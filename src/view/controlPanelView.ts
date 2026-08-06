@@ -1,0 +1,389 @@
+import { randomBytes } from 'node:crypto';
+import * as vscode from 'vscode';
+import { APPROVAL_MODES, SANDBOX_MODES } from '../codex/types';
+import {
+  formatResetsIn,
+  formatWindow,
+  severityOf,
+  type UsageSeverity,
+  type UsageSnapshot,
+} from '../codex/usage';
+import type { Logger } from '../log';
+import { formatAbsoluteTime } from './relativeTime';
+import { isEditableKey, type SettingsProvider, type SettingsSnapshot } from './settingsProvider';
+
+interface UsageView {
+  percent: number;
+  windowLabel: string;
+  resets: string;
+  plan: string;
+  credits: string;
+  capturedAt: string;
+  severity: UsageSeverity;
+}
+
+interface PanelState extends SettingsSnapshot {
+  usage: UsageView | undefined;
+}
+
+/**
+ * サイドバーの操作パネル。モデル・reasoning effort・承認方法・sandboxを切り替える。
+ *
+ * ここでの変更は「次に開くセッション」に効く。実行中のセッションはCodex TUI側の
+ * スラッシュコマンドで変更する（描画をTUIに委ねる構成上の帰結）。
+ */
+export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
+  static readonly viewType = 'codex.controlPanel';
+
+  private view: vscode.WebviewView | undefined;
+  private usage: UsageSnapshot | undefined;
+
+  constructor(
+    private readonly settings: SettingsProvider,
+    private readonly log: Logger,
+  ) {}
+
+  /** 使用量が更新されたときに外から差し込む。読み取りはUsageReaderの責務。 */
+  setUsage(snapshot: UsageSnapshot | undefined): void {
+    this.usage = snapshot;
+    void this.post();
+  }
+
+  resolveWebviewView(view: vscode.WebviewView): void {
+    this.view = view;
+    view.webview.options = { enableScripts: true };
+    view.webview.html = this.render(view.webview);
+
+    view.webview.onDidReceiveMessage((message: unknown) => {
+      void this.handleMessage(message);
+    });
+
+    void this.refresh();
+  }
+
+  /** 設定やカタログの変化をパネルへ反映する。 */
+  async refresh(): Promise<void> {
+    if (this.view === undefined) {
+      return;
+    }
+    await this.settings.load();
+    await this.post();
+  }
+
+  private async post(): Promise<void> {
+    await this.view?.webview.postMessage({ type: 'state', state: this.buildState() });
+  }
+
+  private buildState(): PanelState {
+    return { ...this.settings.snapshot(), usage: buildUsageView(this.usage) };
+  }
+
+  private async handleMessage(message: unknown): Promise<void> {
+    if (typeof message !== 'object' || message === null) {
+      return;
+    }
+    const m = message as Record<string, unknown>;
+
+    if (m['type'] === 'ready') {
+      await this.refresh();
+      return;
+    }
+
+    if (m['type'] === 'newSession') {
+      await vscode.commands.executeCommand('codex.newSession');
+      return;
+    }
+
+    if (m['type'] !== 'update') {
+      return;
+    }
+
+    const key = m['key'];
+    const value = m['value'];
+    if (!isEditableKey(key) || typeof value !== 'string') {
+      this.log.warn(`変更を許可していないキーです: ${String(key)}`);
+      return;
+    }
+
+    // 取り消された場合も表示を現在値へ戻す必要がある
+    await this.settings.update(key, value);
+    await this.post();
+  }
+
+  private render(webview: vscode.Webview): string {
+    const nonce = randomBytes(16).toString('base64');
+    const csp = [
+      "default-src 'none'",
+      `style-src ${webview.cspSource} 'unsafe-inline'`,
+      `script-src 'nonce-${nonce}'`,
+    ].join('; ');
+
+    const approvalOptions = APPROVAL_MODES.map((m) => `<option value="${m}">${m}</option>`).join(
+      '',
+    );
+    const sandboxOptions = SANDBOX_MODES.map((m) => `<option value="${m}">${m}</option>`).join('');
+
+    return `<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="${csp}">
+<style>
+  body {
+    font-family: var(--vscode-font-family);
+    font-size: var(--vscode-font-size);
+    color: var(--vscode-foreground);
+    padding: 8px 12px 12px;
+  }
+  .row { margin-bottom: 12px; }
+  label {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.9em;
+  }
+  select {
+    width: 100%;
+    padding: 3px 4px;
+    color: var(--vscode-dropdown-foreground);
+    background-color: var(--vscode-dropdown-background);
+    border: 1px solid var(--vscode-dropdown-border);
+    border-radius: 2px;
+    font-family: inherit;
+    font-size: inherit;
+  }
+  select:focus {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
+  }
+  .hint {
+    margin-top: 2px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+    min-height: 1em;
+  }
+  .usage {
+    margin-bottom: 14px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--vscode-widget-border, transparent);
+  }
+  .usage-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .usage-head .percent { font-weight: 600; }
+  .bar {
+    height: 4px;
+    border-radius: 2px;
+    background-color: var(--vscode-progressBar-background, var(--vscode-editorWidget-border));
+    opacity: 0.35;
+  }
+  .bar .fill {
+    height: 100%;
+    border-radius: 2px;
+    opacity: 1;
+    background-color: var(--vscode-charts-blue);
+  }
+  .bar .fill.warning { background-color: var(--vscode-charts-yellow); }
+  .bar .fill.critical { background-color: var(--vscode-charts-red); }
+  button {
+    width: 100%;
+    padding: 5px 8px;
+    margin-top: 2px;
+    color: var(--vscode-button-foreground);
+    background-color: var(--vscode-button-background);
+    border: 1px solid var(--vscode-button-border, transparent);
+    border-radius: 2px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: inherit;
+  }
+  button:hover { background-color: var(--vscode-button-hoverBackground); }
+  button:focus {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: 2px;
+  }
+  .note {
+    margin-top: 4px;
+    padding-top: 8px;
+    border-top: 1px solid var(--vscode-widget-border, transparent);
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+  <div class="usage" id="usage" hidden>
+    <div class="usage-head">
+      <span id="usageLabel"></span><span class="percent" id="usagePercent"></span>
+    </div>
+    <div class="bar"><div class="fill" id="usageFill"></div></div>
+    <div class="hint" id="usageMeta"></div>
+  </div>
+
+  <div class="row">
+    <label for="model">モデル</label>
+    <select id="model"></select>
+    <div class="hint" id="modelHint"></div>
+  </div>
+
+  <div class="row">
+    <label for="reasoningEffort">Reasoning effort</label>
+    <select id="reasoningEffort"></select>
+    <div class="hint" id="effortHint"></div>
+  </div>
+
+  <div class="row">
+    <label for="approvalMode">承認方法</label>
+    <select id="approvalMode">
+      <option value="">既定 (config.toml)</option>
+      ${approvalOptions}
+    </select>
+  </div>
+
+  <div class="row">
+    <label for="sandbox">サンドボックス</label>
+    <select id="sandbox">
+      <option value="">既定 (config.toml)</option>
+      ${sandboxOptions}
+    </select>
+  </div>
+
+  <button id="newSession" type="button">この設定で新しいセッションを開く</button>
+
+  <p class="note">「既定」はCodex側の <code>config.toml</code> の値を使います。ここでの変更は次に開くセッションに適用されます。実行中のセッションはタブ内のCodexで変更してください。</p>
+  <p class="note" id="profileNote"></p>
+
+<script nonce="${nonce}">
+  const vscode = acquireVsCodeApi();
+  const el = (id) => document.getElementById(id);
+  let models = [];
+
+  function defaultLabel(value) {
+    return value ? '既定: ' + value : '既定 (config.toml に指定なし)';
+  }
+
+  function setDefaultLabel(select, value) {
+    const opt = select.querySelector('option[value=""]');
+    if (opt) opt.textContent = defaultLabel(value);
+  }
+
+  function fill(select, values, current, defaultText, labelOf) {
+    select.replaceChildren();
+    const def = document.createElement('option');
+    def.value = '';
+    def.textContent = defaultText;
+    select.appendChild(def);
+    for (const v of values) {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = labelOf ? labelOf(v) : v;
+      select.appendChild(o);
+    }
+    // 設定値がカタログに無い場合でも失わないよう選択肢として補う
+    if (current !== '' && !values.includes(current)) {
+      const o = document.createElement('option');
+      o.value = current;
+      o.textContent = current + ' (一覧外)';
+      select.appendChild(o);
+    }
+    select.value = current;
+  }
+
+  function applyUsage(u) {
+    const box = el('usage');
+    if (!u) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    el('usageLabel').textContent = u.windowLabel;
+    el('usagePercent').textContent = u.percent + '%';
+    const fill = el('usageFill');
+    fill.style.width = Math.min(100, u.percent) + '%';
+    fill.className = 'fill' + (u.severity === 'normal' ? '' : ' ' + u.severity);
+    const meta = [];
+    if (u.resets) meta.push('リセット ' + u.resets);
+    if (u.plan) meta.push(u.plan);
+    if (u.credits) meta.push('クレジット ' + u.credits);
+    if (u.capturedAt) meta.push(u.capturedAt + ' 時点');
+    el('usageMeta').textContent = meta.join(' ・ ');
+  }
+
+  function apply(state) {
+    applyUsage(state.usage);
+    models = state.models;
+    const nameOf = (slug) => {
+      const m = models.find((x) => x.slug === slug);
+      return m ? m.displayName : slug;
+    };
+    const d = state.defaults || {};
+    fill(
+      el('model'),
+      models.map((m) => m.slug),
+      state.model,
+      defaultLabel(d.model ? nameOf(d.model) : ''),
+      nameOf,
+    );
+    fill(
+      el('reasoningEffort'),
+      state.efforts,
+      state.reasoningEffort,
+      defaultLabel(d.reasoningEffort),
+    );
+    setDefaultLabel(el('approvalMode'), d.approvalMode);
+    setDefaultLabel(el('sandbox'), d.sandbox);
+    el('approvalMode').value = state.approvalMode;
+    el('sandbox').value = state.sandbox;
+
+    el('profileNote').textContent = state.profile
+      ? 'プロファイル「' + state.profile + '」の適用時は上の既定と異なる場合があります。'
+      : '';
+
+    const selected = models.find((m) => m.slug === state.model);
+    el('modelHint').textContent = selected && selected.description ? selected.description : '';
+    const effort = selected && selected.efforts.find((e) => e.effort === state.reasoningEffort);
+    el('effortHint').textContent = effort && effort.description ? effort.description : '';
+  }
+
+  for (const key of ['model', 'reasoningEffort', 'approvalMode', 'sandbox']) {
+    el(key).addEventListener('change', (e) => {
+      vscode.postMessage({ type: 'update', key, value: e.target.value });
+    });
+  }
+
+  el('newSession').addEventListener('click', () => {
+    vscode.postMessage({ type: 'newSession' });
+  });
+
+  window.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'state') {
+      apply(event.data.state);
+    }
+  });
+
+  vscode.postMessage({ type: 'ready' });
+</script>
+</body>
+</html>`;
+  }
+}
+
+/** 表示用の整形はここで済ませ、Webview側のスクリプトを単純に保つ。 */
+function buildUsageView(snapshot: UsageSnapshot | undefined): UsageView | undefined {
+  if (snapshot?.usedPercent === undefined) {
+    return undefined;
+  }
+  return {
+    percent: Math.round(snapshot.usedPercent),
+    windowLabel: formatWindow(snapshot.windowMinutes) || '制限',
+    resets: formatResetsIn(snapshot.resetsAt, Date.now()),
+    plan: snapshot.planType ?? '',
+    credits: snapshot.creditsBalance ?? '',
+    capturedAt: snapshot.capturedAt === undefined ? '' : formatAbsoluteTime(snapshot.capturedAt),
+    severity: severityOf(snapshot.usedPercent),
+  };
+}

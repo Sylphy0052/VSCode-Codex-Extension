@@ -95,6 +95,8 @@ describe('codexPaths', () => {
       sessions: '/home/user/.codex/sessions',
       archivedSessions: '/home/user/.codex/archived_sessions',
       sessionIndex: '/home/user/.codex/session_index.jsonl',
+      modelsCache: '/home/user/.codex/models_cache.json',
+      configToml: '/home/user/.codex/config.toml',
     });
   });
 });

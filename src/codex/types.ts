@@ -10,6 +10,8 @@ export type ApprovalMode = (typeof APPROVAL_MODES)[number];
  */
 export interface CodexConfig {
   model: string;
+  /** `model_reasoning_effort`。専用フラグが無いため `-c` で渡す。 */
+  reasoningEffort: string;
   profile: string;
   sandbox: string;
   approvalMode: string;
@@ -18,6 +20,7 @@ export interface CodexConfig {
 
 export const emptyConfig: CodexConfig = {
   model: '',
+  reasoningEffort: '',
   profile: '',
   sandbox: '',
   approvalMode: '',
@@ -25,9 +28,7 @@ export const emptyConfig: CodexConfig = {
 };
 
 export type LaunchTarget =
-  | { kind: 'new' }
-  | { kind: 'resume'; sessionId: string }
-  | { kind: 'fork'; sessionId: string };
+  { kind: 'new' } | { kind: 'resume'; sessionId: string } | { kind: 'fork'; sessionId: string };
 
 /** ~/.codex/session_index.jsonl の1行。 */
 export interface SessionIndexEntry {

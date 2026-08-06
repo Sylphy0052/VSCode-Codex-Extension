@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseSessionMeta } from '../../src/codex/sessionMeta';
 import { SessionBinder, createLaunchTag } from '../../src/terminal/sessionBinder';
-import { FakeClock } from '../../src/util/clock';
 
 const ID_A = '019fd79f-1e16-7b60-b9d2-0324b275ed81';
 const ID_B = '019fd7a6-d25e-7bd2-b181-751e467277f3';
@@ -23,14 +22,9 @@ const meta = (id: string, originator: string | undefined, cwd = '/work/alpha') =
     }),
   );
 
-const build = (timeoutMs = 15_000) => {
-  const clock = new FakeClock(1_000);
-  return { clock, binder: new SessionBinder(clock, timeoutMs) };
-};
-
 describe('SessionBinder', () => {
   it('タグが一致したロールアウトで紐付けが確定する', () => {
-    const { binder } = build();
+    const binder = new SessionBinder();
     binder.register('tag-1');
 
     const bound = binder.onRolloutCreated(fileName(ID_A), meta(ID_A, 'tag-1'));
@@ -40,7 +34,7 @@ describe('SessionBinder', () => {
   });
 
   it('他プロセスが作ったセッションを掴まない', () => {
-    const { binder } = build();
+    const binder = new SessionBinder();
     binder.register('tag-1');
 
     expect(binder.onRolloutCreated(fileName(ID_A), meta(ID_A, 'codex_vscode'))).toBeUndefined();
@@ -49,14 +43,14 @@ describe('SessionBinder', () => {
   });
 
   it('パースできなかったmetaを無視する', () => {
-    const { binder } = build();
+    const binder = new SessionBinder();
     binder.register('tag-1');
     expect(binder.onRolloutCreated(fileName(ID_A), undefined)).toBeUndefined();
     expect(binder.pendingTags()).toEqual(['tag-1']);
   });
 
   it('同時に開いた複数タブがそれぞれ自分のセッションに紐付く', () => {
-    const { binder } = build();
+    const binder = new SessionBinder();
     binder.register('tag-1');
     binder.register('tag-2');
 
@@ -70,47 +64,37 @@ describe('SessionBinder', () => {
   });
 
   it('ファイル名のidと session_meta のidが食い違えば信用しない', () => {
-    const { binder } = build();
+    const binder = new SessionBinder();
     binder.register('tag-1');
     expect(binder.onRolloutCreated(fileName(ID_B), meta(ID_A, 'tag-1'))).toBeUndefined();
     expect(binder.pendingTags()).toEqual(['tag-1']);
   });
 
-  it('タイムアウト前は回収しない', () => {
-    const { clock, binder } = build(15_000);
+  it('発言まで時間が空いても待ち続ける（TUIは初回発言時にrolloutを作る）', () => {
+    const binder = new SessionBinder();
     binder.register('tag-1');
-    clock.advance(14_999);
-    expect(binder.sweep()).toEqual([]);
+
+    // 何度も無関係なロールアウトが現れても取り下げない
+    binder.onRolloutCreated(fileName(ID_B), meta(ID_B, 'codex_vscode'));
+    binder.onRolloutCreated(fileName(ID_B), meta(ID_B, 'other-tag'));
     expect(binder.pendingTags()).toEqual(['tag-1']);
-  });
 
-  it('タイムアウトしたタグを回収し、以後は紐付かない', () => {
-    const { clock, binder } = build(15_000);
-    binder.register('tag-1');
-    clock.advance(15_000);
-
-    expect(binder.sweep()).toEqual(['tag-1']);
-    expect(binder.pendingTags()).toEqual([]);
-    expect(binder.onRolloutCreated(fileName(ID_A), meta(ID_A, 'tag-1'))).toBeUndefined();
-  });
-
-  it('回収は期限切れのものだけを対象にする', () => {
-    const { clock, binder } = build(15_000);
-    binder.register('old');
-    clock.advance(10_000);
-    binder.register('new');
-    clock.advance(5_000);
-
-    expect(binder.sweep()).toEqual(['old']);
-    expect(binder.pendingTags()).toEqual(['new']);
+    expect(binder.onRolloutCreated(fileName(ID_A), meta(ID_A, 'tag-1'))?.sessionId).toBe(ID_A);
   });
 
   it('cancelで待ちを取り下げる', () => {
-    const { binder } = build();
+    const binder = new SessionBinder();
     binder.register('tag-1');
     binder.cancel('tag-1');
     expect(binder.pendingTags()).toEqual([]);
     expect(binder.onRolloutCreated(fileName(ID_A), meta(ID_A, 'tag-1'))).toBeUndefined();
+  });
+
+  it('同じタグを二重に登録しても1件として扱う', () => {
+    const binder = new SessionBinder();
+    binder.register('tag-1');
+    binder.register('tag-1');
+    expect(binder.pendingTags()).toEqual(['tag-1']);
   });
 });
 

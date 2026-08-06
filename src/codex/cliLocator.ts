@@ -79,6 +79,10 @@ export interface CodexPaths {
   sessions: string;
   archivedSessions: string;
   sessionIndex: string;
+  /** Codexが更新するモデル一覧。こちらからは読むだけ。 */
+  modelsCache: string;
+  /** Codex側の既定値。拡張機能の設定が空のときに実際に使われる値の表示に使う。 */
+  configToml: string;
 }
 
 /**
@@ -91,5 +95,7 @@ export function codexPaths(home: string): CodexPaths {
     sessions: `${home}/sessions`,
     archivedSessions: `${home}/archived_sessions`,
     sessionIndex: `${home}/session_index.jsonl`,
+    modelsCache: `${home}/models_cache.json`,
+    configToml: `${home}/config.toml`,
   };
 }

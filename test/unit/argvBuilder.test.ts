@@ -14,7 +14,11 @@ const config = (over: Partial<CodexConfig> = {}): CodexConfig => ({ ...emptyConf
 
 describe('buildShellArgs', () => {
   it('新規セッションは -C だけを渡す（空設定はconfig.tomlへ委譲）', () => {
-    const { args, warnings } = buildShellArgs({ target: { kind: 'new' }, cwd: CWD, config: config() });
+    const { args, warnings } = buildShellArgs({
+      target: { kind: 'new' },
+      cwd: CWD,
+      config: config(),
+    });
     expect(args).toEqual(['-C', CWD]);
     expect(warnings).toEqual([]);
   });
@@ -43,6 +47,7 @@ describe('buildShellArgs', () => {
       cwd: CWD,
       config: config({
         model: 'gpt-5.6-terra',
+        reasoningEffort: 'xhigh',
         profile: 'work',
         sandbox: 'workspace-write',
         approvalMode: 'on-request',
@@ -54,6 +59,8 @@ describe('buildShellArgs', () => {
       CWD,
       '-m',
       'gpt-5.6-terra',
+      '-c',
+      'model_reasoning_effort=xhigh',
       '-p',
       'work',
       '-s',
@@ -134,9 +141,9 @@ describe('isSessionId', () => {
 
 describe('isUnsafeCombination', () => {
   it('サンドボックスと承認の両方を外した時だけ真', () => {
-    expect(isUnsafeCombination(config({ sandbox: 'danger-full-access', approvalMode: 'never' }))).toBe(
-      true,
-    );
+    expect(
+      isUnsafeCombination(config({ sandbox: 'danger-full-access', approvalMode: 'never' })),
+    ).toBe(true);
     expect(
       isUnsafeCombination(config({ sandbox: 'danger-full-access', approvalMode: 'on-request' })),
     ).toBe(false);

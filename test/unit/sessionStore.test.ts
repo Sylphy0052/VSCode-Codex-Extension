@@ -42,6 +42,15 @@ class FakeFs implements FileSystemPort {
     return this.files[filePath]?.split('\n')[0];
   }
 
+  async readTail(filePath: string, maxBytes: number): Promise<string | undefined> {
+    const content = this.files[filePath];
+    return content === undefined ? undefined : content.slice(-maxBytes);
+  }
+
+  async mtimeMs(filePath: string): Promise<number | undefined> {
+    return this.files[filePath] === undefined ? undefined : 0;
+  }
+
   async listRollouts(dir: string): Promise<string[]> {
     return Object.keys(this.files).filter(
       (p) => p.startsWith(`${dir}/`) && p.slice(p.lastIndexOf('/') + 1).startsWith('rollout-'),

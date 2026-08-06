@@ -106,6 +106,30 @@ export class SessionStore {
     return { sessions, skippedIndexLines: skipped, unresolved };
   }
 
+  /**
+   * id → thread_name だけを読む軽量版。
+   * タブ名の追従で頻繁に呼ぶため、ロールアウトの解決は行わない。
+   */
+  async threadNames(): Promise<Map<string, string>> {
+    const content = await this.fs.readTextFile(this.paths.sessionIndex);
+    if (content === undefined) {
+      return new Map();
+    }
+    const { entries } = parseSessionIndex(content);
+    const map = new Map<string, string>();
+    for (const entry of entries) {
+      if (entry.threadName !== undefined) {
+        map.set(entry.id, entry.threadName);
+      }
+    }
+    return map;
+  }
+
+  /** 会話ビューアなど、全文を読む用途のためにロールアウトの場所を解決する。 */
+  async resolveRolloutPath(sessionId: string): Promise<string | undefined> {
+    return (await this.locateRollouts()).get(sessionId)?.filePath;
+  }
+
   /** id → ロールアウトの所在。archived_sessions 配下かどうかがアーカイブ状態そのもの。 */
   private async locateRollouts(): Promise<Map<string, RolloutLocation>> {
     const map = new Map<string, RolloutLocation>();

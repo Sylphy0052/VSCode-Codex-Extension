@@ -9,6 +9,10 @@ export interface FileSystemPort {
   readTextFile(filePath: string): Promise<string | undefined>;
   /** 1行目だけを読む。全文読み込みを避けるための専用メソッド。 */
   readFirstLine(filePath: string): Promise<string | undefined>;
+  /** 末尾の最大 maxBytes 分だけを読む。先頭が欠けた行を含みうる。 */
+  readTail(filePath: string, maxBytes: number): Promise<string | undefined>;
+  /** 最終更新時刻（ミリ秒）。読めなければ undefined。 */
+  mtimeMs(filePath: string): Promise<number | undefined>;
   /** ディレクトリを再帰的に走査し、rollout-*.jsonl の絶対パスを返す。 */
   listRollouts(dir: string): Promise<string[]>;
 }

@@ -19,6 +19,347 @@
     "onStartupFinished"
   ],
   "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codexSessions",
+          "title": "Codex",
+          "icon": "resources/codex.svg"
+        }
+      ]
+    },
+    "views": {
+      "codexSessions": [
+        {
+          "id": "codex.controlPanel",
+          "type": "webview",
+          "name": "設定"
+        },
+        {
+          "id": "codex.sessions",
+          "name": "履歴"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "codex.sessions",
+        "contents": "このワークスペースのCodexセッションはまだありません。\n[新規セッション](command:codex.newSession)\n全ワークスペースのセッションを見るには表示範囲を切り替えてください。"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "codex.newChat",
+          "when": "view == codex.sessions",
+          "group": "navigation@1"
+        },
+        {
+          "command": "codex.newSession",
+          "when": "view == codex.sessions",
+          "group": "navigation@2"
+        },
+        {
+          "command": "codex.showAllSessions",
+          "when": "view == codex.sessions && codex.historyScope != all",
+          "group": "navigation@2"
+        },
+        {
+          "command": "codex.showWorkspaceSessions",
+          "when": "view == codex.sessions && codex.historyScope == all",
+          "group": "navigation@2"
+        },
+        {
+          "command": "codex.refreshSessions",
+          "when": "view == codex.sessions",
+          "group": "navigation@3"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "codex.renameChat",
+          "when": "activeWebviewPanelId == codex.chat",
+          "group": "navigation@100"
+        },
+        {
+          "command": "codex.newChat",
+          "when": "resourceScheme == file",
+          "group": "navigation@100"
+        },
+        {
+          "command": "codex.newSession",
+          "when": "resourceScheme == file",
+          "group": "1_codex@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "codex.openChat",
+          "when": "view == codex.sessions && viewItem =~ /^codexSession/",
+          "group": "inline@1"
+        },
+        {
+          "command": "codex.openChat",
+          "when": "view == codex.sessions && viewItem =~ /^codexSession/",
+          "group": "1_open@0"
+        },
+        {
+          "command": "codex.openConversation",
+          "when": "view == codex.sessions && viewItem =~ /^codexSession/",
+          "group": "inline@2"
+        },
+        {
+          "command": "codex.openConversation",
+          "when": "view == codex.sessions && viewItem =~ /^codexSession/",
+          "group": "1_open@0"
+        },
+        {
+          "command": "codex.forkSession",
+          "when": "view == codex.sessions && viewItem =~ /^codexSession/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "codex.archiveSession",
+          "when": "view == codex.sessions && viewItem == codexSession",
+          "group": "2_manage@1"
+        },
+        {
+          "command": "codex.unarchiveSession",
+          "when": "view == codex.sessions && viewItem == codexSession.archived",
+          "group": "2_manage@1"
+        },
+        {
+          "command": "codex.deleteSession",
+          "when": "view == codex.sessions && viewItem =~ /^codexSession/",
+          "group": "3_destructive@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "codex.openSession",
+          "when": "false"
+        },
+        {
+          "command": "codex.openChat",
+          "when": "false"
+        },
+        {
+          "command": "codex.openConversation",
+          "when": "false"
+        },
+        {
+          "command": "codex.forkSession",
+          "when": "false"
+        },
+        {
+          "command": "codex.archiveSession",
+          "when": "false"
+        },
+        {
+          "command": "codex.unarchiveSession",
+          "when": "false"
+        },
+        {
+          "command": "codex.deleteSession",
+          "when": "false"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "codex.newSession",
+        "title": "New Session",
+        "category": "Codex",
+        "icon": "$(add)"
+      },
+      {
+        "command": "codex.openSession",
+        "title": "Open Session",
+        "category": "Codex"
+      },
+      {
+        "command": "codex.resumeSession",
+        "title": "Resume Session…",
+        "category": "Codex"
+      },
+      {
+        "command": "codex.resumeLast",
+        "title": "Resume Last Session",
+        "category": "Codex"
+      },
+      {
+        "command": "codex.refreshSessions",
+        "title": "Refresh",
+        "category": "Codex",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "codex.showAllSessions",
+        "title": "全ワークスペースを表示",
+        "category": "Codex",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "codex.showWorkspaceSessions",
+        "title": "このワークスペースのみ表示",
+        "category": "Codex",
+        "icon": "$(filter-filled)"
+      },
+      {
+        "command": "codex.newChat",
+        "title": "New Chat (Codex画面)",
+        "category": "Codex",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "codex.renameChat",
+        "title": "セッション名を変更",
+        "category": "Codex",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "codex.openChat",
+        "title": "Codex画面で開く",
+        "category": "Codex",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "codex.openConversation",
+        "title": "会話を開いて分岐する",
+        "category": "Codex",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "codex.forkSession",
+        "title": "このセッションをforkする",
+        "category": "Codex"
+      },
+      {
+        "command": "codex.archiveSession",
+        "title": "アーカイブする",
+        "category": "Codex"
+      },
+      {
+        "command": "codex.unarchiveSession",
+        "title": "アーカイブを解除する",
+        "category": "Codex"
+      },
+      {
+        "command": "codex.deleteSession",
+        "title": "削除する",
+        "category": "Codex"
+      },
+      {
+        "command": "codex.showUsage",
+        "title": "使用量を表示",
+        "category": "Codex"
+      },
+      {
+        "command": "codex.showLog",
+        "title": "Show Log",
+        "category": "Codex"
+      }
+    ],
+    "configuration": {
+      "title": "Codex Sessions",
+      "properties": {
+        "codex.executablePath": {
+          "type": "string",
+          "default": "codex",
+          "scope": "machine",
+          "markdownDescription": "codex実行ファイルのパス。パス区切りを含まない場合はPATHから探す。\n\nリポジトリ側の設定から任意のバイナリを起動されないよう machine スコープに固定している。"
+        },
+        "codex.codexHome": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "CODEX_HOME のパス。空なら環境変数、それも無ければ `~/.codex` を使う。"
+        },
+        "codex.additionalArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "machine",
+          "markdownDescription": "codex起動時に追加で渡す引数。"
+        },
+        "codex.sandbox": {
+          "type": "string",
+          "enum": [
+            "",
+            "read-only",
+            "workspace-write",
+            "danger-full-access"
+          ],
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "サンドボックスの方針。空なら `~/.codex/config.toml` に委譲する。"
+        },
+        "codex.approvalMode": {
+          "type": "string",
+          "enum": [
+            "",
+            "untrusted",
+            "on-request",
+            "never"
+          ],
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "コマンド実行の承認方針。空なら `~/.codex/config.toml` に委譲する。"
+        },
+        "codex.model": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "使用するモデル。空なら `-m` を渡さない。"
+        },
+        "codex.reasoningEffort": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "推論の深さ (`model_reasoning_effort`)。空なら `~/.codex/config.toml` に委譲する。選択肢はモデルごとに異なるため、サイドバーの設定パネルから選ぶことを推奨。"
+        },
+        "codex.profile": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "`-p` に渡すCodexのプロファイル名。"
+        },
+        "codex.restore.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "VSCode再起動時に、開いていたセッションのタブを復元する。"
+        },
+        "codex.restore.maxTabs": {
+          "type": "number",
+          "default": 8,
+          "minimum": 0,
+          "scope": "window",
+          "markdownDescription": "復元するタブ数の上限。"
+        },
+        "codex.history.scope": {
+          "type": "string",
+          "enum": [
+            "workspace",
+            "all"
+          ],
+          "default": "workspace",
+          "scope": "window",
+          "markdownDescription": "履歴一覧に出す範囲。`workspace` は現在のワークスペース配下のセッションのみ。"
+        },
+        "codex.history.maxEntries": {
+          "type": "number",
+          "default": 200,
+          "minimum": 1,
+          "scope": "window",
+          "markdownDescription": "履歴一覧を構築する際に読む最大件数。更新時刻の新しい順に絞る。"
+        }
+      }
+    }
+  },
   "scripts": {
     "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node20",
     "watch": "npm run build -- --sourcemap --watch",

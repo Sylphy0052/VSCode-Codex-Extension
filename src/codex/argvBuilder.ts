@@ -1,3 +1,4 @@
+import { isEffortToken } from './modelCatalog';
 import {
   APPROVAL_MODES,
   CodexConfig,
@@ -69,6 +70,15 @@ export function buildShellArgs(input: BuildInput): BuildResult {
 
   if (config.model !== '') {
     args.push('-m', config.model);
+  }
+
+  if (config.reasoningEffort !== '') {
+    // 専用フラグが無いため設定上書きで渡す。値はTOMLとして解釈できなければ文字列扱いになる。
+    if (isEffortToken(config.reasoningEffort)) {
+      args.push('-c', `model_reasoning_effort=${config.reasoningEffort}`);
+    } else {
+      warnings.push(`codex.reasoningEffort の値が不正なため無視します: ${config.reasoningEffort}`);
+    }
   }
 
   if (config.profile !== '') {
