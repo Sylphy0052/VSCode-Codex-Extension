@@ -138,6 +138,13 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   context.subscriptions.push(watcher);
 
+  // リロード後にCodex画面のタブを復元する（TUIタブは TabStateStore が担当）
+  context.subscriptions.push(
+    vscode.window.registerWebviewPanelSerializer('codex.chat', {
+      deserializeWebviewPanel: (panel, state) => chat.restorePanel(panel, state),
+    }),
+  );
+
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('codex')) {

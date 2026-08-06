@@ -83,11 +83,43 @@ export class ChatViewManager implements vscode.Disposable {
     }
   }
 
+  /**
+   * リロード後にVSCodeが復元したパネルを引き取る。
+   * webview側が `setState` で保持していた threadId を使い、会話を読み直す。
+   */
+  async restorePanel(panel: vscode.WebviewPanel, state: unknown): Promise<void> {
+    const threadId = readPersistedThreadId(state);
+    if (threadId === undefined) {
+      // どのスレッドか判らないパネルは残しても操作できない
+      panel.dispose();
+      return;
+    }
+    if (this.panels.has(threadId)) {
+      panel.dispose();
+      return;
+    }
+
+    const entry = this.adopt(panel);
+    this.panels.set(threadId, entry);
+    try {
+      await entry.session.resume(threadId, undefined);
+    } catch (e) {
+      this.panels.delete(threadId);
+      panel.dispose();
+      this.reportError(e);
+    }
+  }
+
   private createPanel(title: string): ChatPanel {
     const panel = vscode.window.createWebviewPanel('codex.chat', title, vscode.ViewColumn.Active, {
       enableScripts: true,
       retainContextWhenHidden: true,
     });
+    return this.adopt(panel);
+  }
+
+  private adopt(panel: vscode.WebviewPanel): ChatPanel {
+    panel.webview.options = { enableScripts: true };
     panel.webview.html = renderShell(panel.webview);
 
     const session = new ChatSession(this.connection, this.log, (state) => {
@@ -280,6 +312,15 @@ export class ChatViewManager implements vscode.Disposable {
 }
 
 export type { ChatState };
+
+/** webview側が `setState` で保持している値。 */
+function readPersistedThreadId(state: unknown): string | undefined {
+  if (typeof state !== 'object' || state === null) {
+    return undefined;
+  }
+  const threadId = (state as Record<string, unknown>)['threadId'];
+  return typeof threadId === 'string' && threadId !== '' ? threadId : undefined;
+}
 
 function renderShell(webview: vscode.Webview): string {
   const nonce = randomBytes(16).toString('base64');
@@ -579,6 +620,10 @@ function renderShell(webview: vscode.Webview): string {
   }
 
   function apply(state) {
+    // リロード後にVSCodeがパネルを復元したとき、どのスレッドかを思い出すために保持する
+    if (state.threadId) {
+      vscode.setState({ threadId: state.threadId });
+    }
     applySettings(state.settings);
     const log = el('log');
     const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
