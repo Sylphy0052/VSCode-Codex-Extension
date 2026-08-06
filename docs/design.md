@@ -20,7 +20,9 @@ Codexのセッションを、VSCodeのファイルタブと同じ感覚でエデ
 | resume / fork / archive / unarchive / delete | Codex Cloud連携 |
 | タブ位置・並び順とセッションIDの記憶と再起動時の自動復元 | マルチルートワークスペースの高度な扱い（§11） |
 | thread_nameへのタブ名追従 | |
-| Codex未インストール/未ログイン時のガイド | |
+| Codex未インストール/未ログイン時のガイド | サインイン/サインアウトのUI |
+| 操作パネル（モデル/effort/承認方法/sandboxの切替） | チャットUIそのもののWebview化 |
+| 使用量の常時表示（ステータスバー＋操作パネル） | 使用量の能動的な取得（APIが無い） |
 
 ## 2. 全体アーキテクチャ
 
@@ -75,15 +77,13 @@ src/
     sessionActions.ts       archive/unarchive/delete の実行（delete は --force 必須）
   terminal/
     terminalSessionManager.ts  端末の生成・追跡・破棄・終了ハンドリング
-    sessionBinder.ts        新規端末 ↔ session_id の事後紐付け（Clock注入）
+    sessionBinder.ts        新規端末 ↔ session_id の事後紐付け（タグ照合）
     terminalRenamer.ts      thread_name追従リネーム（フォーカス非奪取）
   state/
     tabStateStore.ts        workspaceStateへの永続化と復元
   view/
     sessionTreeProvider.ts  TreeDataProvider
     sessionTreeItem.ts      表示整形（相対時刻など）
-  util/
-    clock.ts                Clockインタフェース（テストで差し替え可能）
   commands/                 各コマンドの登録
 test/
   unit/                     純粋ロジック + sessionBinder のテスト
@@ -117,6 +117,7 @@ test/
 利用フィールド: `session_id` / `cwd` / `timestamp` / `originator` / `source` / `thread_source`。
 
 - ファイル名に `session_id` が含まれるため、**ファイルの存在自体がセッションの発生を示す**。これを紐付けの検知に使う（§9.1）。
+- **作られるのはプロセス起動時ではなく、最初のユーザー発言時**（実機検証済み。TUIを18秒起動して発言しなかった場合、ファイルは1つも作られなかった）。つまりタブを開いただけのセッションは存在せず、resume対象にもならない。紐付けの待ち時間に上限を設けてはいけない。
 - `originator` は環境変数 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` で任意の値に上書きできる（検証済み）。
 - アーカイブしたセッションは `~/.codex/archived_sessions/` へ**日付階層なしのフラット配置で移動**される。`unarchive` で元の `sessions/YYYY/MM/DD/` へ戻る。したがって走査対象は `sessions/**` と `archived_sessions/*` の2箇所であり、**どちらに存在するかがアーカイブ状態の判定そのものになる**。
 
@@ -240,7 +241,9 @@ sessionWatcher が session_index.jsonl 変更を検知
                                 アクティブになった時に適用（フォーカスを奪わない）
 ```
 
-VSCodeにはターミナル名を直接書き換えるAPIがなく、`workbench.action.terminal.renameWithArg` はアクティブターミナルに作用する。フォーカスを奪う副作用を避けるため、上記の「アクティブになるまで保留」戦略を採る。**このコマンドの引数仕様と挙動は実装初期に実機検証する**（§9-V2）。
+VSCodeにはターミナル名を直接書き換えるAPIがなく、`workbench.action.terminal.renameWithArg` はアクティブターミナルに作用する。フォーカスを奪う副作用を避けるため、上記の「アクティブになるまで保留」戦略を採る。
+
+**スパイクで確認済み**: `executeCommand('workbench.action.terminal.renameWithArg', { name })` は例外なく成功し、`terminal.name` と `window.tabGroups` から見えるタブのラベルの双方が新しい名前に変わる。対象はアクティブターミナルであるため、上記の保留戦略は引き続き必要。
 
 ## 6. コマンドとUI
 
@@ -274,6 +277,32 @@ Codex
 - 開いているセッションは `contextValue` を分け、アイコンで区別する。
 - セッションが0件、または `codex` 未検出の場合は `viewsWelcome` で導線を出す（§5.7）。
 
+### 操作パネル（Webview）
+
+サイドバーの上段に、モデル・reasoning effort・承認方法・サンドボックスを切り替えるWebviewを置く。公式Codex拡張機能のサイドバーが提供する `Select model` / `Reasoning effort` と同等の操作をこちらでも行えるようにするため。
+
+- 選択肢は `~/.codex/models_cache.json` から読む。**effortはモデルごとに異なる**ため（例: `gpt-5.5` は `low`〜`xhigh`、`gpt-5.6-sol` は `ultra` まで）、モデル選択に連動して選択肢を差し替える。モデルを変えた結果それまでのeffortが非対応になった場合は既定へ戻す。
+- カタログが読めない場合は既知の値の和集合へフォールバックし、パネルは動作を続ける。
+- 変更値はVSCode設定へ書く。`approvalMode` / `sandbox` は machine スコープのため、**必ず `ConfigurationTarget.Global`（ユーザー設定）へ書き込む**。ワークスペース設定への書き込みは失敗する。
+- 設定画面から変更された場合も `onDidChangeConfiguration` でパネルへ反映し、表示が二重管理にならないようにする。
+- CSPは `default-src 'none'` を基点にし、スクリプトはnonceで限定する。配色はVSCodeのCSS変数のみを使い、テーマに追従させる。
+
+**適用範囲の制約**: ここでの変更が効くのは**次に開くセッション**。描画をCodex TUIに委ねる構成上、実行中のセッションはタブ内のスラッシュコマンドで変更する。パネル上にもその旨を明示する。
+
+### 使用量の表示
+
+レート制限の使用量をステータスバーに常時表示し、詳細を操作パネルに出す。
+
+**データ源**: ロールアウトの `event_msg` / `token_count` イベント。`rate_limits.primary.used_percent` / `window_minutes` / `resets_at`、`credits.balance`、`plan_type`、`info.total_token_usage`、`model_context_window` が得られる。
+
+- レート制限は**アカウント単位**のため、最後に更新されたロールアウトの最新 `token_count` が現在値になる。セッションを跨いで最新ファイルを探す。
+- ファイルは伸びるため、**末尾64KBだけを読んで**最後の `token_count` 行を拾う。先頭が欠けた行はパースに失敗するので黙って読み飛ばす。
+- 使用率に応じてステータスバーの背景色を変える（75%以上で警告、90%以上でエラー）。
+
+**制約**: この値はCodexがAPIを呼んだ時点のスナップショットであり、**能動的に問い合わせる手段がない**。どのセッションも動いていなければ値は古いままなので、取得時刻（`capturedAt`）を必ず併記する。
+
+更新契機はロールアウトの追記イベント。会話中は頻発するため1.5秒デバウンスする。リセットまでの残り時間の表記だけは60秒ごとに再描画する（ファイルは読まない）。
+
 ### 破壊操作の実行仕様（スパイクで確認済み）
 
 | 操作 | コマンド | 備考 |
@@ -296,6 +325,7 @@ Codex
 | `codex.sandbox` | enum | `""` | **machine** | `read-only` / `workspace-write` / `danger-full-access` |
 | `codex.approvalMode` | enum | `""` | **machine** | `untrusted` / `on-request` / `never` |
 | `codex.model` | string | `""` | machine-overridable | 空なら `-m` を渡さずconfig.tomlに委譲 |
+| `codex.reasoningEffort` | string | `""` | machine-overridable | `model_reasoning_effort`。専用フラグが無いため `-c model_reasoning_effort=<値>` として渡す |
 | `codex.profile` | string | `""` | machine-overridable | `-p` |
 | `codex.restore.enabled` | boolean | `true` | window | 再起動時の自動resume |
 | `codex.restore.maxTabs` | number | `8` | window | 復元上限 |
@@ -322,8 +352,8 @@ Codex
 
 | ID | 内容 | 影響 | 緩和策 |
 | --- | --- | --- | --- |
-| V1 | 拡張機能作成ターミナルのリロード時挙動が `isTransient` で意図通り抑止されるか | 二重にタブが開く | 検証で否なら、復元時に既存ターミナルを走査して重複を除去する |
-| V2 | `workbench.action.terminal.renameWithArg` の引数形式と対象 | タブ名追従が機能しない | 否ならPhase 1は固定名（`Codex: <folder> #n`）にフォールバックし、追従はPhase 2送り |
+| ~~V1~~ | **解決済**: `isTransient: true` で作った端末は Reload Window 後に復元されない（リロード前 tabs=1 → リロード後 エディタタブ0・拡張機能製の端末なし） | — | VSCode標準復元との二重化対策は不要。§5.5 の自前復元に一本化してよい |
+| ~~V2~~ | **解決済**: `workbench.action.terminal.renameWithArg` に `{ name }` を渡す形式が機能し、`terminal.name` とタブのラベル表示の双方が追従する | — | フォールバック（固定名）は不要。§5.8 の追従を実装する |
 | ~~V3~~ | **解決済**: `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` が `session_meta.originator` に反映されることを確認 | — | §9.1 の確定方式へ置換。ヒューリスティックと直列化は不要になった |
 | V4 | `session_index.jsonl` の追記が行単位でアトミックか（部分行読み込み） | パースエラー | 末尾の不完全行を捨てる。パース失敗行は個別にスキップしログのみ。※紐付けはindexに依存しなくなったため影響は表示のみ |
 | V5 | セッション数が数千件規模になった時の一覧構築コスト | 起動が重い | `updated_at` 降順で上位N件（§7 `history.maxEntries`）のみsession_metaを解決する |
@@ -354,11 +384,16 @@ CLIは対話起動時にsession_idを呼び出し元へ返さないため、当�
 - indexの書き込みタイミングに依存しないため、**紐付けが即時**に完了する
 - `thread_source` によるindexの収録規則（§4.1）の影響を受けない
 
-**残る異常系**: 15秒経ってもタグ付きファイルが現れない場合は起動失敗とみなし、そのタブを「復元対象外」として扱う（誤ったIDを記憶するより安全）。この状態はタブ名に `(未追跡)` を付けて可視化する。このタイムアウト処理のみ時刻に依存するため、`SessionBinder` は `util/clock.ts` の `Clock` を注入して構築し、unit testで以下を検証する。
+**待ち時間に上限は設けない**。実機検証の結果、ロールアウトは**最初のユーザー発言時**に作られることが判明した（§4.2）。タブを開いてから話しかけるまで何分かかっても紐付かないのが正常な状態であり、タイムアウトで打ち切ると通常操作が壊れる。
+
+待ちの寿命は端末の寿命に一致させる。`onDidCloseTerminal` で `cancel(tag)` を呼べば取りこぼしはなく、`shellPath` 方式によりCodexの終了は必ず端末の終了になる（§5.2）ため、待ちが残り続けることもない。この設計により時刻依存のロジックが消え、`Clock` の注入は不要になった。
+
+unit testでは以下を検証する。
 
 - タグ一致で正しく紐付く／タグ不一致のファイルを無視する
 - 複数タブを同時に開いた場合、それぞれが自分のタグのセッションに紐付く
-- タイムアウト時に状態を保存せず、タブ名に `(未追跡)` が付く
+- 無関係なロールアウトが何度現れても待ちを取り下げない
+- `cancel` 後は紐付かない
 
 **注意**: この環境変数は名前が示すとおりCodexの内部向けであり、将来のバージョンで挙動が変わりうる。`argvBuilder` 側でタグが機能しなかった場合に備え、**タイムアウト時は静かに劣化する**（クラッシュせず未追跡扱いにする）設計を守る。CIでこの前提を検証する統合テストを1本置き、Codexのバージョンアップ時に気づけるようにする。
 
@@ -374,7 +409,7 @@ CLIは対話起動時にsession_idを呼び出し元へ返さないため、当�
 - TypeScript / Node 20 / esbuild（バンドル）
 - eslint + prettier、`tsc --noEmit` で型チェック
 - テスト
-  - unit: `argvBuilder` / `sessionIndex` / `sessionMeta` / `sessionStore`のフィルタ / `tabStateStore`のシリアライズ / **`sessionBinder`（Clock注入、§9.1の異常系）**
+  - unit: `argvBuilder` / `sessionIndex` / `sessionMeta` / `sessionStore`のフィルタ / `tabStateStore`のシリアライズ / **`sessionBinder`（§9.1の異常系）**
   - integration: `@vscode/test-electron` でコマンド登録・TreeView・タブ復元
 - `scripts/check.sh` に lint / typecheck / test を集約し、commit前に全緑を必須とする
 - パッケージング: `@vscode/vsce`
