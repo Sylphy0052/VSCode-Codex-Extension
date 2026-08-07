@@ -2,7 +2,8 @@ import * as vscode from 'vscode';
 import type { SessionSummary } from '../codex/types';
 import { readConfig, workspaceFolderPaths } from '../config';
 import type { Logger } from '../log';
-import type { HistoryScope, SessionStore } from '../session/sessionStore';
+import type { ProviderRegistry } from '../provider/registry';
+import type { HistoryScope } from '../session/sessionStore';
 import { formatAbsoluteTime, formatRelativeTime } from './relativeTime';
 
 export class SessionTreeProvider implements vscode.TreeDataProvider<SessionSummary> {
@@ -13,7 +14,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<SessionSumma
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
-    private readonly store: SessionStore,
+    private readonly providers: ProviderRegistry,
     private readonly isOpen: (sessionId: string) => boolean,
     private readonly log: Logger,
   ) {}
@@ -49,18 +50,14 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<SessionSumma
     }
 
     const config = readConfig();
-    const result = await this.store.list({
-      scope: this.scope,
-      workspaceFolders: workspaceFolderPaths(),
-      maxEntries: config.historyMaxEntries,
-    });
-
-    if (result.skippedIndexLines > 0 || result.unresolved > 0) {
-      this.log.warn(
-        `一覧構築: 壊れた行 ${result.skippedIndexLines} / 実体なし ${result.unresolved}`,
-      );
-    }
-    return result.sessions;
+    return this.providers.listSessions(
+      {
+        scope: this.scope,
+        workspaceFolders: workspaceFolderPaths(),
+        maxEntries: config.historyMaxEntries,
+      },
+      this.log,
+    );
   }
 
   getTreeItem(session: SessionSummary): vscode.TreeItem {
@@ -70,7 +67,8 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<SessionSumma
       vscode.TreeItemCollapsibleState.None,
     );
 
-    const parts = [formatRelativeTime(session.updatedAt, Date.now())];
+    const label = this.providers.get(session.provider)?.label ?? session.provider;
+    const parts = [label, formatRelativeTime(session.updatedAt, Date.now())];
     if (this.scope === 'all' && session.cwd !== undefined) {
       parts.push(basename(session.cwd));
     }
@@ -80,6 +78,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<SessionSumma
       [
         `**${session.threadName ?? '(名称未設定)'}**`,
         '',
+        `- CLI: ${label}`,
         `- 更新: ${formatAbsoluteTime(session.updatedAt)}`,
         `- cwd: \`${session.cwd ?? '不明'}\``,
         `- id: \`${session.id}\``,
@@ -88,9 +87,18 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<SessionSumma
     );
 
     item.iconPath = new vscode.ThemeIcon(
-      open ? 'circle-filled' : session.archived ? 'archive' : 'comment-discussion',
+      open
+        ? 'circle-filled'
+        : session.archived
+          ? 'archive'
+          : session.provider === 'claude'
+            ? 'sparkle'
+            : 'comment-discussion',
     );
-    item.contextValue = session.archived ? 'codexSession.archived' : 'codexSession';
+    // メニューの出し分けにプロバイダを含める（Claude Codeにはarchive/deleteが無い）
+    item.contextValue = session.archived
+      ? `codexSession.${session.provider}.archived`
+      : `codexSession.${session.provider}`;
     item.command = {
       command: 'codex.openSession',
       title: 'Open',

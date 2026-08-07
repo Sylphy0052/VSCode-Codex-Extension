@@ -3,21 +3,52 @@ import { createReadStream } from 'node:fs';
 import * as readline from 'node:readline';
 import type { FileSystemPort } from './ports';
 
-/** 1行目だけ読むために全文をメモリに載せない。ロールアウトは巨大になりうる。 */
-async function readFirstLine(filePath: string): Promise<string | undefined> {
+/** 先頭だけ読むために全文をメモリに載せない。ロールアウトは巨大になりうる。 */
+async function readHead(filePath: string, maxLines: number): Promise<string[]> {
   const stream = createReadStream(filePath, { encoding: 'utf8' });
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  const lines: string[] = [];
   try {
     for await (const line of rl) {
-      return line;
+      lines.push(line);
+      if (lines.length >= maxLines) {
+        break;
+      }
     }
-    return undefined;
+    return lines;
   } catch {
-    return undefined;
+    return lines;
   } finally {
     rl.close();
     stream.destroy();
   }
+}
+
+async function readFirstLine(filePath: string): Promise<string | undefined> {
+  return (await readHead(filePath, 1))[0];
+}
+
+/** 拡張子で絞ってディレクトリを再帰的に走査する。 */
+async function walkFiles(dir: string, accept: (name: string) => boolean): Promise<string[]> {
+  const found: string[] = [];
+  const walk = async (current: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = `${current}/${entry.name}`;
+      if (entry.isDirectory()) {
+        await walk(full);
+      } else if (accept(entry.name)) {
+        found.push(full);
+      }
+    }
+  };
+  await walk(dir);
+  return found;
 }
 
 export const nodeFileSystem: FileSystemPort = {
@@ -30,6 +61,8 @@ export const nodeFileSystem: FileSystemPort = {
   },
 
   readFirstLine,
+
+  readHead,
 
   async readTail(filePath: string, maxBytes: number): Promise<string | undefined> {
     let handle;
@@ -56,24 +89,10 @@ export const nodeFileSystem: FileSystemPort = {
   },
 
   async listRollouts(dir: string): Promise<string[]> {
-    const found: string[] = [];
-    const walk = async (current: string): Promise<void> => {
-      let entries;
-      try {
-        entries = await fs.readdir(current, { withFileTypes: true });
-      } catch {
-        return;
-      }
-      for (const entry of entries) {
-        const full = `${current}/${entry.name}`;
-        if (entry.isDirectory()) {
-          await walk(full);
-        } else if (entry.name.startsWith('rollout-') && entry.name.endsWith('.jsonl')) {
-          found.push(full);
-        }
-      }
-    };
-    await walk(dir);
-    return found;
+    return walkFiles(dir, (name) => name.startsWith('rollout-') && name.endsWith('.jsonl'));
+  },
+
+  async listJsonl(dir: string): Promise<string[]> {
+    return walkFiles(dir, (name) => name.endsWith('.jsonl'));
   },
 };

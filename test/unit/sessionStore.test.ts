@@ -51,10 +51,18 @@ class FakeFs implements FileSystemPort {
     return this.files[filePath] === undefined ? undefined : 0;
   }
 
+  async readHead(filePath: string, maxLines: number): Promise<string[]> {
+    return (this.files[filePath]?.split('\n') ?? []).slice(0, maxLines);
+  }
+
   async listRollouts(dir: string): Promise<string[]> {
     return Object.keys(this.files).filter(
       (p) => p.startsWith(`${dir}/`) && p.slice(p.lastIndexOf('/') + 1).startsWith('rollout-'),
     );
+  }
+
+  async listJsonl(dir: string): Promise<string[]> {
+    return Object.keys(this.files).filter((p) => p.startsWith(`${dir}/`) && p.endsWith('.jsonl'));
   }
 }
 

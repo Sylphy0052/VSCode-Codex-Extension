@@ -1,34 +1,41 @@
 import * as vscode from 'vscode';
-import { buildLaunchEnv, buildShellArgs } from '../codex/argvBuilder';
 import { parseSessionMeta } from '../codex/sessionMeta';
-import type { CodexConfig, LaunchTarget } from '../codex/types';
 import type { Logger } from '../log';
+import type { ProviderId } from '../provider/id';
+import type { LaunchSpec } from '../provider/types';
 import type { FileSystemPort } from '../session/ports';
-import { SessionBinder, createLaunchTag } from './sessionBinder';
+import { SessionBinder } from './sessionBinder';
 
 /** 起動失敗とみなす猶予。これより早い異常終了はユーザーに通知する（設計書 §5.6）。 */
 const STARTUP_FAILURE_WINDOW_MS = 5_000;
 
 export interface TrackedTerminal {
   terminal: vscode.Terminal;
+  provider: ProviderId;
   tag: string;
   startedAt: number;
   /** 紐付けが確定するまで undefined。未確定のタブは復元対象にしない。 */
   sessionId: string | undefined;
   cwd: string | undefined;
-  /** Codexが付けた要約名。タブ名の追従と復元時の表示に使う。 */
+  /** CLIが付けた要約名。タブ名の追従と復元時の表示に使う。 */
   threadName: string | undefined;
 }
 
 export interface LaunchRequest {
-  target: LaunchTarget;
+  provider: ProviderId;
+  /**
+   * 起動ごとの一意なタグ。Codexは事後紐付けの照合に使い（設計書 §9.1）、
+   * idが起動前に決まるプロバイダでは端末の識別子としてのみ使う。
+   */
+  tag: string;
+  /** 解決済みの実行ファイル。設定変更に追従するため呼び出しごとに解決する。 */
+  executablePath: string;
+  /** プロバイダが組み立てた起動引数一式。 */
+  spec: LaunchSpec;
   cwd: string | undefined;
-  config: CodexConfig;
   name: string;
   /** 復元時は列を指定しフォーカスを奪わない（設計書 §5.5）。 */
   location?: vscode.TerminalEditorLocationOptions;
-  /** resume/fork では起動前からidが判っているため、紐付けを待たずに確定させる。 */
-  sessionId?: string;
   /** resume時は既知の要約名。 */
   threadName?: string;
 }
@@ -45,8 +52,6 @@ export class TerminalSessionManager implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
 
   constructor(
-    /** 設定変更に追従するため、起動のたびに解決し直す。 */
-    private readonly codexPath: () => string,
     private readonly binder: SessionBinder,
     private readonly fs: FileSystemPort,
     private readonly log: Logger,
@@ -56,27 +61,23 @@ export class TerminalSessionManager implements vscode.Disposable {
   }
 
   /**
-   * Codexをエディタタブとして起動する。
-   * シェルを経由せずプロセスそのものをCodexにするため、引数のエスケープは不要
+   * CLIをエディタタブとして起動する。
+   * シェルを経由せずプロセスそのものをCLIにするため、引数のエスケープは不要
    * （設計書 §5.2）。
    */
   launch(request: LaunchRequest): { terminal: vscode.Terminal; warnings: string[] } {
-    const { args, warnings } = buildShellArgs({
-      target: request.target,
-      cwd: request.cwd,
-      config: request.config,
-    });
+    const { args, env, sessionId, warnings } = request.spec;
     for (const w of warnings) {
       this.log.warn(w);
     }
 
-    const tag = createLaunchTag();
+    const tag = request.tag;
     const terminal = vscode.window.createTerminal({
       name: request.name,
-      shellPath: this.codexPath(),
+      shellPath: request.executablePath,
       shellArgs: args,
-      env: buildLaunchEnv(tag),
-      // -C と重複するが、Codexが -C を解釈する前の起動ディレクトリも合わせておく
+      env,
+      // -C と重複するが、CLIが -C を解釈する前の起動ディレクトリも合わせておく
       ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
       location: request.location ?? vscode.TerminalLocation.Editor,
       isTransient: true,
@@ -84,23 +85,24 @@ export class TerminalSessionManager implements vscode.Disposable {
 
     const tracked: TrackedTerminal = {
       terminal,
+      provider: request.provider,
       tag,
       startedAt: Date.now(),
-      // resume/fork は起動前からidが判っているので待つ必要がない
-      sessionId: request.sessionId,
+      // resume/fork と Claude Code は起動前からidが判っているので待つ必要がない
+      sessionId,
       cwd: request.cwd,
       threadName: request.threadName,
     };
     this.tracked.set(terminal, tracked);
 
-    if (request.sessionId === undefined) {
+    if (sessionId === undefined) {
       this.binder.register(tag);
     }
 
-    this.log.info(`起動 tag=${tag} args=${JSON.stringify(args)}`);
-    if (request.sessionId === undefined) {
+    this.log.info(`起動 provider=${request.provider} tag=${tag} args=${JSON.stringify(args)}`);
+    if (sessionId === undefined) {
       // TUIは最初のユーザー発言時にロールアウトを作るため、それまで紐付かないのが正常。
-      this.log.info('Codexに最初の発言をするとセッションidが確定します');
+      this.log.info('最初の発言をするとセッションidが確定します');
     }
     return { terminal, warnings };
   }

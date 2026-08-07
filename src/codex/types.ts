@@ -1,3 +1,5 @@
+import type { ProviderId } from '../provider/id';
+
 export const SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access'] as const;
 export type SandboxMode = (typeof SANDBOX_MODES)[number];
 
@@ -48,9 +50,15 @@ export interface SessionMeta {
   threadSource: string | undefined;
 }
 
-/** 一覧に出す1セッション。index と session_meta の合成。 */
+/**
+ * 一覧に出す1セッション。
+ *
+ * Codexでは index と session_meta の合成、Claude Codeでは transcript の要約。
+ * どちらのCLIのものかは `provider` で見分ける。
+ */
 export interface SessionSummary {
   id: string;
+  provider: ProviderId;
   threadName: string | undefined;
   updatedAt: string;
   cwd: string | undefined;

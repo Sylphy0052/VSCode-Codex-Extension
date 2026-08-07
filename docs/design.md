@@ -1,6 +1,8 @@
 # VSCode Codex Extension 設計書
 
-Codexのセッションを、VSCodeのファイルタブと同じ感覚でエディタタブとして扱う拡張機能。
+CLIコーディングエージェント（Codex / Claude Code）のセッションを、VSCodeのファイルタブと同じ感覚でエディタタブとして扱う拡張機能。
+
+プロバイダ抽象と作業記録（日報連携）は §14・§15 を参照。§1〜§13 はCodexを前提に書かれており、Claude Code側の差分は §14 に集約している。
 
 ## 1. 目的とスコープ
 
@@ -492,3 +494,117 @@ Codexが会話内容から名前を付けると `thread/name/updated` が届く�
 - `executablePath` / `additionalArgs` / `codexHome` / `sandbox` / `approvalMode` がワークスペース設定から上書きできないことを確認する
 - fork / archive / unarchive / delete が動作し、deleteは確認ダイアログを経る
 - `scripts/check.sh` が全緑（lint / typecheck / test）で、そのログを完了報告に添付する
+
+## 14. プロバイダ抽象とClaude Code対応
+
+Codex専用だった構成に薄い抽象を1枚入れ、Claude Code CLI（`claude`）を同じ体験で扱えるようにする。UI層（履歴TreeView・タブ復元・チャット画面のHTML・作業記録）はプロバイダ非依存。
+
+### 14.1 境界
+
+```
+src/provider/
+  id.ts        ProviderId ('codex' | 'claude')
+  types.ts     AgentProvider（locate / listSessions / buildLaunch / capabilities / tabTitle）
+  registry.ts  利用可能なプロバイダの束。一覧を1本にマージする
+src/codex/provider.ts   既存のargvBuilder・cliLocator・SessionStoreを束ねたアダプタ
+src/claude/
+  cliLocator.ts    claude実行ファイルと CLAUDE_CONFIG_DIR の解決
+  argvBuilder.ts   TUI用 / stream-json用の引数（純粋関数）
+  transcript.ts    projects/**/<id>.jsonl のパースとChatItemへの変換
+  sessionStore.ts  一覧構築（mtime降順で上位N件だけ先頭を読む）
+  streamJson.ts    stream-jsonイベント → ChatState（純粋関数）
+  control.ts       control protocolのメッセージ組み立てと承認カード化（純粋関数）
+  streamSession.ts claudeプロセスの常駐と入出力
+  provider.ts      AgentProvider実装
+```
+
+`SessionSummary` と `PersistedTab` に `provider` を持たせ、履歴・タブ復元・作業記録をプロバイダ横断で扱う。`provider` を持たない旧形式のタブ状態は `codex` として読む。
+
+### 14.2 Claude Code のデータソース
+
+| 用途 | 場所 |
+| --- | --- |
+| セッション実体 | `~/.claude/projects/<cwd-slug>/<sessionId>.jsonl`（1行1イベント） |
+| ホーム | `CLAUDE_CONFIG_DIR` → `~/.claude`（設定 `claude.configDir` で上書き） |
+
+- Codexの `session_index.jsonl` にあたる索引が無いため、transcriptを **mtime降順** に並べ、上位N件だけ先頭40行を読んで一覧を作る。
+- Claude Codeには `thread_name` に相当する要約名が無い。表示名は **最初の人の発言**から作る（`isSidechain` のsubagent発言・ツール結果・IDEが挿入する制御タグは除く）。
+- 更新契機は `projects/**/*.jsonl` のファイル監視。
+
+### 14.3 セッションIDの紐付け（実機検証済み）
+
+`claude --session-id <uuid>` で **起動前にidを決められる**。Codexで必要だった originator タグの事後照合（§9.1）はClaude側では不要で、タブは起動と同時に紐付く。
+
+検証（2026-08-07、CLI 2.1.223）: 指定したUUIDと同名の transcript が `~/.claude/projects/<slug>/` に作られることを確認。
+
+例外は `fork`（`-r <id> --fork-session`）で、この場合の新しいidはCLIが振るためこちらから指定できない。そのタブは紐付け未確定のまま扱い、復元と作業記録の対象外になる。
+
+### 14.4 チャット画面（stream-json）
+
+```
+claude --print --input-format stream-json --output-format stream-json --verbose
+       --include-partial-messages --replay-user-messages
+       [--session-id <uuid> | -r <id>] [--model …] [--effort …] [--permission-mode …]
+```
+
+- app-serverと違い **1プロセス1セッション**。画面ごとにプロセスを常駐させ、発言のたびに起動し直さない。
+- 出力イベントは `streamJson.ts` でCodexと共通の `ChatItem` / `ChatState` へ正規化する。未知のtypeは状態を変えず素通しする。実機で確認した種類: `system/init` / `assistant` / `user` / `stream_event` / `result` / `rate_limit_event` / `control_response`。
+- `--resume` は過去のやり取りを標準出力に流さないため、初期表示は transcript を読んで作る。
+
+### 14.5 承認（control protocol）
+
+stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で扱う。**公式ドキュメントに無い**プロトコルのため、次の劣化方針を守る。
+
+1. 起動直後に `{"subtype":"initialize"}` を送る（実機で `control_response/success` が返ることを確認済み）。
+2. CLIから `can_use_tool` が届いたら承認カードを出し、決定を `{"behavior":"allow"|"deny"}` で返す。
+3. ハンドシェイクが失敗した場合は **会話は続けたまま** 1度だけ通知し、以後は `claude.permissionMode` の設定に委ねる。
+
+`acceptForSession`（この会話では常に許可）はCLI側に区別が無いため、許可として返す。
+
+### 14.6 プロバイダごとにできること
+
+| 操作 | Codex | Claude Code |
+| --- | --- | --- |
+| 新規 / resume / タブ復元 | ○ | ○ |
+| チャット画面（承認・中断込み） | ○ | ○ |
+| fork（セッション全体） | ○ | ○（idは未確定のまま） |
+| 会話の途中のターンから分岐 | ○ | ×（CLIに手段が無い） |
+| archive / unarchive / delete | ○ | ×（CLIに手段が無い。ファイルを直接消すことはしない） |
+| セッション名の変更 | ○ | ×（要約名の概念が無い） |
+
+対応しない操作はTreeViewの `contextValue`（`codexSession.<provider>`）でメニューから隠す。
+
+## 15. 作業記録（日報・週報連携）
+
+この拡張機能から実行したセッションを、日報/週報システムが読める形で残す。
+
+### 15.1 出力
+
+- 出力先: `~/workspace/dairy/.buffer/<YYYY-MM-DD>.jsonl`（`agent.activityLog.dir` → `DAILY_BUFFER_DIR` → 既定の順で解決）
+- 形式: 1行1レコード。`{"ts","source","cwd","text","ref"}`。`source` は `codex` / `claude-code`、`ref` は常に `vscode`
+- 収集側 `~/.claude/scripts/daily/collect.py` の追記バッファ規約に合わせてある。フィールド名を変えると日報が黙って取りこぼす
+
+### 15.2 粒度と契機
+
+**1セッション1行**。発言のたびには書かない。
+
+| 入口 | 契機 | 本文 |
+| --- | --- | --- |
+| Codex TUIタブ | `session_index.jsonl` の更新でCodexが要約名を確定したとき | 要約名 |
+| Codexチャット画面 | 発言時 | その発言 |
+| Claude Code TUIタブ | transcriptの更新を検知したとき | 最初の人の発言 |
+| Claude Codeチャット画面 | 発言時 | その発言 |
+
+二重記録は `globalState` に持つ記録済みidの集合で抑止する（30日で掃除）。書き込みに失敗したものは既記録にせず、次の契機で書き直す。
+
+### 15.3 会話本文の扱い
+
+§8の「会話本文を読まない・保存しない」に対する**意図的な例外**であり、範囲を次に限定する。
+
+- セッションごとに1行だけ、200文字までの1行要約
+- Codex TUIはCodexが付けた要約名（`session_index.jsonl` 由来）を使い、ロールアウト本文は読まない
+- `agent.activityLog.enabled` を `false` にすれば一切書かない
+
+### 15.4 収集側の重複排除
+
+拡張機能経由のClaude Codeセッションは transcript 走査（`collect_claude`）にも現れるため、`collect.py` 側で `(source, cwd, 分, 要約の先頭50字)` が一致する行を1件に畳み、`ref: "vscode"` の方を残す。

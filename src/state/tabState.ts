@@ -1,5 +1,9 @@
+import { isProviderId, type ProviderId } from '../provider/id';
+
 export interface PersistedTab {
   sessionId: string;
+  /** どのCLIのセッションか。provider を持たない旧形式は codex とみなす。 */
+  provider: ProviderId;
   viewColumn: number;
   /** 同一グループ内での並び順。ユーザーがドラッグで並べ替えた結果を再現するため。 */
   order: number;
@@ -101,8 +105,11 @@ export function normalizePersistedTabs(raw: unknown): PersistedTab[] {
     const order = e['order'];
     const cwd = e['cwd'];
     const threadName = e['threadName'];
+    const provider = e['provider'];
     tabs.push({
       sessionId,
+      // 旧形式（プロバイダ抽象より前に保存されたもの）はCodexのタブ
+      provider: isProviderId(provider) ? provider : 'codex',
       viewColumn: typeof viewColumn === 'number' && viewColumn > 0 ? viewColumn : 1,
       order: typeof order === 'number' ? order : UNKNOWN_ORDER,
       cwd: typeof cwd === 'string' && cwd !== '' ? cwd : undefined,

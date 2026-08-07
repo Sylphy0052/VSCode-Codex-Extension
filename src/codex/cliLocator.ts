@@ -35,6 +35,19 @@ export type LocateResult =
  * リポジトリ側の設定から差し替えられないため、ここでの値は信頼してよい。
  */
 export function resolveCodexPath(configured: string, deps: LocatorDeps): LocateResult {
+  return resolveExecutable(configured, 'codex', deps);
+}
+
+/**
+ * PATH（またはパス指定）から実行ファイルを解決する。プロバイダ共通。
+ *
+ * `configured` は machine スコープ設定のため、ここでの値は信頼してよい。
+ */
+export function resolveExecutable(
+  configured: string,
+  defaultName: string,
+  deps: LocatorDeps,
+): LocateResult {
   const trimmed = configured.trim();
 
   // 明示指定がパスを含む場合は、それだけを見る。PATHへのフォールバックはしない
@@ -45,7 +58,7 @@ export function resolveCodexPath(configured: string, deps: LocatorDeps): LocateR
       : { ok: false, reason: 'setting-not-executable', attempted: trimmed };
   }
 
-  const name = trimmed === '' ? 'codex' : trimmed;
+  const name = trimmed === '' ? defaultName : trimmed;
   const dirs = (deps.env['PATH'] ?? '').split(deps.delimiter).filter((d) => d !== '');
   for (const dir of dirs) {
     const candidate = `${dir}/${name}`;

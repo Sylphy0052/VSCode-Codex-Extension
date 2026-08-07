@@ -47,6 +47,7 @@ export class TabStateStore {
 
     const tabs: PersistedTab[] = tracked.map((t, i) => ({
       sessionId: t.sessionId as string,
+      provider: t.provider,
       viewColumn: assigned[i]?.viewColumn ?? 1,
       order: assigned[i]?.order ?? 0,
       cwd: t.cwd,

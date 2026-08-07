@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import type { ClaudeConfig } from './claude/types';
 import type { CodexConfig } from './codex/types';
 import type { HistoryScope } from './session/sessionStore';
 
@@ -54,6 +55,30 @@ export function readConfig(): ExtensionConfig {
     restoreMaxTabs: num(c, 'restore.maxTabs', 8),
     historyScope: c.get<string>('history.scope') === 'all' ? 'all' : 'workspace',
     historyMaxEntries: num(c, 'history.maxEntries', 200),
+  };
+}
+
+export interface ClaudeExtensionConfig {
+  executablePath: string;
+  configDir: string;
+  claude: ClaudeConfig;
+}
+
+export function readClaudeConfig(): ClaudeExtensionConfig {
+  const c = vscode.workspace.getConfiguration('claude');
+  const additional = c.get<unknown>('additionalArgs');
+
+  return {
+    executablePath: str(c, 'executablePath', 'claude'),
+    configDir: str(c, 'configDir'),
+    claude: {
+      model: str(c, 'model'),
+      effort: str(c, 'effort'),
+      permissionMode: str(c, 'permissionMode'),
+      additionalArgs: Array.isArray(additional)
+        ? additional.filter((a): a is string => typeof a === 'string')
+        : [],
+    },
   };
 }
 

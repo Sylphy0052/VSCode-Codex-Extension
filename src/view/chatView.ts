@@ -133,7 +133,7 @@ export class ChatViewManager implements vscode.Disposable {
 
   private adopt(panel: vscode.WebviewPanel, cwd: string | undefined): ChatPanel {
     panel.webview.options = { enableScripts: true };
-    panel.webview.html = renderShell(panel.webview);
+    panel.webview.html = renderShell(panel.webview, { agentLabel: 'Codex', showSettings: true });
 
     const session = new ChatSession(this.connection, this.log, (state) => {
       const title = deriveTitle(state);
@@ -364,7 +364,18 @@ function readPersistedThreadId(state: unknown): string | undefined {
   return typeof threadId === 'string' && threadId !== '' ? threadId : undefined;
 }
 
-function renderShell(webview: vscode.Webview): string {
+export interface ChatShellOptions {
+  /** 画面に出すCLIの名前。発言の見出しと入力欄の案内に使う。 */
+  agentLabel: string;
+  /** モデル・effort・承認のプルダウンを出すか（Codex画面のみ）。 */
+  showSettings: boolean;
+}
+
+/**
+ * チャット画面のHTMLを組み立てる。CodexとClaude Codeで共有する。
+ * 描画するのは `ChatState` だけなので、プロバイダごとの差はここでは扱わない。
+ */
+export function renderShell(webview: vscode.Webview, options: ChatShellOptions): string {
   const nonce = randomBytes(16).toString('base64');
   const csp = [
     "default-src 'none'",
@@ -504,11 +515,11 @@ function renderShell(webview: vscode.Webview): string {
   <div id="approvals"></div>
   <div id="status"></div>
   <div id="composer">
-    <textarea id="input" placeholder="Codexへの指示を入力（Ctrl+Enterで送信）"></textarea>
+    <textarea id="input" placeholder="${options.agentLabel}への指示を入力（Ctrl+Enterで送信）"></textarea>
     <button id="send" type="button">送信</button>
     <button id="stop" type="button" class="secondary" hidden>中断</button>
   </div>
-  <div id="settings">
+  <div id="settings"${options.showSettings ? '' : ' hidden'}>
     <label>モデル <select id="model"></select></label>
     <label>Effort <select id="reasoningEffort"></select></label>
     <label>承認 <select id="approvalMode">
@@ -523,7 +534,7 @@ function renderShell(webview: vscode.Webview): string {
 
   const KIND_LABEL = {
     userMessage: 'あなた',
-    agentMessage: 'Codex',
+    agentMessage: '${options.agentLabel}',
     reasoning: '思考',
     commandExecution: 'コマンド',
     fileChange: 'ファイル変更',

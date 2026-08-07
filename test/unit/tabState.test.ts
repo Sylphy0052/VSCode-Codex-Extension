@@ -73,17 +73,17 @@ describe('assignPositions', () => {
 describe('sortForRestore', () => {
   it('列の順、次に列内の並び順で開く', () => {
     const tabs: PersistedTab[] = [
-      { sessionId: 'c', viewColumn: 2, order: 0, cwd: undefined, threadName: undefined },
-      { sessionId: 'b', viewColumn: 1, order: 5, cwd: undefined, threadName: undefined },
-      { sessionId: 'a', viewColumn: 1, order: 1, cwd: undefined, threadName: undefined },
+      { sessionId: 'c', provider: 'codex', viewColumn: 2, order: 0, cwd: undefined, threadName: undefined },
+      { sessionId: 'b', provider: 'codex', viewColumn: 1, order: 5, cwd: undefined, threadName: undefined },
+      { sessionId: 'a', provider: 'claude', viewColumn: 1, order: 1, cwd: undefined, threadName: undefined },
     ];
     expect(sortForRestore(tabs).map((t) => t.sessionId)).toEqual(['a', 'b', 'c']);
   });
 
   it('元の配列を壊さない', () => {
     const tabs: PersistedTab[] = [
-      { sessionId: 'b', viewColumn: 2, order: 0, cwd: undefined, threadName: undefined },
-      { sessionId: 'a', viewColumn: 1, order: 0, cwd: undefined, threadName: undefined },
+      { sessionId: 'b', provider: 'codex', viewColumn: 2, order: 0, cwd: undefined, threadName: undefined },
+      { sessionId: 'a', provider: 'codex', viewColumn: 1, order: 0, cwd: undefined, threadName: undefined },
     ];
     sortForRestore(tabs);
     expect(tabs[0]?.sessionId).toBe('b');
@@ -92,16 +92,29 @@ describe('sortForRestore', () => {
 
 describe('normalizePersistedTabs', () => {
   it('保存した値を読み戻す', () => {
-    const raw = [{ sessionId: ID_A, viewColumn: 2, order: 3, cwd: '/w', threadName: '設計' }];
+    const raw = [
+      { sessionId: ID_A, provider: 'claude', viewColumn: 2, order: 3, cwd: '/w', threadName: '設計' },
+    ];
     expect(normalizePersistedTabs(raw)).toEqual([
-      { sessionId: ID_A, viewColumn: 2, order: 3, cwd: '/w', threadName: '設計' },
+      { sessionId: ID_A, provider: 'claude', viewColumn: 2, order: 3, cwd: '/w', threadName: '設計' },
     ]);
+  });
+
+  it('プロバイダを持たない旧形式はCodexとして読む', () => {
+    const raw = [{ sessionId: ID_A, viewColumn: 1, order: 0 }];
+    expect(normalizePersistedTabs(raw)[0]?.provider).toBe('codex');
+  });
+
+  it('未知のプロバイダ名はCodexへ倒す', () => {
+    const raw = [{ sessionId: ID_A, provider: 'gemini' }];
+    expect(normalizePersistedTabs(raw)[0]?.provider).toBe('codex');
   });
 
   it('欠けた値に既定を入れる', () => {
     expect(normalizePersistedTabs([{ sessionId: ID_A }])).toEqual([
       {
         sessionId: ID_A,
+        provider: 'codex',
         viewColumn: 1,
         order: UNKNOWN_ORDER,
         cwd: undefined,

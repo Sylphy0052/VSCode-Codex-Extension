@@ -75,6 +75,7 @@ export class SessionStore {
         if (options.scope === 'all') {
           sessions.push({
             id: entry.id,
+            provider: 'codex',
             threadName: entry.threadName,
             updatedAt: entry.updatedAt,
             cwd: undefined,
@@ -96,6 +97,7 @@ export class SessionStore {
 
       sessions.push({
         id: entry.id,
+        provider: 'codex',
         threadName: entry.threadName,
         updatedAt: entry.updatedAt,
         cwd: meta.cwd,
