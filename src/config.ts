@@ -12,6 +12,13 @@ export interface ExtensionConfig {
   historyMaxEntries: number;
 }
 
+/** 日報/週報へ流す作業記録の設定。プロバイダを跨ぐため `agent.*` 名前空間に置く。 */
+export interface ActivityLogConfig {
+  enabled: boolean;
+  /** 空なら `DAILY_BUFFER_DIR` → `~/workspace/dairy/.buffer`（activityLogger が解決）。 */
+  dir: string;
+}
+
 const str = (c: vscode.WorkspaceConfiguration, key: string, fallback = ''): string => {
   const v = c.get<string>(key);
   return typeof v === 'string' ? v : fallback;
@@ -47,6 +54,14 @@ export function readConfig(): ExtensionConfig {
     restoreMaxTabs: num(c, 'restore.maxTabs', 8),
     historyScope: c.get<string>('history.scope') === 'all' ? 'all' : 'workspace',
     historyMaxEntries: num(c, 'history.maxEntries', 200),
+  };
+}
+
+export function readActivityLogConfig(): ActivityLogConfig {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    enabled: c.get<boolean>('activityLog.enabled') ?? true,
+    dir: str(c, 'activityLog.dir'),
   };
 }
 

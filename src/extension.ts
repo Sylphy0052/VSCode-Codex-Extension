@@ -1,4 +1,13 @@
 import * as vscode from 'vscode';
+import {
+  ActivityLogger,
+  InMemoryLoggedSessions,
+  nodeClock,
+  resolveBufferDir,
+  retentionCutoff,
+} from './activity/activityLogger';
+import type { RecordRequest as ActivityRequest } from './activity/activityLogger';
+import { nodeActivityAppender } from './activity/nodeAppender';
 import { AppServerClient } from './codex/appServerClient';
 import { isUnsafeCombination } from './codex/argvBuilder';
 import {
@@ -9,7 +18,12 @@ import {
 } from './codex/cliLocator';
 import type { SessionMeta, SessionSummary } from './codex/types';
 import type { UsageSnapshot } from './codex/usage';
-import { currentWorkspaceFolder, readConfig, workspaceFolderPaths } from './config';
+import {
+  currentWorkspaceFolder,
+  readActivityLogConfig,
+  readConfig,
+  workspaceFolderPaths,
+} from './config';
 import { createLogger, type Logger } from './log';
 import { nodeFileSystem } from './session/nodeFileSystem';
 import { InMemoryMetaCache } from './session/ports';
@@ -31,6 +45,7 @@ import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
 
 const META_CACHE_KEY = 'codex.metaCache.v1';
+const ACTIVITY_LOGGED_KEY = 'agent.activityLogged.v1';
 const CODEX_INSTALL_URL = 'https://developers.openai.com/codex/';
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -47,6 +62,28 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   const store = new SessionStore(nodeFileSystem, paths, cache);
   const binder = new SessionBinder();
+
+  const loggedSessions = new InMemoryLoggedSessions(
+    context.globalState.get<Record<string, string>>(ACTIVITY_LOGGED_KEY) ?? {},
+  );
+  loggedSessions.prune(retentionCutoff(new Date()));
+  const activity = new ActivityLogger(
+    nodeActivityAppender,
+    loggedSessions,
+    () => {
+      const config = readActivityLogConfig();
+      return {
+        enabled: config.enabled,
+        dir: resolveBufferDir(config.dir, process.env, nodeLocatorDeps.homedir()),
+      };
+    },
+    nodeClock,
+  );
+  const recordActivity = (request: ActivityRequest): void => {
+    void activity.record(request).then(() => {
+      void context.globalState.update(ACTIVITY_LOGGED_KEY, loggedSessions.toRecord());
+    });
+  };
 
   const manager = new TerminalSessionManager(
     () => resolveExecutable(log)?.path ?? 'codex',
@@ -67,7 +104,14 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(manager);
 
   const settings = new SettingsProvider(nodeFileSystem, paths.modelsCache, paths.configToml, log);
-  const chat = new ChatViewManager(() => resolveExecutable(log)?.path ?? 'codex', settings, log);
+  // 設定パネルを開かずCodex画面だけ使う場合でも選択肢が揃うよう、起動時に読む
+  void settings.load();
+  const chat = new ChatViewManager(
+    () => resolveExecutable(log)?.path ?? 'codex',
+    settings,
+    log,
+    ({ sessionId, cwd, text }) => recordActivity({ sessionId, source: 'codex', cwd, text }),
+  );
   context.subscriptions.push(chat);
 
   const appServer = new AppServerClient(() => resolveExecutable(log)?.path ?? 'codex', log);
@@ -133,7 +177,7 @@ export function activate(context: vscode.ExtensionContext): void {
     onIndexChanged: () => {
       tree.refreshDebounced();
       void persistCache(context, cache);
-      void syncTabNames(manager, renamer, store);
+      void syncTabNames(manager, renamer, store, recordActivity);
     },
   });
   context.subscriptions.push(watcher);
@@ -243,11 +287,17 @@ async function restoreTabs(
   log.info(`${target.length}件のタブを復元しました`);
 }
 
-/** Codexが要約名を確定/更新したらタブ名へ反映する。 */
+/**
+ * Codexが要約名を確定/更新したらタブ名へ反映する。
+ *
+ * 作業記録もここで行う。要約名はCodexが初回発言から付けたものなので、
+ * 会話本文を読まずに日報向けの1行が得られる（設計書 §8）。
+ */
 async function syncTabNames(
   manager: TerminalSessionManager,
   renamer: TerminalRenamer,
   store: SessionStore,
+  recordActivity: (request: ActivityRequest) => void,
 ): Promise<void> {
   const tracked = manager.trackedSessions();
   if (tracked.length === 0) {
@@ -260,6 +310,9 @@ async function syncTabNames(
     const name = id === undefined ? undefined : names.get(id);
     if (id === undefined || name === undefined) {
       continue;
+    }
+    if (session.cwd !== undefined) {
+      recordActivity({ sessionId: id, source: 'codex', cwd: session.cwd, text: name });
     }
     if (manager.setThreadName(id, name) !== undefined) {
       await renamer.request(session.terminal, `Codex: ${name}`);

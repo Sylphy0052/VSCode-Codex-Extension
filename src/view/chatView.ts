@@ -4,15 +4,25 @@ import { defaultDenyResponse, type ApprovalDecision } from '../appserver/approva
 import type { ChatState } from '../appserver/chatState';
 import { ChatSession } from '../appserver/chatSession';
 import { AppServerConnection, type ServerRequest } from '../appserver/connection';
+import { summarize } from '../codex/conversation';
 import { readForkedThreadId } from '../codex/jsonRpc';
 import { currentWorkspaceFolder, readConfig } from '../config';
 import type { Logger } from '../log';
-import { APPROVAL_MODES, SANDBOX_MODES } from '../codex/types';
+import { APPROVAL_MODES } from '../codex/types';
 import { isEditableKey, type SettingsProvider } from './settingsProvider';
 
 interface ChatPanel {
   panel: vscode.WebviewPanel;
   session: ChatSession;
+  /** 作業記録に載せるディレクトリ。resume時はセッション自身のcwd。 */
+  cwd: string | undefined;
+}
+
+/** 拡張機能から実行したセッションを日報バッファへ記録するための通知。 */
+export interface ChatActivity {
+  sessionId: string;
+  cwd: string;
+  text: string;
 }
 
 /**
@@ -32,6 +42,8 @@ export class ChatViewManager implements vscode.Disposable {
     codexPath: () => string,
     private readonly settings: SettingsProvider,
     private readonly log: Logger,
+    /** 発言のたびに呼ばれる。二重記録の抑止は受け手（ActivityLogger）が担う。 */
+    private readonly onActivity: (activity: ChatActivity) => void = () => undefined,
   ) {
     this.connection = new AppServerConnection(
       codexPath,
@@ -51,7 +63,7 @@ export class ChatViewManager implements vscode.Disposable {
       return;
     }
 
-    const entry = this.createPanel('Codex');
+    const entry = this.createPanel('Codex', folder.uri.fsPath);
     this.pending = entry;
     try {
       const threadId = await entry.session.start(folder.uri.fsPath, readConfig().codex);
@@ -72,7 +84,7 @@ export class ChatViewManager implements vscode.Disposable {
       return;
     }
 
-    const entry = this.createPanel(`Codex: ${title}`);
+    const entry = this.createPanel(`Codex: ${title}`, cwd);
     this.panels.set(threadId, entry);
     try {
       await entry.session.resume(threadId, cwd);
@@ -99,7 +111,8 @@ export class ChatViewManager implements vscode.Disposable {
       return;
     }
 
-    const entry = this.adopt(panel);
+    // 復元されたパネルはcwdを保持していないため、このウィンドウのフォルダを充てる
+    const entry = this.adopt(panel, currentWorkspaceFolder()?.uri.fsPath);
     this.panels.set(threadId, entry);
     try {
       await entry.session.resume(threadId, undefined);
@@ -110,23 +123,22 @@ export class ChatViewManager implements vscode.Disposable {
     }
   }
 
-  private createPanel(title: string): ChatPanel {
+  private createPanel(title: string, cwd: string | undefined): ChatPanel {
     const panel = vscode.window.createWebviewPanel('codex.chat', title, vscode.ViewColumn.Active, {
       enableScripts: true,
       retainContextWhenHidden: true,
     });
-    return this.adopt(panel);
+    return this.adopt(panel, cwd);
   }
 
-  private adopt(panel: vscode.WebviewPanel): ChatPanel {
+  private adopt(panel: vscode.WebviewPanel, cwd: string | undefined): ChatPanel {
     panel.webview.options = { enableScripts: true };
     panel.webview.html = renderShell(panel.webview);
 
     const session = new ChatSession(this.connection, this.log, (state) => {
-      // Codexが会話内容から名前を付けたらタブ名に反映する
-      const next = state.name === undefined ? undefined : `Codex: ${state.name}`;
-      if (next !== undefined && panel.title !== next) {
-        panel.title = next;
+      const title = deriveTitle(state);
+      if (title !== undefined && panel.title !== title) {
+        panel.title = title;
       }
       void panel.webview.postMessage({
         type: 'state',
@@ -134,7 +146,7 @@ export class ChatViewManager implements vscode.Disposable {
       });
     });
 
-    const entry: ChatPanel = { panel, session };
+    const entry: ChatPanel = { panel, session, cwd };
     this.active = entry;
     panel.webview.onDidReceiveMessage(
       (message: unknown) => void this.handleMessage(entry, message),
@@ -169,6 +181,7 @@ export class ChatViewManager implements vscode.Disposable {
     try {
       if (type === 'send' && typeof m['text'] === 'string' && m['text'].trim() !== '') {
         await entry.session.send(m['text'], readConfig().codex);
+        this.reportActivity(entry, m['text']);
         return;
       }
       if (type === 'interrupt') {
@@ -202,6 +215,18 @@ export class ChatViewManager implements vscode.Disposable {
     } catch (e) {
       this.reportError(e);
     }
+  }
+
+  /**
+   * 発言をこのセッションの作業記録として通知する。
+   * 記録されるのは各セッションの初回発言だけで、2回目以降は受け手が捨てる。
+   */
+  private reportActivity(entry: ChatPanel, text: string): void {
+    const sessionId = entry.session.threadId;
+    if (sessionId === undefined || entry.cwd === undefined) {
+      return;
+    }
+    this.onActivity({ sessionId, cwd: entry.cwd, text });
   }
 
   /** 会話の途中から分岐し、新しい画面で開く。元のスレッドは変更されない。 */
@@ -312,6 +337,23 @@ export class ChatViewManager implements vscode.Disposable {
 }
 
 export type { ChatState };
+
+/**
+ * タブ名を決める。
+ *
+ * Codexが会話内容から付ける名前を優先するが、それが届くまでは最初の指示から作る。
+ * 名前が付かないまま会話が進むと、どのタブが何の話か判らなくなるため。
+ */
+function deriveTitle(state: ChatState): string | undefined {
+  if (state.name !== undefined && state.name !== '') {
+    return `Codex: ${state.name}`;
+  }
+  const first = state.items.find((i) => i.kind === 'userMessage' && i.text.trim() !== '');
+  if (first === undefined) {
+    return undefined;
+  }
+  return `Codex: ${summarize(first.text, 32)}`;
+}
 
 /** webview側が `setState` で保持している値。 */
 function readPersistedThreadId(state: unknown): string | undefined {
@@ -426,7 +468,12 @@ function renderShell(webview: vscode.Webview): string {
     font-size: inherit;
   }
   textarea:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  #approvals { padding: 0 16px; }
   #status { padding: 0 16px 6px; color: var(--vscode-descriptionForeground); font-size: 0.85em; }
+  .item .head .actions { display: flex; gap: 6px; flex: none; }
+  .item .head .actions button { padding: 1px 8px; font-size: 0.85em; }
+  /* 本文は選択してコピーできるようにする */
+  .body { user-select: text; cursor: text; }
   #settings {
     display: flex;
     flex-wrap: wrap;
@@ -454,6 +501,7 @@ function renderShell(webview: vscode.Webview): string {
 </head>
 <body>
   <div id="log"></div>
+  <div id="approvals"></div>
   <div id="status"></div>
   <div id="composer">
     <textarea id="input" placeholder="Codexへの指示を入力（Ctrl+Enterで送信）"></textarea>
@@ -466,10 +514,6 @@ function renderShell(webview: vscode.Webview): string {
     <label>承認 <select id="approvalMode">
       <option value="">既定</option>
       ${APPROVAL_MODES.map((m) => `<option value="${m}">${m}</option>`).join('')}
-    </select></label>
-    <label>Sandbox <select id="sandbox">
-      <option value="">既定</option>
-      ${SANDBOX_MODES.map((m) => `<option value="${m}">${m}</option>`).join('')}
     </select></label>
   </div>
 
@@ -497,38 +541,99 @@ function renderShell(webview: vscode.Webview): string {
     mcpToolCall: 'tool',
   };
 
-  function renderItem(item) {
+  // 全体を作り直すと選択中のテキストが消えてコピーできないため、要素を使い回す
+  const nodes = new Map();
+
+  function createNode(item) {
     const wrap = document.createElement('div');
     wrap.className = 'item ' + (CLASS_OF[item.kind] || '');
 
     const head = document.createElement('div');
     head.className = 'head';
     const label = document.createElement('span');
+    head.appendChild(label);
+
+    const actions = document.createElement('span');
+    actions.className = 'actions';
+
+    const copy = document.createElement('button');
+    copy.className = 'secondary';
+    copy.textContent = 'コピー';
+    copy.hidden = true;
+    copy.addEventListener('click', () => {
+      const text = node.body.textContent || '';
+      navigator.clipboard.writeText(text).then(
+        () => {
+          copy.textContent = 'コピーしました';
+          setTimeout(() => (copy.textContent = 'コピー'), 1200);
+        },
+        () => (copy.textContent = 'コピーできません'),
+      );
+    });
+    actions.appendChild(copy);
+
+    const fork = document.createElement('button');
+    fork.className = 'secondary';
+    fork.textContent = 'ここから分岐';
+    fork.hidden = true;
+    fork.addEventListener('click', () => {
+      if (!node.forkTarget) return;
+      fork.disabled = true;
+      vscode.postMessage({ type: 'fork', turnId: node.forkTarget });
+    });
+    actions.appendChild(fork);
+
+    head.appendChild(actions);
+    wrap.appendChild(head);
+
+    const body = document.createElement('div');
+    body.className = 'body';
+    wrap.appendChild(body);
+
+    const node = { wrap, label, body, copy, fork, forkTarget: undefined };
+    return node;
+  }
+
+  function updateNode(node, item, forkTarget) {
     const bits = [KIND_LABEL[item.kind] || item.kind];
     if (item.detail) bits.push(item.detail);
     if (item.status) bits.push(item.status);
-    label.textContent = bits.join(' ・ ');
-    head.appendChild(label);
+    const label = bits.join(' ・ ');
+    if (node.label.textContent !== label) node.label.textContent = label;
 
-    if (item.kind === 'userMessage' && item.turnId) {
-      const fork = document.createElement('button');
-      fork.className = 'secondary';
-      fork.textContent = 'ここから分岐';
-      fork.addEventListener('click', () => {
-        fork.disabled = true;
-        vscode.postMessage({ type: 'fork', turnId: item.turnId });
-      });
-      head.appendChild(fork);
-    }
-    wrap.appendChild(head);
+    const text = item.text || '';
+    if (node.body.textContent !== text) node.body.textContent = text;
+    node.body.hidden = text === '';
+    node.copy.hidden = text === '';
 
-    if (item.text) {
-      const body = document.createElement('div');
-      body.className = 'body';
-      body.textContent = item.text;
-      wrap.appendChild(body);
+    // 分岐は「この指示の手前まで」。押した指示からやり直せるようにする
+    node.forkTarget = forkTarget;
+    node.fork.hidden = !(item.kind === 'userMessage' && forkTarget);
+  }
+
+  function syncItems(items) {
+    const log = el('log');
+    const seen = new Set();
+    let previousTurnId;
+
+    for (const item of items) {
+      seen.add(item.id);
+      let node = nodes.get(item.id);
+      if (!node) {
+        node = createNode(item);
+        nodes.set(item.id, node);
+        log.appendChild(node.wrap);
+      }
+      updateNode(node, item, item.kind === 'userMessage' ? previousTurnId : undefined);
+      if (item.kind === 'userMessage' && item.turnId) previousTurnId = item.turnId;
     }
-    return wrap;
+
+    for (const [id, node] of nodes) {
+      if (!seen.has(id)) {
+        node.wrap.remove();
+        nodes.delete(id);
+      }
+    }
   }
 
   function renderApproval(approval) {
@@ -605,15 +710,12 @@ function renderShell(webview: vscode.Webview): string {
       nameOf,
     );
     fillSelect(el('reasoningEffort'), s.efforts, s.reasoningEffort, defaultLabel(d.reasoningEffort));
-    for (const [id, value] of [['approvalMode', d.approvalMode], ['sandbox', d.sandbox]]) {
-      const opt = el(id).querySelector('option[value=""]');
-      if (opt) opt.textContent = defaultLabel(value);
-    }
+    const approvalDefault = el('approvalMode').querySelector('option[value=""]');
+    if (approvalDefault) approvalDefault.textContent = defaultLabel(d.approvalMode);
     el('approvalMode').value = s.approvalMode;
-    el('sandbox').value = s.sandbox;
   }
 
-  for (const key of ['model', 'reasoningEffort', 'approvalMode', 'sandbox']) {
+  for (const key of ['model', 'reasoningEffort', 'approvalMode']) {
     el(key).addEventListener('change', (e) => {
       vscode.postMessage({ type: 'config', key, value: e.target.value });
     });
@@ -627,9 +729,11 @@ function renderShell(webview: vscode.Webview): string {
     applySettings(state.settings);
     const log = el('log');
     const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
-    log.replaceChildren();
-    for (const item of state.items) log.appendChild(renderItem(item));
-    for (const approval of state.approvals) log.appendChild(renderApproval(approval));
+    syncItems(state.items);
+    // 承認カードは一時的なので作り直してよい（会話本文の選択は壊れない）
+    const approvals = el('approvals');
+    approvals.replaceChildren();
+    for (const approval of state.approvals) approvals.appendChild(renderApproval(approval));
     if (atBottom) log.scrollTop = log.scrollHeight;
 
     el('stop').hidden = !state.busy;

@@ -356,6 +356,18 @@
           "minimum": 1,
           "scope": "window",
           "markdownDescription": "履歴一覧を構築する際に読む最大件数。更新時刻の新しい順に絞る。"
+        },
+        "agent.activityLog.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "この拡張機能から実行したセッションを日報/週報用のバッファへ記録する。記録するのはセッションごとに1行（時刻・作業ディレクトリ・要約）だけで、会話本文は書き出さない。"
+        },
+        "agent.activityLog.dir": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "作業記録の出力先ディレクトリ。空なら環境変数 `DAILY_BUFFER_DIR`、それも無ければ `~/workspace/dairy/.buffer` を使う。"
         }
       }
     }

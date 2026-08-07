@@ -42,8 +42,19 @@ export class SettingsProvider {
     private readonly log: Logger,
   ) {}
 
+  /** 一度でも読み込んだか。未読込のまま snapshot を返すと選択肢が空になる。 */
+  private loaded = false;
+
+  /** 未読込なら読む。読み込み済みなら何もしない。 */
+  async ensureLoaded(): Promise<void> {
+    if (!this.loaded) {
+      await this.load();
+    }
+  }
+
   /** カタログと既定値を読み直す。 */
   async load(): Promise<void> {
+    this.loaded = true;
     const catalog = await this.fs.readTextFile(this.modelsCachePath);
     if (catalog === undefined) {
       this.log.warn(`モデル一覧を読めませんでした: ${this.modelsCachePath}`);

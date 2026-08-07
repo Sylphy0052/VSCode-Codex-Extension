@@ -102,17 +102,29 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
-function renderTurn(turn: ConversationTurn, index: number): string {
+/**
+ * @param previousTurnId 直前のターン。分岐は「この指示の手前まで」を引き継ぐため、
+ *   クリックした指示そのものは含めない。最初の指示には手前が無いのでボタンを出さない。
+ */
+function renderTurn(
+  turn: ConversationTurn,
+  index: number,
+  previousTurnId: string | undefined,
+): string {
   const time = turn.timestamp === undefined ? '' : formatAbsoluteTime(turn.timestamp);
   const tools = summarizeTools(turn.toolNames);
   const agent = turn.agentMessages
     .map((m) => `<div class="bubble agent">${escapeHtml(m)}</div>`)
     .join('');
+  const forkButton =
+    previousTurnId === undefined
+      ? ''
+      : `<button type="button" data-turn="${escapeHtml(previousTurnId)}">ここから分岐</button>`;
 
   return `<article class="turn">
   <header>
     <span class="meta">#${index + 1}${time === '' ? '' : ` ・ ${time}`}${tools === '' ? '' : ` ・ ${escapeHtml(tools)}`}</span>
-    <button type="button" data-turn="${escapeHtml(turn.turnId)}">ここから分岐</button>
+    ${forkButton}
   </header>
   <div class="bubble user">${escapeHtml(turn.userMessage)}</div>
   ${agent}
@@ -196,8 +208,8 @@ function render(webview: vscode.Webview, title: string, turns: ConversationTurn[
 </head>
 <body>
   <h1>${escapeHtml(title)}</h1>
-  <p class="lead">分岐したい指示の「ここから分岐」を押すと、その指示までを引き継いだ新しいセッションが別タブで開きます。元のセッションは変更されません。</p>
-  ${turns.map(renderTurn).join('\n')}
+  <p class="lead">「ここから分岐」を押すと、<strong>その指示の手前まで</strong>を引き継いだ新しいセッションが別タブで開きます。押した指示からやり直せます。元のセッションは変更されません。</p>
+  ${turns.map((turn, i) => renderTurn(turn, i, turns[i - 1]?.turnId)).join('\n')}
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   document.body.addEventListener('click', (event) => {
