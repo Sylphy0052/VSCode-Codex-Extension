@@ -6,7 +6,7 @@ import { ChatSession } from '../appserver/chatSession';
 import { AppServerConnection, type ServerRequest } from '../appserver/connection';
 import { summarize } from '../codex/conversation';
 import { readForkedThreadId } from '../codex/jsonRpc';
-import { currentWorkspaceFolder, readConfig } from '../config';
+import { currentWorkspaceFolder, readConfig, workspaceFolderPaths } from '../config';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
@@ -385,7 +385,7 @@ export class ChatViewManager implements vscode.Disposable {
     if (entry.disposed) {
       return;
     }
-    this.commands ??= await this.catalog.forCodex(this.codexHome);
+    this.commands ??= await this.catalog.forCodex(this.codexHome, workspaceFolderPaths());
     void entry.panel.webview.postMessage({ type: 'commands', commands: this.commands });
   }
 

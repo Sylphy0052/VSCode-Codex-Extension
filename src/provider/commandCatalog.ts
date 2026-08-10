@@ -38,10 +38,13 @@ const dirname = (p: string): string => p.slice(0, Math.max(0, p.lastIndexOf('/')
 export class CommandCatalog {
   constructor(private readonly fs: FileSystemPort) {}
 
-  /** Codex: `~/.codex/prompts/*.md` */
-  async forCodex(codexHome: string): Promise<SlashCommand[]> {
-    const custom = await this.collect(`${codexHome}/prompts`);
-    return dedupe([...CODEX_BUILTINS, ...custom]);
+  /**
+   * Codex: `~/.codex` の prompts と skills。
+   * ワークスペース側の `.codex` にも同じ形で置けるため合わせて読む。
+   */
+  async forCodex(codexHome: string, workspaceFolders: string[]): Promise<SlashCommand[]> {
+    const roots = [codexHome, ...workspaceFolders.map((folder) => `${folder}/.codex`)];
+    return dedupe([...CODEX_BUILTINS, ...(await this.collectFrom(roots))]);
   }
 
   /**
@@ -50,16 +53,27 @@ export class CommandCatalog {
    */
   async forClaude(claudeHome: string, workspaceFolders: string[]): Promise<SlashCommand[]> {
     const roots = [claudeHome, ...workspaceFolders.map((folder) => `${folder}/.claude`)];
-    const found: SlashCommand[] = [];
-    for (const root of roots) {
-      found.push(...(await this.collect(`${root}/skills`)));
-      found.push(...(await this.collect(`${root}/commands`)));
-    }
-    return dedupe([...CLAUDE_BUILTINS, ...found]);
+    return dedupe([...CLAUDE_BUILTINS, ...(await this.collectFrom(roots))]);
   }
 
-  private async collect(dir: string): Promise<SlashCommand[]> {
-    const files = await this.fs.listMarkdown(dir);
+  /** どちらのCLIも prompts / skills / commands の3か所に置ける。 */
+  private async collectFrom(roots: string[]): Promise<SlashCommand[]> {
+    const found: SlashCommand[] = [];
+    for (const root of roots) {
+      // スキルは <name>/SKILL.md、プロンプトとコマンドは直下の .md だけを見る。
+      // 隣に置かれた資料まで拾うと、候補が使えないもので埋まる
+      found.push(...(await this.collect(`${root}/skills`, isSkillEntry)));
+      found.push(...(await this.collect(`${root}/prompts`, directChild(`${root}/prompts`))));
+      found.push(...(await this.collect(`${root}/commands`, directChild(`${root}/commands`))));
+    }
+    return found;
+  }
+
+  private async collect(
+    dir: string,
+    accepts: (filePath: string) => boolean,
+  ): Promise<SlashCommand[]> {
+    const files = (await this.fs.listMarkdown(dir)).filter(accepts);
     const commands: SlashCommand[] = [];
 
     for (const filePath of files) {
@@ -74,6 +88,16 @@ export class CommandCatalog {
     }
     return commands;
   }
+}
+
+/** スキルの本体か。参照用に置かれた資料を弾く。 */
+function isSkillEntry(filePath: string): boolean {
+  return basename(filePath) === 'SKILL.md';
+}
+
+/** そのディレクトリの直下にあるか。入れ子の資料を弾く。 */
+function directChild(dir: string): (filePath: string) => boolean {
+  return (filePath) => dirname(filePath) === dir;
 }
 
 /**

@@ -8,7 +8,14 @@ const files: Record<string, string> = {
   '/home/.claude/skills/daily-report/SKILL.md':
     '---\nname: daily-report\ndescription: 日報を書く\n---',
   '/home/.claude/commands/deploy.md': '---\ndescription: デプロイする\n---',
+  '/home/.codex/skills/gitlab-commit/SKILL.md':
+    '---\nname: gitlab-commit\ndescription: コミットする\n---',
   '/work/.claude/skills/local-skill/SKILL.md': '---\ndescription: この作業用\n---',
+  '/work/.codex/prompts/local-prompt.md': '---\ndescription: この作業用のプロンプト\n---',
+  // スキルの参照ファイル。候補に出してはいけない
+  '/home/.codex/skills/slides-maker/SKILL.md': '---\ndescription: スライドを作る\n---',
+  '/home/.codex/skills/slides-maker/design-guidelines.md': '# 配色の指針',
+  '/home/.claude/commands/nested/deep.md': '---\ndescription: 深すぎる\n---',
 };
 
 const fs = {
@@ -22,8 +29,18 @@ const fs = {
 
 describe('CommandCatalog', () => {
   it('Codexのカスタムプロンプトを集める', async () => {
-    const commands = await new CommandCatalog(fs).forCodex('/home/.codex');
+    const commands = await new CommandCatalog(fs).forCodex('/home/.codex', []);
     expect(commands.map((c) => c.name)).toEqual(expect.arrayContaining(['doc', 'commit']));
+  });
+
+  it('Codexのスキルも集める', async () => {
+    const commands = await new CommandCatalog(fs).forCodex('/home/.codex', []);
+    expect(commands.map((c) => c.name)).toContain('gitlab-commit');
+  });
+
+  it('Codexもワークスペース側を混ぜる', async () => {
+    const commands = await new CommandCatalog(fs).forCodex('/home/.codex', ['/work']);
+    expect(commands.map((c) => c.name)).toContain('local-prompt');
   });
 
   it('Claude Codeのスキルとコマンドを集める', async () => {
@@ -41,8 +58,20 @@ describe('CommandCatalog', () => {
     expect(commands.find((c) => c.name === 'local-skill')?.description).toBe('この作業用');
   });
 
+  it('スキルの参照ファイルは候補にしない', async () => {
+    // SKILL.md の隣に置かれた資料まで拾うと、候補が使えないもので埋まる
+    const commands = await new CommandCatalog(fs).forCodex('/home/.codex', []);
+    expect(commands.map((c) => c.name)).toContain('slides-maker');
+    expect(commands.map((c) => c.name)).not.toContain('design-guidelines');
+  });
+
+  it('commands配下の入れ子は拾わない', async () => {
+    const commands = await new CommandCatalog(fs).forClaude('/home/.claude', []);
+    expect(commands.map((c) => c.name)).not.toContain('deep');
+  });
+
   it('組込コマンドを先に並べる', async () => {
-    const commands = await new CommandCatalog(fs).forCodex('/home/.codex');
+    const commands = await new CommandCatalog(fs).forCodex('/home/.codex', []);
     const builtinAt = commands.findIndex((c) => c.name === 'review');
     const customAt = commands.findIndex((c) => c.name === 'doc');
     expect(builtinAt).toBeGreaterThanOrEqual(0);
@@ -63,7 +92,7 @@ describe('CommandCatalog', () => {
         return [];
       },
     } as unknown as FileSystemPort;
-    const commands = await new CommandCatalog(empty).forCodex('/nowhere');
+    const commands = await new CommandCatalog(empty).forCodex('/nowhere', []);
     expect(commands.every((c) => c.description !== undefined)).toBe(true);
   });
 });
