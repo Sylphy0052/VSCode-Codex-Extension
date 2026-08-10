@@ -1,7 +1,7 @@
 {
   "name": "vscode-codex-extension",
-  "displayName": "Codex Sessions",
-  "description": "Codexのセッションをエディタタブとして開き、履歴から復元する",
+  "displayName": "Agent Sessions",
+  "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
   "version": "0.0.1",
   "license": "MIT",
   "publisher": "Sylphy0052",
@@ -29,8 +29,8 @@
       "activitybar": [
         {
           "id": "codexSessions",
-          "title": "Codex",
-          "icon": "resources/codex.svg"
+          "title": "Agents",
+          "icon": "resources/agents.svg"
         }
       ]
     },
@@ -50,7 +50,7 @@
     "viewsWelcome": [
       {
         "view": "codex.sessions",
-        "contents": "このワークスペースのセッションはまだありません。\n[新規Codexセッション](command:codex.newSession)\n[新規Claude Codeセッション](command:claude.newSession)\n全ワークスペースのセッションを見るには表示範囲を切り替えてください。"
+        "contents": "このワークスペースのセッションはまだありません。\n[新しい会話（Codex）](command:codex.newChat)\n[新しい会話（Claude Code）](command:claude.newChat)\nCLI本体のTUIを使う場合は、ビューのタイトルバーの `...` から開いてください。\n全ワークスペースのセッションを見るには表示範囲を切り替えてください。"
       }
     ],
     "menus": {
@@ -63,32 +63,32 @@
         {
           "command": "claude.newChat",
           "when": "view == codex.sessions",
-          "group": "navigation@1"
-        },
-        {
-          "command": "codex.newSession",
-          "when": "view == codex.sessions",
           "group": "navigation@2"
-        },
-        {
-          "command": "claude.newSession",
-          "when": "view == codex.sessions",
-          "group": "navigation@3"
         },
         {
           "command": "codex.showAllSessions",
           "when": "view == codex.sessions && codex.historyScope != all",
-          "group": "navigation@2"
+          "group": "navigation@3"
         },
         {
           "command": "codex.showWorkspaceSessions",
           "when": "view == codex.sessions && codex.historyScope == all",
-          "group": "navigation@2"
+          "group": "navigation@3"
         },
         {
           "command": "codex.refreshSessions",
           "when": "view == codex.sessions",
-          "group": "navigation@3"
+          "group": "navigation@4"
+        },
+        {
+          "command": "codex.newSession",
+          "when": "view == codex.sessions",
+          "group": "1_new@1"
+        },
+        {
+          "command": "claude.newSession",
+          "when": "view == codex.sessions",
+          "group": "1_new@2"
         }
       ],
       "editor/title": [
@@ -103,14 +103,19 @@
           "group": "navigation@100"
         },
         {
+          "command": "claude.newChat",
+          "when": "resourceScheme == file",
+          "group": "1_new@1"
+        },
+        {
           "command": "codex.newSession",
           "when": "resourceScheme == file",
-          "group": "1_codex@1"
+          "group": "1_new@2"
         },
         {
           "command": "claude.newSession",
           "when": "resourceScheme == file",
-          "group": "1_codex@2"
+          "group": "1_new@3"
         }
       ],
       "view/item/context": [
@@ -203,118 +208,118 @@
     "commands": [
       {
         "command": "codex.newSession",
-        "title": "New Session",
-        "category": "Codex",
-        "icon": "$(add)"
+        "title": "新しいTUIセッション（Codex）",
+        "category": "Agent",
+        "icon": "$(terminal)"
       },
       {
         "command": "claude.newSession",
-        "title": "New Claude Code Session",
-        "category": "Codex",
-        "icon": "$(sparkle)"
+        "title": "新しいTUIセッション（Claude Code）",
+        "category": "Agent",
+        "icon": "$(terminal)"
       },
       {
         "command": "codex.openSession",
-        "title": "Open Session",
-        "category": "Codex"
+        "title": "セッションを開く",
+        "category": "Agent"
       },
       {
         "command": "codex.resumeSession",
-        "title": "Resume Session…",
-        "category": "Codex"
+        "title": "セッションを再開…",
+        "category": "Agent"
       },
       {
         "command": "codex.resumeLast",
-        "title": "Resume Last Session",
-        "category": "Codex"
+        "title": "直前のセッションを再開",
+        "category": "Agent"
       },
       {
         "command": "codex.refreshSessions",
-        "title": "Refresh",
-        "category": "Codex",
+        "title": "更新",
+        "category": "Agent",
         "icon": "$(refresh)"
       },
       {
         "command": "codex.showAllSessions",
         "title": "全ワークスペースを表示",
-        "category": "Codex",
+        "category": "Agent",
         "icon": "$(globe)"
       },
       {
         "command": "codex.showWorkspaceSessions",
         "title": "このワークスペースのみ表示",
-        "category": "Codex",
+        "category": "Agent",
         "icon": "$(filter-filled)"
       },
       {
         "command": "codex.newChat",
-        "title": "New Chat (Codex画面)",
-        "category": "Codex",
-        "icon": "$(comment-discussion)"
+        "title": "新しい会話（Codex）",
+        "category": "Agent",
+        "icon": "$(add)"
       },
       {
         "command": "codex.renameChat",
         "title": "セッション名を変更",
-        "category": "Codex",
+        "category": "Agent",
         "icon": "$(edit)"
       },
       {
         "command": "codex.openChat",
-        "title": "Codex画面で開く",
-        "category": "Codex",
+        "title": "チャット画面で開く（Codex）",
+        "category": "Agent",
         "icon": "$(comment-discussion)"
       },
       {
         "command": "codex.openConversation",
         "title": "会話を開いて分岐する",
-        "category": "Codex",
+        "category": "Agent",
         "icon": "$(git-branch)"
       },
       {
         "command": "codex.forkSession",
         "title": "このセッションをforkする",
-        "category": "Codex"
+        "category": "Agent"
       },
       {
         "command": "codex.archiveSession",
         "title": "アーカイブする",
-        "category": "Codex"
+        "category": "Agent"
       },
       {
         "command": "codex.unarchiveSession",
         "title": "アーカイブを解除する",
-        "category": "Codex"
+        "category": "Agent"
       },
       {
         "command": "codex.deleteSession",
         "title": "削除する",
-        "category": "Codex"
+        "category": "Agent"
       },
       {
         "command": "codex.showUsage",
         "title": "使用量を表示",
-        "category": "Codex"
+        "category": "Agent"
       },
       {
         "command": "codex.showLog",
-        "title": "Show Log",
-        "category": "Codex"
+        "title": "ログを表示",
+        "category": "Agent"
       },
       {
         "command": "claude.newChat",
-        "title": "New Chat (Claude Code画面)",
-        "category": "Codex",
+        "title": "新しい会話（Claude Code）",
+        "category": "Agent",
         "icon": "$(sparkle)"
       },
       {
         "command": "claude.openChat",
-        "title": "Claude Code画面で開く",
-        "category": "Codex",
+        "title": "チャット画面で開く（Claude Code）",
+        "category": "Agent",
         "icon": "$(sparkle)"
       }
     ],
     "configuration": {
-      "title": "Codex Sessions",
+      "title": "Agent Sessions",
       "properties": {
         "codex.executablePath": {
           "type": "string",
@@ -459,9 +464,9 @@
         },
         "claude.model": {
           "type": "string",
-          "default": "",
+          "default": "opus",
           "scope": "machine-overridable",
-          "markdownDescription": "使用するモデル。エイリアス (`opus` / `sonnet` / `fable`) か正式名を指定する。空なら `--model` を渡さない。"
+          "markdownDescription": "使用するモデル。エイリアス (`opus` / `sonnet` / `fable` / `haiku`) か正式名を指定する。空なら `--model` を渡さず、Claude Code 側の設定 (`~/.claude/settings.json`) に委譲する。"
         },
         "claude.effort": {
           "type": "string",
@@ -473,9 +478,9 @@
             "xhigh",
             "max"
           ],
-          "default": "",
+          "default": "medium",
           "scope": "machine-overridable",
-          "markdownDescription": "推論の深さ (`--effort`)。空なら渡さない。"
+          "markdownDescription": "推論の深さ (`--effort`)。空なら渡さず、Claude Code 側の設定に委譲する。"
         }
       }
     }
