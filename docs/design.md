@@ -24,12 +24,18 @@ CLIコーディングエージェント（Codex / Claude Code）のセッショ�
 | thread_nameへのタブ名追従                                     |                                               |
 | Codex未インストール/未ログイン時のガイド                      | サインイン/サインアウトのUI                   |
 | 操作パネル（モデル/effort/承認方法/sandboxの切替）            | サインイン/サインアウトのUI                   |
-| Codex画面（app-server連携のチャットUI・承認・ターン指定fork） | TUIのスラッシュコマンド相当の再実装           |
+| Codex画面（app-server連携のチャットUI・承認・ターン指定fork） | CLIのTUIをそのまま埋め込む方式                |
 | 使用量の常時表示（ステータスバー＋操作パネル）                | 使用量の履歴やグラフ                          |
 
 ## 2. 全体アーキテクチャ
 
-描画はCodex TUIそのものに委ね、拡張機能は**セッションのライフサイクル管理**だけを担う。
+> **この節はTUIタブ方式（廃止済み）の設計です。** 当初はCLIのTUIをそのままエディタタブに出し、
+> 拡張機能はセッションのライフサイクル管理だけを担う構成だった。スラッシュコマンドが
+> チャット画面から使えるようになり（§9.8）、退避先としての役目も終えたため廃止した。
+> 現行はすべてチャット画面（Codexは §9.5、Claude Codeは §14.4）で、`src/terminal` と
+> タブ状態の永続化も削除している。以下は当時の判断の記録として残す。
+
+描画はCodex TUIそのものに委ね、拡張機能は**セッションのライフサイクル管理**だけを担っていた。
 
 ```
 ┌─ VSCode Extension Host (workspace側 / WSL内) ────────────────┐
@@ -273,29 +279,27 @@ VSCodeにはターミナル名を直接書き換えるAPIがなく、`workbench.
 
 コマンドIDの接頭辞は `codex.` / `claude.` のままにしてある。表示名を `Agent` に寄せた後も、既存の設定キー・キーバインド・永続化データと互換を保つため。
 
-| コマンドID                                              | タイトル                           | 導線                                          |
-| ------------------------------------------------------- | ---------------------------------- | --------------------------------------------- |
-| `codex.newChat`                                         | 新しい会話（Codex）                | ビュータイトルの `+`、パレット                |
-| `claude.newChat`                                        | 新しい会話（Claude Code）          | ビュータイトルのスパークル、パレット          |
-| `codex.newSession`                                      | 新しいTUIセッション（Codex）       | ビュータイトルの `...`、パレット              |
-| `claude.newSession`                                     | 新しいTUIセッション（Claude Code） | ビュータイトルの `...`、パレット              |
-| `codex.openSession`                                     | （内部）ツリークリック             | TreeItem.command                              |
-| `codex.openChat`                                        | チャット画面で開く（Codex）        | ツリー項目のホバー                            |
-| `claude.openChat`                                       | チャット画面で開く（Claude Code）  | ツリー項目のホバー                            |
-| `codex.openConversation`                                | 会話を開いて分岐する               | ツリー項目のホバー（Codexのみ）               |
-| `codex.renameChat`                                      | セッション名を変更                 | Codex画面がアクティブなときのエディタタイトル |
-| `codex.resumeSession`                                   | セッションを再開…                  | パレット（QuickPick）                         |
-| `codex.resumeLast`                                      | 直前のセッションを再開             | パレット                                      |
-| `codex.forkSession`                                     | このセッションをforkする           | ツリー右クリック                              |
-| `codex.archiveSession`                                  | アーカイブする                     | ツリー右クリック（Codexのみ）                 |
-| `codex.unarchiveSession`                                | アーカイブを解除する               | ツリー右クリック（アーカイブ表示時）          |
-| `codex.deleteSession`                                   | 削除する                           | ツリー右クリック（確認ダイアログ必須）        |
-| `codex.showAllSessions` / `codex.showWorkspaceSessions` | 表示範囲の切替                     | ビュータイトル                                |
-| `codex.refreshSessions`                                 | 更新                               | ビュータイトル                                |
-| `codex.showUsage`                                       | 使用量を表示                       | ステータスバー                                |
-| `codex.showLog`                                         | ログを表示                         | パレット                                      |
+| コマンドID                                              | タイトル                          | 導線                                          |
+| ------------------------------------------------------- | --------------------------------- | --------------------------------------------- |
+| `codex.newChat`                                         | 新しい会話（Codex）               | ビュータイトルの `+`、パレット                |
+| `claude.newChat`                                        | 新しい会話（Claude Code）         | ビュータイトルのスパークル、パレット          |
+| `codex.openSession`                                     | （内部）ツリークリック            | TreeItem.command                              |
+| `codex.openChat`                                        | チャット画面で開く（Codex）       | ツリー項目のホバー                            |
+| `claude.openChat`                                       | チャット画面で開く（Claude Code） | ツリー項目のホバー                            |
+| `codex.openConversation`                                | 会話を開いて分岐する              | ツリー項目のホバー（Codexのみ）               |
+| `codex.renameChat`                                      | セッション名を変更                | Codex画面がアクティブなときのエディタタイトル |
+| `codex.resumeSession`                                   | セッションを再開…                 | パレット（QuickPick）                         |
+| `codex.resumeLast`                                      | 直前のセッションを再開            | パレット                                      |
+| `codex.forkSession`                                     | このセッションをforkする          | ツリー右クリック                              |
+| `codex.archiveSession`                                  | アーカイブする                    | ツリー右クリック（Codexのみ）                 |
+| `codex.unarchiveSession`                                | アーカイブを解除する              | ツリー右クリック（アーカイブ表示時）          |
+| `codex.deleteSession`                                   | 削除する                          | ツリー右クリック（確認ダイアログ必須）        |
+| `codex.showAllSessions` / `codex.showWorkspaceSessions` | 表示範囲の切替                    | ビュータイトル                                |
+| `codex.refreshSessions`                                 | 更新                              | ビュータイトル                                |
+| `codex.showUsage`                                       | 使用量を表示                      | ステータスバー                                |
+| `codex.showLog`                                         | ログを表示                        | パレット                                      |
 
-**新規セッションの既定はチャット画面**。TUIタブはスラッシュコマンドが要る場面の退避先なので、タイトルバーの `...` に置く。
+新規セッションはチャット画面だけになった。
 
 ### TreeView
 
@@ -323,7 +327,7 @@ Agents
 - 設定画面から変更された場合も `onDidChangeConfiguration` でパネルへ反映し、表示が二重管理にならないようにする。
 - CSPは `default-src 'none'` を基点にし、スクリプトはnonceで限定する。配色はVSCodeのCSS変数のみを使い、テーマに追従させる。
 
-**適用範囲の制約**: ここでの変更が効くのは**次に開くセッション**。描画をCodex TUIに委ねる構成上、実行中のセッションはタブ内のスラッシュコマンドで変更する。パネル上にもその旨を明示する。
+**適用範囲の制約**: ここでの変更が効くのは**次に開くセッション**。Codex画面は `turn/start` に毎回渡すため次の発言から効く（§9.5）。
 
 **プロバイダの切り替え**: パネル上部のタブで Codex / Claude Code を1クリックで切り替える。選んだ側は `setState` に持たせ、リロード後も保つ。
 
@@ -453,15 +457,7 @@ unit testでは以下を検証する。
 
 ## 9.5 Codex画面（app-server連携）
 
-TUIタブ方式に加えて、`codex app-server` と繋いで会話を自前で描画する画面を持つ。両者は併存し、用途で使い分ける。
-
-|                     | TUIタブ            | Codex画面                                                             |
-| ------------------- | ------------------ | --------------------------------------------------------------------- |
-| 描画                | Codex TUI          | 自前のWebview                                                         |
-| 設定の反映          | 次のセッションから | **次の発言から**（`turn/start` にモデル・effort・承認方針を毎回渡す） |
-| 会話途中からの分岐  | 会話ビューア経由   | **画面内のボタンで直接**                                              |
-| スラッシュコマンド  | 全て使える         | 使えない                                                              |
-| Codexの更新への追従 | 不要               | itemの種類が増えたら描画の追加が要る                                  |
+`codex app-server` と繋いで会話を自前で描画する。当初はTUIをそのままエディタタブに出す方式と併存させていたが、スラッシュコマンドがチャット画面から使えるようになり、退避先としての役目も終えたため**TUIタブ方式は廃止した**（下の履歴を参照）。
 
 ### イベントモデル
 
@@ -501,12 +497,11 @@ Codexが会話内容から名前を付けると `thread/name/updated` が届く�
 
 ## 10. 既知の制約
 
-- **app-serverはexperimental**: Codex画面が依存するプロトコルは `[experimental]` 表記であり、将来変更されうる。未知の通知とitem種別を素通しする設計で、変更時に機能が落ちても壊れないようにしている。TUIタブ方式が退避先として機能する。
-- **Codex画面はスラッシュコマンド非対応**: `/review` `/compact` `/plan` などが必要な場面はTUIタブを使う。
+- **app-serverはexperimental**: チャット画面が依存するプロトコルは `[experimental]` 表記であり、将来変更されうる。未知の通知とitem種別を素通しする設計で、変更時に機能が落ちても壊れないようにしている。
 - **マルチルートワークスペース**: Phase 1は「アクティブエディタが属するフォルダ、なければ先頭フォルダ」を1つ選ぶだけ。フォルダ別のセッション分離はPhase 2。
-- **復元は会話履歴ベース**: TUIのスクロールバックや画面状態は復元されない。
+- **復元は会話履歴ベース**: 中断したターンの応答は戻らない（§9.6）。
 - **プロセスは各タブ独立**: 同一ウィンドウ内での同一セッションの二重オープンは防ぐが、ウィンドウを跨いだ排他は行わない（V7）。
-- **Codex側の外部変更**: CLIやTUIから直接archive/deleteした場合、TreeViewはファイル監視で追従するが、開いているタブは残る。
+- **Codex側の外部変更**: CLIから直接archive/deleteした場合、TreeViewはファイル監視で追従するが、開いているタブは残る。
 
 ## 11. 技術スタック
 
@@ -560,7 +555,7 @@ src/provider/
 src/codex/provider.ts   既存のargvBuilder・cliLocator・SessionStoreを束ねたアダプタ
 src/claude/
   cliLocator.ts    claude実行ファイルと CLAUDE_CONFIG_DIR の解決
-  argvBuilder.ts   TUI用 / stream-json用の引数（純粋関数）
+  argvBuilder.ts   stream-json用の引数（純粋関数）
   transcript.ts    projects/**/<id>.jsonl のパースとChatItemへの変換
   sessionStore.ts  一覧構築（mtime降順で上位N件だけ先頭を読む）
   streamJson.ts    stream-jsonイベント → ChatState（純粋関数）
@@ -705,12 +700,10 @@ Claude Codeは消費率（`usedPercent`）を返さない。実測した中身�
 
 **1セッション1行**。発言のたびには書かない。
 
-| 入口                    | 契機                                                      | 本文           |
-| ----------------------- | --------------------------------------------------------- | -------------- |
-| Codex TUIタブ           | `session_index.jsonl` の更新でCodexが要約名を確定したとき | 要約名         |
-| Codexチャット画面       | 発言時                                                    | その発言       |
-| Claude Code TUIタブ     | transcriptの更新を検知したとき                            | 最初の人の発言 |
-| Claude Codeチャット画面 | 発言時                                                    | その発言       |
+| 入口                    | 契機   | 本文     |
+| ----------------------- | ------ | -------- |
+| Codexチャット画面       | 発言時 | その発言 |
+| Claude Codeチャット画面 | 発言時 | その発言 |
 
 二重記録は `globalState` に持つ記録済みidの集合で抑止する（30日で掃除）。書き込みに失敗したものは既記録にせず、次の契機で書き直す。
 
@@ -719,7 +712,6 @@ Claude Codeは消費率（`usedPercent`）を返さない。実測した中身�
 §8の「会話本文を読まない・保存しない」に対する**意図的な例外**であり、範囲を次に限定する。
 
 - セッションごとに1行だけ、200文字までの1行要約
-- Codex TUIはCodexが付けた要約名（`session_index.jsonl` 由来）を使い、ロールアウト本文は読まない
 - `agent.activityLog.enabled` を `false` にすれば一切書かない
 
 ### 15.4 収集側の重複排除

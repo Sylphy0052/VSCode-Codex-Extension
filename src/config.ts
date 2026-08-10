@@ -7,8 +7,6 @@ export interface ExtensionConfig {
   executablePath: string;
   codexHome: string;
   codex: CodexConfig;
-  restoreEnabled: boolean;
-  restoreMaxTabs: number;
   historyScope: HistoryScope;
   historyMaxEntries: number;
 }
@@ -51,8 +49,6 @@ export function readConfig(): ExtensionConfig {
         ? additional.filter((a): a is string => typeof a === 'string')
         : [],
     },
-    restoreEnabled: c.get<boolean>('restore.enabled') ?? true,
-    restoreMaxTabs: num(c, 'restore.maxTabs', 8),
     historyScope: c.get<string>('history.scope') === 'all' ? 'all' : 'workspace',
     historyMaxEntries: num(c, 'history.maxEntries', 200),
   };

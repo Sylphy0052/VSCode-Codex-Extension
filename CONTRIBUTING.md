@@ -45,7 +45,6 @@ src/
   claude/     Claude Code CLIとの境界（引数組み立て・transcript・stream-json・承認）
   appserver/  app-serverとの接続・会話状態・承認（ChatStateは両CLI共通）
   session/    セッション一覧・監視・破壊操作
-  terminal/   TUIタブの端末管理とセッションIDの紐付け
   activity/   日報バッファへの作業記録
   state/      タブ構成の永続化
   view/       TreeView・設定パネル・チャット画面・会話ビューア

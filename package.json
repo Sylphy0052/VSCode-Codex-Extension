@@ -50,7 +50,7 @@
     "viewsWelcome": [
       {
         "view": "codex.sessions",
-        "contents": "このワークスペースのセッションはまだありません。\n[新しい会話（Codex）](command:codex.newChat)\n[新しい会話（Claude Code）](command:claude.newChat)\nCLI本体のTUIを使う場合は、ビューのタイトルバーの `...` から開いてください。\n全ワークスペースのセッションを見るには表示範囲を切り替えてください。"
+        "contents": "このワークスペースのセッションはまだありません。\n[新しい会話（Codex）](command:codex.newChat)\n[新しい会話（Claude Code）](command:claude.newChat)\n全ワークスペースのセッションを見るには表示範囲を切り替えてください。"
       }
     ],
     "menus": {
@@ -79,16 +79,6 @@
           "command": "codex.refreshSessions",
           "when": "view == codex.sessions",
           "group": "navigation@4"
-        },
-        {
-          "command": "codex.newSession",
-          "when": "view == codex.sessions",
-          "group": "1_new@1"
-        },
-        {
-          "command": "claude.newSession",
-          "when": "view == codex.sessions",
-          "group": "1_new@2"
         }
       ],
       "editor/title": [
@@ -106,16 +96,6 @@
           "command": "claude.newChat",
           "when": "resourceScheme == file",
           "group": "1_new@1"
-        },
-        {
-          "command": "codex.newSession",
-          "when": "resourceScheme == file",
-          "group": "1_new@2"
-        },
-        {
-          "command": "claude.newSession",
-          "when": "resourceScheme == file",
-          "group": "1_new@3"
         }
       ],
       "view/item/context": [
@@ -206,18 +186,6 @@
       ]
     },
     "commands": [
-      {
-        "command": "codex.newSession",
-        "title": "新しいTUIセッション（Codex）",
-        "category": "Agent",
-        "icon": "$(terminal)"
-      },
-      {
-        "command": "claude.newSession",
-        "title": "新しいTUIセッション（Claude Code）",
-        "category": "Agent",
-        "icon": "$(terminal)"
-      },
       {
         "command": "codex.openSession",
         "title": "セッションを開く",
@@ -383,19 +351,6 @@
           "default": "",
           "scope": "machine-overridable",
           "markdownDescription": "`-p` に渡すCodexのプロファイル名。"
-        },
-        "codex.restore.enabled": {
-          "type": "boolean",
-          "default": true,
-          "scope": "window",
-          "markdownDescription": "VSCode再起動時に、開いていたセッションのタブを復元する。"
-        },
-        "codex.restore.maxTabs": {
-          "type": "number",
-          "default": 8,
-          "minimum": 0,
-          "scope": "window",
-          "markdownDescription": "復元するタブ数の上限。"
         },
         "codex.history.scope": {
           "type": "string",

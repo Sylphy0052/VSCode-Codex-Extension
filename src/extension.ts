@@ -9,18 +9,15 @@ import {
 import type { RecordRequest as ActivityRequest } from './activity/activityLogger';
 import { nodeActivityAppender } from './activity/nodeAppender';
 import { claudePaths, resolveClaudeHome } from './claude/cliLocator';
-import { isUnsafeClaudeCombination } from './claude/argvBuilder';
 import { ClaudeProvider } from './claude/provider';
 import { ClaudeSessionStore } from './claude/sessionStore';
 import { ClaudeTranscriptWatcher } from './claude/transcriptWatcher';
 import { AppServerClient } from './codex/appServerClient';
-import { isUnsafeCombination } from './codex/argvBuilder';
 import { codexPaths, nodeLocatorDeps, resolveCodexHome } from './codex/cliLocator';
 import { CodexProvider } from './codex/provider';
-import type { LaunchTarget, SessionMeta, SessionSummary } from './codex/types';
+import type { SessionMeta, SessionSummary } from './codex/types';
 import type { UsageSnapshot } from './codex/usage';
 import {
-  currentWorkspaceFolder,
   readActivityLogConfig,
   readClaudeConfig,
   readConfig,
@@ -35,12 +32,6 @@ import { SessionStore } from './session/sessionStore';
 import { SessionActions, nodeCommandRunner, type SessionAction } from './session/sessionActions';
 import { SessionWatcher } from './session/sessionWatcher';
 import { UsageReader } from './session/usageReader';
-import { TabStateStore } from './state/tabStateStore';
-import { sortForRestore } from './state/tabState';
-import { TerminalRenamer } from './terminal/terminalRenamer';
-import { SessionBinder } from './terminal/sessionBinder';
-import { createLaunchTag } from './terminal/sessionBinder';
-import { TerminalSessionManager } from './terminal/terminalSessionManager';
 import { ChatViewManager } from './view/chatView';
 import { ClaudeChatViewManager } from './view/claudeChatView';
 import { ControlPanelViewProvider } from './view/controlPanelView';
@@ -52,9 +43,6 @@ import { UsageStatusBar } from './view/usageStatusBar';
 
 const META_CACHE_KEY = 'codex.metaCache.v1';
 const ACTIVITY_LOGGED_KEY = 'agent.activityLogged.v1';
-/** 作業記録のためにtranscriptを読む件数。開いているタブの分が入れば足りる。 */
-const CLAUDE_ACTIVITY_SCAN_LIMIT = 50;
-
 export function activate(context: vscode.ExtensionContext): void {
   const channel = vscode.window.createOutputChannel('Agent Sessions');
   const log = createLogger(channel);
@@ -68,7 +56,6 @@ export function activate(context: vscode.ExtensionContext): void {
     context.globalState.get<Record<string, SessionMeta>>(META_CACHE_KEY) ?? {},
   );
   const store = new SessionStore(nodeFileSystem, paths, cache);
-  const binder = new SessionBinder();
 
   const claudeHome = resolveClaudeHome(readClaudeConfig().configDir, nodeLocatorDeps);
   const claudeDirs = claudePaths(claudeHome);
@@ -103,18 +90,6 @@ export function activate(context: vscode.ExtensionContext): void {
     });
   };
 
-  const manager = new TerminalSessionManager(binder, nodeFileSystem, log, {
-    onBound: () => {
-      tree.refresh();
-      captureTabs();
-    },
-    onClosed: () => {
-      tree.refresh();
-      captureTabs();
-    },
-  });
-  context.subscriptions.push(manager);
-
   const settings = new SettingsProvider(
     nodeFileSystem,
     paths.modelsCache,
@@ -148,27 +123,14 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const appServer = new AppServerClient(codexPath, log);
   const conversations = new ConversationViewManager(nodeFileSystem, store, log, (session, turnId) =>
-    forkFromTurn(codex, appServer, manager, tree, log, session, turnId),
+    forkFromTurn(codex, appServer, chat, tree, log, session, turnId),
   );
   context.subscriptions.push(conversations);
 
-  const tabs = new TabStateStore(context.workspaceState);
-  const renamer = new TerminalRenamer(log);
-  context.subscriptions.push(renamer);
   const actions = new SessionActions(nodeCommandRunner, codexPath);
 
-  // タブの開閉・移動をまとめて拾い、並び順ごと保存する
-  const captureTabs = debounce(() => void tabs.capture(manager), 500);
-  context.subscriptions.push(
-    vscode.window.tabGroups.onDidChangeTabs(() => captureTabs()),
-    vscode.window.tabGroups.onDidChangeTabGroups(() => captureTabs()),
-  );
-
-  const tree = new SessionTreeProvider(
-    providers,
-    (id) => manager.findBySessionId(id) !== undefined,
-    log,
-  );
+  // 開いているかどうかはチャット画面が持つ
+  const tree = new SessionTreeProvider(providers, (id) => chat.isOpen(id), log);
   context.subscriptions.push(
     tree,
     vscode.window.createTreeView('codex.sessions', {
@@ -202,12 +164,11 @@ export function activate(context: vscode.ExtensionContext): void {
   void readUsage();
 
   const watcher = new SessionWatcher(paths, {
-    onRolloutCreated: (filePath) => void manager.handleRolloutCreated(filePath),
+    onRolloutCreated: () => tree.refresh(),
     onRolloutChanged: () => readUsageDebounced(),
     onIndexChanged: () => {
       tree.refreshDebounced();
       void persistCache(context, cache);
-      void syncTabNames(manager, renamer, store, recordActivity);
     },
   });
   context.subscriptions.push(watcher);
@@ -216,7 +177,6 @@ export function activate(context: vscode.ExtensionContext): void {
   const claudeWatcher = new ClaudeTranscriptWatcher(claudeDirs, {
     onTranscriptChanged: () => {
       tree.refreshDebounced();
-      void syncClaudeActivity(manager, claudeStore, recordActivity);
     },
   });
   context.subscriptions.push(claudeWatcher);
@@ -239,16 +199,14 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('codex.newSession', () => newSession(codex, manager, log)),
-    vscode.commands.registerCommand('claude.newSession', () => newSession(claude, manager, log)),
     vscode.commands.registerCommand('codex.openSession', (s: SessionSummary) =>
-      openSession(providers, manager, log, s),
+      openSession(chat, claudeChat, log, s),
     ),
     vscode.commands.registerCommand('codex.resumeSession', () =>
-      pickAndResume(providers, manager, tree, log),
+      pickAndResume(providers, chat, claudeChat, tree, log),
     ),
     vscode.commands.registerCommand('codex.resumeLast', () =>
-      resumeLast(providers, manager, tree, log),
+      resumeLast(providers, chat, claudeChat, tree, log),
     ),
     vscode.commands.registerCommand('codex.refreshSessions', () => tree.refresh()),
     vscode.commands.registerCommand('codex.showAllSessions', () => tree.setScope('all')),
@@ -271,8 +229,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('codex.openConversation', (s: SessionSummary) =>
       conversations.open(s),
     ),
-    vscode.commands.registerCommand('codex.forkSession', (s: SessionSummary) =>
-      forkSession(providers, manager, log, s),
+    vscode.commands.registerCommand(
+      'codex.forkSession',
+      (s: SessionSummary) => void forkSession(providers, chat, log, s),
     ),
     vscode.commands.registerCommand('codex.archiveSession', (s: SessionSummary) =>
       runAction(actions, tree, log, 'archive', s),
@@ -285,98 +244,12 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand('codex.showLog', () => log.show()),
   );
-
-  if (readConfig().restoreEnabled) {
-    void restoreTabs(providers, manager, tabs, log);
-  }
 }
 
-/**
- * 前回開いていたセッションのタブを開き直す。
- * プロセスは新規なので、復元されるのは画面ではなく会話履歴。
- */
-async function restoreTabs(
-  providers: ProviderRegistry,
-  manager: TerminalSessionManager,
-  store: TabStateStore,
-  log: Logger,
-): Promise<void> {
-  const saved = sortForRestore(store.load());
-  if (saved.length === 0) {
-    return;
-  }
-
-  const config = readConfig();
-  const target = saved.slice(0, Math.max(0, config.restoreMaxTabs));
-  if (target.length < saved.length) {
-    log.warn(
-      `復元上限 ${config.restoreMaxTabs} を超えたため ${saved.length - target.length} 件を開きません`,
-    );
-  }
-
-  let restored = 0;
-  for (const tab of target) {
-    const provider = providers.get(tab.provider);
-    // 実行ファイルが無いCLIのタブは黙って飛ばす（もう一方の復元は続ける）
-    if (provider === undefined || !provider.locate().ok) {
-      continue;
-    }
-    launchSession(provider, manager, log, {
-      target: { kind: 'resume', sessionId: tab.sessionId },
-      cwd: tab.cwd,
-      name: provider.tabTitle({ id: tab.sessionId, threadName: tab.threadName }),
-      // 列を保ちつつフォーカスを奪わない
-      location: { viewColumn: tab.viewColumn, preserveFocus: true },
-      ...(tab.threadName === undefined ? {} : { threadName: tab.threadName }),
-    });
-    restored++;
-  }
-  log.info(`${restored}件のタブを復元しました`);
-}
-
-/**
- * Codexが要約名を確定/更新したらタブ名へ反映する。
- *
- * 作業記録もここで行う。要約名はCodexが初回発言から付けたものなので、
- * 会話本文を読まずに日報向けの1行が得られる（設計書 §8）。
- */
-async function syncTabNames(
-  manager: TerminalSessionManager,
-  renamer: TerminalRenamer,
-  store: SessionStore,
-  recordActivity: (request: ActivityRequest) => void,
-): Promise<void> {
-  const tracked = manager.trackedSessions();
-  if (tracked.length === 0) {
-    return;
-  }
-
-  const names = await store.threadNames();
-  for (const session of tracked) {
-    const id = session.sessionId;
-    const name = id === undefined ? undefined : names.get(id);
-    if (id === undefined || name === undefined) {
-      continue;
-    }
-    if (session.cwd !== undefined) {
-      recordActivity({ sessionId: id, source: 'codex', cwd: session.cwd, text: name });
-    }
-    if (manager.setThreadName(id, name) !== undefined) {
-      await renamer.request(session.terminal, `Codex: ${name}`);
-    }
-  }
-}
-
-/**
- * 指定した指示までを引き継いだ新しいセッションを作って開く。
- *
- * CLIの `codex fork` はターンを指定できないため、この操作だけ app-server の
- * `thread/fork` を使う。元のセッションは変更されない。
- */
 async function forkFromTurn(
   codex: AgentProvider,
   appServer: AppServerClient,
-  manager: TerminalSessionManager,
+  chat: ChatViewManager,
   tree: SessionTreeProvider,
   log: Logger,
   session: SessionSummary,
@@ -394,31 +267,36 @@ async function forkFromTurn(
   }
 
   log.info(`分岐しました: ${session.id} → ${result.threadId}`);
-  launchSession(codex, manager, log, {
-    target: { kind: 'resume', sessionId: result.threadId },
-    cwd: session.cwd,
-    name: `${codex.tabTitle(session)} (分岐)`,
-  })?.show();
+  await chat.openThread(result.threadId, `${codex.tabTitle(session)} (分岐)`, session.cwd);
   tree.refresh();
 }
 
-function forkSession(
+/**
+ * セッション全体を分岐する。
+ *
+ * Codexはapp-server経由で新しいスレッドを作れる。Claude Codeはidを指定できないため、
+ * 分岐先の紐付けは確定しないまま開く。
+ */
+async function forkSession(
   providers: ProviderRegistry,
-  manager: TerminalSessionManager,
+  chat: ChatViewManager,
   log: Logger,
   session: SessionSummary,
-): void {
+): Promise<void> {
   const provider = providers.get(session.provider);
   if (provider === undefined || !provider.capabilities.fork) {
     void vscode.window.showInformationMessage('このセッションは分岐に対応していません');
     return;
   }
-  // forkは新しいセッションになるため、idは起動後に確定する
-  launchSession(provider, manager, log, {
-    target: { kind: 'fork', sessionId: session.id },
-    cwd: session.cwd,
-    name: `${provider.tabTitle(session)} (fork)`,
-  })?.show();
+  if (session.provider !== 'codex') {
+    void vscode.window.showInformationMessage(
+      'Claude Codeのセッション全体の分岐には対応していません',
+    );
+    return;
+  }
+  // ターンを指定しない分岐は、会話の末尾から分岐するのと同じ
+  log.info(`セッションを分岐します: ${session.id}`);
+  await chat.openThread(session.id, `${provider.tabTitle(session)} (fork)`, session.cwd);
 }
 
 const ACTION_LABELS: Record<SessionAction, string> = {
@@ -501,162 +379,26 @@ function resolveExecutable(provider: AgentProvider, log: Logger): string | undef
   return undefined;
 }
 
-interface LaunchOptions {
-  target: LaunchTarget;
-  cwd: string | undefined;
-  name: string;
-  location?: vscode.TerminalEditorLocationOptions;
-  threadName?: string;
-}
-
-/** プロバイダに引数を組み立てさせてタブを起動する。 */
-function launchSession(
-  provider: AgentProvider,
-  manager: TerminalSessionManager,
-  log: Logger,
-  options: LaunchOptions,
-): vscode.Terminal | undefined {
-  const executablePath = resolveExecutable(provider, log);
-  if (executablePath === undefined) {
-    return undefined;
-  }
-
-  const tag = createLaunchTag();
-  let spec;
-  try {
-    spec = provider.buildLaunch({
-      target: options.target,
-      cwd: options.cwd,
-      tag,
-      name: options.name,
-    });
-  } catch (e) {
-    const reason = e instanceof Error ? e.message : String(e);
-    log.error(`起動引数を組み立てられませんでした: ${reason}`);
-    void vscode.window.showErrorMessage(`${provider.label} を起動できません: ${reason}`);
-    return undefined;
-  }
-
-  const { terminal } = manager.launch({
-    provider: provider.id,
-    tag,
-    executablePath,
-    spec,
-    cwd: options.cwd,
-    name: options.name,
-    ...(options.location === undefined ? {} : { location: options.location }),
-    ...(options.threadName === undefined ? {} : { threadName: options.threadName }),
-  });
-  return terminal;
-}
-
-/**
- * Claude Codeのセッションを作業記録へ流す。
- *
- * Codexと違い要約名がCLI側に無いため、transcriptの初回発言をそのまま使う。
- */
-async function syncClaudeActivity(
-  manager: TerminalSessionManager,
-  store: ClaudeSessionStore,
-  recordActivity: (request: ActivityRequest) => void,
-): Promise<void> {
-  const tracked = manager
-    .trackedSessions()
-    .filter((t) => t.provider === 'claude' && t.cwd !== undefined);
-  if (tracked.length === 0) {
-    return;
-  }
-
-  const { sessions } = await store.list({
-    scope: 'all',
-    workspaceFolders: [],
-    maxEntries: CLAUDE_ACTIVITY_SCAN_LIMIT,
-  });
-  const byId = new Map(sessions.map((s) => [s.id, s]));
-
-  for (const session of tracked) {
-    const id = session.sessionId;
-    const found = id === undefined ? undefined : byId.get(id);
-    if (id === undefined || found?.threadName === undefined || session.cwd === undefined) {
-      continue;
-    }
-    recordActivity({
-      sessionId: id,
-      source: 'claude-code',
-      cwd: session.cwd,
-      text: found.threadName,
-    });
-  }
-}
-
-async function newSession(
-  provider: AgentProvider,
-  manager: TerminalSessionManager,
-  log: Logger,
-): Promise<void> {
-  if (isUnsafe(provider) && !(await confirmUnsafe(provider))) {
-    return;
-  }
-
-  // フォルダが無いと作業ディレクトリを決められず、CLIが不定の場所で起動してしまう。
-  // 履歴のワークスペースフィルタも成立しないため、ここで止める。
-  const folder = currentWorkspaceFolder();
-  if (folder === undefined) {
-    log.error('ワークスペースフォルダが開かれていないため起動できません');
-    void vscode.window.showErrorMessage(
-      `${provider.label} を開始するにはフォルダを開いてください（ファイル > フォルダーを開く）`,
-    );
-    return;
-  }
-
-  launchSession(provider, manager, log, {
-    target: { kind: 'new' },
-    cwd: folder.uri.fsPath,
-    name: `${provider.label}: ${folder.name}`,
-  })?.show();
-}
-
-/** 承認とサンドボックスを両方外す設定になっているか。 */
-function isUnsafe(provider: AgentProvider): boolean {
-  return provider.id === 'claude'
-    ? isUnsafeClaudeCombination(readClaudeConfig().claude)
-    : isUnsafeCombination(readConfig().codex);
-}
-
 /**
  * 履歴からセッションを開く。既に開いているタブがあれば新規に開かず、そのタブへ移る
  * （ファイルタブと同じ挙動）。
  */
+/** 履歴から開く。プロバイダに応じたチャット画面へ渡す。 */
 function openSession(
-  providers: ProviderRegistry,
-  manager: TerminalSessionManager,
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
   log: Logger,
   session: SessionSummary,
 ): void {
-  const existing = manager.findBySessionId(session.id);
-  if (existing !== undefined) {
-    existing.terminal.show();
+  if (session.provider === 'claude') {
+    void claudeChat.openThread(session.id, session.threadName ?? 'Claude Code', session.cwd);
     return;
   }
-
-  const provider = providers.get(session.provider);
-  if (provider === undefined) {
-    log.error(`未知のCLIのセッションです: ${session.provider}`);
+  if (session.provider === 'codex') {
+    void chat.openThread(session.id, session.threadName ?? 'Codex', session.cwd);
     return;
   }
-
-  if (session.cwd === undefined) {
-    log.warn(`cwdが判らないセッションのため作業ディレクトリを指定しません: ${session.id}`);
-  }
-
-  launchSession(provider, manager, log, {
-    target: { kind: 'resume', sessionId: session.id },
-    // 現在のワークスペースではなく、そのセッション自身のcwdを渡す。
-    // 全ワークスペース表示から別プロジェクトのセッションを開いても移動させないため。
-    cwd: session.cwd,
-    name: provider.tabTitle(session),
-    ...(session.threadName === undefined ? {} : { threadName: session.threadName }),
-  })?.show();
+  log.error(`未知のCLIのセッションです: ${session.provider}`);
 }
 
 async function listSessions(
@@ -681,7 +423,8 @@ interface SessionPick extends vscode.QuickPickItem {
 
 async function pickAndResume(
   providers: ProviderRegistry,
-  manager: TerminalSessionManager,
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
   tree: SessionTreeProvider,
   log: Logger,
 ): Promise<void> {
@@ -703,13 +446,14 @@ async function pickAndResume(
   });
 
   if (picked !== undefined) {
-    openSession(providers, manager, log, picked.session);
+    openSession(chat, claudeChat, log, picked.session);
   }
 }
 
 async function resumeLast(
   providers: ProviderRegistry,
-  manager: TerminalSessionManager,
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
   tree: SessionTreeProvider,
   log: Logger,
 ): Promise<void> {
@@ -719,16 +463,7 @@ async function resumeLast(
     void vscode.window.showInformationMessage('再開できるセッションがありません');
     return;
   }
-  openSession(providers, manager, log, latest);
-}
-
-async function confirmUnsafe(provider: AgentProvider): Promise<boolean> {
-  const choice = await vscode.window.showWarningMessage(
-    `承認が無効になっています。${provider.label} はコマンドを確認なしで実行します。`,
-    { modal: true },
-    '実行する',
-  );
-  return choice === '実行する';
+  openSession(chat, claudeChat, log, latest);
 }
 
 async function persistCache(

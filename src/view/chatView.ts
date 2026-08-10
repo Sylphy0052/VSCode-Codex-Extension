@@ -76,6 +76,11 @@ export class ChatViewManager implements vscode.Disposable {
     );
   }
 
+  /** そのスレッドの画面を開いているか。履歴の印に使う。 */
+  isOpen(threadId: string): boolean {
+    return this.panels.has(threadId);
+  }
+
   /** 新しい会話を開く。 */
   async openNew(): Promise<void> {
     const folder = currentWorkspaceFolder();
