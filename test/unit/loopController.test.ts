@@ -22,6 +22,7 @@ const agentMessage = (text: string): ChatItem => ({
   detail: '',
   status: undefined,
   turnId: undefined,
+  diffs: [],
 });
 
 const plan = (overrides: Partial<LoopPlan> = {}): LoopPlan => ({
@@ -187,7 +188,7 @@ describe('LoopController', () => {
     controller.observe(state({ busy: true }));
     controller.observe(
       state({
-        approvals: [{ requestId: 1, kind: 'command', title: 'rm', detail: '' }],
+        approvals: [{ requestId: 1, kind: 'command', title: 'rm', detail: '', itemId: undefined }],
       }),
     );
     expect(sent).toHaveLength(1);

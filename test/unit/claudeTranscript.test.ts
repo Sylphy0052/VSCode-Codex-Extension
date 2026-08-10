@@ -1,9 +1,43 @@
 import { describe, expect, it } from 'vitest';
 import {
+  describeTool,
   parseTranscriptHead,
   sessionIdFromTranscriptName,
   transcriptItems,
 } from '../../src/claude/transcript';
+
+describe('describeTool の差分', () => {
+  it('Edit は置換前後を差分にする', () => {
+    const tool = describeTool('Edit', {
+      file_path: '/work/a.ts',
+      old_string: 'const a = 1;\nconst b = 2;',
+      new_string: 'const a = 10;',
+    });
+    expect(tool.kind).toBe('fileChange');
+    expect(tool.diffs).toHaveLength(1);
+    expect(tool.diffs[0]).toMatchObject({ path: '/work/a.ts', kind: 'update' });
+    expect(tool.diffs[0]?.diff).toBe('-const a = 1;\n-const b = 2;\n+const a = 10;');
+  });
+
+  it('Write は全行を追加として扱う', () => {
+    const tool = describeTool('Write', { file_path: '/work/new.ts', content: 'line1\nline2' });
+    expect(tool.diffs[0]).toMatchObject({ path: '/work/new.ts', kind: 'add' });
+    expect(tool.diffs[0]?.diff).toBe('+line1\n+line2');
+  });
+
+  it('巨大な内容は切り詰めて省略を知らせる', () => {
+    const content = Array.from({ length: 500 }, (_, i) => `line${i}`).join('\n');
+    const diff = describeTool('Write', { file_path: '/work/big.ts', content }).diffs[0]?.diff ?? '';
+    expect(diff.split('\n').length).toBeLessThan(500);
+    expect(diff).toContain('省略');
+  });
+
+  it('差分を作れないツールでは空になる', () => {
+    expect(describeTool('Bash', { command: 'ls' }).diffs).toEqual([]);
+    expect(describeTool('Edit', { file_path: '/a.ts' }).diffs).toEqual([]);
+    expect(describeTool('Write', { file_path: '/a.ts', content: '' }).diffs).toEqual([]);
+  });
+});
 
 const ID = 'e71f0acf-2b5b-4ea5-b6c7-24ca8d7668f9';
 

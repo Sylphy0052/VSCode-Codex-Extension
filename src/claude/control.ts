@@ -87,6 +87,7 @@ export function describeCanUseTool(
       kind: 'command',
       title: 'コマンドの実行を許可しますか',
       detail: tool.detail,
+      itemId: undefined,
     };
   }
   if (tool.kind === 'fileChange') {
@@ -95,6 +96,7 @@ export function describeCanUseTool(
       kind: 'fileChange',
       title: 'ファイルの変更を許可しますか',
       detail: tool.detail,
+      itemId: undefined,
     };
   }
   return {
@@ -102,6 +104,7 @@ export function describeCanUseTool(
     kind: 'permissions',
     title: `${name} の実行を許可しますか`,
     detail: tool.detail === name ? summarizeInput(input) : tool.detail,
+    itemId: undefined,
   };
 }
 

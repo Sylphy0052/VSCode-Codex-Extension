@@ -49,6 +49,40 @@ describe('normalizeItem', () => {
     expect(item?.detail).toBe('/a.ts, /b.ts');
   });
 
+  it('fileChange はファイルごとの差分を保持する', () => {
+    const item = normalizeItem({
+      type: 'fileChange',
+      id: 'f1',
+      status: 'completed',
+      changes: [
+        { path: '/a.ts', kind: { type: 'update' }, diff: '@@ -1 +1 @@\n-old\n+new\n' },
+        { path: '/b.ts', kind: { type: 'add' }, diff: '@@ -0,0 +1 @@\n+added\n' },
+      ],
+    });
+    expect(item?.diffs).toEqual([
+      { path: '/a.ts', kind: 'update', movePath: undefined, diff: '@@ -1 +1 @@\n-old\n+new\n' },
+      { path: '/b.ts', kind: 'add', movePath: undefined, diff: '@@ -0,0 +1 @@\n+added\n' },
+    ]);
+  });
+
+  it('ファイルの移動先も保持する', () => {
+    const item = normalizeItem({
+      type: 'fileChange',
+      id: 'f1',
+      changes: [
+        { path: '/a.ts', kind: { type: 'update', move_path: '/moved.ts' }, diff: '@@ @@\n' },
+      ],
+    });
+    expect(item?.diffs[0]).toMatchObject({ kind: 'update', movePath: '/moved.ts' });
+  });
+
+  it('差分の無い項目は空の配列を持つ', () => {
+    expect(normalizeItem({ type: 'agentMessage', id: 'a1', text: 'OK' })?.diffs).toEqual([]);
+    expect(
+      normalizeItem({ type: 'fileChange', id: 'f1', changes: [{ path: '/a.ts' }] })?.diffs,
+    ).toEqual([]);
+  });
+
   it('未知の種類でも捨てずに保持する（プロトコル追加で壊れないため）', () => {
     const item = normalizeItem({ type: 'somethingNew', id: 'x1' });
     expect(item).toMatchObject({ id: 'x1', kind: 'somethingNew' });
@@ -225,7 +259,15 @@ describe('applyEvent', () => {
 
 describe('summarizeTurn', () => {
   const items: ChatState['items'] = [
-    { id: 'u1', kind: 'userMessage', text: '直して', detail: '', status: undefined, turnId: TURN },
+    {
+      id: 'u1',
+      kind: 'userMessage',
+      text: '直して',
+      detail: '',
+      status: undefined,
+      turnId: TURN,
+      diffs: [],
+    },
     {
       id: 'a1',
       kind: 'agentMessage',
@@ -233,6 +275,7 @@ describe('summarizeTurn', () => {
       detail: '',
       status: undefined,
       turnId: TURN,
+      diffs: [],
     },
     {
       id: 'f1',
@@ -241,6 +284,7 @@ describe('summarizeTurn', () => {
       detail: '/a.ts, /b.ts',
       status: undefined,
       turnId: TURN,
+      diffs: [],
     },
     {
       id: 'a2',
@@ -249,6 +293,7 @@ describe('summarizeTurn', () => {
       detail: '',
       status: undefined,
       turnId: 'other-turn',
+      diffs: [],
     },
   ];
 
@@ -268,6 +313,7 @@ describe('summarizeTurn', () => {
         detail: '',
         status: undefined,
         turnId: TURN,
+        diffs: [],
       },
       {
         id: 'a2',
@@ -276,6 +322,7 @@ describe('summarizeTurn', () => {
         detail: '',
         status: undefined,
         turnId: TURN,
+        diffs: [],
       },
     ];
     expect(summarizeTurn(multi, TURN).text).toBe('一つ目\n二つ目');
@@ -283,8 +330,24 @@ describe('summarizeTurn', () => {
 
   it('同じファイルへの複数回の編集は1件にまとめる', () => {
     const repeated: ChatState['items'] = [
-      { id: 'f1', kind: 'fileChange', text: '', detail: '/a.ts', status: undefined, turnId: TURN },
-      { id: 'f2', kind: 'fileChange', text: '', detail: '/a.ts', status: undefined, turnId: TURN },
+      {
+        id: 'f1',
+        kind: 'fileChange',
+        text: '',
+        detail: '/a.ts',
+        status: undefined,
+        turnId: TURN,
+        diffs: [],
+      },
+      {
+        id: 'f2',
+        kind: 'fileChange',
+        text: '',
+        detail: '/a.ts',
+        status: undefined,
+        turnId: TURN,
+        diffs: [],
+      },
     ];
     expect(summarizeTurn(repeated, TURN).editedFiles).toEqual(['/a.ts']);
   });
@@ -300,6 +363,7 @@ describe('承認の出し入れ', () => {
     kind: 'command' as const,
     title: 'コマンドの実行を許可しますか',
     detail: 'ls',
+    itemId: undefined,
   };
 
   it('追加して取り除ける', () => {
@@ -311,6 +375,39 @@ describe('承認の出し入れ', () => {
   it('該当しないidでは何も消えない', () => {
     const added = addApproval(initialChatState, approval);
     expect(removeApproval(added, 99).approvals).toHaveLength(1);
+  });
+
+  it('patchUpdated で差分だけを差し替える', () => {
+    const state = feed(initialChatState, [
+      [
+        'item/started',
+        {
+          item: { type: 'fileChange', id: 'f1', status: 'inProgress', changes: [] },
+          turnId: TURN,
+          diffs: [],
+        },
+      ],
+      [
+        'item/fileChange/patchUpdated',
+        {
+          itemId: 'f1',
+          turnId: TURN,
+          diffs: [],
+          changes: [{ path: '/a.ts', kind: { type: 'update' }, diff: '@@ -1 +1 @@\n+x\n' }],
+        },
+      ],
+    ]);
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]?.diffs).toHaveLength(1);
+    expect(state.items[0]?.detail).toBe('/a.ts');
+  });
+
+  it('知らない項目の patchUpdated は無視する', () => {
+    const state = applyEvent(initialChatState, 'item/fileChange/patchUpdated', {
+      itemId: 'none',
+      changes: [{ path: '/a.ts', kind: { type: 'add' }, diff: '@@ @@\n' }],
+    });
+    expect(state).toBe(initialChatState);
   });
 
   it('別の経路で解決された承認は取り下げる', () => {
