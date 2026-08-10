@@ -4,8 +4,9 @@ import { parseCommandFile, type SlashCommand } from './slashCommands';
 /**
  * CLIに組み込まれているコマンド。
  *
- * 一覧を返すAPIが無いため、ここに持つ。使えるかどうかはCLIが判断して返すので
- * （`isn't available in this environment` など）、こちらでは可否を決めない。
+ * 一覧を返すAPIが無く、`/help` も `--print` では使えないため、ここに持つ。
+ * 使えるかどうかはCLIが判断して返すので（`isn't available in this environment` など）、
+ * こちらでは可否を決めない。版が上がって増減しても候補が出なくなるだけで済む。
  */
 const CODEX_BUILTINS: SlashCommand[] = [
   { name: 'review', description: 'コードをレビューする', argumentHint: '' },
@@ -18,6 +19,7 @@ const CODEX_BUILTINS: SlashCommand[] = [
 ];
 
 const CLAUDE_BUILTINS: SlashCommand[] = [
+  { name: 'usage', description: '使用量と制限を見る', argumentHint: '' },
   { name: 'compact', description: '会話を要約して圧縮する', argumentHint: '' },
   { name: 'review', description: 'コードをレビューする', argumentHint: '' },
   { name: 'init', description: 'CLAUDE.md を作る', argumentHint: '' },
