@@ -12,6 +12,10 @@ export function chatScript(agentLabel: string): string {
   const el = (id) => document.getElementById(id);
   /** この会話で自分が送った発言。古い順。入力欄の履歴に使う。 */
   let sentTexts = [];
+  /** 入力欄でスラッシュを打ったときに出す候補。 */
+  let commands = [];
+  let matched = [];
+  let activeIndex = 0;
 
   const KIND_LABEL = {
     userMessage: 'あなた',
@@ -350,6 +354,86 @@ export function chatScript(agentLabel: string): string {
     return Math.round(hours / 24) + '日後';
   }
 
+  // スラッシュで始まる行を書いている間だけ候補を出す。行の途中では邪魔しない
+  function commandQuery(input) {
+    const upto = input.value.slice(0, input.selectionStart);
+    const line = upto.slice(upto.lastIndexOf('\\n') + 1);
+    const m = /^\\/([\\w-]*)$/.exec(line);
+    return m ? m[1] : undefined;
+  }
+
+  function commandsOpen() {
+    return !el('commands').hidden;
+  }
+
+  function renderCommands(query) {
+    const box = el('commands');
+    matched = filterCommands(commands, query);
+    if (matched.length === 0) {
+      box.hidden = true;
+      return;
+    }
+
+    if (activeIndex >= matched.length) activeIndex = 0;
+    box.hidden = false;
+    box.replaceChildren();
+    matched.forEach((command, index) => {
+      const row = document.createElement('div');
+      row.className = 'row' + (index === activeIndex ? ' active' : '');
+
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = '/' + command.name + (command.argumentHint ? ' ' + command.argumentHint : '');
+      row.appendChild(name);
+
+      const desc = document.createElement('span');
+      desc.className = 'desc';
+      desc.textContent = command.description || '';
+      row.appendChild(desc);
+
+      row.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        acceptCommand(index);
+      });
+      box.appendChild(row);
+    });
+    const active = box.querySelector('.row.active');
+    if (active) active.scrollIntoView({ block: 'nearest' });
+  }
+
+  function filterCommands(list, query) {
+    const needle = String(query).toLowerCase();
+    if (needle === '') return list.slice();
+    const prefix = [];
+    const partial = [];
+    for (const command of list) {
+      const name = command.name.toLowerCase();
+      if (name.startsWith(needle)) prefix.push(command);
+      else if (name.includes(needle)) partial.push(command);
+    }
+    return prefix.concat(partial);
+  }
+
+  function closeCommands() {
+    el('commands').hidden = true;
+    activeIndex = 0;
+  }
+
+  /** 候補を確定して入力欄へ入れる。送信まではしない（引数を書き足せるように） */
+  function acceptCommand(index) {
+    const command = matched[index];
+    if (!command) return;
+    const input = el('input');
+    const upto = input.value.slice(0, input.selectionStart);
+    const lineStart = upto.lastIndexOf('\\n') + 1;
+    const rest = input.value.slice(input.selectionStart);
+    const inserted = '/' + command.name + ' ';
+    input.value = input.value.slice(0, lineStart) + inserted + rest;
+    input.selectionStart = input.selectionEnd = lineStart + inserted.length;
+    closeCommands();
+    input.focus();
+  }
+
   function send() {
     const input = el('input');
     const text = input.value;
@@ -416,7 +500,43 @@ export function chatScript(agentLabel: string): string {
     vscode.postMessage({ type: 'interrupt' });
   });
 
+  el('input').addEventListener('input', (e) => {
+    const query = commandQuery(e.target);
+    if (query === undefined) {
+      closeCommands();
+      return;
+    }
+    renderCommands(query);
+  });
+
+  el('input').addEventListener('blur', closeCommands);
+
   el('input').addEventListener('keydown', (e) => {
+    if (commandsOpen()) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        activeIndex = (activeIndex + 1) % matched.length;
+        renderCommands(commandQuery(e.target) ?? '');
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        activeIndex = (activeIndex - 1 + matched.length) % matched.length;
+        renderCommands(commandQuery(e.target) ?? '');
+        return;
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.ctrlKey && !e.metaKey)) {
+        e.preventDefault();
+        acceptCommand(activeIndex);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeCommands();
+        return;
+      }
+    }
+
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       send();
@@ -434,7 +554,10 @@ export function chatScript(agentLabel: string): string {
   });
 
   window.addEventListener('message', (event) => {
-    if (event.data && event.data.type === 'state') apply(event.data.state);
+    const data = event.data;
+    if (!data) return;
+    if (data.type === 'state') apply(data.state);
+    if (data.type === 'commands') commands = data.commands || [];
   });
 
   vscode.postMessage({ type: 'ready' });

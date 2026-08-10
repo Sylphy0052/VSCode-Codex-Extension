@@ -17,6 +17,8 @@ export interface FileSystemPort {
   listRollouts(dir: string): Promise<string[]>;
   /** ディレクトリを再帰的に走査し、*.jsonl の絶対パスを返す。 */
   listJsonl(dir: string): Promise<string[]>;
+  /** ディレクトリを再帰的に走査し、*.md の絶対パスを返す。 */
+  listMarkdown(dir: string): Promise<string[]>;
   /** 先頭 maxLines 行だけを読む。全文をメモリに載せないための専用メソッド。 */
   readHead(filePath: string, maxLines: number): Promise<string[]>;
 }

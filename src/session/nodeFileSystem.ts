@@ -95,4 +95,8 @@ export const nodeFileSystem: FileSystemPort = {
   async listJsonl(dir: string): Promise<string[]> {
     return walkFiles(dir, (name) => name.endsWith('.jsonl'));
   },
+
+  async listMarkdown(dir: string): Promise<string[]> {
+    return walkFiles(dir, (name) => name.endsWith('.md'));
+  },
 };

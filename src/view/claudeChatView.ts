@@ -6,10 +6,12 @@ import type { ClaudeSessionStore } from '../claude/sessionStore';
 import { ClaudeStreamSession } from '../claude/streamSession';
 import { transcriptItems } from '../claude/transcript';
 import { isUnsafeClaudeCombination } from '../claude/argvBuilder';
-import { currentWorkspaceFolder, readClaudeConfig } from '../config';
+import { currentWorkspaceFolder, readClaudeConfig, workspaceFolderPaths } from '../config';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
+import { CommandCatalog } from '../provider/commandCatalog';
+import type { SlashCommand } from '../provider/slashCommands';
 import { renderShell } from './chatView';
 import { CLAUDE_EFFORTS, CLAUDE_PERMISSION_MODES } from '../claude/types';
 import type { SettingsProvider } from './settingsProvider';
@@ -38,16 +40,31 @@ export class ClaudeChatViewManager implements vscode.Disposable {
   private readonly panels = new Map<string, ClaudePanel>();
   private approvalWarned = false;
 
+  private readonly catalog: CommandCatalog;
+  private commands: SlashCommand[] | undefined;
+
   constructor(
     private readonly claudePath: () => string,
     private readonly fs: FileSystemPort,
+    private readonly claudeHome: string,
     private readonly store: ClaudeSessionStore,
     private readonly settings: SettingsProvider,
     private readonly log: Logger,
     private readonly onActivity: (activity: ChatActivity) => void = () => undefined,
     /** 制限の状態が更新されたときに知らせる。ステータスバーの表示に使う。 */
     private readonly onUsage: (usage: ChatUsage) => void = () => undefined,
-  ) {}
+  ) {
+    this.catalog = new CommandCatalog(fs);
+  }
+
+  /** 入力欄の候補を送る。一度読んだら使い回す。 */
+  private async postCommands(entry: ClaudePanel): Promise<void> {
+    if (entry.disposed) {
+      return;
+    }
+    this.commands ??= await this.catalog.forClaude(this.claudeHome, workspaceFolderPaths());
+    void entry.panel.webview.postMessage({ type: 'commands', commands: this.commands });
+  }
 
   /**
    * 画面下の設定行へ現在値と選択肢を送る。
@@ -300,6 +317,7 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       }
       if (type === 'ready') {
         this.refreshSettings(entry);
+        void this.postCommands(entry);
         return;
       }
       if (type === 'config') {

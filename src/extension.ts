@@ -124,14 +124,20 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   // 設定パネルを開かずCodex画面だけ使う場合でも選択肢が揃うよう、起動時に読む
   void settings.load();
-  const chat = new ChatViewManager(codexPath, settings, log, ({ sessionId, cwd, text }) =>
-    recordActivity({ sessionId, source: 'codex', cwd, text }),
+  const chat = new ChatViewManager(
+    codexPath,
+    settings,
+    home,
+    nodeFileSystem,
+    log,
+    ({ sessionId, cwd, text }) => recordActivity({ sessionId, source: 'codex', cwd, text }),
   );
   context.subscriptions.push(chat);
 
   const claudeChat = new ClaudeChatViewManager(
     () => resolveExecutable(claude, log) ?? 'claude',
     nodeFileSystem,
+    claudeHome,
     claudeStore,
     settings,
     log,

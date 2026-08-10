@@ -60,6 +60,10 @@ class FakeFs implements FileSystemPort {
   async listJsonl(dir: string): Promise<string[]> {
     return Object.keys(this.files).filter((p) => p.startsWith(`${dir}/`));
   }
+
+  async listMarkdown(dir: string): Promise<string[]> {
+    return Object.keys(this.files).filter((p) => p.startsWith(`${dir}/`) && p.endsWith('.md'));
+  }
 }
 
 const options = (overrides: Partial<Parameters<ClaudeSessionStore['list']>[0]> = {}) => ({

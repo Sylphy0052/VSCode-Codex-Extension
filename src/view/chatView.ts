@@ -9,7 +9,10 @@ import { readForkedThreadId } from '../codex/jsonRpc';
 import { currentWorkspaceFolder, readConfig } from '../config';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { Logger } from '../log';
+import type { FileSystemPort } from '../session/ports';
 import { APPROVAL_MODES } from '../codex/types';
+import { CommandCatalog } from '../provider/commandCatalog';
+import type { SlashCommand } from '../provider/slashCommands';
 import { chatScript } from './chatScript';
 import { chatStyles } from './chatStyles';
 import { isEditableKey, type SettingsProvider } from './settingsProvider';
@@ -50,13 +53,19 @@ export class ChatViewManager implements vscode.Disposable {
   /** 名前変更コマンドの対象。最後にアクティブだったCodex画面。 */
   private active: ChatPanel | undefined;
 
+  private readonly catalog: CommandCatalog;
+  private commands: SlashCommand[] | undefined;
+
   constructor(
     codexPath: () => string,
     private readonly settings: SettingsProvider,
+    private readonly codexHome: string,
+    fs: FileSystemPort,
     private readonly log: Logger,
     /** 発言のたびに呼ばれる。二重記録の抑止は受け手（ActivityLogger）が担う。 */
     private readonly onActivity: (activity: ChatActivity) => void = () => undefined,
   ) {
+    this.catalog = new CommandCatalog(fs);
     this.connection = new AppServerConnection(
       codexPath,
       log,
@@ -270,6 +279,7 @@ export class ChatViewManager implements vscode.Disposable {
       }
       if (type === 'ready') {
         this.refreshSettings();
+        await this.postCommands(entry);
       }
     } catch (e) {
       this.reportError(e);
@@ -366,6 +376,19 @@ export class ChatViewManager implements vscode.Disposable {
   }
 
   /** 設定が外部で変わったときに、開いている全画面のプルダウンを更新する。 */
+  /**
+   * 入力欄の候補を送る。
+   *
+   * 一度読んだら使い回す。ファイル数は多くないが、画面を開くたびに走査する意味も無い。
+   */
+  private async postCommands(entry: ChatPanel): Promise<void> {
+    if (entry.disposed) {
+      return;
+    }
+    this.commands ??= await this.catalog.forCodex(this.codexHome);
+    void entry.panel.webview.postMessage({ type: 'commands', commands: this.commands });
+  }
+
   refreshSettings(): void {
     for (const entry of this.allPanels()) {
       this.postState(entry);
@@ -504,6 +527,7 @@ ${chatStyles()}
     <button id="loopStop" type="button" class="secondary" hidden>ループ停止</button>
   </div>
   <div id="composer">
+    <div id="commands" hidden></div>
     <textarea id="input" placeholder="${options.agentLabel}への指示を入力（Ctrl+Enterで送信）"></textarea>
     <button id="send" type="button">送信</button>
     <button id="stop" type="button" class="secondary" title="Escでも中断できます" hidden>中断</button>

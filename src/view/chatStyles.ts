@@ -83,6 +83,7 @@ export function chatStyles(): string {
   button:hover { background-color: var(--vscode-button-hoverBackground); }
   button:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
   #composer {
+    position: relative;
     display: flex;
     gap: 8px;
     padding: 10px 16px 14px;
@@ -103,6 +104,42 @@ export function chatStyles(): string {
   }
   textarea:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
   #approvals { padding: 0 16px; }
+  #commands {
+    position: absolute;
+    left: 16px;
+    right: 16px;
+    bottom: 100%;
+    max-height: 240px;
+    overflow-y: auto;
+    margin-bottom: 4px;
+    padding: 4px 0;
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-radius: 4px;
+    background-color: var(--vscode-editorSuggestWidget-background, var(--vscode-editorWidget-background));
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    z-index: 10;
+  }
+  #commands .row {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    padding: 3px 10px;
+    cursor: pointer;
+  }
+  #commands .row.active {
+    background-color: var(--vscode-editorSuggestWidget-selectedBackground, var(--vscode-list-activeSelectionBackground));
+    color: var(--vscode-list-activeSelectionForeground);
+  }
+  #commands .name { font-weight: 600; white-space: nowrap; }
+  #commands .desc {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.9em;
+  }
+  #commands .row.active .desc { color: inherit; }
   #queue {
     margin: 0 16px 8px;
     padding: 8px 10px;

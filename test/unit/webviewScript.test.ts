@@ -29,6 +29,14 @@ describe('chatScript', () => {
     const broken = lines.filter((line) => (line.match(/'/g)?.length ?? 0) % 2 === 1);
     expect(broken).toEqual([]);
   });
+
+  it('テンプレートリテラルを閉じる文字が混ざっていない', () => {
+    // スクリプトはテンプレートリテラルの中身。バッククォートや ${ } の展開が
+    // 紛れ込むと、そこでリテラルが切れて別物になる
+    const source = chatScript('Codex');
+    expect(source.includes('`')).toBe(false);
+    expect(/\$\{/.test(source)).toBe(false);
+  });
 });
 
 describe('controlPanelScript', () => {
