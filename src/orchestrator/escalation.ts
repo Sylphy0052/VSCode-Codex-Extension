@@ -12,8 +12,21 @@ import type { WorkflowTask } from './workflow';
  * ## 位置付け（§16.7 より）
  *
  * **この判定は防御の主軸ではない。** コマンドは文字列として渡ってくるだけで、
- * シェルの構文木は得られない。`rm -rf` を止めても `rm${IFS}-rf`、`rm -fr`、
- * `X=rm; $X -rf`、`printf '...' > x.sh && bash x.sh` はいずれも同じ結果になる。
+ * シェルの構文木は得られない。実際に塞げない例（`;` `$` `&` `|` 等のシェルメタ文字を
+ * 含まないため、本モジュールのチェックをすべて素通りする）:
+ *
+ * - 別名の同等バイナリを直接呼ぶ: `rm` を指す別名の実行ファイル（`rm-alias -rf ...` の
+ *   ようにPATH解決される名前、または境界内の場所に置かれた同等バイナリ）を直接起動する。
+ *   既知のコマンド名一覧に無く、境界外への絶対パスでもないため、コマンド名照合にも
+ *   引数パスの境界チェックにも掛からない（実測で確認済み）
+ * - スクリプト言語のワンライナーで同じ効果を得る: `perl -e 'unlink glob
+ *   "/repo/work/tmp/*"'` はシェルメタ文字も既知のコマンド名も含まない。引数中の
+ *   パスも、クォートに包まれているため `extractPathLikeArguments` の
+ *   「`/` 始まり」判定に掛からない
+ * - 2つの承認要求にまたがる間接実行: 1つ目の要求（`fileChange`）でスクリプトを
+ *   書き込み、2つ目の要求（`command`）で `bash script.sh` のように無害な形で実行する。
+ *   個々の要求は単体では安全に見えるため、1要求単位の判定である以上原理的に防げない
+ *
  * パターン照合でこれを塞ぎ切ることはできないし、塞げるふりをしてはいけない。
  * 一次防御は `sandbox: workspace-write`（拡張機能の設定より緩められない）であり、
  * ここでのパターン照合は「分かりやすい危険を先回りして人へ回す」ための補助的な
@@ -222,8 +235,28 @@ interface DangerPattern {
   test: (command: string) => boolean;
 }
 
-/** 空白区切りの雑なトークン化。シェルの完全なパースは目指さない（§16.7）。 */
+/**
+ * 空白区切りの雑なトークン化。シェルの完全なパースは目指さない（§16.7）。
+ *
+ * コマンド名・フラグの照合はすべて大文字小文字を無視する。Windowsは実行ファイルの
+ * 解決自体が大文字小文字を区別しないため、`RM -RF` は本物の `rm` を実際に起動する
+ * （実測で確認された回避経路）。ここで小文字化しておくことで、以降のパターン照合を
+ * 個別に `/i` フラグへ気を配らなくても大文字小文字を問わない形に揃える。
+ */
 function tokenize(command: string): string[] {
+  return command
+    .trim()
+    .toLowerCase()
+    .split(/\s+/u)
+    .filter((t) => t !== '');
+}
+
+/**
+ * 空白区切りの雑なトークン化（大文字小文字を保持する版）。
+ * コマンド引数からパスらしいトークンを拾う用途では、パスの実体を変えないために
+ * 大文字小文字を保ったまま扱う（`.git` セグメント判定だけは別途大文字小文字を無視する）。
+ */
+function rawTokenize(command: string): string[] {
   return command
     .trim()
     .split(/\s+/u)
@@ -273,21 +306,27 @@ function isUntrackedClean(command: string): boolean {
   );
 }
 
-/** `git reset --hard` / `git checkout -f|--force` / `git restore --worktree` のいずれか。 */
+/**
+ * `git reset --hard` / `git checkout -f|--force` / `git restore --worktree` のいずれか。
+ * `/i` を付け、`GIT RESET --HARD` のような大文字化での回避を防ぐ。
+ */
 function isWorktreeReset(command: string): boolean {
   return (
-    /\bgit\s+reset\s+(--hard|-[A-Za-z]*[Hh])\b/.test(command) ||
-    /\bgit\s+checkout\b[^\n]*\s(-f|--force)\b/.test(command) ||
-    /\bgit\s+restore\b[^\n]*--worktree\b/.test(command)
+    /\bgit\s+reset\s+(--hard|-[A-Za-z]*h)\b/i.test(command) ||
+    /\bgit\s+checkout\b[^\n]*\s(-f|--force)\b/i.test(command) ||
+    /\bgit\s+restore\b[^\n]*--worktree\b/i.test(command)
   );
 }
 
-/** ブランチ/タグの削除、またはリモートからの削除push。 */
+/**
+ * ブランチ/タグの削除、またはリモートからの削除push。
+ * `/i` を付け、大文字化での回避を防ぐ。
+ */
 function isBranchOrTagDelete(command: string): boolean {
   return (
-    /\bgit\s+branch\b[^\n]*\s(-[A-Za-z]*[Dd][A-Za-z]*|--delete)\b/.test(command) ||
-    /\bgit\s+tag\b[^\n]*\s(-d|--delete)\b/.test(command) ||
-    /\bgit\s+push\b[^\n]*--delete\b/.test(command)
+    /\bgit\s+branch\b[^\n]*\s(-[A-Za-z]*d[A-Za-z]*|--delete)\b/i.test(command) ||
+    /\bgit\s+tag\b[^\n]*\s(-d|--delete)\b/i.test(command) ||
+    /\bgit\s+push\b[^\n]*--delete\b/i.test(command)
   );
 }
 
@@ -440,22 +479,97 @@ function isOutsideAllowedRoots(target: string, boundary: TaskBoundary): boolean 
   return !boundary.allowedRoots.some((root) => isPathWithinRoot(target, root));
 }
 
-/**
- * `.git` 配下（`allowedRoots` それぞれの `.git` 配下、または共有の `gitCommonDir` 配下）
- * への書き込みか。worktreeの `.git` は実体がファイルで、hooksなどの実データは
- * 親リポジトリの共有領域にあるため、`gitCommonDir` も別途チェックする（§16.7）。
- */
-function touchesGitDirectory(target: string, boundary: TaskBoundary): boolean {
-  if (boundary.gitCommonDir !== undefined && isPathWithinRoot(target, boundary.gitCommonDir)) {
-    return true;
-  }
-  return boundary.allowedRoots.some((root) => isPathWithinRoot(target, path.join(root, '.git')));
+/** パスをディレクトリ区切り文字で分割する（`/` と `\` の両方。Windowsのパスも対象にするため）。 */
+function pathSegments(value: string): string[] {
+  return value.split(/[\\/]/u);
 }
 
-/** 判定対象のパス群。`command` は `cwd` を、`fileChange` は `paths` を見る。 */
+/**
+ * `.git` をパスセグメントとして含むか。大文字小文字を無視する。
+ *
+ * macOS既定のAPFSはファイル名の大文字小文字を区別しないため、`.GIT` という表記でも
+ * 実際には同じディレクトリを指しうる（実測で指摘された回避経路）。Linuxでは大文字小文字を
+ * 区別する別ディレクトリになり実害は無いが、多層防御として区別しない側に倒す。
+ */
+function hasGitSegment(value: string): boolean {
+  return pathSegments(value).some((seg) => seg.toLowerCase() === '.git');
+}
+
+/**
+ * `.git` 配下への書き込みか。パス中のどこかに `.git` セグメントがあれば、`allowedRoots` や
+ * `gitCommonDir` との位置関係を問わず即座に該当とする。worktreeの `.git` は実体がファイルで、
+ * hooksなどの実データは親リポジトリの共有領域（`gitCommonDir`）にあるため、こちらも別途見る
+ * （§16.7）。
+ */
+function touchesGitDirectory(target: string, boundary: TaskBoundary): boolean {
+  if (hasGitSegment(target)) {
+    return true;
+  }
+  return boundary.gitCommonDir !== undefined && isPathWithinRoot(target, boundary.gitCommonDir);
+}
+
+/** 絶対パスらしいトークンか（`/` 始まり、またはWindowsのドライブレター `C:\` `C:/`）。 */
+const WINDOWS_DRIVE_PATTERN = /^[A-Za-z]:[\\/]/;
+function looksAbsolutePath(token: string): boolean {
+  return token.startsWith('/') || WINDOWS_DRIVE_PATTERN.test(token);
+}
+
+/** `..` をパスセグメントとして含むか（相対パスでの境界越え）。 */
+function hasParentSegment(token: string): boolean {
+  return pathSegments(token).includes('..');
+}
+
+/**
+ * コマンド引数のうち「パスらしい」トークンを拾う。完全なシェル解析はしない方針
+ * （§16.7）のため、フラグ（`-C` 等）や普通の相対ファイル名（`archive.tar` 等）まで
+ * 拾うと過検知になる。次の3条件のいずれかに絞る（実測で指摘された回避経路への対応）。
+ *
+ * - 絶対パスらしい（`/` 始まり、またはWindowsのドライブレター）
+ * - `..` を含む（相対パスでの境界越え）
+ * - `.git` をパスセグメントとして含む（`cwd` 相対の書き込み先でも拾うため）
+ */
+function extractPathLikeArguments(command: string): string[] {
+  return rawTokenize(command).filter(
+    (t) => looksAbsolutePath(t) || hasParentSegment(t) || hasGitSegment(t),
+  );
+}
+
+/**
+ * パスらしいトークンを実パスへ解決する。絶対パスはそのまま正規化するだけ、相対パスは
+ * `cwd` を基準に解決する。`cwd` が不明（空文字）で相対パスなら判定不能として `undefined`
+ * を返す（`process.cwd()` には依存しない。環境によって結果が変わる純粋関数にしないため）。
+ */
+function resolveArgumentPath(token: string, cwd: string): string | undefined {
+  if (looksAbsolutePath(token)) {
+    return path.normalize(token);
+  }
+  return cwd === '' ? undefined : path.resolve(cwd, token);
+}
+
+/**
+ * `command` 種別で判定対象になるパス。`cwd` 自身に加えて、コマンド引数から拾った
+ * パスらしいトークンを解決したものを含める。シェルメタ文字を含まない単純な
+ * `cp` / `chmod` / `tar` 等でも、引数に指定した書き込み先は境界チェックの対象にする
+ * （実測で指摘された回避経路: `cp payload.sh .git/hooks/pre-commit`）。
+ */
+function commandCandidatePaths(request: EscalationRequest): readonly string[] {
+  const paths: string[] = [];
+  if (request.cwd !== '') {
+    paths.push(request.cwd);
+  }
+  for (const token of extractPathLikeArguments(request.command)) {
+    const resolved = resolveArgumentPath(token, request.cwd);
+    if (resolved !== undefined) {
+      paths.push(resolved);
+    }
+  }
+  return paths;
+}
+
+/** 判定対象のパス群。`command` は `cwd` とコマンド引数由来のパスを、`fileChange` は `paths` を見る。 */
 function targetPathsOf(request: EscalationRequest): readonly string[] {
   if (request.kind === 'command') {
-    return request.cwd === '' ? [] : [request.cwd];
+    return commandCandidatePaths(request);
   }
   if (request.kind === 'fileChange') {
     return request.paths;
@@ -467,9 +581,44 @@ function isAllowed(policy: EscalationPolicy, id: DangerPatternId): boolean {
   return policy.allow.includes(id);
 }
 
-/** `escalate` の判定に使う検索対象文字列。種別を問わず一括で照合する。 */
+/**
+ * `escalate` の判定に使う検索対象文字列。`command` / `cwd` / `paths` に加えて、
+ * 構造化フィールド（ネットワーク到達先のホスト、`grantRoot`、execpolicyの提案）も
+ * 含める。「このタスクは外部通信を許可するが特定のホストだけは人に回したい」のような
+ * escalateが、コマンド文字列に現れない構造化データに対しても効くようにするため（§16.7）。
+ */
 function buildEscalateHaystack(request: EscalationRequest): string {
-  return [request.command, request.cwd, ...request.paths].join('\n').toLowerCase();
+  const parts = [
+    request.command,
+    request.cwd,
+    ...request.paths,
+    request.networkApprovalContext?.host ?? '',
+    ...request.proposedNetworkPolicyAmendments.map((a) => a.host),
+    request.grantRoot ?? '',
+    ...request.proposedExecpolicyAmendment,
+  ];
+  return parts.join('\n').toLowerCase();
+}
+
+/** 理由文字列に埋め込む値の上限長。長大な値でログ・ワークフローViewの表示が崩れるのを防ぐ。 */
+const REASON_VALUE_MAX_LEN = 200;
+
+/**
+ * 理由に埋め込む値の無害化。`grantRoot` やホスト名、パスはapp-server・エージェント
+ * 由来で内容を信用できない。改行や制御文字を含んでいると、理由がそのまま複数行になったり
+ * ログ・ワークフローViewの表示を崩したりする。HTMLエスケープはView側の責務
+ * （design.md §16.8）なのでここでは行わない。
+ */
+function sanitizeForReason(value: string): string {
+  let normalized = '';
+  for (const ch of value) {
+    const code = ch.codePointAt(0) ?? 0;
+    normalized += code < 0x20 || code === 0x7f ? ' ' : ch;
+  }
+  const collapsed = normalized.replace(/ {2,}/gu, ' ').trim();
+  return collapsed.length > REASON_VALUE_MAX_LEN
+    ? `${collapsed.slice(0, REASON_VALUE_MAX_LEN)}…`
+    : collapsed;
 }
 
 /**
@@ -511,6 +660,18 @@ export function classifyApprovalRequest(
     };
   }
 
+  // fileChangeのitemIdからパスを解決するのは実行層の責務（§16.7）。ここを実装し忘れると
+  // pathsが空のまま渡ってきて、パス境界の判定が丸ごと素通りしてautoに倒れる。
+  // その失敗モードを判定関数側でも防ぐため、pathsが空なら「判定に失敗した」ものとして扱う。
+  if (request.kind === 'fileChange' && request.paths.length === 0) {
+    return {
+      decision: 'ask',
+      reasons: [
+        '変更対象のパスを取得できないため、判定に失敗したものとして扱いました（allowでは解除できません）',
+      ],
+    };
+  }
+
   const reasons: string[] = [];
 
   // grantRootは1回分の変更承認ではなく、セッション残り全体への書き込み許可要求
@@ -518,7 +679,7 @@ export function classifyApprovalRequest(
   // 同じ権限拡大の重さがあるため、allowでは解除できない扱いにする。
   if (request.grantRoot !== undefined && request.grantRoot !== '') {
     reasons.push(
-      `セッション残り全体への書き込み許可要求です（allowでは解除できません）: ${request.grantRoot}`,
+      `セッション残り全体への書き込み許可要求です（allowでは解除できません）: ${sanitizeForReason(request.grantRoot)}`,
     );
   }
 
@@ -527,7 +688,7 @@ export function classifyApprovalRequest(
   // 及ぶため、externalEgressのような特定カテゴリのallowでは緩められない扱いにする。
   if (request.proposedExecpolicyAmendment.length > 0) {
     reasons.push(
-      `以後同種のコマンドを無確認で通す提案が付いています（allowでは解除できません）: ${request.proposedExecpolicyAmendment.join(' ')}`,
+      `以後同種のコマンドを無確認で通す提案が付いています（allowでは解除できません）: ${sanitizeForReason(request.proposedExecpolicyAmendment.join(' '))}`,
     );
   }
 
@@ -535,13 +696,25 @@ export function classifyApprovalRequest(
     (p) => p !== '' && touchesGitDirectory(p, boundary),
   );
   if (gitTarget !== undefined) {
-    reasons.push(`.git配下への書き込みです（allowでは解除できません）: ${gitTarget}`);
+    reasons.push(
+      `.git配下への書き込みです（allowでは解除できません）: ${sanitizeForReason(gitTarget)}`,
+    );
+  } else if (
+    request.kind === 'command' &&
+    extractPathLikeArguments(request.command).some(
+      (t) => hasGitSegment(t) && resolveArgumentPath(t, request.cwd) === undefined,
+    )
+  ) {
+    // cwdが不明で相対パスを実パスへ解決できなくても、引数に`.git`セグメントを含む
+    // トークンがある時点で十分に疑わしい（実測で指摘された回避経路）。resolve可否に
+    // 関わらず、この独立したチェックで拾う。
+    reasons.push('.git配下への書き込みの疑いがあるコマンド引数です（allowでは解除できません）');
   }
 
   if (!isAllowed(policy, DANGER_PATTERN_IDS.outsideWorkingDirectory)) {
     const outsideTarget = targetPathsOf(request).find((p) => isOutsideAllowedRoots(p, boundary));
     if (outsideTarget !== undefined) {
-      reasons.push(`作業ディレクトリ・worktreeの境界外です: ${outsideTarget}`);
+      reasons.push(`作業ディレクトリ・worktreeの境界外です: ${sanitizeForReason(outsideTarget)}`);
     }
   }
 
@@ -557,14 +730,16 @@ export function classifyApprovalRequest(
     if (!isAllowed(policy, DANGER_PATTERN_IDS.externalEgress)) {
       const ctx = request.networkApprovalContext;
       if (ctx !== undefined) {
-        reasons.push(`外部ネットワークへの到達が申告されています: ${ctx.host} (${ctx.protocol})`);
+        reasons.push(
+          `外部ネットワークへの到達が申告されています: ${sanitizeForReason(ctx.host)} (${sanitizeForReason(ctx.protocol)})`,
+        );
       }
       const allowAmendment = request.proposedNetworkPolicyAmendments.find(
         (a) => a.action === 'allow',
       );
       if (allowAmendment !== undefined) {
         reasons.push(
-          `このホストを以後許可する恒久的な権限拡大が提案されています: ${allowAmendment.host}`,
+          `このホストを以後許可する恒久的な権限拡大が提案されています: ${sanitizeForReason(allowAmendment.host)}`,
         );
       }
     }
@@ -574,7 +749,7 @@ export function classifyApprovalRequest(
   for (const raw of policy.escalate) {
     const pattern = raw.trim();
     if (pattern !== '' && haystack.includes(pattern.toLowerCase())) {
-      reasons.push(`escalateで指定されたパターンに一致しました: ${pattern}`);
+      reasons.push(`escalateで指定されたパターンに一致しました: ${sanitizeForReason(pattern)}`);
     }
   }
 
