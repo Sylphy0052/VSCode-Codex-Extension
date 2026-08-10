@@ -180,12 +180,9 @@ export function applyEvent(
 ): ChatState {
   switch (method) {
     case 'turn/started': {
-      const turnId = params['turnId'];
-      return {
-        ...state,
-        busy: true,
-        turnId: typeof turnId === 'string' && turnId !== '' ? turnId : undefined,
-      };
+      // turnIdはトップレベルではなく turn オブジェクトの中にある（実機で確認）
+      const turnId = str(rec(params['turn'])?.['id']);
+      return { ...state, busy: true, turnId: turnId === '' ? undefined : turnId };
     }
 
     case 'turn/completed':
@@ -209,9 +206,14 @@ export function applyEvent(
       if (item === undefined) {
         return state;
       }
-      const turnId = params['turnId'];
-      const withTurn = typeof turnId === 'string' && turnId !== '' ? { ...item, turnId } : item;
-      return { ...state, items: upsertItem(state.items, withTurn) };
+      const turnId = str(params['turnId']);
+      const withTurn = turnId === '' ? item : { ...item, turnId };
+      return {
+        ...state,
+        // turn/started を取り逃しても中断できるよう、item側の値でも補う
+        turnId: turnId === '' ? state.turnId : turnId,
+        items: upsertItem(state.items, withTurn),
+      };
     }
 
     case 'item/agentMessage/delta': {

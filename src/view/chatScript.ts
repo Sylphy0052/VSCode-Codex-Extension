@@ -321,6 +321,13 @@ export function chatScript(agentLabel: string): string {
 
   el('send').addEventListener('click', send);
   el('stop').addEventListener('click', () => vscode.postMessage({ type: 'interrupt' }));
+  // 応答中のEscで中断する。画面のどこにフォーカスがあっても効くようにする
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || el('stop').hidden) return;
+    e.preventDefault();
+    vscode.postMessage({ type: 'interrupt' });
+  });
+
   el('input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();

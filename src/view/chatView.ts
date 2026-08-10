@@ -548,7 +548,7 @@ export function renderShell(webview: vscode.Webview, options: ChatShellOptions):
   <div id="composer">
     <textarea id="input" placeholder="${options.agentLabel}への指示を入力（Ctrl+Enterで送信）"></textarea>
     <button id="send" type="button">送信</button>
-    <button id="stop" type="button" class="secondary" hidden>中断</button>
+    <button id="stop" type="button" class="secondary" title="Escでも中断できます" hidden>中断</button>
   </div>
   <div id="settings"${options.showSettings ? '' : ' hidden'}>
     <label>モデル <select id="model"></select></label>

@@ -67,15 +67,28 @@ describe('applyEvent', () => {
     expect(applyEvent(busy, 'turn/completed', {}).busy).toBe(false);
   });
 
-  it('turn/started の turnId を保持し、終了で手放す', () => {
-    const started = applyEvent(initialChatState, 'turn/started', { turnId: 't-1' });
+  it('turn/started の turn.id を保持し、終了で手放す', () => {
+    // turnIdはトップレベルではなく turn オブジェクトの中にある
+    const started = applyEvent(initialChatState, 'turn/started', {
+      threadId: 'th-1',
+      turn: { id: 't-1', status: 'inProgress' },
+    });
     expect(started.turnId).toBe('t-1');
     expect(applyEvent(started, 'turn/completed', {}).turnId).toBeUndefined();
     expect(applyEvent(started, 'turn/failed', {}).turnId).toBeUndefined();
   });
 
-  it('turnId の無い turn/started でも落ちない', () => {
+  it('turnが無い turn/started でも落ちない', () => {
     expect(applyEvent(initialChatState, 'turn/started', {}).turnId).toBeUndefined();
+  });
+
+  it('item通知の turnId でも補える', () => {
+    // turn/started を取り逃しても中断できるようにする
+    const state = applyEvent(initialChatState, 'item/started', {
+      item: { type: 'userMessage', id: 'u1', content: [] },
+      turnId: 't-2',
+    });
+    expect(state.turnId).toBe('t-2');
   });
 
   it('thread/status/changed の active を反映する', () => {
