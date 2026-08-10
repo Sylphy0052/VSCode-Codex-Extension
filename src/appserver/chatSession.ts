@@ -222,6 +222,22 @@ export class ChatSession {
     this.update({ ...this.state, name });
   }
 
+  /**
+   * 会話を要約して圧縮する。
+   *
+   * 会話の内容を不可逆に変えるため、確認は呼び出し側で済ませてから呼ぶこと。
+   * 完了は `contextCompaction` 項目と `thread/tokenUsage/updated` で判る
+   * （`thread/compacted` 通知はプロトコル側で非推奨のため見ない）。
+   */
+  async compact(): Promise<void> {
+    const threadId = this.state.threadId;
+    if (threadId === undefined) {
+      throw new Error('スレッドが開始されていません');
+    }
+    this.update({ ...this.state, busy: true, turnFailed: false });
+    await this.connection.request('thread/compact/start', { threadId });
+  }
+
   async interrupt(): Promise<void> {
     const threadId = this.state.threadId;
     const turnId = this.state.turnId;

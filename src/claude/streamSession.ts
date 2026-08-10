@@ -16,12 +16,15 @@ import { buildClaudeStreamArgs } from './argvBuilder';
 import {
   buildCanUseToolResponse,
   defaultDenyControlResponse,
+  buildContextUsageRequest,
   buildControlRequest,
   buildControlResponse,
   buildUserMessage,
   describeCanUseTool,
+  readContextUsage,
   readControlRequest,
   readControlResponse,
+  type ControlResponse,
   type IncomingControlRequest,
 } from './control';
 import { applyStreamEvent, initialClaudeState } from './streamJson';
@@ -54,6 +57,8 @@ export class ClaudeStreamSession {
   private state: ChatState = initialClaudeState;
   private nextControlId = 1;
   private readonly waiting = new Map<string, WaitingApproval>();
+  /** こちらから出した要求の用途。応答は種類ごとに形が違うため、idで引く。 */
+  private readonly outgoing = new Map<string, OutgoingKind>();
   /** 承認要求が一度でも届いたか。届かない構成を利用者へ知らせるために見る。 */
   private sawApprovalRequest = false;
   private handshakeDone = false;
@@ -127,8 +132,44 @@ export class ClaudeStreamSession {
    * 応答が返らない/失敗しても会話は続けられるため、握り潰してログに残すだけにする。
    */
   private initializeControl(): void {
-    const requestId = `req_${this.nextControlId++}`;
+    const requestId = this.claim('initialize');
     this.write(buildControlRequest(requestId, { subtype: 'initialize', hooks: {} }));
+  }
+
+  /** 要求idを採番し、応答を読むときのために用途を覚える。 */
+  private claim(kind: OutgoingKind): string {
+    const requestId = `req_${this.nextControlId++}`;
+    this.outgoing.set(requestId, kind);
+    return requestId;
+  }
+
+  /**
+   * コンテキストの使用量を読み直す。TUIの `/context` と同じ数字が返る。
+   *
+   * 会話へ `/context` を送ると応答が会話に混ざるため、control protocol で聞く。
+   * 応答が返らなくても会話は続けられるので、失敗は黙って見送る。
+   */
+  refreshContext(): void {
+    // 応答を返さないCLIでは要求が返らない。返事待ちを1件までにして積み上がりを防ぐ
+    if (this.proc === undefined || [...this.outgoing.values()].includes('contextUsage')) {
+      return;
+    }
+    this.write(buildContextUsageRequest(this.claim('contextUsage')));
+  }
+
+  /**
+   * 会話を要約して圧縮する。
+   *
+   * 専用の制御要求が無いため、TUIと同じく `/compact` を発言として送る
+   * （`local_command` の制御要求は `Unsupported control request subtype` で失敗する）。
+   * 会話の内容を不可逆に変えるため、確認は呼び出し側で済ませてから呼ぶこと。
+   */
+  compact(): void {
+    if (this.proc === undefined) {
+      throw new Error('セッションが起動していません');
+    }
+    this.update({ ...this.state, busy: true, turnFailed: false });
+    this.write(buildUserMessage('/compact'));
   }
 
   send(text: string): void {
@@ -213,9 +254,14 @@ export class ClaudeStreamSession {
         continue;
       }
 
+      const wasBusy = this.state.busy;
       const next = applyStreamEvent(this.state, event);
       if (next !== this.state) {
         this.update(next);
+      }
+      // ターンが終わるたびに読み直す。圧縮の効果もここで表示へ反映される
+      if (wasBusy && !next.busy) {
+        this.refreshContext();
       }
     }
   }
@@ -241,7 +287,18 @@ export class ClaudeStreamSession {
     this.update(addApproval(this.state, approval));
   }
 
-  private handleControlResponse(response: ControlResponseLike): void {
+  private handleControlResponse(response: ControlResponse): void {
+    const kind = this.outgoing.get(response.requestId);
+    this.outgoing.delete(response.requestId);
+
+    if (kind === 'contextUsage') {
+      const context = readContextUsage(response.payload);
+      if (context !== undefined) {
+        this.update({ ...this.state, context });
+      }
+      return;
+    }
+
     if (this.handshakeDone) {
       return;
     }
@@ -252,7 +309,10 @@ export class ClaudeStreamSession {
         `承認要求の受け取りを有効にできませんでした: ${response.error ?? '不明'}。claude.permissionMode の設定に従います`,
       );
       this.onApprovalUnavailable();
+      return;
     }
+    // 会話を始める前の値を出しておく。ここを逃すと最初のターンが終わるまで空になる
+    this.refreshContext();
   }
 
   private update(next: ChatState): void {
@@ -274,6 +334,7 @@ export class ClaudeStreamSession {
     for (const [requestId] of this.waiting) {
       this.decide(requestId, 'cancel');
     }
+    this.outgoing.clear();
     this.proc?.stdin.end();
     this.proc?.kill();
     this.proc = undefined;
@@ -281,7 +342,5 @@ export class ClaudeStreamSession {
   }
 }
 
-interface ControlResponseLike {
-  ok: boolean;
-  error: string | undefined;
-}
+/** こちらから出した制御要求の用途。 */
+type OutgoingKind = 'initialize' | 'contextUsage';

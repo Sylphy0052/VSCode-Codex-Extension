@@ -19,6 +19,7 @@ export const initialClaudeState: ChatState = {
   items: [],
   approvals: [],
   usage: undefined,
+  context: undefined,
   turnResultText: '',
   turnEditedFiles: [],
 };
@@ -43,7 +44,14 @@ export function applyStreamEvent(state: ChatState, event: Record<string, unknown
 }
 
 function applySystem(state: ChatState, event: Record<string, unknown>): ChatState {
-  if (str(event['subtype']) !== 'init') {
+  const subtype = str(event['subtype']);
+  if (subtype === 'compact_boundary') {
+    return applyCompactBoundary(state, event);
+  }
+  if (subtype === 'status') {
+    return applyStatus(state, event);
+  }
+  if (subtype !== 'init') {
     return state;
   }
   const sessionId = str(event['session_id']);
@@ -247,6 +255,72 @@ function applyResult(state: ChatState, event: Record<string, unknown>): ChatStat
   const subtype = str(event['subtype']);
   const failed = event['is_error'] === true || (subtype !== '' && subtype !== 'success');
   return { ...state, busy: false, turnFailed: failed, turnResultText: str(event['result']) };
+}
+
+/**
+ * 圧縮の境目。手動・自動どちらでも届く。
+ *
+ * 圧縮した位置を会話に残すのはこの通知の役目にする。成功したことは
+ * `status` 通知でも判るが、両方で項目を作ると同じ圧縮が二重に並ぶ。
+ * 実測した中身: `{trigger, pre_tokens, post_tokens, cumulative_dropped_tokens, ...}`。
+ */
+function applyCompactBoundary(state: ChatState, event: Record<string, unknown>): ChatState {
+  const meta = rec(event['compact_metadata']) ?? {};
+  const trigger = str(meta['trigger']);
+  const before = num(meta['pre_tokens']);
+  const after = num(meta['post_tokens']);
+
+  const bits: string[] = [];
+  if (trigger !== '') {
+    bits.push(trigger === 'auto' ? '自動' : trigger === 'manual' ? '手動' : trigger);
+  }
+  if (before !== undefined && after !== undefined) {
+    bits.push(before + ' → ' + after + ' トークン');
+  }
+
+  return {
+    ...state,
+    items: upsert(state.items, {
+      id: compactionId(event),
+      kind: 'contextCompaction',
+      text: '',
+      detail: bits.join(' ・ '),
+      // 見出しが「会話を圧縮しました」なので、状態を重ねて出すと冗長になる
+      status: undefined,
+      turnId: undefined,
+      diffs: [],
+    }),
+  };
+}
+
+/**
+ * 圧縮の進行と結果。実測した中身は `{status, compact_result, compact_error}` で、
+ * `compact_result` は `success` か `failed`。
+ *
+ * 成功は `compact_boundary` が受け持つので、ここでは失敗だけを項目にする。
+ * 失敗を黙って捨てると「押したのに何も起きない」状態になる。
+ */
+function applyStatus(state: ChatState, event: Record<string, unknown>): ChatState {
+  if (str(event['compact_result']) !== 'failed') {
+    return state;
+  }
+  return {
+    ...state,
+    items: upsert(state.items, {
+      id: compactionId(event),
+      kind: 'contextCompaction',
+      text: str(event['compact_error']) || '理由は判りません',
+      detail: '',
+      status: 'エラー',
+      turnId: undefined,
+      diffs: [],
+    }),
+  };
+}
+
+/** 圧縮の項目id。同じ通知が二度届いても項目が増えないよう uuid を使う。 */
+function compactionId(event: Record<string, unknown>): string {
+  return 'compaction:' + (str(event['uuid']) || str(event['session_id']));
 }
 
 /**

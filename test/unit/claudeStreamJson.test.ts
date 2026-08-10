@@ -372,3 +372,94 @@ describe('作業記録用の成果（turnResultText / turnEditedFiles）', () =>
     expect(next.turnResultText).toBe('');
   });
 });
+
+describe('圧縮', () => {
+  it('compact_boundary が圧縮の位置を会話に残す', () => {
+    const state = apply([
+      {
+        type: 'system',
+        subtype: 'compact_boundary',
+        uuid: 'b1',
+        compact_metadata: { trigger: 'manual', pre_tokens: 41321, post_tokens: 2847 },
+      },
+    ]);
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]).toMatchObject({
+      id: 'compaction:b1',
+      kind: 'contextCompaction',
+      detail: '手動 ・ 41321 → 2847 トークン',
+      status: undefined,
+    });
+  });
+
+  it('自動の圧縮も同じ形で残す', () => {
+    const state = apply([
+      {
+        type: 'system',
+        subtype: 'compact_boundary',
+        uuid: 'b2',
+        compact_metadata: { trigger: 'auto', pre_tokens: 100, post_tokens: 10 },
+      },
+    ]);
+    expect(state.items[0]?.detail).toBe('自動 ・ 100 → 10 トークン');
+  });
+
+  it('同じ境目が二度届いても項目は増えない', () => {
+    const event = {
+      type: 'system',
+      subtype: 'compact_boundary',
+      uuid: 'b3',
+      compact_metadata: { trigger: 'manual', pre_tokens: 1, post_tokens: 0 },
+    };
+    expect(apply([event, event]).items).toHaveLength(1);
+  });
+
+  it('成功の status では項目を作らない（境目と二重になるため）', () => {
+    const state = apply([
+      { type: 'system', subtype: 'status', status: null, compact_result: 'success', uuid: 's1' },
+    ]);
+    expect(state.items).toEqual([]);
+  });
+
+  it('進行中の status では何もしない', () => {
+    const state = apply([{ type: 'system', subtype: 'status', status: 'compacting', uuid: 's0' }]);
+    expect(state.items).toEqual([]);
+  });
+
+  it('失敗した圧縮は理由を残す', () => {
+    const state = apply([
+      {
+        type: 'system',
+        subtype: 'status',
+        status: null,
+        compact_result: 'failed',
+        compact_error: 'Not enough messages to compact.',
+        uuid: 's2',
+      },
+    ]);
+    expect(state.items[0]).toMatchObject({
+      kind: 'contextCompaction',
+      status: 'エラー',
+      text: 'Not enough messages to compact.',
+    });
+  });
+
+  it('理由が無い失敗でも黙って消さない', () => {
+    const state = apply([
+      { type: 'system', subtype: 'status', status: null, compact_result: 'failed', uuid: 's3' },
+    ]);
+    expect(state.items[0]?.text).toBe('理由は判りません');
+  });
+
+  it('圧縮後に流れてくる要約は発言として並べない', () => {
+    // 要約は content が文字列で届く。配列の part だけを見ているため素通しになる
+    const state = apply([
+      {
+        type: 'user',
+        uuid: 'u9',
+        message: { role: 'user', content: 'This session is being continued from...' },
+      },
+    ]);
+    expect(state.items).toEqual([]);
+  });
+});

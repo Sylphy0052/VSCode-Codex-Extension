@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   addApproval,
   applyEvent,
+  buildContextUsage,
   initialChatState,
   normalizeItem,
   removeApproval,
@@ -427,5 +428,107 @@ describe('承認の出し入れ', () => {
     });
     expect(resolved.approvals).toHaveLength(1);
     expect(applyEvent(initialChatState, 'serverRequest/resolved', {})).toBe(initialChatState);
+  });
+});
+
+describe('buildContextUsage', () => {
+  it('上限があれば残りの割合を出す', () => {
+    expect(buildContextUsage(21541, 258400)).toEqual({
+      usedTokens: 21541,
+      contextWindow: 258400,
+      remainingPercent: 92,
+    });
+  });
+
+  it('上限が判らなければ割合を出さない', () => {
+    expect(buildContextUsage(21541, undefined)).toEqual({
+      usedTokens: 21541,
+      contextWindow: undefined,
+      remainingPercent: undefined,
+    });
+  });
+
+  it('上限が0以下なら割合を出さない', () => {
+    expect(buildContextUsage(100, 0)?.remainingPercent).toBeUndefined();
+  });
+
+  it('上限を超えても残りは0で止まる', () => {
+    expect(buildContextUsage(300000, 258400)?.remainingPercent).toBe(0);
+  });
+
+  it('信用できない使用量では何も返さない', () => {
+    expect(buildContextUsage(-1, 100)).toBeUndefined();
+    expect(buildContextUsage(Number.NaN, 100)).toBeUndefined();
+  });
+});
+
+describe('applyEvent / thread/tokenUsage/updated', () => {
+  // 実測した通知の形。`total` はスレッド全体の累計で、コンテキストの占有量は `last`
+  const notification = (lastTotal: number, window: number | null) => ({
+    threadId: 't1',
+    turnId: TURN,
+    tokenUsage: {
+      total: { totalTokens: 21541, inputTokens: 21536, cachedInputTokens: 6912, outputTokens: 5 },
+      last: { totalTokens: lastTotal, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
+      modelContextWindow: window,
+    },
+  });
+
+  it('last の合計と上限からコンテキスト使用量を作る', () => {
+    const state = applyEvent(
+      initialChatState,
+      'thread/tokenUsage/updated',
+      notification(21541, 258400),
+    );
+    expect(state.context).toEqual({
+      usedTokens: 21541,
+      contextWindow: 258400,
+      remainingPercent: 92,
+    });
+  });
+
+  it('圧縮で last だけが下がる', () => {
+    const before = applyEvent(
+      initialChatState,
+      'thread/tokenUsage/updated',
+      notification(21541, 258400),
+    );
+    const after = applyEvent(before, 'thread/tokenUsage/updated', notification(4831, 258400));
+    expect(after.context?.usedTokens).toBe(4831);
+    expect(after.context?.remainingPercent).toBe(98);
+  });
+
+  it('上限がnullなら割合を出さない', () => {
+    const state = applyEvent(
+      initialChatState,
+      'thread/tokenUsage/updated',
+      notification(21541, null),
+    );
+    expect(state.context?.remainingPercent).toBeUndefined();
+  });
+
+  it('読めない通知では状態を変えない', () => {
+    expect(applyEvent(initialChatState, 'thread/tokenUsage/updated', {})).toBe(initialChatState);
+    expect(
+      applyEvent(initialChatState, 'thread/tokenUsage/updated', { tokenUsage: { last: {} } }),
+    ).toBe(initialChatState);
+  });
+
+  it('レート制限の消費率とは別に持つ', () => {
+    const withUsage = applyEvent(initialChatState, 'account/rateLimits/updated', {
+      rateLimits: { primary: { usedPercent: 42 } },
+    });
+    const state = applyEvent(withUsage, 'thread/tokenUsage/updated', notification(21541, 258400));
+    expect(state.usage?.usedPercent).toBe(42);
+    expect(state.context?.usedTokens).toBe(21541);
+  });
+});
+
+describe('normalizeItem / contextCompaction', () => {
+  it('圧縮の項目を種類ごと残す', () => {
+    expect(normalizeItem({ type: 'contextCompaction', id: 'c1' })).toMatchObject({
+      id: 'c1',
+      kind: 'contextCompaction',
+    });
   });
 });

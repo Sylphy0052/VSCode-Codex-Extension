@@ -26,7 +26,11 @@ export function chatScript(agentLabel: string): string {
     mcpToolCall: 'ツール',
     webSearch: 'Web検索',
     plan: '計画',
+    contextCompaction: '会話を圧縮しました',
   };
+
+  /** 残りがこの割合を下回ったら警告として見せる。 */
+  const LOW_CONTEXT_PERCENT = 20;
 
   const CLASS_OF = {
     userMessage: 'user',
@@ -327,12 +331,58 @@ export function chatScript(agentLabel: string): string {
     el('stop').hidden = !state.busy;
     // 応答中でも送れる。進行中のターンへ割り込むので、応答は止まらない
     el('send').disabled = false;
+    // 圧縮は新しいターンを起こす。応答中に重ねると割り込みになるため止める
+    el('compact').disabled = !!state.busy;
     applyLoop(state.loop);
+    renderStatus(state);
+  }
+
+  /**
+   * 入力欄の下の一行。レート制限の消費率とコンテキスト残量は別物なので、
+   * どちらの数字か分かる言葉を付けて並べる。
+   */
+  function renderStatus(state) {
+    const status = el('status');
+    status.replaceChildren();
+
     const bits = [];
     if (state.busy) bits.push('応答中…');
     const usageText = formatUsage(state.usage);
     if (usageText !== '') bits.push(usageText);
-    el('status').textContent = bits.join(' ・ ');
+    if (bits.length > 0) status.appendChild(document.createTextNode(bits.join(' ・ ')));
+
+    const context = formatContext(state.context);
+    if (!context) return;
+    if (status.childNodes.length > 0) status.appendChild(document.createTextNode(' ・ '));
+    const span = document.createElement('span');
+    if (context.low) span.className = 'warn';
+    span.textContent = context.text;
+    status.appendChild(span);
+  }
+
+  /**
+   * コンテキストの使用量。上限が判らないときは割合を出さない（作った数字を出さない）。
+   * 値そのものが無ければ何も返さず、表示ごと消す。
+   */
+  function formatContext(context) {
+    if (!context) return undefined;
+    const used = formatTokens(context.usedTokens);
+    if (context.remainingPercent === undefined) {
+      return { text: 'コンテキスト ' + used, low: false };
+    }
+    return {
+      text:
+        'コンテキスト ' + used + '/' + formatTokens(context.contextWindow) +
+        '（残り' + context.remainingPercent + '%）',
+      low: context.remainingPercent <= LOW_CONTEXT_PERCENT,
+    };
+  }
+
+  function formatTokens(count) {
+    if (typeof count !== 'number') return '?';
+    if (count >= 1000000) return (count / 1000000).toFixed(1) + 'M';
+    if (count >= 1000) return Math.round(count / 1000) + 'k';
+    return String(count);
   }
 
   // ループが止まった理由の説明。止まったことに気付けるよう、次を始めるまで残す。
@@ -549,6 +599,8 @@ export function chatScript(agentLabel: string): string {
   }
 
   el('send').addEventListener('click', send);
+  // 確認は拡張機能側で出す。会話の内容を不可逆に変えるため、押しただけでは実行しない
+  el('compact').addEventListener('click', () => vscode.postMessage({ type: 'compact' }));
   el('flushQueue').addEventListener('click', () => vscode.postMessage({ type: 'flushQueue' }));
   el('stop').addEventListener('click', () => vscode.postMessage({ type: 'interrupt' }));
   // 応答中のEscで中断する。画面のどこにフォーカスがあっても効くようにする

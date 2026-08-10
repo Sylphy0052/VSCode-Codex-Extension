@@ -13,7 +13,7 @@ import type { FileSystemPort } from '../session/ports';
 import { ClaudeUsageProbe } from '../claude/usageProbe';
 import { CommandCatalog } from '../provider/commandCatalog';
 import type { SlashCommand } from '../provider/slashCommands';
-import { renderShell, reportTurnResult } from './chatView';
+import { confirmCompact, renderShell, reportTurnResult } from './chatView';
 import { CLAUDE_EFFORTS, CLAUDE_PERMISSION_MODES } from '../claude/types';
 import type { SettingsProvider } from './settingsProvider';
 import type { ChatActivity } from './chatView';
@@ -316,6 +316,10 @@ export class ClaudeChatViewManager implements vscode.Disposable {
         entry.session.interrupt();
         return;
       }
+      if (type === 'compact') {
+        void this.compact(entry);
+        return;
+      }
       if (type === 'cancelQueued' && typeof m['index'] === 'number') {
         entry.session.cancelQueued(m['index']);
         return;
@@ -355,6 +359,22 @@ export class ClaudeChatViewManager implements vscode.Disposable {
           entry.session.decide(requestId, m['decision'] as ApprovalDecision);
         }
       }
+    } catch (e) {
+      this.reportError(e);
+    }
+  }
+
+  /**
+   * 会話を圧縮する。内容を不可逆に変えるため、実行前に必ず確認する。
+   */
+  private async compact(entry: ClaudePanel): Promise<void> {
+    if (!(await confirmCompact())) {
+      return;
+    }
+    try {
+      // 圧縮は新しいターンを起こす。ループの指示と重ならないよう割り込み扱いにする
+      entry.loop.noteUserAction();
+      entry.session.compact();
     } catch (e) {
       this.reportError(e);
     }

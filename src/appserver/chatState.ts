@@ -58,6 +58,45 @@ export interface ChatUsage {
   limited: boolean | undefined;
 }
 
+/**
+ * コンテキストの使用量。レート制限の消費率（`ChatUsage`）とは別物なので混ぜない。
+ *
+ * Codexは `thread/tokenUsage/updated` の `last`、Claude Codeは control protocol の
+ * `get_context_usage` から得る。どちらも「いまコンテキストに載っている量」を表す。
+ */
+export interface ContextUsage {
+  /** いまコンテキストに載っているトークン数。 */
+  usedTokens: number;
+  /** コンテキスト上限。CLIが返さないことがあるため無い場合を許す。 */
+  contextWindow: number | undefined;
+  /** 残りの割合（0-100の整数）。上限が判らなければ undefined。 */
+  remainingPercent: number | undefined;
+}
+
+/**
+ * 使用量と上限から表示用の値を作る。
+ *
+ * 上限が無い・0以下・使用量が負といった信用できない値では割合を出さない。
+ * 誤った残量を出すくらいなら何も出さないほうがよい。
+ */
+export function buildContextUsage(
+  usedTokens: number,
+  contextWindow: number | undefined,
+): ContextUsage | undefined {
+  if (!Number.isFinite(usedTokens) || usedTokens < 0) {
+    return undefined;
+  }
+  const window =
+    contextWindow !== undefined && Number.isFinite(contextWindow) && contextWindow > 0
+      ? contextWindow
+      : undefined;
+  if (window === undefined) {
+    return { usedTokens, contextWindow: undefined, remainingPercent: undefined };
+  }
+  const remaining = Math.max(0, Math.min(100, Math.round(((window - usedTokens) / window) * 100)));
+  return { usedTokens, contextWindow: window, remainingPercent: remaining };
+}
+
 export interface ChatState {
   threadId: string | undefined;
   /** Codexが会話内容から付ける要約名。ユーザーが変更することもできる。 */
@@ -89,6 +128,8 @@ export interface ChatState {
   items: ChatItem[];
   approvals: PendingApproval[];
   usage: ChatUsage | undefined;
+  /** コンテキストの使用量。まだ判らない間は undefined（数字を出さない）。 */
+  context: ContextUsage | undefined;
   /**
    * 直前に完了/失敗したターンの応答テキスト。作業記録の成果行（`kind: 'result'`）に使う。
    * ターンが終わるたびに上書きする。
@@ -113,11 +154,14 @@ export const initialChatState: ChatState = {
   items: [],
   approvals: [],
   usage: undefined,
+  context: undefined,
   turnResultText: '',
   turnEditedFiles: [],
 };
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+const numberOf = (v: unknown): number | undefined =>
+  typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 const rec = (v: unknown): Record<string, unknown> | undefined =>
   typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : undefined;
 
@@ -406,6 +450,18 @@ export function applyEvent(
           limited: state.usage?.limited,
         },
       };
+    }
+
+    case 'thread/tokenUsage/updated': {
+      // `total` はスレッド全体の累計。コンテキストの占有量は `last` 側で、
+      // 圧縮すると（実測で 21541 → 4831 のように）そちらだけが下がる
+      const tokenUsage = rec(params['tokenUsage']);
+      const usedTokens = numberOf(rec(tokenUsage?.['last'])?.['totalTokens']);
+      if (tokenUsage === undefined || usedTokens === undefined) {
+        return state;
+      }
+      const context = buildContextUsage(usedTokens, numberOf(tokenUsage['modelContextWindow']));
+      return context === undefined ? state : { ...state, context };
     }
 
     case 'item/fileChange/patchUpdated': {

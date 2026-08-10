@@ -48,6 +48,20 @@ export interface ChatActivity {
 }
 
 /**
+ * 圧縮してよいか確かめる。Codex画面・Claude Code画面の両方で共有する。
+ *
+ * 圧縮は会話の内容を要約へ置き換える。元には戻せないため、必ず確認を通す。
+ */
+export async function confirmCompact(): Promise<boolean> {
+  const choice = await vscode.window.showWarningMessage(
+    'これまでの会話を要約に置き換えます。元の内容には戻せません。',
+    { modal: true },
+    '圧縮する',
+  );
+  return choice === '圧縮する';
+}
+
+/**
  * ターン完了時の成果を作業記録へ通知する。Codex画面・Claude Code画面の両方で共有する。
  * 応答テキストと編集ファイルの両方が空なら何もしない。
  */
@@ -270,6 +284,15 @@ export class ChatViewManager implements vscode.Disposable {
       if (type === 'interrupt') {
         entry.loop.noteUserAction();
         await entry.session.interrupt();
+        return;
+      }
+      if (type === 'compact') {
+        if (!(await confirmCompact())) {
+          return;
+        }
+        // 圧縮は新しいターンを起こす。ループの指示と重ならないよう割り込み扱いにする
+        entry.loop.noteUserAction();
+        await entry.session.compact();
         return;
       }
       if (type === 'cancelQueued' && typeof m['index'] === 'number') {
@@ -620,6 +643,7 @@ ${chatStyles()}
     <button id="send" type="button">送信</button>
     <button id="stop" type="button" class="secondary" title="Escでも中断できます" hidden>中断</button>
     <button id="loopToggle" type="button" class="secondary" title="同じ指示を条件成立まで繰り返します">ループ</button>
+    <button id="compact" type="button" class="secondary" title="これまでの会話を要約に置き換えてコンテキストを空けます">圧縮</button>
   </div>
   <div id="loop" hidden>
     <label>初回指示（空なら継続指示から始めます）
