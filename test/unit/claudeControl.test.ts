@@ -5,6 +5,8 @@ import {
   buildControlRequest,
   buildUserMessage,
   describeCanUseTool,
+  readCommandList,
+  readCommandsChanged,
   readContextUsage,
   readControlRequest,
   readControlResponse,
@@ -187,5 +189,62 @@ describe('readControlResponse の中身', () => {
     });
     expect(response?.ok).toBe(true);
     expect(response?.payload).toBeUndefined();
+  });
+});
+
+describe('readCommandList', () => {
+  // 実測した `initialize` の応答（90件）の一部
+  const payload = {
+    commands: [
+      {
+        name: 'compact',
+        description: 'Free up context by summarizing the conversation so far',
+        argumentHint: '<optional custom summarization instructions>',
+      },
+      { name: 'context', description: 'Show current context usage', argumentHint: '' },
+      { name: 'genshijin:genshijin', description: '原始人モード強度切替', argumentHint: '' },
+      { name: 'genshijin:genshijin', description: '重複して返ってくる', argumentHint: '' },
+      { name: '', description: '名前が無い', argumentHint: '' },
+    ],
+  };
+
+  it('名前と説明と引数のヒントを取り出す', () => {
+    expect(readCommandList(payload)?.[0]).toEqual({
+      name: 'compact',
+      description: 'Free up context by summarizing the conversation so far',
+      argumentHint: '<optional custom summarization instructions>',
+    });
+  });
+
+  it('同じ名前と名前無しを落とす', () => {
+    expect(readCommandList(payload)?.map((c) => c.name)).toEqual([
+      'compact',
+      'context',
+      'genshijin:genshijin',
+    ]);
+  });
+
+  it('一覧が無いときは undefined（空の一覧と区別する）', () => {
+    // 読めなかっただけで候補を消してしまわないようにする
+    expect(readCommandList(undefined)).toBeUndefined();
+    expect(readCommandList({})).toBeUndefined();
+    expect(readCommandList({ commands: 'なにか' })).toBeUndefined();
+    expect(readCommandList({ commands: [] })).toEqual([]);
+  });
+});
+
+describe('readCommandsChanged', () => {
+  it('セッション中の増減を受け取る', () => {
+    const commands = readCommandsChanged({
+      type: 'system',
+      subtype: 'commands_changed',
+      commands: [{ name: 'new-skill', description: '増えた', argumentHint: '' }],
+    });
+    expect(commands?.map((c) => c.name)).toEqual(['new-skill']);
+  });
+
+  it('他の通知は引き受けない', () => {
+    expect(readCommandsChanged({ type: 'system', subtype: 'init' })).toBeUndefined();
+    expect(readCommandsChanged({ type: 'assistant' })).toBeUndefined();
   });
 });

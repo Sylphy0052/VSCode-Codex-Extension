@@ -73,13 +73,23 @@ export class ClaudeChatViewManager implements vscode.Disposable {
     }
   }
 
-  /** 入力欄の候補を送る。一度読んだら使い回す。 */
+  /**
+   * 入力欄の候補を送る。
+   *
+   * CLIが `initialize` の応答で使えるコマンドを全部返すため、そちらを優先する
+   * （組込・ユーザー定義・プラグイン由来が揃っており、実在しないものは入らない）。
+   * まだ届いていない、または取れなかった場合だけファイルを走査した一覧で代替する。
+   */
   private async postCommands(entry: ClaudePanel): Promise<void> {
     if (entry.disposed) {
       return;
     }
-    this.commands ??= await this.catalog.forClaude(this.claudeHome, workspaceFolderPaths());
-    void entry.panel.webview.postMessage({ type: 'commands', commands: this.commands });
+    const fromCli = entry.session.commands;
+    const commands =
+      fromCli.length > 0
+        ? fromCli
+        : (this.commands ??= await this.catalog.forClaude(this.claudeHome, workspaceFolderPaths()));
+    void entry.panel.webview.postMessage({ type: 'commands', commands });
   }
 
   /**
@@ -227,6 +237,8 @@ export class ClaudeChatViewManager implements vscode.Disposable {
         });
       },
       () => this.warnApprovalsUnavailable(),
+      // 起動直後と、セッション中に増減したときに届く
+      () => void this.postCommands(entry),
     );
 
     const loop = new LoopController(
