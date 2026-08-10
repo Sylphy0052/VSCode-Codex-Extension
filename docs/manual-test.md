@@ -21,29 +21,44 @@ npm run build     # dist/extension.js を更新
 
 - VSCodeで `F5`（Run Extension）。拡張機能ホストの新しいウィンドウが開く
 - 開発ホスト側で確認用の作業フォルダを1つ開く。**ファイルを壊してよい捨てフォルダ**にする（承認の確認でコマンドを実際に実行させるため）
-- コマンドパレット → `Codex: Show Log` でOutputChannelを常時開いておく。以下「ログ」と書いたらこれを指す
+- コマンドパレット → `Agent: ログを表示` でOutputChannelを常時開いておく。以下「ログ」と書いたらこれを指す
 - WSL Remoteの場合、拡張機能は `extensionKind: ["workspace"]` でリモート側に載る。CLIがリモート側のPATHにあることを `which codex` `which claude` で確認する
 
 ### 設定
 
 承認カードを確実に出すため、確認中は次にする（`settings.json` またはサイドバーの設定パネル）。
 
-| キー                        | 値                 | 理由                           |
-| --------------------------- | ------------------ | ------------------------------ |
-| `codex.sandbox`             | `workspace-write`  | 書き込みで承認要求を発生させる |
-| `codex.approvalMode`        | `on-request`       | 承認カードの経路を通す         |
-| `claude.permissionMode`     | 空 または `manual` | control protocolの承認を通す   |
-| `agent.activityLog.enabled` | `true`             | A群で使う                      |
+| キー                        | 値                 | 理由                                 |
+| --------------------------- | ------------------ | ------------------------------------ |
+| `codex.sandbox`             | `read-only`        | 書き込みのたびに承認要求を発生させる |
+| `codex.approvalMode`        | `on-request`       | 承認カードの経路を通す               |
+| `claude.permissionMode`     | 空 または `manual` | control protocolの承認を通す         |
+| `agent.activityLog.enabled` | `true`             | A群で使う                            |
 
-`danger-full-access` + `never` の組み合わせ、および `claude.permissionMode` の `bypassPermissions` は承認カードが出なくなるため、C群・L群の承認ケースでは使わない。
+`codex.approvalMode` が `never` だと承認要求そのものが発生せず、サンドボックスで弾かれた操作がそのまま失敗する。`danger-full-access` + `never` の組み合わせ、および `claude.permissionMode` の `bypassPermissions` も承認カードが出なくなるため、C群・L群の承認ケースでは使わない。`workspace-write` では作業フォルダ内の書き込みが承認なしで通るため、承認カードの確認には向かない。
+
+**前提**: サンドボックスの実行には `bubblewrap` が要る。無いと `Codex could not find bubblewrap on PATH` が出てサンドボックス実行が失敗し、承認要求の内容が「サンドボックス無しで再試行するか」という異常系に変わる。
+
+```bash
+sudo apt install bubblewrap
+```
 
 ## C群: Codex画面（app-server）
 
 未確認領域の中心。`codex app-server` との接続・承認・分岐・タブ名が対象。
 
+**TUIタブと取り違えないこと**。C群はすべてCodex画面で行う。
+
+|        | Codex画面                                                               | TUIタブ                                              |
+| ------ | ----------------------------------------------------------------------- | ---------------------------------------------------- |
+| 見た目 | VSCodeのテーマ色のWebview。下に入力欄とモデル/effort/承認のセレクタ     | 黒いターミナル。`›` プロンプト                       |
+| 開き方 | 履歴ビューの `+`、またはコマンドパレットの `Agent: 新しい会話（Codex）` | 履歴ビューの `...` →「新しいTUIセッション（Codex）」 |
+| 承認   | 画面内のカード（ボタン）                                                | `1. Yes, proceed (y)` 形式の選択肢                   |
+| ログ   | `app-serverに接続しました` が出る                                       | `起動 provider=codex tag=… args=[…]` が出る          |
+
 ### C-01 画面が開いて発言が返る
 
-- 操作: サイドバーの吹き出しアイコン（`codex.newChat`）
+- 操作: サイドバーの `+` アイコン（`codex.newChat`）
 - 期待: エディタタブとしてCodex画面が開く。`こんにちは` と送ると、応答が**逐次流れて**表示される（`item/agentMessage/delta` によるストリーミング）
 - 確認: ログに接続エラーが出ていない。応答が一括ではなく徐々に伸びる
 - 落ちたとき: `codex app-server` が起動できているか、ログのstderrを見る。ここが落ちたらC群は中断
@@ -51,8 +66,10 @@ npm run build     # dist/extension.js を更新
 ### C-02 使用量と状態表示
 
 - 操作: C-01の続き
-- 期待: ターン完了後、ステータスバーの使用量表示が更新される（`thread/tokenUsage/updated` / `account/rateLimits/updated`）
-- 確認: 発言前後で数値が変わる
+- 期待:
+  - ステータスバーに `Codex <n>%` が出る（未取得なら `Codex --`。ロールアウトを読む別経路）
+  - Codex画面のフッターに `使用量 <n>%` が出る（`account/rateLimits/updated` 由来）
+- 確認: ホバーでプラン・リセット時刻・時点が出る。トークン数は表示しない仕様
 
 ### C-03 承認カード（許可）
 
@@ -170,18 +187,24 @@ npm run build     # dist/extension.js を更新
 - 期待: 新しいタブが開いて会話は継続できるが、**そのタブは復元と作業記録の対象外**になる（CLIが振る新しいidを追跡できないため）
 - 確認: リロード後にそのタブが復元されないことが期待動作であること
 
+### L-11 使用量の表示
+
+- 操作: L-01の会話を1ターン進める
+- 期待: 画面フッターに `5時間制限 リセット <n>時間後` のように出る（`rate_limit_event` 由来）
+- 確認: ステータスバーはCodex専用のため変化しない。制限に到達している場合は `到達` が併記される
+
 ## T群: TUIタブ（回帰確認）
 
 Codexの紐付けは確認済み。ここではプロバイダ抽象を入れた後の回帰と、Claude Code側を見る。
 
 ### T-01 Codex TUIタブ
 
-- 操作: サイドバーの `+`（`codex.newSession`）→ TUI上で1回発言する
+- 操作: サイドバーの `...` →「新しいTUIセッション（Codex）」（`codex.newSession`）→ TUI上で1回発言する
 - 期待: ターミナルがエディタタブとして開き、発言後にサイドバーの履歴へ現れる（ロールアウトは**最初の発言時**に作られる）
 
 ### T-02 Claude Code TUIタブ
 
-- 操作: サイドバーのスパークル（`claude.newSession`）→ TUI上で1回発言する
+- 操作: サイドバーの `...` →「新しいTUIセッション（Claude Code）」（`claude.newSession`）→ TUI上で1回発言する
 - 期待: `--session-id` で起動と同時に紐付く。履歴に現れる
 
 ### T-03 スラッシュコマンド

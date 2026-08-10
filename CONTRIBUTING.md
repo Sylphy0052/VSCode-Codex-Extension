@@ -32,7 +32,7 @@ npm run check     # lint + typecheck + test
 
 F5（`Run Extension`）で拡張機能ホストが起動する。`preLaunchTask` でビルドが走るため、事前の `npm run build` は不要。
 
-- ログは出力チャネル `Codex Sessions`（コマンドパレットの `Codex: Show Log`）に出る。起動した引数・無視した設定値・一覧構築の異常が記録される
+- ログは出力チャネル `Agent Sessions`（コマンドパレットの `Agent: ログを表示`）に出る。起動した引数・無視した設定値・一覧構築の異常が記録される
 - Webview（チャット画面・設定パネル）のDOMを見るには、拡張機能ホスト側で `Developer: Open Webview Developer Tools` を実行する
 - 手を入れたあとは拡張機能ホストのウィンドウをリロードすれば反映される
 

@@ -41,7 +41,8 @@ describe('parseSessionIndex', () => {
   });
 
   it('thread_name が無い/空ならundefinedにする', () => {
-    const content = '{"id":"019fd79f-1e16-7b60-b9d2-0324b275ed81","updated_at":"2026-08-06T15:09:29Z"}';
+    const content =
+      '{"id":"019fd79f-1e16-7b60-b9d2-0324b275ed81","updated_at":"2026-08-06T15:09:29Z"}';
     const { entries } = parseSessionIndex(content);
     expect(entries[0]?.threadName).toBeUndefined();
   });

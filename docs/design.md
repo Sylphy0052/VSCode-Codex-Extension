@@ -14,18 +14,18 @@ CLIコーディングエージェント（Codex / Claude Code）のセッショ�
 
 ### Phase 1のスコープ
 
-| 含む | 含まない |
-| --- | --- |
-| 新規セッション（1ボタン、設定既定値で即起動） | エディタ選択範囲のCodexへの送信 |
-| 新規セッション（Advanced: モデル/承認モード選択） | セッションの実行中/待機中ステータス表示 |
-| 履歴TreeView（ワークスペース限定＋全件トグル） | Webviewによる独自チャットUI |
-| resume / fork / archive / unarchive / delete | Codex Cloud連携 |
-| タブ位置・並び順とセッションIDの記憶と再起動時の自動復元 | マルチルートワークスペースの高度な扱い（§11） |
-| thread_nameへのタブ名追従 | |
-| Codex未インストール/未ログイン時のガイド | サインイン/サインアウトのUI |
-| 操作パネル（モデル/effort/承認方法/sandboxの切替） | サインイン/サインアウトのUI |
-| Codex画面（app-server連携のチャットUI・承認・ターン指定fork） | TUIのスラッシュコマンド相当の再実装 |
-| 使用量の常時表示（ステータスバー＋操作パネル） | 使用量の能動的な取得（APIが無い） |
+| 含む                                                          | 含まない                                      |
+| ------------------------------------------------------------- | --------------------------------------------- |
+| 新規セッション（1ボタン、設定既定値で即起動）                 | エディタ選択範囲のCodexへの送信               |
+| 新規セッション（Advanced: モデル/承認モード選択）             | セッションの実行中/待機中ステータス表示       |
+| 履歴TreeView（ワークスペース限定＋全件トグル）                | Webviewによる独自チャットUI                   |
+| resume / fork / archive / unarchive / delete                  | Codex Cloud連携                               |
+| タブ位置・並び順とセッションIDの記憶と再起動時の自動復元      | マルチルートワークスペースの高度な扱い（§11） |
+| thread_nameへのタブ名追従                                     |                                               |
+| Codex未インストール/未ログイン時のガイド                      | サインイン/サインアウトのUI                   |
+| 操作パネル（モデル/effort/承認方法/sandboxの切替）            | サインイン/サインアウトのUI                   |
+| Codex画面（app-server連携のチャットUI・承認・ターン指定fork） | TUIのスラッシュコマンド相当の再実装           |
+| 使用量の常時表示（ステータスバー＋操作パネル）                | 使用量の能動的な取得（APIが無い）             |
 
 ## 2. 全体アーキテクチャ
 
@@ -100,7 +100,7 @@ test/
 1行1セッション。一覧の骨格として使う。
 
 ```json
-{"id":"019fd7a6-...","thread_name":"環境構築手順を確認","updated_at":"2026-08-06T15:17:53Z"}
+{ "id": "019fd7a6-...", "thread_name": "環境構築手順を確認", "updated_at": "2026-08-06T15:17:53Z" }
 ```
 
 **cwdを含まない**ため、ワークスペースでのフィルタには次のsession_metaが必要。
@@ -112,9 +112,17 @@ test/
 **1行目のみ**を読む。全文パースは不要。
 
 ```json
-{"timestamp":"...","type":"session_meta","payload":{
-  "session_id":"019fd7a6-...","cwd":"/home/…/novel-writer",
-  "originator":"codex_vscode","source":"vscode","cli_version":"0.146.0-…"}}
+{
+  "timestamp": "...",
+  "type": "session_meta",
+  "payload": {
+    "session_id": "019fd7a6-...",
+    "cwd": "/home/…/novel-writer",
+    "originator": "codex_vscode",
+    "source": "vscode",
+    "cli_version": "0.146.0-…"
+  }
+}
 ```
 
 利用フィールド: `session_id` / `cwd` / `timestamp` / `originator` / `source` / `thread_source`。
@@ -191,11 +199,11 @@ resume時は `thread_name` が既知なので、タブ名を最初から確定�
 
 ```ts
 type PersistedTab = {
-  sessionId: string
-  viewColumn: number
-  order: number       // 同一グループ内のタブ位置
-  cwd: string
-}
+  sessionId: string;
+  viewColumn: number;
+  order: number; // 同一グループ内のタブ位置
+  cwd: string;
+};
 ```
 
 `order` は `window.tabGroups` から**実際のタブ位置を読んで**保存する。`createdAt` 順ではユーザーがドラッグで並べ替えた結果を再現できない。保存契機はタブの開閉・移動時（`window.tabGroups.onDidChangeTabs` / `onDidChangeTabGroups`）で、連続変更に備えてデバウンスする。
@@ -220,11 +228,11 @@ createTerminal({
 
 `window.onDidCloseTerminal` を購読し、追跡中の端末が閉じたときに以下を行う。
 
-| 条件 | 処理 |
-| --- | --- |
-| ユーザーがタブを閉じた（`exitStatus.reason === Shutdown` 等） | `TabStateStore` から該当エントリを削除。これを怠ると**閉じたセッションが次回起動で復活する** |
-| `exitStatus.code !== 0` かつ起動から数秒以内 | 起動失敗とみなしエラー通知（実行ファイル不在・未ログイン・引数不正）。通知に「出力を表示」アクションを付ける |
-| `exitStatus.code === 0` | 正常終了。状態から削除し、TreeViewを更新 |
+| 条件                                                          | 処理                                                                                                         |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| ユーザーがタブを閉じた（`exitStatus.reason === Shutdown` 等） | `TabStateStore` から該当エントリを削除。これを怠ると**閉じたセッションが次回起動で復活する**                 |
+| `exitStatus.code !== 0` かつ起動から数秒以内                  | 起動失敗とみなしエラー通知（実行ファイル不在・未ログイン・引数不正）。通知に「出力を表示」アクションを付ける |
+| `exitStatus.code === 0`                                       | 正常終了。状態から削除し、TreeViewを更新                                                                     |
 
 いずれの場合も `SessionBinder` の未紐付けエントリと `TerminalRenamer` の保留キューから該当端末を除去する。
 
@@ -250,26 +258,38 @@ VSCodeにはターミナル名を直接書き換えるAPIがなく、`workbench.
 
 ## 6. コマンドとUI
 
-| コマンドID | タイトル | 導線 |
-| --- | --- | --- |
-| `codex.newSession` | Codex: New Session | ビュータイトルの `+`、キーバインド、パレット |
-| `codex.newSessionAdvanced` | Codex: New Session (Advanced…) | パレット |
-| `codex.resumeSession` | Codex: Resume Session… | パレット（QuickPick） |
-| `codex.resumeLast` | Codex: Resume Last Session | パレット |
-| `codex.openSession` | （内部）ツリークリック | TreeItem.command |
-| `codex.forkSession` | Codex: Fork Session | ツリー右クリック |
-| `codex.archiveSession` | Codex: Archive Session | ツリー右クリック |
-| `codex.unarchiveSession` | Codex: Unarchive Session | ツリー右クリック（アーカイブ表示時） |
-| `codex.deleteSession` | Codex: Delete Session | ツリー右クリック（確認ダイアログ必須） |
-| `codex.toggleScope` | Codex: Toggle All Workspaces | ビュータイトルのトグル |
-| `codex.refreshSessions` | Codex: Refresh | ビュータイトル |
+コマンドIDの接頭辞は `codex.` / `claude.` のままにしてある。表示名を `Agent` に寄せた後も、既存の設定キー・キーバインド・永続化データと互換を保つため。
+
+| コマンドID                                              | タイトル                           | 導線                                          |
+| ------------------------------------------------------- | ---------------------------------- | --------------------------------------------- |
+| `codex.newChat`                                         | 新しい会話（Codex）                | ビュータイトルの `+`、パレット                |
+| `claude.newChat`                                        | 新しい会話（Claude Code）          | ビュータイトルのスパークル、パレット          |
+| `codex.newSession`                                      | 新しいTUIセッション（Codex）       | ビュータイトルの `...`、パレット              |
+| `claude.newSession`                                     | 新しいTUIセッション（Claude Code） | ビュータイトルの `...`、パレット              |
+| `codex.openSession`                                     | （内部）ツリークリック             | TreeItem.command                              |
+| `codex.openChat`                                        | チャット画面で開く（Codex）        | ツリー項目のホバー                            |
+| `claude.openChat`                                       | チャット画面で開く（Claude Code）  | ツリー項目のホバー                            |
+| `codex.openConversation`                                | 会話を開いて分岐する               | ツリー項目のホバー（Codexのみ）               |
+| `codex.renameChat`                                      | セッション名を変更                 | Codex画面がアクティブなときのエディタタイトル |
+| `codex.resumeSession`                                   | セッションを再開…                  | パレット（QuickPick）                         |
+| `codex.resumeLast`                                      | 直前のセッションを再開             | パレット                                      |
+| `codex.forkSession`                                     | このセッションをforkする           | ツリー右クリック                              |
+| `codex.archiveSession`                                  | アーカイブする                     | ツリー右クリック（Codexのみ）                 |
+| `codex.unarchiveSession`                                | アーカイブを解除する               | ツリー右クリック（アーカイブ表示時）          |
+| `codex.deleteSession`                                   | 削除する                           | ツリー右クリック（確認ダイアログ必須）        |
+| `codex.showAllSessions` / `codex.showWorkspaceSessions` | 表示範囲の切替                     | ビュータイトル                                |
+| `codex.refreshSessions`                                 | 更新                               | ビュータイトル                                |
+| `codex.showUsage`                                       | 使用量を表示                       | ステータスバー                                |
+| `codex.showLog`                                         | ログを表示                         | パレット                                      |
+
+**新規セッションの既定はチャット画面**。TUIタブはスラッシュコマンドが要る場面の退避先なので、タイトルバーの `...` に置く。
 
 ### TreeView
 
-アクティビティバーに専用コンテナ `Codex` を置き、ビュー `codexSessions` を配置。
+アクティビティバーに専用コンテナ `Agents` を置き、ビュー `codexSessions` を配置（ID は互換のため据え置き）。
 
 ```
-Codex
+Agents
 ├ ● 環境構築手順を確認            3分前     ← ●=タブとして開いている
 │ Set up environment from docs   2時間前
 └ VSCode拡張の設計               昨日
@@ -282,7 +302,7 @@ Codex
 
 ### 操作パネル（Webview）
 
-サイドバーの上段に、モデル・reasoning effort・承認方法・サンドボックスを切り替えるWebviewを置く。公式Codex拡張機能のサイドバーが提供する `Select model` / `Reasoning effort` と同等の操作をこちらでも行えるようにするため。
+サイドバーの上段に、モデル・reasoning effort・承認方法・サンドボックスを切り替えるWebviewを置く。CodexとClaude Codeをタブで切り替える。公式Codex拡張機能のサイドバーが提供する `Select model` / `Reasoning effort` と同等の操作をこちらでも行えるようにするため。
 
 - 選択肢は `~/.codex/models_cache.json` から読む。**effortはモデルごとに異なる**ため（例: `gpt-5.5` は `low`〜`xhigh`、`gpt-5.6-sol` は `ultra` まで）、モデル選択に連動して選択肢を差し替える。モデルを変えた結果それまでのeffortが非対応になった場合は既定へ戻す。
 - カタログが読めない場合は既知の値の和集合へフォールバックし、パネルは動作を続ける。
@@ -291,6 +311,22 @@ Codex
 - CSPは `default-src 'none'` を基点にし、スクリプトはnonceで限定する。配色はVSCodeのCSS変数のみを使い、テーマに追従させる。
 
 **適用範囲の制約**: ここでの変更が効くのは**次に開くセッション**。描画をCodex TUIに委ねる構成上、実行中のセッションはタブ内のスラッシュコマンドで変更する。パネル上にもその旨を明示する。
+
+**プロバイダの切り替え**: パネル上部のタブで Codex / Claude Code を1クリックで切り替える。選んだ側は `setState` に持たせ、リロード後も保つ。
+
+Claude Code側で扱う設定と選択肢の出どころは次のとおり。
+
+| 項目   | 選択肢                                             | 既定値の出どころ                 |
+| ------ | -------------------------------------------------- | -------------------------------- |
+| モデル | `fable` / `opus` / `sonnet` / `haiku` のエイリアス | `settings.json` の `model`       |
+| effort | `low` / `medium` / `high` / `xhigh` / `max`        | `settings.json` の `effortLevel` |
+
+Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡張機能側の既定値として持つ。Codex側の「空＝CLIへ委譲」とは異なるが、Claude Codeには一覧APIも要約名も無く、未指定だと何が使われるか画面から分からないため、既定を明示する方を採った。「既定」を選べば従来どおり `settings.json` へ委譲する。
+| 承認方法 | `--permission-mode` が受け付ける6種 | `settings.json` の `permissions.defaultMode` |
+
+- **モデル一覧を返すAPIが無い**ため、CLIのヘルプが案内するエイリアスを固定で並べる。正式名（`claude-fable-5` など）を使う場合は `claude.model` を直接編集する。一覧に無い現在値は「(一覧外)」として選択肢に補うので、設定が失われることはない。
+- `permissionMode` を `bypassPermissions` にするときは、Codexの `danger-full-access` + `never` と同じくモーダルで同意を取る。
+- 使用量はCodex側にしか出せない（§14.8）ため、Claudeタブには表示しない。
 
 ### 使用量の表示
 
@@ -306,13 +342,15 @@ Codex
 
 更新契機はロールアウトの追記イベント。会話中は頻発するため1.5秒デバウンスする。リセットまでの残り時間の表記だけは60秒ごとに再描画する（ファイルは読まない）。
 
+**Claude Codeはステータスバーに出せない**。制限の情報は stream-json の `rate_limit_event` でしか流れず、transcript には残らない（実機で確認）。したがってチャット画面が動いている間だけ表示できる。§14.8を参照。
+
 ### 破壊操作の実行仕様（スパイクで確認済み）
 
-| 操作 | コマンド | 備考 |
-| --- | --- | --- |
-| archive | `codex archive <id>` | `~/.codex/archived_sessions/` へ移動。成功=0 / 失敗=1 |
-| unarchive | `codex unarchive <id>` | 元の `sessions/YYYY/MM/DD/` へ戻る |
-| delete | `codex delete --force <id>` | **`--force` 必須**。拡張機能はTTYを持たないため、これがないと「対話端末なしでは確認できない」として exit 1 で拒否される。ユーザーへの確認は拡張機能側のモーダルダイアログで行う |
+| 操作      | コマンド                    | 備考                                                                                                                                                                            |
+| --------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| archive   | `codex archive <id>`        | `~/.codex/archived_sessions/` へ移動。成功=0 / 失敗=1                                                                                                                           |
+| unarchive | `codex unarchive <id>`      | 元の `sessions/YYYY/MM/DD/` へ戻る                                                                                                                                              |
+| delete    | `codex delete --force <id>` | **`--force` 必須**。拡張機能はTTYを持たないため、これがないと「対話端末なしでは確認できない」として exit 1 で拒否される。ユーザーへの確認は拡張機能側のモーダルダイアログで行う |
 
 いずれも失敗時は exit 1 とstderrのメッセージを返すため、終了コードで成否を判定しエラー通知に本文を載せる。
 
@@ -320,20 +358,20 @@ Codex
 
 **スコープの原則**: 実行経路（どのバイナリをどの引数で起動するか）と権限（sandbox / 承認）に影響する設定は `machine` スコープとし、リポジトリの `.vscode/settings.json` から上書きできないようにする。これを怠ると、リポジトリをクローンして開いただけで任意コマンドが実行され、Codexのサンドボックスも無効化される。
 
-| キー | 型 | 既定 | スコープ | 説明 |
-| --- | --- | --- | --- | --- |
-| `codex.executablePath` | string | `codex` | **machine** | 実行ファイルのパス |
-| `codex.codexHome` | string | `""` | **machine** | 空なら `CODEX_HOME` → `~/.codex` |
-| `codex.additionalArgs` | string[] | `[]` | **machine** | 任意の追加引数 |
-| `codex.sandbox` | enum | `""` | **machine** | `read-only` / `workspace-write` / `danger-full-access` |
-| `codex.approvalMode` | enum | `""` | **machine** | `untrusted` / `on-request` / `never` |
-| `codex.model` | string | `""` | machine-overridable | 空なら `-m` を渡さずconfig.tomlに委譲 |
-| `codex.reasoningEffort` | string | `""` | machine-overridable | `model_reasoning_effort`。専用フラグが無いため `-c model_reasoning_effort=<値>` として渡す |
-| `codex.profile` | string | `""` | machine-overridable | `-p` |
-| `codex.restore.enabled` | boolean | `true` | window | 再起動時の自動resume |
-| `codex.restore.maxTabs` | number | `8` | window | 復元上限 |
-| `codex.history.scope` | enum | `workspace` | window | `workspace` / `all` |
-| `codex.history.maxEntries` | number | `200` | window | 一覧構築の上限件数 |
+| キー                       | 型       | 既定        | スコープ            | 説明                                                                                       |
+| -------------------------- | -------- | ----------- | ------------------- | ------------------------------------------------------------------------------------------ |
+| `codex.executablePath`     | string   | `codex`     | **machine**         | 実行ファイルのパス                                                                         |
+| `codex.codexHome`          | string   | `""`        | **machine**         | 空なら `CODEX_HOME` → `~/.codex`                                                           |
+| `codex.additionalArgs`     | string[] | `[]`        | **machine**         | 任意の追加引数                                                                             |
+| `codex.sandbox`            | enum     | `""`        | **machine**         | `read-only` / `workspace-write` / `danger-full-access`                                     |
+| `codex.approvalMode`       | enum     | `""`        | **machine**         | `untrusted` / `on-request` / `never`                                                       |
+| `codex.model`              | string   | `""`        | machine-overridable | 空なら `-m` を渡さずconfig.tomlに委譲                                                      |
+| `codex.reasoningEffort`    | string   | `""`        | machine-overridable | `model_reasoning_effort`。専用フラグが無いため `-c model_reasoning_effort=<値>` として渡す |
+| `codex.profile`            | string   | `""`        | machine-overridable | `-p`                                                                                       |
+| `codex.restore.enabled`    | boolean  | `true`      | window              | 再起動時の自動resume                                                                       |
+| `codex.restore.maxTabs`    | number   | `8`         | window              | 復元上限                                                                                   |
+| `codex.history.scope`      | enum     | `workspace` | window              | `workspace` / `all`                                                                        |
+| `codex.history.maxEntries` | number   | `200`       | window              | 一覧構築の上限件数                                                                         |
 
 - **空文字＝フラグを渡さない**を徹底し、Codex側 `config.toml` との二重管理を避ける。
 - `danger-full-access` と `never` の組み合わせを選んだ場合のみ、初回に確認ダイアログを出す。
@@ -341,29 +379,29 @@ Codex
 
 ## 8. セキュリティ考慮
 
-| 項目 | 対処 |
-| --- | --- |
-| ワークスペース設定による任意コマンド実行 | §7のスコープ設計。`executablePath` / `additionalArgs` / `codexHome` を `machine` に固定 |
-| サンドボックス無効化の誘導 | `sandbox` / `approvalMode` も `machine`。危険な組み合わせは初回に確認ダイアログ |
-| 引数インジェクション | `shellPath` / `shellArgs` 方式によりシェル解釈を経由しない（§5.2） |
-| セッション本文の漏洩 | 拡張機能はロールアウトファイルの**1行目のみ**を読み、会話本文は読まない・保存しない・ログに出さない |
-| 破壊操作 | `delete` は確認ダイアログ必須。`archive` は取り消し可能なため確認不要 |
+| 項目                                     | 対処                                                                                                |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| ワークスペース設定による任意コマンド実行 | §7のスコープ設計。`executablePath` / `additionalArgs` / `codexHome` を `machine` に固定             |
+| サンドボックス無効化の誘導               | `sandbox` / `approvalMode` も `machine`。危険な組み合わせは初回に確認ダイアログ                     |
+| 引数インジェクション                     | `shellPath` / `shellArgs` 方式によりシェル解釈を経由しない（§5.2）                                  |
+| セッション本文の漏洩                     | 拡張機能はロールアウトファイルの**1行目のみ**を読み、会話本文は読まない・保存しない・ログに出さない |
+| 破壊操作                                 | `delete` は確認ダイアログ必須。`archive` は取り消し可能なため確認不要                               |
 
 ## 9. リスクと検証項目
 
 実装開始前に潰しておくべき未確定事項。各項目はPhase 1の最初のタスクとして実機検証する。
 
-| ID | 内容 | 影響 | 緩和策 |
-| --- | --- | --- | --- |
-| ~~V1~~ | **解決済**: `isTransient: true` で作った端末は Reload Window 後に復元されない（リロード前 tabs=1 → リロード後 エディタタブ0・拡張機能製の端末なし） | — | VSCode標準復元との二重化対策は不要。§5.5 の自前復元に一本化してよい |
-| ~~V2~~ | **解決済**: `workbench.action.terminal.renameWithArg` に `{ name }` を渡す形式が機能し、`terminal.name` とタブのラベル表示の双方が追従する | — | フォールバック（固定名）は不要。§5.8 の追従を実装する |
-| ~~V3~~ | **解決済**: `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` が `session_meta.originator` に反映されることを確認 | — | §9.1 の確定方式へ置換。ヒューリスティックと直列化は不要になった |
-| V4 | `session_index.jsonl` の追記が行単位でアトミックか（部分行読み込み） | パースエラー | 末尾の不完全行を捨てる。パース失敗行は個別にスキップしログのみ。※紐付けはindexに依存しなくなったため影響は表示のみ |
-| V5 | セッション数が数千件規模になった時の一覧構築コスト | 起動が重い | `updated_at` 降順で上位N件（§7 `history.maxEntries`）のみsession_metaを解決する |
-| ~~V6~~ | **解決済**: 成功=exit 0、失敗=exit 1（stderrにメッセージ）。`delete` は非対話端末では拒否され **`--force` が必須** | — | 拡張機能はTTYを持たないため `delete --force` を使う。確認は拡張機能側のダイアログで行う |
-| V7 | **同一セッションの多重resume**（別ウィンドウ・CLIから同じidを開く） | 同一ロールアウトファイルへの並行書き込みで履歴破損の恐れ | S6スパイクで確認。防げないなら、開始時に警告を出す／`fork` を促す |
-| ~~V8~~ | **解決済**: `-C` がプロセスcwdより優先される | — | `-C` を正とし常に明示的に渡す（§5.2） |
-| V9 | index に載っているセッションを `archive` したとき index から消えるか | アーカイブ済みが一覧に残る | S6スパイクで確認。消えないなら `archived_sessions` の存在でフィルタする（§4.2の判定で代替可能） |
+| ID     | 内容                                                                                                                                                | 影響                                                     | 緩和策                                                                                                             |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| ~~V1~~ | **解決済**: `isTransient: true` で作った端末は Reload Window 後に復元されない（リロード前 tabs=1 → リロード後 エディタタブ0・拡張機能製の端末なし） | —                                                        | VSCode標準復元との二重化対策は不要。§5.5 の自前復元に一本化してよい                                                |
+| ~~V2~~ | **解決済**: `workbench.action.terminal.renameWithArg` に `{ name }` を渡す形式が機能し、`terminal.name` とタブのラベル表示の双方が追従する          | —                                                        | フォールバック（固定名）は不要。§5.8 の追従を実装する                                                              |
+| ~~V3~~ | **解決済**: `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` が `session_meta.originator` に反映されることを確認                                                | —                                                        | §9.1 の確定方式へ置換。ヒューリスティックと直列化は不要になった                                                    |
+| V4     | `session_index.jsonl` の追記が行単位でアトミックか（部分行読み込み）                                                                                | パースエラー                                             | 末尾の不完全行を捨てる。パース失敗行は個別にスキップしログのみ。※紐付けはindexに依存しなくなったため影響は表示のみ |
+| V5     | セッション数が数千件規模になった時の一覧構築コスト                                                                                                  | 起動が重い                                               | `updated_at` 降順で上位N件（§7 `history.maxEntries`）のみsession_metaを解決する                                    |
+| ~~V6~~ | **解決済**: 成功=exit 0、失敗=exit 1（stderrにメッセージ）。`delete` は非対話端末では拒否され **`--force` が必須**                                  | —                                                        | 拡張機能はTTYを持たないため `delete --force` を使う。確認は拡張機能側のダイアログで行う                            |
+| V7     | **同一セッションの多重resume**（別ウィンドウ・CLIから同じidを開く）                                                                                 | 同一ロールアウトファイルへの並行書き込みで履歴破損の恐れ | S6スパイクで確認。防げないなら、開始時に警告を出す／`fork` を促す                                                  |
+| ~~V8~~ | **解決済**: `-C` がプロセスcwdより優先される                                                                                                        | —                                                        | `-C` を正とし常に明示的に渡す（§5.2）                                                                              |
+| V9     | index に載っているセッションを `archive` したとき index から消えるか                                                                                | アーカイブ済みが一覧に残る                               | S6スパイクで確認。消えないなら `archived_sessions` の存在でフィルタする（§4.2の判定で代替可能）                    |
 
 ### 9.1 セッションIDの紐付け（V3・スパイクで解決済み）
 
@@ -404,13 +442,13 @@ unit testでは以下を検証する。
 
 TUIタブ方式に加えて、`codex app-server` と繋いで会話を自前で描画する画面を持つ。両者は併存し、用途で使い分ける。
 
-| | TUIタブ | Codex画面 |
-| --- | --- | --- |
-| 描画 | Codex TUI | 自前のWebview |
-| 設定の反映 | 次のセッションから | **次の発言から**（`turn/start` にモデル・effort・承認方針を毎回渡す） |
-| 会話途中からの分岐 | 会話ビューア経由 | **画面内のボタンで直接** |
-| スラッシュコマンド | 全て使える | 使えない |
-| Codexの更新への追従 | 不要 | itemの種類が増えたら描画の追加が要る |
+|                     | TUIタブ            | Codex画面                                                             |
+| ------------------- | ------------------ | --------------------------------------------------------------------- |
+| 描画                | Codex TUI          | 自前のWebview                                                         |
+| 設定の反映          | 次のセッションから | **次の発言から**（`turn/start` にモデル・effort・承認方針を毎回渡す） |
+| 会話途中からの分岐  | 会話ビューア経由   | **画面内のボタンで直接**                                              |
+| スラッシュコマンド  | 全て使える         | 使えない                                                              |
+| Codexの更新への追従 | 不要               | itemの種類が増えたら描画の追加が要る                                  |
 
 ### イベントモデル
 
@@ -522,10 +560,10 @@ src/claude/
 
 ### 14.2 Claude Code のデータソース
 
-| 用途 | 場所 |
-| --- | --- |
-| セッション実体 | `~/.claude/projects/<cwd-slug>/<sessionId>.jsonl`（1行1イベント） |
-| ホーム | `CLAUDE_CONFIG_DIR` → `~/.claude`（設定 `claude.configDir` で上書き） |
+| 用途           | 場所                                                                  |
+| -------------- | --------------------------------------------------------------------- |
+| セッション実体 | `~/.claude/projects/<cwd-slug>/<sessionId>.jsonl`（1行1イベント）     |
+| ホーム         | `CLAUDE_CONFIG_DIR` → `~/.claude`（設定 `claude.configDir` で上書き） |
 
 - Codexの `session_index.jsonl` にあたる索引が無いため、transcriptを **mtime降順** に並べ、上位N件だけ先頭40行を読んで一覧を作る。
 - Claude Codeには `thread_name` に相当する要約名が無い。表示名は **最初の人の発言**から作る（`isSidechain` のsubagent発言・ツール結果・IDEが挿入する制御タグは除く）。
@@ -563,16 +601,47 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 
 ### 14.6 プロバイダごとにできること
 
-| 操作 | Codex | Claude Code |
-| --- | --- | --- |
-| 新規 / resume / タブ復元 | ○ | ○ |
-| チャット画面（承認・中断込み） | ○ | ○ |
-| fork（セッション全体） | ○ | ○（idは未確定のまま） |
-| 会話の途中のターンから分岐 | ○ | ×（CLIに手段が無い） |
-| archive / unarchive / delete | ○ | ×（CLIに手段が無い。ファイルを直接消すことはしない） |
-| セッション名の変更 | ○ | ×（要約名の概念が無い） |
+| 操作                           | Codex | Claude Code                                          |
+| ------------------------------ | ----- | ---------------------------------------------------- |
+| 新規 / resume / タブ復元       | ○     | ○                                                    |
+| チャット画面（承認・中断込み） | ○     | ○                                                    |
+| fork（セッション全体）         | ○     | ○（idは未確定のまま）                                |
+| 会話の途中のターンから分岐     | ○     | ×（CLIに手段が無い）                                 |
+| archive / unarchive / delete   | ○     | ×（CLIに手段が無い。ファイルを直接消すことはしない） |
+| セッション名の変更             | ○     | ×（要約名の概念が無い）                              |
 
 対応しない操作はTreeViewの `contextValue`（`codexSession.<provider>`）でメニューから隠す。
+
+### 14.7 チャット画面の設定行
+
+Codex画面と同じHTML（`renderShell`）を使うため、画面下の設定行はClaude Code側にも出る。承認方法の選択肢だけプロバイダごとに差し替える（Codexは `APPROVAL_MODES`、Claude Codeは `--permission-mode` の6種）。
+
+- Webview側のスクリプトはCodexのスナップショット形状を前提にしているため、Claude側は同じ形へ整えて送る。モデルカタログが無いのでエイリアスを `ModelInfo` 相当に見せ、キーも `reasoningEffort` → `effort`、`approvalMode` → `permissionMode` と読み替える。
+- **適用範囲が違う**。Codex画面は `turn/start` に毎回渡すので次の発言から効くが、Claude Codeは1プロセス1セッションで起動時に引数が確定するため、**次に開くセッションから**効く。
+
+### 14.8 使用量（rate_limit_event）
+
+Claude Codeは消費率（`usedPercent`）を返さない。実測した中身は次のとおりで、**制限の種類とリセット時刻**しか得られない。
+
+```json
+{
+  "type": "rate_limit_event",
+  "rate_limit_info": {
+    "status": "allowed",
+    "resetsAt": 1786342200,
+    "rateLimitType": "five_hour",
+    "overageStatus": "rejected",
+    "isUsingOverage": false
+  }
+}
+```
+
+- チャット画面の入力欄の下に `5時間制限 リセット 3時間後` のように出す。`status` が `allowed` 以外なら `到達` を併記する
+- `rateLimitType` の未知の値はCLIの表記のまま出す（種類が増えても表示が消えないように）
+- transcriptには残らないため、ステータスバー（Codexのロールアウト由来・常時表示）と同じことはできない
+- 表示はCodexと共通のフッターで行い、消費率があればそちらを優先する
+
+トークン数は表示しない。Codexの `thread/tokenUsage/updated` もClaudeの `result.usage` も取り込まない。
 
 ## 15. 作業記録（日報・週報連携）
 
@@ -588,12 +657,12 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 
 **1セッション1行**。発言のたびには書かない。
 
-| 入口 | 契機 | 本文 |
-| --- | --- | --- |
-| Codex TUIタブ | `session_index.jsonl` の更新でCodexが要約名を確定したとき | 要約名 |
-| Codexチャット画面 | 発言時 | その発言 |
-| Claude Code TUIタブ | transcriptの更新を検知したとき | 最初の人の発言 |
-| Claude Codeチャット画面 | 発言時 | その発言 |
+| 入口                    | 契機                                                      | 本文           |
+| ----------------------- | --------------------------------------------------------- | -------------- |
+| Codex TUIタブ           | `session_index.jsonl` の更新でCodexが要約名を確定したとき | 要約名         |
+| Codexチャット画面       | 発言時                                                    | その発言       |
+| Claude Code TUIタブ     | transcriptの更新を検知したとき                            | 最初の人の発言 |
+| Claude Codeチャット画面 | 発言時                                                    | その発言       |
 
 二重記録は `globalState` に持つ記録済みidの集合で抑止する（30日で掃除）。書き込みに失敗したものは既記録にせず、次の契機で書き直す。
 
