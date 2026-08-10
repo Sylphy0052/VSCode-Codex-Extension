@@ -51,15 +51,25 @@ export function nextTasksToStart(def: WorkflowDefinition, run: RunState): Readon
   return result;
 }
 
-export type RunOutcome = 'running' | 'succeeded' | 'failed';
+export type RunOutcome = 'running' | 'succeeded' | 'failed' | 'aborted';
 
 /**
- * 実行全体の終了判定（design.md §16.5）。
- * `pending` / `running` / `waitingApproval` が1件でも残っていれば `running`。
- * 全て確定していれば、`failed` が1件でもあれば `failed`、なければ `succeeded`。
+ * 実行全体の終了判定（design.md §16.5）。判定は次の順。
+ *
+ * 1. `pending` / `running` / `waitingApproval` が1件でもあれば `running`
+ * 2. `failed` が1件でもあれば `failed`
+ * 3. `skipped` が1件でもあれば `aborted`
+ * 4. それ以外（全タスクが `done`）は `succeeded`
+ *
+ * `skipped` を見ずに`failed`の有無だけで判定すると、`manual` / `interrupted` による
+ * 停止だけで終わったrun（その原因のタスク自身は`failed`にならない設計。§16.5）が
+ * `succeeded` と誤判定される（レビュー指摘）。`dependencyFailed` による `skipped` は
+ * 必ず対応する `failed` を伴うため2で拾われ、3に落ちるのは `runHalted`（人の割り込み、
+ * または他の失敗による停止で開始されなかった独立した枝）だけになる。
  */
 export function getRunOutcome(run: RunState): RunOutcome {
   let anyFailed = false;
+  let anySkipped = false;
   for (const s of run.tasks.values()) {
     if (s.state === 'pending' || s.state === 'running' || s.state === 'waitingApproval') {
       return 'running';
@@ -67,6 +77,12 @@ export function getRunOutcome(run: RunState): RunOutcome {
     if (s.state === 'failed') {
       anyFailed = true;
     }
+    if (s.state === 'skipped') {
+      anySkipped = true;
+    }
   }
-  return anyFailed ? 'failed' : 'succeeded';
+  if (anyFailed) {
+    return 'failed';
+  }
+  return anySkipped ? 'aborted' : 'succeeded';
 }

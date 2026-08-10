@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applyLoopStopReason,
   createRunState,
+  hasFailedTask,
   markRunning,
   markWaitingApproval,
   retryTask,
@@ -152,6 +153,27 @@ describe('nextTasksToStart', () => {
     expect(nextTasksToStart(d, run)).toEqual(new Set(['T2']));
   });
 
+  it('manualで停止したあとretryTaskすると、次に開始する集合が返るようになる（バグ修正）', () => {
+    // haltedByUserを解除する経路が無いと、retryTaskでpendingに戻しても
+    // isRunHaltedがtrueのままでnextTasksToStartが永久に空を返し続ける
+    const tasks = diamondTasks();
+    const d = def(tasks, 3);
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    run = markRunning(run, 'T2');
+    run = markRunning(run, 'T3');
+
+    run = applyLoopStopReason(run, tasks, 'T2', 'manual'); // T4(pending)がrunHaltedでskip
+    expect(nextTasksToStart(d, run)).toEqual(new Set());
+
+    run = applyLoopStopReason(run, tasks, 'T2', 'done');
+    run = applyLoopStopReason(run, tasks, 'T3', 'done');
+    run = retryTask(run, tasks, 'T4');
+
+    expect(nextTasksToStart(d, run)).toEqual(new Set(['T4']));
+  });
+
   it('同じ段で複数開始できるとき定義順に埋まり、枠が足りない分は残る', () => {
     // T2, T3, T5は全てT1のみに依存する兄弟タスク。定義順はT2, T3, T5
     const tasks = [task('T1', []), task('T2', ['T1']), task('T3', ['T1']), task('T5', ['T1'])];
@@ -228,5 +250,20 @@ describe('getRunOutcome', () => {
     expect(run.tasks.get('T5')?.state).toBe('skipped');
     expect(nextTasksToStart(def(tasks, 3), run)).toEqual(new Set());
     expect(getRunOutcome(run)).toBe('failed');
+  });
+
+  it('manual/interruptedによる停止のみ（failedなし）で終わったrunはaborted（バグ修正）', () => {
+    // T1は最終的にdoneで終わるが、T2は独立した枝でmanual停止によりrunHaltedのままskippedで終わる。
+    // failedが1件も無いのでgetRunOutcomeがsucceededと誤判定していた
+    const tasks = [task('T1', []), task('T2', [])];
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = applyLoopStopReason(run, tasks, 'T1', 'manual');
+    expect(run.tasks.get('T2')?.state).toBe('skipped');
+
+    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    expect(run.tasks.get('T1')?.state).toBe('done');
+    expect(hasFailedTask(run)).toBe(false);
+    expect(getRunOutcome(run)).toBe('aborted');
   });
 });

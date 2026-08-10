@@ -182,6 +182,38 @@ describe('applyLoopStopReason', () => {
 
       expect(stateOf(run, 'T5').state).toBe('running');
     });
+
+    it('複数の親が失敗すると、合流タスクのfailedTaskIdsに両方入る', () => {
+      // T2, T3は共にT1に依存し、T4は両方に依存する合流タスク。T2, T3は独立に失敗しうる
+      const tasks = [
+        task('T1', []),
+        task('T2', ['T1']),
+        task('T3', ['T1']),
+        task('T4', ['T2', 'T3']),
+      ];
+      let run = createRunState(tasks);
+      run = markRunning(run, 'T1');
+      run = applyLoopStopReason(run, tasks, 'T1', 'done');
+      run = markRunning(run, 'T2');
+      run = markRunning(run, 'T3');
+
+      run = applyLoopStopReason(run, tasks, 'T2', 'maxReached');
+      expect(stateOf(run, 'T4').state).toBe('skipped');
+      expect(stateOf(run, 'T4').failure).toEqual({
+        kind: 'dependencyFailed',
+        failedTaskIds: ['T2'],
+      });
+
+      // T3はT2の失敗後もrunningのまま走り続け、独自に失敗する（design.md「走らせ切る」）
+      expect(stateOf(run, 'T3').state).toBe('running');
+      run = applyLoopStopReason(run, tasks, 'T3', 'maxReached');
+
+      expect(stateOf(run, 'T4').state).toBe('skipped');
+      expect(stateOf(run, 'T4').failure).toEqual({
+        kind: 'dependencyFailed',
+        failedTaskIds: ['T2', 'T3'],
+      });
+    });
   });
 
   describe('実行全体の停止時、まだ開始していないタスクの扱い（バグ修正）', () => {
@@ -258,6 +290,16 @@ describe('markApprovalRejected', () => {
     expect(t2.retryCount).toBe(0);
     expect(stateOf(run, 'T4').state).toBe('skipped');
   });
+
+  it('waitingApproval以外のタスクには効かない', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    const before = run;
+
+    expect(markApprovalRejected(run, tasks, 'T1')).toBe(before); // runningには効かない
+    expect(markApprovalRejected(run, tasks, 'unknown')).toBe(before); // 未知のidも無視する
+  });
 });
 
 describe('markWaitingApproval / resumeFromApproval', () => {
@@ -270,6 +312,85 @@ describe('markWaitingApproval / resumeFromApproval', () => {
 
     run = resumeFromApproval(run, 'T1');
     expect(stateOf(run, 'T1').state).toBe('running');
+  });
+
+  it('markWaitingApprovalはrunning以外の状態・未知のidを無視する', () => {
+    const tasks = chainTasks();
+    const run = createRunState(tasks); // T1はpending
+    expect(markWaitingApproval(run, 'T1')).toBe(run);
+    expect(markWaitingApproval(run, 'unknown')).toBe(run);
+  });
+
+  it('resumeFromApprovalはwaitingApproval以外の状態・未知のidを無視する', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1'); // T1はrunning、waitingApprovalではない
+    expect(resumeFromApproval(run, 'T1')).toBe(run);
+    expect(resumeFromApproval(run, 'unknown')).toBe(run);
+  });
+});
+
+describe('確定済みタスクへの二重通知を無視する（ガードの対称性）', () => {
+  it('doneのタスクにmaxReachedが届いても変わらない', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    const before = run;
+
+    run = applyLoopStopReason(run, tasks, 'T1', 'maxReached');
+    expect(run).toBe(before);
+    expect(stateOf(run, 'T1').state).toBe('done');
+  });
+
+  it('doneのタスクにfailedが届いても、retriesが残っていてもpendingへ戻らない', () => {
+    // 再試行の経路にだけガードが無いと、確定した成功が pending へ巻き戻る
+    const tasks = [task('T1', [], 2)];
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    const before = run;
+
+    run = applyLoopStopReason(run, tasks, 'T1', 'failed');
+    expect(run).toBe(before);
+    expect(stateOf(run, 'T1').state).toBe('done');
+    expect(stateOf(run, 'T1').retryCount).toBe(0);
+  });
+
+  it('failedのタスクにdoneが届いても変わらない', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T2');
+    run = applyLoopStopReason(run, tasks, 'T2', 'maxReached'); // T2: failed
+    const before = run;
+
+    run = applyLoopStopReason(run, tasks, 'T2', 'done');
+    expect(run).toBe(before);
+    expect(stateOf(run, 'T2').state).toBe('failed');
+  });
+
+  it('skippedのタスクにmaxReachedが届いても変わらない', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T2');
+    run = applyLoopStopReason(run, tasks, 'T2', 'maxReached'); // T4: skipped
+    const before = run;
+
+    run = applyLoopStopReason(run, tasks, 'T4', 'maxReached');
+    expect(run).toBe(before);
+    expect(stateOf(run, 'T4').state).toBe('skipped');
+  });
+
+  it('doneのタスクへmarkApprovalRejectedを呼んでも変わらない', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    const before = run;
+
+    run = markApprovalRejected(run, tasks, 'T1');
+    expect(run).toBe(before);
+    expect(stateOf(run, 'T1').state).toBe('done');
   });
 });
 
@@ -327,6 +448,53 @@ describe('retryTask（手動の再実行）', () => {
     run = applyLoopStopReason(run, tasks, 'T1', 'done');
     const afterDone = retryTask(run, tasks, 'T1');
     expect(stateOf(afterDone, 'T1').state).toBe('done');
+  });
+
+  it('成功するとhaltedByUserを解除する（バグ修正: 解除経路が無いと再実行しても永久に開始できない）', () => {
+    // design.mdのサンプルと同じT1 -> (T2 || T3) -> T4の形。T2の実行中にmanualで停止し、
+    // T4がrunHaltedでskippedになる → T2・T3は走らせ切ってdoneになる → 手動でT4を戻す、という筋
+    const tasks = [
+      task('T1', []),
+      task('T2', ['T1']),
+      task('T3', ['T1']),
+      task('T4', ['T2', 'T3']),
+    ];
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    run = markRunning(run, 'T2');
+    run = markRunning(run, 'T3');
+
+    run = applyLoopStopReason(run, tasks, 'T2', 'manual'); // haltedByUserが立つ。T4(pending)はrunHaltedでskip
+    expect(isRunHalted(run)).toBe(true);
+    expect(stateOf(run, 'T4').state).toBe('skipped');
+    expect(stateOf(run, 'T4').failure).toEqual({ kind: 'runHalted' });
+
+    // T2・T3自身はmanualで変えられていない（running）ので、そのまま走らせ切ってdoneにできる
+    run = applyLoopStopReason(run, tasks, 'T2', 'done');
+    run = applyLoopStopReason(run, tasks, 'T3', 'done');
+
+    run = retryTask(run, tasks, 'T4');
+    expect(stateOf(run, 'T4').state).toBe('pending');
+    expect(isRunHalted(run)).toBe(false);
+  });
+
+  it('失敗が残っている限りhaltedByUserを解除してもisRunHaltedはtrueのまま', () => {
+    // T1系とT6系の独立した2系統。T1系はmanualで停止しつつ、T6は別途failedで確定させる
+    const tasks = [...chainTasks(), task('T6', [])];
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = markRunning(run, 'T6');
+    run = applyLoopStopReason(run, tasks, 'T1', 'manual');
+    run = applyLoopStopReason(run, tasks, 'T6', 'maxReached'); // T6: failed（hasFailedTaskがtrueになる）
+    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+
+    // T2はrunHaltedでskip済み。依存(T1)がdoneなので手動再実行できる
+    run = retryTask(run, tasks, 'T2');
+    expect(stateOf(run, 'T2').state).toBe('pending');
+    // T6がfailedのままなので、実行全体は依然として停止している
+    expect(hasFailedTask(run)).toBe(true);
+    expect(isRunHalted(run)).toBe(true);
   });
 });
 
