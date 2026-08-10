@@ -13,6 +13,7 @@ export const initialClaudeState: ChatState = {
   busy: false,
   // Claude Codeの中断はcontrol protocolで、ターンの指定を要らない
   turnId: undefined,
+  streamingMessageId: undefined,
   items: [],
   approvals: [],
   usage: undefined,
@@ -145,20 +146,27 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
   if (inner === undefined) {
     return state;
   }
-  const id = partialId(event, inner);
+  const type = str(inner['type']);
 
-  if (str(inner['type']) === 'content_block_start') {
+  // 断片の通知は message.id を持たない。ここで覚えて完成メッセージと同じ項目に積む
+  if (type === 'message_start') {
+    const id = str(rec(inner['message'])?.['id']);
+    return { ...state, streamingMessageId: id === '' ? undefined : id };
+  }
+
+  if (type === 'content_block_start') {
     const block = rec(inner['content_block']);
-    if (block === undefined || str(block['type']) !== 'text') {
+    const kind = str(block?.['type']);
+    if (block === undefined || (kind !== 'text' && kind !== 'thinking')) {
       return state;
     }
     return {
       ...state,
       busy: true,
       items: upsert(state.items, {
-        id,
-        kind: 'agentMessage',
-        text: str(block['text']),
+        id: partialId(state, inner, kind),
+        kind: kind === 'thinking' ? 'reasoning' : 'agentMessage',
+        text: str(block['text']) || str(block['thinking']),
         detail: '',
         status: undefined,
         turnId: undefined,
@@ -166,7 +174,7 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
     };
   }
 
-  if (str(inner['type']) !== 'content_block_delta') {
+  if (type !== 'content_block_delta') {
     return state;
   }
   const delta = rec(inner['delta']);
@@ -174,6 +182,8 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
   if (text === '') {
     return state;
   }
+  const kind = str(delta?.['type']) === 'thinking_delta' ? 'thinking' : 'text';
+  const id = partialId(state, inner, kind);
 
   const index = state.items.findIndex((i) => i.id === id);
   const existing = state.items[index];
@@ -183,7 +193,14 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
       busy: true,
       items: [
         ...state.items,
-        { id, kind: 'agentMessage', text, detail: '', status: undefined, turnId: undefined },
+        {
+          id,
+          kind: kind === 'thinking' ? 'reasoning' : 'agentMessage',
+          text,
+          detail: '',
+          status: undefined,
+          turnId: undefined,
+        },
       ],
     };
   }
@@ -249,9 +266,15 @@ function blockId(
   return `${base}:${kind}:${position}`;
 }
 
-function partialId(event: Record<string, unknown>, inner: Record<string, unknown>): string {
-  const base = str(event['uuid']) || 'partial';
-  return `${base}:${num(inner['index']) ?? 0}`;
+/**
+ * 断片の項目id。
+ *
+ * 完成メッセージ（`assistant`）と同じ形にして、同じ項目へ上書きされるようにする。
+ * イベントごとに変わる uuid を使うと断片の数だけ項目が増えてしまう。
+ */
+function partialId(state: ChatState, inner: Record<string, unknown>, kind: string): string {
+  const base = state.streamingMessageId ?? 'assistant';
+  return `${base}:${kind}:${num(inner['index']) ?? 0}`;
 }
 
 function upsert(items: readonly ChatItem[], item: ChatItem): ChatItem[] {

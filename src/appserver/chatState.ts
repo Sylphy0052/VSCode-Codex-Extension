@@ -38,6 +38,13 @@ export interface ChatState {
   busy: boolean;
   /** 進行中のターン。`turn/interrupt` が要求するため保持する。 */
   turnId: string | undefined;
+  /**
+   * ストリーミング中のメッセージid（Claude Codeのみ）。
+   *
+   * 断片の通知には message.id が入らないため、`message_start` で得た値を覚えておき、
+   * 完成メッセージと同じ項目に積む。Codexは通知ごとにitemIdが来るので使わない。
+   */
+  streamingMessageId: string | undefined;
   items: ChatItem[];
   approvals: PendingApproval[];
   usage: ChatUsage | undefined;
@@ -48,6 +55,7 @@ export const initialChatState: ChatState = {
   name: undefined,
   busy: false,
   turnId: undefined,
+  streamingMessageId: undefined,
   items: [],
   approvals: [],
   usage: undefined,

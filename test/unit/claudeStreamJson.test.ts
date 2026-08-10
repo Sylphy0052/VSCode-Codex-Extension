@@ -147,6 +147,72 @@ describe('applyStreamEvent', () => {
     expect(state.items[0]?.text).toBe('こんにちは');
   });
 
+  it('ストリーミングの断片を1つの項目にまとめる', () => {
+    const state = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      {
+        type: 'stream_event',
+        uuid: 'u1',
+        event: { type: 'message_start', message: { id: 'msg_1', role: 'assistant', content: [] } },
+      },
+      {
+        type: 'stream_event',
+        uuid: 'u2',
+        event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      },
+      {
+        type: 'stream_event',
+        uuid: 'u3',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'こ' } },
+      },
+      {
+        type: 'stream_event',
+        uuid: 'u4',
+        event: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: 'んにちは' },
+        },
+      },
+    ]);
+    const messages = state.items.filter((i) => i.kind === 'agentMessage');
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.text).toBe('こんにちは');
+  });
+
+  it('完成メッセージがストリーミング中の項目を置き換える', () => {
+    // assistant は message.id を持つ。断片と同じ項目でなければ二重に出る
+    const state = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      {
+        type: 'stream_event',
+        uuid: 'u1',
+        event: { type: 'message_start', message: { id: 'msg_1', role: 'assistant', content: [] } },
+      },
+      {
+        type: 'stream_event',
+        uuid: 'u2',
+        event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      },
+      {
+        type: 'stream_event',
+        uuid: 'u3',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'こ' } },
+      },
+      {
+        type: 'assistant',
+        message: {
+          id: 'msg_1',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'こんにちは' }],
+        },
+      },
+    ]);
+    const messages = state.items.filter((i) => i.kind === 'agentMessage');
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.text).toBe('こんにちは');
+  });
+
   it('rate_limit_event から制限の状態を取り込む', () => {
     const state = apply([
       { type: 'system', subtype: 'init', session_id: ID },
