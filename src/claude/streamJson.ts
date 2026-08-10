@@ -14,6 +14,7 @@ export const initialClaudeState: ChatState = {
   // Claude Codeの中断はcontrol protocolで、ターンの指定を要らない
   turnId: undefined,
   streamingMessageId: undefined,
+  queued: [],
   items: [],
   approvals: [],
   usage: undefined,

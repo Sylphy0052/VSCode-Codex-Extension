@@ -2,7 +2,10 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { ApprovalDecision } from '../appserver/approvals';
 import {
   addApproval,
+  enqueue,
   removeApproval,
+  removeQueued,
+  takeQueued,
   type ChatState,
   type PendingApproval,
 } from '../appserver/chatState';
@@ -132,6 +135,41 @@ export class ClaudeStreamSession {
     }
     this.update({ ...this.state, busy: true });
     this.write(buildUserMessage(text));
+  }
+
+  /** 発言を送る。応答中なら待ち行列へ積む。 */
+  sendOrQueue(text: string): 'sent' | 'queued' {
+    if (this.state.busy) {
+      this.update(enqueue(this.state, text));
+      return 'queued';
+    }
+    this.send(text);
+    return 'sent';
+  }
+
+  cancelQueued(index: number): void {
+    this.update(removeQueued(this.state, index));
+  }
+
+  /** 応答を止めて、待機中の指示をすぐ送る。 */
+  flushQueue(): void {
+    if (this.state.queued.length === 0) {
+      return;
+    }
+    if (this.state.busy) {
+      this.interrupt();
+    }
+    this.sendNextQueued();
+  }
+
+  /** 待機中の先頭を送る。ターンが終わったときに呼ぶ。 */
+  sendNextQueued(): void {
+    const { text, next } = takeQueued(this.state);
+    if (text === undefined) {
+      return;
+    }
+    this.update(next);
+    this.send(text);
   }
 
   interrupt(): void {

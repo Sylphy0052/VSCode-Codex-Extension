@@ -631,6 +631,15 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 
 タブ復元やresumeの直後に応答だけが消えて見えるのはこのため。拡張機能側で本文を退避すれば見た目は保てるが、§8の「会話本文を読まない・保存しない」に反するので採らない。
 
+### 9.7 応答中の指示（待ち行列）
+
+CodexもClaude Codeも応答中の指示を受け取れない。送信を弾くと入力を打ち直す羽目になるため、**送信は常に受け付け、応答中なら待ち行列へ積む**。
+
+- ターンが終わった瞬間に先頭の1件を送る。busyがtrueからfalseへ変わったときが契機
+- 待機中の内容は画面に一覧で出し、1件ずつ取り消せる
+- 「今すぐ送る」は**中断してから送る**。応答中に割り込む手段がCLIに無いため、`turn/interrupt`（Codex）/ control protocol の `interrupt`（Claude Code）を挟む
+- 行列そのものは `ChatState.queued` に持つ。両プロバイダで同じ操作になる
+
 ### 14.7 チャット画面の設定行
 
 Codex画面と同じHTML（`renderShell`）を使うため、画面下の設定行はClaude Code側にも出る。承認方法の選択肢だけプロバイダごとに差し替える（Codexは `APPROVAL_MODES`、Claude Codeは `--permission-mode` の6種）。

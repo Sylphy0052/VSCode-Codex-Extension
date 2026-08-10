@@ -4,3 +4,6 @@ out/
 *.vsix
 .vscode-test/
 coverage/
+
+# Claude Code のローカル作業領域（worktreeなど）。共有しない
+.claude/

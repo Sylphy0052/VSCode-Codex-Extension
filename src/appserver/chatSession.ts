@@ -4,9 +4,12 @@ import { buildApprovalResponse, describeApproval, type ApprovalDecision } from '
 import {
   addApproval,
   applyEvent,
+  enqueue,
   initialChatState,
   normalizeItem,
   removeApproval,
+  removeQueued,
+  takeQueued,
   type ChatState,
   type PendingApproval,
 } from './chatState';
@@ -112,6 +115,50 @@ export class ChatSession {
 
     this.update({ ...this.state, busy: true });
     await this.connection.request('turn/start', params);
+  }
+
+  /**
+   * 発言を送る。応答中なら待ち行列へ積む。
+   *
+   * CLIは応答中の指示を受け取れないため、送れるようになるまで持っておく。
+   */
+  async sendOrQueue(text: string, config: CodexConfig): Promise<'sent' | 'queued'> {
+    if (this.state.busy) {
+      this.update(enqueue(this.state, text));
+      return 'queued';
+    }
+    await this.send(text, config);
+    return 'sent';
+  }
+
+  /** 待機中の指示を1件取り消す。 */
+  cancelQueued(index: number): void {
+    this.update(removeQueued(this.state, index));
+  }
+
+  /**
+   * 応答を止めて、待機中の指示をすぐ送る。
+   *
+   * 応答中に割り込んで送る手段がCLIに無いため、中断を挟む。
+   */
+  async flushQueue(config: CodexConfig): Promise<void> {
+    if (this.state.queued.length === 0) {
+      return;
+    }
+    if (this.state.busy) {
+      await this.interrupt();
+    }
+    await this.sendNextQueued(config);
+  }
+
+  /** 待機中の先頭を送る。ターンが終わったときに呼ぶ。 */
+  async sendNextQueued(config: CodexConfig): Promise<void> {
+    const { text, next } = takeQueued(this.state);
+    if (text === undefined) {
+      return;
+    }
+    this.update(next);
+    await this.send(text, config);
   }
 
   /**
