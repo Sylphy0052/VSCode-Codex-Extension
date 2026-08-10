@@ -635,11 +635,15 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 
 入力欄で `/` を打つと候補を出す。**送信そのものはCLIに任せる**。`/name` をそのまま渡せば、Codexは `~/.codex/prompts/*.md` を展開し、Claude Codeはコマンドとして解釈する（どちらも実機で確認）。拡張機能の仕事は「何が使えるか」を見せるところまで。
 
-| 出どころ | Codex                   | Claude Code                                                                                       |
-| -------- | ----------------------- | ------------------------------------------------------------------------------------------------- |
-| カスタム | `~/.codex/prompts/*.md` | `~/.claude/skills/*/SKILL.md`、`~/.claude/commands/*.md`、ワークスペースの `.claude` 配下も同じ形 |
-| 組込     | 固定の一覧を持つ        | 固定の一覧を持つ                                                                                  |
+どちらのCLIも `prompts` / `skills` / `commands` の3か所に置ける。ホーム（`~/.codex` `~/.claude`）とワークスペース（`<folder>/.codex` `<folder>/.claude`）の両方を読む。
 
+| 置き場所          | 拾う形                 |
+| ----------------- | ---------------------- |
+| `<root>/skills`   | `<name>/SKILL.md` のみ |
+| `<root>/prompts`  | 直下の `*.md` のみ     |
+| `<root>/commands` | 直下の `*.md` のみ     |
+
+- **参照ファイルを拾わない**。スキルは `SKILL.md` の隣に `design-guidelines.md` のような資料を置くため、再帰的に集めると候補が使えないもので埋まる（実データで93件→49件）
 - 組込コマンドの一覧を返すAPIは無いため、名前は固定で持つ。**使えるかどうかは判定しない**。CLIが `isn't available in this environment` のように返すので、こちらで可否を決めると版差で嘘をつく
 - 候補は `description` と `argument-hint` を frontmatter から読む。完全なYAML解析はせず、折り返した値は先頭行だけを採る
 - 確定しても送信はしない。引数を書き足せるように `/name ` を入力欄へ入れるところで止める
