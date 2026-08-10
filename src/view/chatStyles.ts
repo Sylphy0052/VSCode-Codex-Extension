@@ -170,6 +170,11 @@ export function chatStyles(): string {
     white-space: nowrap;
   }
   #status { padding: 0 16px 6px; color: var(--vscode-descriptionForeground); font-size: 0.85em; }
+  /* コンテキストの残りが少ないとき。見落とすと突然の圧縮に驚かされる */
+  #status .warn {
+    color: var(--vscode-inputValidation-warningForeground, var(--vscode-editorWarning-foreground));
+    font-weight: 600;
+  }
   .item .head .actions { display: flex; gap: 6px; flex: none; }
   .item .head .actions button { padding: 1px 8px; font-size: 0.85em; }
   /* 本文は選択してコピーできるようにする */

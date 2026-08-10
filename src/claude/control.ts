@@ -1,5 +1,5 @@
 import type { ApprovalDecision } from '../appserver/approvals';
-import type { PendingApproval } from '../appserver/chatState';
+import { buildContextUsage, type ContextUsage, type PendingApproval } from '../appserver/chatState';
 import { describeTool } from './transcript';
 
 /**
@@ -20,6 +20,8 @@ export interface ControlResponse {
   requestId: string;
   ok: boolean;
   error: string | undefined;
+  /** 応答の中身。要求の種類ごとに形が違うため、読み取りは呼び出し側が担う。 */
+  payload: Record<string, unknown> | undefined;
 }
 
 /** stdinへ書く発言。1行で書き切る。 */
@@ -66,7 +68,32 @@ export function readControlResponse(event: Record<string, unknown>): ControlResp
     return undefined;
   }
   const ok = str(response['subtype']) !== 'error';
-  return { requestId, ok, error: ok ? undefined : str(response['error']) || '不明なエラー' };
+  return {
+    requestId,
+    ok,
+    error: ok ? undefined : str(response['error']) || '不明なエラー',
+    payload: rec(response['response']),
+  };
+}
+
+/** コンテキスト使用量を問い合わせる要求。TUIの `/context` と同じ数字が返る。 */
+export function buildContextUsageRequest(requestId: string): string {
+  return buildControlRequest(requestId, { subtype: 'get_context_usage' });
+}
+
+/**
+ * `get_context_usage` の応答を読む。
+ *
+ * 実測した中身は `{categories, totalTokens, maxTokens, percentage, ...}`。
+ * 内訳（categories）は使わず、合計と上限だけを取る。
+ */
+export function readContextUsage(payload: unknown): ContextUsage | undefined {
+  const body = rec(payload);
+  const usedTokens = num(body?.['totalTokens']);
+  if (usedTokens === undefined) {
+    return undefined;
+  }
+  return buildContextUsage(usedTokens, num(body?.['maxTokens']));
 }
 
 /** `can_use_tool` 要求を承認カードにする。 */
@@ -137,6 +164,8 @@ function summarizeInput(input: Record<string, unknown>): string {
 }
 
 const str = (value: unknown): string => (typeof value === 'string' ? value : '');
+const num = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 const rec = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)

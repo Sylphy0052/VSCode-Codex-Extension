@@ -691,7 +691,32 @@ Claude Codeは消費率（`usedPercent`）を返さない。実測した中身�
 - 英語の文章をあてにしているので、**文言が変われば読めなくなる**。読めなければ黙って諦め、`rate_limit_event` 由来の表示（制限の種類とリセット時刻）に任せる
 - 表示はCodexと共通のフッターで行い、消費率があればそちらを優先する
 
-トークン数は表示しない。Codexの `thread/tokenUsage/updated` もClaudeの `result.usage` も取り込まない。
+### 14.9 コンテキスト残量と手動圧縮
+
+長い作業では「そろそろ圧縮が要る」の判断が要る。TUIはCodexが `/status`、Claude Codeが `/context` でこれを出している。チャット画面でも同じ数字を出し、その場で圧縮できるようにする。
+
+**14.8の消費率とは別物**。あちらはレート制限（アカウントの枠）、こちらはコンテキスト（1会話に載る量）で、増減の理由も対処も違う。`ChatUsage` へ混ぜず `ContextUsage`（`usedTokens` / `contextWindow` / `remainingPercent`）として別に持ち、フッターには `使用量 42% ・ コンテキスト 22k/258k（残り92%）` のように何の数字か分かる言葉を付けて並べる。
+
+#### 入手経路（実測で確認）
+
+|             | 使用量                              | 圧縮の要求                          | 圧縮の合図                     |
+| ----------- | ----------------------------------- | ----------------------------------- | ------------------------------ |
+| Codex       | `thread/tokenUsage/updated` 通知    | `thread/compact/start { threadId }` | `contextCompaction` 項目       |
+| Claude Code | `get_context_usage` control request | `/compact` を発言として送る         | `system` の `compact_boundary` |
+
+- Codexの `ThreadTokenUsage` は `{ last, total, modelContextWindow }`。**コンテキストの占有量は `last.totalTokens`** で、`total` はスレッド全体の累計。圧縮すると `last` だけが下がる（実測: 21541 → 4831、`total` は 21541 のまま）
+- Claude Codeの `get_context_usage` は `{ categories, totalTokens, maxTokens, percentage }` を返す。内訳は使わず合計と上限だけ取る。会話へ `/context` を送ると応答が会話に混ざるため、control protocol で聞く
+- 読み直す契機はターンの完了時。圧縮の効果もここで表示へ反映される
+- **上限が判らないときは割合を出さない**。作った残量を出すくらいなら数字だけ出す
+
+#### 圧縮
+
+- 入力欄の横に「圧縮」ボタンを置く。押すと**確認のモーダル**を出してから実行する（会話の内容を要約へ置き換えるため、元には戻せない）
+- Codexは専用のメソッドがある。`thread/compacted` 通知はプロトコル側で非推奨なので見ず、`contextCompaction` 項目の到着で判断する
+- Claude Codeには専用の制御要求が無い。TUIと同じく `/compact` を**発言として送る**（`local_command` の制御要求は `Unsupported control request subtype` で失敗する）
+- Claude Codeの結果は `system` の `status` 通知に入る。`compact_result` は `success` か `failed` で、失敗時は `compact_error` が付く（例: `Not enough messages to compact.`）。**成功の項目は `compact_boundary` が受け持ち、`status` からは失敗だけを項目にする**。両方で作ると同じ圧縮が二重に並ぶ
+- 圧縮後にCLIが流す要約は `content` が配列ではなく文字列で届くため、発言としては並ばない（`applyUser` は配列の part だけを見ている）
+- 圧縮の位置は種類 `contextCompaction` の項目として会話に残す。CodexとClaude Codeで同じ種類にそろえてあるので、描画側の分岐は要らない
 
 ## 15. 作業記録（日報・週報連携）
 

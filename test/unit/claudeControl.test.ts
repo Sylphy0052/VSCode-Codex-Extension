@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildCanUseToolResponse,
+  buildContextUsageRequest,
   buildControlRequest,
   buildUserMessage,
   describeCanUseTool,
+  readContextUsage,
   readControlRequest,
   readControlResponse,
 } from '../../src/claude/control';
@@ -57,7 +59,7 @@ describe('readControlResponse', () => {
         type: 'control_response',
         response: { subtype: 'success', request_id: 'req_1', response: { ok: true } },
       }),
-    ).toEqual({ requestId: 'req_1', ok: true, error: undefined });
+    ).toEqual({ requestId: 'req_1', ok: true, error: undefined, payload: { ok: true } });
   });
 
   it('エラー応答を読み取る', () => {
@@ -127,5 +129,63 @@ describe('buildCanUseToolResponse', () => {
       behavior: 'deny',
       message: 'ユーザーが拒否しました',
     });
+  });
+});
+
+describe('buildContextUsageRequest', () => {
+  it('get_context_usage を1行で送る', () => {
+    const line = buildContextUsageRequest('req_2');
+    expect(line.endsWith('\n')).toBe(true);
+    expect(JSON.parse(line.trim())).toEqual({
+      type: 'control_request',
+      request_id: 'req_2',
+      request: { subtype: 'get_context_usage' },
+    });
+  });
+});
+
+describe('readContextUsage', () => {
+  // 実測した応答の一部。内訳（categories）は使わず合計と上限だけ取る
+  const payload = {
+    categories: [{ name: 'System prompt', tokens: 3897, color: 'promptBorder' }],
+    totalTokens: 36342,
+    maxTokens: 1000000,
+    percentage: 4,
+  };
+
+  it('合計と上限から残りの割合を作る', () => {
+    expect(readContextUsage(payload)).toEqual({
+      usedTokens: 36342,
+      contextWindow: 1000000,
+      remainingPercent: 96,
+    });
+  });
+
+  it('上限が無ければ割合を出さない', () => {
+    expect(readContextUsage({ totalTokens: 100 })?.remainingPercent).toBeUndefined();
+  });
+
+  it('読めない応答では何も返さない', () => {
+    expect(readContextUsage(undefined)).toBeUndefined();
+    expect(readContextUsage({})).toBeUndefined();
+  });
+});
+
+describe('readControlResponse の中身', () => {
+  it('応答の中身を持ち帰る', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: { subtype: 'success', request_id: 'req_2', response: { totalTokens: 10 } },
+    });
+    expect(response?.payload).toEqual({ totalTokens: 10 });
+  });
+
+  it('中身が無ければ undefined', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: { subtype: 'success', request_id: 'req_1' },
+    });
+    expect(response?.ok).toBe(true);
+    expect(response?.payload).toBeUndefined();
   });
 });
