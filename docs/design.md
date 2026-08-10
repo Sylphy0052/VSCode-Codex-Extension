@@ -612,6 +612,12 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 
 対応しない操作はTreeViewの `contextValue`（`codexSession.<provider>`）でメニューから隠す。
 
+### 9.6 中断したターンの扱い
+
+`turn/interrupt` で止めたターンは `status: "interrupted"` として残るが、**itemsには自分の発言しか保存されない**（実機で確認）。途中まで流れていた応答はCodex側に永続化されないため、`thread/resume` でも戻らない。
+
+タブ復元やresumeの直後に応答だけが消えて見えるのはこのため。拡張機能側で本文を退避すれば見た目は保てるが、§8の「会話本文を読まない・保存しない」に反するので採らない。
+
 ### 14.7 チャット画面の設定行
 
 Codex画面と同じHTML（`renderShell`）を使うため、画面下の設定行はClaude Code側にも出る。承認方法の選択肢だけプロバイダごとに差し替える（Codexは `APPROVAL_MODES`、Claude Codeは `--permission-mode` の6種）。

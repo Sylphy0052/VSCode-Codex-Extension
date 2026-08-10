@@ -122,6 +122,7 @@ sudo apt install bubblewrap
 - 操作: Codex画面を2枚開いた状態でウィンドウをリロード（`Developer: Reload Window`）
 - 期待: 両方のタブが会話内容つきで復元される（`registerWebviewPanelSerializer` → `thread/resume`）
 - 確認: 復元後にそのまま発言を続けられる
+- 注意: **中断したターンの応答は戻らない**。Codexが自分の発言しか保存しないため（設計書 §9.6）。中断を試した直後に確認すると、消えたように見えて紛らわしい
 
 ### C-12 履歴から Codex画面で開く
 
