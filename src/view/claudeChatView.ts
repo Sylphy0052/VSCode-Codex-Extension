@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { ApprovalDecision } from '../appserver/approvals';
-import type { ChatState } from '../appserver/chatState';
+import type { ChatState, ChatUsage } from '../appserver/chatState';
 import type { ClaudeSessionStore } from '../claude/sessionStore';
 import { ClaudeStreamSession } from '../claude/streamSession';
 import { transcriptItems } from '../claude/transcript';
@@ -40,6 +40,8 @@ export class ClaudeChatViewManager implements vscode.Disposable {
     private readonly settings: SettingsProvider,
     private readonly log: Logger,
     private readonly onActivity: (activity: ChatActivity) => void = () => undefined,
+    /** 制限の状態が更新されたときに知らせる。ステータスバーの表示に使う。 */
+    private readonly onUsage: (usage: ChatUsage) => void = () => undefined,
   ) {}
 
   /**
@@ -155,6 +157,9 @@ export class ClaudeChatViewManager implements vscode.Disposable {
         const next = deriveTitle(state);
         if (next !== undefined && panel.title !== next) {
           panel.title = next;
+        }
+        if (state.usage !== undefined) {
+          this.onUsage(state.usage);
         }
         void panel.webview.postMessage({ type: 'state', state });
       },

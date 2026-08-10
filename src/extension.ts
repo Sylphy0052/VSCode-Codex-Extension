@@ -136,6 +136,7 @@ export function activate(context: vscode.ExtensionContext): void {
     settings,
     log,
     ({ sessionId, cwd, text }) => recordActivity({ sessionId, source: 'claude-code', cwd, text }),
+    (usage) => usageBar.updateClaude(usage),
   );
   context.subscriptions.push(claudeChat);
 
