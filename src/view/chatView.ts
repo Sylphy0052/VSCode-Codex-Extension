@@ -6,6 +6,7 @@ import { ChatSession } from '../appserver/chatSession';
 import { AppServerConnection, type ServerRequest } from '../appserver/connection';
 import { summarize } from '../codex/conversation';
 import { readForkedThreadId } from '../codex/jsonRpc';
+import { readSkillsList } from '../codex/skillsList';
 import { currentWorkspaceFolder, readConfig, workspaceFolderPaths } from '../config';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { Logger } from '../log';
@@ -385,8 +386,28 @@ export class ChatViewManager implements vscode.Disposable {
     if (entry.disposed) {
       return;
     }
-    this.commands ??= await this.catalog.forCodex(this.codexHome, workspaceFolderPaths());
+    this.commands ??= await this.loadCommands();
     void entry.panel.webview.postMessage({ type: 'commands', commands: this.commands });
+  }
+
+  /**
+   * 候補を作る。
+   *
+   * スキルは app-server に聞く（無効化されたものを除け、プロジェクト側も解決済みで返る）。
+   * 接続できない場合でもファイル由来の候補だけは出す。
+   */
+  private async loadCommands(): Promise<SlashCommand[]> {
+    const fromFiles = await this.catalog.forCodex(this.codexHome, workspaceFolderPaths());
+    try {
+      await this.connection.ensureStarted();
+      const response = await this.connection.request('skills/list', {
+        cwd: currentWorkspaceFolder()?.uri.fsPath ?? this.codexHome,
+      });
+      return mergeCommands(fromFiles, readSkillsList(response.result));
+    } catch (e) {
+      this.log.warn(`スキル一覧を取得できませんでした: ${e instanceof Error ? e.message : e}`);
+      return fromFiles;
+    }
   }
 
   refreshSettings(): void {
@@ -470,6 +491,15 @@ function deriveTitle(state: ChatState): string | undefined {
     return undefined;
   }
   return `Codex: ${summarize(first.text, 32)}`;
+}
+
+/** ファイル由来とAPI由来を混ぜる。同じ名前はAPI側の説明を優先する。 */
+function mergeCommands(fromFiles: SlashCommand[], fromApi: SlashCommand[]): SlashCommand[] {
+  const byName = new Map(fromFiles.map((c) => [c.name, c]));
+  for (const command of fromApi) {
+    byName.set(command.name, command);
+  }
+  return [...byName.values()];
 }
 
 /** webview側が `setState` で保持している値。 */
