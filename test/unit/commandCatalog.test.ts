@@ -70,12 +70,26 @@ describe('CommandCatalog', () => {
     expect(commands.map((c) => c.name)).not.toContain('deep');
   });
 
-  it('組込コマンドを先に並べる', async () => {
+  it('CLIの組込コマンドは並べない', async () => {
+    // 手で並べた一覧は実測と食い違っていた。Codexは組込を送っても効かず、
+    // Claudeの一覧はCLIが返す（`review` と `cost` は実在しなかった）
+    const codex = await new CommandCatalog(fs).forCodex('/home/.codex', []);
+    expect(codex.map((c) => c.name)).not.toContain('review');
+    expect(codex.map((c) => c.name)).not.toContain('status');
+
+    const claude = await new CommandCatalog(fs).forClaude('/home/.claude', []);
+    expect(claude.map((c) => c.name)).not.toContain('review');
+    expect(claude.map((c) => c.name)).not.toContain('cost');
+  });
+
+  it('ファイル由来の候補だけを返す', async () => {
     const commands = await new CommandCatalog(fs).forCodex('/home/.codex', []);
-    const builtinAt = commands.findIndex((c) => c.name === 'review');
-    const customAt = commands.findIndex((c) => c.name === 'doc');
-    expect(builtinAt).toBeGreaterThanOrEqual(0);
-    expect(builtinAt).toBeLessThan(customAt);
+    expect(commands.map((c) => c.name).sort()).toEqual([
+      'commit',
+      'doc',
+      'gitlab-commit',
+      'slides-maker',
+    ]);
   });
 
   it('同じ名前は後から見つけたものを捨てる', async () => {

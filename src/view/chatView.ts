@@ -15,6 +15,12 @@ import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
 import { APPROVAL_MODES } from '../codex/types';
 import { CommandCatalog } from '../provider/commandCatalog';
+import {
+  CODEX_PSEUDO_COMMANDS,
+  routePseudoCommand,
+  withPseudoCommands,
+  type PseudoCommandCall,
+} from '../provider/pseudoCommands';
 import type { SlashCommand } from '../provider/slashCommands';
 import { chatScript } from './chatScript';
 import { chatStyles } from './chatStyles';
@@ -277,6 +283,12 @@ export class ChatViewManager implements vscode.Disposable {
       if (type === 'send' && typeof m['text'] === 'string' && m['text'].trim() !== '') {
         // 手動の発言はループへの割り込み。指示が交互に飛ぶ状態を作らない
         entry.loop.noteUserAction();
+        // 擬似コマンドはCLIへ送らない。送っても文章として素通しされるだけ
+        const pseudo = routePseudoCommand(CODEX_PSEUDO_COMMANDS, m['text']);
+        if (pseudo !== undefined) {
+          await this.runPseudoCommand(entry, pseudo);
+          return;
+        }
         await entry.session.sendOrQueue(m['text'], readConfig().codex);
         this.reportActivity(entry, m['text']);
         return;
@@ -346,6 +358,24 @@ export class ChatViewManager implements vscode.Disposable {
       }
     } catch (e) {
       this.reportError(e);
+    }
+  }
+
+  /**
+   * 擬似コマンドを実行する。CLIへは何も送らない。
+   *
+   * 対応する動作が拡張機能側にあるものだけを候補に出しているため、ここへ来た要求は
+   * 必ず何かを起こす。届かない指示が黙って文章に化けることは無い。
+   */
+  private async runPseudoCommand(entry: ChatPanel, call: PseudoCommandCall): Promise<void> {
+    if (call.args !== '') {
+      this.log.warn(`/${call.name} は引数を受け取らないため無視します: ${call.args}`);
+    }
+    if (call.action === 'compact') {
+      if (!(await confirmCompact())) {
+        return;
+      }
+      await entry.session.compact();
     }
   }
 
@@ -469,6 +499,9 @@ export class ChatViewManager implements vscode.Disposable {
   /**
    * 候補を作る。
    *
+   * 組込コマンドは出さない。app-serverへ送ってもただの文章になるため（実測で確認）、
+   * 代わりに拡張機能側の擬似コマンドを先頭へ置く。
+   *
    * スキルは app-server に聞く（無効化されたものを除け、プロジェクト側も解決済みで返る）。
    * 接続できない場合でもファイル由来の候補だけは出す。
    */
@@ -479,10 +512,13 @@ export class ChatViewManager implements vscode.Disposable {
       const response = await this.connection.request('skills/list', {
         cwd: currentWorkspaceFolder()?.uri.fsPath ?? this.codexHome,
       });
-      return mergeCommands(fromFiles, readSkillsList(response.result));
+      return withPseudoCommands(
+        CODEX_PSEUDO_COMMANDS,
+        mergeCommands(fromFiles, readSkillsList(response.result)),
+      );
     } catch (e) {
       this.log.warn(`スキル一覧を取得できませんでした: ${e instanceof Error ? e.message : e}`);
-      return fromFiles;
+      return withPseudoCommands(CODEX_PSEUDO_COMMANDS, fromFiles);
     }
   }
 

@@ -237,6 +237,20 @@ CodexとClaude Codeで入手経路が違うため、両方の画面で確認す�
 - 確認: Claude Codeで会話が短いうちに押すと `会話を圧縮しました ・ エラー` として `Not enough messages to compact.` が出る（黙って何も起きない状態にならない）
 - 確認: 応答中は「圧縮」ボタンが押せない
 
+### L-13 スラッシュコマンドの候補
+
+CodexとClaude Codeで出どころが違うため、両方の画面で確認する。判定の根拠は [slash-commands.md](slash-commands.md)。
+
+- 操作: 入力欄で `/` を打つ
+- 期待（Codex）: 候補の先頭に `/compact` が出る。続けてスキルとカスタムプロンプトが並ぶ
+- 確認（Codex）: `/status` `/review` `/init` `/diff` `/plan` `/skills` は**候補に出ない**（送っても効かないため）
+- 操作（Codex）: `/compact` を選んで送信する
+- 期待（Codex）: 圧縮の確認が出る。CLIへ発言としては送られない（会話に `/compact` というユーザー発言が残らない）
+- 期待（Claude Code）: 候補にCLIが返した一覧が出る（組込・ユーザー定義・プラグイン由来が混ざる。実測で90件前後）
+- 確認（Claude Code）: `/review` `/cost` は出ない。`/code-review` `/usage` `/context` は出る
+- 確認（Claude Code）: `/context` を送るとコマンドとして処理され、モデルへの発言にならない
+- 確認: 数文字打つと絞り込まれ、前方一致が上に来る
+
 ## P群: ループ実行
 
 チャット画面のループパネル。CodexとClaude Codeで同じ制御を使うため、P-01〜P-04はCodex画面、P-05はClaude Code画面で確認する。

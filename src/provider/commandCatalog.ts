@@ -2,40 +2,28 @@ import type { FileSystemPort } from '../session/ports';
 import { parseCommandFile, type SlashCommand } from './slashCommands';
 
 /**
- * CLIに組み込まれているコマンド。
+ * CLIの組込コマンドはここに持たない。
  *
- * 一覧を返すAPIが無く、`/help` も `--print` では使えないため、ここに持つ。
- * 使えるかどうかはCLIが判断して返すので（`isn't available in this environment` など）、
- * こちらでは可否を決めない。版が上がって増減しても候補が出なくなるだけで済む。
+ * 以前は名前を手で並べていたが、実測の結果どちらのCLIでも誤りだった。
+ * Codexの組込コマンドはTUI層の機能で、app-serverへ送ってもただの文章になる。
+ * Claude Codeは組込コマンドが効くが、一覧はCLI（`initialize` の応答）が持っており、
+ * 手で並べた7件のうち `review` と `cost` は実在しなかった。
+ *
+ * 現在の出どころ:
+ * - Codex: 拡張機能側の擬似コマンド（`pseudoCommands.ts`）+ `skills/list` + このファイル
+ * - Claude Code: `initialize` の応答 + `commands_changed` 通知。取れないときだけこのファイル
+ *
+ * 判定の根拠は `docs/slash-commands.md`。
  */
-const CODEX_BUILTINS: SlashCommand[] = [
-  { name: 'review', description: 'コードをレビューする', argumentHint: '' },
-  { name: 'compact', description: '会話を要約して圧縮する', argumentHint: '' },
-  { name: 'init', description: 'AGENTS.md を作る', argumentHint: '' },
-  { name: 'status', description: '現在の設定と使用量を表示する', argumentHint: '' },
-  { name: 'diff', description: '未コミットの差分を見る', argumentHint: '' },
-  { name: 'plan', description: '計画を立ててから進める', argumentHint: '' },
-  { name: 'skills', description: '使えるスキルを一覧する', argumentHint: '' },
-];
-
-const CLAUDE_BUILTINS: SlashCommand[] = [
-  { name: 'usage', description: '使用量と制限を見る', argumentHint: '' },
-  { name: 'compact', description: '会話を要約して圧縮する', argumentHint: '' },
-  { name: 'review', description: 'コードをレビューする', argumentHint: '' },
-  { name: 'init', description: 'CLAUDE.md を作る', argumentHint: '' },
-  { name: 'context', description: 'コンテキストの使用量を見る', argumentHint: '' },
-  { name: 'cost', description: '課金額を見る', argumentHint: '' },
-  { name: 'security-review', description: 'セキュリティレビューを行う', argumentHint: '' },
-];
 
 const basename = (p: string): string => p.slice(p.lastIndexOf('/') + 1);
 const dirname = (p: string): string => p.slice(0, Math.max(0, p.lastIndexOf('/')));
 
 /**
- * 入力欄の候補を集める。
+ * ファイルに置かれた候補を集める。
  *
- * 送信は `/name` をそのまま渡すだけで済む（Codexはカスタムプロンプトを展開し、
- * Claude Codeはコマンドとして解釈する）。ここでは「何が使えるか」だけを作る。
+ * カスタムプロンプト・スキル・コマンドファイルのみを扱う。これらは `/name` を
+ * そのまま送れば効く（Codexは展開し、Claude Codeはコマンドとして解釈する）。
  */
 export class CommandCatalog {
   constructor(private readonly fs: FileSystemPort) {}
@@ -46,7 +34,7 @@ export class CommandCatalog {
    */
   async forCodex(codexHome: string, workspaceFolders: string[]): Promise<SlashCommand[]> {
     const roots = [codexHome, ...workspaceFolders.map((folder) => `${folder}/.codex`)];
-    return dedupe([...CODEX_BUILTINS, ...(await this.collectFrom(roots))]);
+    return dedupe(await this.collectFrom(roots));
   }
 
   /**
@@ -55,7 +43,7 @@ export class CommandCatalog {
    */
   async forClaude(claudeHome: string, workspaceFolders: string[]): Promise<SlashCommand[]> {
     const roots = [claudeHome, ...workspaceFolders.map((folder) => `${folder}/.claude`)];
-    return dedupe([...CLAUDE_BUILTINS, ...(await this.collectFrom(roots))]);
+    return dedupe(await this.collectFrom(roots));
   }
 
   /** どちらのCLIも prompts / skills / commands の3か所に置ける。 */

@@ -1,5 +1,6 @@
 import type { ApprovalDecision } from '../appserver/approvals';
 import { buildContextUsage, type ContextUsage, type PendingApproval } from '../appserver/chatState';
+import type { SlashCommand } from '../provider/slashCommands';
 import { describeTool } from './transcript';
 
 /**
@@ -74,6 +75,52 @@ export function readControlResponse(event: Record<string, unknown>): ControlResp
     error: ok ? undefined : str(response['error']) || '不明なエラー',
     payload: rec(response['response']),
   };
+}
+
+/**
+ * 使えるスラッシュコマンドの一覧を読む。
+ *
+ * `initialize` の応答と `commands_changed` 通知の両方が同じ形（`commands` 配列）で
+ * 持っている。組込・ユーザー定義・プラグイン由来が混ざり、同じ名前が重複することも
+ * あるため、先に見つけたものを残す。
+ *
+ * 一覧そのものが無いときは `undefined` を返す。空配列（コマンドが1件も無い）と
+ * 区別しないと、読めなかっただけで候補を消してしまう。
+ */
+export function readCommandList(source: unknown): SlashCommand[] | undefined {
+  const raw = rec(source)?.['commands'];
+  if (!Array.isArray(raw)) {
+    return undefined;
+  }
+
+  const commands: SlashCommand[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    const command = rec(entry);
+    const name = str(command?.['name']);
+    if (name === '' || seen.has(name)) {
+      continue;
+    }
+    seen.add(name);
+    commands.push({
+      name,
+      description: str(command?.['description']),
+      argumentHint: str(command?.['argumentHint']),
+    });
+  }
+  return commands;
+}
+
+/**
+ * セッションの途中でコマンドが増減したときの通知。
+ *
+ * CLIは差分ではなく一覧をそのまま押し付けてくるので、受け取った側は入れ替える。
+ */
+export function readCommandsChanged(event: Record<string, unknown>): SlashCommand[] | undefined {
+  if (str(event['type']) !== 'system' || str(event['subtype']) !== 'commands_changed') {
+    return undefined;
+  }
+  return readCommandList(event);
 }
 
 /** コンテキスト使用量を問い合わせる要求。TUIの `/context` と同じ数字が返る。 */

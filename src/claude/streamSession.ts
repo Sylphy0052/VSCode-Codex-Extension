@@ -21,12 +21,15 @@ import {
   buildControlResponse,
   buildUserMessage,
   describeCanUseTool,
+  readCommandList,
+  readCommandsChanged,
   readContextUsage,
   readControlRequest,
   readControlResponse,
   type ControlResponse,
   type IncomingControlRequest,
 } from './control';
+import type { SlashCommand } from '../provider/slashCommands';
 import { applyStreamEvent, initialClaudeState } from './streamJson';
 import type { ClaudeConfig } from './types';
 
@@ -62,6 +65,8 @@ export class ClaudeStreamSession {
   /** 承認要求が一度でも届いたか。届かない構成を利用者へ知らせるために見る。 */
   private sawApprovalRequest = false;
   private handshakeDone = false;
+  /** CLIが持っている使えるコマンド。取れるまでは空。 */
+  private commandList: SlashCommand[] = [];
 
   constructor(
     private readonly claudePath: () => string,
@@ -69,7 +74,19 @@ export class ClaudeStreamSession {
     private readonly onChange: (state: ChatState) => void,
     /** 承認要求を扱えないと判った時に一度だけ呼ぶ。 */
     private readonly onApprovalUnavailable: () => void = () => undefined,
+    /** 使えるコマンドが判った時と、途中で増減した時に呼ぶ。 */
+    private readonly onCommands: (commands: readonly SlashCommand[]) => void = () => undefined,
   ) {}
+
+  /**
+   * 使えるスラッシュコマンド。
+   *
+   * 組込コマンドをこちらで並べるのはやめた（手で並べた一覧は実在しないものを含んでいた）。
+   * CLIが `initialize` の応答で返し、増減は `commands_changed` で届く。
+   */
+  get commands(): readonly SlashCommand[] {
+    return this.commandList;
+  }
 
   get threadId(): string | undefined {
     return this.state.threadId;
@@ -242,6 +259,12 @@ export class ClaudeStreamSession {
     this.buffer = rest;
 
     for (const event of values) {
+      // コマンドの増減。CLIは差分ではなく一覧を押し付けてくるので入れ替える
+      const changed = readCommandsChanged(event);
+      if (changed !== undefined) {
+        this.setCommands(changed);
+      }
+
       const request = readControlRequest(event);
       if (request !== undefined) {
         this.handleControlRequest(request);
@@ -299,6 +322,12 @@ export class ClaudeStreamSession {
       return;
     }
 
+    // `initialize` の応答が使えるコマンドを全部返す。一覧のハードコードは要らない
+    const commands = readCommandList(response.payload);
+    if (commands !== undefined) {
+      this.setCommands(commands);
+    }
+
     if (this.handshakeDone) {
       return;
     }
@@ -313,6 +342,11 @@ export class ClaudeStreamSession {
     }
     // 会話を始める前の値を出しておく。ここを逃すと最初のターンが終わるまで空になる
     this.refreshContext();
+  }
+
+  private setCommands(commands: SlashCommand[]): void {
+    this.commandList = commands;
+    this.onCommands(commands);
   }
 
   private update(next: ChatState): void {
