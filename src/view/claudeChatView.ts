@@ -15,7 +15,7 @@ import { CommandCatalog } from '../provider/commandCatalog';
 import type { SlashCommand } from '../provider/slashCommands';
 import { confirmCompact, renderShell, reportTurnResult } from './chatView';
 import { CLAUDE_EFFORTS, CLAUDE_PERMISSION_MODES } from '../claude/types';
-import type { SettingsProvider } from './settingsProvider';
+import type { ClaudeEditableKey, SettingsProvider } from './settingsProvider';
 import type { ChatActivity } from './chatView';
 
 interface ClaudePanel {
@@ -201,6 +201,9 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       agentLabel: LABEL,
       approvalModes: CLAUDE_PERMISSION_MODES,
       showSettings: true,
+      // effortだけ扱いが違う。黙って効かないより、効いたか判らないと書くほうがまし
+      settingsNote:
+        'モデルと承認は今の会話にすぐ効きます。Effortは送りますが、CLIが結果を返さないため反映は確かめられません。「既定」へ戻す操作は次のセッションから効きます。',
     });
 
     const session = new ClaudeStreamSession(
@@ -266,7 +269,7 @@ export class ClaudeChatViewManager implements vscode.Disposable {
     if (typeof value !== 'string') {
       return;
     }
-    const mapped =
+    const mapped: ClaudeEditableKey | undefined =
       key === 'model'
         ? 'model'
         : key === 'reasoningEffort'
@@ -279,8 +282,38 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       return;
     }
     // 取り消された場合も表示を現在値へ戻すため、結果によらず再送する
-    await this.settings.updateClaude(mapped, value);
+    const applied = await this.settings.updateClaude(mapped, value);
+    if (applied) {
+      this.applyToSession(entry, mapped, value);
+    }
     this.refreshSettings(entry);
+  }
+
+  /**
+   * 変更を実行中のセッションへ流す。
+   *
+   * Codex画面はターンごとに設定を渡せるが、Claude Codeは1プロセス1セッションで
+   * 起動引数が固定なので、control protocol で伝える。
+   *
+   * 「既定」（空文字）へ戻す操作は送らない。CLI側に元へ戻す手段が無く、
+   * 何を送っても嘘になるため。次に開くセッションから効く。
+   */
+  private applyToSession(entry: ClaudePanel, key: ClaudeEditableKey, value: string): void {
+    if (value === '') {
+      this.log.info(
+        `${key} を既定へ戻しました。今の会話には効かず、次のセッションから適用されます`,
+      );
+      return;
+    }
+    if (key === 'model') {
+      entry.session.setModel(value);
+      return;
+    }
+    if (key === 'effort') {
+      entry.session.setEffort(value);
+      return;
+    }
+    entry.session.setPermissionMode(value);
   }
 
   /**

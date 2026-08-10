@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   addApproval,
+  appendNotice,
   applyEvent,
   buildContextUsage,
   initialChatState,
@@ -530,5 +531,30 @@ describe('normalizeItem / contextCompaction', () => {
       id: 'c1',
       kind: 'contextCompaction',
     });
+  });
+});
+
+describe('appendNotice', () => {
+  it('会話とは別の一言を項目として残す', () => {
+    const state = appendNotice(initialChatState, 'settings:1', 'モデルを sonnet に変えました');
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]).toMatchObject({
+      id: 'settings:1',
+      kind: 'settingsChanged',
+      detail: 'モデルを sonnet に変えました',
+      text: '',
+    });
+  });
+
+  it('同じidなら書き換える（増やさない）', () => {
+    const once = appendNotice(initialChatState, 'settings:1', '最初');
+    const twice = appendNotice(once, 'settings:1', 'あとから');
+    expect(twice.items).toHaveLength(1);
+    expect(twice.items[0]?.detail).toBe('あとから');
+  });
+
+  it('別のidなら並べる', () => {
+    const first = appendNotice(initialChatState, 'settings:1', 'モデル');
+    expect(appendNotice(first, 'settings:2', '承認方法').items).toHaveLength(2);
   });
 });

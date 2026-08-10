@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { ApprovalDecision } from '../appserver/approvals';
 import {
   addApproval,
+  appendNotice,
   enqueue,
   removeApproval,
   removeQueued,
@@ -19,6 +20,9 @@ import {
   buildContextUsageRequest,
   buildControlRequest,
   buildControlResponse,
+  buildSetEffortRequest,
+  buildSetModelRequest,
+  buildSetPermissionModeRequest,
   buildUserMessage,
   describeCanUseTool,
   readCommandList,
@@ -61,7 +65,7 @@ export class ClaudeStreamSession {
   private nextControlId = 1;
   private readonly waiting = new Map<string, WaitingApproval>();
   /** こちらから出した要求の用途。応答は種類ごとに形が違うため、idで引く。 */
-  private readonly outgoing = new Map<string, OutgoingKind>();
+  private readonly outgoing = new Map<string, Outgoing>();
   /** 承認要求が一度でも届いたか。届かない構成を利用者へ知らせるために見る。 */
   private sawApprovalRequest = false;
   private handshakeDone = false;
@@ -154,10 +158,55 @@ export class ClaudeStreamSession {
   }
 
   /** 要求idを採番し、応答を読むときのために用途を覚える。 */
-  private claim(kind: OutgoingKind): string {
+  private claim(kind: OutgoingKind, subject = '', note = ''): string {
     const requestId = `req_${this.nextControlId++}`;
-    this.outgoing.set(requestId, kind);
+    this.outgoing.set(requestId, { kind, subject, note });
     return requestId;
+  }
+
+  /**
+   * 会話中にモデルを変える。次の発言から効く。
+   *
+   * 起動引数はプロセスが生きている間ずっと固定なので、これが唯一の手段。
+   * 「既定」（空文字）は元に戻す手段が無いため送らない。
+   */
+  setModel(model: string): void {
+    if (this.proc === undefined || model === '') {
+      return;
+    }
+    const requestId = this.claim('settings', 'モデル', `モデルを ${model} に変えました`);
+    this.write(buildSetModelRequest(requestId, model));
+  }
+
+  /**
+   * 会話中に承認方法を変える。
+   *
+   * 変わったことは `system/status` 通知の側で画面に残す。応答の成功だけを信じない
+   * （他の経路で変えられた場合も同じ通知で拾える）。
+   */
+  setPermissionMode(mode: string): void {
+    if (this.proc === undefined || mode === '') {
+      return;
+    }
+    this.write(buildSetPermissionModeRequest(this.claim('settings', '承認方法'), mode));
+  }
+
+  /**
+   * 会話中にeffortを変える。
+   *
+   * 専用の制御要求が無いため `apply_flag_settings` に載せる。**効いたことは観測できない**
+   * ので、画面には「送った」までしか出さない（`control.ts` の説明を参照）。
+   */
+  setEffort(effort: string): void {
+    if (this.proc === undefined || effort === '') {
+      return;
+    }
+    const requestId = this.claim(
+      'settings',
+      'effort',
+      `effort を ${effort} で送りました（CLIが結果を返さないため、効いたかどうかは確かめられません）`,
+    );
+    this.write(buildSetEffortRequest(requestId, effort));
   }
 
   /**
@@ -168,7 +217,10 @@ export class ClaudeStreamSession {
    */
   refreshContext(): void {
     // 応答を返さないCLIでは要求が返らない。返事待ちを1件までにして積み上がりを防ぐ
-    if (this.proc === undefined || [...this.outgoing.values()].includes('contextUsage')) {
+    if (
+      this.proc === undefined ||
+      [...this.outgoing.values()].some((o) => o.kind === 'contextUsage')
+    ) {
       return;
     }
     this.write(buildContextUsageRequest(this.claim('contextUsage')));
@@ -311,10 +363,15 @@ export class ClaudeStreamSession {
   }
 
   private handleControlResponse(response: ControlResponse): void {
-    const kind = this.outgoing.get(response.requestId);
+    const outgoing = this.outgoing.get(response.requestId);
     this.outgoing.delete(response.requestId);
 
-    if (kind === 'contextUsage') {
+    if (outgoing?.kind === 'settings') {
+      this.noteSettingChange(response, outgoing);
+      return;
+    }
+
+    if (outgoing?.kind === 'contextUsage') {
       const context = readContextUsage(response.payload);
       if (context !== undefined) {
         this.update({ ...this.state, context });
@@ -342,6 +399,30 @@ export class ClaudeStreamSession {
     }
     // 会話を始める前の値を出しておく。ここを逃すと最初のターンが終わるまで空になる
     this.refreshContext();
+  }
+
+  /**
+   * 設定変更の結果を画面に残す。
+   *
+   * 失敗を黙って捨てると「変えたつもりで変わっていない」状態になる。成功の一言は
+   * 別の通知で判るもの（承認方法）では出さず、二重に並べない。
+   */
+  private noteSettingChange(response: ControlResponse, outgoing: Outgoing): void {
+    if (!response.ok) {
+      const reason = response.error ?? '不明';
+      this.log.warn(`${outgoing.subject}を変えられませんでした: ${reason}`);
+      this.update(
+        appendNotice(
+          this.state,
+          `settings:${response.requestId}`,
+          `${outgoing.subject}を変えられませんでした: ${reason}`,
+        ),
+      );
+      return;
+    }
+    if (outgoing.note !== '') {
+      this.update(appendNotice(this.state, `settings:${response.requestId}`, outgoing.note));
+    }
   }
 
   private setCommands(commands: SlashCommand[]): void {
@@ -377,4 +458,12 @@ export class ClaudeStreamSession {
 }
 
 /** こちらから出した制御要求の用途。 */
-type OutgoingKind = 'initialize' | 'contextUsage';
+type OutgoingKind = 'initialize' | 'contextUsage' | 'settings';
+
+interface Outgoing {
+  kind: OutgoingKind;
+  /** 何を変えようとしたか。失敗したときの文面に使う。 */
+  subject: string;
+  /** 成功したとき画面に残す一言。空なら残さない（別の通知で判るとき）。 */
+  note: string;
+}

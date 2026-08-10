@@ -3,6 +3,9 @@ import {
   buildCanUseToolResponse,
   buildContextUsageRequest,
   buildControlRequest,
+  buildSetEffortRequest,
+  buildSetModelRequest,
+  buildSetPermissionModeRequest,
   buildUserMessage,
   describeCanUseTool,
   readCommandList,
@@ -246,5 +249,46 @@ describe('readCommandsChanged', () => {
   it('他の通知は引き受けない', () => {
     expect(readCommandsChanged({ type: 'system', subtype: 'init' })).toBeUndefined();
     expect(readCommandsChanged({ type: 'assistant' })).toBeUndefined();
+  });
+});
+
+describe('セッション中の設定変更', () => {
+  const parse = (line: string) => JSON.parse(line.trim()) as Record<string, unknown>;
+
+  it('モデルの変更は set_model で送る', () => {
+    expect(parse(buildSetModelRequest('req_3', 'sonnet'))).toEqual({
+      type: 'control_request',
+      request_id: 'req_3',
+      request: { subtype: 'set_model', model: 'sonnet' },
+    });
+  });
+
+  it('承認方法の変更は set_permission_mode で送る', () => {
+    expect(parse(buildSetPermissionModeRequest('req_4', 'plan'))).toEqual({
+      type: 'control_request',
+      request_id: 'req_4',
+      request: { subtype: 'set_permission_mode', mode: 'plan' },
+    });
+  });
+
+  it('effortは apply_flag_settings に載せる', () => {
+    // set_effort / set_thinking_effort / set_reasoning_effort はどれも
+    // Unsupported control request subtype になる（実測）
+    expect(parse(buildSetEffortRequest('req_5', 'high'))).toEqual({
+      type: 'control_request',
+      request_id: 'req_5',
+      request: { subtype: 'apply_flag_settings', settings: { effortLevel: 'high' } },
+    });
+  });
+
+  it('どれも1行で終わる', () => {
+    for (const line of [
+      buildSetModelRequest('r', 'sonnet'),
+      buildSetPermissionModeRequest('r', 'plan'),
+      buildSetEffortRequest('r', 'high'),
+    ]) {
+      expect(line.endsWith('\n')).toBe(true);
+      expect(line.trimEnd().includes('\n')).toBe(false);
+    }
   });
 });

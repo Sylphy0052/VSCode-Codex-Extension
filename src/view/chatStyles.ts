@@ -202,6 +202,13 @@ export function chatStyles(): string {
     font-size: inherit;
   }
   #settings select:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  /* 変更がいつから効くかの但し書き。行を折り返して全幅に置く */
+  #settings .note {
+    flex-basis: 100%;
+    margin: 0;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.8em;
+  }
   #loop {
     display: flex;
     flex-direction: column;
