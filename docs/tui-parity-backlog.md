@@ -2,9 +2,11 @@
 
 チャット画面（拡張機能が自前で描画する会話UI）を、CLI本体のTUIでできることに追いつかせるための作業一覧。
 
-**目的**: TUIタブを開かなくてもチャット画面だけで作業が完結する状態にする。TUIタブは「壊れたときの退避先」に位置付けを下げる。
+**目的**: チャット画面だけで作業が完結する状態にする。
 
-**現状の前提**: TUIタブ方式はCLIの出力を解釈せず素通しするため、TUIでできることは全てできる。したがってここに挙げるギャップは全て**チャット画面側**（Codex: app-server / Claude Code: stream-json）のもの。
+**TUIタブ方式は廃止済み**（設計書 §2）。退避先が無くなったため、チャット画面でできないことは**この拡張機能ではできない**。ターミナルで直接CLIを起動するしかない。
+
+**比較対象**: ターミナルで直接起動したCLIのTUI。ここに挙げるギャップは全て**チャット画面側**（Codex: app-server / Claude Code: stream-json）のもの。
 
 **この文書の役割**: 一覧と優先度だけを持つ。背景・仕様・受入基準・実装計画は各GitHub Issueの本文に書く。Issue化したらこの表の「Issue」列にリンクを入れる。
 
@@ -19,11 +21,11 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 
 ## 優先度の定義
 
-| 優先度 | 意味                                                      |
-| ------ | --------------------------------------------------------- |
-| P1     | これが無いためにTUIタブへ逃げる必要がある。パリティの本丸 |
-| P2     | 代替手段はあるが不便。TUIとの体験差が明確に出る           |
-| P3     | あると嬉しい。無くても作業は止まらない                    |
+| 優先度 | 意味                                                     |
+| ------ | -------------------------------------------------------- |
+| P1     | これが無いと拡張機能の外へ出る必要がある。パリティの本丸 |
+| P2     | 代替手段はあるが不便。TUIとの体験差が明確に出る          |
+| P3     | あると嬉しい。無くても作業は止まらない                   |
 
 ## Phase 0: 能力調査（実装より先）
 
@@ -33,21 +35,21 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 
 調査Issue: Z-01〜Z-08 は [#1 Codex app-server の能力を実測で確定する](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1)、Z-09〜Z-13 は [#2 Claude Code の control protocol / stream-json の能力を実測で確定する](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/2)。
 
-| ID   | 調査内容                                                | 結果                                                                                       |
-| ---- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Z-01 | Codex: 組込スラッシュコマンドは解釈されるか             | **されない**。`/status` がテキストとしてモデルへ渡り、モデルが答えた。専用メソッドへ振り替える |
-| Z-02 | Codex: ターン内で model/effort/approval/sandbox を変える | **できる**。`TurnStartParams` の各フィールドが「このターン以降」に効く。`sandboxPolicy` も含む |
-| Z-03 | Codex: 画像入力                                          | **できる**。`UserInput` は text / image(url) / localImage(path) / audio                     |
-| Z-04 | Codex: 差分本文                                          | **取れる**。`turn/diff/updated` が unified diff 文字列を送ってくる                          |
-| Z-05 | Codex: トークン使用量                                    | **取れる**。`thread/tokenUsage/updated`（`modelContextWindow` 込み）                        |
-| Z-06 | Codex: compact / review / plan                           | **ある**。`thread/compact/start` `review/start` `turn/plan/updated`。`thread/rollback` は deprecated |
-| Z-07 | Codex: MCP / hooks / plugins / apps / skills             | **全てAPIあり**。実測で応答を確認                                                           |
-| Z-08 | Codex: background terminal / agent thread                | terminal は `command/exec` 系で**できる**。agent thread 切替は未確定                        |
-| Z-09 | Claude: スラッシュコマンドは解釈されるか                 | **される**。`/context` で `model: "<synthetic>"` の応答。APIコールもコストもゼロ            |
-| Z-10 | Claude: control protocol の能力                          | `set_model` `set_permission_mode` ほか多数を実測で確認                                      |
-| Z-11 | Claude: compact / rewind                                 | `rewind_files` 実在（要チェックポイント）。compact はコマンド送信で可                       |
+| ID   | 調査内容                                                 | 結果                                                                                                                                 |
+| ---- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Z-01 | Codex: 組込スラッシュコマンドは解釈されるか              | **されない**。`/status` がテキストとしてモデルへ渡り、モデルが答えた。専用メソッドへ振り替える                                       |
+| Z-02 | Codex: ターン内で model/effort/approval/sandbox を変える | **できる**。`TurnStartParams` の各フィールドが「このターン以降」に効く。`sandboxPolicy` も含む                                       |
+| Z-03 | Codex: 画像入力                                          | **できる**。`UserInput` は text / image(url) / localImage(path) / audio                                                              |
+| Z-04 | Codex: 差分本文                                          | **取れる**。`turn/diff/updated` が unified diff 文字列を送ってくる                                                                   |
+| Z-05 | Codex: トークン使用量                                    | **取れる**。`thread/tokenUsage/updated`（`modelContextWindow` 込み）                                                                 |
+| Z-06 | Codex: compact / review / plan                           | **ある**。`thread/compact/start` `review/start` `turn/plan/updated`。`thread/rollback` は deprecated                                 |
+| Z-07 | Codex: MCP / hooks / plugins / apps / skills             | **全てAPIあり**。実測で応答を確認                                                                                                    |
+| Z-08 | Codex: background terminal / agent thread                | terminal は `command/exec` 系で**できる**。agent thread 切替は未確定                                                                 |
+| Z-09 | Claude: スラッシュコマンドは解釈されるか                 | **される**。`/context` で `model: "<synthetic>"` の応答。APIコールもコストもゼロ                                                     |
+| Z-10 | Claude: control protocol の能力                          | `set_model` `set_permission_mode` ほか多数を実測で確認                                                                               |
+| Z-11 | Claude: compact / rewind                                 | `rewind_files` 実在（要チェックポイント）。compact はコマンド送信で可                                                                |
 | Z-12 | Claude: 途中ターンからの分岐                             | control には無い。`/branch` コマンド経由の可能性あり（[#22](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/22) で追試） |
-| Z-13 | Claude: todos / cost / context                           | **取れる**。`get_context_usage` `get_session_cost` `get_usage`                              |
+| Z-13 | Claude: todos / cost / context                           | **取れる**。`get_context_usage` `get_session_cost` `get_usage`                                                                       |
 
 **Phase 0 は完了**（2026-08-10、Codex CLI 0.147.0 / Claude Code 2.1.226）。詳細な根拠は [#1](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1) と [#2](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/2) のコメントにある。各実装Issueにも結論を反映済み。
 
@@ -61,23 +63,23 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 
 いずれもPhase 0の副産物。既存の不具合を含む。
 
-| ID    | 内容                                                                     | 対象  | 優先度 | Issue |
-| ----- | -------------------------------------------------------------------------- | ----- | ------ | ----- |
-| TP-80 | app-serverからの要求10種のうち7種を処理していない（MCPツールが黙って失敗しうる） | Codex | P1     | [#41](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/41) |
-| TP-81 | `serverRequest/resolved` を処理しておらず、解決済みの承認カードが残る    | Codex | P2     | [#42](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/42) |
-| TP-82 | `turn/steer` で応答を中断せずに指示を割り込ませる                        | Codex | P1     | [#43](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/43) |
-| TP-83 | モデルとeffortの選択肢をCLIから取得する                                  | 両方  | P2     | [#44](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/44) |
-| TP-84 | app-serverの生成済み型定義を取り込むか判断する                           | Codex | P2     | [#46](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/46) |
-| TP-85 | 履歴の取得を `thread/list` へ移すか判断する                              | Codex | P3     | [#45](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/45) |
+| ID    | 内容                                                                             | 対象  | 優先度 | Issue                                                                                        |
+| ----- | -------------------------------------------------------------------------------- | ----- | ------ | -------------------------------------------------------------------------------------------- |
+| TP-80 | app-serverからの要求10種のうち7種を処理していない（MCPツールが黙って失敗しうる） | Codex | P1     | [#41](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/41) 応答は済。UIは #48 #49 |
+| TP-81 | `serverRequest/resolved` を処理しておらず、解決済みの承認カードが残る            | Codex | P2     | [#42](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/42) 済                     |
+| TP-82 | `turn/steer` で応答を中断せずに指示を割り込ませる                                | Codex | P1     | [#43](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/43) PR #60                 |
+| TP-83 | モデルとeffortの選択肢をCLIから取得する                                          | 両方  | P2     | [#44](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/44)                        |
+| TP-84 | app-serverの生成済み型定義を取り込むか判断する                                   | Codex | P2     | [#46](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/46)                        |
+| TP-85 | 履歴の取得を `thread/list` へ移すか判断する                                      | Codex | P3     | [#45](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/45)                        |
 
 ## Phase 1: 入力欄
 
 | ID    | 内容                                                                            | 対象         | 優先度 | 依存 | Issue |
 | ----- | ------------------------------------------------------------------------------- | ------------ | ------ | ---- | ----- |
-| TP-01 | 画像の貼付・添付。現状は `input: [{ type: 'text' }]` 固定でテキストしか送れない | Codex/Claude | P1     | Z-03 | #3 |
-| TP-02 | `@` によるファイル参照の補完。現状は `/` の候補のみ                             | Codex/Claude | P2     | -    | #4 |
-| TP-03 | `!` から始まる行をシェルコマンドとして扱う（Claude TUIのbashモード相当）        | Claude       | P3     | Z-10 | #5 |
-| TP-04 | `#` から始まる行をメモリへ追記する（Claude TUIのメモリモード相当）              | Claude       | P3     | Z-10 | #6 |
+| TP-01 | 画像の貼付・添付。現状は `input: [{ type: 'text' }]` 固定でテキストしか送れない | Codex/Claude | P1     | Z-03 | #3    |
+| TP-02 | `@` によるファイル参照の補完。現状は `/` の候補のみ                             | Codex/Claude | P2     | -    | #4    |
+| TP-03 | `!` から始まる行をシェルコマンドとして扱う（Claude TUIのbashモード相当）        | Claude       | P3     | Z-10 | #5    |
+| TP-04 | `#` から始まる行をメモリへ追記する（Claude TUIのメモリモード相当）              | Claude       | P3     | Z-10 | #6    |
 
 ## Phase 2: スラッシュコマンド
 
@@ -87,69 +89,69 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 
 | ID    | 内容                                                                                     | 対象         | 優先度 | 依存      | Issue |
 | ----- | ---------------------------------------------------------------------------------------- | ------------ | ------ | --------- | ----- |
-| TP-11 | 組込コマンドの実行経路を確保する。効かないものは候補から外すか、拡張側の機能へ差し替える | Codex/Claude | P1     | Z-01 Z-09 | #7 |
-| TP-10 | 組込コマンド一覧を実測値に揃える。CLI版ごとの差分に追従する仕組みも決める                | Codex/Claude | P1     | TP-11     | #8 |
-| TP-12 | 候補に `argument-hint` を表示し、引数付きコマンドを補完する                              | Codex/Claude | P3     | TP-10     | #9 |
+| TP-11 | 組込コマンドの実行経路を確保する。効かないものは候補から外すか、拡張側の機能へ差し替える | Codex/Claude | P1     | Z-01 Z-09 | #7    |
+| TP-10 | 組込コマンド一覧を実測値に揃える。CLI版ごとの差分に追従する仕組みも決める                | Codex/Claude | P1     | TP-11     | #8    |
+| TP-12 | 候補に `argument-hint` を表示し、引数付きコマンドを補完する                              | Codex/Claude | P3     | TP-10     | #9    |
 
 ## Phase 3: セッション中の設定変更
 
 | ID    | 内容                                                                                                 | 対象   | 優先度 | 依存      | Issue |
 | ----- | ---------------------------------------------------------------------------------------------------- | ------ | ------ | --------- | ----- |
-| TP-21 | Claude のセッション中に model / effort / permissionMode を変える。現状は起動引数のみで、会話中は固定 | Claude | P1     | Z-10      | #10 |
-| TP-22 | Plan mode の切替（Codex `/plan` / Claude Shift+Tab 相当）。現状どちらも手段が無い                    | 両方   | P1     | Z-06 Z-10 | #11 |
-| TP-20 | Codex の sandbox をターン単位で変える。現状は `thread/start` 時のみで、明示的に非対応としている      | Codex  | P2     | Z-02      | #12 |
-| TP-23 | 承認モードを循環させるキーバインド（TUIのShift+Tab相当）を画面に用意する                             | 両方   | P3     | TP-22     | #13 |
+| TP-21 | Claude のセッション中に model / effort / permissionMode を変える。現状は起動引数のみで、会話中は固定 | Claude | P1     | Z-10      | #10   |
+| TP-22 | Plan mode の切替（Codex `/plan` / Claude Shift+Tab 相当）。現状どちらも手段が無い                    | 両方   | P1     | Z-06 Z-10 | #11   |
+| TP-20 | Codex の sandbox をターン単位で変える。現状は `thread/start` 時のみで、明示的に非対応としている      | Codex  | P2     | Z-02      | #12   |
+| TP-23 | 承認モードを循環させるキーバインド（TUIのShift+Tab相当）を画面に用意する                             | 両方   | P3     | TP-22     | #13   |
 
 Codexはターン単位で model / effort / approvalPolicy を渡せるのにClaudeは起動時固定、という非対称が現状ある。TP-21はこの差を埋めるもの。
 
 ## Phase 4: 表示
 
-| ID    | 内容                                                                     | 対象         | 優先度 | 依存      | Issue |
-| ----- | ------------------------------------------------------------------------ | ------------ | ------ | --------- | ----- |
-| TP-30 | ファイル変更の差分本文を表示する。現状はパスを並べるだけ                 | Codex/Claude | P1     | Z-04      | #14 |
-| TP-31 | トークン使用量とコンテキスト残量を表示する。現状はレート制限の消費率のみ | Codex/Claude | P1     | Z-05 Z-13 | #15 |
-| TP-33 | 画像の表示（モデルが見た画像・生成した画像）                             | Codex/Claude | P2     | Z-03      | #16 |
-| TP-35 | コマンド実行の出力を逐次表示し、長い出力を折りたためるようにする         | Codex/Claude | P2     | -         | #17 |
-| TP-32 | Web検索の結果を表示する。現状はクエリのみ                                | Codex/Claude | P3     | -         | #18 |
-| TP-34 | 思考の全文表示と折りたたみ。現状は summary のみ                          | Codex/Claude | P3     | -         | #19 |
+| ID    | 内容                                                                     | 対象         | 優先度 | 依存      | Issue  |
+| ----- | ------------------------------------------------------------------------ | ------------ | ------ | --------- | ------ |
+| TP-30 | ファイル変更の差分本文を表示する                                         | Codex/Claude | P1     | Z-04      | #14 済 |
+| TP-31 | トークン使用量とコンテキスト残量を表示する。現状はレート制限の消費率のみ | Codex/Claude | P1     | Z-05 Z-13 | #15    |
+| TP-33 | 画像の表示（モデルが見た画像・生成した画像）                             | Codex/Claude | P2     | Z-03      | #16    |
+| TP-35 | コマンド実行の出力を逐次表示し、長い出力を折りたためるようにする         | Codex/Claude | P2     | -         | #17    |
+| TP-32 | Web検索の結果を表示する。現状はクエリのみ                                | Codex/Claude | P3     | -         | #18    |
+| TP-34 | 思考の全文表示と折りたたみ。現状は summary のみ                          | Codex/Claude | P3     | -         | #19    |
 
 ## Phase 5: 会話操作
 
 | ID    | 内容                                                                                                         | 対象         | 優先度 | 依存      | Issue |
 | ----- | ------------------------------------------------------------------------------------------------------------ | ------------ | ------ | --------- | ----- |
-| TP-40 | 手動の会話圧縮（`/compact` 相当）。コンテキストが逼迫したときの手が現状ない                                  | Codex/Claude | P1     | Z-06 Z-11 | #20 |
-| TP-41 | 巻き戻し（Codex Esc Esc / Claude `/rewind` 相当）。Codexはターン分岐で部分的に代替できるが、Claudeは代替なし | 両方         | P2     | Z-11      | #21 |
-| TP-44 | Claude で会話の途中ターンから分岐する。現状「CLIに手段が無い」としている                                     | Claude       | P2     | Z-12      | #22 |
-| TP-45 | コードレビューの起動（`/review` 相当）を画面の操作として持つ                                                 | Codex/Claude | P2     | Z-06 Z-09 | #23 |
-| TP-42 | 一時的な脇道の会話（Codex `/btw` 相当）                                                                      | Codex        | P3     | Z-06      | #24 |
-| TP-43 | トランスクリプト表示と生テキストモード（Ctrl+T / `/raw` 相当）                                               | Codex/Claude | P3     | -         | #25 |
-| TP-46 | `AGENTS.md` / `CLAUDE.md` の生成（`/init` 相当）                                                             | Codex/Claude | P3     | TP-11     | #26 |
+| TP-40 | 手動の会話圧縮（`/compact` 相当）。コンテキストが逼迫したときの手が現状ない                                  | Codex/Claude | P1     | Z-06 Z-11 | #20   |
+| TP-41 | 巻き戻し（Codex Esc Esc / Claude `/rewind` 相当）。Codexはターン分岐で部分的に代替できるが、Claudeは代替なし | 両方         | P2     | Z-11      | #21   |
+| TP-44 | Claude で会話の途中ターンから分岐する。現状「CLIに手段が無い」としている                                     | Claude       | P2     | Z-12      | #22   |
+| TP-45 | コードレビューの起動（`/review` 相当）を画面の操作として持つ                                                 | Codex/Claude | P2     | Z-06 Z-09 | #23   |
+| TP-42 | 一時的な脇道の会話（Codex `/btw` 相当）                                                                      | Codex        | P3     | Z-06      | #24   |
+| TP-43 | トランスクリプト表示と生テキストモード（Ctrl+T / `/raw` 相当）                                               | Codex/Claude | P3     | -         | #25   |
+| TP-46 | `AGENTS.md` / `CLAUDE.md` の生成（`/init` 相当）                                                             | Codex/Claude | P3     | TP-11     | #26   |
 
 ## Phase 6: 環境・管理系
 
-TUIタブへ逃がさず拡張UIで実装する方針。ただしCLI側にAPIが無いものは実現不可なので、Phase 0の結果で「実装する / TUIタブへの導線に留める」を各タスクで確定させる。
+拡張UIで実装する方針。TUIタブが無くなったため「TUIタブへの導線に留める」という逃げは取れない。CLI側にAPIが無いものは、設定ファイルの編集やターミナルでのCLI起動を案内する形になる。Phase 0で全領域にAPIがあることは確認済み。
 
 | ID    | 内容                                                                  | 対象         | 優先度 | 依存      | Issue |
 | ----- | --------------------------------------------------------------------- | ------------ | ------ | --------- | ----- |
-| TP-50 | MCPサーバの一覧・状態・有効無効                                       | Codex/Claude | P2     | Z-07 Z-10 | #27 |
-| TP-52 | hooksの一覧と信頼の管理                                               | Codex/Claude | P2     | Z-07 Z-10 | #28 |
-| TP-53 | ログイン状態の表示とlogin / logout                                    | Codex/Claude | P2     | Z-07      | #29 |
-| TP-58 | カスタムエージェントの選択と一覧（Claude `--agent` / `/agents` 相当） | Claude       | P2     | Z-10      | #30 |
-| TP-59 | TODO一覧の表示（Claude `/todos` 相当）                                | Claude       | P2     | Z-13      | #31 |
-| TP-51 | plugins / apps の閲覧と管理                                           | Codex/Claude | P3     | Z-07      | #32 |
-| TP-54 | バックグラウンドターミナルの一覧と停止（Codex `/ps` 相当）            | Codex        | P3     | Z-08      | #33 |
-| TP-55 | agent thread の切替とサブエージェントの状況表示                       | Codex        | P3     | Z-08      | #34 |
-| TP-56 | skillsの一覧表示と管理。取得は `skillsList.ts` で一部実装済み         | Codex/Claude | P3     | Z-07      | #35 |
-| TP-57 | 他エージェントからの設定インポート（Codex `/import` 相当）            | Codex        | P3     | Z-07      | #36 |
-| TP-60 | 課金額とセッション分析（`/cost` `/insights` 相当）                    | Claude       | P3     | Z-13      | #37 |
+| TP-50 | MCPサーバの一覧・状態・有効無効                                       | Codex/Claude | P2     | Z-07 Z-10 | #27   |
+| TP-52 | hooksの一覧と信頼の管理                                               | Codex/Claude | P2     | Z-07 Z-10 | #28   |
+| TP-53 | ログイン状態の表示とlogin / logout                                    | Codex/Claude | P2     | Z-07      | #29   |
+| TP-58 | カスタムエージェントの選択と一覧（Claude `--agent` / `/agents` 相当） | Claude       | P2     | Z-10      | #30   |
+| TP-59 | TODO一覧の表示（Claude `/todos` 相当）                                | Claude       | P2     | Z-13      | #31   |
+| TP-51 | plugins / apps の閲覧と管理                                           | Codex/Claude | P3     | Z-07      | #32   |
+| TP-54 | バックグラウンドターミナルの一覧と停止（Codex `/ps` 相当）            | Codex        | P3     | Z-08      | #33   |
+| TP-55 | agent thread の切替とサブエージェントの状況表示                       | Codex        | P3     | Z-08      | #34   |
+| TP-56 | skillsの一覧表示と管理。取得は `skillsList.ts` で一部実装済み         | Codex/Claude | P3     | Z-07      | #35   |
+| TP-57 | 他エージェントからの設定インポート（Codex `/import` 相当）            | Codex        | P3     | Z-07      | #36   |
+| TP-60 | 課金額とセッション分析（`/cost` `/insights` 相当）                    | Claude       | P3     | Z-13      | #37   |
 
 ## Phase 7: 文書の整合
 
 | ID    | 内容                                                                                                                                                        | 優先度 | 依存  | Issue |
 | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ----- | ----- |
-| TP-70 | READMEのスラッシュコマンド記述の矛盾を直す。「2つの画面」の表では「チャット画面では使えない」、「使い方」では「`/` で候補が出る」と書いていて食い違っている | P1     | TP-11 | #38 |
-| TP-71 | パリティ達成に合わせて「2つの画面」「対応CLI」の表と `docs/design.md` を更新する                                                                            | P2     | 全体  | #39 |
-| TP-72 | 追加した機能の実機確認手順を `docs/manual-test.md` へ追記する                                                                                               | P2     | 全体  | #40 |
+| TP-70 | READMEのスラッシュコマンド記述の矛盾を直す。「2つの画面」の表では「チャット画面では使えない」、「使い方」では「`/` で候補が出る」と書いていて食い違っている | P1     | TP-11 | #38   |
+| TP-71 | パリティ達成に合わせて「2つの画面」「対応CLI」の表と `docs/design.md` を更新する                                                                            | P2     | 全体  | #39   |
+| TP-72 | 追加した機能の実機確認手順を `docs/manual-test.md` へ追記する                                                                                               | P2     | 全体  | #40   |
 
 ## Issue化するときの書き方
 
@@ -169,4 +171,4 @@ TUIタブへ逃がさず拡張UIで実装する方針。ただしCLI側にAPIが
 - 1 Issue 1 ブランチ。実装はworktree隔離
 - プロトコルに触るタスクは、未知のイベント・応答が来ても壊れないこと（現状の「未知は素通し」の方針）を維持する
 - 承認・権限に関わるタスクは、既定を安全側（拒否・確認あり）に倒す
-- CLIの更新で壊れうる箇所は、壊れたときにTUIタブへ退避できる状態を保つ
+- CLIの更新で壊れうる箇所は、**壊れても会話そのものは続けられる**ように作る（未知の通知・要求は素通し、承認は拒否側に倒す）。TUIタブという退避先はもう無い
