@@ -10,6 +10,7 @@ import { currentWorkspaceFolder, readClaudeConfig, workspaceFolderPaths } from '
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
+import { ClaudeUsageProbe } from '../claude/usageProbe';
 import { CommandCatalog } from '../provider/commandCatalog';
 import type { SlashCommand } from '../provider/slashCommands';
 import { renderShell } from './chatView';
@@ -41,6 +42,7 @@ export class ClaudeChatViewManager implements vscode.Disposable {
   private approvalWarned = false;
 
   private readonly catalog: CommandCatalog;
+  private readonly usageProbe: ClaudeUsageProbe;
   private commands: SlashCommand[] | undefined;
 
   constructor(
@@ -55,6 +57,20 @@ export class ClaudeChatViewManager implements vscode.Disposable {
     private readonly onUsage: (usage: ChatUsage) => void = () => undefined,
   ) {
     this.catalog = new CommandCatalog(fs);
+    this.usageProbe = new ClaudeUsageProbe(claudePath, log);
+  }
+
+  /**
+   * 消費率を読み直す。
+   *
+   * `rate_limit_event` は割合を持たないため、`/usage` を別プロセスで叩いて補う。
+   * 間隔を空けるのはProbe側の責務。
+   */
+  private async refreshUsage(): Promise<void> {
+    const usage = await this.usageProbe.read();
+    if (usage !== undefined) {
+      this.onUsage(usage);
+    }
   }
 
   /** 入力欄の候補を送る。一度読んだら使い回す。 */
@@ -196,6 +212,9 @@ export class ClaudeChatViewManager implements vscode.Disposable {
         }
         if (state.usage !== undefined) {
           this.onUsage(state.usage);
+        }
+        if (finished) {
+          void this.refreshUsage();
         }
         // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
         entry.loop.observe(state);
