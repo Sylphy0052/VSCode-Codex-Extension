@@ -1,3 +1,5 @@
+import type { Attachment } from '../provider/attachments';
+
 /** 1ファイル分の変更。app-server の `FileUpdateChange` に対応する。 */
 export interface FileDiff {
   path: string;
@@ -26,6 +28,12 @@ export interface ChatItem {
 
 /** 差分を持たない項目のための空配列。 */
 export const NO_DIFFS: FileDiff[] = [];
+
+/** 待ち行列の1件。応答中に送られた指示を、添えた画像ごと保つ。 */
+export interface QueuedMessage {
+  text: string;
+  attachments: Attachment[];
+}
 
 export interface PendingApproval {
   /** JSON-RPCの要求id。応答を返すときに使う。 */
@@ -124,7 +132,7 @@ export interface ChatState {
    *
    * CLIは応答中の指示を受け取れないため、捨てずにここへ積む。
    */
-  queued: string[];
+  queued: QueuedMessage[];
   items: ChatItem[];
   approvals: PendingApproval[];
   usage: ChatUsage | undefined;
@@ -577,21 +585,28 @@ export function routeSend(state: ChatState): SendRoute {
   return state.turnId === undefined ? 'queue' : 'steer';
 }
 
-/** 応答中の指示を待ち行列の末尾へ積む。 */
-export function enqueue(state: ChatState, text: string): ChatState {
-  if (text.trim() === '') {
+/**
+ * 応答中の指示を待ち行列の末尾へ積む。
+ *
+ * 添えた画像も一緒に積む。テキストだけ積むと、応答中に貼った画像が黙って消える。
+ */
+export function enqueue(state: ChatState, text: string, attachments: Attachment[] = []): ChatState {
+  if (text.trim() === '' && attachments.length === 0) {
     return state;
   }
-  return { ...state, queued: [...state.queued, text] };
+  return { ...state, queued: [...state.queued, { text, attachments }] };
 }
 
 /** 先頭の指示を取り出す。空なら取り出さない。 */
-export function takeQueued(state: ChatState): { text: string | undefined; next: ChatState } {
+export function takeQueued(state: ChatState): {
+  message: QueuedMessage | undefined;
+  next: ChatState;
+} {
   const [head, ...rest] = state.queued;
   if (head === undefined) {
-    return { text: undefined, next: state };
+    return { message: undefined, next: state };
   }
-  return { text: head, next: { ...state, queued: rest } };
+  return { message: head, next: { ...state, queued: rest } };
 }
 
 /** 待機中の指示を1件取り消す。 */

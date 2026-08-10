@@ -89,6 +89,36 @@ export function chatStyles(): string {
   }
   button:hover { background-color: var(--vscode-button-hoverBackground); }
   button:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+  /* 送信前の添付画像。入力欄のすぐ上に並べ、送る前に取り消せるようにする */
+  #attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 16px 0;
+  }
+  .attachment {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px;
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-radius: 4px;
+    background-color: var(--vscode-editorWidget-background);
+    font-size: 0.85em;
+  }
+  .attachment img {
+    width: 40px;
+    height: 40px;
+    object-fit: cover;
+    border-radius: 2px;
+  }
+  .attachment .name {
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--vscode-descriptionForeground);
+  }
   #composer {
     position: relative;
     display: flex;

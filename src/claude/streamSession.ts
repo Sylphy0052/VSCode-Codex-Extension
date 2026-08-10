@@ -34,6 +34,7 @@ import {
   type ControlResponse,
   type IncomingControlRequest,
 } from './control';
+import type { Attachment } from '../provider/attachments';
 import type { SlashCommand } from '../provider/slashCommands';
 import { applyStreamEvent, initialClaudeState } from './streamJson';
 import type { ClaudeConfig } from './types';
@@ -254,21 +255,21 @@ export class ClaudeStreamSession {
     this.write(buildUserMessage('/compact'));
   }
 
-  send(text: string): void {
+  send(text: string, attachments: readonly Attachment[] = []): void {
     if (this.proc === undefined) {
       throw new Error('セッションが起動していません');
     }
     this.update({ ...this.state, busy: true, turnFailed: false });
-    this.write(buildUserMessage(text));
+    this.write(buildUserMessage(text, attachments));
   }
 
   /** 発言を送る。応答中なら待ち行列へ積む。 */
-  sendOrQueue(text: string): 'sent' | 'queued' {
+  sendOrQueue(text: string, attachments: Attachment[] = []): 'sent' | 'queued' {
     if (this.state.busy) {
-      this.update(enqueue(this.state, text));
+      this.update(enqueue(this.state, text, attachments));
       return 'queued';
     }
-    this.send(text);
+    this.send(text, attachments);
     return 'sent';
   }
 
@@ -289,12 +290,12 @@ export class ClaudeStreamSession {
 
   /** 待機中の先頭を送る。ターンが終わったときに呼ぶ。 */
   sendNextQueued(): void {
-    const { text, next } = takeQueued(this.state);
-    if (text === undefined) {
+    const { message, next } = takeQueued(this.state);
+    if (message === undefined) {
       return;
     }
     this.update(next);
-    this.send(text);
+    this.send(message.text, message.attachments);
   }
 
   interrupt(): void {

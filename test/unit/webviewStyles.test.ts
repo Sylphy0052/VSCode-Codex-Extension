@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { chatCsp } from '../../src/view/chatCsp';
 import { chatScript } from '../../src/view/chatScript';
 import { chatStyles } from '../../src/view/chatStyles';
 import { controlPanelStyles } from '../../src/view/controlPanelStyles';
@@ -43,5 +44,28 @@ describe('controlPanelStyles', () => {
 
   it('括弧が対応している', () => {
     expect(balanced(controlPanelStyles())).toBe(true);
+  });
+});
+
+describe('chatCsp', () => {
+  const csp = chatCsp('vscode-resource://x', 'nonce123');
+
+  it('添付のサムネイル（データURL）を許す', () => {
+    // default-src 'none' なので、書き忘れると画像が黙って出なくなる
+    expect(csp).toContain('img-src data:');
+  });
+
+  it('既定は全部塞ぐ', () => {
+    expect(csp).toContain("default-src 'none'");
+  });
+
+  it('スクリプトはnonce付きだけ許す', () => {
+    expect(csp).toContain("script-src 'nonce-nonce123'");
+  });
+
+  it('外部の読み込み先を開けない', () => {
+    // データURL以外の画像取得（http/https）を許すと、会話の内容が外へ漏れうる
+    expect(csp).not.toContain('img-src *');
+    expect(csp).not.toMatch(/img-src[^;]*https?:/u);
   });
 });

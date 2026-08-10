@@ -14,6 +14,7 @@ import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
 import { APPROVAL_MODES } from '../codex/types';
+import { AttachmentBox } from '../provider/attachments';
 import { CommandCatalog } from '../provider/commandCatalog';
 import {
   CODEX_PSEUDO_COMMANDS,
@@ -22,6 +23,7 @@ import {
   type PseudoCommandCall,
 } from '../provider/pseudoCommands';
 import type { SlashCommand } from '../provider/slashCommands';
+import { chatCsp } from './chatCsp';
 import { chatScript } from './chatScript';
 import { chatStyles } from './chatStyles';
 import { isEditableKey, type SettingsProvider } from './settingsProvider';
@@ -33,6 +35,8 @@ interface ChatPanel {
   loop: LoopController;
   /** 作業記録に載せるディレクトリ。resume時はセッション自身のcwd。 */
   cwd: string | undefined;
+  /** 送信前の添付画像。送るまでここに溜める。 */
+  attachments: AttachmentBox;
   /**
    * タブを閉じた後か。
    *
@@ -51,6 +55,23 @@ export interface ChatActivity {
   text: string;
   /** `kind: 'result'` のときだけ使う。そのターンで編集したファイルパス。 */
   editedFiles?: readonly string[];
+}
+
+/**
+ * 貼られた画像を受け取る。Codex画面・Claude Code画面の両方で共有する。
+ *
+ * 受け付けられなかったときは**理由を画面に出す**。黙って捨てると、貼ったのに
+ * サムネイルが出ない理由が分からない。
+ */
+export function addAttachment(box: AttachmentBox, name: unknown, dataUrl: unknown): void {
+  if (typeof dataUrl !== 'string') {
+    return;
+  }
+  const label = typeof name === 'string' && name !== '' ? name : '貼り付けた画像';
+  const added = box.add(label, dataUrl);
+  if ('reason' in added) {
+    void vscode.window.showWarningMessage(`画像を添えられません: ${added.reason}`);
+  }
 }
 
 /**
@@ -245,7 +266,14 @@ export class ChatViewManager implements vscode.Disposable {
       () => this.postState(entry),
     );
 
-    const entry: ChatPanel = { panel, session, loop, cwd, disposed: false };
+    const entry: ChatPanel = {
+      panel,
+      session,
+      loop,
+      cwd,
+      attachments: new AttachmentBox(),
+      disposed: false,
+    };
     this.active = entry;
     panel.webview.onDidReceiveMessage(
       (message: unknown) => void this.handleMessage(entry, message),
@@ -280,17 +308,40 @@ export class ChatViewManager implements vscode.Disposable {
     const type = m['type'];
 
     try {
-      if (type === 'send' && typeof m['text'] === 'string' && m['text'].trim() !== '') {
+      if (type === 'send' && typeof m['text'] === 'string') {
+        const text = m['text'];
+        // 画像だけ送るのも許す。本文が無くても添付があれば送る意味がある
+        if (text.trim() === '' && entry.attachments.list.length === 0) {
+          return;
+        }
         // 手動の発言はループへの割り込み。指示が交互に飛ぶ状態を作らない
         entry.loop.noteUserAction();
         // 擬似コマンドはCLIへ送らない。送っても文章として素通しされるだけ
-        const pseudo = routePseudoCommand(CODEX_PSEUDO_COMMANDS, m['text']);
+        const pseudo = routePseudoCommand(CODEX_PSEUDO_COMMANDS, text);
         if (pseudo !== undefined) {
           await this.runPseudoCommand(entry, pseudo);
           return;
         }
-        await entry.session.sendOrQueue(m['text'], readConfig().codex);
-        this.reportActivity(entry, m['text']);
+        const attachments = entry.attachments.take();
+        try {
+          await entry.session.sendOrQueue(text, readConfig().codex, attachments);
+        } catch (e) {
+          // 取り出したまま失わない。貼り直しを強いない
+          entry.attachments.restore(attachments);
+          throw e;
+        }
+        this.reportActivity(entry, text);
+        this.postState(entry);
+        return;
+      }
+      if (type === 'attach') {
+        addAttachment(entry.attachments, m['name'], m['dataUrl']);
+        this.postState(entry);
+        return;
+      }
+      if (type === 'removeAttachment' && typeof m['id'] === 'string') {
+        entry.attachments.remove(m['id']);
+        this.postState(entry);
         return;
       }
       if (type === 'interrupt') {
@@ -395,6 +446,7 @@ export class ChatViewManager implements vscode.Disposable {
         ...entry.session.getState(),
         settings: this.settings.snapshot(),
         loop: entry.loop.getStatus(),
+        attachments: entry.attachments.snapshot(),
       },
     });
   }
@@ -663,11 +715,7 @@ function escapeHtml(text: string): string {
 
 export function renderShell(webview: vscode.Webview, options: ChatShellOptions): string {
   const nonce = randomBytes(16).toString('base64');
-  const csp = [
-    "default-src 'none'",
-    `style-src ${webview.cspSource} 'unsafe-inline'`,
-    `script-src 'nonce-${nonce}'`,
-  ].join('; ');
+  const csp = chatCsp(webview.cspSource, nonce);
 
   return `<!DOCTYPE html>
 <html lang="ja">
@@ -693,9 +741,12 @@ ${chatStyles()}
     <span id="loopProgress"></span>
     <button id="loopStop" type="button" class="secondary" hidden>ループ停止</button>
   </div>
+  <div id="attachments" hidden></div>
   <div id="composer">
     <div id="commands" hidden></div>
-    <textarea id="input" placeholder="${options.agentLabel}への指示を入力（Ctrl+Enterで送信）"></textarea>
+    <textarea id="input" placeholder="${options.agentLabel}への指示を入力（Ctrl+Enterで送信、画像はCtrl+Vで貼り付け）"></textarea>
+    <input id="filePicker" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+    <button id="attach" type="button" class="secondary" title="画像を選んで添えます。貼り付け（Ctrl+V）とドラッグ&amp;ドロップもできます">画像</button>
     <button id="send" type="button">送信</button>
     <button id="stop" type="button" class="secondary" title="Escでも中断できます" hidden>中断</button>
     <button id="loopToggle" type="button" class="secondary" title="同じ指示を条件成立まで繰り返します">ループ</button>
