@@ -4,7 +4,12 @@
   "description": "Codexのセッションをエディタタブとして開き、履歴から復元する",
   "version": "0.0.1",
   "license": "MIT",
+  "publisher": "Sylphy0052",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Sylphy0052/VSCode-Codex-Extension.git"
+  },
   "engines": {
     "node": ">=20",
     "vscode": "^1.90.0"
@@ -482,12 +487,14 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "test": "vitest run",
-    "check": "bash scripts/check.sh"
+    "check": "bash scripts/check.sh",
+    "package": "npm run build && vsce package --no-dependencies"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
     "@types/node": "^22.10.2",
     "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.28.1",
     "eslint": "^9.17.0",
     "prettier": "^3.4.2",
