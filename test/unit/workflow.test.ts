@@ -31,6 +31,8 @@ const task = (overrides: Partial<WorkflowTask> = {}): WorkflowTask => ({
   allow: [],
   retries: 0,
   cleanup: 'keep',
+  parseErrors: [],
+  parseWarnings: [],
   ...overrides,
 });
 
@@ -117,6 +119,10 @@ tasks:
     expect(def.tasks[0]?.provider).toBe('codex');
     expect(def.tasks[0]?.isolation).toBe('worktree');
     expect(def.tasks[0]?.cleanup).toBe('keep');
+  });
+
+  it('壊れたYAMLは例外を投げる', () => {
+    expect(() => parseWorkflowYaml('invalid: [')).toThrow();
   });
 });
 
@@ -347,6 +353,302 @@ describe('validateWorkflow', () => {
     expect(errors).toEqual([]);
     expect(warnings).toEqual([]);
   });
+
+  it('T1がT1自身に依存する自己参照の循環がエラーになる', () => {
+    const def = {
+      version: 1,
+      name: 'テスト',
+      maxParallel: 3,
+      tasks: [task({ id: 'T1', dependsOn: ['T1'] })],
+    };
+    const { errors } = validateWorkflow(def);
+    const cycleError = errors.find((e) => e.message.includes('循環'));
+    expect(cycleError?.taskIds).toEqual(['T1']);
+  });
+
+  it('独立した2つの循環(A<->B, C<->D)が2件のエラーとして返る', () => {
+    const def = {
+      version: 1,
+      name: 'テスト',
+      maxParallel: 3,
+      tasks: [
+        task({ id: 'A', dependsOn: ['B'] }),
+        task({ id: 'B', dependsOn: ['A'] }),
+        task({ id: 'C', dependsOn: ['D'] }),
+        task({ id: 'D', dependsOn: ['C'] }),
+      ],
+    };
+    const { errors } = validateWorkflow(def);
+    const cycleErrors = errors.filter((e) => e.message.includes('循環'));
+    expect(cycleErrors).toHaveLength(2);
+    expect(cycleErrors.some((e) => e.taskIds.includes('A') && e.taskIds.includes('B'))).toBe(true);
+    expect(cycleErrors.some((e) => e.taskIds.includes('C') && e.taskIds.includes('D'))).toBe(true);
+  });
+
+  it('maxParallelが1でもエラーにならない', () => {
+    const def = { version: 1, name: 'テスト', maxParallel: 1, tasks: [task()] };
+    const { errors } = validateWorkflow(def);
+    expect(errors.some((e) => e.message.includes('maxParallel'))).toBe(false);
+  });
+
+  it('maxParallelが10でもエラーにならない', () => {
+    const def = { version: 1, name: 'テスト', maxParallel: 10, tasks: [task()] };
+    const { errors } = validateWorkflow(def);
+    expect(errors.some((e) => e.message.includes('maxParallel'))).toBe(false);
+  });
+
+  it('idがちょうど50文字ならエラーにならない', () => {
+    const id = 'a'.repeat(50);
+    const def = { version: 1, name: 'テスト', maxParallel: 3, tasks: [task({ id })] };
+    const { errors } = validateWorkflow(def);
+    expect(errors.some((e) => e.taskIds.includes(id))).toBe(false);
+  });
+
+  it('依存関係が3段以上でもsharedの警告が出ない', () => {
+    const def = {
+      version: 1,
+      name: 'テスト',
+      maxParallel: 3,
+      tasks: [
+        task({ id: 'T1', isolation: 'shared' }),
+        task({ id: 'T2', isolation: 'shared', dependsOn: ['T1'] }),
+        task({ id: 'T3', isolation: 'shared', dependsOn: ['T2'] }),
+      ],
+    };
+    const { warnings } = validateWorkflow(def);
+    expect(warnings).toEqual([]);
+  });
+
+  it('tasksが0件だとエラーになる', () => {
+    const def = { version: 1, name: 'テスト', maxParallel: 3, tasks: [] };
+    const { errors } = validateWorkflow(def);
+    expect(errors.some((e) => e.message.includes('tasks'))).toBe(true);
+  });
+
+  it('tasksが配列でない定義は0件扱いでエラーになる', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks: 配列ではない値
+`;
+    const def = parseWorkflowYaml(yaml);
+    const { errors } = validateWorkflow(def);
+    expect(errors.some((e) => e.message.includes('tasks'))).toBe(true);
+  });
+
+  it('dependsOnが配列でない(書き忘れ)場合はエラーになる', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+  - id: T2
+    dependsOn: T1
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+    const { errors } = validateWorkflow(def);
+    expect(errors.some((e) => e.taskIds.includes('T2') && e.message.includes('dependsOn'))).toBe(
+      true,
+    );
+  });
+
+  it('idの大文字小文字だけが違う重複がエラーになる', () => {
+    const def = {
+      version: 1,
+      name: 'テスト',
+      maxParallel: 3,
+      tasks: [task({ id: 'T1' }), task({ id: 't1' })],
+    };
+    const { errors } = validateWorkflow(def);
+    expect(
+      errors.some(
+        (e) =>
+          e.message.includes('大文字小文字') &&
+          e.taskIds.includes('T1') &&
+          e.taskIds.includes('t1'),
+      ),
+    ).toBe(true);
+  });
+
+  it('retriesが上限(10)を超えるとエラーになる', () => {
+    const def = { version: 1, name: 'テスト', maxParallel: 3, tasks: [task({ retries: 11 })] };
+    const { errors } = validateWorkflow(def);
+    expect(errors.some((e) => e.message.includes('retries') && e.taskIds.includes('T1'))).toBe(
+      true,
+    );
+  });
+
+  it.each([0, 201])('maxIterationsが範囲外(%i)だとエラーになる', (maxIterations) => {
+    const def = { version: 1, name: 'テスト', maxParallel: 3, tasks: [task({ maxIterations })] };
+    const { errors } = validateWorkflow(def);
+    expect(
+      errors.some((e) => e.message.includes('maxIterations') && e.taskIds.includes('T1')),
+    ).toBe(true);
+  });
+
+  it('Claudeタスクのapproval Modeがbypass Permissionsだとエラーになる', () => {
+    const def = {
+      version: 1,
+      name: 'テスト',
+      maxParallel: 3,
+      tasks: [task({ provider: 'claude', approvalMode: 'bypassPermissions' })],
+    };
+    const { errors } = validateWorkflow(def);
+    expect(
+      errors.some((e) => e.message.includes('bypassPermissions') && e.taskIds.includes('T1')),
+    ).toBe(true);
+  });
+
+  it.each(['CON', 'con', 'PRN', 'AUX', 'NUL', 'COM1', 'com9', 'LPT1', 'lpt9'])(
+    'idがWindowsの予約デバイス名(%s)だとエラーになる',
+    (badId) => {
+      const def = { version: 1, name: 'テスト', maxParallel: 3, tasks: [task({ id: badId })] };
+      const { errors } = validateWorkflow(def);
+      expect(errors.some((e) => e.taskIds.includes(badId))).toBe(true);
+    },
+  );
+
+  it('idが"-retry<数字>"で終わっているとエラーになる', () => {
+    const def = { version: 1, name: 'テスト', maxParallel: 3, tasks: [task({ id: 'T1-retry2' })] };
+    const { errors } = validateWorkflow(def);
+    expect(errors.some((e) => e.taskIds.includes('T1-retry2') && e.message.includes('retry'))).toBe(
+      true,
+    );
+  });
+
+  it.each(['prompt', 'done', 'continuePrompt'] as const)('%sが長すぎるとエラーになる', (field) => {
+    const tooLong = 'a'.repeat(20001);
+    const def = {
+      version: 1,
+      name: 'テスト',
+      maxParallel: 3,
+      tasks: [task({ [field]: tooLong })],
+    };
+    const { errors } = validateWorkflow(def);
+    expect(errors.some((e) => e.message.includes(field) && e.taskIds.includes('T1'))).toBe(true);
+  });
+
+  it('providerに未知の値が指定されていると警告になる', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    provider: unknown-provider
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+    const { warnings } = validateWorkflow(def);
+    expect(warnings.some((w) => w.taskIds.includes('T1') && w.message.includes('provider'))).toBe(
+      true,
+    );
+  });
+
+  it('isolationに未知の値が指定されていると警告になる', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    isolation: Worktree-Strict
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+    const { warnings } = validateWorkflow(def);
+    expect(warnings.some((w) => w.taskIds.includes('T1') && w.message.includes('isolation'))).toBe(
+      true,
+    );
+  });
+
+  it('defaults.cleanupに未知の値が指定されていると警告になる', () => {
+    const yaml = `
+version: 1
+name: テスト
+defaults:
+  cleanup: totally-invalid
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+    const { warnings } = validateWorkflow(def);
+    expect(warnings.some((w) => w.message.includes('cleanup'))).toBe(true);
+  });
+
+  it('provider/isolationが未指定(空文字)なら警告にならない', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+    const { warnings } = validateWorkflow(def);
+    expect(warnings).toEqual([]);
+  });
+
+  it('escalateに文字列でない要素が混ざっていると警告になる', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+    escalate: ["git push", 123]
+`;
+    const def = parseWorkflowYaml(yaml);
+    const { warnings } = validateWorkflow(def);
+    expect(warnings.some((w) => w.taskIds.includes('T1') && w.message.includes('escalate'))).toBe(
+      true,
+    );
+  });
+
+  it('dependsOnに文字列でない要素が混ざっていると警告になる', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+  - id: T2
+    dependsOn: [T1, 456]
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+    const { warnings } = validateWorkflow(def);
+    expect(warnings.some((w) => w.taskIds.includes('T2') && w.message.includes('dependsOn'))).toBe(
+      true,
+    );
+  });
+
+  it('allowに文字列でない要素が混ざっていると警告になる', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+    allow: [true, "npm test"]
+`;
+    const def = parseWorkflowYaml(yaml);
+    const { warnings } = validateWorkflow(def);
+    expect(warnings.some((w) => w.taskIds.includes('T1') && w.message.includes('allow'))).toBe(
+      true,
+    );
+  });
 });
 
 describe('expandTemplate', () => {
@@ -405,6 +707,12 @@ describe('clampSandbox', () => {
     expect(result.value).toBe('workspace-write');
     expect(result.warning).toBeUndefined();
   });
+
+  it('拡張機能とYAMLが同じ値なら警告が出ない', () => {
+    const result = clampSandbox('workspace-write', 'workspace-write');
+    expect(result.value).toBe('workspace-write');
+    expect(result.warning).toBeUndefined();
+  });
 });
 
 describe('clampCodexApprovalMode', () => {
@@ -432,6 +740,21 @@ describe('clampClaudePermissionMode', () => {
     const result = clampClaudePermissionMode('manual', 'plan');
     expect(result.value).toBe('plan');
     expect(result.warning).toBeUndefined();
+  });
+
+  it('拡張機能がdontAskのときYAMLのacceptEditsはdontAskのまま維持され警告が出る', () => {
+    // dontAskは安全順序表に含めていない（他のモードと一次元で比較できないため）。
+    // 拡張機能側がdontAskのとき、YAML側の値は安全性を判定できないものとして無視し、
+    // 拡張機能側の値(dontAsk)をそのまま維持する。
+    const result = clampClaudePermissionMode('dontAsk', 'acceptEdits');
+    expect(result.value).toBe('dontAsk');
+    expect(result.warning).toBeDefined();
+  });
+
+  it('拡張機能がmanualのときYAMLのdontAskはmanualのまま維持され警告が出る', () => {
+    const result = clampClaudePermissionMode('manual', 'dontAsk');
+    expect(result.value).toBe('manual');
+    expect(result.warning).toBeDefined();
   });
 });
 

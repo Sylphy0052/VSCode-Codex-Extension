@@ -1,5 +1,8 @@
 import { parse } from 'yaml';
 
+import { APPROVAL_MODES, SANDBOX_MODES } from '../codex/types';
+import { LOOP_ITERATION_LIMIT } from '../loop/loopController';
+
 /**
  * ワークフロー定義のYAMLスキーマ・検証・テンプレート展開（design.md §16.2 / §16.4 / §16.16）。
  *
@@ -21,15 +24,28 @@ export type CleanupMode = (typeof CLEANUP_MODES)[number];
  * タスクidの字種。そのままworktreeのパスとブランチ名に入るため絞る。
  * `codex/argvBuilder.ts` がセッションidをUUIDで検証しているのと同じ理由（design.md §16.2）。
  *
- * design.mdの正規表現は `^[A-Za-z0-9_-]{1,50}$` だが、先頭のハイフンだけは別途弾く。
- * `-x` のようなidをそのまま `git` などのCLI引数へ渡すと、値ではなくオプションフラグとして
- * 解釈されうる（design.mdが変更理由に挙げている「gitの引数解釈」問題そのもの）。
+ * 先頭のハイフンを許さないのは、`-x` のようなidをそのまま `git` などのCLI引数へ渡すと、
+ * 値ではなくオプションフラグとして解釈されうるため（design.mdが変更理由に挙げている
+ * 「gitの引数解釈」問題そのもの）。design.md §16.2の正規表現と一致させてある。
  */
 export const TASK_ID_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,49}$/;
+
+/** Windowsではファイル・ディレクトリ名として使えない予約デバイス名（大文字小文字を問わない完全一致）。 */
+const WINDOWS_RESERVED_NAME_PATTERN = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
+
+/**
+ * 再試行時のブランチ名 `wf/<runId>/<taskId>-retry<n>`（design.md §16.5）と衝突するのを防ぐ。
+ * idそのものがこの形で終わっていると、1回目の実行から衝突しうる。
+ */
+const RETRY_SUFFIX_PATTERN = /-retry\d+$/;
 
 export const MAX_PARALLEL_MIN = 1;
 export const MAX_PARALLEL_MAX = 10;
 export const MAX_TASK_COUNT = 50;
+/** 再試行のたびに新しいworktreeとCLIプロセスが増えるため、際限なく許さない。 */
+export const MAX_RETRIES = 10;
+/** 巨大な文字列を拡張機能ホストへ渡してハングさせないための上限（`prompt` / `done` / `continuePrompt` 共通）。 */
+export const MAX_PROMPT_LENGTH = 20000;
 
 /** `defaults` 省略時に使う組み込みの既定値。design.md §16.2のサンプルおよび§16.13の記述に合わせる。 */
 export const DEFAULT_MAX_PARALLEL = 3;
@@ -80,6 +96,18 @@ export interface WorkflowTask {
   allow: string[];
   retries: number;
   cleanup: CleanupMode;
+  /**
+   * パース時点で検出した検証エラーのメッセージ。`validateWorkflow` がそのままタスクidを添えて報告する。
+   * 例: `dependsOn: T1`（配列記法の書き忘れ）は解決後の値だけでは「未指定」と区別が付かないため、
+   * ここに残しておく。
+   */
+  parseErrors: string[];
+  /**
+   * パース時点で検出した警告メッセージ。`validateWorkflow` がそのままタスクidを添えて報告する。
+   * 例: `provider` / `isolation` の値が未知の文字列だった、`escalate` / `dependsOn` / `allow` の
+   * 配列に文字列以外の要素が混ざっていた、など。
+   */
+  parseWarnings: string[];
 }
 
 /** ワークフロー定義ファイル全体の内部表現。 */
@@ -89,13 +117,49 @@ export interface WorkflowDefinition {
   /** `defaults.maxParallel` を解決した値。タスク単位ではなくワークフロー全体に効く。 */
   maxParallel: number;
   tasks: WorkflowTask[];
+  /**
+   * `defaults` ブロック自体（`provider` / `isolation` / `cleanup`）の値が未知だった場合の警告。
+   * タスク単位の同種の警告は各 `WorkflowTask.parseWarnings` に入る。
+   * 手組みの `WorkflowDefinition`（テストなど）ではそもそも `defaults` を経由しないため任意項目にしてある。
+   */
+  defaultsWarnings?: string[];
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
-const rec = (v: unknown): Record<string, unknown> | undefined =>
-  typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : undefined;
+
+/** オブジェクトのプロトタイプへ書き込める特殊キー名。`rec()` で無条件に無視する。 */
+const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
+ * YAMLの1階層をRecordとして扱う。`yaml@2.9.0` 自体はプロトタイプ汚染を起こさない実装だが、
+ * 依存の実装詳細に暗黙に守られている状態にしないため、`__proto__` / `constructor` / `prototype`
+ * という名前のキーは、値がどう構築されていても無視して素通しさせない。
+ */
+const rec = (v: unknown): Record<string, unknown> | undefined => {
+  if (typeof v !== 'object' || v === null) {
+    return undefined;
+  }
+  const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(v)) {
+    if (!DANGEROUS_KEYS.has(key)) {
+      out[key] = value;
+    }
+  }
+  return out;
+};
+
 const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
-const strArr = (v: unknown): string[] => arr(v).filter((x): x is string => typeof x === 'string');
+
+/** 配列の要素から文字列以外を除いた結果と、除いた要素があったかどうかを返す。 */
+interface FilteredStringArray {
+  values: string[];
+  hadNonStringElements: boolean;
+}
+const filterStringArray = (raw: unknown[]): FilteredStringArray => {
+  const values = raw.filter((x): x is string => typeof x === 'string');
+  return { values, hadNonStringElements: values.length !== raw.length };
+};
+
 const optStr = (v: unknown): string | undefined =>
   typeof v === 'string' && v !== '' ? v : undefined;
 const bool = (v: unknown, fallback: boolean): boolean => (typeof v === 'boolean' ? v : fallback);
@@ -119,6 +183,32 @@ function isCleanup(v: string): v is CleanupMode {
   return (CLEANUP_MODES as readonly string[]).includes(v);
 }
 
+/** 列挙値を解決した結果。`invalidRaw` は非空の文字列が指定されたが既知の値でなかった場合にだけ入る。 */
+interface ResolvedEnum<T extends string> {
+  value: T;
+  invalidRaw: string | undefined;
+}
+
+/**
+ * `provider` / `isolation` / `cleanup` のような列挙値を解決する。
+ * 未指定（空文字）は既定値へ黙って倒し、未知の値（タイプミス等）は既定値へ倒しつつ
+ * `invalidRaw` に残す。呼び出し側はこれを見て警告を出す（design.md §16.2）。
+ */
+function resolveEnum<T extends string>(
+  raw: unknown,
+  isValid: (v: string) => v is T,
+  fallback: T,
+): ResolvedEnum<T> {
+  const s = str(raw);
+  if (s === '') {
+    return { value: fallback, invalidRaw: undefined };
+  }
+  if (isValid(s)) {
+    return { value: s, invalidRaw: undefined };
+  }
+  return { value: fallback, invalidRaw: s };
+}
+
 interface ResolvedDefaults {
   provider: Provider;
   isolation: Isolation;
@@ -132,52 +222,127 @@ interface ResolvedDefaults {
   maxParallel: number;
 }
 
-function resolveDefaults(raw: unknown): ResolvedDefaults {
+/** `resolveDefaults` の戻り値。`warnings` は `defaults` ブロック自体の値が未知だった場合のメッセージ。 */
+interface ResolvedDefaultsResult {
+  defaults: ResolvedDefaults;
+  warnings: string[];
+}
+
+function resolveDefaults(raw: unknown): ResolvedDefaultsResult {
   const d = rec(raw) ?? {};
-  const providerRaw = str(d['provider']);
-  const isolationRaw = str(d['isolation']);
-  const cleanupRaw = str(d['cleanup']);
+  const provider = resolveEnum(d['provider'], isProvider, DEFAULT_PROVIDER);
+  const isolation = resolveEnum(d['isolation'], isIsolation, DEFAULT_ISOLATION);
+  const cleanup = resolveEnum(d['cleanup'], isCleanup, DEFAULT_CLEANUP);
+
+  const warnings: string[] = [];
+  if (provider.invalidRaw !== undefined) {
+    warnings.push(
+      `defaults.provider に未知の値が指定されたため既定値(${DEFAULT_PROVIDER})を使いました: ${provider.invalidRaw}`,
+    );
+  }
+  if (isolation.invalidRaw !== undefined) {
+    warnings.push(
+      `defaults.isolation に未知の値が指定されたため既定値(${DEFAULT_ISOLATION})を使いました: ${isolation.invalidRaw}`,
+    );
+  }
+  if (cleanup.invalidRaw !== undefined) {
+    warnings.push(
+      `defaults.cleanup に未知の値が指定されたため既定値(${DEFAULT_CLEANUP})を使いました: ${cleanup.invalidRaw}`,
+    );
+  }
+
   return {
-    provider: isProvider(providerRaw) ? providerRaw : DEFAULT_PROVIDER,
-    isolation: isIsolation(isolationRaw) ? isolationRaw : DEFAULT_ISOLATION,
-    maxIterations: num(d['maxIterations'], DEFAULT_MAX_ITERATIONS),
-    autoApprove: bool(d['autoApprove'], DEFAULT_AUTO_APPROVE),
-    cleanup: isCleanup(cleanupRaw) ? cleanupRaw : DEFAULT_CLEANUP,
-    sandbox: optStr(d['sandbox']),
-    model: optStr(d['model']),
-    effort: optStr(d['effort']),
-    approvalMode: optStr(d['approvalMode']),
-    maxParallel: num(d['maxParallel'], DEFAULT_MAX_PARALLEL),
+    defaults: {
+      provider: provider.value,
+      isolation: isolation.value,
+      maxIterations: num(d['maxIterations'], DEFAULT_MAX_ITERATIONS),
+      autoApprove: bool(d['autoApprove'], DEFAULT_AUTO_APPROVE),
+      cleanup: cleanup.value,
+      sandbox: optStr(d['sandbox']),
+      model: optStr(d['model']),
+      effort: optStr(d['effort']),
+      approvalMode: optStr(d['approvalMode']),
+      maxParallel: num(d['maxParallel'], DEFAULT_MAX_PARALLEL),
+    },
+    warnings,
   };
 }
 
 /** 未知のフィールドは読み飛ばす（存在するキーだけを読み、他は無視する）。 */
 function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
   const t = rec(raw) ?? {};
-  const providerRaw = str(t['provider']);
-  const isolationRaw = str(t['isolation']);
   const continuePromptRaw = str(t['continuePrompt']);
+  const parseErrors: string[] = [];
+  const parseWarnings: string[] = [];
+
+  const provider = resolveEnum(t['provider'], isProvider, defaults.provider);
+  if (provider.invalidRaw !== undefined) {
+    parseWarnings.push(
+      `provider に未知の値が指定されたため既定値(${provider.value})を使いました: ${provider.invalidRaw}`,
+    );
+  }
+  const isolation = resolveEnum(t['isolation'], isIsolation, defaults.isolation);
+  if (isolation.invalidRaw !== undefined) {
+    parseWarnings.push(
+      `isolation に未知の値が指定されたため既定値(${isolation.value})を使いました: ${isolation.invalidRaw}`,
+    );
+  }
+
+  // dependsOnは配列であること自体が意味を持つ（直列/並列の分岐点）。
+  // `dependsOn: T1`のような書き忘れを黙って`[]`にすると、直列であるべきタスクが並列で走ってしまうため、
+  // 「配列でなかった」ことをparseErrorsへ残し、validateWorkflowでエラーにする。
+  const dependsOnRaw = t['dependsOn'];
+  let dependsOn: string[] = [];
+  if (dependsOnRaw !== undefined) {
+    if (!Array.isArray(dependsOnRaw)) {
+      parseErrors.push('dependsOn は配列で指定してください（例: dependsOn: [T1]）');
+    } else {
+      const filtered = filterStringArray(dependsOnRaw);
+      dependsOn = filtered.values;
+      if (filtered.hadNonStringElements) {
+        // dependsOnは依存関係＝実行順序を決めるフィールドなので、黙って要素を捨てると
+        // 「直列のつもりが並列で走る」というescalateと同種のフェイルオープンになりうる
+        parseWarnings.push('dependsOn に文字列でない要素が含まれていたため無視しました');
+      }
+    }
+  }
+
+  const escalateFiltered = filterStringArray(arr(t['escalate']));
+  if (escalateFiltered.hadNonStringElements) {
+    // escalateは自動承認を止める側（安全性を強める側）のフィールド。黙って要素を捨てると
+    // 本来止まるはずの操作が自動承認されてしまうフェイルオープンになるため警告する
+    parseWarnings.push('escalate に文字列でない要素が含まれていたため無視しました');
+  }
+
+  const allowFiltered = filterStringArray(arr(t['allow']));
+  if (allowFiltered.hadNonStringElements) {
+    // allowは停止条件を緩める側のフィールド。要素を捨てても「緩めそこなう」だけで安全側に
+    // 倒れるが、設定ミスに気づけるよう警告だけは出す（escalateとは無効化の方向が逆）
+    parseWarnings.push('allow に文字列でない要素が含まれていたため無視しました');
+  }
 
   return {
     id: str(t['id']),
     prompt: str(t['prompt']),
     done: str(t['done']),
-    dependsOn: strArr(t['dependsOn']),
+    dependsOn,
     continuePrompt: continuePromptRaw === '' ? DEFAULT_CONTINUE_PROMPT : continuePromptRaw,
     maxIterations: num(t['maxIterations'], defaults.maxIterations),
-    provider: isProvider(providerRaw) ? providerRaw : defaults.provider,
-    isolation: isIsolation(isolationRaw) ? isolationRaw : defaults.isolation,
+    provider: provider.value,
+    isolation: isolation.value,
     cwd: optStr(t['cwd']),
     model: optStr(t['model']) ?? defaults.model,
     effort: optStr(t['effort']) ?? defaults.effort,
     approvalMode: optStr(t['approvalMode']) ?? defaults.approvalMode,
     sandbox: optStr(t['sandbox']) ?? defaults.sandbox,
     autoApprove: bool(t['autoApprove'], defaults.autoApprove),
-    escalate: strArr(t['escalate']),
-    allow: strArr(t['allow']),
+    escalate: escalateFiltered.values,
+    allow: allowFiltered.values,
     retries: Math.max(0, Math.trunc(num(t['retries'], 0))),
     // cleanupはworktreeの後始末で、taskごとの上書きはスキーマに無い（design.md §16.2）
     cleanup: defaults.cleanup,
+    parseErrors,
+    parseWarnings,
   };
 }
 
@@ -191,13 +356,14 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
 export function parseWorkflowYaml(source: string): WorkflowDefinition {
   const raw = parse(source);
   const root = rec(raw) ?? {};
-  const defaults = resolveDefaults(root['defaults']);
+  const { defaults, warnings: defaultsWarnings } = resolveDefaults(root['defaults']);
   const tasksRaw = arr(root['tasks']);
   return {
     version: num(root['version'], 1),
     name: str(root['name']),
     maxParallel: defaults.maxParallel,
     tasks: tasksRaw.map((t) => resolveTask(t, defaults)),
+    defaultsWarnings,
   };
 }
 
@@ -245,45 +411,65 @@ function extractTemplateRefs(text: string): TemplateRef[] {
 }
 
 /**
- * 循環に含まれるidだけを返す（循環の下流で待っているだけのタスクは含めない）。
+ * 依存関係を1件の循環ずつ、強連結成分（SCC）単位で返す。
+ * `A<->B` と `C<->D` のように無関係な循環が複数あれば、別々のグループとして返す
+ * （呼び出し側はグループごとに1件のエラーを作る）。循環の下流で待っているだけの
+ * タスク（例: `T3 dependsOn: [T2]` で `T1<->T2` が循環しているときのT3）は含めない。
  *
- * 白黒灰の3色DFSで、探索スタック上にある頂点へ戻るエッジを見つけたら、
- * スタックのその頂点から現在位置までを丸ごと循環に含める。
+ * Tarjanの強連結成分アルゴリズム。要素数2以上のSCC、または自己参照
+ * （`T1` が `dependsOn: [T1]`）を1件のグループとして採用する。
  */
-function findCycleIds(tasks: readonly WorkflowTask[]): string[] {
+function findCycleGroups(tasks: readonly WorkflowTask[]): string[][] {
   const byId = new Map(tasks.map((t) => [t.id, t] as const));
-  const color = new Map<string, 1 | 2>(); // 1=探索中(灰), 2=確定(黒)。無ければ白
-  const inCycle = new Set<string>();
+  let counter = 0;
+  const index = new Map<string, number>();
+  const lowlink = new Map<string, number>();
+  const onStack = new Set<string>();
   const stack: string[] = [];
+  const groups: string[][] = [];
 
-  function visit(id: string): void {
-    color.set(id, 1);
+  function strongConnect(id: string): void {
+    index.set(id, counter);
+    lowlink.set(id, counter);
+    counter += 1;
     stack.push(id);
+    onStack.add(id);
+
     const current = byId.get(id);
     for (const dep of current?.dependsOn ?? []) {
       if (!byId.has(dep)) {
         continue; // 未定義参照は別のチェックで報告済み。循環判定の対象にはしない
       }
-      const depColor = color.get(dep);
-      if (depColor === undefined) {
-        visit(dep);
-      } else if (depColor === 1) {
-        const idx = stack.indexOf(dep);
-        for (const s of stack.slice(idx)) {
-          inCycle.add(s);
-        }
+      if (!index.has(dep)) {
+        strongConnect(dep);
+        lowlink.set(id, Math.min(lowlink.get(id) as number, lowlink.get(dep) as number));
+      } else if (onStack.has(dep)) {
+        lowlink.set(id, Math.min(lowlink.get(id) as number, index.get(dep) as number));
       }
     }
-    stack.pop();
-    color.set(id, 2);
+
+    if (lowlink.get(id) === index.get(id)) {
+      const group: string[] = [];
+      let member: string;
+      do {
+        member = stack.pop() as string;
+        onStack.delete(member);
+        group.push(member);
+      } while (member !== id);
+
+      const isSelfLoop = group.length === 1 && (byId.get(id)?.dependsOn ?? []).includes(id);
+      if (group.length > 1 || isSelfLoop) {
+        groups.push(group);
+      }
+    }
   }
 
   for (const id of byId.keys()) {
-    if (color.get(id) === undefined) {
-      visit(id);
+    if (!index.has(id)) {
+      strongConnect(id);
     }
   }
-  return [...inCycle];
+  return groups;
 }
 
 /**
@@ -349,14 +535,20 @@ function findSharedIsolationWarnings(tasks: readonly WorkflowTask[]): WorkflowWa
  * 読み込み時の検証（design.md §16.2「検証」）。1件でも該当すれば実行を始めない前提で、
  * エラーは1件見つかった時点で止めず全件まとめて返す。
  *
- * `cwd` のワークスペース境界検証とClaudeの承認無効化検証（`approvalMode` が
- * `bypassPermissions` 相当）は、ファイルシステムや拡張機能設定に触れるため
- * このIssueの範囲外。`WorkflowTask.cwd` のコメントの通り、拡張の余地は残してある。
+ * `cwd` のワークスペース境界検証は、ファイルシステムに触れるためこのIssueの範囲外。
+ * `WorkflowTask.cwd` のコメントの通り、拡張の余地は残してある。
  */
 export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationResult {
   const errors: WorkflowError[] = [];
   const warnings: WorkflowWarning[] = [];
   const tasks = def.tasks;
+
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    errors.push({
+      taskIds: [],
+      message: 'tasks が1件も定義されていません（配列でない場合を含む）',
+    });
+  }
 
   if (tasks.length > MAX_TASK_COUNT) {
     errors.push({
@@ -376,6 +568,10 @@ export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationRes
     });
   }
 
+  for (const message of def.defaultsWarnings ?? []) {
+    warnings.push({ taskIds: [], message });
+  }
+
   const idCounts = new Map<string, number>();
   for (const t of tasks) {
     idCounts.set(t.id, (idCounts.get(t.id) ?? 0) + 1);
@@ -385,10 +581,41 @@ export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationRes
         message: `id の形式が不正です（半角英数字・_・-のみ、1〜50文字にしてください）: "${t.id}"`,
       });
     }
+    if (WINDOWS_RESERVED_NAME_PATTERN.test(t.id)) {
+      errors.push({
+        taskIds: [t.id],
+        message: `id にWindowsの予約デバイス名は使えません（worktreeのディレクトリ名になるため）: ${t.id}`,
+      });
+    }
+    if (RETRY_SUFFIX_PATTERN.test(t.id)) {
+      errors.push({
+        taskIds: [t.id],
+        message: `id を"-retry<数字>"で終わらせることはできません（再試行時のブランチ名と衝突します）: ${t.id}`,
+      });
+    }
   }
   for (const [id, count] of idCounts) {
     if (count > 1) {
       errors.push({ taskIds: [id], message: `id が重複しています: ${id}` });
+    }
+  }
+
+  // 大文字小文字だけが違うidはworktreeのパスとブランチ名の上では区別できない
+  // （大小文字を区別しないファイルシステムでは同じ場所を指す）ため、正規化したキーでも見る。
+  const idsByLowerCase = new Map<string, Set<string>>();
+  for (const t of tasks) {
+    const key = t.id.toLowerCase();
+    const variants = idsByLowerCase.get(key) ?? new Set<string>();
+    variants.add(t.id);
+    idsByLowerCase.set(key, variants);
+  }
+  for (const variants of idsByLowerCase.values()) {
+    if (variants.size > 1) {
+      const ids = [...variants];
+      errors.push({
+        taskIds: ids,
+        message: `id が大文字小文字だけ違う形で重複しています: ${ids.join(', ')}`,
+      });
     }
   }
 
@@ -401,6 +628,36 @@ export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationRes
     if (t.prompt.trim() === '') {
       errors.push({ taskIds: [t.id], message: 'prompt が指定されていません' });
     }
+    for (const [field, value] of [
+      ['prompt', t.prompt],
+      ['done', t.done],
+      ['continuePrompt', t.continuePrompt],
+    ] as const) {
+      if (value.length > MAX_PROMPT_LENGTH) {
+        errors.push({
+          taskIds: [t.id],
+          message: `${field} が長すぎます（上限${MAX_PROMPT_LENGTH}文字）: ${value.length}文字`,
+        });
+      }
+    }
+    if (t.retries > MAX_RETRIES) {
+      errors.push({
+        taskIds: [t.id],
+        message: `retries は${MAX_RETRIES}以下にしてください: ${t.retries}`,
+      });
+    }
+    if (t.maxIterations < 1 || t.maxIterations > LOOP_ITERATION_LIMIT) {
+      errors.push({
+        taskIds: [t.id],
+        message: `maxIterations は1〜${LOOP_ITERATION_LIMIT}の範囲で指定してください: ${t.maxIterations}`,
+      });
+    }
+    if (t.provider === 'claude' && t.approvalMode === 'bypassPermissions') {
+      errors.push({
+        taskIds: [t.id],
+        message: 'Claudeタスクの approvalMode に bypassPermissions は指定できません',
+      });
+    }
     for (const dep of t.dependsOn) {
       if (!idSet.has(dep)) {
         errors.push({
@@ -409,13 +666,18 @@ export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationRes
         });
       }
     }
+    for (const message of t.parseErrors) {
+      errors.push({ taskIds: [t.id], message });
+    }
+    for (const message of t.parseWarnings) {
+      warnings.push({ taskIds: [t.id], message });
+    }
   }
 
-  const cycleIds = findCycleIds(tasks);
-  if (cycleIds.length > 0) {
+  for (const group of findCycleGroups(tasks)) {
     errors.push({
-      taskIds: cycleIds,
-      message: `依存が循環しています: ${cycleIds.join(', ')}`,
+      taskIds: group,
+      message: `依存が循環しています: ${group.join(', ')}`,
     });
   }
 
@@ -492,38 +754,50 @@ export interface ClampResult {
 
 /**
  * `sandbox` の安全順序。左ほど安全（読み取り専用）、右ほど危険（無制限）。
- * `src/codex/types.ts` の `SANDBOX_MODES` の宣言順そのままが安全順序と一致している。
+ * `src/codex/types.ts` の `SANDBOX_MODES` は宣言順がそのまま安全順序になっているため、
+ * 値をそのまま再利用する（値と順序を別々に持つと将来どちらかだけ変更されて乖離しうる）。
  */
-export const SANDBOX_SAFETY_ORDER: readonly string[] = [
-  'read-only',
-  'workspace-write',
-  'danger-full-access',
-];
+export const SANDBOX_SAFETY_ORDER: readonly string[] = SANDBOX_MODES;
 
 /**
  * Codexの `approvalMode` の安全順序。左ほど安全（毎回確認を挟む）、右ほど危険（無確認）。
- * `src/codex/types.ts` の `APPROVAL_MODES` の宣言順そのままが安全順序と一致している。
+ * `src/codex/types.ts` の `APPROVAL_MODES` は宣言順がそのまま安全順序になっているため、
+ * 値をそのまま再利用する。
  */
-export const CODEX_APPROVAL_SAFETY_ORDER: readonly string[] = ['untrusted', 'on-request', 'never'];
+export const CODEX_APPROVAL_SAFETY_ORDER: readonly string[] = APPROVAL_MODES;
 
 /**
  * Claudeの `permissionMode` の安全順序。`src/claude/types.ts` の `CLAUDE_PERMISSION_MODES`
  * は語彙の列挙順であって安全順ではないため、ここで独自に定義する。
  *
- * 根拠（Claude Code公式ドキュメント「Choose a permission mode」の記述に基づく）:
- * - `plan`: 読み取りのみで編集そのものができない。最も安全
- * - `manual`: 全ての操作を都度確認する既定モード
- * - `acceptEdits`: 編集と基本的なファイル操作だけ自動承認し、それ以外は確認する
- * - `dontAsk`: 人には一切確認しないが、事前に許可した操作以外は自動で拒否する
- *   （CI向け。保護パスへの書き込みも常に拒否される）
- * - `auto`: 分類器の判定だけで広く自動承認する（保護パスも分類器任せになる）
- * - `bypassPermissions`: 検査そのものを無効化する。最も危険
+ * 出典: Claude Code公式ドキュメント「Permission modes」の「Available modes」表
+ * （https://code.claude.com/docs/en/permission-modes.md、確認日2026-08-10）。要点は次のとおり。
+ *
+ * | Mode（表内の呼称）                              | What runs without asking                                              |
+ * | ------------------------------------------------ | ----------------------------------------------------------------------- |
+ * | `default`（CLIの表示名はManual。`manual`はそのalias） | Reads only                                                          |
+ * | `acceptEdits`                                     | Reads, file edits, and common filesystem commands（`mkdir` `touch` `mv` `cp` 等） |
+ * | `plan`                                            | Reads, plus classifier-approved commands when auto mode is available   |
+ * | `auto`                                            | Everything, with background safety checks                              |
+ * | `dontAsk`                                         | Only pre-approved tools                                                |
+ * | `bypassPermissions`                               | Everything                                                              |
+ *
+ * 同ページには「Writes to protected paths are never auto-approved except in
+ * `bypassPermissions` mode and in planning sessions with bypass permissions available.」
+ * ともある。
+ *
+ * **`dontAsk` はこの順序表に含めていない。** 「事前承認したツールだけ通す」という性質は、
+ * 利用者が設定した `permissions.allow` の中身次第で安全にも危険にもなり、他のモードと
+ * 一次元の安全順序では比較できない。仮に無理な位置（例えば `acceptEdits` と `auto` の間）へ
+ * 割り当てると、拡張機能側が `dontAsk` を使っているときにYAML側の値を実際より「安全」と
+ * 誤判定して通してしまう恐れがある。`clampToSafer` は順序表に無い値を「安全性を判定できない」
+ * として拡張機能側の値をそのまま採用する（design.md §16.16）ため、`dontAsk` を順序表から
+ * 除外しておくことでfail-closedになる。
  */
 export const CLAUDE_PERMISSION_SAFETY_ORDER: readonly string[] = [
   'plan',
   'manual',
   'acceptEdits',
-  'dontAsk',
   'auto',
   'bypassPermissions',
 ];
