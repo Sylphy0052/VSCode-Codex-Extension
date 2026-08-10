@@ -28,6 +28,7 @@ import {
   readCommandList,
   readCommandsChanged,
   readContextUsage,
+  readCurrentPermissionMode,
   readControlRequest,
   readControlResponse,
   type ControlResponse,
@@ -189,6 +190,18 @@ export class ClaudeStreamSession {
       return;
     }
     this.write(buildSetPermissionModeRequest(this.claim('settings', '承認方法'), mode));
+  }
+
+  /**
+   * Plan modeを切り替える。
+   *
+   * Claude Codeでは承認方法そのものなので `set_permission_mode` で足りる。状態は
+   * `system/status` 通知を正として更新するため、ここでは要求を出すだけにする。
+   *
+   * @param fallback 抜けるときに戻す承認方法。設定が空なら `manual`（既定）へ戻す
+   */
+  setPlanMode(on: boolean, fallback: string): void {
+    this.setPermissionMode(on ? 'plan' : fallback === '' ? 'manual' : fallback);
   }
 
   /**
@@ -383,6 +396,12 @@ export class ClaudeStreamSession {
     const commands = readCommandList(response.payload);
     if (commands !== undefined) {
       this.setCommands(commands);
+    }
+
+    // 起動引数でPlan modeにした場合、status通知は何かが変わるまで来ない
+    const permissionMode = readCurrentPermissionMode(response.payload);
+    if (permissionMode !== undefined) {
+      this.update({ ...this.state, planMode: permissionMode === 'plan' });
     }
 
     if (this.handshakeDone) {

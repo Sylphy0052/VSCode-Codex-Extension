@@ -307,6 +307,11 @@ export class ChatViewManager implements vscode.Disposable {
         await entry.session.compact();
         return;
       }
+      if (type === 'planMode') {
+        entry.loop.noteUserAction();
+        entry.session.setPlanMode(m['on'] === true);
+        return;
+      }
       if (type === 'cancelQueued' && typeof m['index'] === 'number') {
         entry.session.cancelQueued(m['index']);
         return;
@@ -695,6 +700,7 @@ ${chatStyles()}
     <button id="stop" type="button" class="secondary" title="Escでも中断できます" hidden>中断</button>
     <button id="loopToggle" type="button" class="secondary" title="同じ指示を条件成立まで繰り返します">ループ</button>
     <button id="compact" type="button" class="secondary" title="これまでの会話を要約に置き換えてコンテキストを空けます">圧縮</button>
+    <button id="planToggle" type="button" class="secondary" aria-pressed="false" title="読み取りだけに絞って計画を立てさせます。ファイルは変更されません">計画</button>
   </div>
   <div id="loop" hidden>
     <label>初回指示（空なら継続指示から始めます）

@@ -9,6 +9,7 @@ import {
 } from './approvals';
 import {
   addApproval,
+  appendNotice,
   applyEvent,
   enqueue,
   initialChatState,
@@ -21,6 +22,7 @@ import {
   type PendingApproval,
 } from './chatState';
 import type { AppServerConnection, ServerRequest } from './connection';
+import { readTurnPolicy, turnPolicyFor, type TurnPolicy } from './planMode';
 
 interface WaitingApproval {
   resolve: (response: unknown) => void;
@@ -37,6 +39,12 @@ interface WaitingApproval {
 export class ChatSession {
   private state: ChatState = initialChatState;
   private readonly waiting = new Map<number | string, WaitingApproval>();
+  /** スレッド開始時に効いていた権限。Plan modeを抜けるときの戻し先。 */
+  private baseline: TurnPolicy | undefined;
+  /** 一度でもPlan modeの権限を送ったか。送っていれば明示的に戻す必要がある。 */
+  private policyOverridden = false;
+  /** 採番用。画面へ出す一言のidに使う。 */
+  private noticeCount = 0;
 
   constructor(
     private readonly connection: AppServerConnection,
@@ -76,6 +84,8 @@ export class ChatSession {
     if (threadId === undefined) {
       throw new Error('スレッドを開始できませんでした');
     }
+    // 応答に「いま効いている権限」が入っている。Plan modeを抜けるときの戻し先にする
+    this.baseline = readTurnPolicy(response.result);
     this.update({ ...this.state, threadId });
     return threadId;
   }
@@ -88,6 +98,7 @@ export class ChatSession {
       params['cwd'] = cwd;
     }
     const response = await this.connection.request('thread/resume', params);
+    this.baseline = readTurnPolicy(response.result);
     this.update({
       ...this.state,
       threadId,
@@ -97,8 +108,35 @@ export class ChatSession {
   }
 
   /**
+   * Plan modeを切り替える。効くのは**次の発言から**。
+   *
+   * app-serverにPlan modeそのものが無いため、`turn/start` の権限で作る（`planMode.ts`）。
+   * 進行中のターンには効かない（`turn/steer` に権限を渡す口が無いため）。
+   */
+  setPlanMode(on: boolean): void {
+    if (this.state.planMode === on) {
+      return;
+    }
+    if (on && this.baseline === undefined) {
+      // 抜けるときに戻せない。入れてしまうと読み取り専用から出られなくなる
+      throw new Error('このスレッドの権限を読み取れなかったため、計画モードに入れません');
+    }
+    const next = appendNotice(
+      { ...this.state, planMode: on },
+      `plan:${this.noticeCount++}`,
+      on
+        ? '計画モードに入りました。次の発言から、ファイルの変更もコマンドの書き込みも起きません'
+        : '計画モードを抜けました。次の発言から元の権限に戻ります',
+    );
+    this.update(next);
+  }
+
+  /**
    * 発言を送る。モデル・effort・承認方針はここで毎回渡す。
-   * サンドボックスはスレッド開始時の指定を使う（turn単位の指定は形が異なるため扱わない）。
+   *
+   * サンドボックスは普段はスレッド開始時の指定に任せるが、Plan modeのときだけ
+   * ターン単位で読み取り専用へ落とす。一度落とすと明示的に戻すまで効き続けるため、
+   * 抜けたあとの最初のターンで開始時の権限を送り直す。
    */
   async send(text: string, config: CodexConfig): Promise<void> {
     const threadId = this.state.threadId;
@@ -118,6 +156,14 @@ export class ChatSession {
     }
     if (config.approvalMode !== '') {
       params['approvalPolicy'] = config.approvalMode;
+    }
+
+    const policy = turnPolicyFor(this.state.planMode, this.baseline, this.policyOverridden);
+    if (policy !== undefined) {
+      // Plan modeの指定は設定パネルの承認方針より優先する（書けないことを保証するため）
+      params['approvalPolicy'] = policy.approvalPolicy;
+      params['sandboxPolicy'] = policy.sandboxPolicy;
+      this.policyOverridden = this.state.planMode;
     }
 
     this.update({ ...this.state, busy: true, turnFailed: false });

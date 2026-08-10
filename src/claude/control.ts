@@ -160,6 +160,17 @@ export function buildSetEffortRequest(requestId: string, effort: string): string
   });
 }
 
+/**
+ * `initialize` の応答から、いま効いている承認方法を読む。
+ *
+ * 起動引数で `--permission-mode plan` を渡した場合、`status` 通知は何かが変わるまで
+ * 来ない。開いた時点のPlan modeを取り違えないよう、ここで拾う。
+ */
+export function readCurrentPermissionMode(payload: unknown): string | undefined {
+  const mode = str(rec(payload)?.['current_permission_mode']);
+  return mode === '' ? undefined : mode;
+}
+
 /** コンテキスト使用量を問い合わせる要求。TUIの `/context` と同じ数字が返る。 */
 export function buildContextUsageRequest(requestId: string): string {
   return buildControlRequest(requestId, { subtype: 'get_context_usage' });

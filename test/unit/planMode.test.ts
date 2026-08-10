@@ -1,0 +1,208 @@
+import { describe, expect, it } from 'vitest';
+import { ChatSession } from '../../src/appserver/chatSession';
+import { applyEvent, describePlan, initialChatState } from '../../src/appserver/chatState';
+import type { AppServerConnection } from '../../src/appserver/connection';
+import { PLAN_POLICY, readTurnPolicy, turnPolicyFor } from '../../src/appserver/planMode';
+import { emptyConfig } from '../../src/codex/types';
+import type { Logger } from '../../src/log';
+
+/** thread/start の応答。実測した形のうち、ここで使うものだけ持つ。 */
+const START_RESULT = {
+  thread: { id: 'th-1' },
+  approvalPolicy: 'on-request',
+  sandbox: { type: 'workspaceWrite', writableRoots: [], networkAccess: false },
+};
+
+describe('readTurnPolicy', () => {
+  it('開始時の応答から効いている権限を読む', () => {
+    expect(readTurnPolicy(START_RESULT)).toEqual({
+      approvalPolicy: 'on-request',
+      sandboxPolicy: { type: 'workspaceWrite', writableRoots: [], networkAccess: false },
+    });
+  });
+
+  it('権限が入っていない応答では何も返さない', () => {
+    expect(readTurnPolicy({ thread: { id: 'th-1' } })).toBeUndefined();
+    expect(readTurnPolicy(undefined)).toBeUndefined();
+    expect(readTurnPolicy({ approvalPolicy: 'never' })).toBeUndefined();
+  });
+});
+
+describe('turnPolicyFor', () => {
+  const baseline = { approvalPolicy: 'on-request', sandboxPolicy: { type: 'workspaceWrite' } };
+
+  it('計画モード中は読み取り専用にする', () => {
+    expect(turnPolicyFor(true, baseline, false)).toEqual(PLAN_POLICY);
+  });
+
+  it('読み取り専用のとき承認を求めない', () => {
+    // 書き込みの失敗がサンドボックス脱出の承認要求へ化けると、そこで許可されてしまう
+    expect(PLAN_POLICY.approvalPolicy).toBe('never');
+    expect(PLAN_POLICY.sandboxPolicy).toEqual({ type: 'readOnly' });
+  });
+
+  it('一度も入っていなければ権限に触らない', () => {
+    expect(turnPolicyFor(false, baseline, false)).toBeUndefined();
+  });
+
+  it('抜けたあとは開始時の権限へ戻す', () => {
+    // turn/start の指定は「このターン以降」に効くため、明示的に戻さないと読み取り専用のまま
+    expect(turnPolicyFor(false, baseline, true)).toEqual(baseline);
+  });
+
+  it('戻し先が判らなければ何も送らない', () => {
+    expect(turnPolicyFor(false, undefined, true)).toBeUndefined();
+  });
+});
+
+interface Sent {
+  method: string;
+  params: Record<string, unknown>;
+}
+
+function fakeSession(startResult: unknown = START_RESULT): {
+  session: ChatSession;
+  sent: Sent[];
+} {
+  const sent: Sent[] = [];
+  const connection = {
+    async ensureStarted() {
+      return undefined;
+    },
+    async request(method: string, params: unknown) {
+      sent.push({ method, params: (params ?? {}) as Record<string, unknown> });
+      return { result: method === 'thread/start' ? startResult : {} };
+    },
+  } as unknown as AppServerConnection;
+  const log = {
+    info() {},
+    warn() {},
+    error() {},
+  } as unknown as Logger;
+  return { session: new ChatSession(connection, log, () => undefined), sent };
+}
+
+const turnStarts = (sent: Sent[]): Record<string, unknown>[] =>
+  sent.filter((s) => s.method === 'turn/start').map((s) => s.params);
+
+describe('ChatSession の計画モード', () => {
+  it('普段はサンドボックスに触らない', async () => {
+    const { session, sent } = fakeSession();
+    await session.start('/w', emptyConfig);
+    await session.send('やって', emptyConfig);
+    expect(turnStarts(sent)[0]).not.toHaveProperty('sandboxPolicy');
+  });
+
+  it('計画モード中は読み取り専用で送る', async () => {
+    const { session, sent } = fakeSession();
+    await session.start('/w', emptyConfig);
+    session.setPlanMode(true);
+    await session.send('計画して', emptyConfig);
+    expect(turnStarts(sent)[0]).toMatchObject({
+      sandboxPolicy: { type: 'readOnly' },
+      approvalPolicy: 'never',
+    });
+  });
+
+  it('設定の承認方針より計画モードを優先する', async () => {
+    const { session, sent } = fakeSession();
+    await session.start('/w', { ...emptyConfig, approvalMode: 'on-request' });
+    session.setPlanMode(true);
+    await session.send('計画して', { ...emptyConfig, approvalMode: 'on-request' });
+    expect(turnStarts(sent)[0]?.['approvalPolicy']).toBe('never');
+  });
+
+  it('抜けたあとの最初のターンで開始時の権限へ戻す', async () => {
+    const { session, sent } = fakeSession();
+    await session.start('/w', emptyConfig);
+    session.setPlanMode(true);
+    await session.send('計画して', emptyConfig);
+    session.setPlanMode(false);
+    await session.send('やって', emptyConfig);
+    expect(turnStarts(sent)[1]).toMatchObject({
+      sandboxPolicy: { type: 'workspaceWrite', writableRoots: [], networkAccess: false },
+      approvalPolicy: 'on-request',
+    });
+  });
+
+  it('切り替えは会話に残る', async () => {
+    const { session } = fakeSession();
+    await session.start('/w', emptyConfig);
+    session.setPlanMode(true);
+    session.setPlanMode(false);
+    const notices = session.getState().items.filter((i) => i.kind === 'settingsChanged');
+    expect(notices).toHaveLength(2);
+    expect(notices[0]?.detail).toContain('計画モードに入りました');
+    expect(notices[1]?.detail).toContain('計画モードを抜けました');
+  });
+
+  it('同じ状態への切り替えは何もしない', async () => {
+    const { session } = fakeSession();
+    await session.start('/w', emptyConfig);
+    session.setPlanMode(false);
+    expect(session.getState().items).toEqual([]);
+    expect(session.getState().planMode).toBe(false);
+  });
+
+  it('戻し先が判らないスレッドでは入れない', async () => {
+    // 入れてしまうと読み取り専用から出られなくなる
+    const { session } = fakeSession({ thread: { id: 'th-1' } });
+    await session.start('/w', emptyConfig);
+    expect(() => session.setPlanMode(true)).toThrow(/計画モードに入れません/u);
+    expect(session.getState().planMode).toBe(false);
+  });
+});
+
+describe('describePlan', () => {
+  it('ステップと進み具合を並べる', () => {
+    expect(
+      describePlan([
+        { step: '調べる', status: 'completed' },
+        { step: '直す', status: 'inProgress' },
+        { step: '確かめる', status: 'pending' },
+      ]),
+    ).toBe('[x] 調べる\n[~] 直す\n[ ] 確かめる');
+  });
+
+  it('未知の状態はCLIの表記のまま出す', () => {
+    expect(describePlan([{ step: 'なにか', status: 'blocked' }])).toBe('[blocked] なにか');
+  });
+
+  it('読めないものは何も返さない', () => {
+    expect(describePlan(undefined)).toBe('');
+    expect(describePlan([])).toBe('');
+    expect(describePlan([{ status: 'pending' }])).toBe('');
+  });
+});
+
+describe('applyEvent / turn/plan/updated', () => {
+  const notification = (status: string) => ({
+    threadId: 'th-1',
+    turnId: 'tu-1',
+    explanation: '先に調べてから直す',
+    plan: [{ step: '調べる', status }],
+  });
+
+  it('計画を項目にする', () => {
+    const state = applyEvent(initialChatState, 'turn/plan/updated', notification('pending'));
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]).toMatchObject({
+      id: 'plan:tu-1',
+      kind: 'plan',
+      text: '[ ] 調べる',
+      detail: '先に調べてから直す',
+      turnId: 'tu-1',
+    });
+  });
+
+  it('進んでも項目は増えない（同じ計画を書き換える）', () => {
+    const first = applyEvent(initialChatState, 'turn/plan/updated', notification('pending'));
+    const next = applyEvent(first, 'turn/plan/updated', notification('completed'));
+    expect(next.items).toHaveLength(1);
+    expect(next.items[0]?.text).toBe('[x] 調べる');
+  });
+
+  it('読めない通知では状態を変えない', () => {
+    expect(applyEvent(initialChatState, 'turn/plan/updated', {})).toBe(initialChatState);
+  });
+});

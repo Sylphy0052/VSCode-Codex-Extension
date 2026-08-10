@@ -743,6 +743,48 @@ Claude Codeは消費率（`usedPercent`）を返さない。実測した中身�
 - 圧縮後にCLIが流す要約は `content` が配列ではなく文字列で届くため、発言としては並ばない（`applyUser` は配列の part だけを見ている）
 - 圧縮の位置は種類 `contextCompaction` の項目として会話に残す。CodexとClaude Codeで同じ種類にそろえてあるので、描画側の分岐は要らない
 
+### 14.10 Plan mode
+
+計画だけ立てさせて手を出させない状態。入力欄の横の「計画」ボタンで入る。**入っているかどうかが常に見える**ようにボタンの見た目と入力欄の下の一行の両方に出し、切り替えは会話にも残す。
+
+**作り方がCodexとClaude Codeで根本的に違う。**
+
+|             | 手段                                               | 状態の持ち主                |
+| ----------- | -------------------------------------------------- | --------------------------- |
+| Codex       | `turn/start` の `sandboxPolicy` / `approvalPolicy` | 拡張機能側                  |
+| Claude Code | `set_permission_mode { mode: 'plan' }`             | CLI（`system/status` 通知） |
+
+#### Codex: app-serverにPlan modeが無い
+
+`ThreadSettings` に `collaborationMode`（`plan` / `default`）はあるが、**それを設定するメソッドが92あるClientRequestのどれにも無い**。`ModeKind` の説明も「TUIが起動するときの初期モード」となっている。
+
+代わりに `turn/start` の権限で作る。読み取り専用のサンドボックスに落とせば、**プロンプトではなく権限でファイル変更を止められる**。
+
+```json
+{ "sandboxPolicy": { "type": "readOnly" }, "approvalPolicy": "never" }
+```
+
+- 実測: この指定のあと「plan.txt を作れ」と指示すると「権限が読み取り専用のため作成できません」と答え、ファイルは作られなかった
+- **承認を `never` にするのは必須**。`on-request` のままだと、書き込みの失敗がサンドボックス脱出の承認要求へ化け、そこで許可すると読み取り専用でなくなる
+- **`turn/start` の指定は「このターン以降」に効く**。一度送ったら、抜けるときに明示的に戻さないと読み取り専用のままになる
+- 戻し先は `thread/start` / `thread/resume` の応答に入っている `approvalPolicy` と `sandbox` を控えておく。設定値から組み立て直すと、設定が空（CLIの `config.toml` へ委譲）のときに推測することになる
+- **戻し先を読めなかったスレッドではPlan modeに入れない**。入れてしまうと読み取り専用から出られなくなる
+- TUIの `/plan` は計画を促す指示も入れるが、`turn/start` に指示を差し込む口は無い（`developerInstructions` は `thread/start` のみ）。**指示は足さない**。ユーザーが送った文面をそのまま送る。つまりTUIの `/plan` とは別物で、保証するのは「書けないこと」だけ
+- 進行中のターンには効かない（`turn/steer` に権限を渡す口が無い）
+
+#### Codex: 計画そのものの表示
+
+`turn/plan/updated`（`{ plan: [{ step, status }], explanation }`）を種類 `plan` の項目にする。計画は進むたびに全体が届くので、`plan:<turnId>` のidで置き換えて増やさない。
+
+進み具合は `[ ]` / `[~]` / `[x]` で出す。未知の状態はCLIの表記のまま `[blocked]` のように出す（種類が増えても行が消えないように）。
+
+#### Claude Code: 承認方法そのもの
+
+`set_permission_mode { mode: 'plan' }` で入る。抜けるときは設定の承認方法へ、設定が空なら `manual`（既定）へ戻す。
+
+- 状態は **`system/status` 通知を正とする**。要求の成功だけを信じない（TUIなど他の経路で変えられた場合も同じ通知で拾える）
+- 起動引数で `--permission-mode plan` にした場合、`status` 通知は何かが変わるまで来ない。開いた時点の状態は `initialize` の応答の `current_permission_mode` から拾う
+
 ## 15. 作業記録（日報・週報連携）
 
 この拡張機能から実行したセッションを、日報/週報システムが読める形で残す。

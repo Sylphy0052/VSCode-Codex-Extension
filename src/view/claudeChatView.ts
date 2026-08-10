@@ -365,6 +365,12 @@ export class ClaudeChatViewManager implements vscode.Disposable {
         void this.compact(entry);
         return;
       }
+      if (type === 'planMode') {
+        entry.loop.noteUserAction();
+        // 抜けるときは設定の承認方法へ戻す。設定が空なら既定（manual）
+        entry.session.setPlanMode(m['on'] === true, readClaudeConfig().claude.permissionMode);
+        return;
+      }
       if (type === 'cancelQueued' && typeof m['index'] === 'number') {
         entry.session.cancelQueued(m['index']);
         return;

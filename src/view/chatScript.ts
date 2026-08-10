@@ -334,8 +334,20 @@ export function chatScript(agentLabel: string): string {
     el('send').disabled = false;
     // 圧縮は新しいターンを起こす。応答中に重ねると割り込みになるため止める
     el('compact').disabled = !!state.busy;
+    applyPlanMode(state.planMode);
     applyLoop(state.loop);
     renderStatus(state);
+  }
+
+  // いまPlan modeか。押したときに反転させるため覚えておく
+  let planMode = false;
+
+  /** 計画ボタンの見た目。押されているかが常に分かるようにする。 */
+  function applyPlanMode(on) {
+    planMode = !!on;
+    const button = el('planToggle');
+    button.setAttribute('aria-pressed', planMode ? 'true' : 'false');
+    button.className = planMode ? 'toggled' : 'secondary';
   }
 
   /**
@@ -347,6 +359,7 @@ export function chatScript(agentLabel: string): string {
     status.replaceChildren();
 
     const bits = [];
+    if (state.planMode) bits.push('計画モード（ファイルは変更されません）');
     if (state.busy) bits.push('応答中…');
     const usageText = formatUsage(state.usage);
     if (usageText !== '') bits.push(usageText);
@@ -602,6 +615,10 @@ export function chatScript(agentLabel: string): string {
   el('send').addEventListener('click', send);
   // 確認は拡張機能側で出す。会話の内容を不可逆に変えるため、押しただけでは実行しない
   el('compact').addEventListener('click', () => vscode.postMessage({ type: 'compact' }));
+  // 見た目は状態が返ってきてから変える。押した瞬間に変えると、失敗したとき嘘になる
+  el('planToggle').addEventListener('click', () =>
+    vscode.postMessage({ type: 'planMode', on: !planMode }),
+  );
   el('flushQueue').addEventListener('click', () => vscode.postMessage({ type: 'flushQueue' }));
   el('stop').addEventListener('click', () => vscode.postMessage({ type: 'interrupt' }));
   // 応答中のEscで中断する。画面のどこにフォーカスがあっても効くようにする

@@ -502,3 +502,37 @@ describe('セッション中の設定変更', () => {
     expect(state.items).toEqual([]);
   });
 });
+
+describe('Plan mode', () => {
+  const status = (permissionMode: string, uuid: string) => ({
+    type: 'system',
+    subtype: 'status',
+    status: null,
+    permissionMode,
+    uuid,
+  });
+
+  it('承認方法が plan なら Plan mode に入る', () => {
+    expect(apply([status('plan', 'p1')]).planMode).toBe(true);
+  });
+
+  it('plan 以外へ変わると抜ける', () => {
+    const inPlan = apply([status('plan', 'p1')]);
+    expect(applyStreamEvent(inPlan, status('acceptEdits', 'p2')).planMode).toBe(false);
+  });
+
+  it('既定では入っていない', () => {
+    expect(initialClaudeState.planMode).toBe(false);
+  });
+
+  it('承認方法を持たない status では変えない', () => {
+    const inPlan = apply([status('plan', 'p1')]);
+    const next = applyStreamEvent(inPlan, {
+      type: 'system',
+      subtype: 'status',
+      status: 'compacting',
+      uuid: 'p3',
+    });
+    expect(next.planMode).toBe(true);
+  });
+});
