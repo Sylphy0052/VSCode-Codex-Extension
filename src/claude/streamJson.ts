@@ -13,6 +13,7 @@ export const initialClaudeState: ChatState = {
   busy: false,
   // Claude Codeの中断はcontrol protocolで、ターンの指定を要らない
   turnId: undefined,
+  turnFailed: false,
   streamingMessageId: undefined,
   items: [],
   approvals: [],
@@ -32,7 +33,7 @@ export function applyStreamEvent(state: ChatState, event: Record<string, unknown
     case 'rate_limit_event':
       return applyRateLimit(state, event);
     case 'result':
-      return applyResult(state);
+      return applyResult(state, event);
     default:
       return state;
   }
@@ -48,6 +49,7 @@ function applySystem(state: ChatState, event: Record<string, unknown>): ChatStat
     threadId: sessionId === '' ? state.threadId : sessionId,
     // initはターン開始時に届く。resultで解除する
     busy: true,
+    turnFailed: false,
   };
 }
 
@@ -210,8 +212,14 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
   return { ...state, busy: true, items };
 }
 
-function applyResult(state: ChatState): ChatState {
-  return { ...state, busy: false };
+/**
+ * ターンの終わり。`is_error` か `success` 以外のsubtypeは失敗として扱う。
+ * ループ実行を止める判断に使うため、完了と区別して持つ。
+ */
+function applyResult(state: ChatState, event: Record<string, unknown>): ChatState {
+  const subtype = str(event['subtype']);
+  const failed = event['is_error'] === true || (subtype !== '' && subtype !== 'success');
+  return { ...state, busy: false, turnFailed: failed };
 }
 
 /**

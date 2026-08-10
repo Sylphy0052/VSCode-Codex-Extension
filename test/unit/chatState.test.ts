@@ -78,6 +78,15 @@ describe('applyEvent', () => {
     expect(applyEvent(started, 'turn/failed', {}).turnId).toBeUndefined();
   });
 
+  it('turn/failed だけを失敗として残し、次のターンで消す', () => {
+    const started = applyEvent(initialChatState, 'turn/started', {});
+    expect(applyEvent(started, 'turn/completed', {}).turnFailed).toBe(false);
+
+    const failed = applyEvent(started, 'turn/failed', {});
+    expect(failed.turnFailed).toBe(true);
+    expect(applyEvent(failed, 'turn/started', {}).turnFailed).toBe(false);
+  });
+
   it('turnが無い turn/started でも落ちない', () => {
     expect(applyEvent(initialChatState, 'turn/started', {}).turnId).toBeUndefined();
   });

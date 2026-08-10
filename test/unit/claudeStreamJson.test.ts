@@ -268,6 +268,25 @@ describe('applyStreamEvent', () => {
       },
     ]);
     expect(state.busy).toBe(false);
+    expect(state.turnFailed).toBe(false);
+  });
+
+  it('is_error や success 以外のsubtypeを失敗として残す', () => {
+    const byFlag = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      { type: 'result', subtype: 'success', is_error: true },
+    ]);
+    expect(byFlag.turnFailed).toBe(true);
+
+    const bySubtype = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      { type: 'result', subtype: 'error_during_execution' },
+    ]);
+    expect(bySubtype.turnFailed).toBe(true);
+
+    // 次のターンが始まれば消える
+    const next = applyStreamEvent(bySubtype, { type: 'system', subtype: 'init', session_id: ID });
+    expect(next.turnFailed).toBe(false);
   });
 
   it('ユーザー発言をそのまま項目にする（replay-user-messages）', () => {

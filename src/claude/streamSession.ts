@@ -98,12 +98,13 @@ export class ClaudeStreamSession {
     proc.on('exit', (code) => {
       this.log.info(`claudeが終了しました (code ${code ?? 'unknown'})`);
       this.proc = undefined;
-      this.update({ ...this.state, busy: false });
+      // 会話の途中でプロセスが消えた形なので、続きは送れない
+      this.update({ ...this.state, busy: false, turnFailed: true });
     });
     proc.on('error', (e) => {
       this.log.error(`claudeを起動できません: ${e.message}`);
       this.proc = undefined;
-      this.update({ ...this.state, busy: false });
+      this.update({ ...this.state, busy: false, turnFailed: true });
     });
 
     const threadId =
@@ -130,7 +131,7 @@ export class ClaudeStreamSession {
     if (this.proc === undefined) {
       throw new Error('セッションが起動していません');
     }
-    this.update({ ...this.state, busy: true });
+    this.update({ ...this.state, busy: true, turnFailed: false });
     this.write(buildUserMessage(text));
   }
 

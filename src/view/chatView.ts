@@ -7,6 +7,7 @@ import { AppServerConnection, type ServerRequest } from '../appserver/connection
 import { summarize } from '../codex/conversation';
 import { readForkedThreadId } from '../codex/jsonRpc';
 import { currentWorkspaceFolder, readConfig } from '../config';
+import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { Logger } from '../log';
 import { APPROVAL_MODES } from '../codex/types';
 import { chatScript } from './chatScript';
@@ -15,6 +16,8 @@ import { isEditableKey, type SettingsProvider } from './settingsProvider';
 interface ChatPanel {
   panel: vscode.WebviewPanel;
   session: ChatSession;
+  /** この画面で走らせているループ。走っていなければ待機状態のまま。 */
+  loop: LoopController;
   /** 作業記録に載せるディレクトリ。resume時はセッション自身のcwd。 */
   cwd: string | undefined;
   /**
@@ -155,13 +158,17 @@ export class ChatViewManager implements vscode.Disposable {
       if (title !== undefined && panel.title !== title) {
         panel.title = title;
       }
-      void panel.webview.postMessage({
-        type: 'state',
-        state: { ...state, settings: this.settings.snapshot() },
-      });
+      // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
+      entry.loop.observe(state);
+      this.postState(entry);
     });
 
-    const entry: ChatPanel = { panel, session, cwd, disposed: false };
+    const loop = new LoopController(
+      (text) => this.sendFromLoop(entry, text),
+      () => this.postState(entry),
+    );
+
+    const entry: ChatPanel = { panel, session, loop, cwd, disposed: false };
     this.active = entry;
     panel.webview.onDidReceiveMessage(
       (message: unknown) => void this.handleMessage(entry, message),
@@ -173,6 +180,7 @@ export class ChatViewManager implements vscode.Disposable {
     });
     panel.onDidDispose(() => {
       entry.disposed = true;
+      loop.stop('manual');
       session.dispose();
       if (this.pending === entry) {
         this.pending = undefined;
@@ -196,12 +204,29 @@ export class ChatViewManager implements vscode.Disposable {
 
     try {
       if (type === 'send' && typeof m['text'] === 'string' && m['text'].trim() !== '') {
+        // 手動の発言はループへの割り込み。指示が交互に飛ぶ状態を作らない
+        entry.loop.noteUserAction();
         await entry.session.send(m['text'], readConfig().codex);
         this.reportActivity(entry, m['text']);
         return;
       }
       if (type === 'interrupt') {
+        entry.loop.noteUserAction();
         await entry.session.interrupt();
+        return;
+      }
+      if (type === 'loop/start') {
+        const plan = normalizeLoopPlan(m['plan']);
+        if (plan === undefined) {
+          void vscode.window.showErrorMessage('ループの継続指示と最大回数を入力してください');
+          return;
+        }
+        this.log.info(`ループ開始: 最大${plan.maxIterations}回`);
+        entry.loop.start(plan);
+        return;
+      }
+      if (type === 'loop/stop') {
+        entry.loop.stop('manual');
         return;
       }
       if (type === 'approve' && typeof m['decision'] === 'string') {
@@ -230,6 +255,34 @@ export class ChatViewManager implements vscode.Disposable {
       }
     } catch (e) {
       this.reportError(e);
+    }
+  }
+
+  /** 画面へ現在の状態を送る。設定とループの進行はここで一緒に載せる。 */
+  private postState(entry: ChatPanel): void {
+    if (entry.disposed) {
+      return;
+    }
+    void entry.panel.webview.postMessage({
+      type: 'state',
+      state: {
+        ...entry.session.getState(),
+        settings: this.settings.snapshot(),
+        loop: entry.loop.getStatus(),
+      },
+    });
+  }
+
+  /**
+   * ループからの送信。失敗はループを止める理由になるため、報告したうえで投げ直す。
+   */
+  private async sendFromLoop(entry: ChatPanel, text: string): Promise<void> {
+    try {
+      await entry.session.send(text, readConfig().codex);
+      this.reportActivity(entry, text);
+    } catch (e) {
+      this.reportError(e);
+      throw e;
     }
   }
 
@@ -296,15 +349,8 @@ export class ChatViewManager implements vscode.Disposable {
 
   /** 設定が外部で変わったときに、開いている全画面のプルダウンを更新する。 */
   refreshSettings(): void {
-    const snapshot = this.settings.snapshot();
     for (const entry of this.allPanels()) {
-      if (entry.disposed) {
-        continue;
-      }
-      void entry.panel.webview.postMessage({
-        type: 'state',
-        state: { ...entry.session.getState(), settings: snapshot },
-      });
+      this.postState(entry);
     }
   }
 
@@ -357,6 +403,7 @@ export class ChatViewManager implements vscode.Disposable {
 
   dispose(): void {
     for (const entry of this.panels.values()) {
+      entry.loop.stop('manual');
       entry.session.dispose();
       entry.panel.dispose();
     }
@@ -539,16 +586,74 @@ export function renderShell(webview: vscode.Webview, options: ChatShellOptions):
     font-size: inherit;
   }
   #settings select:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  #loop {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 16px;
+    border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+  }
+  #loop label {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+  }
+  #loop textarea { flex: none; min-height: 40px; }
+  #loop input {
+    padding: 4px 6px;
+    color: var(--vscode-input-foreground);
+    background-color: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, transparent);
+    border-radius: 2px;
+    font-family: inherit;
+    font-size: inherit;
+  }
+  #loop input:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  #loop .line { display: flex; gap: 12px; align-items: flex-end; }
+  #loop .line label.grow { flex: 1; }
+  #loop .line input[type='number'] { width: 72px; }
+  #loopBar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 16px 6px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+  }
 </style>
 </head>
 <body>
   <div id="log"></div>
   <div id="approvals"></div>
   <div id="status"></div>
+  <div id="loopBar" hidden>
+    <span id="loopProgress"></span>
+    <button id="loopStop" type="button" class="secondary" hidden>ループ停止</button>
+  </div>
   <div id="composer">
     <textarea id="input" placeholder="${options.agentLabel}への指示を入力（Ctrl+Enterで送信）"></textarea>
     <button id="send" type="button">送信</button>
     <button id="stop" type="button" class="secondary" title="Escでも中断できます" hidden>中断</button>
+    <button id="loopToggle" type="button" class="secondary" title="同じ指示を条件成立まで繰り返します">ループ</button>
+  </div>
+  <div id="loop" hidden>
+    <label>初回指示（空なら継続指示から始めます）
+      <textarea id="loopInitial" placeholder="例: 第1話を執筆してください"></textarea>
+    </label>
+    <label>継続指示（2回目以降に繰り返します）
+      <textarea id="loopContinue" placeholder="例: 次へ"></textarea>
+    </label>
+    <div class="line">
+      <label>最大回数
+        <input id="loopMax" type="number" min="1" max="200" value="20">
+      </label>
+      <label class="grow">終了条件（空なら回数だけで終わります）
+        <input id="loopCondition" type="text" placeholder="例: 20話の執筆が完了している">
+      </label>
+      <button id="loopStart" type="button">ループ開始</button>
+    </div>
   </div>
   <div id="settings"${options.showSettings ? '' : ' hidden'}>
     <label>モデル <select id="model"></select></label>

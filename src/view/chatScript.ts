@@ -233,12 +233,67 @@ export function chatScript(agentLabel: string): string {
 
     el('stop').hidden = !state.busy;
     el('send').disabled = state.busy;
+    applyLoop(state.loop);
     const bits = [];
     if (state.busy) bits.push('応答中…');
     const usageText = formatUsage(state.usage);
     if (usageText !== '') bits.push(usageText);
     el('status').textContent = bits.join(' ・ ');
   }
+
+  // ループが止まった理由の説明。止まったことに気付けるよう、次を始めるまで残す。
+  const LOOP_STOP_LABEL = {
+    done: '条件が成立しました',
+    maxReached: '指定した回数を送り終えました',
+    failed: '応答が失敗したため止めました',
+    manual: '停止しました',
+    interrupted: '手動の操作が入ったため止めました',
+  };
+
+  function applyLoop(loop) {
+    el('loopStart').disabled = !!(loop && loop.running);
+    const bar = el('loopBar');
+    if (!loop || (!loop.running && !loop.stopReason)) {
+      bar.hidden = true;
+      el('loopStop').hidden = true;
+      return;
+    }
+
+    bar.hidden = false;
+    el('loopStop').hidden = !loop.running;
+    const count = loop.iteration + '/' + loop.maxIterations + '回目';
+    if (loop.running) {
+      const bits = ['ループ ' + count];
+      if (loop.condition) bits.push('条件: ' + loop.condition);
+      el('loopProgress').textContent = bits.join(' ・ ');
+      return;
+    }
+    el('loopProgress').textContent =
+      'ループ終了（' + count + '）・' + (LOOP_STOP_LABEL[loop.stopReason] || loop.stopReason);
+  }
+
+  el('loopToggle').addEventListener('click', () => {
+    const panel = el('loop');
+    panel.hidden = !panel.hidden;
+    if (!panel.hidden) el('loopContinue').focus();
+  });
+
+  el('loopStart').addEventListener('click', () => {
+    const plan = {
+      initialPrompt: el('loopInitial').value,
+      continuePrompt: el('loopContinue').value,
+      maxIterations: el('loopMax').value,
+      condition: el('loopCondition').value,
+    };
+    if (!plan.continuePrompt.trim()) {
+      el('loopContinue').focus();
+      return;
+    }
+    el('loop').hidden = true;
+    vscode.postMessage({ type: 'loop/start', plan });
+  });
+
+  el('loopStop').addEventListener('click', () => vscode.postMessage({ type: 'loop/stop' }));
 
   // 使用量の表記。Codexは消費率、Claude Codeは制限の種類とリセットまでの時間で示す。
   function formatUsage(usage) {

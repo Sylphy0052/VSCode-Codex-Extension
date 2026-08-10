@@ -39,6 +39,13 @@ export interface ChatState {
   /** 進行中のターン。`turn/interrupt` が要求するため保持する。 */
   turnId: string | undefined;
   /**
+   * 直前のターンが失敗して終わったか。
+   *
+   * 完了と失敗はどちらも `busy` を落とすため、それだけでは区別できない。
+   * ループ実行が壊れた状態で回り続けないよう、失敗を別に持つ。
+   */
+  turnFailed: boolean;
+  /**
    * ストリーミング中のメッセージid（Claude Codeのみ）。
    *
    * 断片の通知には message.id が入らないため、`message_start` で得た値を覚えておき、
@@ -55,6 +62,7 @@ export const initialChatState: ChatState = {
   name: undefined,
   busy: false,
   turnId: undefined,
+  turnFailed: false,
   streamingMessageId: undefined,
   items: [],
   approvals: [],
@@ -190,12 +198,19 @@ export function applyEvent(
     case 'turn/started': {
       // turnIdはトップレベルではなく turn オブジェクトの中にある（実機で確認）
       const turnId = str(rec(params['turn'])?.['id']);
-      return { ...state, busy: true, turnId: turnId === '' ? undefined : turnId };
+      return {
+        ...state,
+        busy: true,
+        turnId: turnId === '' ? undefined : turnId,
+        turnFailed: false,
+      };
     }
 
     case 'turn/completed':
+      return { ...state, busy: false, turnId: undefined, turnFailed: false };
+
     case 'turn/failed':
-      return { ...state, busy: false, turnId: undefined };
+      return { ...state, busy: false, turnId: undefined, turnFailed: true };
 
     case 'thread/name/updated': {
       const name = params['threadName'];

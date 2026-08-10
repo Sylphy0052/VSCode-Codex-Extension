@@ -7,6 +7,7 @@ import { ClaudeStreamSession } from '../claude/streamSession';
 import { transcriptItems } from '../claude/transcript';
 import { isUnsafeClaudeCombination } from '../claude/argvBuilder';
 import { currentWorkspaceFolder, readClaudeConfig } from '../config';
+import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
 import { renderShell } from './chatView';
@@ -17,6 +18,8 @@ import type { ChatActivity } from './chatView';
 interface ClaudePanel {
   panel: vscode.WebviewPanel;
   session: ClaudeStreamSession;
+  /** この画面で走らせているループ。走っていなければ待機状態のまま。 */
+  loop: LoopController;
   cwd: string;
   /** タブを閉じた後か。破棄済みのWebviewへ送るとVSCodeが例外を投げるため見張る。 */
   disposed: boolean;
@@ -61,6 +64,7 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       type: 'state',
       state: {
         ...entry.session.getState(),
+        loop: entry.loop.getStatus(),
         settings: {
           models: snapshot.models.map((slug) => ({
             slug,
@@ -169,15 +173,26 @@ export class ClaudeChatViewManager implements vscode.Disposable {
         if (state.usage !== undefined) {
           this.onUsage(state.usage);
         }
-        void panel.webview.postMessage({ type: 'state', state });
+        // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
+        entry.loop.observe(state);
+        void panel.webview.postMessage({
+          type: 'state',
+          state: { ...state, loop: entry.loop.getStatus() },
+        });
       },
       () => this.warnApprovalsUnavailable(),
     );
 
-    const entry: ClaudePanel = { panel, session, cwd, disposed: false };
+    const loop = new LoopController(
+      (text) => this.sendFromLoop(entry, text),
+      () => this.refreshSettings(entry),
+    );
+
+    const entry: ClaudePanel = { panel, session, loop, cwd, disposed: false };
     panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(entry, message));
     panel.onDidDispose(() => {
       entry.disposed = true;
+      loop.stop('manual');
       session.dispose();
       for (const [id, value] of this.panels) {
         if (value === entry) {
@@ -210,6 +225,31 @@ export class ClaudeChatViewManager implements vscode.Disposable {
     this.refreshSettings(entry);
   }
 
+  /** 発言を送り、作業記録へ流す。手動でもループからでも通り道は同じにする。 */
+  private dispatch(entry: ClaudePanel, text: string): void {
+    entry.session.send(text);
+    const sessionId = entry.session.threadId;
+    if (sessionId !== undefined) {
+      this.onActivity({ sessionId, cwd: entry.cwd, text });
+    }
+  }
+
+  /** ループからの送信。失敗はループを止める理由になるため、報告したうえで投げ直す。 */
+  private sendFromLoop(entry: ClaudePanel, text: string): void {
+    try {
+      this.dispatch(entry, text);
+    } catch (e) {
+      this.reportError(e);
+      throw e;
+    }
+  }
+
+  private reportError(e: unknown): void {
+    const reason = e instanceof Error ? e.message : String(e);
+    this.log.error(`Claude Code画面: ${reason}`);
+    void vscode.window.showErrorMessage(`Claude Code: ${reason}`);
+  }
+
   private handleMessage(entry: ClaudePanel, message: unknown): void {
     const m =
       typeof message === 'object' && message !== null ? (message as Record<string, unknown>) : {};
@@ -217,15 +257,28 @@ export class ClaudeChatViewManager implements vscode.Disposable {
 
     try {
       if (type === 'send' && typeof m['text'] === 'string' && m['text'].trim() !== '') {
-        entry.session.send(m['text']);
-        const sessionId = entry.session.threadId;
-        if (sessionId !== undefined) {
-          this.onActivity({ sessionId, cwd: entry.cwd, text: m['text'] });
-        }
+        // 手動の発言はループへの割り込み。指示が交互に飛ぶ状態を作らない
+        entry.loop.noteUserAction();
+        this.dispatch(entry, m['text']);
         return;
       }
       if (type === 'interrupt') {
+        entry.loop.noteUserAction();
         entry.session.interrupt();
+        return;
+      }
+      if (type === 'loop/start') {
+        const plan = normalizeLoopPlan(m['plan']);
+        if (plan === undefined) {
+          void vscode.window.showErrorMessage('ループの継続指示と最大回数を入力してください');
+          return;
+        }
+        this.log.info(`ループ開始: 最大${plan.maxIterations}回`);
+        entry.loop.start(plan);
+        return;
+      }
+      if (type === 'loop/stop') {
+        entry.loop.stop('manual');
         return;
       }
       if (type === 'ready') {
@@ -243,9 +296,7 @@ export class ClaudeChatViewManager implements vscode.Disposable {
         }
       }
     } catch (e) {
-      const reason = e instanceof Error ? e.message : String(e);
-      this.log.error(`Claude Code画面: ${reason}`);
-      void vscode.window.showErrorMessage(`Claude Code: ${reason}`);
+      this.reportError(e);
     }
   }
 
@@ -274,6 +325,7 @@ export class ClaudeChatViewManager implements vscode.Disposable {
 
   dispose(): void {
     for (const entry of this.panels.values()) {
+      entry.loop.stop('manual');
       entry.session.dispose();
       entry.panel.dispose();
     }

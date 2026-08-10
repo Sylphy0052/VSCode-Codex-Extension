@@ -1,0 +1,258 @@
+import { describe, expect, it } from 'vitest';
+import { initialChatState, type ChatItem, type ChatState } from '../../src/appserver/chatState';
+import {
+  declaresDone,
+  decoratePrompt,
+  LoopController,
+  LOOP_DONE_TOKEN,
+  LOOP_ITERATION_LIMIT,
+  normalizeLoopPlan,
+  type LoopPlan,
+} from '../../src/loop/loopController';
+
+const state = (overrides: Partial<ChatState> = {}): ChatState => ({
+  ...initialChatState,
+  ...overrides,
+});
+
+const agentMessage = (text: string): ChatItem => ({
+  id: 'a1',
+  kind: 'agentMessage',
+  text,
+  detail: '',
+  status: undefined,
+  turnId: undefined,
+});
+
+const plan = (overrides: Partial<LoopPlan> = {}): LoopPlan => ({
+  initialPrompt: '第1話を執筆',
+  continuePrompt: '次へ',
+  maxIterations: 3,
+  condition: '',
+  ...overrides,
+});
+
+/** 1ターン分の状態変化を流す。応答中になってから完了へ落ちる。 */
+const runTurn = (controller: LoopController, completed: ChatState = state()): void => {
+  controller.observe(state({ busy: true }));
+  controller.observe(completed);
+};
+
+const spy = (): { sent: string[]; send: (text: string) => void } => {
+  const sent: string[] = [];
+  return { sent, send: (text: string) => sent.push(text) };
+};
+
+describe('normalizeLoopPlan', () => {
+  it('前後の空白を落として計画にする', () => {
+    expect(
+      normalizeLoopPlan({
+        initialPrompt: ' 執筆 ',
+        continuePrompt: ' 次へ ',
+        maxIterations: '20',
+        condition: ' 20話完了 ',
+      }),
+    ).toEqual({
+      initialPrompt: '執筆',
+      continuePrompt: '次へ',
+      maxIterations: 20,
+      condition: '20話完了',
+    });
+  });
+
+  it('継続指示が無ければ受け付けない', () => {
+    expect(normalizeLoopPlan({ continuePrompt: '  ', maxIterations: 5 })).toBeUndefined();
+  });
+
+  it('回数が数値でない、または1未満なら受け付けない', () => {
+    expect(
+      normalizeLoopPlan({ continuePrompt: '次へ', maxIterations: 'たくさん' }),
+    ).toBeUndefined();
+    expect(normalizeLoopPlan({ continuePrompt: '次へ', maxIterations: 0 })).toBeUndefined();
+  });
+
+  it('回数は上限で頭打ちにする', () => {
+    expect(
+      normalizeLoopPlan({ continuePrompt: '次へ', maxIterations: 100000 })?.maxIterations,
+    ).toBe(LOOP_ITERATION_LIMIT);
+  });
+
+  it('オブジェクトでない入力は受け付けない', () => {
+    expect(normalizeLoopPlan('次へ')).toBeUndefined();
+    expect(normalizeLoopPlan(null)).toBeUndefined();
+  });
+});
+
+describe('decoratePrompt', () => {
+  it('条件が空なら指示をそのまま使う', () => {
+    expect(decoratePrompt('次へ', '')).toBe('次へ');
+  });
+
+  it('条件があれば終了の合図を頼む文を添える', () => {
+    const decorated = decoratePrompt('次へ', '20話完了');
+    expect(decorated).toContain('次へ');
+    expect(decorated).toContain('20話完了');
+    expect(decorated).toContain(LOOP_DONE_TOKEN);
+  });
+});
+
+describe('declaresDone', () => {
+  it('直近のエージェント発言に合図があれば真', () => {
+    expect(declaresDone(state({ items: [agentMessage(LOOP_DONE_TOKEN)] }))).toBe(true);
+  });
+
+  it('古い発言の合図は見ない', () => {
+    const items = [
+      { ...agentMessage(LOOP_DONE_TOKEN), id: 'old' },
+      { ...agentMessage('まだ続きます'), id: 'new' },
+    ];
+    expect(declaresDone(state({ items }))).toBe(false);
+  });
+
+  it('エージェントの発言が無ければ偽', () => {
+    expect(declaresDone(state())).toBe(false);
+  });
+});
+
+describe('LoopController', () => {
+  it('開始すると初回指示を送る', () => {
+    const { sent, send } = spy();
+    new LoopController(send).start(plan());
+    expect(sent).toEqual(['第1話を執筆']);
+  });
+
+  it('初回指示が空なら継続指示で始める', () => {
+    const { sent, send } = spy();
+    new LoopController(send).start(plan({ initialPrompt: '' }));
+    expect(sent).toEqual(['次へ']);
+  });
+
+  it('ターンが終わるたびに継続指示を送る', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan());
+    runTurn(controller);
+    runTurn(controller);
+    expect(sent).toEqual(['第1話を執筆', '次へ', '次へ']);
+  });
+
+  it('指定回数を送り終えたら止まる', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan({ maxIterations: 2 }));
+    runTurn(controller);
+    runTurn(controller);
+    expect(sent).toEqual(['第1話を執筆', '次へ']);
+    expect(controller.running).toBe(false);
+    expect(controller.getStatus().stopReason).toBe('maxReached');
+  });
+
+  it('終了条件があれば指示へ添える', () => {
+    const { sent, send } = spy();
+    new LoopController(send).start(plan({ condition: '20話完了' }));
+    expect(sent[0]).toContain('20話完了');
+    expect(sent[0]).toContain(LOOP_DONE_TOKEN);
+  });
+
+  it('エージェントが合図を出したら止まる', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan({ condition: '20話完了' }));
+    runTurn(controller, state({ items: [agentMessage(`了解しました ${LOOP_DONE_TOKEN}`)] }));
+    expect(sent).toHaveLength(1);
+    expect(controller.getStatus().stopReason).toBe('done');
+  });
+
+  it('条件を指定していなければ合図があっても回数で回る', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan());
+    runTurn(controller, state({ items: [agentMessage(LOOP_DONE_TOKEN)] }));
+    expect(sent).toHaveLength(2);
+  });
+
+  it('ターンが失敗したら止まる', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan());
+    runTurn(controller, state({ turnFailed: true }));
+    expect(sent).toHaveLength(1);
+    expect(controller.getStatus().stopReason).toBe('failed');
+  });
+
+  it('承認待ちの間は次の指示を送らない', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan());
+    controller.observe(state({ busy: true }));
+    controller.observe(
+      state({
+        approvals: [{ requestId: 1, kind: 'command', title: 'rm', detail: '' }],
+      }),
+    );
+    expect(sent).toHaveLength(1);
+    expect(controller.running).toBe(true);
+
+    // 承認が片付いてターンが終われば続きへ進む
+    controller.observe(state());
+    expect(sent).toHaveLength(2);
+  });
+
+  it('ターンが始まる前の完了状態では次を送らない', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan());
+    controller.observe(state());
+    expect(sent).toHaveLength(1);
+  });
+
+  it('手動の操作が入ったら止まる', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan());
+    controller.noteUserAction();
+    runTurn(controller);
+    expect(sent).toHaveLength(1);
+    expect(controller.getStatus().stopReason).toBe('interrupted');
+  });
+
+  it('送信が失敗したら止まる', () => {
+    const controller = new LoopController(() => {
+      throw new Error('セッションが起動していません');
+    });
+    controller.start(plan());
+    expect(controller.running).toBe(false);
+    expect(controller.getStatus().stopReason).toBe('failed');
+  });
+
+  it('送信のPromiseが失敗しても止まる', async () => {
+    const controller = new LoopController(() => Promise.reject(new Error('切断')));
+    controller.start(plan());
+    await Promise.resolve();
+    expect(controller.getStatus().stopReason).toBe('failed');
+  });
+
+  it('進行状況を通知する', () => {
+    const seen: Array<[boolean, number]> = [];
+    const controller = new LoopController(
+      () => undefined,
+      (status) => seen.push([status.running, status.iteration]),
+    );
+    controller.start(plan({ maxIterations: 1 }));
+    runTurn(controller);
+    expect(seen).toEqual([
+      [true, 1],
+      [false, 1],
+    ]);
+  });
+
+  it('止まったあとは状態を流しても何も送らない', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan());
+    controller.stop('manual');
+    runTurn(controller);
+    expect(sent).toHaveLength(1);
+    expect(controller.getStatus().stopReason).toBe('manual');
+  });
+});

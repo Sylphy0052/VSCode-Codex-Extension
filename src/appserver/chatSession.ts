@@ -110,7 +110,7 @@ export class ChatSession {
       params['approvalPolicy'] = config.approvalMode;
     }
 
-    this.update({ ...this.state, busy: true });
+    this.update({ ...this.state, busy: true, turnFailed: false });
     await this.connection.request('turn/start', params);
   }
 
