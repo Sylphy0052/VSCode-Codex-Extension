@@ -1,7 +1,13 @@
 import * as vscode from 'vscode';
+import {
+  extractClaudeDefaults,
+  noClaudeDefaults,
+  type ClaudeDefaults,
+} from '../claude/settingsJson';
+import { CLAUDE_EFFORTS, CLAUDE_PERMISSION_MODES } from '../claude/types';
 import { extractDefaults, noDefaults, type CodexDefaults } from '../codex/configToml';
 import { effortsFor, parseModelCatalog, type ModelInfo } from '../codex/modelCatalog';
-import { readConfig } from '../config';
+import { readClaudeConfig, readConfig } from '../config';
 import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
 
@@ -12,6 +18,20 @@ export type EditableKey = (typeof EDITABLE_KEYS)[number];
 export function isEditableKey(value: unknown): value is EditableKey {
   return typeof value === 'string' && (EDITABLE_KEYS as readonly string[]).includes(value);
 }
+
+/** Claude Code側でWebviewから変更を許すキー。 */
+export const CLAUDE_EDITABLE_KEYS = ['model', 'effort', 'permissionMode'] as const;
+export type ClaudeEditableKey = (typeof CLAUDE_EDITABLE_KEYS)[number];
+
+export function isClaudeEditableKey(value: unknown): value is ClaudeEditableKey {
+  return typeof value === 'string' && (CLAUDE_EDITABLE_KEYS as readonly string[]).includes(value);
+}
+
+/**
+ * Claude Codeにはモデル一覧を返すAPIが無い。CLIのヘルプが案内するエイリアスを並べ、
+ * 正式名を使いたい場合は `claude.model` を直接編集してもらう。
+ */
+export const CLAUDE_MODEL_ALIASES = ['fable', 'opus', 'sonnet', 'haiku'] as const;
 
 export interface SettingsSnapshot {
   models: ModelInfo[];
@@ -26,6 +46,17 @@ export interface SettingsSnapshot {
   profile: string;
 }
 
+export interface ClaudeSettingsSnapshot {
+  models: string[];
+  efforts: string[];
+  permissionModes: string[];
+  model: string;
+  effort: string;
+  permissionMode: string;
+  /** 設定が空のときに実際に使われる値（settings.json 由来）。 */
+  defaults: ClaudeDefaults;
+}
+
 /**
  * モデル・effort・承認方法・サンドボックスの選択肢と現在値を供給する。
  *
@@ -35,10 +66,13 @@ export class SettingsProvider {
   private models: ModelInfo[] = [];
   private defaults: CodexDefaults = noDefaults;
 
+  private claudeDefaults: ClaudeDefaults = noClaudeDefaults;
+
   constructor(
     private readonly fs: FileSystemPort,
     private readonly modelsCachePath: string,
     private readonly configTomlPath: string,
+    private readonly claudeSettingsPath: string,
     private readonly log: Logger,
   ) {}
 
@@ -68,6 +102,10 @@ export class SettingsProvider {
 
     const toml = await this.fs.readTextFile(this.configTomlPath);
     this.defaults = toml === undefined ? noDefaults : extractDefaults(toml);
+
+    const claudeSettings = await this.fs.readTextFile(this.claudeSettingsPath);
+    this.claudeDefaults =
+      claudeSettings === undefined ? noClaudeDefaults : extractClaudeDefaults(claudeSettings);
   }
 
   snapshot(): SettingsSnapshot {
@@ -82,6 +120,37 @@ export class SettingsProvider {
       defaults: this.defaults,
       profile: config.codex.profile,
     };
+  }
+
+  claudeSnapshot(): ClaudeSettingsSnapshot {
+    const config = readClaudeConfig().claude;
+    return {
+      models: [...CLAUDE_MODEL_ALIASES],
+      efforts: [...CLAUDE_EFFORTS],
+      permissionModes: [...CLAUDE_PERMISSION_MODES],
+      model: config.model,
+      effort: config.effort,
+      permissionMode: config.permissionMode,
+      defaults: this.claudeDefaults,
+    };
+  }
+
+  /**
+   * Claude Code側の設定を書き換える。
+   *
+   * `permissionMode` を `bypassPermissions` にすると確認なしでツールが動くため、
+   * Codex側の危険な組み合わせと同じく明示の同意を取る。
+   */
+  async updateClaude(key: ClaudeEditableKey, value: string): Promise<boolean> {
+    if (key === 'permissionMode' && value === 'bypassPermissions' && !(await confirmBypass())) {
+      return false;
+    }
+
+    await vscode.workspace
+      .getConfiguration('claude')
+      .update(key, value, vscode.ConfigurationTarget.Global);
+    this.log.info(`Claude設定を更新しました ${key}=${value === '' ? '(既定)' : value}`);
+    return true;
   }
 
   /**
@@ -120,6 +189,15 @@ export class SettingsProvider {
 
     return true;
   }
+}
+
+async function confirmBypass(): Promise<boolean> {
+  const choice = await vscode.window.showWarningMessage(
+    '承認を無効にします。Claude Codeはツールを確認なしで実行します。',
+    { modal: true },
+    'この設定にする',
+  );
+  return choice === 'この設定にする';
 }
 
 async function confirmUnsafe(): Promise<boolean> {

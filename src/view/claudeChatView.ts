@@ -10,6 +10,8 @@ import { currentWorkspaceFolder, readClaudeConfig } from '../config';
 import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
 import { renderShell } from './chatView';
+import { CLAUDE_EFFORTS, CLAUDE_PERMISSION_MODES } from '../claude/types';
+import type { SettingsProvider } from './settingsProvider';
 import type { ChatActivity } from './chatView';
 
 interface ClaudePanel {
@@ -35,9 +37,46 @@ export class ClaudeChatViewManager implements vscode.Disposable {
     private readonly claudePath: () => string,
     private readonly fs: FileSystemPort,
     private readonly store: ClaudeSessionStore,
+    private readonly settings: SettingsProvider,
     private readonly log: Logger,
     private readonly onActivity: (activity: ChatActivity) => void = () => undefined,
   ) {}
+
+  /**
+   * 画面下の設定行へ現在値と選択肢を送る。
+   *
+   * 描画はCodex画面と同じスクリプトなので、Codex側のスナップショットと同じ形に整えて渡す。
+   * Claude Codeにはモデルカタログが無いため、エイリアスを `ModelInfo` 相当に見せる。
+   */
+  private refreshSettings(entry: ClaudePanel): void {
+    const snapshot = this.settings.claudeSnapshot();
+    void entry.panel.webview.postMessage({
+      type: 'state',
+      state: {
+        ...entry.session.getState(),
+        settings: {
+          models: snapshot.models.map((slug) => ({
+            slug,
+            displayName: slug,
+            description: undefined,
+            defaultEffort: undefined,
+            efforts: [],
+          })),
+          efforts: [...CLAUDE_EFFORTS],
+          model: snapshot.model,
+          reasoningEffort: snapshot.effort,
+          approvalMode: snapshot.permissionMode,
+          defaults: {
+            model: snapshot.defaults.model,
+            reasoningEffort: snapshot.defaults.effort,
+            approvalMode: snapshot.defaults.permissionMode,
+            sandbox: undefined,
+          },
+          profile: '',
+        },
+      },
+    });
+  }
 
   /** 新しい会話を開く。idは起動前に決まるため、開いた時点で履歴と紐づく。 */
   async openNew(): Promise<void> {
@@ -103,7 +142,11 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       enableScripts: true,
       retainContextWhenHidden: true,
     });
-    panel.webview.html = renderShell(panel.webview, { agentLabel: LABEL, showSettings: false });
+    panel.webview.html = renderShell(panel.webview, {
+      agentLabel: LABEL,
+      approvalModes: CLAUDE_PERMISSION_MODES,
+      showSettings: true,
+    });
 
     const session = new ClaudeStreamSession(
       this.claudePath,
@@ -131,6 +174,28 @@ export class ClaudeChatViewManager implements vscode.Disposable {
     return entry;
   }
 
+  /** 設定行のキーはCodex画面と共通なので、Claude側のキーへ読み替える。 */
+  private async applyConfig(entry: ClaudePanel, key: unknown, value: unknown): Promise<void> {
+    if (typeof value !== 'string') {
+      return;
+    }
+    const mapped =
+      key === 'model'
+        ? 'model'
+        : key === 'reasoningEffort'
+          ? 'effort'
+          : key === 'approvalMode'
+            ? 'permissionMode'
+            : undefined;
+    if (mapped === undefined) {
+      this.log.warn(`変更を許可していないキーです: ${String(key)}`);
+      return;
+    }
+    // 取り消された場合も表示を現在値へ戻すため、結果によらず再送する
+    await this.settings.updateClaude(mapped, value);
+    this.refreshSettings(entry);
+  }
+
   private handleMessage(entry: ClaudePanel, message: unknown): void {
     const m =
       typeof message === 'object' && message !== null ? (message as Record<string, unknown>) : {};
@@ -147,6 +212,14 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       }
       if (type === 'interrupt') {
         entry.session.interrupt();
+        return;
+      }
+      if (type === 'ready') {
+        this.refreshSettings(entry);
+        return;
+      }
+      if (type === 'config') {
+        void this.applyConfig(entry, m['key'], m['value']);
         return;
       }
       if (type === 'approve' && typeof m['decision'] === 'string') {

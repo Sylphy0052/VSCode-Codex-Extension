@@ -10,7 +10,13 @@ import {
 } from '../codex/usage';
 import type { Logger } from '../log';
 import { formatAbsoluteTime } from './relativeTime';
-import { isEditableKey, type SettingsProvider, type SettingsSnapshot } from './settingsProvider';
+import {
+  isClaudeEditableKey,
+  isEditableKey,
+  type ClaudeSettingsSnapshot,
+  type SettingsProvider,
+  type SettingsSnapshot,
+} from './settingsProvider';
 
 interface UsageView {
   percent: number;
@@ -24,6 +30,7 @@ interface UsageView {
 
 interface PanelState extends SettingsSnapshot {
   usage: UsageView | undefined;
+  claude: ClaudeSettingsSnapshot;
 }
 
 /**
@@ -75,7 +82,11 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
   }
 
   private buildState(): PanelState {
-    return { ...this.settings.snapshot(), usage: buildUsageView(this.usage) };
+    return {
+      ...this.settings.snapshot(),
+      usage: buildUsageView(this.usage),
+      claude: this.settings.claudeSnapshot(),
+    };
   }
 
   private async handleMessage(message: unknown): Promise<void> {
@@ -90,7 +101,22 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     }
 
     if (m['type'] === 'newSession') {
-      await vscode.commands.executeCommand('codex.newSession');
+      await vscode.commands.executeCommand(
+        m['provider'] === 'claude' ? 'claude.newChat' : 'codex.newChat',
+      );
+      return;
+    }
+
+    if (m['type'] === 'updateClaude') {
+      const key = m['key'];
+      const value = m['value'];
+      if (!isClaudeEditableKey(key) || typeof value !== 'string') {
+        this.log.warn(`変更を許可していないキーです: ${String(key)}`);
+        return;
+      }
+      // 取り消された場合も表示を現在値へ戻す必要がある
+      await this.settings.updateClaude(key, value);
+      await this.post();
       return;
     }
 
@@ -205,6 +231,30 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     outline: 1px solid var(--vscode-focusBorder);
     outline-offset: 2px;
   }
+  .tabs {
+    display: flex;
+    gap: 2px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--vscode-widget-border, transparent);
+  }
+  .tabs button {
+    width: auto;
+    flex: 1;
+    margin-top: 0;
+    padding: 4px 8px;
+    color: var(--vscode-foreground);
+    background-color: transparent;
+    border: none;
+    border-bottom: 1px solid transparent;
+    border-radius: 0;
+    opacity: 0.7;
+  }
+  .tabs button:hover { background-color: var(--vscode-toolbar-hoverBackground, transparent); }
+  .tabs button[aria-selected='true'] {
+    opacity: 1;
+    font-weight: 600;
+    border-bottom-color: var(--vscode-focusBorder);
+  }
   .note {
     margin-top: 4px;
     padding-top: 8px;
@@ -216,6 +266,12 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
 </style>
 </head>
 <body>
+  <div class="tabs" role="tablist">
+    <button id="tabCodex" type="button" role="tab" aria-selected="true">Codex</button>
+    <button id="tabClaude" type="button" role="tab" aria-selected="false">Claude Code</button>
+  </div>
+
+  <div id="panelCodex">
   <div class="usage" id="usage" hidden>
     <div class="usage-head">
       <span id="usageLabel"></span><span class="percent" id="usagePercent"></span>
@@ -252,10 +308,33 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     </select>
   </div>
 
-  <button id="newSession" type="button">この設定で新しいセッションを開く</button>
+  <button id="newSession" type="button">この設定で新しい会話を開く</button>
 
   <p class="note">「既定」はCodex側の <code>config.toml</code> の値を使います。ここでの変更は次に開くセッションに適用されます。実行中のセッションはタブ内のCodexで変更してください。</p>
   <p class="note" id="profileNote"></p>
+  </div>
+
+  <div id="panelClaude" hidden>
+    <div class="row">
+      <label for="claudeModel">モデル</label>
+      <select id="claudeModel"></select>
+      <div class="hint">エイリアスを選びます。正式名を使う場合は <code>claude.model</code> を直接編集してください。</div>
+    </div>
+
+    <div class="row">
+      <label for="claudeEffort">Effort</label>
+      <select id="claudeEffort"></select>
+    </div>
+
+    <div class="row">
+      <label for="claudePermissionMode">承認方法</label>
+      <select id="claudePermissionMode"></select>
+    </div>
+
+    <button id="newClaudeSession" type="button">この設定で新しい会話を開く</button>
+
+    <p class="note">「既定」はClaude Code側の <code>settings.json</code> の値を使います。使用量はチャット画面に表示されます（ステータスバーはCodex専用）。</p>
+  </div>
 
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
@@ -263,7 +342,7 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
   let models = [];
 
   function defaultLabel(value) {
-    return value ? '既定: ' + value : '既定 (config.toml に指定なし)';
+    return value ? '既定: ' + value : '既定 (CLI側に指定なし)';
   }
 
   function setDefaultLabel(select, value) {
@@ -315,6 +394,7 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
 
   function apply(state) {
     applyUsage(state.usage);
+    applyClaude(state.claude);
     models = state.models;
     const nameOf = (slug) => {
       const m = models.find((x) => x.slug === slug);
@@ -349,15 +429,52 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     el('effortHint').textContent = effort && effort.description ? effort.description : '';
   }
 
+  function applyClaude(c) {
+    if (!c) return;
+    const d = c.defaults || {};
+    fill(el('claudeModel'), c.models, c.model, defaultLabel(d.model));
+    fill(el('claudeEffort'), c.efforts, c.effort, defaultLabel(d.effort));
+    fill(el('claudePermissionMode'), c.permissionModes, c.permissionMode, defaultLabel(d.permissionMode));
+  }
+
+  // タブは1クリックで切り替える。選んだ側はリロードしても残す。
+  function selectProvider(provider) {
+    const claude = provider === 'claude';
+    el('panelCodex').hidden = claude;
+    el('panelClaude').hidden = !claude;
+    el('tabCodex').setAttribute('aria-selected', String(!claude));
+    el('tabClaude').setAttribute('aria-selected', String(claude));
+    vscode.setState({ provider });
+  }
+
+  el('tabCodex').addEventListener('click', () => selectProvider('codex'));
+  el('tabClaude').addEventListener('click', () => selectProvider('claude'));
+
   for (const key of ['model', 'reasoningEffort', 'approvalMode', 'sandbox']) {
     el(key).addEventListener('change', (e) => {
       vscode.postMessage({ type: 'update', key, value: e.target.value });
     });
   }
 
+  for (const [id, key] of [
+    ['claudeModel', 'model'],
+    ['claudeEffort', 'effort'],
+    ['claudePermissionMode', 'permissionMode'],
+  ]) {
+    el(id).addEventListener('change', (e) => {
+      vscode.postMessage({ type: 'updateClaude', key, value: e.target.value });
+    });
+  }
+
   el('newSession').addEventListener('click', () => {
-    vscode.postMessage({ type: 'newSession' });
+    vscode.postMessage({ type: 'newSession', provider: 'codex' });
   });
+
+  el('newClaudeSession').addEventListener('click', () => {
+    vscode.postMessage({ type: 'newSession', provider: 'claude' });
+  });
+
+  selectProvider((vscode.getState() || {}).provider === 'claude' ? 'claude' : 'codex');
 
   window.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'state') {
