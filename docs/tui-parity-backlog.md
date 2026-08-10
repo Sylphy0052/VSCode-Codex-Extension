@@ -15,7 +15,7 @@ TUI側の機能一覧は、実機のCLIバイナリから抽出した実測値�
 - Codex CLI 0.147.0: `strings` でTUIのスラッシュコマンド定義（48件）とその説明文を抽出
 - Claude Code 2.1.226: `strings` でコマンド定義（`name:"..."` / `description:"..."` 形式、80件超）を抽出
 
-CLI版が上がるとこの一覧は増減する。Phase 0の完了時に再抽出して差分を確認する。
+CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0の調査Issue（[#1](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1) / [#2](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/2)）にある。Codexについては `codex app-server generate-json-schema` が正となる。
 
 ## 優先度の定義
 
@@ -29,25 +29,46 @@ CLI版が上がるとこの一覧は増減する。Phase 0の完了時に再抽�
 
 「拡張UIで全部やる」方針を取るため、まずapp-server / control protocolに**何ができるか**を確定させる。ここの結果で後続タスクの実現可否と実装方針が決まるので、実装タスクの着手前に必ず通す。
 
-調査は実CLIプロセスへ直接JSON-RPC / NDJSONを流して確かめる。ドキュメントに書かれていない領域なので、実測以外の根拠は採らない。結果は本文書の各タスクへ追記する。
+調査は実CLIプロセスへ直接JSON-RPC / NDJSONを流して確かめた。ドキュメントに書かれていない領域なので、実測以外の根拠は採っていない。
 
 調査Issue: Z-01〜Z-08 は [#1 Codex app-server の能力を実測で確定する](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1)、Z-09〜Z-13 は [#2 Claude Code の control protocol / stream-json の能力を実測で確定する](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/2)。
 
-| ID   | 調査内容                                                                                                                           | 依存先タスク      | Issue |
-| ---- | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------- | ----- |
-| Z-01 | Codex app-server は TUI組込スラッシュコマンド（`/status` `/diff` 等）を解釈するか。しないなら代替経路は何か                        | TP-10 TP-11       | #1 |
-| Z-02 | app-server にターン内で model / effort / approvalPolicy / sandbox を変える手段はあるか                                             | TP-20             | #1 |
-| Z-03 | app-server の `turn/start` の input は画像を受けるか（type: image / localImage 等）                                                | TP-01             | #1 |
-| Z-04 | `item/fileChange` 系の通知に差分本文（unified diff）が含まれるか。無ければどこから取るか                                           | TP-30             | #1 |
-| Z-05 | トークン使用量・コンテキスト残量を返す通知またはメソッドはあるか                                                                   | TP-31             | #1 |
-| Z-06 | app-server に compact / review / plan mode に相当するメソッドはあるか                                                              | TP-22 TP-40 TP-45 | #1 |
-| Z-07 | app-server から MCP / hooks / plugins / apps / skills の一覧と操作は取れるか（`hooks/list` の存在は確認済）                        | TP-50 TP-51 TP-52 | #1 |
-| Z-08 | app-server に background terminal（`/ps`）と agent thread 切替のAPIはあるか                                                        | TP-54 TP-55       | #1 |
-| Z-09 | Claude の `--print` + stream-json でスラッシュコマンドは解釈されるか（組込・カスタムそれぞれ）                                     | TP-10 TP-11       | #2 |
-| Z-10 | Claude control protocol の要求種別を網羅する（set_model / set_permission_mode / interrupt / can_use_tool / hook / mcp_message 等） | TP-21 TP-22 TP-50 | #2 |
-| Z-11 | Claude に compact / rewind（チェックポイント巻き戻し）を外から起こす手段はあるか                                                   | TP-40 TP-41       | #2 |
-| Z-12 | Claude に会話の途中ターンから分岐する手段はあるか（現状「CLIに手段が無い」としている前提の再確認）                                 | TP-44             | #2 |
-| Z-13 | Claude の todos / cost / context を stream-json 経由で取れるか                                                                     | TP-31 TP-59 TP-60 | #2 |
+| ID   | 調査内容                                                | 結果                                                                                       |
+| ---- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Z-01 | Codex: 組込スラッシュコマンドは解釈されるか             | **されない**。`/status` がテキストとしてモデルへ渡り、モデルが答えた。専用メソッドへ振り替える |
+| Z-02 | Codex: ターン内で model/effort/approval/sandbox を変える | **できる**。`TurnStartParams` の各フィールドが「このターン以降」に効く。`sandboxPolicy` も含む |
+| Z-03 | Codex: 画像入力                                          | **できる**。`UserInput` は text / image(url) / localImage(path) / audio                     |
+| Z-04 | Codex: 差分本文                                          | **取れる**。`turn/diff/updated` が unified diff 文字列を送ってくる                          |
+| Z-05 | Codex: トークン使用量                                    | **取れる**。`thread/tokenUsage/updated`（`modelContextWindow` 込み）                        |
+| Z-06 | Codex: compact / review / plan                           | **ある**。`thread/compact/start` `review/start` `turn/plan/updated`。`thread/rollback` は deprecated |
+| Z-07 | Codex: MCP / hooks / plugins / apps / skills             | **全てAPIあり**。実測で応答を確認                                                           |
+| Z-08 | Codex: background terminal / agent thread                | terminal は `command/exec` 系で**できる**。agent thread 切替は未確定                        |
+| Z-09 | Claude: スラッシュコマンドは解釈されるか                 | **される**。`/context` で `model: "<synthetic>"` の応答。APIコールもコストもゼロ            |
+| Z-10 | Claude: control protocol の能力                          | `set_model` `set_permission_mode` ほか多数を実測で確認                                      |
+| Z-11 | Claude: compact / rewind                                 | `rewind_files` 実在（要チェックポイント）。compact はコマンド送信で可                       |
+| Z-12 | Claude: 途中ターンからの分岐                             | control には無い。`/branch` コマンド経由の可能性あり（[#22](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/22) で追試） |
+| Z-13 | Claude: todos / cost / context                           | **取れる**。`get_context_usage` `get_session_cost` `get_usage`                              |
+
+**Phase 0 は完了**（2026-08-10、Codex CLI 0.147.0 / Claude Code 2.1.226）。詳細な根拠は [#1](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1) と [#2](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/2) のコメントにある。各実装Issueにも結論を反映済み。
+
+### Phase 0 で分かった最重要の3点
+
+1. **`codex app-server generate-json-schema --out <DIR>` でプロトコル定義が全量取れる**（ClientRequest 95メソッド / ServerNotification 70 / ServerRequest 10）。`generate-ts` でTypeScriptバインディングも出る。憶測でプロトコルを探る必要はもう無い
+2. **CodexとClaudeでスラッシュコマンドの扱いが正反対**。Codexは解釈せず専用メソッドへの振り替えが要る。Claudeはそのまま送れば効く。CLIごとに別の作りにする
+3. **Claudeは `initialize` が使えるコマンド90件を返す**。一覧のハードコードは不要
+
+## Phase 0.5: 調査中に見つかった、当初のバックログに無かった項目
+
+いずれもPhase 0の副産物。既存の不具合を含む。
+
+| ID    | 内容                                                                     | 対象  | 優先度 | Issue |
+| ----- | -------------------------------------------------------------------------- | ----- | ------ | ----- |
+| TP-80 | app-serverからの要求10種のうち7種を処理していない（MCPツールが黙って失敗しうる） | Codex | P1     | [#41](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/41) |
+| TP-81 | `serverRequest/resolved` を処理しておらず、解決済みの承認カードが残る    | Codex | P2     | [#42](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/42) |
+| TP-82 | `turn/steer` で応答を中断せずに指示を割り込ませる                        | Codex | P1     | [#43](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/43) |
+| TP-83 | モデルとeffortの選択肢をCLIから取得する                                  | 両方  | P2     | [#44](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/44) |
+| TP-84 | app-serverの生成済み型定義を取り込むか判断する                           | Codex | P2     | [#46](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/46) |
+| TP-85 | 履歴の取得を `thread/list` へ移すか判断する                              | Codex | P3     | [#45](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/45) |
 
 ## Phase 1: 入力欄
 
@@ -143,7 +164,8 @@ TUIタブへ逃がさず拡張UIで実装する方針。ただしCLI側にAPIが
 
 ## 進め方の原則
 
-- Phase 0を通してから実装に入る。CLIに手段が無いものへ工数を使わない
+- Phase 0は完了済み。各Issueのコメントに結論があるので、着手前にそれを読む
+- Phase 0.5の不具合（[#41](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/41) / [#42](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/42)）は機能追加より先に片付ける。既に壊れているものを抱えたまま積み上げない
 - 1 Issue 1 ブランチ。実装はworktree隔離
 - プロトコルに触るタスクは、未知のイベント・応答が来ても壊れないこと（現状の「未知は素通し」の方針）を維持する
 - 承認・権限に関わるタスクは、既定を安全側（拒否・確認あり）に倒す
