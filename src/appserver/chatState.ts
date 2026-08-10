@@ -36,6 +36,8 @@ export interface ChatState {
   name: string | undefined;
   /** Codexが応答中かどうか。入力欄の活性制御に使う。 */
   busy: boolean;
+  /** 進行中のターン。`turn/interrupt` が要求するため保持する。 */
+  turnId: string | undefined;
   items: ChatItem[];
   approvals: PendingApproval[];
   usage: ChatUsage | undefined;
@@ -45,6 +47,7 @@ export const initialChatState: ChatState = {
   threadId: undefined,
   name: undefined,
   busy: false,
+  turnId: undefined,
   items: [],
   approvals: [],
   usage: undefined,
@@ -176,12 +179,18 @@ export function applyEvent(
   params: Record<string, unknown>,
 ): ChatState {
   switch (method) {
-    case 'turn/started':
-      return { ...state, busy: true };
+    case 'turn/started': {
+      const turnId = params['turnId'];
+      return {
+        ...state,
+        busy: true,
+        turnId: typeof turnId === 'string' && turnId !== '' ? turnId : undefined,
+      };
+    }
 
     case 'turn/completed':
     case 'turn/failed':
-      return { ...state, busy: false };
+      return { ...state, busy: false, turnId: undefined };
 
     case 'thread/name/updated': {
       const name = params['threadName'];

@@ -67,6 +67,17 @@ describe('applyEvent', () => {
     expect(applyEvent(busy, 'turn/completed', {}).busy).toBe(false);
   });
 
+  it('turn/started の turnId を保持し、終了で手放す', () => {
+    const started = applyEvent(initialChatState, 'turn/started', { turnId: 't-1' });
+    expect(started.turnId).toBe('t-1');
+    expect(applyEvent(started, 'turn/completed', {}).turnId).toBeUndefined();
+    expect(applyEvent(started, 'turn/failed', {}).turnId).toBeUndefined();
+  });
+
+  it('turnId の無い turn/started でも落ちない', () => {
+    expect(applyEvent(initialChatState, 'turn/started', {}).turnId).toBeUndefined();
+  });
+
   it('thread/status/changed の active を反映する', () => {
     const state = applyEvent(initialChatState, 'thread/status/changed', {
       status: { type: 'active' },

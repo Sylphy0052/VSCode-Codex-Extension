@@ -128,11 +128,13 @@ export class ChatSession {
 
   async interrupt(): Promise<void> {
     const threadId = this.state.threadId;
-    if (threadId === undefined) {
+    const turnId = this.state.turnId;
+    // app-serverは中断するターンの指定を要求する。進行中のターンが無ければ何もしない
+    if (threadId === undefined || turnId === undefined) {
       return;
     }
-    await this.connection.request('turn/interrupt', { threadId });
-    this.update({ ...this.state, busy: false });
+    await this.connection.request('turn/interrupt', { threadId, turnId });
+    this.update({ ...this.state, busy: false, turnId: undefined });
   }
 
   applyNotification(method: string, params: Record<string, unknown>): void {
