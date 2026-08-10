@@ -46,7 +46,7 @@ src/
   appserver/  app-serverとの接続・会話状態・承認（ChatStateは両CLI共通）
   session/    セッション一覧・監視・破壊操作
   activity/   日報バッファへの作業記録
-  state/      タブ構成の永続化
+  loop/       同じ指示を繰り返すループの制御
   view/       TreeView・設定パネル・チャット画面・会話ビューア
               （Webviewのスクリプトとスタイルは *Script.ts / *Styles.ts に分け、
                構文と hidden の打ち消しをテストで確かめる）
@@ -57,7 +57,9 @@ docs/design.md  設計書
 
 ### レイヤの制約（重要）
 
-`src/codex` `src/claude`（どちらも `provider.ts` を除く）・`src/session` `src/state` `src/activity` `src/util` `src/appserver/chatState` などのロジック層は **`vscode` モジュールをimportしない**。実VSCodeを起動せずにテストできる状態を保つための制約で、ここを崩すとテストが書けなくなる。
+`src/codex` `src/claude` `src/session` `src/loop` `src/activity` `src/util` `src/provider` `src/appserver/chatState` などのロジック層は **`vscode` モジュールをimportしない**。実VSCodeを起動せずにテストできる状態を保つための制約で、ここを崩すとテストが書けなくなる。
+
+例外は `provider.ts`（VSCodeの型を返す境界）と、ファイル監視の `sessionWatcher.ts` / `transcriptWatcher.ts`（`FileSystemWatcher` が要る）。新しくvscodeをimportしたくなったら、その処理がロジックなのか境界なのかを疑う。
 
 ファイルシステムやプロセスなどの副作用は `src/session/ports.ts` のようなポート経由で受け取り、テストではフェイクを差す。
 
