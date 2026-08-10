@@ -11,6 +11,7 @@ import {
   readCommandList,
   readCommandsChanged,
   readContextUsage,
+  readCurrentPermissionMode,
   readControlRequest,
   readControlResponse,
 } from '../../src/claude/control';
@@ -290,5 +291,18 @@ describe('セッション中の設定変更', () => {
       expect(line.endsWith('\n')).toBe(true);
       expect(line.trimEnd().includes('\n')).toBe(false);
     }
+  });
+});
+
+describe('readCurrentPermissionMode', () => {
+  it('initialize の応答から今の承認方法を読む', () => {
+    // 起動引数で plan にした場合、status通知は何かが変わるまで来ない
+    expect(readCurrentPermissionMode({ current_permission_mode: 'plan' })).toBe('plan');
+  });
+
+  it('入っていなければ何も返さない', () => {
+    expect(readCurrentPermissionMode({})).toBeUndefined();
+    expect(readCurrentPermissionMode({ current_permission_mode: '' })).toBeUndefined();
+    expect(readCurrentPermissionMode(undefined)).toBeUndefined();
   });
 });

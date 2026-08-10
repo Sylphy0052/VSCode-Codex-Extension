@@ -20,6 +20,7 @@ export const initialClaudeState: ChatState = {
   approvals: [],
   usage: undefined,
   context: undefined,
+  planMode: false,
   turnResultText: '',
   turnEditedFiles: [],
 };
@@ -304,8 +305,9 @@ function applyStatus(state: ChatState, event: Record<string, unknown>): ChatStat
   // 承認方法の変更。こちらから変えた場合も、TUIなど他の経路で変わった場合も届く
   const permissionMode = str(event['permissionMode']);
   if (permissionMode !== '') {
+    // Plan modeの状態はこの通知を正とする。要求の成功だけを信じない
     return appendNotice(
-      state,
+      { ...state, planMode: permissionMode === 'plan' },
       'settings:' + (str(event['uuid']) || permissionMode),
       '承認方法を ' + permissionMode + ' に変えました',
     );

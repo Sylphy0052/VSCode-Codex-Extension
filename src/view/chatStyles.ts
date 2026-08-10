@@ -80,6 +80,13 @@ export function chatStyles(): string {
     color: var(--vscode-button-secondaryForeground);
     background-color: var(--vscode-button-secondaryBackground);
   }
+  /* 押しっぱなしのトグル。入っているかどうかが一目で分かるようにする */
+  button.toggled {
+    color: var(--vscode-button-foreground);
+    background-color: var(--vscode-button-background);
+    border-color: var(--vscode-focusBorder);
+    font-weight: 600;
+  }
   button:hover { background-color: var(--vscode-button-hoverBackground); }
   button:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
   #composer {

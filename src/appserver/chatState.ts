@@ -131,6 +131,13 @@ export interface ChatState {
   /** コンテキストの使用量。まだ判らない間は undefined（数字を出さない）。 */
   context: ContextUsage | undefined;
   /**
+   * Plan mode（読み取りだけに絞って計画を立てる状態）か。
+   *
+   * Codexはこちらで持つ（app-serverに状態を返す口が無いため）。Claude Codeは
+   * `permissionMode` が `plan` かどうかで、CLIからの通知を正として決める。
+   */
+  planMode: boolean;
+  /**
    * 直前に完了/失敗したターンの応答テキスト。作業記録の成果行（`kind: 'result'`）に使う。
    * ターンが終わるたびに上書きする。
    */
@@ -155,6 +162,7 @@ export const initialChatState: ChatState = {
   approvals: [],
   usage: undefined,
   context: undefined,
+  planMode: false,
   turnResultText: '',
   turnEditedFiles: [],
 };
@@ -262,6 +270,37 @@ export function readFileDiffs(changes: unknown): FileDiff[] {
     });
   }
   return diffs.length === 0 ? NO_DIFFS : diffs;
+}
+
+/** 計画の進捗記号。絵文字は使わない（環境で欠けるため）。 */
+const PLAN_MARK: Record<string, string> = {
+  pending: '[ ]',
+  inProgress: '[~]',
+  completed: '[x]',
+};
+
+/**
+ * 計画のステップを1つのテキストにする。
+ *
+ * `turn/plan/updated` は進むたびに計画の全体を送ってくるので、そのまま置き換える。
+ * 未知の状態はCLIの表記のまま出す（種類が増えても行が消えないように）。
+ */
+export function describePlan(plan: unknown): string {
+  if (!Array.isArray(plan)) {
+    return '';
+  }
+  return plan
+    .map((raw) => {
+      const entry = rec(raw);
+      const step = str(entry?.['step']);
+      if (step === '') {
+        return '';
+      }
+      const status = str(entry?.['status']);
+      return `${PLAN_MARK[status] ?? `[${status}]`} ${step}`;
+    })
+    .filter((line) => line !== '')
+    .join('\n');
 }
 
 function describeFileChanges(changes: unknown): string {
@@ -462,6 +501,27 @@ export function applyEvent(
       }
       const context = buildContextUsage(usedTokens, numberOf(tokenUsage['modelContextWindow']));
       return context === undefined ? state : { ...state, context };
+    }
+
+    case 'turn/plan/updated': {
+      // 計画は進むたびに全体が届く。1件の項目を書き換えて、増やさない
+      const text = describePlan(params['plan']);
+      if (text === '') {
+        return state;
+      }
+      const turnId = str(params['turnId']);
+      return {
+        ...state,
+        items: upsertItem(state.items, {
+          id: `plan:${turnId}`,
+          kind: 'plan',
+          text,
+          detail: str(params['explanation']),
+          status: undefined,
+          turnId: turnId === '' ? undefined : turnId,
+          diffs: NO_DIFFS,
+        }),
+      };
     }
 
     case 'item/fileChange/patchUpdated': {
