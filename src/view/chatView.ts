@@ -17,6 +17,13 @@ interface ChatPanel {
   session: ChatSession;
   /** 作業記録に載せるディレクトリ。resume時はセッション自身のcwd。 */
   cwd: string | undefined;
+  /**
+   * タブを閉じた後か。
+   *
+   * 保留中の承認を解放すると、その結果の通知が閉じたあとに届く。破棄済みのWebviewへ
+   * 送るとVSCodeが例外を投げるため、ここで止める。
+   */
+  disposed: boolean;
 }
 
 /** 拡張機能から実行したセッションを日報バッファへ記録するための通知。 */
@@ -141,6 +148,9 @@ export class ChatViewManager implements vscode.Disposable {
     });
 
     const session = new ChatSession(this.connection, this.log, (state) => {
+      if (entry.disposed) {
+        return;
+      }
       const title = deriveTitle(state);
       if (title !== undefined && panel.title !== title) {
         panel.title = title;
@@ -151,7 +161,7 @@ export class ChatViewManager implements vscode.Disposable {
       });
     });
 
-    const entry: ChatPanel = { panel, session, cwd };
+    const entry: ChatPanel = { panel, session, cwd, disposed: false };
     this.active = entry;
     panel.webview.onDidReceiveMessage(
       (message: unknown) => void this.handleMessage(entry, message),
@@ -162,6 +172,7 @@ export class ChatViewManager implements vscode.Disposable {
       }
     });
     panel.onDidDispose(() => {
+      entry.disposed = true;
       session.dispose();
       if (this.pending === entry) {
         this.pending = undefined;
@@ -287,6 +298,9 @@ export class ChatViewManager implements vscode.Disposable {
   refreshSettings(): void {
     const snapshot = this.settings.snapshot();
     for (const entry of this.allPanels()) {
+      if (entry.disposed) {
+        continue;
+      }
       void entry.panel.webview.postMessage({
         type: 'state',
         state: { ...entry.session.getState(), settings: snapshot },

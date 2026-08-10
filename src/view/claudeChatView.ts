@@ -18,6 +18,8 @@ interface ClaudePanel {
   panel: vscode.WebviewPanel;
   session: ClaudeStreamSession;
   cwd: string;
+  /** タブを閉じた後か。破棄済みのWebviewへ送るとVSCodeが例外を投げるため見張る。 */
+  disposed: boolean;
 }
 
 const VIEW_TYPE = 'claude.chat';
@@ -51,6 +53,9 @@ export class ClaudeChatViewManager implements vscode.Disposable {
    * Claude Codeにはモデルカタログが無いため、エイリアスを `ModelInfo` 相当に見せる。
    */
   private refreshSettings(entry: ClaudePanel): void {
+    if (entry.disposed) {
+      return;
+    }
     const snapshot = this.settings.claudeSnapshot();
     void entry.panel.webview.postMessage({
       type: 'state',
@@ -154,6 +159,9 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       this.claudePath,
       this.log,
       (state) => {
+        if (entry.disposed) {
+          return;
+        }
         const next = deriveTitle(state);
         if (next !== undefined && panel.title !== next) {
           panel.title = next;
@@ -166,9 +174,10 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       () => this.warnApprovalsUnavailable(),
     );
 
-    const entry: ClaudePanel = { panel, session, cwd };
+    const entry: ClaudePanel = { panel, session, cwd, disposed: false };
     panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(entry, message));
     panel.onDidDispose(() => {
+      entry.disposed = true;
       session.dispose();
       for (const [id, value] of this.panels) {
         if (value === entry) {
