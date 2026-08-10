@@ -306,3 +306,69 @@ describe('applyStreamEvent', () => {
     expect(state).toEqual(initialClaudeState);
   });
 });
+
+describe('作業記録用の成果（turnResultText / turnEditedFiles）', () => {
+  it('resultイベントのresultフィールドを応答テキストとして取り込む', () => {
+    const state = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      { type: 'result', subtype: 'success', result: '直しました' },
+    ]);
+    expect(state.turnResultText).toBe('直しました');
+  });
+
+  it('Edit/Write/NotebookEditのtool_useを編集ファイルとして集める', () => {
+    const state = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'tool_use', id: 't1', name: 'Edit', input: { file_path: '/w/a.ts' } },
+            { type: 'tool_use', id: 't2', name: 'Write', input: { file_path: '/w/b.ts' } },
+            { type: 'tool_use', id: 't3', name: 'Read', input: { file_path: '/w/c.ts' } },
+          ],
+        },
+      },
+      { type: 'result', subtype: 'success', result: '完了' },
+    ]);
+    expect(state.turnEditedFiles).toEqual(['/w/a.ts', '/w/b.ts']);
+  });
+
+  it('同じファイルへの複数回の編集は1件にまとめる', () => {
+    const state = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'tool_use', id: 't1', name: 'Edit', input: { file_path: '/w/a.ts' } },
+            { type: 'tool_use', id: 't2', name: 'Edit', input: { file_path: '/w/a.ts' } },
+          ],
+        },
+      },
+    ]);
+    expect(state.turnEditedFiles).toEqual(['/w/a.ts']);
+  });
+
+  it('次のターンが始まると前のターンの成果と編集ファイルをリセットする', () => {
+    const first = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [{ type: 'tool_use', id: 't1', name: 'Edit', input: { file_path: '/w/a.ts' } }],
+        },
+      },
+      { type: 'result', subtype: 'success', result: '完了' },
+    ]);
+    expect(first.turnEditedFiles).toEqual(['/w/a.ts']);
+    expect(first.turnResultText).toBe('完了');
+
+    const next = applyStreamEvent(first, { type: 'system', subtype: 'init', session_id: ID });
+    expect(next.turnEditedFiles).toEqual([]);
+    expect(next.turnResultText).toBe('');
+  });
+});

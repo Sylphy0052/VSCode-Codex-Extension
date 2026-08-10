@@ -2,6 +2,7 @@ import {
   buildActivityRecord,
   bufferFileName,
   serializeActivityRecord,
+  type ActivityKind,
   type ActivitySource,
 } from './record';
 
@@ -10,11 +11,12 @@ export interface ActivityAppendPort {
   append(filePath: string, line: string): Promise<void>;
 }
 
-/** 記録済みセッションの記憶。実体は globalState。 */
+/** キーごとに直前記録した本文を1件だけ覚える。実体は globalState。 */
 export interface LoggedSessionsPort {
-  has(sessionId: string): boolean;
+  /** 直前にこのキーへ記録した本文（無ければ undefined）。同期経路の重複抑止に使う。 */
+  lastText(key: string): string | undefined;
   /** `day` は YYYY-MM-DD。掃除の基準に使う。 */
-  add(sessionId: string, day: string): void;
+  remember(key: string, text: string, day: string): void;
   /** `oldestKept` より前の日付のエントリを落とす。 */
   prune(oldestKept: string): void;
 }
@@ -31,12 +33,26 @@ export interface ClockPort {
 }
 
 export interface RecordRequest {
-  /** 重複抑止のキー。プロバイダを跨いで一意（UUID）。 */
+  /** セッションを一意に識別するid（Codex: thread id、Claude: session id）。 */
   sessionId: string;
   source: ActivitySource;
   cwd: string;
-  /** セッションの1行要約。空なら記録しない（後の契機で書き直せる）。 */
+  kind: ActivityKind;
+  /**
+   * `kind: 'prompt'` はユーザー発言そのもの。
+   * `kind: 'result'` はアシスタントの最終応答テキスト（1行化・切り詰めは呼び出し側で行わない）。
+   * 空なら記録しない（後の契機で書き直せる）。
+   */
   text: string;
+  /** `kind: 'result'` のときだけ使う。そのターンで編集したファイルパス。 */
+  editedFiles?: readonly string[];
+  /**
+   * 同じ内容の再記録を抑止するか。
+   *
+   * syncTabNames / syncClaudeActivity のように、同じセッションについて何度も同じ要約を
+   * 書きうる同期経路だけ true にする。ユーザーの実発言（送信のたび）は常に false（毎回記録する）。
+   */
+  suppressDuplicates?: boolean;
 }
 
 export const nodeClock: ClockPort = {
@@ -45,7 +61,10 @@ export const nodeClock: ClockPort = {
 };
 
 /**
- * 拡張機能から実行したセッションを日報バッファへ1行だけ記録する。
+ * 拡張機能から実行したセッションの発言・成果を日報バッファへ記録する。
+ *
+ * `kind: 'prompt'` は送信のたびに毎回記録する（セッション初回だけに絞る抑止は無い）。
+ * `suppressDuplicates: true` を渡した要求（同期経路）だけ、直前と同じ本文なら書かない。
  *
  * 記録は会話の成否に影響してはならないため、失敗しても例外を投げず、
  * 既記録にもしない（次の契機で書き直せるようにする）。
@@ -60,7 +79,7 @@ export class ActivityLogger {
 
   async record(request: RecordRequest): Promise<void> {
     const settings = this.settings();
-    if (!settings.enabled || this.logged.has(request.sessionId)) {
+    if (!settings.enabled) {
       return;
     }
 
@@ -71,9 +90,17 @@ export class ActivityLogger {
       timeZoneOffsetMinutes: offset,
       source: request.source,
       cwd: request.cwd,
+      sessionId: request.sessionId,
+      kind: request.kind,
       text: request.text,
+      ...(request.editedFiles === undefined ? {} : { editedFiles: request.editedFiles }),
     });
     if (record === undefined) {
+      return;
+    }
+
+    const dedupeKey = `${request.sessionId}:${request.kind}`;
+    if (request.suppressDuplicates === true && this.logged.lastText(dedupeKey) === record.text) {
       return;
     }
 
@@ -84,38 +111,46 @@ export class ActivityLogger {
       // 追記できないこと自体は会話の妨げにならない。次の契機に委ねる
       return;
     }
-    this.logged.add(request.sessionId, fileName.replace('.jsonl', ''));
+    if (request.suppressDuplicates === true) {
+      this.logged.remember(dedupeKey, record.text, fileName.replace('.jsonl', ''));
+    }
   }
 }
 
 const RETENTION_DAYS = 30;
 
-export class InMemoryLoggedSessions implements LoggedSessionsPort {
-  private readonly map = new Map<string, string>();
+/** キー1件分の記憶。`day` は掃除の基準、`text` は重複判定に使う。 */
+export interface LoggedEntry {
+  day: string;
+  text: string;
+}
 
-  constructor(initial: Record<string, string> = {}) {
+export class InMemoryLoggedSessions implements LoggedSessionsPort {
+  private readonly map = new Map<string, LoggedEntry>();
+
+  constructor(initial: Record<string, LoggedEntry> = {}) {
     for (const [k, v] of Object.entries(initial)) {
       this.map.set(k, v);
     }
   }
 
-  has(sessionId: string): boolean {
-    return this.map.has(sessionId);
+  lastText(key: string): string | undefined {
+    return this.map.get(key)?.text;
   }
 
-  add(sessionId: string, day: string): void {
-    this.map.set(sessionId, day);
+  remember(key: string, text: string, day: string): void {
+    this.map.set(key, { day, text });
   }
 
   prune(oldestKept: string): void {
-    for (const [id, day] of this.map) {
-      if (day < oldestKept) {
+    for (const [id, entry] of this.map) {
+      if (entry.day < oldestKept) {
         this.map.delete(id);
       }
     }
   }
 
-  toRecord(): Record<string, string> {
+  toRecord(): Record<string, LoggedEntry> {
     return Object.fromEntries(this.map);
   }
 }

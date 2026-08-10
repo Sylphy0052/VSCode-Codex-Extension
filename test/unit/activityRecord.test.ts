@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_EDITED_FILES,
   SUMMARY_MAX_LEN,
   bufferFileName,
   buildActivityRecord,
@@ -8,13 +9,15 @@ import {
 
 const at = (iso: string) => new Date(iso);
 
-describe('buildActivityRecord', () => {
+describe('buildActivityRecord (kind: prompt)', () => {
   it('日報バッファが読む形のレコードを作る', () => {
     const record = buildActivityRecord({
       now: at('2026-08-07T00:41:00Z'),
       timeZoneOffsetMinutes: -540, // JST
       source: 'codex',
       cwd: '/home/u/workspace/repo',
+      sessionId: 'sess-1',
+      kind: 'prompt',
       text: '承認フローの実装を依頼',
     });
 
@@ -24,6 +27,8 @@ describe('buildActivityRecord', () => {
       cwd: '/home/u/workspace/repo',
       text: '承認フローの実装を依頼',
       ref: 'vscode',
+      session_id: 'sess-1',
+      kind: 'prompt',
     });
   });
 
@@ -33,6 +38,8 @@ describe('buildActivityRecord', () => {
       timeZoneOffsetMinutes: 0,
       source: 'claude-code',
       cwd: '/w/r',
+      sessionId: 's',
+      kind: 'prompt',
       text: 'x',
     });
     expect(record?.ts).toBe('2026-08-07T00:41:00+00:00');
@@ -44,6 +51,8 @@ describe('buildActivityRecord', () => {
       timeZoneOffsetMinutes: 300, // UTC-5
       source: 'codex',
       cwd: '/w/r',
+      sessionId: 's',
+      kind: 'prompt',
       text: 'x',
     });
     expect(record?.ts).toBe('2026-08-06T19:41:00-05:00');
@@ -55,6 +64,8 @@ describe('buildActivityRecord', () => {
       timeZoneOffsetMinutes: -540,
       source: 'codex',
       cwd: '/w/r',
+      sessionId: 's',
+      kind: 'prompt',
       text: '  一行目\n\n二行目\t三行目  ',
     });
     expect(record?.text).toBe('一行目 二行目 三行目');
@@ -66,6 +77,8 @@ describe('buildActivityRecord', () => {
       timeZoneOffsetMinutes: -540,
       source: 'codex',
       cwd: '/w/r',
+      sessionId: 's',
+      kind: 'prompt',
       text: 'あ'.repeat(SUMMARY_MAX_LEN + 50),
     });
     expect(record?.text).toBe(`${'あ'.repeat(SUMMARY_MAX_LEN)}…`);
@@ -77,6 +90,8 @@ describe('buildActivityRecord', () => {
       timeZoneOffsetMinutes: -540,
       source: 'codex' as const,
       cwd: '/w/r',
+      sessionId: 's',
+      kind: 'prompt' as const,
     };
     expect(buildActivityRecord({ ...base, text: '' })).toBeUndefined();
     expect(buildActivityRecord({ ...base, text: '   \n ' })).toBeUndefined();
@@ -89,9 +104,91 @@ describe('buildActivityRecord', () => {
         timeZoneOffsetMinutes: -540,
         source: 'codex',
         cwd: '',
+        sessionId: 's',
+        kind: 'prompt',
         text: 'x',
       }),
     ).toBeUndefined();
+  });
+
+  it('sessionIdが空なら記録しない（collect.py側の重複排除が成立しない）', () => {
+    expect(
+      buildActivityRecord({
+        now: at('2026-08-07T00:00:00Z'),
+        timeZoneOffsetMinutes: -540,
+        source: 'codex',
+        cwd: '/w/r',
+        sessionId: '  ',
+        kind: 'prompt',
+        text: 'x',
+      }),
+    ).toBeUndefined();
+  });
+});
+
+describe('buildActivityRecord (kind: result)', () => {
+  const base = {
+    now: at('2026-08-07T00:00:00Z'),
+    timeZoneOffsetMinutes: -540,
+    source: 'codex' as const,
+    cwd: '/w/repo',
+    sessionId: 's',
+    kind: 'result' as const,
+  };
+
+  it('応答テキストだけを1行要約にする', () => {
+    const record = buildActivityRecord({ ...base, text: '直しました' });
+    expect(record?.text).toBe('直しました');
+    expect(record?.kind).toBe('result');
+  });
+
+  it('編集ファイルがあれば末尾に付記する', () => {
+    const record = buildActivityRecord({
+      ...base,
+      text: '直しました',
+      editedFiles: ['/w/repo/src/a.ts', '/w/repo/src/b.ts'],
+    });
+    expect(record?.text).toBe('直しました [edit: src/a.ts, src/b.ts]');
+  });
+
+  it('cwd配下でなければbasenameにする', () => {
+    const record = buildActivityRecord({
+      ...base,
+      text: '直しました',
+      editedFiles: ['/other/place/c.ts'],
+    });
+    expect(record?.text).toBe('直しました [edit: c.ts]');
+  });
+
+  it(`編集ファイルが${MAX_EDITED_FILES}件を超えたら残りを+Nで示す`, () => {
+    const editedFiles = Array.from({ length: 8 }, (_, i) => `/w/repo/f${i}.ts`);
+    const record = buildActivityRecord({ ...base, text: '一括修正', editedFiles });
+    expect(record?.text).toBe('一括修正 [edit: f0.ts, f1.ts, f2.ts, f3.ts, f4.ts +3]');
+  });
+
+  it('応答テキストが空でも編集ファイルがあれば記録する', () => {
+    const record = buildActivityRecord({
+      ...base,
+      text: '',
+      editedFiles: ['/w/repo/a.ts'],
+    });
+    expect(record?.text).toBe(' [edit: a.ts]');
+  });
+
+  it('応答テキストと編集ファイルの両方が空なら記録しない', () => {
+    expect(buildActivityRecord({ ...base, text: '', editedFiles: [] })).toBeUndefined();
+    expect(buildActivityRecord({ ...base, text: '   ' })).toBeUndefined();
+  });
+
+  it('全体で200字を超える場合、編集ファイル一覧を残して応答要約側を削る', () => {
+    const record = buildActivityRecord({
+      ...base,
+      text: 'あ'.repeat(300),
+      editedFiles: ['/w/repo/a.ts', '/w/repo/b.ts'],
+    });
+    const suffix = ' [edit: a.ts, b.ts]';
+    expect(record?.text.length).toBeLessThanOrEqual(SUMMARY_MAX_LEN);
+    expect(record?.text.endsWith(suffix)).toBe(true);
   });
 });
 
@@ -102,6 +199,8 @@ describe('serializeActivityRecord', () => {
       timeZoneOffsetMinutes: -540,
       source: 'codex',
       cwd: '/w/r',
+      sessionId: 's',
+      kind: 'prompt',
       text: 'テスト',
     });
     const line = serializeActivityRecord(record!);

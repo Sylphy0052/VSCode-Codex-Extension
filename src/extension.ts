@@ -6,7 +6,7 @@ import {
   resolveBufferDir,
   retentionCutoff,
 } from './activity/activityLogger';
-import type { RecordRequest as ActivityRequest } from './activity/activityLogger';
+import type { LoggedEntry, RecordRequest as ActivityRequest } from './activity/activityLogger';
 import { nodeActivityAppender } from './activity/nodeAppender';
 import { claudePaths, resolveClaudeHome } from './claude/cliLocator';
 import { ClaudeProvider } from './claude/provider';
@@ -69,7 +69,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const codexPath = (): string => resolveExecutable(codex, log) ?? 'codex';
 
   const loggedSessions = new InMemoryLoggedSessions(
-    context.globalState.get<Record<string, string>>(ACTIVITY_LOGGED_KEY) ?? {},
+    context.globalState.get<Record<string, LoggedEntry>>(ACTIVITY_LOGGED_KEY) ?? {},
   );
   loggedSessions.prune(retentionCutoff(new Date()));
   const activity = new ActivityLogger(
@@ -105,7 +105,7 @@ export function activate(context: vscode.ExtensionContext): void {
     home,
     nodeFileSystem,
     log,
-    ({ sessionId, cwd, text }) => recordActivity({ sessionId, source: 'codex', cwd, text }),
+    (activity) => recordActivity({ ...activity, source: 'codex' }),
   );
   context.subscriptions.push(chat);
 
@@ -116,7 +116,7 @@ export function activate(context: vscode.ExtensionContext): void {
     claudeStore,
     settings,
     log,
-    ({ sessionId, cwd, text }) => recordActivity({ sessionId, source: 'claude-code', cwd, text }),
+    (activity) => recordActivity({ ...activity, source: 'claude-code' }),
     (usage) => usageBar.updateClaude(usage),
   );
   context.subscriptions.push(claudeChat);
@@ -246,6 +246,12 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 }
 
+/**
+ * 指定した指示までを引き継いだ新しいセッションを作って開く。
+ *
+ * CLIの `codex fork` はターンを指定できないため、この操作だけ app-server の
+ * `thread/fork` を使う。元のセッションは変更されない。
+ */
 async function forkFromTurn(
   codex: AgentProvider,
   appServer: AppServerClient,

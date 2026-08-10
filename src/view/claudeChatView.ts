@@ -13,7 +13,7 @@ import type { FileSystemPort } from '../session/ports';
 import { ClaudeUsageProbe } from '../claude/usageProbe';
 import { CommandCatalog } from '../provider/commandCatalog';
 import type { SlashCommand } from '../provider/slashCommands';
-import { renderShell } from './chatView';
+import { renderShell, reportTurnResult } from './chatView';
 import { CLAUDE_EFFORTS, CLAUDE_PERMISSION_MODES } from '../claude/types';
 import type { SettingsProvider } from './settingsProvider';
 import type { ChatActivity } from './chatView';
@@ -206,6 +206,9 @@ export class ClaudeChatViewManager implements vscode.Disposable {
         if (finished && state.queued.length > 0) {
           entry.session.sendNextQueued();
         }
+        if (finished) {
+          reportTurnResult(this.onActivity, entry.session.threadId, entry.cwd, state);
+        }
         const next = deriveTitle(state);
         if (next !== undefined && panel.title !== next) {
           panel.title = next;
@@ -268,12 +271,15 @@ export class ClaudeChatViewManager implements vscode.Disposable {
     this.refreshSettings(entry);
   }
 
-  /** 発言を送り、作業記録へ流す。手動でもループからでも通り道は同じにする。 */
+  /**
+   * 発言を送り、作業記録へ流す。手動でもループからでも通り道は同じにする。
+   * 送信のたび毎回記録する。
+   */
   private dispatch(entry: ClaudePanel, text: string): void {
     entry.session.sendOrQueue(text);
     const sessionId = entry.session.threadId;
     if (sessionId !== undefined) {
-      this.onActivity({ sessionId, cwd: entry.cwd, text });
+      this.onActivity({ sessionId, cwd: entry.cwd, kind: 'prompt', text });
     }
   }
 

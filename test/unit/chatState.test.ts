@@ -5,6 +5,7 @@ import {
   initialChatState,
   normalizeItem,
   removeApproval,
+  summarizeTurn,
   type ChatState,
 } from '../../src/appserver/chatState';
 
@@ -174,6 +175,95 @@ describe('applyEvent', () => {
     const next = applyEvent(initialChatState, 'turn/started', {});
     expect(initialChatState.busy).toBe(false);
     expect(next).not.toBe(initialChatState);
+  });
+
+  it('turn/completedで作業記録用の成果（応答テキスト・編集ファイル）を作る', () => {
+    const state = feed(initialChatState, [
+      ['turn/started', { turn: { id: TURN } }],
+      [
+        'item/completed',
+        { item: { type: 'agentMessage', id: 'a1', text: '直しました' }, turnId: TURN },
+      ],
+      [
+        'item/completed',
+        { item: { type: 'fileChange', id: 'f1', changes: [{ path: '/a.ts' }] }, turnId: TURN },
+      ],
+      ['turn/completed', {}],
+    ]);
+    expect(state.turnResultText).toBe('直しました');
+    expect(state.turnEditedFiles).toEqual(['/a.ts']);
+  });
+
+  it('turn/failedでも成果を作る（失敗しても応答・編集が残ることがあるため）', () => {
+    const state = feed(initialChatState, [
+      ['turn/started', { turn: { id: TURN } }],
+      ['item/completed', { item: { type: 'agentMessage', id: 'a1', text: '途中まで' }, turnId: TURN }],
+      ['turn/failed', {}],
+    ]);
+    expect(state.turnResultText).toBe('途中まで');
+  });
+
+  it('turn/startedで前のターンの成果をリセットする', () => {
+    const finished = feed(initialChatState, [
+      ['turn/started', { turn: { id: TURN } }],
+      ['item/completed', { item: { type: 'agentMessage', id: 'a1', text: '前回の応答' }, turnId: TURN }],
+      ['turn/completed', {}],
+    ]);
+    expect(finished.turnResultText).toBe('前回の応答');
+
+    const restarted = applyEvent(finished, 'turn/started', { turn: { id: 't-next' } });
+    expect(restarted.turnResultText).toBe('');
+    expect(restarted.turnEditedFiles).toEqual([]);
+  });
+});
+
+describe('summarizeTurn', () => {
+  const items: ChatState['items'] = [
+    { id: 'u1', kind: 'userMessage', text: '直して', detail: '', status: undefined, turnId: TURN },
+    { id: 'a1', kind: 'agentMessage', text: '直しました', detail: '', status: undefined, turnId: TURN },
+    {
+      id: 'f1',
+      kind: 'fileChange',
+      text: '',
+      detail: '/a.ts, /b.ts',
+      status: undefined,
+      turnId: TURN,
+    },
+    {
+      id: 'a2',
+      kind: 'agentMessage',
+      text: '別のターンの応答',
+      detail: '',
+      status: undefined,
+      turnId: 'other-turn',
+    },
+  ];
+
+  it('turnIdが一致する項目だけから応答テキストと編集ファイルを作る', () => {
+    expect(summarizeTurn(items, TURN)).toEqual({
+      text: '直しました',
+      editedFiles: ['/a.ts', '/b.ts'],
+    });
+  });
+
+  it('複数のagentMessageは改行で連結する', () => {
+    const multi: ChatState['items'] = [
+      { id: 'a1', kind: 'agentMessage', text: '一つ目', detail: '', status: undefined, turnId: TURN },
+      { id: 'a2', kind: 'agentMessage', text: '二つ目', detail: '', status: undefined, turnId: TURN },
+    ];
+    expect(summarizeTurn(multi, TURN).text).toBe('一つ目\n二つ目');
+  });
+
+  it('同じファイルへの複数回の編集は1件にまとめる', () => {
+    const repeated: ChatState['items'] = [
+      { id: 'f1', kind: 'fileChange', text: '', detail: '/a.ts', status: undefined, turnId: TURN },
+      { id: 'f2', kind: 'fileChange', text: '', detail: '/a.ts', status: undefined, turnId: TURN },
+    ];
+    expect(summarizeTurn(repeated, TURN).editedFiles).toEqual(['/a.ts']);
+  });
+
+  it('turnIdが判らなければ何も返さない', () => {
+    expect(summarizeTurn(items, undefined)).toEqual({ text: '', editedFiles: [] });
   });
 });
 

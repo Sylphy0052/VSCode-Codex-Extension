@@ -693,27 +693,37 @@ Claude Codeは消費率（`usedPercent`）を返さない。実測した中身�
 ### 15.1 出力
 
 - 出力先: `~/workspace/dairy/.buffer/<YYYY-MM-DD>.jsonl`（`agent.activityLog.dir` → `DAILY_BUFFER_DIR` → 既定の順で解決）
-- 形式: 1行1レコード。`{"ts","source","cwd","text","ref"}`。`source` は `codex` / `claude-code`、`ref` は常に `vscode`
-- 収集側 `~/.claude/scripts/daily/collect.py` の追記バッファ規約に合わせてある。フィールド名を変えると日報が黙って取りこぼす
+- 形式: 1行1レコード。`{"ts","source","cwd","text","ref","session_id","kind"}`
+  - `source` は `codex` / `claude-code`、`ref` は常に `vscode`
+  - `session_id`: セッションを一意に識別するid（Codex: thread id、Claude: session id）。収集側（`collect.py`）がCLI由来の記録と突き合わせて重複を落とすのに使う。必須
+  - `kind`: `"prompt"`（ユーザー発言）か `"result"`（ターン完了時のアシスタントの成果）
+- 収集側 `~/.claude/scripts/daily/collect.py` の追記バッファ規約に合わせてある。フィールド名を変えると日報が黙って取りこぼす。未知フィールドは無視されるため、フィールドの追加自体は安全
+
+```json
+{"ts":"2026-08-10T17:33:33+09:00","source":"codex","cwd":"/abs/path","text":"...","ref":"vscode","session_id":"<セッションid>","kind":"prompt"}
+```
 
 ### 15.2 粒度と契機
 
-**1セッション1行**。発言のたびには書かない。
+`prompt` と `result` の2種類を、それぞれ発生のたびに書く（旧仕様の「セッション初回の1行だけ」という抑止は撤廃した）。
 
-| 入口                    | 契機   | 本文     |
-| ----------------------- | ------ | -------- |
-| Codexチャット画面       | 発言時 | その発言 |
-| Claude Codeチャット画面 | 発言時 | その発言 |
+| kind     | 契機                                                                      | 本文                                                         |
+| -------- | ------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `prompt` | Codex/Claude Codeチャット画面で発言のたび（ループからの送信を含む）     | その発言                                                      |
+| `result` | Codexのターン完了（成功・失敗いずれも。`turn/completed`・`turn/failed`） | アシスタントの最終応答＋編集ファイル                          |
+| `result` | Claude Codeのターン完了（`stream-json` の `result` イベント）           | アシスタントの最終応答（`result` フィールド）＋編集ファイル    |
 
-二重記録は `globalState` に持つ記録済みidの集合で抑止する（30日で掃除）。書き込みに失敗したものは既記録にせず、次の契機で書き直す。
+- `prompt`: ユーザーが実際に送信するたびに1行書く。ループ機能から同じ文面を繰り返し送った場合も、実際に送信している以上は抑止しない
+- `result`: そのターンの応答テキストを1行化・200字切り詰めし、ファイルを編集していれば末尾に ` [edit: a.ts, b.ts]` のように最大5件までワークスペース相対パスで付記する（超過分は ` +N`）。相対パスにできなければ basename。全体で200字を超える場合は応答要約側から先に削り、編集ファイル一覧を優先して残す。応答テキストと編集ファイルの両方が空なら記録しない
+  - 編集ファイルの抽出元: Codexはpatch/apply系のイベント（`fileChange` ThreadItem）、Claudeは `tool_use` の Edit/Write/NotebookEdit の `input.file_path`
 
 ### 15.3 会話本文の扱い
 
 §8の「会話本文を読まない・保存しない」に対する**意図的な例外**であり、範囲を次に限定する。
 
-- セッションごとに1行だけ、200文字までの1行要約
+- 1回の記録につき200文字までの1行要約（`prompt` は発言そのもの、`result` は応答要約＋編集ファイル）
 - `agent.activityLog.enabled` を `false` にすれば一切書かない
 
 ### 15.4 収集側の重複排除
 
-拡張機能経由のClaude Codeセッションは transcript 走査（`collect_claude`）にも現れるため、`collect.py` 側で `(source, cwd, 分, 要約の先頭50字)` が一致する行を1件に畳み、`ref: "vscode"` の方を残す。
+拡張機能経由のClaude Codeセッションは transcript 走査（`collect_claude`）にも現れるため、`collect.py` 側は `session_id` を軸にCLI由来の記録と突き合わせて重複を1件に畳み、`ref: "vscode"` の方を残す前提とする。

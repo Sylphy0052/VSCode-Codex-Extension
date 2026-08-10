@@ -61,6 +61,17 @@ export interface ChatState {
   items: ChatItem[];
   approvals: PendingApproval[];
   usage: ChatUsage | undefined;
+  /**
+   * 直前に完了/失敗したターンの応答テキスト。作業記録の成果行（`kind: 'result'`）に使う。
+   * ターンが終わるたびに上書きする。
+   */
+  turnResultText: string;
+  /**
+   * 直前に完了/失敗したターンで編集したファイルパス。
+   * Codexは items を turnId で辿って作るため、ここは常に turn/completed・turn/failed 時点で埋める。
+   * Claude Codeは tool_use（Edit/Write/NotebookEdit）から都度積み、ターン開始時にリセットする。
+   */
+  turnEditedFiles: string[];
 }
 
 export const initialChatState: ChatState = {
@@ -74,6 +85,8 @@ export const initialChatState: ChatState = {
   items: [],
   approvals: [],
   usage: undefined,
+  turnResultText: '',
+  turnEditedFiles: [],
 };
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
@@ -150,6 +163,38 @@ function describeFileChanges(changes: unknown): string {
   return paths.join(', ');
 }
 
+/**
+ * 完了したターンの応答テキストと編集ファイルを items から集める。
+ * turnId が判らないと items 全体（他ターン分を含む）を拾ってしまうため、
+ * その場合は何も返さない。
+ */
+export function summarizeTurn(
+  items: readonly ChatItem[],
+  turnId: string | undefined,
+): { text: string; editedFiles: string[] } {
+  if (turnId === undefined) {
+    return { text: '', editedFiles: [] };
+  }
+
+  const turnItems = items.filter((i) => i.turnId === turnId);
+  const text = turnItems
+    .filter((i) => i.kind === 'agentMessage')
+    .map((i) => i.text)
+    .join('\n');
+  const editedFiles = uniqueOrdered(
+    turnItems
+      .filter((i) => i.kind === 'fileChange')
+      .flatMap((i) => i.detail.split(', '))
+      .map((p) => p.trim())
+      .filter((p) => p !== ''),
+  );
+  return { text, editedFiles };
+}
+
+function uniqueOrdered(values: readonly string[]): string[] {
+  return [...new Set(values)];
+}
+
 function upsertItem(items: readonly ChatItem[], item: ChatItem): ChatItem[] {
   const index = items.findIndex((i) => i.id === item.id);
   if (index === -1) {
@@ -210,14 +255,35 @@ export function applyEvent(
         busy: true,
         turnId: turnId === '' ? undefined : turnId,
         turnFailed: false,
+        // 前のターンの成果を次のターンへ持ち越さない
+        turnResultText: '',
+        turnEditedFiles: [],
       };
     }
 
-    case 'turn/completed':
-      return { ...state, busy: false, turnId: undefined, turnFailed: false };
+    case 'turn/completed': {
+      const summary = summarizeTurn(state.items, state.turnId);
+      return {
+        ...state,
+        busy: false,
+        turnId: undefined,
+        turnFailed: false,
+        turnResultText: summary.text,
+        turnEditedFiles: summary.editedFiles,
+      };
+    }
 
-    case 'turn/failed':
-      return { ...state, busy: false, turnId: undefined, turnFailed: true };
+    case 'turn/failed': {
+      const summary = summarizeTurn(state.items, state.turnId);
+      return {
+        ...state,
+        busy: false,
+        turnId: undefined,
+        turnFailed: true,
+        turnResultText: summary.text,
+        turnEditedFiles: summary.editedFiles,
+      };
+    }
 
     case 'thread/name/updated': {
       const name = params['threadName'];

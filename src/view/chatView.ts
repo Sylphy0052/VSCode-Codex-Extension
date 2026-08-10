@@ -4,6 +4,7 @@ import { defaultDenyResponse, type ApprovalDecision } from '../appserver/approva
 import type { ChatState } from '../appserver/chatState';
 import { ChatSession } from '../appserver/chatSession';
 import { AppServerConnection, type ServerRequest } from '../appserver/connection';
+import type { ActivityKind } from '../activity/record';
 import { summarize } from '../codex/conversation';
 import { readForkedThreadId } from '../codex/jsonRpc';
 import { readSkillsList } from '../codex/skillsList';
@@ -39,7 +40,38 @@ interface ChatPanel {
 export interface ChatActivity {
   sessionId: string;
   cwd: string;
+  kind: ActivityKind;
+  /** `kind: 'prompt'` は発言そのもの、`kind: 'result'` はターンの最終応答テキスト。 */
   text: string;
+  /** `kind: 'result'` のときだけ使う。そのターンで編集したファイルパス。 */
+  editedFiles?: readonly string[];
+  /** 同じ内容の再記録を抑止するか。同期経路（syncTabNames等）だけ true にする。 */
+  suppressDuplicates?: boolean;
+}
+
+/**
+ * ターン完了時の成果を作業記録へ通知する。Codex画面・Claude Code画面の両方で共有する。
+ * 応答テキストと編集ファイルの両方が空なら何もしない。
+ */
+export function reportTurnResult(
+  onActivity: (activity: ChatActivity) => void,
+  sessionId: string | undefined,
+  cwd: string | undefined,
+  state: ChatState,
+): void {
+  if (sessionId === undefined || cwd === undefined) {
+    return;
+  }
+  if (state.turnResultText === '' && state.turnEditedFiles.length === 0) {
+    return;
+  }
+  onActivity({
+    sessionId,
+    cwd,
+    kind: 'result',
+    text: state.turnResultText,
+    editedFiles: state.turnEditedFiles,
+  });
 }
 
 /**
@@ -177,6 +209,9 @@ export class ChatViewManager implements vscode.Disposable {
       wasBusy = state.busy;
       if (finished && state.queued.length > 0) {
         void session.sendNextQueued(readConfig().codex);
+      }
+      if (finished) {
+        reportTurnResult(this.onActivity, entry.session.threadId, entry.cwd, state);
       }
       const title = deriveTitle(state);
       if (title !== undefined && panel.title !== title) {
@@ -321,16 +356,13 @@ export class ChatViewManager implements vscode.Disposable {
     }
   }
 
-  /**
-   * 発言をこのセッションの作業記録として通知する。
-   * 記録されるのは各セッションの初回発言だけで、2回目以降は受け手が捨てる。
-   */
+  /** 発言をこのセッションの作業記録として通知する。送信のたび毎回記録する。 */
   private reportActivity(entry: ChatPanel, text: string): void {
     const sessionId = entry.session.threadId;
     if (sessionId === undefined || entry.cwd === undefined) {
       return;
     }
-    this.onActivity({ sessionId, cwd: entry.cwd, text });
+    this.onActivity({ sessionId, cwd: entry.cwd, kind: 'prompt', text });
   }
 
   /** 会話の途中から分岐し、新しい画面で開く。元のスレッドは変更されない。 */

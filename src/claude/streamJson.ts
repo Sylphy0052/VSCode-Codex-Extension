@@ -19,6 +19,8 @@ export const initialClaudeState: ChatState = {
   items: [],
   approvals: [],
   usage: undefined,
+  turnResultText: '',
+  turnEditedFiles: [],
 };
 
 export function applyStreamEvent(state: ChatState, event: Record<string, unknown>): ChatState {
@@ -51,6 +53,9 @@ function applySystem(state: ChatState, event: Record<string, unknown>): ChatStat
     // initはターン開始時に届く。resultで解除する
     busy: true,
     turnFailed: false,
+    // 前のターンの成果を次のターンへ持ち越さない
+    turnResultText: '',
+    turnEditedFiles: [],
   };
 }
 
@@ -58,6 +63,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
   const message = rec(event['message']);
   const content = list(message?.['content']);
   let items = state.items;
+  let editedFiles = state.turnEditedFiles;
 
   for (const [position, part] of content.entries()) {
     const type = str(part['type']);
@@ -84,7 +90,8 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
       continue;
     }
     if (type === 'tool_use') {
-      const tool = describeTool(str(part['name']), rec(part['input']) ?? {});
+      const input = rec(part['input']) ?? {};
+      const tool = describeTool(str(part['name']), input);
       items = upsert(items, {
         id: str(part['id']),
         kind: tool.kind,
@@ -93,10 +100,20 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
         status: 'running',
         turnId: undefined,
       });
+      // Edit/Write/NotebookEdit はファイル編集。作業記録の成果行に使うため集めておく
+      if (tool.kind === 'fileChange') {
+        const filePath = str(input['file_path']);
+        if (filePath !== '' && !editedFiles.includes(filePath)) {
+          editedFiles = [...editedFiles, filePath];
+        }
+      }
     }
   }
 
-  return items === state.items ? state : { ...state, items, busy: true };
+  if (items === state.items && editedFiles === state.turnEditedFiles) {
+    return state;
+  }
+  return { ...state, items, turnEditedFiles: editedFiles, busy: true };
 }
 
 /**
@@ -216,11 +233,14 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
 /**
  * ターンの終わり。`is_error` か `success` 以外のsubtypeは失敗として扱う。
  * ループ実行を止める判断に使うため、完了と区別して持つ。
+ *
+ * `result` フィールドにはそのターンのアシスタントの最終応答テキストが入る
+ * （作業記録の成果行に使う。`turnEditedFiles` は tool_use から積んだものをそのまま使う）。
  */
 function applyResult(state: ChatState, event: Record<string, unknown>): ChatState {
   const subtype = str(event['subtype']);
   const failed = event['is_error'] === true || (subtype !== '' && subtype !== 'success');
-  return { ...state, busy: false, turnFailed: failed };
+  return { ...state, busy: false, turnFailed: failed, turnResultText: str(event['result']) };
 }
 
 /**
