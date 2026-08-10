@@ -111,12 +111,11 @@ describe('applyEvent', () => {
     expect(state.items[0]?.turnId).toBe(TURN);
   });
 
-  it('レート制限とトークン量を取り込む', () => {
+  it('レート制限を取り込む', () => {
     const state = feed(initialChatState, [
       ['account/rateLimits/updated', { rateLimits: { primary: { usedPercent: 91 } } }],
-      ['thread/tokenUsage/updated', { tokenUsage: { total: { totalTokens: 19477 } } }],
     ]);
-    expect(state.usage).toEqual({ usedPercent: 91, totalTokens: 19477 });
+    expect(state.usage).toEqual({ usedPercent: 91 });
   });
 
   it('Codexが付けた名前を取り込む', () => {

@@ -147,7 +147,51 @@ describe('applyStreamEvent', () => {
     expect(state.items[0]?.text).toBe('こんにちは');
   });
 
-  it('result で応答中を解除し使用量を取り込む', () => {
+  it('rate_limit_event から制限の状態を取り込む', () => {
+    const state = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      {
+        type: 'rate_limit_event',
+        rate_limit_info: {
+          status: 'allowed',
+          resetsAt: 1786342200,
+          rateLimitType: 'five_hour',
+        },
+      },
+    ]);
+    expect(state.usage).toEqual({
+      usedPercent: undefined,
+      resetsAt: 1786342200,
+      limitLabel: '5時間',
+      limited: false,
+    });
+  });
+
+  it('制限に到達した rate_limit_event を limited として扱う', () => {
+    const state = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      {
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'rejected', resetsAt: 1786342200, rateLimitType: 'seven_day' },
+      },
+    ]);
+    expect(state.usage?.limited).toBe(true);
+    expect(state.usage?.limitLabel).toBe('週次');
+  });
+
+  it('未知の制限種別はそのまま表示名にする', () => {
+    const state = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      {
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'allowed', rateLimitType: 'monthly' },
+      },
+    ]);
+    expect(state.usage?.limitLabel).toBe('monthly');
+    expect(state.usage?.resetsAt).toBeUndefined();
+  });
+
+  it('result で応答中を解除する', () => {
     const state = apply([
       { type: 'system', subtype: 'init', session_id: ID },
       {
@@ -158,7 +202,6 @@ describe('applyStreamEvent', () => {
       },
     ]);
     expect(state.busy).toBe(false);
-    expect(state.usage?.totalTokens).toBe(150);
   });
 
   it('ユーザー発言をそのまま項目にする（replay-user-messages）', () => {

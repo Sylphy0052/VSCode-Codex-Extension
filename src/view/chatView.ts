@@ -133,7 +133,11 @@ export class ChatViewManager implements vscode.Disposable {
 
   private adopt(panel: vscode.WebviewPanel, cwd: string | undefined): ChatPanel {
     panel.webview.options = { enableScripts: true };
-    panel.webview.html = renderShell(panel.webview, { agentLabel: 'Codex', showSettings: true });
+    panel.webview.html = renderShell(panel.webview, {
+      agentLabel: 'Codex',
+      approvalModes: APPROVAL_MODES,
+      showSettings: true,
+    });
 
     const session = new ChatSession(this.connection, this.log, (state) => {
       const title = deriveTitle(state);
@@ -298,6 +302,16 @@ export class ChatViewManager implements vscode.Disposable {
   }
 
   private routeNotification(method: string, params: Record<string, unknown>): void {
+    // account/rateLimits/updated のようなアカウント単位の通知は threadId を持たない。
+    // スレッドで絞れないので開いている画面すべてへ配る。
+    if (params['threadId'] === undefined) {
+      for (const entry of this.panels.values()) {
+        entry.session.applyNotification(method, params);
+      }
+      this.pending?.session.applyNotification(method, params);
+      return;
+    }
+
     const target = this.findByThreadId(params['threadId']);
     target?.session.applyNotification(method, params);
   }
@@ -367,6 +381,8 @@ function readPersistedThreadId(state: unknown): string | undefined {
 export interface ChatShellOptions {
   /** 画面に出すCLIの名前。発言の見出しと入力欄の案内に使う。 */
   agentLabel: string;
+  /** 承認方法の選択肢。プロバイダごとに異なる。 */
+  approvalModes: readonly string[];
   /** モデル・effort・承認のプルダウンを出すか（Codex画面のみ）。 */
   showSettings: boolean;
 }
@@ -524,7 +540,7 @@ export function renderShell(webview: vscode.Webview, options: ChatShellOptions):
     <label>Effort <select id="reasoningEffort"></select></label>
     <label>承認 <select id="approvalMode">
       <option value="">既定</option>
-      ${APPROVAL_MODES.map((m) => `<option value="${m}">${m}</option>`).join('')}
+      ${options.approvalModes.map((m) => `<option value="${m}">${m}</option>`).join('')}
     </select></label>
   </div>
 
@@ -751,13 +767,32 @@ export function renderShell(webview: vscode.Webview, options: ChatShellOptions):
     el('send').disabled = state.busy;
     const bits = [];
     if (state.busy) bits.push('応答中…');
-    if (state.usage && state.usage.usedPercent !== undefined) {
-      bits.push('使用量 ' + Math.round(state.usage.usedPercent) + '%');
-    }
-    if (state.usage && state.usage.totalTokens !== undefined) {
-      bits.push(state.usage.totalTokens.toLocaleString() + ' tokens');
-    }
+    const usageText = formatUsage(state.usage);
+    if (usageText !== '') bits.push(usageText);
     el('status').textContent = bits.join(' ・ ');
+  }
+
+  // 使用量の表記。Codexは消費率、Claude Codeは制限の種類とリセットまでの時間で示す。
+  function formatUsage(usage) {
+    if (!usage) return '';
+    if (usage.usedPercent !== undefined) return '使用量 ' + Math.round(usage.usedPercent) + '%';
+
+    const bits = [];
+    if (usage.limitLabel) bits.push(usage.limitLabel + '制限');
+    if (usage.limited) bits.push('到達');
+    const resets = formatResetsIn(usage.resetsAt);
+    if (resets !== '') bits.push('リセット ' + resets);
+    return bits.join(' ');
+  }
+
+  function formatResetsIn(resetsAtEpochSeconds) {
+    if (typeof resetsAtEpochSeconds !== 'number') return '';
+    const minutes = Math.round((resetsAtEpochSeconds * 1000 - Date.now()) / 60000);
+    if (minutes <= 0) return 'まもなく';
+    if (minutes < 60) return minutes + '分後';
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return hours + '時間後';
+    return Math.round(hours / 24) + '日後';
   }
 
   function send() {

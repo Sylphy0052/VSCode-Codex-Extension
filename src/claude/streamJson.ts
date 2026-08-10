@@ -26,8 +26,10 @@ export function applyStreamEvent(state: ChatState, event: Record<string, unknown
       return applyUser(state, event);
     case 'stream_event':
       return applyPartial(state, event);
+    case 'rate_limit_event':
+      return applyRateLimit(state, event);
     case 'result':
-      return applyResult(state, event);
+      return applyResult(state);
     default:
       return state;
   }
@@ -189,21 +191,45 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
   return { ...state, busy: true, items };
 }
 
-function applyResult(state: ChatState, event: Record<string, unknown>): ChatState {
-  const usage = rec(event['usage']);
-  const input = num(usage?.['input_tokens']);
-  const output = num(usage?.['output_tokens']);
-  const total =
-    input === undefined && output === undefined ? undefined : (input ?? 0) + (output ?? 0);
+function applyResult(state: ChatState): ChatState {
+  return { ...state, busy: false };
+}
 
+/**
+ * レート制限の状態。
+ *
+ * Claude CodeはCodexと違って消費率を返さないため、制限の種類とリセット時刻で示す。
+ * 実測した中身: `{status, resetsAt, rateLimitType, overageStatus, isUsingOverage}`。
+ */
+function applyRateLimit(state: ChatState, event: Record<string, unknown>): ChatState {
+  const info = rec(event['rate_limit_info']);
+  if (info === undefined) {
+    return state;
+  }
+
+  const status = str(info['status']);
   return {
     ...state,
-    busy: false,
     usage: {
       usedPercent: state.usage?.usedPercent,
-      totalTokens: total ?? state.usage?.totalTokens,
+      resetsAt: num(info['resetsAt']) ?? state.usage?.resetsAt,
+      limitLabel: limitLabelOf(str(info['rateLimitType'])) ?? state.usage?.limitLabel,
+      limited: status === '' ? state.usage?.limited : status !== 'allowed',
     },
   };
+}
+
+/** 未知の種別はCLIの表記のまま出す。増えても表示が消えないようにするため。 */
+function limitLabelOf(rateLimitType: string): string | undefined {
+  if (rateLimitType === '') {
+    return undefined;
+  }
+  const known: Record<string, string> = {
+    five_hour: '5時間',
+    seven_day: '週次',
+    weekly: '週次',
+  };
+  return known[rateLimitType] ?? rateLimitType;
 }
 
 /**

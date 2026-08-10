@@ -20,8 +20,14 @@ export interface PendingApproval {
 }
 
 export interface ChatUsage {
+  /** Codex。レート制限の消費率 */
   usedPercent: number | undefined;
-  totalTokens: number | undefined;
+  /** 制限がリセットされる時刻（epoch秒）。Claude Codeは割合を返さないためこちらで示す */
+  resetsAt: number | undefined;
+  /** 制限の種類の表示名（`5時間` など） */
+  limitLabel: string | undefined;
+  /** 制限に到達しているか */
+  limited: boolean | undefined;
 }
 
 export interface ChatState {
@@ -208,18 +214,6 @@ export function applyEvent(
       return { ...state, items: appendDelta(state.items, itemId, delta) };
     }
 
-    case 'thread/tokenUsage/updated': {
-      const usage = rec(rec(params['tokenUsage'])?.['total']);
-      const totalTokens = usage?.['totalTokens'];
-      return {
-        ...state,
-        usage: {
-          usedPercent: state.usage?.usedPercent,
-          totalTokens: typeof totalTokens === 'number' ? totalTokens : state.usage?.totalTokens,
-        },
-      };
-    }
-
     case 'account/rateLimits/updated': {
       const primary = rec(rec(params['rateLimits'])?.['primary']);
       const usedPercent = primary?.['usedPercent'];
@@ -227,7 +221,9 @@ export function applyEvent(
         ...state,
         usage: {
           usedPercent: typeof usedPercent === 'number' ? usedPercent : state.usage?.usedPercent,
-          totalTokens: state.usage?.totalTokens,
+          resetsAt: state.usage?.resetsAt,
+          limitLabel: state.usage?.limitLabel,
+          limited: state.usage?.limited,
         },
       };
     }
