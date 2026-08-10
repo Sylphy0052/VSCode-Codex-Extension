@@ -1,4 +1,4 @@
-import type { ChatItem, ChatState } from '../appserver/chatState';
+import { appendNotice, type ChatItem, type ChatState } from '../appserver/chatState';
 import { describeTool } from './transcript';
 
 /**
@@ -301,6 +301,16 @@ function applyCompactBoundary(state: ChatState, event: Record<string, unknown>):
  * 失敗を黙って捨てると「押したのに何も起きない」状態になる。
  */
 function applyStatus(state: ChatState, event: Record<string, unknown>): ChatState {
+  // 承認方法の変更。こちらから変えた場合も、TUIなど他の経路で変わった場合も届く
+  const permissionMode = str(event['permissionMode']);
+  if (permissionMode !== '') {
+    return appendNotice(
+      state,
+      'settings:' + (str(event['uuid']) || permissionMode),
+      '承認方法を ' + permissionMode + ' に変えました',
+    );
+  }
+
   if (str(event['compact_result']) !== 'failed') {
     return state;
   }

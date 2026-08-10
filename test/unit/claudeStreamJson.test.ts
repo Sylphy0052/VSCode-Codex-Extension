@@ -463,3 +463,42 @@ describe('圧縮', () => {
     expect(state.items).toEqual([]);
   });
 });
+
+describe('セッション中の設定変更', () => {
+  it('承認方法が変わったことを会話に残す', () => {
+    const state = apply([
+      {
+        type: 'system',
+        subtype: 'status',
+        status: null,
+        permissionMode: 'plan',
+        uuid: 's1',
+      },
+    ]);
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]).toMatchObject({
+      id: 'settings:s1',
+      kind: 'settingsChanged',
+      detail: '承認方法を plan に変えました',
+    });
+  });
+
+  it('同じ通知が二度届いても項目は増えない', () => {
+    const event = {
+      type: 'system',
+      subtype: 'status',
+      status: null,
+      permissionMode: 'plan',
+      uuid: 's2',
+    };
+    expect(apply([event, event]).items).toHaveLength(1);
+  });
+
+  it('圧縮の status とは混ざらない', () => {
+    const state = apply([
+      { type: 'system', subtype: 'status', status: 'compacting', uuid: 's3' },
+      { type: 'system', subtype: 'status', status: null, compact_result: 'success', uuid: 's4' },
+    ]);
+    expect(state.items).toEqual([]);
+  });
+});

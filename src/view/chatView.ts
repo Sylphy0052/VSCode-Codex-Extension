@@ -635,12 +635,27 @@ export interface ChatShellOptions {
   approvalModes: readonly string[];
   /** モデル・effort・承認のプルダウンを出すか（Codex画面のみ）。 */
   showSettings: boolean;
+  /**
+   * 設定行の下に出す但し書き。
+   *
+   * 変更がいつから効くかはプロバイダで違う。書かないと「変えたのに効かない」に見える。
+   */
+  settingsNote?: string;
 }
 
 /**
  * チャット画面のHTMLを組み立てる。CodexとClaude Codeで共有する。
  * 描画するのは `ChatState` だけなので、プロバイダごとの差はここでは扱わない。
  */
+/** 設定から来る文字列をHTMLへ埋め込む前に無害化する。 */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/gu, '&amp;')
+    .replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;')
+    .replace(/"/gu, '&quot;');
+}
+
 export function renderShell(webview: vscode.Webview, options: ChatShellOptions): string {
   const nonce = randomBytes(16).toString('base64');
   const csp = [
@@ -705,6 +720,7 @@ ${chatStyles()}
       <option value="">既定</option>
       ${options.approvalModes.map((m) => `<option value="${m}">${m}</option>`).join('')}
     </select></label>
+    ${options.settingsNote === undefined ? '' : `<p class="note">${escapeHtml(options.settingsNote)}</p>`}
   </div>
 
 <script nonce="${nonce}">

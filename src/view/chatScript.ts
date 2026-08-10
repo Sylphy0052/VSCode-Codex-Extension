@@ -27,6 +27,7 @@ export function chatScript(agentLabel: string): string {
     webSearch: 'Web検索',
     plan: '計画',
     contextCompaction: '会話を圧縮しました',
+    settingsChanged: '設定',
   };
 
   /** 残りがこの割合を下回ったら警告として見せる。 */

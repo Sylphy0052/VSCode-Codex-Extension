@@ -546,6 +546,25 @@ export function clearQueue(state: ChatState): ChatState {
   return state.queued.length === 0 ? state : { ...state, queued: [] };
 }
 
+/**
+ * 会話とは別に起きたことを1行残す。設定の変更のように、CLIとのやり取りの結果を
+ * 見せる用途に使う。同じidで呼び直すと上書きする。
+ */
+export function appendNotice(state: ChatState, id: string, text: string): ChatState {
+  return {
+    ...state,
+    items: upsertItem(state.items, {
+      id,
+      kind: 'settingsChanged',
+      text: '',
+      detail: text,
+      status: undefined,
+      turnId: undefined,
+      diffs: NO_DIFFS,
+    }),
+  };
+}
+
 export function addApproval(state: ChatState, approval: PendingApproval): ChatState {
   return { ...state, approvals: [...state.approvals, approval] };
 }

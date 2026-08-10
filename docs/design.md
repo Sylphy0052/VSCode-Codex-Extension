@@ -675,7 +675,22 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 Codex画面と同じHTML（`renderShell`）を使うため、画面下の設定行はClaude Code側にも出る。承認方法の選択肢だけプロバイダごとに差し替える（Codexは `APPROVAL_MODES`、Claude Codeは `--permission-mode` の6種）。
 
 - Webview側のスクリプトはCodexのスナップショット形状を前提にしているため、Claude側は同じ形へ整えて送る。モデルカタログが無いのでエイリアスを `ModelInfo` 相当に見せ、キーも `reasoningEffort` → `effort`、`approvalMode` → `permissionMode` と読み替える。
-- **適用範囲が違う**。Codex画面は `turn/start` に毎回渡すので次の発言から効くが、Claude Codeは1プロセス1セッションで起動時に引数が確定するため、**次に開くセッションから**効く。
+- **効かせ方が違う**。Codex画面は `turn/start` に毎回渡すので次の発言から効く。Claude Codeは1プロセス1セッションで起動引数が固定なので、control protocol で実行中のセッションへ伝える。
+
+#### Claude Codeのセッション中の変更（実測で確認）
+
+| 対象     | 送るもの                                            | 効いたことの確かめ方                                                                                  |
+| -------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| モデル   | `set_model { model }`                               | 成功応答。`<local-command-stdout>Set model to sonnet (claude-sonnet-5)</local-command-stdout>` も届く |
+| 承認方法 | `set_permission_mode { mode }`                      | `system` の `status` 通知が `permissionMode` を返す                                                   |
+| effort   | `apply_flag_settings { settings: { effortLevel } }` | **確かめられない**                                                                                    |
+
+- **effortには専用の制御要求が無い**。`set_effort` / `set_thinking_effort` / `set_reasoning_effort` はどれも `Unsupported control request subtype` になる（実測）。セッション単位の設定を差し込む `apply_flag_settings` に載せるのが唯一の手段
+- その `apply_flag_settings` は **`effortLevel` に出鱈目な値を入れても success を返し、確認の通知も来ない**。同じ経路で `{ model }` を送ると適用の合図が届くので効いている見込みはあるが、観測できない以上「変わった」とは書かない。画面には「送りました。反映は確かめられません」と出す
+- 承認方法の表示は**`status` 通知を正とする**。要求の成功だけを信じない（TUIなど他の経路で変えられた場合も同じ通知で拾えるため）
+- **「既定」へ戻す操作は送らない**。CLI側に起動時の値へ戻す手段が無く、何を送っても嘘になる。次に開くセッションから効く
+- `bypassPermissions` を選んだときの確認ダイアログを取り消した場合は、セッションへも送らない
+- 変更の結果は `settingsChanged` 種別の項目として会話に残す。失敗も残す（変えたつもりで変わっていない状態を作らないため）
 
 ### 14.8 使用量（rate_limit_event）
 

@@ -123,6 +123,43 @@ export function readCommandsChanged(event: Record<string, unknown>): SlashComman
   return readCommandList(event);
 }
 
+/**
+ * 会話中にモデルを変える。
+ *
+ * 実測: 成功すると `<local-command-stdout>Set model to sonnet (claude-sonnet-5)</local-command-stdout>`
+ * が user イベントで届く。次の発言から新しいモデルになる。
+ */
+export function buildSetModelRequest(requestId: string, model: string): string {
+  return buildControlRequest(requestId, { subtype: 'set_model', model });
+}
+
+/**
+ * 会話中に承認方法を変える。
+ *
+ * 実測: 応答は `{ mode }`。加えて `system` の `status` 通知でも `permissionMode` が届く。
+ * **表示はその通知を正とする**（要求の成功だけを信じない）。
+ */
+export function buildSetPermissionModeRequest(requestId: string, mode: string): string {
+  return buildControlRequest(requestId, { subtype: 'set_permission_mode', mode });
+}
+
+/**
+ * 会話中にeffortを変える。
+ *
+ * **専用の制御要求は無い**（`set_effort` / `set_thinking_effort` / `set_reasoning_effort` は
+ * どれも `Unsupported control request subtype` になる。実測）。セッション単位の設定を
+ * 差し込む `apply_flag_settings` に `effortLevel` を載せるのが唯一の手段。
+ *
+ * ただし**効いたことを観測できない**。`effortLevel` に出鱈目な値を入れても success が返り、
+ * 確認の通知も来ない（実測）。画面には「送った」までしか出さないこと。
+ */
+export function buildSetEffortRequest(requestId: string, effort: string): string {
+  return buildControlRequest(requestId, {
+    subtype: 'apply_flag_settings',
+    settings: { effortLevel: effort },
+  });
+}
+
 /** コンテキスト使用量を問い合わせる要求。TUIの `/context` と同じ数字が返る。 */
 export function buildContextUsageRequest(requestId: string): string {
   return buildControlRequest(requestId, { subtype: 'get_context_usage' });
