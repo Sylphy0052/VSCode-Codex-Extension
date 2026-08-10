@@ -7,6 +7,7 @@ import { AppServerConnection, type ServerRequest } from '../appserver/connection
 import { summarize } from '../codex/conversation';
 import { readForkedThreadId } from '../codex/jsonRpc';
 import { readSkillsList } from '../codex/skillsList';
+import { readRateLimits, type UsageSnapshot } from '../codex/usage';
 import { currentWorkspaceFolder, readConfig, workspaceFolderPaths } from '../config';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { Logger } from '../log';
@@ -388,6 +389,23 @@ export class ChatViewManager implements vscode.Disposable {
     }
     this.commands ??= await this.loadCommands();
     void entry.panel.webview.postMessage({ type: 'commands', commands: this.commands });
+  }
+
+  /**
+   * 使用量をapp-serverへ問い合わせる。
+   *
+   * ロールアウトの追記を待つ必要が無く、いま時点の値が返る。接続していなければ
+   * 何も返さず、ファイル由来の値をそのまま使わせる。
+   */
+  async readUsage(): Promise<UsageSnapshot | undefined> {
+    try {
+      await this.connection.ensureStarted();
+      const response = await this.connection.request('account/rateLimits/read', null);
+      return readRateLimits(response.result, new Date().toISOString());
+    } catch (e) {
+      this.log.warn(`使用量を取得できませんでした: ${e instanceof Error ? e.message : e}`);
+      return undefined;
+    }
   }
 
   /**

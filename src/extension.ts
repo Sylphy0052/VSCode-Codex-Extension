@@ -189,7 +189,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
   let usageSnapshot: UsageSnapshot | undefined;
   const readUsage = async (): Promise<void> => {
-    usageSnapshot = await usageReader.read();
+    // app-serverに聞ければ現在値が返る。繋がっていないときだけロールアウトを読む
+    usageSnapshot = (await chat.readUsage()) ?? (await usageReader.read());
     usageBar.update(usageSnapshot);
     panel.setUsage(usageSnapshot);
   };

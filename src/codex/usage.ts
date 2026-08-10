@@ -25,6 +25,34 @@ const obj = (v: unknown): Record<string, unknown> | undefined =>
  * レート制限はアカウント単位で記録されるため、どのセッションの行でも現在値として使える。
  * ただしCodexがAPIを呼んだ時点の値であり、能動的に取得する手段はない（`capturedAt` を併記する理由）。
  */
+/**
+ * `account/rateLimits/read` の応答を読む。
+ *
+ * ロールアウトの追記を待たずに現在値を問い合わせられる。ファイル由来のスナップショット
+ * （`parseTokenCountLine`）と同じ形に整えて、表示側は区別せず扱えるようにする。
+ */
+export function readRateLimits(result: unknown, capturedAt: string): UsageSnapshot | undefined {
+  const rateLimits = obj(obj(result)?.['rateLimits']);
+  const primary = obj(rateLimits?.['primary']);
+  const usedPercent = primary?.['usedPercent'];
+  if (primary === undefined || typeof usedPercent !== 'number') {
+    return undefined;
+  }
+
+  const credits = obj(rateLimits?.['credits']);
+  return {
+    capturedAt,
+    usedPercent,
+    windowMinutes: num(primary['windowDurationMins']),
+    resetsAt: num(primary['resetsAt']),
+    planType: str(rateLimits?.['planType']),
+    creditsBalance: str(credits?.['balance']),
+    hasCredits: typeof credits?.['hasCredits'] === 'boolean' ? credits['hasCredits'] : undefined,
+    totalTokens: undefined,
+    contextWindow: undefined,
+  };
+}
+
 export function parseTokenCountLine(line: string): UsageSnapshot | undefined {
   let raw: unknown;
   try {
