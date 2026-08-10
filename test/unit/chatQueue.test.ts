@@ -4,10 +4,26 @@ import {
   enqueue,
   initialChatState,
   removeQueued,
+  routeSend,
   takeQueued,
 } from '../../src/appserver/chatState';
 
 const busy = { ...initialChatState, busy: true };
+
+describe('routeSend', () => {
+  it('応答していなければ普通に送る', () => {
+    expect(routeSend(initialChatState)).toBe('start');
+  });
+
+  it('応答中でターンが判れば割り込んで送る', () => {
+    expect(routeSend({ ...busy, turnId: 'turn-1' })).toBe('steer');
+  });
+
+  it('応答中でもターンが判らなければ待ち行列へ積む', () => {
+    // turn/steer は expectedTurnId を要求するため、idが無いと送れない
+    expect(routeSend(busy)).toBe('queue');
+  });
+});
 
 describe('enqueue', () => {
   it('末尾に積む', () => {
