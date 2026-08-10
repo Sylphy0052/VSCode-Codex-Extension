@@ -25,6 +25,23 @@ describe('buildUserMessage', () => {
       message: { role: 'user', content: [{ type: 'text', text: '直して' }] },
     });
   });
+
+  it('画像をbase64のブロックとして本文の前に置く', () => {
+    const line = buildUserMessage('これ直して', [
+      { id: 'a1', name: 'shot.png', mediaType: 'image/png', data: 'QUJD', bytes: 3 },
+    ]);
+    expect(line.trimEnd().includes('\n')).toBe(false);
+    expect(JSON.parse(line)).toEqual({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'QUJD' } },
+          { type: 'text', text: 'これ直して' },
+        ],
+      },
+    });
+  });
 });
 
 describe('buildControlRequest', () => {

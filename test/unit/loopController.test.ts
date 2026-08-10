@@ -204,7 +204,7 @@ describe('LoopController', () => {
     const controller = new LoopController(send);
     controller.start(plan());
     controller.observe(state({ busy: true }));
-    controller.observe(state({ queued: ['先に送りたい指示'] }));
+    controller.observe(state({ queued: [{ text: '先に送りたい指示', attachments: [] }] }));
     expect(sent).toHaveLength(1);
     expect(controller.running).toBe(true);
 

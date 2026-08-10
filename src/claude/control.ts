@@ -1,5 +1,6 @@
 import type { ApprovalDecision } from '../appserver/approvals';
 import { buildContextUsage, type ContextUsage, type PendingApproval } from '../appserver/chatState';
+import { buildClaudeContent, type Attachment } from '../provider/attachments';
 import type { SlashCommand } from '../provider/slashCommands';
 import { describeTool } from './transcript';
 
@@ -25,11 +26,15 @@ export interface ControlResponse {
   payload: Record<string, unknown> | undefined;
 }
 
-/** stdinへ書く発言。1行で書き切る。 */
-export function buildUserMessage(text: string): string {
+/**
+ * stdinへ書く発言。1行で書き切る。
+ *
+ * 画像はbase64の `image` ブロックとして本文の前に置く（実測で受理を確認）。
+ */
+export function buildUserMessage(text: string, attachments: readonly Attachment[] = []): string {
   return `${JSON.stringify({
     type: 'user',
-    message: { role: 'user', content: [{ type: 'text', text }] },
+    message: { role: 'user', content: buildClaudeContent(text, attachments) },
   })}\n`;
 }
 

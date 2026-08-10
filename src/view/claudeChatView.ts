@@ -13,7 +13,8 @@ import type { FileSystemPort } from '../session/ports';
 import { ClaudeUsageProbe } from '../claude/usageProbe';
 import { CommandCatalog } from '../provider/commandCatalog';
 import type { SlashCommand } from '../provider/slashCommands';
-import { confirmCompact, renderShell, reportTurnResult } from './chatView';
+import { AttachmentBox } from '../provider/attachments';
+import { addAttachment, confirmCompact, renderShell, reportTurnResult } from './chatView';
 import { CLAUDE_EFFORTS, CLAUDE_PERMISSION_MODES } from '../claude/types';
 import type { ClaudeEditableKey, SettingsProvider } from './settingsProvider';
 import type { ChatActivity } from './chatView';
@@ -24,6 +25,8 @@ interface ClaudePanel {
   /** この画面で走らせているループ。走っていなければ待機状態のまま。 */
   loop: LoopController;
   cwd: string;
+  /** 送信前の添付画像。送るまでここに溜める。 */
+  attachments: AttachmentBox;
   /** タブを閉じた後か。破棄済みのWebviewへ送るとVSCodeが例外を投げるため見張る。 */
   disposed: boolean;
 }
@@ -108,6 +111,7 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       state: {
         ...entry.session.getState(),
         loop: entry.loop.getStatus(),
+        attachments: entry.attachments.snapshot(),
         settings: {
           models: snapshot.models.map((slug) => ({
             slug,
@@ -236,7 +240,11 @@ export class ClaudeChatViewManager implements vscode.Disposable {
         entry.loop.observe(state);
         void panel.webview.postMessage({
           type: 'state',
-          state: { ...state, loop: entry.loop.getStatus() },
+          state: {
+            ...state,
+            loop: entry.loop.getStatus(),
+            attachments: entry.attachments.snapshot(),
+          },
         });
       },
       () => this.warnApprovalsUnavailable(),
@@ -249,7 +257,14 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       () => this.refreshSettings(entry),
     );
 
-    const entry: ClaudePanel = { panel, session, loop, cwd, disposed: false };
+    const entry: ClaudePanel = {
+      panel,
+      session,
+      loop,
+      cwd,
+      attachments: new AttachmentBox(),
+      disposed: false,
+    };
     panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(entry, message));
     panel.onDidDispose(() => {
       entry.disposed = true;
@@ -320,8 +335,15 @@ export class ClaudeChatViewManager implements vscode.Disposable {
    * 発言を送り、作業記録へ流す。手動でもループからでも通り道は同じにする。
    * 送信のたび毎回記録する。
    */
-  private dispatch(entry: ClaudePanel, text: string): void {
-    entry.session.sendOrQueue(text);
+  private dispatch(entry: ClaudePanel, text: string, withAttachments = false): void {
+    const attachments = withAttachments ? entry.attachments.take() : [];
+    try {
+      entry.session.sendOrQueue(text, attachments);
+    } catch (e) {
+      // 取り出したまま失わない。貼り直しを強いない
+      entry.attachments.restore(attachments);
+      throw e;
+    }
     const sessionId = entry.session.threadId;
     if (sessionId !== undefined) {
       this.onActivity({ sessionId, cwd: entry.cwd, kind: 'prompt', text });
@@ -350,10 +372,26 @@ export class ClaudeChatViewManager implements vscode.Disposable {
     const type = m['type'];
 
     try {
-      if (type === 'send' && typeof m['text'] === 'string' && m['text'].trim() !== '') {
+      if (type === 'send' && typeof m['text'] === 'string') {
+        const text = m['text'];
+        // 画像だけ送るのも許す。本文が無くても添付があれば送る意味がある
+        if (text.trim() === '' && entry.attachments.list.length === 0) {
+          return;
+        }
         // 手動の発言はループへの割り込み。指示が交互に飛ぶ状態を作らない
         entry.loop.noteUserAction();
-        this.dispatch(entry, m['text']);
+        this.dispatch(entry, text, true);
+        this.refreshSettings(entry);
+        return;
+      }
+      if (type === 'attach') {
+        addAttachment(entry.attachments, m['name'], m['dataUrl']);
+        this.refreshSettings(entry);
+        return;
+      }
+      if (type === 'removeAttachment' && typeof m['id'] === 'string') {
+        entry.attachments.remove(m['id']);
+        this.refreshSettings(entry);
         return;
       }
       if (type === 'interrupt') {

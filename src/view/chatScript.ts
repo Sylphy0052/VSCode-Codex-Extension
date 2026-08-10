@@ -290,9 +290,12 @@ export function chatScript(agentLabel: string): string {
     // 割り込めなかった指示だけがここに残る
     el('queueLabel').textContent = '割り込めなかったので待っています（' + queued.length + '件）';
     list.replaceChildren();
-    queued.forEach((text, index) => {
+    queued.forEach((message, index) => {
       const li = document.createElement('li');
       const label = document.createElement('span');
+      const count = (message.attachments || []).length;
+      // 添えた画像も一緒に待っている。件数を出して、消えていないことを示す
+      const text = message.text + (count > 0 ? '（画像' + count + '枚）' : '');
       label.textContent = text;
       label.title = text;
       li.appendChild(label);
@@ -335,8 +338,65 @@ export function chatScript(agentLabel: string): string {
     // 圧縮は新しいターンを起こす。応答中に重ねると割り込みになるため止める
     el('compact').disabled = !!state.busy;
     applyPlanMode(state.planMode);
+    renderAttachments(state.attachments);
     applyLoop(state.loop);
     renderStatus(state);
+  }
+
+  // いま添えている枚数。本文が空でも送れるかの判定に使う
+  let attachmentCount = 0;
+
+  /**
+   * 送信前の添付。サムネイルを並べ、送る前に個別に取り消せるようにする。
+   * 上限の判定は拡張機能側が持つ（両方に書くと片方だけ直したとき食い違う）。
+   */
+  function renderAttachments(list) {
+    const box = el('attachments');
+    const items = list || [];
+    attachmentCount = items.length;
+    box.hidden = items.length === 0;
+    box.replaceChildren();
+
+    for (const item of items) {
+      const cell = document.createElement('div');
+      cell.className = 'attachment';
+
+      const image = document.createElement('img');
+      image.src = item.dataUrl;
+      image.alt = item.name;
+      cell.appendChild(image);
+
+      const label = document.createElement('span');
+      label.className = 'name';
+      label.textContent = item.name + ' ・ ' + item.size;
+      label.title = item.name;
+      cell.appendChild(label);
+
+      const remove = document.createElement('button');
+      remove.className = 'secondary';
+      remove.textContent = '取り消す';
+      remove.addEventListener('click', () => {
+        vscode.postMessage({ type: 'removeAttachment', id: item.id });
+      });
+      cell.appendChild(remove);
+      box.appendChild(cell);
+    }
+  }
+
+  /** 画像を読み込んで拡張機能側へ渡す。形式と大きさの判定は向こうがやる。 */
+  function offerFile(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      vscode.postMessage({ type: 'attach', name: file.name || '', dataUrl: reader.result });
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function offerFiles(files) {
+    for (const file of files || []) {
+      if (file && String(file.type).indexOf('image/') === 0) offerFile(file);
+    }
   }
 
   // いまPlan modeか。押したときに反転させるため覚えておく
@@ -559,7 +619,8 @@ export function chatScript(agentLabel: string): string {
   function send() {
     const input = el('input');
     const text = input.value;
-    if (!text.trim()) return;
+    // 画像だけ送るのも許す。本文が無くても添付があれば送る意味がある
+    if (!text.trim() && attachmentCount === 0) return;
     input.value = '';
     resetHistory();
     vscode.postMessage({ type: 'send', text });
@@ -619,6 +680,37 @@ export function chatScript(agentLabel: string): string {
   el('planToggle').addEventListener('click', () =>
     vscode.postMessage({ type: 'planMode', on: !planMode }),
   );
+
+  el('attach').addEventListener('click', () => el('filePicker').click());
+  el('filePicker').addEventListener('change', (e) => {
+    offerFiles(e.target.files);
+    // 同じファイルを続けて選べるようにする
+    e.target.value = '';
+  });
+
+  // 貼り付け。スクリーンショットを見せながら指示する使い方の本命
+  el('input').addEventListener('paste', (e) => {
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    let took = false;
+    for (const item of items) {
+      if (item.kind !== 'file') continue;
+      const file = item.getAsFile();
+      if (file && String(file.type).indexOf('image/') === 0) {
+        offerFile(file);
+        took = true;
+      }
+    }
+    // 画像を取ったときだけ既定の貼り付けを止める。テキストの貼り付けは邪魔しない
+    if (took) e.preventDefault();
+  });
+
+  // ドラッグ&ドロップ。既定の動作（画像を開く）を止めないと画面が置き換わる
+  for (const name of ['dragover', 'drop']) {
+    document.addEventListener(name, (e) => {
+      e.preventDefault();
+      if (name === 'drop') offerFiles(e.dataTransfer && e.dataTransfer.files);
+    });
+  }
   el('flushQueue').addEventListener('click', () => vscode.postMessage({ type: 'flushQueue' }));
   el('stop').addEventListener('click', () => vscode.postMessage({ type: 'interrupt' }));
   // 応答中のEscで中断する。画面のどこにフォーカスがあっても効くようにする

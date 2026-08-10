@@ -21,6 +21,7 @@ import {
   type ChatState,
   type PendingApproval,
 } from './chatState';
+import { buildCodexInput, type Attachment } from '../provider/attachments';
 import type { AppServerConnection, ServerRequest } from './connection';
 import { readTurnPolicy, turnPolicyFor, type TurnPolicy } from './planMode';
 
@@ -138,7 +139,11 @@ export class ChatSession {
    * ターン単位で読み取り専用へ落とす。一度落とすと明示的に戻すまで効き続けるため、
    * 抜けたあとの最初のターンで開始時の権限を送り直す。
    */
-  async send(text: string, config: CodexConfig): Promise<void> {
+  async send(
+    text: string,
+    config: CodexConfig,
+    attachments: readonly Attachment[] = [],
+  ): Promise<void> {
     const threadId = this.state.threadId;
     if (threadId === undefined) {
       throw new Error('スレッドが開始されていません');
@@ -146,7 +151,7 @@ export class ChatSession {
 
     const params: Record<string, unknown> = {
       threadId,
-      input: [{ type: 'text', text }],
+      input: buildCodexInput(text, attachments),
     };
     if (config.model !== '') {
       params['model'] = config.model;
@@ -176,7 +181,7 @@ export class ChatSession {
    * app-serverは割り込む先のターンidを要求し、それが現在のターンと違えば失敗する。
    * 応答は止まらないので、途中で方針を足すのに使える。
    */
-  async steer(text: string): Promise<void> {
+  async steer(text: string, attachments: readonly Attachment[] = []): Promise<void> {
     const threadId = this.state.threadId;
     const turnId = this.state.turnId;
     if (threadId === undefined || turnId === undefined) {
@@ -185,7 +190,7 @@ export class ChatSession {
     await this.connection.request('turn/steer', {
       threadId,
       expectedTurnId: turnId,
-      input: [{ type: 'text', text }],
+      input: buildCodexInput(text, attachments),
     });
   }
 
@@ -195,16 +200,20 @@ export class ChatSession {
    * 割り込めない場合（ターンidが判らない、ターンが終わった直後で id が食い違う）は
    * 指示を捨てずに待ち行列へ積み、ターンが終わってから送る。
    */
-  async sendOrQueue(text: string, config: CodexConfig): Promise<'sent' | 'queued'> {
+  async sendOrQueue(
+    text: string,
+    config: CodexConfig,
+    attachments: Attachment[] = [],
+  ): Promise<'sent' | 'queued'> {
     const route = routeSend(this.state);
     if (route === 'start') {
-      await this.send(text, config);
+      await this.send(text, config, attachments);
       return 'sent';
     }
 
     if (route === 'steer') {
       try {
-        await this.steer(text);
+        await this.steer(text, attachments);
         return 'sent';
       } catch (e) {
         // ターンが入れ替わった直後など。指示を失わないよう積み直す
@@ -212,7 +221,7 @@ export class ChatSession {
       }
     }
 
-    this.update(enqueue(this.state, text));
+    this.update(enqueue(this.state, text, attachments));
     return 'queued';
   }
 
@@ -238,20 +247,20 @@ export class ChatSession {
    * 送信に失敗したら積み直す（取り出したまま失われないようにする）。
    */
   async sendNextQueued(config: CodexConfig): Promise<void> {
-    const { text, next } = takeQueued(this.state);
-    if (text === undefined) {
+    const { message: queued, next } = takeQueued(this.state);
+    if (queued === undefined) {
       return;
     }
     const route = routeSend(this.state);
     this.update(next);
     try {
       if (route === 'steer') {
-        await this.steer(text);
+        await this.steer(queued.text, queued.attachments);
         return;
       }
-      await this.send(text, config);
+      await this.send(queued.text, config, queued.attachments);
     } catch (e) {
-      this.update(enqueue(this.state, text));
+      this.update(enqueue(this.state, queued.text, queued.attachments));
       throw e instanceof Error ? e : new Error(message(e));
     }
   }
