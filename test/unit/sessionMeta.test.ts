@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  firstUserMessage,
   isUserThread,
   parseSessionMeta,
   sessionIdFromRolloutName,
@@ -93,5 +94,43 @@ describe('sessionIdFromRolloutName', () => {
 describe('isUserThread', () => {
   it('ユーザー起点の対話セッションのみ真', () => {
     expect(isUserThread(parseSessionMeta(realLine)!)).toBe(true);
+  });
+});
+
+describe('firstUserMessage', () => {
+  const line = (o: unknown) => JSON.stringify(o);
+  const userEvent = (message: string) =>
+    line({ type: 'event_msg', payload: { type: 'user_message', message } });
+  const turnContext = () => line({ type: 'turn_context', payload: { turn_id: 't1' } });
+  const userItem = (...texts: string[]) =>
+    line({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: texts.map((text) => ({ type: 'input_text', text })),
+      },
+    });
+
+  it('TUI形式の user_message を拾う', () => {
+    expect(firstUserMessage([turnContext(), userEvent('数えて')])).toBe('数えて');
+  });
+
+  it('チャット画面の形式では turn_context 以降の user を拾う', () => {
+    // 画面経由のセッションには user_message が無く、response_item だけが残る
+    const lines = [
+      userItem('# AGENTS.md instructions', '環境の説明'),
+      turnContext(),
+      userItem('test4.txtを作って'),
+    ];
+    expect(firstUserMessage(lines)).toBe('test4.txtを作って');
+  });
+
+  it('turn_context より前の user は前置きなので無視する', () => {
+    expect(firstUserMessage([userItem('# AGENTS.md instructions')])).toBeUndefined();
+  });
+
+  it('該当が無ければ undefined', () => {
+    expect(firstUserMessage([turnContext(), 'not json', ''])).toBeUndefined();
   });
 });

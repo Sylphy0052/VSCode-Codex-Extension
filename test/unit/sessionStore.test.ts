@@ -9,6 +9,7 @@ const paths = codexPaths(HOME);
 const ID_A = '019fd79f-1e16-7b60-b9d2-0324b275ed81';
 const ID_B = '019fd7a6-d25e-7bd2-b181-751e467277f3';
 const ID_C = '019fd7c1-9554-7f62-816e-50e8acf1ed38';
+const ID_D = '019fd7d2-aaaa-7bbb-8ccc-0123456789ab';
 
 const rollout = (dir: string, id: string) => `${dir}/rollout-2026-08-07T00-00-00-${id}.jsonl`;
 
@@ -24,6 +25,9 @@ const metaLine = (id: string, cwd: string) =>
       thread_source: 'user',
     },
   });
+
+const userLine = (message: string) =>
+  JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message } });
 
 const indexLine = (id: string, name: string, updated: string) =>
   JSON.stringify({ id, thread_name: name, updated_at: updated });
@@ -76,6 +80,11 @@ const buildFs = () =>
     [rollout(`${paths.sessions}/2026/08/07`, ID_A)]: metaLine(ID_A, '/work/alpha'),
     [rollout(`${paths.sessions}/2026/08/07`, ID_B)]: metaLine(ID_B, '/work/beta'),
     [rollout(paths.archivedSessions, ID_C)]: metaLine(ID_C, '/work/alpha'),
+    // 要約名が確定しておらず index に載っていないセッション
+    [rollout(`${paths.sessions}/2026/08/07`, ID_D)]: [
+      metaLine(ID_D, '/work/alpha'),
+      userLine('テスト用の指示を書く'),
+    ].join('\n'),
   });
 
 const options = (over: Partial<Parameters<SessionStore['list']>[0]> = {}) => ({
@@ -98,21 +107,33 @@ describe('SessionStore.list', () => {
 
   it('workspaceスコープでは配下のcwdのセッションだけを返す', async () => {
     const { sessions } = await store.list(options());
-    expect(sessions.map((s) => s.id)).toEqual([ID_C, ID_A]);
+    expect(sessions.map((s) => s.id).sort()).toEqual([ID_A, ID_C, ID_D].sort());
+  });
+
+  it('indexに載っていないセッションもロールアウトがあれば出す', async () => {
+    const { sessions } = await store.list(options({ scope: 'all' }));
+    expect(sessions.map((s) => s.id)).toContain(ID_D);
+  });
+
+  it('要約名が無ければ最初の指示を表示名にする', async () => {
+    const { sessions } = await store.list(options({ scope: 'all' }));
+    expect(sessions.find((s) => s.id === ID_D)?.threadName).toBe('テスト用の指示を書く');
   });
 
   it('更新時刻の降順で並ぶ', async () => {
     const { sessions } = await store.list(options({ scope: 'all', workspaceFolders: [] }));
+    // ID_D は index に無いためファイルの更新時刻（Fakeでは0）で最後に来る
     expect(sessions.map((s) => s.threadName)).toEqual([
       'アーカイブ済み',
       'プロジェクトB',
       'プロジェクトA',
+      'テスト用の指示を書く',
     ]);
   });
 
   it('allスコープでは全ワークスペースのセッションを返す', async () => {
     const { sessions } = await store.list(options({ scope: 'all' }));
-    expect(sessions).toHaveLength(3);
+    expect(sessions).toHaveLength(4);
   });
 
   it('archived_sessions配下のものにarchivedフラグを立てる', async () => {
@@ -143,15 +164,16 @@ describe('SessionStore.list', () => {
     expect(result.unresolved).toBe(1);
   });
 
-  it('allスコープなら実体が消えていてもcwd不明として出す', async () => {
+  it('実体が消えたエントリは出さず、未解決として数える', async () => {
+    // 一覧はロールアウトの実在を骨格にするため、ファイルが無ければ開けない＝出さない
     const partial = new FakeFs({
       [paths.sessionIndex]: indexLine(ID_A, '消えた', '2026-08-06T15:09:29Z'),
     });
     const result = await new SessionStore(partial, paths, new InMemoryMetaCache()).list(
       options({ scope: 'all' }),
     );
-    expect(result.sessions).toHaveLength(1);
-    expect(result.sessions[0]?.cwd).toBeUndefined();
+    expect(result.sessions).toEqual([]);
+    expect(result.unresolved).toBe(1);
   });
 
   it('indexが無ければ空を返す', async () => {
@@ -177,14 +199,14 @@ describe('SessionStore.pruneCache', () => {
     const cache = new InMemoryMetaCache();
     const store = new SessionStore(fs, paths, cache);
     await store.list(options({ scope: 'all' }));
-    expect(cache.keys()).toHaveLength(3);
+    expect(cache.keys()).toHaveLength(4);
 
     const shrunk = new FakeFs({
       [paths.sessionIndex]: '',
       [rollout(`${paths.sessions}/2026/08/07`, ID_A)]: metaLine(ID_A, '/work/alpha'),
     });
     const removed = await new SessionStore(shrunk, paths, cache).pruneCache();
-    expect(removed).toBe(2);
+    expect(removed).toBe(3);
     expect(cache.keys()).toEqual([ID_A]);
   });
 });

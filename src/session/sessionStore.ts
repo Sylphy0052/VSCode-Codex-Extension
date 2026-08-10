@@ -1,10 +1,21 @@
 import type { CodexPaths } from '../codex/cliLocator';
-import { parseSessionIndex, sortByUpdatedAtDesc } from '../codex/sessionIndex';
-import { parseSessionMeta, sessionIdFromRolloutName } from '../codex/sessionMeta';
+import { parseSessionIndex } from '../codex/sessionIndex';
+import {
+  firstUserMessage,
+  isUserThread,
+  parseSessionMeta,
+  sessionIdFromRolloutName,
+} from '../codex/sessionMeta';
 import type { SessionMeta, SessionSummary } from '../codex/types';
 import type { FileSystemPort, MetaCachePort } from './ports';
 
 export type HistoryScope = 'workspace' | 'all';
+
+/**
+ * 表示名を作るために読む先頭行数。
+ * developerロールの前置きが数行入るため1行では足りない。
+ */
+const HEAD_LINES = 40;
 
 export interface ListOptions {
   scope: HistoryScope;
@@ -50,62 +61,92 @@ export class SessionStore {
   ) {}
 
   /**
-   * 一覧を構築する。indexを骨格に、cwdの解決だけロールアウトの1行目から補う
-   * （設計書 §4）。
+   * 一覧を構築する。
+   *
+   * ロールアウトの実在を骨格にする。`session_index.jsonl` はCodexが要約名を確定させて
+   * から書かれるため、それだけを見ると始めたばかりのセッションが一覧に出てこない。
+   * indexは要約名と更新時刻の供給元として重ねる（Claude Code側と同じ組み立て方）。
    */
   async list(options: ListOptions): Promise<ListResult> {
     const content = await this.fs.readTextFile(this.paths.sessionIndex);
-    if (content === undefined) {
-      return { sessions: [], skippedIndexLines: 0, unresolved: 0 };
-    }
+    const { entries, skipped } =
+      content === undefined ? { entries: [], skipped: 0 } : parseSessionIndex(content);
+    const indexed = new Map(entries.map((e) => [e.id, e]));
 
-    const { entries, skipped } = parseSessionIndex(content);
-    const ordered = sortByUpdatedAtDesc(entries).slice(0, Math.max(0, options.maxEntries));
     const locations = await this.locateRollouts();
+    const ordered = await this.orderByRecency([...locations.entries()], indexed);
 
     const sessions: SessionSummary[] = [];
     let unresolved = 0;
 
-    for (const entry of ordered) {
-      const location = locations.get(entry.id);
-      if (location === undefined) {
-        // indexにはあるがファイルが消えている。cwdが判らないので workspace スコープでは出せない。
-        unresolved++;
-        this.cache.delete(entry.id);
-        if (options.scope === 'all') {
-          sessions.push({
-            id: entry.id,
-            provider: 'codex',
-            threadName: entry.threadName,
-            updatedAt: entry.updatedAt,
-            cwd: undefined,
-            archived: false,
-          });
-        }
-        continue;
+    for (const { id, location, updatedAt } of ordered) {
+      if (sessions.length >= Math.max(0, options.maxEntries)) {
+        break;
       }
 
-      const meta = await this.resolveMeta(entry.id, location.filePath);
+      const meta = await this.resolveMeta(id, location.filePath);
       if (meta === undefined) {
         unresolved++;
         continue;
       }
-
+      // サブエージェントなどの派生スレッドは一覧に出さない（設計書 §4.1）
+      if (!isUserThread(meta)) {
+        continue;
+      }
       if (options.scope === 'workspace' && !isWithinAny(meta.cwd, options.workspaceFolders)) {
         continue;
       }
 
       sessions.push({
-        id: entry.id,
+        id,
         provider: 'codex',
-        threadName: entry.threadName,
-        updatedAt: entry.updatedAt,
+        threadName: indexed.get(id)?.threadName ?? (await this.firstInstruction(location.filePath)),
+        updatedAt,
         cwd: meta.cwd,
         archived: location.archived,
       });
     }
 
+    // indexにあるのにロールアウトが消えているものは、cwdが判らないので出せない
+    for (const entry of entries) {
+      if (!locations.has(entry.id)) {
+        unresolved++;
+        this.cache.delete(entry.id);
+      }
+    }
+
     return { sessions, skippedIndexLines: skipped, unresolved };
+  }
+
+  /**
+   * 新しい順に並べる。
+   *
+   * indexに更新時刻があればそれを使い、無ければファイルの更新時刻で代用する。
+   */
+  private async orderByRecency(
+    located: Array<[string, RolloutLocation]>,
+    indexed: Map<string, { updatedAt: string }>,
+  ): Promise<Array<{ id: string; location: RolloutLocation; updatedAt: string }>> {
+    const rows: Array<{ id: string; location: RolloutLocation; updatedAt: string }> = [];
+
+    for (const [id, location] of located) {
+      const fromIndex = indexed.get(id)?.updatedAt;
+      if (fromIndex !== undefined) {
+        rows.push({ id, location, updatedAt: fromIndex });
+        continue;
+      }
+      const mtimeMs = await this.fs.mtimeMs(location.filePath);
+      rows.push({ id, location, updatedAt: new Date(mtimeMs ?? 0).toISOString() });
+    }
+
+    return rows.sort((a, b) =>
+      a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0,
+    );
+  }
+
+  /** 要約名が無いセッションの表示名。最初の指示を先頭数十行から拾う。 */
+  private async firstInstruction(filePath: string): Promise<string | undefined> {
+    return firstUserMessage(await this.fs.readHead(filePath, HEAD_LINES));
   }
 
   /**

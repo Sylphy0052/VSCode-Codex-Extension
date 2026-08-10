@@ -60,6 +60,88 @@ export function sessionIdFromRolloutName(fileName: string): string | undefined {
   return m?.[1];
 }
 
+/**
+ * 先頭数十行から最初のユーザー発言を取り出す。
+ *
+ * Codexが要約名を確定させるまで `session_index.jsonl` には現れないため、
+ * それまでの表示名をここから作る（Claude Code側と同じ考え方）。
+ */
+export function firstUserMessage(headLines: string[]): string | undefined {
+  let afterTurnContext = false;
+  let fallback: string | undefined;
+
+  for (const line of headLines) {
+    const root = readObject(line);
+    if (root === undefined) {
+      continue;
+    }
+
+    if (root['type'] === 'turn_context') {
+      afterTurnContext = true;
+      continue;
+    }
+
+    const payload = asObject(root['payload']);
+    if (payload === undefined) {
+      continue;
+    }
+
+    // TUI経由のセッションはこの形で残る
+    if (root['type'] === 'event_msg' && payload['type'] === 'user_message') {
+      const message = payload['message'];
+      if (typeof message === 'string' && message.trim() !== '') {
+        return message;
+      }
+      continue;
+    }
+
+    // チャット画面経由のセッションには user_message が無く、これだけが残る。
+    // turn_context より前のものは AGENTS.md などの前置きなので採らない。
+    if (
+      afterTurnContext &&
+      fallback === undefined &&
+      root['type'] === 'response_item' &&
+      payload['type'] === 'message' &&
+      payload['role'] === 'user'
+    ) {
+      fallback = firstInputText(payload['content']);
+    }
+  }
+
+  return fallback;
+}
+
+function firstInputText(content: unknown): string | undefined {
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+  for (const part of content) {
+    const p = asObject(part);
+    const text = p?.['text'];
+    if (p?.['type'] === 'input_text' && typeof text === 'string' && text.trim() !== '') {
+      return text;
+    }
+  }
+  return undefined;
+}
+
+function readObject(line: string): Record<string, unknown> | undefined {
+  if (line.trim() === '') {
+    return undefined;
+  }
+  try {
+    return asObject(JSON.parse(line));
+  } catch {
+    return undefined;
+  }
+}
+
+function asObject(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
 /** ユーザーが直接始めた対話セッションか。index に載るのはこれだけ（設計書 §4.1）。 */
 export function isUserThread(meta: SessionMeta): boolean {
   return meta.threadSource === 'user';

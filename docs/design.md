@@ -132,6 +132,19 @@ test/
 - `originator` は環境変数 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` で任意の値に上書きできる（検証済み）。
 - アーカイブしたセッションは `~/.codex/archived_sessions/` へ**日付階層なしのフラット配置で移動**される。`unarchive` で元の `sessions/YYYY/MM/DD/` へ戻る。したがって走査対象は `sessions/**` と `archived_sessions/*` の2箇所であり、**どちらに存在するかがアーカイブ状態の判定そのものになる**。
 
+### 4.2.1 一覧の骨格はロールアウトの実在
+
+`session_index.jsonl` は**Codexが要約名を確定させてから**書かれる。indexだけを見ると、始めたばかりのセッションが履歴に出てこない（実機で確認）。
+
+そのため一覧は**ロールアウトの実在**を骨格にし、indexは要約名と更新時刻の供給元として重ねる。Claude Code側（§14.2）と同じ組み立て方になる。
+
+- 並び順は index の `updated_at`。無ければファイルの更新時刻で代用する
+- 表示名は index の `thread_name`。無ければ先頭40行から最初の指示を拾う
+- `thread_source` が `user` でない派生スレッドは出さない
+- indexにあるのにロールアウトが消えているものは、cwdが判らず開けないので出さない（`unresolved` として数える）
+
+**最初の指示の在り処は入口で異なる**。TUI経由は `event_msg` の `user_message` に入るが、チャット画面（app-server）経由のセッションにはこれが無く、`response_item` の `message`（role=user）だけが残る。後者は `turn_context` より前に AGENTS.md などの前置きが同じ形で入るため、`turn_context` 以降の最初の1件を採る。
+
 ### 4.3 パス解決とキャッシュ
 
 - `id → ロールアウトファイル` は `sessions/**/rollout-*-<id>.jsonl` と `archived_sessions/rollout-*-<id>.jsonl` のglobで解決。
