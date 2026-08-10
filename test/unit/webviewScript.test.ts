@@ -1,0 +1,38 @@
+import { describe, expect, it } from 'vitest';
+import { chatScript } from '../../src/view/chatScript';
+import { controlPanelScript } from '../../src/view/controlPanelScript';
+
+/**
+ * Webviewのスクリプトはテンプレートリテラルの中身で、型検査もlintも効かない。
+ * 壊れると画面が黙って動かなくなるため、構文だけは機械的に確かめる。
+ *
+ * `new Function` は本体を実行せず構文解析だけ行うので、`acquireVsCodeApi` などの
+ * ブラウザ側APIが無い環境でも検査できる。
+ */
+const parses = (source: string): void => {
+  new Function(source);
+};
+
+describe('chatScript', () => {
+  it('構文として成立している', () => {
+    expect(() => parses(chatScript('Codex'))).not.toThrow();
+  });
+
+  it('プロバイダ名を差し替えても壊れない', () => {
+    expect(() => parses(chatScript('Claude Code'))).not.toThrow();
+  });
+
+  it('文字列リテラルが改行で分断されていない', () => {
+    // テンプレートリテラル内に `\n` と書くと実際の改行に展開され、
+    // 文字列リテラルが途中で切れて構文エラーになる。
+    const lines = chatScript('Codex').split('\n');
+    const broken = lines.filter((line) => (line.match(/'/g)?.length ?? 0) % 2 === 1);
+    expect(broken).toEqual([]);
+  });
+});
+
+describe('controlPanelScript', () => {
+  it('構文として成立している', () => {
+    expect(() => parses(controlPanelScript())).not.toThrow();
+  });
+});

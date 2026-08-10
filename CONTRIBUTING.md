@@ -49,6 +49,7 @@ src/
   activity/   日報バッファへの作業記録
   state/      タブ構成の永続化
   view/       TreeView・設定パネル・チャット画面・会話ビューア
+              （Webviewのスクリプトは *Script.ts に分け、構文をテストで確かめる）
   util/       NDJSONなど横断的な小物
 test/unit/    上記のテスト（vscodeモジュールに非依存）
 docs/design.md  設計書
