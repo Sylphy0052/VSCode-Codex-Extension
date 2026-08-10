@@ -1,12 +1,6 @@
 import * as vscode from 'vscode';
-import {
-  ActivityLogger,
-  InMemoryLoggedSessions,
-  nodeClock,
-  resolveBufferDir,
-  retentionCutoff,
-} from './activity/activityLogger';
-import type { LoggedEntry, RecordRequest as ActivityRequest } from './activity/activityLogger';
+import { ActivityLogger, nodeClock, resolveBufferDir } from './activity/activityLogger';
+import type { RecordRequest as ActivityRequest } from './activity/activityLogger';
 import { nodeActivityAppender } from './activity/nodeAppender';
 import { claudePaths, resolveClaudeHome } from './claude/cliLocator';
 import { ClaudeProvider } from './claude/provider';
@@ -42,7 +36,6 @@ import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
 
 const META_CACHE_KEY = 'codex.metaCache.v1';
-const ACTIVITY_LOGGED_KEY = 'agent.activityLogged.v1';
 export function activate(context: vscode.ExtensionContext): void {
   const channel = vscode.window.createOutputChannel('Agent Sessions');
   const log = createLogger(channel);
@@ -68,13 +61,8 @@ export function activate(context: vscode.ExtensionContext): void {
   /** Codex固有の機能（app-server・設定パネル・破壊操作）が使う実行ファイル。 */
   const codexPath = (): string => resolveExecutable(codex, log) ?? 'codex';
 
-  const loggedSessions = new InMemoryLoggedSessions(
-    context.globalState.get<Record<string, LoggedEntry>>(ACTIVITY_LOGGED_KEY) ?? {},
-  );
-  loggedSessions.prune(retentionCutoff(new Date()));
   const activity = new ActivityLogger(
     nodeActivityAppender,
-    loggedSessions,
     () => {
       const config = readActivityLogConfig();
       return {
@@ -85,9 +73,7 @@ export function activate(context: vscode.ExtensionContext): void {
     nodeClock,
   );
   const recordActivity = (request: ActivityRequest): void => {
-    void activity.record(request).then(() => {
-      void context.globalState.update(ACTIVITY_LOGGED_KEY, loggedSessions.toRecord());
-    });
+    void activity.record(request);
   };
 
   const settings = new SettingsProvider(

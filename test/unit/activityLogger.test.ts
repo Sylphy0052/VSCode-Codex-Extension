@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  ActivityLogger,
-  InMemoryLoggedSessions,
-  resolveBufferDir,
-} from '../../src/activity/activityLogger';
+import { ActivityLogger, resolveBufferDir } from '../../src/activity/activityLogger';
 
 interface Appended {
   filePath: string;
@@ -12,18 +8,16 @@ interface Appended {
 
 const makeLogger = (options?: { enabled?: boolean; dir?: string }) => {
   const appended: Appended[] = [];
-  const logged = new InMemoryLoggedSessions();
   const logger = new ActivityLogger(
     {
       append: async (filePath, line) => {
         appended.push({ filePath, line });
       },
     },
-    logged,
     () => ({ enabled: options?.enabled ?? true, dir: options?.dir ?? '/buf' }),
     { now: () => new Date('2026-08-06T15:30:00Z'), timeZoneOffsetMinutes: () => -540 },
   );
-  return { logger, appended, logged };
+  return { logger, appended };
 };
 
 describe('ActivityLogger', () => {
@@ -100,12 +94,10 @@ describe('ActivityLogger', () => {
   });
 
   it('書き込みに失敗しても例外を投げない（会話を止めない）', async () => {
-    const logged = new InMemoryLoggedSessions();
     const logger = new ActivityLogger(
       {
         append: () => Promise.reject(new Error('EACCES')),
       },
-      logged,
       () => ({ enabled: true, dir: '/buf' }),
       { now: () => new Date('2026-08-06T15:30:00Z'), timeZoneOffsetMinutes: () => -540 },
     );
@@ -130,98 +122,6 @@ describe('ActivityLogger', () => {
     expect(parsed.kind).toBe('result');
     expect(parsed.text).toBe('実装を完了しました [edit: src/a.ts]');
   });
-
-  describe('suppressDuplicates: true（同期経路の重複抑止）', () => {
-    it('直前と同じ内容なら書かない', async () => {
-      const { logger, appended } = makeLogger();
-      const entry = {
-        sessionId: 'a',
-        source: 'codex' as const,
-        cwd: '/w/repo',
-        kind: 'prompt' as const,
-        text: '同じ要約',
-        suppressDuplicates: true,
-      };
-
-      await logger.record(entry);
-      await logger.record(entry);
-
-      expect(appended).toHaveLength(1);
-    });
-
-    it('内容が変われば書き直す', async () => {
-      const { logger, appended } = makeLogger();
-      const base = {
-        sessionId: 'a',
-        source: 'codex' as const,
-        cwd: '/w/repo',
-        kind: 'prompt' as const,
-        suppressDuplicates: true,
-      };
-
-      await logger.record({ ...base, text: '最初の要約' });
-      await logger.record({ ...base, text: '更新後の要約' });
-
-      expect(appended).toHaveLength(2);
-      expect(JSON.parse(appended[1]!.line).text).toBe('更新後の要約');
-    });
-
-    it('suppressDuplicatesが無い呼び出し（実発言）は同じ内容でも毎回書く', async () => {
-      const { logger, appended } = makeLogger();
-      const entry = {
-        sessionId: 'a',
-        source: 'codex' as const,
-        cwd: '/w/repo',
-        kind: 'prompt' as const,
-        text: '同じ発言',
-      };
-
-      await logger.record(entry);
-      await logger.record(entry);
-
-      expect(appended).toHaveLength(2);
-    });
-
-    it('書き込みに失敗したら記憶しない（次の契機で書き直せる）', async () => {
-      const logged = new InMemoryLoggedSessions();
-      let shouldFail = true;
-      const appended: Appended[] = [];
-      const logger = new ActivityLogger(
-        {
-          append: async (filePath, line) => {
-            if (shouldFail) {
-              throw new Error('EACCES');
-            }
-            appended.push({ filePath, line });
-          },
-        },
-        logged,
-        () => ({ enabled: true, dir: '/buf' }),
-        { now: () => new Date('2026-08-06T15:30:00Z'), timeZoneOffsetMinutes: () => -540 },
-      );
-
-      await logger.record({
-        sessionId: 'a',
-        source: 'codex',
-        cwd: '/w/repo',
-        kind: 'prompt',
-        text: '要約',
-        suppressDuplicates: true,
-      });
-      expect(appended).toHaveLength(0);
-
-      shouldFail = false;
-      await logger.record({
-        sessionId: 'a',
-        source: 'codex',
-        cwd: '/w/repo',
-        kind: 'prompt',
-        text: '要約',
-        suppressDuplicates: true,
-      });
-      expect(appended).toHaveLength(1);
-    });
-  });
 });
 
 describe('resolveBufferDir', () => {
@@ -237,17 +137,5 @@ describe('resolveBufferDir', () => {
 
   it('どちらも無ければ ~/workspace/dairy/.buffer', () => {
     expect(resolveBufferDir('', {}, home)).toBe('/home/u/workspace/dairy/.buffer');
-  });
-});
-
-describe('InMemoryLoggedSessions', () => {
-  it('保持期間を過ぎたエントリを掃除する', () => {
-    const logged = new InMemoryLoggedSessions({
-      old: { day: '2026-06-01', text: '古い要約' },
-      fresh: { day: '2026-08-06', text: '新しい要約' },
-    });
-    logged.prune('2026-07-08');
-    expect(logged.lastText('old')).toBeUndefined();
-    expect(logged.lastText('fresh')).toBe('新しい要約');
   });
 });

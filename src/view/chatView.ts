@@ -45,8 +45,6 @@ export interface ChatActivity {
   text: string;
   /** `kind: 'result'` のときだけ使う。そのターンで編集したファイルパス。 */
   editedFiles?: readonly string[];
-  /** 同じ内容の再記録を抑止するか。同期経路（syncTabNames等）だけ true にする。 */
-  suppressDuplicates?: boolean;
 }
 
 /**
