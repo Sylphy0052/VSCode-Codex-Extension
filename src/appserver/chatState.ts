@@ -440,6 +440,27 @@ export function applyEvent(
   }
 }
 
+/** 指示の送り先。 */
+export type SendRoute =
+  /** 新しいターンを始める。 */
+  | 'start'
+  /** 進行中のターンへ割り込む。 */
+  | 'steer'
+  /** 送れないので待ち行列へ積む。 */
+  | 'queue';
+
+/**
+ * 応答中の指示をどう送るか決める。
+ *
+ * `turn/steer` は割り込む先のターンidを要求する。idが判らない場合だけ待ち行列へ回す。
+ */
+export function routeSend(state: ChatState): SendRoute {
+  if (!state.busy) {
+    return 'start';
+  }
+  return state.turnId === undefined ? 'queue' : 'steer';
+}
+
 /** 応答中の指示を待ち行列の末尾へ積む。 */
 export function enqueue(state: ChatState, text: string): ChatState {
   if (text.trim() === '') {

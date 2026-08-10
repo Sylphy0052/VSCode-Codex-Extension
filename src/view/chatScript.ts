@@ -282,7 +282,8 @@ export function chatScript(agentLabel: string): string {
     }
 
     box.hidden = false;
-    el('queueLabel').textContent = '応答が終わってから送ります（' + queued.length + '件）';
+    // 割り込めなかった指示だけがここに残る
+    el('queueLabel').textContent = '割り込めなかったので待っています（' + queued.length + '件）';
     list.replaceChildren();
     queued.forEach((text, index) => {
       const li = document.createElement('li');
@@ -324,7 +325,7 @@ export function chatScript(agentLabel: string): string {
 
     renderQueue(state.queued);
     el('stop').hidden = !state.busy;
-    // 応答中でも送れる。送った指示は待ち行列に積まれる
+    // 応答中でも送れる。進行中のターンへ割り込むので、応答は止まらない
     el('send').disabled = false;
     applyLoop(state.loop);
     const bits = [];

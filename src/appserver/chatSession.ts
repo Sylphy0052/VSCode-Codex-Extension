@@ -15,6 +15,7 @@ import {
   normalizeItem,
   removeApproval,
   removeQueued,
+  routeSend,
   takeQueued,
   type ChatState,
   type PendingApproval,
@@ -124,17 +125,49 @@ export class ChatSession {
   }
 
   /**
-   * 発言を送る。応答中なら待ち行列へ積む。
+   * 進行中のターンへ割り込んで指示を足す。
    *
-   * CLIは応答中の指示を受け取れないため、送れるようになるまで持っておく。
+   * app-serverは割り込む先のターンidを要求し、それが現在のターンと違えば失敗する。
+   * 応答は止まらないので、途中で方針を足すのに使える。
+   */
+  async steer(text: string): Promise<void> {
+    const threadId = this.state.threadId;
+    const turnId = this.state.turnId;
+    if (threadId === undefined || turnId === undefined) {
+      throw new Error('割り込む先のターンがありません');
+    }
+    await this.connection.request('turn/steer', {
+      threadId,
+      expectedTurnId: turnId,
+      input: [{ type: 'text', text }],
+    });
+  }
+
+  /**
+   * 発言を送る。応答中なら割り込んで送る。
+   *
+   * 割り込めない場合（ターンidが判らない、ターンが終わった直後で id が食い違う）は
+   * 指示を捨てずに待ち行列へ積み、ターンが終わってから送る。
    */
   async sendOrQueue(text: string, config: CodexConfig): Promise<'sent' | 'queued'> {
-    if (this.state.busy) {
-      this.update(enqueue(this.state, text));
-      return 'queued';
+    const route = routeSend(this.state);
+    if (route === 'start') {
+      await this.send(text, config);
+      return 'sent';
     }
-    await this.send(text, config);
-    return 'sent';
+
+    if (route === 'steer') {
+      try {
+        await this.steer(text);
+        return 'sent';
+      } catch (e) {
+        // ターンが入れ替わった直後など。指示を失わないよう積み直す
+        this.log.warn(`割り込めなかったため待ち行列へ積みます: ${message(e)}`);
+      }
+    }
+
+    this.update(enqueue(this.state, text));
+    return 'queued';
   }
 
   /** 待機中の指示を1件取り消す。 */
@@ -143,28 +176,38 @@ export class ChatSession {
   }
 
   /**
-   * 応答を止めて、待機中の指示をすぐ送る。
+   * 待機中の指示をすぐ送る。
    *
-   * 応答中に割り込んで送る手段がCLIに無いため、中断を挟む。
+   * 応答中でも `turn/steer` で割り込めるため、中断は挟まない。
    */
   async flushQueue(config: CodexConfig): Promise<void> {
     if (this.state.queued.length === 0) {
       return;
     }
-    if (this.state.busy) {
-      await this.interrupt();
-    }
     await this.sendNextQueued(config);
   }
 
-  /** 待機中の先頭を送る。ターンが終わったときに呼ぶ。 */
+  /**
+   * 待機中の先頭を送る。ターンが終わったときと、すぐ送るときに呼ぶ。
+   * 送信に失敗したら積み直す（取り出したまま失われないようにする）。
+   */
   async sendNextQueued(config: CodexConfig): Promise<void> {
     const { text, next } = takeQueued(this.state);
     if (text === undefined) {
       return;
     }
+    const route = routeSend(this.state);
     this.update(next);
-    await this.send(text, config);
+    try {
+      if (route === 'steer') {
+        await this.steer(text);
+        return;
+      }
+      await this.send(text, config);
+    } catch (e) {
+      this.update(enqueue(this.state, text));
+      throw e instanceof Error ? e : new Error(message(e));
+    }
   }
 
   /**
@@ -259,6 +302,10 @@ export class ChatSession {
       this.decide(requestId, 'cancel');
     }
   }
+}
+
+function message(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 function readThreadId(result: unknown): string | undefined {
