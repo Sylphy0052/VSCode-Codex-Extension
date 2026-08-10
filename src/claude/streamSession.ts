@@ -15,6 +15,7 @@ import { consumeNdjson } from '../util/ndjson';
 import { buildClaudeStreamArgs } from './argvBuilder';
 import {
   buildCanUseToolResponse,
+  defaultDenyControlResponse,
   buildControlRequest,
   buildControlResponse,
   buildUserMessage,
@@ -229,9 +230,7 @@ export class ClaudeStreamSession {
     this.sawApprovalRequest = true;
     const approval = describeCanUseTool(request.requestId, request.payload);
     if (approval === undefined) {
-      this.write(
-        buildControlResponse(request.requestId, { behavior: 'deny', message: '解釈不能' }),
-      );
+      this.write(buildControlResponse(request.requestId, defaultDenyControlResponse()));
       return;
     }
 

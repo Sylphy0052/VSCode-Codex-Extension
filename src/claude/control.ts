@@ -119,9 +119,13 @@ export function buildCanUseToolResponse(
   return { behavior: 'deny', message: 'ユーザーが拒否しました' };
 }
 
-/** ユーザーに聞けない要求への既定応答。拒否側に倒す。 */
+/**
+ * ユーザーに聞けない要求への既定応答。
+ *
+ * 内容を読み取れない要求を許可してしまうと、目に触れないまま実行される。必ず拒否側に倒す。
+ */
 export function defaultDenyControlResponse(): Record<string, unknown> {
-  return { behavior: 'deny', message: '対応する画面がありません' };
+  return { behavior: 'deny', message: '内容を読み取れないため拒否しました' };
 }
 
 function summarizeInput(input: Record<string, unknown>): string {
