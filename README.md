@@ -8,103 +8,123 @@ CLIコーディングエージェント（Codex / Claude Code）のセッショ�
 - 会話の途中から分岐して、別のタブで続きをやり直す（Codex）
 - 実行したセッションを日報・週報システムへ流す
 
-## 2つの画面
-
-用途の異なる2方式を併存させている。どちらもエディタタブとして開く。
-
-| | チャット画面 | TUIタブ |
-| --- | --- | --- |
-| 描画 | 拡張機能が自前で描画 | CLI本体のTUIが担当 |
-| 設定の反映 | 次の発言から即座に（Codex） | 次のセッションから |
-| 会話途中からの分岐 | 画面内のボタンで直接（Codex） | 履歴から会話ビューアを開く |
-| 承認 | 画面内のカードで許可/拒否 | CLI本来のプロンプト |
-| スラッシュコマンド | 使えない | `/review` `/compact` など全て使える |
-
-日常的な対話はチャット画面、スラッシュコマンドが必要な場面やチャット画面が未対応の表示に当たった場合はTUIタブ、という使い分けを想定している。
-
-## 対応CLI
-
-| | Codex | Claude Code |
-| --- | --- | --- |
-| TUIタブ（新規 / 再開 / タブ復元） | ○ | ○ |
-| チャット画面（承認・中断込み） | ○（app-server） | ○（stream-json） |
-| fork（セッション全体） | ○ | ○（新しいidは追跡できない） |
-| 会話の途中のターンから分岐 | ○ | ×（CLIに手段が無い） |
-| archive / unarchive / delete | ○ | ×（CLIに手段が無い） |
-| 使用量のステータスバー表示 | ○ | － |
-
-Claude Codeには会話の要約名が無いため、一覧とタブ名は最初の指示から作る。
-
-## 開発状況
-
-**動作するが、実機での検証は途上。**
-
-| 領域 | 状態 |
-| --- | --- |
-| 純粋ロジック層（引数組み立て・パーサ・一覧・紐付け・状態遷移） | 完了、テスト264件 |
-| TUIタブ方式（起動・履歴・復元・fork/archive/delete） | 実装完了、Codexの紐付けを実機確認済み |
-| Codex画面（対話・承認・分岐・タブ名） | 実装完了、実機未確認 |
-| Claude Code画面（対話・承認・中断） | 実装完了、CLIの前提（`--session-id`・control protocol）のみ実機確認済み |
-| 作業記録の日報連携 | 実装完了、収集スクリプトとの疎通を確認済み |
+**状態: 動作するが実機での検証は途上。** 詳細は[開発状況](#開発状況)を参照。
 
 ## 必要環境
 
 - VSCode 1.90以降
 - Node.js 20以降
-- [Codex CLI](https://developers.openai.com/codex/) または [Claude Code](https://code.claude.com/docs/en/quickstart) がPATH上にあること
+- [Codex CLI](https://developers.openai.com/codex/) または [Claude Code](https://code.claude.com/docs/en/quickstart) がPATH上にあること（両方でも片方でもよい）
 
-WSL Remoteなどリモート環境で開発している場合、CLIもその環境側に必要になる。この拡張機能は `extensionKind: ["workspace"]` として動作するため、UI側（Windows等）のCLIは参照しない。
+WSL RemoteやDev Containerなどリモート環境で開発している場合、CLIもその環境側に必要になる。この拡張機能は `extensionKind: ["workspace"]` として動作するため、UI側（Windows等）のCLIは参照しない。
+
+## インストール
+
+Marketplaceには未公開のため、vsixを作ってインストールする。
+
+```bash
+git clone https://github.com/Sylphy0052/VSCode-Codex-Extension.git
+cd VSCode-Codex-Extension
+npm install
+npm run package                                    # vscode-codex-extension-<version>.vsix を生成
+code --install-extension vscode-codex-extension-0.0.1.vsix
+```
+
+VSCodeのUIからインストールする場合は、拡張機能ビューの右上「...」→「Install from VSIX...」で同じvsixを選ぶ。インストール後にウィンドウをリロードすると、アクティビティバーにCodexのアイコンが増える。
+
+## クイックスタート
+
+1. アクティビティバーのCodexアイコンを開く
+2. 履歴ビューのタイトルバーにあるアイコンから、使いたい方法でセッションを開始する
+   - 吹き出し / スパークル: チャット画面（拡張機能が描画する会話UI）
+   - `+` / スパークル: TUIタブ（CLI本体の画面をそのままエディタタブで開く）
+3. 会話するとサイドバーの履歴に積まれる。次からは履歴をクリックすれば再開できる
+4. ウィンドウをリロードしても、開いていたタブは同じ列・同じ並び順で戻る
+
+セッションがまだ無いワークスペースでは、履歴ビューに新規セッションへの導線が表示される。
+
+## 2つの画面
+
+用途の異なる2方式を併存させている。どちらもエディタタブとして開く。
+
+|                    | チャット画面                  | TUIタブ                             |
+| ------------------ | ----------------------------- | ----------------------------------- |
+| 描画               | 拡張機能が自前で描画          | CLI本体のTUIが担当                  |
+| 設定の反映         | 次の発言から即座に（Codex）   | 次のセッションから                  |
+| 会話途中からの分岐 | 画面内のボタンで直接（Codex） | 履歴から会話ビューアを開く          |
+| 承認               | 画面内のカードで許可/拒否     | CLI本来のプロンプト                 |
+| スラッシュコマンド | 使えない                      | `/review` `/compact` など全て使える |
+
+日常的な対話はチャット画面、スラッシュコマンドが必要な場面やチャット画面が未対応の表示に当たった場合はTUIタブ、という使い分けを想定している。
+
+## 対応CLI
+
+|                                   | Codex           | Claude Code                 |
+| --------------------------------- | --------------- | --------------------------- |
+| TUIタブ（新規 / 再開 / タブ復元） | ○               | ○                           |
+| チャット画面（承認・中断込み）    | ○（app-server） | ○（stream-json）            |
+| fork（セッション全体）            | ○               | ○（新しいidは追跡できない） |
+| 会話の途中のターンから分岐        | ○               | ×（CLIに手段が無い）        |
+| archive / unarchive / delete      | ○               | ×（CLIに手段が無い）        |
+| セッション名の変更                | ○               | ×（要約名の概念が無い）     |
+| 使用量のステータスバー表示        | ○               | －                          |
+
+Claude Codeには会話の要約名が無いため、一覧とタブ名は最初の指示から作る。対応しない操作は履歴のコンテキストメニューに出さない。
 
 ## 使い方
 
-| 操作 | 導線 |
-| --- | --- |
-| 新しい会話（チャット画面） | サイドバーの吹き出し / スパークルアイコン |
-| 新しいセッション（TUIタブ） | サイドバーの `+`（Codex）/ スパークル（Claude Code） |
-| 過去セッションを再開 | サイドバーの履歴をクリック |
-| チャット画面で開く | 履歴の項目にホバー → 吹き出し / スパークルアイコン |
-| 会話の途中から分岐 | Codex画面の各発言にある「ここから分岐」 |
-| 履歴から会話を読んで分岐 | 履歴の項目にホバー → ブランチアイコン（Codexのみ） |
-| セッション名の変更 | Codex画面がアクティブなときエディタ右上の鉛筆アイコン |
-| モデル/effort/承認の切替 | サイドバーの設定パネル、またはCodex画面の入力欄下 |
-| 使用量の確認 | ステータスバー（常時表示） |
+| 操作                                        | 導線                                                  |
+| ------------------------------------------- | ----------------------------------------------------- |
+| 新しい会話（チャット画面）                  | サイドバーの吹き出し / スパークルアイコン             |
+| 新しいセッション（TUIタブ）                 | サイドバーの `+`（Codex）/ スパークル（Claude Code）  |
+| 過去セッションを再開                        | サイドバーの履歴をクリック                            |
+| チャット画面で開く                          | 履歴の項目にホバー → 吹き出し / スパークルアイコン    |
+| 会話の途中から分岐                          | Codex画面の各発言にある「ここから分岐」               |
+| 履歴から会話を読んで分岐                    | 履歴の項目にホバー → ブランチアイコン（Codexのみ）    |
+| セッションのfork / archive / delete         | 履歴の項目を右クリック                                |
+| セッション名の変更                          | Codex画面がアクティブなときエディタ右上の鉛筆アイコン |
+| 表示範囲の切替（このワークスペース / 全体） | 履歴ビューのタイトルバー                              |
+| モデル/effort/承認の切替                    | サイドバーの設定パネル、またはCodex画面の入力欄下     |
+| 使用量の確認                                | ステータスバー（常時表示）                            |
+
+主要な操作はコマンドパレット（`Ctrl+Shift+P`）の `Codex:` からも実行できる。
 
 ## 設定
 
 ### Codex
 
-| キー | 既定 | スコープ | 説明 |
-| --- | --- | --- | --- |
-| `codex.executablePath` | `codex` | machine | 実行ファイルのパス |
-| `codex.codexHome` | `""` | machine | 空なら `CODEX_HOME` → `~/.codex` |
-| `codex.additionalArgs` | `[]` | machine | 任意の追加引数 |
-| `codex.sandbox` | `""` | machine | `read-only` / `workspace-write` / `danger-full-access` |
-| `codex.approvalMode` | `""` | machine | `untrusted` / `on-request` / `never` |
-| `codex.model` | `""` | machine-overridable | 空なら `-m` を渡さない |
-| `codex.reasoningEffort` | `""` | machine-overridable | `model_reasoning_effort`。選択肢はモデルごとに異なる |
-| `codex.profile` | `""` | machine-overridable | `-p` に渡すプロファイル名 |
+| キー                    | 既定    | スコープ            | 説明                                                   |
+| ----------------------- | ------- | ------------------- | ------------------------------------------------------ |
+| `codex.executablePath`  | `codex` | machine             | 実行ファイルのパス                                     |
+| `codex.codexHome`       | `""`    | machine             | 空なら `CODEX_HOME` → `~/.codex`                       |
+| `codex.additionalArgs`  | `[]`    | machine             | 任意の追加引数                                         |
+| `codex.sandbox`         | `""`    | machine             | `read-only` / `workspace-write` / `danger-full-access` |
+| `codex.approvalMode`    | `""`    | machine             | `untrusted` / `on-request` / `never`                   |
+| `codex.model`           | `""`    | machine-overridable | 空なら `-m` を渡さない                                 |
+| `codex.reasoningEffort` | `""`    | machine-overridable | `model_reasoning_effort`。選択肢はモデルごとに異なる   |
+| `codex.profile`         | `""`    | machine-overridable | `-p` に渡すプロファイル名                              |
 
 ### Claude Code
 
-| キー | 既定 | スコープ | 説明 |
-| --- | --- | --- | --- |
-| `claude.executablePath` | `claude` | machine | 実行ファイルのパス |
-| `claude.configDir` | `""` | machine | 空なら `CLAUDE_CONFIG_DIR` → `~/.claude` |
-| `claude.additionalArgs` | `[]` | machine | 任意の追加引数 |
-| `claude.permissionMode` | `""` | machine | `manual` / `auto` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
-| `claude.model` | `""` | machine-overridable | エイリアス（`opus` 等）か正式名。空なら `--model` を渡さない |
-| `claude.effort` | `""` | machine-overridable | `low` / `medium` / `high` / `xhigh` / `max` |
+| キー                    | 既定     | スコープ            | 説明                                                                         |
+| ----------------------- | -------- | ------------------- | ---------------------------------------------------------------------------- |
+| `claude.executablePath` | `claude` | machine             | 実行ファイルのパス                                                           |
+| `claude.configDir`      | `""`     | machine             | 空なら `CLAUDE_CONFIG_DIR` → `~/.claude`                                     |
+| `claude.additionalArgs` | `[]`     | machine             | 任意の追加引数                                                               |
+| `claude.permissionMode` | `""`     | machine             | `manual` / `auto` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
+| `claude.model`          | `""`     | machine-overridable | エイリアス（`opus` 等）か正式名。空なら `--model` を渡さない                 |
+| `claude.effort`         | `""`     | machine-overridable | `low` / `medium` / `high` / `xhigh` / `max`                                  |
 
 ### 共通
 
-| キー | 既定 | スコープ | 説明 |
-| --- | --- | --- | --- |
-| `codex.restore.enabled` | `true` | window | 再起動時の自動resume |
-| `codex.restore.maxTabs` | `8` | window | 復元するタブ数の上限 |
-| `codex.history.scope` | `workspace` | window | `workspace` / `all` |
-| `codex.history.maxEntries` | `200` | window | 一覧構築の上限件数 |
-| `agent.activityLog.enabled` | `true` | window | 実行したセッションを日報バッファへ記録する |
-| `agent.activityLog.dir` | `""` | machine | 空なら `DAILY_BUFFER_DIR` → `~/workspace/dairy/.buffer` |
+| キー                        | 既定        | スコープ | 説明                                                    |
+| --------------------------- | ----------- | -------- | ------------------------------------------------------- |
+| `codex.restore.enabled`     | `true`      | window   | 再起動時の自動resume                                    |
+| `codex.restore.maxTabs`     | `8`         | window   | 復元するタブ数の上限                                    |
+| `codex.history.scope`       | `workspace` | window   | `workspace` / `all`                                     |
+| `codex.history.maxEntries`  | `200`       | window   | 一覧構築の上限件数                                      |
+| `agent.activityLog.enabled` | `true`      | window   | 実行したセッションを日報バッファへ記録する              |
+| `agent.activityLog.dir`     | `""`        | machine  | 空なら `DAILY_BUFFER_DIR` → `~/workspace/dairy/.buffer` |
 
 空文字は「そのフラグを渡さない」を意味し、CLI側の設定（`~/.codex/config.toml` / `~/.claude/settings.json`）に委譲する。設定パネルには委譲先の実際の値が `既定: gpt-5.6-terra` のように表示される。
 
@@ -123,36 +143,51 @@ WSL Remoteなどリモート環境で開発している場合、CLIもその環�
 
 `~/.claude/scripts/daily/collect.py` がこのバッファを読み、日報・週報の作業ログに載る。拡張機能経由のClaude Codeセッションは transcript 走査とも重複しうるため、収集側で1件に畳んでいる（設計書 §15.4）。
 
-## 開発
+## トラブルシューティング
 
-```bash
-npm install
-npm run check     # lint + typecheck + test
-npm test          # テストのみ
-npm run build     # dist/extension.js を生成
-```
+**「`codex` コマンドが見つかりません」と出る**
+PATH上にCLIが無い。通知の「インストール手順」から導入するか、「設定を開く」で `codex.executablePath` / `claude.executablePath` に絶対パスを入れる。WSL Remoteの場合、Windows側にインストールしたCLIは見えない点に注意。
 
-F5（Run Extension）で拡張機能ホストが起動する。`scripts/check.sh` はcommit前に全緑であることを必須とする。
+**リモート環境でCLIを入れてあるのに見つからない**
+VSCodeが読むPATHはシェルの対話設定（`.bashrc` 等）を経ないことがある。`which codex` で得た絶対パスを設定に入れるのが確実。
 
-### 構成
+**Claude Code画面で「ツール実行の承認を受け取れませんでした」と出る**
+承認のやり取りに使うプロトコルが利用できない構成。会話自体は続き、以後は `claude.permissionMode` の設定に従う。確認なしで実行させたくない場合は `manual` を指定する。
 
-```
-src/
-  provider/   プロバイダ抽象（AgentProvider・registry）
-  codex/      Codex CLIとの境界（引数組み立て・パーサ・カタログ・使用量）
-  claude/     Claude Code CLIとの境界（引数組み立て・transcript・stream-json・承認）
-  appserver/  app-serverとの接続・会話状態・承認（ChatStateは両CLI共通）
-  session/    セッション一覧・監視・破壊操作
-  terminal/   TUIタブの端末管理とセッションIDの紐付け
-  activity/   日報バッファへの作業記録
-  state/      タブ構成の永続化
-  view/       TreeView・設定パネル・チャット画面・会話ビューア
-  util/       NDJSONなど横断的な小物
-test/unit/    上記のテスト（vscodeモジュールに非依存）
-docs/design.md  設計書
-```
+**タブが復元されない**
+`codex.restore.enabled` が `false`、または `codex.restore.maxTabs` の上限に達している。閉じたタブは意図的に復元対象から外れる。Claude Codeのforkで作ったセッションもidを追えないため復元されない。
 
-`src/codex` `src/claude`（`provider.ts` を除く）・`src/session` `src/state` `src/activity` `src/util` `src/appserver/chatState` などのロジック層は `vscode` モジュールをimportしない。実VSCodeを起動せずにテストできる状態を保つための制約。
+**履歴に過去のセッションが出ない**
+既定では現在のワークスペースのセッションだけを表示する。履歴ビューのタイトルバーで「全ワークスペースを表示」に切り替える。件数は `codex.history.maxEntries` で頭打ちになる。
+
+**それでも原因が分からない**
+コマンドパレットの `Codex: Show Log`（出力チャネル `Codex Sessions`）に、起動した引数や失敗理由が出る。不具合報告にはこのログを添えてほしい。
+
+## 既知の制約
+
+- **Codex画面が依存するapp-serverはexperimental**: 将来のCLI更新で挙動が変わりうる。壊れた場合はTUIタブが退避先になる
+- **チャット画面はスラッシュコマンド非対応**: `/review` `/compact` などはTUIタブで使う
+- **マルチルートワークスペース**: フォルダを1つだけ選ぶ（アクティブエディタが属するフォルダ、なければ先頭）
+- **復元は会話履歴ベース**: TUIのスクロールバックや画面状態は戻らない
+- **ウィンドウを跨いだ排他はしない**: 同一ウィンドウ内の二重オープンは防ぐが、別ウィンドウで同じセッションを開くことは止めない
+- **CLIから直接archive/deleteした場合**: 履歴は追従するが、開いているタブは残る
+
+## 開発状況
+
+| 領域                                                           | 状態                                                                    |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| 純粋ロジック層（引数組み立て・パーサ・一覧・紐付け・状態遷移） | 完了、テスト264件                                                       |
+| TUIタブ方式（起動・履歴・復元・fork/archive/delete）           | 実装完了、Codexの紐付けを実機確認済み                                   |
+| Codex画面（対話・承認・分岐・タブ名）                          | 実装完了、実機未確認                                                    |
+| Claude Code画面（対話・承認・中断）                            | 実装完了、CLIの前提（`--session-id`・control protocol）のみ実機確認済み |
+| 作業記録の日報連携                                             | 実装完了、収集スクリプトとの疎通を確認済み                              |
+| パッケージング（vsix生成）                                     | 完了                                                                    |
+
+実VSCodeでしか確認できない範囲のチェックリストは [docs/manual-test.md](docs/manual-test.md) にある。
+
+## 開発に参加する
+
+ビルド・テスト・アーキテクチャは [CONTRIBUTING.md](CONTRIBUTING.md)、設計の背景と検証結果は [docs/design.md](docs/design.md) を参照。
 
 ## ライセンス
 
