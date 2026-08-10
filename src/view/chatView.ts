@@ -497,7 +497,12 @@ export class ChatViewManager implements vscode.Disposable {
     if (target === undefined) {
       // 対応する画面が無い要求に「許可」を返してはいけない
       this.log.warn(`宛先不明の要求を拒否しました: ${request.method}`);
-      return defaultDenyResponse(request.method);
+      const denial = defaultDenyResponse(request.method, request.params);
+      if (denial === undefined) {
+        // 応答の値を作れない要求。捏造せずエラーで相手を解放する
+        throw new Error(`この拡張機能は ${request.method} に応答できません`);
+      }
+      return denial;
     }
     return target.session.requestApproval(request);
   }

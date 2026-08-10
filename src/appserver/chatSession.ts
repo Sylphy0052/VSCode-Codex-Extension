@@ -1,6 +1,12 @@
 import type { CodexConfig } from '../codex/types';
 import type { Logger } from '../log';
-import { buildApprovalResponse, describeApproval, type ApprovalDecision } from './approvals';
+import {
+  buildApprovalResponse,
+  defaultDenyResponse,
+  describeApproval,
+  SERVER_REQUEST_RESOLVED,
+  type ApprovalDecision,
+} from './approvals';
 import {
   addApproval,
   applyEvent,
@@ -185,6 +191,12 @@ export class ChatSession {
   }
 
   applyNotification(method: string, params: Record<string, unknown>): void {
+    if (method === SERVER_REQUEST_RESOLVED) {
+      const requestId = params['requestId'];
+      if (typeof requestId === 'number' || typeof requestId === 'string') {
+        this.dropResolvedApproval(requestId);
+      }
+    }
     const next = applyEvent(this.state, method, params);
     if (next !== this.state) {
       this.update(next);
@@ -198,13 +210,35 @@ export class ChatSession {
   requestApproval(request: ServerRequest): Promise<unknown> {
     const approval = describeApproval(request.id, request.method, request.params);
     if (approval === undefined) {
-      return Promise.resolve({ decision: 'decline' });
+      // 承認カードに出せない要求。要求ごとに形の合う拒否を返す
+      const denial = defaultDenyResponse(request.method, request.params);
+      if (denial === undefined) {
+        // 値を捏造せず、エラーとして相手を解放する
+        this.log.warn(`応答を組み立てられない要求を拒否しました: ${request.method}`);
+        return Promise.reject(new Error(`この拡張機能は ${request.method} に応答できません`));
+      }
+      this.log.info(`画面に出せない要求を拒否しました: ${request.method}`);
+      return Promise.resolve(denial);
     }
 
     return new Promise<unknown>((resolve) => {
       this.waiting.set(request.id, { resolve, approval, params: request.params });
       this.update(addApproval(this.state, approval));
     });
+  }
+
+  /**
+   * 承認が別の経路で解決されたとき。応答は返さず、画面の保留だけを取り下げる。
+   *
+   * 同じスレッドを別のウィンドウやTUIでも開いている場合、そちらの承認でこちらの
+   * カードが宙に浮く。`serverRequest/resolved` を受けてここで片付ける。
+   */
+  private dropResolvedApproval(requestId: number | string): void {
+    if (!this.waiting.has(requestId)) {
+      return;
+    }
+    this.waiting.delete(requestId);
+    this.log.info(`他の経路で解決された承認を取り下げました: ${String(requestId)}`);
   }
 
   /** ユーザーが承認カードのボタンを押したとき。 */

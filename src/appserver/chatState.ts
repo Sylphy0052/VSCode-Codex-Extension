@@ -14,7 +14,11 @@ export interface ChatItem {
 export interface PendingApproval {
   /** JSON-RPCの要求id。応答を返すときに使う。 */
   requestId: number | string;
-  kind: 'command' | 'fileChange' | 'permissions';
+  /**
+   * 要求の種類。応答の形がこれで決まる。
+   * `applyPatch` と `execCommand` は旧形式で、decisionの語彙が他と違う。
+   */
+  kind: 'command' | 'fileChange' | 'permissions' | 'applyPatch' | 'execCommand';
   title: string;
   detail: string;
 }
@@ -333,6 +337,16 @@ export function applyEvent(
           limited: state.usage?.limited,
         },
       };
+    }
+
+    case 'serverRequest/resolved': {
+      // 別のウィンドウやTUIで承認された。こちらのカードは用済み
+      const requestId = params['requestId'];
+      if (typeof requestId !== 'number' && typeof requestId !== 'string') {
+        return state;
+      }
+      const next = removeApproval(state, requestId);
+      return next.approvals.length === state.approvals.length ? state : next;
     }
 
     default:
