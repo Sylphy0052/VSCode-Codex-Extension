@@ -197,7 +197,10 @@ describe('applyEvent', () => {
   it('turn/failedでも成果を作る（失敗しても応答・編集が残ることがあるため）', () => {
     const state = feed(initialChatState, [
       ['turn/started', { turn: { id: TURN } }],
-      ['item/completed', { item: { type: 'agentMessage', id: 'a1', text: '途中まで' }, turnId: TURN }],
+      [
+        'item/completed',
+        { item: { type: 'agentMessage', id: 'a1', text: '途中まで' }, turnId: TURN },
+      ],
       ['turn/failed', {}],
     ]);
     expect(state.turnResultText).toBe('途中まで');
@@ -206,7 +209,10 @@ describe('applyEvent', () => {
   it('turn/startedで前のターンの成果をリセットする', () => {
     const finished = feed(initialChatState, [
       ['turn/started', { turn: { id: TURN } }],
-      ['item/completed', { item: { type: 'agentMessage', id: 'a1', text: '前回の応答' }, turnId: TURN }],
+      [
+        'item/completed',
+        { item: { type: 'agentMessage', id: 'a1', text: '前回の応答' }, turnId: TURN },
+      ],
       ['turn/completed', {}],
     ]);
     expect(finished.turnResultText).toBe('前回の応答');
@@ -220,7 +226,14 @@ describe('applyEvent', () => {
 describe('summarizeTurn', () => {
   const items: ChatState['items'] = [
     { id: 'u1', kind: 'userMessage', text: '直して', detail: '', status: undefined, turnId: TURN },
-    { id: 'a1', kind: 'agentMessage', text: '直しました', detail: '', status: undefined, turnId: TURN },
+    {
+      id: 'a1',
+      kind: 'agentMessage',
+      text: '直しました',
+      detail: '',
+      status: undefined,
+      turnId: TURN,
+    },
     {
       id: 'f1',
       kind: 'fileChange',
@@ -248,8 +261,22 @@ describe('summarizeTurn', () => {
 
   it('複数のagentMessageは改行で連結する', () => {
     const multi: ChatState['items'] = [
-      { id: 'a1', kind: 'agentMessage', text: '一つ目', detail: '', status: undefined, turnId: TURN },
-      { id: 'a2', kind: 'agentMessage', text: '二つ目', detail: '', status: undefined, turnId: TURN },
+      {
+        id: 'a1',
+        kind: 'agentMessage',
+        text: '一つ目',
+        detail: '',
+        status: undefined,
+        turnId: TURN,
+      },
+      {
+        id: 'a2',
+        kind: 'agentMessage',
+        text: '二つ目',
+        detail: '',
+        status: undefined,
+        turnId: TURN,
+      },
     ];
     expect(summarizeTurn(multi, TURN).text).toBe('一つ目\n二つ目');
   });
@@ -284,5 +311,24 @@ describe('承認の出し入れ', () => {
   it('該当しないidでは何も消えない', () => {
     const added = addApproval(initialChatState, approval);
     expect(removeApproval(added, 99).approvals).toHaveLength(1);
+  });
+
+  it('別の経路で解決された承認は取り下げる', () => {
+    const added = addApproval(initialChatState, approval);
+    const resolved = applyEvent(added, 'serverRequest/resolved', {
+      requestId: 7,
+      threadId: 't1',
+    });
+    expect(resolved.approvals).toEqual([]);
+  });
+
+  it('保留していない要求の解決が来ても壊れない', () => {
+    const added = addApproval(initialChatState, approval);
+    const resolved = applyEvent(added, 'serverRequest/resolved', {
+      requestId: 99,
+      threadId: 't1',
+    });
+    expect(resolved.approvals).toHaveLength(1);
+    expect(applyEvent(initialChatState, 'serverRequest/resolved', {})).toBe(initialChatState);
   });
 });
