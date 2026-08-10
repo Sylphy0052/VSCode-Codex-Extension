@@ -150,9 +150,16 @@ export class ChatViewManager implements vscode.Disposable {
       showSettings: true,
     });
 
+    let wasBusy = false;
     const session = new ChatSession(this.connection, this.log, (state) => {
       if (entry.disposed) {
         return;
+      }
+      // ターンが終わった瞬間に、待たせていた指示を1件送る
+      const finished = wasBusy && !state.busy;
+      wasBusy = state.busy;
+      if (finished && state.queued.length > 0) {
+        void session.sendNextQueued(readConfig().codex);
       }
       const title = deriveTitle(state);
       if (title !== undefined && panel.title !== title) {
@@ -206,13 +213,23 @@ export class ChatViewManager implements vscode.Disposable {
       if (type === 'send' && typeof m['text'] === 'string' && m['text'].trim() !== '') {
         // 手動の発言はループへの割り込み。指示が交互に飛ぶ状態を作らない
         entry.loop.noteUserAction();
-        await entry.session.send(m['text'], readConfig().codex);
+        await entry.session.sendOrQueue(m['text'], readConfig().codex);
         this.reportActivity(entry, m['text']);
         return;
       }
       if (type === 'interrupt') {
         entry.loop.noteUserAction();
         await entry.session.interrupt();
+        return;
+      }
+      if (type === 'cancelQueued' && typeof m['index'] === 'number') {
+        entry.session.cancelQueued(m['index']);
+        return;
+      }
+      if (type === 'flushQueue') {
+        // 待たせていた指示を先に通すため、ループは割り込みとして止める
+        entry.loop.noteUserAction();
+        await entry.session.flushQueue(readConfig().codex);
         return;
       }
       if (type === 'loop/start') {
@@ -558,6 +575,35 @@ export function renderShell(webview: vscode.Webview, options: ChatShellOptions):
   }
   textarea:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
   #approvals { padding: 0 16px; }
+  #queue {
+    margin: 0 16px 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--vscode-widget-border, transparent);
+    border-radius: 4px;
+    background-color: var(--vscode-editorWidget-background);
+    font-size: 0.9em;
+  }
+  #queue .head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+    color: var(--vscode-descriptionForeground);
+  }
+  #queue ol { margin: 0; padding-left: 1.4em; }
+  #queue li {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin: 2px 0;
+  }
+  #queue li span {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   #status { padding: 0 16px 6px; color: var(--vscode-descriptionForeground); font-size: 0.85em; }
   .item .head .actions { display: flex; gap: 6px; flex: none; }
   .item .head .actions button { padding: 1px 8px; font-size: 0.85em; }
@@ -627,6 +673,13 @@ export function renderShell(webview: vscode.Webview, options: ChatShellOptions):
 <body>
   <div id="log"></div>
   <div id="approvals"></div>
+  <div id="queue" hidden>
+    <div class="head">
+      <span id="queueLabel"></span>
+      <button id="flushQueue" type="button" class="secondary">今すぐ送る</button>
+    </div>
+    <ol id="queueList"></ol>
+  </div>
   <div id="status"></div>
   <div id="loopBar" hidden>
     <span id="loopProgress"></span>

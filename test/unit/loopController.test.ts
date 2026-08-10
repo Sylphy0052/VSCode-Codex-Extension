@@ -198,6 +198,20 @@ describe('LoopController', () => {
     expect(sent).toHaveLength(2);
   });
 
+  it('手で積まれた指示が残っている間は送らない', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan());
+    controller.observe(state({ busy: true }));
+    controller.observe(state({ queued: ['先に送りたい指示'] }));
+    expect(sent).toHaveLength(1);
+    expect(controller.running).toBe(true);
+
+    // 待ち行列が捌ければ続きへ進む
+    controller.observe(state());
+    expect(sent).toHaveLength(2);
+  });
+
   it('ターンが始まる前の完了状態では次を送らない', () => {
     const { sent, send } = spy();
     const controller = new LoopController(send);

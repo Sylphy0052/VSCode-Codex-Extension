@@ -149,6 +149,7 @@ export class ClaudeChatViewManager implements vscode.Disposable {
   }
 
   private createPanel(title: string, cwd: string): ClaudePanel {
+    let wasBusy = false;
     const panel = vscode.window.createWebviewPanel(VIEW_TYPE, title, vscode.ViewColumn.Active, {
       enableScripts: true,
       retainContextWhenHidden: true,
@@ -165,6 +166,12 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       (state) => {
         if (entry.disposed) {
           return;
+        }
+        // ターンが終わった瞬間に、待たせていた指示を1件送る
+        const finished = wasBusy && !state.busy;
+        wasBusy = state.busy;
+        if (finished && state.queued.length > 0) {
+          entry.session.sendNextQueued();
         }
         const next = deriveTitle(state);
         if (next !== undefined && panel.title !== next) {
@@ -227,7 +234,7 @@ export class ClaudeChatViewManager implements vscode.Disposable {
 
   /** 発言を送り、作業記録へ流す。手動でもループからでも通り道は同じにする。 */
   private dispatch(entry: ClaudePanel, text: string): void {
-    entry.session.send(text);
+    entry.session.sendOrQueue(text);
     const sessionId = entry.session.threadId;
     if (sessionId !== undefined) {
       this.onActivity({ sessionId, cwd: entry.cwd, text });
@@ -265,6 +272,16 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       if (type === 'interrupt') {
         entry.loop.noteUserAction();
         entry.session.interrupt();
+        return;
+      }
+      if (type === 'cancelQueued' && typeof m['index'] === 'number') {
+        entry.session.cancelQueued(m['index']);
+        return;
+      }
+      if (type === 'flushQueue') {
+        // 待たせていた指示を先に通すため、ループは割り込みとして止める
+        entry.loop.noteUserAction();
+        entry.session.flushQueue();
         return;
       }
       if (type === 'loop/start') {

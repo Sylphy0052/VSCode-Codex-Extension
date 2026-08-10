@@ -52,6 +52,12 @@ export interface ChatState {
    * 完成メッセージと同じ項目に積む。Codexは通知ごとにitemIdが来るので使わない。
    */
   streamingMessageId: string | undefined;
+  /**
+   * 応答中に送られた指示。ターンが終わってから順に送る。
+   *
+   * CLIは応答中の指示を受け取れないため、捨てずにここへ積む。
+   */
+  queued: string[];
   items: ChatItem[];
   approvals: PendingApproval[];
   usage: ChatUsage | undefined;
@@ -64,6 +70,7 @@ export const initialChatState: ChatState = {
   turnId: undefined,
   turnFailed: false,
   streamingMessageId: undefined,
+  queued: [],
   items: [],
   approvals: [],
   usage: undefined,
@@ -265,6 +272,35 @@ export function applyEvent(
     default:
       return state;
   }
+}
+
+/** 応答中の指示を待ち行列の末尾へ積む。 */
+export function enqueue(state: ChatState, text: string): ChatState {
+  if (text.trim() === '') {
+    return state;
+  }
+  return { ...state, queued: [...state.queued, text] };
+}
+
+/** 先頭の指示を取り出す。空なら取り出さない。 */
+export function takeQueued(state: ChatState): { text: string | undefined; next: ChatState } {
+  const [head, ...rest] = state.queued;
+  if (head === undefined) {
+    return { text: undefined, next: state };
+  }
+  return { text: head, next: { ...state, queued: rest } };
+}
+
+/** 待機中の指示を1件取り消す。 */
+export function removeQueued(state: ChatState, index: number): ChatState {
+  if (index < 0 || index >= state.queued.length) {
+    return state;
+  }
+  return { ...state, queued: state.queued.filter((_, i) => i !== index) };
+}
+
+export function clearQueue(state: ChatState): ChatState {
+  return state.queued.length === 0 ? state : { ...state, queued: [] };
 }
 
 export function addApproval(state: ChatState, approval: PendingApproval): ChatState {

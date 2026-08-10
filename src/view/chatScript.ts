@@ -213,6 +213,36 @@ export function chatScript(agentLabel: string): string {
     });
   }
 
+  function renderQueue(queued) {
+    const box = el('queue');
+    const list = el('queueList');
+    if (!queued || queued.length === 0) {
+      box.hidden = true;
+      list.replaceChildren();
+      return;
+    }
+
+    box.hidden = false;
+    el('queueLabel').textContent = '応答が終わってから送ります（' + queued.length + '件）';
+    list.replaceChildren();
+    queued.forEach((text, index) => {
+      const li = document.createElement('li');
+      const label = document.createElement('span');
+      label.textContent = text;
+      label.title = text;
+      li.appendChild(label);
+
+      const cancel = document.createElement('button');
+      cancel.className = 'secondary';
+      cancel.textContent = '取り消す';
+      cancel.addEventListener('click', () => {
+        vscode.postMessage({ type: 'cancelQueued', index });
+      });
+      li.appendChild(cancel);
+      list.appendChild(li);
+    });
+  }
+
   function apply(state) {
     // リロード後にVSCodeがパネルを復元したとき、どのスレッドかを思い出すために保持する
     if (state.threadId) {
@@ -231,8 +261,10 @@ export function chatScript(agentLabel: string): string {
     for (const approval of state.approvals) approvals.appendChild(renderApproval(approval));
     if (atBottom) log.scrollTop = log.scrollHeight;
 
+    renderQueue(state.queued);
     el('stop').hidden = !state.busy;
-    el('send').disabled = state.busy;
+    // 応答中でも送れる。送った指示は待ち行列に積まれる
+    el('send').disabled = false;
     applyLoop(state.loop);
     const bits = [];
     if (state.busy) bits.push('応答中…');
@@ -375,6 +407,7 @@ export function chatScript(agentLabel: string): string {
   }
 
   el('send').addEventListener('click', send);
+  el('flushQueue').addEventListener('click', () => vscode.postMessage({ type: 'flushQueue' }));
   el('stop').addEventListener('click', () => vscode.postMessage({ type: 'interrupt' }));
   // 応答中のEscで中断する。画面のどこにフォーカスがあっても効くようにする
   document.addEventListener('keydown', (e) => {

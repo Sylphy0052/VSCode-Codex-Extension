@@ -15,6 +15,7 @@ export const initialClaudeState: ChatState = {
   turnId: undefined,
   turnFailed: false,
   streamingMessageId: undefined,
+  queued: [],
   items: [],
   approvals: [],
   usage: undefined,

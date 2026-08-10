@@ -178,6 +178,10 @@ export class LoopController {
     if (state.approvals.length > 0) {
       return;
     }
+    // 手で積まれた指示が先。捌け切るまでループの指示を割り込ませない
+    if (state.queued.length > 0) {
+      return;
+    }
     if (!this.sawBusy) {
       // 送った指示のターンがまだ始まっていない
       return;
