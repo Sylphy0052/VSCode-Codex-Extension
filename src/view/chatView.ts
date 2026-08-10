@@ -485,6 +485,11 @@ export function renderShell(webview: vscode.Webview, options: ChatShellOptions):
 <meta http-equiv="Content-Security-Policy" content="${csp}">
 <style>
   html, body { height: 100%; margin: 0; }
+  /*
+   * hidden属性を常に効かせる。display指定のある要素は hidden より詳細度が高く、
+   * 隠したつもりの領域が出しっぱなしになる事故が続いたため、ここで一律に打ち消す。
+   */
+  [hidden] { display: none !important; }
   body {
     display: flex;
     flex-direction: column;

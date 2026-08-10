@@ -156,6 +156,8 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="${csp}">
 <style>
+  /* hidden属性を常に効かせる（display指定に負けないように） */
+  [hidden] { display: none !important; }
   body {
     font-family: var(--vscode-font-family);
     font-size: var(--vscode-font-size);
