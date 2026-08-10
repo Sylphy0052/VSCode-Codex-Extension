@@ -547,6 +547,8 @@ export function renderShell(webview: vscode.Webview, options: ChatShellOptions):
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   const el = (id) => document.getElementById(id);
+  /** この会話で自分が送った発言。古い順。入力欄の履歴に使う。 */
+  let sentTexts = [];
 
   const KIND_LABEL = {
     userMessage: 'あなた',
@@ -753,6 +755,9 @@ export function renderShell(webview: vscode.Webview, options: ChatShellOptions):
     if (state.threadId) {
       vscode.setState({ threadId: state.threadId });
     }
+    sentTexts = state.items
+      .filter((i) => i.kind === 'userMessage' && i.text.trim() !== '')
+      .map((i) => i.text);
     applySettings(state.settings);
     const log = el('log');
     const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
@@ -800,7 +805,55 @@ export function renderShell(webview: vscode.Webview, options: ChatShellOptions):
     const text = input.value;
     if (!text.trim()) return;
     input.value = '';
+    resetHistory();
     vscode.postMessage({ type: 'send', text });
+  }
+
+  // 入力欄の履歴。この会話の自分の発言を新しい順にたどる。
+  // -1 は「履歴に入っていない（編集中）」状態。
+  let historyIndex = -1;
+  let draft = '';
+
+  function resetHistory() {
+    historyIndex = -1;
+    draft = '';
+  }
+
+  function historyEntries() {
+    return sentTexts.slice().reverse();
+  }
+
+  /** カーソルが1行目にあるか。複数行の編集を邪魔しないための判定。 */
+  function atFirstLine(input) {
+    return input.value.lastIndexOf('\n', Math.max(0, input.selectionStart - 1)) === -1;
+  }
+
+  function atLastLine(input) {
+    return input.value.indexOf('\n', input.selectionStart) === -1;
+  }
+
+  function applyHistory(input, index) {
+    historyIndex = index;
+    const entries = historyEntries();
+    input.value = index === -1 ? draft : entries[index];
+    // 呼び出した直後に続きを書けるよう末尾へ置く
+    input.selectionStart = input.selectionEnd = input.value.length;
+  }
+
+  function stepHistory(input, direction) {
+    const entries = historyEntries();
+    if (entries.length === 0) return false;
+
+    if (direction < 0) {
+      if (historyIndex === -1) draft = input.value;
+      if (historyIndex + 1 >= entries.length) return false;
+      applyHistory(input, historyIndex + 1);
+      return true;
+    }
+
+    if (historyIndex === -1) return false;
+    applyHistory(input, historyIndex - 1);
+    return true;
   }
 
   el('send').addEventListener('click', send);
@@ -809,6 +862,16 @@ export function renderShell(webview: vscode.Webview, options: ChatShellOptions):
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       send();
+      return;
+    }
+
+    const input = e.target;
+    if (e.key === 'ArrowUp' && !e.altKey && atFirstLine(input) && stepHistory(input, -1)) {
+      e.preventDefault();
+      return;
+    }
+    if (e.key === 'ArrowDown' && !e.altKey && atLastLine(input) && stepHistory(input, 1)) {
+      e.preventDefault();
     }
   });
 
