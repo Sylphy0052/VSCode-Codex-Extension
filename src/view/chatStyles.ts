@@ -233,5 +233,41 @@ export function chatStyles(): string {
     color: var(--vscode-descriptionForeground);
     font-size: 0.85em;
   }
+  .diffs { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+  .diff {
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-radius: 3px;
+  }
+  .diff > summary {
+    padding: 4px 8px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+    cursor: pointer;
+    user-select: none;
+  }
+  .diff[open] > summary {
+    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+  }
+  .diff-body {
+    /* 長い差分でも会話全体が伸びきらないようにする */
+    max-height: 420px;
+    margin: 0;
+    padding: 6px 8px;
+    overflow: auto;
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 0.85em;
+    line-height: 1.45;
+    white-space: pre;
+  }
+  .diff-body span { display: block; }
+  .diff-add {
+    background-color: var(--vscode-diffEditor-insertedTextBackground, rgba(80, 200, 120, 0.16));
+    color: var(--vscode-gitDecoration-addedResourceForeground, inherit);
+  }
+  .diff-del {
+    background-color: var(--vscode-diffEditor-removedTextBackground, rgba(220, 90, 90, 0.16));
+    color: var(--vscode-gitDecoration-deletedResourceForeground, inherit);
+  }
+  .diff-hunk { color: var(--vscode-descriptionForeground); }
 `;
 }

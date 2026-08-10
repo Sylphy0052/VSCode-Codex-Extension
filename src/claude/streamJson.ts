@@ -75,6 +75,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
         detail: '',
         status: undefined,
         turnId: undefined,
+        diffs: [],
       });
       continue;
     }
@@ -86,6 +87,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
         detail: '',
         status: undefined,
         turnId: undefined,
+        diffs: [],
       });
       continue;
     }
@@ -99,6 +101,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
         detail: tool.detail,
         status: 'running',
         turnId: undefined,
+        diffs: tool.diffs,
       });
       // Edit/Write/NotebookEdit はファイル編集。作業記録の成果行に使うため集めておく
       if (tool.kind === 'fileChange') {
@@ -153,6 +156,7 @@ function applyUser(state: ChatState, event: Record<string, unknown>): ChatState 
         detail: '',
         status: undefined,
         turnId: undefined,
+        diffs: [],
       });
     }
   }
@@ -190,6 +194,7 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
         detail: '',
         status: undefined,
         turnId: undefined,
+        diffs: [],
       }),
     };
   }
@@ -220,6 +225,7 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
           detail: '',
           status: undefined,
           turnId: undefined,
+          diffs: [],
         },
       ],
     };

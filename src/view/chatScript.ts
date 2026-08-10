@@ -86,8 +86,45 @@ export function chatScript(agentLabel: string): string {
     body.className = 'body';
     wrap.appendChild(body);
 
-    const node = { wrap, label, body, copy, fork, forkTarget: undefined };
+    const diffs = document.createElement('div');
+    diffs.className = 'diffs';
+    diffs.hidden = true;
+    wrap.appendChild(diffs);
+
+    const node = { wrap, label, body, diffs, diffKey: '', copy, fork, forkTarget: undefined };
     return node;
+  }
+
+  /** 1ファイル分の差分。既定は畳んでおき、開いた状態は要素を使い回して保つ。 */
+  function createDiff(diff) {
+    const details = document.createElement('details');
+    details.className = 'diff';
+
+    const summary = document.createElement('summary');
+    const kindLabel = { add: '追加', delete: '削除', update: '変更' }[diff.kind] || diff.kind;
+    summary.textContent = diff.path + (diff.movePath ? ' → ' + diff.movePath : '') +
+      ' ・ ' + kindLabel;
+    details.appendChild(summary);
+
+    const pre = document.createElement('pre');
+    pre.className = 'diff-body';
+    // 行ごとに色を付ける。行頭の記号がそのまま意味を持つ
+    for (const line of (diff.diff || '').split('\\n')) {
+      const row = document.createElement('span');
+      const head = line.charAt(0);
+      row.className =
+        head === '+' ? 'diff-add' : head === '-' ? 'diff-del' : head === '@' ? 'diff-hunk' : '';
+      row.textContent = line + '\\n';
+      pre.appendChild(row);
+    }
+    details.appendChild(pre);
+    return details;
+  }
+
+  function renderDiffs(container, diffs) {
+    container.replaceChildren();
+    for (const diff of diffs) container.appendChild(createDiff(diff));
+    container.hidden = diffs.length === 0;
   }
 
   function updateNode(node, item, forkTarget) {
@@ -101,6 +138,14 @@ export function chatScript(agentLabel: string): string {
     if (node.body.textContent !== text) node.body.textContent = text;
     node.body.hidden = text === '';
     node.copy.hidden = text === '';
+
+    // 中身が同じなら作り直さない。開いた差分が勝手に閉じるのを防ぐ
+    const diffs = item.diffs || [];
+    const diffKey = JSON.stringify(diffs);
+    if (node.diffKey !== diffKey) {
+      node.diffKey = diffKey;
+      renderDiffs(node.diffs, diffs);
+    }
 
     // 分岐は「この指示の手前まで」。押した指示からやり直せるようにする
     node.forkTarget = forkTarget;
@@ -132,7 +177,7 @@ export function chatScript(agentLabel: string): string {
     }
   }
 
-  function renderApproval(approval) {
+  function renderApproval(approval, items) {
     const wrap = document.createElement('div');
     wrap.className = 'approval';
 
@@ -144,6 +189,16 @@ export function chatScript(agentLabel: string): string {
       const pre = document.createElement('pre');
       pre.textContent = approval.detail;
       wrap.appendChild(pre);
+    }
+
+    // ファイル変更の要求は差分を持たない。同じidの項目から引いて、承認する前に読めるようにする
+    const target = approval.itemId ? items.find((i) => i.id === approval.itemId) : undefined;
+    const diffs = (target && target.diffs) || [];
+    if (diffs.length > 0) {
+      const box = document.createElement('div');
+      box.className = 'diffs';
+      renderDiffs(box, diffs);
+      wrap.appendChild(box);
     }
 
     const actions = document.createElement('div');
@@ -262,7 +317,9 @@ export function chatScript(agentLabel: string): string {
     // 承認カードは一時的なので作り直してよい（会話本文の選択は壊れない）
     const approvals = el('approvals');
     approvals.replaceChildren();
-    for (const approval of state.approvals) approvals.appendChild(renderApproval(approval));
+    for (const approval of state.approvals) {
+      approvals.appendChild(renderApproval(approval, state.items || []));
+    }
     if (atBottom) log.scrollTop = log.scrollHeight;
 
     renderQueue(state.queued);

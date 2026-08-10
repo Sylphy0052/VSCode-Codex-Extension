@@ -1,4 +1,4 @@
-import type { ChatItem } from '../appserver/chatState';
+import type { ChatItem, FileDiff } from '../appserver/chatState';
 import { isSessionId } from '../codex/argvBuilder';
 import type { TranscriptMeta } from './types';
 
@@ -149,40 +149,94 @@ function appendAssistantEntry(
     }
     if (type === 'tool_use') {
       const tool = describeTool(str(part['name']), rec(part['input']) ?? {});
-      items.push(item(entry, tool.kind, { detail: tool.detail, id: str(part['id']) }));
+      items.push(
+        item(entry, tool.kind, { detail: tool.detail, id: str(part['id']), diffs: tool.diffs }),
+      );
       toolIndex.set(str(part['id']), items.length - 1);
     }
   }
 }
 
-/** ツール呼び出しをCodex側の項目種別へ寄せる。描画側の分岐を増やさないため。 */
+/**
+ * 差分に載せる行数の上限。
+ *
+ * ファイルを丸ごと書くツールがあるため、そのまま持つと状態が膨らむ。
+ * 画面側の折りたたみとは別に、ここで持つ量そのものを抑える。
+ */
+const MAX_DIFF_LINES = 200;
+
+/**
+ * ツール呼び出しをCodex側の項目種別へ寄せる。描画側の分岐を増やさないため。
+ *
+ * Codexは差分をCLIが組み立てて通知に載せてくるが、Claude Codeはツールの入力しか
+ * 来ない。ここで入力から差分の形へ組み直す。
+ */
 export function describeTool(
   name: string,
   input: Record<string, unknown>,
-): { kind: string; detail: string } {
+): { kind: string; detail: string; diffs: FileDiff[] } {
   switch (name) {
     case 'Bash':
     case 'BashOutput':
-      return { kind: 'commandExecution', detail: str(input['command']) };
+      return { kind: 'commandExecution', detail: str(input['command']), diffs: [] };
     case 'Edit':
+      return fileChange(input, editDiff(input));
     case 'Write':
+      return fileChange(input, addedDiff(input, str(input['content'])));
     case 'NotebookEdit':
-      return { kind: 'fileChange', detail: str(input['file_path']) };
+      return fileChange(input, addedDiff(input, str(input['new_source'])));
     case 'Read':
-      return { kind: 'fileRead', detail: str(input['file_path']) };
+      return { kind: 'fileRead', detail: str(input['file_path']), diffs: [] };
     case 'WebSearch':
-      return { kind: 'webSearch', detail: str(input['query']) };
+      return { kind: 'webSearch', detail: str(input['query']), diffs: [] };
     case 'WebFetch':
-      return { kind: 'webSearch', detail: str(input['url']) };
+      return { kind: 'webSearch', detail: str(input['url']), diffs: [] };
     default:
-      return { kind: 'mcpToolCall', detail: name };
+      return { kind: 'mcpToolCall', detail: name, diffs: [] };
   }
+}
+
+function fileChange(
+  input: Record<string, unknown>,
+  diff: string,
+): { kind: string; detail: string; diffs: FileDiff[] } {
+  const path = str(input['file_path']) || str(input['notebook_path']);
+  const kind = str(input['old_string']) === '' ? 'add' : 'update';
+  return {
+    kind: 'fileChange',
+    detail: path,
+    diffs: path === '' || diff === '' ? [] : [{ path, kind, movePath: undefined, diff }],
+  };
+}
+
+/** 置換の前後を差分にする。行番号は判らないためハンクの見出しは付けない。 */
+function editDiff(input: Record<string, unknown>): string {
+  const removed = prefixLines(str(input['old_string']), '-');
+  const added = prefixLines(str(input['new_string']), '+');
+  return [removed, added].filter((s) => s !== '').join('\n');
+}
+
+/** 新しく書いた内容を追加行として並べる。 */
+function addedDiff(_input: Record<string, unknown>, content: string): string {
+  return prefixLines(content, '+');
+}
+
+function prefixLines(text: string, marker: string): string {
+  if (text === '') {
+    return '';
+  }
+  const lines = text.split('\n');
+  const shown = lines.slice(0, MAX_DIFF_LINES).map((line) => `${marker}${line}`);
+  if (lines.length > MAX_DIFF_LINES) {
+    shown.push(`… 残り${lines.length - MAX_DIFF_LINES}行を省略`);
+  }
+  return shown.join('\n');
 }
 
 function item(
   entry: Record<string, unknown>,
   kind: string,
-  overrides: { text?: string; detail?: string; id?: string },
+  overrides: { text?: string; detail?: string; id?: string; diffs?: FileDiff[] },
 ): ChatItem {
   return {
     id: overrides.id !== undefined && overrides.id !== '' ? overrides.id : str(entry['uuid']),
@@ -191,6 +245,7 @@ function item(
     detail: overrides.detail ?? '',
     status: undefined,
     turnId: undefined,
+    diffs: overrides.diffs ?? [],
   };
 }
 

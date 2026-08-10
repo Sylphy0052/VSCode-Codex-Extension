@@ -18,12 +18,33 @@ describe('describeApproval', () => {
     expect(approval?.detail).toContain('/work');
   });
 
-  it('ファイル変更の要求で対象パスを並べる', () => {
+  it('ファイル変更の要求は理由を出す', () => {
     const approval = describeApproval(2, APPROVAL_METHODS.fileChange, {
-      changes: [{ path: '/a.ts' }, { path: '/b.ts' }],
+      itemId: 'f1',
+      threadId: 't1',
+      turnId: 'turn1',
+      startedAtMs: 0,
+      reason: '書き込み権限の要求',
     });
     expect(approval?.kind).toBe('fileChange');
-    expect(approval?.detail).toBe('/a.ts\n/b.ts');
+    expect(approval?.detail).toBe('書き込み権限の要求');
+  });
+
+  it('ファイル変更の要求は itemId を持つ（差分は項目側から引くため）', () => {
+    // FileChangeRequestApprovalParams は changes を持たない。差分は同じitemIdの項目にある
+    const approval = describeApproval(2, APPROVAL_METHODS.fileChange, {
+      itemId: 'f1',
+      threadId: 't1',
+      turnId: 'turn1',
+      startedAtMs: 0,
+    });
+    expect(approval).toMatchObject({ kind: 'fileChange', itemId: 'f1' });
+  });
+
+  it('差分を項目から引けない要求では itemId を持たない', () => {
+    expect(
+      describeApproval(3, APPROVAL_METHODS.command, { command: 'ls' })?.itemId,
+    ).toBeUndefined();
   });
 
   it('権限昇格の要求を理由付きで表す', () => {

@@ -1,3 +1,14 @@
+/** 1ファイル分の変更。app-server の `FileUpdateChange` に対応する。 */
+export interface FileDiff {
+  path: string;
+  /** `add` / `delete` / `update`。 */
+  kind: string;
+  /** 移動先。`update` で移動を伴う場合だけ入る。 */
+  movePath: string | undefined;
+  /** unified diff。CLIが組み立てたものをそのまま持つ。 */
+  diff: string;
+}
+
 export interface ChatItem {
   id: string;
   /** app-server の ThreadItem の種類。未知の種類も捨てずに保持する。 */
@@ -9,7 +20,12 @@ export interface ChatItem {
   status: string | undefined;
   /** このitemが属するターン。会話内から分岐する際の `lastTurnId` になる。 */
   turnId: string | undefined;
+  /** ファイル変更の差分。他の種類では空。 */
+  diffs: FileDiff[];
 }
+
+/** 差分を持たない項目のための空配列。 */
+export const NO_DIFFS: FileDiff[] = [];
 
 export interface PendingApproval {
   /** JSON-RPCの要求id。応答を返すときに使う。 */
@@ -21,6 +37,14 @@ export interface PendingApproval {
   kind: 'command' | 'fileChange' | 'permissions' | 'applyPatch' | 'execCommand';
   title: string;
   detail: string;
+  /**
+   * 対応する項目のid。
+   *
+   * ファイル変更の要求は差分を持たず、同じidの項目（`fileChange`）側に入っている。
+   * 差分は要求より後に `item/fileChange/patchUpdated` で届くこともあるため、
+   * 値を写さずidだけを持ち、表示のたびに項目から引く。
+   */
+  itemId: string | undefined;
 }
 
 export interface ChatUsage {
@@ -120,7 +144,15 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
     return undefined;
   }
 
-  const base: ChatItem = { id, kind, text: '', detail: '', status: undefined, turnId: undefined };
+  const base: ChatItem = {
+    id,
+    kind,
+    text: '',
+    detail: '',
+    status: undefined,
+    turnId: undefined,
+    diffs: NO_DIFFS,
+  };
   const status = item['status'];
   if (typeof status === 'string') {
     base.status = status;
@@ -144,7 +176,11 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
       };
     }
     case 'fileChange':
-      return { ...base, detail: describeFileChanges(item['changes']) };
+      return {
+        ...base,
+        detail: describeFileChanges(item['changes']),
+        diffs: readFileDiffs(item['changes']),
+      };
     case 'mcpToolCall':
       return { ...base, detail: `${str(item['server'])} / ${str(item['tool'])}` };
     case 'webSearch':
@@ -152,6 +188,36 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
     default:
       return base;
   }
+}
+
+/**
+ * 変更の差分を取り出す。
+ *
+ * `diff` を持たない要素は落とす。パスだけの一覧は `describeFileChanges` が担うため、
+ * ここで空の差分を残すと「開いても何も無い」表示になる。
+ */
+export function readFileDiffs(changes: unknown): FileDiff[] {
+  if (!Array.isArray(changes)) {
+    return NO_DIFFS;
+  }
+  const diffs: FileDiff[] = [];
+  for (const raw of changes) {
+    const change = rec(raw);
+    const diff = str(change?.['diff']);
+    const path = str(change?.['path']);
+    if (change === undefined || diff === '' || path === '') {
+      continue;
+    }
+    const kind = rec(change['kind']);
+    const movePath = str(kind?.['move_path']);
+    diffs.push({
+      path,
+      kind: str(kind?.['type']),
+      movePath: movePath === '' ? undefined : movePath,
+      diff,
+    });
+  }
+  return diffs.length === 0 ? NO_DIFFS : diffs;
 }
 
 function describeFileChanges(changes: unknown): string {
@@ -212,6 +278,8 @@ function upsertItem(items: readonly ChatItem[], item: ChatItem): ChatItem[] {
     text: item.text === '' && existing !== undefined ? existing.text : item.text,
     // turnIdは後続の通知で判ることがあるため、一度得た値を保持する
     turnId: item.turnId ?? existing?.turnId,
+    // 差分は patchUpdated が先に届くことがある。空で上書きしない
+    diffs: item.diffs.length === 0 && existing !== undefined ? existing.diffs : item.diffs,
   };
   return next;
 }
@@ -228,6 +296,7 @@ function appendDelta(items: readonly ChatItem[], itemId: string, delta: string):
         detail: '',
         status: undefined,
         turnId: undefined,
+        diffs: NO_DIFFS,
       },
     ];
   }
@@ -337,6 +406,23 @@ export function applyEvent(
           limited: state.usage?.limited,
         },
       };
+    }
+
+    case 'item/fileChange/patchUpdated': {
+      // 差分だけが後から届く。項目そのものは item/* で作られている
+      const itemId = str(params['itemId']);
+      const index = state.items.findIndex((i) => i.id === itemId);
+      const existing = state.items[index];
+      if (index === -1 || existing === undefined) {
+        return state;
+      }
+      const diffs = readFileDiffs(params['changes']);
+      if (diffs.length === 0) {
+        return state;
+      }
+      const items = [...state.items];
+      items[index] = { ...existing, diffs, detail: diffs.map((d) => d.path).join(', ') };
+      return { ...state, items };
     }
 
     case 'serverRequest/resolved': {

@@ -72,15 +72,19 @@ export function describeApproval(
       kind: 'command',
       title: 'コマンドの実行を許可しますか',
       detail: withCwd(str(params['command']), str(params['cwd'])),
+      itemId: undefined,
     };
   }
 
   if (method === APPROVAL_METHODS.fileChange) {
+    // この要求は変更内容を持たない（itemId / threadId / turnId / startedAtMs / reason だけ）。
+    // 差分は同じidの項目側にあるため、idを渡して表示のときに引く
     return {
       requestId,
       kind: 'fileChange',
       title: 'ファイルの変更を許可しますか',
-      detail: describeChanges(params['changes']) || str(params['reason']),
+      detail: str(params['reason']),
+      itemId: str(params['itemId']) || undefined,
     };
   }
 
@@ -90,6 +94,7 @@ export function describeApproval(
       kind: 'permissions',
       title: '権限の昇格を許可しますか',
       detail: str(params['reason']),
+      itemId: undefined,
     };
   }
 
@@ -100,6 +105,7 @@ export function describeApproval(
       kind: 'applyPatch',
       title: 'ファイルの変更を許可しますか',
       detail: describeFileChangeMap(params['fileChanges']) || str(params['reason']),
+      itemId: undefined,
     };
   }
 
@@ -109,6 +115,7 @@ export function describeApproval(
       kind: 'execCommand',
       title: 'コマンドの実行を許可しますか',
       detail: withCwd(joinCommand(params['command']), str(params['cwd'])),
+      itemId: undefined,
     };
   }
 
@@ -128,16 +135,6 @@ function joinCommand(command: unknown): string {
     return '';
   }
   return command.filter((part): part is string => typeof part === 'string').join(' ');
-}
-
-function describeChanges(changes: unknown): string {
-  if (!Array.isArray(changes)) {
-    return '';
-  }
-  return changes
-    .map((c) => str(rec(c)?.['path']) || str(rec(c)?.['file']))
-    .filter((p) => p !== '')
-    .join('\n');
 }
 
 /** 旧形式の変更はパスをキーにしたオブジェクトで届く。 */
