@@ -1016,30 +1016,37 @@ worktreeを作れないため、次のように落とす。
 
 コマンドは文字列として渡ってくるだけで、シェルの構文木は得られない。`rm -rf` を止めても `rm${IFS}-rf`、`rm -fr`、`X=rm; $X -rf`、`find . -delete`、`printf '...' > /tmp/x.sh && bash /tmp/x.sh`、`echo <base64> | base64 -d | sh` はいずれも同じ結果になる。パターン照合でこれを塞ぎ切ることはできないし、塞げるふりをしてはいけない。
 
-したがって次の二段構えにする。
+したがって次の三段構えにする。
 
 1. **一次防御はサンドボックス**。`sandbox` は既定で有効のまま（`workspace-write`）にし、YAMLから緩められないようにする（§16.16）。ファイルシステムの境界はここで技術的に強制する
-2. **パターン照合は補助的な検知**。分かりやすい危険が来たときに先回りして人へ回すためのもの。取りこぼす前提で置く
+2. **構造化データで判定できるものは、パターン照合ではなくそちらを使う**。app-serverが承認要求に添えてくる構造化フィールド（後述の `networkApprovalContext` / `grantRoot` など）は、文字列照合と違って取りこぼしがない。使えるところは必ず使う
+3. **それでも拾えない残りはパターン照合で補助的に検知する**。分かりやすい危険が来たときに先回りして人へ回すためのもの。ここは取りこぼす前提で置く
 
 #### 判定の流れ
 
 - 承認要求は今まで通り受け取る（Codexは `approvalPolicy` を `never` にせず `on-request` のままにする。要求が来なければ判定もできないため）
-- 判定関数（`escalation.ts`）には、表示用に整形済みの `PendingApproval` ではなく**生の要求パラメータ**（`command` / `cwd` / 変更対象のパス）と、そのタスクの作業ディレクトリ・worktreeルートを渡す。既存の `describeApproval`（`src/appserver/approvals.ts`）は表示用に文字列を結合してしまうため、判定の入力には使わない
+- 判定関数（`escalation.ts`）には、表示用に整形済みの `PendingApproval` ではなく**生の要求パラメータ**（`command` / `cwd` / 変更対象のパス / `networkApprovalContext` / `proposedNetworkPolicyAmendments` / `grantRoot`）と、そのタスクの作業ディレクトリ・worktreeルートを渡す。既存の `describeApproval`（`src/appserver/approvals.ts`）は表示用に文字列を結合してしまうため、判定の入力には使わない
+- `fileChange` の承認要求（`item/fileChange/requestApproval`）は変更対象パスを持たない（`itemId` / `reason` / `grantRoot` のみ、実測で確認済み）。**実行層（`runner.ts`）が `itemId` から対応する項目の差分を引いて変更対象パスを解決し、判定関数へ渡す責務を持つ。** ここを実装し忘れると、パスを渡せないままパス境界の判定が丸ごと素通りし、`fileChange` が軒並み `auto` に倒れる
 - `auto` なら即座に許可を返す。`ask` ならタスクを `waitingApproval` にして、通知とワークフローViewで知らせる。人が決めるまでそのタスクは進まない（他のタスクは走り続ける）
 - `auto` で通したものも含め、判定の結果と理由をログとViewに残す
 
-> 実装前に確認すること: Codex app-server / Claude Code control protocol の `command` パラメータが文字列か配列か。既存の `approvals.ts` は `typeof v === 'string'` でなければ空文字にするため、配列で来ているなら判定入力が常に空になり、**全て `auto` に倒れる**。配列なら結合してから判定する。
+> 実装前に確認すること（実測済み）: Codex app-server / Claude Code control protocol の `command` パラメータが文字列か配列か。`codex app-server generate-json-schema --out <dir>`（確認日2026-08-11、`codex-cli 0.147.0`）で `CommandExecutionRequestApprovalParams.json` を読んだ結果、`command` は `"type": ["string", "null"]` ——**文字列（またはnull）であり、配列ではない**。Claude Code側も `src/claude/transcript.ts` / `src/claude/control.ts` の既存実装が最初から文字列として読んでいる。既存の `approvals.ts` の `typeof v === 'string'` 判定（新形式に対して）は正しく動作する。ただし旧形式（`execCommandApproval`）は配列で届くため、`escalation.ts` の `normalizeCommand` で将来の変化にも備えて結合する。
+>
+> 同じ実測で分かった点: `command` は `required` に含まれず、値も `null` を許すため**そもそも届かないことがある**。コマンド文字列が空・欠落の要求は「判定に失敗した」ものとして扱う（後述）。
 
 #### 既定で `ask` に倒す対象
 
+- **コマンド文字列が空・取得できない**（「判定に失敗した」の一種。`command` はapp-server側でも必須でもnull非許容でもないため、実際に起こりうる）
 - **シェルメタ文字を含む、または複数のコマンドが連結されている**（`;` `|` `&` `$` `` ` `` `(` `)` `<` `>` 改行）。単純な1コマンドでなくなった時点で、判定の当てが外れたとみなす
 - 削除・巻き戻し: 再帰的な強制削除、追跡外ファイルの一括削除、作業ツリーの強制巻き戻し、ブランチやタグの削除、テーブルの削除や全消去、`find` の `-delete` / `-exec`
-- 外部へ出る操作: リモートへのpush（`--force` / `-f` / `--force-with-lease` を含む全て）、デプロイ、パッケージの公開、`curl` / `wget` / `nc` など外部へ到達しうるコマンド
+- 外部へ出る操作: リモートへのpush（`--force` / `-f` / `--force-with-lease` を含む全て）、デプロイ、パッケージの公開、`curl` / `wget` / `nc` など外部へ到達しうるコマンド。加えて、app-serverが**構造化データで**ネットワーク到達先を申告してくる場合（`networkApprovalContext: { host, protocol }` が存在する）は、コマンド文字列の中身によらず `ask` にする。`proposedNetworkPolicyAmendments` に `action: "allow"` が含まれる要求（このホストを以後ずっと許可する、という永続的な権限拡大の提案）も同様に `ask` にする
 - デコード・間接実行: `base64` / `xxd` などのデコード、スクリプトファイルを作ってから実行する形
 - 作業ディレクトリの外への書き込み（後述）
 - `.git` 配下への書き込み（後述）
+- **セッション残り全体への書き込み許可要求**（`fileChange` の `grantRoot` が設定されている要求。1回分の変更承認ではなく、以後のセッション全体でそのroot配下への書き込みを認めろという権限拡大そのもの）
+- **以後同種のコマンドを無確認で通す提案**（`command` の `proposedExecpolicyAmendment` が空でない要求）。ネットワークの許可提案が特定のホストに閉じるのに対し、こちらは対象がコマンド全般に及ぶ
 - 権限そのものの変更（`permissions` 種別の要求）
-- 判定に失敗した・種別が未知の要求
+- 判定に失敗した・種別が未知の要求（コマンド文字列が届かない要求を含む。`command` は `required` ではなく `null` もありうる）
 
 #### パスの判定
 
@@ -1053,7 +1060,7 @@ worktreeを作れないため、次のように落とす。
 
 `escalate` でパターンを足し、`allow` で既定の停止条件から外せる。ただし `allow` には次の制限を置く。
 
-- `.git` 配下への書き込みと `permissions` 種別の要求は、`allow` でも解除できない
+- `.git` 配下への書き込み、`permissions` 種別の要求、`grantRoot`（セッション残り全体への書き込み許可要求）、`proposedExecpolicyAmendment`（以後の無確認実行の提案）、コマンド文字列が届かない要求は、`allow` でも解除できない。いずれも特定の危険パターンのカテゴリに属する話ではなく、権限そのものの拡大か、判定が成立していない状態だから
 - `allow` を含むタスクがあるワークフローは、実行開始時に「既定の危険操作チェックを解除しているタスクがある」旨を明示して確認を取る。ワークフローViewの警告欄にも、どのタスクがどのパターンを解除しているかを常時出す
 - `allow` はタスク単位に閉じる。他のタスクの判定には影響しない
 
