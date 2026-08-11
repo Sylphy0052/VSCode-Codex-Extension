@@ -4,8 +4,9 @@ import * as path from 'node:path';
 import { APPROVAL_MODES, SANDBOX_MODES } from '../codex/types';
 import { LOOP_ITERATION_LIMIT } from '../loop/loopController';
 import type { Logger } from '../log';
+import { MAX_WORKFLOW_FILE_BYTES } from './runner';
 import { stripControlChars } from './sanitize';
-import { buildEffectiveTaskConfig, type ExtensionSafetyBaseline } from './taskConfig';
+import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { TaskSessionHost, TaskSessionInput } from './taskSession';
 import {
   CLAUDE_PERMISSION_SAFETY_ORDER,
@@ -62,6 +63,22 @@ export interface PlannerWorkspacePort {
 
 /** 巨大なモノレポ直下でも列挙が長くならないようにする上限。 */
 const MAX_TOP_LEVEL_ENTRIES = 40;
+/** 1エントリ名の表示上限。ファイル名は制限なく長くできるため個別にも切り詰める。 */
+const MAX_ENTRY_NAME_LENGTH = 100;
+
+/**
+ * ファイル名は`runner.ts`の`handleApproval`や`sanitizeForLog`が扱うCLI・エージェント
+ * 由来の文字列と同じく信用しない（design.md §16.9セキュリティ監査 medium 1）。
+ * ファイル名には改行を含められるため、無害化せずにプロンプトへ結合すると、偽の見出しや
+ * 偽YAMLをファイル名に仕込んでプロンプトの構造を偽装できてしまう。`stripControlChars`
+ * （改行・タブを含む制御文字を空白へ畳む）を通し、長さも切り詰める。
+ */
+function sanitizeEntryName(name: string): string {
+  const stripped = stripControlChars(name);
+  return stripped.length > MAX_ENTRY_NAME_LENGTH
+    ? `${stripped.slice(0, MAX_ENTRY_NAME_LENGTH)}…`
+    : stripped;
+}
 
 export async function buildWorkspaceSummary(
   root: string,
@@ -73,7 +90,7 @@ export async function buildWorkspaceSummary(
     port.fileExists(path.join(root, 'CLAUDE.md')),
   ]);
   return {
-    topLevelEntries: entries.slice(0, MAX_TOP_LEVEL_ENTRIES),
+    topLevelEntries: entries.slice(0, MAX_TOP_LEVEL_ENTRIES).map(sanitizeEntryName),
     hasAgentsMd,
     hasClaudeMd,
   };
@@ -468,6 +485,25 @@ interface ParseAttempt {
 }
 
 function tryParseAndValidate(yamlText: string): ParseAttempt {
+  // `runner.ts`はファイルから読む定義に対して`MAX_WORKFLOW_FILE_BYTES`を必ず確認して
+  // からパースするが、LLMの応答は検査なしで`parseWorkflowYaml`へ渡っていた
+  // （#58セキュリティ監査 medium 2）。`MAX_PROMPT_LENGTH`/`MAX_TASK_COUNT`は
+  // `validateWorkflow`の中、つまりパースが終わった後にしか効かないため、巨大な応答は
+  // `yaml`パッケージの`parse`自体（パース前のtokenize等）を無検査で走らせてしまう。
+  // 同じ上限をパース直前に確認する（`runner.ts`と同じ定数を再利用し、値の二重管理を避ける）
+  const byteLength = Buffer.byteLength(yamlText, 'utf8');
+  if (byteLength > MAX_WORKFLOW_FILE_BYTES) {
+    return {
+      ok: false,
+      definition: undefined,
+      errors: [
+        {
+          taskIds: [],
+          message: `応答が大きすぎるため解析しませんでした（上限${MAX_WORKFLOW_FILE_BYTES}バイト、実際は${byteLength}バイト）`,
+        },
+      ],
+    };
+  }
   let def: WorkflowDefinition;
   try {
     def = parseWorkflowYaml(yamlText);
@@ -486,45 +522,66 @@ function tryParseAndValidate(yamlText: string): ParseAttempt {
   return { ok: true, definition: def, errors: [] };
 }
 
+/** 各プロバイダで最も安全な`approvalMode`（Codexの`APPROVAL_MODES`/Claudeの安全順序表の先頭）。 */
+function safestApprovalModeFor(provider: Provider): string {
+  if (provider === 'claude') {
+    // CLAUDE_PERMISSION_SAFETY_ORDERは`readonly string[]`型（tupleではない）なので
+    // `[0]`はnoUncheckedIndexedAccess下でstring|undefinedになる。配列は非空定数であり
+    // 実際には常に'plan'が使われる。フォールバックは型を満たすためだけの保険
+    return CLAUDE_PERMISSION_SAFETY_ORDER[0] ?? 'plan';
+  }
+  return APPROVAL_MODES[0];
+}
+
 /**
  * 分解セッションの`TaskSessionInput`を組み立てる。
  *
- * `sandbox: read-only`相当・各プロバイダで最も安全な`approvalMode`を直接指定した上で、
- * さらに`buildEffectiveTaskConfig`（#52。design.md §16.16の唯一の入口）へ通す。
- * 呼び出し側が渡す値は既に安全順序の先頭（最も安全）なので、クランプは実質的に
- * 「常にこの値のまま」を確認する多層防御になる（baseline自体が壊れている異常系でだけ
- * 意味を持つ）。プロンプトでの指示ではなく、この関数が組み立てる起動設定こそが
- * 縛りの実体である（design.md §16.9「プロンプトで頼むだけでは足りない」）。
+ * **`buildEffectiveTaskConfig`（#52。design.md §16.16の唯一の入口）を経由しない。**
+ * 当初はこれを通していたが、`clampToSafer`は「baselineより緩めない」ための道具であり、
+ * 「baselineが何であれ最安全を強制する」という分解セッションの要求とは意図が逆だった。
+ * 拡張機能側の設定（`codex.sandbox`等）が既定の空文字（CLI側の設定に委譲する、の意）の
+ * とき、`clampToSafer`は安全性を判定できずbaselineをそのまま採用してしまい、YAML側が
+ * 最安全値を明示しても無視される抜け穴があった（#58セキュリティ監査 critical）。
+ * `clampToSafer`自体も「YAML側が安全順序の最安全値なら採用する」よう直したが、
+ * plannerはそもそもbaselineに依存する必要が無いため、ここでは固定値を直接使う
+ * （baselineが何であっても分解セッションは常に最も安全な設定で起動するべきなので、
+ * 「baselineより安全な方向にしか動かせない」という汎用クランプの意味論に頼らない）。
+ *
+ * プロンプトでの指示ではなく、この関数が組み立てる起動設定こそが縛りの実体である
+ * （design.md §16.9「プロンプトで頼むだけでは足りない」）。
  */
-function buildPlannerSessionInput(
-  provider: Provider,
-  cwd: string,
-  baseline: ExtensionSafetyBaseline,
-  log: Logger,
-): TaskSessionInput {
-  const safestSandbox = SANDBOX_MODES[0];
-  const safestCodexApproval = APPROVAL_MODES[0];
-  const safestClaudePermission = CLAUDE_PERMISSION_SAFETY_ORDER[0] ?? 'plan';
-  const safestApprovalMode = provider === 'claude' ? safestClaudePermission : safestCodexApproval;
+function buildPlannerSessionInput(provider: Provider, cwd: string): TaskSessionInput {
+  return {
+    cwd,
+    config: { model: '', effort: '', approvalMode: safestApprovalModeFor(provider) },
+    sandbox: SANDBOX_MODES[0],
+  };
+}
 
-  const effective = buildEffectiveTaskConfig(
-    {
-      provider,
-      model: undefined,
-      effort: undefined,
-      approvalMode: safestApprovalMode,
-      sandbox: safestSandbox,
-      autoApprove: false,
-    },
-    baseline,
-  );
-  for (const w of effective.warnings) {
-    // ここに来るのは baseline 自体が安全順序表に無い値のとき（設定の破損等）だけで、
-    // 通常は発生しない。発生してもフェイルクローズ（拡張機能側の値をそのまま使う）なので
-    // 危険側には倒れないが、想定外の状況としてログにだけ残す
-    log.warn(`[planner] ${w}`);
+/**
+ * `buildPlannerSessionInput`が組み立てた値が、期待する最安全値からずれていないかを
+ * 起動直前に確かめる。`runner.ts`の`startTask`が実効`approvalMode`について
+ * `bypassPermissions`を弾く最終防御と同じ形（design.md §16.16セキュリティ監査対応）。
+ *
+ * 通常のコード経路では`buildPlannerSessionInput`の戻り値をそのまま渡すだけなので
+ * 一致しないことはありえないが、将来ここへ`buildEffectiveTaskConfig`のような
+ * baseline依存のクランプが再び挟まれた場合や、呼び出し側の実装ミスで安全でない値が
+ * 混入した場合に、プロンプトでの指示だけに頼らず起動そのものを止める最後の砦にする。
+ */
+function assertPlannerSessionIsSafe(provider: Provider, input: TaskSessionInput): void {
+  const expectedApprovalMode = safestApprovalModeFor(provider);
+  if (input.config.approvalMode !== expectedApprovalMode) {
+    throw new Error(
+      '分解セッションの実効approvalModeが期待した最安全値と一致しないため、' +
+        `起動を中止しました（実効値: "${input.config.approvalMode}", 期待値: "${expectedApprovalMode}"）`,
+    );
   }
-  return { cwd, config: effective.config, sandbox: effective.sandbox };
+  if (provider === 'codex' && input.sandbox !== SANDBOX_MODES[0]) {
+    throw new Error(
+      '分解セッションの実効sandboxが期待した最安全値と一致しないため、' +
+        `起動を中止しました（実効値: "${input.sandbox}", 期待値: "${SANDBOX_MODES[0]}"）`,
+    );
+  }
 }
 
 /**
@@ -541,9 +598,11 @@ function buildPlannerSessionInput(
  */
 async function sendSingleTurn(
   host: TaskSessionHost,
+  provider: Provider,
   input: TaskSessionInput,
   prompt: string,
 ): Promise<string> {
+  assertPlannerSessionIsSafe(provider, input);
   const session = await host.openTaskSession(input);
   session.setApprovalHandler(async () => ({ kind: 'auto', decision: 'decline' }));
   session.open({ preserveFocus: true });
@@ -582,18 +641,13 @@ async function sendSingleTurn(
  * ワークフローを走らせる手段を持たない（design.md §16.13「生成したまま自動で実行しない」）。
  */
 export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkflowResult> {
-  const sessionInput = buildPlannerSessionInput(
-    input.provider,
-    input.cwd,
-    input.baseline,
-    input.log,
-  );
+  const sessionInput = buildPlannerSessionInput(input.provider, input.cwd);
 
   const firstPrompt = buildPlannerPrompt({
     goal: input.goal,
     workspaceSummary: input.workspaceSummary,
   });
-  const firstResponse = await sendSingleTurn(input.host, sessionInput, firstPrompt);
+  const firstResponse = await sendSingleTurn(input.host, input.provider, sessionInput, firstPrompt);
   const firstYaml = extractYamlFromResponse(firstResponse);
   const firstAttempt = tryParseAndValidate(firstYaml);
   if (firstAttempt.ok && firstAttempt.definition !== undefined) {
@@ -612,7 +666,12 @@ export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkfl
       .join(' / ')}`,
   );
   const retryPrompt = buildRetryPrompt(firstYaml, firstAttempt.errors);
-  const secondResponse = await sendSingleTurn(input.host, sessionInput, retryPrompt);
+  const secondResponse = await sendSingleTurn(
+    input.host,
+    input.provider,
+    sessionInput,
+    retryPrompt,
+  );
   const secondYaml = extractYamlFromResponse(secondResponse);
   const secondAttempt = tryParseAndValidate(secondYaml);
   if (secondAttempt.ok && secondAttempt.definition !== undefined) {

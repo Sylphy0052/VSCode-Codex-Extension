@@ -93,6 +93,11 @@ export function workflowStyles(): string {
     color: var(--vscode-errorForeground);
     background-color: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent);
   }
+  #banner.draft {
+    border-color: var(--vscode-charts-blue);
+    color: var(--vscode-charts-blue);
+    background-color: color-mix(in srgb, var(--vscode-charts-blue) 12%, transparent);
+  }
 
   /* ---- 依存グラフ ---- */
   #graphWrap { overflow-x: auto; padding: 8px 0; }

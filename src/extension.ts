@@ -44,7 +44,7 @@ import {
   locateSecurityWarningLine,
   type PlanWorkflowResult,
 } from './orchestrator/planner';
-import { DEFAULT_PROVIDER } from './orchestrator/workflow';
+import { DEFAULT_PROVIDER, MAX_PROMPT_LENGTH } from './orchestrator/workflow';
 import { ProviderRegistry } from './provider/registry';
 import type { AgentProvider } from './provider/types';
 import { createLogger, type Logger } from './log';
@@ -463,6 +463,13 @@ async function planWorkflowCommand(
     prompt:
       '達成したいことを文章で入力してください（例: 認証機能を追加してテストとレビューまで終える）',
     ignoreFocusOut: true,
+    // `workflow.ts`のprompt/done等と同じ上限を流用する（design.md §16.9セキュリティ監査
+    // low「ゴール入力に長さ上限が無い」）。ここで拒否しておけば、プロンプトへ埋め込んだ
+    // 結果生成されるYAMLがMAX_PROMPT_LENGTHで弾かれる事態を入力時点で避けられる
+    validateInput: (value) =>
+      value.length > MAX_PROMPT_LENGTH
+        ? `ゴールが長すぎます（上限${MAX_PROMPT_LENGTH}文字）: ${value.length}文字`
+        : undefined,
   });
   if (goal === undefined || goal.trim() === '') {
     return;
@@ -496,6 +503,34 @@ async function planWorkflowCommand(
 }
 
 /**
+ * 一覧取得と書き込みの間に別の生成が割り込んでも上書きしないよう、排他フラグ（`wx`）で
+ * 書き込む（design.md §16.9セキュリティ監査 low）。`EEXIST`（他プロセス・他コマンド
+ * 呼び出しが同名で先に作っていた）なら、その名前を候補集合へ足して連番を1つ進め、
+ * 空いている名前が見つかるまで再試行する。
+ */
+async function writeUniqueWorkflowFile(
+  dirAbs: string,
+  slug: string,
+  existingBaseNames: Set<string>,
+  yaml: string,
+): Promise<string> {
+  for (;;) {
+    const baseName = resolveUniqueFileName(slug, existingBaseNames);
+    const filePath = path.join(dirAbs, `${baseName}.yaml`);
+    try {
+      await fsPromises.writeFile(filePath, yaml, { encoding: 'utf8', flag: 'wx' });
+      return filePath;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST') {
+        throw e;
+      }
+      existingBaseNames.add(baseName);
+    }
+  }
+}
+
+/**
  * 生成が検証を通ったときの後処理。`agent.workflows.dir`へ保存し、エディタとワークフロー
  * Viewを開く（design.md §16.9手順4）。セキュリティ警告があれば、該当行へ移動したうえで
  * 強調して知らせる（design.md §16.9「多数のタスクに紛れた1件のallowを人が見落とすのを
@@ -517,9 +552,12 @@ async function handlePlanSuccess(
   const existingBaseNames = new Set(
     existingFiles.map((f) => path.basename(f.fsPath).replace(/\.ya?ml$/i, '')),
   );
-  const baseName = resolveUniqueFileName(slugifyGoal(goal), existingBaseNames);
-  const filePath = path.join(dirAbs, `${baseName}.yaml`);
-  await fsPromises.writeFile(filePath, result.yaml, 'utf8');
+  const filePath = await writeUniqueWorkflowFile(
+    dirAbs,
+    slugifyGoal(goal),
+    existingBaseNames,
+    result.yaml,
+  );
 
   // エディタより先にViewを開く。エディタの`showTextDocument`が最後に呼ばれるほうへ
   // フォーカスが残るようにするため（Viewのパネル作成自体はフォーカスを奪う作りのため）

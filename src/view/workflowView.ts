@@ -389,11 +389,13 @@ function buildPreviewSnapshot(
     runId: `preview:${defPath}`,
     name: def.name,
     defPath,
-    // 「実行中ではない」ことだけを表現したいための便宜的な値。実際に中断されたわけではない
+    // 「実行中ではない」ことだけを表現したいための便宜的な値（stopAllBtnの無効化にしか
+    // 使わない）。「下書きである」という本来伝えたい意味は`isDraft`が持つ
     outcome: 'aborted',
     startedAt: new Date().toISOString(),
     tasks,
     warnings,
     haltedByUser: false,
+    isDraft: true,
   };
 }
