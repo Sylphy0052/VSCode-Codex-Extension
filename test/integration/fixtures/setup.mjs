@@ -9,6 +9,7 @@
 // `.fixture-manifest.json` として書き出す。テストは `vscode.workspace.workspaceFolders`
 // 経由でこのファイルを読み直す（このプロセスと拡張機能ホストのプロセスは別なので、
 // メモリ越しの受け渡しはできない）。
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -21,6 +22,52 @@ const fixturesRoot = join(repoRoot, '.vscode-test', 'fixtures');
 function writeJsonl(filePath, lines) {
   mkdirSync(dirname(filePath), { recursive: true });
   writeFileSync(filePath, `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`, 'utf8');
+}
+
+/**
+ * ワークフローの統合テスト（Issue #158）が使う定義。#51の受入基準そのもの
+ * （`T1 → (T2 || T3) → T4`）を最小の形で書いたもの。プロンプトと終了条件は
+ * フェイクの `TaskSessionHost` が受け取るだけで、CLIへは渡らない。
+ */
+const WORKFLOW_DIAMOND_YAML = `version: 1
+name: integration-diamond
+defaults:
+  provider: codex
+  maxParallel: 3
+tasks:
+  - id: T1
+    prompt: T1のプロンプト
+    done: T1の終了条件
+  - id: T2
+    dependsOn: [T1]
+    prompt: T2のプロンプト
+    done: T2の終了条件
+  - id: T3
+    dependsOn: [T1]
+    prompt: T3のプロンプト
+    done: T3の終了条件
+  - id: T4
+    dependsOn: [T2, T3]
+    prompt: T4のプロンプト
+    done: T4の終了条件
+`;
+
+/**
+ * テスト用ワークスペースを空のgitリポジトリにする。
+ *
+ * worktreeによる隔離（design.md §16.3）を実物で確かめるため、`git worktree add` が
+ * 通る状態（HEADのある作業ツリー）まで用意する。ユーザーのgit設定に依存しないよう、
+ * ここで作るリポジトリの中だけへ最小限の設定を書く。
+ */
+function initGitRepo(dir) {
+  const git = (...args) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+  git('init', '--initial-branch=main');
+  git('config', 'user.email', 'integration-test@example.invalid');
+  git('config', 'user.name', 'Integration Test');
+  git('config', 'commit.gpgsign', 'false');
+  writeFileSync(join(dir, 'README.md'), '統合テスト用の使い捨てリポジトリ\n', 'utf8');
+  git('add', 'README.md');
+  git('commit', '--no-verify', '-m', 'chore: 統合テスト用の初期コミット');
 }
 
 export function prepareFixtures() {
@@ -154,6 +201,9 @@ export function prepareFixtures() {
     'agent.activityLog.enabled': false,
     'agent.activityLog.dir': activityLogDir,
     'security.workspace.trust.enabled': false,
+    // ワークフローの統合テスト（Issue #158）。危険判定の確認は別途行うため、ここでは
+    // 既定（自動承認あり）のまま走らせる。定義の置き場も既定値を明示しておく。
+    'agent.workflows.dir': '.agents/workflows',
   };
   mkdirSync(join(userDataDir, 'User'), { recursive: true });
   writeFileSync(
@@ -162,8 +212,16 @@ export function prepareFixtures() {
     'utf8',
   );
 
+  // ワークフロー（Issue #158）。定義を置いてからgitリポジトリ化する。
+  const workflowDir = join(workspaceFolder, '.agents', 'workflows');
+  mkdirSync(workflowDir, { recursive: true });
+  const workflowDefPath = join(workflowDir, 'diamond.yaml');
+  writeFileSync(workflowDefPath, WORKFLOW_DIAMOND_YAML, 'utf8');
+  initGitRepo(workspaceFolder);
+
   const manifest = {
     workspaceFolder,
+    workflow: { defPath: workflowDefPath },
     outsideWorkspace,
     codexHome,
     claudeHome,

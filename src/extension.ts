@@ -58,6 +58,7 @@ import {
 import { WorkflowRunStore } from './orchestrator/runStore';
 import { WorkflowRunner, nodeWorkflowFilePort } from './orchestrator/runner';
 import type { ExtensionSafetyBaseline } from './orchestrator/taskConfig';
+import type { TaskSessionHost } from './orchestrator/taskSession';
 import {
   buildWorkspaceSummary,
   nodePlannerWorkspacePort,
@@ -68,6 +69,7 @@ import {
   type PlanWorkflowResult,
 } from './orchestrator/planner';
 import { DEFAULT_PROVIDER, MAX_PROMPT_LENGTH } from './orchestrator/workflow';
+import type { Provider } from './orchestrator/workflow';
 import { ProviderRegistry } from './provider/registry';
 import type { AgentProvider } from './provider/types';
 import { createLogger, type Logger } from './log';
@@ -101,6 +103,37 @@ const META_CACHE_KEY = 'codex.metaCache.v1';
  */
 export interface ExtensionTestApi {
   readonly sessionTree: SessionTreeProvider;
+  /**
+   * ワークフロー（design.md §16）の統合テスト（`test/integration`）専用の口。
+   * `AGENT_SESSIONS_INTEGRATION_TEST=1` が立っているときだけ実体が入り、それ以外では
+   * `undefined` になる（Issue #158）。
+   */
+  readonly workflow?: WorkflowTestApi | undefined;
+}
+
+/**
+ * 統合テストからワークフローを動かすための口（Issue #158）。
+ *
+ * 実VSCode上でCLI（codex / claude）を起動することはできない（`test/integration/fixtures/setup.mjs`
+ * が実行ファイルパスを存在しないパスへ固定している）。CLIとの境界は `TaskSessionHost` の
+ * `openTaskSession` 1メソッドだけなので、**そこだけ**をフェイクへ差し替え、worktreeの作成・
+ * スケジューリング・状態遷移・ワークフローView・workspaceStateへの保存は実物を通す。
+ */
+export interface WorkflowTestApi {
+  readonly runner: WorkflowRunner;
+  /**
+   * `provider` のタスクセッションの開き方を差し替える。`undefined` を渡すと実物
+   * （`ChatViewManager` / `ClaudeChatViewManager`）へ戻る。
+   */
+  setTaskSessionHost(provider: Provider, host: TaskSessionHost | undefined): void;
+}
+
+/**
+ * 統合テスト用の差し替えを受け付けるかどうか。`.vscode-test.mjs` の `env` で立てる。
+ * 立っていなければ `activate` は `workflow` を返さず、差し替えの経路そのものが無くなる。
+ */
+function isIntegrationTestMode(): boolean {
+  return process.env.AGENT_SESSIONS_INTEGRATION_TEST === '1';
 }
 
 export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
@@ -258,8 +291,17 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   context.subscriptions.push(claudeChat);
 
   const workflowStore = new WorkflowRunStore(context.workspaceState);
+  // 統合テスト（Issue #158）だけがここへフェイクを入れる。空のままなら常に実物へ委譲
+  // するため、本番の経路は差し替え口が無かったときと変わらない。
+  const taskSessionHostOverrides: Partial<Record<Provider, TaskSessionHost>> = {};
+  const overridableHost = (provider: Provider, real: TaskSessionHost): TaskSessionHost => ({
+    openTaskSession: (input) => (taskSessionHostOverrides[provider] ?? real).openTaskSession(input),
+  });
   const workflowRunner = new WorkflowRunner({
-    hosts: { codex: chat, claude: claudeChat },
+    hosts: {
+      codex: overridableHost('codex', chat),
+      claude: overridableHost('claude', claudeChat),
+    },
     worktreeQueue: new WorktreeCreationQueue(),
     git: nodeGitCommandRunner,
     fs: nodeWorktreeFileSystem,
@@ -458,7 +500,21 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     ),
   );
 
-  return { sessionTree: tree };
+  return {
+    sessionTree: tree,
+    workflow: isIntegrationTestMode()
+      ? {
+          runner: workflowRunner,
+          setTaskSessionHost: (provider, host) => {
+            if (host === undefined) {
+              delete taskSessionHostOverrides[provider];
+              return;
+            }
+            taskSessionHostOverrides[provider] = host;
+          },
+        }
+      : undefined,
+  };
 }
 
 /** `workflowRunner` / `planWorkflowCommand` が共通して使うクランプ基準（design.md §16.16）。 */
