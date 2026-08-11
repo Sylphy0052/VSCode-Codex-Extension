@@ -11,6 +11,7 @@ import {
   buildSetEffortRequest,
   buildSetModelRequest,
   buildSetPermissionModeRequest,
+  buildStopTaskRequest,
   buildUserMessage,
   describeCanUseTool,
   readAgentList,
@@ -461,6 +462,19 @@ describe('buildMcpStatusRequest / buildMcpToggleRequest', () => {
       type: 'control_request',
       request_id: 'req_2',
       request: { subtype: 'mcp_toggle', serverName: 'codegraph', enabled: false },
+    });
+  });
+});
+
+describe('buildStopTaskRequest（issue #33、design.md §14.23）', () => {
+  it('stop_task要求はtask_id（スネークケース）で送る', () => {
+    // 実測: 実際にBashをrun_in_background:trueで開始させ、この形の要求で
+    // 開始から数秒後に停止できることを確認した（自然終了より十分前）
+    const line = buildStopTaskRequest('req_3', 'b1xre2r80');
+    expect(JSON.parse(line)).toEqual({
+      type: 'control_request',
+      request_id: 'req_3',
+      request: { subtype: 'stop_task', task_id: 'b1xre2r80' },
     });
   });
 });

@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { NO_DIFFS, type ChatItem } from '../appserver/chatState';
 
 /**
- * メモリモード（`#`。design.md §14.25、Issue #6）の追記先解決とファイル入出力。
+ * メモリモード（`#`。design.md §14.29、Issue #6）の追記先解決とファイル入出力。
  *
  * 書き込み先は `listMemoryTargets` が列挙した候補に限る。ユーザーが打ったノート本文から
  * パスを組み立てることは一切しない（パストラバーサルの入口を作らないため）。
@@ -205,7 +205,7 @@ export function buildMemoryAppendConfirmMessage(
 }
 
 /**
- * 追記の結果を会話へ残す項目（新しい種類 `memoryAppend`。design.md §14.25）。
+ * 追記の結果を会話へ残す項目（新しい種類 `memoryAppend`。design.md §14.29）。
  *
  * `symlinkTarget` が渡されていれば `detail` へリンク先も含める。会話に残る記録からも
  * 実際に書き込まれたファイルの実体パスが分かるようにする（`buildMemoryAppendConfirmMessage`

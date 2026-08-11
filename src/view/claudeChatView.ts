@@ -46,6 +46,7 @@ import {
   addAttachment,
   confirmCompact,
   confirmRewindFiles,
+  confirmStopBackgroundTask,
   postFileMentions,
   postImageData,
   renderShell,
@@ -781,7 +782,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
           return;
         }
         // `!`（bashモード）・`#`（メモリモード）はCLIへ送らず拡張機能側で処理する
-        // （design.md §14.25。CLIのcontrol protocolに経路が無いことをPhase 0で確認済み）
+        // （design.md §14.29。CLIのcontrol protocolに経路が無いことをPhase 0で確認済み）
         const mode = classifyClaudeInput(text);
         if (mode.kind === 'empty') {
           // 空のコマンド/ノート。何もしない（会話にも項目を足さない）
@@ -839,6 +840,14 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       }
       if (type === 'compact') {
         void this.compact(entry);
+        return;
+      }
+      if (type === 'stopBackgroundTask' && typeof m['id'] === 'string') {
+        void this.stopBackgroundTask(
+          entry,
+          m['id'],
+          typeof m['command'] === 'string' ? m['command'] : m['id'],
+        );
         return;
       }
       if (type === 'exportTranscript') {
@@ -920,6 +929,24 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
   }
 
   /**
+   * バックグラウンドタスクを止める（issue #33、design.md §14.23）。
+   *
+   * 実行中の処理を打ち切る破壊的な操作のため、必ず確認してから送る。止まったことは
+   * `background_tasks_changed` 通知（一覧から消える）で画面に反映されるため、ここでは
+   * 要求を出すだけでよい。
+   */
+  private async stopBackgroundTask(entry: ClaudePanel, taskId: string, command: string): Promise<void> {
+    if (!(await confirmStopBackgroundTask(command))) {
+      return;
+    }
+    try {
+      entry.session.stopBackgroundTask(taskId);
+    } catch (e) {
+      this.reportError(e);
+    }
+  }
+
+  /**
    * ファイルを指定した発言の直前まで戻す。**会話の履歴には触れない**
    * （design.md「Claude Codeの巻き戻し」・Issue #21）。
    *
@@ -967,7 +994,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
   }
 
   /**
-   * bashモード（`!`。design.md §14.25、Issue #5）を実行する。
+   * bashモード（`!`。design.md §14.29、Issue #5）を実行する。
    *
    * 防御は「既定無効（`claude.bashMode.enabled`）」と「実行のたびのモーダル確認」の
    * 二重ゲートのみ。**コマンド文字列そのもののサニタイズはしない**（意図的に任意コマンドを
@@ -1042,7 +1069,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
   }
 
   /**
-   * メモリモード（`#`。design.md §14.25、Issue #6）を実行する。
+   * メモリモード（`#`。design.md §14.29、Issue #6）を実行する。
    *
    * 書き込み先はQuickPickが列挙した候補に限る。ユーザーが打ったノート本文から
    * パスを組み立てることは一切しない（パストラバーサルの入口を作らないため）。

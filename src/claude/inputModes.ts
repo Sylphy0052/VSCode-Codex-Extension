@@ -1,5 +1,5 @@
 /**
- * 入力欄の判定（design.md §14.25、Issue #5・#6）。
+ * 入力欄の判定（design.md §14.29、Issue #5・#6）。
  *
  * Claude Code TUIのbashモード（`!`）・メモリモード（`#`）相当。Phase 0の実測で、
  * どちらもCLIのcontrol protocolに経路が無いと確定している（`local_command` subtypeは

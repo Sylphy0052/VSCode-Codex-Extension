@@ -2,7 +2,7 @@ import { NO_DIFFS, type ChatItem } from '../appserver/chatState';
 import type { ShellCommandResult } from '../process/shellCommandRunner';
 
 /**
- * 会話へ足す項目を組み立てる純粋関数（design.md §14.25、Issue #5）。
+ * 会話へ足す項目を組み立てる純粋関数（design.md §14.29、Issue #5）。
  *
  * 表示は既存の `commandExecution` 種別を使い回す（`chatScript.ts` が既に
  * ラベル・状態・切り詰め注記の表示を持っているため、Webview側の変更は不要）。

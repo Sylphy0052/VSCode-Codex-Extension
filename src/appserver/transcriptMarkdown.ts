@@ -26,7 +26,7 @@ const KIND_TITLE: Record<string, string> = {
   imageGeneration: '画像の生成',
   enteredReviewMode: 'レビュー開始',
   exitedReviewMode: 'レビュー終了',
-  // bashモード（!）・メモリモード（#）。design.md §14.25、Issue #5・#6
+  // bashモード（!）・メモリモード（#）。design.md §14.29、Issue #5・#6
   memoryAppend: 'メモリ追記',
 };
 

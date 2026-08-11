@@ -29,6 +29,7 @@ import {
   buildSetEffortRequest,
   buildSetModelRequest,
   buildSetPermissionModeRequest,
+  buildStopTaskRequest,
   buildUserMessage,
   describeCanUseTool,
   readCommandList,
@@ -365,7 +366,7 @@ export class ClaudeStreamSession {
   /**
    * 拡張機能内で完結する項目を会話へ追加・更新する（同じidなら上書き）。
    *
-   * bashモード（`!`）・メモリモード（`#`。design.md §14.25）はCLIの制御プロトコルに
+   * bashモード（`!`）・メモリモード（`#`。design.md §14.29）はCLIの制御プロトコルに
    * 経路が無く、拡張機能側だけで処理が完結する（Phase 0で確認済み）。CLIとの通信を
    * 経ずに会話へ項目を残す入口がこれまで無かったため追加した。`noteSettingChange` が
    * 使う `appendNotice` と同じ `upsertItem` を使うが、こちらは種類・本文を呼び出し側が
@@ -441,6 +442,21 @@ export class ClaudeStreamSession {
     }
     this.write(buildControlRequest(`req_${this.nextControlId++}`, { subtype: 'interrupt' }));
     this.update({ ...this.state, busy: false });
+  }
+
+  /**
+   * バックグラウンドで走っているタスクを止める（issue #33、design.md §14.23）。
+   *
+   * `stop_task` の応答は常に空で成否を返さない（`control.ts` の説明を参照）ため、
+   * `interrupt` と同じく発行するだけにする。止まったことは後続の `background_tasks_changed`
+   * 通知（一覧から消える）で画面に反映される。呼び出し側は破壊的操作として確認を
+   * 済ませてから呼ぶこと。
+   */
+  stopBackgroundTask(taskId: string): void {
+    if (this.proc === undefined) {
+      return;
+    }
+    this.write(buildStopTaskRequest(`req_${this.nextControlId++}`, taskId));
   }
 
   /** ユーザーが承認カードのボタンを押したとき。 */

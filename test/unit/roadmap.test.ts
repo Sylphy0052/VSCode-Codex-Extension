@@ -1,15 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import { initialChatState, type ChatState } from '../../src/appserver/chatState';
 import type { LoopPlan, LoopStopReason } from '../../src/loop/loopController';
+import type { Logger } from '../../src/log';
 import {
   applyRunCompletion,
   applyRunCompletionToFile,
+  buildRoadmapPlanGoal,
   buildRoadmapPrompt,
   createCliIssueListPort,
   createTaskSessionRoadmapGenerationPort,
+  detectRoadmapMaterialMismatches,
+  formatRoadmapMaterial,
   generateRoadmap,
   parseRoadmapMarkdown,
+  planWorkflowFromRoadmapPhase,
   resolveRoadmapOutputPath,
+  selectNextRoadmapPhase,
+  selectRoadmapPhaseItems,
   slugifyGoal,
   stripMarkdownCodeFence,
   validateRoadmap,
@@ -17,7 +24,10 @@ import {
   type IssueListPort,
   type RoadmapFileSystemPort,
   type RoadmapGenerationPort,
+  type RoadmapMaterialItem,
 } from '../../src/orchestrator/roadmap';
+import type { ExtensionSafetyBaseline } from '../../src/orchestrator/taskConfig';
+import { parseWorkflowYaml } from '../../src/orchestrator/workflow';
 import type { CliCommandRunner } from '../../src/orchestrator/forge';
 import type {
   ApprovalHandler,
@@ -241,6 +251,254 @@ describe('validateRoadmap', () => {
 `;
     const result = validateRoadmap(parseRoadmapMarkdown(md));
     expect(result.errors.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+const fakeLogger: Logger = {
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+  show: () => undefined,
+};
+
+const baseline: ExtensionSafetyBaseline = {
+  codexSandbox: 'workspace-write',
+  codexApprovalMode: 'on-request',
+  claudePermissionMode: 'acceptEdits',
+  allowAutoApprove: false,
+};
+
+describe('selectNextRoadmapPhase（design.md §16.19 2段目「次のフェーズだけYAMLにする」）', () => {
+  it('未チェックの項目を含む最初のフェーズを返す', () => {
+    const md = `# g
+
+## Phase 1: 設計
+
+- [x] R1 a
+  - 依存: なし
+
+## Phase 2: 実装
+
+- [ ] R2 b
+  - 依存: なし
+`;
+    const parsed = parseRoadmapMarkdown(md);
+    expect(selectNextRoadmapPhase(parsed)?.name).toBe('Phase 2: 実装');
+  });
+
+  it('全フェーズ完了済みならundefined', () => {
+    const md = '# g\n\n## Phase 1\n\n- [x] R1 a\n  - 依存: なし\n';
+    expect(selectNextRoadmapPhase(parseRoadmapMarkdown(md))).toBeUndefined();
+  });
+});
+
+describe('selectRoadmapPhaseItems / formatRoadmapMaterial（design.md §16.19 2段目）', () => {
+  it('フェーズの項目をid・依存・issueだけの材料へ変換する', () => {
+    const parsed = parseRoadmapMarkdown(SAMPLE_ROADMAP);
+    const phase = parsed.phases[0];
+    if (phase === undefined) throw new Error('phase not found');
+    const items = selectRoadmapPhaseItems(phase);
+    expect(items).toEqual([
+      { id: 'R1', text: '認証方式を決めて設計を書く', dependsOn: [], issue: 12 },
+      { id: 'R2', text: 'API側を実装する', dependsOn: ['R1'], issue: 13 },
+      { id: 'R3', text: 'UI側を実装する', dependsOn: ['R1'], issue: undefined },
+    ]);
+  });
+
+  it('idと依存とIssueをそのまま転記するよう指示する材料テキストを組み立てる', () => {
+    const items: RoadmapMaterialItem[] = [
+      { id: 'R1', text: '設計する', dependsOn: [], issue: 12 },
+      { id: 'R2', text: '実装する', dependsOn: ['R1'], issue: undefined },
+    ];
+    const material = formatRoadmapMaterial(items);
+    expect(material).toContain('id: R1');
+    expect(material).toContain('Issue: #12');
+    expect(material).toContain('id: R2');
+    expect(material).toContain('依存: R1');
+    expect(material).toContain('Issue: なし');
+    expect(material).toContain('書き換えないこと');
+  });
+});
+
+describe('buildRoadmapPlanGoal', () => {
+  it('ロードマップのタイトルとフェーズ名からゴール文を組み立てる', () => {
+    const parsed = parseRoadmapMarkdown(SAMPLE_ROADMAP);
+    const phase = parsed.phases[0];
+    if (phase === undefined) throw new Error('phase not found');
+    const goal = buildRoadmapPlanGoal(parsed.title, phase);
+    expect(goal).toContain('認証機能を追加する');
+    expect(goal).toContain('Phase 1: 設計');
+  });
+});
+
+describe('detectRoadmapMaterialMismatches（design.md §16.19 2段目の転記確認）', () => {
+  const material: RoadmapMaterialItem[] = [
+    { id: 'R1', text: '設計する', dependsOn: [], issue: 12 },
+    { id: 'R2', text: '実装する', dependsOn: ['R1'], issue: 13 },
+  ];
+
+  it('材料どおりに転記されていれば不一致無し', () => {
+    const def = parseWorkflowYaml(
+      [
+        'version: 1',
+        'name: x',
+        'tasks:',
+        '  - id: R1',
+        '    prompt: p',
+        '    done: d',
+        '    issue: 12',
+        '  - id: R2',
+        '    dependsOn: [R1]',
+        '    prompt: p',
+        '    done: d',
+        '    issue: 13',
+      ].join('\n'),
+    );
+    expect(detectRoadmapMaterialMismatches(material, def)).toEqual([]);
+  });
+
+  it('対応するタスクが無ければmissingを報告する', () => {
+    const def = parseWorkflowYaml(
+      ['version: 1', 'name: x', 'tasks:', '  - id: R1', '    prompt: p', '    done: d'].join('\n'),
+    );
+    const mismatches = detectRoadmapMaterialMismatches(material, def);
+    expect(mismatches.some((m) => m.itemId === 'R2' && m.kind === 'missing')).toBe(true);
+  });
+
+  it('dependsOnが材料と異なればdependsOnMismatchを報告する', () => {
+    const def = parseWorkflowYaml(
+      [
+        'version: 1',
+        'name: x',
+        'tasks:',
+        '  - id: R1',
+        '    prompt: p',
+        '    done: d',
+        '    issue: 12',
+        '  - id: R2',
+        '    prompt: p',
+        '    done: d',
+        '    issue: 13',
+      ].join('\n'),
+    );
+    const mismatches = detectRoadmapMaterialMismatches(material, def);
+    expect(mismatches.some((m) => m.itemId === 'R2' && m.kind === 'dependsOnMismatch')).toBe(true);
+  });
+
+  it('issueが材料と異なればissueMismatchを報告する', () => {
+    const def = parseWorkflowYaml(
+      [
+        'version: 1',
+        'name: x',
+        'tasks:',
+        '  - id: R1',
+        '    prompt: p',
+        '    done: d',
+        '  - id: R2',
+        '    dependsOn: [R1]',
+        '    prompt: p',
+        '    done: d',
+        '    issue: 13',
+      ].join('\n'),
+    );
+    const mismatches = detectRoadmapMaterialMismatches(material, def);
+    expect(mismatches.some((m) => m.itemId === 'R1' && m.kind === 'issueMismatch')).toBe(true);
+  });
+});
+
+describe('planWorkflowFromRoadmapPhase（design.md §16.19 2段目）', () => {
+  const baseInput = {
+    roadmapTitle: '認証機能を追加する',
+    workspaceSummary: { topLevelEntries: [], hasAgentsMd: false, hasClaudeMd: false },
+    provider: 'codex' as const,
+    cwd: '/repo',
+    baseline,
+    log: fakeLogger,
+  };
+
+  it('フェーズの項目を材料として分解セッションへ渡し、生成された定義と不一致の有無を返す', async () => {
+    const parsed = parseRoadmapMarkdown(SAMPLE_ROADMAP);
+    const phase = parsed.phases[0];
+    if (phase === undefined) throw new Error('phase not found');
+
+    const yaml = [
+      'version: 1',
+      'name: x',
+      'tasks:',
+      '  - id: R1',
+      '    prompt: 認証方式を決めて設計を書く',
+      '    done: 設計が終わっている',
+      '    issue: 12',
+      '  - id: R2',
+      '    dependsOn: [R1]',
+      '    prompt: API側を実装する',
+      '    done: 実装が終わっている',
+      '    issue: 13',
+      '  - id: R3',
+      '    dependsOn: [R1]',
+      '    prompt: UI側を実装する',
+      '    done: 実装が終わっている',
+    ].join('\n');
+    const host = new FakeRoadmapHost(yaml);
+
+    const result = await planWorkflowFromRoadmapPhase({ ...baseInput, phase, host });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.roadmapMismatches).toEqual([]);
+      expect(result.definition.tasks.map((t) => t.id)).toEqual(['R1', 'R2', 'R3']);
+    }
+    const sentPrompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+    expect(sentPrompt).toContain('id: R1');
+    expect(sentPrompt).toContain('Issue: #12');
+  });
+
+  it('goalを省略すると、ロードマップのタイトルとフェーズ名から組み立てる', async () => {
+    const parsed = parseRoadmapMarkdown(SAMPLE_ROADMAP);
+    const phase = parsed.phases[0];
+    if (phase === undefined) throw new Error('phase not found');
+    const host = new FakeRoadmapHost(
+      ['version: 1', 'name: x', 'tasks:', '  - id: R1', '    prompt: p', '    done: d'].join('\n'),
+    );
+    await planWorkflowFromRoadmapPhase({ ...baseInput, phase, host });
+    const sentPrompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+    expect(sentPrompt).toContain('認証機能を追加する');
+    expect(sentPrompt).toContain('Phase 1: 設計');
+  });
+
+  it('生成が検証を通らなければ、planWorkflowと同じくok: falseを返す', async () => {
+    const parsed = parseRoadmapMarkdown(SAMPLE_ROADMAP);
+    const phase = parsed.phases[0];
+    if (phase === undefined) throw new Error('phase not found');
+    const invalidYaml = ['version: 1', 'name: x', 'tasks:', '  - id: R1'].join('\n');
+    const host = new FakeRoadmapHost(invalidYaml);
+    const result = await planWorkflowFromRoadmapPhase({ ...baseInput, phase, host });
+    expect(result.ok).toBe(false);
+  });
+
+  it('材料の転記に漏れがあれば、生成自体は成功していてもroadmapMismatchesに残る', async () => {
+    const parsed = parseRoadmapMarkdown(SAMPLE_ROADMAP);
+    const phase = parsed.phases[0];
+    if (phase === undefined) throw new Error('phase not found');
+    // R2・R3を作らず、issueも落とした不完全な転記
+    const yaml = [
+      'version: 1',
+      'name: x',
+      'tasks:',
+      '  - id: R1',
+      '    prompt: 認証方式を決めて設計を書く',
+      '    done: 設計が終わっている',
+    ].join('\n');
+    const host = new FakeRoadmapHost(yaml);
+    const result = await planWorkflowFromRoadmapPhase({ ...baseInput, phase, host });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.roadmapMismatches.some((m) => m.itemId === 'R1' && m.kind === 'issueMismatch')).toBe(
+        true,
+      );
+      expect(result.roadmapMismatches.some((m) => m.itemId === 'R2' && m.kind === 'missing')).toBe(true);
+      expect(result.roadmapMismatches.some((m) => m.itemId === 'R3' && m.kind === 'missing')).toBe(true);
+    }
   });
 });
 

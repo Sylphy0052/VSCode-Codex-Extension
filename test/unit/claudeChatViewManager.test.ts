@@ -449,7 +449,7 @@ describe('ClaudeChatViewManager', () => {
     });
   });
 
-  describe('入力欄の判定の統合（design.md §14.25）', () => {
+  describe('入力欄の判定の統合（design.md §14.29）', () => {
     it('空のbash/メモリ入力はCLIへ送らず、会話にも項目を残さない', async () => {
       const calls = stubStart();
       const { manager } = createManager();
@@ -486,7 +486,7 @@ describe('ClaudeChatViewManager', () => {
 
     it(
       '`!` / `#` は添付ファイルを消費せず、次の通常の発言へ持ち越す' +
-        '（design.md §14.25。`entry.attachments.take()`は`dispatch()`からしか呼ばれない）',
+        '（design.md §14.29。`entry.attachments.take()`は`dispatch()`からしか呼ばれない）',
       async () => {
         stubStart();
         const { manager } = createManager();
@@ -524,7 +524,7 @@ describe('ClaudeChatViewManager', () => {
     );
   });
 
-  describe('bashモード（`!`。design.md §14.25、Issue #5）', () => {
+  describe('bashモード（`!`。design.md §14.29、Issue #5）', () => {
     it('claude.bashMode.enabledが既定(false)のときは実行せず、無効である旨の項目を残す', async () => {
       stubStart();
       const runSpy = vi.fn();
@@ -765,7 +765,7 @@ describe('ClaudeChatViewManager', () => {
     });
   });
 
-  describe('メモリモード（`#`。design.md §14.25、Issue #6）', () => {
+  describe('メモリモード（`#`。design.md §14.29、Issue #6）', () => {
     const WORKSPACE_MEMORY_PATH = '/workspace/root/CLAUDE.md';
     const USER_MEMORY_PATH = '/config/CLAUDE.md';
 

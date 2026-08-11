@@ -80,7 +80,7 @@ export function readConfig(): ExtensionConfig {
   };
 }
 
-/** bashモード（`!`。Issue #5、design.md §14.25）の設定。 */
+/** bashモード（`!`。Issue #5、design.md §14.29）の設定。 */
 export interface ClaudeBashModeConfig {
   enabled: boolean;
   timeoutMs: number;
@@ -110,7 +110,7 @@ export function readClaudeConfig(): ClaudeExtensionConfig {
         : [],
     },
     bashMode: {
-      // 既定は無効（CLIの権限設定を迂回する機能のため。design.md §14.25）
+      // 既定は無効（CLIの権限設定を迂回する機能のため。design.md §14.29）
       enabled: c.get<boolean>('bashMode.enabled') === true,
       // 0以下・非有限の値は既定へ丸める（`positiveNum`のJSDoc参照）
       timeoutMs: positiveNum(c, 'bashMode.timeoutMs', 60000),

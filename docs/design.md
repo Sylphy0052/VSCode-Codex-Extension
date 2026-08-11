@@ -1653,7 +1653,149 @@ CodexのTUIは Ctrl+T でトランスクリプトを表示し、`/raw` で選択
 - **外部へは送らない**。クリップボード・ローカルファイル・エディタタブの3つに留め、ネットワーク越しの送信機能は作らない（仕様どおり。生テキストには機微な内容が含まれうるため）
 - `showQuickPick` / `showSaveDialog` / `env.clipboard` / `workspace.fs` / `openTextDocument` はテスト用の `vscode` モック（`test/mocks/vscode.ts`）に無く、既存の `review` メッセージ（`runReview`）と同じ理由でユニットテストの対象外（実機確認に回す。`docs/manual-test.md` C-38 / L-36）。Markdownの組み立てそのものは純粋関数として全面的にユニットテストする
 
-### 14.25 入力欄のbashモード・メモリモード（Claude Code）
+### 14.25 バックグラウンドターミナルの一覧と停止
+
+Codex TUIの `/ps`（list background terminals）に相当する表示。issue #33、design.mdのTP-54対応。Phase 0（issue #1 Z-08）では「terminal は `command/exec` 系でできる」「通知: `process/outputDelta` `process/exited`」とされ、Codexのみが対象だった。issue #33のPhase 0コメントで**Claude側にも `background_tasks` / `stop_task` / `agents_killed` が実在する**ことが分かり、スコープをCodex/Claude両方へ広げた。本issueで両CLIとも実際にバックグラウンドプロセスを起こし、一覧と停止を試して確定させたところ、**「一覧は取れるが停止する確定した経路は無い」（Codex）と「一覧も停止も両方できる」（Claude Code）という非対称**であることが分かった（pluginの有効/無効操作の非対称、§14.22と対照的に、こちらはClaude Codeのほうが高機能）。
+
+#### Codex: `commandExecution` ThreadItemの `status: inProgress` で分かる。停止する確定した経路は無い
+
+実測（codex-cli 0.147.0。`codex app-server` を実際に起動し、`thread/start` → `turn/start` でスレッドを作り、モデルに `sleep 45.29` をバックグラウンドで開始させ、実際のイベントを記録した。この環境の会話履歴以外の設定は変更していない）:
+
+- `codex app-server generate-json-schema --out` の `ClientRequest` を全数確認したところ、**一覧取得・全停止に相当する専用メソッドは無い**（95メソッドの一覧。`command/exec` `command/exec/write` `command/exec/resize` `command/exec/terminate` はあるが、いずれも「クライアントが `command/exec` で起動したプロセス」専用で、一覧を返すものは無い）
+- モデルに「`sleep 45.29` をバックグラウンドで開始してください」と指示すると、実際には `/bin/bash -lc 'nohup sleep 45.29 >/dev/null 2>&1 &'` という**シェルの `&` によるバックグラウンド化**を選んだ。このコマンド自体（`nohup ... &`）はシェルへ渡した瞬間に返るため、対応する `commandExecution` ThreadItemは `item/started` で `status: inProgress` ・`processId: "92439"`（実測: 実在するOSのPID）を一瞬持つが、直後の `item/completed` で `status: completed` へ遷移する。**この一覧に載り続けるのは、`&`で切り離した子プロセスではなく、exec呼び出し自体がまだ終わっていない（ビルド・テスト等の）長時間コマンドだけ**
+- **`command/exec/terminate` を、この `commandExecution` ThreadItemが実際に持っていた `processId`（`"92439"`）に対して呼んだところ、`{"code":-32600,"message":"no active command/exec for process id \"92439\""}` というエラーで拒否された**（実測。会話は継続、拡張の壊れは無い）。`CommandExecTerminateParams` のスキーマ説明どおり、この経路は「クライアントが `command/exec` で起動したプロセス」専用で、エージェントが実行したコマンドのprocessIdは受け付けない。**Codex側に、拡張機能から個別のバックグラウンドコマンドを止める確定した経路は無い**
+- `turn/interrupt`（`{threadId, turnId}`。実測で `turnId` も必須と判明）はターン全体を打ち切れるが、特定の1コマンドだけを止めるものではなく、応答そのものが終わってしまう。「個別に停止」というissueの受入基準には合わないため採用しない
+- `process/outputDelta` / `process/exited`（Phase 0が言及していた通知）はスキーマ上 `ServerNotification` に実在するが、対応する要求メソッド（`process/spawn` 相当）が現行の `ClientRequest` 一覧に無い。ドキュメント文字列に名残があるのみで、外部から呼び出す経路が見当たらない（スキーマ根拠のみ、未実測）
+
+一覧は既存の仕組み（issue #17、TP-35のコマンド出力逐次表示）をそのまま使う。`state.items` のうち `kind: 'commandExecution' && status: 'inProgress'` を拾えば、走っているコマンドの一覧になる（`deriveCodexBackgroundTerminals`）。停止ボタンは出さず、「この画面から停止する経路はありません」と明示する。
+
+#### Claude Code: `background_tasks_changed` 通知で分かる。`stop_task` で実際に止められる
+
+実測（CLI 2.1.227。`claude --print --input-format stream-json --output-format stream-json` を実際に起動し、Bashツールを `run_in_background:true` で呼び出させて、開始から数秒後に停止を試みた。3回実測した）:
+
+- Bashツールを `run_in_background:true` で呼ぶと、ツールの結果はすぐ返る（`"Command running in background with ID: <task_id>. Output is being written to: <path>.output..."`という文字列。構造化されていないプレーンテキスト）。ほぼ同時に **`{type:'system', subtype:'background_tasks_changed', tasks:[{task_id, task_type, description}]}`** という通知が届く（`task_type`の実測値は `local_bash`。CLIバイナリのstrings解析では `local_agent` `mcp_task` `local_workflow` `auto_mode_scan` も列挙されており、対応する種別のタスクでも同じ通知が来るとみられる。実測はlocal_bashのみ）
+- **`background_tasks` control request（能動的な問い合わせ）は、タスクが実際に走っている間に呼んでも空 `{}` を返した**（2回実測。`task_started` 通知の直後に呼んでも同じ）。ポーリングでは一覧を取れないため、**この拡張の一覧は `background_tasks_changed` 通知だけを正として持つ**（届くたびに一覧を丸ごと置き換える。差分ではない）
+- **`stop_task`（`{subtype:'stop_task', task_id}`。パラメータ名はスネークケース。CLIバイナリのstrings解析で `Cannot destructure property 'task_id'` というエラー文言から確認）を、タスク開始直後（自然終了の30.71秒よりずっと前）に送ったところ、実際に止まった**（実測。直後に `background_tasks_changed` で `tasks: []`、`task_updated` で `{status:'killed', end_time}`、`task_notification` で `{status:'stopped'}` が届いた）。**Claude Code側は、拡張機能から個別のバックグラウンドタスクを止められる**
+- `--print`（非対話）セッションでは、ターンが `end_turn` で終わると、明示的に停止していないバックグラウンドタスクも数秒以内に自動終了する挙動を3回とも観測した（`task_updated` で `status: 'killed'` に変わる）。原因はCLI内部の実装（`orphaned_background_tasks_pending_notification` という文字列がバイナリに実在し、孤立したバックグラウンドタスクの後始末に関わるとみられる）で、この拡張機能が明示的に何かをしたわけではない。**この拡張機能はセッションをターンをまたいで生かし続ける**（`ClaudeStreamSession` は1会話につき1プロセスを使い回す。§14.4）ため、TUIの `--print` 単発利用より一覧が長く保たれる可能性はあるが、確証は無い
+- `agents_killed`（`system` メッセージの一種。`@internal Emitted when background agents are terminated (e.g. on interrupt)` という説明がCLIバイナリに実在する）は個別タスクの終了ではなく、割り込み等による一括終了の通知とみられる（スキーマ・strings根拠のみ、実測はしていない）
+
+#### 実装
+
+- `src/appserver/chatState.ts`: `BackgroundTerminalItem`（`id` / `command` / `status` / `cwd` / `processId` / `taskType` / `stoppable`）と空配列 `NO_BACKGROUND_TERMINALS` を共有の型として持つ。`ChatItem` に `cwd` / `processId`（`commandExecution` のみ、`normalizeItem` で読む）を追加。`ChatState.backgroundTerminals` を追加し、Codex側は `item/started` `item/updated` `item/completed` の中で `deriveCodexBackgroundTerminals(items)`（`kind: 'commandExecution' && status: 'inProgress'` を拾う純粋関数）から求める
+- `src/claude/streamJson.ts`: `background_tasks_changed` 通知を `backgroundTerminals` へ丸ごと置き換える（`applyBackgroundTasksChanged`）。`task_id` の無い要素は捨てる
+- `src/claude/control.ts`: `buildStopTaskRequest(requestId, taskId)` を追加（`{subtype:'stop_task', task_id}`）
+- `src/claude/streamSession.ts`: `ClaudeStreamSession.stopBackgroundTask(taskId)` を追加。`interrupt()` と同じく発行するだけで、応答（常に空）は見ない。実際に止まったかは後続の `background_tasks_changed` 通知が反映する
+- `src/view/chatView.ts`: `confirmStopBackgroundTask(command)` を追加（`confirmCompact` と同じ形の確認ダイアログ。実行中の処理を打ち切る破壊的操作のため必ず挟む）。Codex/Claude Code両画面で共有するHTMLへ `#backgroundTerminals` を追加（TODO一覧と同じ並び）
+- `src/view/claudeChatView.ts`: `stopBackgroundTask` メッセージを受け、確認してから `ClaudeStreamSession.stopBackgroundTask` を呼ぶ
+- `src/view/chatScript.ts` / `chatStyles.ts`: 一覧の描画。`stoppable: true` の項目にだけ「停止」ボタンを出し、`false`（Codex）は「この画面から停止する経路はありません」と明示する（黙って何もしないボタンを置かない）。コマンド文字列は必ず `textContent` でDOMへ入れる
+
+### 14.26 AGENTS.md / CLAUDE.mdの生成（`/init` 相当）
+
+どちらのCLIも `/init` でプロジェクト向けの指示ファイルを生成する。issue #26、design.mdのTP-46対応。Phase 0（issue #1コメント）では「Codexは効かない」「Claudeはそのまま効く」とされ、本issueでその判定（TP-11）を前提に、Codex側だけ実装するかどうかを判断する調査から始めた。
+
+#### 調査
+
+- **Claude Code**: `/init` はCLIの組込コマンドとして実在する（実測。`claude --print --input-format stream-json --output-format stream-json --verbose` を実際に起動し、`{"type":"control_request","request_id":"1","request":{"subtype":"initialize"}}` を送ったところ、応答の `commands`（90件）に `{"name":"init","description":"Initialize a new CLAUDE.md file with codebase documentation","argumentHint":""}` が含まれていた）。§9.8で確定した通り、Claude Codeの組込コマンドは一覧をハードコードせず`initialize`の応答をそのまま候補に出す作り（`docs/slash-commands.md`）なので、**この拡張機能は既に`/init`を候補として出しており、そのまま送れば動く**。追加の実装は不要
+- **Codex**: `codex app-server generate-json-schema --out <DIR>` で`ClientRequest`の全95メソッドを再確認したが、`init`に相当するメソッドは無い（実測、§14.25と同じ手法）。`AGENTS_MD`という文字列はスキーマ中に1箇所あるが、`ExternalAgentConfigMigrationItemType`（他ツールの設定を移行する機能の種別列挙）の一部であり、生成機能とは無関係。TUIの`/init`はTUI層だけの機能で、app-server越しには存在しない（§9系と同じ構造。`docs/slash-commands.md`の結論を追認）
+- Codexで生成する手段は「モデルへの指示として送る」以外に無い。TUIタブの`/init`（この拡張機能には無い）のほうが公式に作り込まれた指示文である可能性はあるが、拡張機能側からその文面を取得する経路は無い。既存の擬似コマンド（`/compact`）と同じ形で、固定の指示文を通常の発言として送ることにした
+
+#### 実装（Codexのみ。Claude Codeは追加実装なし）
+
+- `src/provider/pseudoCommands.ts`: `PseudoAction` に `'generateAgentsFile'` を追加し、`CODEX_PSEUDO_COMMANDS` へ `/init` を足す。`buildInitInstructionText(agentsFileExists)` を純粋関数として追加し、AGENTS.mdの有無で「新規に作成」「既存の内容を踏まえて更新」と文面を変える
+- `src/view/chatView.ts`: `confirmGenerateAgentsFile()` を追加（`confirmCompact` と同じ形の確認ダイアログ）。`runPseudoCommand` に `generateAgentsFile` の分岐を足し、新設の `runGenerateAgentsFile(entry)` で次を行う
+  1. `entry.cwd`（無ければ `currentWorkspaceFolder()`）でワークスペースの場所を求める。どちらも無ければ生成先が分からない旨をエラー表示して終える（黙って何も起きない状態を作らない）
+  2. `path.join(cwd, 'AGENTS.md')` を`FileSystemPort.readTextFile`で読み、存在すれば`confirmGenerateAgentsFile()`で上書きの確認を取る（拒否されたら何もしない）
+  3. `buildInitInstructionText(existing !== undefined)` の指示文を、送信欄に打った発言と同じ経路（`entry.session.sendOrQueue`）で送る。生成そのものはモデル・CLI側の`apply_patch`に任せ、拡張機能は中身を書かない
+- 上書き確認は既存ファイルがあるときだけ挟む（無ければ新規作成として素通り）。承認モードによる書き込み自体の確認とは別に、**AGENTS.mdの上書きは承認モードの設定に関わらず必ず一度確認する**（`compact`と同じ考え方。基盤になる指示ファイルを壊すと以後の作業全体に影響するため）
+- 会話中に打つ`/init`も、候補から選ぶ場合も同じ経路（`routePseudoCommand`）を通る。Codexの組込`/init`と同名だが、実行されるのは拡張機能側のこの処理だけで、CLIへ`/init`という文字列がそのまま渡ることは無い
+
+#### スコープ外にしたもの
+
+- Codexが実際に生成した内容の品質は保証しない（モデルの応答に依存する。TUI公式の`/init`とは指示文が異なるため、生成される内容が完全に同じにはならない）
+- Claude Code側の上書き確認は、Claude Code CLI自身が`/init`実行時にどう振る舞うか（既存ファイルを読んでから編集するか等）に委ねる。拡張機能側で別途確認ダイアログは挟まない（組込コマンドの一般的な承認フロー・§14.3のツール承認カードに任せる）
+
+### 14.27 脇道の質問（Codex TUIの `/btw` 相当）
+
+Codex TUIの `/btw` は「本流の会話を汚さずに、ephemeralなforkで一時的な会話を始める」機能（Codexバイナリの説明: "start a side conversation in an ephemeral fork"）。issue #24、TP-42、Phase 0（issue #1 Z-06）対応。issueに書かれたスコープはCodexのみ（Phase 0のコメントでClaude側にも同等の `side_question` control requestが実在すると分かったが、それは別issueで扱う）。
+
+#### 調査: `ephemeral` と `ThreadSection` は別物
+
+`codex app-server generate-json-schema --out`（CLI 0.147.0）で調べたところ、Phase 0が挙げていた3つの型は次のように性質が分かれる。
+
+- **`ephemeral`**（`ThreadStartParams.ephemeral` / `ThreadForkParams.ephemeral` / `Thread.ephemeral`。いずれも `boolean`）: `Thread.ephemeral` の説明は "Whether the thread is ephemeral and should not be materialized on disk."。**これが `/btw` の実体**（スキーマ根拠かつ実測で確認。後述）
+- **`section` / `sectionEnteredAt` / `threadSection/*`**（`ThreadSectionCreateParams` 等。`ClientRequest` に `threadSection/create` `threadSection/list` `threadSection/update` `threadSection/delete` が実在する）: スレッドを名前付きグループへ分類する、**永続化される**整理機能（`ThreadSection { id, name }`）。`ephemeral` とは無関係で、`/btw` の代替にはならない（スキーマ根拠のみ、未実装・未実測。将来スレッドの整理機能を作るなら別issue）
+
+#### 実測: `ephemeral: true` でforkしたスレッドの性質
+
+`codex app-server` を実際に起動し、`thread/start` → `turn/start`（"hi"）で会話が1往復あるスレッドを作ってから `thread/fork`（`{threadId, ephemeral: true}`。`lastTurnId` は指定しない）した（実測、課金を伴う呼び出しは必要最小限の2往復のみ）。
+
+- forkの応答にある新しいスレッドは `path: null`（通常のスレッドは `~/.codex/sessions/**` のロールアウトファイルのパスが入る）
+- forkされたスレッドへ実際に `turn/start` で発言し、reasoning・web検索を伴う応答が最後まで通ることを確認した（会話機能そのものは通常のスレッドと変わらない）
+- forkの前後で `~/.codex/sessions/**` のファイル一覧を比較したところ、**ephemeralなスレッドに対応するロールアウトファイルは1つも作られなかった**（元の非ephemeralなスレッドの分だけ増えた）
+- `thread/list`（`limit: 10`）の応答にephemeralなスレッドのidは**含まれなかった**（作成直後・発言後のいずれでも）
+- `thread/read` では読める（同じapp-serverプロセスが生きている間はメモリ上に存在するため）
+- 一方 **`thread/resume` では読み直せない**。`{"code":-32600,"message":"no rollout found for thread id ..."}` で拒否される（ロールアウトが無いため。`path: null` と符合する）
+- **forkの元スレッドに1往復も会話が無い状態では、ephemeralなforkそのものが失敗する**（`no rollout found for thread id <元のスレッド>`）。forkはディスク上のロールアウトを読み込む処理を経由するため、先に元スレッドが最低1往復進んでいる必要がある
+
+#### 既存の「分岐」との違い
+
+`thread/fork` 自体は既存の「分岐」（`forkFromTurn` / `chatView.ts` の `forkFrom`。§9.5「会話途中からの分岐」）と同じメソッドだが、`ephemeral` の有無で性質が正反対になる。
+
+|                    | 分岐（`ephemeral` 無し）                                                 | 脇道の質問（`ephemeral: true`）                               |
+| ------------------ | ------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| ディスクへの永続化 | される（ロールアウトファイルができる）                                   | **されない**（`path: null`、ファイルが作られない）            |
+| `thread/list`      | 出る（履歴に残り続ける）                                                 | **出ない**                                                    |
+| リロード後の復元   | `thread/resume` で復元できる                                             | **できない**（ロールアウトが無く `thread/resume` が拒否する） |
+| 使いどころ         | 過去のターンへ戻ってやり直す・別方向へ進める（本流の代わりに使い続ける） | 今の文脈のまま一言だけ聞いて捨てる（跡を残さない）            |
+
+分岐は「新しい本流」を作る操作であり、履歴に残り続ける。脇道の質問は逆に、**聞いたら消えることが要点**。両者を混同すると「分岐で足りるのでは」という疑問が出るが、`ephemeral` による永続化の有無という明確な違いがあるため、分岐とは別の操作として実装する。
+
+#### 実装
+
+- `src/codex/sideQuestion.ts`: `buildSideQuestionForkParams(threadId)` が `{ threadId, ephemeral: true }` を組み立てる（純粋関数）。`lastTurnId` は指定しない。分岐が過去の特定ターンを指す運用なのに対し、脇道の質問は「今の文脈まで」を引き継ぐため
+- `src/appserver/chatSession.ts`: `resume()` と `loadForkedThread(result)` の共通部分を `applyThreadSnapshot` へ切り出した。`loadForkedThread` はfork応答（`thread/resume` と同じ形）を通信なしでそのままこの画面の状態にする。`thread/resume` が使えない（前述の実測）ため専用の経路にした
+- `src/provider/pseudoCommands.ts`: 既存の擬似コマンド（`/compact`）に `/btw <質問>` を追加。`PseudoAction` に `sideQuestion` を追加し、`trimmedArgsOrUndefined` で引数（質問文）の有無を判定する。組込コマンドがapp-serverに存在しない事情は §9.8 と同じ
+- `src/view/chatView.ts`: `runPseudoCommand` に `sideQuestion` の分岐を追加。質問が空なら送らずエラーを出す。`startSideQuestion` が実際の流れを持つ: 現在のスレッドを `buildSideQuestionForkParams` でephemeral fork → 新しい `ChatPanel`（見出し「脇道」）を作り `loadForkedThread` で会話を差し込む → その画面へ質問を送る。元のスレッド（呼び出し元の `entry`）の状態には一切触れないため、本流の会話は汚れない
+- タブの復元: 脇道のタブはephemeralで `thread/resume` が使えないため、既存の「復元できないパネルは残さず閉じる」（§9.5「タブ復元」）がそのまま働く。専用の分岐は追加していない（ウィンドウ再読み込み後、`thread/resume` が失敗してパネルが閉じる）
+
+### 14.28 サブエージェントの状況表示と履歴の親子関係（issue #34、design.mdのTP-55）
+
+Codex TUIには「switch the active agent thread」があり、バイナリには `Sent input to an agent` `Waited for an agent` `Closed an agent` `Agent spawn failed` `No agents completed yet` といった文字列がある（issue #1 Z-08、Phase 0）。拡張はこれまでサブエージェントの活動を扱っておらず、`normalizeItem` の `default` に落ちて種類名（`subAgentActivity` / `collabAgentToolCall`）しか出なかった。本issueは「(a) サブエージェントの状況表示」と「(b) agent threadの切替」の2つに分けて扱う。**`/goal`（thread単位の目標の表示・設定）はスコープ外**（Phase 0のコメントで「goalとサブエージェントは性質が違うため分けて出す」と提案されており、本issueでは扱わない。別issueで扱う）。
+
+#### 調査
+
+- **スキーマ実測**（`codex app-server generate-json-schema --out <dir>`、CLI 0.147.0）: `ThreadItem` のunionに `SubAgentActivityThreadItem`（`{id, type: 'subAgentActivity', agentPath: string, agentThreadId: string, kind: SubAgentActivityKind}`。`SubAgentActivityKind` は `started` / `interacted` / `interrupted`）と `CollabAgentToolCallThreadItem`（`{id, type: 'collabAgentToolCall', tool: CollabAgentTool, status: CollabAgentToolCallStatus, senderThreadId: string, receiverThreadIds: string[], agentsStates: {[threadId]: CollabAgentState}, model?: string|null, prompt?: string|null, reasoningEffort?: string|null}`）がある。`CollabAgentTool` は `spawnAgent` / `sendInput` / `resumeAgent` / `wait` / `closeAgent`、`CollabAgentToolCallStatus` は `inProgress` / `completed` / `failed`、`CollabAgentState` は `{status: CollabAgentStatus, message: string|null}`、`CollabAgentStatus` は `pendingInit` / `running` / `interrupted` / `completed` / `errored` / `shutdown` / `notFound`
+- **スキーマ実測**（`ClientRequest.json`）: `method` のenumを全数確認したところ**95件**で、うち `thread/` 接頭辞は21件（`thread/approveGuardianDeniedAction` `thread/archive` `thread/compact/start` `thread/delete` `thread/fork` `thread/goal/clear` `thread/goal/get` `thread/goal/set` `thread/inject_items` `thread/list` `thread/loaded/list` `thread/metadata/update` `thread/name/set` `thread/read` `thread/resume` `thread/rollback` `thread/section/move` `thread/shellCommand` `thread/start` `thread/unarchive` `thread/unsubscribe`）。**「アクティブなagent threadを切り替える」に相当するメソッド（`thread/switch` `thread/activate` 等）は無い**。`thread/loaded/list` はapp-serverプロセスがメモリに載せているスレッドidの一覧を返すだけで、「アクティブ」を制御する経路ではない
+- **実測**（`codex app-server` を実際に起動し、読み取りのみで `thread/list` を`{limit:100}`でページングし尽くすまで叩いた。この環境で存在した33スレッド全件を確認）: `parentThreadId` / `agentNickname` / `agentRole` / `forkedFromId` / `threadSource` はいずれもキー自体は応答に存在するが、**33件全てで値が`null`だった**。サブエージェントを実際に起動する検証はコストと時間がかかるため行っておらず（Phase 0コメントで許容されている簡略化）、値が入った実例は今回も再現できなかった
+- 既存の `src/codex/threadList.ts` の `normalizeThread` は `threadSource !== 'user'` の派生スレッド（サブエージェントなど）を履歴一覧から意図的に除外している（issue #45、§4.4）。これは「サブエージェント由来のスレッドを履歴に出さない」という既存の設計判断で、本issueのスコープではない
+
+#### (a) サブエージェントの状況表示（実装済み）
+
+`src/appserver/chatState.ts` の `normalizeItem` に `subAgentActivity` / `collabAgentToolCall` を追加し、種類名だけでなく中身が読める形にした。
+
+- `subAgentActivity`: `detail` に `agentPath`（どのエージェントか）、`status` に `kind`（`started` / `interacted` / `interrupted`。チャット画面の `STATUS_LABEL` で「開始」「応答」「中断」に翻訳する。`chatScript.ts`）、本文（`text`）に `エージェントスレッド: <agentThreadId>` を1行残す
+- `collabAgentToolCall`: `detail` に `tool` を日本語化したもの（`エージェントを起動` 等。`COLLAB_TOOL_LABEL`。`detail` にはstatusのような翻訳の通り道がchatScript.ts側に無いため、ここではホスト側で直接翻訳する）、`status` は生の値（`inProgress` / `completed` / `failed`。既存の `STATUS_LABEL` がそのまま翻訳する）、本文に指示（`prompt`）・モデル・reasoning effort・対象スレッド（`receiverThreadIds`）・`agentsStates` の対象エージェントごとの状態（`CollabAgentState`。`COLLAB_AGENT_STATUS_LABEL` で日本語化）を1行ずつ組み立てる（`describeCollabAgentToolCall`）。無い項目は行を出さない
+- `chatScript.ts`: `KIND_LABEL` に `subAgentActivity: 'サブエージェント'` / `collabAgentToolCall: 'サブエージェント操作'`、`STATUS_LABEL` に `started` / `interacted` / `interrupted` の3件、`CLASS_OF` に両kindを `'tool'`（既存のツール系項目と同じ見た目）として追加
+- テストは `test/unit/chatState.test.ts` に純粋関数（`normalizeItem`）の単体テストとして追加（実データを再現できないため、スキーマの形に沿った合成データで検証している）
+
+#### (b) agent threadの切替
+
+**できない**。上記のスキーマ実測のとおり、95件のClientRequestメソッドを全数確認しても切替に相当するものが無い。`thread/resume` は任意のthreadIdを読み込めるが、これは「別のスレッドとして新しく開く」動きで、既存のTUIタブの「アクティブなagent threadを切り替える」（同じ会話の中でどのサブエージェントの出力を見るか選ぶ）とは異なる。この拡張機能には切替ボタンを設けない。
+
+**履歴ツリーでの親子表示は最小限に留めた**。`SessionSummary`（`src/codex/types.ts`）に `parentThreadId?: string | undefined` を追加し、`normalizeThread`（`src/codex/threadList.ts`）で読む。`SessionTreeProvider` のtooltipに、値がある場合だけ「親スレッド: `<id>`」の行を足す（`src/view/sessionTreeProvider.ts`）。
+
+**ツリーを親子でネストする構造化は見送った**。理由は次の2点。
+
+1. 上記の実測のとおり、`parentThreadId` が値を持つスレッドを一度も観測できておらず、実データでの検証ができない
+2. 既存の `normalizeThread` は `threadSource !== 'user'` のスレッド（サブエージェント由来と見られるものを含む）を履歴一覧そのものから除外している。この除外を変えずにネスト表示を実装すると、サブエージェントのスレッドはそもそも一覧に入らないため**ネスト用のコードが実行される経路が無いまま残ることになる**（「黙って何も起きない」コード）。除外を変えるかどうかは既存の設計判断（issue #45）を覆すかどうかの検討が要り、実データも無いまま踏み込むのは避けた
+
+親子関係は「見える」ところまで（tooltipでの表示）に留め、ツリー構造での表示・切替は将来のissueで実データが取れたときに改めて検討する。
+
+#### スコープ外: `/goal`
+
+Codexの `/goal`（`thread/goal/set` / `thread/goal/get` / `thread/goal/clear`。Phase 0で「実装できる」と確認済み）は、本issueでは扱わない。サブエージェントの状況表示とは性質が違う機能のため、別issueで扱う。
+
+### 14.29 入力欄のbashモード・メモリモード（Claude Code）
 
 Claude Code TUIのbashモード（`!`）とメモリモード（`#`）相当。TP-03・TP-04、issue #5・#6。Codex側は対象外（TUIに相当機能が無い）。
 
@@ -1827,7 +1969,7 @@ T4は「T2とT3のブランチをマージする」タスクではない。マ�
 
 - 走らせる集合の決定は純粋関数（`scheduler.ts`）に閉じる。入力は「タスク定義」と「タスクごとの状態」、出力は「次に開始するidの集合」
 - Codexは1つのapp-serverプロセスが複数スレッドを扱えるため、並列数を上げてもプロセスは増えない。Claude Codeはセッションごとに `claude` プロセスが立つため、`maxParallel` の主な意味はこちら側にある
-- タスクの状態は `pending` / `running` / `waitingApproval` / `waitingReply` / `merging` / `done` / `failed` / `blocked` / `skipped`。ただし `waitingReply` は §16.21 のメッセージング機能に属し、その配線が無い現状の `runState.ts` にはまだ無い（実際に取りうるのは残り8状態。§16.21参照）
+- タスクの状態は `pending` / `running` / `waitingApproval` / `waitingReply` / `merging` / `done` / `failed` / `blocked` / `skipped` の9状態。`waitingReply` は §16.21 のメッセージング機能に属する
 - `waitingApproval` も並列の枠を占める。人待ちのセッションもプロセスとしては生きているため
 - 同じ段のタスクが複数開始できるとき、定義ファイルに書かれた順で埋める（再現性のため）
 
@@ -2005,15 +2147,15 @@ git worktree add -b wf/run/T1 repo/.agents/worktrees/run/T1 <HEAD>
 
 #### gitリポジトリでない場合
 
-worktreeを作れないため、`isolation` の値を問わず**ワークスペース直下を共有するタスクとして走らせる**（`decideWorkingDirectory` が `sharedFallback` を返す）。
+worktreeを作れないため、`isolation` の値を問わず**git worktree隔離ではない経路へ倒す**（`decideWorkingDirectory` が `sharedFallback` を返す）。
 
-1. ワークスペースがgitの作業ツリーでないと判定したら、そのタスクをワークスペース直下（共有ディレクトリ）で走らせる
+1. ワークスペースがgitの作業ツリーでないと判定したら、そのタスクをgit worktree以外の隔離で走らせる
 2. 「同じファイルへの変更が衝突しうる」旨を、ログとワークフローViewの両方に警告として出す
 3. `{{T.branch}}` は空文字になる。ブランチ名を前提にしたpromptを書いていると噛み合わないため、警告文でそれも示す
 
 フォールバックを望まない場合のために `isolation: worktree-strict` を用意し、こちらはgit外なら実行を開始せずエラーにする。
 
-ディレクトリの複製によるタスクごとの隔離（疑似worktree、§16.20）は設計としては別に用意してあるが、**`runner.ts` から呼ばれておらず、現在の実行では使われない**（§16.13「実装状況」）。上記の共有ディレクトリへのフォールバックが実際の挙動である。
+**`sharedFallback` の実際の挙動は、ディレクトリの複製によるタスクごとの隔離（疑似worktree、§16.20）である。** `resolveWorkingDirectory` が `sharedFallback` の判定を受けて `cloneWorkspace` を呼び、タスクごとに別々の複製ディレクトリで走らせる（`runner.ts` からの呼び出しを含めて実装済み、Issue #105）。「ワークスペース直下をそのまま共有する」旧挙動は、ワークフロー実行の構成（`WorkflowRunnerDeps.pseudoWorktree`）を省略した場合にのみ残る後方互換の経路になる。
 
 ### 16.7 無人実行と停止条件
 
@@ -2107,7 +2249,7 @@ worktreeを作れないため、`isolation` の値を問わず**ワークスペ�
 [####------------] 25%
 ```
 
-- 状態の内訳: §16.3 の全ての状態（`done` / `running` / `waitingApproval` / `waitingReply` / `merging` / `pending` / `failed` / `blocked` / `skipped`）。実装済みの内訳は `waitingReply` を除く8状態（§16.21が未配線のため。実際のカウンタは `pending / running / waitingApproval / merging / done / failed / blocked / skipped` の8件）
+- 状態の内訳: §16.3 の全ての状態（`done` / `running` / `waitingApproval` / `waitingReply` / `merging` / `pending` / `failed` / `blocked` / `skipped` の9件）
 - 承認待ち・失敗・統合できていないものが1件でもあれば、その旨を最上段で目立たせる（並列で走っていると個々のノードを見落とすため）
 
 #### 依存グラフ
@@ -2117,17 +2259,17 @@ worktreeを作れないため、`isolation` の値を問わず**ワークスペ�
 - レイアウト: 依存の深さで段（rank）を決め、同じ段のタスクを横に並べる。段が「同時に走りうる集合」に対応するので、`T1 → (T2 || T3) → T4` がそのまま縦3段の図になる
 - ノードの見た目で状態を示す。色に加えて記号も添える（色だけに頼らない）
 
-| 状態              | 見た目                                                                       |
-| ----------------- | ---------------------------------------------------------------------------- |
-| `pending`         | 灰色の枠線のみ・記号なし                                                     |
-| `running`         | 強調色の枠＋進行を示すアニメーション、`n回目` を併記                         |
-| `waitingApproval` | 警告色＋一時停止の記号                                                       |
-| `done`            | 塗りつぶし＋チェック                                                         |
-| `failed`          | エラー色＋バツ、理由（回数切れ・ターン失敗など）                             |
-| `waitingReply`    | 警告色の枠＋吹き出しの記号。返信待ち（§16.21。未配線のため現状は出現しない） |
-| `merging`         | 完了色の枠＋合流の記号。統合ブランチへ取り込み中                             |
-| `blocked`         | 警告色の枠＋合流の記号にバツ。衝突して統合できていない                       |
-| `skipped`         | 破線の枠＋斜線                                                               |
+| 状態              | 見た目                                                 |
+| ----------------- | ------------------------------------------------------ |
+| `pending`         | 灰色の枠線のみ・記号なし                               |
+| `running`         | 強調色の枠＋進行を示すアニメーション、`n回目` を併記   |
+| `waitingApproval` | 警告色＋一時停止の記号                                 |
+| `done`            | 塗りつぶし＋チェック                                   |
+| `failed`          | エラー色＋バツ、理由（回数切れ・ターン失敗など）       |
+| `waitingReply`    | 警告色の枠＋吹き出しの記号。返信待ち（§16.21）         |
+| `merging`         | 完了色の枠＋合流の記号。統合ブランチへ取り込み中       |
+| `blocked`         | 警告色の枠＋合流の記号にバツ。衝突して統合できていない |
+| `skipped`         | 破線の枠＋斜線                                         |
 
 - ノードには id・状態・経過時間・送信回数・**直近の応答の1行要約**を出す。要約があるだけで「今なにをしているか」がグラフ上で分かる
 - エッジは依存元→依存先。依存元が未完了のものは薄く描く
@@ -2149,15 +2291,15 @@ worktreeを作れないため、`isolation` の値を問わず**ワークスペ�
   - `再実行`: `failed` / `skipped` のタスクを、依存が満たされていればもう1度走らせる
   - `承認`: `waitingApproval` のとき、要求の内容をその場に出して許可・拒否を決める
   - `プロンプトを見る`: 展開後の（`{{T1.result}}` 等を差し込んだあとの）`prompt` と `continuePrompt` の両方をその場に開く（§16.4「テンプレート変数経由の権限越境」、Issue #67）。セッションが生きているタスク（`hasLiveSession`）でのみ出せる。もう一度押すと閉じる
-  - `再マージ`: `blocked` のタスクを、人が手元で衝突を解いたあとにもう1度マージする（§16.17）。**状態遷移（`retryMergeState`）は実装済みだが、Viewからの呼び出し配線はまだ無い**（§16.13「実装状況」）。現状 `blocked` から抜けるには手元のgit操作で解決するしかない
+  - `再マージ`: `blocked` のタスクを、人が手元で衝突を解いたあとにもう1度マージする（§16.17）。状態遷移（`retryMergeState`）とView側の呼び出し配線は実装済み（Issue #104）
 - 衝突の解決用セッション（§16.17）はワークフローの定義に無いのでノードにしない。対象タスクのノードに「マージ解決中」として重ね、押すとそのセッションのタブへ移動する
 
 「中断」と「タスク停止」は停止理由を分ける。人がタブへ直接介入した場合（`manual` / `interrupted`）はタスク自身の状態を変えず実行全体を止めるのに対し（§16.5）、Viewからの「タスク停止」はそのタスクだけを `failed` にして他は走らせ続ける。同じ「止める」でも波及範囲が違うため、`LoopStopReason` の段階で区別する。
 
 #### そのほか
 
-- 操作: 実行、全体の停止、定義ファイルを開く、worktreeの撤去（現状は「worktreeを片付ける」1操作。統合ブランチのPR/MRを開く操作は§16.18が未配線のため無い）
-- 統合の状況: 統合ブランチ名、取り込み済みのタスク数（PR/MRへのリンクと最終マージの結果は§16.18が未配線の現状では出ない）
+- 操作: 実行、全体の停止、定義ファイルを開く、「統合ブランチと残ったworktreeをまとめて片付ける」（人が明示的に押したときだけ行う。§16.17「統合worktreeの片付け」参照）、統合ブランチのPR/MRを開く
+- 統合の状況: 統合ブランチ名、取り込み済みのタスク数、タスクごとのPR/MRへのリンク、統合PR/MRへのリンクと最終マージの結果
 - 警告欄: git外フォールバック、サンドボックス無効の指定、`allow` による危険判定の解除、回数切れ、上流より緩い権限でのテンプレート変数参照（§16.4「テンプレート変数経由の権限越境」）など
 - 更新はタスクの状態が変わったときと、実行中の経過時間の表示のため1秒ごと（送るのは差分のみ）
 - **画面に出す動的な文字列（応答の要約・タスクid・ブランチ名・ファイルパス）は、必ずテキストノードとして挿入する。** これらはエージェントの出力やYAMLに由来し、内容を信用できない。HTML/SVGの文字列結合で組み立てるとWebview内でスクリプトが走り、承認操作の偽装に繋がる。CSPは既存のチャット画面と同じく nonce 付きの単一スクリプトのみとし、`unsafe-inline` は使わない
@@ -2165,7 +2307,7 @@ worktreeを作れないため、`isolation` の値を問わず**ワークスペ�
 
 ### 16.9 定義ファイルの生成
 
-ゴールの文を渡すと、タスク分解済みのYAMLを作る（`agent.workflows.plan`。実装・配線済み）。規模の大きいゴールでは、あいだにロードマップを挟む2段の経路（§16.19）を使う設計だが、**この2段の経路は現状未配線**（§16.13「実装状況」）で、`workflow.plan` はゴール文からの直接生成のみを受け付ける。
+ゴールの文を渡すと、タスク分解済みのYAMLを作る（`agent.workflows.plan`。実装・配線済み）。規模の大きいゴールでは、あいだにロードマップを挟む2段の経路（§16.19）を使う設計で、`workflow.plan` を実行すると最初にQuickPickで「ゴール文から生成」「ロードマップから生成」のどちらかを選ばせる。後者は `agent.workflows.roadmapDir` 配下のロードマップから対象ファイルとフェーズを選び、そのフェーズだけをYAML化する。
 
 1. コマンド（`agent.workflows.plan`。既存の `agent.workflows.run` / `.stop` / `.view` と名前を揃える）でゴールを入力する
 2. 分解用のセッションを1つ作り、スキーマの説明と現在のワークスペースの情報を添えてゴールを渡す。返答はYAMLのみとするよう指示する
@@ -2213,7 +2355,7 @@ src/
     workflowView.ts ワークフローViewのWebview
 ```
 
-`*` を付けた4ファイルは、ロジック・ポート・ユニットテストは実装済みだが `runner.ts` / `extension.ts` からの配線がまだ無く、実行には反映されない（§16.13「実装状況」）。
+`*` を付けた4ファイルも、`runner.ts` / `extension.ts` からの配線を含めて実装済みで、実行に反映される（§16.13）。
 
 `integration.ts` / `forge.ts` / `pseudoWorktree.ts` は、`worktree.ts` と同じくコマンドの実行をポート（差し替え可能なインターフェース）越しに行い、コマンドを組み立てる部分を純粋関数として切り出す。テストで実際に `git` / `gh` / `glab` を叩かないため。
 
@@ -2301,6 +2443,7 @@ Codexは送信のたびに `readConfig().codex`（VSCodeのグローバル設定
 - **応答本文は保存しない。** `{{T.result}}` の元になるテキストは機微を含みうるため、暗号化されない `workspaceState` に平文で置かない。必要になったらセッションの `ChatState` から読み直す（リロードで失われた場合は、そのタスクは再実行の対象になる）
 - ウィンドウのリロードで走行中だったタスクは、いったん `failed`（理由: 中断）として扱う。人がViewから再実行できる。`waitingReply`（§16.21）も同じ扱いにする。未配送のメッセージは保存していないため、リロードをまたいで届くことはない
 - `merging` だったタスクは、マージが途中で切れている可能性がある。状態の記録ではなく**統合ブランチの実際の状態から判定し直す**（そのタスクのマージコミットが入っていれば `done`、入っていなければ `merging` からやり直す）。統合worktreeに未解決の衝突が残っていれば `blocked` として扱い、人へ回す
+- **`originCommit`（そのタスクを開始した時点の統合ブランチのHEAD、§16.17「タスクブランチの分岐元」）は永続化していない。** リロード後に `blocked` のタスクを「再マージ」すると、`originCommit` は空文字として扱われる。この値はコンフリクト解決セッション（§16.17）へ渡す「突き合わせる相手（自分の起点から見て、他にどのタスクが先にマージされたか）」の文脈を組み立てるのに使うため、空になった場合はその文脈が空のまま解決セッションが始まる（制約）
 - タスク管理下のセッションは、汎用のパネル復元（§16.10 の7）に任せない
 - 走り終えたrunの記録も残し、Viewから開き直せるようにする（最新10件。それより古いものは消す。手動で全消去する手段も用意する）
 
@@ -2312,18 +2455,7 @@ Codexは送信のたびに `readConfig().codex`（VSCodeのグローバル設定
 
 ### 16.13 制約
 
-#### 実装状況: 配線が済んでいない機能
-
-以下の4つは、ロジック・ポート・ユニットテストまでは実装済みだが、`runner.ts`（実行層）や `extension.ts`（コマンド登録）からの配線がまだ無く、**ワークフローを実際に実行しても動かない**。各節にも同じ内容の注記を置いてある。
-
-| 機能                                           | 節     | 実装済みの部分                                                    | 未配線の部分                                                                                                                            |
-| ---------------------------------------------- | ------ | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| ホスト連携（PR/MRの作成・最終マージ）          | §16.18 | `forge.ts`（ホスト判定・PR/MR作成・最終マージのロジックとポート） | `runner.ts` から呼ばれない。全タスク成功後もローカルの統合ブランチが残るだけで、PR/MR作成もmainへのマージも起きない                     |
-| ロードマップ（生成・YAML化・チェック書き戻し） | §16.19 | `roadmap.ts`（生成・検証・チェック書き戻しのロジック）            | `workflow.roadmap` コマンドは生成セッションの起動口が固定の「未実装」応答を返す。`workflow.plan` にロードマップファイルを渡す経路も無い |
-| gitリポジトリでない場合の複製ベースの隔離      | §16.20 | `pseudoWorktree.ts`（複製・差分検出・適用のロジック）             | `runner.ts` から呼ばれない。非git実行は §16.6 の「共有ディレクトリへフォールバックし警告する」旧挙動のまま                              |
-| タスク間のメッセージング                       | §16.21 | `messaging.ts`（MCPサーバ・配送判定・待ちぼうけ検出のロジック）   | runごとにサーバを立ててタスクのセッションへ渡す配線が無い。`waitingReply` も `runState.ts` の `TaskState` に未追加                      |
-
-ワークフローViewの「再マージ」操作（§16.8）も、状態遷移（`retryMergeState`）は実装済みだがView側の呼び出し配線が無い。
+ホスト連携（PR/MRの作成・最終マージ、§16.18）・ロードマップ（生成・YAML化・チェック書き戻し、§16.19）・gitリポジトリでない場合の複製ベースの隔離（§16.20）・タスク間のメッセージング（§16.21）・ワークフローViewの「再マージ」操作（§16.8）は、いずれも `runner.ts` / `extension.ts` / `workflowView.ts` からの配線を含めて実装済みで、ワークフローの実行に組み込まれている（Issue #105・#118・#123ほか）。以下は配線後も残る制約。
 
 - タスクの粒度と分割の妥当性は人が担保する。並列タスクが同じ設計判断を別々に下す事故は、worktreeでは防げない
 - 回数切れ（`maxReached`）は「終わっていないのに止まった」状態であり、成功として扱わない
@@ -2335,11 +2467,12 @@ Codexは送信のたびに `readConfig().codex`（VSCodeのグローバル設定
 - タスクの起点が「開始時点の統合ブランチ」になるため（§16.17）、**同じYAMLを同じHEADから実行しても、タスクの完了順が違えば結果が変わる。** 並列実行と成果の引き継ぎを両立させる以上避けられない
 - マージの衝突そのものは減らせない。統合ブランチへ順に取り込む形は、衝突を**早く見つける**ことはできても、並列で同じ場所を触る分割の問題を解くわけではない。タスクの切り方は人が担保する（この表の1点目と同じ）
 - 衝突の自動解決（§16.17）は取りこぼす。解けたように見えて意味的に壊れている解決もありうる。統合ブランチをmainへ入れる前のレビューは省けない
-- 疑似worktree（§16.20、現状未配線。上表参照）では3-way mergeができず、同じファイルへの変更が全て衝突になる。gitリポジトリでの実行と同じ密度の並列は見込めない
-- `finalMerge: auto` は無人実行がmainを進めることを意味する。組織の運用規約と衝突しうるため、machine設定で `pr-only` に固定できるようにしてある（§16.16）。ただし現状は §16.18 が未配線のため、`auto` でもmainは自動では進まない（上表参照）
-- タスク間のメッセージング（§16.21、現状未配線。上表参照）は、分割の設計が悪いタスクを救う手段にはならない。互いに問い合わせながら進めるより、依存を引き直したほうが早いことが多い
+- 疑似worktree（§16.20）では3-way mergeができず、同じファイルへの変更が全て衝突になる。gitリポジトリでの実行と同じ密度の並列は見込めない
+- `finalMerge: auto` は無人実行がmainを進めることを意味する。組織の運用規約と衝突しうるため、machine設定で `pr-only` に固定できるようにしてある（§16.16）
+- タスク間のメッセージング（§16.21）は、分割の設計が悪いタスクを救う手段にはならない。互いに問い合わせながら進めるより、依存を引き直したほうが早いことが多い
 - ツールを呼ぶかどうかはモデルの判断であり、呼ばれることを前提にした設計にはできない。メッセージングが一度も使われないまま走り切るワークフローもありうる
 - メッセージのやり取りはターンを増やす。コンテキストとレート制限の消費もそのぶん増える
+- ロードマップからYAMLへの変換（§16.19）は**1フェーズ単位の選択のみ**。フェーズをまたいだ部分選択（例: フェーズ1の後半とフェーズ2の前半だけをまとめて1つのYAMLにする）は未実装で、`workflow.plan` のQuickPickも単一フェーズしか選べない
 
 ### 16.14 実装順序（TDD）
 
@@ -2402,7 +2535,7 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 | 返信待ちの解除                 | 全タスクが `waitingReply` になった場合と、`replyTimeoutSec` を超えた場合の双方で待ちが解け、警告が記録される                                                                                                                                                                                                                                                                                                      |
 | MCPサーバの欠落                | ツールが見えない状態でも、警告のうえワークフローが最後まで走る                                                                                                                                                                                                                                                                                                                                                    |
 
-上表のうち「PR/MRの順序」「前提の欠落」「疑似worktree」「ロードマップ」「タスク間の送信」「送信元の判別」「返信待ちの解除」「MCPサーバの欠落」は、対応する機能（§16.18・§16.19・§16.20・§16.21）が `runner.ts` に配線されるまで確認できない（§16.13「実装状況」）。個々のロジックはユニットテストで担保済みだが、実行に組み込まれるまでこの完了条件は未達のままである。
+上表のうち「PR/MRの順序」「前提の欠落」「疑似worktree」「ロードマップ」「タスク間の送信」「送信元の判別」「返信待ちの解除」「MCPサーバの欠落」は、対応する機能（§16.18・§16.19・§16.20・§16.21）の `runner.ts` への配線を含めて実装済みで、実機での確認が可能になっている（§16.13）。実機確認そのものは [docs/manual-test.md](manual-test.md) のW群を参照。
 
 ### 16.16 設定の信頼境界
 
@@ -2448,12 +2581,12 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 | --------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `agent.workflows.dir`                   | resource            | ワークフロー定義ファイルを探すディレクトリ（既定 `.agents/workflows`）。中身は§16.16のとおり信用しないので、置き場自体はワークスペースごとに変えてよい |
 | `agent.workflows.allowAutoApprove`      | machine             | YAMLの `autoApprove: true` を有効化できるかどうか（既定 `false`）。無効化してある間はYAMLの指定によらず全承認を人へ回す（前掲の表参照）                |
-| `agent.workflows.replyTimeoutSec`       | machine-overridable | タスク間メッセージング（§16.21）の返信待ちの上限秒数。**現状は§16.21が未配線のため未使用**（§16.13「実装状況」）                                       |
-| `agent.workflows.finalMerge`            | machine             | mainを無人で書き換えるかどうかを決める。リポジトリの `.vscode/settings.json` から `auto` にされてはいけない。**現状は§16.18が未配線のため未使用**      |
-| `agent.workflows.forge`                 | machine             | どのCLI（`gh` / `glab`）を起動するかを決める。実行するコマンドの選択にあたるので §8 と同じ扱いにする。**現状は§16.18が未配線のため未使用**             |
-| `agent.workflows.pullRequest`           | machine-overridable | 作るPR/MRの層。権限には関わらない。**現状は§16.18が未配線のため未使用**                                                                                |
-| `agent.workflows.roadmapDir`            | machine-overridable | ロードマップの出力先のパス。ワークスペースフォルダの配下に限る。**現状は§16.19が未配線のため未使用**                                                   |
-| `agent.workflows.pseudoWorktreeExclude` | machine-overridable | 疑似worktreeで複製から外すディレクトリ名。増やしても安全側にしか働かない。**現状は§16.20が未配線のため未使用**                                         |
+| `agent.workflows.replyTimeoutSec`       | machine-overridable | タスク間メッセージング（§16.21）の返信待ちの上限秒数                                                                                                   |
+| `agent.workflows.finalMerge`            | machine             | mainを無人で書き換えるかどうかを決める。リポジトリの `.vscode/settings.json` から `auto` にされてはいけない                                            |
+| `agent.workflows.forge`                 | machine             | どのCLI（`gh` / `glab`）を起動するかを決める。実行するコマンドの選択にあたるので §8 と同じ扱いにする                                                   |
+| `agent.workflows.pullRequest`           | machine-overridable | 作るPR/MRの層。権限には関わらない                                                                                                                      |
+| `agent.workflows.roadmapDir`            | machine-overridable | ロードマップの出力先のパス。ワークスペースフォルダの配下に限る                                                                                         |
+| `agent.workflows.pseudoWorktreeExclude` | machine-overridable | 疑似worktreeで複製から外すディレクトリ名。増やしても安全側にしか働かない                                                                               |
 
 push先のremoteをYAMLや設定から選ぶ手段は設けない。常に `origin` を使う。任意のURLへpushできると、リポジトリの中身を別の宛先へ出す経路になる。
 
@@ -2507,6 +2640,8 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 
 マージが終わるまで、次に開始するタスクの起点は決まらない。そこでタスクの状態に `merging` を足し、**`done` は「統合ブランチへ入った」を指す**ことにする。ループが終わっただけの状態は `merging` であり、スケジューラは `done` になるまで後続を開始しない。
 
+**`isolation: shared` のタスクと、明示的に `cwd` を指定したタスクはこの限りではない。** どちらも統合ブランチへマージする対象となる専用のタスクブランチを持たない（ワークスペース直下や指定ディレクトリを直接触るため）。この2種のタスクは `merging` を経由せず、ループが終わった時点で直接 `done` にする。
+
 #### コンフリクト
 
 衝突したら、解決用のセッションを自動で立てる。無人実行を止めないため。
@@ -2515,7 +2650,7 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 2. 巻き戻し先として、マージ前の統合ブランチのコミットidを控える
 3. 統合worktreeを `cwd` にして解決用セッションを開く。プロンプトには衝突したファイルの一覧、突き合わせる2つのタスクの `prompt` と `done`、未解決パスの一覧（`git diff --name-only --diff-filter=U`）を渡す
 4. 終了条件は「衝突を解決してコミットしてあり、未解決のパスが残っていないこと」。判定は `git status` で拡張機能側からも確かめる（宣言だけを信じない）
-5. 解決用セッションは通常のタスクと同じループ制御・承認判定に従う。`maxIterations` は別に持ち、既定は小さくする（5）。何度も回して直らないものは人へ回したほうが早い
+5. 解決用セッションはループ制御は通常のタスクと同じ仕組みを使うが、**承認判定は通常のタスクの `escalation.ts`（タスク境界・`allow` / `escalate`）を使わず、標準の承認カード（常に人へ回す既定挙動）へ委ねる。** タスク境界（`TaskBoundary`）は本来そのタスクのworktree用に作られたもので、統合worktree（別ディレクトリ）向けに作り直すと境界判定の意味が変わってしまうため、安全側（常に人の承認を要求する）に倒す単純化である。`maxIterations` は別に持ち、既定は小さくする（5）。何度も回して直らないものは人へ回したほうが早い
 6. 解決できたらマージ完了として扱い、タスクを `done` にして次へ進む
 7. 解決できなければ、控えたコミットidへ `git merge --abort` で戻し、そのタスクを `blocked` にする
 
@@ -2540,19 +2675,15 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 - ブランチは消さない。PR/MRから辿れる必要がある
 - 撤去は `git worktree remove`。未コミットの変更は自動コミットで無くなっているはずだが、それでも残っていれば撤去せず警告する（現行の方針を維持）
 - `failed` / `blocked` のタスクのworktreeは残す。原因を調べるのに要る
-- 統合worktreeはrunが終わるまで残し、終了時に撤去する
+- **統合worktreeの撤去は、runの終了時に自動では行わない。** ワークフローViewの「統合ブランチと残ったworktreeをまとめて片付ける」操作を人が明示的に押したときだけ撤去する。`blocked` のタスクは「再マージ」（§16.8）で統合worktreeを使い続けるため、run終了時に無条件で撤去すると再マージの前提が壊れる。runがまだ `running` の間は、後続タスクが統合worktreeを必要としうるためこの操作自体を失敗として返す
 
 #### 全体の終了とmainへの反映
 
-設計としては、全タスクが `done` になったら統合ブランチからmainへのPR/MRを作る（§16.18）。`failed` / `blocked` / `skipped` が1件でも残っていれば作らず、統合ブランチをそのまま残して人に委ねる。
-
-**現状の実装ではこの呼び出し自体が `runner.ts` に配線されていない**（§16.13「実装状況」）。全タスクが `done` になっても、統合ブランチへローカルにマージされた状態で止まり、PR/MRの作成もmainへのマージも自動では行われない。ワークフローViewにも統合ブランチのPR/MRを開く操作は無い。人が統合ブランチ（`wf/<runId>/integration`）を手元でpushし、PR/MRを作る。
+全タスクが `done` になったら統合ブランチからmainへのPR/MRを作る（§16.18）。`failed` / `blocked` / `skipped` が1件でも残っていれば作らず、統合ブランチをそのまま残して人に委ねる。この呼び出しは `runner.ts` に配線済み（Issue #105）で、ワークフローViewから統合ブランチのPR/MRを開くこともできる。
 
 ### 16.18 ホスト連携（PR/MRの作成）
 
-**現状: 未配線（§16.13「実装状況」）。** 以下はこの節が目指す設計であり、ホスト判定・PR/MR作成・最終マージのロジックとポート（`forge.ts`）はユニットテストつきで実装済みだが、`runner.ts` から呼び出す配線はまだ無い。ワークフローを実行しても、この節の内容は自動では起きない。
-
-作業の履歴をリポジトリのホスト側にも残す。GitHubとGitLabの両方を扱う。
+作業の履歴をリポジトリのホスト側にも残す。GitHubとGitLabの両方を扱う。ホスト判定・PR/MR作成・最終マージのロジックとポート（`forge.ts`）は、`runner.ts` からの呼び出しを含めて実装済み（Issue #105）。
 
 #### ホストの判定
 
@@ -2582,10 +2713,27 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 
 #### 本文
 
+**タスク層**
+
 - タイトル: `<taskId>: <prompt の1行目>`
 - 本文: そのタスクの `prompt` と `done`、runId、依存タスクのid、対応するIssue番号（§16.19 で紐づいていれば `Closes #<N>`）
-- **本文はファイル経由で渡す**（`--body-file`）。`prompt` もエージェントの出力も、引数に直接置かない。改行やオプションに見える文字列が混ざりうる
+
+**統合層**
+
+- タイトル: `run <runId> の統合`
+- 本文: `run <runId> で完了したタスクを統合します。` に続けて、完了したタスクidの一覧を箇条書きで並べる
+- タスク層と同じく、エージェントの応答（`{{T.result}}`）を受け取るフィールドは持たない（§16.16「ホストへ出る情報」）
+
+**本文はファイル経由で渡す。** `prompt` もエージェントの出力も、引数に直接置かない。改行やオプションに見える文字列が混ざりうる。
+
+- GitHub（`gh`）は `--body-file` フラグそのものに対応している
+- **GitLab（`glab`）には `--body-file` に相当するフラグが無い。** `glab mr create` の `-d/--description` はファイルからの読み込みに未対応で、`-` を渡してもエディタが開くだけになる（実機の `--help` で確認済み。`glab` 1.112.0）。代わりに `glab api projects/:id/merge_requests` へPOSTし、`--field description=@<path>` で本文をファイル経由にする（`glab api` の `--field` は値が `@` から始まると、その後ろをファイル名として読み込む仕様）
+- この代替により、`glab mr create` が本来持つ対話的な補完（`base` / `head` 未指定時のtarget branch自動解決など）が効かない。**呼び出し側が `base` / `head` を明示する前提**になる（§16.18「2層で作る」の表がそのまま `base` / `head` になる）
 - `gh` / `glab` の呼び出しはシェルを経由しない（`execFile` にargv配列を渡す）。§16.6 のgitと同じ方針
+
+#### PR/MRの番号
+
+`gh pr create` の標準出力・`glab api` が返す `web_url` はどちらもURLしか返さない。PR/MRの番号は、そのURLの末尾から取り出す（GitHubは `.../pull/<n>`、GitLabは `.../-/merge_requests/<n>` で、いずれも末尾が10進数）。取り出せなければ番号なしとして扱い、URLだけを表示に使う。
 
 #### 最終マージ
 
@@ -2615,8 +2763,6 @@ mainへマージした後も統合ブランチは残す。片付けはViewの操
 PR/MRの本文には、YAMLに書かれた `prompt` と `done` が入る。これらはリポジトリのホストへ送られ、後から消しても記録が残りうる。§16.16 の信頼境界に含める。
 
 ### 16.19 ロードマップ
-
-**現状: 未配線（§16.13「実装状況」）。** `workflow.roadmap` コマンドは登録されているが、生成セッションの起動口（`RoadmapGenerationPort`）が `extension.ts` では「ロードマップ生成セッションの起動は未実装です」を返す固定実装のままで、実行すると常にこのエラーで終わる。2段目（ロードマップファイルをYAML化する経路）も `workflow.plan` に未接続（`planWorkflow` の入力にロードマップファイルを渡す手段が無い。§16.9で述べた**ゴール文からの直接生成**は動く）。runの完了でロードマップのチェックを書き戻す処理（後述）も `runner.ts` からは呼ばれない。`roadmap.ts` 自体（生成ロジック・検証・チェックの書き戻し）はユニットテストつきで実装済みである。
 
 ゴールから実行までを2段に分ける。1段目でロードマップのMarkdownを作り、人がレビューし、2段目でワークフローYAMLへ落とす。
 
@@ -2655,7 +2801,8 @@ PR/MRの本文には、YAMLに書かれた `prompt` と `done` が入る。こ�
 
 - `workflow.plan` の入力として、ゴール文に加えてロードマップのファイルを取れるようにする
 - 項目を `tasks` に、`依存` を `dependsOn` に写す
-- **1回のワークフローで扱うのはロードマップの一部でよい。** 「次のフェーズだけYAMLにする」を選べるようにする。全体を1つのYAMLにするとタスク数の上限（50件）に当たるうえ、途中で方針が変わったときの作り直しが大きくなる
+- **1回のワークフローで扱うのはロードマップの一部でよい。** QuickPickでフェーズを1つ選び、そのフェーズだけをYAML化する。全体を1つのYAMLにするとタスク数の上限（50件）に当たるうえ、途中で方針が変わったときの作り直しが大きくなる
+- **選べるのはフェーズ単位のみ。** フェーズをまたいだ部分選択（例: フェーズ1の後半とフェーズ2の前半だけをまとめる）はできない。フェーズの切り方自体で調整する
 - Issue番号を持つ項目は、生成されるタスクに `issue` フィールドとして持たせる。PR/MRの本文へ `Closes #<N>` として出す（§16.18）
 - 生成後の検証と、`autoApprove` / `allow` を含む場合の強調は §16.9 のまま
 
@@ -2667,16 +2814,14 @@ PR/MRの本文には、YAMLに書かれた `prompt` と `done` が入る。こ�
 
 ### 16.20 gitリポジトリでない場合の隔離
 
-**現状: 未配線（§16.13「実装状況」）。** ここで述べる複製ベースの隔離（`pseudoWorktree.ts`）はロジックとユニットテストのみが実装済みで、`runner.ts` からは呼ばれていない。実際の非git実行は §16.6「gitリポジトリでない場合」に書いたとおり、`shared`（ワークスペース直下）へ落として警告するだけの挙動のままである。以下はその先（複製による隔離）に進めるための設計であり、現状の挙動ではない。
-
-§16.6 は、gitの作業ツリーでなければ `shared`（ワークスペース直下）へ落として並列実行し、衝突しうる旨を警告するとしていた。並列で走る以上、警告だけでは足りない。ディレクトリの複製による隔離に置き換える、というのがこの節の狙いである。
+§16.6 は、gitの作業ツリーでなければ `shared`（ワークスペース直下）へ落として並列実行し、衝突しうる旨を警告するとしていた。並列で走る以上、警告だけでは足りない。ディレクトリの複製による隔離に置き換える、というのがこの節の狙いである。複製ベースの隔離（`pseudoWorktree.ts`）は `runner.ts` からの呼び出しを含めて実装済みで、gitリポジトリでないワークスペースの `isolation: worktree` タスクに実際に使われる（Issue #105）。
 
 - 置き場はgitの場合と同じ `<workspace>/.agents/worktrees/<runId>/<taskId>`
 - タスクの開始時にワークスペースの内容を複製する。複製から外すのは `.agents/worktrees` 自身（無限に再帰する）と、重量のあるディレクトリ（設定 `agent.workflows.pseudoWorktreeExclude`、既定 `node_modules` / `.venv` / `dist` / `out`）
 - 同時に、複製元のファイル一覧とサイズ・更新時刻をスナップショットとして持つ
 - タスクが終わったら、スナップショットとの差分（追加・変更・削除）を計算し、統合先のディレクトリ（`<runId>/_integration`）へ適用する。これがgitの場合のマージにあたる
-- 統合先で同じファイルが別のタスクによって既に変更されていれば衝突とする。**gitが無いので3-way mergeはできない。内容の突き合わせは行わず、両方の版をファイルとして渡してコンフリクト解決セッション（§16.17）へ回す**
-- runが終わったら、統合先の内容をワークスペースへ反映する。反映の前にワークスペース側が実行中に変更されていないかスナップショットで確かめ、変わっていれば反映せず警告する（人の編集を上書きしない）
+- 統合先で同じファイルが別のタスクによって既に変更されていれば衝突とする。**gitが無いので3-way mergeはできない。内容の突き合わせは行わず、そのタスクを直接 `blocked` にする（§16.17のコンフリクト解決セッションは開かない）**。解決用セッションはgitの統合worktreeを前提に組み立てており（衝突したファイルを `cwd` に置いた状態で開く）、疑似worktreeにはその前提が無いため
+- **runが終わったら、統合先の内容をワークスペースへ反映する。run全体の結果（`succeeded` かどうか）は問わない。** それまでに統合できた分は、`failed` / `blocked` / `skipped` が混ざっていてもワークスペースへ反映する。反映の前にワークスペース側が実行中に変更されていないかスナップショットで確かめ、変わっていれば反映せず警告する（人の編集を上書きしない）
 - PR/MRは作れない。§16.18 の前提チェックで飛ばす
 
 制約は次のとおり。
@@ -2687,7 +2832,7 @@ PR/MRの本文には、YAMLに書かれた `prompt` と `done` が入る。こ�
 
 ### 16.21 タスク間のメッセージング
 
-**現状: 未配線（§16.13「実装状況」）。** ここで述べるMCPサーバ（`messaging.ts`）は配送可否判定・待ちぼうけ検出のロジックとユニットテストのみが実装済みで、`runner.ts` / `taskSession.ts` からは呼ばれていない。runごとにサーバを立ててタスクのセッションへツールとして見せる配線が無いため、実行中のタスクに `list_tasks` / `send_message` ツールは見えない。連動して、`waitingReply` は `runState.ts` の `TaskState` にまだ含まれておらず（`pending / running / waitingApproval / merging / done / failed / blocked / skipped` の8状態のみ）、ワークフローViewにも `waitingReply` の表示は無い。以下はその配線が入ったときの設計である。
+runごとにMCPサーバ（`messaging.ts`）を立て、タスクのセッションへツールとして見せる配線は済んでいる（Issue #105・#123）。実行中のタスクには `list_tasks` / `send_message` が実際に見える。`waitingReply` も `runState.ts` の `TaskState` に含まれ、ワークフローViewに表示される。
 
 §16.4 の `{{T1.result}}` は、**完了したタスクの結果を一方向に渡す**だけの仕組みである。並列で走っているタスク同士が途中で問い合わせる手段は無い。UI側のタスクがAPI側のタスクへレスポンスの形を聞きたくても、相手が終わるまで待つか、人が仲介するしかない。
 
@@ -2727,7 +2872,7 @@ Claude Codeには、別々に走っているセッションが互いに名前で
 - 受け取ったメッセージは、そのタスクの**次の指示の先頭へ添える**。走行中のターンへ割り込まない。ターンの途中で文脈が変わるのを避けるため
 - 宛先が `pending` なら、そのタスクの開始時の最初の指示へ添える
 - 宛先が `done` / `failed` / `blocked` / `skipped` なら配送できない。`send_message` はその旨を返す
-- 1件あたりの長さの上限は `MAX_PROMPT_LENGTH` と同じ。run全体で配送できる総数にも上限を置く。無制限だと互いに送り合ってコンテキストとレート制限を食い潰す
+- 1件あたりの長さの上限は `MAX_PROMPT_LENGTH` と同じ。run全体で配送できる総数にも上限を置く（`MAX_MESSAGES_PER_RUN` = 500。タスク総数の上限 `MAX_TASK_COUNT`（50）の10倍を採った）。無制限だと互いに送り合ってコンテキストとレート制限を食い潰す
 
 #### 宛先の範囲
 
@@ -2741,20 +2886,32 @@ runをまたぐ通信と、ワークフローの外のセッションへの送�
 
 - 配送するときは出所と範囲が分かる形で包む（`<task-message from="T2">…</task-message>` のような明示的な囲い）
 - 囲いの中の文を指示として実行しないよう、添える文面で明示する
-- ただしこれは補助でしかない。**一次防御は権限の最小化にある。** 送信元も受信先も同じrunのタスクであり、同じサンドボックスと承認判定（§16.7・§16.16）の下で走る。メッセージを経由して新しい権限が手に入ることはない
+- ただしこれは補助でしかない。**一次防御は下流タスク自身の権限設定（`sandbox` / `approvalMode` / `autoApprove`。§16.16）であり、上の囲いはそれを補う見える化でしかない。** 送信元と受信先が同じ権限の下にある保証はどこにもない（詳細は次項「メッセージング経由の権限越境」）
 - 本文は `workspaceState` へ保存しない（§16.11 と同じ理由）。PR/MRの本文にも入れない（§16.18）
 - 作業記録（§16.12）には、`{{T1.result}}` の展開と同じ扱いで、配送された本文を落として記録する
 
+#### メッセージング経由の権限越境（Issue #132）
+
+以前のこの文書は「送信元も受信先も同じrunのタスクで、同じサンドボックスと承認判定（§16.7・§16.16）の下にある。メッセージを経由して新しい権限が手に入ることはない」と書いていた。**これは誤りである。** タスクごとに `sandbox` / `approvalMode` / `autoApprove` は異なりうる（§16.2「タスクのフィールド」のとおり、いずれも `defaults` を上書きできる）。§16.4「テンプレート変数経由の権限越境」（Issue #67）が足した `permissionEscalationReasons` 一式は、まさにその差分が実在することを前提に作られている。「同じ権限の下にある」という前提そのものが、#67の時点で判明していた知見に追随できていなかった。
+
+しかも、メッセージングの宛先は**`dependsOn` を問わない**（前掲「宛先の範囲」）。テンプレート変数（`{{T1.result}}`）は依存関係に沿ってしか流れないのに対し、メッセージは同じrunの任意のタスクへ送れる。`sandbox: read-only` のタスクから `workspace-write` かつ `autoApprove: true` のタスクへ、依存の有無を問わず自由記述を送れてしまう。**経路としてはテンプレート変数より広い。**
+
+**§16.4と本節は、同じ脅威クラスの2つの経路である。** 一方は「完了したタスクの結果を一方向に、依存関係に沿って渡す」経路、他方は「走行中のタスク同士が依存を問わず送り合う」経路で、下流タスクの権限が上流より緩ければどちらも同じ形で権限越境になりうる。片方（§16.4）だけに対策を入れて本節を素通りさせると、経路として広い分だけ穴が残る。
+
+対策は§16.4の案2（警告）と同じ立て付けにする。**エラーにはせず、警告として出す。** 送信先のタスクが送信元より緩い `sandbox` / `approvalMode` / `autoApprove` を持つ場合に、ワークフローViewの警告欄へ出す。書けてしまうこと自体は止めず、見えるようにするだけである（§16.7の危険判定・§16.4の案2と同じ位置付け）。**実装はIssue #132。** 本節はその設計上の位置付けを記すもので、警告の実装自体はまだ入っていない。
+
 #### 拡張機能が立てたサーバの見え方
 
-設定パネルのMCPサーバ一覧（`src/provider/mcpServers.ts` / `src/codex/mcpStatus.ts` / `src/claude/mcpProbe.ts`）は、CLIが認識しているサーバを列挙する。**拡張機能が立てたこのサーバも、そこに混ざって見える。**
+設計時は「設定パネルのMCPサーバ一覧（`src/provider/mcpServers.ts` / `src/codex/mcpStatus.ts` / `src/claude/mcpProbe.ts`）に、拡張機能が立てたこのサーバも混ざって見える。Codexの有効無効は `config.toml` の `mcp_servers.<name>.enabled` に書かれるため、人が一度無効にすると拡張機能の再起動では戻らない」と想定していた。**実装方法によってこの懸念は回避されている。** 実測（Codex 0.147.0 / Claude Code 2.1.227。いずれもローカルHTTPサーバを立てて実際に叩いて確認、Issue #123）。
 
-- 一覧から除外するか、無効化できないものとして区別して表示する
-- Codexの有効無効は `config.toml` の `mcp_servers.<name>.enabled` に書かれる。**人が一度無効にすると、拡張機能を再起動しても戻らない**
-- そこで、タスクの開始時にツールが見えているかを確かめる。見えていなければワークフローViewへ警告を出し、**通信なしでそのまま走らせる**。runは止めない
+- **Codex**: タスクのセッションを開くとき、`thread/start` の `config.mcp_servers.<name> = {url, type: "streamable_http"}` としてMCPサーバを渡す。これは**スレッド限定のオーバーレイ**で、`config.toml` には一切書かれない（`config/read` で確認済み）。人が設定パネルから無効化する対象にならない
+- **Codex（未文書化の挙動）**: `mcpServerStatus/list` は `threadId` を渡さないとスレッド限定サーバを一覧に含めない。タスク専用のMCPサーバが通常の設定パネル（`threadId` を渡さずに呼ぶ）の一覧に混ざることはない
+- **Claude Code**: `--mcp-config '{"mcpServers":{...}}'` で渡したサーバは `mcp_status` の一覧に `scope: "dynamic"` として現れ、ユーザー設定・プロジェクト設定のサーバと**区別できる**
+
+このため、「一覧から除外する」「無効化できないものとして区別して表示する」といった対処は不要になった。一方で、タスクの開始時にツールが見えているかを確かめる仕組みは有効なまま残す。
+
+- タスクの開始時にMCPツールが見えているかを確かめる。見えていなければワークフローViewへ警告を出し、**通信なしでそのまま走らせる**。runは止めない
 - Codexは `mcpServer/startupStatus/updated` の通知が `thread/start` の後にしか発火しないため、会話を開く前に起動の成否を取れない。確認はタスクのセッションを開いた後に行う
-
-（この節のCLI側の挙動は、MCPサーバ一覧の実装（#27）で実測した値による）
 
 #### YAMLとの関係
 

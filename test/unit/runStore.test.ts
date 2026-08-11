@@ -17,6 +17,8 @@ function task(state: PersistedTaskState['state']): PersistedTaskState {
     submissionCount: state === 'pending' ? 0 : 1,
     retryCount: 0,
     failure: undefined,
+    pullRequestNumber: undefined,
+    pullRequestUrl: undefined,
   };
 }
 
@@ -30,6 +32,9 @@ function run(overrides: Partial<PersistedRun> = {}): PersistedRun {
     tasks: { T1: task('running') },
     haltedByUser: false,
     integrationBranch: 'wf/run-1/integration',
+    integrationPullRequestNumber: undefined,
+    integrationPullRequestUrl: undefined,
+    finalMergeOutcome: undefined,
     ...overrides,
   };
 }
@@ -127,6 +132,69 @@ describe('WorkflowRunStore（design.md §16.11）', () => {
     // 古いもの（run-0, run-1）は落ちている
     expect(all.some((r) => r.runId === 'run-0')).toBe(false);
     expect(all.some((r) => r.runId === 'run-11')).toBe(true);
+  });
+
+  it(
+    'PR/MRフィールドが無い旧形式のデータを読んでも壊れない' +
+      '（design.md §16.11、Issue #118「既存の永続データを読めなくしないこと」）',
+    () => {
+      const legacyRun = {
+        runId: 'run-legacy',
+        defPath: '/repo/.agents/workflows/a.yaml',
+        workspaceRoot: '/repo',
+        startedAt: '2026-08-10T00:00:00+09:00',
+        finishedAt: undefined,
+        tasks: {
+          T1: {
+            state: 'done',
+            sessionId: 'session-1',
+            cwd: '/repo/task',
+            branch: 'wf/run-legacy/T1',
+            submissionCount: 1,
+            retryCount: 0,
+            failure: undefined,
+            // pullRequestNumber / pullRequestUrl を持たない旧形式
+          },
+        },
+        haltedByUser: false,
+        integrationBranch: 'wf/run-legacy/integration',
+        // integrationPullRequestNumber / integrationPullRequestUrl / finalMergeOutcome を持たない旧形式
+      };
+      const memento = fakeMemento({ [WORKFLOW_RUNS_KEY]: [legacyRun] });
+      const store = new WorkflowRunStore(memento);
+      const found = store.find('run-legacy');
+      expect(found?.tasks['T1']?.state).toBe('done');
+      expect(found?.tasks['T1']?.pullRequestNumber).toBeUndefined();
+      expect(found?.tasks['T1']?.pullRequestUrl).toBeUndefined();
+      expect(found?.integrationPullRequestNumber).toBeUndefined();
+      expect(found?.integrationPullRequestUrl).toBeUndefined();
+      expect(found?.finalMergeOutcome).toBeUndefined();
+    },
+  );
+
+  it('PR/MRの番号・URL・最終マージの成否を保存・復元できる（design.md §16.11、Issue #118）', async () => {
+    const memento = fakeMemento();
+    const store = new WorkflowRunStore(memento);
+    await store.update('run-1', () =>
+      run({
+        tasks: {
+          T1: {
+            ...task('done'),
+            pullRequestNumber: 42,
+            pullRequestUrl: 'https://github.com/acme/repo/pull/42',
+          },
+        },
+        integrationPullRequestNumber: 7,
+        integrationPullRequestUrl: 'https://github.com/acme/repo/pull/7',
+        finalMergeOutcome: 'merged',
+      }),
+    );
+    const found = store.find('run-1');
+    expect(found?.tasks['T1']?.pullRequestNumber).toBe(42);
+    expect(found?.tasks['T1']?.pullRequestUrl).toBe('https://github.com/acme/repo/pull/42');
+    expect(found?.integrationPullRequestNumber).toBe(7);
+    expect(found?.integrationPullRequestUrl).toBe('https://github.com/acme/repo/pull/7');
+    expect(found?.finalMergeOutcome).toBe('merged');
   });
 
   it('clearAllで全消去する', async () => {

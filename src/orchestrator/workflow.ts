@@ -128,6 +128,11 @@ export interface WorkflowTask {
   escalate: string[];
   allow: string[];
   retries: number;
+  /**
+   * 対応するIssue番号。指定されていればPR/MRの本文へ `Closes #<N>` として出す
+   * （design.md §16.2・§16.18・§16.19）。`undefined` は「未指定」。
+   */
+  issue: number | undefined;
   cleanup: CleanupMode;
   /**
    * パース時点で検出した検証エラーのメッセージ。`validateWorkflow` がそのままタスクidを添えて報告する。
@@ -214,6 +219,34 @@ function isIsolation(v: string): v is Isolation {
 }
 function isCleanup(v: string): v is CleanupMode {
   return (CLEANUP_MODES as readonly string[]).includes(v);
+}
+
+/** `resolveIssue` の戻り値。`error` はフィールドが指定されていたが不正な値だった場合にだけ入る。 */
+interface ResolvedIssue {
+  value: number | undefined;
+  error: string | undefined;
+}
+
+/**
+ * `issue`（対応するIssue番号）を解決する。他の数値フィールド（`retries` / `maxIterations`
+ * 等が使う `num()`）と違い、不正な値を既定値へ黙って倒さない。この値はPR/MRの本文へ
+ * `Closes #<N>` としてそのまま出る（design.md §16.2・§16.18）ため、誤った番号が紛れ込むと
+ * 無関係のIssueを閉じかねない。「未指定」（フィールド自体が無い。`undefined`）と
+ * 「指定されたが不正」を区別し、後者は `parseErrors` へ積んで読み込みごと止める
+ * （`dependsOn` が配列でない場合と同じ扱い）。
+ */
+function resolveIssue(raw: unknown): ResolvedIssue {
+  if (raw === undefined) {
+    return { value: undefined, error: undefined };
+  }
+  const n = typeof raw === 'number' ? raw : Number.parseInt(str(raw), 10);
+  if (!Number.isInteger(n) || n <= 0) {
+    return {
+      value: undefined,
+      error: `issue が正の整数ではありません: ${JSON.stringify(raw)}`,
+    };
+  }
+  return { value: n, error: undefined };
 }
 
 /** 列挙値を解決した結果。`invalidRaw` は非空の文字列が指定されたが既知の値でなかった場合にだけ入る。 */
@@ -354,6 +387,11 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
     parseWarnings.push('allow に文字列でない要素が含まれていたため無視しました');
   }
 
+  const issueResult = resolveIssue(t['issue']);
+  if (issueResult.error !== undefined) {
+    parseErrors.push(issueResult.error);
+  }
+
   return {
     id: str(t['id']),
     prompt: str(t['prompt']),
@@ -372,6 +410,7 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
     escalate: escalateFiltered.values,
     allow: allowFiltered.values,
     retries: Math.max(0, Math.trunc(num(t['retries'], 0))),
+    issue: issueResult.value,
     // cleanupはworktreeの後始末で、taskごとの上書きはスキーマに無い（design.md §16.2）
     cleanup: defaults.cleanup,
     parseErrors,

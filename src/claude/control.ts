@@ -396,6 +396,19 @@ export function readSessionCost(payload: unknown, capturedAt: number): SessionCo
   return parseSessionCost(payload, capturedAt);
 }
 
+/**
+ * バックグラウンドで走っているタスクを停止する要求（issue #33、design.md §14.23）。
+ *
+ * 実測（本issueの調査。実際に `sleep` をバックグラウンドで開始させ、開始直後に
+ * この要求を送って止まることを確認した）: パラメータ名は**スネークケース**の `task_id`
+ * （`background_tasks_changed` 通知が返す `task_id` をそのまま渡す）。応答は常に空 `{}`
+ * で成否の情報を持たないため、`interrupt` と同じく発行するだけにし、実際に止まったかは
+ * 後続の `background_tasks_changed` 通知（一覧から消える）で判断する。
+ */
+export function buildStopTaskRequest(requestId: string, taskId: string): string {
+  return buildControlRequest(requestId, { subtype: 'stop_task', task_id: taskId });
+}
+
 /** MCPサーバーの一覧・状態を問い合わせる要求（issue #27、design.md TP-50）。 */
 export function buildMcpStatusRequest(requestId: string): string {
   return buildControlRequest(requestId, { subtype: 'mcp_status' });

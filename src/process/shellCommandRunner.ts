@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 
 /**
- * bashモード（`!`。design.md §14.25、Issue #5）の1回分の実行結果。
+ * bashモード（`!`。design.md §14.29、Issue #5）の1回分の実行結果。
  */
 export interface ShellCommandResult {
   stdout: string;
@@ -10,7 +10,7 @@ export interface ShellCommandResult {
   code: number | null;
   timedOut: boolean;
   /**
-   * `AbortSignal` で中断されたか（タブを閉じた、拡張機能が終了した等。design.md §14.25、
+   * `AbortSignal` で中断されたか（タブを閉じた、拡張機能が終了した等。design.md §14.29、
    * Issue #5のレビュー指摘: タブを閉じても実行中のコマンドが生き残る）。
    */
   aborted: boolean;
@@ -83,7 +83,7 @@ function killProcessGroup(proc: ReturnType<typeof spawn>, signal: NodeJS.Signals
  *
  * **意図的にコマンド文字列をサニタイズしない。** bashモードは任意コマンドを通すことが
  * 目的の機能であり、防御は「既定無効（`claude.bashMode.enabled`）」と「実行のたびの
- * モーダル確認」の二重ゲートのみに絞っている（design.md §14.25）。パイプ・リダイレクト・
+ * モーダル確認」の二重ゲートのみに絞っている（design.md §14.29）。パイプ・リダイレクト・
  * 変数展開が効くよう `shell: true` で実行する。
  *
  * `sigkillGraceMs` はSIGKILLへエスカレーションするまでの猶予をテストから短縮できるよう

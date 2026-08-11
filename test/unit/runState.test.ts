@@ -41,6 +41,7 @@ const task = (id: string, dependsOn: string[] = [], retries = 0): WorkflowTask =
   escalate: [],
   allow: [],
   retries,
+  issue: undefined,
   cleanup: 'keep',
   parseErrors: [],
   parseWarnings: [],

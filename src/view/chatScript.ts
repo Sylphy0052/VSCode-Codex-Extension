@@ -56,7 +56,9 @@ export function chatScript(
     imageGeneration: '画像の生成',
     enteredReviewMode: 'レビュー開始',
     exitedReviewMode: 'レビュー終了',
-    // bashモード（!）・メモリモード（#）。design.md §14.25、Issue #5・#6
+    subAgentActivity: 'サブエージェント',
+    collabAgentToolCall: 'サブエージェント操作',
+    // bashモード（!）・メモリモード（#）。design.md §14.29、Issue #5・#6
     memoryAppend: 'メモリ追記',
   };
 
@@ -86,6 +88,10 @@ export function chatScript(
     completed: '完了',
     failed: '失敗',
     declined: '拒否',
+    // subAgentActivity（issue #34）のkindがそのままstatusへ入る（SubAgentActivityKind）
+    started: '開始',
+    interacted: '応答',
+    interrupted: '中断',
   };
 
   const CLASS_OF = {
@@ -95,6 +101,8 @@ export function chatScript(
     commandExecution: 'tool',
     fileChange: 'tool',
     mcpToolCall: 'tool',
+    subAgentActivity: 'tool',
+    collabAgentToolCall: 'tool',
   };
 
   // 全体を作り直すと選択中のテキストが消えてコピーできないため、要素を使い回す
@@ -830,6 +838,44 @@ export function chatScript(
     }
   }
 
+  // バックグラウンドで実行中のプロセス一覧（issue #33、design.md 14.23、Codexの/ps相当）。
+  // stoppableが立っている項目（Claude Codeのみ、実測でstop_taskが機能することを
+  // 確認した）にだけ停止ボタンを出す。Codexは確定した停止経路が無いため、その旨を注記して
+  // ボタンは出さない（design.md 14.23。「黙って何も起きない状態を作らない」ため）。
+  function renderBackgroundTerminals(terminals) {
+    const box = el('backgroundTerminals');
+    const list = el('backgroundTerminalsList');
+    const items = terminals || [];
+    box.hidden = items.length === 0;
+    list.replaceChildren();
+    for (const t of items) {
+      const li = document.createElement('li');
+
+      const command = document.createElement('span');
+      command.className = 'command';
+      command.textContent = t.command || t.id;
+      command.title = t.command || t.id;
+      li.appendChild(command);
+
+      if (t.stoppable) {
+        const stop = document.createElement('button');
+        stop.className = 'secondary';
+        stop.textContent = '停止';
+        stop.addEventListener('click', () => {
+          vscode.postMessage({ type: 'stopBackgroundTask', id: t.id, command: t.command });
+        });
+        li.appendChild(stop);
+      } else {
+        const note = document.createElement('span');
+        note.className = 'note';
+        note.textContent = 'この画面から停止する経路はありません';
+        li.appendChild(note);
+      }
+
+      list.appendChild(li);
+    }
+  }
+
   function renderQueue(queued) {
     const box = el('queue');
     const list = el('queueList');
@@ -887,6 +933,7 @@ export function chatScript(
     if (atBottom) log.scrollTop = log.scrollHeight;
 
     renderTodos(state.todos);
+    renderBackgroundTerminals(state.backgroundTerminals);
     renderQueue(state.queued);
     el('stop').hidden = !state.busy;
     // 応答中でも送れる。進行中のターンへ割り込むので、応答は止まらない

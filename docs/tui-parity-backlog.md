@@ -138,27 +138,27 @@ Codexはターン単位で model / effort / approvalPolicy を渡せるのにCla
 | TP-41 | 巻き戻し（Codex Esc Esc / Claude `/rewind` 相当）。実装の結果、戻せる対象がCodexとClaudeで正反対と判明（Codex `thread/rollback` は会話のみ・ファイルは戻さないためdeprecatedごと不採用、Claude `rewind_files` はファイルのみ・会話は変わらない） | 両方         | P2     | Z-11      | #21 済（Claudeのみ、ファイル限定） |
 | TP-44 | Claude で会話の途中ターンから分岐する。実測の結果、非対話環境では手段が無いと確定した（design.md §14.6）                                                                                                                                         | Claude       | P2     | Z-12      | #22 不可（根拠つき）               |
 | TP-45 | コードレビューの起動（`/review` 相当）を画面の操作として持つ                                                                                                                                                                                     | Codex/Claude | P2     | Z-06 Z-09 | #23 済                             |
-| TP-42 | 一時的な脇道の会話（Codex `/btw` 相当）                                                                                                                                                                                                          | Codex        | P3     | Z-06      | #24                                |
+| TP-42 | 一時的な脇道の会話（Codex `/btw` 相当）。`thread/fork` に `ephemeral: true` で対応。既存の「分岐」（`ephemeral` 無しのfork）とはディスクへの永続化・`thread/list` への表示の有無で正反対（design.md §14.26）                                     | Codex        | P3     | Z-06      | #24 済                             |
 | TP-43 | トランスクリプト表示と生テキストモード（Ctrl+T / `/raw` 相当）                                                                                                                                                                                   | Codex/Claude | P3     | -         | #25 済                             |
-| TP-46 | `AGENTS.md` / `CLAUDE.md` の生成（`/init` 相当）                                                                                                                                                                                                 | Codex/Claude | P3     | TP-11     | #26                                |
+| TP-46 | `AGENTS.md` / `CLAUDE.md` の生成（`/init` 相当）。実装したのはCodexの擬似コマンドのみ、Claudeは既存の候補が実測で動作確認済みのため追加実装なし                                                                                                  | Codex/Claude | P3     | TP-11     | #26 済                             |
 
 ## Phase 6: 環境・管理系
 
 拡張UIで実装する方針。TUIタブが無くなったため「TUIタブへの導線に留める」という逃げは取れない。CLI側にAPIが無いものは、設定ファイルの編集やターミナルでのCLI起動を案内する形になる。Phase 0で全領域にAPIがあることは確認済み。
 
-| ID    | 内容                                                                  | 対象         | 優先度 | 依存      | Issue                                                                                                          |
-| ----- | --------------------------------------------------------------------- | ------------ | ------ | --------- | -------------------------------------------------------------------------------------------------------------- |
-| TP-50 | MCPサーバの一覧・状態・有効無効                                       | Codex/Claude | P2     | Z-07 Z-10 | #27 済                                                                                                         |
-| TP-52 | hooksの一覧と信頼の管理                                               | Codex/Claude | P2     | Z-07 Z-10 | #28 済（Claude Codeは一覧のみ。信頼状態を返す経路が無い）                                                      |
-| TP-53 | ログイン状態の表示とlogin / logout                                    | Codex/Claude | P2     | Z-07      | #29 済                                                                                                         |
-| TP-58 | カスタムエージェントの選択と一覧（Claude `--agent` / `/agents` 相当） | Claude       | P2     | Z-10      | #30 済（起動時のみ。切替の制御要求は無い）                                                                     |
-| TP-59 | TODO一覧の表示（Claude `/todos` 相当）                                | Claude       | P2     | Z-13      | #31 済                                                                                                         |
-| TP-51 | plugins / apps の閲覧と管理                                           | Codex/Claude | P3     | Z-07      | #32 済（Codexは有効/無効の経路が無くinstall/uninstallのみ。appは閲覧のみ。Claude Codeは全操作可能）            |
-| TP-54 | バックグラウンドターミナルの一覧と停止（Codex `/ps` 相当）            | Codex        | P3     | Z-08      | #33                                                                                                            |
-| TP-55 | agent thread の切替とサブエージェントの状況表示                       | Codex        | P3     | Z-08      | #34                                                                                                            |
-| TP-56 | skillsの一覧表示と管理。取得は `skillsList.ts` で一部実装済み         | Codex/Claude | P3     | Z-07      | #35 済（Claude Codeは一覧のみ。有効/無効を返す・切り替える経路が無い）                                         |
-| TP-57 | 他エージェントからの設定インポート（Codex `/import` 相当）            | Codex        | P3     | Z-07      | #36                                                                                                            |
-| TP-60 | 課金額とセッション分析（`/cost` `/insights` 相当）                    | Claude       | P2     | Z-13      | #37 済（GitHubラベルと揃えてP3からP2へ変更。分析レポートは既存のスラッシュコマンド送信経路で無変更のまま動く） |
+| ID    | 内容                                                                  | 対象         | 優先度 | 依存      | Issue                                                                                                               |
+| ----- | --------------------------------------------------------------------- | ------------ | ------ | --------- | ------------------------------------------------------------------------------------------------------------------- |
+| TP-50 | MCPサーバの一覧・状態・有効無効                                       | Codex/Claude | P2     | Z-07 Z-10 | #27 済                                                                                                              |
+| TP-52 | hooksの一覧と信頼の管理                                               | Codex/Claude | P2     | Z-07 Z-10 | #28 済（Claude Codeは一覧のみ。信頼状態を返す経路が無い）                                                           |
+| TP-53 | ログイン状態の表示とlogin / logout                                    | Codex/Claude | P2     | Z-07      | #29 済                                                                                                              |
+| TP-58 | カスタムエージェントの選択と一覧（Claude `--agent` / `/agents` 相当） | Claude       | P2     | Z-10      | #30 済（起動時のみ。切替の制御要求は無い）                                                                          |
+| TP-59 | TODO一覧の表示（Claude `/todos` 相当）                                | Claude       | P2     | Z-13      | #31 済                                                                                                              |
+| TP-51 | plugins / apps の閲覧と管理                                           | Codex/Claude | P3     | Z-07      | #32 済（Codexは有効/無効の経路が無くinstall/uninstallのみ。appは閲覧のみ。Claude Codeは全操作可能）                 |
+| TP-54 | バックグラウンドターミナルの一覧と停止（Codex `/ps` 相当）            | 両方         | P3     | Z-08      | #33 済（Codexは一覧のみ。停止する確定した経路が無い。Claude Codeは両方できる）                                      |
+| TP-55 | agent thread の切替とサブエージェントの状況表示                       | Codex        | P3     | Z-08      | #34 済（サブエージェントの状況表示のみ。切替する経路が無い。履歴の親子表示はtooltipのみに留めた。design.md §14.26） |
+| TP-56 | skillsの一覧表示と管理。取得は `skillsList.ts` で一部実装済み         | Codex/Claude | P3     | Z-07      | #35 済（Claude Codeは一覧のみ。有効/無効を返す・切り替える経路が無い）                                              |
+| TP-57 | 他エージェントからの設定インポート（Codex `/import` 相当）            | Codex        | P3     | Z-07      | #36                                                                                                                 |
+| TP-60 | 課金額とセッション分析（`/cost` `/insights` 相当）                    | Claude       | P2     | Z-13      | #37 済（GitHubラベルと揃えてP3からP2へ変更。分析レポートは既存のスラッシュコマンド送信経路で無変更のまま動く）      |
 
 ## Phase 7: 文書の整合
 
