@@ -255,6 +255,13 @@ export function chatStyles(): string {
     font-family: var(--vscode-editor-font-family);
     font-size: 0.9em;
   }
+  /* 行頭の !/# で何が起きるかを送信前に見せる（issue #5/#6、Claude Code画面のみ） */
+  #inputModeHint {
+    margin: 0 16px 4px;
+    color: var(--vscode-editorWarning-foreground, var(--vscode-descriptionForeground));
+    font-family: var(--vscode-editor-font-family);
+    font-size: 0.9em;
+  }
   #queue {
     margin: 0 16px 8px;
     padding: 8px 10px;

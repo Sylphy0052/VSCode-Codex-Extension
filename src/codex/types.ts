@@ -72,4 +72,13 @@ export interface SessionSummary {
   updatedAt: string;
   cwd: string | undefined;
   archived: boolean;
+  /**
+   * 親スレッドのid（issue #34、design.md §14.26）。
+   *
+   * `thread/list`（Codexのみ）の応答にあるキーで、`normalizeThread`で読む。実測・スキーマの
+   * どちらでも値が入っている例を確認できていない（`threadSource !== 'user'`
+   * の派生スレッドは一覧から除かれるため。design.md §14.26参照）。切替の代わりに
+   * ツリーの親子表示へ使う「保険」の値のため、常に持たせず取れたときだけ入れる。
+   */
+  parentThreadId?: string | undefined;
 }

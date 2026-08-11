@@ -66,6 +66,7 @@ export function normalizeThread(
   const cwd = str(obj['cwd']);
   const name = obj['name'];
   const path = str(obj['path']);
+  const parentThreadId = str(obj['parentThreadId']);
 
   return {
     id,
@@ -74,6 +75,7 @@ export function normalizeThread(
     updatedAt,
     cwd: cwd === '' ? undefined : cwd,
     archived: path !== '' && isUnderDir(path, archivedSessionsDir),
+    parentThreadId: parentThreadId === '' ? undefined : parentThreadId,
   };
 }
 

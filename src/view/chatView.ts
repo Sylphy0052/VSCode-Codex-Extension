@@ -220,6 +220,37 @@ export async function confirmStopBackgroundTask(command: string): Promise<boolea
   return choice === '停止する';
 }
 
+/**
+ * 行頭が `!` の入力（issue #5、design.md §14.29）をターミナルへ入力してよいか確かめる。
+ *
+ * **自動実行はしない**（`openLoginTerminal` と同じ流儀。統合ターミナルへ文字を入力するだけで、
+ * 実行するかどうかは開いたターミナルでユーザーが自分でEnterを押して決める）。それでも
+ * 何を入力するかは事前にここで確認させる。
+ */
+export async function confirmRunShellCommand(command: string): Promise<boolean> {
+  const choice = await vscode.window.showWarningMessage(
+    `次のコマンドを統合ターミナルへ入力します（自動実行はしません。実行するかはターミナル側でEnterを押して決められます）:\n\n${command}`,
+    { modal: true },
+    '入力する',
+  );
+  return choice === '入力する';
+}
+
+/**
+ * 行頭が `#` の入力（issue #6、design.md §14.29）をメモリへ追記してよいか確かめる。
+ *
+ * ファイルへの書き込みは元に戻せないため（gitで管理されていない環境もある）、
+ * 追記先と内容の両方を確認させてから書く（issue #6の受入基準）。
+ */
+export async function confirmMemoryAppend(content: string, path: string): Promise<boolean> {
+  const choice = await vscode.window.showWarningMessage(
+    `次の内容を追記します:\n\n${content}\n\n追記先: ${path}`,
+    { modal: true },
+    '追記する',
+  );
+  return choice === '追記する';
+}
+
 /** 確認ダイアログに列挙するファイル数の上限。超えた分は件数だけ示す。 */
 const REWIND_FILE_LIST_LIMIT = 10;
 
@@ -1569,6 +1600,11 @@ export interface ChatShellOptions {
    * ファイルを戻さない）。Claude Codeは`rewind_files`でファイルだけを戻せる。
    */
   showRewind?: boolean;
+  /**
+   * 入力欄の下に `!`/`#` 始まりの案内を出すか（Claude Code画面のみ、issue #5/#6、
+   * design.md §14.29）。CodexのTUIにこの挙動は無い。
+   */
+  showInputModeHints?: boolean;
 }
 
 /**
@@ -1623,6 +1659,7 @@ ${chatStyles()}
   </div>
   <div id="attachments" hidden></div>
   <div id="argumentHint" hidden></div>
+  <div id="inputModeHint" hidden></div>
   <div id="composer">
     <div id="commands" hidden></div>
     <textarea id="input" placeholder="${options.agentLabel}への指示を入力（Ctrl+Enterで送信、画像はCtrl+Vで貼り付け）"></textarea>
@@ -1677,7 +1714,7 @@ ${chatStyles()}
   </div>
 
 <script nonce="${nonce}">
-${chatScript(options.agentLabel, options.review, options.showRewind === true, options.approvalCycle ?? [])}
+${chatScript(options.agentLabel, options.review, options.showRewind === true, options.approvalCycle ?? [], options.showInputModeHints === true)}
 </script>
 </body>
 </html>`;

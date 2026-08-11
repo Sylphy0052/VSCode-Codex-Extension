@@ -22,6 +22,7 @@ export function chatScript(
   review: ReviewButtonConfig,
   showRewind = false,
   approvalCycle: readonly string[] = [],
+  showInputModeHints = false,
 ): string {
   return `
   const vscode = acquireVsCodeApi();
@@ -56,6 +57,8 @@ export function chatScript(
     imageGeneration: '画像の生成',
     enteredReviewMode: 'レビュー開始',
     exitedReviewMode: 'レビュー終了',
+    subAgentActivity: 'サブエージェント',
+    collabAgentToolCall: 'サブエージェント操作',
   };
 
   /** ホスト側から渡されたレビューボタンの動作。 */
@@ -67,6 +70,12 @@ export function chatScript(
    * （design.md「Claude Codeの巻き戻し」参照）。
    */
   const SHOW_REWIND = ${JSON.stringify(showRewind)};
+
+  /**
+   * 入力欄の下に !/# 始まりの案内を出すか（Claude Code画面のみ、issue #5/#6、
+   * design.md §14.29）。CodexのTUIにこの挙動は無い。
+   */
+  const SHOW_INPUT_MODE_HINTS = ${JSON.stringify(showInputModeHints)};
 
   /** 残りがこの割合を下回ったら警告として見せる。 */
   const LOW_CONTEXT_PERCENT = 20;
@@ -84,6 +93,10 @@ export function chatScript(
     completed: '完了',
     failed: '失敗',
     declined: '拒否',
+    // subAgentActivity（issue #34）のkindがそのままstatusへ入る（SubAgentActivityKind）
+    started: '開始',
+    interacted: '応答',
+    interrupted: '中断',
   };
 
   const CLASS_OF = {
@@ -93,6 +106,8 @@ export function chatScript(
     commandExecution: 'tool',
     fileChange: 'tool',
     mcpToolCall: 'tool',
+    subAgentActivity: 'tool',
+    collabAgentToolCall: 'tool',
   };
 
   // 全体を作り直すと選択中のテキストが消えてコピーできないため、要素を使い回す
@@ -1270,6 +1285,28 @@ export function chatScript(
     box.textContent = found ? '/' + found.name + ' ' + found.argumentHint : '';
   }
 
+  /**
+   * 行頭の !/# を送信前に案内する（issue #5/#6、Claude Code画面のみ）。
+   *
+   * 判定の規則はホスト側の routeInputMode（src/provider/inputModes.ts）と同じ。
+   * テンプレートリテラルの中からは関数を呼べないため書き直している。両方を揃えること。
+   */
+  function renderInputModeHint() {
+    const box = el('inputModeHint');
+    if (!box || !SHOW_INPUT_MODE_HINTS) return;
+    const line = el('input').value.trim();
+    let text = '';
+    if (line.indexOf('\\n') === -1) {
+      if (line.slice(0, 1) === '!' && line.slice(1).trim() !== '') {
+        text = 'シェルコマンドとしてターミナルへ入力します: ' + line.slice(1).trim();
+      } else if (line.slice(0, 1) === '#' && line.slice(1).trim() !== '') {
+        text = 'メモリへ追記します: ' + line.slice(1).trim();
+      }
+    }
+    box.hidden = text === '';
+    box.textContent = text;
+  }
+
   function filterCommands(list, query) {
     const needle = String(query).toLowerCase();
     if (needle === '') return list.slice();
@@ -1324,6 +1361,7 @@ export function chatScript(
     if (!text.trim() && attachmentCount === 0) return;
     input.value = '';
     renderArgumentHint();
+    renderInputModeHint();
     resetHistory();
     vscode.postMessage({ type: 'send', text });
   }
@@ -1440,6 +1478,7 @@ export function chatScript(
 
   el('input').addEventListener('input', (e) => {
     renderArgumentHint();
+    renderInputModeHint();
     const command = commandQuery(e.target);
     if (command !== undefined) {
       showCommands(command);
