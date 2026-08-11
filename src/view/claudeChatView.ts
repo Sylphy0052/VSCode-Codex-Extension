@@ -31,6 +31,7 @@ import {
   postImageData,
   renderShell,
   reportTurnResult,
+  runExportTranscript,
 } from './chatView';
 import type { FileMentionCatalog } from '../provider/fileMentions';
 import { readPersistedThreadId } from './panelState';
@@ -778,6 +779,11 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       }
       if (type === 'compact') {
         void this.compact(entry);
+        return;
+      }
+      if (type === 'exportTranscript') {
+        // 発言や中断とは独立した操作。ループへの割り込み扱いにはしない
+        void runExportTranscript(entry.session.getState().items, LABEL);
         return;
       }
       if (type === 'rewind' && typeof m['messageId'] === 'string') {

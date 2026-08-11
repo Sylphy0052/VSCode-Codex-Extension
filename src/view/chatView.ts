@@ -9,6 +9,7 @@ import {
 } from '../appserver/approvals';
 import { isOpenableSearchUrl, type ChatItem, type ChatState } from '../appserver/chatState';
 import { ChatSession } from '../appserver/chatSession';
+import { buildTranscriptMarkdown, defaultTranscriptFileName } from '../appserver/transcriptMarkdown';
 import {
   AppServerConnection,
   type AppServerConnectionPort,
@@ -222,6 +223,74 @@ export function reportTurnResult(
     text: state.turnResultText,
     editedFiles: state.turnEditedFiles,
   });
+}
+
+/**
+ * 会話全体の取り出し（issue #25・design.md §14.23）で選ばせる操作。
+ * `runReview` の対象選択と同じQuickPickの流儀に揃える。
+ */
+const TRANSCRIPT_EXPORT_ITEMS: (vscode.QuickPickItem & { mode: 'copy' | 'save' | 'raw' })[] = [
+  { mode: 'copy', label: 'クリップボードへコピー', detail: '会話全体をMarkdownでコピーします' },
+  { mode: 'save', label: 'ファイルへ保存', detail: 'Markdownファイルとして保存します' },
+  {
+    mode: 'raw',
+    label: '生テキストで開く',
+    detail: '装飾を落として新しいタブに開きます。コピー・検索・保存もそのままできます',
+  },
+];
+
+/**
+ * 会話全体をMarkdownとして取り出す。Codex画面・Claude Code画面の両方で共有する。
+ *
+ * Markdownの組み立ては純粋関数（`buildTranscriptMarkdown`）に任せ、ここでは
+ * 「何をするか」をQuickPickで選ばせてから実行するだけにする。**外部へ送る機能は作らない**
+ * （クリップボード・ローカルファイル・エディタタブの3つに留める。issue #25の仕様）。
+ *
+ * 生テキストで開く操作は、ワークフロー生成が検証エラー時にやっている
+ * `vscode.workspace.openTextDocument({content, language})` と同じ手（`extension.ts`
+ * の `handlePlanFailure` 参照）で、通常のエディタとして開けばコピー・検索・保存が
+ * VSCode標準の操作でできる。
+ */
+export async function runExportTranscript(
+  items: readonly ChatItem[],
+  agentLabel: string,
+): Promise<void> {
+  if (items.length === 0) {
+    void vscode.window.showInformationMessage('会話がまだ無いため取り出せません');
+    return;
+  }
+
+  const choice = await vscode.window.showQuickPick(TRANSCRIPT_EXPORT_ITEMS, {
+    title: '会話を取り出す',
+    placeHolder: '何をしますか',
+  });
+  if (choice === undefined) {
+    return;
+  }
+
+  const markdown = buildTranscriptMarkdown(items, agentLabel);
+
+  if (choice.mode === 'copy') {
+    await vscode.env.clipboard.writeText(markdown);
+    void vscode.window.showInformationMessage('会話をMarkdownでコピーしました');
+    return;
+  }
+
+  if (choice.mode === 'save') {
+    const uri = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.file(defaultTranscriptFileName(new Date())),
+      filters: { Markdown: ['md'] },
+    });
+    if (uri === undefined) {
+      return;
+    }
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(markdown, 'utf8'));
+    void vscode.window.showInformationMessage(`会話を保存しました: ${uri.fsPath}`);
+    return;
+  }
+
+  const doc = await vscode.workspace.openTextDocument({ content: markdown, language: 'markdown' });
+  await vscode.window.showTextDocument(doc, { preview: false });
 }
 
 /** `TaskSessionInput` をCodexの `thread/start`/`turn/start` が読む形へ写す。 */
@@ -866,6 +935,11 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
         await this.runReview(entry);
         return;
       }
+      if (type === 'exportTranscript') {
+        // 発言や中断とは独立した操作。ループへの割り込み扱いにはしない
+        await runExportTranscript(entry.session.getState().items, 'Codex');
+        return;
+      }
       if (type === 'cancelQueued' && typeof m['index'] === 'number') {
         entry.session.cancelQueued(m['index']);
         return;
@@ -1427,6 +1501,7 @@ ${chatStyles()}
     <button id="compact" type="button" class="secondary" title="これまでの会話を要約に置き換えてコンテキストを空けます">圧縮</button>
     <button id="planToggle" type="button" class="secondary" aria-pressed="false" title="読み取りだけに絞って計画を立てさせます。ファイルは変更されません">計画</button>
     <button id="review" type="button" class="secondary" title="コードレビューを実行します"${options.review.mode === 'command' ? ' hidden' : ''}>レビュー</button>
+    <button id="exportTranscript" type="button" class="secondary" title="会話全体をMarkdownとして取り出します（コピー・ファイル保存・生テキスト表示）">エクスポート</button>
   </div>
   <div id="loop" hidden>
     <label>初回指示（空なら継続指示から始めます）

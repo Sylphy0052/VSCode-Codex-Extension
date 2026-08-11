@@ -1354,6 +1354,12 @@ export function chatScript(
     vscode.postMessage({ type: 'review' });
   });
 
+  // 会話全体の取り出し（issue #25）。Markdownの組み立て・コピー・保存・生テキスト表示は
+  // すべて拡張機能側で行う（巨大な会話でもWebviewの描画スレッドを固まらせないため）
+  el('exportTranscript').addEventListener('click', () =>
+    vscode.postMessage({ type: 'exportTranscript' }),
+  );
+
   el('attach').addEventListener('click', () => el('filePicker').click());
   el('filePicker').addEventListener('change', (e) => {
     offerFiles(e.target.files);
