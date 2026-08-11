@@ -3,12 +3,15 @@ import { ActivityLogger, nodeClock, resolveBufferDir } from './activity/activity
 import type { RecordRequest as ActivityRequest } from './activity/activityLogger';
 import { nodeActivityAppender } from './activity/nodeAppender';
 import { ClaudeAgentProbe } from './claude/agentProbe';
+import { ClaudeAuthActions } from './claude/authActions';
+import { ClaudeAuthProbe } from './claude/authProbe';
 import { claudePaths, resolveClaudeHome } from './claude/cliLocator';
 import { ClaudeMcpProbe } from './claude/mcpProbe';
 import { ClaudeModelProbe } from './claude/modelProbe';
 import { ClaudeProvider } from './claude/provider';
 import { ClaudeSessionStore } from './claude/sessionStore';
 import { ClaudeTranscriptWatcher } from './claude/transcriptWatcher';
+import { CodexAccountActions } from './codex/accountActions';
 import { AppServerClient } from './codex/appServerClient';
 import { codexPaths, nodeLocatorDeps, resolveCodexHome } from './codex/cliLocator';
 import { CodexProvider } from './codex/provider';
@@ -32,6 +35,7 @@ import { WorkflowRunner, nodeWorkflowFilePort } from './orchestrator/runner';
 import { ProviderRegistry } from './provider/registry';
 import type { AgentProvider } from './provider/types';
 import { createLogger, type Logger } from './log';
+import { nodeCommandRunner as nodeAccountCommandRunner } from './process/commandRunner';
 import { nodeFileSystem } from './session/nodeFileSystem';
 import { nodeFileScan } from './session/nodeFileScan';
 import { FileMentionCatalog } from './provider/fileMentions';
@@ -94,11 +98,15 @@ export function activate(context: vscode.ExtensionContext): void {
   /** Claude Code固有の機能（設定パネル・モデル一覧）が使う実行ファイル。 */
   const claudePath = (): string => resolveExecutable(claude, log) ?? 'claude';
 
-  // 単発の問い合わせ（fork・モデル一覧・エージェント一覧・MCP一覧）に使う。会話用の接続とは別プロセス
+  // 単発の問い合わせ（fork・モデル一覧・エージェント一覧・MCP一覧・ログイン状態）に使う。会話用の接続とは別プロセス
   const appServer = new AppServerClient(codexPath, log);
   const claudeModels = new ClaudeModelProbe(claudePath, log);
   const claudeAgents = new ClaudeAgentProbe(claudePath, log);
   const claudeMcp = new ClaudeMcpProbe(claudePath, log);
+  const claudeAuth = new ClaudeAuthProbe(claudePath, log);
+  // ログイン/ログアウトの実行はCLIサブコマンドへ委譲する（issue #29、accountActions.ts参照）
+  const codexAccountActions = new CodexAccountActions(nodeAccountCommandRunner, codexPath);
+  const claudeAuthActions = new ClaudeAuthActions(nodeAccountCommandRunner, claudePath);
 
   const settings = new SettingsProvider(
     nodeFileSystem,
@@ -112,6 +120,11 @@ export function activate(context: vscode.ExtensionContext): void {
     () => claudeMcp.read(),
     (name, enabled) => appServer.setMcpServerEnabled(name, enabled),
     (name, enabled) => claudeMcp.toggle(name, enabled),
+    () => appServer.readAccount(),
+    () => claudeAuth.read(),
+    () => codexAccountActions.logout(),
+    () => claudeAuthActions.logout(),
+    (apiKey) => codexAccountActions.loginWithApiKey(apiKey),
     log,
   );
   // オーケストレータ（design.md §16）。`chat` / `claudeChat` は `WorkflowRunner` の
