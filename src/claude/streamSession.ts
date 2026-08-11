@@ -139,6 +139,15 @@ export class ClaudeStreamSession {
     return this.state;
   }
 
+  /**
+   * CLIとはやり取りせず、拡張機能側だけで完結した出来事を会話に1行残す
+   * （issue #6のメモリ追記など）。プロセスが生きていなくても呼べる
+   * （会話を閉じた後の操作を弾く理由が無いため）。
+   */
+  noteLocalEvent(id: string, text: string): void {
+    this.update(appendNotice(this.state, id, text));
+  }
+
   /** プロセスを起動する。発言はこの後 `send` で流す。 */
   start(options: ClaudeStreamOptions): void {
     const { args, warnings } = buildClaudeStreamArgs({
