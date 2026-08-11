@@ -10,13 +10,17 @@ const fakeLogger: Logger = {
 };
 
 interface FakeProc {
-  stdin: { write: (line: string) => void };
+  killed: boolean;
+  stdin: { write: (line: string) => void; destroyed: boolean; writable: boolean };
 }
 
 /**
  * `start()` は実プロセスを起動するため、ここでは `proc` に書き込みを記録するだけの
  * フェイクを直接差し込む（`claudeStreamSessionApproval.test.ts` と同じ方針。
  * `proc` はTSの `private` で実行時には保護されないため、テストからは越えられる）。
+ *
+ * `killed` / `stdin.destroyed` / `stdin.writable` は`write()`が書き込み前に見る生存判定
+ * （issue #155、`src/process/stdinSafety.ts`）が通るよう「生きているプロセス」を模す。
  */
 function createSessionWithFakeProc(): {
   session: ClaudeStreamSession;
@@ -28,7 +32,10 @@ function createSessionWithFakeProc(): {
     fakeLogger,
     () => undefined,
   );
-  const fakeProc: FakeProc = { stdin: { write: (line) => written.push(line) } };
+  const fakeProc: FakeProc = {
+    killed: false,
+    stdin: { write: (line) => written.push(line), destroyed: false, writable: true },
+  };
   (session as unknown as { proc: FakeProc }).proc = fakeProc;
   return { session, written };
 }

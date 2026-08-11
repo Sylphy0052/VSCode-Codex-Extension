@@ -13,6 +13,7 @@ import {
 import type { LaunchTarget } from '../codex/types';
 import type { Logger } from '../log';
 import type { ApprovalHandlerResult } from '../orchestrator/taskSession';
+import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
 import { consumeNdjson } from '../util/ndjson';
 import { buildClaudeStreamArgs } from './argvBuilder';
 import {
@@ -173,6 +174,16 @@ export class ClaudeStreamSession {
       env: { ...process.env, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1' },
     });
     this.proc = proc;
+
+    // `proc.on('error')`は起動失敗しか拾わない。起動後に相手が終了した状態へ書き込むと
+    // 飛ぶEPIPE等はここで捕まえないとNodeの未捕捉例外になる（issue #155、design.md
+    // §14.31）。常駐セッションなので、既存のexit/errorハンドラと同じ「ターン失敗」の
+    // 経路へ寄せる。
+    guardStdinErrors(proc, (e) => {
+      this.log.error(`claudeへの書き込みに失敗しました: ${e.message}`);
+      this.proc = undefined;
+      this.update({ ...this.state, busy: false, turnFailed: true });
+    });
 
     proc.stdout.on('data', (chunk: Buffer) => this.receive(chunk.toString('utf8')));
     proc.stderr.on('data', (chunk: Buffer) => {
@@ -648,8 +659,14 @@ export class ClaudeStreamSession {
     this.onChange(next);
   }
 
+  /**
+   * 書き込み前に生存判定を行う（issue #155）。判定と書き込みの間の競合までは防げないため、
+   * `start()`で購読した`guardStdinErrors`と併用する。
+   */
   private write(line: string): void {
-    this.proc?.stdin.write(line);
+    if (this.proc !== undefined) {
+      safeWriteStdin(this.proc, line);
+    }
   }
 
   /** 承認要求が一度も来ていないか（劣化検知の補助）。 */

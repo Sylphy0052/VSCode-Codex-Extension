@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { canWriteStdin, guardStdinErrors } from './stdinSafety';
 
 /**
  * CLIサブコマンドを1回だけ実行する共通の抽象（issue #29）。
@@ -47,9 +48,19 @@ export const nodeCommandRunner: CommandRunner = {
       proc.on('error', (e: Error) => finish({ code: 1, stderr: e.message }));
       proc.on('close', (code) => finish({ code: code ?? 1, stderr }));
 
+      // `proc.on('error')`は起動失敗しか拾わない。起動後に相手が終了した状態へ書き込むと
+      // 飛ぶEPIPE等はここで捕まえないとNodeの未捕捉例外になる（issue #155、design.md
+      // §14.31）。この関数はAPIキーを`stdin`引数で受け取りうる経路（`codex login
+      // --with-api-key`）なので、ここでは`e.message`（Nodeのシステムエラー文字列。書き込んだ
+      // 内容は含まない）のみを使い、`stdin`引数はいかなる形でもログ・エラーメッセージへ
+      // 混ぜないこと。
+      guardStdinErrors(proc, (e: Error) => finish({ code: 1, stderr: e.message }));
+
       if (stdin !== undefined) {
-        proc.stdin.end(stdin);
-      } else {
+        if (canWriteStdin(proc)) {
+          proc.stdin.end(stdin);
+        }
+      } else if (canWriteStdin(proc)) {
         proc.stdin.end();
       }
     });
