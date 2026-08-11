@@ -115,7 +115,7 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 | TP-21 | Claude のセッション中に model / effort / permissionMode を変える。現状は起動引数のみで、会話中は固定 | Claude | P1     | Z-10      | #10 済（effortの反映は観測できない） |
 | TP-22 | Plan mode の切替（Codex `/plan` / Claude Shift+Tab 相当）。現状どちらも手段が無い                    | 両方   | P1     | Z-06 Z-10 | #11 済（Codexは権限で代替）          |
 | TP-20 | Codex の sandbox をターン単位で変える。現状は `thread/start` 時のみで、明示的に非対応としている      | Codex  | P2     | Z-02      | #12 済                               |
-| TP-23 | 承認モードを循環させるキーバインド（TUIのShift+Tab相当）を画面に用意する                             | 両方   | P3     | TP-22     | #13                                  |
+| TP-23 | 承認モードを循環させるキーバインド（TUIのShift+Tab相当）を画面に用意する                             | 両方   | P3     | TP-22     | #13 済                               |
 
 Codexはターン単位で model / effort / approvalPolicy を渡せるのにClaudeは起動時固定、という非対称が現状ある。TP-21はこの差を埋めるもの。
 

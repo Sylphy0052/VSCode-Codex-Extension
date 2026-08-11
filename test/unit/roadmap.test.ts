@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { initialChatState, type ChatState } from '../../src/appserver/chatState';
+import type { LoopPlan, LoopStopReason } from '../../src/loop/loopController';
 import {
   applyRunCompletion,
   applyRunCompletionToFile,
   buildRoadmapPrompt,
   createCliIssueListPort,
+  createTaskSessionRoadmapGenerationPort,
   generateRoadmap,
   parseRoadmapMarkdown,
   resolveRoadmapOutputPath,
@@ -16,7 +19,68 @@ import {
   type RoadmapGenerationPort,
 } from '../../src/orchestrator/roadmap';
 import type { CliCommandRunner } from '../../src/orchestrator/forge';
+import type {
+  ApprovalHandler,
+  TaskSession,
+  TaskSessionHost,
+  TaskSessionInput,
+} from '../../src/orchestrator/taskSession';
 import type { GitCommandRunner } from '../../src/orchestrator/worktree';
+
+/** `planner.test.ts`のフェイクと同じ形。1ターンで応答を返し、承認要求は全拒否する。 */
+class FakeRoadmapSession implements TaskSession {
+  readonly sessionId = 'roadmap-fake-session';
+  approvalHandler: ApprovalHandler | undefined;
+  runLoopCalls: LoopPlan[] = [];
+  disposed = false;
+  private finishedListener: ((reason: LoopStopReason, state: ChatState) => void) | undefined;
+
+  constructor(
+    private readonly responseText: string,
+    private readonly shouldFail: boolean,
+  ) {}
+
+  runLoop(plan: LoopPlan): void {
+    this.runLoopCalls.push(plan);
+    this.finishedListener?.(this.shouldFail ? 'failed' : 'maxReached', {
+      ...initialChatState,
+      turnResultText: this.responseText,
+    });
+  }
+  setPromptTransform(): void {}
+  onFinished(listener: (reason: LoopStopReason, state: ChatState) => void): void {
+    this.finishedListener = listener;
+  }
+  onStateChanged(): void {}
+  setApprovalHandler(handler: ApprovalHandler): void {
+    this.approvalHandler = handler;
+  }
+  onApprovalResolved(): void {}
+  async interrupt(): Promise<void> {}
+  stopLoop(): void {}
+  decideApproval(): void {}
+  reveal(): void {}
+  open(): void {}
+  dispose(): void {
+    this.disposed = true;
+  }
+}
+
+class FakeRoadmapHost implements TaskSessionHost {
+  openCalls: TaskSessionInput[] = [];
+  sessions: FakeRoadmapSession[] = [];
+  constructor(
+    private readonly responseText: string,
+    private readonly shouldFail = false,
+  ) {}
+
+  async openTaskSession(input: TaskSessionInput): Promise<TaskSession> {
+    this.openCalls.push(input);
+    const session = new FakeRoadmapSession(this.responseText, this.shouldFail);
+    this.sessions.push(session);
+    return session;
+  }
+}
 
 const SAMPLE_ROADMAP = `# 認証機能を追加する
 
@@ -508,6 +572,47 @@ describe('applyRunCompletionToFile', () => {
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) {
       expect(outcome.reason).toBe('readFailed');
+    }
+  });
+});
+
+describe('createTaskSessionRoadmapGenerationPort', () => {
+  it('read-only相当・承認全拒否のセッションを1つ開き、応答テキストを返して閉じる（design.md §16.19）', async () => {
+    const host = new FakeRoadmapHost('# ゴール\n\n## Phase 1: a\n\n- [ ] R1 やる\n  - 依存: なし');
+    const port = createTaskSessionRoadmapGenerationPort(host, 'codex', '/repo');
+
+    const result = await port.generate({ prompt: 'ロードマップを作って' });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.text).toContain('R1 やる');
+    }
+    expect(host.openCalls).toHaveLength(1);
+    // sandbox: read-only相当（`planner.ts`のbuildPlannerSessionInputが組み立てる最安全値）
+    expect(host.openCalls[0]?.sandbox).toBe('read-only');
+    expect(host.openCalls[0]?.cwd).toBe('/repo');
+
+    const session = host.sessions[0];
+    expect(session).toBeDefined();
+    // 承認要求は全て拒否する（design.md §16.9・§16.19）
+    const decision = await session?.approvalHandler?.(
+      { requestId: 1, kind: 'command', title: 'rm -rf /', detail: '', itemId: undefined },
+      {},
+    );
+    expect(decision).toEqual({ kind: 'auto', decision: 'decline' });
+    // 生成が終わったらセッションを閉じる（design.md §16.19）
+    expect(session?.disposed).toBe(true);
+  });
+
+  it('セッションのターンが失敗したら ok: false を返す', async () => {
+    const host = new FakeRoadmapHost('', true);
+    const port = createTaskSessionRoadmapGenerationPort(host, 'codex', '/repo');
+
+    const result = await port.generate({ prompt: 'ロードマップを作って' });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain('ロードマップ生成セッションが失敗しました');
     }
   });
 });

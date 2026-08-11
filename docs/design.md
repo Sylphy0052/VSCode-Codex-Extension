@@ -1420,7 +1420,23 @@ Phase 0（issue #1 Z-07 / issue #2 Z-10）の時点では「両方とも実装�
 - `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `skills: SkillsSnapshot` を追加。`toggleCodexSkill(path, enabled)` を新設（Claude Code側には対応する書き込みメソッドを持たない）
 - `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画と有効/無効の切替（Codexのみ）。skillの名前・説明は必ず `textContent` でDOMへ入れ、HTMLとして解釈させない
 
-### 14.20 Web検索結果の表示
+### 14.20 承認方法をキー操作で回す
+
+TUIは Shift+Tab で承認モードを循環させる。セレクタを開いて選ぶより速く、実際にはこちらばかり使う操作なので、チャット画面にも同じ入口を用意する（issue #13・TP-23）。
+
+- **入力欄にフォーカスがあるときだけ効かせる**。ブラウザ既定のフォーカス移動を奪う操作なので、画面のどこでも効くようにはしない
+- 並びは「制限が強い側から緩い側へ」。押すたびに緩む向きに進むので、どこまで緩めたかが押した回数で分かる
+  - Codex: `untrusted` → `on-request` → `never`（`APPROVAL_MODES` の宣言順がそのまま安全順）
+  - Claude Code: `plan` → `manual` → `acceptEdits` → `auto` → `dontAsk`
+- **Claude Codeの `bypassPermissions` は循環に含めない。** 確認なしでツールが動く値で、キーを連打していて到達してよいものではない。設定パネルとセレクタからは、明示の同意を取ったうえで選べる
+- 現在値が循環に無いとき（空文字＝CLIへ委譲、または `bypassPermissions`）は**先頭へ進む**。いま何が効いているか画面から判らない状態から、いちばん厳しいところへ寄せる
+- **現在の承認方法は入力欄の下に常に出す**（`承認 on-request` のように）。キーで回す以上、いまどこにいるかが見えていないと使えない
+
+並びと遷移は `src/provider/approvalCycle.ts` の純粋関数に置き、Webview側はそこから渡された配列を回すだけにする（同じ規則を2か所に書かない）。
+
+## 15. 作業記録（日報・週報連携）
+
+### 14.21 Web検索結果の表示
 
 `webSearch` の項目にクエリだけでなく検索結果（タイトルとURL）を出す。issue #18・design.mdのTP-32対応。表示のみで、結果の取得方法そのものは変えない。
 

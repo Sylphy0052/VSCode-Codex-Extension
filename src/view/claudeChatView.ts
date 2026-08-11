@@ -34,6 +34,7 @@ import {
 import type { FileMentionCatalog } from '../provider/fileMentions';
 import { readPersistedThreadId } from './panelState';
 import { CLAUDE_PERMISSION_MODES } from '../claude/types';
+import { CLAUDE_APPROVAL_CYCLE } from '../provider/approvalCycle';
 import type { ClaudeConfig } from '../claude/types';
 import type { ClaudeEditableKey, SettingsProvider } from './settingsProvider';
 import type { ChatActivity } from './chatView';
@@ -434,6 +435,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     panel.webview.html = renderShell(panel.webview, {
       agentLabel: LABEL,
       approvalModes: CLAUDE_PERMISSION_MODES,
+      approvalCycle: CLAUDE_APPROVAL_CYCLE,
       showSettings: true,
       showAgentSelector: true,
       // effort・エージェントだけ扱いが違う。黙って効かないより、効くタイミングを書くほうがまし
