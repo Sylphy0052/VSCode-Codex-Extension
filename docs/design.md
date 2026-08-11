@@ -349,11 +349,11 @@ Agents
 
 Claude Code側で扱う設定と選択肢の出どころは次のとおり。
 
-| 項目   | 選択肢                                              | 既定値の出どころ                 |
-| ------ | --------------------------------------------------- | -------------------------------- |
-| モデル | `initialize` の応答の `models`（`value` を渡す）    | `settings.json` の `model`       |
-| effort | モデルごとの `supportedEffortLevels`                | `settings.json` の `effortLevel` |
-| 承認方法 | `--permission-mode` が受け付ける6種                | `settings.json` の `permissions.defaultMode` |
+| 項目     | 選択肢                                           | 既定値の出どころ                             |
+| -------- | ------------------------------------------------ | -------------------------------------------- |
+| モデル   | `initialize` の応答の `models`（`value` を渡す） | `settings.json` の `model`                   |
+| effort   | モデルごとの `supportedEffortLevels`             | `settings.json` の `effortLevel`             |
+| 承認方法 | `--permission-mode` が受け付ける6種              | `settings.json` の `permissions.defaultMode` |
 
 Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡張機能側の既定値として持つ。Codex側の「空＝CLIへ委譲」とは異なるが、未指定だと何が使われるか画面から分からないため、既定を明示する方を採った。「既定」を選べば従来どおり `settings.json` へ委譲する。
 
@@ -487,11 +487,23 @@ unit testでは以下を検証する。
 ```
 turn/started
   item/started → item/agentMessage/delta（ストリーミング）→ item/completed
+  item/started → item/commandExecution/outputDelta（コマンド出力）→ item/completed
 thread/tokenUsage/updated / account/rateLimits/updated
 turn/completed
 ```
 
 扱うのは `item` 系・`turn` 系・`thread/status/changed`・使用量・`thread/name/updated` のみ。**未知の通知は状態を変えずに素通しする**（プロトコルの追加で壊れないため）。ThreadItemは18種あるが、未知の種類も種類名だけ保持して捨てない。
+
+### コマンド出力の逐次表示
+
+`item/commandExecution/outputDelta`（`{threadId, turnId, itemId, delta}`）を購読し、エージェントの応答と同じように本文へ積む。これを見ないと `item/completed` の `aggregatedOutput` が届くまで何も出ず、長いコマンドは進んでいるのか分からない。
+
+- **上限を超えた分は先頭を捨てる**（`MAX_OUTPUT_CHARS` = 200,000文字）。`find /` のような出力は際限なく伸びるため、全部持つと状態の受け渡しと描画が重くなる。TUIも古い行から流れて消える
+- 捨てた印は本文に混ぜない。混ぜると「コピー」がそのまま使えなくなるので、`ChatItem.truncated` で持ち、見出しに「先頭は省略」と出す
+- `item/completed` の `aggregatedOutput` にも同じ上限をかける。デルタで積んだ本文を空の completed で消さないのは既存の `upsertItem` の方針どおり
+- Claude Code側は `tool_result` が一括で届くため逐次表示はできない。**上限と折りたたみだけ共通**にする
+- 画面は `MAX_VISIBLE_LINES`（20行）を超えたら末尾だけ見せ、「全体を表示（N行）」で開ける。開いた状態は要素と一緒に保つので、出力が伸びても勝手に閉じない
+- 実行中は見出しに「実行中」と出し、本文の左に色を付ける（Codexは `inProgress`、Claude Codeは `running`）
 
 ### 接続
 
