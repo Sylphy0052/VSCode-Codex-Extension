@@ -20,6 +20,13 @@ import { accountNotLoadedYet, type AccountSnapshot } from '../provider/account';
 import type { McpServersSnapshot } from '../provider/mcpServers';
 import type { AppsSnapshot, PluginsSnapshot } from '../provider/plugins';
 import type { SkillsSnapshot } from '../provider/skills';
+import {
+  isValidImportItemKey,
+  type ImportHistorySnapshot,
+  type ImportItemView,
+  type ImportRunResult,
+  type ImportSnapshot,
+} from '../provider/import';
 import type { CommandResult } from '../process/commandRunner';
 import type { FileSystemPort } from '../session/ports';
 
@@ -37,6 +44,15 @@ const pluginsNotLoadedYet: PluginsSnapshot = { ok: false, reason: 'まだ読み�
 
 /** appsの一覧をまだ読んでいない状態（Codexのみ）。 */
 const appsNotLoadedYet: AppsSnapshot = { ok: false, reason: 'まだ読み込んでいません' };
+
+/** インポート候補の一覧をまだ読んでいない状態（Codexのみ、issue #36）。 */
+const importNotLoadedYet: ImportSnapshot = { ok: false, reason: 'まだ読み込んでいません' };
+
+/** インポート履歴をまだ読んでいない状態（Codexのみ、issue #36）。 */
+const importHistoryNotLoadedYet: ImportHistorySnapshot = {
+  ok: false,
+  reason: 'まだ読み込んでいません',
+};
 
 /**
  * `setMcpServerEnabled` / `ClaudeMcpProbe.toggle` / `setHookTrusted` と同じ形の結果。
@@ -89,6 +105,10 @@ export interface SettingsSnapshot {
   plugins: PluginsSnapshot;
   /** appsの一覧（issue #32、design.md §14.20。Codexのみ）。 */
   apps: AppsSnapshot;
+  /** 他エージェントからの設定インポート候補（issue #36、design.md TP-57。Codexのみ）。 */
+  importCandidates: ImportSnapshot;
+  /** インポートの実行履歴（issue #36。Codexのみ）。 */
+  importHistory: ImportHistorySnapshot;
 }
 
 export interface ClaudeSettingsSnapshot {
@@ -142,6 +162,10 @@ export class SettingsProvider {
   private codexAccount: AccountSnapshot = accountNotLoadedYet;
   private codexPlugins: PluginsSnapshot = pluginsNotLoadedYet;
   private codexApps: AppsSnapshot = appsNotLoadedYet;
+  private codexImport: ImportSnapshot = importNotLoadedYet;
+  private codexImportHistory: ImportHistorySnapshot = importHistoryNotLoadedYet;
+  /** `runCodexImport` へそのまま再送するための、キーごとの生の項目（issue #36）。 */
+  private codexImportRawByKey: Map<string, unknown> = new Map();
 
   private claudeModels: ModelInfo[] = [];
   private claudeDefaults: ClaudeDefaults = noClaudeDefaults;
@@ -186,6 +210,12 @@ export class SettingsProvider {
    * @param uninstallClaudePluginCli `claude plugin uninstall`。
    * @param listCodexApps `app/installed` + `app/read` を突き合わせた結果（Codexのみ。
    *   有効/無効・インストール操作の確定した経路が無いため閲覧のみ）。
+   * @param detectCodexImportCandidates `externalAgentConfig/detect` の結果（issue #36、
+   *   design.md TP-57。Codexのみ）。`snapshot` は画面表示用、`rawByKey` は
+   *   `runCodexImport` が実行時にそのまま再送するための生データ。
+   * @param readCodexImportHistories `externalAgentConfig/import/readHistories` の結果。
+   * @param runCodexImportCli `externalAgentConfig/import`。設定を書き換える操作のため、
+   *   `runCodexImport` が確認ダイアログを必ず挟んでから呼ぶ。
    */
   constructor(
     private readonly fs: FileSystemPort,
@@ -243,6 +273,12 @@ export class SettingsProvider {
       scope: string | undefined,
     ) => Promise<CommandResult>,
     private readonly listCodexApps: () => Promise<AppsSnapshot>,
+    private readonly detectCodexImportCandidates: () => Promise<{
+      snapshot: ImportSnapshot;
+      rawByKey: Map<string, unknown>;
+    }>,
+    private readonly readCodexImportHistories: () => Promise<ImportHistorySnapshot>,
+    private readonly runCodexImportCli: (items: unknown[]) => Promise<ImportRunResult>,
     private readonly log: Logger,
   ) {}
 
@@ -276,6 +312,8 @@ export class SettingsProvider {
       this.codexPlugins,
       this.claudePlugins,
       this.codexApps,
+      this.codexImport,
+      this.codexImportHistory,
     ] = await Promise.all([
       this.loadCodexModels(),
       this.loadClaudeModels(),
@@ -291,6 +329,8 @@ export class SettingsProvider {
       this.listCodexPlugins(),
       this.listClaudePlugins(),
       this.listCodexApps(),
+      this.loadCodexImportCandidates(),
+      this.readCodexImportHistories(),
     ]);
 
     const toml = await this.fs.readTextFile(this.configTomlPath);
@@ -299,6 +339,17 @@ export class SettingsProvider {
     const claudeSettings = await this.fs.readTextFile(this.claudeSettingsPath);
     this.claudeDefaults =
       claudeSettings === undefined ? noClaudeDefaults : extractClaudeDefaults(claudeSettings);
+  }
+
+  /**
+   * インポート候補を読み、実行時に再送する生データ（`codexImportRawByKey`）を
+   * 副作用として更新する（issue #36）。`load()` の `Promise.all` から呼ぶため、
+   * 一覧の値（`ImportSnapshot`）だけを返す形に揃えている。
+   */
+  private async loadCodexImportCandidates(): Promise<ImportSnapshot> {
+    const { snapshot, rawByKey } = await this.detectCodexImportCandidates();
+    this.codexImportRawByKey = rawByKey;
+    return snapshot;
   }
 
   /**
@@ -372,6 +423,8 @@ export class SettingsProvider {
       account: this.codexAccount,
       plugins: this.codexPlugins,
       apps: this.codexApps,
+      importCandidates: this.codexImport,
+      importHistory: this.codexImportHistory,
     };
   }
 
@@ -442,6 +495,52 @@ export class SettingsProvider {
     const result = await this.setCodexSkillEnabled(path, enabled);
     if (!result.ok) {
       this.log.warn(`skillを切り替えられませんでした (${path}): ${result.error}`);
+    }
+    return result;
+  }
+
+  /**
+   * 他エージェントからの設定インポートを実行する（issue #36、design.md TP-57）。
+   * **設定を書き換える操作**。実行前に対象（何を・どこから・どこへ）を示して確認を取る
+   * （§8のセキュリティ考慮）。
+   *
+   * `keys` は直前の `load()` で読んだ `codexImportRawByKey` のキー。一覧が更新される前の
+   * 古いキーが渡された場合はその項目だけを黙って除外する（一覧の再読込を跨いだ選択の
+   * ずれをエラーにはしない）。
+   */
+  async runCodexImport(keys: string[]): Promise<ImportRunResult> {
+    const validKeys = new Set(keys.filter(isValidImportItemKey));
+    const items =
+      this.codexImport.ok === true
+        ? this.codexImport.items.filter((item) => validKeys.has(item.key))
+        : [];
+    if (items.length === 0) {
+      return { ok: false, error: '選択された項目がありません' };
+    }
+
+    if (!(await confirmImport(items))) {
+      return { ok: false, error: undefined };
+    }
+
+    const rawItems = items
+      .map((item) => this.codexImportRawByKey.get(item.key))
+      .filter((raw): raw is NonNullable<typeof raw> => raw !== undefined);
+    if (rawItems.length === 0) {
+      return {
+        ok: false,
+        error: '選択された項目の内容を読み直せませんでした。一覧を更新してからやり直してください',
+      };
+    }
+
+    const result = await this.runCodexImportCli(rawItems);
+    if (!result.ok) {
+      this.log.warn(`インポートを実行できませんでした: ${result.error}`);
+    } else if (result.results === undefined) {
+      this.log.warn(
+        `インポート完了の通知が届きませんでした (importId: ${result.importId})。履歴一覧で後から確認してください`,
+      );
+    } else {
+      this.log.info(`インポートを実行しました (importId: ${result.importId})`);
     }
     return result;
   }
@@ -665,6 +764,26 @@ export class SettingsProvider {
 
     return true;
   }
+}
+
+/**
+ * 他エージェントからの設定インポートは既存の設定を書き換えうる操作のため、
+ * 何を・どこから・どこへ取り込むかを明示して必ず確認を挟む（issue #36、design.md TP-57、
+ * §8のセキュリティ考慮）。`description` はCLIが返す文言（英語、そのまま）で、
+ * 何を・どこから・どこへが書かれている。
+ */
+async function confirmImport(items: ImportItemView[]): Promise<boolean> {
+  const lines = items.map((item) => `・${item.label}: ${item.description}`);
+  const hasConfig = items.some((item) => item.itemType === 'CONFIG');
+  const detailLines = hasConfig
+    ? [...lines, '', '「設定」を含むため、既存の config.toml の値を上書きすることがあります。']
+    : lines;
+  const choice = await vscode.window.showWarningMessage(
+    `選択した${items.length}件をインポートします。`,
+    { modal: true, detail: detailLines.join('\n') },
+    'インポートする',
+  );
+  return choice === 'インポートする';
 }
 
 /**

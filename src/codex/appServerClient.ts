@@ -9,10 +9,22 @@ import {
   type AppsSnapshot,
   type PluginsSnapshot,
 } from '../provider/plugins';
+import type {
+  ImportHistorySnapshot,
+  ImportRunItemResult,
+  ImportRunResult,
+  ImportSnapshot,
+} from '../provider/import';
 import { parseAccountRead } from './accountStatus';
 import { mergeApps, parseAppsInstalled, parseAppsRead } from './appsStatus';
 import { isSessionId } from './argvBuilder';
 import { buildHookTrustEdit, parseHooksList } from './hooksStatus';
+import {
+  parseDetectResponse,
+  parseImportNotification,
+  parseImportResponse,
+  parseReadHistoriesResponse,
+} from './importStatus';
 import {
   consumeFrames,
   encodeNotification,
@@ -37,6 +49,16 @@ type CallResult<T> = { ok: true; value: T } | { ok: false; error: string };
 /** JSON-RPCの1往復。応答は `error` を含みうるため、呼び出し側で見ること。 */
 type Request = (method: string, params: unknown) => Promise<JsonRpcMessage>;
 
+/**
+ * 通知（idを持たないメッセージ）を購読する口。`externalAgentConfig/import` のように、
+ * 最初の応答（`importId`）の後に非同期の通知（`.../progress` `.../completed`）が続く
+ * 要求のためだけに使う。他のメソッドは単発の要求・応答で完結するため使わない。
+ */
+type NotificationBus = {
+  /** 通知が来るたびに呼ばれる。戻り値の関数を呼ぶと購読を止める。 */
+  onEach: (listener: (message: JsonRpcMessage) => void) => () => void;
+};
+
 const CLIENT_NAME = 'vscode-codex-extension';
 const CLIENT_VERSION = '0.0.1';
 
@@ -52,6 +74,17 @@ const MAX_PLUGIN_READ_CALLS = 25;
 
 /** `app/read` の `appIds` の上限（スキーマの説明: 「最大100件、重複除去」）。 */
 const MAX_APP_READ_IDS = 100;
+
+/**
+ * `externalAgentConfig/import` の完了通知を待つ上限（issue #36、design.md TP-57）。
+ *
+ * Phase 0で確認されたバイナリのUI文言（「Import started. You can keep working while it
+ * finishes.」）から非同期に進むことが分かっており、セッション移行など項目数が多い場合は
+ * 数分かかる可能性がある。単発起動のこのクライアントは常駐できないため、待ちに上限を設け、
+ * 超えたら「開始はしたが完了は確認できていない」として返す（`runImport` 参照。実行系のため
+ * 実測していない値であり、余裕を持たせている）。
+ */
+const IMPORT_COMPLETE_TIMEOUT_MS = 5 * 60_000;
 
 /**
  * `codex app-server` を必要な瞬間だけ起動し、1回のRPCを行って終了する。
@@ -514,14 +547,179 @@ export class AppServerClient {
   }
 
   /**
+   * 他エージェントからの設定インポートの候補を検出する（issue #36、design.md TP-57）。
+   *
+   * `externalAgentConfig/detect`（`ExternalAgentConfigDetectParams { cwds?, includeHome?,
+   * migrationSource?, ... }` → `ExternalAgentConfigDetectResponse { items, connectors }`）は
+   * スレッドを開始していなくても呼べる（実測）。`includeHome: true` を常に渡す
+   * （実測: 省略すると常に空になる。詳細は `importStatus.ts` のコメント参照）。`cwds` には
+   * ワークスペースフォルダを渡し、プロジェクト側の設定（リポジトリのcloneに含まれる
+   * `.claude/` 等）も検出対象にする。`migrationSource` は指定しない（既定でClaude Code、
+   * issueのスコープと一致。詳細は `importStatus.ts` 参照）。
+   *
+   * 戻り値の `rawByKey` は `runImport` へそのまま渡すための生の項目。webviewへは
+   * `snapshot`（`ImportItemView[]`）だけを渡し、生データは呼び出し側（`SettingsProvider`）に
+   * 留める。
+   */
+  async detectImportCandidates(
+    cwds: string[],
+  ): Promise<{ snapshot: ImportSnapshot; rawByKey: Map<string, unknown> }> {
+    const result = await this.call<ReturnType<typeof parseDetectResponse>>(async (request) => {
+      const response = await request('externalAgentConfig/detect', {
+        includeHome: true,
+        ...(cwds.length === 0 ? {} : { cwds }),
+      });
+      if (response.error !== undefined) {
+        return { ok: false, error: response.error.message };
+      }
+      return { ok: true, value: parseDetectResponse(response.result) };
+    });
+
+    if (!result.ok) {
+      this.log.warn(`インポート候補を検出できませんでした: ${result.error}`);
+      return { snapshot: { ok: false, reason: result.error }, rawByKey: new Map() };
+    }
+    return { snapshot: { ok: true, items: result.value.items }, rawByKey: result.value.rawByKey };
+  }
+
+  /**
+   * 過去のインポート実行履歴を読む（issue #36）。
+   *
+   * `externalAgentConfig/import/readHistories`（params: `null` → `{data, connectors}`）は
+   * 実測。この一覧を見せることで、実行前に「前回いつ何を取り込んだか」が分かるようにする
+   * （受入基準「実行前に何が変わるかが分かる」の一部）。
+   */
+  async readImportHistories(): Promise<ImportHistorySnapshot> {
+    const result = await this.call<ReturnType<typeof parseReadHistoriesResponse>>(
+      async (request) => {
+        const response = await request('externalAgentConfig/import/readHistories', null);
+        if (response.error !== undefined) {
+          return { ok: false, error: response.error.message };
+        }
+        return { ok: true, value: parseReadHistoriesResponse(response.result) };
+      },
+    );
+
+    if (!result.ok) {
+      this.log.warn(`インポート履歴を取得できませんでした: ${result.error}`);
+      return { ok: false, reason: result.error };
+    }
+    return { ok: true, entries: result.value };
+  }
+
+  /**
+   * 選ばれた項目を実際にインポートする（issue #36）。**設定を書き換える操作**。
+   *
+   * `migrationItems` には `detectImportCandidates` が返した `rawByKey` の値をそのまま渡す
+   * こと（`ExternalAgentConfigMigrationItem` の形をこのクライアントが再構築するのではなく、
+   * CLIが返した生のJSONを再送する。スキーマの型が一致しているため）。呼び出し側
+   * （`SettingsProvider.runCodexImport`）が実行前に確認ダイアログで対象を明示すること。
+   *
+   * `externalAgentConfig/import` は `{importId}` を即座に返し、実際の結果は
+   * `externalAgentConfig/import/completed` 通知で非同期に届く（Phase 0調査で確認された
+   * UI文言「Import started. You can keep working while it finishes.」と整合）。このクライアント
+   * は単発起動で常駐できないため、完了通知を `IMPORT_COMPLETE_TIMEOUT_MS` まで待ってから
+   * プロセスを終える。**タイムアウト後にCLI側で処理が実際に継続するかどうかは未確認**
+   * （実行系のため実測していない。プロセスを終了させることで中断される可能性がある）。
+   * タイムアウトを失敗とはせず、「開始はできた」ことが分かる形（`results: undefined`）で返す。
+   *
+   * 通知の購読は要求を送る**前**に始める。応答（`importId`）と完了通知が同じ受信チャンクに
+   * 混ざって届いた場合、応答を待ってから購読すると通知を取りこぼす競合があるため。
+   * このapp-serverプロセスはこの1回のインポートのためだけに起動しているので、観測する
+   * `.../progress` `.../completed` 通知はすべてこの実行のものとみなしてよい。
+   */
+  async runImport(migrationItems: unknown[]): Promise<ImportRunResult> {
+    if (migrationItems.length === 0) {
+      return { ok: false, error: 'インポートする項目が選ばれていません' };
+    }
+
+    const result = await this.call<{
+      importId: string;
+      results: ImportRunItemResult[] | undefined;
+    }>(
+      async (request, notify) => {
+        let resolveCompletion: (results: ImportRunItemResult[]) => void = () => {};
+        const completion = new Promise<ImportRunItemResult[]>((resolve) => {
+          resolveCompletion = resolve;
+        });
+        const stop = notify.onEach((message) => {
+          if (message.method === 'externalAgentConfig/import/progress') {
+            const progress = parseImportNotification(message.params);
+            if (progress !== undefined) {
+              this.log.info(
+                `インポート進行中 (${progress.importId}): ${progress.results
+                  .map((r) => `${r.label} 成功${r.successCount}/失敗${r.failureCount}`)
+                  .join(' ・ ')}`,
+              );
+            }
+            return;
+          }
+          if (message.method === 'externalAgentConfig/import/completed') {
+            const completed = parseImportNotification(message.params);
+            if (completed !== undefined) {
+              resolveCompletion(completed.results);
+            }
+          }
+        });
+
+        const response = await request('externalAgentConfig/import', { migrationItems });
+        if (response.error !== undefined) {
+          stop();
+          return { ok: false, error: response.error.message };
+        }
+        const importId = parseImportResponse(response.result);
+        if (importId === undefined) {
+          stop();
+          return { ok: false, error: '応答からimportIdを読み取れませんでした' };
+        }
+
+        const results = await new Promise<ImportRunItemResult[] | undefined>((resolve) => {
+          const timer = setTimeout(() => resolve(undefined), IMPORT_COMPLETE_TIMEOUT_MS);
+          void completion.then((r) => {
+            clearTimeout(timer);
+            resolve(r);
+          });
+        });
+        stop();
+
+        return { ok: true, value: { importId, results } };
+      },
+      IMPORT_COMPLETE_TIMEOUT_MS,
+    );
+
+    if (!result.ok) {
+      this.log.warn(`インポートを実行できませんでした: ${result.error}`);
+      return { ok: false, error: result.error };
+    }
+    if (result.value.results === undefined) {
+      this.log.warn(
+        `インポート完了の通知が届きませんでした (importId: ${result.value.importId})。CLI側で処理が継続している可能性があります`,
+      );
+      return { ok: true, importId: result.value.importId, results: undefined };
+    }
+    this.log.info(`インポートが完了しました (importId: ${result.value.importId})`);
+    return { ok: true, importId: result.value.importId, results: result.value.results };
+  }
+
+  /**
    * app-serverを起動し、初期化してから `body` の要求を行い、終わったら落とす。
    *
    * 応答が来ない場合に居座らせないよう、必ずタイムアウトで決着させる。
    */
-  private call<T>(body: (request: Request) => Promise<CallResult<T>>): Promise<CallResult<T>> {
+  private call<T>(
+    body: (request: Request, notify: NotificationBus) => Promise<CallResult<T>>,
+    timeoutOverrideMs?: number,
+  ): Promise<CallResult<T>> {
     return new Promise<CallResult<T>>((resolve) => {
       const proc = spawn(this.codexPath(), ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'] });
       const pending = new Map<number, (m: JsonRpcMessage) => void>();
+      const notificationListeners = new Set<(message: JsonRpcMessage) => void>();
+      const notify: NotificationBus = {
+        onEach: (listener) => {
+          notificationListeners.add(listener);
+          return () => notificationListeners.delete(listener);
+        },
+      };
       let buffer = '';
       let settled = false;
       let nextId = 1;
@@ -538,7 +736,7 @@ export class AppServerClient {
 
       const timer = setTimeout(
         () => finish({ ok: false, error: 'app-serverが応答しませんでした' }),
-        this.timeoutMs,
+        timeoutOverrideMs ?? this.timeoutMs,
       );
 
       proc.stdout.on('data', (chunk: Buffer) => {
@@ -549,6 +747,12 @@ export class AppServerClient {
           if (typeof message.id === 'number') {
             pending.get(message.id)?.(message);
             pending.delete(message.id);
+          } else if (message.method !== undefined) {
+            // idを持たないメッセージ（通知）。既定のメソッドは要求・応答だけで完結し
+            // 通知を無視するが、`runImport` のように非同期の続報を待つ呼び出しもある
+            for (const listener of notificationListeners) {
+              listener(message);
+            }
           }
         }
       });
@@ -585,7 +789,7 @@ export class AppServerClient {
         }
         proc.stdin.write(encodeNotification('initialized', {}));
 
-        finish(await body(request));
+        finish(await body(request, notify));
       })();
     });
   }

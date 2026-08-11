@@ -551,6 +551,200 @@ export function controlPanelScript(): string {
     }
   }
 
+  // 他エージェントからの設定インポート（issue #36、design.md TP-57）。
+  // チェックボックスで選んだ項目のkeyだけをホストへ送る。実際に送る生データ（CLIの
+  // 応答そのもの）はホスト側（SettingsProvider）に留めており、webviewは持たない
+  let importSelectedKeys = new Set();
+
+  function importDetailKindLabel(kind) {
+    const labels = {
+      skills: 'skills',
+      hooks: 'hooks',
+      mcpServers: 'MCPサーバー',
+      plugins: 'plugins',
+      subagents: 'サブエージェント',
+      commands: 'スラッシュコマンド',
+      sessions: 'セッション',
+      memory: 'メモリ',
+    };
+    return labels[kind] || kind;
+  }
+
+  function formatImportDetail(detail) {
+    let text = importDetailKindLabel(detail.kind) + '(' + detail.count + '件)';
+    if (detail.sampleNames.length === 0) return text;
+    let names = detail.sampleNames.join('、');
+    if (detail.moreCount > 0) names += ' ほか' + detail.moreCount + '件';
+    return text + ': ' + names;
+  }
+
+  function importScopeLabel(scope) {
+    return scope === 'home' ? 'ユーザー' : 'プロジェクト';
+  }
+
+  function renderImportItem(item, updateButton) {
+    const row = document.createElement('div');
+    row.className = 'importItem';
+
+    const head = document.createElement('div');
+    head.className = 'importItem-head';
+
+    const label = document.createElement('label');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = importSelectedKeys.has(item.key);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) {
+        importSelectedKeys.add(item.key);
+      } else {
+        importSelectedKeys.delete(item.key);
+      }
+      updateButton();
+    });
+    const name = document.createElement('span');
+    name.className = 'importItem-name';
+    name.textContent = item.label;
+    label.appendChild(checkbox);
+    label.appendChild(name);
+    head.appendChild(label);
+
+    const scopeBadge = document.createElement('span');
+    scopeBadge.className = 'importBadge importBadge-' + item.scope;
+    scopeBadge.textContent = importScopeLabel(item.scope);
+    head.appendChild(scopeBadge);
+
+    row.appendChild(head);
+
+    if (item.description) {
+      const desc = document.createElement('div');
+      desc.className = 'importItem-desc';
+      desc.textContent = item.description;
+      row.appendChild(desc);
+    }
+
+    if (item.cwd) {
+      const cwd = document.createElement('div');
+      cwd.className = 'importItem-meta';
+      cwd.textContent = 'プロジェクト: ' + item.cwd;
+      row.appendChild(cwd);
+    }
+
+    for (const detail of item.details) {
+      const meta = document.createElement('div');
+      meta.className = 'importItem-meta';
+      meta.textContent = formatImportDetail(detail);
+      row.appendChild(meta);
+    }
+
+    return row;
+  }
+
+  function renderImport(elId, snapshot) {
+    const container = el(elId);
+    container.replaceChildren();
+
+    if (!snapshot || snapshot.ok !== true) {
+      const p = document.createElement('p');
+      p.className = 'importError';
+      const reason = snapshot && snapshot.reason ? snapshot.reason : '不明なエラー';
+      p.textContent = 'インポート候補を取得できませんでした: ' + reason;
+      container.appendChild(p);
+      return;
+    }
+
+    // 一覧が更新されて消えた項目の選択は捨てる
+    const currentKeys = new Set(snapshot.items.map((item) => item.key));
+    importSelectedKeys.forEach((key) => {
+      if (!currentKeys.has(key)) importSelectedKeys.delete(key);
+    });
+
+    if (snapshot.items.length === 0) {
+      const p = document.createElement('p');
+      p.className = 'importEmpty';
+      p.textContent = 'インポートできる項目は見つかりませんでした';
+      container.appendChild(p);
+      return;
+    }
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'importRunButton';
+    button.textContent = '選択した項目をインポート';
+    const updateButton = () => {
+      button.disabled = importSelectedKeys.size === 0;
+    };
+
+    for (const item of snapshot.items) {
+      container.appendChild(renderImportItem(item, updateButton));
+    }
+
+    updateButton();
+    button.addEventListener('click', () => {
+      vscode.postMessage({ type: 'runCodexImport', keys: Array.from(importSelectedKeys) });
+    });
+    container.appendChild(button);
+  }
+
+  function renderImportHistoryEntry(entry) {
+    const row = document.createElement('div');
+    row.className = 'importHistoryItem';
+
+    const head = document.createElement('div');
+    head.className = 'importHistoryItem-head';
+    const when = document.createElement('span');
+    when.className = 'importHistoryItem-time';
+    when.textContent = entry.completedAt || '(時刻不明)';
+    head.appendChild(when);
+    if (entry.providerId) {
+      const provider = document.createElement('span');
+      provider.className = 'importHistoryItem-provider';
+      provider.textContent = entry.providerId;
+      head.appendChild(provider);
+    }
+    row.appendChild(head);
+
+    for (const result of entry.results) {
+      const line = document.createElement('div');
+      line.className = 'importHistoryItem-meta';
+      line.textContent = result.label + ' ・ 成功' + result.successCount + '件 / 失敗' + result.failureCount + '件';
+      row.appendChild(line);
+      for (const message of result.failureMessages) {
+        const failure = document.createElement('div');
+        failure.className = 'importHistoryItem-failure';
+        failure.textContent = message;
+        row.appendChild(failure);
+      }
+    }
+
+    return row;
+  }
+
+  function renderImportHistory(elId, snapshot) {
+    const container = el(elId);
+    container.replaceChildren();
+
+    if (!snapshot || snapshot.ok !== true) {
+      const p = document.createElement('p');
+      p.className = 'importError';
+      const reason = snapshot && snapshot.reason ? snapshot.reason : '不明なエラー';
+      p.textContent = 'インポート履歴を取得できませんでした: ' + reason;
+      container.appendChild(p);
+      return;
+    }
+
+    if (snapshot.entries.length === 0) {
+      const p = document.createElement('p');
+      p.className = 'importHistoryEmpty';
+      p.textContent = 'インポートの実行履歴はありません';
+      container.appendChild(p);
+      return;
+    }
+
+    for (const entry of snapshot.entries) {
+      container.appendChild(renderImportHistoryEntry(entry));
+    }
+  }
+
   function renderAccount(elId, snapshot, renderActions) {
     const container = el(elId);
     container.replaceChildren();
@@ -655,6 +849,8 @@ export function controlPanelScript(): string {
     renderSkills('skillsListCodex', state.skills);
     renderPlugins('pluginsListCodex', 'codex', state.plugins);
     renderApps('appsListCodex', state.apps);
+    renderImport('importListCodex', state.importCandidates);
+    renderImportHistory('importHistoryListCodex', state.importHistory);
     models = state.models;
     const nameOf = (slug) => {
       const m = models.find((x) => x.slug === slug);

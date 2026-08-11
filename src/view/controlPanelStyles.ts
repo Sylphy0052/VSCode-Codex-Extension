@@ -350,5 +350,77 @@ export function controlPanelStyles(): string {
     width: auto;
     padding: 3px 10px;
   }
+  .sectionSubTitle {
+    margin: 12px 0 6px;
+    font-size: 0.85em;
+    font-weight: 600;
+    color: var(--vscode-descriptionForeground);
+  }
+  .importList, .importHistoryList { display: flex; flex-direction: column; gap: 6px; }
+  .importEmpty, .importError, .importHistoryEmpty {
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+  }
+  .importError { color: var(--vscode-errorForeground, var(--vscode-descriptionForeground)); }
+  .importItem, .importHistoryItem {
+    padding: 6px 8px;
+    border: 1px solid var(--vscode-widget-border, transparent);
+    border-radius: 3px;
+  }
+  .importItem-head, .importHistoryItem-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .importItem-name { font-weight: 600; }
+  .importItem-desc {
+    margin-top: 4px;
+    color: var(--vscode-foreground);
+    font-size: 0.85em;
+    line-height: 1.4;
+    word-break: break-all;
+  }
+  .importItem-meta {
+    margin-top: 2px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.8em;
+    word-break: break-all;
+  }
+  .importBadge {
+    font-size: 0.8em;
+    padding: 1px 6px;
+    border-radius: 10px;
+    white-space: nowrap;
+  }
+  .importBadge-home {
+    color: var(--vscode-charts-blue);
+    border: 1px solid var(--vscode-charts-blue);
+  }
+  .importBadge-project {
+    color: var(--vscode-charts-orange, var(--vscode-charts-yellow));
+    border: 1px solid var(--vscode-charts-orange, var(--vscode-charts-yellow));
+  }
+  .importRunButton {
+    width: auto;
+    margin-top: 4px;
+    padding: 5px 10px;
+  }
+  .importHistoryItem-time { font-weight: 600; }
+  .importHistoryItem-provider {
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.8em;
+  }
+  .importHistoryItem-meta {
+    margin-top: 2px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+  }
+  .importHistoryItem-failure {
+    margin-top: 2px;
+    color: var(--vscode-errorForeground, var(--vscode-charts-red));
+    font-size: 0.8em;
+    word-break: break-all;
+  }
 `;
 }

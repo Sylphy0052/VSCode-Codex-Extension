@@ -9,6 +9,7 @@ import {
   type UsageSnapshot,
 } from '../codex/usage';
 import type { Logger } from '../log';
+import type { ImportHistoryItemTypeResultView, ImportHistorySnapshot } from '../provider/import';
 import { controlPanelScript } from './controlPanelScript';
 import { controlPanelStyles } from './controlPanelStyles';
 import { formatAbsoluteTime } from './relativeTime';
@@ -30,9 +31,22 @@ interface UsageView {
   severity: UsageSeverity;
 }
 
-interface PanelState extends SettingsSnapshot {
+/** インポート履歴の表示用整形（`completedAtMs` を文字列にする）。issue #36。 */
+interface ImportHistoryEntryDisplay {
+  importId: string;
+  completedAt: string;
+  providerId: string | undefined;
+  results: ImportHistoryItemTypeResultView[];
+}
+
+type ImportHistoryDisplaySnapshot =
+  | { ok: true; entries: ImportHistoryEntryDisplay[] }
+  | { ok: false; reason: string };
+
+interface PanelState extends Omit<SettingsSnapshot, 'importHistory'> {
   usage: UsageView | undefined;
   claude: ClaudeSettingsSnapshot;
+  importHistory: ImportHistoryDisplaySnapshot;
 }
 
 /**
@@ -84,10 +98,12 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
   }
 
   private buildState(): PanelState {
+    const snapshot = this.settings.snapshot();
     return {
-      ...this.settings.snapshot(),
+      ...snapshot,
       usage: buildUsageView(this.usage),
       claude: this.settings.claudeSnapshot(),
+      importHistory: buildImportHistoryView(snapshot.importHistory),
     };
   }
 
@@ -220,6 +236,40 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       await this.installPlugin(cli);
+      return;
+    }
+
+    if (m['type'] === 'runCodexImport') {
+      // Codex専用（issue #36、design.md TP-57）。設定を書き換えうる操作のため、
+      // `SettingsProvider.runCodexImport` 側で確認ダイアログを必ず挟む
+      const keys = m['keys'];
+      if (!Array.isArray(keys) || keys.some((k) => typeof k !== 'string')) {
+        this.log.warn(`インポート実行要求が不正です: ${JSON.stringify(m)}`);
+        return;
+      }
+      const result = await this.settings.runCodexImport(keys as string[]);
+      if (!result.ok) {
+        if (result.error !== undefined) {
+          void vscode.window.showErrorMessage(`インポートを実行できませんでした: ${result.error}`);
+        }
+        await this.refresh();
+        return;
+      }
+      if (result.results === undefined) {
+        void vscode.window.showInformationMessage(
+          `インポートを開始しました（importId: ${result.importId}）。完了の通知が届かなかったため、結果は下の履歴一覧で後から確認してください。`,
+        );
+      } else {
+        const failed = result.results.filter((r) => r.failureCount > 0);
+        if (failed.length > 0) {
+          void vscode.window.showWarningMessage(
+            `インポートが完了しましたが、一部失敗しました: ${failed.map((r) => r.label).join('、')}`,
+          );
+        } else {
+          void vscode.window.showInformationMessage('インポートが完了しました。');
+        }
+      }
+      await this.refresh();
       return;
     }
 
@@ -446,6 +496,12 @@ ${controlPanelStyles()}
   <h2 class="sectionTitle">apps</h2>
   <p class="note">appはChatGPTに接続されたコネクタです。この一覧は閲覧のみです。Codexには有効/無効・インストール/アンインストールを拡張機能から操作する確定した経路がありません。</p>
   <div class="appsList" id="appsListCodex"></div>
+
+  <h2 class="sectionTitle">他エージェントからの設定インポート</h2>
+  <p class="note">Claude Codeの設定・skills・plugins・最近のセッションなどをCodexへ取り込みます。既存の設定を上書きすることがあるため、実行前に必ず内容を確認してください。</p>
+  <div class="importList" id="importListCodex"></div>
+  <h3 class="sectionSubTitle">インポート履歴</h3>
+  <div class="importHistoryList" id="importHistoryListCodex"></div>
   </div>
 
   <div id="panelClaude" hidden>
@@ -516,6 +572,22 @@ function buildUsageView(snapshot: UsageSnapshot | undefined): UsageView | undefi
     credits: snapshot.creditsBalance ?? '',
     capturedAt: snapshot.capturedAt === undefined ? '' : formatAbsoluteTime(snapshot.capturedAt),
     severity: severityOf(snapshot.usedPercent),
+  };
+}
+
+/** インポート履歴の `completedAtMs`（epoch ms）を表示用の文字列にする（issue #36）。 */
+function buildImportHistoryView(snapshot: ImportHistorySnapshot): ImportHistoryDisplaySnapshot {
+  if (!snapshot.ok) {
+    return snapshot;
+  }
+  return {
+    ok: true,
+    entries: snapshot.entries.map((entry) => ({
+      importId: entry.importId,
+      completedAt: formatAbsoluteTime(new Date(entry.completedAtMs).toISOString()),
+      providerId: entry.providerId,
+      results: entry.results,
+    })),
   };
 }
 
