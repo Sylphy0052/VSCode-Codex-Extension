@@ -61,10 +61,15 @@ import {
   type Snapshot,
 } from './pseudoWorktree';
 import {
+  buildStalledWaitingReplyWarning,
   composeNextPrompt,
+  detectAllWaitingStalemate,
+  detectTimedOutWaitingReplies,
+  DEFAULT_REPLY_TIMEOUT_SEC,
   TaskMessagingHub,
   type HttpMcpTransportHandle,
   type RunTaskSnapshot,
+  type StoredMessage,
 } from './messaging';
 import {
   applyLoopStopReason,
@@ -75,9 +80,11 @@ import {
   markMergeSucceeded,
   markRunning,
   markWaitingApproval,
+  markWaitingReply,
   recordSessionInfo,
   recordSubmissionCount,
   resumeFromApproval,
+  resumeFromWaitingReply,
   retryMergeState,
   retryTask as retryTaskState,
   type RunState,
@@ -150,6 +157,13 @@ export interface WorkflowFilePort {
  */
 export const MAX_WORKFLOW_FILE_BYTES = 1 * 1024 * 1024;
 
+/**
+ * タスク間メッセージング（design.md §16.21）の待ちぼうけ検出（`checkWaitingReplyStalls`）を
+ * 定期的に走らせる間隔。既定の`replyTimeoutSec`（300秒）に対して十分細かく、かつ
+ * 負荷にならない値にしてある。
+ */
+export const WAITING_REPLY_POLL_INTERVAL_MS = 5_000;
+
 export const nodeWorkflowFilePort: WorkflowFilePort = {
   async fileSize(path: string): Promise<number | undefined> {
     try {
@@ -199,6 +213,13 @@ export interface WorkflowRunnerForgeDeps {
 export interface WorkflowRunnerMessagingDeps {
   /** runごとに1つ、MCPサーバを起動する（design.md §16.21「サーバはrunごとに立て」）。 */
   startTransport: (hub: TaskMessagingHub) => Promise<HttpMcpTransportHandle>;
+  /**
+   * `agent.workflows.replyTimeoutSec` の現在値（秒）。省略時は`DEFAULT_REPLY_TIMEOUT_SEC`
+   * （既定300秒）を使う。待ちぼうけ検出の経路2（`detectTimedOutWaitingReplies`）で使う。
+   * 呼び出し側は使い捨てのオブジェクトではなく毎回現在値を返す関数を渡すこと
+   * （`readBaseline`と同じ流儀。実行中に設定が変わっても次のtickから反映される）。
+   */
+  readReplyTimeoutSec?: () => number;
 }
 
 export interface WorkflowRunnerDeps {
@@ -232,22 +253,19 @@ export interface WorkflowRunnerDeps {
    * タスクの開始時に`TaskSessionInput.mcp`へ接続用URLを渡す。渡された宛先への
    * `send_message`は、宛先タスクの次の送信（`setPromptTransform`）の先頭へ添えられる。
    *
-   * **`waitingReply`への実際の遷移（design.md「自分のターンを終えたあと...次の指示を
-   * 受け取らない」）は配線していない。** ループの継続指示（`continuePrompt`）を止める
-   * には `LoopController`（`src/loop/loopController.ts`）の一時停止・再開の口が要るが、
-   * それを実際に呼び出す場所は`TaskSession`の具象実装（`ChatViewManager` /
-   * `ClaudeChatViewManager`。`src/view/chatView.ts` / `claudeChatView.ts`）の中にしか
-   * 無い。このIssueは`src/view/`を対象外にしている（Issue #104と衝突するため）ため、
-   * `markWaitingReply`/`resumeFromWaitingReply`（`runState.ts`）・待ちぼうけ検出
-   * （`messaging.ts`の`detectAllWaitingStalemate`/`detectTimedOutWaitingReplies`）は
-   * 純粋関数として用意したが、runner.tsからは呼んでいない。呼ばずに状態だけ`waitingReply`
-   * へ倒すと、実際には止まっていないループに「止まっている」という嘘の状態を付けることになり
-   * 実害の方が大きいと判断した（最終報告に安全側の判断として記載）。
+   * **`waitingReply`への実際の遷移も配線済み（Issue #123）。** `TaskMessagingHub`の
+   * `onAccepted`フックで`send_message`の受け付けを検知し、`expectReply: true`なら
+   * 送信元タスクを`markWaitingReply`で倒したうえで`session.pauseLoop()`を呼ぶ
+   * （`LoopController`が実際に`continuePrompt`を止める。`onMessageAccepted`参照）。
+   * 宛先タスクが`waitingReply`であれば`resumeFromWaitingReply`で戻し
+   * `session.resumeLoop()`を呼ぶ。待ちぼうけの2経路（`detectAllWaitingStalemate`/
+   * `detectTimedOutWaitingReplies`）は`checkWaitingReplyStalls`が定期的（`WAITING_REPLY_POLL_INTERVAL_MS`
+   * ごと）に確認する。
    *
-   * **MCP設定を実際にCLIの起動へ渡す配線（`TaskSessionInput.mcp`を読んで`thread/start`等へ
-   * 反映する部分）も同じ理由で`src/view/`側が必要になるため、このIssueの範囲外。**
-   * ツールの可視性確認（design.md「タスクの開始時にツールが見えているか確かめる」）も
-   * 同じくCodex/Claude固有の通知処理が要るため未配線（最終報告に記載）。
+   * MCP設定を実際にCLIの起動へ渡す配線（`TaskSessionInput.mcp`を読んで`thread/start`/
+   * `--mcp-config`へ反映する部分）と、ツールの可視性確認
+   * （`TaskSession.checkMessagingToolVisible`）は`src/view/chatView.ts` /
+   * `claudeChatView.ts`側で実装済み（Issue #123）。
    */
   messaging?: WorkflowRunnerMessagingDeps;
   /** テスト用の差し替え口。既定は `node:crypto` の `randomUUID`。 */
@@ -327,7 +345,19 @@ export interface WorkflowWarning {
      * （design.md §16.4「タスク間の引き継ぎ」、Issue #67）。`workflow.ts` の
      * `findPermissionEscalationWarnings` が読み込み時（`start()`）に検出する。
      */
-    | 'permissionEscalation';
+    | 'permissionEscalation'
+    /**
+     * タスク間メッセージング（design.md §16.21）専用のMCPツールが、タスクのセッションを
+     * 開いた後に確認しても見えなかった（`TaskSession.checkMessagingToolVisible`が
+     * `false`を返した）。design.md「見えていなければワークフローViewへ警告を出し、
+     * 通信なしでそのまま走らせる。runは止めない」に対応する。
+     */
+    | 'messagingUnavailable'
+    /**
+     * タスク間メッセージングの待ちぼうけが解けた（design.md §16.21「待ちぼうけを検出する
+     * 経路」）。`buildStalledWaitingReplyWarning`が組み立てた文言をそのまま使う。
+     */
+    | 'messagingStalled';
   /** ワークフロー全体に関わる警告（gitignoreなど）は undefined。 */
   taskId: string | undefined;
   message: string;
@@ -488,6 +518,12 @@ interface LiveTask {
   expandedPrompt: string | undefined;
   /** `continuePrompt`の展開結果。`expandedPrompt`と同時に計算する（セキュリティ監査指摘#6）。 */
   expandedContinuePrompt: string | undefined;
+  /**
+   * `waitingReply`（design.md §16.21）へ遷移した時刻（ms）。それ以外の状態では
+   * `undefined`。`checkWaitingReplyStalls`の経路2（`detectTimedOutWaitingReplies`）の
+   * 入力に使う。
+   */
+  waitingReplySinceMs: number | undefined;
 }
 
 interface LiveRun {
@@ -527,8 +563,18 @@ interface LiveRun {
   /**
    * タスク間メッセージング（design.md §16.21）。`WorkflowRunnerDeps.messaging`が渡され、
    * かつMCPサーバの起動に成功したときだけ実行開始時に一度作る。
+   *
+   * `waitingReplyPollTimer`は待ちぼうけ検出（`checkWaitingReplyStalls`）を定期的に
+   * 走らせるタイマー。`messaging`と同時に作り、run終了時に一緒に止める
+   * （`finishRun`参照）。`.unref()`しているためテスト・プロセス終了を妨げない。
    */
-  messaging: { hub: TaskMessagingHub; transport: HttpMcpTransportHandle } | undefined;
+  messaging:
+    | {
+        hub: TaskMessagingHub;
+        transport: HttpMcpTransportHandle;
+        waitingReplyPollTimer: ReturnType<typeof setInterval>;
+      }
+    | undefined;
   /**
    * 衝突解決セッション（design.md §16.17「コンフリクト」5.「解決用セッションは依存グラフの
    * ノードにはしない」）。`live.tasks`（グラフのノード＝通常のタスク）とは別に持つ。
@@ -1164,10 +1210,18 @@ export class WorkflowRunner {
     // タスク間メッセージング（design.md §16.21）。省略可能（`WorkflowRunnerDeps.messaging`
     // のJSDoc参照）。MCPサーバの起動に失敗しても実行は止めない
     if (this.deps.messaging !== undefined) {
-      const hub = new TaskMessagingHub({ listRunTasks: () => this.buildRunTaskSnapshots(runId) });
+      const hub = new TaskMessagingHub({
+        listRunTasks: () => this.buildRunTaskSnapshots(runId),
+        onAccepted: (message) => this.onMessageAccepted(runId, message),
+      });
       try {
         const transport = await this.deps.messaging.startTransport(hub);
-        live.messaging = { hub, transport };
+        const waitingReplyPollTimer = setInterval(
+          () => this.checkWaitingReplyStalls(runId),
+          WAITING_REPLY_POLL_INTERVAL_MS,
+        );
+        waitingReplyPollTimer.unref?.();
+        live.messaging = { hub, transport, waitingReplyPollTimer };
       } catch (e) {
         const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
         this.deps.log.warn(
@@ -1193,6 +1247,162 @@ export class WorkflowRunner {
       state: live.runState.tasks.get(t.id)?.state ?? 'pending',
       summary: live.tasks.get(t.id)?.lastResponseSummary ?? '',
     }));
+  }
+
+  /**
+   * `TaskMessagingHub`が`send_message`を受け付けた直後に呼ばれる（`WorkflowRunnerMessagingDeps`
+   * のJSDoc、design.md §16.21）。
+   *
+   * - `expectReply: true`なら送信元タスクを`waitingReply`へ倒し、実際にループを一時停止する
+   *   （`session.pauseLoop()`。状態だけを倒さない。#105が避けた「実際には止まっていないのに
+   *   止まっていると偽る」問題への対応）
+   * - 宛先タスクが`waitingReply`であれば、この配送で再開してよいので`running`へ戻し
+   *   （`resumeFromWaitingReply`）、ループを再開する（`session.resumeLoop()`。返信の本文自体は
+   *   `setPromptTransform`の`composeNextPrompt`が次の送信へ添える）
+   */
+  private onMessageAccepted(runId: string, message: StoredMessage): void {
+    const live = this.runs.get(runId);
+    if (live === undefined) {
+      return;
+    }
+    let changed = false;
+
+    if (message.expectReply) {
+      const senderTask = live.tasks.get(message.from);
+      const senderState = live.runState.tasks.get(message.from);
+      if (senderTask !== undefined && senderState?.state === 'running') {
+        live.runState = markWaitingReply(live.runState, message.from);
+        senderTask.waitingReplySinceMs = (this.deps.now?.() ?? new Date()).getTime();
+        senderTask.session.pauseLoop();
+        changed = true;
+      }
+    }
+
+    const recipientTask = live.tasks.get(message.to);
+    const recipientState = live.runState.tasks.get(message.to);
+    if (recipientTask !== undefined && recipientState?.state === 'waitingReply') {
+      live.runState = resumeFromWaitingReply(live.runState, message.to);
+      recipientTask.waitingReplySinceMs = undefined;
+      recipientTask.session.resumeLoop();
+      changed = true;
+    }
+
+    if (changed) {
+      this.notify(runId);
+      void this.persist(runId);
+    }
+  }
+
+  /**
+   * 待ちぼうけの2経路（design.md §16.21「待ちぼうけを検出する経路」）を確認し、解けていれば
+   * `running`へ戻す。`WorkflowRunnerMessagingDeps.startTransport`と同時に登録したタイマー
+   * （`WAITING_REPLY_POLL_INTERVAL_MS`ごと）から呼ばれる。
+   */
+  private checkWaitingReplyStalls(runId: string): void {
+    const live = this.runs.get(runId);
+    if (live === undefined || live.messaging === undefined || live.finished) {
+      return;
+    }
+
+    const activeStates = new Map<string, TaskState>();
+    const waitingSinceMsByTaskId = new Map<string, number>();
+    for (const [taskId, s] of live.runState.tasks) {
+      if (
+        s.state === 'running' ||
+        s.state === 'waitingApproval' ||
+        s.state === 'waitingReply' ||
+        s.state === 'merging'
+      ) {
+        activeStates.set(taskId, s.state);
+      }
+      if (s.state === 'waitingReply') {
+        const sinceMs = live.tasks.get(taskId)?.waitingReplySinceMs;
+        if (sinceMs !== undefined) {
+          waitingSinceMsByTaskId.set(taskId, sinceMs);
+        }
+      }
+    }
+
+    const nowMs = (this.deps.now?.() ?? new Date()).getTime();
+    const replyTimeoutSec =
+      this.deps.messaging?.readReplyTimeoutSec?.() ?? DEFAULT_REPLY_TIMEOUT_SEC;
+
+    const stalemateIds = detectAllWaitingStalemate(
+      activeStates,
+      live.messaging.hub.totalUndeliveredCount(),
+    );
+    const timedOutIds = detectTimedOutWaitingReplies(
+      waitingSinceMsByTaskId,
+      nowMs,
+      replyTimeoutSec,
+    );
+
+    this.releaseStalledWaitingReplies(runId, live, stalemateIds, 'allWaiting');
+    this.releaseStalledWaitingReplies(runId, live, timedOutIds, 'timeout');
+  }
+
+  /** `checkWaitingReplyStalls`が検出したtaskIdを実際に`running`へ戻し、警告を積む。 */
+  private releaseStalledWaitingReplies(
+    runId: string,
+    live: LiveRun,
+    taskIds: readonly string[],
+    reason: 'allWaiting' | 'timeout',
+  ): void {
+    const released: string[] = [];
+    for (const taskId of taskIds) {
+      const task = live.tasks.get(taskId);
+      const state = live.runState.tasks.get(taskId);
+      if (task === undefined || state?.state !== 'waitingReply') {
+        continue;
+      }
+      live.runState = resumeFromWaitingReply(live.runState, taskId);
+      task.waitingReplySinceMs = undefined;
+      task.session.resumeLoop();
+      released.push(taskId);
+    }
+    if (released.length === 0) {
+      return;
+    }
+    live.warnings.push({
+      kind: 'messagingStalled',
+      taskId: undefined,
+      message: buildStalledWaitingReplyWarning(released, reason),
+    });
+    this.notify(runId);
+    void this.persist(runId);
+  }
+
+  /**
+   * MCPツールの可視性確認（design.md §16.21「ツールの可視性の確認」）。見えなければ
+   * ワークフローViewへ警告を出し、通信なしでそのまま走らせる（runは止めない）。
+   * `startTask`が`await`せず投げっぱなしで呼ぶ（タスクの開始自体をこの確認で遅らせない）。
+   */
+  private async checkMessagingVisibility(
+    runId: string,
+    taskId: string,
+    session: TaskSession,
+  ): Promise<void> {
+    let visible: boolean;
+    try {
+      visible = await session.checkMessagingToolVisible();
+    } catch {
+      // 確認自体が失敗した場合も「見えない」側へ倒す（安全側の判断。最終報告に記載）
+      visible = false;
+    }
+    if (visible) {
+      return;
+    }
+    const live = this.runs.get(runId);
+    if (live === undefined) {
+      return;
+    }
+    live.warnings.push({
+      kind: 'messagingUnavailable',
+      taskId,
+      message: `タスク間メッセージングのツールがこのタスクから見えませんでした（通信なしで実行します）: ${taskId}`,
+    });
+    this.notify(runId);
+    void this.persist(runId);
   }
 
   /**
@@ -1424,6 +1634,7 @@ export class WorkflowRunner {
       // 以降新しいタスクは開始されない（`live.finished`）ため、これ以上の接続は要らない
       if (live.messaging !== undefined) {
         void live.messaging.transport.close();
+        clearInterval(live.messaging.waitingReplyPollTimer);
       }
     }
   }
@@ -1514,6 +1725,7 @@ export class WorkflowRunner {
         pendingApproval: undefined,
         expandedPrompt: undefined,
         expandedContinuePrompt: undefined,
+        waitingReplySinceMs: undefined,
       };
       live.tasks.set(taskId, liveTask);
       live.runState = recordSessionInfo(live.runState, taskId, session.sessionId, cwd);
@@ -1578,6 +1790,15 @@ export class WorkflowRunner {
         maxIterations: task.maxIterations,
         condition,
       });
+
+      // ツールの可視性の確認（design.md §16.21「タスクの開始時にツールが見えているか
+      // 確かめる」）。見えなくても警告のうえ通信なしで走らせる（runは止めない）ため、
+      // ここでは`await`せず投げっぱなしにする（`session.open`/`runLoop`をこの確認の
+      // 分だけ遅らせない）
+      if (input.mcp !== undefined) {
+        void this.checkMessagingVisibility(runId, taskId, session);
+      }
+
       this.notify(runId);
     } catch (e) {
       // openTaskSessionの失敗はCLIプロセス起動時のエラーをそのまま含みうる。

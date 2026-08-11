@@ -270,4 +270,82 @@ describe('LoopController', () => {
     expect(sent).toHaveLength(1);
     expect(controller.getStatus().stopReason).toBe('manual');
   });
+
+  describe('pause/resume（design.md §16.21 waitingReplyへの遷移）', () => {
+    it('一時停止中はターンが終わっても継続指示を送らない。runningのまま止まる', () => {
+      const { sent, send } = spy();
+      const controller = new LoopController(send);
+      controller.start(plan());
+      controller.pause();
+      runTurn(controller);
+      expect(sent).toEqual(['第1話を執筆']);
+      // 「実際は止まっていないのに止まっていると偽る」を避ける: runningはtrueのまま
+      // （stop()を呼んでいない。#105が避けた問題への対応）
+      expect(controller.running).toBe(true);
+      expect(controller.getStatus().stopReason).toBeUndefined();
+    });
+
+    it('resume()を呼ぶと直ちに次の継続指示を送る', () => {
+      const { sent, send } = spy();
+      const controller = new LoopController(send);
+      controller.start(plan());
+      controller.pause();
+      runTurn(controller);
+      controller.resume();
+      expect(sent).toEqual(['第1話を執筆', '次へ']);
+    });
+
+    it('resume後は通常どおり回数上限・終了条件の判定に戻る', () => {
+      const { sent, send } = spy();
+      const controller = new LoopController(send);
+      controller.start(plan({ maxIterations: 2 }));
+      controller.pause();
+      runTurn(controller);
+      controller.resume();
+      expect(sent).toHaveLength(2);
+      runTurn(controller);
+      expect(sent).toHaveLength(2); // 2回目の継続指示（=resumeで送った1回）で上限に到達済み
+      expect(controller.getStatus().stopReason).toBe('maxReached');
+    });
+
+    it('一時停止中でもターンが失敗していれば止める（安全側）', () => {
+      const { sent, send } = spy();
+      const controller = new LoopController(send);
+      controller.start(plan());
+      controller.pause();
+      runTurn(controller, state({ turnFailed: true }));
+      expect(sent).toHaveLength(1);
+      expect(controller.running).toBe(false);
+      expect(controller.getStatus().stopReason).toBe('failed');
+    });
+
+    it('走っていなければpause()は何もしない', () => {
+      const { sent, send } = spy();
+      const controller = new LoopController(send);
+      controller.pause();
+      controller.start(plan());
+      expect(sent).toEqual(['第1話を執筆']);
+      runTurn(controller);
+      expect(sent).toEqual(['第1話を執筆', '次へ']);
+    });
+
+    it('一時停止中でなければresume()は何もしない', () => {
+      const { sent, send } = spy();
+      const controller = new LoopController(send);
+      controller.start(plan());
+      controller.resume();
+      expect(sent).toEqual(['第1話を執筆']);
+    });
+
+    it('stop()すると一時停止フラグも解ける', () => {
+      const { sent, send } = spy();
+      const controller = new LoopController(send);
+      controller.start(plan());
+      controller.pause();
+      controller.stop('manual');
+      // 停止後にresume()を呼んでも何も起きない（走っていないため）
+      controller.resume();
+      expect(sent).toEqual(['第1話を執筆']);
+    });
+  });
 });

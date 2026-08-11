@@ -260,11 +260,14 @@ export function activate(context: vscode.ExtensionContext): void {
       fs: nodePseudoWorktreeFileSystem,
       exclude: readWorkflowsConfig().pseudoWorktreeExclude,
     },
-    // タスク間メッセージング（design.md §16.21、Issue #105）。runごとにMCPサーバ
-    // （HTTP。`messaging.ts`の`startHttpMcpTransport`のJSDoc参照）を立てる。実際に
-    // CLIの起動設定へ反映する配線（`src/view/`側）はこのIssueの範囲外
+    // タスク間メッセージング（design.md §16.21、Issue #105・#123）。runごとにMCPサーバ
+    // （HTTP。`messaging.ts`の`startHttpMcpTransport`のJSDoc参照）を立て、CLIの起動設定へ
+    // 反映する配線・waitingReplyへの遷移は`src/view/`側と`runner.ts`で完結している
     // （`WorkflowRunnerMessagingDeps`のJSDoc参照）
-    messaging: { startTransport: startHttpMcpTransport },
+    messaging: {
+      startTransport: startHttpMcpTransport,
+      readReplyTimeoutSec: () => readWorkflowsConfig().replyTimeoutSec,
+    },
   });
   // isTaskManagedThreadのクロージャが参照する箱を埋める。以降の`workflowRunner`
   // （コマンド登録などで使う）はこの束縛を指し、常にWorkflowRunnerとして扱える
