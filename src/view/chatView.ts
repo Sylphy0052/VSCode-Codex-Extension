@@ -14,6 +14,7 @@ import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
 import { APPROVAL_MODES } from '../codex/types';
+import type { PromptSubmission } from '../appserver/prompts';
 import { AttachmentBox } from '../provider/attachments';
 import { CommandCatalog } from '../provider/commandCatalog';
 import {
@@ -394,6 +395,14 @@ export class ChatViewManager implements vscode.Disposable {
         }
         return;
       }
+      if (type === 'prompt') {
+        const requestId = m['requestId'];
+        const submission = readSubmission(m['submission']);
+        if ((typeof requestId === 'number' || typeof requestId === 'string') && submission) {
+          entry.session.answerPrompt(requestId, submission);
+        }
+        return;
+      }
       if (type === 'fork' && typeof m['turnId'] === 'string') {
         await this.forkFrom(entry, m['turnId']);
         return;
@@ -676,6 +685,32 @@ function mergeCommands(fromFiles: SlashCommand[], fromApi: SlashCommand[]): Slas
   return [...byName.values()];
 }
 
+/**
+ * 画面から返ってきた回答を読む。
+ *
+ * Webviewからの値は信用せず、型が合わないものは落とす。中身を作らずに落とすことで、
+ * 壊れた回答をapp-serverへ流さない。
+ */
+function readSubmission(raw: unknown): PromptSubmission | undefined {
+  const submission =
+    typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
+  const action = submission['action'];
+  if (action !== 'submit' && action !== 'decline' && action !== 'cancel') {
+    return undefined;
+  }
+  const rawValues =
+    typeof submission['values'] === 'object' && submission['values'] !== null
+      ? (submission['values'] as Record<string, unknown>)
+      : {};
+  const values: Record<string, string[]> = {};
+  for (const [id, value] of Object.entries(rawValues)) {
+    if (Array.isArray(value)) {
+      values[id] = value.filter((v): v is string => typeof v === 'string');
+    }
+  }
+  return { action, values };
+}
+
 /** webview側が `setState` で保持している値。 */
 function readPersistedThreadId(state: unknown): string | undefined {
   if (typeof state !== 'object' || state === null) {
@@ -729,6 +764,7 @@ ${chatStyles()}
 <body>
   <div id="log"></div>
   <div id="approvals"></div>
+  <div id="prompts"></div>
   <div id="queue" hidden>
     <div class="head">
       <span id="queueLabel"></span>

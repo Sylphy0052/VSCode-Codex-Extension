@@ -18,6 +18,8 @@ export const initialClaudeState: ChatState = {
   queued: [],
   items: [],
   approvals: [],
+  // Claude Codeにはツールからの問い合わせにあたる制御要求が無い（Codexのみ）
+  prompts: [],
   usage: undefined,
   context: undefined,
   planMode: false,
