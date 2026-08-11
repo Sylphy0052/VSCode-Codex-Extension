@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   describeTool,
+  normalizeTodos,
   parseTranscriptHead,
   sessionIdFromTranscriptName,
   transcriptItems,
@@ -149,7 +150,7 @@ describe('parseTranscriptHead', () => {
 
 describe('transcriptItems', () => {
   it('会話を表示用の項目列にする', () => {
-    const items = transcriptItems([
+    const { items } = transcriptItems([
       userLine('直して'),
       JSON.stringify({
         type: 'assistant',
@@ -181,12 +182,108 @@ describe('transcriptItems', () => {
   });
 
   it('sidechainと壊れた行を除く', () => {
-    const items = transcriptItems([
+    const { items } = transcriptItems([
       '{壊れ',
       userLine('本命'),
       userLine('副', { isSidechain: true }),
     ]);
     expect(items).toHaveLength(1);
     expect(items[0]?.text).toBe('本命');
+  });
+
+  it('TodoWriteは会話の項目には積まない', () => {
+    const { items } = transcriptItems([
+      JSON.stringify({
+        type: 'assistant',
+        uuid: 'a1',
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool_use',
+              id: 't1',
+              name: 'TodoWrite',
+              input: { todos: [{ content: '直す', status: 'pending', activeForm: '直している' }] },
+            },
+          ],
+        },
+      }),
+    ]);
+    expect(items).toEqual([]);
+  });
+
+  it('最後に呼ばれたTodoWriteの内容をtodosとして返す', () => {
+    const call = (todos: Record<string, unknown>[]) =>
+      JSON.stringify({
+        type: 'assistant',
+        uuid: `a-${todos.length}`,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 't1', name: 'TodoWrite', input: { todos } }],
+        },
+      });
+
+    const { todos } = transcriptItems([
+      call([{ content: 'A', status: 'pending', activeForm: 'A中' }]),
+      call([
+        { content: 'A', status: 'completed', activeForm: 'A中' },
+        { content: 'B', status: 'in_progress', activeForm: 'B中' },
+      ]),
+    ]);
+
+    expect(todos).toEqual([
+      { content: 'A', status: 'completed', activeForm: 'A中' },
+      { content: 'B', status: 'in_progress', activeForm: 'B中' },
+    ]);
+  });
+
+  it('TodoWriteを使っていないセッションではtodosが空になる', () => {
+    const { todos } = transcriptItems([userLine('本文')]);
+    expect(todos).toEqual([]);
+  });
+});
+
+describe('normalizeTodos', () => {
+  it('実測した形（todos配列）をそのまま読む', () => {
+    const todos = normalizeTodos({
+      todos: [
+        { content: 'Aを準備する', status: 'pending', activeForm: 'Aを準備中' },
+        { content: 'Bを実行する', status: 'in_progress', activeForm: 'Bを実行中' },
+        { content: 'Cを確認する', status: 'completed', activeForm: 'Cを確認中' },
+      ],
+    });
+    expect(todos).toEqual([
+      { content: 'Aを準備する', status: 'pending', activeForm: 'Aを準備中' },
+      { content: 'Bを実行する', status: 'in_progress', activeForm: 'Bを実行中' },
+      { content: 'Cを確認する', status: 'completed', activeForm: 'Cを確認中' },
+    ]);
+  });
+
+  it('未知の状態語彙もそのまま持つ', () => {
+    const todos = normalizeTodos({ todos: [{ content: 'X', status: 'blocked' }] });
+    expect(todos[0]?.status).toBe('blocked');
+  });
+
+  it('activeFormが無ければcontentで補う', () => {
+    const todos = normalizeTodos({ todos: [{ content: 'X', status: 'pending' }] });
+    expect(todos[0]?.activeForm).toBe('X');
+  });
+
+  it('statusが無ければpending扱いにする', () => {
+    const todos = normalizeTodos({ todos: [{ content: 'X' }] });
+    expect(todos[0]?.status).toBe('pending');
+  });
+
+  it('contentが空の項目は読み飛ばす', () => {
+    const todos = normalizeTodos({ todos: [{ content: '' }, { content: '  ' }] });
+    expect(todos).toEqual([]);
+  });
+
+  it('todosが配列でない・入力が壊れている場合は空にする', () => {
+    expect(normalizeTodos({})).toEqual([]);
+    expect(normalizeTodos({ todos: 'not-an-array' })).toEqual([]);
+    expect(normalizeTodos(undefined)).toEqual([]);
+    expect(normalizeTodos(null)).toEqual([]);
+    expect(normalizeTodos('string')).toEqual([]);
   });
 });

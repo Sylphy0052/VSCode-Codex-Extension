@@ -181,23 +181,32 @@ export class ClaudeChatViewManager implements vscode.Disposable {
 
     const entry = this.createPanel(`${LABEL}: ${title}`, folder);
     this.panels.set(sessionId, entry);
+    const transcript = await this.readTranscript(sessionId);
     entry.session.start({
       cwd: folder,
       target: { kind: 'resume', sessionId },
       sessionId: undefined,
       config: readClaudeConfig().claude,
-      initialItems: await this.readTranscript(sessionId),
+      initialItems: transcript.items,
+      initialTodos: transcript.todos,
     });
   }
 
-  /** `--resume` は過去のやり取りを流さないため、transcriptを読んで初期表示にする。 */
-  private async readTranscript(sessionId: string): Promise<ChatState['items']> {
+  /**
+   * `--resume` は過去のやり取りを流さないため、transcriptを読んで初期表示にする。
+   * TODO一覧も同じtranscriptから最後の内容を拾い、専用表示の初期値に使う。
+   */
+  private async readTranscript(
+    sessionId: string,
+  ): Promise<{ items: ChatState['items']; todos: ChatState['todos'] }> {
     const filePath = await this.store.resolveTranscriptPath(sessionId);
     if (filePath === undefined) {
-      return [];
+      return { items: [], todos: [] };
     }
     const content = await this.fs.readTextFile(filePath);
-    return content === undefined ? [] : transcriptItems(content.split('\n'));
+    return content === undefined
+      ? { items: [], todos: [] }
+      : transcriptItems(content.split('\n'));
   }
 
   /**
@@ -222,12 +231,14 @@ export class ClaudeChatViewManager implements vscode.Disposable {
 
     const entry = this.adopt(panel, cwd);
     this.panels.set(sessionId, entry);
+    const transcript = await this.readTranscript(sessionId);
     entry.session.start({
       cwd,
       target: { kind: 'resume', sessionId },
       sessionId: undefined,
       config: readClaudeConfig().claude,
-      initialItems: await this.readTranscript(sessionId),
+      initialItems: transcript.items,
+      initialTodos: transcript.todos,
     });
   }
 

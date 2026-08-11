@@ -275,6 +275,29 @@ export function chatStyles(): string {
     color: var(--vscode-inputValidation-warningForeground, var(--vscode-editorWarning-foreground));
     font-weight: 600;
   }
+  /*
+   * TODO一覧（Claude CodeのTodoWrite）。入力欄の上、ループ・コンテキスト表示と同じ並びに置く。
+   * 会話には積まず、ここだけが書き変わる。
+   */
+  #todos {
+    margin: 0 16px 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--vscode-widget-border, transparent);
+    border-radius: 4px;
+    background-color: var(--vscode-editorWidget-background);
+    font-size: 0.9em;
+  }
+  #todos .head { color: var(--vscode-descriptionForeground); margin-bottom: 4px; }
+  #todos ul { margin: 0; padding: 0; list-style: none; }
+  #todos li { display: flex; align-items: baseline; gap: 6px; margin: 2px 0; }
+  #todos li .mark {
+    flex: none;
+    font-family: var(--vscode-editor-font-family, monospace);
+    color: var(--vscode-descriptionForeground);
+  }
+  /* 完了は取り消し線、進行中は太字にして一覧の中でも状態が見分けられるようにする */
+  #todos li.completed { color: var(--vscode-descriptionForeground); text-decoration: line-through; }
+  #todos li.in_progress { font-weight: 600; }
   .item .head .actions { display: flex; gap: 6px; flex: none; }
   .item .head .actions button { padding: 1px 8px; font-size: 0.85em; }
   /* 本文は選択してコピーできるようにする */

@@ -967,6 +967,45 @@ Claude Codeは消費率（`usedPercent`）を返さない。実測した中身�
 - 表示できないURL（`http` など）は読み込ませず、「表示できない画像 (URL)」と出す。CSPが `img-src data:` しか許さないため、そのまま渡すと黙って欠ける
 - 既定はサムネイル（高さ160pxまで）。クリックで原寸に広げる。拡大した状態は要素と一緒に保つ
 
+### 14.13 TODO一覧（Claude CodeのTodoWrite）
+
+Claude CodeのTUIの `/todos` に相当する表示。issue #31・TP-59対応（対象はClaude側のみ）。
+
+#### 実測した入力の形
+
+`claude --print --output-format stream-json --verbose --permission-mode acceptEdits` を起動し、TodoWriteを使わせて `tool_use.input` をそのまま読んだ。
+
+```json
+{
+  "todos": [
+    { "content": "Aを準備する", "status": "pending", "activeForm": "Aを準備中" },
+    { "content": "Bを実行する", "status": "in_progress", "activeForm": "Bを実行中" },
+    { "content": "Cを確認する", "status": "completed", "activeForm": "Cを確認中" }
+  ]
+}
+```
+
+- 状態の語彙は `pending` / `in_progress` / `completed` の3つ（実測）
+- **同じセッションで複数回呼んだときも、毎回一覧をまるごと送ってくる**（差分ではない）。4回連続で呼ばせた実測で、2回目以降も3件全部が毎回届き、変わった項目だけ `status` が更新されていた。表示側は「置き換え」でよく、前回の内容とマージする必要は無い
+- `activeForm` は進行形の言い回し（「Aを準備中」）。TUIの進捗表示に合わせ、`in_progress` のときだけこちらを見せる
+
+#### 実装
+
+- `src/claude/transcript.ts` の `normalizeTodos` が `tool_use.input` を `TodoItem[]`（`content` / `status` / `activeForm`）へ正規化する純粋関数。壊れた要素（`content` が空など）は個別に読み飛ばす。未知の `status` もそのまま持つ（CLIの語彙が増えても表示が消えないように、`describePlan` の `PLAN_MARK` と同じ考え方）
+- TodoWriteの呼び出しは**会話の項目には積まない**。ライブ（`src/claude/streamJson.ts` の `applyAssistant`）でも過去ログの読み直し（`transcript.ts` の `transcriptItems`）でも、`tool_use.name === 'TodoWrite'` のときは項目を作らず `ChatState.todos` だけを置き換える。呼ぶたびに「ツール ・ TodoWrite」の行が積み上がっていた元の挙動（issueの背景）をやめるため
+- `ChatState.todos: TodoItem[]` はCodex・Claude Code共有の型に生やしたが、埋めるのはClaude Code側だけ（後述）
+- ターンをまたいでも保持する（`turn/started` 相当の `system/init` では `turnResultText` / `turnEditedFiles` はリセットするが、`todos` はリセットしない）。TODOは1ターンの成果ではなく会話全体の進行管理のため
+- `--resume` で開き直したセッションは、transcriptの中から**最後に呼ばれたTodoWrite**の内容を拾って初期値にする（`ClaudeStreamOptions.initialTodos`）。ただし他のセッション由来の一時状態（`busy` / `usage` / `context` など）と同じく、Webview側の `retainContextWhenHidden` を跨いだ再読込では復元しない（会話本文以外は元々復元していない既存の設計を踏襲）
+- 表示は`renderShell`が組み立てる共通HTMLに `#todos` を追加し、入力欄の上・ステータス行とループパネルの間に置いた。`chatScript.ts` の `renderTodos` が空なら要素ごと隠す（TODOを使わないセッションでは何も出ない）。進み具合は `[ ]` / `[~]` / `[x]` で、Codexの計画表示と記号を揃えた
+
+#### Codex側は対象外（既存の表示で足りる）
+
+issue #31 の起票時点のスコープは「Claude側のみ」（`docs/tui-parity-backlog.md` のTP-59もプロバイダ列は `Claude`）。調査コメントでは「Codex側も対象になりうる」と触れているが、これは別issue（TP-22、Plan mode）の文脈で、TP-59自体のスコープを変えるものではないと判断した。
+
+実際、Codexには `turn/plan/updated`（`{ plan: [{ step, status }], explanation }`）を受けて `describePlan` が作る `plan` 種別の項目が既にある（§14.10「計画そのものの表示」）。これは1ターンの間は同じidで上書きされ（`plan:<turnId>`）、状態（`[ ]` / `[~]` / `[x]`）も見える。会話内の項目という点でこの節の専用パネルとは置き場所が違うが、**「一覧として見える」「状態が分かる」という受入基準は既に満たしている**ため、今回はCodex側のコードを変更しなかった。
+
+置き場所を完全に揃える（Codexの計画も入力欄の上の専用パネルへ出す）のは、`plan` 項目の会話内表示という既存の設計を変えることになり、この issueのスコープを超える。今回は `ChatState.todos` と `#todos` パネルをプロバイダ共通の器として用意するところまでに留め、Codexの計画表示を同じ器へ移すかどうかは別issueで判断する。
+
 ## 15. 作業記録（日報・週報連携）
 
 この拡張機能から実行したセッションを、日報/週報システムが読める形で残す。

@@ -1,4 +1,4 @@
-import type { ChatItem, FileDiff } from '../appserver/chatState';
+import { NO_TODOS, type ChatItem, type FileDiff, type TodoItem } from '../appserver/chatState';
 import { isSessionId } from '../codex/argvBuilder';
 import type { TranscriptMeta } from './types';
 
@@ -65,14 +65,25 @@ export function parseTranscriptHead(lines: readonly string[]): TranscriptMeta | 
   return { sessionId, cwd, firstUserText, startedAt, gitBranch };
 }
 
+/** transcript / tool_use から読み取った結果。 */
+export interface TranscriptItems {
+  items: ChatItem[];
+  /** 最後に呼ばれた TodoWrite の内容。使っていなければ空。 */
+  todos: TodoItem[];
+}
+
 /**
  * 会話全体を表示用の項目列にする。
  * Codexのチャット画面と同じ `ChatItem` へ寄せ、描画側を1本に保つ。
+ *
+ * TodoWriteは一覧をまるごと送ってくる（実測）。会話に項目としては積まず、
+ * 最後に呼ばれた内容だけを `todos` として別に返す（専用表示の初期値に使う）。
  */
-export function transcriptItems(lines: readonly string[]): ChatItem[] {
+export function transcriptItems(lines: readonly string[]): TranscriptItems {
   const items: ChatItem[] = [];
   /** tool_use id → items上の位置。tool_result で結果を書き戻すため。 */
   const toolIndex = new Map<string, number>();
+  let todos: TodoItem[] = NO_TODOS;
 
   for (const line of lines) {
     const entry = parseLine(line);
@@ -86,11 +97,14 @@ export function transcriptItems(lines: readonly string[]): ChatItem[] {
       continue;
     }
     if (type === 'assistant') {
-      appendAssistantEntry(entry, items, toolIndex);
+      const found = appendAssistantEntry(entry, items, toolIndex);
+      if (found !== undefined) {
+        todos = found;
+      }
     }
   }
 
-  return items;
+  return { items, todos };
 }
 
 function appendUserEntry(
@@ -126,11 +140,20 @@ function appendUserEntry(
   items.push(item(entry, 'userMessage', { text }));
 }
 
+/** ツール名。会話には積まず、専用の一覧として別に持つ。 */
+export const TODO_WRITE_TOOL = 'TodoWrite';
+
+/**
+ * @returns TodoWriteが見つかった場合はその内容。無ければ undefined
+ *   （呼び出し側は undefined のとき todos を上書きしない）。
+ */
 function appendAssistantEntry(
   entry: Record<string, unknown>,
   items: ChatItem[],
   toolIndex: Map<string, number>,
-): void {
+): TodoItem[] | undefined {
+  let todos: TodoItem[] | undefined;
+
   for (const part of messageContent(entry)) {
     const type = str(part['type']);
     if (type === 'text') {
@@ -148,13 +171,50 @@ function appendAssistantEntry(
       continue;
     }
     if (type === 'tool_use') {
-      const tool = describeTool(str(part['name']), rec(part['input']) ?? {});
+      const name = str(part['name']);
+      if (name === TODO_WRITE_TOOL) {
+        todos = normalizeTodos(part['input']);
+        continue;
+      }
+      const tool = describeTool(name, rec(part['input']) ?? {});
       items.push(
         item(entry, tool.kind, { detail: tool.detail, id: str(part['id']), diffs: tool.diffs }),
       );
       toolIndex.set(str(part['id']), items.length - 1);
     }
   }
+
+  return todos;
+}
+
+/**
+ * TodoWriteの `input` を専用一覧の形にする。実測した中身:
+ * `{ todos: [{ content, status, activeForm }] }`。
+ * `status` は `pending` / `in_progress` / `completed`（実測）。未知の値もそのまま持ち、
+ * 表示側で言葉に直す（CLIの語彙が増えても行が消えないように）。
+ *
+ * 壊れた入力（配列でない・contentが空）は個別に読み飛ばす。全体を捨てない。
+ */
+export function normalizeTodos(input: unknown): TodoItem[] {
+  const todos = rec(input)?.['todos'];
+  if (!Array.isArray(todos)) {
+    return NO_TODOS;
+  }
+
+  const result: TodoItem[] = [];
+  for (const raw of todos) {
+    const entry = rec(raw);
+    const content = str(entry?.['content']).trim();
+    if (content === '') {
+      continue;
+    }
+    result.push({
+      content,
+      status: str(entry?.['status']) || 'pending',
+      activeForm: str(entry?.['activeForm']) || content,
+    });
+  }
+  return result;
 }
 
 /**

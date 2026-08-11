@@ -1,6 +1,12 @@
-import { appendNotice, capOutput, type ChatItem, type ChatState } from '../appserver/chatState';
+import {
+  appendNotice,
+  capOutput,
+  NO_TODOS,
+  type ChatItem,
+  type ChatState,
+} from '../appserver/chatState';
 import { readClaudeResultImages } from '../provider/imageRefs';
-import { describeTool } from './transcript';
+import { describeTool, normalizeTodos, TODO_WRITE_TOOL } from './transcript';
 
 /**
  * `claude --output-format stream-json` のイベントを、Codex画面と共通の
@@ -26,6 +32,7 @@ export const initialClaudeState: ChatState = {
   planMode: false,
   turnResultText: '',
   turnEditedFiles: [],
+  todos: NO_TODOS,
 };
 
 export function applyStreamEvent(state: ChatState, event: Record<string, unknown>): ChatState {
@@ -76,6 +83,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
   const content = list(message?.['content']);
   let items = state.items;
   let editedFiles = state.turnEditedFiles;
+  let todos = state.todos;
 
   for (const [position, part] of content.entries()) {
     const type = str(part['type']);
@@ -104,8 +112,14 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
       continue;
     }
     if (type === 'tool_use') {
+      const name = str(part['name']);
+      // TODO一覧は会話に項目として積まず、専用の一覧（state.todos）だけを書き換える
+      if (name === TODO_WRITE_TOOL) {
+        todos = normalizeTodos(part['input']);
+        continue;
+      }
       const input = rec(part['input']) ?? {};
-      const tool = describeTool(str(part['name']), input);
+      const tool = describeTool(name, input);
       items = upsert(items, {
         id: str(part['id']),
         kind: tool.kind,
@@ -125,10 +139,10 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
     }
   }
 
-  if (items === state.items && editedFiles === state.turnEditedFiles) {
+  if (items === state.items && editedFiles === state.turnEditedFiles && todos === state.todos) {
     return state;
   }
-  return { ...state, items, turnEditedFiles: editedFiles, busy: true };
+  return { ...state, items, turnEditedFiles: editedFiles, todos, busy: true };
 }
 
 /**
