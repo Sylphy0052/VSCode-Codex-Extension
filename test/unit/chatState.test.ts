@@ -1076,3 +1076,128 @@ describe('applyEvent / item/started でbackgroundTerminalsを更新する（issu
     expect(completed.backgroundTerminals).toEqual([]);
   });
 });
+
+describe('normalizeItem / subAgentActivity（issue #34）', () => {
+  it('agentPathをdetailへ、kindをstatusへ、agentThreadIdをtextへ読む', () => {
+    const item = normalizeItem({
+      id: 'sa_1',
+      type: 'subAgentActivity',
+      agentPath: 'agents/reviewer.md',
+      agentThreadId: 'thread_child_1',
+      kind: 'started',
+    });
+    expect(item?.detail).toBe('agents/reviewer.md');
+    expect(item?.status).toBe('started');
+    expect(item?.text).toBe('エージェントスレッド: thread_child_1');
+  });
+
+  it('kindがinteracted・interruptedでもそのまま読む', () => {
+    expect(
+      normalizeItem({
+        id: 'sa_2',
+        type: 'subAgentActivity',
+        agentPath: 'agents/x.md',
+        agentThreadId: 't2',
+        kind: 'interacted',
+      })?.status,
+    ).toBe('interacted');
+    expect(
+      normalizeItem({
+        id: 'sa_3',
+        type: 'subAgentActivity',
+        agentPath: 'agents/x.md',
+        agentThreadId: 't3',
+        kind: 'interrupted',
+      })?.status,
+    ).toBe('interrupted');
+  });
+
+  it('agentPath・agentThreadIdが無ければ空のまま', () => {
+    const item = normalizeItem({ id: 'sa_4', type: 'subAgentActivity', kind: 'started' });
+    expect(item?.detail).toBe('');
+    expect(item?.text).toBe('');
+  });
+});
+
+describe('normalizeItem / collabAgentToolCall（issue #34）', () => {
+  it('toolを日本語のdetailにし、statusはそのまま読む', () => {
+    const item = normalizeItem({
+      id: 'ca_1',
+      type: 'collabAgentToolCall',
+      tool: 'spawnAgent',
+      status: 'inProgress',
+      senderThreadId: 'thread_parent',
+      receiverThreadIds: ['thread_child_1'],
+      agentsStates: {},
+    });
+    expect(item?.detail).toBe('エージェントを起動');
+    expect(item?.status).toBe('inProgress');
+  });
+
+  it('未知のtoolは値をそのまま出す', () => {
+    const item = normalizeItem({
+      id: 'ca_2',
+      type: 'collabAgentToolCall',
+      tool: 'somethingNew',
+      status: 'completed',
+      senderThreadId: 's',
+      receiverThreadIds: [],
+      agentsStates: {},
+    });
+    expect(item?.detail).toBe('somethingNew');
+  });
+
+  it('prompt・model・reasoningEffort・受信先・agentsStatesをtextへ組み立てる', () => {
+    const item = normalizeItem({
+      id: 'ca_3',
+      type: 'collabAgentToolCall',
+      tool: 'spawnAgent',
+      status: 'inProgress',
+      senderThreadId: 'thread_parent',
+      receiverThreadIds: ['thread_child_1', 'thread_child_2'],
+      prompt: 'レビューして',
+      model: 'gpt-5.5',
+      reasoningEffort: 'high',
+      agentsStates: {
+        thread_child_1: { status: 'running', message: null },
+        thread_child_2: { status: 'errored', message: '接続に失敗しました' },
+      },
+    });
+    expect(item?.text).toBe(
+      [
+        '指示: レビューして',
+        'モデル: gpt-5.5',
+        'reasoning effort: high',
+        '対象スレッド: thread_child_1, thread_child_2',
+        'thread_child_1: 実行中',
+        'thread_child_2: エラー（接続に失敗しました）',
+      ].join('\n'),
+    );
+  });
+
+  it('未知のCollabAgentStatusは値をそのまま出す', () => {
+    const item = normalizeItem({
+      id: 'ca_4',
+      type: 'collabAgentToolCall',
+      tool: 'wait',
+      status: 'completed',
+      senderThreadId: 's',
+      receiverThreadIds: [],
+      agentsStates: { thread_x: { status: 'somethingUnknown', message: null } },
+    });
+    expect(item?.text).toBe('thread_x: somethingUnknown');
+  });
+
+  it('省略可能な項目が無ければ空のtext', () => {
+    const item = normalizeItem({
+      id: 'ca_5',
+      type: 'collabAgentToolCall',
+      tool: 'wait',
+      status: 'inProgress',
+      senderThreadId: 's',
+      receiverThreadIds: [],
+      agentsStates: {},
+    });
+    expect(item?.text).toBe('');
+  });
+});

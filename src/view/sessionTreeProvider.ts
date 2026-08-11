@@ -83,6 +83,11 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<SessionSumma
         `- cwd: \`${session.cwd ?? '不明'}\``,
         `- id: \`${session.id}\``,
         ...(session.archived ? ['- アーカイブ済み'] : []),
+        // 親スレッドが分かる場合のみ（issue #34、design.md §14.26）。切替はできないため、
+        // ツリーからは「親が居る」ことが分かるだけに留める
+        ...(session.parentThreadId !== undefined
+          ? [`- 親スレッド: \`${session.parentThreadId}\``]
+          : []),
       ].join('\n'),
     );
 

@@ -375,6 +375,84 @@ function readStringArray(value: unknown): string {
     .join('\n\n');
 }
 
+/**
+ * `collabAgentToolCall` の `tool`（`CollabAgentTool`）を日本語にする（issue #34）。
+ *
+ * `detail` には他の種類（`mcpToolCall` の server/tool 名など）と違って翻訳の通り道が無いため
+ * （`status` はチャット画面側の `STATUS_LABEL` を経由する。`chatScript.ts` 参照）、ここで直接
+ * 日本語へ変える。未知の値（スキーマ追加）はそのまま出す。
+ */
+const COLLAB_TOOL_LABEL: Record<string, string> = {
+  spawnAgent: 'エージェントを起動',
+  sendInput: '入力を送信',
+  resumeAgent: 'エージェントを再開',
+  wait: '完了を待機',
+  closeAgent: 'エージェントを終了',
+};
+
+/** `agentsStates` 内の `CollabAgentStatus` を日本語にする（issue #34）。未知の値はそのまま出す。 */
+const COLLAB_AGENT_STATUS_LABEL: Record<string, string> = {
+  pendingInit: '初期化待ち',
+  running: '実行中',
+  interrupted: '中断',
+  completed: '完了',
+  errored: 'エラー',
+  shutdown: '終了',
+  notFound: '見つかりません',
+};
+
+/**
+ * サブエージェントを操作するツール呼び出し（`collabAgentToolCall`）の中身を読める形にする
+ * （issue #34）。種類名だけでは「何をしているエージェントか」が分からないため、
+ * 指示・モデル・reasoning effort・送信先・対象エージェントごとの状態を1行ずつ組み立てる。
+ *
+ * スキーマ根拠（`codex app-server generate-json-schema`、CollabAgentToolCallThreadItem）:
+ * `agentsStates` は `{[threadId]: {status: CollabAgentStatus, message: string | null}}`という
+ * 辞書。空・未定義の項目は行を出さない（無いことを無理に表示しない）。
+ */
+function describeCollabAgentToolCall(item: Record<string, unknown>): {
+  detail: string;
+  text: string;
+} {
+  const tool = str(item['tool']);
+  const detail = COLLAB_TOOL_LABEL[tool] ?? tool;
+
+  const lines: string[] = [];
+  const prompt = strOrUndefined(item['prompt']);
+  if (prompt !== undefined) {
+    lines.push(`指示: ${prompt}`);
+  }
+  const model = strOrUndefined(item['model']);
+  if (model !== undefined) {
+    lines.push(`モデル: ${model}`);
+  }
+  const effort = strOrUndefined(item['reasoningEffort']);
+  if (effort !== undefined) {
+    lines.push(`reasoning effort: ${effort}`);
+  }
+  const receivers = item['receiverThreadIds'];
+  if (Array.isArray(receivers)) {
+    const ids = receivers.filter((r): r is string => typeof r === 'string' && r !== '');
+    if (ids.length > 0) {
+      lines.push(`対象スレッド: ${ids.join(', ')}`);
+    }
+  }
+  const states = rec(item['agentsStates']);
+  if (states !== undefined) {
+    for (const [threadId, raw] of Object.entries(states)) {
+      const state = rec(raw);
+      const statusValue = str(state?.['status']);
+      if (statusValue === '') {
+        continue;
+      }
+      const statusLabel = COLLAB_AGENT_STATUS_LABEL[statusValue] ?? statusValue;
+      const message = strOrUndefined(state?.['message']);
+      lines.push(`${threadId}: ${statusLabel}${message !== undefined ? `（${message}）` : ''}`);
+    }
+  }
+  return { detail, text: lines.join('\n') };
+}
+
 /** userMessage の content 配列からテキストを取り出す。 */
 function readContentText(content: unknown): string {
   if (!Array.isArray(content)) {
@@ -466,6 +544,27 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
     case 'enteredReviewMode':
     case 'exitedReviewMode':
       return { ...base, detail: str(item['review']) };
+    /**
+     * サブエージェントの活動（issue #34）。`agentPath` がどのエージェントか、`kind`
+     * （`SubAgentActivityKind`: started/interacted/interrupted）がstatusとして
+     * チャット画面の`STATUS_LABEL`（`chatScript.ts`）を通って日本語になる。
+     * `agentThreadId` は履歴には出ないため、本文へ1行残す。
+     */
+    case 'subAgentActivity': {
+      const kind = str(item['kind']);
+      const agentThreadId = str(item['agentThreadId']);
+      return {
+        ...base,
+        detail: str(item['agentPath']),
+        status: kind === '' ? base.status : kind,
+        text: agentThreadId === '' ? '' : `エージェントスレッド: ${agentThreadId}`,
+      };
+    }
+    // サブエージェントを操作するツール呼び出し（issue #34）。中身は describeCollabAgentToolCall参照
+    case 'collabAgentToolCall': {
+      const described = describeCollabAgentToolCall(item);
+      return { ...base, detail: described.detail, text: described.text };
+    }
     // モデルが見た画像。パスだけが届くので、読むのはホスト側の役目
     case 'imageView': {
       const filePath = str(item['path']);

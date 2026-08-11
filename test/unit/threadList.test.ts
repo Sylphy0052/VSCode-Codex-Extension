@@ -107,6 +107,16 @@ describe('normalizeThread', () => {
     expect(session?.cwd).toBeUndefined();
   });
 
+  it('parentThreadIdが入っていれば読む（issue #34。実データでは未確認、スキーマ根拠）', () => {
+    const session = normalizeThread(rawThread({ parentThreadId: 'thread_parent_1' }), ARCHIVED_DIR);
+    expect(session?.parentThreadId).toBe('thread_parent_1');
+  });
+
+  it('parentThreadIdが無ければundefinedのまま', () => {
+    const session = normalizeThread(rawThread(), ARCHIVED_DIR);
+    expect(session?.parentThreadId).toBeUndefined();
+  });
+
   it('オブジェクトでない入力はundefinedを返す', () => {
     expect(normalizeThread(null, ARCHIVED_DIR)).toBeUndefined();
     expect(normalizeThread('string', ARCHIVED_DIR)).toBeUndefined();
