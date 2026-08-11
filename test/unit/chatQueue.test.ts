@@ -23,6 +23,11 @@ describe('routeSend', () => {
     // turn/steer は expectedTurnId を要求するため、idが無いと送れない
     expect(routeSend(busy)).toBe('queue');
   });
+
+  it('レビュー中はターンが判っても割り込まず待ち行列へ積む', () => {
+    // app-serverはレビュー中のターンへの turn/steer を受け付けない（スキーマ根拠）
+    expect(routeSend({ ...busy, turnId: 'turn-1', reviewing: true })).toBe('queue');
+  });
 });
 
 describe('enqueue', () => {

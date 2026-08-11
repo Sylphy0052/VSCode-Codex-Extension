@@ -24,6 +24,8 @@ export const initialClaudeState: ChatState = {
   usage: undefined,
   context: undefined,
   planMode: false,
+  // Codexのレビュー中フラグに相当する概念がClaude Codeには無い
+  reviewing: false,
   turnResultText: '',
   turnEditedFiles: [],
 };

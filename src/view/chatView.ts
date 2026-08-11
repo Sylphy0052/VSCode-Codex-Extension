@@ -26,8 +26,14 @@ import {
   type PseudoCommandCall,
 } from '../provider/pseudoCommands';
 import type { SlashCommand } from '../provider/slashCommands';
+import {
+  buildReviewTarget,
+  type ReviewDelivery,
+  type ReviewTarget,
+  type ReviewTargetKind,
+} from '../codex/reviewTarget';
 import { chatCsp } from './chatCsp';
-import { chatScript } from './chatScript';
+import { chatScript, type ReviewButtonConfig } from './chatScript';
 import { chatStyles } from './chatStyles';
 import { readPersistedThreadId } from './panelState';
 import { isEditableKey, type SettingsProvider } from './settingsProvider';
@@ -137,6 +143,43 @@ export async function postImageData(
     void panel.webview.postMessage({ type: 'imageData', ...reply });
   }
 }
+
+/**
+ * レビュー対象のQuickPick選択肢。
+ *
+ * フィールド名は `targetKind` にする。`vscode.QuickPickItem` は区切り線の表示に使う
+ * `kind?: QuickPickItemKind` を既に持っており、`kind` のままだと型が衝突する。
+ */
+const REVIEW_TARGET_ITEMS: (vscode.QuickPickItem & { targetKind: ReviewTargetKind })[] = [
+  {
+    targetKind: 'uncommittedChanges',
+    label: '未コミットの変更',
+    detail: '作業ツリー（staged / unstaged / untracked）',
+  },
+  {
+    targetKind: 'baseBranch',
+    label: 'ベースブランチとの差分',
+    detail: '現在のブランチと指定したブランチとの差分',
+  },
+  { targetKind: 'commit', label: '指定コミット', detail: '特定コミットで入った変更' },
+  { targetKind: 'custom', label: '自由記述', detail: '指示文をそのままレビューに渡す' },
+];
+
+/** レビューの出し先。 */
+const REVIEW_DELIVERY_ITEMS: (vscode.QuickPickItem & { delivery: ReviewDelivery })[] = [
+  { delivery: 'inline', label: 'この会話の中', detail: '今のスレッドに続けて出す' },
+  { delivery: 'detached', label: '別のタブ', detail: '新しいCodex画面を開いて出す' },
+];
+
+/** `uncommittedChanges` 以外の対象で、`showInputBox` に渡す文言。 */
+const REVIEW_TARGET_INPUT: Record<
+  Exclude<ReviewTargetKind, 'uncommittedChanges'>,
+  { prompt: string; value?: string }
+> = {
+  baseBranch: { prompt: 'ベースブランチ名', value: 'main' },
+  commit: { prompt: 'コミットのSHA' },
+  custom: { prompt: '指示文' },
+};
 
 /** `@` の候補として返す最大件数。画面に収まる範囲に留める。 */
 const MENTION_LIMIT = 50;
@@ -291,6 +334,8 @@ export class ChatViewManager implements vscode.Disposable {
       approvalModes: APPROVAL_MODES,
       sandboxModes: SANDBOX_MODES,
       showSettings: true,
+      // review/startはapp-serverの標準機能なので、コマンド一覧を待たずに常に出す
+      review: { mode: 'quickPick' },
     });
 
     let wasBusy = false;
@@ -424,6 +469,11 @@ export class ChatViewManager implements vscode.Disposable {
       if (type === 'planMode') {
         entry.loop.noteUserAction();
         entry.session.setPlanMode(m['on'] === true);
+        return;
+      }
+      if (type === 'review') {
+        entry.loop.noteUserAction();
+        await this.runReview(entry);
         return;
       }
       if (type === 'cancelQueued' && typeof m['index'] === 'number') {
@@ -563,6 +613,79 @@ export class ChatViewManager implements vscode.Disposable {
     }
     this.log.info(`分岐しました: ${threadId} → ${newThreadId}`);
     await this.openThread(newThreadId, '分岐', undefined);
+  }
+
+  /**
+   * コードレビューを起動する。
+   *
+   * 対象（4種）とdelivery（この会話の中 / 別のタブ）をQuickPickで選ばせてから
+   * `review/start` を呼ぶ。`detached` を選んだ場合は、返ってきた `reviewThreadId` で
+   * 新しいCodex画面を開く（`forkFrom` と同じ導線）。
+   */
+  private async runReview(entry: ChatPanel): Promise<void> {
+    const targetChoice = await vscode.window.showQuickPick(REVIEW_TARGET_ITEMS, {
+      title: 'レビューの対象',
+      placeHolder: '何をレビューしますか',
+    });
+    if (targetChoice === undefined) {
+      return;
+    }
+
+    const target = await this.promptReviewTarget(targetChoice.targetKind);
+    if (target === undefined) {
+      return;
+    }
+
+    const deliveryChoice = await vscode.window.showQuickPick(REVIEW_DELIVERY_ITEMS, {
+      title: 'レビューの出し先',
+      placeHolder: 'どこに結果を出しますか',
+    });
+    if (deliveryChoice === undefined) {
+      return;
+    }
+
+    try {
+      const reviewThreadId = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'レビューを開始しています…' },
+        () => entry.session.startReview(target, deliveryChoice.delivery),
+      );
+      this.log.info(`レビューを開始しました: ${reviewThreadId} (${deliveryChoice.delivery})`);
+      if (deliveryChoice.delivery === 'detached') {
+        await this.openThread(reviewThreadId, 'レビュー', entry.cwd);
+      }
+    } catch (e) {
+      this.reportError(e);
+    }
+  }
+
+  /**
+   * レビュー対象ごとに要る入力を聞く。
+   *
+   * `uncommittedChanges` は追加入力が不要。それ以外はQuickPickの選択に応じて
+   * `showInputBox` で1項目だけ聞く。空文字のまま進めると何が起きたか画面から
+   * 分からなくなるため、`buildReviewTarget` が拒否したらエラーを出して中止する。
+   */
+  private async promptReviewTarget(kind: ReviewTargetKind): Promise<ReviewTarget | undefined> {
+    if (kind === 'uncommittedChanges') {
+      return buildReviewTarget(kind, '');
+    }
+
+    const spec = REVIEW_TARGET_INPUT[kind];
+    const input = await vscode.window.showInputBox({
+      prompt: spec.prompt,
+      ...(spec.value === undefined ? {} : { value: spec.value }),
+      validateInput: (v) => (v.trim() === '' ? '入力してください' : undefined),
+    });
+    if (input === undefined) {
+      // キャンセル
+      return undefined;
+    }
+
+    const target = buildReviewTarget(kind, input);
+    if (target === undefined) {
+      void vscode.window.showErrorMessage('レビューの対象を読み取れませんでした');
+    }
+    return target;
   }
 
   /**
@@ -786,6 +909,8 @@ export interface ChatShellOptions {
   sandboxModes?: readonly string[];
   /** モデル・effort・承認のプルダウンを出すか（Codex画面のみ）。 */
   showSettings: boolean;
+  /** レビューボタンの動作。Codexは常に出し、Claude Codeはコマンド一覧にあるときだけ出す。 */
+  review: ReviewButtonConfig;
   /**
    * 設定行の下に出す但し書き。
    *
@@ -847,6 +972,7 @@ ${chatStyles()}
     <button id="loopToggle" type="button" class="secondary" title="同じ指示を条件成立まで繰り返します">ループ</button>
     <button id="compact" type="button" class="secondary" title="これまでの会話を要約に置き換えてコンテキストを空けます">圧縮</button>
     <button id="planToggle" type="button" class="secondary" aria-pressed="false" title="読み取りだけに絞って計画を立てさせます。ファイルは変更されません">計画</button>
+    <button id="review" type="button" class="secondary" title="コードレビューを実行します"${options.review.mode === 'command' ? ' hidden' : ''}>レビュー</button>
   </div>
   <div id="loop" hidden>
     <label>初回指示（空なら継続指示から始めます）
@@ -884,7 +1010,7 @@ ${chatStyles()}
   </div>
 
 <script nonce="${nonce}">
-${chatScript(options.agentLabel)}
+${chatScript(options.agentLabel, options.review)}
 </script>
 </body>
 </html>`;

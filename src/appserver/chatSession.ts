@@ -12,6 +12,7 @@ import {
   addPrompt,
   appendNotice,
   applyEvent,
+  deriveReviewing,
   enqueue,
   initialChatState,
   normalizeItem,
@@ -32,6 +33,12 @@ import {
   type PendingPrompt,
   type PromptSubmission,
 } from './prompts';
+import {
+  buildReviewStartParams,
+  readReviewThreadId,
+  type ReviewDelivery,
+  type ReviewTarget,
+} from '../codex/reviewTarget';
 
 interface WaitingApproval {
   resolve: (response: unknown) => void;
@@ -115,11 +122,14 @@ export class ChatSession {
     }
     const response = await this.connection.request('thread/resume', params);
     this.baseline = readTurnPolicy(response.result);
+    const items = readInitialItems(response.result);
     this.update({
       ...this.state,
       threadId,
       name: readThreadName(response.result) ?? this.state.name,
-      items: readInitialItems(response.result),
+      items,
+      // レビュー中に復元・detachedで開いた画面でも、割り込みの扱いを取り違えない
+      reviewing: deriveReviewing(items),
     });
   }
 
@@ -320,6 +330,40 @@ export class ChatSession {
     }
     this.update({ ...this.state, busy: true, turnFailed: false });
     await this.connection.request('thread/compact/start', { threadId });
+  }
+
+  /**
+   * コードレビューを開始する（`review/start`）。
+   *
+   * `inline` はこのスレッドの新しいターンとして動くため、`send()` と同じく応答前に
+   * `busy` を立てる。`detached` は別スレッドで動くため、このセッションの状態には
+   * 触れない（呼び出し側が `reviewThreadId` で新しい画面を開いて追う）。
+   *
+   * レビュー中かどうかの表示は `enteredReviewMode` / `exitedReviewMode` 項目の到着
+   * （`chatState.deriveReviewing`）を正とする。ここでは開始の合図だけ扱う。
+   */
+  async startReview(target: ReviewTarget, delivery: ReviewDelivery): Promise<string> {
+    const threadId = this.state.threadId;
+    if (threadId === undefined) {
+      throw new Error('スレッドが開始されていません');
+    }
+    const params = buildReviewStartParams(threadId, target, delivery);
+    if (delivery === 'inline') {
+      this.update({ ...this.state, busy: true, turnFailed: false });
+    }
+    try {
+      const response = await this.connection.request('review/start', params);
+      const reviewThreadId = readReviewThreadId(response.result);
+      if (reviewThreadId === undefined) {
+        throw new Error('reviewThreadIdを読み取れませんでした');
+      }
+      return reviewThreadId;
+    } catch (e) {
+      if (delivery === 'inline') {
+        this.update({ ...this.state, busy: false });
+      }
+      throw e;
+    }
   }
 
   async interrupt(): Promise<void> {

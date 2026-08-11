@@ -30,7 +30,7 @@ describe('chatStyles', () => {
 
   it('隠す領域はすべてスクリプトから開閉できる', () => {
     // hidden を切り替える対象が消えると、開いたまま／閉じたままになる
-    const script = chatScript('Codex');
+    const script = chatScript('Codex', { mode: 'quickPick' });
     for (const id of ['queue', 'loop', 'loopBar', 'settings']) {
       expect(script.includes(id), `${id} を扱う処理が無い`).toBe(true);
     }

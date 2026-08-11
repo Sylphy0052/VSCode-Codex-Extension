@@ -250,6 +250,8 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       // effortだけ扱いが違う。黙って効かないより、効いたか判らないと書くほうがまし
       settingsNote:
         'モデルと承認は今の会話にすぐ効きます。Effortは送りますが、CLIが結果を返さないため反映は確かめられません。「既定」へ戻す操作は次のセッションから効きます。',
+      // /review は実在しない（実測で /code-review を確認済み）。一覧に無ければボタンを隠す
+      review: { mode: 'command', commandName: 'code-review' },
     });
 
     const session = new ClaudeStreamSession(

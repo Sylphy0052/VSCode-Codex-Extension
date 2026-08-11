@@ -132,7 +132,7 @@ Codexはターン単位で model / effort / approvalPolicy を渡せるのにCla
 | TP-40 | 手動の会話圧縮（`/compact` 相当）。コンテキストが逼迫したときの手が現状ない                                  | Codex/Claude | P1     | Z-06 Z-11 | #20 済 |
 | TP-41 | 巻き戻し（Codex Esc Esc / Claude `/rewind` 相当）。Codexはターン分岐で部分的に代替できるが、Claudeは代替なし | 両方         | P2     | Z-11      | #21    |
 | TP-44 | Claude で会話の途中ターンから分岐する。現状「CLIに手段が無い」としている                                     | Claude       | P2     | Z-12      | #22    |
-| TP-45 | コードレビューの起動（`/review` 相当）を画面の操作として持つ                                                 | Codex/Claude | P2     | Z-06 Z-09 | #23    |
+| TP-45 | コードレビューの起動（`/review` 相当）を画面の操作として持つ                                                 | Codex/Claude | P2     | Z-06 Z-09 | #23 済 |
 | TP-42 | 一時的な脇道の会話（Codex `/btw` 相当）                                                                      | Codex        | P3     | Z-06      | #24    |
 | TP-43 | トランスクリプト表示と生テキストモード（Ctrl+T / `/raw` 相当）                                               | Codex/Claude | P3     | -         | #25    |
 | TP-46 | `AGENTS.md` / `CLAUDE.md` の生成（`/init` 相当）                                                             | Codex/Claude | P3     | TP-11     | #26    |

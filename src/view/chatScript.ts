@@ -1,12 +1,23 @@
 /**
+ * レビューボタンの動作。
+ *
+ * `quickPick`: 対象とdeliveryをQuickPickで選ばせてから `review/start` を呼ぶ（Codexのみ）。
+ * ボタンは常に出す（app-serverの標準機能のため一覧を待つ必要が無い）。
+ *
+ * `command`: コマンド一覧に `commandName` があるときだけボタンを出し、押したら
+ * そのままスラッシュコマンドとして発言に送る（Claude Codeのみ）。
+ */
+export type ReviewButtonConfig = { mode: 'quickPick' } | { mode: 'command'; commandName: string };
+
+/**
  * チャット画面のWebviewで動くスクリプト。
  *
  * テンプレートリテラルの中身なので型検査もlintも効かない。壊れると画面全体が黙って
- * 動かなくなるため、`chatScript.test.ts` で構文だけは機械的に確かめている。
+ * 動かなくなるため、`webviewScript.test.ts` で構文だけは機械的に確かめている。
  * 文字列リテラルに改行を書くときは `\\n` と二重にエスケープすること（`\n` は
  * テンプレートリテラルの時点で実際の改行に展開され、リテラルが分断される）。
  */
-export function chatScript(agentLabel: string): string {
+export function chatScript(agentLabel: string, review: ReviewButtonConfig): string {
   return `
   const vscode = acquireVsCodeApi();
   const el = (id) => document.getElementById(id);
@@ -34,7 +45,12 @@ export function chatScript(agentLabel: string): string {
     settingsChanged: '設定',
     imageView: '画像',
     imageGeneration: '画像の生成',
+    enteredReviewMode: 'レビュー開始',
+    exitedReviewMode: 'レビュー終了',
   };
+
+  /** ホスト側から渡されたレビューボタンの動作。 */
+  const REVIEW = ${JSON.stringify(review)};
 
   /** 残りがこの割合を下回ったら警告として見せる。 */
   const LOW_CONTEXT_PERCENT = 20;
@@ -778,6 +794,7 @@ export function chatScript(agentLabel: string): string {
 
     const bits = [];
     if (state.planMode) bits.push('計画モード（ファイルは変更されません）');
+    if (state.reviewing) bits.push('レビュー中は割り込めません');
     if (state.busy) bits.push('応答中…');
     const usageText = formatUsage(state.usage);
     if (usageText !== '') bits.push(usageText);
@@ -1079,6 +1096,16 @@ export function chatScript(agentLabel: string): string {
     vscode.postMessage({ type: 'planMode', on: !planMode }),
   );
 
+  // Codexは対象をQuickPickで選ばせるためホストへ委ねる。Claude Codeはコマンドとして
+  // そのまま送る（CLI側が対話で対象を聞く）
+  el('review').addEventListener('click', () => {
+    if (REVIEW.mode === 'command') {
+      vscode.postMessage({ type: 'send', text: '/' + REVIEW.commandName });
+      return;
+    }
+    vscode.postMessage({ type: 'review' });
+  });
+
   el('attach').addEventListener('click', () => el('filePicker').click());
   el('filePicker').addEventListener('change', (e) => {
     offerFiles(e.target.files);
@@ -1182,7 +1209,13 @@ export function chatScript(agentLabel: string): string {
     const data = event.data;
     if (!data) return;
     if (data.type === 'state') apply(data.state);
-    if (data.type === 'commands') commands = data.commands || [];
+    if (data.type === 'commands') {
+      commands = data.commands || [];
+      // コマンド一覧に無ければボタンを出さない（押しても何も起きない状態を作らない）
+      if (REVIEW.mode === 'command') {
+        el('review').hidden = !commands.some((c) => c.name === REVIEW.commandName);
+      }
+    }
     if (data.type === 'files') {
       // 打っている途中に古い応答が届くことがある。今の語と一致するものだけ出す
       if (menuMode !== 'file') return;

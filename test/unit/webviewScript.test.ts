@@ -15,17 +15,19 @@ const parses = (source: string): void => {
 
 describe('chatScript', () => {
   it('構文として成立している', () => {
-    expect(() => parses(chatScript('Codex'))).not.toThrow();
+    expect(() => parses(chatScript('Codex', { mode: 'quickPick' }))).not.toThrow();
   });
 
   it('プロバイダ名を差し替えても壊れない', () => {
-    expect(() => parses(chatScript('Claude Code'))).not.toThrow();
+    expect(() =>
+      parses(chatScript('Claude Code', { mode: 'command', commandName: 'code-review' })),
+    ).not.toThrow();
   });
 
   it('文字列リテラルが改行で分断されていない', () => {
     // テンプレートリテラル内に `\n` と書くと実際の改行に展開され、
     // 文字列リテラルが途中で切れて構文エラーになる。
-    const lines = chatScript('Codex').split('\n');
+    const lines = chatScript('Codex', { mode: 'quickPick' }).split('\n');
     const broken = lines.filter((line) => (line.match(/'/g)?.length ?? 0) % 2 === 1);
     expect(broken).toEqual([]);
   });
@@ -33,7 +35,7 @@ describe('chatScript', () => {
   it('テンプレートリテラルを閉じる文字が混ざっていない', () => {
     // スクリプトはテンプレートリテラルの中身。バッククォートや ${ } の展開が
     // 紛れ込むと、そこでリテラルが切れて別物になる
-    const source = chatScript('Codex');
+    const source = chatScript('Codex', { mode: 'quickPick' });
     expect(source.includes('`')).toBe(false);
     expect(/\$\{/.test(source)).toBe(false);
   });

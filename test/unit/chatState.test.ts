@@ -6,6 +6,7 @@ import {
   applyEvent,
   buildContextUsage,
   capOutput,
+  deriveReviewing,
   initialChatState,
   normalizeItem,
   removeApproval,
@@ -96,6 +97,39 @@ describe('normalizeItem', () => {
     expect(normalizeItem({ type: 'agentMessage' })).toBeUndefined();
     expect(normalizeItem({ id: 'x' })).toBeUndefined();
     expect(normalizeItem(null)).toBeUndefined();
+  });
+
+  it('enteredReviewMode / exitedReviewMode は review を detail として持つ', () => {
+    expect(
+      normalizeItem({ type: 'enteredReviewMode', id: 'r1', review: '未コミットの変更' }),
+    ).toMatchObject({ id: 'r1', kind: 'enteredReviewMode', detail: '未コミットの変更' });
+    expect(
+      normalizeItem({ type: 'exitedReviewMode', id: 'r2', review: '未コミットの変更' }),
+    ).toMatchObject({ id: 'r2', kind: 'exitedReviewMode', detail: '未コミットの変更' });
+  });
+});
+
+describe('deriveReviewing', () => {
+  const base = { text: '', detail: '', status: undefined, turnId: undefined, diffs: [] };
+  const entered = { ...base, id: 'r1', kind: 'enteredReviewMode' };
+  const exited = { ...base, id: 'r2', kind: 'exitedReviewMode' };
+  const message = { ...base, id: 'm1', kind: 'agentMessage', text: 'OK' };
+
+  it('enteredReviewModeが最後ならレビュー中', () => {
+    expect(deriveReviewing([message, entered])).toBe(true);
+  });
+
+  it('exitedReviewModeが最後ならレビュー中ではない', () => {
+    expect(deriveReviewing([entered, message, exited])).toBe(false);
+  });
+
+  it('どちらも現れていなければレビュー中ではない', () => {
+    expect(deriveReviewing([])).toBe(false);
+    expect(deriveReviewing([message])).toBe(false);
+  });
+
+  it('2回目のレビューが始まれば再びレビュー中になる', () => {
+    expect(deriveReviewing([entered, exited, entered])).toBe(true);
   });
 });
 
@@ -258,6 +292,20 @@ describe('applyEvent', () => {
     const restarted = applyEvent(finished, 'turn/started', { turn: { id: 't-next' } });
     expect(restarted.turnResultText).toBe('');
     expect(restarted.turnEditedFiles).toEqual([]);
+  });
+
+  it('enteredReviewModeが届くとreviewingになり、exitedReviewModeで戻る', () => {
+    const entered = applyEvent(initialChatState, 'item/started', {
+      item: { type: 'enteredReviewMode', id: 'r1', review: '未コミットの変更' },
+      turnId: TURN,
+    });
+    expect(entered.reviewing).toBe(true);
+
+    const exited = applyEvent(entered, 'item/completed', {
+      item: { type: 'exitedReviewMode', id: 'r2', review: '未コミットの変更' },
+      turnId: TURN,
+    });
+    expect(exited.reviewing).toBe(false);
   });
 });
 
