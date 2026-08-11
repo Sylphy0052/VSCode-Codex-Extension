@@ -29,13 +29,18 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 
 ## 現在の状況（2026-08-11）
 
-**P1は残ゼロ。** 本丸にあたる11件（TP-01 / TP-10 / TP-11 / TP-21 / TP-22 / TP-30 / TP-31 / TP-40 / TP-70 / TP-80 / TP-82）が全て入っている。
+**P1もP2も残ゼロ。** 残っているのは P3 だけ。
 
-- 入るようになったもの: 画像添付・スラッシュコマンドの実効性・セッション中の設定変更・Plan mode・差分表示・コンテキスト残量・手動圧縮・ツールやMCPからの問い合わせ・応答を止めない割り込み
-- 残っているのは P2 / P3。体験差は出るが、作業そのものは拡張機能の中で完結する
-- **実機確認は追いついていない**。ユニットテストとプロトコル上の実測で確かめた範囲までで、画面上の挙動は [manual-test.md](manual-test.md) の未実施ケースとして残っている
+- P1（本丸11件）: 画像添付・スラッシュコマンドの実効性・セッション中の設定変更・Plan mode・差分表示・コンテキスト残量・手動圧縮・ツールやMCPからの問い合わせ・応答を止めない割り込み
+- P2: モデルとeffortの取得・コマンド出力の逐次表示・ターン単位のサンドボックス・会話に出る画像・TODO一覧・コードレビューの起動・カスタムエージェント・MCPサーバ管理・hooks・ログイン状態・ファイルの巻き戻し
+- **できないと確定したもの**: Claude Codeの会話途中からの分岐（TP-44）。Codexの巻き戻し（TP-41のCodex側。`thread/rollback` はdeprecatedかつファイルを戻さない）
+- **実機確認は追いついていない**。ユニットテストとプロトコル上の実測で確かめた範囲までで、画面上の挙動は [manual-test.md](manual-test.md) の未実施ケースとして残っている。**ここが最大の残作業**
 
-各表の「Issue」列に `済` と書いてあるものはマージ済み。
+各表の「Issue」列の印:
+
+- `済` — 実装してマージ済み
+- `不可（根拠つき）` — 調べた結果できないと確定した。根拠は各Issueのコメントと [design.md](design.md) にある
+- 印なし — 未着手
 
 ## Phase 0: 能力調査（実装より先）
 
@@ -79,7 +84,7 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 | TP-81 | `serverRequest/resolved` を処理しておらず、解決済みの承認カードが残る            | Codex | P2     | [#42](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/42) 済                        |
 | TP-82 | `turn/steer` で応答を中断せずに指示を割り込ませる                                | Codex | P1     | [#43](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/43) 済                        |
 | TP-83 | モデルとeffortの選択肢をCLIから取得する                                          | 両方  | P2     | [#44](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/44) 済                        |
-| TP-84 | app-serverの生成済み型定義を取り込むか判断する                                   | Codex | P2     | [#46](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/46)                           |
+| TP-84 | app-serverの生成済み型定義を取り込むか判断する                                   | Codex | P2     | [#46](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/46) 済（取り込まないと判断）  |
 | TP-85 | 履歴の取得を `thread/list` へ移すか判断する                                      | Codex | P3     | [#45](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/45)                           |
 
 ## Phase 1: 入力欄
@@ -161,7 +166,7 @@ Codexはターン単位で model / effort / approvalPolicy を渡せるのにCla
 | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ----- | ------ |
 | TP-70 | READMEのスラッシュコマンド記述の矛盾を直す。「2つの画面」の表では「チャット画面では使えない」、「使い方」では「`/` で候補が出る」と書いていて食い違っている | P1     | TP-11 | #38 済 |
 | TP-71 | パリティ達成に合わせて「対応CLI」の表と `docs/design.md` を更新する                                                                                         | P2     | 全体  | #39 済 |
-| TP-72 | 追加した機能の実機確認手順を `docs/manual-test.md` へ追記する                                                                                               | P2     | 全体  | #40    |
+| TP-72 | 追加した機能の実機確認手順を `docs/manual-test.md` へ追記する                                                                                               | P2     | 全体  | #40 済 |
 
 ## Issue化するときの書き方
 
