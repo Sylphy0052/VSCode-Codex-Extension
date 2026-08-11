@@ -473,6 +473,12 @@
           "default": "medium",
           "scope": "machine-overridable",
           "markdownDescription": "推論の深さ (`--effort`)。空なら渡さず、Claude Code 側の設定に委譲する。"
+        },
+        "claude.agent": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "使用するエージェント (`--agent`)。組込エージェント (`claude` / `Explore` / `Plan` / `general-purpose` など) やユーザー定義のカスタムエージェントの名前を指定する。空なら渡さず、Claude Code 側の `agent` 設定に委譲する。起動時にのみ効き、会話の途中では切り替えられない。"
         }
       }
     }

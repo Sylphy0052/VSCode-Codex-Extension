@@ -80,12 +80,17 @@ interface ClaudePanel {
 const VIEW_TYPE = 'claude.chat';
 const LABEL = 'Claude Code';
 
-/** `TaskSessionInput` をClaude Codeの起動設定へ写す。`sandbox` はClaudeに概念が無いため使わない。 */
+/**
+ * `TaskSessionInput` をClaude Codeの起動設定へ写す。`sandbox` はClaudeに概念が無いため使わない。
+ * `agent` はタスクオーケストレーション（design.md §16）が扱う語彙に無いため常に空文字にする
+ * （タスクは既定のエージェントで走る）。
+ */
 function toClaudeConfig(input: TaskSessionInput): ClaudeConfig {
   return {
     model: input.config.model,
     effort: input.config.effort,
     permissionMode: input.config.approvalMode,
+    agent: '',
     additionalArgs: [],
   };
 }
@@ -181,14 +186,19 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         settings: {
           models: snapshot.models,
           efforts: snapshot.efforts,
+          agents: snapshot.agents,
           model: snapshot.model,
           reasoningEffort: snapshot.effort,
           approvalMode: snapshot.permissionMode,
+          agent: snapshot.agent,
           defaults: {
             model: snapshot.defaults.model,
             reasoningEffort: snapshot.defaults.effort,
             approvalMode: snapshot.defaults.permissionMode,
             sandbox: undefined,
+            // エージェントの既定値はsettings.jsonから読んでいない（表示のみの用途に対して
+            // 追跡コストが見合わないため）。「既定 (CLI側に指定なし)」とだけ出す
+            agent: undefined,
           },
           profile: '',
         },
@@ -426,9 +436,10 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       agentLabel: LABEL,
       approvalModes: CLAUDE_PERMISSION_MODES,
       showSettings: true,
-      // effortだけ扱いが違う。黙って効かないより、効いたか判らないと書くほうがまし
+      showAgentSelector: true,
+      // effort・エージェントだけ扱いが違う。黙って効かないより、効くタイミングを書くほうがまし
       settingsNote:
-        'モデルと承認は今の会話にすぐ効きます。Effortは送りますが、CLIが結果を返さないため反映は確かめられません。「既定」へ戻す操作は次のセッションから効きます。',
+        'モデルと承認は今の会話にすぐ効きます。Effortは送りますが、CLIが結果を返さないため反映は確かめられません。エージェントは起動引数でのみ決まるため、変更は次のセッションから効きます。「既定」へ戻す操作も次のセッションから効きます。',
       // /review は実在しない（実測で /code-review を確認済み）。一覧に無ければボタンを隠す
       review: { mode: 'command', commandName: 'code-review' },
     });
@@ -545,7 +556,9 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
           ? 'effort'
           : key === 'approvalMode'
             ? 'permissionMode'
-            : undefined;
+            : key === 'agent'
+              ? 'agent'
+              : undefined;
     if (mapped === undefined) {
       this.log.warn(`変更を許可していないキーです: ${String(key)}`);
       return;
@@ -566,8 +579,22 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
    *
    * 「既定」（空文字）へ戻す操作は送らない。CLI側に元へ戻す手段が無く、
    * 何を送っても嘘になるため。次に開くセッションから効く。
+   *
+   * `agent` だけは値の有無によらず常にここで返す。エージェントは起動引数
+   * （`--agent`）でのみ決まり、実行中のセッションへ切り替えを伝える制御要求が無い
+   * （`set_agent` 等7種の候補を実測し、いずれも `Unsupported control request subtype`
+   * で拒否されることを確認済み）。値を送っても効かないので、常に「次のセッションから」
+   * と伝えるだけにする。
    */
   private applyToSession(entry: ClaudePanel, key: ClaudeEditableKey, value: string): void {
+    if (key === 'agent') {
+      this.log.info(
+        value === ''
+          ? 'agent を既定へ戻しました。セッション中は切り替えられないため、次のセッションから適用されます'
+          : `agent を ${value} に変えました。セッション中は切り替えられないため、次のセッションから適用されます`,
+      );
+      return;
+    }
     if (value === '') {
       this.log.info(
         `${key} を既定へ戻しました。今の会話には効かず、次のセッションから適用されます`,

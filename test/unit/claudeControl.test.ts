@@ -10,6 +10,7 @@ import {
   buildSetPermissionModeRequest,
   buildUserMessage,
   describeCanUseTool,
+  readAgentList,
   readCommandList,
   readMcpServersList,
   readModelList,
@@ -484,5 +485,44 @@ describe('readMcpServersList', () => {
     expect(readMcpServersList({})).toBeUndefined();
     expect(readMcpServersList({ mcpServers: 'なにか' })).toBeUndefined();
     expect(readMcpServersList({ mcpServers: [] })).toEqual([]);
+  });
+});
+
+describe('readAgentList', () => {
+  // 実測した `initialize` の応答（CLI 2.1.227）の一部。組込エージェントとユーザー定義の
+  // カスタムエージェントが混ざって返る。`model` は一部のエントリにしか無い
+  const payload = {
+    agents: [
+      {
+        name: 'claude',
+        description: "Catch-all for any task that doesn't fit a more specific agent.",
+      },
+      {
+        name: 'code-reviewer',
+        description: 'コード品質レビュー専用subagent。',
+        model: 'sonnet',
+      },
+      { name: 'code-reviewer', description: '重複して返ってくる' },
+      { name: '', description: '名前が無い' },
+    ],
+  };
+
+  it('名前と説明を取り出す（modelは使わない）', () => {
+    expect(readAgentList(payload)?.[0]).toEqual({
+      name: 'claude',
+      description: "Catch-all for any task that doesn't fit a more specific agent.",
+    });
+  });
+
+  it('同じ名前と名前無しを落とす', () => {
+    expect(readAgentList(payload)?.map((a) => a.name)).toEqual(['claude', 'code-reviewer']);
+  });
+
+  it('一覧が無いときは undefined（空の一覧と区別する）', () => {
+    // 読めなかっただけで候補を消してしまわないようにする
+    expect(readAgentList(undefined)).toBeUndefined();
+    expect(readAgentList({})).toBeUndefined();
+    expect(readAgentList({ agents: 'なにか' })).toBeUndefined();
+    expect(readAgentList({ agents: [] })).toEqual([]);
   });
 });

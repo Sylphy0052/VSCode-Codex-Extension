@@ -203,6 +203,12 @@ export function controlPanelScript(): string {
     );
     fill(el('claudeEffort'), c.efforts, c.effort, defaultLabel(d.effort));
     fill(el('claudePermissionMode'), c.permissionModes, c.permissionMode, defaultLabel(d.permissionMode));
+    fill(
+      el('claudeAgent'),
+      (c.agents || []).map((a) => a.name),
+      c.agent,
+      defaultLabel(d.agent),
+    );
 
     const selected = c.models.find((m) => m.slug === c.model);
     el('claudeModelHint').textContent = selected && selected.description ? selected.description : '';
@@ -210,6 +216,10 @@ export function controlPanelScript(): string {
     const noEffort = !!selected && selected.supportsEffort === false;
     el('claudeEffort').disabled = noEffort;
     el('claudeEffortHint').textContent = noEffort ? 'このモデルはeffortを選べません' : '';
+
+    const selectedAgent = (c.agents || []).find((a) => a.name === c.agent);
+    el('claudeAgentHint').textContent =
+      selectedAgent && selectedAgent.description ? selectedAgent.description : '';
   }
 
   // タブは1クリックで切り替える。選んだ側はリロードしても残す。
@@ -235,6 +245,7 @@ export function controlPanelScript(): string {
     ['claudeModel', 'model'],
     ['claudeEffort', 'effort'],
     ['claudePermissionMode', 'permissionMode'],
+    ['claudeAgent', 'agent'],
   ]) {
     el(id).addEventListener('change', (e) => {
       vscode.postMessage({ type: 'updateClaude', key, value: e.target.value });

@@ -5,6 +5,7 @@ import { buildClaudeContent, type Attachment } from '../provider/attachments';
 import type { McpServerView } from '../provider/mcpServers';
 import type { SlashCommand } from '../provider/slashCommands';
 import { describeTool } from './transcript';
+import type { ClaudeAgentInfo } from './types';
 
 /**
  * `claude` の stream-json 入出力に流す制御メッセージ。
@@ -173,6 +174,42 @@ function readEffortLevels(raw: unknown): EffortInfo[] {
     }
   }
   return efforts;
+}
+
+/**
+ * 使えるカスタムエージェントの一覧を読む。
+ *
+ * `initialize` の応答の `agents` に入っている（実測。Codexに相当する概念は無い）。
+ * `commands` / `models` と同じ経路・同じ形（配列）で届くため、`readCommandList` /
+ * `readModelList` と同じ作りにする。組込エージェント（`claude` `Explore` `Plan`
+ * `general-purpose` など）とユーザー定義のカスタムエージェントが混ざって返り、
+ * 一部のエントリだけ `model` を持つが、`--agent` に渡すのは `name` だけなので使わない。
+ *
+ * セッション中にエージェントを切り替える専用の制御要求は見つかっていない
+ * （`set_agent` 等7種の候補を実測し、いずれも `Unsupported control request subtype` で
+ * 拒否されることを確認済み）。そのため一覧は起動時の選択肢としてのみ使う。
+ *
+ * 一覧そのものが無いときは `undefined` を返す。空配列（1件も無い）と区別しないと、
+ * 読めなかっただけで候補を消してしまう。
+ */
+export function readAgentList(source: unknown): ClaudeAgentInfo[] | undefined {
+  const raw = rec(source)?.['agents'];
+  if (!Array.isArray(raw)) {
+    return undefined;
+  }
+
+  const agents: ClaudeAgentInfo[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    const agent = rec(entry);
+    const name = str(agent?.['name']);
+    if (name === '' || seen.has(name)) {
+      continue;
+    }
+    seen.add(name);
+    agents.push({ name, description: str(agent?.['description']) });
+  }
+  return agents;
 }
 
 /**
