@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  claudeSearchResults,
   describeTool,
   normalizeTodos,
   parseTranscriptHead,
@@ -285,5 +286,145 @@ describe('normalizeTodos', () => {
     expect(normalizeTodos(undefined)).toEqual([]);
     expect(normalizeTodos(null)).toEqual([]);
     expect(normalizeTodos('string')).toEqual([]);
+  });
+});
+
+// Web検索結果（issue #18）。実測（`claude --output-format stream-json` でWebSearchを伴う
+// ターンを実際に回して確認）した形をそのまま固定する。
+// `tool_use_result`: `{query, results: [{tool_use_id, content: [{title, url}, ...]}]}`
+describe('claudeSearchResults', () => {
+  const toolUseResult = {
+    query: 'microsoft/TypeScript latest release version GitHub',
+    results: [
+      {
+        tool_use_id: 'srvtoolu_01UjMQQwAc51xeT9zJC9TJf1',
+        content: [
+          { title: 'microsoft/TypeScript v6.0.3 on GitHub', url: 'https://newreleases.io/x' },
+          { title: 'Releases · microsoft/TypeScript', url: 'https://github.com/microsoft/x' },
+        ],
+      },
+    ],
+  };
+
+  it('tool_use_resultのresults.content からタイトルとURLを取り出す', () => {
+    expect(claudeSearchResults(toolUseResult, 1)).toEqual([
+      { title: 'microsoft/TypeScript v6.0.3 on GitHub', url: 'https://newreleases.io/x' },
+      { title: 'Releases · microsoft/TypeScript', url: 'https://github.com/microsoft/x' },
+    ]);
+  });
+
+  // WebFetchの実測形（`{bytes, code, codeText, result, durationMs, url}`）には
+  // resultsが無いため、常に空になる（従来どおりURL＝クエリだけの表示に留まる）
+  it('WebFetchのtool_use_result（resultsを持たない）では空になる', () => {
+    const webFetchResult = {
+      bytes: 462152,
+      code: 200,
+      codeText: 'OK',
+      result: '# 本文…',
+      durationMs: 2788,
+      url: 'https://github.com/microsoft/TypeScript/releases',
+    };
+    expect(claudeSearchResults(webFetchResult, 1)).toEqual([]);
+  });
+
+  it('同じイベントに2件以上のtool_resultが並ぶときは対応が取れないため空にする', () => {
+    expect(claudeSearchResults(toolUseResult, 2)).toEqual([]);
+  });
+
+  it('tool_use_resultが無い・壊れている場合も空になる', () => {
+    expect(claudeSearchResults(undefined, 1)).toEqual([]);
+    expect(claudeSearchResults(null, 1)).toEqual([]);
+    expect(claudeSearchResults({ results: 'not-an-array' }, 1)).toEqual([]);
+  });
+});
+
+describe('transcriptItems / webSearch', () => {
+  const assistantToolUse = (id: string, name: string, input: Record<string, unknown>) =>
+    JSON.stringify({
+      type: 'assistant',
+      uuid: `a-${id}`,
+      message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] },
+    });
+
+  it('WebSearchの結果を searchResults に積む', () => {
+    const { items } = transcriptItems([
+      assistantToolUse('t1', 'WebSearch', { query: 'TypeScript release' }),
+      JSON.stringify({
+        type: 'user',
+        uuid: 'u1',
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 't1',
+              content:
+                'Web search results for query: "TypeScript release"\n\nLinks: [{"title":"A","url":"https://a.example"}]',
+              is_error: false,
+            },
+          ],
+        },
+        tool_use_result: {
+          query: 'TypeScript release',
+          results: [
+            {
+              tool_use_id: 'srvtoolu_1',
+              content: [{ title: 'A', url: 'https://a.example' }],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: 'webSearch',
+      detail: 'TypeScript release',
+      searchResults: [{ title: 'A', url: 'https://a.example' }],
+    });
+  });
+
+  it('WebFetchはtool_use_resultにresultsが無いためsearchResultsが空のまま', () => {
+    const { items } = transcriptItems([
+      assistantToolUse('t1', 'WebFetch', { url: 'https://a.example' }),
+      JSON.stringify({
+        type: 'user',
+        uuid: 'u1',
+        message: {
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: '# 本文…', is_error: false },
+          ],
+        },
+        tool_use_result: {
+          bytes: 100,
+          code: 200,
+          codeText: 'OK',
+          result: '# 本文…',
+          durationMs: 10,
+          url: 'https://a.example',
+        },
+      }),
+    ]);
+
+    expect(items[0]).toMatchObject({ kind: 'webSearch', detail: 'https://a.example' });
+    expect(items[0]?.searchResults).toEqual([]);
+  });
+
+  it('tool_use_resultが無い（実測できなかった経路）ときも壊れずクエリだけの表示に留まる', () => {
+    const { items } = transcriptItems([
+      assistantToolUse('t1', 'WebSearch', { query: 'q' }),
+      JSON.stringify({
+        type: 'user',
+        uuid: 'u1',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok', is_error: false }],
+        },
+      }),
+    ]);
+
+    expect(items[0]).toMatchObject({ kind: 'webSearch', detail: 'q', text: 'ok' });
+    expect(items[0]?.searchResults).toEqual([]);
   });
 });

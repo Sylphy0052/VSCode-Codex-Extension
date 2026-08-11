@@ -74,6 +74,9 @@ export function chatScript(
   /** コマンド出力を畳まずに出す行数。超えた分は末尾だけ見せる。 */
   const MAX_VISIBLE_LINES = 20;
 
+  /** Web検索結果を畳まずに出す件数（issue #18）。超えた分は開くまで隠す。 */
+  const MAX_VISIBLE_SEARCH_RESULTS = 5;
+
   /** app-serverが返すコマンドの状態。そのまま出すと英語のままになる。 */
   const STATUS_LABEL = {
     inProgress: '実行中',
@@ -164,6 +167,12 @@ export function chatScript(
     body.className = 'body';
     wrap.appendChild(body);
 
+    // Web検索の結果（issue #18）。URLとタイトルの一覧を出す。webSearch以外では常に空
+    const searchResults = document.createElement('div');
+    searchResults.className = 'search-results';
+    searchResults.hidden = true;
+    wrap.appendChild(searchResults);
+
     const images = document.createElement('div');
     images.className = 'images';
     images.hidden = true;
@@ -178,6 +187,8 @@ export function chatScript(
       wrap,
       label,
       body,
+      searchResults,
+      searchResultsKey: '',
       images,
       imageKey: '',
       diffs,
@@ -299,6 +310,56 @@ export function chatScript(
     container.hidden = images.length === 0;
   }
 
+  /**
+   * Web検索結果1件（issue #18）。URLは全部見せ、自動では開かない。
+   * クリックしたら拡張機能側へ要求を送り、host側でvscode.env.openExternalを使って開く
+   * （Webviewから直接は開けないため）。押す＝行き先を見た上での明示の意思表示なので、
+   * ここでの追加確認はしない（design.mdの問い合わせカードのurlモードと同じ考え方）。
+   */
+  function createSearchResult(result) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'search-result';
+
+    const title = document.createElement('span');
+    title.className = 'search-result-title';
+    title.textContent = result.title;
+    button.appendChild(title);
+
+    const url = document.createElement('span');
+    url.className = 'search-result-url';
+    url.textContent = result.url;
+    button.appendChild(url);
+
+    button.addEventListener('click', () => {
+      vscode.postMessage({ type: 'openUrl', url: result.url });
+    });
+    return button;
+  }
+
+  /** 件数が多いときは折りたたむ。開いた状態は要素と一緒に保つ（issue #17/#19と同じやり方）。 */
+  function renderSearchResults(container, results) {
+    container.replaceChildren();
+    if (results.length === 0) {
+      container.hidden = true;
+      return;
+    }
+    container.hidden = false;
+
+    if (results.length <= MAX_VISIBLE_SEARCH_RESULTS) {
+      for (const result of results) container.appendChild(createSearchResult(result));
+      return;
+    }
+
+    const details = document.createElement('details');
+    details.className = 'search-results-fold';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Web検索結果（' + results.length + '件）';
+    details.appendChild(summary);
+    for (const result of results) details.appendChild(createSearchResult(result));
+    container.appendChild(details);
+  }
+
   /** 1ファイル分の差分。既定は畳んでおき、開いた状態は要素を使い回して保つ。 */
   function createDiff(diff) {
     const details = document.createElement('details');
@@ -347,6 +408,14 @@ export function chatScript(
     node.wrap.classList.toggle('running', running);
 
     renderBody(node, item);
+
+    // 中身が同じなら作り直さない。折りたたみを開いた状態が勝手に戻るのを防ぐ
+    const searchResults = item.searchResults || [];
+    const searchResultsKey = JSON.stringify(searchResults);
+    if (node.searchResultsKey !== searchResultsKey) {
+      node.searchResultsKey = searchResultsKey;
+      renderSearchResults(node.searchResults, searchResults);
+    }
 
     // 中身が同じなら作り直さない。拡大した画像が勝手に戻るのを防ぐ
     const images = item.images || [];
