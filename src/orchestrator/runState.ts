@@ -32,6 +32,11 @@ export type TaskFailureReason =
   | { readonly kind: 'loopFailed' }
   /** 人が承認要求を拒否した。自動再試行の対象にしない。 */
   | { readonly kind: 'approvalRejected' }
+  /**
+   * ワークフローViewの「タスク停止」操作（design.md §16.8）で人がそのタスクだけを止めた。
+   * `approvalRejected` と同じ理由（同じ操作を勝手にやり直さない）で自動再試行の対象にしない。
+   */
+  | { readonly kind: 'manualStop' }
   /** 依存先タスクの失敗が波及して `skipped` になった。 */
   | { readonly kind: 'dependencyFailed'; readonly failedTaskIds: readonly string[] }
   /**
@@ -320,6 +325,12 @@ export function applyLoopStopReason(
 
   if (reason === 'maxReached') {
     return markFailed(run, tasks, taskId, { kind: 'maxReached' });
+  }
+
+  if (reason === 'taskStopped') {
+    // ワークフローViewの「タスク停止」（design.md §16.8）。`markApprovalRejected`と同じく
+    // `retries`の自動再試行の経路には乗せない（人が明示的に止めたタスクを勝手にやり直さない）。
+    return markFailed(run, tasks, taskId, { kind: 'manualStop' });
   }
 
   // reason === 'failed'。`retries`の範囲内なら、新しいスレッド・worktreeでやり直す前提で

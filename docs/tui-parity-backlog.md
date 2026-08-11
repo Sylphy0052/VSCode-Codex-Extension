@@ -45,21 +45,21 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 
 調査Issue: Z-01〜Z-08 は [#1 Codex app-server の能力を実測で確定する](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1)、Z-09〜Z-13 は [#2 Claude Code の control protocol / stream-json の能力を実測で確定する](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/2)。
 
-| ID   | 調査内容                                                 | 結果                                                                                                                                 |
-| ---- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| Z-01 | Codex: 組込スラッシュコマンドは解釈されるか              | **されない**。`/status` がテキストとしてモデルへ渡り、モデルが答えた。専用メソッドへ振り替える                                       |
-| Z-02 | Codex: ターン内で model/effort/approval/sandbox を変える | **できる**。`TurnStartParams` の各フィールドが「このターン以降」に効く。`sandboxPolicy` も含む                                       |
-| Z-03 | Codex: 画像入力                                          | **できる**。`UserInput` は text / image(url) / localImage(path) / audio                                                              |
-| Z-04 | Codex: 差分本文                                          | **取れる**。`turn/diff/updated` が unified diff 文字列を送ってくる                                                                   |
-| Z-05 | Codex: トークン使用量                                    | **取れる**。`thread/tokenUsage/updated`（`modelContextWindow` 込み）                                                                 |
-| Z-06 | Codex: compact / review / plan                           | **ある**。`thread/compact/start` `review/start` `turn/plan/updated`。`thread/rollback` は deprecated                                 |
-| Z-07 | Codex: MCP / hooks / plugins / apps / skills             | **全てAPIあり**。実測で応答を確認                                                                                                    |
-| Z-08 | Codex: background terminal / agent thread                | terminal は `command/exec` 系で**できる**。agent thread 切替は未確定                                                                 |
-| Z-09 | Claude: スラッシュコマンドは解釈されるか                 | **される**。`/context` で `model: "<synthetic>"` の応答。APIコールもコストもゼロ                                                     |
-| Z-10 | Claude: control protocol の能力                          | `set_model` `set_permission_mode` ほか多数を実測で確認                                                                               |
-| Z-11 | Claude: compact / rewind                                 | `rewind_files` 実在（要チェックポイント）。compact はコマンド送信で可                                                                |
-| Z-12 | Claude: 途中ターンからの分岐                             | control には無い。`/branch` コマンド経由の可能性あり（[#22](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/22) で追試） |
-| Z-13 | Claude: todos / cost / context                           | **取れる**。`get_context_usage` `get_session_cost` `get_usage`                                                                       |
+| ID   | 調査内容                                                 | 結果                                                                                                                                                                                                                                                                                          |
+| ---- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Z-01 | Codex: 組込スラッシュコマンドは解釈されるか              | **されない**。`/status` がテキストとしてモデルへ渡り、モデルが答えた。専用メソッドへ振り替える                                                                                                                                                                                                |
+| Z-02 | Codex: ターン内で model/effort/approval/sandbox を変える | **できる**。`TurnStartParams` の各フィールドが「このターン以降」に効く。`sandboxPolicy` も含む                                                                                                                                                                                                |
+| Z-03 | Codex: 画像入力                                          | **できる**。`UserInput` は text / image(url) / localImage(path) / audio                                                                                                                                                                                                                       |
+| Z-04 | Codex: 差分本文                                          | **取れる**。`turn/diff/updated` が unified diff 文字列を送ってくる                                                                                                                                                                                                                            |
+| Z-05 | Codex: トークン使用量                                    | **取れる**。`thread/tokenUsage/updated`（`modelContextWindow` 込み）                                                                                                                                                                                                                          |
+| Z-06 | Codex: compact / review / plan                           | **ある**。`thread/compact/start` `review/start` `turn/plan/updated`。`thread/rollback` は deprecated                                                                                                                                                                                          |
+| Z-07 | Codex: MCP / hooks / plugins / apps / skills             | **全てAPIあり**。実測で応答を確認                                                                                                                                                                                                                                                             |
+| Z-08 | Codex: background terminal / agent thread                | terminal は `command/exec` 系で**できる**。agent thread 切替は未確定                                                                                                                                                                                                                          |
+| Z-09 | Claude: スラッシュコマンドは解釈されるか                 | **される**。`/context` で `model: "<synthetic>"` の応答。APIコールもコストもゼロ                                                                                                                                                                                                              |
+| Z-10 | Claude: control protocol の能力                          | `set_model` `set_permission_mode` ほか多数を実測で確認                                                                                                                                                                                                                                        |
+| Z-11 | Claude: compact / rewind                                 | `rewind_files` 実在（要チェックポイント）。compact はコマンド送信で可                                                                                                                                                                                                                         |
+| Z-12 | Claude: 途中ターンからの分岐                             | **無いと確定**。`branch` / `fork` コマンドはバイナリに実在するが `--print`（非対話）では無効化されており、送っても `"... isn't available in this environment."` で拒否される。control_requestのsubtypeも14候補で全滅（[#22](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/22)） |
+| Z-13 | Claude: todos / cost / context                           | **取れる**。`get_context_usage` `get_session_cost` `get_usage`                                                                                                                                                                                                                                |
 
 **Phase 0 は完了**（2026-08-10、Codex CLI 0.147.0 / Claude Code 2.1.226）。詳細な根拠は [#1](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1) と [#2](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/2) のコメントにある。各実装Issueにも結論を反映済み。
 
@@ -127,15 +127,15 @@ Codexはターン単位で model / effort / approvalPolicy を渡せるのにCla
 
 ## Phase 5: 会話操作
 
-| ID    | 内容                                                                                                         | 対象         | 優先度 | 依存      | Issue  |
-| ----- | ------------------------------------------------------------------------------------------------------------ | ------------ | ------ | --------- | ------ |
-| TP-40 | 手動の会話圧縮（`/compact` 相当）。コンテキストが逼迫したときの手が現状ない                                  | Codex/Claude | P1     | Z-06 Z-11 | #20 済 |
-| TP-41 | 巻き戻し（Codex Esc Esc / Claude `/rewind` 相当）。Codexはターン分岐で部分的に代替できるが、Claudeは代替なし | 両方         | P2     | Z-11      | #21    |
-| TP-44 | Claude で会話の途中ターンから分岐する。現状「CLIに手段が無い」としている                                     | Claude       | P2     | Z-12      | #22    |
-| TP-45 | コードレビューの起動（`/review` 相当）を画面の操作として持つ                                                 | Codex/Claude | P2     | Z-06 Z-09 | #23 済 |
-| TP-42 | 一時的な脇道の会話（Codex `/btw` 相当）                                                                      | Codex        | P3     | Z-06      | #24    |
-| TP-43 | トランスクリプト表示と生テキストモード（Ctrl+T / `/raw` 相当）                                               | Codex/Claude | P3     | -         | #25    |
-| TP-46 | `AGENTS.md` / `CLAUDE.md` の生成（`/init` 相当）                                                             | Codex/Claude | P3     | TP-11     | #26    |
+| ID    | 内容                                                                                                         | 対象         | 優先度 | 依存      | Issue                |
+| ----- | ------------------------------------------------------------------------------------------------------------ | ------------ | ------ | --------- | -------------------- |
+| TP-40 | 手動の会話圧縮（`/compact` 相当）。コンテキストが逼迫したときの手が現状ない                                  | Codex/Claude | P1     | Z-06 Z-11 | #20 済               |
+| TP-41 | 巻き戻し（Codex Esc Esc / Claude `/rewind` 相当）。Codexはターン分岐で部分的に代替できるが、Claudeは代替なし | 両方         | P2     | Z-11      | #21                  |
+| TP-44 | Claude で会話の途中ターンから分岐する。実測の結果、非対話環境では手段が無いと確定した（design.md §14.6）     | Claude       | P2     | Z-12      | #22 不可（根拠つき） |
+| TP-45 | コードレビューの起動（`/review` 相当）を画面の操作として持つ                                                 | Codex/Claude | P2     | Z-06 Z-09 | #23 済               |
+| TP-42 | 一時的な脇道の会話（Codex `/btw` 相当）                                                                      | Codex        | P3     | Z-06      | #24                  |
+| TP-43 | トランスクリプト表示と生テキストモード（Ctrl+T / `/raw` 相当）                                               | Codex/Claude | P3     | -         | #25                  |
+| TP-46 | `AGENTS.md` / `CLAUDE.md` の生成（`/init` 相当）                                                             | Codex/Claude | P3     | TP-11     | #26                  |
 
 ## Phase 6: 環境・管理系
 

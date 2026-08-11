@@ -42,6 +42,9 @@ const fakeLogger: Logger = {
   show: () => undefined,
 };
 
+/** 既定でaskになる危険パターンの例（design.md §16.7）。承認関連のテストで使い回す。 */
+const DANGEROUS_COMMAND = ['git', 'push', '--force', 'origin', 'main'].join(' ');
+
 class FakeTaskSession implements TaskSession {
   readonly sessionId: string;
   runLoopCalls: LoopPlan[] = [];
@@ -83,7 +86,18 @@ class FakeTaskSession implements TaskSession {
     this.interruptCount += 1;
     return Promise.resolve();
   }
-  reveal(): void {}
+  stopLoopCount = 0;
+  stopLoop(): void {
+    this.stopLoopCount += 1;
+  }
+  decideApprovalCalls: Array<{ requestId: number | string; decision: ApprovalDecision }> = [];
+  decideApproval(requestId: number | string, decision: ApprovalDecision): void {
+    this.decideApprovalCalls.push({ requestId, decision });
+  }
+  revealCount = 0;
+  reveal(): void {
+    this.revealCount += 1;
+  }
   open(): void {}
   dispose(): void {
     this.disposed = true;
@@ -911,5 +925,506 @@ tasks:
     expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
     // worktreeが無いのでセッションも一度も開かれない
     expect(codexHost.openInputs).toHaveLength(0);
+  });
+});
+
+describe('WorkflowRunner: ワークフローViewからの操作（design.md §16.8）', () => {
+  const YAML = `
+version: 1
+name: view-ops-test
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+  - id: T2
+    dependsOn: [T1]
+    prompt: p
+    done: d
+`;
+
+  it('getSnapshotはdependsOn・provider・応答の1行要約を含む', async () => {
+    const { runner, codexHost } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.emitState({ ...initialChatState, busy: true, turnResultText: '' });
+    t1.emitState({
+      ...initialChatState,
+      busy: true,
+      items: [
+        {
+          id: 'i1',
+          kind: 'agentMessage',
+          text: '作業中です',
+          detail: '',
+          status: undefined,
+          turnId: undefined,
+          diffs: [],
+        },
+      ],
+    });
+
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.tasks.map((t) => t.id)).toEqual(['T1', 'T2']);
+    const t2 = snapshot?.tasks.find((t) => t.id === 'T2');
+    expect(t2?.dependsOn).toEqual(['T1']);
+    expect(t2?.provider).toBe('codex');
+    const t1Snapshot = snapshot?.tasks.find((t) => t.id === 'T1');
+    expect(t1Snapshot?.lastResponseSummary).toBe('作業中です');
+    expect(t1Snapshot?.hasLiveSession).toBe(true);
+  });
+
+  it('onChangedはタスクの状態が変わるたびにrunIdで通知する', async () => {
+    const { runner, codexHost } = createHarness(YAML);
+    const notified: string[] = [];
+    const unsubscribe = runner.onChanged((runId) => notified.push(runId));
+
+    const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    expect(notified).toContain(runId);
+
+    unsubscribe();
+    notified.length = 0;
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+    // 購読解除後は通知が来ない
+    expect(notified).toEqual([]);
+  });
+
+  it('revealTaskはそのタスクのTaskSession.reveal()を呼ぶ', async () => {
+    const { runner, codexHost } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    expect(runner.revealTask(runId, 'T1')).toBe(true);
+    expect(t1.revealCount).toBe(1);
+    // 存在しないタスクは何もせずfalseを返す
+    expect(runner.revealTask(runId, '存在しない')).toBe(false);
+  });
+
+  it('interruptTaskはTaskSession.interrupt()だけを呼び、ループは止めない', async () => {
+    const { runner, codexHost, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    await runner.interruptTask(runId, 'T1');
+    expect(t1.interruptCount).toBe(1);
+    // タスクの状態はrunningのまま（ループは続く）
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+  });
+
+  it('stopTaskはそのタスクだけをfailed（manualStop）にし、他のタスクへは影響しない', async () => {
+    const parallelYaml = `
+version: 1
+name: stop-task-test
+defaults:
+  maxParallel: 2
+tasks:
+  - id: A
+    prompt: p
+    done: d
+  - id: B
+    prompt: p
+    done: d
+`;
+    const { runner, codexHost, store } = createHarness(parallelYaml);
+    const result = await runner.start('/repo/.agents/workflows/stop.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const a = codexHost.byTaskId('A');
+    const b = codexHost.byTaskId('B');
+    runner.stopTask(runId, 'A');
+    // TaskSession.stopLoop() はLoopController.stop('taskStopped')相当。
+    // フェイクはstopLoopCountを記録するだけなので、実際の遷移は`finish`で模擬する
+    expect(a.stopLoopCount).toBe(1);
+    a.finish('taskStopped' as LoopStopReason, { ...initialChatState });
+    await flush();
+
+    const taskA = store.find(runId)?.tasks['A'];
+    expect(taskA?.state).toBe('failed');
+    expect(taskA?.failure).toEqual({ kind: 'manualStop' });
+    // Bはstopの対象外なので走り続ける
+    expect(store.find(runId)?.tasks['B']?.state).toBe('running');
+    expect(b.disposed).toBe(false);
+    expect(a.disposed).toBe(true);
+  });
+
+  it('retryTaskはfailedタスクを依存が満たされていればpendingへ戻し、新しいセッションで再開する', async () => {
+    const { runner, codexHost, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('failed', { ...initialChatState, turnFailed: true });
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+
+    expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+    // 新しいセッションが作られている（元のセッションとは別物）
+    expect(codexHost.sessions).toHaveLength(2);
+
+    // 依存未達（T2はT1が未完了）なので再実行できない
+    expect(runner.retryTask(runId, 'T2')).toEqual({ ok: false });
+  });
+
+  it('allowを持つタスクの再実行はallowConfirmed無しでは始まらない（design.md §16.7、レビュー指摘: high）', async () => {
+    const allowRetryYaml = `
+version: 1
+name: allow-retry-test
+tasks:
+  - id: T1
+    allow:
+      - "npm test"
+    prompt: p
+    done: d
+`;
+    const { runner, codexHost, store } = createHarness(allowRetryYaml);
+    const result = await runner.start('/repo/.agents/workflows/allow-retry.yaml', '/repo', {
+      allowConfirmed: true,
+    });
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('failed', { ...initialChatState, turnFailed: true });
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+
+    // 確認無しでは再実行が始まらない
+    expect(runner.retryTask(runId, 'T1')).toEqual({ ok: false, needsAllowConfirmation: true });
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+    expect(codexHost.sessions).toHaveLength(1);
+
+    // allowConfirmed: true を付ければ再実行できる
+    expect(runner.retryTask(runId, 'T1', { allowConfirmed: true })).toEqual({ ok: true });
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+    expect(codexHost.sessions).toHaveLength(2);
+  });
+
+  it('decideApprovalはpendingApprovalのrequestIdでTaskSession.decideApprovalを呼ぶ', async () => {
+    const singleYaml = `
+version: 1
+name: decide-approval-test
+tasks:
+  - id: T1
+    autoApprove: true
+    prompt: p
+    done: d
+`;
+    const { runner, codexHost } = createHarness(singleYaml, { allowAutoApprove: true });
+    const result = await runner.start('/repo/.agents/workflows/decide.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    const decision = await t1.requestApproval(
+      { requestId: 42, kind: 'command', title: '危険な操作', detail: '詳細', itemId: undefined },
+      { command: DANGEROUS_COMMAND, cwd: t1.cwd },
+    );
+    expect(decision.kind).toBe('ask');
+    await flush();
+
+    const snapshot = runner.getSnapshot(runId);
+    const t1Snapshot = snapshot?.tasks.find((t) => t.id === 'T1');
+    expect(t1Snapshot?.pendingApproval).toEqual({
+      requestId: 42,
+      kind: 'command',
+      title: '危険な操作',
+      detail: '詳細',
+    });
+
+    expect(runner.decideApproval(runId, 'T1', 'accept')).toBe(true);
+    expect(t1.decideApprovalCalls).toEqual([{ requestId: 42, decision: 'accept' }]);
+  });
+
+  it('pendingApprovalのtitle/detailは双方向制御文字を無害化してから保持する（レビュー指摘: medium 3）', async () => {
+    const singleYaml = `
+version: 1
+name: decide-approval-sanitize-test
+tasks:
+  - id: T1
+    autoApprove: true
+    prompt: p
+    done: d
+`;
+    const { runner, codexHost } = createHarness(singleYaml, { allowAutoApprove: true });
+    const result = await runner.start('/repo/.agents/workflows/decide-sanitize.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    const rtlOverride = '\u202E';
+    const spoofedTitle = 'safe' + rtlOverride + 'gnp.exe';
+    const spoofedDetail = 'detail' + rtlOverride + 'line';
+    await t1.requestApproval(
+      {
+        requestId: 1,
+        kind: 'command',
+        title: spoofedTitle,
+        detail: spoofedDetail,
+        itemId: undefined,
+      },
+      { command: DANGEROUS_COMMAND, cwd: t1.cwd },
+    );
+    await flush();
+
+    const snapshot = runner.getSnapshot(runId);
+    const t1Snapshot = snapshot?.tasks.find((t) => t.id === 'T1');
+    expect(t1Snapshot?.pendingApproval?.title).not.toContain(rtlOverride);
+    expect(t1Snapshot?.pendingApproval?.detail).not.toContain(rtlOverride);
+    expect(t1Snapshot?.pendingApproval?.title).toBe('safegnp.exe');
+    expect(t1Snapshot?.pendingApproval?.detail).toBe('detailline');
+  });
+
+  it('allowを含むタスクがあるワークフローはallowConfirmed無しでは開始せずneedsAllowConfirmationを返す', async () => {
+    const allowYaml = `
+version: 1
+name: allow-confirm-test
+tasks:
+  - id: T1
+    allow:
+      - "npm test"
+    prompt: p
+    done: d
+`;
+    const { runner, codexHost } = createHarness(allowYaml);
+    const first = await runner.start('/repo/.agents/workflows/allow.yaml', '/repo');
+    expect(first.ok).toBe(false);
+    expect(first.needsAllowConfirmation).toBe(true);
+    expect(first.allowTaskIds).toEqual(['T1']);
+    expect(codexHost.sessions).toHaveLength(0);
+
+    const second = await runner.start('/repo/.agents/workflows/allow.yaml', '/repo', {
+      allowConfirmed: true,
+    });
+    expect(second.ok).toBe(true);
+    await flush();
+    expect(codexHost.sessions).toHaveLength(1);
+
+    const snapshot = runner.getSnapshot(second.runId as string);
+    expect(snapshot?.warnings.some((w) => w.kind === 'allowOverride' && w.taskId === 'T1')).toBe(
+      true,
+    );
+  });
+
+  it('removeWorktreesはdone/failed/skippedタスクのworktreeを撤去する', async () => {
+    const git = fakeGit();
+    const { runner, codexHost } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/remove.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const before = git.calls.filter((c) => c.args[0] === 'worktree' && c.args[1] === 'remove');
+    expect(before).toHaveLength(0); // cleanup: keep（既定）なので自動では撤去されない
+
+    const outcome = await runner.removeWorktrees(runId);
+    expect(outcome.removed).toContain('T1');
+    const after = git.calls.filter((c) => c.args[0] === 'worktree' && c.args[1] === 'remove');
+    expect(after).toHaveLength(1);
+  });
+});
+
+describe('WorkflowRunner: リロード後の実行再開（design.md §16.11）', () => {
+  const YAML = `
+version: 1
+name: reload-resume-test
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+
+  it('restoreRunsForViewはworkspaceStateから実行を復元し、再実行できる状態にする', async () => {
+    const { runner, codexHost, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/reload.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    codexHost.byTaskId('T1'); // 開始できていることの確認
+
+    // 新しいプロセス（リロード後）を模す。同じstoreを使い回すが、ライブな状態は空
+    const newCodexHost = new FakeHost();
+    const newHosts: Record<Provider, TaskSessionHost> = {
+      codex: newCodexHost,
+      claude: newCodexHost,
+    };
+    const reloadedRunner = new WorkflowRunner({
+      hosts: newHosts,
+      worktreeQueue: new WorktreeCreationQueue(),
+      git: fakeGit(),
+      fs: identityFs,
+      filePort: filePort(YAML),
+      store,
+      log: fakeLogger,
+      readBaseline: () => ({
+        codexSandbox: 'read-only',
+        codexApprovalMode: 'on-request',
+        claudePermissionMode: 'manual',
+        allowAutoApprove: true,
+      }),
+    });
+
+    await reloadedRunner.restoreRunsForView();
+
+    // リロード直後は中断扱い（failed）で復元され、Viewから見える
+    const snapshot = reloadedRunner.getSnapshot(runId);
+    expect(snapshot?.tasks[0]?.state).toBe('failed');
+    expect(snapshot?.tasks[0]?.failure).toEqual({ kind: 'reloadInterrupted' });
+    expect(snapshot?.tasks[0]?.hasLiveSession).toBe(false);
+
+    // 「再実行」で新しいセッションから続けられる
+    expect(reloadedRunner.retryTask(runId, 'T1')).toEqual({ ok: true });
+    await flush();
+    expect(newCodexHost.sessions).toHaveLength(1);
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+  });
+
+  it(
+    'allowを含むワークフローをリロード後に復元しても、allowOverride警告が消えず、' +
+      '再実行にはallow確認が要る（design.md §16.7、レビュー指摘: high）',
+    async () => {
+      const allowYaml = `
+version: 1
+name: reload-allow-test
+tasks:
+  - id: T1
+    allow:
+      - "npm test"
+    prompt: p
+    done: d
+`;
+      const { runner, codexHost, store } = createHarness(allowYaml);
+      const result = await runner.start('/repo/.agents/workflows/reload-allow.yaml', '/repo', {
+        allowConfirmed: true,
+      });
+      const runId = result.runId as string;
+      await flush();
+      codexHost.byTaskId('T1');
+
+      // start()の時点ではallowOverride警告が出ている（従来どおり）
+      expect(runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'allowOverride')).toBe(
+        true,
+      );
+
+      // 新しいプロセス（リロード後）を模す
+      const newCodexHost = new FakeHost();
+      const reloadedRunner = new WorkflowRunner({
+        hosts: { codex: newCodexHost, claude: newCodexHost },
+        worktreeQueue: new WorktreeCreationQueue(),
+        git: fakeGit(),
+        fs: identityFs,
+        filePort: filePort(allowYaml),
+        store,
+        log: fakeLogger,
+        readBaseline: () => ({
+          codexSandbox: 'read-only',
+          codexApprovalMode: 'on-request',
+          claudePermissionMode: 'manual',
+          allowAutoApprove: true,
+        }),
+      });
+      await reloadedRunner.restoreRunsForView();
+
+      // 復元後もallowOverride警告が消えない（修正前は`live.warnings: []`初期化のため消えていた）
+      const snapshot = reloadedRunner.getSnapshot(runId);
+      const allowWarning = snapshot?.warnings.find((w) => w.kind === 'allowOverride');
+      expect(allowWarning).toBeDefined();
+      expect(allowWarning?.taskId).toBe('T1');
+      expect(allowWarning?.message).toContain('npm test');
+
+      // 再実行はallow確認を経由しないと始まらない
+      expect(reloadedRunner.retryTask(runId, 'T1')).toEqual({
+        ok: false,
+        needsAllowConfirmation: true,
+      });
+      await flush();
+      expect(newCodexHost.sessions).toHaveLength(0);
+
+      // 確認すれば再実行できる
+      expect(reloadedRunner.retryTask(runId, 'T1', { allowConfirmed: true })).toEqual({
+        ok: true,
+      });
+      await flush();
+      expect(newCodexHost.sessions).toHaveLength(1);
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+    },
+  );
+
+  it('定義ファイルが大きすぎるrunは復元をあきらめる（design.md §16.2の上限。レビュー指摘: medium 2）', async () => {
+    const { runner, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/oversize.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const oversizeFilePort: WorkflowFilePort = {
+      fileSize: async () => MAX_WORKFLOW_FILE_BYTES + 1,
+      readTextFile: async () => YAML,
+    };
+    const reloadedRunner = new WorkflowRunner({
+      hosts: { codex: new FakeHost(), claude: new FakeHost() },
+      worktreeQueue: new WorktreeCreationQueue(),
+      git: fakeGit(),
+      fs: identityFs,
+      filePort: oversizeFilePort,
+      store,
+      log: fakeLogger,
+      readBaseline: () => ({
+        codexSandbox: 'read-only',
+        codexApprovalMode: 'on-request',
+        claudePermissionMode: 'manual',
+        allowAutoApprove: true,
+      }),
+    });
+
+    await expect(reloadedRunner.restoreRunsForView()).resolves.toBeUndefined();
+    // 上限超過のため復元をあきらめる（readTextFileが呼ばれる前にfileSizeで弾く）
+    expect(reloadedRunner.getSnapshot(runId)).toBeUndefined();
+  });
+
+  it('定義ファイルが読めないrunは復元をあきらめる（クラッシュしない）', async () => {
+    const { runner, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/gone.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const brokenFilePort: WorkflowFilePort = {
+      fileSize: async () => undefined,
+      readTextFile: async () => undefined,
+    };
+    const reloadedRunner = new WorkflowRunner({
+      hosts: { codex: new FakeHost(), claude: new FakeHost() },
+      worktreeQueue: new WorktreeCreationQueue(),
+      git: fakeGit(),
+      fs: identityFs,
+      filePort: brokenFilePort,
+      store,
+      log: fakeLogger,
+      readBaseline: () => ({
+        codexSandbox: 'read-only',
+        codexApprovalMode: 'on-request',
+        claudePermissionMode: 'manual',
+        allowAutoApprove: true,
+      }),
+    });
+
+    await expect(reloadedRunner.restoreRunsForView()).resolves.toBeUndefined();
+    expect(reloadedRunner.getSnapshot(runId)).toBeUndefined();
   });
 });
