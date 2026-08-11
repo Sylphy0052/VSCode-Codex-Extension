@@ -1970,11 +1970,23 @@ Codex TUIの `/import` はClaude Codeなど他エージェントから設定・�
 #### 検証
 
 - `test/unit/stdinSafety.test.ts`: `canWriteStdin` / `safeWriteStdin` / `guardStdinErrors`をフェイクの`proc`で検証（純粋関数部分）
-- `test/integration/sessionHistory.test.ts`: 即終了するスタブへ`codex.executablePath`を向ける統合テスト（#147で見つかった実際の再現条件）。**この対策で未捕捉例外は消え、他のテストを道連れにしなくなった**が、`test.skip`を外して実行すると**テストが完了しないまま止まる**（16分待って1件も結果が出ない）ことを実測したため、skipのまま残している
+- `test/integration/sessionHistory.test.ts`: 即終了するスタブへ`codex.executablePath`を向ける統合テスト（#147で見つかった実際の再現条件）。**この対策で未捕捉例外は消え、他のテストを道連れにしなくなった**
 
-#### 残っている問題
+`test.skip`を外して実行すると、ハングせず完走して6 passing / 5 failingになる。残る5件は履歴一覧が空になるという別の問題で、issue #164 で追う。
 
-未捕捉例外は塞いだが、**相手が即終了したときに待ちを打ち切る作りは無い**。単発の問い合わせにはタイムアウトがあるので最終的には決着するが、常駐接続側で「もう応答が来ない」と判断する経路が弱い。`sessionHistory.test.ts`が完了しないのはこれが原因とみられる（未特定）。ここを詰めればH群5件の自動化が通る見込み
+一時期「skipを外すとテストが完了しないまま止まる」と記録していたが、これは誤りだった。原因はEPIPEでも待ちの打ち切りでもなく、実行環境の`XDG_RUNTIME_DIR`が消えていたこと（§14.32）。skipの有無ともこの対策とも無関係だった。
+
+### 14.32 統合テストのXDG_RUNTIME_DIR（issue #163）
+
+VSCodeは単一インスタンス判定のためのIPCソケットを`XDG_RUNTIME_DIR`の下へ作る。このディレクトリが実在しないと、ソケットを作れないまま起動が終わらず、**テストは1件も始まらないまま止まる**。mochaの出力が一切出ないので、テストの問題と見分けがつきにくい。
+
+WSL2ではsystemd-logindのユーザーセッションが終わると`/run/user/<uid>`ごと消える。環境変数`XDG_RUNTIME_DIR`だけが残ってディレクトリが無い状態になるため、未設定時のフォールバックも働かない。
+
+対策として`test/integration/fixtures/setup.mjs`の`createRuntimeDir()`で使い捨てのディレクトリを毎回作り、`.vscode-test.mjs`の`env`から渡す。ユーザーの`/run/user/<uid>`には触らない。
+
+置き場所を`.vscode-test/`配下ではなく`os.tmpdir()`の直下にしているのは、UNIXドメインソケットのパス長制限（107文字）に収めるため。リポジトリが深い場所にあると`<repo>/.vscode-test/fixtures/.../vscode-xxxxxxxx-1.13-main.sock`が上限を超え、`listen EINVAL`で起動に失敗する。
+
+切り分けで無関係と分かったもの: VSCodeのバージョン（1.132.0に固定しても再現）、コードの変更（#155を含まないコミットでも再現）、残留プロセス、ディスク・メモリの空き。
 
 ## 15. 作業記録（日報・週報連携）
 

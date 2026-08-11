@@ -10,13 +10,39 @@
 // 経由でこのファイルを読み直す（このプロセスと拡張機能ホストのプロセスは別なので、
 // メモリ越しの受け渡しはできない）。
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, '..', '..', '..');
 const fixturesRoot = join(repoRoot, '.vscode-test', 'fixtures');
+
+/**
+ * VSCodeへ渡す `XDG_RUNTIME_DIR` を用意する（issue #163）。
+ *
+ * VSCodeは単一インスタンス判定のためのIPCソケットを `XDG_RUNTIME_DIR` の下へ作る。
+ * このディレクトリが実在しないと、ソケットを作れないまま起動が終わらず、テストは
+ * 1件も始まらないまま止まる。WSL2ではsystemd-logindのユーザーセッションが終わると
+ * `/run/user/<uid>` ごと消えるため、環境変数だけが残ってディレクトリが無い状態に
+ * なりうる（未設定時のフォールバックも働かない）。
+ *
+ * ユーザーの `/run/user/<uid>` には触らず、使い捨てのディレクトリを毎回作って渡す。
+ * 置き場所を `.vscode-test/` 配下ではなく `os.tmpdir()` の直下にしているのは、
+ * UNIXドメインソケットのパス長制限（107文字）に収めるため。リポジトリが深い場所に
+ * あると `<repo>/.vscode-test/fixtures/... /vscode-xxxxxxxx-1.13-main.sock` が上限を
+ * 超え、`listen EINVAL` で起動に失敗する。
+ */
+function createRuntimeDir() {
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'vscode-it-'));
+  // ベストエフォートの後始末。SIGKILLで落とされた場合は残るが、中身はソケット1つ。
+  process.on('exit', () => {
+    rmSync(runtimeDir, { recursive: true, force: true });
+  });
+  return runtimeDir;
+}
 
 function writeJsonl(filePath, lines) {
   mkdirSync(dirname(filePath), { recursive: true });
@@ -33,6 +59,7 @@ export function prepareFixtures() {
   const claudeHome = join(fixturesRoot, 'claude-home');
   const userDataDir = join(fixturesRoot, 'user-data');
   const activityLogDir = join(fixturesRoot, 'activity-log');
+  const runtimeDir = createRuntimeDir();
 
   mkdirSync(workspaceFolder, { recursive: true });
   mkdirSync(outsideWorkspace, { recursive: true });
@@ -140,12 +167,14 @@ export function prepareFixtures() {
   //
   // 既知のトレードオフ: `ProviderRegistry.available()`（src/provider/registry.ts）は
   // `locate()` が解決できないプロバイダを一覧からまるごと除外するため、この設定では
-  // 履歴一覧（TreeView）が常に空になる。「解決はできるが呼んでも即失敗する」無害な
-  // スタブ（`exit 1` するだけのシェルスクリプト）へ差し替える案も試したが、
-  // `AppServerClient` がまだ書き込み中に相手プロセスが終了し `EPIPE` の非捕捉例外で
-  // 拡張機能ホストごと巻き込む形で複数テストが道連れに失敗した（2026-08-12に実測）。
-  // そのため履歴一覧まわり（`sessionHistory.test.ts`）は現状 `test.skip` にしてある。
-  // 再挑戦するなら、拡張機能側で書き込み時のEPIPEを捕捉する対応が先に要る。
+  // 履歴一覧（TreeView）が常に空になる。そのため履歴一覧まわり
+  // （`sessionHistory.test.ts`）は現状 `test.skip` にしてある（issue #164）。
+  //
+  // 「解決はできるが呼んでも即失敗する」無害なスタブ（`exit 1` するだけのシェル
+  // スクリプト）へ差し替える案は、`AppServerClient` がまだ書き込み中に相手プロセスが
+  // 終了し `EPIPE` の非捕捉例外で拡張機能ホストごと巻き込む形で複数テストが道連れに
+  // 失敗したため見送っていた（2026-08-12に実測）。その後 issue #155 で書き込み時の
+  // EPIPEを捕捉する対応（`src/process/stdinSafety.ts`）が入ったので、再挑戦できる。
   const settings = {
     'codex.codexHome': codexHome,
     'codex.executablePath': '/nonexistent/codex-must-not-run',
@@ -183,5 +212,5 @@ export function prepareFixtures() {
     'utf8',
   );
 
-  return { workspaceFolder, userDataDir, codexHome, claudeHome, manifest };
+  return { workspaceFolder, userDataDir, runtimeDir, codexHome, claudeHome, manifest };
 }
