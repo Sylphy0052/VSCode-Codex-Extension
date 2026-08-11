@@ -284,8 +284,7 @@ export class AppServerClient {
   /**
    * hookを信頼する（issue #28）。
    *
-   * **根拠は実行ファイルの文字列調査(strings)のみ**で、実際に書き込んで確認してはいない
-   * （この環境の `~/.codex/config.toml` を書き換えない方針のため。`hooksStatus.ts` の
+   * **実測で確認済み**（issue #146。隔離環境での検証結果は `hooksStatus.ts` の
    * `buildHookTrustEdit` のコメントを参照）。信頼を取り消す経路は見つかっていない
    * （`MergeStrategy` が `replace` / `upsert` のみで、キーの削除に相当する操作が無い）。
    */
@@ -339,10 +338,11 @@ export class AppServerClient {
    * skillの有効/無効を切り替える（issue #35）。
    *
    * `skills/config/write`（`SkillsConfigWriteParams { enabled, name?, path? }` →
-   * `SkillsConfigWriteResponse { effectiveEnabled }`）はスキーマ根拠（`codex app-server
-   * generate-json-schema --out` で確認）。この環境のskill設定を書き換えない方針のため、
-   * **実際に切り替えて確認してはいない**。`path` は `skills/list` が返す一意なファイル
-   * パスをそのまま渡す（`name` 選択子は同名skillが複数scopeに存在しうるため使わない）。
+   * `SkillsConfigWriteResponse { effectiveEnabled }`）は**実測で確認済み**（issue #146。
+   * `CODEX_HOME` を隔離した環境で実際に切り替え、`config.toml` の `[[skills.config]]` と
+   * 続く `skills/list` の両方に反映されることを確認した）。`path` は `skills/list` が返す
+   * 一意なファイルパスをそのまま渡す（`name` 選択子は同名skillが複数scopeに存在しうるため
+   * 使わない）。
    */
   async setSkillEnabled(
     path: string,
@@ -432,9 +432,12 @@ export class AppServerClient {
    * pluginをインストールする（issue #32）。
    *
    * `plugin/install`（`PluginInstallParams { pluginName, marketplacePath?,
-   * remoteMarketplaceName? }`）はスキーマ根拠（`codex app-server generate-json-schema
-   * --out` で確認）。この環境のplugin設定を書き換えない方針のため、**実際にインストールして
-   * 確認してはいない**。呼び出し側（`SettingsProvider.installCodexPlugin`）が確認ダイアログで
+   * remoteMarketplaceName? }`）は**実測で確認済み**（issue #146。ネットワークを使わない
+   * 完全ローカルのマーケットプレイスを隔離環境に用意し、実際にインストールして
+   * `plugin/installed` に反映されることを確認した。`marketplacePath` は
+   * `plugin/installed` が返す `marketplaces[].path`（マーケットプレイスの
+   * マニフェストファイルそのもののパス。ディレクトリを渡すと失敗する）をそのまま使うこと）。
+   * 呼び出し側（`SettingsProvider.installCodexPlugin`）が確認ダイアログで
    * 「何をどこから入れるか」を明示してから呼ぶこと。
    */
   async installPlugin(
@@ -463,9 +466,10 @@ export class AppServerClient {
   /**
    * pluginをアンインストールする（issue #32）。
    *
-   * `plugin/uninstall`（`PluginUninstallParams { pluginId }`）はスキーマ根拠のみ
-   * （`installPlugin` と同じ理由で実際に削除して確認してはいない）。`pluginId` は
-   * `plugin/installed` が返す一覧の `key`（`<name>@<marketplace>`）をそのまま渡す。
+   * `plugin/uninstall`（`PluginUninstallParams { pluginId }`）は**実測で確認済み**
+   * （issue #146。`installPlugin` と同じ隔離環境で実際に削除し、`plugin/installed` から
+   * 消えることを確認した）。`pluginId` は `plugin/installed` が返す一覧の `key`
+   * （`<name>@<marketplace>`）をそのまま渡す。
    */
   async uninstallPlugin(pluginId: string): Promise<{ ok: true } | { ok: false; error: string }> {
     if (!isValidPluginName(pluginId)) {
@@ -615,13 +619,17 @@ export class AppServerClient {
    * CLIが返した生のJSONを再送する。スキーマの型が一致しているため）。呼び出し側
    * （`SettingsProvider.runCodexImport`）が実行前に確認ダイアログで対象を明示すること。
    *
-   * `externalAgentConfig/import` は `{importId}` を即座に返し、実際の結果は
-   * `externalAgentConfig/import/completed` 通知で非同期に届く（Phase 0調査で確認された
-   * UI文言「Import started. You can keep working while it finishes.」と整合）。このクライアント
-   * は単発起動で常駐できないため、完了通知を `IMPORT_COMPLETE_TIMEOUT_MS` まで待ってから
-   * プロセスを終える。**タイムアウト後にCLI側で処理が実際に継続するかどうかは未確認**
-   * （実行系のため実測していない。プロセスを終了させることで中断される可能性がある）。
-   * タイムアウトを失敗とはせず、「開始はできた」ことが分かる形（`results: undefined`）で返す。
+   * **実測で確認済み**（issue #146。`CODEX_HOME` と、Claude Code側の探索元となる `$HOME` の
+   * 両方を隔離した環境で `HOOKS` / `SKILLS` を実行し、完了通知が届いて実際にファイルへ
+   * 反映されることを確認した。詳細はdesign.md §14.30参照）。`externalAgentConfig/import` は
+   * `{importId}` を即座に返し、実際の結果は `externalAgentConfig/import/completed` 通知で
+   * 非同期に届く（Phase 0調査で確認されたUI文言「Import started. You can keep working while
+   * it finishes.」と整合。実測では数十ミリ秒以内に届いた）。このクライアントは単発起動で
+   * 常駐できないため、完了通知を `IMPORT_COMPLETE_TIMEOUT_MS` まで待ってからプロセスを
+   * 終える。**タイムアウト後にCLI側で処理が実際に継続するかどうかは未確認**（実測した
+   * 範囲ではタイムアウトに達する前に完了したため、この境界条件だけは実測できていない。
+   * プロセスを終了させることで中断される可能性がある）。タイムアウトを失敗とはせず、
+   * 「開始はできた」ことが分かる形（`results: undefined`）で返す。
    *
    * 通知の購読は要求を送る**前**に始める。応答（`importId`）と完了通知が同じ受信チャンクに
    * 混ざって届いた場合、応答を待ってから購読すると通知を取りこぼす競合があるため。
