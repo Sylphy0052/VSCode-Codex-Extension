@@ -384,6 +384,7 @@ function buildPreviewSnapshot(
     failure: undefined,
     pendingApproval: undefined,
     hasLiveSession: false,
+    expandedPrompt: undefined,
   }));
   return {
     runId: `preview:${defPath}`,

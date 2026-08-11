@@ -173,6 +173,21 @@ export function workflowStyles(): string {
     overflow: auto;
   }
 
+  /* ---- 展開後のプロンプト（design.md §16.4 案1「見せる」、Issue #67） ---- */
+  tr.prompt-row td {
+    background-color: color-mix(in srgb, var(--vscode-charts-blue) 6%, transparent);
+    border-bottom: 1px solid var(--vscode-widget-border, transparent);
+  }
+  .prompt-box { padding: 4px 2px; }
+  .prompt-box .detail {
+    white-space: pre-wrap;
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 0.85em;
+    margin: 4px 0;
+    max-height: 320px;
+    overflow: auto;
+  }
+
   /* ---- 警告欄 ---- */
   #warnings { display: flex; flex-direction: column; gap: 4px; }
   .warning-item {
@@ -183,6 +198,7 @@ export function workflowStyles(): string {
   }
   .warning-item.allowOverride { border-left-color: var(--vscode-errorForeground); }
   .warning-item.plannerSecurity { border-left-color: var(--vscode-errorForeground); }
+  .warning-item.permissionEscalation { border-left-color: var(--vscode-errorForeground); }
 
   #empty { color: var(--vscode-descriptionForeground); padding: 24px 0; }
 `;

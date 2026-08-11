@@ -70,6 +70,7 @@ import {
 } from './worktree';
 import {
   expandTemplate,
+  findPermissionEscalationWarnings,
   parseWorkflowYaml,
   validateWorkflow,
   withCommitRequirement,
@@ -188,7 +189,14 @@ export interface WorkflowWarning {
      * 発生するが、これは生成直後のプレビュー（`WorkflowViewManager.previewDefinition`）
      * でも出す必要があるため区別する。
      */
-    | 'plannerSecurity';
+    | 'plannerSecurity'
+    /**
+     * 上流タスクより緩い `sandbox` / `autoApprove` を持つ下流タスクが、上流の応答
+     * （`{{T1.result}}` / `{{T1.summary}}`）をテンプレート変数で参照している
+     * （design.md §16.4「タスク間の引き継ぎ」、Issue #67）。`workflow.ts` の
+     * `findPermissionEscalationWarnings` が読み込み時（`start()`）に検出する。
+     */
+    | 'permissionEscalation';
   /** ワークフロー全体に関わる警告（gitignoreなど）は undefined。 */
   taskId: string | undefined;
   message: string;
@@ -223,6 +231,14 @@ export interface TaskSnapshot {
    * リロード直後に復元したrunのタスクにはまだセッションが無く、`再実行` だけが有効）。
    */
   hasLiveSession: boolean;
+  /**
+   * `{{T1.result}}` 等を展開したあとの、実際にこのタスクへ送った最初のプロンプト
+   * （design.md §16.4 案1「見せる」、Issue #67）。テンプレート変数がどう膨らんだかを
+   * 人が読める形で確認できるようにするためのもので、`LiveTask`（メモリ上のみ）から
+   * 都度導出する。応答本文と同じく永続化はしない（design.md §16.11）ため、リロード後は
+   * `undefined` に戻る。
+   */
+  expandedPrompt: string | undefined;
 }
 
 /** ワークフローViewが描画する1実行分のスナップショット（design.md §16.8）。 */
@@ -276,6 +292,13 @@ interface LiveTask {
   lastResponseSummary: string;
   /** `waitingApproval` の間だけ埋まる。Viewの「承認」操作が要求内容を出すために使う。 */
   pendingApproval: TaskPendingApprovalSnapshot | undefined;
+  /**
+   * テンプレート変数を展開したあとの最初のプロンプト（design.md §16.4 案1、Issue #67）。
+   * タスク開始直前、`setPromptTransform` を差し込むのと同じタイミングで一度だけ計算する
+   * （§16.4「展開は読み込み時ではなく、タスクの開始直前に行う」）。表示専用で、
+   * `runLoop` へ渡す本文（展開前）とは別に持つ。
+   */
+  expandedPrompt: string | undefined;
 }
 
 interface LiveRun {
@@ -377,6 +400,7 @@ export class WorkflowRunner {
         ...live.warnings,
         ...this.deriveMaxReachedWarnings(live),
         ...this.deriveAllowWarnings(live),
+        ...this.derivePermissionEscalationWarnings(live),
       ],
       haltedByUser: live.runState.haltedByUser,
     };
@@ -401,6 +425,7 @@ export class WorkflowRunner {
       failure: state?.failure,
       pendingApproval: liveTask?.pendingApproval,
       hasLiveSession: liveTask !== undefined,
+      expandedPrompt: liveTask?.expandedPrompt,
     };
   }
 
@@ -424,6 +449,25 @@ export class WorkflowRunner {
       }
     }
     return warnings;
+  }
+
+  /**
+   * 上流タスクより緩い権限で `{{T1.result}}` / `{{T1.summary}}` を参照している下流タスクの
+   * 警告（design.md §16.4 案2「警告する」、Issue #67）。`deriveAllowWarnings` と同じ理由
+   * （直前のコメント参照）で、`live.def.tasks`だけから決まる情報は都度導出する。1回だけ
+   * `start()`で積むと、ウィンドウのリロードで復元した実行（`rebuildLiveRun`は`warnings: []`で
+   * 初期化する）では二度と現れない。
+   */
+  private derivePermissionEscalationWarnings(live: LiveRun): WorkflowWarning[] {
+    return findPermissionEscalationWarnings(live.def.tasks).map(
+      (issue): WorkflowWarning => ({
+        kind: 'permissionEscalation',
+        // taskIdsは[上流, 下流]の順（`findPermissionEscalationWarnings`参照）。実際に
+        // 危険な参照を書いている側（下流）のタスクへ紐付ける
+        taskId: issue.taskIds[issue.taskIds.length - 1],
+        message: issue.message,
+      }),
+    );
   }
 
   /** 回数切れは状態としてすでに`failed`が持っているため、都度作らず表示のたびに導出する。 */
@@ -1061,6 +1105,7 @@ export class WorkflowRunner {
         startedAt: (this.deps.now?.() ?? new Date()).toISOString(),
         lastResponseSummary: '',
         pendingApproval: undefined,
+        expandedPrompt: undefined,
       };
       live.tasks.set(taskId, liveTask);
       live.runState = recordSessionInfo(live.runState, taskId, session.sessionId, cwd);
@@ -1080,6 +1125,9 @@ export class WorkflowRunner {
       // 展開前のまま（作業記録に残すため。§16.12）で、実際の送信直前にpromptTransformで展開する
       const resultsMap = this.buildResultsMap(live, task);
       session.setPromptTransform((text) => expandTemplate(text, resultsMap));
+      // Viewで「展開後のプロンプトを実際の文面として確認できる」ようにするための表示専用の値
+      // （design.md §16.4 案1「見せる」、Issue #67）。実際に送る本文とは別経路で保持する
+      liveTask.expandedPrompt = expandTemplate(task.prompt, resultsMap);
 
       // `usedWorktree`（タスク専用ブランチを使う）のときだけ「コミットしてあること」を
       // 終了条件へ自動で足す（design.md §16.17「タスク完了時のコミット」1.）。`shared` /
@@ -1362,6 +1410,11 @@ export class WorkflowRunner {
         cwd: liveTask.cwd,
         branch: liveTask.branch,
         files: [...state.turnEditedFiles],
+        // {{T1.summary}}（design.md §16.4 案4「絞る」、Issue #67）。#57の1行要約をそのまま
+        // 使う。応答全部ではなく要点だけを下流へ渡す選択肢を書き手に与えるためのもので、
+        // buildResponseSummary自体が既に制御文字の除去と長さの上限（MAX_SUMMARY_LENGTH）を
+        // 行っている
+        summary: buildResponseSummary(state),
       };
     }
 
