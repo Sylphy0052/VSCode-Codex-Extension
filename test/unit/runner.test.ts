@@ -3157,6 +3157,151 @@ tasks:
       expect(snapshot?.warnings.some((w) => w.kind === 'messagingStalled')).toBe(true);
     });
   });
+
+  describe('メッセージング経由の権限差の警告・実際の送信文面の表示（design.md §16.21、Issue #132）', () => {
+    // T1はsandbox: read-only、T2はsandbox: workspace-write。dependsOnで結ばない
+    // （メッセージは依存関係を問わず送れることを再現するため）
+    const SANDBOX_DIFF_YAML = `
+version: 1
+name: messaging-escalation-test
+defaults:
+  maxParallel: 2
+tasks:
+  - id: T1
+    sandbox: read-only
+    prompt: p1
+    done: d1
+  - id: T2
+    sandbox: workspace-write
+    prompt: p2
+    done: d2
+`;
+
+    it('送信元より緩い実効権限の宛先へ配送された時点でmessagingPermissionEscalationを積む（受付時点では出ない）', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, {
+        messaging: deps,
+        codexSandbox: 'workspace-write',
+      });
+      const result = await runner.start('/repo/.agents/workflows/messaging-escalation.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const sendResult = state.hub?.sendMessage({
+        from: 'T1',
+        to: 'T2',
+        body: '調査結果です',
+        expectReply: false,
+      });
+      expect(sendResult?.accepted).toBe(true);
+      // 受付時点（sendMessageの直後）ではまだ配送していないため警告は出ない
+      expect(
+        runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'messagingPermissionEscalation'),
+      ).toBe(false);
+
+      // 宛先（T2）の次の送信で実際に配送される（setPromptTransformがtakeDeliverableMessagesを
+      // 呼ぶ）。この時点で初めて警告が積まれる
+      const t2 = codexHost.byTaskId('T2');
+      t2.promptTransform?.('続けてください');
+
+      const snapshot = runner.getSnapshot(runId);
+      const warning = snapshot?.warnings.find((w) => w.kind === 'messagingPermissionEscalation');
+      expect(warning?.taskId).toBe('T2');
+      expect(warning?.message).toContain('T1');
+      expect(warning?.message).toContain('sandbox');
+      // #67経由の警告（permissionEscalation）とは別のkindで区別される
+      expect(snapshot?.warnings.some((w) => w.kind === 'permissionEscalation')).toBe(false);
+    });
+
+    it('宛先の実効権限が送信元と同じか厳しければ警告は出ない', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, {
+        messaging: deps,
+        codexSandbox: 'workspace-write',
+      });
+      const result = await runner.start('/repo/.agents/workflows/messaging-no-escalation.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      // T2（workspace-write、緩い）からT1（read-only、厳しい）へ送る向き
+      state.hub?.sendMessage({ from: 'T2', to: 'T1', body: 'お願いします', expectReply: false });
+      const t1 = codexHost.byTaskId('T1');
+      t1.promptTransform?.('続けてください');
+
+      expect(
+        runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'messagingPermissionEscalation'),
+      ).toBe(false);
+    });
+
+    it('同じ警告文言は積み直さない（重複除去）', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, {
+        messaging: deps,
+        codexSandbox: 'workspace-write',
+      });
+      const result = await runner.start('/repo/.agents/workflows/messaging-dedup.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t2 = codexHost.byTaskId('T2');
+      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: '1回目', expectReply: false });
+      t2.promptTransform?.('続けて1');
+      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: '2回目', expectReply: false });
+      t2.promptTransform?.('続けて2');
+
+      const warnings = runner
+        .getSnapshot(runId)
+        ?.warnings.filter((w) => w.kind === 'messagingPermissionEscalation');
+      expect(warnings).toHaveLength(1);
+    });
+
+    it('lastSentPromptは実際にCLIへ送った本文（メッセージの合成後）と一致する', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/messaging-last-sent.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      // メッセージが無い最初の送信では、実際に送った本文と展開後プロンプトが一致する
+      const t2 = codexHost.byTaskId('T2');
+      const firstSent = t2.promptTransform?.('p2') ?? '';
+      let snapshot = runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2');
+      expect(snapshot?.lastSentPrompt).toBe(firstSent);
+      expect(snapshot?.lastSentPrompt).toBe(snapshot?.expandedPrompt);
+
+      // メッセージが配送されると、expandedPromptは変わらないがlastSentPromptには
+      // メッセージの内容が現れる（design.md §16.21、Issue #132「4. 人が目視確認できる
+      // ようにする」。expandedPromptはcomposeNextPromptを経由しないため確認できなかった）
+      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: '追加の指示です', expectReply: false });
+      const secondSent = t2.promptTransform?.('続けてください') ?? '';
+      snapshot = runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2');
+      expect(snapshot?.lastSentPrompt).toBe(secondSent);
+      expect(snapshot?.lastSentPrompt).toContain('追加の指示です');
+      expect(snapshot?.lastSentPrompt).toContain('<task-message from="T1">');
+    });
+
+    it('lastSentPromptは双方向制御文字を落とすが改行は保持する（表示専用の無害化、監査指摘#5と同じ扱い）', async () => {
+      const rtlOverride = String.fromCodePoint(0x202e);
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/messaging-rtl.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t2 = codexHost.byTaskId('T2');
+      state.hub?.sendMessage({
+        from: 'T1',
+        to: 'T2',
+        body: `1行目\n安全${rtlOverride}exe.悪意のある名前`,
+        expectReply: false,
+      });
+      t2.promptTransform?.('続けてください');
+
+      const snapshot = runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2');
+      expect(snapshot?.lastSentPrompt).not.toContain(rtlOverride);
+      expect(snapshot?.lastSentPrompt?.includes('\n')).toBe(true);
+    });
+  });
 });
 
 describe('WorkflowRunner: マージのリロード後再判定（design.md §16.11）', () => {

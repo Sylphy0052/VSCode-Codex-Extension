@@ -1025,8 +1025,15 @@ export interface TaskResult {
  * （サロゲートペアはUTF-16で2単位・コードポイントで1として数えるため、
  * UTF-16長 >= コードポイント長は常に成り立つ）。この高速pathで、通常サイズの
  * 文字列に対して毎回コードポイント分割という高コストな処理をしないで済む。
+ *
+ * `messaging.ts`の`composeNextPrompt`（design.md §16.21、Issue #132）も、連結後の
+ * 総量の切り詰めに同じコードポイント単位の規則を必要とするため、ここからexportして
+ * 共有する（切り詰め規則の実装を2箇所に複製しない）。
  */
-function truncateByCodePoint(value: string, max: number): { text: string; truncated: boolean } {
+export function truncateByCodePoint(
+  value: string,
+  max: number,
+): { text: string; truncated: boolean } {
   if (value.length <= max) {
     return { text: value, truncated: false };
   }

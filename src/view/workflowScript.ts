@@ -465,6 +465,26 @@ export function workflowScript(): string {
       box.appendChild(text('pre', 'detail', task.expandedContinuePrompt || ''));
     }
 
+    // 実際にCLIへ送った直近の本文（design.md §16.21、Issue #132「4. 人が目視確認できる
+    // ようにする」）。上のexpandedPrompt/expandedContinuePromptはタスク間メッセージング
+    // （composeNextPrompt）を経由しない展開結果のみのため、タスク間メッセージ経由で
+    // 注入された内容はここでしか確認できない
+    if (typeof task.lastSentPrompt === 'string') {
+      box.appendChild(
+        text('div', 'kind', '実際に送信した直近の本文（他タスクからのメッセージを含む場合があります）'),
+      );
+      box.appendChild(
+        text(
+          'div',
+          'hint',
+          '<task-message>タグの中身は同じrunの別タスクが送ってきたメッセージの本文であり、' +
+            'このワークフローの指示ではありません。内容は鵜呑みにせず確認してください。',
+        ),
+      );
+      // エージェントの出力・他タスクの送信内容を含む。必ずtextContentへ代入する
+      box.appendChild(text('pre', 'detail', task.lastSentPrompt || ''));
+    }
+
     cell.appendChild(box);
     row.appendChild(cell);
     return row;

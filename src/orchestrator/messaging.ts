@@ -2,8 +2,8 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import * as http from 'node:http';
 
 import type { TaskState } from './runState';
-import { stripControlChars } from './sanitize';
-import { MAX_PROMPT_LENGTH } from './workflow';
+import { stripControlCharsPreservingNewlines } from './sanitize';
+import { truncateByCodePoint } from './workflow';
 
 /**
  * タスク間のメッセージング（design.md §16.21）。
@@ -18,6 +18,15 @@ import { MAX_PROMPT_LENGTH } from './workflow';
  * `runner.ts` / `taskSession.ts` の責務。実際にCLIへMCP設定を渡す経路
  * （`src/view/chatView.ts` / `claudeChatView.ts`）とツールの可視性確認も含めて
  * 配線済み（Issue #123）。`runner.ts`のJSDoc・最終報告を参照。
+ *
+ * `{{T1.result}}`（Issue #67）と同じ脅威クラスの経路として、権限越境対策の水準を揃える
+ * 対応（Issue #132）を入れてある。このモジュール内の対応は主に3点:
+ * `MAX_MESSAGE_BODY_LENGTH`（1件あたりの上限を独立の定数にする）・
+ * `MAX_COMPOSED_PROMPT_LENGTH`（`composeNextPrompt`の合成後の総量に粗い安全弁を掛ける）・
+ * `wrapTaskMessage`の改行保持（`stripControlCharsPreservingNewlines`への差し替え）。
+ * 送信元・宛先の実効権限を比べる警告（配送時点）と、合成後の実際の送信文面をViewで
+ * 確認できるようにする対応は`runner.ts`側（`checkMessagingPermissionEscalation` /
+ * `LiveTask.lastSentPrompt`）にある。
  */
 
 /**
@@ -42,6 +51,47 @@ export function isDeliverableState(state: TaskState): boolean {
  * 許すと事実上無制限と変わらないため、タスク数の目安に対して余裕を持たせた定数にする。
  */
 export const MAX_MESSAGES_PER_RUN = 500;
+
+/**
+ * メッセージ1件あたりの本文の長さ上限（design.md §16.21、Issue #132）。
+ *
+ * 以前は `workflow.ts` の `MAX_PROMPT_LENGTH`（20000文字）を流用していたが、これは
+ * 「人がYAMLに書く固定の `prompt` 自体の上限」であり、性質が異なる値の流用だった。
+ * メッセージの本文はエージェントが実行時に自由に生成し、`dependsOn` を問わず同じrunの
+ * 任意のタスク（送信元より緩い権限を持ちうる）へ届く。これは `{{T1.result}}` /
+ * `{{T1.summary}}`（`workflow.ts` の `MAX_TEMPLATE_RESULT_LENGTH`、4000文字。Issue #67）と
+ * 同じ脅威クラス（上流の自由記述がより緩い権限の下流へそのまま渡る経路）にあたるため、
+ * 値もそちらへ揃える。独立した定数として持つことで、どちらか一方だけ値を見直したくなった
+ * ときに互いを気にせず変更できる。
+ *
+ * 上限を超えた場合の扱いは `{{T1.result}}` 側（`truncateForTemplate`。黙って切り詰める）と
+ * 意図的に違える。`validateSendMessage` はこの上限を超えた `send_message` の**受付自体を
+ * 拒否する**（`MAX_MESSAGE_BODY_LENGTH` の使用箇所参照）。理由:
+ * - `send_message` はモデルが明示的に呼ぶツール呼び出しであり、拒否理由
+ *   （`SendMessageValidationResult.reason`）がその場でモデルへ返る。モデル自身が本文を
+ *   短くする・要点だけに絞って送り直す・複数件に分けて送るといった対応を選べる
+ * - `{{T1.result}}` の展開はテンプレート変数を差し込むオーケストレータ側の自動処理で、
+ *   その時点でモデルの判断が介在する余地が無い（`prompt` はワークフロー開始前に固定
+ *   されており、差し込む先の文脈をモデルが選べない）。この場合、唯一実行可能な安全策は
+ *   黙って切り詰めることだけになる
+ *
+ * 送信元の意図（本文の全体が届くこと）を尊重できる場面では拒否のほうが安全という判断。
+ */
+export const MAX_MESSAGE_BODY_LENGTH = 4000;
+
+/**
+ * `composeNextPrompt` が合成した後の総量の上限（design.md §16.21、Issue #132）。
+ *
+ * `composeNextPrompt` は未配送のメッセージを**全て連結**して次の指示の先頭へ添えるが、
+ * 1件ずつの長さ（`MAX_MESSAGE_BODY_LENGTH`）を守っていても、run全体で配送できる総数
+ * （`MAX_MESSAGES_PER_RUN`、500件）まで積み上がれば連結後の総量は理論上極端な長さになりうる。
+ * `workflow.ts` の `MAX_EXPANDED_PROMPT_LENGTH`（60000文字。Issue #67セキュリティ監査
+ * 指摘#7「`MAX_TEMPLATE_RESULT_LENGTH`はフィールド単位の上限なので複数参照で積み上がる」）と
+ * 同じ動機・同じ値の粗い安全弁を、メッセージの合成にも設ける。値そのものを共有すると
+ * 片方の見直しがもう片方に波及するため、`MAX_MESSAGE_BODY_LENGTH`と同じ理由で独立した
+ * 定数にする。
+ */
+export const MAX_COMPOSED_PROMPT_LENGTH = 60000;
 
 /** `agent.workflows.replyTimeoutSec` の既定値（design.md §16.21）。 */
 export const DEFAULT_REPLY_TIMEOUT_SEC = 300;
@@ -96,10 +146,10 @@ export function validateSendMessage(
       reason: `宛先が見つかりません（同じrunのタスクではありません）: ${input.to}`,
     };
   }
-  if (input.body.length > MAX_PROMPT_LENGTH) {
+  if (input.body.length > MAX_MESSAGE_BODY_LENGTH) {
     return {
       accepted: false,
-      reason: `本文が長すぎます（上限${MAX_PROMPT_LENGTH}文字）: ${input.body.length}文字`,
+      reason: `本文が長すぎます（上限${MAX_MESSAGE_BODY_LENGTH}文字）: ${input.body.length}文字`,
     };
   }
   if (input.totalMessagesInRun >= MAX_MESSAGES_PER_RUN) {
@@ -214,18 +264,48 @@ function escapeAngleBrackets(text: string): string {
  * メッセージ1件を `<task-message from="...">...</task-message>` で囲む。
  * `from` はタスクidで `TASK_ID_PATTERN`（`workflow.ts`）で検証済みの値が入る想定
  * （英数字・`_`・`-` のみ）のため、属性値としてエスケープの必要は無い。
- * 本文は制御文字を落とし（`sanitize.ts`。表示・プロンプトの見た目を偽装する
- * 双方向制御文字等を含むため）、そのうえで角括弧を実体参照化する。
+ *
+ * 本文は制御文字を落とす（`sanitize.ts`。表示・プロンプトの見た目を偽装する双方向制御文字等を
+ * 含むため）が、**改行・タブ・復帰は残す `stripControlCharsPreservingNewlines` を使う**
+ * （Issue #132）。以前は改行も空白へ畳む `stripControlChars` を使っていたため、複数行の
+ * メッセージがCLIへ実際に送る本文の上で1行に潰れてしまっていた（意図した仕様ではない。
+ * 改行を潰す必要があるのは1行の表示（承認カードのタイトル等）に限られ、CLIへ送る本文の
+ * 意味そのものを変えてよい理由にはならない）。
+ *
+ * 改行を残しても囲いの偽装は成立しない。`escapeAngleBrackets` が本文中の全ての `<` `>` を
+ * 実体参照へ変換するため、本文がどんな文字列（改行を含む）であっても `<...>` という
+ * タグ構造そのものを再構成できない。この順序（制御文字除去 → 角括弧の実体参照化）を
+ * 崩さない限り、改行を残すこと自体は囲いの安全性に影響しない（`test/unit/messaging.test.ts`
+ * で改行入りの偽装本文でも囲いを破れないことを固定してある）。
  */
 export function wrapTaskMessage(from: string, body: string): string {
-  const sanitized = escapeAngleBrackets(stripControlChars(body));
+  const sanitized = escapeAngleBrackets(stripControlCharsPreservingNewlines(body));
   return [`<task-message from="${from}">`, sanitized, '</task-message>'].join('\n');
+}
+
+/**
+ * 合成後の総量が上限を超えたときに添える表示（design.md §16.21、Issue #132）。
+ * `workflow.ts`の`capExpandedLength`と同じ言い回しに揃える。
+ */
+function buildComposedTruncationNotice(): string {
+  return `\n…（連結後の合計が上限${MAX_COMPOSED_PROMPT_LENGTH}文字を超えたため以下省略）`;
 }
 
 /**
  * 受け取ったメッセージを、次の指示（`basePrompt`）の先頭へ添える
  * （design.md §16.21「受け取ったメッセージは、そのタスクの次の指示の先頭へ添える」）。
  * `messages` が空なら `basePrompt` をそのまま返す（案内文もタグも付けない）。
+ *
+ * 連結後の総量には粗い安全弁（`MAX_COMPOSED_PROMPT_LENGTH`）を掛ける（Issue #132）。
+ * `workflow.ts`の`capExpandedLength`（Issue #67セキュリティ監査指摘#7）と同じく、
+ * 合成した文字列全体をコードポイント単位（`truncateByCodePoint`。サロゲートペアの
+ * 境目を割らない）で切り詰め、末尾に切り詰めた旨を添える。`basePrompt`
+ * （`expandTemplate`で展開済みの指示。既に`MAX_EXPANDED_PROMPT_LENGTH`=60000文字以内に
+ * 収まっている）を末尾に置く構成上、極端なケース（`basePrompt`自体が上限に近いほど長い
+ * うえに大量のメッセージが積み上がっている）ではこの切り詰めが`basePrompt`の末尾へ
+ * 掛かることもありうるが、これは`capExpandedLength`が既に許容している「無限に膨らむのを
+ * 止める粗い安全弁であり、上限内に収まる量の指示文が埋め込まれることは防がない」という
+ * 位置付けと同じトレードオフであり、新たに持ち込むものではない。
  */
 export function composeNextPrompt(
   basePrompt: string,
@@ -235,7 +315,9 @@ export function composeNextPrompt(
     return basePrompt;
   }
   const wrapped = messages.map((m) => wrapTaskMessage(m.from, m.body)).join('\n\n');
-  return `${TASK_MESSAGE_GUIDANCE}\n\n${wrapped}\n\n${basePrompt}`;
+  const composed = `${TASK_MESSAGE_GUIDANCE}\n\n${wrapped}\n\n${basePrompt}`;
+  const { text, truncated } = truncateByCodePoint(composed, MAX_COMPOSED_PROMPT_LENGTH);
+  return truncated ? `${text}${buildComposedTruncationNotice()}` : text;
 }
 
 /* ------------------------------------------------------------------------ *
