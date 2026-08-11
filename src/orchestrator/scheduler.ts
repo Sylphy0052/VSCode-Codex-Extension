@@ -16,8 +16,9 @@ import type { WorkflowDefinition } from './workflow';
  *   （design.md §16.17「後続タスクは統合ブランチから分岐するため、依存先が`merging`の間は
  *   開始できない」。統合ブランチへ実際に入るのはマージが終わってからのため）
  * - 自身が `pending` であること
- * - `running` / `waitingApproval` / `merging` の合計が `maxParallel` 未満であること
- *   （`waitingApproval` も人待ちのセッションが生きているため枠を占め、`merging` も
+ * - `running` / `waitingApproval` / `waitingReply` / `merging` の合計が `maxParallel`
+ *   未満であること（`waitingApproval` も人待ちのセッションが生きているため枠を占め、
+ *   `waitingReply` も返信待ちのセッションが生きているため枠を占め、`merging` も
  *   マージが終わるまでそのタスクの成果は確定しないため枠を占める。design.md §16.3）
  * - 実行全体が停止している（`failed` の確定、または人の割り込み）ときは何も返さない
  * - 同じ段で複数開始できるとき、`def.tasks` に書かれた順で埋める（再現性のため）
@@ -30,7 +31,12 @@ export function nextTasksToStart(def: WorkflowDefinition, run: RunState): Readon
 
   let activeCount = 0;
   for (const s of run.tasks.values()) {
-    if (s.state === 'running' || s.state === 'waitingApproval' || s.state === 'merging') {
+    if (
+      s.state === 'running' ||
+      s.state === 'waitingApproval' ||
+      s.state === 'waitingReply' ||
+      s.state === 'merging'
+    ) {
       activeCount += 1;
     }
   }
@@ -59,7 +65,8 @@ export type RunOutcome = 'running' | 'succeeded' | 'failed' | 'blocked' | 'abort
 /**
  * 実行全体の終了判定（design.md §16.5 / §16.17）。判定は次の順。
  *
- * 1. `pending` / `running` / `waitingApproval` / `merging` が1件でもあれば `running`
+ * 1. `pending` / `running` / `waitingApproval` / `waitingReply` / `merging` が
+ *    1件でもあれば `running`
  * 2. `failed` が1件でもあれば `failed`
  * 3. `blocked` が1件でもあれば `blocked`（作業は終わったが統合できていない）
  * 4. `skipped` が1件でもあれば `aborted`
@@ -85,6 +92,7 @@ export function getRunOutcome(run: RunState): RunOutcome {
       s.state === 'pending' ||
       s.state === 'running' ||
       s.state === 'waitingApproval' ||
+      s.state === 'waitingReply' ||
       s.state === 'merging'
     ) {
       return 'running';

@@ -13,6 +13,7 @@ export const TASK_STATES = [
   'pending',
   'running',
   'waitingApproval',
+  'waitingReply',
   'merging',
   'done',
   'failed',
