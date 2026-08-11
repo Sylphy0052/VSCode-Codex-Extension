@@ -355,6 +355,54 @@ function buildHub(tasks: RunTaskSnapshot[]): TaskMessagingHub {
   });
 }
 
+describe('TaskMessagingHubDeps.onAccepted（design.md §16.21「waitingReplyへの遷移」・Issue #123）', () => {
+  it('sendMessageが受け付けたメッセージをそのままonAcceptedへ渡す', () => {
+    const accepted: StoredMessage[] = [];
+    const hub = new TaskMessagingHub({
+      listRunTasks: () => [
+        { id: 'T1', state: 'running', summary: '' },
+        { id: 'T2', state: 'running', summary: '' },
+      ],
+      now: () => 123,
+      randomId: () => 'msg-1',
+      onAccepted: (m) => accepted.push(m),
+    });
+
+    const result = hub.sendMessage({ from: 'T1', to: 'T2', body: 'hi', expectReply: true });
+
+    expect(result.accepted).toBe(true);
+    expect(accepted).toEqual([
+      { id: 'msg-1', from: 'T1', to: 'T2', body: 'hi', expectReply: true, createdAtMs: 123 },
+    ]);
+  });
+
+  it('拒否されたメッセージではonAcceptedを呼ばない', () => {
+    const accepted: StoredMessage[] = [];
+    const hub = new TaskMessagingHub({
+      listRunTasks: () => [{ id: 'T1', state: 'running', summary: '' }],
+      onAccepted: (m) => accepted.push(m),
+    });
+
+    // 宛先が存在しない（同じrunのタスクではない）ため拒否される
+    const result = hub.sendMessage({ from: 'T1', to: 'ghost', body: 'hi', expectReply: false });
+
+    expect(result.accepted).toBe(false);
+    expect(accepted).toEqual([]);
+  });
+
+  it('onAcceptedを省略しても既存の呼び出しはそのまま動く（後方互換）', () => {
+    const hub = new TaskMessagingHub({
+      listRunTasks: () => [
+        { id: 'T1', state: 'running', summary: '' },
+        { id: 'T2', state: 'running', summary: '' },
+      ],
+    });
+    expect(() =>
+      hub.sendMessage({ from: 'T1', to: 'T2', body: 'hi', expectReply: false }),
+    ).not.toThrow();
+  });
+});
+
 describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側が接続で判別する」）', () => {
   it('tools/listでlist_tasksとsend_messageの2つが見える', () => {
     const transport = new FakeTransport();

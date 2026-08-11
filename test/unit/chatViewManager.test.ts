@@ -630,4 +630,179 @@ describe('ChatViewManager', () => {
       expect(activities.find((a) => a.kind === 'prompt')?.text).toBe('素の指示');
     });
   });
+
+  describe('タスク間メッセージングのMCP設定・可視性確認（design.md §16.21、Issue #123）', () => {
+    it('input.mcpを渡すとthread/startのconfig.mcp_serversへ差し込まれる（実測: streamable_http）', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+        mcp: { url: 'http://127.0.0.1:12345/mcp/abc' },
+      });
+      await tick();
+
+      const threadStart = connection.requests.find((r) => r.method === 'thread/start');
+      const params = threadStart?.params as { config?: { mcp_servers?: Record<string, unknown> } };
+      expect(params.config?.mcp_servers?.['task-messaging']).toEqual({
+        url: 'http://127.0.0.1:12345/mcp/abc',
+        type: 'streamable_http',
+      });
+
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p;
+    });
+
+    it('input.mcpを渡さなければthread/startにconfigを含めない（後方互換）', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+
+      const threadStart = connection.requests.find((r) => r.method === 'thread/start');
+      expect((threadStart?.params as Record<string, unknown>)['config']).toBeUndefined();
+
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p;
+    });
+
+    it(
+      'mcpServer/startupStatus/updated(ready)が届くとcheckMessagingToolVisible()はtrueで解決する' +
+        '（design.md「確認はthread/startの後に行う」）',
+      async () => {
+        const { manager, connection } = createManager();
+        const p = manager.openTaskSession({
+          cwd: '/workspace/root/task-a',
+          config: EMPTY_TASK_CONFIG,
+          sandbox: '',
+          mcp: { url: 'http://127.0.0.1:12345/mcp/abc' },
+        });
+        await tick();
+        connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+        const task = await p;
+
+        const visiblePromise = task.checkMessagingToolVisible();
+        connection.notify('mcpServer/startupStatus/updated', {
+          threadId: 'thread-A',
+          name: 'task-messaging',
+          status: 'ready',
+        });
+        await expect(visiblePromise).resolves.toBe(true);
+      },
+    );
+
+    it('mcpServer/startupStatus/updated(failed)が届くとcheckMessagingToolVisible()はfalseで解決する', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+        mcp: { url: 'http://127.0.0.1:12345/mcp/abc' },
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      const task = await p;
+
+      const visiblePromise = task.checkMessagingToolVisible();
+      connection.notify('mcpServer/startupStatus/updated', {
+        threadId: 'thread-A',
+        name: 'task-messaging',
+        status: 'failed',
+      });
+      await expect(visiblePromise).resolves.toBe(false);
+    });
+
+    it('別スレッド・別サーバ名の通知は無視する（誤配送しない）', async () => {
+      const { manager, connection } = createManager();
+      const p1 = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+        mcp: { url: 'http://127.0.0.1:12345/mcp/a' },
+      });
+      const p2 = manager.openTaskSession({
+        cwd: '/workspace/root/task-b',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+        mcp: { url: 'http://127.0.0.1:12345/mcp/b' },
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      connection.resolveFirst('thread/start', threadStartResult('thread-B'));
+      const taskA = await p1;
+      await p2;
+
+      const visiblePromise = taskA.checkMessagingToolVisible();
+      // 別スレッド宛のready通知は無視する
+      connection.notify('mcpServer/startupStatus/updated', {
+        threadId: 'thread-B',
+        name: 'task-messaging',
+        status: 'ready',
+      });
+      // 同じスレッドでも別のサーバ名は無視する
+      connection.notify('mcpServer/startupStatus/updated', {
+        threadId: 'thread-A',
+        name: 'other-server',
+        status: 'ready',
+      });
+      // 本来の通知
+      connection.notify('mcpServer/startupStatus/updated', {
+        threadId: 'thread-A',
+        name: 'task-messaging',
+        status: 'ready',
+      });
+      await expect(visiblePromise).resolves.toBe(true);
+    });
+
+    it('input.mcpを渡していなければ確認そのものを行わず常にtrueを返す', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      const task = await p;
+
+      await expect(task.checkMessagingToolVisible()).resolves.toBe(true);
+    });
+  });
+
+  describe('pauseLoop/resumeLoop（design.md §16.21、Issue #123）', () => {
+    it('pauseLoop()するとターンが終わっても継続指示を送らず、resumeLoop()で送る', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      const task = await p;
+
+      task.runLoop({
+        initialPrompt: '第1ターン',
+        continuePrompt: '続けて',
+        maxIterations: 5,
+        condition: '',
+      });
+      await tick();
+      connection.resolveFirst('turn/start', {});
+      await tick();
+
+      task.pauseLoop();
+      connection.notify('turn/completed', { threadId: 'thread-A' });
+      await tick();
+
+      expect(connection.requests.filter((r) => r.method === 'turn/start')).toHaveLength(1);
+
+      task.resumeLoop();
+      await tick();
+      expect(connection.requests.filter((r) => r.method === 'turn/start')).toHaveLength(2);
+    });
+  });
 });

@@ -21,6 +21,7 @@ import {
   buildContextUsageRequest,
   buildControlRequest,
   buildControlResponse,
+  buildMcpStatusRequest,
   buildRewindFilesRequest,
   buildSessionCostRequest,
   buildSetEffortRequest,
@@ -35,6 +36,7 @@ import {
   readCurrentPermissionMode,
   readControlRequest,
   readControlResponse,
+  readMcpServersList,
   readRewindFilesResult,
   readSessionCost,
   type ControlResponse,
@@ -42,6 +44,7 @@ import {
   type RewindFilesResult,
 } from './control';
 import type { Attachment } from '../provider/attachments';
+import type { McpServerView } from '../provider/mcpServers';
 import type { SlashCommand } from '../provider/slashCommands';
 import { applyStreamEvent, initialClaudeState } from './streamJson';
 import type { ClaudeConfig } from './types';
@@ -84,6 +87,14 @@ export class ClaudeStreamSession {
   private commandList: SlashCommand[] = [];
   /** `rewind_files` の応答待ち。requestIdごとに解決関数を覚える（design.md「Claude Codeの巻き戻し」）。 */
   private readonly rewindWaiting = new Map<string, (result: RewindFilesResult) => void>();
+  /**
+   * `mcp_status` の応答待ち（design.md §16.21「ツールの可視性の確認」）。
+   * `rewindWaiting` と同じ形（requestIdごとに解決関数を覚える）。
+   */
+  private readonly mcpStatusWaiting = new Map<
+    string,
+    (servers: McpServerView[] | undefined) => void
+  >();
 
   constructor(
     private readonly claudePath: () => string,
@@ -329,6 +340,27 @@ export class ClaudeStreamSession {
     return this.requestRewindFiles(userMessageId, false);
   }
 
+  /**
+   * MCPサーバーの一覧・状態を問い合わせる（design.md §16.21「ツールの可視性の確認」）。
+   *
+   * `mcp_status` control requestは`ClaudeMcpProbe`（単発起動の設定パネル用問い合わせ）と
+   * 同じ要求だが、こちらは**既に会話用に起動しているプロセスへ**そのまま投げる
+   * （タスクのセッションを開いた後に確認する。design.md「確認はタスクのセッションを
+   * 開いた後に行う」はCodex固有の制約の記述だが、同じ流儀に合わせておく）。
+   * プロセスが無い、または応答が来ない場合は`undefined`を返す（呼び出し側は
+   * 「見えない」側へ倒す。`ChatViewManager.checkMcpStartupStatus`と対称の判断）。
+   */
+  checkMcpStatus(): Promise<McpServerView[] | undefined> {
+    if (this.proc === undefined) {
+      return Promise.resolve(undefined);
+    }
+    const requestId = this.claim('mcpStatus');
+    return new Promise((resolve) => {
+      this.mcpStatusWaiting.set(requestId, resolve);
+      this.write(buildMcpStatusRequest(requestId));
+    });
+  }
+
   private requestRewindFiles(userMessageId: string, dryRun: boolean): Promise<RewindFilesResult> {
     if (this.proc === undefined) {
       return Promise.resolve({
@@ -536,6 +568,14 @@ export class ClaudeStreamSession {
       return;
     }
 
+    if (outgoing?.kind === 'mcpStatus') {
+      this.mcpStatusWaiting
+        .get(response.requestId)
+        ?.(response.ok ? readMcpServersList(response.payload) : undefined);
+      this.mcpStatusWaiting.delete(response.requestId);
+      return;
+    }
+
     // `initialize` の応答が使えるコマンドを全部返す。一覧のハードコードは要らない
     const commands = readCommandList(response.payload);
     if (commands !== undefined) {
@@ -624,6 +664,11 @@ export class ClaudeStreamSession {
       });
     }
     this.rewindWaiting.clear();
+    // mcp_statusの応答待ちも解放する。放置するとawaitしている側が永遠に待つ
+    for (const resolve of this.mcpStatusWaiting.values()) {
+      resolve(undefined);
+    }
+    this.mcpStatusWaiting.clear();
     this.outgoing.clear();
     this.proc?.stdin.end();
     this.proc?.kill();
@@ -633,7 +678,13 @@ export class ClaudeStreamSession {
 }
 
 /** こちらから出した制御要求の用途。 */
-type OutgoingKind = 'initialize' | 'contextUsage' | 'sessionCost' | 'settings' | 'rewindFiles';
+type OutgoingKind =
+  | 'initialize'
+  | 'contextUsage'
+  | 'sessionCost'
+  | 'settings'
+  | 'rewindFiles'
+  | 'mcpStatus';
 
 interface Outgoing {
   kind: OutgoingKind;

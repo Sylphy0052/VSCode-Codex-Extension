@@ -15,6 +15,7 @@ import { ClaudeUsageProbe } from '../claude/usageProbe';
 import { CommandCatalog } from '../provider/commandCatalog';
 import type { SlashCommand } from '../provider/slashCommands';
 import { AttachmentBox } from '../provider/attachments';
+import { MESSAGING_MCP_SERVER_NAME } from '../orchestrator/messaging';
 import type {
   ApprovalHandler,
   ApprovalOutcome,
@@ -31,6 +32,7 @@ import {
   postImageData,
   renderShell,
   reportTurnResult,
+  runExportTranscript,
 } from './chatView';
 import type { FileMentionCatalog } from '../provider/fileMentions';
 import { readPersistedThreadId } from './panelState';
@@ -87,6 +89,14 @@ const LABEL = 'Claude Code';
  * `TaskSessionInput` をClaude Codeの起動設定へ写す。`sandbox` はClaudeに概念が無いため使わない。
  * `agent` はタスクオーケストレーション（design.md §16）が扱う語彙に無いため常に空文字にする
  * （タスクは既定のエージェントで走る）。
+ *
+ * `input.mcp` が渡されていれば、タスク間メッセージング（design.md §16.21）専用のMCP
+ * サーバを `--mcp-config` で渡す（実測。CLI 2.1.227で`{"mcpServers":{"<name>":{"type":
+ * "http","url":...}}}`形式のJSON文字列を受け付け、`mcp_status`で`scope: "dynamic"`
+ * として現れることを確認済み）。ここで組み立てる`additionalArgs`は拡張機能が完全に
+ * 制御する値であり、`codex.additionalArgs`/`claude.additionalArgs`のような
+ * ユーザー設定・YAMLの経路とは無関係（§16.16の信頼境界を壊さない。`TaskSessionConfig`
+ * 自体に`additionalArgs`が無いことがそれを裏付ける）。
  */
 function toClaudeConfig(input: TaskSessionInput): ClaudeConfig {
   return {
@@ -94,7 +104,15 @@ function toClaudeConfig(input: TaskSessionInput): ClaudeConfig {
     effort: input.config.effort,
     permissionMode: input.config.approvalMode,
     agent: '',
-    additionalArgs: [],
+    additionalArgs:
+      input.mcp !== undefined
+        ? [
+            '--mcp-config',
+            JSON.stringify({
+              mcpServers: { [MESSAGING_MCP_SERVER_NAME]: { type: 'http', url: input.mcp.url } },
+            }),
+          ]
+        : [],
   };
 }
 
@@ -274,7 +292,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       sessionId,
       config: taskConfig,
     });
-    return this.buildTaskSession(entry, sessionId);
+    return this.buildTaskSession(entry, sessionId, input.mcp !== undefined);
   }
 
   /** 既存のセッションを開く。過去のやり取りはtranscriptから復元する。 */
@@ -457,8 +475,18 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     });
   }
 
-  /** `TaskSessionHost` が返す口の実体。 */
-  private buildTaskSession(entry: ClaudePanel, sessionId: string): TaskSession {
+  /**
+   * `TaskSessionHost` が返す口の実体。
+   *
+   * `mcpRequested` は `openTaskSession` の `input.mcp !== undefined` をそのまま渡す。
+   * `false` なら `checkMessagingToolVisible` は確認そのものを行わず常に `true` を返す
+   * （`TaskSession.checkMessagingToolVisible` のJSDoc参照）。
+   */
+  private buildTaskSession(
+    entry: ClaudePanel,
+    sessionId: string,
+    mcpRequested = false,
+  ): TaskSession {
     return {
       sessionId,
       runLoop: (plan: LoopPlan) => entry.loop.start(plan),
@@ -474,6 +502,19 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       interrupt: () => {
         entry.session.interrupt();
         return Promise.resolve();
+      },
+      pauseLoop: () => entry.loop.pause(),
+      resumeLoop: () => entry.loop.resume(),
+      checkMessagingToolVisible: async () => {
+        if (!mcpRequested) {
+          return true;
+        }
+        // design.md §16.21「ツールの可視性の確認」。`mcp_status`の一覧に、拡張機能が
+        // 渡した名前のサーバが`connected`として現れているかを見る（`streamSession.ts`の
+        // `checkMcpStatus`のJSDoc参照）
+        const servers = await entry.session.checkMcpStatus();
+        const server = servers?.find((s) => s.name === MESSAGING_MCP_SERVER_NAME);
+        return server?.state === 'connected';
       },
       stopLoop: () => entry.loop.stop('taskStopped'),
       decideApproval: (requestId, decision) => this.resolveApproval(entry, requestId, decision),
@@ -742,7 +783,16 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         return;
       }
       if (type === 'stopBackgroundTask' && typeof m['id'] === 'string') {
-        void this.stopBackgroundTask(entry, m['id'], typeof m['command'] === 'string' ? m['command'] : m['id']);
+        void this.stopBackgroundTask(
+          entry,
+          m['id'],
+          typeof m['command'] === 'string' ? m['command'] : m['id'],
+        );
+        return;
+      }
+      if (type === 'exportTranscript') {
+        // 発言や中断とは独立した操作。ループへの割り込み扱いにはしない
+        void runExportTranscript(entry.session.getState().items, LABEL);
         return;
       }
       if (type === 'rewind' && typeof m['messageId'] === 'string') {

@@ -402,6 +402,8 @@ function buildPreviewSnapshot(
     failure: undefined,
     pendingApproval: undefined,
     hasLiveSession: false,
+    expandedPrompt: undefined,
+    expandedContinuePrompt: undefined,
     mergeResolutionActive: false,
   }));
   return {

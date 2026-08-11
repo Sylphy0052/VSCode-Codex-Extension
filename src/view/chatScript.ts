@@ -1224,11 +1224,18 @@ export function chatScript(
         name.textContent = cut < 0 ? path : path.slice(cut + 1);
         desc.textContent = cut < 0 ? '' : path.slice(0, cut);
       } else {
-        name.textContent = '/' + item.name + (item.argumentHint ? ' ' + item.argumentHint : '');
+        name.textContent = '/' + item.name;
         desc.textContent = item.description || '';
       }
 
       row.appendChild(name);
+      // 引数の書き方は名前と別の色で添える（issue #9）。無いコマンドでは要素ごと出さない
+      if (menuMode !== 'file' && item.argumentHint) {
+        const hint = document.createElement('span');
+        hint.className = 'hint';
+        hint.textContent = item.argumentHint;
+        row.appendChild(hint);
+      }
       row.appendChild(desc);
       row.addEventListener('mousedown', (e) => {
         e.preventDefault();
@@ -1238,6 +1245,29 @@ export function chatScript(
     });
     const active = box.querySelector('.row.active');
     if (active) active.scrollIntoView({ block: 'nearest' });
+  }
+
+  /**
+   * いま打っているコマンドの引数ヒントを入力欄の下に出す（issue #9）。
+   *
+   * 候補一覧にもヒントは出るが、確定すると一覧が閉じる。書き方が要るのはむしろ
+   * その後なので、打っている間ずっと見えるようにする。
+   * 判定の規則はホスト側の hintForInput（src/provider/slashCommands.ts）と同じ。
+   * テンプレートリテラルの中からは関数を呼べないため書き直している。両方を揃えること。
+   */
+  function renderArgumentHint() {
+    const box = el('argumentHint');
+    if (!box) return;
+    const text = el('input').value;
+    const line = text.slice(text.lastIndexOf('\\n') + 1);
+    const space = line.indexOf(' ');
+    let found;
+    if (line.slice(0, 1) === '/' && space !== -1) {
+      const name = line.slice(1, space);
+      found = commands.find((c) => c.name === name && c.argumentHint);
+    }
+    box.hidden = !found;
+    box.textContent = found ? '/' + found.name + ' ' + found.argumentHint : '';
   }
 
   function filterCommands(list, query) {
@@ -1282,6 +1312,8 @@ export function chatScript(
     }
 
     closeMenu();
+    // 候補が閉じた後こそ書き方が要る。確定した時点でヒントへ切り替える（issue #9）
+    renderArgumentHint();
     input.focus();
   }
 
@@ -1291,6 +1323,7 @@ export function chatScript(
     // 画像だけ送るのも許す。本文が無くても添付があれば送る意味がある
     if (!text.trim() && attachmentCount === 0) return;
     input.value = '';
+    renderArgumentHint();
     resetHistory();
     vscode.postMessage({ type: 'send', text });
   }
@@ -1360,6 +1393,12 @@ export function chatScript(
     vscode.postMessage({ type: 'review' });
   });
 
+  // 会話全体の取り出し（issue #25）。Markdownの組み立て・コピー・保存・生テキスト表示は
+  // すべて拡張機能側で行う（巨大な会話でもWebviewの描画スレッドを固まらせないため）
+  el('exportTranscript').addEventListener('click', () =>
+    vscode.postMessage({ type: 'exportTranscript' }),
+  );
+
   el('attach').addEventListener('click', () => el('filePicker').click());
   el('filePicker').addEventListener('change', (e) => {
     offerFiles(e.target.files);
@@ -1400,6 +1439,7 @@ export function chatScript(
   });
 
   el('input').addEventListener('input', (e) => {
+    renderArgumentHint();
     const command = commandQuery(e.target);
     if (command !== undefined) {
       showCommands(command);
