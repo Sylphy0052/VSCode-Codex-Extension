@@ -61,9 +61,97 @@ export function controlPanelScript(): string {
     el('usageMeta').textContent = meta.join(' ・ ');
   }
 
+  function mcpBadgeLabel(state) {
+    if (state === 'connected') return '接続済み';
+    if (state === 'disabled') return '無効';
+    return '起動していません';
+  }
+
+  function renderMcpServer(cli, server) {
+    const row = document.createElement('div');
+    row.className = 'mcpServer';
+
+    const head = document.createElement('div');
+    head.className = 'mcpServer-head';
+
+    const label = document.createElement('label');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = server.state !== 'disabled';
+    checkbox.addEventListener('change', () => {
+      vscode.postMessage({
+        type: 'toggleMcp',
+        cli: cli,
+        name: server.name,
+        enabled: checkbox.checked,
+      });
+    });
+    const name = document.createElement('span');
+    name.className = 'mcpServer-name';
+    name.textContent = server.name;
+    label.appendChild(checkbox);
+    label.appendChild(name);
+
+    const badge = document.createElement('span');
+    badge.className = 'mcpBadge mcpBadge-' + server.state;
+    badge.textContent = mcpBadgeLabel(server.state);
+
+    head.appendChild(label);
+    head.appendChild(badge);
+    row.appendChild(head);
+
+    const bits = [];
+    if (server.state === 'connected') {
+      bits.push(server.toolCount + '個のツール');
+      if (server.version) bits.push('v' + server.version);
+    }
+    if (server.state === 'unavailable') {
+      bits.push(
+        server.reason
+          ? server.reason
+          : '起動状況を確認できませんでした（無効化はされていません）',
+      );
+    }
+    if (bits.length > 0) {
+      const meta = document.createElement('div');
+      meta.className = 'mcpServer-meta';
+      meta.textContent = bits.join(' ・ ');
+      row.appendChild(meta);
+    }
+
+    return row;
+  }
+
+  function renderMcp(cli, elId, snapshot) {
+    const container = el(elId);
+    container.replaceChildren();
+
+    if (!snapshot || snapshot.ok !== true) {
+      const p = document.createElement('p');
+      p.className = 'mcpError';
+      const reason = snapshot && snapshot.reason ? snapshot.reason : '不明なエラー';
+      p.textContent = 'MCPサーバー一覧を取得できませんでした: ' + reason;
+      container.appendChild(p);
+      return;
+    }
+
+    if (snapshot.servers.length === 0) {
+      const p = document.createElement('p');
+      p.className = 'mcpEmpty';
+      p.textContent = 'MCPサーバーは設定されていません';
+      container.appendChild(p);
+      return;
+    }
+
+    for (const server of snapshot.servers) {
+      container.appendChild(renderMcpServer(cli, server));
+    }
+  }
+
   function apply(state) {
     applyUsage(state.usage);
     applyClaude(state.claude);
+    renderMcp('codex', 'mcpListCodex', state.mcpServers);
     models = state.models;
     const nameOf = (slug) => {
       const m = models.find((x) => x.slug === slug);
@@ -100,6 +188,7 @@ export function controlPanelScript(): string {
 
   function applyClaude(c) {
     if (!c) return;
+    renderMcp('claude', 'mcpListClaude', c.mcpServers);
     const d = c.defaults || {};
     const nameOf = (slug) => {
       const m = c.models.find((x) => x.slug === slug);

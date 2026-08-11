@@ -2,6 +2,7 @@ import type { ApprovalDecision } from '../appserver/approvals';
 import { buildContextUsage, type ContextUsage, type PendingApproval } from '../appserver/chatState';
 import { isEffortToken, type EffortInfo, type ModelInfo } from '../codex/modelCatalog';
 import { buildClaudeContent, type Attachment } from '../provider/attachments';
+import type { McpServerView } from '../provider/mcpServers';
 import type { SlashCommand } from '../provider/slashCommands';
 import { describeTool } from './transcript';
 import type { ClaudeAgentInfo } from './types';
@@ -291,6 +292,82 @@ export function readContextUsage(payload: unknown): ContextUsage | undefined {
   return buildContextUsage(usedTokens, num(body?.['maxTokens']));
 }
 
+/** MCPサーバーの一覧・状態を問い合わせる要求（issue #27、design.md TP-50）。 */
+export function buildMcpStatusRequest(requestId: string): string {
+  return buildControlRequest(requestId, { subtype: 'mcp_status' });
+}
+
+/**
+ * MCPサーバーの有効/無効を切り替える要求。
+ *
+ * 実測（CLI 2.1.227）: パラメータ名は **`serverName`**（camelCase）。`server_name` /
+ * `name` はどちらも `Server not found: undefined` になる（Phase 0の追試項目への回答）。
+ * 存在しないサーバー名を指定すると `Server not found: <name>` エラーが返る。
+ * プロセスを終了しても設定は残る（`.claude.json` に永続化される。実測で確認）ため、
+ * 会話を開いていない設定パネルからの単発呼び出しでも切り替えられる。
+ */
+export function buildMcpToggleRequest(
+  requestId: string,
+  serverName: string,
+  enabled: boolean,
+): string {
+  return buildControlRequest(requestId, { subtype: 'mcp_toggle', serverName, enabled });
+}
+
+/**
+ * `mcp_status` の応答からMCPサーバー一覧を読む。
+ *
+ * 実測（CLI 2.1.227）した形:
+ * `{ mcpServers: [{ name, status: 'connected'|'failed'|'disabled', serverInfo？,
+ * config, scope, tools？: [{name, annotations}], error？ }] }`。
+ * Codexの `mcpServerStatus/list` と違い、**失敗理由（`error`）がこの応答だけで取れる**
+ * （スレッドの開始も、別途の通知購読も要らない）。
+ *
+ * 一覧そのものが無いときは `undefined` を返す（他の読み取り関数と同じ理由）。
+ */
+export function readMcpServersList(payload: unknown): McpServerView[] | undefined {
+  const raw = rec(payload)?.['mcpServers'];
+  if (!Array.isArray(raw)) {
+    return undefined;
+  }
+
+  const servers: McpServerView[] = [];
+  for (const entry of raw) {
+    const e = rec(entry);
+    const name = str(e?.['name']);
+    if (name === '') {
+      continue;
+    }
+    const status = str(e?.['status']);
+
+    if (status === 'disabled') {
+      servers.push({ name, state: 'disabled', toolCount: 0, version: undefined, reason: undefined });
+      continue;
+    }
+    if (status === 'connected') {
+      const tools = e?.['tools'];
+      const serverInfo = rec(e?.['serverInfo']);
+      servers.push({
+        name,
+        state: 'connected',
+        toolCount: Array.isArray(tools) ? tools.length : 0,
+        version: serverInfo === undefined ? undefined : strOrUndefined(serverInfo['version']),
+        reason: undefined,
+      });
+      continue;
+    }
+    // 'failed' に限らず未知の状態も「使えない」側へ倒す。理由が取れていれば添える
+    servers.push({
+      name,
+      state: 'unavailable',
+      toolCount: 0,
+      version: undefined,
+      reason: strOrUndefined(e?.['error']),
+    });
+  }
+  return servers;
+}
+
 /** `can_use_tool` 要求を承認カードにする。 */
 export function describeCanUseTool(
   requestId: string,
@@ -359,6 +436,10 @@ function summarizeInput(input: Record<string, unknown>): string {
 }
 
 const str = (value: unknown): string => (typeof value === 'string' ? value : '');
+const strOrUndefined = (value: unknown): string | undefined => {
+  const s = str(value);
+  return s === '' ? undefined : s;
+};
 const num = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 const rec = (value: unknown): Record<string, unknown> | undefined =>

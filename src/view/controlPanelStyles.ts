@@ -115,5 +115,54 @@ export function controlPanelStyles(): string {
     font-size: 0.85em;
     line-height: 1.5;
   }
+  .sectionTitle {
+    margin: 16px 0 8px;
+    padding-top: 12px;
+    border-top: 1px solid var(--vscode-widget-border, transparent);
+    font-size: 0.9em;
+    font-weight: 600;
+    color: var(--vscode-foreground);
+  }
+  .mcpList { display: flex; flex-direction: column; gap: 6px; }
+  .mcpEmpty, .mcpError {
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+  }
+  .mcpError { color: var(--vscode-errorForeground, var(--vscode-descriptionForeground)); }
+  .mcpServer {
+    padding: 6px 8px;
+    border: 1px solid var(--vscode-widget-border, transparent);
+    border-radius: 3px;
+  }
+  .mcpServer-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .mcpServer-name { font-weight: 600; }
+  .mcpServer-meta {
+    margin-top: 2px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+  }
+  .mcpBadge {
+    font-size: 0.8em;
+    padding: 1px 6px;
+    border-radius: 10px;
+    white-space: nowrap;
+  }
+  .mcpBadge-connected {
+    color: var(--vscode-charts-green);
+    border: 1px solid var(--vscode-charts-green);
+  }
+  .mcpBadge-disabled {
+    color: var(--vscode-descriptionForeground);
+    border: 1px solid var(--vscode-widget-border, var(--vscode-descriptionForeground));
+  }
+  .mcpBadge-unavailable {
+    color: var(--vscode-charts-red);
+    border: 1px solid var(--vscode-charts-red);
+  }
 `;
 }
