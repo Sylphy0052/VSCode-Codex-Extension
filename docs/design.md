@@ -349,18 +349,22 @@ Agents
 
 Claude Code側で扱う設定と選択肢の出どころは次のとおり。
 
-| 項目     | 選択肢                                           | 既定値の出どころ                             |
-| -------- | ------------------------------------------------ | -------------------------------------------- |
-| モデル   | `initialize` の応答の `models`（`value` を渡す） | `settings.json` の `model`                   |
-| effort   | モデルごとの `supportedEffortLevels`             | `settings.json` の `effortLevel`             |
-| 承認方法 | `--permission-mode` が受け付ける6種              | `settings.json` の `permissions.defaultMode` |
+| 項目         | 選択肢                                           | 既定値の出どころ                                            |
+| ------------ | ------------------------------------------------ | ----------------------------------------------------------- |
+| モデル       | `initialize` の応答の `models`（`value` を渡す） | `settings.json` の `model`                                  |
+| effort       | モデルごとの `supportedEffortLevels`             | `settings.json` の `effortLevel`                            |
+| 承認方法     | `--permission-mode` が受け付ける6種              | `settings.json` の `permissions.defaultMode`                |
+| エージェント | `initialize` の応答の `agents`（`name` を渡す）  | 出どころ無し（`settings.json` の値は追跡していない。§14.7） |
 
-Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡張機能側の既定値として持つ。Codex側の「空＝CLIへ委譲」とは異なるが、未指定だと何が使われるか画面から分からないため、既定を明示する方を採った。「既定」を選べば従来どおり `settings.json` へ委譲する。
+Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡張機能側の既定値として持つ。Codex側の「空＝CLIへ委譲」とは異なるが、未指定だと何が使われるか画面から分からないため、既定を明示する方を採った。「既定」を選べば従来どおり `settings.json` へ委譲する。**エージェントだけは空文字を既定にした**（`claude.model` / `claude.effort` と違い、意味のある既定値を1つに決められない。カスタムエージェントは環境ごとに違うため）。
 
 - モデル一覧は `initialize` の応答の `models` から取る。Codexの `model/list` に相当する要求は control protocol に無く、これが唯一の取得手段（実測）。応答は `{value, resolvedModel, displayName, description, supportsEffort, supportedEffortLevels}` で、`--model` へ渡すのは `value`。
   - 設定パネルは会話を開いていなくても選択肢を出すため、`claude --print --input-format stream-json` を単発で起動して `initialize` の応答だけを読む（`ClaudeModelProbe`）。
   - `supportsEffort` を持たないモデル（実測では haiku）では effort を選ばせず、理由を画面に出す。
   - 取得できない場合は `fable` / `opus` / `sonnet` / `haiku` のエイリアスへ退避する。正式名（`claude-fable-5` など）を使う場合は `claude.model` を直接編集する。一覧に無い現在値は「(一覧外)」として選択肢に補うので、設定が失われることはない。
+- エージェント一覧は同じ `initialize` の応答の `agents` から取る（実測。CLI 2.1.227）。中身は `{name, description, model?}` の配列で、組込エージェント（`claude` `Explore` `Plan` `general-purpose` など）とユーザー定義のカスタムエージェントが混ざって返る。`--agent` へ渡すのは `name` だけで、`model` は使わない。
+  - モデルと違い、意味のあるフォールバック一覧が無い（カスタムエージェントは `~/.claude/agents/` やプラグイン次第で環境ごとに違う）。取得できなければ選択肢を出さず、既定（空文字＝CLI委譲）だけが選べる状態にする（`ClaudeAgentProbe`。`ClaudeModelProbe` と同じ作り）。
+  - **エージェントは起動時にのみ効く**。会話の途中で切り替える制御要求を7候補（`set_agent` / `change_agent` / `switch_agent` / `agent_change` / `set_current_agent` / `select_agent` / `use_agent`）で実測したが、いずれも `{"subtype":"error","error":"Unsupported control request subtype: <name>"}` で拒否された。`initialize` の応答の `commands` には `/agents` が含まれておりCLI内蔵の対話的なエージェント管理はあるが、拡張機能から制御できる経路ではないため使わない。
 - `permissionMode` を `bypassPermissions` にするときは、Codexの `danger-full-access` + `never` と同じくモーダルで同意を取る。
 - 使用量はCodex側にしか出せない（§14.8）ため、Claudeタブには表示しない。
 
@@ -824,20 +828,22 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 
 Codex画面と同じHTML（`renderShell`）を使うため、画面下の設定行はClaude Code側にも出る。承認方法の選択肢だけプロバイダごとに差し替える（Codexは `APPROVAL_MODES`、Claude Codeは `--permission-mode` の6種）。
 
-- Webview側のスクリプトはCodexのスナップショット形状を前提にしているため、Claude側は同じ形へ整えて送る。モデル一覧は `initialize` の応答を `ModelInfo` へ正規化したものを渡し、キーは `reasoningEffort` → `effort`、`approvalMode` → `permissionMode` と読み替える。
+- Webview側のスクリプトはCodexのスナップショット形状を前提にしているため、Claude側は同じ形へ整えて送る。モデル一覧は `initialize` の応答を `ModelInfo` へ正規化したものを渡し、キーは `reasoningEffort` → `effort`、`approvalMode` → `permissionMode` と読み替える。エージェントはCodexに概念が無いため専用の `showAgentSelector` フラグでセレクタごと出し分ける（Sandboxセレクタと同じ「無ければ描画しない」方式）。
 - effortを持たないモデルを選んでいる間は、effortのセレクタを無効にして理由を出す（黙って選べなくしない）。
-- **効かせ方が違う**。Codex画面は `turn/start` に毎回渡すので次の発言から効く。Claude Codeは1プロセス1セッションで起動引数が固定なので、control protocol で実行中のセッションへ伝える。
+- **効かせ方が違う**。Codex画面は `turn/start` に毎回渡すので次の発言から効く。Claude Codeは1プロセス1セッションで起動引数が固定なので、control protocol で実行中のセッションへ伝える。**エージェントだけは control protocol にも経路が無く、常に「次のセッションから」になる**（次項）。
 
 #### Claude Codeのセッション中の変更（実測で確認）
 
-| 対象     | 送るもの                                            | 効いたことの確かめ方                                                                                  |
-| -------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| モデル   | `set_model { model }`                               | 成功応答。`<local-command-stdout>Set model to sonnet (claude-sonnet-5)</local-command-stdout>` も届く |
-| 承認方法 | `set_permission_mode { mode }`                      | `system` の `status` 通知が `permissionMode` を返す                                                   |
-| effort   | `apply_flag_settings { settings: { effortLevel } }` | **確かめられない**                                                                                    |
+| 対象         | 送るもの                                            | 効いたことの確かめ方                                                                                  |
+| ------------ | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| モデル       | `set_model { model }`                               | 成功応答。`<local-command-stdout>Set model to sonnet (claude-sonnet-5)</local-command-stdout>` も届く |
+| 承認方法     | `set_permission_mode { mode }`                      | `system` の `status` 通知が `permissionMode` を返す                                                   |
+| effort       | `apply_flag_settings { settings: { effortLevel } }` | **確かめられない**                                                                                    |
+| エージェント | 無し（起動引数 `--agent` のみ）                     | **専用の制御要求が見つからない**（7候補すべて実測でエラー。下記）                                     |
 
 - **effortには専用の制御要求が無い**。`set_effort` / `set_thinking_effort` / `set_reasoning_effort` はどれも `Unsupported control request subtype` になる（実測）。セッション単位の設定を差し込む `apply_flag_settings` に載せるのが唯一の手段
 - その `apply_flag_settings` は **`effortLevel` に出鱈目な値を入れても success を返し、確認の通知も来ない**。同じ経路で `{ model }` を送ると適用の合図が届くので効いている見込みはあるが、観測できない以上「変わった」とは書かない。画面には「送りました。反映は確かめられません」と出す
+- **エージェントを切り替える制御要求は無い**。`set_agent` / `change_agent` / `switch_agent` / `agent_change` / `set_current_agent` / `select_agent` / `use_agent` の7候補を実測したが、すべて `{"subtype":"error","error":"Unsupported control request subtype: <name>"}` で拒否された。`apply_flag_settings` はeffort専用の観測不能な経路であり、同じ穴（値を入れても無条件success）を持つエージェントで試しても「送った」以上のことは分からないため、こちらでは試していない。以上から**エージェントは起動時にのみ指定できる**と結論づけ、画面には常に「次のセッションから効く」と出す（effortのように「送った」とすら書かない。送信自体をしないため）
 - 承認方法の表示は**`status` 通知を正とする**。要求の成功だけを信じない（TUIなど他の経路で変えられた場合も同じ通知で拾えるため）
 - **「既定」へ戻す操作は送らない**。CLI側に起動時の値へ戻す手段が無く、何を送っても嘘になる。次に開くセッションから効く
 - `bypassPermissions` を選んだときの確認ダイアログを取り消した場合は、セッションへも送らない

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { ActivityLogger, nodeClock, resolveBufferDir } from './activity/activityLogger';
 import type { RecordRequest as ActivityRequest } from './activity/activityLogger';
 import { nodeActivityAppender } from './activity/nodeAppender';
+import { ClaudeAgentProbe } from './claude/agentProbe';
 import { claudePaths, resolveClaudeHome } from './claude/cliLocator';
 import { ClaudeModelProbe } from './claude/modelProbe';
 import { ClaudeProvider } from './claude/provider';
@@ -91,9 +92,10 @@ export function activate(context: vscode.ExtensionContext): void {
   /** Claude Code固有の機能（設定パネル・モデル一覧）が使う実行ファイル。 */
   const claudePath = (): string => resolveExecutable(claude, log) ?? 'claude';
 
-  // 単発の問い合わせ（fork・モデル一覧）に使う。会話用の接続とは別プロセス
+  // 単発の問い合わせ（fork・モデル一覧・エージェント一覧）に使う。会話用の接続とは別プロセス
   const appServer = new AppServerClient(codexPath, log);
   const claudeModels = new ClaudeModelProbe(claudePath, log);
+  const claudeAgents = new ClaudeAgentProbe(claudePath, log);
 
   const settings = new SettingsProvider(
     nodeFileSystem,
@@ -102,6 +104,7 @@ export function activate(context: vscode.ExtensionContext): void {
     `${claudeDirs.home}/settings.json`,
     () => appServer.listModels(),
     () => claudeModels.read(),
+    () => claudeAgents.read(),
     log,
   );
   // オーケストレータ（design.md §16）。`chat` / `claudeChat` は `WorkflowRunner` の
