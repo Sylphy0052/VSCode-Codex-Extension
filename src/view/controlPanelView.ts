@@ -162,6 +162,67 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    if (m['type'] === 'togglePlugin') {
+      // Claude Code専用（issue #32）。Codexには有効/無効を切り替える経路が無い
+      const cli = m['cli'];
+      const id = m['id'];
+      const scope = m['scope'];
+      const enabled = m['enabled'];
+      if (cli !== 'claude' || typeof id !== 'string' || id === '') {
+        this.log.warn(`pluginの切替要求が不正です: ${JSON.stringify(m)}`);
+        return;
+      }
+      await this.settings.toggleClaudePlugin(
+        id,
+        typeof scope === 'string' ? scope : undefined,
+        enabled === true,
+      );
+      await this.refresh();
+      return;
+    }
+
+    if (m['type'] === 'uninstallPlugin') {
+      const cli = m['cli'];
+      const id = m['id'];
+      const name = m['name'];
+      const scope = m['scope'];
+      if (
+        (cli !== 'codex' && cli !== 'claude') ||
+        typeof id !== 'string' ||
+        id === '' ||
+        typeof name !== 'string' ||
+        name === ''
+      ) {
+        this.log.warn(`pluginのアンインストール要求が不正です: ${JSON.stringify(m)}`);
+        return;
+      }
+      const result =
+        cli === 'codex'
+          ? await this.settings.uninstallCodexPlugin(id, name)
+          : await this.settings.uninstallClaudePlugin(
+              id,
+              typeof scope === 'string' ? scope : undefined,
+              name,
+            );
+      if (!result.ok && result.error !== undefined) {
+        void vscode.window.showErrorMessage(
+          `pluginをアンインストールできませんでした: ${result.error}`,
+        );
+      }
+      await this.refresh();
+      return;
+    }
+
+    if (m['type'] === 'installPlugin') {
+      const cli = m['cli'];
+      if (cli !== 'codex' && cli !== 'claude') {
+        this.log.warn(`pluginのインストール要求が不正です: ${JSON.stringify(m)}`);
+        return;
+      }
+      await this.installPlugin(cli);
+      return;
+    }
+
     if (m['type'] === 'logoutCodex') {
       await this.runAccountAction(() => this.settings.logoutCodex(), 'Codexからログアウト');
       return;
@@ -224,6 +285,65 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
    * （issue #29）。確認ダイアログでの取り消し（`error` が `undefined`）は静かに終える。
    * 失敗時だけエラーを通知する。
    */
+  /**
+   * pluginをインストールする（issue #32）。
+   *
+   * どちらも名前をテキスト入力で受ける（既存の `loginCodexApiKey` と同じ
+   * `showInputBox` パターン）。Codexは `plugin/install` が名前だけでは対象を特定できない
+   * （マーケットプレイスの指定が要る。スキーマ根拠）ため、続けてマーケットプレイスを
+   * `showQuickPick` で選ばせる。確認ダイアログ（「何をどこから入れるか」の明示）は
+   * `SettingsProvider.installCodexPlugin` / `installClaudePlugin` 側で必ず挟む。
+   */
+  private async installPlugin(cli: 'codex' | 'claude'): Promise<void> {
+    const pluginName = await vscode.window.showInputBox({
+      title: 'pluginをインストール',
+      prompt:
+        cli === 'codex'
+          ? 'インストールするpluginの名前を入力してください（例: github）'
+          : 'インストールするpluginを入力してください（例: name または name@marketplace）',
+      ignoreFocusOut: true,
+    });
+    if (pluginName === undefined || pluginName === '') {
+      return;
+    }
+
+    if (cli === 'claude') {
+      await this.runAccountAction(
+        () => this.settings.installClaudePlugin(pluginName),
+        'pluginのインストール',
+      );
+      return;
+    }
+
+    const snapshot = this.settings.snapshot().plugins;
+    const marketplaces = snapshot.ok ? snapshot.marketplaces : [];
+    if (marketplaces.length === 0) {
+      void vscode.window.showErrorMessage(
+        'マーケットプレイスの一覧を取得できていないため、インストールできません。',
+      );
+      return;
+    }
+    const picked = await vscode.window.showQuickPick(
+      marketplaces.map((m) => ({
+        label: m.displayName ?? m.name,
+        description: m.name,
+        marketplace: m,
+      })),
+      { title: 'インストール元のマーケットプレイスを選択', ignoreFocusOut: true },
+    );
+    if (picked === undefined) {
+      return;
+    }
+    await this.runAccountAction(
+      () =>
+        this.settings.installCodexPlugin(pluginName, {
+          name: picked.marketplace.name,
+          path: picked.marketplace.path,
+        }),
+      'pluginのインストール',
+    );
+  }
+
   private async runAccountAction(
     action: () => Promise<{ ok: true } | { ok: false; error: string | undefined }>,
     label: string,
@@ -318,6 +438,14 @@ ${controlPanelStyles()}
   <h2 class="sectionTitle">skills</h2>
   <p class="note">skillsはモデルへ渡す指示（プロンプト）です。特にプロジェクト側で定義されたskillは、cloneしただけで効く経路になりえます。どこ由来かを確認してから使ってください。</p>
   <div class="skillsList" id="skillsListCodex"></div>
+
+  <h2 class="sectionTitle">plugins</h2>
+  <p class="note">pluginは任意のコード（hookやMCPサーバーなど）を持ち込む仕組みです。中身を確認してから使ってください。Codexには有効/無効を切り替える経路がありません（実測。導入済みかどうかはインストール/アンインストールで扱います）。</p>
+  <div class="pluginsList" id="pluginsListCodex"></div>
+
+  <h2 class="sectionTitle">apps</h2>
+  <p class="note">appはChatGPTに接続されたコネクタです。この一覧は閲覧のみです。Codexには有効/無効・インストール/アンインストールを拡張機能から操作する確定した経路がありません。</p>
+  <div class="appsList" id="appsListCodex"></div>
   </div>
 
   <div id="panelClaude" hidden>
@@ -361,6 +489,10 @@ ${controlPanelStyles()}
     <h2 class="sectionTitle">skills</h2>
     <p class="note">skillsはモデルへ渡す指示（プロンプト）です。特にプロジェクト側で定義されたskillは、cloneしただけで効く経路になりえます。Claude Codeにはこの拡張機能から有効/無効を切り替える経路がありません（実測。出どころの表示はCLIの説明文からの推測です）。</p>
     <div class="skillsList" id="skillsListClaude"></div>
+
+    <h2 class="sectionTitle">plugins</h2>
+    <p class="note">pluginは任意のコード（hookやMCPサーバーなど）を持ち込む仕組みです。中身を確認してから使ってください。Claude Codeは <code>claude plugin</code> CLI経由で有効/無効・インストール/アンインストールをすべて操作できます。</p>
+    <div class="pluginsList" id="pluginsListClaude"></div>
   </div>
 
 <script nonce="${nonce}">

@@ -406,6 +406,7 @@ Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡
 
 **hooksの一覧**: MCPサーバーの一覧の下に、登録されているhookの一覧を出す（issue #28・§14.15）。1件あたりイベント名・実行するコマンド・出どころ（user/project/plugin等）を表示する。Codexは信頼状態も持ち、未信頼・変更ありのhookには「信頼する」操作を出す。Claude Codeには信頼状態を返す経路が無いため、一覧のみで操作は出さない（黙って何もしないボタンは置かない。「無い」旨を注記する）。
 **skillsの一覧**: hooksの一覧の下に、使えるskillsの一覧と（Codexのみ）有効/無効の切替を出す（issue #35・§14.19）。1件あたり名前・説明・出どころ（user/project/plugin/system/admin/unknown）を表示する。Claude Codeには有効/無効を返す・切り替える経路がどちらも無いため、一覧のみで操作は出さない（「無い」旨を注記する）。出どころの表示はCodexは公式フィールド（`scope`）、Claude Codeは応答の説明文からの推測であることも注記で区別する。
+**pluginsの一覧**: skillsの一覧の下に、導入済みのpluginの一覧を出す（issue #32・§14.20）。1件あたり名前・説明・出どころ・提供するもの（skills/agents/hooks/MCPサーバーの件数、分かる範囲）を表示する。Codexは有効/無効を切り替える経路が無いためインストール/アンインストールのみ、Claude Codeは有効/無効の切替も含めすべて操作できる。インストール・アンインストールはどちらも確認ダイアログ必須。Codexはさらにappの一覧（閲覧のみ）を出す。
 **アカウント**: MCPサーバーの一覧より上に、ログイン状態とlogin/logoutの操作を出す（§14.16）。状態の取得はCodexが `account/read`（app-server）、Claude Codeが `claude auth status --json`。ログアウトはどちらもCLIのトップレベルサブコマンドを直接実行し、確認ダイアログを必ず挟む。ブラウザでのOAuthログインは拡張機能内で完結できないため、統合ターミナルへコマンドを入力するところまでに留める（自動実行はしない）。
 
 ### 使用量の表示
@@ -463,14 +464,15 @@ Claude Code側（`claude.*`）と作業記録（`agent.activityLog.*`）の設�
 
 ## 8. セキュリティ考慮
 
-| 項目                                     | 対処                                                                                                                                                                                                   |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| ワークスペース設定による任意コマンド実行 | §7のスコープ設計。`executablePath` / `additionalArgs` / `codexHome` を `machine` に固定                                                                                                                |
-| サンドボックス無効化の誘導               | `sandbox` / `approvalMode` も `machine`。危険な組み合わせは初回に確認ダイアログ                                                                                                                        |
-| 引数インジェクション                     | `shellPath` / `shellArgs` 方式によりシェル解釈を経由しない（§5.2）                                                                                                                                     |
-| セッション本文の漏洩                     | 拡張機能はロールアウトファイルの**1行目のみ**を読み、会話本文は読まない・保存しない・ログに出さない                                                                                                    |
-| 破壊操作                                 | `delete` は確認ダイアログ必須。`archive` は取り消し可能なため確認不要                                                                                                                                  |
-| hookによる任意コマンド実行（issue #28）  | 出どころ（user/project/plugin等）と実行コマンドを隠さず表示。既定は信頼せず、Codexは明示的な信頼操作が必要（§14.15）。hookのコマンド文字列はDOM APIの `textContent` で埋め込み、HTMLとして解釈させない |
+| 項目                                                | 対処                                                                                                                                                                                                       |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ワークスペース設定による任意コマンド実行            | §7のスコープ設計。`executablePath` / `additionalArgs` / `codexHome` を `machine` に固定                                                                                                                    |
+| サンドボックス無効化の誘導                          | `sandbox` / `approvalMode` も `machine`。危険な組み合わせは初回に確認ダイアログ                                                                                                                            |
+| 引数インジェクション                                | `shellPath` / `shellArgs` 方式によりシェル解釈を経由しない（§5.2）                                                                                                                                         |
+| セッション本文の漏洩                                | 拡張機能はロールアウトファイルの**1行目のみ**を読み、会話本文は読まない・保存しない・ログに出さない                                                                                                        |
+| 破壊操作                                            | `delete` は確認ダイアログ必須。`archive` は取り消し可能なため確認不要                                                                                                                                      |
+| hookによる任意コマンド実行（issue #28）             | 出どころ（user/project/plugin等）と実行コマンドを隠さず表示。既定は信頼せず、Codexは明示的な信頼操作が必要（§14.15）。hookのコマンド文字列はDOM APIの `textContent` で埋め込み、HTMLとして解釈させない     |
+| pluginインストールによる任意コード持込（issue #32） | インストール前に確認ダイアログで「何をどこから入れるか」を明示（§14.20）。plugin名・説明はDOM APIの `textContent` で埋め込み、HTMLとして解釈させない。CLI呼び出しへ渡す前に `isValidPluginName` で防御する |
 
 ## 9. リスクと検証項目
 
@@ -1419,6 +1421,69 @@ Phase 0（issue #1 Z-07 / issue #2 Z-10）の時点では「両方とも実装�
 - `src/claude/skillsProbe.ts`: `ClaudeSkillsProbe`。`ClaudeHooksProbe` と同じ理由で単発プロセスとして問い合わせる。切り替える経路が無いため読み取り専用
 - `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `skills: SkillsSnapshot` を追加。`toggleCodexSkill(path, enabled)` を新設（Claude Code側には対応する書き込みメソッドを持たない）
 - `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画と有効/無効の切替（Codexのみ）。skillの名前・説明は必ず `textContent` でDOMへ入れ、HTMLとして解釈させない
+
+### 14.20 plugins / appsの一覧と管理
+
+TUIの `/plugins`（browse plugins）と `/apps`（manage apps）に相当する表示（Codex）。Claude Codeには `/plugin` と `/reload-plugins` がある。issue #32・design.mdのTP-51対応。pluginは任意のコード（hookやMCPサーバーなど）を持ち込む仕組みで、hooks（§14.15）・skills（§14.19）と同じくどこ由来かを隠さず見せる方針にする（§8のセキュリティ考慮）。
+
+Phase 0（issue #1 Z-07）のコメントでは「Codex側は`plugin/list` `plugin/installed` `plugin/read` `plugin/install` `plugin/uninstall`等、`app/list` `app/installed` `app/read`があり、インストール・アンインストールまでAPIがある」「Claude側は`plugin_install` `reload_plugins`が実在（未実測）」までが確定していた。本issueで実測とスキーマの両面から経路を確定させたところ、**CodexとClaude Codeで扱える範囲が正反対に非対称**であることが分かった（hooks/skillsはどちらもCodexの方が高機能だったが、pluginの有効/無効操作だけはClaude Codeの方が高機能）。
+
+#### Codex: `plugin/installed` + `plugin/read`（閲覧）、`plugin/install` / `plugin/uninstall`（操作）
+
+実測（codex-cli 0.147.0。このリポジトリで `codex app-server` を起動して呼び出し、実際の応答を確認した。この環境のplugin/app設定は変更していない）と `codex app-server generate-json-schema --out` のスキーマが根拠:
+
+- `plugin/list`（マーケットプレイスのカタログ全体。未導入のリモートplugin候補まで含む）を実行すると、この環境では**応答が11MBを超えた**。導入済みのものだけを一覧する本issueのスコープでは使わない
+- **`plugin/installed`**（`PluginInstalledParams { cwds?, installSuggestionPluginNames? }` → `PluginInstalledResponse { marketplaces: [{name, path, interface: {displayName}, plugins: [PluginSummary]}], marketplaceLoadErrors }`）はスレッドを開始していなくても呼べる。この環境で実際に導入済みの3件（`openai-templates` `github` `google-drive`。いずれも`openai-curated-remote`という既定のリモートカタログ由来）を確認した。`PluginSummary`は`id`（`<name>@<marketplace>`）/`name`/`version`/`localVersion`/`enabled`/`installed`/`source`（`local`|`git`|`npm`|`remote`の判別共用体）/`interface`（`displayName`/`shortDescription`/`longDescription`等）を持つ
+- **「提供するもの」の内訳（hooks/mcpServers/skills）は`plugin/installed`には無い**。`plugin/read`（`PluginReadParams { pluginName, marketplacePath? or remoteMarketplaceName? }` → `PluginReadResponse { plugin: PluginDetail }`。どちらか一方が必須。実測でエラー文言「`plugin/read requires exactly one of marketplacePath or remoteMarketplaceName`」を確認）で1件ずつ読む。`PluginDetail`は`hooks: [{eventName, key}]`/`mcpServers: [string]`/`skills: [SkillSummary]`/`apps: [AppSummary]`/`appTemplates`/`scheduledTasks`を持ち、実際に`github`pluginを読んで`skills`が4件（`gh-address-comments`等）、`hooks`/`mcpServers`が0件であることを確認した
+- **`plugin/read`の応答内の`plugin.summary.installed`/`plugin.summary.enabled`は信用できない**（実測: `plugin/installed`では`installed: true`だった`github`pluginを、同じ環境で`plugin/read`で読むと`installed: false`が返った。カタログの定義を読んでいるだけで、この端末の導入状態を反映していないとみられる）。そのため一覧・有効無効の判定は`plugin/installed`だけを正とし、`plugin/read`は「提供するもの」の内訳を補う目的だけに使う
+- **plugin専用の有効/無効APIが無い**。`ClientRequest`のメソッド一覧（`plugin/list` `plugin/installed` `plugin/read` `plugin/install` `plugin/uninstall` `plugin/share/*` `plugin/skill/read`）を`generate-json-schema`で全数確認したが、トグルに相当するものは存在しない。`PluginSummary.enabled`は読み取り専用の状態で、書き込む経路は無いとみられる
+- **インストール・アンインストールはAPIがある**。`plugin/install`（`PluginInstallParams { pluginName, marketplacePath?, remoteMarketplaceName? }` → `PluginInstallResponse { appsNeedingAuth, authPolicy }`）と`plugin/uninstall`（`PluginUninstallParams { pluginId }` → `PluginUninstallResponse`）はスキーマ根拠。**この環境のplugin設定を書き換えない方針のため、実際にインストール・アンインストールして確認してはいない**
+- `marketplace/add` `marketplace/remove` `marketplace/upgrade`（マーケットプレイス自体の追加・削除）も存在するが、本issueのスコープ（導入済みの閲覧＋既知マーケットプレイスからのインストール）では扱わない
+
+#### Codex: `app/installed` + `app/read`（閲覧のみ）
+
+実測（この環境で実際に導入済みのappを読んだ。設定は変更していない）:
+
+- `app/list`（マーケットプレイスのカタログ全体）も`plugin/list`と同様にこの環境で応答が非常に大きく、使わない
+- `app/installed`（`AppsInstalledResponse { apps: [{id, runtimeName, enabled, callable}] }`）で導入済みの一覧を読み、`app/read`（`AppsReadParams { appIds }` → `AppsReadResponse { apps: [ConnectorMetadata], missingAppIds }`。`appIds`は最大100件・重複除去とスキーマに明記）で人が読める`name`/`description`を補う。実際に導入済みの6件（GitHub・Google Drive等のconnector）で両方を確認した
+- **有効/無効・インストール/アンインストールの確定した書き込み経路が無い**。`AppInfo.isEnabled`のスキーマ説明には`config.toml`の`[apps.<id>] enabled = false`という例示があるが、対応する再読込メソッド（MCPサーバーの`config/mcpServer/reload`に相当するもの）がスキーマに見当たらず、`config/value/write`だけで実際に反映されるかは未確認（この環境のapp設定を書き換えない方針のため検証していない）。確証の無い書き込みは実装しない方針（design.mdの決定事項）に合わせ、**appは閲覧のみ**とし、画面にその旨を注記する
+
+#### Claude Code: `claude plugin` CLIサブコマンド一式（閲覧・有効無効・インストール・アンインストールすべて操作可能）
+
+Phase 0では「`plugin_install` `reload_plugins`という2つのcontrol_request subtypeが実在する（未実測）」とされていた。本issueで実測したところ、**`reload_plugins`は`initialize`と同じ「commands」一覧（90件）をそのまま返すだけで、plugin専用の情報を一切持たない**（`reload_skills`がskillだけに絞り込んだ一覧を返すのとは対照的）。`plugin_install`は総当たり確認していない（下記のCLIサブコマンドの方が確実なため）。
+
+代わりに `claude --help` を調べたところ、**`claude plugin`（エイリアス`plugins`）という専用のトップレベルサブコマンドが見つかった**（Phase 0の時点では確認されていなかった経路）:
+
+```
+$ claude plugin --help
+Commands:
+  details <name>        Show a plugin's component inventory and projected token cost
+  disable [plugin]       Disable an enabled plugin
+  enable <plugin>        Enable a disabled plugin
+  install|i <plugin>      Install a plugin from available marketplaces
+  list                    List installed plugins
+  marketplace             Manage Claude Code marketplaces
+  uninstall|remove <plugin>  Uninstall an installed plugin
+  ...
+```
+
+- **`claude plugin list --json`は実際に呼んで確認した**（実測。CLI 2.1.227。この環境に実際に導入済みの2件、genshijin・last30daysで確認した）: `[{id, version, scope, enabled, installPath, installedAt, lastUpdated}]`。`id`は`<name>@<marketplace>`の形、`scope`は`user`/`project`/`local`の3種（`claude plugin install --help`の`-s, --scope`の説明が根拠。`project`/`local`はこの環境に対象が無く実測できていない）。**`enabled`フィールドを持つ**（Codexと違い有効/無効がこの一覧だけで分かる）
+- 「提供するもの」の内訳は一覧に無いため、**`claude plugin details <id>`**（実測。人が読める表示用テキストで、`--json`を持たない。`list`/`marketplace list`のみ`--json`がある）を1件ずつ呼んで補う。実際に`genshijin@genshijin`を読み、`Component inventory`欄に`Skills (13)` `Agents (3)` `Hooks (2)` `MCP servers (0)`という件数と、2行目に説明文が出ることを確認した。**これは表示用整形であり正式なAPIではない**（skills origin推測と同じ注意）ため、CLI更新で崩れても該当項目だけ`undefined`のまま残し、一覧自体は失わない防御的な実装にしている
+- **`claude plugin enable <plugin> [-s <scope>]` / `disable [plugin] [-s <scope>]`が実在する**（`--help`で確認。`disable --help`は実行して全文を確認、`enable --help`は環境のサンドボックス制約でヘルプの実行自体はできなかったが、`claude plugin --help`の一覧に`enable [options] <plugin>  Enable a disabled plugin`と載っており、`disable`との対称性から引数構成を推定した）。**enableは実行していない**（実測ではなく`--help`根拠のみ。この環境のplugin設定を変える可能性がある操作を調査目的で実行しないこととしたため）
+- **`claude plugin install <plugin> [-s <scope>]` / `uninstall <plugin> [-y] [-s <scope>] [--prune]`が実在する**（`--help`で確認。`install`の`<plugin>`は`<name>`または`<name>@<marketplace>`。`uninstall`の`-y`は`--prune`の確認プロンプトをスキップするフラグで、非TTY環境で確認待ちのまま止まる経路を先回りして塞ぐために常に付ける）。**どちらも実行していない**（実測ではなく`--help`根拠のみ、enableと同じ理由）
+- `claude plugin marketplace add/remove/list/update`（マーケットプレイス自体の追加・削除）も存在するが、Codex側と同じ理由で本issueのスコープでは扱わない。インストールは`<name>@<marketplace>`の自由入力（既知マーケットプレイスからの指定）に留める
+
+#### 実装
+
+- `src/provider/plugins.ts`: `PluginView`（`key`/`name`/`description`/`version`/`origin`/`scope`/`enabled`/`toggleable`/`removable`/`provides`）と`PluginsSnapshot`（`{ok:true, plugins, installable, marketplaces, warnings}`か`{ok:false, reason}`）、`AppView`と`AppsSnapshot`を共有の型として持つ。`isValidPluginName`で書き込み先（CLI引数・`pluginId`パラメータ）へ渡す前の防御をする
+- `src/codex/pluginsStatus.ts`: `plugin/installed`の応答を`PluginView[]`へ正規化する純粋関数（`parsePluginInstalled`。`installed: true`のみを一覧にし、`plugin/read`を呼ぶためのref一覧も返す）と、`plugin/read`の応答から「提供するもの」の件数だけを取り出す`parsePluginProvides`（`summary`の`installed`/`enabled`は無視する）
+- `src/codex/appsStatus.ts`: `app/installed` / `app/read`をそれぞれ`AppView[]`へ正規化・突き合わせる純粋関数（`parseAppsInstalled` / `parseAppsRead` / `mergeApps`）
+- `src/codex/appServerClient.ts`: `listPlugins()`（`plugin/installed`→`plugin/read`を1件ずつ、上限25件）/ `installPlugin(pluginName, marketplace)` / `uninstallPlugin(pluginId)` / `listApps()`（`app/installed`→`app/read`、`appIds`上限100件）を追加
+- `src/claude/pluginsList.ts`: `claude plugin list --json`の標準出力を`PluginView[]`へ正規化する純粋関数（`parsePluginListJson`）と、`claude plugin details <id>`の表示用テキストから説明・内訳を読む`parsePluginDetailsText`
+- `src/claude/pluginsProbe.ts`: `ClaudePluginsProbe`。`ClaudeAuthProbe`と同じ理由（設定パネルは会話を開いていなくても使える必要がある）で`claude plugin list --json`を単発実行し、続けて`claude plugin details`を1件ずつ（上限25件）呼んで内訳を補う
+- `src/claude/pluginsActions.ts`: `ClaudePluginActions`。`claude plugin enable` / `disable` / `install` / `uninstall`を実行する（`CommandRunner`経由。`CodexAccountActions`と同じ構成）
+- `src/view/settingsProvider.ts`: `SettingsSnapshot`に`plugins: PluginsSnapshot`と`apps: AppsSnapshot`を、`ClaudeSettingsSnapshot`に`plugins: PluginsSnapshot`を追加。`installCodexPlugin` / `uninstallCodexPlugin` / `toggleClaudePlugin` / `installClaudePlugin` / `uninstallClaudePlugin`を新設。インストール・アンインストールは確認ダイアログ（「何をどこから入れるか」を明示）を必ず挟む。有効/無効の切替（Claude Codeのみ）はMCP/skillsの切替と同じく破壊的操作ではないため確認ダイアログを挟まない
+- `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画と操作。インストールは既存の`loginCodexApiKey`と同じ`showInputBox`パターン（Codexはマーケットプレイスを続けて`showQuickPick`で選ばせる）。plugin/appの名前・説明は必ず`textContent`でDOMへ入れ、HTMLとして解釈させない
 
 ## 15. 作業記録（日報・週報連携）
 

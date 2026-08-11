@@ -4,7 +4,13 @@ import type { HooksSnapshot } from '../provider/hooks';
 import { isValidMcpServerName, type McpServersSnapshot } from '../provider/mcpServers';
 import type { AccountSnapshot } from '../provider/account';
 import { isValidSkillPath, type SkillsSnapshot } from '../provider/skills';
+import {
+  isValidPluginName,
+  type AppsSnapshot,
+  type PluginsSnapshot,
+} from '../provider/plugins';
 import { parseAccountRead } from './accountStatus';
+import { mergeApps, parseAppsInstalled, parseAppsRead } from './appsStatus';
 import { isSessionId } from './argvBuilder';
 import { buildHookTrustEdit, parseHooksList } from './hooksStatus';
 import {
@@ -20,6 +26,7 @@ import {
   parseMcpServerStatusList,
 } from './mcpStatus';
 import { parseModelList, readNextCursor, type ModelInfo } from './modelCatalog';
+import { parsePluginInstalled, parsePluginProvides, type PluginReadRef } from './pluginsStatus';
 import { parseSkillsList } from './skillsStatus';
 import { normalizeThreadList, parseThreadListPage, type ThreadListOutcome } from './threadList';
 
@@ -39,6 +46,12 @@ const MAX_MODEL_PAGES = 20;
 /** `thread/list` の1回あたりの要求件数。応答が壊れて無限ループになるのを防ぐページ数上限も併せて持つ。 */
 const THREAD_LIST_PAGE_SIZE = 100;
 const MAX_THREAD_LIST_PAGES = 20;
+
+/** `plugin/read` を呼ぶ件数の上限。導入数が多い環境でパネルが固まらないようにする。 */
+const MAX_PLUGIN_READ_CALLS = 25;
+
+/** `app/read` の `appIds` の上限（スキーマの説明: 「最大100件、重複除去」）。 */
+const MAX_APP_READ_IDS = 100;
 
 /**
  * `codex app-server` を必要な瞬間だけ起動し、1回のRPCを行って終了する。
@@ -315,6 +328,165 @@ export class AppServerClient {
     });
 
     return result.ok ? { ok: true } : { ok: false, error: result.error };
+  }
+
+  /**
+   * pluginの一覧を取る（issue #32、design.md §14.20）。
+   *
+   * `plugin/installed` で導入済みの一覧を読み、`plugin/read` で1件ずつ「提供するもの」の
+   * 内訳（hooks/mcpServers/skillsの件数）を補う。`plugin/read` はスキーマ上必須の
+   * `marketplacePath` か `remoteMarketplaceName` のどちらか一方が要る（実測でエラー文言を
+   * 確認）ため、`plugin/installed` が返すマーケットプレイスの `path`（ローカル）の有無で
+   * 使い分ける。導入数が多い環境でパネルが固まらないよう呼び出し件数に上限を設け、
+   * 超えた分は内訳が空のまま返す（一覧・有効無効・出どころは失わない）。
+   *
+   * `plugin/read` が1件失敗しても、その1件の内訳だけを諦めて続行する（一覧全体は失わない）。
+   */
+  async listPlugins(): Promise<PluginsSnapshot> {
+    const result = await this.call<ReturnType<typeof parsePluginInstalled>>(async (request) => {
+      const response = await request('plugin/installed', {});
+      if (response.error !== undefined) {
+        return { ok: false, error: response.error.message };
+      }
+      const parsed = parsePluginInstalled(response.result);
+
+      const provideByKey = new Map<string, PluginReadRef>();
+      for (const ref of parsed.refs) {
+        provideByKey.set(ref.key, ref);
+      }
+      for (const plugin of parsed.plugins.slice(0, MAX_PLUGIN_READ_CALLS)) {
+        const ref = provideByKey.get(plugin.key);
+        if (ref === undefined) {
+          continue;
+        }
+        const readParams =
+          ref.marketplacePath === undefined
+            ? { pluginName: ref.pluginName, remoteMarketplaceName: ref.marketplaceName }
+            : { pluginName: ref.pluginName, marketplacePath: ref.marketplacePath };
+        const readResponse = await request('plugin/read', readParams);
+        if (readResponse.error !== undefined) {
+          continue;
+        }
+        const provides = parsePluginProvides(readResponse.result);
+        if (provides !== undefined) {
+          plugin.provides = provides;
+        }
+      }
+
+      return { ok: true, value: parsed };
+    });
+
+    if (!result.ok) {
+      this.log.warn(`plugin一覧を取得できませんでした: ${result.error}`);
+      return { ok: false, reason: result.error };
+    }
+    const warnings = [...result.value.warnings];
+    if (result.value.plugins.length > MAX_PLUGIN_READ_CALLS) {
+      warnings.push(
+        `導入数が多いため、${MAX_PLUGIN_READ_CALLS}件を超えるpluginの内訳は表示していません。`,
+      );
+    }
+    return {
+      ok: true,
+      plugins: result.value.plugins,
+      installable: true,
+      marketplaces: result.value.marketplaces,
+      warnings,
+    };
+  }
+
+  /**
+   * pluginをインストールする（issue #32）。
+   *
+   * `plugin/install`（`PluginInstallParams { pluginName, marketplacePath?,
+   * remoteMarketplaceName? }`）はスキーマ根拠（`codex app-server generate-json-schema
+   * --out` で確認）。この環境のplugin設定を書き換えない方針のため、**実際にインストールして
+   * 確認してはいない**。呼び出し側（`SettingsProvider.installCodexPlugin`）が確認ダイアログで
+   * 「何をどこから入れるか」を明示してから呼ぶこと。
+   */
+  async installPlugin(
+    pluginName: string,
+    marketplace: { path: string | undefined; remoteMarketplaceName: string | undefined },
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (!isValidPluginName(pluginName)) {
+      return { ok: false, error: '不正なplugin名です' };
+    }
+
+    const result = await this.call<void>(async (request) => {
+      const write = await request('plugin/install', {
+        pluginName,
+        marketplacePath: marketplace.path ?? null,
+        remoteMarketplaceName: marketplace.remoteMarketplaceName ?? null,
+      });
+      if (write.error !== undefined) {
+        return { ok: false, error: write.error.message };
+      }
+      return { ok: true, value: undefined };
+    });
+
+    return result.ok ? { ok: true } : { ok: false, error: result.error };
+  }
+
+  /**
+   * pluginをアンインストールする（issue #32）。
+   *
+   * `plugin/uninstall`（`PluginUninstallParams { pluginId }`）はスキーマ根拠のみ
+   * （`installPlugin` と同じ理由で実際に削除して確認してはいない）。`pluginId` は
+   * `plugin/installed` が返す一覧の `key`（`<name>@<marketplace>`）をそのまま渡す。
+   */
+  async uninstallPlugin(pluginId: string): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (!isValidPluginName(pluginId)) {
+      return { ok: false, error: '不正なplugin idです' };
+    }
+
+    const result = await this.call<void>(async (request) => {
+      const write = await request('plugin/uninstall', { pluginId });
+      if (write.error !== undefined) {
+        return { ok: false, error: write.error.message };
+      }
+      return { ok: true, value: undefined };
+    });
+
+    return result.ok ? { ok: true } : { ok: false, error: result.error };
+  }
+
+  /**
+   * appの一覧を取る（issue #32、design.md §14.20）。
+   *
+   * `app/installed`（導入済みの一覧。`id` / `runtimeName` / `enabled` / `callable` のみ）と
+   * `app/read`（人が読める `name` / `description`）を突き合わせる。`app/list`
+   * （マーケットプレイスのカタログ全体）は `plugin/list` と同じ理由でこの環境では応答が
+   * 非常に大きいため使わない。
+   *
+   * **有効/無効・インストール/アンインストールの確定した書き込み経路が無い**ため閲覧のみ。
+   * `AppInfo.isEnabled` の説明に `config.toml` の `[apps.<id>] enabled = false` が例示されて
+   * いるが、対応する書き込みメソッド（`config/app/reload` 相当）がスキーマに見当たらず、
+   * `config/value/write` だけで反映されるかは未確認（この環境のapp設定を書き換えない方針の
+   * ため検証していない）。確証の無い書き込みは実装しない方針に合わせ、読み取りのみとする。
+   */
+  async listApps(): Promise<AppsSnapshot> {
+    const result = await this.call<ReturnType<typeof mergeApps>>(async (request) => {
+      const installedResponse = await request('app/installed', {});
+      if (installedResponse.error !== undefined) {
+        return { ok: false, error: installedResponse.error.message };
+      }
+      const installed = parseAppsInstalled(installedResponse.result);
+      if (installed.length === 0) {
+        return { ok: true, value: [] };
+      }
+
+      const appIds = installed.slice(0, MAX_APP_READ_IDS).map((app) => app.id);
+      const readResponse = await request('app/read', { appIds });
+      const details =
+        readResponse.error === undefined ? parseAppsRead(readResponse.result) : new Map();
+      return { ok: true, value: mergeApps(installed, details) };
+    });
+
+    if (!result.ok) {
+      this.log.warn(`app一覧を取得できませんでした: ${result.error}`);
+      return { ok: false, reason: result.error };
+    }
+    return { ok: true, apps: result.value };
   }
 
   /**

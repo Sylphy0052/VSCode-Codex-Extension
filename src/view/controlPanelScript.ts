@@ -355,6 +355,202 @@ export function controlPanelScript(): string {
     }
   }
 
+  function formatProvides(provides) {
+    if (!provides) return '';
+    const parts = [];
+    const labelOf = { skills: 'skills', agents: 'agents', hooks: 'hooks', mcpServers: 'MCPサーバー' };
+    for (const key of ['skills', 'agents', 'hooks', 'mcpServers']) {
+      const value = provides[key];
+      parts.push(labelOf[key] + ': ' + (value === undefined || value === null ? '不明' : value + '件'));
+    }
+    return parts.join(' ・ ');
+  }
+
+  function renderPlugin(cli, plugin) {
+    const row = document.createElement('div');
+    row.className = 'pluginItem';
+
+    const head = document.createElement('div');
+    head.className = 'pluginItem-head';
+
+    if (plugin.toggleable) {
+      const label = document.createElement('label');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = plugin.enabled;
+      checkbox.addEventListener('change', () => {
+        vscode.postMessage({
+          type: 'togglePlugin',
+          cli: cli,
+          id: plugin.key,
+          scope: plugin.scope,
+          enabled: checkbox.checked,
+        });
+      });
+      const name = document.createElement('span');
+      name.className = 'pluginItem-name';
+      name.textContent = plugin.name;
+      label.appendChild(checkbox);
+      label.appendChild(name);
+      head.appendChild(label);
+    } else {
+      const name = document.createElement('span');
+      name.className = 'pluginItem-name';
+      name.textContent = plugin.name;
+      head.appendChild(name);
+      const badge = document.createElement('span');
+      badge.className = 'pluginBadge pluginBadge-' + (plugin.enabled ? 'enabled' : 'disabled');
+      badge.textContent = plugin.enabled ? '有効' : '無効';
+      head.appendChild(badge);
+    }
+
+    row.appendChild(head);
+
+    if (plugin.description) {
+      const desc = document.createElement('div');
+      desc.className = 'pluginItem-desc';
+      desc.textContent = plugin.description;
+      row.appendChild(desc);
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'pluginItem-meta';
+    const metaBits = ['出どころ: ' + plugin.origin];
+    if (plugin.version) metaBits.push('v' + plugin.version);
+    meta.textContent = metaBits.join(' ・ ');
+    row.appendChild(meta);
+
+    const provides = document.createElement('div');
+    provides.className = 'pluginItem-meta';
+    provides.textContent = '提供するもの ・ ' + formatProvides(plugin.provides);
+    row.appendChild(provides);
+
+    if (plugin.removable) {
+      const actions = document.createElement('div');
+      actions.className = 'pluginItem-actions';
+      const uninstallBtn = document.createElement('button');
+      uninstallBtn.type = 'button';
+      uninstallBtn.textContent = 'アンインストール';
+      uninstallBtn.addEventListener('click', () => {
+        vscode.postMessage({
+          type: 'uninstallPlugin',
+          cli: cli,
+          id: plugin.key,
+          scope: plugin.scope,
+          name: plugin.name,
+        });
+      });
+      actions.appendChild(uninstallBtn);
+      row.appendChild(actions);
+    }
+
+    return row;
+  }
+
+  function renderPlugins(elId, cli, snapshot) {
+    const container = el(elId);
+    container.replaceChildren();
+
+    if (!snapshot || snapshot.ok !== true) {
+      const p = document.createElement('p');
+      p.className = 'pluginsError';
+      const reason = snapshot && snapshot.reason ? snapshot.reason : '不明なエラー';
+      p.textContent = 'plugin一覧を取得できませんでした: ' + reason;
+      container.appendChild(p);
+      return;
+    }
+
+    if (snapshot.installable) {
+      const installBtn = document.createElement('button');
+      installBtn.type = 'button';
+      installBtn.className = 'pluginInstallButton';
+      installBtn.textContent = 'plugin名を指定してインストール…';
+      installBtn.addEventListener('click', () => {
+        vscode.postMessage({ type: 'installPlugin', cli: cli });
+      });
+      container.appendChild(installBtn);
+    }
+
+    for (const warning of snapshot.warnings || []) {
+      const w = document.createElement('p');
+      w.className = 'pluginsWarning';
+      w.textContent = warning;
+      container.appendChild(w);
+    }
+
+    if (snapshot.plugins.length === 0) {
+      const p = document.createElement('p');
+      p.className = 'pluginsEmpty';
+      p.textContent = 'pluginは導入されていません';
+      container.appendChild(p);
+      return;
+    }
+
+    for (const plugin of snapshot.plugins) {
+      container.appendChild(renderPlugin(cli, plugin));
+    }
+  }
+
+  function renderApp(app) {
+    const row = document.createElement('div');
+    row.className = 'appItem';
+
+    const head = document.createElement('div');
+    head.className = 'appItem-head';
+
+    const name = document.createElement('span');
+    name.className = 'appItem-name';
+    name.textContent = app.name;
+    head.appendChild(name);
+
+    const badge = document.createElement('span');
+    badge.className = 'appBadge appBadge-' + (app.enabled ? 'enabled' : 'disabled');
+    badge.textContent = app.enabled ? '有効' : '無効';
+    head.appendChild(badge);
+
+    row.appendChild(head);
+
+    if (app.description) {
+      const desc = document.createElement('div');
+      desc.className = 'appItem-desc';
+      desc.textContent = app.description;
+      row.appendChild(desc);
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'appItem-meta';
+    meta.textContent = app.callable ? '呼び出し可能' : '呼び出し不可';
+    row.appendChild(meta);
+
+    return row;
+  }
+
+  function renderApps(elId, snapshot) {
+    const container = el(elId);
+    container.replaceChildren();
+
+    if (!snapshot || snapshot.ok !== true) {
+      const p = document.createElement('p');
+      p.className = 'appsError';
+      const reason = snapshot && snapshot.reason ? snapshot.reason : '不明なエラー';
+      p.textContent = 'app一覧を取得できませんでした: ' + reason;
+      container.appendChild(p);
+      return;
+    }
+
+    if (snapshot.apps.length === 0) {
+      const p = document.createElement('p');
+      p.className = 'appsEmpty';
+      p.textContent = 'appは導入されていません';
+      container.appendChild(p);
+      return;
+    }
+
+    for (const app of snapshot.apps) {
+      container.appendChild(renderApp(app));
+    }
+  }
+
   function renderAccount(elId, snapshot, renderActions) {
     const container = el(elId);
     container.replaceChildren();
@@ -457,6 +653,8 @@ export function controlPanelScript(): string {
     renderMcp('codex', 'mcpListCodex', state.mcpServers);
     renderHooks('hooksListCodex', state.hooks);
     renderSkills('skillsListCodex', state.skills);
+    renderPlugins('pluginsListCodex', 'codex', state.plugins);
+    renderApps('appsListCodex', state.apps);
     models = state.models;
     const nameOf = (slug) => {
       const m = models.find((x) => x.slug === slug);
@@ -497,6 +695,7 @@ export function controlPanelScript(): string {
     renderMcp('claude', 'mcpListClaude', c.mcpServers);
     renderHooks('hooksListClaude', c.hooks);
     renderSkills('skillsListClaude', c.skills);
+    renderPlugins('pluginsListClaude', 'claude', c.plugins);
     const d = c.defaults || {};
     const nameOf = (slug) => {
       const m = c.models.find((x) => x.slug === slug);
