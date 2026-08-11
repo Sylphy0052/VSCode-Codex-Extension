@@ -28,6 +28,10 @@ export default defineConfig({
     // codex/claudeが実行ファイルとしてPATH上に居ても解決させない（実CLIを絶対に呼ばせない
     // ための二重の防御。設定側の対策は setup.mjs のexecutablePath参照）。
     PATH: '/usr/bin:/bin',
+    // ワークフローの統合テスト（Issue #158）だけがTaskSessionHostの差し替えを使う。
+    // これが立っていないとき、拡張機能は差し替え口そのものを公開しない
+    // （`src/extension.ts` の `isIntegrationTestMode`）。
+    AGENT_SESSIONS_INTEGRATION_TEST: '1',
   },
   mocha: {
     ui: 'tdd',

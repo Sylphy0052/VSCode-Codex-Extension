@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import type { WorkflowTestApiLike } from './workflow';
 
 export const EXTENSION_ID = 'Sylphy0052.vscode-codex-extension';
 
@@ -30,6 +31,11 @@ export interface SessionTreeLike {
  */
 export interface ExtensionTestApi {
   readonly sessionTree: SessionTreeLike;
+  /**
+   * ワークフロー（design.md §16）用の口。`AGENT_SESSIONS_INTEGRATION_TEST=1` が
+   * 立っているときだけ実体が入る（`src/extension.ts` の `WorkflowTestApi`、Issue #158）。
+   */
+  readonly workflow?: WorkflowTestApiLike;
 }
 
 /** 拡張機能を（未活性なら）有効化し、テスト用APIを返す。 */

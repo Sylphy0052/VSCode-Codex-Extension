@@ -568,7 +568,7 @@
     "compile:integration": "tsc -p tsconfig.integration.json",
     "build:integration": "npm run build && npm run compile:integration",
     "test:integration": "npm run build:integration && vscode-test",
-    "test:integration:xvfb": "npm run build:integration && xvfb-run -a vscode-test",
+    "test:integration:xvfb": "npm run build:integration && bash scripts/xvfb-vscode-test.sh",
     "check": "bash scripts/check.sh",
     "package": "npm run build && vsce package --no-dependencies"
   },
