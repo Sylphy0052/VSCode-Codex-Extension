@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { LAST_MEMORY_TARGET_KEY, type MemoryFilePort } from '../../src/claude/memoryTargets';
 import type { ClaudeSessionStore } from '../../src/claude/sessionStore';
 import { ClaudeStreamSession, type ClaudeStreamOptions } from '../../src/claude/streamSession';
 import type { Logger } from '../../src/log';
@@ -7,9 +8,10 @@ import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMe
 import { MESSAGING_MCP_SERVER_NAME } from '../../src/orchestrator/messaging';
 import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
 import type { McpServerView } from '../../src/provider/mcpServers';
+import type { ShellCommandRunner } from '../../src/process/shellCommandRunner';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import { ClaudeChatViewManager } from '../../src/view/claudeChatView';
-import { __mock, ViewColumn, window as fakeWindow } from '../mocks/vscode';
+import { __mock, ViewColumn, window as fakeWindow, type FakeWebviewPanel } from '../mocks/vscode';
 
 const fakeLogger: Logger = {
   info: () => undefined,
@@ -67,7 +69,37 @@ function fakeStore(): ClaudeSessionStore {
 
 const EMPTY_TASK_CONFIG: TaskSessionConfig = { model: '', effort: '', approvalMode: '' };
 
-function createManager(options?: { isTaskManagedThread?: (sessionId: string) => boolean }): {
+/** テストからは触らない口の既定fake。呼ばれたら失敗させて、意図せぬ利用に気づけるようにする。 */
+function unusedBashRunner(): ShellCommandRunner {
+  return {
+    run: async () => {
+      throw new Error('bashRunner.runが呼ばれるはずのないテストで呼ばれました');
+    },
+  };
+}
+
+function unusedMemoryFiles(): MemoryFilePort {
+  return {
+    exists: async () => false,
+    readTextFile: async () => undefined,
+    writeTextFile: async () => {
+      throw new Error('memoryFiles.writeTextFileが呼ばれるはずのないテストで呼ばれました');
+    },
+    resolveSymlinkTarget: async () => undefined,
+  };
+}
+
+interface CreateManagerOptions {
+  isTaskManagedThread?: (sessionId: string) => boolean;
+  bashRunner?: ShellCommandRunner;
+  memoryFiles?: MemoryFilePort;
+  memento?: {
+    get<T>(key: string, defaultValue: T): T;
+    update(key: string, value: unknown): Promise<void>;
+  };
+}
+
+function createManager(options?: CreateManagerOptions): {
   manager: ClaudeChatViewManager;
 } {
   const manager = new ClaudeChatViewManager(
@@ -81,8 +113,34 @@ function createManager(options?: { isTaskManagedThread?: (sessionId: string) => 
     () => undefined,
     () => undefined,
     options?.isTaskManagedThread ?? (() => false),
+    options?.bashRunner ?? unusedBashRunner(),
+    options?.memoryFiles ?? unusedMemoryFiles(),
+    options?.memento,
   );
   return { manager };
+}
+
+/**
+ * `void this.runBashMode(...)` / `void this.runMemoryAppend(...)`（fire-and-forget）の
+ * 完了を待つ。マクロタスク（`setTimeout`）を複数回はさみ、内部の複数の `await`
+ * （ファイルI/O・QuickPick・確認ダイアログ等）が進み切るのを確実にする。
+ */
+async function flushAsync(): Promise<void> {
+  for (let i = 0; i < 20; i++) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+/** 最後にwebviewへ送られた `state` メッセージの `items` を取り出す。 */
+function lastPostedItems(panel: FakeWebviewPanel): unknown[] {
+  const sent = panel.webview.sent as Array<{ type: string; state?: { items?: unknown[] } }>;
+  for (let i = sent.length - 1; i >= 0; i--) {
+    const message = sent[i];
+    if (message?.type === 'state' && message.state?.items !== undefined) {
+      return message.state.items;
+    }
+  }
+  return [];
 }
 
 /**
@@ -300,7 +358,13 @@ describe('ClaudeChatViewManager', () => {
     it('mcp_statusでサーバがconnectedならcheckMessagingToolVisible()はtrueを返す', async () => {
       stubStart();
       stubMcpStatus([
-        { name: MESSAGING_MCP_SERVER_NAME, state: 'connected', toolCount: 2, version: '1', reason: undefined },
+        {
+          name: MESSAGING_MCP_SERVER_NAME,
+          state: 'connected',
+          toolCount: 2,
+          version: '1',
+          reason: undefined,
+        },
       ]);
       const { manager } = createManager();
 
@@ -382,6 +446,542 @@ describe('ClaudeChatViewManager', () => {
 
       task.resumeLoop();
       expect(sendCalls).toEqual(['第1ターン', '続けて', '続けて']);
+    });
+  });
+
+  describe('入力欄の判定の統合（design.md §14.25）', () => {
+    it('空のbash/メモリ入力はCLIへ送らず、会話にも項目を残さない', async () => {
+      const calls = stubStart();
+      const { manager } = createManager();
+      await manager.openNew('/workspace/root');
+      const panel = __mock.lastCreatedPanel();
+      if (panel === undefined) throw new Error('panel not created');
+      const sendOrQueueSpy = vi.spyOn(ClaudeStreamSession.prototype, 'sendOrQueue');
+
+      panel.webview.simulateMessage({ type: 'send', text: '!   ' });
+      await flushAsync();
+      panel.webview.simulateMessage({ type: 'send', text: '#' });
+      await flushAsync();
+
+      expect(sendOrQueueSpy).not.toHaveBeenCalled();
+      expect(lastPostedItems(panel)).toHaveLength(0);
+      expect(calls).toHaveLength(1);
+    });
+
+    it('`\\!` / `\\#` はエスケープ。先頭のバックスラッシュだけ外した通常のメッセージとしてCLIへ送る', async () => {
+      stubStart();
+      const { manager } = createManager();
+      await manager.openNew('/workspace/root');
+      const panel = __mock.lastCreatedPanel();
+      if (panel === undefined) throw new Error('panel not created');
+      const sendOrQueueSpy = vi
+        .spyOn(ClaudeStreamSession.prototype, 'sendOrQueue')
+        .mockImplementation(() => 'sent');
+
+      panel.webview.simulateMessage({ type: 'send', text: '\\!echo hi' });
+      await flushAsync();
+
+      expect(sendOrQueueSpy).toHaveBeenCalledWith('!echo hi', []);
+    });
+
+    it(
+      '`!` / `#` は添付ファイルを消費せず、次の通常の発言へ持ち越す' +
+        '（design.md §14.25。`entry.attachments.take()`は`dispatch()`からしか呼ばれない）',
+      async () => {
+        stubStart();
+        const { manager } = createManager();
+        await manager.openNew('/workspace/root');
+        const panel = __mock.lastCreatedPanel();
+        if (panel === undefined) throw new Error('panel not created');
+        const sendOrQueueSpy = vi
+          .spyOn(ClaudeStreamSession.prototype, 'sendOrQueue')
+          .mockImplementation(() => 'sent');
+
+        panel.webview.simulateMessage({
+          type: 'attach',
+          name: 'a.png',
+          dataUrl: `data:image/png;base64,${Buffer.from('x').toString('base64')}`,
+        });
+        // bashモードは既定で無効。それでも添付は消費されないことを確かめる
+        panel.webview.simulateMessage({ type: 'send', text: '!echo hi' });
+        await flushAsync();
+
+        const sent = panel.webview.sent as Array<{
+          type: string;
+          state?: { attachments?: unknown[] };
+        }>;
+        const lastState = [...sent].reverse().find((m) => m.type === 'state' && m.state);
+        expect(lastState?.state?.attachments).toHaveLength(1);
+
+        // 続く通常の発言に、持ち越された添付が一緒に送られる
+        panel.webview.simulateMessage({ type: 'send', text: '通常の発言' });
+        await flushAsync();
+        expect(sendOrQueueSpy).toHaveBeenCalledWith(
+          '通常の発言',
+          expect.arrayContaining([expect.objectContaining({ name: 'a.png' })]),
+        );
+      },
+    );
+  });
+
+  describe('bashモード（`!`。design.md §14.25、Issue #5）', () => {
+    it('claude.bashMode.enabledが既定(false)のときは実行せず、無効である旨の項目を残す', async () => {
+      stubStart();
+      const runSpy = vi.fn();
+      const { manager } = createManager({ bashRunner: { run: runSpy } });
+      await manager.openNew('/workspace/root');
+      const panel = __mock.lastCreatedPanel();
+      if (panel === undefined) throw new Error('panel not created');
+
+      panel.webview.simulateMessage({ type: 'send', text: '!echo hi' });
+      await flushAsync();
+
+      expect(runSpy).not.toHaveBeenCalled();
+      const items = lastPostedItems(panel) as Array<{ kind: string; detail: string }>;
+      expect(
+        items.some(
+          (i) => i.kind === 'settingsChanged' && i.detail.includes('claude.bashMode.enabled'),
+        ),
+      ).toBe(true);
+    });
+
+    it('無効時の通知で「設定を開く」を選ぶと設定画面を開くコマンドが呼ばれる', async () => {
+      stubStart();
+      const { manager } = createManager();
+      await manager.openNew('/workspace/root');
+      const panel = __mock.lastCreatedPanel();
+      if (panel === undefined) throw new Error('panel not created');
+      __mock.setShowWarningMessageAnswer('設定を開く');
+
+      panel.webview.simulateMessage({ type: 'send', text: '!echo hi' });
+      await flushAsync();
+
+      expect(__mock.executedCommands).toContainEqual({
+        command: 'workbench.action.openSettings',
+        args: ['claude.bashMode.enabled'],
+      });
+    });
+
+    it('有効時、確認をキャンセルすると実行されない', async () => {
+      stubStart();
+      __mock.setConfig('claude', { bashMode: { enabled: true, timeoutMs: 5000 } });
+      const runSpy = vi.fn();
+      const { manager } = createManager({ bashRunner: { run: runSpy } });
+      await manager.openNew('/workspace/root');
+      const panel = __mock.lastCreatedPanel();
+      if (panel === undefined) throw new Error('panel not created');
+      __mock.setShowWarningMessageAnswer(undefined);
+
+      panel.webview.simulateMessage({ type: 'send', text: '!echo hi' });
+      await flushAsync();
+
+      expect(runSpy).not.toHaveBeenCalled();
+      expect(lastPostedItems(panel)).toHaveLength(0);
+    });
+
+    it('有効時、確認を承認すると実行され、成功時はstdoutと終了コードが会話に出る', async () => {
+      stubStart();
+      __mock.setConfig('claude', { bashMode: { enabled: true, timeoutMs: 5000 } });
+      const { manager } = createManager({
+        bashRunner: {
+          run: async () => ({
+            stdout: 'hello\n',
+            stderr: '',
+            code: 0,
+            timedOut: false,
+            aborted: false,
+            spawnError: undefined,
+            truncated: false,
+          }),
+        },
+      });
+      await manager.openNew('/workspace/root');
+      const panel = __mock.lastCreatedPanel();
+      if (panel === undefined) throw new Error('panel not created');
+      __mock.setShowWarningMessageAnswer('実行する');
+
+      panel.webview.simulateMessage({ type: 'send', text: '!echo hello' });
+      await flushAsync();
+
+      const items = lastPostedItems(panel) as Array<{
+        kind: string;
+        text: string;
+        status: string | undefined;
+        detail: string;
+      }>;
+      const commandItem = items.find(
+        (i) => i.kind === 'commandExecution' && i.detail === 'echo hello',
+      );
+      expect(commandItem?.text).toBe('hello\n');
+      expect(commandItem?.status).toBe('exit 0');
+    });
+
+    it('非ゼロ終了・タイムアウト・起動失敗は理由が会話から分かる', async () => {
+      stubStart();
+      __mock.setConfig('claude', { bashMode: { enabled: true, timeoutMs: 5000 } });
+      const { manager } = createManager({
+        bashRunner: {
+          run: async () => ({
+            stdout: '',
+            stderr: 'boom',
+            code: 1,
+            timedOut: false,
+            aborted: false,
+            spawnError: undefined,
+            truncated: false,
+          }),
+        },
+      });
+      await manager.openNew('/workspace/root');
+      const panel = __mock.lastCreatedPanel();
+      if (panel === undefined) throw new Error('panel not created');
+      __mock.setShowWarningMessageAnswer('実行する');
+
+      panel.webview.simulateMessage({ type: 'send', text: '!false' });
+      await flushAsync();
+
+      const items = lastPostedItems(panel) as Array<{
+        kind: string;
+        text: string;
+        status: string | undefined;
+      }>;
+      const commandItem = items.find((i) => i.kind === 'commandExecution');
+      expect(commandItem?.status).toBe('exit 1');
+      expect(commandItem?.text).toContain('boom');
+    });
+
+    it('出力が上限を超えたら切り詰められ、会話にもtruncatedが反映される', async () => {
+      stubStart();
+      __mock.setConfig('claude', { bashMode: { enabled: true, timeoutMs: 5000 } });
+      const { manager } = createManager({
+        bashRunner: {
+          run: async () => ({
+            stdout: 'x'.repeat(10),
+            stderr: '',
+            code: 0,
+            timedOut: false,
+            aborted: false,
+            spawnError: undefined,
+            truncated: true,
+          }),
+        },
+      });
+      await manager.openNew('/workspace/root');
+      const panel = __mock.lastCreatedPanel();
+      if (panel === undefined) throw new Error('panel not created');
+      __mock.setShowWarningMessageAnswer('実行する');
+
+      panel.webview.simulateMessage({ type: 'send', text: '!yes' });
+      await flushAsync();
+
+      const items = lastPostedItems(panel) as Array<{ kind: string; truncated?: boolean }>;
+      const commandItem = items.find((i) => i.kind === 'commandExecution');
+      expect(commandItem?.truncated).toBe(true);
+    });
+
+    it(
+      'ランナー自体が想定外の例外を投げても、実行中項目が畳まれエラーが通知される' +
+        '（レビュー指摘: fire-and-forgetでエラーが握り潰される）',
+      async () => {
+        stubStart();
+        __mock.setConfig('claude', { bashMode: { enabled: true, timeoutMs: 5000 } });
+        const { manager } = createManager({
+          bashRunner: {
+            run: async () => {
+              throw new Error('想定外の異常');
+            },
+          },
+        });
+        await manager.openNew('/workspace/root');
+        const panel = __mock.lastCreatedPanel();
+        if (panel === undefined) throw new Error('panel not created');
+        __mock.setShowWarningMessageAnswer('実行する');
+
+        panel.webview.simulateMessage({ type: 'send', text: '!echo hi' });
+        await flushAsync();
+
+        // ユーザーへ見せる（fire-and-forgetのまま握り潰されない）
+        expect(__mock.messages.errors.some((m) => m.includes('想定外の異常'))).toBe(true);
+        // 「実行中」項目が残らず、失敗として畳まれている
+        const items = lastPostedItems(panel) as Array<{ kind: string; status?: string }>;
+        const commandItem = items.find((i) => i.kind === 'commandExecution');
+        expect(commandItem?.status).not.toBe('running');
+        expect(commandItem?.status).toBe('失敗');
+      },
+    );
+
+    it('タブを閉じると実行中のbashコマンドが中断される（Issue #5レビュー指摘）', async () => {
+      stubStart();
+      __mock.setConfig('claude', { bashMode: { enabled: true, timeoutMs: 5000 } });
+      let capturedSignal: AbortSignal | undefined;
+      const { manager } = createManager({
+        bashRunner: {
+          run: (_command, _cwd, _timeoutMs, signal) => {
+            capturedSignal = signal;
+            return new Promise(() => undefined); // 完了させない。中断だけを見る
+          },
+        },
+      });
+      await manager.openNew('/workspace/root');
+      const panel = __mock.lastCreatedPanel();
+      if (panel === undefined) throw new Error('panel not created');
+      __mock.setShowWarningMessageAnswer('実行する');
+
+      panel.webview.simulateMessage({ type: 'send', text: '!sleep 100' });
+      await flushAsync();
+
+      expect(capturedSignal).toBeDefined();
+      expect(capturedSignal?.aborted).toBe(false);
+
+      panel.dispose(); // タブを閉じる → teardown()
+
+      expect(capturedSignal?.aborted).toBe(true);
+    });
+
+    it('manager.dispose()すると実行中の全パネルのbashコマンドが中断される', async () => {
+      stubStart();
+      __mock.setConfig('claude', { bashMode: { enabled: true, timeoutMs: 5000 } });
+      let capturedSignal: AbortSignal | undefined;
+      const { manager } = createManager({
+        bashRunner: {
+          run: (_command, _cwd, _timeoutMs, signal) => {
+            capturedSignal = signal;
+            return new Promise(() => undefined);
+          },
+        },
+      });
+      await manager.openNew('/workspace/root');
+      const panel = __mock.lastCreatedPanel();
+      if (panel === undefined) throw new Error('panel not created');
+      __mock.setShowWarningMessageAnswer('実行する');
+
+      panel.webview.simulateMessage({ type: 'send', text: '!sleep 100' });
+      await flushAsync();
+      expect(capturedSignal?.aborted).toBe(false);
+
+      manager.dispose();
+
+      expect(capturedSignal?.aborted).toBe(true);
+    });
+  });
+
+  describe('メモリモード（`#`。design.md §14.25、Issue #6）', () => {
+    const WORKSPACE_MEMORY_PATH = '/workspace/root/CLAUDE.md';
+    const USER_MEMORY_PATH = '/config/CLAUDE.md';
+
+    function fakeMemento(): {
+      get<T>(key: string, defaultValue: T): T;
+      update(key: string, value: unknown): Promise<void>;
+      store: Record<string, unknown>;
+    } {
+      const store: Record<string, unknown> = {};
+      return {
+        get: <T>(key: string, defaultValue: T): T =>
+          key in store ? (store[key] as T) : defaultValue,
+        update: async (key: string, value: unknown) => {
+          store[key] = value;
+        },
+        store,
+      };
+    }
+
+    function recordingMemoryFiles(
+      writes: { filePath: string; content: string }[],
+      overrides: Partial<MemoryFilePort> = {},
+    ): MemoryFilePort {
+      return {
+        exists: async () => false,
+        readTextFile: async () => undefined,
+        writeTextFile: async (filePath, content) => {
+          writes.push({ filePath, content });
+        },
+        resolveSymlinkTarget: async () => undefined,
+        ...overrides,
+      };
+    }
+
+    it('QuickPickをキャンセルすると何も書き込まない', async () => {
+      stubStart();
+      __mock.setConfig('claude', { configDir: '/config' });
+      const writes: { filePath: string; content: string }[] = [];
+      const { manager } = createManager({ memoryFiles: recordingMemoryFiles(writes) });
+      await manager.openNew('/workspace/root');
+      const panel = __mock.lastCreatedPanel();
+      if (panel === undefined) throw new Error('panel not created');
+      __mock.showQuickPickAnswerIndex = undefined;
+
+      panel.webview.simulateMessage({ type: 'send', text: '#次はこれを試す' });
+      await flushAsync();
+
+      expect(writes).toHaveLength(0);
+    });
+
+    it('確認をキャンセルすると何も書き込まない', async () => {
+      stubStart();
+      __mock.setConfig('claude', { configDir: '/config' });
+      const writes: { filePath: string; content: string }[] = [];
+      const { manager } = createManager({ memoryFiles: recordingMemoryFiles(writes) });
+      await manager.openNew('/workspace/root');
+      const panel = __mock.lastCreatedPanel();
+      if (panel === undefined) throw new Error('panel not created');
+      __mock.showQuickPickAnswerIndex = 0;
+      __mock.setShowWarningMessageAnswer(undefined);
+
+      panel.webview.simulateMessage({ type: 'send', text: '#次はこれを試す' });
+      await flushAsync();
+
+      expect(writes).toHaveLength(0);
+    });
+
+    it('確認を承認すると、選んだ候補へ追記し、会話にもファイル・本文が残る', async () => {
+      stubStart();
+      __mock.setConfig('claude', { configDir: '/config' });
+      const writes: { filePath: string; content: string }[] = [];
+      const { manager } = createManager({ memoryFiles: recordingMemoryFiles(writes) });
+      await manager.openNew('/workspace/root');
+      const panel = __mock.lastCreatedPanel();
+      if (panel === undefined) throw new Error('panel not created');
+      __mock.showQuickPickAnswerIndex = 0; // workspaceFolder直下のCLAUDE.md
+      __mock.setShowWarningMessageAnswer('追記する');
+
+      panel.webview.simulateMessage({ type: 'send', text: '#次はこれを試す' });
+      await flushAsync();
+
+      expect(writes).toEqual([{ filePath: WORKSPACE_MEMORY_PATH, content: '- 次はこれを試す\n' }]);
+      const items = lastPostedItems(panel) as Array<{ kind: string; text: string; detail: string }>;
+      const memoryItem = items.find((i) => i.kind === 'memoryAppend');
+      expect(memoryItem?.text).toBe('次はこれを試す');
+      expect(memoryItem?.detail).toBe(WORKSPACE_MEMORY_PATH);
+    });
+
+    it('前回選んだ追記先をmementoへ覚え、次回の候補の先頭に並ぶ', async () => {
+      stubStart();
+      __mock.setConfig('claude', { configDir: '/config' });
+      const writes: { filePath: string; content: string }[] = [];
+      const memento = fakeMemento();
+      const { manager } = createManager({ memoryFiles: recordingMemoryFiles(writes), memento });
+      await manager.openNew('/workspace/root');
+      const panel = __mock.lastCreatedPanel();
+      if (panel === undefined) throw new Error('panel not created');
+
+      // 1回目: 一覧2番目（ユーザーメモリ、index 1）を選ぶ
+      __mock.showQuickPickAnswerIndex = 1;
+      __mock.setShowWarningMessageAnswer('追記する');
+      panel.webview.simulateMessage({ type: 'send', text: '#1回目のメモ' });
+      await flushAsync();
+      expect(writes[0]?.filePath).toBe(USER_MEMORY_PATH);
+      expect(memento.store[LAST_MEMORY_TARGET_KEY]).toBe(USER_MEMORY_PATH);
+
+      // 2回目: 先頭（index 0）を選ぶと、前回選んだユーザーメモリが先頭に来ているはず
+      __mock.showQuickPickAnswerIndex = 0;
+      panel.webview.simulateMessage({ type: 'send', text: '#2回目のメモ' });
+      await flushAsync();
+      expect(writes[1]?.filePath).toBe(USER_MEMORY_PATH);
+    });
+
+    it('複数行のノートは追記ファイルで2行目以降がインデントされる', async () => {
+      stubStart();
+      __mock.setConfig('claude', { configDir: '/config' });
+      const writes: { filePath: string; content: string }[] = [];
+      const { manager } = createManager({ memoryFiles: recordingMemoryFiles(writes) });
+      await manager.openNew('/workspace/root');
+      const panel = __mock.lastCreatedPanel();
+      if (panel === undefined) throw new Error('panel not created');
+      __mock.showQuickPickAnswerIndex = 0;
+      __mock.setShowWarningMessageAnswer('追記する');
+
+      panel.webview.simulateMessage({ type: 'send', text: '#見出し\n詳細1\n詳細2' });
+      await flushAsync();
+
+      expect(writes[0]?.content).toBe('- 見出し\n  詳細1\n  詳細2\n');
+    });
+
+    it(
+      '選んだ候補がシンボリックリンクなら、確認ダイアログと会話の記録にリンク先の実パスが出る' +
+        '（レビュー指摘: シンボリックリンク追従で書き込み先が別ファイルへすり替わる）',
+      async () => {
+        stubStart();
+        __mock.setConfig('claude', { configDir: '/config' });
+        const writes: { filePath: string; content: string }[] = [];
+        const realPath = '/real/CLAUDE.md';
+        const { manager } = createManager({
+          memoryFiles: recordingMemoryFiles(writes, {
+            resolveSymlinkTarget: async (filePath) =>
+              filePath === WORKSPACE_MEMORY_PATH ? realPath : undefined,
+          }),
+        });
+        await manager.openNew('/workspace/root');
+        const panel = __mock.lastCreatedPanel();
+        if (panel === undefined) throw new Error('panel not created');
+        __mock.showQuickPickAnswerIndex = 0;
+        __mock.setShowWarningMessageAnswer('追記する');
+
+        panel.webview.simulateMessage({ type: 'send', text: '#次はこれを試す' });
+        await flushAsync();
+
+        // 中止はせず、実パスを見せた上で書き込みは実行される
+        expect(writes).toEqual([{ filePath: WORKSPACE_MEMORY_PATH, content: '- 次はこれを試す\n' }]);
+        expect(__mock.messages.warnings.some((m) => m.includes(`リンク先: ${realPath}`))).toBe(
+          true,
+        );
+        const items = lastPostedItems(panel) as Array<{ kind: string; detail: string }>;
+        const memoryItem = items.find((i) => i.kind === 'memoryAppend');
+        expect(memoryItem?.detail).toContain(realPath);
+      },
+    );
+
+    it(
+      'readTextFileが例外を投げると、書き込まずエラーを通知する' +
+        '（レビュー指摘: fire-and-forgetでエラーが握り潰される／既存メモリファイルの内容破壊）',
+      async () => {
+        stubStart();
+        __mock.setConfig('claude', { configDir: '/config' });
+        const writes: { filePath: string; content: string }[] = [];
+        const { manager } = createManager({
+          memoryFiles: recordingMemoryFiles(writes, {
+            readTextFile: async () => {
+              throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+            },
+          }),
+        });
+        await manager.openNew('/workspace/root');
+        const panel = __mock.lastCreatedPanel();
+        if (panel === undefined) throw new Error('panel not created');
+        __mock.showQuickPickAnswerIndex = 0;
+        __mock.setShowWarningMessageAnswer('追記する');
+
+        panel.webview.simulateMessage({ type: 'send', text: '#次はこれを試す' });
+        await flushAsync();
+
+        expect(writes).toHaveLength(0);
+        expect(__mock.messages.errors.some((m) => m.includes('EACCES'))).toBe(true);
+        const items = lastPostedItems(panel) as Array<{ kind: string }>;
+        expect(items.some((i) => i.kind === 'memoryAppend')).toBe(false);
+      },
+    );
+
+    it('writeTextFileが失敗すると、エラーを通知する（fire-and-forgetでエラーが握り潰されない）', async () => {
+      stubStart();
+      __mock.setConfig('claude', { configDir: '/config' });
+      const { manager } = createManager({
+        memoryFiles: recordingMemoryFiles([], {
+          writeTextFile: async () => {
+            throw new Error('ディスクがいっぱいです');
+          },
+        }),
+      });
+      await manager.openNew('/workspace/root');
+      const panel = __mock.lastCreatedPanel();
+      if (panel === undefined) throw new Error('panel not created');
+      __mock.showQuickPickAnswerIndex = 0;
+      __mock.setShowWarningMessageAnswer('追記する');
+
+      panel.webview.simulateMessage({ type: 'send', text: '#次はこれを試す' });
+      await flushAsync();
+
+      expect(__mock.messages.errors.some((m) => m.includes('ディスクがいっぱいです'))).toBe(true);
+      const items = lastPostedItems(panel) as Array<{ kind: string }>;
+      expect(items.some((i) => i.kind === 'memoryAppend')).toBe(false);
     });
   });
 });

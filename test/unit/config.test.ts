@@ -131,4 +131,34 @@ describe('readClaudeConfig', () => {
     __mock.setConfig('claude', { agent: 'code-reviewer' });
     expect(readClaudeConfig().claude.agent).toBe('code-reviewer');
   });
+
+  it('bashMode.timeoutMsの既定は60000', () => {
+    expect(readClaudeConfig().bashMode.timeoutMs).toBe(60000);
+  });
+
+  it('bashMode.timeoutMsの正の値はそのまま使う', () => {
+    __mock.setConfig('claude', { bashMode: { timeoutMs: 1000 } });
+    expect(readClaudeConfig().bashMode.timeoutMs).toBe(1000);
+  });
+
+  it(
+    'bashMode.timeoutMsが0以下・非有限なら既定値へ落とす' +
+      '（レビュー指摘: package.jsonのminimumは設定UIのヒントに過ぎず、settings.json直編集を防げない）',
+    () => {
+      __mock.setConfig('claude', { bashMode: { timeoutMs: 0 } });
+      expect(readClaudeConfig().bashMode.timeoutMs).toBe(60000);
+
+      __mock.setConfig('claude', { bashMode: { timeoutMs: -100 } });
+      expect(readClaudeConfig().bashMode.timeoutMs).toBe(60000);
+
+      __mock.setConfig('claude', { bashMode: { timeoutMs: Number.NaN } });
+      expect(readClaudeConfig().bashMode.timeoutMs).toBe(60000);
+
+      __mock.setConfig('claude', { bashMode: { timeoutMs: Number.POSITIVE_INFINITY } });
+      expect(readClaudeConfig().bashMode.timeoutMs).toBe(60000);
+
+      __mock.setConfig('claude', { bashMode: { timeoutMs: 'たくさん' } });
+      expect(readClaudeConfig().bashMode.timeoutMs).toBe(60000);
+    },
+  );
 });

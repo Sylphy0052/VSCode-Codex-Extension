@@ -311,9 +311,7 @@ function readStringArray(value: unknown): string {
   if (!Array.isArray(value)) {
     return '';
   }
-  return value
-    .filter((v): v is string => typeof v === 'string' && v !== '')
-    .join('\n\n');
+  return value.filter((v): v is string => typeof v === 'string' && v !== '').join('\n\n');
 }
 
 /** userMessage の content 配列からテキストを取り出す。 */
@@ -596,7 +594,13 @@ export function deriveReviewing(items: readonly ChatItem[]): boolean {
   return false;
 }
 
-function upsertItem(items: readonly ChatItem[], item: ChatItem): ChatItem[] {
+/**
+ * 項目を追加・更新する（同じidなら上書き）。
+ *
+ * `appendNotice` の内部実装だけでなく、`ClaudeStreamSession.upsertLocalItem`
+ * （bashモード・メモリモード。design.md §14.25）からも直接使うためexportする。
+ */
+export function upsertItem(items: readonly ChatItem[], item: ChatItem): ChatItem[] {
   const index = items.findIndex((i) => i.id === item.id);
   if (index === -1) {
     return [...items, item];

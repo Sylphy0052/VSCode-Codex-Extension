@@ -2,11 +2,30 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { isApprovalDecision, type ApprovalDecision } from '../appserver/approvals';
 import { isOpenableSearchUrl, type ChatState, type ChatUsage } from '../appserver/chatState';
+import {
+  buildBashModeDisabledNotice,
+  buildBashModeErrorItem,
+  buildCompletedCommandItem,
+  buildRunningCommandItem,
+} from '../claude/bashMode';
+import { classifyClaudeInput } from '../claude/inputModes';
+import {
+  buildMemoryAppendConfirmMessage,
+  buildMemoryAppendContent,
+  buildMemoryAppendItem,
+  LAST_MEMORY_TARGET_KEY,
+  listMemoryTargets,
+  nodeMemoryFilePort,
+  orderMemoryTargets,
+  type MementoLike,
+  type MemoryFilePort,
+} from '../claude/memoryTargets';
 import type { ClaudeSessionStore } from '../claude/sessionStore';
 import { ClaudeStreamSession } from '../claude/streamSession';
 import { transcriptItems } from '../claude/transcript';
 import { isUnsafeClaudeCombination } from '../claude/argvBuilder';
 import { currentWorkspaceFolder, readClaudeConfig, workspaceFolderPaths } from '../config';
+import { nodeShellCommandRunner, type ShellCommandRunner } from '../process/shellCommandRunner';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
@@ -79,6 +98,12 @@ interface ClaudePanel {
   finishedListeners: Array<(reason: LoopStopReason, state: ChatState) => void>;
   /** `TaskSession.onApprovalResolved` のリスナー。 */
   approvalResolvedListeners: Array<(outcome: ApprovalOutcome) => void>;
+  /**
+   * 実行中のbashモード（`!`。Issue #5）コマンドの中断口。`teardown()` / `dispose()` で
+   * 全て `abort()` する（POSIXでは `detached: true` で起動しているため、タブを閉じても
+   * 子プロセスとその子孫がVSCode終了後も生き残ってしまうレビュー指摘への対応）。
+   */
+  runningBashCommands: Set<AbortController>;
 }
 
 const VIEW_TYPE = 'claude.chat';
@@ -149,6 +174,19 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
      * `restorePanel` の対象から外す（design.md §16.10の7）。
      */
     private readonly isTaskManagedThread: (sessionId: string) => boolean = () => false,
+    /** bashモード（`!`。Issue #5）の実行部。既定はNodeの子プロセス。 */
+    private readonly bashRunner: ShellCommandRunner = nodeShellCommandRunner,
+    /** メモリモード（`#`。Issue #6）のファイル入出力。既定はNodeのfs。 */
+    private readonly memoryFiles: MemoryFilePort = nodeMemoryFilePort,
+    /**
+     * メモリモードで最後に選んだ追記先を覚えておく口。既定は何も覚えない
+     * no-op実装（テストで明示的に差し替えない限り、選択順は毎回既定の並びに戻る）。
+     * 実際の拡張機能は `context.workspaceState` を渡す（`extension.ts`）。
+     */
+    private readonly memento: MementoLike = {
+      get: (_key, defaultValue) => defaultValue,
+      update: () => Promise.resolve(),
+    },
   ) {
     this.catalog = new CommandCatalog(fs);
     this.usageProbe = new ClaudeUsageProbe(claudePath, log);
@@ -420,6 +458,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       stateListeners: [],
       finishedListeners: [],
       approvalResolvedListeners: [],
+      runningBashCommands: new Set(),
     };
     return entry;
   }
@@ -548,6 +587,12 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       return;
     }
     entry.disposed = true;
+    // 実行中のbashモードコマンドを中断する（Issue #5。タブを閉じても子プロセスが
+    // 生き残るレビュー指摘への対応）。`dispose()` は全エントリでこの `teardown` を
+    // 呼ぶため、そちらからも自動的に効く
+    for (const controller of entry.runningBashCommands) {
+      controller.abort();
+    }
     entry.loop.stop('manual');
     entry.session.dispose();
     entry.panel?.dispose();
@@ -735,9 +780,24 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         if (text.trim() === '' && entry.attachments.list.length === 0) {
           return;
         }
+        // `!`（bashモード）・`#`（メモリモード）はCLIへ送らず拡張機能側で処理する
+        // （design.md §14.25。CLIのcontrol protocolに経路が無いことをPhase 0で確認済み）
+        const mode = classifyClaudeInput(text);
+        if (mode.kind === 'empty') {
+          // 空のコマンド/ノート。何もしない（会話にも項目を足さない）
+          return;
+        }
         // 手動の発言はループへの割り込み。指示が交互に飛ぶ状態を作らない
         entry.loop.noteUserAction();
-        this.dispatch(entry, text, true);
+        if (mode.kind === 'shellCommand') {
+          void this.runBashMode(entry, mode.command);
+          return;
+        }
+        if (mode.kind === 'memoryNote') {
+          void this.runMemoryAppend(entry, mode.note);
+          return;
+        }
+        this.dispatch(entry, mode.text, true);
         this.refreshSettings(entry);
         return;
       }
@@ -904,6 +964,147 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     void vscode.window.showInformationMessage(
       `${preview.filesChanged.length}件のファイルを戻しました: ${preview.filesChanged.join(', ')}`,
     );
+  }
+
+  /**
+   * bashモード（`!`。design.md §14.25、Issue #5）を実行する。
+   *
+   * 防御は「既定無効（`claude.bashMode.enabled`）」と「実行のたびのモーダル確認」の
+   * 二重ゲートのみ。**コマンド文字列そのもののサニタイズはしない**（意図的に任意コマンドを
+   * 通す機能のため）。
+   *
+   * `void this.runBashMode(...)`（fire-and-forget）で呼ばれるため、本体全体をtry/catchで
+   * 囲み、失敗（ファイルI/O以外の想定外の例外を含む）を必ずユーザーへ見せる
+   * （レビュー指摘: fire-and-forgetでエラーが握り潰される）。「実行中」項目を出した後に
+   * 失敗した場合は、同じidで上書きして畳む（runningのまま残さない）。
+   */
+  private async runBashMode(entry: ClaudePanel, command: string): Promise<void> {
+    let itemId: string | undefined;
+    try {
+      const { bashMode } = readClaudeConfig();
+      if (!bashMode.enabled) {
+        entry.session.upsertLocalItem(
+          buildBashModeDisabledNotice(`bash-disabled:${randomUUID()}`),
+        );
+        const choice = await vscode.window.showWarningMessage(
+          'bashモードが無効なため、コマンドは実行されませんでした。',
+          '設定を開く',
+        );
+        if (choice === '設定を開く') {
+          void vscode.commands.executeCommand(
+            'workbench.action.openSettings',
+            'claude.bashMode.enabled',
+          );
+        }
+        return;
+      }
+
+      // 実行のたびに確認する。実コマンド・cwd・CLIの権限設定が及ばないことを必ず明記する
+      const confirmed = await vscode.window.showWarningMessage(
+        `次のコマンドを実行します。\n\nコマンド: ${command}\ncwd: ${entry.cwd}\n\n` +
+          'Claude Code CLIの権限設定（permissionMode / allowedToolsなど）は適用されません。',
+        { modal: true },
+        '実行する',
+      );
+      if (confirmed !== '実行する') {
+        // キャンセル。会話には何も残さない
+        return;
+      }
+
+      itemId = `bash:${randomUUID()}`;
+      entry.session.upsertLocalItem(buildRunningCommandItem(itemId, command));
+
+      // タブを閉じた・拡張機能が終了した場合に中断できるよう、実行中の間だけ登録する
+      // （Issue #5のレビュー指摘: タブを閉じても実行中のコマンドが生き残る）
+      const controller = new AbortController();
+      entry.runningBashCommands.add(controller);
+      try {
+        const result = await this.bashRunner.run(
+          command,
+          entry.cwd,
+          bashMode.timeoutMs,
+          controller.signal,
+        );
+        entry.session.upsertLocalItem(
+          buildCompletedCommandItem(itemId, command, result, bashMode.timeoutMs),
+        );
+      } finally {
+        entry.runningBashCommands.delete(controller);
+      }
+    } catch (e) {
+      if (itemId !== undefined) {
+        entry.session.upsertLocalItem(
+          buildBashModeErrorItem(itemId, command, e instanceof Error ? e.message : String(e)),
+        );
+      }
+      this.reportError(e);
+    }
+  }
+
+  /**
+   * メモリモード（`#`。design.md §14.25、Issue #6）を実行する。
+   *
+   * 書き込み先はQuickPickが列挙した候補に限る。ユーザーが打ったノート本文から
+   * パスを組み立てることは一切しない（パストラバーサルの入口を作らないため）。
+   *
+   * `void this.runMemoryAppend(...)`（fire-and-forget）で呼ばれるため、本体全体を
+   * try/catchで囲み、失敗（`readTextFile`が拾ったEACCES等・`writeTextFile`の失敗を含む）を
+   * 必ずユーザーへ見せる（レビュー指摘: fire-and-forgetでエラーが握り潰される）。
+   * `writeTextFile` より前で失敗すれば、既存ファイルには一切触れない。
+   */
+  private async runMemoryAppend(entry: ClaudePanel, note: string): Promise<void> {
+    try {
+      const { configDir } = readClaudeConfig();
+      const folders = (vscode.workspace.workspaceFolders ?? []).map((f) => ({
+        name: f.name,
+        path: f.uri.fsPath,
+      }));
+      const targets = await listMemoryTargets(folders, configDir, this.memoryFiles);
+      const lastUsedPath = this.memento.get<string | undefined>(
+        LAST_MEMORY_TARGET_KEY,
+        undefined,
+      );
+      const ordered = orderMemoryTargets(targets, lastUsedPath);
+
+      const picked = await vscode.window.showQuickPick(
+        ordered.map((target) => ({
+          label: target.label,
+          description: target.description,
+          target,
+        })),
+        { title: 'メモリの追記先', placeHolder: '追記先を選んでください' },
+      );
+      if (picked === undefined) {
+        // キャンセル
+        return;
+      }
+
+      // シンボリックリンクなら実体の絶対パスを確認ダイアログ・会話の記録の両方へ出す
+      // （レビュー指摘: シンボリックリンク追従で書き込み先が別ファイルへすり替わる。
+      // 中止はせず、実パスを見せた上でユーザーに判断させる）
+      const symlinkTarget = await this.memoryFiles.resolveSymlinkTarget(picked.target.filePath);
+      const confirmed = await vscode.window.showWarningMessage(
+        buildMemoryAppendConfirmMessage(picked.target.filePath, note, symlinkTarget),
+        { modal: true },
+        '追記する',
+      );
+      if (confirmed !== '追記する') {
+        return;
+      }
+
+      const existing = await this.memoryFiles.readTextFile(picked.target.filePath);
+      await this.memoryFiles.writeTextFile(
+        picked.target.filePath,
+        buildMemoryAppendContent(existing, note),
+      );
+      await this.memento.update(LAST_MEMORY_TARGET_KEY, picked.target.filePath);
+
+      entry.session.upsertLocalItem(
+        buildMemoryAppendItem(`memory:${randomUUID()}`, picked.target.filePath, note, symlinkTarget),
+      );
+    } catch (e) {
+      this.reportError(e);
+    }
   }
 
   /**

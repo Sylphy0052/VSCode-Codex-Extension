@@ -40,6 +40,16 @@ const num = (c: vscode.WorkspaceConfiguration, key: string, fallback: number): n
 };
 
 /**
+ * 正の数値であることまで検証する `num`。`package.json` の `minimum` はあくまで設定UIの
+ * ヒントで、`settings.json` を直接編集すれば0以下・非有限の値も渡ってきてしまう
+ * （`normalizeReplyTimeoutSec` と同じ「壊れた設定値は既定へ丸める」方針）。
+ */
+const positiveNum = (c: vscode.WorkspaceConfiguration, key: string, fallback: number): number => {
+  const v = c.get<number>(key);
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : fallback;
+};
+
+/**
  * 実行経路と権限に関わるキーは package.json 側で machine スコープに固定してある。
  * リポジトリの .vscode/settings.json から差し替えられないことが前提（設計書 §7・§8）。
  */
@@ -70,10 +80,17 @@ export function readConfig(): ExtensionConfig {
   };
 }
 
+/** bashモード（`!`。Issue #5、design.md §14.25）の設定。 */
+export interface ClaudeBashModeConfig {
+  enabled: boolean;
+  timeoutMs: number;
+}
+
 export interface ClaudeExtensionConfig {
   executablePath: string;
   configDir: string;
   claude: ClaudeConfig;
+  bashMode: ClaudeBashModeConfig;
 }
 
 export function readClaudeConfig(): ClaudeExtensionConfig {
@@ -91,6 +108,12 @@ export function readClaudeConfig(): ClaudeExtensionConfig {
       additionalArgs: Array.isArray(additional)
         ? additional.filter((a): a is string => typeof a === 'string')
         : [],
+    },
+    bashMode: {
+      // 既定は無効（CLIの権限設定を迂回する機能のため。design.md §14.25）
+      enabled: c.get<boolean>('bashMode.enabled') === true,
+      // 0以下・非有限の値は既定へ丸める（`positiveNum`のJSDoc参照）
+      timeoutMs: positiveNum(c, 'bashMode.timeoutMs', 60000),
     },
   };
 }
@@ -182,9 +205,7 @@ function normalizePseudoWorktreeExclude(value: unknown): readonly string[] {
   if (!Array.isArray(value)) {
     return DEFAULT_PSEUDO_WORKTREE_EXCLUDE;
   }
-  const entries = value.filter(
-    (v): v is string => typeof v === 'string' && v.trim() !== '',
-  );
+  const entries = value.filter((v): v is string => typeof v === 'string' && v.trim() !== '');
   return entries.length === value.length && entries.length > 0
     ? entries
     : DEFAULT_PSEUDO_WORKTREE_EXCLUDE;

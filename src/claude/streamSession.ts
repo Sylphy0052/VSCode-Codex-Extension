@@ -7,6 +7,8 @@ import {
   removeApproval,
   removeQueued,
   takeQueued,
+  upsertItem,
+  type ChatItem,
   type ChatState,
   type PendingApproval,
 } from '../appserver/chatState';
@@ -360,6 +362,19 @@ export class ClaudeStreamSession {
     });
   }
 
+  /**
+   * 拡張機能内で完結する項目を会話へ追加・更新する（同じidなら上書き）。
+   *
+   * bashモード（`!`）・メモリモード（`#`。design.md §14.25）はCLIの制御プロトコルに
+   * 経路が無く、拡張機能側だけで処理が完結する（Phase 0で確認済み）。CLIとの通信を
+   * 経ずに会話へ項目を残す入口がこれまで無かったため追加した。`noteSettingChange` が
+   * 使う `appendNotice` と同じ `upsertItem` を使うが、こちらは種類・本文を呼び出し側が
+   * 自由に決められる。
+   */
+  upsertLocalItem(item: ChatItem): void {
+    this.update({ ...this.state, items: upsertItem(this.state.items, item) });
+  }
+
   private requestRewindFiles(userMessageId: string, dryRun: boolean): Promise<RewindFilesResult> {
     if (this.proc === undefined) {
       return Promise.resolve({
@@ -553,9 +568,9 @@ export class ClaudeStreamSession {
     }
 
     if (outgoing?.kind === 'mcpStatus') {
-      this.mcpStatusWaiting
-        .get(response.requestId)
-        ?.(response.ok ? readMcpServersList(response.payload) : undefined);
+      this.mcpStatusWaiting.get(response.requestId)?.(
+        response.ok ? readMcpServersList(response.payload) : undefined,
+      );
       this.mcpStatusWaiting.delete(response.requestId);
       return;
     }
@@ -663,12 +678,7 @@ export class ClaudeStreamSession {
 
 /** こちらから出した制御要求の用途。 */
 type OutgoingKind =
-  | 'initialize'
-  | 'contextUsage'
-  | 'sessionCost'
-  | 'settings'
-  | 'rewindFiles'
-  | 'mcpStatus';
+  'initialize' | 'contextUsage' | 'sessionCost' | 'settings' | 'rewindFiles' | 'mcpStatus';
 
 interface Outgoing {
   kind: OutgoingKind;

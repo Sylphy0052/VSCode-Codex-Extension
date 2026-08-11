@@ -554,6 +554,19 @@
           "default": "",
           "scope": "machine-overridable",
           "markdownDescription": "使用するエージェント (`--agent`)。組込エージェント (`claude` / `Explore` / `Plan` / `general-purpose` など) やユーザー定義のカスタムエージェントの名前を指定する。空なら渡さず、Claude Code 側の `agent` 設定に委譲する。起動時にのみ効き、会話の途中では切り替えられない。"
+        },
+        "claude.bashMode.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "markdownDescription": "有効にすると、入力欄の先頭が `!` の入力を拡張機能がシェルで直接実行します。**Claude Code CLIの権限設定（permissionMode / allowedTools など）は適用されません。** 実行のたびに実コマンド・cwdを示す確認ダイアログを出します。リポジトリ側の設定から無断で有効化されないようmachineスコープに固定しています。"
+        },
+        "claude.bashMode.timeoutMs": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 1,
+          "scope": "machine",
+          "markdownDescription": "bashモード（`!`）で実行するコマンドのタイムアウト（ミリ秒）。リポジトリ側の設定から短縮・無効化されないようmachineスコープに固定しています。"
         }
       }
     }

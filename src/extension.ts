@@ -13,6 +13,7 @@ import { ClaudeMcpProbe } from './claude/mcpProbe';
 import { ClaudeModelProbe } from './claude/modelProbe';
 import { ClaudePluginActions } from './claude/pluginsActions';
 import { ClaudePluginsProbe } from './claude/pluginsProbe';
+import { nodeMemoryFilePort } from './claude/memoryTargets';
 import { ClaudeProvider } from './claude/provider';
 import { ClaudeSessionStore } from './claude/sessionStore';
 import { ClaudeSkillsProbe } from './claude/skillsProbe';
@@ -36,7 +37,11 @@ import {
   nodeWorktreeFileSystem,
   WorktreeCreationQueue,
 } from './orchestrator/worktree';
-import { nodeCliAvailability, nodeCliCommandRunner, nodeForgeFileSystem } from './orchestrator/forge';
+import {
+  nodeCliAvailability,
+  nodeCliCommandRunner,
+  nodeForgeFileSystem,
+} from './orchestrator/forge';
 import { startHttpMcpTransport } from './orchestrator/messaging';
 import { nodePseudoWorktreeFileSystem } from './orchestrator/pseudoWorktree';
 import {
@@ -63,6 +68,7 @@ import { ProviderRegistry } from './provider/registry';
 import type { AgentProvider } from './provider/types';
 import { createLogger, type Logger } from './log';
 import { nodeCommandRunner as nodeAccountCommandRunner } from './process/commandRunner';
+import { nodeShellCommandRunner } from './process/shellCommandRunner';
 import { nodeFileSystem } from './session/nodeFileSystem';
 import { nodeFileScan } from './session/nodeFileScan';
 import { FileMentionCatalog } from './provider/fileMentions';
@@ -225,6 +231,9 @@ export function activate(context: vscode.ExtensionContext): void {
     (activity) => recordActivity({ ...activity, source: 'claude-code' }),
     (usage) => usageBar.updateClaude(usage),
     isTaskManagedThread,
+    nodeShellCommandRunner,
+    nodeMemoryFilePort,
+    context.workspaceState,
   );
   context.subscriptions.push(claudeChat);
 

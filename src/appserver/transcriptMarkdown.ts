@@ -26,6 +26,8 @@ const KIND_TITLE: Record<string, string> = {
   imageGeneration: '画像の生成',
   enteredReviewMode: 'レビュー開始',
   exitedReviewMode: 'レビュー終了',
+  // bashモード（!）・メモリモード（#）。design.md §14.25、Issue #5・#6
+  memoryAppend: 'メモリ追記',
 };
 
 /** ファイル変更の種類ラベル。`chatScript.ts` の `createDiff` と同じ対応。 */

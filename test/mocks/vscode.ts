@@ -161,6 +161,19 @@ interface MockState {
   messages: { warnings: string[]; errors: string[]; infos: string[] };
   /** `window.showInputBox` が返す値。テストごとに設定する（既定はキャンセル扱いの`undefined`）。 */
   showInputBoxAnswer: string | undefined;
+  /**
+   * `window.showQuickPick` が返す値。渡された選択肢配列のインデックスで指定する
+   * （`undefined` はキャンセル扱い。既定はキャンセル）。
+   */
+  showQuickPickAnswerIndex: number | undefined;
+  /**
+   * `window.showWarningMessage` が返す値の上書き。未設定（`set: false`）なら従来通り
+   * 渡されたボタン文字列のうち最初の1件を自動で選ぶ（＝確認ダイアログを自動承認する）。
+   * `set: true` にすると `value`（`undefined` を含む）をそのまま返す（キャンセルを模擬できる）。
+   */
+  showWarningMessageOverride: { set: boolean; value: string | undefined };
+  /** `vscode.commands.executeCommand` の呼び出し履歴。 */
+  executedCommands: { command: string; args: unknown[] }[];
 }
 
 const state: MockState = {
@@ -170,6 +183,9 @@ const state: MockState = {
   createdPanels: [],
   messages: { warnings: [], errors: [], infos: [] },
   showInputBoxAnswer: undefined,
+  showQuickPickAnswerIndex: undefined,
+  showWarningMessageOverride: { set: false, value: undefined },
+  executedCommands: [],
 };
 
 /** テストコードから内部状態を操作・観測するための入口。実装コードからは使わない。 */
@@ -181,12 +197,28 @@ export const __mock = {
     state.createdPanels = [];
     state.messages = { warnings: [], errors: [], infos: [] };
     state.showInputBoxAnswer = undefined;
+    state.showQuickPickAnswerIndex = undefined;
+    state.showWarningMessageOverride = { set: false, value: undefined };
+    state.executedCommands = [];
   },
   set showInputBoxAnswer(value: string | undefined) {
     state.showInputBoxAnswer = value;
   },
   get showInputBoxAnswer(): string | undefined {
     return state.showInputBoxAnswer;
+  },
+  set showQuickPickAnswerIndex(value: number | undefined) {
+    state.showQuickPickAnswerIndex = value;
+  },
+  get showQuickPickAnswerIndex(): number | undefined {
+    return state.showQuickPickAnswerIndex;
+  },
+  /** 以後の `showWarningMessage` 呼び出しが返す値を固定する（`undefined` でキャンセルを模擬）。 */
+  setShowWarningMessageAnswer(value: string | undefined): void {
+    state.showWarningMessageOverride = { set: true, value };
+  },
+  get executedCommands(): { command: string; args: unknown[] }[] {
+    return state.executedCommands;
   },
   setConfig(section: string, values: Record<string, unknown>): void {
     state.configs.set(section, values);
@@ -278,6 +310,9 @@ export const window = {
   },
   showWarningMessage: (message: string, ...items: unknown[]): Promise<string | undefined> => {
     state.messages.warnings.push(message);
+    if (state.showWarningMessageOverride.set) {
+      return Promise.resolve(state.showWarningMessageOverride.value);
+    }
     const choice = items.find((i): i is string => typeof i === 'string');
     return Promise.resolve(choice);
   },
@@ -287,10 +322,29 @@ export const window = {
   },
   showInputBox: (_options?: unknown): Promise<string | undefined> =>
     Promise.resolve(state.showInputBoxAnswer),
+  /**
+   * `state.showQuickPickAnswerIndex` に設定したインデックスの要素を返す
+   * （未設定・範囲外・非配列は `undefined` = キャンセル扱い）。
+   */
+  showQuickPick: (items: unknown, _options?: unknown): Promise<unknown> => {
+    const index = state.showQuickPickAnswerIndex;
+    if (index === undefined || !Array.isArray(items)) {
+      return Promise.resolve(undefined);
+    }
+    return Promise.resolve(items[index]);
+  },
   withProgress: async <T>(
     _options: unknown,
     task: (progress: { report: () => void }) => Thenable<T>,
   ): Promise<T> => task({ report: () => undefined }),
+};
+
+/** `vscode.commands`。呼び出し履歴は `__mock.executedCommands` から確認する。 */
+export const commands = {
+  executeCommand: (command: string, ...args: unknown[]): Promise<unknown> => {
+    state.executedCommands.push({ command, args });
+    return Promise.resolve(undefined);
+  },
 };
 
 export type WebviewPanel = FakeWebviewPanel;

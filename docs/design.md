@@ -1653,6 +1653,59 @@ CodexのTUIは Ctrl+T でトランスクリプトを表示し、`/raw` で選択
 - **外部へは送らない**。クリップボード・ローカルファイル・エディタタブの3つに留め、ネットワーク越しの送信機能は作らない（仕様どおり。生テキストには機微な内容が含まれうるため）
 - `showQuickPick` / `showSaveDialog` / `env.clipboard` / `workspace.fs` / `openTextDocument` はテスト用の `vscode` モック（`test/mocks/vscode.ts`）に無く、既存の `review` メッセージ（`runReview`）と同じ理由でユニットテストの対象外（実機確認に回す。`docs/manual-test.md` C-38 / L-36）。Markdownの組み立てそのものは純粋関数として全面的にユニットテストする
 
+### 14.25 入力欄のbashモード・メモリモード（Claude Code）
+
+Claude Code TUIのbashモード（`!`）とメモリモード（`#`）相当。TP-03・TP-04、issue #5・#6。Codex側は対象外（TUIに相当機能が無い）。
+
+#### 調査（Phase 0の結果）
+
+- `local_command` subtypeのcontrol requestは `Unsupported control request subtype` で拒否される。TUIの `!`（bashモード）に対応する制御プロトコル上の経路は無い
+- `/memory` コマンドはCLIの応答上はエディタでファイルを開く動作を返すだけで、拡張機能側にエディタが無い以上メモリへの追記そのものにはならない
+
+**どちらもCLIに経路が無いため、拡張機能側だけで処理を完結させる。**
+
+#### 共通: 入力の判定
+
+`src/claude/inputModes.ts` の `classifyClaudeInput(raw)` が純粋関数として判定する。**入力欄の先頭文字だけ**を見る（trimしない）。複数行入力でもその全体を1つのコマンド／ノート本文として扱う。
+
+- `!` 始まり → シェルコマンド（`!` を除いた残り全体）
+- `#` 始まり → メモリ追記のノート本文（`#` を除いた残りをtrim）
+- `\!` / `\#` 始まり → エスケープ。先頭のバックスラッシュ1つだけを取り除き、通常のメッセージとして送る（マークダウン見出し `# 見出し` を送りたい場合の逃げ道）
+- `!` / `#` の後ろが空白のみ → `empty`。CLIへは送らず、会話にも項目を足さない
+- それ以外は通常のメッセージ
+
+戻り値は判別可能なユニオン（`message` / `shellCommand` / `memoryNote` / `empty`）。`ClaudeChatViewManager.handleMessage` の `send` 分岐がこれを読んで、CLIへの送信・bashモードの実行・メモリ追記のいずれかへ振り分ける。`!` / `#` のときは添付ファイル（`entry.attachments`）を消費しない。取り出し（`take()`）は通常の発言を送る経路（`dispatch`）でしか呼ばないため、貼り付けた添付はそのまま残り、次の通常の発言へ持ち越される。
+
+#### bashモード（`!`。Issue #5）
+
+- 設定 `claude.bashMode.enabled`（boolean、既定 `false`、`machine`スコープ）。既定で無効。CLIの権限設定（`permissionMode` / `allowedTools` など）を丸ごと迂回する機能のため、リポジトリ側の設定から無断で有効化されないよう固定する
+- 設定 `claude.bashMode.timeoutMs`（number、既定 `60000`、`machine`スコープ）。0以下・非有限の値は`src/config.ts`の`readClaudeConfig`が既定値へ丸める（`settings.json`を直接編集した場合、`package.json`の`minimum`はUIのヒントに過ぎず効かないため）
+- 無効のまま `!` が打たれたら、実行せず「bashモードが無効である」旨の項目（`settingsChanged`種別）を会話へ1件足す。あわせて `vscode.window.showWarningMessage` に「設定を開く」ボタンを出し、押されたら `workbench.action.openSettings` で `claude.bashMode.enabled` を開く（`src/claude/bashMode.ts` の `buildBashModeDisabledNotice`）
+- 有効なら**実行のたびにモーダル確認**（`showWarningMessage(msg, {modal: true}, '実行する')`）。メッセージ本文に実コマンド・cwd・「CLIの権限設定は適用されない」旨を必ず含める。キャンセルしたら何もしない（会話に項目を残さない）
+- 実行部は `src/process/shellCommandRunner.ts` の `ShellCommandRunner` インターフェースへ切り出し、既定実装 `nodeShellCommandRunner` は `child_process.spawn(command, {shell: true, cwd})` でパイプ・リダイレクト・変数展開を効かせる。タイムアウトと出力上限（1MB程度、超過分は先頭を切り詰めて`truncated`で返す）を持つ。**コマンド文字列そのもののサニタイズはしない**（意図的に任意コマンドを通す機能であり、防御は「既定無効」と「毎回の確認」の二重ゲートのみという設計判断）
+- タイムアウトはSIGTERMだけでは終わらないことがある（`trap '' TERM` 等でSIGTERMを無視するプロセス）。SIGTERM送出後、猶予（`DEFAULT_SIGKILL_GRACE_MS`、既定3秒）を空けても `close` が来なければSIGKILLへエスカレーションする（POSIXはプロセスグループ宛`process.kill(-pid, 'SIGKILL')`、失敗時は`proc.kill('SIGKILL')`へフォールバック）。これが無いと「実行中」項目が永久に残る（レビュー指摘・実プロセスで再現確認済み）
+- `ShellCommandRunner.run` は `AbortSignal` を受け取る。タブを閉じる・拡張機能が終了する（`ClaudeChatViewManager.teardown` / `dispose`）と、実行中のコマンドを中断する（POSIXでは`detached: true`起動のため、放置すると子プロセスと子孫がVSCode終了後も生き残ってしまう）。中断時はSIGTERM→（猶予後）SIGKILLの同じエスカレーションで打ち切り、`ShellCommandResult.aborted: true` で解決する（rejectはしない）。会話の「実行中」項目は「中断した」旨で畳まれる
+- 会話への表示は既存の `commandExecution` 種別を使い回す。実行開始時に「実行中」の項目を1件足し（`status: 'running'`）、完了時に同じidでstdout/stderr/終了コードを反映して上書きする（`src/claude/bashMode.ts` の `buildRunningCommandItem` / `buildCompletedCommandItem`）。失敗（非ゼロ終了・タイムアウト・中断・シェル起動失敗）は本文の先頭に理由を明示する
+- CLIの会話状態（`ChatState`）へCLIとの通信を経ずに項目を足す必要があるため、`ClaudeStreamSession.upsertLocalItem(item)` を追加した（`appendNotice` が使う `upsertItem` を公開して共用する）
+- `ClaudeChatViewManager.runBashMode` は `void` で呼ばれるfire-and-forgetのため、本体全体をtry/catchで囲み、失敗（`ShellCommandRunner.run`自体が投げた想定外の例外を含む）を`reportError`で必ずユーザーへ見せる。「実行中」項目を出した後の失敗は、同じidで`buildBashModeErrorItem`により上書きして畳む（レビュー指摘: fire-and-forgetでエラーが握り潰される）
+
+#### メモリモード（`#`。Issue #6）
+
+- 追記先の候補は `src/claude/memoryTargets.ts` の `listMemoryTargets` が純粋に列挙する: 各workspaceFolder直下の `CLAUDE.md`（複数フォルダなら全部。ラベルにフォルダ名を含める）と、ユーザーメモリ（`claude.configDir` 設定があればそれ、無ければ `os.homedir()/.claude`）の `CLAUDE.md`。各候補は実在するかどうかをラベルへ出す（「既存」/「新規作成」）。各候補の実在確認は互いに依存しないため`Promise.all`で並列に行う
+- 選択は `vscode.window.showQuickPick`。**最後に選んだ追記先を `workspaceState`（`LAST_MEMORY_TARGET_KEY`）へ覚え、`orderMemoryTargets` が次回の先頭に並べ替える**（連続入力を軽くするため）
+- 選択後にモーダル確認。本文に追記先の絶対パスと追記される本文そのものを出す（`buildMemoryAppendConfirmMessage`。純粋関数として切り出しユニットテスト済み）
+- **選んだ候補がシンボリックリンクなら、実体の絶対パスを確認ダイアログへ「リンク先: <実パス>」として足す。** `MemoryFilePort.resolveSymlinkTarget`（既定実装は`fs.lstat`でシンボリックリンク判定→`fs.realpath`。判定・解決いずれかの失敗は`undefined`へフォールバックし機能は壊さない）が返した値をそのまま渡す。`fs.writeFile`はシンボリックリンクを追従してリンク先の実体へ書くため、リンク自身のパスしか見せないと実際に書き換わるファイルが確認ダイアログから分からない（レビュー指摘: 悪意あるリポジトリが`CLAUDE.md`→`~/.ssh/authorized_keys`のようなリンクを同梱する筋）。dotfiles管理でCLAUDE.mdをシンボリックリンクにする使い方は正当なため、**書き込み自体は中止せず**実パスを見せた上でユーザーに判断させる。会話へ残す`memoryAppend`項目の`detail`にも同じ実パスを含める
+- 追記形式（`buildMemoryAppendContent`）: ファイル末尾へ `- <ノート本文>\n` を追記する。既存ファイルの末尾が改行で終わっていなければ先に改行を1つ足す。ファイルが無ければ親ディレクトリごと作成して新規作成する。ノートが複数行なら、2行目以降は2スペースでインデントして1つの箇条書きに収める
+- ファイル入出力は `MemoryFilePort` インターフェースへ切り出し（既定実装 `nodeMemoryFilePort`）、テストではfakeに差し替える。`readTextFile`はファイルが無い（ENOENT）ときだけ`undefined`を返し、それ以外の例外（EACCES / EBUSY / EISDIR等）は投げる。ここを握り潰すと「ファイルが存在しない」と誤解され、`buildMemoryAppendContent(undefined, note)`が既存内容を無視した本文を作り、`writeTextFile`（上書き）が実在するファイルをノート1行だけに置き換えてしまう（レビュー指摘: 既存メモリファイルの内容破壊）
+- **書き込み先はQuickPickが列挙した候補（`MemoryTarget.filePath`）に限る。** ユーザーが打ったノート本文からパスを組み立てることは一切しない（パストラバーサルの入口を作らないため）
+- 会話への表示は新しい種別 `memoryAppend` を使う。追記先の絶対パス（`detail`）とノート本文（`text`）を1件の項目として残す。Webview側（`chatScript.ts` の `KIND_LABEL`）と `src/appserver/transcriptMarkdown.ts` の `KIND_TITLE` の両方に「メモリ追記」ラベルを追加した（語彙は揃えること）
+- `ClaudeChatViewManager.runMemoryAppend` は `void` で呼ばれるfire-and-forgetのため、本体全体をtry/catchで囲み、失敗（`readTextFile`が投げた例外・`writeTextFile`の失敗を含む）を`reportError`で必ずユーザーへ見せる。`writeTextFile`より前で失敗すれば既存ファイルには一切触れない
+
+#### セキュリティ
+
+- webviewへ渡すコマンド文字列・パス・ノート本文・コマンド出力は、既存の流儀どおりDOMの `textContent` 経由で埋め込む（`chatScript.ts` は元からHTML文字列の直接埋め込みをしていない。今回追加した種別もその流儀にそのまま乗る）
+- bashモードのコマンド文字列は意図的にサニタイズしない。防御は「既定無効」「毎回のモーダル確認」の二重ゲートのみ（`shellCommandRunner.ts` のコメント参照）
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）
