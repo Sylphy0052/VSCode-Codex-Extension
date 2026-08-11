@@ -29,6 +29,7 @@ import { APPROVAL_MODES, type CodexConfig } from '../codex/types';
 import type { PromptSubmission } from '../appserver/prompts';
 import type {
   ApprovalHandler,
+  ApprovalOutcome,
   TaskSession,
   TaskSessionHost,
   TaskSessionInput,
@@ -95,10 +96,17 @@ interface ChatPanel {
   wasLoopRunning: boolean;
   /** `setApprovalHandler` で差し込まれた自動判定。未設定なら従来通り必ず承認カードを出す。 */
   approvalHandler: ApprovalHandler | undefined;
+  /**
+   * `setPromptTransform` で差し込まれた本文変換。実際の送信直前に適用する
+   * （design.md §16.4のテンプレート展開）。未設定ならそのまま送る。
+   */
+  promptTransform: ((text: string) => string) | undefined;
   /** `TaskSession.onStateChanged` のリスナー。 */
   stateListeners: Array<(state: ChatState) => void>;
   /** `TaskSession.onFinished` のリスナー。 */
   finishedListeners: Array<(reason: LoopStopReason, state: ChatState) => void>;
+  /** `TaskSession.onApprovalResolved` のリスナー。 */
+  approvalResolvedListeners: Array<(outcome: ApprovalOutcome) => void>;
 }
 
 /** 拡張機能から実行したセッションを日報バッファへ記録するための通知。 */
@@ -375,8 +383,10 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       wasBusy: false,
       wasLoopRunning: false,
       approvalHandler: undefined,
+      promptTransform: undefined,
       stateListeners: [],
       finishedListeners: [],
+      approvalResolvedListeners: [],
     };
     return entry;
   }
@@ -444,11 +454,15 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     return {
       sessionId: threadId,
       runLoop: (plan: LoopPlan) => entry.loop.start(plan),
+      setPromptTransform: (transform) => {
+        entry.promptTransform = transform;
+      },
       onFinished: (listener) => entry.finishedListeners.push(listener),
       onStateChanged: (listener) => entry.stateListeners.push(listener),
       setApprovalHandler: (handler) => {
         entry.approvalHandler = handler;
       },
+      onApprovalResolved: (listener) => entry.approvalResolvedListeners.push(listener),
       interrupt: () => entry.session.interrupt(),
       reveal: () => this.showPanel(entry, false),
       open: (options) => this.showPanel(entry, options.preserveFocus),
@@ -616,7 +630,12 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       if (type === 'approve' && typeof m['decision'] === 'string') {
         const requestId = m['requestId'];
         if (typeof requestId === 'number' || typeof requestId === 'string') {
-          entry.session.decide(requestId, m['decision'] as ApprovalDecision);
+          const decision = m['decision'] as ApprovalDecision;
+          entry.session.decide(requestId, decision);
+          // setApprovalHandlerが`ask`で従来の承認カードへ委ねた要求の決定をrunner.tsへ伝える
+          for (const listener of entry.approvalResolvedListeners) {
+            listener({ requestId, decision });
+          }
         }
         return;
       }
@@ -687,10 +706,15 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
 
   /**
    * ループからの送信。失敗はループを止める理由になるため、報告したうえで投げ直す。
+   *
+   * `promptTransform` が設定されていれば、実際にCLIへ送る本文だけそちらを通す。
+   * 作業記録（`reportActivity`）には変換前の `text`（テンプレート展開前）を残す
+   * （design.md §16.12）。未設定なら従来通り同じ文字列を送信・記録する。
    */
   private async sendFromLoop(entry: ChatPanel, text: string): Promise<void> {
+    const toSend = entry.promptTransform?.(text) ?? text;
     try {
-      await entry.session.send(text, entry.taskConfig ?? readConfig().codex);
+      await entry.session.send(toSend, entry.taskConfig ?? readConfig().codex);
       this.reportActivity(entry, text);
     } catch (e) {
       this.reportError(e);
@@ -854,7 +878,9 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     if (target.approvalHandler !== undefined) {
       const approval = describeApproval(request.id, request.method, request.params);
       if (approval !== undefined) {
-        const result = await target.approvalHandler(approval);
+        // 判定の入力は生の要求パラメータ（request.params）。表示用に整形済みのapprovalは
+        // 種別・requestId・itemIdの参照にだけ使う（design.md §16.7）
+        const result = await target.approvalHandler(approval, request.params);
         if (result.kind === 'auto') {
           this.log.info(`承認(自動判定): ${approval.kind} → ${result.decision}`);
           return buildApprovalResponse(approval.kind, result.decision, request.params);

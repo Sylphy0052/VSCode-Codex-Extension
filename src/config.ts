@@ -86,6 +86,25 @@ export function readActivityLogConfig(): ActivityLogConfig {
   };
 }
 
+/** ワークフロー実行（design.md §16）の設定。 */
+export interface WorkflowsConfig {
+  /** 定義ファイルの置き場。ワークスペースフォルダ配下の相対パス（既定 `.agents/workflows`）。 */
+  dir: string;
+  /**
+   * `autoApprove: true` を有効化できるか（machineスコープ）。無効なら、YAMLの指定に
+   * 関わらず全ての承認を人へ回す（design.md §16.16）。`clampAutoApprove` の基準値。
+   */
+  allowAutoApprove: boolean;
+}
+
+export function readWorkflowsConfig(): WorkflowsConfig {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    dir: str(c, 'workflows.dir', '.agents/workflows'),
+    allowAutoApprove: c.get<boolean>('workflows.allowAutoApprove') ?? false,
+  };
+}
+
 /** アクティブエディタが属するワークスペースフォルダ。無ければ先頭（設計書 §10）。 */
 export function currentWorkspaceFolder(): vscode.WorkspaceFolder | undefined {
   const active = vscode.window.activeTextEditor?.document.uri;

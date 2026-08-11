@@ -89,9 +89,14 @@ export class ClaudeStreamSession {
      * 既定は常に `ask`（従来通り必ず承認カードを出す）。タスク管理下のセッションだけ
      * `ClaudeChatViewManager` が実際の判定へ差し替える。判定そのもの
      * （`classifyApprovalRequest`）を呼ぶのは runner.ts の責務で、ここは口を通すだけ。
+     *
+     * 第2引数は `can_use_tool` 要求の生payload（`tool_name` / `input` を含む）。
+     * `PendingApproval`（表示用に文字列結合済み）だけでは判定に使う `command` /
+     * 変更対象パスを取り出せないため渡す（design.md §16.7）。
      */
     private readonly interceptApproval: (
       approval: PendingApproval,
+      rawParams: Record<string, unknown>,
     ) => Promise<ApprovalHandlerResult> = () => Promise.resolve({ kind: 'ask' }),
   ) {}
 
@@ -386,7 +391,7 @@ export class ClaudeStreamSession {
     }
 
     const input = (request.payload['input'] as Record<string, unknown> | undefined) ?? {};
-    void this.resolveApproval(request.requestId, approval, input);
+    void this.resolveApproval(request.requestId, approval, input, request.payload);
   }
 
   /**
@@ -397,8 +402,9 @@ export class ClaudeStreamSession {
     requestId: string,
     approval: PendingApproval,
     input: Record<string, unknown>,
+    rawPayload: Record<string, unknown>,
   ): Promise<void> {
-    const result = await this.interceptApproval(approval);
+    const result = await this.interceptApproval(approval, rawPayload);
     if (result.kind === 'auto') {
       this.write(buildControlResponse(requestId, buildCanUseToolResponse(result.decision, input)));
       this.log.info(`承認(自動判定): ${approval.kind} → ${result.decision}`);

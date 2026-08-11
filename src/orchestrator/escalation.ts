@@ -467,7 +467,7 @@ const DANGER_COMMAND_PATTERNS: readonly DangerPattern[] = [
  * 呼び出し側は実パス解決済みの絶対パスを渡す前提（本関数はシンボリックリンクの
  * 解決を行わない）。
  */
-function isPathWithinRoot(target: string, root: string): boolean {
+export function isPathWithinRoot(target: string, root: string): boolean {
   const rel = path.relative(root, target);
   return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel));
 }

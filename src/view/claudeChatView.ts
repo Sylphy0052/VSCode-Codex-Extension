@@ -17,6 +17,7 @@ import type { SlashCommand } from '../provider/slashCommands';
 import { AttachmentBox } from '../provider/attachments';
 import type {
   ApprovalHandler,
+  ApprovalOutcome,
   TaskSession,
   TaskSessionHost,
   TaskSessionInput,
@@ -55,10 +56,17 @@ interface ClaudePanel {
   wasLoopRunning: boolean;
   /** `setApprovalHandler` で差し込まれた自動判定。未設定なら従来通り必ず承認カードを出す。 */
   approvalHandler: ApprovalHandler | undefined;
+  /**
+   * `setPromptTransform` で差し込まれた本文変換。実際の送信直前に適用する
+   * （design.md §16.4のテンプレート展開）。未設定ならそのまま送る。
+   */
+  promptTransform: ((text: string) => string) | undefined;
   /** `TaskSession.onStateChanged` のリスナー。 */
   stateListeners: Array<(state: ChatState) => void>;
   /** `TaskSession.onFinished` のリスナー。 */
   finishedListeners: Array<(reason: LoopStopReason, state: ChatState) => void>;
+  /** `TaskSession.onApprovalResolved` のリスナー。 */
+  approvalResolvedListeners: Array<(outcome: ApprovalOutcome) => void>;
 }
 
 const VIEW_TYPE = 'claude.chat';
@@ -341,9 +349,9 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       () => void this.postCommands(entry),
       // entry.approvalHandlerはsetApprovalHandlerで後から差し込まれることがあるため、
       // 構築時に固定せず呼び出しのたびに読み直す（クロージャで参照するだけ）
-      (approval) =>
+      (approval, rawParams) =>
         entry.approvalHandler !== undefined
-          ? entry.approvalHandler(approval)
+          ? entry.approvalHandler(approval, rawParams)
           : Promise.resolve({ kind: 'ask' as const }),
     );
 
@@ -365,8 +373,10 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       wasBusy: false,
       wasLoopRunning: false,
       approvalHandler: undefined,
+      promptTransform: undefined,
       stateListeners: [],
       finishedListeners: [],
+      approvalResolvedListeners: [],
     };
     return entry;
   }
@@ -420,11 +430,15 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     return {
       sessionId,
       runLoop: (plan: LoopPlan) => entry.loop.start(plan),
+      setPromptTransform: (transform) => {
+        entry.promptTransform = transform;
+      },
       onFinished: (listener) => entry.finishedListeners.push(listener),
       onStateChanged: (listener) => entry.stateListeners.push(listener),
       setApprovalHandler: (handler) => {
         entry.approvalHandler = handler;
       },
+      onApprovalResolved: (listener) => entry.approvalResolvedListeners.push(listener),
       interrupt: () => {
         entry.session.interrupt();
         return Promise.resolve();
@@ -557,8 +571,16 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
   /**
    * 発言を送り、作業記録へ流す。手動でもループからでも通り道は同じにする。
    * 送信のたび毎回記録する。
+   *
+   * `logText` を渡した場合、作業記録にはそちらを残し、実際の送信は `text` を使う
+   * （design.md §16.12。テンプレート展開前の文面を記録するため。`sendFromLoop` から使う）。
    */
-  private dispatch(entry: ClaudePanel, text: string, withAttachments = false): void {
+  private dispatch(
+    entry: ClaudePanel,
+    text: string,
+    withAttachments = false,
+    logText: string = text,
+  ): void {
     const attachments = withAttachments ? entry.attachments.take() : [];
     try {
       entry.session.sendOrQueue(text, attachments);
@@ -569,14 +591,20 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     }
     const sessionId = entry.session.threadId;
     if (sessionId !== undefined) {
-      this.onActivity({ sessionId, cwd: entry.cwd, kind: 'prompt', text });
+      this.onActivity({ sessionId, cwd: entry.cwd, kind: 'prompt', text: logText });
     }
   }
 
-  /** ループからの送信。失敗はループを止める理由になるため、報告したうえで投げ直す。 */
+  /**
+   * ループからの送信。失敗はループを止める理由になるため、報告したうえで投げ直す。
+   *
+   * `promptTransform` が設定されていれば、実際にCLIへ送る本文だけそちらを通す。
+   * 作業記録には変換前の `text`（テンプレート展開前）を残す（design.md §16.12）。
+   */
   private sendFromLoop(entry: ClaudePanel, text: string): void {
+    const toSend = entry.promptTransform?.(text) ?? text;
     try {
-      this.dispatch(entry, text);
+      this.dispatch(entry, toSend, false, text);
     } catch (e) {
       this.reportError(e);
       throw e;
@@ -670,7 +698,12 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       if (type === 'approve' && typeof m['decision'] === 'string') {
         const requestId = m['requestId'];
         if (typeof requestId === 'number' || typeof requestId === 'string') {
-          entry.session.decide(requestId, m['decision'] as ApprovalDecision);
+          const decision = m['decision'] as ApprovalDecision;
+          entry.session.decide(requestId, decision);
+          // setApprovalHandlerが`ask`で従来の承認カードへ委ねた要求の決定をrunner.tsへ伝える
+          for (const listener of entry.approvalResolvedListeners) {
+            listener({ requestId, decision });
+          }
         }
       }
     } catch (e) {

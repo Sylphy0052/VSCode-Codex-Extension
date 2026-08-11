@@ -3,7 +3,7 @@ import { noDefaults } from '../../src/codex/configToml';
 import type { Logger } from '../../src/log';
 import type { FileSystemPort } from '../../src/session/ports';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
-import { ChatViewManager } from '../../src/view/chatView';
+import { ChatViewManager, type ChatActivity } from '../../src/view/chatView';
 import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
 import { __mock, ViewColumn, window as fakeWindow } from '../mocks/vscode';
 import {
@@ -59,7 +59,10 @@ async function tick(times = 5): Promise<void> {
   }
 }
 
-function createManager(options?: { isTaskManagedThread?: (threadId: string) => boolean }): {
+function createManager(options?: {
+  isTaskManagedThread?: (threadId: string) => boolean;
+  onActivity?: (activity: ChatActivity) => void;
+}): {
   manager: ChatViewManager;
   connection: FakeAppServerConnection;
 } {
@@ -70,7 +73,7 @@ function createManager(options?: { isTaskManagedThread?: (threadId: string) => b
     '/fake/codex-home',
     fakeFileSystem,
     fakeLogger,
-    () => undefined,
+    options?.onActivity ?? (() => undefined),
     options?.isTaskManagedThread ?? (() => false),
     factory,
   );
@@ -517,6 +520,69 @@ describe('ChatViewManager', () => {
 
       expect(panel.disposed).toBe(false);
       expect(manager.isOpen('thread-normal')).toBe(true);
+    });
+  });
+
+  describe('setPromptTransform（design.md §16.4 / §16.12）', () => {
+    it('実際の送信は展開後、作業記録には展開前の文面を残す', async () => {
+      const activities: ChatActivity[] = [];
+      const { manager, connection } = createManager({ onActivity: (a) => activities.push(a) });
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      const task = await p;
+
+      task.setPromptTransform((text) => text.replace('{{T1.result}}', '前タスクの応答テキスト'));
+      task.runLoop({
+        initialPrompt: '前タスクの結果: {{T1.result}}',
+        continuePrompt: '続けて',
+        maxIterations: 3,
+        condition: '',
+      });
+      await tick();
+      connection.resolveFirst('turn/start', {});
+      await tick();
+
+      // 実際にapp-serverへ送った内容は展開済み
+      const turnStart = connection.requests.find((r) => r.method === 'turn/start');
+      const input = (turnStart?.params as { input?: Array<{ text?: string }> } | undefined)?.input;
+      expect(input?.[0]?.text).toBe('前タスクの結果: 前タスクの応答テキスト');
+
+      // 作業記録には展開前の文面（{{T1.result}}のまま）が残る
+      const promptActivity = activities.find((a) => a.kind === 'prompt');
+      expect(promptActivity?.text).toBe('前タスクの結果: {{T1.result}}');
+    });
+
+    it('promptTransformを設定しなければ従来通り同じ文字列を送信・記録する', async () => {
+      const activities: ChatActivity[] = [];
+      const { manager, connection } = createManager({ onActivity: (a) => activities.push(a) });
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      const task = await p;
+
+      task.runLoop({
+        initialPrompt: '素の指示',
+        continuePrompt: '続けて',
+        maxIterations: 3,
+        condition: '',
+      });
+      await tick();
+      connection.resolveFirst('turn/start', {});
+      await tick();
+
+      const turnStart = connection.requests.find((r) => r.method === 'turn/start');
+      const input = (turnStart?.params as { input?: Array<{ text?: string }> } | undefined)?.input;
+      expect(input?.[0]?.text).toBe('素の指示');
+      expect(activities.find((a) => a.kind === 'prompt')?.text).toBe('素の指示');
     });
   });
 });

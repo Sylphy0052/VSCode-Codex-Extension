@@ -39,7 +39,17 @@ export type TaskFailureReason =
    * `dependencyFailed`（自分の依存先が失敗した）とは原因が異なるため区別する。
    * Viewはこの2つを別の表示にできる。
    */
-  | { readonly kind: 'runHalted' };
+  | { readonly kind: 'runHalted' }
+  /**
+   * ウィンドウのリロードで走行中（`running` / `waitingApproval`）だったタスクを
+   * 「中断」として`failed`にする（design.md §16.11）。セッションのプロセスごと消えている
+   * ため、`manual` / `interrupted`（人がそのタスクの画面を直接操作した状態。セッションは
+   * 生きたまま残る）とは意味が異なり、`retries`の自動再試行も対象外にする
+   * （中断は操作ミスではなく環境側の理由のため、他の失敗理由と同列に自動再試行してよいが、
+   * 少なくとも「同じ危険操作を繰り返し提示しない」制約は無関係なので`approvalRejected`とは
+   * 別に区別できるようにしておく）。
+   */
+  | { readonly kind: 'reloadInterrupted' };
 
 /** タスク1件の実行状態。 */
 export interface TaskRunState {
@@ -387,6 +397,24 @@ export function recordSubmissionCount(
     return run;
   }
   return setTask(run, taskId, { ...current, submissionCount });
+}
+
+/**
+ * タスク開始時に、実際に使ったセッションidと作業ディレクトリを記録する。
+ * `TaskRunState.sessionId` / `.cwd` のコメント通り「実行層が埋める値」で、この層に
+ * 書き込み手段が無いと実行層（`runner.ts`）が永続化のために値を持てない。
+ */
+export function recordSessionInfo(
+  run: RunState,
+  taskId: string,
+  sessionId: string,
+  cwd: string,
+): RunState {
+  const current = run.tasks.get(taskId);
+  if (current === undefined) {
+    return run;
+  }
+  return setTask(run, taskId, { ...current, sessionId, cwd });
 }
 
 /**
