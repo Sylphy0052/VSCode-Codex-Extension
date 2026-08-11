@@ -226,6 +226,201 @@ export function chatScript(agentLabel: string): string {
     return wrap;
   }
 
+  /**
+   * ユーザーへの問い合わせ。ツールの質問（requestUserInput）とMCPサーバのフォーム
+   * （elicitation）を同じ形で出す。
+   *
+   * 入力欄の中身は画面が持ち、送信のときにまとめて集める。状態の再描画で入力中の
+   * 値が消えないよう、カードは中身が変わったときだけ作り直す。
+   */
+  function renderPrompt(prompt) {
+    const wrap = document.createElement('div');
+    wrap.className = 'prompt';
+
+    const title = document.createElement('h3');
+    title.textContent = prompt.title;
+    wrap.appendChild(title);
+
+    // 誰が聞いているか。外部のプログラムからの要求なので必ず出す
+    if (prompt.source) {
+      const source = document.createElement('p');
+      source.className = 'source';
+      source.textContent = prompt.source + ' からの要求';
+      wrap.appendChild(source);
+    }
+
+    if (prompt.message) {
+      const message = document.createElement('p');
+      message.className = 'message';
+      message.textContent = prompt.message;
+      wrap.appendChild(message);
+    }
+
+    // 行き先は全部見せる。押すだけで外部へ飛ぶ導線は作らない
+    if (prompt.url) {
+      const url = document.createElement('pre');
+      url.className = 'prompt-url';
+      url.textContent = prompt.url;
+      wrap.appendChild(url);
+    }
+
+    if (!prompt.blocking && prompt.kind === 'userInput') {
+      const note = document.createElement('p');
+      note.className = 'note';
+      note.textContent = '答えなくても応答は進みます';
+      wrap.appendChild(note);
+    }
+
+    const readers = [];
+    for (const field of prompt.fields || []) {
+      wrap.appendChild(buildField(field, readers));
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    const buttons = [['送信', 'submit', false]];
+    buttons.push(['拒否', 'decline', true]);
+    if (prompt.kind === 'elicitation') buttons.push(['取り消す', 'cancel', true]);
+
+    for (const [label, action, secondary] of buttons) {
+      const button = document.createElement('button');
+      button.textContent = label;
+      if (secondary) button.className = 'secondary';
+      button.addEventListener('click', () => {
+        actions.querySelectorAll('button').forEach((b) => (b.disabled = true));
+        const values = {};
+        if (action === 'submit') {
+          for (const read of readers) read(values);
+        }
+        vscode.postMessage({
+          type: 'prompt',
+          requestId: prompt.requestId,
+          submission: { action, values },
+        });
+      });
+      actions.appendChild(button);
+    }
+    wrap.appendChild(actions);
+    return wrap;
+  }
+
+  /** 1つの入力欄。集め方は readers へ積む。 */
+  function buildField(field, readers) {
+    const box = document.createElement('div');
+    box.className = 'field';
+
+    const label = document.createElement('div');
+    label.className = 'field-label';
+    label.textContent = field.label + (field.required ? ' *' : '');
+    box.appendChild(label);
+
+    if (field.description) {
+      const desc = document.createElement('div');
+      desc.className = 'field-desc';
+      desc.textContent = field.description;
+      box.appendChild(desc);
+    }
+
+    if (field.input === 'boolean') {
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = field.defaultValue === 'true';
+      box.appendChild(input);
+      readers.push((values) => {
+        values[field.id] = [input.checked ? 'true' : 'false'];
+      });
+      return box;
+    }
+
+    const options = field.options || [];
+    if (options.length > 0) {
+      buildOptions(box, field, options, readers);
+      return box;
+    }
+
+    box.appendChild(buildFreeInput(field, readers));
+    return box;
+  }
+
+  function buildOptions(box, field, options, readers) {
+    // 同じカードに複数の質問が並ぶため、name はフィールドidで分ける
+    const name = 'prompt-' + field.id;
+    const inputs = [];
+    for (const option of options) {
+      const row = document.createElement('label');
+      row.className = 'option';
+
+      const input = document.createElement('input');
+      input.type = field.multiple ? 'checkbox' : 'radio';
+      input.name = name;
+      input.value = option.value;
+      if (option.value === field.defaultValue) input.checked = true;
+      row.appendChild(input);
+      inputs.push(input);
+
+      const text = document.createElement('span');
+      text.textContent = option.label + (option.description ? ' ・ ' + option.description : '');
+      row.appendChild(text);
+      box.appendChild(row);
+    }
+
+    let other;
+    if (field.allowOther) {
+      const row = document.createElement('label');
+      row.className = 'option';
+      const pick = document.createElement('input');
+      pick.type = field.multiple ? 'checkbox' : 'radio';
+      pick.name = name;
+      pick.value = '';
+      row.appendChild(pick);
+      const text = document.createElement('span');
+      text.textContent = 'その他';
+      row.appendChild(text);
+      other = document.createElement('input');
+      other.type = 'text';
+      other.className = 'other';
+      row.appendChild(other);
+      box.appendChild(row);
+      inputs.push(pick);
+      // 書き始めたら選ばれている扱いにする。選び忘れで消えるのを防ぐ
+      other.addEventListener('input', () => {
+        if (other.value) pick.checked = true;
+      });
+    }
+
+    readers.push((values) => {
+      const picked = [];
+      for (const input of inputs) {
+        if (!input.checked) continue;
+        if (input.value === '' && other) picked.push(other.value);
+        else picked.push(input.value);
+      }
+      values[field.id] = picked;
+    });
+  }
+
+  function buildFreeInput(field, readers) {
+    const input = document.createElement('input');
+    // 伏せ字の指定は画面でも守る
+    input.type = field.secret ? 'password' : field.input === 'number' ? 'number' : 'text';
+    input.value = field.defaultValue || '';
+    readers.push((values) => {
+      values[field.id] = [input.value];
+    });
+    return input;
+  }
+
+  function renderPrompts(prompts) {
+    const box = el('prompts');
+    const list = prompts || [];
+    // 入力中の値を消さないため、顔ぶれが変わったときだけ作り直す
+    const key = list.map((p) => String(p.requestId)).join(',');
+    if (box.dataset.key === key) return;
+    box.dataset.key = key;
+    box.replaceChildren();
+    for (const prompt of list) box.appendChild(renderPrompt(prompt));
+  }
+
   function defaultLabel(value) {
     return value ? '既定: ' + value : '既定';
   }
@@ -329,6 +524,7 @@ export function chatScript(agentLabel: string): string {
     for (const approval of state.approvals) {
       approvals.appendChild(renderApproval(approval, state.items || []));
     }
+    renderPrompts(state.prompts);
     if (atBottom) log.scrollTop = log.scrollHeight;
 
     renderQueue(state.queued);

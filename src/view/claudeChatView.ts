@@ -15,6 +15,7 @@ import { CommandCatalog } from '../provider/commandCatalog';
 import type { SlashCommand } from '../provider/slashCommands';
 import { AttachmentBox } from '../provider/attachments';
 import { addAttachment, confirmCompact, renderShell, reportTurnResult } from './chatView';
+import { readPersistedThreadId } from './panelState';
 import { CLAUDE_EFFORTS, CLAUDE_PERMISSION_MODES } from '../claude/types';
 import type { ClaudeEditableKey, SettingsProvider } from './settingsProvider';
 import type { ChatActivity } from './chatView';
@@ -195,12 +196,49 @@ export class ClaudeChatViewManager implements vscode.Disposable {
     return content === undefined ? [] : transcriptItems(content.split('\n'));
   }
 
+  /**
+   * リロード後にVSCodeが復元したパネルを引き取る。
+   * webview側が `setState` で保持していたセッションidを使い、会話を読み直す。
+   */
+  async restorePanel(panel: vscode.WebviewPanel, state: unknown): Promise<void> {
+    const sessionId = readPersistedThreadId(state);
+    if (sessionId === undefined || this.panels.has(sessionId)) {
+      // どのセッションか判らないパネル、および二重に復元されたパネルは操作できない
+      panel.dispose();
+      return;
+    }
+
+    // 復元されたパネルはcwdを保持していない。transcriptの素性から取り戻す
+    const cwd = (await this.store.resolveCwd(sessionId)) ?? currentWorkspaceFolder()?.uri.fsPath;
+    if (cwd === undefined) {
+      void vscode.window.showErrorMessage('作業ディレクトリを特定できませんでした');
+      panel.dispose();
+      return;
+    }
+
+    const entry = this.adopt(panel, cwd);
+    this.panels.set(sessionId, entry);
+    entry.session.start({
+      cwd,
+      target: { kind: 'resume', sessionId },
+      sessionId: undefined,
+      config: readClaudeConfig().claude,
+      initialItems: await this.readTranscript(sessionId),
+    });
+  }
+
   private createPanel(title: string, cwd: string): ClaudePanel {
-    let wasBusy = false;
     const panel = vscode.window.createWebviewPanel(VIEW_TYPE, title, vscode.ViewColumn.Active, {
       enableScripts: true,
       retainContextWhenHidden: true,
     });
+    return this.adopt(panel, cwd);
+  }
+
+  private adopt(panel: vscode.WebviewPanel, cwd: string): ClaudePanel {
+    let wasBusy = false;
+    // 復元されたパネルはスクリプトの許可が落ちているため、ここで入れ直す
+    panel.webview.options = { enableScripts: true };
     panel.webview.html = renderShell(panel.webview, {
       agentLabel: LABEL,
       approvalModes: CLAUDE_PERMISSION_MODES,

@@ -12,20 +12,28 @@ CLIコーディングエージェント（Codex / Claude Code）のセッショ�
 - 過去セッションを一覧から選んでresumeし、同じくタブで開く
 - VSCode再起動後もタブ構成が復元される
 
-### Phase 1のスコープ
+### スコープ
 
-| 含む                                                          | 含まない                                      |
-| ------------------------------------------------------------- | --------------------------------------------- |
-| 新規セッション（1ボタン、設定既定値で即起動）                 | エディタ選択範囲のCodexへの送信               |
-| 新規セッション（Advanced: モデル/承認モード選択）             | セッションの実行中/待機中ステータス表示       |
-| 履歴TreeView（ワークスペース限定＋全件トグル）                | Webviewによる独自チャットUI                   |
-| resume / fork / archive / unarchive / delete                  | Codex Cloud連携                               |
-| タブ位置・並び順とセッションIDの記憶と再起動時の自動復元      | マルチルートワークスペースの高度な扱い（§11） |
-| thread_nameへのタブ名追従                                     |                                               |
-| Codex未インストール/未ログイン時のガイド                      | サインイン/サインアウトのUI                   |
-| 操作パネル（モデル/effort/承認方法/sandboxの切替）            | サインイン/サインアウトのUI                   |
-| Codex画面（app-server連携のチャットUI・承認・ターン指定fork） | CLIのTUIをそのまま埋め込む方式                |
-| 使用量の常時表示（ステータスバー＋操作パネル）                | 使用量の履歴やグラフ                          |
+| 含む                                                         | 含まない                                      |
+| ------------------------------------------------------------ | --------------------------------------------- |
+| 新規セッション（1ボタン、設定既定値で即起動）                | エディタ選択範囲のCLIへの送信                 |
+| 履歴TreeView（ワークスペース限定＋全件トグル）               | セッションの実行中/待機中ステータス表示       |
+| resume / fork / archive / unarchive / delete                 | Codex Cloud連携                               |
+| チャット画面のタブ復元（`registerWebviewPanelSerializer`）   | マルチルートワークスペースの高度な扱い（§11） |
+| thread_nameへのタブ名追従                                    | サインイン/サインアウトのUI                   |
+| CLI未インストール/未ログイン時のガイド                       | CLIのTUIをそのまま埋め込む方式                |
+| 操作パネル（モデル/effort/承認方法/sandboxの切替）           | 使用量の履歴やグラフ                          |
+| チャット画面（承認・中断・ターン指定fork・待ち行列・ループ） |                                               |
+| 使用量とコンテキスト残量の表示、手動での圧縮                 |                                               |
+| Plan mode・画像添付・ツールやMCPからの問い合わせ             |                                               |
+| 作業記録の日報・週報連携（§15）                              |                                               |
+
+当初のPhase 1スコープからの変更点は次の2つ。
+
+- **Webviewによる独自チャットUIは「含まない」から「含む」へ移った**。当初はCLIのTUIをそのままエディタタブに出す方式で、チャットUIは対象外だった。TUIタブ方式を廃止した経緯は §2 にある
+- **タブ復元の作り方が変わった**。当初はターミナルの位置と並び順を `workspaceState` へ持って開き直す設計（§5.5）で、現在はWebviewの復元機構に載せている（§9.5・§14.6）
+
+サインイン/サインアウトのUIは依然として含まない。MCP・プラグイン・hookの管理も同様で、これらはCLI側の管理コマンドに任せている。
 
 ## 2. 全体アーキテクチャ
 
@@ -160,14 +168,20 @@ test/
 
 ## 5. 主要フロー
 
+> **5.2・5.3・5.5・5.6 はTUIタブ方式（廃止済み、§2）の設計です。** 端末を作って `resume` を渡す前提で書かれており、
+> 現行はチャット画面（Codexは §9.5、Claude Codeは §14.4）に置き換わっている。
+> 対応する現行の記述は、新規セッションが §9.5・§14.4、タブ復元が §9.5「タブ復元」、
+> 終了とエラー処理が §9.5「接続」と §14.4。以下は当時の判断の記録として残す。
+> 5.1・5.4・5.7・5.8 は現行にも当てはまる（5.1 の `TabStateStore` を除く）。
+
 ### 5.1 アクティベーション
 
-`activationEvents` は `onStartupFinished` を指定する。タブ復元（§5.5）はサイドバーを開かなくても動く必要があるため、`onView:codexSessions` や `onCommand:*` だけでは不十分。
+`activationEvents` は `onStartupFinished` を指定する。タブ復元はサイドバーを開かなくても動く必要があるため、`onView:codexSessions` や `onCommand:*` だけでは不十分。
 
 起動コストを抑えるため、activate時に行うのは以下に限る。
 
 1. コマンドとTreeViewの登録（一覧の実データ構築はTreeViewが最初に展開されるまで遅延）
-2. `TabStateStore` の読み出しとタブ復元（`codex.restore.enabled` が真の場合のみ）
+2. チャット画面の復元役（`registerWebviewPanelSerializer`）の登録。TUIタブ方式では代わりに `TabStateStore` を読んでタブを開き直していた
 3. `sessionWatcher` の登録
 
 セッション一覧の構築は `updated_at` 降順で上位N件（`codex.history.maxEntries`、既定200）に限定し、`session_meta` の解決もその範囲に留める。
@@ -385,10 +399,12 @@ Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡
 | `codex.model`              | string   | `""`        | machine-overridable | 空なら `-m` を渡さずconfig.tomlに委譲                                                      |
 | `codex.reasoningEffort`    | string   | `""`        | machine-overridable | `model_reasoning_effort`。専用フラグが無いため `-c model_reasoning_effort=<値>` として渡す |
 | `codex.profile`            | string   | `""`        | machine-overridable | `-p`                                                                                       |
-| `codex.restore.enabled`    | boolean  | `true`      | window              | 再起動時の自動resume                                                                       |
-| `codex.restore.maxTabs`    | number   | `8`         | window              | 復元上限                                                                                   |
 | `codex.history.scope`      | enum     | `workspace` | window              | `workspace` / `all`                                                                        |
 | `codex.history.maxEntries` | number   | `200`       | window              | 一覧構築の上限件数                                                                         |
+
+Claude Code側（`claude.*`）と作業記録（`agent.activityLog.*`）の設定は §14・§15 で扱う。実際に登録している一覧は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている。
+
+> TUIタブ方式では復元の可否と上限を `codex.restore.enabled` / `codex.restore.maxTabs` で持っていた（§5.5）。Webviewの復元機構に移した際に、どちらもVSCode側の設定に委ねられるため削除した。
 
 - **空文字＝フラグを渡さない**を徹底し、Codex側 `config.toml` との二重管理を避ける。
 - `danger-full-access` と `never` の組み合わせを選んだ場合のみ、初回に確認ダイアログを出す。
@@ -495,6 +511,17 @@ Codexが会話内容から名前を付けると `thread/name/updated` が届く�
 
 `registerWebviewPanelSerializer` で復元する。webview側が `setState` で `threadId` を保持しており、復元時にそれを使って `thread/resume` する。TUIタブの復元（§5.5）とは別経路になる。
 
+Claude Code画面（`claude.chat`）も同じ仕組みで復元する。webview側のスクリプトは共通なので保持している形（`{ threadId }`）も同じで、読み取りは `view/panelState.ts` に共通化している。ただし復元後の扱いはプロバイダで異なる。
+
+|                 | Codex                                        | Claude Code                                                                                     |
+| --------------- | -------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| 会話の読み直し  | `thread/resume`（サーバが過去のitemsを返す） | transcriptを読んで初期表示にする（§14.4。`--resume` は過去のやり取りを流さない）                |
+| cwdの取り戻し方 | ワークスペース直下を充てる                   | transcriptの素性から引く（`ClaudeSessionStore.resolveCwd`）。読めないときだけワークスペース直下 |
+
+cwdの解決に差があるのは、Claude Codeの `--resume` がcwdを引数として要求するため。Codexは `thread/resume` がサーバ側の記録を使うので、こちらから正しいcwdを渡さなくても会話自体は戻る。
+
+復元できないパネル（`setState` にidが無い、同じidのタブが既に開いている、Claude Code側でcwdを特定できない）は残さず閉じる。操作できないタブを画面に残さないため。
+
 ### 9.6 中断したターンの扱い
 
 `turn/interrupt` で止めたターンは `status: "interrupted"` として残るが、**itemsには自分の発言しか保存されない**（実機で確認）。途中まで流れていた応答はCodex側に永続化されないため、`thread/resume` でも戻らない。
@@ -545,12 +572,44 @@ Codexが会話内容から名前を付けると `thread/name/updated` が届く�
 - 確定しても送信はしない。引数を書き足せるように `/name ` を入力欄へ入れるところで止める
 - 候補が出ている間は `↑` `↓` が候補の移動になる（入力履歴の操作より優先）
 
+### 9.9 ユーザーへの問い合わせ（requestUserInput / elicitation）
+
+app-serverからは「聞いてくる」要求が2種類届く。どちらも**応答を返すまでapp-serverは待ち続ける**。
+
+| 要求                            | 誰が聞いているか | 応答                                                      |
+| ------------------------------- | ---------------- | --------------------------------------------------------- |
+| `item/tool/requestUserInput`    | ツール           | `{ answers: { <questionId>: { answers: string[] } } }`    |
+| `mcpServer/elicitation/request` | MCPサーバ        | `{ action: 'accept' \| 'decline' \| 'cancel', content? }` |
+
+以前は形だけ揃えた既定の応答（空の回答 / `decline`）を返していた。形が合うのでツールは止まらないが、**ユーザーは聞かれたことすら分からず、要求は必ず空振りしていた**。
+
+#### 同じ形へ正規化する
+
+どちらも「ラベルと説明が付いた入力欄の並び」に落とせるので、`PendingPrompt` へ正規化して描画を1つにまとめる（`prompts.ts`）。応答の組み立てだけ要求ごとに戻す。
+
+- `requestUserInput`: `questions[]` の各要素が入力欄1つ。`options` があれば選択肢、無ければ自由入力。`isOther` で「その他」を足す。`isSecret` は伏せ字にし、**ログにも出さない**
+- `elicitation`: `requestedSchema` の `properties` から入力欄を組む。string / number / boolean / enum（単一・複数）に対応する
+
+#### 判断したこと
+
+- **未知のスキーマ型はテキストとして扱う**。画面が壊れて拒否すらできなくなるほうが困る
+- **スキーマが読めないときは入力欄を作らない**。作った入力欄で嘘の値を送らない。結果として拒否だけができる状態になる
+- **未入力の項目は `content` に入れない**。空文字を入れるとサーバ側で「答えた」ことになる
+- `requestUserInput` では**答えていない質問もidを揃えて返す**。idを落とすと相手が読めない
+- **どのMCPサーバからの要求かを必ず出す**。外部のプログラムからの要求なので、信用の判断材料を隠さない
+- **`url` モードのelicitationは行き先を全部見せるだけ**にする。押すだけで外部へ飛ぶ導線は作らない。MCPサーバが渡してくるURLをそのまま開かせると、行き先を確かめる機会が無くなる
+- `turnId` がnullの要求（ターン外）も表示する。宛先は `threadId` で決める
+- 画面を閉じたときは `cancel` で解放する。放置するとapp-serverが待ち続ける
+- カードは**顔ぶれが変わったときだけ作り直す**。状態の再描画のたびに作り直すと入力中の値が消える
+
 ## 10. 既知の制約
 
 - **app-serverはexperimental**: チャット画面が依存するプロトコルは `[experimental]` 表記であり、将来変更されうる。未知の通知とitem種別を素通しする設計で、変更時に機能が落ちても壊れないようにしている。
-- **マルチルートワークスペース**: Phase 1は「アクティブエディタが属するフォルダ、なければ先頭フォルダ」を1つ選ぶだけ。フォルダ別のセッション分離はPhase 2。
+- **マルチルートワークスペース**: 「アクティブエディタが属するフォルダ、なければ先頭フォルダ」を1つ選ぶだけ。フォルダ別のセッション分離はしていない。
 - **復元は会話履歴ベース**: 中断したターンの応答は戻らない（§9.6）。
+- **復元したCodex画面のcwd**: 復元されたパネルはcwdを持たないため、Codex側はワークスペース直下を充てる。Claude Code側はtranscriptの素性から引く（§9.5「タブ復元」）。
 - **プロセスは各タブ独立**: 同一ウィンドウ内での同一セッションの二重オープンは防ぐが、ウィンドウを跨いだ排他は行わない（V7）。
+- **effortの反映は観測できない**: Claude Codeにはeffort専用の制御要求が無く、唯一の経路（`apply_flag_settings`）が結果を返さない（§14.7）。
 - **Codex側の外部変更**: CLIから直接archive/deleteした場合、TreeViewはファイル監視で追従するが、開いているタブは残る。
 
 ## 11. 技術スタック
@@ -558,12 +617,16 @@ Codexが会話内容から名前を付けると `thread/name/updated` が届く�
 - TypeScript / Node 20 / esbuild（バンドル）
 - eslint + prettier、`tsc --noEmit` で型チェック
 - テスト
-  - unit: `argvBuilder` / `sessionIndex` / `sessionMeta` / `sessionStore`のフィルタ / `tabStateStore`のシリアライズ / **`sessionBinder`（§9.1の異常系）**
-  - integration: `@vscode/test-electron` でコマンド登録・TreeView・タブ復元
+  - unit（vitest）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で43ファイル762件
+  - **VSCodeに依存する層はユニットテストで扱わない**。`vscode` モジュールを触るファイル（`view/**` など）はテストから import できないため、判断が要るロジックは純粋関数へ切り出してそちらを試す（例: `view/panelState.ts`）
+  - 実VSCodeでしか確認できない範囲は自動化せず、[manual-test.md](manual-test.md) のチェックリストと実施記録で担保する
 - `scripts/check.sh` に lint / typecheck / test を集約し、commit前に全緑を必須とする
 - パッケージング: `@vscode/vsce`
 
 ## 12. 実装順序（TDD）
+
+> **この節はTUIタブ方式（廃止済み、§2）当時の順序です。** 6・8・9 は端末を作る前提の手順で、現行には無い
+> （`src/terminal` と `tabStateStore` は削除済み）。チャット画面から先の実装順序は §16.14 と各節にある。
 
 0. ~~CLIスパイク（V3・V6・V8）~~ **完了**。結果は §4・§5.2・§6・§9 に反映済み。
 1. **VSCodeスパイク（V1・V2・V7・V9）**（使い捨て。結果を本設計書に反映してから先へ進む）
@@ -579,6 +642,10 @@ Codexが会話内容から名前を付けると `thread/name/updated` が届く�
 11. README・設定ドキュメント整備、vsceパッケージング確認
 
 ## 13. Phase 1の完了条件
+
+> **この節もTUIタブ方式（廃止済み、§2）当時の条件です。** 「エディタタブにCodex TUIが起動する」など、
+> 現行の作りとは合わない項目を含む。現在の到達点はREADMEの「開発状況」、
+> TUIとの機能差の消化状況は [tui-parity-backlog.md](tui-parity-backlog.md) を参照。
 
 - 新規セッションボタン1回でエディタタブにCodex TUIが起動する
 - Codexを終了するとタブが閉じ、異常終了時はエラー通知が出る
@@ -1314,11 +1381,11 @@ Codexは送信のたびに `readConfig().codex`（VSCodeのグローバル設定
 
 **7. 汎用のパネル復元をタスク管理下のセッションでは使わない**
 
-`registerWebviewPanelSerializer` の `restorePanel` はcwdを保持しておらず、常にワークスペース直下を充てて `thread/resume` する。リロード時にこれが先に走ると、worktreeで動いていたタスクのセッションがワークスペース直下のcwdで `panels` に登録され、後からオーケストレータが正しいcwdで開き直そうとしても `openThread` が既存エントリを `reveal()` して終わる。
+`registerWebviewPanelSerializer` の `restorePanel` はcwdを保持していない。Codex側は常にワークスペース直下を充てて `thread/resume` する。リロード時にこれが先に走ると、worktreeで動いていたタスクのセッションがワークスペース直下のcwdで `panels` に登録され、後からオーケストレータが正しいcwdで開き直そうとしても `openThread` が既存エントリを `reveal()` して終わる。
 
 タスク管理下のスレッドは汎用復元の対象から外し、オーケストレータが `workspaceState` の記録から明示的に扱う（§16.11）。
 
-> なお `claude.chat` には `registerWebviewPanelSerializer` が登録されておらず、Claude Code側のタブはリロードで復元されない（§14.6 の表とは食い違っている既存の不整合）。§16.11 はこれを前提に組む。
+> Claude Code側（`claude.chat`）も同じ経路で復元する（§9.5）。cwdはtranscriptの素性から引くため worktree でも取り違えないが、`panels` へ先に登録される点はCodexと同じなので、タスク管理下のスレッドを外す扱いは両方に要る。
 
 ### 16.11 永続化と復元
 
