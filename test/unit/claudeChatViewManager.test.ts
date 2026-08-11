@@ -4,7 +4,9 @@ import { ClaudeStreamSession, type ClaudeStreamOptions } from '../../src/claude/
 import type { Logger } from '../../src/log';
 import type { FileSystemPort } from '../../src/session/ports';
 import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMentions';
+import { MESSAGING_MCP_SERVER_NAME } from '../../src/orchestrator/messaging';
 import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
+import type { McpServerView } from '../../src/provider/mcpServers';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import { ClaudeChatViewManager } from '../../src/view/claudeChatView';
 import { __mock, ViewColumn, window as fakeWindow } from '../mocks/vscode';
@@ -98,6 +100,33 @@ function stubStart(): ClaudeStreamOptions[] {
   });
   return calls;
 }
+
+/**
+ * `stubStart`と同じく実プロセスは起動しないが、`this`（実際の`ClaudeStreamSession`
+ * インスタンス）も併せて記録する。`receive()`を直接呼んでターンの完了を模すのに使う
+ * （design.md §16.21のpauseLoop/resumeLoopの検証用）。
+ */
+function stubStartCapturing(): { calls: ClaudeStreamOptions[]; sessions: ClaudeStreamSession[] } {
+  const calls: ClaudeStreamOptions[] = [];
+  const sessions: ClaudeStreamSession[] = [];
+  vi.spyOn(ClaudeStreamSession.prototype, 'start').mockImplementation(function (
+    this: ClaudeStreamSession,
+    options: ClaudeStreamOptions,
+  ) {
+    calls.push(options);
+    sessions.push(this);
+  });
+  return { calls, sessions };
+}
+
+/** `checkMcpStatus`（design.md §16.21「ツールの可視性の確認」）を差し替える。 */
+function stubMcpStatus(servers: McpServerView[] | undefined): void {
+  vi.spyOn(ClaudeStreamSession.prototype, 'checkMcpStatus').mockResolvedValue(servers);
+}
+
+const initLine = (sessionId: string): string =>
+  `${JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId })}\n`;
+const resultLine = (): string => `${JSON.stringify({ type: 'result' })}\n`;
 
 describe('ClaudeChatViewManager', () => {
   beforeEach(() => {
@@ -229,6 +258,130 @@ describe('ClaudeChatViewManager', () => {
 
       expect(calls).toHaveLength(1);
       expect(__mock.createdPanels.length).toBe(panelCountBefore);
+    });
+  });
+
+  describe('タスク間メッセージングのMCP設定・可視性確認（design.md §16.21、Issue #123）', () => {
+    it('input.mcpを渡すと--mcp-configがadditionalArgsへ追加される（実測: type=http）', async () => {
+      const calls = stubStart();
+      const { manager } = createManager();
+
+      await manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+        mcp: { url: 'http://127.0.0.1:12345/mcp/abc' },
+      });
+
+      const call = calls[calls.length - 1];
+      expect(call?.config.additionalArgs).toEqual([
+        '--mcp-config',
+        JSON.stringify({
+          mcpServers: {
+            [MESSAGING_MCP_SERVER_NAME]: { type: 'http', url: 'http://127.0.0.1:12345/mcp/abc' },
+          },
+        }),
+      ]);
+    });
+
+    it('input.mcpを渡さなければadditionalArgsは空のまま（後方互換）', async () => {
+      const calls = stubStart();
+      const { manager } = createManager();
+
+      await manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+
+      expect(calls[calls.length - 1]?.config.additionalArgs).toEqual([]);
+    });
+
+    it('mcp_statusでサーバがconnectedならcheckMessagingToolVisible()はtrueを返す', async () => {
+      stubStart();
+      stubMcpStatus([
+        { name: MESSAGING_MCP_SERVER_NAME, state: 'connected', toolCount: 2, version: '1', reason: undefined },
+      ]);
+      const { manager } = createManager();
+
+      const task = await manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+        mcp: { url: 'http://127.0.0.1:12345/mcp/abc' },
+      });
+
+      await expect(task.checkMessagingToolVisible()).resolves.toBe(true);
+    });
+
+    it('mcp_statusにサーバが現れない、またはconnectedでなければfalseを返す（runは止めない）', async () => {
+      stubStart();
+      stubMcpStatus(undefined);
+      const { manager } = createManager();
+
+      const task = await manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+        mcp: { url: 'http://127.0.0.1:12345/mcp/abc' },
+      });
+
+      await expect(task.checkMessagingToolVisible()).resolves.toBe(false);
+    });
+
+    it('input.mcpを渡していなければ確認そのものを行わず常にtrueを返す', async () => {
+      stubStart();
+      const { manager } = createManager();
+
+      const task = await manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+
+      await expect(task.checkMessagingToolVisible()).resolves.toBe(true);
+    });
+  });
+
+  describe('pauseLoop/resumeLoop（design.md §16.21、Issue #123）', () => {
+    it('pauseLoop()するとターンが終わっても継続指示を送らず、resumeLoop()で直ちに送る', async () => {
+      const { sessions } = stubStartCapturing();
+      const sendCalls: string[] = [];
+      vi.spyOn(ClaudeStreamSession.prototype, 'sendOrQueue').mockImplementation((text: string) => {
+        sendCalls.push(text);
+        return 'sent';
+      });
+      const { manager } = createManager();
+
+      const task = await manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      const session = sessions[sessions.length - 1];
+      if (session === undefined) {
+        throw new Error('セッションが記録されていません');
+      }
+
+      task.runLoop({
+        initialPrompt: '第1ターン',
+        continuePrompt: '続けて',
+        maxIterations: 5,
+        condition: '',
+      });
+      // 初回指示（runLoop）とターン完了後の継続指示（1回）
+      session.receive(initLine('s1'));
+      session.receive(resultLine());
+      expect(sendCalls).toEqual(['第1ターン', '続けて']);
+
+      task.pauseLoop();
+      session.receive(initLine('s1'));
+      session.receive(resultLine());
+      // 一時停止中はターンが終わっても継続指示を送らない
+      expect(sendCalls).toEqual(['第1ターン', '続けて']);
+
+      task.resumeLoop();
+      expect(sendCalls).toEqual(['第1ターン', '続けて', '続けて']);
     });
   });
 });

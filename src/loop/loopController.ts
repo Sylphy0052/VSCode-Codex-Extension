@@ -129,6 +129,16 @@ export class LoopController {
   private status: LoopStatus = idleLoopStatus;
   /** 送った指示のターンが始まったのを見たか。始まる前の busy=false と区別する。 */
   private sawBusy = false;
+  /**
+   * `pause()` で一時停止中か（design.md §16.21「waitingReplyへの遷移」）。
+   *
+   * `true` の間、`observe()` はターンの完了を検知しても `continuePrompt` を送らない
+   * （回数上限・終了条件の判定そのものへも進ませない。`resume()` が呼ばれるまで
+   * ループは実際に止まったまま待つ。`running` 自体は `true` のまま保つ
+   * （`stop()` は呼ばない）。タスクのセッションは生きているため、design.mdの
+   * 「waitingReplyも並列の枠を占める」という状態と整合する。
+   */
+  private paused = false;
 
   constructor(
     private readonly send: (text: string) => void | Promise<void>,
@@ -141,6 +151,35 @@ export class LoopController {
 
   get running(): boolean {
     return this.status.running;
+  }
+
+  /**
+   * ループを一時停止する（design.md §16.21「自分のターンを終えたあと、返信が届くまで
+   * 次の指示を受け取らない」）。
+   *
+   * 走っていなければ何もしない。進行中のターンには割り込まない（`interrupt()`とは別物）。
+   * そのターンが完了した時点で `observe()` が `continuePrompt` を送らずに止める。
+   */
+  pause(): void {
+    if (!this.status.running) {
+      return;
+    }
+    this.paused = true;
+  }
+
+  /**
+   * `pause()` で止めたループを再開し、直ちに次の `continuePrompt` を送る
+   * （design.md §16.21「返信が届いたら running へ戻し、返信の本文を添えて次の指示を送る」。
+   * 本文を添える処理自体は `TaskSession.setPromptTransform` 側で行う）。
+   *
+   * 走っていない、または一時停止中でなければ何もしない。
+   */
+  resume(): void {
+    if (!this.status.running || !this.paused || this.plan === undefined) {
+      return;
+    }
+    this.paused = false;
+    this.dispatch(this.plan.continuePrompt);
   }
 
   /** ループを開始し、1回目の指示を送る。 */
@@ -162,6 +201,7 @@ export class LoopController {
     }
     this.plan = undefined;
     this.sawBusy = false;
+    this.paused = false;
     this.status = { ...this.status, running: false, stopReason: reason };
     this.onStatus(this.status);
   }
@@ -199,7 +239,14 @@ export class LoopController {
     this.sawBusy = false;
 
     if (state.turnFailed) {
+      // 一時停止中でも、ターン自体が失敗していれば止める。「返信待ちのまま実は
+      // 失敗していた」を黙って握り潰さない（安全側の判断。最終報告に記載）
       this.stop('failed');
+      return;
+    }
+    if (this.paused) {
+      // waitingReply（design.md §16.21）。resume()が呼ばれるまでここで待つ。
+      // 回数上限・終了条件の判定はresume後の次回observe()で改めて行う
       return;
     }
     if (plan.condition !== '' && declaresDone(state)) {

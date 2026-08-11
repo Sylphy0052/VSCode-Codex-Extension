@@ -76,11 +76,12 @@ export interface TaskSessionInput {
    * 発行されていない）通信なしで走らせる（design.md「見えていなければ...通信なしで
    * 走らせる」と同じ扱い）。
    *
-   * **この値を実際にCodex/Claudeの起動設定（`mcp_servers`相当）へ反映する配線は
-   * まだ無い。** `TaskSessionHost`の具象実装（`ChatViewManager` / `ClaudeChatViewManager`。
-   * `src/view/chatView.ts` / `claudeChatView.ts`）を変更する必要があるが、Issue #105は
-   * `src/view/`を対象外にしている（Issue #104と衝突するため）。値はここまで届くが、
-   * 現時点ではどちらの実装も読まない（最終報告に記載）。
+   * `TaskSessionHost`の具象実装（`ChatViewManager` / `ClaudeChatViewManager`。
+   * `src/view/chatView.ts` / `claudeChatView.ts`）がこの値を実際のCLI起動設定へ反映する
+   * （Issue #123）。CodexとClaude Codeで渡し方が異なる（実測。最終報告に記載）:
+   * Codexは`thread/start`の`config.mcp_servers.<name>`（スレッド限定・`config.toml`には
+   * 永続化されない）、Claude Codeは`claude`起動時の`--mcp-config`引数（JSON）。
+   * どちらもサーバ名には`messaging.ts`の`MESSAGING_MCP_SERVER_NAME`を使う。
    */
   mcp?: { url: string };
 }
@@ -127,6 +128,35 @@ export interface TaskSession {
    * その経路は使えない。`session.interrupt()` だけを呼ぶ別の口として持つ。
    */
   interrupt(): Promise<void>;
+  /**
+   * `LoopController`を一時停止する（design.md §16.21「waitingReplyへの遷移」）。
+   * `runLoop` / `interrupt` と並ぶ新しい口。既存の呼び出しはこれを一度も呼ばなければ
+   * 従来どおり動く。
+   *
+   * 進行中のターンには割り込まない。**そのターンが完了した時点で** `continuePrompt` を
+   * 送らずに止める（design.md「自分のターンを終えたあと...次の指示を受け取らない」）。
+   * ループが走っていなければ何もしない。
+   */
+  pauseLoop(): void;
+  /**
+   * `pauseLoop`で止めたループを再開し、直ちに次の`continuePrompt`を送る
+   * （design.md「返信が届いたらrunningへ戻し、返信の本文を添えて次の指示を送る」。
+   * 本文を添える処理自体は`setPromptTransform`で差し込んだ変換が担う）。
+   *
+   * 一時停止中でなければ何もしない。
+   */
+  resumeLoop(): void;
+  /**
+   * MCPツール（タスク間メッセージング。design.md §16.21）が実際にエージェントから
+   * 見えているかを確かめる。`openTaskSession`の`input.mcp`が`undefined`だった場合
+   * （メッセージングが無効、またはこのタスクには発行されていない）は確認自体が
+   * 不要なため常に`true`を返す。
+   *
+   * Codexは`mcpServer/startupStatus/updated`通知が`thread/start`の後にしか届かない
+   * （design.md §16.21、実測）ため、この確認は`openTaskSession`が解決した後に呼ぶこと。
+   * 見えないと判った場合、呼び出し側（runner.ts）は警告を出すだけでrunは止めない。
+   */
+  checkMessagingToolVisible(): Promise<boolean>;
   /**
    * ワークフローViewの「タスク停止」操作（design.md §16.8）専用。ループそのものを止める。
    *

@@ -28,6 +28,7 @@ import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
 import { APPROVAL_MODES, SANDBOX_MODES, type CodexConfig } from '../codex/types';
 import type { PromptSubmission } from '../appserver/prompts';
+import { MESSAGING_MCP_SERVER_NAME } from '../orchestrator/messaging';
 import type {
   ApprovalHandler,
   ApprovalOutcome,
@@ -61,6 +62,13 @@ import { readPersistedThreadId } from './panelState';
 import { isEditableKey, type SettingsProvider } from './settingsProvider';
 
 const VIEW_TYPE = 'codex.chat';
+
+/**
+ * MCPツールの可視性確認（design.md §16.21）で `mcpServer/startupStatus/updated` 通知を
+ * 待つ上限。ローカルの拡張機能自身が立てたサーバへの接続なので通常は一瞬で決着するが、
+ * 通知そのものが届かない場合に確認を無期限で止めないための保険。
+ */
+const MCP_STARTUP_CHECK_TIMEOUT_MS = 8_000;
 
 interface ChatPanel {
   /**
@@ -117,6 +125,13 @@ interface ChatPanel {
   finishedListeners: Array<(reason: LoopStopReason, state: ChatState) => void>;
   /** `TaskSession.onApprovalResolved` のリスナー。 */
   approvalResolvedListeners: Array<(outcome: ApprovalOutcome) => void>;
+  /**
+   * `mcpServer/startupStatus/updated`通知（design.md §16.21）を待つリスナー。
+   * `checkMessagingToolVisible`がツールの可視性を確かめるために使う。この通知は
+   * `thread/start`の後にしか届かないため、会話には無関係な内部状態としてここへ集める
+   * （`ChatSession.applyNotification`へは転送しない。`routeNotification`参照）。
+   */
+  mcpStartupListeners: Array<(name: string, status: string) => void>;
 }
 
 /** 拡張機能から実行したセッションを日報バッファへ記録するための通知。 */
@@ -418,11 +433,18 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     const taskConfig = toCodexConfig(input);
     const entry = this.buildEntry(input.cwd, 'Codex', true, taskConfig);
     const pendingKey = this.pendingStarts.begin(entry);
+    // タスク間メッセージング（design.md §16.21）。`input.mcp`が渡されていれば、
+    // このスレッドだけに見せるMCPサーバとして`thread/start`のconfigへ差し込む
+    // （`ChatSession.start`はmcp_servers自体の意味を知らない。同メソッドのJSDoc参照）
+    const mcpServersConfig =
+      input.mcp !== undefined
+        ? { [MESSAGING_MCP_SERVER_NAME]: { url: input.mcp.url, type: 'streamable_http' } }
+        : undefined;
     try {
-      const threadId = await entry.session.start(input.cwd, taskConfig);
+      const threadId = await entry.session.start(input.cwd, taskConfig, mcpServersConfig);
       this.pendingStarts.end(pendingKey);
       this.panels.set(threadId, entry);
-      return this.buildTaskSession(entry, threadId);
+      return this.buildTaskSession(entry, threadId, input.mcp !== undefined);
     } catch (e) {
       this.pendingStarts.end(pendingKey);
       this.teardown(entry);
@@ -518,6 +540,7 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       stateListeners: [],
       finishedListeners: [],
       approvalResolvedListeners: [],
+      mcpStartupListeners: [],
     };
     return entry;
   }
@@ -591,8 +614,14 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     }
   }
 
-  /** `TaskSessionHost` が返す口の実体。 */
-  private buildTaskSession(entry: ChatPanel, threadId: string): TaskSession {
+  /**
+   * `TaskSessionHost` が返す口の実体。
+   *
+   * `mcpRequested` は `openTaskSession` の `input.mcp !== undefined` をそのまま渡す。
+   * `false` なら `checkMessagingToolVisible` は確認そのものを行わず常に `true` を返す
+   * （`TaskSession.checkMessagingToolVisible` のJSDoc参照）。
+   */
+  private buildTaskSession(entry: ChatPanel, threadId: string, mcpRequested = false): TaskSession {
     return {
       sessionId: threadId,
       runLoop: (plan: LoopPlan) => entry.loop.start(plan),
@@ -606,12 +635,59 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       },
       onApprovalResolved: (listener) => entry.approvalResolvedListeners.push(listener),
       interrupt: () => entry.session.interrupt(),
+      pauseLoop: () => entry.loop.pause(),
+      resumeLoop: () => entry.loop.resume(),
+      checkMessagingToolVisible: () =>
+        mcpRequested ? this.checkMcpStartupStatus(entry) : Promise.resolve(true),
       stopLoop: () => entry.loop.stop('taskStopped'),
       decideApproval: (requestId, decision) => this.resolveApproval(entry, requestId, decision),
       reveal: () => this.showPanel(entry, false),
       open: (options) => this.showPanel(entry, options.preserveFocus),
       dispose: () => this.teardown(entry),
     };
+  }
+
+  /**
+   * MCPツールの可視性確認（design.md §16.21・`TaskSession.checkMessagingToolVisible`）。
+   *
+   * `mcpServer/startupStatus/updated`通知（`status: 'ready' | 'failed' | 'starting'`。
+   * 実測、CLI 0.147.0）を待つ。`thread/start`の後にしか届かないため、この関数は
+   * `openTaskSession`が解決した後に呼ぶ前提（呼び出し側 `buildTaskSession` 参照）。
+   * 一定時間内に確定した状態が届かなければ「見えない」側へ倒す
+   * （design.md「見えていなければ...通信なしで走らせる」。timeoutを待たせて起動を
+   * 遅らせないよう、この確認自体はrunner.ts側で`await`せず投げっぱなしにする想定）。
+   */
+  private checkMcpStartupStatus(entry: ChatPanel): Promise<boolean> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (visible: boolean): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        const index = entry.mcpStartupListeners.indexOf(listener);
+        if (index >= 0) {
+          entry.mcpStartupListeners.splice(index, 1);
+        }
+        resolve(visible);
+      };
+      const listener = (name: string, status: string): void => {
+        if (name !== MESSAGING_MCP_SERVER_NAME) {
+          return;
+        }
+        if (status === 'ready') {
+          finish(true);
+        } else if (status === 'failed') {
+          finish(false);
+        }
+        // 'starting' はまだ確定していないので待ち続ける
+      };
+      entry.mcpStartupListeners.push(listener);
+      const timer = setTimeout(() => finish(false), MCP_STARTUP_CHECK_TIMEOUT_MS);
+      // このタイマーだけでNode/拡張機能ホストのプロセス終了を止めない
+      timer.unref?.();
+    });
   }
 
   /**
@@ -1104,6 +1180,16 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     }
 
     const target = this.findByThreadId(params['threadId']);
+    if (method === 'mcpServer/startupStatus/updated') {
+      // MCPツールの可視性確認（design.md §16.21）専用の内部状態。会話には無関係なため
+      // ChatSession.applyNotificationへは転送しない（`mcpStartupListeners`のJSDoc参照）
+      const name = typeof params['name'] === 'string' ? params['name'] : '';
+      const status = typeof params['status'] === 'string' ? params['status'] : '';
+      for (const listener of target?.mcpStartupListeners ?? []) {
+        listener(name, status);
+      }
+      return;
+    }
     target?.session.applyNotification(method, params);
   }
 

@@ -91,6 +91,31 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
       'out',
     ]);
   });
+
+  it('replyTimeoutSecの既定は300秒（design.md §16.21・DEFAULT_REPLY_TIMEOUT_SEC）', () => {
+    expect(readWorkflowsConfig().replyTimeoutSec).toBe(300);
+  });
+
+  it('replyTimeoutSecは指定値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.replyTimeoutSec': 60 });
+    expect(readWorkflowsConfig().replyTimeoutSec).toBe(60);
+  });
+
+  it('replyTimeoutSecが数値でない・1未満なら既定値へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.replyTimeoutSec': 'たくさん' });
+    expect(readWorkflowsConfig().replyTimeoutSec).toBe(300);
+
+    __mock.setConfig('agent', { 'workflows.replyTimeoutSec': 0 });
+    expect(readWorkflowsConfig().replyTimeoutSec).toBe(300);
+
+    __mock.setConfig('agent', { 'workflows.replyTimeoutSec': -5 });
+    expect(readWorkflowsConfig().replyTimeoutSec).toBe(300);
+  });
+
+  it('replyTimeoutSecの小数は切り捨てる', () => {
+    __mock.setConfig('agent', { 'workflows.replyTimeoutSec': 60.7 });
+    expect(readWorkflowsConfig().replyTimeoutSec).toBe(60);
+  });
 });
 
 describe('readClaudeConfig', () => {

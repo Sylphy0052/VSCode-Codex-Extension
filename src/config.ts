@@ -10,6 +10,7 @@ import {
   type ForgeHostConfig,
   type PullRequestLayerConfig,
 } from './orchestrator/forge';
+import { DEFAULT_REPLY_TIMEOUT_SEC } from './orchestrator/messaging';
 import { DEFAULT_PSEUDO_WORKTREE_EXCLUDE } from './orchestrator/pseudoWorktree';
 import type { HistoryScope } from './session/sessionStore';
 
@@ -142,6 +143,12 @@ export interface WorkflowsConfig {
    * 無人で書き換えるかどうかを決めるため、`.vscode/settings.json`からは変えられない。
    */
   finalMerge: FinalMergeConfig;
+  /**
+   * タスク間メッセージング（design.md §16.21）の返信待ちの上限秒数
+   * （`agent.workflows.replyTimeoutSec`、既定300秒、`machine-overridable`）。権限には
+   * 関わらないため`forge`/`finalMerge`ほど強い制限は要らない。
+   */
+  replyTimeoutSec: number;
 }
 
 const DEFAULT_WORKFLOWS_DIR = '.agents/workflows';
@@ -197,7 +204,21 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     forge: normalizeForgeHostConfig(str(c, 'workflows.forge', 'auto')),
     pullRequest: normalizePullRequestLayerConfig(str(c, 'workflows.pullRequest', 'per-task')),
     finalMerge: normalizeFinalMergeConfig(str(c, 'workflows.finalMerge', 'auto')),
+    replyTimeoutSec: normalizeReplyTimeoutSec(c.get<unknown>('workflows.replyTimeoutSec')),
   };
+}
+
+/**
+ * `agent.workflows.replyTimeoutSec` の生値を安全な秒数へ丸める。`package.json`の
+ * `minimum: 1` を実行時にも守る（設定ファイルを直接書き換えた場合など、VSCode側の
+ * バリデーションを経由しない値が渡りうるため）。数値でない、または1未満なら既定値
+ * （`DEFAULT_REPLY_TIMEOUT_SEC`）へ丸める（`isSafeRelativeDir`と同じ「壊れた設定値は
+ * 既定へ丸める」方針）。
+ */
+function normalizeReplyTimeoutSec(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1
+    ? Math.floor(value)
+    : DEFAULT_REPLY_TIMEOUT_SEC;
 }
 
 /** アクティブエディタが属するワークスペースフォルダ。無ければ先頭（設計書 §10）。 */

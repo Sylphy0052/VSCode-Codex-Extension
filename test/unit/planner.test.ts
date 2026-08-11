@@ -116,6 +116,11 @@ class FakePlannerSession implements TaskSession {
   }
   onApprovalResolved(): void {}
   async interrupt(): Promise<void> {}
+  pauseLoop(): void {}
+  resumeLoop(): void {}
+  async checkMessagingToolVisible(): Promise<boolean> {
+    return true;
+  }
   stopLoop(): void {}
   decideApproval(): void {}
   reveal(): void {}
