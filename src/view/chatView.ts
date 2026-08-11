@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import {
   buildApprovalResponse,
@@ -43,6 +44,7 @@ import { buildImageReply } from '../provider/imageRefs';
 import { CommandCatalog } from '../provider/commandCatalog';
 import { FileMentionCatalog, filterFiles } from '../provider/fileMentions';
 import {
+  buildInitInstructionText,
   CODEX_PSEUDO_COMMANDS,
   routePseudoCommand,
   trimmedArgsOrUndefined,
@@ -186,6 +188,20 @@ export async function confirmCompact(): Promise<boolean> {
     '圧縮する',
   );
   return choice === '圧縮する';
+}
+
+/**
+ * AGENTS.mdの生成（`/init` 擬似コマンド、issue #26）で、既存ファイルを上書きしてよいか
+ * 確かめる。ファイルが無いときは呼ばない。`confirmCompact` と同じく必ず確認を挟む
+ * （生成そのものはCLI・モデルに任せるが、上書きの可否は拡張機能側で必ず止める）。
+ */
+export async function confirmGenerateAgentsFile(): Promise<boolean> {
+  const choice = await vscode.window.showWarningMessage(
+    'AGENTS.mdは既にあります。内容を踏まえて更新します（上書き）。',
+    { modal: true },
+    '更新する',
+  );
+  return choice === '更新する';
 }
 
 /**
@@ -1046,6 +1062,10 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       await entry.session.compact();
       return;
     }
+    if (call.action === 'generateAgentsFile') {
+      await this.runGenerateAgentsFile(entry);
+      return;
+    }
     if (call.action === 'sideQuestion') {
       const question = trimmedArgsOrUndefined(call.args);
       if (question === undefined) {
@@ -1101,6 +1121,32 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     }
     this.reportActivity(sideEntry, question);
     this.postState(sideEntry);
+  }
+
+  /**
+   * `/init` 擬似コマンド。AGENTS.mdの生成をモデルへ指示する（issue #26）。
+   *
+   * Codexの組込 `/init` はapp-serverに存在しないため、拡張機能が固定の指示文を
+   * 組み立てて通常の発言として送る。既存ファイルがあれば必ず上書きの確認を挟む。
+   * ワークスペースの場所が分からないときは何もせず、理由を出す
+   * （黙って何も起きない状態を作らない）。
+   */
+  private async runGenerateAgentsFile(entry: ChatPanel): Promise<void> {
+    const cwd = entry.cwd ?? currentWorkspaceFolder()?.uri.fsPath;
+    if (cwd === undefined) {
+      void vscode.window.showErrorMessage(
+        'AGENTS.mdを生成する先のワークスペースが分かりません',
+      );
+      return;
+    }
+    const agentsFilePath = path.join(cwd, 'AGENTS.md');
+    const existing = await this.fs.readTextFile(agentsFilePath);
+    if (existing !== undefined && !(await confirmGenerateAgentsFile())) {
+      return;
+    }
+    const text = buildInitInstructionText(existing !== undefined);
+    await entry.session.sendOrQueue(text, entry.taskConfig ?? readConfig().codex);
+    this.reportActivity(entry, text);
   }
 
   /** 画面へ現在の状態を送る。設定とループの進行はここで一緒に載せる。 */

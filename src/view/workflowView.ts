@@ -171,7 +171,11 @@ export class WorkflowViewManager implements vscode.Disposable {
     // 「そのほか」・Issue #104。以前はWebview内のJavaScriptで独自に集計しており、
     // `merging`/`blocked`/`waitingReply`の3状態がここでの追随漏れの原因になっていた）
     const progress = aggregateProgress(snapshot.tasks);
-    const integration = summarizeIntegration(snapshot.integrationBranch, snapshot.tasks);
+    const integration = summarizeIntegration(snapshot.integrationBranch, snapshot.tasks, {
+      number: snapshot.integrationPullRequestNumber,
+      url: snapshot.integrationPullRequestUrl,
+      finalMergeOutcome: snapshot.finalMergeOutcome,
+    });
     void this.panel.webview.postMessage({ type: 'state', snapshot, layout, progress, integration });
   }
 
@@ -248,6 +252,42 @@ export class WorkflowViewManager implements vscode.Disposable {
       }
       return;
     }
+    if (type === 'openIntegrationPullRequest') {
+      // Webviewからは番号やURLを受け取らず、runIdだけでrunner.tsへ問い合わせる
+      // （design.md §16.8「画面に出す動的な文字列は必ずテキストノードとして挿入する」の
+      // 精神と同じく、Webview側が持つ値を操作の起点として信用しない）
+      const snapshot = this.runner.getSnapshot(runId);
+      await this.openPullRequestUrl(snapshot?.integrationPullRequestUrl);
+      return;
+    }
+    if (type === 'cleanupIntegration') {
+      // design.md §16.17「worktreeの片付け」・Issue #118「統合ブランチと残った
+      // worktreeをまとめて片付ける」。統合worktreeの撤去は人が明示的にこの操作を
+      // 押したときだけ実行する（`blocked`タスクの再マージが使い続けるため、runの
+      // 終了時に無条件で撤去してはいけない）。破壊的操作なので確認を挟む
+      const choice = await vscode.window.showWarningMessage(
+        '統合ブランチのworktreeと、このワークフローで作られた残りのworktreeをまとめて撤去します。' +
+          '未コミットの変更が残っているものは撤去せず警告します。統合ブランチ自体（履歴）は消しません。',
+        { modal: true },
+        '撤去する',
+      );
+      if (choice !== '撤去する') {
+        return;
+      }
+      const result = await this.runner.cleanupIntegration(runId);
+      const problems: string[] = [];
+      if (result.tasksFailed.length > 0) {
+        problems.push(`worktreeの撤去に失敗したタスクがあります: ${result.tasksFailed.join(', ')}`);
+      }
+      if (!result.integrationRemoved && result.integrationFailedMessage !== undefined) {
+        problems.push(result.integrationFailedMessage);
+      }
+      if (problems.length > 0) {
+        this.log.warn(`[workflowView] ${problems.join(' / ')}`);
+        void vscode.window.showWarningMessage(problems.join(' / '));
+      }
+      return;
+    }
 
     const taskId = m['taskId'];
     if (typeof taskId !== 'string') {
@@ -276,8 +316,33 @@ export class WorkflowViewManager implements vscode.Disposable {
       this.runner.retryMerge(runId, taskId);
       return;
     }
+    if (type === 'openTaskPullRequest') {
+      // openIntegrationPullRequestと同じく、Webviewからは値を受け取らずtaskIdだけで
+      // runner.tsへ問い合わせる
+      const snapshot = this.runner.getSnapshot(runId);
+      const task = snapshot?.tasks.find((t) => t.id === taskId);
+      await this.openPullRequestUrl(task?.pullRequestUrl);
+      return;
+    }
     if (type === 'approve' && isApprovalDecision(m['decision'])) {
       this.runner.decideApproval(runId, taskId, m['decision']);
+    }
+  }
+
+  /**
+   * PR/MRのURLを開く（design.md §16.8「そのほか」・§16.18、Issue #118）。`gh`/`glab`が
+   * 返したURLをそのまま`workspaceState`経由で持ち回っており、ホスト側の出力を全面的には
+   * 信用しない。**`https://`以外のスキームは開かない**（タスク指示「URLを開く導線では、
+   * `https://`以外のスキームを開かないこと（ホストのCLIが返す値をそのまま信用しない）」）。
+   */
+  private async openPullRequestUrl(url: string | undefined): Promise<void> {
+    if (url === undefined || !url.startsWith('https://')) {
+      return;
+    }
+    try {
+      await vscode.env.openExternal(vscode.Uri.parse(url, true));
+    } catch (e) {
+      this.log.error(`PR/MRのURLを開けません: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -332,6 +397,8 @@ ${workflowStyles()}
       <button id="stopAllBtn" type="button" class="danger">全体の停止</button>
       <button id="removeWorktreesBtn" type="button" class="secondary">worktreeの撤去</button>
       <button id="openDefBtn" type="button" class="secondary">定義ファイルを開く</button>
+      <button id="openIntegrationPrBtn" type="button" class="secondary" disabled>統合ブランチのPR/MRを開く</button>
+      <button id="cleanupIntegrationBtn" type="button" class="danger">統合ブランチと残ったworktreeをまとめて片付ける</button>
     </div>
     <div id="progressBar"><div class="fill" id="progressFill"></div></div>
     <div id="progressPercent"></div>
@@ -405,6 +472,8 @@ function buildPreviewSnapshot(
     expandedPrompt: undefined,
     expandedContinuePrompt: undefined,
     mergeResolutionActive: false,
+    pullRequestNumber: undefined,
+    pullRequestUrl: undefined,
   }));
   return {
     runId: `preview:${defPath}`,

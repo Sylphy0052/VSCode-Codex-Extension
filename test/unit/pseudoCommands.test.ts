@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildInitInstructionText,
   CODEX_PSEUDO_COMMANDS,
   routePseudoCommand,
   trimmedArgsOrUndefined,
@@ -15,7 +16,7 @@ const pseudo: PseudoCommand[] = [
 describe('CODEX_PSEUDO_COMMANDS', () => {
   it('拡張機能側で実行できるものだけを載せる', () => {
     // 対応する動作が無いものを載せると「押しても何も起きない」状態に戻る
-    expect(CODEX_PSEUDO_COMMANDS.map((c) => c.name)).toEqual(['compact', 'btw']);
+    expect(CODEX_PSEUDO_COMMANDS.map((c) => c.name)).toEqual(['compact', 'init', 'btw']);
   });
 
   it('説明が付いている', () => {
@@ -100,5 +101,22 @@ describe('withPseudoCommands', () => {
 
   it('擬似コマンドが無くても壊れない', () => {
     expect(withPseudoCommands([], others)).toEqual(others);
+  });
+});
+
+describe('buildInitInstructionText', () => {
+  it('AGENTS.mdが無いときは新規作成を指示する', () => {
+    expect(buildInitInstructionText(false)).toContain('新規に作成');
+  });
+
+  it('AGENTS.mdが既にあるときは踏まえた更新を指示する', () => {
+    const text = buildInitInstructionText(true);
+    expect(text).toContain('既存のAGENTS.md');
+    expect(text).toContain('更新');
+  });
+
+  it('どちらも次の担当者が知るべき情報をまとめるよう伝える', () => {
+    expect(buildInitInstructionText(false)).toContain('AGENTS.md');
+    expect(buildInitInstructionText(true)).toContain('AGENTS.md');
   });
 });

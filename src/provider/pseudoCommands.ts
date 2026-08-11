@@ -13,7 +13,7 @@ import type { SlashCommand } from './slashCommands';
  */
 
 /** 擬似コマンドが起こす動作。 */
-export type PseudoAction = 'compact' | 'sideQuestion';
+export type PseudoAction = 'compact' | 'generateAgentsFile' | 'sideQuestion';
 
 export interface PseudoCommand extends SlashCommand {
   action: PseudoAction;
@@ -36,9 +36,15 @@ export const CODEX_PSEUDO_COMMANDS: readonly PseudoCommand[] = [
     action: 'compact',
   },
   {
-    name: 'btw',
+    name: 'init',
     description:
-      '脇道の質問を送る（本流を汚さない使い捨てのスレッドで聞く。issue #24）',
+      'AGENTS.mdを生成する（この画面の機能で実行します。既存があれば確認してから上書きします）',
+    argumentHint: '',
+    action: 'generateAgentsFile',
+  },
+  {
+    name: 'btw',
+    description: '脇道の質問を送る（本流を汚さない使い捨てのスレッドで聞く。issue #24）',
     argumentHint: '<質問>',
     action: 'sideQuestion',
   },
@@ -90,4 +96,19 @@ export function withPseudoCommands(
 ): SlashCommand[] {
   const names = new Set(pseudo.map((c) => c.name));
   return [...pseudo, ...commands.filter((c) => !names.has(c.name))];
+}
+
+/**
+ * `/init` 擬似コマンド（AGENTS.mdの生成）で送る指示文を組み立てる。
+ *
+ * CodexのTUIが持つ組込 `/init` はTUI層の機能でapp-serverには存在せず、実行できるのは
+ * モデルへの指示として送ることだけ（`codex app-server generate-json-schema` の95メソッドを
+ * 全数確認済み、docs/slash-commands.md）。既存ファイルの有無で文面を変え、上書きのときは
+ * 「踏まえて更新」、新規のときは「新規に作成」と伝える（黙って中身を捨てさせない）。
+ */
+export function buildInitInstructionText(agentsFileExists: boolean): string {
+  const action = agentsFileExists
+    ? '既存のAGENTS.mdの内容を踏まえて、最新の状態に更新してください'
+    : 'AGENTS.mdを新規に作成してください';
+  return `${action}。プロジェクトの構成・ビルド方法・テスト方法・作業時の注意点など、次にこのリポジトリを触るエージェントが最初に知っておくべき情報をまとめてください。`;
 }

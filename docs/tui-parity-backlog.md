@@ -140,7 +140,7 @@ Codexはターン単位で model / effort / approvalPolicy を渡せるのにCla
 | TP-45 | コードレビューの起動（`/review` 相当）を画面の操作として持つ                                                                                                                                                                                     | Codex/Claude | P2     | Z-06 Z-09 | #23 済                             |
 | TP-42 | 一時的な脇道の会話（Codex `/btw` 相当）。`thread/fork` に `ephemeral: true` で対応。既存の「分岐」（`ephemeral` 無しのfork）とはディスクへの永続化・`thread/list` への表示の有無で正反対（design.md §14.26）                                     | Codex        | P3     | Z-06      | #24 済                             |
 | TP-43 | トランスクリプト表示と生テキストモード（Ctrl+T / `/raw` 相当）                                                                                                                                                                                   | Codex/Claude | P3     | -         | #25 済                             |
-| TP-46 | `AGENTS.md` / `CLAUDE.md` の生成（`/init` 相当）                                                                                                                                                                                                 | Codex/Claude | P3     | TP-11     | #26                                |
+| TP-46 | `AGENTS.md` / `CLAUDE.md` の生成（`/init` 相当）。実装したのはCodexの擬似コマンドのみ、Claudeは既存の候補が実測で動作確認済みのため追加実装なし                                                                                                  | Codex/Claude | P3     | TP-11     | #26 済                             |
 
 ## Phase 6: 環境・管理系
 

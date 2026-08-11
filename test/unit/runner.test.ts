@@ -2428,6 +2428,284 @@ tasks:
   });
 });
 
+describe('WorkflowRunner: PR/MRの結果の保持・露出・永続化（design.md §16.11・§16.18、Issue #118）', () => {
+  const SINGLE_TASK_YAML = `
+version: 1
+name: forge-result-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+  it('タスクPR/MRの番号・URLをスナップショットへ露出する（番号はURLから導く）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli({ prUrl: 'https://github.com/acme/repo/pull/42' });
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    const result = await runner.start('/repo/.agents/workflows/forge-result.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const snapshot = runner.getSnapshot(runId);
+    const task = snapshot?.tasks.find((t) => t.id === 'T1');
+    expect(task?.pullRequestNumber).toBe(42);
+    expect(task?.pullRequestUrl).toBe('https://github.com/acme/repo/pull/42');
+  });
+
+  it('タスクPR/MRの番号・URLを永続化する（応答本文は含まない）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli({ prUrl: 'https://github.com/acme/repo/pull/42' });
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    const result = await runner.start('/repo/.agents/workflows/forge-result.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const persistedTask = store.find(runId)?.tasks['T1'];
+    expect(persistedTask?.pullRequestNumber).toBe(42);
+    expect(persistedTask?.pullRequestUrl).toBe('https://github.com/acme/repo/pull/42');
+    // 応答本文（doneStateのturnResultText）は永続化データへ混ざらない
+    const serialized = JSON.stringify(store.list());
+    expect(serialized).not.toContain('turnResultText');
+  });
+
+  it('統合PR/MRの番号・URLと、finalMerge: auto成功時のfinalMergeOutcome（merged）をスナップショットへ露出する', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli({ prUrl: 'https://github.com/acme/repo/pull/1' });
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    const result = await runner.start('/repo/.agents/workflows/forge-result.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.integrationPullRequestNumber).toBe(1);
+    expect(snapshot?.integrationPullRequestUrl).toBe('https://github.com/acme/repo/pull/1');
+    expect(snapshot?.finalMergeOutcome).toBe('merged');
+    // 永続化にも反映されている
+    expect(store.find(runId)?.integrationPullRequestNumber).toBe(1);
+    expect(store.find(runId)?.finalMergeOutcome).toBe('merged');
+  });
+
+  it('finalMerge: pr-onlyのときはfinalMergeOutcomeがundefinedのまま（最終マージを試みていない）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { finalMerge: 'pr-only' }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/forge-result.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.integrationPullRequestNumber).toBeDefined();
+    expect(snapshot?.finalMergeOutcome).toBeUndefined();
+  });
+
+  it('最終マージに失敗すればfinalMergeOutcomeがfailedになる', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli({ failMerge: true });
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    const result = await runner.start('/repo/.agents/workflows/forge-result.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.finalMergeOutcome).toBe('failed');
+  });
+
+  it(
+    'PR/MRの前提が欠けていれば、タスク・統合いずれのPR/MRの番号・URLも露出しない' +
+      '（受入基準「PR/MRが作られなかったrunでは...作られなかったことが分かるようにする」）',
+    async () => {
+      const git = fakeGit(); // originのremoteが無い
+      const cli = fakeForgeCli();
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli),
+      });
+      const result = await runner.start('/repo/.agents/workflows/forge-result.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      const snapshot = runner.getSnapshot(runId);
+      const task = snapshot?.tasks.find((t) => t.id === 'T1');
+      expect(task?.pullRequestNumber).toBeUndefined();
+      expect(task?.pullRequestUrl).toBeUndefined();
+      expect(snapshot?.integrationPullRequestNumber).toBeUndefined();
+      expect(snapshot?.integrationPullRequestUrl).toBeUndefined();
+      expect(snapshot?.finalMergeOutcome).toBeUndefined();
+    },
+  );
+
+  it('リロード後もPR/MRへのリンクが残る（永続化された値からのフォールバック。受入基準）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli({ prUrl: 'https://github.com/acme/repo/pull/9' });
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    const result = await runner.start('/repo/.agents/workflows/forge-result.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // 同じstoreを共有する新しいWorkflowRunnerインスタンス（ウィンドウのリロードを模す）
+    const reloadedHost = new FakeHost();
+    const reloadedRunner = new WorkflowRunner({
+      hosts: { codex: reloadedHost, claude: reloadedHost },
+      worktreeQueue: new WorktreeCreationQueue(),
+      git,
+      fs: identityFs,
+      filePort: filePort(SINGLE_TASK_YAML),
+      store,
+      log: fakeLogger,
+      readBaseline: () => ({
+        codexSandbox: 'read-only',
+        codexApprovalMode: 'on-request',
+        claudePermissionMode: 'manual',
+        allowAutoApprove: true,
+      }),
+    });
+    await reloadedRunner.restoreRunsForView();
+
+    const snapshot = reloadedRunner.getSnapshot(runId);
+    const task = snapshot?.tasks.find((t) => t.id === 'T1');
+    // リロード直後はこのウィンドウでまだセッションを開いていない（hasLiveSession: false）が、
+    // PR/MRのリンクは永続化された値から出る
+    expect(task?.hasLiveSession).toBe(false);
+    expect(task?.pullRequestUrl).toBe('https://github.com/acme/repo/pull/9');
+    expect(snapshot?.integrationPullRequestUrl).toBe('https://github.com/acme/repo/pull/9');
+  });
+});
+
+describe('WorkflowRunner.cleanupIntegration（design.md §16.8「そのほか」・§16.17、Issue #118）', () => {
+  const SINGLE_TASK_YAML = `
+version: 1
+name: cleanup-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+  it('runが終わっていれば、統合worktreeと終わったタスクのworktreeをまとめて撤去する', async () => {
+    const git = fakeGit();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/cleanup.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const cleanup = await runner.cleanupIntegration(runId);
+    expect(cleanup.integrationRemoved).toBe(true);
+    expect(cleanup.integrationFailedMessage).toBeUndefined();
+    expect(cleanup.tasksRemoved).toContain('T1');
+
+    const removeCalls = git.calls.filter((c) => c.args[0] === 'worktree' && c.args[1] === 'remove');
+    expect(removeCalls.some((c) => c.args[2]?.includes('_integration'))).toBe(true);
+    // ブランチ自体は消さない（design.md §16.17「ブランチは消さない」）。
+    // `git worktree remove`はworktreeの参照を外すだけで`branch -d`を呼ばない
+    expect(git.calls.some((c) => c.args[0] === 'branch')).toBe(false);
+  });
+
+  it('runが実行中の間は統合worktreeを撤去しない（blockedタスクの再マージが使い続けるため）', async () => {
+    const YAML2 = `
+version: 1
+name: cleanup-running
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    dependsOn: [T1]
+    prompt: p2
+    done: d2
+`;
+    const git = fakeGit();
+    const { runner, codexHost } = createHarness(YAML2, { git });
+    const result = await runner.start('/repo/.agents/workflows/cleanup2.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+    // T2はT1完了後に走り始めるが、まだ終わっていない（runは`running`のまま）
+
+    const cleanup = await runner.cleanupIntegration(runId);
+    expect(cleanup.integrationRemoved).toBe(false);
+    expect(cleanup.integrationFailedMessage).toBe('runが実行中のため統合worktreeは撤去しませんでした');
+  });
+
+  it('未コミットの変更が残っている統合worktreeは撤去せず失敗として返す（既存の方針。design.md §16.17）', async () => {
+    const git = fakeGit();
+    const originalRun = git.run.bind(git);
+    const dirtyGit: FakeGitHandle = {
+      ...git,
+      run: async (args, cwd) => {
+        if (args[0] === 'status' && args[1] === '--porcelain' && cwd.includes('_integration')) {
+          return { code: 0, stdout: ' M some-file.txt\n', stderr: '' };
+        }
+        return originalRun(args, cwd);
+      },
+    };
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, { git: dirtyGit });
+    const result = await runner.start('/repo/.agents/workflows/cleanup3.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const cleanup = await runner.cleanupIntegration(runId);
+    expect(cleanup.integrationRemoved).toBe(false);
+    expect(cleanup.integrationFailedMessage).toContain('未コミットの変更');
+  });
+});
+
 describe('WorkflowRunner: 疑似worktree（design.md §16.20、Issue #105）', () => {
   const SINGLE_TASK_YAML = `
 version: 1
@@ -2860,10 +3138,15 @@ tasks:
           submissionCount: 1,
           retryCount: 0,
           failure: undefined,
+          pullRequestNumber: undefined,
+          pullRequestUrl: undefined,
         },
       },
       haltedByUser: false,
       integrationBranch: `wf/${runId}/integration`,
+      integrationPullRequestNumber: undefined,
+      integrationPullRequestUrl: undefined,
+      finalMergeOutcome: undefined,
     }));
 
     const git = fakeGit();
@@ -2905,10 +3188,15 @@ tasks:
           submissionCount: 1,
           retryCount: 0,
           failure: undefined,
+          pullRequestNumber: undefined,
+          pullRequestUrl: undefined,
         },
       },
       haltedByUser: false,
       integrationBranch: `wf/${runId}/integration`,
+      integrationPullRequestNumber: undefined,
+      integrationPullRequestUrl: undefined,
+      finalMergeOutcome: undefined,
     }));
 
     const git = fakeGit(); // 既定でmerge --no-ffは成功する
@@ -2940,10 +3228,15 @@ tasks:
           submissionCount: 1,
           retryCount: 0,
           failure: undefined,
+          pullRequestNumber: undefined,
+          pullRequestUrl: undefined,
         },
       },
       haltedByUser: false,
       integrationBranch: `wf/${runId}/integration`,
+      integrationPullRequestNumber: undefined,
+      integrationPullRequestUrl: undefined,
+      finalMergeOutcome: undefined,
     }));
 
     const git = fakeGit();

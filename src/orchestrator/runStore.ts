@@ -27,6 +27,15 @@ export interface PersistedTaskState {
   submissionCount: number;
   retryCount: number;
   failure: TaskFailureReason | undefined;
+  /**
+   * タスクPR/MRの番号（design.md §16.11「タスクごとの...PR/MRの番号」、Issue #118）。
+   * 作られていない・番号を取り出せない場合は `undefined`。**本文は保存しない**
+   * （§16.11・§16.21）。既存の永続データ（このフィールドが無い形式）を読んでも、
+   * 単に `undefined` になるだけで壊れない。
+   */
+  pullRequestNumber: number | undefined;
+  /** タスクPR/MRのURL。番号と同じくホスト側にも残っている情報で機微は含まない。 */
+  pullRequestUrl: string | undefined;
 }
 
 export interface PersistedRun {
@@ -50,6 +59,19 @@ export interface PersistedRun {
    * 持たせておく）。
    */
   integrationBranch: string;
+  /**
+   * 統合PR/MRの番号（design.md §16.11「統合PR/MRの番号」、Issue #118）。作られていない
+   * （前提が欠けていた・`pullRequest`/`forge`設定で無効化されている等）場合は `undefined`。
+   * 既存の永続データ（このフィールドが無い形式）を読んでも `undefined` になるだけで壊れない。
+   */
+  integrationPullRequestNumber: number | undefined;
+  /** 統合PR/MRのURL。 */
+  integrationPullRequestUrl: string | undefined;
+  /**
+   * 統合→mainの最終マージ（design.md §16.18「最終マージ」）の成否。試みていなければ
+   * `undefined`（`finalMerge: pr-only`、統合PR/MRの作成に失敗、runがまだ終わっていない等）。
+   */
+  finalMergeOutcome: 'merged' | 'failed' | undefined;
 }
 
 /**

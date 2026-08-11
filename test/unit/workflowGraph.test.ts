@@ -221,6 +221,45 @@ describe('summarizeIntegration（design.md §16.8「そのほか」・§16.17。
     ]);
     expect(summary).toEqual({ branch: 'wf/r1/integration', mergedTaskCount: 0 });
   });
+
+  it(
+    'PR/MRの番号・URL・最終マージの成否をそのまま持ち帰る' +
+      '（design.md §16.8「そのほか」・§16.11・§16.18、Issue #118）',
+    () => {
+      const summary = summarizeIntegration(
+        'wf/r1/integration',
+        [{ state: 'done', branch: 'wf/r1/T1' }],
+        {
+          number: 7,
+          url: 'https://github.com/acme/repo/pull/7',
+          finalMergeOutcome: 'merged',
+        },
+      );
+      expect(summary).toEqual({
+        branch: 'wf/r1/integration',
+        mergedTaskCount: 1,
+        pullRequestNumber: 7,
+        pullRequestUrl: 'https://github.com/acme/repo/pull/7',
+        finalMergeOutcome: 'merged',
+      });
+    },
+  );
+
+  it('PR/MRが作られていなければ番号・URL・最終マージの成否はundefined（第3引数省略時も同じ）', () => {
+    const withoutArg = summarizeIntegration('wf/r1/integration', []);
+    expect(withoutArg?.pullRequestNumber).toBeUndefined();
+    expect(withoutArg?.pullRequestUrl).toBeUndefined();
+    expect(withoutArg?.finalMergeOutcome).toBeUndefined();
+
+    const withUndefinedFields = summarizeIntegration('wf/r1/integration', [], {
+      number: undefined,
+      url: undefined,
+      finalMergeOutcome: undefined,
+    });
+    expect(withUndefinedFields?.pullRequestNumber).toBeUndefined();
+    expect(withUndefinedFields?.pullRequestUrl).toBeUndefined();
+    expect(withUndefinedFields?.finalMergeOutcome).toBeUndefined();
+  });
 });
 
 // `escapeHtml`はworkflowGraph.tsから削除した（レビュー指摘: info「未結線のデッドコード」）。
