@@ -1,7 +1,11 @@
 import { spawn } from 'node:child_process';
 import type { Logger } from '../log';
+import type { HooksSnapshot } from '../provider/hooks';
 import { isValidMcpServerName, type McpServersSnapshot } from '../provider/mcpServers';
+import type { AccountSnapshot } from '../provider/account';
+import { parseAccountRead } from './accountStatus';
 import { isSessionId } from './argvBuilder';
+import { buildHookTrustEdit, parseHooksList } from './hooksStatus';
 import {
   consumeFrames,
   encodeNotification,
@@ -156,6 +160,84 @@ export class AppServerClient {
     });
 
     return result.ok ? { ok: true } : { ok: false, error: result.error };
+  }
+
+  /**
+   * hooksの一覧を取る（issue #28、design.md TP-52）。
+   *
+   * `hooks/list`（`HooksListParams { cwds? }` → `HooksListResponse { data: [{cwd, hooks,
+   * warnings, errors}] }`）は実測でスレッドを開始していなくても呼べる。`cwds` を省略すると
+   * 「現在のセッションの作業ディレクトリ」が使われる（スキーマの説明。単発起動でセッションが
+   * 無い場合の挙動は未確認）ため、明示的にワークスペースフォルダを渡す。
+   */
+  async listHooks(cwds: string[]): Promise<HooksSnapshot> {
+    const result = await this.call<ReturnType<typeof parseHooksList>>(async (request) => {
+      const response = await request('hooks/list', cwds.length === 0 ? {} : { cwds });
+      if (response.error !== undefined) {
+        return { ok: false, error: response.error.message };
+      }
+      return { ok: true, value: parseHooksList(response.result) };
+    });
+
+    if (!result.ok) {
+      this.log.warn(`hooks一覧を取得できませんでした: ${result.error}`);
+      return { ok: false, reason: result.error };
+    }
+    return { ok: true, hooks: result.value.hooks, warnings: result.value.warnings };
+  }
+
+  /**
+   * hookを信頼する（issue #28）。
+   *
+   * **根拠は実行ファイルの文字列調査(strings)のみ**で、実際に書き込んで確認してはいない
+   * （この環境の `~/.codex/config.toml` を書き換えない方針のため。`hooksStatus.ts` の
+   * `buildHookTrustEdit` のコメントを参照）。信頼を取り消す経路は見つかっていない
+   * （`MergeStrategy` が `replace` / `upsert` のみで、キーの削除に相当する操作が無い）。
+   */
+  async setHookTrusted(
+    key: string,
+    currentHash: string,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    let edit: ReturnType<typeof buildHookTrustEdit>;
+    try {
+      edit = buildHookTrustEdit(key, currentHash);
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+
+    const result = await this.call<void>(async (request) => {
+      const write = await request('config/batchWrite', { edits: [edit] });
+      if (write.error !== undefined) {
+        return { ok: false, error: write.error.message };
+      }
+      return { ok: true, value: undefined };
+    });
+
+    return result.ok ? { ok: true } : { ok: false, error: result.error };
+  }
+
+  /**
+   * ログイン状態を読む（issue #29、design.mdのTP-53）。
+   *
+   * `account/read`（`GetAccountParams {}` → `GetAccountResponse { account, requiresOpenaiAuth }`）
+   * はスレッドを開始していなくても呼べる（実測。`mcpServerStatus/list` と同じ性質）。
+   * login/logoutの実行そのものはCLIのサブコマンド（`src/codex/accountActions.ts`）に委ねており、
+   * ここでは読み取りだけを行う。
+   */
+  async readAccount(): Promise<AccountSnapshot> {
+    const result = await this.call<ReturnType<typeof parseAccountRead>>(async (request) => {
+      const response = await request('account/read', {});
+      if (response.error !== undefined) {
+        return { ok: false, error: response.error.message };
+      }
+      return { ok: true, value: parseAccountRead(response.result) };
+    });
+
+    if (!result.ok) {
+      this.log.warn(`ログイン状態を取得できませんでした: ${result.error}`);
+      return { ok: false, reason: result.error };
+    }
+    return { ok: true, account: result.value };
   }
 
   /**

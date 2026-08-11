@@ -377,6 +377,18 @@ export function buildMcpStatusRequest(requestId: string): string {
 }
 
 /**
+ * 有効な設定一式を問い合わせる要求（issue #28、design.md TP-52）。
+ *
+ * hooksの一覧に相当する専用の要求はプロトコルに無い（`hooks_list` 等6候補を実測で
+ * 総当たりし、いずれも `Unsupported control request subtype` だった）。`get_settings` の
+ * 応答の `effective.hooks` がその代わりになる（実測。CLI 2.1.227）。詳細は
+ * `src/claude/hooksSettings.ts` を参照。
+ */
+export function buildGetSettingsRequest(requestId: string): string {
+  return buildControlRequest(requestId, { subtype: 'get_settings' });
+}
+
+/**
  * MCPサーバーの有効/無効を切り替える要求。
  *
  * 実測（CLI 2.1.227）: パラメータ名は **`serverName`**（camelCase）。`server_name` /

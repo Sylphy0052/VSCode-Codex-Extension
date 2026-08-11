@@ -148,10 +148,210 @@ export function controlPanelScript(): string {
     }
   }
 
+  function hookTrustLabel(trust) {
+    if (trust === 'trusted') return '信頼済み';
+    if (trust === 'untrusted') return '未信頼';
+    if (trust === 'modified') return '変更あり(再信頼が必要)';
+    if (trust === 'managed') return '管理者設定';
+    return '';
+  }
+
+  function renderHook(hook) {
+    const row = document.createElement('div');
+    row.className = 'hookItem';
+
+    const head = document.createElement('div');
+    head.className = 'hookItem-head';
+
+    const name = document.createElement('span');
+    name.className = 'hookItem-name';
+    name.textContent = hook.eventName + (hook.matcher ? ' (' + hook.matcher + ')' : '');
+    head.appendChild(name);
+
+    if (hook.trust && hook.trust !== 'unsupported') {
+      const badge = document.createElement('span');
+      badge.className = 'hookBadge hookBadge-' + hook.trust;
+      badge.textContent = hookTrustLabel(hook.trust);
+      head.appendChild(badge);
+    }
+
+    if (hook.enabled === false) {
+      const disabledBadge = document.createElement('span');
+      disabledBadge.className = 'hookBadge hookBadge-disabled';
+      disabledBadge.textContent = '無効';
+      head.appendChild(disabledBadge);
+    }
+
+    row.appendChild(head);
+
+    if (hook.command) {
+      const command = document.createElement('pre');
+      command.className = 'hookItem-command';
+      command.textContent = hook.command;
+      row.appendChild(command);
+    } else {
+      const kind = document.createElement('div');
+      kind.className = 'hookItem-meta';
+      kind.textContent = '種別: ' + hook.handlerType;
+      row.appendChild(kind);
+    }
+
+    const origin = document.createElement('div');
+    origin.className = 'hookItem-meta';
+    const originText = ['出どころ: ' + hook.origin];
+    if (hook.originDetail) originText.push(hook.originDetail);
+    if (hook.pluginId) originText.push('plugin: ' + hook.pluginId);
+    origin.textContent = originText.join(' / ');
+    row.appendChild(origin);
+
+    if ((hook.trust === 'untrusted' || hook.trust === 'modified') && hook.trustHash) {
+      const trustBtn = document.createElement('button');
+      trustBtn.type = 'button';
+      trustBtn.className = 'hookTrustButton';
+      trustBtn.textContent = '信頼する';
+      trustBtn.addEventListener('click', () => {
+        vscode.postMessage({ type: 'trustHook', key: hook.key, hash: hook.trustHash });
+      });
+      row.appendChild(trustBtn);
+    }
+
+    return row;
+  }
+
+  function renderHooks(elId, snapshot) {
+    const container = el(elId);
+    container.replaceChildren();
+
+    if (!snapshot || snapshot.ok !== true) {
+      const p = document.createElement('p');
+      p.className = 'hooksError';
+      const reason = snapshot && snapshot.reason ? snapshot.reason : '不明なエラー';
+      p.textContent = 'hooks一覧を取得できませんでした: ' + reason;
+      container.appendChild(p);
+      return;
+    }
+
+    for (const warning of snapshot.warnings || []) {
+      const w = document.createElement('p');
+      w.className = 'hooksWarning';
+      w.textContent = warning;
+      container.appendChild(w);
+    }
+
+    if (snapshot.hooks.length === 0) {
+      const p = document.createElement('p');
+      p.className = 'hooksEmpty';
+      p.textContent = 'hookは設定されていません';
+      container.appendChild(p);
+      return;
+    }
+
+    for (const hook of snapshot.hooks) {
+      container.appendChild(renderHook(hook));
+    }
+  }
+
+  function renderAccount(elId, snapshot, renderActions) {
+    const container = el(elId);
+    container.replaceChildren();
+
+    if (!snapshot || snapshot.ok !== true) {
+      const p = document.createElement('p');
+      p.className = 'mcpError';
+      const reason = snapshot && snapshot.reason ? snapshot.reason : '不明なエラー';
+      p.textContent = 'ログイン状態を取得できませんでした: ' + reason;
+      container.appendChild(p);
+      return;
+    }
+
+    const view = snapshot.account;
+    const status = document.createElement('div');
+    status.className = 'accountStatus';
+
+    const badge = document.createElement('span');
+    badge.className = 'mcpBadge ' + (view.loggedIn ? 'mcpBadge-connected' : 'mcpBadge-disabled');
+    badge.textContent = view.loggedIn ? 'ログイン済み' : '未ログイン';
+    status.appendChild(badge);
+
+    const bits = [];
+    if (view.method) bits.push(view.method);
+    if (view.identity) bits.push(view.identity);
+    if (view.plan) bits.push(view.plan);
+    if (bits.length > 0) {
+      const meta = document.createElement('span');
+      meta.className = 'accountMeta';
+      meta.textContent = bits.join(' ・ ');
+      status.appendChild(meta);
+    }
+    container.appendChild(status);
+
+    const actions = document.createElement('div');
+    actions.className = 'accountActions';
+    container.appendChild(actions);
+    renderActions(actions, view);
+  }
+
+  function addAccountButton(actions, text, onClick) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = text;
+    button.addEventListener('click', onClick);
+    actions.appendChild(button);
+    return button;
+  }
+
+  function addAccountNote(actions, text) {
+    const note = document.createElement('p');
+    note.className = 'note';
+    note.textContent = text;
+    actions.appendChild(note);
+  }
+
+  function renderCodexAccount(snapshot) {
+    renderAccount('accountCodex', snapshot, function (actions, view) {
+      if (view.loggedIn) {
+        addAccountButton(actions, 'ログアウト', function () {
+          vscode.postMessage({ type: 'logoutCodex' });
+        });
+        return;
+      }
+      addAccountButton(actions, 'APIキーでログイン', function () {
+        vscode.postMessage({ type: 'loginCodexApiKey' });
+      });
+      addAccountButton(actions, 'ターミナルでChatGPTログインを開く', function () {
+        vscode.postMessage({ type: 'openLoginTerminal', cli: 'codex' });
+      });
+      addAccountNote(
+        actions,
+        'ChatGPTアカウントでのログインはブラウザでの操作が必要なため、拡張機能内では完結できません。開いたターミナルに codex login が入力されるので、内容を確認してEnterを押してください（自動では実行しません）。',
+      );
+    });
+  }
+
+  function renderClaudeAccount(snapshot) {
+    renderAccount('accountClaude', snapshot, function (actions, view) {
+      if (view.loggedIn) {
+        addAccountButton(actions, 'ログアウト', function () {
+          vscode.postMessage({ type: 'logoutClaude' });
+        });
+        return;
+      }
+      addAccountButton(actions, 'ターミナルでログインを開く', function () {
+        vscode.postMessage({ type: 'openLoginTerminal', cli: 'claude' });
+      });
+      addAccountNote(
+        actions,
+        'ログインはブラウザでの操作が必要なため、拡張機能内では完結できません。開いたターミナルに claude auth login が入力されるので、内容を確認してEnterを押してください（自動では実行しません）。APIキーでの非対話ログインの経路は見つかりませんでした。',
+      );
+    });
+  }
+
   function apply(state) {
     applyUsage(state.usage);
     applyClaude(state.claude);
+    renderCodexAccount(state.account);
     renderMcp('codex', 'mcpListCodex', state.mcpServers);
+    renderHooks('hooksListCodex', state.hooks);
     models = state.models;
     const nameOf = (slug) => {
       const m = models.find((x) => x.slug === slug);
@@ -188,7 +388,9 @@ export function controlPanelScript(): string {
 
   function applyClaude(c) {
     if (!c) return;
+    renderClaudeAccount(c.account);
     renderMcp('claude', 'mcpListClaude', c.mcpServers);
+    renderHooks('hooksListClaude', c.hooks);
     const d = c.defaults || {};
     const nameOf = (slug) => {
       const m = c.models.find((x) => x.slug === slug);

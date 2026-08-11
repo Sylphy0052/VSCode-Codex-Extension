@@ -33,7 +33,7 @@ CLIコーディングエージェント（Codex / Claude Code）のセッショ�
 - **Webviewによる独自チャットUIは「含まない」から「含む」へ移った**。当初はCLIのTUIをそのままエディタタブに出す方式で、チャットUIは対象外だった。TUIタブ方式を廃止した経緯は §2 にある
 - **タブ復元の作り方が変わった**。当初はターミナルの位置と並び順を `workspaceState` へ持って開き直す設計（§5.5）で、現在はWebviewの復元機構に載せている（§9.5・§14.6）
 
-サインイン/サインアウトのUIは依然として含まない。MCP・プラグイン・hookの管理も同様で、これらはCLI側の管理コマンドに任せている。
+サインイン/サインアウトのUIは依然として含まない。プラグインの管理も同様で、CLI側の管理コマンドに任せている。MCPサーバー（§14.14）とhooks（§14.15）は一覧表示を拡張UIに含む。信頼やトグルなど操作できる範囲はCLIごとに異なる。
 
 ## 2. 全体アーキテクチャ
 
@@ -370,6 +370,9 @@ Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡
 
 **MCPサーバーの一覧**: 両タブの下部に、設定されているMCPサーバーの一覧と有効/無効の切替を出す（§14.14）。取得・切替の経路はCodexとClaude Codeで別物（プロトコルの非対称は§14.14を参照）。
 
+**hooksの一覧**: MCPサーバーの一覧の下に、登録されているhookの一覧を出す（issue #28・§14.15）。1件あたりイベント名・実行するコマンド・出どころ（user/project/plugin等）を表示する。Codexは信頼状態も持ち、未信頼・変更ありのhookには「信頼する」操作を出す。Claude Codeには信頼状態を返す経路が無いため、一覧のみで操作は出さない（黙って何もしないボタンは置かない。「無い」旨を注記する）。
+**アカウント**: MCPサーバーの一覧より上に、ログイン状態とlogin/logoutの操作を出す（§14.15）。状態の取得はCodexが `account/read`（app-server）、Claude Codeが `claude auth status --json`。ログアウトはどちらもCLIのトップレベルサブコマンドを直接実行し、確認ダイアログを必ず挟む。ブラウザでのOAuthログインは拡張機能内で完結できないため、統合ターミナルへコマンドを入力するところまでに留める（自動実行はしない）。
+
 ### 使用量の表示
 
 レート制限の使用量をステータスバーに常時表示し、詳細を操作パネルに出す。
@@ -425,13 +428,14 @@ Claude Code側（`claude.*`）と作業記録（`agent.activityLog.*`）の設�
 
 ## 8. セキュリティ考慮
 
-| 項目                                     | 対処                                                                                                |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| ワークスペース設定による任意コマンド実行 | §7のスコープ設計。`executablePath` / `additionalArgs` / `codexHome` を `machine` に固定             |
-| サンドボックス無効化の誘導               | `sandbox` / `approvalMode` も `machine`。危険な組み合わせは初回に確認ダイアログ                     |
-| 引数インジェクション                     | `shellPath` / `shellArgs` 方式によりシェル解釈を経由しない（§5.2）                                  |
-| セッション本文の漏洩                     | 拡張機能はロールアウトファイルの**1行目のみ**を読み、会話本文は読まない・保存しない・ログに出さない |
-| 破壊操作                                 | `delete` は確認ダイアログ必須。`archive` は取り消し可能なため確認不要                               |
+| 項目                                     | 対処                                                                                                                                                                                                   |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| ワークスペース設定による任意コマンド実行 | §7のスコープ設計。`executablePath` / `additionalArgs` / `codexHome` を `machine` に固定                                                                                                                |
+| サンドボックス無効化の誘導               | `sandbox` / `approvalMode` も `machine`。危険な組み合わせは初回に確認ダイアログ                                                                                                                        |
+| 引数インジェクション                     | `shellPath` / `shellArgs` 方式によりシェル解釈を経由しない（§5.2）                                                                                                                                     |
+| セッション本文の漏洩                     | 拡張機能はロールアウトファイルの**1行目のみ**を読み、会話本文は読まない・保存しない・ログに出さない                                                                                                    |
+| 破壊操作                                 | `delete` は確認ダイアログ必須。`archive` は取り消し可能なため確認不要                                                                                                                                  |
+| hookによる任意コマンド実行（issue #28）  | 出どころ（user/project/plugin等）と実行コマンドを隠さず表示。既定は信頼せず、Codexは明示的な信頼操作が必要（§14.15）。hookのコマンド文字列はDOM APIの `textContent` で埋め込み、HTMLとして解釈させない |
 
 ## 9. リスクと検証項目
 
@@ -1128,6 +1132,130 @@ Phase 0（issue #1 Z-07 / issue #2 Z-10）で「両方とも一覧・有効無�
 - `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `mcpServers: McpServersSnapshot` を追加。`toggleMcpServer(cli, name, enabled)` を新設
 - `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画とトグル操作。一覧が取れない場合はその旨を出し、0件（未設定）とは表示を分ける
 
+### 14.15 hooksの一覧と信頼の管理
+
+TUIの `/hooks` に相当する表示（Codex）。issue #28・design.mdのTP-52対応。hooksは任意のコマンドを実行する仕組みで、特にプロジェクト側（リポジトリ内）で定義されたhookはcloneしただけで任意コマンドが動く経路になりうる（§8のセキュリティ考慮）。中身を隠さず全部見せ、既定は信頼しない方針にする。
+
+Phase 0（issue #1 Z-07 / issue #2 Z-10）の時点では「両方とも実装できる」までしか確定していなかった。本issueで実測とスキーマの両面から経路を確定させたところ、**CodexとClaude Codeで扱える範囲が大きく非対称**であることが分かった。TP-50（MCPサーバー）と違い、Claude Code側は一覧だけで信頼状態そのものを返す経路が無い。
+
+#### Codex: `hooks/list` + `config/batchWrite`（推定）
+
+実測（codex-cli 0.147.0）と `codex app-server generate-json-schema --out` のスキーマが根拠:
+
+- `hooks/list`（`HooksListParams { cwds? }` → `HooksListResponse { data: [{cwd, hooks: HookMetadata[], warnings: string[], errors: HookErrorInfo[]}] }`）はスレッドを開始していなくても呼べる（実測: `{data:[{cwd,hooks:[],warnings:[],errors:[]}]}` が返った。この環境にはhookが1件も設定されていないため、`hooks` 配列の中身はスキーマのみが根拠）
+- `HookMetadata` は `key` / `eventName` / `matcher` / `handlerType`（`command`|`prompt`|`agent`）/ `command` / `source`（`system`|`user`|`project`|`mdm`|`sessionFlags`|`plugin`|`cloudRequirements`|`cloudManagedConfig`|`legacyManagedConfigFile`|`legacyManagedConfigMdm`|`unknown`）/ `sourcePath` / `pluginId` / `enabled` / `trustStatus`（`managed`|`untrusted`|`trusted`|`modified`）/ `currentHash` を持つ。**`sourcePath` がプロジェクト内で定義されたhookかどうかを一目で判断する材料になる**
+- **信頼を求めるプロトコル上の要求は存在しない**。`ServerRequest`（10種）・`ServerNotification`（全種）をスキーマで確認したが、hook信頼専用のものは無い。TUIの「Hooks need review」画面は、`hooks/list` の `trustStatus` を見てTUI自身が組み立てているとみられる。そのため拡張機能も同じ発想を取り、設定パネルのhooks一覧に信頼状態を出し、そこから信頼操作をする形にした
+- **未信頼のhookがブロックされたことは `hook/completed`（`status: 'blocked'`。`HookRunStatus` の1値）通知で分かる**。これが唯一の実観測可能な合図なので、チャット画面に「hookがブロックされました」という注記を出す（`src/appserver/chatState.ts` の `hook/completed` ハンドラ）。「信頼を求める要求が画面に出る」という受入基準は、プロトコルにその要求自体が無い以上、この形（実行がブロックされたら気づける）で満たす
+- 信頼の書き込み(`config/batchWrite`)は**実行ファイル（`codex`）の文字列調査(strings)のみが根拠**で、実際に書き込んで確認してはいない（この環境の `~/.codex/config.toml` を書き換えない方針のため）。バイナリには `hooks.state."` `".trusted_hash` `failed to write hook trust:` という文字列が連続して存在し、`hooks.state."<key>".trusted_hash` というkeyPathへ `currentHash` を `upsert` する形と推定した（`src/codex/hooksStatus.ts` の `buildHookTrustEdit` を参照）。`filePath` に一時ファイルを指定して書き込みを試す安全な検証も行ったが、`config/batchWrite` は `filePath` を無視して常にユーザー設定へ書こうとし `configLayerReadonly` で拒否された（＝ユーザーのconfig.toml以外へは書けない仕様と分かったのみで、keyPathの正しさそのものは未検証）
+- **信頼を取り消す経路は見つかっていない**。`MergeStrategy` が `replace` / `upsert` のみで削除に相当する操作が無いため、「信頼する」ボタンだけを置く
+
+#### Claude Code: `get_settings`（`effective.hooks`）
+
+実測（CLI 2.1.227）:
+
+- hooksの一覧に相当する専用の要求は無い。`hooks_list` / `list_hooks` / `get_hooks` / `hooks_status` / `hook_list` / `settings_list` の6候補を実測で総当たりしたが、いずれも `Unsupported control request subtype` で拒否された
+- **`get_settings` だけが実在する**。応答は `{ effective: {...}, sources: [{source, settings}], applied: {...} }` で、`effective.hooks` に実際に使われるhookの一覧（イベント名をキーにしたグループの配列）が入っている
+- `sources` は設定の出どころごとの生設定。実測で確認できたのは `userSettings`（`~/.claude/settings.json`）と `projectSettings`（プロジェクトの `.claude/settings.json`）の2つ。`effective.hooks[eventName]` は各sourceの同名配列を単純に連結したものだった（実測: user側2グループ + project側1グループ→effective側3グループ）
+- **信頼状態を返すフィールドは無い**。`.claude/settings.json` にプロジェクト側のhookを1件だけ置いて `claude --print` を起動したところ、承認を求める `control_request` は一切来ず、そのままhookが実行された（`hook_started` → `hook_response` という `system` タイプの通知のみ）。Claude Codeには「hookを信頼するまで実行を止める」仕組みそのものがプロトコル層に無いとみられる
+- **plugin由来のhookは `sources` に出てこない**（実測: `genshijin` プラグインが実行したSessionStartのhookが `effective.hooks` にも `sources` にも現れなかった）。そのため、どのsourceにも一致しないグループは `origin: 'unknown'` として扱う。**この一覧はplugin由来のhookを見落としうる**ことを画面の注記に明記する
+- `hook_callback` のような、hookに関する `control_request` がこちらへ届くこともなかった（Phase 0の追試項目への回答。少なくとも `--print` の単発起動では観測されない）
+
+#### 実装
+
+- `src/provider/hooks.ts`: `HookView`（`key` / `eventName` / `matcher` / `handlerType` / `command` / `origin` / `originDetail` / `pluginId` / `enabled` / `trust` / `trustHash`）と `HooksSnapshot`（`{ok:true, hooks, warnings}` か `{ok:false, reason}`）を共有の型として持つ。`isValidHookKey` で信頼の書き込み先（keyPath）へ埋め込む前の防御をする
+- `src/codex/hooksStatus.ts`: `hooks/list` の応答を `HookView[]` へ正規化する純粋関数（`parseHooksList`）と、信頼の書き込み1件を組み立てる `buildHookTrustEdit`
+- `src/codex/appServerClient.ts`: `listHooks(cwds)` / `setHookTrusted(key, currentHash)` を追加
+- `src/claude/control.ts`: `buildGetSettingsRequest`
+- `src/claude/hooksSettings.ts`: `get_settings` の応答を `HookView[]` へ正規化する純粋関数（`readHooksFromSettings`）。sourcesとの深い等価比較で出どころを推定する
+- `src/claude/hooksProbe.ts`: `ClaudeHooksProbe`。`ClaudeMcpProbe` と同じ理由で単発プロセスとして問い合わせる。信頼を書き込む経路が無いため、読み取り専用
+- `src/appserver/chatState.ts`: `hook/completed`（`status: 'blocked'`）を会話への注記に変換する
+- `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `hooks: HooksSnapshot` を追加。`trustCodexHook(key, currentHash)` を新設（Claude Code側には対応する書き込みメソッドを持たない）
+- `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画と信頼操作（Codexのみ）。hookのコマンド文字列は必ず `textContent` でDOMへ入れ、HTMLとして解釈させない
+
+### 14.15 ログイン状態の表示とlogin / logout
+
+TUIには無い専用画面だが、TUI起動時のバナーやステータス行に相当する情報。issue #29・design.mdのTP-53対応。サイドバーの設定パネル（§6「操作パネル」）に、CodexとClaude Codeそれぞれのタブへ「アカウント」欄を出す。
+
+Phase 0（issue #1 Z-07）のコメントでは「両方ともログイン状態の取得とlogin/logoutを実装できる」ところまで確認済みだった。本issueでは実際のプロトコルとCLIのサブコマンドを調べ、**状態の読み取りはPhase 0の想定どおりapp-server/control protocol経由、login・logoutの実行はCLIのトップレベルサブコマンドへ委譲する**という構成に落ち着いた。理由は「実装」の項を参照。
+
+#### Codex: 状態は `account/read`、操作は `codex login` / `codex logout`
+
+`codex app-server generate-json-schema --out <DIR>` の `ClientRequest.json` で確認した、`account/` 配下のメソッド一覧（実測。codex-cli 0.147.0）:
+
+```
+account/read
+account/login/start
+account/login/cancel
+account/logout
+account/rateLimits/read（#15で対応済み）
+account/rateLimitResetCredit/consume
+account/usage/read
+account/workspaceMessages/read
+account/sendAddCreditsNudgeEmail
+```
+
+（`account/chatgptAuthTokens/refresh` はサーバから届く要求で、値を捏造できないため対象外。プロジェクトの決定事項）
+
+- `account/read`（`GetAccountParams { refreshToken? }` → `GetAccountResponse { account, requiresOpenaiAuth }`）は**スレッドを開始していなくても呼べる**（実測。`mcpServerStatus/list` と同じ性質）。実際に呼んだ生の応答（メールアドレスは伏せた）:
+
+  ```json
+  {
+    "account": { "type": "chatgpt", "email": "<redacted>", "planType": "prolite" },
+    "requiresOpenaiAuth": true
+  }
+  ```
+
+- `account` はスキーマ上、判別共用体 `Account`（`type: 'apiKey' | 'chatgpt' | 'amazonBedrock'`）。この環境ではChatGPTアカウントでログイン済みのため、`apiKey` / `amazonBedrock` の実際の応答形は確認していない（スキーマ根拠のみ）
+- `account/login/start`（`LoginAccountParams`。`type` ごとに `apiKey` / `chatgpt` / `chatgptDeviceCode` / `chatgptAuthTokens`（内部用、対象外）/ `amazonBedrock` に分かれる）と `account/login/cancel` はスキーマの確認のみに留め、**実行はしていない**。ChatGPTアカウント（`type: 'chatgpt'`）でのログインは応答に `authUrl` を含み、ブラウザでの操作を経てから `account/login/completed` 通知（`{success, error?, loginId?}`）が届く形になっている（スキーマ根拠）。`AppServerClient` は1回の要求ごとにapp-serverプロセスを起動して終わったら落とす作り（`listMcpServers()` 等と同じ）のため、この待機を挟む操作をそのまま実装すると、ブラウザでの操作を待つ間だけプロセスを生かし続ける・キャンセルを扱う、という別種のライフサイクル管理が要る。加えて、この環境の現在のログイン状態を、調査目的の実行で変えないことを優先した
+- `account/logout` も同じ理由で実行していないが、CLIには対話端末を要さないトップレベルサブコマンド `codex logout`（`--help` で確認: オプションは設定上書き用の `-c` のみ）があり、こちらは`archive` / `delete`（§6「破壊操作の実行仕様」）と同じ、CLIサブコマンドを直接実行して終了コードで判定する構成にそのまま乗せられる。`account/logout` ではなくこちらを使う
+- `codex login --help` で見つけた `--with-api-key`（標準入力からAPIキーを読む。`printenv OPENAI_API_KEY | codex login --with-api-key` が例示されている）も同様に非対話で完結するため、APIキーでのログインはこちらを使う。キーは標準入力にだけ渡し、引数・ログ・設定には残さない
+- ブラウザでのOAuthログイン（既定の `codex login`、引数無し）は非対話では完結できないため、**拡張機能内では完結できないことを画面に明記し、統合ターミナルに `codex login` を入力するところまでで止める**（自動実行はしない。ユーザーが確認してEnterを押す）
+
+#### Claude Code: 状態も操作も `claude auth` サブコマンド
+
+Phase 0のコメントでは「`initialize` のcontrol_responseが `account` を返す」「ログイン系のsubtype（`claude_authenticate` `claude_oauth_callback` `claude_oauth_wait_for_completion` `oauth_token_refresh` `host_auth_token_refresh`）が実在する」とされていた。本issueではこの5つのsubtypeを実際には呼び出していない（ログイン状態を変える可能性がある操作を、調査目的で実行しないこととしたため）。代わりに `claude --help` を調べたところ、**`claude auth`** という専用のトップレベルサブコマンドが見つかった（Phase 0の時点では確認されていなかった経路）。
+
+```
+$ claude auth --help
+Commands:
+  login [options]   Sign in to your Anthropic account
+  logout            Log out from your Anthropic account
+  status [options]  Show authentication status
+```
+
+- `claude auth status --json`（`--json` は既定でもある）は実際に呼んで確認した（実測。CLI 2.1.227。ログイン済みの場合。メールアドレス等は伏せた）:
+
+  ```json
+  {
+    "loggedIn": true,
+    "authMethod": "claude.ai",
+    "apiProvider": "firstParty",
+    "email": "<redacted>",
+    "orgId": "<redacted>",
+    "orgName": "<redacted>",
+    "subscriptionType": "max"
+  }
+  ```
+
+  `initialize` のcontrol_response（`{email, organization, subscriptionType, apiProvider}`）も実測で同時に確認したが、ログイン済みかどうかを示す真偽値（`loggedIn`）を持たず、control protocol用のプロセスを別途起動する必要もある。`claude auth status --json` の方が単純で確実なため、状態表示にはこちらを使う。**未ログイン時の応答形はこの環境では確認できていない**（実測ではなく、`loggedIn` フィールドの有無・真偽だけで判定する防御的な実装にしている）
+
+- `claude auth logout`（`--help` にオプション無し）は非対話で完結するため、`codex logout` と同じ構成で実行する。**実行はしていない**（実測ではなくヘルプ根拠のみ）
+- `claude auth login` はブラウザでのOAuthを前提にした対話的なコマンドで、APIキーのような非対話の代替経路は `--help` に見当たらなかった。**Claude Code側にはAPIキーでの非対話ログインを実装していない**。ログインは統合ターミナルに `claude auth login` を入力するところまでで止める（Codexと同じく自動実行はしない）
+- Phase 0が報告した5つのcontrol request subtypeは、この構成では使わずじまいになった。将来 `claude auth` サブコマンドが無くなった場合の代替候補として記録だけ残す
+
+#### 実装
+
+- `src/provider/account.ts`: `AccountView`（`loggedIn` / `method` / `identity` / `plan`）と `AccountSnapshot`（`{ok:true, account}` か `{ok:false, reason}`）を共有の型として持つ。秘密情報（トークン等）は含めない
+- `src/codex/accountStatus.ts`: `account/read` の応答を `AccountView` へ正規化する純粋関数 `parseAccountRead`
+- `src/codex/accountActions.ts`: `CodexAccountActions`。`codex logout` / `codex login --with-api-key` を実行する
+- `src/codex/appServerClient.ts`: `readAccount()` を追加。既存の `listMcpServers()` と同じ単発呼び出し
+- `src/claude/authStatus.ts`: `claude auth status --json` の標準出力を `AccountView` へ正規化する純粋関数 `parseAuthStatusJson`
+- `src/claude/authProbe.ts`: `ClaudeAuthProbe`。`claude auth status --json` を単発で起動する（`ClaudeMcpProbe` と違い、control protocolではなく通常のCLI標準出力を読むだけなので単純）
+- `src/claude/authActions.ts`: `ClaudeAuthActions`。`claude auth logout` を実行する
+- `src/process/commandRunner.ts`: `CommandRunner`（`src/session/sessionActions.ts` と同じ形だが、標準入力を渡す経路を持つ）。APIキーを引数ではなく標準入力で渡すために新設した
+- `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `account: AccountSnapshot` を追加。`logoutCodex()` / `logoutClaude()` / `loginCodexApiKey(apiKey)` を新設。ログアウトは確認ダイアログを必ず挟む
+- `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 「アカウント」欄の描画とボタン操作。ブラウザでのログインは統合ターミナルを開いてコマンドを入力するところまでで止め、自動実行はしない（`terminal.sendText(cmd, false)`）
+
 ## 15. 作業記録（日報・週報連携）
 
 この拡張機能から実行したセッションを、日報/週報システムが読める形で残す。
@@ -1184,6 +1312,8 @@ Phase 0（issue #1 Z-07 / issue #2 Z-10）で「両方とも一覧・有効無�
 
 想定する形は `T1 → (T2 || T3) → T4`。T1が終わったらT2とT3を同時に開始し、両方の完了を見てからT4を開始する。
 
+成果の統合まで含めてオーケストレータの責務にする。タスクが終わるたびにrun専用の統合ブランチへマージし、worktreeを片付けて次のタスクへ進む（§16.17）。ホストへのPR/MRの作成（§16.18）と、ゴールからロードマップを経てYAMLへ落とす流れ（§16.19）も同じ節の並びに置く。並列で走っているタスク同士が途中で問い合わせられるようにする仕組みは §16.21 にある。
+
 ### 16.1 位置付けと既存機能との違い
 
 | 機能                                          | 範囲             | 制御単位 |
@@ -1208,12 +1338,13 @@ defaults:
   sandbox: workspace-write # 拡張機能の設定より緩められない（§16.16）
   autoApprove: true # machine設定で許可されている場合のみ有効（§16.16）
   maxIterations: 20
-  cleanup: keep # keep | remove（worktreeの後始末）
+  cleanup: after-merge # keep | after-merge | remove（worktreeの後始末。§16.17）
 
 tasks:
   - id: T1
     prompt: 認証方式を検討し、docs/auth-design.md に設計を書く
     done: docs/auth-design.md を書き終えている
+    issue: 12
 
   - id: T2
     dependsOn: [T1]
@@ -1225,6 +1356,7 @@ tasks:
     done: API側の実装が終わり、全テストが通っている
     continuePrompt: 続き
     maxIterations: 30
+    issue: 13
 
   - id: T3
     dependsOn: [T1]
@@ -1233,13 +1365,11 @@ tasks:
 
   - id: T4
     dependsOn: [T2, T3]
-    isolation: shared
-    prompt: |
-      次のブランチをマージし、結合部分の齟齬を直してレビューする。
-      - {{T2.branch}}（{{T2.cwd}}）
-      - {{T3.branch}}（{{T3.cwd}}）
-    done: マージが終わり、全テストが通っている
+    prompt: API側とUI側の結合部分に齟齬がないか確かめ、あれば直す
+    done: 結合部分の確認が終わり、全テストが通っている
 ```
+
+T4は「T2とT3のブランチをマージする」タスクではない。マージは拡張機能が行い（§16.17）、T4はマージ済みの統合ブランチから分岐した状態で始まる。合流タスクに要るのは、統合された結果を確かめる作業だけになる。
 
 #### タスクのフィールド
 
@@ -1259,6 +1389,7 @@ tasks:
 | `escalate`                                | -    | `[]`                     | 自動承認しないコマンドのパターン追加                                                                               |
 | `allow`                                   | -    | `[]`                     | 既定の停止条件から外すパターン。解除できない固定ルールがある（§16.16）                                             |
 | `retries`                                 | -    | `0`                      | 失敗時の再試行回数                                                                                                 |
+| `issue`                                   | -    | -                        | 対応するIssue番号。PR/MRの本文へ `Closes #<N>` として出す（§16.18・§16.19）                                        |
 
 未知のフィールドは読み飛ばす（CLIやスキーマの更新で壊れないようにする）。
 
@@ -1275,6 +1406,8 @@ tasks:
 - `id` が `^[A-Za-z0-9_][A-Za-z0-9_-]{0,49}$` に一致しない。この値はそのままパスとブランチ名に入るため、パストラバーサルやgitの引数解釈を防ぐために字種を絞る（`codex/argvBuilder.ts` がセッションidをUUIDで検証しているのと同じ理由）。先頭のハイフンを許さないのは、`-` で始まる文字列がコマンドのオプションとして解釈されうるため
 - `id` がWindowsの予約デバイス名（`CON` `PRN` `AUX` `NUL` `COM1`〜`COM9` `LPT1`〜`LPT9`、大文字小文字を問わない完全一致）。worktreeのディレクトリ名に使えない
 - `id` が `-retry` に数字が続く形で終わっている（`/-retry\d+$/`）。再試行時のブランチ名 `wf/<runId>/<taskId>-retry<n>`（§16.5）と衝突する
+- `id` が `_integration`（大文字小文字を問わない）。統合worktreeのディレクトリ名として予約する（§16.17）。字種の正規表現は先頭の `_` を許しているため、そのままだと同じ場所を指すタスクを書けてしまう
+- `issue` が正の整数でない。値はそのまま `gh` / `glab` の引数とPR/MR本文へ入るため、型を絞る
 - `maxParallel` が1未満、または10を超える。タスクの総数が50を超える
 - `retries` が上限（`MAX_RETRIES` = 10）を超える。再試行のたびに新しいworktreeとCLIプロセスが増えるため
 - `maxIterations` が1未満、または200（既存のループ制御の上限 `LOOP_ITERATION_LIMIT` と共通）を超える
@@ -1292,13 +1425,29 @@ tasks:
 
 - 走らせる集合の決定は純粋関数（`scheduler.ts`）に閉じる。入力は「タスク定義」と「タスクごとの状態」、出力は「次に開始するidの集合」
 - Codexは1つのapp-serverプロセスが複数スレッドを扱えるため、並列数を上げてもプロセスは増えない。Claude Codeはセッションごとに `claude` プロセスが立つため、`maxParallel` の主な意味はこちら側にある
-- タスクの状態は `pending` / `running` / `waitingApproval` / `done` / `failed` / `skipped`
+- タスクの状態は `pending` / `running` / `waitingApproval` / `waitingReply` / `merging` / `done` / `failed` / `blocked` / `skipped`
 - `waitingApproval` も並列の枠を占める。人待ちのセッションもプロセスとしては生きているため
 - 同じ段のタスクが複数開始できるとき、定義ファイルに書かれた順で埋める（再現性のため）
+
+`merging` と `blocked` は成果の統合（§16.17）に対応する状態で、次の意味を持つ。
+
+| 状態      | 意味                                                                  |
+| --------- | --------------------------------------------------------------------- |
+| `merging` | ループは終わったが、統合ブランチへのマージがまだ終わっていない        |
+| `done`    | **統合ブランチへ入った。** ループが終わっただけでは `done` にならない |
+| `blocked` | マージが衝突し、自動での解決にも失敗した。作業自体は終わっている      |
+
+`waitingReply` は他のタスクへ返信を求めて送った状態で、§16.21 に属する。返信が届くか、待ちの上限に達するまで次の指示を送らない。これも並列の枠を占める。
+
+- 後続タスクは統合ブランチから分岐するため、依存先が `merging` の間は開始できない。スケジューラは `done` だけを依存の充足とみなす
+- `merging` も並列の枠を占める。マージが終わるまでそのタスクの成果は確定しないため
+- `blocked` は実行全体を止めない。依存する後続だけが `skipped` になり、独立した枝は走り続ける（§16.17）
 
 ### 16.4 タスク間の引き継ぎ
 
 `prompt` と `continuePrompt` の中で `{{<id>.<field>}}` を書いたときだけ、その値を差し込む。依存タスクの応答を無条件に前置きすることはしない（長文でコンテキストを圧迫するため）。
+
+ここで扱うのは**完了したタスクの結果を一方向に渡す**ことだけである。走行中のタスク同士が途中で問い合わせる仕組みは §16.21 で別に用意する。
 
 | 変数            | 中身                                                         |
 | --------------- | ------------------------------------------------------------ |
@@ -1325,12 +1474,15 @@ tasks:
 
 | `LoopStopReason`         | タスクの結果                             |
 | ------------------------ | ---------------------------------------- |
-| `done`                   | `done`                                   |
+| `done`                   | `merging`（マージが済んで初めて `done`） |
 | `maxReached`             | `failed`（回数切れ。理由を記録する）     |
 | `failed`                 | `failed`（`retries` の範囲で再試行）     |
 | `manual` / `interrupted` | 実行全体を停止（人が割り込んだとみなす） |
+| `taskStopped`            | `failed`（手動）。そのタスクだけを止める |
 
-`manual` / `interrupted` は「タスクの結果」の対応が無い（実行全体の制御にだけ効く）。人がそのタスクの画面へ直接介入した状態は、`pending` / `running` / `waitingApproval` / `done` / `failed` / `skipped` のどれにも当てはまらないため、**そのタスク自身の状態は変えない**。走っていたセッションはそのまま（多くは `running` のまま）残り、以降はそのタスクに関しては人の操作に委ねる。
+`taskStopped` はワークフローView（§16.8）の「タスク停止」から来る。人がタブへ直接介入した `manual` / `interrupted` と紛らわしいが、**波及範囲が逆**である。前者はそのタスクだけを `failed` にして他のタスクは走らせ続け、後者はタスク自身の状態を変えずに実行全体を止める。同じ「止める」を1つの理由にまとめると、Viewからタスクを1つ止めただけでワークフロー全体が停止してしまう。
+
+`manual` / `interrupted` は「タスクの結果」の対応が無い（実行全体の制御にだけ効く）。人がそのタスクの画面へ直接介入した状態は、§16.3 に挙げたどの状態にも当てはまらないため、**そのタスク自身の状態は変えない**。走っていたセッションはそのまま（多くは `running` のまま）残り、以降はそのタスクに関しては人の操作に委ねる。
 
 タスクが `failed` になった時点で、そのタスクに依存する後続を `skipped` にし、実行全体を止める。独立した枝も止める（合流タスクの前提が崩れた状態で走らせない）。ただし、すでに `running` のタスクは走らせ切る。途中で殺すと中途半端な変更がworktreeに残るため。
 
@@ -1350,10 +1502,13 @@ Viewからの手動の「再実行」だけを受け付ける。手動の再実�
 
 判定は次の優先順で行う。
 
-1. `pending` / `running` / `waitingApproval` が1件でもあれば `running`（まだ終わっていない）
+1. `pending` / `running` / `waitingApproval` / `waitingReply` / `merging` が1件でもあれば `running`（まだ終わっていない）
 2. `failed` が1件でもあれば `failed`
-3. `skipped` が1件でもあれば `aborted`
-4. それ以外（全タスクが `done`）は `succeeded`
+3. `blocked` が1件でもあれば `blocked`（作業は終わったが統合できていない）
+4. `skipped` が1件でもあれば `aborted`
+5. それ以外（全タスクが `done`）は `succeeded`
+
+`succeeded` のときだけ、統合ブランチからmainへのPR/MRを作る（§16.18）。`blocked` を `failed` と混ぜないのは、原因も次にやることも違うためで、前者は統合の衝突（人が解決すれば続けられる）、後者はタスクそのものの失敗（やり直しが要る）にあたる。
 
 `skipped` を見ずに `failed` の有無だけで判定してはいけない。`manual` / `interrupted` による停止は、その原因になったタスク自身を `failed` にしない設計（前述のとおり状態を変えない）ため、`skipped`（`runHalted`）だけが残ってrunが終わることがある。ここを `succeeded` と誤判定すると、一部のタスクが実行されないまま終わったことに気づけない。`dependencyFailed` による `skipped` は必ず対応する `failed` を伴うため2で拾われ、3に落ちるのは `runHalted`（人の割り込み、または他の失敗による停止で新たに開始されなかった独立した枝）だけになる。
 
@@ -1366,11 +1521,11 @@ Viewからの手動の「再実行」だけを受け付ける。手動の再実�
 `isolation: worktree` のタスクは、専用のgit worktreeで走らせる。同時に走るタスクが同じファイルを書いて壊れるのを、原理的に防ぐため。
 
 - 置き場: `<repo>/.agents/worktrees/<runId>/<taskId>`
-- ブランチ: `wf/<runId>/<taskId>`、分岐元は実行開始時のHEAD
+- ブランチ: `wf/<runId>/<taskId>`。分岐元は**そのタスクを開始する時点の統合ブランチ**（§16.17）。依存先の成果を引き継いだ状態から始めるため
 - `<repo>` はワークフローの定義ファイルが属するワークスペースフォルダに固定する。マルチルートでも `currentWorkspaceFolder()`（アクティブエディタ基準で揺れる）は使わない
 - `runId` はUUID。`taskId` は §16.2 の検証で字種を絞ってある
-- 実行後は既定で残す（`cleanup: keep`）。マージは合流タスクのpromptで指示するか、人が行う
-- `cleanup: remove` を指定した場合のみ、`done` になったタスクのworktreeを撤去する。`failed` のものは残す
+- タスクの成果は拡張機能が統合ブランチへマージする（§16.17）。合流タスクのpromptでマージを指示する必要はない
+- 実行後の後始末は `cleanup` で決める。既定の `after-merge` はマージが済んだ時点で撤去する（§16.17）。`failed` / `blocked` のものは残す
 - 撤去は `git worktree remove`。ディレクトリを直接消さない。未コミットの変更があるworktreeは撤去せず警告する
 
 #### 実装上の注意
@@ -1403,11 +1558,11 @@ git worktree add -b wf/run/T1 repo/.agents/worktrees/run/T1 <HEAD>
 
 #### gitリポジトリでない場合
 
-worktreeを作れないため、次のように落とす。
+worktreeを作れないため、ディレクトリの複製による隔離（疑似worktree）へ落とす。詳細は §16.20 にある。
 
-1. ワークスペースがgitの作業ツリーでないと判定したら、そのタスクを `shared`（ワークスペース直下）へフォールバックする
-2. 「並列タスクが同じディレクトリで走るためファイル衝突しうる」旨を、ログとワークフローViewの両方に警告として出す
-3. `{{T.branch}}` は空文字になる。マージ前提のpromptを書いていると噛み合わないため、警告文でそれも示す
+1. ワークスペースがgitの作業ツリーでないと判定したら、そのタスクを疑似worktreeで走らせる
+2. 「3-way mergeができないため、同じファイルへの変更は全て衝突になる」旨を、ログとワークフローViewの両方に警告として出す
+3. `{{T.branch}}` は空文字になる。ブランチ名を前提にしたpromptを書いていると噛み合わないため、警告文でそれも示す
 
 フォールバックを望まない場合のために `isolation: worktree-strict` を用意し、こちらはgit外なら実行を開始せずエラーにする。
 
@@ -1503,8 +1658,8 @@ worktreeを作れないため、次のように落とす。
 [####------------] 25%
 ```
 
-- 状態の内訳: `done` / `running` / `waitingApproval` / `pending` / `failed` / `skipped`
-- 承認待ちと失敗が1件でもあれば、その旨を最上段で目立たせる（並列で走っていると個々のノードを見落とすため）
+- 状態の内訳: §16.3 の全ての状態（`done` / `running` / `waitingApproval` / `waitingReply` / `merging` / `pending` / `failed` / `blocked` / `skipped`）
+- 承認待ち・返信待ち・失敗・統合できていないものが1件でもあれば、その旨を最上段で目立たせる（並列で走っていると個々のノードを見落とすため）
 
 #### 依存グラフ
 
@@ -1513,14 +1668,17 @@ worktreeを作れないため、次のように落とす。
 - レイアウト: 依存の深さで段（rank）を決め、同じ段のタスクを横に並べる。段が「同時に走りうる集合」に対応するので、`T1 → (T2 || T3) → T4` がそのまま縦3段の図になる
 - ノードの見た目で状態を示す。色に加えて記号も添える（色だけに頼らない）
 
-| 状態              | 見た目                                               |
-| ----------------- | ---------------------------------------------------- |
-| `pending`         | 灰色の枠線のみ・記号なし                             |
-| `running`         | 強調色の枠＋進行を示すアニメーション、`n回目` を併記 |
-| `waitingApproval` | 警告色＋一時停止の記号                               |
-| `done`            | 塗りつぶし＋チェック                                 |
-| `failed`          | エラー色＋バツ、理由（回数切れ・ターン失敗など）     |
-| `skipped`         | 破線の枠＋斜線                                       |
+| 状態              | 見た目                                                 |
+| ----------------- | ------------------------------------------------------ |
+| `pending`         | 灰色の枠線のみ・記号なし                               |
+| `running`         | 強調色の枠＋進行を示すアニメーション、`n回目` を併記   |
+| `waitingApproval` | 警告色＋一時停止の記号                                 |
+| `done`            | 塗りつぶし＋チェック                                   |
+| `failed`          | エラー色＋バツ、理由（回数切れ・ターン失敗など）       |
+| `waitingReply`    | 警告色の枠＋吹き出しの記号。返信待ち（§16.21）         |
+| `merging`         | 完了色の枠＋合流の記号。統合ブランチへ取り込み中       |
+| `blocked`         | 警告色の枠＋合流の記号にバツ。衝突して統合できていない |
+| `skipped`         | 破線の枠＋斜線                                         |
 
 - ノードには id・状態・経過時間・送信回数・**直近の応答の1行要約**を出す。要約があるだけで「今なにをしているか」がグラフ上で分かる
 - エッジは依存元→依存先。依存元が未完了のものは薄く描く
@@ -1535,15 +1693,21 @@ worktreeを作れないため、次のように落とす。
 - ノードまたは一覧の行を押すと、そのタスクのチャットタブへ移動する。会話の中身は通常のチャット画面そのものなので、途中経過も承認カードも同じ見た目で読める
 - タスクを開始したとき、チャットタブは**背面で開く**（`preserveFocus`）。フォーカスは奪わないが、いつでも切り替えて経過を追える
 - **タブを閉じてもタスクは止まらない**。閉じた後にノードを押せば同じセッションのタブが開き直り、それまでの会話が全て復元される。そのために、タスク実行中のセッション（`ChatSession` / `ClaudeStreamSession`）の寿命をパネルから切り離す（§16.10）
-- ノードから直接できる操作
+  - ただしこれが効くのは**ウィンドウが生きている間**に限る。リロードするとセッション（CLIのプロセス）自体が失われるので、開き直せるのは会話ではなく「再実行」になる（§16.11）
+- 操作は一覧の行に置く。グラフのノードは会話へ移る導線に専念させる（「グラフは全体像、一覧は詳細」という分担に合わせる。小さなノードにボタンを詰めても押しにくい）
   - `中断`: 進行中のターンだけ止める（`turn/interrupt` 相当）。タスクは止まらず、次の指示から続く
   - `タスク停止`: そのタスクのループを止め、`failed`（手動）にする
   - `再実行`: `failed` / `skipped` のタスクを、依存が満たされていればもう1度走らせる
   - `承認`: `waitingApproval` のとき、要求の内容をその場に出して許可・拒否を決める
+  - `再マージ`: `blocked` のタスクを、人が手元で衝突を解いたあとにもう1度マージする（§16.17）
+- 衝突の解決用セッション（§16.17）はワークフローの定義に無いのでノードにしない。対象タスクのノードに「マージ解決中」として重ね、押すとそのセッションのタブへ移動する
+
+「中断」と「タスク停止」は停止理由を分ける。人がタブへ直接介入した場合（`manual` / `interrupted`）はタスク自身の状態を変えず実行全体を止めるのに対し（§16.5）、Viewからの「タスク停止」はそのタスクだけを `failed` にして他は走らせ続ける。同じ「止める」でも波及範囲が違うため、`LoopStopReason` の段階で区別する。
 
 #### そのほか
 
-- 操作: 実行、全体の停止、worktreeの撤去、定義ファイルを開く
+- 操作: 実行、全体の停止、worktreeの撤去、定義ファイルを開く、統合ブランチのPR/MRを開く、統合ブランチと残ったworktreeをまとめて片付ける
+- 統合の状況: 統合ブランチ名、取り込み済みのタスク数、作成したPR/MRへのリンク、最終マージの結果（§16.17・§16.18）
 - 警告欄: git外フォールバック、サンドボックス無効の指定、`allow` による危険判定の解除、回数切れなど
 - 更新はタスクの状態が変わったときと、実行中の経過時間の表示のため1秒ごと（送るのは差分のみ）
 - **画面に出す動的な文字列（応答の要約・タスクid・ブランチ名・ファイルパス）は、必ずテキストノードとして挿入する。** これらはエージェントの出力やYAMLに由来し、内容を信用できない。HTML/SVGの文字列結合で組み立てるとWebview内でスクリプトが走り、承認操作の偽装に繋がる。CSPは既存のチャット画面と同じく nonce 付きの単一スクリプトのみとし、`unsafe-inline` は使わない
@@ -1551,7 +1715,7 @@ worktreeを作れないため、次のように落とす。
 
 ### 16.9 定義ファイルの生成
 
-ゴールの文を渡すと、タスク分解済みのYAMLを作る。
+ゴールの文を渡すと、タスク分解済みのYAMLを作る。規模の大きいゴールでは、あいだにロードマップを挟む2段の経路（§16.19）を使う。この節はどちらの経路にも共通する、生成そのものの扱いを述べる。
 
 1. コマンド（`workflow.plan`）でゴールを入力する
 2. 分解用のセッションを1つ作り、スキーマの説明と現在のワークスペースの情報を添えてゴールを渡す。返答はYAMLのみとするよう指示する
@@ -1579,11 +1743,18 @@ src/
     escalation.ts   承認要求を auto / ask に振り分ける（純粋）
     runState.ts     実行状態の保持と遷移（純粋）
     worktree.ts     worktreeの作成・撤去、git作業ツリーかの判定
+    integration.ts  統合ブランチの作成・マージ・衝突の検出（gitはポート越し）
+    forge.ts        ホストの判定と PR/MR の作成（gh / glab をポート越しに呼ぶ）
+    pseudoWorktree.ts git外での複製による隔離と差分の適用
+    messaging.ts    タスク間メッセージングのMCPサーバと配送（§16.21）
     runner.ts       セッションの生成・指示の送信・完了検知（VSCode層）
-    planner.ts      ゴール文からYAMLを生成する
+    planner.ts      ゴール文またはロードマップからYAMLを生成する
+    roadmap.ts      ゴール文からロードマップを生成し、完了を書き戻す
   view/
     workflowView.ts ワークフローViewのWebview
 ```
+
+`integration.ts` / `forge.ts` / `pseudoWorktree.ts` は、`worktree.ts` と同じくコマンドの実行をポート（差し替え可能なインターフェース）越しに行い、コマンドを組み立てる部分を純粋関数として切り出す。テストで実際に `git` / `gh` / `glab` を叩かないため。
 
 チャット画面側には、オーケストレータが使う口を1つ足す。CodexとClaude Codeで同じ形にし、`runner.ts` はプロバイダを見ない。
 
@@ -1664,9 +1835,11 @@ Codexは送信のたびに `readConfig().codex`（VSCodeのグローバル設定
 
 ### 16.11 永続化と復元
 
-- キーは `codex.workflow.runs`。値はrunの配列で、各runが `runId`（UUID）・定義ファイルのパス・開始時刻・タスクごとの `{ 状態, sessionId, cwd, ブランチ名, 送信回数, 失敗理由 }` を持つ
+- キーは `codex.workflow.runs`。値はrunの配列で、各runが `runId`（UUID）・定義ファイルのパス・開始時刻・統合ブランチ名・統合PR/MRの番号・タスクごとの `{ 状態, sessionId, cwd, ブランチ名, 送信回数, 失敗理由, PR/MRの番号 }` を持つ
+- 統合ブランチ名とPR/MRの番号を持たせるのは、リロード後もViewから統合の状況を辿れるようにするため。どちらもホスト側にも残っている情報で、機微は含まない
 - **応答本文は保存しない。** `{{T.result}}` の元になるテキストは機微を含みうるため、暗号化されない `workspaceState` に平文で置かない。必要になったらセッションの `ChatState` から読み直す（リロードで失われた場合は、そのタスクは再実行の対象になる）
-- ウィンドウのリロードで走行中だったタスクは、いったん `failed`（理由: 中断）として扱う。人がViewから再実行できる
+- ウィンドウのリロードで走行中だったタスクは、いったん `failed`（理由: 中断）として扱う。人がViewから再実行できる。`waitingReply`（§16.21）も同じ扱いにする。未配送のメッセージは保存していないため、リロードをまたいで届くことはない
+- `merging` だったタスクは、マージが途中で切れている可能性がある。状態の記録ではなく**統合ブランチの実際の状態から判定し直す**（そのタスクのマージコミットが入っていれば `done`、入っていなければ `merging` からやり直す）。統合worktreeに未解決の衝突が残っていれば `blocked` として扱い、人へ回す
 - タスク管理下のセッションは、汎用のパネル復元（§16.10 の7）に任せない
 - 走り終えたrunの記録も残し、Viewから開き直せるようにする（最新10件。それより古いものは消す。手動で全消去する手段も用意する）
 
@@ -1685,6 +1858,14 @@ Codexは送信のたびに `readConfig().codex`（VSCodeのグローバル設定
 - 危険判定（§16.7）は取りこぼす。サンドボックスと併せて初めて意味を持つ
 - `allow` を書いたタスクは、そのタスクに関する限り危険判定が効かなくなる。防げないので、見えるようにする方針を採っている（§16.7）
 - 分解の生成（§16.9）はあくまで下書き。人のレビューを前提とし、生成したまま自動で実行することはしない
+- タスクの起点が「開始時点の統合ブランチ」になるため（§16.17）、**同じYAMLを同じHEADから実行しても、タスクの完了順が違えば結果が変わる。** 並列実行と成果の引き継ぎを両立させる以上避けられない
+- マージの衝突そのものは減らせない。統合ブランチへ順に取り込む形は、衝突を**早く見つける**ことはできても、並列で同じ場所を触る分割の問題を解くわけではない。タスクの切り方は人が担保する（この表の1点目と同じ）
+- 衝突の自動解決（§16.17）は取りこぼす。解けたように見えて意味的に壊れている解決もありうる。統合ブランチをmainへ入れる前のレビューは省けない
+- 疑似worktree（§16.20）では3-way mergeができず、同じファイルへの変更が全て衝突になる。gitリポジトリでの実行と同じ密度の並列は見込めない
+- `finalMerge: auto` は無人実行がmainを進めることを意味する。組織の運用規約と衝突しうるため、machine設定で `pr-only` に固定できるようにしてある（§16.16）
+- タスク間のメッセージング（§16.21）は、分割の設計が悪いタスクを救う手段にはならない。互いに問い合わせながら進めるより、依存を引き直したほうが早いことが多い
+- ツールを呼ぶかどうかはモデルの判断であり、呼ばれることを前提にした設計にはできない。メッセージングが一度も使われないまま走り切るワークフローもありうる
+- メッセージのやり取りはターンを増やす。コンテキストとレート制限の消費もそのぶん増える
 
 ### 16.14 実装順序（TDD）
 
@@ -1695,9 +1876,18 @@ Codexは送信のたびに `readConfig().codex`（VSCodeのグローバル設定
 3. `runState.ts`: 状態遷移（失敗時の後続 `skipped` 化、再試行、`allow` がタスクを越えないこと）
 4. `escalation.ts`: 危険判定。入力は生の要求パラメータとタスクの境界パス
 5. `worktree.ts`: 作成・撤去・git判定（gitの呼び出しはポート越しに差し替え可能にし、シェルを経由しない）
-6. `runner.ts`: セッションの生成と完了検知
-7. `workflowView.ts`: 表示と操作
-8. `planner.ts`: ゴール文からの生成
+6. `integration.ts`: 統合ブランチの作成、マージ、衝突の検出（gitはポート越し。衝突時の巻き戻しまでを含む）
+7. `runner.ts`: セッションの生成と完了検知。`merging` / `blocked` を含む状態遷移の接続と、衝突解決セッションの起動
+8. `forge.ts`: ホストの判定と PR/MR の作成。前提チェック（remote・CLI・認証）を含む
+9. `workflowView.ts`: 表示と操作
+10. `planner.ts`: ゴール文からの生成
+11. `roadmap.ts`: ロードマップの生成と、完了の書き戻し
+12. `pseudoWorktree.ts`: git外での隔離
+13. `messaging.ts`: タスク間メッセージング（MCPサーバ、配送、`waitingReply` の遷移）
+
+`integration.ts` を `runner.ts` より先に置くのは、マージがタスクの状態遷移（`merging` → `done` / `blocked`）の一部になるため。マージの成否を返す層が無いと、`runner.ts` 側の遷移を書けない。
+
+`forge.ts` は `runner.ts` の後で足す。PR/MRが作れなくてもローカルのマージだけで完結する設計（§16.18）なので、ここまでで機能としては閉じる。`pseudoWorktree.ts` を最後に置くのも同じ理由で、git外の対応が無くてもgitリポジトリでは動く。
 
 YAMLの解析には `yaml` パッケージを使う（現状ランタイム依存は無いが、esbuildのバンドルに含める）。
 
@@ -1722,6 +1912,20 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 | 設定のクランプ      | 拡張機能の設定より緩い `sandbox` / `approvalMode` をYAMLに書いても、緩まずに警告が出る（§16.16）                                                                 |
 | `cwd` の境界        | ワークスペース外を指す `cwd` が実行前にエラーになる                                                                                                              |
 | YAMLの生成          | ゴール文から生成したYAMLが §16.2 の検証を通り、`autoApprove` や `allow` を含む場合は警告として提示される                                                         |
+| 統合ブランチ        | 実行後に `wf/<runId>/integration` が存在し、そのcommit列に各タスクのマージコミットが `--no-ff` で並んでいる                                                      |
+| 起点の引き継ぎ      | 依存を持つタスクのブランチの分岐元が、依存先のマージコミットと一致する（`git merge-base` で確かめる）                                                            |
+| マージの直列化      | 2つのタスクが同時に完了する状況で、マージが重ならずに順に実行される（ポートへの呼び出し順をユニットテストで確認する）                                            |
+| 未コミットの回収    | エージェントがコミットせずに `done` を宣言した場合でも、変更が統合ブランチへ入る                                                                                 |
+| 衝突の解決          | 同じ行を変える2タスクの実行で、解決用セッションが立ち、成功時は `done`、失敗時は `blocked` になり統合ブランチがマージ前のcommitへ戻っている                      |
+| `blocked` の波及    | `blocked` のタスクに依存する後続だけが `skipped` になり、独立した枝は最後まで走る                                                                                |
+| PR/MRの順序         | タスクのPR/MRがマージより先に作られ、統合ブランチのpush後にホスト側でマージ済みとして扱われる                                                                    |
+| 前提の欠落          | 認証が通らない状態で実行しても、警告のうえローカルのマージだけ進み、mainへのマージは行われない                                                                   |
+| 疑似worktree        | gitでないフォルダで並列タスクが別々のディレクトリで走り、同じファイルを変えた場合に衝突として解決セッションへ回る                                                |
+| ロードマップ        | 生成したロードマップからYAMLが作られ、runの完了後に対応する項目のチェックだけが変わっている（本文は変わらない）                                                  |
+| タスク間の送信      | 並列の2タスクで、片方から送ったメッセージが相手の次の指示の先頭に届く。走行中のターンには割り込まない                                                            |
+| 送信元の判別        | ツールの引数に別のタスクidを書いても、送信元は接続から判別した側の値になる                                                                                       |
+| 返信待ちの解除      | 全タスクが `waitingReply` になった場合と、`replyTimeoutSec` を超えた場合の双方で待ちが解け、警告が記録される                                                     |
+| MCPサーバの欠落     | ツールが見えない状態でも、警告のうえワークフローが最後まで走る                                                                                                   |
 
 ### 16.16 設定の信頼境界
 
@@ -1742,9 +1946,318 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 | `executablePath` `additionalArgs` `codexHome` | **YAMLからは指定できない**。フィールド自体を設けない                                                                                                                                   |
 | `sandboxWritableRoots` `sandboxNetworkAccess` | **YAMLからは指定できず、拡張機能の設定も継承しない**。タスクでは常に空・無効に固定する（後述）                                                                                         |
 | `model` `effort`                              | 自由に指定できる（これらは `machine-overridable` であり、実行経路や権限には関わらない）                                                                                                |
+| `issue`                                       | 正の整数のみ。PR/MR本文の `Closes #<N>` とホストのCLIの引数に入る（§16.18）                                                                                                            |
+| 統合・PR/MR・最終マージの設定                 | **YAMLからは指定できない**。`agent.workflows.forge` / `pullRequest` / `finalMerge` は拡張機能の設定にだけ置く（後述）                                                                  |
 
 `sandboxWritableRoots` と `sandboxNetworkAccess` は、`workspace-write` の範囲をワークスペースの外やネットワークへ広げる**追加の許可**である。YAMLにこれを指定する項目は設けていないので、素直に作るなら拡張機能の設定をそのまま引き継ぐことになる。だがそれをすると、人が対話セッション用に意識して許可した拡張が、**YAMLからは見えも書けもしない形で無人実行のタスクへ暗黙に伝わる**。クランプの対象になるフィールドが存在しない以上、安全側（拡張しない）に固定する。タスクに広い書き込み先が要るなら、`cwd` か `isolation` で表現する。
 
 `cwd` を無検証で許すと、`sandbox: workspace-write` の「workspace」の基準そのものを付け替えられる（例: `cwd: ~/.ssh` にすればそこが書き込み可能な領域になる）。境界の検証はサンドボックスの意味を保つために要る。
 
 この節の方針は「安全側へは動かせる、危険側へは動かせない」の一点に尽きる。ワークフローの定義は便利さのための入力であって、権限を決める場所ではない。
+
+#### 成果の統合まわりの設定
+
+§16.17〜§16.20 で足す設定は、YAMLではなく拡張機能の設定に置く。スコープは次のとおり。
+
+| 設定                                    | スコープ            | 理由                                                                                                        |
+| --------------------------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `agent.workflows.finalMerge`            | machine             | mainを無人で書き換えるかどうかを決める。リポジトリの `.vscode/settings.json` から `auto` にされてはいけない |
+| `agent.workflows.forge`                 | machine             | どのCLI（`gh` / `glab`）を起動するかを決める。実行するコマンドの選択にあたるので §8 と同じ扱いにする        |
+| `agent.workflows.pullRequest`           | machine-overridable | 作るPR/MRの層。権限には関わらない                                                                           |
+| `agent.workflows.roadmapDir`            | machine-overridable | 出力先のパス。ワークスペースフォルダの配下に限る                                                            |
+| `agent.workflows.pseudoWorktreeExclude` | machine-overridable | 複製から外すディレクトリ名。増やしても安全側にしか働かない                                                  |
+
+push先のremoteをYAMLや設定から選ぶ手段は設けない。常に `origin` を使う。任意のURLへpushできると、リポジトリの中身を別の宛先へ出す経路になる。
+
+#### ホストへ出る情報
+
+PR/MRを作ると、YAMLに書かれた `prompt` と `done` がリポジトリのホストへ送られる（§16.18）。**`{{T1.result}}` の展開結果はPR/MRの本文に入れない。** エージェントの応答は機微を含みうるうえ、長さも読めない。同じ理由でコミットメッセージにも入れない（§16.17 の固定文言）。
+
+ホストへ出る文字列は、人が書いたYAMLの中身と、拡張機能が組み立てた固定の文面に限る。これは §16.12 で「展開後のプロンプトを作業記録へ流さない」と決めたのと同じ線引きを、外部のサービスに対して引いたものにあたる。
+
+### 16.17 成果の統合（統合ブランチとマージ）
+
+§16.6 は当初「実行後のworktreeは残し、マージは合流タスクのpromptで指示するか人が行う」としていた。これを改め、**マージまでをオーケストレータの責務にする**。並列タスクが終わるたびに拡張機能がマージし、worktreeを片付けて次へ進む形にする。
+
+合流タスクのpromptでマージを指示する方式は、マージという毎回同じ手順をエージェントの裁量に委ねることになる。衝突の扱いも、コミットの粒度も、ブランチの消し忘れも、そのつど違う結果になる。手順が決まっているものは拡張機能側に置く。
+
+#### 統合ブランチ
+
+runごとに1本の統合ブランチを持ち、そこへ各タスクの成果を集める。
+
+- ブランチ: `wf/<runId>/integration`。分岐元は実行開始時のHEADコミット
+- 作業ディレクトリ: `<repo>/.agents/worktrees/<runId>/_integration` に専用のworktreeを作る
+- 専用worktreeにするのは、**人が使っているメインの作業ツリーのHEADを動かさないため**。無人実行が人の手元のブランチを切り替えたり、編集中のファイルの上でマージを走らせたりしてはいけない
+- `_integration` はタスクidとして予約する。`id` の字種（§16.2）は先頭の `_` を許しているため、`id: _integration` と書けてしまうと同じディレクトリを指す。検証で弾く
+- 統合ブランチはrunが終わっても消さない。片付けはViewの操作から明示的に行う
+
+#### タスクブランチの分岐元
+
+現行の「実行開始時のHEAD」から、**そのタスクを開始する時点の統合ブランチのHEAD**へ変える。
+
+- 依存先の成果は統合ブランチへ入っているので、`dependsOn` を持つタスクはそれを引き継いだ状態から始まる。`{{T1.branch}}` を使って自分でマージする必要が無くなる
+- 同じ段の並列タスクは同じ起点を共有する。先に終わった1件がマージされると、残りは古い起点のまま作業を続けることになる。これは並列実行である以上避けられないので、下のコンフリクト処理で受ける
+- 起点が完了の順序で変わるため、「同じYAML・同じHEADなら同じ結果」という意味での再現性は失われる。制約として §16.13 に書く
+
+#### タスク完了時のコミット
+
+マージするには、成果がコミットされている必要がある。`done` の宣言はコミットの有無を問わないため、エージェントが未コミットのまま終了を宣言することがある。
+
+1. 終了条件に「変更をコミットしてあること」を拡張機能側が自動で足す（`decoratePrompt` と同じ経路。人が書いた `done` はそのまま残す）
+2. それでも未コミットの変更が残っていたら、拡張機能が `git add -A` と `git commit` を実行してからマージへ進む
+3. 自動コミットのメッセージは固定文言（`wf(<taskId>): uncommitted changes at task completion`）にする。エージェントの出力を混ぜない。改行やオプションに見える文字列が入りうるため
+4. `-A` で追跡対象外のファイルも拾う。新規ファイルがマージから落ちるほうが実害が大きい。`.gitignore` は効くのでビルド生成物は入らない
+
+粒度とメッセージはエージェントに委ね、取りこぼしだけ拡張機能が拾う、という分担になる。
+
+#### マージ
+
+- タスクが `done` になった時点で、統合worktreeで `git merge --no-ff <taskBranch>` を実行する
+- `--no-ff` にするのは、タスク単位の境界をあとから辿れるようにするため
+- マージコミットのメッセージは固定文言（`Merge task <taskId> (run <runId>)`）
+- **マージはworktreeの作成・撤去と同じ1本のキューに通して直列化する。** 並列タスクが同時に完了しても順に処理する。同じリポジトリの `index.lock` で競合するため（§16.6 の直列化と同じ理由）
+
+マージが終わるまで、次に開始するタスクの起点は決まらない。そこでタスクの状態に `merging` を足し、**`done` は「統合ブランチへ入った」を指す**ことにする。ループが終わっただけの状態は `merging` であり、スケジューラは `done` になるまで後続を開始しない。
+
+#### コンフリクト
+
+衝突したら、解決用のセッションを自動で立てる。無人実行を止めないため。
+
+1. `git merge` が衝突で終わったら、**衝突した状態のまま**にしておく。先に `git merge --abort` してから解決させると、解決用セッション自身がマージをやり直す必要があり、失敗する経路が増える
+2. 巻き戻し先として、マージ前の統合ブランチのコミットidを控える
+3. 統合worktreeを `cwd` にして解決用セッションを開く。プロンプトには衝突したファイルの一覧、突き合わせる2つのタスクの `prompt` と `done`、未解決パスの一覧（`git diff --name-only --diff-filter=U`）を渡す
+4. 終了条件は「衝突を解決してコミットしてあり、未解決のパスが残っていないこと」。判定は `git status` で拡張機能側からも確かめる（宣言だけを信じない）
+5. 解決用セッションは通常のタスクと同じループ制御・承認判定に従う。`maxIterations` は別に持ち、既定は小さくする（5）。何度も回して直らないものは人へ回したほうが早い
+6. 解決できたらマージ完了として扱い、タスクを `done` にして次へ進む
+7. 解決できなければ、控えたコミットidへ `git merge --abort` で戻し、そのタスクを `blocked` にする
+
+`blocked` は「タスクの作業自体は終わったが、統合できていない」状態で、`failed` とは別に扱う。
+
+- 依存する後続は `skipped`（理由: `mergeBlocked`）
+- **独立した枝は走り続ける。** 衝突は1タスクの統合の問題であって、他の枝の前提は崩れていない。`failed` のように実行全体を止めない
+- Viewから人が解決したうえで「再マージ」を指示できる
+
+解決用セッションは依存グラフのノードにはしない（ワークフローの定義に無いため）。Viewでは対象タスクのノードに「マージ解決中」として重ねて出す。
+
+#### worktreeの片付け
+
+`cleanup` の値に `after-merge` を足し、これを既定にする。
+
+| 値            | 挙動                                                               |
+| ------------- | ------------------------------------------------------------------ |
+| `keep`        | 撤去しない（現行の既定）                                           |
+| `after-merge` | マージが成功した時点でそのタスクのworktreeを撤去する（新しい既定） |
+| `remove`      | タスクが `done` になった時点で撤去する                             |
+
+- ブランチは消さない。PR/MRから辿れる必要がある
+- 撤去は `git worktree remove`。未コミットの変更は自動コミットで無くなっているはずだが、それでも残っていれば撤去せず警告する（現行の方針を維持）
+- `failed` / `blocked` のタスクのworktreeは残す。原因を調べるのに要る
+- 統合worktreeはrunが終わるまで残し、終了時に撤去する
+
+#### 全体の終了とmainへの反映
+
+全タスクが `done` になったら、統合ブランチからmainへのPR/MRを作る（§16.18）。`failed` / `blocked` / `skipped` が1件でも残っていれば作らず、統合ブランチをそのまま残して人に委ねる。
+
+### 16.18 ホスト連携（PR/MRの作成）
+
+作業の履歴をリポジトリのホスト側にも残す。GitHubとGitLabの両方を扱う。
+
+#### ホストの判定
+
+- `git remote get-url origin` のホスト名で決める。`github.com` ならGitHub（`gh`）、ホスト名に `gitlab` を含めばGitLab（`glab`）
+- 自己ホストのGitHub Enterpriseなど、名前から判定できないものがある。設定 `agent.workflows.forge`（`auto` / `github` / `gitlab` / `none`、既定 `auto`）で明示できる
+- `none` はPR/MRを作らない
+
+#### 2層で作る
+
+| 層     | head           | base                     | 本数       |
+| ------ | -------------- | ------------------------ | ---------- |
+| タスク | タスクブランチ | 統合ブランチ             | タスクごと |
+| 統合   | 統合ブランチ   | 実行開始時のHEADブランチ | runごと1本 |
+
+設定 `agent.workflows.pullRequest`（`none` / `integration` / `per-task`、既定 `per-task`）で層を選ぶ。
+
+#### 作る順序
+
+タスク1件について、次の順で行う。**3と4を入れ替えてはいけない。**
+
+1. タスクのコミットが揃った時点で、タスクブランチをpushする
+2. 統合ブランチが未pushならpushする。baseが存在しないとPR/MRを作れない
+3. PR/MRを作る（base=統合ブランチ、head=タスクブランチ）
+4. 統合worktreeでマージし、統合ブランチをpushする
+
+先にマージしてしまうと、baseとheadの間に差分が無くなり作成に失敗する（GitHubは "No commits between" を返す）。4のpushによって、作ったPR/MRはホスト側でマージ済みとして扱われる。
+
+#### 本文
+
+- タイトル: `<taskId>: <prompt の1行目>`
+- 本文: そのタスクの `prompt` と `done`、runId、依存タスクのid、対応するIssue番号（§16.19 で紐づいていれば `Closes #<N>`）
+- **本文はファイル経由で渡す**（`--body-file`）。`prompt` もエージェントの出力も、引数に直接置かない。改行やオプションに見える文字列が混ざりうる
+- `gh` / `glab` の呼び出しはシェルを経由しない（`execFile` にargv配列を渡す）。§16.6 のgitと同じ方針
+
+#### 最終マージ
+
+設定 `agent.workflows.finalMerge`（`auto` / `pr-only`、既定 `auto`）。
+
+- `auto`: 統合→mainのPR/MRを作ったうえで、`gh pr merge --merge` / `glab mr merge --remove-source-branch` まで実行する
+- `pr-only`: PR/MRを作って止める。mainへの書き込みは人が行う
+
+この設定はmainを書き換えるかどうかを決めるので、**machineスコープに固定する**（§16.16）。リポジトリの `.vscode/settings.json` から `auto` へ変えられてはいけない。MRの自己マージを禁じる運用規約を持つ組織のリポジトリでは、利用者がmachine設定で `pr-only` にする。
+
+mainへマージした後も統合ブランチは残す。片付けはViewの操作から行う。
+
+#### 前提が欠けている場合
+
+実行開始前に次を確かめる。
+
+- `origin` remote があるか
+- `gh` / `glab` がPATHにあるか
+- 認証が通っているか（`gh auth status` / `glab auth status`）
+
+欠けていれば、**警告を出したうえでPR/MRの作成を飛ばし、統合ブランチへのローカルのマージだけ進める。** ワークフロー自体は止めない。認証切れで夜間の実行が丸ごと落ちるほうが損失が大きい。警告はワークフローViewの警告欄とログの両方へ出す。
+
+この場合、`finalMerge: auto` であってもmainへのマージは行わない。PR/MRを介さずにmainを書き換えることはしない。統合ブランチが残るので、人が後から確かめてマージする。
+
+#### 外へ出る情報
+
+PR/MRの本文には、YAMLに書かれた `prompt` と `done` が入る。これらはリポジトリのホストへ送られ、後から消しても記録が残りうる。§16.16 の信頼境界に含める。
+
+### 16.19 ロードマップ
+
+ゴールから実行までを2段に分ける。1段目でロードマップのMarkdownを作り、人がレビューし、2段目でワークフローYAMLへ落とす。
+
+1段で直接YAMLを作ると、規模の大きいゴールではタスク数が膨らみ、分解の誤りをYAMLの上で読み取ることになる。**ロードマップは複数のrunにまたがって使う資産で、YAMLは1run分の実行定義**という寿命の違いもある。
+
+#### 1段目: ロードマップの生成
+
+- コマンド `workflow.roadmap` でゴールの文を入力する
+- 生成セッションが参照するもの: ワークスペースの構成、`AGENTS.md` / `CLAUDE.md`、既存のIssue
+- Issueは `gh issue list` / `glab issue list` で取る。ホストの判定は §16.18 と同じ。取れなければ飛ばす。既存のIssueと重複する項目を作らせないため、および項目にIssue番号を紐づけるために使う
+- 生成セッションは §16.9 の分解セッションと同じ制限で走らせる（`sandbox: read-only` 相当、承認要求は全て拒否）
+- 出力は `docs/roadmap/<slug>.md`（設定 `agent.workflows.roadmapDir`、既定 `docs/roadmap`）
+
+形式は次のとおり。機械が読み直せる程度に決めておき、それ以上は縛らない。
+
+```markdown
+# <ゴール>
+
+## Phase 1: <フェーズ名>
+
+- [ ] R1 認証方式を決めて設計を書く
+  - 依存: なし
+  - Issue: #12
+- [ ] R2 API側を実装する
+  - 依存: R1
+  - Issue: #13
+- [ ] R3 UI側を実装する
+  - 依存: R1
+```
+
+- 項目のid（`R1`）はロードマップの中で一意にする。YAMLのタスクidの元になる
+- `依存` は同じロードマップ内の項目idで書く。書かれていない項目同士は並列に走せる
+- 生成したロードマップは人がレビューして直す。**分解の誤りを一番安く直せる段がここ**
+
+#### 2段目: ロードマップからYAML
+
+- `workflow.plan` の入力として、ゴール文に加えてロードマップのファイルを取れるようにする
+- 項目を `tasks` に、`依存` を `dependsOn` に写す
+- **1回のワークフローで扱うのはロードマップの一部でよい。** 「次のフェーズだけYAMLにする」を選べるようにする。全体を1つのYAMLにするとタスク数の上限（50件）に当たるうえ、途中で方針が変わったときの作り直しが大きくなる
+- Issue番号を持つ項目は、生成されるタスクに `issue` フィールドとして持たせる。PR/MRの本文へ `Closes #<N>` として出す（§16.18）
+- 生成後の検証と、`autoApprove` / `allow` を含む場合の強調は §16.9 のまま
+
+#### ロードマップの更新
+
+- runが終わったら、そのrunで `done` になったタスクに対応するロードマップの項目にチェックを入れる
+- **書き換えるのはチェックボックスの記号だけにする。** 人が書いた文を機械が書き換えない
+- 人がYAMLを直してタスクidが変わったなどで対応が取れない項目には何もしない。ログに残す
+
+### 16.20 gitリポジトリでない場合の隔離
+
+§16.6 は、gitの作業ツリーでなければ `shared`（ワークスペース直下）へ落として並列実行し、衝突しうる旨を警告するとしていた。並列で走る以上、警告だけでは足りない。ディレクトリの複製による隔離に置き換える。
+
+- 置き場はgitの場合と同じ `<workspace>/.agents/worktrees/<runId>/<taskId>`
+- タスクの開始時にワークスペースの内容を複製する。複製から外すのは `.agents/worktrees` 自身（無限に再帰する）と、重量のあるディレクトリ（設定 `agent.workflows.pseudoWorktreeExclude`、既定 `node_modules` / `.venv` / `dist` / `out`）
+- 同時に、複製元のファイル一覧とサイズ・更新時刻をスナップショットとして持つ
+- タスクが終わったら、スナップショットとの差分（追加・変更・削除）を計算し、統合先のディレクトリ（`<runId>/_integration`）へ適用する。これがgitの場合のマージにあたる
+- 統合先で同じファイルが別のタスクによって既に変更されていれば衝突とする。**gitが無いので3-way mergeはできない。内容の突き合わせは行わず、両方の版をファイルとして渡してコンフリクト解決セッション（§16.17）へ回す**
+- runが終わったら、統合先の内容をワークスペースへ反映する。反映の前にワークスペース側が実行中に変更されていないかスナップショットで確かめ、変わっていれば反映せず警告する（人の編集を上書きしない）
+- PR/MRは作れない。§16.18 の前提チェックで飛ばす
+
+制約は次のとおり。
+
+- 3-way mergeができないため、同じファイルへの変更は全て衝突になる。gitリポジトリでの実行に比べて衝突の頻度は上がる
+- 大きなワークスペースでは複製のコストが無視できない。除外の設定で調整する
+- `worktree-strict` は従来どおりgit外では実行を始めない。疑似worktreeを望まない場合はこちらを使う
+
+### 16.21 タスク間のメッセージング
+
+§16.4 の `{{T1.result}}` は、**完了したタスクの結果を一方向に渡す**だけの仕組みである。並列で走っているタスク同士が途中で問い合わせる手段は無い。UI側のタスクがAPI側のタスクへレスポンスの形を聞きたくても、相手が終わるまで待つか、人が仲介するしかない。
+
+Claude Codeには、別々に走っているセッションが互いに名前で呼び合ってメッセージを送る仕組みがある。同じことをワークフローのタスク同士でできるようにする。**Codexにはこれに相当する機能が無い**ため、拡張機能側で両プロバイダに同じ口を用意する。
+
+#### 口の与え方
+
+拡張機能がMCPサーバを1つ立て、タスクのセッションへツールとして見せる。CodexもClaude CodeもMCPサーバを読むため、プロバイダを問わず同じツール名で揃えられる。
+
+- サーバはrunごとに立て、タスクのセッションを開くときにMCPの設定として渡す
+- **送信元はサーバ側が接続で判別する。** ツールの引数でタスクidを名乗らせない。名乗らせると、あるタスクが別のタスクを騙って送れてしまう
+
+| ツール         | 引数                                            | 返り値                                       |
+| -------------- | ----------------------------------------------- | -------------------------------------------- |
+| `list_tasks`   | なし                                            | 同じrunのタスクid・状態・直近の応答の1行要約 |
+| `send_message` | `to`（タスクid）・`body`・`expectReply`（真偽） | 受け付けたかどうかと、その理由               |
+
+`wait_reply` のような、返事が来るまでツールの中で待つものは置かない。互いに待つとデッドロックする。
+
+#### 待ちの表し方
+
+`expectReply: true` で送ったタスクは、自分のターンを終えたあと、返信が届くまで次の指示を受け取らない。**待ちはツールの中ではなく、オーケストレータ側の状態として表す。**
+
+- タスクの状態に `waitingReply` を足す。ループの `continuePrompt` を送らずに止める
+- 返信が届いたら `running` へ戻し、返信の本文を添えて次の指示を送る
+- `waitingReply` も並列の枠を占める。セッションは生きているため
+
+待ちぼうけを検出する経路を2つ持つ。
+
+1. 走行中のタスクが全て `waitingReply` で、未配送のメッセージが1件も無ければ、それ以上は誰も動かない。全員へ「返信は来なかった」と伝えて `running` へ戻す
+2. `waitingReply` には時間の上限を置く（設定 `agent.workflows.replyTimeoutSec`、既定300秒）。超えたタスクも同じ扱いで再開する
+
+どちらの経路で解けた場合も、ワークフローViewの警告欄に出す。黙って進むと「返事を待っていたはずのタスクが勝手に進んだ」ように見える。
+
+#### 配送
+
+- 受け取ったメッセージは、そのタスクの**次の指示の先頭へ添える**。走行中のターンへ割り込まない。ターンの途中で文脈が変わるのを避けるため
+- 宛先が `pending` なら、そのタスクの開始時の最初の指示へ添える
+- 宛先が `done` / `failed` / `blocked` / `skipped` なら配送できない。`send_message` はその旨を返す
+- 1件あたりの長さの上限は `MAX_PROMPT_LENGTH` と同じ。run全体で配送できる総数にも上限を置く。無制限だと互いに送り合ってコンテキストとレート制限を食い潰す
+
+#### 宛先の範囲
+
+同じrunのタスクにだけ送れる。依存関係の有無は問わない。**並列で走っているタスク同士の問い合わせがこの機能の主目的**なので、`dependsOn` で絞ると使えなくなる。
+
+runをまたぐ通信と、ワークフローの外のセッションへの送信はできない。
+
+#### 受信内容の扱い
+
+受け取ったメッセージは、別のエージェントが生成した文である。**指示ではなくデータとして扱わせる。**
+
+- 配送するときは出所と範囲が分かる形で包む（`<task-message from="T2">…</task-message>` のような明示的な囲い）
+- 囲いの中の文を指示として実行しないよう、添える文面で明示する
+- ただしこれは補助でしかない。**一次防御は権限の最小化にある。** 送信元も受信先も同じrunのタスクであり、同じサンドボックスと承認判定（§16.7・§16.16）の下で走る。メッセージを経由して新しい権限が手に入ることはない
+- 本文は `workspaceState` へ保存しない（§16.11 と同じ理由）。PR/MRの本文にも入れない（§16.18）
+- 作業記録（§16.12）には、`{{T1.result}}` の展開と同じ扱いで、配送された本文を落として記録する
+
+#### 拡張機能が立てたサーバの見え方
+
+設定パネルのMCPサーバ一覧（`src/provider/mcpServers.ts` / `src/codex/mcpStatus.ts` / `src/claude/mcpProbe.ts`）は、CLIが認識しているサーバを列挙する。**拡張機能が立てたこのサーバも、そこに混ざって見える。**
+
+- 一覧から除外するか、無効化できないものとして区別して表示する
+- Codexの有効無効は `config.toml` の `mcp_servers.<name>.enabled` に書かれる。**人が一度無効にすると、拡張機能を再起動しても戻らない**
+- そこで、タスクの開始時にツールが見えているかを確かめる。見えていなければワークフローViewへ警告を出し、**通信なしでそのまま走らせる**。runは止めない
+- Codexは `mcpServer/startupStatus/updated` の通知が `thread/start` の後にしか発火しないため、会話を開く前に起動の成否を取れない。確認はタスクのセッションを開いた後に行う
+
+（この節のCLI側の挙動は、MCPサーバ一覧の実装（#27）で実測した値による）
+
+#### YAMLとの関係
+
+この機能に対応するYAMLのフィールドは設けない。常に有効で、タスクごとの有効無効も持たない。権限を動かす設定ではないため §16.16 のクランプの対象外であり、経路が増えるぶんは受信内容の扱いと配送の上限で受ける。

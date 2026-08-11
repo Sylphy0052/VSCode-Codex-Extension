@@ -4,6 +4,7 @@ import {
   buildApprovalResponse,
   defaultDenyResponse,
   describeApproval,
+  isApprovalDecision,
   type ApprovalDecision,
 } from '../appserver/approvals';
 import type { ChatItem, ChatState } from '../appserver/chatState';
@@ -603,10 +604,28 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       },
       onApprovalResolved: (listener) => entry.approvalResolvedListeners.push(listener),
       interrupt: () => entry.session.interrupt(),
+      stopLoop: () => entry.loop.stop('taskStopped'),
+      decideApproval: (requestId, decision) => this.resolveApproval(entry, requestId, decision),
       reveal: () => this.showPanel(entry, false),
       open: (options) => this.showPanel(entry, options.preserveFocus),
       dispose: () => this.teardown(entry),
     };
+  }
+
+  /**
+   * 承認要求を決定する。webviewの承認カード（`approve`メッセージ）とワークフローViewの
+   * 「承認」操作（`TaskSession.decideApproval`）の両方から呼ばれる共通経路にしておくことで、
+   * どちらの入口から決定しても `onApprovalResolved` のリスナーへ同じ通知が届く。
+   */
+  private resolveApproval(
+    entry: ChatPanel,
+    requestId: number | string,
+    decision: ApprovalDecision,
+  ): void {
+    entry.session.decide(requestId, decision);
+    for (const listener of entry.approvalResolvedListeners) {
+      listener({ requestId, decision });
+    }
   }
 
   /**
@@ -785,15 +804,10 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
         entry.loop.stop('manual');
         return;
       }
-      if (type === 'approve' && typeof m['decision'] === 'string') {
+      if (type === 'approve' && isApprovalDecision(m['decision'])) {
         const requestId = m['requestId'];
         if (typeof requestId === 'number' || typeof requestId === 'string') {
-          const decision = m['decision'] as ApprovalDecision;
-          entry.session.decide(requestId, decision);
-          // setApprovalHandlerが`ask`で従来の承認カードへ委ねた要求の決定をrunner.tsへ伝える
-          for (const listener of entry.approvalResolvedListeners) {
-            listener({ requestId, decision });
-          }
+          this.resolveApproval(entry, requestId, m['decision']);
         }
         return;
       }

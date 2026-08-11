@@ -136,6 +136,60 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    if (m['type'] === 'trustHook') {
+      // Codex専用（issue #28）。Claude Codeには信頼を書き込む経路が無い
+      const key = m['key'];
+      const hash = m['hash'];
+      if (typeof key !== 'string' || key === '' || typeof hash !== 'string' || hash === '') {
+        this.log.warn(`hookの信頼要求が不正です: ${JSON.stringify(m)}`);
+        return;
+      }
+      await this.settings.trustCodexHook(key, hash);
+      await this.refresh();
+      return;
+    }
+
+    if (m['type'] === 'logoutCodex') {
+      await this.runAccountAction(() => this.settings.logoutCodex(), 'Codexからログアウト');
+      return;
+    }
+
+    if (m['type'] === 'logoutClaude') {
+      await this.runAccountAction(
+        () => this.settings.logoutClaude(),
+        'Claude Codeからログアウト',
+      );
+      return;
+    }
+
+    if (m['type'] === 'loginCodexApiKey') {
+      const apiKey = await vscode.window.showInputBox({
+        title: 'OpenAIのAPIキーでログイン',
+        prompt: 'APIキーを入力してください。値は画面にもログにも表示されません。',
+        password: true,
+        ignoreFocusOut: true,
+      });
+      // 空文字も含め未入力なら中止する（誤って空キーでログインを試みない）
+      if (apiKey === undefined || apiKey === '') {
+        return;
+      }
+      await this.runAccountAction(
+        () => this.settings.loginCodexApiKey(apiKey),
+        'CodexへAPIキーでログイン',
+      );
+      return;
+    }
+
+    if (m['type'] === 'openLoginTerminal') {
+      const cli = m['cli'];
+      if (cli !== 'codex' && cli !== 'claude') {
+        this.log.warn(`ログイン用ターミナルの要求が不正です: ${JSON.stringify(m)}`);
+        return;
+      }
+      openLoginTerminal(cli);
+      return;
+    }
+
     if (m['type'] !== 'update') {
       return;
     }
@@ -150,6 +204,22 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     // 取り消された場合も表示を現在値へ戻す必要がある
     await this.settings.update(key, value);
     await this.post();
+  }
+
+  /**
+   * ログイン/ログアウト操作を実行し、結果にかかわらず実際の状態を読み直して表示する
+   * （issue #29）。確認ダイアログでの取り消し（`error` が `undefined`）は静かに終える。
+   * 失敗時だけエラーを通知する。
+   */
+  private async runAccountAction(
+    action: () => Promise<{ ok: true } | { ok: false; error: string | undefined }>,
+    label: string,
+  ): Promise<void> {
+    const result = await action();
+    if (!result.ok && result.error !== undefined) {
+      void vscode.window.showErrorMessage(`${label}に失敗しました: ${result.error}`);
+    }
+    await this.refresh();
   }
 
   private render(webview: vscode.Webview): string {
@@ -222,8 +292,15 @@ ${controlPanelStyles()}
   <p class="note">「既定」はCodex側の <code>config.toml</code> の値を使います。ここでの変更は次に開くセッションに適用されます。実行中のセッションはタブ内のCodexで変更してください。</p>
   <p class="note" id="profileNote"></p>
 
+  <h2 class="sectionTitle">アカウント</h2>
+  <div class="accountBox" id="accountCodex"></div>
+
   <h2 class="sectionTitle">MCPサーバー</h2>
   <div class="mcpList" id="mcpListCodex"></div>
+
+  <h2 class="sectionTitle">hooks</h2>
+  <p class="note">hooksは任意のコマンドを実行する仕組みです。特にプロジェクト側で定義されたhookは、cloneしただけで任意コマンドが動く経路になりえます。何が実行されるかを確認してから信頼してください。</p>
+  <div class="hooksList" id="hooksListCodex"></div>
   </div>
 
   <div id="panelClaude" hidden>
@@ -254,8 +331,15 @@ ${controlPanelStyles()}
 
     <p class="note">「既定」はClaude Code側の <code>settings.json</code> の値を使います。使用量はチャット画面に表示されます（ステータスバーはCodex専用）。</p>
 
+    <h2 class="sectionTitle">アカウント</h2>
+    <div class="accountBox" id="accountClaude"></div>
+
     <h2 class="sectionTitle">MCPサーバー</h2>
     <div class="mcpList" id="mcpListClaude"></div>
+
+    <h2 class="sectionTitle">hooks</h2>
+    <p class="note">hooksは任意のコマンドを実行する仕組みです。特にプロジェクト側で定義されたhookは、cloneしただけで任意コマンドが動く経路になりえます。Claude Codeにはこの拡張機能から信頼状態を確認・操作する経路がありません（実測。CLI側の挙動に委ねます）。</p>
+    <div class="hooksList" id="hooksListClaude"></div>
   </div>
 
 <script nonce="${nonce}">
@@ -280,4 +364,24 @@ function buildUsageView(snapshot: UsageSnapshot | undefined): UsageView | undefi
     capturedAt: snapshot.capturedAt === undefined ? '' : formatAbsoluteTime(snapshot.capturedAt),
     severity: severityOf(snapshot.usedPercent),
   };
+}
+
+const LOGIN_TERMINAL_NAME = 'Agent Sessions: ログイン';
+/** ブラウザでのOAuthを要するログインコマンド。両方ともCLIの`--help`で確認済み。 */
+const LOGIN_COMMANDS: Record<'codex' | 'claude', string> = {
+  codex: 'codex login',
+  claude: 'claude auth login',
+};
+
+/**
+ * ブラウザでの操作が必要なログインをターミナルへ委ねる（issue #29）。
+ *
+ * コマンドは入力するだけで**自動実行はしない**（`sendText` の第2引数を `false` にする）。
+ * ユーザーがコマンドを目で確認し、自分でEnterを押して初めて実行される。
+ */
+function openLoginTerminal(cli: 'codex' | 'claude'): void {
+  const existing = vscode.window.terminals.find((t) => t.name === LOGIN_TERMINAL_NAME);
+  const terminal = existing ?? vscode.window.createTerminal(LOGIN_TERMINAL_NAME);
+  terminal.show();
+  terminal.sendText(LOGIN_COMMANDS[cli], false);
 }

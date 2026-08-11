@@ -164,5 +164,78 @@ export function controlPanelStyles(): string {
     color: var(--vscode-charts-red);
     border: 1px solid var(--vscode-charts-red);
   }
+  .hooksList { display: flex; flex-direction: column; gap: 6px; }
+  .hooksEmpty, .hooksError {
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+  }
+  .hooksError { color: var(--vscode-errorForeground, var(--vscode-descriptionForeground)); }
+  .hooksWarning {
+    color: var(--vscode-charts-yellow, var(--vscode-descriptionForeground));
+    font-size: 0.85em;
+  }
+  .hookItem {
+    padding: 6px 8px;
+    border: 1px solid var(--vscode-widget-border, transparent);
+    border-radius: 3px;
+  }
+  .hookItem-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .hookItem-name { font-weight: 600; }
+  .hookItem-command {
+    margin: 4px 0 0;
+    padding: 4px 6px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 0.85em;
+    background-color: var(--vscode-textCodeBlock-background, transparent);
+    border-radius: 2px;
+  }
+  .hookItem-meta {
+    margin-top: 2px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+    word-break: break-all;
+  }
+  .hookTrustButton {
+    width: auto;
+    margin-top: 6px;
+    padding: 3px 10px;
+  }
+  .hookBadge {
+    font-size: 0.8em;
+    padding: 1px 6px;
+    border-radius: 10px;
+    white-space: nowrap;
+  }
+  .hookBadge-trusted {
+    color: var(--vscode-charts-green);
+    border: 1px solid var(--vscode-charts-green);
+  }
+  .hookBadge-untrusted, .hookBadge-modified {
+    color: var(--vscode-charts-red);
+    border: 1px solid var(--vscode-charts-red);
+  }
+  .hookBadge-managed, .hookBadge-disabled {
+    color: var(--vscode-descriptionForeground);
+    border: 1px solid var(--vscode-widget-border, var(--vscode-descriptionForeground));
+  }
+  .accountBox { display: flex; flex-direction: column; gap: 6px; }
+  .accountStatus {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .accountMeta {
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+  }
+  .accountActions .note { border-top: none; padding-top: 0; margin-top: 6px; }
 `;
 }
