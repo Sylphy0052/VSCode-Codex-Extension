@@ -826,6 +826,19 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 
 問い合わせカードだけは事情が違い、**Claude Code側に同じ要求が来ない**。`requestUserInput` / `elicitation` に相当するものがstream-jsonにも control protocol にも無く、ツール実行の可否を聞く `can_use_tool` は承認として別に扱っている。CLIが増やしてくれば同じ `PendingPrompt` へ正規化して載せられる。
 
+#### 会話の途中のターンから分岐（実測で不可と確定、[#22](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/22)）
+
+Codexの `forkFromTurn`（`thread/fork` に `lastTurnId` を渡す。§9.5「会話途中からの分岐」）に相当する経路をClaude Code側で探したが、**拡張機能が使う `--print`（非対話）経路には存在しない**。実測した内容は次のとおり（CLI 2.1.227）。
+
+1. **`initialize` の `commands`（90件）に `branch` / `fork` は含まれない**。一方、CLIバイナリの文字列解析では `name:"branch"`（`type:"local-jsx"`、`description:"Create a branch of the current conversation at this point"`）と `name:"fork"`（`type:"local-jsx"`、`description:"Copy this conversation into a new background session and keep working here"`）が実在することを確認した。`local-jsx` は対話的なUIコンポーネント（Ink）の起動を要求する型で、TTYを持たない `--print` では一覧から除かれているとみられる。
+2. **`/branch <name>` / `/fork <directive>` をユーザーメッセージとして送っても実行されない**。CLIは `model: "<synthetic>"` の応答で `"/branch isn't available in this environment."` / `"/fork isn't available in this environment."` を返すだけで、新しいセッションもtranscriptも作られない（実測。CLI自身が安全側に倒して即座に拒否しており、副作用は無い）。
+3. **control_requestのsubtypeにも無い**。`fork_session` `branch_session` `create_branch` `branch` `fork` `branch_conversation` `fork_conversation` `rewind_session` `rewind` `checkpoint` `create_checkpoint` `restore_checkpoint` `session_fork` `session_branch` の14候補を実測し、すべて `Unsupported control request subtype: <name>` で拒否された。
+4. **起動引数にも該当が無い**。`claude --help` に `--fork-session`（セッション全体のfork。既存実装で使用中）はあるが、ターンを指定できる引数は無い。`--resume` はサブコマンドではなくオプションのため専用の `--help` は無い（`claude --resume --help` は通常の `--help` と同じ出力）。
+
+バイナリ内の実装（`branch` 選択時に呼ばれる関数）を読むと、対象ターンまでのメッセージを新しいsessionIdへ複製しながら `content-replacement` / `relocated`（cwdの引き継ぎ）/ `sessionHistorySuppressed` などのレコードを合わせて書き出す処理になっており、単純なtranscriptの行コピーでは再現できない。加えてこれは公開ドキュメントの無いminifiedコードからの逆解析であり、CLIの更新で予告なく変わりうる。**この処理自体が非対話環境では実行できないよう作られている**ことは、同等の操作を拡張機能側で（transcriptを読んで新しいセッションを組み立てる形で）代替するのが安全でないことの傍証でもある。§8「会話本文を読まない・保存しない」とは別に、CLIの内部ストレージ形式に依存した複製は元のセッションを壊すリスクを避けられないため、この代替は採らない。
+
+以上から、**Claude Codeでは会話の途中のターンから分岐する手段が無いと結論する**。Codex側の `forkFromTurn` 実装（`src/view/chatView.ts` の `forkFrom` / `src/view/conversationView.ts`）と同じ導線は出さない。将来のCLI更新で `--print` 経路にも `branch` / `fork` が解放されれば再調査する。
+
 ### 14.7 チャット画面の設定行
 
 Codex画面と同じHTML（`renderShell`）を使うため、画面下の設定行はClaude Code側にも出る。承認方法の選択肢だけプロバイダごとに差し替える（Codexは `APPROVAL_MODES`、Claude Codeは `--permission-mode` の6種）。
