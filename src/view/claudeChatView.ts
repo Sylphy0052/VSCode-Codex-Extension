@@ -23,7 +23,7 @@ import {
 } from './chatView';
 import type { FileMentionCatalog } from '../provider/fileMentions';
 import { readPersistedThreadId } from './panelState';
-import { CLAUDE_EFFORTS, CLAUDE_PERMISSION_MODES } from '../claude/types';
+import { CLAUDE_PERMISSION_MODES } from '../claude/types';
 import type { ClaudeEditableKey, SettingsProvider } from './settingsProvider';
 import type { ChatActivity } from './chatView';
 
@@ -109,7 +109,7 @@ export class ClaudeChatViewManager implements vscode.Disposable {
    * 画面下の設定行へ現在値と選択肢を送る。
    *
    * 描画はCodex画面と同じスクリプトなので、Codex側のスナップショットと同じ形に整えて渡す。
-   * Claude Codeにはモデルカタログが無いため、エイリアスを `ModelInfo` 相当に見せる。
+   * モデルの一覧は `initialize` の応答から取ったもの（取れなければエイリアス）。
    */
   private refreshSettings(entry: ClaudePanel): void {
     if (entry.disposed) {
@@ -123,14 +123,8 @@ export class ClaudeChatViewManager implements vscode.Disposable {
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),
         settings: {
-          models: snapshot.models.map((slug) => ({
-            slug,
-            displayName: slug,
-            description: undefined,
-            defaultEffort: undefined,
-            efforts: [],
-          })),
-          efforts: [...CLAUDE_EFFORTS],
+          models: snapshot.models,
+          efforts: snapshot.efforts,
           model: snapshot.model,
           reasoningEffort: snapshot.effort,
           approvalMode: snapshot.permissionMode,

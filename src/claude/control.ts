@@ -1,5 +1,6 @@
 import type { ApprovalDecision } from '../appserver/approvals';
 import { buildContextUsage, type ContextUsage, type PendingApproval } from '../appserver/chatState';
+import { isEffortToken, type EffortInfo, type ModelInfo } from '../codex/modelCatalog';
 import { buildClaudeContent, type Attachment } from '../provider/attachments';
 import type { SlashCommand } from '../provider/slashCommands';
 import { describeTool } from './transcript';
@@ -114,6 +115,63 @@ export function readCommandList(source: unknown): SlashCommand[] | undefined {
     });
   }
   return commands;
+}
+
+/**
+ * 使えるモデルの一覧を読む。
+ *
+ * `initialize` の応答の `models` に入っている。Codexの `model/list` に相当するものが
+ * stream-json には無く、これが唯一の取得手段。
+ *
+ * 実測の1件（CLI 2.1.227）:
+ * `{value, resolvedModel, displayName, description, supportsEffort, supportedEffortLevels}`。
+ * `--model` へ渡すのは `value`。haiku のように `supportsEffort` を持たないモデルがあり、
+ * その場合はeffortの選択肢を出さない。
+ *
+ * 一覧そのものが無いときは `undefined` を返す（コマンド一覧と同じ理由で空配列と区別する）。
+ */
+export function readModelList(source: unknown): ModelInfo[] | undefined {
+  const raw = rec(source)?.['models'];
+  if (!Array.isArray(raw)) {
+    return undefined;
+  }
+
+  const models: ModelInfo[] = [];
+  for (const entry of raw) {
+    const model = rec(entry);
+    const slug = str(model?.['value']);
+    if (model === undefined || slug === '') {
+      continue;
+    }
+    const displayName = str(model['displayName']);
+    const description = str(model['description']);
+    const supportsEffort = model['supportsEffort'] === true;
+
+    models.push({
+      slug,
+      displayName: displayName === '' ? slug : displayName,
+      description: description === '' ? undefined : description,
+      // Claude Codeは既定のeffortを返さない（CLI側の設定に委ねる）
+      defaultEffort: undefined,
+      supportsEffort,
+      efforts: supportsEffort ? readEffortLevels(model['supportedEffortLevels']) : [],
+    });
+  }
+  return models;
+}
+
+/** `supportedEffortLevels` は説明の無い文字列配列。引数に渡せない形は捨てる。 */
+function readEffortLevels(raw: unknown): EffortInfo[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const efforts: EffortInfo[] = [];
+  for (const entry of raw) {
+    if (typeof entry === 'string' && isEffortToken(entry)) {
+      efforts.push({ effort: entry, description: undefined });
+    }
+  }
+  return efforts;
 }
 
 /**

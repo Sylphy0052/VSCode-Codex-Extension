@@ -213,12 +213,13 @@ ${controlPanelStyles()}
     <div class="row">
       <label for="claudeModel">モデル</label>
       <select id="claudeModel"></select>
-      <div class="hint">エイリアスを選びます。正式名を使う場合は <code>claude.model</code> を直接編集してください。</div>
+      <div class="hint" id="claudeModelHint"></div>
     </div>
 
     <div class="row">
       <label for="claudeEffort">Effort</label>
       <select id="claudeEffort"></select>
+      <div class="hint" id="claudeEffortHint"></div>
     </div>
 
     <div class="row">

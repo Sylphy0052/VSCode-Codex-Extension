@@ -335,8 +335,10 @@ Agents
 
 サイドバーの上段に、モデル・reasoning effort・承認方法・サンドボックスを切り替えるWebviewを置く。CodexとClaude Codeをタブで切り替える。公式Codex拡張機能のサイドバーが提供する `Select model` / `Reasoning effort` と同等の操作をこちらでも行えるようにするため。
 
-- 選択肢は `~/.codex/models_cache.json` から読む。**effortはモデルごとに異なる**ため（例: `gpt-5.5` は `low`〜`xhigh`、`gpt-5.6-sol` は `ultra` まで）、モデル選択に連動して選択肢を差し替える。モデルを変えた結果それまでのeffortが非対応になった場合は既定へ戻す。
-- カタログが読めない場合は既知の値の和集合へフォールバックし、パネルは動作を続ける。
+- 選択肢は `codex app-server` の `model/list` から読む。応答は `{data: [{id, model, displayName, description, hidden, defaultReasoningEffort, supportedReasoningEfforts: [{reasoningEffort, description}]}], nextCursor}` で、**effortごとの説明文まで返る**。`hidden` のモデルは選択肢に出さない。
+- **effortはモデルごとに異なる**ため（例: `gpt-5.5` は `low`〜`xhigh`、`gpt-5.6-sol` は `ultra` まで）、モデル選択に連動して選択肢を差し替える。モデルを変えた結果それまでのeffortが非対応になった場合は既定へ戻す。
+- CLIから取れない場合（app-serverが起動しない、CLIが古い）は `~/.codex/models_cache.json` を読み、それも読めなければ既知の値の和集合へフォールバックする。**選択肢を空にはしない**。
+- 一覧の取得には会話用の常駐接続とは別のプロセス（`AppServerClient`）を使う。設定パネルは会話を開いていなくても選択肢を出す必要があるため。
 - 変更値はVSCode設定へ書く。`approvalMode` / `sandbox` は machine スコープのため、**必ず `ConfigurationTarget.Global`（ユーザー設定）へ書き込む**。ワークスペース設定への書き込みは失敗する。
 - 設定画面から変更された場合も `onDidChangeConfiguration` でパネルへ反映し、表示が二重管理にならないようにする。
 - CSPは `default-src 'none'` を基点にし、スクリプトはnonceで限定する。配色はVSCodeのCSS変数のみを使い、テーマに追従させる。
@@ -347,15 +349,18 @@ Agents
 
 Claude Code側で扱う設定と選択肢の出どころは次のとおり。
 
-| 項目   | 選択肢                                             | 既定値の出どころ                 |
-| ------ | -------------------------------------------------- | -------------------------------- |
-| モデル | `fable` / `opus` / `sonnet` / `haiku` のエイリアス | `settings.json` の `model`       |
-| effort | `low` / `medium` / `high` / `xhigh` / `max`        | `settings.json` の `effortLevel` |
+| 項目   | 選択肢                                              | 既定値の出どころ                 |
+| ------ | --------------------------------------------------- | -------------------------------- |
+| モデル | `initialize` の応答の `models`（`value` を渡す）    | `settings.json` の `model`       |
+| effort | モデルごとの `supportedEffortLevels`                | `settings.json` の `effortLevel` |
+| 承認方法 | `--permission-mode` が受け付ける6種                | `settings.json` の `permissions.defaultMode` |
 
-Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡張機能側の既定値として持つ。Codex側の「空＝CLIへ委譲」とは異なるが、Claude Codeには一覧APIも要約名も無く、未指定だと何が使われるか画面から分からないため、既定を明示する方を採った。「既定」を選べば従来どおり `settings.json` へ委譲する。
-| 承認方法 | `--permission-mode` が受け付ける6種 | `settings.json` の `permissions.defaultMode` |
+Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡張機能側の既定値として持つ。Codex側の「空＝CLIへ委譲」とは異なるが、未指定だと何が使われるか画面から分からないため、既定を明示する方を採った。「既定」を選べば従来どおり `settings.json` へ委譲する。
 
-- **モデル一覧を返すAPIが無い**ため、CLIのヘルプが案内するエイリアスを固定で並べる。正式名（`claude-fable-5` など）を使う場合は `claude.model` を直接編集する。一覧に無い現在値は「(一覧外)」として選択肢に補うので、設定が失われることはない。
+- モデル一覧は `initialize` の応答の `models` から取る。Codexの `model/list` に相当する要求は control protocol に無く、これが唯一の取得手段（実測）。応答は `{value, resolvedModel, displayName, description, supportsEffort, supportedEffortLevels}` で、`--model` へ渡すのは `value`。
+  - 設定パネルは会話を開いていなくても選択肢を出すため、`claude --print --input-format stream-json` を単発で起動して `initialize` の応答だけを読む（`ClaudeModelProbe`）。
+  - `supportsEffort` を持たないモデル（実測では haiku）では effort を選ばせず、理由を画面に出す。
+  - 取得できない場合は `fable` / `opus` / `sonnet` / `haiku` のエイリアスへ退避する。正式名（`claude-fable-5` など）を使う場合は `claude.model` を直接編集する。一覧に無い現在値は「(一覧外)」として選択肢に補うので、設定が失われることはない。
 - `permissionMode` を `bypassPermissions` にするときは、Codexの `danger-full-access` + `never` と同じくモーダルで同意を取る。
 - 使用量はCodex側にしか出せない（§14.8）ため、Claudeタブには表示しない。
 
@@ -771,7 +776,8 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 
 Codex画面と同じHTML（`renderShell`）を使うため、画面下の設定行はClaude Code側にも出る。承認方法の選択肢だけプロバイダごとに差し替える（Codexは `APPROVAL_MODES`、Claude Codeは `--permission-mode` の6種）。
 
-- Webview側のスクリプトはCodexのスナップショット形状を前提にしているため、Claude側は同じ形へ整えて送る。モデルカタログが無いのでエイリアスを `ModelInfo` 相当に見せ、キーも `reasoningEffort` → `effort`、`approvalMode` → `permissionMode` と読み替える。
+- Webview側のスクリプトはCodexのスナップショット形状を前提にしているため、Claude側は同じ形へ整えて送る。モデル一覧は `initialize` の応答を `ModelInfo` へ正規化したものを渡し、キーは `reasoningEffort` → `effort`、`approvalMode` → `permissionMode` と読み替える。
+- effortを持たないモデルを選んでいる間は、effortのセレクタを無効にして理由を出す（黙って選べなくしない）。
 - **効かせ方が違う**。Codex画面は `turn/start` に毎回渡すので次の発言から効く。Claude Codeは1プロセス1セッションで起動引数が固定なので、control protocol で実行中のセッションへ伝える。
 
 #### Claude Codeのセッション中の変更（実測で確認）

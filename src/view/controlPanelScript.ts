@@ -101,9 +101,26 @@ export function controlPanelScript(): string {
   function applyClaude(c) {
     if (!c) return;
     const d = c.defaults || {};
-    fill(el('claudeModel'), c.models, c.model, defaultLabel(d.model));
+    const nameOf = (slug) => {
+      const m = c.models.find((x) => x.slug === slug);
+      return m ? m.displayName : slug;
+    };
+    fill(
+      el('claudeModel'),
+      c.models.map((m) => m.slug),
+      c.model,
+      defaultLabel(d.model ? nameOf(d.model) : ''),
+      nameOf,
+    );
     fill(el('claudeEffort'), c.efforts, c.effort, defaultLabel(d.effort));
     fill(el('claudePermissionMode'), c.permissionModes, c.permissionMode, defaultLabel(d.permissionMode));
+
+    const selected = c.models.find((m) => m.slug === c.model);
+    el('claudeModelHint').textContent = selected && selected.description ? selected.description : '';
+    // effortを持たないモデル（haikuなど）では選ばせない。黙って無効にせず理由を出す
+    const noEffort = !!selected && selected.supportsEffort === false;
+    el('claudeEffort').disabled = noEffort;
+    el('claudeEffortHint').textContent = noEffort ? 'このモデルはeffortを選べません' : '';
   }
 
   // タブは1クリックで切り替える。選んだ側はリロードしても残す。

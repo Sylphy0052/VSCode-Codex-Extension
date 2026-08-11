@@ -463,6 +463,11 @@ export function chatScript(agentLabel: string): string {
       nameOf,
     );
     fillSelect(el('reasoningEffort'), s.efforts, s.reasoningEffort, defaultLabel(d.reasoningEffort));
+    // effortを持たないモデル（Claude Codeのhaikuなど）では選ばせない
+    const selected = s.models.find((m) => m.slug === s.model);
+    const noEffort = !!selected && selected.supportsEffort === false;
+    el('reasoningEffort').disabled = noEffort;
+    el('reasoningEffort').title = noEffort ? 'このモデルはeffortを選べません' : '';
     const approvalDefault = el('approvalMode').querySelector('option[value=""]');
     if (approvalDefault) approvalDefault.textContent = defaultLabel(d.approvalMode);
     el('approvalMode').value = s.approvalMode;
