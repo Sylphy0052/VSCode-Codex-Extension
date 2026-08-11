@@ -14,7 +14,7 @@
  * （テストコードが `vscode.WebviewPanel` などの実型へ構造的に適合しているかを
  * tscで確かめるために使う。tscはvitestのalias設定を知らないため、実型で検査される）。
  */
-import type { Uri } from 'vscode';
+import type { Uri as VscodeUri } from 'vscode';
 
 export enum ViewColumn {
   Active = -1,
@@ -58,7 +58,7 @@ export interface FakeWebview {
   readonly cspSource: string;
   readonly onDidReceiveMessage: (listener: (message: unknown) => void) => Disposable;
   postMessage(message: unknown): Promise<boolean>;
-  asWebviewUri(uri: Uri): Uri;
+  asWebviewUri(uri: VscodeUri): VscodeUri;
   /** テスト用: webview側（クライアントJS）からの発言を模擬する。 */
   simulateMessage(message: unknown): void;
   /** テスト用: `postMessage` で拡張機能側から送られたメッセージの履歴。 */
@@ -98,7 +98,7 @@ function makeFakeWebview(): FakeWebview {
       sent.push(message);
       return Promise.resolve(true);
     },
-    asWebviewUri: (uri: Uri) => uri,
+    asWebviewUri: (uri: VscodeUri) => uri,
     simulateMessage: (message: unknown) => onDidReceiveMessageEmitter.fire(message),
     sent,
   };
@@ -153,6 +153,24 @@ function makeFakeWebviewPanel(
   return panel;
 }
 
+/** テスト用: `vscode.Uri` の最小フェイク。`fsPath` しか実装コードは使わない。 */
+export interface FakeUri {
+  readonly fsPath: string;
+}
+
+/**
+ * `showWarningMessage` の既定の振る舞い（渡されたボタン文字列を自動で選ぶ＝常に確認する）を
+ * 表す印。`__mock.showWarningMessageAnswer` を設定していないテストは全てこれに依存しているため、
+ * 既定値として使う（確認ダイアログをキャンセルする経路だけ、明示的に上書きさせる）。
+ */
+const AUTO_CONFIRM = Symbol('auto-confirm');
+
+/** テスト用: `vscode.workspace.fs.writeFile` に渡された内容の履歴1件。 */
+export interface WrittenFile {
+  path: string;
+  content: string;
+}
+
 interface MockState {
   configs: Map<string, Record<string, unknown>>;
   workspaceFolders: Array<{ uri: { fsPath: string }; name: string; index: number }> | undefined;
@@ -161,6 +179,22 @@ interface MockState {
   messages: { warnings: string[]; errors: string[]; infos: string[] };
   /** `window.showInputBox` が返す値。テストごとに設定する（既定はキャンセル扱いの`undefined`）。 */
   showInputBoxAnswer: string | undefined;
+  /**
+   * `window.showQuickPick` の選び方。渡された `items` を見て選ぶ関数として設定する
+   * （項目がテストごとに動的に組み立てられるため、`showInputBoxAnswer` のような静的な値では
+   * 表せない）。既定は`undefined`（キャンセル扱い＝Escapeを押した状態）。
+   */
+  showQuickPickAnswer: ((items: readonly unknown[]) => unknown) | undefined;
+  /** `workspace.fs.writeFile` に渡された内容の履歴。 */
+  writtenFiles: WrittenFile[];
+  /** 設定すると `workspace.fs.writeFile` がこの例外で reject する（書き込み失敗のテスト用）。 */
+  writeFileError: Error | undefined;
+  /**
+   * `window.showWarningMessage` が返す値。既定は `AUTO_CONFIRM`（渡されたボタン文字列を
+   * 自動で選ぶ）。確認ダイアログをキャンセルする経路をテストするときだけ、
+   * `__mock.showWarningMessageAnswer = undefined`（Escapeで閉じた扱い）等に上書きする。
+   */
+  showWarningMessageAnswer: string | undefined | typeof AUTO_CONFIRM;
 }
 
 const state: MockState = {
@@ -170,6 +204,10 @@ const state: MockState = {
   createdPanels: [],
   messages: { warnings: [], errors: [], infos: [] },
   showInputBoxAnswer: undefined,
+  showQuickPickAnswer: undefined,
+  writtenFiles: [],
+  writeFileError: undefined,
+  showWarningMessageAnswer: AUTO_CONFIRM,
 };
 
 /** テストコードから内部状態を操作・観測するための入口。実装コードからは使わない。 */
@@ -181,6 +219,10 @@ export const __mock = {
     state.createdPanels = [];
     state.messages = { warnings: [], errors: [], infos: [] };
     state.showInputBoxAnswer = undefined;
+    state.showQuickPickAnswer = undefined;
+    state.writtenFiles = [];
+    state.writeFileError = undefined;
+    state.showWarningMessageAnswer = AUTO_CONFIRM;
   },
   set showInputBoxAnswer(value: string | undefined) {
     state.showInputBoxAnswer = value;
@@ -188,12 +230,37 @@ export const __mock = {
   get showInputBoxAnswer(): string | undefined {
     return state.showInputBoxAnswer;
   },
+  set showQuickPickAnswer(value: ((items: readonly unknown[]) => unknown) | undefined) {
+    state.showQuickPickAnswer = value;
+  },
+  get showQuickPickAnswer(): ((items: readonly unknown[]) => unknown) | undefined {
+    return state.showQuickPickAnswer;
+  },
+  get writtenFiles(): WrittenFile[] {
+    return state.writtenFiles;
+  },
+  set writeFileError(value: Error | undefined) {
+    state.writeFileError = value;
+  },
+  /** 確認ダイアログ（`showWarningMessage`）をキャンセルさせたいときだけ設定する。 */
+  set showWarningMessageAnswer(value: string | undefined) {
+    state.showWarningMessageAnswer = value;
+  },
   setConfig(section: string, values: Record<string, unknown>): void {
     state.configs.set(section, values);
   },
   setWorkspaceFolder(fsPath: string): void {
     state.workspaceFolders = [{ uri: { fsPath }, name: fsPath, index: 0 }];
     state.activeTextEditorFolderPath = fsPath;
+  },
+  /** マルチルートワークスペース用: 複数フォルダを一括設定する（issue #144の統合テスト）。 */
+  setWorkspaceFolders(folders: ReadonlyArray<{ fsPath: string; name: string }>): void {
+    state.workspaceFolders = folders.map((f, index) => ({
+      uri: { fsPath: f.fsPath },
+      name: f.name,
+      index,
+    }));
+    state.activeTextEditorFolderPath = folders[0]?.fsPath;
   },
   clearWorkspaceFolder(): void {
     state.workspaceFolders = undefined;
@@ -249,6 +316,21 @@ export const workspace = {
   ): MockState['workspaceFolders'] extends (infer U)[] | undefined ? U | undefined : never {
     return state.workspaceFolders?.[0] as never;
   },
+  fs: {
+    /** テスト用: 実ディスクへは書かず、内容を `__mock.writtenFiles` へ記録するだけ。 */
+    writeFile: (uri: FakeUri, content: Uint8Array): Promise<void> => {
+      if (state.writeFileError !== undefined) {
+        return Promise.reject(state.writeFileError);
+      }
+      state.writtenFiles.push({ path: uri.fsPath, content: Buffer.from(content).toString('utf8') });
+      return Promise.resolve();
+    },
+  },
+};
+
+/** テスト用: `vscode.Uri` の最小フェイク（`Uri.file` のみ実装コードが使う）。 */
+export const Uri = {
+  file: (fsPath: string): FakeUri => ({ fsPath }),
 };
 
 export const window = {
@@ -278,6 +360,9 @@ export const window = {
   },
   showWarningMessage: (message: string, ...items: unknown[]): Promise<string | undefined> => {
     state.messages.warnings.push(message);
+    if (state.showWarningMessageAnswer !== AUTO_CONFIRM) {
+      return Promise.resolve(state.showWarningMessageAnswer);
+    }
     const choice = items.find((i): i is string => typeof i === 'string');
     return Promise.resolve(choice);
   },
@@ -287,6 +372,8 @@ export const window = {
   },
   showInputBox: (_options?: unknown): Promise<string | undefined> =>
     Promise.resolve(state.showInputBoxAnswer),
+  showQuickPick: (items: readonly unknown[], _options?: unknown): Promise<unknown> =>
+    Promise.resolve(state.showQuickPickAnswer?.(items)),
   withProgress: async <T>(
     _options: unknown,
     task: (progress: { report: () => void }) => Thenable<T>,

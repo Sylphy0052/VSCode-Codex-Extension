@@ -36,7 +36,11 @@ import {
   nodeWorktreeFileSystem,
   WorktreeCreationQueue,
 } from './orchestrator/worktree';
-import { nodeCliAvailability, nodeCliCommandRunner, nodeForgeFileSystem } from './orchestrator/forge';
+import {
+  nodeCliAvailability,
+  nodeCliCommandRunner,
+  nodeForgeFileSystem,
+} from './orchestrator/forge';
 import { startHttpMcpTransport } from './orchestrator/messaging';
 import { nodePseudoWorktreeFileSystem } from './orchestrator/pseudoWorktree';
 import {
@@ -68,7 +72,7 @@ import { ProviderRegistry } from './provider/registry';
 import type { AgentProvider } from './provider/types';
 import { createLogger, type Logger } from './log';
 import { nodeCommandRunner as nodeAccountCommandRunner } from './process/commandRunner';
-import { nodeFileSystem } from './session/nodeFileSystem';
+import { nodeFileSystem, nodeMemoryFileSystem } from './session/nodeFileSystem';
 import { nodeFileScan } from './session/nodeFileScan';
 import { FileMentionCatalog } from './provider/fileMentions';
 import { InMemoryMetaCache } from './session/ports';
@@ -87,7 +91,19 @@ import { UsageStatusBar } from './view/usageStatusBar';
 import { WorkflowViewManager } from './view/workflowView';
 
 const META_CACHE_KEY = 'codex.metaCache.v1';
-export function activate(context: vscode.ExtensionContext): void {
+
+/**
+ * `test/integration/**` だけが使う内部参照。エンドユーザー向けの公開APIではない
+ * （このプロジェクトは他拡張機能からの利用を想定しておらず、`extensionDependencies` も
+ * 無い）。VSCodeに依存する層（`view/**`）はユニットテストから触れないため（設計書 §11）、
+ * `SessionTreeProvider` の実インスタンスをテストへ渡す最小限の口として `activate` の
+ * 戻り値に載せる。
+ */
+export interface ExtensionTestApi {
+  readonly sessionTree: SessionTreeProvider;
+}
+
+export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const channel = vscode.window.createOutputChannel('Agent Sessions');
   const log = createLogger(channel);
   context.subscriptions.push(channel);
@@ -235,6 +251,9 @@ export function activate(context: vscode.ExtensionContext): void {
     (activity) => recordActivity({ ...activity, source: 'claude-code' }),
     (usage) => usageBar.updateClaude(usage),
     isTaskManagedThread,
+    // メモリ追記（issue #6/#144）専用の読み取り口と、前回選んだ追記先の記憶先
+    nodeMemoryFileSystem,
+    context.workspaceState,
   );
   context.subscriptions.push(claudeChat);
 
@@ -438,6 +457,8 @@ export function activate(context: vscode.ExtensionContext): void {
       runRoadmap(roadmapIssuePort, chat, claudeChat, log),
     ),
   );
+
+  return { sessionTree: tree };
 }
 
 /** `workflowRunner` / `planWorkflowCommand` が共通して使うクランプ基準（design.md §16.16）。 */

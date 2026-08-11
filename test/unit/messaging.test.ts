@@ -791,8 +791,48 @@ describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタ�
       }),
     });
     expect(response.status).toBe(413);
+    // 本文まで読み切れること。上限超過時にソケットを壊して打ち切ると、送信中のクライアントは
+    // RSTを受けて413そのものを読めない（Issue #152のflakyの原因）
+    expect(await response.text()).toBe('payload too large');
     // 上限超過で打ち切ったリクエストはメッセージとして受け付けられていない
     expect(hub.takeDeliverableMessages('T2')).toHaveLength(0);
+  });
+
+  it('上限超過のリクエストの後も、同じサーバの別リクエストは通常どおり処理できる（Issue #152）', async () => {
+    const hub = buildHub([
+      { id: 'T1', state: 'running', summary: '' },
+      { id: 'T2', state: 'running', summary: '' },
+    ]);
+    handle = await startHttpMcpTransport(hub);
+    const url = handle.registerTask('T1');
+
+    const oversized = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'send_message',
+          arguments: { to: 'T2', body: 'x'.repeat(200_000), expectReply: false },
+        },
+      }),
+    });
+    expect(oversized.status).toBe(413);
+
+    const accepted = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'send_message', arguments: { to: 'T2', body: 'hi', expectReply: false } },
+      }),
+    });
+    expect(accepted.status).toBe(200);
+    expect(hub.takeDeliverableMessages('T2')).toHaveLength(1);
   });
 
   it('タスクごとに別のURLが発行される（同じサーバを1つのrunで使い回す）', async () => {

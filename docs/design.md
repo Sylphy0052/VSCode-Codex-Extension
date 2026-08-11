@@ -762,10 +762,11 @@ codex app-server generate-ts --out <DIR>            # TypeScript バインディ
 - TypeScript / Node 20 / esbuild（バンドル）
 - eslint + prettier、`tsc --noEmit` で型チェック
 - テスト
-  - unit（vitest）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で87ファイル1574件
-  - **VSCodeに依存する層はユニットテストで扱わない**。`vscode` モジュールを触るファイル（`view/**` など）はテストから import できないため、判断が要るロジックは純粋関数へ切り出してそちらを試す（例: `view/panelState.ts`）
-  - 実VSCodeでしか確認できない範囲は自動化せず、[manual-test.md](manual-test.md) のチェックリストと実施記録で担保する
-- `scripts/check.sh` に lint / typecheck / test を集約し、commit前に全緑を必須とする
+  - unit（vitest、`test/unit/`）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で101ファイル1890件
+  - **VSCodeに依存する層（`view/**` など、`vscode` モジュールを直接触るファイル）はunitテストから扱わない**。`vscode` はunitテストのプロセス内でimportできないため、判断が要るロジックは純粋関数へ切り出してそちらを試す（例: `view/panelState.ts`）
+  - integration（`@vscode/test-electron`、`test/integration/`）: 実VSCode（拡張機能ホスト）上で動く。WSL（xvfb-run経由）で実際に動作することを確認済み（issue #147）。**現状自動化できているのは拡張機能の有効化・コマンド登録・設定の読み書きの土台部分のみ**（`extension.test.ts` / `configuration.test.ts`、計6件）。履歴一覧（TreeView）を狙った`sessionHistory.test.ts`は、実CLIを呼ばせない制約と`ProviderRegistry.available()`（実行ファイルを解決できないプロバイダを一覧から除外する）が噛み合わず、現状`test.skip`のまま残っている（原因と代替案の検証結果は同ファイル冒頭のコメント、および[manual-test.md](manual-test.md)の「統合テストで自動化した範囲」参照）。`activate()`はテスト専用の最小限の内部参照（`ExtensionTestApi`）を返し、`SessionTreeProvider`の実インスタンスへテストからアクセスできるようにしてある。既定の `npm run check` には含めない（実VSCodeのダウンロード・起動が要り重いため）。`npm run test:integration`（ディスプレイあり）/ `npm run test:integration:xvfb`（ヘッドレスLinux/WSL）で明示的に実行する
+  - 実CLIプロセス・Webviewの中身・承認カードのような、実際のCodex/Claude Codeとの対話が要る範囲、および上記の理由で自動化に至らなかった範囲は、引き続き[manual-test.md](manual-test.md)のチェックリストと実施記録で担保する
+- `scripts/check.sh` に lint / typecheck / test を集約し、commit前に全緑を必須とする（integrationテストは含まない）
 - パッケージング: `@vscode/vsce`
 
 ## 12. 実装順序（TDD）
@@ -1824,19 +1825,54 @@ issue #2（Z-10）の時点で `local_command` は `Unsupported control request 
 
 **`#` メモリ追記（issue #6）はファイルへ直接書き込む。** シェル実行と違い、ファイルへの追記はCLIの承認・サンドボックスの対象外の操作（ユーザー自身が編集する `CLAUDE.md` への追記であり、モデルの実行系統を経由しない）であり、迂回にはあたらない。ただし書き込みは元に戻せない操作のため、次の手順を必ず踏む。
 
-1. 追記先を選ばせる（`vscode.window.showQuickPick`。「プロジェクト」= `<cwd>/CLAUDE.md`（既存が無ければ既定）または `<cwd>/.claude/CLAUDE.md`（既存があればそちら）、「ユーザー」= `<claudeHome>/CLAUDE.md`。選び方は `resolveProjectMemoryFile` / `resolveUserMemoryFile`）
+1. 追記先を選ばせる（`vscode.window.showQuickPick`。候補は各workspaceFolder分の「プロジェクト（フォルダ名）」＝ `resolveProjectMemoryFile` の値（既存が無ければ `<cwd>/CLAUDE.md`、`<cwd>/.claude/CLAUDE.md` だけあればそちら）と、「ユーザー」＝ `resolveUserMemoryFile(claudeHome)`。各候補は既存/新規作成のラベル付き、前回選んだ追記先が先頭に来る。詳細は後述）
 2. 内容と追記先を確認ダイアログ（`confirmMemoryAppend`）で見せてから書き込む
 3. 追記後、書き込み先を会話に1行残す（`noteLocalEvent`）
 
+#### issue #144: 追記の安全性強化（読み込み失敗時の上書き破壊、シンボリックリンク、候補の改善）
+
+issue #6実装（#141）のレビューで2件の問題が見つかり、併せて追記先の選択も改善した。
+
+**1. 読み込み失敗時に既存のCLAUDE.mdを上書きしてしまう問題。** 共有の `FileSystemPort.readTextFile` は「読めなければ無い扱い」（全例外を握り潰して`undefined`）で、`commandCatalog` 等の他の呼び出し元には正しい挙動だが、メモリ追記でこれを使うと、ENOENT以外の理由（他プロセスによるロック・EACCES・同名ディレクトリの存在等）で読めなかった場合も「ファイルが無い」と誤認し、`appendMemoryLine(undefined, content)` が作った `- <ノート>\n` だけの本文で実在するファイルを丸ごと上書きしてしまう。共有ポートの挙動を変えると影響範囲が広いため変えず、メモリ追記専用の読み取り口 `MemoryFileSystemPort`（`src/session/ports.ts`）を切り出した。`readStrict` はENOENTだけを「無い」として扱い、それ以外は投げる。`runMemoryInputMode` は投げられた例外を`this.reportError`で見せ、書き込まずに打ち切る。
+
+**2. シンボリックリンクの追記先が確認できない問題。** 追記先がシンボリックリンクだと `vscode.workspace.fs.writeFile` はリンクを追従して実体へ書くが、QuickPickにも確認ダイアログにもリンク自身のパスしか出ないため、実際にどのファイルが書き換わるのか分からない（悪意あるリポジトリが `CLAUDE.md` をホーム配下の機微な設定ファイルへのシンボリックリンクとして同梱する筋も考えられる）。**書き込みは中止しない**（dotfiles管理で `CLAUDE.md` をシンボリックリンクにするのは正当な使い方のため）。代わりに `MemoryFileSystemPort.resolveSymlinkTarget` で実体の絶対パスを解決し、確認ダイアログ（`buildMemoryAppendConfirmation`、純粋関数）と会話への記録（`describeMemoryAppendResult`、純粋関数）の両方へ「リンク先: `<実パス>`」を追加で出す。
+
+**3. 追記先の選択の改善。** 従来は「プロジェクト」「ユーザー」の固定2択で、マルチルートワークスペースだとどのフォルダのCLAUDE.mdか分からなかった。各workspaceFolderごとに候補を1件出す（`buildProjectMemoryCandidates`。ラベルは「プロジェクト（フォルダ名）」）ようにし、加えてこの画面の実際の作業ディレクトリ（`entry.cwd`。タスクのworktree等でworkspaceFolderと一致しないことがある）がworkspaceFolderに含まれていなければ、それも候補へ足す（worktree自身のCLAUDE.mdへ直接追記できる従来の使い勝手を保つため）。各候補は実在すれば「既存」、無ければ「新規作成」とラベルに出す（実在確認は共有の`readTextFile`で十分。書き込み判断には使わないため）。直前に選んだ追記先は `workspaceState`（`MemoryModeMemento`。`vscode.Memento`と構造的に一致する最小限の口。`orchestrator/runStore.ts`の`WorkflowRunMemento`と実体は共通の`MementoLike`、`src/util/memento.ts`）へ覚え、`orderMemoryCandidates`（純粋関数）で次回の候補の先頭へ動かす。**書き込み先はQuickPickが列挙した候補のパスに限り、ユーザーが打ったノート本文からは組み立てない**（パストラバーサルの入口を作らないため）。フォルダ名が親ディレクトリ違いで重複する場合（`/a/project` と `/b/project`）は、`buildProjectMemoryCandidates`がラベルへ親ディレクトリ名を添えて区別する（`detail`には元々フルパスが出るため致命的ではないが、ラベルだけでも見分けが付くようにした）。
+
+#### issue #144レビュー指摘: 壊れたシンボリックリンクの誤表示（CRITICAL）とTOCTOU
+
+上記の実装（#144初版）に対するcode-reviewer / security-auditorのレビューで、シンボリックリンク解決まわりに2件の脆弱性が見つかった。
+
+**CRITICAL: `resolveSymlinkTarget`が「リンクでない」と「リンクだが実体パスを特定できない」を区別できず、警告なしに任意パスへ書き込まれる。** 初版の`resolveSymlinkTarget`は`fs.lstat`でシンボリックリンクと判定した後`fs.realpath`で実体を解決し、判定・解決のどちらが失敗しても一律`undefined`を返していた。これは「シンボリックリンクではない」ケースと区別が付かない。壊れたリンク（リンク先がENOENTで存在しない）・循環参照（ELOOP）・途中ディレクトリの権限不足（EACCES）で`realpath`が失敗すると、確認ダイアログにも会話の記録にも「リンク先」の行が一切出ないまま`vscode.workspace.fs.writeFile`がリンクを追従して実体へ書き込む。悪意あるリポジトリが`CLAUDE.md`を「まだ存在しないパスを指すシンボリックリンク」としてコミットしておけば、被害者には完全に無害な新規作成に見えたまま任意のパスへ書き込みが届く。
+
+修正: `MemoryFileSystemPort.resolveSymlinkTarget`の戻り値を判別可能ユニオン`SymlinkResolution`（`src/session/ports.ts`）にした。
+
+```ts
+type SymlinkResolution =
+  | { kind: 'not-symlink' }
+  | { kind: 'resolved'; target: string }
+  | { kind: 'unresolved' };
+```
+
+`unresolved`（実体パスを特定できない）のときは`buildMemoryAppendConfirmation`・`describeMemoryAppendResult`の両方が「警告: シンボリックリンクですが、実体のパスを特定できません（壊れたリンク・循環参照・権限不足の可能性があります）。書き込みは実際のリンク先へ届きます。」を明示する。**書き込み自体は中止しない**（従来方針どおり。「分からない」ことを隠さず見せるのが修正の本質）。
+
+**TOCTOU: 確認ダイアログと書き込みの間にリンク先が変わりうる。** `symlinkTarget`は確認ダイアログの前に1回だけ解決され、モーダル確認（ユーザー応答待ちで不定長）・`readStrict`・`writeFile`の間は再検証されなかった。`runMemoryInputMode`は書き込み直前（`readStrict`の直前）に`resolveSymlinkTarget`を取り直し、確認時に見せた結果（`symlinkResolutionEquals`、純粋関数）と食い違っていれば書き込みを中止してエラーとして見せる。
+
+その他、レビューで指摘された小さめの修正: `orderMemoryCandidates`から`as T`型アサーションを除去（`noUncheckedIndexedAccess`の型のまま扱う）、`this.memoryFs.resolveSymlinkTarget`の呼び出しをtry/catchで包んで`reportError`へ倒す（`resolveSymlinkTargetSafely`。契約上は例外を投げないが`memoryFs`はテストで差し替え可能なため防御的に）、`this.memoryMemento.update(...)`をfire-and-forgetのまま放置せず`await`して失敗を`reportError`へ流す（`orchestrator/runStore.ts`の同型の`update`が常に`await`されている流儀に揃えた）、`MemoryModeMemento`と`WorkflowRunMemento`の同型定義を`src/util/memento.ts`の`MementoLike`へ1本化。
+
 #### 実装
 
-- `src/provider/inputModes.ts`（新規）: `routeInputMode` / `describeInputMode` / `resolveProjectMemoryFile` / `resolveUserMemoryFile` / `appendMemoryLine`。全て純粋関数
-- `src/claude/streamSession.ts`: `ClaudeStreamSession.noteLocalEvent(id, text)` を追加。CLIとはやり取りせず、既存の `appendNotice`（`chatState.ts`。hookBlockedと同じ仕組み）で会話に1行残すだけ
-- `src/view/claudeChatView.ts`: `handleMessage` の `send` 分岐で `routeInputMode` を呼び、該当すれば `runInputMode` へ委ねてCLIへは送らない。シェルコマンドは `openShellCommandTerminal`（`sendText(command, false)`）、メモリ追記はQuickPick→確認→`vscode.workspace.fs.writeFile`
-- `src/view/chatView.ts`: 確認ダイアログ `confirmRunShellCommand` / `confirmMemoryAppend` を追加（既存の `confirmCompact` 等と同じ置き場）。`ChatShellOptions.showInputModeHints` を追加（Claude Code画面のみ`true`）
+- `src/util/memento.ts`: `MementoLike`（`vscode.Memento`と構造的に一致する最小限の口）。`orchestrator/runStore.ts`の`WorkflowRunMemento`と`provider/inputModes.ts`の`MemoryModeMemento`はどちらもこの型の再exportに一本化した（#144レビュー指摘）
+- `src/provider/inputModes.ts`: `routeInputMode` / `describeInputMode` / `resolveProjectMemoryFile` / `resolveUserMemoryFile` / `appendMemoryLine`（#141）に加え、`buildProjectMemoryCandidates` / `orderMemoryCandidates` / `buildMemoryAppendConfirmation` / `describeMemoryAppendResult` / `symlinkResolutionEquals` / `MemoryModeMemento` / `MEMORY_LAST_SELECTED_PATH_KEY`（#144）。全て純粋関数（`MemoryModeMemento`は型のみ）
+- `src/session/ports.ts`: `MemoryFileSystemPort`（`readStrict` / `resolveSymlinkTarget`）と`SymlinkResolution`（判別可能ユニオン）を追加。既存の`FileSystemPort`はそのまま
+- `src/session/nodeFileSystem.ts`: `MemoryFileSystemPort`の既定実装 `nodeMemoryFileSystem`（`fs.readFile`のENOENT判定、`fs.lstat`+`fs.realpath`でのシンボリックリンク解決。判定・解決の失敗を`not-symlink`と`unresolved`で区別する）
+- `src/claude/streamSession.ts`: `ClaudeStreamSession.noteLocalEvent(id, text)`（#141）。CLIとはやり取りせず、既存の `appendNotice`（`chatState.ts`。hookBlockedと同じ仕組み）で会話に1行残すだけ
+- `src/view/claudeChatView.ts`: `handleMessage` の `send` 分岐で `routeInputMode` を呼び、該当すれば `runInputMode` へ委ねてCLIへは送らない（#141）。シェルコマンドは `openShellCommandTerminal`（`sendText(command, false)`）、メモリ追記は `runMemoryInputMode`（候補列挙→QuickPick→シンボリックリンク解決→確認→**書き込み直前の再解決とTOCTOU検証**→`readStrict`→`vscode.workspace.fs.writeFile`→`workspaceState`更新→`noteLocalEvent`）。`MemoryFileSystemPort` / `MemoryModeMemento` はコンストラクタ末尾のoptional引数で注入（既定はそれぞれ`nodeMemoryFileSystem`・何も覚えないno-op）し、既存の呼び出し箇所を壊さない
+- `src/view/chatView.ts`: 確認ダイアログ `confirmRunShellCommand` / `confirmMemoryAppend` を追加（既存の `confirmCompact` 等と同じ置き場、#141）。`confirmMemoryAppend`は`symlink`（`SymlinkResolution`）引数を追加し、本文は`buildMemoryAppendConfirmation`（純粋関数）へ委譲（#144）。`ChatShellOptions.showInputModeHints` を追加（Claude Code画面のみ`true`）
 - `src/view/chatScript.ts` / `chatStyles.ts`: 送信前に入力欄の下へ案内を出す `#inputModeHint`。判定ロジックは `routeInputMode` と同じ規則をJSで書き直している（テンプレートリテラルの中からは関数を呼べないため。`renderArgumentHint` と同じ事情）
+- `src/extension.ts`: `ClaudeChatViewManager` の構築時に `nodeMemoryFileSystem` と `context.workspaceState` を渡す（#144。`WorkflowRunStore`と同じく`context.workspaceState`をそのまま`MemoryModeMemento`として渡せる）
 
-テストは `test/unit/inputModes.test.ts`（純粋関数）と `test/unit/webviewScript.test.ts`（`showInputModeHints` を立てたときの構文・埋め込み値）に追加した。`src/view/**` はvscodeに依存するためテストから触れない（既存方針どおり）。
+テストは `test/unit/inputModes.test.ts`（純粋関数、#141・#144双方。`SymlinkResolution`の3ケース・`symlinkResolutionEquals`・重複フォルダ名のラベル区別を含む）、`test/unit/nodeMemoryFileSystem.test.ts`（`MemoryFileSystemPort`の既定実装。実ファイルシステム・実シンボリックリンク（壊れたリンク・循環参照を含む）に対して`SymlinkResolution`の3つの`kind`を検証）、`test/unit/webviewScript.test.ts`（`showInputModeHints` を立てたときの構文・埋め込み値）に追加した。`ClaudeChatViewManager`はフェイクの`MemoryFileSystemPort`/`MemoryModeMemento`を注入し、`test/unit/claudeChatViewManager.test.ts`で`handleMessage`経由の一連の流れ（QuickPick→確認ダイアログが実際に呼ばれたことを含む→書き込み→通知、読み取り失敗・書き込み失敗・キャンセル・壊れたシンボリックリンクの警告・TOCTOU不一致の各分岐）を検証する。加えて`resolveMemoryCandidates`の統合テストとして、`entry.cwd`がworkspaceFoldersに含まれない場合（worktreeタスク）・workspaceFoldersが複数（マルチルート）・workspaceFoldersがundefined（フォルダ未オープン）の3経路をQuickPickへ渡る候補そのもので検証する。`test/mocks/vscode.ts`に`showQuickPick`・`Uri.file`・`workspace.fs.writeFile`・確認ダイアログを明示的にキャンセルさせる機構と、マルチルート検証用の`setWorkspaceFolders`を追加した。
 
 ### 14.30 他エージェントからの設定インポート（issue #36、design.md TP-57、Codex TUIの `/import` 相当）
 

@@ -868,12 +868,18 @@ export function startHttpMcpTransport(hub: TaskMessagingHub): Promise<HttpMcpTra
         return;
       }
       receivedBytes += chunk.length;
-      // 上限を超えた時点で受信を打ち切る（`MAX_MCP_REQUEST_BODY_BYTES`参照）。既に
+      // 上限を超えた時点でボディの蓄積を打ち切る（`MAX_MCP_REQUEST_BODY_BYTES`参照）。既に
       // 受け取った分もチャンクへ積まず捨て、以後のチャンクも無視する
       if (receivedBytes > MAX_MCP_REQUEST_BODY_BYTES) {
         rejectedForSize = true;
+        chunks.length = 0;
         res.writeHead(413, { 'content-type': 'text/plain' }).end('payload too large');
-        req.destroy();
+        // ここで`req.destroy()`をするとソケットが即座に壊れ、まだ本文を送っている途中の
+        // クライアントはTCPのRSTを受けて`ECONNRESET`になる。413を返しても相手がそれを
+        // 読めないうえ、テストも並列実行で不安定になっていた（Issue #152）。残りの受信は
+        // `resume()`で読み流して捨てる。`chunks`へ積まないためメモリは増えず、
+        // 「上限を超えた分は受け取らない」という意図はそのまま満たせる
+        req.resume();
         return;
       }
       chunks.push(chunk);
