@@ -11,10 +11,10 @@ import { getRunOutcome } from './scheduler';
 import type {
   LiveRun,
   TaskSnapshot,
-  WorkflowRunner,
   WorkflowRunSnapshot,
   WorkflowWarning,
 } from './runner';
+import type { WorkflowRunnerInternals } from './runnerInternals';
 
 /**
  * ワークフローViewの読み取り専用のスナップショット構築（design.md §16.8）を集めたモジュール
@@ -24,7 +24,7 @@ import type {
  * 引き継いでいる。
  *
  * ここに集めた関数はいずれも状態を変更しない（`live.warnings`への追記を除く。これは
- * 元の実装でも「実行中に随時積む」既存の形を踏襲している）。`self: WorkflowRunner`を
+ * 元の実装でも「実行中に随時積む」既存の形を踏襲している）。`self: WorkflowRunnerInternals`を
  * 第一引数に取るのは、`WorkflowRunner`のメソッドから機械的に切り出したままの形を保ち、
  * 挙動を変えないため（最終報告に記載）。
  */
@@ -33,7 +33,7 @@ import type {
  * Viewが描画する現在の状態のスナップショット（design.md §16.8）。
  * 応答本文そのものではなく `LiveTask.lastResponseSummary`（1行要約）だけを渡す。
  */
-export function getSnapshot(self: WorkflowRunner, runId: string): WorkflowRunSnapshot | undefined {
+export function getSnapshot(self: WorkflowRunnerInternals, runId: string): WorkflowRunSnapshot | undefined {
   const live = self.runs.get(runId);
   if (live === undefined) {
     return undefined;
@@ -67,7 +67,7 @@ export function getSnapshot(self: WorkflowRunner, runId: string): WorkflowRunSna
   };
 }
 
-function buildTaskSnapshot(self: WorkflowRunner, live: LiveRun, task: WorkflowTask): TaskSnapshot {
+function buildTaskSnapshot(self: WorkflowRunnerInternals, live: LiveRun, task: WorkflowTask): TaskSnapshot {
   const state = live.runState.tasks.get(task.id);
   const liveTask = live.tasks.get(task.id);
   // PR/MRの結果も、branch同様このウィンドウでまだセッションを開いていない
@@ -154,7 +154,7 @@ export function derivePermissionEscalationWarnings(live: LiveRun): WorkflowWarni
  * 再試行で同じタスクが複数回開始しても同じ文言を積み直さないよう、既にあれば足さない。
  */
 export function checkEffectivePermissionEscalation(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   live: LiveRun,
   task: WorkflowTask,
   taskId: string,
@@ -223,7 +223,7 @@ export function checkEffectivePermissionEscalation(
  * 送信元の`LiveTask`は通常必ず見つかるが、内部矛盾で見つからない場合は判定を諦める。
  */
 export function checkMessagingPermissionEscalation(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   live: LiveRun,
   recipientTask: WorkflowTask,
   recipientTaskId: string,

@@ -55,6 +55,7 @@ import {
   checkMessagingPermissionEscalation,
   getSnapshot,
 } from './runnerSnapshot';
+import type { WorkflowRunnerInternals } from './runnerInternals';
 import { cleanupWorktreeIfNeeded, retryMerge, startMerge } from './runnerMerge';
 import { restoreRunsForView } from './runnerRestore';
 import {
@@ -678,13 +679,13 @@ class SimpleEmitter<T> {
 
 export class WorkflowRunner {
   /**
-   * 分割後のファイル（`runnerSnapshot.ts`等、Issue #147）から`self.runs`として読めるよう
-   * `private`を外してある。TypeScriptの`private`はコンパイル時の型チェックのみで実行時の
-   * 挙動には影響しないため、これは構造の変更であり挙動は変わらない（最終報告に記載）。
-   * `WorkflowRunner`のpublic API（メソッドの引数・戻り値）には現れないため、
-   * クラスの外部から見た振る舞いは従来どおり。
+   * 分割後のファイル（`runnerSnapshot.ts`等、Issue #147）からは`self.runs`として読むが、
+   * クラスの外（`src/view/`・`extension.ts`）へは出さない。分割時に一度`private`を外して
+   * いたのを、`WorkflowRunnerInternals`（`runnerInternals.ts`）へ公開範囲を閉じたうえで
+   * 戻したもの（PR #157のレビュー指摘）。外から可変状態へ直接届くと、`persist()`・
+   * `notify()`を経ない書き換えで永続化した値とメモリ上の`LiveRun`が食い違う。
    */
-  readonly runs = new Map<string, LiveRun>();
+  private readonly runs = new Map<string, LiveRun>();
   private readonly changeEmitter = new SimpleEmitter<string>();
   /**
    * `deps.worktreeQueue`から構築する。design.md §16.17「マージはworktreeの作成・撤去と
@@ -693,12 +694,40 @@ export class WorkflowRunner {
    * 注意書き参照）。コンストラクタ内で組み立てることで、配線を誤って別のキューを
    * 渡す事故を型のうえで起こしえない状態にする。
    *
-   * `runs`と同じ理由（直前のコメント参照）で`private`を外してある。
+   * 分割後のファイルからは`self.integrationQueue`として触るが、`runs`と同じ理由
+   * （直前のコメント参照）でクラスの外へは出さない。
    */
-  readonly integrationQueue: IntegrationMergeQueue;
+  private readonly integrationQueue: IntegrationMergeQueue;
 
-  constructor(readonly deps: WorkflowRunnerDeps) {
+  /**
+   * 分割後のファイル（`runnerSnapshot.ts`等、Issue #147）へ渡す内部の口
+   * （`runnerInternals.ts`のJSDoc参照）。
+   *
+   * `this as unknown as WorkflowRunnerInternals`のキャストで済ませない理由: キャストは
+   * 構造的部分型の検査ごと無効にするため、クラス側と`WorkflowRunnerInternals`がずれても
+   * `tsc`が検出しない（`pump`をリネームしても型検査は通り、実行時に
+   * `self.pump is not a function`で落ちる）。ここで明示的に組み立てることで、
+   * メンバの過不足・シグネチャのずれをコンパイル時に捕まえる。
+   *
+   * メソッドはアロー関数で包む。`prototype`側の実装を都度引くため、テストが
+   * `WorkflowRunner.prototype.cleanupWorktreeIfNeeded`をスパイした場合もここを通る
+   * 呼び出しにスパイが効く。
+   */
+  private readonly internals: WorkflowRunnerInternals;
+
+  constructor(private readonly deps: WorkflowRunnerDeps) {
     this.integrationQueue = new IntegrationMergeQueue(deps.worktreeQueue);
+    this.internals = {
+      deps: this.deps,
+      runs: this.runs,
+      integrationQueue: this.integrationQueue,
+      notify: (runId) => this.notify(runId),
+      pump: (runId) => this.pump(runId),
+      persist: (runId) => this.persist(runId),
+      resolveForgeState: (repoRoot) => this.resolveForgeState(repoRoot),
+      cleanupWorktreeIfNeeded: (live, task, taskId, liveTask) =>
+        this.cleanupWorktreeIfNeeded(live, task, taskId, liveTask),
+    };
   }
 
   /**
@@ -714,10 +743,10 @@ export class WorkflowRunner {
   }
 
   /**
-   * 分割後のファイル（`runnerMerge.ts`等、Issue #147）から`self.notify(...)`として呼べるよう
-   * `private`を外してある（`runs`と同じ理由。上のコメント参照）。
+   * 分割後のファイル（`runnerMerge.ts`等、Issue #147）から`self.notify(...)`として呼ぶ。
+   * 公開範囲は`WorkflowRunnerInternals`に閉じる（`runs`と同じ理由。上のコメント参照）。
    */
-  notify(runId: string): void {
+  private notify(runId: string): void {
     this.changeEmitter.fire(runId);
   }
 
@@ -728,7 +757,7 @@ export class WorkflowRunner {
    * 実体は`runnerSnapshot.ts`（読み取り専用のスナップショット構築、Issue #147）。
    */
   getSnapshot(runId: string): WorkflowRunSnapshot | undefined {
-    return getSnapshot(this, runId);
+    return getSnapshot(this.internals, runId);
   }
 
   /** 現在メモリ上で把握している実行（このウィンドウで開始したもの）の一覧。 */
@@ -768,7 +797,7 @@ export class WorkflowRunner {
    * 実体は`runnerRestore.ts`（Issue #147）。
    */
   async restoreRunsForView(): Promise<void> {
-    return restoreRunsForView(this);
+    return restoreRunsForView(this.internals);
   }
 
   /**
@@ -897,7 +926,7 @@ export class WorkflowRunner {
     if (gitRepo) {
       return { ok: true, pseudo: undefined };
     }
-    const resolved = await resolvePseudoState(this, repoRoot, runId);
+    const resolved = await resolvePseudoState(this.internals, repoRoot, runId);
     if (!resolved.ok) {
       return {
         ok: false,
@@ -917,13 +946,13 @@ export class WorkflowRunner {
     messaging: WorkflowRunnerMessagingDeps,
   ): Promise<void> {
     const hub = new TaskMessagingHub({
-      listRunTasks: () => buildRunTaskSnapshots(this, runId),
-      onAccepted: (message) => onMessageAccepted(this, runId, message),
+      listRunTasks: () => buildRunTaskSnapshots(this.internals, runId),
+      onAccepted: (message) => onMessageAccepted(this.internals, runId, message),
     });
     try {
       const transport = await messaging.startTransport(hub);
       const waitingReplyPollTimer = setInterval(
-        () => checkWaitingReplyStalls(this, runId),
+        () => checkWaitingReplyStalls(this.internals, runId),
         WAITING_REPLY_POLL_INTERVAL_MS,
       );
       waitingReplyPollTimer.unref?.();
@@ -970,7 +999,7 @@ export class WorkflowRunner {
     }
     const { gitRepo, headCommit } = gitContext;
 
-    const cwdErrors = await validateExplicitCwds(this, def, repoRoot);
+    const cwdErrors = await validateExplicitCwds(this.internals, def, repoRoot);
     if (cwdErrors.length > 0) {
       return { ok: false, errors: cwdErrors };
     }
@@ -1329,9 +1358,10 @@ export class WorkflowRunner {
 
   /**
    * 状態が変わるたびに呼ぶ（design.md §16.3）。次に開始できるタスクを開始し、終了を判定する。
-   * 分割後のファイル（Issue #147）から`self.pump(...)`として呼べるよう`private`を外してある。
+   * 分割後のファイル（Issue #147）から`self.pump(...)`として呼ぶ（公開範囲は
+   * `WorkflowRunnerInternals`に閉じる）。
    */
-  pump(runId: string): void {
+  private pump(runId: string): void {
     const live = this.runs.get(runId);
     if (live === undefined || live.finished) {
       return;
@@ -1357,7 +1387,7 @@ export class WorkflowRunner {
       // 疑似worktree（design.md §16.20）はrunの結果を問わず反映する（forgeとは異なり
       // `succeeded`限定にしない。`reflectPseudoWorktree`自身のJSDoc参照）
       if (live.pseudo !== undefined) {
-        void reflectPseudoWorktree(this, runId);
+        void reflectPseudoWorktree(this.internals, runId);
       }
       // タスク間メッセージング（design.md §16.21）のMCPサーバはrunの結果を問わず閉じる。
       // 以降新しいタスクは開始されない（`live.finished`）ため、これ以上の接続は要らない
@@ -1380,7 +1410,7 @@ export class WorkflowRunner {
   ): Promise<TaskLaunchPreparation> {
     const retry = retrySuffixOf(live.runState.tasks.get(taskId)?.retryCount);
     const { cwd, branch, usedWorktree, usedPseudoWorktree, pseudoSnapshot, originCommit } =
-      await resolveWorkingDirectory(this, live, task, retry);
+      await resolveWorkingDirectory(this.internals, live, task, retry);
 
     const baseline = this.deps.readBaseline();
     // クランプはこの1関数だけを通す（design.md §16.16。#52セキュリティ監査指摘）
@@ -1395,7 +1425,7 @@ export class WorkflowRunner {
     // 明示しないと判定できないが、ここでは実際にクランプされた値が分かっているため、
     // 未指定でも判定できる。上流タスクの実効値は`live.tasks`に既に保存されている
     // （依存が満たされて開始した以上、上流タスクは必ず先に完了しliveTaskが残っている）
-    checkEffectivePermissionEscalation(this, live, task, taskId, effective);
+    checkEffectivePermissionEscalation(this.internals, live, task, taskId, effective);
 
     // 最終防御（レビュー指摘: critical 3）。bypassPermissionsでは`can_use_tool`が
     // 発行されず、classifyApprovalRequest / autoApprove / escalate / allow が
@@ -1422,7 +1452,7 @@ export class WorkflowRunner {
       ...(messagingUrl !== undefined ? { mcp: { url: messagingUrl } } : {}),
     };
 
-    const boundaryResult = await buildBoundary(this, live, cwd);
+    const boundaryResult = await buildBoundary(this.internals, live, cwd);
     if (boundaryResult.warning !== undefined) {
       this.deps.log.warn(`[workflow ${runId}/${taskId}] ${boundaryResult.warning}`);
       live.warnings.push({ kind: 'gitCommonDir', taskId, message: boundaryResult.warning });
@@ -1500,7 +1530,7 @@ export class WorkflowRunner {
       // （design.md §16.21、Issue #132「1. 権限差の警告」）。静的には検査できない
       // （送信はモデルの判断で実行時に起きる）ため、実際に配送するこの時点でのみ判定できる
       if (delivered.length > 0) {
-        checkMessagingPermissionEscalation(this, live, task, taskId, effective, delivered);
+        checkMessagingPermissionEscalation(this.internals, live, task, taskId, effective, delivered);
       }
       const composed = composeNextPrompt(expanded, delivered);
       // Viewで実際に送った文面を確認できるようにする（design.md §16.21、Issue #132
@@ -1556,7 +1586,7 @@ export class WorkflowRunner {
     // ここでは`await`せず投げっぱなしにする（`session.open`/`runLoop`をこの確認の
     // 分だけ遅らせない）
     if (input.mcp !== undefined) {
-      void checkMessagingVisibility(this, runId, taskId, session);
+      void checkMessagingVisibility(this.internals, runId, taskId, session);
     }
 
     this.notify(runId);
@@ -1629,8 +1659,8 @@ export class WorkflowRunner {
    * PATH・認証）が欠けていれば `skipped`（呼び出し側が警告を出し、ローカルのマージだけ
    * 進める。design.md「前提が欠けている場合...ワークフロー自体は止めない」）。
    */
-  /** `rebuildLiveRun`（`runnerRestore.ts`、Issue #147）から`self.resolveForgeState(...)`として呼べるよう`private`を外してある。 */
-  async resolveForgeState(repoRoot: string): Promise<LiveRunForgeState> {
+  /** `rebuildLiveRun`（`runnerRestore.ts`、Issue #147）から`self.resolveForgeState(...)`として呼ぶ（公開範囲は`WorkflowRunnerInternals`に閉じる）。 */
+  private async resolveForgeState(repoRoot: string): Promise<LiveRunForgeState> {
     const forgeDeps = this.deps.forge;
     if (forgeDeps === undefined) {
       return { kind: 'disabled' };
@@ -1914,7 +1944,7 @@ export class WorkflowRunner {
           // マージまでを拡張機能の責務にする（design.md §16.17）。ループが終わっただけでは
           // `applyLoopStopReason`が`merging`にしてあるだけなので、実際にマージを試みる
           void startMerge(
-            this,
+            this.internals,
             runId,
             taskId,
             task,
@@ -1924,7 +1954,7 @@ export class WorkflowRunner {
           );
         } else if (liveTask.usedPseudoWorktree && live.pseudo !== undefined) {
           // 疑似worktree（design.md §16.20）。gitのマージに相当する統合を試みる
-          void integratePseudoWorktree(this, runId, taskId, live.pseudo, liveTask);
+          void integratePseudoWorktree(this.internals, runId, taskId, live.pseudo, liveTask);
         } else {
           // `shared` / 明示`cwd`のタスクは統合ブランチへマージする対象となる専用ブランチを
           // 持たない。マージ済みの成果物が最初から無い（あるいは元々`repoRoot`を直接触って
@@ -1951,7 +1981,7 @@ export class WorkflowRunner {
    * 実体は`runnerMerge.ts`（マージと衝突解決、Issue #147）。
    */
   retryMerge(runId: string, taskId: string): boolean {
-    return retryMerge(this, runId, taskId);
+    return retryMerge(this.internals, runId, taskId);
   }
 
   /**
@@ -1965,13 +1995,13 @@ export class WorkflowRunner {
     taskId: string,
     liveTask: LiveTask | undefined,
   ): void {
-    cleanupWorktreeIfNeeded(this, live, task, taskId, liveTask);
+    cleanupWorktreeIfNeeded(this.internals, live, task, taskId, liveTask);
   }
 
   // ---- 永続化 ----
 
-  /** 分割後のファイル（Issue #147）から`self.persist(...)`として呼べるよう`private`を外してある。 */
-  async persist(runId: string): Promise<void> {
+  /** 分割後のファイル（Issue #147）から`self.persist(...)`として呼ぶ（公開範囲は`WorkflowRunnerInternals`に閉じる）。 */
+  private async persist(runId: string): Promise<void> {
     const live = this.runs.get(runId);
     if (live === undefined) {
       return;

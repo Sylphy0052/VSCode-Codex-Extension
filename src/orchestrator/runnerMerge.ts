@@ -37,15 +37,15 @@ import {
   type LiveRun,
   type LiveTask,
   type PullRequestResult,
-  type WorkflowRunner,
 } from './runner';
+import type { WorkflowRunnerInternals } from './runnerInternals';
 
 /**
  * マージと衝突解決（design.md §16.17、Issue #147）を集めたモジュール。`WorkflowRunner`から
  * 機能単位で切り出した1本で、`WorktreeCreationQueue`を1つだけ使い回す不変条件
  * （`self.integrationQueue`。design.md §16.6・§16.17）は変えない。
  *
- * `self: WorkflowRunner`を第一引数に取るのは、`WorkflowRunner`のメソッドから機械的に
+ * `self: WorkflowRunnerInternals`を第一引数に取るのは、`WorkflowRunner`のメソッドから機械的に
  * 切り出したままの形を保ち、挙動を変えないため（最終報告に記載）。
  */
 
@@ -63,7 +63,7 @@ import {
  * 「ワークフロー自体は止めない」方針）。
  */
 export async function mergeTaskWithForge(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   live: LiveRun,
   runId: string,
   taskId: string,
@@ -113,7 +113,7 @@ export async function mergeTaskWithForge(
  * PR/MRの作成が失敗してもこのマージ自体は必ず行われる）。
  */
 function buildTaskPullRequestFlowCallbacks(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   live: LiveRun,
   runId: string,
   taskId: string,
@@ -121,7 +121,7 @@ function buildTaskPullRequestFlowCallbacks(
   integration: { cwd: string; branch: string },
   taskCwd: string,
   taskBranch: string,
-  forgeDeps: NonNullable<WorkflowRunner['deps']['forge']>,
+  forgeDeps: NonNullable<WorkflowRunnerInternals['deps']['forge']>,
   forge: Extract<LiveRun['forge'], { kind: 'active' }>,
 ): TaskPullRequestSteps<MergeTaskResult> {
   return {
@@ -173,7 +173,7 @@ function buildTaskPullRequestFlowCallbacks(
 
 /** `runTaskPullRequestFlow`の結果を警告・ログへ反映し、`mergeTaskWithForge`の戻り値へ整える。 */
 function finalizeTaskPullRequestFlow(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   live: LiveRun,
   runId: string,
   taskId: string,
@@ -213,7 +213,7 @@ function finalizeTaskPullRequestFlow(
  * 呼ばれるため、`LiveTask`ではなくcwd/branch/originCommitを直接受け取る。
  */
 export async function startMerge(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   runId: string,
   taskId: string,
   task: WorkflowTask,
@@ -260,7 +260,7 @@ export async function startMerge(
  * design.mdの定める順序で行う。
  */
 async function attemptMerge(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   runId: string,
   taskId: string,
   task: WorkflowTask,
@@ -297,7 +297,10 @@ async function attemptMerge(
 
   if (merge.kind === 'success') {
     live.runState = markMergeSucceeded(live.runState, live.def.tasks, taskId);
-    cleanupWorktreeIfNeeded(self, live, task, taskId, live.tasks.get(taskId));
+    // ラッパー（`WorkflowRunner`側のメソッド）を通す。テストが`prototype`をスパイして
+    // 「interrupted/manualでは撤去しない」を確かめるため、モジュール関数を直接呼ばない
+    // （PR #157のレビュー指摘。分割時にこの2経路だけラッパーを迂回していた）
+    self.cleanupWorktreeIfNeeded(live, task, taskId, live.tasks.get(taskId));
     void self.persist(runId);
     self.notify(runId);
     self.pump(runId);
@@ -324,7 +327,7 @@ async function attemptMerge(
  * 「コンフリクト」5.）ため、`live.tasks`ではなく`live.mergeResolutions`で管理する。
  */
 async function startMergeResolution(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   runId: string,
   taskId: string,
   task: WorkflowTask,
@@ -404,7 +407,7 @@ async function startMergeResolution(
 
 /** 衝突解決セッションの結果を受けて、`done`（解決済み）か`blocked`（未解決）かを確定する。 */
 async function onMergeResolutionFinished(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   runId: string,
   taskId: string,
   task: WorkflowTask,
@@ -434,7 +437,10 @@ async function onMergeResolutionFinished(
     reason === 'done' && (await isMergeResolutionComplete(integration.cwd, self.deps.git));
   if (resolved) {
     live.runState = markMergeSucceeded(live.runState, live.def.tasks, taskId);
-    cleanupWorktreeIfNeeded(self, live, task, taskId, live.tasks.get(taskId));
+    // ラッパー（`WorkflowRunner`側のメソッド）を通す。テストが`prototype`をスパイして
+    // 「interrupted/manualでは撤去しない」を確かめるため、モジュール関数を直接呼ばない
+    // （PR #157のレビュー指摘。分割時にこの2経路だけラッパーを迂回していた）
+    self.cleanupWorktreeIfNeeded(live, task, taskId, live.tasks.get(taskId));
     void self.persist(runId);
     self.notify(runId);
     self.pump(runId);
@@ -451,7 +457,7 @@ async function onMergeResolutionFinished(
 
 /** マージを巻き戻して`blocked`に確定させる共通処理（design.md §16.17「コンフリクト」7.）。 */
 async function abortAndBlock(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   runId: string,
   taskId: string,
   integration: { cwd: string; branch: string },
@@ -480,7 +486,7 @@ async function abortAndBlock(
  * タスクのworktree・ブランチはこのウィンドウのライブなセッション（`live.tasks`）が
  * あればそれを、無ければ永続化された値（リロード後、まだ再実行していない場合）を使う。
  */
-export function retryMerge(self: WorkflowRunner, runId: string, taskId: string): boolean {
+export function retryMerge(self: WorkflowRunnerInternals, runId: string, taskId: string): boolean {
   const live = self.runs.get(runId);
   if (live === undefined || live.integration === undefined) {
     return false;
@@ -513,7 +519,7 @@ export function retryMerge(self: WorkflowRunner, runId: string, taskId: string):
 }
 
 export function cleanupWorktreeIfNeeded(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   live: LiveRun,
   task: WorkflowTask,
   taskId: string,
