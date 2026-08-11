@@ -8,40 +8,81 @@ import { transcriptItems } from '../claude/transcript';
 import { isUnsafeClaudeCombination } from '../claude/argvBuilder';
 import { currentWorkspaceFolder, readClaudeConfig, workspaceFolderPaths } from '../config';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
+import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
 import { ClaudeUsageProbe } from '../claude/usageProbe';
 import { CommandCatalog } from '../provider/commandCatalog';
 import type { SlashCommand } from '../provider/slashCommands';
 import { AttachmentBox } from '../provider/attachments';
+import type {
+  ApprovalHandler,
+  TaskSession,
+  TaskSessionHost,
+  TaskSessionInput,
+} from '../orchestrator/taskSession';
 import { addAttachment, confirmCompact, renderShell, reportTurnResult } from './chatView';
 import { readPersistedThreadId } from './panelState';
 import { CLAUDE_EFFORTS, CLAUDE_PERMISSION_MODES } from '../claude/types';
+import type { ClaudeConfig } from '../claude/types';
 import type { ClaudeEditableKey, SettingsProvider } from './settingsProvider';
 import type { ChatActivity } from './chatView';
 
 interface ClaudePanel {
-  panel: vscode.WebviewPanel;
+  /** タブが今開いているか。`undefined` は閉じている状態（design.md §16.10の4）。 */
+  panel: vscode.WebviewPanel | undefined;
   session: ClaudeStreamSession;
   /** この画面で走らせているループ。走っていなければ待機状態のまま。 */
   loop: LoopController;
   cwd: string;
   /** 送信前の添付画像。送るまでここに溜める。 */
   attachments: AttachmentBox;
-  /** タブを閉じた後か。破棄済みのWebviewへ送るとVSCodeが例外を投げるため見張る。 */
+  /** 破棄済みか。破棄済みのWebviewへ送るとVSCodeが例外を投げるため見張る。 */
   disposed: boolean;
+  /** パネルの見出し。タブが閉じている間もタイトルを見失わないよう別に保持する。 */
+  title: string;
+  /** タスク（オーケストレータ）管理下のセッションか（design.md §16.10の4）。 */
+  taskManaged: boolean;
+  /**
+   * タスク単位の設定。`ClaudeStreamSession` は起動時の引数で固定されるため、
+   * Codexと違い送信のたびに読み直す必要は無いが、Plan modeを抜けるときの
+   * 戻し先（`permissionMode`）だけはグローバル設定ではなくこちらを見る。
+   */
+  taskConfig: ClaudeConfig | undefined;
+  /** ターン完了検知に使う直前の値。 */
+  wasBusy: boolean;
+  /** ループ停止検知に使う直前の値。 */
+  wasLoopRunning: boolean;
+  /** `setApprovalHandler` で差し込まれた自動判定。未設定なら従来通り必ず承認カードを出す。 */
+  approvalHandler: ApprovalHandler | undefined;
+  /** `TaskSession.onStateChanged` のリスナー。 */
+  stateListeners: Array<(state: ChatState) => void>;
+  /** `TaskSession.onFinished` のリスナー。 */
+  finishedListeners: Array<(reason: LoopStopReason, state: ChatState) => void>;
 }
 
 const VIEW_TYPE = 'claude.chat';
 const LABEL = 'Claude Code';
 
+/** `TaskSessionInput` をClaude Codeの起動設定へ写す。`sandbox` はClaudeに概念が無いため使わない。 */
+function toClaudeConfig(input: TaskSessionInput): ClaudeConfig {
+  return {
+    model: input.config.model,
+    effort: input.config.effort,
+    permissionMode: input.config.approvalMode,
+    additionalArgs: [],
+  };
+}
+
 /**
  * Claude Code画面。`claude` を stream-json で常駐させ、会話と承認を画面内で完結させる。
  *
  * 描画はCodex画面と同じHTML（`renderShell`）を使う。プロバイダごとの差は
- * このクラスとイベント正規化（streamJson.ts）に閉じている。
+ * このクラスとイベント正規化（streamJson.ts）に閉じている。`TaskSessionHost` を実装し、
+ * オーケストレータ（`runner.ts`。次の依頼）がプロバイダを見ずにタスクを扱えるようにする
+ * （design.md §16.10）。
  */
-export class ClaudeChatViewManager implements vscode.Disposable {
+export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost {
   private readonly panels = new Map<string, ClaudePanel>();
   private approvalWarned = false;
 
@@ -59,6 +100,12 @@ export class ClaudeChatViewManager implements vscode.Disposable {
     private readonly onActivity: (activity: ChatActivity) => void = () => undefined,
     /** 制限の状態が更新されたときに知らせる。ステータスバーの表示に使う。 */
     private readonly onUsage: (usage: ChatUsage) => void = () => undefined,
+    /**
+     * このsessionIdがタスク（オーケストレータ）管理下かどうか。既定は常に`false`
+     * （従来通り全セッションを汎用復元の対象にする）。`true`を返すセッションは
+     * `restorePanel` の対象から外す（design.md §16.10の7）。
+     */
+    private readonly isTaskManagedThread: (sessionId: string) => boolean = () => false,
   ) {
     this.catalog = new CommandCatalog(fs);
     this.usageProbe = new ClaudeUsageProbe(claudePath, log);
@@ -85,7 +132,7 @@ export class ClaudeChatViewManager implements vscode.Disposable {
    * まだ届いていない、または取れなかった場合だけファイルを走査した一覧で代替する。
    */
   private async postCommands(entry: ClaudePanel): Promise<void> {
-    if (entry.disposed) {
+    if (entry.disposed || entry.panel === undefined) {
       return;
     }
     const fromCli = entry.session.commands;
@@ -103,7 +150,7 @@ export class ClaudeChatViewManager implements vscode.Disposable {
    * Claude Codeにはモデルカタログが無いため、エイリアスを `ModelInfo` 相当に見せる。
    */
   private refreshSettings(entry: ClaudePanel): void {
-    if (entry.disposed) {
+    if (entry.disposed || entry.panel === undefined) {
       return;
     }
     const snapshot = this.settings.claudeSnapshot();
@@ -137,35 +184,79 @@ export class ClaudeChatViewManager implements vscode.Disposable {
     });
   }
 
+  /**
+   * 画面へ現在の状態だけを送る（設定は含めない）。ストリーミング中の細かい更新は
+   * こちらを使い、設定込みの完全な状態は `refreshSettings` が担う
+   * （既存の挙動をそのまま踏襲。webview側は届かないキーを前回の値のまま保つ）。
+   */
+  private postState(entry: ClaudePanel): void {
+    if (entry.disposed || entry.panel === undefined) {
+      return;
+    }
+    void entry.panel.webview.postMessage({
+      type: 'state',
+      state: {
+        ...entry.session.getState(),
+        loop: entry.loop.getStatus(),
+        attachments: entry.attachments.snapshot(),
+      },
+    });
+  }
+
   /** 新しい会話を開く。idは起動前に決まるため、開いた時点で履歴と紐づく。 */
-  async openNew(): Promise<void> {
+  async openNew(cwd?: string, taskConfig?: ClaudeConfig): Promise<void> {
     const folder = currentWorkspaceFolder();
-    if (folder === undefined) {
+    const targetCwd = cwd ?? folder?.uri.fsPath;
+    if (targetCwd === undefined) {
       void vscode.window.showErrorMessage(
         'Claude Codeを開始するにはフォルダを開いてください（ファイル > フォルダーを開く）',
       );
       return;
     }
-    if (isUnsafeClaudeCombination(readClaudeConfig().claude) && !(await this.confirmUnsafe())) {
+    const effectiveConfig = taskConfig ?? readClaudeConfig().claude;
+    if (isUnsafeClaudeCombination(effectiveConfig) && !(await this.confirmUnsafe())) {
       return;
     }
 
     const sessionId = randomSessionId();
-    const entry = this.createPanel(LABEL, folder.uri.fsPath);
+    const entry = this.buildEntry(targetCwd, LABEL, false, taskConfig);
+    this.showPanel(entry, false);
     this.panels.set(sessionId, entry);
     entry.session.start({
-      cwd: folder.uri.fsPath,
+      cwd: targetCwd,
       target: { kind: 'new' },
       sessionId,
-      config: readClaudeConfig().claude,
+      config: effectiveConfig,
     });
+  }
+
+  /**
+   * タスク用のセッションを開く（`TaskSessionHost`）。
+   *
+   * タスクは無人で走るため、`openNew` の「安全でない組み合わせの確認ダイアログ」は
+   * 経由しない（応答する人がおらず、出しても永久に止まるだけ）。タスク単位の設定を
+   * 安全側へ収める判定（クランプ）はrunner.ts側の責務。パネルはここでは作らない
+   * （`TaskSession.open()` の役目。design.md §16.10の2）。
+   */
+  async openTaskSession(input: TaskSessionInput): Promise<TaskSession> {
+    const taskConfig = toClaudeConfig(input);
+    const sessionId = randomSessionId();
+    const entry = this.buildEntry(input.cwd, LABEL, true, taskConfig);
+    this.panels.set(sessionId, entry);
+    entry.session.start({
+      cwd: input.cwd,
+      target: { kind: 'new' },
+      sessionId,
+      config: taskConfig,
+    });
+    return this.buildTaskSession(entry, sessionId);
   }
 
   /** 既存のセッションを開く。過去のやり取りはtranscriptから復元する。 */
   async openThread(sessionId: string, title: string, cwd: string | undefined): Promise<void> {
     const existing = this.panels.get(sessionId);
     if (existing !== undefined) {
-      existing.panel.reveal();
+      this.showPanel(existing, false);
       return;
     }
 
@@ -175,7 +266,8 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       return;
     }
 
-    const entry = this.createPanel(`${LABEL}: ${title}`, folder);
+    const entry = this.buildEntry(folder, `${LABEL}: ${title}`, false, undefined);
+    this.showPanel(entry, false);
     this.panels.set(sessionId, entry);
     entry.session.start({
       cwd: folder,
@@ -207,6 +299,11 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       panel.dispose();
       return;
     }
+    if (this.isTaskManagedThread(sessionId)) {
+      // タスク管理下のセッション。汎用復元はここで手を引く（design.md §16.10の7）
+      panel.dispose();
+      return;
+    }
 
     // 復元されたパネルはcwdを保持していない。transcriptの素性から取り戻す
     const cwd = (await this.store.resolveCwd(sessionId)) ?? currentWorkspaceFolder()?.uri.fsPath;
@@ -216,7 +313,8 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       return;
     }
 
-    const entry = this.adopt(panel, cwd);
+    const entry = this.buildEntry(cwd, LABEL, false, undefined);
+    this.attachPanel(entry, panel);
     this.panels.set(sessionId, entry);
     entry.session.start({
       cwd,
@@ -227,16 +325,76 @@ export class ClaudeChatViewManager implements vscode.Disposable {
     });
   }
 
-  private createPanel(title: string, cwd: string): ClaudePanel {
-    const panel = vscode.window.createWebviewPanel(VIEW_TYPE, title, vscode.ViewColumn.Active, {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-    });
-    return this.adopt(panel, cwd);
+  /** セッションとループだけを組み立てる。パネルはまだ作らない。 */
+  private buildEntry(
+    cwd: string,
+    title: string,
+    taskManaged: boolean,
+    taskConfig: ClaudeConfig | undefined,
+  ): ClaudePanel {
+    const session = new ClaudeStreamSession(
+      this.claudePath,
+      this.log,
+      (state) => this.onSessionChange(entry, state),
+      () => this.warnApprovalsUnavailable(),
+      // 起動直後と、セッション中に増減したときに届く
+      () => void this.postCommands(entry),
+      // entry.approvalHandlerはsetApprovalHandlerで後から差し込まれることがあるため、
+      // 構築時に固定せず呼び出しのたびに読み直す（クロージャで参照するだけ）
+      (approval) =>
+        entry.approvalHandler !== undefined
+          ? entry.approvalHandler(approval)
+          : Promise.resolve({ kind: 'ask' as const }),
+    );
+
+    const loop = new LoopController(
+      (text) => this.sendFromLoop(entry, text),
+      (status) => this.onLoopStatus(entry, status),
+    );
+
+    const entry: ClaudePanel = {
+      panel: undefined,
+      session,
+      loop,
+      cwd,
+      attachments: new AttachmentBox(),
+      disposed: false,
+      title,
+      taskManaged,
+      taskConfig,
+      wasBusy: false,
+      wasLoopRunning: false,
+      approvalHandler: undefined,
+      stateListeners: [],
+      finishedListeners: [],
+    };
+    return entry;
   }
 
-  private adopt(panel: vscode.WebviewPanel, cwd: string): ClaudePanel {
-    let wasBusy = false;
+  /**
+   * パネルを表に出す。既にタブがあれば `reveal`、閉じていれば作り直す
+   * （design.md §16.10の4）。会話の再描画はwebview起動時の `ready` 通知への応答に任せる。
+   */
+  private showPanel(entry: ClaudePanel, preserveFocus: boolean): void {
+    if (entry.disposed) {
+      return;
+    }
+    if (entry.panel !== undefined) {
+      entry.panel.reveal(undefined, preserveFocus);
+      return;
+    }
+    const panel = vscode.window.createWebviewPanel(
+      VIEW_TYPE,
+      entry.title,
+      { viewColumn: vscode.ViewColumn.Active, preserveFocus },
+      { enableScripts: true, retainContextWhenHidden: true },
+    );
+    this.attachPanel(entry, panel);
+  }
+
+  private attachPanel(entry: ClaudePanel, panel: vscode.WebviewPanel): void {
+    entry.panel = panel;
+    panel.title = entry.title;
     // 復元されたパネルはスクリプトの許可が落ちているため、ここで入れ直す
     panel.webview.options = { enableScripts: true };
     panel.webview.html = renderShell(panel.webview, {
@@ -247,74 +405,101 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       settingsNote:
         'モデルと承認は今の会話にすぐ効きます。Effortは送りますが、CLIが結果を返さないため反映は確かめられません。「既定」へ戻す操作は次のセッションから効きます。',
     });
-
-    const session = new ClaudeStreamSession(
-      this.claudePath,
-      this.log,
-      (state) => {
-        if (entry.disposed) {
-          return;
-        }
-        // ターンが終わった瞬間に、待たせていた指示を1件送る
-        const finished = wasBusy && !state.busy;
-        wasBusy = state.busy;
-        if (finished && state.queued.length > 0) {
-          entry.session.sendNextQueued();
-        }
-        if (finished) {
-          reportTurnResult(this.onActivity, entry.session.threadId, entry.cwd, state);
-        }
-        const next = deriveTitle(state);
-        if (next !== undefined && panel.title !== next) {
-          panel.title = next;
-        }
-        if (state.usage !== undefined) {
-          this.onUsage(state.usage);
-        }
-        if (finished) {
-          void this.refreshUsage();
-        }
-        // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
-        entry.loop.observe(state);
-        void panel.webview.postMessage({
-          type: 'state',
-          state: {
-            ...state,
-            loop: entry.loop.getStatus(),
-            attachments: entry.attachments.snapshot(),
-          },
-        });
-      },
-      () => this.warnApprovalsUnavailable(),
-      // 起動直後と、セッション中に増減したときに届く
-      () => void this.postCommands(entry),
-    );
-
-    const loop = new LoopController(
-      (text) => this.sendFromLoop(entry, text),
-      () => this.refreshSettings(entry),
-    );
-
-    const entry: ClaudePanel = {
-      panel,
-      session,
-      loop,
-      cwd,
-      attachments: new AttachmentBox(),
-      disposed: false,
-    };
     panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(entry, message));
     panel.onDidDispose(() => {
-      entry.disposed = true;
-      loop.stop('manual');
-      session.dispose();
-      for (const [id, value] of this.panels) {
-        if (value === entry) {
-          this.panels.delete(id);
-        }
+      entry.panel = undefined;
+      if (!entry.taskManaged) {
+        // 人が手で開いた画面は、これまで通りタブを閉じたらセッションも終わる
+        this.teardown(entry);
       }
     });
-    return entry;
+  }
+
+  /** `TaskSessionHost` が返す口の実体。 */
+  private buildTaskSession(entry: ClaudePanel, sessionId: string): TaskSession {
+    return {
+      sessionId,
+      runLoop: (plan: LoopPlan) => entry.loop.start(plan),
+      onFinished: (listener) => entry.finishedListeners.push(listener),
+      onStateChanged: (listener) => entry.stateListeners.push(listener),
+      setApprovalHandler: (handler) => {
+        entry.approvalHandler = handler;
+      },
+      interrupt: () => {
+        entry.session.interrupt();
+        return Promise.resolve();
+      },
+      reveal: () => this.showPanel(entry, false),
+      open: (options) => this.showPanel(entry, options.preserveFocus),
+      dispose: () => this.teardown(entry),
+    };
+  }
+
+  /**
+   * エントリを完全に破棄する。二重に呼んでも安全（`disposed` で早期return）。
+   * タブを閉じたことによる破棄と、明示的な `dispose()` 呼び出しの両方から通る。
+   */
+  private teardown(entry: ClaudePanel): void {
+    if (entry.disposed) {
+      return;
+    }
+    entry.disposed = true;
+    entry.loop.stop('manual');
+    entry.session.dispose();
+    entry.panel?.dispose();
+    entry.panel = undefined;
+    for (const [id, value] of this.panels) {
+      if (value === entry) {
+        this.panels.delete(id);
+      }
+    }
+  }
+
+  private onSessionChange(entry: ClaudePanel, state: ChatState): void {
+    if (entry.disposed) {
+      return;
+    }
+    // ターンが終わった瞬間に、待たせていた指示を1件送る
+    const finished = entry.wasBusy && !state.busy;
+    entry.wasBusy = state.busy;
+    if (finished && state.queued.length > 0) {
+      entry.session.sendNextQueued();
+    }
+    if (finished) {
+      reportTurnResult(this.onActivity, entry.session.threadId, entry.cwd, state);
+    }
+    const next = deriveTitle(state);
+    if (next !== undefined && entry.title !== next) {
+      entry.title = next;
+      if (entry.panel !== undefined) {
+        entry.panel.title = next;
+      }
+    }
+    if (state.usage !== undefined) {
+      this.onUsage(state.usage);
+    }
+    if (finished) {
+      void this.refreshUsage();
+    }
+    // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
+    entry.loop.observe(state);
+    this.postState(entry);
+    for (const listener of entry.stateListeners) {
+      listener(state);
+    }
+  }
+
+  /** ループの状態変化。停止（running: true→false）を検知して `onFinished` を1度だけ呼ぶ。 */
+  private onLoopStatus(entry: ClaudePanel, status: LoopStatus): void {
+    const stopped = entry.wasLoopRunning && !status.running;
+    entry.wasLoopRunning = status.running;
+    this.refreshSettings(entry);
+    if (stopped && status.stopReason !== undefined) {
+      const state = entry.session.getState();
+      for (const listener of entry.finishedListeners) {
+        listener(status.stopReason, state);
+      }
+    }
   }
 
   /** 設定行のキーはCodex画面と共通なので、Claude側のキーへ読み替える。 */
@@ -443,8 +628,10 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       }
       if (type === 'planMode') {
         entry.loop.noteUserAction();
-        // 抜けるときは設定の承認方法へ戻す。設定が空なら既定（manual）
-        entry.session.setPlanMode(m['on'] === true, readClaudeConfig().claude.permissionMode);
+        // 抜けるときは設定の承認方法へ戻す。タスク単位の設定があればそちらを優先する
+        // （design.md §16.10の5。無ければ従来通りグローバル設定、空なら既定=manual）
+        const fallback = (entry.taskConfig ?? readClaudeConfig().claude).permissionMode;
+        entry.session.setPlanMode(m['on'] === true, fallback);
         return;
       }
       if (type === 'cancelQueued' && typeof m['index'] === 'number') {
@@ -532,9 +719,7 @@ export class ClaudeChatViewManager implements vscode.Disposable {
 
   dispose(): void {
     for (const entry of this.panels.values()) {
-      entry.loop.stop('manual');
-      entry.session.dispose();
-      entry.panel.dispose();
+      this.teardown(entry);
     }
     this.panels.clear();
   }

@@ -20,6 +20,19 @@ export type NotificationHandler = (method: string, params: Record<string, unknow
 /** 応答を返さないとCodexは待ち続けるため、必ず値を解決すること。 */
 export type ServerRequestHandler = (request: ServerRequest) => Promise<unknown>;
 
+/**
+ * `ChatSession` が実際に使う面だけを切り出した抽象。
+ *
+ * `AppServerConnection` は構造的にこれを満たすため、実装側は何も変えずそのまま渡せる。
+ * テストでは子プロセスを立てないフェイクに差し替え、`thread/start` 等の応答を
+ * その場で組み立てられるようにする（design.md §16.10、開始待ちの複数化のテストで使う）。
+ */
+export interface AppServerConnectionPort {
+  ensureStarted(): Promise<void>;
+  request(method: string, params: unknown): Promise<JsonRpcMessage>;
+  dispose(): void;
+}
+
 const CLIENT_NAME = 'vscode-codex-extension';
 const CLIENT_VERSION = '0.0.1';
 const REQUEST_TIMEOUT_MS = 120_000;

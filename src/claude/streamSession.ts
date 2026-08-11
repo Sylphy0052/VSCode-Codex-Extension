@@ -12,6 +12,7 @@ import {
 } from '../appserver/chatState';
 import type { LaunchTarget } from '../codex/types';
 import type { Logger } from '../log';
+import type { ApprovalHandlerResult } from '../orchestrator/taskSession';
 import { consumeNdjson } from '../util/ndjson';
 import { buildClaudeStreamArgs } from './argvBuilder';
 import {
@@ -82,6 +83,16 @@ export class ClaudeStreamSession {
     private readonly onApprovalUnavailable: () => void = () => undefined,
     /** 使えるコマンドが判った時と、途中で増減した時に呼ぶ。 */
     private readonly onCommands: (commands: readonly SlashCommand[]) => void = () => undefined,
+    /**
+     * 承認要求を、承認カードを出す前に自動判定へ回す（design.md §16.10の6）。
+     *
+     * 既定は常に `ask`（従来通り必ず承認カードを出す）。タスク管理下のセッションだけ
+     * `ClaudeChatViewManager` が実際の判定へ差し替える。判定そのもの
+     * （`classifyApprovalRequest`）を呼ぶのは runner.ts の責務で、ここは口を通すだけ。
+     */
+    private readonly interceptApproval: (
+      approval: PendingApproval,
+    ) => Promise<ApprovalHandlerResult> = () => Promise.resolve({ kind: 'ask' }),
   ) {}
 
   /**
@@ -319,7 +330,12 @@ export class ClaudeStreamSession {
     this.update(removeApproval(this.state, requestId));
   }
 
-  private receive(chunk: string): void {
+  /**
+   * stdoutの1チャンクを処理する。実際の使い手はプロセスのstdoutリスナーだが、
+   * テストからも直接呼べるよう公開する（`start()` は実プロセスを起動するため、
+   * 承認まわりの分岐だけを検証したいテストは `start()` を経由せずここへ直接流す）。
+   */
+  receive(chunk: string): void {
     this.buffer += chunk;
     const { values, rest } = consumeNdjson(this.buffer);
     this.buffer = rest;
@@ -369,10 +385,26 @@ export class ClaudeStreamSession {
       return;
     }
 
-    this.waiting.set(request.requestId, {
-      approval,
-      input: (request.payload['input'] as Record<string, unknown> | undefined) ?? {},
-    });
+    const input = (request.payload['input'] as Record<string, unknown> | undefined) ?? {};
+    void this.resolveApproval(request.requestId, approval, input);
+  }
+
+  /**
+   * 承認要求を自動判定へ回し、`auto` なら承認カードを出さずに応答する。
+   * `ask`（既定）なら従来通り承認カードを出して人の判断を待つ。
+   */
+  private async resolveApproval(
+    requestId: string,
+    approval: PendingApproval,
+    input: Record<string, unknown>,
+  ): Promise<void> {
+    const result = await this.interceptApproval(approval);
+    if (result.kind === 'auto') {
+      this.write(buildControlResponse(requestId, buildCanUseToolResponse(result.decision, input)));
+      this.log.info(`承認(自動判定): ${approval.kind} → ${result.decision}`);
+      return;
+    }
+    this.waiting.set(requestId, { approval, input });
     this.update(addApproval(this.state, approval));
   }
 
