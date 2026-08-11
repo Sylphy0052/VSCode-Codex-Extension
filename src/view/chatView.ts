@@ -832,6 +832,10 @@ ${chatStyles()}
     <ol id="queueList"></ol>
   </div>
   <div id="status"></div>
+  <div id="todos" hidden>
+    <div class="head">TODO一覧</div>
+    <ul id="todosList"></ul>
+  </div>
   <div id="loopBar" hidden>
     <span id="loopProgress"></span>
     <button id="loopStop" type="button" class="secondary" hidden>ループ停止</button>

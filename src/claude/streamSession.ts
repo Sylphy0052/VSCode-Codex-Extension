@@ -52,6 +52,8 @@ export interface ClaudeStreamOptions {
   config: ClaudeConfig;
   /** 過去の会話。resume時にtranscriptから読んだものを初期表示に使う。 */
   initialItems?: ChatState['items'];
+  /** 過去の会話に含まれていた最後のTODO一覧。resume時にtranscriptから読んだものを使う。 */
+  initialTodos?: ChatState['todos'];
 }
 
 /**
@@ -145,6 +147,7 @@ export class ClaudeStreamSession {
       ...initialClaudeState,
       threadId,
       items: options.initialItems ?? [],
+      todos: options.initialTodos ?? initialClaudeState.todos,
     });
 
     this.initializeControl();
