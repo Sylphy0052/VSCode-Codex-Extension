@@ -2447,7 +2447,14 @@ src/
     pseudoWorktree.ts git外での複製による隔離と差分の適用（*）
     messaging.ts    タスク間メッセージングのMCPサーバと配送（§16.21。*）
     taskSession.ts  `TaskSessionHost` / `TaskSession` のインターフェース（チャット画面側の口）
-    runner.ts       セッションの生成・指示の送信・完了検知（VSCode層）
+    runner.ts       `WorkflowRunner`本体（薄いファサード）。セッションの生成・指示の送信・
+                     完了検知・状態遷移の接続（VSCode層）。関心事ごとの実体は下記5ファイルへ
+                     切り出し済み（Issue #147）
+    runnerSnapshot.ts   ワークフローViewのスナップショット構築（`getSnapshot`等。読み取り専用）
+    runnerRestore.ts    ウィンドウのリロード後の実行再開（`rebuildLiveRun`等。§16.11）
+    runnerWorkingDirectory.ts 作業ディレクトリの解決と疑似worktree統合（§16.6・§16.20）
+    runnerMerge.ts      マージと衝突解決、タスク層のPR/MR作成（§16.17・§16.18）
+    runnerMessaging.ts  タスク間メッセージング（§16.21）
     planner.ts      ゴール文からYAMLを生成する（§16.9）
     roadmap.ts      ロードマップの生成・YAML化・完了の書き戻し（§16.19。*）
   view/
@@ -2455,6 +2462,8 @@ src/
 ```
 
 `*` を付けた4ファイルも、`runner.ts` / `extension.ts` からの配線を含めて実装済みで、実行に反映される（§16.13）。
+
+`runnerSnapshot.ts` / `runnerRestore.ts` / `runnerWorkingDirectory.ts` / `runnerMerge.ts` / `runnerMessaging.ts` の5ファイルは、`WorkflowRunner`のメソッドを機能単位で切り出したもので、`self: WorkflowRunner`を第一引数に取る関数の集まりとして実装している（Issue #147）。`runner.ts`側のクラスメソッドはこれらへ委譲する薄いラッパーとして残す（`getSnapshot` / `restoreRunsForView` / `retryMerge` のように公開APIとして呼ばれ続けるものは、シグネチャを変えずメソッドのまま残す）。`WorktreeCreationQueue`を1つだけ使い回す不変条件（§16.6・§16.17）は、`WorkflowRunner`のコンストラクタで組み立てたインスタンスを`self.integrationQueue`（`IntegrationMergeQueue`経由）として共有し続けることで変えていない。
 
 `integration.ts` / `forge.ts` / `pseudoWorktree.ts` は、`worktree.ts` と同じくコマンドの実行をポート（差し替え可能なインターフェース）越しに行い、コマンドを組み立てる部分を純粋関数として切り出す。テストで実際に `git` / `gh` / `glab` を叩かないため。
 
