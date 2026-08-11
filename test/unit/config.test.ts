@@ -34,6 +34,23 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
   it('allowAutoApproveの既定はfalse', () => {
     expect(readWorkflowsConfig().allowAutoApprove).toBe(false);
   });
+
+  it('roadmapDirの既定は docs/roadmap', () => {
+    expect(readWorkflowsConfig().roadmapDir).toBe('docs/roadmap');
+  });
+
+  it('roadmapDirは通常の相対パスをそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.roadmapDir': 'roadmaps' });
+    expect(readWorkflowsConfig().roadmapDir).toBe('roadmaps');
+  });
+
+  it('roadmapDirの..を含む値・絶対パスは既定値へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.roadmapDir': '../../outside' });
+    expect(readWorkflowsConfig().roadmapDir).toBe('docs/roadmap');
+
+    __mock.setConfig('agent', { 'workflows.roadmapDir': '/etc/evil' });
+    expect(readWorkflowsConfig().roadmapDir).toBe('docs/roadmap');
+  });
 });
 
 describe('readClaudeConfig', () => {

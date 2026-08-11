@@ -716,6 +716,29 @@ export function applyEvent(
       return next.approvals.length === state.approvals.length ? state : next;
     }
 
+    /**
+     * hookの実行結果（issue #28）。
+     *
+     * app-serverのプロトコルには「hookを信頼してください」という要求そのものが無い
+     * （`ServerRequest` の10種、`ServerNotification` の全種を実測・スキーマ双方で確認したが
+     * hook信頼専用のものは存在しない）。代わりに、信頼していないhookが動くタイミングで
+     * `status: 'blocked'`（`HookRunStatus` の1値）を伴う `hook/completed` が届く。これが
+     * 「信頼が必要」と気づける唯一の実観測可能な合図なので、会話へ一言残す。
+     */
+    case 'hook/completed': {
+      const run = rec(params['run']);
+      if (str(run?.['status']) !== 'blocked') {
+        return state;
+      }
+      const eventName = str(run?.['eventName']) || '不明なイベント';
+      const sourcePath = str(run?.['sourcePath']);
+      const detail =
+        `hookがブロックされました（信頼されていないため実行されませんでした）: ${eventName}` +
+        (sourcePath === '' ? '' : ` (${sourcePath})`) +
+        '。設定パネルのhooks一覧で内容を確認してから信頼してください。';
+      return appendNotice(state, `hookBlocked:${str(run?.['id'])}`, detail);
+    }
+
     default:
       return state;
   }

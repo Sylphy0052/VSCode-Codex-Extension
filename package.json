@@ -296,6 +296,11 @@
         "category": "Agent"
       },
       {
+        "command": "agent.workflows.roadmap",
+        "title": "ロードマップを生成…",
+        "category": "Agent"
+      },
+      {
         "command": "agent.workflows.view",
         "title": "ワークフローViewを開く",
         "category": "Agent"
@@ -429,6 +434,26 @@
           "minimum": 1,
           "scope": "machine-overridable",
           "markdownDescription": "タスク間のメッセージング（`send_message` の `expectReply: true`）で、返信を待つ時間の上限（秒）。超えたタスクは返信を待たずに再開する（設計書 §16.21）。"
+        },
+        "agent.workflows.roadmapDir": {
+          "type": "string",
+          "default": "docs/roadmap",
+          "scope": "machine-overridable",
+          "markdownDescription": "ロードマップ（`workflow.roadmap` で生成するMarkdown）の出力先ディレクトリ。ワークスペースフォルダからの相対パス。出力先はワークスペースフォルダの配下に限る（設計書 §16.16・§16.19）。"
+        },
+        "agent.workflows.pseudoWorktreeExclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "node_modules",
+            ".venv",
+            "dist",
+            "out"
+          ],
+          "scope": "machine-overridable",
+          "markdownDescription": "ワークスペースがgitの作業ツリーでない場合の隔離（疑似worktree）で、複製から除外するディレクトリ名。深さを問わず名前が一致するディレクトリを除外する。`.agents/worktrees` 自身は常に除外される（設計書 §16.20）。"
         },
         "claude.executablePath": {
           "type": "string",
