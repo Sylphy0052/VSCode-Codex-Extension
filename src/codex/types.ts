@@ -16,6 +16,13 @@ export interface CodexConfig {
   reasoningEffort: string;
   profile: string;
   sandbox: string;
+  /**
+   * `workspace-write` のときに作業フォルダの外で書き込みを許す場所。絶対パスのみ。
+   * TUIの `/sandbox-add-read-dir` に相当する。
+   */
+  sandboxWritableRoots: string[];
+  /** `workspace-write` のときにネットワークへ出られるか。 */
+  sandboxNetworkAccess: boolean;
   approvalMode: string;
   additionalArgs: string[];
 }
@@ -25,6 +32,8 @@ export const emptyConfig: CodexConfig = {
   reasoningEffort: '',
   profile: '',
   sandbox: '',
+  sandboxWritableRoots: [],
+  sandboxNetworkAccess: false,
   approvalMode: '',
   additionalArgs: [],
 };

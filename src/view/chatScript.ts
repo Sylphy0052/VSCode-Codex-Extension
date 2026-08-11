@@ -517,7 +517,7 @@ export function chatScript(agentLabel: string): string {
     select.value = current;
   }
 
-  function applySettings(s) {
+  function applySettings(s, planning) {
     if (!s) return;
     const nameOf = (slug) => {
       const m = s.models.find((x) => x.slug === slug);
@@ -540,10 +540,25 @@ export function chatScript(agentLabel: string): string {
     const approvalDefault = el('approvalMode').querySelector('option[value=""]');
     if (approvalDefault) approvalDefault.textContent = defaultLabel(d.approvalMode);
     el('approvalMode').value = s.approvalMode;
+
+    // サンドボックスはCodex画面にしか無い（Claude Codeは承認方法に集約されている）
+    const sandbox = el('sandbox');
+    if (sandbox) {
+      const sandboxDefault = sandbox.querySelector('option[value=""]');
+      if (sandboxDefault) sandboxDefault.textContent = defaultLabel(d.sandbox);
+      sandbox.value = s.sandbox || '';
+      // 計画モード中は読み取り専用が優先される。選ばせても効かないので止める
+      sandbox.disabled = !!planning;
+      sandbox.title = planning
+        ? '計画モード中は読み取り専用が優先されます'
+        : '次の発言から効きます';
+    }
   }
 
-  for (const key of ['model', 'reasoningEffort', 'approvalMode']) {
-    el(key).addEventListener('change', (e) => {
+  for (const key of ['model', 'reasoningEffort', 'approvalMode', 'sandbox']) {
+    const select = el(key);
+    if (!select) continue;
+    select.addEventListener('change', (e) => {
       vscode.postMessage({ type: 'config', key, value: e.target.value });
     });
   }
@@ -590,7 +605,7 @@ export function chatScript(agentLabel: string): string {
     sentTexts = state.items
       .filter((i) => i.kind === 'userMessage' && i.text.trim() !== '')
       .map((i) => i.text);
-    applySettings(state.settings);
+    applySettings(state.settings, state.planMode);
     const log = el('log');
     const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
     syncItems(state.items);

@@ -89,7 +89,7 @@ Claude Codeには会話の要約名が無いため、一覧とタブ名は最初
 | セッションのfork / archive / delete         | 履歴の項目を右クリック                                                                                                 |
 | セッション名の変更                          | Codex画面がアクティブなときエディタ右上の鉛筆アイコン                                                                  |
 | 表示範囲の切替（このワークスペース / 全体） | 履歴ビューのタイトルバー                                                                                               |
-| モデル/effort/承認の切替                    | サイドバーの設定パネル（Codex / Claude Codeのタブ）、または各チャット画面の入力欄下。選択肢はCLIから取得する            |
+| モデル/effort/承認の切替                    | サイドバーの設定パネル（Codex / Claude Codeのタブ）、または各チャット画面の入力欄下。選択肢はCLIから取得する           |
 | 使用量とコンテキスト残量の確認              | ステータスバー／チャット画面の入力欄下                                                                                 |
 | 会話を圧縮する                              | チャット画面の「圧縮」ボタン（確認あり。元には戻せない）                                                               |
 | 画像を添えて送る                            | 入力欄で `Ctrl+V`、画面へドラッグ&ドロップ、または「画像」ボタン（png / jpeg / gif / webp、1枚5MB・合計10MB・5枚まで） |
@@ -185,16 +185,18 @@ Codexのapp-serverにはPlan modeそのものが無いため、**権限で作っ
 
 ### Codex
 
-| キー                    | 既定    | スコープ            | 説明                                                   |
-| ----------------------- | ------- | ------------------- | ------------------------------------------------------ |
-| `codex.executablePath`  | `codex` | machine             | 実行ファイルのパス                                     |
-| `codex.codexHome`       | `""`    | machine             | 空なら `CODEX_HOME` → `~/.codex`                       |
-| `codex.additionalArgs`  | `[]`    | machine             | 任意の追加引数                                         |
-| `codex.sandbox`         | `""`    | machine             | `read-only` / `workspace-write` / `danger-full-access` |
-| `codex.approvalMode`    | `""`    | machine             | `untrusted` / `on-request` / `never`                   |
-| `codex.model`           | `""`    | machine-overridable | 空なら `-m` を渡さない                                 |
-| `codex.reasoningEffort` | `""`    | machine-overridable | `model_reasoning_effort`。選択肢はモデルごとに異なる   |
-| `codex.profile`         | `""`    | machine-overridable | `-p` に渡すプロファイル名                              |
+| キー                         | 既定    | スコープ            | 説明                                                                                         |
+| ---------------------------- | ------- | ------------------- | -------------------------------------------------------------------------------------------- |
+| `codex.executablePath`       | `codex` | machine             | 実行ファイルのパス                                                                           |
+| `codex.codexHome`            | `""`    | machine             | 空なら `CODEX_HOME` → `~/.codex`                                                             |
+| `codex.additionalArgs`       | `[]`    | machine             | 任意の追加引数                                                                               |
+| `codex.sandbox`              | `""`    | machine             | `read-only` / `workspace-write` / `danger-full-access`。会話の途中で変えると次の発言から効く |
+| `codex.sandboxWritableRoots` | `[]`    | machine             | `workspace-write` のときに書き込みを許す追加の場所。絶対パスのみ                             |
+| `codex.sandboxNetworkAccess` | `false` | machine             | `workspace-write` のときにネットワークへ出られるか                                           |
+| `codex.approvalMode`         | `""`    | machine             | `untrusted` / `on-request` / `never`                                                         |
+| `codex.model`                | `""`    | machine-overridable | 空なら `-m` を渡さない                                                                       |
+| `codex.reasoningEffort`      | `""`    | machine-overridable | `model_reasoning_effort`。選択肢はモデルごとに異なる                                         |
+| `codex.profile`              | `""`    | machine-overridable | `-p` に渡すプロファイル名                                                                    |
 
 ### Claude Code
 

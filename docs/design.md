@@ -394,18 +394,20 @@ Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡
 
 **スコープの原則**: 実行経路（どのバイナリをどの引数で起動するか）と権限（sandbox / 承認）に影響する設定は `machine` スコープとし、リポジトリの `.vscode/settings.json` から上書きできないようにする。これを怠ると、リポジトリをクローンして開いただけで任意コマンドが実行され、Codexのサンドボックスも無効化される。
 
-| キー                       | 型       | 既定        | スコープ            | 説明                                                                                       |
-| -------------------------- | -------- | ----------- | ------------------- | ------------------------------------------------------------------------------------------ |
-| `codex.executablePath`     | string   | `codex`     | **machine**         | 実行ファイルのパス                                                                         |
-| `codex.codexHome`          | string   | `""`        | **machine**         | 空なら `CODEX_HOME` → `~/.codex`                                                           |
-| `codex.additionalArgs`     | string[] | `[]`        | **machine**         | 任意の追加引数                                                                             |
-| `codex.sandbox`            | enum     | `""`        | **machine**         | `read-only` / `workspace-write` / `danger-full-access`                                     |
-| `codex.approvalMode`       | enum     | `""`        | **machine**         | `untrusted` / `on-request` / `never`                                                       |
-| `codex.model`              | string   | `""`        | machine-overridable | 空なら `-m` を渡さずconfig.tomlに委譲                                                      |
-| `codex.reasoningEffort`    | string   | `""`        | machine-overridable | `model_reasoning_effort`。専用フラグが無いため `-c model_reasoning_effort=<値>` として渡す |
-| `codex.profile`            | string   | `""`        | machine-overridable | `-p`                                                                                       |
-| `codex.history.scope`      | enum     | `workspace` | window              | `workspace` / `all`                                                                        |
-| `codex.history.maxEntries` | number   | `200`       | window              | 一覧構築の上限件数                                                                         |
+| キー                         | 型       | 既定        | スコープ            | 説明                                                                                       |
+| ---------------------------- | -------- | ----------- | ------------------- | ------------------------------------------------------------------------------------------ |
+| `codex.executablePath`       | string   | `codex`     | **machine**         | 実行ファイルのパス                                                                         |
+| `codex.codexHome`            | string   | `""`        | **machine**         | 空なら `CODEX_HOME` → `~/.codex`                                                           |
+| `codex.additionalArgs`       | string[] | `[]`        | **machine**         | 任意の追加引数                                                                             |
+| `codex.sandbox`              | enum     | `""`        | **machine**         | `read-only` / `workspace-write` / `danger-full-access`。会話の途中でも変えられる（§9.5）   |
+| `codex.sandboxWritableRoots` | string[] | `[]`        | **machine**         | `workspace-write` のときに書き込みを許す追加の場所。絶対パスのみ                           |
+| `codex.sandboxNetworkAccess` | boolean  | `false`     | **machine**         | `workspace-write` のときにネットワークへ出られるか                                         |
+| `codex.approvalMode`         | enum     | `""`        | **machine**         | `untrusted` / `on-request` / `never`                                                       |
+| `codex.model`                | string   | `""`        | machine-overridable | 空なら `-m` を渡さずconfig.tomlに委譲                                                      |
+| `codex.reasoningEffort`      | string   | `""`        | machine-overridable | `model_reasoning_effort`。専用フラグが無いため `-c model_reasoning_effort=<値>` として渡す |
+| `codex.profile`              | string   | `""`        | machine-overridable | `-p`                                                                                       |
+| `codex.history.scope`        | enum     | `workspace` | window              | `workspace` / `all`                                                                        |
+| `codex.history.maxEntries`   | number   | `200`       | window              | 一覧構築の上限件数                                                                         |
 
 Claude Code側（`claude.*`）と作業記録（`agent.activityLog.*`）の設定は §14・§15 で扱う。実際に登録している一覧は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている。
 
@@ -515,6 +517,24 @@ turn/completed
 
 - 宛先の画面が見つからない要求は**必ず拒否側に倒す**。ユーザーの目に触れないまま実行を許さないため。
 - 画面を閉じるときは保留中の要求を全て `cancel` で解放する。放置するとCodexが待ち続ける。
+
+### サンドボックスをターン単位で変える
+
+`turn/start` の `sandboxPolicy` は「このターン以降」に効く（app-serverのスキーマの文言そのまま）。モデル・effort・承認方針と同じく**毎ターン渡す**ので、会話の途中で権限を変えられる。読み取り専用で始めた会話の途中で書き込みを許すのに、セッションを開き直す必要は無い。
+
+`thread/start` は文字列（`read-only` など）を取るが、ターン単位ではタグ付きunionのオブジェクトになる。**形が違うだけで指定できる内容は同じ**。
+
+| 設定の値             | `sandboxPolicy`                |
+| -------------------- | ------------------------------ |
+| `read-only`          | `{ type: 'readOnly' }`         |
+| `workspace-write`    | `{ type: 'workspaceWrite' }`   |
+| `danger-full-access` | `{ type: 'dangerFullAccess' }` |
+| 空（CLIへ委譲）      | 載せない                       |
+
+- 省略した項目はapp-server側の既定になる（`writableRoots: []` / `networkAccess: false` / `excludeSlashTmp: false` / `excludeTmpdirEnvVar: false`）。これは `thread/start` に `sandbox: 'workspace-write'` を渡したときの実効値と同じ形
+- `codex.sandboxWritableRoots` / `codex.sandboxNetworkAccess` で `workspaceWrite` の中身を指定できる。前者はTUIの `/sandbox-add-read-dir` に相当する。**絶対パスでない要素は黙って落とす**（app-serverが `AbsolutePathBuf` を要求するため）
+- **権限を広げる変更には確認を挟む**。`SANDBOX_MODES` の宣言順がそのまま安全順で、いまの値が空（CLIへ委譲）のときは何が効いているか判らないため、読み取り専用以外への変更を確認対象にする
+- 優先順位は Plan mode > 設定 > スレッド開始時の指定。Plan mode中はセレクタを無効にして理由を出す
 
 ### 会話途中からの分岐
 
@@ -884,6 +904,7 @@ Claude Codeは消費率（`usedPercent`）を返さない。実測した中身�
 - **`turn/start` の指定は「このターン以降」に効く**。一度送ったら、抜けるときに明示的に戻さないと読み取り専用のままになる
 - 戻し先は `thread/start` / `thread/resume` の応答に入っている `approvalPolicy` と `sandbox` を控えておく。設定値から組み立て直すと、設定が空（CLIの `config.toml` へ委譲）のときに推測することになる
 - **戻し先を読めなかったスレッドではPlan modeに入れない**。入れてしまうと読み取り専用から出られなくなる
+- 設定のサンドボックス（§9.5「サンドボックスをターン単位で変える」）よりPlan modeを優先する。書けないことを権限で保証するため
 - TUIの `/plan` は計画を促す指示も入れるが、`turn/start` に指示を差し込む口は無い（`developerInstructions` は `thread/start` のみ）。**指示は足さない**。ユーザーが送った文面をそのまま送る。つまりTUIの `/plan` とは別物で、保証するのは「書けないこと」だけ
 - 進行中のターンには効かない（`turn/steer` に権限を渡す口が無い）
 

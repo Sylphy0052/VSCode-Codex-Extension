@@ -32,7 +32,11 @@ describe('turnPolicyFor', () => {
   const baseline = { approvalPolicy: 'on-request', sandboxPolicy: { type: 'workspaceWrite' } };
 
   it('計画モード中は読み取り専用にする', () => {
-    expect(turnPolicyFor(true, baseline, false)).toEqual(PLAN_POLICY);
+    expect(turnPolicyFor(true, baseline, false, '')).toEqual(PLAN_POLICY);
+  });
+
+  it('設定のサンドボックスより計画モードを優先する', () => {
+    expect(turnPolicyFor(true, baseline, false, 'danger-full-access')).toEqual(PLAN_POLICY);
   });
 
   it('読み取り専用のとき承認を求めない', () => {
@@ -41,17 +45,45 @@ describe('turnPolicyFor', () => {
     expect(PLAN_POLICY.sandboxPolicy).toEqual({ type: 'readOnly' });
   });
 
-  it('一度も入っていなければ権限に触らない', () => {
-    expect(turnPolicyFor(false, baseline, false)).toBeUndefined();
+  it('設定が空で一度も入っていなければ権限に触らない', () => {
+    expect(turnPolicyFor(false, baseline, false, '')).toBeUndefined();
+  });
+
+  it('設定のサンドボックスを毎ターン渡す', () => {
+    expect(turnPolicyFor(false, baseline, false, 'read-only')).toEqual({
+      sandboxPolicy: { type: 'readOnly' },
+    });
   });
 
   it('抜けたあとは開始時の権限へ戻す', () => {
     // turn/start の指定は「このターン以降」に効くため、明示的に戻さないと読み取り専用のまま
-    expect(turnPolicyFor(false, baseline, true)).toEqual(baseline);
+    expect(turnPolicyFor(false, baseline, true, '')).toEqual(baseline);
+  });
+
+  it('抜けたあとに設定があれば、承認方針だけ戻して設定のサンドボックスを使う', () => {
+    expect(turnPolicyFor(false, baseline, true, 'danger-full-access')).toEqual({
+      approvalPolicy: 'on-request',
+      sandboxPolicy: { type: 'dangerFullAccess' },
+    });
   });
 
   it('戻し先が判らなければ何も送らない', () => {
-    expect(turnPolicyFor(false, undefined, true)).toBeUndefined();
+    expect(turnPolicyFor(false, undefined, true, '')).toBeUndefined();
+  });
+
+  it('書き込み範囲とネットワークの指定を載せる', () => {
+    expect(
+      turnPolicyFor(false, baseline, false, 'workspace-write', {
+        writableRoots: ['/tmp/work'],
+        networkAccess: true,
+      }),
+    ).toEqual({
+      sandboxPolicy: {
+        type: 'workspaceWrite',
+        writableRoots: ['/tmp/work'],
+        networkAccess: true,
+      },
+    });
   });
 });
 
@@ -123,6 +155,39 @@ describe('ChatSession の計画モード', () => {
       sandboxPolicy: { type: 'workspaceWrite', writableRoots: [], networkAccess: false },
       approvalPolicy: 'on-request',
     });
+  });
+
+  it('設定のサンドボックスを毎ターン渡す（会話の途中で変えられる）', async () => {
+    const { session, sent } = fakeSession();
+    await session.start('/w', { ...emptyConfig, sandbox: 'read-only' });
+    await session.send('調べて', { ...emptyConfig, sandbox: 'read-only' });
+    await session.send('直して', { ...emptyConfig, sandbox: 'workspace-write' });
+
+    expect(turnStarts(sent)[0]?.['sandboxPolicy']).toEqual({ type: 'readOnly' });
+    expect(turnStarts(sent)[1]?.['sandboxPolicy']).toEqual({ type: 'workspaceWrite' });
+  });
+
+  it('計画モード中は設定のサンドボックスを無視する', async () => {
+    const { session, sent } = fakeSession();
+    const config = { ...emptyConfig, sandbox: 'danger-full-access' };
+    await session.start('/w', config);
+    session.setPlanMode(true);
+    await session.send('計画して', config);
+    expect(turnStarts(sent)[0]).toMatchObject({
+      sandboxPolicy: { type: 'readOnly' },
+      approvalPolicy: 'never',
+    });
+  });
+
+  it('計画モードを抜けたら設定のサンドボックスへ戻る', async () => {
+    const { session, sent } = fakeSession();
+    const config = { ...emptyConfig, sandbox: 'workspace-write' };
+    await session.start('/w', config);
+    session.setPlanMode(true);
+    await session.send('計画して', config);
+    session.setPlanMode(false);
+    await session.send('やって', config);
+    expect(turnStarts(sent)[1]?.['sandboxPolicy']).toEqual({ type: 'workspaceWrite' });
   });
 
   it('切り替えは会話に残る', async () => {

@@ -13,7 +13,7 @@ import { currentWorkspaceFolder, readConfig, workspaceFolderPaths } from '../con
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
-import { APPROVAL_MODES } from '../codex/types';
+import { APPROVAL_MODES, SANDBOX_MODES } from '../codex/types';
 import type { PromptSubmission } from '../appserver/prompts';
 import { AttachmentBox } from '../provider/attachments';
 import { CommandCatalog } from '../provider/commandCatalog';
@@ -267,6 +267,7 @@ export class ChatViewManager implements vscode.Disposable {
     panel.webview.html = renderShell(panel.webview, {
       agentLabel: 'Codex',
       approvalModes: APPROVAL_MODES,
+      sandboxModes: SANDBOX_MODES,
       showSettings: true,
     });
 
@@ -751,6 +752,12 @@ export interface ChatShellOptions {
   agentLabel: string;
   /** 承認方法の選択肢。プロバイダごとに異なる。 */
   approvalModes: readonly string[];
+  /**
+   * サンドボックスの選択肢。渡さなければセレクタ自体を出さない。
+   *
+   * Claude Codeにサンドボックスの概念は無く、権限は `--permission-mode` に集約される。
+   */
+  sandboxModes?: readonly string[];
   /** モデル・effort・承認のプルダウンを出すか（Codex画面のみ）。 */
   showSettings: boolean;
   /**
@@ -839,6 +846,14 @@ ${chatStyles()}
       <option value="">既定</option>
       ${options.approvalModes.map((m) => `<option value="${m}">${m}</option>`).join('')}
     </select></label>
+    ${
+      options.sandboxModes === undefined
+        ? ''
+        : `<label>Sandbox <select id="sandbox">
+      <option value="">既定</option>
+      ${options.sandboxModes.map((m) => `<option value="${m}">${m}</option>`).join('')}
+    </select></label>`
+    }
     ${options.settingsNote === undefined ? '' : `<p class="note">${escapeHtml(options.settingsNote)}</p>`}
   </div>
 
