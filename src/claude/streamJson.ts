@@ -6,7 +6,7 @@ import {
   type ChatState,
 } from '../appserver/chatState';
 import { readClaudeResultImages } from '../provider/imageRefs';
-import { describeTool, normalizeTodos, TODO_WRITE_TOOL } from './transcript';
+import { claudeSearchResults, describeTool, normalizeTodos, TODO_WRITE_TOOL } from './transcript';
 
 /**
  * `claude --output-format stream-json` のイベントを、Codex画面と共通の
@@ -99,6 +99,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
         status: undefined,
         turnId: undefined,
         diffs: [],
+        searchResults: [],
       });
       continue;
     }
@@ -111,6 +112,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
         status: undefined,
         turnId: undefined,
         diffs: [],
+        searchResults: [],
       });
       continue;
     }
@@ -131,6 +133,8 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
         status: 'running',
         turnId: undefined,
         diffs: tool.diffs,
+        // tool_useの時点では結果が判らない。tool_resultが届いたときにapplyUserが埋める
+        searchResults: [],
       });
       // Edit/Write/NotebookEdit はファイル編集。作業記録の成果行に使うため集めておく
       if (tool.kind === 'fileChange') {
@@ -154,6 +158,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
  */
 function applyUser(state: ChatState, event: Record<string, unknown>): ChatState {
   const content = list(rec(event['message'])?.['content']);
+  const toolResultCount = content.filter((part) => str(part['type']) === 'tool_result').length;
   let items = state.items;
 
   for (const part of content) {
@@ -174,6 +179,12 @@ function applyUser(state: ChatState, event: Record<string, unknown>): ChatState 
         // 画像を読むツール（Read）は base64 の image ブロックで返す（実測）
         images: readClaudeResultImages(part['content']),
         status: part['is_error'] === true ? 'エラー' : 'completed',
+        // WebSearchの結果（issue #18）。メッセージ本体には無く、イベントに別枠で
+        // 添えられる tool_use_result から取り出す（詳細は transcript.ts の関数を参照）
+        searchResults:
+          existing.kind === 'webSearch'
+            ? claudeSearchResults(event['tool_use_result'], toolResultCount)
+            : existing.searchResults,
       };
       items = next;
       continue;
@@ -191,6 +202,7 @@ function applyUser(state: ChatState, event: Record<string, unknown>): ChatState 
         status: undefined,
         turnId: undefined,
         diffs: [],
+        searchResults: [],
       });
     }
   }
@@ -229,6 +241,7 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
         status: undefined,
         turnId: undefined,
         diffs: [],
+        searchResults: [],
       }),
     };
   }
@@ -260,6 +273,7 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
           status: undefined,
           turnId: undefined,
           diffs: [],
+          searchResults: [],
         },
       ],
     };
@@ -315,6 +329,7 @@ function applyCompactBoundary(state: ChatState, event: Record<string, unknown>):
       status: undefined,
       turnId: undefined,
       diffs: [],
+      searchResults: [],
     }),
   };
 }
@@ -351,6 +366,7 @@ function applyStatus(state: ChatState, event: Record<string, unknown>): ChatStat
       status: 'エラー',
       turnId: undefined,
       diffs: [],
+      searchResults: [],
     }),
   };
 }

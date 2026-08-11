@@ -7,7 +7,7 @@ import {
   isApprovalDecision,
   type ApprovalDecision,
 } from '../appserver/approvals';
-import type { ChatItem, ChatState } from '../appserver/chatState';
+import { isOpenableSearchUrl, type ChatItem, type ChatState } from '../appserver/chatState';
 import { ChatSession } from '../appserver/chatSession';
 import {
   AppServerConnection,
@@ -35,6 +35,7 @@ import type {
   TaskSessionHost,
   TaskSessionInput,
 } from '../orchestrator/taskSession';
+import { CODEX_APPROVAL_CYCLE } from '../provider/approvalCycle';
 import { AttachmentBox } from '../provider/attachments';
 import { buildImageReply } from '../provider/imageRefs';
 import { CommandCatalog } from '../provider/commandCatalog';
@@ -554,6 +555,7 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     panel.webview.html = renderShell(panel.webview, {
       agentLabel: 'Codex',
       approvalModes: APPROVAL_MODES,
+      approvalCycle: CODEX_APPROVAL_CYCLE,
       sandboxModes: SANDBOX_MODES,
       showSettings: true,
       // review/startはapp-serverの標準機能なので、コマンド一覧を待たずに常に出す
@@ -743,6 +745,14 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       if (type === 'requestImage') {
         if (entry.panel !== undefined) {
           await postImageData(entry.panel, this.fs, entry.session.getState().items, m['path']);
+        }
+        return;
+      }
+      if (type === 'openUrl' && typeof m['url'] === 'string') {
+        // Webviewからは直接開けない。押した＝行き先を見た上での明示の意思表示なので
+        // 追加の確認はしない（design.md §9.9の `url` モードと同じ考え方。issue #18）
+        if (isOpenableSearchUrl(m['url'])) {
+          void vscode.env.openExternal(vscode.Uri.parse(m['url']));
         }
         return;
       }
@@ -1236,6 +1246,10 @@ export interface ChatShellOptions {
   /** 承認方法の選択肢。プロバイダごとに異なる。 */
   approvalModes: readonly string[];
   /**
+   * Shift+Tabで回す承認方法の並び（issue #13）。渡さなければキー操作を効かせない。
+   */
+  approvalCycle?: readonly string[];
+  /**
    * サンドボックスの選択肢。渡さなければセレクタ自体を出さない。
    *
    * Claude Codeにサンドボックスの概念は無く、権限は `--permission-mode` に集約される。
@@ -1368,7 +1382,7 @@ ${chatStyles()}
   </div>
 
 <script nonce="${nonce}">
-${chatScript(options.agentLabel, options.review, options.showRewind === true)}
+${chatScript(options.agentLabel, options.review, options.showRewind === true, options.approvalCycle ?? [])}
 </script>
 </body>
 </html>`;

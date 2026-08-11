@@ -555,6 +555,32 @@ export function resumeFromApproval(run: RunState, taskId: string): RunState {
   return setTask(run, taskId, { ...current, state: 'running' });
 }
 
+/**
+ * `running` のタスクを `waitingReply` にする（design.md §16.21「`expectReply: true` で
+ * 送ったタスクは、自分のターンを終えたあと、返信が届くまで次の指示を受け取らない」）。
+ * `messaging.ts`の判定（`validateSendMessage`等）は状態を変えないため、実際の遷移は
+ * ここで行う。
+ */
+export function markWaitingReply(run: RunState, taskId: string): RunState {
+  const current = run.tasks.get(taskId);
+  if (current === undefined || current.state !== 'running') {
+    return run;
+  }
+  return setTask(run, taskId, { ...current, state: 'waitingReply' });
+}
+
+/**
+ * `waitingReply` から `running` へ戻る。返信が届いた場合と、待ちぼうけが解けた場合
+ * （design.md §16.21「待ちぼうけを検出する経路」）の両方で使う共通の遷移。
+ */
+export function resumeFromWaitingReply(run: RunState, taskId: string): RunState {
+  const current = run.tasks.get(taskId);
+  if (current === undefined || current.state !== 'waitingReply') {
+    return run;
+  }
+  return setTask(run, taskId, { ...current, state: 'running' });
+}
+
 /** 送信回数を上書きする。実行層（`LoopStatus.iteration`）の値をそのまま写す想定。 */
 export function recordSubmissionCount(
   run: RunState,

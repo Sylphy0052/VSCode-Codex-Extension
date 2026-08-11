@@ -761,7 +761,7 @@ codex app-server generate-ts --out <DIR>            # TypeScript バインディ
 - TypeScript / Node 20 / esbuild（バンドル）
 - eslint + prettier、`tsc --noEmit` で型チェック
 - テスト
-  - unit（vitest）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で83ファイル1420件
+  - unit（vitest）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で87ファイル1574件
   - **VSCodeに依存する層はユニットテストで扱わない**。`vscode` モジュールを触るファイル（`view/**` など）はテストから import できないため、判断が要るロジックは純粋関数へ切り出してそちらを試す（例: `view/panelState.ts`）
   - 実VSCodeでしか確認できない範囲は自動化せず、[manual-test.md](manual-test.md) のチェックリストと実施記録で担保する
 - `scripts/check.sh` に lint / typecheck / test を集約し、commit前に全緑を必須とする
@@ -1422,7 +1422,136 @@ Phase 0（issue #1 Z-07 / issue #2 Z-10）の時点では「両方とも実装�
 - `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `skills: SkillsSnapshot` を追加。`toggleCodexSkill(path, enabled)` を新設（Claude Code側には対応する書き込みメソッドを持たない）
 - `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画と有効/無効の切替（Codexのみ）。skillの名前・説明は必ず `textContent` でDOMへ入れ、HTMLとして解釈させない
 
-### 14.20 plugins / appsの一覧と管理
+### 14.20 承認方法をキー操作で回す
+
+TUIは Shift+Tab で承認モードを循環させる。セレクタを開いて選ぶより速く、実際にはこちらばかり使う操作なので、チャット画面にも同じ入口を用意する（issue #13・TP-23）。
+
+- **入力欄にフォーカスがあるときだけ効かせる**。ブラウザ既定のフォーカス移動を奪う操作なので、画面のどこでも効くようにはしない
+- 並びは「制限が強い側から緩い側へ」。押すたびに緩む向きに進むので、どこまで緩めたかが押した回数で分かる
+  - Codex: `untrusted` → `on-request` → `never`（`APPROVAL_MODES` の宣言順がそのまま安全順）
+  - Claude Code: `plan` → `manual` → `acceptEdits` → `auto` → `dontAsk`
+- **Claude Codeの `bypassPermissions` は循環に含めない。** 確認なしでツールが動く値で、キーを連打していて到達してよいものではない。設定パネルとセレクタからは、明示の同意を取ったうえで選べる
+- 現在値が循環に無いとき（空文字＝CLIへ委譲、または `bypassPermissions`）は**先頭へ進む**。いま何が効いているか画面から判らない状態から、いちばん厳しいところへ寄せる
+- **現在の承認方法は入力欄の下に常に出す**（`承認 on-request` のように）。キーで回す以上、いまどこにいるかが見えていないと使えない
+
+並びと遷移は `src/provider/approvalCycle.ts` の純粋関数に置き、Webview側はそこから渡された配列を回すだけにする（同じ規則を2か所に書かない）。
+
+### 14.21 Web検索結果の表示
+
+`webSearch` の項目にクエリだけでなく検索結果（タイトルとURL）を出す。issue #18・design.mdのTP-32対応。表示のみで、結果の取得方法そのものは変えない。
+
+#### 調査
+
+**Codex（実測・スキーマの両方で確認）**: `codex app-server generate-json-schema` の `WebSearchThreadItem`（`ThreadItem` のoneOf）は `id` / `query` / `action`（`WebSearchAction`。`search` / `openPage` / `findInPage` / `other` のunion） / `results` を持つ。`results` の型定義は次のとおり、意図的に不透明:
+
+```
+"results": {
+  "description": "Structured search results returned out-of-band by standalone web search.\n\nThese stay as opaque JSON at the extension/app-server boundary so new result fields and result types can pass through without a Codex release.",
+  "items": true,
+  "type": ["array", "null"]
+}
+```
+
+個々の要素の形はスキーマ上保証されていない。実際にWeb検索を伴うターンを1つ回して確かめたところ（`codex app-server` を起動し、`thread/start` → `turn/start` で「直近1週間のTypeScriptの最新リリースをWeb検索して」と送った。課金を伴うため1ターンに留めた）、`item/completed` の `webSearch` は次の形で届いた:
+
+```json
+{
+  "type": "webSearch",
+  "id": "exec-...",
+  "query": "site:github.com/microsoft/TypeScript/releases ...",
+  "action": { "type": "search", "query": "...", "queries": null },
+  "results": [
+    {
+      "type": "text_result",
+      "domain": "github.com",
+      "ref_id": "turn0search0",
+      "snippet": "...",
+      "title": "Releases · microsoft/TypeScript · GitHub",
+      "url": "https://github.com/microsoft/TypeScript/releases"
+    }
+  ]
+}
+```
+
+`item/started` の時点では `query` が空文字列・`action` `results` とも `null` で、`item/completed` で初めて埋まる（他の項目と同様、デルタ通知は無い）。スキーマの説明どおり将来別の結果種別が増えても壊れないよう、`title` `url` の両方が文字列として読めた要素だけを拾い、それ以外は形を問わず捨てる実装にした。
+
+**Claude Code（実測、`claude --output-format stream-json` でWebSearch/WebFetchを伴うターンをそれぞれ1つ回して確認）**: APIのメッセージ本体（`tool_result` の `content`）には構造化データが無い。`content` は自然文の1本の文字列で、`Links: [{"title":...,"url":...}, ...]` というJSON断片がその中に埋め込まれているだけ（モデルへの参照材料であり、UIが頼る構造ではない）。一方、CLIが同じstream-jsonのイベント（および履歴のJSONL）に**別枠で**添える `tool_use_result` フィールドのほうに、構造化された結果が入っている:
+
+```json
+{
+  "type": "user",
+  "message": {
+    "content": [{ "type": "tool_result", "tool_use_id": "toolu_...", "content": "…自然文…" }]
+  },
+  "tool_use_result": {
+    "query": "...",
+    "results": [
+      { "tool_use_id": "srvtoolu_...", "content": [{ "title": "...", "url": "https://..." }] }
+    ]
+  }
+}
+```
+
+`WebFetch`（`describeTool` は既存どおり `webSearch` 種別へ寄せている）の `tool_use_result` は形が違い、`results` を持たない（実測: `{bytes, code, codeText, result, durationMs, url}`）。そのため抽出は自然に空になり、従来どおりURL（＝クエリ相当）だけの表示に留まる。
+
+#### 実装
+
+- `src/appserver/chatState.ts`: `WebSearchResult`（`{title, url}`）と `ChatItem.searchResults?: WebSearchResult[]` を追加。`readWebSearchResults(results)` が配列の各要素から `title` `url` が非空文字列として読めるものだけを残す純粋関数（Codex・Claude Code共通）。`isOpenableSearchUrl(url)` は `http:` / `https:` 以外（`javascript:` `data:` `file:` 等）を弾く純粋関数で、`readWebSearchResults` の時点で適用する（`ChatItem` に安全でないURLを一切持ち込まない）。`normalizeItem` の `webSearch` ケースはこれらを使って `searchResults` を埋める
+- `src/claude/transcript.ts`: `claudeSearchResults(toolUseResult, toolResultCount)` を追加。`tool_use_result.results[].content[]` を1段フラットにしてから `readWebSearchResults` へ渡す。同じイベントに `tool_result` が2件以上並ぶと `tool_use_result` がどちらの結果か対応づけられないため、そのときは安全側に倒して何も返さない（実測では常に1件）。`appendUserEntry` は対象項目が `webSearch` のときだけこれを呼ぶ
+- `src/claude/streamJson.ts`: `applyUser` に同じ抽出を追加（ライブのstream-jsonでも履歴の読み直しと同じ経路になる。`claudeSearchResults` を共有）
+- `src/view/chatScript.ts`: 項目ごとに `search-results` コンテナを持たせ、`renderSearchResults` が結果を描く。1件ごとに `<button>`（タイトル・URLとも `textContent` でDOMへ入れ、HTMLとして解釈させない）を作り、クリックで `vscode.postMessage({type:'openUrl', url})` を送るだけで、Webview側では何も開かない。件数が `MAX_VISIBLE_SEARCH_RESULTS`（5件）を超えたら丸ごと `<details>` で畳む（開いた状態は要素を使い回して保つ既存の仕組みに乗せる。issue #17/#19と同じやり方）。**URLは全部見せ、自動では開かない**方針（問い合わせカードの `url` モード、§9.9と同じ考え方）で、クリック＝行き先を見た上での明示の意思表示として扱い、開く前の確認は挟まない
+- `src/view/chatView.ts` / `claudeChatView.ts`: `openUrl` メッセージを受け、`isOpenableSearchUrl` で再確認してから `vscode.env.openExternal` で開く（Webviewからは直接開けないため）。Webview側の抽出時点で既に安全なURLだけに絞っているが、ホスト側でも独立して検証する（多層防御）
+- 結果が取れない・app-server/Claude Codeから届かない場合は `searchResults` が空のままで、従来どおりクエリ（Claude CodeのWebFetchはURL）だけの表示に留まる（壊さない）
+
+この拡張機能から実行したセッションを、日報/週報システムが読める形で残す。
+
+### 15.1 出力
+
+- 出力先: `~/workspace/dairy/.buffer/<YYYY-MM-DD>.jsonl`（`agent.activityLog.dir` → `DAILY_BUFFER_DIR` → 既定の順で解決）
+- 形式: 1行1レコード。`{"ts","source","cwd","text","ref","session_id","kind"}`
+  - `source` は `codex` / `claude-code`、`ref` は常に `vscode`
+  - `session_id`: セッションを一意に識別するid（Codex: thread id、Claude: session id）。収集側（`collect.py`）がCLI由来の記録と突き合わせて重複を落とすのに使う。必須
+  - `kind`: `"prompt"`（ユーザー発言）か `"result"`（ターン完了時のアシスタントの成果）
+- 収集側 `~/.claude/scripts/daily/collect.py` の追記バッファ規約に合わせてある。フィールド名を変えると日報が黙って取りこぼす。未知フィールドは無視されるため、フィールドの追加自体は安全
+
+```json
+{
+  "ts": "2026-08-10T17:33:33+09:00",
+  "source": "codex",
+  "cwd": "/abs/path",
+  "text": "...",
+  "ref": "vscode",
+  "session_id": "<セッションid>",
+  "kind": "prompt"
+}
+```
+
+### 15.2 粒度と契機
+
+`prompt` と `result` の2種類を、それぞれ発生のたびに書く（旧仕様の「セッション初回の1行だけ」という抑止は撤廃した）。
+
+| kind     | 契機                                                                     | 本文                                                        |
+| -------- | ------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| `prompt` | Codex/Claude Codeチャット画面で発言のたび（ループからの送信を含む）      | その発言                                                    |
+| `result` | Codexのターン完了（成功・失敗いずれも。`turn/completed`・`turn/failed`） | アシスタントの最終応答＋編集ファイル                        |
+| `result` | Claude Codeのターン完了（`stream-json` の `result` イベント）            | アシスタントの最終応答（`result` フィールド）＋編集ファイル |
+
+- `prompt`: ユーザーが実際に送信するたびに1行書く。ループ機能から同じ文面を繰り返し送った場合も、実際に送信している以上は抑止しない
+- `result`: そのターンの応答テキストを1行化・200字切り詰めし、ファイルを編集していれば末尾に ` [edit: a.ts, b.ts]` のように最大5件までワークスペース相対パスで付記する（超過分は ` +N`）。相対パスにできなければ basename。全体で200字を超える場合は応答要約側から先に削り、編集ファイル一覧を優先して残す。応答テキストと編集ファイルの両方が空なら記録しない
+  - 編集ファイルの抽出元: Codexはpatch/apply系のイベント（`fileChange` ThreadItem）、Claudeは `tool_use` の Edit/Write/NotebookEdit の `input.file_path`
+
+### 15.3 会話本文の扱い
+
+§8の「会話本文を読まない・保存しない」に対する**意図的な例外**であり、範囲を次に限定する。
+
+- 1回の記録につき200文字までの1行要約（`prompt` は発言そのもの、`result` は応答要約＋編集ファイル）
+- `agent.activityLog.enabled` を `false` にすれば一切書かない
+
+### 15.4 収集側の重複排除
+
+拡張機能経由のClaude Codeセッションは transcript 走査（`collect_claude`）にも現れるため、`collect.py` 側は `session_id` を軸にCLI由来の記録と突き合わせて重複を1件に畳み、`ref: "vscode"` の方を残す前提とする。
+
+### 14.22 plugins / appsの一覧と管理
 
 TUIの `/plugins`（browse plugins）と `/apps`（manage apps）に相当する表示（Codex）。Claude Codeには `/plugin` と `/reload-plugins` がある。issue #32・design.mdのTP-51対応。pluginは任意のコード（hookやMCPサーバーなど）を持ち込む仕組みで、hooks（§14.15）・skills（§14.19）と同じくどこ由来かを隠さず見せる方針にする（§8のセキュリティ考慮）。
 
@@ -1486,54 +1615,6 @@ Commands:
 - `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画と操作。インストールは既存の`loginCodexApiKey`と同じ`showInputBox`パターン（Codexはマーケットプレイスを続けて`showQuickPick`で選ばせる）。plugin/appの名前・説明は必ず`textContent`でDOMへ入れ、HTMLとして解釈させない
 
 ## 15. 作業記録（日報・週報連携）
-
-この拡張機能から実行したセッションを、日報/週報システムが読める形で残す。
-
-### 15.1 出力
-
-- 出力先: `~/workspace/dairy/.buffer/<YYYY-MM-DD>.jsonl`（`agent.activityLog.dir` → `DAILY_BUFFER_DIR` → 既定の順で解決）
-- 形式: 1行1レコード。`{"ts","source","cwd","text","ref","session_id","kind"}`
-  - `source` は `codex` / `claude-code`、`ref` は常に `vscode`
-  - `session_id`: セッションを一意に識別するid（Codex: thread id、Claude: session id）。収集側（`collect.py`）がCLI由来の記録と突き合わせて重複を落とすのに使う。必須
-  - `kind`: `"prompt"`（ユーザー発言）か `"result"`（ターン完了時のアシスタントの成果）
-- 収集側 `~/.claude/scripts/daily/collect.py` の追記バッファ規約に合わせてある。フィールド名を変えると日報が黙って取りこぼす。未知フィールドは無視されるため、フィールドの追加自体は安全
-
-```json
-{
-  "ts": "2026-08-10T17:33:33+09:00",
-  "source": "codex",
-  "cwd": "/abs/path",
-  "text": "...",
-  "ref": "vscode",
-  "session_id": "<セッションid>",
-  "kind": "prompt"
-}
-```
-
-### 15.2 粒度と契機
-
-`prompt` と `result` の2種類を、それぞれ発生のたびに書く（旧仕様の「セッション初回の1行だけ」という抑止は撤廃した）。
-
-| kind     | 契機                                                                     | 本文                                                        |
-| -------- | ------------------------------------------------------------------------ | ----------------------------------------------------------- |
-| `prompt` | Codex/Claude Codeチャット画面で発言のたび（ループからの送信を含む）      | その発言                                                    |
-| `result` | Codexのターン完了（成功・失敗いずれも。`turn/completed`・`turn/failed`） | アシスタントの最終応答＋編集ファイル                        |
-| `result` | Claude Codeのターン完了（`stream-json` の `result` イベント）            | アシスタントの最終応答（`result` フィールド）＋編集ファイル |
-
-- `prompt`: ユーザーが実際に送信するたびに1行書く。ループ機能から同じ文面を繰り返し送った場合も、実際に送信している以上は抑止しない
-- `result`: そのターンの応答テキストを1行化・200字切り詰めし、ファイルを編集していれば末尾に ` [edit: a.ts, b.ts]` のように最大5件までワークスペース相対パスで付記する（超過分は ` +N`）。相対パスにできなければ basename。全体で200字を超える場合は応答要約側から先に削り、編集ファイル一覧を優先して残す。応答テキストと編集ファイルの両方が空なら記録しない
-  - 編集ファイルの抽出元: Codexはpatch/apply系のイベント（`fileChange` ThreadItem）、Claudeは `tool_use` の Edit/Write/NotebookEdit の `input.file_path`
-
-### 15.3 会話本文の扱い
-
-§8の「会話本文を読まない・保存しない」に対する**意図的な例外**であり、範囲を次に限定する。
-
-- 1回の記録につき200文字までの1行要約（`prompt` は発言そのもの、`result` は応答要約＋編集ファイル）
-- `agent.activityLog.enabled` を `false` にすれば一切書かない
-
-### 15.4 収集側の重複排除
-
-拡張機能経由のClaude Codeセッションは transcript 走査（`collect_claude`）にも現れるため、`collect.py` 側は `session_id` を軸にCLI由来の記録と突き合わせて重複を1件に畳み、`ref: "vscode"` の方を残す前提とする。
 
 ## 16. 並列オーケストレーション（ワークフロー実行）
 

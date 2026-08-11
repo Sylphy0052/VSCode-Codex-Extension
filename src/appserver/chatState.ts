@@ -13,6 +13,21 @@ export interface FileDiff {
   diff: string;
 }
 
+/**
+ * Web検索結果1件（issue #18）。
+ *
+ * `title` `url` の両方が空でない文字列として読めた要素だけをここへ積む
+ * （`readWebSearchResults` を参照）。URLは全部見せる方針（design.md）のため、
+ * 短縮・省略はしない。
+ */
+export interface WebSearchResult {
+  title: string;
+  url: string;
+}
+
+/** Web検索結果を持たない項目のための空配列。 */
+export const NO_SEARCH_RESULTS: WebSearchResult[] = [];
+
 export interface ChatItem {
   id: string;
   /** app-server の ThreadItem の種類。未知の種類も捨てずに保持する。 */
@@ -30,6 +45,13 @@ export interface ChatItem {
   truncated?: boolean | undefined;
   /** 会話に出す画像。持たない項目では空。 */
   images?: ChatImage[] | undefined;
+  /**
+   * Web検索の結果（issue #18）。`webSearch` の項目でのみ使う。
+   *
+   * 結果が取れない・app-server/Claude Codeから届かないときは未設定のまま
+   * （表示側は空配列と同じに扱い、クエリだけを出す従来の表示に留める。壊さない）。
+   */
+  searchResults?: WebSearchResult[] | undefined;
   /**
    * 思考の全文（reasoningのみ）。
    *
@@ -326,6 +348,7 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
     turnId: undefined,
     diffs: NO_DIFFS,
     images: NO_IMAGES,
+    searchResults: NO_SEARCH_RESULTS,
   };
   const status = item['status'];
   if (typeof status === 'string') {
@@ -369,7 +392,15 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
     case 'mcpToolCall':
       return { ...base, detail: `${str(item['server'])} / ${str(item['tool'])}` };
     case 'webSearch':
-      return { ...base, detail: str(item['query']) };
+      // `results` はapp-server側で意図的に不透明なJSON（スキーマ上 `items: true`）として
+      // 扱われている。実測（本issueで実際にWeb検索を伴うターンを回して確認）した形は
+      // `{type:'text_result', title, url, domain, snippet, ref_id}` だが、スキーマの
+      // 説明文どおり将来別の結果種別が増えても壊れないよう、形は決め打ちしない
+      return {
+        ...base,
+        detail: str(item['query']),
+        searchResults: readWebSearchResults(item['results']),
+      };
     // レビューの開始/終了。`review` フィールドは対象の説明（不透明な文字列として扱う）
     case 'enteredReviewMode':
     case 'exitedReviewMode':
@@ -430,6 +461,44 @@ export function readFileDiffs(changes: unknown): FileDiff[] {
     });
   }
   return diffs.length === 0 ? NO_DIFFS : diffs;
+}
+
+/**
+ * 外部ブラウザで開いてよいURLか。
+ *
+ * `http:` / `https:` 以外（`javascript:` `data:` `file:` 等）は弾く。Web検索の結果は
+ * 外部から届く文字列で、`href` やホストへの要求へそのまま渡す前にここで一度絞る
+ * （design.md §9.9の `url` モードと同じ「行き先は全部見せるが、危険なスキームは開かせない」
+ * 考え方）。
+ */
+export function isOpenableSearchUrl(url: string): boolean {
+  return /^https?:\/\//iu.test(url);
+}
+
+/**
+ * Web検索結果の配列を正規化する（issue #18）。
+ *
+ * `title` `url` の両方が空でない文字列として読める要素だけを拾い、それ以外
+ * （形が違う・スキームが安全でない）は黙って捨てる。CodexとClaude Codeで結果の
+ * 届き方（生の配列か、ネストした構造から取り出した配列か）が違うため、どちらも
+ * 「`{title, url}` らしき要素の配列」まで揃えてからここへ渡す（Codex: `normalizeItem`、
+ * Claude Code: `src/claude/transcript.ts`）。
+ */
+export function readWebSearchResults(results: unknown): WebSearchResult[] {
+  if (!Array.isArray(results)) {
+    return NO_SEARCH_RESULTS;
+  }
+  const items: WebSearchResult[] = [];
+  for (const raw of results) {
+    const entry = rec(raw);
+    const title = str(entry?.['title']);
+    const url = str(entry?.['url']);
+    if (title === '' || url === '' || !isOpenableSearchUrl(url)) {
+      continue;
+    }
+    items.push({ title, url });
+  }
+  return items.length === 0 ? NO_SEARCH_RESULTS : items;
 }
 
 /** 計画の進捗記号。絵文字は使わない（環境で欠けるため）。 */

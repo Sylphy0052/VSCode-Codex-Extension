@@ -115,7 +115,7 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 | TP-21 | Claude のセッション中に model / effort / permissionMode を変える。現状は起動引数のみで、会話中は固定 | Claude | P1     | Z-10      | #10 済（effortの反映は観測できない） |
 | TP-22 | Plan mode の切替（Codex `/plan` / Claude Shift+Tab 相当）。現状どちらも手段が無い                    | 両方   | P1     | Z-06 Z-10 | #11 済（Codexは権限で代替）          |
 | TP-20 | Codex の sandbox をターン単位で変える。現状は `thread/start` 時のみで、明示的に非対応としている      | Codex  | P2     | Z-02      | #12 済                               |
-| TP-23 | 承認モードを循環させるキーバインド（TUIのShift+Tab相当）を画面に用意する                             | 両方   | P3     | TP-22     | #13                                  |
+| TP-23 | 承認モードを循環させるキーバインド（TUIのShift+Tab相当）を画面に用意する                             | 両方   | P3     | TP-22     | #13 済                               |
 
 Codexはターン単位で model / effort / approvalPolicy を渡せるのにClaudeは起動時固定、という非対称が現状ある。TP-21はこの差を埋めるもの。
 
@@ -127,7 +127,7 @@ Codexはターン単位で model / effort / approvalPolicy を渡せるのにCla
 | TP-31 | トークン使用量とコンテキスト残量を表示する。現状はレート制限の消費率のみ | Codex/Claude | P1     | Z-05 Z-13 | #15 済 |
 | TP-33 | 画像の表示（モデルが見た画像・生成した画像）                             | Codex/Claude | P2     | Z-03      | #16 済 |
 | TP-35 | コマンド実行の出力を逐次表示し、長い出力を折りたためるようにする         | Codex/Claude | P2     | -         | #17 済 |
-| TP-32 | Web検索の結果を表示する。現状はクエリのみ                                | Codex/Claude | P3     | -         | #18    |
+| TP-32 | Web検索の結果を表示する。現状はクエリのみ                                | Codex/Claude | P3     | -         | #18 済 |
 | TP-34 | 思考の全文表示と折りたたみ。現状は summary のみ                          | Codex/Claude | P3     | -         | #19 済 |
 
 ## Phase 5: 会話操作

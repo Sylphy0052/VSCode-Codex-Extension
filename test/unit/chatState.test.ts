@@ -8,7 +8,9 @@ import {
   capOutput,
   deriveReviewing,
   initialChatState,
+  isOpenableSearchUrl,
   normalizeItem,
+  readWebSearchResults,
   removeApproval,
   summarizeTurn,
   type ChatState,
@@ -142,6 +144,125 @@ describe('normalizeItem', () => {
       expect(item?.text).toBe('');
       expect(item?.reasoningFull).toBeUndefined();
     });
+  });
+
+  // Web検索の結果（issue #18）。実測（本issueで実際にWeb検索を伴うターンを回して確認）した
+  // WebSearchThreadItemの `results` は `{type:'text_result', title, url, domain, snippet,
+  // ref_id}` の形。スキーマ上は不透明なJSON（`items: true`）なので、形が違っても壊れないことも
+  // あわせて確かめる。
+  describe('webSearch', () => {
+    it('query を detail として持ち、結果のタイトルとURLを searchResults に積む', () => {
+      const item = normalizeItem({
+        type: 'webSearch',
+        id: 'ws_1',
+        query: 'TypeScript release',
+        action: { type: 'search', query: 'TypeScript release' },
+        results: [
+          {
+            type: 'text_result',
+            title: 'Releases · microsoft/TypeScript',
+            url: 'https://github.com/microsoft/TypeScript/releases',
+            domain: 'github.com',
+            snippet: '...',
+            ref_id: 'turn0search0',
+          },
+        ],
+      });
+      expect(item).toMatchObject({
+        id: 'ws_1',
+        kind: 'webSearch',
+        detail: 'TypeScript release',
+        searchResults: [
+          {
+            title: 'Releases · microsoft/TypeScript',
+            url: 'https://github.com/microsoft/TypeScript/releases',
+          },
+        ],
+      });
+    });
+
+    it('results が無い・itemStartedのnullでは searchResults が空のまま（従来どおりクエリだけ）', () => {
+      expect(
+        normalizeItem({ type: 'webSearch', id: 'ws_2', query: 'q', action: null, results: null }),
+      ).toMatchObject({ detail: 'q', searchResults: [] });
+      expect(normalizeItem({ type: 'webSearch', id: 'ws_3', query: 'q' })?.searchResults).toEqual(
+        [],
+      );
+    });
+
+    it('title か url が欠けた結果は黙って捨てる（他の結果は残す）', () => {
+      const item = normalizeItem({
+        type: 'webSearch',
+        id: 'ws_4',
+        query: 'q',
+        results: [
+          { title: 'タイトルのみ' },
+          { url: 'https://example.com' },
+          { title: '両方あり', url: 'https://example.com/ok' },
+        ],
+      });
+      expect(item?.searchResults).toEqual([{ title: '両方あり', url: 'https://example.com/ok' }]);
+    });
+
+    it('危険なスキームのURLは弾く（javascript:等）', () => {
+      const item = normalizeItem({
+        type: 'webSearch',
+        id: 'ws_5',
+        query: 'q',
+        results: [
+          { title: '危険', url: 'javascript:alert(1)' },
+          { title: '安全', url: 'https://example.com' },
+        ],
+      });
+      expect(item?.searchResults).toEqual([{ title: '安全', url: 'https://example.com' }]);
+    });
+
+    it('resultsが配列でない（形が想定外）ときも壊れず空になる', () => {
+      const item = normalizeItem({
+        type: 'webSearch',
+        id: 'ws_6',
+        query: 'q',
+        results: 'not-an-array',
+      });
+      expect(item?.searchResults).toEqual([]);
+    });
+  });
+});
+
+describe('isOpenableSearchUrl', () => {
+  it('http/httpsは開ける', () => {
+    expect(isOpenableSearchUrl('https://example.com')).toBe(true);
+    expect(isOpenableSearchUrl('http://example.com')).toBe(true);
+  });
+
+  it('javascript: 等の危険なスキームは開けない', () => {
+    expect(isOpenableSearchUrl('javascript:alert(1)')).toBe(false);
+    expect(isOpenableSearchUrl('data:text/html,<script>alert(1)</script>')).toBe(false);
+    expect(isOpenableSearchUrl('file:///etc/passwd')).toBe(false);
+    expect(isOpenableSearchUrl('vbscript:msgbox(1)')).toBe(false);
+    expect(isOpenableSearchUrl('')).toBe(false);
+  });
+});
+
+describe('readWebSearchResults', () => {
+  it('title/urlの両方が読める要素だけを残す', () => {
+    expect(
+      readWebSearchResults([
+        { title: 'A', url: 'https://a.example' },
+        { title: '', url: 'https://b.example' },
+        { title: 'C', url: '' },
+        { title: 'D', url: 'https://d.example' },
+      ]),
+    ).toEqual([
+      { title: 'A', url: 'https://a.example' },
+      { title: 'D', url: 'https://d.example' },
+    ]);
+  });
+
+  it('配列でない入力は空配列を返す', () => {
+    expect(readWebSearchResults(undefined)).toEqual([]);
+    expect(readWebSearchResults(null)).toEqual([]);
+    expect(readWebSearchResults('x')).toEqual([]);
   });
 });
 

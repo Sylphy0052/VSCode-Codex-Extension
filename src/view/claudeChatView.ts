@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { isApprovalDecision, type ApprovalDecision } from '../appserver/approvals';
-import type { ChatState, ChatUsage } from '../appserver/chatState';
+import { isOpenableSearchUrl, type ChatState, type ChatUsage } from '../appserver/chatState';
 import type { ClaudeSessionStore } from '../claude/sessionStore';
 import { ClaudeStreamSession } from '../claude/streamSession';
 import { transcriptItems } from '../claude/transcript';
@@ -34,6 +34,7 @@ import {
 import type { FileMentionCatalog } from '../provider/fileMentions';
 import { readPersistedThreadId } from './panelState';
 import { CLAUDE_PERMISSION_MODES } from '../claude/types';
+import { CLAUDE_APPROVAL_CYCLE } from '../provider/approvalCycle';
 import type { ClaudeConfig } from '../claude/types';
 import type { ClaudeEditableKey, SettingsProvider } from './settingsProvider';
 import type { ChatActivity } from './chatView';
@@ -434,6 +435,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     panel.webview.html = renderShell(panel.webview, {
       agentLabel: LABEL,
       approvalModes: CLAUDE_PERMISSION_MODES,
+      approvalCycle: CLAUDE_APPROVAL_CYCLE,
       showSettings: true,
       showAgentSelector: true,
       // effort・エージェントだけ扱いが違う。黙って効かないより、効くタイミングを書くほうがまし
@@ -708,6 +710,14 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       if (type === 'requestImage') {
         if (entry.panel !== undefined) {
           void postImageData(entry.panel, this.fs, entry.session.getState().items, m['path']);
+        }
+        return;
+      }
+      if (type === 'openUrl' && typeof m['url'] === 'string') {
+        // Webviewからは直接開けない。押した＝行き先を見た上での明示の意思表示なので
+        // 追加の確認はしない（design.md §9.9の `url` モードと同じ考え方。issue #18）
+        if (isOpenableSearchUrl(m['url'])) {
+          void vscode.env.openExternal(vscode.Uri.parse(m['url']));
         }
         return;
       }

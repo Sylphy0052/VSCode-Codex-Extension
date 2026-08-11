@@ -3,8 +3,10 @@ import * as path from 'node:path';
 
 import { isPathWithinRoot } from './escalation';
 import { detectForgeHost, type CliCommandRunner } from './forge';
+import { buildPlannerSessionInput, sendSingleTurn } from './planner';
+import type { TaskSessionHost } from './taskSession';
 import type { GitCommandRunner } from './worktree';
-import { TASK_ID_PATTERN } from './workflow';
+import { TASK_ID_PATTERN, type Provider } from './workflow';
 
 /**
  * ロードマップ（design.md §16.19）の純粋ロジック。
@@ -584,6 +586,39 @@ export type RoadmapGenerationResult = { ok: true; text: string } | { ok: false; 
  */
 export interface RoadmapGenerationPort {
   generate(request: RoadmapGenerationRequest): Promise<RoadmapGenerationResult>;
+}
+
+/**
+ * `RoadmapGenerationPort` の実装（Issue #105。上のJSDocが「範囲外」としていた配線）。
+ *
+ * `planner.ts` の分解セッション（design.md §16.9）と全く同じ安全要件（`sandbox: read-only`
+ * 相当で起動し、承認要求は全て拒否する。プロンプトの指示ではなく起動時の設定で縛る）を
+ * 課される（design.md §16.19「生成セッションは§16.9の分解セッションと同じ制限で走らせる」）
+ * ため、独自に実装し直さず `planner.ts` がexportする `buildPlannerSessionInput` /
+ * `sendSingleTurn` をそのまま使う。この2関数は「最も安全な値を直接指定し、起動直前に
+ * ずれていないか確認してから開く」（`assertPlannerSessionIsSafe`）を内包しているため、
+ * ここで安全設定を再実装する必要が無い。
+ *
+ * 生成は1ターンで終わらせ、`sendSingleTurn` が `finally` でセッションを閉じる
+ * （design.md §16.19「生成が終わったらセッションを閉じる」）。
+ */
+export function createTaskSessionRoadmapGenerationPort(
+  host: TaskSessionHost,
+  provider: Provider,
+  cwd: string,
+): RoadmapGenerationPort {
+  return {
+    async generate(request: RoadmapGenerationRequest): Promise<RoadmapGenerationResult> {
+      const input = buildPlannerSessionInput(provider, cwd);
+      try {
+        const text = await sendSingleTurn(host, provider, input, request.prompt);
+        return { ok: true, text };
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        return { ok: false, message: `ロードマップ生成セッションが失敗しました: ${message}` };
+      }
+    },
+  };
 }
 
 /* -------------------------------------------------------------------------------------------- */
