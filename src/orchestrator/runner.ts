@@ -174,7 +174,21 @@ export interface LiveRunSummary {
  * （HTMLエスケープが要らないことをここでは前提にしない）。
  */
 export interface WorkflowWarning {
-  kind: 'gitFallback' | 'gitCommonDir' | 'clamp' | 'allowOverride' | 'maxReached' | 'gitignore';
+  kind:
+    | 'gitFallback'
+    | 'gitCommonDir'
+    | 'clamp'
+    | 'allowOverride'
+    | 'maxReached'
+    | 'gitignore'
+    /**
+     * ゴール文から生成したワークフロー（`planner.ts`）が、既定の安全設定を上書きする
+     * 指定（`autoApprove: true` / 非空の `allow` / `sandbox` や `approvalMode` の緩和）を
+     * 含んでいる（design.md §16.9「分解セッションの制限」）。他のkindは実行時に動的へ
+     * 発生するが、これは生成直後のプレビュー（`WorkflowViewManager.previewDefinition`）
+     * でも出す必要があるため区別する。
+     */
+    | 'plannerSecurity';
   /** ワークフロー全体に関わる警告（gitignoreなど）は undefined。 */
   taskId: string | undefined;
   message: string;
@@ -222,6 +236,16 @@ export interface WorkflowRunSnapshot {
   warnings: readonly WorkflowWarning[];
   /** 人の割り込み（`manual`/`interrupted`）で実行全体が停止しているか。 */
   haltedByUser: boolean;
+  /**
+   * ゴール文から生成した直後・未実行の下書きプレビューか（`WorkflowViewManager.
+   * previewDefinition`専用。design.md §16.9セキュリティ監査 low「outcome: 'aborted'が
+   * 紛らわしい」対応）。`outcome`の4値（running/succeeded/failed/aborted）には
+   * 「まだ始まっていない」を表す値が無く、`aborted`（依存先の失敗等でskippedが出た
+   * 実行）を便宜的に転用すると「失敗して中断した」と読めてしまう。実行中のrunでは
+   * 常に`false`（`WorkflowRunner.getSnapshot`はこのフィールドを設定しないため、
+   * オブジェクトスプレッドされない限りundefinedになり、falsyとして扱われる）。
+   */
+  isDraft?: boolean;
 }
 
 /** タスク1件の実行時ブックキーピング。`RunState`（純粋）とは別に、セッション等の実体を持つ。 */

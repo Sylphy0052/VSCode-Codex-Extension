@@ -400,7 +400,12 @@ export interface WorkflowValidationResult {
   warnings: WorkflowWarning[];
 }
 
-const TEMPLATE_FIELDS = ['result', 'cwd', 'branch', 'files'] as const;
+/**
+ * exportしてある。`planner.ts`がゴール生成プロンプトのスキーマ説明をここから組み立て、
+ * 手書きの一覧との二重管理を避けるため（design.md §16.9のプロンプトはスキーマの説明を
+ * 含む必要があるが、フィールド名の一覧そのものは`workflow.ts`の定義が唯一の正）。
+ */
+export const TEMPLATE_FIELDS = ['result', 'cwd', 'branch', 'files'] as const;
 export type TemplateField = (typeof TEMPLATE_FIELDS)[number];
 
 function isTemplateField(v: string): v is TemplateField {
@@ -858,8 +863,21 @@ export const CLAUDE_PERMISSION_SAFETY_ORDER: readonly string[] = [
  * 拡張機能側の値より安全な方向にしか動かせないようにする（design.md §16.16）。
  *
  * 安全順序の中に無い値（拡張機能・YAMLのいずれか）は判定のしようがないため、
- * 緩められる側に倒さず拡張機能側の値を採用する。YAML側が空文字（未指定）なら
- * そのまま拡張機能側を使う。
+ * 緩められる側に倒さず拡張機能側の値を採用する……が、これには1つ抜け穴があった。
+ * `extensionValue`が空文字（`codex.sandbox` / `codex.approvalMode` /
+ * `claude.permissionMode`の既定値。CLI側の設定へ委譲する、の意）のとき、`order`の
+ * どの値とも一致せず`extIndex === -1`になる。この場合に無条件で`extensionValue`
+ * （＝空文字）を採用すると、YAML側が最も安全な値（`sandbox: read-only`等）を明示しても
+ * 無視され、**空文字のまま`openTaskSession`へ渡ってCLI設定に丸投げされる**
+ * （実効的にサンドボックスなし・確認なしになりうる。#58セキュリティ監査 critical）。
+ *
+ * `extIndex === -1`（baselineの安全性が不明）のときは、大小を比較できない代わりに
+ * 「YAML側が安全順序の最安全値（`order[0]`）かどうか」だけで判定する。最安全値は
+ * これ以上緩めようがない値なので、baselineが何であっても「緩める」ことは論理的に
+ * ありえない。それ以外の値（baselineより緩いか安全か判定できない）は従来通り拒否する
+ * （fail-closed）。YAML側が安全順序に無い値（`yamlIndex === -1`）のときは、baselineの
+ * 状態に関わらず判定不能として拒否する。YAML側が空文字（未指定）ならそのまま
+ * 拡張機能側を使う。
  */
 export function clampToSafer(
   order: readonly string[],
@@ -871,10 +889,22 @@ export function clampToSafer(
   }
   const extIndex = order.indexOf(extensionValue);
   const yamlIndex = order.indexOf(yamlValue);
-  if (extIndex === -1 || yamlIndex === -1) {
+  if (yamlIndex === -1) {
     return {
       value: extensionValue,
       warning: `安全性を判定できない値のため無視しました: ${yamlValue}`,
+    };
+  }
+  if (extIndex === -1) {
+    if (yamlIndex === 0) {
+      // 最安全値は、baselineがどんな値であっても「緩める」結果にはなりえない
+      return { value: yamlValue, warning: undefined };
+    }
+    return {
+      value: extensionValue,
+      warning:
+        `拡張機能の設定(${extensionValue === '' ? '既定（CLI側の設定に委譲）' : extensionValue})の` +
+        `安全性を判定できないため、最も安全な値以外の指定は無視しました: ${yamlValue}`,
     };
   }
   if (yamlIndex <= extIndex) {
