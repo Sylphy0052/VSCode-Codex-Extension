@@ -2385,13 +2385,19 @@ src/
     scheduler.ts    完了状態から次に開始する集合を決める（純粋）
     escalation.ts   承認要求を auto / ask に振り分ける（純粋）
     runState.ts     実行状態の保持と遷移（純粋）
+    taskConfig.ts   タスク単位の実効設定を組み立てる（`buildEffectiveTaskConfig`。クランプの唯一の入口。純粋）
+    sanitize.ts     制御文字除去の共通ヘルパー（依存を持たない末端。純粋）
+    approvalMapping.ts 承認要求の生パラメータをescalation.ts/表示用へ変換する（純粋）
+    taskSummary.ts  応答の1行要約を組み立てる（純粋）
     fsGuards.ts     runId/taskIdの識別子検証とシンボリックリンク検知（依存を持たない末端。純粋）
     serialQueue.ts  非同期タスクを1本の待ち行列で直列化する汎用クラス（依存を持たない末端。純粋）
+    runStore.ts     実行状態の永続化と復元（`workspaceState`。応答本文は保存しない。§16.11）
     worktree.ts     worktreeの作成・撤去、git作業ツリーかの判定
     integration.ts  統合ブランチの作成・マージ・衝突の検出（gitはポート越し）
     forge.ts        ホストの判定と PR/MR の作成（gh / glab をポート越しに呼ぶ。*）
     pseudoWorktree.ts git外での複製による隔離と差分の適用（*）
     messaging.ts    タスク間メッセージングのMCPサーバと配送（§16.21。*）
+    taskSession.ts  `TaskSessionHost` / `TaskSession` のインターフェース（チャット画面側の口）
     runner.ts       セッションの生成・指示の送信・完了検知（VSCode層）
     planner.ts      ゴール文からYAMLを生成する（§16.9）
     roadmap.ts      ロードマップの生成・YAML化・完了の書き戻し（§16.19。*）

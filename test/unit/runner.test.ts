@@ -3473,3 +3473,128 @@ tasks:
     expect(runner.getSnapshot(runId)?.tasks[0]?.state).toBe('blocked');
   });
 });
+
+describe('WorkflowRunner: manual / interrupted の実行層（design.md §16.5、Issue #148）', () => {
+  /**
+   * `applyLoopStopReason`（純粋ロジック側）は`manual`/`interrupted`を既に網羅しているが、
+   * 実行層（`runner.ts`）を通した結線は未検証だった。design.mdが「同じ『止める』を1つの
+   * 理由にまとめると、Viewからタスクを1つ止めただけでワークフロー全体が停止してしまう」
+   * として`taskStopped`と区別している箇所（§16.5）を、実行層での結線ミし（誤って
+   * `session.dispose()` や `cleanupWorktreeIfNeeded` を呼んでしまう類）から守る。
+   */
+  const PARALLEL_YAML = `
+version: 1
+name: manual-interrupted-test
+defaults:
+  maxParallel: 2
+tasks:
+  - id: A
+    prompt: p
+    done: d
+  - id: B
+    prompt: p
+    done: d
+`;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('interruptedで終わったタスク自身の状態は変わらず、session.dispose()もcleanupWorktreeIfNeededも呼ばれない', async () => {
+    const cleanupSpy = vi.spyOn(
+      WorkflowRunner.prototype as unknown as {
+        cleanupWorktreeIfNeeded: (...args: unknown[]) => void;
+      },
+      'cleanupWorktreeIfNeeded',
+    );
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML);
+    const result = await runner.start('/repo/.agents/workflows/manual-interrupted.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const a = codexHost.byTaskId('A');
+    expect(store.find(runId)?.tasks['A']?.state).toBe('running');
+
+    a.finish('interrupted', { ...initialChatState });
+    await flush();
+
+    // 人がタブへ直接介入した状態は§16.3のどの状態にも当てはまらないため、
+    // タスク自身の状態は変えない設計（design.md §16.5）
+    expect(store.find(runId)?.tasks['A']?.state).toBe('running');
+    // done/failedと同じ経路でセッションを解放してはいけない（走っていたセッションは
+    // そのまま残し、以降は人の操作に委ねる設計）
+    expect(a.disposed).toBe(false);
+    // worktreeの撤去判定にも回してはいけない
+    expect(cleanupSpy).not.toHaveBeenCalled();
+  });
+
+  it('interruptedになってもlive.finishedにならず、他のタスクは動き続ける', async () => {
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML);
+    const result = await runner.start('/repo/.agents/workflows/manual-interrupted.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const a = codexHost.byTaskId('A');
+    const b = codexHost.byTaskId('B');
+
+    a.finish('interrupted', { ...initialChatState });
+    await flush();
+
+    // Aのinterruptedに巻き込まれず、Bは走り続ける
+    expect(store.find(runId)?.tasks['B']?.state).toBe('running');
+    expect(b.disposed).toBe(false);
+
+    // live.finishedが立っていれば以降pump()は何もしなくなる（新規実装の`pump`参照）。
+    // Bを実際に完了させ、通常どおりマージまで進むことで、pumpがまだ機能している
+    // （＝finishedになっていない）ことを示す
+    b.finish('done', doneState('Bの応答'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['B']?.state).toBe('done');
+    expect(b.disposed).toBe(true);
+
+    // Aはinterruptedのまま人の操作待ちで残り続ける。実行全体はhaltedByUserだが、
+    // Aがrunningのままなので終了判定（design.md §16.5「全体の終了」1.）はまだ`running`
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.haltedByUser).toBe(true);
+    expect(snapshot?.outcome).toBe('running');
+    expect(store.find(runId)?.tasks['A']?.state).toBe('running');
+  });
+
+  it('衝突解決セッションがmanualで終わったとき、対象タスクはblockedにならず状態が変わらない', async () => {
+    const SOLO_MERGE_YAML = `
+version: 1
+name: manual-merge-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(SOLO_MERGE_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/manual-merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // T1は衝突したのでmergingのまま、衝突解決セッションが開いている
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    const resolutionSession = codexHost.sessions.at(-1);
+    expect(resolutionSession).toBeDefined();
+    expect(resolutionSession?.cwd.endsWith('_integration')).toBe(true);
+
+    resolutionSession?.finish('manual', { ...initialChatState });
+    await flush();
+
+    // 人がタブへ直接介入した。対象タスクの状態は変えず、実行全体だけを止める設計を
+    // 踏襲する（design.md §16.5）。`blocked`（衝突未解決の確定）にはしない
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    // abortAndBlock（マージの巻き戻し）を経由していないことをgit呼び出しでも確認する
+    const abortCall = git.calls.find((c) => c.args[0] === 'merge' && c.args[1] === '--abort');
+    expect(abortCall).toBeUndefined();
+    expect(runner.getSnapshot(runId)?.haltedByUser).toBe(true);
+  });
+});
