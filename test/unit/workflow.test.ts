@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CLEANUP_MODES,
   clampAutoApprove,
   clampClaudePermissionMode,
   clampCodexApprovalMode,
@@ -7,6 +8,7 @@ import {
   expandTemplate,
   parseWorkflowYaml,
   validateWorkflow,
+  withCommitRequirement,
   type TaskResult,
   type WorkflowTask,
 } from '../../src/orchestrator/workflow';
@@ -118,7 +120,8 @@ tasks:
     expect(def.maxParallel).toBe(3);
     expect(def.tasks[0]?.provider).toBe('codex');
     expect(def.tasks[0]?.isolation).toBe('worktree');
-    expect(def.tasks[0]?.cleanup).toBe('keep');
+    // design.md §16.17「worktreeの片付け」で既定が`keep`から`after-merge`に変わった
+    expect(def.tasks[0]?.cleanup).toBe('after-merge');
   });
 
   it('壊れたYAMLは例外を投げる', () => {
@@ -520,6 +523,17 @@ tasks:
     );
   });
 
+  it('id "_integration" は統合worktree用に予約されておりエラーになる（design.md §16.17）', () => {
+    const def = {
+      version: 1,
+      name: 'テスト',
+      maxParallel: 3,
+      tasks: [task({ id: '_integration' })],
+    };
+    const { errors } = validateWorkflow(def);
+    expect(errors.some((e) => e.taskIds.includes('_integration'))).toBe(true);
+  });
+
   it.each(['prompt', 'done', 'continuePrompt'] as const)('%sが長すぎるとエラーになる', (field) => {
     const tooLong = 'a'.repeat(20001);
     const def = {
@@ -775,5 +789,21 @@ describe('clampAutoApprove', () => {
     const result = clampAutoApprove(false, false);
     expect(result.value).toBe(false);
     expect(result.warning).toBeUndefined();
+  });
+});
+
+describe('CLEANUP_MODES（design.md §16.17「worktreeの片付け」）', () => {
+  it('keep / after-merge / removeの3値を持つ', () => {
+    expect(CLEANUP_MODES).toEqual(['keep', 'after-merge', 'remove']);
+  });
+});
+
+describe('withCommitRequirement', () => {
+  it('人が書いたdoneを残したまま、コミット済みであることを条件に足す', () => {
+    const result = withCommitRequirement('作業が終わっている');
+    expect(result).toContain('作業が終わっている');
+    expect(result).toContain('コミット');
+    // 元のdone文言が壊されず、末尾に連結されているだけであることを確認する
+    expect(result.startsWith('作業が終わっている')).toBe(true);
   });
 });

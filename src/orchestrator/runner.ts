@@ -13,14 +13,33 @@ import {
   type TaskBoundary,
 } from './escalation';
 import {
+  buildMergeResolutionPrompt,
+  commitUncommittedChangesIfNeeded,
+  findTaskIdsMergedSince,
+  integrationBranchName,
+  integrationWorktreePath,
+  isMergeResolutionComplete,
+  IntegrationMergeQueue,
+  MERGE_RESOLUTION_CONDITION,
+  MERGE_RESOLUTION_MAX_ITERATIONS,
+  reconcileMergingTaskOnReload,
+  resolveTaskBranchOrigin,
+  type MergeResolutionTaskInfo,
+  type MergeTaskResult,
+} from './integration';
+import {
   applyLoopStopReason,
   createRunState,
   markApprovalRejected,
+  markMergeBlocked,
+  markMergeFailed,
+  markMergeSucceeded,
   markRunning,
   markWaitingApproval,
   recordSessionInfo,
   recordSubmissionCount,
   resumeFromApproval,
+  retryMergeState,
   retryTask as retryTaskState,
   type RunState,
   type TaskFailureReason,
@@ -53,6 +72,7 @@ import {
   expandTemplate,
   parseWorkflowYaml,
   validateWorkflow,
+  withCommitRequirement,
   type Provider,
   type TaskResult,
   type WorkflowDefinition,
@@ -214,6 +234,13 @@ interface LiveTask {
   boundary: TaskBoundary;
   /** `isolation: worktree` で実際にworktreeを使ったか。撤去してよいかの判定に使う。 */
   usedWorktree: boolean;
+  /**
+   * このタスクのブランチが分岐した時点の統合ブランチのコミット
+   * （`resolveTaskBranchOrigin`。design.md §16.17「タスクブランチの分岐元」）。
+   * `usedWorktree`が`false`（`shared`・明示`cwd`）のときは空文字。衝突解決時に
+   * 「突き合わせる」相手のタスクを`findTaskIdsMergedSince`で特定するために使う。
+   */
+  originCommit: string;
   lastState: ChatState | undefined;
   /** `done` になったときだけ埋まる。後続タスクのテンプレート変数に使う（応答本文は永続化しない）。 */
   result: TaskResult | undefined;
@@ -240,6 +267,18 @@ interface LiveRun {
   finished: boolean;
   /** design.md §16.8「警告欄」。発生した順に積む（`maxReached` はスナップショット生成時に動的に足す）。 */
   warnings: WorkflowWarning[];
+  /**
+   * 統合ブランチ・統合worktree（design.md §16.17）。`gitRepo`が`true`のときだけ
+   * `start()`（または`rebuildLiveRun`）が作る。`isolation: worktree`のタスクが1件も
+   * 無い定義でも、runごとに1本という設計（§16.17「統合ブランチ」）どおり作る。
+   */
+  integration: { cwd: string; branch: string } | undefined;
+  /**
+   * 衝突解決セッション（design.md §16.17「コンフリクト」5.「解決用セッションは依存グラフの
+   * ノードにはしない」）。`live.tasks`（グラフのノード＝通常のタスク）とは別に持つ。
+   * taskIdをキーにする（1タスクにつき同時に1件のマージしか走らない）。
+   */
+  mergeResolutions: Map<string, TaskSession>;
 }
 
 /** `onChanged` の最小限のpub-sub。VSCodeの `EventEmitter` には依存しない（design.mdの方針どおり）。 */
@@ -264,8 +303,18 @@ class SimpleEmitter<T> {
 export class WorkflowRunner {
   private readonly runs = new Map<string, LiveRun>();
   private readonly changeEmitter = new SimpleEmitter<string>();
+  /**
+   * `deps.worktreeQueue`から構築する。design.md §16.17「マージはworktreeの作成・撤去と
+   * 同じ1本のキューに通して直列化する」ため、別インスタンスを持たせず必ず同じ
+   * `WorktreeCreationQueue`をラップする（`integration.ts`の`IntegrationMergeQueue`の
+   * 注意書き参照）。コンストラクタ内で組み立てることで、配線を誤って別のキューを
+   * 渡す事故を型のうえで起こしえない状態にする。
+   */
+  private readonly integrationQueue: IntegrationMergeQueue;
 
-  constructor(private readonly deps: WorkflowRunnerDeps) {}
+  constructor(private readonly deps: WorkflowRunnerDeps) {
+    this.integrationQueue = new IntegrationMergeQueue(deps.worktreeQueue);
+  }
 
   /**
    * 実行状態が変わるたびに呼ばれる（design.md §16.8「更新はタスクの状態が変わったとき」）。
@@ -418,10 +467,47 @@ export class WorkflowRunner {
         continue;
       }
       const rebuilt = await this.rebuildLiveRun(p);
-      if (rebuilt !== undefined) {
-        this.runs.set(p.runId, rebuilt);
+      if (rebuilt === undefined) {
+        continue;
+      }
+      this.runs.set(p.runId, rebuilt);
+      // `rebuildLiveRun`が統合ブランチの実際の状態から判定し直してもなお`merging`のまま
+      // 残ったタスクは、マージが実行途中で切れていたと分かっているもの。ライブなセッションは
+      // 無い（リロードで失われた）ため、永続化された`branch`/`cwd`だけを頼りにマージを
+      // やり直す（design.md §16.11「`merging`からやり直す」）
+      for (const [taskId, s] of rebuilt.runState.tasks) {
+        if (s.state === 'merging') {
+          this.resumeMergeAfterReload(p.runId, taskId);
+        }
       }
     }
+  }
+
+  /**
+   * リロード直後、まだ`merging`のまま残ったタスクのマージをやり直す
+   * （design.md §16.11。`restoreRunsForView`から呼ぶ）。ライブなセッション
+   * （`LiveTask`）は無いため、永続化された`branch`/`cwd`を直接使う。どちらか欠けている
+   * （古い永続化形式・作成前に中断した等）場合は再開できないため、安全側で`blocked`にする。
+   */
+  private resumeMergeAfterReload(runId: string, taskId: string): void {
+    const live = this.runs.get(runId);
+    if (live === undefined || live.integration === undefined) {
+      return;
+    }
+    const task = live.def.tasks.find((t) => t.id === taskId);
+    const persistedTask = this.deps.store.find(runId)?.tasks[taskId];
+    const branch = persistedTask?.branch;
+    const cwd = persistedTask?.cwd;
+    if (task === undefined || branch === undefined || branch === '' || cwd === undefined) {
+      this.deps.log.warn(
+        `[workflow ${runId}/${taskId}] マージを再開するための情報が不足しているため blocked にします`,
+      );
+      live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
+      void this.persist(runId);
+      this.notify(runId);
+      return;
+    }
+    void this.startMerge(runId, taskId, task, cwd, branch, '');
   }
 
   private async rebuildLiveRun(p: PersistedRun): Promise<LiveRun | undefined> {
@@ -466,13 +552,53 @@ export class WorkflowRunner {
       ? ((await resolveHeadCommit(p.workspaceRoot, this.deps.git)) ?? '')
       : '';
 
+    // 統合ブランチ・統合worktree（design.md §16.17）。gitRepoでない実行には統合の概念が
+    // 無い。永続化された`integrationBranch`（古い形式や空文字なら決定的に導ける値）を使う
+    const integrationBranch =
+      p.integrationBranch !== '' ? p.integrationBranch : integrationBranchName(p.runId);
+    const integration = gitRepo
+      ? { cwd: integrationWorktreePath(p.workspaceRoot, p.runId), branch: integrationBranch }
+      : undefined;
+
     const tasks = new Map<string, TaskRunState>();
     for (const [id, t] of Object.entries(p.tasks)) {
+      let state = t.state;
+      let failure = t.failure;
+      if (state === 'merging') {
+        // design.md §16.11「`merging`だったタスクは、状態の記録ではなく統合ブランチの
+        // 実際の状態から判定し直す」。gitRepoでない（統合worktreeが無い）実行で`merging`
+        // が残っているのは想定外の状態のため、安全側で`blocked`にする
+        if (integration === undefined) {
+          state = 'blocked';
+        } else {
+          const outcome = await reconcileMergingTaskOnReload(
+            integration.cwd,
+            p.runId,
+            id,
+            this.deps.git,
+          );
+          if (outcome === 'done') {
+            state = 'done';
+          } else if (outcome === 'blocked') {
+            state = 'blocked';
+          } else if (t.cwd === undefined || t.branch === undefined || t.branch === '') {
+            // マージをやり直すための情報（タスクのworktreeのcwd・ブランチ名）が無い。
+            // `restoreRunsForView`側の再開処理も同じ条件で`blocked`に倒すため、ここで
+            // 先に確定させて二重の判定を避ける
+            state = 'blocked';
+          }
+          // それ以外（outcome === 'merging' かつ再開に必要な情報がある）は`merging`のまま
+          // 残す。`restoreRunsForView`がこのあとマージをやり直す
+        }
+        if (state !== 'merging') {
+          failure = undefined;
+        }
+      }
       tasks.set(id, {
-        state: t.state,
+        state,
         submissionCount: t.submissionCount,
         retryCount: t.retryCount,
-        failure: t.failure,
+        failure,
         sessionId: t.sessionId,
         cwd: t.cwd,
       });
@@ -493,6 +619,8 @@ export class WorkflowRunner {
       tasks: new Map(),
       finished: getRunOutcome(runState) !== 'running',
       warnings: [],
+      integration,
+      mergeResolutions: new Map(),
     };
   }
 
@@ -594,7 +722,29 @@ export class WorkflowRunner {
     // 復元した実行（`rebuildLiveRun`は`warnings: []`で初期化する）では二度と現れず、
     // design.md §16.7の「常時出す」が復元経路だけ欠けてしまう（レビュー指摘: high）
 
+    // runIdは統合worktreeのパス（`integrationWorktreePath`）を組み立てるのに要るため、
+    // 統合worktreeの作成より前に確定させる
     const runId = this.deps.randomId?.() ?? randomUUID();
+
+    // 統合ブランチ・統合worktree（design.md §16.17）。runごとに1本、実行開始時に一度だけ
+    // 作る。`isolation: worktree`のタスクが1件も無い定義でも作る（design.md §16.17
+    // 「統合ブランチ」がrun単位の概念として定めているため）
+    let integration: { cwd: string; branch: string } | undefined;
+    if (gitRepo) {
+      const created = await this.integrationQueue.createIntegrationWorktree(
+        { repoRoot, runId, headCommit },
+        this.deps.git,
+        this.deps.fs,
+      );
+      if (!created.ok) {
+        return {
+          ok: false,
+          errors: [issue(`統合worktreeの作成に失敗しました: ${created.message}`)],
+        };
+      }
+      integration = { cwd: created.cwd, branch: created.branch };
+    }
+
     const live: LiveRun = {
       runId,
       def,
@@ -607,6 +757,8 @@ export class WorkflowRunner {
       tasks: new Map(),
       finished: false,
       warnings,
+      integration,
+      mergeResolutions: new Map(),
     };
     this.runs.set(runId, live);
     await this.persist(runId);
@@ -749,9 +901,15 @@ export class WorkflowRunner {
     const failed: string[] = [];
     for (const task of live.def.tasks) {
       const state = live.runState.tasks.get(task.id);
+      // `merging`（マージ未了。統合ブランチへ入るまで消してはいけない）は対象外にする。
+      // `blocked`は自動撤去（`shouldRemoveWorktree`）の対象からは外れているが、これは
+      // 人が明示的に「終わったタスクのworktreeをまとめて撤去する」操作なので含める
       if (
         state === undefined ||
-        (state.state !== 'done' && state.state !== 'failed' && state.state !== 'skipped')
+        (state.state !== 'done' &&
+          state.state !== 'failed' &&
+          state.state !== 'blocked' &&
+          state.state !== 'skipped')
       ) {
         continue;
       }
@@ -825,7 +983,11 @@ export class WorkflowRunner {
 
     try {
       const retry = retrySuffixOf(live.runState.tasks.get(taskId)?.retryCount);
-      const { cwd, branch, usedWorktree } = await this.resolveWorkingDirectory(live, task, retry);
+      const { cwd, branch, usedWorktree, originCommit } = await this.resolveWorkingDirectory(
+        live,
+        task,
+        retry,
+      );
 
       const baseline = this.deps.readBaseline();
       // クランプはこの1関数だけを通す（design.md §16.16。#52セキュリティ監査指摘）
@@ -867,6 +1029,7 @@ export class WorkflowRunner {
         autoApprove: effective.autoApprove,
         boundary: boundaryResult.boundary,
         usedWorktree,
+        originCommit,
         lastState: undefined,
         result: undefined,
         wasBusy: false,
@@ -894,11 +1057,15 @@ export class WorkflowRunner {
       const resultsMap = this.buildResultsMap(live, task);
       session.setPromptTransform((text) => expandTemplate(text, resultsMap));
 
+      // `usedWorktree`（タスク専用ブランチを使う）のときだけ「コミットしてあること」を
+      // 終了条件へ自動で足す（design.md §16.17「タスク完了時のコミット」1.）。`shared` /
+      // 明示`cwd`のタスクは統合ブランチへマージする対象を持たないため足さない
+      const condition = usedWorktree ? withCommitRequirement(task.done) : task.done;
       session.runLoop({
         initialPrompt: task.prompt,
         continuePrompt: task.continuePrompt,
         maxIterations: task.maxIterations,
-        condition: task.done,
+        condition,
       });
       this.notify(runId);
     } catch (e) {
@@ -979,7 +1146,7 @@ export class WorkflowRunner {
     live: LiveRun,
     task: WorkflowTask,
     retry: number | undefined,
-  ): Promise<{ cwd: string; branch: string; usedWorktree: boolean }> {
+  ): Promise<{ cwd: string; branch: string; usedWorktree: boolean; originCommit: string }> {
     const decision = decideWorkingDirectory(task, live.gitRepo);
     if (decision.kind === 'explicitCwd') {
       // decision.kind==='explicitCwd'はtask.cwdが設定されている場合にしか出ない
@@ -993,18 +1160,30 @@ export class WorkflowRunner {
       if (!resolved.ok) {
         throw new Error(resolved.message);
       }
-      return { cwd: resolved.resolved, branch: '', usedWorktree: false };
+      return { cwd: resolved.resolved, branch: '', usedWorktree: false, originCommit: '' };
     }
     if (decision.kind === 'shared') {
-      return { cwd: live.repoRoot, branch: '', usedWorktree: false };
+      return { cwd: live.repoRoot, branch: '', usedWorktree: false, originCommit: '' };
     }
     if (decision.kind === 'sharedFallback') {
       this.deps.log.warn(`[workflow ${live.runId}/${task.id}] ${decision.warning}`);
       live.warnings.push({ kind: 'gitFallback', taskId: task.id, message: decision.warning });
-      return { cwd: live.repoRoot, branch: '', usedWorktree: false };
+      return { cwd: live.repoRoot, branch: '', usedWorktree: false, originCommit: '' };
     }
     if (decision.kind === 'error') {
       throw new Error(decision.message);
+    }
+
+    // タスクブランチの分岐元は「そのタスクを開始する時点の統合ブランチのHEAD」
+    // （design.md §16.17「タスクブランチの分岐元」。現行の「実行開始時のHEAD」から変更）。
+    // 統合worktreeが無い（gitRepoでない）ケースは`decideWorkingDirectory`が`shared`/
+    // `sharedFallback`/`error`のいずれかへ倒すため、ここへは来ない
+    if (live.integration === undefined) {
+      throw new Error('内部矛盾: 統合worktreeが無い状態でworktree隔離のタスクを開始しようとしました');
+    }
+    const originCommit = await resolveTaskBranchOrigin(live.repoRoot, live.runId, this.deps.git);
+    if (originCommit === undefined) {
+      throw new Error('統合ブランチのHEADコミットを解決できませんでした');
     }
 
     const result = await this.deps.worktreeQueue.create(
@@ -1012,7 +1191,7 @@ export class WorkflowRunner {
         repoRoot: live.repoRoot,
         runId: live.runId,
         taskId: task.id,
-        headCommit: live.headCommit,
+        headCommit: originCommit,
         retry,
       },
       this.deps.git,
@@ -1021,7 +1200,7 @@ export class WorkflowRunner {
     if (!result.ok) {
       throw new Error(`worktreeの作成に失敗しました: ${result.message}`);
     }
-    return { cwd: result.cwd, branch: result.branch, usedWorktree: true };
+    return { cwd: result.cwd, branch: result.branch, usedWorktree: true, originCommit };
   }
 
   private async buildBoundary(
@@ -1168,12 +1347,309 @@ export class WorkflowRunner {
       // done / maxReached / failed。セッションを解放する（design.md §16.10の4）。
       // 再試行はここで新しいセッション・worktreeを新規に作るため、古いものは残さない
       liveTask?.session.dispose();
+
+      if (reason === 'done' && liveTask !== undefined) {
+        if (liveTask.usedWorktree) {
+          // マージまでを拡張機能の責務にする（design.md §16.17）。ループが終わっただけでは
+          // `applyLoopStopReason`が`merging`にしてあるだけなので、実際にマージを試みる
+          void this.startMerge(runId, taskId, task, liveTask.cwd, liveTask.branch, liveTask.originCommit);
+        } else {
+          // `shared` / 明示`cwd`のタスクは統合ブランチへマージする対象となる専用ブランチを
+          // 持たない。マージ済みの成果物が最初から無い（あるいは元々`repoRoot`を直接触って
+          // いる）ため、`merging`を経ずそのまま`done`にする（design.md §16.17の対象外の
+          // 判断。ambiguousな点は最終報告で明記する）
+          live.runState = markMergeSucceeded(live.runState, live.def.tasks, taskId);
+        }
+      }
       this.cleanupWorktreeIfNeeded(live, task, taskId, liveTask);
     }
 
     void this.persist(runId);
     this.notify(runId);
     this.pump(runId);
+  }
+
+  // ---- マージ（design.md §16.17） ----
+
+  /**
+   * タスクが`merging`になった直後に呼ぶ。未コミットの変更を回収してからマージを試みる。
+   * `onTaskFinished`（通常経路）と`resumeMergeAfterReload`（リロード後の再開）の両方から
+   * 呼ばれるため、`LiveTask`ではなくcwd/branch/originCommitを直接受け取る。
+   */
+  private async startMerge(
+    runId: string,
+    taskId: string,
+    task: WorkflowTask,
+    taskCwd: string,
+    taskBranch: string,
+    originCommit: string,
+  ): Promise<void> {
+    const live = this.runs.get(runId);
+    if (live === undefined) {
+      return;
+    }
+    if (live.integration === undefined) {
+      // 内部矛盾（usedWorktreeなタスクが走っている以上、start()が統合worktreeを
+      // 作っているはず）。安全側でfailedにする
+      this.deps.log.error(`[workflow ${runId}/${taskId}] 統合worktreeが無いためマージできません`);
+      live.runState = markMergeFailed(live.runState, live.def.tasks, taskId);
+      void this.persist(runId);
+      this.notify(runId);
+      this.pump(runId);
+      return;
+    }
+
+    // design.md §16.17「タスク完了時のコミット」2.〜4.
+    const commitResult = await commitUncommittedChangesIfNeeded(taskCwd, taskId, this.deps.git);
+    if (!commitResult.ok) {
+      this.deps.log.error(
+        `[workflow ${runId}/${taskId}] 未コミットの変更の回収に失敗しました: ${commitResult.message}`,
+      );
+      live.runState = markMergeFailed(live.runState, live.def.tasks, taskId);
+      void this.persist(runId);
+      this.notify(runId);
+      this.pump(runId);
+      return;
+    }
+
+    await this.attemptMerge(runId, taskId, task, live.integration, taskBranch, originCommit);
+  }
+
+  /**
+   * 統合worktreeへ実際にマージを試みる。成功なら`done`、衝突なら衝突解決セッションを
+   * 起動、その他の失敗なら`failed`にする（design.md §16.17「マージ」）。
+   */
+  private async attemptMerge(
+    runId: string,
+    taskId: string,
+    task: WorkflowTask,
+    integration: { cwd: string; branch: string },
+    taskBranch: string,
+    originCommit: string,
+  ): Promise<void> {
+    const live = this.runs.get(runId);
+    if (live === undefined) {
+      return;
+    }
+    const result = await this.integrationQueue.mergeTask(
+      integration.cwd,
+      runId,
+      taskId,
+      taskBranch,
+      this.deps.git,
+    );
+
+    if (result.kind === 'success') {
+      live.runState = markMergeSucceeded(live.runState, live.def.tasks, taskId);
+      this.cleanupWorktreeIfNeeded(live, task, taskId, live.tasks.get(taskId));
+      void this.persist(runId);
+      this.notify(runId);
+      this.pump(runId);
+      return;
+    }
+    if (result.kind === 'failure') {
+      this.deps.log.error(`[workflow ${runId}/${taskId}] マージに失敗しました: ${result.message}`);
+      live.runState = markMergeFailed(live.runState, live.def.tasks, taskId);
+      void this.persist(runId);
+      this.notify(runId);
+      this.pump(runId);
+      return;
+    }
+
+    // 衝突。design.md §16.17「コンフリクト」1.「衝突した状態のままにしておく」
+    await this.startMergeResolution(runId, taskId, task, integration, result, originCommit);
+  }
+
+  /**
+   * 衝突解決セッションを開く（design.md §16.17「コンフリクト」3.）。衝突した状態の
+   * 統合worktreeを`cwd`にし、未解決パスの一覧と、突き合わせる相手のタスクの`prompt`/`done`
+   * をプロンプトに渡す。解決用セッションは依存グラフのノードにはしない（design.md
+   * 「コンフリクト」5.）ため、`live.tasks`ではなく`live.mergeResolutions`で管理する。
+   */
+  private async startMergeResolution(
+    runId: string,
+    taskId: string,
+    task: WorkflowTask,
+    integration: { cwd: string; branch: string },
+    conflict: Extract<MergeTaskResult, { kind: 'conflict' }>,
+    originCommit: string,
+  ): Promise<void> {
+    const live = this.runs.get(runId);
+    if (live === undefined) {
+      return;
+    }
+
+    const baseline = this.deps.readBaseline();
+    const effective = buildEffectiveTaskConfig(task, baseline);
+    // startTask()と同じ最終防御（レビュー指摘: critical 3参照）。衝突解決セッションも
+    // 通常のタスクと同じループ制御・承認判定に従う（design.md §16.17「コンフリクト」5.）
+    if (task.provider === 'claude' && effective.config.approvalMode === 'bypassPermissions') {
+      this.deps.log.error(
+        `[workflow ${runId}/${taskId}] 実効approvalModeがbypassPermissionsのため衝突解決セッションを開始できません`,
+      );
+      await this.abortAndBlock(runId, taskId, integration);
+      return;
+    }
+
+    const otherIds =
+      originCommit !== ''
+        ? await findTaskIdsMergedSince(integration.cwd, runId, originCommit, this.deps.git)
+        : [];
+    const others: MergeResolutionTaskInfo[] = otherIds
+      .filter((id) => id !== taskId)
+      .map((id) => live.def.tasks.find((t) => t.id === id))
+      .filter((t): t is WorkflowTask => t !== undefined)
+      .map((t) => ({ id: t.id, prompt: t.prompt, done: t.done }));
+
+    const host = this.deps.hosts[task.provider];
+    let session: TaskSession;
+    try {
+      session = await host.openTaskSession({
+        cwd: integration.cwd,
+        config: effective.config,
+        sandbox: effective.sandbox,
+      });
+    } catch (e) {
+      const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+      this.deps.log.error(
+        `[workflow ${runId}/${taskId}] 衝突解決セッションを開始できませんでした: ${message}`,
+      );
+      await this.abortAndBlock(runId, taskId, integration);
+      return;
+    }
+    session.open({ preserveFocus: true });
+    live.mergeResolutions.set(taskId, session);
+
+    const prompt = buildMergeResolutionPrompt(
+      { id: taskId, prompt: task.prompt, done: task.done },
+      others,
+      conflict.unresolvedPaths,
+    );
+
+    // 衝突解決セッションの承認は、通常のタスクの`escalation.ts`（境界・allow/escalate）
+    // ではなく、標準の承認カード（`setApprovalHandler`を設定しない既定挙動）へ委ねる。
+    // タスク境界（`TaskBoundary`）は本来そのタスクのworktree用に作られたもので、統合
+    // worktree（別ディレクトリ）向けに作り直すと境界判定の意味が変わってしまう。安全側
+    // （常に人の承認を要求する）に倒すための単純化であり、最終報告に明記する
+    session.onFinished((reason) => {
+      void this.onMergeResolutionFinished(runId, taskId, task, integration, reason);
+    });
+
+    session.runLoop({
+      initialPrompt: prompt,
+      continuePrompt: `続けてください。終了条件: ${MERGE_RESOLUTION_CONDITION}`,
+      maxIterations: MERGE_RESOLUTION_MAX_ITERATIONS,
+      condition: MERGE_RESOLUTION_CONDITION,
+    });
+    this.notify(runId);
+  }
+
+  /** 衝突解決セッションの結果を受けて、`done`（解決済み）か`blocked`（未解決）かを確定する。 */
+  private async onMergeResolutionFinished(
+    runId: string,
+    taskId: string,
+    task: WorkflowTask,
+    integration: { cwd: string; branch: string },
+    reason: LoopStopReason,
+  ): Promise<void> {
+    const live = this.runs.get(runId);
+    if (live === undefined) {
+      return;
+    }
+    const session = live.mergeResolutions.get(taskId);
+    live.mergeResolutions.delete(taskId);
+    session?.dispose();
+
+    if (reason === 'manual' || reason === 'interrupted') {
+      // 人がタブへ直接介入した。通常のタスクと同じく、このタスク自身の状態は変えず
+      // 実行全体だけを止める設計を踏襲する（design.md §16.5）
+      live.runState = applyLoopStopReason(live.runState, live.def.tasks, '', reason);
+      void this.persist(runId);
+      this.notify(runId);
+      this.pump(runId);
+      return;
+    }
+
+    // design.md §16.17「コンフリクト」4.「宣言だけを信じず`git status`でも確かめる」
+    const resolved =
+      reason === 'done' && (await isMergeResolutionComplete(integration.cwd, this.deps.git));
+    if (resolved) {
+      live.runState = markMergeSucceeded(live.runState, live.def.tasks, taskId);
+      this.cleanupWorktreeIfNeeded(live, task, taskId, live.tasks.get(taskId));
+      void this.persist(runId);
+      this.notify(runId);
+      this.pump(runId);
+      return;
+    }
+
+    if (reason === 'done') {
+      this.deps.log.warn(
+        `[workflow ${runId}/${taskId}] 衝突解決セッションはdoneを宣言しましたが、git上は未解決のままでした`,
+      );
+    }
+    await this.abortAndBlock(runId, taskId, integration);
+  }
+
+  /** マージを巻き戻して`blocked`に確定させる共通処理（design.md §16.17「コンフリクト」7.）。 */
+  private async abortAndBlock(
+    runId: string,
+    taskId: string,
+    integration: { cwd: string; branch: string },
+  ): Promise<void> {
+    const live = this.runs.get(runId);
+    if (live === undefined) {
+      return;
+    }
+    const abort = await this.integrationQueue.abortMerge(integration.cwd, this.deps.git);
+    if (!abort.ok) {
+      this.deps.log.warn(
+        `[workflow ${runId}/${taskId}] マージの巻き戻しに失敗しました: ${abort.message}`,
+      );
+    }
+    live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
+    void this.persist(runId);
+    this.notify(runId);
+    this.pump(runId);
+  }
+
+  /**
+   * `blocked`のタスクを再マージする（design.md §16.17「Viewから人が解決したうえで
+   * 『再マージ』を指示できる」）。Viewからの呼び出しの配線は別Issue（このIssueは
+   * `src/view/`を対象外にしている）だが、runner.ts側の入口はここに用意しておく。
+   *
+   * タスクのworktree・ブランチはこのウィンドウのライブなセッション（`live.tasks`）が
+   * あればそれを、無ければ永続化された値（リロード後、まだ再実行していない場合）を使う。
+   */
+  retryMerge(runId: string, taskId: string): boolean {
+    const live = this.runs.get(runId);
+    if (live === undefined || live.integration === undefined) {
+      return false;
+    }
+    const task = live.def.tasks.find((t) => t.id === taskId);
+    if (task === undefined) {
+      return false;
+    }
+    const liveTask = live.tasks.get(taskId);
+    const persistedTask = this.deps.store.find(runId)?.tasks[taskId];
+    const branch = liveTask?.branch ?? persistedTask?.branch;
+    const cwd = liveTask?.cwd ?? persistedTask?.cwd;
+    if (branch === undefined || branch === '' || cwd === undefined) {
+      return false;
+    }
+    const next = retryMergeState(live.runState, taskId);
+    if (next === live.runState) {
+      return false;
+    }
+    live.runState = next;
+    // `pump()`は`live.finished`が立っていると即座に戻ってしまう（design.md §16.5の終了判定を
+    // 一度確定させたら動かさない設計）。`blocked`はrunの終了判定（`getRunOutcome`）を`running`
+    // 以外へ倒すため、`retryTask`（手動の再実行）が同じ理由で`finished`を解除しているのと
+    // 同様、ここでも再開の起点として明示的に解除する
+    live.finished = false;
+    void this.persist(runId);
+    this.notify(runId);
+    void this.startMerge(runId, taskId, task, cwd, branch, liveTask?.originCommit ?? '');
+    return true;
   }
 
   private cleanupWorktreeIfNeeded(
@@ -1208,30 +1684,37 @@ export class WorkflowRunner {
     if (live === undefined) {
       return;
     }
-    const tasks: Record<string, PersistedTaskState> = {};
-    for (const [id, s] of live.runState.tasks) {
-      const liveTask = live.tasks.get(id);
-      tasks[id] = {
-        state: s.state,
-        sessionId: s.sessionId,
-        cwd: s.cwd,
-        branch: liveTask?.branch,
-        submissionCount: s.submissionCount,
-        retryCount: s.retryCount,
-        failure: s.failure,
-      };
-    }
     const outcome = getRunOutcome(live.runState);
-    await this.deps.store.update(runId, (current) => ({
-      runId,
-      defPath: live.defPath,
-      workspaceRoot: live.repoRoot,
-      startedAt: current?.startedAt ?? live.startedAt,
-      finishedAt:
-        outcome === 'running' ? undefined : (current?.finishedAt ?? new Date().toISOString()),
-      tasks,
-      haltedByUser: live.runState.haltedByUser,
-    }));
+    await this.deps.store.update(runId, (current) => {
+      const tasks: Record<string, PersistedTaskState> = {};
+      for (const [id, s] of live.runState.tasks) {
+        const liveTask = live.tasks.get(id);
+        tasks[id] = {
+          state: s.state,
+          sessionId: s.sessionId,
+          cwd: s.cwd,
+          // liveTaskはこのウィンドウでまだセッションを開いていないタスク（リロード直後で
+          // 復元しただけの実行に多い）では undefined になる。その場合は前回persistした値を
+          // 引き継ぐ（`current`）。素通しで`undefined`を書くと、既にdone/failed/skipped
+          // 確定済みのタスクのbranchがリロード後の初回persistで失われてしまう
+          branch: liveTask?.branch ?? current?.tasks[id]?.branch,
+          submissionCount: s.submissionCount,
+          retryCount: s.retryCount,
+          failure: s.failure,
+        };
+      }
+      return {
+        runId,
+        defPath: live.defPath,
+        workspaceRoot: live.repoRoot,
+        startedAt: current?.startedAt ?? live.startedAt,
+        finishedAt:
+          outcome === 'running' ? undefined : (current?.finishedAt ?? new Date().toISOString()),
+        tasks,
+        haltedByUser: live.runState.haltedByUser,
+        integrationBranch: live.integration?.branch ?? current?.integrationBranch ?? '',
+      };
+    });
   }
 }
 

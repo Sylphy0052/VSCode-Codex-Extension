@@ -17,7 +17,14 @@ export type Provider = (typeof PROVIDERS)[number];
 export const ISOLATIONS = ['worktree', 'worktree-strict', 'shared'] as const;
 export type Isolation = (typeof ISOLATIONS)[number];
 
-export const CLEANUP_MODES = ['keep', 'remove'] as const;
+/**
+ * `after-merge` は design.md §16.17「worktreeの片付け」の新しい既定値。
+ * マージが成功した時点でそのタスクのworktreeを撤去する（`worktree.ts` の
+ * `shouldRemoveWorktree` 参照）。`remove`（タスクが`done`になった時点で撤去）は、
+ * `done`の意味自体が「統合ブランチへ入った（＝マージ成功）」に変わった（design.md §16.17）
+ * ため、実質`after-merge`と同じ事象で発火する既存の値として残してある。
+ */
+export const CLEANUP_MODES = ['keep', 'after-merge', 'remove'] as const;
 export type CleanupMode = (typeof CLEANUP_MODES)[number];
 
 /**
@@ -39,6 +46,17 @@ const WINDOWS_RESERVED_NAME_PATTERN = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
  */
 const RETRY_SUFFIX_PATTERN = /-retry\d+$/;
 
+/**
+ * 統合worktreeのディレクトリ名として予約されている（design.md §16.17「`_integration`は
+ * タスクidとして予約する」。`id: _integration`と書けてしまうと、`integration.ts`の
+ * `integrationWorktreePath`が指すディレクトリと同じ場所を指してしまう）。
+ *
+ * `integration.ts`の`INTEGRATION_DIR_NAME`と同じ文字列だが、`integration.ts`は
+ * `workflow.ts`をimportしているため、循環importを避けてここでは文字列リテラルとして
+ * 複製する（`worktree.ts`/`integration.ts`間の定数複製と同じ方針。design.mdコメント参照）。
+ */
+const RESERVED_INTEGRATION_TASK_ID = '_integration';
+
 export const MAX_PARALLEL_MIN = 1;
 export const MAX_PARALLEL_MAX = 10;
 export const MAX_TASK_COUNT = 50;
@@ -53,7 +71,8 @@ export const DEFAULT_MAX_ITERATIONS = 20;
 export const DEFAULT_CONTINUE_PROMPT = '続けてください';
 export const DEFAULT_PROVIDER: Provider = 'codex';
 export const DEFAULT_ISOLATION: Isolation = 'worktree';
-export const DEFAULT_CLEANUP: CleanupMode = 'keep';
+/** design.md §16.17「worktreeの片付け」でこれが新しい既定になった（旧既定は`keep`）。 */
+export const DEFAULT_CLEANUP: CleanupMode = 'after-merge';
 /**
  * autoApproveの組み込み既定値はfalseにしてある。
  * design.mdのサンプルはtrueで書いているが、あれは「著者が明示的に選んだ値」の例であって
@@ -593,6 +612,12 @@ export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationRes
         message: `id を"-retry<数字>"で終わらせることはできません（再試行時のブランチ名と衝突します）: ${t.id}`,
       });
     }
+    if (t.id === RESERVED_INTEGRATION_TASK_ID) {
+      errors.push({
+        taskIds: [t.id],
+        message: `id "${RESERVED_INTEGRATION_TASK_ID}" は統合worktree用に予約されているため使えません`,
+      });
+    }
   }
   for (const [id, count] of idCounts) {
     if (count > 1) {
@@ -751,6 +776,26 @@ export function expandTemplate(text: string, results: ReadonlyMap<string, TaskRe
     }
     return field === 'files' ? result.files.join('\n') : result[field];
   });
+}
+
+/**
+ * 終了条件（`task.done`）へ「変更をコミットしてあること」を自動で足す
+ * （design.md §16.17「タスク完了時のコミット」1.）。マージには成果がコミットされている
+ * 必要があるが、`done`の宣言はコミットの有無を問わないため、エージェントが未コミットの
+ * まま終了を宣言することがある。人が書いた`done`はそのまま残し、末尾に連結するだけ
+ * （`decoratePrompt`（`loopController.ts`）が`condition`を指示文へ埋め込むのと同じ経路。
+ * 呼び出し側 `runner.ts` はこの結果を`LoopPlan.condition`として渡す）。
+ *
+ * これは「エージェントに伝える終了条件の文面」を広げるだけの合図に過ぎず、実際に
+ * コミットされている保証にはならない。取りこぼしは`commitUncommittedChangesIfNeeded`
+ * （`integration.ts`）が拾う。
+ *
+ * `isolation: worktree` でタスク専用のブランチを使うタスクにのみ意味を持つ
+ * （`shared` / 明示`cwd`のタスクは統合ブランチへマージする対象を持たないため、
+ * 呼び出し側はそもそもこの関数を呼ばない）。
+ */
+export function withCommitRequirement(done: string): string {
+  return `${done}、かつすべての変更をコミットしてあること`;
 }
 
 /** クランプ関数の結果。`warning` は緩める指定を無視したときだけ入る。 */

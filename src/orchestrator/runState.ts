@@ -13,8 +13,10 @@ export const TASK_STATES = [
   'pending',
   'running',
   'waitingApproval',
+  'merging',
   'done',
   'failed',
+  'blocked',
   'skipped',
 ] as const;
 export type TaskState = (typeof TASK_STATES)[number];
@@ -39,6 +41,21 @@ export type TaskFailureReason =
   | { readonly kind: 'manualStop' }
   /** 依存先タスクの失敗が波及して `skipped` になった。 */
   | { readonly kind: 'dependencyFailed'; readonly failedTaskIds: readonly string[] }
+  /**
+   * 依存先タスクのマージが衝突し、自動解決にも失敗した（`blocked`）ために `skipped` に
+   * なった（design.md §16.17「依存する後続は skipped（理由: mergeBlocked）」）。
+   * `dependencyFailed` と同じ理由で複数の親を配列に持てるようにする
+   * （`appendBlockedTaskId`）。`failed` とは違い実行全体は止めないため、`skipRemainingPending`
+   * の対象にはならない（このタスクの依存関係にある後続だけが対象）。
+   */
+  | { readonly kind: 'mergeBlocked'; readonly blockedTaskIds: readonly string[] }
+  /**
+   * マージが衝突以外の理由（gitエラー等）で失敗した（design.md §16.17「その他の失敗は
+   * failed」）。`applyLoopStopReason` の `'failed'` 分岐（`retries` を消費してループを
+   * 新しいworktreeでやり直す）とは別経路のため、`retries` は消費しない即時確定にする
+   * （マージという別の操作の失敗をタスクのループ失敗と同列に扱わない）。
+   */
+  | { readonly kind: 'mergeFailed' }
   /**
    * 依存関係とは無関係に、実行全体が停止したため開始されなかった（独立した枝など）。
    * `dependencyFailed`（自分の依存先が失敗した）とは原因が異なるため区別する。
@@ -200,48 +217,62 @@ function skipRemainingPending(tasks: Map<string, TaskRunState>): void {
 }
 
 /**
- * `dependencyFailed` で `skipped` になっている子孫へ、もう1件の失敗原因を積み増す。
- * 複数の親（合流タスクの依存先）が別々に失敗しうるため、`failedTaskIds` を単一要素で
- * 作り切りにすると2件目以降の失敗が記録から漏れる（レビュー指摘: 1件目しか残らない）。
- * 重複は入れない。`dependencyFailed` 以外（`runHalted` 等）は原因が異なるため触らない。
+ * `dependencyFailed` / `mergeBlocked` で `skipped` になっている子孫へ、もう1件の原因を
+ * 積み増す。複数の親（合流タスクの依存先）が別々に失敗・ブロックされうるため、
+ * `failedTaskIds` / `blockedTaskIds` を単一要素で作り切りにすると2件目以降が記録から
+ * 漏れる（レビュー指摘: 1件目しか残らない）。重複は入れない。指定した `kind` 以外
+ * （`runHalted` 等、または`dependencyFailed`と`mergeBlocked`の取り違え）は原因が異なる
+ * ため触らない。
  */
-function appendFailedTaskId(current: TaskRunState, taskId: string): TaskRunState {
-  if (
-    current.failure?.kind !== 'dependencyFailed' ||
-    current.failure.failedTaskIds.includes(taskId)
-  ) {
+function appendCascadeTaskId(
+  current: TaskRunState,
+  kind: 'dependencyFailed' | 'mergeBlocked',
+  taskId: string,
+): TaskRunState {
+  const failure = current.failure;
+  if (failure === undefined || failure.kind !== kind) {
+    return current;
+  }
+  if (failure.kind === 'dependencyFailed') {
+    if (failure.failedTaskIds.includes(taskId)) {
+      return current;
+    }
+    return {
+      ...current,
+      failure: { kind: 'dependencyFailed', failedTaskIds: [...failure.failedTaskIds, taskId] },
+    };
+  }
+  if (failure.blockedTaskIds.includes(taskId)) {
     return current;
   }
   return {
     ...current,
-    failure: {
-      kind: 'dependencyFailed',
-      failedTaskIds: [...current.failure.failedTaskIds, taskId],
-    },
+    failure: { kind: 'mergeBlocked', blockedTaskIds: [...failure.blockedTaskIds, taskId] },
   };
 }
 
 /**
  * タスクを `failed` に確定し、依存する全タスク（間接を含む）を `skipped` にする
- * （design.md §16.5「失敗の波及」）。
+ * （design.md §16.5「失敗の波及」）。呼び出し側（`markFailed` / `markMergeFailed`）が、
+ * 対象タスクがどの状態から失敗しうるかを `allowedState` で指定する。
  *
- * 対象タスク自身が `pending` / `running` / `waitingApproval`（＝未確定）のときだけ動く。
  * すでに `done` / `failed` / `skipped` で確定しているタスクへ`LoopStopReason`が二重・
  * 遅延で届いても上書きしない（レビュー指摘: 以前はここに自己ガードが無く、確定済みの
  * `done` が `maxReached` の再通知だけで `failed` へ書き換わりうった）。
  *
  * 下流（依存する側）についても、すでに `running` / `waitingApproval` / `done` /
  * `failed` のものは触らない。すでに `dependencyFailed` で `skipped` のものは、状態は
- * 変えずに失敗原因だけ積み増す（`appendFailedTaskId`）。
+ * 変えずに失敗原因だけ積み増す（`appendCascadeTaskId`）。
  */
-function markFailed(
+function markFailedFrom(
   run: RunState,
   tasks: readonly WorkflowTask[],
   taskId: string,
   reason: TaskFailureReason,
+  allowedState: (state: TaskState) => boolean,
 ): RunState {
   const current = run.tasks.get(taskId);
-  if (current === undefined || !isUnsettled(current.state)) {
+  if (current === undefined || !allowedState(current.state)) {
     return run;
   }
   const dependents = buildDependentsIndex(tasks);
@@ -262,7 +293,7 @@ function markFailed(
       });
       continue;
     }
-    nextTasks.set(id, appendFailedTaskId(s, taskId));
+    nextTasks.set(id, appendCascadeTaskId(s, 'dependencyFailed', taskId));
   }
   // ここまでで依存先の失敗が波及する分は確定した。残った `pending` は、依存関係の上では
   // このタスクと無関係な独立した枝でも、実行全体が停止する以上は新たに開始しない
@@ -271,20 +302,30 @@ function markFailed(
   return { ...run, tasks: nextTasks };
 }
 
+/** `applyLoopStopReason` / `markApprovalRejected` からの `failed` 確定。`isUnsettled` な状態からだけ動く。 */
+function markFailed(
+  run: RunState,
+  tasks: readonly WorkflowTask[],
+  taskId: string,
+  reason: TaskFailureReason,
+): RunState {
+  return markFailedFrom(run, tasks, taskId, reason, isUnsettled);
+}
+
 /**
  * ループの停止理由（`LoopStopReason`）をタスクの結果へ対応させる（design.md §16.5の表）。
  *
  * | `LoopStopReason`         | タスクの結果                             |
  * | ------------------------ | ---------------------------------------- |
- * | `done`                   | `done`                                   |
+ * | `done`                   | `merging`（マージが済んで初めて`done`。design.md §16.17。マージ結果に応じた `done` / `blocked` / `failed` への遷移は `markMergeSucceeded` / `markMergeBlocked` / `markMergeFailed` が担う） |
  * | `maxReached`             | `failed`（回数切れ）                     |
  * | `failed`                 | `failed`（`retries` の範囲で再試行）     |
  * | `manual` / `interrupted` | 実行全体を停止（このタスク自身は変えない）|
  *
  * `manual` / `interrupted` は「タスクの結果」の対応が表に無い（design.mdは「実行全体を
- * 停止」とだけ書いている）。人がそのタスクの画面へ直接介入した状態を指すため、この6状態
- * （pending/running/waitingApproval/done/failed/skipped）のどれにも当てはまらない。
- * ここでは実行層に判断を委ね、`haltedByUser` を立てて新規開始だけを止める。
+ * 停止」とだけ書いている）。人がそのタスクの画面へ直接介入した状態を指すため、この8状態
+ * （pending/running/waitingApproval/merging/done/failed/blocked/skipped）のどれにも
+ * 当てはまらない。ここでは実行層に判断を委ね、`haltedByUser` を立てて新規開始だけを止める。
  *
  * `failed` の確定、および `haltedByUser` を立てるときのいずれも、まだ開始されていない
  * `pending` のタスクは全て `skipped`（`runHalted`）にする。`running` のものは走らせ切る。
@@ -320,7 +361,10 @@ export function applyLoopStopReason(
   }
 
   if (reason === 'done') {
-    return setTask(run, taskId, { ...current, state: 'done', failure: undefined });
+    // ループが終わっただけでは`done`にしない。マージが済むまでは`merging`
+    // （design.md §16.17。実際のマージ呼び出しと結果に応じた遷移は実行層 `runner.ts` が
+    // `markMergeSucceeded` / `markMergeBlocked` / `markMergeFailed` を呼んで担う）。
+    return setTask(run, taskId, { ...current, state: 'merging', failure: undefined });
   }
 
   if (reason === 'maxReached') {
@@ -368,6 +412,119 @@ export function markApprovalRejected(
     return run;
   }
   return markFailed(run, tasks, taskId, { kind: 'approvalRejected' });
+}
+
+// ---------------------------------------------------------------------------
+// マージの結果に応じた遷移（design.md §16.17）。
+//
+// ループの完了（`applyLoopStopReason(..., 'done')`）はタスクを`merging`にするだけで、
+// 実際にマージを試みるのは実行層（`runner.ts`）の責務。以下の3関数は、その結果を
+// 受けて`merging`から次の状態へ遷移させる。いずれも対象タスクが`merging`のときだけ動く。
+// ---------------------------------------------------------------------------
+
+/**
+ * マージが成功した（design.md §16.17「マージが成功したら`done`」）。
+ *
+ * このタスクの失敗（衝突）を理由に`skipped`（`mergeBlocked`）へ倒れていた依存先も
+ * `pending`へ戻す。「再マージ」（`retryMergeState`）で一度`blocked`になったタスクの
+ * マージを成功させたときに、依存する後続が永久に`skipped`のまま残らないようにするため
+ * （`retryTask`が`dependencyFailed`のskippedを戻すのと同じ考え方）。複数の親から
+ * ブロックされていた場合でも、`nextTasksToStart`の依存充足チェック（`dependsOn`が
+ * 全て`done`）が残りの親を待つため、ここでは無条件に戻してよい。
+ */
+export function markMergeSucceeded(
+  run: RunState,
+  tasks: readonly WorkflowTask[],
+  taskId: string,
+): RunState {
+  const current = run.tasks.get(taskId);
+  if (current === undefined || current.state !== 'merging') {
+    return run;
+  }
+  const dependents = buildDependentsIndex(tasks);
+  const toRestore = collectDependents(taskId, dependents);
+
+  const nextTasks = new Map(run.tasks);
+  nextTasks.set(taskId, { ...current, state: 'done', failure: undefined });
+  for (const id of toRestore) {
+    const s = nextTasks.get(id);
+    if (s === undefined || s.state !== 'skipped' || s.failure?.kind !== 'mergeBlocked') {
+      continue;
+    }
+    nextTasks.set(id, { ...s, state: 'pending', failure: undefined });
+  }
+  return { ...run, tasks: nextTasks };
+}
+
+/**
+ * マージが衝突し、自動解決（衝突解決セッション）にも失敗した
+ * （design.md §16.17「コンフリクト」7.）。対象タスクを`blocked`にし、依存する後続
+ * （間接を含む）のうちまだ`pending`のものだけを`skipped`（理由: `mergeBlocked`）にする。
+ *
+ * `markFailed`（`failed`用）とは違い、実行全体は止めない。`blocked`は「タスクの作業
+ * 自体は終わったが、統合できていない」状態で、独立した枝は走り続ける
+ * （design.md §16.3「`blocked`は実行全体を止めない」）。そのため`skipRemainingPending`
+ * は呼ばない。
+ */
+export function markMergeBlocked(
+  run: RunState,
+  tasks: readonly WorkflowTask[],
+  taskId: string,
+): RunState {
+  const current = run.tasks.get(taskId);
+  if (current === undefined || current.state !== 'merging') {
+    return run;
+  }
+  const dependents = buildDependentsIndex(tasks);
+  const toSkip = collectDependents(taskId, dependents);
+
+  const nextTasks = new Map(run.tasks);
+  nextTasks.set(taskId, { ...current, state: 'blocked', failure: undefined });
+  for (const id of toSkip) {
+    const s = nextTasks.get(id);
+    if (s === undefined) {
+      continue;
+    }
+    if (s.state === 'pending') {
+      nextTasks.set(id, {
+        ...s,
+        state: 'skipped',
+        failure: { kind: 'mergeBlocked', blockedTaskIds: [taskId] },
+      });
+      continue;
+    }
+    nextTasks.set(id, appendCascadeTaskId(s, 'mergeBlocked', taskId));
+  }
+  return { ...run, tasks: nextTasks };
+}
+
+/**
+ * マージが衝突以外の理由（gitエラー等）で失敗した（design.md §16.17「その他の失敗は
+ * failed」）。`failed`と同じく実行全体を止め、依存する後続を`skipped`
+ * （理由: `dependencyFailed`）にする。対象タスクが`merging`のときだけ動く。
+ */
+export function markMergeFailed(
+  run: RunState,
+  tasks: readonly WorkflowTask[],
+  taskId: string,
+): RunState {
+  return markFailedFrom(run, tasks, taskId, { kind: 'mergeFailed' }, (s) => s === 'merging');
+}
+
+/**
+ * `blocked`のタスクを、再マージのために`merging`へ戻す（design.md §16.17「Viewから人が
+ * 解決したうえで『再マージ』を指示できる」）。`blocked`のときだけ動く。実際にマージを
+ * やり直す（`IntegrationMergeQueue.mergeTask`の呼び出し）のは実行層の責務で、この関数は
+ * 状態を戻すだけ。依存先の`skipped`（`mergeBlocked`）を戻す処理は、`retryTask`
+ * （タスクそのものの再実行）と違い、まだブロック中の後続を勝手に再開させない意図で
+ * 含めない（再マージが成功して`done`になった時点で、`nextTasksToStart`が改めて拾う）。
+ */
+export function retryMergeState(run: RunState, taskId: string): RunState {
+  const current = run.tasks.get(taskId);
+  if (current === undefined || current.state !== 'blocked') {
+    return run;
+  }
+  return setTask(run, taskId, { ...current, state: 'merging', failure: undefined });
 }
 
 /** `pending` のタスクを `running` にする。対象外の状態・未知のidは無視する。 */
