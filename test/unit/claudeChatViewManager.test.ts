@@ -43,9 +43,11 @@ function fakeSettingsProvider(): SettingsProvider {
       models: [],
       efforts: [],
       permissionModes: [],
+      agents: [],
       model: '',
       effort: '',
       permissionMode: '',
+      agent: '',
       defaults: { model: '', effort: '', permissionMode: '' },
     }),
     updateClaude: async () => true,
@@ -161,6 +163,8 @@ describe('ClaudeChatViewManager', () => {
         model: 'task-model',
         effort: 'high',
         permissionMode: 'plan',
+        // タスクオーケストレーションはエージェントの語彙を持たないため常に空文字
+        agent: '',
         additionalArgs: [],
       });
     });

@@ -77,6 +77,7 @@ export function readClaudeConfig(): ClaudeExtensionConfig {
       model: str(c, 'model'),
       effort: str(c, 'effort'),
       permissionMode: str(c, 'permissionMode'),
+      agent: str(c, 'agent'),
       additionalArgs: Array.isArray(additional)
         ? additional.filter((a): a is string => typeof a === 'string')
         : [],

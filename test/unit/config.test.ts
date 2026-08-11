@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { readWorkflowsConfig } from '../../src/config';
+import { readClaudeConfig, readWorkflowsConfig } from '../../src/config';
 import { __mock } from '../mocks/vscode';
 
 describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
@@ -33,5 +33,20 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
 
   it('allowAutoApproveの既定はfalse', () => {
     expect(readWorkflowsConfig().allowAutoApprove).toBe(false);
+  });
+});
+
+describe('readClaudeConfig', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('agentの既定は空文字（--agentを渡さない）', () => {
+    expect(readClaudeConfig().claude.agent).toBe('');
+  });
+
+  it('claude.agentを読む', () => {
+    __mock.setConfig('claude', { agent: 'code-reviewer' });
+    expect(readClaudeConfig().claude.agent).toBe('code-reviewer');
   });
 });

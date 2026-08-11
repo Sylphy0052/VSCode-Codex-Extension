@@ -639,9 +639,27 @@ export function chatScript(agentLabel: string, review: ReviewButtonConfig): stri
         ? '計画モード中は読み取り専用が優先されます'
         : '次の発言から効きます';
     }
+
+    // エージェントはClaude Code画面にしか無い。起動引数でのみ決まり、実行中は
+    // 切り替えられないため、選んでも「次のセッションから」になる（下の但し書きで補足）
+    const agent = el('agent');
+    if (agent) {
+      const agents = s.agents || [];
+      fillSelect(
+        agent,
+        agents.map((a) => a.name),
+        s.agent || '',
+        defaultLabel(d.agent),
+      );
+      const selectedAgent = agents.find((a) => a.name === s.agent);
+      agent.title =
+        selectedAgent && selectedAgent.description
+          ? selectedAgent.description
+          : '次のセッションから効きます';
+    }
   }
 
-  for (const key of ['model', 'reasoningEffort', 'approvalMode', 'sandbox']) {
+  for (const key of ['model', 'reasoningEffort', 'approvalMode', 'sandbox', 'agent']) {
     const select = el(key);
     if (!select) continue;
     select.addEventListener('change', (e) => {

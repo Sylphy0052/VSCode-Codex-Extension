@@ -349,20 +349,26 @@ Agents
 
 Claude Code側で扱う設定と選択肢の出どころは次のとおり。
 
-| 項目     | 選択肢                                           | 既定値の出どころ                             |
-| -------- | ------------------------------------------------ | -------------------------------------------- |
-| モデル   | `initialize` の応答の `models`（`value` を渡す） | `settings.json` の `model`                   |
-| effort   | モデルごとの `supportedEffortLevels`             | `settings.json` の `effortLevel`             |
-| 承認方法 | `--permission-mode` が受け付ける6種              | `settings.json` の `permissions.defaultMode` |
+| 項目         | 選択肢                                           | 既定値の出どころ                                            |
+| ------------ | ------------------------------------------------ | ----------------------------------------------------------- |
+| モデル       | `initialize` の応答の `models`（`value` を渡す） | `settings.json` の `model`                                  |
+| effort       | モデルごとの `supportedEffortLevels`             | `settings.json` の `effortLevel`                            |
+| 承認方法     | `--permission-mode` が受け付ける6種              | `settings.json` の `permissions.defaultMode`                |
+| エージェント | `initialize` の応答の `agents`（`name` を渡す）  | 出どころ無し（`settings.json` の値は追跡していない。§14.7） |
 
-Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡張機能側の既定値として持つ。Codex側の「空＝CLIへ委譲」とは異なるが、未指定だと何が使われるか画面から分からないため、既定を明示する方を採った。「既定」を選べば従来どおり `settings.json` へ委譲する。
+Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡張機能側の既定値として持つ。Codex側の「空＝CLIへ委譲」とは異なるが、未指定だと何が使われるか画面から分からないため、既定を明示する方を採った。「既定」を選べば従来どおり `settings.json` へ委譲する。**エージェントだけは空文字を既定にした**（`claude.model` / `claude.effort` と違い、意味のある既定値を1つに決められない。カスタムエージェントは環境ごとに違うため）。
 
 - モデル一覧は `initialize` の応答の `models` から取る。Codexの `model/list` に相当する要求は control protocol に無く、これが唯一の取得手段（実測）。応答は `{value, resolvedModel, displayName, description, supportsEffort, supportedEffortLevels}` で、`--model` へ渡すのは `value`。
   - 設定パネルは会話を開いていなくても選択肢を出すため、`claude --print --input-format stream-json` を単発で起動して `initialize` の応答だけを読む（`ClaudeModelProbe`）。
   - `supportsEffort` を持たないモデル（実測では haiku）では effort を選ばせず、理由を画面に出す。
   - 取得できない場合は `fable` / `opus` / `sonnet` / `haiku` のエイリアスへ退避する。正式名（`claude-fable-5` など）を使う場合は `claude.model` を直接編集する。一覧に無い現在値は「(一覧外)」として選択肢に補うので、設定が失われることはない。
+- エージェント一覧は同じ `initialize` の応答の `agents` から取る（実測。CLI 2.1.227）。中身は `{name, description, model?}` の配列で、組込エージェント（`claude` `Explore` `Plan` `general-purpose` など）とユーザー定義のカスタムエージェントが混ざって返る。`--agent` へ渡すのは `name` だけで、`model` は使わない。
+  - モデルと違い、意味のあるフォールバック一覧が無い（カスタムエージェントは `~/.claude/agents/` やプラグイン次第で環境ごとに違う）。取得できなければ選択肢を出さず、既定（空文字＝CLI委譲）だけが選べる状態にする（`ClaudeAgentProbe`。`ClaudeModelProbe` と同じ作り）。
+  - **エージェントは起動時にのみ効く**。会話の途中で切り替える制御要求を7候補（`set_agent` / `change_agent` / `switch_agent` / `agent_change` / `set_current_agent` / `select_agent` / `use_agent`）で実測したが、いずれも `{"subtype":"error","error":"Unsupported control request subtype: <name>"}` で拒否された。`initialize` の応答の `commands` には `/agents` が含まれておりCLI内蔵の対話的なエージェント管理はあるが、拡張機能から制御できる経路ではないため使わない。
 - `permissionMode` を `bypassPermissions` にするときは、Codexの `danger-full-access` + `never` と同じくモーダルで同意を取る。
 - 使用量はCodex側にしか出せない（§14.8）ため、Claudeタブには表示しない。
+
+**MCPサーバーの一覧**: 両タブの下部に、設定されているMCPサーバーの一覧と有効/無効の切替を出す（§14.14）。取得・切替の経路はCodexとClaude Codeで別物（プロトコルの非対称は§14.14を参照）。
 
 ### 使用量の表示
 
@@ -820,24 +826,39 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 
 問い合わせカードだけは事情が違い、**Claude Code側に同じ要求が来ない**。`requestUserInput` / `elicitation` に相当するものがstream-jsonにも control protocol にも無く、ツール実行の可否を聞く `can_use_tool` は承認として別に扱っている。CLIが増やしてくれば同じ `PendingPrompt` へ正規化して載せられる。
 
+#### 会話の途中のターンから分岐（実測で不可と確定、[#22](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/22)）
+
+Codexの `forkFromTurn`（`thread/fork` に `lastTurnId` を渡す。§9.5「会話途中からの分岐」）に相当する経路をClaude Code側で探したが、**拡張機能が使う `--print`（非対話）経路には存在しない**。実測した内容は次のとおり（CLI 2.1.227）。
+
+1. **`initialize` の `commands`（90件）に `branch` / `fork` は含まれない**。一方、CLIバイナリの文字列解析では `name:"branch"`（`type:"local-jsx"`、`description:"Create a branch of the current conversation at this point"`）と `name:"fork"`（`type:"local-jsx"`、`description:"Copy this conversation into a new background session and keep working here"`）が実在することを確認した。`local-jsx` は対話的なUIコンポーネント（Ink）の起動を要求する型で、TTYを持たない `--print` では一覧から除かれているとみられる。
+2. **`/branch <name>` / `/fork <directive>` をユーザーメッセージとして送っても実行されない**。CLIは `model: "<synthetic>"` の応答で `"/branch isn't available in this environment."` / `"/fork isn't available in this environment."` を返すだけで、新しいセッションもtranscriptも作られない（実測。CLI自身が安全側に倒して即座に拒否しており、副作用は無い）。
+3. **control_requestのsubtypeにも無い**。`fork_session` `branch_session` `create_branch` `branch` `fork` `branch_conversation` `fork_conversation` `rewind_session` `rewind` `checkpoint` `create_checkpoint` `restore_checkpoint` `session_fork` `session_branch` の14候補を実測し、すべて `Unsupported control request subtype: <name>` で拒否された。
+4. **起動引数にも該当が無い**。`claude --help` に `--fork-session`（セッション全体のfork。既存実装で使用中）はあるが、ターンを指定できる引数は無い。`--resume` はサブコマンドではなくオプションのため専用の `--help` は無い（`claude --resume --help` は通常の `--help` と同じ出力）。
+
+バイナリ内の実装（`branch` 選択時に呼ばれる関数）を読むと、対象ターンまでのメッセージを新しいsessionIdへ複製しながら `content-replacement` / `relocated`（cwdの引き継ぎ）/ `sessionHistorySuppressed` などのレコードを合わせて書き出す処理になっており、単純なtranscriptの行コピーでは再現できない。加えてこれは公開ドキュメントの無いminifiedコードからの逆解析であり、CLIの更新で予告なく変わりうる。**この処理自体が非対話環境では実行できないよう作られている**ことは、同等の操作を拡張機能側で（transcriptを読んで新しいセッションを組み立てる形で）代替するのが安全でないことの傍証でもある。§8「会話本文を読まない・保存しない」とは別に、CLIの内部ストレージ形式に依存した複製は元のセッションを壊すリスクを避けられないため、この代替は採らない。
+
+以上から、**Claude Codeでは会話の途中のターンから分岐する手段が無いと結論する**。Codex側の `forkFromTurn` 実装（`src/view/chatView.ts` の `forkFrom` / `src/view/conversationView.ts`）と同じ導線は出さない。将来のCLI更新で `--print` 経路にも `branch` / `fork` が解放されれば再調査する。
+
 ### 14.7 チャット画面の設定行
 
 Codex画面と同じHTML（`renderShell`）を使うため、画面下の設定行はClaude Code側にも出る。承認方法の選択肢だけプロバイダごとに差し替える（Codexは `APPROVAL_MODES`、Claude Codeは `--permission-mode` の6種）。
 
-- Webview側のスクリプトはCodexのスナップショット形状を前提にしているため、Claude側は同じ形へ整えて送る。モデル一覧は `initialize` の応答を `ModelInfo` へ正規化したものを渡し、キーは `reasoningEffort` → `effort`、`approvalMode` → `permissionMode` と読み替える。
+- Webview側のスクリプトはCodexのスナップショット形状を前提にしているため、Claude側は同じ形へ整えて送る。モデル一覧は `initialize` の応答を `ModelInfo` へ正規化したものを渡し、キーは `reasoningEffort` → `effort`、`approvalMode` → `permissionMode` と読み替える。エージェントはCodexに概念が無いため専用の `showAgentSelector` フラグでセレクタごと出し分ける（Sandboxセレクタと同じ「無ければ描画しない」方式）。
 - effortを持たないモデルを選んでいる間は、effortのセレクタを無効にして理由を出す（黙って選べなくしない）。
-- **効かせ方が違う**。Codex画面は `turn/start` に毎回渡すので次の発言から効く。Claude Codeは1プロセス1セッションで起動引数が固定なので、control protocol で実行中のセッションへ伝える。
+- **効かせ方が違う**。Codex画面は `turn/start` に毎回渡すので次の発言から効く。Claude Codeは1プロセス1セッションで起動引数が固定なので、control protocol で実行中のセッションへ伝える。**エージェントだけは control protocol にも経路が無く、常に「次のセッションから」になる**（次項）。
 
 #### Claude Codeのセッション中の変更（実測で確認）
 
-| 対象     | 送るもの                                            | 効いたことの確かめ方                                                                                  |
-| -------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| モデル   | `set_model { model }`                               | 成功応答。`<local-command-stdout>Set model to sonnet (claude-sonnet-5)</local-command-stdout>` も届く |
-| 承認方法 | `set_permission_mode { mode }`                      | `system` の `status` 通知が `permissionMode` を返す                                                   |
-| effort   | `apply_flag_settings { settings: { effortLevel } }` | **確かめられない**                                                                                    |
+| 対象         | 送るもの                                            | 効いたことの確かめ方                                                                                  |
+| ------------ | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| モデル       | `set_model { model }`                               | 成功応答。`<local-command-stdout>Set model to sonnet (claude-sonnet-5)</local-command-stdout>` も届く |
+| 承認方法     | `set_permission_mode { mode }`                      | `system` の `status` 通知が `permissionMode` を返す                                                   |
+| effort       | `apply_flag_settings { settings: { effortLevel } }` | **確かめられない**                                                                                    |
+| エージェント | 無し（起動引数 `--agent` のみ）                     | **専用の制御要求が見つからない**（7候補すべて実測でエラー。下記）                                     |
 
 - **effortには専用の制御要求が無い**。`set_effort` / `set_thinking_effort` / `set_reasoning_effort` はどれも `Unsupported control request subtype` になる（実測）。セッション単位の設定を差し込む `apply_flag_settings` に載せるのが唯一の手段
 - その `apply_flag_settings` は **`effortLevel` に出鱈目な値を入れても success を返し、確認の通知も来ない**。同じ経路で `{ model }` を送ると適用の合図が届くので効いている見込みはあるが、観測できない以上「変わった」とは書かない。画面には「送りました。反映は確かめられません」と出す
+- **エージェントを切り替える制御要求は無い**。`set_agent` / `change_agent` / `switch_agent` / `agent_change` / `set_current_agent` / `select_agent` / `use_agent` の7候補を実測したが、すべて `{"subtype":"error","error":"Unsupported control request subtype: <name>"}` で拒否された。`apply_flag_settings` はeffort専用の観測不能な経路であり、同じ穴（値を入れても無条件success）を持つエージェントで試しても「送った」以上のことは分からないため、こちらでは試していない。以上から**エージェントは起動時にのみ指定できる**と結論づけ、画面には常に「次のセッションから効く」と出す（effortのように「送った」とすら書かない。送信自体をしないため）
 - 承認方法の表示は**`status` 通知を正とする**。要求の成功だけを信じない（TUIなど他の経路で変えられた場合も同じ通知で拾えるため）
 - **「既定」へ戻す操作は送らない**。CLI側に起動時の値へ戻す手段が無く、何を送っても嘘になる。次に開くセッションから効く
 - `bypassPermissions` を選んだときの確認ダイアログを取り消した場合は、セッションへも送らない
@@ -1021,6 +1042,44 @@ issue #31 の起票時点のスコープは「Claude側のみ」（`docs/tui-par
 実際、Codexには `turn/plan/updated`（`{ plan: [{ step, status }], explanation }`）を受けて `describePlan` が作る `plan` 種別の項目が既にある（§14.10「計画そのものの表示」）。これは1ターンの間は同じidで上書きされ（`plan:<turnId>`）、状態（`[ ]` / `[~]` / `[x]`）も見える。会話内の項目という点でこの節の専用パネルとは置き場所が違うが、**「一覧として見える」「状態が分かる」という受入基準は既に満たしている**ため、今回はCodex側のコードを変更しなかった。
 
 置き場所を完全に揃える（Codexの計画も入力欄の上の専用パネルへ出す）のは、`plan` 項目の会話内表示という既存の設計を変えることになり、この issueのスコープを超える。今回は `ChatState.todos` と `#todos` パネルをプロバイダ共通の器として用意するところまでに留め、Codexの計画表示を同じ器へ移すかどうかは別issueで判断する。
+
+### 14.14 MCPサーバーの一覧・状態・有効無効
+
+TUIの `/mcp`（Codexは `/mcp verbose`）に相当する表示。issue #27・design.mdのTP-50対応。サイドバーの設定パネル（§6「操作パネル」）に、CodexとClaude Codeそれぞれのタブへ一覧を出す。
+
+Phase 0（issue #1 Z-07 / issue #2 Z-10）で「両方とも一覧・有効無効ともに実装できる」ことは確認済みだった。本issueでは実際のプロトコルの形を実測し、**CodexとClaude Codeで取得できる情報の粒度が非対称**であることを確認した。
+
+#### Codex: `mcpServerStatus/list` + `config/read`
+
+実測（codex-cli 0.147.0。`codex app-server generate-json-schema --out` のスキーマも根拠）:
+
+- `mcpServerStatus/list`（`ListMcpServerStatusParams { cursor?, detail?: 'full' | 'toolsAndAuthOnly', limit?, threadId? }` → `ListMcpServerStatusResponse { data: McpServerStatus[], nextCursor? }`）は**スレッドを開始していなくても呼べる**。呼ぶとその場で（未接続なら）接続を試み、成功すれば `serverInfo` とツール定義一式（`tools: {[name]: Tool}`）が入って返る
+- **無効化されたサーバーと、起動に失敗したサーバーは、この応答だけでは区別できない**。どちらも `serverInfo: null, tools: {}` になり、失敗理由を持つフィールドが `McpServerStatus` 型自体に無い（実測: 実在しないコマンドを指すサーバーを用意して確認）
+- 有効/無効そのものは `config/read` の `config.mcp_servers.<name>.enabled` と突き合わせて判定する。`enabled` を明示しないサーバーもこの応答では `enabled: true` に正規化されて返る（実測）
+- 切替は `config/value/write { keyPath: "mcp_servers.<name>.enabled", mergeStrategy: "upsert", value: true|false }` → `config/mcpServer/reload { }`（params は `null`）の2段階（実測で確認）。`config/mcpServer/reload` はサーバー名を取らず、`config.toml` 全体を読み直すだけ
+
+失敗理由は `mcpServer/startupStatus/updated` 通知（`McpServerStatusUpdatedNotification { name, status: 'starting'|'ready'|'failed'|'cancelled', error?, failureReason?, threadId? }`）に乗る（実測: `error` に `"MCP client for \`x\` failed to start: MCP startup failed: No such file or directory (os error 2)"`のような具体的な文言が入った）。しかし、**この通知は`thread/start` した後、そのスレッド向けにしか届かない**（実測: スレッドを開始せずに8秒アイドル観察してもゼロ件。`mcpServerStatus/list` を単発で呼んだだけでは発火しない）。設定パネルは会話を開かずに使うため、この通知には依存できない。
+
+したがって、設定パネルでは「有効なのに接続できない」状態を `state: 'unavailable'` として理由なしで示す。これは実装上の妥協ではなく、**観測した範囲でこの経路には理由が無い**という事実に基づく。受入基準（「起動に失敗しているサーバが、失敗していると分かる」）は状態表示だけで満たすが、失敗理由の表示はできない。
+
+#### Claude Code: `mcp_status` / `mcp_toggle`（control protocol）
+
+実測（CLI 2.1.227）:
+
+- `mcp_status` は1回の要求で `{ mcpServers: [{ name, status: 'connected'|'failed'|'disabled', serverInfo？: {name, version}, config, scope, tools？: [{name, annotations}], error？ }] }` を返す。**失敗理由（`error`）がこの応答だけで取れる**ため、Codexと違い通知の購読もスレッドの開始も要らない
+  - Phase 0時点のコメントでは「実測で `{ mcpServers: [] }`」だったが、これは検証環境にサーバーが設定されていなかっただけで、サーバーがあれば1件ずつ詳細が返ることを今回のissueで確認した
+- `mcp_toggle` の正しいパラメータ名は **`serverName`**（camelCase）。Phase 0の追試項目（`server_name` / `name` はどちらも `Server not found: undefined` になっていた）への回答。存在しないサーバー名を指定すると `Server not found: <name>` エラーが返る
+- **`mcp_toggle` はプロセスを終了しても設定に残る**（`.claude.json` に永続化される。実測: 1つのプロセスで無効化し、続けて起動した別プロセスの `mcp_status` でも無効のままだったことを確認）。会話を開いていない設定パネルからの単発呼び出しで切り替えても失われない
+
+#### 実装
+
+- `src/provider/mcpServers.ts`: `McpServerView`（`name` / `state: 'connected'|'disabled'|'unavailable'` / `toolCount` / `version` / `reason`）と `McpServersSnapshot`（`{ok:true, servers}` か `{ok:false, reason}`）を共有の型として持つ。空配列（0件）と「取得できなかった」を型で区別する
+- `src/codex/mcpStatus.ts`: `mcpServerStatus/list` と `config/read` の応答を`McpServerView[]`へ正規化する純粋関数（`parseMcpServerStatusList` / `parseConfigMcpServersEnabled` / `mergeMcpServers`）
+- `src/codex/appServerClient.ts`: `listMcpServers()` / `setMcpServerEnabled()` を追加。既存の `listModels()` と同じく、会話用の常駐接続とは別プロセスの単発呼び出し
+- `src/claude/control.ts`: `buildMcpStatusRequest` / `buildMcpToggleRequest` / `readMcpServersList`
+- `src/claude/mcpProbe.ts`: `ClaudeMcpProbe`。`ClaudeModelProbe` と同じ理由（設定パネルは会話を開いていなくても使える必要がある）で単発プロセスとして問い合わせる
+- `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `mcpServers: McpServersSnapshot` を追加。`toggleMcpServer(cli, name, enabled)` を新設
+- `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画とトグル操作。一覧が取れない場合はその旨を出し、0件（未設定）とは表示を分ける
 
 ## 15. 作業記録（日報・週報連携）
 
