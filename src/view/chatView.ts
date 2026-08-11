@@ -1206,6 +1206,13 @@ export interface ChatShellOptions {
   sandboxModes?: readonly string[];
   /** モデル・effort・承認のプルダウンを出すか（Codex画面のみ）。 */
   showSettings: boolean;
+  /**
+   * エージェントのプルダウンを出すか（Claude Code画面のみ）。
+   *
+   * Codexにエージェントの概念は無い。選択肢はモデル・effortと同じく空のまま描画し、
+   * `state.settings.agents` を受け取ってから `applySettings` が埋める（`fillSelect`）。
+   */
+  showAgentSelector?: boolean;
   /** レビューボタンの動作。Codexは常に出し、Claude Codeはコマンド一覧にあるときだけ出す。 */
   review: ReviewButtonConfig;
   /**
@@ -1306,6 +1313,11 @@ ${chatStyles()}
       <option value="">既定</option>
       ${options.sandboxModes.map((m) => `<option value="${m}">${m}</option>`).join('')}
     </select></label>`
+    }
+    ${
+      options.showAgentSelector === true
+        ? '<label>エージェント <select id="agent"></select></label>'
+        : ''
     }
     ${options.settingsNote === undefined ? '' : `<p class="note">${escapeHtml(options.settingsNote)}</p>`}
   </div>

@@ -227,6 +227,12 @@ ${controlPanelStyles()}
       <select id="claudePermissionMode"></select>
     </div>
 
+    <div class="row">
+      <label for="claudeAgent">エージェント</label>
+      <select id="claudeAgent"></select>
+      <div class="hint" id="claudeAgentHint"></div>
+    </div>
+
     <button id="newClaudeSession" type="button">この設定で新しい会話を開く</button>
 
     <p class="note">「既定」はClaude Code側の <code>settings.json</code> の値を使います。使用量はチャット画面に表示されます（ステータスバーはCodex専用）。</p>

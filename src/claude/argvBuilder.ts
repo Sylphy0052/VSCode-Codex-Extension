@@ -39,6 +39,22 @@ function isPermissionMode(value: string): value is ClaudePermissionMode {
 }
 
 /**
+ * `--agent` に渡してよい形か。
+ *
+ * エージェント名はユーザー定義のカスタムエージェントを含むため固定の一覧で検証できない
+ * （`isEffort` / `isPermissionMode` のような enum チェックが使えない）。代わりに
+ * `codex/modelCatalog.ts` の `isEffortToken` と同じ考え方で、引数として安全な形だけを
+ * 許す形式検証にする。先頭を英数字に限定することで `--foo` のような別のフラグに
+ * 化けさせる余地を塞ぐ。実在するエージェント名（`code-reviewer` `genshijin:genshijin-builder`
+ * など）はすべて通る。
+ */
+const AGENT_RE = /^[A-Za-z0-9][A-Za-z0-9_:-]*$/;
+
+function isAgentToken(value: string): boolean {
+  return AGENT_RE.test(value);
+}
+
+/**
  * TUIタブとして起動するための引数を組み立てる。
  *
  * `claude` には `-C` に相当する作業ディレクトリ指定が無いため、cwdは
@@ -118,6 +134,14 @@ function configArgs(config: ClaudeConfig, warnings: string[]): string[] {
       args.push('--permission-mode', config.permissionMode);
     } else {
       warnings.push(`claude.permissionMode の値が不正なため無視します: ${config.permissionMode}`);
+    }
+  }
+
+  if (config.agent !== '') {
+    if (isAgentToken(config.agent)) {
+      args.push('--agent', config.agent);
+    } else {
+      warnings.push(`claude.agent の値が不正なため無視します: ${config.agent}`);
     }
   }
 

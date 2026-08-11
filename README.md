@@ -233,16 +233,17 @@ Claude CodeがTodoWriteツールを使うと、入力欄の上（ステータス
 
 ### Claude Code
 
-| キー                    | 既定     | スコープ            | 説明                                                                         |
-| ----------------------- | -------- | ------------------- | ---------------------------------------------------------------------------- |
-| `claude.executablePath` | `claude` | machine             | 実行ファイルのパス                                                           |
-| `claude.configDir`      | `""`     | machine             | 空なら `CLAUDE_CONFIG_DIR` → `~/.claude`                                     |
-| `claude.additionalArgs` | `[]`     | machine             | 任意の追加引数                                                               |
-| `claude.permissionMode` | `""`     | machine             | `manual` / `auto` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
-| `claude.model`          | `opus`   | machine-overridable | エイリアス（`opus` 等）か正式名。空なら `--model` を渡さない                 |
-| `claude.effort`         | `medium` | machine-overridable | 選択肢はモデルごとに異なる。空なら `--effort` を渡さない                     |
+| キー                    | 既定     | スコープ            | 説明                                                                            |
+| ----------------------- | -------- | ------------------- | ------------------------------------------------------------------------------- |
+| `claude.executablePath` | `claude` | machine             | 実行ファイルのパス                                                              |
+| `claude.configDir`      | `""`     | machine             | 空なら `CLAUDE_CONFIG_DIR` → `~/.claude`                                        |
+| `claude.additionalArgs` | `[]`     | machine             | 任意の追加引数                                                                  |
+| `claude.permissionMode` | `""`     | machine             | `manual` / `auto` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions`    |
+| `claude.model`          | `opus`   | machine-overridable | エイリアス（`opus` 等）か正式名。空なら `--model` を渡さない                    |
+| `claude.effort`         | `medium` | machine-overridable | 選択肢はモデルごとに異なる。空なら `--effort` を渡さない                        |
+| `claude.agent`          | `""`     | machine-overridable | 使用するエージェント（`--agent`）。空なら渡さず、CLI側の `agent` 設定に委譲する |
 
-モデルとeffortの選択肢は、Codexは `codex app-server` の `model/list`、Claude Codeは `initialize` の応答から取る。CLIが新しいモデルに対応すれば拡張機能の更新なしで選べる。取得できないときは既知の一覧へ退避する（選択肢が空になることはない）。
+モデル・effort・エージェントの選択肢は、Codexは `codex app-server` の `model/list`、Claude Codeは `initialize` の応答（`models` / `agents`）から取る。CLIが新しいモデルやカスタムエージェントに対応すれば拡張機能の更新なしで選べる。モデルは取得できないときに既知の一覧へ退避するが、エージェントは環境ごとに違うため退避先が無く、取得できなければ選択肢を出さない（既定＝CLI委譲は常に選べる）。エージェントは**起動時にのみ**効き、会話の途中では切り替えられない（CLIに専用の制御要求が無いことを実測で確認済み）。
 
 ### 共通
 
