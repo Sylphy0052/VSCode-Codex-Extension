@@ -464,15 +464,16 @@ Claude Code側（`claude.*`）と作業記録（`agent.activityLog.*`）の設�
 
 ## 8. セキュリティ考慮
 
-| 項目                                                | 対処                                                                                                                                                                                                       |
-| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ワークスペース設定による任意コマンド実行            | §7のスコープ設計。`executablePath` / `additionalArgs` / `codexHome` を `machine` に固定                                                                                                                    |
-| サンドボックス無効化の誘導                          | `sandbox` / `approvalMode` も `machine`。危険な組み合わせは初回に確認ダイアログ                                                                                                                            |
-| 引数インジェクション                                | `shellPath` / `shellArgs` 方式によりシェル解釈を経由しない（§5.2）                                                                                                                                         |
-| セッション本文の漏洩                                | 拡張機能はロールアウトファイルの**1行目のみ**を読み、会話本文は読まない・保存しない・ログに出さない                                                                                                        |
-| 破壊操作                                            | `delete` は確認ダイアログ必須。`archive` は取り消し可能なため確認不要                                                                                                                                      |
-| hookによる任意コマンド実行（issue #28）             | 出どころ（user/project/plugin等）と実行コマンドを隠さず表示。既定は信頼せず、Codexは明示的な信頼操作が必要（§14.15）。hookのコマンド文字列はDOM APIの `textContent` で埋め込み、HTMLとして解釈させない     |
-| pluginインストールによる任意コード持込（issue #32） | インストール前に確認ダイアログで「何をどこから入れるか」を明示（§14.20）。plugin名・説明はDOM APIの `textContent` で埋め込み、HTMLとして解釈させない。CLI呼び出しへ渡す前に `isValidPluginName` で防御する |
+| 項目                                                                                  | 対処                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ワークスペース設定による任意コマンド実行                                              | §7のスコープ設計。`executablePath` / `additionalArgs` / `codexHome` を `machine` に固定                                                                                                                                                                                                                                                                                                                                         |
+| サンドボックス無効化の誘導                                                            | `sandbox` / `approvalMode` も `machine`。危険な組み合わせは初回に確認ダイアログ                                                                                                                                                                                                                                                                                                                                                 |
+| 引数インジェクション                                                                  | `shellPath` / `shellArgs` 方式によりシェル解釈を経由しない（§5.2）                                                                                                                                                                                                                                                                                                                                                              |
+| セッション本文の漏洩                                                                  | 拡張機能はロールアウトファイルの**1行目のみ**を読み、会話本文は読まない・保存しない・ログに出さない                                                                                                                                                                                                                                                                                                                             |
+| 破壊操作                                                                              | `delete` は確認ダイアログ必須。`archive` は取り消し可能なため確認不要                                                                                                                                                                                                                                                                                                                                                           |
+| hookによる任意コマンド実行（issue #28）                                               | 出どころ（user/project/plugin等）と実行コマンドを隠さず表示。既定は信頼せず、Codexは明示的な信頼操作が必要（§14.15）。hookのコマンド文字列はDOM APIの `textContent` で埋め込み、HTMLとして解釈させない                                                                                                                                                                                                                          |
+| pluginインストールによる任意コード持込（issue #32）                                   | インストール前に確認ダイアログで「何をどこから入れるか」を明示（§14.20）。plugin名・説明はDOM APIの `textContent` で埋め込み、HTMLとして解釈させない。CLI呼び出しへ渡す前に `isValidPluginName` で防御する                                                                                                                                                                                                                      |
+| 他エージェントからの設定インポートによる既存設定の上書き・任意コード持込（issue #36） | 実行前に確認ダイアログで対象（何を・どこから・どこへ）を明示し、設定を上書きしうる旨（CONFIG種別を含む場合）を注記（§14.29）。CLIが返す説明文・項目名はDOM APIの `textContent` で埋め込み、HTMLとして解釈させない。webviewから返る選択キーは `isValidImportItemKey` で防御し、実際にCLIへ送る生データはサーバー側（`SettingsProvider`）にキャッシュした`detect`の応答のみを使う（webviewが送ってきた値をそのままCLIへ渡さない） |
 
 ## 9. リスクと検証項目
 
@@ -1794,6 +1795,58 @@ Codex TUIには「switch the active agent thread」があり、バイナリに�
 #### スコープ外: `/goal`
 
 Codexの `/goal`（`thread/goal/set` / `thread/goal/get` / `thread/goal/clear`。Phase 0で「実装できる」と確認済み）は、本issueでは扱わない。サブエージェントの状況表示とは性質が違う機能のため、別issueで扱う。
+
+### 14.29 他エージェントからの設定インポート（issue #36、design.md TP-57、Codex TUIの `/import` 相当）
+
+Codex TUIの `/import` はClaude Codeなど他エージェントから設定・プロジェクト・最近のチャットを取り込む。issueのスコープはCodex側のみ。この拡張はCodexとClaude Codeを同じ一覧で扱っているため、相性が良い機能として起票された。
+
+#### Phase 0の結果（issue #1 Z-07）
+
+専用APIが4つあることが分かっていた。
+
+- `externalAgentConfig/detect` — 取り込める設定の検出
+- `externalAgentConfig/import` — 実行
+- `externalAgentConfig/import/readHistories` — 取り込み履歴の読み取り
+- `externalAgentConfig/import/recordHistory` — 履歴の記録
+- 通知: `externalAgentConfig/import/progress` `externalAgentConfig/import/completed`
+
+バイナリのUI文字列から、取り込み対象は `Instructions` / `Skills` / `Plugins` / `MCP servers` / `Agents` / `Hooks` / `Slash commands` / `Memory` / `Chat sessions` の単位で選べること、`Import started. You can keep working while it finishes.` という文言から非同期に進むことが分かっていた。
+
+#### スキーマ実測（`codex app-server generate-json-schema --out`、CLI 0.147.0）
+
+- **`externalAgentConfig/detect`**（`ExternalAgentConfigDetectParams { cwds?, includeHome?, maxSessionAgeDays?, maxSessions?, migrationSource? }` → `ExternalAgentConfigDetectResponse { items: [ExternalAgentConfigMigrationItem], connectors: [ExternalAgentDetectedConnectorCandidate] }`）
+- **`ExternalAgentConfigMigrationItem`**は`{cwd, description, details, itemType}`。`cwd`は「nullまたは空ならホームスコープ、非空ならプロジェクトスコープ」（スキーマの説明文）。`itemType`は`ExternalAgentConfigMigrationItemType`（enum: `AGENTS_MD` `CONFIG` `SKILLS` `PLUGINS` `MCP_SERVER_CONFIG` `SUBAGENTS` `HOOKS` `COMMANDS` `MEMORY` `SESSIONS`。issue #26の調査で`AGENTS_MD`の存在は確認済みだったが、他の9種別は本issueで初めて確認した）。`details`（`MigrationDetails`）は`commands` / `hooks` / `mcpServers` / `plugins`（`{marketplaceName, pluginNames}`） / `sessions`（`{cwd, path, title}`） / `skills` / `subagents`（いずれも`{name}`の配列） / `memory`（**他と違い名前ではなく文字列そのもの**の配列）を持つ
+- **`externalAgentConfig/import`**（`ExternalAgentConfigImportParams { migrationItems: [ExternalAgentConfigMigrationItem], migrationSource?, providerId?, source? }` → `ExternalAgentConfigImportResponse { importId }`）。`migrationItems`は`detect`が返した項目と**同じ型**。実行したい項目を選んで、その生データをそのまま送り返す設計とみられる
+- **`externalAgentConfig/import/progress`** と **`externalAgentConfig/import/completed`**（通知）はどちらも同じ形（`{importId, itemTypeResults: [{itemType, successes: [ExternalAgentConfigImportItemTypeSuccess], failures: [ExternalAgentConfigImportItemTypeFailure]}]}`）。`import`の応答は`importId`のみを即座に返すため、実際の結果はこの通知で非同期に届く
+- **`externalAgentConfig/import/readHistories`**（params: `null` → `ExternalAgentConfigImportHistoriesReadResponse { data: [ExternalAgentConfigImportHistory], connectors: [ExternalAgentImportedConnectorCandidate] }`）。`ExternalAgentConfigImportHistory`は`{completedAtMs, failures, importId, providerId, successes}`
+- **`externalAgentConfig/import/recordHistory`**（`{providerId, itemTypeResults}` → `{importId}`）はスキーマの説明文から「拡張機能の外（TUI等）で完了したインポートの結果を、後からapp-serverの履歴へ記録する」ためのメソッドと分かる。この拡張は常に自分自身の`externalAgentConfig/import`を経由して実行するため、対応する結果は同じapp-serverの履歴へ自然に記録される想定であり、別途呼ぶ必要は無い（**この想定自体は実行系のため実測していない**）。使わない
+- `connectors`（`ExternalAgentDetectedConnectorCandidate` / `ExternalAgentImportedConnectorCandidate`。リモートMCPサーバー由来の候補）は`itemType`の単位とは別のUI概念で、受入基準（種別を選んでインポート）にも直接関係しない。この環境では常に空だった（後述の実測）ため、本issueのスコープ外とする
+
+#### 実測: `externalAgentConfig/detect` / `externalAgentConfig/import/readHistories`（読み取り専用）
+
+このリポジトリで`codex app-server`を実際に起動し、読み取り専用の要求だけを送って生の応答を確認した。**`externalAgentConfig/import`（実行系）は一度も呼んでいない**（この環境の実際の設定・履歴を書き換えない方針のため）。
+
+- `includeHome`を渡さない既定の呼び出しでは`items: []`（**何も検出しない**）。ホーム配下を対象にするには`includeHome: true`を明示する必要がある（スキーマにデフォルト値の記載が無く、実測で初めて分かった）
+- `includeHome: true`を指定すると、この環境の実際の`~/.claude`から`CONFIG`（`settings.json`→`config.toml`の移行）・`HOOKS`（`PreToolUse` `PostToolUse`の2件）・`SKILLS`（実際に導入している26件のskill名）・`PLUGINS`（`{marketplaceName, pluginNames}`。実際に導入している2件）・`SESSIONS`（実際の最近のセッション30件、`{cwd, path, title}`）の5種別が検出できた。`MCP_SERVER_CONFIG` / `SUBAGENTS` / `COMMANDS` / `MEMORY` / `AGENTS_MD`はこの環境に対象が無く未確認
+- `cwds`にワークスペースフォルダを渡しても、この拡張機能自体のリポジトリには`.claude/`が無いため追加の項目は増えなかった（`.claude/`があるプロジェクトでは`cwd`が非nullのプロジェクトスコープ項目が返る想定。スキーマの説明文が根拠）
+- `migrationSource`はスキーマにenumが無い自由文字列。実測: 省略時・`'claude-code'`指定時のどちらも同じ結果（Claude Codeが既定のソース）。`'cursor'`を指定すると空（この環境にCursorの設定が無いため）。未知の値（`'bogus-nonexistent'`）を渡してもエラーにならず既定のソースへフォールバックした（スキーマの説明文「Missing or unrecognized values use the default source.」と一致）
+- codexバイナリの文字列調査（`strings`）で`external-agent-migration/src/source_cla.rs`（Claude Code向け）と`source_cur.rs`（Cursor向け）の2つのソース実装、UI文字列`Claude CodeCursor`（連結されているため元は2つの選択肢）が確認できる。issueのスコープ（Claude Codeのみ）に合わせ、`migrationSource`は指定せず既定に委ねる。Cursorの選択UIはスコープ外（将来Cursor対応が要る場合は別issueで検討する）
+- `externalAgentConfig/import/readHistories`はこの環境に過去の実行履歴が無いため`{data: [], connectors: []}`だった。形自体はスキーマと一致することを確認した
+
+#### 実装
+
+- `src/provider/import.ts`: `ImportItemType`（enumの10種別）、`ImportItemDetailGroup`（内訳を種別ごとに要約した表示用の1グループ。代表的な名前は`MAX_DETAIL_SAMPLES`件までに絞り、残りは`moreCount`で示す）、`ImportItemView`・`ImportSnapshot`（`{ok:true, items}`か`{ok:false, reason}`）、`ImportHistoryEntryView`・`ImportHistorySnapshot`、`ImportRunResult`（`{ok:true, importId, results}` / `{ok:true, importId, results: undefined}`＝開始はできたが完了通知が届かなかった / `{ok:false, error}`）を共有の型として持つ。`isValidImportItemKey`でwebviewから返る選択キーへの防御をする
+- `src/codex/importStatus.ts`: `detect`の応答を`ImportItemView[]`へ正規化する純粋関数（`parseDetectResponse`。`rawByKey`として`externalAgentConfig/import`へ再送するための生データも返す）、`readHistories`の応答を正規化する`parseReadHistoriesResponse`、通知（`progress`/`completed`共通の形）を正規化する`parseImportNotification`。`memory`は内容そのものを一覧に出さず件数のみにする（§8「セッション本文の漏洩」と同じ考え方。実際のメモリ内容が漏れる経路を作らない）
+- `src/codex/appServerClient.ts`: `detectImportCandidates(cwds)`（`{includeHome: true, cwds}`で`detect`を呼ぶ。戻り値は画面表示用の`snapshot`と、実行時に再送するための`rawByKey`）、`readImportHistories()`、`runImport(migrationItems)`を追加。`runImport`は`import`の応答（`importId`）を得た後、`completed`通知を`IMPORT_COMPLETE_TIMEOUT_MS`（5分）まで待ってから単発プロセスを終える。**通知の購読は要求を送る前に始める**（応答と完了通知が同じ受信チャンクに混ざって届いた場合、応答を待ってから購読すると取りこぼす競合があるため）。タイムアウトしても失敗とはせず、「開始はできた」ことが分かる形（`results: undefined`）で返す（**タイムアウト後にCLI側で処理が実際に継続するか、プロセス終了で中断されるかは未確認**。実行系のため実測していない）。この目的のため、単発呼び出しの共通処理（`private call<T>`）に通知購読の口（`NotificationBus`）とタイムアウト上書きの引数を追加した
+- `src/view/settingsProvider.ts`: `SettingsSnapshot`に`importCandidates: ImportSnapshot`と`importHistory: ImportHistorySnapshot`を追加（Claude Codeには対応する概念が無いため`ClaudeSettingsSnapshot`には追加しない）。`load()`で`detectImportCandidates`・`readImportHistories`を他の一覧と並列に読み、`rawByKey`は`codexImportRawByKey`として保持する。`runCodexImport(keys)`がwebviewから届いたキーで対象を絞り込み、`confirmImport`（「何を・どこから・どこへ」を明示する確認ダイアログ。CONFIG種別を含む場合は上書きの可能性を追記）で確認を取ってから`runImport`を呼ぶ
+- `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: Codexタブのpluginsの下に「他エージェントからの設定インポート」の節を追加。項目ごとにチェックボックス・種別ラベル・CLIの説明文・内訳を表示し、「選択した項目をインポート」ボタンで`runCodexImport`メッセージを送る。実行結果（完了/一部失敗/開始のみ）に応じて通知を出し分ける。履歴一覧（`importHistoryListCodex`）も同じ節に表示する。項目名・説明文はすべてDOM APIの`textContent`で埋め込む
+
+#### スコープ外にしたもの
+
+- **`connectors`（リモートMCPサーバー由来の候補）**: この環境では常に空。`itemType`とは別のUI概念で受入基準にも直接関係しないため扱わない
+- **Cursorからのインポート（`migrationSource: 'cursor'`）**: issue本文のスコープ（Claude Codeのみ）に合わせ、ソース選択UIを設けない。バイナリにCursor向けの実装が存在することは§14.29の実測に記録した
+- **`externalAgentConfig/import/recordHistory`**: この拡張は常に自身の`externalAgentConfig/import`を経由するため呼ぶ必要が無い想定（未実行のため未確認）
+- **完了通知のリアルタイム進捗表示（プログレスバー等）**: `progress`通知はログ（`Agent: ログを表示`）へ出すのみに留めた。webview側の状態管理（実行中スピナー等）を追加すると実装・テストの範囲が大きくなるため、まずは「実行→完了/開始のみの結果通知」の往復を確実にすることを優先した
 
 ## 15. 作業記録（日報・週報連携）
 
