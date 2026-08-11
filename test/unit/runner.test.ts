@@ -2459,6 +2459,77 @@ tasks:
     expect(task?.pullRequestUrl).toBe('https://github.com/acme/repo/pull/42');
   });
 
+  /**
+   * `fakeForgeDeps`の`fs`は本文を捨てるので、本文そのものを確かめたいときだけ差し替える。
+   * `--body-file`へ渡す一時ファイルの中身＝PR/MRの本文（design.md §16.18）。
+   */
+  function captureForgeBodies(deps: WorkflowRunnerForgeDeps): {
+    deps: WorkflowRunnerForgeDeps;
+    bodies: string[];
+  } {
+    const bodies: string[] = [];
+    return {
+      bodies,
+      deps: {
+        ...deps,
+        fs: {
+          async writeTempFile(content: string): Promise<string> {
+            bodies.push(content);
+            return '/tmp/fake-forge-body.md';
+          },
+          async removeTempFile(): Promise<void> {
+            return undefined;
+          },
+        },
+      },
+    };
+  }
+
+  const ISSUE_TASK_YAML = `
+version: 1
+name: forge-closes-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+    issue: 12
+`;
+
+  it('issueを持つタスクのPR/MR本文にCloses #<N>を出す（Issue #137）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli({ prUrl: 'https://github.com/acme/repo/pull/42' });
+    const captured = captureForgeBodies(fakeForgeDeps(cli));
+    const { runner, codexHost } = createHarness(ISSUE_TASK_YAML, {
+      git,
+      forge: captured.deps,
+    });
+    await runner.start('/repo/.agents/workflows/forge-closes.yaml', '/repo');
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    expect(captured.bodies.some((body) => body.includes('Closes #12'))).toBe(true);
+  });
+
+  it('issueを持たないタスクのPR/MR本文にはCloses行を出さない（Issue #137）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli({ prUrl: 'https://github.com/acme/repo/pull/42' });
+    const captured = captureForgeBodies(fakeForgeDeps(cli));
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: captured.deps,
+    });
+    await runner.start('/repo/.agents/workflows/forge-result.yaml', '/repo');
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    expect(captured.bodies.length).toBeGreaterThan(0);
+    expect(captured.bodies.some((body) => body.includes('Closes #'))).toBe(false);
+  });
+
   it('タスクPR/MRの番号・URLを永続化する（応答本文は含まない）', async () => {
     const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
     const cli = fakeForgeCli({ prUrl: 'https://github.com/acme/repo/pull/42' });

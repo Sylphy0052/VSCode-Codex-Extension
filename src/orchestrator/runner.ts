@@ -2388,10 +2388,7 @@ export class WorkflowRunner {
               done: task.done,
               runId,
               dependsOn: task.dependsOn,
-              // `workflow.ts`のWorkflowTaskはまだ`issue`フィールドを持たない
-              // （§16.19の2段目・ロードマップ→YAML変換がこのIssueの範囲外のため）。
-              // 実装されるまでは`Closes #<N>`を出せない（最終報告に記載）
-              issue: undefined,
+              issue: task.issue,
             }),
           },
         ),
