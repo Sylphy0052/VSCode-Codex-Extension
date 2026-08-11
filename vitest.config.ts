@@ -12,7 +12,9 @@ export default defineConfig({
   test: {
     // 既定のincludeはリポジトリ全体を走査するため、worktree（.claude/worktrees配下）の
     // テストまで拾って件数が二重になる。対象をこのツリーのテストだけに限定する。
-    include: ['test/**/*.test.ts'],
-    exclude: ['**/node_modules/**', '**/dist/**', '.claude/**'],
+    // test/integration（@vscode/test-electron、実VSCode上で動く）はvitestのプロセス内では
+    // 実行できない（実物の'vscode'モジュールが要る）ため、test/unit配下だけに絞る。
+    include: ['test/unit/**/*.test.ts'],
+    exclude: ['**/node_modules/**', '**/dist/**', '.claude/**', 'test/integration/**'],
   },
 });

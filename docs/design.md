@@ -762,10 +762,11 @@ codex app-server generate-ts --out <DIR>            # TypeScript バインディ
 - TypeScript / Node 20 / esbuild（バンドル）
 - eslint + prettier、`tsc --noEmit` で型チェック
 - テスト
-  - unit（vitest）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で87ファイル1574件
-  - **VSCodeに依存する層はユニットテストで扱わない**。`vscode` モジュールを触るファイル（`view/**` など）はテストから import できないため、判断が要るロジックは純粋関数へ切り出してそちらを試す（例: `view/panelState.ts`）
-  - 実VSCodeでしか確認できない範囲は自動化せず、[manual-test.md](manual-test.md) のチェックリストと実施記録で担保する
-- `scripts/check.sh` に lint / typecheck / test を集約し、commit前に全緑を必須とする
+  - unit（vitest、`test/unit/`）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で101ファイル1890件
+  - **VSCodeに依存する層（`view/**` など、`vscode` モジュールを直接触るファイル）はunitテストから扱わない**。`vscode` はunitテストのプロセス内でimportできないため、判断が要るロジックは純粋関数へ切り出してそちらを試す（例: `view/panelState.ts`）
+  - integration（`@vscode/test-electron`、`test/integration/`）: 実VSCode（拡張機能ホスト）上で動く。WSL（xvfb-run経由）で実際に動作することを確認済み（issue #147）。**現状自動化できているのは拡張機能の有効化・コマンド登録・設定の読み書きの土台部分のみ**（`extension.test.ts` / `configuration.test.ts`、計6件）。履歴一覧（TreeView）を狙った`sessionHistory.test.ts`は、実CLIを呼ばせない制約と`ProviderRegistry.available()`（実行ファイルを解決できないプロバイダを一覧から除外する）が噛み合わず、現状`test.skip`のまま残っている（原因と代替案の検証結果は同ファイル冒頭のコメント、および[manual-test.md](manual-test.md)の「統合テストで自動化した範囲」参照）。`activate()`はテスト専用の最小限の内部参照（`ExtensionTestApi`）を返し、`SessionTreeProvider`の実インスタンスへテストからアクセスできるようにしてある。既定の `npm run check` には含めない（実VSCodeのダウンロード・起動が要り重いため）。`npm run test:integration`（ディスプレイあり）/ `npm run test:integration:xvfb`（ヘッドレスLinux/WSL）で明示的に実行する
+  - 実CLIプロセス・Webviewの中身・承認カードのような、実際のCodex/Claude Codeとの対話が要る範囲、および上記の理由で自動化に至らなかった範囲は、引き続き[manual-test.md](manual-test.md)のチェックリストと実施記録で担保する
+- `scripts/check.sh` に lint / typecheck / test を集約し、commit前に全緑を必須とする（integrationテストは含まない）
 - パッケージング: `@vscode/vsce`
 
 ## 12. 実装順序（TDD）
