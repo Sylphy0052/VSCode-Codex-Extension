@@ -304,9 +304,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       return { items: [], todos: [] };
     }
     const content = await this.fs.readTextFile(filePath);
-    return content === undefined
-      ? { items: [], todos: [] }
-      : transcriptItems(content.split('\n'));
+    return content === undefined ? { items: [], todos: [] } : transcriptItems(content.split('\n'));
   }
 
   /**
@@ -458,10 +456,28 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         entry.session.interrupt();
         return Promise.resolve();
       },
+      stopLoop: () => entry.loop.stop('taskStopped'),
+      decideApproval: (requestId, decision) => this.resolveApproval(entry, requestId, decision),
       reveal: () => this.showPanel(entry, false),
       open: (options) => this.showPanel(entry, options.preserveFocus),
       dispose: () => this.teardown(entry),
     };
+  }
+
+  /**
+   * 承認要求を決定する。webviewの承認カードとワークフローViewの「承認」操作
+   * （`TaskSession.decideApproval`）の共通経路（design.md §16.8）。`chatView.ts`と同じ理由で
+   * 分けてある。
+   */
+  private resolveApproval(
+    entry: ClaudePanel,
+    requestId: number | string,
+    decision: ApprovalDecision,
+  ): void {
+    entry.session.decide(requestId, decision);
+    for (const listener of entry.approvalResolvedListeners) {
+      listener({ requestId, decision });
+    }
   }
 
   /**
@@ -726,12 +742,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       if (type === 'approve' && typeof m['decision'] === 'string') {
         const requestId = m['requestId'];
         if (typeof requestId === 'number' || typeof requestId === 'string') {
-          const decision = m['decision'] as ApprovalDecision;
-          entry.session.decide(requestId, decision);
-          // setApprovalHandlerが`ask`で従来の承認カードへ委ねた要求の決定をrunner.tsへ伝える
-          for (const listener of entry.approvalResolvedListeners) {
-            listener({ requestId, decision });
-          }
+          this.resolveApproval(entry, requestId, m['decision'] as ApprovalDecision);
         }
       }
     } catch (e) {

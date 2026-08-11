@@ -31,7 +31,17 @@ export type LoopStopReason =
   /** ループ停止ボタン */
   | 'manual'
   /** 手動の発言や中断が割り込んだ */
-  | 'interrupted';
+  | 'interrupted'
+  /**
+   * ワークフローViewの「タスク停止」操作（design.md §16.8）による停止。
+   *
+   * `manual`（チャット画面自身のループ停止ボタン）と区別する。`manual`/`interrupted` は
+   * 「人がそのタスクの画面へ直接介入した」ことを表し、`runState.ts`ではそのタスク自身の
+   * 状態を変えず実行全体だけを止める（design.md §16.5）。一方「タスク停止」は
+   * オーケストレータ経由でそのタスク**だけ**を`failed`に確定させる別の操作であり、
+   * 同じ`manual`を使い回すと両者を`onFinished`側で区別できなくなる。
+   */
+  | 'taskStopped';
 
 export interface LoopStatus {
   running: boolean;

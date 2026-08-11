@@ -46,6 +46,7 @@ import { formatRelativeTime } from './view/relativeTime';
 import { SessionTreeProvider } from './view/sessionTreeProvider';
 import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
+import { WorkflowViewManager } from './view/workflowView';
 
 const META_CACHE_KEY = 'codex.metaCache.v1';
 export function activate(context: vscode.ExtensionContext): void {
@@ -147,19 +148,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   context.subscriptions.push(claudeChat);
 
-  // この時点ではViewが無いため（#57）、「定義ファイルを選んで実行」
-  // 「実行中のワークフローを停止」の最小限の口だけを結線する
   const workflowStore = new WorkflowRunStore(context.workspaceState);
-  void workflowStore.reconcileAfterReload().then((runs) => {
-    const interrupted = runs.filter((r) =>
-      Object.values(r.tasks).some((t) => t.failure?.kind === 'reloadInterrupted'),
-    );
-    if (interrupted.length > 0) {
-      log.info(
-        `リロードにより中断扱いにしたワークフロー実行: ${interrupted.map((r) => r.runId).join(', ')}`,
-      );
-    }
-  });
   const workflowRunner = new WorkflowRunner({
     hosts: { codex: chat, claude: claudeChat },
     worktreeQueue: new WorktreeCreationQueue(),
@@ -178,6 +167,21 @@ export function activate(context: vscode.ExtensionContext): void {
   // isTaskManagedThreadのクロージャが参照する箱を埋める。以降の`workflowRunner`
   // （コマンド登録などで使う）はこの束縛を指し、常にWorkflowRunnerとして扱える
   workflowRunnerRef.current = workflowRunner;
+
+  // ワークフローView（#57）。`restoreRunsForView`がworkspaceStateのreconcileと
+  // メモリ上への復元（design.md §16.11「リロード後の実行再開」）を両方行う
+  const workflowView = new WorkflowViewManager(workflowRunner, log);
+  context.subscriptions.push(workflowView);
+  void workflowRunner.restoreRunsForView().then(() => {
+    const interrupted = workflowStore
+      .list()
+      .filter((r) => Object.values(r.tasks).some((t) => t.failure?.kind === 'reloadInterrupted'));
+    if (interrupted.length > 0) {
+      log.info(
+        `リロードにより中断扱いにしたワークフロー実行: ${interrupted.map((r) => r.runId).join(', ')}`,
+      );
+    }
+  });
 
   const conversations = new ConversationViewManager(nodeFileSystem, store, log, (session, turnId) =>
     forkFromTurn(codex, appServer, chat, tree, log, session, turnId),
@@ -303,13 +307,26 @@ export function activate(context: vscode.ExtensionContext): void {
       runAction(actions, tree, log, 'delete', s),
     ),
     vscode.commands.registerCommand('codex.showLog', () => log.show()),
-    vscode.commands.registerCommand('agent.workflows.run', () => runWorkflow(workflowRunner, log)),
+    vscode.commands.registerCommand('agent.workflows.run', () =>
+      runWorkflow(workflowRunner, workflowView, log),
+    ),
     vscode.commands.registerCommand('agent.workflows.stop', () => stopWorkflow(workflowRunner)),
+    vscode.commands.registerCommand('agent.workflows.view', () => workflowView.show()),
   );
 }
 
-/** 定義ファイルを選んで実行する（design.md §16。Viewは#57、この時点では最小限）。 */
-async function runWorkflow(runner: WorkflowRunner, log: Logger): Promise<void> {
+/**
+ * 定義ファイルを選んで実行し、ワークフローViewを開く（design.md §16.8）。
+ *
+ * `allow` を含むタスクがあれば、`runner.start` が `needsAllowConfirmation` を返す
+ * （design.md §16.7「実行開始時に...確認を取る」）。ここで確認し、了承が得られたときだけ
+ * `allowConfirmed: true` を付けて呼び直す。
+ */
+async function runWorkflow(
+  runner: WorkflowRunner,
+  view: WorkflowViewManager,
+  log: Logger,
+): Promise<void> {
   const folder = currentWorkspaceFolder();
   if (folder === undefined) {
     void vscode.window.showErrorMessage('ワークフローを実行するにはフォルダを開いてください');
@@ -332,7 +349,20 @@ async function runWorkflow(runner: WorkflowRunner, log: Logger): Promise<void> {
     return;
   }
 
-  const result = await runner.start(picked.file.fsPath, folder.uri.fsPath);
+  let result = await runner.start(picked.file.fsPath, folder.uri.fsPath);
+  if (!result.ok && result.needsAllowConfirmation === true) {
+    const ids = (result.allowTaskIds ?? []).join(', ');
+    const choice = await vscode.window.showWarningMessage(
+      `このワークフローは既定の危険操作チェックを解除しているタスクがあります（${ids}）。` +
+        'これらのタスクでは allow に一致する操作が承認なしで実行されます。実行しますか？',
+      { modal: true },
+      '実行する',
+    );
+    if (choice !== '実行する') {
+      return;
+    }
+    result = await runner.start(picked.file.fsPath, folder.uri.fsPath, { allowConfirmed: true });
+  }
   if (!result.ok) {
     const detail = (result.errors ?? []).map((e) => e.message).join('\n');
     log.error(`ワークフローを開始できません:\n${detail}`);
@@ -340,6 +370,7 @@ async function runWorkflow(runner: WorkflowRunner, log: Logger): Promise<void> {
     return;
   }
   void vscode.window.showInformationMessage(`ワークフローを開始しました: ${picked.label}`);
+  view.show(result.runId);
 }
 
 /** 実行中のワークフローを選んで停止する。 */
