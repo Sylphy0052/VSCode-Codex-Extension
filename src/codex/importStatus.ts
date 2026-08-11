@@ -12,8 +12,10 @@ import {
  * 他エージェントからの設定インポート（issue #36、design.md TP-57）。
  *
  * 実測（codex-cli 0.147.0。このリポジトリで `codex app-server` を起動して呼び出し、実際の
- * 応答を確認した。読み取り専用の要求のみを送った。**実行系（`externalAgentConfig/import`）は
- * 呼んでいない**）と `codex app-server generate-json-schema --out` のスキーマが根拠。
+ * 応答を確認した。読み取り専用の要求は実際の環境に対して送った）と `codex app-server
+ * generate-json-schema --out` のスキーマが根拠。**実行系（`externalAgentConfig/import`）は
+ * issue #146で別途、`CODEX_HOME` と `$HOME` の両方を隔離した環境に対して実行し確認済み**
+ * （後述、および `appServerClient.ts` の `runImport` / design.md §14.30参照）。
  *
  * - `externalAgentConfig/detect`（`{cwds?, includeHome?, maxSessionAgeDays?, maxSessions?,
  *   migrationSource?}` → `{items: [ExternalAgentConfigMigrationItem], connectors: [...]}`）。
@@ -38,12 +40,14 @@ import {
  *   source?}` → `{importId}`）。`migrationItems` は `detect` が返した項目を**そのまま**
  *   送り返す形（スキーマの型が一致）。この拡張はdetectで受け取った生のJSONをキーで
  *   キャッシュしておき、選ばれた項目だけをそのまま再送する（`appServerClient.ts` の
- *   `detectImportCandidates` / `runImport` 参照）。**実行していないため、実際に
- *   `migrationItems` を編集して送ったときの挙動（部分選択が本当に効くか）は未確認**。
+ *   `detectImportCandidates` / `runImport` 参照）。**issue #146で実測して確認済み**:
+ *   隔離環境で `HOOKS` / `SKILLS` の項目をそれぞれ単独で送り、選んだ項目だけが実行される
+ *   （部分選択が実際に効く）ことを確認した。
  * - `externalAgentConfig/import/progress` と `externalAgentConfig/import/completed`
- *   （通知。`{importId, itemTypeResults: [{itemType, successes, failures}]}`）はスキーマ根拠。
- *   Phase 0で確認されたバイナリのUI文言（「Import started. You can keep working while it
- *   finishes.」）から非同期に進むことが分かっており、`completed` 通知を待って結果を確定する
+ *   （通知。`{importId, itemTypeResults: [{itemType, successes, failures}]}`）は**実測済み**
+ *   （issue #146）。Phase 0で確認されたバイナリのUI文言（「Import started. You can keep
+ *   working while it finishes.」）どおり非同期に進み、実測では要求送信から数十ミリ秒以内に
+ *   `progress`・`completed` の順で届いた。`completed` 通知を待って結果を確定する
  *   （`appServerClient.ts` 参照）。
  * - `externalAgentConfig/import/readHistories`（params: `null` → `{data: [...],
  *   connectors: [...]}`）は実測。この環境は過去のインポート実行が無いため `data: []`。
@@ -52,8 +56,9 @@ import {
  * - `externalAgentConfig/import/recordHistory` は「拡張機能の外（TUI等）で完了したインポートの
  *   結果をapp-serverの履歴へ後から記録する」ためのメソッド（スキーマの説明）。この拡張は
  *   常に自分自身の `externalAgentConfig/import` 経由で実行するため、対応する項目は自然に
- *   同じapp-serverの履歴へ記録される想定であり、別途呼ぶ必要が無い（**この想定自体は
- *   実行していないため未確認**）。使わない。
+ *   同じapp-serverの履歴へ記録される想定であり、別途呼ぶ必要が無い（**issue #146で実測して
+ *   確認済み**: `import` 実行直後に `readHistories` を呼ぶと、`recordHistory` を別途呼ばずとも
+ *   今回の実行が履歴に現れた）。使わない。
  * - `connectors`（`ExternalAgentDetectedConnectorCandidate`。リモートMCPサーバー由来の候補）は
  *   この環境では常に空配列だった。itemTypeとは別のUI概念で、受入基準（取り込む対象を
  *   種別で選べる）にも直接関係しないため本issueのスコープ外とする。

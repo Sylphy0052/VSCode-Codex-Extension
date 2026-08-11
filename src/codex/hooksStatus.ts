@@ -119,20 +119,12 @@ function asTrustState(value: unknown): HookTrustState {
 /**
  * hookの信頼を書き込む `config/batchWrite` の1件を組み立てる。
  *
- * **根拠は実行ファイル(`codex`、0.147.0)の文字列調査(strings)のみ**で、実際に書き込んで
- * 確認してはいない(この環境の `~/.codex/config.toml` を書き換えない方針のため)。
- * バイナリには次の文字列が連続して存在する:
- *
- * ```text
- * hooks.state."
- * ".trusted_hash
- * failed to write hook trust:
- * ```
- *
- * これは `hooks.state."<key>".trusted_hash` というkeyPathの組み立てに一致する
- * (`ConfigBatchWriteParams` のスキーマも、`edits[].keyPath` が任意の文字列であることは
- * 裏付けるが、hook信頼専用のkeyPathまでは規定していない)。実測ではなく**strings由来の
- * 推定**であることをコード上に明記する。
+ * **実測で確認済み**(issue #146。`CODEX_HOME` を使い捨てディレクトリへ向けた隔離環境で
+ * 実際に `config/batchWrite` を送り、`config.toml` に `[hooks.state."<key>"]` の
+ * `trusted_hash` が書き込まれ、続く `hooks/list` で `trustStatus` が `trusted` に
+ * 変わることを確認した。この環境の実際の `~/.codex/config.toml` は書き換えていない)。
+ * 当初は実行ファイル(`codex`、0.147.0)の文字列調査(strings)のみが根拠だったが、その
+ * 推定どおりの組み立てで実際に動くことが分かっている。
  *
  * `key` は `isValidHookKey` を満たすことを呼び出し側が確認してから渡すこと
  * (満たさない場合は例外を投げる。TOMLのキー構造を壊しうる値をそのまま埋め込まないため)。
