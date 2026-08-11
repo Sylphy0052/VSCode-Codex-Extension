@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   buildListTasksResult,
@@ -16,12 +16,14 @@ import {
   MessagingMcpServer,
   NO_REPLY_NOTICE,
   SEND_MESSAGE_TOOL,
+  startHttpMcpTransport,
   TASK_MESSAGE_GUIDANCE,
   TaskMessagingHub,
   takeQueuedMessages,
   totalUndeliveredCount,
   validateSendMessage,
   wrapTaskMessage,
+  type HttpMcpTransportHandle,
   type JsonRpcRequest,
   type JsonRpcResponse,
   type McpConnection,
@@ -510,5 +512,106 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
 
     const response = conn.sent[0];
     expect(response && 'error' in response).toBe(true);
+  });
+});
+
+describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタスク」、Issue #105）', () => {
+  let handle: HttpMcpTransportHandle | undefined;
+
+  afterEach(async () => {
+    await handle?.close();
+    handle = undefined;
+  });
+
+  it('タスクごとに発行したURLへPOSTすると、そのタスクを送信元としてMCPが応答する', async () => {
+    const hub = buildHub([
+      { id: 'T1', state: 'running', summary: '' },
+      { id: 'T2', state: 'running', summary: '' },
+    ]);
+    handle = await startHttpMcpTransport(hub);
+    const url = handle.registerTask('T1');
+    expect(url.startsWith(handle.baseUrl)).toBe(true);
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'send_message', arguments: { to: 'T2', body: 'hi', expectReply: false } },
+      }),
+    });
+    expect(response.status).toBe(200);
+
+    const delivered = hub.takeDeliverableMessages('T2');
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.from).toBe('T1');
+  });
+
+  it(
+    '引数に別のtaskId/fromを混ぜても、送信元はURLのトークンから判別した側になる' +
+      '（design.md「引数で名乗らせない」）',
+    async () => {
+      const hub = buildHub([
+        { id: 'T1', state: 'running', summary: '' },
+        { id: 'T2', state: 'running', summary: '' },
+        { id: 'T3', state: 'running', summary: '' },
+      ]);
+      handle = await startHttpMcpTransport(hub);
+      const url = handle.registerTask('T1');
+
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'send_message',
+            arguments: { to: 'T3', body: 'spoofed', expectReply: false, from: 'T2', taskId: 'T2' },
+          },
+        }),
+      });
+
+      const delivered = hub.takeDeliverableMessages('T3');
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]?.from).toBe('T1');
+    },
+  );
+
+  it('未登録のトークン・別runのトークンは404になる（他タスクのURLを推測しても届かない）', async () => {
+    const hub = buildHub([{ id: 'T1', state: 'running', summary: '' }]);
+    handle = await startHttpMcpTransport(hub);
+
+    const response = await fetch(`${handle.baseUrl}/mcp/${'0'.repeat(32)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    });
+    expect(response.status).toBe(404);
+  });
+
+  it('GETやパス外のリクエストも404になる', async () => {
+    const hub = buildHub([{ id: 'T1', state: 'running', summary: '' }]);
+    handle = await startHttpMcpTransport(hub);
+    const url = handle.registerTask('T1');
+
+    const response = await fetch(url, { method: 'GET' });
+    expect(response.status).toBe(404);
+  });
+
+  it('タスクごとに別のURLが発行される（同じサーバを1つのrunで使い回す）', async () => {
+    const hub = buildHub([
+      { id: 'T1', state: 'running', summary: '' },
+      { id: 'T2', state: 'running', summary: '' },
+    ]);
+    handle = await startHttpMcpTransport(hub);
+    const url1 = handle.registerTask('T1');
+    const url2 = handle.registerTask('T2');
+    expect(url1).not.toBe(url2);
+    expect(url1.startsWith(handle.baseUrl)).toBe(true);
+    expect(url2.startsWith(handle.baseUrl)).toBe(true);
   });
 });

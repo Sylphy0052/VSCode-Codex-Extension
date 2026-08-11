@@ -11,8 +11,10 @@ import {
   markMergeSucceeded,
   markRunning,
   markWaitingApproval,
+  markWaitingReply,
   recordSubmissionCount,
   resumeFromApproval,
+  resumeFromWaitingReply,
   retryMergeState,
   retryTask,
   type RunState,
@@ -350,6 +352,34 @@ describe('markWaitingApproval / resumeFromApproval', () => {
     run = markRunning(run, 'T1'); // T1はrunning、waitingApprovalではない
     expect(resumeFromApproval(run, 'T1')).toBe(run);
     expect(resumeFromApproval(run, 'unknown')).toBe(run);
+  });
+});
+
+describe('markWaitingReply / resumeFromWaitingReply（design.md §16.21）', () => {
+  it('runningからwaitingReplyへ、そこからrunningへ戻せる', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = markWaitingReply(run, 'T1');
+    expect(stateOf(run, 'T1').state).toBe('waitingReply');
+
+    run = resumeFromWaitingReply(run, 'T1');
+    expect(stateOf(run, 'T1').state).toBe('running');
+  });
+
+  it('markWaitingReplyはrunning以外の状態・未知のidを無視する', () => {
+    const tasks = chainTasks();
+    const run = createRunState(tasks); // T1はpending
+    expect(markWaitingReply(run, 'T1')).toBe(run);
+    expect(markWaitingReply(run, 'unknown')).toBe(run);
+  });
+
+  it('resumeFromWaitingReplyはwaitingReply以外の状態・未知のidを無視する', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1'); // T1はrunning、waitingReplyではない
+    expect(resumeFromWaitingReply(run, 'T1')).toBe(run);
+    expect(resumeFromWaitingReply(run, 'unknown')).toBe(run);
   });
 });
 
