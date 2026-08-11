@@ -1329,6 +1329,7 @@ ${chatStyles()}
     <button id="loopStop" type="button" class="secondary" hidden>ループ停止</button>
   </div>
   <div id="attachments" hidden></div>
+  <div id="argumentHint" hidden></div>
   <div id="composer">
     <div id="commands" hidden></div>
     <textarea id="input" placeholder="${options.agentLabel}への指示を入力（Ctrl+Enterで送信、画像はCtrl+Vで貼り付け）"></textarea>
