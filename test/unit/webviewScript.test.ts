@@ -42,6 +42,24 @@ describe('chatScript', () => {
     expect(source).toContain("type: 'rewind'");
   });
 
+  it('showInputModeHintsを省略すると !/# の案内を出さない（既定はfalse、issue #5/#6）', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+    expect(source).toContain('SHOW_INPUT_MODE_HINTS = false');
+  });
+
+  it('showInputModeHintsを立てるとその値が埋め込まれる（Claude Code画面のみ使う）', () => {
+    const source = chatScript(
+      'Claude Code',
+      { mode: 'command', commandName: 'code-review' },
+      true,
+      [],
+      true,
+    );
+    expect(() => parses(source)).not.toThrow();
+    expect(source).toContain('SHOW_INPUT_MODE_HINTS = true');
+    expect(source).toContain('inputModeHint');
+  });
+
   it('文字列リテラルが改行で分断されていない', () => {
     // テンプレートリテラル内に `\n` と書くと実際の改行に展開され、
     // 文字列リテラルが途中で切れて構文エラーになる。
