@@ -21,6 +21,8 @@ import { ProviderRegistry } from './provider/registry';
 import type { AgentProvider } from './provider/types';
 import { createLogger, type Logger } from './log';
 import { nodeFileSystem } from './session/nodeFileSystem';
+import { nodeFileScan } from './session/nodeFileScan';
+import { FileMentionCatalog } from './provider/fileMentions';
 import { InMemoryMetaCache } from './session/ports';
 import { SessionStore } from './session/sessionStore';
 import { SessionActions, nodeCommandRunner, type SessionAction } from './session/sessionActions';
@@ -85,11 +87,15 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   // 設定パネルを開かずCodex画面だけ使う場合でも選択肢が揃うよう、起動時に読む
   void settings.load();
+  // `@` のファイル候補。両方の画面で同じ一覧とキャッシュを使う
+  const mentions = new FileMentionCatalog(nodeFileScan);
+
   const chat = new ChatViewManager(
     codexPath,
     settings,
     home,
     nodeFileSystem,
+    mentions,
     log,
     (activity) => recordActivity({ ...activity, source: 'codex' }),
   );
@@ -98,6 +104,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const claudeChat = new ClaudeChatViewManager(
     () => resolveExecutable(claude, log) ?? 'claude',
     nodeFileSystem,
+    mentions,
     claudeHome,
     claudeStore,
     settings,

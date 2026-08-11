@@ -17,6 +17,7 @@ import { APPROVAL_MODES } from '../codex/types';
 import type { PromptSubmission } from '../appserver/prompts';
 import { AttachmentBox } from '../provider/attachments';
 import { CommandCatalog } from '../provider/commandCatalog';
+import { FileMentionCatalog, filterFiles } from '../provider/fileMentions';
 import {
   CODEX_PSEUDO_COMMANDS,
   routePseudoCommand,
@@ -115,6 +116,33 @@ export function reportTurnResult(
   });
 }
 
+/** `@` の候補として返す最大件数。画面に収まる範囲に留める。 */
+const MENTION_LIMIT = 50;
+
+/**
+ * `@` のファイル候補をWebviewへ返す。
+ *
+ * **絞り込みはホスト側で行う。** 同じ規則をWebviewにも書くと、片方だけ直したときに
+ * 「候補に出たのに違うものが入る」状態になる。走査を間引くのはカタログの責務。
+ */
+export async function postFileMentions(
+  panel: vscode.WebviewPanel,
+  mentions: FileMentionCatalog,
+  cwd: string | undefined,
+  query: unknown,
+): Promise<void> {
+  if (typeof query !== 'string') {
+    return;
+  }
+  // 復元されたCodex画面はcwdを持たない。そのときはこのウィンドウのフォルダを充てる
+  const folder = cwd ?? currentWorkspaceFolder()?.uri.fsPath;
+  if (folder === undefined) {
+    return;
+  }
+  const files = filterFiles(await mentions.list(folder), query, MENTION_LIMIT);
+  void panel.webview.postMessage({ type: 'files', query, files });
+}
+
 /**
  * Codex画面。app-server と繋いで会話をその場で描画し、承認と分岐も画面内で完結させる。
  *
@@ -136,6 +164,8 @@ export class ChatViewManager implements vscode.Disposable {
     private readonly settings: SettingsProvider,
     private readonly codexHome: string,
     fs: FileSystemPort,
+    /** `@` のファイル候補。走査の間引きはカタログ側が担う。 */
+    private readonly mentions: FileMentionCatalog,
     private readonly log: Logger,
     /** 発言のたびに呼ばれる。二重記録の抑止は受け手（ActivityLogger）が担う。 */
     private readonly onActivity: (activity: ChatActivity) => void = () => undefined,
@@ -334,6 +364,10 @@ export class ChatViewManager implements vscode.Disposable {
         }
         this.reportActivity(entry, text);
         this.postState(entry);
+        return;
+      }
+      if (type === 'requestFiles') {
+        await postFileMentions(entry.panel, this.mentions, entry.cwd, m['query']);
         return;
       }
       if (type === 'attach') {

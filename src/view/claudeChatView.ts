@@ -14,7 +14,14 @@ import { ClaudeUsageProbe } from '../claude/usageProbe';
 import { CommandCatalog } from '../provider/commandCatalog';
 import type { SlashCommand } from '../provider/slashCommands';
 import { AttachmentBox } from '../provider/attachments';
-import { addAttachment, confirmCompact, renderShell, reportTurnResult } from './chatView';
+import {
+  addAttachment,
+  confirmCompact,
+  postFileMentions,
+  renderShell,
+  reportTurnResult,
+} from './chatView';
+import type { FileMentionCatalog } from '../provider/fileMentions';
 import { readPersistedThreadId } from './panelState';
 import { CLAUDE_EFFORTS, CLAUDE_PERMISSION_MODES } from '../claude/types';
 import type { ClaudeEditableKey, SettingsProvider } from './settingsProvider';
@@ -52,6 +59,8 @@ export class ClaudeChatViewManager implements vscode.Disposable {
   constructor(
     private readonly claudePath: () => string,
     private readonly fs: FileSystemPort,
+    /** `@` のファイル候補。Codex画面と同じカタログを使い回す。 */
+    private readonly mentions: FileMentionCatalog,
     private readonly claudeHome: string,
     private readonly store: ClaudeSessionStore,
     private readonly settings: SettingsProvider,
@@ -420,6 +429,10 @@ export class ClaudeChatViewManager implements vscode.Disposable {
         entry.loop.noteUserAction();
         this.dispatch(entry, text, true);
         this.refreshSettings(entry);
+        return;
+      }
+      if (type === 'requestFiles') {
+        void postFileMentions(entry.panel, this.mentions, entry.cwd, m['query']);
         return;
       }
       if (type === 'attach') {

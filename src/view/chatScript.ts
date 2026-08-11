@@ -16,6 +16,8 @@ export function chatScript(agentLabel: string): string {
   let commands = [];
   let matched = [];
   let activeIndex = 0;
+  // 出している候補の種類。'command' はスラッシュコマンド、'file' は @ のファイル参照
+  let menuMode = '';
 
   const KIND_LABEL = {
     userMessage: 'あなた',
@@ -740,13 +742,33 @@ export function chatScript(agentLabel: string): string {
     return m ? m[1] : undefined;
   }
 
-  function commandsOpen() {
+  // @ で始まる語を書いている間だけファイル候補を出す。メールアドレスなどを邪魔しないよう、
+  // 直前が行頭か空白のものだけを拾う
+  function mentionQuery(input) {
+    const upto = input.value.slice(0, input.selectionStart);
+    const m = /(?:^|\\s)@([^\\s@]*)$/.exec(upto);
+    return m ? m[1] : undefined;
+  }
+
+  function menuOpen() {
     return !el('commands').hidden;
   }
 
-  function renderCommands(query) {
-    const box = el('commands');
+  function showCommands(query) {
+    menuMode = 'command';
     matched = filterCommands(commands, query);
+    renderMenu();
+  }
+
+  /** ファイル候補はホスト側で絞ってから届く。絞り込みの規則を2か所に持たないため */
+  function showFiles(list) {
+    menuMode = 'file';
+    matched = list;
+    renderMenu();
+  }
+
+  function renderMenu() {
+    const box = el('commands');
     if (matched.length === 0) {
       box.hidden = true;
       return;
@@ -755,23 +777,31 @@ export function chatScript(agentLabel: string): string {
     if (activeIndex >= matched.length) activeIndex = 0;
     box.hidden = false;
     box.replaceChildren();
-    matched.forEach((command, index) => {
+    matched.forEach((item, index) => {
       const row = document.createElement('div');
       row.className = 'row' + (index === activeIndex ? ' active' : '');
 
       const name = document.createElement('span');
       name.className = 'name';
-      name.textContent = '/' + command.name + (command.argumentHint ? ' ' + command.argumentHint : '');
-      row.appendChild(name);
-
       const desc = document.createElement('span');
       desc.className = 'desc';
-      desc.textContent = command.description || '';
-      row.appendChild(desc);
 
+      if (menuMode === 'file') {
+        // ファイル名を主、置き場所を従にする。同名のファイルを見分けられるように
+        const path = String(item);
+        const cut = path.lastIndexOf('/');
+        name.textContent = cut < 0 ? path : path.slice(cut + 1);
+        desc.textContent = cut < 0 ? '' : path.slice(0, cut);
+      } else {
+        name.textContent = '/' + item.name + (item.argumentHint ? ' ' + item.argumentHint : '');
+        desc.textContent = item.description || '';
+      }
+
+      row.appendChild(name);
+      row.appendChild(desc);
       row.addEventListener('mousedown', (e) => {
         e.preventDefault();
-        acceptCommand(index);
+        acceptItem(index);
       });
       box.appendChild(row);
     });
@@ -792,23 +822,35 @@ export function chatScript(agentLabel: string): string {
     return prefix.concat(partial);
   }
 
-  function closeCommands() {
+  function closeMenu() {
     el('commands').hidden = true;
     activeIndex = 0;
+    menuMode = '';
   }
 
   /** 候補を確定して入力欄へ入れる。送信まではしない（引数を書き足せるように） */
-  function acceptCommand(index) {
-    const command = matched[index];
-    if (!command) return;
+  function acceptItem(index) {
+    const item = matched[index];
+    if (!item) return;
     const input = el('input');
     const upto = input.value.slice(0, input.selectionStart);
-    const lineStart = upto.lastIndexOf('\\n') + 1;
     const rest = input.value.slice(input.selectionStart);
-    const inserted = '/' + command.name + ' ';
-    input.value = input.value.slice(0, lineStart) + inserted + rest;
-    input.selectionStart = input.selectionEnd = lineStart + inserted.length;
-    closeCommands();
+
+    if (menuMode === 'file') {
+      // @ は候補を出す引き金なので消す。CLIへはただの相対パスとして渡す
+      const at = upto.lastIndexOf('@');
+      if (at < 0) return;
+      const inserted = String(item) + ' ';
+      input.value = input.value.slice(0, at) + inserted + rest;
+      input.selectionStart = input.selectionEnd = at + inserted.length;
+    } else {
+      const lineStart = upto.lastIndexOf('\\n') + 1;
+      const inserted = '/' + item.name + ' ';
+      input.value = input.value.slice(0, lineStart) + inserted + rest;
+      input.selectionStart = input.selectionEnd = lineStart + inserted.length;
+    }
+
+    closeMenu();
     input.focus();
   }
 
@@ -917,38 +959,45 @@ export function chatScript(agentLabel: string): string {
   });
 
   el('input').addEventListener('input', (e) => {
-    const query = commandQuery(e.target);
-    if (query === undefined) {
-      closeCommands();
+    const command = commandQuery(e.target);
+    if (command !== undefined) {
+      showCommands(command);
       return;
     }
-    renderCommands(query);
+    const mention = mentionQuery(e.target);
+    if (mention !== undefined) {
+      // 一覧はホストが持つ。走査し直すかどうかもホスト側で間引く
+      menuMode = 'file';
+      vscode.postMessage({ type: 'requestFiles', query: mention });
+      return;
+    }
+    closeMenu();
   });
 
-  el('input').addEventListener('blur', closeCommands);
+  el('input').addEventListener('blur', closeMenu);
 
   el('input').addEventListener('keydown', (e) => {
-    if (commandsOpen()) {
+    if (menuOpen()) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         activeIndex = (activeIndex + 1) % matched.length;
-        renderCommands(commandQuery(e.target) ?? '');
+        renderMenu();
         return;
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault();
         activeIndex = (activeIndex - 1 + matched.length) % matched.length;
-        renderCommands(commandQuery(e.target) ?? '');
+        renderMenu();
         return;
       }
       if (e.key === 'Tab' || (e.key === 'Enter' && !e.ctrlKey && !e.metaKey)) {
         e.preventDefault();
-        acceptCommand(activeIndex);
+        acceptItem(activeIndex);
         return;
       }
       if (e.key === 'Escape') {
         e.preventDefault();
-        closeCommands();
+        closeMenu();
         return;
       }
     }
@@ -974,6 +1023,12 @@ export function chatScript(agentLabel: string): string {
     if (!data) return;
     if (data.type === 'state') apply(data.state);
     if (data.type === 'commands') commands = data.commands || [];
+    if (data.type === 'files') {
+      // 打っている途中に古い応答が届くことがある。今の語と一致するものだけ出す
+      if (menuMode !== 'file') return;
+      if (mentionQuery(el('input')) !== data.query) return;
+      showFiles(data.files || []);
+    }
   });
 
   vscode.postMessage({ type: 'ready' });
