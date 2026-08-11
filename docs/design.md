@@ -701,12 +701,29 @@ Codexには専用のメソッド `review/start` がある（`codex app-server ge
 - **effortの反映は観測できない**: Claude Codeにはeffort専用の制御要求が無く、唯一の経路（`apply_flag_settings`）が結果を返さない（§14.7）。
 - **Codex側の外部変更**: CLIから直接archive/deleteした場合、TreeViewはファイル監視で追従するが、開いているタブは残る。
 
+### 生成済みの型定義は取り込まない（issue #46）
+
+`codex app-server` は自身のプロトコル定義を出力できる。
+
+```bash
+codex app-server generate-json-schema --out <DIR>   # JSON Schema
+codex app-server generate-ts --out <DIR>            # TypeScript バインディング
+```
+
+**この出力はリポジトリへ取り込まない。調査の一次資料としてのみ使う。** 判断の根拠:
+
+- 生成物が大きい。`generate-ts` は643ファイル・2.7MB（`ts-rs` 生成の型のみでランタイムコードは無い）。リポジトリに置くとCLIの版と拡張機能が結び付き、CLIを上げるたびに再生成と差分レビューが要る
+- **「未知のものは素通しする」という設計と噛み合わない**。いまのパーサは `unknown` から `rec()` / `str()` で1フィールドずつ掘る形で、CLIが形を変えても壊れずに劣化する。生成型を入れると「型があるから安全」と `as` で押し通す書き方に流れやすく、実行時の防御が薄くなる
+- 型で得たい情報（メソッド名・パラメータの綴り・union の全種類）は、**実装時にスキーマを読めば足りる**。実際にこれまでの実装は全てスキーマを読んで形を確定させてきた（`model/list`・`review/start` の `ReviewTarget`・`SandboxPolicy`・`ThreadItem` の `imageView` / `imageGeneration`・`ThreadRollbackParams` など）
+
+代わりに、**プロトコルの形を書くときは根拠を必ず併記する**という運用を採る。「実測で確認した」のか「スキーマが根拠」なのかを区別して書き、実機で確かめていないものは [manual-test.md](manual-test.md) の未実施ケースとして残す。
+
 ## 11. 技術スタック
 
 - TypeScript / Node 20 / esbuild（バンドル）
 - eslint + prettier、`tsc --noEmit` で型チェック
 - テスト
-  - unit（vitest）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で52ファイル935件
+  - unit（vitest）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で80ファイル1349件
   - **VSCodeに依存する層はユニットテストで扱わない**。`vscode` モジュールを触るファイル（`view/**` など）はテストから import できないため、判断が要るロジックは純粋関数へ切り出してそちらを試す（例: `view/panelState.ts`）
   - 実VSCodeでしか確認できない範囲は自動化せず、[manual-test.md](manual-test.md) のチェックリストと実施記録で担保する
 - `scripts/check.sh` に lint / typecheck / test を集約し、commit前に全緑を必須とする
