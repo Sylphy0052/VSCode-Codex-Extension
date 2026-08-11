@@ -294,6 +294,11 @@
         "command": "agent.workflows.stop",
         "title": "ワークフローを停止…",
         "category": "Agent"
+      },
+      {
+        "command": "agent.workflows.view",
+        "title": "ワークフローViewを開く",
+        "category": "Agent"
       }
     ],
     "configuration": {
