@@ -574,7 +574,7 @@ cwdの解決に差があるのは、Claude Codeの `--resume` がcwdを引数と
 
 ### 9.9 ユーザーへの問い合わせ（requestUserInput / elicitation）
 
-app-serverからは「聞いてくる」要求が2種類届く。どちらも**応答を返すまでapp-serverは待ち続ける**。
+**Codex画面だけの話**（Claude Code側に同じ要求が届かないことは §14.6）。app-serverからは「聞いてくる」要求が2種類届く。どちらも**応答を返すまでapp-serverは待ち続ける**。
 
 | 要求                            | 誰が聞いているか | 応答                                                      |
 | ------------------------------- | ---------------- | --------------------------------------------------------- |
@@ -734,8 +734,11 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 | 会話の途中のターンから分岐     | ○     | ×（CLIに手段が無い）                                 |
 | archive / unarchive / delete   | ○     | ×（CLIに手段が無い。ファイルを直接消すことはしない） |
 | セッション名の変更             | ○     | ×（要約名の概念が無い）                              |
+| 問い合わせカード（§9.9）       | ○     | ×（同じ要求が届かない）                              |
 
 対応しない操作はTreeViewの `contextValue`（`codexSession.<provider>`）でメニューから隠す。
+
+問い合わせカードだけは事情が違い、**Claude Code側に同じ要求が来ない**。`requestUserInput` / `elicitation` に相当するものがstream-jsonにも control protocol にも無く、ツール実行の可否を聞く `can_use_tool` は承認として別に扱っている。CLIが増やしてくれば同じ `PendingPrompt` へ正規化して載せられる。
 
 ### 14.7 チャット画面の設定行
 
