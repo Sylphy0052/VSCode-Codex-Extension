@@ -2455,6 +2455,8 @@ src/
     runnerWorkingDirectory.ts 作業ディレクトリの解決と疑似worktree統合（§16.6・§16.20）
     runnerMerge.ts      マージと衝突解決、タスク層のPR/MR作成（§16.17・§16.18）
     runnerMessaging.ts  タスク間メッセージング（§16.21）
+    runnerInternals.ts  上記5ファイルだけが触る`WorkflowRunner`の内部の口
+                     （`WorkflowRunnerInternals`。クラス外へは公開しない）
     planner.ts      ゴール文からYAMLを生成する（§16.9）
     roadmap.ts      ロードマップの生成・YAML化・完了の書き戻し（§16.19。*）
   view/
@@ -2463,7 +2465,11 @@ src/
 
 `*` を付けた4ファイルも、`runner.ts` / `extension.ts` からの配線を含めて実装済みで、実行に反映される（§16.13）。
 
-`runnerSnapshot.ts` / `runnerRestore.ts` / `runnerWorkingDirectory.ts` / `runnerMerge.ts` / `runnerMessaging.ts` の5ファイルは、`WorkflowRunner`のメソッドを機能単位で切り出したもので、`self: WorkflowRunner`を第一引数に取る関数の集まりとして実装している（Issue #147）。`runner.ts`側のクラスメソッドはこれらへ委譲する薄いラッパーとして残す（`getSnapshot` / `restoreRunsForView` / `retryMerge` のように公開APIとして呼ばれ続けるものは、シグネチャを変えずメソッドのまま残す）。`WorktreeCreationQueue`を1つだけ使い回す不変条件（§16.6・§16.17）は、`WorkflowRunner`のコンストラクタで組み立てたインスタンスを`self.integrationQueue`（`IntegrationMergeQueue`経由）として共有し続けることで変えていない。
+`runnerSnapshot.ts` / `runnerRestore.ts` / `runnerWorkingDirectory.ts` / `runnerMerge.ts` / `runnerMessaging.ts` の5ファイルは、`WorkflowRunner`のメソッドを機能単位で切り出したもので、`self: WorkflowRunnerInternals`を第一引数に取る関数の集まりとして実装している（Issue #147）。`runner.ts`側のクラスメソッドはこれらへ委譲する薄いラッパーとして残す（`getSnapshot` / `restoreRunsForView` / `retryMerge` のように公開APIとして呼ばれ続けるものは、シグネチャを変えずメソッドのまま残す）。`WorktreeCreationQueue`を1つだけ使い回す不変条件（§16.6・§16.17）は、`WorkflowRunner`のコンストラクタで組み立てたインスタンスを`self.integrationQueue`（`IntegrationMergeQueue`経由）として共有し続けることで変えていない。
+
+分割にあたって渡す`self`の型は`WorkflowRunnerInternals`（`runnerInternals.ts`）に閉じる。`runs`・`integrationQueue`・`deps`・`notify`・`pump`・`persist`・`resolveForgeState`は`WorkflowRunner`側では`private`のままにし、分割ファイルへ渡すときだけ`internals`ゲッター（キャスト1箇所）を通す。分割のために`private`を外すと、`src/view/`や`extension.ts`から`runner.runs.get(id)!.runState = ...`や`runner.pump(id)`を直接書いても型検査が止められず、`persist()`・`notify()`を経ない書き換えで永続化した値とメモリ上の`LiveRun`が食い違うため（PR #157のレビュー指摘）。
+
+worktreeの撤去（`cleanupWorktreeIfNeeded`）だけは、分割ファイル側からも`WorkflowRunner`のラッパーメソッドを通す（`WorkflowRunnerInternals`に含める）。テストが`WorkflowRunner.prototype`をスパイして「interrupted/manualでは撤去しない」を確かめる作りのため、モジュール関数を直接呼ぶ経路があるとその検証をすり抜ける。
 
 `integration.ts` / `forge.ts` / `pseudoWorktree.ts` は、`worktree.ts` と同じくコマンドの実行をポート（差し替え可能なインターフェース）越しに行い、コマンドを組み立てる部分を純粋関数として切り出す。テストで実際に `git` / `gh` / `glab` を叩かないため。
 

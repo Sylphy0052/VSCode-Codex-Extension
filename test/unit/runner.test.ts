@@ -1985,6 +1985,39 @@ tasks:
     expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
   });
 
+  it('マージ成功経路のworktree撤去もWorkflowRunnerのラッパーを通る（PR #157のレビュー指摘）', async () => {
+    // `cleanupWorktreeIfNeeded`はテストが`prototype`をスパイして撤去の有無を確かめる前提で
+    // ラッパーを残してある（`runnerInternals.ts`のJSDoc参照）。Issue #147の分割で
+    // マージ成功経路と衝突解決完了経路だけがラッパーを迂回してモジュール関数を直接呼んで
+    // いたため、この2経路をスパイで検証しようとすると呼び出し回数0で誤って落ちる状態に
+    // なっていた。迂回が再発したらここで落ちる
+    const cleanupSpy = vi.spyOn(
+      WorkflowRunner.prototype as unknown as {
+        cleanupWorktreeIfNeeded: (...args: unknown[]) => void;
+      },
+      'cleanupWorktreeIfNeeded',
+    );
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    git.resolveConflict();
+    codexHost.sessions.at(-1)?.finish('done', doneState('衝突を解決しました'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    // 2回の内訳: タスク完了時（`onTaskFinished`）と、衝突解決の完了時
+    // （`onMergeResolutionFinished`）。後者がモジュール関数を直接呼ぶ形へ戻ると1回に減る
+    expect(cleanupSpy).toHaveBeenCalledTimes(2);
+    cleanupSpy.mockRestore();
+  });
+
   it('未コミットの変更があるタスクが完了すると、終了条件にコミット要件が自動で足される', async () => {
     const { runner, codexHost } = createHarness(YAML);
     await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');

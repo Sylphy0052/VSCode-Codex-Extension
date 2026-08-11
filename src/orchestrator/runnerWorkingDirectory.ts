@@ -10,7 +10,8 @@ import {
   type Snapshot,
 } from './pseudoWorktree';
 import { markMergeBlocked, markMergeSucceeded } from './runState';
-import { issue, type LiveRun, type LiveTask, type WorkflowRunner } from './runner';
+import { issue, type LiveRun, type LiveTask } from './runner';
+import type { WorkflowRunnerInternals } from './runnerInternals';
 import { buildTaskBoundary, decideWorkingDirectory } from './worktree';
 import type { WorkflowDefinition, WorkflowIssue, WorkflowTask } from './workflow';
 
@@ -18,7 +19,7 @@ import type { WorkflowDefinition, WorkflowIssue, WorkflowTask } from './workflow
  * 作業ディレクトリの解決と疑似worktree統合（design.md §16.6・§16.20、Issue #147）を
  * 集めたモジュール。`WorkflowRunner`から機能単位で切り出した1本。
  *
- * `self: WorkflowRunner`を第一引数に取るのは、`WorkflowRunner`のメソッドから機械的に
+ * `self: WorkflowRunnerInternals`を第一引数に取るのは、`WorkflowRunner`のメソッドから機械的に
  * 切り出したままの形を保ち、挙動を変えないため（最終報告に記載）。
  */
 
@@ -31,7 +32,7 @@ import type { WorkflowDefinition, WorkflowIssue, WorkflowTask } from './workflow
  * 伴わないためこの判定ができず、実行層の責務になる。
  */
 async function resolveExplicitCwd(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   cwd: string,
   repoRoot: string,
 ): Promise<{ ok: true; resolved: string } | { ok: false; message: string }> {
@@ -57,7 +58,7 @@ async function resolveExplicitCwd(
  * （レビュー指摘: warning）。
  */
 export async function validateExplicitCwds(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   def: WorkflowDefinition,
   repoRoot: string,
 ): Promise<WorkflowIssue[]> {
@@ -84,7 +85,7 @@ interface WorkingDirectoryResolution {
 }
 
 export async function resolveWorkingDirectory(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   live: LiveRun,
   task: WorkflowTask,
   retry: number | undefined,
@@ -113,7 +114,7 @@ export async function resolveWorkingDirectory(
 }
 
 async function resolveExplicitCwdWorkingDirectory(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   live: LiveRun,
   task: WorkflowTask,
 ): Promise<WorkingDirectoryResolution> {
@@ -139,7 +140,7 @@ async function resolveExplicitCwdWorkingDirectory(
 }
 
 async function resolveSharedFallbackWorkingDirectory(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   live: LiveRun,
   task: WorkflowTask,
   warning: string,
@@ -179,7 +180,7 @@ async function resolveSharedFallbackWorkingDirectory(
 }
 
 async function resolveWorktreeWorkingDirectory(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   live: LiveRun,
   task: WorkflowTask,
   retry: number | undefined,
@@ -230,7 +231,7 @@ async function resolveWorktreeWorkingDirectory(
  * 渡されていなければ何もせず`state: undefined`を返す（後方互換。上のJSDoc参照）。
  */
 export async function resolvePseudoState(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   repoRoot: string,
   runId: string,
 ): Promise<{ ok: true; state: LiveRun['pseudo'] } | { ok: false; message: string }> {
@@ -266,7 +267,7 @@ export async function resolvePseudoState(
  * 衝突したタスクは`blocked`にし、独立した枝は走り続ける（`markMergeBlocked`と同じ扱い）。
  */
 export async function integratePseudoWorktree(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   runId: string,
   taskId: string,
   pseudo: NonNullable<LiveRun['pseudo']>,
@@ -316,7 +317,7 @@ export async function integratePseudoWorktree(
  * 反映前にワークスペース側の変更を検知したら、反映せず警告を残す
  * （design.md「人の編集を上書きしない」。`reflectIntegrationToWorkspace`自身が判定する）。
  */
-export async function reflectPseudoWorktree(self: WorkflowRunner, runId: string): Promise<void> {
+export async function reflectPseudoWorktree(self: WorkflowRunnerInternals, runId: string): Promise<void> {
   const live = self.runs.get(runId);
   const deps = self.deps.pseudoWorktree;
   if (live === undefined || live.pseudo === undefined || deps === undefined) {
@@ -346,7 +347,7 @@ export async function reflectPseudoWorktree(self: WorkflowRunner, runId: string)
 }
 
 export async function buildBoundary(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   live: LiveRun,
   cwd: string,
 ): Promise<{ boundary: TaskBoundary; warning: string | undefined }> {
