@@ -84,6 +84,20 @@ export function buildEffectiveTaskConfig(
     warnings.push(autoApproveResult.warning);
   }
 
+  // bypassPermissionsでは can_use_tool 自体が発行されないため、classifyApprovalRequest /
+  // autoApprove / escalate / allow が一度も呼ばれず、#54の危険判定が丸ごと無意味になる
+  // （レビュー指摘: critical 3）。YAMLがapprovalModeを一切指定しない場合、
+  // clampToSaferは拡張機能側の値をそのまま継承する（yamlValue === ''の早期return）ため、
+  // baseline自体がbypassPermissionsだと実効値も無警告でbypassPermissionsになる。
+  // ここでは警告を出すだけに留め、実際にタスクを開始させない最終防御はrunner.ts側で行う
+  // （純粋関数であるこの関数はI/Oも状態遷移も持たないため）。
+  if (task.provider === 'claude' && approvalResult.value === 'bypassPermissions') {
+    warnings.push(
+      'Claudeタスクの実効approvalModeがbypassPermissionsです。この設定では危険判定（承認）が' +
+        '一切働かないため、タスクは開始されません',
+    );
+  }
+
   return {
     config: {
       model: task.model ?? '',

@@ -92,10 +92,28 @@ export function activate(context: vscode.ExtensionContext): void {
     `${claudeDirs.home}/settings.json`,
     log,
   );
+  // オーケストレータ（design.md §16）。`chat` / `claudeChat` は `WorkflowRunner` の
+  // hostsとして要るため先に作れないが、`WorkflowRunner` は「このスレッドはタスク管理下か」を
+  // `chat` / `claudeChat` へ答える口（`isTaskManagedThread`）を要求する（design.md §16.10の7）。
+  // 循環しているため、書き換え可能な箱（`workflowRunnerRef`）を先に用意してクロージャに
+  // 渡し、`WorkflowRunner` を実際に作った後で埋める
+  // （レビュー指摘: critical 1。以前はこの口が一切結線されておらず、リロード後に
+  // worktreeで走っていたタスクのタブが汎用復元へ拾われ、ワークスペース直下のcwdで
+  // セッションが復活していた）。`workflowRunnerRef` 自体は再代入しないため `const`。
+  const workflowRunnerRef: { current: WorkflowRunner | undefined } = { current: undefined };
+  const isTaskManagedThread = (id: string): boolean =>
+    workflowRunnerRef.current?.isTaskManagedSessionId(id) ?? false;
+
   // 設定パネルを開かずCodex画面だけ使う場合でも選択肢が揃うよう、起動時に読む
   void settings.load();
-  const chat = new ChatViewManager(codexPath, settings, home, nodeFileSystem, log, (activity) =>
-    recordActivity({ ...activity, source: 'codex' }),
+  const chat = new ChatViewManager(
+    codexPath,
+    settings,
+    home,
+    nodeFileSystem,
+    log,
+    (activity) => recordActivity({ ...activity, source: 'codex' }),
+    isTaskManagedThread,
   );
   context.subscriptions.push(chat);
 
@@ -108,11 +126,12 @@ export function activate(context: vscode.ExtensionContext): void {
     log,
     (activity) => recordActivity({ ...activity, source: 'claude-code' }),
     (usage) => usageBar.updateClaude(usage),
+    isTaskManagedThread,
   );
   context.subscriptions.push(claudeChat);
 
-  // オーケストレータ（design.md §16）。この時点ではViewが無いため（#57）、
-  // 「定義ファイルを選んで実行」「実行中のワークフローを停止」の最小限の口だけを結線する
+  // この時点ではViewが無いため（#57）、「定義ファイルを選んで実行」
+  // 「実行中のワークフローを停止」の最小限の口だけを結線する
   const workflowStore = new WorkflowRunStore(context.workspaceState);
   void workflowStore.reconcileAfterReload().then((runs) => {
     const interrupted = runs.filter((r) =>
@@ -139,6 +158,9 @@ export function activate(context: vscode.ExtensionContext): void {
       allowAutoApprove: readWorkflowsConfig().allowAutoApprove,
     }),
   });
+  // isTaskManagedThreadのクロージャが参照する箱を埋める。以降の`workflowRunner`
+  // （コマンド登録などで使う）はこの束縛を指し、常にWorkflowRunnerとして扱える
+  workflowRunnerRef.current = workflowRunner;
 
   const appServer = new AppServerClient(codexPath, log);
   const conversations = new ConversationViewManager(nodeFileSystem, store, log, (session, turnId) =>

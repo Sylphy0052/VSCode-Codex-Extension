@@ -446,7 +446,14 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
         this.active = undefined;
       }
     });
-    this.active = entry;
+    // showPanelのreveal分岐（既存タブ）はpreserveFocusを見てactiveを更新するのに、
+    // 新規作成のこの分岐だけ無条件にactiveを奪っていた（レビュー指摘: critical 2）。
+    // タスクは必ずpreserveFocus: trueで背面に開く（design.md §16.10の2）ため、
+    // 無条件のままだと背面のタスクが「名前変更」等の対象を奪ってしまう。
+    // 実際にフォーカスが当たっているか（panel.active）を見て決める
+    if (panel.active) {
+      this.active = entry;
+    }
   }
 
   /** `TaskSessionHost` が返す口の実体。 */

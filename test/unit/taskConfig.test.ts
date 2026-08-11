@@ -139,6 +139,22 @@ describe('buildEffectiveTaskConfig（design.md §16.16の唯一の入口）', ()
     expect(result.sandbox).toBe('');
   });
 
+  it('拡張機能側の設定が既にbypassPermissionsのとき、実効値の継承について警告する（レビュー指摘: critical 3）', () => {
+    const result = buildEffectiveTaskConfig(
+      {
+        provider: 'claude',
+        model: undefined,
+        effort: undefined,
+        approvalMode: undefined,
+        sandbox: undefined,
+        autoApprove: false,
+      },
+      { ...baseline, claudePermissionMode: 'bypassPermissions' },
+    );
+    expect(result.config.approvalMode).toBe('bypassPermissions');
+    expect(result.warnings.some((w) => w.includes('bypassPermissions'))).toBe(true);
+  });
+
   it('未指定（undefined）のフィールドは拡張機能側の値をそのまま使い、警告を出さない', () => {
     const result = buildEffectiveTaskConfig(
       {

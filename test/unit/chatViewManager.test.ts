@@ -495,6 +495,39 @@ describe('ChatViewManager', () => {
       expect(renameRequest).toBeDefined();
       expect((renameRequest?.params as { name?: string } | undefined)?.name).toBe('あたらしい名前');
     });
+
+    it('背面で開いたタスクのタブは名前変更の対象（active）を奪わない（レビュー指摘: critical 2）', async () => {
+      const { manager, connection } = createManager();
+
+      // 人が自分のチャットを前面で開く
+      const humanChat = manager.openNew();
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-human'));
+      await humanChat;
+
+      // タスクは必ずpreserveFocus: trueで背面に開く（design.md §16.10の2）
+      const taskPromise = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-task'));
+      const task = await taskPromise;
+      task.open({ preserveFocus: true });
+
+      // 背面で開いただけなので、人のチャットが選択中のまま
+      __mock.showInputBoxAnswer = 'タスクの名前になってはいけない';
+      const renamePromise = manager.renameActive();
+      await tick();
+      connection.resolveFirst('thread/name/set', {});
+      await renamePromise;
+
+      const renameRequest = connection.requests.find((r) => r.method === 'thread/name/set');
+      expect((renameRequest?.params as { threadId?: string } | undefined)?.threadId).toBe(
+        'thread-human',
+      );
+    });
   });
 
   describe('タスク管理下スレッドの汎用復元除外（design.md §16.10の7）', () => {

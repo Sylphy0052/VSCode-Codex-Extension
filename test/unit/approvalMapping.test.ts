@@ -7,6 +7,7 @@ import type { WorktreeFileSystemPort } from '../../src/orchestrator/worktree';
 const identityFs: WorktreeFileSystemPort = {
   realpath: async (target) => target,
   readTextFile: async () => undefined,
+  isSymbolicLink: async () => false,
 };
 
 function commandApproval(itemId?: string): PendingApproval {
@@ -165,6 +166,7 @@ describe('buildEscalationRequest（design.md §16.7: 判定へは生の要求パ
     const resolvingFs: WorktreeFileSystemPort = {
       realpath: async (target) => `/resolved${target}`,
       readTextFile: async () => undefined,
+      isSymbolicLink: async () => false,
     };
     const request = await buildEscalationRequest(
       'claude',

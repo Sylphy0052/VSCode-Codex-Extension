@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
@@ -50,6 +50,7 @@ class FakeGit implements GitCommandRunner {
 class FakeFs implements WorktreeFileSystemPort {
   realpaths = new Map<string, string>();
   textFiles = new Map<string, string>();
+  symlinks = new Set<string>();
 
   async realpath(target: string): Promise<string | undefined> {
     return this.realpaths.get(target);
@@ -57,6 +58,10 @@ class FakeFs implements WorktreeFileSystemPort {
 
   async readTextFile(target: string): Promise<string | undefined> {
     return this.textFiles.get(target);
+  }
+
+  async isSymbolicLink(target: string): Promise<boolean> {
+    return this.symlinks.has(target);
   }
 }
 
@@ -173,10 +178,16 @@ describe('WorktreeCreationQueue.create', () => {
     git.respond(['rev-parse', '--verify'], { code: 1, stdout: '', stderr: '' });
     git.respond(['worktree', 'add'], { code: 0, stdout: '', stderr: '' });
     const queue = new WorktreeCreationQueue();
+    const cwd = path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2');
+    const fs = new FakeFs();
+    // 作成後の実パス確認（二次防御）が通るよう、リンクの無い通常の作られ方を模す
+    fs.realpaths.set(cwd, cwd);
+    fs.realpaths.set('/repo', '/repo');
 
     const result = await queue.create(
       { repoRoot: '/repo', runId: RUN_ID, taskId: 'T2', headCommit: HEAD_SHA, retry: undefined },
       git,
+      fs,
     );
 
     expect(result).toEqual({
@@ -208,6 +219,7 @@ describe('WorktreeCreationQueue.create', () => {
     const result = await queue.create(
       { repoRoot: '/repo', runId: RUN_ID, taskId: 'T2', headCommit: HEAD_SHA, retry: undefined },
       git,
+      new FakeFs(),
     );
 
     expect(result).toEqual({
@@ -231,6 +243,7 @@ describe('WorktreeCreationQueue.create', () => {
     const result = await queue.create(
       { repoRoot: '/repo', runId: RUN_ID, taskId: 'T2', headCommit: HEAD_SHA, retry: undefined },
       git,
+      new FakeFs(),
     );
 
     expect(result).toEqual({
@@ -238,6 +251,31 @@ describe('WorktreeCreationQueue.create', () => {
       reason: 'gitError',
       message: 'fatal: something went wrong',
     });
+  });
+
+  it('git worktree addのstderrは無害化してから返す（制御文字の除去・URL中のuserinfoのマスク。レビュー指摘: warning）', async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', '--verify'], { code: 1, stdout: '', stderr: '' });
+    git.respond(['worktree', 'add'], {
+      code: 128,
+      stdout: '',
+      stderr:
+        "fatal: unable to access 'https://token123:x-oauth-basic@github.com/org/repo.git/': \x00control",
+    });
+    const queue = new WorktreeCreationQueue();
+
+    const result = await queue.create(
+      { repoRoot: '/repo', runId: RUN_ID, taskId: 'T2', headCommit: HEAD_SHA, retry: undefined },
+      git,
+      new FakeFs(),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).not.toContain('token123');
+    expect(result.message).not.toContain('x-oauth-basic');
+    expect(result.message).not.toContain('\x00');
+    expect(result.message).toContain('https://***@github.com/org/repo.git/');
   });
 
   it('不正なrunId/taskIdはinvalidIdentifierを返し、gitを一切呼ばない（high2修正）', async () => {
@@ -253,6 +291,7 @@ describe('WorktreeCreationQueue.create', () => {
         retry: undefined,
       },
       git,
+      new FakeFs(),
     );
     expect(badRunId).toMatchObject({ ok: false, reason: 'invalidIdentifier' });
 
@@ -265,6 +304,7 @@ describe('WorktreeCreationQueue.create', () => {
         retry: undefined,
       },
       git,
+      new FakeFs(),
     );
     expect(badTaskId).toMatchObject({ ok: false, reason: 'invalidIdentifier' });
 
@@ -278,6 +318,7 @@ describe('WorktreeCreationQueue.create', () => {
     const result = await queue.create(
       { repoRoot: '/repo', runId: RUN_ID, taskId: 'T2', headCommit: '--force', retry: undefined },
       git,
+      new FakeFs(),
     );
 
     expect(result).toMatchObject({ ok: false, reason: 'invalidHeadCommit' });
@@ -289,14 +330,26 @@ describe('WorktreeCreationQueue.create', () => {
     git.respond(['rev-parse', '--verify'], { code: 1, stdout: '', stderr: '' });
     git.respond(['worktree', 'add'], { code: 0, stdout: '', stderr: '' });
     const queue = new WorktreeCreationQueue();
+    const fs = new FakeFs();
+    fs.realpaths.set('/repo', '/repo');
+    fs.realpaths.set(
+      path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2'),
+      path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2'),
+    );
+    fs.realpaths.set(
+      path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T3'),
+      path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T3'),
+    );
 
     await queue.create(
       { repoRoot: '/repo', runId: RUN_ID, taskId: 'T2', headCommit: HEAD_SHA, retry: undefined },
       git,
+      fs,
     );
     await queue.create(
       { repoRoot: '/repo', runId: RUN_ID, taskId: 'T3', headCommit: HEAD_SHA, retry: undefined },
       git,
+      fs,
     );
 
     const addCalls = git.calls.filter((c) => c.args[0] === 'worktree' && c.args[1] === 'add');
@@ -354,11 +407,16 @@ describe('WorktreeCreationQueue（直列化）', () => {
     git.respond(['status', '--porcelain'], { code: 0, stdout: '', stderr: '' });
     git.respond(['worktree', 'remove'], { code: 0, stdout: '', stderr: '' });
     const queue = new WorktreeCreationQueue();
+    const fs = new FakeFs();
+    const createdCwd = path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2');
+    fs.realpaths.set('/repo', '/repo');
+    fs.realpaths.set(createdCwd, createdCwd);
 
     const results = await Promise.all([
       queue.create(
         { repoRoot: '/repo', runId: RUN_ID, taskId: 'T2', headCommit: HEAD_SHA, retry: undefined },
         git,
+        fs,
       ),
       queue.remove('/repo', RUN_ID, 'T3', undefined, git),
     ]);
@@ -648,7 +706,7 @@ describe('実gitでの統合テスト', () => {
       retry: undefined,
     };
 
-    const first = await queue.create(request, nodeGitCommandRunner);
+    const first = await queue.create(request, nodeGitCommandRunner, nodeWorktreeFileSystem);
     expect(first.ok).toBe(true);
     if (first.ok) {
       expect(first.branch).toBe(`wf/${RUN_ID}/T1`);
@@ -656,7 +714,7 @@ describe('実gitでの統合テスト', () => {
       await expect(stat(first.cwd)).resolves.toBeDefined();
     }
 
-    const second = await queue.create(request, nodeGitCommandRunner);
+    const second = await queue.create(request, nodeGitCommandRunner, nodeWorktreeFileSystem);
     expect(second).toMatchObject({ ok: false, reason: 'branchExists' });
   });
 
@@ -673,6 +731,7 @@ describe('実gitでの統合テスト', () => {
         retry: undefined,
       },
       nodeGitCommandRunner,
+      nodeWorktreeFileSystem,
     );
     expect(first.ok).toBe(true);
     // design.mdの規則どおり、failedになったタスクのworktreeは撤去せず残す
@@ -681,6 +740,7 @@ describe('実gitでの統合テスト', () => {
     const retry = await queue.create(
       { repoRoot: repoDir, runId: RUN_ID, taskId: 'T1', headCommit: head as string, retry: 0 },
       nodeGitCommandRunner,
+      nodeWorktreeFileSystem,
     );
 
     expect(retry.ok).toBe(true);
@@ -706,6 +766,7 @@ describe('実gitでの統合テスト', () => {
         retry: undefined,
       },
       nodeGitCommandRunner,
+      nodeWorktreeFileSystem,
     );
     expect(created.ok).toBe(true);
     if (!created.ok) return;
@@ -732,6 +793,7 @@ describe('実gitでの統合テスト', () => {
         retry: undefined,
       },
       nodeGitCommandRunner,
+      nodeWorktreeFileSystem,
     );
     const dirty = await queue.create(
       {
@@ -742,6 +804,7 @@ describe('実gitでの統合テスト', () => {
         retry: undefined,
       },
       nodeGitCommandRunner,
+      nodeWorktreeFileSystem,
     );
     expect(clean.ok).toBe(true);
     expect(dirty.ok).toBe(true);
@@ -776,5 +839,42 @@ describe('実gitでの統合テスト', () => {
     // execFileはargv配列をそのまま渡すため`--pretty=...`という1つの引数の中身でしかない。
     await nodeGitCommandRunner.run(['log', '-1', `--pretty=%H; touch ${marker}`], repoDir);
     await expect(stat(marker)).rejects.toThrow();
+  });
+
+  /**
+   * `.agents/worktrees` がシンボリックリンクだと、文字列結合だけで組み立てた
+   * `worktreePath` の実体はリンク先（リポジトリの外）になる（design.md §16.6、
+   * レビュー指摘: critical 4）。`git worktree add` 自体はエラーにならずリンクを
+   * 黙って辿ってしまうため、一次防御（事前のリンク検知）が無いと気づけない。
+   */
+  it('.agents/worktreesがシンボリックリンクだと、worktreeの作成を拒否しリポジトリの外に何も作らない', async () => {
+    const outsideDir = await mkdtemp(path.join(tmpdir(), 'worktree-outside-'));
+    try {
+      await mkdir(path.join(repoDir, '.agents'), { recursive: true });
+      // リポジトリの中身（cloneしただけで手に入る）がリンクを仕込める、という前提を再現する
+      await symlink(outsideDir, path.join(repoDir, '.agents', 'worktrees'));
+
+      const head = await resolveHeadCommit(repoDir, nodeGitCommandRunner);
+      expect(head).toBeDefined();
+      const queue = new WorktreeCreationQueue();
+
+      const result = await queue.create(
+        {
+          repoRoot: repoDir,
+          runId: RUN_ID,
+          taskId: 'T1',
+          headCommit: head as string,
+          retry: undefined,
+        },
+        nodeGitCommandRunner,
+        nodeWorktreeFileSystem,
+      );
+
+      expect(result).toMatchObject({ ok: false, reason: 'symlinkDetected' });
+      // リンク先（リポジトリの外）に何も作られていないことを実際に確認する
+      await expect(readdir(outsideDir)).resolves.toEqual([]);
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
   });
 });

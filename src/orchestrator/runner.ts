@@ -25,6 +25,7 @@ import {
 } from './runState';
 import { getRunOutcome, nextTasksToStart, type RunOutcome } from './scheduler';
 import { WorkflowRunStore, type PersistedTaskState } from './runStore';
+import { sanitizeForLog } from './sanitize';
 import { buildEffectiveTaskConfig, type ExtensionSafetyBaseline } from './taskConfig';
 import type {
   ApprovalHandlerResult,
@@ -176,6 +177,28 @@ export class WorkflowRunner {
   }
 
   /**
+   * このsessionId（Codexのthread id / Claudeのsession id）がタスク（オーケストレータ）
+   * 管理下かどうかを答える（design.md §16.10の7）。`ChatViewManager` /
+   * `ClaudeChatViewManager` の `isTaskManagedThread` へそのまま渡す用途。
+   *
+   * **永続化された`WorkflowRunStore`を見る。メモリ上の `this.runs` だけを見てはいけない。**
+   * ウィンドウのリロード直後は `this.runs`（このプロセスのライブな実行状態）が空になる
+   * 一方、`restorePanel`（VSCodeのWebviewパネル復元）はまさにその瞬間に呼ばれる。
+   * メモリだけを見ると常に`false`を返してしまい、worktreeで走っていたタスクのタブが
+   * 汎用復元に拾われてワークスペース直下のcwdでセッションが復活する事故になる
+   * （レビュー指摘: critical 1）。`workspaceState`は`reconcileAfterReload`後も
+   * `sessionId`を保持したまま残るため、これを見れば復元直後でも正しく判定できる。
+   */
+  isTaskManagedSessionId(sessionId: string): boolean {
+    if (sessionId === '') {
+      return false;
+    }
+    return this.deps.store
+      .list()
+      .some((run) => Object.values(run.tasks).some((t) => t.sessionId === sessionId));
+  }
+
+  /**
    * 定義ファイルを読み込み、検証し、通れば実行を開始する。
    *
    * `repoRoot` はワークフロー定義ファイルが属するワークスペースフォルダの絶対パス
@@ -240,6 +263,11 @@ export class WorkflowRunner {
           ],
         };
       }
+    }
+
+    const cwdErrors = await this.validateExplicitCwds(def, repoRoot);
+    if (cwdErrors.length > 0) {
+      return { ok: false, errors: cwdErrors };
     }
 
     const gitignoreCheck = await checkWorktreesGitignored(repoRoot, this.deps.fs);
@@ -317,8 +345,7 @@ export class WorkflowRunner {
     }
 
     try {
-      const retryCount = live.runState.tasks.get(taskId)?.retryCount ?? 0;
-      const retry = retryCount > 0 ? retryCount : undefined;
+      const retry = retrySuffixOf(live.runState.tasks.get(taskId)?.retryCount);
       const { cwd, branch, usedWorktree } = await this.resolveWorkingDirectory(live, task, retry);
 
       const baseline = this.deps.readBaseline();
@@ -327,6 +354,20 @@ export class WorkflowRunner {
       for (const w of effective.warnings) {
         this.deps.log.warn(`[workflow ${runId}/${taskId}] ${w}`);
       }
+
+      // 最終防御（レビュー指摘: critical 3）。bypassPermissionsでは`can_use_tool`が
+      // 発行されず、classifyApprovalRequest / autoApprove / escalate / allow が
+      // 一度も呼ばれない。workflow.tsのvalidateWorkflowはYAMLリテラルの
+      // `approvalMode: bypassPermissions`一致だけを見るため、YAML側が何も指定せず
+      // 拡張機能側の設定が既にbypassPermissionsの場合は素通りしてしまう（実測で確認済み）。
+      // ここは実効値（クランプ後の値）に対する検査であり、YAMLの記述に関わらず効く
+      if (task.provider === 'claude' && effective.config.approvalMode === 'bypassPermissions') {
+        throw new Error(
+          '実効approvalModeがbypassPermissionsのため、このタスクは開始できません' +
+            '（危険判定が働かない設定での無人実行はできません）',
+        );
+      }
+
       const input: TaskSessionInput = { cwd, config: effective.config, sandbox: effective.sandbox };
 
       const boundaryResult = await this.buildBoundary(live, cwd);
@@ -376,12 +417,65 @@ export class WorkflowRunner {
         condition: task.done,
       });
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      // openTaskSessionの失敗はCLIプロセス起動時のエラーをそのまま含みうる。
+      // worktree.ts側のgitエラーは既に無害化済みだが、ここでも共通ヘルパーを通しておく
+      // （レビュー指摘: warning。sanitizeForLogは冪等に近く、二重に通しても実害は無い）
+      const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
       this.deps.log.error(`[workflow ${runId}/${taskId}] タスクを開始できませんでした: ${message}`);
       live.runState = applyLoopStopReason(live.runState, live.def.tasks, taskId, 'failed');
       void this.persist(runId);
       this.pump(runId);
     }
+  }
+
+  /**
+   * `cwd` を実パス解決し、`repoRoot` の実パス配下にあるか確かめる。
+   *
+   * cwdを無検証で通すと、`sandbox: workspace-write` の「workspace」の基準そのものを
+   * YAMLから付け替えられる（例: cwdに `~/.ssh` を指定すれば、そこが書き込み可能な領域に
+   * なる）。design.md §16.16 が塞ぐと決めている経路。`workflow.ts` の検証は実パス解決を
+   * 伴わないためこの判定ができず、実行層の責務になる。
+   */
+  private async resolveExplicitCwd(
+    cwd: string,
+    repoRoot: string,
+  ): Promise<{ ok: true; resolved: string } | { ok: false; message: string }> {
+    const resolvedCwd = await this.deps.fs.realpath(cwd);
+    if (resolvedCwd === undefined) {
+      return { ok: false, message: `cwdを解決できませんでした: ${cwd}` };
+    }
+    // 境界側も実パスに直してから比べる。シンボリックリンク越しに外へ出るのを防ぐ
+    const resolvedRoot = (await this.deps.fs.realpath(repoRoot)) ?? repoRoot;
+    if (!isPathWithinRoot(resolvedCwd, resolvedRoot)) {
+      return {
+        ok: false,
+        message: `cwdがワークスペースの外を指しています（design.md §16.16）: ${cwd}`,
+      };
+    }
+    return { ok: true, resolved: resolvedCwd };
+  }
+
+  /**
+   * 全タスクの明示`cwd`を実行開始前に一括で検証する（design.md §16.2「1件でも該当すれば
+   * 実行を始めない」）。タスクごと（`startTask`内）の事後検証だけだと、正当なcwdの
+   * タスクが先に開始・副作用を残した後で別タスクの違反が判明しうる
+   * （レビュー指摘: warning）。
+   */
+  private async validateExplicitCwds(
+    def: WorkflowDefinition,
+    repoRoot: string,
+  ): Promise<WorkflowIssue[]> {
+    const errors: WorkflowIssue[] = [];
+    for (const task of def.tasks) {
+      if (task.cwd === undefined) {
+        continue;
+      }
+      const resolved = await this.resolveExplicitCwd(task.cwd, repoRoot);
+      if (!resolved.ok) {
+        errors.push(issue(resolved.message, [task.id]));
+      }
+    }
+    return errors;
   }
 
   private buildResultsMap(live: LiveRun, task: WorkflowTask): Map<string, TaskResult> {
@@ -407,20 +501,13 @@ export class WorkflowRunner {
       if (task.cwd === undefined) {
         throw new Error('内部矛盾: explicitCwdの判定なのにcwdが無いタスクです');
       }
-      // cwdを無検証で通すと、`sandbox: workspace-write` の「workspace」の基準そのものを
-      // YAMLから付け替えられる（例: cwdに ~/.ssh を指定すれば、そこが書き込み可能な領域に
-      // なる）。design.md §16.16 が塞ぐと決めている経路なので、ここで必ず確かめる。
-      // workflow.ts の検証は実パス解決を伴わないためこの判定ができず、実行層の責務になる。
-      const resolvedCwd = await this.deps.fs.realpath(task.cwd);
-      if (resolvedCwd === undefined) {
-        throw new Error(`cwdを解決できませんでした: ${task.cwd}`);
+      // 実行開始時（start()）の一括検証を必ず通っている前提だが、念のためここでも確かめる
+      // （多層防御。呼び出し順序の変更などで一括検証が経由されなくても危険側に倒れない）
+      const resolved = await this.resolveExplicitCwd(task.cwd, live.repoRoot);
+      if (!resolved.ok) {
+        throw new Error(resolved.message);
       }
-      // 境界側も実パスに直してから比べる。シンボリックリンク越しに外へ出るのを防ぐ
-      const resolvedRoot = (await this.deps.fs.realpath(live.repoRoot)) ?? live.repoRoot;
-      if (!isPathWithinRoot(resolvedCwd, resolvedRoot)) {
-        throw new Error(`cwdがワークスペースの外を指しています（design.md §16.16）: ${task.cwd}`);
-      }
-      return { cwd: resolvedCwd, branch: '', usedWorktree: false };
+      return { cwd: resolved.resolved, branch: '', usedWorktree: false };
     }
     if (decision.kind === 'shared') {
       return { cwd: live.repoRoot, branch: '', usedWorktree: false };
@@ -442,6 +529,7 @@ export class WorkflowRunner {
         retry,
       },
       this.deps.git,
+      this.deps.fs,
     );
     if (!result.ok) {
       throw new Error(`worktreeの作成に失敗しました: ${result.message}`);
@@ -585,15 +673,9 @@ export class WorkflowRunner {
     if (finalState === undefined || !shouldRemoveWorktree(task.cleanup, finalState)) {
       return;
     }
-    const retryCount = live.runState.tasks.get(taskId)?.retryCount ?? 0;
+    const retry = retrySuffixOf(live.runState.tasks.get(taskId)?.retryCount);
     void this.deps.worktreeQueue
-      .remove(
-        live.repoRoot,
-        live.runId,
-        taskId,
-        retryCount > 0 ? retryCount : undefined,
-        this.deps.git,
-      )
+      .remove(live.repoRoot, live.runId, taskId, retry, this.deps.git)
       .then((result) => {
         if (!result.ok) {
           this.deps.log.warn(
@@ -639,4 +721,19 @@ export class WorkflowRunner {
 
 function issue(message: string, taskIds: string[] = []): WorkflowIssue {
   return { taskIds, message };
+}
+
+/**
+ * `TaskRunState.retryCount`（0開始。「これまでの自動再試行回数」）から、
+ * `worktreePath` / `branchName` が受け取る `retry` サフィックス番号（0開始）へ変換する。
+ *
+ * `retryCount` は `applyLoopStopReason` が**次の試行を始める前に**インクリメントする
+ * （design.md §16.5の再試行判定）ため、1回目の失敗直後は `retryCount === 1` になる。
+ * これは「1回retryを消費した」という意味であり、そのままworktreeのサフィックスに使うと
+ * 1回目の再試行が `-retry1` になってしまう（`worktree.test.ts` が固定している規約は
+ * 1回目の再試行が `-retry0`）。1つずらして渡す必要がある
+ * （レビュー指摘: high。テスト追加で発覚したオフバイワン）。
+ */
+function retrySuffixOf(retryCount: number | undefined): number | undefined {
+  return retryCount !== undefined && retryCount > 0 ? retryCount - 1 : undefined;
 }

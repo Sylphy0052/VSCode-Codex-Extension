@@ -1129,6 +1129,26 @@ Viewからの手動の「再実行」だけを受け付ける。手動の再実�
 - worktree作成に失敗したタスクは開始しない（中途半端なディレクトリで走らせない）
 - `.gitignore` に `.agents/worktrees/` が無ければ追記を促す（勝手には書き換えない）
 
+#### `.agents/worktrees` がシンボリックリンクの場合（実機確認済みの脅威）
+
+`worktreePath`（`<repo>/.agents/worktrees/<runId>/<taskId>`）は文字列結合だけで組み立てる。`.agents` または `.agents/worktrees` がシンボリックリンクだと、この文字列が指す実体はリンク先——**リポジトリの外**——になる。
+
+```
+repo/.agents/worktrees -> ../../outside   （このリンクをリポジトリにcommitしておく）
+git worktree add -b wf/run/T1 repo/.agents/worktrees/run/T1 <HEAD>
+→ Preparing worktree (new branch 'wf/run/T1')   ... エラーにならない
+→ 実体は outside/run/T1 に作られる
+```
+
+実機で確認済み: `git worktree add` はリンクを黙って辿り、エラーにならずリンク先へ実体を作る。`buildTaskBoundary` は生成後のcwdを実パス解決するため境界判定そのものは「実際に作られた場所」に対して自己整合的に働くが、**その「実際に作られた場所」自体をリポジトリの中身（cloneしただけで手に入るシンボリックリンク）が決められてしまう。** `sandbox: workspace-write` はcwd基準で書き込み可能域を決めるので、リンク先（例えばホーム配下）が丸ごとサンドボックス内として扱われる。**cloneしただけで発火し、YAMLを一切介さない。** §16.16 が「設定パネルを触らずに開く穴」として警戒している経路そのものだが、YAMLより手前（定義ファイルを読む前）の、リポジトリのファイルシステム構造そのものが攻撃面になる点で§16.16の対象外だった。
+
+対策は二段構え（多層防御）。
+
+1. **一次防御（事前検知）**: `git worktree add` を呼ぶ前に、`<repo>` から作成先までの各中間ディレクトリ（`.agents` / `.agents/worktrees` / `<runId>`）を `lstat` し、シンボリックリンクが含まれていれば作成そのものを拒否する。まだ存在しないセグメント（`<taskId>` 自身など）はリンクになりようがないため対象外でよい
+2. **二次防御（事後検証）**: `git worktree add` が成功した後、実際に作られたcwdを実パス解決し、`<repo>` の実パス配下にあることを確認する。一次防御をすり抜けるTOCTOU（検査後・作成前にリンクへ差し替えられる）や見落としに備える。外れていた場合は `git worktree remove` で撤去してからエラーにする
+
+`.gitignore` のチェック（`checkWorktreesGitignored`）は `.gitignore` の中身しか見ないため、リンクの検知はこれとは独立に行う。
+
 #### gitリポジトリでない場合
 
 worktreeを作れないため、次のように落とす。

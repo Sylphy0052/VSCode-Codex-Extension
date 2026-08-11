@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { ClaudeConfig } from './claude/types';
 import type { CodexConfig } from './codex/types';
@@ -97,10 +98,32 @@ export interface WorkflowsConfig {
   allowAutoApprove: boolean;
 }
 
+const DEFAULT_WORKFLOWS_DIR = '.agents/workflows';
+
+/**
+ * `agent.workflows.dir` の値として安全か。絶対パス、または `..` セグメントを含む値は拒否する。
+ *
+ * このキーは `resource` スコープ（`.vscode/settings.json` から上書きできる）のままにしてある。
+ * マルチルートで「ワークスペースフォルダごとに置き場を変えたい」需要が自然にあり、
+ * `machine` へ固定するとその用途を潰すため。ただし `resource` スコープはリポジトリ側の
+ * 設定ファイルから差し替えられる以上、`..` を含む値でワークスペースフォルダの外を
+ * 探索対象に混ぜられる余地は塞ぐ（レビュー指摘: warning）。
+ */
+function isSafeRelativeDir(value: string): boolean {
+  if (value.trim() === '') {
+    return false;
+  }
+  if (path.isAbsolute(value)) {
+    return false;
+  }
+  return !value.split(/[\\/]/u).includes('..');
+}
+
 export function readWorkflowsConfig(): WorkflowsConfig {
   const c = vscode.workspace.getConfiguration('agent');
+  const rawDir = str(c, 'workflows.dir', DEFAULT_WORKFLOWS_DIR);
   return {
-    dir: str(c, 'workflows.dir', '.agents/workflows'),
+    dir: isSafeRelativeDir(rawDir) ? rawDir : DEFAULT_WORKFLOWS_DIR,
     allowAutoApprove: c.get<boolean>('workflows.allowAutoApprove') ?? false,
   };
 }

@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 
+import { sanitizeForLog } from './sanitize';
 import type { WorkflowTask } from './workflow';
 
 /**
@@ -600,25 +601,18 @@ function buildEscalateHaystack(request: EscalationRequest): string {
   return parts.join('\n').toLowerCase();
 }
 
-/** 理由文字列に埋め込む値の上限長。長大な値でログ・ワークフローViewの表示が崩れるのを防ぐ。 */
-const REASON_VALUE_MAX_LEN = 200;
-
 /**
  * 理由に埋め込む値の無害化。`grantRoot` やホスト名、パスはapp-server・エージェント
  * 由来で内容を信用できない。改行や制御文字を含んでいると、理由がそのまま複数行になったり
  * ログ・ワークフローViewの表示を崩したりする。HTMLエスケープはView側の責務
  * （design.md §16.8）なのでここでは行わない。
+ *
+ * 実体は `sanitize.ts` の共通ヘルパー。`worktree.ts` / `runner.ts` が生成する
+ * gitのstderrやエラーメッセージのログ出力にも同じ無害化を通すため、この関数の中身を
+ * 個別に持つのではなく共通ヘルパーへ集約する（レビュー指摘: warning）。
  */
 function sanitizeForReason(value: string): string {
-  let normalized = '';
-  for (const ch of value) {
-    const code = ch.codePointAt(0) ?? 0;
-    normalized += code < 0x20 || code === 0x7f ? ' ' : ch;
-  }
-  const collapsed = normalized.replace(/ {2,}/gu, ' ').trim();
-  return collapsed.length > REASON_VALUE_MAX_LEN
-    ? `${collapsed.slice(0, REASON_VALUE_MAX_LEN)}…`
-    : collapsed;
+  return sanitizeForLog(value);
 }
 
 /**
