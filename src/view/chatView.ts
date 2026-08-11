@@ -45,6 +45,7 @@ import { FileMentionCatalog, filterFiles } from '../provider/fileMentions';
 import {
   CODEX_PSEUDO_COMMANDS,
   routePseudoCommand,
+  trimmedArgsOrUndefined,
   withPseudoCommands,
   type PseudoCommandCall,
 } from '../provider/pseudoCommands';
@@ -55,6 +56,7 @@ import {
   type ReviewTarget,
   type ReviewTargetKind,
 } from '../codex/reviewTarget';
+import { buildSideQuestionForkParams } from '../codex/sideQuestion';
 import { chatCsp } from './chatCsp';
 import { chatScript, type ReviewButtonConfig } from './chatScript';
 import { chatStyles } from './chatStyles';
@@ -63,6 +65,15 @@ import { readPersistedThreadId } from './panelState';
 import { isEditableKey, type SettingsProvider } from './settingsProvider';
 
 const VIEW_TYPE = 'codex.chat';
+
+/**
+ * 脇道の質問（issue #24）用に新しく開くタブの見出し。
+ *
+ * 「分岐」（`forkFrom`）と紛れないよう別の語を使う。ephemeralスレッドはディスクに
+ * 残らないため、このタブの内容は閉じる・ウィンドウを再読み込みすると失われる
+ * （`docs/design.md` §14.26）。
+ */
+const SIDE_QUESTION_TAB_TITLE = '脇道';
 
 /**
  * MCPツールの可視性確認（design.md §16.21）で `mcpServer/startupStatus/updated` 通知を
@@ -1025,15 +1036,71 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
    * 必ず何かを起こす。届かない指示が黙って文章に化けることは無い。
    */
   private async runPseudoCommand(entry: ChatPanel, call: PseudoCommandCall): Promise<void> {
-    if (call.args !== '') {
-      this.log.warn(`/${call.name} は引数を受け取らないため無視します: ${call.args}`);
-    }
     if (call.action === 'compact') {
+      if (call.args !== '') {
+        this.log.warn(`/${call.name} は引数を受け取らないため無視します: ${call.args}`);
+      }
       if (!(await confirmCompact())) {
         return;
       }
       await entry.session.compact();
+      return;
     }
+    if (call.action === 'sideQuestion') {
+      const question = trimmedArgsOrUndefined(call.args);
+      if (question === undefined) {
+        void vscode.window.showErrorMessage(
+          '脇道の質問を入力してください（例: /btw 今のタイムゾーンは？）',
+        );
+        return;
+      }
+      await this.startSideQuestion(entry, question);
+    }
+  }
+
+  /**
+   * 脇道の質問を送る（issue #24、design.md §14.26、Codex TUIの `/btw` 相当）。
+   *
+   * 現在のスレッドをephemeralに（`ephemeral: true`で）forkし、新しいタブへ
+   * fork応答をそのまま差し込んでから質問を送る。ephemeralスレッドは
+   * `thread/resume` で読み直せないため、既存の「分岐」（`forkFrom`）のように
+   * `openThread`（内部で`thread/resume`を呼ぶ）は使わず、`ChatSession.loadForkedThread`
+   * でfork応答を直接適用する（`chatSession.ts` 参照）。
+   *
+   * 元のスレッド（`entry`）の状態には一切触れない。本流の会話が脇道の質問で
+   * 汚れないのはこのため。
+   */
+  private async startSideQuestion(entry: ChatPanel, question: string): Promise<void> {
+    const threadId = entry.session.threadId;
+    if (threadId === undefined) {
+      return;
+    }
+
+    const response = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: '脇道の質問を準備しています…' },
+      () => this.connection.request('thread/fork', buildSideQuestionForkParams(threadId)),
+    );
+
+    const sideEntry = this.buildEntry(entry.cwd, SIDE_QUESTION_TAB_TITLE, false, undefined);
+    let sideThreadId: string;
+    try {
+      sideThreadId = sideEntry.session.loadForkedThread(response.result);
+    } catch (e) {
+      this.reportError(e);
+      return;
+    }
+    this.showPanel(sideEntry, false);
+    this.panels.set(sideThreadId, sideEntry);
+    this.log.info(`脇道の質問を開始しました: ${threadId} → ${sideThreadId}`);
+
+    try {
+      await sideEntry.session.send(question, entry.taskConfig ?? readConfig().codex);
+    } catch (e) {
+      this.reportError(e);
+      return;
+    }
+    this.reportActivity(sideEntry, question);
+    this.postState(sideEntry);
   }
 
   /** 画面へ現在の状態を送る。設定とループの進行はここで一緒に載せる。 */

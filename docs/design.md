@@ -1689,6 +1689,50 @@ Codex TUIの `/ps`（list background terminals）に相当する表示。issue #
 - `src/view/claudeChatView.ts`: `stopBackgroundTask` メッセージを受け、確認してから `ClaudeStreamSession.stopBackgroundTask` を呼ぶ
 - `src/view/chatScript.ts` / `chatStyles.ts`: 一覧の描画。`stoppable: true` の項目にだけ「停止」ボタンを出し、`false`（Codex）は「この画面から停止する経路はありません」と明示する（黙って何もしないボタンを置かない）。コマンド文字列は必ず `textContent` でDOMへ入れる
 
+### 14.26 脇道の質問（Codex TUIの `/btw` 相当）
+
+Codex TUIの `/btw` は「本流の会話を汚さずに、ephemeralなforkで一時的な会話を始める」機能（Codexバイナリの説明: "start a side conversation in an ephemeral fork"）。issue #24、TP-42、Phase 0（issue #1 Z-06）対応。issueに書かれたスコープはCodexのみ（Phase 0のコメントでClaude側にも同等の `side_question` control requestが実在すると分かったが、それは別issueで扱う）。
+
+#### 調査: `ephemeral` と `ThreadSection` は別物
+
+`codex app-server generate-json-schema --out`（CLI 0.147.0）で調べたところ、Phase 0が挙げていた3つの型は次のように性質が分かれる。
+
+- **`ephemeral`**（`ThreadStartParams.ephemeral` / `ThreadForkParams.ephemeral` / `Thread.ephemeral`。いずれも `boolean`）: `Thread.ephemeral` の説明は "Whether the thread is ephemeral and should not be materialized on disk."。**これが `/btw` の実体**（スキーマ根拠かつ実測で確認。後述）
+- **`section` / `sectionEnteredAt` / `threadSection/*`**（`ThreadSectionCreateParams` 等。`ClientRequest` に `threadSection/create` `threadSection/list` `threadSection/update` `threadSection/delete` が実在する）: スレッドを名前付きグループへ分類する、**永続化される**整理機能（`ThreadSection { id, name }`）。`ephemeral` とは無関係で、`/btw` の代替にはならない（スキーマ根拠のみ、未実装・未実測。将来スレッドの整理機能を作るなら別issue）
+
+#### 実測: `ephemeral: true` でforkしたスレッドの性質
+
+`codex app-server` を実際に起動し、`thread/start` → `turn/start`（"hi"）で会話が1往復あるスレッドを作ってから `thread/fork`（`{threadId, ephemeral: true}`。`lastTurnId` は指定しない）した（実測、課金を伴う呼び出しは必要最小限の2往復のみ）。
+
+- forkの応答にある新しいスレッドは `path: null`（通常のスレッドは `~/.codex/sessions/**` のロールアウトファイルのパスが入る）
+- forkされたスレッドへ実際に `turn/start` で発言し、reasoning・web検索を伴う応答が最後まで通ることを確認した（会話機能そのものは通常のスレッドと変わらない）
+- forkの前後で `~/.codex/sessions/**` のファイル一覧を比較したところ、**ephemeralなスレッドに対応するロールアウトファイルは1つも作られなかった**（元の非ephemeralなスレッドの分だけ増えた）
+- `thread/list`（`limit: 10`）の応答にephemeralなスレッドのidは**含まれなかった**（作成直後・発言後のいずれでも）
+- `thread/read` では読める（同じapp-serverプロセスが生きている間はメモリ上に存在するため）
+- 一方 **`thread/resume` では読み直せない**。`{"code":-32600,"message":"no rollout found for thread id ..."}` で拒否される（ロールアウトが無いため。`path: null` と符合する）
+- **forkの元スレッドに1往復も会話が無い状態では、ephemeralなforkそのものが失敗する**（`no rollout found for thread id <元のスレッド>`）。forkはディスク上のロールアウトを読み込む処理を経由するため、先に元スレッドが最低1往復進んでいる必要がある
+
+#### 既存の「分岐」との違い
+
+`thread/fork` 自体は既存の「分岐」（`forkFromTurn` / `chatView.ts` の `forkFrom`。§9.5「会話途中からの分岐」）と同じメソッドだが、`ephemeral` の有無で性質が正反対になる。
+
+|                    | 分岐（`ephemeral` 無し）                                                 | 脇道の質問（`ephemeral: true`）                               |
+| ------------------ | ------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| ディスクへの永続化 | される（ロールアウトファイルができる）                                   | **されない**（`path: null`、ファイルが作られない）            |
+| `thread/list`      | 出る（履歴に残り続ける）                                                 | **出ない**                                                    |
+| リロード後の復元   | `thread/resume` で復元できる                                             | **できない**（ロールアウトが無く `thread/resume` が拒否する） |
+| 使いどころ         | 過去のターンへ戻ってやり直す・別方向へ進める（本流の代わりに使い続ける） | 今の文脈のまま一言だけ聞いて捨てる（跡を残さない）            |
+
+分岐は「新しい本流」を作る操作であり、履歴に残り続ける。脇道の質問は逆に、**聞いたら消えることが要点**。両者を混同すると「分岐で足りるのでは」という疑問が出るが、`ephemeral` による永続化の有無という明確な違いがあるため、分岐とは別の操作として実装する。
+
+#### 実装
+
+- `src/codex/sideQuestion.ts`: `buildSideQuestionForkParams(threadId)` が `{ threadId, ephemeral: true }` を組み立てる（純粋関数）。`lastTurnId` は指定しない。分岐が過去の特定ターンを指す運用なのに対し、脇道の質問は「今の文脈まで」を引き継ぐため
+- `src/appserver/chatSession.ts`: `resume()` と `loadForkedThread(result)` の共通部分を `applyThreadSnapshot` へ切り出した。`loadForkedThread` はfork応答（`thread/resume` と同じ形）を通信なしでそのままこの画面の状態にする。`thread/resume` が使えない（前述の実測）ため専用の経路にした
+- `src/provider/pseudoCommands.ts`: 既存の擬似コマンド（`/compact`）に `/btw <質問>` を追加。`PseudoAction` に `sideQuestion` を追加し、`trimmedArgsOrUndefined` で引数（質問文）の有無を判定する。組込コマンドがapp-serverに存在しない事情は §9.8 と同じ
+- `src/view/chatView.ts`: `runPseudoCommand` に `sideQuestion` の分岐を追加。質問が空なら送らずエラーを出す。`startSideQuestion` が実際の流れを持つ: 現在のスレッドを `buildSideQuestionForkParams` でephemeral fork → 新しい `ChatPanel`（見出し「脇道」）を作り `loadForkedThread` で会話を差し込む → その画面へ質問を送る。元のスレッド（呼び出し元の `entry`）の状態には一切触れないため、本流の会話は汚れない
+- タブの復元: 脇道のタブはephemeralで `thread/resume` が使えないため、既存の「復元できないパネルは残さず閉じる」（§9.5「タブ復元」）がそのまま働く。専用の分岐は追加していない（ウィンドウ再読み込み後、`thread/resume` が失敗してパネルが閉じる）
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）
