@@ -1,4 +1,12 @@
-import { NO_TODOS, type ChatItem, type FileDiff, type TodoItem } from '../appserver/chatState';
+import {
+  NO_SEARCH_RESULTS,
+  NO_TODOS,
+  readWebSearchResults,
+  type ChatItem,
+  type FileDiff,
+  type TodoItem,
+  type WebSearchResult,
+} from '../appserver/chatState';
 import { isSessionId } from '../codex/argvBuilder';
 import type { TranscriptMeta } from './types';
 
@@ -113,6 +121,7 @@ function appendUserEntry(
   toolIndex: Map<string, number>,
 ): void {
   const content = messageContent(entry);
+  const toolResultCount = content.filter((part) => str(part['type']) === 'tool_result').length;
 
   for (const part of content) {
     if (str(part['type']) !== 'tool_result') {
@@ -127,6 +136,10 @@ function appendUserEntry(
       ...existing,
       text: toolResultText(part['content']),
       status: part['is_error'] === true ? 'エラー' : 'completed',
+      searchResults:
+        existing.kind === 'webSearch'
+          ? claudeSearchResults(entry['tool_use_result'], toolResultCount)
+          : existing.searchResults,
     };
   }
 
@@ -306,7 +319,50 @@ function item(
     status: undefined,
     turnId: undefined,
     diffs: overrides.diffs ?? [],
+    // tool_useの時点では結果が判らない。tool_resultが届いたときにappendUserEntryが埋める
+    searchResults: NO_SEARCH_RESULTS,
   };
+}
+
+/**
+ * Claude CodeのWebSearchツールの `tool_result` から検索結果を取り出す（issue #18）。
+ *
+ * APIのメッセージ本体（`content` の `tool_result` ブロック）には結果の構造情報が無い。
+ * 実測（`claude --output-format stream-json` でWebSearchを伴うターンを実際に回して確認）
+ * した `content` は自然文の1本の文字列で、`Links: [{"title":...,"url":...}, ...]` という
+ * JSON断片がその中に埋め込まれているだけ。一方、CLIが同じJSONLの行・stream-jsonの
+ * イベントに**別枠で**添える `tool_use_result.results[].content[]` のほうに、構造化された
+ * `{title, url}` がそのまま入っている。自然文からの抜き出しよりこちらを使う。
+ *
+ * `WebFetch` の `tool_use_result` は形が違う（実測: `{bytes, code, codeText, result,
+ * durationMs, url}` で `results` を持たない）ため、この関数は自然に空を返す
+ * （従来どおりクエリ＝URLだけの表示に留まる）。
+ *
+ * `toolResultCount` は同じイベントに含まれる `tool_result` の総数。`tool_use_result` は
+ * イベント単位でしか持てず、どの呼び出しの結果かをidで対応づける経路が無いため、
+ * 2件以上並んでいるときは安全側に倒して何も返さない（実測では常に1件）。
+ */
+export function claudeSearchResults(
+  toolUseResult: unknown,
+  toolResultCount: number,
+): WebSearchResult[] {
+  if (toolResultCount !== 1) {
+    return NO_SEARCH_RESULTS;
+  }
+  const root = rec(toolUseResult);
+  const results = root?.['results'];
+  if (!Array.isArray(results)) {
+    return NO_SEARCH_RESULTS;
+  }
+  const flattened: unknown[] = [];
+  for (const raw of results) {
+    const resultEntry = rec(raw);
+    const content = resultEntry?.['content'];
+    if (Array.isArray(content)) {
+      flattened.push(...content);
+    }
+  }
+  return readWebSearchResults(flattened);
 }
 
 /**

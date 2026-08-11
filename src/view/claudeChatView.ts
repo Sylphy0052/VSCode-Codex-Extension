@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { isApprovalDecision, type ApprovalDecision } from '../appserver/approvals';
-import type { ChatState, ChatUsage } from '../appserver/chatState';
+import { isOpenableSearchUrl, type ChatState, type ChatUsage } from '../appserver/chatState';
 import type { ClaudeSessionStore } from '../claude/sessionStore';
 import { ClaudeStreamSession } from '../claude/streamSession';
 import { transcriptItems } from '../claude/transcript';
@@ -708,6 +708,14 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       if (type === 'requestImage') {
         if (entry.panel !== undefined) {
           void postImageData(entry.panel, this.fs, entry.session.getState().items, m['path']);
+        }
+        return;
+      }
+      if (type === 'openUrl' && typeof m['url'] === 'string') {
+        // Webviewからは直接開けない。押した＝行き先を見た上での明示の意思表示なので
+        // 追加の確認はしない（design.md §9.9の `url` モードと同じ考え方。issue #18）
+        if (isOpenableSearchUrl(m['url'])) {
+          void vscode.env.openExternal(vscode.Uri.parse(m['url']));
         }
         return;
       }

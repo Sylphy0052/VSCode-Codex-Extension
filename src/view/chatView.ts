@@ -7,7 +7,7 @@ import {
   isApprovalDecision,
   type ApprovalDecision,
 } from '../appserver/approvals';
-import type { ChatItem, ChatState } from '../appserver/chatState';
+import { isOpenableSearchUrl, type ChatItem, type ChatState } from '../appserver/chatState';
 import { ChatSession } from '../appserver/chatSession';
 import {
   AppServerConnection,
@@ -743,6 +743,14 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       if (type === 'requestImage') {
         if (entry.panel !== undefined) {
           await postImageData(entry.panel, this.fs, entry.session.getState().items, m['path']);
+        }
+        return;
+      }
+      if (type === 'openUrl' && typeof m['url'] === 'string') {
+        // Webviewからは直接開けない。押した＝行き先を見た上での明示の意思表示なので
+        // 追加の確認はしない（design.md §9.9の `url` モードと同じ考え方。issue #18）
+        if (isOpenableSearchUrl(m['url'])) {
+          void vscode.env.openExternal(vscode.Uri.parse(m['url']));
         }
         return;
       }
