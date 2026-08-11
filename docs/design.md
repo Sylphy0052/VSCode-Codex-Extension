@@ -764,7 +764,7 @@ codex app-server generate-ts --out <DIR>            # TypeScript バインディ
 - テスト
   - unit（vitest、`test/unit/`）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で101ファイル1890件
   - **VSCodeに依存する層（`view/**` など、`vscode` モジュールを直接触るファイル）はunitテストから扱わない**。`vscode` はunitテストのプロセス内でimportできないため、判断が要るロジックは純粋関数へ切り出してそちらを試す（例: `view/panelState.ts`）
-  - integration（`@vscode/test-electron`、`test/integration/`）: 実VSCode（拡張機能ホスト）上で動く。WSL（xvfb-run経由）で実際に動作することを確認済み（issue #147）。自動化済みの範囲は、拡張機能の有効化・コマンド登録・設定の読み書き（`extension.test.ts` / `configuration.test.ts`、計6件）と、**ワークフローの並列実行**（`workflow.test.ts`、5件。Issue #158）。後者は`T1 → (T2 || T3) → T4`が依存順に進むこと・T2とT3が同時に走ること・両者が別のworktreeで動いて互いのファイルを踏まないこと・「タスク停止」がそのタスクだけを倒すこと・「中断」がターンだけを止めること・ノードから会話タブへの導線が生きていることを、実VSCode上で確かめる。CLIとの境界（`TaskSessionHost.openTaskSession`）だけを`ExtensionTestApi.workflow`経由でフェイクへ差し替え（`AGENT_SESSIONS_INTEGRATION_TEST=1`が立っているときだけ公開する口。立っていなければ差し替えの経路そのものが無い）、worktreeの作成・スケジューリング・状態遷移・workspaceStateへの保存は実物を通す。画面上の見え方（グラフの段組み・ノードの色・1行要約・タブの復元）と実CLIを伴う挙動は自動化できておらず、[manual-test.md](manual-test.md)のW群に残る。履歴一覧（TreeView）を狙った`sessionHistory.test.ts`は、実CLIを呼ばせない制約と`ProviderRegistry.available()`（実行ファイルを解決できないプロバイダを一覧から除外する）が噛み合わず、現状`test.skip`のまま残っている（原因と代替案の検証結果は同ファイル冒頭のコメント、および[manual-test.md](manual-test.md)の「統合テストで自動化した範囲」参照）。`activate()`はテスト専用の最小限の内部参照（`ExtensionTestApi`）を返し、`SessionTreeProvider`の実インスタンスへテストからアクセスできるようにしてある。既定の `npm run check` には含めない（実VSCodeのダウンロード・起動が要り重いため）。`npm run test:integration`（ディスプレイあり）/ `npm run test:integration:xvfb`（ヘッドレスLinux/WSL）で明示的に実行する。後者は`scripts/xvfb-vscode-test.sh`を経由する。`XDG_RUNTIME_DIR`が無い環境（WSL2など、`/run/user/<uid>`が作られないもの）ではVSCodeがウィンドウを作る前に無言で止まり、テストが1件も報告されないままハングするため、未設定・実在しない場合だけ使い捨てのディレクトリを用意して渡している（Issue #158で実測）
+  - integration（`@vscode/test-electron`、`test/integration/`）: 実VSCode（拡張機能ホスト）上で動く。WSL（xvfb-run経由）で実際に動作することを確認済み（issue #147）。自動化済みの範囲は、拡張機能の有効化・コマンド登録・設定の読み書き（`extension.test.ts` / `configuration.test.ts`、計6件）と、**ワークフローの並列実行**（`workflow.test.ts`、5件。Issue #158）。後者は`T1 → (T2 || T3) → T4`が依存順に進むこと・T2とT3が同時に走ること・両者が別のworktreeで動いて互いのファイルを踏まないこと・「タスク停止」がそのタスクだけを倒すこと・「中断」がターンだけを止めること・ノードから会話タブへの導線が生きていることを、実VSCode上で確かめる。CLIとの境界（`TaskSessionHost.openTaskSession`）だけを`ExtensionTestApi.workflow`経由でフェイクへ差し替え（`AGENT_SESSIONS_INTEGRATION_TEST=1`が立っているときだけ公開する口。立っていなければ差し替えの経路そのものが無い）、worktreeの作成・スケジューリング・状態遷移・workspaceStateへの保存は実物を通す。画面上の見え方（グラフの段組み・ノードの色・1行要約・タブの復元）と実CLIを伴う挙動は自動化できておらず、[manual-test.md](manual-test.md)のW群に残る。履歴一覧（TreeView）を狙った`sessionHistory.test.ts`は、実CLIを呼ばせない制約と`ProviderRegistry.available()`（実行ファイルを解決できないプロバイダを一覧から除外する）が噛み合わず、現状`test.skip`のまま残っている（原因と代替案の検証結果は同ファイル冒頭のコメント、および[manual-test.md](manual-test.md)の「統合テストで自動化した範囲」参照）。`activate()`はテスト専用の最小限の内部参照（`ExtensionTestApi`）を返し、`SessionTreeProvider`の実インスタンスへテストからアクセスできるようにしてある。既定の `npm run check` には含めない（実VSCodeのダウンロード・起動が要り重いため）。`npm run test:integration`（ディスプレイあり）/ `npm run test:integration:xvfb`（ヘッドレスLinux/WSL）で明示的に実行する。後者は`scripts/xvfb-vscode-test.sh`を経由する。`XDG_RUNTIME_DIR`が無い環境ではVSCodeがウィンドウを作る前に無言で止まりハングするため、使い捨てのディレクトリを用意して渡している（§14.32）
   - 実CLIプロセス・Webviewの中身・承認カードのような、実際のCodex/Claude Codeとの対話が要る範囲、および上記の理由で自動化に至らなかった範囲は、引き続き[manual-test.md](manual-test.md)のチェックリストと実施記録で担保する
 - `scripts/check.sh` に lint / typecheck / test を集約し、commit前に全緑を必須とする（integrationテストは含まない）
 - パッケージング: `@vscode/vsce`
@@ -1970,11 +1970,23 @@ Codex TUIの `/import` はClaude Codeなど他エージェントから設定・�
 #### 検証
 
 - `test/unit/stdinSafety.test.ts`: `canWriteStdin` / `safeWriteStdin` / `guardStdinErrors`をフェイクの`proc`で検証（純粋関数部分）
-- `test/integration/sessionHistory.test.ts`: 即終了するスタブへ`codex.executablePath`を向ける統合テスト（#147で見つかった実際の再現条件）。**この対策で未捕捉例外は消え、他のテストを道連れにしなくなった**が、`test.skip`を外して実行すると**テストが完了しないまま止まる**（16分待って1件も結果が出ない）ことを実測したため、skipのまま残している
+- `test/integration/sessionHistory.test.ts`: 即終了するスタブへ`codex.executablePath`を向ける統合テスト（#147で見つかった実際の再現条件）。**この対策で未捕捉例外は消え、他のテストを道連れにしなくなった**
 
-#### 残っている問題
+`test.skip`を外して実行すると、ハングせず完走して6 passing / 5 failingになる。残る5件は履歴一覧が空になるという別の問題で、issue #164 で追う。
 
-未捕捉例外は塞いだが、**相手が即終了したときに待ちを打ち切る作りは無い**。単発の問い合わせにはタイムアウトがあるので最終的には決着するが、常駐接続側で「もう応答が来ない」と判断する経路が弱い。`sessionHistory.test.ts`が完了しないのはこれが原因とみられる（未特定）。ここを詰めればH群5件の自動化が通る見込み
+一時期「skipを外すとテストが完了しないまま止まる」と記録していたが、これは誤りだった。原因はEPIPEでも待ちの打ち切りでもなく、実行環境の`XDG_RUNTIME_DIR`が消えていたこと（§14.32）。skipの有無ともこの対策とも無関係だった。
+
+### 14.32 統合テストのXDG_RUNTIME_DIR（issue #163）
+
+VSCodeは単一インスタンス判定のためのIPCソケットを`XDG_RUNTIME_DIR`の下へ作る。このディレクトリが実在しないと、ソケットを作れないまま起動が終わらず、**テストは1件も始まらないまま止まる**。mochaの出力が一切出ないので、テストの問題と見分けがつきにくい。
+
+WSL2ではsystemd-logindのユーザーセッションが終わると`/run/user/<uid>`ごと消える。環境変数`XDG_RUNTIME_DIR`だけが残ってディレクトリが無い状態になるため、未設定時のフォールバックも働かない。
+
+対策として`test/integration/fixtures/setup.mjs`の`createRuntimeDir()`で使い捨てのディレクトリを毎回作り、`.vscode-test.mjs`の`env`から渡す。ユーザーの`/run/user/<uid>`には触らない。
+
+置き場所を`.vscode-test/`配下ではなく`os.tmpdir()`の直下にしているのは、UNIXドメインソケットのパス長制限（107文字）に収めるため。リポジトリが深い場所にあると`<repo>/.vscode-test/fixtures/.../vscode-xxxxxxxx-1.13-main.sock`が上限を超え、`listen EINVAL`で起動に失敗する。
+
+切り分けで無関係と分かったもの: VSCodeのバージョン（1.132.0に固定しても再現）、コードの変更（#155を含まないコミットでも再現）、残留プロセス、ディスク・メモリの空き。
 
 ## 15. 作業記録（日報・週報連携）
 

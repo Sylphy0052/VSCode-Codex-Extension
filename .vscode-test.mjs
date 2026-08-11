@@ -28,6 +28,9 @@ export default defineConfig({
     // codex/claudeが実行ファイルとしてPATH上に居ても解決させない（実CLIを絶対に呼ばせない
     // ための二重の防御。設定側の対策は setup.mjs のexecutablePath参照）。
     PATH: '/usr/bin:/bin',
+    // VSCodeがIPCソケットを作る先。実行環境の `/run/user/<uid>` が消えていても起動できる
+    // ようにする（issue #163。理由は setup.mjs の createRuntimeDir 参照）。
+    XDG_RUNTIME_DIR: fixtures.runtimeDir,
     // ワークフローの統合テスト（Issue #158）だけがTaskSessionHostの差し替えを使う。
     // これが立っていないとき、拡張機能は差し替え口そのものを公開しない
     // （`src/extension.ts` の `isIntegrationTestMode`）。
