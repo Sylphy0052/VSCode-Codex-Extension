@@ -15,9 +15,9 @@ import { MAX_PROMPT_LENGTH } from './workflow';
  * `McpTransportPort` のNode実装（`startHttpMcpTransport`。Issue #105で追加）である。
  *
  * `waitingReply` の実際の状態遷移・MCPサーバの起動・タスクセッションへの設定配布は
- * `runner.ts` / `taskSession.ts` の責務（Issue #105で配線）。ただし、実際にCLIへ
- * MCP設定を渡す経路（`src/view/chatView.ts` / `claudeChatView.ts`）はIssue #104と
- * 衝突するため対象外にしてある。`runner.ts`のJSDoc・最終報告を参照。
+ * `runner.ts` / `taskSession.ts` の責務。実際にCLIへMCP設定を渡す経路
+ * （`src/view/chatView.ts` / `claudeChatView.ts`）とツールの可視性確認も含めて
+ * 配線済み（Issue #123）。`runner.ts`のJSDoc・最終報告を参照。
  */
 
 /**
@@ -45,6 +45,18 @@ export const MAX_MESSAGES_PER_RUN = 500;
 
 /** `agent.workflows.replyTimeoutSec` の既定値（design.md §16.21）。 */
 export const DEFAULT_REPLY_TIMEOUT_SEC = 300;
+
+/**
+ * タスクのセッションへ渡すMCP設定（Codexの`thread/start`の`config.mcp_servers.<name>` /
+ * Claude Codeの`--mcp-config`の`mcpServers.<name>`）で使うサーバ名（design.md §16.21
+ * 「拡張機能がMCPサーバを1つ立て、タスクのセッションへツールとして見せる」）。
+ *
+ * `MessagingMcpServer`が`initialize`で返す`serverInfo.name`（`SERVER_INFO_RESULT`）とは
+ * 別物。こちらは呼び出し側（`thread/start`のconfig / `--mcp-config`のJSON）が選ぶ
+ * 設定キーで、`mcpServerStatus/list`・`mcp_status`の一覧にこの名前で現れる
+ * （実測: `codex app-server` / `claude` の両方でCLI 0.147.0・2.1.227にて確認）。
+ */
+export const MESSAGING_MCP_SERVER_NAME = 'task-messaging';
 
 /* ------------------------------------------------------------------------ *
  * メッセージの検証
@@ -429,6 +441,16 @@ export interface TaskMessagingHubDeps {
   now?: () => number;
   /** メッセージidの生成。テスト用の差し替え口。既定は `node:crypto` の `randomUUID`。 */
   randomId?: () => string;
+  /**
+   * `sendMessage`が受け付けた（`validateSendMessage`が`accepted: true`を返した）直後に
+   * 同期的に呼ばれる。**省略可能**（省略時は何も起きず、既存の呼び出し・テストはそのまま動く）。
+   *
+   * `runner.ts`（実行層）が、この通知を使って`waitingReply`への実際の遷移を行う
+   * （design.md §16.21）: `expectReply: true`なら送信元タスクのループを一時停止し、
+   * 宛先タスクが`waitingReply`であれば再開する。純粋関数（`validateSendMessage`等）
+   * 自体は状態遷移を持たないため、遷移の実行はこの通知を受け取った側（実行層）の責務にする。
+   */
+  onAccepted?: (message: StoredMessage) => void;
 }
 
 /**
@@ -478,6 +500,7 @@ export class TaskMessagingHub {
       createdAtMs: this.deps.now?.() ?? Date.now(),
     };
     this.store = enqueueMessage(this.store, message);
+    this.deps.onAccepted?.(message);
     return validation;
   }
 
