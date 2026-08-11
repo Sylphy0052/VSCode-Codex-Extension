@@ -1614,6 +1614,34 @@ Commands:
 - `src/view/settingsProvider.ts`: `SettingsSnapshot`に`plugins: PluginsSnapshot`と`apps: AppsSnapshot`を、`ClaudeSettingsSnapshot`に`plugins: PluginsSnapshot`を追加。`installCodexPlugin` / `uninstallCodexPlugin` / `toggleClaudePlugin` / `installClaudePlugin` / `uninstallClaudePlugin`を新設。インストール・アンインストールは確認ダイアログ（「何をどこから入れるか」を明示）を必ず挟む。有効/無効の切替（Claude Codeのみ）はMCP/skillsの切替と同じく破壊的操作ではないため確認ダイアログを挟まない
 - `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画と操作。インストールは既存の`loginCodexApiKey`と同じ`showInputBox`パターン（Codexはマーケットプレイスを続けて`showQuickPick`で選ばせる）。plugin/appの名前・説明は必ず`textContent`でDOMへ入れ、HTMLとして解釈させない
 
+### 14.23 トランスクリプト表示と生テキストモード
+
+CodexのTUIは Ctrl+T でトランスクリプトを表示し、`/raw` で選択・コピーしやすい生テキストモードに切り替えられる。チャット画面には項目ごとのコピーボタン（`chatScript.ts` の `copy`）しか無く、会話全体をテキストで取り出す手段が無かった。issue #25・design.mdのTP-43対応。スコープはCodex/Claude両方（Claudeの `/export` 相当もここに含める）。
+
+#### 調査（Phase 0の結果・issue #1コメント、およびそこからさらに確定させたこと）
+
+- Codex: `thread/read` でスレッド全体を読める（`thread/resume` の応答にも `turns` が入る。実装済み）
+- Codex: `item/*` の種類が `generate-json-schema` の出力から全て分かる。Markdown化で未知の種類に出会っても、`normalizeItem` の default 分岐と同じ「種類名をそのまま見出しにする」防御で崩れないようにできる
+- Claude: `initialize` の応答に `output_style` / `available_output_styles`（`default` `Proactive` `Explanatory` `Learning`）がある。TUIの `/raw` に相当する表示切替は拡張機能側の描画の話であり、CLIには依存しない
+- Claudeの `/export`（`initialize` が返す90コマンド前後に含まれる）はユーザーメッセージとして送れば動く可能性があるが、**保存先がCLI側になる**。拡張機能のUIとしては自前でMarkdown化するほうが素直なため、この経路は採らない
+- 拡張機能は既にCodex/Claude双方の会話を `ChatItem[]`（`src/appserver/chatState.ts`）へ正規化して画面に描いており（Codex: `normalizeItem`、Claude: `src/claude/transcript.ts`）、生テキスト化に必要な情報はどちらも会話を開いている `ChatState.items` だけで揃っている。CLI側に専用のエクスポートAPIが無くても実装できる
+
+#### 実装
+
+「Markdownとして取り出す」操作を1つに束ね、クリップボードへのコピー・ファイルへの保存・生テキスト表示（装飾を落とした表示モード）の3つをそこから選ばせる。3つとも同じ組み立て（Markdown文字列）を使い回すため、作りを増やさない。
+
+- `src/appserver/transcriptMarkdown.ts`: `buildTranscriptMarkdown(items, agentLabel)` が `ChatState.items` からMarkdownを組む純粋関数。`vscode` を import する `src/view/**` から独立させ、ユニットテストで直接確かめる。項目ごとに `## 見出し（種類・detail・status・truncated注記）` と本文を並べ、`---` で区切る。見出しの語彙は `chatScript.ts` の `KIND_LABEL` に揃えた。本文が無い項目（`enteredReviewMode` など）も見出しだけ残し、イベントを取りこぼさない。`reasoning` は全文（`reasoningFull`）があればそちらを優先する（issue #19と同じ考え方。画面の折りたたみは表示だけの都合で書き出しには影響させない）。ファイル変更は`diff`フェンス、Web検索結果はMarkdownリンクの箇条書き、画像はパス/代替テキストの箇条書きにする
+- 同ファイルの `MAX_TRANSCRIPT_CHARS`（500万文字）: `MAX_OUTPUT_CHARS`（1項目あたりの上限）と同じ考え方を会話全体の合計にも適用し、超えた分は先頭を捨てて末尾（直近のやり取り）を残す。「長い会話でも取り出しが完了する」という受入基準に対応する。組み立てはWebviewではなく拡張機能ホスト側（Node）で行うため、大きな会話でもWebviewの描画スレッドは固まらない
+- `defaultTranscriptFileName(now)`: 保存ダイアログの既定ファイル名（`transcript-yyyyMMdd-HHmmss.md`）を作る純粋関数
+- `src/view/chatView.ts`: `runExportTranscript(items, agentLabel)` を追加し、Codex画面・Claude Code画面の両方で共有する（`confirmCompact` 等と同じ共有関数の置き場）。会話が空なら「取り出せません」と伝えて終わる（黙って何も起きない状態を作らない）。空でなければ `showQuickPick` で「クリップボードへコピー」「ファイルへ保存」「生テキストで開く」の3択を出す（`runReview` の対象選択と同じQuickPickの流儀）
+  - コピー: `vscode.env.clipboard.writeText(markdown)`
+  - 保存: `showSaveDialog`（既定ファイル名は `defaultTranscriptFileName`）→ `vscode.workspace.fs.writeFile`
+  - 生テキストで開く: `vscode.workspace.openTextDocument({content: markdown, language: 'markdown'})` → `showTextDocument(doc, {preview: false})`。装飾（バブル・折りたたみ・画像）を持たない通常のエディタタブとして開くため、これがそのまま「生テキストモード」になる。同じ手は `extension.ts` の `handlePlanFailure`（ワークフロー生成失敗時に生の応答をエディタで開く）で既に使っている
+- `src/view/chatScript.ts` / `renderShell`: 入力欄の周りに「エクスポート」ボタンを追加し、押すと `{type: 'exportTranscript'}` を送るだけにする（組み立ては全てホスト側）
+- `src/view/chatView.ts`（`ChatViewManager.handleMessage`）/ `src/view/claudeChatView.ts`（`ClaudeChatViewManager.handleMessage`）: `exportTranscript` メッセージを受けて `runExportTranscript` を呼ぶ。`entry.session.getState().items` をそのまま渡し、agentLabelはそれぞれ `'Codex'` / `'Claude Code'`
+- **外部へは送らない**。クリップボード・ローカルファイル・エディタタブの3つに留め、ネットワーク越しの送信機能は作らない（仕様どおり。生テキストには機微な内容が含まれうるため）
+- `showQuickPick` / `showSaveDialog` / `env.clipboard` / `workspace.fs` / `openTextDocument` はテスト用の `vscode` モック（`test/mocks/vscode.ts`）に無く、既存の `review` メッセージ（`runReview`）と同じ理由でユニットテストの対象外（実機確認に回す。`docs/manual-test.md` C-38 / L-36）。Markdownの組み立てそのものは純粋関数として全面的にユニットテストする
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）
