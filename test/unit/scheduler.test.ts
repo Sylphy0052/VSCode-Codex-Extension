@@ -10,9 +10,25 @@ import {
   markWaitingApproval,
   retryTask,
   type RunState,
+  type TaskState,
 } from '../../src/orchestrator/runState';
 import { getRunOutcome, nextTasksToStart } from '../../src/orchestrator/scheduler';
 import type { WorkflowDefinition, WorkflowTask } from '../../src/orchestrator/workflow';
+
+/**
+ * `waitingReply` への実際の遷移（`messaging.ts`への配線）は#105の範囲で、この時点では
+ * `runState.ts` に遷移関数が無い。スケジューリング側の枠計算・終了判定が`waitingReply`を
+ * 正しく扱うかだけをテストしたいので、状態を直接差し替えるテスト専用ヘルパーで代用する。
+ */
+const withState = (run: RunState, taskId: string, state: TaskState): RunState => {
+  const current = run.tasks.get(taskId);
+  if (current === undefined) {
+    return run;
+  }
+  const tasks = new Map(run.tasks);
+  tasks.set(taskId, { ...current, state });
+  return { ...run, tasks };
+};
 
 const task = (id: string, dependsOn: string[] = [], retries = 0): WorkflowTask => ({
   id,
@@ -101,6 +117,19 @@ describe('nextTasksToStart', () => {
     run = markWaitingApproval(run, 'T2');
 
     // T2がwaitingApprovalのままでも枠を占めているため、T3は開始できない
+    expect(nextTasksToStart(d, run)).toEqual(new Set());
+  });
+
+  it('waitingReplyも並列の枠を占める（design.md §16.3。返信待ちもセッションは生きている）', () => {
+    const tasks = diamondTasks();
+    const d = def(tasks, 1);
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = finishDone(run, tasks, 'T1');
+    run = markRunning(run, 'T2');
+    run = withState(run, 'T2', 'waitingReply');
+
+    // T2がwaitingReplyのままでも枠を占めているため、T3は開始できない
     expect(nextTasksToStart(d, run)).toEqual(new Set());
   });
 
@@ -228,6 +257,14 @@ describe('getRunOutcome', () => {
   it('pending/running/waitingApprovalが残っていればrunning', () => {
     const tasks = diamondTasks();
     const run = createRunState(tasks);
+    expect(getRunOutcome(run)).toBe('running');
+  });
+
+  it('waitingReplyが残っていればrunning（design.md §16.5「まだ終わっていない」）', () => {
+    const tasks = [task('T1', [])];
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = withState(run, 'T1', 'waitingReply');
     expect(getRunOutcome(run)).toBe('running');
   });
 
