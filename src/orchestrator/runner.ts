@@ -42,6 +42,7 @@ import {
   integrationBranchName,
   integrationWorktreePath,
   isMergeResolutionComplete,
+  INTEGRATION_DIR_NAME,
   IntegrationMergeQueue,
   MERGE_RESOLUTION_CONDITION,
   MERGE_RESOLUTION_MAX_ITERATIONS,
@@ -414,6 +415,15 @@ export interface TaskSnapshot {
    * `true`の間、`revealTask`はこのタスク自身のセッションではなく衝突解決セッションを開く。
    */
   mergeResolutionActive: boolean;
+  /**
+   * このタスクのPR/MRの番号（design.md §16.11・§16.18、Issue #118）。作られていなければ
+   * `undefined`（`pullRequestUrl`も`undefined`のとき、Viewはリンクの欄を出さない）。
+   * リロード直後（`hasLiveSession: false`）でも、永続化された値（`PersistedTaskState`）が
+   * あれば読める。
+   */
+  pullRequestNumber: number | undefined;
+  /** このタスクのPR/MRのURL。 */
+  pullRequestUrl: string | undefined;
 }
 
 /** ワークフローViewが描画する1実行分のスナップショット（design.md §16.8）。 */
@@ -444,6 +454,19 @@ export interface WorkflowRunSnapshot {
    * これと`tasks`から統合の状況（取り込み済み件数）を導く。
    */
   integrationBranch?: string | undefined;
+  /**
+   * 統合PR/MRの番号（design.md §16.8「そのほか」・§16.11・§16.18、Issue #118）。
+   * `integrationBranch`と同じく、統合の概念が無い実行やプレビューでは`undefined`。
+   * `integrationPullRequestUrl`も`undefined`のとき、Viewはリンクの欄を出さない。
+   */
+  integrationPullRequestNumber?: number | undefined;
+  /** 統合PR/MRのURL。 */
+  integrationPullRequestUrl?: string | undefined;
+  /**
+   * 統合→mainの最終マージ（design.md §16.18「最終マージ」）の成否。試みていなければ
+   * `undefined`（`finalMerge: pr-only`、統合PR/MRの作成に失敗、runがまだ終わっていない等）。
+   */
+  finalMergeOutcome?: 'merged' | 'failed' | undefined;
 }
 
 /**
@@ -467,6 +490,18 @@ export type LiveRunForgeState =
        */
       baseBranch: string | undefined;
     };
+
+/**
+ * PR/MRの結果（design.md §16.11・§16.18、Issue #118）。タスク層・統合層のどちらにも使う。
+ * **番号とURLだけを持ち、本文は持たない**（§16.11「応答本文は保存しない」・§16.21と同じ
+ * 方針。`prompt`/`done`はホストへ送るだけで、ここへは持ち帰らない）。`number`は
+ * `parsePullRequestNumberFromUrl`がURLから取り出せなかった場合に`undefined`になりうるが、
+ * `url`は常に持つ（呼び出し側は`url !== undefined`を確認してから結果を作る）。
+ */
+export interface PullRequestResult {
+  number: number | undefined;
+  url: string;
+}
 
 /** タスク1件の実行時ブックキーピング。`RunState`（純粋）とは別に、セッション等の実体を持つ。 */
 interface LiveTask {
@@ -524,6 +559,12 @@ interface LiveTask {
    * 入力に使う。
    */
   waitingReplySinceMs: number | undefined;
+  /**
+   * このタスクのPR/MRの結果（design.md §16.11・§16.18、Issue #118）。`attemptMerge`
+   * （`mergeTaskWithForge`が返す`flow.pullRequest.created && url !== undefined`の分岐）で
+   * 書き込む。作られていなければ`undefined`。
+   */
+  pullRequest: PullRequestResult | undefined;
 }
 
 interface LiveRun {
@@ -581,6 +622,16 @@ interface LiveRun {
    * taskIdをキーにする（1タスクにつき同時に1件のマージしか走らない）。
    */
   mergeResolutions: Map<string, TaskSession>;
+  /**
+   * 統合PR/MRの結果（design.md §16.11・§16.18、Issue #118）。`finalizeForge`で書き込む。
+   * 作られていなければ`undefined`。
+   */
+  integrationPullRequest: PullRequestResult | undefined;
+  /**
+   * 統合→mainの最終マージ（design.md §16.18「最終マージ」）の成否。`finalizeForge`で
+   * 書き込む。試みていなければ`undefined`。
+   */
+  finalMergeOutcome: 'merged' | 'failed' | undefined;
 }
 
 /** `onChanged` の最小限のpub-sub。VSCodeの `EventEmitter` には依存しない（design.mdの方針どおり）。 */
@@ -644,6 +695,11 @@ export class WorkflowRunner {
       return undefined;
     }
     const tasks = live.def.tasks.map((task) => this.buildTaskSnapshot(live, task));
+    // 統合PR/MRの結果・最終マージの成否は、このプロセスでまだ何も試みていない
+    // （`live.integrationPullRequest`/`live.finalMergeOutcome`が`undefined`の）間、
+    // 永続化された値（前のウィンドウで作られた等）へフォールバックする
+    // （design.md §16.11「リロードしてもPR/MRへのリンクが残る」・Issue #118）
+    const persisted = this.deps.store.find(runId);
     return {
       runId: live.runId,
       name: live.def.name,
@@ -659,12 +715,22 @@ export class WorkflowRunner {
       ],
       haltedByUser: live.runState.haltedByUser,
       integrationBranch: live.integration?.branch,
+      integrationPullRequestNumber:
+        live.integrationPullRequest?.number ?? persisted?.integrationPullRequestNumber,
+      integrationPullRequestUrl:
+        live.integrationPullRequest?.url ?? persisted?.integrationPullRequestUrl,
+      finalMergeOutcome: live.finalMergeOutcome ?? persisted?.finalMergeOutcome,
     };
   }
 
   private buildTaskSnapshot(live: LiveRun, task: WorkflowTask): TaskSnapshot {
     const state = live.runState.tasks.get(task.id);
     const liveTask = live.tasks.get(task.id);
+    // PR/MRの結果も、branch同様このウィンドウでまだセッションを開いていない
+    // （リロード復元直後の）タスクでは`liveTask`が無い。branchと違い、PR/MRのリンクは
+    // リロード後も出す必要がある（design.md §16.11「リロードしてもPR/MRへのリンクが残る」・
+    // Issue #118の受入基準）ため、永続化された値へフォールバックする
+    const persistedTask = this.deps.store.find(live.runId)?.tasks[task.id];
     return {
       id: task.id,
       dependsOn: task.dependsOn,
@@ -684,6 +750,8 @@ export class WorkflowRunner {
       expandedPrompt: liveTask?.expandedPrompt,
       expandedContinuePrompt: liveTask?.expandedContinuePrompt,
       mergeResolutionActive: live.mergeResolutions.has(task.id),
+      pullRequestNumber: liveTask?.pullRequest?.number ?? persistedTask?.pullRequestNumber,
+      pullRequestUrl: liveTask?.pullRequest?.url ?? persistedTask?.pullRequestUrl,
     };
   }
 
@@ -1037,6 +1105,10 @@ export class WorkflowRunner {
       // 「無くても実行は止めない」設計に揃える）
       messaging: undefined,
       mergeResolutions: new Map(),
+      // 統合PR/MRの結果・最終マージの成否はこのプロセスでまだ何も試みていない
+      // （design.md §16.11。Viewは`getSnapshot`が読む永続化された値へフォールバックする）
+      integrationPullRequest: undefined,
+      finalMergeOutcome: undefined,
     };
   }
 
@@ -1204,6 +1276,8 @@ export class WorkflowRunner {
       pseudo,
       messaging: undefined,
       mergeResolutions: new Map(),
+      integrationPullRequest: undefined,
+      finalMergeOutcome: undefined,
     };
     this.runs.set(runId, live);
 
@@ -1599,6 +1673,88 @@ export class WorkflowRunner {
     return { removed, failed };
   }
 
+  /**
+   * 統合ブランチのworktreeと、終わったタスクの残りworktreeをまとめて撤去する
+   * （design.md §16.8「そのほか」の操作・§16.17「worktreeの片付け」、Issue #118）。
+   *
+   * **統合worktreeの撤去は、この操作からの明示的な呼び出しでしか行わない。** `blocked`
+   * タスクの再マージ（`retryMerge`）は統合worktreeを使い続けるため、runの終了時に
+   * 無条件で撤去してはいけない（Issue #118のコメント「統合worktreeの撤去タイミングは
+   * 未解決の論点」への回答）。runがまだ`running`の間は、後続タスクが統合worktreeを
+   * 必要としうるため撤去せず失敗として返す（安全側。人が明示的に押した操作であっても
+   * 走っているタスクの前提を壊してはいけない）。
+   *
+   * 統合worktreeの実体は `worktreePath(repoRoot, runId, '_integration')` が指す場所で、
+   * `integrationWorktreePath` と同じディレクトリを指す（design.md §16.17「`_integration`は
+   * タスクidとして予約する」）。そのため `deps.worktreeQueue.remove` をタスクのworktree撤去と
+   * 同じ入口から呼べる。未コミットの変更が残っていれば（`removeWorktree`自身の
+   * `uncommittedChanges`判定）撤去せず警告する（既存の方針を踏襲。設計上、統合worktreeで
+   * 衝突が未解決のまま残っている場合もここで弾かれる）。
+   *
+   * ブランチ自体は消さない（`git worktree remove`はworktreeの参照を外すだけ。
+   * design.md §16.17「ブランチは消さない。PR/MRから辿れる必要がある」）。
+   */
+  async cleanupIntegration(runId: string): Promise<{
+    tasksRemoved: string[];
+    tasksFailed: string[];
+    integrationRemoved: boolean;
+    integrationFailedMessage: string | undefined;
+  }> {
+    const live = this.runs.get(runId);
+    if (live === undefined) {
+      return {
+        tasksRemoved: [],
+        tasksFailed: [],
+        integrationRemoved: false,
+        integrationFailedMessage: undefined,
+      };
+    }
+    const taskResult = await this.removeWorktrees(runId);
+
+    if (live.integration === undefined) {
+      return {
+        tasksRemoved: taskResult.removed,
+        tasksFailed: taskResult.failed,
+        integrationRemoved: false,
+        integrationFailedMessage: undefined,
+      };
+    }
+    if (getRunOutcome(live.runState) === 'running') {
+      const message = 'runが実行中のため統合worktreeは撤去しませんでした';
+      this.deps.log.warn(`[workflow ${runId}] ${message}`);
+      return {
+        tasksRemoved: taskResult.removed,
+        tasksFailed: taskResult.failed,
+        integrationRemoved: false,
+        integrationFailedMessage: message,
+      };
+    }
+
+    const result = await this.deps.worktreeQueue.remove(
+      live.repoRoot,
+      runId,
+      INTEGRATION_DIR_NAME,
+      undefined,
+      this.deps.git,
+    );
+    this.notify(runId);
+    if (result.ok) {
+      return {
+        tasksRemoved: taskResult.removed,
+        tasksFailed: taskResult.failed,
+        integrationRemoved: true,
+        integrationFailedMessage: undefined,
+      };
+    }
+    this.deps.log.warn(`[workflow ${runId}] 統合worktreeの撤去に失敗しました: ${result.message}`);
+    return {
+      tasksRemoved: taskResult.removed,
+      tasksFailed: taskResult.failed,
+      integrationRemoved: false,
+      integrationFailedMessage: result.message,
+    };
+  }
+
   // ---- スケジューリング ----
 
   /** 状態が変わるたびに呼ぶ（design.md §16.3）。次に開始できるタスクを開始し、終了を判定する。 */
@@ -1726,6 +1882,7 @@ export class WorkflowRunner {
         expandedPrompt: undefined,
         expandedContinuePrompt: undefined,
         waitingReplySinceMs: undefined,
+        pullRequest: undefined,
       };
       live.tasks.set(taskId, liveTask);
       live.runState = recordSessionInfo(live.runState, taskId, session.sessionId, cwd);
@@ -2196,7 +2353,7 @@ export class WorkflowRunner {
     integration: { cwd: string; branch: string },
     taskCwd: string,
     taskBranch: string,
-  ): Promise<MergeTaskResult> {
+  ): Promise<{ merge: MergeTaskResult; pullRequest: PullRequestResult | undefined }> {
     const forgeDeps = this.deps.forge;
     const forge = live.forge;
     if (
@@ -2204,13 +2361,14 @@ export class WorkflowRunner {
       forge.kind !== 'active' ||
       !shouldCreateTaskPullRequest(forge.pullRequest)
     ) {
-      return this.integrationQueue.mergeTask(
+      const merge = await this.integrationQueue.mergeTask(
         integration.cwd,
         runId,
         taskId,
         taskBranch,
         this.deps.git,
       );
+      return { merge, pullRequest: undefined };
     }
 
     const flow = await runTaskPullRequestFlow({
@@ -2277,7 +2435,15 @@ export class WorkflowRunner {
       );
     }
 
-    return flow.mergeOutcome;
+    // design.md §16.11「タスクごとの...PR/MRの番号」・Issue #118。番号とURLだけを持ち帰る
+    // （本文は持ち帰らない）。作成できていても`url`が無い（CLIの出力形式が想定外）場合は
+    // 表示に使えないため記録しない（`else if`と同じ条件）
+    const pullRequest: PullRequestResult | undefined =
+      flow.pullRequest.created && flow.pullRequest.url !== undefined
+        ? { number: parsePullRequestNumberFromUrl(flow.pullRequest.url), url: flow.pullRequest.url }
+        : undefined;
+
+    return { merge: flow.mergeOutcome, pullRequest };
   }
 
   /**
@@ -2343,6 +2509,11 @@ export class WorkflowRunner {
       });
     } else if (result.pullRequest.url !== undefined) {
       this.deps.log.info(`[workflow ${runId}] 統合PR/MRを作成しました: ${result.pullRequest.url}`);
+      // design.md §16.11「統合PR/MRの番号」・Issue #118。番号とURLだけを持ち帰る
+      live.integrationPullRequest = {
+        number: parsePullRequestNumberFromUrl(result.pullRequest.url),
+        url: result.pullRequest.url,
+      };
     }
 
     // design.md §16.18「この場合、finalMerge: autoであってもmainへのマージは行わない」。
@@ -2357,10 +2528,13 @@ export class WorkflowRunner {
           taskId: undefined,
           message: `最終マージに失敗しました: ${merge.message}`,
         });
+        live.finalMergeOutcome = 'failed';
       } else {
         this.deps.log.info(`[workflow ${runId}] mainへの最終マージが完了しました`);
+        live.finalMergeOutcome = 'merged';
       }
     }
+    void this.persist(runId);
     this.notify(runId);
   }
 
@@ -2611,7 +2785,7 @@ export class WorkflowRunner {
     if (live === undefined) {
       return;
     }
-    const result = await this.mergeTaskWithForge(
+    const { merge, pullRequest } = await this.mergeTaskWithForge(
       live,
       runId,
       taskId,
@@ -2621,7 +2795,18 @@ export class WorkflowRunner {
       taskBranch,
     );
 
-    if (result.kind === 'success') {
+    // design.md §16.11「タスクごとの...PR/MRの番号」・Issue #118。PR/MRの作成はマージより
+    // 前の手順（design.md §16.18「作る順序」）なので、マージが失敗・衝突した場合でも
+    // 既に作られたPR/MRのリンクは書き込む。`live.tasks.get(taskId)`はリロード直後に
+    // マージを再開した経路（`resumeMergeAfterReload`）では未定義になりうる
+    // （このウィンドウでセッションを開いていないため）。その場合はこの1回分の結果を
+    // 保持できないが、実行そのものは止めない（安全側）
+    const liveTaskForPr = live.tasks.get(taskId);
+    if (liveTaskForPr !== undefined && pullRequest !== undefined) {
+      liveTaskForPr.pullRequest = pullRequest;
+    }
+
+    if (merge.kind === 'success') {
       live.runState = markMergeSucceeded(live.runState, live.def.tasks, taskId);
       this.cleanupWorktreeIfNeeded(live, task, taskId, live.tasks.get(taskId));
       void this.persist(runId);
@@ -2629,8 +2814,8 @@ export class WorkflowRunner {
       this.pump(runId);
       return;
     }
-    if (result.kind === 'failure') {
-      this.deps.log.error(`[workflow ${runId}/${taskId}] マージに失敗しました: ${result.message}`);
+    if (merge.kind === 'failure') {
+      this.deps.log.error(`[workflow ${runId}/${taskId}] マージに失敗しました: ${merge.message}`);
       live.runState = markMergeFailed(live.runState, live.def.tasks, taskId);
       void this.persist(runId);
       this.notify(runId);
@@ -2639,7 +2824,8 @@ export class WorkflowRunner {
     }
 
     // 衝突。design.md §16.17「コンフリクト」1.「衝突した状態のままにしておく」
-    await this.startMergeResolution(runId, taskId, task, integration, result, originCommit);
+    void this.persist(runId);
+    await this.startMergeResolution(runId, taskId, task, integration, merge, originCommit);
   }
 
   /**
@@ -2883,6 +3069,10 @@ export class WorkflowRunner {
           submissionCount: s.submissionCount,
           retryCount: s.retryCount,
           failure: s.failure,
+          // design.md §16.11「タスクごとの...PR/MRの番号」・Issue #118。branchと同じ理由で
+          // liveTaskが無ければ前回persistした値を引き継ぐ
+          pullRequestNumber: liveTask?.pullRequest?.number ?? current?.tasks[id]?.pullRequestNumber,
+          pullRequestUrl: liveTask?.pullRequest?.url ?? current?.tasks[id]?.pullRequestUrl,
         };
       }
       return {
@@ -2895,6 +3085,11 @@ export class WorkflowRunner {
         tasks,
         haltedByUser: live.runState.haltedByUser,
         integrationBranch: live.integration?.branch ?? current?.integrationBranch ?? '',
+        // design.md §16.11「統合PR/MRの番号」・Issue #118。同じく前回persistした値を引き継ぐ
+        integrationPullRequestNumber:
+          live.integrationPullRequest?.number ?? current?.integrationPullRequestNumber,
+        integrationPullRequestUrl: live.integrationPullRequest?.url ?? current?.integrationPullRequestUrl,
+        finalMergeOutcome: live.finalMergeOutcome ?? current?.finalMergeOutcome,
       };
     });
   }
@@ -2902,6 +3097,22 @@ export class WorkflowRunner {
 
 function issue(message: string, taskIds: string[] = []): WorkflowIssue {
   return { taskIds, message };
+}
+
+/**
+ * PR/MRのURLから番号を取り出す（design.md §16.11「タスクごとの...PR/MRの番号」・
+ * 「統合PR/MRの番号」、Issue #118）。`forge.ts`の`CreatePullRequestOutcome`はURLしか
+ * 返さない（`gh pr create`の標準出力・`glab api`が返す`web_url`）ため、ここで拾う。
+ * GitHubは`.../pull/<n>`、GitLabは`.../-/merge_requests/<n>`の形式で、いずれも末尾が
+ * 10進数になる。取り出せなければ`undefined`（番号なし・URLだけは引き続き表示に使える）。
+ */
+function parsePullRequestNumberFromUrl(url: string): number | undefined {
+  const match = /\/(\d+)\/?$/u.exec(url);
+  if (match === null) {
+    return undefined;
+  }
+  const n = Number(match[1]);
+  return Number.isSafeInteger(n) && n > 0 ? n : undefined;
 }
 
 /**
