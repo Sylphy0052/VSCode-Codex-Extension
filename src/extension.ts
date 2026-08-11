@@ -40,10 +40,15 @@ import { nodeCliAvailability, nodeCliCommandRunner, nodeForgeFileSystem } from '
 import { startHttpMcpTransport } from './orchestrator/messaging';
 import { nodePseudoWorktreeFileSystem } from './orchestrator/pseudoWorktree';
 import {
+  buildRoadmapPlanGoal,
   createCliIssueListPort,
   createTaskSessionRoadmapGenerationPort,
   generateRoadmap,
   nodeRoadmapFileSystem,
+  parseRoadmapMarkdown,
+  planWorkflowFromRoadmapPhase,
+  selectNextRoadmapPhase,
+  validateRoadmap,
   type IssueListPort,
 } from './orchestrator/roadmap';
 import { WorkflowRunStore } from './orchestrator/runStore';
@@ -609,12 +614,11 @@ async function runRoadmap(
 }
 
 /**
- * ゴール文からワークフロー定義（YAML）を生成する（design.md §16.9、`agent.workflows.plan`）。
+ * ワークフロー定義（YAML）を生成する（design.md §16.9・§16.19、`agent.workflows.plan`）。
  *
- * `planWorkflow`（`planner.ts`）はYAML文字列を作るだけで、実行は一切行わない。
- * ここではその結果を保存し、エディタとワークフローViewを開くところまでを担う。
- * `WorkflowRunner.start` は呼ばない — 生成したワークフローを走らせるのは、人が
- * ワークフローViewから明示的に「実行」を選んだとき（design.md §16.13）。
+ * 入力の経路を2つ持つ（design.md §16.19 2段目「ゴール文に加えて、ロードマップのファイルを
+ * 取れるようにする」）。ゴール文からの直接生成はこれまでどおり、ロードマップからの生成は
+ * `planWorkflowFromRoadmapCommand` に委ねる。
  */
 async function planWorkflowCommand(
   chat: ChatViewManager,
@@ -627,6 +631,43 @@ async function planWorkflowCommand(
     void vscode.window.showErrorMessage('ワークフローを生成するにはフォルダを開いてください');
     return;
   }
+
+  const source = await vscode.window.showQuickPick(
+    [
+      { label: 'ゴール文から生成', sourceKind: 'goal' as const },
+      {
+        label: 'ロードマップから生成',
+        description: '既存のロードマップの1フェーズをタスクへ変換する（design.md §16.19）',
+        sourceKind: 'roadmap' as const,
+      },
+    ],
+    { placeHolder: 'ワークフローの生成方法を選択', ignoreFocusOut: true },
+  );
+  if (source === undefined) {
+    return;
+  }
+  if (source.sourceKind === 'roadmap') {
+    await planWorkflowFromRoadmapCommand(chat, claudeChat, view, log, folder);
+    return;
+  }
+  await planWorkflowFromGoalCommand(chat, claudeChat, view, log, folder);
+}
+
+/**
+ * ゴール文からワークフロー定義（YAML）を生成する（design.md §16.9）。
+ *
+ * `planWorkflow`（`planner.ts`）はYAML文字列を作るだけで、実行は一切行わない。
+ * ここではその結果を保存し、エディタとワークフローViewを開くところまでを担う。
+ * `WorkflowRunner.start` は呼ばない — 生成したワークフローを走らせるのは、人が
+ * ワークフローViewから明示的に「実行」を選んだとき（design.md §16.13）。
+ */
+async function planWorkflowFromGoalCommand(
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
+  view: WorkflowViewManager,
+  log: Logger,
+  folder: vscode.WorkspaceFolder,
+): Promise<void> {
   const goal = await vscode.window.showInputBox({
     title: 'ワークフローのゴール',
     prompt:
@@ -669,6 +710,121 @@ async function planWorkflowCommand(
     return;
   }
   await handlePlanFailure(result, log);
+}
+
+/**
+ * ロードマップの1フェーズから、ワークフロー定義（YAML）を生成する（design.md §16.19
+ * 2段目、`agent.workflows.plan`のロードマップ入力経路）。
+ *
+ * 材料の組み立てと分解セッションの起動は`roadmap.ts`の`planWorkflowFromRoadmapPhase`に
+ * 委ねる。ここではロードマップファイルの選択・フェーズの選択（design.md §16.19「1回の
+ * ワークフローで扱うのはロードマップの一部でよい」「次のフェーズだけYAMLにするを選べる
+ * ようにする」）・結果の保存とView表示（`handlePlanSuccess`/`handlePlanFailure`をゴール文
+ * 経路と共通で使う）を担う。
+ */
+async function planWorkflowFromRoadmapCommand(
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
+  view: WorkflowViewManager,
+  log: Logger,
+  folder: vscode.WorkspaceFolder,
+): Promise<void> {
+  const roadmapDir = readWorkflowsConfig().roadmapDir;
+  const pattern = new vscode.RelativePattern(folder, `${roadmapDir}/**/*.md`);
+  const files = await vscode.workspace.findFiles(pattern, undefined, 200);
+  if (files.length === 0) {
+    void vscode.window.showInformationMessage(
+      `ロードマップが見つかりません（${roadmapDir} 配下に .md を置いてください。先に「ロードマップの生成」を実行してください）`,
+    );
+    return;
+  }
+  const pickedFile = await vscode.window.showQuickPick(
+    files.map((f) => ({ label: vscode.workspace.asRelativePath(f), file: f })),
+    { placeHolder: '元にするロードマップを選択', ignoreFocusOut: true },
+  );
+  if (pickedFile === undefined) {
+    return;
+  }
+
+  const doc = await vscode.workspace.openTextDocument(pickedFile.file);
+  const parsed = parseRoadmapMarkdown(doc.getText());
+  if (parsed.phases.length === 0) {
+    void vscode.window.showErrorMessage('選択したロードマップにフェーズ・項目がありません');
+    return;
+  }
+  const validation = validateRoadmap(parsed);
+  if (validation.errors.length > 0) {
+    log.error(
+      `[planner] 選択したロードマップに問題があります: ${validation.errors
+        .map((e) => e.message)
+        .join(' / ')}`,
+    );
+    void vscode.window.showWarningMessage(
+      '選択したロードマップに問題があります。内容を確認してください（詳しくはログ）',
+    );
+  }
+
+  const nextPhase = selectNextRoadmapPhase(parsed);
+  const phasePicks = parsed.phases.map((phase) => ({
+    label: phase.name === '' ? '(無題のフェーズ)' : phase.name,
+    phase,
+    // `exactOptionalPropertyTypes`下では`description: undefined`を明示できないため、
+    // 次のフェーズでなければキー自体を持たせない
+    ...(phase === nextPhase ? { description: '次に着手すべきフェーズ' } : {}),
+  }));
+  const pickedPhase = await vscode.window.showQuickPick(phasePicks, {
+    placeHolder: '変換するフェーズを選択（1回のワークフローで扱うのは一部でよい）',
+    ignoreFocusOut: true,
+  });
+  if (pickedPhase === undefined) {
+    return;
+  }
+
+  const provider = DEFAULT_PROVIDER;
+  const host = provider === 'claude' ? claudeChat : chat;
+  const workspaceRoot = folder.uri.fsPath;
+
+  const result = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'ワークフローを生成しています…' },
+    async () => {
+      const workspaceSummary = await buildWorkspaceSummary(workspaceRoot, nodePlannerWorkspacePort);
+      return planWorkflowFromRoadmapPhase({
+        roadmapTitle: parsed.title,
+        phase: pickedPhase.phase,
+        workspaceSummary,
+        provider,
+        host,
+        cwd: workspaceRoot,
+        baseline: readSafetyBaseline(),
+        log,
+      });
+    },
+  );
+
+  if (!result.ok) {
+    await handlePlanFailure(result, log);
+    return;
+  }
+
+  if (result.roadmapMismatches.length > 0) {
+    log.warn(
+      `[planner] ロードマップの材料が正しく転記されていない可能性があります: ${result.roadmapMismatches
+        .map((m) => m.message)
+        .join(' / ')}`,
+    );
+    void vscode.window.showWarningMessage(
+      '生成されたワークフローが、ロードマップの内容（id・依存・Issue）と一致しない箇所があります' +
+        `（${result.roadmapMismatches.length}件）。内容を確認してください（詳しくはログ）`,
+    );
+  }
+
+  await handlePlanSuccess(
+    result,
+    buildRoadmapPlanGoal(parsed.title, pickedPhase.phase),
+    workspaceRoot,
+    view,
+    log,
+  );
 }
 
 /**
