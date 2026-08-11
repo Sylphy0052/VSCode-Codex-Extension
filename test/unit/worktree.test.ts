@@ -9,12 +9,10 @@ import {
   branchName,
   buildTaskBoundary,
   checkWorktreesGitignored,
-  createWorktree,
   decideWorkingDirectory,
   isGitWorkingTree,
   nodeGitCommandRunner,
   nodeWorktreeFileSystem,
-  removeWorktree,
   resolveGitCommonDir,
   resolveHeadCommit,
   shouldRemoveWorktree,
@@ -25,6 +23,12 @@ import {
   type GitCommandRunner,
   type WorktreeFileSystemPort,
 } from '../../src/orchestrator/worktree';
+
+/** `runId` はUUID形式で検証されるため、テスト全体で1つの妥当なUUIDを使い回す。 */
+const RUN_ID = '11111111-1111-4111-8111-111111111111';
+
+/** テストで使う妥当なコミットSHA（`HEAD_COMMIT_PATTERN` を満たす16進数）。 */
+const HEAD_SHA = 'deadbeef';
 
 /** `git` の呼び出しを記録し、プレフィックス一致で応答を差し替えられるフェイク。 */
 class FakeGit implements GitCommandRunner {
@@ -58,24 +62,43 @@ class FakeFs implements WorktreeFileSystemPort {
 
 describe('worktreePath / branchName', () => {
   it('置き場は<repo>/.agents/worktrees/<runId>/<taskId>になる', () => {
-    expect(worktreePath('/repo', 'run1', 'T2')).toBe(
-      path.join('/repo', '.agents', 'worktrees', 'run1', 'T2'),
+    expect(worktreePath('/repo', RUN_ID, 'T2')).toBe(
+      path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2'),
     );
   });
 
   it('並列の2タスクが別のworktreeパスになる', () => {
-    const t2 = worktreePath('/repo', 'run1', 'T2');
-    const t3 = worktreePath('/repo', 'run1', 'T3');
+    const t2 = worktreePath('/repo', RUN_ID, 'T2');
+    const t3 = worktreePath('/repo', RUN_ID, 'T3');
     expect(t2).not.toBe(t3);
   });
 
+  it('retryを渡すとディレクトリ名にも-retry<n>が付く（branchNameと対称。high1修正）', () => {
+    expect(worktreePath('/repo', RUN_ID, 'T2', 0)).toBe(
+      path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2-retry0'),
+    );
+    expect(worktreePath('/repo', RUN_ID, 'T2', 3)).toBe(
+      path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2-retry3'),
+    );
+  });
+
   it('ブランチ名はwf/<runId>/<taskId>になる', () => {
-    expect(branchName('run1', 'T2')).toBe('wf/run1/T2');
+    expect(branchName(RUN_ID, 'T2')).toBe(`wf/${RUN_ID}/T2`);
   });
 
   it('再試行時のブランチ名は-retry<n>付きになる', () => {
-    expect(branchName('run1', 'T2', 0)).toBe('wf/run1/T2-retry0');
-    expect(branchName('run1', 'T2', 3)).toBe('wf/run1/T2-retry3');
+    expect(branchName(RUN_ID, 'T2', 0)).toBe(`wf/${RUN_ID}/T2-retry0`);
+    expect(branchName(RUN_ID, 'T2', 3)).toBe(`wf/${RUN_ID}/T2-retry3`);
+  });
+
+  it('不正なrunId（UUID形式でない）は例外になる', () => {
+    expect(() => worktreePath('/repo', 'not-a-uuid', 'T2')).toThrow(/runId/);
+    expect(() => branchName('not-a-uuid', 'T2')).toThrow(/runId/);
+  });
+
+  it('不正なtaskId（パストラバーサル等）は例外になる', () => {
+    expect(() => worktreePath('/repo', RUN_ID, '../../../../etc/evil')).toThrow(/taskId/);
+    expect(() => branchName(RUN_ID, '../../../../etc/evil')).toThrow(/taskId/);
   });
 });
 
@@ -144,32 +167,33 @@ describe('shouldRemoveWorktree', () => {
   });
 });
 
-describe('createWorktree', () => {
+describe('WorktreeCreationQueue.create', () => {
   it('isolation: worktreeのタスクが<repo>/.agents/worktrees/<runId>/<taskId>で、ブランチwf/<runId>/<taskId>で作られる', async () => {
     const git = new FakeGit();
     git.respond(['rev-parse', '--verify'], { code: 1, stdout: '', stderr: '' });
     git.respond(['worktree', 'add'], { code: 0, stdout: '', stderr: '' });
+    const queue = new WorktreeCreationQueue();
 
-    const result = await createWorktree(
-      { repoRoot: '/repo', runId: 'run1', taskId: 'T2', headCommit: 'deadbeef', retry: undefined },
+    const result = await queue.create(
+      { repoRoot: '/repo', runId: RUN_ID, taskId: 'T2', headCommit: HEAD_SHA, retry: undefined },
       git,
     );
 
     expect(result).toEqual({
       ok: true,
-      cwd: path.join('/repo', '.agents', 'worktrees', 'run1', 'T2'),
-      branch: 'wf/run1/T2',
+      cwd: path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2'),
+      branch: `wf/${RUN_ID}/T2`,
     });
     expect(git.calls).toEqual([
-      { args: ['rev-parse', '--verify', '--quiet', 'refs/heads/wf/run1/T2'], cwd: '/repo' },
+      { args: ['rev-parse', '--verify', '--quiet', `refs/heads/wf/${RUN_ID}/T2`], cwd: '/repo' },
       {
         args: [
           'worktree',
           'add',
           '-b',
-          'wf/run1/T2',
-          path.join('/repo', '.agents', 'worktrees', 'run1', 'T2'),
-          'deadbeef',
+          `wf/${RUN_ID}/T2`,
+          path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2'),
+          HEAD_SHA,
         ],
         cwd: '/repo',
       },
@@ -179,16 +203,17 @@ describe('createWorktree', () => {
   it('同名のブランチが既にあるときエラーになり、git worktree addを試みない', async () => {
     const git = new FakeGit();
     git.respond(['rev-parse', '--verify'], { code: 0, stdout: 'sha\n', stderr: '' });
+    const queue = new WorktreeCreationQueue();
 
-    const result = await createWorktree(
-      { repoRoot: '/repo', runId: 'run1', taskId: 'T2', headCommit: 'deadbeef', retry: undefined },
+    const result = await queue.create(
+      { repoRoot: '/repo', runId: RUN_ID, taskId: 'T2', headCommit: HEAD_SHA, retry: undefined },
       git,
     );
 
     expect(result).toEqual({
       ok: false,
       reason: 'branchExists',
-      message: 'ブランチ wf/run1/T2 は既に存在します',
+      message: `ブランチ wf/${RUN_ID}/T2 は既に存在します`,
     });
     expect(git.calls.some((c) => c.args[0] === 'worktree')).toBe(false);
   });
@@ -201,9 +226,10 @@ describe('createWorktree', () => {
       stdout: '',
       stderr: 'fatal: something went wrong',
     });
+    const queue = new WorktreeCreationQueue();
 
-    const result = await createWorktree(
-      { repoRoot: '/repo', runId: 'run1', taskId: 'T2', headCommit: 'deadbeef', retry: undefined },
+    const result = await queue.create(
+      { repoRoot: '/repo', runId: RUN_ID, taskId: 'T2', headCommit: HEAD_SHA, retry: undefined },
       git,
     );
 
@@ -214,30 +240,74 @@ describe('createWorktree', () => {
     });
   });
 
+  it('不正なrunId/taskIdはinvalidIdentifierを返し、gitを一切呼ばない（high2修正）', async () => {
+    const git = new FakeGit();
+    const queue = new WorktreeCreationQueue();
+
+    const badRunId = await queue.create(
+      {
+        repoRoot: '/repo',
+        runId: 'not-a-uuid',
+        taskId: 'T2',
+        headCommit: HEAD_SHA,
+        retry: undefined,
+      },
+      git,
+    );
+    expect(badRunId).toMatchObject({ ok: false, reason: 'invalidIdentifier' });
+
+    const badTaskId = await queue.create(
+      {
+        repoRoot: '/repo',
+        runId: RUN_ID,
+        taskId: '../../../../etc/evil',
+        headCommit: HEAD_SHA,
+        retry: undefined,
+      },
+      git,
+    );
+    expect(badTaskId).toMatchObject({ ok: false, reason: 'invalidIdentifier' });
+
+    expect(git.calls).toEqual([]);
+  });
+
+  it('不正なheadCommit（フラグとして解釈されうる文字列）はinvalidHeadCommitを返し、gitを一切呼ばない（low1修正）', async () => {
+    const git = new FakeGit();
+    const queue = new WorktreeCreationQueue();
+
+    const result = await queue.create(
+      { repoRoot: '/repo', runId: RUN_ID, taskId: 'T2', headCommit: '--force', retry: undefined },
+      git,
+    );
+
+    expect(result).toMatchObject({ ok: false, reason: 'invalidHeadCommit' });
+    expect(git.calls).toEqual([]);
+  });
+
   it('全タスクが同じHEAD（実行開始時に固定した値）から分岐する', async () => {
     const git = new FakeGit();
     git.respond(['rev-parse', '--verify'], { code: 1, stdout: '', stderr: '' });
     git.respond(['worktree', 'add'], { code: 0, stdout: '', stderr: '' });
+    const queue = new WorktreeCreationQueue();
 
-    const fixedHead = 'fixed-head-sha';
-    await createWorktree(
-      { repoRoot: '/repo', runId: 'run1', taskId: 'T2', headCommit: fixedHead, retry: undefined },
+    await queue.create(
+      { repoRoot: '/repo', runId: RUN_ID, taskId: 'T2', headCommit: HEAD_SHA, retry: undefined },
       git,
     );
-    await createWorktree(
-      { repoRoot: '/repo', runId: 'run1', taskId: 'T3', headCommit: fixedHead, retry: undefined },
+    await queue.create(
+      { repoRoot: '/repo', runId: RUN_ID, taskId: 'T3', headCommit: HEAD_SHA, retry: undefined },
       git,
     );
 
     const addCalls = git.calls.filter((c) => c.args[0] === 'worktree' && c.args[1] === 'add');
     expect(addCalls).toHaveLength(2);
     for (const call of addCalls) {
-      expect(call.args.at(-1)).toBe(fixedHead);
+      expect(call.args.at(-1)).toBe(HEAD_SHA);
     }
   });
 });
 
-describe('WorktreeCreationQueue', () => {
+describe('WorktreeCreationQueue（直列化）', () => {
   it('worktree作成が直列化され、同時に複数要求してもgit呼び出しが重ならない', async () => {
     let active = 0;
     let maxActive = 0;
@@ -276,15 +346,36 @@ describe('WorktreeCreationQueue', () => {
     await expect(failing).rejects.toThrow('boom');
     await expect(following).resolves.toBe('ok');
   });
+
+  it('createとremoveも同じキューに乗り、gitを実際に呼ぶまで直列化される（low2修正）', async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', '--verify'], { code: 1, stdout: '', stderr: '' });
+    git.respond(['worktree', 'add'], { code: 0, stdout: '', stderr: '' });
+    git.respond(['status', '--porcelain'], { code: 0, stdout: '', stderr: '' });
+    git.respond(['worktree', 'remove'], { code: 0, stdout: '', stderr: '' });
+    const queue = new WorktreeCreationQueue();
+
+    const results = await Promise.all([
+      queue.create(
+        { repoRoot: '/repo', runId: RUN_ID, taskId: 'T2', headCommit: HEAD_SHA, retry: undefined },
+        git,
+      ),
+      queue.remove('/repo', RUN_ID, 'T3', undefined, git),
+    ]);
+
+    expect(results[0]).toMatchObject({ ok: true });
+    expect(results[1]).toEqual({ ok: true });
+  });
 });
 
-describe('removeWorktree', () => {
+describe('WorktreeCreationQueue.remove', () => {
   it('未コミットの変更があるworktreeは撤去されず警告になる', async () => {
     const git = new FakeGit();
     git.respond(['status', '--porcelain'], { code: 0, stdout: ' M file.txt\n', stderr: '' });
+    const queue = new WorktreeCreationQueue();
 
-    const cwd = path.join('/repo', '.agents', 'worktrees', 'run1', 'T2');
-    const result = await removeWorktree(cwd, '/repo', git);
+    const cwd = path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2');
+    const result = await queue.remove('/repo', RUN_ID, 'T2', undefined, git);
 
     expect(result).toEqual({
       ok: false,
@@ -298,9 +389,10 @@ describe('removeWorktree', () => {
     const git = new FakeGit();
     git.respond(['status', '--porcelain'], { code: 0, stdout: '', stderr: '' });
     git.respond(['worktree', 'remove'], { code: 0, stdout: '', stderr: '' });
+    const queue = new WorktreeCreationQueue();
 
-    const cwd = path.join('/repo', '.agents', 'worktrees', 'run1', 'T2');
-    const result = await removeWorktree(cwd, '/repo', git);
+    const cwd = path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2');
+    const result = await queue.remove('/repo', RUN_ID, 'T2', undefined, git);
 
     expect(result).toEqual({ ok: true });
     expect(git.calls).toEqual([
@@ -316,12 +408,39 @@ describe('removeWorktree', () => {
       stdout: '',
       stderr: 'fatal: not a git repository',
     });
+    const queue = new WorktreeCreationQueue();
 
-    const result = await removeWorktree('/repo/.agents/worktrees/run1/T2', '/repo', git);
+    const result = await queue.remove('/repo', RUN_ID, 'T2', undefined, git);
     expect(result).toEqual({
       ok: false,
       reason: 'gitError',
       message: 'fatal: not a git repository',
+    });
+  });
+
+  it('不正なrunId/taskIdはinvalidIdentifierを返し、gitを一切呼ばない（high2修正）', async () => {
+    const git = new FakeGit();
+    const queue = new WorktreeCreationQueue();
+
+    const result = await queue.remove('/repo', 'not-a-uuid', 'T2', undefined, git);
+    expect(result).toMatchObject({ ok: false, reason: 'invalidIdentifier' });
+    expect(git.calls).toEqual([]);
+  });
+
+  it('生のパスではなくrepoRoot/runId/taskId/retryから自分でパスを組み立てる（medium1修正）', async () => {
+    const git = new FakeGit();
+    git.respond(['status', '--porcelain'], { code: 0, stdout: '', stderr: '' });
+    git.respond(['worktree', 'remove'], { code: 0, stdout: '', stderr: '' });
+    const queue = new WorktreeCreationQueue();
+
+    const expectedCwd = path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2-retry1');
+    const result = await queue.remove('/repo', RUN_ID, 'T2', 1, git);
+
+    expect(result).toEqual({ ok: true });
+    expect(git.calls[0]).toEqual({ args: ['status', '--porcelain'], cwd: expectedCwd });
+    expect(git.calls[1]).toEqual({
+      args: ['worktree', 'remove', expectedCwd],
+      cwd: '/repo',
     });
   });
 });
@@ -364,10 +483,105 @@ describe('resolveGitCommonDir', () => {
     fs.realpaths.set(path.resolve('/repo', '.git'), '/real/repo/.git');
 
     const result = await resolveGitCommonDir('/repo', git, fs);
-    expect(result).toBe('/real/repo/.git');
+    expect(result).toEqual({ ok: true, value: '/real/repo/.git' });
   });
 
-  it('gitでないときundefinedになる', async () => {
+  it('gitでないときnotGitになる（正常系）', async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', '--git-common-dir'], {
+      code: 128,
+      stdout: '',
+      stderr: 'fatal: not a git repository (or any of the parent directories): .git',
+    });
+    const fs = new FakeFs();
+
+    const result = await resolveGitCommonDir('/repo', git, fs);
+    expect(result).toEqual({ ok: false, reason: 'notGit' });
+  });
+
+  it('gitコマンドが「gitでない」以外の理由で失敗したときはcommandFailedになる（notGitとは区別する。medium2修正）', async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', '--git-common-dir'], {
+      code: 1,
+      stdout: '',
+      stderr: 'fatal: unable to read some other error',
+    });
+    const fs = new FakeFs();
+
+    const result = await resolveGitCommonDir('/repo', git, fs);
+    expect(result).toEqual({
+      ok: false,
+      reason: 'commandFailed',
+      message: 'fatal: unable to read some other error',
+    });
+  });
+
+  it('実パス解決が失敗したときはrealpathFailedになる（medium2修正）', async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', '--git-common-dir'], { code: 0, stdout: '.git', stderr: '' });
+    const fs = new FakeFs(); // realpathを登録しない = 解決失敗
+
+    const result = await resolveGitCommonDir('/repo', git, fs);
+    expect(result).toEqual({
+      ok: false,
+      reason: 'realpathFailed',
+      path: path.resolve('/repo', '.git'),
+    });
+  });
+});
+
+describe('buildTaskBoundary', () => {
+  it('実パス解決済みのallowedRootsとgitCommonDirを組み立てる（警告は無い）', async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', '--git-common-dir'], { code: 0, stdout: '.git', stderr: '' });
+    const fs = new FakeFs();
+    const rawRoot = path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T1');
+    fs.realpaths.set(rawRoot, `/real/repo/.agents/worktrees/${RUN_ID}/T1`);
+    fs.realpaths.set(path.resolve('/repo', '.git'), '/real/repo/.git');
+
+    const result = await buildTaskBoundary([rawRoot], '/repo', git, fs);
+
+    expect(result).toEqual({
+      boundary: {
+        allowedRoots: [`/real/repo/.agents/worktrees/${RUN_ID}/T1`],
+        gitCommonDir: '/real/repo/.git',
+      },
+      gitCommonDirWarning: undefined,
+    });
+  });
+
+  it('gitでないときgitCommonDirがundefinedになり、警告も出ない（正常系）', async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', '--git-common-dir'], {
+      code: 128,
+      stdout: '',
+      stderr: 'fatal: not a git repository',
+    });
+    const fs = new FakeFs();
+    fs.realpaths.set('/work', '/work');
+
+    const result = await buildTaskBoundary(['/work'], '/work', git, fs);
+    expect(result.boundary.gitCommonDir).toBeUndefined();
+    expect(result.gitCommonDirWarning).toBeUndefined();
+  });
+
+  it('git-common-dirの取得が「gitでない」以外の理由で失敗したときは警告付きで返す（medium2修正）', async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', '--git-common-dir'], {
+      code: 1,
+      stdout: '',
+      stderr: 'fatal: index file corrupt',
+    });
+    const fs = new FakeFs();
+    fs.realpaths.set('/work', '/work');
+
+    const result = await buildTaskBoundary(['/work'], '/work', git, fs);
+    expect(result.boundary.gitCommonDir).toBeUndefined();
+    expect(result.gitCommonDirWarning).toContain('commandFailed');
+    expect(result.gitCommonDirWarning).toContain('fatal: index file corrupt');
+  });
+
+  it('実パス解決できないrootは黙って除く', async () => {
     const git = new FakeGit();
     git.respond(['rev-parse', '--git-common-dir'], {
       code: 128,
@@ -376,52 +590,16 @@ describe('resolveGitCommonDir', () => {
     });
     const fs = new FakeFs();
 
-    await expect(resolveGitCommonDir('/repo', git, fs)).resolves.toBeUndefined();
-  });
-});
-
-describe('buildTaskBoundary', () => {
-  it('実パス解決済みのallowedRootsとgitCommonDirを組み立てる', async () => {
-    const git = new FakeGit();
-    git.respond(['rev-parse', '--git-common-dir'], { code: 0, stdout: '.git', stderr: '' });
-    const fs = new FakeFs();
-    const rawRoot = path.join('/repo', '.agents', 'worktrees', 'run1', 'T1');
-    fs.realpaths.set(rawRoot, '/real/repo/.agents/worktrees/run1/T1');
-    fs.realpaths.set(path.resolve('/repo', '.git'), '/real/repo/.git');
-
-    const boundary = await buildTaskBoundary([rawRoot], '/repo', git, fs);
-
-    expect(boundary).toEqual({
-      allowedRoots: ['/real/repo/.agents/worktrees/run1/T1'],
-      gitCommonDir: '/real/repo/.git',
-    });
-  });
-
-  it('gitでないときgitCommonDirがundefinedになる', async () => {
-    const git = new FakeGit();
-    git.respond(['rev-parse', '--git-common-dir'], { code: 128, stdout: '', stderr: '' });
-    const fs = new FakeFs();
-    fs.realpaths.set('/work', '/work');
-
-    const boundary = await buildTaskBoundary(['/work'], '/work', git, fs);
-    expect(boundary.gitCommonDir).toBeUndefined();
-    expect(boundary.allowedRoots).toEqual(['/work']);
-  });
-
-  it('実パス解決できないrootは黙って除く', async () => {
-    const git = new FakeGit();
-    git.respond(['rev-parse', '--git-common-dir'], { code: 128, stdout: '', stderr: '' });
-    const fs = new FakeFs();
-
-    const boundary = await buildTaskBoundary(['/does-not-exist'], '/repo', git, fs);
-    expect(boundary.allowedRoots).toEqual([]);
+    const result = await buildTaskBoundary(['/does-not-exist'], '/repo', git, fs);
+    expect(result.boundary.allowedRoots).toEqual([]);
   });
 });
 
 /**
  * ここから下は実際の `git` バイナリを使った統合テスト。フェイクだけでは
  * 「worktreeの`.git`が実体ファイルであること」「未コミットの変更を実際にgitがどう見せるか」
- * 「execFileが本当にシェルを経由しないか」までは確認できないため、実機で確かめる。
+ * 「execFileが本当にシェルを経由しないか」「failedで残ったworktreeとリトライの衝突」までは
+ * 確認できないため、実機で確かめる。
  */
 describe('実gitでの統合テスト', () => {
   let repoDir: string;
@@ -458,35 +636,71 @@ describe('実gitでの統合テスト', () => {
     expect(head).toMatch(/^[0-9a-f]{40}$/);
   });
 
-  it('createWorktreeが実際にworktreeとブランチを作る。同名ブランチの2回目はエラーになる', async () => {
+  it('WorktreeCreationQueue.createが実際にworktreeとブランチを作る。同名ブランチの2回目はエラーになる', async () => {
     const head = await resolveHeadCommit(repoDir, nodeGitCommandRunner);
     expect(head).toBeDefined();
+    const queue = new WorktreeCreationQueue();
     const request: CreateWorktreeRequest = {
       repoRoot: repoDir,
-      runId: 'run1',
+      runId: RUN_ID,
       taskId: 'T1',
       headCommit: head as string,
       retry: undefined,
     };
 
-    const first = await createWorktree(request, nodeGitCommandRunner);
+    const first = await queue.create(request, nodeGitCommandRunner);
     expect(first.ok).toBe(true);
     if (first.ok) {
-      expect(first.branch).toBe('wf/run1/T1');
-      expect(first.cwd).toBe(worktreePath(repoDir, 'run1', 'T1'));
+      expect(first.branch).toBe(`wf/${RUN_ID}/T1`);
+      expect(first.cwd).toBe(worktreePath(repoDir, RUN_ID, 'T1'));
       await expect(stat(first.cwd)).resolves.toBeDefined();
     }
 
-    const second = await createWorktree(request, nodeGitCommandRunner);
+    const second = await queue.create(request, nodeGitCommandRunner);
     expect(second).toMatchObject({ ok: false, reason: 'branchExists' });
+  });
+
+  it('1回目のworktreeがfailedで残ったままでも、リトライは別ディレクトリ・別ブランチで成功する（high1修正）', async () => {
+    const head = await resolveHeadCommit(repoDir, nodeGitCommandRunner);
+    const queue = new WorktreeCreationQueue();
+
+    const first = await queue.create(
+      {
+        repoRoot: repoDir,
+        runId: RUN_ID,
+        taskId: 'T1',
+        headCommit: head as string,
+        retry: undefined,
+      },
+      nodeGitCommandRunner,
+    );
+    expect(first.ok).toBe(true);
+    // design.mdの規則どおり、failedになったタスクのworktreeは撤去せず残す
+    // （`shouldRemoveWorktree` は `done` のときしか撤去を許さない）。ここでは撤去せず放置する。
+
+    const retry = await queue.create(
+      { repoRoot: repoDir, runId: RUN_ID, taskId: 'T1', headCommit: head as string, retry: 0 },
+      nodeGitCommandRunner,
+    );
+
+    expect(retry.ok).toBe(true);
+    if (first.ok && retry.ok) {
+      expect(retry.cwd).not.toBe(first.cwd);
+      expect(retry.branch).toBe(`wf/${RUN_ID}/T1-retry0`);
+      // 修正前は同じディレクトリへの2回目の`git worktree add`が
+      // `fatal: '<path>' already exists` で必ず失敗していた。
+      await expect(stat(first.cwd)).resolves.toBeDefined();
+      await expect(stat(retry.cwd)).resolves.toBeDefined();
+    }
   });
 
   it('worktreeのgit-common-dirは親リポジトリの.gitを指す（実パス解決込み）', async () => {
     const head = await resolveHeadCommit(repoDir, nodeGitCommandRunner);
-    const created = await createWorktree(
+    const queue = new WorktreeCreationQueue();
+    const created = await queue.create(
       {
         repoRoot: repoDir,
-        runId: 'run1',
+        runId: RUN_ID,
         taskId: 'T1',
         headCommit: head as string,
         retry: undefined,
@@ -502,26 +716,27 @@ describe('実gitでの統合テスト', () => {
       nodeWorktreeFileSystem,
     );
     const expected = await nodeWorktreeFileSystem.realpath(path.join(repoDir, '.git'));
-    expect(commonDir).toBe(expected);
+    expect(commonDir).toEqual({ ok: true, value: expected });
   });
 
-  it('未コミットの変更があるworktreeはremoveWorktreeで撤去されず警告になる。クリーンなworktreeは実際に撤去される', async () => {
+  it('未コミットの変更があるworktreeはWorktreeCreationQueue.removeで撤去されず警告になる。クリーンなworktreeは実際に撤去される', async () => {
     const head = await resolveHeadCommit(repoDir, nodeGitCommandRunner);
+    const queue = new WorktreeCreationQueue();
 
-    const clean = await createWorktree(
+    const clean = await queue.create(
       {
         repoRoot: repoDir,
-        runId: 'run1',
+        runId: RUN_ID,
         taskId: 'Clean',
         headCommit: head as string,
         retry: undefined,
       },
       nodeGitCommandRunner,
     );
-    const dirty = await createWorktree(
+    const dirty = await queue.create(
       {
         repoRoot: repoDir,
-        runId: 'run1',
+        runId: RUN_ID,
         taskId: 'Dirty',
         headCommit: head as string,
         retry: undefined,
@@ -534,11 +749,23 @@ describe('実gitでの統合テスト', () => {
 
     await writeFile(path.join(dirty.cwd, 'uncommitted.txt'), 'まだコミットしていない\n');
 
-    const dirtyResult = await removeWorktree(dirty.cwd, repoDir, nodeGitCommandRunner);
+    const dirtyResult = await queue.remove(
+      repoDir,
+      RUN_ID,
+      'Dirty',
+      undefined,
+      nodeGitCommandRunner,
+    );
     expect(dirtyResult).toMatchObject({ ok: false, reason: 'uncommittedChanges' });
     await expect(stat(dirty.cwd)).resolves.toBeDefined();
 
-    const cleanResult = await removeWorktree(clean.cwd, repoDir, nodeGitCommandRunner);
+    const cleanResult = await queue.remove(
+      repoDir,
+      RUN_ID,
+      'Clean',
+      undefined,
+      nodeGitCommandRunner,
+    );
     expect(cleanResult).toEqual({ ok: true });
     await expect(stat(clean.cwd)).rejects.toThrow();
   });
