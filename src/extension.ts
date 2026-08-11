@@ -31,10 +31,10 @@ import {
   nodeWorktreeFileSystem,
   WorktreeCreationQueue,
 } from './orchestrator/worktree';
+import { nodeCliCommandRunner } from './orchestrator/forge';
 import {
   createCliIssueListPort,
   generateRoadmap,
-  nodeCliCommandRunner,
   nodeRoadmapFileSystem,
   type IssueListPort,
   type RoadmapGenerationPort,

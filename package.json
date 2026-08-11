@@ -455,6 +455,39 @@
           "scope": "machine-overridable",
           "markdownDescription": "ワークスペースがgitの作業ツリーでない場合の隔離（疑似worktree）で、複製から除外するディレクトリ名。深さを問わず名前が一致するディレクトリを除外する。`.agents/worktrees` 自身は常に除外される（設計書 §16.20）。"
         },
+        "agent.workflows.forge": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "github",
+            "gitlab",
+            "none"
+          ],
+          "default": "auto",
+          "scope": "machine",
+          "markdownDescription": "PR/MRの作成に使うホストの選択。`auto` は `origin` のリモートURLから判定する（`github.com` はGitHub、ホスト名に `gitlab` を含めばGitLab）。自己ホストのGitHub Enterpriseなど名前から判定できない場合は `github` / `gitlab` を明示する。`none` はPR/MRを作らない。実行するコマンド（`gh` / `glab`）の選択にあたるため、machineスコープに固定している。リポジトリの `.vscode/settings.json` からは変えられない（設計書 §16.16・§16.18）。"
+        },
+        "agent.workflows.pullRequest": {
+          "type": "string",
+          "enum": [
+            "none",
+            "integration",
+            "per-task"
+          ],
+          "default": "per-task",
+          "scope": "machine-overridable",
+          "markdownDescription": "作るPR/MRの層。`per-task` はタスクブランチ→統合ブランチ（タスクごと）と統合ブランチ→main（runごと1本）の両方、`integration` は統合ブランチ→mainのみ、`none` はPR/MRを作らない（設計書 §16.18）。"
+        },
+        "agent.workflows.finalMerge": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "pr-only"
+          ],
+          "default": "auto",
+          "scope": "machine",
+          "markdownDescription": "統合ブランチ→mainのPR/MRを無人でマージするか。`auto` は `gh pr merge --merge` / `glab mr merge --remove-source-branch` まで実行する。`pr-only` はPR/MRを作って止め、mainへの書き込みは人が行う。mainを無人で書き換えるかどうかを決めるため、machineスコープに固定している。リポジトリの `.vscode/settings.json` から `auto` へは変えられない。MRの自己マージを禁じる運用規約を持つ組織では `pr-only` にする（設計書 §16.16・§16.18）。"
+        },
         "claude.executablePath": {
           "type": "string",
           "default": "claude",

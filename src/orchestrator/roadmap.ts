@@ -1,8 +1,8 @@
-import { execFile } from 'node:child_process';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
 import { isPathWithinRoot } from './escalation';
+import { detectForgeHost, type CliCommandRunner } from './forge';
 import type { GitCommandRunner } from './worktree';
 import { TASK_ID_PATTERN } from './workflow';
 
@@ -17,6 +17,9 @@ import { TASK_ID_PATTERN } from './workflow';
  *
  * `workflow.ts`（純粋ロジック・全件まとめてのエラー報告）と `worktree.ts`（外部コマンドを
  * ポート越しに呼ぶ・execFileでシェルを経由しない）の書き方に合わせる。
+ *
+ * ホストの判定（`detectForgeHost`）と汎用CLI実行ポート（`CliCommandRunner`）は `forge.ts`
+ * （#94）が正式な置き場になったため、そちらから参照する（重複を残さない）。
  */
 
 /* -------------------------------------------------------------------------------------------- */
@@ -438,78 +441,6 @@ export interface IssueListPort {
   /** 取得できなければ `undefined`（design.md §16.19「取れなければ飛ばす」）。 */
   listIssues(cwd: string): Promise<RoadmapIssueSummary[] | undefined>;
 }
-
-export type ForgeHost = 'github' | 'gitlab';
-
-/**
- * `origin` のURLからホストを判定する（design.md §16.18と同じ方針をこのIssueの範囲で最小限に
- * 実装する。§16.18のPR/MR作成が扱う判定と重複する部分は、専用モジュール `forge.ts`（#94、
- * 未着手）が実装されたときにそちらへ寄せる）。
- *
- * `github.com` ならGitHub、ホスト名に `gitlab` を含めばGitLab。それ以外（自己ホストの
- * GitHub Enterpriseなど名前から判定できないもの）は `undefined` を返し、呼び出し側は
- * 「取れなければ飛ばす」を選ぶ。
- */
-export function detectForgeHost(remoteUrl: string): ForgeHost | undefined {
-  const trimmed = remoteUrl.trim();
-  const scpMatch = /^[^@\s]+@([^:\s/]+)[:/]/u.exec(trimmed);
-  let host: string | undefined;
-  if (scpMatch !== null) {
-    host = scpMatch[1];
-  } else {
-    try {
-      host = new URL(trimmed).hostname;
-    } catch {
-      host = undefined;
-    }
-  }
-  if (host === undefined || host === '') {
-    return undefined;
-  }
-  const lower = host.toLowerCase();
-  if (lower === 'github.com') {
-    return 'github';
-  }
-  if (lower.includes('gitlab')) {
-    return 'gitlab';
-  }
-  return undefined;
-}
-
-export interface CliCommandResult {
-  code: number;
-  stdout: string;
-  stderr: string;
-}
-
-/** `gh` / `glab` のような任意のCLIコマンドを実行する抽象。`worktree.ts` の `GitCommandRunner` と同じ方針。 */
-export interface CliCommandRunner {
-  run(command: string, args: readonly string[], cwd: string): Promise<CliCommandResult>;
-}
-
-const CLI_TIMEOUT_MS = 30_000;
-const CLI_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
-
-export const nodeCliCommandRunner: CliCommandRunner = {
-  run(command: string, args: readonly string[], cwd: string): Promise<CliCommandResult> {
-    return new Promise((resolve) => {
-      // execFileはシェルを経由しない（design.md §8・§16.18と同じ方針）
-      execFile(
-        command,
-        [...args],
-        { cwd, timeout: CLI_TIMEOUT_MS, maxBuffer: CLI_MAX_BUFFER_BYTES },
-        (error, stdout, stderr) => {
-          if (error === null) {
-            resolve({ code: 0, stdout, stderr });
-            return;
-          }
-          const code = typeof error.code === 'number' ? error.code : 1;
-          resolve({ code, stdout, stderr: stderr === '' ? error.message : stderr });
-        },
-      );
-    });
-  },
-};
 
 const ISSUE_LIST_LIMIT = 200;
 

@@ -2,6 +2,14 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { ClaudeConfig } from './claude/types';
 import type { CodexConfig } from './codex/types';
+import {
+  normalizeFinalMergeConfig,
+  normalizeForgeHostConfig,
+  normalizePullRequestLayerConfig,
+  type FinalMergeConfig,
+  type ForgeHostConfig,
+  type PullRequestLayerConfig,
+} from './orchestrator/forge';
 import type { HistoryScope } from './session/sessionStore';
 
 export interface ExtensionConfig {
@@ -109,6 +117,22 @@ export interface WorkflowsConfig {
    * 関わらないため、`agent.workflows.forge` / `finalMerge` ほど強い制限（`machine`固定）は要らない。
    */
   roadmapDir: string;
+  /**
+   * ホスト連携（design.md §16.18）で使うCLIの選択。`machine`スコープ（§16.16「成果の統合
+   * まわりの設定」）。実行するコマンド（`gh` / `glab`）の選択にあたるため、`.vscode/settings.json`
+   * からは変えられない。
+   */
+  forge: ForgeHostConfig;
+  /**
+   * 作るPR/MRの層（design.md §16.18）。`machine-overridable`。権限には関わらないため
+   * `forge` / `finalMerge` ほど強い制限は要らない。
+   */
+  pullRequest: PullRequestLayerConfig;
+  /**
+   * 統合→mainのPR/MRを無人でマージするか（design.md §16.18）。`machine`スコープ。mainを
+   * 無人で書き換えるかどうかを決めるため、`.vscode/settings.json`からは変えられない。
+   */
+  finalMerge: FinalMergeConfig;
 }
 
 const DEFAULT_WORKFLOWS_DIR = '.agents/workflows';
@@ -141,6 +165,9 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     dir: isSafeRelativeDir(rawDir) ? rawDir : DEFAULT_WORKFLOWS_DIR,
     allowAutoApprove: c.get<boolean>('workflows.allowAutoApprove') ?? false,
     roadmapDir: isSafeRelativeDir(rawRoadmapDir) ? rawRoadmapDir : DEFAULT_ROADMAP_DIR,
+    forge: normalizeForgeHostConfig(str(c, 'workflows.forge', 'auto')),
+    pullRequest: normalizePullRequestLayerConfig(str(c, 'workflows.pullRequest', 'per-task')),
+    finalMerge: normalizeFinalMergeConfig(str(c, 'workflows.finalMerge', 'auto')),
   };
 }
 

@@ -4,19 +4,18 @@ import {
   applyRunCompletionToFile,
   buildRoadmapPrompt,
   createCliIssueListPort,
-  detectForgeHost,
   generateRoadmap,
   parseRoadmapMarkdown,
   resolveRoadmapOutputPath,
   slugifyGoal,
   stripMarkdownCodeFence,
   validateRoadmap,
-  type CliCommandRunner,
   type GenerateRoadmapDeps,
   type IssueListPort,
   type RoadmapFileSystemPort,
   type RoadmapGenerationPort,
 } from '../../src/orchestrator/roadmap';
+import type { CliCommandRunner } from '../../src/orchestrator/forge';
 import type { GitCommandRunner } from '../../src/orchestrator/worktree';
 
 const SAMPLE_ROADMAP = `# 認証機能を追加する
@@ -266,29 +265,6 @@ describe('buildRoadmapPrompt', () => {
       existingIssues: undefined,
     });
     expect(prompt).toContain('取得できませんでした');
-  });
-});
-
-describe('detectForgeHost', () => {
-  it('github.comをgithubと判定する（https）', () => {
-    expect(detectForgeHost('https://github.com/org/repo.git')).toBe('github');
-  });
-
-  it('github.comをgithubと判定する（scp-like）', () => {
-    expect(detectForgeHost('git@github.com:org/repo.git')).toBe('github');
-  });
-
-  it('ホスト名にgitlabを含めばgitlabと判定する', () => {
-    expect(detectForgeHost('https://gitlab.example.com/org/repo.git')).toBe('gitlab');
-    expect(detectForgeHost('git@gitlab.example.com:org/repo.git')).toBe('gitlab');
-  });
-
-  it('名前から判定できない場合はundefined', () => {
-    expect(detectForgeHost('https://git.internal.example.com/org/repo.git')).toBeUndefined();
-  });
-
-  it('URLとして解釈できない値もundefined', () => {
-    expect(detectForgeHost('not a url')).toBeUndefined();
   });
 });
 
