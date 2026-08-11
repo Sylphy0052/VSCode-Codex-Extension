@@ -20,8 +20,11 @@ export function workflowScript(): string {
     pending: '待機',
     running: '実行中',
     waitingApproval: '承認待ち',
+    waitingReply: '返信待ち',
+    merging: '統合中',
     done: '完了',
     failed: '失敗',
+    blocked: 'ブロック（統合できず）',
     skipped: 'スキップ',
   };
 
@@ -30,6 +33,8 @@ export function workflowScript(): string {
     loopFailed: 'ターン失敗',
     approvalRejected: '承認拒否',
     dependencyFailed: '依存先の失敗',
+    mergeBlocked: '依存先の統合ブロック',
+    mergeFailed: 'マージ失敗',
     runHalted: '実行停止のため未着手',
     reloadInterrupted: 'リロードによる中断',
     manualStop: '手動停止',
@@ -84,59 +89,75 @@ export function workflowScript(): string {
     if (task.failure.kind === 'dependencyFailed' && task.failure.failedTaskIds) {
       return label + '（' + task.failure.failedTaskIds.join(', ') + '）';
     }
+    if (task.failure.kind === 'mergeBlocked' && task.failure.blockedTaskIds) {
+      return label + '（' + task.failure.blockedTaskIds.join(', ') + '）';
+    }
     return label;
   }
 
   // ---- 最上段: 全体の進捗 ----
+  // 集計そのものは拡張機能側（workflowGraph.tsのaggregateProgress。純粋関数でテスト済み）が
+  // 行い、ここではその結果（progress）を表示するだけにする。以前はここでも同じ集計を
+  // JavaScriptとして再実装しており、workflowGraph.ts側だけを直しても3状態
+  // （waitingReply/merging/blocked）がここに反映されない食い違いの原因になっていた
+  // （Issue #104が起きた背景そのもの）。
 
-  function aggregateCounts(tasks) {
-    const counts = { pending: 0, running: 0, waitingApproval: 0, done: 0, failed: 0, skipped: 0 };
-    for (const t of tasks) counts[t.state] = (counts[t.state] || 0) + 1;
-    return counts;
-  }
-
-  function renderHeader(snapshot) {
-    const counts = aggregateCounts(snapshot.tasks);
-    const total = snapshot.tasks.length;
-    const percent = total === 0 ? 0 : Math.round((counts.done / total) * 100);
+  function renderHeader(snapshot, progress) {
+    const counts = progress.counts;
+    const total = progress.total;
 
     el('runName').textContent = snapshot.name || snapshot.runId;
     el('runCounts').textContent =
       total + 'タスク中 ' + counts.done + '完了 / ' + counts.running + '実行中 / ' +
       counts.pending + '待機' +
+      (counts.merging > 0 ? ' / ' + counts.merging + '統合中' : '') +
       (counts.waitingApproval > 0 ? ' / ' + counts.waitingApproval + '承認待ち' : '') +
+      (counts.waitingReply > 0 ? ' / ' + counts.waitingReply + '返信待ち' : '') +
       (counts.failed > 0 ? ' / ' + counts.failed + '失敗' : '') +
+      (counts.blocked > 0 ? ' / ' + counts.blocked + 'ブロック' : '') +
       (counts.skipped > 0 ? ' / ' + counts.skipped + 'スキップ' : '');
-    el('progressFill').style.width = percent + '%';
-    el('progressPercent').textContent = percent + '%';
+    el('progressFill').style.width = progress.percentDone + '%';
+    el('progressPercent').textContent = progress.percentDone + '%';
     el('runStartedAt').setAttribute('data-started', String(Date.parse(snapshot.startedAt) || 0));
 
     const stopBtn = el('stopAllBtn');
     stopBtn.disabled = snapshot.outcome !== 'running';
 
+    renderBanner(snapshot, progress);
+  }
+
+  /**
+   * 承認待ち・返信待ち・失敗・統合できていないものが1件でもあれば最上段で目立たせる
+   * （design.md §16.8「全体の進捗」）。複数同時に該当しうるため、該当する種別を全て
+   * 1行にまとめ、最も重い種別（失敗 > 統合ブロック > 承認待ち > 返信待ち）でバナーの
+   * 色を決める。
+   */
+  function renderBanner(snapshot, progress) {
     const banner = el('banner');
-    // 承認待ちと失敗が1件でもあれば最上段で目立たせる（design.md §16.8）
-    if (counts.failed > 0) {
+    const counts = progress.counts;
+    const parts = [];
+    if (progress.hasFailed) parts.push('失敗（' + counts.failed + '件）');
+    if (progress.hasBlocked) parts.push('統合できていないタスク（' + counts.blocked + '件）');
+    if (progress.hasWaitingApproval) parts.push('承認待ち（' + counts.waitingApproval + '件）');
+    if (progress.hasWaitingReply) parts.push('返信待ち（' + counts.waitingReply + '件）');
+
+    if (parts.length > 0) {
       banner.hidden = false;
-      banner.className = 'failed';
-      banner.textContent =
-        '失敗したタスクがあります（' + counts.failed + '件）。一覧から内容を確認してください。';
-    } else if (counts.waitingApproval > 0) {
-      banner.hidden = false;
-      banner.className = 'approval';
-      banner.textContent =
-        '承認待ちのタスクがあります（' + counts.waitingApproval + '件）。一覧から許可・拒否を決めてください。';
-    } else if (snapshot.isDraft) {
+      banner.className = progress.hasFailed ? 'failed' : progress.hasBlocked ? 'blocked' : 'approval';
+      banner.textContent = parts.join(' ・ ') + '。一覧から内容を確認してください。';
+      return;
+    }
+    if (snapshot.isDraft) {
       // ゴール文から生成した直後・未実行の下書き（design.md §16.9）。outcomeの4値には
       // 「まだ始まっていない」を表す値が無いため、専用フラグで判定する
       banner.hidden = false;
       banner.className = 'draft';
       banner.textContent =
         'これは生成された下書きです。内容を確認し、問題なければ「実行」から開始してください。';
-    } else {
-      banner.hidden = true;
-      banner.textContent = '';
+      return;
     }
+    banner.hidden = true;
+    banner.textContent = '';
   }
 
   // ---- 依存グラフ（SVG） ----
@@ -155,6 +176,22 @@ export function workflowScript(): string {
       group.appendChild(svgEl('line', { class: 'wf-mark-failed', x1: 6, y1: -6, x2: -6, y2: 6 }));
     } else if (state === 'skipped') {
       group.appendChild(svgEl('line', { class: 'wf-mark-skipped', x1: -6, y1: 6, x2: 6, y2: -6 }));
+    } else if (state === 'waitingReply') {
+      // 吹き出し（design.md §16.8「waitingReply: 警告色の枠＋吹き出しの記号」）
+      group.appendChild(svgEl('rect', { class: 'wf-mark-reply', x: -7, y: -6, width: 14, height: 9, rx: 2 }));
+      group.appendChild(svgEl('polygon', { class: 'wf-mark-reply', points: '-3,3 1,3 -2,8' }));
+    } else if (state === 'merging' || state === 'blocked') {
+      // 合流の記号（design.md §16.8「merging: 完了色の枠＋合流の記号」
+      // 「blocked: 警告色の枠＋合流の記号にバツ」）。2本のブランチが1本に合流する形を
+      // 単純な線分3本で表す
+      const markClass = state === 'merging' ? 'wf-mark-merging' : 'wf-mark-blocked';
+      group.appendChild(svgEl('line', { class: markClass, x1: -6, y1: -6, x2: 0, y2: 0 }));
+      group.appendChild(svgEl('line', { class: markClass, x1: -6, y1: 6, x2: 0, y2: 0 }));
+      group.appendChild(svgEl('line', { class: markClass, x1: 0, y1: 0, x2: 7, y2: 0 }));
+      if (state === 'blocked') {
+        group.appendChild(svgEl('line', { class: 'wf-mark-blocked-x', x1: -6, y1: -7, x2: 6, y2: 7 }));
+        group.appendChild(svgEl('line', { class: 'wf-mark-blocked-x', x1: 6, y1: -7, x2: -6, y2: 7 }));
+      }
     }
     return group;
   }
@@ -190,6 +227,21 @@ export function workflowScript(): string {
     metaText.textContent = metaParts.join(' ・ ');
     group.appendChild(metaText);
 
+    // 衝突解決セッション（design.md §16.17「コンフリクト」5.）はワークフローの定義に無いため
+    // ノード化しない。対象タスクのノードへ「マージ解決中」として重ねて出す（Issue #104）。
+    // 押すとそのセッションのタブへ移動する（クリックハンドラは下のselectAndRevealが
+    // runner.tsのrevealTask経由で衝突解決セッションを優先して開く）
+    if (task.mergeResolutionActive) {
+      const badge = svgEl('text', {
+        class: 'wf-merge-resolution-badge',
+        x: 0,
+        y: h / 2 - 6,
+        'text-anchor': 'middle',
+      });
+      badge.textContent = 'マージ解決中';
+      group.appendChild(badge);
+    }
+
     if (task.lastResponseSummary) {
       const summaryText = svgEl('text', { class: 'wf-summary', x: -w / 2 + 10, y: -h / 2 + 48 });
       const shown =
@@ -202,6 +254,7 @@ export function workflowScript(): string {
 
     const title = svgEl('title');
     title.textContent = task.id + ' ・ ' + (STATE_LABEL[task.state] || task.state) +
+      (task.mergeResolutionActive ? ' ・ マージ解決中' : '') +
       (task.lastResponseSummary ? ' ・ ' + task.lastResponseSummary : '');
     group.appendChild(title);
 
@@ -288,6 +341,17 @@ export function workflowScript(): string {
       });
       cell.appendChild(retryBtn);
     }
+    if (task.state === 'blocked') {
+      // design.md §16.17「Viewから人が解決したうえで『再マージ』を指示できる」。
+      // runner.tsのretryMergeをそのまま呼ぶ（人が統合worktreeで手元の衝突を解いた後を想定）
+      const retryMergeBtn = text('button', 'secondary', '再マージ');
+      retryMergeBtn.type = 'button';
+      retryMergeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ type: 'retryMerge', taskId: task.id });
+      });
+      cell.appendChild(retryMergeBtn);
+    }
     return cell;
   }
 
@@ -344,6 +408,9 @@ export function workflowScript(): string {
       if (failureText) {
         stateCell.appendChild(text('span', 'hint', '（' + failureText + '）'));
       }
+      if (task.mergeResolutionActive) {
+        stateCell.appendChild(text('span', 'hint', '（マージ解決中）'));
+      }
       row.appendChild(stateCell);
 
       row.appendChild(text('td', '', task.provider));
@@ -393,6 +460,27 @@ export function workflowScript(): string {
     el('warningsSection').hidden = snapshot.warnings.length === 0;
   }
 
+  // ---- そのほか: 統合の状況（design.md §16.8「そのほか」・§16.17。Issue #104） ----
+
+  /**
+   * 統合ブランチ名・取り込み済みタスク数を表示する。PR/MRの番号・URL・最終マージの結果は
+   * runStore.tsにまだ永続化されておらずrunner.tsからも取れないため出さない
+   * （Issue #104の実装範囲外。詳細は最終報告に記載）。
+   */
+  function renderIntegration(integration) {
+    const box = el('integrationInfo');
+    box.replaceChildren();
+    if (!integration) {
+      el('integrationSection').hidden = true;
+      return;
+    }
+    el('integrationSection').hidden = false;
+    // ブランチ名はgit由来（design.md §16.8「画面に出す動的な文字列は必ずテキストノードとして
+    // 挿入する」）。必ずtextContentへ代入する
+    box.appendChild(text('div', '', '統合ブランチ: ' + integration.branch));
+    box.appendChild(text('div', '', '取り込み済みタスク: ' + integration.mergedTaskCount + '件'));
+  }
+
   // ---- 選択・操作 ----
 
   let selectedTaskId = undefined;
@@ -403,7 +491,7 @@ export function workflowScript(): string {
       renderGraph(currentSnapshot, currentLayout);
     }
     const task = findTask(taskId);
-    if (task && task.hasLiveSession) {
+    if (task && (task.hasLiveSession || task.mergeResolutionActive)) {
       vscode.postMessage({ type: 'reveal', taskId });
     }
   }
@@ -425,15 +513,16 @@ export function workflowScript(): string {
     el('empty').hidden = runs.length > 0;
   }
 
-  function applyState(snapshot, layout) {
+  function applyState(snapshot, layout, progress, integration) {
     currentSnapshot = snapshot;
     currentLayout = layout;
     el('content').hidden = false;
     el('empty').hidden = true;
-    renderHeader(snapshot);
+    renderHeader(snapshot, progress);
     renderGraph(snapshot, layout);
     renderTable(snapshot);
     renderWarnings(snapshot);
+    renderIntegration(integration);
     const select = el('runSelect');
     if (select.value !== snapshot.runId) select.value = snapshot.runId;
   }
@@ -480,7 +569,7 @@ export function workflowScript(): string {
     if (msg.type === 'runs') {
       applyRuns(msg.runs);
     } else if (msg.type === 'state') {
-      applyState(msg.snapshot, msg.layout);
+      applyState(msg.snapshot, msg.layout, msg.progress, msg.integration);
     } else if (msg.type === 'noRun') {
       applyNoRun();
     }

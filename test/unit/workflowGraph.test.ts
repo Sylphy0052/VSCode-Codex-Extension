@@ -5,6 +5,7 @@ import {
   layoutGraph,
   NODE_GAP_X,
   NODE_WIDTH,
+  summarizeIntegration,
   type GraphTaskInput,
 } from '../../src/view/workflowGraph';
 
@@ -142,6 +143,18 @@ describe('aggregateProgress（design.md §16.8「全体の進捗」）', () => {
     });
   });
 
+  it('waitingReply/merging/blockedも数える（Issue #104: 3状態への追随）', () => {
+    const summary = aggregateProgress([
+      { state: 'waitingReply' },
+      { state: 'merging' },
+      { state: 'blocked' },
+      { state: 'done' },
+    ]);
+    expect(summary.counts.waitingReply).toBe(1);
+    expect(summary.counts.merging).toBe(1);
+    expect(summary.counts.blocked).toBe(1);
+  });
+
   it('進み具合（百分率）を四捨五入で出す', () => {
     // 1/3 = 33.33...% → 33%
     const summary = aggregateProgress([
@@ -167,9 +180,46 @@ describe('aggregateProgress（design.md §16.8「全体の進捗」）', () => {
     expect(summary.hasFailed).toBe(true);
   });
 
+  it('返信待ちが1件でもあればhasWaitingReplyが立つ（Issue #104）', () => {
+    const summary = aggregateProgress([{ state: 'waitingReply' }, { state: 'done' }]);
+    expect(summary.hasWaitingReply).toBe(true);
+    expect(summary.hasBlocked).toBe(false);
+  });
+
+  it('統合できていない(blocked)が1件でもあればhasBlockedが立つ（Issue #104）', () => {
+    const summary = aggregateProgress([{ state: 'blocked' }, { state: 'done' }]);
+    expect(summary.hasBlocked).toBe(true);
+    expect(summary.hasWaitingReply).toBe(false);
+  });
+
   it('全て完了していれば進み具合は100', () => {
     const summary = aggregateProgress([{ state: 'done' }, { state: 'done' }]);
     expect(summary.percentDone).toBe(100);
+  });
+});
+
+describe('summarizeIntegration（design.md §16.8「そのほか」・§16.17。Issue #104）', () => {
+  it('統合ブランチ名が無ければundefined（gitリポジトリでない実行など）', () => {
+    expect(summarizeIntegration(undefined, [])).toBeUndefined();
+    expect(summarizeIntegration('', [{ state: 'done', branch: 'wf/r1/T1' }])).toBeUndefined();
+  });
+
+  it('ブランチ名と、doneかつタスク専用ブランチを持つものの件数を返す', () => {
+    const summary = summarizeIntegration('wf/r1/integration', [
+      { state: 'done', branch: 'wf/r1/T1' },
+      { state: 'done', branch: 'wf/r1/T2' },
+      { state: 'running', branch: 'wf/r1/T3' },
+      { state: 'blocked', branch: 'wf/r1/T4' },
+    ]);
+    expect(summary).toEqual({ branch: 'wf/r1/integration', mergedTaskCount: 2 });
+  });
+
+  it('doneでもタスク専用ブランチが無ければ取り込み済みに数えない（isolation: sharedの直行）', () => {
+    const summary = summarizeIntegration('wf/r1/integration', [
+      { state: 'done', branch: undefined },
+      { state: 'done', branch: '' },
+    ]);
+    expect(summary).toEqual({ branch: 'wf/r1/integration', mergedTaskCount: 0 });
   });
 });
 

@@ -155,6 +155,17 @@ export interface ProgressSummary {
   hasWaitingApproval: boolean;
   /** 失敗が1件でもあるか。最上段で目立たせる判断に使う。 */
   hasFailed: boolean;
+  /**
+   * 返信待ち（`waitingReply`）が1件でもあるか（design.md §16.21・Issue #104）。
+   * 承認待ち・失敗と同じく、並列実行では個々のノードを見落としやすいため最上段で目立たせる。
+   */
+  hasWaitingReply: boolean;
+  /**
+   * 統合できていない（`blocked`）タスクが1件でもあるか（design.md §16.17・Issue #104）。
+   * `blocked`はタスク自体は終わっているが統合ブランチへ入っていない状態で、`failed`とは
+   * 別に扱う必要があるため専用のフラグにする。
+   */
+  hasBlocked: boolean;
 }
 
 const EMPTY_COUNTS = (): Record<TaskState, number> => ({
@@ -181,7 +192,48 @@ export function aggregateProgress(tasks: readonly { state: TaskState }[]): Progr
     percentDone: total === 0 ? 0 : Math.round((counts.done / total) * 100),
     hasWaitingApproval: counts.waitingApproval > 0,
     hasFailed: counts.failed > 0,
+    hasWaitingReply: counts.waitingReply > 0,
+    hasBlocked: counts.blocked > 0,
   };
+}
+
+/** 統合の状況（design.md §16.8「そのほか」・§16.17）。表示できる項目だけを持つ。 */
+export interface IntegrationSummary {
+  /** 統合ブランチ名（`PersistedRun.integrationBranch` 由来）。 */
+  branch: string;
+  /** 統合ブランチへ取り込み済み（`done`）のタスク数。 */
+  mergedTaskCount: number;
+}
+
+/** `summarizeIntegration` が集計対象とする最小限のタスク形。 */
+export interface IntegrationTaskInput {
+  state: TaskState;
+  /** タスク専用ブランチ名。`shared` / 明示`cwd`のタスクは統合対象のブランチを持たないため空。 */
+  branch: string | undefined;
+}
+
+/**
+ * 統合ブランチ名・取り込み済みタスク数を集計する（design.md §16.8「そのほか」の
+ * 「統合ブランチ名、取り込み済みのタスク数」・§16.17）。
+ *
+ * `branch` が空（gitリポジトリでない実行、または未取得）なら統合の概念が無いため
+ * `undefined` を返す。「取り込み済み」は `done`（design.md §16.17「doneは統合ブランチへ
+ * 入ったことを指す」）かつタスク専用ブランチを持つ（`branch` が非空 = `isolation: worktree`
+ * 系で実際にマージ対象だった）タスクに限る。`shared` / 明示`cwd`のタスクは統合ブランチへの
+ * マージを経ずに`done`になる（`runner.ts`の`markMergeSucceeded`直行コメント参照）ため、
+ * 「取り込み済み」には数えない。
+ */
+export function summarizeIntegration(
+  branch: string | undefined,
+  tasks: readonly IntegrationTaskInput[],
+): IntegrationSummary | undefined {
+  if (branch === undefined || branch === '') {
+    return undefined;
+  }
+  const mergedTaskCount = tasks.filter(
+    (t) => t.state === 'done' && t.branch !== undefined && t.branch !== '',
+  ).length;
+  return { branch, mergedTaskCount };
 }
 
 // HTML文字列への埋め込みを前提にした`escapeHtml`はここに置かない（以前あったが未結線の

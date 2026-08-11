@@ -1042,6 +1042,16 @@ tasks:
     expect(t1Snapshot?.hasLiveSession).toBe(true);
   });
 
+  it('getSnapshotは統合ブランチ名を含む（design.md §16.17・Issue #104）', async () => {
+    const { runner } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.integrationBranch).toBe(`wf/${runId}/integration`);
+  });
+
   it('onChangedはタスクの状態が変わるたびにrunIdで通知する', async () => {
     const { runner, codexHost } = createHarness(YAML);
     const notified: string[] = [];
@@ -1594,6 +1604,41 @@ tasks:
 
     expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
   });
+
+  it(
+    '衝突解決中はgetSnapshotのmergeResolutionActiveが立ち、revealTaskは衝突解決セッションを開く' +
+      '（design.md §16.17「コンフリクト」5.・Issue #104）',
+    async () => {
+      const git = fakeGit({ conflictOnce: true });
+      const { runner, codexHost } = createHarness(YAML, { git });
+      const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      // 通常のタスクセッションはこの時点でまだreveal可能（hasLiveSession）だが、
+      // 衝突解決中はそちらではなく衝突解決セッションを開くべき
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      const snapshot = runner.getSnapshot(runId);
+      const t1Snapshot = snapshot?.tasks.find((t) => t.id === 'T1');
+      expect(t1Snapshot?.mergeResolutionActive).toBe(true);
+
+      const resolutionSession = codexHost.sessions.at(-1);
+      expect(runner.revealTask(runId, 'T1')).toBe(true);
+      expect(resolutionSession?.revealCount).toBe(1);
+      // 元のタスクセッション（T1自身のworktree）のrevealは呼ばれない
+      expect(t1.revealCount).toBe(0);
+
+      // 解決が終われば通常のreveal対象（liveTaskの側）に戻り、mergeResolutionActiveも消える
+      git.resolveConflict();
+      resolutionSession?.finish('done', doneState('衝突を解決しました'));
+      await flush();
+      const afterSnapshot = runner.getSnapshot(runId);
+      expect(afterSnapshot?.tasks.find((t) => t.id === 'T1')?.mergeResolutionActive).toBe(false);
+    },
+  );
 
   it(
     '衝突解決セッションがdoneを宣言してもgit上は未解決のままなら信用せずblockedにする' +
