@@ -25,6 +25,7 @@ import type {
 import {
   addAttachment,
   confirmCompact,
+  confirmRewindFiles,
   postFileMentions,
   postImageData,
   renderShell,
@@ -442,6 +443,8 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         'モデルと承認は今の会話にすぐ効きます。Effortは送りますが、CLIが結果を返さないため反映は確かめられません。エージェントは起動引数でのみ決まるため、変更は次のセッションから効きます。「既定」へ戻す操作も次のセッションから効きます。',
       // /review は実在しない（実測で /code-review を確認済み）。一覧に無ければボタンを隠す
       review: { mode: 'command', commandName: 'code-review' },
+      // ファイルの巻き戻し（design.md「Claude Codeの巻き戻し」）。Codexは分岐で代替する
+      showRewind: true,
     });
     panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(entry, message));
     panel.onDidDispose(() => {
@@ -711,6 +714,11 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         void this.compact(entry);
         return;
       }
+      if (type === 'rewind' && typeof m['messageId'] === 'string') {
+        entry.loop.noteUserAction();
+        void this.rewindFiles(entry, m['messageId']);
+        return;
+      }
       if (type === 'planMode') {
         entry.loop.noteUserAction();
         // 抜けるときは設定の承認方法へ戻す。タスク単位の設定があればそちらを優先する
@@ -782,6 +790,53 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     } catch (e) {
       this.reportError(e);
     }
+  }
+
+  /**
+   * ファイルを指定した発言の直前まで戻す。**会話の履歴には触れない**
+   * （design.md「Claude Codeの巻き戻し」・Issue #21）。
+   *
+   * 手順: 1) dry_runで対象ファイルを確かめる（押しても何も起きないボタンにしない）
+   * 2) 対象が無ければ、その旨を伝えて確認ダイアログは出さない
+   * 3) 対象ファイルを列挙し「会話は変わらない」ことを明記した確認ダイアログ
+   * 4) 承認されたら適用し、結果を必ず画面に返す（成功も失敗も黙って終わらせない）
+   */
+  private async rewindFiles(entry: ClaudePanel, userMessageId: string): Promise<void> {
+    let preview: Awaited<ReturnType<ClaudeStreamSession['previewRewindFiles']>>;
+    try {
+      preview = await entry.session.previewRewindFiles(userMessageId);
+    } catch (e) {
+      this.reportError(e);
+      return;
+    }
+    if (!preview.ok) {
+      void vscode.window.showErrorMessage(
+        `この発言まで戻せません: ${preview.error}（CLIのバージョンや実行環境によって使えないことがあります）`,
+      );
+      return;
+    }
+    if (preview.filesChanged.length === 0) {
+      void vscode.window.showInformationMessage('戻すファイルの変更はありませんでした。');
+      return;
+    }
+    if (!(await confirmRewindFiles(preview.filesChanged))) {
+      return;
+    }
+
+    let result: Awaited<ReturnType<ClaudeStreamSession['applyRewindFiles']>>;
+    try {
+      result = await entry.session.applyRewindFiles(userMessageId);
+    } catch (e) {
+      this.reportError(e);
+      return;
+    }
+    if (!result.ok) {
+      void vscode.window.showErrorMessage(`ファイルを戻せませんでした: ${result.error}`);
+      return;
+    }
+    void vscode.window.showInformationMessage(
+      `${preview.filesChanged.length}件のファイルを戻しました: ${preview.filesChanged.join(', ')}`,
+    );
   }
 
   /**

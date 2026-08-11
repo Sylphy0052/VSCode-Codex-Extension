@@ -24,6 +24,23 @@ describe('chatScript', () => {
     ).not.toThrow();
   });
 
+  it('showRewindを立てても構文として成立している（Claude Code画面のみ使う）', () => {
+    expect(() =>
+      parses(chatScript('Claude Code', { mode: 'command', commandName: 'code-review' }, true)),
+    ).not.toThrow();
+  });
+
+  it('showRewindを省略すると巻き戻しボタンを出さない（既定はfalse）', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+    expect(source).toContain('SHOW_REWIND = false');
+  });
+
+  it('showRewindを立てるとその値が埋め込まれる', () => {
+    const source = chatScript('Claude Code', { mode: 'command', commandName: 'code-review' }, true);
+    expect(source).toContain('SHOW_REWIND = true');
+    expect(source).toContain("type: 'rewind'");
+  });
+
   it('文字列リテラルが改行で分断されていない', () => {
     // テンプレートリテラル内に `\n` と書くと実際の改行に展開され、
     // 文字列リテラルが途中で切れて構文エラーになる。

@@ -57,7 +57,7 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 | Z-08 | Codex: background terminal / agent thread                | terminal は `command/exec` 系で**できる**。agent thread 切替は未確定                                                                                                                                                                                                                          |
 | Z-09 | Claude: スラッシュコマンドは解釈されるか                 | **される**。`/context` で `model: "<synthetic>"` の応答。APIコールもコストもゼロ                                                                                                                                                                                                              |
 | Z-10 | Claude: control protocol の能力                          | `set_model` `set_permission_mode` ほか多数を実測で確認                                                                                                                                                                                                                                        |
-| Z-11 | Claude: compact / rewind                                 | `rewind_files` 実在（要チェックポイント）。compact はコマンド送信で可                                                                                                                                                                                                                         |
+| Z-11 | Claude: compact / rewind                                 | `rewind_files` 実在。パラメータは`user_message_id`/`dry_run`（スネークケース）で、非対話環境では`CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=1`を渡さないとチェックポイントが作られない（実測、#21で確定）。compact はコマンド送信で可                                                          |
 | Z-12 | Claude: 途中ターンからの分岐                             | **無いと確定**。`branch` / `fork` コマンドはバイナリに実在するが `--print`（非対話）では無効化されており、送っても `"... isn't available in this environment."` で拒否される。control_requestのsubtypeも14候補で全滅（[#22](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/22)） |
 | Z-13 | Claude: todos / cost / context                           | **取れる**。`get_context_usage` `get_session_cost` `get_usage`                                                                                                                                                                                                                                |
 
@@ -127,15 +127,15 @@ Codexはターン単位で model / effort / approvalPolicy を渡せるのにCla
 
 ## Phase 5: 会話操作
 
-| ID    | 内容                                                                                                         | 対象         | 優先度 | 依存      | Issue                |
-| ----- | ------------------------------------------------------------------------------------------------------------ | ------------ | ------ | --------- | -------------------- |
-| TP-40 | 手動の会話圧縮（`/compact` 相当）。コンテキストが逼迫したときの手が現状ない                                  | Codex/Claude | P1     | Z-06 Z-11 | #20 済               |
-| TP-41 | 巻き戻し（Codex Esc Esc / Claude `/rewind` 相当）。Codexはターン分岐で部分的に代替できるが、Claudeは代替なし | 両方         | P2     | Z-11      | #21                  |
-| TP-44 | Claude で会話の途中ターンから分岐する。実測の結果、非対話環境では手段が無いと確定した（design.md §14.6）     | Claude       | P2     | Z-12      | #22 不可（根拠つき） |
-| TP-45 | コードレビューの起動（`/review` 相当）を画面の操作として持つ                                                 | Codex/Claude | P2     | Z-06 Z-09 | #23 済               |
-| TP-42 | 一時的な脇道の会話（Codex `/btw` 相当）                                                                      | Codex        | P3     | Z-06      | #24                  |
-| TP-43 | トランスクリプト表示と生テキストモード（Ctrl+T / `/raw` 相当）                                               | Codex/Claude | P3     | -         | #25                  |
-| TP-46 | `AGENTS.md` / `CLAUDE.md` の生成（`/init` 相当）                                                             | Codex/Claude | P3     | TP-11     | #26                  |
+| ID    | 内容                                                                                                                                                                                                                                             | 対象         | 優先度 | 依存      | Issue                              |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------ | ------ | --------- | ---------------------------------- |
+| TP-40 | 手動の会話圧縮（`/compact` 相当）。コンテキストが逼迫したときの手が現状ない                                                                                                                                                                      | Codex/Claude | P1     | Z-06 Z-11 | #20 済                             |
+| TP-41 | 巻き戻し（Codex Esc Esc / Claude `/rewind` 相当）。実装の結果、戻せる対象がCodexとClaudeで正反対と判明（Codex `thread/rollback` は会話のみ・ファイルは戻さないためdeprecatedごと不採用、Claude `rewind_files` はファイルのみ・会話は変わらない） | 両方         | P2     | Z-11      | #21 済（Claudeのみ、ファイル限定） |
+| TP-44 | Claude で会話の途中ターンから分岐する。実測の結果、非対話環境では手段が無いと確定した（design.md §14.6）                                                                                                                                         | Claude       | P2     | Z-12      | #22 不可（根拠つき）               |
+| TP-45 | コードレビューの起動（`/review` 相当）を画面の操作として持つ                                                                                                                                                                                     | Codex/Claude | P2     | Z-06 Z-09 | #23 済                             |
+| TP-42 | 一時的な脇道の会話（Codex `/btw` 相当）                                                                                                                                                                                                          | Codex        | P3     | Z-06      | #24                                |
+| TP-43 | トランスクリプト表示と生テキストモード（Ctrl+T / `/raw` 相当）                                                                                                                                                                                   | Codex/Claude | P3     | -         | #25                                |
+| TP-46 | `AGENTS.md` / `CLAUDE.md` の生成（`/init` 相当）                                                                                                                                                                                                 | Codex/Claude | P3     | TP-11     | #26                                |
 
 ## Phase 6: 環境・管理系
 

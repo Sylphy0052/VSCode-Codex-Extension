@@ -159,6 +159,29 @@ export async function confirmCompact(): Promise<boolean> {
   return choice === '圧縮する';
 }
 
+/** 確認ダイアログに列挙するファイル数の上限。超えた分は件数だけ示す。 */
+const REWIND_FILE_LIST_LIMIT = 10;
+
+/**
+ * ファイルの巻き戻し（Claude Code画面のみ）を実行してよいか確かめる。
+ *
+ * **会話の履歴には触れず、ファイルだけを戻す**。取り違えると作業が失われるため、
+ * 対象ファイルを列挙したうえで「会話は変わらない」ことを明記する
+ * （design.md「Claude Codeの巻き戻し」・Issue #21の受入基準）。
+ */
+export async function confirmRewindFiles(files: readonly string[]): Promise<boolean> {
+  const shown =
+    files.length > REWIND_FILE_LIST_LIMIT
+      ? [...files.slice(0, REWIND_FILE_LIST_LIMIT), `他 ${files.length - REWIND_FILE_LIST_LIMIT}件`]
+      : files;
+  const choice = await vscode.window.showWarningMessage(
+    `次のファイルを、この発言を送る前の状態に戻します。会話の履歴は変わりません。元には戻せません。\n\n${shown.join('\n')}`,
+    { modal: true },
+    'ファイルを戻す',
+  );
+  return choice === 'ファイルを戻す';
+}
+
 /**
  * ターン完了時の成果を作業記録へ通知する。Codex画面・Claude Code画面の両方で共有する。
  * 応答テキストと編集ファイルの両方が空なら何もしない。
@@ -1221,6 +1244,14 @@ export interface ChatShellOptions {
    * 変更がいつから効くかはプロバイダで違う。書かないと「変えたのに効かない」に見える。
    */
   settingsNote?: string;
+  /**
+   * 発言ごとに「ここまで戻す」ボタンを出すか（Claude Code画面のみ）。
+   *
+   * Codexには会話の途中から**分岐**する導線（「ここから分岐」）が既にあり、巻き戻しは
+   * 実装しない（design.md「Claude Codeの巻き戻し」。thread/rollbackはdeprecatedかつ
+   * ファイルを戻さない）。Claude Codeは`rewind_files`でファイルだけを戻せる。
+   */
+  showRewind?: boolean;
 }
 
 /**
@@ -1323,7 +1354,7 @@ ${chatStyles()}
   </div>
 
 <script nonce="${nonce}">
-${chatScript(options.agentLabel, options.review)}
+${chatScript(options.agentLabel, options.review, options.showRewind === true)}
 </script>
 </body>
 </html>`;
