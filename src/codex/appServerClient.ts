@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { Logger } from '../log';
+import { isValidMcpServerName, type McpServersSnapshot } from '../provider/mcpServers';
 import { isSessionId } from './argvBuilder';
 import {
   consumeFrames,
@@ -8,6 +9,7 @@ import {
   readForkedThreadId,
   type JsonRpcMessage,
 } from './jsonRpc';
+import { mergeMcpServers, parseConfigMcpServersEnabled, parseMcpServerStatusList } from './mcpStatus';
 import { parseModelList, readNextCursor, type ModelInfo } from './modelCatalog';
 
 export type ForkResult = { ok: true; threadId: string } | { ok: false; error: string };
@@ -90,6 +92,70 @@ export class AppServerClient {
       return [];
     }
     return result.value;
+  }
+
+  /**
+   * MCPサーバーの一覧を取る（issue #27、design.md TP-50）。
+   *
+   * `mcpServerStatus/list` と `config/read` を1回ずつ呼び、接続状況（ツール数など）と
+   * 有効/無効を突き合わせる。どちらか一方が失敗しても一覧は返さず、理由を添えて返す
+   * （空配列と「取得できなかった」を区別するため。詳細は `mcpStatus.ts` のコメントを参照）。
+   */
+  async listMcpServers(): Promise<McpServersSnapshot> {
+    const result = await this.call<ReturnType<typeof mergeMcpServers>>(async (request) => {
+      const statusResponse = await request('mcpServerStatus/list', { detail: 'full' });
+      if (statusResponse.error !== undefined) {
+        return { ok: false, error: statusResponse.error.message };
+      }
+      const configResponse = await request('config/read', {});
+      if (configResponse.error !== undefined) {
+        return { ok: false, error: configResponse.error.message };
+      }
+      const statusList = parseMcpServerStatusList(statusResponse.result);
+      const enabledMap = parseConfigMcpServersEnabled(configResponse.result);
+      return { ok: true, value: mergeMcpServers(statusList, enabledMap) };
+    });
+
+    if (!result.ok) {
+      this.log.warn(`MCPサーバー一覧を取得できませんでした: ${result.error}`);
+      return { ok: false, reason: result.error };
+    }
+    return { ok: true, servers: result.value };
+  }
+
+  /**
+   * MCPサーバーの有効/無効を切り替える（issue #27）。
+   *
+   * 実測で確認した手順: `config/value/write` で `config.toml` の
+   * `mcp_servers.<name>.enabled` を書き換え、`config/mcpServer/reload` で読み直させる。
+   * `config/mcpServer/reload` はサーバー名を取らず、設定ファイル全体を再読込するだけ
+   * （実測）。
+   */
+  async setMcpServerEnabled(
+    name: string,
+    enabled: boolean,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (!isValidMcpServerName(name)) {
+      return { ok: false, error: '不正なサーバー名です' };
+    }
+
+    const result = await this.call<void>(async (request) => {
+      const write = await request('config/value/write', {
+        keyPath: `mcp_servers.${name}.enabled`,
+        mergeStrategy: 'upsert',
+        value: enabled,
+      });
+      if (write.error !== undefined) {
+        return { ok: false, error: write.error.message };
+      }
+      const reload = await request('config/mcpServer/reload', null);
+      if (reload.error !== undefined) {
+        return { ok: false, error: reload.error.message };
+      }
+      return { ok: true, value: undefined };
+    });
+
+    return result.ok ? { ok: true } : { ok: false, error: result.error };
   }
 
   /**
