@@ -27,6 +27,7 @@ import type { SlashCommand } from '../provider/slashCommands';
 import { chatCsp } from './chatCsp';
 import { chatScript } from './chatScript';
 import { chatStyles } from './chatStyles';
+import { readPersistedThreadId } from './panelState';
 import { isEditableKey, type SettingsProvider } from './settingsProvider';
 
 interface ChatPanel {
@@ -709,15 +710,6 @@ function readSubmission(raw: unknown): PromptSubmission | undefined {
     }
   }
   return { action, values };
-}
-
-/** webview側が `setState` で保持している値。 */
-function readPersistedThreadId(state: unknown): string | undefined {
-  if (typeof state !== 'object' || state === null) {
-    return undefined;
-  }
-  const threadId = (state as Record<string, unknown>)['threadId'];
-  return typeof threadId === 'string' && threadId !== '' ? threadId : undefined;
 }
 
 export interface ChatShellOptions {

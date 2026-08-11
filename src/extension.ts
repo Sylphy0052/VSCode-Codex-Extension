@@ -167,10 +167,13 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   context.subscriptions.push(claudeWatcher);
 
-  // リロード後にCodex画面のタブを復元する（TUIタブは TabStateStore が担当）
+  // リロード後にチャット画面のタブを復元する
   context.subscriptions.push(
     vscode.window.registerWebviewPanelSerializer('codex.chat', {
       deserializeWebviewPanel: (panel, state) => chat.restorePanel(panel, state),
+    }),
+    vscode.window.registerWebviewPanelSerializer('claude.chat', {
+      deserializeWebviewPanel: (panel, state) => claudeChat.restorePanel(panel, state),
     }),
   );
 

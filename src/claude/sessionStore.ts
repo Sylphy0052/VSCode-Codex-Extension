@@ -64,6 +64,19 @@ export class ClaudeSessionStore {
     return found.find((filePath) => sessionIdFromTranscriptName(basename(filePath)) === sessionId);
   }
 
+  /**
+   * idから作業ディレクトリを引く。
+   *
+   * リロードで復元されたパネルはcwdを持たないため、transcriptの素性から取り戻す。
+   */
+  async resolveCwd(sessionId: string): Promise<string | undefined> {
+    const filePath = await this.resolveTranscriptPath(sessionId);
+    if (filePath === undefined) {
+      return undefined;
+    }
+    return parseTranscriptHead(await this.fs.readHead(filePath, HEAD_LINES))?.cwd;
+  }
+
   /** id が読めたtranscriptを、更新の新しい順に。 */
   private async orderedTranscripts(): Promise<
     Array<{ filePath: string; id: string; mtimeMs: number | undefined }>
