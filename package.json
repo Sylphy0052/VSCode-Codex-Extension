@@ -434,6 +434,20 @@
           "scope": "machine-overridable",
           "markdownDescription": "ロードマップ（`workflow.roadmap` で生成するMarkdown）の出力先ディレクトリ。ワークスペースフォルダからの相対パス。出力先はワークスペースフォルダの配下に限る（設計書 §16.16・§16.19）。"
         },
+        "agent.workflows.pseudoWorktreeExclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "node_modules",
+            ".venv",
+            "dist",
+            "out"
+          ],
+          "scope": "machine-overridable",
+          "markdownDescription": "ワークスペースがgitの作業ツリーでない場合の隔離（疑似worktree）で、複製から除外するディレクトリ名。深さを問わず名前が一致するディレクトリを除外する。`.agents/worktrees` 自身は常に除外される（設計書 §16.20）。"
+        },
         "claude.executablePath": {
           "type": "string",
           "default": "claude",
