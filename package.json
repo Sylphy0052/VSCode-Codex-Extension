@@ -418,6 +418,20 @@
           "scope": "machine",
           "markdownDescription": "ワークフロー定義（YAML）の `autoApprove: true` を有効化できるようにする。無効のままだと、YAMLに何と書かれていても全ての承認要求を人へ回す。リポジトリ側のYAMLから無人実行を勝手に有効化されないよう machine スコープに固定している（設計書 §16.16）。"
         },
+        "agent.workflows.pseudoWorktreeExclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "node_modules",
+            ".venv",
+            "dist",
+            "out"
+          ],
+          "scope": "machine-overridable",
+          "markdownDescription": "ワークスペースがgitの作業ツリーでない場合の隔離（疑似worktree）で、複製から除外するディレクトリ名。深さを問わず名前が一致するディレクトリを除外する。`.agents/worktrees` 自身は常に除外される（設計書 §16.20）。"
+        },
         "claude.executablePath": {
           "type": "string",
           "default": "claude",
