@@ -148,6 +148,26 @@ export function buildContextUsage(
   return { usedTokens, contextWindow: window, remainingPercent: remaining };
 }
 
+/**
+ * セッションのコスト（issue #37、design.md TP-60）。Claude Codeのみが持つ概念で、
+ * レート制限の消費率（`ChatUsage`）ともコンテキストの使用量（`ContextUsage`）とも別物。
+ *
+ * `get_usage` control requestの応答から作る（`src/claude/costText.ts` の `parseSessionCost`
+ * を参照）。CLIはこの値を読んだ時刻を返さないため、`capturedAt` は呼び出し側の
+ * wall clockで埋める。
+ */
+export interface SessionCostView {
+  /** このセッションで使った推定コスト（USD）。サブスクリプションでは実際の請求額ではなく、
+   * API料金換算の見積もり（`subscriptionType` が入っているときはその旨を表示側で注記する）。 */
+  totalCostUsd: number;
+  totalLinesAdded: number;
+  totalLinesRemoved: number;
+  /** サブスクリプションの種別（例: 'max'）。APIキー利用など無い場合は undefined。 */
+  subscriptionType: string | undefined;
+  /** この値を読み取った時刻（epoch ms、クライアント側のwall clock）。 */
+  capturedAt: number;
+}
+
 export interface ChatState {
   threadId: string | undefined;
   /** Codexが会話内容から付ける要約名。ユーザーが変更することもできる。 */
@@ -183,6 +203,10 @@ export interface ChatState {
   usage: ChatUsage | undefined;
   /** コンテキストの使用量。まだ判らない間は undefined（数字を出さない）。 */
   context: ContextUsage | undefined;
+  /**
+   * セッションのコスト（Claude Codeのみ）。まだ判らない間・Codexのセッションでは undefined。
+   */
+  sessionCost: SessionCostView | undefined;
   /**
    * Plan mode（読み取りだけに絞って計画を立てる状態）か。
    *
@@ -232,6 +256,7 @@ export const initialChatState: ChatState = {
   prompts: [],
   usage: undefined,
   context: undefined,
+  sessionCost: undefined,
   planMode: false,
   reviewing: false,
   turnResultText: '',

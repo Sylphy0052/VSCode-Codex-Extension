@@ -881,12 +881,44 @@ export function chatScript(
     if (bits.length > 0) status.appendChild(document.createTextNode(bits.join(' ・ ')));
 
     const context = formatContext(state.context);
-    if (!context) return;
-    if (status.childNodes.length > 0) status.appendChild(document.createTextNode(' ・ '));
-    const span = document.createElement('span');
-    if (context.low) span.className = 'warn';
-    span.textContent = context.text;
-    status.appendChild(span);
+    if (context) {
+      if (status.childNodes.length > 0) status.appendChild(document.createTextNode(' ・ '));
+      const span = document.createElement('span');
+      if (context.low) span.className = 'warn';
+      span.textContent = context.text;
+      status.appendChild(span);
+    }
+
+    const cost = formatSessionCost(state.sessionCost);
+    if (cost) {
+      if (status.childNodes.length > 0) status.appendChild(document.createTextNode(' ・ '));
+      const costSpan = document.createElement('span');
+      costSpan.textContent = cost.text;
+      costSpan.title = cost.title;
+      status.appendChild(costSpan);
+    }
+  }
+
+  // セッションのコスト（issue #37、/cost相当）。レート制限の消費率（usage）とも
+  // コンテキスト残量（context）とも別の数字なので、見出しを分けて並べる。Claude Codeの
+  // セッションでのみ値が届く（Codexでは常にundefinedのまま）。
+  function formatSessionCost(cost) {
+    if (!cost || typeof cost.totalCostUsd !== 'number') return undefined;
+    const amount = cost.totalCostUsd.toFixed(4);
+    const titleBits = ['見積りコスト（現在のセッション、USD）: $' + amount];
+    if (cost.subscriptionType) {
+      titleBits.push(
+        'サブスクリプション(' + cost.subscriptionType +
+          ')のため、実際の請求額ではなくAPI料金換算の見積もりです',
+      );
+    }
+    if (cost.totalLinesAdded || cost.totalLinesRemoved) {
+      titleBits.push('コード変更: +' + cost.totalLinesAdded + ' / -' + cost.totalLinesRemoved + ' 行');
+    }
+    if (typeof cost.capturedAt === 'number') {
+      titleBits.push('取得時刻: ' + new Date(cost.capturedAt).toLocaleString('ja-JP'));
+    }
+    return { text: 'コスト $' + amount, title: titleBits.join(' / ') };
   }
 
   /**

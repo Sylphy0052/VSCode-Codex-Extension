@@ -1273,6 +1273,57 @@ Commands:
 - `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `account: AccountSnapshot` を追加。`logoutCodex()` / `logoutClaude()` / `loginCodexApiKey(apiKey)` を新設。ログアウトは確認ダイアログを必ず挟む
 - `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 「アカウント」欄の描画とボタン操作。ブラウザでのログインは統合ターミナルを開いてコマンドを入力するところまでで止め、自動実行はしない（`terminal.sendText(cmd, false)`）
 
+### 14.16 課金額とセッション分析の表示（`/cost` `/insights` 相当）
+
+TUIの `/cost`（課金額）と `/insights`（セッション分析レポート）に相当する表示。issue #37・design.mdのTP-60対応。**スコープはClaude Codeのみ**（issue本文の明記どおり）。TP-31（トークン使用量・コンテキスト残量）や既存の使用量表示（`usageProbe.ts` / `usageText.ts`。レート制限の消費率）とは別の情報であり、混同しない表示にする。
+
+#### 実測（CLI 2.1.227、issue #2 Z-13のPhase 0を追試）
+
+`get_session_cost` と `get_context_usage` を、ターンを1回も回していない状態と1ターン回した後の両方で送って比較した。
+
+- `get_session_cost` は整形済みの英文テキストのみを返す: `{ text: "Total cost: $0.0000\nTotal duration (API): 0s\n..." }`（ターン無し）→ `{ text: "Total cost: $0.2177\n...\nUsage by model:\n  claude-opus-5: 2 input, 4 output, ...($0.2177)" }`（1ターン後）
+- `get_usage` は同じ数字を構造化して返し、**情報量がより多い**。実測した形の一部:
+  ```json
+  {
+    "session": {
+      "total_cost_usd": 0.2176935,
+      "total_api_duration_ms": 1945,
+      "total_lines_added": 0,
+      "total_lines_removed": 0,
+      "model_usage": { "claude-opus-5[1m]": { "costUSD": 0.2176935, "inputTokens": 2, "..." } }
+    },
+    "subscription_type": "max",
+    "rate_limits": { "five_hour": { "utilization": 58, "resets_at": "..." }, "...": "..." },
+    "behaviors": {
+      "day": { "request_count": 10822, "session_count": 59, "behaviors": [{ "key": "high_parallel", "pct": 90 }], "agents": ["..."], "skills": ["..."] },
+      "week": { "...": "..." }
+    }
+  }
+  ```
+  `rate_limits` は既存の使用量表示（レート制限の消費率）と同じ情報で、`behaviors` はセッション分析（`/insights` の内容と重なる）。**どちらもこの機能では読まない**（重複表示を避けるため。Phase 0コメントの「実装時に重複しないよう調整する」への回答）。使うのは `session.total_cost_usd` / `total_lines_added` / `total_lines_removed` と `subscription_type` だけに絞った
+- **`total_cost_usd` はサブスクリプション（Max）でも0にならず、API料金換算の見積額が入る**。ターンを1回も回していない状態でだけ正しく `0` になる（実測）。したがって「サブスクリプションでは金額が出ない」という当初の懸念は、この経路には**当てはまらなかった**。ただし数字の性質が「実際の請求額」ではなく「API相当額の見積もり」であることは分かりにくいため、画面には常にその旨を注記する（誤解防止。取れなかった場合の実測は無いが、`total_cost_usd` が数値で読めない応答が来ても0円と決め付けず表示しない防御にしている）
+- `/cost` はコマンド一覧（`initialize.commands`）には独立した項目としては無く、`usage` コマンドの `aliases: ["cost", "stats"]` として登録されている（実測）。発言として `/cost` を送ると、`model: "<synthetic>"` のアシスタント発言として `/usage` と同じレポート（消費率・行動分析）が返る。**金額そのものは出ない**ため、課金額の表示には `get_session_cost` / `get_usage` を使う
+- `/insights` はコマンド一覧に独立して存在する（`description: "Generate a report analyzing your Claude Code sessions"`）。発言として送ると受理されるところまでは確認したが、**応答の完了は実測の時間内（20秒)では確認できなかった**（セッション数・リクエスト数が多い環境だったため長くかかった可能性がある。課金の発生を抑えるため、これ以上長く待つ再実験はしていない）。ただし「送信そのものはCLIに任せる」という既存の設計（`src/provider/slashCommands.ts` の冒頭コメント）により、**`/insights` はコード変更なしで既に動く**: `initialize.commands` に含まれるため入力欄の候補に出て、確定して送ると他のClaude Codeコマンドと同じ経路でCLIへそのまま渡る。受入基準の「分析レポートを起動できる」はこの既存経路で満たす
+
+#### Codex側の可否（スコープ外だが確認した）
+
+issueのスコープはClaude側のみだが、指示に基づき同種の経路を確認した。`codex app-server generate-json-schema` に `account/usage/read`（`GetAccountTokenUsageResponse { summary: AccountTokenUsageSummary, dailyUsageBuckets? }`）があり、`AccountTokenUsageSummary` は `currentStreakDays` / `lifetimeTokens` / `longestRunningTurnSec` / `longestStreakDays` / `peakDailyTokens` を持つ。**実際にparamsなし（`null`）で呼べることを実測で確認した**（スレッド開始不要、`account/read` と同じ性質）が、応答には**金額（USD等）を示すフィールドが無く、トークン数と連続日数の統計のみ**だった。加えてこの値は「アカウント全体・全期間の累計」であり、Codexにはget_usageのような「いま開いている会話のコスト」に相当する概念自体が無い。ChatGPTのサブスクリプションでは実際にトークン単価の課金情報を持たない、というissueの想定どおりの結果になった。以上より、**Codex側は今回実装しない**（スコープどおり）。将来「Codexのセッション分析」を別issueにする場合の入口として、この結果だけ記録に残す
+
+#### 表示
+
+- チャット画面のフッター（入力欄の下、レート制限の消費率・コンテキスト残量と同じ行）に `コスト $0.2177` のように出す。**Claude Codeのセッションでのみ**表示され、Codexのセッションでは出ない（`sessionCost` フィールドが常にundefinedのため）
+- 値はターンが終わるたびに読み直す（`get_context_usage` と同じ契機。`ClaudeStreamSession.refreshSessionCost`）。会話を始める前（`initialize` 応答直後）にも一度読み、開いた直後から出るようにする
+- ホバー（`title` 属性）でサブスクリプションの場合の注記（実際の請求額ではなくAPI相当額の見積もりであること）とコード変更行数、取得時刻を出す。**通貨（USD）と時点を明示する**（要件どおり）
+- 分析レポート（`/insights`）はスラッシュコマンドの候補からそのまま送るか、入力欄に直接入力する。既存のスラッシュコマンド送信経路をそのまま使うため、専用のボタンは設けていない
+
+#### 実装
+
+- `src/appserver/chatState.ts`: `SessionCostView`（`totalCostUsd` / `totalLinesAdded` / `totalLinesRemoved` / `subscriptionType` / `capturedAt`）を追加。`ChatState.sessionCost` として持つ（Codexのセッションでは常にundefined）
+- `src/claude/costText.ts`: `get_usage` の応答を `SessionCostView` へ正規化する純粋関数 `parseSessionCost`。`total_cost_usd` が数値で読めなければ `undefined` を返し、0円と決め付けない
+- `src/claude/control.ts`: `buildSessionCostRequest`（`get_usage` を送る）/ `readSessionCost`（`parseSessionCost` への薄いラッパー）
+- `src/claude/streamSession.ts`: `refreshSessionCost()`。`refreshContext()` と同じ契機（ターン完了時、会話開始直後）で呼ぶ
+- `src/view/chatScript.ts`: フッターへのコスト表示（`formatSessionCost`）。テンプレートリテラルの中の素のJSのため、`costText.ts` の関数は再利用できず同等のロジックを書き直している（既存の `formatContext` / `formatUsage` と同じ構成）
+
 ## 15. 作業記録（日報・週報連携）
 
 この拡張機能から実行したセッションを、日報/週報システムが読める形で残す。

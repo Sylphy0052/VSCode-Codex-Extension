@@ -7,6 +7,7 @@ import {
   buildMcpStatusRequest,
   buildMcpToggleRequest,
   buildRewindFilesRequest,
+  buildSessionCostRequest,
   buildSetEffortRequest,
   buildSetModelRequest,
   buildSetPermissionModeRequest,
@@ -22,6 +23,7 @@ import {
   readControlRequest,
   readControlResponse,
   readRewindFilesResult,
+  readSessionCost,
 } from '../../src/claude/control';
 
 describe('buildUserMessage', () => {
@@ -199,6 +201,39 @@ describe('readContextUsage', () => {
   it('読めない応答では何も返さない', () => {
     expect(readContextUsage(undefined)).toBeUndefined();
     expect(readContextUsage({})).toBeUndefined();
+  });
+});
+
+describe('buildSessionCostRequest', () => {
+  it('get_usage を1行で送る（issue #37）', () => {
+    const line = buildSessionCostRequest('req_3');
+    expect(line.endsWith('\n')).toBe(true);
+    expect(JSON.parse(line.trim())).toEqual({
+      type: 'control_request',
+      request_id: 'req_3',
+      request: { subtype: 'get_usage' },
+    });
+  });
+});
+
+describe('readSessionCost', () => {
+  it('get_usage の応答からコストを読む', () => {
+    const payload = {
+      session: { total_cost_usd: 0.21, total_lines_added: 3, total_lines_removed: 1 },
+      subscription_type: 'max',
+    };
+    expect(readSessionCost(payload, 1000)).toEqual({
+      totalCostUsd: 0.21,
+      totalLinesAdded: 3,
+      totalLinesRemoved: 1,
+      subscriptionType: 'max',
+      capturedAt: 1000,
+    });
+  });
+
+  it('コストが読めない応答では何も返さない', () => {
+    expect(readSessionCost(undefined, 1000)).toBeUndefined();
+    expect(readSessionCost({}, 1000)).toBeUndefined();
   });
 });
 
@@ -584,7 +619,11 @@ describe('readRewindFilesResult', () => {
   it('トップレベルのエラー応答も読む（実測: dry_run:falseでチェックポイント無しのとき）', () => {
     const response = readControlResponse({
       type: 'control_response',
-      response: { subtype: 'error', request_id: 'req_4', error: 'No file checkpoint found for this message.' },
+      response: {
+        subtype: 'error',
+        request_id: 'req_4',
+        error: 'No file checkpoint found for this message.',
+      },
     });
     expect(readRewindFilesResult(response!)).toEqual({
       ok: false,
