@@ -11,7 +11,6 @@ import type {
   TaskSessionInput,
 } from '../../src/orchestrator/taskSession';
 import {
-  MAX_WORKFLOW_FILE_BYTES,
   WAITING_REPLY_POLL_INTERVAL_MS,
   WorkflowRunner,
   type WorkflowFilePort,
@@ -42,7 +41,7 @@ import {
   type GitCommandRunner,
   type WorktreeFileSystemPort,
 } from '../../src/orchestrator/worktree';
-import type { Provider } from '../../src/orchestrator/workflow';
+import { MAX_WORKFLOW_FILE_BYTES, type Provider } from '../../src/orchestrator/workflow';
 import type { Logger } from '../../src/log';
 
 /**

@@ -2,6 +2,13 @@ import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
 import { isPathWithinRoot } from './escalation';
+import {
+  assertValidIdentifiers,
+  findSymlinkedAncestor,
+  identifierError,
+  runIdError,
+} from './fsGuards';
+import { SerialQueue } from './serialQueue';
 
 /**
  * gitの作業ツリーでないワークスペースでの隔離（design.md §16.20 / Issue #96）。
@@ -205,55 +212,18 @@ export function isExcludedPath(relativePath: string, exclude: readonly string[])
 }
 
 // ---------------------------------------------------------------------------
-// 識別子の検証（worktree.tsのRUN_ID_PATTERNと同じ理由で複製）
+// 識別子の検証・パスの組み立て
 // ---------------------------------------------------------------------------
 
 /**
- * `runId` の字種（UUID）。`worktree.ts` の `RUN_ID_PATTERN` と同じ正規表現だが、あえて
- * 複製している。両モジュールは互いをimportしない構造にしてあり（循環を避けるため）、
- * 「形式がUUIDである」という要件はdesign.md由来でどちらのモジュールにも共通して課される
- * ものなので、意味の異なるモジュール間の結合を避けてここでも複製する
- * （`worktree.ts` 自身のコメントと同じ方針）。
+ * `runId` / `taskId` の字種の検証は `worktree.ts` / `integration.ts` と共通の
+ * `fsGuards.ts` から読む。以前はここへも同じ正規表現・同じロジックが複製されていた
+ * （「`workflow.ts` / `worktree.ts` をimportしない」という理由づけだったが、`fsGuards.ts`
+ * は他モジュールに依存しない末端モジュールのため、importしても循環しない。Issue #146）。
  */
-const RUN_ID_PATTERN =
-  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-
-/**
- * `taskId` の字種。`workflow.ts` の `TASK_ID_PATTERN` と同じ正規表現をここでも複製する
- * （このファイルは `workflow.ts` をimportしない。`worktree.ts` は直接importして共有して
- * いるが、循環の心配が無いことを個別に確認する手間を避け、`RUN_ID_PATTERN` と対称な方針で
- * 統一する）。
- */
-const TASK_ID_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,49}$/;
 
 /** 統合先ディレクトリのタスクid相当の固定名。design.md §16.17「`_integration` はタスクidとして予約する」。 */
 const INTEGRATION_DIR_NAME = '_integration';
-
-function runIdError(runId: string): string | undefined {
-  return RUN_ID_PATTERN.test(runId) ? undefined : `不正なrunId（UUID形式ではありません）: ${runId}`;
-}
-
-function identifierError(runId: string, taskId: string): string | undefined {
-  const runIdMessage = runIdError(runId);
-  if (runIdMessage !== undefined) {
-    return runIdMessage;
-  }
-  if (!TASK_ID_PATTERN.test(taskId)) {
-    return `不正なtaskId（許可されない文字を含みます）: ${taskId}`;
-  }
-  return undefined;
-}
-
-function assertValidIdentifiers(runId: string, taskId: string): void {
-  const message = identifierError(runId, taskId);
-  if (message !== undefined) {
-    throw new Error(message);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// パスの組み立て
-// ---------------------------------------------------------------------------
 
 /** 疑似worktreeを置くディレクトリ。gitの場合（`worktree.ts` の `worktreesRootDir`）と同じ置き場。 */
 export function pseudoWorktreesRootDir(workspaceRoot: string): string {
@@ -376,38 +346,6 @@ export const nodePseudoWorktreeFileSystem: PseudoWorktreeFileSystemPort = {
     await fsPromises.rm(target, { recursive: true, force: true });
   },
 };
-
-// ---------------------------------------------------------------------------
-// シンボリックリンク対策（`worktree.ts` の `findSymlinkedAncestor` と同じ考え方）
-// ---------------------------------------------------------------------------
-
-/**
- * `root` から `target` までの各中間ディレクトリにシンボリックリンクが含まれていないかを
- * 確かめる。見つかった最初のパスを返す（無ければ undefined）。一次防御（事前検知）。
- *
- * `worktree.ts` の同名関数と同じロジックだが、`PseudoWorktreeFileSystemPort` は別の
- * インターフェース型のため、型を跨いで共有する構造は取らず複製する
- * （このファイルの他の複製箇所と同じ理由）。`target`（複製先・統合先そのもの）はこれから
- * 作られる前提のため存在しないが、その祖先（`.agents` / `.agents/worktrees` / `<runId>`）は
- * 既存でありうる。存在しないセグメントは `isSymbolicLink` が `false` を返すだけで安全に
- * 読み飛ばせる。
- */
-async function findSymlinkedAncestor(
-  root: string,
-  target: string,
-  fs: PseudoWorktreeFileSystemPort,
-): Promise<string | undefined> {
-  const rel = path.relative(root, target);
-  const segments = rel.split(path.sep).filter((segment) => segment !== '' && segment !== '..');
-  let cursor = root;
-  for (const segment of segments) {
-    cursor = path.join(cursor, segment);
-    if (await fs.isSymbolicLink(cursor)) {
-      return cursor;
-    }
-  }
-  return undefined;
-}
 
 /**
  * `root` 配下を再帰的に走査し、除外に該当しないファイルの相対パス（`/` 区切り）一覧を返す。
@@ -625,7 +563,8 @@ export async function applyDiffToIntegration(
 /**
  * 統合先への適用（差分適用 + マニフェスト更新）を1本のキューへ通して直列化する。
  *
- * `worktree.ts` の `WorktreeCreationQueue` と同じ理由。複数タスクが同時に完了すると、
+ * `worktree.ts` の `WorktreeCreationQueue` と同じ理由（直列化そのものの実装は
+ * `serialQueue.ts` の `SerialQueue` を共有する。Issue #146）。複数タスクが同時に完了すると、
  * マニフェストへの読み取り→更新→書き戻しが競合し、後勝ちで前の更新が消える
  * （典型的なread-modify-writeレース）。gitの `index.lock` のような排他機構がここには
  * 無いため、呼び出し側でキューに通して直列化する。
@@ -634,7 +573,7 @@ export async function applyDiffToIntegration(
  * と同じ注意。
  */
 export class IntegrationQueue {
-  private tail: Promise<void> = Promise.resolve();
+  private readonly queue = new SerialQueue();
   private manifest: IntegrationManifest;
 
   constructor(initialManifest: IntegrationManifest = new Map()) {
@@ -663,12 +602,7 @@ export class IntegrationQueue {
   }
 
   private enqueue<T>(task: () => Promise<T>): Promise<T> {
-    const run = this.tail.then(task, task);
-    this.tail = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
+    return this.queue.enqueue(task);
   }
 }
 

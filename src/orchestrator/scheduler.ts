@@ -1,4 +1,4 @@
-import { isRunHalted, type RunState } from './runState';
+import { isActiveTaskState, isRunHalted, type RunState } from './runState';
 import type { WorkflowDefinition } from './workflow';
 
 /**
@@ -31,12 +31,7 @@ export function nextTasksToStart(def: WorkflowDefinition, run: RunState): Readon
 
   let activeCount = 0;
   for (const s of run.tasks.values()) {
-    if (
-      s.state === 'running' ||
-      s.state === 'waitingApproval' ||
-      s.state === 'waitingReply' ||
-      s.state === 'merging'
-    ) {
+    if (isActiveTaskState(s.state)) {
       activeCount += 1;
     }
   }
@@ -88,13 +83,10 @@ export function getRunOutcome(run: RunState): RunOutcome {
   let anyBlocked = false;
   let anySkipped = false;
   for (const s of run.tasks.values()) {
-    if (
-      s.state === 'pending' ||
-      s.state === 'running' ||
-      s.state === 'waitingApproval' ||
-      s.state === 'waitingReply' ||
-      s.state === 'merging'
-    ) {
+    // `isActiveTaskState`（枠を占める4状態）に加えて`pending`（まだ始まっていない）も
+    // ここでは「まだ終わっていない」に含める。「枠を占める」より広い問いのため、
+    // `pending`はここでだけ明示的に足す（`isActiveTaskState`のコメント参照）。
+    if (s.state === 'pending' || isActiveTaskState(s.state)) {
       return 'running';
     }
     if (s.state === 'failed') {

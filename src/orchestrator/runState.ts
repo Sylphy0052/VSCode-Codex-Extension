@@ -23,6 +23,30 @@ export const TASK_STATES = [
 export type TaskState = (typeof TASK_STATES)[number];
 
 /**
+ * その状態が「並列枠を占めている」か（design.md §16.3）。
+ *
+ * `running` はもちろん、`waitingApproval`（人待ちのセッションもプロセスとしては生きている）・
+ * `waitingReply`（返信待ちのセッションも同様。§16.21）・`merging`（マージが終わるまで
+ * そのタスクの成果は確定しない）も枠を占める。この4状態の集合は、`maxParallel` の空き数
+ * 計算（`scheduler.ts` の `nextTasksToStart`）・待ちぼうけ検出（`runner.ts` の
+ * `checkWaitingReplyStalls`）・実行全体の終了判定（`scheduler.ts` の `getRunOutcome`）の
+ * 3箇所で同じ判定が必要になる（Issue #146）。状態を1つ足すたびに3箇所を揃えて直す必要が
+ * あった重複を、ここへ集約する。
+ *
+ * `getRunOutcome` は「実行全体がまだ終わっていないか」という別の問い（この4状態に加えて
+ * `pending` も含む）を判定しており、`isActiveTaskState` はその一部として使う
+ * （`pending` は「枠を占める」の意味ではまだ何も始まっていないため、ここには含めない）。
+ */
+export function isActiveTaskState(state: TaskState): boolean {
+  return (
+    state === 'running' ||
+    state === 'waitingApproval' ||
+    state === 'waitingReply' ||
+    state === 'merging'
+  );
+}
+
+/**
  * タスクが `failed` / `skipped` になった理由。discriminated unionにすることで、
  * 「人が承認要求を拒否した（approvalRejected）」を他の失敗（自動再試行してよいもの）と
  * 型で区別できるようにする（design.md §16.5「人が承認要求を拒否したために止まったタスクは、

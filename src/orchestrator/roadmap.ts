@@ -16,7 +16,12 @@ import {
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { TaskSessionHost } from './taskSession';
 import type { GitCommandRunner } from './worktree';
-import { TASK_ID_PATTERN, type Provider, type WorkflowDefinition } from './workflow';
+import {
+  findCycleGroups,
+  TASK_ID_PATTERN,
+  type Provider,
+  type WorkflowDefinition,
+} from './workflow';
 
 /**
  * ロードマップ（design.md §16.19）の純粋ロジック。
@@ -171,63 +176,6 @@ export interface RoadmapValidationResult {
 
 function allItems(parsed: ParsedRoadmap): RoadmapItem[] {
   return parsed.phases.flatMap((p) => p.items);
-}
-
-/**
- * 依存の循環を強連結成分（SCC）単位で検出する。`workflow.ts` の `findCycleGroups` と
- * 同じTarjanベースの考え方をロードマップ項目向けに書き直したもの（対象の型が違うため複製）。
- */
-function findCycleGroups(items: readonly RoadmapItem[]): string[][] {
-  const byId = new Map(items.map((it) => [it.id, it] as const));
-  let counter = 0;
-  const index = new Map<string, number>();
-  const lowlink = new Map<string, number>();
-  const onStack = new Set<string>();
-  const stack: string[] = [];
-  const groups: string[][] = [];
-
-  function strongConnect(id: string): void {
-    index.set(id, counter);
-    lowlink.set(id, counter);
-    counter += 1;
-    stack.push(id);
-    onStack.add(id);
-
-    const current = byId.get(id);
-    for (const dep of current?.dependsOn ?? []) {
-      if (!byId.has(dep)) {
-        continue;
-      }
-      if (!index.has(dep)) {
-        strongConnect(dep);
-        lowlink.set(id, Math.min(lowlink.get(id) as number, lowlink.get(dep) as number));
-      } else if (onStack.has(dep)) {
-        lowlink.set(id, Math.min(lowlink.get(id) as number, index.get(dep) as number));
-      }
-    }
-
-    if (lowlink.get(id) === index.get(id)) {
-      const group: string[] = [];
-      let member: string;
-      do {
-        member = stack.pop() as string;
-        onStack.delete(member);
-        group.push(member);
-      } while (member !== id);
-
-      const isSelfLoop = group.length === 1 && (byId.get(id)?.dependsOn ?? []).includes(id);
-      if (group.length > 1 || isSelfLoop) {
-        groups.push(group);
-      }
-    }
-  }
-
-  for (const id of byId.keys()) {
-    if (!index.has(id)) {
-      strongConnect(id);
-    }
-  }
-  return groups;
 }
 
 /**

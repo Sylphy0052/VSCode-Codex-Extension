@@ -75,6 +75,7 @@ import {
 import {
   applyLoopStopReason,
   createRunState,
+  isActiveTaskState,
   markApprovalRejected,
   markMergeBlocked,
   markMergeFailed,
@@ -122,6 +123,7 @@ import {
 import {
   expandTemplate,
   findPermissionEscalationWarnings,
+  MAX_WORKFLOW_FILE_BYTES,
   parseWorkflowYaml,
   permissionEscalationReasons,
   referencedResultFields,
@@ -150,13 +152,6 @@ export interface WorkflowFilePort {
   fileSize(path: string): Promise<number | undefined>;
   readTextFile(path: string): Promise<string | undefined>;
 }
-
-/**
- * 巨大なYAMLで拡張機能ホスト（シングルスレッド）を固まらせないための上限。
- * `workflow.ts` の `MAX_PROMPT_LENGTH`（20000文字）× `MAX_TASK_COUNT`（50）を
- * 大きく超える値を目安にした余裕のある上限で、通常のワークフロー定義には十分すぎる。
- */
-export const MAX_WORKFLOW_FILE_BYTES = 1 * 1024 * 1024;
 
 /**
  * タスク間メッセージング（design.md §16.21）の待ちぼうけ検出（`checkWaitingReplyStalls`）を
@@ -1487,12 +1482,7 @@ export class WorkflowRunner {
     const activeStates = new Map<string, TaskState>();
     const waitingSinceMsByTaskId = new Map<string, number>();
     for (const [taskId, s] of live.runState.tasks) {
-      if (
-        s.state === 'running' ||
-        s.state === 'waitingApproval' ||
-        s.state === 'waitingReply' ||
-        s.state === 'merging'
-      ) {
+      if (isActiveTaskState(s.state)) {
         activeStates.set(taskId, s.state);
       }
       if (s.state === 'waitingReply') {

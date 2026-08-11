@@ -3,9 +3,15 @@ import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
 import { isPathWithinRoot, type TaskBoundary } from './escalation';
+import {
+  assertValidIdentifiers,
+  findSymlinkedAncestor,
+  identifierError,
+} from './fsGuards';
 import type { TaskState } from './runState';
 import { sanitizeForLog } from './sanitize';
-import { TASK_ID_PATTERN, type CleanupMode, type Isolation } from './workflow';
+import { SerialQueue } from './serialQueue';
+import type { CleanupMode, Isolation } from './workflow';
 
 /**
  * タスクごとの作業ディレクトリ分離とgit外フォールバック（design.md §16.6）。
@@ -113,48 +119,6 @@ export const nodeWorktreeFileSystem: WorktreeFileSystemPort = {
 };
 
 /**
- * `runId` の字種（UUID）。design.md §16.6「runIdはUUID」。
- *
- * `src/codex/argvBuilder.ts` の `isSessionId` と同じ正規表現だが、あえて複製している。
- * `isSessionId` はCodexセッションid専用の意味を持つ関数で、runIdの検証に流用すると
- * 「たまたま形式が同じだけ」の依存が生まれる。形式（UUID）が一致しているのはここでは
- * 偶然ではなく設計上の要件（design.md）なので、意味の異なるモジュールへ結合させず
- * このファイル内に正規表現として複製する。
- */
-const RUN_ID_PATTERN =
-  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-
-/**
- * `taskId` の字種は `workflow.ts` の `TASK_ID_PATTERN` をそのまま使う。`workflow.ts` は
- * このファイルを一切importしていないため循環の心配が無く、複製せず直接参照する
- * （二重管理による将来的な乖離を避ける）。
- */
-const TASK_ID_VALIDATION_PATTERN = TASK_ID_PATTERN;
-
-/**
- * `runId` / `taskId` を検証し、不正なら理由を返す（有効なら undefined）。
- * `worktreePath` / `branchName`（例外を投げる） と `createWorktree` / `removeWorktree`
- * （`Result` のエラーとして返す）の両方から呼ぶ共通の判定本体。
- */
-function identifierError(runId: string, taskId: string): string | undefined {
-  if (!RUN_ID_PATTERN.test(runId)) {
-    return `不正なrunId（UUID形式ではありません）: ${runId}`;
-  }
-  if (!TASK_ID_VALIDATION_PATTERN.test(taskId)) {
-    return `不正なtaskId（許可されない文字を含みます）: ${taskId}`;
-  }
-  return undefined;
-}
-
-/** `worktreePath` / `branchName` はパスとブランチ名を組み立てる純粋関数のため、不正な入力は例外にする。 */
-function assertValidIdentifiers(runId: string, taskId: string): void {
-  const message = identifierError(runId, taskId);
-  if (message !== undefined) {
-    throw new Error(message);
-  }
-}
-
-/**
  * `taskId` に再試行のサフィックスを付ける。`worktreePath` のディレクトリ名と
  * `branchName` のブランチ名の末尾セグメントとで同じ変換を共有する
  * （design.md §16.5「再試行時のブランチ名は `wf/<runId>/<taskId>-retry<n>`」）。
@@ -193,6 +157,26 @@ export function worktreePath(
 export function branchName(runId: string, taskId: string, retry?: number): string {
   assertValidIdentifiers(runId, taskId);
   return `wf/${runId}/${withRetrySuffix(taskId, retry)}`;
+}
+
+/**
+ * `branchName()` が生成する形（`wf/<runId>/<taskId>`、または再試行時の
+ * `wf/<runId>/<taskId>-retry<n>`）だけにマッチする。
+ *
+ * gitへ位置引数として渡すブランチ名が `-` から始まらないことを保証するための検証
+ * （引数インジェクション対策。design.md §8）。`integration.ts` は `git merge` の対象
+ * ブランチ、`forge.ts` は `git push` の対象ブランチとして、それぞれこの形のブランチ名
+ * だけを渡してよい。以前はこの検証がファイルごとに別々の実装形（`integration.ts` は
+ * 既知の `runId` への文字列prefix一致＋正規表現、`forge.ts` は正規表現1本）で複製されて
+ * おり、末尾の許容文字数（`{0,60}`）が偶然一致しているだけの状態だった（Issue #146）。
+ * `branchName()` の生成元であるここへ一本化し、双方から参照する。
+ */
+export const WF_BRANCH_PATTERN =
+  /^wf\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\/[A-Za-z0-9_][A-Za-z0-9_-]{0,60}$/u;
+
+/** `branch` が `branchName()` の生成形（どの `runId` でもよい）かどうか。 */
+export function isWorkflowBranchName(branch: string): boolean {
+  return WF_BRANCH_PATTERN.test(branch);
 }
 
 /** ワークスペースがgitの作業ツリーかどうか（ベアリポジトリを除く）。 */
@@ -404,38 +388,6 @@ export type CreateWorktreeResult =
     };
 
 /**
- * `root` から `target` までの各中間ディレクトリにシンボリックリンクが含まれていないかを
- * 確かめる。見つかった最初のパスを返す（無ければ undefined）。
- *
- * `.agents/worktrees` がリポジトリにcommitされたシンボリックリンクだと、文字列結合
- * だけで組み立てた `worktreePath` は実際にはリンク先（リポジトリの外）を指す
- * （design.md §16.6、レビュー指摘: critical 4。実機確認済み: `git worktree add` は
- * リンクを黙って辿り、エラーにならずリンク先へ実体を作る）。`sandbox: workspace-write`
- * はcwd基準で書き込み可能域を決めるため、リンク先（例えばホーム配下）が丸ごと
- * サンドボックス内として扱われてしまう。cloneしただけで発火し、YAMLを一切介さない。
- *
- * `target`（worktree自体のディレクトリ）はこれから作られる前提のため存在しないが、
- * その祖先（`.agents` / `.agents/worktrees` / `<runId>` ディレクトリ）は既存でありうる。
- * 存在しないセグメントは `isSymbolicLink` が `false` を返すだけで安全に読み飛ばせる。
- */
-async function findSymlinkedAncestor(
-  root: string,
-  target: string,
-  fs: WorktreeFileSystemPort,
-): Promise<string | undefined> {
-  const rel = path.relative(root, target);
-  const segments = rel.split(path.sep).filter((s) => s !== '' && s !== '..');
-  let cursor = root;
-  for (const segment of segments) {
-    cursor = path.join(cursor, segment);
-    if (await fs.isSymbolicLink(cursor)) {
-      return cursor;
-    }
-  }
-  return undefined;
-}
-
-/**
  * `headCommit` はコミットのSHA（省略形を含む7〜40桁の16進数）に限る。
  *
  * `git worktree add -b <branch> <path> <headCommit>` の末尾は位置引数で、`--` の区切りが
@@ -613,7 +565,8 @@ async function removeWorktree(
  * 「キューを経由し忘れる」事故を型のうえで起こしえない状態にする。
  */
 export class WorktreeCreationQueue {
-  private tail: Promise<void> = Promise.resolve();
+  /** 直列化そのものの実装は `serialQueue.ts` の `SerialQueue` へ委譲する（Issue #146）。 */
+  private readonly queue = new SerialQueue();
 
   /** worktreeを1件作る（`createWorktree` をキュー経由で呼ぶ）。 */
   create(
@@ -621,7 +574,7 @@ export class WorktreeCreationQueue {
     git: GitCommandRunner,
     fs: WorktreeFileSystemPort,
   ): Promise<CreateWorktreeResult> {
-    return this.enqueue(() => createWorktree(request, git, fs));
+    return this.queue.enqueue(() => createWorktree(request, git, fs));
   }
 
   /** worktreeを1件撤去する（`removeWorktree` をキュー経由で呼ぶ）。 */
@@ -632,21 +585,16 @@ export class WorktreeCreationQueue {
     retry: number | undefined,
     git: GitCommandRunner,
   ): Promise<RemoveWorktreeResult> {
-    return this.enqueue(() => removeWorktree(repoRoot, runId, taskId, retry, git));
+    return this.queue.enqueue(() => removeWorktree(repoRoot, runId, taskId, retry, git));
   }
 
   /**
-   * 汎用の直列化。前の項目が失敗（例外・エラー結果）しても後続はブロックしない。
-   * `this.tail` は「実行が終わったこと」だけを表す継続用Promiseで、結果や例外は
-   * `enqueue` の戻り値としてそれぞれの呼び出し元へ個別に返る。
+   * 汎用の直列化を外部へも開放する。`integration.ts` の `IntegrationMergeQueue` が
+   * 統合worktreeの作成・マージも同じ1本のキューへ通すために使う（`index.lock` の
+   * 競合対策は「worktree操作全般」に及ぶため。design.md §16.6 / §16.17）。
    */
   enqueue<T>(task: () => Promise<T>): Promise<T> {
-    const run = this.tail.then(task, task);
-    this.tail = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
+    return this.queue.enqueue(task);
   }
 }
 
