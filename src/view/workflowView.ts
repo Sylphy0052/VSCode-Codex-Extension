@@ -469,6 +469,8 @@ function buildPreviewSnapshot(
     failure: undefined,
     pendingApproval: undefined,
     hasLiveSession: false,
+    expandedPrompt: undefined,
+    expandedContinuePrompt: undefined,
     mergeResolutionActive: false,
     pullRequestNumber: undefined,
     pullRequestUrl: undefined,

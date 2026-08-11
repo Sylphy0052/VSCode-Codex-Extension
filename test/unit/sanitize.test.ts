@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { sanitizeForLog, stripControlChars } from '../../src/orchestrator/sanitize';
+import {
+  sanitizeForLog,
+  stripControlChars,
+  stripControlCharsPreservingNewlines,
+} from '../../src/orchestrator/sanitize';
 
 describe('sanitizeForLog（design.md §16.7のsanitizeForReasonを共通化。レビュー指摘: warning）', () => {
   it('制御文字・改行を空白に畳む', () => {
@@ -71,5 +75,38 @@ describe('stripControlChars（レビュー指摘: medium 3 / low）', () => {
   it('制御文字を含まない文字列はそのまま返す', () => {
     const example = 'ls -la /repo/work';
     expect(stripControlChars(example)).toBe(example);
+  });
+});
+
+describe('stripControlCharsPreservingNewlines（design.md §16.4、セキュリティ監査指摘#5）', () => {
+  it('改行・タブ・復帰は保持する', () => {
+    expect(stripControlCharsPreservingNewlines('a\nb\tc\rd')).toBe('a\nb\tc\rd');
+  });
+
+  it('改行・タブ・復帰以外のC0制御文字・DELは空白に畳む', () => {
+    expect(stripControlCharsPreservingNewlines('a\x00b\x1Fc\x7Fd')).toBe('a b c d');
+  });
+
+  it('双方向制御文字を跡を残さず削除する（stripControlCharsと同じ、複数行を潰さない）', () => {
+    // U+202E（RTL override）。不可視文字をソースへ直接書かず、コードポイントから作る
+    const rtlOverride = String.fromCodePoint(0x202e);
+    const spoofed = '1行目\n安全' + rtlOverride + 'exe.悪意のある名前\n3行目';
+    const result = stripControlCharsPreservingNewlines(spoofed);
+    expect(result).not.toContain(rtlOverride);
+    // 改行はそのまま残り、3行の構造が崩れていないこと
+    expect(result.split('\n')).toHaveLength(3);
+  });
+
+  it('ゼロ幅文字・BOMを跡を残さず削除する', () => {
+    const codePoints = [0x200b, 0x2060, 0xfeff];
+    for (const codePoint of codePoints) {
+      const ch = String.fromCodePoint(codePoint);
+      expect(stripControlCharsPreservingNewlines('a' + ch + 'b')).toBe('ab');
+    }
+  });
+
+  it('複数行の通常テキストは改行の位置を含めてそのまま返す', () => {
+    const example = '1行目のプロンプト\n\n----- 区切り -----\n本文\n----- ここまで -----';
+    expect(stripControlCharsPreservingNewlines(example)).toBe(example);
   });
 });

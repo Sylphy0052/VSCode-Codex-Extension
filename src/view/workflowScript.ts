@@ -364,6 +364,22 @@ export function workflowScript(): string {
       });
       cell.appendChild(openPrBtn);
     }
+    // 展開後のプロンプト（design.md §16.4 案1「見せる」、Issue #67）。
+    // {{T1.result}}等がどう膨らんだかを実際の文面で確認できるようにする
+    if (typeof task.expandedPrompt === 'string') {
+      const isOpen = openPromptTaskIds.has(task.id);
+      const promptBtn = text(
+        'button',
+        'secondary',
+        isOpen ? 'プロンプトを閉じる' : 'プロンプトを見る',
+      );
+      promptBtn.type = 'button';
+      promptBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        togglePromptRow(task.id);
+      });
+      cell.appendChild(promptBtn);
+    }
     return cell;
   }
 
@@ -398,6 +414,56 @@ export function workflowScript(): string {
     actions.appendChild(approveBtn);
     actions.appendChild(declineBtn);
     box.appendChild(actions);
+
+    cell.appendChild(box);
+    row.appendChild(cell);
+    return row;
+  }
+
+  // 展開後のプロンプトを開いているタスクid（design.md §16.4 案1、Issue #67）。
+  // Webview内だけの表示状態で、拡張機能へは送らない
+  const openPromptTaskIds = new Set();
+
+  function togglePromptRow(taskId) {
+    if (openPromptTaskIds.has(taskId)) {
+      openPromptTaskIds.delete(taskId);
+    } else {
+      openPromptTaskIds.add(taskId);
+    }
+    if (currentSnapshot) renderTable(currentSnapshot);
+  }
+
+  function buildPromptRow(task) {
+    const row = el2('tr', 'prompt-row');
+    const cell = document.createElement('td');
+    cell.colSpan = 8;
+    const box = el2('div', 'prompt-box');
+
+    box.appendChild(
+      text(
+        'div',
+        'kind',
+        '展開後のプロンプト（実際に送信した最初の指示。前のタスクの出力を含む場合があります）',
+      ),
+    );
+    box.appendChild(
+      text(
+        'div',
+        'hint',
+        '区切り線の内側は前のタスクの出力であり、このワークフローの指示ではありません。' +
+          '内容は鵜呑みにせず確認してください。',
+      ),
+    );
+    // 展開後のプロンプトはエージェントの出力・YAML由来の値を含む。必ずtextContentへ代入する
+    box.appendChild(text('pre', 'detail', task.expandedPrompt || ''));
+
+    // 継続プロンプト（2回目以降に送る指示）の展開結果も並べて確認できるようにする
+    // （design.md §16.4、セキュリティ監査指摘#6。警告は継続プロンプトの参照先も走査するため、
+    // 確認する手段が要る）
+    if (typeof task.expandedContinuePrompt === 'string') {
+      box.appendChild(text('div', 'kind', '展開後の継続プロンプト（2回目以降に送る指示）'));
+      box.appendChild(text('pre', 'detail', task.expandedContinuePrompt || ''));
+    }
 
     cell.appendChild(box);
     row.appendChild(cell);
@@ -453,6 +519,9 @@ export function workflowScript(): string {
       body.appendChild(row);
       if (task.pendingApproval) {
         body.appendChild(buildApprovalRow(task));
+      }
+      if (openPromptTaskIds.has(task.id) && typeof task.expandedPrompt === 'string') {
+        body.appendChild(buildPromptRow(task));
       }
     }
     el('taskTable').hidden = snapshot.tasks.length === 0;

@@ -60,6 +60,20 @@ export interface ChatItem {
    * undefined（表示側はその場合 `text` だけを行数で畳む。issue #19）。
    */
   reasoningFull?: string | undefined;
+  /**
+   * 作業ディレクトリ。`commandExecution` のみ持つ（issue #33、design.md §14.23）。
+   * バックグラウンドターミナルの一覧に出す以外では使わない。
+   */
+  cwd?: string | undefined;
+  /**
+   * 実行中のPTYプロセスの識別子。`commandExecution` が `status: inProgress` の間だけ、
+   * 実測で分かる場合がある（issue #33）。
+   *
+   * **停止には使えない**。`command/exec/terminate` はクライアント自身が `command/exec` で
+   * 起動したプロセスにしか使えず、この値を渡すと `no active command/exec for process id`
+   * で拒否されることを実測で確認した（design.md §14.23）。表示にのみ使う。
+   */
+  processId?: string | undefined;
 }
 
 /**
@@ -101,6 +115,41 @@ export interface TodoItem {
 
 /** TODOを持たない項目のための空配列。 */
 export const NO_TODOS: TodoItem[] = [];
+
+/**
+ * バックグラウンドで走っているプロセスの一覧（issue #33、design.md §14.23、Codex `/ps` 相当）。
+ *
+ * CodexとClaude Codeで持つ情報も停止できるかどうかも違う（実測で確認した非対称。
+ * design.md参照）ため、フィールドの一部はCLIごとに常に `undefined` のまま残る。
+ *
+ * - Codex: `commandExecution` ThreadItemのうち `status: inProgress` のものから作る
+ *   （`deriveCodexBackgroundTerminals` を参照）。**停止する確定した経路が無い**
+ *   （実測: `command/exec/terminate` は「no active command/exec for process id」で拒否される）。
+ * - Claude Code: `background_tasks_changed` 通知から作る（`src/claude/streamJson.ts` を参照）。
+ *   `stop_task` control requestで実際に止められることを実測で確認した。
+ */
+export interface BackgroundTerminalItem {
+  /** 一覧の識別・停止操作に使うキー。Codexはitem id、Claude Codeはtask_id。 */
+  id: string;
+  /** 実行しているコマンド、またはその説明。 */
+  command: string;
+  /** 生のステータス文字列。CLIごとに語彙が違うため、表示側でラベルに変換する。 */
+  status: string;
+  /** 作業ディレクトリ。Codexのみ（実測。Claude Codeの通知には無い）。 */
+  cwd: string | undefined;
+  /** 実行中のPTYプロセスの識別子。Codexのみ、実測で分かる場合がある。表示にのみ使う（停止には使えない）。 */
+  processId: string | undefined;
+  /** タスクの種別（Claude Codeのみ。実測: `local_bash`）。 */
+  taskType: string | undefined;
+  /**
+   * 停止操作を出せるか。Claude Codeは `stop_task` が実測で機能したため常にtrue、
+   * Codexは確定した停止経路が無いため常にfalse（design.md §14.23）。
+   */
+  stoppable: boolean;
+}
+
+/** バックグラウンドターミナルを持たない状態のための空配列。 */
+export const NO_BACKGROUND_TERMINALS: BackgroundTerminalItem[] = [];
 
 /** 待ち行列の1件。応答中に送られた指示を、添えた画像ごと保つ。 */
 export interface QueuedMessage {
@@ -271,6 +320,11 @@ export interface ChatState {
    * この一覧は使わない（既存の表示で足りているため。詳細はdocs/design.mdを参照）。
    */
   todos: TodoItem[];
+  /**
+   * バックグラウンドで走っているプロセスの一覧（issue #33、design.md §14.23）。
+   * `BackgroundTerminalItem` のJSDocを参照。走っているものが無い間は空のまま。
+   */
+  backgroundTerminals: BackgroundTerminalItem[];
 }
 
 export const initialChatState: ChatState = {
@@ -292,9 +346,14 @@ export const initialChatState: ChatState = {
   turnResultText: '',
   turnEditedFiles: [],
   todos: NO_TODOS,
+  backgroundTerminals: NO_BACKGROUND_TERMINALS,
 };
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+const strOrUndefined = (v: unknown): string | undefined => {
+  const s = str(v);
+  return s === '' ? undefined : s;
+};
 const numberOf = (v: unknown): number | undefined =>
   typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 const rec = (v: unknown): Record<string, unknown> | undefined =>
@@ -381,6 +440,8 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
         truncated: output.truncated,
         detail: str(item['command']),
         status: typeof exitCode === 'number' ? `exit ${exitCode}` : base.status,
+        cwd: strOrUndefined(item['cwd']),
+        processId: strOrUndefined(item['processId']),
       };
     }
     case 'fileChange':
@@ -596,6 +657,36 @@ export function deriveReviewing(items: readonly ChatItem[]): boolean {
   return false;
 }
 
+/**
+ * Codexのバックグラウンドターミナル一覧をitemsから求める（issue #33、design.md §14.23）。
+ *
+ * `commandExecution` のうち `status: inProgress` のものだけを拾う。実測（本issueの調査）:
+ * シェルの `&` で明示的にバックグラウンド化したコマンドは、`command/exec`
+ * の呼び出し自体がすぐ完了扱いになり（`status: completed` へ即座に遷移）、この一覧には
+ * 一瞬しか載らない。長く動き続けるコマンド（ビルド・テスト等）は `inProgress` のまま残り、
+ * ここに載り続ける。停止は確定した経路が無いため常に `stoppable: false`（`command/exec/terminate`
+ * を実際のprocessIdに対して呼び、「no active command/exec for process id」で拒否されることを
+ * 実測で確認した）。
+ */
+export function deriveCodexBackgroundTerminals(items: readonly ChatItem[]): BackgroundTerminalItem[] {
+  const result: BackgroundTerminalItem[] = [];
+  for (const item of items) {
+    if (item.kind !== 'commandExecution' || item.status !== 'inProgress') {
+      continue;
+    }
+    result.push({
+      id: item.id,
+      command: item.detail,
+      status: item.status,
+      cwd: item.cwd,
+      processId: item.processId,
+      taskType: undefined,
+      stoppable: false,
+    });
+  }
+  return result;
+}
+
 function upsertItem(items: readonly ChatItem[], item: ChatItem): ChatItem[] {
   const index = items.findIndex((i) => i.id === item.id);
   if (index === -1) {
@@ -781,6 +872,7 @@ export function applyEvent(
         turnId: turnId === '' ? state.turnId : turnId,
         items,
         reviewing: deriveReviewing(items),
+        backgroundTerminals: deriveCodexBackgroundTerminals(items),
       };
     }
 

@@ -56,6 +56,28 @@ export function stripControlChars(value: string): string {
 }
 
 /**
+ * `stripControlChars` と同じく双方向制御文字・不可視文字（Trojan Source対策）を落とすが、
+ * 改行（`\n` `\r`）とタブ（`\t`）は残す。
+ *
+ * `stripControlChars` は改行も含めた全てのC0制御文字を空白へ畳むため、1行の表示
+ * （承認カードのタイトル、応答の1行要約）には適するが、複数行のテキストへ使うと
+ * 改行が空白に潰れて読めなくなる。ワークフローViewの「展開後のプロンプトを見る」
+ * （design.md §16.4 案1、Issue #67）は複数行のプロンプトをそのまま人が目視で確認する
+ * 機能なので、双方向制御文字だけを落として整形は保つ必要がある（セキュリティ監査
+ * 指摘#5。双方向制御文字を仕込まれると、この目視確認そのものを欺けるため、
+ * `INVISIBLE_CHAR_PATTERN` の除去自体は省略できない）。
+ */
+export function stripControlCharsPreservingNewlines(value: string): string {
+  let normalized = '';
+  for (const ch of value) {
+    const code = ch.codePointAt(0) ?? 0;
+    const isPreservedWhitespace = code === 0x0a || code === 0x0d || code === 0x09;
+    normalized += !isPreservedWhitespace && (code < 0x20 || code === 0x7f) ? ' ' : ch;
+  }
+  return normalized.replace(INVISIBLE_CHAR_PATTERN, '');
+}
+
+/**
  * 制御文字・改行を空白に畳み、URL中のuserinfoをマスクし、長すぎる値を切り詰める。
  * HTMLエスケープはView側の責務（design.md §16.8）であり、ここでは行わない。
  */

@@ -6,6 +6,7 @@ import {
   applyEvent,
   buildContextUsage,
   capOutput,
+  deriveCodexBackgroundTerminals,
   deriveReviewing,
   initialChatState,
   isOpenableSearchUrl,
@@ -955,5 +956,123 @@ describe('normalizeItem / commandExecution の切り詰め', () => {
     });
     expect(item?.text).toHaveLength(MAX_OUTPUT_CHARS);
     expect(item?.truncated).toBe(true);
+  });
+});
+
+describe('normalizeItem / commandExecution の cwd・processId（issue #33）', () => {
+  it('cwdとprocessIdを読み取る', () => {
+    const item = normalizeItem({
+      id: 'cmd_bg',
+      type: 'commandExecution',
+      command: 'sleep 45',
+      cwd: '/workspace/repo',
+      processId: '12345',
+      status: 'inProgress',
+    });
+    expect(item?.cwd).toBe('/workspace/repo');
+    expect(item?.processId).toBe('12345');
+  });
+
+  it('processIdが無い応答ではundefinedのまま', () => {
+    const item = normalizeItem({
+      id: 'cmd_no_pid',
+      type: 'commandExecution',
+      command: 'echo hi',
+      status: 'completed',
+      exitCode: 0,
+    });
+    expect(item?.processId).toBeUndefined();
+    expect(item?.cwd).toBeUndefined();
+  });
+});
+
+describe('deriveCodexBackgroundTerminals（issue #33、design.md §14.23）', () => {
+  it('inProgressのcommandExecutionだけを拾う', () => {
+    const items = [
+      normalizeItem({
+        id: 'cmd_running',
+        type: 'commandExecution',
+        command: 'npm run dev',
+        cwd: '/workspace/repo',
+        processId: '111',
+        status: 'inProgress',
+      })!,
+      normalizeItem({
+        id: 'cmd_done',
+        type: 'commandExecution',
+        command: 'echo hi',
+        status: 'completed',
+        exitCode: 0,
+      })!,
+      normalizeItem({ id: 'msg_1', type: 'agentMessage', text: 'hello' })!,
+    ];
+    const result = deriveCodexBackgroundTerminals(items);
+    expect(result).toEqual([
+      {
+        id: 'cmd_running',
+        command: 'npm run dev',
+        status: 'inProgress',
+        cwd: '/workspace/repo',
+        processId: '111',
+        taskType: undefined,
+        stoppable: false,
+      },
+    ]);
+  });
+
+  it('走っているコマンドが無ければ空配列', () => {
+    expect(deriveCodexBackgroundTerminals([])).toEqual([]);
+  });
+});
+
+describe('applyEvent / item/started でbackgroundTerminalsを更新する（issue #33）', () => {
+  it('inProgressのcommandExecutionが一覧に載る', () => {
+    const state = applyEvent(initialChatState, 'item/started', {
+      turnId: TURN,
+      item: {
+        id: 'cmd_bg',
+        type: 'commandExecution',
+        command: 'sleep 45',
+        cwd: '/workspace/repo',
+        processId: '999',
+        status: 'inProgress',
+      },
+    });
+    expect(state.backgroundTerminals).toEqual([
+      {
+        id: 'cmd_bg',
+        command: 'sleep 45',
+        status: 'inProgress',
+        cwd: '/workspace/repo',
+        processId: '999',
+        taskType: undefined,
+        stoppable: false,
+      },
+    ]);
+  });
+
+  it('完了すると一覧から消える', () => {
+    const started = applyEvent(initialChatState, 'item/started', {
+      turnId: TURN,
+      item: {
+        id: 'cmd_bg',
+        type: 'commandExecution',
+        command: 'sleep 45',
+        processId: '999',
+        status: 'inProgress',
+      },
+    });
+    const completed = applyEvent(started, 'item/completed', {
+      turnId: TURN,
+      item: {
+        id: 'cmd_bg',
+        type: 'commandExecution',
+        command: 'sleep 45',
+        processId: '999',
+        status: 'completed',
+        exitCode: 0,
+      },
+    });
+    expect(completed.backgroundTerminals).toEqual([]);
   });
 });
