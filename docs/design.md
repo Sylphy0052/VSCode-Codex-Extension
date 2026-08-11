@@ -495,6 +495,17 @@ Codexが会話内容から名前を付けると `thread/name/updated` が届く�
 
 `registerWebviewPanelSerializer` で復元する。webview側が `setState` で `threadId` を保持しており、復元時にそれを使って `thread/resume` する。TUIタブの復元（§5.5）とは別経路になる。
 
+Claude Code画面（`claude.chat`）も同じ仕組みで復元する。webview側のスクリプトは共通なので保持している形（`{ threadId }`）も同じで、読み取りは `view/panelState.ts` に共通化している。ただし復元後の扱いはプロバイダで異なる。
+
+| | Codex | Claude Code |
+| --- | --- | --- |
+| 会話の読み直し | `thread/resume`（サーバが過去のitemsを返す） | transcriptを読んで初期表示にする（§14.4。`--resume` は過去のやり取りを流さない） |
+| cwdの取り戻し方 | ワークスペース直下を充てる | transcriptの素性から引く（`ClaudeSessionStore.resolveCwd`）。読めないときだけワークスペース直下 |
+
+cwdの解決に差があるのは、Claude Codeの `--resume` がcwdを引数として要求するため。Codexは `thread/resume` がサーバ側の記録を使うので、こちらから正しいcwdを渡さなくても会話自体は戻る。
+
+復元できないパネル（`setState` にidが無い、同じidのタブが既に開いている、Claude Code側でcwdを特定できない）は残さず閉じる。操作できないタブを画面に残さないため。
+
 ### 9.6 中断したターンの扱い
 
 `turn/interrupt` で止めたターンは `status: "interrupted"` として残るが、**itemsには自分の発言しか保存されない**（実機で確認）。途中まで流れていた応答はCodex側に永続化されないため、`thread/resume` でも戻らない。
@@ -1344,11 +1355,11 @@ Codexは送信のたびに `readConfig().codex`（VSCodeのグローバル設定
 
 **7. 汎用のパネル復元をタスク管理下のセッションでは使わない**
 
-`registerWebviewPanelSerializer` の `restorePanel` はcwdを保持しておらず、常にワークスペース直下を充てて `thread/resume` する。リロード時にこれが先に走ると、worktreeで動いていたタスクのセッションがワークスペース直下のcwdで `panels` に登録され、後からオーケストレータが正しいcwdで開き直そうとしても `openThread` が既存エントリを `reveal()` して終わる。
+`registerWebviewPanelSerializer` の `restorePanel` はcwdを保持していない。Codex側は常にワークスペース直下を充てて `thread/resume` する。リロード時にこれが先に走ると、worktreeで動いていたタスクのセッションがワークスペース直下のcwdで `panels` に登録され、後からオーケストレータが正しいcwdで開き直そうとしても `openThread` が既存エントリを `reveal()` して終わる。
 
 タスク管理下のスレッドは汎用復元の対象から外し、オーケストレータが `workspaceState` の記録から明示的に扱う（§16.11）。
 
-> なお `claude.chat` には `registerWebviewPanelSerializer` が登録されておらず、Claude Code側のタブはリロードで復元されない（§14.6 の表とは食い違っている既存の不整合）。§16.11 はこれを前提に組む。
+> Claude Code側（`claude.chat`）も同じ経路で復元する（§9.5）。cwdはtranscriptの素性から引くため worktree でも取り違えないが、`panels` へ先に登録される点はCodexと同じなので、タスク管理下のスレッドを外す扱いは両方に要る。
 
 ### 16.11 永続化と復元
 

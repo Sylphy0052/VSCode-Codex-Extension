@@ -171,4 +171,20 @@ describe('ClaudeSessionStore', () => {
     expect(await store.resolveTranscriptPath(ID_A)).toBe(path);
     expect(await store.resolveTranscriptPath(ID_B)).toBeUndefined();
   });
+
+  it('idからcwdを解決する', async () => {
+    const path = transcript('-w-alpha', ID_A);
+    const fs = new FakeFs({ [path]: userLine(ID_A, '/w/alpha', 'A', '2026-08-06T20:00:00.000Z') });
+    const store = new ClaudeSessionStore(fs, paths);
+    expect(await store.resolveCwd(ID_A)).toBe('/w/alpha');
+  });
+
+  it('transcriptが無い・素性を読めないidのcwdは解決しない', async () => {
+    const fs = new FakeFs({
+      [transcript('-w-alpha', ID_A)]: '{壊れている',
+    });
+    const store = new ClaudeSessionStore(fs, paths);
+    expect(await store.resolveCwd(ID_A)).toBeUndefined();
+    expect(await store.resolveCwd(ID_B)).toBeUndefined();
+  });
 });
