@@ -352,6 +352,18 @@ export function workflowScript(): string {
       });
       cell.appendChild(retryMergeBtn);
     }
+    if (task.pullRequestUrl) {
+      // design.md §16.8「タスクの一覧から、そのタスクのPR/MRを開けるようにする」・Issue #118。
+      // URLはWebviewから渡さず、拡張機能側（workflowView.ts）がtaskIdから引いて開く
+      // （https以外のスキームを開かないガードも拡張機能側に集約する）
+      const openPrBtn = text('button', 'secondary', 'PR/MRを開く');
+      openPrBtn.type = 'button';
+      openPrBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ type: 'openTaskPullRequest', taskId: task.id });
+      });
+      cell.appendChild(openPrBtn);
+    }
     return cell;
   }
 
@@ -460,18 +472,21 @@ export function workflowScript(): string {
     el('warningsSection').hidden = snapshot.warnings.length === 0;
   }
 
-  // ---- そのほか: 統合の状況（design.md §16.8「そのほか」・§16.17。Issue #104） ----
+  // ---- そのほか: 統合の状況（design.md §16.8「そのほか」・§16.11・§16.17・§16.18） ----
 
   /**
-   * 統合ブランチ名・取り込み済みタスク数を表示する。PR/MRの番号・URL・最終マージの結果は
-   * runStore.tsにまだ永続化されておらずrunner.tsからも取れないため出さない
-   * （Issue #104の実装範囲外。詳細は最終報告に記載）。
+   * 統合ブランチ名・取り込み済みタスク数・統合PR/MRへのリンク・最終マージの結果を表示する
+   * （Issue #118）。PR/MRが作られていなければ番号・URLの行を出さず、runが終わっている
+   * （outcomeが'running'でない）場合だけ「作成されていません」と明示する（受入基準
+   * 「PR/MRが作られなかったrunでは...作られなかったことが分かるようにする」）。
    */
-  function renderIntegration(integration) {
+  function renderIntegration(snapshot, integration) {
     const box = el('integrationInfo');
     box.replaceChildren();
+    const openBtn = el('openIntegrationPrBtn');
     if (!integration) {
       el('integrationSection').hidden = true;
+      openBtn.disabled = true;
       return;
     }
     el('integrationSection').hidden = false;
@@ -479,6 +494,25 @@ export function workflowScript(): string {
     // 挿入する」）。必ずtextContentへ代入する
     box.appendChild(text('div', '', '統合ブランチ: ' + integration.branch));
     box.appendChild(text('div', '', '取り込み済みタスク: ' + integration.mergedTaskCount + '件'));
+
+    if (integration.pullRequestUrl) {
+      const label = integration.pullRequestNumber
+        ? '統合PR/MR: #' + integration.pullRequestNumber
+        : '統合PR/MR: 作成済み';
+      box.appendChild(text('div', '', label));
+      openBtn.disabled = false;
+    } else {
+      openBtn.disabled = true;
+      if (snapshot.outcome !== 'running') {
+        box.appendChild(text('div', 'hint', '統合PR/MRは作成されていません'));
+      }
+    }
+
+    if (integration.finalMergeOutcome === 'merged') {
+      box.appendChild(text('div', '', 'mainへの最終マージ: 完了'));
+    } else if (integration.finalMergeOutcome === 'failed') {
+      box.appendChild(text('div', 'hint', 'mainへの最終マージ: 失敗'));
+    }
   }
 
   // ---- 選択・操作 ----
@@ -522,7 +556,7 @@ export function workflowScript(): string {
     renderGraph(snapshot, layout);
     renderTable(snapshot);
     renderWarnings(snapshot);
-    renderIntegration(integration);
+    renderIntegration(snapshot, integration);
     const select = el('runSelect');
     if (select.value !== snapshot.runId) select.value = snapshot.runId;
   }
@@ -532,6 +566,7 @@ export function workflowScript(): string {
     currentLayout = null;
     el('content').hidden = true;
     el('empty').hidden = false;
+    el('openIntegrationPrBtn').disabled = true;
   }
 
   // ---- 経過時間: ローカルで毎秒更新する（拡張機能からは状態が変わったときだけ届く） ----
@@ -562,6 +597,12 @@ export function workflowScript(): string {
     vscode.postMessage({ type: 'removeWorktrees' }),
   );
   el('openDefBtn').addEventListener('click', () => vscode.postMessage({ type: 'openDefFile' }));
+  el('openIntegrationPrBtn').addEventListener('click', () =>
+    vscode.postMessage({ type: 'openIntegrationPullRequest' }),
+  );
+  el('cleanupIntegrationBtn').addEventListener('click', () =>
+    vscode.postMessage({ type: 'cleanupIntegration' }),
+  );
 
   window.addEventListener('message', (event) => {
     const msg = event.data;
