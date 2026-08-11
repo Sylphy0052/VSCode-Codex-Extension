@@ -197,12 +197,24 @@ export function aggregateProgress(tasks: readonly { state: TaskState }[]): Progr
   };
 }
 
-/** 統合の状況（design.md §16.8「そのほか」・§16.17）。表示できる項目だけを持つ。 */
+/** 統合の状況（design.md §16.8「そのほか」・§16.17・§16.18）。表示できる項目だけを持つ。 */
 export interface IntegrationSummary {
   /** 統合ブランチ名（`PersistedRun.integrationBranch` 由来）。 */
   branch: string;
   /** 統合ブランチへ取り込み済み（`done`）のタスク数。 */
   mergedTaskCount: number;
+  /**
+   * 統合PR/MRの番号（design.md §16.8「そのほか」・§16.11・§16.18、Issue #118）。
+   * 作られていなければ `undefined`（`url` も `undefined`のとき、Viewはリンクの欄を出さない）。
+   */
+  pullRequestNumber: number | undefined;
+  /** 統合PR/MRのURL。 */
+  pullRequestUrl: string | undefined;
+  /**
+   * 統合→mainの最終マージ（design.md §16.18「最終マージ」）の成否。試みていなければ
+   * `undefined`。
+   */
+  finalMergeOutcome: 'merged' | 'failed' | undefined;
 }
 
 /** `summarizeIntegration` が集計対象とする最小限のタスク形。 */
@@ -226,6 +238,11 @@ export interface IntegrationTaskInput {
 export function summarizeIntegration(
   branch: string | undefined,
   tasks: readonly IntegrationTaskInput[],
+  pullRequest?: {
+    number: number | undefined;
+    url: string | undefined;
+    finalMergeOutcome: 'merged' | 'failed' | undefined;
+  },
 ): IntegrationSummary | undefined {
   if (branch === undefined || branch === '') {
     return undefined;
@@ -233,7 +250,13 @@ export function summarizeIntegration(
   const mergedTaskCount = tasks.filter(
     (t) => t.state === 'done' && t.branch !== undefined && t.branch !== '',
   ).length;
-  return { branch, mergedTaskCount };
+  return {
+    branch,
+    mergedTaskCount,
+    pullRequestNumber: pullRequest?.number,
+    pullRequestUrl: pullRequest?.url,
+    finalMergeOutcome: pullRequest?.finalMergeOutcome,
+  };
 }
 
 // HTML文字列への埋め込みを前提にした`escapeHtml`はここに置かない（以前あったが未結線の

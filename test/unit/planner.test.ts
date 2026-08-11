@@ -208,6 +208,34 @@ describe('buildPlannerPrompt（design.md §16.9）', () => {
     });
     expect(prompt).toContain('取得できませんでした');
   });
+
+  it('roadmapMaterialを渡すとプロンプトへそのまま含まれる（design.md §16.19 2段目）', () => {
+    const prompt = buildPlannerPrompt({
+      goal: 'ゴール',
+      workspaceSummary: { topLevelEntries: [], hasAgentsMd: false, hasClaudeMd: false },
+      roadmapMaterial: '## ロードマップの材料\n- id: R1\n  内容: 設計する\n  依存: なし\n  Issue: #12',
+    });
+    expect(prompt).toContain('## ロードマップの材料');
+    expect(prompt).toContain('id: R1');
+    expect(prompt).toContain('Issue: #12');
+  });
+
+  it('roadmapMaterialを省略しても組み立てられる', () => {
+    const prompt = buildPlannerPrompt({
+      goal: 'ゴール',
+      workspaceSummary: { topLevelEntries: [], hasAgentsMd: false, hasClaudeMd: false },
+    });
+    expect(prompt).not.toContain('## ロードマップの材料');
+  });
+
+  it('issueフィールドの説明を含む（design.md §16.2「Closes #<N>」）', () => {
+    const prompt = buildPlannerPrompt({
+      goal: 'ゴール',
+      workspaceSummary: { topLevelEntries: [], hasAgentsMd: false, hasClaudeMd: false },
+    });
+    expect(prompt).toContain('issue');
+    expect(prompt).toContain('Closes #');
+  });
 });
 
 describe('buildWorkspaceSummary', () => {
@@ -532,6 +560,18 @@ describe('planWorkflow（design.md §16.9）', () => {
       expect(result.securityWarnings.some((w) => w.kind === 'autoApprove')).toBe(true);
       expect(result.securityWarnings.some((w) => w.kind === 'allow')).toBe(true);
     }
+  });
+
+  it('roadmapMaterialを渡すと、実際に送るプロンプトへ含まれる（design.md §16.19 2段目）', async () => {
+    const host = new FakePlannerHost([VALID_YAML]);
+    await planWorkflow({
+      ...baseInput,
+      host,
+      roadmapMaterial: '## ロードマップの項目\n- id: R1\n  Issue: #12',
+    });
+    const sentPrompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+    expect(sentPrompt).toContain('## ロードマップの項目');
+    expect(sentPrompt).toContain('Issue: #12');
   });
 
   it('巨大な応答はパースする前にサイズ上限で弾かれる（#58セキュリティ監査 medium 2）', async () => {

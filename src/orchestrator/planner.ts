@@ -158,6 +158,9 @@ export function buildSchemaDescription(): string {
     `- continuePrompt（省略可、既定「${DEFAULT_CONTINUE_PROMPT}」）: 2回目以降に送る指示`,
     `- maxIterations（省略可、既定 defaults.maxIterations）: 1〜${LOOP_ITERATION_LIMIT}`,
     `- retries（省略可、既定 0）: 失敗時の自動再試行回数（上限${MAX_RETRIES}）`,
+    '- issue（省略可）: 対応するIssue番号（正の整数）。指定するとPR/MRの本文へ' +
+      'Closes #<番号>として出る。ロードマップの項目から変換する場合は、対応するIssue番号を' +
+      'そのまま書き写すこと（無ければ省略する）',
     `- cleanup（省略可）: ${CLEANUP_MODES.join(' または ')}。タスク単位では指定できず defaults.cleanup に従う`,
     '- model / effort / approvalMode / sandbox（省略可）: 拡張機能側の設定より安全な方向にしか' +
       '動かせない。緩める指定は無視されるので、特別な理由がなければ書かないこと',
@@ -180,6 +183,13 @@ export function buildSchemaDescription(): string {
 export interface BuildPlannerPromptInput {
   goal: string;
   workspaceSummary: WorkspaceSummary;
+  /**
+   * ロードマップの一部をタスク分解の材料として渡す場合に使う（design.md §16.19 2段目
+   * 「ロードマップからYAML」）。整形済みのテキストブロックをそのまま埋め込む。
+   * `roadmap.ts` の `formatRoadmapMaterial` が組み立てる（この関数自体はロードマップの
+   * 型を知らない。文字列を受け取るだけにして、planner.ts と roadmap.ts の循環import を避ける）。
+   */
+  roadmapMaterial?: string;
 }
 
 function describeWorkspace(summary: WorkspaceSummary): string {
@@ -209,13 +219,18 @@ const OUTPUT_FORMAT_INSTRUCTION =
  * 頼むだけでは足りない」）。
  */
 export function buildPlannerPrompt(input: BuildPlannerPromptInput): string {
-  return [
+  const parts = [
     'あなたはワークフロー定義（YAML）の作成担当です。次のゴールを、依存関係を持つ' +
       'タスクへ分解し、下記スキーマに従うYAML定義だけを出力してください。',
     '実際にタスクを実行することはしないでください（読み取りと提案のみ）。',
     '',
     `## ゴール\n${input.goal}`,
     '',
+  ];
+  if (input.roadmapMaterial !== undefined && input.roadmapMaterial !== '') {
+    parts.push(input.roadmapMaterial, '');
+  }
+  parts.push(
     describeWorkspace(input.workspaceSummary),
     '',
     buildSchemaDescription(),
@@ -227,7 +242,8 @@ export function buildPlannerPrompt(input: BuildPlannerPromptInput): string {
     '- 全てのタスクにdoneを書くこと。外から判定できる終了条件にすること',
     '',
     OUTPUT_FORMAT_INSTRUCTION,
-  ].join('\n');
+  );
+  return parts.join('\n');
 }
 
 /** 検証に落ちたときの再生成プロンプト（design.md §16.9「もう1度だけ投げ直す」）。 */
@@ -456,6 +472,8 @@ export interface PlanWorkflowInput {
   /** #52のクランプ基準（design.md §16.16）。 */
   baseline: ExtensionSafetyBaseline;
   log: Logger;
+  /** `buildPlannerPrompt`にそのまま渡す（design.md §16.19 2段目）。 */
+  roadmapMaterial?: string;
 }
 
 export interface PlanWorkflowSuccess {
@@ -654,6 +672,10 @@ export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkfl
   const firstPrompt = buildPlannerPrompt({
     goal: input.goal,
     workspaceSummary: input.workspaceSummary,
+    // `exactOptionalPropertyTypes`下では`roadmapMaterial: undefined`を明示的に
+    // 書き込めない（プロパティ自体の省略と`undefined`代入を区別する）ため、
+    // 値がある場合だけキーを足す（`runner.ts`の`mcp`と同じ書き方）
+    ...(input.roadmapMaterial !== undefined ? { roadmapMaterial: input.roadmapMaterial } : {}),
   });
   const firstResponse = await sendSingleTurn(input.host, input.provider, sessionInput, firstPrompt);
   const firstYaml = extractYamlFromResponse(firstResponse);

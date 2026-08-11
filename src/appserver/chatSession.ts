@@ -138,12 +138,40 @@ export class ChatSession {
       params['cwd'] = cwd;
     }
     const response = await this.connection.request('thread/resume', params);
-    this.baseline = readTurnPolicy(response.result);
-    const items = readInitialItems(response.result);
+    this.applyThreadSnapshot(threadId, response.result);
+  }
+
+  /**
+   * 脇道の質問（issue #24、design.md TP-42、Codex TUIの `/btw` 相当）用に、
+   * ephemeralな `thread/fork` の応答をこの画面へ直接差し込む。
+   *
+   * ephemeralスレッドは `thread/resume` で読み直せない（実測: CLI 0.147.0。
+   * ロールアウトファイルが存在しないため `no rollout found for thread id ...` で
+   * 拒否される。`Thread.path` が `null` になっているのと符合する。詳細は
+   * `codex/sideQuestion.ts` のコメント参照）。fork応答自体が `thread/resume` と
+   * 同じ形（`thread` に加えて `approvalPolicy` / `sandbox` 等がルートに乗る）で
+   * 完全な `turns` を持っているため、通信を増やさずそのままこの画面の初期状態にする。
+   *
+   * 呼び出し元（`ChatViewManager`）は、この画面用に新しく作った `ChatSession` へ
+   * fork応答をそのまま渡す。元のスレッドの状態には一切触れない。
+   */
+  loadForkedThread(result: unknown): string {
+    const threadId = readThreadId(result);
+    if (threadId === undefined) {
+      throw new Error('脇道のスレッドidを読み取れませんでした');
+    }
+    this.applyThreadSnapshot(threadId, result);
+    return threadId;
+  }
+
+  /** `thread/resume` / ephemeralな `thread/fork` の応答を、この画面の状態へ適用する。 */
+  private applyThreadSnapshot(threadId: string, result: unknown): void {
+    this.baseline = readTurnPolicy(result);
+    const items = readInitialItems(result);
     this.update({
       ...this.state,
       threadId,
-      name: readThreadName(response.result) ?? this.state.name,
+      name: readThreadName(result) ?? this.state.name,
       items,
       // レビュー中に復元・detachedで開いた画面でも、割り込みの扱いを取り違えない
       reviewing: deriveReviewing(items),
