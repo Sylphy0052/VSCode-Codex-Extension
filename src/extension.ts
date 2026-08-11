@@ -188,6 +188,11 @@ export function activate(context: vscode.ExtensionContext): void {
     (spec, scope) => claudePluginActions.install(spec, scope),
     (id, scope) => claudePluginActions.uninstall(id, scope),
     () => appServer.listApps(),
+    // インポート候補の検出もcwdを渡さないと単発起動時のセッション既定に委ねる形になるため、
+    // hooks/skillsと同じくワークスペースフォルダを明示する（issue #36、design.md TP-57）
+    () => appServer.detectImportCandidates(workspaceFolderPaths()),
+    () => appServer.readImportHistories(),
+    (items) => appServer.runImport(items),
     log,
   );
   // オーケストレータ（design.md §16）。`chat` / `claudeChat` は `WorkflowRunner` の

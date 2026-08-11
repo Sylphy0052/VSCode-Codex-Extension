@@ -6,7 +6,7 @@ import * as path from 'node:path';
 
 import { sanitizeForLog, stripControlChars } from './sanitize';
 import { TASK_ID_PATTERN } from './workflow';
-import type { GitCommandRunner } from './worktree';
+import { isWorkflowBranchName, type GitCommandRunner } from './worktree';
 
 /**
  * ホスト連携（PR/MRの作成。design.md §16.18）。
@@ -432,15 +432,13 @@ export const nodeForgeFileSystem: ForgeFileSystemPort = {
 /* -------------------------------------------------------------------------------------------- */
 
 /**
- * `wf/<runId>/...` の形（`worktree.ts` の `branchName` / `integration.ts` の
- * `integrationBranchName` が生成する形）だけを許す。`git push origin <branch>:<branch>` の
- * 引数として渡す前の防御（`integration.ts` の `isValidTaskBranch` と同じ理由の複製）。
+ * `wf/<runId>/...` の形（`worktree.ts` の `branchName` が生成する形）だけを許す。
+ * `git push origin <branch>:<branch>` の引数として渡す前の防御。検証パターンそのものは
+ * `worktree.ts` の `isWorkflowBranchName` へ一本化した（以前は `integration.ts` の
+ * `isValidTaskBranch` と実装形が違うまま複製されていた。Issue #146）。
  */
-const WF_BRANCH_PATTERN =
-  /^wf\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\/[A-Za-z0-9_][A-Za-z0-9_-]{0,60}$/u;
-
 function isManagedWorkflowBranch(branch: string): boolean {
-  return WF_BRANCH_PATTERN.test(branch);
+  return isWorkflowBranchName(branch);
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -504,7 +502,7 @@ export type CreatePullRequestOutcome =
 /**
  * `base` / `head` / `title` の最低限の健全性を確かめる。`base` はタスク層では統合ブランチ
  * （`wf/...`）、統合層では実行開始時のブランチ（`main` など任意の名前）になりうるため
- * `WF_BRANCH_PATTERN` のような固定形では縛れない。改行を含む・空文字といった、
+ * `isWorkflowBranchName` のような固定形では縛れない。改行を含む・空文字といった、
  * `--base=<value>` の一部として渡すには不適切な値だけを弾く（引数の値自体は `=` で
  * 1つのトークンに結合するため、先頭が `-` でもフラグとして再解釈されない。後述）。
  */

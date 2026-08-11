@@ -222,6 +222,9 @@ export function workflowStyles(): string {
   .warning-item.allowOverride { border-left-color: var(--vscode-errorForeground); }
   .warning-item.plannerSecurity { border-left-color: var(--vscode-errorForeground); }
   .warning-item.permissionEscalation { border-left-color: var(--vscode-errorForeground); }
+  /* タスク間メッセージング経由の権限差の警告（design.md §16.21、Issue #132）。
+     permissionEscalationと同じ重大度として同じ色にする（経路が違うだけでリスクの質は同じ）。 */
+  .warning-item.messagingPermissionEscalation { border-left-color: var(--vscode-errorForeground); }
 
   #empty { color: var(--vscode-descriptionForeground); padding: 24px 0; }
 `;

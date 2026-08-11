@@ -72,6 +72,18 @@ export const MAX_RETRIES = 10;
 export const MAX_PROMPT_LENGTH = 20000;
 
 /**
+ * 巨大なYAMLで拡張機能ホスト（シングルスレッド）を固まらせないための上限。
+ * `MAX_PROMPT_LENGTH`（20000文字）× `MAX_TASK_COUNT`（50）を大きく超える値を
+ * 目安にした余裕のある上限で、通常のワークフロー定義には十分すぎる。
+ *
+ * `runner.ts`（ファイルから読む定義）と `planner.ts`（LLMの応答をパースする前）の
+ * 両方から参照される。定義ファイルの読み込み・検証を担う`workflow.ts`が本来の
+ * 置き場であり、`runner.ts`はVSCode層、`planner.ts`は純粋ロジック層のため、
+ * どちらもこの純粋ロジック層から読む形にして依存の向きを揃える（design.md §16.10 / §16.14）。
+ */
+export const MAX_WORKFLOW_FILE_BYTES = 1 * 1024 * 1024;
+
+/**
  * `{{T1.result}}` / `{{T1.summary}}` の展開結果に設ける長さ上限（design.md §16.4 案4「絞る」、
  * Issue #67）。上流タスクの応答をそのまま次のタスクへ渡す経路なので、上限が無いと
  * 下流のコンテキストを圧迫するだけでなく、応答に仕込まれた指示文もそのまま増幅されて渡る。
@@ -488,16 +500,31 @@ function extractTemplateRefs(text: string): TemplateRef[] {
 }
 
 /**
+ * `findCycleGroups` が扱える最小限の形。`id` と `dependsOn`（他ノードの `id` への
+ * 参照の一覧）さえ持っていれば、それが表すものがワークフローのタスクでもロードマップの
+ * 項目でも構わない。
+ */
+export interface DependencyGraphNode {
+  readonly id: string;
+  readonly dependsOn: readonly string[];
+}
+
+/**
  * 依存関係を1件の循環ずつ、強連結成分（SCC）単位で返す。
  * `A<->B` と `C<->D` のように無関係な循環が複数あれば、別々のグループとして返す
  * （呼び出し側はグループごとに1件のエラーを作る）。循環の下流で待っているだけの
- * タスク（例: `T3 dependsOn: [T2]` で `T1<->T2` が循環しているときのT3）は含めない。
+ * ノード（例: `T3 dependsOn: [T2]` で `T1<->T2` が循環しているときのT3）は含めない。
  *
  * Tarjanの強連結成分アルゴリズム。要素数2以上のSCC、または自己参照
  * （`T1` が `dependsOn: [T1]`）を1件のグループとして採用する。
+ *
+ * ワークフローのタスク（`WorkflowTask`）とロードマップの項目（`roadmap.ts` の
+ * `RoadmapItem`）の両方が同じ形（`{ id: string; dependsOn: readonly string[] }`）を
+ * 持つため、対象の型をジェネリクスにして共有する（Issue #146。以前は`roadmap.ts`が
+ * 「対象の型が違うため複製」としてTarjanベースの同じロジックをほぼそのまま複製していた）。
  */
-function findCycleGroups(tasks: readonly WorkflowTask[]): string[][] {
-  const byId = new Map(tasks.map((t) => [t.id, t] as const));
+export function findCycleGroups<T extends DependencyGraphNode>(nodes: readonly T[]): string[][] {
+  const byId = new Map(nodes.map((n) => [n.id, n] as const));
   let counter = 0;
   const index = new Map<string, number>();
   const lowlink = new Map<string, number>();
@@ -1025,8 +1052,15 @@ export interface TaskResult {
  * （サロゲートペアはUTF-16で2単位・コードポイントで1として数えるため、
  * UTF-16長 >= コードポイント長は常に成り立つ）。この高速pathで、通常サイズの
  * 文字列に対して毎回コードポイント分割という高コストな処理をしないで済む。
+ *
+ * `messaging.ts`の`composeNextPrompt`（design.md §16.21、Issue #132）も、連結後の
+ * 総量の切り詰めに同じコードポイント単位の規則を必要とするため、ここからexportして
+ * 共有する（切り詰め規則の実装を2箇所に複製しない）。
  */
-function truncateByCodePoint(value: string, max: number): { text: string; truncated: boolean } {
+export function truncateByCodePoint(
+  value: string,
+  max: number,
+): { text: string; truncated: boolean } {
   if (value.length <= max) {
     return { text: value, truncated: false };
   }

@@ -4,7 +4,6 @@ import * as path from 'node:path';
 import { APPROVAL_MODES, SANDBOX_MODES } from '../codex/types';
 import { LOOP_ITERATION_LIMIT } from '../loop/loopController';
 import type { Logger } from '../log';
-import { MAX_WORKFLOW_FILE_BYTES } from './runner';
 import { stripControlChars } from './sanitize';
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { TaskSessionHost, TaskSessionInput } from './taskSession';
@@ -27,6 +26,7 @@ import {
   MAX_PROMPT_LENGTH,
   MAX_RETRIES,
   MAX_TASK_COUNT,
+  MAX_WORKFLOW_FILE_BYTES,
   parseWorkflowYaml,
   PROVIDERS,
   TASK_ID_PATTERN,

@@ -1,5 +1,6 @@
 import type { TaskFailureReason, TaskState } from './runState';
 import type { MementoLike } from '../util/memento';
+import { SerialQueue } from './serialQueue';
 
 /**
  * ワークフロー実行状態の永続化と復元（design.md §16.11）。
@@ -113,10 +114,11 @@ function trimRuns(runs: readonly PersistedRun[]): PersistedRun[] {
  *
  * 複数のタスクが並列に走ると、状態変化のたびに `update` が競合しうる。素朴な
  * 「読む→書く」を並行実行すると後勝ちで途中の更新が失われる（lost update）ため、
- * `worktree.ts` の `WorktreeCreationQueue` と同じ流儀で直列化する。
+ * `worktree.ts` の `WorktreeCreationQueue` と同じ流儀（直列化そのものの実装は
+ * `serialQueue.ts` の `SerialQueue` を共有する。Issue #146）で直列化する。
  */
 export class WorkflowRunStore {
-  private tail: Promise<void> = Promise.resolve();
+  private readonly queue = new SerialQueue();
 
   constructor(private readonly memento: WorkflowRunMemento) {}
 
@@ -170,11 +172,6 @@ export class WorkflowRunStore {
   }
 
   private enqueue<T>(task: () => Promise<T>): Promise<T> {
-    const run = this.tail.then(task, task);
-    this.tail = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
+    return this.queue.enqueue(task);
   }
 }

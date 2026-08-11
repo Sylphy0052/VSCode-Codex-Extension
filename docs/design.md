@@ -464,15 +464,16 @@ Claude Code側（`claude.*`）と作業記録（`agent.activityLog.*`）の設�
 
 ## 8. セキュリティ考慮
 
-| 項目                                                | 対処                                                                                                                                                                                                       |
-| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ワークスペース設定による任意コマンド実行            | §7のスコープ設計。`executablePath` / `additionalArgs` / `codexHome` を `machine` に固定                                                                                                                    |
-| サンドボックス無効化の誘導                          | `sandbox` / `approvalMode` も `machine`。危険な組み合わせは初回に確認ダイアログ                                                                                                                            |
-| 引数インジェクション                                | `shellPath` / `shellArgs` 方式によりシェル解釈を経由しない（§5.2）                                                                                                                                         |
-| セッション本文の漏洩                                | 拡張機能はロールアウトファイルの**1行目のみ**を読み、会話本文は読まない・保存しない・ログに出さない                                                                                                        |
-| 破壊操作                                            | `delete` は確認ダイアログ必須。`archive` は取り消し可能なため確認不要                                                                                                                                      |
-| hookによる任意コマンド実行（issue #28）             | 出どころ（user/project/plugin等）と実行コマンドを隠さず表示。既定は信頼せず、Codexは明示的な信頼操作が必要（§14.15）。hookのコマンド文字列はDOM APIの `textContent` で埋め込み、HTMLとして解釈させない     |
-| pluginインストールによる任意コード持込（issue #32） | インストール前に確認ダイアログで「何をどこから入れるか」を明示（§14.20）。plugin名・説明はDOM APIの `textContent` で埋め込み、HTMLとして解釈させない。CLI呼び出しへ渡す前に `isValidPluginName` で防御する |
+| 項目                                                                                  | 対処                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ワークスペース設定による任意コマンド実行                                              | §7のスコープ設計。`executablePath` / `additionalArgs` / `codexHome` を `machine` に固定                                                                                                                                                                                                                                                                                                                                         |
+| サンドボックス無効化の誘導                                                            | `sandbox` / `approvalMode` も `machine`。危険な組み合わせは初回に確認ダイアログ                                                                                                                                                                                                                                                                                                                                                 |
+| 引数インジェクション                                                                  | `shellPath` / `shellArgs` 方式によりシェル解釈を経由しない（§5.2）                                                                                                                                                                                                                                                                                                                                                              |
+| セッション本文の漏洩                                                                  | 拡張機能はロールアウトファイルの**1行目のみ**を読み、会話本文は読まない・保存しない・ログに出さない                                                                                                                                                                                                                                                                                                                             |
+| 破壊操作                                                                              | `delete` は確認ダイアログ必須。`archive` は取り消し可能なため確認不要                                                                                                                                                                                                                                                                                                                                                           |
+| hookによる任意コマンド実行（issue #28）                                               | 出どころ（user/project/plugin等）と実行コマンドを隠さず表示。既定は信頼せず、Codexは明示的な信頼操作が必要（§14.15）。hookのコマンド文字列はDOM APIの `textContent` で埋め込み、HTMLとして解釈させない                                                                                                                                                                                                                          |
+| pluginインストールによる任意コード持込（issue #32）                                   | インストール前に確認ダイアログで「何をどこから入れるか」を明示（§14.20）。plugin名・説明はDOM APIの `textContent` で埋め込み、HTMLとして解釈させない。CLI呼び出しへ渡す前に `isValidPluginName` で防御する                                                                                                                                                                                                                      |
+| 他エージェントからの設定インポートによる既存設定の上書き・任意コード持込（issue #36） | 実行前に確認ダイアログで対象（何を・どこから・どこへ）を明示し、設定を上書きしうる旨（CONFIG種別を含む場合）を注記（§14.29）。CLIが返す説明文・項目名はDOM APIの `textContent` で埋め込み、HTMLとして解釈させない。webviewから返る選択キーは `isValidImportItemKey` で防御し、実際にCLIへ送る生データはサーバー側（`SettingsProvider`）にキャッシュした`detect`の応答のみを使う（webviewが送ってきた値をそのままCLIへ渡さない） |
 
 ## 9. リスクと検証項目
 
@@ -1197,11 +1198,11 @@ Phase 0（issue #1 Z-07 / issue #2 Z-10）の時点では「両方とも実装�
 
 実測（codex-cli 0.147.0）と `codex app-server generate-json-schema --out` のスキーマが根拠:
 
-- `hooks/list`（`HooksListParams { cwds? }` → `HooksListResponse { data: [{cwd, hooks: HookMetadata[], warnings: string[], errors: HookErrorInfo[]}] }`）はスレッドを開始していなくても呼べる（実測: `{data:[{cwd,hooks:[],warnings:[],errors:[]}]}` が返った。この環境にはhookが1件も設定されていないため、`hooks` 配列の中身はスキーマのみが根拠）
+- `hooks/list`（`HooksListParams { cwds? }` → `HooksListResponse { data: [{cwd, hooks: HookMetadata[], warnings: string[], errors: HookErrorInfo[]}] }`）はスレッドを開始していなくても呼べる（実測: 実際の設定に対しては `{data:[{cwd,hooks:[],warnings:[],errors:[]}]}` が返った。`hooks` 配列の中身は、issue #146で隔離環境にhookを1件定義して実測した。実際の応答: `{key,eventName:"sessionStart",handlerType:"command",matcher:"*",command:"true",timeoutSec:600,statusMessage:null,additionalContextLimit:null,sourcePath,source:"user",pluginId:null,displayOrder:0,enabled:true,isManaged:false,currentHash:"sha256:...",trustStatus:"untrusted"}`。`hooksStatus.ts` の `parseHookMetadata` が読む各フィールドは実際の応答と一致した）
 - `HookMetadata` は `key` / `eventName` / `matcher` / `handlerType`（`command`|`prompt`|`agent`）/ `command` / `source`（`system`|`user`|`project`|`mdm`|`sessionFlags`|`plugin`|`cloudRequirements`|`cloudManagedConfig`|`legacyManagedConfigFile`|`legacyManagedConfigMdm`|`unknown`）/ `sourcePath` / `pluginId` / `enabled` / `trustStatus`（`managed`|`untrusted`|`trusted`|`modified`）/ `currentHash` を持つ。**`sourcePath` がプロジェクト内で定義されたhookかどうかを一目で判断する材料になる**
 - **信頼を求めるプロトコル上の要求は存在しない**。`ServerRequest`（10種）・`ServerNotification`（全種）をスキーマで確認したが、hook信頼専用のものは無い。TUIの「Hooks need review」画面は、`hooks/list` の `trustStatus` を見てTUI自身が組み立てているとみられる。そのため拡張機能も同じ発想を取り、設定パネルのhooks一覧に信頼状態を出し、そこから信頼操作をする形にした
 - **未信頼のhookがブロックされたことは `hook/completed`（`status: 'blocked'`。`HookRunStatus` の1値）通知で分かる**。これが唯一の実観測可能な合図なので、チャット画面に「hookがブロックされました」という注記を出す（`src/appserver/chatState.ts` の `hook/completed` ハンドラ）。「信頼を求める要求が画面に出る」という受入基準は、プロトコルにその要求自体が無い以上、この形（実行がブロックされたら気づける）で満たす
-- 信頼の書き込み(`config/batchWrite`)は**実行ファイル（`codex`）の文字列調査(strings)のみが根拠**で、実際に書き込んで確認してはいない（この環境の `~/.codex/config.toml` を書き換えない方針のため）。バイナリには `hooks.state."` `".trusted_hash` `failed to write hook trust:` という文字列が連続して存在し、`hooks.state."<key>".trusted_hash` というkeyPathへ `currentHash` を `upsert` する形と推定した（`src/codex/hooksStatus.ts` の `buildHookTrustEdit` を参照）。`filePath` に一時ファイルを指定して書き込みを試す安全な検証も行ったが、`config/batchWrite` は `filePath` を無視して常にユーザー設定へ書こうとし `configLayerReadonly` で拒否された（＝ユーザーのconfig.toml以外へは書けない仕様と分かったのみで、keyPathの正しさそのものは未検証）
+- 信頼の書き込み(`config/batchWrite`)は**実測で確認した**（issue #146。`CODEX_HOME` を使い捨てディレクトリへ向けた隔離環境で検証し、この環境の実際の `~/.codex/config.toml` は書き換えていない）。隔離した `CODEX_HOME` の `config.toml` にuser scopeのhookを1件定義し（`[[hooks.SessionStart]]` の下に `matcher` と `[[hooks.SessionStart.hooks]]`（`type = "command"`、`command`）を書く形。TOMLのキーはイベント名を **`SessionStart` のようなPascalCaseで書く**必要があり、`hooks/list` の応答が返す `eventName`（`sessionStart` のようなcamelCase）とは表記が異なる。応答の `key` は `<config.tomlの絶対パス>:<snake_caseのイベント名>:<インデックス>:<インデックス>` という形（実測: `/home/.../config.toml:session_start:0:0`)で、`hooksStatus.ts` の `isValidHookKey` はこの形をそのまま通す）、`hooks/list` で `trustStatus: "untrusted"` と `currentHash` を確認したうえで、`buildHookTrustEdit` が組み立てる通りの `config/batchWrite`（`keyPath: 'hooks.state."<key>".trusted_hash'`、`mergeStrategy: 'upsert'`、`value: currentHash`）を実際に送った。応答は `{status: "ok", version: "sha256:...", filePath: "<codexHome>/config.toml", overriddenMetadata: null}` で、`config.toml` に `[hooks.state."<key>"]` の `trusted_hash` が実際に書き込まれ、続けて呼んだ `hooks/list` では同じhookの `trustStatus` が `"trusted"` に変わっていた。**`buildHookTrustEdit` のkeyPath組み立ては実装どおりで正しい**（コードの修正は不要）
 - **信頼を取り消す経路は見つかっていない**。`MergeStrategy` が `replace` / `upsert` のみで削除に相当する操作が無いため、「信頼する」ボタンだけを置く
 
 #### Claude Code: `get_settings`（`effective.hooks`）
@@ -1399,7 +1400,7 @@ Phase 0（issue #1 Z-07 / issue #2 Z-10）の時点では「両方とも実装�
 - `skills/list`（`SkillsListParams { cwds?, forceReload? }` → `SkillsListResponse { data: [{cwd, skills: SkillMetadata[], errors: SkillErrorInfo[]}] }`）はスレッドを開始していなくても呼べる
 - `SkillMetadata` は `name` / `description` / `path`（絶対パス）/ `scope`（`user`|`repo`|`system`|`admin`）/ `enabled` / `interface?`（表示名・アイコン等）/ `shortDescription?` / `dependencies?` を持つ
 - `scope` は4種のうち3つを実測で確認済み: `user`（`~/.codex/skills/`）・`repo`（cwd配下の `.codex/skills/`。調査用の一時ディレクトリに `.codex/skills` を作って確認した。このリポジトリや `~/.codex` の設定は変更していない）・`system`（CLIに同梱。`~/.codex/skills/.system/` 配下）。`admin`（組織管理者配布）はこの環境に対象が無く実測できていない（スキーマの列挙にあることのみが根拠）
-- 有効/無効の書き込みは `skills/config/write`（`SkillsConfigWriteParams { enabled, name?, path? }` → `SkillsConfigWriteResponse { effectiveEnabled }`）。スキーマ根拠のみで、**この環境のskill設定を書き換えない方針のため実際に切り替えて確認してはいない**。`path` 選択子を使う（同名skillが複数scopeに存在しうるため `name` 選択子は使わない）
+- 有効/無効の書き込みは `skills/config/write`（`SkillsConfigWriteParams { enabled, name?, path? }` → `SkillsConfigWriteResponse { effectiveEnabled }`）。**実測で確認した**（issue #146。隔離した `CODEX_HOME` にuser scopeのskillを1件・別ディレクトリの `.codex/skills/` にrepo scopeのskillを1件置き、`skills/list` で両方のscope（`user`/`repo`）が見えることを先に確認したうえで、user scope skillの `path` を渡して `{enabled: false, path}` を送った）。応答は `{effectiveEnabled: false}` で、`config.toml` に実際に `[[skills.config]]`（`path` と `enabled = false`）が書き込まれ、続けて呼んだ `skills/list` でも同じskillの `enabled` が `false` に変わっていた。`true` に戻す書き込みも同様に反映された。**`path` 選択子を渡す実装は正しい**（コードの修正は不要）。`name` 選択子は同名skillが複数scopeに存在しうるため使わない
 - 通知 `skills/changed` はスキーマに存在するが（「監視しているskillファイルの変更を検知したら再度 `skills/list` を呼べ」という説明）、本issueでは購読を追加していない（既存のhooks/mcpの一覧も自動購読はしておらず、パネルを開く・`refresh()` のタイミングで読み直す既存の設計に合わせた）
 
 #### Claude Code: `reload_skills`（一覧のみ、出どころは文字列からの推測）
@@ -1566,7 +1567,7 @@ Phase 0（issue #1 Z-07）のコメントでは「Codex側は`plugin/list` `plug
 - **「提供するもの」の内訳（hooks/mcpServers/skills）は`plugin/installed`には無い**。`plugin/read`（`PluginReadParams { pluginName, marketplacePath? or remoteMarketplaceName? }` → `PluginReadResponse { plugin: PluginDetail }`。どちらか一方が必須。実測でエラー文言「`plugin/read requires exactly one of marketplacePath or remoteMarketplaceName`」を確認）で1件ずつ読む。`PluginDetail`は`hooks: [{eventName, key}]`/`mcpServers: [string]`/`skills: [SkillSummary]`/`apps: [AppSummary]`/`appTemplates`/`scheduledTasks`を持ち、実際に`github`pluginを読んで`skills`が4件（`gh-address-comments`等）、`hooks`/`mcpServers`が0件であることを確認した
 - **`plugin/read`の応答内の`plugin.summary.installed`/`plugin.summary.enabled`は信用できない**（実測: `plugin/installed`では`installed: true`だった`github`pluginを、同じ環境で`plugin/read`で読むと`installed: false`が返った。カタログの定義を読んでいるだけで、この端末の導入状態を反映していないとみられる）。そのため一覧・有効無効の判定は`plugin/installed`だけを正とし、`plugin/read`は「提供するもの」の内訳を補う目的だけに使う
 - **plugin専用の有効/無効APIが無い**。`ClientRequest`のメソッド一覧（`plugin/list` `plugin/installed` `plugin/read` `plugin/install` `plugin/uninstall` `plugin/share/*` `plugin/skill/read`）を`generate-json-schema`で全数確認したが、トグルに相当するものは存在しない。`PluginSummary.enabled`は読み取り専用の状態で、書き込む経路は無いとみられる
-- **インストール・アンインストールはAPIがある**。`plugin/install`（`PluginInstallParams { pluginName, marketplacePath?, remoteMarketplaceName? }` → `PluginInstallResponse { appsNeedingAuth, authPolicy }`）と`plugin/uninstall`（`PluginUninstallParams { pluginId }` → `PluginUninstallResponse`）はスキーマ根拠。**この環境のplugin設定を書き換えない方針のため、実際にインストール・アンインストールして確認してはいない**
+- **インストール・アンインストールはAPIがある**。`plugin/install`（`PluginInstallParams { pluginName, marketplacePath?, remoteMarketplaceName? }` → `PluginInstallResponse { appsNeedingAuth, authPolicy }`）と`plugin/uninstall`（`PluginUninstallParams { pluginId }` → `PluginUninstallResponse`）は**実測で確認した**（issue #146。隔離した`CODEX_HOME`に、ネットワークを使わない完全ローカルのマーケットプレイス（`.agents/plugins/marketplace.json` と、そこが参照する`plugins/sample/.codex-plugin/plugin.json`）を用意し、`codex plugin marketplace add <ローカルパス>`で登録した。実際の環境のplugin設定は変更していない）。`plugin/install`に`pluginName: "sample"`と、`plugin/installed`が返す`marketplaces[].path`（**マーケットプレイスのルートディレクトリではなく`marketplace.json`のファイルパスそのもの**。ディレクトリを渡すと`failed to install plugin: failed to read marketplace file: Is a directory`で失敗することを確認した）を`marketplacePath`として渡すと、`{authPolicy: "ON_INSTALL", appsNeedingAuth: []}`が返り、続けて呼んだ`plugin/installed`に`installed: true`のpluginが実際に現れた。`plugin/uninstall`に`pluginId: "sample@debug"`（`plugin/installed`の`id`をそのまま渡す）を送ると`{}`が返り、`plugin/installed`から消えた。**`appServerClient.ts`の`installPlugin`/`uninstallPlugin`はいずれもパラメータの組み立てが実装どおりで正しい**（`marketplacePath`は常に`plugin/installed`の応答から得た値をそのまま使う設計のため、ここに手動でディレクトリを渡すような不整合は起きない。コードの修正は不要）
 - `marketplace/add` `marketplace/remove` `marketplace/upgrade`（マーケットプレイス自体の追加・削除）も存在するが、本issueのスコープ（導入済みの閲覧＋既知マーケットプレイスからのインストール）では扱わない
 
 #### Codex: `app/installed` + `app/read`（閲覧のみ）
@@ -1871,6 +1872,71 @@ type SymlinkResolution =
 - `src/extension.ts`: `ClaudeChatViewManager` の構築時に `nodeMemoryFileSystem` と `context.workspaceState` を渡す（#144。`WorkflowRunStore`と同じく`context.workspaceState`をそのまま`MemoryModeMemento`として渡せる）
 
 テストは `test/unit/inputModes.test.ts`（純粋関数、#141・#144双方。`SymlinkResolution`の3ケース・`symlinkResolutionEquals`・重複フォルダ名のラベル区別を含む）、`test/unit/nodeMemoryFileSystem.test.ts`（`MemoryFileSystemPort`の既定実装。実ファイルシステム・実シンボリックリンク（壊れたリンク・循環参照を含む）に対して`SymlinkResolution`の3つの`kind`を検証）、`test/unit/webviewScript.test.ts`（`showInputModeHints` を立てたときの構文・埋め込み値）に追加した。`ClaudeChatViewManager`はフェイクの`MemoryFileSystemPort`/`MemoryModeMemento`を注入し、`test/unit/claudeChatViewManager.test.ts`で`handleMessage`経由の一連の流れ（QuickPick→確認ダイアログが実際に呼ばれたことを含む→書き込み→通知、読み取り失敗・書き込み失敗・キャンセル・壊れたシンボリックリンクの警告・TOCTOU不一致の各分岐）を検証する。加えて`resolveMemoryCandidates`の統合テストとして、`entry.cwd`がworkspaceFoldersに含まれない場合（worktreeタスク）・workspaceFoldersが複数（マルチルート）・workspaceFoldersがundefined（フォルダ未オープン）の3経路をQuickPickへ渡る候補そのもので検証する。`test/mocks/vscode.ts`に`showQuickPick`・`Uri.file`・`workspace.fs.writeFile`・確認ダイアログを明示的にキャンセルさせる機構と、マルチルート検証用の`setWorkspaceFolders`を追加した。
+
+### 14.30 他エージェントからの設定インポート（issue #36、design.md TP-57、Codex TUIの `/import` 相当）
+
+Codex TUIの `/import` はClaude Codeなど他エージェントから設定・プロジェクト・最近のチャットを取り込む。issueのスコープはCodex側のみ。この拡張はCodexとClaude Codeを同じ一覧で扱っているため、相性が良い機能として起票された。
+
+#### Phase 0の結果（issue #1 Z-07）
+
+専用APIが4つあることが分かっていた。
+
+- `externalAgentConfig/detect` — 取り込める設定の検出
+- `externalAgentConfig/import` — 実行
+- `externalAgentConfig/import/readHistories` — 取り込み履歴の読み取り
+- `externalAgentConfig/import/recordHistory` — 履歴の記録
+- 通知: `externalAgentConfig/import/progress` `externalAgentConfig/import/completed`
+
+バイナリのUI文字列から、取り込み対象は `Instructions` / `Skills` / `Plugins` / `MCP servers` / `Agents` / `Hooks` / `Slash commands` / `Memory` / `Chat sessions` の単位で選べること、`Import started. You can keep working while it finishes.` という文言から非同期に進むことが分かっていた。
+
+#### スキーマ実測（`codex app-server generate-json-schema --out`、CLI 0.147.0）
+
+- **`externalAgentConfig/detect`**（`ExternalAgentConfigDetectParams { cwds?, includeHome?, maxSessionAgeDays?, maxSessions?, migrationSource? }` → `ExternalAgentConfigDetectResponse { items: [ExternalAgentConfigMigrationItem], connectors: [ExternalAgentDetectedConnectorCandidate] }`）
+- **`ExternalAgentConfigMigrationItem`**は`{cwd, description, details, itemType}`。`cwd`は「nullまたは空ならホームスコープ、非空ならプロジェクトスコープ」（スキーマの説明文）。`itemType`は`ExternalAgentConfigMigrationItemType`（enum: `AGENTS_MD` `CONFIG` `SKILLS` `PLUGINS` `MCP_SERVER_CONFIG` `SUBAGENTS` `HOOKS` `COMMANDS` `MEMORY` `SESSIONS`。issue #26の調査で`AGENTS_MD`の存在は確認済みだったが、他の9種別は本issueで初めて確認した）。`details`（`MigrationDetails`）は`commands` / `hooks` / `mcpServers` / `plugins`（`{marketplaceName, pluginNames}`） / `sessions`（`{cwd, path, title}`） / `skills` / `subagents`（いずれも`{name}`の配列） / `memory`（**他と違い名前ではなく文字列そのもの**の配列）を持つ
+- **`externalAgentConfig/import`**（`ExternalAgentConfigImportParams { migrationItems: [ExternalAgentConfigMigrationItem], migrationSource?, providerId?, source? }` → `ExternalAgentConfigImportResponse { importId }`）。`migrationItems`は`detect`が返した項目と**同じ型**。実行したい項目を選んで、その生データをそのまま送り返す設計（issue #146で実測。後述）
+- **`externalAgentConfig/import/progress`** と **`externalAgentConfig/import/completed`**（通知）はどちらも同じ形（`{importId, itemTypeResults: [{itemType, successes: [ExternalAgentConfigImportItemTypeSuccess], failures: [ExternalAgentConfigImportItemTypeFailure]}]}`）。`import`の応答は`importId`のみを即座に返すため、実際の結果はこの通知で非同期に届く（issue #146で実測。後述）
+- **`externalAgentConfig/import/readHistories`**（params: `null` → `ExternalAgentConfigImportHistoriesReadResponse { data: [ExternalAgentConfigImportHistory], connectors: [ExternalAgentImportedConnectorCandidate] }`）。`ExternalAgentConfigImportHistory`は`{completedAtMs, failures, importId, providerId, successes}`
+- **`externalAgentConfig/import/recordHistory`**（`{providerId, itemTypeResults}` → `{importId}`）はスキーマの説明文から「拡張機能の外（TUI等）で完了したインポートの結果を、後からapp-serverの履歴へ記録する」ためのメソッドと分かる。この拡張は常に自分自身の`externalAgentConfig/import`を経由して実行するため、対応する結果は同じapp-serverの履歴へ自然に記録される想定であり、別途呼ぶ必要は無い（**issue #146で実測して確認した**。後述。`externalAgentConfig/import`を実行した直後に`externalAgentConfig/import/readHistories`を呼ぶと、`recordHistory`を別途呼ばなくても今回の実行がそのまま履歴に現れた）。使わない
+- `connectors`（`ExternalAgentDetectedConnectorCandidate` / `ExternalAgentImportedConnectorCandidate`。リモートMCPサーバー由来の候補）は`itemType`の単位とは別のUI概念で、受入基準（種別を選んでインポート）にも直接関係しない。この環境では常に空だった（後述の実測）ため、本issueのスコープ外とする
+
+#### 実測: `externalAgentConfig/detect` / `externalAgentConfig/import/readHistories`（読み取り専用、実際の環境に対して）
+
+このリポジトリで`codex app-server`を実際に起動し、読み取り専用の要求だけを送って生の応答を確認した。**この節の実測では`externalAgentConfig/import`（実行系）は呼んでいない**（この環境の実際の設定・履歴を書き換えない方針のため）。実行系の実測はissue #146で別途、完全に隔離した環境に対して行った（次項参照）。
+
+- `includeHome`を渡さない既定の呼び出しでは`items: []`（**何も検出しない**）。ホーム配下を対象にするには`includeHome: true`を明示する必要がある（スキーマにデフォルト値の記載が無く、実測で初めて分かった）
+- `includeHome: true`を指定すると、この環境の実際の`~/.claude`から`CONFIG`（`settings.json`→`config.toml`の移行）・`HOOKS`（`PreToolUse` `PostToolUse`の2件）・`SKILLS`（実際に導入している26件のskill名）・`PLUGINS`（`{marketplaceName, pluginNames}`。実際に導入している2件）・`SESSIONS`（実際の最近のセッション30件、`{cwd, path, title}`）の5種別が検出できた。`MCP_SERVER_CONFIG` / `SUBAGENTS` / `COMMANDS` / `MEMORY` / `AGENTS_MD`はこの環境に対象が無く未確認
+- `cwds`にワークスペースフォルダを渡しても、この拡張機能自体のリポジトリには`.claude/`が無いため追加の項目は増えなかった（`.claude/`があるプロジェクトでは`cwd`が非nullのプロジェクトスコープ項目が返る想定。スキーマの説明文が根拠）
+- `migrationSource`はスキーマにenumが無い自由文字列。実測: 省略時・`'claude-code'`指定時のどちらも同じ結果（Claude Codeが既定のソース）。`'cursor'`を指定すると空（この環境にCursorの設定が無いため）。未知の値（`'bogus-nonexistent'`）を渡してもエラーにならず既定のソースへフォールバックした（スキーマの説明文「Missing or unrecognized values use the default source.」と一致）
+- codexバイナリの文字列調査（`strings`）で`external-agent-migration/src/source_cla.rs`（Claude Code向け）と`source_cur.rs`（Cursor向け）の2つのソース実装、UI文字列`Claude CodeCursor`（連結されているため元は2つの選択肢）が確認できる。issueのスコープ（Claude Codeのみ）に合わせ、`migrationSource`は指定せず既定に委ねる。Cursorの選択UIはスコープ外（将来Cursor対応が要る場合は別issueで検討する）
+- `externalAgentConfig/import/readHistories`はこの環境に過去の実行履歴が無いため`{data: [], connectors: []}`だった。形自体はスキーマと一致することを確認した
+
+#### 実測: `externalAgentConfig/import`（実行系、issue #146。完全に隔離した環境）
+
+`externalAgentConfig/import`は実際の設定を書き換える操作のため、上記の読み取り専用実測とは別に、**`CODEX_HOME`と（Claude Code側の検出元である）`$HOME`の両方を使い捨てディレクトリへ向けた完全に隔離した環境**で実行した。実際の`~/.codex` `~/.claude`はどちらも変更していない。
+
+- Codexの外部エージェント設定移行（`source_cla.rs`）は、Claude Code側の探索元を**`$HOME`環境変数（`.claude`を末尾に結合）から解決しており、`CLAUDE_CONFIG_DIR`は見ない**（コード上の根拠: `codex-rs/external-agent-migration/src/service.rs`の`default_external_agent_home`が`std::env::var_os("HOME")`のみを見る）。そのため隔離するには、拡張機能が使っている`CLAUDE_CONFIG_DIR`ではなく、`codex app-server`プロセスの`$HOME`環境変数そのものを差し替える必要がある（拡張機能はこの移行元探索を自分で組み立てているわけではなく、`detect`/`import`をそのままCLIへ委ねているため、この制約は拡張機能の実装ではなくCLIバイナリ側の仕様である）
+- 隔離した`$HOME/.claude`に`settings.json`（`hooks.PreToolUse`を1件）・`skills/<name>/SKILL.md`を1件・`projects/`配下にダミーのセッションjsonlを用意し、隔離した`CODEX_HOME`で`externalAgentConfig/detect`→`externalAgentConfig/import`を実行した
+- **`SKILLS`のインポート先(`.agents/skills`)は`$CODEX_HOME`の直下ではなく、`$CODEX_HOME`の**親ディレクトリ**を基準にした`<CODEX_HOMEの親>/.agents/skills`だった**（実測: `detect`が返す`description`に`"Migrate skills from <home>/.claude/skills to <CODEX_HOMEの親>/.agents/skills"`という形で明示される）。`HOOKS`のインポート先は`$CODEX_HOME/hooks.json`（`CODEX_HOME`の直下）で、こちらは`$CODEX_HOME`を基準にしている。**この非対称は隔離環境を作るうえで重要**: `CODEX_HOME`を実ホーム直下（例: `~/.codex-verify-xxx`）に直接作ると、その親ディレクトリは実ホームそのものになり、`SKILLS`を実行すると実際の`~/.agents/skills`へ書き込まれてしまう。安全に検証するには`CODEX_HOME`を**実ホーム直下のさらに1段下**（例: `~/.codex-verify-xxx/nested`）に作り、親ディレクトリも隔離された場所にする必要がある（issue #146ではこの構成で検証し、`<隔離ディレクトリ>/.agents/skills`にのみ書き込まれたことを確認した）
+- `externalAgentConfig/import`に`detect`が返した`items`をそのまま`migrationItems`として送ると、`{importId}`が即座に返り、続けて`externalAgentConfig/import/progress`・`externalAgentConfig/import/completed`通知が届いた（`HOOKS`・`SKILLS`をそれぞれ単独で実行。どちらも`successes`が1件・`failures`が0件）。**`appServerClient.ts`の`runImport`が要求送信前に通知購読を始める設計、および`migrationItems`を`detect`の生データそのまま再送する設計は、実装どおりに正しく動作した**（コードの修正は不要）
+- `HOOKS`を実行すると、隔離した`$CODEX_HOME/hooks.json`に実際に`{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"true"}]}]}}`が書き込まれた
+- `SKILLS`を実行すると、`<隔離ディレクトリ>/.agents/skills/<name>/SKILL.md`が実際に作られた。**ただしCLI側が内容を書き写す際に、Claude Code由来であることを示す語（`claude`等）をCodex向けに置換していた**（実測: 送り込んだskill名`verify-claude-skill`が`verify-Codex-skill`に、frontmatterの説明文も同様に書き換わって保存された。design.mdのTP-57受入基準はskillの存在・有効/無効の移行を求めているだけで内容の一字一句までは求めていないため、拡張機能側の対応は不要と判断する）
+- 実行直後に`externalAgentConfig/import/readHistories`を呼ぶと、`recordHistory`を別途呼ばなくても今回実行した2件（`HOOKS`・`SKILLS`）がそのまま履歴に現れた（`completedAtMs`・`successes`・`failures`つき）。design.mdが「未実測」としていた想定が正しかったことを確認した
+- 検証に使った隔離ディレクトリ（`CODEX_HOME`・`$HOME`代替の両方）は検証後に削除した
+
+#### 実装
+
+- `src/provider/import.ts`: `ImportItemType`（enumの10種別）、`ImportItemDetailGroup`（内訳を種別ごとに要約した表示用の1グループ。代表的な名前は`MAX_DETAIL_SAMPLES`件までに絞り、残りは`moreCount`で示す）、`ImportItemView`・`ImportSnapshot`（`{ok:true, items}`か`{ok:false, reason}`）、`ImportHistoryEntryView`・`ImportHistorySnapshot`、`ImportRunResult`（`{ok:true, importId, results}` / `{ok:true, importId, results: undefined}`＝開始はできたが完了通知が届かなかった / `{ok:false, error}`）を共有の型として持つ。`isValidImportItemKey`でwebviewから返る選択キーへの防御をする
+- `src/codex/importStatus.ts`: `detect`の応答を`ImportItemView[]`へ正規化する純粋関数（`parseDetectResponse`。`rawByKey`として`externalAgentConfig/import`へ再送するための生データも返す）、`readHistories`の応答を正規化する`parseReadHistoriesResponse`、通知（`progress`/`completed`共通の形）を正規化する`parseImportNotification`。`memory`は内容そのものを一覧に出さず件数のみにする（§8「セッション本文の漏洩」と同じ考え方。実際のメモリ内容が漏れる経路を作らない）
+- `src/codex/appServerClient.ts`: `detectImportCandidates(cwds)`（`{includeHome: true, cwds}`で`detect`を呼ぶ。戻り値は画面表示用の`snapshot`と、実行時に再送するための`rawByKey`）、`readImportHistories()`、`runImport(migrationItems)`を追加。`runImport`は`import`の応答（`importId`）を得た後、`completed`通知を`IMPORT_COMPLETE_TIMEOUT_MS`（5分）まで待ってから単発プロセスを終える。**通知の購読は要求を送る前に始める**（応答と完了通知が同じ受信チャンクに混ざって届いた場合、応答を待ってから購読すると取りこぼす競合があるため）。タイムアウトしても失敗とはせず、「開始はできた」ことが分かる形（`results: undefined`）で返す（**タイムアウト後にCLI側で処理が実際に継続するか、プロセス終了で中断されるかは未確認**。実行系のため実測していない）。この目的のため、単発呼び出しの共通処理（`private call<T>`）に通知購読の口（`NotificationBus`）とタイムアウト上書きの引数を追加した
+- `src/view/settingsProvider.ts`: `SettingsSnapshot`に`importCandidates: ImportSnapshot`と`importHistory: ImportHistorySnapshot`を追加（Claude Codeには対応する概念が無いため`ClaudeSettingsSnapshot`には追加しない）。`load()`で`detectImportCandidates`・`readImportHistories`を他の一覧と並列に読み、`rawByKey`は`codexImportRawByKey`として保持する。`runCodexImport(keys)`がwebviewから届いたキーで対象を絞り込み、`confirmImport`（「何を・どこから・どこへ」を明示する確認ダイアログ。CONFIG種別を含む場合は上書きの可能性を追記）で確認を取ってから`runImport`を呼ぶ
+- `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: Codexタブのpluginsの下に「他エージェントからの設定インポート」の節を追加。項目ごとにチェックボックス・種別ラベル・CLIの説明文・内訳を表示し、「選択した項目をインポート」ボタンで`runCodexImport`メッセージを送る。実行結果（完了/一部失敗/開始のみ）に応じて通知を出し分ける。履歴一覧（`importHistoryListCodex`）も同じ節に表示する。項目名・説明文はすべてDOM APIの`textContent`で埋め込む
+
+#### スコープ外にしたもの
+
+- **`connectors`（リモートMCPサーバー由来の候補）**: この環境では常に空。`itemType`とは別のUI概念で受入基準にも直接関係しないため扱わない
+- **Cursorからのインポート（`migrationSource: 'cursor'`）**: issue本文のスコープ（Claude Codeのみ）に合わせ、ソース選択UIを設けない。バイナリにCursor向けの実装が存在することは§14.29の実測に記録した
+- **`externalAgentConfig/import/recordHistory`**: この拡張は常に自身の`externalAgentConfig/import`を経由するため呼ぶ必要が無い想定（未実行のため未確認）
+- **完了通知のリアルタイム進捗表示（プログレスバー等）**: `progress`通知はログ（`Agent: ログを表示`）へ出すのみに留めた。webview側の状態管理（実行中スピナー等）を追加すると実装・テストの範囲が大きくなるため、まずは「実行→完了/開始のみの結果通知」の往復を確実にすることを優先した
 
 ## 15. 作業記録（日報・週報連携）
 
@@ -2367,11 +2433,19 @@ src/
     scheduler.ts    完了状態から次に開始する集合を決める（純粋）
     escalation.ts   承認要求を auto / ask に振り分ける（純粋）
     runState.ts     実行状態の保持と遷移（純粋）
+    taskConfig.ts   タスク単位の実効設定を組み立てる（`buildEffectiveTaskConfig`。クランプの唯一の入口。純粋）
+    sanitize.ts     制御文字除去の共通ヘルパー（依存を持たない末端。純粋）
+    approvalMapping.ts 承認要求の生パラメータをescalation.ts/表示用へ変換する（純粋）
+    taskSummary.ts  応答の1行要約を組み立てる（純粋）
+    fsGuards.ts     runId/taskIdの識別子検証とシンボリックリンク検知（依存を持たない末端。純粋）
+    serialQueue.ts  非同期タスクを1本の待ち行列で直列化する汎用クラス（依存を持たない末端。純粋）
+    runStore.ts     実行状態の永続化と復元（`workspaceState`。応答本文は保存しない。§16.11）
     worktree.ts     worktreeの作成・撤去、git作業ツリーかの判定
     integration.ts  統合ブランチの作成・マージ・衝突の検出（gitはポート越し）
     forge.ts        ホストの判定と PR/MR の作成（gh / glab をポート越しに呼ぶ。*）
     pseudoWorktree.ts git外での複製による隔離と差分の適用（*）
     messaging.ts    タスク間メッセージングのMCPサーバと配送（§16.21。*）
+    taskSession.ts  `TaskSessionHost` / `TaskSession` のインターフェース（チャット画面側の口）
     runner.ts       セッションの生成・指示の送信・完了検知（VSCode層）
     planner.ts      ゴール文からYAMLを生成する（§16.9）
     roadmap.ts      ロードマップの生成・YAML化・完了の書き戻し（§16.19。*）
@@ -2876,6 +2950,8 @@ Claude Codeには、別々に走っているセッションが互いに名前で
 
 `wait_reply` のような、返事が来るまでツールの中で待つものは置かない。互いに待つとデッドロックする。
 
+トランスポート（`startHttpMcpTransport`、HTTP実装）は、JSONをパースする前のHTTPリクエストボディの受信バイト数にも上限（`MAX_MCP_REQUEST_BODY_BYTES`、64KiB）を設ける（Issue #132 PRレビューでのセキュリティ監査、Info）。`MAX_MESSAGE_BODY_LENGTH` はJSONをパースし終えた後の `validateSendMessage` で効くため、パース前の受信量そのものには効かない。ローカルループバック（`127.0.0.1`）+ 128bitトークン付きURLでしか到達できず外部からの悪用は考えにくいが、そのタスクのCLIプロセス自身が巨大なボディを送る経路は残るため、受信を打ち切る上限を別に設けた。上限を超えたら413で打ち切る。
+
 #### 待ちの表し方
 
 `expectReply: true` で送ったタスクは、自分のターンを終えたあと、返信が届くまで次の指示を受け取らない。**待ちはツールの中ではなく、オーケストレータ側の状態として表す。**
@@ -2896,7 +2972,11 @@ Claude Codeには、別々に走っているセッションが互いに名前で
 - 受け取ったメッセージは、そのタスクの**次の指示の先頭へ添える**。走行中のターンへ割り込まない。ターンの途中で文脈が変わるのを避けるため
 - 宛先が `pending` なら、そのタスクの開始時の最初の指示へ添える
 - 宛先が `done` / `failed` / `blocked` / `skipped` なら配送できない。`send_message` はその旨を返す
-- 1件あたりの長さの上限は `MAX_PROMPT_LENGTH` と同じ。run全体で配送できる総数にも上限を置く（`MAX_MESSAGES_PER_RUN` = 500。タスク総数の上限 `MAX_TASK_COUNT`（50）の10倍を採った）。無制限だと互いに送り合ってコンテキストとレート制限を食い潰す
+- 1件あたりの長さの上限は独立した定数 `MAX_MESSAGE_BODY_LENGTH`（4000文字）を持つ（Issue #132）。以前は `MAX_PROMPT_LENGTH`（20000文字。YAMLに書く `prompt` 自体の上限）を流用していたが、性質が異なる値の流用だった。メッセージの本文はエージェントが実行時に自由に生成し、`dependsOn` を問わず任意の（送信元より緩い権限を持ちうる）宛先へ届く。これは §16.4 の `{{T1.result}}`（`MAX_TEMPLATE_RESULT_LENGTH`、4000文字）と同じ脅威クラス（上流の自由記述がより緩い権限の下流へそのまま渡る経路）にあたるため、値もそちらへ揃えた。上限を超えた場合、`validateSendMessage` は `{{T1.result}}` 側（黙って切り詰める）と違い**受付自体を拒否する**。`send_message` はモデルが明示的に呼ぶツール呼び出しであり拒否理由がその場でモデルへ返るため、モデル自身が本文を短くして送り直せる。一方 `{{T1.result}}` の展開はテンプレート変数を差し込むオーケストレータ側の自動処理で、その時点でモデルの判断が介在する余地が無い（差し込む先の `prompt` はワークフロー開始前に固定されている）ため、黙って切り詰めることだけが唯一実行可能な安全策になる、という違いによる
+- run全体で配送できる総数にも上限を置く（`MAX_MESSAGES_PER_RUN` = 500。タスク総数の上限 `MAX_TASK_COUNT`（50）の10倍を採った）。無制限だと互いに送り合ってコンテキストとレート制限を食い潰す
+- `composeNextPrompt`（未配送のメッセージを次の指示の先頭へ連結する処理）の**合成後の総量**にも粗い安全弁（`MAX_COMPOSED_PROMPT_LENGTH`、60000文字。§16.4 の `MAX_EXPANDED_PROMPT_LENGTH` と同じ動機・同じ値）を設ける（Issue #132）。1件ずつの長さを守っていても、run全体の上限（500件）まで積み上がれば連結後の総量は理論上極端な長さになりうるため
+  - **監査指摘（Warning、Issue #132 PRレビューでのセキュリティ監査。実測で再現確認）**: 初回実装は §16.4 の `capExpandedLength` を単純に真似て、`HEADER + メッセージ群 + basePrompt` を連結してから末尾をコードポイント単位で切り詰めていた。`basePrompt`（そのタスク本来の、人がYAMLに書いた信頼できる指示）は常に列の末尾にあるため、真っ先に削られるのが信頼できる側になっていた。`MAX_MESSAGE_BODY_LENGTH` ちょうど（4000文字）のメッセージを同じ宛先へ15件積むだけで `basePrompt` が完全に消え、さらに最後のメッセージの閉じタグ `</task-message>` まで失われる（開始タグ15個に対し閉じタグ14個）ことを実測で確認した。宛先のエージェントは `TASK_MESSAGE_GUIDANCE`（データとして扱えという注意書き）と注入された本文だけを受け取り、本来やるべき指示が1文字も残っていない状態でターンを開始することになり、次項「受信内容の扱い」の「指示ではなくデータとして扱わせる」という補助防御が実質的に無力化されていた。`{{T1.result}}` の `capExpandedLength` は「無限に膨らむのを止める粗い安全弁であり、上限内に収まる量の指示文が埋め込まれることは防がない」というトレードオフだが、この引用は誤り（過小評価）だった。`{{T1.result}}` は人がYAMLに書いた `prompt` の中に変数参照が埋め込まれる形なので周囲に人間の指示文が残りやすく、`dependsOn` を明示した場合にしか発生しない。一方このメッセージング経路は**宛先の同意も `dependsOn` も要らず、送信元エージェントの意思だけで**（`send_message` を連投するだけで）基準の指示を丸ごと押し出せる
+  - **対処**: `basePrompt` は常に全量を温存し、削るのはメッセージ側だけにする。メッセージは1件単位で丸ごと残すか丸ごと落とすかのどちらかにする（文字数で機械的に切ると、選んだ最後のメッセージの閉じタグが失われうるため。`<task-message>` 〜 `</task-message>` を常に対にする）。落とす優先順位は送信順の古いものから（直近のメッセージのほうが宛先にとって新しい・関連が強い可能性が高いという判断）。`basePrompt` 自体（+ `HEADER` 等の固定コスト）だけで予算を使い切る極端なケースでは、メッセージを1件も載せず `basePrompt` だけを返す。いずれの場合も、間引いたことが分かる通知を添える
 
 #### 宛先の範囲
 
@@ -2908,11 +2988,18 @@ runをまたぐ通信と、ワークフローの外のセッションへの送�
 
 受け取ったメッセージは、別のエージェントが生成した文である。**指示ではなくデータとして扱わせる。**
 
-- 配送するときは出所と範囲が分かる形で包む（`<task-message from="T2">…</task-message>` のような明示的な囲い）
+- 配送するときは出所と範囲が分かる形で包む（`<task-message from="T2">…</task-message>` のような明示的な囲い）。本文中の `<` `>` は実体参照（`&lt;` `&gt;`）へ変換してから包む（`escapeAngleBrackets`）。本文がどんな文字列（`</task-message>` や偽の `from` 属性を含む文字列）であっても、これだけで `<...>` というタグ構造そのものを再構成できなくなるため、囲いの偽装は構造的に成立しない。§16.4の対策3「区切る」がテンプレート変数側で採っている `nonce`（呼び出しごとの乱数）に相当する仕掛けはここでは不要（実体参照化のほうが強い防御であり、乱数で偽装の確率を下げる必要が無い）
 - 囲いの中の文を指示として実行しないよう、添える文面で明示する
+- 本文の制御文字は落とすが、**改行・タブ・復帰は残す**（`stripControlCharsPreservingNewlines`、Issue #132）。以前は改行も空白へ畳む `stripControlChars` を使っており、複数行のメッセージがCLIへ実際に送る本文の上で1行に潰れてしまっていた（意図した仕様ではない。改行を潰す必要があるのは1行の表示（承認カードのタイトル等）に限られ、CLIへ送る本文の意味そのものを変えてよい理由にはならない）。改行を残しても囲いの偽装は成立しない。`escapeAngleBrackets` による無害化（前掲）は本文の中身に関わらず一様に効くため、改行の有無は安全性に影響しない
 - ただしこれは補助でしかない。**一次防御は下流タスク自身の権限設定（`sandbox` / `approvalMode` / `autoApprove`。§16.16）であり、上の囲いはそれを補う見える化でしかない。** 送信元と受信先が同じ権限の下にある保証はどこにもない（詳細は次項「メッセージング経由の権限越境」）
 - 本文は `workspaceState` へ保存しない（§16.11 と同じ理由）。PR/MRの本文にも入れない（§16.18）
 - 作業記録（§16.12）には、`{{T1.result}}` の展開と同じ扱いで、配送された本文を落として記録する
+
+#### 人が目視確認できるようにする（Issue #132）
+
+§16.4の対策1「見せる」（ワークフローViewの「プロンプトを見る」）は `expandTemplate(task.prompt / continuePrompt, ...)` だけから `expandedPrompt` / `expandedContinuePrompt` を計算しており、**`composeNextPrompt` を経由しない**。そのため、タスクメッセージ経由で注入された内容はViewのどこにも表示されなかった。
+
+`LiveTask.lastSentPrompt` を新設し、`setPromptTransform` が実際にCLIへ返す値（`composeNextPrompt` を経由した実送信文面そのもの）をそのまま表示専用に保持する。送信のたび（初回・継続の両方、メッセージの有無を問わず）に更新するため、常に「実際に何を送ったか」と一致する。表示する値には§16.4の対策1と同じく `stripControlCharsPreservingNewlines` を通し（Trojan Source対策。目視確認そのものを欺けないようにする）、`workspaceState` へは永続化しない（§16.11・前項「受信内容の扱い」と同じ理由）。ワークフローViewの「プロンプトを見る」に「実際に送信した直近の本文」として、`expandedPrompt` / `expandedContinuePrompt` と並べて表示する。
 
 #### メッセージング経由の権限越境（Issue #132）
 
@@ -2922,7 +3009,14 @@ runをまたぐ通信と、ワークフローの外のセッションへの送�
 
 **§16.4と本節は、同じ脅威クラスの2つの経路である。** 一方は「完了したタスクの結果を一方向に、依存関係に沿って渡す」経路、他方は「走行中のタスク同士が依存を問わず送り合う」経路で、下流タスクの権限が上流より緩ければどちらも同じ形で権限越境になりうる。片方（§16.4）だけに対策を入れて本節を素通りさせると、経路として広い分だけ穴が残る。
 
-対策は§16.4の案2（警告）と同じ立て付けにする。**エラーにはせず、警告として出す。** 送信先のタスクが送信元より緩い `sandbox` / `approvalMode` / `autoApprove` を持つ場合に、ワークフローViewの警告欄へ出す。書けてしまうこと自体は止めず、見えるようにするだけである（§16.7の危険判定・§16.4の案2と同じ位置付け）。**実装はIssue #132。** 本節はその設計上の位置付けを記すもので、警告の実装自体はまだ入っていない。
+対策は§16.4の案2（警告）と同じ立て付けにする。**エラーにはせず、警告として出す。** 送信先のタスクが送信元より緩い `sandbox` / `approvalMode` / `autoApprove` を持つ場合に、ワークフローViewの警告欄へ出す。書けてしまうこと自体は止めず、見えるようにするだけである（§16.7の危険判定・§16.4の案2と同じ位置付け）。判定ロジック（`permissionEscalationReasons`、安全順序表 `SANDBOX_SAFETY_ORDER` / `CODEX_APPROVAL_SAFETY_ORDER` / `CLAUDE_PERMISSION_SAFETY_ORDER`）は§16.4の実装をそのまま再利用し、独自の判定は持たない（Issue #132で実装済み）。
+
+§16.4の警告は読み込み時・実行時の二段（YAMLのリテラル値／実効値）を持つが、メッセージングの警告は**実行時の一段だけ**になる。`send_message` の呼び出しはモデルの判断で実行時に起きるため、静的な検査（YAMLを読んだ時点の検証）ができない。加えて宛先は `dependsOn` を問わないため、送信元・宛先の組み合わせを読み込み時点で列挙すること自体に意味が薄い。
+
+- メッセージが実際に配送される時点（宛先タスクの次の送信で `composeNextPrompt` が呼ばれ、`takeDeliverableMessages` が未配送分を取り出した直後）で、送信元・宛先の実効値を比較する（`runner.ts` の `checkMessagingPermissionEscalation`）
+- 送信元の実効値は、送信元タスクが開始した時点で `LiveTask` へ保存済みの `effectiveSandbox` / `effectiveApprovalMode` / `autoApprove`（§16.4と同じ値）を使う。`send_message` は呼び出し元のセッションが生きていないと成立しないため、送信元の `LiveTask` は必ず存在する
+- ワークフローViewの警告欄には `messagingPermissionEscalation` という種別で出す。`{{T1.result}}` 経由の `permissionEscalation`（§16.4）とは経路が違う（メッセージは `dependsOn` を問わず任意の宛先へ送れる）ため、別の種別にして区別する
+- 同じ警告文言を繰り返し積まないよう重複は除く（§16.4の実行時チェックと同じ流儀）
 
 #### 拡張機能が立てたサーバの見え方
 

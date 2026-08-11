@@ -75,6 +75,7 @@ import {
 import {
   applyLoopStopReason,
   createRunState,
+  isActiveTaskState,
   markApprovalRejected,
   markMergeBlocked,
   markMergeFailed,
@@ -122,6 +123,7 @@ import {
 import {
   expandTemplate,
   findPermissionEscalationWarnings,
+  MAX_WORKFLOW_FILE_BYTES,
   parseWorkflowYaml,
   permissionEscalationReasons,
   referencedResultFields,
@@ -150,13 +152,6 @@ export interface WorkflowFilePort {
   fileSize(path: string): Promise<number | undefined>;
   readTextFile(path: string): Promise<string | undefined>;
 }
-
-/**
- * 巨大なYAMLで拡張機能ホスト（シングルスレッド）を固まらせないための上限。
- * `workflow.ts` の `MAX_PROMPT_LENGTH`（20000文字）× `MAX_TASK_COUNT`（50）を
- * 大きく超える値を目安にした余裕のある上限で、通常のワークフロー定義には十分すぎる。
- */
-export const MAX_WORKFLOW_FILE_BYTES = 1 * 1024 * 1024;
 
 /**
  * タスク間メッセージング（design.md §16.21）の待ちぼうけ検出（`checkWaitingReplyStalls`）を
@@ -348,6 +343,16 @@ export interface WorkflowWarning {
      */
     | 'permissionEscalation'
     /**
+     * タスク間メッセージング（design.md §16.21）経由で、送信元より緩い実効権限を持つ
+     * 宛先へメッセージが配送された（Issue #132）。`permissionEscalation`
+     * （`{{T1.result}}`経由、Issue #67・依存関係のあるタスク間に限る）とは経路が違う
+     * （メッセージは`dependsOn`を問わず任意の宛先へ送れる）ため、別のkindにして区別する。
+     * `checkMessagingPermissionEscalation`が、メッセージが実際に配送される時点
+     * （`setPromptTransform`が`takeDeliverableMessages`を呼んだ直後）で検出し
+     * `live.warnings`へ積む。`permissionEscalation`と同じく警告のみでエラーにはしない。
+     */
+    | 'messagingPermissionEscalation'
+    /**
      * タスク間メッセージング（design.md §16.21）専用のMCPツールが、タスクのセッションを
      * 開いた後に確認しても見えなかった（`TaskSession.checkMessagingToolVisible`が
      * `false`を返した）。design.md「見えていなければワークフローViewへ警告を出し、
@@ -408,6 +413,15 @@ export interface TaskSnapshot {
    * 追加した。`expandedPrompt`と同じ理由で永続化しない。制御文字は除去済み。
    */
   expandedContinuePrompt: string | undefined;
+  /**
+   * 実際にCLIへ送った直近の本文（`LiveTask.lastSentPrompt`参照、design.md §16.21、
+   * Issue #132）。`expandedPrompt` / `expandedContinuePrompt`はテンプレート変数だけの
+   * 展開結果（`composeNextPrompt`を経由しない）なので、タスク間メッセージング経由で
+   * 注入された内容を確認する手段が無かった。この値はメッセージの合成結果を含む、
+   * 実際に送信した文面そのもの。`expandedPrompt`と同じ理由で永続化しないため、
+   * リロード後は`undefined`に戻る。
+   */
+  lastSentPrompt: string | undefined;
   /**
    * 衝突解決セッション（design.md §16.17「コンフリクト」・Issue #104）がこのタスクに
    * ついて走っているか。`live.mergeResolutions`はワークフローの定義に無い（ノード化しない）
@@ -553,6 +567,22 @@ interface LiveTask {
   expandedPrompt: string | undefined;
   /** `continuePrompt`の展開結果。`expandedPrompt`と同時に計算する（セキュリティ監査指摘#6）。 */
   expandedContinuePrompt: string | undefined;
+  /**
+   * `setPromptTransform`が実際にCLIへ送った直近の本文（design.md §16.4 案1「見せる」の
+   * メッセージング版、Issue #132）。
+   *
+   * `expandedPrompt` / `expandedContinuePrompt`はタスク開始直前に一度だけ計算する
+   * テンプレート変数だけの展開結果で、`composeNextPrompt`（タスク間メッセージング、
+   * design.md §16.21）を経由しない。そのため、メッセージ経由で注入された内容は
+   * これまでViewのどこにも表示されなかった（起票時の指摘4）。この値は
+   * `setPromptTransform`が返す値（＝実際にCLIへ送る文面そのもの）をそのまま
+   * 表示用に保持したもので、送信のたびに（初回・継続の両方、メッセージの有無を問わず）
+   * 更新する。`expandedPrompt`と同じく表示専用でworkspaceStateへは永続化しない
+   * （design.md §16.11・§16.21「本文はworkspaceStateへ保存しない」）ため、リロード後は
+   * `undefined`に戻る。制御文字は`stripControlCharsPreservingNewlines`で除去済み
+   * （Trojan Source対策。表示用は改行を残す）。
+   */
+  lastSentPrompt: string | undefined;
   /**
    * `waitingReply`（design.md §16.21）へ遷移した時刻（ms）。それ以外の状態では
    * `undefined`。`checkWaitingReplyStalls`の経路2（`detectTimedOutWaitingReplies`）の
@@ -749,6 +779,7 @@ export class WorkflowRunner {
       hasLiveSession: liveTask !== undefined,
       expandedPrompt: liveTask?.expandedPrompt,
       expandedContinuePrompt: liveTask?.expandedContinuePrompt,
+      lastSentPrompt: liveTask?.lastSentPrompt,
       mergeResolutionActive: live.mergeResolutions.has(task.id),
       pullRequestNumber: liveTask?.pullRequest?.number ?? persistedTask?.pullRequestNumber,
       pullRequestUrl: liveTask?.pullRequest?.url ?? persistedTask?.pullRequestUrl,
@@ -853,6 +884,76 @@ export class WorkflowRunner {
       }
       this.deps.log.warn(`[workflow ${live.runId}/${taskId}] ${message}`);
       live.warnings.push({ kind: 'permissionEscalation', taskId, message });
+    }
+  }
+
+  /**
+   * タスク間メッセージング（design.md §16.21）専用の権限差の警告（Issue #132「1. 権限差の
+   * 警告」）。`checkEffectivePermissionEscalation`（`{{T1.result}}`経由、Issue #67）と
+   * 判定ロジック自体（`permissionEscalationReasons`）は共有するが、経路が異なるため
+   * 別メソッド・別`WorkflowWarning.kind`にする:
+   *
+   * - `{{T1.result}}`は`dependsOn`に挙げた依存先しか参照できず、読み込み時
+   *   （`findPermissionEscalationWarnings`）と実行時の二段で検出できる
+   * - メッセージは`dependsOn`を問わず同じrunの任意の宛先へ送れるうえ、`send_message`の
+   *   呼び出しはモデルの判断で実行時に起きるため**静的には検査できない**。実行時、
+   *   実際に配送された時点でしか検出できない
+   *
+   * 呼び出し元（`setPromptTransform`）は、メッセージが実際に宛先の次の指示へ組み込まれる
+   * 直前（`takeDeliverableMessages`で取り出した直後）でこれを呼ぶ。宛先（recipient）が
+   * このタスク自身、送信元（sender）が`message.from`。送信元の実効権限は、送信元タスクが
+   * 開始した時点で`LiveTask`へ保存済みの`effectiveSandbox` / `effectiveApprovalMode` /
+   * `autoApprove`（`checkEffectivePermissionEscalation`と同じ値）を使う。`send_message`は
+   * 呼び出し元のセッションが生きていないと成立しない（MCPツールの呼び出しのため）ので、
+   * 送信元の`LiveTask`は通常必ず見つかるが、内部矛盾で見つからない場合は判定を諦める。
+   */
+  private checkMessagingPermissionEscalation(
+    live: LiveRun,
+    recipientTask: WorkflowTask,
+    recipientTaskId: string,
+    effective: EffectiveTaskConfig,
+    messages: readonly StoredMessage[],
+  ): void {
+    const downstream: PermissionProfile = {
+      provider: recipientTask.provider,
+      sandbox: effective.sandbox,
+      approvalMode: effective.config.approvalMode,
+      autoApprove: effective.autoApprove,
+    };
+
+    for (const m of messages) {
+      const senderTask = live.def.tasks.find((t) => t.id === m.from);
+      const senderLive = live.tasks.get(m.from);
+      if (senderTask === undefined || senderLive === undefined) {
+        continue;
+      }
+      const upstream: PermissionProfile = {
+        provider: senderTask.provider,
+        sandbox: senderLive.effectiveSandbox,
+        approvalMode: senderLive.effectiveApprovalMode,
+        autoApprove: senderLive.autoApprove,
+      };
+
+      const reasons = permissionEscalationReasons(upstream, downstream);
+      if (reasons.length === 0) {
+        continue;
+      }
+
+      const message =
+        `${recipientTaskId} は送信元タスク ${m.from} より緩い実効権限でメッセージを受け取り` +
+        `ました（${reasons.join(', ')}）。${m.from} が送った本文に仕込まれた指示文が ` +
+        `${recipientTaskId} の権限で実行されうるため、内容を確認してください`;
+      const alreadyWarned = live.warnings.some(
+        (w) =>
+          w.kind === 'messagingPermissionEscalation' &&
+          w.taskId === recipientTaskId &&
+          w.message === message,
+      );
+      if (alreadyWarned) {
+        continue;
+      }
+      this.deps.log.warn(`[workflow ${live.runId}/${recipientTaskId}] ${message}`);
+      live.warnings.push({ kind: 'messagingPermissionEscalation', taskId: recipientTaskId, message });
     }
   }
 
@@ -1381,12 +1482,7 @@ export class WorkflowRunner {
     const activeStates = new Map<string, TaskState>();
     const waitingSinceMsByTaskId = new Map<string, number>();
     for (const [taskId, s] of live.runState.tasks) {
-      if (
-        s.state === 'running' ||
-        s.state === 'waitingApproval' ||
-        s.state === 'waitingReply' ||
-        s.state === 'merging'
-      ) {
+      if (isActiveTaskState(s.state)) {
         activeStates.set(taskId, s.state);
       }
       if (s.state === 'waitingReply') {
@@ -1881,6 +1977,7 @@ export class WorkflowRunner {
         pendingApproval: undefined,
         expandedPrompt: undefined,
         expandedContinuePrompt: undefined,
+        lastSentPrompt: undefined,
         waitingReplySinceMs: undefined,
         pullRequest: undefined,
       };
@@ -1914,10 +2011,23 @@ export class WorkflowRunner {
         // `takeDeliverableMessages`は呼ぶたびに未配送分を取り出す（配送済みとして消費する）
         // ため、送信のたびにここで取りに行く必要がある
         const hub = live.messaging?.hub;
-        if (hub === undefined) {
-          return expanded;
+        const delivered = hub?.takeDeliverableMessages(taskId) ?? [];
+        // 配送される時点で、送信元より緩い実効権限へメッセージが届いていないかを確認する
+        // （design.md §16.21、Issue #132「1. 権限差の警告」）。静的には検査できない
+        // （送信はモデルの判断で実行時に起きる）ため、実際に配送するこの時点でのみ判定できる
+        if (delivered.length > 0) {
+          this.checkMessagingPermissionEscalation(live, task, taskId, effective, delivered);
         }
-        return composeNextPrompt(expanded, hub.takeDeliverableMessages(taskId));
+        const composed = composeNextPrompt(expanded, delivered);
+        // Viewで実際に送った文面を確認できるようにする（design.md §16.21、Issue #132
+        // 「4. 人が目視確認できるようにする」）。`expandedPrompt`はcomposeNextPromptを
+        // 経由しないため、メッセージ経由で注入された内容を映せなかった。ここは
+        // `setPromptTransform`が実際に返す値（CLIへ送る本文そのもの）を表示用に保持する
+        // 経路なので、常に実際の送信内容と一致する。永続化はしない（design.md §16.11・
+        // §16.21）表示専用の値のため、Trojan Source対策として`stripControlCharsPreservingNewlines`
+        // を通す（改行はプロンプトの整形を保つため残す。CLIへ送る`composed`自体は変更しない）
+        liveTask.lastSentPrompt = stripControlCharsPreservingNewlines(composed);
+        return composed;
       });
       // Viewで「展開後のプロンプトを実際の文面として確認できる」ようにするための表示専用の値
       // （design.md §16.4 案1「見せる」、Issue #67）。実際に送る本文とは別経路で保持する。
