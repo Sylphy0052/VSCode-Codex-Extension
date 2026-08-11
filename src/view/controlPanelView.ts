@@ -122,6 +122,20 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    if (m['type'] === 'toggleMcp') {
+      const cli = m['cli'];
+      const name = m['name'];
+      const enabled = m['enabled'];
+      if ((cli !== 'codex' && cli !== 'claude') || typeof name !== 'string' || name === '') {
+        this.log.warn(`MCPサーバーの切替要求が不正です: ${JSON.stringify(m)}`);
+        return;
+      }
+      await this.settings.toggleMcpServer(cli, name, enabled === true);
+      // 成功/失敗にかかわらず、実際の状態を読み直してから表示する
+      await this.refresh();
+      return;
+    }
+
     if (m['type'] !== 'update') {
       return;
     }
@@ -207,6 +221,9 @@ ${controlPanelStyles()}
 
   <p class="note">「既定」はCodex側の <code>config.toml</code> の値を使います。ここでの変更は次に開くセッションに適用されます。実行中のセッションはタブ内のCodexで変更してください。</p>
   <p class="note" id="profileNote"></p>
+
+  <h2 class="sectionTitle">MCPサーバー</h2>
+  <div class="mcpList" id="mcpListCodex"></div>
   </div>
 
   <div id="panelClaude" hidden>
@@ -230,6 +247,9 @@ ${controlPanelStyles()}
     <button id="newClaudeSession" type="button">この設定で新しい会話を開く</button>
 
     <p class="note">「既定」はClaude Code側の <code>settings.json</code> の値を使います。使用量はチャット画面に表示されます（ステータスバーはCodex専用）。</p>
+
+    <h2 class="sectionTitle">MCPサーバー</h2>
+    <div class="mcpList" id="mcpListClaude"></div>
   </div>
 
 <script nonce="${nonce}">

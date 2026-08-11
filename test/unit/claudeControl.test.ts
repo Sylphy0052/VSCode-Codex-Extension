@@ -3,12 +3,15 @@ import {
   buildCanUseToolResponse,
   buildContextUsageRequest,
   buildControlRequest,
+  buildMcpStatusRequest,
+  buildMcpToggleRequest,
   buildSetEffortRequest,
   buildSetModelRequest,
   buildSetPermissionModeRequest,
   buildUserMessage,
   describeCanUseTool,
   readCommandList,
+  readMcpServersList,
   readModelList,
   readCommandsChanged,
   readContextUsage,
@@ -388,5 +391,98 @@ describe('readModelList', () => {
     expect(readModelList({})).toBeUndefined();
     expect(readModelList({ models: 'なにか' })).toBeUndefined();
     expect(readModelList({ models: [] })).toEqual([]);
+  });
+});
+
+describe('buildMcpStatusRequest / buildMcpToggleRequest', () => {
+  it('mcp_status要求を作る', () => {
+    const line = buildMcpStatusRequest('req_1');
+    expect(JSON.parse(line)).toEqual({
+      type: 'control_request',
+      request_id: 'req_1',
+      request: { subtype: 'mcp_status' },
+    });
+  });
+
+  it('mcp_toggle要求はserverName（camelCase）で送る', () => {
+    // 実測: server_name / name は Server not found: undefined になる
+    const line = buildMcpToggleRequest('req_2', 'codegraph', false);
+    expect(JSON.parse(line)).toEqual({
+      type: 'control_request',
+      request_id: 'req_2',
+      request: { subtype: 'mcp_toggle', serverName: 'codegraph', enabled: false },
+    });
+  });
+});
+
+describe('readMcpServersList', () => {
+  it('接続済みサーバーのツール数とバージョンを読む（実測: CLI 2.1.227）', () => {
+    const servers = readMcpServersList({
+      mcpServers: [
+        {
+          name: 'codegraph',
+          status: 'connected',
+          serverInfo: { name: 'codegraph', version: '1.5.0' },
+          config: { type: 'stdio', command: 'codegraph', args: ['serve', '--mcp'] },
+          scope: 'local',
+          tools: [{ name: 'codegraph_explore', annotations: { readOnly: true } }],
+        },
+      ],
+    });
+    expect(servers).toEqual([
+      { name: 'codegraph', state: 'connected', toolCount: 1, version: '1.5.0', reason: undefined },
+    ]);
+  });
+
+  it('失敗したサーバーはerrorをそのまま理由にする', () => {
+    const servers = readMcpServersList({
+      mcpServers: [
+        {
+          name: 'mcpprobe-fail',
+          status: 'failed',
+          error: "ENOENT: no such file or directory, posix_spawn '/nonexistent/binary-xyz'",
+          config: { type: 'stdio', command: '/nonexistent/binary-xyz', args: ['--foo'] },
+          scope: 'local',
+        },
+      ],
+    });
+    expect(servers).toEqual([
+      {
+        name: 'mcpprobe-fail',
+        state: 'unavailable',
+        toolCount: 0,
+        version: undefined,
+        reason: "ENOENT: no such file or directory, posix_spawn '/nonexistent/binary-xyz'",
+      },
+    ]);
+  });
+
+  it('無効化されたサーバーを読む', () => {
+    const servers = readMcpServersList({
+      mcpServers: [{ name: 'codegraph', status: 'disabled', config: {}, scope: 'local' }],
+    });
+    expect(servers).toEqual([
+      { name: 'codegraph', state: 'disabled', toolCount: 0, version: undefined, reason: undefined },
+    ]);
+  });
+
+  it('未知のstatusは使えない側へ倒す', () => {
+    const servers = readMcpServersList({
+      mcpServers: [{ name: 'x', status: 'pending', config: {}, scope: 'local' }],
+    });
+    expect(servers).toEqual([
+      { name: 'x', state: 'unavailable', toolCount: 0, version: undefined, reason: undefined },
+    ]);
+  });
+
+  it('名前を持たないエントリは読み飛ばす', () => {
+    expect(readMcpServersList({ mcpServers: [{ status: 'connected' }] })).toEqual([]);
+  });
+
+  it('一覧が無いときはundefined（空の一覧と区別する）', () => {
+    expect(readMcpServersList(undefined)).toBeUndefined();
+    expect(readMcpServersList({})).toBeUndefined();
+    expect(readMcpServersList({ mcpServers: 'なにか' })).toBeUndefined();
+    expect(readMcpServersList({ mcpServers: [] })).toEqual([]);
   });
 });

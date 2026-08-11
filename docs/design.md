@@ -364,6 +364,8 @@ Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡
 - `permissionMode` を `bypassPermissions` にするときは、Codexの `danger-full-access` + `never` と同じくモーダルで同意を取る。
 - 使用量はCodex側にしか出せない（§14.8）ため、Claudeタブには表示しない。
 
+**MCPサーバーの一覧**: 両タブの下部に、設定されているMCPサーバーの一覧と有効/無効の切替を出す（§14.14）。取得・切替の経路はCodexとClaude Codeで別物（プロトコルの非対称は§14.14を参照）。
+
 ### 使用量の表示
 
 レート制限の使用量をステータスバーに常時表示し、詳細を操作パネルに出す。
@@ -1021,6 +1023,44 @@ issue #31 の起票時点のスコープは「Claude側のみ」（`docs/tui-par
 実際、Codexには `turn/plan/updated`（`{ plan: [{ step, status }], explanation }`）を受けて `describePlan` が作る `plan` 種別の項目が既にある（§14.10「計画そのものの表示」）。これは1ターンの間は同じidで上書きされ（`plan:<turnId>`）、状態（`[ ]` / `[~]` / `[x]`）も見える。会話内の項目という点でこの節の専用パネルとは置き場所が違うが、**「一覧として見える」「状態が分かる」という受入基準は既に満たしている**ため、今回はCodex側のコードを変更しなかった。
 
 置き場所を完全に揃える（Codexの計画も入力欄の上の専用パネルへ出す）のは、`plan` 項目の会話内表示という既存の設計を変えることになり、この issueのスコープを超える。今回は `ChatState.todos` と `#todos` パネルをプロバイダ共通の器として用意するところまでに留め、Codexの計画表示を同じ器へ移すかどうかは別issueで判断する。
+
+### 14.14 MCPサーバーの一覧・状態・有効無効
+
+TUIの `/mcp`（Codexは `/mcp verbose`）に相当する表示。issue #27・design.mdのTP-50対応。サイドバーの設定パネル（§6「操作パネル」）に、CodexとClaude Codeそれぞれのタブへ一覧を出す。
+
+Phase 0（issue #1 Z-07 / issue #2 Z-10）で「両方とも一覧・有効無効ともに実装できる」ことは確認済みだった。本issueでは実際のプロトコルの形を実測し、**CodexとClaude Codeで取得できる情報の粒度が非対称**であることを確認した。
+
+#### Codex: `mcpServerStatus/list` + `config/read`
+
+実測（codex-cli 0.147.0。`codex app-server generate-json-schema --out` のスキーマも根拠）:
+
+- `mcpServerStatus/list`（`ListMcpServerStatusParams { cursor?, detail?: 'full' | 'toolsAndAuthOnly', limit?, threadId? }` → `ListMcpServerStatusResponse { data: McpServerStatus[], nextCursor? }`）は**スレッドを開始していなくても呼べる**。呼ぶとその場で（未接続なら）接続を試み、成功すれば `serverInfo` とツール定義一式（`tools: {[name]: Tool}`）が入って返る
+- **無効化されたサーバーと、起動に失敗したサーバーは、この応答だけでは区別できない**。どちらも `serverInfo: null, tools: {}` になり、失敗理由を持つフィールドが `McpServerStatus` 型自体に無い（実測: 実在しないコマンドを指すサーバーを用意して確認）
+- 有効/無効そのものは `config/read` の `config.mcp_servers.<name>.enabled` と突き合わせて判定する。`enabled` を明示しないサーバーもこの応答では `enabled: true` に正規化されて返る（実測）
+- 切替は `config/value/write { keyPath: "mcp_servers.<name>.enabled", mergeStrategy: "upsert", value: true|false }` → `config/mcpServer/reload { }`（params は `null`）の2段階（実測で確認）。`config/mcpServer/reload` はサーバー名を取らず、`config.toml` 全体を読み直すだけ
+
+失敗理由は `mcpServer/startupStatus/updated` 通知（`McpServerStatusUpdatedNotification { name, status: 'starting'|'ready'|'failed'|'cancelled', error?, failureReason?, threadId? }`）に乗る（実測: `error` に `"MCP client for \`x\` failed to start: MCP startup failed: No such file or directory (os error 2)"`のような具体的な文言が入った）。しかし、**この通知は`thread/start` した後、そのスレッド向けにしか届かない**（実測: スレッドを開始せずに8秒アイドル観察してもゼロ件。`mcpServerStatus/list` を単発で呼んだだけでは発火しない）。設定パネルは会話を開かずに使うため、この通知には依存できない。
+
+したがって、設定パネルでは「有効なのに接続できない」状態を `state: 'unavailable'` として理由なしで示す。これは実装上の妥協ではなく、**観測した範囲でこの経路には理由が無い**という事実に基づく。受入基準（「起動に失敗しているサーバが、失敗していると分かる」）は状態表示だけで満たすが、失敗理由の表示はできない。
+
+#### Claude Code: `mcp_status` / `mcp_toggle`（control protocol）
+
+実測（CLI 2.1.227）:
+
+- `mcp_status` は1回の要求で `{ mcpServers: [{ name, status: 'connected'|'failed'|'disabled', serverInfo？: {name, version}, config, scope, tools？: [{name, annotations}], error？ }] }` を返す。**失敗理由（`error`）がこの応答だけで取れる**ため、Codexと違い通知の購読もスレッドの開始も要らない
+  - Phase 0時点のコメントでは「実測で `{ mcpServers: [] }`」だったが、これは検証環境にサーバーが設定されていなかっただけで、サーバーがあれば1件ずつ詳細が返ることを今回のissueで確認した
+- `mcp_toggle` の正しいパラメータ名は **`serverName`**（camelCase）。Phase 0の追試項目（`server_name` / `name` はどちらも `Server not found: undefined` になっていた）への回答。存在しないサーバー名を指定すると `Server not found: <name>` エラーが返る
+- **`mcp_toggle` はプロセスを終了しても設定に残る**（`.claude.json` に永続化される。実測: 1つのプロセスで無効化し、続けて起動した別プロセスの `mcp_status` でも無効のままだったことを確認）。会話を開いていない設定パネルからの単発呼び出しで切り替えても失われない
+
+#### 実装
+
+- `src/provider/mcpServers.ts`: `McpServerView`（`name` / `state: 'connected'|'disabled'|'unavailable'` / `toolCount` / `version` / `reason`）と `McpServersSnapshot`（`{ok:true, servers}` か `{ok:false, reason}`）を共有の型として持つ。空配列（0件）と「取得できなかった」を型で区別する
+- `src/codex/mcpStatus.ts`: `mcpServerStatus/list` と `config/read` の応答を`McpServerView[]`へ正規化する純粋関数（`parseMcpServerStatusList` / `parseConfigMcpServersEnabled` / `mergeMcpServers`）
+- `src/codex/appServerClient.ts`: `listMcpServers()` / `setMcpServerEnabled()` を追加。既存の `listModels()` と同じく、会話用の常駐接続とは別プロセスの単発呼び出し
+- `src/claude/control.ts`: `buildMcpStatusRequest` / `buildMcpToggleRequest` / `readMcpServersList`
+- `src/claude/mcpProbe.ts`: `ClaudeMcpProbe`。`ClaudeModelProbe` と同じ理由（設定パネルは会話を開いていなくても使える必要がある）で単発プロセスとして問い合わせる
+- `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `mcpServers: McpServersSnapshot` を追加。`toggleMcpServer(cli, name, enabled)` を新設
+- `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画とトグル操作。一覧が取れない場合はその旨を出し、0件（未設定）とは表示を分ける
 
 ## 15. 作業記録（日報・週報連携）
 

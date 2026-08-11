@@ -143,7 +143,7 @@ Codexはターン単位で model / effort / approvalPolicy を渡せるのにCla
 
 | ID    | 内容                                                                  | 対象         | 優先度 | 依存      | Issue  |
 | ----- | --------------------------------------------------------------------- | ------------ | ------ | --------- | ------ |
-| TP-50 | MCPサーバの一覧・状態・有効無効                                       | Codex/Claude | P2     | Z-07 Z-10 | #27    |
+| TP-50 | MCPサーバの一覧・状態・有効無効                                       | Codex/Claude | P2     | Z-07 Z-10 | #27 済 |
 | TP-52 | hooksの一覧と信頼の管理                                               | Codex/Claude | P2     | Z-07 Z-10 | #28    |
 | TP-53 | ログイン状態の表示とlogin / logout                                    | Codex/Claude | P2     | Z-07      | #29    |
 | TP-58 | カスタムエージェントの選択と一覧（Claude `--agent` / `/agents` 相当） | Claude       | P2     | Z-10      | #30    |
