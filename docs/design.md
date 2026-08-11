@@ -1758,6 +1758,43 @@ Codex TUIの `/btw` は「本流の会話を汚さずに、ephemeralなforkで�
 - `src/view/chatView.ts`: `runPseudoCommand` に `sideQuestion` の分岐を追加。質問が空なら送らずエラーを出す。`startSideQuestion` が実際の流れを持つ: 現在のスレッドを `buildSideQuestionForkParams` でephemeral fork → 新しい `ChatPanel`（見出し「脇道」）を作り `loadForkedThread` で会話を差し込む → その画面へ質問を送る。元のスレッド（呼び出し元の `entry`）の状態には一切触れないため、本流の会話は汚れない
 - タブの復元: 脇道のタブはephemeralで `thread/resume` が使えないため、既存の「復元できないパネルは残さず閉じる」（§9.5「タブ復元」）がそのまま働く。専用の分岐は追加していない（ウィンドウ再読み込み後、`thread/resume` が失敗してパネルが閉じる）
 
+### 14.28 サブエージェントの状況表示と履歴の親子関係（issue #34、design.mdのTP-55）
+
+Codex TUIには「switch the active agent thread」があり、バイナリには `Sent input to an agent` `Waited for an agent` `Closed an agent` `Agent spawn failed` `No agents completed yet` といった文字列がある（issue #1 Z-08、Phase 0）。拡張はこれまでサブエージェントの活動を扱っておらず、`normalizeItem` の `default` に落ちて種類名（`subAgentActivity` / `collabAgentToolCall`）しか出なかった。本issueは「(a) サブエージェントの状況表示」と「(b) agent threadの切替」の2つに分けて扱う。**`/goal`（thread単位の目標の表示・設定）はスコープ外**（Phase 0のコメントで「goalとサブエージェントは性質が違うため分けて出す」と提案されており、本issueでは扱わない。別issueで扱う）。
+
+#### 調査
+
+- **スキーマ実測**（`codex app-server generate-json-schema --out <dir>`、CLI 0.147.0）: `ThreadItem` のunionに `SubAgentActivityThreadItem`（`{id, type: 'subAgentActivity', agentPath: string, agentThreadId: string, kind: SubAgentActivityKind}`。`SubAgentActivityKind` は `started` / `interacted` / `interrupted`）と `CollabAgentToolCallThreadItem`（`{id, type: 'collabAgentToolCall', tool: CollabAgentTool, status: CollabAgentToolCallStatus, senderThreadId: string, receiverThreadIds: string[], agentsStates: {[threadId]: CollabAgentState}, model?: string|null, prompt?: string|null, reasoningEffort?: string|null}`）がある。`CollabAgentTool` は `spawnAgent` / `sendInput` / `resumeAgent` / `wait` / `closeAgent`、`CollabAgentToolCallStatus` は `inProgress` / `completed` / `failed`、`CollabAgentState` は `{status: CollabAgentStatus, message: string|null}`、`CollabAgentStatus` は `pendingInit` / `running` / `interrupted` / `completed` / `errored` / `shutdown` / `notFound`
+- **スキーマ実測**（`ClientRequest.json`）: `method` のenumを全数確認したところ**95件**で、うち `thread/` 接頭辞は21件（`thread/approveGuardianDeniedAction` `thread/archive` `thread/compact/start` `thread/delete` `thread/fork` `thread/goal/clear` `thread/goal/get` `thread/goal/set` `thread/inject_items` `thread/list` `thread/loaded/list` `thread/metadata/update` `thread/name/set` `thread/read` `thread/resume` `thread/rollback` `thread/section/move` `thread/shellCommand` `thread/start` `thread/unarchive` `thread/unsubscribe`）。**「アクティブなagent threadを切り替える」に相当するメソッド（`thread/switch` `thread/activate` 等）は無い**。`thread/loaded/list` はapp-serverプロセスがメモリに載せているスレッドidの一覧を返すだけで、「アクティブ」を制御する経路ではない
+- **実測**（`codex app-server` を実際に起動し、読み取りのみで `thread/list` を`{limit:100}`でページングし尽くすまで叩いた。この環境で存在した33スレッド全件を確認）: `parentThreadId` / `agentNickname` / `agentRole` / `forkedFromId` / `threadSource` はいずれもキー自体は応答に存在するが、**33件全てで値が`null`だった**。サブエージェントを実際に起動する検証はコストと時間がかかるため行っておらず（Phase 0コメントで許容されている簡略化）、値が入った実例は今回も再現できなかった
+- 既存の `src/codex/threadList.ts` の `normalizeThread` は `threadSource !== 'user'` の派生スレッド（サブエージェントなど）を履歴一覧から意図的に除外している（issue #45、§4.4）。これは「サブエージェント由来のスレッドを履歴に出さない」という既存の設計判断で、本issueのスコープではない
+
+#### (a) サブエージェントの状況表示（実装済み）
+
+`src/appserver/chatState.ts` の `normalizeItem` に `subAgentActivity` / `collabAgentToolCall` を追加し、種類名だけでなく中身が読める形にした。
+
+- `subAgentActivity`: `detail` に `agentPath`（どのエージェントか）、`status` に `kind`（`started` / `interacted` / `interrupted`。チャット画面の `STATUS_LABEL` で「開始」「応答」「中断」に翻訳する。`chatScript.ts`）、本文（`text`）に `エージェントスレッド: <agentThreadId>` を1行残す
+- `collabAgentToolCall`: `detail` に `tool` を日本語化したもの（`エージェントを起動` 等。`COLLAB_TOOL_LABEL`。`detail` にはstatusのような翻訳の通り道がchatScript.ts側に無いため、ここではホスト側で直接翻訳する）、`status` は生の値（`inProgress` / `completed` / `failed`。既存の `STATUS_LABEL` がそのまま翻訳する）、本文に指示（`prompt`）・モデル・reasoning effort・対象スレッド（`receiverThreadIds`）・`agentsStates` の対象エージェントごとの状態（`CollabAgentState`。`COLLAB_AGENT_STATUS_LABEL` で日本語化）を1行ずつ組み立てる（`describeCollabAgentToolCall`）。無い項目は行を出さない
+- `chatScript.ts`: `KIND_LABEL` に `subAgentActivity: 'サブエージェント'` / `collabAgentToolCall: 'サブエージェント操作'`、`STATUS_LABEL` に `started` / `interacted` / `interrupted` の3件、`CLASS_OF` に両kindを `'tool'`（既存のツール系項目と同じ見た目）として追加
+- テストは `test/unit/chatState.test.ts` に純粋関数（`normalizeItem`）の単体テストとして追加（実データを再現できないため、スキーマの形に沿った合成データで検証している）
+
+#### (b) agent threadの切替
+
+**できない**。上記のスキーマ実測のとおり、95件のClientRequestメソッドを全数確認しても切替に相当するものが無い。`thread/resume` は任意のthreadIdを読み込めるが、これは「別のスレッドとして新しく開く」動きで、既存のTUIタブの「アクティブなagent threadを切り替える」（同じ会話の中でどのサブエージェントの出力を見るか選ぶ）とは異なる。この拡張機能には切替ボタンを設けない。
+
+**履歴ツリーでの親子表示は最小限に留めた**。`SessionSummary`（`src/codex/types.ts`）に `parentThreadId?: string | undefined` を追加し、`normalizeThread`（`src/codex/threadList.ts`）で読む。`SessionTreeProvider` のtooltipに、値がある場合だけ「親スレッド: `<id>`」の行を足す（`src/view/sessionTreeProvider.ts`）。
+
+**ツリーを親子でネストする構造化は見送った**。理由は次の2点。
+
+1. 上記の実測のとおり、`parentThreadId` が値を持つスレッドを一度も観測できておらず、実データでの検証ができない
+2. 既存の `normalizeThread` は `threadSource !== 'user'` のスレッド（サブエージェント由来と見られるものを含む）を履歴一覧そのものから除外している。この除外を変えずにネスト表示を実装すると、サブエージェントのスレッドはそもそも一覧に入らないため**ネスト用のコードが実行される経路が無いまま残ることになる**（「黙って何も起きない」コード）。除外を変えるかどうかは既存の設計判断（issue #45）を覆すかどうかの検討が要り、実データも無いまま踏み込むのは避けた
+
+親子関係は「見える」ところまで（tooltipでの表示）に留め、ツリー構造での表示・切替は将来のissueで実データが取れたときに改めて検討する。
+
+#### スコープ外: `/goal`
+
+Codexの `/goal`（`thread/goal/set` / `thread/goal/get` / `thread/goal/clear`。Phase 0で「実装できる」と確認済み）は、本issueでは扱わない。サブエージェントの状況表示とは性質が違う機能のため、別issueで扱う。
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）

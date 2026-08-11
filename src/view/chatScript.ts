@@ -56,6 +56,8 @@ export function chatScript(
     imageGeneration: '画像の生成',
     enteredReviewMode: 'レビュー開始',
     exitedReviewMode: 'レビュー終了',
+    subAgentActivity: 'サブエージェント',
+    collabAgentToolCall: 'サブエージェント操作',
   };
 
   /** ホスト側から渡されたレビューボタンの動作。 */
@@ -84,6 +86,10 @@ export function chatScript(
     completed: '完了',
     failed: '失敗',
     declined: '拒否',
+    // subAgentActivity（issue #34）のkindがそのままstatusへ入る（SubAgentActivityKind）
+    started: '開始',
+    interacted: '応答',
+    interrupted: '中断',
   };
 
   const CLASS_OF = {
@@ -93,6 +99,8 @@ export function chatScript(
     commandExecution: 'tool',
     fileChange: 'tool',
     mcpToolCall: 'tool',
+    subAgentActivity: 'tool',
+    collabAgentToolCall: 'tool',
   };
 
   // 全体を作り直すと選択中のテキストが消えてコピーできないため、要素を使い回す
