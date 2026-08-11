@@ -33,7 +33,7 @@ CLIコーディングエージェント（Codex / Claude Code）のセッショ�
 - **Webviewによる独自チャットUIは「含まない」から「含む」へ移った**。当初はCLIのTUIをそのままエディタタブに出す方式で、チャットUIは対象外だった。TUIタブ方式を廃止した経緯は §2 にある
 - **タブ復元の作り方が変わった**。当初はターミナルの位置と並び順を `workspaceState` へ持って開き直す設計（§5.5）で、現在はWebviewの復元機構に載せている（§9.5・§14.6）
 
-サインイン/サインアウトのUIは依然として含まない。MCP・プラグイン・hookの管理も同様で、これらはCLI側の管理コマンドに任せている。
+サインイン/サインアウトのUIは依然として含まない。プラグインの管理も同様で、CLI側の管理コマンドに任せている。MCPサーバー（§14.14）とhooks（§14.15）は一覧表示を拡張UIに含む。信頼やトグルなど操作できる範囲はCLIごとに異なる。
 
 ## 2. 全体アーキテクチャ
 
@@ -370,6 +370,8 @@ Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡
 
 **MCPサーバーの一覧**: 両タブの下部に、設定されているMCPサーバーの一覧と有効/無効の切替を出す（§14.14）。取得・切替の経路はCodexとClaude Codeで別物（プロトコルの非対称は§14.14を参照）。
 
+**hooksの一覧**: MCPサーバーの一覧の下に、登録されているhookの一覧を出す（issue #28・§14.15）。1件あたりイベント名・実行するコマンド・出どころ（user/project/plugin等）を表示する。Codexは信頼状態も持ち、未信頼・変更ありのhookには「信頼する」操作を出す。Claude Codeには信頼状態を返す経路が無いため、一覧のみで操作は出さない（黙って何もしないボタンは置かない。「無い」旨を注記する）。
+
 ### 使用量の表示
 
 レート制限の使用量をステータスバーに常時表示し、詳細を操作パネルに出す。
@@ -425,13 +427,14 @@ Claude Code側（`claude.*`）と作業記録（`agent.activityLog.*`）の設�
 
 ## 8. セキュリティ考慮
 
-| 項目                                     | 対処                                                                                                |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| ワークスペース設定による任意コマンド実行 | §7のスコープ設計。`executablePath` / `additionalArgs` / `codexHome` を `machine` に固定             |
-| サンドボックス無効化の誘導               | `sandbox` / `approvalMode` も `machine`。危険な組み合わせは初回に確認ダイアログ                     |
-| 引数インジェクション                     | `shellPath` / `shellArgs` 方式によりシェル解釈を経由しない（§5.2）                                  |
-| セッション本文の漏洩                     | 拡張機能はロールアウトファイルの**1行目のみ**を読み、会話本文は読まない・保存しない・ログに出さない |
-| 破壊操作                                 | `delete` は確認ダイアログ必須。`archive` は取り消し可能なため確認不要                               |
+| 項目                                     | 対処                                                                                                                                                                                                   |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| ワークスペース設定による任意コマンド実行 | §7のスコープ設計。`executablePath` / `additionalArgs` / `codexHome` を `machine` に固定                                                                                                                |
+| サンドボックス無効化の誘導               | `sandbox` / `approvalMode` も `machine`。危険な組み合わせは初回に確認ダイアログ                                                                                                                        |
+| 引数インジェクション                     | `shellPath` / `shellArgs` 方式によりシェル解釈を経由しない（§5.2）                                                                                                                                     |
+| セッション本文の漏洩                     | 拡張機能はロールアウトファイルの**1行目のみ**を読み、会話本文は読まない・保存しない・ログに出さない                                                                                                    |
+| 破壊操作                                 | `delete` は確認ダイアログ必須。`archive` は取り消し可能なため確認不要                                                                                                                                  |
+| hookによる任意コマンド実行（issue #28）  | 出どころ（user/project/plugin等）と実行コマンドを隠さず表示。既定は信頼せず、Codexは明示的な信頼操作が必要（§14.15）。hookのコマンド文字列はDOM APIの `textContent` で埋め込み、HTMLとして解釈させない |
 
 ## 9. リスクと検証項目
 
@@ -1067,6 +1070,46 @@ Phase 0（issue #1 Z-07 / issue #2 Z-10）で「両方とも一覧・有効無�
 - `src/claude/mcpProbe.ts`: `ClaudeMcpProbe`。`ClaudeModelProbe` と同じ理由（設定パネルは会話を開いていなくても使える必要がある）で単発プロセスとして問い合わせる
 - `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `mcpServers: McpServersSnapshot` を追加。`toggleMcpServer(cli, name, enabled)` を新設
 - `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画とトグル操作。一覧が取れない場合はその旨を出し、0件（未設定）とは表示を分ける
+
+### 14.15 hooksの一覧と信頼の管理
+
+TUIの `/hooks` に相当する表示（Codex）。issue #28・design.mdのTP-52対応。hooksは任意のコマンドを実行する仕組みで、特にプロジェクト側（リポジトリ内）で定義されたhookはcloneしただけで任意コマンドが動く経路になりうる（§8のセキュリティ考慮）。中身を隠さず全部見せ、既定は信頼しない方針にする。
+
+Phase 0（issue #1 Z-07 / issue #2 Z-10）の時点では「両方とも実装できる」までしか確定していなかった。本issueで実測とスキーマの両面から経路を確定させたところ、**CodexとClaude Codeで扱える範囲が大きく非対称**であることが分かった。TP-50（MCPサーバー）と違い、Claude Code側は一覧だけで信頼状態そのものを返す経路が無い。
+
+#### Codex: `hooks/list` + `config/batchWrite`（推定）
+
+実測（codex-cli 0.147.0）と `codex app-server generate-json-schema --out` のスキーマが根拠:
+
+- `hooks/list`（`HooksListParams { cwds? }` → `HooksListResponse { data: [{cwd, hooks: HookMetadata[], warnings: string[], errors: HookErrorInfo[]}] }`）はスレッドを開始していなくても呼べる（実測: `{data:[{cwd,hooks:[],warnings:[],errors:[]}]}` が返った。この環境にはhookが1件も設定されていないため、`hooks` 配列の中身はスキーマのみが根拠）
+- `HookMetadata` は `key` / `eventName` / `matcher` / `handlerType`（`command`|`prompt`|`agent`）/ `command` / `source`（`system`|`user`|`project`|`mdm`|`sessionFlags`|`plugin`|`cloudRequirements`|`cloudManagedConfig`|`legacyManagedConfigFile`|`legacyManagedConfigMdm`|`unknown`）/ `sourcePath` / `pluginId` / `enabled` / `trustStatus`（`managed`|`untrusted`|`trusted`|`modified`）/ `currentHash` を持つ。**`sourcePath` がプロジェクト内で定義されたhookかどうかを一目で判断する材料になる**
+- **信頼を求めるプロトコル上の要求は存在しない**。`ServerRequest`（10種）・`ServerNotification`（全種）をスキーマで確認したが、hook信頼専用のものは無い。TUIの「Hooks need review」画面は、`hooks/list` の `trustStatus` を見てTUI自身が組み立てているとみられる。そのため拡張機能も同じ発想を取り、設定パネルのhooks一覧に信頼状態を出し、そこから信頼操作をする形にした
+- **未信頼のhookがブロックされたことは `hook/completed`（`status: 'blocked'`。`HookRunStatus` の1値）通知で分かる**。これが唯一の実観測可能な合図なので、チャット画面に「hookがブロックされました」という注記を出す（`src/appserver/chatState.ts` の `hook/completed` ハンドラ）。「信頼を求める要求が画面に出る」という受入基準は、プロトコルにその要求自体が無い以上、この形（実行がブロックされたら気づける）で満たす
+- 信頼の書き込み(`config/batchWrite`)は**実行ファイル（`codex`）の文字列調査(strings)のみが根拠**で、実際に書き込んで確認してはいない（この環境の `~/.codex/config.toml` を書き換えない方針のため）。バイナリには `hooks.state."` `".trusted_hash` `failed to write hook trust:` という文字列が連続して存在し、`hooks.state."<key>".trusted_hash` というkeyPathへ `currentHash` を `upsert` する形と推定した（`src/codex/hooksStatus.ts` の `buildHookTrustEdit` を参照）。`filePath` に一時ファイルを指定して書き込みを試す安全な検証も行ったが、`config/batchWrite` は `filePath` を無視して常にユーザー設定へ書こうとし `configLayerReadonly` で拒否された（＝ユーザーのconfig.toml以外へは書けない仕様と分かったのみで、keyPathの正しさそのものは未検証）
+- **信頼を取り消す経路は見つかっていない**。`MergeStrategy` が `replace` / `upsert` のみで削除に相当する操作が無いため、「信頼する」ボタンだけを置く
+
+#### Claude Code: `get_settings`（`effective.hooks`）
+
+実測（CLI 2.1.227）:
+
+- hooksの一覧に相当する専用の要求は無い。`hooks_list` / `list_hooks` / `get_hooks` / `hooks_status` / `hook_list` / `settings_list` の6候補を実測で総当たりしたが、いずれも `Unsupported control request subtype` で拒否された
+- **`get_settings` だけが実在する**。応答は `{ effective: {...}, sources: [{source, settings}], applied: {...} }` で、`effective.hooks` に実際に使われるhookの一覧（イベント名をキーにしたグループの配列）が入っている
+- `sources` は設定の出どころごとの生設定。実測で確認できたのは `userSettings`（`~/.claude/settings.json`）と `projectSettings`（プロジェクトの `.claude/settings.json`）の2つ。`effective.hooks[eventName]` は各sourceの同名配列を単純に連結したものだった（実測: user側2グループ + project側1グループ→effective側3グループ）
+- **信頼状態を返すフィールドは無い**。`.claude/settings.json` にプロジェクト側のhookを1件だけ置いて `claude --print` を起動したところ、承認を求める `control_request` は一切来ず、そのままhookが実行された（`hook_started` → `hook_response` という `system` タイプの通知のみ）。Claude Codeには「hookを信頼するまで実行を止める」仕組みそのものがプロトコル層に無いとみられる
+- **plugin由来のhookは `sources` に出てこない**（実測: `genshijin` プラグインが実行したSessionStartのhookが `effective.hooks` にも `sources` にも現れなかった）。そのため、どのsourceにも一致しないグループは `origin: 'unknown'` として扱う。**この一覧はplugin由来のhookを見落としうる**ことを画面の注記に明記する
+- `hook_callback` のような、hookに関する `control_request` がこちらへ届くこともなかった（Phase 0の追試項目への回答。少なくとも `--print` の単発起動では観測されない）
+
+#### 実装
+
+- `src/provider/hooks.ts`: `HookView`（`key` / `eventName` / `matcher` / `handlerType` / `command` / `origin` / `originDetail` / `pluginId` / `enabled` / `trust` / `trustHash`）と `HooksSnapshot`（`{ok:true, hooks, warnings}` か `{ok:false, reason}`）を共有の型として持つ。`isValidHookKey` で信頼の書き込み先（keyPath）へ埋め込む前の防御をする
+- `src/codex/hooksStatus.ts`: `hooks/list` の応答を `HookView[]` へ正規化する純粋関数（`parseHooksList`）と、信頼の書き込み1件を組み立てる `buildHookTrustEdit`
+- `src/codex/appServerClient.ts`: `listHooks(cwds)` / `setHookTrusted(key, currentHash)` を追加
+- `src/claude/control.ts`: `buildGetSettingsRequest`
+- `src/claude/hooksSettings.ts`: `get_settings` の応答を `HookView[]` へ正規化する純粋関数（`readHooksFromSettings`）。sourcesとの深い等価比較で出どころを推定する
+- `src/claude/hooksProbe.ts`: `ClaudeHooksProbe`。`ClaudeMcpProbe` と同じ理由で単発プロセスとして問い合わせる。信頼を書き込む経路が無いため、読み取り専用
+- `src/appserver/chatState.ts`: `hook/completed`（`status: 'blocked'`）を会話への注記に変換する
+- `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `hooks: HooksSnapshot` を追加。`trustCodexHook(key, currentHash)` を新設（Claude Code側には対応する書き込みメソッドを持たない）
+- `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画と信頼操作（Codexのみ）。hookのコマンド文字列は必ず `textContent` でDOMへ入れ、HTMLとして解釈させない
 
 ## 15. 作業記録（日報・週報連携）
 

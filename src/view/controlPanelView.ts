@@ -136,6 +136,19 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    if (m['type'] === 'trustHook') {
+      // Codex専用（issue #28）。Claude Codeには信頼を書き込む経路が無い
+      const key = m['key'];
+      const hash = m['hash'];
+      if (typeof key !== 'string' || key === '' || typeof hash !== 'string' || hash === '') {
+        this.log.warn(`hookの信頼要求が不正です: ${JSON.stringify(m)}`);
+        return;
+      }
+      await this.settings.trustCodexHook(key, hash);
+      await this.refresh();
+      return;
+    }
+
     if (m['type'] !== 'update') {
       return;
     }
@@ -224,6 +237,10 @@ ${controlPanelStyles()}
 
   <h2 class="sectionTitle">MCPサーバー</h2>
   <div class="mcpList" id="mcpListCodex"></div>
+
+  <h2 class="sectionTitle">hooks</h2>
+  <p class="note">hooksは任意のコマンドを実行する仕組みです。特にプロジェクト側で定義されたhookは、cloneしただけで任意コマンドが動く経路になりえます。何が実行されるかを確認してから信頼してください。</p>
+  <div class="hooksList" id="hooksListCodex"></div>
   </div>
 
   <div id="panelClaude" hidden>
@@ -256,6 +273,10 @@ ${controlPanelStyles()}
 
     <h2 class="sectionTitle">MCPサーバー</h2>
     <div class="mcpList" id="mcpListClaude"></div>
+
+    <h2 class="sectionTitle">hooks</h2>
+    <p class="note">hooksは任意のコマンドを実行する仕組みです。特にプロジェクト側で定義されたhookは、cloneしただけで任意コマンドが動く経路になりえます。Claude Codeにはこの拡張機能から信頼状態を確認・操作する経路がありません（実測。CLI側の挙動に委ねます）。</p>
+    <div class="hooksList" id="hooksListClaude"></div>
   </div>
 
 <script nonce="${nonce}">

@@ -3,6 +3,7 @@ import {
   buildCanUseToolResponse,
   buildContextUsageRequest,
   buildControlRequest,
+  buildGetSettingsRequest,
   buildMcpStatusRequest,
   buildMcpToggleRequest,
   buildSetEffortRequest,
@@ -392,6 +393,17 @@ describe('readModelList', () => {
     expect(readModelList({})).toBeUndefined();
     expect(readModelList({ models: 'なにか' })).toBeUndefined();
     expect(readModelList({ models: [] })).toEqual([]);
+  });
+});
+
+describe('buildGetSettingsRequest', () => {
+  it('get_settings要求を作る（hooks一覧の唯一の取得経路。issue #28）', () => {
+    const line = buildGetSettingsRequest('req_1');
+    expect(JSON.parse(line)).toEqual({
+      type: 'control_request',
+      request_id: 'req_1',
+      request: { subtype: 'get_settings' },
+    });
   });
 });
 

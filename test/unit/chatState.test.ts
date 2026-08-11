@@ -682,6 +682,44 @@ describe('applyEvent / item/commandExecution/outputDelta', () => {
   });
 });
 
+describe('applyEvent / hook/completed', () => {
+  // app-serverにはhookの信頼を求める専用の要求が無い（ServerRequest/ServerNotificationの
+  // 全種をスキーマで確認済み）。信頼していないhookが動くと status: 'blocked' の
+  // hook/completed が届くのが唯一の合図なので、これを会話への注記に変換する（issue #28）。
+  it('信頼されていないhookがブロックされたら会話に注記を残す', () => {
+    const state = applyEvent(initialChatState, 'hook/completed', {
+      threadId: 'th-1',
+      run: {
+        id: 'run-1',
+        eventName: 'preToolUse',
+        sourcePath: '/workspace/repo/.codex/config.toml',
+        status: 'blocked',
+      },
+    });
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]?.detail).toContain('preToolUse');
+    expect(state.items[0]?.detail).toContain('/workspace/repo/.codex/config.toml');
+    expect(state.items[0]?.detail).toContain('信頼されていない');
+  });
+
+  it('blocked以外のstatusでは何もしない', () => {
+    const state = applyEvent(initialChatState, 'hook/completed', {
+      run: { id: 'run-2', eventName: 'preToolUse', status: 'completed' },
+    });
+    expect(state).toBe(initialChatState);
+  });
+
+  it('同じrunのidを二重に積まない', () => {
+    const once = applyEvent(initialChatState, 'hook/completed', {
+      run: { id: 'run-3', eventName: 'preToolUse', status: 'blocked' },
+    });
+    const twice = applyEvent(once, 'hook/completed', {
+      run: { id: 'run-3', eventName: 'preToolUse', status: 'blocked' },
+    });
+    expect(twice.items).toHaveLength(1);
+  });
+});
+
 describe('normalizeItem / commandExecution の切り詰め', () => {
   it('aggregatedOutput が長すぎる場合も末尾を残す', () => {
     const item = normalizeItem({
