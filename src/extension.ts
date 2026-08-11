@@ -123,6 +123,12 @@ export function activate(context: vscode.ExtensionContext): void {
   // 単発の問い合わせ（fork・モデル一覧・エージェント一覧・MCP一覧・hooks一覧・ログイン状態）に
   // 使う。会話用の接続とは別プロセス
   const appServer = new AppServerClient(codexPath, log);
+  // 履歴の取得はまずthread/listを試し、空か失敗ならファイル読みへ退避する（issue #45）。
+  // storeの構築時点ではcodexPath（codexの解決結果）がまだ無いため、appServerを作った
+  // ここで事後に配線する
+  store.attachThreadList((limit, archivedSessionsDir) =>
+    appServer.listThreads(limit, archivedSessionsDir),
+  );
   const claudeModels = new ClaudeModelProbe(claudePath, log);
   const claudeAgents = new ClaudeAgentProbe(claudePath, log);
   const claudeMcp = new ClaudeMcpProbe(claudePath, log);

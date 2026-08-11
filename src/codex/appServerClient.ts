@@ -13,8 +13,13 @@ import {
   readForkedThreadId,
   type JsonRpcMessage,
 } from './jsonRpc';
-import { mergeMcpServers, parseConfigMcpServersEnabled, parseMcpServerStatusList } from './mcpStatus';
+import {
+  mergeMcpServers,
+  parseConfigMcpServersEnabled,
+  parseMcpServerStatusList,
+} from './mcpStatus';
 import { parseModelList, readNextCursor, type ModelInfo } from './modelCatalog';
+import { normalizeThreadList, parseThreadListPage, type ThreadListOutcome } from './threadList';
 
 export type ForkResult = { ok: true; threadId: string } | { ok: false; error: string };
 
@@ -28,6 +33,10 @@ const CLIENT_VERSION = '0.0.1';
 
 /** `model/list` のページ数の上限。応答が壊れて無限ループになるのを防ぐ。 */
 const MAX_MODEL_PAGES = 20;
+
+/** `thread/list` の1回あたりの要求件数。応答が壊れて無限ループになるのを防ぐページ数上限も併せて持つ。 */
+const THREAD_LIST_PAGE_SIZE = 100;
+const MAX_THREAD_LIST_PAGES = 20;
 
 /**
  * `codex app-server` を必要な瞬間だけ起動し、1回のRPCを行って終了する。
@@ -75,10 +84,7 @@ export class AppServerClient {
       let cursor: string | undefined;
 
       for (let page = 0; page < MAX_MODEL_PAGES; page += 1) {
-        const response = await request(
-          'model/list',
-          cursor === undefined ? {} : { cursor },
-        );
+        const response = await request('model/list', cursor === undefined ? {} : { cursor });
         if (response.error !== undefined) {
           return { ok: false, error: response.error.message };
         }
@@ -96,6 +102,47 @@ export class AppServerClient {
       return [];
     }
     return result.value;
+  }
+
+  /**
+   * セッション一覧を `thread/list` で取る（issue #45）。
+   *
+   * 失敗しても空配列に丸めず `ok:false` を返す。「空だから退避する」のか「エラーだから
+   * 退避する」のかを呼び出し側（SessionStore）が区別し、出力パネルに理由を残せるように
+   * するため（他のメソッドのように内部で握りつぶさない）。
+   */
+  async listThreads(limit: number, archivedSessionsDir: string): Promise<ThreadListOutcome> {
+    if (limit <= 0) {
+      return { ok: true, sessions: [] };
+    }
+
+    const result = await this.call<unknown[]>(async (request) => {
+      const items: unknown[] = [];
+      let cursor: string | undefined;
+
+      for (let page = 0; page < MAX_THREAD_LIST_PAGES && items.length < limit; page += 1) {
+        const response = await request('thread/list', {
+          limit: Math.min(THREAD_LIST_PAGE_SIZE, limit - items.length),
+          ...(cursor === undefined ? {} : { cursor }),
+        });
+        if (response.error !== undefined) {
+          return { ok: false, error: response.error.message };
+        }
+        const parsed = parseThreadListPage(response.result);
+        items.push(...parsed.items);
+        cursor = parsed.nextCursor;
+        if (cursor === undefined) {
+          break;
+        }
+      }
+      return { ok: true, value: items };
+    });
+
+    if (!result.ok) {
+      this.log.warn(`スレッド一覧を取得できませんでした: ${result.error}`);
+      return { ok: false, error: result.error };
+    }
+    return { ok: true, sessions: normalizeThreadList(result.value, archivedSessionsDir) };
   }
 
   /**
