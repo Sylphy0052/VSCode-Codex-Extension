@@ -69,6 +69,20 @@ export interface TaskSessionInput {
    * Claude側は起動引数に相当するものが無いため無視する。
    */
   sandbox: string;
+  /**
+   * タスク間メッセージング（design.md §16.21）専用のMCPサーバへの接続先。runner.tsが
+   * runごとに立てたサーバ（`messaging.ts`の`startHttpMcpTransport`）から、タスクごとに
+   * 発行したURLを渡す。`undefined`なら（メッセージングが無効、またはこのタスクには
+   * 発行されていない）通信なしで走らせる（design.md「見えていなければ...通信なしで
+   * 走らせる」と同じ扱い）。
+   *
+   * **この値を実際にCodex/Claudeの起動設定（`mcp_servers`相当）へ反映する配線は
+   * まだ無い。** `TaskSessionHost`の具象実装（`ChatViewManager` / `ClaudeChatViewManager`。
+   * `src/view/chatView.ts` / `claudeChatView.ts`）を変更する必要があるが、Issue #105は
+   * `src/view/`を対象外にしている（Issue #104と衝突するため）。値はここまで届くが、
+   * 現時点ではどちらの実装も読まない（最終報告に記載）。
+   */
+  mcp?: { url: string };
 }
 
 export interface TaskSessionHost {

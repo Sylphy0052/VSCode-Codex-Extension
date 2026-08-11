@@ -21,6 +21,7 @@ export function chatScript(
   agentLabel: string,
   review: ReviewButtonConfig,
   showRewind = false,
+  approvalCycle: readonly string[] = [],
 ): string {
   return `
   const vscode = acquireVsCodeApi();
@@ -35,6 +36,10 @@ export function chatScript(
   let menuMode = '';
   /** 最後に描いた項目。画像が遅れて届いたときに描き直すため保つ。 */
   let lastItems = undefined;
+  /** 承認方法をShift+Tabで回すときの並び（issue #13。制限が強い側から緩い側へ）。 */
+  const APPROVAL_CYCLE = ${JSON.stringify(approvalCycle)};
+  /** いま効いている承認方法。循環の起点にする。 */
+  let currentApproval = '';
 
   const KIND_LABEL = {
     userMessage: 'あなた',
@@ -68,6 +73,9 @@ export function chatScript(
 
   /** コマンド出力を畳まずに出す行数。超えた分は末尾だけ見せる。 */
   const MAX_VISIBLE_LINES = 20;
+
+  /** Web検索結果を畳まずに出す件数（issue #18）。超えた分は開くまで隠す。 */
+  const MAX_VISIBLE_SEARCH_RESULTS = 5;
 
   /** app-serverが返すコマンドの状態。そのまま出すと英語のままになる。 */
   const STATUS_LABEL = {
@@ -159,6 +167,12 @@ export function chatScript(
     body.className = 'body';
     wrap.appendChild(body);
 
+    // Web検索の結果（issue #18）。URLとタイトルの一覧を出す。webSearch以外では常に空
+    const searchResults = document.createElement('div');
+    searchResults.className = 'search-results';
+    searchResults.hidden = true;
+    wrap.appendChild(searchResults);
+
     const images = document.createElement('div');
     images.className = 'images';
     images.hidden = true;
@@ -173,6 +187,8 @@ export function chatScript(
       wrap,
       label,
       body,
+      searchResults,
+      searchResultsKey: '',
       images,
       imageKey: '',
       diffs,
@@ -294,6 +310,56 @@ export function chatScript(
     container.hidden = images.length === 0;
   }
 
+  /**
+   * Web検索結果1件（issue #18）。URLは全部見せ、自動では開かない。
+   * クリックしたら拡張機能側へ要求を送り、host側でvscode.env.openExternalを使って開く
+   * （Webviewから直接は開けないため）。押す＝行き先を見た上での明示の意思表示なので、
+   * ここでの追加確認はしない（design.mdの問い合わせカードのurlモードと同じ考え方）。
+   */
+  function createSearchResult(result) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'search-result';
+
+    const title = document.createElement('span');
+    title.className = 'search-result-title';
+    title.textContent = result.title;
+    button.appendChild(title);
+
+    const url = document.createElement('span');
+    url.className = 'search-result-url';
+    url.textContent = result.url;
+    button.appendChild(url);
+
+    button.addEventListener('click', () => {
+      vscode.postMessage({ type: 'openUrl', url: result.url });
+    });
+    return button;
+  }
+
+  /** 件数が多いときは折りたたむ。開いた状態は要素と一緒に保つ（issue #17/#19と同じやり方）。 */
+  function renderSearchResults(container, results) {
+    container.replaceChildren();
+    if (results.length === 0) {
+      container.hidden = true;
+      return;
+    }
+    container.hidden = false;
+
+    if (results.length <= MAX_VISIBLE_SEARCH_RESULTS) {
+      for (const result of results) container.appendChild(createSearchResult(result));
+      return;
+    }
+
+    const details = document.createElement('details');
+    details.className = 'search-results-fold';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Web検索結果（' + results.length + '件）';
+    details.appendChild(summary);
+    for (const result of results) details.appendChild(createSearchResult(result));
+    container.appendChild(details);
+  }
+
   /** 1ファイル分の差分。既定は畳んでおき、開いた状態は要素を使い回して保つ。 */
   function createDiff(diff) {
     const details = document.createElement('details');
@@ -342,6 +408,14 @@ export function chatScript(
     node.wrap.classList.toggle('running', running);
 
     renderBody(node, item);
+
+    // 中身が同じなら作り直さない。折りたたみを開いた状態が勝手に戻るのを防ぐ
+    const searchResults = item.searchResults || [];
+    const searchResultsKey = JSON.stringify(searchResults);
+    if (node.searchResultsKey !== searchResultsKey) {
+      node.searchResultsKey = searchResultsKey;
+      renderSearchResults(node.searchResults, searchResults);
+    }
 
     // 中身が同じなら作り直さない。拡大した画像が勝手に戻るのを防ぐ
     const images = item.images || [];
@@ -681,6 +755,7 @@ export function chatScript(
     const approvalDefault = el('approvalMode').querySelector('option[value=""]');
     if (approvalDefault) approvalDefault.textContent = defaultLabel(d.approvalMode);
     el('approvalMode').value = s.approvalMode;
+    currentApproval = s.approvalMode || '';
 
     // サンドボックスはCodex画面にしか無い（Claude Codeは承認方法に集約されている）
     const sandbox = el('sandbox');
@@ -898,6 +973,9 @@ export function chatScript(
     status.replaceChildren();
 
     const bits = [];
+    // 承認方法は常に見えるようにする（Shift+Tabで回すため。issue #13）
+    const approval = state.settings && state.settings.approvalMode;
+    bits.push('承認 ' + (approval ? approval : '既定'));
     if (state.planMode) bits.push('計画モード（ファイルは変更されません）');
     if (state.reviewing) bits.push('レビュー中は割り込めません');
     if (state.busy) bits.push('応答中…');
@@ -1107,11 +1185,18 @@ export function chatScript(
         name.textContent = cut < 0 ? path : path.slice(cut + 1);
         desc.textContent = cut < 0 ? '' : path.slice(0, cut);
       } else {
-        name.textContent = '/' + item.name + (item.argumentHint ? ' ' + item.argumentHint : '');
+        name.textContent = '/' + item.name;
         desc.textContent = item.description || '';
       }
 
       row.appendChild(name);
+      // 引数の書き方は名前と別の色で添える（issue #9）。無いコマンドでは要素ごと出さない
+      if (menuMode !== 'file' && item.argumentHint) {
+        const hint = document.createElement('span');
+        hint.className = 'hint';
+        hint.textContent = item.argumentHint;
+        row.appendChild(hint);
+      }
       row.appendChild(desc);
       row.addEventListener('mousedown', (e) => {
         e.preventDefault();
@@ -1121,6 +1206,29 @@ export function chatScript(
     });
     const active = box.querySelector('.row.active');
     if (active) active.scrollIntoView({ block: 'nearest' });
+  }
+
+  /**
+   * いま打っているコマンドの引数ヒントを入力欄の下に出す（issue #9）。
+   *
+   * 候補一覧にもヒントは出るが、確定すると一覧が閉じる。書き方が要るのはむしろ
+   * その後なので、打っている間ずっと見えるようにする。
+   * 判定の規則はホスト側の hintForInput（src/provider/slashCommands.ts）と同じ。
+   * テンプレートリテラルの中からは関数を呼べないため書き直している。両方を揃えること。
+   */
+  function renderArgumentHint() {
+    const box = el('argumentHint');
+    if (!box) return;
+    const text = el('input').value;
+    const line = text.slice(text.lastIndexOf('\\n') + 1);
+    const space = line.indexOf(' ');
+    let found;
+    if (line.slice(0, 1) === '/' && space !== -1) {
+      const name = line.slice(1, space);
+      found = commands.find((c) => c.name === name && c.argumentHint);
+    }
+    box.hidden = !found;
+    box.textContent = found ? '/' + found.name + ' ' + found.argumentHint : '';
   }
 
   function filterCommands(list, query) {
@@ -1165,6 +1273,8 @@ export function chatScript(
     }
 
     closeMenu();
+    // 候補が閉じた後こそ書き方が要る。確定した時点でヒントへ切り替える（issue #9）
+    renderArgumentHint();
     input.focus();
   }
 
@@ -1174,6 +1284,7 @@ export function chatScript(
     // 画像だけ送るのも許す。本文が無くても添付があれば送る意味がある
     if (!text.trim() && attachmentCount === 0) return;
     input.value = '';
+    renderArgumentHint();
     resetHistory();
     vscode.postMessage({ type: 'send', text });
   }
@@ -1283,6 +1394,7 @@ export function chatScript(
   });
 
   el('input').addEventListener('input', (e) => {
+    renderArgumentHint();
     const command = commandQuery(e.target);
     if (command !== undefined) {
       showCommands(command);
@@ -1324,6 +1436,17 @@ export function chatScript(
         closeMenu();
         return;
       }
+    }
+
+    // Shift+Tab で承認方法を回す（TUIと同じ操作。入力欄にいるときだけ効かせる）
+    if (e.key === 'Tab' && e.shiftKey && APPROVAL_CYCLE.length > 0) {
+      e.preventDefault();
+      const index = APPROVAL_CYCLE.indexOf(currentApproval);
+      const next = index === -1 ? APPROVAL_CYCLE[0] : APPROVAL_CYCLE[(index + 1) % APPROVAL_CYCLE.length];
+      currentApproval = next;
+      el('approvalMode').value = next;
+      vscode.postMessage({ type: 'config', key: 'approvalMode', value: next });
+      return;
     }
 
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {

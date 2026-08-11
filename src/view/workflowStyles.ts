@@ -98,6 +98,12 @@ export function workflowStyles(): string {
     color: var(--vscode-charts-blue);
     background-color: color-mix(in srgb, var(--vscode-charts-blue) 12%, transparent);
   }
+  /* 統合できていない(blocked)タスクがある（design.md §16.8「全体の進捗」・Issue #104） */
+  #banner.blocked {
+    border-color: var(--vscode-charts-orange, var(--vscode-charts-yellow));
+    color: var(--vscode-charts-orange, var(--vscode-charts-yellow));
+    background-color: color-mix(in srgb, var(--vscode-charts-orange, var(--vscode-charts-yellow)) 12%, transparent);
+  }
 
   /* ---- 依存グラフ ---- */
   #graphWrap { overflow-x: auto; padding: 8px 0; }
@@ -120,6 +126,13 @@ export function workflowStyles(): string {
     stroke: var(--vscode-descriptionForeground);
     stroke-dasharray: 4 3;
   }
+  /* waitingReply / merging / blocked（design.md §16.8「依存グラフ」の表・Issue #104） */
+  .wf-node.state-waitingReply .wf-node-rect { stroke: var(--vscode-charts-yellow); stroke-width: 2.5; stroke-dasharray: 2 2; }
+  .wf-node.state-merging .wf-node-rect {
+    stroke: var(--vscode-charts-green);
+    fill: color-mix(in srgb, var(--vscode-charts-green) 16%, var(--vscode-editorWidget-background));
+  }
+  .wf-node.state-blocked .wf-node-rect { stroke: var(--vscode-charts-yellow); stroke-width: 2.5; stroke-dasharray: 6 3; }
   .wf-node text { fill: var(--vscode-foreground); font-family: var(--vscode-font-family); }
   .wf-node .wf-id { font-weight: 600; font-size: 12px; }
   .wf-node .wf-meta { font-size: 10px; fill: var(--vscode-descriptionForeground); }
@@ -140,6 +153,12 @@ export function workflowStyles(): string {
   .wf-mark-failed { stroke: var(--vscode-errorForeground); fill: none; stroke-width: 2; stroke-linecap: round; }
   .wf-mark-waiting { fill: var(--vscode-charts-yellow); }
   .wf-mark-skipped { stroke: var(--vscode-descriptionForeground); stroke-width: 1.5; stroke-dasharray: 3 2; }
+  /* waitingReply（吹き出し）・merging/blocked（合流の記号。design.md §16.8・Issue #104） */
+  .wf-mark-reply { fill: none; stroke: var(--vscode-charts-yellow); stroke-width: 1.6; stroke-linejoin: round; }
+  .wf-mark-merging { stroke: var(--vscode-charts-green); fill: none; stroke-width: 2; stroke-linecap: round; }
+  .wf-mark-blocked { stroke: var(--vscode-charts-yellow); fill: none; stroke-width: 2; stroke-linecap: round; }
+  .wf-mark-blocked-x { stroke: var(--vscode-errorForeground); stroke-width: 1.6; stroke-linecap: round; }
+  .wf-merge-resolution-badge { fill: var(--vscode-charts-yellow); font-size: 9px; font-weight: 600; }
 
   .wf-edge { stroke: var(--vscode-descriptionForeground); stroke-width: 1.5; fill: none; }
   .wf-edge.dim { opacity: 0.35; }
@@ -158,6 +177,10 @@ export function workflowStyles(): string {
   #taskTable .ops { display: flex; gap: 4px; flex-wrap: wrap; }
   #taskTable .state-badge { display: inline-flex; align-items: center; gap: 4px; }
   #taskTable .summary-cell { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #taskTable .hint, #integrationInfo .hint { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
+
+  /* ---- 統合の状況（design.md §16.8「そのほか」・§16.17。Issue #104） ---- */
+  #integrationInfo { display: flex; flex-direction: column; gap: 2px; font-size: 0.92em; }
 
   tr.approval-row td {
     background-color: color-mix(in srgb, var(--vscode-charts-yellow) 8%, transparent);

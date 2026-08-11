@@ -57,6 +57,15 @@ describe('chatScript', () => {
     expect(source.includes('`')).toBe(false);
     expect(/\$\{/.test(source)).toBe(false);
   });
+
+  it('Web検索結果のクリックはホストへopenUrlを送るだけで、動的な文字列をHTMLへ組み込まない（issue #18）', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+    expect(source).toContain("type: 'openUrl'");
+    // タイトル・URLはtextContentで入れる（innerHTML系を使うとHTMLとして解釈されうる）
+    expect(source.includes('innerHTML')).toBe(false);
+    expect(source.includes('outerHTML')).toBe(false);
+    expect(source.includes('insertAdjacentHTML')).toBe(false);
+  });
 });
 
 describe('controlPanelScript', () => {

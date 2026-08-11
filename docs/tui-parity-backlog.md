@@ -106,7 +106,7 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 | ----- | ---------------------------------------------------------------------------------------- | ------------ | ------ | --------- | ----- |
 | TP-11 | 組込コマンドの実行経路を確保する。効かないものは候補から外すか、拡張側の機能へ差し替える | Codex/Claude | P1     | Z-01 Z-09 | #7 済 |
 | TP-10 | 組込コマンド一覧を実測値に揃える。CLI版ごとの差分に追従する仕組みも決める                | Codex/Claude | P1     | TP-11     | #8 済 |
-| TP-12 | 候補に `argument-hint` を表示し、引数付きコマンドを補完する                              | Codex/Claude | P3     | TP-10     | #9    |
+| TP-12 | 候補に `argument-hint` を表示し、引数付きコマンドを補完する                              | Codex/Claude | P3     | TP-10     | #9 済 |
 
 ## Phase 3: セッション中の設定変更
 
@@ -115,7 +115,7 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 | TP-21 | Claude のセッション中に model / effort / permissionMode を変える。現状は起動引数のみで、会話中は固定 | Claude | P1     | Z-10      | #10 済（effortの反映は観測できない） |
 | TP-22 | Plan mode の切替（Codex `/plan` / Claude Shift+Tab 相当）。現状どちらも手段が無い                    | 両方   | P1     | Z-06 Z-10 | #11 済（Codexは権限で代替）          |
 | TP-20 | Codex の sandbox をターン単位で変える。現状は `thread/start` 時のみで、明示的に非対応としている      | Codex  | P2     | Z-02      | #12 済                               |
-| TP-23 | 承認モードを循環させるキーバインド（TUIのShift+Tab相当）を画面に用意する                             | 両方   | P3     | TP-22     | #13                                  |
+| TP-23 | 承認モードを循環させるキーバインド（TUIのShift+Tab相当）を画面に用意する                             | 両方   | P3     | TP-22     | #13 済                               |
 
 Codexはターン単位で model / effort / approvalPolicy を渡せるのにClaudeは起動時固定、という非対称が現状ある。TP-21はこの差を埋めるもの。
 
@@ -127,7 +127,7 @@ Codexはターン単位で model / effort / approvalPolicy を渡せるのにCla
 | TP-31 | トークン使用量とコンテキスト残量を表示する。現状はレート制限の消費率のみ | Codex/Claude | P1     | Z-05 Z-13 | #15 済 |
 | TP-33 | 画像の表示（モデルが見た画像・生成した画像）                             | Codex/Claude | P2     | Z-03      | #16 済 |
 | TP-35 | コマンド実行の出力を逐次表示し、長い出力を折りたためるようにする         | Codex/Claude | P2     | -         | #17 済 |
-| TP-32 | Web検索の結果を表示する。現状はクエリのみ                                | Codex/Claude | P3     | -         | #18    |
+| TP-32 | Web検索の結果を表示する。現状はクエリのみ                                | Codex/Claude | P3     | -         | #18 済 |
 | TP-34 | 思考の全文表示と折りたたみ。現状は summary のみ                          | Codex/Claude | P3     | -         | #19 済 |
 
 ## Phase 5: 会話操作
@@ -153,7 +153,7 @@ Codexはターン単位で model / effort / approvalPolicy を渡せるのにCla
 | TP-53 | ログイン状態の表示とlogin / logout                                    | Codex/Claude | P2     | Z-07      | #29 済                                                                                                         |
 | TP-58 | カスタムエージェントの選択と一覧（Claude `--agent` / `/agents` 相当） | Claude       | P2     | Z-10      | #30 済（起動時のみ。切替の制御要求は無い）                                                                     |
 | TP-59 | TODO一覧の表示（Claude `/todos` 相当）                                | Claude       | P2     | Z-13      | #31 済                                                                                                         |
-| TP-51 | plugins / apps の閲覧と管理                                           | Codex/Claude | P3     | Z-07      | #32                                                                                                            |
+| TP-51 | plugins / apps の閲覧と管理                                           | Codex/Claude | P3     | Z-07      | #32 済（Codexは有効/無効の経路が無くinstall/uninstallのみ。appは閲覧のみ。Claude Codeは全操作可能）            |
 | TP-54 | バックグラウンドターミナルの一覧と停止（Codex `/ps` 相当）            | Codex        | P3     | Z-08      | #33                                                                                                            |
 | TP-55 | agent thread の切替とサブエージェントの状況表示                       | Codex        | P3     | Z-08      | #34                                                                                                            |
 | TP-56 | skillsの一覧表示と管理。取得は `skillsList.ts` で一部実装済み         | Codex/Claude | P3     | Z-07      | #35 済（Claude Codeは一覧のみ。有効/無効を返す・切り替える経路が無い）                                         |

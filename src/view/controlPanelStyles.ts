@@ -293,5 +293,62 @@ export function controlPanelStyles(): string {
     font-size: 0.85em;
   }
   .accountActions .note { border-top: none; padding-top: 0; margin-top: 6px; }
+  .pluginsList, .appsList { display: flex; flex-direction: column; gap: 6px; }
+  .pluginsEmpty, .pluginsError, .appsEmpty, .appsError {
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+  }
+  .pluginsError, .appsError { color: var(--vscode-errorForeground, var(--vscode-descriptionForeground)); }
+  .pluginsWarning {
+    color: var(--vscode-charts-yellow, var(--vscode-descriptionForeground));
+    font-size: 0.85em;
+  }
+  .pluginItem, .appItem {
+    padding: 6px 8px;
+    border: 1px solid var(--vscode-widget-border, transparent);
+    border-radius: 3px;
+  }
+  .pluginItem-head, .appItem-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .pluginItem-name, .appItem-name { font-weight: 600; }
+  .pluginItem-desc, .appItem-desc {
+    margin-top: 4px;
+    color: var(--vscode-foreground);
+    font-size: 0.85em;
+    line-height: 1.4;
+  }
+  .pluginItem-meta, .appItem-meta {
+    margin-top: 2px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.8em;
+    word-break: break-all;
+  }
+  .pluginBadge, .appBadge {
+    font-size: 0.8em;
+    padding: 1px 6px;
+    border-radius: 10px;
+    white-space: nowrap;
+  }
+  .pluginBadge-enabled, .appBadge-enabled {
+    color: var(--vscode-charts-green);
+    border: 1px solid var(--vscode-charts-green);
+  }
+  .pluginBadge-disabled, .appBadge-disabled {
+    color: var(--vscode-descriptionForeground);
+    border: 1px solid var(--vscode-widget-border, var(--vscode-descriptionForeground));
+  }
+  .pluginItem-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .pluginItem-actions button, .pluginInstallButton {
+    width: auto;
+    padding: 3px 10px;
+  }
 `;
 }

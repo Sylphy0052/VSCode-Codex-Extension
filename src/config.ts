@@ -10,6 +10,7 @@ import {
   type ForgeHostConfig,
   type PullRequestLayerConfig,
 } from './orchestrator/forge';
+import { DEFAULT_PSEUDO_WORKTREE_EXCLUDE } from './orchestrator/pseudoWorktree';
 import type { HistoryScope } from './session/sessionStore';
 
 export interface ExtensionConfig {
@@ -118,6 +119,14 @@ export interface WorkflowsConfig {
    */
   roadmapDir: string;
   /**
+   * 疑似worktree（design.md §16.20）の複製から除外するディレクトリ名（`agent.workflows.
+   * pseudoWorktreeExclude`。`machine-overridable`）。`package.json`の`contributes.
+   * configuration`が定義を持ち、既定値は`pseudoWorktree.ts`の`DEFAULT_PSEUDO_WORKTREE_EXCLUDE`
+   * とリテラルで一致させてある（値を変える場合は両方合わせて直すこと。同ファイルの
+   * JSDoc参照）。
+   */
+  pseudoWorktreeExclude: readonly string[];
+  /**
    * ホスト連携（design.md §16.18）で使うCLIの選択。`machine`スコープ（§16.16「成果の統合
    * まわりの設定」）。実行するコマンド（`gh` / `glab`）の選択にあたるため、`.vscode/settings.json`
    * からは変えられない。
@@ -157,6 +166,23 @@ function isSafeRelativeDir(value: string): boolean {
   return !value.split(/[\\/]/u).includes('..');
 }
 
+/**
+ * `agent.workflows.pseudoWorktreeExclude` の生値を安全な配列へ丸める。文字列の配列でない、
+ * または空文字を含む要素があれば既定値（`DEFAULT_PSEUDO_WORKTREE_EXCLUDE`）へ丸ごと戻す
+ * （`isSafeRelativeDir`と同じ「壊れた設定値は既定へ丸める」方針）。
+ */
+function normalizePseudoWorktreeExclude(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) {
+    return DEFAULT_PSEUDO_WORKTREE_EXCLUDE;
+  }
+  const entries = value.filter(
+    (v): v is string => typeof v === 'string' && v.trim() !== '',
+  );
+  return entries.length === value.length && entries.length > 0
+    ? entries
+    : DEFAULT_PSEUDO_WORKTREE_EXCLUDE;
+}
+
 export function readWorkflowsConfig(): WorkflowsConfig {
   const c = vscode.workspace.getConfiguration('agent');
   const rawDir = str(c, 'workflows.dir', DEFAULT_WORKFLOWS_DIR);
@@ -165,6 +191,9 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     dir: isSafeRelativeDir(rawDir) ? rawDir : DEFAULT_WORKFLOWS_DIR,
     allowAutoApprove: c.get<boolean>('workflows.allowAutoApprove') ?? false,
     roadmapDir: isSafeRelativeDir(rawRoadmapDir) ? rawRoadmapDir : DEFAULT_ROADMAP_DIR,
+    pseudoWorktreeExclude: normalizePseudoWorktreeExclude(
+      c.get<unknown>('workflows.pseudoWorktreeExclude'),
+    ),
     forge: normalizeForgeHostConfig(str(c, 'workflows.forge', 'auto')),
     pullRequest: normalizePullRequestLayerConfig(str(c, 'workflows.pullRequest', 'per-task')),
     finalMerge: normalizeFinalMergeConfig(str(c, 'workflows.finalMerge', 'auto')),

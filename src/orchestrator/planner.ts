@@ -550,7 +550,14 @@ function safestApprovalModeFor(provider: Provider): string {
  * プロンプトでの指示ではなく、この関数が組み立てる起動設定こそが縛りの実体である
  * （design.md §16.9「プロンプトで頼むだけでは足りない」）。
  */
-function buildPlannerSessionInput(provider: Provider, cwd: string): TaskSessionInput {
+/**
+ * `roadmap.ts`（design.md §16.19「生成セッションは§16.9の分解セッションと同じ制限
+ * （`sandbox: read-only`相当、承認要求は全て拒否）で走らせる」）からも使う共通の組み立て。
+ * 両者は同じ安全要件を持つ別のユースケース（ワークフロー分解／ロードマップ生成）のため、
+ * 独自に作り直さず、ここで唯一の実装として`export`する（`detectForgeHost`等を`forge.ts`
+ * 一箇所に集約したのと同じ「重複を残さない」判断）。
+ */
+export function buildPlannerSessionInput(provider: Provider, cwd: string): TaskSessionInput {
   return {
     cwd,
     config: { model: '', effort: '', approvalMode: safestApprovalModeFor(provider) },
@@ -596,7 +603,8 @@ function assertPlannerSessionIsSafe(provider: Provider, input: TaskSessionInput)
  * `escalation.ts`の危険判定は経由しない。分解セッションに「妥当な危険操作」という
  * カテゴリは無く、判定するまでもなく拒否してよいため。
  */
-async function sendSingleTurn(
+/** `roadmap.ts`からも使う（`buildPlannerSessionInput`と同じ理由でexportする）。 */
+export async function sendSingleTurn(
   host: TaskSessionHost,
   provider: Provider,
   input: TaskSessionInput,

@@ -240,6 +240,21 @@ export function chatStyles(): string {
     font-size: 0.9em;
   }
   #commands .row.active .desc { color: inherit; }
+  /* 引数の書き方。名前と別の色で添える（issue #9） */
+  #commands .hint {
+    white-space: nowrap;
+    color: var(--vscode-descriptionForeground);
+    font-family: var(--vscode-editor-font-family);
+    font-size: 0.9em;
+  }
+  #commands .row.active .hint { color: inherit; }
+  /* 候補を確定した後も書き方が見えるよう、入力欄の上に残す */
+  #argumentHint {
+    margin: 0 16px 4px;
+    color: var(--vscode-descriptionForeground);
+    font-family: var(--vscode-editor-font-family);
+    font-size: 0.9em;
+  }
   #queue {
     margin: 0 16px 8px;
     padding: 8px 10px;
@@ -404,5 +419,38 @@ export function chatStyles(): string {
     color: var(--vscode-gitDecoration-deletedResourceForeground, inherit);
   }
   .diff-hunk { color: var(--vscode-descriptionForeground); }
+  /* Web検索結果（issue #18）。URLは全部見せる。クリックで外部ブラウザへ */
+  .search-results { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+  .search-result {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    padding: 6px 8px;
+    color: inherit;
+    background-color: var(--vscode-textCodeBlock-background);
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.9em;
+    text-align: left;
+  }
+  .search-result:hover { background-color: var(--vscode-list-hoverBackground); }
+  .search-result-title { color: var(--vscode-textLink-foreground); }
+  .search-result-url {
+    overflow-wrap: anywhere;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+  }
+  .search-results-fold > summary {
+    padding: 4px 0;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+    cursor: pointer;
+    user-select: none;
+  }
+  .search-results-fold[open] > summary { margin-bottom: 4px; }
+  .search-results-fold .search-result { margin-bottom: 4px; }
 `;
 }

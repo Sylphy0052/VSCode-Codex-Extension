@@ -13,6 +13,38 @@ export interface SlashCommand {
 }
 
 /**
+ * いま打っているコマンドの引数ヒント（issue #9）。
+ *
+ * 候補一覧にもヒントは出るが、**候補を確定した後こそ書き方が要る**。確定すると候補は
+ * 閉じるため、入力欄の下に出し続けるための判定をここに置く。
+ *
+ * 出すのは「行頭の `/名前` を打ち終えて空白を入れた後」だけ。空白より前は候補一覧が
+ * 出ているので二重に出さない。引数を取らないコマンドでも出さない。
+ *
+ * Webview側（`chatScript.ts`）はテンプレートリテラルの中の素のJSで、この関数を
+ * 直接は使えないため同等の判定を書き直している。規則を変えるときは両方を直すこと。
+ */
+export function hintForInput(
+  text: string,
+  commands: readonly SlashCommand[],
+): { name: string; argumentHint: string } | undefined {
+  const line = text.slice(text.lastIndexOf('\n') + 1);
+  if (!line.startsWith('/')) {
+    return undefined;
+  }
+  const space = line.indexOf(' ');
+  if (space === -1) {
+    return undefined;
+  }
+  const name = line.slice(1, space);
+  const command = commands.find((c) => c.name === name);
+  if (command === undefined || command.argumentHint === '') {
+    return undefined;
+  }
+  return { name: command.name, argumentHint: command.argumentHint };
+}
+
+/**
  * プロンプト/スキルのファイルから候補を1件作る。
  *
  * frontmatterのうち `name` / `description` / `argument-hint` だけを見る。完全なYAML解析は

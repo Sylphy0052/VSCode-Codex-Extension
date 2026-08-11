@@ -174,6 +174,76 @@ describe('applyStreamEvent', () => {
     expect(state.items[0]?.status).toBe('エラー');
   });
 
+  // Web検索の結果（issue #18）。ライブのstream-jsonでも同じ tool_use_result を実測している
+  // （transcript.tsのテストと同じ実測データ）ため、履歴の読み直しと同じ経路で拾えることを確かめる
+  it('WebSearchのtool_use_resultから検索結果を積む', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [{ type: 'tool_use', id: 't1', name: 'WebSearch', input: { query: 'q' } }],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 't1',
+              content: 'Web search results for query: "q"\n\nLinks: [{"title":"A","url":"https://a.example"}]',
+              is_error: false,
+            },
+          ],
+        },
+        tool_use_result: {
+          query: 'q',
+          results: [
+            { tool_use_id: 'srvtoolu_1', content: [{ title: 'A', url: 'https://a.example' }] },
+          ],
+        },
+      },
+    ]);
+    expect(state.items[0]).toMatchObject({
+      kind: 'webSearch',
+      detail: 'q',
+      searchResults: [{ title: 'A', url: 'https://a.example' }],
+    });
+  });
+
+  it('WebFetchはtool_use_resultにresultsが無いためsearchResultsが空のまま', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'tool_use', id: 't1', name: 'WebFetch', input: { url: 'https://a.example' } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: '# 本文', is_error: false },
+          ],
+        },
+        tool_use_result: {
+          bytes: 100,
+          code: 200,
+          codeText: 'OK',
+          result: '# 本文',
+          durationMs: 10,
+          url: 'https://a.example',
+        },
+      },
+    ]);
+    expect(state.items[0]).toMatchObject({ kind: 'webSearch', detail: 'https://a.example' });
+    expect(state.items[0]?.searchResults).toEqual([]);
+  });
+
   it('部分メッセージのデルタを積む', () => {
     const state = apply([
       {
