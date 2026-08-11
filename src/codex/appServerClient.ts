@@ -3,6 +3,7 @@ import type { Logger } from '../log';
 import type { HooksSnapshot } from '../provider/hooks';
 import { isValidMcpServerName, type McpServersSnapshot } from '../provider/mcpServers';
 import type { AccountSnapshot } from '../provider/account';
+import { isValidSkillPath, type SkillsSnapshot } from '../provider/skills';
 import { parseAccountRead } from './accountStatus';
 import { isSessionId } from './argvBuilder';
 import { buildHookTrustEdit, parseHooksList } from './hooksStatus';
@@ -19,6 +20,7 @@ import {
   parseMcpServerStatusList,
 } from './mcpStatus';
 import { parseModelList, readNextCursor, type ModelInfo } from './modelCatalog';
+import { parseSkillsList } from './skillsStatus';
 import { normalizeThreadList, parseThreadListPage, type ThreadListOutcome } from './threadList';
 
 export type ForkResult = { ok: true; threadId: string } | { ok: false; error: string };
@@ -254,6 +256,58 @@ export class AppServerClient {
 
     const result = await this.call<void>(async (request) => {
       const write = await request('config/batchWrite', { edits: [edit] });
+      if (write.error !== undefined) {
+        return { ok: false, error: write.error.message };
+      }
+      return { ok: true, value: undefined };
+    });
+
+    return result.ok ? { ok: true } : { ok: false, error: result.error };
+  }
+
+  /**
+   * skillsの一覧を取る（issue #35、design.md TP-56）。
+   *
+   * `skills/list`（`SkillsListParams { cwds?, forceReload? }` → `SkillsListResponse`）は
+   * 実測でスレッドを開始していなくても呼べる。`cwds` を省略すると「現在のセッションの
+   * 作業ディレクトリ」に委ねられる（スキーマの説明。`hooks/list` と同じ設計）ため、
+   * `listHooks` と同じくワークスペースフォルダを明示して渡す。
+   */
+  async listSkills(cwds: string[]): Promise<SkillsSnapshot> {
+    const result = await this.call<ReturnType<typeof parseSkillsList>>(async (request) => {
+      const response = await request('skills/list', cwds.length === 0 ? {} : { cwds });
+      if (response.error !== undefined) {
+        return { ok: false, error: response.error.message };
+      }
+      return { ok: true, value: parseSkillsList(response.result) };
+    });
+
+    if (!result.ok) {
+      this.log.warn(`skills一覧を取得できませんでした: ${result.error}`);
+      return { ok: false, reason: result.error };
+    }
+    return { ok: true, skills: result.value.skills, warnings: result.value.warnings };
+  }
+
+  /**
+   * skillの有効/無効を切り替える（issue #35）。
+   *
+   * `skills/config/write`（`SkillsConfigWriteParams { enabled, name?, path? }` →
+   * `SkillsConfigWriteResponse { effectiveEnabled }`）はスキーマ根拠（`codex app-server
+   * generate-json-schema --out` で確認）。この環境のskill設定を書き換えない方針のため、
+   * **実際に切り替えて確認してはいない**。`path` は `skills/list` が返す一意なファイル
+   * パスをそのまま渡す（`name` 選択子は同名skillが複数scopeに存在しうるため使わない）。
+   */
+  async setSkillEnabled(
+    path: string,
+    enabled: boolean,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (!isValidSkillPath(path)) {
+      return { ok: false, error: '不正なパスです' };
+    }
+
+    const result = await this.call<void>(async (request) => {
+      const write = await request('skills/config/write', { enabled, path });
       if (write.error !== undefined) {
         return { ok: false, error: write.error.message };
       }

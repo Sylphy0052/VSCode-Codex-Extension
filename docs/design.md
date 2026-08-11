@@ -405,7 +405,8 @@ Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡
 **MCPサーバーの一覧**: 両タブの下部に、設定されているMCPサーバーの一覧と有効/無効の切替を出す（§14.14）。取得・切替の経路はCodexとClaude Codeで別物（プロトコルの非対称は§14.14を参照）。
 
 **hooksの一覧**: MCPサーバーの一覧の下に、登録されているhookの一覧を出す（issue #28・§14.15）。1件あたりイベント名・実行するコマンド・出どころ（user/project/plugin等）を表示する。Codexは信頼状態も持ち、未信頼・変更ありのhookには「信頼する」操作を出す。Claude Codeには信頼状態を返す経路が無いため、一覧のみで操作は出さない（黙って何もしないボタンは置かない。「無い」旨を注記する）。
-**アカウント**: MCPサーバーの一覧より上に、ログイン状態とlogin/logoutの操作を出す（§14.15）。状態の取得はCodexが `account/read`（app-server）、Claude Codeが `claude auth status --json`。ログアウトはどちらもCLIのトップレベルサブコマンドを直接実行し、確認ダイアログを必ず挟む。ブラウザでのOAuthログインは拡張機能内で完結できないため、統合ターミナルへコマンドを入力するところまでに留める（自動実行はしない）。
+**skillsの一覧**: hooksの一覧の下に、使えるskillsの一覧と（Codexのみ）有効/無効の切替を出す（issue #35・§14.19）。1件あたり名前・説明・出どころ（user/project/plugin/system/admin/unknown）を表示する。Claude Codeには有効/無効を返す・切り替える経路がどちらも無いため、一覧のみで操作は出さない（「無い」旨を注記する）。出どころの表示はCodexは公式フィールド（`scope`）、Claude Codeは応答の説明文からの推測であることも注記で区別する。
+**アカウント**: MCPサーバーの一覧より上に、ログイン状態とlogin/logoutの操作を出す（§14.16）。状態の取得はCodexが `account/read`（app-server）、Claude Codeが `claude auth status --json`。ログアウトはどちらもCLIのトップレベルサブコマンドを直接実行し、確認ダイアログを必ず挟む。ブラウザでのOAuthログインは拡張機能内で完結できないため、統合ターミナルへコマンドを入力するところまでに留める（自動実行はしない）。
 
 ### 使用量の表示
 
@@ -1224,7 +1225,7 @@ Phase 0（issue #1 Z-07 / issue #2 Z-10）の時点では「両方とも実装�
 - `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `hooks: HooksSnapshot` を追加。`trustCodexHook(key, currentHash)` を新設（Claude Code側には対応する書き込みメソッドを持たない）
 - `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画と信頼操作（Codexのみ）。hookのコマンド文字列は必ず `textContent` でDOMへ入れ、HTMLとして解釈させない
 
-### 14.15 ログイン状態の表示とlogin / logout
+### 14.16 ログイン状態の表示とlogin / logout
 
 TUIには無い専用画面だが、TUI起動時のバナーやステータス行に相当する情報。issue #29・design.mdのTP-53対応。サイドバーの設定パネル（§6「操作パネル」）に、CodexとClaude Codeそれぞれのタブへ「アカウント」欄を出す。
 
@@ -1308,7 +1309,7 @@ Commands:
 - `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `account: AccountSnapshot` を追加。`logoutCodex()` / `logoutClaude()` / `loginCodexApiKey(apiKey)` を新設。ログアウトは確認ダイアログを必ず挟む
 - `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 「アカウント」欄の描画とボタン操作。ブラウザでのログインは統合ターミナルを開いてコマンドを入力するところまでで止め、自動実行はしない（`terminal.sendText(cmd, false)`）
 
-### 14.16 課金額とセッション分析の表示（`/cost` `/insights` 相当）
+### 14.17 課金額とセッション分析の表示（`/cost` `/insights` 相当）
 
 TUIの `/cost`（課金額）と `/insights`（セッション分析レポート）に相当する表示。issue #37・design.mdのTP-60対応。**スコープはClaude Codeのみ**（issue本文の明記どおり）。TP-31（トークン使用量・コンテキスト残量）や既存の使用量表示（`usageProbe.ts` / `usageText.ts`。レート制限の消費率）とは別の情報であり、混同しない表示にする。
 
@@ -1359,7 +1360,7 @@ issueのスコープはClaude側のみだが、指示に基づき同種の経路
 - `src/claude/streamSession.ts`: `refreshSessionCost()`。`refreshContext()` と同じ契機（ターン完了時、会話開始直後）で呼ぶ
 - `src/view/chatScript.ts`: フッターへのコスト表示（`formatSessionCost`）。テンプレートリテラルの中の素のJSのため、`costText.ts` の関数は再利用できず同等のロジックを書き直している（既存の `formatContext` / `formatUsage` と同じ構成）
 
-### 14.17 思考の全文表示と折りたたみ
+### 14.18 思考の全文表示と折りたたみ
 
 思考（reasoning）の項目を既定では要約で表示し、展開すると全文が読めるようにする。issue #19・design.mdのTP-34対応。コマンド出力の折りたたみ（TP-*・issue #17、§9.5参照）と同じ操作感（開いた状態は要素と一緒に保つ。再描画で勝手に閉じない）に揃え、別の作りを増やさない。
 
@@ -1382,6 +1383,42 @@ issueのスコープはClaude側のみだが、指示に基づき同種の経路
 - `src/claude/streamJson.ts`: **変更なし**。Claude Codeの `thinking` は要約・全文の区別が無い単一のテキストで、既にそのまま `text` に入っているため、`reasoningFull` を使わない（後述の表示側の分岐で自動的にコマンド出力と同じ行数折りたたみになる）
 - `src/view/chatScript.ts`: `renderBody` を拡張。`item.kind === 'reasoning'` かつ `reasoningFull` が要約と別に存在するとき（Codex）は、既定で要約(`text`)を見せ、展開ボタンで全文(`reasoningFull`)へ丸ごと切り替える（コマンド出力のような「末尾だけ」ではない）。それ以外（全文が無い、または要約と同じ。Claude Codeは常にこちら）は、コマンド出力と同じ `MAX_VISIBLE_LINES`（20行）での折りたたみに落ちる。展開の開閉状態は要素と一緒に保つ既存の仕組み（`node.expanded`）をそのまま使う
 - 「全文が無い場合に展開の操作が出ない」は自然に満たされる: 要約と全文の切り替えは全文が無ければ発生せず、行数折りたたみも短ければ `overflow` が立たずボタンが出ない
+
+### 14.19 skillsの一覧・有効無効
+
+TUIの `/skills` に相当する表示（Codex）。issue #35・design.mdのTP-56対応。skillはモデルへ渡す指示（プロンプト）そのもので、hooks（14.15）と同じくプロジェクト側（リポジトリ内）で定義されたskillはcloneしただけで効く経路になりうる（§8のセキュリティ考慮）。どこ由来かを必ず示す方針にする。
+
+Phase 0（issue #1 Z-07 / issue #2 Z-10）の時点では「両方とも実装できる。`skills/list` が `enabled` と `scope` を返す（Codex）」「`reload_skills` が実測で成功する（Claude）」まで確定していた。本issueで実測とスキーマの両面から経路を確定させたところ、hooksと同様に**CodexとClaude Codeで扱える範囲が非対称**であることが分かった。
+
+#### Codex: `skills/list` + `skills/config/write`
+
+実測（codex-cli 0.147.0。このリポジトリで `codex app-server` を起動し、`cwds` にこのワークスペースを指定して呼び出し、実際の応答を確認した）と `codex app-server generate-json-schema --out` のスキーマが根拠:
+
+- `skills/list`（`SkillsListParams { cwds?, forceReload? }` → `SkillsListResponse { data: [{cwd, skills: SkillMetadata[], errors: SkillErrorInfo[]}] }`）はスレッドを開始していなくても呼べる
+- `SkillMetadata` は `name` / `description` / `path`（絶対パス）/ `scope`（`user`|`repo`|`system`|`admin`）/ `enabled` / `interface?`（表示名・アイコン等）/ `shortDescription?` / `dependencies?` を持つ
+- `scope` は4種のうち3つを実測で確認済み: `user`（`~/.codex/skills/`）・`repo`（cwd配下の `.codex/skills/`。調査用の一時ディレクトリに `.codex/skills` を作って確認した。このリポジトリや `~/.codex` の設定は変更していない）・`system`（CLIに同梱。`~/.codex/skills/.system/` 配下）。`admin`（組織管理者配布）はこの環境に対象が無く実測できていない（スキーマの列挙にあることのみが根拠）
+- 有効/無効の書き込みは `skills/config/write`（`SkillsConfigWriteParams { enabled, name?, path? }` → `SkillsConfigWriteResponse { effectiveEnabled }`）。スキーマ根拠のみで、**この環境のskill設定を書き換えない方針のため実際に切り替えて確認してはいない**。`path` 選択子を使う（同名skillが複数scopeに存在しうるため `name` 選択子は使わない）
+- 通知 `skills/changed` はスキーマに存在するが（「監視しているskillファイルの変更を検知したら再度 `skills/list` を呼べ」という説明）、本issueでは購読を追加していない（既存のhooks/mcpの一覧も自動購読はしておらず、パネルを開く・`refresh()` のタイミングで読み直す既存の設計に合わせた）
+
+#### Claude Code: `reload_skills`（一覧のみ、出どころは文字列からの推測）
+
+実測（CLI 2.1.227）:
+
+- 一覧に相当する専用の要求は無い。`skills_list` / `list_skills` / `get_skills` / `skill_list` / `skills` の5候補を実測で総当たりしたが、いずれも `Unsupported control request subtype` で拒否された
+- **`reload_skills` だけが実在する**。応答は `{skills: [{name, description, argumentHint}]}` で、あわせて `system/commands_changed` 通知も飛ぶ。`initialize` の応答の `commands`（実測90件前後）には `/agents` 等の組込コマンドも混ざるが、`reload_skills` はCLI側で既にskillだけへ絞り込んだ結果を返す（実測: 90件中54件のみがskill）
+- **`enabled` フィールドが応答に無い**。`skill_toggle` / `set_skill_enabled` / `toggle_skill` / `skill_config` の4候補も同様に拒否されることを実測済みで、有効/無効を切り替える経路も判別する経路もプロトコルに存在しない
+- **出どころを示す専用フィールドも無い**。実測したところ `description` に整形用の注記が付く: ユーザー定義（`~/.claude/skills/`）は末尾に ` (user)`、プロジェクト定義（`<cwd>/.claude/skills/`。調査用の一時ディレクトリに `.claude/skills` を作って確認した）は末尾に ` (project)`、プラグイン由来は `name` が `<pluginId>:<skillName>` の形になり `description` の先頭に `(<pluginId>) ` が付く（実測: `genshijin` `last30days` プラグインで確認）。Anthropic公式のCLI同梱skill（`dataviz` `artifact-design` `claude-api` 等）にはどちらの注記も付かない。**これはCLIの表示用整形であり正式なAPIフィールドではない**ため、判別できなかったものは安全側の `unknown` に倒し、画面には推測であることを注記する
+
+#### 実装
+
+- `src/provider/skills.ts`: `SkillView`（`key` / `name` / `description` / `origin` / `originDetail` / `enabled` / `toggleable`）と `SkillsSnapshot`（`{ok:true, skills, warnings}` か `{ok:false, reason}`）を共有の型として持つ。`isValidSkillPath` で書き込み先へ渡す前の防御をする
+- `src/codex/skillsStatus.ts`: `skills/list` の応答を `SkillView[]` へ正規化する純粋関数（`parseSkillsList`）。`scope` を `origin` へ対応させる
+- `src/codex/appServerClient.ts`: `listSkills(cwds)` / `setSkillEnabled(path, enabled)` を追加
+- `src/claude/control.ts`: `buildReloadSkillsRequest`
+- `src/claude/skillsList.ts`: `reload_skills` の応答を `SkillView[]` へ正規化する純粋関数（`parseClaudeSkillsList`）。`description` の文字列から出どころを推測する
+- `src/claude/skillsProbe.ts`: `ClaudeSkillsProbe`。`ClaudeHooksProbe` と同じ理由で単発プロセスとして問い合わせる。切り替える経路が無いため読み取り専用
+- `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `skills: SkillsSnapshot` を追加。`toggleCodexSkill(path, enabled)` を新設（Claude Code側には対応する書き込みメソッドを持たない）
+- `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画と有効/無効の切替（Codexのみ）。skillの名前・説明は必ず `textContent` でDOMへ入れ、HTMLとして解釈させない
 
 ## 15. 作業記録（日報・週報連携）
 

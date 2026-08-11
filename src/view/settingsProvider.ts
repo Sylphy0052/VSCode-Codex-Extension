@@ -18,6 +18,7 @@ import type { Logger } from '../log';
 import type { HooksSnapshot } from '../provider/hooks';
 import { accountNotLoadedYet, type AccountSnapshot } from '../provider/account';
 import type { McpServersSnapshot } from '../provider/mcpServers';
+import type { SkillsSnapshot } from '../provider/skills';
 import type { CommandResult } from '../process/commandRunner';
 import type { FileSystemPort } from '../session/ports';
 
@@ -26,6 +27,9 @@ const notLoadedYet: McpServersSnapshot = { ok: false, reason: 'まだ読み込�
 
 /** hooksの一覧をまだ読んでいない状態。 */
 const hooksNotLoadedYet: HooksSnapshot = { ok: false, reason: 'まだ読み込んでいません' };
+
+/** skillsの一覧をまだ読んでいない状態。 */
+const skillsNotLoadedYet: SkillsSnapshot = { ok: false, reason: 'まだ読み込んでいません' };
 
 /**
  * `setMcpServerEnabled` / `ClaudeMcpProbe.toggle` / `setHookTrusted` と同じ形の結果。
@@ -70,6 +74,8 @@ export interface SettingsSnapshot {
   mcpServers: McpServersSnapshot;
   /** hooksの一覧・信頼状態（issue #28）。 */
   hooks: HooksSnapshot;
+  /** skillsの一覧・有効無効（issue #35、design.md TP-56）。 */
+  skills: SkillsSnapshot;
   /** ログイン状態（issue #29）。 */
   account: AccountSnapshot;
 }
@@ -96,6 +102,11 @@ export interface ClaudeSettingsSnapshot {
   mcpServers: McpServersSnapshot;
   /** hooksの一覧（issue #28）。Claude Codeは信頼状態を返さない（`HookView.trust` が参照）。 */
   hooks: HooksSnapshot;
+  /**
+   * skillsの一覧（issue #35、design.md TP-56）。Claude Codeは有効/無効を切り替える経路も
+   * 判別する経路も無い（`SkillView.toggleable` が参照）。
+   */
+  skills: SkillsSnapshot;
   /** ログイン状態（issue #29）。 */
   account: AccountSnapshot;
 }
@@ -110,6 +121,7 @@ export class SettingsProvider {
   private defaults: CodexDefaults = noDefaults;
   private codexMcp: McpServersSnapshot = notLoadedYet;
   private codexHooks: HooksSnapshot = hooksNotLoadedYet;
+  private codexSkills: SkillsSnapshot = skillsNotLoadedYet;
   private codexAccount: AccountSnapshot = accountNotLoadedYet;
 
   private claudeModels: ModelInfo[] = [];
@@ -117,6 +129,7 @@ export class SettingsProvider {
   private claudeAgents: ClaudeAgentInfo[] = [];
   private claudeMcp: McpServersSnapshot = notLoadedYet;
   private claudeHooks: HooksSnapshot = hooksNotLoadedYet;
+  private claudeSkills: SkillsSnapshot = skillsNotLoadedYet;
   private claudeAccount: AccountSnapshot = accountNotLoadedYet;
 
   /**
@@ -131,6 +144,10 @@ export class SettingsProvider {
    * @param listCodexHooks `hooks/list` の結果。
    * @param listClaudeHooks `get_settings` の `effective.hooks` から組み立てた結果。
    * @param setCodexHookTrusted `config/batchWrite` でhookの信頼を書く（issue #28）。
+   *   Claude Code側には対応する経路が無いため、書き込みメソッドを持たない。
+   * @param listCodexSkills `skills/list` の結果（issue #35、design.md TP-56）。
+   * @param listClaudeSkills `reload_skills` の結果。
+   * @param setCodexSkillEnabled `skills/config/write` でskillの有効/無効を書く。
    *   Claude Code側には対応する経路が無いため、書き込みメソッドを持たない。
    * @param readCodexAccount `account/read` の結果（issue #29）。
    * @param readClaudeAccount `claude auth status --json` の結果（issue #29）。
@@ -161,6 +178,12 @@ export class SettingsProvider {
     private readonly setCodexHookTrusted: (
       key: string,
       currentHash: string,
+    ) => Promise<McpToggleResult>,
+    private readonly listCodexSkills: () => Promise<SkillsSnapshot>,
+    private readonly listClaudeSkills: () => Promise<SkillsSnapshot>,
+    private readonly setCodexSkillEnabled: (
+      path: string,
+      enabled: boolean,
     ) => Promise<McpToggleResult>,
     private readonly readCodexAccount: () => Promise<AccountSnapshot>,
     private readonly readClaudeAccount: () => Promise<AccountSnapshot>,
@@ -193,6 +216,8 @@ export class SettingsProvider {
       this.claudeMcp,
       this.codexHooks,
       this.claudeHooks,
+      this.codexSkills,
+      this.claudeSkills,
       this.codexAccount,
       this.claudeAccount,
     ] = await Promise.all([
@@ -203,6 +228,8 @@ export class SettingsProvider {
       this.listClaudeMcpServers(),
       this.listCodexHooks(),
       this.listClaudeHooks(),
+      this.listCodexSkills(),
+      this.listClaudeSkills(),
       this.readCodexAccount(),
       this.readClaudeAccount(),
     ]);
@@ -282,6 +309,7 @@ export class SettingsProvider {
       profile: config.codex.profile,
       mcpServers: this.codexMcp,
       hooks: this.codexHooks,
+      skills: this.codexSkills,
       account: this.codexAccount,
     };
   }
@@ -300,6 +328,7 @@ export class SettingsProvider {
       defaults: this.claudeDefaults,
       mcpServers: this.claudeMcp,
       hooks: this.claudeHooks,
+      skills: this.claudeSkills,
       account: this.claudeAccount,
     };
   }
@@ -336,6 +365,21 @@ export class SettingsProvider {
     const result = await this.setCodexHookTrusted(key, currentHash);
     if (!result.ok) {
       this.log.warn(`hookを信頼できませんでした (${key}): ${result.error}`);
+    }
+    return result;
+  }
+
+  /**
+   * skillの有効/無効を切り替える（issue #35）。
+   *
+   * Claude Codeには対応する経路が無い（`skillsList.ts` 参照）ため、Codex専用にする。
+   * `trustCodexHook` と同じく、この時点ではパネルの表示は更新しない。呼び出し側が
+   * `load()` を呼び直してから表示を反映すること。
+   */
+  async toggleCodexSkill(path: string, enabled: boolean): Promise<McpToggleResult> {
+    const result = await this.setCodexSkillEnabled(path, enabled);
+    if (!result.ok) {
+      this.log.warn(`skillを切り替えられませんでした (${path}): ${result.error}`);
     }
     return result;
   }
