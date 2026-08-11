@@ -113,6 +113,21 @@ export interface TaskSession {
    * その経路は使えない。`session.interrupt()` だけを呼ぶ別の口として持つ。
    */
   interrupt(): Promise<void>;
+  /**
+   * ワークフローViewの「タスク停止」操作（design.md §16.8）専用。ループそのものを止める。
+   *
+   * `LoopStopReason: 'taskStopped'` で `onFinished` が呼ばれ、`runner.ts` はこれを
+   * `manual`/`interrupted`（人がそのタスクの画面へ直接介入した状態。タスク自身は変えない）
+   * とは別に扱い、そのタスクだけを `failed`（手動停止）に確定させる（design.md §16.5）。
+   */
+  stopLoop(): void;
+  /**
+   * `waitingApproval` の要求を、チャット画面のタブを開かずに直接解決する
+   * （design.md §16.8「承認」操作用）。従来の承認カード（webview内の`approve`メッセージ）と
+   * 同じ決定経路（`ChatSession.decide` / `ClaudeStreamSession.decide`）を通すため、
+   * `onApprovalResolved` のリスナーにも同じ通知が届く。
+   */
+  decideApproval(requestId: number | string, decision: ApprovalDecision): void;
   /** タブを前面に出す。閉じられていれば作り直し、それまでの会話を復元する。 */
   reveal(): void;
   /** タブを背面で用意する。開始時に呼ぶ。 */
