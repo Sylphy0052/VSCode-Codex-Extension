@@ -1943,7 +1943,8 @@ export class WorkflowRunner {
         if (liveTask.usedWorktree) {
           // マージまでを拡張機能の責務にする（design.md §16.17）。ループが終わっただけでは
           // `applyLoopStopReason`が`merging`にしてあるだけなので、実際にマージを試みる
-          void startMerge(this.internals,
+          void startMerge(
+            this.internals,
             runId,
             taskId,
             task,
