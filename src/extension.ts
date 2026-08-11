@@ -11,6 +11,8 @@ import { claudePaths, resolveClaudeHome } from './claude/cliLocator';
 import { ClaudeHooksProbe } from './claude/hooksProbe';
 import { ClaudeMcpProbe } from './claude/mcpProbe';
 import { ClaudeModelProbe } from './claude/modelProbe';
+import { ClaudePluginActions } from './claude/pluginsActions';
+import { ClaudePluginsProbe } from './claude/pluginsProbe';
 import { ClaudeProvider } from './claude/provider';
 import { ClaudeSessionStore } from './claude/sessionStore';
 import { ClaudeSkillsProbe } from './claude/skillsProbe';
@@ -141,6 +143,9 @@ export function activate(context: vscode.ExtensionContext): void {
   // ログイン/ログアウトの実行はCLIサブコマンドへ委譲する（issue #29、accountActions.ts参照）
   const codexAccountActions = new CodexAccountActions(nodeAccountCommandRunner, codexPath);
   const claudeAuthActions = new ClaudeAuthActions(nodeAccountCommandRunner, claudePath);
+  // plugins/appsの一覧・操作（issue #32、design.md §14.20）
+  const claudePlugins = new ClaudePluginsProbe(claudePath, log);
+  const claudePluginActions = new ClaudePluginActions(nodeAccountCommandRunner, claudePath);
 
   const settings = new SettingsProvider(
     nodeFileSystem,
@@ -169,6 +174,15 @@ export function activate(context: vscode.ExtensionContext): void {
     () => codexAccountActions.logout(),
     () => claudeAuthActions.logout(),
     (apiKey) => codexAccountActions.loginWithApiKey(apiKey),
+    () => appServer.listPlugins(),
+    () => claudePlugins.read(),
+    (pluginName, marketplace) => appServer.installPlugin(pluginName, marketplace),
+    (pluginId) => appServer.uninstallPlugin(pluginId),
+    (id, scope, enabled) =>
+      enabled ? claudePluginActions.enable(id, scope) : claudePluginActions.disable(id, scope),
+    (spec, scope) => claudePluginActions.install(spec, scope),
+    (id, scope) => claudePluginActions.uninstall(id, scope),
+    () => appServer.listApps(),
     log,
   );
   // オーケストレータ（design.md §16）。`chat` / `claudeChat` は `WorkflowRunner` の

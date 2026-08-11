@@ -18,6 +18,7 @@ import type { Logger } from '../log';
 import type { HooksSnapshot } from '../provider/hooks';
 import { accountNotLoadedYet, type AccountSnapshot } from '../provider/account';
 import type { McpServersSnapshot } from '../provider/mcpServers';
+import type { AppsSnapshot, PluginsSnapshot } from '../provider/plugins';
 import type { SkillsSnapshot } from '../provider/skills';
 import type { CommandResult } from '../process/commandRunner';
 import type { FileSystemPort } from '../session/ports';
@@ -30,6 +31,12 @@ const hooksNotLoadedYet: HooksSnapshot = { ok: false, reason: 'まだ読み込�
 
 /** skillsの一覧をまだ読んでいない状態。 */
 const skillsNotLoadedYet: SkillsSnapshot = { ok: false, reason: 'まだ読み込んでいません' };
+
+/** pluginsの一覧をまだ読んでいない状態。 */
+const pluginsNotLoadedYet: PluginsSnapshot = { ok: false, reason: 'まだ読み込んでいません' };
+
+/** appsの一覧をまだ読んでいない状態（Codexのみ）。 */
+const appsNotLoadedYet: AppsSnapshot = { ok: false, reason: 'まだ読み込んでいません' };
 
 /**
  * `setMcpServerEnabled` / `ClaudeMcpProbe.toggle` / `setHookTrusted` と同じ形の結果。
@@ -78,6 +85,10 @@ export interface SettingsSnapshot {
   skills: SkillsSnapshot;
   /** ログイン状態（issue #29）。 */
   account: AccountSnapshot;
+  /** pluginsの一覧（issue #32、design.md §14.20）。 */
+  plugins: PluginsSnapshot;
+  /** appsの一覧（issue #32、design.md §14.20。Codexのみ）。 */
+  apps: AppsSnapshot;
 }
 
 export interface ClaudeSettingsSnapshot {
@@ -109,6 +120,12 @@ export interface ClaudeSettingsSnapshot {
   skills: SkillsSnapshot;
   /** ログイン状態（issue #29）。 */
   account: AccountSnapshot;
+  /**
+   * pluginsの一覧（issue #32、design.md §14.20）。Claude Codeは有効/無効・
+   * インストール/アンインストールをすべてCLIサブコマンド経由で扱える（`PluginView.toggleable`
+   * / `removable` が参照）。
+   */
+  plugins: PluginsSnapshot;
 }
 
 /**
@@ -123,6 +140,8 @@ export class SettingsProvider {
   private codexHooks: HooksSnapshot = hooksNotLoadedYet;
   private codexSkills: SkillsSnapshot = skillsNotLoadedYet;
   private codexAccount: AccountSnapshot = accountNotLoadedYet;
+  private codexPlugins: PluginsSnapshot = pluginsNotLoadedYet;
+  private codexApps: AppsSnapshot = appsNotLoadedYet;
 
   private claudeModels: ModelInfo[] = [];
   private claudeDefaults: ClaudeDefaults = noClaudeDefaults;
@@ -131,6 +150,7 @@ export class SettingsProvider {
   private claudeHooks: HooksSnapshot = hooksNotLoadedYet;
   private claudeSkills: SkillsSnapshot = skillsNotLoadedYet;
   private claudeAccount: AccountSnapshot = accountNotLoadedYet;
+  private claudePlugins: PluginsSnapshot = pluginsNotLoadedYet;
 
   /**
    * @param listCodexModels `model/list` の結果。取れなければ空配列。
@@ -154,6 +174,18 @@ export class SettingsProvider {
    * @param logoutCodexCli `codex logout` の実行結果。
    * @param logoutClaudeCli `claude auth logout` の実行結果。
    * @param loginCodexApiKeyCli `codex login --with-api-key` の実行結果。
+   * @param listCodexPlugins `plugin/installed` + `plugin/read` を突き合わせた結果
+   *   （issue #32、design.md §14.20）。
+   * @param listClaudePlugins `claude plugin list --json` + `claude plugin details` を
+   *   突き合わせた結果。
+   * @param installCodexPluginCli `plugin/install`。Codexには有効/無効の書き込み経路が無い
+   *   （`PluginView.toggleable` が参照）。
+   * @param uninstallCodexPluginCli `plugin/uninstall`。
+   * @param toggleClaudePluginCli `claude plugin enable` / `disable`。
+   * @param installClaudePluginCli `claude plugin install`。
+   * @param uninstallClaudePluginCli `claude plugin uninstall`。
+   * @param listCodexApps `app/installed` + `app/read` を突き合わせた結果（Codexのみ。
+   *   有効/無効・インストール操作の確定した経路が無いため閲覧のみ）。
    */
   constructor(
     private readonly fs: FileSystemPort,
@@ -190,6 +222,27 @@ export class SettingsProvider {
     private readonly logoutCodexCli: () => Promise<CommandResult>,
     private readonly logoutClaudeCli: () => Promise<CommandResult>,
     private readonly loginCodexApiKeyCli: (apiKey: string) => Promise<CommandResult>,
+    private readonly listCodexPlugins: () => Promise<PluginsSnapshot>,
+    private readonly listClaudePlugins: () => Promise<PluginsSnapshot>,
+    private readonly installCodexPluginCli: (
+      pluginName: string,
+      marketplace: { path: string | undefined; remoteMarketplaceName: string | undefined },
+    ) => Promise<McpToggleResult>,
+    private readonly uninstallCodexPluginCli: (pluginId: string) => Promise<McpToggleResult>,
+    private readonly toggleClaudePluginCli: (
+      id: string,
+      scope: string | undefined,
+      enabled: boolean,
+    ) => Promise<CommandResult>,
+    private readonly installClaudePluginCli: (
+      spec: string,
+      scope: string | undefined,
+    ) => Promise<CommandResult>,
+    private readonly uninstallClaudePluginCli: (
+      id: string,
+      scope: string | undefined,
+    ) => Promise<CommandResult>,
+    private readonly listCodexApps: () => Promise<AppsSnapshot>,
     private readonly log: Logger,
   ) {}
 
@@ -220,6 +273,9 @@ export class SettingsProvider {
       this.claudeSkills,
       this.codexAccount,
       this.claudeAccount,
+      this.codexPlugins,
+      this.claudePlugins,
+      this.codexApps,
     ] = await Promise.all([
       this.loadCodexModels(),
       this.loadClaudeModels(),
@@ -232,6 +288,9 @@ export class SettingsProvider {
       this.listClaudeSkills(),
       this.readCodexAccount(),
       this.readClaudeAccount(),
+      this.listCodexPlugins(),
+      this.listClaudePlugins(),
+      this.listCodexApps(),
     ]);
 
     const toml = await this.fs.readTextFile(this.configTomlPath);
@@ -311,6 +370,8 @@ export class SettingsProvider {
       hooks: this.codexHooks,
       skills: this.codexSkills,
       account: this.codexAccount,
+      plugins: this.codexPlugins,
+      apps: this.codexApps,
     };
   }
 
@@ -330,6 +391,7 @@ export class SettingsProvider {
       hooks: this.claudeHooks,
       skills: this.claudeSkills,
       account: this.claudeAccount,
+      plugins: this.claudePlugins,
     };
   }
 
@@ -382,6 +444,106 @@ export class SettingsProvider {
       this.log.warn(`skillを切り替えられませんでした (${path}): ${result.error}`);
     }
     return result;
+  }
+
+  /**
+   * Codexのpluginをインストールする（issue #32）。
+   *
+   * pluginは任意のコード（hookやMCPサーバー）を持ち込む仕組みのため、確認ダイアログで
+   * 「何をどこから入れるか」を明示してから実行する（design.md §14.20・§8のセキュリティ考慮）。
+   */
+  async installCodexPlugin(
+    pluginName: string,
+    marketplace: { name: string; path: string | undefined },
+  ): Promise<AccountActionResult> {
+    if (!(await confirmInstallPlugin(pluginName, marketplace.name))) {
+      return { ok: false, error: undefined };
+    }
+    const result = await this.installCodexPluginCli(pluginName, {
+      path: marketplace.path,
+      remoteMarketplaceName: marketplace.path === undefined ? marketplace.name : undefined,
+    });
+    if (!result.ok) {
+      this.log.warn(`pluginをインストールできませんでした (${pluginName}): ${result.error}`);
+      return { ok: false, error: result.error };
+    }
+    this.log.info(`pluginをインストールしました (${pluginName})`);
+    return { ok: true };
+  }
+
+  /**
+   * Codexのpluginをアンインストールする（issue #32）。ローカルのコードを削除する
+   * 不可逆な操作のため、確認ダイアログを必ず挟む。
+   */
+  async uninstallCodexPlugin(pluginId: string, pluginName: string): Promise<AccountActionResult> {
+    if (!(await confirmUninstallPlugin(pluginName))) {
+      return { ok: false, error: undefined };
+    }
+    const result = await this.uninstallCodexPluginCli(pluginId);
+    if (!result.ok) {
+      this.log.warn(`pluginをアンインストールできませんでした (${pluginId}): ${result.error}`);
+      return { ok: false, error: result.error };
+    }
+    this.log.info(`pluginをアンインストールしました (${pluginId})`);
+    return { ok: true };
+  }
+
+  /**
+   * Claude Codeのpluginの有効/無効を切り替える（issue #32）。
+   *
+   * `claude plugin enable` / `disable` は破壊的操作ではない（コードの削除もダウンロードも
+   * 伴わない）ため、MCP/skillsの切替と同じく確認ダイアログは挟まない。
+   */
+  async toggleClaudePlugin(id: string, scope: string | undefined, enabled: boolean): Promise<McpToggleResult> {
+    const result = await this.toggleClaudePluginCli(id, scope, enabled);
+    if (result.code !== 0) {
+      const error = result.stderr.trim() || '不明なエラー';
+      this.log.warn(`pluginを切り替えられませんでした (${id}): ${error}`);
+      return { ok: false, error };
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Claude Codeのpluginをインストールする（issue #32）。
+   *
+   * pluginは任意のコード（hookやMCPサーバー）を持ち込む仕組みのため、確認ダイアログで
+   * 「何をどこから入れるか」を明示してから実行する（design.md §14.20・§8のセキュリティ考慮）。
+   */
+  async installClaudePlugin(spec: string): Promise<AccountActionResult> {
+    if (!(await confirmInstallPlugin(spec, undefined))) {
+      return { ok: false, error: undefined };
+    }
+    const result = await this.installClaudePluginCli(spec, undefined);
+    if (result.code !== 0) {
+      const error = result.stderr.trim() || '不明なエラー';
+      this.log.warn(`pluginをインストールできませんでした (${spec}): ${error}`);
+      return { ok: false, error };
+    }
+    this.log.info(`pluginをインストールしました (${spec})`);
+    return { ok: true };
+  }
+
+  /**
+   * Claude Codeのpluginをアンインストールする（issue #32）。ローカルのコードを削除する
+   * 不可逆な操作のため、確認ダイアログを必ず挟む。
+   */
+  async uninstallClaudePlugin(
+    id: string,
+    scope: string | undefined,
+    pluginName: string,
+  ): Promise<AccountActionResult> {
+    if (!(await confirmUninstallPlugin(pluginName))) {
+      return { ok: false, error: undefined };
+    }
+    const result = await this.uninstallClaudePluginCli(id, scope);
+    if (result.code !== 0) {
+      const error = result.stderr.trim() || '不明なエラー';
+      this.log.warn(`pluginをアンインストールできませんでした (${id}): ${error}`);
+      return { ok: false, error };
+    }
+    this.log.info(`pluginをアンインストールしました (${id})`);
+    return { ok: true };
   }
 
   /**
@@ -503,6 +665,30 @@ export class SettingsProvider {
 
     return true;
   }
+}
+
+/**
+ * pluginのインストールは外部から任意のコード（hookやMCPサーバーを含む）を持ち込む操作
+ * のため、何をどこから入れるかを明示して必ず確認を挟む（issue #32、design.md §14.20）。
+ */
+async function confirmInstallPlugin(pluginName: string, marketplace: string | undefined): Promise<boolean> {
+  const source = marketplace === undefined ? '' : `（マーケットプレイス: ${marketplace}）`;
+  const choice = await vscode.window.showWarningMessage(
+    `plugin「${pluginName}」${source}をインストールします。hookやMCPサーバーなど任意のコードが持ち込まれる可能性があります。`,
+    { modal: true },
+    'インストールする',
+  );
+  return choice === 'インストールする';
+}
+
+/** pluginのアンインストールはローカルのコードを削除する不可逆な操作のため、必ず確認を挟む（issue #32）。 */
+async function confirmUninstallPlugin(pluginName: string): Promise<boolean> {
+  const choice = await vscode.window.showWarningMessage(
+    `plugin「${pluginName}」をアンインストールします。ローカルに保存されているコードが削除されます。`,
+    { modal: true },
+    'アンインストールする',
+  );
+  return choice === 'アンインストールする';
 }
 
 /** ログアウトは資格情報を削除する不可逆な操作のため、必ず確認を挟む（issue #29）。 */
