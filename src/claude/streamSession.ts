@@ -26,6 +26,7 @@ import {
   buildSetEffortRequest,
   buildSetModelRequest,
   buildSetPermissionModeRequest,
+  buildStopTaskRequest,
   buildUserMessage,
   describeCanUseTool,
   readCommandList,
@@ -394,6 +395,21 @@ export class ClaudeStreamSession {
     }
     this.write(buildControlRequest(`req_${this.nextControlId++}`, { subtype: 'interrupt' }));
     this.update({ ...this.state, busy: false });
+  }
+
+  /**
+   * バックグラウンドで走っているタスクを止める（issue #33、design.md §14.23）。
+   *
+   * `stop_task` の応答は常に空で成否を返さない（`control.ts` の説明を参照）ため、
+   * `interrupt` と同じく発行するだけにする。止まったことは後続の `background_tasks_changed`
+   * 通知（一覧から消える）で画面に反映される。呼び出し側は破壊的操作として確認を
+   * 済ませてから呼ぶこと。
+   */
+  stopBackgroundTask(taskId: string): void {
+    if (this.proc === undefined) {
+      return;
+    }
+    this.write(buildStopTaskRequest(`req_${this.nextControlId++}`, taskId));
   }
 
   /** ユーザーが承認カードのボタンを押したとき。 */

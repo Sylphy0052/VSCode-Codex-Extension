@@ -298,6 +298,38 @@ export function chatStyles(): string {
   /* 完了は取り消し線、進行中は太字にして一覧の中でも状態が見分けられるようにする */
   #todos li.completed { color: var(--vscode-descriptionForeground); text-decoration: line-through; }
   #todos li.in_progress { font-weight: 600; }
+  /*
+   * バックグラウンドで実行中のプロセス一覧（issue #33、design.md 14.23、Codexの/ps相当）。
+   * TODO一覧と同じ並びに置く。
+   */
+  #backgroundTerminals {
+    margin: 0 16px 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--vscode-widget-border, transparent);
+    border-radius: 4px;
+    background-color: var(--vscode-editorWidget-background);
+    font-size: 0.9em;
+  }
+  #backgroundTerminals .head { color: var(--vscode-descriptionForeground); margin-bottom: 4px; }
+  #backgroundTerminals ul { margin: 0; padding: 0; list-style: none; }
+  #backgroundTerminals li {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin: 2px 0;
+  }
+  #backgroundTerminals li .command {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--vscode-editor-font-family, monospace);
+  }
+  #backgroundTerminals li .note {
+    flex: none;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+  }
   .item .head .actions { display: flex; gap: 6px; flex: none; }
   .item .head .actions button { padding: 1px 8px; font-size: 0.85em; }
   /* 本文は選択してコピーできるようにする */

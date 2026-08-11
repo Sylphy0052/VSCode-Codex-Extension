@@ -1614,6 +1614,42 @@ Commands:
 - `src/view/settingsProvider.ts`: `SettingsSnapshot`に`plugins: PluginsSnapshot`と`apps: AppsSnapshot`を、`ClaudeSettingsSnapshot`に`plugins: PluginsSnapshot`を追加。`installCodexPlugin` / `uninstallCodexPlugin` / `toggleClaudePlugin` / `installClaudePlugin` / `uninstallClaudePlugin`を新設。インストール・アンインストールは確認ダイアログ（「何をどこから入れるか」を明示）を必ず挟む。有効/無効の切替（Claude Codeのみ）はMCP/skillsの切替と同じく破壊的操作ではないため確認ダイアログを挟まない
 - `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画と操作。インストールは既存の`loginCodexApiKey`と同じ`showInputBox`パターン（Codexはマーケットプレイスを続けて`showQuickPick`で選ばせる）。plugin/appの名前・説明は必ず`textContent`でDOMへ入れ、HTMLとして解釈させない
 
+### 14.23 バックグラウンドターミナルの一覧と停止
+
+Codex TUIの `/ps`（list background terminals）に相当する表示。issue #33、design.mdのTP-54対応。Phase 0（issue #1 Z-08）では「terminal は `command/exec` 系でできる」「通知: `process/outputDelta` `process/exited`」とされ、Codexのみが対象だった。issue #33のPhase 0コメントで**Claude側にも `background_tasks` / `stop_task` / `agents_killed` が実在する**ことが分かり、スコープをCodex/Claude両方へ広げた。本issueで両CLIとも実際にバックグラウンドプロセスを起こし、一覧と停止を試して確定させたところ、**「一覧は取れるが停止する確定した経路は無い」（Codex）と「一覧も停止も両方できる」（Claude Code）という非対称**であることが分かった（pluginの有効/無効操作の非対称、§14.22と対照的に、こちらはClaude Codeのほうが高機能）。
+
+#### Codex: `commandExecution` ThreadItemの `status: inProgress` で分かる。停止する確定した経路は無い
+
+実測（codex-cli 0.147.0。`codex app-server` を実際に起動し、`thread/start` → `turn/start` でスレッドを作り、モデルに `sleep 45.29` をバックグラウンドで開始させ、実際のイベントを記録した。この環境の会話履歴以外の設定は変更していない）:
+
+- `codex app-server generate-json-schema --out` の `ClientRequest` を全数確認したところ、**一覧取得・全停止に相当する専用メソッドは無い**（95メソッドの一覧。`command/exec` `command/exec/write` `command/exec/resize` `command/exec/terminate` はあるが、いずれも「クライアントが `command/exec` で起動したプロセス」専用で、一覧を返すものは無い）
+- モデルに「`sleep 45.29` をバックグラウンドで開始してください」と指示すると、実際には `/bin/bash -lc 'nohup sleep 45.29 >/dev/null 2>&1 &'` という**シェルの `&` によるバックグラウンド化**を選んだ。このコマンド自体（`nohup ... &`）はシェルへ渡した瞬間に返るため、対応する `commandExecution` ThreadItemは `item/started` で `status: inProgress` ・`processId: "92439"`（実測: 実在するOSのPID）を一瞬持つが、直後の `item/completed` で `status: completed` へ遷移する。**この一覧に載り続けるのは、`&`で切り離した子プロセスではなく、exec呼び出し自体がまだ終わっていない（ビルド・テスト等の）長時間コマンドだけ**
+- **`command/exec/terminate` を、この `commandExecution` ThreadItemが実際に持っていた `processId`（`"92439"`）に対して呼んだところ、`{"code":-32600,"message":"no active command/exec for process id \"92439\""}` というエラーで拒否された**（実測。会話は継続、拡張の壊れは無い）。`CommandExecTerminateParams` のスキーマ説明どおり、この経路は「クライアントが `command/exec` で起動したプロセス」専用で、エージェントが実行したコマンドのprocessIdは受け付けない。**Codex側に、拡張機能から個別のバックグラウンドコマンドを止める確定した経路は無い**
+- `turn/interrupt`（`{threadId, turnId}`。実測で `turnId` も必須と判明）はターン全体を打ち切れるが、特定の1コマンドだけを止めるものではなく、応答そのものが終わってしまう。「個別に停止」というissueの受入基準には合わないため採用しない
+- `process/outputDelta` / `process/exited`（Phase 0が言及していた通知）はスキーマ上 `ServerNotification` に実在するが、対応する要求メソッド（`process/spawn` 相当）が現行の `ClientRequest` 一覧に無い。ドキュメント文字列に名残があるのみで、外部から呼び出す経路が見当たらない（スキーマ根拠のみ、未実測）
+
+一覧は既存の仕組み（issue #17、TP-35のコマンド出力逐次表示）をそのまま使う。`state.items` のうち `kind: 'commandExecution' && status: 'inProgress'` を拾えば、走っているコマンドの一覧になる（`deriveCodexBackgroundTerminals`）。停止ボタンは出さず、「この画面から停止する経路はありません」と明示する。
+
+#### Claude Code: `background_tasks_changed` 通知で分かる。`stop_task` で実際に止められる
+
+実測（CLI 2.1.227。`claude --print --input-format stream-json --output-format stream-json` を実際に起動し、Bashツールを `run_in_background:true` で呼び出させて、開始から数秒後に停止を試みた。3回実測した）:
+
+- Bashツールを `run_in_background:true` で呼ぶと、ツールの結果はすぐ返る（`"Command running in background with ID: <task_id>. Output is being written to: <path>.output..."`という文字列。構造化されていないプレーンテキスト）。ほぼ同時に **`{type:'system', subtype:'background_tasks_changed', tasks:[{task_id, task_type, description}]}`** という通知が届く（`task_type`の実測値は `local_bash`。CLIバイナリのstrings解析では `local_agent` `mcp_task` `local_workflow` `auto_mode_scan` も列挙されており、対応する種別のタスクでも同じ通知が来るとみられる。実測はlocal_bashのみ）
+- **`background_tasks` control request（能動的な問い合わせ）は、タスクが実際に走っている間に呼んでも空 `{}` を返した**（2回実測。`task_started` 通知の直後に呼んでも同じ）。ポーリングでは一覧を取れないため、**この拡張の一覧は `background_tasks_changed` 通知だけを正として持つ**（届くたびに一覧を丸ごと置き換える。差分ではない）
+- **`stop_task`（`{subtype:'stop_task', task_id}`。パラメータ名はスネークケース。CLIバイナリのstrings解析で `Cannot destructure property 'task_id'` というエラー文言から確認）を、タスク開始直後（自然終了の30.71秒よりずっと前）に送ったところ、実際に止まった**（実測。直後に `background_tasks_changed` で `tasks: []`、`task_updated` で `{status:'killed', end_time}`、`task_notification` で `{status:'stopped'}` が届いた）。**Claude Code側は、拡張機能から個別のバックグラウンドタスクを止められる**
+- `--print`（非対話）セッションでは、ターンが `end_turn` で終わると、明示的に停止していないバックグラウンドタスクも数秒以内に自動終了する挙動を3回とも観測した（`task_updated` で `status: 'killed'` に変わる）。原因はCLI内部の実装（`orphaned_background_tasks_pending_notification` という文字列がバイナリに実在し、孤立したバックグラウンドタスクの後始末に関わるとみられる）で、この拡張機能が明示的に何かをしたわけではない。**この拡張機能はセッションをターンをまたいで生かし続ける**（`ClaudeStreamSession` は1会話につき1プロセスを使い回す。§14.4）ため、TUIの `--print` 単発利用より一覧が長く保たれる可能性はあるが、確証は無い
+- `agents_killed`（`system` メッセージの一種。`@internal Emitted when background agents are terminated (e.g. on interrupt)` という説明がCLIバイナリに実在する）は個別タスクの終了ではなく、割り込み等による一括終了の通知とみられる（スキーマ・strings根拠のみ、実測はしていない）
+
+#### 実装
+
+- `src/appserver/chatState.ts`: `BackgroundTerminalItem`（`id` / `command` / `status` / `cwd` / `processId` / `taskType` / `stoppable`）と空配列 `NO_BACKGROUND_TERMINALS` を共有の型として持つ。`ChatItem` に `cwd` / `processId`（`commandExecution` のみ、`normalizeItem` で読む）を追加。`ChatState.backgroundTerminals` を追加し、Codex側は `item/started` `item/updated` `item/completed` の中で `deriveCodexBackgroundTerminals(items)`（`kind: 'commandExecution' && status: 'inProgress'` を拾う純粋関数）から求める
+- `src/claude/streamJson.ts`: `background_tasks_changed` 通知を `backgroundTerminals` へ丸ごと置き換える（`applyBackgroundTasksChanged`）。`task_id` の無い要素は捨てる
+- `src/claude/control.ts`: `buildStopTaskRequest(requestId, taskId)` を追加（`{subtype:'stop_task', task_id}`）
+- `src/claude/streamSession.ts`: `ClaudeStreamSession.stopBackgroundTask(taskId)` を追加。`interrupt()` と同じく発行するだけで、応答（常に空）は見ない。実際に止まったかは後続の `background_tasks_changed` 通知が反映する
+- `src/view/chatView.ts`: `confirmStopBackgroundTask(command)` を追加（`confirmCompact` と同じ形の確認ダイアログ。実行中の処理を打ち切る破壊的操作のため必ず挟む）。Codex/Claude Code両画面で共有するHTMLへ `#backgroundTerminals` を追加（TODO一覧と同じ並び）
+- `src/view/claudeChatView.ts`: `stopBackgroundTask` メッセージを受け、確認してから `ClaudeStreamSession.stopBackgroundTask` を呼ぶ
+- `src/view/chatScript.ts` / `chatStyles.ts`: 一覧の描画。`stoppable: true` の項目にだけ「停止」ボタンを出し、`false`（Codex）は「この画面から停止する経路はありません」と明示する（黙って何もしないボタンを置かない）。コマンド文字列は必ず `textContent` でDOMへ入れる
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）

@@ -541,6 +541,65 @@ describe('TODO一覧（TodoWrite）', () => {
   });
 });
 
+describe('バックグラウンドタスク一覧（issue #33、design.md §14.23）', () => {
+  it('background_tasks_changedの実測形を取り込む', () => {
+    // 実測（本issueの調査。実際にclaude --print --input-format stream-jsonを起動し、
+    // Bashツールをrun_in_background:trueで呼び出させて確認した生のイベント）
+    const state = apply([
+      {
+        type: 'system',
+        subtype: 'background_tasks_changed',
+        tasks: [
+          { task_id: 'b1xre2r80', task_type: 'local_bash', description: 'Sleep 24.37 seconds in background' },
+        ],
+      },
+    ]);
+    expect(state.backgroundTerminals).toEqual([
+      {
+        id: 'b1xre2r80',
+        command: 'Sleep 24.37 seconds in background',
+        status: 'running',
+        cwd: undefined,
+        processId: undefined,
+        taskType: 'local_bash',
+        stoppable: true,
+      },
+    ]);
+  });
+
+  it('空のtasksが届くと一覧をまるごと空にする（停止・完了の実測どおり）', () => {
+    const withTask = apply([
+      {
+        type: 'system',
+        subtype: 'background_tasks_changed',
+        tasks: [{ task_id: 'b1', task_type: 'local_bash', description: 'sleep 30' }],
+      },
+    ]);
+    const cleared = applyStreamEvent(withTask, {
+      type: 'system',
+      subtype: 'background_tasks_changed',
+      tasks: [],
+    });
+    expect(cleared.backgroundTerminals).toEqual([]);
+  });
+
+  it('tasksが配列でない通知は無視する', () => {
+    const state = apply([{ type: 'system', subtype: 'background_tasks_changed' }]);
+    expect(state.backgroundTerminals).toEqual([]);
+  });
+
+  it('task_idの無い要素は捨てる', () => {
+    const state = apply([
+      {
+        type: 'system',
+        subtype: 'background_tasks_changed',
+        tasks: [{ task_type: 'local_bash', description: 'no id' }],
+      },
+    ]);
+    expect(state.backgroundTerminals).toEqual([]);
+  });
+});
+
 describe('作業記録用の成果（turnResultText / turnEditedFiles）', () => {
   it('resultイベントのresultフィールドを応答テキストとして取り込む', () => {
     const state = apply([

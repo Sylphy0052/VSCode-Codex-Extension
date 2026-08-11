@@ -161,6 +161,22 @@ export async function confirmCompact(): Promise<boolean> {
   return choice === '圧縮する';
 }
 
+/**
+ * バックグラウンドタスクを止めてよいか確かめる（issue #33、design.md §14.23、
+ * Claude Code画面のみ。Codexには停止する確定した経路が無い）。
+ *
+ * 実行中の処理を打ち切る破壊的な操作のため、`confirmCompact` / `confirmUninstallPlugin` と
+ * 同じく必ず確認を挟む。
+ */
+export async function confirmStopBackgroundTask(command: string): Promise<boolean> {
+  const choice = await vscode.window.showWarningMessage(
+    `バックグラウンドで実行中のタスクを停止します: ${command}`,
+    { modal: true },
+    '停止する',
+  );
+  return choice === '停止する';
+}
+
 /** 確認ダイアログに列挙するファイル数の上限。超えた分は件数だけ示す。 */
 const REWIND_FILE_LIST_LIMIT = 10;
 
@@ -1323,6 +1339,10 @@ ${chatStyles()}
   <div id="todos" hidden>
     <div class="head">TODO一覧</div>
     <ul id="todosList"></ul>
+  </div>
+  <div id="backgroundTerminals" hidden>
+    <div class="head">バックグラウンドで実行中</div>
+    <ul id="backgroundTerminalsList"></ul>
   </div>
   <div id="loopBar" hidden>
     <span id="loopProgress"></span>

@@ -26,6 +26,7 @@ import {
   addAttachment,
   confirmCompact,
   confirmRewindFiles,
+  confirmStopBackgroundTask,
   postFileMentions,
   postImageData,
   renderShell,
@@ -740,6 +741,10 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         void this.compact(entry);
         return;
       }
+      if (type === 'stopBackgroundTask' && typeof m['id'] === 'string') {
+        void this.stopBackgroundTask(entry, m['id'], typeof m['command'] === 'string' ? m['command'] : m['id']);
+        return;
+      }
       if (type === 'rewind' && typeof m['messageId'] === 'string') {
         entry.loop.noteUserAction();
         void this.rewindFiles(entry, m['messageId']);
@@ -808,6 +813,24 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       // 圧縮は新しいターンを起こす。ループの指示と重ならないよう割り込み扱いにする
       entry.loop.noteUserAction();
       entry.session.compact();
+    } catch (e) {
+      this.reportError(e);
+    }
+  }
+
+  /**
+   * バックグラウンドタスクを止める（issue #33、design.md §14.23）。
+   *
+   * 実行中の処理を打ち切る破壊的な操作のため、必ず確認してから送る。止まったことは
+   * `background_tasks_changed` 通知（一覧から消える）で画面に反映されるため、ここでは
+   * 要求を出すだけでよい。
+   */
+  private async stopBackgroundTask(entry: ClaudePanel, taskId: string, command: string): Promise<void> {
+    if (!(await confirmStopBackgroundTask(command))) {
+      return;
+    }
+    try {
+      entry.session.stopBackgroundTask(taskId);
     } catch (e) {
       this.reportError(e);
     }
