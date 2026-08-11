@@ -148,6 +148,26 @@ export function buildContextUsage(
   return { usedTokens, contextWindow: window, remainingPercent: remaining };
 }
 
+/**
+ * セッションのコスト（issue #37、design.md TP-60）。Claude Codeのみが持つ概念で、
+ * レート制限の消費率（`ChatUsage`）ともコンテキストの使用量（`ContextUsage`）とも別物。
+ *
+ * `get_usage` control requestの応答から作る（`src/claude/costText.ts` の `parseSessionCost`
+ * を参照）。CLIはこの値を読んだ時刻を返さないため、`capturedAt` は呼び出し側の
+ * wall clockで埋める。
+ */
+export interface SessionCostView {
+  /** このセッションで使った推定コスト（USD）。サブスクリプションでは実際の請求額ではなく、
+   * API料金換算の見積もり（`subscriptionType` が入っているときはその旨を表示側で注記する）。 */
+  totalCostUsd: number;
+  totalLinesAdded: number;
+  totalLinesRemoved: number;
+  /** サブスクリプションの種別（例: 'max'）。APIキー利用など無い場合は undefined。 */
+  subscriptionType: string | undefined;
+  /** この値を読み取った時刻（epoch ms、クライアント側のwall clock）。 */
+  capturedAt: number;
+}
+
 export interface ChatState {
   threadId: string | undefined;
   /** Codexが会話内容から付ける要約名。ユーザーが変更することもできる。 */
@@ -183,6 +203,10 @@ export interface ChatState {
   usage: ChatUsage | undefined;
   /** コンテキストの使用量。まだ判らない間は undefined（数字を出さない）。 */
   context: ContextUsage | undefined;
+  /**
+   * セッションのコスト（Claude Codeのみ）。まだ判らない間・Codexのセッションでは undefined。
+   */
+  sessionCost: SessionCostView | undefined;
   /**
    * Plan mode（読み取りだけに絞って計画を立てる状態）か。
    *
@@ -232,6 +256,7 @@ export const initialChatState: ChatState = {
   prompts: [],
   usage: undefined,
   context: undefined,
+  sessionCost: undefined,
   planMode: false,
   reviewing: false,
   turnResultText: '',
@@ -714,6 +739,29 @@ export function applyEvent(
       }
       const next = removeApproval(state, requestId);
       return next.approvals.length === state.approvals.length ? state : next;
+    }
+
+    /**
+     * hookの実行結果（issue #28）。
+     *
+     * app-serverのプロトコルには「hookを信頼してください」という要求そのものが無い
+     * （`ServerRequest` の10種、`ServerNotification` の全種を実測・スキーマ双方で確認したが
+     * hook信頼専用のものは存在しない）。代わりに、信頼していないhookが動くタイミングで
+     * `status: 'blocked'`（`HookRunStatus` の1値）を伴う `hook/completed` が届く。これが
+     * 「信頼が必要」と気づける唯一の実観測可能な合図なので、会話へ一言残す。
+     */
+    case 'hook/completed': {
+      const run = rec(params['run']);
+      if (str(run?.['status']) !== 'blocked') {
+        return state;
+      }
+      const eventName = str(run?.['eventName']) || '不明なイベント';
+      const sourcePath = str(run?.['sourcePath']);
+      const detail =
+        `hookがブロックされました（信頼されていないため実行されませんでした）: ${eventName}` +
+        (sourcePath === '' ? '' : ` (${sourcePath})`) +
+        '。設定パネルのhooks一覧で内容を確認してから信頼してください。';
+      return appendNotice(state, `hookBlocked:${str(run?.['id'])}`, detail);
     }
 
     default:

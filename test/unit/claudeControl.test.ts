@@ -3,8 +3,11 @@ import {
   buildCanUseToolResponse,
   buildContextUsageRequest,
   buildControlRequest,
+  buildGetSettingsRequest,
   buildMcpStatusRequest,
   buildMcpToggleRequest,
+  buildRewindFilesRequest,
+  buildSessionCostRequest,
   buildSetEffortRequest,
   buildSetModelRequest,
   buildSetPermissionModeRequest,
@@ -19,6 +22,8 @@ import {
   readCurrentPermissionMode,
   readControlRequest,
   readControlResponse,
+  readRewindFilesResult,
+  readSessionCost,
 } from '../../src/claude/control';
 
 describe('buildUserMessage', () => {
@@ -196,6 +201,39 @@ describe('readContextUsage', () => {
   it('読めない応答では何も返さない', () => {
     expect(readContextUsage(undefined)).toBeUndefined();
     expect(readContextUsage({})).toBeUndefined();
+  });
+});
+
+describe('buildSessionCostRequest', () => {
+  it('get_usage を1行で送る（issue #37）', () => {
+    const line = buildSessionCostRequest('req_3');
+    expect(line.endsWith('\n')).toBe(true);
+    expect(JSON.parse(line.trim())).toEqual({
+      type: 'control_request',
+      request_id: 'req_3',
+      request: { subtype: 'get_usage' },
+    });
+  });
+});
+
+describe('readSessionCost', () => {
+  it('get_usage の応答からコストを読む', () => {
+    const payload = {
+      session: { total_cost_usd: 0.21, total_lines_added: 3, total_lines_removed: 1 },
+      subscription_type: 'max',
+    };
+    expect(readSessionCost(payload, 1000)).toEqual({
+      totalCostUsd: 0.21,
+      totalLinesAdded: 3,
+      totalLinesRemoved: 1,
+      subscriptionType: 'max',
+      capturedAt: 1000,
+    });
+  });
+
+  it('コストが読めない応答では何も返さない', () => {
+    expect(readSessionCost(undefined, 1000)).toBeUndefined();
+    expect(readSessionCost({}, 1000)).toBeUndefined();
   });
 });
 
@@ -395,6 +433,17 @@ describe('readModelList', () => {
   });
 });
 
+describe('buildGetSettingsRequest', () => {
+  it('get_settings要求を作る（hooks一覧の唯一の取得経路。issue #28）', () => {
+    const line = buildGetSettingsRequest('req_1');
+    expect(JSON.parse(line)).toEqual({
+      type: 'control_request',
+      request_id: 'req_1',
+      request: { subtype: 'get_settings' },
+    });
+  });
+});
+
 describe('buildMcpStatusRequest / buildMcpToggleRequest', () => {
   it('mcp_status要求を作る', () => {
     const line = buildMcpStatusRequest('req_1');
@@ -485,6 +534,116 @@ describe('readMcpServersList', () => {
     expect(readMcpServersList({})).toBeUndefined();
     expect(readMcpServersList({ mcpServers: 'なにか' })).toBeUndefined();
     expect(readMcpServersList({ mcpServers: [] })).toEqual([]);
+  });
+});
+
+describe('buildRewindFilesRequest', () => {
+  it('user_message_id と dry_run を送る（実測: パラメータ名はスネークケース）', () => {
+    // messageId 等キャメルケースでは通らないことをバイナリのstrings解析と実機で確認済み
+    const line = buildRewindFilesRequest('req_1', 'msg-uuid-1', true);
+    expect(JSON.parse(line.trim())).toEqual({
+      type: 'control_request',
+      request_id: 'req_1',
+      request: { subtype: 'rewind_files', user_message_id: 'msg-uuid-1', dry_run: true },
+    });
+  });
+
+  it('dry_run: false で実際に適用する要求を作る', () => {
+    const line = buildRewindFilesRequest('req_2', 'msg-uuid-2', false);
+    expect(JSON.parse(line.trim())).toEqual({
+      type: 'control_request',
+      request_id: 'req_2',
+      request: { subtype: 'rewind_files', user_message_id: 'msg-uuid-2', dry_run: false },
+    });
+  });
+});
+
+describe('readRewindFilesResult', () => {
+  it('戻せる場合は対象ファイルと増減行数を読む（実測: CLI 2.1.227、env var有効時）', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_1',
+        response: { canRewind: true, filesChanged: ['/w/a.txt'], insertions: 0, deletions: 1 },
+      },
+    });
+    expect(response).toBeDefined();
+    expect(readRewindFilesResult(response!)).toEqual({
+      ok: true,
+      filesChanged: ['/w/a.txt'],
+      insertions: 0,
+      deletions: 1,
+      error: undefined,
+    });
+  });
+
+  it('実適用（dry_run: false）の応答は filesChanged を持たない', () => {
+    // 実測: {"canRewind":true,"skippedLinks":0}
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_2',
+        response: { canRewind: true, skippedLinks: 0 },
+      },
+    });
+    expect(readRewindFilesResult(response!)).toEqual({
+      ok: true,
+      filesChanged: [],
+      insertions: undefined,
+      deletions: undefined,
+      error: undefined,
+    });
+  });
+
+  it('チェックポイントが無い場合（success包みでcanRewind: false）はエラーとして読む', () => {
+    // 実測: dry_run:true かつチェックポイント無しは success 応答に包まれて canRewind: false で返る
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_3',
+        response: { canRewind: false, error: 'No file checkpoint found for this message.' },
+      },
+    });
+    expect(readRewindFilesResult(response!)).toEqual({
+      ok: false,
+      filesChanged: [],
+      insertions: undefined,
+      deletions: undefined,
+      error: 'No file checkpoint found for this message.',
+    });
+  });
+
+  it('トップレベルのエラー応答も読む（実測: dry_run:falseでチェックポイント無しのとき）', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'error',
+        request_id: 'req_4',
+        error: 'No file checkpoint found for this message.',
+      },
+    });
+    expect(readRewindFilesResult(response!)).toEqual({
+      ok: false,
+      filesChanged: [],
+      insertions: undefined,
+      deletions: undefined,
+      error: 'No file checkpoint found for this message.',
+    });
+  });
+
+  it('未対応のCLIでも安全に失敗として読む', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'error',
+        request_id: 'req_5',
+        error: 'Unsupported control request subtype: rewind_files',
+      },
+    });
+    expect(readRewindFilesResult(response!).ok).toBe(false);
   });
 });
 

@@ -21,6 +21,8 @@ import {
   buildContextUsageRequest,
   buildControlRequest,
   buildControlResponse,
+  buildRewindFilesRequest,
+  buildSessionCostRequest,
   buildSetEffortRequest,
   buildSetModelRequest,
   buildSetPermissionModeRequest,
@@ -32,8 +34,11 @@ import {
   readCurrentPermissionMode,
   readControlRequest,
   readControlResponse,
+  readRewindFilesResult,
+  readSessionCost,
   type ControlResponse,
   type IncomingControlRequest,
+  type RewindFilesResult,
 } from './control';
 import type { Attachment } from '../provider/attachments';
 import type { SlashCommand } from '../provider/slashCommands';
@@ -76,6 +81,8 @@ export class ClaudeStreamSession {
   private handshakeDone = false;
   /** CLIが持っている使えるコマンド。取れるまでは空。 */
   private commandList: SlashCommand[] = [];
+  /** `rewind_files` の応答待ち。requestIdごとに解決関数を覚える（design.md「Claude Codeの巻き戻し」）。 */
+  private readonly rewindWaiting = new Map<string, (result: RewindFilesResult) => void>();
 
   constructor(
     private readonly claudePath: () => string,
@@ -135,6 +142,14 @@ export class ClaudeStreamSession {
     const proc = spawn(this.claudePath(), args, {
       cwd: options.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
+      // `rewind_files`（ファイルの巻き戻し）はこの環境変数を立てないと、非対話
+      // （`--print`）環境ではチェックポイントが作られず常に失敗する（実測。CLIバイナリの
+      // strings解析で見つけたゲート関数 `QF()` がinteractive判定を見ている。
+      // design.md「Claude Codeの巻き戻し」参照）。ドキュメントに無い変数だが、名前
+      // （SDK向け）と挙動から拡張機能のような非対話クライアント向けの明示的な入口と判断し、
+      // 常に立てる。CLIの更新で消える・形が変わる可能性はあり、その場合は
+      // `rewind_files` の応答が失敗として返るだけで、会話自体は影響を受けない。
+      env: { ...process.env, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1' },
     });
     this.proc = proc;
 
@@ -260,6 +275,25 @@ export class ClaudeStreamSession {
   }
 
   /**
+   * セッションのコストを読み直す（issue #37、design.md TP-60）。
+   *
+   * レート制限の消費率（`usage`）ともコンテキストの使用量（`context`）とも別の数字なので、
+   * `refreshContext` と同じ作りで別のフィールド（`sessionCost`）へ持つ。会話へ `/cost` を
+   * 送ると応答が会話に混ざるため、control protocolで聞く。応答が返らなくても会話は
+   * 続けられるので、失敗は黙って見送る。
+   */
+  refreshSessionCost(): void {
+    // 応答を返さないCLIでは要求が返らない。返事待ちを1件までにして積み上がりを防ぐ
+    if (
+      this.proc === undefined ||
+      [...this.outgoing.values()].some((o) => o.kind === 'sessionCost')
+    ) {
+      return;
+    }
+    this.write(buildSessionCostRequest(this.claim('sessionCost')));
+  }
+
+  /**
    * 会話を要約して圧縮する。
    *
    * 専用の制御要求が無いため、TUIと同じく `/compact` を発言として送る
@@ -272,6 +306,43 @@ export class ClaudeStreamSession {
     }
     this.update({ ...this.state, busy: true, turnFailed: false });
     this.write(buildUserMessage('/compact'));
+  }
+
+  /**
+   * 指定した発言の直前まで、ファイルだけを戻せるか確かめる（dry_run）。実際には適用しない。
+   *
+   * **会話の履歴には触れない**。`rewind_files` はファイルだけを対象にする制御要求で、
+   * 会話を戻す `rewind` subtype は非対応（`Unsupported control request subtype: rewind` を
+   * 実測済み）。呼び出し側は返ってきた `filesChanged` を確認ダイアログで見せてから
+   * `applyRewindFiles` を呼ぶこと（design.md「Claude Codeの巻き戻し」）。
+   */
+  previewRewindFiles(userMessageId: string): Promise<RewindFilesResult> {
+    return this.requestRewindFiles(userMessageId, true);
+  }
+
+  /**
+   * 指定した発言の直前まで、ファイルを実際に戻す。会話の履歴は変わらない。
+   * 元には戻せないため、呼び出し側で確認を済ませてから呼ぶこと。
+   */
+  applyRewindFiles(userMessageId: string): Promise<RewindFilesResult> {
+    return this.requestRewindFiles(userMessageId, false);
+  }
+
+  private requestRewindFiles(userMessageId: string, dryRun: boolean): Promise<RewindFilesResult> {
+    if (this.proc === undefined) {
+      return Promise.resolve({
+        ok: false,
+        filesChanged: [],
+        insertions: undefined,
+        deletions: undefined,
+        error: 'セッションが起動していません',
+      });
+    }
+    const requestId = this.claim('rewindFiles');
+    return new Promise<RewindFilesResult>((resolve) => {
+      this.rewindWaiting.set(requestId, resolve);
+      this.write(buildRewindFilesRequest(requestId, userMessageId, dryRun));
+    });
   }
 
   send(text: string, attachments: readonly Attachment[] = []): void {
@@ -375,6 +446,7 @@ export class ClaudeStreamSession {
       // ターンが終わるたびに読み直す。圧縮の効果もここで表示へ反映される
       if (wasBusy && !next.busy) {
         this.refreshContext();
+        this.refreshSessionCost();
       }
     }
   }
@@ -434,6 +506,20 @@ export class ClaudeStreamSession {
       return;
     }
 
+    if (outgoing?.kind === 'sessionCost') {
+      const sessionCost = readSessionCost(response.payload, Date.now());
+      if (sessionCost !== undefined) {
+        this.update({ ...this.state, sessionCost });
+      }
+      return;
+    }
+
+    if (outgoing?.kind === 'rewindFiles') {
+      this.rewindWaiting.get(response.requestId)?.(readRewindFilesResult(response));
+      this.rewindWaiting.delete(response.requestId);
+      return;
+    }
+
     // `initialize` の応答が使えるコマンドを全部返す。一覧のハードコードは要らない
     const commands = readCommandList(response.payload);
     if (commands !== undefined) {
@@ -460,6 +546,7 @@ export class ClaudeStreamSession {
     }
     // 会話を始める前の値を出しておく。ここを逃すと最初のターンが終わるまで空になる
     this.refreshContext();
+    this.refreshSessionCost();
   }
 
   /**
@@ -510,6 +597,17 @@ export class ClaudeStreamSession {
     for (const [requestId] of this.waiting) {
       this.decide(requestId, 'cancel');
     }
+    // rewind_filesの応答待ちも解放する。放置するとawaitしている側が永遠に待つ
+    for (const resolve of this.rewindWaiting.values()) {
+      resolve({
+        ok: false,
+        filesChanged: [],
+        insertions: undefined,
+        deletions: undefined,
+        error: 'セッションが終了しました',
+      });
+    }
+    this.rewindWaiting.clear();
     this.outgoing.clear();
     this.proc?.stdin.end();
     this.proc?.kill();
@@ -519,7 +617,7 @@ export class ClaudeStreamSession {
 }
 
 /** こちらから出した制御要求の用途。 */
-type OutgoingKind = 'initialize' | 'contextUsage' | 'settings';
+type OutgoingKind = 'initialize' | 'contextUsage' | 'sessionCost' | 'settings' | 'rewindFiles';
 
 interface Outgoing {
   kind: OutgoingKind;

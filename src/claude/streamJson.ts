@@ -29,6 +29,7 @@ export const initialClaudeState: ChatState = {
   prompts: [],
   usage: undefined,
   context: undefined,
+  sessionCost: undefined,
   planMode: false,
   // Codexのレビュー中フラグに相当する概念がClaude Codeには無い
   reviewing: false,
