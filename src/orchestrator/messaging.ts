@@ -2,8 +2,8 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import * as http from 'node:http';
 
 import type { TaskState } from './runState';
-import { stripControlChars } from './sanitize';
-import { MAX_PROMPT_LENGTH } from './workflow';
+import { stripControlCharsPreservingNewlines } from './sanitize';
+import { truncateByCodePoint } from './workflow';
 
 /**
  * タスク間のメッセージング（design.md §16.21）。
@@ -18,6 +18,15 @@ import { MAX_PROMPT_LENGTH } from './workflow';
  * `runner.ts` / `taskSession.ts` の責務。実際にCLIへMCP設定を渡す経路
  * （`src/view/chatView.ts` / `claudeChatView.ts`）とツールの可視性確認も含めて
  * 配線済み（Issue #123）。`runner.ts`のJSDoc・最終報告を参照。
+ *
+ * `{{T1.result}}`（Issue #67）と同じ脅威クラスの経路として、権限越境対策の水準を揃える
+ * 対応（Issue #132）を入れてある。このモジュール内の対応は主に3点:
+ * `MAX_MESSAGE_BODY_LENGTH`（1件あたりの上限を独立の定数にする）・
+ * `MAX_COMPOSED_PROMPT_LENGTH`（`composeNextPrompt`の合成後の総量に粗い安全弁を掛ける）・
+ * `wrapTaskMessage`の改行保持（`stripControlCharsPreservingNewlines`への差し替え）。
+ * 送信元・宛先の実効権限を比べる警告（配送時点）と、合成後の実際の送信文面をViewで
+ * 確認できるようにする対応は`runner.ts`側（`checkMessagingPermissionEscalation` /
+ * `LiveTask.lastSentPrompt`）にある。
  */
 
 /**
@@ -42,6 +51,52 @@ export function isDeliverableState(state: TaskState): boolean {
  * 許すと事実上無制限と変わらないため、タスク数の目安に対して余裕を持たせた定数にする。
  */
 export const MAX_MESSAGES_PER_RUN = 500;
+
+/**
+ * メッセージ1件あたりの本文の長さ上限（design.md §16.21、Issue #132）。
+ *
+ * 以前は `workflow.ts` の `MAX_PROMPT_LENGTH`（20000文字）を流用していたが、これは
+ * 「人がYAMLに書く固定の `prompt` 自体の上限」であり、性質が異なる値の流用だった。
+ * メッセージの本文はエージェントが実行時に自由に生成し、`dependsOn` を問わず同じrunの
+ * 任意のタスク（送信元より緩い権限を持ちうる）へ届く。これは `{{T1.result}}` /
+ * `{{T1.summary}}`（`workflow.ts` の `MAX_TEMPLATE_RESULT_LENGTH`、4000文字。Issue #67）と
+ * 同じ脅威クラス（上流の自由記述がより緩い権限の下流へそのまま渡る経路）にあたるため、
+ * 値もそちらへ揃える。独立した定数として持つことで、どちらか一方だけ値を見直したくなった
+ * ときに互いを気にせず変更できる。
+ *
+ * 上限を超えた場合の扱いは `{{T1.result}}` 側（`truncateForTemplate`。黙って切り詰める）と
+ * 意図的に違える。`validateSendMessage` はこの上限を超えた `send_message` の**受付自体を
+ * 拒否する**（`MAX_MESSAGE_BODY_LENGTH` の使用箇所参照）。理由:
+ * - `send_message` はモデルが明示的に呼ぶツール呼び出しであり、拒否理由
+ *   （`SendMessageValidationResult.reason`）がその場でモデルへ返る。モデル自身が本文を
+ *   短くする・要点だけに絞って送り直す・複数件に分けて送るといった対応を選べる
+ * - `{{T1.result}}` の展開はテンプレート変数を差し込むオーケストレータ側の自動処理で、
+ *   その時点でモデルの判断が介在する余地が無い（`prompt` はワークフロー開始前に固定
+ *   されており、差し込む先の文脈をモデルが選べない）。この場合、唯一実行可能な安全策は
+ *   黙って切り詰めることだけになる
+ *
+ * 送信元の意図（本文の全体が届くこと）を尊重できる場面では拒否のほうが安全という判断。
+ */
+export const MAX_MESSAGE_BODY_LENGTH = 4000;
+
+/**
+ * `composeNextPrompt` が合成した後の総量の上限（design.md §16.21、Issue #132）。
+ *
+ * `composeNextPrompt` は未配送のメッセージを**全て連結**して次の指示の先頭へ添えるが、
+ * 1件ずつの長さ（`MAX_MESSAGE_BODY_LENGTH`）を守っていても、run全体で配送できる総数
+ * （`MAX_MESSAGES_PER_RUN`、500件）まで積み上がれば連結後の総量は理論上極端な長さになりうる。
+ * `workflow.ts` の `MAX_EXPANDED_PROMPT_LENGTH`（60000文字。Issue #67セキュリティ監査
+ * 指摘#7「`MAX_TEMPLATE_RESULT_LENGTH`はフィールド単位の上限なので複数参照で積み上がる」）と
+ * 同じ動機・同じ値の粗い安全弁を、メッセージの合成にも設ける。値そのものを共有すると
+ * 片方の見直しがもう片方に波及するため、`MAX_MESSAGE_BODY_LENGTH`と同じ理由で独立した
+ * 定数にする。
+ *
+ * **切り詰めの方式は`capExpandedLength`と同じではない**（Issue #132 PRレビューでの
+ * セキュリティ監査、Warning。`composeNextPrompt`のJSDoc参照）。`capExpandedLength`は
+ * 展開後の文字列全体を末尾から機械的に切り詰めるが、`composeNextPrompt`は`basePrompt`
+ * （このタスク本来の指示）を全量温存し、間引くのは常にメッセージ側にする。
+ */
+export const MAX_COMPOSED_PROMPT_LENGTH = 60000;
 
 /** `agent.workflows.replyTimeoutSec` の既定値（design.md §16.21）。 */
 export const DEFAULT_REPLY_TIMEOUT_SEC = 300;
@@ -96,10 +151,10 @@ export function validateSendMessage(
       reason: `宛先が見つかりません（同じrunのタスクではありません）: ${input.to}`,
     };
   }
-  if (input.body.length > MAX_PROMPT_LENGTH) {
+  if (input.body.length > MAX_MESSAGE_BODY_LENGTH) {
     return {
       accepted: false,
-      reason: `本文が長すぎます（上限${MAX_PROMPT_LENGTH}文字）: ${input.body.length}文字`,
+      reason: `本文が長すぎます（上限${MAX_MESSAGE_BODY_LENGTH}文字）: ${input.body.length}文字`,
     };
   }
   if (input.totalMessagesInRun >= MAX_MESSAGES_PER_RUN) {
@@ -214,18 +269,80 @@ function escapeAngleBrackets(text: string): string {
  * メッセージ1件を `<task-message from="...">...</task-message>` で囲む。
  * `from` はタスクidで `TASK_ID_PATTERN`（`workflow.ts`）で検証済みの値が入る想定
  * （英数字・`_`・`-` のみ）のため、属性値としてエスケープの必要は無い。
- * 本文は制御文字を落とし（`sanitize.ts`。表示・プロンプトの見た目を偽装する
- * 双方向制御文字等を含むため）、そのうえで角括弧を実体参照化する。
+ *
+ * 本文は制御文字を落とす（`sanitize.ts`。表示・プロンプトの見た目を偽装する双方向制御文字等を
+ * 含むため）が、**改行・タブ・復帰は残す `stripControlCharsPreservingNewlines` を使う**
+ * （Issue #132）。以前は改行も空白へ畳む `stripControlChars` を使っていたため、複数行の
+ * メッセージがCLIへ実際に送る本文の上で1行に潰れてしまっていた（意図した仕様ではない。
+ * 改行を潰す必要があるのは1行の表示（承認カードのタイトル等）に限られ、CLIへ送る本文の
+ * 意味そのものを変えてよい理由にはならない）。
+ *
+ * 改行を残しても囲いの偽装は成立しない。`escapeAngleBrackets` が本文中の全ての `<` `>` を
+ * 実体参照へ変換するため、本文がどんな文字列（改行を含む）であっても `<...>` という
+ * タグ構造そのものを再構成できない。この順序（制御文字除去 → 角括弧の実体参照化）を
+ * 崩さない限り、改行を残すこと自体は囲いの安全性に影響しない（`test/unit/messaging.test.ts`
+ * で改行入りの偽装本文でも囲いを破れないことを固定してある）。
  */
 export function wrapTaskMessage(from: string, body: string): string {
-  const sanitized = escapeAngleBrackets(stripControlChars(body));
+  const sanitized = escapeAngleBrackets(stripControlCharsPreservingNewlines(body));
   return [`<task-message from="${from}">`, sanitized, '</task-message>'].join('\n');
+}
+
+/** `\n\n` の固定区切り。合成の各セグメント間で共通して使う。 */
+const COMPOSE_SEP = '\n\n';
+
+/**
+ * 文字列のコードポイント単位の長さ。`truncateByCodePoint`（`workflow.ts`）と同じ理由
+ * （UTF-16のコード単位とサロゲートペアの扱い）で、ここでも常にコードポイント単位で数える。
+ */
+function cpLen(value: string): number {
+  return Array.from(value).length;
+}
+
+/**
+ * メッセージを間引いたときに添える表示（design.md §16.21、Issue #132）。
+ * `droppedCount`は実際に落とした件数（0件のときは呼ばない）。
+ */
+function buildDroppedMessagesNotice(droppedCount: number): string {
+  return (
+    `（連結後の合計が上限${MAX_COMPOSED_PROMPT_LENGTH}文字を超えるため、送信順の古い` +
+    `メッセージから${droppedCount}件を省略しました。このタスク本来の指示を優先して残しています）`
+  );
 }
 
 /**
  * 受け取ったメッセージを、次の指示（`basePrompt`）の先頭へ添える
  * （design.md §16.21「受け取ったメッセージは、そのタスクの次の指示の先頭へ添える」）。
  * `messages` が空なら `basePrompt` をそのまま返す（案内文もタグも付けない）。
+ *
+ * 連結後の総量には粗い安全弁（`MAX_COMPOSED_PROMPT_LENGTH`）を掛ける（Issue #132）。
+ *
+ * **`basePrompt` は常に全量を残し、削るのはメッセージ側だけにする。** 以前の実装は
+ * `workflow.ts`の`capExpandedLength`（Issue #67セキュリティ監査指摘#7）を単純に真似て、
+ * `HEADER + メッセージ群 + basePrompt` を連結してから末尾を切り詰めていた。`basePrompt`
+ * （このタスク本来の、人がYAMLに書いた信頼できる指示）は常に列の末尾にあるため、真っ先に
+ * 削られるのが信頼できる側になってしまっていた。**セキュリティ監査で実測により再現**:
+ * 4000文字（`MAX_MESSAGE_BODY_LENGTH`ちょうど）のメッセージを同じ宛先へ15件積むだけで
+ * `basePrompt`が完全に消え、さらに最後のメッセージの閉じタグ`</task-message>`まで
+ * 失われる（開始タグ15個に対し閉じタグ14個）。宛先のエージェントは`TASK_MESSAGE_GUIDANCE`
+ * （データとして扱えという注意書き）と注入された本文だけを受け取り、本来やるべき指示が
+ * 1文字も残らない状態でターンを開始することになり、「データとして扱わせる」という
+ * 補助防御が実質的に無力化されていた。
+ *
+ * `capExpandedLength`の「無限に膨らむのを止める粗い安全弁であり、上限内に収まる量の
+ * 指示文が埋め込まれることは防がない」というトレードオフの引用は誤りだった（過小評価）。
+ * `{{T1.result}}`は人がYAMLに書いた`prompt`の中に変数参照が埋め込まれる形なので周囲に
+ * 人間の指示文が残りやすく、`dependsOn`を明示した場合にしか発生しない。一方このメッセージング
+ * 経路は**宛先の同意も`dependsOn`も要らず、送信元エージェントの意思だけで**（`send_message`を
+ * 連投するだけで）基準の指示を丸ごと押し出せる。持ち込むリスクの性質が違う。
+ *
+ * 対処: `basePrompt`を全量温存する予算をまず確保し、残りの予算にメッセージ側（`HEADER`・
+ * 区切り・間引いた旨の通知を含む）を収める。文字数で機械的に切ると選んだ最後のメッセージの
+ * 閉じタグが失われうるため、**メッセージは1件単位で丸ごと残すか丸ごと落とすかのどちらかにする**
+ * （`<task-message>`〜`</task-message>`が常に対になる）。落とす優先順位は送信順の古いものから
+ * （直近のメッセージのほうが宛先にとって新しい・関連が強い可能性が高いという判断）。
+ * `basePrompt`自体（+`HEADER`等の固定コスト）だけで予算を使い切る極端なケースでは、
+ * メッセージを1件も載せず`basePrompt`だけを返す（通知は残す）。
  */
 export function composeNextPrompt(
   basePrompt: string,
@@ -234,8 +351,57 @@ export function composeNextPrompt(
   if (messages.length === 0) {
     return basePrompt;
   }
-  const wrapped = messages.map((m) => wrapTaskMessage(m.from, m.body)).join('\n\n');
-  return `${TASK_MESSAGE_GUIDANCE}\n\n${wrapped}\n\n${basePrompt}`;
+
+  const wrappedAll = messages.map((m) => wrapTaskMessage(m.from, m.body));
+  const composedAll = `${TASK_MESSAGE_GUIDANCE}${COMPOSE_SEP}${wrappedAll.join(COMPOSE_SEP)}${COMPOSE_SEP}${basePrompt}`;
+  // 上限内に収まる（よくあるケース）なら間引く必要は無い。`truncateByCodePoint`の内部の
+  // 高速path（UTF-16長で先に判定する）をそのまま使うため、巨大な文字列でも
+  // 毎回コードポイント分割はしない
+  const { truncated } = truncateByCodePoint(composedAll, MAX_COMPOSED_PROMPT_LENGTH);
+  if (!truncated) {
+    return composedAll;
+  }
+
+  // ここから先は間引きが必要。basePromptは全量を温存する前提で、メッセージ側だけの予算を
+  // 逆算する。通知文の長さは「落とした件数」の桁数にしか依存せず、実際の落とした件数は
+  // messages.length以下（＝桁数も以下）になるため、全件分の桁数で見積もっておけば安全側
+  const baseLen = cpLen(basePrompt);
+  const headerLen = cpLen(TASK_MESSAGE_GUIDANCE);
+  const noticeLen = cpLen(buildDroppedMessagesNotice(messages.length));
+  // 固定コスト: HEADERの後・メッセージ塊の後・通知の後・basePromptの前、の4箇所の区切り
+  const fixedOverhead = headerLen + noticeLen + cpLen(COMPOSE_SEP) * 4;
+  const budgetForMessages = MAX_COMPOSED_PROMPT_LENGTH - baseLen - fixedOverhead;
+
+  // 送信順の新しいほうから優先して残す（＝古いものから間引く）。1件ずつ丸ごと足すか
+  // 諦めるかのどちらかにすることで、選んだメッセージは必ず開始・終了タグが揃う
+  let usedLen = 0;
+  let keepFromIndex = wrappedAll.length;
+  for (let i = wrappedAll.length - 1; i >= 0; i -= 1) {
+    const w = wrappedAll[i];
+    if (w === undefined) {
+      continue;
+    }
+    const add = cpLen(w) + (keepFromIndex === wrappedAll.length ? 0 : cpLen(COMPOSE_SEP));
+    if (usedLen + add > budgetForMessages) {
+      break;
+    }
+    usedLen += add;
+    keepFromIndex = i;
+  }
+
+  const kept = wrappedAll.slice(keepFromIndex);
+  const droppedCount = keepFromIndex;
+  const notice = buildDroppedMessagesNotice(droppedCount);
+
+  if (kept.length === 0) {
+    // basePrompt自体（+固定コスト）だけで予算を使い切る極端なケース。メッセージは1件も
+    // 載せず、basePromptの全量温存を最優先する
+    return `${notice}${COMPOSE_SEP}${basePrompt}`;
+  }
+  return (
+    `${TASK_MESSAGE_GUIDANCE}${COMPOSE_SEP}${kept.join(COMPOSE_SEP)}${COMPOSE_SEP}${notice}` +
+    `${COMPOSE_SEP}${basePrompt}`
+  );
 }
 
 /* ------------------------------------------------------------------------ *
@@ -639,6 +805,20 @@ export interface HttpMcpTransportHandle {
 const MCP_TOKEN_PATTERN = /^[0-9a-f]{32}$/u;
 
 /**
+ * HTTPリクエストボディの受信バイト数の上限（Issue #132 PRレビューでのセキュリティ監査、
+ * Info）。`MAX_MESSAGE_BODY_LENGTH`（4000文字）はJSONをパースし終えた後の
+ * `validateSendMessage`で効くため、パース前の受信量そのものには効かない。ローカル
+ * ループバック（`127.0.0.1`）+ 128bitトークン付きURLでしか到達できず外部からの悪用は
+ * 考えにくいが、そのタスクのCLIプロセス自身が巨大なボディを送る経路は残るため、受信を
+ * 打ち切る上限を別に設ける。
+ *
+ * `tools/call`の正規のリクエストは`send_message`の本文（最大4000文字）にJSON-RPCの
+ * envelope・UTF-8での多バイト文字・JSON文字列内のエスケープ（`\uXXXX`で1文字が最大6バイトに
+ * 膨らみうる）を足しても数万バイトに収まる。64KiBは余裕を持たせつつ「数十KB程度」に収める値。
+ */
+const MAX_MCP_REQUEST_BODY_BYTES = 64 * 1024;
+
+/**
  * `McpTransportPort` のNode実装。**方式の選定理由（最終報告にも記載）**:
  *
  * - design.mdは「サーバはrunごとに立て」「送信元はサーバー側が接続で判別する」の2つを
@@ -681,8 +861,27 @@ export function startHttpMcpTransport(hub: TaskMessagingHub): Promise<HttpMcpTra
     }
 
     const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    let receivedBytes = 0;
+    let rejectedForSize = false;
+    req.on('data', (chunk: Buffer) => {
+      if (rejectedForSize) {
+        return;
+      }
+      receivedBytes += chunk.length;
+      // 上限を超えた時点で受信を打ち切る（`MAX_MCP_REQUEST_BODY_BYTES`参照）。既に
+      // 受け取った分もチャンクへ積まず捨て、以後のチャンクも無視する
+      if (receivedBytes > MAX_MCP_REQUEST_BODY_BYTES) {
+        rejectedForSize = true;
+        res.writeHead(413, { 'content-type': 'text/plain' }).end('payload too large');
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on('end', () => {
+      if (rejectedForSize) {
+        return;
+      }
       let parsed: unknown;
       try {
         parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
