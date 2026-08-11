@@ -1,9 +1,20 @@
 import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
-import { defaultDenyResponse, type ApprovalDecision } from '../appserver/approvals';
+import {
+  buildApprovalResponse,
+  defaultDenyResponse,
+  describeApproval,
+  type ApprovalDecision,
+} from '../appserver/approvals';
 import type { ChatItem, ChatState } from '../appserver/chatState';
 import { ChatSession } from '../appserver/chatSession';
-import { AppServerConnection, type ServerRequest } from '../appserver/connection';
+import {
+  AppServerConnection,
+  type AppServerConnectionPort,
+  type NotificationHandler,
+  type ServerRequest,
+  type ServerRequestHandler,
+} from '../appserver/connection';
 import type { ActivityKind } from '../activity/record';
 import { summarize } from '../codex/conversation';
 import { readForkedThreadId } from '../codex/jsonRpc';
@@ -11,10 +22,18 @@ import { readSkillsList } from '../codex/skillsList';
 import { readRateLimits, type UsageSnapshot } from '../codex/usage';
 import { currentWorkspaceFolder, readConfig, workspaceFolderPaths } from '../config';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
+import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
-import { APPROVAL_MODES, SANDBOX_MODES } from '../codex/types';
+import { APPROVAL_MODES, SANDBOX_MODES, type CodexConfig } from '../codex/types';
 import type { PromptSubmission } from '../appserver/prompts';
+import type {
+  ApprovalHandler,
+  ApprovalOutcome,
+  TaskSession,
+  TaskSessionHost,
+  TaskSessionInput,
+} from '../orchestrator/taskSession';
 import { AttachmentBox } from '../provider/attachments';
 import { buildImageReply } from '../provider/imageRefs';
 import { CommandCatalog } from '../provider/commandCatalog';
@@ -29,11 +48,21 @@ import type { SlashCommand } from '../provider/slashCommands';
 import { chatCsp } from './chatCsp';
 import { chatScript } from './chatScript';
 import { chatStyles } from './chatStyles';
+import { PendingStartRegistry } from './pendingStarts';
 import { readPersistedThreadId } from './panelState';
 import { isEditableKey, type SettingsProvider } from './settingsProvider';
 
+const VIEW_TYPE = 'codex.chat';
+
 interface ChatPanel {
-  panel: vscode.WebviewPanel;
+  /**
+   * 今そのタブが開いているか。`undefined` はタブが閉じられている状態を表す。
+   *
+   * タスク管理下のセッション（`taskManaged: true`）は、タブを閉じてもこのエントリ自体は
+   * `panels` に残り続ける（design.md §16.10「セッションの寿命をパネルから切り離す」）。
+   * `reveal()` / `open()` はこの値が `undefined` ならパネルを作り直す。
+   */
+  panel: vscode.WebviewPanel | undefined;
   session: ChatSession;
   /** この画面で走らせているループ。走っていなければ待機状態のまま。 */
   loop: LoopController;
@@ -42,12 +71,44 @@ interface ChatPanel {
   /** 送信前の添付画像。送るまでここに溜める。 */
   attachments: AttachmentBox;
   /**
-   * タブを閉じた後か。
+   * 破棄済みか。
    *
-   * 保留中の承認を解放すると、その結果の通知が閉じたあとに届く。破棄済みのWebviewへ
-   * 送るとVSCodeが例外を投げるため、ここで止める。
+   * 保留中の承認を解放すると、その結果の通知が破棄後に届くことがある。破棄済みの
+   * セッションへ送るとVSCodeが例外を投げるため、ここで止める。`panel === undefined`
+   * とは別の概念（タスク管理下のセッションはタブが閉じても破棄されない）。
    */
   disposed: boolean;
+  /** パネルの見出し。タブが閉じている間もタイトルを見失わないよう、パネルとは別に保持する。 */
+  title: string;
+  /**
+   * タスク（オーケストレータ）管理下のセッションか。
+   *
+   * `true` の場合だけタブを閉じてもセッションを維持する（design.md §16.10の4）。
+   * 人が手で開いた画面（`false`）は従来通りタブを閉じたらセッションも終わる。
+   */
+  taskManaged: boolean;
+  /**
+   * タスク単位の設定。指定されていれば、この画面からの送信は常にこちらを使い、
+   * `readConfig().codex`（拡張機能のグローバル設定）を見ない（design.md §16.10の5）。
+   */
+  taskConfig: CodexConfig | undefined;
+  /** ターン完了検知（`busy` の立ち下がり）に使う直前の値。 */
+  wasBusy: boolean;
+  /** ループ停止検知（`running` の立ち下がり）に使う直前の値。 */
+  wasLoopRunning: boolean;
+  /** `setApprovalHandler` で差し込まれた自動判定。未設定なら従来通り必ず承認カードを出す。 */
+  approvalHandler: ApprovalHandler | undefined;
+  /**
+   * `setPromptTransform` で差し込まれた本文変換。実際の送信直前に適用する
+   * （design.md §16.4のテンプレート展開）。未設定ならそのまま送る。
+   */
+  promptTransform: ((text: string) => string) | undefined;
+  /** `TaskSession.onStateChanged` のリスナー。 */
+  stateListeners: Array<(state: ChatState) => void>;
+  /** `TaskSession.onFinished` のリスナー。 */
+  finishedListeners: Array<(reason: LoopStopReason, state: ChatState) => void>;
+  /** `TaskSession.onApprovalResolved` のリスナー。 */
+  approvalResolvedListeners: Array<(outcome: ApprovalOutcome) => void>;
 }
 
 /** 拡張機能から実行したセッションを日報バッファへ記録するための通知。 */
@@ -117,6 +178,29 @@ export function reportTurnResult(
   });
 }
 
+/** `TaskSessionInput` をCodexの `thread/start`/`turn/start` が読む形へ写す。 */
+function toCodexConfig(input: TaskSessionInput): CodexConfig {
+  return {
+    model: input.config.model,
+    reasoningEffort: input.config.effort,
+    approvalMode: input.config.approvalMode,
+    sandbox: input.sandbox,
+    // `sandboxWritableRoots` / `sandboxNetworkAccess` はworkspace-writeの範囲を
+    // ワークスペースの外・ネットワークへ広げる追加の許可（#83）。ワークフローのYAML
+    // スキーマ（design.md §16.2）にはこれを指定する項目が無く、`TaskSessionInput` /
+    // `TaskSessionConfig`（#52のクランプを通った値だけを運ぶ）も運んでこない。
+    // 拡張機能のグローバル設定（`codex.sandboxWritableRoots` 等）をそのまま継承すると、
+    // 人が対話セッション用に意識して許可した拡張が、YAMLからは見えない・書けない形で
+    // 無人実行のタスクへ暗黙に伝播してしまう（§16.16「YAMLは安全側にしか動かせない」を
+    // 拡張機能側の設定にまで広げた抜け道になる）。クランプ対象のフィールドが無い以上、
+    // 安全側の既定（拡張しない）に固定する
+    sandboxWritableRoots: [],
+    sandboxNetworkAccess: false,
+    profile: '',
+    additionalArgs: [],
+  };
+}
+
 /**
  * 会話に出てきた画像をWebviewへ返す。Codex画面・Claude Code画面の両方で共有する。
  *
@@ -169,12 +253,18 @@ export async function postFileMentions(
  * Codex画面。app-server と繋いで会話をその場で描画し、承認と分岐も画面内で完結させる。
  *
  * TUIタブ方式と併存する。こちらは設定がターン単位で効き、会話の途中から直接分岐できる。
+ * `TaskSessionHost` を実装し、オーケストレータ（`runner.ts`。次の依頼で実装）がプロバイダを
+ * 見ずにタスクのセッションを扱えるようにする（design.md §16.10）。
  */
-export class ChatViewManager implements vscode.Disposable {
-  private readonly connection: AppServerConnection;
-  /** threadIdが確定するまでは undefined キーで1件だけ保持する。 */
+export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
+  private readonly connection: AppServerConnectionPort;
   private readonly panels = new Map<string, ChatPanel>();
-  private pending: ChatPanel | undefined;
+  /**
+   * `thread/start` の応答待ち。複数件を同時に持てる（design.md §16.10の3）。
+   * 「最後に開始した1件」を決め打ちで返すと、並列開始時に別タスク宛の通知・承認要求を
+   * 誤配送する（詳しくは `pendingStarts.ts` のコメント）。
+   */
+  private readonly pendingStarts = new PendingStartRegistry<ChatPanel>();
   /** 名前変更コマンドの対象。最後にアクティブだったCodex画面。 */
   private active: ChatPanel | undefined;
 
@@ -191,11 +281,24 @@ export class ChatViewManager implements vscode.Disposable {
     private readonly log: Logger,
     /** 発言のたびに呼ばれる。二重記録の抑止は受け手（ActivityLogger）が担う。 */
     private readonly onActivity: (activity: ChatActivity) => void = () => undefined,
+    /**
+     * このthreadIdがタスク（オーケストレータ）管理下かどうか。
+     *
+     * 汎用のパネル復元（`restorePanel`）は、このスレッドを避けて`false`を返す既定のままなら
+     * 従来通り全てのスレッドを拾う。`true`を返すスレッドは復元をここでは行わず、
+     * オーケストレータ側（`workspaceState`を読む`runner.ts`。次の依頼）が正しいcwdで
+     * 開き直す（design.md §16.10の7）。
+     */
+    private readonly isTaskManagedThread: (threadId: string) => boolean = () => false,
+    /** テスト用の差し替え口。既定は実際にapp-serverプロセスへ繋ぐ本物の接続。 */
+    connectionFactory: (
+      onNotification: NotificationHandler,
+      onServerRequest: ServerRequestHandler,
+    ) => AppServerConnectionPort = (onNotification, onServerRequest) =>
+      new AppServerConnection(codexPath, log, onNotification, onServerRequest),
   ) {
     this.catalog = new CommandCatalog(this.fs);
-    this.connection = new AppServerConnection(
-      codexPath,
-      log,
+    this.connection = connectionFactory(
       (method, params) => this.routeNotification(method, params),
       (request) => this.routeServerRequest(request),
     );
@@ -206,26 +309,57 @@ export class ChatViewManager implements vscode.Disposable {
     return this.panels.has(threadId);
   }
 
-  /** 新しい会話を開く。 */
-  async openNew(): Promise<void> {
+  /**
+   * 新しい会話を開く。
+   *
+   * `cwd` / `taskConfig` を省略すると、従来通りワークスペース直下・拡張機能の
+   * グローバル設定で始まる（design.md §16.10の1。既存の呼び出しは全て既定値で動く）。
+   */
+  async openNew(cwd?: string, taskConfig?: CodexConfig): Promise<void> {
     const folder = currentWorkspaceFolder();
-    if (folder === undefined) {
+    const targetCwd = cwd ?? folder?.uri.fsPath;
+    if (targetCwd === undefined) {
       void vscode.window.showErrorMessage(
         'Codexを開始するにはフォルダを開いてください（ファイル > フォルダーを開く）',
       );
       return;
     }
 
-    const entry = this.createPanel('Codex', folder.uri.fsPath);
-    this.pending = entry;
+    const entry = this.buildEntry(targetCwd, 'Codex', false, taskConfig);
+    this.showPanel(entry, false);
+    const pendingKey = this.pendingStarts.begin(entry);
     try {
-      const threadId = await entry.session.start(folder.uri.fsPath, readConfig().codex);
-      this.pending = undefined;
+      const threadId = await entry.session.start(targetCwd, taskConfig ?? readConfig().codex);
+      this.pendingStarts.end(pendingKey);
       this.panels.set(threadId, entry);
     } catch (e) {
-      this.pending = undefined;
-      entry.panel.dispose();
+      this.pendingStarts.end(pendingKey);
+      this.teardown(entry);
       this.reportError(e);
+    }
+  }
+
+  /**
+   * タスク用のセッションを開く（`TaskSessionHost`）。
+   *
+   * パネルはここでは作らない。タブを背面で用意するのは `TaskSession.open()` の役目
+   * （design.md §16.10の2）。失敗時は例外を投げ直し、呼び出し側（runner.ts）が
+   * タスクを`failed`にできるようにする。
+   */
+  async openTaskSession(input: TaskSessionInput): Promise<TaskSession> {
+    const taskConfig = toCodexConfig(input);
+    const entry = this.buildEntry(input.cwd, 'Codex', true, taskConfig);
+    const pendingKey = this.pendingStarts.begin(entry);
+    try {
+      const threadId = await entry.session.start(input.cwd, taskConfig);
+      this.pendingStarts.end(pendingKey);
+      this.panels.set(threadId, entry);
+      return this.buildTaskSession(entry, threadId);
+    } catch (e) {
+      this.pendingStarts.end(pendingKey);
+      this.teardown(entry);
+      this.reportError(e);
+      throw e instanceof Error ? e : new Error(String(e));
     }
   }
 
@@ -233,17 +367,18 @@ export class ChatViewManager implements vscode.Disposable {
   async openThread(threadId: string, title: string, cwd: string | undefined): Promise<void> {
     const existing = this.panels.get(threadId);
     if (existing !== undefined) {
-      existing.panel.reveal();
+      this.showPanel(existing, false);
       return;
     }
 
-    const entry = this.createPanel(`Codex: ${title}`, cwd);
+    const entry = this.buildEntry(cwd, `Codex: ${title}`, false, undefined);
+    this.showPanel(entry, false);
     this.panels.set(threadId, entry);
     try {
       await entry.session.resume(threadId, cwd);
     } catch (e) {
       this.panels.delete(threadId);
-      entry.panel.dispose();
+      this.teardown(entry);
       this.reportError(e);
     }
   }
@@ -263,28 +398,91 @@ export class ChatViewManager implements vscode.Disposable {
       panel.dispose();
       return;
     }
+    if (this.isTaskManagedThread(threadId)) {
+      // タスク管理下のスレッド。汎用復元はここで手を引く（design.md §16.10の7）
+      panel.dispose();
+      return;
+    }
 
     // 復元されたパネルはcwdを保持していないため、このウィンドウのフォルダを充てる
-    const entry = this.adopt(panel, currentWorkspaceFolder()?.uri.fsPath);
+    const entry = this.buildEntry(currentWorkspaceFolder()?.uri.fsPath, 'Codex', false, undefined);
+    this.attachPanel(entry, panel);
     this.panels.set(threadId, entry);
     try {
       await entry.session.resume(threadId, undefined);
     } catch (e) {
       this.panels.delete(threadId);
-      panel.dispose();
+      this.teardown(entry);
       this.reportError(e);
     }
   }
 
-  private createPanel(title: string, cwd: string | undefined): ChatPanel {
-    const panel = vscode.window.createWebviewPanel('codex.chat', title, vscode.ViewColumn.Active, {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-    });
-    return this.adopt(panel, cwd);
+  /** セッションとループだけを組み立てる。パネルはまだ作らない。 */
+  private buildEntry(
+    cwd: string | undefined,
+    title: string,
+    taskManaged: boolean,
+    taskConfig: CodexConfig | undefined,
+  ): ChatPanel {
+    // sessionのコールバックはentryを参照するが、実際に呼ばれるのはentry代入後
+    // （closureが束縛するのは変数、呼び出し時点の値を読む。既存コードと同じ流儀）。
+    const session = new ChatSession(this.connection, this.log, (state) =>
+      this.onSessionChange(entry, state),
+    );
+    const loop = new LoopController(
+      (text) => this.sendFromLoop(entry, text),
+      (status) => this.onLoopStatus(entry, status),
+    );
+    const entry: ChatPanel = {
+      panel: undefined,
+      session,
+      loop,
+      cwd,
+      attachments: new AttachmentBox(),
+      disposed: false,
+      title,
+      taskManaged,
+      taskConfig,
+      wasBusy: false,
+      wasLoopRunning: false,
+      approvalHandler: undefined,
+      promptTransform: undefined,
+      stateListeners: [],
+      finishedListeners: [],
+      approvalResolvedListeners: [],
+    };
+    return entry;
   }
 
-  private adopt(panel: vscode.WebviewPanel, cwd: string | undefined): ChatPanel {
+  /**
+   * パネルを表に出す。既にタブがあれば `reveal`、閉じていれば作り直す
+   * （design.md §16.10の4「reveal()でパネルを作り直し、ChatStateから会話を描き直す」）。
+   * 会話の再描画は、webview起動時の `ready` 通知への応答（`postState`）に任せる。
+   */
+  private showPanel(entry: ChatPanel, preserveFocus: boolean): void {
+    if (entry.disposed) {
+      return;
+    }
+    if (entry.panel !== undefined) {
+      entry.panel.reveal(undefined, preserveFocus);
+      if (!preserveFocus) {
+        this.active = entry;
+      }
+      return;
+    }
+    const panel = vscode.window.createWebviewPanel(
+      VIEW_TYPE,
+      entry.title,
+      { viewColumn: vscode.ViewColumn.Active, preserveFocus },
+      { enableScripts: true, retainContextWhenHidden: true },
+    );
+    this.attachPanel(entry, panel);
+  }
+
+  /** 実際のパネルへ表示を結び付け、イベントを配線する。 */
+  private attachPanel(entry: ChatPanel, panel: vscode.WebviewPanel): void {
+    entry.panel = panel;
+    panel.title = entry.title;
     panel.webview.options = { enableScripts: true };
     panel.webview.html = renderShell(panel.webview, {
       agentLabel: 'Codex',
@@ -293,43 +491,6 @@ export class ChatViewManager implements vscode.Disposable {
       showSettings: true,
     });
 
-    let wasBusy = false;
-    const session = new ChatSession(this.connection, this.log, (state) => {
-      if (entry.disposed) {
-        return;
-      }
-      // ターンが終わった瞬間に、待たせていた指示を1件送る
-      const finished = wasBusy && !state.busy;
-      wasBusy = state.busy;
-      if (finished && state.queued.length > 0) {
-        void session.sendNextQueued(readConfig().codex);
-      }
-      if (finished) {
-        reportTurnResult(this.onActivity, entry.session.threadId, entry.cwd, state);
-      }
-      const title = deriveTitle(state);
-      if (title !== undefined && panel.title !== title) {
-        panel.title = title;
-      }
-      // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
-      entry.loop.observe(state);
-      this.postState(entry);
-    });
-
-    const loop = new LoopController(
-      (text) => this.sendFromLoop(entry, text),
-      () => this.postState(entry),
-    );
-
-    const entry: ChatPanel = {
-      panel,
-      session,
-      loop,
-      cwd,
-      attachments: new AttachmentBox(),
-      disposed: false,
-    };
-    this.active = entry;
     panel.webview.onDidReceiveMessage(
       (message: unknown) => void this.handleMessage(entry, message),
     );
@@ -339,22 +500,113 @@ export class ChatViewManager implements vscode.Disposable {
       }
     });
     panel.onDidDispose(() => {
-      entry.disposed = true;
-      loop.stop('manual');
-      session.dispose();
-      if (this.pending === entry) {
-        this.pending = undefined;
+      entry.panel = undefined;
+      if (!entry.taskManaged) {
+        // 人が手で開いた画面は、これまで通りタブを閉じたらセッションも終わる
+        this.teardown(entry);
+        return;
       }
       if (this.active === entry) {
         this.active = undefined;
       }
-      for (const [id, value] of this.panels) {
-        if (value === entry) {
-          this.panels.delete(id);
-        }
-      }
     });
-    return entry;
+    // showPanelのreveal分岐（既存タブ）はpreserveFocusを見てactiveを更新するのに、
+    // 新規作成のこの分岐だけ無条件にactiveを奪っていた（レビュー指摘: critical 2）。
+    // タスクは必ずpreserveFocus: trueで背面に開く（design.md §16.10の2）ため、
+    // 無条件のままだと背面のタスクが「名前変更」等の対象を奪ってしまう。
+    // 実際にフォーカスが当たっているか（panel.active）を見て決める
+    if (panel.active) {
+      this.active = entry;
+    }
+  }
+
+  /** `TaskSessionHost` が返す口の実体。 */
+  private buildTaskSession(entry: ChatPanel, threadId: string): TaskSession {
+    return {
+      sessionId: threadId,
+      runLoop: (plan: LoopPlan) => entry.loop.start(plan),
+      setPromptTransform: (transform) => {
+        entry.promptTransform = transform;
+      },
+      onFinished: (listener) => entry.finishedListeners.push(listener),
+      onStateChanged: (listener) => entry.stateListeners.push(listener),
+      setApprovalHandler: (handler) => {
+        entry.approvalHandler = handler;
+      },
+      onApprovalResolved: (listener) => entry.approvalResolvedListeners.push(listener),
+      interrupt: () => entry.session.interrupt(),
+      reveal: () => this.showPanel(entry, false),
+      open: (options) => this.showPanel(entry, options.preserveFocus),
+      dispose: () => this.teardown(entry),
+    };
+  }
+
+  /**
+   * エントリを完全に破棄する。ループを止め、セッションを解放し（保留中の承認は拒否される）、
+   * パネルが開いていれば閉じ、全ての管理表から取り除く。
+   *
+   * 二重に呼んでも安全（`disposed` で早期return）。タブを閉じたことによる破棄と、
+   * 明示的な `dispose()` 呼び出しの両方から通る。
+   */
+  private teardown(entry: ChatPanel): void {
+    if (entry.disposed) {
+      return;
+    }
+    entry.disposed = true;
+    entry.loop.stop('manual');
+    entry.session.dispose();
+    entry.panel?.dispose();
+    entry.panel = undefined;
+    if (this.active === entry) {
+      this.active = undefined;
+    }
+    this.pendingStarts.remove(entry);
+    for (const [id, value] of this.panels) {
+      if (value === entry) {
+        this.panels.delete(id);
+      }
+    }
+  }
+
+  private onSessionChange(entry: ChatPanel, state: ChatState): void {
+    if (entry.disposed) {
+      return;
+    }
+    // ターンが終わった瞬間に、待たせていた指示を1件送る
+    const finished = entry.wasBusy && !state.busy;
+    entry.wasBusy = state.busy;
+    if (finished && state.queued.length > 0) {
+      void entry.session.sendNextQueued(entry.taskConfig ?? readConfig().codex);
+    }
+    if (finished) {
+      reportTurnResult(this.onActivity, entry.session.threadId, entry.cwd, state);
+    }
+    const title = deriveTitle(state);
+    if (title !== undefined && entry.title !== title) {
+      entry.title = title;
+      if (entry.panel !== undefined) {
+        entry.panel.title = title;
+      }
+    }
+    // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
+    entry.loop.observe(state);
+    this.postState(entry);
+    for (const listener of entry.stateListeners) {
+      listener(state);
+    }
+  }
+
+  /** ループの状態変化。停止（running: true→false）を検知して `onFinished` を1度だけ呼ぶ。 */
+  private onLoopStatus(entry: ChatPanel, status: LoopStatus): void {
+    const stopped = entry.wasLoopRunning && !status.running;
+    entry.wasLoopRunning = status.running;
+    this.postState(entry);
+    if (stopped && status.stopReason !== undefined) {
+      const state = entry.session.getState();
+      for (const listener of entry.finishedListeners) {
+        listener(status.stopReason, state);
+      }
+    }
   }
 
   private async handleMessage(entry: ChatPanel, message: unknown): Promise<void> {
@@ -379,7 +631,11 @@ export class ChatViewManager implements vscode.Disposable {
         }
         const attachments = entry.attachments.take();
         try {
-          await entry.session.sendOrQueue(text, readConfig().codex, attachments);
+          await entry.session.sendOrQueue(
+            text,
+            entry.taskConfig ?? readConfig().codex,
+            attachments,
+          );
         } catch (e) {
           // 取り出したまま失わない。貼り直しを強いない
           entry.attachments.restore(attachments);
@@ -390,11 +646,17 @@ export class ChatViewManager implements vscode.Disposable {
         return;
       }
       if (type === 'requestFiles') {
-        await postFileMentions(entry.panel, this.mentions, entry.cwd, m['query']);
+        // タブが閉じている（タスク管理下でパネルが無い）間は送り先が無い。
+        // `postState` と同じ流儀で、パネルが無ければ何もしない
+        if (entry.panel !== undefined) {
+          await postFileMentions(entry.panel, this.mentions, entry.cwd, m['query']);
+        }
         return;
       }
       if (type === 'requestImage') {
-        await postImageData(entry.panel, this.fs, entry.session.getState().items, m['path']);
+        if (entry.panel !== undefined) {
+          await postImageData(entry.panel, this.fs, entry.session.getState().items, m['path']);
+        }
         return;
       }
       if (type === 'attach') {
@@ -433,7 +695,7 @@ export class ChatViewManager implements vscode.Disposable {
       if (type === 'flushQueue') {
         // 待たせていた指示を先に通すため、ループは割り込みとして止める
         entry.loop.noteUserAction();
-        await entry.session.flushQueue(readConfig().codex);
+        await entry.session.flushQueue(entry.taskConfig ?? readConfig().codex);
         return;
       }
       if (type === 'loop/start') {
@@ -453,7 +715,12 @@ export class ChatViewManager implements vscode.Disposable {
       if (type === 'approve' && typeof m['decision'] === 'string') {
         const requestId = m['requestId'];
         if (typeof requestId === 'number' || typeof requestId === 'string') {
-          entry.session.decide(requestId, m['decision'] as ApprovalDecision);
+          const decision = m['decision'] as ApprovalDecision;
+          entry.session.decide(requestId, decision);
+          // setApprovalHandlerが`ask`で従来の承認カードへ委ねた要求の決定をrunner.tsへ伝える
+          for (const listener of entry.approvalResolvedListeners) {
+            listener({ requestId, decision });
+          }
         }
         return;
       }
@@ -508,7 +775,7 @@ export class ChatViewManager implements vscode.Disposable {
 
   /** 画面へ現在の状態を送る。設定とループの進行はここで一緒に載せる。 */
   private postState(entry: ChatPanel): void {
-    if (entry.disposed) {
+    if (entry.disposed || entry.panel === undefined) {
       return;
     }
     void entry.panel.webview.postMessage({
@@ -524,10 +791,15 @@ export class ChatViewManager implements vscode.Disposable {
 
   /**
    * ループからの送信。失敗はループを止める理由になるため、報告したうえで投げ直す。
+   *
+   * `promptTransform` が設定されていれば、実際にCLIへ送る本文だけそちらを通す。
+   * 作業記録（`reportActivity`）には変換前の `text`（テンプレート展開前）を残す
+   * （design.md §16.12）。未設定なら従来通り同じ文字列を送信・記録する。
    */
   private async sendFromLoop(entry: ChatPanel, text: string): Promise<void> {
+    const toSend = entry.promptTransform?.(text) ?? text;
     try {
-      await entry.session.send(text, readConfig().codex);
+      await entry.session.send(toSend, entry.taskConfig ?? readConfig().codex);
       this.reportActivity(entry, text);
     } catch (e) {
       this.reportError(e);
@@ -593,14 +865,13 @@ export class ChatViewManager implements vscode.Disposable {
     }
   }
 
-  /** 設定が外部で変わったときに、開いている全画面のプルダウンを更新する。 */
   /**
    * 入力欄の候補を送る。
    *
    * 一度読んだら使い回す。ファイル数は多くないが、画面を開くたびに走査する意味も無い。
    */
   private async postCommands(entry: ChatPanel): Promise<void> {
-    if (entry.disposed) {
+    if (entry.disposed || entry.panel === undefined) {
       return;
     }
     this.commands ??= await this.loadCommands();
@@ -657,21 +928,16 @@ export class ChatViewManager implements vscode.Disposable {
   }
 
   private allPanels(): ChatPanel[] {
-    const entries = [...this.panels.values()];
-    if (this.pending !== undefined && !entries.includes(this.pending)) {
-      entries.push(this.pending);
-    }
-    return entries;
+    return [...this.panels.values(), ...this.pendingStarts.values()];
   }
 
   private routeNotification(method: string, params: Record<string, unknown>): void {
     // account/rateLimits/updated のようなアカウント単位の通知は threadId を持たない。
-    // スレッドで絞れないので開いている画面すべてへ配る。
+    // スレッドで絞れないので開いている（開始待ちも含む）画面すべてへ配る。
     if (params['threadId'] === undefined) {
-      for (const entry of this.panels.values()) {
+      for (const entry of this.allPanels()) {
         entry.session.applyNotification(method, params);
       }
-      this.pending?.session.applyNotification(method, params);
       return;
     }
 
@@ -691,15 +957,48 @@ export class ChatViewManager implements vscode.Disposable {
       }
       return denial;
     }
+
+    // タスク実行中のセッションなら、承認カードを出す前に自動判定へ回す（design.md §16.10の6）。
+    // 判定そのもの（classifyApprovalRequest）はrunner.tsの責務で、ここは差し込み口を通すだけ。
+    if (target.approvalHandler !== undefined) {
+      const approval = describeApproval(request.id, request.method, request.params);
+      if (approval !== undefined) {
+        // 判定の入力は生の要求パラメータ（request.params）。表示用に整形済みのapprovalは
+        // 種別・requestId・itemIdの参照にだけ使う（design.md §16.7）
+        const result = await target.approvalHandler(approval, request.params);
+        if (result.kind === 'auto') {
+          this.log.info(`承認(自動判定): ${approval.kind} → ${result.decision}`);
+          return buildApprovalResponse(approval.kind, result.decision, request.params);
+        }
+        // ask: 従来どおり承認カードを出して人を待つ
+      }
+    }
     return target.session.requestApproval(request);
   }
 
+  /**
+   * threadIdから画面を引く。`panels` に無ければ、開始待ちの中から**そのthreadIdを
+   * 実際に記録しているエントリ**を探す（design.md §16.10の3）。
+   *
+   * 「開始待ちが1件だけだから」という決め打ちはしない。並列開始時に別タスク宛の
+   * 通知・承認要求を誤って渡すと、それは「別タスクの操作を勝手に許可する」事故になる。
+   * 一致するものが無ければ宛先不明として `undefined`（誤配送より安全な失敗）。
+   */
   private findByThreadId(threadId: unknown): ChatPanel | undefined {
-    if (typeof threadId === 'string' && this.panels.has(threadId)) {
-      return this.panels.get(threadId);
+    if (typeof threadId !== 'string') {
+      return undefined;
     }
-    // thread/start の応答が返る前に届く通知は、開始待ちの画面のもの
-    return this.pending;
+    const known = this.panels.get(threadId);
+    if (known !== undefined) {
+      return known;
+    }
+    const pending = this.pendingStarts.findByThreadId(threadId, (entry) => entry.session.threadId);
+    if (pending !== undefined) {
+      return pending;
+    }
+    // `thread/start` の応答前に届いた通知。開始待ちが1件だけなら宛先は一意に定まる。
+    // 2件以上あるときは諦める（取りこぼしより誤配送のほうが重い。§16.10の3）
+    return this.pendingStarts.soleEntry();
   }
 
   private reportError(e: unknown): void {
@@ -709,10 +1008,8 @@ export class ChatViewManager implements vscode.Disposable {
   }
 
   dispose(): void {
-    for (const entry of this.panels.values()) {
-      entry.loop.stop('manual');
-      entry.session.dispose();
-      entry.panel.dispose();
+    for (const entry of this.allPanels()) {
+      this.teardown(entry);
     }
     this.panels.clear();
     this.connection.dispose();

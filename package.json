@@ -284,6 +284,16 @@
         "title": "チャット画面で開く（Claude Code）",
         "category": "Agent",
         "icon": "$(sparkle)"
+      },
+      {
+        "command": "agent.workflows.run",
+        "title": "ワークフローを実行…",
+        "category": "Agent"
+      },
+      {
+        "command": "agent.workflows.stop",
+        "title": "ワークフローを停止…",
+        "category": "Agent"
       }
     ],
     "configuration": {
@@ -395,6 +405,18 @@
           "default": "",
           "scope": "machine",
           "markdownDescription": "作業記録の出力先ディレクトリ。空なら環境変数 `DAILY_BUFFER_DIR`、それも無ければ `~/workspace/dairy/.buffer` を使う。"
+        },
+        "agent.workflows.dir": {
+          "type": "string",
+          "default": ".agents/workflows",
+          "scope": "resource",
+          "markdownDescription": "ワークフロー定義ファイル（`.yaml` / `.yml`）を探すディレクトリ。ワークスペースフォルダからの相対パス。"
+        },
+        "agent.workflows.allowAutoApprove": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "markdownDescription": "ワークフロー定義（YAML）の `autoApprove: true` を有効化できるようにする。無効のままだと、YAMLに何と書かれていても全ての承認要求を人へ回す。リポジトリ側のYAMLから無人実行を勝手に有効化されないよう machine スコープに固定している（設計書 §16.16）。"
         },
         "claude.executablePath": {
           "type": "string",

@@ -13,11 +13,20 @@ import { CodexProvider } from './codex/provider';
 import type { SessionMeta, SessionSummary } from './codex/types';
 import type { UsageSnapshot } from './codex/usage';
 import {
+  currentWorkspaceFolder,
   readActivityLogConfig,
   readClaudeConfig,
   readConfig,
+  readWorkflowsConfig,
   workspaceFolderPaths,
 } from './config';
+import {
+  nodeGitCommandRunner,
+  nodeWorktreeFileSystem,
+  WorktreeCreationQueue,
+} from './orchestrator/worktree';
+import { WorkflowRunStore } from './orchestrator/runStore';
+import { WorkflowRunner, nodeWorkflowFilePort } from './orchestrator/runner';
 import { ProviderRegistry } from './provider/registry';
 import type { AgentProvider } from './provider/types';
 import { createLogger, type Logger } from './log';
@@ -95,6 +104,18 @@ export function activate(context: vscode.ExtensionContext): void {
     () => claudeModels.read(),
     log,
   );
+  // オーケストレータ（design.md §16）。`chat` / `claudeChat` は `WorkflowRunner` の
+  // hostsとして要るため先に作れないが、`WorkflowRunner` は「このスレッドはタスク管理下か」を
+  // `chat` / `claudeChat` へ答える口（`isTaskManagedThread`）を要求する（design.md §16.10の7）。
+  // 循環しているため、書き換え可能な箱（`workflowRunnerRef`）を先に用意してクロージャに
+  // 渡し、`WorkflowRunner` を実際に作った後で埋める
+  // （レビュー指摘: critical 1。以前はこの口が一切結線されておらず、リロード後に
+  // worktreeで走っていたタスクのタブが汎用復元へ拾われ、ワークスペース直下のcwdで
+  // セッションが復活していた）。`workflowRunnerRef` 自体は再代入しないため `const`。
+  const workflowRunnerRef: { current: WorkflowRunner | undefined } = { current: undefined };
+  const isTaskManagedThread = (id: string): boolean =>
+    workflowRunnerRef.current?.isTaskManagedSessionId(id) ?? false;
+
   // 設定パネルを開かずCodex画面だけ使う場合でも選択肢が揃うよう、起動時に読む
   void settings.load();
   // `@` のファイル候補。両方の画面で同じ一覧とキャッシュを使う
@@ -108,6 +129,7 @@ export function activate(context: vscode.ExtensionContext): void {
     mentions,
     log,
     (activity) => recordActivity({ ...activity, source: 'codex' }),
+    isTaskManagedThread,
   );
   context.subscriptions.push(chat);
 
@@ -121,8 +143,41 @@ export function activate(context: vscode.ExtensionContext): void {
     log,
     (activity) => recordActivity({ ...activity, source: 'claude-code' }),
     (usage) => usageBar.updateClaude(usage),
+    isTaskManagedThread,
   );
   context.subscriptions.push(claudeChat);
+
+  // この時点ではViewが無いため（#57）、「定義ファイルを選んで実行」
+  // 「実行中のワークフローを停止」の最小限の口だけを結線する
+  const workflowStore = new WorkflowRunStore(context.workspaceState);
+  void workflowStore.reconcileAfterReload().then((runs) => {
+    const interrupted = runs.filter((r) =>
+      Object.values(r.tasks).some((t) => t.failure?.kind === 'reloadInterrupted'),
+    );
+    if (interrupted.length > 0) {
+      log.info(
+        `リロードにより中断扱いにしたワークフロー実行: ${interrupted.map((r) => r.runId).join(', ')}`,
+      );
+    }
+  });
+  const workflowRunner = new WorkflowRunner({
+    hosts: { codex: chat, claude: claudeChat },
+    worktreeQueue: new WorktreeCreationQueue(),
+    git: nodeGitCommandRunner,
+    fs: nodeWorktreeFileSystem,
+    filePort: nodeWorkflowFilePort,
+    store: workflowStore,
+    log,
+    readBaseline: () => ({
+      codexSandbox: readConfig().codex.sandbox,
+      codexApprovalMode: readConfig().codex.approvalMode,
+      claudePermissionMode: readClaudeConfig().claude.permissionMode,
+      allowAutoApprove: readWorkflowsConfig().allowAutoApprove,
+    }),
+  });
+  // isTaskManagedThreadのクロージャが参照する箱を埋める。以降の`workflowRunner`
+  // （コマンド登録などで使う）はこの束縛を指し、常にWorkflowRunnerとして扱える
+  workflowRunnerRef.current = workflowRunner;
 
   const conversations = new ConversationViewManager(nodeFileSystem, store, log, (session, turnId) =>
     forkFromTurn(codex, appServer, chat, tree, log, session, turnId),
@@ -248,7 +303,64 @@ export function activate(context: vscode.ExtensionContext): void {
       runAction(actions, tree, log, 'delete', s),
     ),
     vscode.commands.registerCommand('codex.showLog', () => log.show()),
+    vscode.commands.registerCommand('agent.workflows.run', () => runWorkflow(workflowRunner, log)),
+    vscode.commands.registerCommand('agent.workflows.stop', () => stopWorkflow(workflowRunner)),
   );
+}
+
+/** 定義ファイルを選んで実行する（design.md §16。Viewは#57、この時点では最小限）。 */
+async function runWorkflow(runner: WorkflowRunner, log: Logger): Promise<void> {
+  const folder = currentWorkspaceFolder();
+  if (folder === undefined) {
+    void vscode.window.showErrorMessage('ワークフローを実行するにはフォルダを開いてください');
+    return;
+  }
+  const dir = readWorkflowsConfig().dir;
+  const pattern = new vscode.RelativePattern(folder, `${dir}/**/*.{yaml,yml}`);
+  const files = await vscode.workspace.findFiles(pattern, undefined, 200);
+  if (files.length === 0) {
+    void vscode.window.showInformationMessage(
+      `ワークフロー定義が見つかりません（${dir} 配下に .yaml / .yml を置いてください）`,
+    );
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(
+    files.map((f) => ({ label: vscode.workspace.asRelativePath(f), file: f })),
+    { placeHolder: '実行するワークフロー定義を選択' },
+  );
+  if (picked === undefined) {
+    return;
+  }
+
+  const result = await runner.start(picked.file.fsPath, folder.uri.fsPath);
+  if (!result.ok) {
+    const detail = (result.errors ?? []).map((e) => e.message).join('\n');
+    log.error(`ワークフローを開始できません:\n${detail}`);
+    void vscode.window.showErrorMessage(`ワークフローを開始できません: ${detail}`);
+    return;
+  }
+  void vscode.window.showInformationMessage(`ワークフローを開始しました: ${picked.label}`);
+}
+
+/** 実行中のワークフローを選んで停止する。 */
+async function stopWorkflow(runner: WorkflowRunner): Promise<void> {
+  const live = runner.listLive().filter((r) => r.outcome === 'running');
+  if (live.length === 0) {
+    void vscode.window.showInformationMessage('実行中のワークフローはありません');
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(
+    live.map((r) => ({
+      label: r.name === '' ? r.runId : r.name,
+      description: r.defPath,
+      runId: r.runId,
+    })),
+    { placeHolder: '停止するワークフロー実行を選択' },
+  );
+  if (picked === undefined) {
+    return;
+  }
+  runner.stop(picked.runId);
 }
 
 /**
