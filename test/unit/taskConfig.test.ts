@@ -155,6 +155,55 @@ describe('buildEffectiveTaskConfig（design.md §16.16の唯一の入口）', ()
     expect(result.warnings.some((w) => w.includes('bypassPermissions'))).toBe(true);
   });
 
+  it('拡張機能の設定が既定の空文字（CLIへ委譲）でも、YAMLがsandbox: read-onlyを明示すれば通る', () => {
+    // #58セキュリティ監査 critical。plannerだけでなく実行タスク側も同じクランプ
+    // （buildEffectiveTaskConfig → clampSandbox → clampToSafer）を通るため、
+    // baselineが空文字のときにYAML側の安全な明示指定が無視される欠陥は実行タスクにも
+    // 及んでいた（clampToSaferの修正で解消）
+    const emptyBaseline: ExtensionSafetyBaseline = {
+      codexSandbox: '',
+      codexApprovalMode: '',
+      claudePermissionMode: '',
+      allowAutoApprove: false,
+    };
+    const result = buildEffectiveTaskConfig(
+      {
+        provider: 'codex',
+        model: undefined,
+        effort: undefined,
+        approvalMode: 'untrusted',
+        sandbox: 'read-only',
+        autoApprove: false,
+      },
+      emptyBaseline,
+    );
+    expect(result.sandbox).toBe('read-only');
+    expect(result.config.approvalMode).toBe('untrusted');
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('拡張機能の設定が既定の空文字のとき、最安全値以外のYAML指定は無視される', () => {
+    const emptyBaseline: ExtensionSafetyBaseline = {
+      codexSandbox: '',
+      codexApprovalMode: '',
+      claudePermissionMode: '',
+      allowAutoApprove: false,
+    };
+    const result = buildEffectiveTaskConfig(
+      {
+        provider: 'codex',
+        model: undefined,
+        effort: undefined,
+        approvalMode: undefined,
+        sandbox: 'workspace-write',
+        autoApprove: false,
+      },
+      emptyBaseline,
+    );
+    expect(result.sandbox).toBe('');
+    expect(result.warnings.length).toBeGreaterThan(0);
+  });
+
   it('未指定（undefined）のフィールドは拡張機能側の値をそのまま使い、警告を出さない', () => {
     const result = buildEffectiveTaskConfig(
       {

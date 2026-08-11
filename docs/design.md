@@ -1359,6 +1359,30 @@ issueのスコープはClaude側のみだが、指示に基づき同種の経路
 - `src/claude/streamSession.ts`: `refreshSessionCost()`。`refreshContext()` と同じ契機（ターン完了時、会話開始直後）で呼ぶ
 - `src/view/chatScript.ts`: フッターへのコスト表示（`formatSessionCost`）。テンプレートリテラルの中の素のJSのため、`costText.ts` の関数は再利用できず同等のロジックを書き直している（既存の `formatContext` / `formatUsage` と同じ構成）
 
+### 14.17 思考の全文表示と折りたたみ
+
+思考（reasoning）の項目を既定では要約で表示し、展開すると全文が読めるようにする。issue #19・design.mdのTP-34対応。コマンド出力の折りたたみ（TP-*・issue #17、§9.5参照）と同じ操作感（開いた状態は要素と一緒に保つ。再描画で勝手に閉じない）に揃え、別の作りを増やさない。
+
+#### 調査（実測・スキーマの両方で確認）
+
+- `codex app-server generate-json-schema` の `ReasoningThreadItem`（`ThreadItem`のoneOf、v2スキーマにのみ存在）を読むと、`summary` / `content` は**どちらも `string[]`**（`ReasoningItemContent` / `ReasoningItemReasoningSummary` という `{type, text}` 形のオブジェクト配列ではない）。既存コード（`normalizeItem`）は `str(item['summary'])` で文字列を期待していたため、配列を渡されると常に空文字列になり、次点の `readContentText(item['content'])` も「`{type: 'text', text}` の配列」を期待するコードなので、こちらも空文字列になる。**つまり実装時点で `summary` と `content` のどちらを見ても中身が読めていなかった**（Phase 0のコメントにある「summaryとcontentがどちらも空配列で届いた」という実測と符合する。空配列なので `str()` はそもそも通らない）
+- 中身は3種の通知でしか届かない（Phase 0で確認済み、スキーマでも該当メソッドを確認）:
+  - `item/reasoning/summaryTextDelta`（`{itemId, delta, summaryIndex, threadId, turnId}`）: 要約の逐次
+  - `item/reasoning/summaryPartAdded`（`{itemId, summaryIndex, threadId, turnId}`。本文を持たない、新しい段落の開始の合図）
+  - `item/reasoning/textDelta`（`{itemId, delta, contentIndex, threadId, turnId}`）: **全文の逐次**
+- Claude Codeは `thinking` ブロック（`streamJson.ts` の `applyAssistant` / `applyPartial`）で本文を取る。要約と全文が別に取れる仕組みはAPI上そもそも無い（Claude API側の `thinking.display` はモデルにより挙動が異なり、要約(`summarized`)か空(`omitted`)のどちらかで、生の思考過程が両方届く経路は無い）。Claude Code CLIが何を渡すかに依存するが、いずれにせよ「要約と全文を両方持つ」ケースはCodex固有
+
+#### 実装
+
+要約と全文を「別に取れるかどうか」で表示を分ける。両方揃うのはCodexだけなので、必然的にプロバイダで挙動が分かれる。
+
+- `src/appserver/chatState.ts`: `ChatItem.reasoningFull`（`string | undefined`）を追加。`normalizeItem` の `reasoning` は `summary` を `text`（要約）、`content` を `reasoningFull`（全文）として別々に持つ（両方とも `string[]` を `readStringArray` で `\n\n` 区切りの文字列へ変換）。`content` が空なら `reasoningFull` は `undefined`（「全文が無い」を表す）
+- `applyEvent` に `item/reasoning/summaryTextDelta` `item/reasoning/summaryPartAdded` `item/reasoning/textDelta` を追加（`appendReasoningDelta`）。`summaryPartAdded` は本文を持たないため、既存の要約が空でなければ区切り（`\n\n`）を1つ追記する合図として扱う（先頭に空行を作らないよう、要約がまだ無ければ何もしない）
+- `upsertItem` は `text` と同様、`item/completed` の `reasoningFull` が `undefined`（`content` が空配列）でもデルタで積んだ値を消さない（Phase 0の実測どおり `item/completed` 自体は空で届くため、消してしまうと消えたように見える）
+- `src/claude/streamJson.ts`: **変更なし**。Claude Codeの `thinking` は要約・全文の区別が無い単一のテキストで、既にそのまま `text` に入っているため、`reasoningFull` を使わない（後述の表示側の分岐で自動的にコマンド出力と同じ行数折りたたみになる）
+- `src/view/chatScript.ts`: `renderBody` を拡張。`item.kind === 'reasoning'` かつ `reasoningFull` が要約と別に存在するとき（Codex）は、既定で要約(`text`)を見せ、展開ボタンで全文(`reasoningFull`)へ丸ごと切り替える（コマンド出力のような「末尾だけ」ではない）。それ以外（全文が無い、または要約と同じ。Claude Codeは常にこちら）は、コマンド出力と同じ `MAX_VISIBLE_LINES`（20行）での折りたたみに落ちる。展開の開閉状態は要素と一緒に保つ既存の仕組み（`node.expanded`）をそのまま使う
+- 「全文が無い場合に展開の操作が出ない」は自然に満たされる: 要約と全文の切り替えは全文が無ければ発生せず、行数折りたたみも短ければ `overflow` が立たずボタンが出ない
+
 ## 15. 作業記録（日報・週報連携）
 
 この拡張機能から実行したセッションを、日報/週報システムが読める形で残す。
@@ -1820,21 +1844,30 @@ worktreeを作れないため、ディレクトリの複製による隔離（疑
 
 ゴールの文を渡すと、タスク分解済みのYAMLを作る。規模の大きいゴールでは、あいだにロードマップを挟む2段の経路（§16.19）を使う。この節はどちらの経路にも共通する、生成そのものの扱いを述べる。
 
-1. コマンド（`workflow.plan`）でゴールを入力する
+1. コマンド（`agent.workflows.plan`。既存の `agent.workflows.run` / `.stop` / `.view` と名前を揃える）でゴールを入力する
 2. 分解用のセッションを1つ作り、スキーマの説明と現在のワークスペースの情報を添えてゴールを渡す。返答はYAMLのみとするよう指示する
 3. 受け取ったYAMLを§16.2の検証にかける。コードフェンスで囲まれて返ることが多いので、剥がしてからパーサへ渡す。通らなければ、検証エラーを添えてもう1度だけ投げ直す
 4. `agent.workflows.dir` へ保存し、エディタで開く。ワークフローViewを同時に開き、依存関係の図を見ながら人が直す
 5. 人が直したら「実行」で走り出す
 
-生成に使うプロバイダは `defaults.provider` と同じ既定（設定で変更可）。
+生成に使うプロバイダは `defaults.provider` の組み込み既定値（`codex`）に固定する。設定での切り替えは提供しない（実装を単純に保つための判断。プロバイダごとの分解品質に差が出て需要が生まれたら、`agent.workflows.plannerProvider` のような設定を別途足す）。
 
 #### 分解セッションの制限
 
 分解セッションはワークスペースの中身を読む。つまり**リポジトリに仕込まれた文が指示として効きうる**。「タスクを実行しないでください」とプロンプトで頼むだけでは足りない。
 
-- 分解セッションは `sandbox: read-only` 相当で起動し、承認要求は全て拒否する。プロンプトの指示ではなく起動時の設定で縛る
+- 分解セッションは `sandbox: read-only` 相当で起動し、承認要求は全て拒否する。プロンプトの指示ではなく起動時の設定で縛る。**この起動設定は §16.16 のクランプ（`clampSandbox` 等。拡張機能側の設定より緩めない）を経由しない。** クランプは「baselineより緩めない」ための道具であり、「baselineが何であれ最も安全な値を強制する」という分解セッションの要求とは意図が逆で、`codex.sandbox` 等が既定の空文字（CLI側の設定に委譲する、の意）のときクランプ経由だと安全性を判定できずbaselineをそのまま採用してしまう（後述のクランプ側の欠陥と合わせて自律実行向けの設定がそのまま漏れる経路になっていた。#58セキュリティ監査 critical）。分解セッションは常に固定の最安全値を直接指定し、起動直前にその値がずれていないかを確認してから開く（ずれていれば起動しない）
+- ワークスペース情報（フォルダ構成・ファイル名）はエージェント由来の文字列と同様に信用しない。ファイル名には改行を含められるため、制御文字を落としてからプロンプトへ埋め込み、個々のエントリ名の長さにも上限を設ける（§16.7・§16.8の「CLI・エージェント由来の文字列は制御文字を落としてから埋め込む」という既存の形に揃える）
+- 分解セッションの応答は、YAMLとしてパースする直前にサイズ上限を確認する（§16.2の定義ファイル読み込みと同じ上限。巨大な応答でパーサ自体を無検査に走らせない）
 - 生成されたYAMLに `autoApprove: true` / 非空の `allow` / `sandbox` や `approvalMode` の緩和指定が含まれる場合は、通常の検証エラーとは別に強調して知らせる。エディタでは該当行へ移動し、ワークフローViewの警告欄にも「このワークフローは既定の安全設定を上書きしています」と出す。多数のタスクに紛れた1件の `allow` を人が見落とすのを防ぐ
 - 生成したまま自動で実行することはしない
+
+#### ファイル名
+
+保存先ファイル名は、ゴール文から作った短いスラッグに `.yaml` を付けたもの。
+
+- スラッグ化: ファイル名として不正な記号（`\ / : * ? " < > |`）と空白・ハイフンを区切りとみなして畳み、`-` で結合する。日本語のゴール文はローマ字化せずそのまま使う（依存ライブラリを増やさない・意味を保つ判断）。最大40文字で切り詰め、Windowsの予約デバイス名（`CON` `PRN` `AUX` `NUL` `COM1`〜`COM9` `LPT1`〜`LPT9`）に一致する場合と、有効な文字が1つも残らない場合は `workflow` へ落とす
+- 重複: `agent.workflows.dir` 配下の既存ファイル名（拡張子を除いた部分）と衝突する場合は `-2` `-3` ... と連番を足す。一覧取得と保存の間に別の生成が割り込む競合を避けるため、実際の書き込みは排他フラグで行い、書き込み時点で衝突が判明したらその名前を候補から外してもう一度連番を進める
 
 ### 16.10 モジュール構成
 
@@ -2051,6 +2084,12 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 | `model` `effort`                              | 自由に指定できる（これらは `machine-overridable` であり、実行経路や権限には関わらない）                                                                                                |
 | `issue`                                       | 正の整数のみ。PR/MR本文の `Closes #<N>` とホストのCLIの引数に入る（§16.18）                                                                                                            |
 | 統合・PR/MR・最終マージの設定                 | **YAMLからは指定できない**。`agent.workflows.forge` / `pullRequest` / `finalMerge` は拡張機能の設定にだけ置く（後述）                                                                  |
+
+**baselineが空文字（CLIの設定へ委譲する、の意）のときの扱い。** `codex.sandbox` / `codex.approvalMode` / `claude.permissionMode` はいずれも既定値が空文字で、これは拡張機能を入れた直後の素の状態（`~/.codex/config.toml` や Claude の `settings.json` に委ねる）を表す。空文字は安全順序表のどの値とも一致しないため、素朴には「大小を比較できない＝判定不能」として拡張機能側の値（空文字）をそのまま採用してしまう。しかしこれには抜け穴があった。**空文字は「パラメータを送らない」の意味であり、YAML側が `sandbox: read-only` のように最も安全な値を明示しても無視され、実効的にはCLI側の設定（自律実行向けかもしれない）にそのまま委ねられてしまう**（#58セキュリティ監査 critical。分解セッション（本節）・実行タスクの `sandbox` 明示指定の両方が影響を受けていた）。
+
+そこでクランプ（`clampToSafer`）は、baselineが安全順序表に無い値（空文字を含む）のときだけ特例を設ける。**YAML側の値が安全順序表の最安全値（例: `sandbox: read-only`、Codexの `approvalMode: untrusted`）であれば、baselineが不明でも採用する。** 最安全値はこれ以上緩めようがないため、baselineが何であっても「緩める」結果にはなりえない、という一点だけを根拠にする。それ以外の値（baselineより緩いか安全か判定できない）は従来どおり拒否し、拡張機能側の値（空文字）を採用する。
+
+分解セッション（前節）はこのクランプの一般規則にも頼らない。「baselineより緩めない」という一般規則の意図と、「baselineが何であれ常に最も安全な値で起動する」という分解セッションの要求は逆であるため、固定の最安全値を直接使い、クランプを経由しない多層防御にしてある。
 
 `sandboxWritableRoots` と `sandboxNetworkAccess` は、`workspace-write` の範囲をワークスペースの外やネットワークへ広げる**追加の許可**である。YAMLにこれを指定する項目は設けていないので、素直に作るなら拡張機能の設定をそのまま引き継ぐことになる。だがそれをすると、人が対話セッション用に意識して許可した拡張が、**YAMLからは見えも書けもしない形で無人実行のタスクへ暗黙に伝わる**。クランプの対象になるフィールドが存在しない以上、安全側（拡張しない）に固定する。タスクに広い書き込み先が要るなら、`cwd` か `isolation` で表現する。
 

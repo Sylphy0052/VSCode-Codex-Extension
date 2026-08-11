@@ -133,8 +133,11 @@ describe('aggregateProgress（design.md §16.8「全体の進捗」）', () => {
       pending: 1,
       running: 2,
       waitingApproval: 0,
+      waitingReply: 0,
+      merging: 0,
       done: 1,
       failed: 0,
+      blocked: 0,
       skipped: 0,
     });
   });

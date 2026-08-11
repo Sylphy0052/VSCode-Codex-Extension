@@ -651,12 +651,19 @@ export class WorktreeCreationQueue {
 }
 
 /**
- * `cleanup: remove` かつタスクが `done` のときだけ撤去してよい（design.md §16.6）。
- * `failed` は必ず残す。純粋関数にしておき、実際の撤去（`WorktreeCreationQueue.remove`）を
- * 呼ぶかどうかは呼び出し側（`runner.ts`）がこれで判定する。
+ * `cleanup: remove` / `after-merge` かつタスクが `done` のときだけ撤去してよい
+ * （design.md §16.6 / §16.17）。`failed` / `blocked` は必ず残す（原因調査に要る）。
+ * 純粋関数にしておき、実際の撤去（`WorktreeCreationQueue.remove`）を呼ぶかどうかは
+ * 呼び出し側（`runner.ts`）がこれで判定する。
+ *
+ * `done`の意味は design.md §16.17 で「統合ブランチへ入った（＝マージ成功）」に変わった
+ * ため、`remove`（「タスクが`done`になった時点で撤去」）と`after-merge`（「マージが
+ * 成功した時点で撤去」）は実質同じ事象で発火する。それでも列挙値として2つ残すのは、
+ * `remove`が`after-merge`より前から存在する値（design.md §16.6由来）で、既存の定義
+ * ファイルとの後方互換のため。
  */
 export function shouldRemoveWorktree(cleanup: CleanupMode, taskState: TaskState): boolean {
-  return cleanup === 'remove' && taskState === 'done';
+  return (cleanup === 'remove' || cleanup === 'after-merge') && taskState === 'done';
 }
 
 /** `.gitignore` に追記を促す文言に使う1行。 */

@@ -1,3 +1,5 @@
+import * as fsPromises from 'node:fs/promises';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { ActivityLogger, nodeClock, resolveBufferDir } from './activity/activityLogger';
 import type { RecordRequest as ActivityRequest } from './activity/activityLogger';
@@ -41,6 +43,17 @@ import {
 } from './orchestrator/roadmap';
 import { WorkflowRunStore } from './orchestrator/runStore';
 import { WorkflowRunner, nodeWorkflowFilePort } from './orchestrator/runner';
+import type { ExtensionSafetyBaseline } from './orchestrator/taskConfig';
+import {
+  buildWorkspaceSummary,
+  nodePlannerWorkspacePort,
+  planWorkflow,
+  resolveUniqueFileName,
+  slugifyGoal,
+  locateSecurityWarningLine,
+  type PlanWorkflowResult,
+} from './orchestrator/planner';
+import { DEFAULT_PROVIDER, MAX_PROMPT_LENGTH } from './orchestrator/workflow';
 import { ProviderRegistry } from './provider/registry';
 import type { AgentProvider } from './provider/types';
 import { createLogger, type Logger } from './log';
@@ -201,12 +214,9 @@ export function activate(context: vscode.ExtensionContext): void {
     filePort: nodeWorkflowFilePort,
     store: workflowStore,
     log,
-    readBaseline: () => ({
-      codexSandbox: readConfig().codex.sandbox,
-      codexApprovalMode: readConfig().codex.approvalMode,
-      claudePermissionMode: readClaudeConfig().claude.permissionMode,
-      allowAutoApprove: readWorkflowsConfig().allowAutoApprove,
-    }),
+    // `planWorkflowCommand`（#58）も同じ基準を使う。#52セキュリティ監査指摘の
+    // クランプ入口を1つに保つのと同じ理由で、baselineの読み方も1箇所にまとめる
+    readBaseline: readSafetyBaseline,
   });
   // isTaskManagedThreadのクロージャが参照する箱を埋める。以降の`workflowRunner`
   // （コマンド登録などで使う）はこの束縛を指し、常にWorkflowRunnerとして扱える
@@ -372,10 +382,23 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand('agent.workflows.stop', () => stopWorkflow(workflowRunner)),
     vscode.commands.registerCommand('agent.workflows.view', () => workflowView.show()),
+    vscode.commands.registerCommand('agent.workflows.plan', () =>
+      planWorkflowCommand(chat, claudeChat, workflowView, log),
+    ),
     vscode.commands.registerCommand('agent.workflows.roadmap', () =>
       runRoadmap(roadmapIssuePort, roadmapGenerationPort, log),
     ),
   );
+}
+
+/** `workflowRunner` / `planWorkflowCommand` が共通して使うクランプ基準（design.md §16.16）。 */
+function readSafetyBaseline(): ExtensionSafetyBaseline {
+  return {
+    codexSandbox: readConfig().codex.sandbox,
+    codexApprovalMode: readConfig().codex.approvalMode,
+    claudePermissionMode: readClaudeConfig().claude.permissionMode,
+    allowAutoApprove: readWorkflowsConfig().allowAutoApprove,
+  };
 }
 
 /**
@@ -540,6 +563,193 @@ async function runRoadmap(
 
   const doc = await vscode.workspace.openTextDocument(result.path);
   await vscode.window.showTextDocument(doc);
+}
+
+/**
+ * ゴール文からワークフロー定義（YAML）を生成する（design.md §16.9、`agent.workflows.plan`）。
+ *
+ * `planWorkflow`（`planner.ts`）はYAML文字列を作るだけで、実行は一切行わない。
+ * ここではその結果を保存し、エディタとワークフローViewを開くところまでを担う。
+ * `WorkflowRunner.start` は呼ばない — 生成したワークフローを走らせるのは、人が
+ * ワークフローViewから明示的に「実行」を選んだとき（design.md §16.13）。
+ */
+async function planWorkflowCommand(
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
+  view: WorkflowViewManager,
+  log: Logger,
+): Promise<void> {
+  const folder = currentWorkspaceFolder();
+  if (folder === undefined) {
+    void vscode.window.showErrorMessage('ワークフローを生成するにはフォルダを開いてください');
+    return;
+  }
+  const goal = await vscode.window.showInputBox({
+    title: 'ワークフローのゴール',
+    prompt:
+      '達成したいことを文章で入力してください（例: 認証機能を追加してテストとレビューまで終える）',
+    ignoreFocusOut: true,
+    // `workflow.ts`のprompt/done等と同じ上限を流用する（design.md §16.9セキュリティ監査
+    // low「ゴール入力に長さ上限が無い」）。ここで拒否しておけば、プロンプトへ埋め込んだ
+    // 結果生成されるYAMLがMAX_PROMPT_LENGTHで弾かれる事態を入力時点で避けられる
+    validateInput: (value) =>
+      value.length > MAX_PROMPT_LENGTH
+        ? `ゴールが長すぎます（上限${MAX_PROMPT_LENGTH}文字）: ${value.length}文字`
+        : undefined,
+  });
+  if (goal === undefined || goal.trim() === '') {
+    return;
+  }
+
+  const provider = DEFAULT_PROVIDER;
+  const host = provider === 'claude' ? claudeChat : chat;
+  const workspaceRoot = folder.uri.fsPath;
+
+  const result = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'ワークフローを生成しています…' },
+    async () => {
+      const workspaceSummary = await buildWorkspaceSummary(workspaceRoot, nodePlannerWorkspacePort);
+      return planWorkflow({
+        goal,
+        workspaceSummary,
+        provider,
+        host,
+        cwd: workspaceRoot,
+        baseline: readSafetyBaseline(),
+        log,
+      });
+    },
+  );
+
+  if (result.ok) {
+    await handlePlanSuccess(result, goal, workspaceRoot, view, log);
+    return;
+  }
+  await handlePlanFailure(result, log);
+}
+
+/**
+ * 一覧取得と書き込みの間に別の生成が割り込んでも上書きしないよう、排他フラグ（`wx`）で
+ * 書き込む（design.md §16.9セキュリティ監査 low）。`EEXIST`（他プロセス・他コマンド
+ * 呼び出しが同名で先に作っていた）なら、その名前を候補集合へ足して連番を1つ進め、
+ * 空いている名前が見つかるまで再試行する。
+ */
+async function writeUniqueWorkflowFile(
+  dirAbs: string,
+  slug: string,
+  existingBaseNames: Set<string>,
+  yaml: string,
+): Promise<string> {
+  for (;;) {
+    const baseName = resolveUniqueFileName(slug, existingBaseNames);
+    const filePath = path.join(dirAbs, `${baseName}.yaml`);
+    try {
+      await fsPromises.writeFile(filePath, yaml, { encoding: 'utf8', flag: 'wx' });
+      return filePath;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST') {
+        throw e;
+      }
+      existingBaseNames.add(baseName);
+    }
+  }
+}
+
+/**
+ * 生成が検証を通ったときの後処理。`agent.workflows.dir`へ保存し、エディタとワークフロー
+ * Viewを開く（design.md §16.9手順4）。セキュリティ警告があれば、該当行へ移動したうえで
+ * 強調して知らせる（design.md §16.9「多数のタスクに紛れた1件のallowを人が見落とすのを
+ * 防ぐ」）。
+ */
+async function handlePlanSuccess(
+  result: Extract<PlanWorkflowResult, { ok: true }>,
+  goal: string,
+  workspaceRoot: string,
+  view: WorkflowViewManager,
+  log: Logger,
+): Promise<void> {
+  const dirConfig = readWorkflowsConfig().dir;
+  const dirAbs = path.join(workspaceRoot, dirConfig);
+  await fsPromises.mkdir(dirAbs, { recursive: true });
+
+  const pattern = new vscode.RelativePattern(dirAbs, '*.{yaml,yml}');
+  const existingFiles = await vscode.workspace.findFiles(pattern, undefined, 500);
+  const existingBaseNames = new Set(
+    existingFiles.map((f) => path.basename(f.fsPath).replace(/\.ya?ml$/i, '')),
+  );
+  const filePath = await writeUniqueWorkflowFile(
+    dirAbs,
+    slugifyGoal(goal),
+    existingBaseNames,
+    result.yaml,
+  );
+
+  // エディタより先にViewを開く。エディタの`showTextDocument`が最後に呼ばれるほうへ
+  // フォーカスが残るようにするため（Viewのパネル作成自体はフォーカスを奪う作りのため）
+  view.previewDefinition(
+    filePath,
+    result.definition,
+    result.securityWarnings.map((w) => ({
+      kind: 'plannerSecurity' as const,
+      taskId: w.taskId,
+      message: w.message,
+    })),
+  );
+
+  const doc = await vscode.workspace.openTextDocument(filePath);
+  const editor = await vscode.window.showTextDocument(doc, { preview: false });
+
+  if (result.securityWarnings.length > 0) {
+    const first = result.securityWarnings[0];
+    if (first !== undefined) {
+      const line = locateSecurityWarningLine(result.yaml, first.taskId, first.kind);
+      if (line !== undefined) {
+        const pos = new vscode.Position(Math.max(0, line - 1), 0);
+        editor.selection = new vscode.Selection(pos, pos);
+        editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+      }
+    }
+    log.warn(
+      `[planner] 生成されたワークフローは既定の安全設定を上書きしています: ${result.securityWarnings
+        .map((w) => w.message)
+        .join(' / ')}`,
+    );
+    void vscode.window.showWarningMessage(
+      `生成されたワークフローは既定の安全設定を上書きする指定を含んでいます（${result.securityWarnings.length}件）。` +
+        '内容を確認してから実行してください。',
+    );
+  } else {
+    void vscode.window.showInformationMessage(
+      `ワークフローを生成しました: ${path.relative(workspaceRoot, filePath)}` +
+        (result.attempts > 1 ? '（検証エラーを踏まえて再生成しました）' : ''),
+    );
+  }
+}
+
+/**
+ * 2回とも検証を通らなかったときの後処理（design.md §16.9「生の返答をエディタで開いて
+ * 人に委ねる」）。ワークフロー定義として保存はしない（無効なYAMLをそのまま
+ * `agent.workflows.dir`へ置くと、他の一覧処理を壊しうるため）。
+ */
+async function handlePlanFailure(
+  result: Extract<PlanWorkflowResult, { ok: false }>,
+  log: Logger,
+): Promise<void> {
+  log.error(
+    `[planner] 2回の生成でもワークフロー定義の検証を通せませんでした: ${result.lastErrors
+      .map((e) => e.message)
+      .join(' / ')}`,
+  );
+  const doc = await vscode.workspace.openTextDocument({
+    content: result.rawResponse,
+    language: 'yaml',
+  });
+  await vscode.window.showTextDocument(doc, { preview: false });
+  void vscode.window.showErrorMessage(
+    'ワークフロー定義の生成に失敗しました（検証エラーを踏まえた再生成でも通りませんでした）。' +
+      '開いたエディタの内容を確認し、必要なら手で直してから保存してください。',
+  );
 }
 
 /**
