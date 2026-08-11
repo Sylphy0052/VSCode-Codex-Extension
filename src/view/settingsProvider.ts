@@ -15,7 +15,9 @@ import { effortsFor, parseModelCatalog, type ModelInfo } from '../codex/modelCat
 import { isSandboxRelaxed } from '../codex/sandboxPolicy';
 import { readClaudeConfig, readConfig } from '../config';
 import type { Logger } from '../log';
+import { accountNotLoadedYet, type AccountSnapshot } from '../provider/account';
 import type { McpServersSnapshot } from '../provider/mcpServers';
+import type { CommandResult } from '../process/commandRunner';
 import type { FileSystemPort } from '../session/ports';
 
 /** 一覧をまだ読んでいない状態。CLIへの問い合わせが空だったのと区別する。 */
@@ -23,6 +25,12 @@ const notLoadedYet: McpServersSnapshot = { ok: false, reason: 'まだ読み込�
 
 /** `setMcpServerEnabled` / `ClaudeMcpProbe.toggle` と同じ形の結果。 */
 export type McpToggleResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * ログイン/ログアウト操作の結果。
+ * `error` が `undefined` のときは確認ダイアログでの取り消しを意味し、エラー表示はしない。
+ */
+export type AccountActionResult = { ok: true } | { ok: false; error: string | undefined };
 
 /** Webviewから変更を許すキー。ここに無いキーは無視する。 */
 export const EDITABLE_KEYS = ['model', 'reasoningEffort', 'approvalMode', 'sandbox'] as const;
@@ -53,6 +61,8 @@ export interface SettingsSnapshot {
   profile: string;
   /** MCPサーバーの一覧・状態（issue #27）。 */
   mcpServers: McpServersSnapshot;
+  /** ログイン状態（issue #29）。 */
+  account: AccountSnapshot;
 }
 
 export interface ClaudeSettingsSnapshot {
@@ -75,6 +85,8 @@ export interface ClaudeSettingsSnapshot {
   defaults: ClaudeDefaults;
   /** MCPサーバーの一覧・状態（issue #27）。 */
   mcpServers: McpServersSnapshot;
+  /** ログイン状態（issue #29）。 */
+  account: AccountSnapshot;
 }
 
 /**
@@ -86,11 +98,13 @@ export class SettingsProvider {
   private models: ModelInfo[] = [];
   private defaults: CodexDefaults = noDefaults;
   private codexMcp: McpServersSnapshot = notLoadedYet;
+  private codexAccount: AccountSnapshot = accountNotLoadedYet;
 
   private claudeModels: ModelInfo[] = [];
   private claudeDefaults: ClaudeDefaults = noClaudeDefaults;
   private claudeAgents: ClaudeAgentInfo[] = [];
   private claudeMcp: McpServersSnapshot = notLoadedYet;
+  private claudeAccount: AccountSnapshot = accountNotLoadedYet;
 
   /**
    * @param listCodexModels `model/list` の結果。取れなければ空配列。
@@ -101,6 +115,11 @@ export class SettingsProvider {
    * @param listClaudeMcpServers `mcp_status` の結果。
    * @param setCodexMcpServerEnabled `config/value/write` + `config/mcpServer/reload`。
    * @param setClaudeMcpServerEnabled `mcp_toggle`。
+   * @param readCodexAccount `account/read` の結果（issue #29）。
+   * @param readClaudeAccount `claude auth status --json` の結果（issue #29）。
+   * @param logoutCodexCli `codex logout` の実行結果。
+   * @param logoutClaudeCli `claude auth logout` の実行結果。
+   * @param loginCodexApiKeyCli `codex login --with-api-key` の実行結果。
    */
   constructor(
     private readonly fs: FileSystemPort,
@@ -120,6 +139,11 @@ export class SettingsProvider {
       name: string,
       enabled: boolean,
     ) => Promise<McpToggleResult>,
+    private readonly readCodexAccount: () => Promise<AccountSnapshot>,
+    private readonly readClaudeAccount: () => Promise<AccountSnapshot>,
+    private readonly logoutCodexCli: () => Promise<CommandResult>,
+    private readonly logoutClaudeCli: () => Promise<CommandResult>,
+    private readonly loginCodexApiKeyCli: (apiKey: string) => Promise<CommandResult>,
     private readonly log: Logger,
   ) {}
 
@@ -133,18 +157,27 @@ export class SettingsProvider {
     }
   }
 
-  /** モデル一覧・既定値・MCPサーバー一覧を読み直す。 */
+  /** モデル一覧・既定値・MCPサーバー一覧・ログイン状態を読み直す。 */
   async load(): Promise<void> {
     this.loaded = true;
     // CLIの起動を待つ時間が二重にならないよう、まとめて聞く
-    [this.models, this.claudeModels, this.claudeAgents, this.codexMcp, this.claudeMcp] =
-      await Promise.all([
-        this.loadCodexModels(),
-        this.loadClaudeModels(),
-        this.loadClaudeAgents(),
-        this.listCodexMcpServers(),
-        this.listClaudeMcpServers(),
-      ]);
+    [
+      this.models,
+      this.claudeModels,
+      this.claudeAgents,
+      this.codexMcp,
+      this.claudeMcp,
+      this.codexAccount,
+      this.claudeAccount,
+    ] = await Promise.all([
+      this.loadCodexModels(),
+      this.loadClaudeModels(),
+      this.loadClaudeAgents(),
+      this.listCodexMcpServers(),
+      this.listClaudeMcpServers(),
+      this.readCodexAccount(),
+      this.readClaudeAccount(),
+    ]);
 
     const toml = await this.fs.readTextFile(this.configTomlPath);
     this.defaults = toml === undefined ? noDefaults : extractDefaults(toml);
@@ -220,6 +253,7 @@ export class SettingsProvider {
       defaults: this.defaults,
       profile: config.codex.profile,
       mcpServers: this.codexMcp,
+      account: this.codexAccount,
     };
   }
 
@@ -236,6 +270,7 @@ export class SettingsProvider {
       agent: config.agent,
       defaults: this.claudeDefaults,
       mcpServers: this.claudeMcp,
+      account: this.claudeAccount,
     };
   }
 
@@ -258,6 +293,52 @@ export class SettingsProvider {
       this.log.warn(`MCPサーバーを切り替えられませんでした (${cli}/${name}): ${result.error}`);
     }
     return result;
+  }
+
+  /**
+   * Codexからログアウトする（issue #29）。`codex logout` は資格情報を削除する不可逆な操作
+   * のため、MCPの有効/無効切替とは違い確認ダイアログを必ず挟む。
+   */
+  async logoutCodex(): Promise<AccountActionResult> {
+    if (!(await confirmLogout('Codex'))) {
+      return { ok: false, error: undefined };
+    }
+    const result = await this.logoutCodexCli();
+    if (result.code !== 0) {
+      this.log.warn(`Codexからログアウトできませんでした: ${result.stderr.trim()}`);
+      return { ok: false, error: result.stderr.trim() || '不明なエラー' };
+    }
+    this.log.info('Codexからログアウトしました');
+    return { ok: true };
+  }
+
+  /** Claude Codeからログアウトする（issue #29）。 */
+  async logoutClaude(): Promise<AccountActionResult> {
+    if (!(await confirmLogout('Claude Code'))) {
+      return { ok: false, error: undefined };
+    }
+    const result = await this.logoutClaudeCli();
+    if (result.code !== 0) {
+      this.log.warn(`Claude Codeからログアウトできませんでした: ${result.stderr.trim()}`);
+      return { ok: false, error: result.stderr.trim() || '不明なエラー' };
+    }
+    this.log.info('Claude Codeからログアウトしました');
+    return { ok: true };
+  }
+
+  /**
+   * CodexへAPIキーでログインする（issue #29）。
+   * キーの値はここから先（`codex login --with-api-key` の標準入力）にしか渡らず、
+   * ログにも設定にも残さない。
+   */
+  async loginCodexApiKey(apiKey: string): Promise<AccountActionResult> {
+    const result = await this.loginCodexApiKeyCli(apiKey);
+    if (result.code !== 0) {
+      this.log.warn(`CodexへAPIキーでログインできませんでした: ${result.stderr.trim()}`);
+      return { ok: false, error: result.stderr.trim() || '不明なエラー' };
+    }
+    this.log.info('CodexへAPIキーでログインしました');
+    return { ok: true };
   }
 
   /**
@@ -333,6 +414,16 @@ export class SettingsProvider {
 
     return true;
   }
+}
+
+/** ログアウトは資格情報を削除する不可逆な操作のため、必ず確認を挟む（issue #29）。 */
+async function confirmLogout(label: string): Promise<boolean> {
+  const choice = await vscode.window.showWarningMessage(
+    `${label}からログアウトします。保存されている認証情報が削除されます。`,
+    { modal: true },
+    'ログアウトする',
+  );
+  return choice === 'ログアウトする';
 }
 
 async function confirmBypass(): Promise<boolean> {

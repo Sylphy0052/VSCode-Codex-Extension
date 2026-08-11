@@ -370,6 +370,8 @@ Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡
 
 **MCPサーバーの一覧**: 両タブの下部に、設定されているMCPサーバーの一覧と有効/無効の切替を出す（§14.14）。取得・切替の経路はCodexとClaude Codeで別物（プロトコルの非対称は§14.14を参照）。
 
+**アカウント**: MCPサーバーの一覧より上に、ログイン状態とlogin/logoutの操作を出す（§14.15）。状態の取得はCodexが `account/read`（app-server）、Claude Codeが `claude auth status --json`。ログアウトはどちらもCLIのトップレベルサブコマンドを直接実行し、確認ダイアログを必ず挟む。ブラウザでのOAuthログインは拡張機能内で完結できないため、統合ターミナルへコマンドを入力するところまでに留める（自動実行はしない）。
+
 ### 使用量の表示
 
 レート制限の使用量をステータスバーに常時表示し、詳細を操作パネルに出す。
@@ -1081,6 +1083,90 @@ Phase 0（issue #1 Z-07 / issue #2 Z-10）で「両方とも一覧・有効無�
 - `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `mcpServers: McpServersSnapshot` を追加。`toggleMcpServer(cli, name, enabled)` を新設
 - `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画とトグル操作。一覧が取れない場合はその旨を出し、0件（未設定）とは表示を分ける
 
+### 14.15 ログイン状態の表示とlogin / logout
+
+TUIには無い専用画面だが、TUI起動時のバナーやステータス行に相当する情報。issue #29・design.mdのTP-53対応。サイドバーの設定パネル（§6「操作パネル」）に、CodexとClaude Codeそれぞれのタブへ「アカウント」欄を出す。
+
+Phase 0（issue #1 Z-07）のコメントでは「両方ともログイン状態の取得とlogin/logoutを実装できる」ところまで確認済みだった。本issueでは実際のプロトコルとCLIのサブコマンドを調べ、**状態の読み取りはPhase 0の想定どおりapp-server/control protocol経由、login・logoutの実行はCLIのトップレベルサブコマンドへ委譲する**という構成に落ち着いた。理由は「実装」の項を参照。
+
+#### Codex: 状態は `account/read`、操作は `codex login` / `codex logout`
+
+`codex app-server generate-json-schema --out <DIR>` の `ClientRequest.json` で確認した、`account/` 配下のメソッド一覧（実測。codex-cli 0.147.0）:
+
+```
+account/read
+account/login/start
+account/login/cancel
+account/logout
+account/rateLimits/read（#15で対応済み）
+account/rateLimitResetCredit/consume
+account/usage/read
+account/workspaceMessages/read
+account/sendAddCreditsNudgeEmail
+```
+
+（`account/chatgptAuthTokens/refresh` はサーバから届く要求で、値を捏造できないため対象外。プロジェクトの決定事項）
+
+- `account/read`（`GetAccountParams { refreshToken? }` → `GetAccountResponse { account, requiresOpenaiAuth }`）は**スレッドを開始していなくても呼べる**（実測。`mcpServerStatus/list` と同じ性質）。実際に呼んだ生の応答（メールアドレスは伏せた）:
+
+  ```json
+  {
+    "account": { "type": "chatgpt", "email": "<redacted>", "planType": "prolite" },
+    "requiresOpenaiAuth": true
+  }
+  ```
+
+- `account` はスキーマ上、判別共用体 `Account`（`type: 'apiKey' | 'chatgpt' | 'amazonBedrock'`）。この環境ではChatGPTアカウントでログイン済みのため、`apiKey` / `amazonBedrock` の実際の応答形は確認していない（スキーマ根拠のみ）
+- `account/login/start`（`LoginAccountParams`。`type` ごとに `apiKey` / `chatgpt` / `chatgptDeviceCode` / `chatgptAuthTokens`（内部用、対象外）/ `amazonBedrock` に分かれる）と `account/login/cancel` はスキーマの確認のみに留め、**実行はしていない**。ChatGPTアカウント（`type: 'chatgpt'`）でのログインは応答に `authUrl` を含み、ブラウザでの操作を経てから `account/login/completed` 通知（`{success, error?, loginId?}`）が届く形になっている（スキーマ根拠）。`AppServerClient` は1回の要求ごとにapp-serverプロセスを起動して終わったら落とす作り（`listMcpServers()` 等と同じ）のため、この待機を挟む操作をそのまま実装すると、ブラウザでの操作を待つ間だけプロセスを生かし続ける・キャンセルを扱う、という別種のライフサイクル管理が要る。加えて、この環境の現在のログイン状態を、調査目的の実行で変えないことを優先した
+- `account/logout` も同じ理由で実行していないが、CLIには対話端末を要さないトップレベルサブコマンド `codex logout`（`--help` で確認: オプションは設定上書き用の `-c` のみ）があり、こちらは`archive` / `delete`（§6「破壊操作の実行仕様」）と同じ、CLIサブコマンドを直接実行して終了コードで判定する構成にそのまま乗せられる。`account/logout` ではなくこちらを使う
+- `codex login --help` で見つけた `--with-api-key`（標準入力からAPIキーを読む。`printenv OPENAI_API_KEY | codex login --with-api-key` が例示されている）も同様に非対話で完結するため、APIキーでのログインはこちらを使う。キーは標準入力にだけ渡し、引数・ログ・設定には残さない
+- ブラウザでのOAuthログイン（既定の `codex login`、引数無し）は非対話では完結できないため、**拡張機能内では完結できないことを画面に明記し、統合ターミナルに `codex login` を入力するところまでで止める**（自動実行はしない。ユーザーが確認してEnterを押す）
+
+#### Claude Code: 状態も操作も `claude auth` サブコマンド
+
+Phase 0のコメントでは「`initialize` のcontrol_responseが `account` を返す」「ログイン系のsubtype（`claude_authenticate` `claude_oauth_callback` `claude_oauth_wait_for_completion` `oauth_token_refresh` `host_auth_token_refresh`）が実在する」とされていた。本issueではこの5つのsubtypeを実際には呼び出していない（ログイン状態を変える可能性がある操作を、調査目的で実行しないこととしたため）。代わりに `claude --help` を調べたところ、**`claude auth`** という専用のトップレベルサブコマンドが見つかった（Phase 0の時点では確認されていなかった経路）。
+
+```
+$ claude auth --help
+Commands:
+  login [options]   Sign in to your Anthropic account
+  logout            Log out from your Anthropic account
+  status [options]  Show authentication status
+```
+
+- `claude auth status --json`（`--json` は既定でもある）は実際に呼んで確認した（実測。CLI 2.1.227。ログイン済みの場合。メールアドレス等は伏せた）:
+
+  ```json
+  {
+    "loggedIn": true,
+    "authMethod": "claude.ai",
+    "apiProvider": "firstParty",
+    "email": "<redacted>",
+    "orgId": "<redacted>",
+    "orgName": "<redacted>",
+    "subscriptionType": "max"
+  }
+  ```
+
+  `initialize` のcontrol_response（`{email, organization, subscriptionType, apiProvider}`）も実測で同時に確認したが、ログイン済みかどうかを示す真偽値（`loggedIn`）を持たず、control protocol用のプロセスを別途起動する必要もある。`claude auth status --json` の方が単純で確実なため、状態表示にはこちらを使う。**未ログイン時の応答形はこの環境では確認できていない**（実測ではなく、`loggedIn` フィールドの有無・真偽だけで判定する防御的な実装にしている）
+
+- `claude auth logout`（`--help` にオプション無し）は非対話で完結するため、`codex logout` と同じ構成で実行する。**実行はしていない**（実測ではなくヘルプ根拠のみ）
+- `claude auth login` はブラウザでのOAuthを前提にした対話的なコマンドで、APIキーのような非対話の代替経路は `--help` に見当たらなかった。**Claude Code側にはAPIキーでの非対話ログインを実装していない**。ログインは統合ターミナルに `claude auth login` を入力するところまでで止める（Codexと同じく自動実行はしない）
+- Phase 0が報告した5つのcontrol request subtypeは、この構成では使わずじまいになった。将来 `claude auth` サブコマンドが無くなった場合の代替候補として記録だけ残す
+
+#### 実装
+
+- `src/provider/account.ts`: `AccountView`（`loggedIn` / `method` / `identity` / `plan`）と `AccountSnapshot`（`{ok:true, account}` か `{ok:false, reason}`）を共有の型として持つ。秘密情報（トークン等）は含めない
+- `src/codex/accountStatus.ts`: `account/read` の応答を `AccountView` へ正規化する純粋関数 `parseAccountRead`
+- `src/codex/accountActions.ts`: `CodexAccountActions`。`codex logout` / `codex login --with-api-key` を実行する
+- `src/codex/appServerClient.ts`: `readAccount()` を追加。既存の `listMcpServers()` と同じ単発呼び出し
+- `src/claude/authStatus.ts`: `claude auth status --json` の標準出力を `AccountView` へ正規化する純粋関数 `parseAuthStatusJson`
+- `src/claude/authProbe.ts`: `ClaudeAuthProbe`。`claude auth status --json` を単発で起動する（`ClaudeMcpProbe` と違い、control protocolではなく通常のCLI標準出力を読むだけなので単純）
+- `src/claude/authActions.ts`: `ClaudeAuthActions`。`claude auth logout` を実行する
+- `src/process/commandRunner.ts`: `CommandRunner`（`src/session/sessionActions.ts` と同じ形だが、標準入力を渡す経路を持つ）。APIキーを引数ではなく標準入力で渡すために新設した
+- `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `account: AccountSnapshot` を追加。`logoutCodex()` / `logoutClaude()` / `loginCodexApiKey(apiKey)` を新設。ログアウトは確認ダイアログを必ず挟む
+- `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 「アカウント」欄の描画とボタン操作。ブラウザでのログインは統合ターミナルを開いてコマンドを入力するところまでで止め、自動実行はしない（`terminal.sendText(cmd, false)`）
+
 ## 15. 作業記録（日報・週報連携）
 
 この拡張機能から実行したセッションを、日報/週報システムが読める形で残す。
@@ -1282,6 +1368,9 @@ tasks:
 | `maxReached`             | `failed`（回数切れ。理由を記録する）     |
 | `failed`                 | `failed`（`retries` の範囲で再試行）     |
 | `manual` / `interrupted` | 実行全体を停止（人が割り込んだとみなす） |
+| `taskStopped`            | `failed`（手動）。そのタスクだけを止める |
+
+`taskStopped` はワークフローView（§16.8）の「タスク停止」から来る。人がタブへ直接介入した `manual` / `interrupted` と紛らわしいが、**波及範囲が逆**である。前者はそのタスクだけを `failed` にして他のタスクは走らせ続け、後者はタスク自身の状態を変えずに実行全体を止める。同じ「止める」を1つの理由にまとめると、Viewからタスクを1つ止めただけでワークフロー全体が停止してしまう。
 
 `manual` / `interrupted` は「タスクの結果」の対応が無い（実行全体の制御にだけ効く）。人がそのタスクの画面へ直接介入した状態は、`pending` / `running` / `waitingApproval` / `done` / `failed` / `skipped` のどれにも当てはまらないため、**そのタスク自身の状態は変えない**。走っていたセッションはそのまま（多くは `running` のまま）残り、以降はそのタスクに関しては人の操作に委ねる。
 
@@ -1488,11 +1577,14 @@ worktreeを作れないため、次のように落とす。
 - ノードまたは一覧の行を押すと、そのタスクのチャットタブへ移動する。会話の中身は通常のチャット画面そのものなので、途中経過も承認カードも同じ見た目で読める
 - タスクを開始したとき、チャットタブは**背面で開く**（`preserveFocus`）。フォーカスは奪わないが、いつでも切り替えて経過を追える
 - **タブを閉じてもタスクは止まらない**。閉じた後にノードを押せば同じセッションのタブが開き直り、それまでの会話が全て復元される。そのために、タスク実行中のセッション（`ChatSession` / `ClaudeStreamSession`）の寿命をパネルから切り離す（§16.10）
-- ノードから直接できる操作
+  - ただしこれが効くのは**ウィンドウが生きている間**に限る。リロードするとセッション（CLIのプロセス）自体が失われるので、開き直せるのは会話ではなく「再実行」になる（§16.11）
+- 操作は一覧の行に置く。グラフのノードは会話へ移る導線に専念させる（「グラフは全体像、一覧は詳細」という分担に合わせる。小さなノードにボタンを詰めても押しにくい）
   - `中断`: 進行中のターンだけ止める（`turn/interrupt` 相当）。タスクは止まらず、次の指示から続く
   - `タスク停止`: そのタスクのループを止め、`failed`（手動）にする
   - `再実行`: `failed` / `skipped` のタスクを、依存が満たされていればもう1度走らせる
   - `承認`: `waitingApproval` のとき、要求の内容をその場に出して許可・拒否を決める
+
+「中断」と「タスク停止」は停止理由を分ける。人がタブへ直接介入した場合（`manual` / `interrupted`）はタスク自身の状態を変えず実行全体を止めるのに対し（§16.5）、Viewからの「タスク停止」はそのタスクだけを `failed` にして他は走らせ続ける。同じ「止める」でも波及範囲が違うため、`LoopStopReason` の段階で区別する。
 
 #### そのほか
 

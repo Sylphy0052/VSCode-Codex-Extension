@@ -299,6 +299,11 @@
         "command": "agent.workflows.roadmap",
         "title": "ロードマップを生成…",
         "category": "Agent"
+      },
+      {
+        "command": "agent.workflows.view",
+        "title": "ワークフローViewを開く",
+        "category": "Agent"
       }
     ],
     "configuration": {
