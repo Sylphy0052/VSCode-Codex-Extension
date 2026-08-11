@@ -414,6 +414,18 @@ export function buildGetSettingsRequest(requestId: string): string {
 }
 
 /**
+ * skillsの一覧を問い合わせる要求（issue #35、design.md TP-56）。
+ *
+ * 専用の一覧取得要求はプロトコルに無い（`skills_list` `list_skills` `get_skills`
+ * `skill_list` `skills` の5候補を実測で総当たりし、いずれも`Unsupported control request
+ * subtype`だった）。`reload_skills`の応答がその代わりになる（実測。CLI 2.1.227）。
+ * 詳細は `src/claude/skillsList.ts` を参照。
+ */
+export function buildReloadSkillsRequest(requestId: string): string {
+  return buildControlRequest(requestId, { subtype: 'reload_skills' });
+}
+
+/**
  * MCPサーバーの有効/無効を切り替える要求。
  *
  * 実測（CLI 2.1.227）: パラメータ名は **`serverName`**（camelCase）。`server_name` /

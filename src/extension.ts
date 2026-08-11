@@ -11,6 +11,7 @@ import { ClaudeMcpProbe } from './claude/mcpProbe';
 import { ClaudeModelProbe } from './claude/modelProbe';
 import { ClaudeProvider } from './claude/provider';
 import { ClaudeSessionStore } from './claude/sessionStore';
+import { ClaudeSkillsProbe } from './claude/skillsProbe';
 import { ClaudeTranscriptWatcher } from './claude/transcriptWatcher';
 import { CodexAccountActions } from './codex/accountActions';
 import { AppServerClient } from './codex/appServerClient';
@@ -114,6 +115,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const claudeAgents = new ClaudeAgentProbe(claudePath, log);
   const claudeMcp = new ClaudeMcpProbe(claudePath, log);
   const claudeHooks = new ClaudeHooksProbe(claudePath, log);
+  const claudeSkills = new ClaudeSkillsProbe(claudePath, log);
   const claudeAuth = new ClaudeAuthProbe(claudePath, log);
   // ログイン/ログアウトの実行はCLIサブコマンドへ委譲する（issue #29、accountActions.ts参照）
   const codexAccountActions = new CodexAccountActions(nodeAccountCommandRunner, codexPath);
@@ -136,6 +138,11 @@ export function activate(context: vscode.ExtensionContext): void {
     () => appServer.listHooks(workspaceFolderPaths()),
     () => claudeHooks.read(),
     (key, currentHash) => appServer.setHookTrusted(key, currentHash),
+    // skills/list もcwdを渡さないと単発起動時のセッション既定に委ねる形になるため、
+    // hooks/list と同じくワークスペースフォルダを明示する（issue #35、design.md TP-56）
+    () => appServer.listSkills(workspaceFolderPaths()),
+    () => claudeSkills.read(),
+    (path, enabled) => appServer.setSkillEnabled(path, enabled),
     () => appServer.readAccount(),
     () => claudeAuth.read(),
     () => codexAccountActions.logout(),

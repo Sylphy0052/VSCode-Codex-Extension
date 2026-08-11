@@ -251,6 +251,110 @@ export function controlPanelScript(): string {
     }
   }
 
+  function skillOriginLabel(origin) {
+    if (origin === 'user') return 'ユーザー';
+    if (origin === 'project') return 'プロジェクト';
+    if (origin === 'plugin') return 'プラグイン';
+    if (origin === 'system') return '同梱';
+    if (origin === 'admin') return '管理者配布';
+    return '不明';
+  }
+
+  function renderSkill(skill) {
+    const row = document.createElement('div');
+    row.className = 'skillItem';
+
+    const head = document.createElement('div');
+    head.className = 'skillItem-head';
+
+    if (skill.toggleable) {
+      const label = document.createElement('label');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = skill.enabled;
+      checkbox.addEventListener('change', () => {
+        vscode.postMessage({
+          type: 'toggleSkill',
+          path: skill.key,
+          enabled: checkbox.checked,
+        });
+      });
+      const name = document.createElement('span');
+      name.className = 'skillItem-name';
+      name.textContent = skill.name;
+      label.appendChild(checkbox);
+      label.appendChild(name);
+      head.appendChild(label);
+    } else {
+      const name = document.createElement('span');
+      name.className = 'skillItem-name';
+      name.textContent = skill.name;
+      head.appendChild(name);
+      if (skill.enabled === false) {
+        const disabledBadge = document.createElement('span');
+        disabledBadge.className = 'skillBadge skillBadge-disabled';
+        disabledBadge.textContent = '無効';
+        head.appendChild(disabledBadge);
+      }
+    }
+
+    const originBadge = document.createElement('span');
+    originBadge.className = 'skillBadge skillBadge-' + skill.origin;
+    originBadge.textContent = skillOriginLabel(skill.origin);
+    head.appendChild(originBadge);
+
+    row.appendChild(head);
+
+    if (skill.description) {
+      const desc = document.createElement('div');
+      desc.className = 'skillItem-desc';
+      desc.textContent = skill.description;
+      row.appendChild(desc);
+    }
+
+    if (skill.originDetail) {
+      const meta = document.createElement('div');
+      meta.className = 'skillItem-meta';
+      meta.textContent = skill.originDetail;
+      row.appendChild(meta);
+    }
+
+    return row;
+  }
+
+  function renderSkills(elId, snapshot) {
+    const container = el(elId);
+    container.replaceChildren();
+
+    if (!snapshot || snapshot.ok !== true) {
+      const p = document.createElement('p');
+      p.className = 'skillsError';
+      const reason = snapshot && snapshot.reason ? snapshot.reason : '不明なエラー';
+      p.textContent = 'skills一覧を取得できませんでした: ' + reason;
+      container.appendChild(p);
+      return;
+    }
+
+    for (const warning of snapshot.warnings || []) {
+      const w = document.createElement('p');
+      w.className = 'skillsWarning';
+      w.textContent = warning;
+      container.appendChild(w);
+    }
+
+    if (snapshot.skills.length === 0) {
+      const p = document.createElement('p');
+      p.className = 'skillsEmpty';
+      p.textContent = 'skillは設定されていません';
+      container.appendChild(p);
+      return;
+    }
+
+    for (const skill of snapshot.skills) {
+      container.appendChild(renderSkill(skill));
+    }
+  }
+
   function renderAccount(elId, snapshot, renderActions) {
     const container = el(elId);
     container.replaceChildren();
@@ -352,6 +456,7 @@ export function controlPanelScript(): string {
     renderCodexAccount(state.account);
     renderMcp('codex', 'mcpListCodex', state.mcpServers);
     renderHooks('hooksListCodex', state.hooks);
+    renderSkills('skillsListCodex', state.skills);
     models = state.models;
     const nameOf = (slug) => {
       const m = models.find((x) => x.slug === slug);
@@ -391,6 +496,7 @@ export function controlPanelScript(): string {
     renderClaudeAccount(c.account);
     renderMcp('claude', 'mcpListClaude', c.mcpServers);
     renderHooks('hooksListClaude', c.hooks);
+    renderSkills('skillsListClaude', c.skills);
     const d = c.defaults || {};
     const nameOf = (slug) => {
       const m = c.models.find((x) => x.slug === slug);

@@ -156,7 +156,7 @@ Codexはターン単位で model / effort / approvalPolicy を渡せるのにCla
 | TP-51 | plugins / apps の閲覧と管理                                           | Codex/Claude | P3     | Z-07      | #32                                                                                                            |
 | TP-54 | バックグラウンドターミナルの一覧と停止（Codex `/ps` 相当）            | Codex        | P3     | Z-08      | #33                                                                                                            |
 | TP-55 | agent thread の切替とサブエージェントの状況表示                       | Codex        | P3     | Z-08      | #34                                                                                                            |
-| TP-56 | skillsの一覧表示と管理。取得は `skillsList.ts` で一部実装済み         | Codex/Claude | P3     | Z-07      | #35                                                                                                            |
+| TP-56 | skillsの一覧表示と管理。取得は `skillsList.ts` で一部実装済み         | Codex/Claude | P3     | Z-07      | #35 済（Claude Codeは一覧のみ。有効/無効を返す・切り替える経路が無い）                                         |
 | TP-57 | 他エージェントからの設定インポート（Codex `/import` 相当）            | Codex        | P3     | Z-07      | #36                                                                                                            |
 | TP-60 | 課金額とセッション分析（`/cost` `/insights` 相当）                    | Claude       | P2     | Z-13      | #37 済（GitHubラベルと揃えてP3からP2へ変更。分析レポートは既存のスラッシュコマンド送信経路で無変更のまま動く） |
 
