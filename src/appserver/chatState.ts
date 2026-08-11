@@ -1,4 +1,5 @@
 import type { Attachment } from '../provider/attachments';
+import { NO_IMAGES, readUserInputImages, type ChatImage } from '../provider/imageRefs';
 import type { PendingPrompt } from './prompts';
 
 /** 1ファイル分の変更。app-server の `FileUpdateChange` に対応する。 */
@@ -27,6 +28,8 @@ export interface ChatItem {
   diffs: FileDiff[];
   /** 本文の先頭を捨てたか。コマンド出力が上限を超えたときだけ立つ。 */
   truncated?: boolean | undefined;
+  /** 会話に出す画像。持たない項目では空。 */
+  images?: ChatImage[] | undefined;
 }
 
 /**
@@ -239,6 +242,7 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
     status: undefined,
     turnId: undefined,
     diffs: NO_DIFFS,
+    images: NO_IMAGES,
   };
   const status = item['status'];
   if (typeof status === 'string') {
@@ -247,7 +251,11 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
 
   switch (kind) {
     case 'userMessage':
-      return { ...base, text: readContentText(item['content']) };
+      return {
+        ...base,
+        text: readContentText(item['content']),
+        images: readUserInputImages(item['content']),
+      };
     case 'agentMessage':
     case 'plan':
       return { ...base, text: str(item['text']) };
@@ -274,6 +282,29 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
       return { ...base, detail: `${str(item['server'])} / ${str(item['tool'])}` };
     case 'webSearch':
       return { ...base, detail: str(item['query']) };
+    // モデルが見た画像。パスだけが届くので、読むのはホスト側の役目
+    case 'imageView': {
+      const filePath = str(item['path']);
+      return {
+        ...base,
+        detail: filePath,
+        images:
+          filePath === '' ? NO_IMAGES : [{ dataUrl: undefined, path: filePath, alt: filePath }],
+      };
+    }
+    // モデルが生成した画像。失敗したターンでは savedPath が無い
+    case 'imageGeneration': {
+      const savedPath = str(item['savedPath']);
+      return {
+        ...base,
+        text: str(item['result']),
+        detail: str(item['revisedPrompt']),
+        images:
+          savedPath === ''
+            ? NO_IMAGES
+            : [{ dataUrl: undefined, path: savedPath, alt: '生成した画像' }],
+      };
+    }
     default:
       return base;
   }

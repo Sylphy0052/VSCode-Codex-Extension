@@ -64,6 +64,18 @@ export const nodeFileSystem: FileSystemPort = {
 
   readHead,
 
+  async readBase64File(filePath: string, maxBytes: number): Promise<string | undefined> {
+    try {
+      const stat = await fs.stat(filePath);
+      if (!stat.isFile() || stat.size > maxBytes) {
+        return undefined;
+      }
+      return (await fs.readFile(filePath)).toString('base64');
+    } catch {
+      return undefined;
+    }
+  },
+
   async readTail(filePath: string, maxBytes: number): Promise<string | undefined> {
     let handle;
     try {

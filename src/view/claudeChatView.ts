@@ -18,6 +18,7 @@ import {
   addAttachment,
   confirmCompact,
   postFileMentions,
+  postImageData,
   renderShell,
   reportTurnResult,
 } from './chatView';
@@ -427,6 +428,10 @@ export class ClaudeChatViewManager implements vscode.Disposable {
       }
       if (type === 'requestFiles') {
         void postFileMentions(entry.panel, this.mentions, entry.cwd, m['query']);
+        return;
+      }
+      if (type === 'requestImage') {
+        void postImageData(entry.panel, this.fs, entry.session.getState().items, m['path']);
         return;
       }
       if (type === 'attach') {

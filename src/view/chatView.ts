@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import { defaultDenyResponse, type ApprovalDecision } from '../appserver/approvals';
-import type { ChatState } from '../appserver/chatState';
+import type { ChatItem, ChatState } from '../appserver/chatState';
 import { ChatSession } from '../appserver/chatSession';
 import { AppServerConnection, type ServerRequest } from '../appserver/connection';
 import type { ActivityKind } from '../activity/record';
@@ -16,6 +16,7 @@ import type { FileSystemPort } from '../session/ports';
 import { APPROVAL_MODES, SANDBOX_MODES } from '../codex/types';
 import type { PromptSubmission } from '../appserver/prompts';
 import { AttachmentBox } from '../provider/attachments';
+import { buildImageReply } from '../provider/imageRefs';
 import { CommandCatalog } from '../provider/commandCatalog';
 import { FileMentionCatalog, filterFiles } from '../provider/fileMentions';
 import {
@@ -116,6 +117,27 @@ export function reportTurnResult(
   });
 }
 
+/**
+ * 会話に出てきた画像をWebviewへ返す。Codex画面・Claude Code画面の両方で共有する。
+ *
+ * 画像はデータURLにして送る。`localResourceRoots` を広げて `asWebviewUri` で参照させると、
+ * その範囲のファイルをWebviewから自由に読めるようになるため、そちらへは寄せない。
+ * 読めるのは**会話に出てきたパスだけ**（判定は `buildImageReply`）。
+ */
+export async function postImageData(
+  panel: vscode.WebviewPanel,
+  fs: FileSystemPort,
+  items: readonly ChatItem[],
+  requested: unknown,
+): Promise<void> {
+  const reply = await buildImageReply(items, requested, (filePath, maxBytes) =>
+    fs.readBase64File(filePath, maxBytes),
+  );
+  if (reply !== undefined) {
+    void panel.webview.postMessage({ type: 'imageData', ...reply });
+  }
+}
+
 /** `@` の候補として返す最大件数。画面に収まる範囲に留める。 */
 const MENTION_LIMIT = 50;
 
@@ -163,14 +185,14 @@ export class ChatViewManager implements vscode.Disposable {
     codexPath: () => string,
     private readonly settings: SettingsProvider,
     private readonly codexHome: string,
-    fs: FileSystemPort,
+    private readonly fs: FileSystemPort,
     /** `@` のファイル候補。走査の間引きはカタログ側が担う。 */
     private readonly mentions: FileMentionCatalog,
     private readonly log: Logger,
     /** 発言のたびに呼ばれる。二重記録の抑止は受け手（ActivityLogger）が担う。 */
     private readonly onActivity: (activity: ChatActivity) => void = () => undefined,
   ) {
-    this.catalog = new CommandCatalog(fs);
+    this.catalog = new CommandCatalog(this.fs);
     this.connection = new AppServerConnection(
       codexPath,
       log,
@@ -369,6 +391,10 @@ export class ChatViewManager implements vscode.Disposable {
       }
       if (type === 'requestFiles') {
         await postFileMentions(entry.panel, this.mentions, entry.cwd, m['query']);
+        return;
+      }
+      if (type === 'requestImage') {
+        await postImageData(entry.panel, this.fs, entry.session.getState().items, m['path']);
         return;
       }
       if (type === 'attach') {

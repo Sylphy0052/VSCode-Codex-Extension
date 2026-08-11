@@ -120,6 +120,41 @@ describe('applyStreamEvent', () => {
     expect(state.items[0]?.truncated).toBe(true);
   });
 
+  it('ツールが読んだ画像を項目に持たせる', () => {
+    // 実測: Read でpngを読ませると image ブロックが base64 で返る
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'tool_use', id: 't1', name: 'Read', input: { file_path: '/tmp/dot.png' } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 't1',
+              content: [
+                {
+                  type: 'image',
+                  source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0K' },
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ]);
+    expect(state.items[0]?.images).toEqual([
+      { dataUrl: 'data:image/png;base64,iVBORw0K', path: undefined, alt: 'ツールが読んだ画像' },
+    ]);
+  });
+
   it('失敗したツール結果に印を付ける', () => {
     const state = apply([
       {
