@@ -4,6 +4,8 @@ import * as vscode from 'vscode';
 
 export interface FixtureManifest {
   workspaceFolder: string;
+  /** ワークフローの統合テスト（Issue #158）用の定義ファイル。 */
+  workflow: { defPath: string };
   outsideWorkspace: string;
   codexHome: string;
   claudeHome: string;

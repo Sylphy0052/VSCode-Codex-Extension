@@ -11,13 +11,14 @@ import {
   validateWorkflow,
   type WorkflowDefinition,
 } from './workflow';
-import type { LiveRun, LiveRunForgeState, WorkflowRunner } from './runner';
+import type { LiveRun, LiveRunForgeState } from './runner';
+import type { WorkflowRunnerInternals } from './runnerInternals';
 
 /**
  * ウィンドウのリロード後の実行再開（design.md §16.11、Issue #147）を集めたモジュール。
  * `WorkflowRunner`から機能単位で切り出した1本。
  *
- * `self: WorkflowRunner`を第一引数に取るのは、`WorkflowRunner`のメソッドから機械的に
+ * `self: WorkflowRunnerInternals`を第一引数に取るのは、`WorkflowRunner`のメソッドから機械的に
  * 切り出したままの形を保ち、挙動を変えないため（最終報告に記載）。
  */
 
@@ -32,7 +33,7 @@ import type { LiveRun, LiveRunForgeState, WorkflowRunner } from './runner';
  * そのrunはこのウィンドウのライブな状態には現れないが、`workspaceState`自体からは
  * 消さない（ファイルを直して次回リロードすれば復元できる余地を残す）。
  */
-export async function restoreRunsForView(self: WorkflowRunner): Promise<void> {
+export async function restoreRunsForView(self: WorkflowRunnerInternals): Promise<void> {
   const persisted = await self.deps.store.reconcileAfterReload();
   for (const p of persisted) {
     if (self.runs.has(p.runId)) {
@@ -61,7 +62,7 @@ export async function restoreRunsForView(self: WorkflowRunner): Promise<void> {
  * （`LiveTask`）は無いため、永続化された`branch`/`cwd`を直接使う。どちらか欠けている
  * （古い永続化形式・作成前に中断した等）場合は再開できないため、安全側で`blocked`にする。
  */
-function resumeMergeAfterReload(self: WorkflowRunner, runId: string, taskId: string): void {
+function resumeMergeAfterReload(self: WorkflowRunnerInternals, runId: string, taskId: string): void {
   const live = self.runs.get(runId);
   if (live === undefined || live.integration === undefined) {
     return;
@@ -89,7 +90,7 @@ function resumeMergeAfterReload(self: WorkflowRunner, runId: string, taskId: str
  * を固まらせない」ための防御であり、復元経路だけ素通りさせない。
  */
 async function loadPersistedWorkflowDefinition(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   p: PersistedRun,
 ): Promise<WorkflowDefinition | undefined> {
   const size = await self.deps.filePort.fileSize(p.defPath);
@@ -130,7 +131,7 @@ async function loadPersistedWorkflowDefinition(
  * 状態から判定し直す」）。
  */
 async function reconcileRestoredTaskStates(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   p: PersistedRun,
   integration: { cwd: string; branch: string } | undefined,
 ): Promise<Map<string, TaskRunState>> {
@@ -183,7 +184,7 @@ async function reconcileRestoredTaskStates(
  * 簡略化。再実行は新しい複製でやり直す設計のため、この差異は再実行の意味を壊さない）。
  */
 async function resolveRestoredPseudoState(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   p: PersistedRun,
 ): Promise<LiveRun['pseudo']> {
   const resolved = await resolvePseudoState(self, p.workspaceRoot, p.runId);
@@ -196,7 +197,7 @@ async function resolveRestoredPseudoState(
   return undefined;
 }
 
-async function rebuildLiveRun(self: WorkflowRunner, p: PersistedRun): Promise<LiveRun | undefined> {
+async function rebuildLiveRun(self: WorkflowRunnerInternals, p: PersistedRun): Promise<LiveRun | undefined> {
   const def = await loadPersistedWorkflowDefinition(self, p);
   if (def === undefined) {
     return undefined;

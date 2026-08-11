@@ -31,6 +31,10 @@ export default defineConfig({
     // VSCodeがIPCソケットを作る先。実行環境の `/run/user/<uid>` が消えていても起動できる
     // ようにする（issue #163。理由は setup.mjs の createRuntimeDir 参照）。
     XDG_RUNTIME_DIR: fixtures.runtimeDir,
+    // ワークフローの統合テスト（Issue #158）だけがTaskSessionHostの差し替えを使う。
+    // これが立っていないとき、拡張機能は差し替え口そのものを公開しない
+    // （`src/extension.ts` の `isIntegrationTestMode`）。
+    AGENT_SESSIONS_INTEGRATION_TEST: '1',
   },
   mocha: {
     ui: 'tdd',

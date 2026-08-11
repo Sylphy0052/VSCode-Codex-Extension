@@ -8,18 +8,19 @@ import {
 } from './messaging';
 import { isActiveTaskState, markWaitingReply, resumeFromWaitingReply, type TaskState } from './runState';
 import type { TaskSession } from './taskSession';
-import type { LiveRun, WorkflowRunner } from './runner';
+import type { LiveRun } from './runner';
+import type { WorkflowRunnerInternals } from './runnerInternals';
 
 /**
  * タスク間メッセージング（design.md §16.21、Issue #147）を集めたモジュール。
  * `WorkflowRunner`から機能単位で切り出した1本。
  *
- * `self: WorkflowRunner`を第一引数に取るのは、`WorkflowRunner`のメソッドから機械的に
+ * `self: WorkflowRunnerInternals`を第一引数に取るのは、`WorkflowRunner`のメソッドから機械的に
  * 切り出したままの形を保ち、挙動を変えないため（最終報告に記載）。
  */
 
 /** `TaskMessagingHub`の`list_tasks`が返す一覧を組み立てる（design.md §16.21）。 */
-export function buildRunTaskSnapshots(self: WorkflowRunner, runId: string): RunTaskSnapshot[] {
+export function buildRunTaskSnapshots(self: WorkflowRunnerInternals, runId: string): RunTaskSnapshot[] {
   const live = self.runs.get(runId);
   if (live === undefined) {
     return [];
@@ -42,7 +43,7 @@ export function buildRunTaskSnapshots(self: WorkflowRunner, runId: string): RunT
  *   （`resumeFromWaitingReply`）、ループを再開する（`session.resumeLoop()`。返信の本文自体は
  *   `setPromptTransform`の`composeNextPrompt`が次の送信へ添える）
  */
-export function onMessageAccepted(self: WorkflowRunner, runId: string, message: StoredMessage): void {
+export function onMessageAccepted(self: WorkflowRunnerInternals, runId: string, message: StoredMessage): void {
   const live = self.runs.get(runId);
   if (live === undefined) {
     return;
@@ -80,7 +81,7 @@ export function onMessageAccepted(self: WorkflowRunner, runId: string, message: 
  * `running`へ戻す。`WorkflowRunnerMessagingDeps.startTransport`と同時に登録したタイマー
  * （`WAITING_REPLY_POLL_INTERVAL_MS`ごと）から呼ばれる。
  */
-export function checkWaitingReplyStalls(self: WorkflowRunner, runId: string): void {
+export function checkWaitingReplyStalls(self: WorkflowRunnerInternals, runId: string): void {
   const live = self.runs.get(runId);
   if (live === undefined || live.messaging === undefined || live.finished) {
     return;
@@ -115,7 +116,7 @@ export function checkWaitingReplyStalls(self: WorkflowRunner, runId: string): vo
 
 /** `checkWaitingReplyStalls`が検出したtaskIdを実際に`running`へ戻し、警告を積む。 */
 function releaseStalledWaitingReplies(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   runId: string,
   live: LiveRun,
   taskIds: readonly string[],
@@ -151,7 +152,7 @@ function releaseStalledWaitingReplies(
  * `startTask`が`await`せず投げっぱなしで呼ぶ（タスクの開始自体をこの確認で遅らせない）。
  */
 export async function checkMessagingVisibility(
-  self: WorkflowRunner,
+  self: WorkflowRunnerInternals,
   runId: string,
   taskId: string,
   session: TaskSession,

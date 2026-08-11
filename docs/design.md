@@ -764,7 +764,7 @@ codex app-server generate-ts --out <DIR>            # TypeScript バインディ
 - テスト
   - unit（vitest、`test/unit/`）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で101ファイル1890件
   - **VSCodeに依存する層（`view/**` など、`vscode` モジュールを直接触るファイル）はunitテストから扱わない**。`vscode` はunitテストのプロセス内でimportできないため、判断が要るロジックは純粋関数へ切り出してそちらを試す（例: `view/panelState.ts`）
-  - integration（`@vscode/test-electron`、`test/integration/`）: 実VSCode（拡張機能ホスト）上で動く。WSL（xvfb-run経由）で実際に動作することを確認済み（issue #147）。**現状自動化できているのは拡張機能の有効化・コマンド登録・設定の読み書きの土台部分のみ**（`extension.test.ts` / `configuration.test.ts`、計6件）。履歴一覧（TreeView）を狙った`sessionHistory.test.ts`は、実CLIを呼ばせない制約と`ProviderRegistry.available()`（実行ファイルを解決できないプロバイダを一覧から除外する）が噛み合わず、現状`test.skip`のまま残っている（原因と代替案の検証結果は同ファイル冒頭のコメント、および[manual-test.md](manual-test.md)の「統合テストで自動化した範囲」参照）。`activate()`はテスト専用の最小限の内部参照（`ExtensionTestApi`）を返し、`SessionTreeProvider`の実インスタンスへテストからアクセスできるようにしてある。既定の `npm run check` には含めない（実VSCodeのダウンロード・起動が要り重いため）。`npm run test:integration`（ディスプレイあり）/ `npm run test:integration:xvfb`（ヘッドレスLinux/WSL）で明示的に実行する
+  - integration（`@vscode/test-electron`、`test/integration/`）: 実VSCode（拡張機能ホスト）上で動く。WSL（xvfb-run経由）で実際に動作することを確認済み（issue #147）。自動化済みの範囲は、拡張機能の有効化・コマンド登録・設定の読み書き（`extension.test.ts` / `configuration.test.ts`、計6件）と、**ワークフローの並列実行**（`workflow.test.ts`、5件。Issue #158）。後者は`T1 → (T2 || T3) → T4`が依存順に進むこと・T2とT3が同時に走ること・両者が別のworktreeで動いて互いのファイルを踏まないこと・「タスク停止」がそのタスクだけを倒すこと・「中断」がターンだけを止めること・ノードから会話タブへの導線が生きていることを、実VSCode上で確かめる。CLIとの境界（`TaskSessionHost.openTaskSession`）だけを`ExtensionTestApi.workflow`経由でフェイクへ差し替え（`AGENT_SESSIONS_INTEGRATION_TEST=1`が立っているときだけ公開する口。立っていなければ差し替えの経路そのものが無い）、worktreeの作成・スケジューリング・状態遷移・workspaceStateへの保存は実物を通す。画面上の見え方（グラフの段組み・ノードの色・1行要約・タブの復元）と実CLIを伴う挙動は自動化できておらず、[manual-test.md](manual-test.md)のW群に残る。履歴一覧（TreeView）を狙った`sessionHistory.test.ts`は、実CLIを呼ばせない制約と`ProviderRegistry.available()`（実行ファイルを解決できないプロバイダを一覧から除外する）が噛み合わず、現状`test.skip`のまま残っている（原因と代替案の検証結果は同ファイル冒頭のコメント、および[manual-test.md](manual-test.md)の「統合テストで自動化した範囲」参照）。`activate()`はテスト専用の最小限の内部参照（`ExtensionTestApi`）を返し、`SessionTreeProvider`の実インスタンスへテストからアクセスできるようにしてある。既定の `npm run check` には含めない（実VSCodeのダウンロード・起動が要り重いため）。`npm run test:integration`（ディスプレイあり）/ `npm run test:integration:xvfb`（ヘッドレスLinux/WSL）で明示的に実行する。後者は`scripts/xvfb-vscode-test.sh`を経由する。`XDG_RUNTIME_DIR`が無い環境（WSL2など、`/run/user/<uid>`が作られないもの）ではVSCodeがウィンドウを作る前に無言で止まり、テストが1件も報告されないままハングするため、未設定・実在しない場合だけ使い捨てのディレクトリを用意して渡している（Issue #158で実測）
   - 実CLIプロセス・Webviewの中身・承認カードのような、実際のCodex/Claude Codeとの対話が要る範囲、および上記の理由で自動化に至らなかった範囲は、引き続き[manual-test.md](manual-test.md)のチェックリストと実施記録で担保する
 - `scripts/check.sh` に lint / typecheck / test を集約し、commit前に全緑を必須とする（integrationテストは含まない）
 - パッケージング: `@vscode/vsce`
@@ -2504,6 +2504,8 @@ src/
     runnerWorkingDirectory.ts 作業ディレクトリの解決と疑似worktree統合（§16.6・§16.20）
     runnerMerge.ts      マージと衝突解決、タスク層のPR/MR作成（§16.17・§16.18）
     runnerMessaging.ts  タスク間メッセージング（§16.21）
+    runnerInternals.ts  上記5ファイルだけが触る`WorkflowRunner`の内部の口
+                     （`WorkflowRunnerInternals`。クラス外へは公開しない）
     planner.ts      ゴール文からYAMLを生成する（§16.9）
     roadmap.ts      ロードマップの生成・YAML化・完了の書き戻し（§16.19。*）
   view/
@@ -2512,7 +2514,11 @@ src/
 
 `*` を付けた4ファイルも、`runner.ts` / `extension.ts` からの配線を含めて実装済みで、実行に反映される（§16.13）。
 
-`runnerSnapshot.ts` / `runnerRestore.ts` / `runnerWorkingDirectory.ts` / `runnerMerge.ts` / `runnerMessaging.ts` の5ファイルは、`WorkflowRunner`のメソッドを機能単位で切り出したもので、`self: WorkflowRunner`を第一引数に取る関数の集まりとして実装している（Issue #147）。`runner.ts`側のクラスメソッドはこれらへ委譲する薄いラッパーとして残す（`getSnapshot` / `restoreRunsForView` / `retryMerge` のように公開APIとして呼ばれ続けるものは、シグネチャを変えずメソッドのまま残す）。`WorktreeCreationQueue`を1つだけ使い回す不変条件（§16.6・§16.17）は、`WorkflowRunner`のコンストラクタで組み立てたインスタンスを`self.integrationQueue`（`IntegrationMergeQueue`経由）として共有し続けることで変えていない。
+`runnerSnapshot.ts` / `runnerRestore.ts` / `runnerWorkingDirectory.ts` / `runnerMerge.ts` / `runnerMessaging.ts` の5ファイルは、`WorkflowRunner`のメソッドを機能単位で切り出したもので、`self: WorkflowRunnerInternals`を第一引数に取る関数の集まりとして実装している（Issue #147）。`runner.ts`側のクラスメソッドはこれらへ委譲する薄いラッパーとして残す（`getSnapshot` / `restoreRunsForView` / `retryMerge` のように公開APIとして呼ばれ続けるものは、シグネチャを変えずメソッドのまま残す）。`WorktreeCreationQueue`を1つだけ使い回す不変条件（§16.6・§16.17）は、`WorkflowRunner`のコンストラクタで組み立てたインスタンスを`self.integrationQueue`（`IntegrationMergeQueue`経由）として共有し続けることで変えていない。
+
+分割にあたって渡す`self`の型は`WorkflowRunnerInternals`（`runnerInternals.ts`）に閉じる。`runs`・`integrationQueue`・`deps`・`notify`・`pump`・`persist`・`resolveForgeState`は`WorkflowRunner`側では`private`のままにし、分割ファイルへは、コンストラクタで組み立てた`internals`（`WorkflowRunnerInternals`型のオブジェクト）だけを渡す。`this as unknown as WorkflowRunnerInternals`のキャストにはしない。キャストは構造的部分型の検査ごと無効にするため、クラス側とインターフェースがずれても`tsc`が検出できず（`pump`をリネームしても型検査は通る）、実行時に`self.pump is not a function`で初めて表面化する。メソッドはアロー関数で包み、`prototype`側の実装を都度引かせる（テストが`WorkflowRunner.prototype`へ張ったスパイを効かせるため）。分割のために`private`を外すと、`src/view/`や`extension.ts`から`runner.runs.get(id)!.runState = ...`や`runner.pump(id)`を直接書いても型検査が止められず、`persist()`・`notify()`を経ない書き換えで永続化した値とメモリ上の`LiveRun`が食い違うため（PR #157のレビュー指摘）。
+
+worktreeの撤去（`cleanupWorktreeIfNeeded`）だけは、分割ファイル側からも`WorkflowRunner`のラッパーメソッドを通す（`WorkflowRunnerInternals`に含める）。テストが`WorkflowRunner.prototype`をスパイして「interrupted/manualでは撤去しない」を確かめる作りのため、モジュール関数を直接呼ぶ経路があるとその検証をすり抜ける。
 
 `integration.ts` / `forge.ts` / `pseudoWorktree.ts` は、`worktree.ts` と同じくコマンドの実行をポート（差し替え可能なインターフェース）越しに行い、コマンドを組み立てる部分を純粋関数として切り出す。テストで実際に `git` / `gh` / `glab` を叩かないため。
 
