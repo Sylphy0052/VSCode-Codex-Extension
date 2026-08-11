@@ -699,19 +699,35 @@ export class WorkflowRunner {
    */
   private readonly integrationQueue: IntegrationMergeQueue;
 
-  constructor(private readonly deps: WorkflowRunnerDeps) {
-    this.integrationQueue = new IntegrationMergeQueue(deps.worktreeQueue);
-  }
-
   /**
    * 分割後のファイル（`runnerSnapshot.ts`等、Issue #147）へ渡す内部の口
-   * （`runnerInternals.ts`のJSDoc参照）。`private`なメンバを含むため構造的部分型の
-   * 検査は通らないが、TypeScriptの`private`はコンパイル時の型検査だけで実行時の挙動には
-   * 影響しないため、このキャスト経由の呼び出しは従来どおり動く。キャストをここ1箇所に
-   * 閉じ込めることで、外部から内部状態へ届く経路を作らずに分割を保つ。
+   * （`runnerInternals.ts`のJSDoc参照）。
+   *
+   * `this as unknown as WorkflowRunnerInternals`のキャストで済ませない理由: キャストは
+   * 構造的部分型の検査ごと無効にするため、クラス側と`WorkflowRunnerInternals`がずれても
+   * `tsc`が検出しない（`pump`をリネームしても型検査は通り、実行時に
+   * `self.pump is not a function`で落ちる）。ここで明示的に組み立てることで、
+   * メンバの過不足・シグネチャのずれをコンパイル時に捕まえる。
+   *
+   * メソッドはアロー関数で包む。`prototype`側の実装を都度引くため、テストが
+   * `WorkflowRunner.prototype.cleanupWorktreeIfNeeded`をスパイした場合もここを通る
+   * 呼び出しにスパイが効く。
    */
-  private get internals(): WorkflowRunnerInternals {
-    return this as unknown as WorkflowRunnerInternals;
+  private readonly internals: WorkflowRunnerInternals;
+
+  constructor(private readonly deps: WorkflowRunnerDeps) {
+    this.integrationQueue = new IntegrationMergeQueue(deps.worktreeQueue);
+    this.internals = {
+      deps: this.deps,
+      runs: this.runs,
+      integrationQueue: this.integrationQueue,
+      notify: (runId) => this.notify(runId),
+      pump: (runId) => this.pump(runId),
+      persist: (runId) => this.persist(runId),
+      resolveForgeState: (repoRoot) => this.resolveForgeState(repoRoot),
+      cleanupWorktreeIfNeeded: (live, task, taskId, liveTask) =>
+        this.cleanupWorktreeIfNeeded(live, task, taskId, liveTask),
+    };
   }
 
   /**

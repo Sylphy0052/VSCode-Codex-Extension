@@ -20,9 +20,11 @@ import type { WorkflowTask } from './workflow';
  *
  * そこで公開範囲をこのインターフェースへ閉じ、`WorkflowRunner`側のメンバは`private`へ戻す。
  * 分割モジュールは`self: WorkflowRunnerInternals`として受け取り、`WorkflowRunner`は
- * `internals`ゲッター（キャスト1箇所）でのみ自身を渡す。TypeScriptの`private`は
- * コンパイル時の型検査だけで実行時の挙動には影響しないため、キャスト経由の呼び出しは
- * 従来どおり動く。
+ * コンストラクタで組み立てた`internals`（`runner.ts`）でのみ自身の内部を渡す。
+ *
+ * `this as unknown as WorkflowRunnerInternals`のキャストでは済ませない。キャストは
+ * 構造的部分型の検査ごと無効にするため、このインターフェースとクラス側がずれても
+ * `tsc`が検出できず、実行時に`self.pump is not a function`のような形で初めて表面化する。
  */
 export interface WorkflowRunnerInternals {
   readonly deps: WorkflowRunnerDeps;
