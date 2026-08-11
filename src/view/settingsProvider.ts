@@ -8,13 +8,21 @@ import {
   CLAUDE_EFFORTS,
   CLAUDE_PERMISSION_MODES,
   claudeFallbackModels,
+  type ClaudeAgentInfo,
 } from '../claude/types';
 import { extractDefaults, noDefaults, type CodexDefaults } from '../codex/configToml';
 import { effortsFor, parseModelCatalog, type ModelInfo } from '../codex/modelCatalog';
 import { isSandboxRelaxed } from '../codex/sandboxPolicy';
 import { readClaudeConfig, readConfig } from '../config';
 import type { Logger } from '../log';
+import type { McpServersSnapshot } from '../provider/mcpServers';
 import type { FileSystemPort } from '../session/ports';
+
+/** 一覧をまだ読んでいない状態。CLIへの問い合わせが空だったのと区別する。 */
+const notLoadedYet: McpServersSnapshot = { ok: false, reason: 'まだ読み込んでいません' };
+
+/** `setMcpServerEnabled` / `ClaudeMcpProbe.toggle` と同じ形の結果。 */
+export type McpToggleResult = { ok: true } | { ok: false; error: string };
 
 /** Webviewから変更を許すキー。ここに無いキーは無視する。 */
 export const EDITABLE_KEYS = ['model', 'reasoningEffort', 'approvalMode', 'sandbox'] as const;
@@ -25,7 +33,7 @@ export function isEditableKey(value: unknown): value is EditableKey {
 }
 
 /** Claude Code側でWebviewから変更を許すキー。 */
-export const CLAUDE_EDITABLE_KEYS = ['model', 'effort', 'permissionMode'] as const;
+export const CLAUDE_EDITABLE_KEYS = ['model', 'effort', 'permissionMode', 'agent'] as const;
 export type ClaudeEditableKey = (typeof CLAUDE_EDITABLE_KEYS)[number];
 
 export function isClaudeEditableKey(value: unknown): value is ClaudeEditableKey {
@@ -43,6 +51,8 @@ export interface SettingsSnapshot {
   /** 設定が空のときに実際に使われる値（config.toml 由来）。 */
   defaults: CodexDefaults;
   profile: string;
+  /** MCPサーバーの一覧・状態（issue #27）。 */
+  mcpServers: McpServersSnapshot;
 }
 
 export interface ClaudeSettingsSnapshot {
@@ -50,11 +60,21 @@ export interface ClaudeSettingsSnapshot {
   /** 選択中のモデルで選べるeffort。effortを持たないモデルでは空になる。 */
   efforts: string[];
   permissionModes: string[];
+  /**
+   * 選べるカスタムエージェント。`initialize` の応答から取れなければ空配列
+   * （取得できなかった場合と1件も無い場合を区別する意味が呼び出し側に無いため、
+   * ここでは空配列に均す。選択肢を出さないだけで済む）。
+   */
+  agents: ClaudeAgentInfo[];
   model: string;
   effort: string;
   permissionMode: string;
+  /** 起動時にのみ効く。セッション中は切り替えられない（設計書 §6・Issue #30）。 */
+  agent: string;
   /** 設定が空のときに実際に使われる値（settings.json 由来）。 */
   defaults: ClaudeDefaults;
+  /** MCPサーバーの一覧・状態（issue #27）。 */
+  mcpServers: McpServersSnapshot;
 }
 
 /**
@@ -65,13 +85,22 @@ export interface ClaudeSettingsSnapshot {
 export class SettingsProvider {
   private models: ModelInfo[] = [];
   private defaults: CodexDefaults = noDefaults;
+  private codexMcp: McpServersSnapshot = notLoadedYet;
 
   private claudeModels: ModelInfo[] = [];
   private claudeDefaults: ClaudeDefaults = noClaudeDefaults;
+  private claudeAgents: ClaudeAgentInfo[] = [];
+  private claudeMcp: McpServersSnapshot = notLoadedYet;
 
   /**
    * @param listCodexModels `model/list` の結果。取れなければ空配列。
    * @param listClaudeModels `initialize` の応答の一覧。取れなければ `undefined`。
+   * @param listClaudeAgents `initialize` の応答の `agents`。取れなければ `undefined`
+   *   （モデルと違い意味のあるフォールバック一覧が無いため、呼び出し側は選択肢を出さない）。
+   * @param listCodexMcpServers `mcpServerStatus/list` + `config/read` を突き合わせた結果。
+   * @param listClaudeMcpServers `mcp_status` の結果。
+   * @param setCodexMcpServerEnabled `config/value/write` + `config/mcpServer/reload`。
+   * @param setClaudeMcpServerEnabled `mcp_toggle`。
    */
   constructor(
     private readonly fs: FileSystemPort,
@@ -80,6 +109,17 @@ export class SettingsProvider {
     private readonly claudeSettingsPath: string,
     private readonly listCodexModels: () => Promise<ModelInfo[]>,
     private readonly listClaudeModels: () => Promise<ModelInfo[] | undefined>,
+    private readonly listClaudeAgents: () => Promise<ClaudeAgentInfo[] | undefined>,
+    private readonly listCodexMcpServers: () => Promise<McpServersSnapshot>,
+    private readonly listClaudeMcpServers: () => Promise<McpServersSnapshot>,
+    private readonly setCodexMcpServerEnabled: (
+      name: string,
+      enabled: boolean,
+    ) => Promise<McpToggleResult>,
+    private readonly setClaudeMcpServerEnabled: (
+      name: string,
+      enabled: boolean,
+    ) => Promise<McpToggleResult>,
     private readonly log: Logger,
   ) {}
 
@@ -93,14 +133,18 @@ export class SettingsProvider {
     }
   }
 
-  /** モデル一覧と既定値を読み直す。 */
+  /** モデル一覧・既定値・MCPサーバー一覧を読み直す。 */
   async load(): Promise<void> {
     this.loaded = true;
-    // CLIの起動を待つ時間が二重にならないよう、両方まとめて聞く
-    [this.models, this.claudeModels] = await Promise.all([
-      this.loadCodexModels(),
-      this.loadClaudeModels(),
-    ]);
+    // CLIの起動を待つ時間が二重にならないよう、まとめて聞く
+    [this.models, this.claudeModels, this.claudeAgents, this.codexMcp, this.claudeMcp] =
+      await Promise.all([
+        this.loadCodexModels(),
+        this.loadClaudeModels(),
+        this.loadClaudeAgents(),
+        this.listCodexMcpServers(),
+        this.listClaudeMcpServers(),
+      ]);
 
     const toml = await this.fs.readTextFile(this.configTomlPath);
     this.defaults = toml === undefined ? noDefaults : extractDefaults(toml);
@@ -148,6 +192,22 @@ export class SettingsProvider {
     return claudeFallbackModels();
   }
 
+  /**
+   * Claude Codeのエージェント一覧。取れなければ空配列にする。
+   *
+   * モデルと違い「よく使われるエイリアス」のような意味のあるフォールバックが無い
+   * （エージェント名はユーザー定義のカスタムエージェント次第で環境ごとに違う）ため、
+   * 取得できなければ単に選択肢を出さない。既定（空文字＝CLI委譲）は常に選べる。
+   */
+  private async loadClaudeAgents(): Promise<ClaudeAgentInfo[]> {
+    const fromCli = await this.listClaudeAgents();
+    if (fromCli !== undefined) {
+      return fromCli;
+    }
+    this.log.warn('Claude Codeのエージェント一覧を取得できませんでした。選択肢は既定のみになります');
+    return [];
+  }
+
   snapshot(): SettingsSnapshot {
     const config = readConfig();
     return {
@@ -159,6 +219,7 @@ export class SettingsProvider {
       sandbox: config.codex.sandbox,
       defaults: this.defaults,
       profile: config.codex.profile,
+      mcpServers: this.codexMcp,
     };
   }
 
@@ -168,11 +229,35 @@ export class SettingsProvider {
       models: this.claudeModels,
       efforts: effortsFor(this.claudeModels, config.model, CLAUDE_EFFORTS),
       permissionModes: [...CLAUDE_PERMISSION_MODES],
+      agents: this.claudeAgents,
       model: config.model,
       effort: config.effort,
       permissionMode: config.permissionMode,
+      agent: config.agent,
       defaults: this.claudeDefaults,
+      mcpServers: this.claudeMcp,
     };
+  }
+
+  /**
+   * MCPサーバーの有効/無効を切り替える。
+   *
+   * 切替そのものはCLI側の状態を変えるだけで、この時点ではパネルの表示は更新しない。
+   * 呼び出し側（`ControlPanelViewProvider`）が `load()` を呼び直してから表示を反映する
+   * こと（成功/失敗にかかわらず、実際の状態を出すため）。
+   */
+  async toggleMcpServer(
+    cli: 'codex' | 'claude',
+    name: string,
+    enabled: boolean,
+  ): Promise<McpToggleResult> {
+    const result = await (cli === 'codex'
+      ? this.setCodexMcpServerEnabled(name, enabled)
+      : this.setClaudeMcpServerEnabled(name, enabled));
+    if (!result.ok) {
+      this.log.warn(`MCPサーバーを切り替えられませんでした (${cli}/${name}): ${result.error}`);
+    }
+    return result;
   }
 
   /**

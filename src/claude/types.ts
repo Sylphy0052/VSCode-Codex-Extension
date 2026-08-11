@@ -44,6 +44,13 @@ export interface ClaudeConfig {
   model: string;
   effort: string;
   permissionMode: string;
+  /**
+   * `--agent` へ渡すエージェント名。空文字なら渡さず、CLI側の `agent` 設定に委譲する
+   * （設計書 §6・Issue #30）。起動引数でしか指定できず、セッションの途中では変えられない
+   * （`set_agent` 等7種の候補を実測し、いずれも `Unsupported control request subtype` で
+   * 拒否されることを確認済み）。
+   */
+  agent: string;
   additionalArgs: string[];
 }
 
@@ -51,8 +58,21 @@ export const emptyClaudeConfig: ClaudeConfig = {
   model: '',
   effort: '',
   permissionMode: '',
+  agent: '',
   additionalArgs: [],
 };
+
+/**
+ * `initialize` の応答の `agents` から読んだカスタムエージェントの候補。
+ *
+ * 実測（CLI 2.1.227）: `{name, description, model?}` が並ぶ。組込エージェント
+ * （`claude` `Explore` `Plan` `general-purpose` など）とユーザー定義のカスタムエージェントが
+ * 混ざって返る。`model` は一部のエントリにしか無いため、拡張機能側では使わない。
+ */
+export interface ClaudeAgentInfo {
+  name: string;
+  description: string;
+}
 
 /** transcript から読み取ったセッションの素性。 */
 export interface TranscriptMeta {

@@ -65,12 +65,17 @@ describe('buildClaudeShellArgs', () => {
     ).toThrow();
   });
 
-  it('モデル・effort・権限モードを渡す', () => {
+  it('モデル・effort・権限モード・エージェントを渡す', () => {
     const { args, warnings } = buildClaudeShellArgs({
       target: { kind: 'new' },
       sessionId: NEW_ID,
       cwd: '/w/repo',
-      config: config({ model: 'opus', effort: 'high', permissionMode: 'acceptEdits' }),
+      config: config({
+        model: 'opus',
+        effort: 'high',
+        permissionMode: 'acceptEdits',
+        agent: 'code-reviewer',
+      }),
     });
     expect(args).toEqual([
       '--session-id',
@@ -81,6 +86,8 @@ describe('buildClaudeShellArgs', () => {
       'high',
       '--permission-mode',
       'acceptEdits',
+      '--agent',
+      'code-reviewer',
     ]);
     expect(warnings).toEqual([]);
   });
@@ -94,6 +101,38 @@ describe('buildClaudeShellArgs', () => {
     });
     expect(args).toEqual(['--session-id', NEW_ID]);
     expect(warnings).toHaveLength(2);
+  });
+
+  it('エージェント名は空なら渡さない', () => {
+    const { args, warnings } = buildClaudeShellArgs({
+      target: { kind: 'new' },
+      sessionId: NEW_ID,
+      cwd: '/w/repo',
+      config: config({ agent: '' }),
+    });
+    expect(args).toEqual(['--session-id', NEW_ID]);
+    expect(warnings).toEqual([]);
+  });
+
+  it('プラグイン由来のエージェント名（コロン区切り）も渡せる', () => {
+    const { args } = buildClaudeShellArgs({
+      target: { kind: 'new' },
+      sessionId: NEW_ID,
+      cwd: '/w/repo',
+      config: config({ agent: 'genshijin:genshijin-builder' }),
+    });
+    expect(args).toEqual(['--session-id', NEW_ID, '--agent', 'genshijin:genshijin-builder']);
+  });
+
+  it('引数注入になりうるエージェント名は無視して警告する（先頭がハイフン等）', () => {
+    const { args, warnings } = buildClaudeShellArgs({
+      target: { kind: 'new' },
+      sessionId: NEW_ID,
+      cwd: '/w/repo',
+      config: config({ agent: '--dangerously-skip-permissions' }),
+    });
+    expect(args).toEqual(['--session-id', NEW_ID]);
+    expect(warnings).toHaveLength(1);
   });
 
   it('追加引数の空要素を捨てる', () => {
