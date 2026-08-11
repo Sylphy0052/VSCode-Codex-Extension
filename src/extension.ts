@@ -13,6 +13,7 @@ import { ClaudeMcpProbe } from './claude/mcpProbe';
 import { ClaudeModelProbe } from './claude/modelProbe';
 import { ClaudeProvider } from './claude/provider';
 import { ClaudeSessionStore } from './claude/sessionStore';
+import { ClaudeSkillsProbe } from './claude/skillsProbe';
 import { ClaudeTranscriptWatcher } from './claude/transcriptWatcher';
 import { CodexAccountActions } from './codex/accountActions';
 import { AppServerClient } from './codex/appServerClient';
@@ -33,13 +34,15 @@ import {
   nodeWorktreeFileSystem,
   WorktreeCreationQueue,
 } from './orchestrator/worktree';
-import { nodeCliCommandRunner } from './orchestrator/forge';
+import { nodeCliAvailability, nodeCliCommandRunner, nodeForgeFileSystem } from './orchestrator/forge';
+import { startHttpMcpTransport } from './orchestrator/messaging';
+import { nodePseudoWorktreeFileSystem } from './orchestrator/pseudoWorktree';
 import {
   createCliIssueListPort,
+  createTaskSessionRoadmapGenerationPort,
   generateRoadmap,
   nodeRoadmapFileSystem,
   type IssueListPort,
-  type RoadmapGenerationPort,
 } from './orchestrator/roadmap';
 import { WorkflowRunStore } from './orchestrator/runStore';
 import { WorkflowRunner, nodeWorkflowFilePort } from './orchestrator/runner';
@@ -123,10 +126,17 @@ export function activate(context: vscode.ExtensionContext): void {
   // 単発の問い合わせ（fork・モデル一覧・エージェント一覧・MCP一覧・hooks一覧・ログイン状態）に
   // 使う。会話用の接続とは別プロセス
   const appServer = new AppServerClient(codexPath, log);
+  // 履歴の取得はまずthread/listを試し、空か失敗ならファイル読みへ退避する（issue #45）。
+  // storeの構築時点ではcodexPath（codexの解決結果）がまだ無いため、appServerを作った
+  // ここで事後に配線する
+  store.attachThreadList((limit, archivedSessionsDir) =>
+    appServer.listThreads(limit, archivedSessionsDir),
+  );
   const claudeModels = new ClaudeModelProbe(claudePath, log);
   const claudeAgents = new ClaudeAgentProbe(claudePath, log);
   const claudeMcp = new ClaudeMcpProbe(claudePath, log);
   const claudeHooks = new ClaudeHooksProbe(claudePath, log);
+  const claudeSkills = new ClaudeSkillsProbe(claudePath, log);
   const claudeAuth = new ClaudeAuthProbe(claudePath, log);
   // ログイン/ログアウトの実行はCLIサブコマンドへ委譲する（issue #29、accountActions.ts参照）
   const codexAccountActions = new CodexAccountActions(nodeAccountCommandRunner, codexPath);
@@ -149,6 +159,11 @@ export function activate(context: vscode.ExtensionContext): void {
     () => appServer.listHooks(workspaceFolderPaths()),
     () => claudeHooks.read(),
     (key, currentHash) => appServer.setHookTrusted(key, currentHash),
+    // skills/list もcwdを渡さないと単発起動時のセッション既定に委ねる形になるため、
+    // hooks/list と同じくワークスペースフォルダを明示する（issue #35、design.md TP-56）
+    () => appServer.listSkills(workspaceFolderPaths()),
+    () => claudeSkills.read(),
+    (path, enabled) => appServer.setSkillEnabled(path, enabled),
     () => appServer.readAccount(),
     () => claudeAuth.read(),
     () => codexAccountActions.logout(),
@@ -211,6 +226,31 @@ export function activate(context: vscode.ExtensionContext): void {
     // `planWorkflowCommand`（#58）も同じ基準を使う。#52セキュリティ監査指摘の
     // クランプ入口を1つに保つのと同じ理由で、baselineの読み方も1箇所にまとめる
     readBaseline: readSafetyBaseline,
+    // PR/MRの作成（design.md §16.18、Issue #105）。`agent.workflows.forge` は既定の
+    // `auto`のままだと、`origin` remote・`gh`/`glab`の有無を実行のたびに確かめたうえで
+    // 対応するホストへPR/MRを作る。前提が欠けていれば`runner.ts`側が警告のうえ
+    // ローカルのマージだけへ倒す（`checkForgePrerequisites`。ワークフロー自体は止めない）
+    forge: {
+      cli: nodeCliCommandRunner,
+      cliAvailability: nodeCliAvailability,
+      fs: nodeForgeFileSystem,
+      readConfig: () => {
+        const c = readWorkflowsConfig();
+        return { host: c.forge, pullRequest: c.pullRequest, finalMerge: c.finalMerge };
+      },
+    },
+    // 疑似worktree（design.md §16.20、Issue #105）。gitの作業ツリーでないワークスペースで
+    // `isolation: worktree`のタスクを走らせるときの隔離手段。`decideWorkingDirectory`の
+    // `sharedFallback`から`resolveWorkingDirectory`が呼ぶ
+    pseudoWorktree: {
+      fs: nodePseudoWorktreeFileSystem,
+      exclude: readWorkflowsConfig().pseudoWorktreeExclude,
+    },
+    // タスク間メッセージング（design.md §16.21、Issue #105）。runごとにMCPサーバ
+    // （HTTP。`messaging.ts`の`startHttpMcpTransport`のJSDoc参照）を立てる。実際に
+    // CLIの起動設定へ反映する配線（`src/view/`側）はこのIssueの範囲外
+    // （`WorkflowRunnerMessagingDeps`のJSDoc参照）
+    messaging: { startTransport: startHttpMcpTransport },
   });
   // isTaskManagedThreadのクロージャが参照する箱を埋める。以降の`workflowRunner`
   // （コマンド登録などで使う）はこの束縛を指し、常にWorkflowRunnerとして扱える
@@ -231,21 +271,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   });
 
-  // ロードマップ（design.md §16.19、#95）。既存Issueの取得は `git remote` + `gh`/`glab` を
-  // ポート越しに呼ぶだけなので、ここで実装を組み立てて渡す。
+  // ロードマップ（design.md §16.19、#95・配線はIssue #105）。既存Issueの取得は
+  // `git remote` + `gh`/`glab` をポート越しに呼ぶだけなので、ここで実装を組み立てて渡す。
   const roadmapIssuePort = createCliIssueListPort(nodeGitCommandRunner, nodeCliCommandRunner);
-  // 生成セッションの起動（`TaskSessionHost` を read-only 相当・承認全拒否で回し、
-  // `ChatState.turnResultText` を受け取る配線）は、`taskSession.ts` / `runner.ts` を
-  // 変更する別PR（#90）と衝突するため、このIssue（#95）の範囲外にしてある。
-  // 実装されるまでは「未実装」を返すポートを渡す（`roadmap.ts` の `RoadmapGenerationPort`
-  // のJSDoc参照）。
-  const roadmapGenerationPort: RoadmapGenerationPort = {
-    generate: () =>
-      Promise.resolve({
-        ok: false,
-        message: 'ロードマップ生成セッションの起動は未実装です（後続Issueで対応予定）',
-      }),
-  };
 
   const conversations = new ConversationViewManager(nodeFileSystem, store, log, (session, turnId) =>
     forkFromTurn(codex, appServer, chat, tree, log, session, turnId),
@@ -380,7 +408,7 @@ export function activate(context: vscode.ExtensionContext): void {
       planWorkflowCommand(chat, claudeChat, workflowView, log),
     ),
     vscode.commands.registerCommand('agent.workflows.roadmap', () =>
-      runRoadmap(roadmapIssuePort, roadmapGenerationPort, log),
+      runRoadmap(roadmapIssuePort, chat, claudeChat, log),
     ),
   );
 }
@@ -498,15 +526,16 @@ async function fileExists(folder: vscode.WorkspaceFolder, name: string): Promise
 }
 
 /**
- * ゴールの文からロードマップを生成する（design.md §16.19、#95）。
+ * ゴールの文からロードマップを生成する（design.md §16.19、#95・配線はIssue #105）。
  *
- * 生成セッションの実際の起動は `roadmapGenerationPort`（`activate` で組み立てる、現時点では
- * 「未実装」を返すポート）に委ねている。実装されるまでこのコマンドはエラーメッセージを
- * 出して終わる。
+ * 生成セッションの起動は `roadmap.ts` の `createTaskSessionRoadmapGenerationPort` に委ねる。
+ * `planWorkflowCommand`（分解セッション）と同じく、プロバイダは `defaults.provider` の
+ * 組み込み既定値（`codex`）に固定する（design.md §16.9「設定での切り替えは提供しない」）。
  */
 async function runRoadmap(
   issues: IssueListPort,
-  generation: RoadmapGenerationPort,
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
   log: Logger,
 ): Promise<void> {
   const folder = currentWorkspaceFolder();
@@ -523,6 +552,9 @@ async function runRoadmap(
   }
 
   const workspaceRoot = folder.uri.fsPath;
+  const provider = DEFAULT_PROVIDER;
+  const host = provider === 'claude' ? claudeChat : chat;
+  const generation = createTaskSessionRoadmapGenerationPort(host, provider, workspaceRoot);
   const [workspaceSummary, hasAgentsFile, hasClaudeFile] = await Promise.all([
     listWorkspaceSummary(folder),
     fileExists(folder, 'AGENTS.md'),

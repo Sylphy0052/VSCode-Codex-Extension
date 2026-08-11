@@ -225,6 +225,62 @@ export function controlPanelStyles(): string {
     color: var(--vscode-descriptionForeground);
     border: 1px solid var(--vscode-widget-border, var(--vscode-descriptionForeground));
   }
+  .skillsList { display: flex; flex-direction: column; gap: 6px; }
+  .skillsEmpty, .skillsError {
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+  }
+  .skillsError { color: var(--vscode-errorForeground, var(--vscode-descriptionForeground)); }
+  .skillsWarning {
+    color: var(--vscode-charts-yellow, var(--vscode-descriptionForeground));
+    font-size: 0.85em;
+  }
+  .skillItem {
+    padding: 6px 8px;
+    border: 1px solid var(--vscode-widget-border, transparent);
+    border-radius: 3px;
+  }
+  .skillItem-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .skillItem-name { font-weight: 600; }
+  .skillItem-desc {
+    margin-top: 4px;
+    color: var(--vscode-foreground);
+    font-size: 0.85em;
+    line-height: 1.4;
+  }
+  .skillItem-meta {
+    margin-top: 2px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.8em;
+    word-break: break-all;
+  }
+  .skillBadge {
+    font-size: 0.8em;
+    padding: 1px 6px;
+    border-radius: 10px;
+    white-space: nowrap;
+  }
+  .skillBadge-user {
+    color: var(--vscode-charts-blue);
+    border: 1px solid var(--vscode-charts-blue);
+  }
+  .skillBadge-project {
+    color: var(--vscode-charts-orange, var(--vscode-charts-yellow));
+    border: 1px solid var(--vscode-charts-orange, var(--vscode-charts-yellow));
+  }
+  .skillBadge-plugin {
+    color: var(--vscode-charts-purple, var(--vscode-charts-blue));
+    border: 1px solid var(--vscode-charts-purple, var(--vscode-charts-blue));
+  }
+  .skillBadge-system, .skillBadge-admin, .skillBadge-unknown, .skillBadge-disabled {
+    color: var(--vscode-descriptionForeground);
+    border: 1px solid var(--vscode-widget-border, var(--vscode-descriptionForeground));
+  }
   .accountBox { display: flex; flex-direction: column; gap: 6px; }
   .accountStatus {
     display: flex;

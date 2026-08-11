@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
+import * as http from 'node:http';
 
 import type { TaskState } from './runState';
 import { stripControlChars } from './sanitize';
@@ -9,11 +10,14 @@ import { MAX_PROMPT_LENGTH } from './workflow';
  *
  * `workflow.ts` / `worktree.ts` と同じく、VSCode APIには一切依存しない。実際の
  * MCPプロトコルの入出力（トランスポート）は `McpTransportPort` の向こうに置き、
- * テストではフェイクへ差し替える。`waitingReply` の実際の状態遷移（`runState.ts`）への
- * 配線、およびMCPサーバの起動・タスクセッションへの設定配布（`runner.ts` /
- * `taskSession.ts`）はこのIssueの範囲外。ここにあるのは純粋なロジックと、
- * それをMCPのツール呼び出しへ結び付ける薄い層（`TaskMessagingHub` /
- * `MessagingMcpServer`）だけである。
+ * テストではフェイクへ差し替える。ここにあるのは純粋なロジックと、それをMCPのツール
+ * 呼び出しへ結び付ける薄い層（`TaskMessagingHub` / `MessagingMcpServer`）、および
+ * `McpTransportPort` のNode実装（`startHttpMcpTransport`。Issue #105で追加）である。
+ *
+ * `waitingReply` の実際の状態遷移・MCPサーバの起動・タスクセッションへの設定配布は
+ * `runner.ts` / `taskSession.ts` の責務（Issue #105で配線）。ただし、実際にCLIへ
+ * MCP設定を渡す経路（`src/view/chatView.ts` / `claudeChatView.ts`）はIssue #104と
+ * 衝突するため対象外にしてある。`runner.ts`のJSDoc・最終報告を参照。
  */
 
 /**
@@ -586,4 +590,131 @@ export class MessagingMcpServer {
 
     return failure(request.id, -32602, `未知のツールです: ${name}`);
   }
+}
+
+/* ------------------------------------------------------------------------ *
+ * McpTransportPortのNode実装（HTTP。design.md §16.21、Issue #105）
+ * ------------------------------------------------------------------------ */
+
+/**
+ * runごとに立てるMCPサーバのハンドル。`registerTask` がタスクごとの接続用URLを発行する。
+ */
+export interface HttpMcpTransportHandle {
+  transport: McpTransportPort;
+  /** サーバの待受アドレス（`http://127.0.0.1:<port>`）。 */
+  baseUrl: string;
+  /**
+   * タスク1件分の接続用URLを発行する。同じ`taskId`に対して複数回呼んでも、
+   * その都度別のトークンを持つ別URLになる（再試行で新しいセッションを開く design.md §16.5
+   * と同じ「使い捨て」の流儀に合わせておく。古いURLは以後404になる）。
+   */
+  registerTask(taskId: string): string;
+  /** サーバを閉じる。runの終了時に呼ぶ。 */
+  close(): Promise<void>;
+}
+
+const MCP_TOKEN_PATTERN = /^[0-9a-f]{32}$/u;
+
+/**
+ * `McpTransportPort` のNode実装。**方式の選定理由（最終報告にも記載）**:
+ *
+ * - design.mdは「サーバはrunごとに立て」「送信元はサーバー側が接続で判別する」の2つを
+ *   要件にしている。stdio（CLIがサーバを子プロセスとして起動する形）は「1タスク=1
+ *   プロセス」になりやすく、「runごとに1つ」という単位と噛み合わない。HTTPで1サーバ・
+ *   複数エンドポイントにすれば、両方の要件を1つのプロセスで自然に満たせる
+ * - タスクごとに `registerTask` が推測不能なトークン（`randomBytes(16)`、128bit）を
+ *   発行し、URLパス（`/mcp/<token>`）へ埋め込む。**トークンはURLの一部であり、ツールの
+ *   引数ではない。** サーバは受け取ったリクエストのパスからしかタスクを判別せず、
+ *   リクエストボディの中身（`tools/call`の`arguments`）は一切信用しない
+ *   （design.md「引数で名乗らせない」を、サーバ実装のこの一点で構造的に保証する。
+ *   `MessagingMcpServer.dispatch`も同じ方針を二重に守っている）
+ * - HTTPの1リクエストは1接続に対応する短命なやり取りだが、`McpConnection`が要求する
+ *   `onRequest`/`send`/`onClose`は「1回のリクエストに対して1回だけ呼ばれる」という
+ *   形で問題なく満たせるため、`MessagingMcpServer`側のロジックを変えずに使える
+ * - サーバは `127.0.0.1` のエフェメラルポート（OSが割り当てる空きポート）で待ち受ける。
+ *   ワークスペースの外・他プロセスから推測されうる固定ポートを避けるため
+ */
+export function startHttpMcpTransport(hub: TaskMessagingHub): Promise<HttpMcpTransportHandle> {
+  const tokenToTaskId = new Map<string, string>();
+  let connectionHandler: ((connection: McpConnection) => void) | undefined;
+
+  const transport: McpTransportPort = {
+    onConnection(handler) {
+      connectionHandler = handler;
+    },
+  };
+  const mcpServer = new MessagingMcpServer(hub, transport);
+  void mcpServer; // 生成することで`transport.onConnection`にハンドラを登録させる
+
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const match = /^\/mcp\/([0-9a-f]{32})$/u.exec(url.pathname);
+    const token = match?.[1];
+    const taskId = token !== undefined && MCP_TOKEN_PATTERN.test(token) ? tokenToTaskId.get(token) : undefined;
+
+    if (req.method !== 'POST' || taskId === undefined) {
+      res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
+      return;
+    }
+
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      } catch {
+        res.writeHead(400, { 'content-type': 'text/plain' }).end('invalid json');
+        return;
+      }
+      if (
+        connectionHandler === undefined ||
+        typeof parsed !== 'object' ||
+        parsed === null ||
+        !('jsonrpc' in parsed) ||
+        !('method' in parsed)
+      ) {
+        res.writeHead(400, { 'content-type': 'text/plain' }).end('invalid request');
+        return;
+      }
+      const request = parsed as JsonRpcRequest;
+      // taskIdは常にURLのトークンから解決した値（上のJSDoc参照）。リクエスト自体に
+      // taskId/fromらしきフィールドがあっても、connection経由では一切渡していない
+      const connection: McpConnection = {
+        taskId,
+        send(response) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(response));
+        },
+        onRequest(handler) {
+          handler(request);
+        },
+        onClose() {
+          // HTTPは1リクエストごとに完結するため、明示的に閉じる操作は無い
+        },
+      };
+      connectionHandler(connection);
+    });
+  });
+
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address !== null ? address.port : 0;
+      const baseUrl = `http://127.0.0.1:${port}`;
+      resolve({
+        transport,
+        baseUrl,
+        registerTask(taskId: string): string {
+          const token = randomBytes(16).toString('hex');
+          tokenToTaskId.set(token, taskId);
+          return `${baseUrl}/mcp/${token}`;
+        },
+        close(): Promise<void> {
+          return new Promise((resolveClose) => server.close(() => resolveClose()));
+        },
+      });
+    });
+  });
 }

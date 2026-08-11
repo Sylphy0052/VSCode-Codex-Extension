@@ -21,6 +21,7 @@ export function chatScript(
   agentLabel: string,
   review: ReviewButtonConfig,
   showRewind = false,
+  approvalCycle: readonly string[] = [],
 ): string {
   return `
   const vscode = acquireVsCodeApi();
@@ -35,6 +36,10 @@ export function chatScript(
   let menuMode = '';
   /** 最後に描いた項目。画像が遅れて届いたときに描き直すため保つ。 */
   let lastItems = undefined;
+  /** 承認方法をShift+Tabで回すときの並び（issue #13。制限が強い側から緩い側へ）。 */
+  const APPROVAL_CYCLE = ${JSON.stringify(approvalCycle)};
+  /** いま効いている承認方法。循環の起点にする。 */
+  let currentApproval = '';
 
   const KIND_LABEL = {
     userMessage: 'あなた',
@@ -191,24 +196,49 @@ export function chatScript(
   }
 
   /**
-   * 本文を描く。コマンド出力が長い場合は末尾だけ見せ、展開できるようにする。
+   * 本文を描く。長い場合は畳んで、展開できるようにする。
    *
-   * 出力は途中経過が流れ込んで伸び続けるため、全部を描き続けると重くなる。
+   * コマンド出力・思考の全文は途中経過が流れ込んで伸び続けるため、全部を描き続けると重くなる。
+   *
+   * 思考（reasoning）だけは畳み方が違う。Codexは要約(text)と全文(reasoningFull)が別に
+   * 届くことがあり、その場合は既定で要約だけを見せ、展開すると全文に切り替える
+   * （コマンド出力のような「末尾だけ」ではなく丸ごと入れ替える）。全文が無い・要約と同じ
+   * ときは、コマンド出力と同じ行数での折りたたみに落ちる（Claude Codeの思考は要約を
+   * 持たずここに該当する。issue #19）。
    */
   function renderBody(node, item) {
     if (!item) return;
     node.lastItem = item;
     const text = item.text || '';
-    node.fullText = text;
+    const full = item.kind === 'reasoning' ? item.reasoningFull || '' : '';
+    const hasSummaryAndFull = full !== '' && text !== '' && full !== text;
 
-    const lines = item.kind === 'commandExecution' ? text.split('\\n') : undefined;
+    if (hasSummaryAndFull) {
+      node.fullText = full;
+      const shown = node.expanded ? full : text;
+      if (node.body.textContent !== shown) node.body.textContent = shown;
+      node.body.hidden = false;
+      node.copy.hidden = false;
+      node.expand.hidden = false;
+      node.expand.textContent = node.expanded ? '要約だけ表示' : '全文を表示';
+      return;
+    }
+
+    // 要約が無ければ全文をそのまま本文として扱う（コマンド出力と同じ行数折りたたみ）
+    const primary = text !== '' ? text : full;
+    node.fullText = primary;
+
+    const foldByLines = item.kind === 'commandExecution' || item.kind === 'reasoning';
+    const lines = foldByLines ? primary.split('\\n') : undefined;
     const overflow = lines !== undefined && lines.length > MAX_VISIBLE_LINES;
     const shown =
-      overflow && !node.expanded ? lines.slice(lines.length - MAX_VISIBLE_LINES).join('\\n') : text;
+      overflow && !node.expanded
+        ? lines.slice(lines.length - MAX_VISIBLE_LINES).join('\\n')
+        : primary;
 
     if (node.body.textContent !== shown) node.body.textContent = shown;
-    node.body.hidden = text === '';
-    node.copy.hidden = text === '';
+    node.body.hidden = primary === '';
+    node.copy.hidden = primary === '';
 
     node.expand.hidden = !overflow;
     if (overflow) {
@@ -656,6 +686,7 @@ export function chatScript(
     const approvalDefault = el('approvalMode').querySelector('option[value=""]');
     if (approvalDefault) approvalDefault.textContent = defaultLabel(d.approvalMode);
     el('approvalMode').value = s.approvalMode;
+    currentApproval = s.approvalMode || '';
 
     // サンドボックスはCodex画面にしか無い（Claude Codeは承認方法に集約されている）
     const sandbox = el('sandbox');
@@ -873,6 +904,9 @@ export function chatScript(
     status.replaceChildren();
 
     const bits = [];
+    // 承認方法は常に見えるようにする（Shift+Tabで回すため。issue #13）
+    const approval = state.settings && state.settings.approvalMode;
+    bits.push('承認 ' + (approval ? approval : '既定'));
     if (state.planMode) bits.push('計画モード（ファイルは変更されません）');
     if (state.reviewing) bits.push('レビュー中は割り込めません');
     if (state.busy) bits.push('応答中…');
@@ -1299,6 +1333,17 @@ export function chatScript(
         closeMenu();
         return;
       }
+    }
+
+    // Shift+Tab で承認方法を回す（TUIと同じ操作。入力欄にいるときだけ効かせる）
+    if (e.key === 'Tab' && e.shiftKey && APPROVAL_CYCLE.length > 0) {
+      e.preventDefault();
+      const index = APPROVAL_CYCLE.indexOf(currentApproval);
+      const next = index === -1 ? APPROVAL_CYCLE[0] : APPROVAL_CYCLE[(index + 1) % APPROVAL_CYCLE.length];
+      currentApproval = next;
+      el('approvalMode').value = next;
+      vscode.postMessage({ type: 'config', key: 'approvalMode', value: next });
+      return;
     }
 
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {

@@ -149,6 +149,19 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    if (m['type'] === 'toggleSkill') {
+      // Codex専用（issue #35）。Claude Codeには有効/無効を切り替える経路が無い
+      const path = m['path'];
+      const enabled = m['enabled'];
+      if (typeof path !== 'string' || path === '') {
+        this.log.warn(`skillの切替要求が不正です: ${JSON.stringify(m)}`);
+        return;
+      }
+      await this.settings.toggleCodexSkill(path, enabled === true);
+      await this.refresh();
+      return;
+    }
+
     if (m['type'] === 'logoutCodex') {
       await this.runAccountAction(() => this.settings.logoutCodex(), 'Codexからログアウト');
       return;
@@ -301,6 +314,10 @@ ${controlPanelStyles()}
   <h2 class="sectionTitle">hooks</h2>
   <p class="note">hooksは任意のコマンドを実行する仕組みです。特にプロジェクト側で定義されたhookは、cloneしただけで任意コマンドが動く経路になりえます。何が実行されるかを確認してから信頼してください。</p>
   <div class="hooksList" id="hooksListCodex"></div>
+
+  <h2 class="sectionTitle">skills</h2>
+  <p class="note">skillsはモデルへ渡す指示（プロンプト）です。特にプロジェクト側で定義されたskillは、cloneしただけで効く経路になりえます。どこ由来かを確認してから使ってください。</p>
+  <div class="skillsList" id="skillsListCodex"></div>
   </div>
 
   <div id="panelClaude" hidden>
@@ -340,6 +357,10 @@ ${controlPanelStyles()}
     <h2 class="sectionTitle">hooks</h2>
     <p class="note">hooksは任意のコマンドを実行する仕組みです。特にプロジェクト側で定義されたhookは、cloneしただけで任意コマンドが動く経路になりえます。Claude Codeにはこの拡張機能から信頼状態を確認・操作する経路がありません（実測。CLI側の挙動に委ねます）。</p>
     <div class="hooksList" id="hooksListClaude"></div>
+
+    <h2 class="sectionTitle">skills</h2>
+    <p class="note">skillsはモデルへ渡す指示（プロンプト）です。特にプロジェクト側で定義されたskillは、cloneしただけで効く経路になりえます。Claude Codeにはこの拡張機能から有効/無効を切り替える経路がありません（実測。出どころの表示はCLIの説明文からの推測です）。</p>
+    <div class="skillsList" id="skillsListClaude"></div>
   </div>
 
 <script nonce="${nonce}">

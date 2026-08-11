@@ -1,3 +1,4 @@
+import type { ThreadListOutcome } from '../codex/threadList';
 import type { SessionMeta } from '../codex/types';
 
 /**
@@ -29,6 +30,18 @@ export interface FileSystemPort {
    */
   readBase64File(filePath: string, maxBytes: number): Promise<string | undefined>;
 }
+
+/**
+ * `thread/list` を叩く口。SessionStoreはこれを介してのみapp-serverを知る
+ * （app-serverの起動・JSON-RPC自体はAppServerClientの責務）。
+ *
+ * `limit` は取得したい件数の上限（`codex.history.maxEntries`）、`archivedSessionsDir` は
+ * archived判定に使うディレクトリ（`CodexPaths.archivedSessions`）。
+ */
+export type ThreadListPort = (
+  limit: number,
+  archivedSessionsDir: string,
+) => Promise<ThreadListOutcome>;
 
 /** session_meta の永続キャッシュ。1行目は不変なので無効化はエントリ削除のみ。 */
 export interface MetaCachePort {
