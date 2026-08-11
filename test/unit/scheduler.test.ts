@@ -4,9 +4,12 @@ import {
   applyLoopStopReason,
   createRunState,
   hasFailedTask,
+  markMergeBlocked,
+  markMergeSucceeded,
   markRunning,
   markWaitingApproval,
   retryTask,
+  type RunState,
 } from '../../src/orchestrator/runState';
 import { getRunOutcome, nextTasksToStart } from '../../src/orchestrator/scheduler';
 import type { WorkflowDefinition, WorkflowTask } from '../../src/orchestrator/workflow';
@@ -49,13 +52,21 @@ const def = (tasks: WorkflowTask[], maxParallel: number): WorkflowDefinition => 
   tasks,
 });
 
+/**
+ * `applyLoopStopReason(..., 'done')` は`merging`にするだけ（design.md §16.17）。
+ * スケジューリングのテストは「マージまで含めて完了した」前提を必要とするだけなので、
+ * `markMergeSucceeded`まで一気に進めるヘルパーで代用する。
+ */
+const finishDone = (run: RunState, tasks: WorkflowTask[], taskId: string): RunState =>
+  markMergeSucceeded(applyLoopStopReason(run, tasks, taskId, 'done'), tasks, taskId);
+
 describe('nextTasksToStart', () => {
   it('T1完了後、maxParallelに余裕があればT2とT3が同時に返る', () => {
     const tasks = diamondTasks();
     const d = def(tasks, 3);
     let run = createRunState(tasks);
     run = markRunning(run, 'T1');
-    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    run = finishDone(run, tasks, 'T1');
 
     const next = nextTasksToStart(d, run);
     expect(next).toEqual(new Set(['T2', 'T3']));
@@ -66,7 +77,7 @@ describe('nextTasksToStart', () => {
     const d = def(tasks, 1);
     let run = createRunState(tasks);
     run = markRunning(run, 'T1');
-    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    run = finishDone(run, tasks, 'T1');
 
     let next = nextTasksToStart(d, run);
     expect(next).toEqual(new Set(['T2']));
@@ -75,7 +86,7 @@ describe('nextTasksToStart', () => {
     // T2がrunning中はT3の枠が無い
     expect(nextTasksToStart(d, run)).toEqual(new Set());
 
-    run = applyLoopStopReason(run, tasks, 'T2', 'done');
+    run = finishDone(run, tasks, 'T2');
     next = nextTasksToStart(d, run);
     expect(next).toEqual(new Set(['T3']));
   });
@@ -85,7 +96,7 @@ describe('nextTasksToStart', () => {
     const d = def(tasks, 1);
     let run = createRunState(tasks);
     run = markRunning(run, 'T1');
-    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    run = finishDone(run, tasks, 'T1');
     run = markRunning(run, 'T2');
     run = markWaitingApproval(run, 'T2');
 
@@ -98,7 +109,7 @@ describe('nextTasksToStart', () => {
     const d = def(tasks, 3);
     let run = createRunState(tasks);
     run = markRunning(run, 'T1');
-    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    run = finishDone(run, tasks, 'T1');
     run = markRunning(run, 'T2');
     run = markRunning(run, 'T3');
 
@@ -139,10 +150,10 @@ describe('nextTasksToStart', () => {
     const d = def(tasks, 3);
     let run = createRunState(tasks);
     run = markRunning(run, 'T1');
-    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    run = finishDone(run, tasks, 'T1');
     run = markRunning(run, 'T2');
     run = markRunning(run, 'T3');
-    run = applyLoopStopReason(run, tasks, 'T3', 'done');
+    run = finishDone(run, tasks, 'T3');
     run = applyLoopStopReason(run, tasks, 'T2', 'maxReached'); // T2: failed, T4: skipped
 
     run = retryTask(run, tasks, 'T2');
@@ -160,15 +171,15 @@ describe('nextTasksToStart', () => {
     const d = def(tasks, 3);
     let run = createRunState(tasks);
     run = markRunning(run, 'T1');
-    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    run = finishDone(run, tasks, 'T1');
     run = markRunning(run, 'T2');
     run = markRunning(run, 'T3');
 
     run = applyLoopStopReason(run, tasks, 'T2', 'manual'); // T4(pending)がrunHaltedでskip
     expect(nextTasksToStart(d, run)).toEqual(new Set());
 
-    run = applyLoopStopReason(run, tasks, 'T2', 'done');
-    run = applyLoopStopReason(run, tasks, 'T3', 'done');
+    run = finishDone(run, tasks, 'T2');
+    run = finishDone(run, tasks, 'T3');
     run = retryTask(run, tasks, 'T4');
 
     expect(nextTasksToStart(d, run)).toEqual(new Set(['T4']));
@@ -180,7 +191,7 @@ describe('nextTasksToStart', () => {
     const d = def(tasks, 2);
     let run = createRunState(tasks);
     run = markRunning(run, 'T1');
-    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    run = finishDone(run, tasks, 'T1');
 
     // maxParallel: 2なので定義順の先頭2件（T2, T3）だけが埋まり、T5は残る
     expect(nextTasksToStart(d, run)).toEqual(new Set(['T2', 'T3']));
@@ -191,7 +202,7 @@ describe('nextTasksToStart', () => {
     const d = def(tasks, 3);
     let run = createRunState(tasks);
     run = markRunning(run, 'T1');
-    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    run = finishDone(run, tasks, 'T1');
 
     // 1回目の失敗: 自動再試行でpendingへ戻り、まだ実行は止まらない
     run = markRunning(run, 'T2');
@@ -224,9 +235,9 @@ describe('getRunOutcome', () => {
     const tasks = [task('T1', []), task('T2', ['T1'])];
     let run = createRunState(tasks);
     run = markRunning(run, 'T1');
-    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    run = finishDone(run, tasks, 'T1');
     run = markRunning(run, 'T2');
-    run = applyLoopStopReason(run, tasks, 'T2', 'done');
+    run = finishDone(run, tasks, 'T2');
     expect(getRunOutcome(run)).toBe('succeeded');
   });
 
@@ -236,7 +247,7 @@ describe('getRunOutcome', () => {
     run = markRunning(run, 'T1');
     run = applyLoopStopReason(run, tasks, 'T1', 'maxReached');
     run = markRunning(run, 'T2');
-    run = applyLoopStopReason(run, tasks, 'T2', 'done');
+    run = finishDone(run, tasks, 'T2');
     expect(getRunOutcome(run)).toBe('failed');
   });
 
@@ -261,9 +272,82 @@ describe('getRunOutcome', () => {
     run = applyLoopStopReason(run, tasks, 'T1', 'manual');
     expect(run.tasks.get('T2')?.state).toBe('skipped');
 
-    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    run = finishDone(run, tasks, 'T1');
     expect(run.tasks.get('T1')?.state).toBe('done');
     expect(hasFailedTask(run)).toBe(false);
     expect(getRunOutcome(run)).toBe('aborted');
+  });
+
+  it('mergingは1件でもあればrunning（マージが済むまで終了しない。design.md §16.17）', () => {
+    const tasks = [task('T1', [])];
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = applyLoopStopReason(run, tasks, 'T1', 'done'); // T1: merging
+    expect(run.tasks.get('T1')?.state).toBe('merging');
+    expect(getRunOutcome(run)).toBe('running');
+  });
+
+  it('blockedが1件でもあれば、failedが無い限りblocked（design.md §16.17）', () => {
+    const tasks = [task('T1', [])];
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    run = markMergeBlocked(run, tasks, 'T1');
+    expect(getRunOutcome(run)).toBe('blocked');
+  });
+
+  it('failedとblockedが両方あれば、failedを優先する（design.md §16.17「原因も次にやることも違う」）', () => {
+    const tasks = [task('T1', []), task('T2', [])];
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = applyLoopStopReason(run, tasks, 'T1', 'done');
+    run = markMergeBlocked(run, tasks, 'T1');
+    run = markRunning(run, 'T2');
+    run = applyLoopStopReason(run, tasks, 'T2', 'maxReached');
+    expect(getRunOutcome(run)).toBe('failed');
+  });
+});
+
+describe('merging/blockedとスケジューリングの関係（design.md §16.3 / §16.17）', () => {
+  it('依存先がmergingの間は後続を開始しない（doneだけが依存の充足）', () => {
+    const tasks = diamondTasks();
+    const d = def(tasks, 3);
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = applyLoopStopReason(run, tasks, 'T1', 'done'); // T1: merging（まだdoneでない）
+
+    expect(run.tasks.get('T1')?.state).toBe('merging');
+    expect(nextTasksToStart(d, run)).toEqual(new Set());
+
+    run = markMergeSucceeded(run, tasks, 'T1');
+    expect(nextTasksToStart(d, run)).toEqual(new Set(['T2', 'T3']));
+  });
+
+  it('mergingは並列の枠を占める', () => {
+    // T1がmergingのままだと、他に開始できる独立したタスク（T5）があっても枠が無く開始できない
+    const tasks = [task('T1', []), task('T5', [])];
+    const d = def(tasks, 1);
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = applyLoopStopReason(run, tasks, 'T1', 'done'); // T1: merging。maxParallel:1の枠を占める
+    expect(nextTasksToStart(d, run)).toEqual(new Set());
+  });
+
+  it('blockedは依存する後続だけをskippedにし、独立した枝は走り続ける', () => {
+    const tasks = [...diamondTasks(), task('T5', [])];
+    let run = createRunState(tasks);
+    run = finishDone(run, tasks, 'T1');
+    run = markRunning(run, 'T2');
+    run = markRunning(run, 'T3');
+    run = markRunning(run, 'T5');
+    run = applyLoopStopReason(run, tasks, 'T2', 'done'); // T2: merging
+    run = markMergeBlocked(run, tasks, 'T2'); // T2: blocked, T4: skipped(mergeBlocked)
+
+    expect(run.tasks.get('T2')?.state).toBe('blocked');
+    expect(run.tasks.get('T4')?.state).toBe('skipped');
+    // T3・T5はblockedの影響を受けず走り続ける（failedと違い実行全体を止めない）
+    expect(run.tasks.get('T3')?.state).toBe('running');
+    expect(run.tasks.get('T5')?.state).toBe('running');
+    expect(getRunOutcome(run)).toBe('running'); // T3・T5がまだrunningのため
   });
 });

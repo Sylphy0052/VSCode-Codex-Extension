@@ -25,10 +25,10 @@ import {
  * 複製しているのと同じ方針）。`taskId` の字種は `workflow.ts` の `TASK_ID_PATTERN` を
  * `worktree.ts` と同じく直接参照する（循環importの心配が無いため複製しない）。
  *
- * **状態遷移（`merging` / `blocked`）との接続、衝突解決セッションの起動、PR/MRの作成は
- * このファイルの範囲に含まない（Issue #92のスコープ外。#93が別に扱う）。** ここが返すのは
- * マージの結果を表す型までで、その結果を受けて何をするかは呼び出し側（`runner.ts`、
- * 別Issueで接続）の責務にする。
+ * 状態遷移（`merging` / `blocked`）との接続、衝突解決セッションの起動は `runner.ts`
+ * （#93）が担う。このファイルは、その接続で使う純粋寄りの補助（衝突解決プロンプトの
+ * 組み立て、衝突解決の完了判定、リロード直後の`merging`タスクの再判定）までを提供する。
+ * PR/MRの作成（`forge.ts`）は引き続きこのファイルの範囲に含まない。
  */
 
 /** 統合先ディレクトリのタスクid相当の固定名。design.md §16.17「`_integration` はタスクidとして予約する」。 */
@@ -505,4 +505,167 @@ export class IntegrationMergeQueue {
   abortMerge(integrationWorktreeCwd: string, git: GitCommandRunner): Promise<AbortMergeResult> {
     return this.worktreeQueue.enqueue(() => abortMerge(integrationWorktreeCwd, git));
   }
+}
+
+// ---------------------------------------------------------------------------
+// リロード直後の`merging`タスクの再判定（design.md §16.11）
+// ---------------------------------------------------------------------------
+
+/**
+ * リロード直後、`merging`だったタスクが実際にどうなっているかを統合ブランチの状態から
+ * 判定し直す（design.md §16.11「状態の記録ではなく統合ブランチの実際の状態から判定し
+ * 直す」）。永続化された状態はマージが途中で切れている可能性があるため信用しない。
+ *
+ * - 未解決の衝突が残っていれば `blocked`
+ * - 対象タスクのマージコミット（`mergeCommitMessage`の固定文言）が統合ブランチの
+ *   履歴に見つかれば `done`
+ * - どちらでもなければ `merging`（呼び出し側がマージをやり直す）
+ *
+ * `runId` / `taskId` が不正な場合や、統合worktreeが読めない場合（gitコマンド自体が
+ * 失敗する）は安全側の `merging`（やり直し対象）を返す。
+ */
+export type ReconcileMergingOutcome = 'done' | 'merging' | 'blocked';
+
+export async function reconcileMergingTaskOnReload(
+  integrationWorktreeCwd: string,
+  runId: string,
+  taskId: string,
+  git: GitCommandRunner,
+): Promise<ReconcileMergingOutcome> {
+  const idMessage = identifierError(runId, taskId);
+  if (idMessage !== undefined) {
+    return 'merging';
+  }
+
+  const unresolved = await git.run(
+    ['diff', '--name-only', '--diff-filter=U'],
+    integrationWorktreeCwd,
+  );
+  if (unresolved.code === 0 && unresolved.stdout.trim() !== '') {
+    return 'blocked';
+  }
+
+  const log = await git.run(
+    ['log', '--fixed-strings', `--grep=${mergeCommitMessage(taskId, runId)}`, '-1', '--format=%H'],
+    integrationWorktreeCwd,
+  );
+  if (log.code === 0 && log.stdout.trim() !== '') {
+    return 'done';
+  }
+  return 'merging';
+}
+
+// ---------------------------------------------------------------------------
+// 衝突解決セッション（design.md §16.17「コンフリクト」）
+// ---------------------------------------------------------------------------
+
+/** 衝突解決セッションの `maxIterations` の既定値（design.md §16.17「既定は小さくする（5）」）。 */
+export const MERGE_RESOLUTION_MAX_ITERATIONS = 5;
+
+/** 衝突解決セッションの終了条件（固定文言。design.md §16.17「コンフリクト」4.）。 */
+export const MERGE_RESOLUTION_CONDITION =
+  '衝突を解決してコミットしてあり、git statusで未解決のパスが1件も残っていないこと';
+
+/** `buildMergeResolutionPrompt` へ渡すタスク情報。`WorkflowTask` から必要な3項目だけを抜き出す。 */
+export interface MergeResolutionTaskInfo {
+  id: string;
+  prompt: string;
+  done: string;
+}
+
+/**
+ * 衝突解決セッションへ渡す初回プロンプトを組み立てる（design.md §16.17「コンフリクト」3.
+ * 「プロンプトには衝突したファイルの一覧、突き合わせる2つのタスクのpromptとdone、
+ * 未解決パスの一覧を渡す」）。
+ *
+ * `others` は、`target`のブランチが分岐した時点から統合ブランチの現在のHEADまでの間に
+ * 既に取り込まれたタスク（`findTaskIdsMergedSince`で求める）。通常は1件（design.mdが
+ * 想定する「2つのタスク」の片方）だが、複数のタスクが積み重なって取り込まれた後に
+ * 衝突した場合は複数件になりうるため、配列として渡す。
+ */
+export function buildMergeResolutionPrompt(
+  target: MergeResolutionTaskInfo,
+  others: readonly MergeResolutionTaskInfo[],
+  unresolvedPaths: readonly string[],
+): string {
+  const lines: string[] = [];
+  lines.push(
+    '複数の並列タスクの成果を統合ブランチへ取り込む際にマージ衝突が発生しました。',
+    '現在のディレクトリ（統合worktree）はマージが衝突した状態のままです。衝突を解決し、コミットしてください。',
+    '',
+    '# 未解決のパス',
+  );
+  for (const p of unresolvedPaths) {
+    lines.push(`- ${p}`);
+  }
+  lines.push('', `# タスク「${target.id}」（今回マージしようとしたタスク）`, `prompt: ${target.prompt}`, `done: ${target.done}`);
+  for (const other of others) {
+    lines.push(
+      '',
+      `# タスク「${other.id}」（既に統合ブランチへ取り込み済みのタスク）`,
+      `prompt: ${other.prompt}`,
+      `done: ${other.done}`,
+    );
+  }
+  lines.push('', '両方のタスクの意図を汲み取り、意味的に正しくなるよう解決してください。');
+  return lines.join('\n');
+}
+
+/**
+ * `sinceCommit`（対象タスクのブランチの分岐元）から統合ブランチの現在のHEADまでの間に
+ * マージされたタスクidの一覧を、マージコミットの固定文言（`mergeCommitMessage`）から
+ * 逆算する。衝突解決プロンプトの「突き合わせる」相手を特定するために使う
+ * （`buildMergeResolutionPrompt`の`others`）。
+ *
+ * `sinceCommit`が不正な形式（コミットのSHAでない）なら空配列を返す（安全側）。
+ */
+export async function findTaskIdsMergedSince(
+  integrationWorktreeCwd: string,
+  runId: string,
+  sinceCommit: string,
+  git: GitCommandRunner,
+): Promise<string[]> {
+  if (runIdError(runId) !== undefined || !HEAD_COMMIT_PATTERN.test(sinceCommit)) {
+    return [];
+  }
+  const log = await git.run(['log', '--format=%s', `${sinceCommit}..HEAD`], integrationWorktreeCwd);
+  if (log.code !== 0) {
+    return [];
+  }
+  const prefix = 'Merge task ';
+  const suffix = ` (run ${runId})`;
+  const ids: string[] = [];
+  for (const line of log.stdout.split(/\r?\n/u)) {
+    if (line.startsWith(prefix) && line.endsWith(suffix)) {
+      const id = line.slice(prefix.length, line.length - suffix.length);
+      if (TASK_ID_PATTERN.test(id) && !ids.includes(id)) {
+        ids.push(id);
+      }
+    }
+  }
+  return ids;
+}
+
+/**
+ * 衝突解決セッションが「完了」を宣言した際、実際に解決されコミット済みかを
+ * `git status`相当のコマンドで確かめる（design.md §16.17「コンフリクト」4.
+ * 「宣言だけを信じず`git status`でも確かめる」）。
+ *
+ * 未解決パス（`git diff --diff-filter=U`）が無く、かつマージが進行中でない
+ * （`MERGE_HEAD`が存在しない＝解決コミットが済んでいる）ときだけ`true`。
+ */
+export async function isMergeResolutionComplete(
+  integrationWorktreeCwd: string,
+  git: GitCommandRunner,
+): Promise<boolean> {
+  const unresolved = await git.run(
+    ['diff', '--name-only', '--diff-filter=U'],
+    integrationWorktreeCwd,
+  );
+  if (unresolved.code !== 0 || unresolved.stdout.trim() !== '') {
+    return false;
+  }
+  const mergeHead = await git.run(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], integrationWorktreeCwd);
+  // MERGE_HEADの解決に成功する（code 0）ということは、まだマージ進行中（未コミット）
+  return mergeHead.code !== 0;
 }

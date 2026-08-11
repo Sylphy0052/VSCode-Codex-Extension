@@ -168,13 +168,40 @@ class FakeHost implements TaskSessionHost {
 interface FakeGitHandle extends GitCommandRunner {
   /** 呼ばれたgitコマンドの履歴。`worktree remove` が実際に呼ばれたかの確認等に使う。 */
   calls: Array<{ args: string[]; cwd: string }>;
+  /**
+   * 衝突解決セッションのテスト用。`conflictOnce: true` で発生させた衝突を「解決してコミット
+   * 済み」の状態にする（`git diff --diff-filter=U`を空にし、`MERGE_HEAD`も無しにする）。
+   * 衝突解決セッション役の`FakeTaskSession`が`finish('done', ...)`する前に呼ぶ。
+   */
+  resolveConflict(): void;
 }
 
-/** `worktree add` を常に失敗させたい場合だけ `failWorktreeAdd: true` を渡す。 */
-function fakeGit(options?: { failWorktreeAdd?: boolean }): FakeGitHandle {
+/**
+ * `worktree add` を失敗させたい場合だけ `failWorktreeAdd: true` を渡す。既定では
+ * 1回目の`worktree add`呼び出し（`start()`が作る統合worktree）から失敗させる。
+ * タスク自身のworktree作成（2回目以降）だけを失敗させたいときは
+ * `failWorktreeAddFromCall: 2` を併せて渡す（1回目＝統合worktreeは成功させる）。
+ * `failMerge: true` は `git merge --no-ff` を常に（衝突ではない）失敗させる。
+ * `conflictOnce: true` は最初の1回の `git merge --no-ff` だけを衝突として扱う
+ * （2回目以降は成功。衝突解決セッションが解決した後の再マージを模す）。衝突中は
+ * `git diff --diff-filter=U` / `git rev-parse MERGE_HEAD` も実物同様に振る舞う
+ * （`resolveConflict()`を呼ぶまで未解決のまま）。
+ */
+function fakeGit(options?: {
+  failWorktreeAdd?: boolean;
+  failWorktreeAddFromCall?: number;
+  failMerge?: boolean;
+  conflictOnce?: boolean;
+}): FakeGitHandle {
   const calls: Array<{ args: string[]; cwd: string }> = [];
+  let conflictPending = options?.conflictOnce === true;
+  let unresolvedConflict = false;
+  let worktreeAddCallCount = 0;
   return {
     calls,
+    resolveConflict() {
+      unresolvedConflict = false;
+    },
     async run(args, cwd) {
       calls.push({ args: [...args], cwd });
       if (args[0] === 'rev-parse' && args[1] === '--is-inside-work-tree') {
@@ -186,12 +213,20 @@ function fakeGit(options?: { failWorktreeAdd?: boolean }): FakeGitHandle {
       if (args[0] === 'rev-parse' && args[1] === '--git-common-dir') {
         return { code: 0, stdout: '/repo/.git\n', stderr: '' };
       }
+      if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) {
+        // マージ進行中（未解決の衝突が残っている）間だけ見つかる
+        return unresolvedConflict
+          ? { code: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '' }
+          : { code: 1, stdout: '', stderr: 'not found' };
+      }
       if (args[0] === 'rev-parse' && args.includes('--verify')) {
         // ブランチはまだ存在しない（worktree作成前提）
         return { code: 1, stdout: '', stderr: 'not found' };
       }
       if (args[0] === 'worktree' && args[1] === 'add') {
-        if (options?.failWorktreeAdd) {
+        worktreeAddCallCount += 1;
+        const from = options?.failWorktreeAddFromCall ?? 1;
+        if (options?.failWorktreeAdd && worktreeAddCallCount >= from) {
           return { code: 128, stdout: '', stderr: 'fatal: fake worktree add failure' };
         }
         return { code: 0, stdout: '', stderr: '' };
@@ -200,6 +235,36 @@ function fakeGit(options?: { failWorktreeAdd?: boolean }): FakeGitHandle {
         return { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'status' && args[1] === '--porcelain') {
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'merge' && args[1] === '--no-ff') {
+        if (conflictPending) {
+          conflictPending = false;
+          unresolvedConflict = true;
+          return { code: 1, stdout: '', stderr: 'CONFLICT (content): fake conflict' };
+        }
+        if (options?.failMerge) {
+          return { code: 1, stdout: '', stderr: 'fatal: fake merge failure' };
+        }
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'merge' && args[1] === '--abort') {
+        unresolvedConflict = false;
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'diff' && args.includes('--diff-filter=U')) {
+        return unresolvedConflict
+          ? { code: 0, stdout: 'CONFLICT.txt\n', stderr: '' }
+          : { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'add' && args[1] === '-A') {
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'commit') {
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'log') {
+        // マージ済みタスクidの逆算・リロード時の再判定は既定では「見つからない」扱い
         return { code: 0, stdout: '', stderr: '' };
       }
       return { code: 1, stdout: '', stderr: `unhandled: ${args.join(' ')}` };
@@ -916,7 +981,8 @@ tasks:
   });
 
   it('worktreeの作成（git worktree add）自体が失敗したとき、タスクはfailedになる', async () => {
-    const git = fakeGit({ failWorktreeAdd: true });
+    // 1回目のworktree addはstart()が作る統合worktree。2回目（T1自身）から失敗させる
+    const git = fakeGit({ failWorktreeAdd: true, failWorktreeAddFromCall: 2 });
     const { runner, codexHost, store } = createHarness(YAML, { git });
     const result = await runner.start('/repo/.agents/workflows/wtfail.yaml', '/repo');
     const runId = result.runId as string;
@@ -1222,8 +1288,26 @@ tasks:
   });
 
   it('removeWorktreesはdone/failed/skippedタスクのworktreeを撤去する', async () => {
+    // design.md §16.17でcleanupの既定は`after-merge`に変わり、doneになった時点で
+    // 自動的に撤去されるようになった。ここでは「自動撤去が起きていない状態から
+    // removeWorktrees()で撤去する」という本来のテスト意図を保つため、明示的に
+    // `cleanup: keep`にする
+    const keepYaml = `
+version: 1
+name: view-ops-test-keep
+defaults:
+  cleanup: keep
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+  - id: T2
+    dependsOn: [T1]
+    prompt: p
+    done: d
+`;
     const git = fakeGit();
-    const { runner, codexHost } = createHarness(YAML, { git });
+    const { runner, codexHost } = createHarness(keepYaml, { git });
     const result = await runner.start('/repo/.agents/workflows/remove.yaml', '/repo');
     const runId = result.runId as string;
     await flush();
@@ -1233,7 +1317,7 @@ tasks:
     await flush();
 
     const before = git.calls.filter((c) => c.args[0] === 'worktree' && c.args[1] === 'remove');
-    expect(before).toHaveLength(0); // cleanup: keep（既定）なので自動では撤去されない
+    expect(before).toHaveLength(0); // cleanup: keep なので自動では撤去されない
 
     const outcome = await runner.removeWorktrees(runId);
     expect(outcome.removed).toContain('T1');
@@ -1426,5 +1510,402 @@ tasks:
 
     await expect(reloadedRunner.restoreRunsForView()).resolves.toBeUndefined();
     expect(reloadedRunner.getSnapshot(runId)).toBeUndefined();
+  });
+});
+
+describe('WorkflowRunner: マージ（design.md §16.17）', () => {
+  const YAML = `
+version: 1
+name: merge-test
+defaults:
+  provider: codex
+  maxParallel: 3
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    dependsOn: [T1]
+    prompt: p2
+    done: d2
+  - id: T3
+    dependsOn: [T1]
+    prompt: p3
+    done: d3
+  - id: T4
+    dependsOn: [T2, T3]
+    prompt: p4
+    done: d4
+`;
+
+  it('マージが成功するとdoneになり、worktreeがafter-mergeで撤去される（design.md §16.17既定）', async () => {
+    const git = fakeGit();
+    const { runner, codexHost, store } = createHarness(YAML);
+    // createHarnessは既定のfakeGit()を使うため、明示的にgitを渡し直す必要は無いが
+    // 撤去呼び出しを確認したいのでharnessと同じgitインスタンスを使う
+    void git;
+    const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+  });
+
+  it('未コミットの変更があるタスクが完了すると、終了条件にコミット要件が自動で足される', async () => {
+    const { runner, codexHost } = createHarness(YAML);
+    await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    // isolation: worktree（既定）のタスクは、終了条件へ「コミットしてあること」が
+    // 自動で足される（design.md §16.17「タスク完了時のコミット」1.）
+    expect(t1.runLoopCalls[0]?.condition).toContain('d1');
+    expect(t1.runLoopCalls[0]?.condition).toContain('コミット');
+  });
+
+  it('マージが衝突すると衝突解決セッションが自動で開始され、解決すればdoneになる', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // T1は衝突したのでまだmergingのまま（衝突解決セッションが開いているはず）
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    // 衝突解決セッションはT1自身のworktreeとは別（統合worktree）で開かれる。
+    // 直近に開かれたセッションがそれのはず
+    const resolutionSession = codexHost.sessions.at(-1);
+    expect(resolutionSession).toBeDefined();
+    expect(resolutionSession?.cwd.endsWith('_integration')).toBe(true);
+    expect(resolutionSession?.runLoopCalls[0]?.initialPrompt).toContain('T1');
+
+    // 解決してコミットした（git上も未解決パスが消えた）とみなして完了を宣言する
+    git.resolveConflict();
+    resolutionSession?.finish('done', doneState('衝突を解決しました'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+  });
+
+  it(
+    '衝突解決セッションがdoneを宣言してもgit上は未解決のままなら信用せずblockedにする' +
+      '（design.md §16.17「宣言だけを信じずgit statusでも確かめる」）',
+    async () => {
+      const git = fakeGit({ conflictOnce: true });
+      const { runner, codexHost, store } = createHarness(YAML, { git });
+      const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      const resolutionSession = codexHost.sessions.at(-1);
+      // git.resolveConflict()を呼ばず、宣言だけdoneにする
+      resolutionSession?.finish('done', doneState('解決したつもり'));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+      // マージは巻き戻されている
+      const abortCall = git.calls.find((c) => c.args[0] === 'merge' && c.args[1] === '--abort');
+      expect(abortCall).toBeDefined();
+    },
+  );
+
+  it('衝突解決セッションが回数切れ（maxReached）になるとblockedになり、マージが巻き戻される', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const resolutionSession = codexHost.sessions.at(-1);
+    resolutionSession?.finish('maxReached', { ...initialChatState });
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+    const abortCall = git.calls.find((c) => c.args[0] === 'merge' && c.args[1] === '--abort');
+    expect(abortCall).toBeDefined();
+  });
+
+  it(
+    'blockedは依存する後続だけをskipped(mergeBlocked)にし、独立した枝は走り続ける' +
+      '（design.md §16.3「blockedは実行全体を止めない」）',
+    async () => {
+      const git = fakeGit({ conflictOnce: true });
+      const { runner, codexHost, store } = createHarness(YAML, { git });
+      const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+      // T1のマージが衝突 → 衝突解決セッションが回数切れでblockedになる
+      const resolutionSession = codexHost.sessions.at(-1);
+      resolutionSession?.finish('maxReached', { ...initialChatState });
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+      // T2・T3はT1に依存しているため開始されない（skipped, mergeBlocked）
+      expect(store.find(runId)?.tasks['T2']?.state).toBe('skipped');
+      expect(store.find(runId)?.tasks['T2']?.failure).toEqual({
+        kind: 'mergeBlocked',
+        blockedTaskIds: ['T1'],
+      });
+      expect(store.find(runId)?.tasks['T3']?.state).toBe('skipped');
+      // 実行全体は停止していない（haltedByUserがfalseのまま）
+      expect(store.find(runId)?.haltedByUser).toBe(false);
+    },
+  );
+
+  it('マージがその他の理由（gitエラー等）で失敗するとfailedになり、依存する後続がskippedになる', async () => {
+    const git = fakeGit({ failMerge: true });
+    const { runner, codexHost, store } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+    expect(store.find(runId)?.tasks['T1']?.failure).toEqual({ kind: 'mergeFailed' });
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('skipped');
+  });
+
+  it('retryMergeはblockedのタスクを再マージし、成功すればdoneになり依存先が再開できる', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+    const resolutionSession = codexHost.sessions.at(-1);
+    resolutionSession?.finish('maxReached', { ...initialChatState });
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('skipped');
+
+    // 人が統合worktreeを手で直し（ここではfakeGitを解決済みにする）、再マージを指示する
+    git.resolveConflict();
+    const retried = runner.retryMerge(runId, 'T1');
+    expect(retried).toBe(true);
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    // mergeBlockedで止まっていたT2がpendingへ戻り、次に開始される
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('running');
+  });
+
+  it('isolation: sharedのタスクはマージ対象のブランチを持たないため、mergingを経ずそのままdoneになる', async () => {
+    const sharedYaml = `
+version: 1
+name: shared-test
+tasks:
+  - id: T1
+    isolation: shared
+    prompt: p
+    done: d
+`;
+    const git = fakeGit();
+    const { runner, codexHost, store } = createHarness(sharedYaml, { git });
+    const result = await runner.start('/repo/.agents/workflows/shared.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // isolation: sharedのタスクはcwdがrepoRoot直下（'/repo'）になり、taskIdでは終わらないため
+    // byTaskIdでは引けない
+    expect(codexHost.sessions).toHaveLength(1);
+    const t1 = codexHost.sessions[0] as FakeTaskSession;
+    expect(t1.cwd).toBe('/repo');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    // マージ関連のgit呼び出し（merge, commit）が一切発生していない
+    expect(git.calls.some((c) => c.args[0] === 'merge')).toBe(false);
+    expect(git.calls.some((c) => c.args[0] === 'commit')).toBe(false);
+  });
+
+  it('統合worktreeの作成自体が失敗すると、start()はエラーで返す', async () => {
+    const git = fakeGit({ failWorktreeAdd: true });
+    const { runner } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+    expect(result.ok).toBe(false);
+    expect(result.errors?.some((e) => e.message.includes('統合worktree'))).toBe(true);
+  });
+});
+
+describe('WorkflowRunner: マージのリロード後再判定（design.md §16.11）', () => {
+  const YAML = `
+version: 1
+name: merge-reload-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+  function makeReloadedRunner(
+    store: WorkflowRunStore,
+    git: FakeGitHandle,
+    host: FakeHost,
+  ): WorkflowRunner {
+    return new WorkflowRunner({
+      hosts: { codex: host, claude: host },
+      worktreeQueue: new WorktreeCreationQueue(),
+      git,
+      fs: identityFs,
+      filePort: filePort(YAML),
+      store,
+      log: fakeLogger,
+      readBaseline: () => ({
+        codexSandbox: 'read-only',
+        codexApprovalMode: 'on-request',
+        claudePermissionMode: 'manual',
+        allowAutoApprove: true,
+      }),
+    });
+  }
+
+  it('永続化されたmergingタスクは、マージコミットが統合ブランチの履歴に見つかればdoneとして復元される', async () => {
+    const store = new WorkflowRunStore(fakeMemento());
+    const runId = '00000000-0000-4000-8000-000000000101';
+    await store.update(runId, () => ({
+      runId,
+      defPath: '/repo/.agents/workflows/reload-merging.yaml',
+      workspaceRoot: '/repo',
+      startedAt: new Date().toISOString(),
+      finishedAt: undefined,
+      tasks: {
+        T1: {
+          state: 'merging',
+          sessionId: 'session-1',
+          cwd: `/repo/.agents/worktrees/${runId}/T1`,
+          branch: `wf/${runId}/T1`,
+          submissionCount: 1,
+          retryCount: 0,
+          failure: undefined,
+        },
+      },
+      haltedByUser: false,
+      integrationBranch: `wf/${runId}/integration`,
+    }));
+
+    const git = fakeGit();
+    // マージコミットが既に履歴にある（マージ自体は完了していたが、リロードでその後の
+    // 状態遷移が失われたケースを模す）
+    const originalRun = git.run.bind(git);
+    const gitWithLog: FakeGitHandle = {
+      ...git,
+      run: async (args, cwd) => {
+        if (args[0] === 'log') {
+          return { code: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '' };
+        }
+        return originalRun(args, cwd);
+      },
+    };
+
+    const host = new FakeHost();
+    const runner = makeReloadedRunner(store, gitWithLog, host);
+    await runner.restoreRunsForView();
+
+    expect(runner.getSnapshot(runId)?.tasks[0]?.state).toBe('done');
+  });
+
+  it('永続化されたmergingタスクは、マージコミットが見つからずbranch/cwdが分かれば自動でマージをやり直す', async () => {
+    const store = new WorkflowRunStore(fakeMemento());
+    const runId = '00000000-0000-4000-8000-000000000102';
+    await store.update(runId, () => ({
+      runId,
+      defPath: '/repo/.agents/workflows/reload-merging2.yaml',
+      workspaceRoot: '/repo',
+      startedAt: new Date().toISOString(),
+      finishedAt: undefined,
+      tasks: {
+        T1: {
+          state: 'merging',
+          sessionId: 'session-1',
+          cwd: `/repo/.agents/worktrees/${runId}/T1`,
+          branch: `wf/${runId}/T1`,
+          submissionCount: 1,
+          retryCount: 0,
+          failure: undefined,
+        },
+      },
+      haltedByUser: false,
+      integrationBranch: `wf/${runId}/integration`,
+    }));
+
+    const git = fakeGit(); // 既定でmerge --no-ffは成功する
+    const host = new FakeHost();
+    const runner = makeReloadedRunner(store, git, host);
+    await runner.restoreRunsForView();
+    await flush();
+
+    expect(runner.getSnapshot(runId)?.tasks[0]?.state).toBe('done');
+    const mergeCall = git.calls.find((c) => c.args[0] === 'merge' && c.args[1] === '--no-ff');
+    expect(mergeCall?.args).toContain(`wf/${runId}/T1`);
+  });
+
+  it('永続化されたmergingタスクに未解決の衝突が残っていればblockedとして復元される', async () => {
+    const store = new WorkflowRunStore(fakeMemento());
+    const runId = '00000000-0000-4000-8000-000000000103';
+    await store.update(runId, () => ({
+      runId,
+      defPath: '/repo/.agents/workflows/reload-blocked.yaml',
+      workspaceRoot: '/repo',
+      startedAt: new Date().toISOString(),
+      finishedAt: undefined,
+      tasks: {
+        T1: {
+          state: 'merging',
+          sessionId: 'session-1',
+          cwd: `/repo/.agents/worktrees/${runId}/T1`,
+          branch: `wf/${runId}/T1`,
+          submissionCount: 1,
+          retryCount: 0,
+          failure: undefined,
+        },
+      },
+      haltedByUser: false,
+      integrationBranch: `wf/${runId}/integration`,
+    }));
+
+    const git = fakeGit();
+    const originalRun = git.run.bind(git);
+    const gitWithConflict: FakeGitHandle = {
+      ...git,
+      run: async (args, cwd) => {
+        if (args[0] === 'diff' && args.includes('--diff-filter=U')) {
+          return { code: 0, stdout: 'CONFLICT.txt\n', stderr: '' };
+        }
+        return originalRun(args, cwd);
+      },
+    };
+
+    const host = new FakeHost();
+    const runner = makeReloadedRunner(store, gitWithConflict, host);
+    await runner.restoreRunsForView();
+
+    expect(runner.getSnapshot(runId)?.tasks[0]?.state).toBe('blocked');
   });
 });

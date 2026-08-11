@@ -166,7 +166,18 @@ describe('shouldRemoveWorktree', () => {
     ['remove', 'pending', false],
     ['remove', 'running', false],
     ['remove', 'skipped', false],
+    ['remove', 'merging', false],
+    ['remove', 'blocked', false],
     ['keep', 'done', false],
+    // design.md §16.17「worktreeの片付け」: after-mergeはdoneの時点で撤去する（remove同様）。
+    // failed/blocked/merging/pending/running/skippedは残す
+    ['after-merge', 'done', true],
+    ['after-merge', 'failed', false],
+    ['after-merge', 'blocked', false],
+    ['after-merge', 'merging', false],
+    ['after-merge', 'pending', false],
+    ['after-merge', 'running', false],
+    ['after-merge', 'skipped', false],
   ] as const)('cleanup=%s state=%s => %s', (cleanup, state, expected) => {
     expect(shouldRemoveWorktree(cleanup, state)).toBe(expected);
   });

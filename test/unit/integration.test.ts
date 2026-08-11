@@ -3,11 +3,15 @@ import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  buildMergeResolutionPrompt,
   commitUncommittedChangesIfNeeded,
+  findTaskIdsMergedSince,
   integrationBranchName,
   integrationWorktreePath,
   IntegrationMergeQueue,
+  isMergeResolutionComplete,
   mergeCommitMessage,
+  reconcileMergingTaskOnReload,
   resolveTaskBranchOrigin,
   uncommittedChangesCommitMessage,
 } from '../../src/orchestrator/integration';
@@ -525,5 +529,142 @@ describe('未コミットの変更の自動コミット→マージの流れ（�
     const mergeCallIndex = git.calls.findIndex((c) => c.args[0] === 'merge');
     expect(commitCallIndex).toBeGreaterThanOrEqual(0);
     expect(mergeCallIndex).toBeGreaterThan(commitCallIndex);
+  });
+});
+
+describe('reconcileMergingTaskOnReload（design.md §16.11）', () => {
+  it('未解決の衝突（diff --diff-filter=Uが非空）が残っていればblocked', async () => {
+    const git = new FakeGit();
+    git.respond(['diff', '--name-only', '--diff-filter=U'], {
+      code: 0,
+      stdout: 'a.ts\n',
+      stderr: '',
+    });
+    const result = await reconcileMergingTaskOnReload(INTEGRATION_CWD, RUN_ID, 'T1', git);
+    expect(result).toBe('blocked');
+  });
+
+  it('未解決の衝突が無く、マージコミットが履歴に見つかればdone', async () => {
+    const git = new FakeGit();
+    git.respond(['diff', '--name-only', '--diff-filter=U'], { code: 0, stdout: '', stderr: '' });
+    git.respond(['log'], { code: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '' });
+    const result = await reconcileMergingTaskOnReload(INTEGRATION_CWD, RUN_ID, 'T1', git);
+    expect(result).toBe('done');
+
+    const logCall = git.calls.find((c) => c.args[0] === 'log');
+    expect(logCall?.args).toContain(`--grep=${mergeCommitMessage('T1', RUN_ID)}`);
+  });
+
+  it('未解決の衝突が無く、マージコミットも見つからなければmerging（やり直し対象）', async () => {
+    const git = new FakeGit();
+    git.respond(['diff', '--name-only', '--diff-filter=U'], { code: 0, stdout: '', stderr: '' });
+    git.respond(['log'], { code: 0, stdout: '', stderr: '' });
+    const result = await reconcileMergingTaskOnReload(INTEGRATION_CWD, RUN_ID, 'T1', git);
+    expect(result).toBe('merging');
+  });
+
+  it('不正なrunId/taskIdは安全側でmerging（gitを呼ばない）', async () => {
+    const git = new FakeGit();
+    const result = await reconcileMergingTaskOnReload(INTEGRATION_CWD, 'not-a-uuid', 'T1', git);
+    expect(result).toBe('merging');
+    expect(git.calls).toHaveLength(0);
+  });
+});
+
+describe('isMergeResolutionComplete（design.md §16.17「コンフリクト」4.）', () => {
+  it('未解決パスが無く、MERGE_HEADも見つからなければtrue（解決してコミット済み）', async () => {
+    const git = new FakeGit();
+    git.respond(['diff', '--name-only', '--diff-filter=U'], { code: 0, stdout: '', stderr: '' });
+    git.respond(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], {
+      code: 1,
+      stdout: '',
+      stderr: 'not found',
+    });
+    expect(await isMergeResolutionComplete(INTEGRATION_CWD, git)).toBe(true);
+  });
+
+  it('未解決パスが残っていればfalse', async () => {
+    const git = new FakeGit();
+    git.respond(['diff', '--name-only', '--diff-filter=U'], {
+      code: 0,
+      stdout: 'a.ts\n',
+      stderr: '',
+    });
+    expect(await isMergeResolutionComplete(INTEGRATION_CWD, git)).toBe(false);
+  });
+
+  it('未解決パスは無いがMERGE_HEADがまだ存在すれば（コミット前）false', async () => {
+    const git = new FakeGit();
+    git.respond(['diff', '--name-only', '--diff-filter=U'], { code: 0, stdout: '', stderr: '' });
+    git.respond(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], {
+      code: 0,
+      stdout: `${'a'.repeat(40)}\n`,
+      stderr: '',
+    });
+    expect(await isMergeResolutionComplete(INTEGRATION_CWD, git)).toBe(false);
+  });
+});
+
+describe('findTaskIdsMergedSince', () => {
+  it('マージコミットの固定文言からタスクidを逆算する', async () => {
+    const git = new FakeGit();
+    git.respond(['log'], {
+      code: 0,
+      stdout: [
+        `Merge task T2 (run ${RUN_ID})`,
+        'some unrelated commit',
+        `Merge task T3 (run ${RUN_ID})`,
+      ].join('\n'),
+      stderr: '',
+    });
+    const ids = await findTaskIdsMergedSince(INTEGRATION_CWD, RUN_ID, HEAD_SHA, git);
+    expect(ids).toEqual(['T2', 'T3']);
+
+    const logCall = git.calls.find((c) => c.args[0] === 'log');
+    expect(logCall?.args).toContain(`${HEAD_SHA}..HEAD`);
+  });
+
+  it('重複したタスクidは1回だけ含める', async () => {
+    const git = new FakeGit();
+    git.respond(['log'], {
+      code: 0,
+      stdout: [`Merge task T2 (run ${RUN_ID})`, `Merge task T2 (run ${RUN_ID})`].join('\n'),
+      stderr: '',
+    });
+    const ids = await findTaskIdsMergedSince(INTEGRATION_CWD, RUN_ID, HEAD_SHA, git);
+    expect(ids).toEqual(['T2']);
+  });
+
+  it('不正なsinceCommitは空配列（gitを呼ばない）', async () => {
+    const git = new FakeGit();
+    const ids = await findTaskIdsMergedSince(INTEGRATION_CWD, RUN_ID, 'not-a-sha', git);
+    expect(ids).toEqual([]);
+    expect(git.calls).toHaveLength(0);
+  });
+});
+
+describe('buildMergeResolutionPrompt', () => {
+  it('未解決パス・対象タスク・突き合わせるタスクのprompt/doneを含む', () => {
+    const prompt = buildMergeResolutionPrompt(
+      { id: 'T2', prompt: 'T2のプロンプト', done: 'T2完了条件' },
+      [{ id: 'T1', prompt: 'T1のプロンプト', done: 'T1完了条件' }],
+      ['a.ts', 'b.ts'],
+    );
+    expect(prompt).toContain('a.ts');
+    expect(prompt).toContain('b.ts');
+    expect(prompt).toContain('T2のプロンプト');
+    expect(prompt).toContain('T2完了条件');
+    expect(prompt).toContain('T1のプロンプト');
+    expect(prompt).toContain('T1完了条件');
+  });
+
+  it('othersが空でも組み立てられる', () => {
+    const prompt = buildMergeResolutionPrompt(
+      { id: 'T2', prompt: 'p', done: 'd' },
+      [],
+      ['a.ts'],
+    );
+    expect(prompt).toContain('a.ts');
+    expect(prompt).toContain('T2');
   });
 });

@@ -29,6 +29,7 @@ function run(overrides: Partial<PersistedRun> = {}): PersistedRun {
     finishedAt: undefined,
     tasks: { T1: task('running') },
     haltedByUser: false,
+    integrationBranch: 'wf/run-1/integration',
     ...overrides,
   };
 }
