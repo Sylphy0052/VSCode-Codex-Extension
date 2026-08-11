@@ -1,4 +1,5 @@
 import type { Attachment } from '../provider/attachments';
+import type { PendingPrompt } from './prompts';
 
 /** 1ファイル分の変更。app-server の `FileUpdateChange` に対応する。 */
 export interface FileDiff {
@@ -135,6 +136,8 @@ export interface ChatState {
   queued: QueuedMessage[];
   items: ChatItem[];
   approvals: PendingApproval[];
+  /** ユーザーへの問い合わせ（ツールの質問・MCPサーバのフォーム）。 */
+  prompts: PendingPrompt[];
   usage: ChatUsage | undefined;
   /** コンテキストの使用量。まだ判らない間は undefined（数字を出さない）。 */
   context: ContextUsage | undefined;
@@ -168,6 +171,7 @@ export const initialChatState: ChatState = {
   queued: [],
   items: [],
   approvals: [],
+  prompts: [],
   usage: undefined,
   context: undefined,
   planMode: false,
@@ -646,4 +650,12 @@ export function addApproval(state: ChatState, approval: PendingApproval): ChatSt
 
 export function removeApproval(state: ChatState, requestId: number | string): ChatState {
   return { ...state, approvals: state.approvals.filter((a) => a.requestId !== requestId) };
+}
+
+export function addPrompt(state: ChatState, prompt: PendingPrompt): ChatState {
+  return { ...state, prompts: [...state.prompts, prompt] };
+}
+
+export function removePrompt(state: ChatState, requestId: number | string): ChatState {
+  return { ...state, prompts: state.prompts.filter((p) => p.requestId !== requestId) };
 }

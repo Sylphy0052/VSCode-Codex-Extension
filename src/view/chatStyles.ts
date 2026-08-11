@@ -58,6 +58,49 @@ export function chatStyles(): string {
     background-color: var(--vscode-inputValidation-warningBackground, transparent);
   }
   .approval h3 { margin: 0 0 6px; font-size: 1em; }
+  /* ユーザーへの問い合わせ。承認カードと同じ場所・同じ系統の見た目にする */
+  .prompt {
+    margin: 10px 0;
+    padding: 10px 12px;
+    border: 1px solid var(--vscode-focusBorder);
+    border-radius: 4px;
+    background-color: var(--vscode-editorWidget-background);
+  }
+  .prompt h3 { margin: 0 0 6px; font-size: 1em; }
+  .prompt .source {
+    margin: 0 0 6px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+  }
+  .prompt .message { margin: 0 0 8px; white-space: pre-wrap; }
+  .prompt .note { margin: 0 0 8px; color: var(--vscode-descriptionForeground); font-size: 0.85em; }
+  .prompt-url {
+    margin: 0 0 8px;
+    padding: 6px 8px;
+    overflow-x: auto;
+    background-color: var(--vscode-textCodeBlock-background);
+    font-family: var(--vscode-editor-font-family);
+    font-size: 0.85em;
+  }
+  .prompt .field { margin-bottom: 10px; }
+  .prompt .field-label { margin-bottom: 2px; font-weight: 600; font-size: 0.9em; }
+  .prompt .field-desc {
+    margin-bottom: 4px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+    white-space: pre-wrap;
+  }
+  .prompt .option { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+  .prompt input[type='text'], .prompt input[type='password'], .prompt input[type='number'] {
+    padding: 3px 6px;
+    color: var(--vscode-input-foreground);
+    background-color: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, transparent);
+    border-radius: 2px;
+    font-family: inherit;
+    font-size: inherit;
+  }
+  .prompt .other { flex: 1; }
   .approval pre {
     margin: 0 0 8px;
     white-space: pre-wrap;

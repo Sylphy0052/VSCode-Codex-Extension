@@ -9,12 +9,14 @@ import {
 } from './approvals';
 import {
   addApproval,
+  addPrompt,
   appendNotice,
   applyEvent,
   enqueue,
   initialChatState,
   normalizeItem,
   removeApproval,
+  removePrompt,
   removeQueued,
   routeSend,
   takeQueued,
@@ -24,11 +26,22 @@ import {
 import { buildCodexInput, type Attachment } from '../provider/attachments';
 import type { AppServerConnection, ServerRequest } from './connection';
 import { readTurnPolicy, turnPolicyFor, type TurnPolicy } from './planMode';
+import {
+  buildPromptResponse,
+  describePrompt,
+  type PendingPrompt,
+  type PromptSubmission,
+} from './prompts';
 
 interface WaitingApproval {
   resolve: (response: unknown) => void;
   approval: PendingApproval;
   params: Record<string, unknown>;
+}
+
+interface WaitingPrompt {
+  resolve: (response: unknown) => void;
+  prompt: PendingPrompt;
 }
 
 /**
@@ -40,6 +53,8 @@ interface WaitingApproval {
 export class ChatSession {
   private state: ChatState = initialChatState;
   private readonly waiting = new Map<number | string, WaitingApproval>();
+  /** 回答待ちの問い合わせ。応答を返すまでapp-serverは待ち続ける。 */
+  private readonly waitingPrompts = new Map<number | string, WaitingPrompt>();
   /** スレッド開始時に効いていた権限。Plan modeを抜けるときの戻し先。 */
   private baseline: TurnPolicy | undefined;
   /** 一度でもPlan modeの権限を送ったか。送っていれば明示的に戻す必要がある。 */
@@ -322,6 +337,15 @@ export class ChatSession {
    * 応答を返さない限りCodexは待ち続けるため、画面を閉じる際は必ず解決すること。
    */
   requestApproval(request: ServerRequest): Promise<unknown> {
+    // ユーザーへの問い合わせは承認カードと別の形。フォームとして出す
+    const prompt = describePrompt(request.id, request.method, request.params);
+    if (prompt !== undefined) {
+      return new Promise<unknown>((resolve) => {
+        this.waitingPrompts.set(request.id, { resolve, prompt });
+        this.update(addPrompt(this.state, prompt));
+      });
+    }
+
     const approval = describeApproval(request.id, request.method, request.params);
     if (approval === undefined) {
       // 承認カードに出せない要求。要求ごとに形の合う拒否を返す
@@ -367,10 +391,32 @@ export class ChatSession {
     this.update(removeApproval(this.state, requestId));
   }
 
+  /**
+   * ユーザーがフォームに答えたとき。
+   *
+   * 未入力のまま送っても形は揃える（質問idを落とすと相手が読めない）。中身を
+   * 作らないのは `buildPromptResponse` の役目。
+   */
+  answerPrompt(requestId: number | string, submission: PromptSubmission): void {
+    const waiting = this.waitingPrompts.get(requestId);
+    if (waiting === undefined) {
+      return;
+    }
+    this.waitingPrompts.delete(requestId);
+    waiting.resolve(buildPromptResponse(waiting.prompt, submission));
+    // 伏せ字の項目があるため、答えの中身はログに出さない
+    this.log.info(`問い合わせに回答: ${waiting.prompt.kind} → ${submission.action}`);
+    this.update(removePrompt(this.state, requestId));
+  }
+
   /** 画面を閉じるときなど。保留中の要求を全て拒否して解放する。 */
   dispose(): void {
     for (const [requestId] of this.waiting) {
       this.decide(requestId, 'cancel');
+    }
+    // 問い合わせも解放する。放置するとapp-serverが待ち続ける
+    for (const [requestId] of this.waitingPrompts) {
+      this.answerPrompt(requestId, { action: 'cancel', values: {} });
     }
   }
 }
