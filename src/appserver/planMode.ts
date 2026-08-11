@@ -16,6 +16,8 @@
  * 送った文面をそのまま送る。
  */
 
+import { sandboxPolicyFor, type SandboxOptions } from '../codex/sandboxPolicy';
+
 /** ターンへ載せる権限。app-serverの形をそのまま持つ。 */
 export interface TurnPolicy {
   /** `AskForApproval`。文字列にもオブジェクトにもなる。 */
@@ -51,23 +53,45 @@ export function readTurnPolicy(result: unknown): TurnPolicy | undefined {
   return { approvalPolicy, sandboxPolicy };
 }
 
+/** そのターンへ載せる権限。載せる項目だけを持つ。 */
+export interface TurnPolicyPatch {
+  approvalPolicy?: unknown;
+  sandboxPolicy?: unknown;
+}
+
 /**
  * そのターンへ載せる権限を決める。`undefined` なら何も載せない。
+ *
+ * 優先順位は Plan mode > 設定のサンドボックス > 開始時の権限（Plan modeからの復帰用）。
+ * Plan modeが最優先なのは「書けないこと」を権限で保証するため。
  *
  * @param planMode いまPlan modeか
  * @param baseline 開始時に控えた権限。Plan modeを抜けるときの戻し先
  * @param overridden 一度でもPlan modeの権限を送ったか。送っていれば明示的に戻す必要がある
+ * @param sandbox 設定のサンドボックス。空文字はCLI側の設定へ委ねる
+ * @param options `workspace-write` のときの書き込み範囲とネットワーク
  */
 export function turnPolicyFor(
   planMode: boolean,
   baseline: TurnPolicy | undefined,
   overridden: boolean,
-): TurnPolicy | undefined {
+  sandbox: string,
+  options?: SandboxOptions,
+): TurnPolicyPatch | undefined {
   if (planMode) {
     return PLAN_POLICY;
   }
-  // 送っていなければ触らない。スレッド開始時の権限がそのまま効いている
-  return overridden ? baseline : undefined;
+
+  const fromConfig = sandboxPolicyFor(sandbox, options);
+  // Plan modeを抜けた最初のターンでは、開始時の権限を明示的に送り直す必要がある
+  const restore = overridden ? baseline : undefined;
+
+  if (fromConfig === undefined) {
+    return restore;
+  }
+  return restore === undefined
+    ? { sandboxPolicy: fromConfig }
+    : { approvalPolicy: restore.approvalPolicy, sandboxPolicy: fromConfig };
 }
 
 function asObject(value: unknown): Record<string, unknown> | undefined {

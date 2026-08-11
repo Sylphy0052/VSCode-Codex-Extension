@@ -11,6 +11,7 @@ import {
 } from '../claude/types';
 import { extractDefaults, noDefaults, type CodexDefaults } from '../codex/configToml';
 import { effortsFor, parseModelCatalog, type ModelInfo } from '../codex/modelCatalog';
+import { isSandboxRelaxed } from '../codex/sandboxPolicy';
 import { readClaudeConfig, readConfig } from '../config';
 import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
@@ -214,6 +215,15 @@ export class SettingsProvider {
     const config = readConfig();
     const next = { ...config.codex, [key]: value };
 
+    // 権限を広げる変更は、会話の途中でも必ず断りを入れる（次の発言から効く）
+    if (
+      key === 'sandbox' &&
+      isSandboxRelaxed(config.codex.sandbox, value) &&
+      !(await confirmRelaxedSandbox(value))
+    ) {
+      return false;
+    }
+
     if (
       next.sandbox === 'danger-full-access' &&
       next.approvalMode === 'never' &&
@@ -243,6 +253,22 @@ export class SettingsProvider {
 async function confirmBypass(): Promise<boolean> {
   const choice = await vscode.window.showWarningMessage(
     '承認を無効にします。Claude Codeはツールを確認なしで実行します。',
+    { modal: true },
+    'この設定にする',
+  );
+  return choice === 'この設定にする';
+}
+
+/** 広げる先ごとの、実際に何が起きるか。 */
+const RELAXED_SANDBOX_DETAIL: Record<string, string> = {
+  'workspace-write': 'Codexは作業フォルダの中へ承認なしで書き込めるようになります。',
+  'danger-full-access': 'Codexはファイルもネットワークも制限なく扱えるようになります。',
+};
+
+async function confirmRelaxedSandbox(value: string): Promise<boolean> {
+  const detail = RELAXED_SANDBOX_DETAIL[value] ?? 'Codexの権限が広がります。';
+  const choice = await vscode.window.showWarningMessage(
+    `サンドボックスを ${value} に変更します。${detail}`,
     { modal: true },
     'この設定にする',
   );

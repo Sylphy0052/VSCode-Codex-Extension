@@ -320,7 +320,22 @@
           ],
           "default": "",
           "scope": "machine",
-          "markdownDescription": "サンドボックスの方針。空なら `~/.codex/config.toml` に委譲する。"
+          "markdownDescription": "サンドボックスの方針。空なら `~/.codex/config.toml` に委譲する。会話の途中で変えると次の発言から効く。"
+        },
+        "codex.sandboxWritableRoots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "machine",
+          "markdownDescription": "`workspace-write` のときに作業フォルダの外で書き込みを許す場所。**絶対パスのみ**（相対パスは無視する）。TUIの `/sandbox-add-read-dir` に相当する。"
+        },
+        "codex.sandboxNetworkAccess": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "markdownDescription": "`workspace-write` のときにネットワークへ出られるようにする。"
         },
         "codex.approvalMode": {
           "type": "string",
