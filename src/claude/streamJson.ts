@@ -1,7 +1,9 @@
 import {
   appendNotice,
   capOutput,
+  NO_BACKGROUND_TERMINALS,
   NO_TODOS,
+  type BackgroundTerminalItem,
   type ChatItem,
   type ChatState,
 } from '../appserver/chatState';
@@ -36,6 +38,7 @@ export const initialClaudeState: ChatState = {
   turnResultText: '',
   turnEditedFiles: [],
   todos: NO_TODOS,
+  backgroundTerminals: NO_BACKGROUND_TERMINALS,
 };
 
 export function applyStreamEvent(state: ChatState, event: Record<string, unknown>): ChatState {
@@ -64,6 +67,9 @@ function applySystem(state: ChatState, event: Record<string, unknown>): ChatStat
   }
   if (subtype === 'status') {
     return applyStatus(state, event);
+  }
+  if (subtype === 'background_tasks_changed') {
+    return applyBackgroundTasksChanged(state, event);
   }
   if (subtype !== 'init') {
     return state;
@@ -377,6 +383,48 @@ function compactionId(event: Record<string, unknown>): string {
 }
 
 /**
+ * バックグラウンドで走っているタスクの一覧（issue #33、design.md §14.23、Codex `/ps` 相当）。
+ *
+ * 実測（本issueの調査。`claude --print --input-format stream-json` を実際に起動し、
+ * Bashツールを `run_in_background:true` で呼び出させて確認した）:
+ * `{type:'system', subtype:'background_tasks_changed', tasks:[{task_id, task_type,
+ * description}]}`。このイベントは一覧全体を毎回押し付けてくるため、差分ではなく置き換える
+ * （`readCommandsChanged` と同じ考え方）。
+ *
+ * **`background_tasks` control requestで能動的に問い合わせても、実測では走っているタスクが
+ * あるときでも空`{}`が返った**（2回実測、いずれも空）。このため一覧はこの通知だけを
+ * 正として持つ（ポーリングはしない）。
+ */
+function applyBackgroundTasksChanged(state: ChatState, event: Record<string, unknown>): ChatState {
+  const raw = event['tasks'];
+  if (!Array.isArray(raw)) {
+    return state;
+  }
+  const backgroundTerminals: BackgroundTerminalItem[] = [];
+  for (const entry of raw) {
+    const task = rec(entry);
+    const id = str(task?.['task_id']);
+    if (task === undefined || id === '') {
+      continue;
+    }
+    backgroundTerminals.push({
+      id,
+      command: str(task['description']),
+      // 実測ではこの通知に載っている間は常に走っている（`status`フィールド自体を持たない）。
+      // CLIの語彙に合わせ `running` とする（`chatScript.ts` が既にCodexの `inProgress` と
+      // 並べて扱っている値。issue #17）
+      status: 'running',
+      cwd: undefined,
+      processId: undefined,
+      taskType: strOrUndefined(task['task_type']),
+      // `stop_task` が実際にタスクを止めることを実測で確認した（design.md §14.23）
+      stoppable: true,
+    });
+  }
+  return { ...state, backgroundTerminals };
+}
+
+/**
  * レート制限の状態。
  *
  * Claude CodeはCodexと違って消費率を返さないため、制限の種類とリセット時刻で示す。
@@ -465,6 +513,10 @@ function resultText(content: unknown): string {
 }
 
 const str = (value: unknown): string => (typeof value === 'string' ? value : '');
+const strOrUndefined = (value: unknown): string | undefined => {
+  const s = str(value);
+  return s === '' ? undefined : s;
+};
 const num = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 const rec = (value: unknown): Record<string, unknown> | undefined =>
