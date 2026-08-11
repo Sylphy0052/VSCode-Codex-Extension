@@ -32,6 +32,7 @@ import {
   readForkedThreadId,
   type JsonRpcMessage,
 } from './jsonRpc';
+import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
 import {
   mergeMcpServers,
   parseConfigMcpServersEnabled,
@@ -747,6 +748,13 @@ export class AppServerClient {
         timeoutOverrideMs ?? this.timeoutMs,
       );
 
+      // `proc.on('error')`は起動失敗しか拾わない。起動後に相手が終了した状態へ書き込むと
+      // 飛ぶEPIPE等はここで捕まえないとNodeの未捕捉例外になる（issue #155、design.md
+      // §14.31）。単発の問い合わせなので、既に決着させる作りの`finish`へそのまま寄せる。
+      guardStdinErrors(proc, (e) =>
+        finish({ ok: false, error: `app-serverへの書き込みに失敗しました: ${e.message}` }),
+      );
+
       proc.stdout.on('data', (chunk: Buffer) => {
         buffer += chunk.toString('utf8');
         const { messages, rest } = consumeFrames(buffer);
@@ -784,7 +792,7 @@ export class AppServerClient {
           const id = nextId;
           nextId += 1;
           pending.set(id, res);
-          proc.stdin.write(encodeRequest(id, method, params));
+          safeWriteStdin(proc, encodeRequest(id, method, params));
         });
 
       void (async () => {
@@ -795,7 +803,7 @@ export class AppServerClient {
           finish({ ok: false, error: init.error.message });
           return;
         }
-        proc.stdin.write(encodeNotification('initialized', {}));
+        safeWriteStdin(proc, encodeNotification('initialized', {}));
 
         finish(await body(request, notify));
       })();

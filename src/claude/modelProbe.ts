@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import type { ModelInfo } from '../codex/modelCatalog';
 import type { Logger } from '../log';
+import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
 import { buildControlRequest, readControlResponse, readModelList } from './control';
 
 /** 応答が返らないまま居座らせない。モデル一覧は無くてもフォールバックがある。 */
@@ -71,7 +72,15 @@ export class ClaudeModelProbe {
       });
       proc.on('close', () => finish(undefined));
 
-      proc.stdin.write(buildControlRequest('1', { subtype: 'initialize', hooks: {} }));
+      // `proc.on('error')`は起動失敗しか拾わない。起動後に相手が終了した状態へ書き込むと
+      // 飛ぶEPIPE等はここで捕まえないとNodeの未捕捉例外になる（issue #155、design.md
+      // §14.31）。単発の問い合わせなので、既に決着させる作りの`finish`へそのまま寄せる。
+      guardStdinErrors(proc, (e) => {
+        this.log.warn(`モデル一覧を取得できませんでした: ${e.message}`);
+        finish(undefined);
+      });
+
+      safeWriteStdin(proc, buildControlRequest('1', { subtype: 'initialize', hooks: {} }));
     });
   }
 }

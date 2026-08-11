@@ -8,22 +8,29 @@ import { waitFor } from './helpers/waitFor';
 
 /**
  * docs/manual-test.md のH群（履歴・復元）のうち、実CLIプロセスなしで確認できる範囲を
- * 狙って書いたテスト。**現状は全件 `test.skip` にしてあり、実行されない。**
+ * 狙って書いたテスト。
  *
  * 履歴一覧（TreeView）は `ProviderRegistry.available()`（src/provider/registry.ts）が
  * `locate()` で実行ファイルを解決できたプロバイダしか対象にしないため、実CLIを一切
  * 呼ばせない（`codex.executablePath` / `claude.executablePath` を存在しないパスへ
  * 固定する）方針のままだと一覧が常に空になる。「解決はできるが呼んでも即失敗する」
- * 無害なスタブへ差し替える案も試したが、`AppServerClient` が書き込み中に相手プロセスが
- * 既に終了しており `EPIPE` の非捕捉例外で拡張機能ホストごと巻き込み、無関係な他のテスト
- * まで道連れに失敗する形で実測された（2026-08-12、xvfb-run環境）。
+ * 無害なスタブへ差し替える必要がある。
  *
- * このファイルのテストコード自体は「fixtureさえ揃えばTreeViewの中身をどう検証するか」
- * の実装例として残す。再挑戦する場合は、`AppServerClient` 側で書き込み時のEPIPEを
- * 捕捉してから `test.skip` を `test` に戻すこと。H-08（thread/list接続時）はそもそも
- * 実際のCodex CLIが要るため引き続き対象外。
+ * #147では、無害なスタブへ差し替えた状態で `AppServerClient` が書き込み中に相手プロセスが
+ * 既に終了しており `EPIPE` の非捕捉例外で拡張機能ホストごと巻き込み、無関係な他のテスト
+ * まで道連れに失敗することが実測されたため、全件 `test.skip` にしていた（issue #155）。
+ * `stdin` の `error` を捕捉する対策（`src/process/stdinSafety.ts`、design.md §14.31）を
+ * 入れて `test.skip` を外して実行したところ、**拡張機能ホストが落ちることは無くなったが、
+ * テストが完了しないまま止まる**（16分待っても1件も結果が出ない）ことを実測した。EPIPEの
+ * 非捕捉例外は解消したものの、スタブへ差し替えたCLIとの間で待ち続ける経路が別に残っている。
+ * 原因を特定できていないため、**全件 `test.skip` のまま残す**。
+ *
+ * 未捕捉例外が消えたこと自体は前進で、他のテストを道連れにしなくなった。ここを通すには
+ * 「相手が即終了したときに待ちを打ち切る」側の作り込みが要る（別issue）。
+ *
+ * H-08（thread/list接続時）はそもそも実際のCodex CLIが要るため引き続き対象外。
  */
-suite('履歴一覧（docs/manual-test.md H群、現状skip・下部の説明参照）', () => {
+suite('履歴一覧（docs/manual-test.md H群）', () => {
   test.skip('H-00: session_index.jsonlに載っていないセッションも最初の発言から名前が付いて出る', async () => {
     const api = await activateExtension();
     const manifest = readManifest();
@@ -119,8 +126,11 @@ suite('履歴一覧（docs/manual-test.md H群、現状skip・下部の説明参
     await api.sessionTree.setScope('workspace');
 
     const before = await api.sessionTree.getChildren();
-    // ここまでの一覧はすべてファイル読みの経路（thread/listは実行ファイルが存在せず
-    // 必ず失敗する）を通っている。それでも空にならないこと自体がH-09の狙いの確認になる
+    // ここまでの一覧はすべてファイル読みの経路を通っている。`codex.executablePath` は
+    // 即終了するだけのスタブ（fixtures/setup.mjs）を指しているため、`thread/list` は
+    // 応答が届く前に相手プロセスが終了して必ず失敗し、ファイル読みへ退避する
+    // （issue #155で解消したEPIPEの非捕捉は起こさず、失敗として決着する）。
+    // それでも空にならないこと自体がH-09の狙いの確認になる
     assert.ok(before.length > 0, 'thread/listが使えないだけで一覧が空になっている');
 
     const newId = 'ffffffff-0000-0000-0000-000000000000';

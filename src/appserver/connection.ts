@@ -9,6 +9,7 @@ import {
   isServerRequest,
   type JsonRpcMessage,
 } from '../codex/jsonRpc';
+import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
 
 export interface ServerRequest {
   id: number | string;
@@ -70,6 +71,14 @@ export class AppServerConnection {
   private async start(): Promise<void> {
     const proc = spawn(this.codexPath(), ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'] });
     this.proc = proc;
+
+    // `proc.on('error')`は起動失敗しか拾わない。起動後に相手が終了した状態へ書き込むと
+    // 飛ぶEPIPE等はここで捕まえないとNodeの未捕捉例外になる（issue #155、design.md §14.31）。
+    // 常駐接続なので、接続が死んだものとして既存のexitハンドラと同じ経路（reset）へ寄せる。
+    guardStdinErrors(proc, (e) => {
+      this.log.error(`app-serverへの書き込みに失敗しました: ${e.message}`);
+      this.reset();
+    });
 
     proc.stdout.on('data', (chunk: Buffer) => this.receive(chunk.toString('utf8')));
     proc.stderr.on('data', (chunk: Buffer) => {
@@ -155,8 +164,14 @@ export class AppServerConnection {
     this.write(encodeNotification(method, params));
   }
 
+  /**
+   * 書き込み前に生存判定を行う（issue #155）。判定と書き込みの間の競合までは防げないため、
+   * `start()`で購読した`guardStdinErrors`と併用する。
+   */
   private write(line: string): void {
-    this.proc?.stdin.write(line);
+    if (this.proc !== undefined) {
+      safeWriteStdin(this.proc, line);
+    }
   }
 
   private reset(): void {

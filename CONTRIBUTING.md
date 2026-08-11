@@ -99,7 +99,7 @@ CLI固有の事情（ファイル配置・引数・セッションIDの決まり
 
 - `vscode.extensions.getExtension('Sylphy0052.vscode-codex-extension')` で拡張機能を取得し、`activate()` の戻り値（`ExtensionTestApi`）経由で`view/**`側の実インスタンス（`SessionTreeProvider`）へアクセスする。VSCodeに依存する層はユニットテストからimportできないため（`docs/design.md` §11）、テスト専用の最小限の口として用意してある
 - 実CLI（codex/claude）は絶対に呼ばない。`test/integration/fixtures/setup.mjs` が使い捨てのVSCodeプロファイルを作り、`codex.executablePath` / `claude.executablePath` を存在しない絶対パスへ固定した上で、`codex.codexHome` / `claude.configDir` を一時ディレクトリへ向けている。ユーザーの実環境（`~/.codex` `~/.claude` 実際のVSCodeユーザー設定）には一切触れない
-- **現状自動化できているのは拡張機能の有効化・コマンド登録・設定の読み書き**（`extension.test.ts` / `configuration.test.ts`）だけ。履歴一覧（TreeView）を狙った`sessionHistory.test.ts`は、`codex.executablePath`を存在しないパスに固定すると`ProviderRegistry.available()`が対象プロバイダを一覧からまるごと除外してしまい一覧が空になる一方、無害なスタブへ差し替えると`AppServerClient`の書き込み時に未捕捉の`EPIPE`が発生し他のテストまで巻き込んで失敗することを確認したため、現状`test.skip`のまま残している（詳細は同ファイル冒頭のコメント）
+- **現状自動化できているのは拡張機能の有効化・コマンド登録・設定の読み書き**（`extension.test.ts` / `configuration.test.ts`）だけ。履歴一覧（TreeView）を狙った`sessionHistory.test.ts`は`test.skip`のまま残している。`codex.executablePath`を存在しないパスに固定すると`ProviderRegistry.available()`が対象プロバイダを一覧からまるごと除外してしまい一覧が空になるため、実在する即exitスタブへ差し替える必要がある。そのスタブに対して以前は未捕捉の`EPIPE`が出て他のテストまで道連れにしていたが、issue #155の対策（`src/process/stdinSafety.ts`）で**落ちることは無くなった**。ただし対策後に`test.skip`を外して実行しても**テストが完了しないまま止まる**（16分待って1件も結果が出ない）ことを実測したため、原因を特定できるまでskipのまま残す。相手が即終了したときに待ちを打ち切る作りが別に要る（詳細は同ファイル冒頭のコメント）
 - Webviewの中身・承認カード・タブ復元・履歴一覧など、実CLIとの対話が要る範囲、および上記の理由で自動化に至らなかった範囲は引き続きF5による手動確認に頼っている。手順とチェックリストは [docs/manual-test.md](docs/manual-test.md) にある
 
 ## 変更を入れるときの流れ

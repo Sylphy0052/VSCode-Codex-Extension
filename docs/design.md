@@ -1849,9 +1849,7 @@ issue #6実装（#141）のレビューで2件の問題が見つかり、併せ�
 
 ```ts
 type SymlinkResolution =
-  | { kind: 'not-symlink' }
-  | { kind: 'resolved'; target: string }
-  | { kind: 'unresolved' };
+  { kind: 'not-symlink' } | { kind: 'resolved'; target: string } | { kind: 'unresolved' };
 ```
 
 `unresolved`（実体パスを特定できない）のときは`buildMemoryAppendConfirmation`・`describeMemoryAppendResult`の両方が「警告: シンボリックリンクですが、実体のパスを特定できません（壊れたリンク・循環参照・権限不足の可能性があります）。書き込みは実際のリンク先へ届きます。」を明示する。**書き込み自体は中止しない**（従来方針どおり。「分からない」ことを隠さず見せるのが修正の本質）。
@@ -1938,6 +1936,45 @@ Codex TUIの `/import` はClaude Codeなど他エージェントから設定・�
 - **Cursorからのインポート（`migrationSource: 'cursor'`）**: issue本文のスコープ（Claude Codeのみ）に合わせ、ソース選択UIを設けない。バイナリにCursor向けの実装が存在することは§14.29の実測に記録した
 - **`externalAgentConfig/import/recordHistory`**: この拡張は常に自身の`externalAgentConfig/import`を経由するため呼ぶ必要が無い想定（未実行のため未確認）
 - **完了通知のリアルタイム進捗表示（プログレスバー等）**: `progress`通知はログ（`Agent: ログを表示`）へ出すのみに留めた。webview側の状態管理（実行中スピナー等）を追加すると実装・テストの範囲が大きくなるため、まずは「実行→完了/開始のみの結果通知」の往復を確実にすることを優先した
+
+### 14.31 stdinのEPIPE対策（issue #155）
+
+相手プロセス（`codex` / `claude`）が起動後に早期終了した状態で`stdin`へ書き込むと、`EPIPE`が発生する。`child_process`の`proc.on('error')`は**起動失敗**しか拾わないため、この`EPIPE`は`proc.stdin`の`error`イベントとして別に飛ぶ。ここを誰も購読していないとNodeの未捕捉例外になり、拡張機能ホストごと落ちる（#147の統合テストで無関係な21件を巻き込んで実測）。
+
+**原因になりうる状況はいずれも悪意を要しない**: CLIがクラッシュした、古い版で`app-server`サブコマンドが無く即終了する、`executablePath`の指定を誤って別の何かが起動しすぐ終わる、など。
+
+#### 対象と対策
+
+`stdin`を使うプロセス起動箇所は9ファイルあり、すべてに同じ対策を入れた。
+
+- `src/appserver/connection.ts`（`AppServerConnection`。常駐接続）
+- `src/codex/appServerClient.ts`（`AppServerClient.call`。単発の問い合わせ）
+- `src/claude/streamSession.ts`（`ClaudeStreamSession`。常駐接続）
+- `src/claude/modelProbe.ts` / `agentProbe.ts` / `hooksProbe.ts` / `mcpProbe.ts` / `skillsProbe.ts`（単発の問い合わせ）
+- `src/process/commandRunner.ts`（`codex login --with-api-key`でAPIキーを`stdin`へ渡す経路を含む）
+
+同じ購読・生存判定を9箇所へ書き写すと保守が崩れるため、`src/process/stdinSafety.ts`へ薄いヘルパを切り出した。
+
+- `canWriteStdin(proc)` — 書き込み前に`proc.killed` / `stdin.destroyed` / `stdin.writable`を見る生存判定（純粋関数）。判定と書き込みの間に相手が終了する競合までは防げないため、単独では使わない
+- `safeWriteStdin(proc, chunk)` — `canWriteStdin`を通ったときだけ書き込む
+- `guardStdinErrors(proc, onError)` — `proc.stdin`の`error`を購読する。**これが必須**（`canWriteStdin`だけでは競合を塞げない）
+
+購読した`error`の扱いは、呼び出し元の性質で振り分けた。
+
+- **単発の問い合わせ**（`AppServerClient.call` / 各`*Probe`）: 既にタイムアウトや起動失敗を`finish()`で決着させる作りがあるため、`error`もそこへ寄せて失敗として返す
+- **常駐接続**（`AppServerConnection` / `ClaudeStreamSession`）: 接続・セッションが死んだものとして扱い、既存の`exit`ハンドラと同じ経路（`reset()` / `turnFailed: true`）へ寄せる
+- **`commandRunner.ts`**: `finish()`へ寄せる点は単発の問い合わせと同じだが、`stdin`引数（APIキーを含みうる）を`error`ハンドラの中で一切参照しない。Nodeのストリームエラー（`e.message`）はシステムエラー文字列（例: `write EPIPE`）のみを持ち、書き込んだ内容を含まないため、これだけを使えばキーが漏れない
+
+いずれも**握り潰さず、`Logger`経由で出力パネルへ理由を残す**（「黙って何も起きない状態を作らない」の原則、README/CONTRIBUTINGの方針と一致）。
+
+#### 検証
+
+- `test/unit/stdinSafety.test.ts`: `canWriteStdin` / `safeWriteStdin` / `guardStdinErrors`をフェイクの`proc`で検証（純粋関数部分）
+- `test/integration/sessionHistory.test.ts`: 即終了するスタブへ`codex.executablePath`を向ける統合テスト（#147で見つかった実際の再現条件）。**この対策で未捕捉例外は消え、他のテストを道連れにしなくなった**が、`test.skip`を外して実行すると**テストが完了しないまま止まる**（16分待って1件も結果が出ない）ことを実測したため、skipのまま残している
+
+#### 残っている問題
+
+未捕捉例外は塞いだが、**相手が即終了したときに待ちを打ち切る作りは無い**。単発の問い合わせにはタイムアウトがあるので最終的には決着するが、常駐接続側で「もう応答が来ない」と判断する経路が弱い。`sessionHistory.test.ts`が完了しないのはこれが原因とみられる（未特定）。ここを詰めればH群5件の自動化が通る見込み
 
 ## 15. 作業記録（日報・週報連携）
 

@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { Logger } from '../log';
+import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
 import type { HooksSnapshot } from '../provider/hooks';
 import {
   buildControlRequest,
@@ -106,8 +107,16 @@ export class ClaudeHooksProbe {
       });
       proc.on('close', () => finish(undefined));
 
-      proc.stdin.write(buildControlRequest('initialize', { subtype: 'initialize', hooks: {} }));
-      proc.stdin.write(requestLine);
+      // `proc.on('error')`は起動失敗しか拾わない。起動後に相手が終了した状態へ書き込むと
+      // 飛ぶEPIPE等はここで捕まえないとNodeの未捕捉例外になる（issue #155、design.md
+      // §14.31）。単発の問い合わせなので、既に決着させる作りの`finish`へそのまま寄せる。
+      guardStdinErrors(proc, (e) => {
+        this.log.warn(`claudeへの書き込みに失敗しました: ${e.message}`);
+        finish(undefined);
+      });
+
+      safeWriteStdin(proc, buildControlRequest('initialize', { subtype: 'initialize', hooks: {} }));
+      safeWriteStdin(proc, requestLine);
     });
   }
 }

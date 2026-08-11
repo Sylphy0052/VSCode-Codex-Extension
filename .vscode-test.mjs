@@ -19,6 +19,10 @@ export default defineConfig({
     '--disable-workspace-trust',
     '--skip-release-notes',
     '--skip-welcome',
+    // Electron内蔵のsetuidサンドボックスは、実行環境によっては権限不足でカーネルに
+    // SIGKILLされる（chrome-sandboxがCAP_SYS_ADMIN相当を要求するため）。統合テストは
+    // 使い捨てのVSCodeプロファイル・ワークスペースでのみ動くため、この隔離は不要。
+    '--no-sandbox',
   ],
   env: {
     // codex/claudeが実行ファイルとしてPATH上に居ても解決させない（実CLIを絶対に呼ばせない
