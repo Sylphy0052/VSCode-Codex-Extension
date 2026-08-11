@@ -1795,6 +1795,48 @@ Codex TUIには「switch the active agent thread」があり、バイナリに�
 
 Codexの `/goal`（`thread/goal/set` / `thread/goal/get` / `thread/goal/clear`。Phase 0で「実装できる」と確認済み）は、本issueでは扱わない。サブエージェントの状況表示とは性質が違う機能のため、別issueで扱う。
 
+### 14.29 入力欄の行頭 `!` / `#`（issue #5, #6、TP-03, TP-04、Claude Code画面のみ）
+
+Claude Code TUIには、入力の先頭が `!` ならシェルコマンド（bashモード）、`#` ならメモリ（CLAUDE.md）への追記として扱う挙動がある。チャット画面にはこれに相当する経路が無かった。
+
+#### 調査: control_requestに専用のsubtypeは無い
+
+issue #2（Z-10）の時点で `local_command` は `Unsupported control request subtype: local_command` で拒否されることが分かっていた。本issueで、命名の候補を増やして総当たりを行った（実測、CLI 2.1.227。`claude --print --input-format stream-json --output-format stream-json --verbose` を起動し、`initialize` の後に候補を1件ずつ送る。既存の `set_agent`（7候補）・`hooks_list`（6候補）・`skills_list`（5候補）の調査と同じ手法）。
+
+- シェル実行系14候補（`bash` `shell` `run_bash` `bash_command` `shell_command` `run_command` `run_shell_command` `execute_command` `execute_bash` `local_bash_command` `run_local_command` `exec_shell` `shell_exec` `local_shell_command`）: **全て `Unsupported control request subtype`**
+- メモリ追記系12候補（`memory_save` `save_memory` `append_memory` `memory_append` `write_memory` `memory_write` `add_memory` `memory_add` `update_memory` `memory_update` `claude_md_append` `append_claude_md`）: **全て `Unsupported control request subtype`**
+
+**結論: どちらも専用のcontrol_requestは存在しない。**
+
+補足として、公式ドキュメント（[code.claude.com/docs/en/memory](https://code.claude.com/docs/en/memory)）によれば、TUIの `#` ショートカットはもともとユーザー用CLAUDE.md／プロジェクト用CLAUDE.mdのどちらに書くか選ばせるプロンプトを出す仕組みだった。ただし [anthropics/claude-code#14868](https://github.com/anthropics/claude-code/issues/14868) によれば、CLI 2.0.74で `#` が普通の文章として扱われるようになり追記が起きないリグレッションが報告されている（本調査時点のCLI 2.1.227でTUI自体を対話的に再検証してはいないが、control_requestに経路が無いことと矛盾しない）。TUI側の機能自体が不安定なため、拡張機能側で実装する妥当性は高いと判断した。
+
+#### 決定: 拡張機能側の機能として実装する。ただしシェル実行は「入力するだけ」に留める
+
+入力欄の判定は純粋関数 `routeInputMode`（`src/provider/inputModes.ts`）に切り出す。`routePseudoCommand`（`pseudoCommands.ts`）と同じ考え方で、**1行だけの入力に限って**引き受ける（複数行にまたがる発言、たとえばMarkdown見出しの引用を誤って乗っ取らないため）。行頭でない `!` / `#` は対象にしない。マッチした入力はCLIへは一切送らない（`claudeChatView.ts` の `handleMessage` が `send` を受け取った時点で分岐し、`dispatch` を呼ばない。モデルのターンを消費しない）。
+
+**`!` シェルコマンド（issue #5）は自動実行しない。** 検討した経路は次の2つ。
+
+1. Bashツールの実行としてモデル経由で流す: `!` の意図とずれるうえ、モデルのターンを消費する。不採用
+2. 拡張機能が `child_process` 等で直接実行する: **CLIの承認・サンドボックスの外側で任意コマンドを実行する経路になる。** `claude.permissionMode` はモデルがツールを呼ぶときの仕組みであり、ユーザーが入力欄に直接書いたコマンドを拡張機能が代わりに実行する動きはこの仕組みを一切経由しない。既存の安全機構を迂回する実装であり、既定で無効にし明示的な有効化を要求するとしても、「入力欄に書いた文字列がそのまま実行される」という機能自体が攻撃面を広げる
+
+上記を踏まえ、**確認ダイアログを経た後、統合ターミナルへコマンドを入力するだけに留めた**（`controlPanelView.ts` の `openLoginTerminal` と同じ流儀。`terminal.sendText(command, false)` で自動実行しない）。実行するかどうかは開いたターミナルでユーザーが自分でEnterを押して決める。入力したことは `ClaudeStreamSession.noteLocalEvent`（後述）で会話にも1行残す（黙って何も起きない状態を作らない）。
+
+**`#` メモリ追記（issue #6）はファイルへ直接書き込む。** シェル実行と違い、ファイルへの追記はCLIの承認・サンドボックスの対象外の操作（ユーザー自身が編集する `CLAUDE.md` への追記であり、モデルの実行系統を経由しない）であり、迂回にはあたらない。ただし書き込みは元に戻せない操作のため、次の手順を必ず踏む。
+
+1. 追記先を選ばせる（`vscode.window.showQuickPick`。「プロジェクト」= `<cwd>/CLAUDE.md`（既存が無ければ既定）または `<cwd>/.claude/CLAUDE.md`（既存があればそちら）、「ユーザー」= `<claudeHome>/CLAUDE.md`。選び方は `resolveProjectMemoryFile` / `resolveUserMemoryFile`）
+2. 内容と追記先を確認ダイアログ（`confirmMemoryAppend`）で見せてから書き込む
+3. 追記後、書き込み先を会話に1行残す（`noteLocalEvent`）
+
+#### 実装
+
+- `src/provider/inputModes.ts`（新規）: `routeInputMode` / `describeInputMode` / `resolveProjectMemoryFile` / `resolveUserMemoryFile` / `appendMemoryLine`。全て純粋関数
+- `src/claude/streamSession.ts`: `ClaudeStreamSession.noteLocalEvent(id, text)` を追加。CLIとはやり取りせず、既存の `appendNotice`（`chatState.ts`。hookBlockedと同じ仕組み）で会話に1行残すだけ
+- `src/view/claudeChatView.ts`: `handleMessage` の `send` 分岐で `routeInputMode` を呼び、該当すれば `runInputMode` へ委ねてCLIへは送らない。シェルコマンドは `openShellCommandTerminal`（`sendText(command, false)`）、メモリ追記はQuickPick→確認→`vscode.workspace.fs.writeFile`
+- `src/view/chatView.ts`: 確認ダイアログ `confirmRunShellCommand` / `confirmMemoryAppend` を追加（既存の `confirmCompact` 等と同じ置き場）。`ChatShellOptions.showInputModeHints` を追加（Claude Code画面のみ`true`）
+- `src/view/chatScript.ts` / `chatStyles.ts`: 送信前に入力欄の下へ案内を出す `#inputModeHint`。判定ロジックは `routeInputMode` と同じ規則をJSで書き直している（テンプレートリテラルの中からは関数を呼べないため。`renderArgumentHint` と同じ事情）
+
+テストは `test/unit/inputModes.test.ts`（純粋関数）と `test/unit/webviewScript.test.ts`（`showInputModeHints` を立てたときの構文・埋め込み値）に追加した。`src/view/**` はvscodeに依存するためテストから触れない（既存方針どおり）。
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）

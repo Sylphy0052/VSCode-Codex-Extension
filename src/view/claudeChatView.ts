@@ -26,7 +26,9 @@ import type {
 import {
   addAttachment,
   confirmCompact,
+  confirmMemoryAppend,
   confirmRewindFiles,
+  confirmRunShellCommand,
   confirmStopBackgroundTask,
   postFileMentions,
   postImageData,
@@ -35,6 +37,13 @@ import {
   runExportTranscript,
 } from './chatView';
 import type { FileMentionCatalog } from '../provider/fileMentions';
+import {
+  appendMemoryLine,
+  resolveProjectMemoryFile,
+  resolveUserMemoryFile,
+  routeInputMode,
+  type InputModeCall,
+} from '../provider/inputModes';
 import { readPersistedThreadId } from './panelState';
 import { CLAUDE_PERMISSION_MODES } from '../claude/types';
 import { CLAUDE_APPROVAL_CYCLE } from '../provider/approvalCycle';
@@ -84,6 +93,22 @@ interface ClaudePanel {
 
 const VIEW_TYPE = 'claude.chat';
 const LABEL = 'Claude Code';
+
+/** 行頭 `!` のシェルコマンド（issue #5）を入力するターミナルの名前。既存があれば使い回す。 */
+const SHELL_COMMAND_TERMINAL_NAME = 'Agent Sessions: シェルコマンド入力';
+
+/**
+ * 行頭 `!` のシェルコマンド（issue #5）を統合ターミナルへ入力する。
+ *
+ * `controlPanelView.ts` の `openLoginTerminal` と同じ流儀で、**入力するだけで自動実行はしない**
+ * （`sendText` の第2引数を `false` にする）。ユーザーが自分でEnterを押して初めて実行される。
+ */
+function openShellCommandTerminal(cwd: string, command: string): void {
+  const existing = vscode.window.terminals.find((t) => t.name === SHELL_COMMAND_TERMINAL_NAME);
+  const terminal = existing ?? vscode.window.createTerminal({ name: SHELL_COMMAND_TERMINAL_NAME, cwd });
+  terminal.show();
+  terminal.sendText(command, false);
+}
 
 /**
  * `TaskSessionInput` をClaude Codeの起動設定へ写す。`sandbox` はClaudeに概念が無いため使わない。
@@ -464,6 +489,8 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       review: { mode: 'command', commandName: 'code-review' },
       // ファイルの巻き戻し（design.md「Claude Codeの巻き戻し」）。Codexは分岐で代替する
       showRewind: true,
+      // 行頭の !/# の案内（issue #5/#6、design.md §14.29）。CodexのTUIに無い挙動
+      showInputModeHints: true,
     });
     panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(entry, message));
     panel.onDidDispose(() => {
@@ -738,6 +765,14 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         }
         // 手動の発言はループへの割り込み。指示が交互に飛ぶ状態を作らない
         entry.loop.noteUserAction();
+        // 行頭が !/# の入力はCLIへ送らず、拡張機能側の機能として扱う（issue #5/#6、
+        // design.md §14.29）。control_requestに相当する経路が無いため、Claudeへ発言として
+        // 渡すとモデルのターンを消費して意図とずれる（design.mdの調査結果を参照）
+        const inputMode = routeInputMode(text);
+        if (inputMode !== undefined) {
+          void this.runInputMode(entry, inputMode);
+          return;
+        }
         this.dispatch(entry, text, true);
         this.refreshSettings(entry);
         return;
@@ -884,6 +919,93 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     } catch (e) {
       this.reportError(e);
     }
+  }
+
+  /**
+   * 行頭が !/# の入力を、拡張機能側の機能として実行する（issue #5/#6、design.md §14.29）。
+   * `routeInputMode` が「送るべきでない」と判定した時点で呼ばれるため、ここではCLIへは
+   * 一切送らない。
+   */
+  private async runInputMode(entry: ClaudePanel, mode: InputModeCall): Promise<void> {
+    if (mode.kind === 'shell') {
+      await this.runShellInputMode(entry, mode.command);
+      return;
+    }
+    await this.runMemoryInputMode(entry, mode.content);
+  }
+
+  /**
+   * シェルコマンドを統合ターミナルへ入力する（issue #5）。
+   *
+   * **自動実行はしない**。CLIの承認設定（`claude.permissionMode`）はモデルがツールを
+   * 呼ぶときの仕組みで、ここで打つコマンドはユーザーが自分で書いた文字列そのものであり、
+   * その仕組みを経由しない。拡張機能が代わりに自動実行すると、CLIの承認・サンドボックスの
+   * 外側で任意コマンドを実行する経路になってしまうため、`openLoginTerminal`
+   * （`controlPanelView.ts`）と同じ流儀で「入力するだけ」に留める。実行するかどうかは
+   * 開いたターミナルでユーザーが自分でEnterを押して決める。
+   */
+  private async runShellInputMode(entry: ClaudePanel, command: string): Promise<void> {
+    if (!(await confirmRunShellCommand(command))) {
+      return;
+    }
+    openShellCommandTerminal(entry.cwd, command);
+    entry.session.noteLocalEvent(
+      `shellCommand:${randomUUID()}`,
+      `シェルコマンドを統合ターミナルへ入力しました（自動実行はしていません）: ${command}`,
+    );
+  }
+
+  /**
+   * 内容をメモリ（CLAUDE.md）へ追記する（issue #6）。
+   *
+   * 追記先（プロジェクト / ユーザー）を選ばせ、内容と追記先を確認してから書き込む。
+   * 書き込み後は「どこに書いたか」を会話に1行残す（受入基準）。
+   */
+  private async runMemoryInputMode(entry: ClaudePanel, content: string): Promise<void> {
+    const projectPath = await this.resolveProjectMemoryPath(entry.cwd);
+    const userPath = resolveUserMemoryFile(this.claudeHome);
+    const choice = await vscode.window.showQuickPick(
+      [
+        { label: 'プロジェクト', detail: projectPath, path: projectPath },
+        { label: 'ユーザー', detail: userPath, path: userPath },
+      ],
+      { title: `メモリへ追記: ${content}`, placeHolder: '追記先を選んでください' },
+    );
+    if (choice === undefined) {
+      return;
+    }
+    if (!(await confirmMemoryAppend(content, choice.path))) {
+      return;
+    }
+
+    let existing: string | undefined;
+    try {
+      existing = await this.fs.readTextFile(choice.path);
+    } catch (e) {
+      this.reportError(e);
+      return;
+    }
+    const next = appendMemoryLine(existing, content);
+    try {
+      await vscode.workspace.fs.writeFile(vscode.Uri.file(choice.path), Buffer.from(next, 'utf8'));
+    } catch (e) {
+      this.reportError(e);
+      return;
+    }
+    entry.session.noteLocalEvent(
+      `memoryAppend:${randomUUID()}`,
+      `メモリへ追記しました: ${choice.path}`,
+    );
+  }
+
+  /**
+   * プロジェクト側のメモリ追記先を解決する（`resolveProjectMemoryFile` を参照）。
+   * 存在確認は「読めるか」で行う。専用のstat呼び出しを増やさないため。
+   */
+  private async resolveProjectMemoryPath(cwd: string): Promise<string> {
+    const rootExists = (await this.fs.readTextFile(`${cwd}/CLAUDE.md`)) !== undefined;
+    const dotClaudeExists = (await this.fs.readTextFile(`${cwd}/.claude/CLAUDE.md`)) !== undefined;
+    return resolveProjectMemoryFile(cwd, rootExists, dotClaudeExists);
   }
 
   /**
