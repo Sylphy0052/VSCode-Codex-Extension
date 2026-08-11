@@ -428,6 +428,13 @@
           "scope": "machine",
           "markdownDescription": "ワークフロー定義（YAML）の `autoApprove: true` を有効化できるようにする。無効のままだと、YAMLに何と書かれていても全ての承認要求を人へ回す。リポジトリ側のYAMLから無人実行を勝手に有効化されないよう machine スコープに固定している（設計書 §16.16）。"
         },
+        "agent.workflows.replyTimeoutSec": {
+          "type": "number",
+          "default": 300,
+          "minimum": 1,
+          "scope": "machine-overridable",
+          "markdownDescription": "タスク間のメッセージング（`send_message` の `expectReply: true`）で、返信を待つ時間の上限（秒）。超えたタスクは返信を待たずに再開する（設計書 §16.21）。"
+        },
         "agent.workflows.roadmapDir": {
           "type": "string",
           "default": "docs/roadmap",
