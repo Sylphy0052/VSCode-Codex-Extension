@@ -377,6 +377,14 @@ export function workflowScript(): string {
     // 展開後のプロンプトはエージェントの出力・YAML由来の値を含む。必ずtextContentへ代入する
     box.appendChild(text('pre', 'detail', task.expandedPrompt || ''));
 
+    // 継続プロンプト（2回目以降に送る指示）の展開結果も並べて確認できるようにする
+    // （design.md §16.4、セキュリティ監査指摘#6。警告は継続プロンプトの参照先も走査するため、
+    // 確認する手段が要る）
+    if (typeof task.expandedContinuePrompt === 'string') {
+      box.appendChild(text('div', 'kind', '展開後の継続プロンプト（2回目以降に送る指示）'));
+      box.appendChild(text('pre', 'detail', task.expandedContinuePrompt || ''));
+    }
+
     cell.appendChild(box);
     row.appendChild(cell);
     return row;

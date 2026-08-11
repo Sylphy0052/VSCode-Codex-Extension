@@ -48,8 +48,12 @@ import {
 } from './runState';
 import { getRunOutcome, nextTasksToStart, type RunOutcome } from './scheduler';
 import { WorkflowRunStore, type PersistedRun, type PersistedTaskState } from './runStore';
-import { sanitizeForLog, stripControlChars } from './sanitize';
-import { buildEffectiveTaskConfig, type ExtensionSafetyBaseline } from './taskConfig';
+import { sanitizeForLog, stripControlChars, stripControlCharsPreservingNewlines } from './sanitize';
+import {
+  buildEffectiveTaskConfig,
+  type EffectiveTaskConfig,
+  type ExtensionSafetyBaseline,
+} from './taskConfig';
 import { buildResponseSummary } from './taskSummary';
 import type {
   ApprovalHandlerResult,
@@ -72,8 +76,11 @@ import {
   expandTemplate,
   findPermissionEscalationWarnings,
   parseWorkflowYaml,
+  permissionEscalationReasons,
+  referencedResultFields,
   validateWorkflow,
   withCommitRequirement,
+  type PermissionProfile,
   type Provider,
   type TaskResult,
   type WorkflowDefinition,
@@ -236,9 +243,16 @@ export interface TaskSnapshot {
    * （design.md §16.4 案1「見せる」、Issue #67）。テンプレート変数がどう膨らんだかを
    * 人が読める形で確認できるようにするためのもので、`LiveTask`（メモリ上のみ）から
    * 都度導出する。応答本文と同じく永続化はしない（design.md §16.11）ため、リロード後は
-   * `undefined` に戻る。
+   * `undefined` に戻る。制御文字は`stripControlChars`で除去済み（セキュリティ監査指摘#5）。
    */
   expandedPrompt: string | undefined;
+  /**
+   * `continuePrompt`（2回目以降に送る指示）の展開結果（design.md §16.4、セキュリティ
+   * 監査指摘#6）。警告（案2）は`prompt`と`continuePrompt`の両方を参照先として走査するが、
+   * `expandedPrompt`だけでは`continuePrompt`側の参照内容を確認する手段が無かったため
+   * 追加した。`expandedPrompt`と同じ理由で永続化しない。制御文字は除去済み。
+   */
+  expandedContinuePrompt: string | undefined;
 }
 
 /** ワークフローViewが描画する1実行分のスナップショット（design.md §16.8）。 */
@@ -271,6 +285,15 @@ interface LiveTask {
   branch: string;
   /** クランプ済みの `autoApprove`。承認判定の入力に使う。 */
   autoApprove: boolean;
+  /**
+   * クランプ済み（実効値）の `sandbox` / `approvalMode`（Claudeでは `permissionMode`）。
+   * 後続タスクが開始する際、実効値ベースの権限越境チェック（セキュリティ監査指摘#2。
+   * `checkEffectivePermissionEscalation`）が上流タスクの「実際に使われた」権限として
+   * 参照する。読み込み時のチェック（`findPermissionEscalationWarnings`）はYAMLの値しか
+   * 見えず、未指定（拡張機能側の設定に委ねる）だと判定できないため、この実効値が要る。
+   */
+  effectiveSandbox: string;
+  effectiveApprovalMode: string;
   boundary: TaskBoundary;
   /** `isolation: worktree` で実際にworktreeを使ったか。撤去してよいかの判定に使う。 */
   usedWorktree: boolean;
@@ -296,9 +319,11 @@ interface LiveTask {
    * テンプレート変数を展開したあとの最初のプロンプト（design.md §16.4 案1、Issue #67）。
    * タスク開始直前、`setPromptTransform` を差し込むのと同じタイミングで一度だけ計算する
    * （§16.4「展開は読み込み時ではなく、タスクの開始直前に行う」）。表示専用で、
-   * `runLoop` へ渡す本文（展開前）とは別に持つ。
+   * `runLoop` へ渡す本文（展開前）とは別に持つ。`stripControlChars`済み（監査指摘#5）。
    */
   expandedPrompt: string | undefined;
+  /** `continuePrompt`の展開結果。`expandedPrompt`と同時に計算する（セキュリティ監査指摘#6）。 */
+  expandedContinuePrompt: string | undefined;
 }
 
 interface LiveRun {
@@ -426,6 +451,7 @@ export class WorkflowRunner {
       pendingApproval: liveTask?.pendingApproval,
       hasLiveSession: liveTask !== undefined,
       expandedPrompt: liveTask?.expandedPrompt,
+      expandedContinuePrompt: liveTask?.expandedContinuePrompt,
     };
   }
 
@@ -459,15 +485,75 @@ export class WorkflowRunner {
    * 初期化する）では二度と現れない。
    */
   private derivePermissionEscalationWarnings(live: LiveRun): WorkflowWarning[] {
-    return findPermissionEscalationWarnings(live.def.tasks).map(
-      (issue): WorkflowWarning => ({
-        kind: 'permissionEscalation',
-        // taskIdsは[上流, 下流]の順（`findPermissionEscalationWarnings`参照）。実際に
-        // 危険な参照を書いている側（下流）のタスクへ紐付ける
-        taskId: issue.taskIds[issue.taskIds.length - 1],
-        message: issue.message,
-      }),
-    );
+    return findPermissionEscalationWarnings(live.def.tasks).map((issue): WorkflowWarning => ({
+      kind: 'permissionEscalation',
+      // taskIdsは[上流, 下流]の順（`findPermissionEscalationWarnings`参照）。実際に
+      // 危険な参照を書いている側（下流）のタスクへ紐付ける
+      taskId: issue.taskIds[issue.taskIds.length - 1],
+      message: issue.message,
+    }));
+  }
+
+  /**
+   * 実効値（クランプ後の値）に基づく第二段の権限越境チェック（design.md §16.4 案2、
+   * セキュリティ監査指摘#2）。
+   *
+   * `findPermissionEscalationWarnings`（読み込み時、`workflow.ts`）はYAMLに書かれた
+   * リテラルの値しか見えない純粋関数のため、`sandbox` / `approvalMode` がどちらか一方でも
+   * 未指定（拡張機能側の設定に委ねる、が典型的な書き方）だと実効値が分からず判定を諦める。
+   * ここでは`buildEffectiveTaskConfig`が実際に計算したクランプ後の値（`effective`と、
+   * 上流タスクが開始した時点で`LiveTask`へ保存済みの`effectiveSandbox` /
+   * `effectiveApprovalMode` / `autoApprove`）を使うため、未指定でも判定できる。
+   *
+   * `live.warnings`には`clamp`等と同じく実行中に随時積む（design.mdの既存の形）。
+   * 再試行で同じタスクが複数回開始しても同じ文言を積み直さないよう、既にあれば足さない。
+   */
+  private checkEffectivePermissionEscalation(
+    live: LiveRun,
+    task: WorkflowTask,
+    taskId: string,
+    effective: EffectiveTaskConfig,
+  ): void {
+    const downstream: PermissionProfile = {
+      provider: task.provider,
+      sandbox: effective.sandbox,
+      approvalMode: effective.config.approvalMode,
+      autoApprove: effective.autoApprove,
+    };
+
+    for (const ref of referencedResultFields(task)) {
+      const upstreamTask = live.def.tasks.find((t) => t.id === ref.id);
+      const upstreamLive = live.tasks.get(ref.id);
+      // 依存が満たされて初めてこのタスクは開始するため通常は必ず見つかるが、
+      // 見つからない場合（内部矛盾）は判定できないので黙って諦める
+      if (upstreamTask === undefined || upstreamLive === undefined) {
+        continue;
+      }
+      const upstream: PermissionProfile = {
+        provider: upstreamTask.provider,
+        sandbox: upstreamLive.effectiveSandbox,
+        approvalMode: upstreamLive.effectiveApprovalMode,
+        autoApprove: upstreamLive.autoApprove,
+      };
+
+      const reasons = permissionEscalationReasons(upstream, downstream);
+      if (reasons.length === 0) {
+        continue;
+      }
+
+      const message =
+        `${taskId} は上流タスク ${ref.id} より緩い実効権限（拡張機能の設定でクランプ済みの値）で ` +
+        `{{${ref.id}.${ref.field}}} を参照しています（${reasons.join(', ')}）。${ref.id} の応答に ` +
+        `仕込まれた指示文が ${taskId} の権限で実行されうるため、参照する内容を確認してください`;
+      const alreadyWarned = live.warnings.some(
+        (w) => w.kind === 'permissionEscalation' && w.taskId === taskId && w.message === message,
+      );
+      if (alreadyWarned) {
+        continue;
+      }
+      this.deps.log.warn(`[workflow ${live.runId}/${taskId}] ${message}`);
+      live.warnings.push({ kind: 'permissionEscalation', taskId, message });
+    }
   }
 
   /** 回数切れは状態としてすでに`failed`が持っているため、都度作らず表示のたびに導出する。 */
@@ -1065,6 +1151,13 @@ export class WorkflowRunner {
         live.warnings.push({ kind: 'clamp', taskId, message: w });
       }
 
+      // 実効値（クランプ後の値）に基づく第二段の権限越境チェック（セキュリティ監査指摘#2）。
+      // 読み込み時のチェック（`findPermissionEscalationWarnings`）はYAMLが`sandbox`等を
+      // 明示しないと判定できないが、ここでは実際にクランプされた値が分かっているため、
+      // 未指定でも判定できる。上流タスクの実効値は`live.tasks`に既に保存されている
+      // （依存が満たされて開始した以上、上流タスクは必ず先に完了しliveTaskが残っている）
+      this.checkEffectivePermissionEscalation(live, task, taskId, effective);
+
       // 最終防御（レビュー指摘: critical 3）。bypassPermissionsでは`can_use_tool`が
       // 発行されず、classifyApprovalRequest / autoApprove / escalate / allow が
       // 一度も呼ばれない。workflow.tsのvalidateWorkflowはYAMLリテラルの
@@ -1095,6 +1188,8 @@ export class WorkflowRunner {
         cwd,
         branch,
         autoApprove: effective.autoApprove,
+        effectiveSandbox: effective.sandbox,
+        effectiveApprovalMode: effective.config.approvalMode,
         boundary: boundaryResult.boundary,
         usedWorktree,
         originCommit,
@@ -1106,6 +1201,7 @@ export class WorkflowRunner {
         lastResponseSummary: '',
         pendingApproval: undefined,
         expandedPrompt: undefined,
+        expandedContinuePrompt: undefined,
       };
       live.tasks.set(taskId, liveTask);
       live.runState = recordSessionInfo(live.runState, taskId, session.sessionId, cwd);
@@ -1122,12 +1218,33 @@ export class WorkflowRunner {
       );
 
       // テンプレート展開はタスク開始直前に行う（design.md §16.4）。`runLoop` へ渡す本文は
-      // 展開前のまま（作業記録に残すため。§16.12）で、実際の送信直前にpromptTransformで展開する
+      // 展開前のまま（作業記録に残すため。§16.12）で、実際の送信直前にpromptTransformで展開する。
+      //
+      // 区切り用の乱数（`nonce`。セキュリティ監査指摘#3）はタスク開始時に1回だけ生成し、
+      // 以後の全ターン（`prompt` / `continuePrompt`）とView表示用の値（`expandedPrompt` /
+      // `expandedContinuePrompt`）とで使い回す。依存タスクの結果（`resultsMap`）は
+      // タスク開始時点で確定済み（依存は完了済みタスクに限る）で以後変わらないため、
+      // `continuePrompt`の展開結果もこの時点で一度計算すれば以後のどのターンにも一致する
       const resultsMap = this.buildResultsMap(live, task);
-      session.setPromptTransform((text) => expandTemplate(text, resultsMap));
+      const templateNonce = this.deps.randomId?.() ?? randomUUID();
+      session.setPromptTransform((text) => expandTemplate(text, resultsMap, templateNonce));
       // Viewで「展開後のプロンプトを実際の文面として確認できる」ようにするための表示専用の値
-      // （design.md §16.4 案1「見せる」、Issue #67）。実際に送る本文とは別経路で保持する
-      liveTask.expandedPrompt = expandTemplate(task.prompt, resultsMap);
+      // （design.md §16.4 案1「見せる」、Issue #67）。実際に送る本文とは別経路で保持する。
+      // 双方向制御文字等（Trojan Source）を仕込まれると、人がここを目視で確認するという
+      // 対策そのものを欺けるため、承認カードの表示・応答要約と同じ発想で無害化する
+      // （セキュリティ監査指摘#5）。ただしここは複数行のプロンプトをそのまま見せる用途なので、
+      // 改行まで空白に潰す`stripControlChars`ではなく、改行を残す
+      // `stripControlCharsPreservingNewlines`を使う。CLIへ実際に送る本文
+      // （`promptTransform`側）は意味を変えたくないため、表示専用のこちらだけに適用する
+      liveTask.expandedPrompt = stripControlCharsPreservingNewlines(
+        expandTemplate(task.prompt, resultsMap, templateNonce),
+      );
+      // 継続プロンプト（2回目以降に送る指示）の展開結果もViewで確認できるようにする
+      // （design.md §16.4、セキュリティ監査指摘#6）。上記のとおりresultsMapは以後の
+      // ターンでも変わらないため、ここで一度計算した値が実際に送られる値と一致し続ける
+      liveTask.expandedContinuePrompt = stripControlCharsPreservingNewlines(
+        expandTemplate(task.continuePrompt, resultsMap, templateNonce),
+      );
 
       // `usedWorktree`（タスク専用ブランチを使う）のときだけ「コミットしてあること」を
       // 終了条件へ自動で足す（design.md §16.17「タスク完了時のコミット」1.）。`shared` /
