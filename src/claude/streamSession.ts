@@ -22,6 +22,7 @@ import {
   buildControlRequest,
   buildControlResponse,
   buildRewindFilesRequest,
+  buildSessionCostRequest,
   buildSetEffortRequest,
   buildSetModelRequest,
   buildSetPermissionModeRequest,
@@ -34,6 +35,7 @@ import {
   readControlRequest,
   readControlResponse,
   readRewindFilesResult,
+  readSessionCost,
   type ControlResponse,
   type IncomingControlRequest,
   type RewindFilesResult,
@@ -273,6 +275,25 @@ export class ClaudeStreamSession {
   }
 
   /**
+   * セッションのコストを読み直す（issue #37、design.md TP-60）。
+   *
+   * レート制限の消費率（`usage`）ともコンテキストの使用量（`context`）とも別の数字なので、
+   * `refreshContext` と同じ作りで別のフィールド（`sessionCost`）へ持つ。会話へ `/cost` を
+   * 送ると応答が会話に混ざるため、control protocolで聞く。応答が返らなくても会話は
+   * 続けられるので、失敗は黙って見送る。
+   */
+  refreshSessionCost(): void {
+    // 応答を返さないCLIでは要求が返らない。返事待ちを1件までにして積み上がりを防ぐ
+    if (
+      this.proc === undefined ||
+      [...this.outgoing.values()].some((o) => o.kind === 'sessionCost')
+    ) {
+      return;
+    }
+    this.write(buildSessionCostRequest(this.claim('sessionCost')));
+  }
+
+  /**
    * 会話を要約して圧縮する。
    *
    * 専用の制御要求が無いため、TUIと同じく `/compact` を発言として送る
@@ -425,6 +446,7 @@ export class ClaudeStreamSession {
       // ターンが終わるたびに読み直す。圧縮の効果もここで表示へ反映される
       if (wasBusy && !next.busy) {
         this.refreshContext();
+        this.refreshSessionCost();
       }
     }
   }
@@ -484,6 +506,14 @@ export class ClaudeStreamSession {
       return;
     }
 
+    if (outgoing?.kind === 'sessionCost') {
+      const sessionCost = readSessionCost(response.payload, Date.now());
+      if (sessionCost !== undefined) {
+        this.update({ ...this.state, sessionCost });
+      }
+      return;
+    }
+
     if (outgoing?.kind === 'rewindFiles') {
       this.rewindWaiting.get(response.requestId)?.(readRewindFilesResult(response));
       this.rewindWaiting.delete(response.requestId);
@@ -516,6 +546,7 @@ export class ClaudeStreamSession {
     }
     // 会話を始める前の値を出しておく。ここを逃すと最初のターンが終わるまで空になる
     this.refreshContext();
+    this.refreshSessionCost();
   }
 
   /**
@@ -586,7 +617,7 @@ export class ClaudeStreamSession {
 }
 
 /** こちらから出した制御要求の用途。 */
-type OutgoingKind = 'initialize' | 'contextUsage' | 'settings' | 'rewindFiles';
+type OutgoingKind = 'initialize' | 'contextUsage' | 'sessionCost' | 'settings' | 'rewindFiles';
 
 interface Outgoing {
   kind: OutgoingKind;

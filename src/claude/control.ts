@@ -1,9 +1,15 @@
 import type { ApprovalDecision } from '../appserver/approvals';
-import { buildContextUsage, type ContextUsage, type PendingApproval } from '../appserver/chatState';
+import {
+  buildContextUsage,
+  type ContextUsage,
+  type PendingApproval,
+  type SessionCostView,
+} from '../appserver/chatState';
 import { isEffortToken, type EffortInfo, type ModelInfo } from '../codex/modelCatalog';
 import { buildClaudeContent, type Attachment } from '../provider/attachments';
 import type { McpServerView } from '../provider/mcpServers';
 import type { SlashCommand } from '../provider/slashCommands';
+import { parseSessionCost } from './costText';
 import { describeTool } from './transcript';
 import type { ClaudeAgentInfo } from './types';
 
@@ -361,7 +367,9 @@ export function readRewindFilesResult(response: ControlResponse): RewindFilesRes
     };
   }
   const raw = payload['filesChanged'];
-  const filesChanged = Array.isArray(raw) ? raw.filter((p): p is string => typeof p === 'string') : [];
+  const filesChanged = Array.isArray(raw)
+    ? raw.filter((p): p is string => typeof p === 'string')
+    : [];
   return {
     ok: true,
     filesChanged,
@@ -369,6 +377,23 @@ export function readRewindFilesResult(response: ControlResponse): RewindFilesRes
     deletions: num(payload['deletions']),
     error: undefined,
   };
+}
+
+/**
+ * セッションのコストを問い合わせる要求（issue #37、design.md TP-60）。
+ *
+ * `get_session_cost`（整形済みの英文テキストのみ）より `get_usage` のほうが情報量が多く
+ * （`session.total_cost_usd` 等を構造化して返す。実測、CLI 2.1.227）、両方を送る必要が無い。
+ * 会話へ `/cost` を送ると応答が会話に混ざるため、`get_context_usage` と同じく
+ * control protocolで聞く。
+ */
+export function buildSessionCostRequest(requestId: string): string {
+  return buildControlRequest(requestId, { subtype: 'get_usage' });
+}
+
+/** `get_usage` の応答からセッションのコストを読む。中身の詳細は `costText.ts` を参照。 */
+export function readSessionCost(payload: unknown, capturedAt: number): SessionCostView | undefined {
+  return parseSessionCost(payload, capturedAt);
 }
 
 /** MCPサーバーの一覧・状態を問い合わせる要求（issue #27、design.md TP-50）。 */
@@ -432,7 +457,13 @@ export function readMcpServersList(payload: unknown): McpServerView[] | undefine
     const status = str(e?.['status']);
 
     if (status === 'disabled') {
-      servers.push({ name, state: 'disabled', toolCount: 0, version: undefined, reason: undefined });
+      servers.push({
+        name,
+        state: 'disabled',
+        toolCount: 0,
+        version: undefined,
+        reason: undefined,
+      });
       continue;
     }
     if (status === 'connected') {
