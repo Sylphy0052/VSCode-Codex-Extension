@@ -347,6 +347,13 @@ export interface TaskSnapshot {
    * リロード直後に復元したrunのタスクにはまだセッションが無く、`再実行` だけが有効）。
    */
   hasLiveSession: boolean;
+  /**
+   * 衝突解決セッション（design.md §16.17「コンフリクト」・Issue #104）がこのタスクに
+   * ついて走っているか。`live.mergeResolutions`はワークフローの定義に無い（ノード化しない）
+   * ため、Viewは対象タスクのノードへ「マージ解決中」として重ねて出す判断にこれを使う。
+   * `true`の間、`revealTask`はこのタスク自身のセッションではなく衝突解決セッションを開く。
+   */
+  mergeResolutionActive: boolean;
 }
 
 /** ワークフローViewが描画する1実行分のスナップショット（design.md §16.8）。 */
@@ -370,6 +377,13 @@ export interface WorkflowRunSnapshot {
    * オブジェクトスプレッドされない限りundefinedになり、falsyとして扱われる）。
    */
   isDraft?: boolean;
+  /**
+   * 統合ブランチ名（design.md §16.8「そのほか」・§16.17。Issue #104）。gitリポジトリでない
+   * 実行（統合の概念が無い）や、`WorkflowViewManager.previewDefinition`が組み立てる
+   * 生成直後の下書きプレビューでは`undefined`。`workflowGraph.ts`の`summarizeIntegration`が
+   * これと`tasks`から統合の状況（取り込み済み件数）を導く。
+   */
+  integrationBranch?: string | undefined;
 }
 
 /**
@@ -544,6 +558,7 @@ export class WorkflowRunner {
         ...this.deriveAllowWarnings(live),
       ],
       haltedByUser: live.runState.haltedByUser,
+      integrationBranch: live.integration?.branch,
     };
   }
 
@@ -566,6 +581,7 @@ export class WorkflowRunner {
       failure: state?.failure,
       pendingApproval: liveTask?.pendingApproval,
       hasLiveSession: liveTask !== undefined,
+      mergeResolutionActive: live.mergeResolutions.has(task.id),
     };
   }
 
@@ -1067,11 +1083,26 @@ export class WorkflowRunner {
    * そのタスクのチャットタブを前面に出す。閉じていれば作り直し、会話を復元する
    * （`TaskSession.reveal()`。#56で実装済みの寿命分離をそのまま使う）。
    *
+   * **衝突解決セッション（design.md §16.17「コンフリクト」5.・Issue #104）が走っている間は
+   * そちらを優先する。** タスク自身のセッションは`onTaskFinished`が`done`の時点で既に
+   * `dispose()`済み（マージへ進むため）で、開き直しても会話の続きは見えない。衝突解決は
+   * 別セッション（統合worktreeで開く）で進行中のため、Viewの「マージ解決中」表示から
+   * 押したときはそちらのタブへ移動しないと意味が無い。
+   *
    * リロード直後で復元しただけの実行（`live.tasks` にまだ実体が無い）に対しては
    * 何もできない。`false` を返すので、Viewは「再実行」だけを案内する。
    */
   revealTask(runId: string, taskId: string): boolean {
-    const liveTask = this.runs.get(runId)?.tasks.get(taskId);
+    const live = this.runs.get(runId);
+    if (live === undefined) {
+      return false;
+    }
+    const mergeResolutionSession = live.mergeResolutions.get(taskId);
+    if (mergeResolutionSession !== undefined) {
+      mergeResolutionSession.reveal();
+      return true;
+    }
+    const liveTask = live.tasks.get(taskId);
     if (liveTask === undefined) {
       return false;
     }

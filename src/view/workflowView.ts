@@ -10,7 +10,7 @@ import type {
 } from '../orchestrator/runner';
 import type { WorkflowDefinition } from '../orchestrator/workflow';
 import { chatCsp } from './chatCsp';
-import { layoutGraph } from './workflowGraph';
+import { aggregateProgress, layoutGraph, summarizeIntegration } from './workflowGraph';
 import { workflowScript } from './workflowScript';
 import { workflowStyles } from './workflowStyles';
 
@@ -166,7 +166,13 @@ export class WorkflowViewManager implements vscode.Disposable {
     }
     this.panel.title = (snapshot.name === '' ? 'ワークフロー' : snapshot.name) + titleSuffix;
     const layout = layoutGraph(snapshot.tasks);
-    void this.panel.webview.postMessage({ type: 'state', snapshot, layout });
+    // 進捗の内訳・統合の状況の集計は`workflowGraph.ts`の純粋関数（テスト済み）で行い、
+    // Webview側では受け取った結果を表示するだけにする（design.md §16.8「全体の進捗」・
+    // 「そのほか」・Issue #104。以前はWebview内のJavaScriptで独自に集計しており、
+    // `merging`/`blocked`/`waitingReply`の3状態がここでの追随漏れの原因になっていた）
+    const progress = aggregateProgress(snapshot.tasks);
+    const integration = summarizeIntegration(snapshot.integrationBranch, snapshot.tasks);
+    void this.panel.webview.postMessage({ type: 'state', snapshot, layout, progress, integration });
   }
 
   private async handleMessage(message: unknown): Promise<void> {
@@ -263,6 +269,13 @@ export class WorkflowViewManager implements vscode.Disposable {
       await this.retryWithAllowConfirmation(runId, taskId);
       return;
     }
+    if (type === 'retryMerge') {
+      // design.md §16.17「Viewから人が解決したうえで『再マージ』を指示できる」（Issue #104）。
+      // `blocked`以外のタスクや存在しないidに対しては`runner.ts`側が何もせず`false`を
+      // 返すだけなので、ここでは呼び出すだけでよい
+      this.runner.retryMerge(runId, taskId);
+      return;
+    }
     if (type === 'approve' && isApprovalDecision(m['decision'])) {
       this.runner.decideApproval(runId, taskId, m['decision']);
     }
@@ -342,6 +355,11 @@ ${workflowStyles()}
       <tbody id="taskTableBody"></tbody>
     </table>
 
+    <div id="integrationSection" hidden>
+      <h2>統合の状況</h2>
+      <div id="integrationInfo"></div>
+    </div>
+
     <div id="warningsSection" hidden>
       <h2>警告</h2>
       <div id="warnings"></div>
@@ -384,6 +402,7 @@ function buildPreviewSnapshot(
     failure: undefined,
     pendingApproval: undefined,
     hasLiveSession: false,
+    mergeResolutionActive: false,
   }));
   return {
     runId: `preview:${defPath}`,
