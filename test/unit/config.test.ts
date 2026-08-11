@@ -51,6 +51,46 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
     __mock.setConfig('agent', { 'workflows.roadmapDir': '/etc/evil' });
     expect(readWorkflowsConfig().roadmapDir).toBe('docs/roadmap');
   });
+
+  it('pseudoWorktreeExcludeの既定はnode_modules/.venv/dist/out（design.md §16.20）', () => {
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual([
+      'node_modules',
+      '.venv',
+      'dist',
+      'out',
+    ]);
+  });
+
+  it('pseudoWorktreeExcludeは文字列配列をそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['build', 'coverage'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(['build', 'coverage']);
+  });
+
+  it('pseudoWorktreeExcludeが配列でない・空文字要素を含む・空配列なら既定値へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': 'not-an-array' });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual([
+      'node_modules',
+      '.venv',
+      'dist',
+      'out',
+    ]);
+
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['ok', ''] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual([
+      'node_modules',
+      '.venv',
+      'dist',
+      'out',
+    ]);
+
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': [] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual([
+      'node_modules',
+      '.venv',
+      'dist',
+      'out',
+    ]);
+  });
 });
 
 describe('readClaudeConfig', () => {

@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { initialChatState, type ChatState } from '../../src/appserver/chatState';
 import type { ApprovalDecision } from '../../src/appserver/approvals';
@@ -13,7 +14,23 @@ import {
   MAX_WORKFLOW_FILE_BYTES,
   WorkflowRunner,
   type WorkflowFilePort,
+  type WorkflowRunnerForgeDeps,
+  type WorkflowRunnerMessagingDeps,
 } from '../../src/orchestrator/runner';
+import type {
+  CliAvailabilityPort,
+  CliCommandRunner,
+  FinalMergeConfig,
+  ForgeFileSystemPort,
+  ForgeHostConfig,
+  PullRequestLayerConfig,
+} from '../../src/orchestrator/forge';
+import type {
+  PseudoWorktreeDirEntry,
+  PseudoWorktreeFileStat,
+  PseudoWorktreeFileSystemPort,
+} from '../../src/orchestrator/pseudoWorktree';
+import type { HttpMcpTransportHandle, TaskMessagingHub } from '../../src/orchestrator/messaging';
 import {
   WorkflowRunStore,
   type PersistedRun,
@@ -192,6 +209,14 @@ function fakeGit(options?: {
   failWorktreeAddFromCall?: number;
   failMerge?: boolean;
   conflictOnce?: boolean;
+  /** `git remote get-url origin` の応答（design.md §16.18のforgeテスト用）。未指定ならremote無し。 */
+  originRemoteUrl?: string;
+  /** `git rev-parse --abbrev-ref HEAD` の応答。既定は `main`。 */
+  headBranch?: string;
+  /** `git push` を常に失敗させる。 */
+  failPush?: boolean;
+  /** `git`の作業ツリーでないワークスペースを模す（design.md §16.20の疑似worktreeテスト用）。 */
+  notGitRepo?: boolean;
 }): FakeGitHandle {
   const calls: Array<{ args: string[]; cwd: string }> = [];
   let conflictPending = options?.conflictOnce === true;
@@ -205,13 +230,28 @@ function fakeGit(options?: {
     async run(args, cwd) {
       calls.push({ args: [...args], cwd });
       if (args[0] === 'rev-parse' && args[1] === '--is-inside-work-tree') {
-        return { code: 0, stdout: 'true\n', stderr: '' };
+        return options?.notGitRepo
+          ? { code: 128, stdout: '', stderr: 'fatal: not a git repository' }
+          : { code: 0, stdout: 'true\n', stderr: '' };
       }
       if (args[0] === 'rev-parse' && args[1] === 'HEAD') {
         return { code: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '' };
       }
       if (args[0] === 'rev-parse' && args[1] === '--git-common-dir') {
         return { code: 0, stdout: '/repo/.git\n', stderr: '' };
+      }
+      if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref' && args[2] === 'HEAD') {
+        return { code: 0, stdout: `${options?.headBranch ?? 'main'}\n`, stderr: '' };
+      }
+      if (args[0] === 'remote' && args[1] === 'get-url' && args[2] === 'origin') {
+        return options?.originRemoteUrl !== undefined
+          ? { code: 0, stdout: `${options.originRemoteUrl}\n`, stderr: '' }
+          : { code: 1, stdout: '', stderr: "error: No such remote 'origin'" };
+      }
+      if (args[0] === 'push') {
+        return options?.failPush
+          ? { code: 1, stdout: '', stderr: 'fatal: fake push failure' }
+          : { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) {
         // マージ進行中（未解決の衝突が残っている）間だけ見つかる
@@ -278,6 +318,193 @@ const identityFs: WorktreeFileSystemPort = {
   isSymbolicLink: async () => false,
 };
 
+/** `gh` CLIの呼び出しをフェイクで完結させる（design.md §16.18のforgeテスト用）。 */
+interface FakeForgeCli extends CliCommandRunner {
+  calls: Array<{ command: string; args: string[]; cwd: string }>;
+}
+
+function fakeForgeCli(options?: {
+  authenticated?: boolean;
+  failCreate?: boolean;
+  failMerge?: boolean;
+  prUrl?: string;
+}): FakeForgeCli {
+  const calls: Array<{ command: string; args: string[]; cwd: string }> = [];
+  return {
+    calls,
+    async run(command, args, cwd) {
+      calls.push({ command, args: [...args], cwd });
+      if (args[0] === 'auth' && args[1] === 'status') {
+        return options?.authenticated === false
+          ? { code: 1, stdout: '', stderr: 'not logged in' }
+          : { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'pr' && args[1] === 'create') {
+        return options?.failCreate
+          ? { code: 1, stdout: '', stderr: 'fake pr create failure' }
+          : { code: 0, stdout: `${options?.prUrl ?? 'https://github.com/acme/repo/pull/1'}\n`, stderr: '' };
+      }
+      if (args[0] === 'pr' && args[1] === 'merge') {
+        return options?.failMerge
+          ? { code: 1, stdout: '', stderr: 'fake pr merge failure' }
+          : { code: 0, stdout: '', stderr: '' };
+      }
+      return { code: 1, stdout: '', stderr: `unhandled: ${command} ${args.join(' ')}` };
+    },
+  };
+}
+
+const fakeForgeCliAvailability: CliAvailabilityPort = { isOnPath: async () => true };
+const fakeForgeFs: ForgeFileSystemPort = {
+  writeTempFile: async () => '/tmp/fake-forge-body.md',
+  removeTempFile: async () => undefined,
+};
+
+/**
+ * 疑似worktree（design.md §16.20）のためのメモリ上のフェイクファイルシステム。
+ * `pseudoWorktree.test.ts`は実ファイルシステム（`node:fs/promises` + `mkdtemp`）で
+ * 完結させているが、`runner.ts`のテストは「実ファイルシステムへは一切触れない」方針
+ * （ファイル冒頭のdocstring参照）に揃えるため、ここではメモリ上のフェイクにする。
+ */
+class FakePseudoFs implements PseudoWorktreeFileSystemPort {
+  readonly files = new Map<string, PseudoWorktreeFileStat>();
+  readonly dirs = new Set<string>();
+
+  constructor(seedFiles: Record<string, PseudoWorktreeFileStat> = {}) {
+    for (const [p, meta] of Object.entries(seedFiles)) {
+      this.setFile(p, meta);
+    }
+  }
+
+  private ensureDirsFor(target: string): void {
+    let cur = path.dirname(target);
+    let prev = target;
+    while (cur !== prev) {
+      this.dirs.add(cur);
+      prev = cur;
+      cur = path.dirname(cur);
+    }
+  }
+
+  setFile(target: string, meta: PseudoWorktreeFileStat): void {
+    this.files.set(target, meta);
+    this.ensureDirsFor(target);
+  }
+
+  async readdir(target: string): Promise<readonly PseudoWorktreeDirEntry[]> {
+    const entries: PseudoWorktreeDirEntry[] = [];
+    for (const p of this.files.keys()) {
+      if (path.dirname(p) === target) {
+        entries.push({ name: path.basename(p), isDirectory: false, isSymbolicLink: false });
+      }
+    }
+    for (const d of this.dirs) {
+      if (path.dirname(d) === target) {
+        entries.push({ name: path.basename(d), isDirectory: true, isSymbolicLink: false });
+      }
+    }
+    return entries;
+  }
+  async statFile(target: string): Promise<PseudoWorktreeFileStat | undefined> {
+    return this.files.get(target);
+  }
+  async isSymbolicLink(): Promise<boolean> {
+    return false;
+  }
+  async directoryExists(target: string): Promise<boolean> {
+    return this.dirs.has(target);
+  }
+  async realpath(target: string): Promise<string | undefined> {
+    return target;
+  }
+  async mkdir(target: string): Promise<void> {
+    this.dirs.add(target);
+    this.ensureDirsFor(target);
+  }
+  async copyFile(from: string, to: string): Promise<void> {
+    const meta = this.files.get(from);
+    if (meta !== undefined) {
+      this.setFile(to, meta);
+    }
+  }
+  async removeFile(target: string): Promise<void> {
+    this.files.delete(target);
+  }
+  async removeDirRecursive(target: string): Promise<void> {
+    const prefix = `${target}${path.sep}`;
+    for (const p of [...this.files.keys()]) {
+      if (p === target || p.startsWith(prefix)) {
+        this.files.delete(p);
+      }
+    }
+    for (const d of [...this.dirs]) {
+      if (d === target || d.startsWith(prefix)) {
+        this.dirs.delete(d);
+      }
+    }
+  }
+}
+
+function fakeForgeDeps(
+  cli: FakeForgeCli,
+  config?: {
+    host?: ForgeHostConfig;
+    pullRequest?: PullRequestLayerConfig;
+    finalMerge?: FinalMergeConfig;
+  },
+  cliAvailability: CliAvailabilityPort = fakeForgeCliAvailability,
+): WorkflowRunnerForgeDeps {
+  return {
+    cli,
+    cliAvailability,
+    fs: fakeForgeFs,
+    readConfig: () => ({
+      host: config?.host ?? 'auto',
+      pullRequest: config?.pullRequest ?? 'per-task',
+      finalMerge: config?.finalMerge ?? 'auto',
+    }),
+  };
+}
+
+/** `messaging.ts`の`startHttpMcpTransport`のフェイク。実HTTPは張らず、呼び出しだけ記録する。 */
+interface FakeMessagingState {
+  hub: TaskMessagingHub | undefined;
+  handle: (HttpMcpTransportHandle & { registeredTasks: string[]; closed: boolean }) | undefined;
+}
+
+function fakeMessagingDeps(options?: { failStart?: boolean }): {
+  deps: WorkflowRunnerMessagingDeps;
+  state: FakeMessagingState;
+} {
+  const state: FakeMessagingState = { hub: undefined, handle: undefined };
+  const deps: WorkflowRunnerMessagingDeps = {
+    startTransport: async (hub) => {
+      state.hub = hub;
+      if (options?.failStart) {
+        throw new Error('fake transport start failure');
+      }
+      const registeredTasks: string[] = [];
+      const handle: HttpMcpTransportHandle & { registeredTasks: string[]; closed: boolean } = {
+        transport: { onConnection: () => undefined },
+        baseUrl: 'http://127.0.0.1:0',
+        registeredTasks,
+        closed: false,
+        registerTask(taskId: string): string {
+          registeredTasks.push(taskId);
+          return `http://127.0.0.1:0/mcp/${taskId}`;
+        },
+        close(): Promise<void> {
+          handle.closed = true;
+          return Promise.resolve();
+        },
+      };
+      state.handle = handle;
+      return handle;
+    },
+  };
+  return { deps, state };
+}
+
 function fakeMemento(): WorkflowRunMemento {
   const store = new Map<string, unknown>();
   return {
@@ -321,6 +548,9 @@ function createHarness(
     codexApprovalMode?: string;
     claudePermissionMode?: string;
     git?: FakeGitHandle;
+    forge?: WorkflowRunnerForgeDeps;
+    pseudoWorktree?: { fs: PseudoWorktreeFileSystemPort; exclude: readonly string[] };
+    messaging?: WorkflowRunnerMessagingDeps;
   },
 ): Harness {
   const codexHost = new FakeHost();
@@ -343,6 +573,9 @@ function createHarness(
       claudePermissionMode: options?.claudePermissionMode ?? 'manual',
       allowAutoApprove: options?.allowAutoApprove ?? true,
     }),
+    ...(options?.forge !== undefined ? { forge: options.forge } : {}),
+    ...(options?.pseudoWorktree !== undefined ? { pseudoWorktree: options.pseudoWorktree } : {}),
+    ...(options?.messaging !== undefined ? { messaging: options.messaging } : {}),
     randomId: () => `00000000-0000-4000-8000-${String((seq += 1)).padStart(12, '0')}`,
   });
   return { runner, codexHost, claudeHost, store, git };
@@ -1751,6 +1984,471 @@ tasks:
     const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
     expect(result.ok).toBe(false);
     expect(result.errors?.some((e) => e.message.includes('統合worktree'))).toBe(true);
+  });
+});
+
+describe('WorkflowRunner: PR/MRの作成（design.md §16.18、Issue #105）', () => {
+  const SINGLE_TASK_YAML = `
+version: 1
+name: forge-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+  it(
+    'design.mdが定める順序（タスクブランチをpush→統合ブランチをpush→PR/MRを作る→' +
+      'マージして統合ブランチをpush）でPR/MRを作る',
+    async () => {
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+      const cli = fakeForgeCli();
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli),
+      });
+      const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      // pushはタスクブランチ→統合ブランチ→(マージ後に)統合ブランチ、の順で呼ばれる
+      const pushCalls = git.calls.filter((c) => c.args[0] === 'push');
+      expect(pushCalls.length).toBeGreaterThanOrEqual(2);
+      // PR作成はpushの後、マージ（統合worktreeでの`git merge --no-ff`）の前に呼ばれる
+      const createCallIndex = cli.calls.findIndex(
+        (c) => c.args[0] === 'pr' && c.args[1] === 'create',
+      );
+      const mergeCallIndex = git.calls.findIndex(
+        (c) => c.args[0] === 'merge' && c.args[1] === '--no-ff',
+      );
+      expect(createCallIndex).toBeGreaterThanOrEqual(0);
+      expect(mergeCallIndex).toBeGreaterThan(createCallIndex);
+      const createCall = cli.calls.find((c) => c.args[0] === 'pr' && c.args[1] === 'create');
+      expect(createCall?.args.some((a) => a.startsWith('--base=wf/'))).toBe(true);
+    },
+  );
+
+  it('gh/glabの前提（認証）が欠けていれば、警告のうえPR/MRを飛ばしローカルのマージだけ進める', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli({ authenticated: false });
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // ローカルの統合ブランチへのマージ自体は進む
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    // PR/MRは作られない
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'create')).toBe(false);
+    // 警告が出る
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.warnings.some((w) => w.kind === 'forgeSkipped')).toBe(true);
+  });
+
+  it('originのremoteが無ければ、警告のうえPR/MRを飛ばしローカルのマージだけ進める', async () => {
+    const git = fakeGit();
+    const cli = fakeForgeCli();
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'create')).toBe(false);
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.warnings.some((w) => w.kind === 'forgeSkipped')).toBe(true);
+  });
+
+  it('agent.workflows.forgeがnoneならPR/MRを作らない（前提チェックも行わない）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { host: 'none' }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(cli.calls).toHaveLength(0);
+    // host: 'none' は既定に丸めた設定違反ではないため、forgeSkipped警告も出さない
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.warnings.some((w) => w.kind === 'forgeSkipped')).toBe(false);
+  });
+
+  it('全タスクがdoneになったら統合→mainのPR/MRを作り、finalMerge: autoならmainへマージする', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // タスク層のPRに続き、統合層のPR（gh pr create）も作られている
+    const createCalls = cli.calls.filter((c) => c.args[0] === 'pr' && c.args[1] === 'create');
+    expect(createCalls.length).toBe(2);
+    const integrationCreate = createCalls[1];
+    expect(integrationCreate?.args.some((a) => a === '--base=main')).toBe(true);
+    // finalMerge: auto（既定）なので最終マージまで実行する
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(true);
+    void result;
+  });
+
+  it('finalMerge: pr-onlyなら統合PR/MRは作るがmainへはマージしない', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { finalMerge: 'pr-only' }),
+    });
+    await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'create')).toBe(true);
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+  });
+
+  it('統合PR/MRの作成に失敗していれば、finalMerge: autoでもmainへはマージしない（design.md §16.18）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli({ failCreate: true });
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { pullRequest: 'integration' }),
+    });
+    await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+  });
+
+  it('pullRequest: noneならタスク層・統合層のいずれもPR/MRを作らない', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { pullRequest: 'none' }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(cli.calls.some((c) => c.args[0] === 'pr')).toBe(false);
+  });
+
+  it('WorkflowRunnerDeps.forgeが渡されていなければPR/MRを一切作らない（既存の呼び出しはそのまま動く）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.warnings.some((w) => w.kind === 'forgeSkipped')).toBe(false);
+  });
+});
+
+describe('WorkflowRunner: 疑似worktree（design.md §16.20、Issue #105）', () => {
+  const SINGLE_TASK_YAML = `
+version: 1
+name: pseudo-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+  it(
+    'decideWorkingDirectoryのgit外フォールバックから疑似worktreeを使い、' +
+      'runの終了時にワークスペースへ反映する',
+    async () => {
+      const git = fakeGit({ notGitRepo: true });
+      const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        pseudoWorktree: { fs, exclude: [] },
+      });
+      const result = await runner.start('/repo/.agents/workflows/pseudo.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      const cloneDir = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+      expect(t1.cwd).toBe(cloneDir);
+      // ワークスペースの内容が複製されている
+      expect(fs.files.get(path.join(cloneDir, 'a.txt'))).toEqual({ size: 10, mtimeMs: 100 });
+
+      // タスクがファイルを1件変更し、1件追加したとする
+      fs.setFile(path.join(cloneDir, 'a.txt'), { size: 20, mtimeMs: 200 });
+      fs.setFile(path.join(cloneDir, 'b.txt'), { size: 5, mtimeMs: 50 });
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      // runの終了時にワークスペースへ反映される
+      expect(fs.files.get('/repo/a.txt')).toEqual({ size: 20, mtimeMs: 200 });
+      expect(fs.files.get('/repo/b.txt')).toEqual({ size: 5, mtimeMs: 50 });
+    },
+  );
+
+  it('worktree-strictはgit外では実行を開始しない挙動を保つ', async () => {
+    const git = fakeGit({ notGitRepo: true });
+    const fs = new FakePseudoFs();
+    const yaml = `
+version: 1
+name: strict-test
+tasks:
+  - id: T1
+    isolation: worktree-strict
+    prompt: p
+    done: d
+`;
+    const { runner } = createHarness(yaml, { git, pseudoWorktree: { fs, exclude: [] } });
+    const result = await runner.start('/repo/.agents/workflows/strict.yaml', '/repo');
+    expect(result.ok).toBe(false);
+    expect(result.errors?.some((e) => e.message.includes('worktree-strict'))).toBe(true);
+  });
+
+  it('実行中にワークスペース側が変更されていれば、反映せず警告を残す（design.md「人の編集を上書きしない」）', async () => {
+    const git = fakeGit({ notGitRepo: true });
+    const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      pseudoWorktree: { fs, exclude: [] },
+    });
+    const result = await runner.start('/repo/.agents/workflows/pseudo.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    const cloneDir = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+    fs.setFile(path.join(cloneDir, 'a.txt'), { size: 20, mtimeMs: 200 });
+    // 人がワークスペース側を実行中に直接編集した、を模す
+    fs.setFile('/repo/a.txt', { size: 999, mtimeMs: 999 });
+
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // タスク自体の統合は成功する（done）。反映だけが中止される
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(fs.files.get('/repo/a.txt')).toEqual({ size: 999, mtimeMs: 999 });
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.warnings.some((w) => w.kind === 'pseudoWorktreeReflectBlocked')).toBe(true);
+  });
+
+  it('同じパスへ複数タスクが競合すると、3-way mergeができないため衝突としてblockedになる', async () => {
+    const git = fakeGit({ notGitRepo: true });
+    const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+    const yaml = `
+version: 1
+name: pseudo-conflict-test
+defaults:
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+    const { runner, codexHost, store } = createHarness(yaml, {
+      git,
+      pseudoWorktree: { fs, exclude: [] },
+    });
+    const result = await runner.start('/repo/.agents/workflows/pseudo-conflict.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    const t2 = codexHost.byTaskId('T2');
+    const cloneDir1 = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+    const cloneDir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T2');
+    fs.setFile(path.join(cloneDir1, 'a.txt'), { size: 20, mtimeMs: 200 });
+    fs.setFile(path.join(cloneDir2, 'a.txt'), { size: 30, mtimeMs: 300 });
+
+    t1.finish('done', doneState('ok'));
+    await flush();
+    t2.finish('done', doneState('ok'));
+    await flush();
+
+    // 先に統合したT1はdone、後から同じパスを統合しようとしたT2はblocked
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('blocked');
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.warnings.some((w) => w.kind === 'pseudoWorktreeConflict')).toBe(true);
+  });
+
+  it('WorkflowRunnerDeps.pseudoWorktreeが渡されていなければ、従来どおりワークスペース直下を共有する（後方互換）', async () => {
+    const git = fakeGit({ notGitRepo: true });
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/pseudo.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.sessions[0] as FakeTaskSession;
+    expect(t1.cwd).toBe('/repo');
+    t1.finish('done', doneState('ok'));
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+  });
+});
+
+describe('WorkflowRunner: タスク間メッセージング（design.md §16.21、Issue #105）', () => {
+  const TWO_TASK_YAML = `
+version: 1
+name: messaging-test
+defaults:
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+
+  it('runごとにMCPサーバを起動し、タスクの開始時に接続用URLを発行してTaskSessionInputへ渡す', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
+    await flush();
+
+    expect(state.handle?.registeredTasks.sort()).toEqual(['T1', 'T2']);
+    const t1Input = codexHost.openInputs.find((i) => i.cwd.endsWith('/T1'));
+    const t2Input = codexHost.openInputs.find((i) => i.cwd.endsWith('/T2'));
+    expect(t1Input?.mcp?.url).toContain('/mcp/');
+    expect(t2Input?.mcp?.url).toContain('/mcp/');
+    expect(t1Input?.mcp?.url).not.toBe(t2Input?.mcp?.url);
+  });
+
+  it('send_messageで受け付けたメッセージは、宛先タスクの次の送信の先頭へ添えられる', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
+    await flush();
+
+    const t2 = codexHost.byTaskId('T2');
+    const result = state.hub?.sendMessage({ from: 'T1', to: 'T2', body: 'hi T2', expectReply: false });
+    expect(result?.accepted).toBe(true);
+
+    const composed = t2.promptTransform?.('続けてください') ?? '';
+    expect(composed).toContain('T1');
+    expect(composed).toContain('hi T2');
+    expect(composed).toContain('続けてください');
+    // 一度取り出したメッセージは再度は添えられない（配送済みとして消費される）
+    const secondSend = t2.promptTransform?.('もう一度') ?? '';
+    expect(secondSend).toBe('もう一度');
+  });
+
+  it('MCPサーバの起動に失敗しても、通信なしでワークフローが最後まで走る（design.md「runは止めない」）', async () => {
+    const { deps } = fakeMessagingDeps({ failStart: true });
+    const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, { messaging: deps });
+    const result = await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    const t2 = codexHost.byTaskId('T2');
+    expect(t1.cwd).toBeDefined();
+    t1.finish('done', doneState('ok'));
+    t2.finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+  });
+
+  it('WorkflowRunnerDeps.messagingが渡されていなければ、mcpは付かず通常どおり走る（後方互換）', async () => {
+    const { runner, codexHost, store } = createHarness(TWO_TASK_YAML);
+    const result = await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    expect(codexHost.openInputs.every((i) => i.mcp === undefined)).toBe(true);
+    const t1 = codexHost.byTaskId('T1');
+    const t2 = codexHost.byTaskId('T2');
+    t1.finish('done', doneState('ok'));
+    t2.finish('done', doneState('ok'));
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+  });
+
+  it('runの終了時にMCPサーバを閉じる', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
+    await flush();
+
+    expect(state.handle?.closed).toBe(false);
+    const t1 = codexHost.byTaskId('T1');
+    const t2 = codexHost.byTaskId('T2');
+    t1.finish('done', doneState('ok'));
+    t2.finish('done', doneState('ok'));
+    await flush();
+
+    expect(state.handle?.closed).toBe(true);
+  });
+
+  it('list_tasksは同じrunのタスクid・状態・直近の応答の1行要約を返す', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
+    await flush();
+    void codexHost;
+
+    const listed = state.hub?.listTasks() ?? [];
+    expect(listed.map((t) => t.id).sort()).toEqual(['T1', 'T2']);
+    expect(listed.every((t) => t.state === 'running')).toBe(true);
   });
 });
 
