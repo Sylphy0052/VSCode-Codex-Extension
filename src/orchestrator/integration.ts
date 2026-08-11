@@ -1,9 +1,11 @@
 import * as path from 'node:path';
 
 import { isPathWithinRoot } from './escalation';
+import { findSymlinkedAncestor, identifierError, runIdError } from './fsGuards';
 import { sanitizeForLog } from './sanitize';
 import { TASK_ID_PATTERN } from './workflow';
 import {
+  isWorkflowBranchName,
   resolveHeadCommit,
   worktreesRootDir,
   WorktreeCreationQueue,
@@ -20,10 +22,10 @@ import {
  * （実パス解決・シンボリックリンク検知）も `worktree.ts` の `WorktreeFileSystemPort` を
  * そのまま使う。
  *
- * `runId` の字種（UUID）の検証は `worktree.ts` の `RUN_ID_PATTERN` と同じ正規表現だが、
- * `worktree.ts` はこれをexportしていないため複製する（`pseudoWorktree.ts` が同じ理由で
- * 複製しているのと同じ方針）。`taskId` の字種は `workflow.ts` の `TASK_ID_PATTERN` を
- * `worktree.ts` と同じく直接参照する（循環importの心配が無いため複製しない）。
+ * `runId` / `taskId` の字種の検証（`identifierError` / `runIdError`）とシンボリックリンク
+ * 検知（`findSymlinkedAncestor`）は、以前はこのファイル・`worktree.ts` ・`pseudoWorktree.ts`
+ * の3箇所へほぼ同一実装のまま複製されていたが、`fsGuards.ts`（依存を持たない末端モジュール）
+ * へ一本化した（Issue #146）。
  *
  * 状態遷移（`merging` / `blocked`）との接続、衝突解決セッションの起動は `runner.ts`
  * （#93）が担う。このファイルは、その接続で使う純粋寄りの補助（衝突解決プロンプトの
@@ -34,69 +36,26 @@ import {
 /** 統合先ディレクトリのタスクid相当の固定名。design.md §16.17「`_integration` はタスクidとして予約する」。 */
 export const INTEGRATION_DIR_NAME = '_integration';
 
-/** `runId` の字種（UUID）。`worktree.ts` の `RUN_ID_PATTERN` と同じ正規表現の複製（コメント参照）。 */
-const RUN_ID_PATTERN =
-  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-
 /**
  * `headCommit` はコミットのSHA（省略形を含む7〜40桁の16進数）に限る。
  * `worktree.ts` の `HEAD_COMMIT_PATTERN` と同じ理由・同じ正規表現の複製（フラグ注入対策）。
  */
 const HEAD_COMMIT_PATTERN = /^[0-9a-f]{7,40}$/;
 
-function runIdError(runId: string): string | undefined {
-  return RUN_ID_PATTERN.test(runId) ? undefined : `不正なrunId（UUID形式ではありません）: ${runId}`;
-}
-
-function identifierError(runId: string, taskId: string): string | undefined {
-  const runIdMessage = runIdError(runId);
-  if (runIdMessage !== undefined) {
-    return runIdMessage;
-  }
-  if (!TASK_ID_PATTERN.test(taskId)) {
-    return `不正なtaskId（許可されない文字を含みます）: ${taskId}`;
-  }
-  return undefined;
-}
-
 /**
- * `taskBranch` が `wf/<runId>/<...>` の形をしているかを確かめる。
+ * `taskBranch` が「この `runId` の」`wf/<runId>/<...>` の形をしているかを確かめる。
  *
  * マージ対象のブランチ名は `git merge --no-ff -m <message> <taskBranch>` の末尾の位置引数
  * として渡す。`--` の区切りが無いため、`-` から始まる文字列を渡されるとフラグとして解釈
- * されうる（`worktree.ts` の `HEAD_COMMIT_PATTERN` と同じ理由の防御）。`branchName`
- * （`worktree.ts`）が生成する形（`wf/<runId>/<taskId>` または再試行時の
- * `wf/<runId>/<taskId>-retry<n>`）だけを許す。
+ * されうる（`worktree.ts` の `HEAD_COMMIT_PATTERN` と同じ理由の防御）。形そのものの検証
+ * （`branchName()` が生成する `wf/<runId>/<taskId>` または再試行時の
+ * `wf/<runId>/<taskId>-retry<n>`）は `worktree.ts` の `isWorkflowBranchName` へ一本化した
+ * （Issue #146）。ここではそれに加えて、渡された `taskBranch` が「他のrunのブランチでは
+ * なく、まさにこの `runId` のものであること」まで確かめる（`isWorkflowBranchName` は
+ * runIdを問わないため、この一段厳しい確認は`integration.ts`固有の責務として残す）。
  */
 function isValidTaskBranch(taskBranch: string, runId: string): boolean {
-  const prefix = `wf/${runId}/`;
-  if (!taskBranch.startsWith(prefix)) {
-    return false;
-  }
-  const rest = taskBranch.slice(prefix.length);
-  return /^[A-Za-z0-9_][A-Za-z0-9_-]{0,60}$/.test(rest);
-}
-
-/**
- * `root` から `target` までの各中間ディレクトリにシンボリックリンクが含まれていないかを
- * 確かめる（一次防御）。`worktree.ts` の同名関数と同じロジックの複製（exportされていない
- * ため直接参照できない。`pseudoWorktree.ts` と同じ方針）。
- */
-async function findSymlinkedAncestor(
-  root: string,
-  target: string,
-  fs: WorktreeFileSystemPort,
-): Promise<string | undefined> {
-  const rel = path.relative(root, target);
-  const segments = rel.split(path.sep).filter((s) => s !== '' && s !== '..');
-  let cursor = root;
-  for (const segment of segments) {
-    cursor = path.join(cursor, segment);
-    if (await fs.isSymbolicLink(cursor)) {
-      return cursor;
-    }
-  }
-  return undefined;
+  return taskBranch.startsWith(`wf/${runId}/`) && isWorkflowBranchName(taskBranch);
 }
 
 // ---------------------------------------------------------------------------

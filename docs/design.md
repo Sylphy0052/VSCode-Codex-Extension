@@ -2385,6 +2385,8 @@ src/
     scheduler.ts    完了状態から次に開始する集合を決める（純粋）
     escalation.ts   承認要求を auto / ask に振り分ける（純粋）
     runState.ts     実行状態の保持と遷移（純粋）
+    fsGuards.ts     runId/taskIdの識別子検証とシンボリックリンク検知（依存を持たない末端。純粋）
+    serialQueue.ts  非同期タスクを1本の待ち行列で直列化する汎用クラス（依存を持たない末端。純粋）
     worktree.ts     worktreeの作成・撤去、git作業ツリーかの判定
     integration.ts  統合ブランチの作成・マージ・衝突の検出（gitはポート越し）
     forge.ts        ホストの判定と PR/MR の作成（gh / glab をポート越しに呼ぶ。*）

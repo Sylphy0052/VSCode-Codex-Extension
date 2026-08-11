@@ -10,7 +10,6 @@ import {
   type LoopStopReason,
 } from '../../src/loop/loopController';
 import type { Logger } from '../../src/log';
-import { MAX_WORKFLOW_FILE_BYTES } from '../../src/orchestrator/runner';
 import type { ExtensionSafetyBaseline } from '../../src/orchestrator/taskConfig';
 import type {
   ApprovalHandler,
@@ -44,6 +43,7 @@ import {
   MAX_PROMPT_LENGTH,
   MAX_RETRIES,
   MAX_TASK_COUNT,
+  MAX_WORKFLOW_FILE_BYTES,
   PROVIDERS,
   TASK_ID_PATTERN,
   TEMPLATE_FIELDS,
