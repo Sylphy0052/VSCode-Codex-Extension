@@ -6,6 +6,7 @@ import { ClaudeAgentProbe } from './claude/agentProbe';
 import { ClaudeAuthActions } from './claude/authActions';
 import { ClaudeAuthProbe } from './claude/authProbe';
 import { claudePaths, resolveClaudeHome } from './claude/cliLocator';
+import { ClaudeHooksProbe } from './claude/hooksProbe';
 import { ClaudeMcpProbe } from './claude/mcpProbe';
 import { ClaudeModelProbe } from './claude/modelProbe';
 import { ClaudeProvider } from './claude/provider';
@@ -30,6 +31,14 @@ import {
   nodeWorktreeFileSystem,
   WorktreeCreationQueue,
 } from './orchestrator/worktree';
+import { nodeCliCommandRunner } from './orchestrator/forge';
+import {
+  createCliIssueListPort,
+  generateRoadmap,
+  nodeRoadmapFileSystem,
+  type IssueListPort,
+  type RoadmapGenerationPort,
+} from './orchestrator/roadmap';
 import { WorkflowRunStore } from './orchestrator/runStore';
 import { WorkflowRunner, nodeWorkflowFilePort } from './orchestrator/runner';
 import { ProviderRegistry } from './provider/registry';
@@ -98,11 +107,13 @@ export function activate(context: vscode.ExtensionContext): void {
   /** Claude Code固有の機能（設定パネル・モデル一覧）が使う実行ファイル。 */
   const claudePath = (): string => resolveExecutable(claude, log) ?? 'claude';
 
-  // 単発の問い合わせ（fork・モデル一覧・エージェント一覧・MCP一覧・ログイン状態）に使う。会話用の接続とは別プロセス
+  // 単発の問い合わせ（fork・モデル一覧・エージェント一覧・MCP一覧・hooks一覧・ログイン状態）に
+  // 使う。会話用の接続とは別プロセス
   const appServer = new AppServerClient(codexPath, log);
   const claudeModels = new ClaudeModelProbe(claudePath, log);
   const claudeAgents = new ClaudeAgentProbe(claudePath, log);
   const claudeMcp = new ClaudeMcpProbe(claudePath, log);
+  const claudeHooks = new ClaudeHooksProbe(claudePath, log);
   const claudeAuth = new ClaudeAuthProbe(claudePath, log);
   // ログイン/ログアウトの実行はCLIサブコマンドへ委譲する（issue #29、accountActions.ts参照）
   const codexAccountActions = new CodexAccountActions(nodeAccountCommandRunner, codexPath);
@@ -120,6 +131,11 @@ export function activate(context: vscode.ExtensionContext): void {
     () => claudeMcp.read(),
     (name, enabled) => appServer.setMcpServerEnabled(name, enabled),
     (name, enabled) => claudeMcp.toggle(name, enabled),
+    // hooks/list はcwdを渡さないと単発起動時のセッション既定に委ねる形になるため、
+    // ワークスペースフォルダを明示する（issue #28、`hooksStatus.ts` のコメント参照）
+    () => appServer.listHooks(workspaceFolderPaths()),
+    () => claudeHooks.read(),
+    (key, currentHash) => appServer.setHookTrusted(key, currentHash),
     () => appServer.readAccount(),
     () => claudeAuth.read(),
     () => codexAccountActions.logout(),
@@ -204,6 +220,22 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     }
   });
+
+  // ロードマップ（design.md §16.19、#95）。既存Issueの取得は `git remote` + `gh`/`glab` を
+  // ポート越しに呼ぶだけなので、ここで実装を組み立てて渡す。
+  const roadmapIssuePort = createCliIssueListPort(nodeGitCommandRunner, nodeCliCommandRunner);
+  // 生成セッションの起動（`TaskSessionHost` を read-only 相当・承認全拒否で回し、
+  // `ChatState.turnResultText` を受け取る配線）は、`taskSession.ts` / `runner.ts` を
+  // 変更する別PR（#90）と衝突するため、このIssue（#95）の範囲外にしてある。
+  // 実装されるまでは「未実装」を返すポートを渡す（`roadmap.ts` の `RoadmapGenerationPort`
+  // のJSDoc参照）。
+  const roadmapGenerationPort: RoadmapGenerationPort = {
+    generate: () =>
+      Promise.resolve({
+        ok: false,
+        message: 'ロードマップ生成セッションの起動は未実装です（後続Issueで対応予定）',
+      }),
+  };
 
   const conversations = new ConversationViewManager(nodeFileSystem, store, log, (session, turnId) =>
     forkFromTurn(codex, appServer, chat, tree, log, session, turnId),
@@ -334,6 +366,9 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand('agent.workflows.stop', () => stopWorkflow(workflowRunner)),
     vscode.commands.registerCommand('agent.workflows.view', () => workflowView.show()),
+    vscode.commands.registerCommand('agent.workflows.roadmap', () =>
+      runRoadmap(roadmapIssuePort, roadmapGenerationPort, log),
+    ),
   );
 }
 
@@ -414,6 +449,91 @@ async function stopWorkflow(runner: WorkflowRunner): Promise<void> {
     return;
   }
   runner.stop(picked.runId);
+}
+
+/** ワークスペース直下の構成（ファイル・ディレクトリ名。隠しファイルは除く）。取得できなければ空配列。 */
+async function listWorkspaceSummary(folder: vscode.WorkspaceFolder): Promise<string[]> {
+  try {
+    const entries = await vscode.workspace.fs.readDirectory(folder.uri);
+    return entries
+      .filter(([name]) => !name.startsWith('.'))
+      .slice(0, 50)
+      .map(([name, type]) => (type === vscode.FileType.Directory ? `${name}/` : name));
+  } catch {
+    return [];
+  }
+}
+
+/** ワークスペース直下に指定した名前のファイルがあるか。 */
+async function fileExists(folder: vscode.WorkspaceFolder, name: string): Promise<boolean> {
+  try {
+    await vscode.workspace.fs.stat(vscode.Uri.joinPath(folder.uri, name));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * ゴールの文からロードマップを生成する（design.md §16.19、#95）。
+ *
+ * 生成セッションの実際の起動は `roadmapGenerationPort`（`activate` で組み立てる、現時点では
+ * 「未実装」を返すポート）に委ねている。実装されるまでこのコマンドはエラーメッセージを
+ * 出して終わる。
+ */
+async function runRoadmap(
+  issues: IssueListPort,
+  generation: RoadmapGenerationPort,
+  log: Logger,
+): Promise<void> {
+  const folder = currentWorkspaceFolder();
+  if (folder === undefined) {
+    void vscode.window.showErrorMessage('ロードマップを生成するにはフォルダを開いてください');
+    return;
+  }
+  const goal = await vscode.window.showInputBox({
+    prompt: 'ロードマップを生成するゴールを入力してください',
+    ignoreFocusOut: true,
+  });
+  if (goal === undefined || goal.trim() === '') {
+    return;
+  }
+
+  const workspaceRoot = folder.uri.fsPath;
+  const [workspaceSummary, hasAgentsFile, hasClaudeFile] = await Promise.all([
+    listWorkspaceSummary(folder),
+    fileExists(folder, 'AGENTS.md'),
+    fileExists(folder, 'CLAUDE.md'),
+  ]);
+
+  const result = await generateRoadmap(
+    { generation, issues, fs: nodeRoadmapFileSystem },
+    {
+      goal,
+      workspaceRoot,
+      roadmapDir: readWorkflowsConfig().roadmapDir,
+      workspaceSummary,
+      hasAgentsFile,
+      hasClaudeFile,
+    },
+  );
+
+  if (!result.ok) {
+    log.error(`ロードマップを生成できません: ${result.message}`);
+    void vscode.window.showErrorMessage(`ロードマップを生成できません: ${result.message}`);
+    return;
+  }
+
+  if (result.validation.errors.length > 0) {
+    const detail = result.validation.errors.map((e) => e.message).join('\n');
+    log.error(`生成されたロードマップに問題があります:\n${detail}`);
+    void vscode.window.showWarningMessage(
+      '生成されたロードマップに問題があります。内容を確認してください（詳しくはログ）',
+    );
+  }
+
+  const doc = await vscode.workspace.openTextDocument(result.path);
+  await vscode.window.showTextDocument(doc);
 }
 
 /**

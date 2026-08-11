@@ -292,9 +292,100 @@ export function readContextUsage(payload: unknown): ContextUsage | undefined {
   return buildContextUsage(usedTokens, num(body?.['maxTokens']));
 }
 
+/**
+ * ファイルを指定した発言の直前まで戻す要求。
+ *
+ * 実測（CLI 2.1.227、バイナリのstrings解析で判明）: パラメータ名は**スネークケース**の
+ * `user_message_id`（戻す起点にする発言のuuid）と `dry_run`。`messageId` 等キャメルケースの
+ * 名では通らない。会話の巻き戻し（`rewind` subtype）とは別物で、`rewind_files` は
+ * **ファイルだけ**を対象にする（`rewind` は `Unsupported control request subtype: rewind` で
+ * 拒否されることを実測済み。design.md「Claude Codeの巻き戻し」参照）。
+ *
+ * 既定では常に失敗する。CLIは非対話（`--print`）環境ではファイルのチェックポイントを
+ * 作らないため（実測: `QF()` ゲート関数がinteractive判定を見ている）。
+ * `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=1` を環境変数として渡した場合のみ有効になる
+ * （`streamSession.ts` の `start()` で設定）。
+ */
+export function buildRewindFilesRequest(
+  requestId: string,
+  userMessageId: string,
+  dryRun: boolean,
+): string {
+  return buildControlRequest(requestId, {
+    subtype: 'rewind_files',
+    user_message_id: userMessageId,
+    dry_run: dryRun,
+  });
+}
+
+/** `rewind_files` の応答を読んだ結果。戻せるかどうかを1つの形にまとめる。 */
+export interface RewindFilesResult {
+  ok: boolean;
+  /** 対象ファイルの一覧（絶対パス）。プレビュー（dry_run）でのみ埋まる。実適用の応答には無い。 */
+  filesChanged: string[];
+  /** プレビューでのみ入る増減行数。 */
+  insertions: number | undefined;
+  deletions: number | undefined;
+  /** 戻せない理由。チェックポイントが無い・CLIが対応していない等。 */
+  error: string | undefined;
+}
+
+/**
+ * `rewind_files` の応答を読む。
+ *
+ * 実測した形は3通り:
+ * 1. 戻せる場合（プレビュー）: `{canRewind:true, filesChanged:[...], insertions, deletions}`
+ * 2. 戻せる場合（実適用）: `{canRewind:true, skippedLinks:0}`（filesChangedを含まない）
+ * 3. チェックポイントが無い場合: dry_runなら成功応答に包まれた `canRewind:false`、
+ *    dry_run:falseならトップレベルの `subtype:"error"` で返る（実測、CLI 2.1.227）。
+ * どの経路でも「戻せたか」を1つの形にまとめ、呼び出し側が分岐を持たなくて済むようにする。
+ */
+export function readRewindFilesResult(response: ControlResponse): RewindFilesResult {
+  if (!response.ok) {
+    return {
+      ok: false,
+      filesChanged: [],
+      insertions: undefined,
+      deletions: undefined,
+      error: response.error ?? '不明なエラー',
+    };
+  }
+  const payload = response.payload;
+  if (payload?.['canRewind'] !== true) {
+    return {
+      ok: false,
+      filesChanged: [],
+      insertions: undefined,
+      deletions: undefined,
+      error: strOrUndefined(payload?.['error']) ?? '不明なエラー',
+    };
+  }
+  const raw = payload['filesChanged'];
+  const filesChanged = Array.isArray(raw) ? raw.filter((p): p is string => typeof p === 'string') : [];
+  return {
+    ok: true,
+    filesChanged,
+    insertions: num(payload['insertions']),
+    deletions: num(payload['deletions']),
+    error: undefined,
+  };
+}
+
 /** MCPサーバーの一覧・状態を問い合わせる要求（issue #27、design.md TP-50）。 */
 export function buildMcpStatusRequest(requestId: string): string {
   return buildControlRequest(requestId, { subtype: 'mcp_status' });
+}
+
+/**
+ * 有効な設定一式を問い合わせる要求（issue #28、design.md TP-52）。
+ *
+ * hooksの一覧に相当する専用の要求はプロトコルに無い（`hooks_list` 等6候補を実測で
+ * 総当たりし、いずれも `Unsupported control request subtype` だった）。`get_settings` の
+ * 応答の `effective.hooks` がその代わりになる（実測。CLI 2.1.227）。詳細は
+ * `src/claude/hooksSettings.ts` を参照。
+ */
+export function buildGetSettingsRequest(requestId: string): string {
+  return buildControlRequest(requestId, { subtype: 'get_settings' });
 }
 
 /**

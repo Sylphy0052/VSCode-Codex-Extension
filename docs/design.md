@@ -33,7 +33,7 @@ CLIコーディングエージェント（Codex / Claude Code）のセッショ�
 - **Webviewによる独自チャットUIは「含まない」から「含む」へ移った**。当初はCLIのTUIをそのままエディタタブに出す方式で、チャットUIは対象外だった。TUIタブ方式を廃止した経緯は §2 にある
 - **タブ復元の作り方が変わった**。当初はターミナルの位置と並び順を `workspaceState` へ持って開き直す設計（§5.5）で、現在はWebviewの復元機構に載せている（§9.5・§14.6）
 
-サインイン/サインアウトのUIは依然として含まない。MCP・プラグイン・hookの管理も同様で、これらはCLI側の管理コマンドに任せている。
+サインイン/サインアウトのUIは依然として含まない。プラグインの管理も同様で、CLI側の管理コマンドに任せている。MCPサーバー（§14.14）とhooks（§14.15）は一覧表示を拡張UIに含む。信頼やトグルなど操作できる範囲はCLIごとに異なる。
 
 ## 2. 全体アーキテクチャ
 
@@ -370,6 +370,7 @@ Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡
 
 **MCPサーバーの一覧**: 両タブの下部に、設定されているMCPサーバーの一覧と有効/無効の切替を出す（§14.14）。取得・切替の経路はCodexとClaude Codeで別物（プロトコルの非対称は§14.14を参照）。
 
+**hooksの一覧**: MCPサーバーの一覧の下に、登録されているhookの一覧を出す（issue #28・§14.15）。1件あたりイベント名・実行するコマンド・出どころ（user/project/plugin等）を表示する。Codexは信頼状態も持ち、未信頼・変更ありのhookには「信頼する」操作を出す。Claude Codeには信頼状態を返す経路が無いため、一覧のみで操作は出さない（黙って何もしないボタンは置かない。「無い」旨を注記する）。
 **アカウント**: MCPサーバーの一覧より上に、ログイン状態とlogin/logoutの操作を出す（§14.15）。状態の取得はCodexが `account/read`（app-server）、Claude Codeが `claude auth status --json`。ログアウトはどちらもCLIのトップレベルサブコマンドを直接実行し、確認ダイアログを必ず挟む。ブラウザでのOAuthログインは拡張機能内で完結できないため、統合ターミナルへコマンドを入力するところまでに留める（自動実行はしない）。
 
 ### 使用量の表示
@@ -427,13 +428,14 @@ Claude Code側（`claude.*`）と作業記録（`agent.activityLog.*`）の設�
 
 ## 8. セキュリティ考慮
 
-| 項目                                     | 対処                                                                                                |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| ワークスペース設定による任意コマンド実行 | §7のスコープ設計。`executablePath` / `additionalArgs` / `codexHome` を `machine` に固定             |
-| サンドボックス無効化の誘導               | `sandbox` / `approvalMode` も `machine`。危険な組み合わせは初回に確認ダイアログ                     |
-| 引数インジェクション                     | `shellPath` / `shellArgs` 方式によりシェル解釈を経由しない（§5.2）                                  |
-| セッション本文の漏洩                     | 拡張機能はロールアウトファイルの**1行目のみ**を読み、会話本文は読まない・保存しない・ログに出さない |
-| 破壊操作                                 | `delete` は確認ダイアログ必須。`archive` は取り消し可能なため確認不要                               |
+| 項目                                     | 対処                                                                                                                                                                                                   |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| ワークスペース設定による任意コマンド実行 | §7のスコープ設計。`executablePath` / `additionalArgs` / `codexHome` を `machine` に固定                                                                                                                |
+| サンドボックス無効化の誘導               | `sandbox` / `approvalMode` も `machine`。危険な組み合わせは初回に確認ダイアログ                                                                                                                        |
+| 引数インジェクション                     | `shellPath` / `shellArgs` 方式によりシェル解釈を経由しない（§5.2）                                                                                                                                     |
+| セッション本文の漏洩                     | 拡張機能はロールアウトファイルの**1行目のみ**を読み、会話本文は読まない・保存しない・ログに出さない                                                                                                    |
+| 破壊操作                                 | `delete` は確認ダイアログ必須。`archive` は取り消し可能なため確認不要                                                                                                                                  |
+| hookによる任意コマンド実行（issue #28）  | 出どころ（user/project/plugin等）と実行コマンドを隠さず表示。既定は信頼せず、Codexは明示的な信頼操作が必要（§14.15）。hookのコマンド文字列はDOM APIの `textContent` で埋め込み、HTMLとして解釈させない |
 
 ## 9. リスクと検証項目
 
@@ -699,12 +701,29 @@ Codexには専用のメソッド `review/start` がある（`codex app-server ge
 - **effortの反映は観測できない**: Claude Codeにはeffort専用の制御要求が無く、唯一の経路（`apply_flag_settings`）が結果を返さない（§14.7）。
 - **Codex側の外部変更**: CLIから直接archive/deleteした場合、TreeViewはファイル監視で追従するが、開いているタブは残る。
 
+### 生成済みの型定義は取り込まない（issue #46）
+
+`codex app-server` は自身のプロトコル定義を出力できる。
+
+```bash
+codex app-server generate-json-schema --out <DIR>   # JSON Schema
+codex app-server generate-ts --out <DIR>            # TypeScript バインディング
+```
+
+**この出力はリポジトリへ取り込まない。調査の一次資料としてのみ使う。** 判断の根拠:
+
+- 生成物が大きい。`generate-ts` は643ファイル・2.7MB（`ts-rs` 生成の型のみでランタイムコードは無い）。リポジトリに置くとCLIの版と拡張機能が結び付き、CLIを上げるたびに再生成と差分レビューが要る
+- **「未知のものは素通しする」という設計と噛み合わない**。いまのパーサは `unknown` から `rec()` / `str()` で1フィールドずつ掘る形で、CLIが形を変えても壊れずに劣化する。生成型を入れると「型があるから安全」と `as` で押し通す書き方に流れやすく、実行時の防御が薄くなる
+- 型で得たい情報（メソッド名・パラメータの綴り・union の全種類）は、**実装時にスキーマを読めば足りる**。実際にこれまでの実装は全てスキーマを読んで形を確定させてきた（`model/list`・`review/start` の `ReviewTarget`・`SandboxPolicy`・`ThreadItem` の `imageView` / `imageGeneration`・`ThreadRollbackParams` など）
+
+代わりに、**プロトコルの形を書くときは根拠を必ず併記する**という運用を採る。「実測で確認した」のか「スキーマが根拠」なのかを区別して書き、実機で確かめていないものは [manual-test.md](manual-test.md) の未実施ケースとして残す。
+
 ## 11. 技術スタック
 
 - TypeScript / Node 20 / esbuild（バンドル）
 - eslint + prettier、`tsc --noEmit` で型チェック
 - テスト
-  - unit（vitest）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で52ファイル935件
+  - unit（vitest）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で80ファイル1349件
   - **VSCodeに依存する層はユニットテストで扱わない**。`vscode` モジュールを触るファイル（`view/**` など）はテストから import できないため、判断が要るロジックは純粋関数へ切り出してそちらを試す（例: `view/panelState.ts`）
   - 実VSCodeでしか確認できない範囲は自動化せず、[manual-test.md](manual-test.md) のチェックリストと実施記録で担保する
 - `scripts/check.sh` に lint / typecheck / test を集約し、commit前に全緑を必須とする
@@ -813,16 +832,17 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 
 ### 14.6 プロバイダごとにできること
 
-| 操作                           | Codex                                                | Claude Code                                                     |
-| ------------------------------ | ---------------------------------------------------- | --------------------------------------------------------------- |
-| 新規 / resume / タブ復元       | ○                                                    | ○                                                               |
-| チャット画面（承認・中断込み） | ○                                                    | ○                                                               |
-| fork（セッション全体）         | ○                                                    | ○（idは未確定のまま）                                           |
-| 会話の途中のターンから分岐     | ○                                                    | ×（CLIに手段が無い）                                            |
-| archive / unarchive / delete   | ○                                                    | ×（CLIに手段が無い。ファイルを直接消すことはしない）            |
-| セッション名の変更             | ○                                                    | ×（要約名の概念が無い）                                         |
-| 問い合わせカード（§9.9）       | ○                                                    | ×（同じ要求が届かない）                                         |
-| コードレビューの起動（§9.11）  | ○（`review/start`。QuickPickで対象とdeliveryを選ぶ） | ○（`/code-review` を発言として送るだけ。CLIが対話で対象を聞く） |
+| 操作                                                                              | Codex                                                               | Claude Code                                                     |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------- |
+| 新規 / resume / タブ復元                                                          | ○                                                                   | ○                                                               |
+| チャット画面（承認・中断込み）                                                    | ○                                                                   | ○                                                               |
+| fork（セッション全体）                                                            | ○                                                                   | ○（idは未確定のまま）                                           |
+| 会話の途中のターンから分岐                                                        | ○                                                                   | ×（CLIに手段が無い）                                            |
+| 巻き戻し（[#21](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/21)） | ×（`thread/rollback` はdeprecatedかつファイルを戻さない。採らない） | ○（`rewind_files`。**ファイルだけ**戻す。会話には触れない）     |
+| archive / unarchive / delete                                                      | ○                                                                   | ×（CLIに手段が無い。ファイルを直接消すことはしない）            |
+| セッション名の変更                                                                | ○                                                                   | ×（要約名の概念が無い）                                         |
+| 問い合わせカード（§9.9）                                                          | ○                                                                   | ×（同じ要求が届かない）                                         |
+| コードレビューの起動（§9.11）                                                     | ○（`review/start`。QuickPickで対象とdeliveryを選ぶ）                | ○（`/code-review` を発言として送るだけ。CLIが対話で対象を聞く） |
 
 対応しない操作はTreeViewの `contextValue`（`codexSession.<provider>`）でメニューから隠す。
 
@@ -840,6 +860,52 @@ Codexの `forkFromTurn`（`thread/fork` に `lastTurnId` を渡す。§9.5「会
 バイナリ内の実装（`branch` 選択時に呼ばれる関数）を読むと、対象ターンまでのメッセージを新しいsessionIdへ複製しながら `content-replacement` / `relocated`（cwdの引き継ぎ）/ `sessionHistorySuppressed` などのレコードを合わせて書き出す処理になっており、単純なtranscriptの行コピーでは再現できない。加えてこれは公開ドキュメントの無いminifiedコードからの逆解析であり、CLIの更新で予告なく変わりうる。**この処理自体が非対話環境では実行できないよう作られている**ことは、同等の操作を拡張機能側で（transcriptを読んで新しいセッションを組み立てる形で）代替するのが安全でないことの傍証でもある。§8「会話本文を読まない・保存しない」とは別に、CLIの内部ストレージ形式に依存した複製は元のセッションを壊すリスクを避けられないため、この代替は採らない。
 
 以上から、**Claude Codeでは会話の途中のターンから分岐する手段が無いと結論する**。Codex側の `forkFromTurn` 実装（`src/view/chatView.ts` の `forkFrom` / `src/view/conversationView.ts`）と同じ導線は出さない。将来のCLI更新で `--print` 経路にも `branch` / `fork` が解放されれば再調査する。
+
+#### 巻き戻し（Codex Esc Esc / Claude `/rewind` 相当、[#21](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/21)）
+
+**Codexは実装しない。Claude Codeは「ファイルだけを戻す」形で実装した。** 両者は戻せる対象が正反対（Codexの `thread/rollback` は会話だけ・ファイルは戻さない、Claudeの `rewind_files` はファイルだけ・会話は戻さない）なので、画面の文言では**取り違えようのない書き方**にする。
+
+##### Codex: `thread/rollback` は使わない（結論は変えない。根拠を実測で更新）
+
+`codex app-server generate-json-schema` で得た `ThreadRollbackParams` の定義:
+
+```
+"DEPRECATED: `thread/rollback` will be removed soon."
+numTurns: "The number of turns to drop from the end of the thread. Must be >= 1.
+  This only modifies the thread's history and does not revert local file changes
+  that have been made by the agent. Clients are responsible for reverting these changes."
+```
+
+- **末尾からNターン落とすだけ**（任意の地点を指定できず、対象を選ぶ操作として作れない）
+- **ファイル変更は戻らない**（`ThreadRollbackResponse` が返すのは更新後の `Thread`（会話）のみで、diffやfilesChangedに相当するフィールドを持たない）。戻すのはクライアントの責任と明記されている
+- **近く削除される**（DEPRECATED）
+
+→ このAPIに依存した実装はしない。Codexの巻き戻しに相当する体験は「会話途中からの分岐」（`forkFromTurn`、上の節）で代替する。分岐は元のスレッドを残したまま新しいスレッドを作る操作で、巻き戻し（元のスレッドを書き換える）とは別物だが、「途中からやり直す」というユーザーの目的には応えられる。
+
+##### Claude: `rewind_files` は実装した。会話には触れない
+
+Issue #21着手時点でのIssue #2（Z-11）の記録は「`rewind_files` 実在（要チェックポイント）」だった。以下、パラメータの形とチェックポイントの作られ方を実測で埋めた（CLI 2.1.227）。
+
+1. **control_requestのsubtypeを`rewind` `rewind_files` `restore_checkpoint` `list_checkpoints` `file_snapshot` `create_checkpoint` `checkpoint` `revert` `revert_files` `undo` の10候補で総当たり**。`rewind_files` だけが `Unsupported control request subtype` にならず、`"No file checkpoint found for this message."` という別のエラーで応答した（＝subtypeとしては存在し、パラメータかチェックポイントの有無で失敗している）。**`rewind`（会話を戻す方）は `Unsupported control request subtype: rewind` で拒否される**。会話を戻す経路はどのパラメータでも存在しない
+2. **パラメータ名はスネークケースの `user_message_id` / `dry_run`**。CLIバイナリの `strings` 解析で `rewindFiles(e,t){...subtype:"rewind_files",user_message_id:e,dry_run:t?.dryRun...}` という該当コードを発見し、キャメルケース（`messageId` 等）で試していたのが失敗の原因だったと判明した
+3. **チェックポイントは既定で作られない**。同じくバイナリ解析で見つけたゲート関数:
+   ```
+   function QF(){ if(Ns()) return false; if(Rn()) return U3_(); return Zu("fileCheckpointingEnabled",true).value && !CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING }
+   function Rn(){ return !Jm.isInteractive() }
+   function U3_(){ return CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING && !CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING }
+   ```
+   非対話（`Jm.isInteractive()` が偽、＝拡張機能が使う `--print` 経路はこれに該当）では、環境変数 `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` を立てない限りチェックポイントが作られず、`rewind_files` は常に失敗する。変数名が「SDK」を指しており、非対話のクライアント（この拡張機能を含む）向けの明示的な入口と判断した
+4. **実機で両方向を確認した**:
+   - インタラクティブなTUI（`claude`、pty経由）で実際にファイルを編集させたあと Esc Esc → Rewind → 「Restore code and conversation」を選ぶと、確認画面に「The conversation will be forked. / The code will be restored -1 in a.txt. / ⚠ Rewinding does not affect files edited manually or via bash.」と出て、実行後に対象ファイルが実際に元へ戻ることを確認した（スクラッチのgitリポジトリで実施）
+   - 拡張機能と同じ `--print --input-format stream-json` 経路で、`CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=1` を渡さずに `rewind_files` を呼ぶと常に `"No file checkpoint found for this message."`、**渡すと** `dry_run:true` で `{"canRewind":true,"filesChanged":["...a.txt"],"insertions":0,"deletions":1}`、`dry_run:false` で実際にファイルが編集前の内容へ戻ることを確認した
+5. **`user_message_id` には会話に実在する人の発言のuuidを渡す**。拡張機能は `--replay-user-messages` で発言を送り返してもらっており、その `user` イベントの `uuid` を `ChatItem.id`（`kind: 'userMessage'`）としてそのまま保持している（`src/claude/streamJson.ts` の `applyUser`）ため、新たに紐付けを持つ必要は無い
+6. **会話には触れない**。1で確認したとおり `rewind` subtype 自体が存在せず、`rewind_files` の応答にも会話（items/turn）に関するフィールドは無い。TUIの確認画面が「The conversation will be forked」と言っているのは、TUI自身がRewind操作の一部として**別途** `fork` 相当の処理を行っているためで、`rewind_files` 単体の効果ではない
+
+**画面の文言**: 「ファイルを戻します。会話の履歴は変わりません。元には戻せません。」で統一し、対象ファイルを列挙してから確認する（`confirmRewindFiles`、`src/view/chatView.ts`）。「会話も戻る」と誤解させる書き方はしない。
+
+**実装箇所**: `src/claude/control.ts`（`buildRewindFilesRequest` / `readRewindFilesResult`）、`src/claude/streamSession.ts`（`previewRewindFiles` / `applyRewindFiles`。`start()` で環境変数を設定）、`src/view/claudeChatView.ts`（`rewindFiles`。dry_run→確認→適用の順で、対象が無ければ確認ダイアログを出さず、成功・失敗のどちらも画面に返す）、`src/view/chatScript.ts`（発言ごとの「ここまで戻す」ボタン。Claude Code画面のみ、`showRewind` で出し分け）。
+
+**リスクと劣化方針**: `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` は公式ドキュメントに無い環境変数で、CLIの更新で無くなる・形が変わる可能性がある。その場合は `rewind_files` の応答が失敗として返るだけで、`readRewindFilesResult` が安全側（`ok: false`）に倒すため、会話や他の操作には影響しない。
 
 ### 14.7 チャット画面の設定行
 
@@ -1082,6 +1148,46 @@ Phase 0（issue #1 Z-07 / issue #2 Z-10）で「両方とも一覧・有効無�
 - `src/claude/mcpProbe.ts`: `ClaudeMcpProbe`。`ClaudeModelProbe` と同じ理由（設定パネルは会話を開いていなくても使える必要がある）で単発プロセスとして問い合わせる
 - `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `mcpServers: McpServersSnapshot` を追加。`toggleMcpServer(cli, name, enabled)` を新設
 - `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画とトグル操作。一覧が取れない場合はその旨を出し、0件（未設定）とは表示を分ける
+
+### 14.15 hooksの一覧と信頼の管理
+
+TUIの `/hooks` に相当する表示（Codex）。issue #28・design.mdのTP-52対応。hooksは任意のコマンドを実行する仕組みで、特にプロジェクト側（リポジトリ内）で定義されたhookはcloneしただけで任意コマンドが動く経路になりうる（§8のセキュリティ考慮）。中身を隠さず全部見せ、既定は信頼しない方針にする。
+
+Phase 0（issue #1 Z-07 / issue #2 Z-10）の時点では「両方とも実装できる」までしか確定していなかった。本issueで実測とスキーマの両面から経路を確定させたところ、**CodexとClaude Codeで扱える範囲が大きく非対称**であることが分かった。TP-50（MCPサーバー）と違い、Claude Code側は一覧だけで信頼状態そのものを返す経路が無い。
+
+#### Codex: `hooks/list` + `config/batchWrite`（推定）
+
+実測（codex-cli 0.147.0）と `codex app-server generate-json-schema --out` のスキーマが根拠:
+
+- `hooks/list`（`HooksListParams { cwds? }` → `HooksListResponse { data: [{cwd, hooks: HookMetadata[], warnings: string[], errors: HookErrorInfo[]}] }`）はスレッドを開始していなくても呼べる（実測: `{data:[{cwd,hooks:[],warnings:[],errors:[]}]}` が返った。この環境にはhookが1件も設定されていないため、`hooks` 配列の中身はスキーマのみが根拠）
+- `HookMetadata` は `key` / `eventName` / `matcher` / `handlerType`（`command`|`prompt`|`agent`）/ `command` / `source`（`system`|`user`|`project`|`mdm`|`sessionFlags`|`plugin`|`cloudRequirements`|`cloudManagedConfig`|`legacyManagedConfigFile`|`legacyManagedConfigMdm`|`unknown`）/ `sourcePath` / `pluginId` / `enabled` / `trustStatus`（`managed`|`untrusted`|`trusted`|`modified`）/ `currentHash` を持つ。**`sourcePath` がプロジェクト内で定義されたhookかどうかを一目で判断する材料になる**
+- **信頼を求めるプロトコル上の要求は存在しない**。`ServerRequest`（10種）・`ServerNotification`（全種）をスキーマで確認したが、hook信頼専用のものは無い。TUIの「Hooks need review」画面は、`hooks/list` の `trustStatus` を見てTUI自身が組み立てているとみられる。そのため拡張機能も同じ発想を取り、設定パネルのhooks一覧に信頼状態を出し、そこから信頼操作をする形にした
+- **未信頼のhookがブロックされたことは `hook/completed`（`status: 'blocked'`。`HookRunStatus` の1値）通知で分かる**。これが唯一の実観測可能な合図なので、チャット画面に「hookがブロックされました」という注記を出す（`src/appserver/chatState.ts` の `hook/completed` ハンドラ）。「信頼を求める要求が画面に出る」という受入基準は、プロトコルにその要求自体が無い以上、この形（実行がブロックされたら気づける）で満たす
+- 信頼の書き込み(`config/batchWrite`)は**実行ファイル（`codex`）の文字列調査(strings)のみが根拠**で、実際に書き込んで確認してはいない（この環境の `~/.codex/config.toml` を書き換えない方針のため）。バイナリには `hooks.state."` `".trusted_hash` `failed to write hook trust:` という文字列が連続して存在し、`hooks.state."<key>".trusted_hash` というkeyPathへ `currentHash` を `upsert` する形と推定した（`src/codex/hooksStatus.ts` の `buildHookTrustEdit` を参照）。`filePath` に一時ファイルを指定して書き込みを試す安全な検証も行ったが、`config/batchWrite` は `filePath` を無視して常にユーザー設定へ書こうとし `configLayerReadonly` で拒否された（＝ユーザーのconfig.toml以外へは書けない仕様と分かったのみで、keyPathの正しさそのものは未検証）
+- **信頼を取り消す経路は見つかっていない**。`MergeStrategy` が `replace` / `upsert` のみで削除に相当する操作が無いため、「信頼する」ボタンだけを置く
+
+#### Claude Code: `get_settings`（`effective.hooks`）
+
+実測（CLI 2.1.227）:
+
+- hooksの一覧に相当する専用の要求は無い。`hooks_list` / `list_hooks` / `get_hooks` / `hooks_status` / `hook_list` / `settings_list` の6候補を実測で総当たりしたが、いずれも `Unsupported control request subtype` で拒否された
+- **`get_settings` だけが実在する**。応答は `{ effective: {...}, sources: [{source, settings}], applied: {...} }` で、`effective.hooks` に実際に使われるhookの一覧（イベント名をキーにしたグループの配列）が入っている
+- `sources` は設定の出どころごとの生設定。実測で確認できたのは `userSettings`（`~/.claude/settings.json`）と `projectSettings`（プロジェクトの `.claude/settings.json`）の2つ。`effective.hooks[eventName]` は各sourceの同名配列を単純に連結したものだった（実測: user側2グループ + project側1グループ→effective側3グループ）
+- **信頼状態を返すフィールドは無い**。`.claude/settings.json` にプロジェクト側のhookを1件だけ置いて `claude --print` を起動したところ、承認を求める `control_request` は一切来ず、そのままhookが実行された（`hook_started` → `hook_response` という `system` タイプの通知のみ）。Claude Codeには「hookを信頼するまで実行を止める」仕組みそのものがプロトコル層に無いとみられる
+- **plugin由来のhookは `sources` に出てこない**（実測: `genshijin` プラグインが実行したSessionStartのhookが `effective.hooks` にも `sources` にも現れなかった）。そのため、どのsourceにも一致しないグループは `origin: 'unknown'` として扱う。**この一覧はplugin由来のhookを見落としうる**ことを画面の注記に明記する
+- `hook_callback` のような、hookに関する `control_request` がこちらへ届くこともなかった（Phase 0の追試項目への回答。少なくとも `--print` の単発起動では観測されない）
+
+#### 実装
+
+- `src/provider/hooks.ts`: `HookView`（`key` / `eventName` / `matcher` / `handlerType` / `command` / `origin` / `originDetail` / `pluginId` / `enabled` / `trust` / `trustHash`）と `HooksSnapshot`（`{ok:true, hooks, warnings}` か `{ok:false, reason}`）を共有の型として持つ。`isValidHookKey` で信頼の書き込み先（keyPath）へ埋め込む前の防御をする
+- `src/codex/hooksStatus.ts`: `hooks/list` の応答を `HookView[]` へ正規化する純粋関数（`parseHooksList`）と、信頼の書き込み1件を組み立てる `buildHookTrustEdit`
+- `src/codex/appServerClient.ts`: `listHooks(cwds)` / `setHookTrusted(key, currentHash)` を追加
+- `src/claude/control.ts`: `buildGetSettingsRequest`
+- `src/claude/hooksSettings.ts`: `get_settings` の応答を `HookView[]` へ正規化する純粋関数（`readHooksFromSettings`）。sourcesとの深い等価比較で出どころを推定する
+- `src/claude/hooksProbe.ts`: `ClaudeHooksProbe`。`ClaudeMcpProbe` と同じ理由で単発プロセスとして問い合わせる。信頼を書き込む経路が無いため、読み取り専用
+- `src/appserver/chatState.ts`: `hook/completed`（`status: 'blocked'`）を会話への注記に変換する
+- `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `hooks: HooksSnapshot` を追加。`trustCodexHook(key, currentHash)` を新設（Claude Code側には対応する書き込みメソッドを持たない）
+- `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画と信頼操作（Codexのみ）。hookのコマンド文字列は必ず `textContent` でDOMへ入れ、HTMLとして解釈させない
 
 ### 14.15 ログイン状態の表示とlogin / logout
 

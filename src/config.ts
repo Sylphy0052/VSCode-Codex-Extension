@@ -2,6 +2,14 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { ClaudeConfig } from './claude/types';
 import type { CodexConfig } from './codex/types';
+import {
+  normalizeFinalMergeConfig,
+  normalizeForgeHostConfig,
+  normalizePullRequestLayerConfig,
+  type FinalMergeConfig,
+  type ForgeHostConfig,
+  type PullRequestLayerConfig,
+} from './orchestrator/forge';
 import type { HistoryScope } from './session/sessionStore';
 
 export interface ExtensionConfig {
@@ -102,9 +110,33 @@ export interface WorkflowsConfig {
    * 関わらず全ての承認を人へ回す（design.md §16.16）。`clampAutoApprove` の基準値。
    */
   allowAutoApprove: boolean;
+  /**
+   * ロードマップ（design.md §16.19）の出力先ディレクトリ。ワークスペースフォルダからの
+   * 相対パス（既定 `docs/roadmap`）。`agent.workflows.dir` と同じく `machine-overridable`
+   * （§16.16「成果の統合まわりの設定」）。出力先のパス自体であって実行するコマンドの選択には
+   * 関わらないため、`agent.workflows.forge` / `finalMerge` ほど強い制限（`machine`固定）は要らない。
+   */
+  roadmapDir: string;
+  /**
+   * ホスト連携（design.md §16.18）で使うCLIの選択。`machine`スコープ（§16.16「成果の統合
+   * まわりの設定」）。実行するコマンド（`gh` / `glab`）の選択にあたるため、`.vscode/settings.json`
+   * からは変えられない。
+   */
+  forge: ForgeHostConfig;
+  /**
+   * 作るPR/MRの層（design.md §16.18）。`machine-overridable`。権限には関わらないため
+   * `forge` / `finalMerge` ほど強い制限は要らない。
+   */
+  pullRequest: PullRequestLayerConfig;
+  /**
+   * 統合→mainのPR/MRを無人でマージするか（design.md §16.18）。`machine`スコープ。mainを
+   * 無人で書き換えるかどうかを決めるため、`.vscode/settings.json`からは変えられない。
+   */
+  finalMerge: FinalMergeConfig;
 }
 
 const DEFAULT_WORKFLOWS_DIR = '.agents/workflows';
+const DEFAULT_ROADMAP_DIR = 'docs/roadmap';
 
 /**
  * `agent.workflows.dir` の値として安全か。絶対パス、または `..` セグメントを含む値は拒否する。
@@ -128,9 +160,14 @@ function isSafeRelativeDir(value: string): boolean {
 export function readWorkflowsConfig(): WorkflowsConfig {
   const c = vscode.workspace.getConfiguration('agent');
   const rawDir = str(c, 'workflows.dir', DEFAULT_WORKFLOWS_DIR);
+  const rawRoadmapDir = str(c, 'workflows.roadmapDir', DEFAULT_ROADMAP_DIR);
   return {
     dir: isSafeRelativeDir(rawDir) ? rawDir : DEFAULT_WORKFLOWS_DIR,
     allowAutoApprove: c.get<boolean>('workflows.allowAutoApprove') ?? false,
+    roadmapDir: isSafeRelativeDir(rawRoadmapDir) ? rawRoadmapDir : DEFAULT_ROADMAP_DIR,
+    forge: normalizeForgeHostConfig(str(c, 'workflows.forge', 'auto')),
+    pullRequest: normalizePullRequestLayerConfig(str(c, 'workflows.pullRequest', 'per-task')),
+    finalMerge: normalizeFinalMergeConfig(str(c, 'workflows.finalMerge', 'auto')),
   };
 }
 
