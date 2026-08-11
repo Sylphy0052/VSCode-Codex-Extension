@@ -21,6 +21,7 @@ export function chatScript(
   agentLabel: string,
   review: ReviewButtonConfig,
   showRewind = false,
+  approvalCycle: readonly string[] = [],
 ): string {
   return `
   const vscode = acquireVsCodeApi();
@@ -35,6 +36,10 @@ export function chatScript(
   let menuMode = '';
   /** 最後に描いた項目。画像が遅れて届いたときに描き直すため保つ。 */
   let lastItems = undefined;
+  /** 承認方法をShift+Tabで回すときの並び（issue #13。制限が強い側から緩い側へ）。 */
+  const APPROVAL_CYCLE = ${JSON.stringify(approvalCycle)};
+  /** いま効いている承認方法。循環の起点にする。 */
+  let currentApproval = '';
 
   const KIND_LABEL = {
     userMessage: 'あなた',
@@ -681,6 +686,7 @@ export function chatScript(
     const approvalDefault = el('approvalMode').querySelector('option[value=""]');
     if (approvalDefault) approvalDefault.textContent = defaultLabel(d.approvalMode);
     el('approvalMode').value = s.approvalMode;
+    currentApproval = s.approvalMode || '';
 
     // サンドボックスはCodex画面にしか無い（Claude Codeは承認方法に集約されている）
     const sandbox = el('sandbox');
@@ -898,6 +904,9 @@ export function chatScript(
     status.replaceChildren();
 
     const bits = [];
+    // 承認方法は常に見えるようにする（Shift+Tabで回すため。issue #13）
+    const approval = state.settings && state.settings.approvalMode;
+    bits.push('承認 ' + (approval ? approval : '既定'));
     if (state.planMode) bits.push('計画モード（ファイルは変更されません）');
     if (state.reviewing) bits.push('レビュー中は割り込めません');
     if (state.busy) bits.push('応答中…');
@@ -1324,6 +1333,17 @@ export function chatScript(
         closeMenu();
         return;
       }
+    }
+
+    // Shift+Tab で承認方法を回す（TUIと同じ操作。入力欄にいるときだけ効かせる）
+    if (e.key === 'Tab' && e.shiftKey && APPROVAL_CYCLE.length > 0) {
+      e.preventDefault();
+      const index = APPROVAL_CYCLE.indexOf(currentApproval);
+      const next = index === -1 ? APPROVAL_CYCLE[0] : APPROVAL_CYCLE[(index + 1) % APPROVAL_CYCLE.length];
+      currentApproval = next;
+      el('approvalMode').value = next;
+      vscode.postMessage({ type: 'config', key: 'approvalMode', value: next });
+      return;
     }
 
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
