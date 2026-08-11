@@ -18,6 +18,8 @@ export function chatScript(agentLabel: string): string {
   let activeIndex = 0;
   // 出している候補の種類。'command' はスラッシュコマンド、'file' は @ のファイル参照
   let menuMode = '';
+  /** 最後に描いた項目。画像が遅れて届いたときに描き直すため保つ。 */
+  let lastItems = undefined;
 
   const KIND_LABEL = {
     userMessage: 'あなた',
@@ -30,6 +32,8 @@ export function chatScript(agentLabel: string): string {
     plan: '計画',
     contextCompaction: '会話を圧縮しました',
     settingsChanged: '設定',
+    imageView: '画像',
+    imageGeneration: '画像の生成',
   };
 
   /** 残りがこの割合を下回ったら警告として見せる。 */
@@ -116,6 +120,11 @@ export function chatScript(agentLabel: string): string {
     body.className = 'body';
     wrap.appendChild(body);
 
+    const images = document.createElement('div');
+    images.className = 'images';
+    images.hidden = true;
+    wrap.appendChild(images);
+
     const diffs = document.createElement('div');
     diffs.className = 'diffs';
     diffs.hidden = true;
@@ -125,6 +134,8 @@ export function chatScript(agentLabel: string): string {
       wrap,
       label,
       body,
+      images,
+      imageKey: '',
       diffs,
       diffKey: '',
       copy,
@@ -164,6 +175,57 @@ export function chatScript(agentLabel: string): string {
         ? '末尾だけ表示'
         : '全体を表示（' + lines.length + '行）';
     }
+  }
+
+  /**
+   * パスで届いた画像の中身。ホスト側が読んで返したデータURLを覚える。
+   *
+   * Webviewから直接ファイルを読むことはできない（CSPは img-src data: のみ）。
+   * 値は 'data:...' か、読めなかった理由の文字列。
+   */
+  const imageData = new Map();
+  /** 要求済みのパス。同じ画像を何度も頼まない。 */
+  const imageAsked = new Set();
+
+  function requestImage(path) {
+    if (imageAsked.has(path)) return;
+    imageAsked.add(path);
+    vscode.postMessage({ type: 'requestImage', path });
+  }
+
+  /** 画像1枚。クリックで原寸表示へ切り替える。 */
+  function createImage(image) {
+    const wrap = document.createElement('div');
+    wrap.className = 'image';
+
+    const src = image.dataUrl || (image.path ? imageData.get(image.path) : undefined);
+    if (src && src.slice(0, 5) === 'data:') {
+      const img = document.createElement('img');
+      img.src = src;
+      img.alt = image.alt || '';
+      img.title = image.alt || '';
+      img.addEventListener('click', () => wrap.classList.toggle('zoom'));
+      wrap.appendChild(img);
+      return wrap;
+    }
+
+    // まだ読めていない・読めなかった。黙って空白を残さず理由を出す
+    const note = document.createElement('div');
+    note.className = 'image-note';
+    if (image.path) {
+      requestImage(image.path);
+      note.textContent = src ? src + ': ' + image.path : '読み込み中… ' + image.path;
+    } else {
+      note.textContent = image.alt || '画像を表示できません';
+    }
+    wrap.appendChild(note);
+    return wrap;
+  }
+
+  function renderImages(container, images) {
+    container.replaceChildren();
+    for (const image of images) container.appendChild(createImage(image));
+    container.hidden = images.length === 0;
   }
 
   /** 1ファイル分の差分。既定は畳んでおき、開いた状態は要素を使い回して保つ。 */
@@ -214,6 +276,14 @@ export function chatScript(agentLabel: string): string {
     node.wrap.classList.toggle('running', running);
 
     renderBody(node, item);
+
+    // 中身が同じなら作り直さない。拡大した画像が勝手に戻るのを防ぐ
+    const images = item.images || [];
+    const imageKey = JSON.stringify(images) + '|' + images.map((i) => imageData.get(i.path) || '').join(',');
+    if (node.imageKey !== imageKey) {
+      node.imageKey = imageKey;
+      renderImages(node.images, images);
+    }
 
     // 中身が同じなら作り直さない。開いた差分が勝手に閉じるのを防ぐ
     const diffs = item.diffs || [];
@@ -608,6 +678,7 @@ export function chatScript(agentLabel: string): string {
     applySettings(state.settings, state.planMode);
     const log = el('log');
     const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+    lastItems = state.items;
     syncItems(state.items);
     // 承認カードは一時的なので作り直してよい（会話本文の選択は壊れない）
     const approvals = el('approvals');
@@ -1117,6 +1188,11 @@ export function chatScript(agentLabel: string): string {
       if (menuMode !== 'file') return;
       if (mentionQuery(el('input')) !== data.query) return;
       showFiles(data.files || []);
+    }
+    if (data.type === 'imageData' && data.path) {
+      imageData.set(data.path, data.dataUrl || data.error || '画像を読み込めませんでした');
+      // 届いた画像を反映する。差分がある項目だけ描き直される
+      if (lastItems) syncItems(lastItems);
     }
   });
 

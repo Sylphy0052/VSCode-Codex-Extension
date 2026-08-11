@@ -942,6 +942,31 @@ Claude Codeは消費率（`usedPercent`）を返さない。実測した中身�
 - 送信に失敗したら添付を戻す。取り出したまま失うと貼り直しを強いることになる
 - **CSPに `img-src data:` が要る**。`default-src 'none'` なので、書き忘れるとサムネイルが黙って出ない。`chatCsp.ts` に切り出してテストで見張っている
 
+### 14.12 会話に出す画像
+
+送った画像・モデルが見た画像・モデルが生成した画像を会話の中に描く。`ChatItem.images` に持ち、種類ごとの読み取りは `imageRefs.ts` に集約する。
+
+| 出どころ                            | 形                                                             | 実測     |
+| ----------------------------------- | -------------------------------------------------------------- | -------- |
+| Codex `userMessage.content`         | `{type:'image', detail:null, url:'data:image/png;base64,...'}` | ○        |
+| Codex `userMessage.content`         | `{type:'localImage', path}`                                    | スキーマ |
+| Codex `imageView`                   | `{id, path, type:'imageView'}`                                 | スキーマ |
+| Codex `imageGeneration`             | `{id, result, status, revisedPrompt, savedPath}`               | スキーマ |
+| Claude Code `tool_result.content[]` | `{type:'image', source:{type:'base64', media_type, data}}`     | ○        |
+
+`imageView` / `imageGeneration` は `codex app-server generate-json-schema` の `ThreadItem` に定義がある。手元のターンでは出せなかったため、**通知の形はスキーマを根拠にしている**（実機確認で確かめる）。送った画像が `userMessage` にそのまま残ることと、Claude Codeの `tool_result` の形は実測で確認した。
+
+**Webviewへ渡すのはデータURLだけ。** `localResourceRoots` を広げて `asWebviewUri` で参照させると、その範囲のファイルをWebviewから自由に読めるようになる。パスで届いた画像は次の流れでホスト側が読む。
+
+1. Webviewが `requestImage { path }` を送る（同じパスは1回だけ）
+2. ホストが**会話に出てきたパスかどうか**を確かめる（`buildImageReply`）。会話に無いパスは読まない
+3. 拡張子から種類を決め、10MBまで読んでデータURLにする
+4. `imageData { path, dataUrl, error }` で返す。読めなければ理由を返し、画面に出す
+
+- 対応形式は添付と同じ（png / jpeg / gif / webp）。svgは弾く
+- 表示できないURL（`http` など）は読み込ませず、「表示できない画像 (URL)」と出す。CSPが `img-src data:` しか許さないため、そのまま渡すと黙って欠ける
+- 既定はサムネイル（高さ160pxまで）。クリックで原寸に広げる。拡大した状態は要素と一緒に保つ
+
 ## 15. 作業記録（日報・週報連携）
 
 この拡張機能から実行したセッションを、日報/週報システムが読める形で残す。

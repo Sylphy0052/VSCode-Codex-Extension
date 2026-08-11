@@ -21,6 +21,13 @@ export interface FileSystemPort {
   listMarkdown(dir: string): Promise<string[]>;
   /** 先頭 maxLines 行だけを読む。全文をメモリに載せないための専用メソッド。 */
   readHead(filePath: string, maxLines: number): Promise<string[]>;
+  /**
+   * ファイル全体をbase64で読む。会話に出す画像に使う。
+   *
+   * `maxBytes` を超えるファイルは読まずに `undefined` を返す。Webviewへ渡す前に
+   * 上限で切るのは、巨大な画像でメッセージが詰まるのを防ぐため。
+   */
+  readBase64File(filePath: string, maxBytes: number): Promise<string | undefined>;
 }
 
 /** session_meta の永続キャッシュ。1行目は不変なので無効化はエントリ削除のみ。 */
