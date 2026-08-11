@@ -1,12 +1,22 @@
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
+import type { Logger } from '../log';
 import { isPathWithinRoot } from './escalation';
 import { detectForgeHost, type CliCommandRunner } from './forge';
-import { buildPlannerSessionInput, sendSingleTurn } from './planner';
+import {
+  buildPlannerSessionInput,
+  planWorkflow,
+  sendSingleTurn,
+  type PlanWorkflowFailure,
+  type PlanWorkflowInput,
+  type PlanWorkflowSuccess,
+  type WorkspaceSummary,
+} from './planner';
+import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { TaskSessionHost } from './taskSession';
 import type { GitCommandRunner } from './worktree';
-import { TASK_ID_PATTERN, type Provider } from './workflow';
+import { TASK_ID_PATTERN, type Provider, type WorkflowDefinition } from './workflow';
 
 /**
  * ロードマップ（design.md §16.19）の純粋ロジック。
@@ -270,6 +280,200 @@ export function validateRoadmap(parsed: ParsedRoadmap): RoadmapValidationResult 
   }
 
   return { errors, warnings };
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* 2段目: ロードマップからYAMLへ変換する材料（design.md §16.19 2段目、Issue #58）                */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * `workflow.plan`（`planner.ts`）へ渡す、ロードマップの1項目分の材料。`RoadmapItem`から
+ * 分解セッションの材料として必要な部分だけを取り出した形（`checked`/`line`は不要）。
+ */
+export interface RoadmapMaterialItem {
+  id: string;
+  text: string;
+  dependsOn: readonly string[];
+  issue: number | undefined;
+}
+
+/**
+ * 次に着手すべきフェーズを選ぶ（design.md §16.19 2段目「次のフェーズだけYAMLにする」を
+ * 選べるようにする、の既定候補）。未チェックの項目を1件以上含む最初のフェーズを返す。
+ * 全フェーズ完了済みなら `undefined`。呼び出し側（UI層）はこれを既定の選択にしつつ、
+ * `parsed.phases` から他のフェーズも選び直せるようにする。
+ */
+export function selectNextRoadmapPhase(parsed: ParsedRoadmap): RoadmapPhase | undefined {
+  return parsed.phases.find((phase) => phase.items.some((item) => !item.checked));
+}
+
+/** フェーズの項目を、分解セッションへ渡す材料の形へ変換する。 */
+export function selectRoadmapPhaseItems(phase: RoadmapPhase): RoadmapMaterialItem[] {
+  return phase.items.map((item) => ({
+    id: item.id,
+    text: item.text,
+    dependsOn: item.dependsOn,
+    issue: item.issue,
+  }));
+}
+
+/**
+ * 選んだ項目を、分解セッションへ渡すテキストの材料として整形する（design.md §16.19 2段目
+ * 「項目をtasksに、依存をdependsOnに写す」「Issue番号を持つ項目は…issueフィールドとして
+ * 持たせる」）。
+ *
+ * idと依存とIssue番号はそのまま転記するよう明示的に指示する。分解セッション（LLM）が
+ * 依存関係やIssue番号を書き換えてしまうと、依存順序が壊れたまま実行されたり、誤った
+ * Issueへ`Closes #<N>`が送られたりする。ここでの指示はあくまで補助で、一次防御ではない
+ * （`planWorkflowFromRoadmapPhase`が生成後に`detectRoadmapMaterialMismatches`で機械的にも
+ * 確認する）。
+ */
+export function formatRoadmapMaterial(items: readonly RoadmapMaterialItem[]): string {
+  const lines: string[] = [];
+  lines.push('## ロードマップの材料');
+  lines.push('');
+  lines.push(
+    '次の項目を、それぞれ1つのタスクとして書き出してください。' +
+      'タスクのidは項目のidをそのまま使い、書き換えないこと。' +
+      'dependsOnは項目の依存をそのまま写し、それ以外の依存を追加しないこと。' +
+      'Issueが示されている項目は、タスクのissueフィールドへその番号をそのまま書くこと' +
+      '（省略・改変しないこと。Issueが示されていない項目にissueを書かないこと）。' +
+      'promptとdoneは、項目の内容から具体的に書き起こすこと。',
+  );
+  lines.push('');
+  for (const item of items) {
+    const depends = item.dependsOn.length > 0 ? item.dependsOn.join(', ') : 'なし';
+    const issueText = item.issue !== undefined ? `#${item.issue}` : 'なし';
+    lines.push(`- id: ${item.id}`);
+    lines.push(`  内容: ${item.text}`);
+    lines.push(`  依存: ${depends}`);
+    lines.push(`  Issue: ${issueText}`);
+  }
+  return lines.join('\n');
+}
+
+/** `planWorkflowFromRoadmapPhase`が使う既定のゴール文。ロードマップのタイトルとフェーズ名から組み立てる。 */
+export function buildRoadmapPlanGoal(roadmapTitle: string, phase: RoadmapPhase): string {
+  return `${roadmapTitle}のうち「${phase.name}」を実行できるワークフローに分解する`;
+}
+
+/** `detectRoadmapMaterialMismatches`が返す1件。 */
+export interface RoadmapMaterialMismatch {
+  itemId: string;
+  kind: 'missing' | 'dependsOnMismatch' | 'issueMismatch';
+  message: string;
+}
+
+/**
+ * 生成されたワークフロー定義が、渡した材料（id・依存・Issue）を正しく転記できているかを
+ * 機械的に確かめる（design.md §16.19 2段目の検証。分解セッションはLLMであり、転記を誤る・
+ * 省略する可能性を否定できないため）。
+ *
+ * `validateWorkflow`（YAMLとして妥当かどうか）とは別の観点の確認で、これに失敗しても
+ * YAML自体は妥当でありうる。あくまで「材料を正しく使ったか」の確認であり、`planWorkflow`
+ * の検証・再試行の対象にはしない（design.md §16.9の再試行は検証エラーに対するものであり、
+ * 材料の転記漏れはここでは検証エラーとして扱わない）。呼び出し側が結果を見て人に知らせる。
+ */
+export function detectRoadmapMaterialMismatches(
+  material: readonly RoadmapMaterialItem[],
+  definition: WorkflowDefinition,
+): RoadmapMaterialMismatch[] {
+  const byId = new Map(definition.tasks.map((t) => [t.id, t] as const));
+  const mismatches: RoadmapMaterialMismatch[] = [];
+
+  for (const item of material) {
+    const task = byId.get(item.id);
+    if (task === undefined) {
+      mismatches.push({
+        itemId: item.id,
+        kind: 'missing',
+        message: `ロードマップの項目 ${item.id} に対応するタスクが生成されていません`,
+      });
+      continue;
+    }
+
+    const expectedDeps = new Set(item.dependsOn);
+    const actualDeps = new Set(task.dependsOn);
+    const dependsOnMatches =
+      expectedDeps.size === actualDeps.size && [...expectedDeps].every((d) => actualDeps.has(d));
+    if (!dependsOnMatches) {
+      mismatches.push({
+        itemId: item.id,
+        kind: 'dependsOnMismatch',
+        message:
+          `${item.id}: dependsOnがロードマップの依存と一致しません` +
+          `（期待: ${[...expectedDeps].join(', ') || 'なし'}, ` +
+          `実際: ${[...actualDeps].join(', ') || 'なし'}）`,
+      });
+    }
+
+    if (item.issue !== task.issue) {
+      mismatches.push({
+        itemId: item.id,
+        kind: 'issueMismatch',
+        message:
+          `${item.id}: issueがロードマップと一致しません` +
+          `（期待: ${item.issue ?? 'なし'}, 実際: ${task.issue ?? 'なし'}）`,
+      });
+    }
+  }
+
+  return mismatches;
+}
+
+export interface PlanWorkflowFromRoadmapInput {
+  roadmapTitle: string;
+  phase: RoadmapPhase;
+  /** 既定は `buildRoadmapPlanGoal(roadmapTitle, phase)`。呼び出し側が上書きできる。 */
+  goal?: string;
+  workspaceSummary: WorkspaceSummary;
+  /** 分解セッションに使うプロバイダ（`planner.ts`の`PlanWorkflowInput`と同じ）。 */
+  provider: Provider;
+  host: TaskSessionHost;
+  cwd: string;
+  baseline: ExtensionSafetyBaseline;
+  log: Logger;
+}
+
+export type PlanWorkflowFromRoadmapResult =
+  | (PlanWorkflowSuccess & { roadmapMismatches: readonly RoadmapMaterialMismatch[] })
+  | PlanWorkflowFailure;
+
+/**
+ * ロードマップの1フェーズ分から、ワークフロー定義（YAML）を生成する（design.md §16.19
+ * 2段目）。`planner.ts`の分解セッション（§16.9）をそのまま使い、材料としてこのフェーズの
+ * 項目（id・依存・Issue）を渡す。生成後、材料が正しく転記されたかを
+ * `detectRoadmapMaterialMismatches`で確認し、結果に含める。
+ *
+ * 分解セッションの安全設定（`sandbox: read-only`相当・承認全拒否）は`planWorkflow`が
+ * `buildPlannerSessionInput`経由で組み立てる。ここで独自に安全設定を作らない
+ * （`createTaskSessionRoadmapGenerationPort`と同じ「重複を残さない」判断）。
+ */
+export async function planWorkflowFromRoadmapPhase(
+  input: PlanWorkflowFromRoadmapInput,
+): Promise<PlanWorkflowFromRoadmapResult> {
+  const items = selectRoadmapPhaseItems(input.phase);
+  const material = formatRoadmapMaterial(items);
+  const goal = input.goal ?? buildRoadmapPlanGoal(input.roadmapTitle, input.phase);
+
+  const planInput: PlanWorkflowInput = {
+    goal,
+    workspaceSummary: input.workspaceSummary,
+    provider: input.provider,
+    host: input.host,
+    cwd: input.cwd,
+    baseline: input.baseline,
+    log: input.log,
+    roadmapMaterial: material,
+  };
+  const result = await planWorkflow(planInput);
+  if (!result.ok) {
+    return result;
+  }
+  return {
+    ...result,
+    roadmapMismatches: detectRoadmapMaterialMismatches(items, result.definition),
+  };
 }
 
 /* -------------------------------------------------------------------------------------------- */

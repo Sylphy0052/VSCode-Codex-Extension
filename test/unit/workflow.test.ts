@@ -35,6 +35,7 @@ const task = (overrides: Partial<WorkflowTask> = {}): WorkflowTask => ({
   escalate: [],
   allow: [],
   retries: 0,
+  issue: undefined,
   cleanup: 'keep',
   parseErrors: [],
   parseWarnings: [],
@@ -129,6 +130,34 @@ tasks:
 
   it('壊れたYAMLは例外を投げる', () => {
     expect(() => parseWorkflowYaml('invalid: [')).toThrow();
+  });
+
+  it('issueを正の整数として読む（design.md §16.2・§16.18「Closes #<N>」に使う）', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+    issue: 12
+`;
+    const def = parseWorkflowYaml(yaml);
+    expect(def.tasks[0]?.issue).toBe(12);
+  });
+
+  it('issueが未指定ならundefinedのまま（エラーにしない）', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+    expect(def.tasks[0]?.issue).toBeUndefined();
+    expect(def.tasks[0]?.parseErrors).toEqual([]);
   });
 });
 
@@ -497,6 +526,28 @@ tasks:
     expect(errors.some((e) => e.message.includes('retries') && e.taskIds.includes('T1'))).toBe(
       true,
     );
+  });
+
+  it('issueが正の整数でなければエラーになる（0や負数、YAML経由での不正値）', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+    issue: -1
+`;
+    const { errors } = validateWorkflow(parseWorkflowYaml(yaml));
+    expect(
+      errors.some((e) => e.message.includes('issue') && e.taskIds.includes('T1')),
+    ).toBe(true);
+  });
+
+  it('issueが未指定ならエラーにならない', () => {
+    const def = { version: 1, name: 'テスト', maxParallel: 3, tasks: [task({ issue: undefined })] };
+    const { errors } = validateWorkflow(def);
+    expect(errors.some((e) => e.message.includes('issue'))).toBe(false);
   });
 
   it.each([0, 201])('maxIterationsが範囲外(%i)だとエラーになる', (maxIterations) => {
