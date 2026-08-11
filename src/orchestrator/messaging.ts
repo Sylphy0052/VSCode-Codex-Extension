@@ -17,19 +17,10 @@ import { MAX_PROMPT_LENGTH } from './workflow';
  */
 
 /**
- * design.md §16.3のタスク状態全体。`runState.ts` の `TaskState` は現時点で
- * `waitingReply` / `merging` / `blocked` を持たない（design.mdはこれらを含めて定義しているが、
- * 実装は別Issueが順に追加する）。messaging.tsは配送可否判定・待ちぼうけ検出に
- * この3状態も必要とするため、既存の `TaskState` を拡張した型をここに定義する。
- * 実際の状態遷移（`runState.ts` への配線）はこのIssueの範囲外。
- */
-export type MessagingTaskState = TaskState | 'waitingReply' | 'merging' | 'blocked';
-
-/**
  * 配送できない宛先の状態（design.md §16.21「配送」）。
  * `pending` はここに含めない。開始時の最初の指示へ添える形で配送できるため。
  */
-const UNDELIVERABLE_STATES: ReadonlySet<MessagingTaskState> = new Set([
+const UNDELIVERABLE_STATES: ReadonlySet<TaskState> = new Set([
   'done',
   'failed',
   'blocked',
@@ -37,7 +28,7 @@ const UNDELIVERABLE_STATES: ReadonlySet<MessagingTaskState> = new Set([
 ]);
 
 /** 宛先の状態が配送可能かどうか。 */
-export function isDeliverableState(state: MessagingTaskState): boolean {
+export function isDeliverableState(state: TaskState): boolean {
   return !UNDELIVERABLE_STATES.has(state);
 }
 
@@ -63,7 +54,7 @@ export interface SendMessageValidationInput {
   /** 同じrunに存在するタスクidの集合。宛先の存在確認に使う。 */
   knownTaskIds: ReadonlySet<string>;
   /** 宛先タスクの現在の状態。`knownTaskIds` に含まれないidの場合は無視される。 */
-  recipientState: MessagingTaskState | undefined;
+  recipientState: TaskState | undefined;
   /** これまでにrun全体で受け付けたメッセージの総数（`TaskMessagingHub` の `totalSent`）。 */
   totalMessagesInRun: number;
 }
@@ -254,7 +245,7 @@ export const NO_REPLY_NOTICE =
  * 該当すれば解除すべき全タスクidを返す。該当しなければ空配列。
  */
 export function detectAllWaitingStalemate(
-  activeStates: ReadonlyMap<string, MessagingTaskState>,
+  activeStates: ReadonlyMap<string, TaskState>,
   undeliveredMessageCount: number,
 ): readonly string[] {
   if (activeStates.size === 0 || undeliveredMessageCount !== 0) {
@@ -310,7 +301,7 @@ export function buildStalledWaitingReplyWarning(
 /** `list_tasks` が返す1タスク分のエントリ。 */
 export interface ListTasksEntry {
   id: string;
-  state: MessagingTaskState;
+  state: TaskState;
   /** 直近の応答の1行要約（`taskSummary.ts` の `buildResponseSummary` が作る値をそのまま渡す想定）。 */
   summary: string;
 }
@@ -318,7 +309,7 @@ export interface ListTasksEntry {
 /** `list_tasks` の入力（1タスク分）。 */
 export interface RunTaskSnapshot {
   id: string;
-  state: MessagingTaskState;
+  state: TaskState;
   summary: string;
 }
 

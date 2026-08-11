@@ -7,7 +7,7 @@ import {
   sessionIdFromRolloutName,
 } from '../codex/sessionMeta';
 import type { SessionMeta, SessionSummary } from '../codex/types';
-import type { FileSystemPort, MetaCachePort } from './ports';
+import type { FileSystemPort, MetaCachePort, ThreadListPort } from './ports';
 
 export type HistoryScope = 'workspace' | 'all';
 
@@ -31,6 +31,12 @@ export interface ListResult {
   skippedIndexLines: number;
   /** ロールアウトが見つからず cwd を解決できなかった件数。 */
   unresolved: number;
+  /**
+   * `thread/list` を使わずファイル読みへ退避した理由。`thread/list` で組み立てられた場合は
+   * undefined（黙って切り替わったことが分からなくなるのを防ぐため、退避時は必ず設定する。
+   * issue #45）。
+   */
+  threadListFallbackReason?: string;
 }
 
 interface RolloutLocation {
@@ -54,20 +60,73 @@ export function isWithinAny(target: string, folders: string[]): boolean {
 }
 
 export class SessionStore {
+  /**
+   * `thread/list` の口。activate時の配線順序の都合で、コンストラクタではなく
+   * `attachThreadList` で事後に渡す（extension.tsのコメント参照）。未接続の間は
+   * 常にファイル読みだけを使う。
+   */
+  private threadList: ThreadListPort | undefined;
+
   constructor(
     private readonly fs: FileSystemPort,
     private readonly paths: CodexPaths,
     private readonly cache: MetaCachePort,
   ) {}
 
+  /** `thread/list` を使えるようにする。呼ばなければ従来どおりファイル読みのみで動く。 */
+  attachThreadList(port: ThreadListPort): void {
+    this.threadList = port;
+  }
+
   /**
    * 一覧を構築する。
+   *
+   * まず `thread/list`（issue #45）を試す。空でない結果が返ればそれを使い、ファイルは
+   * 一切読まない。空か失敗のときはファイル読みへ退避し、その理由を
+   * `threadListFallbackReason` に残す（黙って表示が変わらないようにするため）。
+   */
+  async list(options: ListOptions): Promise<ListResult> {
+    if (this.threadList !== undefined) {
+      const outcome = await this.threadList(
+        Math.max(0, options.maxEntries),
+        this.paths.archivedSessions,
+      );
+      if (outcome.ok && outcome.sessions.length > 0) {
+        return this.buildFromThreadList(outcome.sessions, options);
+      }
+      const reason = outcome.ok ? 'thread/listの応答が空でした' : outcome.error;
+      const fallback = await this.listFromFiles(options);
+      return { ...fallback, threadListFallbackReason: reason };
+    }
+
+    return this.listFromFiles(options);
+  }
+
+  /** `thread/list` で得たセッションにスコープ絞り込みと件数上限だけを適用する。 */
+  private buildFromThreadList(sessions: SessionSummary[], options: ListOptions): ListResult {
+    const scoped = sessions.filter(
+      (s) =>
+        options.scope !== 'workspace' ||
+        (s.cwd !== undefined && isWithinAny(s.cwd, options.workspaceFolders)),
+    );
+    const sorted = [...scoped].sort((a, b) =>
+      a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0,
+    );
+    return {
+      sessions: sorted.slice(0, Math.max(0, options.maxEntries)),
+      skippedIndexLines: 0,
+      unresolved: 0,
+    };
+  }
+
+  /**
+   * ファイルから一覧を組み立てる（`thread/list` が使えないとき、または未接続のとき）。
    *
    * ロールアウトの実在を骨格にする。`session_index.jsonl` はCodexが要約名を確定させて
    * から書かれるため、それだけを見ると始めたばかりのセッションが一覧に出てこない。
    * indexは要約名と更新時刻の供給元として重ねる（Claude Code側と同じ組み立て方）。
    */
-  async list(options: ListOptions): Promise<ListResult> {
+  private async listFromFiles(options: ListOptions): Promise<ListResult> {
     const content = await this.fs.readTextFile(this.paths.sessionIndex);
     const { entries, skipped } =
       content === undefined ? { entries: [], skipped: 0 } : parseSessionIndex(content);

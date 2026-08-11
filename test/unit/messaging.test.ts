@@ -26,10 +26,10 @@ import {
   type JsonRpcResponse,
   type McpConnection,
   type McpTransportPort,
-  type MessagingTaskState,
   type RunTaskSnapshot,
   type StoredMessage,
 } from '../../src/orchestrator/messaging';
+import type { TaskState } from '../../src/orchestrator/runState';
 import { MAX_PROMPT_LENGTH } from '../../src/orchestrator/workflow';
 
 const message = (overrides: Partial<StoredMessage> = {}): StoredMessage => ({
@@ -235,7 +235,7 @@ describe('wrapTaskMessage / composeNextPrompt（design.md §16.21「受信内容
 
 describe('待ちぼうけの検出（design.md §16.21）', () => {
   it('走行中の全タスクがwaitingReplyかつ未配送が0件なら全員を解除対象にする', () => {
-    const states = new Map<string, MessagingTaskState>([
+    const states = new Map<string, TaskState>([
       ['T1', 'waitingReply'],
       ['T2', 'waitingReply'],
     ]);
@@ -244,7 +244,7 @@ describe('待ちぼうけの検出（design.md §16.21）', () => {
   });
 
   it('1つでもwaitingReply以外があれば解除しない', () => {
-    const states = new Map<string, MessagingTaskState>([
+    const states = new Map<string, TaskState>([
       ['T1', 'waitingReply'],
       ['T2', 'running'],
     ]);
@@ -252,7 +252,7 @@ describe('待ちぼうけの検出（design.md §16.21）', () => {
   });
 
   it('未配送メッセージが残っていれば解除しない', () => {
-    const states = new Map<string, MessagingTaskState>([['T1', 'waitingReply']]);
+    const states = new Map<string, TaskState>([['T1', 'waitingReply']]);
     expect(detectAllWaitingStalemate(states, 1)).toEqual([]);
   });
 

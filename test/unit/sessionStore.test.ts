@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { codexPaths } from '../../src/codex/cliLocator';
-import { InMemoryMetaCache, type FileSystemPort } from '../../src/session/ports';
+import type { SessionSummary } from '../../src/codex/types';
+import {
+  InMemoryMetaCache,
+  type FileSystemPort,
+  type ThreadListPort,
+} from '../../src/session/ports';
 import { SessionStore, isWithinAny } from '../../src/session/sessionStore';
 
 const HOME = '/home/u/.codex';
@@ -199,6 +204,99 @@ describe('SessionStore.list', () => {
     const result = await new SessionStore(broken, paths, new InMemoryMetaCache()).list(options());
     expect(result.sessions).toHaveLength(1);
     expect(result.skippedIndexLines).toBe(1);
+  });
+});
+
+/** thread/list の1件を模したSessionSummary（正規化後の形。src/codex/threadList.tsのテスト対象外）。 */
+const threadSession = (id: string, cwd: string, updatedAt: string): SessionSummary => ({
+  id,
+  provider: 'codex',
+  threadName: `thread-${id}`,
+  updatedAt,
+  cwd,
+  archived: false,
+});
+
+const okPort =
+  (sessions: SessionSummary[]): ThreadListPort =>
+  async () => ({ ok: true, sessions });
+
+const emptyPort: ThreadListPort = async () => ({ ok: true, sessions: [] });
+
+const failingPort =
+  (error: string): ThreadListPort =>
+  async () => ({ ok: false, error });
+
+describe('SessionStore.list（thread/list優先・ファイル読みへの退避）', () => {
+  it('thread/listが空でなければそれを使い、ファイルは一切読まない', async () => {
+    const fs = buildFs();
+    const store = new SessionStore(fs, paths, new InMemoryMetaCache());
+    store.attachThreadList(okPort([threadSession(ID_A, '/work/alpha', '2026-08-06T15:09:29Z')]));
+
+    const result = await store.list(options({ scope: 'all' }));
+    expect(result.sessions.map((s) => s.id)).toEqual([ID_A]);
+    expect(result.threadListFallbackReason).toBeUndefined();
+    expect(fs.firstLineReads).toBe(0);
+  });
+
+  it('thread/listの結果にもworkspaceスコープの絞り込みを適用する', async () => {
+    const store = new SessionStore(buildFs(), paths, new InMemoryMetaCache());
+    store.attachThreadList(
+      okPort([
+        threadSession(ID_A, '/work/alpha', '2026-08-06T15:09:29Z'),
+        threadSession(ID_B, '/work/other', '2026-08-06T15:10:00Z'),
+      ]),
+    );
+
+    const result = await store.list(options({ scope: 'workspace' }));
+    expect(result.sessions.map((s) => s.id)).toEqual([ID_A]);
+  });
+
+  it('thread/listの結果にもmaxEntriesの上限を適用する', async () => {
+    const store = new SessionStore(buildFs(), paths, new InMemoryMetaCache());
+    store.attachThreadList(
+      okPort([
+        threadSession(ID_A, '/work/alpha', '2026-08-06T15:09:29Z'),
+        threadSession(ID_B, '/work/alpha', '2026-08-06T15:10:00Z'),
+      ]),
+    );
+
+    const result = await store.list(options({ scope: 'all', maxEntries: 1 }));
+    // 更新時刻の降順で先頭1件
+    expect(result.sessions.map((s) => s.id)).toEqual([ID_B]);
+  });
+
+  it('thread/listが空応答ならファイル読みへ退避し、理由を残す', async () => {
+    const fs = buildFs();
+    const store = new SessionStore(fs, paths, new InMemoryMetaCache());
+    store.attachThreadList(emptyPort);
+
+    const viaFiles = await new SessionStore(buildFs(), paths, new InMemoryMetaCache()).list(
+      options({ scope: 'all' }),
+    );
+    const result = await store.list(options({ scope: 'all' }));
+
+    expect(result.sessions.map((s) => s.id).sort()).toEqual(
+      viaFiles.sessions.map((s) => s.id).sort(),
+    );
+    expect(result.threadListFallbackReason).toBeDefined();
+    expect(fs.firstLineReads).toBeGreaterThan(0);
+  });
+
+  it('thread/listが失敗したらファイル読みへ退避し、エラー理由を残す', async () => {
+    const store = new SessionStore(buildFs(), paths, new InMemoryMetaCache());
+    store.attachThreadList(failingPort('app-serverが応答しませんでした'));
+
+    const result = await store.list(options({ scope: 'all' }));
+    expect(result.sessions.length).toBeGreaterThan(0);
+    expect(result.threadListFallbackReason).toBe('app-serverが応答しませんでした');
+  });
+
+  it('attachThreadListを呼ばなければ従来どおりファイル読みのみで動く', async () => {
+    const store = new SessionStore(buildFs(), paths, new InMemoryMetaCache());
+    const result = await store.list(options({ scope: 'all' }));
+    expect(result.threadListFallbackReason).toBeUndefined();
+    expect(result.sessions.length).toBeGreaterThan(0);
   });
 });
 
