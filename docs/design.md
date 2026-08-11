@@ -666,6 +666,21 @@ TUIは `@` でワークスペースのファイルを補完できる。チャッ
 
 打っている途中に古い応答が届くことがあるため、**要求に含めた語と応答の語が一致するときだけ**描き替える。
 
+### 9.11 コードレビューの起動（review/start）
+
+Codexには専用のメソッド `review/start` がある（`codex app-server generate-json-schema` で確認。CLI 0.147.0）。入力欄の周りに「計画」「圧縮」と並べて「レビュー」ボタンを置き、押すとQuickPickで対象とdeliveryを選ばせてから呼ぶ。**以下はいずれもスキーマが根拠で、実機での動作確認はしていない**（[manual-test.md](manual-test.md) のC-28が未実施ケースとして残る）。
+
+- 対象（`ReviewTarget`）は4種のタグ付きunion。組み立てと検証は純粋関数（`src/codex/reviewTarget.ts`）に切り出す。空文字のままではapp-serverへ送らない（`baseBranch` はブランチ名、`commit` はSHA、`custom` は指示文が必須）
+  - `uncommittedChanges`: 作業ツリー（staged / unstaged / untracked）。追加入力なし
+  - `baseBranch`: 現在のブランチと指定ブランチとの差分。ブランチ名を `showInputBox` で聞く（既定 `main`）
+  - `commit`: 指定コミットの変更。SHAを聞く
+  - `custom`: 自由記述の指示文を聞く
+- `delivery` も選ばせる。既定の `inline`（この会話の中）は他の設定と同じく「空＝フラグを渡さない」に倣って省略し、`detached`（別のタブ）だけ明示する
+- `detached` で返る `reviewThreadId` は新しいスレッドのid。`forkFrom`（§9.5「会話途中からの分岐」）と同じ導線（`openThread` → `thread/resume`）で新しいCodex画面を開く。応答にはターンの内容（`turn`）も入っているが、`resume` を経由することで既存の復元経路と揃えている
+- レビュー中は `EnteredReviewModeThreadItem` / `ExitedReviewModeThreadItem`（`{id, review, type}`。`review` は対象の説明で、拡張機能は不透明な文字列として扱う）が届く。`ChatState.reviewing` は items に含まれる直近の `enteredReviewMode` / `exitedReviewMode` から求める（`deriveReviewing`）
+- **レビュー中は割り込み（`turn/steer`）を止める**。`NonSteerableTurnKind` に `review` があることから、レビュー中のターンは `turn/steer` を受け付けないと分かる（Codexバイナリの文字列 "Steer messages aren't supported during /review." とも整合する）。`routeSend` は `reviewing` を見て、応答中の指示を割り込みではなく待ち行列へ回す。入力欄の下にも「レビュー中は割り込めません」と出す
+- Claude Code側には `review/start` に相当するメソッドが無い。同じボタンに `/code-review` を発言として送る導線を割り当てる（§9.8のとおり `/review` は実在しない）。QuickPickは出さない（CLI側が対話で対象を聞く）。コマンド一覧（`initialize` の応答）に `code-review` が無ければボタンごと出さない
+
 ## 10. 既知の制約
 
 - **app-serverはexperimental**: チャット画面が依存するプロトコルは `[experimental]` 表記であり、将来変更されうる。未知の通知とitem種別を素通しする設計で、変更時に機能が落ちても壊れないようにしている。
@@ -681,7 +696,7 @@ TUIは `@` でワークスペースのファイルを補完できる。チャッ
 - TypeScript / Node 20 / esbuild（バンドル）
 - eslint + prettier、`tsc --noEmit` で型チェック
 - テスト
-  - unit（vitest）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で43ファイル762件
+  - unit（vitest）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で52ファイル935件
   - **VSCodeに依存する層はユニットテストで扱わない**。`vscode` モジュールを触るファイル（`view/**` など）はテストから import できないため、判断が要るロジックは純粋関数へ切り出してそちらを試す（例: `view/panelState.ts`）
   - 実VSCodeでしか確認できない範囲は自動化せず、[manual-test.md](manual-test.md) のチェックリストと実施記録で担保する
 - `scripts/check.sh` に lint / typecheck / test を集約し、commit前に全緑を必須とする
@@ -790,15 +805,16 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 
 ### 14.6 プロバイダごとにできること
 
-| 操作                           | Codex | Claude Code                                          |
-| ------------------------------ | ----- | ---------------------------------------------------- |
-| 新規 / resume / タブ復元       | ○     | ○                                                    |
-| チャット画面（承認・中断込み） | ○     | ○                                                    |
-| fork（セッション全体）         | ○     | ○（idは未確定のまま）                                |
-| 会話の途中のターンから分岐     | ○     | ×（CLIに手段が無い）                                 |
-| archive / unarchive / delete   | ○     | ×（CLIに手段が無い。ファイルを直接消すことはしない） |
-| セッション名の変更             | ○     | ×（要約名の概念が無い）                              |
-| 問い合わせカード（§9.9）       | ○     | ×（同じ要求が届かない）                              |
+| 操作                           | Codex                                                | Claude Code                                                     |
+| ------------------------------ | ---------------------------------------------------- | --------------------------------------------------------------- |
+| 新規 / resume / タブ復元       | ○                                                    | ○                                                               |
+| チャット画面（承認・中断込み） | ○                                                    | ○                                                               |
+| fork（セッション全体）         | ○                                                    | ○（idは未確定のまま）                                           |
+| 会話の途中のターンから分岐     | ○                                                    | ×（CLIに手段が無い）                                            |
+| archive / unarchive / delete   | ○                                                    | ×（CLIに手段が無い。ファイルを直接消すことはしない）            |
+| セッション名の変更             | ○                                                    | ×（要約名の概念が無い）                                         |
+| 問い合わせカード（§9.9）       | ○                                                    | ×（同じ要求が届かない）                                         |
+| コードレビューの起動（§9.11）  | ○（`review/start`。QuickPickで対象とdeliveryを選ぶ） | ○（`/code-review` を発言として送るだけ。CLIが対話で対象を聞く） |
 
 対応しない操作はTreeViewの `contextValue`（`codexSession.<provider>`）でメニューから隠す。
 

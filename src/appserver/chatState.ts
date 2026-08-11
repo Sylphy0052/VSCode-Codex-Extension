@@ -191,6 +191,15 @@ export interface ChatState {
    */
   planMode: boolean;
   /**
+   * Codexのレビュー中か（`review/start` で開始したターン）。
+   *
+   * app-serverの `NonSteerableTurnKind` に `review` があり、レビュー中のターンへは
+   * `turn/steer` を受け付けないと分かる（スキーマが根拠。実機は未確認）。`routeSend` は
+   * このフラグを見て、応答中の指示を割り込みではなく待ち行列へ回す。
+   * Claude Codeには対応する概念が無く、常にfalseのまま。
+   */
+  reviewing: boolean;
+  /**
    * 直前に完了/失敗したターンの応答テキスト。作業記録の成果行（`kind: 'result'`）に使う。
    * ターンが終わるたびに上書きする。
    */
@@ -224,6 +233,7 @@ export const initialChatState: ChatState = {
   usage: undefined,
   context: undefined,
   planMode: false,
+  reviewing: false,
   turnResultText: '',
   turnEditedFiles: [],
   todos: NO_TODOS,
@@ -306,6 +316,10 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
       return { ...base, detail: `${str(item['server'])} / ${str(item['tool'])}` };
     case 'webSearch':
       return { ...base, detail: str(item['query']) };
+    // レビューの開始/終了。`review` フィールドは対象の説明（不透明な文字列として扱う）
+    case 'enteredReviewMode':
+    case 'exitedReviewMode':
+      return { ...base, detail: str(item['review']) };
     // モデルが見た画像。パスだけが届くので、読むのはホスト側の役目
     case 'imageView': {
       const filePath = str(item['path']);
@@ -438,6 +452,25 @@ export function summarizeTurn(
 
 function uniqueOrdered(values: readonly string[]): string[] {
   return [...new Set(values)];
+}
+
+/**
+ * レビュー中かどうかを items から求める。
+ *
+ * `enteredReviewMode` / `exitedReviewMode` はレビューの開始と終了を示す項目で、
+ * より後に現れたほうが現在の状態を表す。どちらも現れていなければレビュー中ではない。
+ */
+export function deriveReviewing(items: readonly ChatItem[]): boolean {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const kind = items[i]?.kind;
+    if (kind === 'enteredReviewMode') {
+      return true;
+    }
+    if (kind === 'exitedReviewMode') {
+      return false;
+    }
+  }
+  return false;
 }
 
 function upsertItem(items: readonly ChatItem[], item: ChatItem): ChatItem[] {
@@ -575,11 +608,13 @@ export function applyEvent(
       }
       const turnId = str(params['turnId']);
       const withTurn = turnId === '' ? item : { ...item, turnId };
+      const items = upsertItem(state.items, withTurn);
       return {
         ...state,
         // turn/started を取り逃しても中断できるよう、item側の値でも補う
         turnId: turnId === '' ? state.turnId : turnId,
-        items: upsertItem(state.items, withTurn),
+        items,
+        reviewing: deriveReviewing(items),
       };
     }
 
@@ -703,6 +738,10 @@ export type SendRoute =
 export function routeSend(state: ChatState): SendRoute {
   if (!state.busy) {
     return 'start';
+  }
+  if (state.reviewing) {
+    // app-serverはレビュー中のターンへの turn/steer を受け付けない（スキーマ根拠）
+    return 'queue';
   }
   return state.turnId === undefined ? 'queue' : 'steer';
 }
