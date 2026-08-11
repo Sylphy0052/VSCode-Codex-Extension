@@ -102,9 +102,17 @@ export interface WorkflowsConfig {
    * 関わらず全ての承認を人へ回す（design.md §16.16）。`clampAutoApprove` の基準値。
    */
   allowAutoApprove: boolean;
+  /**
+   * ロードマップ（design.md §16.19）の出力先ディレクトリ。ワークスペースフォルダからの
+   * 相対パス（既定 `docs/roadmap`）。`agent.workflows.dir` と同じく `machine-overridable`
+   * （§16.16「成果の統合まわりの設定」）。出力先のパス自体であって実行するコマンドの選択には
+   * 関わらないため、`agent.workflows.forge` / `finalMerge` ほど強い制限（`machine`固定）は要らない。
+   */
+  roadmapDir: string;
 }
 
 const DEFAULT_WORKFLOWS_DIR = '.agents/workflows';
+const DEFAULT_ROADMAP_DIR = 'docs/roadmap';
 
 /**
  * `agent.workflows.dir` の値として安全か。絶対パス、または `..` セグメントを含む値は拒否する。
@@ -128,9 +136,11 @@ function isSafeRelativeDir(value: string): boolean {
 export function readWorkflowsConfig(): WorkflowsConfig {
   const c = vscode.workspace.getConfiguration('agent');
   const rawDir = str(c, 'workflows.dir', DEFAULT_WORKFLOWS_DIR);
+  const rawRoadmapDir = str(c, 'workflows.roadmapDir', DEFAULT_ROADMAP_DIR);
   return {
     dir: isSafeRelativeDir(rawDir) ? rawDir : DEFAULT_WORKFLOWS_DIR,
     allowAutoApprove: c.get<boolean>('workflows.allowAutoApprove') ?? false,
+    roadmapDir: isSafeRelativeDir(rawRoadmapDir) ? rawRoadmapDir : DEFAULT_ROADMAP_DIR,
   };
 }
 
