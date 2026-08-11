@@ -240,6 +240,21 @@ export function chatStyles(): string {
     font-size: 0.9em;
   }
   #commands .row.active .desc { color: inherit; }
+  /* 引数の書き方。名前と別の色で添える（issue #9） */
+  #commands .hint {
+    white-space: nowrap;
+    color: var(--vscode-descriptionForeground);
+    font-family: var(--vscode-editor-font-family);
+    font-size: 0.9em;
+  }
+  #commands .row.active .hint { color: inherit; }
+  /* 候補を確定した後も書き方が見えるよう、入力欄の上に残す */
+  #argumentHint {
+    margin: 0 16px 4px;
+    color: var(--vscode-descriptionForeground);
+    font-family: var(--vscode-editor-font-family);
+    font-size: 0.9em;
+  }
   #queue {
     margin: 0 16px 8px;
     padding: 8px 10px;

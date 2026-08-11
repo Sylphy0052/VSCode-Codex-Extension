@@ -1614,7 +1614,18 @@ Commands:
 - `src/view/settingsProvider.ts`: `SettingsSnapshot`に`plugins: PluginsSnapshot`と`apps: AppsSnapshot`を、`ClaudeSettingsSnapshot`に`plugins: PluginsSnapshot`を追加。`installCodexPlugin` / `uninstallCodexPlugin` / `toggleClaudePlugin` / `installClaudePlugin` / `uninstallClaudePlugin`を新設。インストール・アンインストールは確認ダイアログ（「何をどこから入れるか」を明示）を必ず挟む。有効/無効の切替（Claude Codeのみ）はMCP/skillsの切替と同じく破壊的操作ではないため確認ダイアログを挟まない
 - `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画と操作。インストールは既存の`loginCodexApiKey`と同じ`showInputBox`パターン（Codexはマーケットプレイスを続けて`showQuickPick`で選ばせる）。plugin/appの名前・説明は必ず`textContent`でDOMへ入れ、HTMLとして解釈させない
 
-### 14.23 トランスクリプト表示と生テキストモード
+### 14.23 スラッシュ候補の引数ヒント
+
+`SlashCommand` は `argumentHint` を持っている（frontmatterの `argument-hint`、およびClaude Codeの `initialize` 応答）。引数を取るコマンド（`/copy N`、`/sandbox-add-read-dir <absolute_path>` など）は書き方が分からないと打てないため、候補と入力欄の両方に出す（issue #9・TP-12）。
+
+- 候補一覧では**名前と別の要素**にして薄い色で添える。ヒントを持たないコマンドでは要素ごと出さない（空の隙間を作らない）
+- **候補を確定した後こそ書き方が要る**。確定すると候補は閉じるため、入力欄の上にヒントを残す
+- 出すのは「行頭の `/名前` を打ち終えて空白を入れた後」だけ。空白より前は候補一覧にヒントが出ているので二重に出さない
+- 行頭でない `/` は対象にしない（パスを書いているときに拾わないため）。複数行のときは最後の行だけを見る
+
+判定は `src/provider/slashCommands.ts` の `hintForInput` に純粋関数として置き、テストする。Webview側（`chatScript.ts`）はテンプレートリテラルの中の素のJSでこの関数を呼べないため**同等の判定を書き直している**（`formatContext` / `formatSessionCost` と同じ事情）。規則を変えるときは両方を直すこと。
+
+### 14.24 トランスクリプト表示と生テキストモード
 
 CodexのTUIは Ctrl+T でトランスクリプトを表示し、`/raw` で選択・コピーしやすい生テキストモードに切り替えられる。チャット画面には項目ごとのコピーボタン（`chatScript.ts` の `copy`）しか無く、会話全体をテキストで取り出す手段が無かった。issue #25・design.mdのTP-43対応。スコープはCodex/Claude両方（Claudeの `/export` 相当もここに含める）。
 
