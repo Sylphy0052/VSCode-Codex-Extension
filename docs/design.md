@@ -335,8 +335,10 @@ Agents
 
 サイドバーの上段に、モデル・reasoning effort・承認方法・サンドボックスを切り替えるWebviewを置く。CodexとClaude Codeをタブで切り替える。公式Codex拡張機能のサイドバーが提供する `Select model` / `Reasoning effort` と同等の操作をこちらでも行えるようにするため。
 
-- 選択肢は `~/.codex/models_cache.json` から読む。**effortはモデルごとに異なる**ため（例: `gpt-5.5` は `low`〜`xhigh`、`gpt-5.6-sol` は `ultra` まで）、モデル選択に連動して選択肢を差し替える。モデルを変えた結果それまでのeffortが非対応になった場合は既定へ戻す。
-- カタログが読めない場合は既知の値の和集合へフォールバックし、パネルは動作を続ける。
+- 選択肢は `codex app-server` の `model/list` から読む。応答は `{data: [{id, model, displayName, description, hidden, defaultReasoningEffort, supportedReasoningEfforts: [{reasoningEffort, description}]}], nextCursor}` で、**effortごとの説明文まで返る**。`hidden` のモデルは選択肢に出さない。
+- **effortはモデルごとに異なる**ため（例: `gpt-5.5` は `low`〜`xhigh`、`gpt-5.6-sol` は `ultra` まで）、モデル選択に連動して選択肢を差し替える。モデルを変えた結果それまでのeffortが非対応になった場合は既定へ戻す。
+- CLIから取れない場合（app-serverが起動しない、CLIが古い）は `~/.codex/models_cache.json` を読み、それも読めなければ既知の値の和集合へフォールバックする。**選択肢を空にはしない**。
+- 一覧の取得には会話用の常駐接続とは別のプロセス（`AppServerClient`）を使う。設定パネルは会話を開いていなくても選択肢を出す必要があるため。
 - 変更値はVSCode設定へ書く。`approvalMode` / `sandbox` は machine スコープのため、**必ず `ConfigurationTarget.Global`（ユーザー設定）へ書き込む**。ワークスペース設定への書き込みは失敗する。
 - 設定画面から変更された場合も `onDidChangeConfiguration` でパネルへ反映し、表示が二重管理にならないようにする。
 - CSPは `default-src 'none'` を基点にし、スクリプトはnonceで限定する。配色はVSCodeのCSS変数のみを使い、テーマに追従させる。
@@ -347,15 +349,18 @@ Agents
 
 Claude Code側で扱う設定と選択肢の出どころは次のとおり。
 
-| 項目   | 選択肢                                             | 既定値の出どころ                 |
-| ------ | -------------------------------------------------- | -------------------------------- |
-| モデル | `fable` / `opus` / `sonnet` / `haiku` のエイリアス | `settings.json` の `model`       |
-| effort | `low` / `medium` / `high` / `xhigh` / `max`        | `settings.json` の `effortLevel` |
+| 項目     | 選択肢                                           | 既定値の出どころ                             |
+| -------- | ------------------------------------------------ | -------------------------------------------- |
+| モデル   | `initialize` の応答の `models`（`value` を渡す） | `settings.json` の `model`                   |
+| effort   | モデルごとの `supportedEffortLevels`             | `settings.json` の `effortLevel`             |
+| 承認方法 | `--permission-mode` が受け付ける6種              | `settings.json` の `permissions.defaultMode` |
 
-Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡張機能側の既定値として持つ。Codex側の「空＝CLIへ委譲」とは異なるが、Claude Codeには一覧APIも要約名も無く、未指定だと何が使われるか画面から分からないため、既定を明示する方を採った。「既定」を選べば従来どおり `settings.json` へ委譲する。
-| 承認方法 | `--permission-mode` が受け付ける6種 | `settings.json` の `permissions.defaultMode` |
+Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡張機能側の既定値として持つ。Codex側の「空＝CLIへ委譲」とは異なるが、未指定だと何が使われるか画面から分からないため、既定を明示する方を採った。「既定」を選べば従来どおり `settings.json` へ委譲する。
 
-- **モデル一覧を返すAPIが無い**ため、CLIのヘルプが案内するエイリアスを固定で並べる。正式名（`claude-fable-5` など）を使う場合は `claude.model` を直接編集する。一覧に無い現在値は「(一覧外)」として選択肢に補うので、設定が失われることはない。
+- モデル一覧は `initialize` の応答の `models` から取る。Codexの `model/list` に相当する要求は control protocol に無く、これが唯一の取得手段（実測）。応答は `{value, resolvedModel, displayName, description, supportsEffort, supportedEffortLevels}` で、`--model` へ渡すのは `value`。
+  - 設定パネルは会話を開いていなくても選択肢を出すため、`claude --print --input-format stream-json` を単発で起動して `initialize` の応答だけを読む（`ClaudeModelProbe`）。
+  - `supportsEffort` を持たないモデル（実測では haiku）では effort を選ばせず、理由を画面に出す。
+  - 取得できない場合は `fable` / `opus` / `sonnet` / `haiku` のエイリアスへ退避する。正式名（`claude-fable-5` など）を使う場合は `claude.model` を直接編集する。一覧に無い現在値は「(一覧外)」として選択肢に補うので、設定が失われることはない。
 - `permissionMode` を `bypassPermissions` にするときは、Codexの `danger-full-access` + `never` と同じくモーダルで同意を取る。
 - 使用量はCodex側にしか出せない（§14.8）ため、Claudeタブには表示しない。
 
@@ -389,18 +394,20 @@ Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡
 
 **スコープの原則**: 実行経路（どのバイナリをどの引数で起動するか）と権限（sandbox / 承認）に影響する設定は `machine` スコープとし、リポジトリの `.vscode/settings.json` から上書きできないようにする。これを怠ると、リポジトリをクローンして開いただけで任意コマンドが実行され、Codexのサンドボックスも無効化される。
 
-| キー                       | 型       | 既定        | スコープ            | 説明                                                                                       |
-| -------------------------- | -------- | ----------- | ------------------- | ------------------------------------------------------------------------------------------ |
-| `codex.executablePath`     | string   | `codex`     | **machine**         | 実行ファイルのパス                                                                         |
-| `codex.codexHome`          | string   | `""`        | **machine**         | 空なら `CODEX_HOME` → `~/.codex`                                                           |
-| `codex.additionalArgs`     | string[] | `[]`        | **machine**         | 任意の追加引数                                                                             |
-| `codex.sandbox`            | enum     | `""`        | **machine**         | `read-only` / `workspace-write` / `danger-full-access`                                     |
-| `codex.approvalMode`       | enum     | `""`        | **machine**         | `untrusted` / `on-request` / `never`                                                       |
-| `codex.model`              | string   | `""`        | machine-overridable | 空なら `-m` を渡さずconfig.tomlに委譲                                                      |
-| `codex.reasoningEffort`    | string   | `""`        | machine-overridable | `model_reasoning_effort`。専用フラグが無いため `-c model_reasoning_effort=<値>` として渡す |
-| `codex.profile`            | string   | `""`        | machine-overridable | `-p`                                                                                       |
-| `codex.history.scope`      | enum     | `workspace` | window              | `workspace` / `all`                                                                        |
-| `codex.history.maxEntries` | number   | `200`       | window              | 一覧構築の上限件数                                                                         |
+| キー                         | 型       | 既定        | スコープ            | 説明                                                                                       |
+| ---------------------------- | -------- | ----------- | ------------------- | ------------------------------------------------------------------------------------------ |
+| `codex.executablePath`       | string   | `codex`     | **machine**         | 実行ファイルのパス                                                                         |
+| `codex.codexHome`            | string   | `""`        | **machine**         | 空なら `CODEX_HOME` → `~/.codex`                                                           |
+| `codex.additionalArgs`       | string[] | `[]`        | **machine**         | 任意の追加引数                                                                             |
+| `codex.sandbox`              | enum     | `""`        | **machine**         | `read-only` / `workspace-write` / `danger-full-access`。会話の途中でも変えられる（§9.5）   |
+| `codex.sandboxWritableRoots` | string[] | `[]`        | **machine**         | `workspace-write` のときに書き込みを許す追加の場所。絶対パスのみ                           |
+| `codex.sandboxNetworkAccess` | boolean  | `false`     | **machine**         | `workspace-write` のときにネットワークへ出られるか                                         |
+| `codex.approvalMode`         | enum     | `""`        | **machine**         | `untrusted` / `on-request` / `never`                                                       |
+| `codex.model`                | string   | `""`        | machine-overridable | 空なら `-m` を渡さずconfig.tomlに委譲                                                      |
+| `codex.reasoningEffort`      | string   | `""`        | machine-overridable | `model_reasoning_effort`。専用フラグが無いため `-c model_reasoning_effort=<値>` として渡す |
+| `codex.profile`              | string   | `""`        | machine-overridable | `-p`                                                                                       |
+| `codex.history.scope`        | enum     | `workspace` | window              | `workspace` / `all`                                                                        |
+| `codex.history.maxEntries`   | number   | `200`       | window              | 一覧構築の上限件数                                                                         |
 
 Claude Code側（`claude.*`）と作業記録（`agent.activityLog.*`）の設定は §14・§15 で扱う。実際に登録している一覧は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている。
 
@@ -482,11 +489,23 @@ unit testでは以下を検証する。
 ```
 turn/started
   item/started → item/agentMessage/delta（ストリーミング）→ item/completed
+  item/started → item/commandExecution/outputDelta（コマンド出力）→ item/completed
 thread/tokenUsage/updated / account/rateLimits/updated
 turn/completed
 ```
 
 扱うのは `item` 系・`turn` 系・`thread/status/changed`・使用量・`thread/name/updated` のみ。**未知の通知は状態を変えずに素通しする**（プロトコルの追加で壊れないため）。ThreadItemは18種あるが、未知の種類も種類名だけ保持して捨てない。
+
+### コマンド出力の逐次表示
+
+`item/commandExecution/outputDelta`（`{threadId, turnId, itemId, delta}`）を購読し、エージェントの応答と同じように本文へ積む。これを見ないと `item/completed` の `aggregatedOutput` が届くまで何も出ず、長いコマンドは進んでいるのか分からない。
+
+- **上限を超えた分は先頭を捨てる**（`MAX_OUTPUT_CHARS` = 200,000文字）。`find /` のような出力は際限なく伸びるため、全部持つと状態の受け渡しと描画が重くなる。TUIも古い行から流れて消える
+- 捨てた印は本文に混ぜない。混ぜると「コピー」がそのまま使えなくなるので、`ChatItem.truncated` で持ち、見出しに「先頭は省略」と出す
+- `item/completed` の `aggregatedOutput` にも同じ上限をかける。デルタで積んだ本文を空の completed で消さないのは既存の `upsertItem` の方針どおり
+- Claude Code側は `tool_result` が一括で届くため逐次表示はできない。**上限と折りたたみだけ共通**にする
+- 画面は `MAX_VISIBLE_LINES`（20行）を超えたら末尾だけ見せ、「全体を表示（N行）」で開ける。開いた状態は要素と一緒に保つので、出力が伸びても勝手に閉じない
+- 実行中は見出しに「実行中」と出し、本文の左に色を付ける（Codexは `inProgress`、Claude Codeは `running`）
 
 ### 接続
 
@@ -498,6 +517,24 @@ turn/completed
 
 - 宛先の画面が見つからない要求は**必ず拒否側に倒す**。ユーザーの目に触れないまま実行を許さないため。
 - 画面を閉じるときは保留中の要求を全て `cancel` で解放する。放置するとCodexが待ち続ける。
+
+### サンドボックスをターン単位で変える
+
+`turn/start` の `sandboxPolicy` は「このターン以降」に効く（app-serverのスキーマの文言そのまま）。モデル・effort・承認方針と同じく**毎ターン渡す**ので、会話の途中で権限を変えられる。読み取り専用で始めた会話の途中で書き込みを許すのに、セッションを開き直す必要は無い。
+
+`thread/start` は文字列（`read-only` など）を取るが、ターン単位ではタグ付きunionのオブジェクトになる。**形が違うだけで指定できる内容は同じ**。
+
+| 設定の値             | `sandboxPolicy`                |
+| -------------------- | ------------------------------ |
+| `read-only`          | `{ type: 'readOnly' }`         |
+| `workspace-write`    | `{ type: 'workspaceWrite' }`   |
+| `danger-full-access` | `{ type: 'dangerFullAccess' }` |
+| 空（CLIへ委譲）      | 載せない                       |
+
+- 省略した項目はapp-server側の既定になる（`writableRoots: []` / `networkAccess: false` / `excludeSlashTmp: false` / `excludeTmpdirEnvVar: false`）。これは `thread/start` に `sandbox: 'workspace-write'` を渡したときの実効値と同じ形
+- `codex.sandboxWritableRoots` / `codex.sandboxNetworkAccess` で `workspaceWrite` の中身を指定できる。前者はTUIの `/sandbox-add-read-dir` に相当する。**絶対パスでない要素は黙って落とす**（app-serverが `AbsolutePathBuf` を要求するため）
+- **権限を広げる変更には確認を挟む**。`SANDBOX_MODES` の宣言順がそのまま安全順で、いまの値が空（CLIへ委譲）のときは何が効いているか判らないため、読み取り専用以外への変更を確認対象にする
+- 優先順位は Plan mode > 設定 > スレッド開始時の指定。Plan mode中はセレクタを無効にして理由を出す
 
 ### 会話途中からの分岐
 
@@ -601,6 +638,33 @@ cwdの解決に差があるのは、Claude Codeの `--resume` がcwdを引数と
 - `turnId` がnullの要求（ターン外）も表示する。宛先は `threadId` で決める
 - 画面を閉じたときは `cancel` で解放する。放置するとapp-serverが待ち続ける
 - カードは**顔ぶれが変わったときだけ作り直す**。状態の再描画のたびに作り直すと入力中の値が消える
+
+### 9.10 ファイル参照の補完（`@`）
+
+TUIは `@` でワークスペースのファイルを補完できる。チャット画面でも同じことをする。候補の描画と操作はスラッシュコマンド（§9.8）と同じ仕組みを使い、`menuMode` で中身を切り替える。
+
+- **`@` は候補を出す引き金でしかない**。確定すると `@` は消え、ワークスペース相対パスだけが入る。app-serverが `@path` を解釈するか確かめられていないため、どちらのCLIでもただのパス文字列として読める形に倒した
+- 直前が行頭か空白のものだけを拾う。メールアドレスやデコレータを書いている途中で候補が出ないように
+
+#### 候補の集め方
+
+`FileScanPort`（`provider/fileMentions.ts`）で走査する。VSCodeの `findFiles` を使わないのは、`.gitignore` を尊重しないため。
+
+- 除外は**固定の一覧（`DEFAULT_IGNORE_DIRS`）+ ワークスペース直下の `.gitignore` の簡易解釈**
+- **`.gitignore` の簡易解釈にとどめる**。否定（`!`）・階層ごとの `.gitignore`・複雑な `**` の組み合わせは扱わず、読めない行は無視する。正確さより「生成物が候補を埋め尽くさないこと」を取る。除外し損ねて候補に出るほうが、間違って消すよりまし
+- 末尾が `/` の単純な行はディレクトリ名として扱い、**走査そのものを止める**。`node_modules` の下を歩いてから捨てるのは無駄
+
+#### 鮮度と間引き
+
+`@` を打つたびにWebviewからホストへ要求する。エージェント自身が作ったファイルをすぐ候補に出したいため、開いた時に一度だけ集める方式は採らない。代わりにホスト側が**5秒だけ結果を使い回す**ので、連打しても走査は繰り返さない。
+
+走査は20,000件、画面に返すのは50件で頭打ちにする。
+
+#### 絞り込みはホスト側に置く
+
+同じ規則をWebviewにも書くと、片方だけ直したときに「候補に出たのに違うものが入る」状態になる。`filterFiles` はホスト側の1か所だけに置き、Webviewは届いた並びをそのまま描く。
+
+打っている途中に古い応答が届くことがあるため、**要求に含めた語と応答の語が一致するときだけ**描き替える。
 
 ## 10. 既知の制約
 
@@ -744,7 +808,8 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 
 Codex画面と同じHTML（`renderShell`）を使うため、画面下の設定行はClaude Code側にも出る。承認方法の選択肢だけプロバイダごとに差し替える（Codexは `APPROVAL_MODES`、Claude Codeは `--permission-mode` の6種）。
 
-- Webview側のスクリプトはCodexのスナップショット形状を前提にしているため、Claude側は同じ形へ整えて送る。モデルカタログが無いのでエイリアスを `ModelInfo` 相当に見せ、キーも `reasoningEffort` → `effort`、`approvalMode` → `permissionMode` と読み替える。
+- Webview側のスクリプトはCodexのスナップショット形状を前提にしているため、Claude側は同じ形へ整えて送る。モデル一覧は `initialize` の応答を `ModelInfo` へ正規化したものを渡し、キーは `reasoningEffort` → `effort`、`approvalMode` → `permissionMode` と読み替える。
+- effortを持たないモデルを選んでいる間は、effortのセレクタを無効にして理由を出す（黙って選べなくしない）。
 - **効かせ方が違う**。Codex画面は `turn/start` に毎回渡すので次の発言から効く。Claude Codeは1プロセス1セッションで起動引数が固定なので、control protocol で実行中のセッションへ伝える。
 
 #### Claude Codeのセッション中の変更（実測で確認）
@@ -839,6 +904,7 @@ Claude Codeは消費率（`usedPercent`）を返さない。実測した中身�
 - **`turn/start` の指定は「このターン以降」に効く**。一度送ったら、抜けるときに明示的に戻さないと読み取り専用のままになる
 - 戻し先は `thread/start` / `thread/resume` の応答に入っている `approvalPolicy` と `sandbox` を控えておく。設定値から組み立て直すと、設定が空（CLIの `config.toml` へ委譲）のときに推測することになる
 - **戻し先を読めなかったスレッドではPlan modeに入れない**。入れてしまうと読み取り専用から出られなくなる
+- 設定のサンドボックス（§9.5「サンドボックスをターン単位で変える」）よりPlan modeを優先する。書けないことを権限で保証するため
 - TUIの `/plan` は計画を促す指示も入れるが、`turn/start` に指示を差し込む口は無い（`developerInstructions` は `thread/start` のみ）。**指示は足さない**。ユーザーが送った文面をそのまま送る。つまりTUIの `/plan` とは別物で、保証するのは「書けないこと」だけ
 - 進行中のターンには効かない（`turn/steer` に権限を渡す口が無い）
 
@@ -875,6 +941,31 @@ Claude Codeは消費率（`usedPercent`）を返さない。実測した中身�
 - **待ち行列にも画像を積む**。`ChatState.queued` を文字列の配列から `{ text, attachments }` の配列へ変えた。テキストだけ積むと、応答中に貼った画像が黙って消える
 - 送信に失敗したら添付を戻す。取り出したまま失うと貼り直しを強いることになる
 - **CSPに `img-src data:` が要る**。`default-src 'none'` なので、書き忘れるとサムネイルが黙って出ない。`chatCsp.ts` に切り出してテストで見張っている
+
+### 14.12 会話に出す画像
+
+送った画像・モデルが見た画像・モデルが生成した画像を会話の中に描く。`ChatItem.images` に持ち、種類ごとの読み取りは `imageRefs.ts` に集約する。
+
+| 出どころ                            | 形                                                             | 実測     |
+| ----------------------------------- | -------------------------------------------------------------- | -------- |
+| Codex `userMessage.content`         | `{type:'image', detail:null, url:'data:image/png;base64,...'}` | ○        |
+| Codex `userMessage.content`         | `{type:'localImage', path}`                                    | スキーマ |
+| Codex `imageView`                   | `{id, path, type:'imageView'}`                                 | スキーマ |
+| Codex `imageGeneration`             | `{id, result, status, revisedPrompt, savedPath}`               | スキーマ |
+| Claude Code `tool_result.content[]` | `{type:'image', source:{type:'base64', media_type, data}}`     | ○        |
+
+`imageView` / `imageGeneration` は `codex app-server generate-json-schema` の `ThreadItem` に定義がある。手元のターンでは出せなかったため、**通知の形はスキーマを根拠にしている**（実機確認で確かめる）。送った画像が `userMessage` にそのまま残ることと、Claude Codeの `tool_result` の形は実測で確認した。
+
+**Webviewへ渡すのはデータURLだけ。** `localResourceRoots` を広げて `asWebviewUri` で参照させると、その範囲のファイルをWebviewから自由に読めるようになる。パスで届いた画像は次の流れでホスト側が読む。
+
+1. Webviewが `requestImage { path }` を送る（同じパスは1回だけ）
+2. ホストが**会話に出てきたパスかどうか**を確かめる（`buildImageReply`）。会話に無いパスは読まない
+3. 拡張子から種類を決め、10MBまで読んでデータURLにする
+4. `imageData { path, dataUrl, error }` で返す。読めなければ理由を返し、画面に出す
+
+- 対応形式は添付と同じ（png / jpeg / gif / webp）。svgは弾く
+- 表示できないURL（`http` など）は読み込ませず、「表示できない画像 (URL)」と出す。CSPが `img-src data:` しか許さないため、そのまま渡すと黙って欠ける
+- 既定はサムネイル（高さ160pxまで）。クリックで原寸に広げる。拡大した状態は要素と一緒に保つ
 
 ## 15. 作業記録（日報・週報連携）
 
@@ -1488,7 +1579,10 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 | `allow`                                       | 有効。ただし `.git` 配下と `permissions` 種別は解除できない。使用時は実行前の確認とViewへの常時表示（§16.7）                                                                           |
 | `cwd`                                         | ワークスペースフォルダの実パス配下に限る。外れていれば実行前エラー                                                                                                                     |
 | `executablePath` `additionalArgs` `codexHome` | **YAMLからは指定できない**。フィールド自体を設けない                                                                                                                                   |
+| `sandboxWritableRoots` `sandboxNetworkAccess` | **YAMLからは指定できず、拡張機能の設定も継承しない**。タスクでは常に空・無効に固定する（後述）                                                                                         |
 | `model` `effort`                              | 自由に指定できる（これらは `machine-overridable` であり、実行経路や権限には関わらない）                                                                                                |
+
+`sandboxWritableRoots` と `sandboxNetworkAccess` は、`workspace-write` の範囲をワークスペースの外やネットワークへ広げる**追加の許可**である。YAMLにこれを指定する項目は設けていないので、素直に作るなら拡張機能の設定をそのまま引き継ぐことになる。だがそれをすると、人が対話セッション用に意識して許可した拡張が、**YAMLからは見えも書けもしない形で無人実行のタスクへ暗黙に伝わる**。クランプの対象になるフィールドが存在しない以上、安全側（拡張しない）に固定する。タスクに広い書き込み先が要るなら、`cwd` か `isolation` で表現する。
 
 `cwd` を無検証で許すと、`sandbox: workspace-write` の「workspace」の基準そのものを付け替えられる（例: `cwd: ~/.ssh` にすればそこが書き込み可能な領域になる）。境界の検証はサンドボックスの意味を保つために要る。
 

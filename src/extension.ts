@@ -3,6 +3,7 @@ import { ActivityLogger, nodeClock, resolveBufferDir } from './activity/activity
 import type { RecordRequest as ActivityRequest } from './activity/activityLogger';
 import { nodeActivityAppender } from './activity/nodeAppender';
 import { claudePaths, resolveClaudeHome } from './claude/cliLocator';
+import { ClaudeModelProbe } from './claude/modelProbe';
 import { ClaudeProvider } from './claude/provider';
 import { ClaudeSessionStore } from './claude/sessionStore';
 import { ClaudeTranscriptWatcher } from './claude/transcriptWatcher';
@@ -30,6 +31,8 @@ import { ProviderRegistry } from './provider/registry';
 import type { AgentProvider } from './provider/types';
 import { createLogger, type Logger } from './log';
 import { nodeFileSystem } from './session/nodeFileSystem';
+import { nodeFileScan } from './session/nodeFileScan';
+import { FileMentionCatalog } from './provider/fileMentions';
 import { InMemoryMetaCache } from './session/ports';
 import { SessionStore } from './session/sessionStore';
 import { SessionActions, nodeCommandRunner, type SessionAction } from './session/sessionActions';
@@ -85,11 +88,20 @@ export function activate(context: vscode.ExtensionContext): void {
     void activity.record(request);
   };
 
+  /** Claude Code固有の機能（設定パネル・モデル一覧）が使う実行ファイル。 */
+  const claudePath = (): string => resolveExecutable(claude, log) ?? 'claude';
+
+  // 単発の問い合わせ（fork・モデル一覧）に使う。会話用の接続とは別プロセス
+  const appServer = new AppServerClient(codexPath, log);
+  const claudeModels = new ClaudeModelProbe(claudePath, log);
+
   const settings = new SettingsProvider(
     nodeFileSystem,
     paths.modelsCache,
     paths.configToml,
     `${claudeDirs.home}/settings.json`,
+    () => appServer.listModels(),
+    () => claudeModels.read(),
     log,
   );
   // オーケストレータ（design.md §16）。`chat` / `claudeChat` は `WorkflowRunner` の
@@ -106,11 +118,15 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // 設定パネルを開かずCodex画面だけ使う場合でも選択肢が揃うよう、起動時に読む
   void settings.load();
+  // `@` のファイル候補。両方の画面で同じ一覧とキャッシュを使う
+  const mentions = new FileMentionCatalog(nodeFileScan);
+
   const chat = new ChatViewManager(
     codexPath,
     settings,
     home,
     nodeFileSystem,
+    mentions,
     log,
     (activity) => recordActivity({ ...activity, source: 'codex' }),
     isTaskManagedThread,
@@ -118,8 +134,9 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(chat);
 
   const claudeChat = new ClaudeChatViewManager(
-    () => resolveExecutable(claude, log) ?? 'claude',
+    claudePath,
     nodeFileSystem,
+    mentions,
     claudeHome,
     claudeStore,
     settings,
@@ -162,7 +179,6 @@ export function activate(context: vscode.ExtensionContext): void {
   // （コマンド登録などで使う）はこの束縛を指し、常にWorkflowRunnerとして扱える
   workflowRunnerRef.current = workflowRunner;
 
-  const appServer = new AppServerClient(codexPath, log);
   const conversations = new ConversationViewManager(nodeFileSystem, store, log, (session, turnId) =>
     forkFromTurn(codex, appServer, chat, tree, log, session, turnId),
   );

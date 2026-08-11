@@ -1,4 +1,5 @@
-import { appendNotice, type ChatItem, type ChatState } from '../appserver/chatState';
+import { appendNotice, capOutput, type ChatItem, type ChatState } from '../appserver/chatState';
+import { readClaudeResultImages } from '../provider/imageRefs';
 import { describeTool } from './transcript';
 
 /**
@@ -146,10 +147,15 @@ function applyUser(state: ChatState, event: Record<string, unknown>): ChatState 
       if (index === -1 || existing === undefined) {
         continue;
       }
+      // ツールの出力は際限なく長くなりうる。Codex側と同じ上限で末尾だけ残す
+      const output = capOutput(resultText(part['content']));
       const next = [...items];
       next[index] = {
         ...existing,
-        text: resultText(part['content']),
+        text: output.text,
+        truncated: output.truncated,
+        // 画像を読むツール（Read）は base64 の image ブロックで返す（実測）
+        images: readClaudeResultImages(part['content']),
         status: part['is_error'] === true ? 'エラー' : 'completed',
       };
       items = next;

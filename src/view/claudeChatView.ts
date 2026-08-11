@@ -22,9 +22,17 @@ import type {
   TaskSessionHost,
   TaskSessionInput,
 } from '../orchestrator/taskSession';
-import { addAttachment, confirmCompact, renderShell, reportTurnResult } from './chatView';
+import {
+  addAttachment,
+  confirmCompact,
+  postFileMentions,
+  postImageData,
+  renderShell,
+  reportTurnResult,
+} from './chatView';
+import type { FileMentionCatalog } from '../provider/fileMentions';
 import { readPersistedThreadId } from './panelState';
-import { CLAUDE_EFFORTS, CLAUDE_PERMISSION_MODES } from '../claude/types';
+import { CLAUDE_PERMISSION_MODES } from '../claude/types';
 import type { ClaudeConfig } from '../claude/types';
 import type { ClaudeEditableKey, SettingsProvider } from './settingsProvider';
 import type { ChatActivity } from './chatView';
@@ -101,6 +109,8 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
   constructor(
     private readonly claudePath: () => string,
     private readonly fs: FileSystemPort,
+    /** `@` のファイル候補。Codex画面と同じカタログを使い回す。 */
+    private readonly mentions: FileMentionCatalog,
     private readonly claudeHome: string,
     private readonly store: ClaudeSessionStore,
     private readonly settings: SettingsProvider,
@@ -155,7 +165,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
    * 画面下の設定行へ現在値と選択肢を送る。
    *
    * 描画はCodex画面と同じスクリプトなので、Codex側のスナップショットと同じ形に整えて渡す。
-   * Claude Codeにはモデルカタログが無いため、エイリアスを `ModelInfo` 相当に見せる。
+   * モデルの一覧は `initialize` の応答から取ったもの（取れなければエイリアス）。
    */
   private refreshSettings(entry: ClaudePanel): void {
     if (entry.disposed || entry.panel === undefined) {
@@ -169,14 +179,8 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),
         settings: {
-          models: snapshot.models.map((slug) => ({
-            slug,
-            displayName: slug,
-            description: undefined,
-            defaultEffort: undefined,
-            efforts: [],
-          })),
-          efforts: [...CLAUDE_EFFORTS],
+          models: snapshot.models,
+          efforts: snapshot.efforts,
           model: snapshot.model,
           reasoningEffort: snapshot.effort,
           approvalMode: snapshot.permissionMode,
@@ -633,6 +637,19 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         entry.loop.noteUserAction();
         this.dispatch(entry, text, true);
         this.refreshSettings(entry);
+        return;
+      }
+      if (type === 'requestFiles') {
+        // タブが閉じている（タスク管理下でパネルが無い）間は送り先が無い
+        if (entry.panel !== undefined) {
+          void postFileMentions(entry.panel, this.mentions, entry.cwd, m['query']);
+        }
+        return;
+      }
+      if (type === 'requestImage') {
+        if (entry.panel !== undefined) {
+          void postImageData(entry.panel, this.fs, entry.session.getState().items, m['path']);
+        }
         return;
       }
       if (type === 'attach') {

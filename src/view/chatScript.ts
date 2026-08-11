@@ -16,6 +16,10 @@ export function chatScript(agentLabel: string): string {
   let commands = [];
   let matched = [];
   let activeIndex = 0;
+  // 出している候補の種類。'command' はスラッシュコマンド、'file' は @ のファイル参照
+  let menuMode = '';
+  /** 最後に描いた項目。画像が遅れて届いたときに描き直すため保つ。 */
+  let lastItems = undefined;
 
   const KIND_LABEL = {
     userMessage: 'あなた',
@@ -28,10 +32,24 @@ export function chatScript(agentLabel: string): string {
     plan: '計画',
     contextCompaction: '会話を圧縮しました',
     settingsChanged: '設定',
+    imageView: '画像',
+    imageGeneration: '画像の生成',
   };
 
   /** 残りがこの割合を下回ったら警告として見せる。 */
   const LOW_CONTEXT_PERCENT = 20;
+
+  /** コマンド出力を畳まずに出す行数。超えた分は末尾だけ見せる。 */
+  const MAX_VISIBLE_LINES = 20;
+
+  /** app-serverが返すコマンドの状態。そのまま出すと英語のままになる。 */
+  const STATUS_LABEL = {
+    inProgress: '実行中',
+    running: '実行中',
+    completed: '完了',
+    failed: '失敗',
+    declined: '拒否',
+  };
 
   const CLASS_OF = {
     userMessage: 'user',
@@ -62,7 +80,8 @@ export function chatScript(agentLabel: string): string {
     copy.textContent = 'コピー';
     copy.hidden = true;
     copy.addEventListener('click', () => {
-      const text = node.body.textContent || '';
+      // 畳んでいても全文をコピーする（見えている末尾だけにしない）
+      const text = node.fullText || '';
       navigator.clipboard.writeText(text).then(
         () => {
           copy.textContent = 'コピーしました';
@@ -72,6 +91,16 @@ export function chatScript(agentLabel: string): string {
       );
     });
     actions.appendChild(copy);
+
+    // 長いコマンド出力の展開。開いた状態は要素と一緒に保つ（再描画で閉じない）
+    const expand = document.createElement('button');
+    expand.className = 'secondary';
+    expand.hidden = true;
+    expand.addEventListener('click', () => {
+      node.expanded = !node.expanded;
+      renderBody(node, node.lastItem);
+    });
+    actions.appendChild(expand);
 
     const fork = document.createElement('button');
     fork.className = 'secondary';
@@ -91,13 +120,112 @@ export function chatScript(agentLabel: string): string {
     body.className = 'body';
     wrap.appendChild(body);
 
+    const images = document.createElement('div');
+    images.className = 'images';
+    images.hidden = true;
+    wrap.appendChild(images);
+
     const diffs = document.createElement('div');
     diffs.className = 'diffs';
     diffs.hidden = true;
     wrap.appendChild(diffs);
 
-    const node = { wrap, label, body, diffs, diffKey: '', copy, fork, forkTarget: undefined };
+    const node = {
+      wrap,
+      label,
+      body,
+      images,
+      imageKey: '',
+      diffs,
+      diffKey: '',
+      copy,
+      expand,
+      fork,
+      forkTarget: undefined,
+      expanded: false,
+      fullText: '',
+      lastItem: undefined,
+    };
     return node;
+  }
+
+  /**
+   * 本文を描く。コマンド出力が長い場合は末尾だけ見せ、展開できるようにする。
+   *
+   * 出力は途中経過が流れ込んで伸び続けるため、全部を描き続けると重くなる。
+   */
+  function renderBody(node, item) {
+    if (!item) return;
+    node.lastItem = item;
+    const text = item.text || '';
+    node.fullText = text;
+
+    const lines = item.kind === 'commandExecution' ? text.split('\\n') : undefined;
+    const overflow = lines !== undefined && lines.length > MAX_VISIBLE_LINES;
+    const shown =
+      overflow && !node.expanded ? lines.slice(lines.length - MAX_VISIBLE_LINES).join('\\n') : text;
+
+    if (node.body.textContent !== shown) node.body.textContent = shown;
+    node.body.hidden = text === '';
+    node.copy.hidden = text === '';
+
+    node.expand.hidden = !overflow;
+    if (overflow) {
+      node.expand.textContent = node.expanded
+        ? '末尾だけ表示'
+        : '全体を表示（' + lines.length + '行）';
+    }
+  }
+
+  /**
+   * パスで届いた画像の中身。ホスト側が読んで返したデータURLを覚える。
+   *
+   * Webviewから直接ファイルを読むことはできない（CSPは img-src data: のみ）。
+   * 値は 'data:...' か、読めなかった理由の文字列。
+   */
+  const imageData = new Map();
+  /** 要求済みのパス。同じ画像を何度も頼まない。 */
+  const imageAsked = new Set();
+
+  function requestImage(path) {
+    if (imageAsked.has(path)) return;
+    imageAsked.add(path);
+    vscode.postMessage({ type: 'requestImage', path });
+  }
+
+  /** 画像1枚。クリックで原寸表示へ切り替える。 */
+  function createImage(image) {
+    const wrap = document.createElement('div');
+    wrap.className = 'image';
+
+    const src = image.dataUrl || (image.path ? imageData.get(image.path) : undefined);
+    if (src && src.slice(0, 5) === 'data:') {
+      const img = document.createElement('img');
+      img.src = src;
+      img.alt = image.alt || '';
+      img.title = image.alt || '';
+      img.addEventListener('click', () => wrap.classList.toggle('zoom'));
+      wrap.appendChild(img);
+      return wrap;
+    }
+
+    // まだ読めていない・読めなかった。黙って空白を残さず理由を出す
+    const note = document.createElement('div');
+    note.className = 'image-note';
+    if (image.path) {
+      requestImage(image.path);
+      note.textContent = src ? src + ': ' + image.path : '読み込み中… ' + image.path;
+    } else {
+      note.textContent = image.alt || '画像を表示できません';
+    }
+    wrap.appendChild(note);
+    return wrap;
+  }
+
+  function renderImages(container, images) {
+    container.replaceChildren();
+    for (const image of images) container.appendChild(createImage(image));
+    container.hidden = images.length === 0;
   }
 
   /** 1ファイル分の差分。既定は畳んでおき、開いた状態は要素を使い回して保つ。 */
@@ -135,14 +263,27 @@ export function chatScript(agentLabel: string): string {
   function updateNode(node, item, forkTarget) {
     const bits = [KIND_LABEL[item.kind] || item.kind];
     if (item.detail) bits.push(item.detail);
-    if (item.status) bits.push(item.status);
+    if (item.status) bits.push(STATUS_LABEL[item.status] || item.status);
+    // 上限を超えて先頭を捨てた分は本文に印を混ぜず、ここで断る
+    if (item.truncated) bits.push('先頭は省略');
     const label = bits.join(' ・ ');
     if (node.label.textContent !== label) node.label.textContent = label;
 
-    const text = item.text || '';
-    if (node.body.textContent !== text) node.body.textContent = text;
-    node.body.hidden = text === '';
-    node.copy.hidden = text === '';
+    // 実行中のコマンドは見た目でも区別する（Codexは inProgress、Claude Codeは running）
+    const running =
+      item.kind === 'commandExecution' &&
+      (item.status === 'inProgress' || item.status === 'running');
+    node.wrap.classList.toggle('running', running);
+
+    renderBody(node, item);
+
+    // 中身が同じなら作り直さない。拡大した画像が勝手に戻るのを防ぐ
+    const images = item.images || [];
+    const imageKey = JSON.stringify(images) + '|' + images.map((i) => imageData.get(i.path) || '').join(',');
+    if (node.imageKey !== imageKey) {
+      node.imageKey = imageKey;
+      renderImages(node.images, images);
+    }
 
     // 中身が同じなら作り直さない。開いた差分が勝手に閉じるのを防ぐ
     const diffs = item.diffs || [];
@@ -446,7 +587,7 @@ export function chatScript(agentLabel: string): string {
     select.value = current;
   }
 
-  function applySettings(s) {
+  function applySettings(s, planning) {
     if (!s) return;
     const nameOf = (slug) => {
       const m = s.models.find((x) => x.slug === slug);
@@ -461,13 +602,33 @@ export function chatScript(agentLabel: string): string {
       nameOf,
     );
     fillSelect(el('reasoningEffort'), s.efforts, s.reasoningEffort, defaultLabel(d.reasoningEffort));
+    // effortを持たないモデル（Claude Codeのhaikuなど）では選ばせない
+    const selected = s.models.find((m) => m.slug === s.model);
+    const noEffort = !!selected && selected.supportsEffort === false;
+    el('reasoningEffort').disabled = noEffort;
+    el('reasoningEffort').title = noEffort ? 'このモデルはeffortを選べません' : '';
     const approvalDefault = el('approvalMode').querySelector('option[value=""]');
     if (approvalDefault) approvalDefault.textContent = defaultLabel(d.approvalMode);
     el('approvalMode').value = s.approvalMode;
+
+    // サンドボックスはCodex画面にしか無い（Claude Codeは承認方法に集約されている）
+    const sandbox = el('sandbox');
+    if (sandbox) {
+      const sandboxDefault = sandbox.querySelector('option[value=""]');
+      if (sandboxDefault) sandboxDefault.textContent = defaultLabel(d.sandbox);
+      sandbox.value = s.sandbox || '';
+      // 計画モード中は読み取り専用が優先される。選ばせても効かないので止める
+      sandbox.disabled = !!planning;
+      sandbox.title = planning
+        ? '計画モード中は読み取り専用が優先されます'
+        : '次の発言から効きます';
+    }
   }
 
-  for (const key of ['model', 'reasoningEffort', 'approvalMode']) {
-    el(key).addEventListener('change', (e) => {
+  for (const key of ['model', 'reasoningEffort', 'approvalMode', 'sandbox']) {
+    const select = el(key);
+    if (!select) continue;
+    select.addEventListener('change', (e) => {
       vscode.postMessage({ type: 'config', key, value: e.target.value });
     });
   }
@@ -514,9 +675,10 @@ export function chatScript(agentLabel: string): string {
     sentTexts = state.items
       .filter((i) => i.kind === 'userMessage' && i.text.trim() !== '')
       .map((i) => i.text);
-    applySettings(state.settings);
+    applySettings(state.settings, state.planMode);
     const log = el('log');
     const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+    lastItems = state.items;
     syncItems(state.items);
     // 承認カードは一時的なので作り直してよい（会話本文の選択は壊れない）
     const approvals = el('approvals');
@@ -740,13 +902,33 @@ export function chatScript(agentLabel: string): string {
     return m ? m[1] : undefined;
   }
 
-  function commandsOpen() {
+  // @ で始まる語を書いている間だけファイル候補を出す。メールアドレスなどを邪魔しないよう、
+  // 直前が行頭か空白のものだけを拾う
+  function mentionQuery(input) {
+    const upto = input.value.slice(0, input.selectionStart);
+    const m = /(?:^|\\s)@([^\\s@]*)$/.exec(upto);
+    return m ? m[1] : undefined;
+  }
+
+  function menuOpen() {
     return !el('commands').hidden;
   }
 
-  function renderCommands(query) {
-    const box = el('commands');
+  function showCommands(query) {
+    menuMode = 'command';
     matched = filterCommands(commands, query);
+    renderMenu();
+  }
+
+  /** ファイル候補はホスト側で絞ってから届く。絞り込みの規則を2か所に持たないため */
+  function showFiles(list) {
+    menuMode = 'file';
+    matched = list;
+    renderMenu();
+  }
+
+  function renderMenu() {
+    const box = el('commands');
     if (matched.length === 0) {
       box.hidden = true;
       return;
@@ -755,23 +937,31 @@ export function chatScript(agentLabel: string): string {
     if (activeIndex >= matched.length) activeIndex = 0;
     box.hidden = false;
     box.replaceChildren();
-    matched.forEach((command, index) => {
+    matched.forEach((item, index) => {
       const row = document.createElement('div');
       row.className = 'row' + (index === activeIndex ? ' active' : '');
 
       const name = document.createElement('span');
       name.className = 'name';
-      name.textContent = '/' + command.name + (command.argumentHint ? ' ' + command.argumentHint : '');
-      row.appendChild(name);
-
       const desc = document.createElement('span');
       desc.className = 'desc';
-      desc.textContent = command.description || '';
-      row.appendChild(desc);
 
+      if (menuMode === 'file') {
+        // ファイル名を主、置き場所を従にする。同名のファイルを見分けられるように
+        const path = String(item);
+        const cut = path.lastIndexOf('/');
+        name.textContent = cut < 0 ? path : path.slice(cut + 1);
+        desc.textContent = cut < 0 ? '' : path.slice(0, cut);
+      } else {
+        name.textContent = '/' + item.name + (item.argumentHint ? ' ' + item.argumentHint : '');
+        desc.textContent = item.description || '';
+      }
+
+      row.appendChild(name);
+      row.appendChild(desc);
       row.addEventListener('mousedown', (e) => {
         e.preventDefault();
-        acceptCommand(index);
+        acceptItem(index);
       });
       box.appendChild(row);
     });
@@ -792,23 +982,35 @@ export function chatScript(agentLabel: string): string {
     return prefix.concat(partial);
   }
 
-  function closeCommands() {
+  function closeMenu() {
     el('commands').hidden = true;
     activeIndex = 0;
+    menuMode = '';
   }
 
   /** 候補を確定して入力欄へ入れる。送信まではしない（引数を書き足せるように） */
-  function acceptCommand(index) {
-    const command = matched[index];
-    if (!command) return;
+  function acceptItem(index) {
+    const item = matched[index];
+    if (!item) return;
     const input = el('input');
     const upto = input.value.slice(0, input.selectionStart);
-    const lineStart = upto.lastIndexOf('\\n') + 1;
     const rest = input.value.slice(input.selectionStart);
-    const inserted = '/' + command.name + ' ';
-    input.value = input.value.slice(0, lineStart) + inserted + rest;
-    input.selectionStart = input.selectionEnd = lineStart + inserted.length;
-    closeCommands();
+
+    if (menuMode === 'file') {
+      // @ は候補を出す引き金なので消す。CLIへはただの相対パスとして渡す
+      const at = upto.lastIndexOf('@');
+      if (at < 0) return;
+      const inserted = String(item) + ' ';
+      input.value = input.value.slice(0, at) + inserted + rest;
+      input.selectionStart = input.selectionEnd = at + inserted.length;
+    } else {
+      const lineStart = upto.lastIndexOf('\\n') + 1;
+      const inserted = '/' + item.name + ' ';
+      input.value = input.value.slice(0, lineStart) + inserted + rest;
+      input.selectionStart = input.selectionEnd = lineStart + inserted.length;
+    }
+
+    closeMenu();
     input.focus();
   }
 
@@ -917,38 +1119,45 @@ export function chatScript(agentLabel: string): string {
   });
 
   el('input').addEventListener('input', (e) => {
-    const query = commandQuery(e.target);
-    if (query === undefined) {
-      closeCommands();
+    const command = commandQuery(e.target);
+    if (command !== undefined) {
+      showCommands(command);
       return;
     }
-    renderCommands(query);
+    const mention = mentionQuery(e.target);
+    if (mention !== undefined) {
+      // 一覧はホストが持つ。走査し直すかどうかもホスト側で間引く
+      menuMode = 'file';
+      vscode.postMessage({ type: 'requestFiles', query: mention });
+      return;
+    }
+    closeMenu();
   });
 
-  el('input').addEventListener('blur', closeCommands);
+  el('input').addEventListener('blur', closeMenu);
 
   el('input').addEventListener('keydown', (e) => {
-    if (commandsOpen()) {
+    if (menuOpen()) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         activeIndex = (activeIndex + 1) % matched.length;
-        renderCommands(commandQuery(e.target) ?? '');
+        renderMenu();
         return;
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault();
         activeIndex = (activeIndex - 1 + matched.length) % matched.length;
-        renderCommands(commandQuery(e.target) ?? '');
+        renderMenu();
         return;
       }
       if (e.key === 'Tab' || (e.key === 'Enter' && !e.ctrlKey && !e.metaKey)) {
         e.preventDefault();
-        acceptCommand(activeIndex);
+        acceptItem(activeIndex);
         return;
       }
       if (e.key === 'Escape') {
         e.preventDefault();
-        closeCommands();
+        closeMenu();
         return;
       }
     }
@@ -974,6 +1183,17 @@ export function chatScript(agentLabel: string): string {
     if (!data) return;
     if (data.type === 'state') apply(data.state);
     if (data.type === 'commands') commands = data.commands || [];
+    if (data.type === 'files') {
+      // 打っている途中に古い応答が届くことがある。今の語と一致するものだけ出す
+      if (menuMode !== 'file') return;
+      if (mentionQuery(el('input')) !== data.query) return;
+      showFiles(data.files || []);
+    }
+    if (data.type === 'imageData' && data.path) {
+      imageData.set(data.path, data.dataUrl || data.error || '画像を読み込めませんでした');
+      // 届いた画像を反映する。差分がある項目だけ描き直される
+      if (lastItems) syncItems(lastItems);
+    }
   });
 
   vscode.postMessage({ type: 'ready' });

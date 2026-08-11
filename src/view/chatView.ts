@@ -6,7 +6,7 @@ import {
   describeApproval,
   type ApprovalDecision,
 } from '../appserver/approvals';
-import type { ChatState } from '../appserver/chatState';
+import type { ChatItem, ChatState } from '../appserver/chatState';
 import { ChatSession } from '../appserver/chatSession';
 import {
   AppServerConnection,
@@ -25,7 +25,7 @@ import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
-import { APPROVAL_MODES, type CodexConfig } from '../codex/types';
+import { APPROVAL_MODES, SANDBOX_MODES, type CodexConfig } from '../codex/types';
 import type { PromptSubmission } from '../appserver/prompts';
 import type {
   ApprovalHandler,
@@ -35,7 +35,9 @@ import type {
   TaskSessionInput,
 } from '../orchestrator/taskSession';
 import { AttachmentBox } from '../provider/attachments';
+import { buildImageReply } from '../provider/imageRefs';
 import { CommandCatalog } from '../provider/commandCatalog';
+import { FileMentionCatalog, filterFiles } from '../provider/fileMentions';
 import {
   CODEX_PSEUDO_COMMANDS,
   routePseudoCommand,
@@ -183,9 +185,68 @@ function toCodexConfig(input: TaskSessionInput): CodexConfig {
     reasoningEffort: input.config.effort,
     approvalMode: input.config.approvalMode,
     sandbox: input.sandbox,
+    // `sandboxWritableRoots` / `sandboxNetworkAccess` はworkspace-writeの範囲を
+    // ワークスペースの外・ネットワークへ広げる追加の許可（#83）。ワークフローのYAML
+    // スキーマ（design.md §16.2）にはこれを指定する項目が無く、`TaskSessionInput` /
+    // `TaskSessionConfig`（#52のクランプを通った値だけを運ぶ）も運んでこない。
+    // 拡張機能のグローバル設定（`codex.sandboxWritableRoots` 等）をそのまま継承すると、
+    // 人が対話セッション用に意識して許可した拡張が、YAMLからは見えない・書けない形で
+    // 無人実行のタスクへ暗黙に伝播してしまう（§16.16「YAMLは安全側にしか動かせない」を
+    // 拡張機能側の設定にまで広げた抜け道になる）。クランプ対象のフィールドが無い以上、
+    // 安全側の既定（拡張しない）に固定する
+    sandboxWritableRoots: [],
+    sandboxNetworkAccess: false,
     profile: '',
     additionalArgs: [],
   };
+}
+
+/**
+ * 会話に出てきた画像をWebviewへ返す。Codex画面・Claude Code画面の両方で共有する。
+ *
+ * 画像はデータURLにして送る。`localResourceRoots` を広げて `asWebviewUri` で参照させると、
+ * その範囲のファイルをWebviewから自由に読めるようになるため、そちらへは寄せない。
+ * 読めるのは**会話に出てきたパスだけ**（判定は `buildImageReply`）。
+ */
+export async function postImageData(
+  panel: vscode.WebviewPanel,
+  fs: FileSystemPort,
+  items: readonly ChatItem[],
+  requested: unknown,
+): Promise<void> {
+  const reply = await buildImageReply(items, requested, (filePath, maxBytes) =>
+    fs.readBase64File(filePath, maxBytes),
+  );
+  if (reply !== undefined) {
+    void panel.webview.postMessage({ type: 'imageData', ...reply });
+  }
+}
+
+/** `@` の候補として返す最大件数。画面に収まる範囲に留める。 */
+const MENTION_LIMIT = 50;
+
+/**
+ * `@` のファイル候補をWebviewへ返す。
+ *
+ * **絞り込みはホスト側で行う。** 同じ規則をWebviewにも書くと、片方だけ直したときに
+ * 「候補に出たのに違うものが入る」状態になる。走査を間引くのはカタログの責務。
+ */
+export async function postFileMentions(
+  panel: vscode.WebviewPanel,
+  mentions: FileMentionCatalog,
+  cwd: string | undefined,
+  query: unknown,
+): Promise<void> {
+  if (typeof query !== 'string') {
+    return;
+  }
+  // 復元されたCodex画面はcwdを持たない。そのときはこのウィンドウのフォルダを充てる
+  const folder = cwd ?? currentWorkspaceFolder()?.uri.fsPath;
+  if (folder === undefined) {
+    return;
+  }
+  const files = filterFiles(await mentions.list(folder), query, MENTION_LIMIT);
+  void panel.webview.postMessage({ type: 'files', query, files });
 }
 
 /**
@@ -214,7 +275,9 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     codexPath: () => string,
     private readonly settings: SettingsProvider,
     private readonly codexHome: string,
-    fs: FileSystemPort,
+    private readonly fs: FileSystemPort,
+    /** `@` のファイル候補。走査の間引きはカタログ側が担う。 */
+    private readonly mentions: FileMentionCatalog,
     private readonly log: Logger,
     /** 発言のたびに呼ばれる。二重記録の抑止は受け手（ActivityLogger）が担う。 */
     private readonly onActivity: (activity: ChatActivity) => void = () => undefined,
@@ -234,7 +297,7 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     ) => AppServerConnectionPort = (onNotification, onServerRequest) =>
       new AppServerConnection(codexPath, log, onNotification, onServerRequest),
   ) {
-    this.catalog = new CommandCatalog(fs);
+    this.catalog = new CommandCatalog(this.fs);
     this.connection = connectionFactory(
       (method, params) => this.routeNotification(method, params),
       (request) => this.routeServerRequest(request),
@@ -424,6 +487,7 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     panel.webview.html = renderShell(panel.webview, {
       agentLabel: 'Codex',
       approvalModes: APPROVAL_MODES,
+      sandboxModes: SANDBOX_MODES,
       showSettings: true,
     });
 
@@ -579,6 +643,20 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
         }
         this.reportActivity(entry, text);
         this.postState(entry);
+        return;
+      }
+      if (type === 'requestFiles') {
+        // タブが閉じている（タスク管理下でパネルが無い）間は送り先が無い。
+        // `postState` と同じ流儀で、パネルが無ければ何もしない
+        if (entry.panel !== undefined) {
+          await postFileMentions(entry.panel, this.mentions, entry.cwd, m['query']);
+        }
+        return;
+      }
+      if (type === 'requestImage') {
+        if (entry.panel !== undefined) {
+          await postImageData(entry.panel, this.fs, entry.session.getState().items, m['path']);
+        }
         return;
       }
       if (type === 'attach') {
@@ -997,6 +1075,12 @@ export interface ChatShellOptions {
   agentLabel: string;
   /** 承認方法の選択肢。プロバイダごとに異なる。 */
   approvalModes: readonly string[];
+  /**
+   * サンドボックスの選択肢。渡さなければセレクタ自体を出さない。
+   *
+   * Claude Codeにサンドボックスの概念は無く、権限は `--permission-mode` に集約される。
+   */
+  sandboxModes?: readonly string[];
   /** モデル・effort・承認のプルダウンを出すか（Codex画面のみ）。 */
   showSettings: boolean;
   /**
@@ -1085,6 +1169,14 @@ ${chatStyles()}
       <option value="">既定</option>
       ${options.approvalModes.map((m) => `<option value="${m}">${m}</option>`).join('')}
     </select></label>
+    ${
+      options.sandboxModes === undefined
+        ? ''
+        : `<label>Sandbox <select id="sandbox">
+      <option value="">既定</option>
+      ${options.sandboxModes.map((m) => `<option value="${m}">${m}</option>`).join('')}
+    </select></label>`
+    }
     ${options.settingsNote === undefined ? '' : `<p class="note">${escapeHtml(options.settingsNote)}</p>`}
   </div>
 

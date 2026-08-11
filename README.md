@@ -62,10 +62,12 @@ VSCodeのUIからインストールする場合は、拡張機能ビューの右
 | コンテキスト残量の表示             | ○                             | ○                               |
 | 会話の圧縮（compact）              | ○                             | ○                               |
 | 画像を添えて送る                   | ○                             | ○                               |
+| 会話に出た画像の表示               | ○                             | ○（ツールが読んだ画像）         |
 | Plan mode（計画だけ立てさせる）    | ○（読み取り専用の権限で作る） | ○（CLIのplanモード）            |
 | ツールやMCPサーバからの問い合わせ  | ○                             | ×（CLIに要求を渡す経路が無い）  |
 | モデル・承認方法のセッション中変更 | ○                             | ○（effortは反映を確認できない） |
 | スラッシュコマンド                 | △（後述）                     | ○（CLIの全コマンド）            |
+| `@` によるファイル参照の補完       | ○                             | ○                               |
 | 同じ指示の繰り返し（ループ）       | ○                             | ○                               |
 
 Claude Codeには会話の要約名が無いため、一覧とタブ名は最初の指示から作る。対応しない操作は履歴のコンテキストメニューに出さない。
@@ -77,6 +79,7 @@ Claude Codeには会話の要約名が無いため、一覧とタブ名は最初
 | 新しい会話（チャット画面）                  | サイドバーの `+`（Codex）/ スパークル（Claude Code）                                                                   |
 | 過去セッションを再開                        | サイドバーの履歴をクリック（チャット画面で開く）                                                                       |
 | スラッシュコマンドを探す                    | チャット画面の入力欄で `/` を打つ（↑↓で選び、Tab か Enter で確定）。[後述](#スラッシュコマンド)のとおりCLIで扱いが違う |
+| ファイルを指し示す                          | チャット画面の入力欄で `@` を打つ（同じ操作で確定。[後述](#ファイルを指し示す)）                                       |
 | 応答中に次の指示を送る                      | そのまま送信する（Codexは応答を止めずに割り込む。Claude Codeは終わってから送る）                                       |
 | 待たせた指示をすぐ送る                      | 待ち行列の「今すぐ送る」（Claude Codeは応答を中断して送る）                                                            |
 | 応答を中断する                              | チャット画面の「中断」ボタン、または `Esc`                                                                             |
@@ -87,10 +90,11 @@ Claude Codeには会話の要約名が無いため、一覧とタブ名は最初
 | セッションのfork / archive / delete         | 履歴の項目を右クリック                                                                                                 |
 | セッション名の変更                          | Codex画面がアクティブなときエディタ右上の鉛筆アイコン                                                                  |
 | 表示範囲の切替（このワークスペース / 全体） | 履歴ビューのタイトルバー                                                                                               |
-| モデル/effort/承認の切替                    | サイドバーの設定パネル（Codex / Claude Codeのタブ）、または各チャット画面の入力欄下                                    |
+| モデル/effort/承認の切替                    | サイドバーの設定パネル（Codex / Claude Codeのタブ）、または各チャット画面の入力欄下。選択肢はCLIから取得する           |
 | 使用量とコンテキスト残量の確認              | ステータスバー／チャット画面の入力欄下                                                                                 |
 | 会話を圧縮する                              | チャット画面の「圧縮」ボタン（確認あり。元には戻せない）                                                               |
 | 画像を添えて送る                            | 入力欄で `Ctrl+V`、画面へドラッグ&ドロップ、または「画像」ボタン（png / jpeg / gif / webp、1枚5MB・合計10MB・5枚まで） |
+| 会話に出た画像を見る                        | 会話の中にサムネイルで出る。クリックで原寸に広がる                                                                     |
 | 計画だけ立てさせる                          | チャット画面の「計画」ボタン（[後述](#計画だけ立てさせるplan-mode)）                                                   |
 | ツールやMCPからの問い合わせに答える         | 会話に出るカードにそのまま入力して送る（Codex画面のみ。[後述](#問い合わせに答える)）                                   |
 
@@ -118,6 +122,17 @@ Claude Codeには会話の要約名が無いため、一覧とタブ名は最初
 Claude Codeは組込コマンドがそのまま効くため、候補もCLIから受け取ったものをそのまま出す。セッション中にスキルが増減しても追従する。
 
 判定の根拠と全一覧は [docs/slash-commands.md](docs/slash-commands.md) にある。
+
+### ファイルを指し示す
+
+入力欄で `@` を打つとワークスペースのファイル候補が出る。操作はスラッシュコマンドと同じで、打ち進めて絞り込み、`↑` `↓` で選び、Tab か Enter で確定する。`Esc` で閉じる。
+
+**確定すると `@` は消え、ワークスペース相対パスだけが入る**（`src/view/chatView.ts` の形）。`@` は候補を出す引き金で、CLIへはただのパス文字列として渡る。
+
+- 候補から外れるもの: `node_modules` `dist` `.git` などの決め打ちの一覧と、ワークスペース直下の `.gitignore` に載っているもの
+- `.gitignore` の解釈は簡易版。否定（`!`）や階層ごとの `.gitignore` は見ないため、除外し切れずに候補へ出るものがある
+- 候補はエージェントが作ったファイルもすぐ拾えるよう、`@` を打つたびに集め直す（数秒は結果を使い回す）
+- 直前が行頭か空白のときだけ候補を出す。メールアドレスを書いている途中では出ない
 
 ### 計画だけ立てさせる（Plan mode）
 
@@ -172,16 +187,18 @@ Codexのapp-serverにはPlan modeそのものが無いため、**権限で作っ
 
 ### Codex
 
-| キー                    | 既定    | スコープ            | 説明                                                   |
-| ----------------------- | ------- | ------------------- | ------------------------------------------------------ |
-| `codex.executablePath`  | `codex` | machine             | 実行ファイルのパス                                     |
-| `codex.codexHome`       | `""`    | machine             | 空なら `CODEX_HOME` → `~/.codex`                       |
-| `codex.additionalArgs`  | `[]`    | machine             | 任意の追加引数                                         |
-| `codex.sandbox`         | `""`    | machine             | `read-only` / `workspace-write` / `danger-full-access` |
-| `codex.approvalMode`    | `""`    | machine             | `untrusted` / `on-request` / `never`                   |
-| `codex.model`           | `""`    | machine-overridable | 空なら `-m` を渡さない                                 |
-| `codex.reasoningEffort` | `""`    | machine-overridable | `model_reasoning_effort`。選択肢はモデルごとに異なる   |
-| `codex.profile`         | `""`    | machine-overridable | `-p` に渡すプロファイル名                              |
+| キー                         | 既定    | スコープ            | 説明                                                                                         |
+| ---------------------------- | ------- | ------------------- | -------------------------------------------------------------------------------------------- |
+| `codex.executablePath`       | `codex` | machine             | 実行ファイルのパス                                                                           |
+| `codex.codexHome`            | `""`    | machine             | 空なら `CODEX_HOME` → `~/.codex`                                                             |
+| `codex.additionalArgs`       | `[]`    | machine             | 任意の追加引数                                                                               |
+| `codex.sandbox`              | `""`    | machine             | `read-only` / `workspace-write` / `danger-full-access`。会話の途中で変えると次の発言から効く |
+| `codex.sandboxWritableRoots` | `[]`    | machine             | `workspace-write` のときに書き込みを許す追加の場所。絶対パスのみ                             |
+| `codex.sandboxNetworkAccess` | `false` | machine             | `workspace-write` のときにネットワークへ出られるか                                           |
+| `codex.approvalMode`         | `""`    | machine             | `untrusted` / `on-request` / `never`                                                         |
+| `codex.model`                | `""`    | machine-overridable | 空なら `-m` を渡さない                                                                       |
+| `codex.reasoningEffort`      | `""`    | machine-overridable | `model_reasoning_effort`。選択肢はモデルごとに異なる                                         |
+| `codex.profile`              | `""`    | machine-overridable | `-p` に渡すプロファイル名                                                                    |
 
 ### Claude Code
 
@@ -192,7 +209,9 @@ Codexのapp-serverにはPlan modeそのものが無いため、**権限で作っ
 | `claude.additionalArgs` | `[]`     | machine             | 任意の追加引数                                                               |
 | `claude.permissionMode` | `""`     | machine             | `manual` / `auto` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
 | `claude.model`          | `opus`   | machine-overridable | エイリアス（`opus` 等）か正式名。空なら `--model` を渡さない                 |
-| `claude.effort`         | `medium` | machine-overridable | `low` / `medium` / `high` / `xhigh` / `max`。空なら `--effort` を渡さない    |
+| `claude.effort`         | `medium` | machine-overridable | 選択肢はモデルごとに異なる。空なら `--effort` を渡さない                     |
+
+モデルとeffortの選択肢は、Codexは `codex app-server` の `model/list`、Claude Codeは `initialize` の応答から取る。CLIが新しいモデルに対応すれば拡張機能の更新なしで選べる。取得できないときは既知の一覧へ退避する（選択肢が空になることはない）。
 
 ### 共通
 

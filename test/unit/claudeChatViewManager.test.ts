@@ -3,6 +3,7 @@ import type { ClaudeSessionStore } from '../../src/claude/sessionStore';
 import { ClaudeStreamSession, type ClaudeStreamOptions } from '../../src/claude/streamSession';
 import type { Logger } from '../../src/log';
 import type { FileSystemPort } from '../../src/session/ports';
+import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMentions';
 import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import { ClaudeChatViewManager } from '../../src/view/claudeChatView';
@@ -24,7 +25,17 @@ const fakeFileSystem: FileSystemPort = {
   listJsonl: async () => [],
   listMarkdown: async () => [],
   readHead: async () => [],
+  readBase64File: async () => undefined,
 };
+
+/** `@` のファイル候補。走査を伴わない最小のフェイクで足りる。 */
+const fakeScanPort: FileScanPort = {
+  scan: async () => [],
+  readText: async () => undefined,
+};
+function fakeMentions(): FileMentionCatalog {
+  return new FileMentionCatalog(fakeScanPort);
+}
 
 function fakeSettingsProvider(): SettingsProvider {
   const settings = {
@@ -58,6 +69,7 @@ function createManager(options?: { isTaskManagedThread?: (sessionId: string) => 
   const manager = new ClaudeChatViewManager(
     () => 'claude',
     fakeFileSystem,
+    fakeMentions(),
     '/fake/claude-home',
     fakeStore(),
     fakeSettingsProvider(),

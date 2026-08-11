@@ -50,6 +50,26 @@ export function chatStyles(): string {
     overflow: auto;
   }
   .reasoning .body { color: var(--vscode-descriptionForeground); font-style: italic; }
+  /* 会話に出す画像。既定はサムネイル、クリックで原寸まで広げる */
+  .images { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+  .image img {
+    max-height: 160px;
+    max-width: 100%;
+    border-radius: 4px;
+    border: 1px solid var(--vscode-panel-border);
+    cursor: zoom-in;
+  }
+  .image.zoom img { max-height: none; cursor: zoom-out; }
+  .image-note {
+    padding: 6px 8px;
+    border-radius: 4px;
+    background-color: var(--vscode-textCodeBlock-background);
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+  }
+  /* 実行中のコマンド。完了したものと見分けが付くようにする */
+  .item.running .body { border-left: 2px solid var(--vscode-progressBar-background); }
+  .item.running .head { color: var(--vscode-foreground); }
   .approval {
     margin: 10px 0;
     padding: 10px 12px;

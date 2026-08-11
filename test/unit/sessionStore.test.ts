@@ -55,6 +55,11 @@ class FakeFs implements FileSystemPort {
     return this.files[filePath] === undefined ? undefined : 0;
   }
 
+  async readBase64File(filePath: string): Promise<string | undefined> {
+    const content = this.files[filePath];
+    return content === undefined ? undefined : Buffer.from(content).toString('base64');
+  }
+
   async readHead(filePath: string, maxLines: number): Promise<string[]> {
     return (this.files[filePath]?.split('\n') ?? []).slice(0, maxLines);
   }

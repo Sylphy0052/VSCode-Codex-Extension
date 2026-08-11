@@ -78,7 +78,7 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 | TP-80 | app-serverからの要求10種のうち7種を処理していない（MCPツールが黙って失敗しうる） | Codex | P1     | [#41](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/41) 済（UIは #48 #49 で完了） |
 | TP-81 | `serverRequest/resolved` を処理しておらず、解決済みの承認カードが残る            | Codex | P2     | [#42](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/42) 済                        |
 | TP-82 | `turn/steer` で応答を中断せずに指示を割り込ませる                                | Codex | P1     | [#43](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/43) 済                        |
-| TP-83 | モデルとeffortの選択肢をCLIから取得する                                          | 両方  | P2     | [#44](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/44)                           |
+| TP-83 | モデルとeffortの選択肢をCLIから取得する                                          | 両方  | P2     | [#44](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/44) 済                        |
 | TP-84 | app-serverの生成済み型定義を取り込むか判断する                                   | Codex | P2     | [#46](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/46)                           |
 | TP-85 | 履歴の取得を `thread/list` へ移すか判断する                                      | Codex | P3     | [#45](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/45)                           |
 
@@ -87,7 +87,7 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 | ID    | 内容                                                                            | 対象         | 優先度 | 依存 | Issue |
 | ----- | ------------------------------------------------------------------------------- | ------------ | ------ | ---- | ----- |
 | TP-01 | 画像の貼付・添付。現状は `input: [{ type: 'text' }]` 固定でテキストしか送れない | Codex/Claude | P1     | Z-03 | #3 済 |
-| TP-02 | `@` によるファイル参照の補完。現状は `/` の候補のみ                             | Codex/Claude | P2     | -    | #4    |
+| TP-02 | `@` によるファイル参照の補完。現状は `/` の候補のみ                             | Codex/Claude | P2     | -    | #4 済 |
 | TP-03 | `!` から始まる行をシェルコマンドとして扱う（Claude TUIのbashモード相当）        | Claude       | P3     | Z-10 | #5    |
 | TP-04 | `#` から始まる行をメモリへ追記する（Claude TUIのメモリモード相当）              | Claude       | P3     | Z-10 | #6    |
 
@@ -109,7 +109,7 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 | ----- | ---------------------------------------------------------------------------------------------------- | ------ | ------ | --------- | ------------------------------------ |
 | TP-21 | Claude のセッション中に model / effort / permissionMode を変える。現状は起動引数のみで、会話中は固定 | Claude | P1     | Z-10      | #10 済（effortの反映は観測できない） |
 | TP-22 | Plan mode の切替（Codex `/plan` / Claude Shift+Tab 相当）。現状どちらも手段が無い                    | 両方   | P1     | Z-06 Z-10 | #11 済（Codexは権限で代替）          |
-| TP-20 | Codex の sandbox をターン単位で変える。現状は `thread/start` 時のみで、明示的に非対応としている      | Codex  | P2     | Z-02      | #12                                  |
+| TP-20 | Codex の sandbox をターン単位で変える。現状は `thread/start` 時のみで、明示的に非対応としている      | Codex  | P2     | Z-02      | #12 済                               |
 | TP-23 | 承認モードを循環させるキーバインド（TUIのShift+Tab相当）を画面に用意する                             | 両方   | P3     | TP-22     | #13                                  |
 
 Codexはターン単位で model / effort / approvalPolicy を渡せるのにClaudeは起動時固定、という非対称が現状ある。TP-21はこの差を埋めるもの。
@@ -120,8 +120,8 @@ Codexはターン単位で model / effort / approvalPolicy を渡せるのにCla
 | ----- | ------------------------------------------------------------------------ | ------------ | ------ | --------- | ------ |
 | TP-30 | ファイル変更の差分本文を表示する                                         | Codex/Claude | P1     | Z-04      | #14 済 |
 | TP-31 | トークン使用量とコンテキスト残量を表示する。現状はレート制限の消費率のみ | Codex/Claude | P1     | Z-05 Z-13 | #15 済 |
-| TP-33 | 画像の表示（モデルが見た画像・生成した画像）                             | Codex/Claude | P2     | Z-03      | #16    |
-| TP-35 | コマンド実行の出力を逐次表示し、長い出力を折りたためるようにする         | Codex/Claude | P2     | -         | #17    |
+| TP-33 | 画像の表示（モデルが見た画像・生成した画像）                             | Codex/Claude | P2     | Z-03      | #16 済 |
+| TP-35 | コマンド実行の出力を逐次表示し、長い出力を折りたためるようにする         | Codex/Claude | P2     | -         | #17 済 |
 | TP-32 | Web検索の結果を表示する。現状はクエリのみ                                | Codex/Claude | P3     | -         | #18    |
 | TP-34 | 思考の全文表示と折りたたみ。現状は summary のみ                          | Codex/Claude | P3     | -         | #19    |
 

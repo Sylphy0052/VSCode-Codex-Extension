@@ -148,11 +148,12 @@ export class ChatSession {
   }
 
   /**
-   * 発言を送る。モデル・effort・承認方針はここで毎回渡す。
+   * 発言を送る。モデル・effort・承認方針・サンドボックスはここで毎回渡す。
    *
-   * サンドボックスは普段はスレッド開始時の指定に任せるが、Plan modeのときだけ
-   * ターン単位で読み取り専用へ落とす。一度落とすと明示的に戻すまで効き続けるため、
-   * 抜けたあとの最初のターンで開始時の権限を送り直す。
+   * `turn/start` の指定は「このターン以降」に効くため、会話の途中で権限を変えられる。
+   * 設定が空（CLIのconfig.tomlへ委譲）のときだけスレッド開始時の指定に任せる。
+   * Plan mode中は設定より優先して読み取り専用へ落とし、抜けたあとの最初のターンで
+   * 開始時の権限を送り直す。
    */
   async send(
     text: string,
@@ -178,11 +179,24 @@ export class ChatSession {
       params['approvalPolicy'] = config.approvalMode;
     }
 
-    const policy = turnPolicyFor(this.state.planMode, this.baseline, this.policyOverridden);
+    const policy = turnPolicyFor(
+      this.state.planMode,
+      this.baseline,
+      this.policyOverridden,
+      config.sandbox,
+      {
+        writableRoots: config.sandboxWritableRoots,
+        networkAccess: config.sandboxNetworkAccess,
+      },
+    );
     if (policy !== undefined) {
       // Plan modeの指定は設定パネルの承認方針より優先する（書けないことを保証するため）
-      params['approvalPolicy'] = policy.approvalPolicy;
-      params['sandboxPolicy'] = policy.sandboxPolicy;
+      if (policy.approvalPolicy !== undefined) {
+        params['approvalPolicy'] = policy.approvalPolicy;
+      }
+      if (policy.sandboxPolicy !== undefined) {
+        params['sandboxPolicy'] = policy.sandboxPolicy;
+      }
       this.policyOverridden = this.state.planMode;
     }
 

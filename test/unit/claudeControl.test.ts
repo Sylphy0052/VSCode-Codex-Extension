@@ -9,6 +9,7 @@ import {
   buildUserMessage,
   describeCanUseTool,
   readCommandList,
+  readModelList,
   readCommandsChanged,
   readContextUsage,
   readCurrentPermissionMode,
@@ -321,5 +322,71 @@ describe('readCurrentPermissionMode', () => {
     expect(readCurrentPermissionMode({})).toBeUndefined();
     expect(readCurrentPermissionMode({ current_permission_mode: '' })).toBeUndefined();
     expect(readCurrentPermissionMode(undefined)).toBeUndefined();
+  });
+});
+
+describe('readModelList', () => {
+  // 実測した `initialize` の応答（CLI 2.1.227）
+  const payload = {
+    models: [
+      {
+        value: 'default',
+        resolvedModel: 'claude-opus-5[1m]',
+        displayName: 'Default (recommended)',
+        description: 'Opus 5 with 1M context · Best for everyday, complex tasks',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
+      {
+        value: 'haiku',
+        resolvedModel: 'claude-haiku-4-5-20251001',
+        displayName: 'Haiku',
+        description: 'Haiku 4.5 · Fastest',
+      },
+      { value: '', displayName: '値が無い' },
+    ],
+  };
+
+  it('表示名・説明・effortを取り出す', () => {
+    expect(readModelList(payload)?.[0]).toEqual({
+      slug: 'default',
+      displayName: 'Default (recommended)',
+      description: 'Opus 5 with 1M context · Best for everyday, complex tasks',
+      defaultEffort: undefined,
+      supportsEffort: true,
+      efforts: [
+        { effort: 'low', description: undefined },
+        { effort: 'medium', description: undefined },
+        { effort: 'high', description: undefined },
+        { effort: 'xhigh', description: undefined },
+        { effort: 'max', description: undefined },
+      ],
+    });
+  });
+
+  it('supportsEffortが無いモデルはeffortを持たない', () => {
+    const haiku = readModelList(payload)?.[1];
+    expect(haiku?.supportsEffort).toBe(false);
+    expect(haiku?.efforts).toEqual([]);
+  });
+
+  it('値が無いモデルを落とす', () => {
+    expect(readModelList(payload)?.map((m) => m.slug)).toEqual(['default', 'haiku']);
+  });
+
+  it('引数として渡せない形のeffortを捨てる', () => {
+    const models = readModelList({
+      models: [
+        { value: 'x', supportsEffort: true, supportedEffortLevels: ['high', '--search', ''] },
+      ],
+    });
+    expect(models?.[0]?.efforts.map((e) => e.effort)).toEqual(['high']);
+  });
+
+  it('一覧が無いときは undefined（空の一覧と区別する）', () => {
+    expect(readModelList(undefined)).toBeUndefined();
+    expect(readModelList({})).toBeUndefined();
+    expect(readModelList({ models: 'なにか' })).toBeUndefined();
+    expect(readModelList({ models: [] })).toEqual([]);
   });
 });

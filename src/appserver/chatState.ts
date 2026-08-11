@@ -1,4 +1,5 @@
 import type { Attachment } from '../provider/attachments';
+import { NO_IMAGES, readUserInputImages, type ChatImage } from '../provider/imageRefs';
 import type { PendingPrompt } from './prompts';
 
 /** 1ファイル分の変更。app-server の `FileUpdateChange` に対応する。 */
@@ -25,6 +26,31 @@ export interface ChatItem {
   turnId: string | undefined;
   /** ファイル変更の差分。他の種類では空。 */
   diffs: FileDiff[];
+  /** 本文の先頭を捨てたか。コマンド出力が上限を超えたときだけ立つ。 */
+  truncated?: boolean | undefined;
+  /** 会話に出す画像。持たない項目では空。 */
+  images?: ChatImage[] | undefined;
+}
+
+/**
+ * 1項目の本文として保持する上限。
+ *
+ * コマンドの出力は際限なく伸びうる（`find /` など）。全部持つと状態の受け渡しと
+ * 描画が重くなるため、**末尾を残して先頭を捨てる**。TUIも古い行から流れて消える。
+ */
+export const MAX_OUTPUT_CHARS = 200_000;
+
+/**
+ * コマンド出力を上限まで切り詰める。
+ *
+ * 印（「省略」など）は本文へ混ぜない。混ぜると「コピー」がそのまま使えなくなるため、
+ * 捨てたかどうかは `truncated` で持ち、表示側が注記する。
+ */
+export function capOutput(text: string): { text: string; truncated: boolean } {
+  if (text.length <= MAX_OUTPUT_CHARS) {
+    return { text, truncated: false };
+  }
+  return { text: text.slice(text.length - MAX_OUTPUT_CHARS), truncated: true };
 }
 
 /** 差分を持たない項目のための空配列。 */
@@ -216,6 +242,7 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
     status: undefined,
     turnId: undefined,
     diffs: NO_DIFFS,
+    images: NO_IMAGES,
   };
   const status = item['status'];
   if (typeof status === 'string') {
@@ -224,7 +251,11 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
 
   switch (kind) {
     case 'userMessage':
-      return { ...base, text: readContentText(item['content']) };
+      return {
+        ...base,
+        text: readContentText(item['content']),
+        images: readUserInputImages(item['content']),
+      };
     case 'agentMessage':
     case 'plan':
       return { ...base, text: str(item['text']) };
@@ -232,9 +263,11 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
       return { ...base, text: str(item['summary']) || readContentText(item['content']) };
     case 'commandExecution': {
       const exitCode = item['exitCode'];
+      const output = capOutput(str(item['aggregatedOutput']));
       return {
         ...base,
-        text: str(item['aggregatedOutput']),
+        text: output.text,
+        truncated: output.truncated,
         detail: str(item['command']),
         status: typeof exitCode === 'number' ? `exit ${exitCode}` : base.status,
       };
@@ -249,6 +282,29 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
       return { ...base, detail: `${str(item['server'])} / ${str(item['tool'])}` };
     case 'webSearch':
       return { ...base, detail: str(item['query']) };
+    // モデルが見た画像。パスだけが届くので、読むのはホスト側の役目
+    case 'imageView': {
+      const filePath = str(item['path']);
+      return {
+        ...base,
+        detail: filePath,
+        images:
+          filePath === '' ? NO_IMAGES : [{ dataUrl: undefined, path: filePath, alt: filePath }],
+      };
+    }
+    // モデルが生成した画像。失敗したターンでは savedPath が無い
+    case 'imageGeneration': {
+      const savedPath = str(item['savedPath']);
+      return {
+        ...base,
+        text: str(item['result']),
+        detail: str(item['revisedPrompt']),
+        images:
+          savedPath === ''
+            ? NO_IMAGES
+            : [{ dataUrl: undefined, path: savedPath, alt: '生成した画像' }],
+      };
+    }
     default:
       return base;
   }
@@ -371,6 +427,7 @@ function upsertItem(items: readonly ChatItem[], item: ChatItem): ChatItem[] {
     ...item,
     // デルタで積んだ本文を、本文が空の completed で消さない
     text: item.text === '' && existing !== undefined ? existing.text : item.text,
+    truncated: item.text === '' && existing !== undefined ? existing.truncated : item.truncated,
     // turnIdは後続の通知で判ることがあるため、一度得た値を保持する
     turnId: item.turnId ?? existing?.turnId,
     // 差分は patchUpdated が先に届くことがある。空で上書きしない
@@ -379,26 +436,48 @@ function upsertItem(items: readonly ChatItem[], item: ChatItem): ChatItem[] {
   return next;
 }
 
-function appendDelta(items: readonly ChatItem[], itemId: string, delta: string): ChatItem[] {
+/**
+ * デルタ通知を本文へ追記する。
+ *
+ * まだ項目が無い場合（`item/started` を取り逃した、通知の順序が入れ替わった）は
+ * `kind` で作る。コマンド出力だけは上限を超えた分の先頭を捨てる。
+ */
+function appendDelta(
+  items: readonly ChatItem[],
+  itemId: string,
+  delta: string,
+  kind: string,
+): ChatItem[] {
+  const cap = (text: string): { text: string; truncated: boolean } =>
+    kind === 'commandExecution' ? capOutput(text) : { text, truncated: false };
+
   const index = items.findIndex((i) => i.id === itemId);
   if (index === -1) {
+    const created = cap(delta);
     return [
       ...items,
       {
         id: itemId,
-        kind: 'agentMessage',
-        text: delta,
+        kind,
+        text: created.text,
         detail: '',
         status: undefined,
         turnId: undefined,
         diffs: NO_DIFFS,
+        truncated: created.truncated,
       },
     ];
   }
   const next = [...items];
   const existing = next[index];
   if (existing !== undefined) {
-    next[index] = { ...existing, text: existing.text + delta };
+    const appended = cap(existing.text + delta);
+    next[index] = {
+      ...existing,
+      text: appended.text,
+      // 一度でも捨てたら、その後の追記で上限を下回っても捨てた事実は残る
+      truncated: existing.truncated === true || appended.truncated,
+    };
   }
   return next;
 }
@@ -486,7 +565,22 @@ export function applyEvent(
       if (itemId === '' || delta === '') {
         return state;
       }
-      return { ...state, items: appendDelta(state.items, itemId, delta) };
+      return { ...state, items: appendDelta(state.items, itemId, delta, 'agentMessage') };
+    }
+
+    /**
+     * コマンド出力の逐次表示。
+     *
+     * これを見ないと `item/completed` の `aggregatedOutput` まで何も出ず、長いコマンドは
+     * 進んでいるのかどうかが画面から分からない。
+     */
+    case 'item/commandExecution/outputDelta': {
+      const itemId = str(params['itemId']);
+      const delta = str(params['delta']);
+      if (itemId === '' || delta === '') {
+        return state;
+      }
+      return { ...state, items: appendDelta(state.items, itemId, delta, 'commandExecution') };
     }
 
     case 'account/rateLimits/updated': {

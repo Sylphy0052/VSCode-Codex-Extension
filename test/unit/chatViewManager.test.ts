@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { noDefaults } from '../../src/codex/configToml';
 import type { Logger } from '../../src/log';
 import type { FileSystemPort } from '../../src/session/ports';
+import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMentions';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import { ChatViewManager, type ChatActivity } from '../../src/view/chatView';
 import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
@@ -27,7 +28,17 @@ const fakeFileSystem: FileSystemPort = {
   listJsonl: async () => [],
   listMarkdown: async () => [],
   readHead: async () => [],
+  readBase64File: async () => undefined,
 };
+
+/** `@` のファイル候補。走査を伴わない最小のフェイクで足りる。 */
+const fakeScanPort: FileScanPort = {
+  scan: async () => [],
+  readText: async () => undefined,
+};
+function fakeMentions(): FileMentionCatalog {
+  return new FileMentionCatalog(fakeScanPort);
+}
 
 function fakeSettingsProvider(): SettingsProvider {
   const settings = {
@@ -72,6 +83,7 @@ function createManager(options?: {
     fakeSettingsProvider(),
     '/fake/codex-home',
     fakeFileSystem,
+    fakeMentions(),
     fakeLogger,
     options?.onActivity ?? (() => undefined),
     options?.isTaskManagedThread ?? (() => false),

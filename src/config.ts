@@ -36,6 +36,7 @@ const num = (c: vscode.WorkspaceConfiguration, key: string, fallback: number): n
 export function readConfig(): ExtensionConfig {
   const c = vscode.workspace.getConfiguration('codex');
   const additional = c.get<unknown>('additionalArgs');
+  const writableRoots = c.get<unknown>('sandboxWritableRoots');
 
   return {
     executablePath: str(c, 'executablePath', 'codex'),
@@ -45,6 +46,10 @@ export function readConfig(): ExtensionConfig {
       reasoningEffort: str(c, 'reasoningEffort'),
       profile: str(c, 'profile'),
       sandbox: str(c, 'sandbox'),
+      sandboxWritableRoots: Array.isArray(writableRoots)
+        ? writableRoots.filter((r): r is string => typeof r === 'string')
+        : [],
+      sandboxNetworkAccess: c.get<boolean>('sandboxNetworkAccess') === true,
       approvalMode: str(c, 'approvalMode'),
       additionalArgs: Array.isArray(additional)
         ? additional.filter((a): a is string => typeof a === 'string')
