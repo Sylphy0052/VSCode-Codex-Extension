@@ -7,7 +7,7 @@
 ## 進め方
 
 1. 下の「準備」を済ませる
-2. ケースを上から順に実行する。C群（Codex画面・22件）→ L群（Claude Code画面・19件）→ P群（ループ実行・5件）→ H群（履歴・復元・8件）→ A群（作業記録・4件）
+2. ケースを上から順に実行する。C群（Codex画面・23件）→ L群（Claude Code画面・20件）→ P群（ループ実行・5件）→ H群（履歴・復元・8件）→ A群（作業記録・4件）
 3. 各ケースの結果を「記録テンプレート」に写す。落ちたものはIssue化してから次へ進む
 
 前提が崩れるケース（C-01・L-01）が落ちた場合、その群の残りは実行しても意味がないので中断して原因を先に潰す。
@@ -253,6 +253,21 @@ Claude Code画面でも同じ操作ができるので、L-19で同じことを�
 - 期待: `@` の直前が空白でないため候補が出ない
 - 確認: 確定したパスをそのまま指示に使うと、モデルがそのファイルを読める
 
+### C-23 モデルとeffortの選択肢がCLIから来る
+
+設定パネルのCodexタブとCodex画面下の設定行。選択肢を静的に持たず `model/list` から取る。
+
+- 準備: `codex app-server` に `model/list` を投げた結果を控えておく（`docs/tui-parity-backlog.md` の「調査データの再取得方法」）
+- 確認: 設定パネルのモデルの選択肢が、`model/list` の `hidden: false` のモデルと**一致する**（数も並びも）
+- 確認: 表示名（`GPT-5.6-Sol` など）で並び、選ぶと下に説明文が出る
+- 操作: モデルを切り替える
+- 期待: effortの選択肢がそのモデルの `supportedReasoningEfforts` に入れ替わる。effortを選ぶと説明文が出る
+- 操作: effort に `ultra` を選んでから、`ultra` を持たないモデルへ切り替える
+- 期待: effortが「既定」へ戻る（出力パネルに理由が出る）
+- 確認: 「既定 (CLI側に指定なし)」の選択肢が残っている
+- 操作: `codex` を見つけられない状態にして（`codex.executable` に存在しないパスを入れて）VSCodeを再読み込みする
+- 期待: 選択肢が空にならない（`~/.codex/models_cache.json` 由来、それも無ければ既知の値）。出力パネルに退避した旨が出る
+
 ## L群: Claude Code画面（stream-json）
 
 `--print --input-format stream-json` の常駐プロセスと control protocol が対象。
@@ -428,6 +443,21 @@ Codex画面と同じ仕組み（候補はホスト側で集めて絞る）。プ
 - 期待: `@` が消え、ワークスペース相対パスが入る
 - 確認: 確定したパスをそのまま指示に使うと、モデルがそのファイルを読める
 - 確認: 候補の中身がCodex画面と同じ（同じワークスペースなら同じ一覧）
+
+### L-20 モデルとeffortの選択肢がCLIから来る
+
+設定パネルのClaude CodeタブとClaude Code画面下の設定行。C-23のClaude Code版。
+
+- 準備: `claude --print --input-format stream-json --output-format stream-json --verbose` を起動して `{"type":"control_request","request_id":"1","request":{"subtype":"initialize"}}` を流し、`models` を控えておく
+- 確認: モデルの選択肢が `models` の `value` と**一致する**（`default` / `opus[1m]` / `sonnet` など。エイリアス4件の固定一覧ではない）
+- 確認: 表示名（`Default (recommended)` など）で並び、選ぶと下に説明文が出る
+- 操作: `haiku` を選ぶ
+- 期待: effortのセレクタが無効になり、「このモデルはeffortを選べません」と出る（`supportsEffort` を持たないため）
+- 操作: effortを選んだ状態から `haiku` へ切り替える
+- 期待: effortが「既定」へ戻る
+- 確認: チャット画面下の設定行でも同じ選択肢・同じ無効化になる
+- 操作: `claude` を見つけられない状態にしてVSCodeを再読み込みする
+- 期待: `fable` / `opus` / `sonnet` / `haiku` の一覧へ退避する（空にならない）。出力パネルに理由が出る
 
 ## P群: ループ実行
 

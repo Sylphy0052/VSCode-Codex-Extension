@@ -89,7 +89,7 @@ Claude Codeには会話の要約名が無いため、一覧とタブ名は最初
 | セッションのfork / archive / delete         | 履歴の項目を右クリック                                                                                                 |
 | セッション名の変更                          | Codex画面がアクティブなときエディタ右上の鉛筆アイコン                                                                  |
 | 表示範囲の切替（このワークスペース / 全体） | 履歴ビューのタイトルバー                                                                                               |
-| モデル/effort/承認の切替                    | サイドバーの設定パネル（Codex / Claude Codeのタブ）、または各チャット画面の入力欄下                                    |
+| モデル/effort/承認の切替                    | サイドバーの設定パネル（Codex / Claude Codeのタブ）、または各チャット画面の入力欄下。選択肢はCLIから取得する            |
 | 使用量とコンテキスト残量の確認              | ステータスバー／チャット画面の入力欄下                                                                                 |
 | 会話を圧縮する                              | チャット画面の「圧縮」ボタン（確認あり。元には戻せない）                                                               |
 | 画像を添えて送る                            | 入力欄で `Ctrl+V`、画面へドラッグ&ドロップ、または「画像」ボタン（png / jpeg / gif / webp、1枚5MB・合計10MB・5枚まで） |
@@ -205,7 +205,9 @@ Codexのapp-serverにはPlan modeそのものが無いため、**権限で作っ
 | `claude.additionalArgs` | `[]`     | machine             | 任意の追加引数                                                               |
 | `claude.permissionMode` | `""`     | machine             | `manual` / `auto` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
 | `claude.model`          | `opus`   | machine-overridable | エイリアス（`opus` 等）か正式名。空なら `--model` を渡さない                 |
-| `claude.effort`         | `medium` | machine-overridable | `low` / `medium` / `high` / `xhigh` / `max`。空なら `--effort` を渡さない    |
+| `claude.effort`         | `medium` | machine-overridable | 選択肢はモデルごとに異なる。空なら `--effort` を渡さない                     |
+
+モデルとeffortの選択肢は、Codexは `codex app-server` の `model/list`、Claude Codeは `initialize` の応答から取る。CLIが新しいモデルに対応すれば拡張機能の更新なしで選べる。取得できないときは既知の一覧へ退避する（選択肢が空になることはない）。
 
 ### 共通
 

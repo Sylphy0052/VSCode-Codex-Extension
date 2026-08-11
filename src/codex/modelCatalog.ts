@@ -8,6 +8,13 @@ export interface ModelInfo {
   displayName: string;
   description: string | undefined;
   defaultEffort: string | undefined;
+  /**
+   * そもそもeffortを選べるモデルか。
+   *
+   * Claude Codeの haiku のように effort の概念を持たないモデルがあるため、
+   * 「対応しない」と「一覧を取れなかった」を区別する。Codexは全モデルが対応する。
+   */
+  supportsEffort: boolean;
   efforts: EffortInfo[];
 }
 
@@ -80,7 +87,8 @@ export function parseModelCatalog(content: string): ModelInfo[] {
         displayName: typeof displayName === 'string' && displayName !== '' ? displayName : slug,
         description: typeof description === 'string' ? description : undefined,
         defaultEffort: typeof defaultEffort === 'string' ? defaultEffort : undefined,
-        efforts: parseEfforts(m['supported_reasoning_levels']),
+        supportsEffort: true,
+        efforts: parseEfforts(m['supported_reasoning_levels'], 'effort'),
       },
       priority: typeof priority === 'number' ? priority : Number.MAX_SAFE_INTEGER,
     });
@@ -89,7 +97,64 @@ export function parseModelCatalog(content: string): ModelInfo[] {
   return parsed.sort((a, b) => a.priority - b.priority).map((p) => p.info);
 }
 
-function parseEfforts(raw: unknown): EffortInfo[] {
+/**
+ * `model/list` の応答をパースする。
+ *
+ * app-serverが返す一覧であり、CLIが新しいモデルに対応すればそのまま反映される。
+ * 取得できない場合は `parseModelCatalog`（キャッシュファイル）へ退避するため、
+ * ここでは形が違えば黙って空を返す。
+ *
+ * 実測の1件（`codex-cli 0.147.0`）:
+ * `{id, model, displayName, description, hidden, isDefault, defaultReasoningEffort,
+ *   supportedReasoningEfforts:[{reasoningEffort, description}]}`
+ */
+export function parseModelList(result: unknown): ModelInfo[] {
+  const data = asRecord(result)?.['data'];
+  if (!Array.isArray(data)) {
+    return [];
+  }
+
+  const models: ModelInfo[] = [];
+  for (const entry of data) {
+    const m = asRecord(entry);
+    if (m === undefined) {
+      continue;
+    }
+    // `model` が実際にCLIへ渡す値。無い応答に備えて `id` で代用する
+    const slug = str(m['model']) || str(m['id']);
+    if (slug === '') {
+      continue;
+    }
+    // 既定のピッカーに出さないモデルは選択肢にも出さない
+    if (m['hidden'] === true) {
+      continue;
+    }
+
+    const displayName = str(m['displayName']);
+    const description = m['description'];
+    const defaultEffort = m['defaultReasoningEffort'];
+
+    models.push({
+      slug,
+      displayName: displayName === '' ? slug : displayName,
+      description: typeof description === 'string' && description !== '' ? description : undefined,
+      defaultEffort: typeof defaultEffort === 'string' ? defaultEffort : undefined,
+      supportsEffort: true,
+      efforts: parseEfforts(m['supportedReasoningEfforts'], 'reasoningEffort'),
+    });
+  }
+  return models;
+}
+
+/**
+ * `model/list` の続きを取るためのカーソル。続きが無ければ `undefined`。
+ */
+export function readNextCursor(result: unknown): string | undefined {
+  const cursor = str(asRecord(result)?.['nextCursor']);
+  return cursor === '' ? undefined : cursor;
+}
+
+function parseEfforts(raw: unknown, key: string): EffortInfo[] {
   if (!Array.isArray(raw)) {
     return [];
   }
@@ -99,7 +164,7 @@ function parseEfforts(raw: unknown): EffortInfo[] {
       continue;
     }
     const e = entry as Record<string, unknown>;
-    const effort = e['effort'];
+    const effort = e[key];
     if (typeof effort !== 'string' || !isEffortToken(effort)) {
       continue;
     }
@@ -118,14 +183,26 @@ export function findModel(models: ModelInfo[], slug: string): ModelInfo | undefi
 
 /**
  * 指定モデルで選べるeffort。モデル未指定・カタログ未取得のときは和集合を返す。
+ *
+ * effortに対応しないモデル（Claude Codeの haiku など）では空配列を返す。呼び出し側は
+ * 選択肢を出さないこと。`fallback` は一覧そのものを取れなかったときに使う。
  */
-export function effortsFor(models: ModelInfo[], slug: string): string[] {
+export function effortsFor(
+  models: ModelInfo[],
+  slug: string,
+  fallback: readonly string[] = FALLBACK_EFFORTS,
+): string[] {
   const model = slug === '' ? undefined : findModel(models, slug);
-  if (model !== undefined && model.efforts.length > 0) {
-    return model.efforts.map((e) => e.effort);
+  if (model !== undefined) {
+    if (!model.supportsEffort) {
+      return [];
+    }
+    if (model.efforts.length > 0) {
+      return model.efforts.map((e) => e.effort);
+    }
   }
   if (models.length === 0) {
-    return [...FALLBACK_EFFORTS];
+    return [...fallback];
   }
   // モデル未指定なら、どのモデルでも選びうる値の和集合を出す
   const union = new Set<string>();
@@ -134,5 +211,11 @@ export function effortsFor(models: ModelInfo[], slug: string): string[] {
       union.add(e.effort);
     }
   }
-  return union.size > 0 ? [...union] : [...FALLBACK_EFFORTS];
+  return union.size > 0 ? [...union] : [...fallback];
 }
+
+const str = (value: unknown): string => (typeof value === 'string' ? value : '');
+const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;

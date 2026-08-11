@@ -3,6 +3,7 @@ import { ActivityLogger, nodeClock, resolveBufferDir } from './activity/activity
 import type { RecordRequest as ActivityRequest } from './activity/activityLogger';
 import { nodeActivityAppender } from './activity/nodeAppender';
 import { claudePaths, resolveClaudeHome } from './claude/cliLocator';
+import { ClaudeModelProbe } from './claude/modelProbe';
 import { ClaudeProvider } from './claude/provider';
 import { ClaudeSessionStore } from './claude/sessionStore';
 import { ClaudeTranscriptWatcher } from './claude/transcriptWatcher';
@@ -78,11 +79,20 @@ export function activate(context: vscode.ExtensionContext): void {
     void activity.record(request);
   };
 
+  /** Claude Code固有の機能（設定パネル・モデル一覧）が使う実行ファイル。 */
+  const claudePath = (): string => resolveExecutable(claude, log) ?? 'claude';
+
+  // 単発の問い合わせ（fork・モデル一覧）に使う。会話用の接続とは別プロセス
+  const appServer = new AppServerClient(codexPath, log);
+  const claudeModels = new ClaudeModelProbe(claudePath, log);
+
   const settings = new SettingsProvider(
     nodeFileSystem,
     paths.modelsCache,
     paths.configToml,
     `${claudeDirs.home}/settings.json`,
+    () => appServer.listModels(),
+    () => claudeModels.read(),
     log,
   );
   // 設定パネルを開かずCodex画面だけ使う場合でも選択肢が揃うよう、起動時に読む
@@ -102,7 +112,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(chat);
 
   const claudeChat = new ClaudeChatViewManager(
-    () => resolveExecutable(claude, log) ?? 'claude',
+    claudePath,
     nodeFileSystem,
     mentions,
     claudeHome,
@@ -114,7 +124,6 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   context.subscriptions.push(claudeChat);
 
-  const appServer = new AppServerClient(codexPath, log);
   const conversations = new ConversationViewManager(nodeFileSystem, store, log, (session, turnId) =>
     forkFromTurn(codex, appServer, chat, tree, log, session, turnId),
   );

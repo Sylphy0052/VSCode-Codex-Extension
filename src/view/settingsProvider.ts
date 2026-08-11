@@ -4,7 +4,11 @@ import {
   noClaudeDefaults,
   type ClaudeDefaults,
 } from '../claude/settingsJson';
-import { CLAUDE_EFFORTS, CLAUDE_PERMISSION_MODES } from '../claude/types';
+import {
+  CLAUDE_EFFORTS,
+  CLAUDE_PERMISSION_MODES,
+  claudeFallbackModels,
+} from '../claude/types';
 import { extractDefaults, noDefaults, type CodexDefaults } from '../codex/configToml';
 import { effortsFor, parseModelCatalog, type ModelInfo } from '../codex/modelCatalog';
 import { readClaudeConfig, readConfig } from '../config';
@@ -27,12 +31,6 @@ export function isClaudeEditableKey(value: unknown): value is ClaudeEditableKey 
   return typeof value === 'string' && (CLAUDE_EDITABLE_KEYS as readonly string[]).includes(value);
 }
 
-/**
- * Claude Codeにはモデル一覧を返すAPIが無い。CLIのヘルプが案内するエイリアスを並べ、
- * 正式名を使いたい場合は `claude.model` を直接編集してもらう。
- */
-export const CLAUDE_MODEL_ALIASES = ['fable', 'opus', 'sonnet', 'haiku'] as const;
-
 export interface SettingsSnapshot {
   models: ModelInfo[];
   /** 選択中のモデルで選べるeffort。 */
@@ -47,7 +45,8 @@ export interface SettingsSnapshot {
 }
 
 export interface ClaudeSettingsSnapshot {
-  models: string[];
+  models: ModelInfo[];
+  /** 選択中のモデルで選べるeffort。effortを持たないモデルでは空になる。 */
   efforts: string[];
   permissionModes: string[];
   model: string;
@@ -66,13 +65,20 @@ export class SettingsProvider {
   private models: ModelInfo[] = [];
   private defaults: CodexDefaults = noDefaults;
 
+  private claudeModels: ModelInfo[] = [];
   private claudeDefaults: ClaudeDefaults = noClaudeDefaults;
 
+  /**
+   * @param listCodexModels `model/list` の結果。取れなければ空配列。
+   * @param listClaudeModels `initialize` の応答の一覧。取れなければ `undefined`。
+   */
   constructor(
     private readonly fs: FileSystemPort,
     private readonly modelsCachePath: string,
     private readonly configTomlPath: string,
     private readonly claudeSettingsPath: string,
+    private readonly listCodexModels: () => Promise<ModelInfo[]>,
+    private readonly listClaudeModels: () => Promise<ModelInfo[] | undefined>,
     private readonly log: Logger,
   ) {}
 
@@ -86,19 +92,14 @@ export class SettingsProvider {
     }
   }
 
-  /** カタログと既定値を読み直す。 */
+  /** モデル一覧と既定値を読み直す。 */
   async load(): Promise<void> {
     this.loaded = true;
-    const catalog = await this.fs.readTextFile(this.modelsCachePath);
-    if (catalog === undefined) {
-      this.log.warn(`モデル一覧を読めませんでした: ${this.modelsCachePath}`);
-      this.models = [];
-    } else {
-      this.models = parseModelCatalog(catalog);
-      if (this.models.length === 0) {
-        this.log.warn('モデル一覧が空でした。既知の値へフォールバックします');
-      }
-    }
+    // CLIの起動を待つ時間が二重にならないよう、両方まとめて聞く
+    [this.models, this.claudeModels] = await Promise.all([
+      this.loadCodexModels(),
+      this.loadClaudeModels(),
+    ]);
 
     const toml = await this.fs.readTextFile(this.configTomlPath);
     this.defaults = toml === undefined ? noDefaults : extractDefaults(toml);
@@ -106,6 +107,44 @@ export class SettingsProvider {
     const claudeSettings = await this.fs.readTextFile(this.claudeSettingsPath);
     this.claudeDefaults =
       claudeSettings === undefined ? noClaudeDefaults : extractClaudeDefaults(claudeSettings);
+  }
+
+  /**
+   * Codexのモデル一覧。`model/list` を優先し、取れなければキャッシュファイルを読む。
+   *
+   * CLIが新しいモデルに対応したとき拡張の更新なしで追随させたいので、静的な
+   * キャッシュより実行時の問い合わせを上に置く。どちらも取れなければ空のまま返し、
+   * effortの選択肢だけが既知の値へフォールバックする。
+   */
+  private async loadCodexModels(): Promise<ModelInfo[]> {
+    const fromCli = await this.listCodexModels();
+    if (fromCli.length > 0) {
+      return fromCli;
+    }
+
+    this.log.warn('CLIからモデル一覧を取得できませんでした。キャッシュを読みます');
+    const catalog = await this.fs.readTextFile(this.modelsCachePath);
+    if (catalog === undefined) {
+      this.log.warn(`モデル一覧を読めませんでした: ${this.modelsCachePath}`);
+      return [];
+    }
+    const models = parseModelCatalog(catalog);
+    if (models.length === 0) {
+      this.log.warn('モデル一覧が空でした。既知の値へフォールバックします');
+    }
+    return models;
+  }
+
+  /** Claude Codeのモデル一覧。取れなければエイリアスの一覧へ退避する。 */
+  private async loadClaudeModels(): Promise<ModelInfo[]> {
+    const fromCli = await this.listClaudeModels();
+    if (fromCli !== undefined && fromCli.length > 0) {
+      return fromCli;
+    }
+    this.log.warn(
+      'Claude Codeのモデル一覧を取得できませんでした。エイリアスの一覧へフォールバックします',
+    );
+    return claudeFallbackModels();
   }
 
   snapshot(): SettingsSnapshot {
@@ -125,8 +164,8 @@ export class SettingsProvider {
   claudeSnapshot(): ClaudeSettingsSnapshot {
     const config = readClaudeConfig().claude;
     return {
-      models: [...CLAUDE_MODEL_ALIASES],
-      efforts: [...CLAUDE_EFFORTS],
+      models: this.claudeModels,
+      efforts: effortsFor(this.claudeModels, config.model, CLAUDE_EFFORTS),
       permissionModes: [...CLAUDE_PERMISSION_MODES],
       model: config.model,
       effort: config.effort,
@@ -146,10 +185,20 @@ export class SettingsProvider {
       return false;
     }
 
-    await vscode.workspace
-      .getConfiguration('claude')
-      .update(key, value, vscode.ConfigurationTarget.Global);
+    const section = vscode.workspace.getConfiguration('claude');
+    await section.update(key, value, vscode.ConfigurationTarget.Global);
     this.log.info(`Claude設定を更新しました ${key}=${value === '' ? '(既定)' : value}`);
+
+    // モデルによって選べるeffortが変わる（haikuのようにeffortを持たないモデルもある）
+    if (key === 'model') {
+      const allowed = effortsFor(this.claudeModels, value, CLAUDE_EFFORTS);
+      const current = readClaudeConfig().claude.effort;
+      if (current !== '' && !allowed.includes(current)) {
+        await section.update('effort', '', vscode.ConfigurationTarget.Global);
+        this.log.info(`${value} は effort=${current} に対応しないため既定へ戻しました`);
+      }
+    }
+
     return true;
   }
 

@@ -5,6 +5,8 @@ import {
   findModel,
   isEffortToken,
   parseModelCatalog,
+  parseModelList,
+  readNextCursor,
 } from '../../src/codex/modelCatalog';
 
 /** 実際の models_cache.json を模したもの。 */
@@ -102,6 +104,118 @@ describe('parseModelCatalog', () => {
   });
 });
 
+/** 実際の `model/list` 応答を模したもの。 */
+const modelListResult = {
+  data: [
+    {
+      id: 'gpt-5.6-sol',
+      model: 'gpt-5.6-sol',
+      displayName: 'GPT-5.6-Sol',
+      description: 'Latest frontier agentic coding model.',
+      hidden: false,
+      isDefault: true,
+      defaultReasoningEffort: 'low',
+      supportedReasoningEfforts: [
+        { reasoningEffort: 'low', description: 'Fast responses with lighter reasoning' },
+        { reasoningEffort: 'ultra', description: 'Maximum reasoning with automatic delegation' },
+      ],
+    },
+    {
+      id: 'gpt-5.6-terra',
+      model: 'gpt-5.6-terra',
+      displayName: 'GPT-5.6-Terra',
+      description: 'Balanced agentic coding model for everyday work.',
+      hidden: false,
+      isDefault: false,
+      defaultReasoningEffort: 'medium',
+      supportedReasoningEfforts: [{ reasoningEffort: 'medium', description: 'Balanced' }],
+    },
+    {
+      id: 'internal-only',
+      model: 'internal-only',
+      displayName: '内部用',
+      description: '',
+      hidden: true,
+      isDefault: false,
+      defaultReasoningEffort: 'low',
+      supportedReasoningEfforts: [{ reasoningEffort: 'low', description: '' }],
+    },
+  ],
+  nextCursor: null,
+};
+
+describe('parseModelList', () => {
+  it('応答の順序のままモデルを取り出す', () => {
+    expect(parseModelList(modelListResult).map((m) => m.slug)).toEqual([
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+    ]);
+  });
+
+  it('hiddenのモデルを除く', () => {
+    expect(findModel(parseModelList(modelListResult), 'internal-only')).toBeUndefined();
+  });
+
+  it('表示名・説明・既定effort・effortの説明を取り出す', () => {
+    const model = findModel(parseModelList(modelListResult), 'gpt-5.6-sol');
+    expect(model?.displayName).toBe('GPT-5.6-Sol');
+    expect(model?.description).toBe('Latest frontier agentic coding model.');
+    expect(model?.defaultEffort).toBe('low');
+    expect(model?.supportsEffort).toBe(true);
+    expect(model?.efforts).toEqual([
+      { effort: 'low', description: 'Fast responses with lighter reasoning' },
+      { effort: 'ultra', description: 'Maximum reasoning with automatic delegation' },
+    ]);
+  });
+
+  it('modelが無ければidをslugにする', () => {
+    const result = { data: [{ id: 'only-id', displayName: 'Only Id' }] };
+    expect(parseModelList(result)[0]?.slug).toBe('only-id');
+  });
+
+  it('displayNameが無ければslugで代用する', () => {
+    expect(parseModelList({ data: [{ id: 'bare' }] })[0]?.displayName).toBe('bare');
+  });
+
+  it('想定外の形なら空配列を返す', () => {
+    expect(parseModelList(undefined)).toEqual([]);
+    expect(parseModelList(null)).toEqual([]);
+    expect(parseModelList({})).toEqual([]);
+    expect(parseModelList({ data: 'x' })).toEqual([]);
+  });
+
+  it('個々の壊れたエントリだけを捨てる', () => {
+    const result = { data: [null, { model: '' }, { id: 'ok' }] };
+    expect(parseModelList(result).map((m) => m.slug)).toEqual(['ok']);
+  });
+
+  it('引数として渡せない形のeffortを捨てる', () => {
+    const result = {
+      data: [
+        {
+          id: 'ok',
+          supportedReasoningEfforts: [
+            { reasoningEffort: 'high' },
+            { reasoningEffort: '--search' },
+            { reasoningEffort: '' },
+          ],
+        },
+      ],
+    };
+    expect(parseModelList(result)[0]?.efforts.map((e) => e.effort)).toEqual(['high']);
+  });
+});
+
+describe('readNextCursor', () => {
+  it('続きがあるときだけカーソルを返す', () => {
+    expect(readNextCursor({ data: [], nextCursor: 'abc' })).toBe('abc');
+    expect(readNextCursor({ data: [], nextCursor: null })).toBeUndefined();
+    expect(readNextCursor({ data: [], nextCursor: '' })).toBeUndefined();
+    expect(readNextCursor({ data: [] })).toBeUndefined();
+    expect(readNextCursor(undefined)).toBeUndefined();
+  });
+});
+
 describe('effortsFor', () => {
   const models = parseModelCatalog(catalog);
 
@@ -119,6 +233,24 @@ describe('effortsFor', () => {
 
   it('一覧にないモデルを指定したら和集合にフォールバックする', () => {
     expect(effortsFor(models, 'unknown-model')).toContain('ultra');
+  });
+
+  it('effortに対応しないモデルでは空を返す', () => {
+    const noEffort = [
+      {
+        slug: 'haiku',
+        displayName: 'Haiku',
+        description: undefined,
+        defaultEffort: undefined,
+        supportsEffort: false,
+        efforts: [],
+      },
+    ];
+    expect(effortsFor(noEffort, 'haiku')).toEqual([]);
+  });
+
+  it('フォールバックの値を差し替えられる', () => {
+    expect(effortsFor([], 'anything', ['a', 'b'])).toEqual(['a', 'b']);
   });
 });
 
