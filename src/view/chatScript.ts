@@ -17,7 +17,11 @@ export type ReviewButtonConfig = { mode: 'quickPick' } | { mode: 'command'; comm
  * 文字列リテラルに改行を書くときは `\\n` と二重にエスケープすること（`\n` は
  * テンプレートリテラルの時点で実際の改行に展開され、リテラルが分断される）。
  */
-export function chatScript(agentLabel: string, review: ReviewButtonConfig): string {
+export function chatScript(
+  agentLabel: string,
+  review: ReviewButtonConfig,
+  showRewind = false,
+): string {
   return `
   const vscode = acquireVsCodeApi();
   const el = (id) => document.getElementById(id);
@@ -51,6 +55,13 @@ export function chatScript(agentLabel: string, review: ReviewButtonConfig): stri
 
   /** ホスト側から渡されたレビューボタンの動作。 */
   const REVIEW = ${JSON.stringify(review)};
+
+  /**
+   * 発言ごとに「ここまで戻す」ボタンを出すか（Claude Code画面のみ）。
+   * Codexは会話の途中から分岐する導線（「ここから分岐」）を使う。巻き戻しは実装しない
+   * （design.md「Claude Codeの巻き戻し」参照）。
+   */
+  const SHOW_REWIND = ${JSON.stringify(showRewind)};
 
   /** 残りがこの割合を下回ったら警告として見せる。 */
   const LOW_CONTEXT_PERCENT = 20;
@@ -129,6 +140,18 @@ export function chatScript(agentLabel: string, review: ReviewButtonConfig): stri
     });
     actions.appendChild(fork);
 
+    // ファイルだけを戻す（Claude Code画面のみ）。会話には触れない。確認は拡張機能側の
+    // モーダルダイアログが持つため、ここでは要求を送るだけ
+    const rewind = document.createElement('button');
+    rewind.className = 'secondary';
+    rewind.textContent = 'ここまで戻す';
+    rewind.hidden = true;
+    rewind.addEventListener('click', () => {
+      if (!node.rewindTarget) return;
+      vscode.postMessage({ type: 'rewind', messageId: node.rewindTarget });
+    });
+    actions.appendChild(rewind);
+
     head.appendChild(actions);
     wrap.appendChild(head);
 
@@ -158,6 +181,8 @@ export function chatScript(agentLabel: string, review: ReviewButtonConfig): stri
       expand,
       fork,
       forkTarget: undefined,
+      rewind,
+      rewindTarget: undefined,
       expanded: false,
       fullText: '',
       lastItem: undefined,
@@ -312,6 +337,11 @@ export function chatScript(agentLabel: string, review: ReviewButtonConfig): stri
     // 分岐は「この指示の手前まで」。押した指示からやり直せるようにする
     node.forkTarget = forkTarget;
     node.fork.hidden = !(item.kind === 'userMessage' && forkTarget);
+
+    // 巻き戻しは発言自身のidを渡す（対象は「この発言を送る前」）。turnIdと違い、
+    // どの発言でも常に持っている値なので、直前の発言の有無を待つ必要が無い
+    node.rewindTarget = item.kind === 'userMessage' ? item.id : undefined;
+    node.rewind.hidden = !(SHOW_REWIND && item.kind === 'userMessage');
   }
 
   function syncItems(items) {

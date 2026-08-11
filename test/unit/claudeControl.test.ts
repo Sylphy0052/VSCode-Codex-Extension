@@ -6,6 +6,7 @@ import {
   buildGetSettingsRequest,
   buildMcpStatusRequest,
   buildMcpToggleRequest,
+  buildRewindFilesRequest,
   buildSetEffortRequest,
   buildSetModelRequest,
   buildSetPermissionModeRequest,
@@ -20,6 +21,7 @@ import {
   readCurrentPermissionMode,
   readControlRequest,
   readControlResponse,
+  readRewindFilesResult,
 } from '../../src/claude/control';
 
 describe('buildUserMessage', () => {
@@ -497,6 +499,112 @@ describe('readMcpServersList', () => {
     expect(readMcpServersList({})).toBeUndefined();
     expect(readMcpServersList({ mcpServers: 'なにか' })).toBeUndefined();
     expect(readMcpServersList({ mcpServers: [] })).toEqual([]);
+  });
+});
+
+describe('buildRewindFilesRequest', () => {
+  it('user_message_id と dry_run を送る（実測: パラメータ名はスネークケース）', () => {
+    // messageId 等キャメルケースでは通らないことをバイナリのstrings解析と実機で確認済み
+    const line = buildRewindFilesRequest('req_1', 'msg-uuid-1', true);
+    expect(JSON.parse(line.trim())).toEqual({
+      type: 'control_request',
+      request_id: 'req_1',
+      request: { subtype: 'rewind_files', user_message_id: 'msg-uuid-1', dry_run: true },
+    });
+  });
+
+  it('dry_run: false で実際に適用する要求を作る', () => {
+    const line = buildRewindFilesRequest('req_2', 'msg-uuid-2', false);
+    expect(JSON.parse(line.trim())).toEqual({
+      type: 'control_request',
+      request_id: 'req_2',
+      request: { subtype: 'rewind_files', user_message_id: 'msg-uuid-2', dry_run: false },
+    });
+  });
+});
+
+describe('readRewindFilesResult', () => {
+  it('戻せる場合は対象ファイルと増減行数を読む（実測: CLI 2.1.227、env var有効時）', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_1',
+        response: { canRewind: true, filesChanged: ['/w/a.txt'], insertions: 0, deletions: 1 },
+      },
+    });
+    expect(response).toBeDefined();
+    expect(readRewindFilesResult(response!)).toEqual({
+      ok: true,
+      filesChanged: ['/w/a.txt'],
+      insertions: 0,
+      deletions: 1,
+      error: undefined,
+    });
+  });
+
+  it('実適用（dry_run: false）の応答は filesChanged を持たない', () => {
+    // 実測: {"canRewind":true,"skippedLinks":0}
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_2',
+        response: { canRewind: true, skippedLinks: 0 },
+      },
+    });
+    expect(readRewindFilesResult(response!)).toEqual({
+      ok: true,
+      filesChanged: [],
+      insertions: undefined,
+      deletions: undefined,
+      error: undefined,
+    });
+  });
+
+  it('チェックポイントが無い場合（success包みでcanRewind: false）はエラーとして読む', () => {
+    // 実測: dry_run:true かつチェックポイント無しは success 応答に包まれて canRewind: false で返る
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_3',
+        response: { canRewind: false, error: 'No file checkpoint found for this message.' },
+      },
+    });
+    expect(readRewindFilesResult(response!)).toEqual({
+      ok: false,
+      filesChanged: [],
+      insertions: undefined,
+      deletions: undefined,
+      error: 'No file checkpoint found for this message.',
+    });
+  });
+
+  it('トップレベルのエラー応答も読む（実測: dry_run:falseでチェックポイント無しのとき）', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: { subtype: 'error', request_id: 'req_4', error: 'No file checkpoint found for this message.' },
+    });
+    expect(readRewindFilesResult(response!)).toEqual({
+      ok: false,
+      filesChanged: [],
+      insertions: undefined,
+      deletions: undefined,
+      error: 'No file checkpoint found for this message.',
+    });
+  });
+
+  it('未対応のCLIでも安全に失敗として読む', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'error',
+        request_id: 'req_5',
+        error: 'Unsupported control request subtype: rewind_files',
+      },
+    });
+    expect(readRewindFilesResult(response!).ok).toBe(false);
   });
 });
 

@@ -815,16 +815,17 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 
 ### 14.6 プロバイダごとにできること
 
-| 操作                           | Codex                                                | Claude Code                                                     |
-| ------------------------------ | ---------------------------------------------------- | --------------------------------------------------------------- |
-| 新規 / resume / タブ復元       | ○                                                    | ○                                                               |
-| チャット画面（承認・中断込み） | ○                                                    | ○                                                               |
-| fork（セッション全体）         | ○                                                    | ○（idは未確定のまま）                                           |
-| 会話の途中のターンから分岐     | ○                                                    | ×（CLIに手段が無い）                                            |
-| archive / unarchive / delete   | ○                                                    | ×（CLIに手段が無い。ファイルを直接消すことはしない）            |
-| セッション名の変更             | ○                                                    | ×（要約名の概念が無い）                                         |
-| 問い合わせカード（§9.9）       | ○                                                    | ×（同じ要求が届かない）                                         |
-| コードレビューの起動（§9.11）  | ○（`review/start`。QuickPickで対象とdeliveryを選ぶ） | ○（`/code-review` を発言として送るだけ。CLIが対話で対象を聞く） |
+| 操作                                                                              | Codex                                                               | Claude Code                                                     |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------- |
+| 新規 / resume / タブ復元                                                          | ○                                                                   | ○                                                               |
+| チャット画面（承認・中断込み）                                                    | ○                                                                   | ○                                                               |
+| fork（セッション全体）                                                            | ○                                                                   | ○（idは未確定のまま）                                           |
+| 会話の途中のターンから分岐                                                        | ○                                                                   | ×（CLIに手段が無い）                                            |
+| 巻き戻し（[#21](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/21)） | ×（`thread/rollback` はdeprecatedかつファイルを戻さない。採らない） | ○（`rewind_files`。**ファイルだけ**戻す。会話には触れない）     |
+| archive / unarchive / delete                                                      | ○                                                                   | ×（CLIに手段が無い。ファイルを直接消すことはしない）            |
+| セッション名の変更                                                                | ○                                                                   | ×（要約名の概念が無い）                                         |
+| 問い合わせカード（§9.9）                                                          | ○                                                                   | ×（同じ要求が届かない）                                         |
+| コードレビューの起動（§9.11）                                                     | ○（`review/start`。QuickPickで対象とdeliveryを選ぶ）                | ○（`/code-review` を発言として送るだけ。CLIが対話で対象を聞く） |
 
 対応しない操作はTreeViewの `contextValue`（`codexSession.<provider>`）でメニューから隠す。
 
@@ -842,6 +843,52 @@ Codexの `forkFromTurn`（`thread/fork` に `lastTurnId` を渡す。§9.5「会
 バイナリ内の実装（`branch` 選択時に呼ばれる関数）を読むと、対象ターンまでのメッセージを新しいsessionIdへ複製しながら `content-replacement` / `relocated`（cwdの引き継ぎ）/ `sessionHistorySuppressed` などのレコードを合わせて書き出す処理になっており、単純なtranscriptの行コピーでは再現できない。加えてこれは公開ドキュメントの無いminifiedコードからの逆解析であり、CLIの更新で予告なく変わりうる。**この処理自体が非対話環境では実行できないよう作られている**ことは、同等の操作を拡張機能側で（transcriptを読んで新しいセッションを組み立てる形で）代替するのが安全でないことの傍証でもある。§8「会話本文を読まない・保存しない」とは別に、CLIの内部ストレージ形式に依存した複製は元のセッションを壊すリスクを避けられないため、この代替は採らない。
 
 以上から、**Claude Codeでは会話の途中のターンから分岐する手段が無いと結論する**。Codex側の `forkFromTurn` 実装（`src/view/chatView.ts` の `forkFrom` / `src/view/conversationView.ts`）と同じ導線は出さない。将来のCLI更新で `--print` 経路にも `branch` / `fork` が解放されれば再調査する。
+
+#### 巻き戻し（Codex Esc Esc / Claude `/rewind` 相当、[#21](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/21)）
+
+**Codexは実装しない。Claude Codeは「ファイルだけを戻す」形で実装した。** 両者は戻せる対象が正反対（Codexの `thread/rollback` は会話だけ・ファイルは戻さない、Claudeの `rewind_files` はファイルだけ・会話は戻さない）なので、画面の文言では**取り違えようのない書き方**にする。
+
+##### Codex: `thread/rollback` は使わない（結論は変えない。根拠を実測で更新）
+
+`codex app-server generate-json-schema` で得た `ThreadRollbackParams` の定義:
+
+```
+"DEPRECATED: `thread/rollback` will be removed soon."
+numTurns: "The number of turns to drop from the end of the thread. Must be >= 1.
+  This only modifies the thread's history and does not revert local file changes
+  that have been made by the agent. Clients are responsible for reverting these changes."
+```
+
+- **末尾からNターン落とすだけ**（任意の地点を指定できず、対象を選ぶ操作として作れない）
+- **ファイル変更は戻らない**（`ThreadRollbackResponse` が返すのは更新後の `Thread`（会話）のみで、diffやfilesChangedに相当するフィールドを持たない）。戻すのはクライアントの責任と明記されている
+- **近く削除される**（DEPRECATED）
+
+→ このAPIに依存した実装はしない。Codexの巻き戻しに相当する体験は「会話途中からの分岐」（`forkFromTurn`、上の節）で代替する。分岐は元のスレッドを残したまま新しいスレッドを作る操作で、巻き戻し（元のスレッドを書き換える）とは別物だが、「途中からやり直す」というユーザーの目的には応えられる。
+
+##### Claude: `rewind_files` は実装した。会話には触れない
+
+Issue #21着手時点でのIssue #2（Z-11）の記録は「`rewind_files` 実在（要チェックポイント）」だった。以下、パラメータの形とチェックポイントの作られ方を実測で埋めた（CLI 2.1.227）。
+
+1. **control_requestのsubtypeを`rewind` `rewind_files` `restore_checkpoint` `list_checkpoints` `file_snapshot` `create_checkpoint` `checkpoint` `revert` `revert_files` `undo` の10候補で総当たり**。`rewind_files` だけが `Unsupported control request subtype` にならず、`"No file checkpoint found for this message."` という別のエラーで応答した（＝subtypeとしては存在し、パラメータかチェックポイントの有無で失敗している）。**`rewind`（会話を戻す方）は `Unsupported control request subtype: rewind` で拒否される**。会話を戻す経路はどのパラメータでも存在しない
+2. **パラメータ名はスネークケースの `user_message_id` / `dry_run`**。CLIバイナリの `strings` 解析で `rewindFiles(e,t){...subtype:"rewind_files",user_message_id:e,dry_run:t?.dryRun...}` という該当コードを発見し、キャメルケース（`messageId` 等）で試していたのが失敗の原因だったと判明した
+3. **チェックポイントは既定で作られない**。同じくバイナリ解析で見つけたゲート関数:
+   ```
+   function QF(){ if(Ns()) return false; if(Rn()) return U3_(); return Zu("fileCheckpointingEnabled",true).value && !CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING }
+   function Rn(){ return !Jm.isInteractive() }
+   function U3_(){ return CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING && !CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING }
+   ```
+   非対話（`Jm.isInteractive()` が偽、＝拡張機能が使う `--print` 経路はこれに該当）では、環境変数 `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` を立てない限りチェックポイントが作られず、`rewind_files` は常に失敗する。変数名が「SDK」を指しており、非対話のクライアント（この拡張機能を含む）向けの明示的な入口と判断した
+4. **実機で両方向を確認した**:
+   - インタラクティブなTUI（`claude`、pty経由）で実際にファイルを編集させたあと Esc Esc → Rewind → 「Restore code and conversation」を選ぶと、確認画面に「The conversation will be forked. / The code will be restored -1 in a.txt. / ⚠ Rewinding does not affect files edited manually or via bash.」と出て、実行後に対象ファイルが実際に元へ戻ることを確認した（スクラッチのgitリポジトリで実施）
+   - 拡張機能と同じ `--print --input-format stream-json` 経路で、`CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=1` を渡さずに `rewind_files` を呼ぶと常に `"No file checkpoint found for this message."`、**渡すと** `dry_run:true` で `{"canRewind":true,"filesChanged":["...a.txt"],"insertions":0,"deletions":1}`、`dry_run:false` で実際にファイルが編集前の内容へ戻ることを確認した
+5. **`user_message_id` には会話に実在する人の発言のuuidを渡す**。拡張機能は `--replay-user-messages` で発言を送り返してもらっており、その `user` イベントの `uuid` を `ChatItem.id`（`kind: 'userMessage'`）としてそのまま保持している（`src/claude/streamJson.ts` の `applyUser`）ため、新たに紐付けを持つ必要は無い
+6. **会話には触れない**。1で確認したとおり `rewind` subtype 自体が存在せず、`rewind_files` の応答にも会話（items/turn）に関するフィールドは無い。TUIの確認画面が「The conversation will be forked」と言っているのは、TUI自身がRewind操作の一部として**別途** `fork` 相当の処理を行っているためで、`rewind_files` 単体の効果ではない
+
+**画面の文言**: 「ファイルを戻します。会話の履歴は変わりません。元には戻せません。」で統一し、対象ファイルを列挙してから確認する（`confirmRewindFiles`、`src/view/chatView.ts`）。「会話も戻る」と誤解させる書き方はしない。
+
+**実装箇所**: `src/claude/control.ts`（`buildRewindFilesRequest` / `readRewindFilesResult`）、`src/claude/streamSession.ts`（`previewRewindFiles` / `applyRewindFiles`。`start()` で環境変数を設定）、`src/view/claudeChatView.ts`（`rewindFiles`。dry_run→確認→適用の順で、対象が無ければ確認ダイアログを出さず、成功・失敗のどちらも画面に返す）、`src/view/chatScript.ts`（発言ごとの「ここまで戻す」ボタン。Claude Code画面のみ、`showRewind` で出し分け）。
+
+**リスクと劣化方針**: `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` は公式ドキュメントに無い環境変数で、CLIの更新で無くなる・形が変わる可能性がある。その場合は `rewind_files` の応答が失敗として返るだけで、`readRewindFilesResult` が安全側（`ok: false`）に倒すため、会話や他の操作には影響しない。
 
 ### 14.7 チャット画面の設定行
 
