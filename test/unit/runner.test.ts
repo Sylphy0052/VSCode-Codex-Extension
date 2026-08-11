@@ -1069,14 +1069,50 @@ tasks:
     await flush();
     expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
 
-    expect(runner.retryTask(runId, 'T1')).toBe(true);
+    expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
     await flush();
     expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
     // 新しいセッションが作られている（元のセッションとは別物）
     expect(codexHost.sessions).toHaveLength(2);
 
     // 依存未達（T2はT1が未完了）なので再実行できない
-    expect(runner.retryTask(runId, 'T2')).toBe(false);
+    expect(runner.retryTask(runId, 'T2')).toEqual({ ok: false });
+  });
+
+  it('allowを持つタスクの再実行はallowConfirmed無しでは始まらない（design.md §16.7、レビュー指摘: high）', async () => {
+    const allowRetryYaml = `
+version: 1
+name: allow-retry-test
+tasks:
+  - id: T1
+    allow:
+      - "npm test"
+    prompt: p
+    done: d
+`;
+    const { runner, codexHost, store } = createHarness(allowRetryYaml);
+    const result = await runner.start('/repo/.agents/workflows/allow-retry.yaml', '/repo', {
+      allowConfirmed: true,
+    });
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('failed', { ...initialChatState, turnFailed: true });
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+
+    // 確認無しでは再実行が始まらない
+    expect(runner.retryTask(runId, 'T1')).toEqual({ ok: false, needsAllowConfirmation: true });
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+    expect(codexHost.sessions).toHaveLength(1);
+
+    // allowConfirmed: true を付ければ再実行できる
+    expect(runner.retryTask(runId, 'T1', { allowConfirmed: true })).toEqual({ ok: true });
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+    expect(codexHost.sessions).toHaveLength(2);
   });
 
   it('decideApprovalはpendingApprovalのrequestIdでTaskSession.decideApprovalを呼ぶ', async () => {
@@ -1113,6 +1149,45 @@ tasks:
 
     expect(runner.decideApproval(runId, 'T1', 'accept')).toBe(true);
     expect(t1.decideApprovalCalls).toEqual([{ requestId: 42, decision: 'accept' }]);
+  });
+
+  it('pendingApprovalのtitle/detailは双方向制御文字を無害化してから保持する（レビュー指摘: medium 3）', async () => {
+    const singleYaml = `
+version: 1
+name: decide-approval-sanitize-test
+tasks:
+  - id: T1
+    autoApprove: true
+    prompt: p
+    done: d
+`;
+    const { runner, codexHost } = createHarness(singleYaml, { allowAutoApprove: true });
+    const result = await runner.start('/repo/.agents/workflows/decide-sanitize.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    const rtlOverride = '\u202E';
+    const spoofedTitle = 'safe' + rtlOverride + 'gnp.exe';
+    const spoofedDetail = 'detail' + rtlOverride + 'line';
+    await t1.requestApproval(
+      {
+        requestId: 1,
+        kind: 'command',
+        title: spoofedTitle,
+        detail: spoofedDetail,
+        itemId: undefined,
+      },
+      { command: DANGEROUS_COMMAND, cwd: t1.cwd },
+    );
+    await flush();
+
+    const snapshot = runner.getSnapshot(runId);
+    const t1Snapshot = snapshot?.tasks.find((t) => t.id === 'T1');
+    expect(t1Snapshot?.pendingApproval?.title).not.toContain(rtlOverride);
+    expect(t1Snapshot?.pendingApproval?.detail).not.toContain(rtlOverride);
+    expect(t1Snapshot?.pendingApproval?.title).toBe('safegnp.exe');
+    expect(t1Snapshot?.pendingApproval?.detail).toBe('detailline');
   });
 
   it('allowを含むタスクがあるワークフローはallowConfirmed無しでは開始せずneedsAllowConfirmationを返す', async () => {
@@ -1215,10 +1290,112 @@ tasks:
     expect(snapshot?.tasks[0]?.hasLiveSession).toBe(false);
 
     // 「再実行」で新しいセッションから続けられる
-    expect(reloadedRunner.retryTask(runId, 'T1')).toBe(true);
+    expect(reloadedRunner.retryTask(runId, 'T1')).toEqual({ ok: true });
     await flush();
     expect(newCodexHost.sessions).toHaveLength(1);
     expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+  });
+
+  it(
+    'allowを含むワークフローをリロード後に復元しても、allowOverride警告が消えず、' +
+      '再実行にはallow確認が要る（design.md §16.7、レビュー指摘: high）',
+    async () => {
+      const allowYaml = `
+version: 1
+name: reload-allow-test
+tasks:
+  - id: T1
+    allow:
+      - "npm test"
+    prompt: p
+    done: d
+`;
+      const { runner, codexHost, store } = createHarness(allowYaml);
+      const result = await runner.start('/repo/.agents/workflows/reload-allow.yaml', '/repo', {
+        allowConfirmed: true,
+      });
+      const runId = result.runId as string;
+      await flush();
+      codexHost.byTaskId('T1');
+
+      // start()の時点ではallowOverride警告が出ている（従来どおり）
+      expect(runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'allowOverride')).toBe(
+        true,
+      );
+
+      // 新しいプロセス（リロード後）を模す
+      const newCodexHost = new FakeHost();
+      const reloadedRunner = new WorkflowRunner({
+        hosts: { codex: newCodexHost, claude: newCodexHost },
+        worktreeQueue: new WorktreeCreationQueue(),
+        git: fakeGit(),
+        fs: identityFs,
+        filePort: filePort(allowYaml),
+        store,
+        log: fakeLogger,
+        readBaseline: () => ({
+          codexSandbox: 'read-only',
+          codexApprovalMode: 'on-request',
+          claudePermissionMode: 'manual',
+          allowAutoApprove: true,
+        }),
+      });
+      await reloadedRunner.restoreRunsForView();
+
+      // 復元後もallowOverride警告が消えない（修正前は`live.warnings: []`初期化のため消えていた）
+      const snapshot = reloadedRunner.getSnapshot(runId);
+      const allowWarning = snapshot?.warnings.find((w) => w.kind === 'allowOverride');
+      expect(allowWarning).toBeDefined();
+      expect(allowWarning?.taskId).toBe('T1');
+      expect(allowWarning?.message).toContain('npm test');
+
+      // 再実行はallow確認を経由しないと始まらない
+      expect(reloadedRunner.retryTask(runId, 'T1')).toEqual({
+        ok: false,
+        needsAllowConfirmation: true,
+      });
+      await flush();
+      expect(newCodexHost.sessions).toHaveLength(0);
+
+      // 確認すれば再実行できる
+      expect(reloadedRunner.retryTask(runId, 'T1', { allowConfirmed: true })).toEqual({
+        ok: true,
+      });
+      await flush();
+      expect(newCodexHost.sessions).toHaveLength(1);
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+    },
+  );
+
+  it('定義ファイルが大きすぎるrunは復元をあきらめる（design.md §16.2の上限。レビュー指摘: medium 2）', async () => {
+    const { runner, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/oversize.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const oversizeFilePort: WorkflowFilePort = {
+      fileSize: async () => MAX_WORKFLOW_FILE_BYTES + 1,
+      readTextFile: async () => YAML,
+    };
+    const reloadedRunner = new WorkflowRunner({
+      hosts: { codex: new FakeHost(), claude: new FakeHost() },
+      worktreeQueue: new WorktreeCreationQueue(),
+      git: fakeGit(),
+      fs: identityFs,
+      filePort: oversizeFilePort,
+      store,
+      log: fakeLogger,
+      readBaseline: () => ({
+        codexSandbox: 'read-only',
+        codexApprovalMode: 'on-request',
+        claudePermissionMode: 'manual',
+        allowAutoApprove: true,
+      }),
+    });
+
+    await expect(reloadedRunner.restoreRunsForView()).resolves.toBeUndefined();
+    // 上限超過のため復元をあきらめる（readTextFileが呼ばれる前にfileSizeで弾く）
+    expect(reloadedRunner.getSnapshot(runId)).toBeUndefined();
   });
 
   it('定義ファイルが読めないrunは復元をあきらめる（クラッシュしない）', async () => {

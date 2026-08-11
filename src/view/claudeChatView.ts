@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
-import type { ApprovalDecision } from '../appserver/approvals';
+import { isApprovalDecision, type ApprovalDecision } from '../appserver/approvals';
 import type { ChatState, ChatUsage } from '../appserver/chatState';
 import type { ClaudeSessionStore } from '../claude/sessionStore';
 import { ClaudeStreamSession } from '../claude/streamSession';
@@ -739,10 +739,10 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         void this.applyConfig(entry, m['key'], m['value']);
         return;
       }
-      if (type === 'approve' && typeof m['decision'] === 'string') {
+      if (type === 'approve' && isApprovalDecision(m['decision'])) {
         const requestId = m['requestId'];
         if (typeof requestId === 'number' || typeof requestId === 'string') {
-          this.resolveApproval(entry, requestId, m['decision'] as ApprovalDecision);
+          this.resolveApproval(entry, requestId, m['decision']);
         }
       }
     } catch (e) {

@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   aggregateProgress,
   computeRanks,
-  escapeHtml,
   layoutGraph,
   NODE_GAP_X,
   NODE_WIDTH,
@@ -171,23 +170,7 @@ describe('aggregateProgress（design.md §16.8「全体の進捗」）', () => {
   });
 });
 
-describe('escapeHtml（design.md §16.8のセキュリティ要件。動的文字列のHTML埋め込み対策）', () => {
-  it('タグを構成する文字を実体参照へ変える', () => {
-    const dangerous = '<img src=x onerror="alert(1)">';
-    const escaped = escapeHtml(dangerous);
-    expect(escaped).not.toContain('<img');
-    expect(escaped).toBe('&lt;img src=x onerror=&quot;alert(1)&quot;&gt;');
-  });
-
-  it('&自体も二重エスケープを起こさないよう最初に変換する', () => {
-    expect(escapeHtml('a & b')).toBe('a &amp; b');
-  });
-
-  it('単一引用符も属性値の脱出を防ぐためエスケープする', () => {
-    expect(escapeHtml("a'b")).toBe('a&#39;b');
-  });
-
-  it('危険な文字を含まない文字列はそのまま返す', () => {
-    expect(escapeHtml('T1 done in 12:43')).toBe('T1 done in 12:43');
-  });
-});
+// `escapeHtml`はworkflowGraph.tsから削除した（レビュー指摘: info「未結線のデッドコード」）。
+// XSS対策は「HTML文字列結合の経路を作らない」設計そのもの（`workflowScript.ts`の
+// `textContent`/`createElementNS`のみでのDOM組み立て）で担保しており、
+// `webviewScript.test.ts`の「innerHTML等を使わない」検査で機械的に固定している。

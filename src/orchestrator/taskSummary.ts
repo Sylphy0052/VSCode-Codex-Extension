@@ -1,4 +1,5 @@
 import type { ChatItem, ChatState } from '../appserver/chatState';
+import { stripControlChars } from './sanitize';
 
 /**
  * ワークフローViewのノード・一覧に出す「直近の応答の1行要約」を組み立てる（design.md §16.8）。
@@ -34,9 +35,14 @@ function lastAgentMessageText(items: readonly ChatItem[]): string {
   return '';
 }
 
-/** 最初の空でない行を取り、上限で省略する。改行以降は「1行要約」の趣旨から外れるため捨てる。 */
+/**
+ * 最初の空でない行を取り、制御文字（ANSIエスケープ・ゼロ幅文字・双方向制御文字を含む。
+ * `sanitize.ts`のstripControlChars）を落としてから上限で省略する。改行以降は
+ * 「1行要約」の趣旨から外れるため捨てる（レビュー指摘: low。エージェントの出力を
+ * そのまま画面へ出す経路なので、`sanitizeForLog`と同じ無害化を通す）。
+ */
 function firstLineOf(text: string): string {
   const line = text.split('\n').find((candidate) => candidate.trim() !== '') ?? '';
-  const trimmed = line.trim();
+  const trimmed = stripControlChars(line).trim();
   return trimmed.length > MAX_SUMMARY_LENGTH ? `${trimmed.slice(0, MAX_SUMMARY_LENGTH)}…` : trimmed;
 }

@@ -181,20 +181,9 @@ export function aggregateProgress(tasks: readonly { state: TaskState }[]): Progr
   };
 }
 
-/**
- * HTML文字列へ埋め込む前に無害化する（`chatView.ts`の`escapeHtml`と同じ考え方）。
- *
- * design.md §16.8の本則は「動的な文字列は必ずテキストノードとして挿入する」こと
- * （`workflowScript.ts`が`textContent`で行う。ブラウザのDOM APIはテキストとして扱った
- * 内容をHTML/SVGとして解釈しないため、これ自体は追加の検証を要さないプラットフォームの
- * 保証である）。この関数は、それでも拡張機能ホスト側（`workflowView.ts`）が初期HTMLの
- * シェルへ値を埋め込む場合の保険として使う（多層防御。`chatView.ts`の`settingsNote`と同じ扱い）。
- */
-export function escapeHtml(text: string): string {
-  return text
-    .replace(/&/gu, '&amp;')
-    .replace(/</gu, '&lt;')
-    .replace(/>/gu, '&gt;')
-    .replace(/"/gu, '&quot;')
-    .replace(/'/gu, '&#39;');
-}
+// HTML文字列への埋め込みを前提にした`escapeHtml`はここに置かない（以前あったが未結線の
+// まま残っていた。レビュー指摘: info「デッドコードのまま『対策済み』に見えるのが一番良くない」）。
+// `workflowView.ts`は初期HTMLシェルへ動的な値を一切埋め込まず（`postMessage`のJSON経由のみ）、
+// `workflowScript.ts`側も`textContent`/`createElementNS`のみでDOMを組み立てる
+// （`innerHTML`系APIを使わないことは`webviewScript.test.ts`で機械的に固定している）。
+// この設計自体が「HTML文字列結合の経路を作らない」対策であり、エスケープ関数は不要。

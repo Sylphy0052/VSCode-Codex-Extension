@@ -29,7 +29,7 @@ import {
 } from './runState';
 import { getRunOutcome, nextTasksToStart, type RunOutcome } from './scheduler';
 import { WorkflowRunStore, type PersistedRun, type PersistedTaskState } from './runStore';
-import { sanitizeForLog } from './sanitize';
+import { sanitizeForLog, stripControlChars } from './sanitize';
 import { buildEffectiveTaskConfig, type ExtensionSafetyBaseline } from './taskConfig';
 import { buildResponseSummary } from './taskSummary';
 import type {
@@ -129,6 +129,13 @@ export interface StartWorkflowResult {
   /** `true` のとき、`allowTaskIds` を確認のうえ `allowConfirmed: true` で呼び直すこと（design.md §16.7）。 */
   needsAllowConfirmation?: boolean;
   allowTaskIds?: readonly string[];
+}
+
+/** `WorkflowRunner.retryTask` の戻り値。`start()` の `allow` 確認と同じ形にしてある。 */
+export interface RetryTaskResult {
+  ok: boolean;
+  /** `true` のとき、対象タスクに `allow` があるため確認のうえ `allowConfirmed: true` で呼び直すこと。 */
+  needsAllowConfirmation?: boolean;
 }
 
 /** 一覧表示用の要約。#57のワークフローViewができるまでの間、コマンドのQuickPickに使う。 */
@@ -293,7 +300,11 @@ export class WorkflowRunner {
       outcome: getRunOutcome(live.runState),
       startedAt: live.startedAt,
       tasks,
-      warnings: [...live.warnings, ...this.deriveMaxReachedWarnings(live)],
+      warnings: [
+        ...live.warnings,
+        ...this.deriveMaxReachedWarnings(live),
+        ...this.deriveAllowWarnings(live),
+      ],
       haltedByUser: live.runState.haltedByUser,
     };
   }
@@ -318,6 +329,28 @@ export class WorkflowRunner {
       pendingApproval: liveTask?.pendingApproval,
       hasLiveSession: liveTask !== undefined,
     };
+  }
+
+  /**
+   * `allow` による危険判定の解除は定義ファイルから決まる情報であり、状態として
+   * 持つ必要が無い（レビュー指摘: high）。以前は`start()`の中で1回だけ`live.warnings`へ
+   * 積んでいたため、ウィンドウのリロードで復元した実行（`rebuildLiveRun`は`warnings: []`で
+   * 初期化する）では二度と現れなかった。`live.def.tasks`から都度導出すれば、
+   * design.md §16.7「どのタスクがどのパターンを解除しているかを常時出す」を
+   * 復元経路でも自動的に満たす。
+   */
+  private deriveAllowWarnings(live: LiveRun): WorkflowWarning[] {
+    const warnings: WorkflowWarning[] = [];
+    for (const task of live.def.tasks) {
+      if (task.allow.length > 0) {
+        warnings.push({
+          kind: 'allowOverride',
+          taskId: task.id,
+          message: `allowで危険操作チェックの一部を解除しています: ${task.allow.join(', ')}`,
+        });
+      }
+    }
+    return warnings;
   }
 
   /** 回数切れは状態としてすでに`failed`が持っているため、都度作らず表示のたびに導出する。 */
@@ -392,6 +425,16 @@ export class WorkflowRunner {
   }
 
   private async rebuildLiveRun(p: PersistedRun): Promise<LiveRun | undefined> {
+    // start()と同じ上限チェックをここでも通す（レビュー指摘: medium 2）。
+    // `MAX_WORKFLOW_FILE_BYTES`のコメントどおり「巨大なYAMLで拡張機能ホスト
+    // （シングルスレッド）を固まらせない」ための防御であり、復元経路だけ素通りさせない
+    const size = await this.deps.filePort.fileSize(p.defPath);
+    if (size === undefined || size > MAX_WORKFLOW_FILE_BYTES) {
+      this.deps.log.warn(
+        `[workflow ${p.runId}] 定義ファイルを読み込めないため復元できません: ${p.defPath}`,
+      );
+      return undefined;
+    }
     const text = await this.deps.filePort.readTextFile(p.defPath);
     if (text === undefined) {
       this.deps.log.warn(
@@ -546,16 +589,10 @@ export class WorkflowRunner {
       this.deps.log.warn(`[workflow] ${gitignoreCheck.message}`);
       warnings.push({ kind: 'gitignore', taskId: undefined, message: gitignoreCheck.message });
     }
-    // allowによる危険判定の解除は、実行前確認とは別にViewの警告欄へ常時出す
-    // （design.md §16.7「どのタスクがどのパターンを解除しているかを常時出す」）
-    for (const taskId of allowTaskIds) {
-      const task = def.tasks.find((t) => t.id === taskId);
-      warnings.push({
-        kind: 'allowOverride',
-        taskId,
-        message: `allowで危険操作チェックの一部を解除しています: ${(task?.allow ?? []).join(', ')}`,
-      });
-    }
+    // allowによる危険判定の解除はここでは積まない。`getSnapshot`が`live.def.tasks`から
+    // 都度導出する（`deriveAllowWarnings`）。ここで1回だけ積むと、ウィンドウのリロードで
+    // 復元した実行（`rebuildLiveRun`は`warnings: []`で初期化する）では二度と現れず、
+    // design.md §16.7の「常時出す」が復元経路だけ欠けてしまう（レビュー指摘: high）
 
     const runId = this.deps.randomId?.() ?? randomUUID();
     const live: LiveRun = {
@@ -650,15 +687,29 @@ export class WorkflowRunner {
    * リロード直後で復元した実行（`live.tasks` が空）でも動く。`retryTaskState` が
    * `live.runState`（`workspaceState` から復元済み）だけを見て `pending` へ戻し、
    * `pump()` が `startTask()` を呼んで新しいセッションを作る。
+   *
+   * 対象タスクに非空の `allow` があれば、`options.allowConfirmed !== true` の間は
+   * 再実行を始めず `needsAllowConfirmation` を立てて返す（`start()` と同じ形。
+   * レビュー指摘: high）。`start()` の実行前確認は**そのプロセスの最初の起動時**にしか
+   * 効かず、ウィンドウのリロード後に復元した実行を「再実行」する経路はそれを経由しない
+   * ため、ここでも独立して確認を要求する。
    */
-  retryTask(runId: string, taskId: string): boolean {
+  retryTask(
+    runId: string,
+    taskId: string,
+    options?: { allowConfirmed?: boolean },
+  ): RetryTaskResult {
     const live = this.runs.get(runId);
     if (live === undefined) {
-      return false;
+      return { ok: false };
+    }
+    const task = live.def.tasks.find((t) => t.id === taskId);
+    if (task !== undefined && task.allow.length > 0 && options?.allowConfirmed !== true) {
+      return { ok: false, needsAllowConfirmation: true };
     }
     const next = retryTaskState(live.runState, live.def.tasks, taskId);
     if (next === live.runState) {
-      return false;
+      return { ok: false };
     }
     live.runState = next;
     // 停止していた実行を人の操作で再開する起点でもあるため、finishedを解除する
@@ -666,7 +717,7 @@ export class WorkflowRunner {
     this.notify(runId);
     void this.persist(runId);
     this.pump(runId);
-    return true;
+    return { ok: true };
   }
 
   /**
@@ -1020,12 +1071,20 @@ export class WorkflowRunner {
     }
 
     // Viewの「承認」操作（`decideApproval`）がその場に要求内容を出すために持っておく
-    // （design.md §16.8）。応答が決まったら`onApprovalResolved`側で消す
+    // （design.md §16.8）。応答が決まったら`onApprovalResolved`側で消す。
+    //
+    // title/detail（コマンド文字列・cwd・reasonを含む）は`describeApproval`が組み立てた
+    // ものでCLI・エージェント由来のため信用しない。`textContent`で挿入する限りXSSには
+    // ならないが、双方向制御文字（RTL override等）は表示上の文字列を反転・偽装できる。
+    // ワークフローViewの「承認」は会話タブを開かずその場で決める設計（design.md §16.8）で
+    // 通常のチャット画面より文脈が少なく、見た目の偽装が誤判断に直結しやすいため
+    // `stripControlChars`を通す（レビュー指摘: medium 3）。`detail`は切り詰めない
+    // （危険な内容の一部が「…」に隠れて見えなくなるほうが、承認可否の判断としては危険）
     liveTask.pendingApproval = {
       requestId: approval.requestId,
       kind: approval.kind,
-      title: approval.title,
-      detail: approval.detail,
+      title: sanitizeForLog(approval.title),
+      detail: stripControlChars(approval.detail),
     };
     live.runState = markWaitingApproval(live.runState, taskId);
     void this.persist(runId);

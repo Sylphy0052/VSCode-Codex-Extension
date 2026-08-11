@@ -54,4 +54,17 @@ describe('buildResponseSummary（design.md §16.8「直近の応答の1行要約
     const state = { ...initialChatState, turnResultText: '\n\n本題はここから' };
     expect(buildResponseSummary(state)).toBe('本題はここから');
   });
+
+  it('ANSIエスケープ・ゼロ幅文字を落とす（レビュー指摘: low）', () => {
+    const esc = '\u001b[31m';
+    const reset = '\u001b[0m';
+    const zeroWidthSpace = '\u200b';
+    const state = {
+      ...initialChatState,
+      turnResultText: esc + 'red' + reset + zeroWidthSpace + 'text',
+    };
+    const summary = buildResponseSummary(state);
+    expect(summary).not.toContain(esc);
+    expect(summary).not.toContain(zeroWidthSpace);
+  });
 });

@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
-import type { ApprovalDecision } from '../appserver/approvals';
+import { isApprovalDecision } from '../appserver/approvals';
 import type { Logger } from '../log';
 import type { WorkflowRunner } from '../orchestrator/runner';
 import { chatCsp } from './chatCsp';
@@ -126,8 +126,14 @@ export class WorkflowViewManager implements vscode.Disposable {
       return;
     }
     if (type === 'selectRun' && typeof m['runId'] === 'string') {
-      this.activeRunId = m['runId'];
-      this.postState();
+      // Webviewは信頼境界の外側。存在しないidをそのまま`activeRunId`へ入れても
+      // 実害は薄い（`getSnapshot`がundefinedを返すだけ）が、多層防御として
+      // `listLive()`にある実在のidかを確かめてから採用する（レビュー指摘: low）
+      const requestedRunId = m['runId'];
+      if (this.runner.listLive().some((r) => r.runId === requestedRunId)) {
+        this.activeRunId = requestedRunId;
+        this.postState();
+      }
       return;
     }
     if (type === 'run') {
@@ -148,6 +154,17 @@ export class WorkflowViewManager implements vscode.Disposable {
       return;
     }
     if (type === 'removeWorktrees') {
+      // 未コミットの変更があるworktreeは`removeWorktree`自身が拒否するためデータ損失は
+      // 防がれるが、クリーンなworktreeとブランチは確認無しで一発で消える。セッション削除
+      // 等の他の破壊的操作と同じく確認を挟む（レビュー指摘: low）
+      const choice = await vscode.window.showWarningMessage(
+        'このワークフローで作られたworktreeを撤去します。未コミットの変更があるものは残ります。',
+        { modal: true },
+        '撤去する',
+      );
+      if (choice !== '撤去する') {
+        return;
+      }
       const result = await this.runner.removeWorktrees(runId);
       if (result.failed.length > 0) {
         this.log.warn(`[workflowView] worktreeの撤去に失敗したタスク: ${result.failed.join(', ')}`);
@@ -188,12 +205,35 @@ export class WorkflowViewManager implements vscode.Disposable {
       return;
     }
     if (type === 'retry') {
-      this.runner.retryTask(runId, taskId);
+      await this.retryWithAllowConfirmation(runId, taskId);
       return;
     }
-    if (type === 'approve' && typeof m['decision'] === 'string') {
-      this.runner.decideApproval(runId, taskId, m['decision'] as ApprovalDecision);
+    if (type === 'approve' && isApprovalDecision(m['decision'])) {
+      this.runner.decideApproval(runId, taskId, m['decision']);
     }
+  }
+
+  /**
+   * 「再実行」操作。対象タスクに `allow` があれば確認を挟む（design.md §16.7、
+   * レビュー指摘: high）。`start()` の実行前確認はプロセス最初の起動時にしか効かず、
+   * ウィンドウのリロード後に復元した実行を「再実行」する経路はそれを経由しないため、
+   * ここで独立して確認する。
+   */
+  private async retryWithAllowConfirmation(runId: string, taskId: string): Promise<void> {
+    const first = this.runner.retryTask(runId, taskId);
+    if (first.ok || first.needsAllowConfirmation !== true) {
+      return;
+    }
+    const choice = await vscode.window.showWarningMessage(
+      `タスク「${taskId}」は既定の危険操作チェックを解除しています（allow）。` +
+        'このタスクではallowに一致する操作が承認なしで実行されます。再実行しますか？',
+      { modal: true },
+      '再実行する',
+    );
+    if (choice !== '再実行する') {
+      return;
+    }
+    this.runner.retryTask(runId, taskId, { allowConfirmed: true });
   }
 
   private render(webview: vscode.Webview): string {

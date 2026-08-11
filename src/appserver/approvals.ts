@@ -3,6 +3,27 @@ import type { PendingApproval } from './chatState';
 /** UIに出す選択肢。protocolのdecision値に対応する。 */
 export type ApprovalDecision = 'accept' | 'acceptForSession' | 'decline' | 'cancel';
 
+const APPROVAL_DECISIONS: readonly ApprovalDecision[] = [
+  'accept',
+  'acceptForSession',
+  'decline',
+  'cancel',
+];
+
+/**
+ * Webviewから届いた値が `ApprovalDecision` として妥当かをホワイトリストで確かめる。
+ *
+ * Webviewは信頼境界の外側（`chatView.ts` / `claudeChatView.ts` / `workflowView.ts` の
+ * `postMessage` ハンドラは全て同じ理由でここを通す）。`typeof value === 'string'` だけの
+ * チェックでは、任意の文字列がそのまま `buildApprovalResponse` を経由してapp-serverへの
+ * 応答（`{ decision }`）に載る。`command` / `fileChange` 種別はdecisionの値を検証せず
+ * そのまま応答へ埋め込むため、境界（この関数の呼び出し側）で弾かないと未知の値が
+ * app-serverまで届いてしまう（レビュー指摘: medium 1）。
+ */
+export function isApprovalDecision(value: unknown): value is ApprovalDecision {
+  return typeof value === 'string' && (APPROVAL_DECISIONS as readonly string[]).includes(value);
+}
+
 /**
  * app-serverがこちらへ投げてくる要求。
  *

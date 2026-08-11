@@ -4,6 +4,7 @@ import {
   buildApprovalResponse,
   defaultDenyResponse,
   describeApproval,
+  isApprovalDecision,
   type ApprovalDecision,
 } from '../appserver/approvals';
 import type { ChatItem, ChatState } from '../appserver/chatState';
@@ -730,10 +731,10 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
         entry.loop.stop('manual');
         return;
       }
-      if (type === 'approve' && typeof m['decision'] === 'string') {
+      if (type === 'approve' && isApprovalDecision(m['decision'])) {
         const requestId = m['requestId'];
         if (typeof requestId === 'number' || typeof requestId === 'string') {
-          this.resolveApproval(entry, requestId, m['decision'] as ApprovalDecision);
+          this.resolveApproval(entry, requestId, m['decision']);
         }
         return;
       }
