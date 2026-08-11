@@ -652,6 +652,13 @@ export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationRes
         message: `maxIterations は1〜${LOOP_ITERATION_LIMIT}の範囲で指定してください: ${t.maxIterations}`,
       });
     }
+    // 注意: ここで見ているのはYAMLに書かれたリテラルの値だけ。approvalModeを
+    // 一切指定しない（undefined）タスクはこのチェックを素通りする。拡張機能側の設定
+    // （baseline）が既にbypassPermissionsなら、実効値（クランプ後の値）はそれを継承して
+    // bypassPermissionsになりうるが、baselineはこの純粋関数からは見えないため
+    // ここでは判定できない（レビュー指摘: critical 3）。**実効値に対する最終防御は
+    // `runner.ts`の`startTask`が担う**。このチェックは「YAMLで明示的に指定した」
+    // 分かりやすいミスを早期に拾うだけの、追加の一枚に過ぎない
     if (t.provider === 'claude' && t.approvalMode === 'bypassPermissions') {
       errors.push({
         taskIds: [t.id],

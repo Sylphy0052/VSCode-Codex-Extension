@@ -12,6 +12,7 @@ import {
 } from '../appserver/chatState';
 import type { LaunchTarget } from '../codex/types';
 import type { Logger } from '../log';
+import type { ApprovalHandlerResult } from '../orchestrator/taskSession';
 import { consumeNdjson } from '../util/ndjson';
 import { buildClaudeStreamArgs } from './argvBuilder';
 import {
@@ -52,6 +53,8 @@ export interface ClaudeStreamOptions {
   config: ClaudeConfig;
   /** 過去の会話。resume時にtranscriptから読んだものを初期表示に使う。 */
   initialItems?: ChatState['items'];
+  /** 過去の会話に含まれていた最後のTODO一覧。resume時にtranscriptから読んだものを使う。 */
+  initialTodos?: ChatState['todos'];
 }
 
 /**
@@ -82,6 +85,21 @@ export class ClaudeStreamSession {
     private readonly onApprovalUnavailable: () => void = () => undefined,
     /** 使えるコマンドが判った時と、途中で増減した時に呼ぶ。 */
     private readonly onCommands: (commands: readonly SlashCommand[]) => void = () => undefined,
+    /**
+     * 承認要求を、承認カードを出す前に自動判定へ回す（design.md §16.10の6）。
+     *
+     * 既定は常に `ask`（従来通り必ず承認カードを出す）。タスク管理下のセッションだけ
+     * `ClaudeChatViewManager` が実際の判定へ差し替える。判定そのもの
+     * （`classifyApprovalRequest`）を呼ぶのは runner.ts の責務で、ここは口を通すだけ。
+     *
+     * 第2引数は `can_use_tool` 要求の生payload（`tool_name` / `input` を含む）。
+     * `PendingApproval`（表示用に文字列結合済み）だけでは判定に使う `command` /
+     * 変更対象パスを取り出せないため渡す（design.md §16.7）。
+     */
+    private readonly interceptApproval: (
+      approval: PendingApproval,
+      rawParams: Record<string, unknown>,
+    ) => Promise<ApprovalHandlerResult> = () => Promise.resolve({ kind: 'ask' }),
   ) {}
 
   /**
@@ -145,6 +163,7 @@ export class ClaudeStreamSession {
       ...initialClaudeState,
       threadId,
       items: options.initialItems ?? [],
+      todos: options.initialTodos ?? initialClaudeState.todos,
     });
 
     this.initializeControl();
@@ -319,7 +338,12 @@ export class ClaudeStreamSession {
     this.update(removeApproval(this.state, requestId));
   }
 
-  private receive(chunk: string): void {
+  /**
+   * stdoutの1チャンクを処理する。実際の使い手はプロセスのstdoutリスナーだが、
+   * テストからも直接呼べるよう公開する（`start()` は実プロセスを起動するため、
+   * 承認まわりの分岐だけを検証したいテストは `start()` を経由せずここへ直接流す）。
+   */
+  receive(chunk: string): void {
     this.buffer += chunk;
     const { values, rest } = consumeNdjson(this.buffer);
     this.buffer = rest;
@@ -369,10 +393,27 @@ export class ClaudeStreamSession {
       return;
     }
 
-    this.waiting.set(request.requestId, {
-      approval,
-      input: (request.payload['input'] as Record<string, unknown> | undefined) ?? {},
-    });
+    const input = (request.payload['input'] as Record<string, unknown> | undefined) ?? {};
+    void this.resolveApproval(request.requestId, approval, input, request.payload);
+  }
+
+  /**
+   * 承認要求を自動判定へ回し、`auto` なら承認カードを出さずに応答する。
+   * `ask`（既定）なら従来通り承認カードを出して人の判断を待つ。
+   */
+  private async resolveApproval(
+    requestId: string,
+    approval: PendingApproval,
+    input: Record<string, unknown>,
+    rawPayload: Record<string, unknown>,
+  ): Promise<void> {
+    const result = await this.interceptApproval(approval, rawPayload);
+    if (result.kind === 'auto') {
+      this.write(buildControlResponse(requestId, buildCanUseToolResponse(result.decision, input)));
+      this.log.info(`承認(自動判定): ${approval.kind} → ${result.decision}`);
+      return;
+    }
+    this.waiting.set(requestId, { approval, input });
     this.update(addApproval(this.state, approval));
   }
 

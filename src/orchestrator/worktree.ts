@@ -2,8 +2,9 @@ import { execFile } from 'node:child_process';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
-import type { TaskBoundary } from './escalation';
+import { isPathWithinRoot, type TaskBoundary } from './escalation';
 import type { TaskState } from './runState';
+import { sanitizeForLog } from './sanitize';
 import { TASK_ID_PATTERN, type CleanupMode, type Isolation } from './workflow';
 
 /**
@@ -78,6 +79,12 @@ export interface WorktreeFileSystemPort {
   realpath(target: string): Promise<string | undefined>;
   /** ファイル全体をUTF-8で読む。存在しなければ undefined。 */
   readTextFile(target: string): Promise<string | undefined>;
+  /**
+   * `target` そのものがシンボリックリンクか（リンクを辿らず`lstat`で見る）。
+   * 存在しなければ `false`。worktreeの作成先を組み立てる途中の各セグメントが
+   * リンクでないかを確かめるために使う（design.md §16.6、レビュー指摘: critical 4）。
+   */
+  isSymbolicLink(target: string): Promise<boolean>;
 }
 
 export const nodeWorktreeFileSystem: WorktreeFileSystemPort = {
@@ -93,6 +100,14 @@ export const nodeWorktreeFileSystem: WorktreeFileSystemPort = {
       return await fsPromises.readFile(target, 'utf8');
     } catch {
       return undefined;
+    }
+  },
+  async isSymbolicLink(target: string): Promise<boolean> {
+    try {
+      const stat = await fsPromises.lstat(target);
+      return stat.isSymbolicLink();
+    } catch {
+      return false;
     }
   },
 };
@@ -241,7 +256,7 @@ export async function resolveGitCommonDir(
       reason: 'commandFailed',
       message:
         result.stderr.trim() !== ''
-          ? result.stderr.trim()
+          ? sanitizeForLog(result.stderr)
           : `git rev-parse --git-common-dir に失敗しました（終了コード ${result.code}）`,
     };
   }
@@ -378,9 +393,47 @@ export type CreateWorktreeResult =
   | { ok: true; cwd: string; branch: string }
   | {
       ok: false;
-      reason: 'branchExists' | 'gitError' | 'invalidIdentifier' | 'invalidHeadCommit';
+      reason:
+        | 'branchExists'
+        | 'gitError'
+        | 'invalidIdentifier'
+        | 'invalidHeadCommit'
+        | 'symlinkDetected'
+        | 'boundaryEscape';
       message: string;
     };
+
+/**
+ * `root` から `target` までの各中間ディレクトリにシンボリックリンクが含まれていないかを
+ * 確かめる。見つかった最初のパスを返す（無ければ undefined）。
+ *
+ * `.agents/worktrees` がリポジトリにcommitされたシンボリックリンクだと、文字列結合
+ * だけで組み立てた `worktreePath` は実際にはリンク先（リポジトリの外）を指す
+ * （design.md §16.6、レビュー指摘: critical 4。実機確認済み: `git worktree add` は
+ * リンクを黙って辿り、エラーにならずリンク先へ実体を作る）。`sandbox: workspace-write`
+ * はcwd基準で書き込み可能域を決めるため、リンク先（例えばホーム配下）が丸ごと
+ * サンドボックス内として扱われてしまう。cloneしただけで発火し、YAMLを一切介さない。
+ *
+ * `target`（worktree自体のディレクトリ）はこれから作られる前提のため存在しないが、
+ * その祖先（`.agents` / `.agents/worktrees` / `<runId>` ディレクトリ）は既存でありうる。
+ * 存在しないセグメントは `isSymbolicLink` が `false` を返すだけで安全に読み飛ばせる。
+ */
+async function findSymlinkedAncestor(
+  root: string,
+  target: string,
+  fs: WorktreeFileSystemPort,
+): Promise<string | undefined> {
+  const rel = path.relative(root, target);
+  const segments = rel.split(path.sep).filter((s) => s !== '' && s !== '..');
+  let cursor = root;
+  for (const segment of segments) {
+    cursor = path.join(cursor, segment);
+    if (await fs.isSymbolicLink(cursor)) {
+      return cursor;
+    }
+  }
+  return undefined;
+}
 
 /**
  * `headCommit` はコミットのSHA（省略形を含む7〜40桁の16進数）に限る。
@@ -408,6 +461,7 @@ const HEAD_COMMIT_PATTERN = /^[0-9a-f]{7,40}$/;
 async function createWorktree(
   request: CreateWorktreeRequest,
   git: GitCommandRunner,
+  fs: WorktreeFileSystemPort,
 ): Promise<CreateWorktreeResult> {
   const identifierMessage = identifierError(request.runId, request.taskId);
   if (identifierMessage !== undefined) {
@@ -423,6 +477,17 @@ async function createWorktree(
 
   const branch = branchName(request.runId, request.taskId, request.retry);
   const cwd = worktreePath(request.repoRoot, request.runId, request.taskId, request.retry);
+
+  // 一次防御: `git worktree add` を呼ぶ前に、作成先までの経路にシンボリックリンクが
+  // 含まれていないかを確かめる（レビュー指摘: critical 4）
+  const symlinkedAncestor = await findSymlinkedAncestor(request.repoRoot, cwd, fs);
+  if (symlinkedAncestor !== undefined) {
+    return {
+      ok: false,
+      reason: 'symlinkDetected',
+      message: `worktreeの作成先の経路にシンボリックリンクが含まれています。作成を中止しました: ${symlinkedAncestor}`,
+    };
+  }
 
   const verify = await git.run(
     ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`],
@@ -442,10 +507,27 @@ async function createWorktree(
       reason: 'gitError',
       message:
         add.stderr.trim() !== ''
-          ? add.stderr.trim()
+          ? sanitizeForLog(add.stderr)
           : `git worktree add に失敗しました（終了コード ${add.code}）`,
     };
   }
+
+  // 二次防御: 実際に作られた場所が本当にrepoRoot配下にあるかを確かめる。一次防御
+  // （事前のリンク検知）だけに頼らない多層防御（design.md §16.6）。TOCTOU
+  // （検査後・作成前にリンクが差し替えられる）や、一次防御の見落としに備える
+  const realCwd = await fs.realpath(cwd);
+  const realRoot = (await fs.realpath(request.repoRoot)) ?? request.repoRoot;
+  if (realCwd === undefined || !isPathWithinRoot(realCwd, realRoot)) {
+    const cleanup = await git.run(['worktree', 'remove', '--force', cwd], request.repoRoot);
+    const cleanupNote =
+      cleanup.code === 0 ? '撤去しました' : '撤去にも失敗しました。手動で確認してください';
+    return {
+      ok: false,
+      reason: 'boundaryEscape',
+      message: `worktreeがワークスペースの外に作られたため、${cleanupNote}: ${realCwd ?? cwd}`,
+    };
+  }
+
   return { ok: true, cwd, branch };
 }
 
@@ -488,7 +570,7 @@ async function removeWorktree(
       reason: 'gitError',
       message:
         status.stderr.trim() !== ''
-          ? status.stderr.trim()
+          ? sanitizeForLog(status.stderr)
           : `git status の取得に失敗しました（終了コード ${status.code}）`,
     };
   }
@@ -507,7 +589,7 @@ async function removeWorktree(
       reason: 'gitError',
       message:
         remove.stderr.trim() !== ''
-          ? remove.stderr.trim()
+          ? sanitizeForLog(remove.stderr)
           : `git worktree remove に失敗しました（終了コード ${remove.code}）`,
     };
   }
@@ -534,8 +616,12 @@ export class WorktreeCreationQueue {
   private tail: Promise<void> = Promise.resolve();
 
   /** worktreeを1件作る（`createWorktree` をキュー経由で呼ぶ）。 */
-  create(request: CreateWorktreeRequest, git: GitCommandRunner): Promise<CreateWorktreeResult> {
-    return this.enqueue(() => createWorktree(request, git));
+  create(
+    request: CreateWorktreeRequest,
+    git: GitCommandRunner,
+    fs: WorktreeFileSystemPort,
+  ): Promise<CreateWorktreeResult> {
+    return this.enqueue(() => createWorktree(request, git, fs));
   }
 
   /** worktreeを1件撤去する（`removeWorktree` をキュー経由で呼ぶ）。 */

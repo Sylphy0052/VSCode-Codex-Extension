@@ -56,6 +56,22 @@ export function capOutput(text: string): { text: string; truncated: boolean } {
 /** 差分を持たない項目のための空配列。 */
 export const NO_DIFFS: FileDiff[] = [];
 
+/**
+ * TODO一覧の1件。Claude Codeの `TodoWrite` ツールの入力から作る
+ * （`src/claude/transcript.ts` の `normalizeTodos` を参照）。
+ */
+export interface TodoItem {
+  /** 完了形の説明（例: 「Aを準備する」）。既定の表示に使う。 */
+  content: string;
+  /** `pending` / `in_progress` / `completed`。CLIの語彙をそのまま持つ（実測で確認）。 */
+  status: string;
+  /** 進行中の表現（例: 「Aを準備中」）。`in_progress` のときに使う。 */
+  activeForm: string;
+}
+
+/** TODOを持たない項目のための空配列。 */
+export const NO_TODOS: TodoItem[] = [];
+
 /** 待ち行列の1件。応答中に送られた指示を、添えた画像ごと保つ。 */
 export interface QueuedMessage {
   text: string;
@@ -194,6 +210,13 @@ export interface ChatState {
    * Claude Codeは tool_use（Edit/Write/NotebookEdit）から都度積み、ターン開始時にリセットする。
    */
   turnEditedFiles: string[];
+  /**
+   * TODO一覧（Claude Codeのみ）。`TodoWrite` を使わないセッションでは空のまま。
+   *
+   * Codexは `plan`（`turn/plan/updated`）で同種の情報を会話内の項目として持つため、
+   * この一覧は使わない（既存の表示で足りているため。詳細はdocs/design.mdを参照）。
+   */
+  todos: TodoItem[];
 }
 
 export const initialChatState: ChatState = {
@@ -213,6 +236,7 @@ export const initialChatState: ChatState = {
   reviewing: false,
   turnResultText: '',
   turnEditedFiles: [],
+  todos: NO_TODOS,
 };
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');

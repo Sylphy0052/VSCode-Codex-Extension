@@ -25,7 +25,7 @@ import {
   type PendingApproval,
 } from './chatState';
 import { buildCodexInput, type Attachment } from '../provider/attachments';
-import type { AppServerConnection, ServerRequest } from './connection';
+import type { AppServerConnectionPort, ServerRequest } from './connection';
 import { readTurnPolicy, turnPolicyFor, type TurnPolicy } from './planMode';
 import {
   buildPromptResponse,
@@ -70,7 +70,7 @@ export class ChatSession {
   private noticeCount = 0;
 
   constructor(
-    private readonly connection: AppServerConnection,
+    private readonly connection: AppServerConnectionPort,
     private readonly log: Logger,
     private readonly onChange: (state: ChatState) => void,
   ) {}

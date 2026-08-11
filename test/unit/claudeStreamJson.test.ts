@@ -370,6 +370,107 @@ describe('applyStreamEvent', () => {
   });
 });
 
+describe('TODO一覧（TodoWrite）', () => {
+  it('TodoWriteのtool_useを専用一覧にし、会話の項目には積まない', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            {
+              type: 'tool_use',
+              id: 't1',
+              name: 'TodoWrite',
+              input: {
+                todos: [
+                  { content: 'Aを準備する', status: 'pending', activeForm: 'Aを準備中' },
+                  { content: 'Bを実行する', status: 'pending', activeForm: 'Bを実行中' },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    ]);
+    expect(state.items).toEqual([]);
+    expect(state.todos).toEqual([
+      { content: 'Aを準備する', status: 'pending', activeForm: 'Aを準備中' },
+      { content: 'Bを実行する', status: 'pending', activeForm: 'Bを実行中' },
+    ]);
+  });
+
+  it('更新のたびに一覧を置き換える（差分ではなく全体が届く）', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            {
+              type: 'tool_use',
+              id: 't1',
+              name: 'TodoWrite',
+              input: { todos: [{ content: 'A', status: 'pending', activeForm: 'A中' }] },
+            },
+          ],
+        },
+      },
+      {
+        type: 'assistant',
+        message: {
+          id: 'm2',
+          content: [
+            {
+              type: 'tool_use',
+              id: 't2',
+              name: 'TodoWrite',
+              input: { todos: [{ content: 'A', status: 'in_progress', activeForm: 'A中' }] },
+            },
+          ],
+        },
+      },
+    ]);
+    expect(state.todos).toEqual([{ content: 'A', status: 'in_progress', activeForm: 'A中' }]);
+  });
+
+  it('TodoWriteを使わないセッションではtodosが空のまま', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } }],
+        },
+      },
+    ]);
+    expect(state.todos).toEqual([]);
+  });
+
+  it('ターンをまたいでも一覧を持ち越す（会話全体のTODOのため）', () => {
+    const withTodos = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            {
+              type: 'tool_use',
+              id: 't1',
+              name: 'TodoWrite',
+              input: { todos: [{ content: 'A', status: 'in_progress', activeForm: 'A中' }] },
+            },
+          ],
+        },
+      },
+      { type: 'result', subtype: 'success' },
+    ]);
+    const next = applyStreamEvent(withTodos, { type: 'system', subtype: 'init', session_id: ID });
+    expect(next.todos).toEqual([{ content: 'A', status: 'in_progress', activeForm: 'A中' }]);
+  });
+});
+
 describe('作業記録用の成果（turnResultText / turnEditedFiles）', () => {
   it('resultイベントのresultフィールドを応答テキストとして取り込む', () => {
     const state = apply([

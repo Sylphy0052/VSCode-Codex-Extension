@@ -983,6 +983,45 @@ Claude Codeは消費率（`usedPercent`）を返さない。実測した中身�
 - 表示できないURL（`http` など）は読み込ませず、「表示できない画像 (URL)」と出す。CSPが `img-src data:` しか許さないため、そのまま渡すと黙って欠ける
 - 既定はサムネイル（高さ160pxまで）。クリックで原寸に広げる。拡大した状態は要素と一緒に保つ
 
+### 14.13 TODO一覧（Claude CodeのTodoWrite）
+
+Claude CodeのTUIの `/todos` に相当する表示。issue #31・TP-59対応（対象はClaude側のみ）。
+
+#### 実測した入力の形
+
+`claude --print --output-format stream-json --verbose --permission-mode acceptEdits` を起動し、TodoWriteを使わせて `tool_use.input` をそのまま読んだ。
+
+```json
+{
+  "todos": [
+    { "content": "Aを準備する", "status": "pending", "activeForm": "Aを準備中" },
+    { "content": "Bを実行する", "status": "in_progress", "activeForm": "Bを実行中" },
+    { "content": "Cを確認する", "status": "completed", "activeForm": "Cを確認中" }
+  ]
+}
+```
+
+- 状態の語彙は `pending` / `in_progress` / `completed` の3つ（実測）
+- **同じセッションで複数回呼んだときも、毎回一覧をまるごと送ってくる**（差分ではない）。4回連続で呼ばせた実測で、2回目以降も3件全部が毎回届き、変わった項目だけ `status` が更新されていた。表示側は「置き換え」でよく、前回の内容とマージする必要は無い
+- `activeForm` は進行形の言い回し（「Aを準備中」）。TUIの進捗表示に合わせ、`in_progress` のときだけこちらを見せる
+
+#### 実装
+
+- `src/claude/transcript.ts` の `normalizeTodos` が `tool_use.input` を `TodoItem[]`（`content` / `status` / `activeForm`）へ正規化する純粋関数。壊れた要素（`content` が空など）は個別に読み飛ばす。未知の `status` もそのまま持つ（CLIの語彙が増えても表示が消えないように、`describePlan` の `PLAN_MARK` と同じ考え方）
+- TodoWriteの呼び出しは**会話の項目には積まない**。ライブ（`src/claude/streamJson.ts` の `applyAssistant`）でも過去ログの読み直し（`transcript.ts` の `transcriptItems`）でも、`tool_use.name === 'TodoWrite'` のときは項目を作らず `ChatState.todos` だけを置き換える。呼ぶたびに「ツール ・ TodoWrite」の行が積み上がっていた元の挙動（issueの背景）をやめるため
+- `ChatState.todos: TodoItem[]` はCodex・Claude Code共有の型に生やしたが、埋めるのはClaude Code側だけ（後述）
+- ターンをまたいでも保持する（`turn/started` 相当の `system/init` では `turnResultText` / `turnEditedFiles` はリセットするが、`todos` はリセットしない）。TODOは1ターンの成果ではなく会話全体の進行管理のため
+- `--resume` で開き直したセッションは、transcriptの中から**最後に呼ばれたTodoWrite**の内容を拾って初期値にする（`ClaudeStreamOptions.initialTodos`）。ただし他のセッション由来の一時状態（`busy` / `usage` / `context` など）と同じく、Webview側の `retainContextWhenHidden` を跨いだ再読込では復元しない（会話本文以外は元々復元していない既存の設計を踏襲）
+- 表示は`renderShell`が組み立てる共通HTMLに `#todos` を追加し、入力欄の上・ステータス行とループパネルの間に置いた。`chatScript.ts` の `renderTodos` が空なら要素ごと隠す（TODOを使わないセッションでは何も出ない）。進み具合は `[ ]` / `[~]` / `[x]` で、Codexの計画表示と記号を揃えた
+
+#### Codex側は対象外（既存の表示で足りる）
+
+issue #31 の起票時点のスコープは「Claude側のみ」（`docs/tui-parity-backlog.md` のTP-59もプロバイダ列は `Claude`）。調査コメントでは「Codex側も対象になりうる」と触れているが、これは別issue（TP-22、Plan mode）の文脈で、TP-59自体のスコープを変えるものではないと判断した。
+
+実際、Codexには `turn/plan/updated`（`{ plan: [{ step, status }], explanation }`）を受けて `describePlan` が作る `plan` 種別の項目が既にある（§14.10「計画そのものの表示」）。これは1ターンの間は同じidで上書きされ（`plan:<turnId>`）、状態（`[ ]` / `[~]` / `[x]`）も見える。会話内の項目という点でこの節の専用パネルとは置き場所が違うが、**「一覧として見える」「状態が分かる」という受入基準は既に満たしている**ため、今回はCodex側のコードを変更しなかった。
+
+置き場所を完全に揃える（Codexの計画も入力欄の上の専用パネルへ出す）のは、`plan` 項目の会話内表示という既存の設計を変えることになり、この issueのスコープを超える。今回は `ChatState.todos` と `#todos` パネルをプロバイダ共通の器として用意するところまでに留め、Codexの計画表示を同じ器へ移すかどうかは別issueで判断する。
+
 ## 15. 作業記録（日報・週報連携）
 
 この拡張機能から実行したセッションを、日報/週報システムが読める形で残す。
@@ -1235,6 +1274,26 @@ Viewからの手動の「再実行」だけを受け付ける。手動の再実�
 - 同名のブランチが既にある場合はエラーにする（既存の作業を踏まない）
 - worktree作成に失敗したタスクは開始しない（中途半端なディレクトリで走らせない）
 - `.gitignore` に `.agents/worktrees/` が無ければ追記を促す（勝手には書き換えない）
+
+#### `.agents/worktrees` がシンボリックリンクの場合（実機確認済みの脅威）
+
+`worktreePath`（`<repo>/.agents/worktrees/<runId>/<taskId>`）は文字列結合だけで組み立てる。`.agents` または `.agents/worktrees` がシンボリックリンクだと、この文字列が指す実体はリンク先——**リポジトリの外**——になる。
+
+```
+repo/.agents/worktrees -> ../../outside   （このリンクをリポジトリにcommitしておく）
+git worktree add -b wf/run/T1 repo/.agents/worktrees/run/T1 <HEAD>
+→ Preparing worktree (new branch 'wf/run/T1')   ... エラーにならない
+→ 実体は outside/run/T1 に作られる
+```
+
+実機で確認済み: `git worktree add` はリンクを黙って辿り、エラーにならずリンク先へ実体を作る。`buildTaskBoundary` は生成後のcwdを実パス解決するため境界判定そのものは「実際に作られた場所」に対して自己整合的に働くが、**その「実際に作られた場所」自体をリポジトリの中身（cloneしただけで手に入るシンボリックリンク）が決められてしまう。** `sandbox: workspace-write` はcwd基準で書き込み可能域を決めるので、リンク先（例えばホーム配下）が丸ごとサンドボックス内として扱われる。**cloneしただけで発火し、YAMLを一切介さない。** §16.16 が「設定パネルを触らずに開く穴」として警戒している経路そのものだが、YAMLより手前（定義ファイルを読む前）の、リポジトリのファイルシステム構造そのものが攻撃面になる点で§16.16の対象外だった。
+
+対策は二段構え（多層防御）。
+
+1. **一次防御（事前検知）**: `git worktree add` を呼ぶ前に、`<repo>` から作成先までの各中間ディレクトリ（`.agents` / `.agents/worktrees` / `<runId>`）を `lstat` し、シンボリックリンクが含まれていれば作成そのものを拒否する。まだ存在しないセグメント（`<taskId>` 自身など）はリンクになりようがないため対象外でよい
+2. **二次防御（事後検証）**: `git worktree add` が成功した後、実際に作られたcwdを実パス解決し、`<repo>` の実パス配下にあることを確認する。一次防御をすり抜けるTOCTOU（検査後・作成前にリンクへ差し替えられる）や見落としに備える。外れていた場合は `git worktree remove` で撤去してからエラーにする
+
+`.gitignore` のチェック（`checkWorktreesGitignored`）は `.gitignore` の中身しか見ないため、リンクの検知はこれとは独立に行う。
 
 #### gitリポジトリでない場合
 
@@ -1575,7 +1634,10 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 | `allow`                                       | 有効。ただし `.git` 配下と `permissions` 種別は解除できない。使用時は実行前の確認とViewへの常時表示（§16.7）                                                                           |
 | `cwd`                                         | ワークスペースフォルダの実パス配下に限る。外れていれば実行前エラー                                                                                                                     |
 | `executablePath` `additionalArgs` `codexHome` | **YAMLからは指定できない**。フィールド自体を設けない                                                                                                                                   |
+| `sandboxWritableRoots` `sandboxNetworkAccess` | **YAMLからは指定できず、拡張機能の設定も継承しない**。タスクでは常に空・無効に固定する（後述）                                                                                         |
 | `model` `effort`                              | 自由に指定できる（これらは `machine-overridable` であり、実行経路や権限には関わらない）                                                                                                |
+
+`sandboxWritableRoots` と `sandboxNetworkAccess` は、`workspace-write` の範囲をワークスペースの外やネットワークへ広げる**追加の許可**である。YAMLにこれを指定する項目は設けていないので、素直に作るなら拡張機能の設定をそのまま引き継ぐことになる。だがそれをすると、人が対話セッション用に意識して許可した拡張が、**YAMLからは見えも書けもしない形で無人実行のタスクへ暗黙に伝わる**。クランプの対象になるフィールドが存在しない以上、安全側（拡張しない）に固定する。タスクに広い書き込み先が要るなら、`cwd` か `isolation` で表現する。
 
 `cwd` を無検証で許すと、`sandbox: workspace-write` の「workspace」の基準そのものを付け替えられる（例: `cwd: ~/.ssh` にすればそこが書き込み可能な領域になる）。境界の検証はサンドボックスの意味を保つために要る。
 

@@ -649,6 +649,37 @@ export function chatScript(agentLabel: string, review: ReviewButtonConfig): stri
     });
   }
 
+  // TODOの進み具合の記号。計画（Codexの plan）と同じ記号を使う。絵文字は使わない
+  const TODO_MARK = { pending: '[ ]', in_progress: '[~]', completed: '[x]' };
+
+  /**
+   * TODO一覧（Claude CodeのTodoWrite）。会話には積まず、ここだけが書き変わる。
+   * 使っていないセッションでは要素ごと隠す。
+   */
+  function renderTodos(todos) {
+    const box = el('todos');
+    const list = el('todosList');
+    const items = todos || [];
+    box.hidden = items.length === 0;
+    list.replaceChildren();
+    for (const todo of items) {
+      const li = document.createElement('li');
+      li.className = todo.status || '';
+
+      const mark = document.createElement('span');
+      mark.className = 'mark';
+      mark.textContent = TODO_MARK[todo.status] || '[' + todo.status + ']';
+      li.appendChild(mark);
+
+      const label = document.createElement('span');
+      // 進行中は「Aを準備中」のような進行形（activeForm）で見せる
+      label.textContent = todo.status === 'in_progress' && todo.activeForm ? todo.activeForm : todo.content;
+      li.appendChild(label);
+
+      list.appendChild(li);
+    }
+  }
+
   function renderQueue(queued) {
     const box = el('queue');
     const list = el('queueList');
@@ -705,6 +736,7 @@ export function chatScript(agentLabel: string, review: ReviewButtonConfig): stri
     renderPrompts(state.prompts);
     if (atBottom) log.scrollTop = log.scrollHeight;
 
+    renderTodos(state.todos);
     renderQueue(state.queued);
     el('stop').hidden = !state.busy;
     // 応答中でも送れる。進行中のターンへ割り込むので、応答は止まらない
