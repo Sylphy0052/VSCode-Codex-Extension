@@ -27,7 +27,7 @@ import { currentWorkspaceFolder, readConfig, workspaceFolderPaths } from '../con
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
-import type { FileSystemPort } from '../session/ports';
+import type { FileSystemPort, SymlinkResolution } from '../session/ports';
 import { APPROVAL_MODES, SANDBOX_MODES, type CodexConfig } from '../codex/types';
 import type { PromptSubmission } from '../appserver/prompts';
 import { MESSAGING_MCP_SERVER_NAME } from '../orchestrator/messaging';
@@ -51,6 +51,7 @@ import {
   withPseudoCommands,
   type PseudoCommandCall,
 } from '../provider/pseudoCommands';
+import { buildMemoryAppendConfirmation } from '../provider/inputModes';
 import type { SlashCommand } from '../provider/slashCommands';
 import {
   buildReviewTarget,
@@ -241,10 +242,19 @@ export async function confirmRunShellCommand(command: string): Promise<boolean> 
  *
  * ファイルへの書き込みは元に戻せないため（gitで管理されていない環境もある）、
  * 追記先と内容の両方を確認させてから書く（issue #6の受入基準）。
+ *
+ * `symlink` は追記先のシンボリックリンク判別結果。本文の組み立ては
+ * `buildMemoryAppendConfirmation`（純粋関数）に切り出してある（issue #144。実体パスを
+ * 見せずに書き込みが実行されると、実際にどのファイルが書き換わるか分からないため。
+ * 実体パスが特定できない場合も警告として出す）。
  */
-export async function confirmMemoryAppend(content: string, path: string): Promise<boolean> {
+export async function confirmMemoryAppend(
+  content: string,
+  path: string,
+  symlink: SymlinkResolution,
+): Promise<boolean> {
   const choice = await vscode.window.showWarningMessage(
-    `次の内容を追記します:\n\n${content}\n\n追記先: ${path}`,
+    buildMemoryAppendConfirmation(content, path, symlink),
     { modal: true },
     '追記する',
   );

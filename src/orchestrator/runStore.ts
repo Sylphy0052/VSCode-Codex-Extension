@@ -1,4 +1,5 @@
 import type { TaskFailureReason, TaskState } from './runState';
+import type { MementoLike } from '../util/memento';
 import { SerialQueue } from './serialQueue';
 
 /**
@@ -9,11 +10,8 @@ import { SerialQueue } from './serialQueue';
  * 復元後に人が判断するために必要な最小限に留める。
  */
 
-/** `vscode.Memento` と構造的に一致する最小限の口。`context.workspaceState` をそのまま渡せる。 */
-export interface WorkflowRunMemento {
-  get<T>(key: string, defaultValue: T): T;
-  update(key: string, value: unknown): Thenable<void>;
-}
+/** `vscode.Memento` と構造的に一致する最小限の口（実体は `src/util/memento.ts`）。 */
+export type WorkflowRunMemento = MementoLike;
 
 export const WORKFLOW_RUNS_KEY = 'codex.workflow.runs';
 
