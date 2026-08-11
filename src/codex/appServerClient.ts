@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process';
 import type { Logger } from '../log';
 import type { HooksSnapshot } from '../provider/hooks';
 import { isValidMcpServerName, type McpServersSnapshot } from '../provider/mcpServers';
+import type { AccountSnapshot } from '../provider/account';
+import { parseAccountRead } from './accountStatus';
 import { isSessionId } from './argvBuilder';
 import { buildHookTrustEdit, parseHooksList } from './hooksStatus';
 import {
@@ -212,6 +214,30 @@ export class AppServerClient {
     });
 
     return result.ok ? { ok: true } : { ok: false, error: result.error };
+  }
+
+  /**
+   * ログイン状態を読む（issue #29、design.mdのTP-53）。
+   *
+   * `account/read`（`GetAccountParams {}` → `GetAccountResponse { account, requiresOpenaiAuth }`）
+   * はスレッドを開始していなくても呼べる（実測。`mcpServerStatus/list` と同じ性質）。
+   * login/logoutの実行そのものはCLIのサブコマンド（`src/codex/accountActions.ts`）に委ねており、
+   * ここでは読み取りだけを行う。
+   */
+  async readAccount(): Promise<AccountSnapshot> {
+    const result = await this.call<ReturnType<typeof parseAccountRead>>(async (request) => {
+      const response = await request('account/read', {});
+      if (response.error !== undefined) {
+        return { ok: false, error: response.error.message };
+      }
+      return { ok: true, value: parseAccountRead(response.result) };
+    });
+
+    if (!result.ok) {
+      this.log.warn(`ログイン状態を取得できませんでした: ${result.error}`);
+      return { ok: false, reason: result.error };
+    }
+    return { ok: true, account: result.value };
   }
 
   /**

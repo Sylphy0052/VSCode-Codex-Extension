@@ -225,5 +225,17 @@ export function controlPanelStyles(): string {
     color: var(--vscode-descriptionForeground);
     border: 1px solid var(--vscode-widget-border, var(--vscode-descriptionForeground));
   }
+  .accountBox { display: flex; flex-direction: column; gap: 6px; }
+  .accountStatus {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .accountMeta {
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+  }
+  .accountActions .note { border-top: none; padding-top: 0; margin-top: 6px; }
 `;
 }
