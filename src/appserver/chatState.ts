@@ -30,6 +30,14 @@ export interface ChatItem {
   truncated?: boolean | undefined;
   /** 会話に出す画像。持たない項目では空。 */
   images?: ChatImage[] | undefined;
+  /**
+   * 思考の全文（reasoningのみ）。
+   *
+   * `text` は要約として使う。CodexのReasoningThreadItemは要約(`summary`)と全文(`content`)を
+   * 別々の配列で持つため、両方あるときだけここに全文を入れる。片方しか無い・両方無いときは
+   * undefined（表示側はその場合 `text` だけを行数で畳む。issue #19）。
+   */
+  reasoningFull?: string | undefined;
 }
 
 /**
@@ -270,6 +278,22 @@ const numberOf = (v: unknown): number | undefined =>
 const rec = (v: unknown): Record<string, unknown> | undefined =>
   typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : undefined;
 
+/**
+ * reasoning の `summary` / `content` からテキストを取り出す。
+ *
+ * ReasoningThreadItemのスキーマ（`codex app-server generate-json-schema`で実測・確認）では
+ * どちらも文字列の配列（`string[]`）。要約が複数のパートに分かれることがあるため、
+ * 空でない要素だけを段落区切り（空行）で繋ぐ。
+ */
+function readStringArray(value: unknown): string {
+  if (!Array.isArray(value)) {
+    return '';
+  }
+  return value
+    .filter((v): v is string => typeof v === 'string' && v !== '')
+    .join('\n\n');
+}
+
 /** userMessage の content 配列からテキストを取り出す。 */
 function readContentText(content: unknown): string {
   if (!Array.isArray(content)) {
@@ -318,8 +342,13 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
     case 'agentMessage':
     case 'plan':
       return { ...base, text: str(item['text']) };
-    case 'reasoning':
-      return { ...base, text: str(item['summary']) || readContentText(item['content']) };
+    case 'reasoning': {
+      // summaryとcontentは別々のstring[]（実測・スキーマとも確認）。両方あるときだけ
+      // reasoningFullへ全文を持たせ、表示側で要約↔全文の切り替えに使う（issue #19）。
+      const summary = readStringArray(item['summary']);
+      const content = readStringArray(item['content']);
+      return { ...base, text: summary, reasoningFull: content === '' ? undefined : content };
+    }
     case 'commandExecution': {
       const exitCode = item['exitCode'];
       const output = capOutput(str(item['aggregatedOutput']));
@@ -510,6 +539,11 @@ function upsertItem(items: readonly ChatItem[], item: ChatItem): ChatItem[] {
     // デルタで積んだ本文を、本文が空の completed で消さない
     text: item.text === '' && existing !== undefined ? existing.text : item.text,
     truncated: item.text === '' && existing !== undefined ? existing.truncated : item.truncated,
+    // reasoningの全文も同様。completedのcontentが空配列で届いてもデルタの蓄積を消さない
+    reasoningFull:
+      item.reasoningFull === undefined && existing !== undefined
+        ? existing.reasoningFull
+        : item.reasoningFull,
     // turnIdは後続の通知で判ることがあるため、一度得た値を保持する
     turnId: item.turnId ?? existing?.turnId,
     // 差分は patchUpdated が先に届くことがある。空で上書きしない
@@ -561,6 +595,44 @@ function appendDelta(
       truncated: existing.truncated === true || appended.truncated,
     };
   }
+  return next;
+}
+
+/**
+ * reasoningのデルタ通知を要約(summary)/全文(content)のどちらかへ追記する。
+ *
+ * `item/started` を取り逃した場合は`kind: 'reasoning'`で作る。上限は設けない
+ * （コマンド出力と違って際限なく伸びる性質のものではないため。issue #19のスコープ外）。
+ */
+function appendReasoningDelta(
+  items: readonly ChatItem[],
+  itemId: string,
+  target: 'summary' | 'content',
+  delta: string,
+): ChatItem[] {
+  const index = items.findIndex((i) => i.id === itemId);
+  if (index === -1) {
+    const created: ChatItem = {
+      id: itemId,
+      kind: 'reasoning',
+      text: target === 'summary' ? delta : '',
+      detail: '',
+      status: undefined,
+      turnId: undefined,
+      diffs: NO_DIFFS,
+      reasoningFull: target === 'content' ? delta : undefined,
+    };
+    return [...items, created];
+  }
+  const next = [...items];
+  const existing = next[index];
+  if (existing === undefined) {
+    return next;
+  }
+  next[index] =
+    target === 'summary'
+      ? { ...existing, text: existing.text + delta }
+      : { ...existing, reasoningFull: (existing.reasoningFull ?? '') + delta };
   return next;
 }
 
@@ -665,6 +737,41 @@ export function applyEvent(
         return state;
       }
       return { ...state, items: appendDelta(state.items, itemId, delta, 'commandExecution') };
+    }
+
+    /**
+     * 思考の要約・全文の逐次表示（issue #19）。
+     *
+     * Phase 0の実測では `item/completed` の `reasoning` は `summary` / `content` が
+     * どちらも空配列で届いた。中身はこの3つのデルタ通知でしか来ていない可能性が高いため、
+     * 逐次で積む。`item/reasoning/summaryPartAdded` は本文を持たず、新しい段落の開始を
+     * 知らせるだけなので、既にある要約の続きへ区切り（空行）を挟む合図として使う。
+     */
+    case 'item/reasoning/summaryTextDelta': {
+      const itemId = str(params['itemId']);
+      const delta = str(params['delta']);
+      if (itemId === '' || delta === '') {
+        return state;
+      }
+      return { ...state, items: appendReasoningDelta(state.items, itemId, 'summary', delta) };
+    }
+
+    case 'item/reasoning/summaryPartAdded': {
+      const itemId = str(params['itemId']);
+      const existing = state.items.find((i) => i.id === itemId);
+      if (itemId === '' || existing === undefined || existing.text === '') {
+        return state;
+      }
+      return { ...state, items: appendReasoningDelta(state.items, itemId, 'summary', '\n\n') };
+    }
+
+    case 'item/reasoning/textDelta': {
+      const itemId = str(params['itemId']);
+      const delta = str(params['delta']);
+      if (itemId === '' || delta === '') {
+        return state;
+      }
+      return { ...state, items: appendReasoningDelta(state.items, itemId, 'content', delta) };
     }
 
     case 'account/rateLimits/updated': {

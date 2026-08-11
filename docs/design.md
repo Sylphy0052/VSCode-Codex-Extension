@@ -1324,6 +1324,30 @@ issueのスコープはClaude側のみだが、指示に基づき同種の経路
 - `src/claude/streamSession.ts`: `refreshSessionCost()`。`refreshContext()` と同じ契機（ターン完了時、会話開始直後）で呼ぶ
 - `src/view/chatScript.ts`: フッターへのコスト表示（`formatSessionCost`）。テンプレートリテラルの中の素のJSのため、`costText.ts` の関数は再利用できず同等のロジックを書き直している（既存の `formatContext` / `formatUsage` と同じ構成）
 
+### 14.17 思考の全文表示と折りたたみ
+
+思考（reasoning）の項目を既定では要約で表示し、展開すると全文が読めるようにする。issue #19・design.mdのTP-34対応。コマンド出力の折りたたみ（TP-*・issue #17、§9.5参照）と同じ操作感（開いた状態は要素と一緒に保つ。再描画で勝手に閉じない）に揃え、別の作りを増やさない。
+
+#### 調査（実測・スキーマの両方で確認）
+
+- `codex app-server generate-json-schema` の `ReasoningThreadItem`（`ThreadItem`のoneOf、v2スキーマにのみ存在）を読むと、`summary` / `content` は**どちらも `string[]`**（`ReasoningItemContent` / `ReasoningItemReasoningSummary` という `{type, text}` 形のオブジェクト配列ではない）。既存コード（`normalizeItem`）は `str(item['summary'])` で文字列を期待していたため、配列を渡されると常に空文字列になり、次点の `readContentText(item['content'])` も「`{type: 'text', text}` の配列」を期待するコードなので、こちらも空文字列になる。**つまり実装時点で `summary` と `content` のどちらを見ても中身が読めていなかった**（Phase 0のコメントにある「summaryとcontentがどちらも空配列で届いた」という実測と符合する。空配列なので `str()` はそもそも通らない）
+- 中身は3種の通知でしか届かない（Phase 0で確認済み、スキーマでも該当メソッドを確認）:
+  - `item/reasoning/summaryTextDelta`（`{itemId, delta, summaryIndex, threadId, turnId}`）: 要約の逐次
+  - `item/reasoning/summaryPartAdded`（`{itemId, summaryIndex, threadId, turnId}`。本文を持たない、新しい段落の開始の合図）
+  - `item/reasoning/textDelta`（`{itemId, delta, contentIndex, threadId, turnId}`）: **全文の逐次**
+- Claude Codeは `thinking` ブロック（`streamJson.ts` の `applyAssistant` / `applyPartial`）で本文を取る。要約と全文が別に取れる仕組みはAPI上そもそも無い（Claude API側の `thinking.display` はモデルにより挙動が異なり、要約(`summarized`)か空(`omitted`)のどちらかで、生の思考過程が両方届く経路は無い）。Claude Code CLIが何を渡すかに依存するが、いずれにせよ「要約と全文を両方持つ」ケースはCodex固有
+
+#### 実装
+
+要約と全文を「別に取れるかどうか」で表示を分ける。両方揃うのはCodexだけなので、必然的にプロバイダで挙動が分かれる。
+
+- `src/appserver/chatState.ts`: `ChatItem.reasoningFull`（`string | undefined`）を追加。`normalizeItem` の `reasoning` は `summary` を `text`（要約）、`content` を `reasoningFull`（全文）として別々に持つ（両方とも `string[]` を `readStringArray` で `\n\n` 区切りの文字列へ変換）。`content` が空なら `reasoningFull` は `undefined`（「全文が無い」を表す）
+- `applyEvent` に `item/reasoning/summaryTextDelta` `item/reasoning/summaryPartAdded` `item/reasoning/textDelta` を追加（`appendReasoningDelta`）。`summaryPartAdded` は本文を持たないため、既存の要約が空でなければ区切り（`\n\n`）を1つ追記する合図として扱う（先頭に空行を作らないよう、要約がまだ無ければ何もしない）
+- `upsertItem` は `text` と同様、`item/completed` の `reasoningFull` が `undefined`（`content` が空配列）でもデルタで積んだ値を消さない（Phase 0の実測どおり `item/completed` 自体は空で届くため、消してしまうと消えたように見える）
+- `src/claude/streamJson.ts`: **変更なし**。Claude Codeの `thinking` は要約・全文の区別が無い単一のテキストで、既にそのまま `text` に入っているため、`reasoningFull` を使わない（後述の表示側の分岐で自動的にコマンド出力と同じ行数折りたたみになる）
+- `src/view/chatScript.ts`: `renderBody` を拡張。`item.kind === 'reasoning'` かつ `reasoningFull` が要約と別に存在するとき（Codex）は、既定で要約(`text`)を見せ、展開ボタンで全文(`reasoningFull`)へ丸ごと切り替える（コマンド出力のような「末尾だけ」ではない）。それ以外（全文が無い、または要約と同じ。Claude Codeは常にこちら）は、コマンド出力と同じ `MAX_VISIBLE_LINES`（20行）での折りたたみに落ちる。展開の開閉状態は要素と一緒に保つ既存の仕組み（`node.expanded`）をそのまま使う
+- 「全文が無い場合に展開の操作が出ない」は自然に満たされる: 要約と全文の切り替えは全文が無ければ発生せず、行数折りたたみも短ければ `overflow` が立たずボタンが出ない
+
 ## 15. 作業記録（日報・週報連携）
 
 この拡張機能から実行したセッションを、日報/週報システムが読める形で残す。

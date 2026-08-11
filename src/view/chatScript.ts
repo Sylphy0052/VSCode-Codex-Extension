@@ -191,24 +191,49 @@ export function chatScript(
   }
 
   /**
-   * 本文を描く。コマンド出力が長い場合は末尾だけ見せ、展開できるようにする。
+   * 本文を描く。長い場合は畳んで、展開できるようにする。
    *
-   * 出力は途中経過が流れ込んで伸び続けるため、全部を描き続けると重くなる。
+   * コマンド出力・思考の全文は途中経過が流れ込んで伸び続けるため、全部を描き続けると重くなる。
+   *
+   * 思考（reasoning）だけは畳み方が違う。Codexは要約(text)と全文(reasoningFull)が別に
+   * 届くことがあり、その場合は既定で要約だけを見せ、展開すると全文に切り替える
+   * （コマンド出力のような「末尾だけ」ではなく丸ごと入れ替える）。全文が無い・要約と同じ
+   * ときは、コマンド出力と同じ行数での折りたたみに落ちる（Claude Codeの思考は要約を
+   * 持たずここに該当する。issue #19）。
    */
   function renderBody(node, item) {
     if (!item) return;
     node.lastItem = item;
     const text = item.text || '';
-    node.fullText = text;
+    const full = item.kind === 'reasoning' ? item.reasoningFull || '' : '';
+    const hasSummaryAndFull = full !== '' && text !== '' && full !== text;
 
-    const lines = item.kind === 'commandExecution' ? text.split('\\n') : undefined;
+    if (hasSummaryAndFull) {
+      node.fullText = full;
+      const shown = node.expanded ? full : text;
+      if (node.body.textContent !== shown) node.body.textContent = shown;
+      node.body.hidden = false;
+      node.copy.hidden = false;
+      node.expand.hidden = false;
+      node.expand.textContent = node.expanded ? '要約だけ表示' : '全文を表示';
+      return;
+    }
+
+    // 要約が無ければ全文をそのまま本文として扱う（コマンド出力と同じ行数折りたたみ）
+    const primary = text !== '' ? text : full;
+    node.fullText = primary;
+
+    const foldByLines = item.kind === 'commandExecution' || item.kind === 'reasoning';
+    const lines = foldByLines ? primary.split('\\n') : undefined;
     const overflow = lines !== undefined && lines.length > MAX_VISIBLE_LINES;
     const shown =
-      overflow && !node.expanded ? lines.slice(lines.length - MAX_VISIBLE_LINES).join('\\n') : text;
+      overflow && !node.expanded
+        ? lines.slice(lines.length - MAX_VISIBLE_LINES).join('\\n')
+        : primary;
 
     if (node.body.textContent !== shown) node.body.textContent = shown;
-    node.body.hidden = text === '';
-    node.copy.hidden = text === '';
+    node.body.hidden = primary === '';
+    node.copy.hidden = primary === '';
 
     node.expand.hidden = !overflow;
     if (overflow) {
