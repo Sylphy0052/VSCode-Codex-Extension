@@ -42,6 +42,14 @@ export interface PersistedRun {
   tasks: Record<string, PersistedTaskState>;
   /** `manual` / `interrupted`（人の割り込み）で実行全体が停止しているか（runState.tsのRunStateと同じ意味）。 */
   haltedByUser: boolean;
+  /**
+   * 統合ブランチ名（design.md §16.11「統合ブランチ名とPR/MRの番号を持たせるのは、
+   * リロード後もViewから統合の状況を辿れるようにするため」、§16.17）。gitリポジトリでない
+   * runでは統合の概念が無いため空文字。`integration.ts`の`integrationBranchName(runId)`と
+   * 同じ値になる（runIdから決定的に導けるが、Viewでの表示・将来のPR/MR作成のため明示的に
+   * 持たせておく）。
+   */
+  integrationBranch: string;
 }
 
 /**

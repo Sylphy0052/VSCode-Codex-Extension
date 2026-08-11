@@ -126,6 +126,13 @@ export function workflowScript(): string {
       banner.className = 'approval';
       banner.textContent =
         '承認待ちのタスクがあります（' + counts.waitingApproval + '件）。一覧から許可・拒否を決めてください。';
+    } else if (snapshot.isDraft) {
+      // ゴール文から生成した直後・未実行の下書き（design.md §16.9）。outcomeの4値には
+      // 「まだ始まっていない」を表す値が無いため、専用フラグで判定する
+      banner.hidden = false;
+      banner.className = 'draft';
+      banner.textContent =
+        'これは生成された下書きです。内容を確認し、問題なければ「実行」から開始してください。';
     } else {
       banner.hidden = true;
       banner.textContent = '';

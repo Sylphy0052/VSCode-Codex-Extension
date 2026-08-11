@@ -109,7 +109,20 @@ test/
 
 ## 4. データソース
 
-### 4.1 `~/.codex/session_index.jsonl`
+### 4.0 履歴取得の経路（併用、issue #45）
+
+セッション一覧の取得経路は2つある。
+
+1. **`thread/list`（既定の経路、§4.4）**: app-serverのJSON-RPC。ファイルを一切読まずに一覧を組み立てられ、`forkedFromId` / `parentThreadId` / `ephemeral` のようなファイルからは組み立てにくい情報も入っている
+2. **ファイル読み（退避経路、§4.1〜§4.3）**: `session_index.jsonl` とロールアウトファイルを直接読む。従来からの経路
+
+`SessionStore.list()` は**まず`thread/list`を試し、空か失敗ならファイル読みへ退避する**（`SessionStore.attachThreadList` が未接続の場合も同様にファイル読みのみで動く）。退避が起きたことは `ListResult.threadListFallbackReason` に理由を残し、`ProviderRegistry` が出力パネルへ警告として出す。黙って表示経路が切り替わると、なぜ内容が変わったのか分からなくなるため。
+
+**判断の理由**: issueの仕様案3つ（完全移行 / 併用 / 据え置き）のうち「併用」を採った。app-serverはexperimentalであり、落ちても履歴だけは見えてほしい（§10「既知の制約」参照）。ファイル読みだけの経路を残しておけば、app-serverの不調時にも表示が完全に失われることはない。一方で繋がっているときは`thread/list`の方が情報量が多く、ファイル形式の変更にも振り回されない。2経路を保守する費用は掛かるが、両者の差はSessionStore内に閉じており（正規化はどちらも`SessionSummary`へ収束する）、表示層（`SessionTreeProvider`等）は経路の違いを意識しない。
+
+**このIssueのスコープ外にしたこと**: `thread/list`で新しく取れるようになった`forkedFromId` / `parentThreadId` / `ephemeral` / `gitInfo.branch` のような情報を表示に反映することは、このIssueでは行わない。まずは経路の置き換え（正規化して同じ`SessionSummary`に収めるところ）に専念し、取れるようになったという事実だけをここに記録する（§4.4末尾）。表示への反映は将来のIssueの材料とする。
+
+### 4.1 `~/.codex/session_index.jsonl`（退避経路）
 
 1行1セッション。一覧の骨格として使う。
 
@@ -121,7 +134,7 @@ test/
 
 **収録規則（スパイクで確認済み）**: このindexは全セッションを含まない。`session_meta.thread_source == "user"` のセッションのみが載り、`thread_source: "subagent"` や `source: "exec"` の非対話セッションは載らない。本拡張機能が起動するのはユーザー起点の対話セッションなので一覧のソースとして妥当だが、「sessionsディレクトリのファイル数 ≠ index行数」である点を実装時に前提としてよい。
 
-### 4.2 `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<id>.jsonl`
+### 4.2 `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<id>.jsonl`（退避経路）
 
 **1行目のみ**を読む。全文パースは不要。
 
@@ -146,7 +159,7 @@ test/
 - `originator` は環境変数 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` で任意の値に上書きできる（検証済み）。
 - アーカイブしたセッションは `~/.codex/archived_sessions/` へ**日付階層なしのフラット配置で移動**される。`unarchive` で元の `sessions/YYYY/MM/DD/` へ戻る。したがって走査対象は `sessions/**` と `archived_sessions/*` の2箇所であり、**どちらに存在するかがアーカイブ状態の判定そのものになる**。
 
-### 4.2.1 一覧の骨格はロールアウトの実在
+### 4.2.1 一覧の骨格はロールアウトの実在（退避経路）
 
 `session_index.jsonl` は**Codexが要約名を確定させてから**書かれる。indexだけを見ると、始めたばかりのセッションが履歴に出てこない（実機で確認）。
 
@@ -159,12 +172,33 @@ test/
 
 **最初の指示の在り処は入口で異なる**。TUI経由は `event_msg` の `user_message` に入るが、チャット画面（app-server）経由のセッションにはこれが無く、`response_item` の `message`（role=user）だけが残る。後者は `turn_context` より前に AGENTS.md などの前置きが同じ形で入るため、`turn_context` 以降の最初の1件を採る。
 
-### 4.3 パス解決とキャッシュ
+### 4.3 パス解決とキャッシュ（退避経路）
 
 - `id → ロールアウトファイル` は `sessions/**/rollout-*-<id>.jsonl` と `archived_sessions/rollout-*-<id>.jsonl` のglobで解決。
 - `session_meta` はファイルの**1行目であり、セッション進行中に追記されても内容は変わらない**。したがって `id → {cwd, createdAt, filePath}` は不変とみなし、`globalState` に単純な永続キャッシュとして保持する（`mtime` 比較や再パースは行わない）。
 - キャッシュの無効化はファイル消失時のエントリ削除のみ。`session_index.jsonl` に存在しないidは掃除する。
 - `CODEX_HOME` 環境変数が設定されていればそれを優先し、なければ `~/.codex`。設定 `codex.codexHome` で明示上書きも可能にする。
+
+### 4.4 `thread/list`（既定の経路、issue #45）
+
+app-serverのJSON-RPC。`AppServerClient.listThreads(limit, archivedSessionsDir)` が呼ぶ。
+
+**応答の形（実測、codex-cli 0.147.0、`{limit: 3}`）**: `{data: [...], nextCursor: "2026-08-11T00:52:11Z"}`。`nextCursor` があるページング形式で、`SessionStore` から渡された `limit`（`codex.history.maxEntries`、既定200）に達するかカーソルが尽きるまで、1回あたり最大100件ずつ要求を重ねる（`model/list` のページングと同じ考え方。応答が壊れて無限ループになるのを防ぐページ数上限も同様に持つ）。
+
+**1件のキー（実測）**: `id, extra, sessionId, forkedFromId, parentThreadId, preview, ephemeral, section, sectionEnteredAt, historyMode, modelProvider, createdAt, updatedAt, recencyAt, status, path, cwd, cliVersion, source, canAcceptDirectInput, threadSource, agentNickname, agentRole, gitInfo, name, turns`。
+
+**`SessionSummary` への正規化（`src/codex/threadList.ts`、純粋関数）**:
+
+- `id` ← `id`。空なら除く
+- `threadName` ← `name`（無ければ `undefined`。ファイル読み経路のような「先頭行から拾う」フォールバックは無い。要約名が確定していない直後のセッションは無名で出る）
+- `updatedAt` ← `updatedAt`。**実測でUnix epoch秒（数値）**。ISO8601文字列で来た場合も念のため受け付ける。読めなければそのエントリ自体を除く
+- `cwd` ← `cwd`。空文字は `undefined` にする
+- `archived` ← `archived` に相当するフィールドが応答に無いため、`path` が `archivedSessionsDir`（`CodexPaths.archivedSessions`）配下かどうかで判定する。ファイル読み経路（§4.2）と同じ考え方
+- `threadSource !== 'user'` の派生スレッド（subagentなど）は除く。ファイル読み経路の収録規則（§4.1「収録規則」）と表示を揃えるための処理で、`session_index.jsonl`側は元々こう絞られているが、`thread/list` は絞られていないためここで明示的に行う
+
+**既知の簡略化**: `limit` はサーバーへの要求件数の上限であり、`threadSource` やワークスペーススコープでの絞り込みは正規化・`SessionStore` 側で後から行う。そのため、絞り込み後の件数が `maxEntries` より少なくなることがある（ファイル読み経路は絞り込み後もロールアウトの実在を全件走査するため、この制約が無い）。実用上は問題になりにくいと考えているが、体感で件数が足りないという報告があれば見直す。
+
+**取れるようになったが表示にはまだ使っていない情報（issue #45のスコープ外）**: `forkedFromId` / `parentThreadId`（fork元・親スレッドが分かる）、`ephemeral`、`gitInfo.branch`・`gitInfo.sha`（起動時のブランチ・コミット）、`agentNickname` / `agentRole`。表示への反映は将来のIssueで検討する。
 
 ## 5. 主要フロー
 
@@ -371,8 +405,8 @@ Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡
 **MCPサーバーの一覧**: 両タブの下部に、設定されているMCPサーバーの一覧と有効/無効の切替を出す（§14.14）。取得・切替の経路はCodexとClaude Codeで別物（プロトコルの非対称は§14.14を参照）。
 
 **hooksの一覧**: MCPサーバーの一覧の下に、登録されているhookの一覧を出す（issue #28・§14.15）。1件あたりイベント名・実行するコマンド・出どころ（user/project/plugin等）を表示する。Codexは信頼状態も持ち、未信頼・変更ありのhookには「信頼する」操作を出す。Claude Codeには信頼状態を返す経路が無いため、一覧のみで操作は出さない（黙って何もしないボタンは置かない。「無い」旨を注記する）。
-**skillsの一覧**: hooksの一覧の下に、使えるskillsの一覧と（Codexのみ）有効/無効の切替を出す（issue #35・§14.17）。1件あたり名前・説明・出どころ（user/project/plugin/system/admin/unknown）を表示する。Claude Codeには有効/無効を返す・切り替える経路がどちらも無いため、一覧のみで操作は出さない（「無い」旨を注記する）。出どころの表示はCodexは公式フィールド（`scope`）、Claude Codeは応答の説明文からの推測であることも注記で区別する。
-**アカウント**: MCPサーバーの一覧より上に、ログイン状態とlogin/logoutの操作を出す（§14.15）。状態の取得はCodexが `account/read`（app-server）、Claude Codeが `claude auth status --json`。ログアウトはどちらもCLIのトップレベルサブコマンドを直接実行し、確認ダイアログを必ず挟む。ブラウザでのOAuthログインは拡張機能内で完結できないため、統合ターミナルへコマンドを入力するところまでに留める（自動実行はしない）。
+**skillsの一覧**: hooksの一覧の下に、使えるskillsの一覧と（Codexのみ）有効/無効の切替を出す（issue #35・§14.19）。1件あたり名前・説明・出どころ（user/project/plugin/system/admin/unknown）を表示する。Claude Codeには有効/無効を返す・切り替える経路がどちらも無いため、一覧のみで操作は出さない（「無い」旨を注記する）。出どころの表示はCodexは公式フィールド（`scope`）、Claude Codeは応答の説明文からの推測であることも注記で区別する。
+**アカウント**: MCPサーバーの一覧より上に、ログイン状態とlogin/logoutの操作を出す（§14.16）。状態の取得はCodexが `account/read`（app-server）、Claude Codeが `claude auth status --json`。ログアウトはどちらもCLIのトップレベルサブコマンドを直接実行し、確認ダイアログを必ず挟む。ブラウザでのOAuthログインは拡張機能内で完結できないため、統合ターミナルへコマンドを入力するところまでに留める（自動実行はしない）。
 
 ### 使用量の表示
 
@@ -701,6 +735,7 @@ Codexには専用のメソッド `review/start` がある（`codex app-server ge
 - **プロセスは各タブ独立**: 同一ウィンドウ内での同一セッションの二重オープンは防ぐが、ウィンドウを跨いだ排他は行わない（V7）。
 - **effortの反映は観測できない**: Claude Codeにはeffort専用の制御要求が無く、唯一の経路（`apply_flag_settings`）が結果を返さない（§14.7）。
 - **Codex側の外部変更**: CLIから直接archive/deleteした場合、TreeViewはファイル監視で追従するが、開いているタブは残る。
+- **`thread/list` の絞り込みは概算**: サーバーへは `maxEntries` 件を要求するだけで、ワークスペーススコープや `threadSource` の絞り込みは応答を受け取ったあとに行う。そのため絞り込み後の件数が `maxEntries` を下回ることがある（§4.4「既知の簡略化」）。
 
 ### 生成済みの型定義は取り込まない（issue #46）
 
@@ -715,7 +750,7 @@ codex app-server generate-ts --out <DIR>            # TypeScript バインディ
 
 - 生成物が大きい。`generate-ts` は643ファイル・2.7MB（`ts-rs` 生成の型のみでランタイムコードは無い）。リポジトリに置くとCLIの版と拡張機能が結び付き、CLIを上げるたびに再生成と差分レビューが要る
 - **「未知のものは素通しする」という設計と噛み合わない**。いまのパーサは `unknown` から `rec()` / `str()` で1フィールドずつ掘る形で、CLIが形を変えても壊れずに劣化する。生成型を入れると「型があるから安全」と `as` で押し通す書き方に流れやすく、実行時の防御が薄くなる
-- 型で得たい情報（メソッド名・パラメータの綴り・union の全種類）は、**実装時にスキーマを読めば足りる**。実際にこれまでの実装は全てスキーマを読んで形を確定させてきた（`model/list`・`review/start` の `ReviewTarget`・`SandboxPolicy`・`ThreadItem` の `imageView` / `imageGeneration`・`ThreadRollbackParams` など）
+- 型で得たい情報（メソッド名・パラメータの綴り・union の全種類）は、**実装時にスキーマを読めば足りる**。実際にこれまでの実装は全てスキーマを読んで形を確定させてきた（`model/list`・`review/start` の `ReviewTarget`・`SandboxPolicy`・`ThreadItem` の `imageView` / `imageGeneration`・`ThreadRollbackParams`・`thread/list`（§4.4、issue #45）など）
 
 代わりに、**プロトコルの形を書くときは根拠を必ず併記する**という運用を採る。「実測で確認した」のか「スキーマが根拠」なのかを区別して書き、実機で確かめていないものは [manual-test.md](manual-test.md) の未実施ケースとして残す。
 
@@ -724,7 +759,7 @@ codex app-server generate-ts --out <DIR>            # TypeScript バインディ
 - TypeScript / Node 20 / esbuild（バンドル）
 - eslint + prettier、`tsc --noEmit` で型チェック
 - テスト
-  - unit（vitest）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で80ファイル1349件
+  - unit（vitest）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で83ファイル1420件
   - **VSCodeに依存する層はユニットテストで扱わない**。`vscode` モジュールを触るファイル（`view/**` など）はテストから import できないため、判断が要るロジックは純粋関数へ切り出してそちらを試す（例: `view/panelState.ts`）
   - 実VSCodeでしか確認できない範囲は自動化せず、[manual-test.md](manual-test.md) のチェックリストと実施記録で担保する
 - `scripts/check.sh` に lint / typecheck / test を集約し、commit前に全緑を必須とする
@@ -1190,7 +1225,7 @@ Phase 0（issue #1 Z-07 / issue #2 Z-10）の時点では「両方とも実装�
 - `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `hooks: HooksSnapshot` を追加。`trustCodexHook(key, currentHash)` を新設（Claude Code側には対応する書き込みメソッドを持たない）
 - `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画と信頼操作（Codexのみ）。hookのコマンド文字列は必ず `textContent` でDOMへ入れ、HTMLとして解釈させない
 
-### 14.15 ログイン状態の表示とlogin / logout
+### 14.16 ログイン状態の表示とlogin / logout
 
 TUIには無い専用画面だが、TUI起動時のバナーやステータス行に相当する情報。issue #29・design.mdのTP-53対応。サイドバーの設定パネル（§6「操作パネル」）に、CodexとClaude Codeそれぞれのタブへ「アカウント」欄を出す。
 
@@ -1274,7 +1309,7 @@ Commands:
 - `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `account: AccountSnapshot` を追加。`logoutCodex()` / `logoutClaude()` / `loginCodexApiKey(apiKey)` を新設。ログアウトは確認ダイアログを必ず挟む
 - `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 「アカウント」欄の描画とボタン操作。ブラウザでのログインは統合ターミナルを開いてコマンドを入力するところまでで止め、自動実行はしない（`terminal.sendText(cmd, false)`）
 
-### 14.16 課金額とセッション分析の表示（`/cost` `/insights` 相当）
+### 14.17 課金額とセッション分析の表示（`/cost` `/insights` 相当）
 
 TUIの `/cost`（課金額）と `/insights`（セッション分析レポート）に相当する表示。issue #37・design.mdのTP-60対応。**スコープはClaude Codeのみ**（issue本文の明記どおり）。TP-31（トークン使用量・コンテキスト残量）や既存の使用量表示（`usageProbe.ts` / `usageText.ts`。レート制限の消費率）とは別の情報であり、混同しない表示にする。
 
@@ -1325,7 +1360,31 @@ issueのスコープはClaude側のみだが、指示に基づき同種の経路
 - `src/claude/streamSession.ts`: `refreshSessionCost()`。`refreshContext()` と同じ契機（ターン完了時、会話開始直後）で呼ぶ
 - `src/view/chatScript.ts`: フッターへのコスト表示（`formatSessionCost`）。テンプレートリテラルの中の素のJSのため、`costText.ts` の関数は再利用できず同等のロジックを書き直している（既存の `formatContext` / `formatUsage` と同じ構成）
 
-### 14.17 skillsの一覧・有効無効
+### 14.18 思考の全文表示と折りたたみ
+
+思考（reasoning）の項目を既定では要約で表示し、展開すると全文が読めるようにする。issue #19・design.mdのTP-34対応。コマンド出力の折りたたみ（TP-*・issue #17、§9.5参照）と同じ操作感（開いた状態は要素と一緒に保つ。再描画で勝手に閉じない）に揃え、別の作りを増やさない。
+
+#### 調査（実測・スキーマの両方で確認）
+
+- `codex app-server generate-json-schema` の `ReasoningThreadItem`（`ThreadItem`のoneOf、v2スキーマにのみ存在）を読むと、`summary` / `content` は**どちらも `string[]`**（`ReasoningItemContent` / `ReasoningItemReasoningSummary` という `{type, text}` 形のオブジェクト配列ではない）。既存コード（`normalizeItem`）は `str(item['summary'])` で文字列を期待していたため、配列を渡されると常に空文字列になり、次点の `readContentText(item['content'])` も「`{type: 'text', text}` の配列」を期待するコードなので、こちらも空文字列になる。**つまり実装時点で `summary` と `content` のどちらを見ても中身が読めていなかった**（Phase 0のコメントにある「summaryとcontentがどちらも空配列で届いた」という実測と符合する。空配列なので `str()` はそもそも通らない）
+- 中身は3種の通知でしか届かない（Phase 0で確認済み、スキーマでも該当メソッドを確認）:
+  - `item/reasoning/summaryTextDelta`（`{itemId, delta, summaryIndex, threadId, turnId}`）: 要約の逐次
+  - `item/reasoning/summaryPartAdded`（`{itemId, summaryIndex, threadId, turnId}`。本文を持たない、新しい段落の開始の合図）
+  - `item/reasoning/textDelta`（`{itemId, delta, contentIndex, threadId, turnId}`）: **全文の逐次**
+- Claude Codeは `thinking` ブロック（`streamJson.ts` の `applyAssistant` / `applyPartial`）で本文を取る。要約と全文が別に取れる仕組みはAPI上そもそも無い（Claude API側の `thinking.display` はモデルにより挙動が異なり、要約(`summarized`)か空(`omitted`)のどちらかで、生の思考過程が両方届く経路は無い）。Claude Code CLIが何を渡すかに依存するが、いずれにせよ「要約と全文を両方持つ」ケースはCodex固有
+
+#### 実装
+
+要約と全文を「別に取れるかどうか」で表示を分ける。両方揃うのはCodexだけなので、必然的にプロバイダで挙動が分かれる。
+
+- `src/appserver/chatState.ts`: `ChatItem.reasoningFull`（`string | undefined`）を追加。`normalizeItem` の `reasoning` は `summary` を `text`（要約）、`content` を `reasoningFull`（全文）として別々に持つ（両方とも `string[]` を `readStringArray` で `\n\n` 区切りの文字列へ変換）。`content` が空なら `reasoningFull` は `undefined`（「全文が無い」を表す）
+- `applyEvent` に `item/reasoning/summaryTextDelta` `item/reasoning/summaryPartAdded` `item/reasoning/textDelta` を追加（`appendReasoningDelta`）。`summaryPartAdded` は本文を持たないため、既存の要約が空でなければ区切り（`\n\n`）を1つ追記する合図として扱う（先頭に空行を作らないよう、要約がまだ無ければ何もしない）
+- `upsertItem` は `text` と同様、`item/completed` の `reasoningFull` が `undefined`（`content` が空配列）でもデルタで積んだ値を消さない（Phase 0の実測どおり `item/completed` 自体は空で届くため、消してしまうと消えたように見える）
+- `src/claude/streamJson.ts`: **変更なし**。Claude Codeの `thinking` は要約・全文の区別が無い単一のテキストで、既にそのまま `text` に入っているため、`reasoningFull` を使わない（後述の表示側の分岐で自動的にコマンド出力と同じ行数折りたたみになる）
+- `src/view/chatScript.ts`: `renderBody` を拡張。`item.kind === 'reasoning'` かつ `reasoningFull` が要約と別に存在するとき（Codex）は、既定で要約(`text`)を見せ、展開ボタンで全文(`reasoningFull`)へ丸ごと切り替える（コマンド出力のような「末尾だけ」ではない）。それ以外（全文が無い、または要約と同じ。Claude Codeは常にこちら）は、コマンド出力と同じ `MAX_VISIBLE_LINES`（20行）での折りたたみに落ちる。展開の開閉状態は要素と一緒に保つ既存の仕組み（`node.expanded`）をそのまま使う
+- 「全文が無い場合に展開の操作が出ない」は自然に満たされる: 要約と全文の切り替えは全文が無ければ発生せず、行数折りたたみも短ければ `overflow` が立たずボタンが出ない
+
+### 14.19 skillsの一覧・有効無効
 
 TUIの `/skills` に相当する表示（Codex）。issue #35・design.mdのTP-56対応。skillはモデルへ渡す指示（プロンプト）そのもので、hooks（14.15）と同じくプロジェクト側（リポジトリ内）で定義されたskillはcloneしただけで効く経路になりうる（§8のセキュリティ考慮）。どこ由来かを必ず示す方針にする。
 
@@ -1822,21 +1881,30 @@ worktreeを作れないため、ディレクトリの複製による隔離（疑
 
 ゴールの文を渡すと、タスク分解済みのYAMLを作る。規模の大きいゴールでは、あいだにロードマップを挟む2段の経路（§16.19）を使う。この節はどちらの経路にも共通する、生成そのものの扱いを述べる。
 
-1. コマンド（`workflow.plan`）でゴールを入力する
+1. コマンド（`agent.workflows.plan`。既存の `agent.workflows.run` / `.stop` / `.view` と名前を揃える）でゴールを入力する
 2. 分解用のセッションを1つ作り、スキーマの説明と現在のワークスペースの情報を添えてゴールを渡す。返答はYAMLのみとするよう指示する
 3. 受け取ったYAMLを§16.2の検証にかける。コードフェンスで囲まれて返ることが多いので、剥がしてからパーサへ渡す。通らなければ、検証エラーを添えてもう1度だけ投げ直す
 4. `agent.workflows.dir` へ保存し、エディタで開く。ワークフローViewを同時に開き、依存関係の図を見ながら人が直す
 5. 人が直したら「実行」で走り出す
 
-生成に使うプロバイダは `defaults.provider` と同じ既定（設定で変更可）。
+生成に使うプロバイダは `defaults.provider` の組み込み既定値（`codex`）に固定する。設定での切り替えは提供しない（実装を単純に保つための判断。プロバイダごとの分解品質に差が出て需要が生まれたら、`agent.workflows.plannerProvider` のような設定を別途足す）。
 
 #### 分解セッションの制限
 
 分解セッションはワークスペースの中身を読む。つまり**リポジトリに仕込まれた文が指示として効きうる**。「タスクを実行しないでください」とプロンプトで頼むだけでは足りない。
 
-- 分解セッションは `sandbox: read-only` 相当で起動し、承認要求は全て拒否する。プロンプトの指示ではなく起動時の設定で縛る
+- 分解セッションは `sandbox: read-only` 相当で起動し、承認要求は全て拒否する。プロンプトの指示ではなく起動時の設定で縛る。**この起動設定は §16.16 のクランプ（`clampSandbox` 等。拡張機能側の設定より緩めない）を経由しない。** クランプは「baselineより緩めない」ための道具であり、「baselineが何であれ最も安全な値を強制する」という分解セッションの要求とは意図が逆で、`codex.sandbox` 等が既定の空文字（CLI側の設定に委譲する、の意）のときクランプ経由だと安全性を判定できずbaselineをそのまま採用してしまう（後述のクランプ側の欠陥と合わせて自律実行向けの設定がそのまま漏れる経路になっていた。#58セキュリティ監査 critical）。分解セッションは常に固定の最安全値を直接指定し、起動直前にその値がずれていないかを確認してから開く（ずれていれば起動しない）
+- ワークスペース情報（フォルダ構成・ファイル名）はエージェント由来の文字列と同様に信用しない。ファイル名には改行を含められるため、制御文字を落としてからプロンプトへ埋め込み、個々のエントリ名の長さにも上限を設ける（§16.7・§16.8の「CLI・エージェント由来の文字列は制御文字を落としてから埋め込む」という既存の形に揃える）
+- 分解セッションの応答は、YAMLとしてパースする直前にサイズ上限を確認する（§16.2の定義ファイル読み込みと同じ上限。巨大な応答でパーサ自体を無検査に走らせない）
 - 生成されたYAMLに `autoApprove: true` / 非空の `allow` / `sandbox` や `approvalMode` の緩和指定が含まれる場合は、通常の検証エラーとは別に強調して知らせる。エディタでは該当行へ移動し、ワークフローViewの警告欄にも「このワークフローは既定の安全設定を上書きしています」と出す。多数のタスクに紛れた1件の `allow` を人が見落とすのを防ぐ
 - 生成したまま自動で実行することはしない
+
+#### ファイル名
+
+保存先ファイル名は、ゴール文から作った短いスラッグに `.yaml` を付けたもの。
+
+- スラッグ化: ファイル名として不正な記号（`\ / : * ? " < > |`）と空白・ハイフンを区切りとみなして畳み、`-` で結合する。日本語のゴール文はローマ字化せずそのまま使う（依存ライブラリを増やさない・意味を保つ判断）。最大40文字で切り詰め、Windowsの予約デバイス名（`CON` `PRN` `AUX` `NUL` `COM1`〜`COM9` `LPT1`〜`LPT9`）に一致する場合と、有効な文字が1つも残らない場合は `workflow` へ落とす
+- 重複: `agent.workflows.dir` 配下の既存ファイル名（拡張子を除いた部分）と衝突する場合は `-2` `-3` ... と連番を足す。一覧取得と保存の間に別の生成が割り込む競合を避けるため、実際の書き込みは排他フラグで行い、書き込み時点で衝突が判明したらその名前を候補から外してもう一度連番を進める
 
 ### 16.10 モジュール構成
 
@@ -2053,6 +2121,12 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 | `model` `effort`                              | 自由に指定できる（これらは `machine-overridable` であり、実行経路や権限には関わらない）                                                                                                |
 | `issue`                                       | 正の整数のみ。PR/MR本文の `Closes #<N>` とホストのCLIの引数に入る（§16.18）                                                                                                            |
 | 統合・PR/MR・最終マージの設定                 | **YAMLからは指定できない**。`agent.workflows.forge` / `pullRequest` / `finalMerge` は拡張機能の設定にだけ置く（後述）                                                                  |
+
+**baselineが空文字（CLIの設定へ委譲する、の意）のときの扱い。** `codex.sandbox` / `codex.approvalMode` / `claude.permissionMode` はいずれも既定値が空文字で、これは拡張機能を入れた直後の素の状態（`~/.codex/config.toml` や Claude の `settings.json` に委ねる）を表す。空文字は安全順序表のどの値とも一致しないため、素朴には「大小を比較できない＝判定不能」として拡張機能側の値（空文字）をそのまま採用してしまう。しかしこれには抜け穴があった。**空文字は「パラメータを送らない」の意味であり、YAML側が `sandbox: read-only` のように最も安全な値を明示しても無視され、実効的にはCLI側の設定（自律実行向けかもしれない）にそのまま委ねられてしまう**（#58セキュリティ監査 critical。分解セッション（本節）・実行タスクの `sandbox` 明示指定の両方が影響を受けていた）。
+
+そこでクランプ（`clampToSafer`）は、baselineが安全順序表に無い値（空文字を含む）のときだけ特例を設ける。**YAML側の値が安全順序表の最安全値（例: `sandbox: read-only`、Codexの `approvalMode: untrusted`）であれば、baselineが不明でも採用する。** 最安全値はこれ以上緩めようがないため、baselineが何であっても「緩める」結果にはなりえない、という一点だけを根拠にする。それ以外の値（baselineより緩いか安全か判定できない）は従来どおり拒否し、拡張機能側の値（空文字）を採用する。
+
+分解セッション（前節）はこのクランプの一般規則にも頼らない。「baselineより緩めない」という一般規則の意図と、「baselineが何であれ常に最も安全な値で起動する」という分解セッションの要求は逆であるため、固定の最安全値を直接使い、クランプを経由しない多層防御にしてある。
 
 `sandboxWritableRoots` と `sandboxNetworkAccess` は、`workspace-write` の範囲をワークスペースの外やネットワークへ広げる**追加の許可**である。YAMLにこれを指定する項目は設けていないので、素直に作るなら拡張機能の設定をそのまま引き継ぐことになる。だがそれをすると、人が対話セッション用に意識して許可した拡張が、**YAMLからは見えも書けもしない形で無人実行のタスクへ暗黙に伝わる**。クランプの対象になるフィールドが存在しない以上、安全側（拡張しない）に固定する。タスクに広い書き込み先が要るなら、`cwd` か `isolation` で表現する。
 

@@ -107,6 +107,42 @@ describe('normalizeItem', () => {
       normalizeItem({ type: 'exitedReviewMode', id: 'r2', review: '未コミットの変更' }),
     ).toMatchObject({ id: 'r2', kind: 'exitedReviewMode', detail: '未コミットの変更' });
   });
+
+  // reasoning の summary/content は ReasoningThreadItem のスキーマ上 string[]（実測でも一致）。
+  // 要約(text)と全文(reasoningFull)は別に持ち、UI側で要約/全文の切り替えに使う（issue #19）。
+  describe('reasoning', () => {
+    it('summary と content が両方あれば要約と全文を別に持つ', () => {
+      const item = normalizeItem({
+        type: 'reasoning',
+        id: 'rs_1',
+        summary: ['要約その1', '要約その2'],
+        content: ['全文その1', '全文その2'],
+      });
+      expect(item).toMatchObject({
+        id: 'rs_1',
+        kind: 'reasoning',
+        text: '要約その1\n\n要約その2',
+        reasoningFull: '全文その1\n\n全文その2',
+      });
+    });
+
+    it('summary しか無ければ全文は持たない', () => {
+      const item = normalizeItem({ type: 'reasoning', id: 'rs_2', summary: ['要約のみ'] });
+      expect(item).toMatchObject({ text: '要約のみ' });
+      expect(item?.reasoningFull).toBeUndefined();
+    });
+
+    it('content しか無ければ全文側にだけ入る（要約は空）', () => {
+      const item = normalizeItem({ type: 'reasoning', id: 'rs_3', content: ['本文のみ'] });
+      expect(item).toMatchObject({ text: '', reasoningFull: '本文のみ' });
+    });
+
+    it('どちらも無ければ空のまま', () => {
+      const item = normalizeItem({ type: 'reasoning', id: 'rs_4', summary: [], content: [] });
+      expect(item?.text).toBe('');
+      expect(item?.reasoningFull).toBeUndefined();
+    });
+  });
 });
 
 describe('deriveReviewing', () => {
@@ -679,6 +715,74 @@ describe('applyEvent / item/commandExecution/outputDelta', () => {
     });
     expect(completed.items[0]?.text).toBe('流れてきた出力');
     expect(completed.items[0]?.status).toBe('exit 0');
+  });
+});
+
+// Phase 0（issue #19）の実測: item/completed の reasoning は summary/content が
+// どちらも空配列で届き、中身はデルタ通知でしか来ない。要約と全文を別々に積む。
+describe('applyEvent / item/reasoning/*', () => {
+  it('summaryTextDelta で要約を積む', () => {
+    const state = feed(initialChatState, [
+      ['item/reasoning/summaryTextDelta', { itemId: 'rs_1', delta: '考え中' }],
+      ['item/reasoning/summaryTextDelta', { itemId: 'rs_1', delta: 'です' }],
+    ]);
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]).toMatchObject({ id: 'rs_1', kind: 'reasoning', text: '考え中です' });
+    expect(state.items[0]?.reasoningFull).toBeUndefined();
+  });
+
+  it('textDelta で全文を積む（要約とは別枠）', () => {
+    const state = feed(initialChatState, [
+      ['item/reasoning/textDelta', { itemId: 'rs_1', delta: '本文の' }],
+      ['item/reasoning/textDelta', { itemId: 'rs_1', delta: '続き' }],
+    ]);
+    expect(state.items[0]).toMatchObject({ id: 'rs_1', kind: 'reasoning', text: '' });
+    expect(state.items[0]?.reasoningFull).toBe('本文の続き');
+  });
+
+  it('要約と全文を両方積める', () => {
+    const state = feed(initialChatState, [
+      ['item/reasoning/summaryTextDelta', { itemId: 'rs_1', delta: '要約' }],
+      ['item/reasoning/textDelta', { itemId: 'rs_1', delta: '全文' }],
+    ]);
+    expect(state.items[0]).toMatchObject({ text: '要約', reasoningFull: '全文' });
+  });
+
+  it('summaryPartAdded は既存の要約が空でなければ区切りを挟む', () => {
+    const state = feed(initialChatState, [
+      ['item/reasoning/summaryTextDelta', { itemId: 'rs_1', delta: '一段落目' }],
+      ['item/reasoning/summaryPartAdded', { itemId: 'rs_1' }],
+      ['item/reasoning/summaryTextDelta', { itemId: 'rs_1', delta: '二段落目' }],
+    ]);
+    expect(state.items[0]?.text).toBe('一段落目\n\n二段落目');
+  });
+
+  it('summaryPartAdded は要約がまだ無ければ何もしない（先頭に空行を作らない）', () => {
+    const state = applyEvent(initialChatState, 'item/reasoning/summaryPartAdded', {
+      itemId: 'rs_1',
+    });
+    expect(state).toBe(initialChatState);
+  });
+
+  it('itemIdやdeltaが欠けていれば何もしない', () => {
+    expect(
+      applyEvent(initialChatState, 'item/reasoning/summaryTextDelta', { delta: 'x' }),
+    ).toBe(initialChatState);
+    expect(
+      applyEvent(initialChatState, 'item/reasoning/textDelta', { itemId: 'rs_1' }),
+    ).toBe(initialChatState);
+  });
+
+  it('完了通知が空配列でも、デルタで積んだ要約・全文を消さない', () => {
+    const withDelta = feed(initialChatState, [
+      ['item/reasoning/summaryTextDelta', { itemId: 'rs_1', delta: '要約' }],
+      ['item/reasoning/textDelta', { itemId: 'rs_1', delta: '全文' }],
+    ]);
+    const completed = applyEvent(withDelta, 'item/completed', {
+      turnId: TURN,
+      item: { id: 'rs_1', type: 'reasoning', summary: [], content: [] },
+    });
+    expect(completed.items[0]).toMatchObject({ text: '要約', reasoningFull: '全文' });
   });
 });
 

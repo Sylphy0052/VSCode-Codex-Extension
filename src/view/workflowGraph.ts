@@ -161,8 +161,11 @@ const EMPTY_COUNTS = (): Record<TaskState, number> => ({
   pending: 0,
   running: 0,
   waitingApproval: 0,
+  waitingReply: 0,
+  merging: 0,
   done: 0,
   failed: 0,
+  blocked: 0,
   skipped: 0,
 });
 

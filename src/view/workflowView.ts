@@ -2,7 +2,13 @@ import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import { isApprovalDecision } from '../appserver/approvals';
 import type { Logger } from '../log';
-import type { WorkflowRunner } from '../orchestrator/runner';
+import type {
+  TaskSnapshot,
+  WorkflowRunner,
+  WorkflowRunSnapshot,
+  WorkflowWarning,
+} from '../orchestrator/runner';
+import type { WorkflowDefinition } from '../orchestrator/workflow';
 import { chatCsp } from './chatCsp';
 import { layoutGraph } from './workflowGraph';
 import { workflowScript } from './workflowScript';
@@ -20,6 +26,13 @@ export class WorkflowViewManager implements vscode.Disposable {
 
   private panel: vscode.WebviewPanel | undefined;
   private activeRunId: string | undefined;
+  /**
+   * 生成直後・未実行のワークフロー定義のプレビュー（design.md §16.9手順4）。
+   * `activeRunId === undefined` の間だけ意味を持つ。`WorkflowRunner`には一切登録しない
+   * ため、`runner.onChanged` はこれを更新しない（そもそも実行が始まっていないので
+   * 変化しようがない）。
+   */
+  private previewSnapshot: WorkflowRunSnapshot | undefined;
   private readonly unsubscribeChanged: () => void;
 
   constructor(
@@ -44,25 +57,56 @@ export class WorkflowViewManager implements vscode.Disposable {
     } else if (this.activeRunId === undefined) {
       this.activeRunId = this.runner.listLive()[0]?.runId;
     }
+    // 実行中/終了済みのrunを明示的に見にきたときは、生成直後のプレビューから離れる
+    this.previewSnapshot = undefined;
 
     if (this.panel === undefined) {
-      const panel = vscode.window.createWebviewPanel(
-        WorkflowViewManager.viewType,
-        'ワークフロー',
-        vscode.ViewColumn.Beside,
-        { enableScripts: true, retainContextWhenHidden: true },
-      );
-      panel.webview.options = { enableScripts: true };
-      panel.webview.html = this.render(panel.webview);
-      panel.webview.onDidReceiveMessage((message: unknown) => void this.handleMessage(message));
-      panel.onDidDispose(() => {
-        this.panel = undefined;
-      });
-      this.panel = panel;
+      this.ensurePanel();
     } else {
       this.panel.reveal();
     }
     this.postAll();
+  }
+
+  /**
+   * ゴール文から生成した直後・未実行のワークフロー定義をプレビュー表示する
+   * （design.md §16.9手順4「ワークフローViewを同時に開き、依存関係の図を見ながら人が直す」）。
+   *
+   * `WorkflowRunner`には一切登録せず、セッションも開かない。表示するのは全タスク
+   * `pending`のスナップショットで、依存グラフとタスク一覧だけを見せる。実行するには
+   * 「実行」操作（design.md §16.8）を人が選ぶ必要がある（design.md §16.13「生成した
+   * まま自動で実行しない」をView側でも徹底する。実際、`retry`/`stopTask`等の操作は
+   * `activeRunId`が無いと何もしない実装になっている）。
+   */
+  previewDefinition(
+    defPath: string,
+    def: WorkflowDefinition,
+    securityWarnings: readonly WorkflowWarning[],
+  ): void {
+    this.activeRunId = undefined;
+    this.previewSnapshot = buildPreviewSnapshot(defPath, def, securityWarnings);
+    this.ensurePanel().reveal(vscode.ViewColumn.Beside, true);
+    this.postAll();
+  }
+
+  private ensurePanel(): vscode.WebviewPanel {
+    if (this.panel !== undefined) {
+      return this.panel;
+    }
+    const panel = vscode.window.createWebviewPanel(
+      WorkflowViewManager.viewType,
+      'ワークフロー',
+      vscode.ViewColumn.Beside,
+      { enableScripts: true, retainContextWhenHidden: true },
+    );
+    panel.webview.options = { enableScripts: true };
+    panel.webview.html = this.render(panel.webview);
+    panel.webview.onDidReceiveMessage((message: unknown) => void this.handleMessage(message));
+    panel.onDidDispose(() => {
+      this.panel = undefined;
+    });
+    this.panel = panel;
+    return panel;
   }
 
   private onRunnerChanged(runId: string): void {
@@ -101,6 +145,10 @@ export class WorkflowViewManager implements vscode.Disposable {
       return;
     }
     if (this.activeRunId === undefined) {
+      if (this.previewSnapshot !== undefined) {
+        this.postSnapshot(this.previewSnapshot, '（下書き・未実行）');
+        return;
+      }
       void this.panel.webview.postMessage({ type: 'noRun' });
       return;
     }
@@ -109,7 +157,14 @@ export class WorkflowViewManager implements vscode.Disposable {
       void this.panel.webview.postMessage({ type: 'noRun' });
       return;
     }
-    this.panel.title = snapshot.name === '' ? 'ワークフロー' : snapshot.name;
+    this.postSnapshot(snapshot, '');
+  }
+
+  private postSnapshot(snapshot: WorkflowRunSnapshot, titleSuffix: string): void {
+    if (this.panel === undefined) {
+      return;
+    }
+    this.panel.title = (snapshot.name === '' ? 'ワークフロー' : snapshot.name) + titleSuffix;
     const layout = layoutGraph(snapshot.tasks);
     void this.panel.webview.postMessage({ type: 'state', snapshot, layout });
   }
@@ -301,4 +356,46 @@ ${workflowScript()}
 </body>
 </html>`;
   }
+}
+
+/**
+ * 未実行のワークフロー定義から、全タスク`pending`のスナップショットを組み立てる
+ * （`WorkflowViewManager.previewDefinition`専用）。
+ *
+ * `runId`はワークフロー全体に対して一意であればよい（`WorkflowRunner`のrunIdとは無関係の
+ * 別名前空間）。定義ファイルのパスは実行のたびに変わらないため、そのままキーに使う。
+ */
+function buildPreviewSnapshot(
+  defPath: string,
+  def: WorkflowDefinition,
+  warnings: readonly WorkflowWarning[],
+): WorkflowRunSnapshot {
+  const tasks: TaskSnapshot[] = def.tasks.map((task) => ({
+    id: task.id,
+    dependsOn: task.dependsOn,
+    provider: task.provider,
+    state: 'pending',
+    cwd: undefined,
+    branch: undefined,
+    submissionCount: 0,
+    retryCount: 0,
+    startedAt: undefined,
+    lastResponseSummary: '',
+    failure: undefined,
+    pendingApproval: undefined,
+    hasLiveSession: false,
+  }));
+  return {
+    runId: `preview:${defPath}`,
+    name: def.name,
+    defPath,
+    // 「実行中ではない」ことだけを表現したいための便宜的な値（stopAllBtnの無効化にしか
+    // 使わない）。「下書きである」という本来伝えたい意味は`isDraft`が持つ
+    outcome: 'aborted',
+    startedAt: new Date().toISOString(),
+    tasks,
+    warnings,
+    haltedByUser: false,
+    isDraft: true,
+  };
 }

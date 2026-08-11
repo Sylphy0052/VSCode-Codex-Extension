@@ -85,7 +85,7 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 | TP-82 | `turn/steer` で応答を中断せずに指示を割り込ませる                                | Codex | P1     | [#43](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/43) 済                        |
 | TP-83 | モデルとeffortの選択肢をCLIから取得する                                          | 両方  | P2     | [#44](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/44) 済                        |
 | TP-84 | app-serverの生成済み型定義を取り込むか判断する                                   | Codex | P2     | [#46](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/46) 済（取り込まないと判断）  |
-| TP-85 | 履歴の取得を `thread/list` へ移すか判断する                                      | Codex | P3     | [#45](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/45)                           |
+| TP-85 | 履歴の取得を `thread/list` へ移すか判断する                                      | Codex | P3     | [#45](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/45) 済（併用を採用）          |
 
 ## Phase 1: 入力欄
 
@@ -128,7 +128,7 @@ Codexはターン単位で model / effort / approvalPolicy を渡せるのにCla
 | TP-33 | 画像の表示（モデルが見た画像・生成した画像）                             | Codex/Claude | P2     | Z-03      | #16 済 |
 | TP-35 | コマンド実行の出力を逐次表示し、長い出力を折りたためるようにする         | Codex/Claude | P2     | -         | #17 済 |
 | TP-32 | Web検索の結果を表示する。現状はクエリのみ                                | Codex/Claude | P3     | -         | #18    |
-| TP-34 | 思考の全文表示と折りたたみ。現状は summary のみ                          | Codex/Claude | P3     | -         | #19    |
+| TP-34 | 思考の全文表示と折りたたみ。現状は summary のみ                          | Codex/Claude | P3     | -         | #19 済 |
 
 ## Phase 5: 会話操作
 
