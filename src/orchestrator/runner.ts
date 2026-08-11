@@ -6,26 +6,15 @@ import type { ChatState, PendingApproval } from '../appserver/chatState';
 import type { LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
 import { buildEscalationRequest } from './approvalMapping';
-import {
-  classifyApprovalRequest,
-  isPathWithinRoot,
-  type EscalationPolicy,
-  type TaskBoundary,
-} from './escalation';
+import { classifyApprovalRequest, type EscalationPolicy, type TaskBoundary } from './escalation';
 import {
   checkForgePrerequisites,
   createIntegrationPullRequest,
-  createPullRequest,
   buildIntegrationPullRequestBody,
   buildIntegrationPullRequestTitle,
-  buildTaskPullRequestBody,
-  buildTaskPullRequestTitle,
-  pushBranch,
   resolveForgeHost,
   runFinalMerge,
-  runTaskPullRequestFlow,
   shouldCreateIntegrationPullRequest,
-  shouldCreateTaskPullRequest,
   shouldRunFinalMerge,
   type CliAvailabilityPort,
   type CliCommandRunner,
@@ -35,67 +24,55 @@ import {
   type ForgeHostConfig,
   type PullRequestLayerConfig,
 } from './forge';
+import { INTEGRATION_DIR_NAME, IntegrationMergeQueue } from './integration';
 import {
-  buildMergeResolutionPrompt,
-  commitUncommittedChangesIfNeeded,
-  findTaskIdsMergedSince,
-  integrationBranchName,
-  integrationWorktreePath,
-  isMergeResolutionComplete,
-  INTEGRATION_DIR_NAME,
-  IntegrationMergeQueue,
-  MERGE_RESOLUTION_CONDITION,
-  MERGE_RESOLUTION_MAX_ITERATIONS,
-  reconcileMergingTaskOnReload,
-  resolveTaskBranchOrigin,
-  type MergeResolutionTaskInfo,
-  type MergeTaskResult,
-} from './integration';
-import {
-  cloneWorkspace,
-  diffSnapshots,
-  ensureIntegrationDir,
-  reflectIntegrationToWorkspace,
-  takeSnapshot,
   IntegrationQueue as PseudoWorktreeIntegrationQueue,
   type PseudoWorktreeFileSystemPort,
   type Snapshot,
 } from './pseudoWorktree';
 import {
-  buildStalledWaitingReplyWarning,
   composeNextPrompt,
-  detectAllWaitingStalemate,
-  detectTimedOutWaitingReplies,
-  DEFAULT_REPLY_TIMEOUT_SEC,
   TaskMessagingHub,
   type HttpMcpTransportHandle,
-  type RunTaskSnapshot,
-  type StoredMessage,
 } from './messaging';
 import {
   applyLoopStopReason,
   createRunState,
-  isActiveTaskState,
   markApprovalRejected,
-  markMergeBlocked,
-  markMergeFailed,
   markMergeSucceeded,
   markRunning,
   markWaitingApproval,
-  markWaitingReply,
   recordSessionInfo,
   recordSubmissionCount,
   resumeFromApproval,
-  resumeFromWaitingReply,
-  retryMergeState,
   retryTask as retryTaskState,
   type RunState,
   type TaskFailureReason,
-  type TaskRunState,
   type TaskState,
 } from './runState';
+import {
+  checkEffectivePermissionEscalation,
+  checkMessagingPermissionEscalation,
+  getSnapshot,
+} from './runnerSnapshot';
+import { cleanupWorktreeIfNeeded, retryMerge, startMerge } from './runnerMerge';
+import { restoreRunsForView } from './runnerRestore';
+import {
+  buildRunTaskSnapshots,
+  checkMessagingVisibility,
+  checkWaitingReplyStalls,
+  onMessageAccepted,
+} from './runnerMessaging';
+import {
+  buildBoundary,
+  integratePseudoWorktree,
+  reflectPseudoWorktree,
+  resolvePseudoState,
+  resolveWorkingDirectory,
+  validateExplicitCwds,
+} from './runnerWorkingDirectory';
 import { getRunOutcome, nextTasksToStart, type RunOutcome } from './scheduler';
-import { WorkflowRunStore, type PersistedRun, type PersistedTaskState } from './runStore';
+import { WorkflowRunStore, type PersistedTaskState } from './runStore';
 import { sanitizeForLog, stripControlChars, stripControlCharsPreservingNewlines } from './sanitize';
 import {
   buildEffectiveTaskConfig,
@@ -110,26 +87,19 @@ import type {
   TaskSessionInput,
 } from './taskSession';
 import {
-  buildTaskBoundary,
   checkWorktreesGitignored,
-  decideWorkingDirectory,
   isGitWorkingTree,
   resolveHeadCommit,
-  shouldRemoveWorktree,
   WorktreeCreationQueue,
   type GitCommandRunner,
   type WorktreeFileSystemPort,
 } from './worktree';
 import {
   expandTemplate,
-  findPermissionEscalationWarnings,
   MAX_WORKFLOW_FILE_BYTES,
   parseWorkflowYaml,
-  permissionEscalationReasons,
-  referencedResultFields,
   validateWorkflow,
   withCommitRequirement,
-  type PermissionProfile,
   type Provider,
   type TaskResult,
   type WorkflowDefinition,
@@ -517,8 +487,14 @@ export interface PullRequestResult {
   url: string;
 }
 
-/** タスク1件の実行時ブックキーピング。`RunState`（純粋）とは別に、セッション等の実体を持つ。 */
-interface LiveTask {
+/**
+ * タスク1件の実行時ブックキーピング。`RunState`（純粋）とは別に、セッション等の実体を持つ。
+ *
+ * 分割後のファイル（`runnerSnapshot.ts`等）へ型として渡すため`export`する（Issue #147）。
+ * `WorkflowRunner`の外へ値として漏らすAPIは増やさない（`WorkflowRunner`のpublicメソッドの
+ * 戻り値・引数には現れない）。
+ */
+export interface LiveTask {
   session: TaskSession;
   cwd: string;
   branch: string;
@@ -597,7 +573,8 @@ interface LiveTask {
   pullRequest: PullRequestResult | undefined;
 }
 
-interface LiveRun {
+/** `LiveTask`と同じ理由（直前のコメント参照）で`export`する（Issue #147）。 */
+export interface LiveRun {
   runId: string;
   def: WorkflowDefinition;
   defPath: string;
@@ -664,6 +641,22 @@ interface LiveRun {
   finalMergeOutcome: 'merged' | 'failed' | undefined;
 }
 
+/**
+ * `WorkflowRunner.prepareTaskLaunch`（`startTask()`の分割、Issue #147）の戻り値。
+ * `buildLiveTask` / `finishTaskLaunch`が同じ形をそのまま受け取る。
+ */
+interface TaskLaunchPreparation {
+  cwd: string;
+  branch: string;
+  usedWorktree: boolean;
+  usedPseudoWorktree: boolean;
+  pseudoSnapshot: Snapshot | undefined;
+  originCommit: string;
+  effective: EffectiveTaskConfig;
+  input: TaskSessionInput;
+  boundaryResult: { boundary: TaskBoundary; warning: string | undefined };
+}
+
 /** `onChanged` の最小限のpub-sub。VSCodeの `EventEmitter` には依存しない（design.mdの方針どおり）。 */
 class SimpleEmitter<T> {
   private readonly listeners: Array<(value: T) => void> = [];
@@ -684,7 +677,14 @@ class SimpleEmitter<T> {
 }
 
 export class WorkflowRunner {
-  private readonly runs = new Map<string, LiveRun>();
+  /**
+   * 分割後のファイル（`runnerSnapshot.ts`等、Issue #147）から`self.runs`として読めるよう
+   * `private`を外してある。TypeScriptの`private`はコンパイル時の型チェックのみで実行時の
+   * 挙動には影響しないため、これは構造の変更であり挙動は変わらない（最終報告に記載）。
+   * `WorkflowRunner`のpublic API（メソッドの引数・戻り値）には現れないため、
+   * クラスの外部から見た振る舞いは従来どおり。
+   */
+  readonly runs = new Map<string, LiveRun>();
   private readonly changeEmitter = new SimpleEmitter<string>();
   /**
    * `deps.worktreeQueue`から構築する。design.md §16.17「マージはworktreeの作成・撤去と
@@ -692,10 +692,12 @@ export class WorkflowRunner {
    * `WorktreeCreationQueue`をラップする（`integration.ts`の`IntegrationMergeQueue`の
    * 注意書き参照）。コンストラクタ内で組み立てることで、配線を誤って別のキューを
    * 渡す事故を型のうえで起こしえない状態にする。
+   *
+   * `runs`と同じ理由（直前のコメント参照）で`private`を外してある。
    */
-  private readonly integrationQueue: IntegrationMergeQueue;
+  readonly integrationQueue: IntegrationMergeQueue;
 
-  constructor(private readonly deps: WorkflowRunnerDeps) {
+  constructor(readonly deps: WorkflowRunnerDeps) {
     this.integrationQueue = new IntegrationMergeQueue(deps.worktreeQueue);
   }
 
@@ -711,265 +713,22 @@ export class WorkflowRunner {
     return this.changeEmitter.on(listener);
   }
 
-  private notify(runId: string): void {
+  /**
+   * 分割後のファイル（`runnerMerge.ts`等、Issue #147）から`self.notify(...)`として呼べるよう
+   * `private`を外してある（`runs`と同じ理由。上のコメント参照）。
+   */
+  notify(runId: string): void {
     this.changeEmitter.fire(runId);
   }
 
   /**
    * Viewが描画する現在の状態のスナップショット（design.md §16.8）。
    * 応答本文そのものではなく `LiveTask.lastResponseSummary`（1行要約）だけを渡す。
+   *
+   * 実体は`runnerSnapshot.ts`（読み取り専用のスナップショット構築、Issue #147）。
    */
   getSnapshot(runId: string): WorkflowRunSnapshot | undefined {
-    const live = this.runs.get(runId);
-    if (live === undefined) {
-      return undefined;
-    }
-    const tasks = live.def.tasks.map((task) => this.buildTaskSnapshot(live, task));
-    // 統合PR/MRの結果・最終マージの成否は、このプロセスでまだ何も試みていない
-    // （`live.integrationPullRequest`/`live.finalMergeOutcome`が`undefined`の）間、
-    // 永続化された値（前のウィンドウで作られた等）へフォールバックする
-    // （design.md §16.11「リロードしてもPR/MRへのリンクが残る」・Issue #118）
-    const persisted = this.deps.store.find(runId);
-    return {
-      runId: live.runId,
-      name: live.def.name,
-      defPath: live.defPath,
-      outcome: getRunOutcome(live.runState),
-      startedAt: live.startedAt,
-      tasks,
-      warnings: [
-        ...live.warnings,
-        ...this.deriveMaxReachedWarnings(live),
-        ...this.deriveAllowWarnings(live),
-        ...this.derivePermissionEscalationWarnings(live),
-      ],
-      haltedByUser: live.runState.haltedByUser,
-      integrationBranch: live.integration?.branch,
-      integrationPullRequestNumber:
-        live.integrationPullRequest?.number ?? persisted?.integrationPullRequestNumber,
-      integrationPullRequestUrl:
-        live.integrationPullRequest?.url ?? persisted?.integrationPullRequestUrl,
-      finalMergeOutcome: live.finalMergeOutcome ?? persisted?.finalMergeOutcome,
-    };
-  }
-
-  private buildTaskSnapshot(live: LiveRun, task: WorkflowTask): TaskSnapshot {
-    const state = live.runState.tasks.get(task.id);
-    const liveTask = live.tasks.get(task.id);
-    // PR/MRの結果も、branch同様このウィンドウでまだセッションを開いていない
-    // （リロード復元直後の）タスクでは`liveTask`が無い。branchと違い、PR/MRのリンクは
-    // リロード後も出す必要がある（design.md §16.11「リロードしてもPR/MRへのリンクが残る」・
-    // Issue #118の受入基準）ため、永続化された値へフォールバックする
-    const persistedTask = this.deps.store.find(live.runId)?.tasks[task.id];
-    return {
-      id: task.id,
-      dependsOn: task.dependsOn,
-      provider: task.provider,
-      state: state?.state ?? 'pending',
-      cwd: state?.cwd,
-      // ライブなセッションの値を優先する。リロード復元直後はliveTaskが無いため
-      // `state.cwd`（永続化された値）へ落ちる（design.md §16.11）
-      branch: liveTask?.branch,
-      submissionCount: state?.submissionCount ?? 0,
-      retryCount: state?.retryCount ?? 0,
-      startedAt: liveTask?.startedAt,
-      lastResponseSummary: liveTask?.lastResponseSummary ?? '',
-      failure: state?.failure,
-      pendingApproval: liveTask?.pendingApproval,
-      hasLiveSession: liveTask !== undefined,
-      expandedPrompt: liveTask?.expandedPrompt,
-      expandedContinuePrompt: liveTask?.expandedContinuePrompt,
-      lastSentPrompt: liveTask?.lastSentPrompt,
-      mergeResolutionActive: live.mergeResolutions.has(task.id),
-      pullRequestNumber: liveTask?.pullRequest?.number ?? persistedTask?.pullRequestNumber,
-      pullRequestUrl: liveTask?.pullRequest?.url ?? persistedTask?.pullRequestUrl,
-    };
-  }
-
-  /**
-   * `allow` による危険判定の解除は定義ファイルから決まる情報であり、状態として
-   * 持つ必要が無い（レビュー指摘: high）。以前は`start()`の中で1回だけ`live.warnings`へ
-   * 積んでいたため、ウィンドウのリロードで復元した実行（`rebuildLiveRun`は`warnings: []`で
-   * 初期化する）では二度と現れなかった。`live.def.tasks`から都度導出すれば、
-   * design.md §16.7「どのタスクがどのパターンを解除しているかを常時出す」を
-   * 復元経路でも自動的に満たす。
-   */
-  private deriveAllowWarnings(live: LiveRun): WorkflowWarning[] {
-    const warnings: WorkflowWarning[] = [];
-    for (const task of live.def.tasks) {
-      if (task.allow.length > 0) {
-        warnings.push({
-          kind: 'allowOverride',
-          taskId: task.id,
-          message: `allowで危険操作チェックの一部を解除しています: ${task.allow.join(', ')}`,
-        });
-      }
-    }
-    return warnings;
-  }
-
-  /**
-   * 上流タスクより緩い権限で `{{T1.result}}` / `{{T1.summary}}` を参照している下流タスクの
-   * 警告（design.md §16.4 案2「警告する」、Issue #67）。`deriveAllowWarnings` と同じ理由
-   * （直前のコメント参照）で、`live.def.tasks`だけから決まる情報は都度導出する。1回だけ
-   * `start()`で積むと、ウィンドウのリロードで復元した実行（`rebuildLiveRun`は`warnings: []`で
-   * 初期化する）では二度と現れない。
-   */
-  private derivePermissionEscalationWarnings(live: LiveRun): WorkflowWarning[] {
-    return findPermissionEscalationWarnings(live.def.tasks).map((issue): WorkflowWarning => ({
-      kind: 'permissionEscalation',
-      // taskIdsは[上流, 下流]の順（`findPermissionEscalationWarnings`参照）。実際に
-      // 危険な参照を書いている側（下流）のタスクへ紐付ける
-      taskId: issue.taskIds[issue.taskIds.length - 1],
-      message: issue.message,
-    }));
-  }
-
-  /**
-   * 実効値（クランプ後の値）に基づく第二段の権限越境チェック（design.md §16.4 案2、
-   * セキュリティ監査指摘#2）。
-   *
-   * `findPermissionEscalationWarnings`（読み込み時、`workflow.ts`）はYAMLに書かれた
-   * リテラルの値しか見えない純粋関数のため、`sandbox` / `approvalMode` がどちらか一方でも
-   * 未指定（拡張機能側の設定に委ねる、が典型的な書き方）だと実効値が分からず判定を諦める。
-   * ここでは`buildEffectiveTaskConfig`が実際に計算したクランプ後の値（`effective`と、
-   * 上流タスクが開始した時点で`LiveTask`へ保存済みの`effectiveSandbox` /
-   * `effectiveApprovalMode` / `autoApprove`）を使うため、未指定でも判定できる。
-   *
-   * `live.warnings`には`clamp`等と同じく実行中に随時積む（design.mdの既存の形）。
-   * 再試行で同じタスクが複数回開始しても同じ文言を積み直さないよう、既にあれば足さない。
-   */
-  private checkEffectivePermissionEscalation(
-    live: LiveRun,
-    task: WorkflowTask,
-    taskId: string,
-    effective: EffectiveTaskConfig,
-  ): void {
-    const downstream: PermissionProfile = {
-      provider: task.provider,
-      sandbox: effective.sandbox,
-      approvalMode: effective.config.approvalMode,
-      autoApprove: effective.autoApprove,
-    };
-
-    for (const ref of referencedResultFields(task)) {
-      const upstreamTask = live.def.tasks.find((t) => t.id === ref.id);
-      const upstreamLive = live.tasks.get(ref.id);
-      // 依存が満たされて初めてこのタスクは開始するため通常は必ず見つかるが、
-      // 見つからない場合（内部矛盾）は判定できないので黙って諦める
-      if (upstreamTask === undefined || upstreamLive === undefined) {
-        continue;
-      }
-      const upstream: PermissionProfile = {
-        provider: upstreamTask.provider,
-        sandbox: upstreamLive.effectiveSandbox,
-        approvalMode: upstreamLive.effectiveApprovalMode,
-        autoApprove: upstreamLive.autoApprove,
-      };
-
-      const reasons = permissionEscalationReasons(upstream, downstream);
-      if (reasons.length === 0) {
-        continue;
-      }
-
-      const message =
-        `${taskId} は上流タスク ${ref.id} より緩い実効権限（拡張機能の設定でクランプ済みの値）で ` +
-        `{{${ref.id}.${ref.field}}} を参照しています（${reasons.join(', ')}）。${ref.id} の応答に ` +
-        `仕込まれた指示文が ${taskId} の権限で実行されうるため、参照する内容を確認してください`;
-      const alreadyWarned = live.warnings.some(
-        (w) => w.kind === 'permissionEscalation' && w.taskId === taskId && w.message === message,
-      );
-      if (alreadyWarned) {
-        continue;
-      }
-      this.deps.log.warn(`[workflow ${live.runId}/${taskId}] ${message}`);
-      live.warnings.push({ kind: 'permissionEscalation', taskId, message });
-    }
-  }
-
-  /**
-   * タスク間メッセージング（design.md §16.21）専用の権限差の警告（Issue #132「1. 権限差の
-   * 警告」）。`checkEffectivePermissionEscalation`（`{{T1.result}}`経由、Issue #67）と
-   * 判定ロジック自体（`permissionEscalationReasons`）は共有するが、経路が異なるため
-   * 別メソッド・別`WorkflowWarning.kind`にする:
-   *
-   * - `{{T1.result}}`は`dependsOn`に挙げた依存先しか参照できず、読み込み時
-   *   （`findPermissionEscalationWarnings`）と実行時の二段で検出できる
-   * - メッセージは`dependsOn`を問わず同じrunの任意の宛先へ送れるうえ、`send_message`の
-   *   呼び出しはモデルの判断で実行時に起きるため**静的には検査できない**。実行時、
-   *   実際に配送された時点でしか検出できない
-   *
-   * 呼び出し元（`setPromptTransform`）は、メッセージが実際に宛先の次の指示へ組み込まれる
-   * 直前（`takeDeliverableMessages`で取り出した直後）でこれを呼ぶ。宛先（recipient）が
-   * このタスク自身、送信元（sender）が`message.from`。送信元の実効権限は、送信元タスクが
-   * 開始した時点で`LiveTask`へ保存済みの`effectiveSandbox` / `effectiveApprovalMode` /
-   * `autoApprove`（`checkEffectivePermissionEscalation`と同じ値）を使う。`send_message`は
-   * 呼び出し元のセッションが生きていないと成立しない（MCPツールの呼び出しのため）ので、
-   * 送信元の`LiveTask`は通常必ず見つかるが、内部矛盾で見つからない場合は判定を諦める。
-   */
-  private checkMessagingPermissionEscalation(
-    live: LiveRun,
-    recipientTask: WorkflowTask,
-    recipientTaskId: string,
-    effective: EffectiveTaskConfig,
-    messages: readonly StoredMessage[],
-  ): void {
-    const downstream: PermissionProfile = {
-      provider: recipientTask.provider,
-      sandbox: effective.sandbox,
-      approvalMode: effective.config.approvalMode,
-      autoApprove: effective.autoApprove,
-    };
-
-    for (const m of messages) {
-      const senderTask = live.def.tasks.find((t) => t.id === m.from);
-      const senderLive = live.tasks.get(m.from);
-      if (senderTask === undefined || senderLive === undefined) {
-        continue;
-      }
-      const upstream: PermissionProfile = {
-        provider: senderTask.provider,
-        sandbox: senderLive.effectiveSandbox,
-        approvalMode: senderLive.effectiveApprovalMode,
-        autoApprove: senderLive.autoApprove,
-      };
-
-      const reasons = permissionEscalationReasons(upstream, downstream);
-      if (reasons.length === 0) {
-        continue;
-      }
-
-      const message =
-        `${recipientTaskId} は送信元タスク ${m.from} より緩い実効権限でメッセージを受け取り` +
-        `ました（${reasons.join(', ')}）。${m.from} が送った本文に仕込まれた指示文が ` +
-        `${recipientTaskId} の権限で実行されうるため、内容を確認してください`;
-      const alreadyWarned = live.warnings.some(
-        (w) =>
-          w.kind === 'messagingPermissionEscalation' &&
-          w.taskId === recipientTaskId &&
-          w.message === message,
-      );
-      if (alreadyWarned) {
-        continue;
-      }
-      this.deps.log.warn(`[workflow ${live.runId}/${recipientTaskId}] ${message}`);
-      live.warnings.push({ kind: 'messagingPermissionEscalation', taskId: recipientTaskId, message });
-    }
-  }
-
-  /** 回数切れは状態としてすでに`failed`が持っているため、都度作らず表示のたびに導出する。 */
-  private deriveMaxReachedWarnings(live: LiveRun): WorkflowWarning[] {
-    const warnings: WorkflowWarning[] = [];
-    for (const [taskId, state] of live.runState.tasks) {
-      if (state.state === 'failed' && state.failure?.kind === 'maxReached') {
-        warnings.push({
-          kind: 'maxReached',
-          taskId,
-          message: `送信回数の上限に達しました（終了条件が満たされないまま停止）: ${taskId}`,
-        });
-      }
-    }
-    return warnings;
+    return getSnapshot(this, runId);
   }
 
   /** 現在メモリ上で把握している実行（このウィンドウで開始したもの）の一覧。 */
@@ -1006,230 +765,21 @@ export class WorkflowRunner {
 
   /**
    * リロード直後に呼ぶ（design.md §16.11「リロード後の実行再開」）。
-   *
-   * `workspaceState` に残っているrun（`reconcileAfterReload` で走行中タスクを
-   * 中断扱いへ倒し済み）をメモリ上へ復元し、ワークフローViewが表示・「再実行」
-   * できるようにする。#56では中断扱いに倒すところまでしか実装していなかった。
-   *
-   * 定義ファイルが読めない・検証を通らないrunは復元をあきらめる（ログにだけ残す）。
-   * そのrunはこのウィンドウのライブな状態には現れないが、`workspaceState`自体からは
-   * 消さない（ファイルを直して次回リロードすれば復元できる余地を残す）。
+   * 実体は`runnerRestore.ts`（Issue #147）。
    */
   async restoreRunsForView(): Promise<void> {
-    const persisted = await this.deps.store.reconcileAfterReload();
-    for (const p of persisted) {
-      if (this.runs.has(p.runId)) {
-        continue;
-      }
-      const rebuilt = await this.rebuildLiveRun(p);
-      if (rebuilt === undefined) {
-        continue;
-      }
-      this.runs.set(p.runId, rebuilt);
-      // `rebuildLiveRun`が統合ブランチの実際の状態から判定し直してもなお`merging`のまま
-      // 残ったタスクは、マージが実行途中で切れていたと分かっているもの。ライブなセッションは
-      // 無い（リロードで失われた）ため、永続化された`branch`/`cwd`だけを頼りにマージを
-      // やり直す（design.md §16.11「`merging`からやり直す」）
-      for (const [taskId, s] of rebuilt.runState.tasks) {
-        if (s.state === 'merging') {
-          this.resumeMergeAfterReload(p.runId, taskId);
-        }
-      }
-    }
+    return restoreRunsForView(this);
   }
 
   /**
-   * リロード直後、まだ`merging`のまま残ったタスクのマージをやり直す
-   * （design.md §16.11。`restoreRunsForView`から呼ぶ）。ライブなセッション
-   * （`LiveTask`）は無いため、永続化された`branch`/`cwd`を直接使う。どちらか欠けている
-   * （古い永続化形式・作成前に中断した等）場合は再開できないため、安全側で`blocked`にする。
+   * `start()`の前半（読み込み・解析・検証）。サイズ上限チェックのコメントは
+   * `MAX_WORKFLOW_FILE_BYTES`のJSDoc（巨大なYAMLで拡張機能ホストを固まらせない防御）参照。
    */
-  private resumeMergeAfterReload(runId: string, taskId: string): void {
-    const live = this.runs.get(runId);
-    if (live === undefined || live.integration === undefined) {
-      return;
-    }
-    const task = live.def.tasks.find((t) => t.id === taskId);
-    const persistedTask = this.deps.store.find(runId)?.tasks[taskId];
-    const branch = persistedTask?.branch;
-    const cwd = persistedTask?.cwd;
-    if (task === undefined || branch === undefined || branch === '' || cwd === undefined) {
-      this.deps.log.warn(
-        `[workflow ${runId}/${taskId}] マージを再開するための情報が不足しているため blocked にします`,
-      );
-      live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
-      void this.persist(runId);
-      this.notify(runId);
-      return;
-    }
-    void this.startMerge(runId, taskId, task, cwd, branch, '');
-  }
-
-  private async rebuildLiveRun(p: PersistedRun): Promise<LiveRun | undefined> {
-    // start()と同じ上限チェックをここでも通す（レビュー指摘: medium 2）。
-    // `MAX_WORKFLOW_FILE_BYTES`のコメントどおり「巨大なYAMLで拡張機能ホスト
-    // （シングルスレッド）を固まらせない」ための防御であり、復元経路だけ素通りさせない
-    const size = await this.deps.filePort.fileSize(p.defPath);
-    if (size === undefined || size > MAX_WORKFLOW_FILE_BYTES) {
-      this.deps.log.warn(
-        `[workflow ${p.runId}] 定義ファイルを読み込めないため復元できません: ${p.defPath}`,
-      );
-      return undefined;
-    }
-    const text = await this.deps.filePort.readTextFile(p.defPath);
-    if (text === undefined) {
-      this.deps.log.warn(
-        `[workflow ${p.runId}] 定義ファイルを読み込めないため復元できません: ${p.defPath}`,
-      );
-      return undefined;
-    }
-    let def: WorkflowDefinition;
-    try {
-      def = parseWorkflowYaml(text);
-    } catch {
-      this.deps.log.warn(
-        `[workflow ${p.runId}] 定義ファイルの解析に失敗したため復元できません: ${p.defPath}`,
-      );
-      return undefined;
-    }
-    if (validateWorkflow(def).errors.length > 0) {
-      this.deps.log.warn(
-        `[workflow ${p.runId}] 定義ファイルが検証を通らないため復元できません: ${p.defPath}`,
-      );
-      return undefined;
-    }
-
-    const gitRepo = await isGitWorkingTree(p.workspaceRoot, this.deps.git);
-    // 元のHEADは永続化していない（design.md §16.11は応答本文以外も最小限しか保存しない
-    // 方針）ため、復元した時点のHEADを分岐元にする。再実行は元々「新しいスレッド・
-    // worktreeでやり直す」設計（design.md §16.5）なので、この差異は再実行の意味を壊さない
-    const headCommit = gitRepo
-      ? ((await resolveHeadCommit(p.workspaceRoot, this.deps.git)) ?? '')
-      : '';
-
-    // 統合ブランチ・統合worktree（design.md §16.17）。gitRepoでない実行には統合の概念が
-    // 無い。永続化された`integrationBranch`（古い形式や空文字なら決定的に導ける値）を使う
-    const integrationBranch =
-      p.integrationBranch !== '' ? p.integrationBranch : integrationBranchName(p.runId);
-    const integration = gitRepo
-      ? { cwd: integrationWorktreePath(p.workspaceRoot, p.runId), branch: integrationBranch }
-      : undefined;
-
-    const tasks = new Map<string, TaskRunState>();
-    for (const [id, t] of Object.entries(p.tasks)) {
-      let state = t.state;
-      let failure = t.failure;
-      if (state === 'merging') {
-        // design.md §16.11「`merging`だったタスクは、状態の記録ではなく統合ブランチの
-        // 実際の状態から判定し直す」。gitRepoでない（統合worktreeが無い）実行で`merging`
-        // が残っているのは想定外の状態のため、安全側で`blocked`にする
-        if (integration === undefined) {
-          state = 'blocked';
-        } else {
-          const outcome = await reconcileMergingTaskOnReload(
-            integration.cwd,
-            p.runId,
-            id,
-            this.deps.git,
-          );
-          if (outcome === 'done') {
-            state = 'done';
-          } else if (outcome === 'blocked') {
-            state = 'blocked';
-          } else if (t.cwd === undefined || t.branch === undefined || t.branch === '') {
-            // マージをやり直すための情報（タスクのworktreeのcwd・ブランチ名）が無い。
-            // `restoreRunsForView`側の再開処理も同じ条件で`blocked`に倒すため、ここで
-            // 先に確定させて二重の判定を避ける
-            state = 'blocked';
-          }
-          // それ以外（outcome === 'merging' かつ再開に必要な情報がある）は`merging`のまま
-          // 残す。`restoreRunsForView`がこのあとマージをやり直す
-        }
-        if (state !== 'merging') {
-          failure = undefined;
-        }
-      }
-      tasks.set(id, {
-        state,
-        submissionCount: t.submissionCount,
-        retryCount: t.retryCount,
-        failure,
-        sessionId: t.sessionId,
-        cwd: t.cwd,
-      });
-    }
-    const runState: RunState = { tasks, haltedByUser: p.haltedByUser };
-    const forge: LiveRunForgeState = gitRepo
-      ? await this.resolveForgeState(p.workspaceRoot)
-      : { kind: 'disabled' };
-
-    // 疑似worktree（design.md §16.20）。リロード後の再構築はベストエフォートにする
-    // （`rebuildLiveRun`自体が「定義ファイルを読めない等は復元をあきらめる」以外は
-    // 失敗時も可能な限り表示を続ける方針のため。統合先の再作成に失敗した場合は
-    // `pseudo: undefined`のまま続け、ログにだけ残す）。
-    // なお、疑似worktreeの`baseline`はrun開始時点ではなく**復元した時点**の
-    // ワークスペースで取り直す（`headCommit`と同じ「復元時点を基準にする」簡略化。
-    // 再実行は新しい複製でやり直す設計のため、この差異は再実行の意味を壊さない）
-    let pseudo: LiveRun['pseudo'];
-    if (!gitRepo) {
-      const resolved = await this.resolvePseudoState(p.workspaceRoot, p.runId);
-      if (resolved.ok) {
-        pseudo = resolved.state;
-      } else {
-        this.deps.log.warn(
-          `[workflow ${p.runId}] 疑似worktreeの統合先を復元できませんでした: ${resolved.message}`,
-        );
-      }
-    }
-
-    return {
-      runId: p.runId,
-      def,
-      defPath: p.defPath,
-      repoRoot: p.workspaceRoot,
-      gitRepo,
-      headCommit,
-      startedAt: p.startedAt,
-      runState,
-      // このプロセスでまだセッションを開いていない。`hasLiveSession: false`として
-      // Viewへ出る（design.md §16.11。再実行すればstartTask()が新しく作る）
-      tasks: new Map(),
-      finished: getRunOutcome(runState) !== 'running',
-      warnings: [],
-      integration,
-      forge,
-      pseudo,
-      // タスク間メッセージング（design.md §16.21）はこのウィンドウで新たに始める実行にだけ
-      // 立てる（リロード直後の復元では作らない。再実行すればstartTask()相当の経路で
-      // 改めてタスクが動き出すが、メッセージングはrunそのものに紐づく短命なサーバのため、
-      // 復元だけでは作り直さない。`WorkflowRunnerDeps.messaging`が省略可能なのと同じ
-      // 「無くても実行は止めない」設計に揃える）
-      messaging: undefined,
-      mergeResolutions: new Map(),
-      // 統合PR/MRの結果・最終マージの成否はこのプロセスでまだ何も試みていない
-      // （design.md §16.11。Viewは`getSnapshot`が読む永続化された値へフォールバックする）
-      integrationPullRequest: undefined,
-      finalMergeOutcome: undefined,
-    };
-  }
-
-  /**
-   * 定義ファイルを読み込み、検証し、通れば実行を開始する。
-   *
-   * `repoRoot` はワークフロー定義ファイルが属するワークスペースフォルダの絶対パス
-   * （design.md §16.6「`currentWorkspaceFolder()` は使わない」の呼び出し側での実践）。
-   *
-   * `allow` を含むタスクが1件でもあれば、`options.allowConfirmed !== true` の間は
-   * 実行を始めず `needsAllowConfirmation` を立てて返す（design.md §16.7「`allow`を含む
-   * ワークフローは、実行開始時に...確認を取る」）。呼び出し側（`extension.ts` /
-   * ワークフローView）はこれを見てモーダルを出し、確認が取れたら
-   * `allowConfirmed: true` で呼び直す。
-   */
-  async start(
+  private async parseAndValidateWorkflow(
     defPath: string,
-    repoRoot: string,
-    options?: { allowConfirmed?: boolean },
-  ): Promise<StartWorkflowResult> {
+  ): Promise<
+    { ok: true; def: WorkflowDefinition } | { ok: false; errors: readonly WorkflowIssue[] }
+  > {
     const size = await this.deps.filePort.fileSize(defPath);
     if (size === undefined) {
       return { ok: false, errors: [issue(`定義ファイルを読み込めません: ${defPath}`)] };
@@ -1264,38 +814,163 @@ export class WorkflowRunner {
     if (validation.errors.length > 0) {
       return { ok: false, errors: validation.errors };
     }
+    return { ok: true, def };
+  }
+
+  /** `start()`のgit判定（design.md §16.6）。gitでない場合は`worktree-strict`の禁止を確認する。 */
+  private async resolveStartGitContext(
+    repoRoot: string,
+    def: WorkflowDefinition,
+  ): Promise<
+    | { ok: true; gitRepo: boolean; headCommit: string }
+    | { ok: false; errors: readonly WorkflowIssue[] }
+  > {
+    const gitRepo = await isGitWorkingTree(repoRoot, this.deps.git);
+    if (gitRepo) {
+      const head = await resolveHeadCommit(repoRoot, this.deps.git);
+      if (head === undefined) {
+        return { ok: false, errors: [issue('HEADコミットを解決できませんでした')] };
+      }
+      return { ok: true, gitRepo, headCommit: head };
+    }
+    const strictWithoutCwd = def.tasks.find(
+      (t) => t.isolation === 'worktree-strict' && t.cwd === undefined,
+    );
+    if (strictWithoutCwd !== undefined) {
+      return {
+        ok: false,
+        errors: [
+          issue(
+            'ワークスペースがgitの作業ツリーではないため、isolation: worktree-strict のタスクを実行できません',
+            [strictWithoutCwd.id],
+          ),
+        ],
+      };
+    }
+    return { ok: true, gitRepo, headCommit: '' };
+  }
+
+  /**
+   * 統合ブランチ・統合worktree（design.md §16.17）。runごとに1本、実行開始時に一度だけ
+   * 作る。`isolation: worktree`のタスクが1件も無い定義でも作る（design.md §16.17
+   * 「統合ブランチ」がrun単位の概念として定めているため）。
+   */
+  private async createIntegrationForStart(
+    repoRoot: string,
+    runId: string,
+    headCommit: string,
+    gitRepo: boolean,
+  ): Promise<
+    | { ok: true; integration: { cwd: string; branch: string } | undefined }
+    | { ok: false; errors: readonly WorkflowIssue[] }
+  > {
+    if (!gitRepo) {
+      return { ok: true, integration: undefined };
+    }
+    const created = await this.integrationQueue.createIntegrationWorktree(
+      { repoRoot, runId, headCommit },
+      this.deps.git,
+      this.deps.fs,
+    );
+    if (!created.ok) {
+      return {
+        ok: false,
+        errors: [issue(`統合worktreeの作成に失敗しました: ${created.message}`)],
+      };
+    }
+    return { ok: true, integration: { cwd: created.cwd, branch: created.branch } };
+  }
+
+  /**
+   * 疑似worktree（design.md §16.20）。gitでない実行だけ、統合先を実行開始時に一度作る
+   * （`isolation: worktree`のタスクが1件も無い定義でも作る。git版の統合worktreeと同じ
+   * 「run単位の概念として定める」扱い）。作成に失敗したら実行を始めない
+   * （git版の統合worktree作成失敗と同じ扱い。中途半端な状態で走らせない）。
+   */
+  private async createPseudoWorktreeForStart(
+    repoRoot: string,
+    runId: string,
+    gitRepo: boolean,
+  ): Promise<
+    { ok: true; pseudo: LiveRun['pseudo'] } | { ok: false; errors: readonly WorkflowIssue[] }
+  > {
+    if (gitRepo) {
+      return { ok: true, pseudo: undefined };
+    }
+    const resolved = await resolvePseudoState(this, repoRoot, runId);
+    if (!resolved.ok) {
+      return {
+        ok: false,
+        errors: [issue(`疑似worktreeの統合先の作成に失敗しました: ${resolved.message}`)],
+      };
+    }
+    return { ok: true, pseudo: resolved.state };
+  }
+
+  /**
+   * タスク間メッセージング（design.md §16.21）。省略可能（`WorkflowRunnerDeps.messaging`
+   * のJSDoc参照）。MCPサーバの起動に失敗しても実行は止めない。
+   */
+  private async setupMessagingForStart(
+    runId: string,
+    live: LiveRun,
+    messaging: WorkflowRunnerMessagingDeps,
+  ): Promise<void> {
+    const hub = new TaskMessagingHub({
+      listRunTasks: () => buildRunTaskSnapshots(this, runId),
+      onAccepted: (message) => onMessageAccepted(this, runId, message),
+    });
+    try {
+      const transport = await messaging.startTransport(hub);
+      const waitingReplyPollTimer = setInterval(
+        () => checkWaitingReplyStalls(this, runId),
+        WAITING_REPLY_POLL_INTERVAL_MS,
+      );
+      waitingReplyPollTimer.unref?.();
+      live.messaging = { hub, transport, waitingReplyPollTimer };
+    } catch (e) {
+      const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+      this.deps.log.warn(
+        `[workflow ${runId}] MCPサーバの起動に失敗したため、タスク間メッセージングなしで実行します: ${message}`,
+      );
+    }
+  }
+
+  /**
+   * 定義ファイルを読み込み、検証し、通れば実行を開始する。
+   *
+   * `repoRoot` はワークフロー定義ファイルが属するワークスペースフォルダの絶対パス
+   * （design.md §16.6「`currentWorkspaceFolder()` は使わない」の呼び出し側での実践）。
+   *
+   * `allow` を含むタスクが1件でもあれば、`options.allowConfirmed !== true` の間は
+   * 実行を始めず `needsAllowConfirmation` を立てて返す（design.md §16.7「`allow`を含む
+   * ワークフローは、実行開始時に...確認を取る」）。呼び出し側（`extension.ts` /
+   * ワークフローView）はこれを見てモーダルを出し、確認が取れたら
+   * `allowConfirmed: true` で呼び直す。
+   */
+  async start(
+    defPath: string,
+    repoRoot: string,
+    options?: { allowConfirmed?: boolean },
+  ): Promise<StartWorkflowResult> {
+    const parsed = await this.parseAndValidateWorkflow(defPath);
+    if (!parsed.ok) {
+      return parsed;
+    }
+    const { def } = parsed;
 
     const allowTaskIds = def.tasks.filter((t) => t.allow.length > 0).map((t) => t.id);
     if (allowTaskIds.length > 0 && options?.allowConfirmed !== true) {
       return { ok: false, needsAllowConfirmation: true, allowTaskIds };
     }
 
-    const gitRepo = await isGitWorkingTree(repoRoot, this.deps.git);
-    let headCommit = '';
-    if (gitRepo) {
-      const head = await resolveHeadCommit(repoRoot, this.deps.git);
-      if (head === undefined) {
-        return { ok: false, errors: [issue('HEADコミットを解決できませんでした')] };
-      }
-      headCommit = head;
-    } else {
-      const strictWithoutCwd = def.tasks.find(
-        (t) => t.isolation === 'worktree-strict' && t.cwd === undefined,
-      );
-      if (strictWithoutCwd !== undefined) {
-        return {
-          ok: false,
-          errors: [
-            issue(
-              'ワークスペースがgitの作業ツリーではないため、isolation: worktree-strict のタスクを実行できません',
-              [strictWithoutCwd.id],
-            ),
-          ],
-        };
-      }
+    const gitContext = await this.resolveStartGitContext(repoRoot, def);
+    if (!gitContext.ok) {
+      return gitContext;
     }
+    const { gitRepo, headCommit } = gitContext;
 
-    const cwdErrors = await this.validateExplicitCwds(def, repoRoot);
+    const cwdErrors = await validateExplicitCwds(this, def, repoRoot);
     if (cwdErrors.length > 0) {
       return { ok: false, errors: cwdErrors };
     }
@@ -1315,24 +990,16 @@ export class WorkflowRunner {
     // 統合worktreeの作成より前に確定させる
     const runId = this.deps.randomId?.() ?? randomUUID();
 
-    // 統合ブランチ・統合worktree（design.md §16.17）。runごとに1本、実行開始時に一度だけ
-    // 作る。`isolation: worktree`のタスクが1件も無い定義でも作る（design.md §16.17
-    // 「統合ブランチ」がrun単位の概念として定めているため）
-    let integration: { cwd: string; branch: string } | undefined;
-    if (gitRepo) {
-      const created = await this.integrationQueue.createIntegrationWorktree(
-        { repoRoot, runId, headCommit },
-        this.deps.git,
-        this.deps.fs,
-      );
-      if (!created.ok) {
-        return {
-          ok: false,
-          errors: [issue(`統合worktreeの作成に失敗しました: ${created.message}`)],
-        };
-      }
-      integration = { cwd: created.cwd, branch: created.branch };
+    const integrationResult = await this.createIntegrationForStart(
+      repoRoot,
+      runId,
+      headCommit,
+      gitRepo,
+    );
+    if (!integrationResult.ok) {
+      return integrationResult;
     }
+    const { integration } = integrationResult;
 
     // PR/MR作成の前提チェック（design.md §16.18「実行開始前に次を確かめる」）。gitでない
     // 実行には統合ブランチ自体が無いため対象外
@@ -1344,21 +1011,11 @@ export class WorkflowRunner {
       warnings.push({ kind: 'forgeSkipped', taskId: undefined, message: forge.message });
     }
 
-    // 疑似worktree（design.md §16.20）。gitでない実行だけ、統合先を実行開始時に一度作る
-    // （`isolation: worktree`のタスクが1件も無い定義でも作る。git版の統合worktreeと同じ
-    // 「run単位の概念として定める」扱い）。作成に失敗したら実行を始めない
-    // （git版の統合worktree作成失敗と同じ扱い。中途半端な状態で走らせない）
-    let pseudo: LiveRun['pseudo'];
-    if (!gitRepo) {
-      const resolved = await this.resolvePseudoState(repoRoot, runId);
-      if (!resolved.ok) {
-        return {
-          ok: false,
-          errors: [issue(`疑似worktreeの統合先の作成に失敗しました: ${resolved.message}`)],
-        };
-      }
-      pseudo = resolved.state;
+    const pseudoResult = await this.createPseudoWorktreeForStart(repoRoot, runId, gitRepo);
+    if (!pseudoResult.ok) {
+      return pseudoResult;
     }
+    const { pseudo } = pseudoResult;
 
     const live: LiveRun = {
       runId,
@@ -1382,197 +1039,14 @@ export class WorkflowRunner {
     };
     this.runs.set(runId, live);
 
-    // タスク間メッセージング（design.md §16.21）。省略可能（`WorkflowRunnerDeps.messaging`
-    // のJSDoc参照）。MCPサーバの起動に失敗しても実行は止めない
     if (this.deps.messaging !== undefined) {
-      const hub = new TaskMessagingHub({
-        listRunTasks: () => this.buildRunTaskSnapshots(runId),
-        onAccepted: (message) => this.onMessageAccepted(runId, message),
-      });
-      try {
-        const transport = await this.deps.messaging.startTransport(hub);
-        const waitingReplyPollTimer = setInterval(
-          () => this.checkWaitingReplyStalls(runId),
-          WAITING_REPLY_POLL_INTERVAL_MS,
-        );
-        waitingReplyPollTimer.unref?.();
-        live.messaging = { hub, transport, waitingReplyPollTimer };
-      } catch (e) {
-        const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
-        this.deps.log.warn(
-          `[workflow ${runId}] MCPサーバの起動に失敗したため、タスク間メッセージングなしで実行します: ${message}`,
-        );
-      }
+      await this.setupMessagingForStart(runId, live, this.deps.messaging);
     }
 
     await this.persist(runId);
     this.notify(runId);
     this.pump(runId);
     return { ok: true, runId };
-  }
-
-  /** `TaskMessagingHub`の`list_tasks`が返す一覧を組み立てる（design.md §16.21）。 */
-  private buildRunTaskSnapshots(runId: string): RunTaskSnapshot[] {
-    const live = this.runs.get(runId);
-    if (live === undefined) {
-      return [];
-    }
-    return live.def.tasks.map((t) => ({
-      id: t.id,
-      state: live.runState.tasks.get(t.id)?.state ?? 'pending',
-      summary: live.tasks.get(t.id)?.lastResponseSummary ?? '',
-    }));
-  }
-
-  /**
-   * `TaskMessagingHub`が`send_message`を受け付けた直後に呼ばれる（`WorkflowRunnerMessagingDeps`
-   * のJSDoc、design.md §16.21）。
-   *
-   * - `expectReply: true`なら送信元タスクを`waitingReply`へ倒し、実際にループを一時停止する
-   *   （`session.pauseLoop()`。状態だけを倒さない。#105が避けた「実際には止まっていないのに
-   *   止まっていると偽る」問題への対応）
-   * - 宛先タスクが`waitingReply`であれば、この配送で再開してよいので`running`へ戻し
-   *   （`resumeFromWaitingReply`）、ループを再開する（`session.resumeLoop()`。返信の本文自体は
-   *   `setPromptTransform`の`composeNextPrompt`が次の送信へ添える）
-   */
-  private onMessageAccepted(runId: string, message: StoredMessage): void {
-    const live = this.runs.get(runId);
-    if (live === undefined) {
-      return;
-    }
-    let changed = false;
-
-    if (message.expectReply) {
-      const senderTask = live.tasks.get(message.from);
-      const senderState = live.runState.tasks.get(message.from);
-      if (senderTask !== undefined && senderState?.state === 'running') {
-        live.runState = markWaitingReply(live.runState, message.from);
-        senderTask.waitingReplySinceMs = (this.deps.now?.() ?? new Date()).getTime();
-        senderTask.session.pauseLoop();
-        changed = true;
-      }
-    }
-
-    const recipientTask = live.tasks.get(message.to);
-    const recipientState = live.runState.tasks.get(message.to);
-    if (recipientTask !== undefined && recipientState?.state === 'waitingReply') {
-      live.runState = resumeFromWaitingReply(live.runState, message.to);
-      recipientTask.waitingReplySinceMs = undefined;
-      recipientTask.session.resumeLoop();
-      changed = true;
-    }
-
-    if (changed) {
-      this.notify(runId);
-      void this.persist(runId);
-    }
-  }
-
-  /**
-   * 待ちぼうけの2経路（design.md §16.21「待ちぼうけを検出する経路」）を確認し、解けていれば
-   * `running`へ戻す。`WorkflowRunnerMessagingDeps.startTransport`と同時に登録したタイマー
-   * （`WAITING_REPLY_POLL_INTERVAL_MS`ごと）から呼ばれる。
-   */
-  private checkWaitingReplyStalls(runId: string): void {
-    const live = this.runs.get(runId);
-    if (live === undefined || live.messaging === undefined || live.finished) {
-      return;
-    }
-
-    const activeStates = new Map<string, TaskState>();
-    const waitingSinceMsByTaskId = new Map<string, number>();
-    for (const [taskId, s] of live.runState.tasks) {
-      if (isActiveTaskState(s.state)) {
-        activeStates.set(taskId, s.state);
-      }
-      if (s.state === 'waitingReply') {
-        const sinceMs = live.tasks.get(taskId)?.waitingReplySinceMs;
-        if (sinceMs !== undefined) {
-          waitingSinceMsByTaskId.set(taskId, sinceMs);
-        }
-      }
-    }
-
-    const nowMs = (this.deps.now?.() ?? new Date()).getTime();
-    const replyTimeoutSec =
-      this.deps.messaging?.readReplyTimeoutSec?.() ?? DEFAULT_REPLY_TIMEOUT_SEC;
-
-    const stalemateIds = detectAllWaitingStalemate(
-      activeStates,
-      live.messaging.hub.totalUndeliveredCount(),
-    );
-    const timedOutIds = detectTimedOutWaitingReplies(
-      waitingSinceMsByTaskId,
-      nowMs,
-      replyTimeoutSec,
-    );
-
-    this.releaseStalledWaitingReplies(runId, live, stalemateIds, 'allWaiting');
-    this.releaseStalledWaitingReplies(runId, live, timedOutIds, 'timeout');
-  }
-
-  /** `checkWaitingReplyStalls`が検出したtaskIdを実際に`running`へ戻し、警告を積む。 */
-  private releaseStalledWaitingReplies(
-    runId: string,
-    live: LiveRun,
-    taskIds: readonly string[],
-    reason: 'allWaiting' | 'timeout',
-  ): void {
-    const released: string[] = [];
-    for (const taskId of taskIds) {
-      const task = live.tasks.get(taskId);
-      const state = live.runState.tasks.get(taskId);
-      if (task === undefined || state?.state !== 'waitingReply') {
-        continue;
-      }
-      live.runState = resumeFromWaitingReply(live.runState, taskId);
-      task.waitingReplySinceMs = undefined;
-      task.session.resumeLoop();
-      released.push(taskId);
-    }
-    if (released.length === 0) {
-      return;
-    }
-    live.warnings.push({
-      kind: 'messagingStalled',
-      taskId: undefined,
-      message: buildStalledWaitingReplyWarning(released, reason),
-    });
-    this.notify(runId);
-    void this.persist(runId);
-  }
-
-  /**
-   * MCPツールの可視性確認（design.md §16.21「ツールの可視性の確認」）。見えなければ
-   * ワークフローViewへ警告を出し、通信なしでそのまま走らせる（runは止めない）。
-   * `startTask`が`await`せず投げっぱなしで呼ぶ（タスクの開始自体をこの確認で遅らせない）。
-   */
-  private async checkMessagingVisibility(
-    runId: string,
-    taskId: string,
-    session: TaskSession,
-  ): Promise<void> {
-    let visible: boolean;
-    try {
-      visible = await session.checkMessagingToolVisible();
-    } catch {
-      // 確認自体が失敗した場合も「見えない」側へ倒す（安全側の判断。最終報告に記載）
-      visible = false;
-    }
-    if (visible) {
-      return;
-    }
-    const live = this.runs.get(runId);
-    if (live === undefined) {
-      return;
-    }
-    live.warnings.push({
-      kind: 'messagingUnavailable',
-      taskId,
-      message: `タスク間メッセージングのツールがこのタスクから見えませんでした（通信なしで実行します）: ${taskId}`,
-    });
-    this.notify(runId);
-    void this.persist(runId);
   }
 
   /**
@@ -1853,8 +1327,11 @@ export class WorkflowRunner {
 
   // ---- スケジューリング ----
 
-  /** 状態が変わるたびに呼ぶ（design.md §16.3）。次に開始できるタスクを開始し、終了を判定する。 */
-  private pump(runId: string): void {
+  /**
+   * 状態が変わるたびに呼ぶ（design.md §16.3）。次に開始できるタスクを開始し、終了を判定する。
+   * 分割後のファイル（Issue #147）から`self.pump(...)`として呼べるよう`private`を外してある。
+   */
+  pump(runId: string): void {
     const live = this.runs.get(runId);
     if (live === undefined || live.finished) {
       return;
@@ -1880,7 +1357,7 @@ export class WorkflowRunner {
       // 疑似worktree（design.md §16.20）はrunの結果を問わず反映する（forgeとは異なり
       // `succeeded`限定にしない。`reflectPseudoWorktree`自身のJSDoc参照）
       if (live.pseudo !== undefined) {
-        void this.reflectPseudoWorktree(runId);
+        void reflectPseudoWorktree(this, runId);
       }
       // タスク間メッセージング（design.md §16.21）のMCPサーバはrunの結果を問わず閉じる。
       // 以降新しいタスクは開始されない（`live.finished`）ため、これ以上の接続は要らない
@@ -1889,6 +1366,200 @@ export class WorkflowRunner {
         clearInterval(live.messaging.waitingReplyPollTimer);
       }
     }
+  }
+
+  /**
+   * `startTask()`の前半。作業ディレクトリの解決・実効設定のクランプ・権限越境チェック・
+   * bypassPermissionsの最終防御・`TaskSessionInput`の組み立てとタスク境界の解決までを担う。
+   */
+  private async prepareTaskLaunch(
+    live: LiveRun,
+    task: WorkflowTask,
+    taskId: string,
+    runId: string,
+  ): Promise<TaskLaunchPreparation> {
+    const retry = retrySuffixOf(live.runState.tasks.get(taskId)?.retryCount);
+    const { cwd, branch, usedWorktree, usedPseudoWorktree, pseudoSnapshot, originCommit } =
+      await resolveWorkingDirectory(this, live, task, retry);
+
+    const baseline = this.deps.readBaseline();
+    // クランプはこの1関数だけを通す（design.md §16.16。#52セキュリティ監査指摘）
+    const effective = buildEffectiveTaskConfig(task, baseline);
+    for (const w of effective.warnings) {
+      this.deps.log.warn(`[workflow ${runId}/${taskId}] ${w}`);
+      live.warnings.push({ kind: 'clamp', taskId, message: w });
+    }
+
+    // 実効値（クランプ後の値）に基づく第二段の権限越境チェック（セキュリティ監査指摘#2）。
+    // 読み込み時のチェック（`findPermissionEscalationWarnings`）はYAMLが`sandbox`等を
+    // 明示しないと判定できないが、ここでは実際にクランプされた値が分かっているため、
+    // 未指定でも判定できる。上流タスクの実効値は`live.tasks`に既に保存されている
+    // （依存が満たされて開始した以上、上流タスクは必ず先に完了しliveTaskが残っている）
+    checkEffectivePermissionEscalation(this, live, task, taskId, effective);
+
+    // 最終防御（レビュー指摘: critical 3）。bypassPermissionsでは`can_use_tool`が
+    // 発行されず、classifyApprovalRequest / autoApprove / escalate / allow が
+    // 一度も呼ばれない。workflow.tsのvalidateWorkflowはYAMLリテラルの
+    // `approvalMode: bypassPermissions`一致だけを見るため、YAML側が何も指定せず
+    // 拡張機能側の設定が既にbypassPermissionsの場合は素通りしてしまう（実測で確認済み）。
+    // ここは実効値（クランプ後の値）に対する検査であり、YAMLの記述に関わらず効く
+    if (task.provider === 'claude' && effective.config.approvalMode === 'bypassPermissions') {
+      throw new Error(
+        '実効approvalModeがbypassPermissionsのため、このタスクは開始できません' +
+          '（危険判定が働かない設定での無人実行はできません）',
+      );
+    }
+
+    // タスク間メッセージング（design.md §16.21）。runにMCPサーバが立っていれば、
+    // このタスク専用の接続用URLを1つ発行する。実際にCLIの起動へ渡す配線
+    // （`TaskSessionInput.mcp`を読む側）はsrc/view/の変更が要るため、このIssueの範囲外
+    // （`WorkflowRunnerMessagingDeps`のJSDoc参照）。ここでは値を渡すところまで
+    const messagingUrl = live.messaging?.transport.registerTask(taskId);
+    const input: TaskSessionInput = {
+      cwd,
+      config: effective.config,
+      sandbox: effective.sandbox,
+      ...(messagingUrl !== undefined ? { mcp: { url: messagingUrl } } : {}),
+    };
+
+    const boundaryResult = await buildBoundary(this, live, cwd);
+    if (boundaryResult.warning !== undefined) {
+      this.deps.log.warn(`[workflow ${runId}/${taskId}] ${boundaryResult.warning}`);
+      live.warnings.push({ kind: 'gitCommonDir', taskId, message: boundaryResult.warning });
+    }
+
+    return {
+      cwd,
+      branch,
+      usedWorktree,
+      usedPseudoWorktree,
+      pseudoSnapshot,
+      originCommit,
+      effective,
+      input,
+      boundaryResult,
+    };
+  }
+
+  private buildLiveTask(session: TaskSession, prepared: TaskLaunchPreparation): LiveTask {
+    return {
+      session,
+      cwd: prepared.cwd,
+      branch: prepared.branch,
+      autoApprove: prepared.effective.autoApprove,
+      effectiveSandbox: prepared.effective.sandbox,
+      effectiveApprovalMode: prepared.effective.config.approvalMode,
+      boundary: prepared.boundaryResult.boundary,
+      usedWorktree: prepared.usedWorktree,
+      usedPseudoWorktree: prepared.usedPseudoWorktree,
+      pseudoSnapshot: prepared.pseudoSnapshot,
+      originCommit: prepared.originCommit,
+      lastState: undefined,
+      result: undefined,
+      wasBusy: false,
+      submissionCount: 0,
+      startedAt: (this.deps.now?.() ?? new Date()).toISOString(),
+      lastResponseSummary: '',
+      pendingApproval: undefined,
+      expandedPrompt: undefined,
+      expandedContinuePrompt: undefined,
+      lastSentPrompt: undefined,
+      waitingReplySinceMs: undefined,
+      pullRequest: undefined,
+    };
+  }
+
+  /**
+   * テンプレート展開はタスク開始直前に行う（design.md §16.4）。`runLoop` へ渡す本文は
+   * 展開前のまま（作業記録に残すため。§16.12）で、実際の送信直前にpromptTransformで展開する。
+   *
+   * 区切り用の乱数（`nonce`。セキュリティ監査指摘#3）はタスク開始時に1回だけ生成し、
+   * 以後の全ターン（`prompt` / `continuePrompt`）とView表示用の値（`expandedPrompt` /
+   * `expandedContinuePrompt`）とで使い回す。依存タスクの結果（`resultsMap`）は
+   * タスク開始時点で確定済み（依存は完了済みタスクに限る）で以後変わらないため、
+   * `continuePrompt`の展開結果もこの時点で一度計算すれば以後のどのターンにも一致する
+   */
+  private setupTaskPrompting(
+    live: LiveRun,
+    task: WorkflowTask,
+    taskId: string,
+    liveTask: LiveTask,
+    effective: EffectiveTaskConfig,
+    session: TaskSession,
+  ): void {
+    const resultsMap = this.buildResultsMap(live, task);
+    const templateNonce = this.deps.randomId?.() ?? randomUUID();
+    session.setPromptTransform((text) => {
+      const expanded = expandTemplate(text, resultsMap, templateNonce);
+      // 受け取ったメッセージは、次の指示の先頭へ添える（design.md §16.21「配送」）。
+      // `takeDeliverableMessages`は呼ぶたびに未配送分を取り出す（配送済みとして消費する）
+      // ため、送信のたびにここで取りに行く必要がある
+      const hub = live.messaging?.hub;
+      const delivered = hub?.takeDeliverableMessages(taskId) ?? [];
+      // 配送される時点で、送信元より緩い実効権限へメッセージが届いていないかを確認する
+      // （design.md §16.21、Issue #132「1. 権限差の警告」）。静的には検査できない
+      // （送信はモデルの判断で実行時に起きる）ため、実際に配送するこの時点でのみ判定できる
+      if (delivered.length > 0) {
+        checkMessagingPermissionEscalation(this, live, task, taskId, effective, delivered);
+      }
+      const composed = composeNextPrompt(expanded, delivered);
+      // Viewで実際に送った文面を確認できるようにする（design.md §16.21、Issue #132
+      // 「4. 人が目視確認できるようにする」）。`expandedPrompt`はcomposeNextPromptを
+      // 経由しないため、メッセージ経由で注入された内容を映せなかった。ここは
+      // `setPromptTransform`が実際に返す値（CLIへ送る本文そのもの）を表示用に保持する
+      // 経路なので、常に実際の送信内容と一致する。永続化はしない（design.md §16.11・
+      // §16.21）表示専用の値のため、Trojan Source対策として`stripControlCharsPreservingNewlines`
+      // を通す（改行はプロンプトの整形を保つため残す。CLIへ送る`composed`自体は変更しない）
+      liveTask.lastSentPrompt = stripControlCharsPreservingNewlines(composed);
+      return composed;
+    });
+    // Viewで「展開後のプロンプトを実際の文面として確認できる」ようにするための表示専用の値
+    // （design.md §16.4 案1「見せる」、Issue #67）。実際に送る本文とは別経路で保持する。
+    // 双方向制御文字等（Trojan Source）を仕込まれると、人がここを目視で確認するという
+    // 対策そのものを欺けるため、承認カードの表示・応答要約と同じ発想で無害化する
+    // （セキュリティ監査指摘#5）。ただしここは複数行のプロンプトをそのまま見せる用途なので、
+    // 改行まで空白に潰す`stripControlChars`ではなく、改行を残す
+    // `stripControlCharsPreservingNewlines`を使う。CLIへ実際に送る本文
+    // （`promptTransform`側）は意味を変えたくないため、表示専用のこちらだけに適用する
+    liveTask.expandedPrompt = stripControlCharsPreservingNewlines(
+      expandTemplate(task.prompt, resultsMap, templateNonce),
+    );
+    // 継続プロンプト（2回目以降に送る指示）の展開結果もViewで確認できるようにする
+    // （design.md §16.4、セキュリティ監査指摘#6）。上記のとおりresultsMapは以後の
+    // ターンでも変わらないため、ここで一度計算した値が実際に送られる値と一致し続ける
+    liveTask.expandedContinuePrompt = stripControlCharsPreservingNewlines(
+      expandTemplate(task.continuePrompt, resultsMap, templateNonce),
+    );
+  }
+
+  private finishTaskLaunch(
+    runId: string,
+    taskId: string,
+    task: WorkflowTask,
+    session: TaskSession,
+    usedWorktree: boolean,
+    input: TaskSessionInput,
+  ): void {
+    // `usedWorktree`（タスク専用ブランチを使う）のときだけ「コミットしてあること」を
+    // 終了条件へ自動で足す（design.md §16.17「タスク完了時のコミット」1.）。`shared` /
+    // 明示`cwd`のタスクは統合ブランチへマージする対象を持たないため足さない
+    const condition = usedWorktree ? withCommitRequirement(task.done) : task.done;
+    session.runLoop({
+      initialPrompt: task.prompt,
+      continuePrompt: task.continuePrompt,
+      maxIterations: task.maxIterations,
+      condition,
+    });
+
+    // ツールの可視性の確認（design.md §16.21「タスクの開始時にツールが見えているか
+    // 確かめる」）。見えなくても警告のうえ通信なしで走らせる（runは止めない）ため、
+    // ここでは`await`せず投げっぱなしにする（`session.open`/`runLoop`をこの確認の
+    // 分だけ遅らせない）
+    if (input.mcp !== undefined) {
+      void checkMessagingVisibility(this, runId, taskId, session);
+    }
+
+    this.notify(runId);
   }
 
   private async startTask(runId: string, taskId: string): Promise<void> {
@@ -1902,87 +1573,15 @@ export class WorkflowRunner {
     }
 
     try {
-      const retry = retrySuffixOf(live.runState.tasks.get(taskId)?.retryCount);
-      const { cwd, branch, usedWorktree, usedPseudoWorktree, pseudoSnapshot, originCommit } =
-        await this.resolveWorkingDirectory(live, task, retry);
-
-      const baseline = this.deps.readBaseline();
-      // クランプはこの1関数だけを通す（design.md §16.16。#52セキュリティ監査指摘）
-      const effective = buildEffectiveTaskConfig(task, baseline);
-      for (const w of effective.warnings) {
-        this.deps.log.warn(`[workflow ${runId}/${taskId}] ${w}`);
-        live.warnings.push({ kind: 'clamp', taskId, message: w });
-      }
-
-      // 実効値（クランプ後の値）に基づく第二段の権限越境チェック（セキュリティ監査指摘#2）。
-      // 読み込み時のチェック（`findPermissionEscalationWarnings`）はYAMLが`sandbox`等を
-      // 明示しないと判定できないが、ここでは実際にクランプされた値が分かっているため、
-      // 未指定でも判定できる。上流タスクの実効値は`live.tasks`に既に保存されている
-      // （依存が満たされて開始した以上、上流タスクは必ず先に完了しliveTaskが残っている）
-      this.checkEffectivePermissionEscalation(live, task, taskId, effective);
-
-      // 最終防御（レビュー指摘: critical 3）。bypassPermissionsでは`can_use_tool`が
-      // 発行されず、classifyApprovalRequest / autoApprove / escalate / allow が
-      // 一度も呼ばれない。workflow.tsのvalidateWorkflowはYAMLリテラルの
-      // `approvalMode: bypassPermissions`一致だけを見るため、YAML側が何も指定せず
-      // 拡張機能側の設定が既にbypassPermissionsの場合は素通りしてしまう（実測で確認済み）。
-      // ここは実効値（クランプ後の値）に対する検査であり、YAMLの記述に関わらず効く
-      if (task.provider === 'claude' && effective.config.approvalMode === 'bypassPermissions') {
-        throw new Error(
-          '実効approvalModeがbypassPermissionsのため、このタスクは開始できません' +
-            '（危険判定が働かない設定での無人実行はできません）',
-        );
-      }
-
-      // タスク間メッセージング（design.md §16.21）。runにMCPサーバが立っていれば、
-      // このタスク専用の接続用URLを1つ発行する。実際にCLIの起動へ渡す配線
-      // （`TaskSessionInput.mcp`を読む側）はsrc/view/の変更が要るため、このIssueの範囲外
-      // （`WorkflowRunnerMessagingDeps`のJSDoc参照）。ここでは値を渡すところまで
-      const messagingUrl = live.messaging?.transport.registerTask(taskId);
-      const input: TaskSessionInput = {
-        cwd,
-        config: effective.config,
-        sandbox: effective.sandbox,
-        ...(messagingUrl !== undefined ? { mcp: { url: messagingUrl } } : {}),
-      };
-
-      const boundaryResult = await this.buildBoundary(live, cwd);
-      if (boundaryResult.warning !== undefined) {
-        this.deps.log.warn(`[workflow ${runId}/${taskId}] ${boundaryResult.warning}`);
-        live.warnings.push({ kind: 'gitCommonDir', taskId, message: boundaryResult.warning });
-      }
+      const prepared = await this.prepareTaskLaunch(live, task, taskId, runId);
 
       const host = this.deps.hosts[task.provider];
-      const session = await host.openTaskSession(input);
+      const session = await host.openTaskSession(prepared.input);
       session.open({ preserveFocus: true });
 
-      const liveTask: LiveTask = {
-        session,
-        cwd,
-        branch,
-        autoApprove: effective.autoApprove,
-        effectiveSandbox: effective.sandbox,
-        effectiveApprovalMode: effective.config.approvalMode,
-        boundary: boundaryResult.boundary,
-        usedWorktree,
-        usedPseudoWorktree,
-        pseudoSnapshot,
-        originCommit,
-        lastState: undefined,
-        result: undefined,
-        wasBusy: false,
-        submissionCount: 0,
-        startedAt: (this.deps.now?.() ?? new Date()).toISOString(),
-        lastResponseSummary: '',
-        pendingApproval: undefined,
-        expandedPrompt: undefined,
-        expandedContinuePrompt: undefined,
-        lastSentPrompt: undefined,
-        waitingReplySinceMs: undefined,
-        pullRequest: undefined,
-      };
+      const liveTask = this.buildLiveTask(session, prepared);
       live.tasks.set(taskId, liveTask);
-      live.runState = recordSessionInfo(live.runState, taskId, session.sessionId, cwd);
+      live.runState = recordSessionInfo(live.runState, taskId, session.sessionId, prepared.cwd);
 
       session.setApprovalHandler((approval, rawParams) =>
         this.handleApproval(runId, taskId, task, approval, rawParams),
@@ -1995,78 +1594,8 @@ export class WorkflowRunner {
         this.onTaskFinished(runId, taskId, task, reason, state),
       );
 
-      // テンプレート展開はタスク開始直前に行う（design.md §16.4）。`runLoop` へ渡す本文は
-      // 展開前のまま（作業記録に残すため。§16.12）で、実際の送信直前にpromptTransformで展開する。
-      //
-      // 区切り用の乱数（`nonce`。セキュリティ監査指摘#3）はタスク開始時に1回だけ生成し、
-      // 以後の全ターン（`prompt` / `continuePrompt`）とView表示用の値（`expandedPrompt` /
-      // `expandedContinuePrompt`）とで使い回す。依存タスクの結果（`resultsMap`）は
-      // タスク開始時点で確定済み（依存は完了済みタスクに限る）で以後変わらないため、
-      // `continuePrompt`の展開結果もこの時点で一度計算すれば以後のどのターンにも一致する
-      const resultsMap = this.buildResultsMap(live, task);
-      const templateNonce = this.deps.randomId?.() ?? randomUUID();
-      session.setPromptTransform((text) => {
-        const expanded = expandTemplate(text, resultsMap, templateNonce);
-        // 受け取ったメッセージは、次の指示の先頭へ添える（design.md §16.21「配送」）。
-        // `takeDeliverableMessages`は呼ぶたびに未配送分を取り出す（配送済みとして消費する）
-        // ため、送信のたびにここで取りに行く必要がある
-        const hub = live.messaging?.hub;
-        const delivered = hub?.takeDeliverableMessages(taskId) ?? [];
-        // 配送される時点で、送信元より緩い実効権限へメッセージが届いていないかを確認する
-        // （design.md §16.21、Issue #132「1. 権限差の警告」）。静的には検査できない
-        // （送信はモデルの判断で実行時に起きる）ため、実際に配送するこの時点でのみ判定できる
-        if (delivered.length > 0) {
-          this.checkMessagingPermissionEscalation(live, task, taskId, effective, delivered);
-        }
-        const composed = composeNextPrompt(expanded, delivered);
-        // Viewで実際に送った文面を確認できるようにする（design.md §16.21、Issue #132
-        // 「4. 人が目視確認できるようにする」）。`expandedPrompt`はcomposeNextPromptを
-        // 経由しないため、メッセージ経由で注入された内容を映せなかった。ここは
-        // `setPromptTransform`が実際に返す値（CLIへ送る本文そのもの）を表示用に保持する
-        // 経路なので、常に実際の送信内容と一致する。永続化はしない（design.md §16.11・
-        // §16.21）表示専用の値のため、Trojan Source対策として`stripControlCharsPreservingNewlines`
-        // を通す（改行はプロンプトの整形を保つため残す。CLIへ送る`composed`自体は変更しない）
-        liveTask.lastSentPrompt = stripControlCharsPreservingNewlines(composed);
-        return composed;
-      });
-      // Viewで「展開後のプロンプトを実際の文面として確認できる」ようにするための表示専用の値
-      // （design.md §16.4 案1「見せる」、Issue #67）。実際に送る本文とは別経路で保持する。
-      // 双方向制御文字等（Trojan Source）を仕込まれると、人がここを目視で確認するという
-      // 対策そのものを欺けるため、承認カードの表示・応答要約と同じ発想で無害化する
-      // （セキュリティ監査指摘#5）。ただしここは複数行のプロンプトをそのまま見せる用途なので、
-      // 改行まで空白に潰す`stripControlChars`ではなく、改行を残す
-      // `stripControlCharsPreservingNewlines`を使う。CLIへ実際に送る本文
-      // （`promptTransform`側）は意味を変えたくないため、表示専用のこちらだけに適用する
-      liveTask.expandedPrompt = stripControlCharsPreservingNewlines(
-        expandTemplate(task.prompt, resultsMap, templateNonce),
-      );
-      // 継続プロンプト（2回目以降に送る指示）の展開結果もViewで確認できるようにする
-      // （design.md §16.4、セキュリティ監査指摘#6）。上記のとおりresultsMapは以後の
-      // ターンでも変わらないため、ここで一度計算した値が実際に送られる値と一致し続ける
-      liveTask.expandedContinuePrompt = stripControlCharsPreservingNewlines(
-        expandTemplate(task.continuePrompt, resultsMap, templateNonce),
-      );
-
-      // `usedWorktree`（タスク専用ブランチを使う）のときだけ「コミットしてあること」を
-      // 終了条件へ自動で足す（design.md §16.17「タスク完了時のコミット」1.）。`shared` /
-      // 明示`cwd`のタスクは統合ブランチへマージする対象を持たないため足さない
-      const condition = usedWorktree ? withCommitRequirement(task.done) : task.done;
-      session.runLoop({
-        initialPrompt: task.prompt,
-        continuePrompt: task.continuePrompt,
-        maxIterations: task.maxIterations,
-        condition,
-      });
-
-      // ツールの可視性の確認（design.md §16.21「タスクの開始時にツールが見えているか
-      // 確かめる」）。見えなくても警告のうえ通信なしで走らせる（runは止めない）ため、
-      // ここでは`await`せず投げっぱなしにする（`session.open`/`runLoop`をこの確認の
-      // 分だけ遅らせない）
-      if (input.mcp !== undefined) {
-        void this.checkMessagingVisibility(runId, taskId, session);
-      }
-
-      this.notify(runId);
+      this.setupTaskPrompting(live, task, taskId, liveTask, prepared.effective, session);
+      this.finishTaskLaunch(runId, taskId, task, session, prepared.usedWorktree, prepared.input);
     } catch (e) {
       // openTaskSessionの失敗はCLIプロセス起動時のエラーをそのまま含みうる。
       // worktree.ts側のgitエラーは既に無害化済みだが、ここでも共通ヘルパーを通しておく
@@ -2080,56 +1609,6 @@ export class WorkflowRunner {
     }
   }
 
-  /**
-   * `cwd` を実パス解決し、`repoRoot` の実パス配下にあるか確かめる。
-   *
-   * cwdを無検証で通すと、`sandbox: workspace-write` の「workspace」の基準そのものを
-   * YAMLから付け替えられる（例: cwdに `~/.ssh` を指定すれば、そこが書き込み可能な領域に
-   * なる）。design.md §16.16 が塞ぐと決めている経路。`workflow.ts` の検証は実パス解決を
-   * 伴わないためこの判定ができず、実行層の責務になる。
-   */
-  private async resolveExplicitCwd(
-    cwd: string,
-    repoRoot: string,
-  ): Promise<{ ok: true; resolved: string } | { ok: false; message: string }> {
-    const resolvedCwd = await this.deps.fs.realpath(cwd);
-    if (resolvedCwd === undefined) {
-      return { ok: false, message: `cwdを解決できませんでした: ${cwd}` };
-    }
-    // 境界側も実パスに直してから比べる。シンボリックリンク越しに外へ出るのを防ぐ
-    const resolvedRoot = (await this.deps.fs.realpath(repoRoot)) ?? repoRoot;
-    if (!isPathWithinRoot(resolvedCwd, resolvedRoot)) {
-      return {
-        ok: false,
-        message: `cwdがワークスペースの外を指しています（design.md §16.16）: ${cwd}`,
-      };
-    }
-    return { ok: true, resolved: resolvedCwd };
-  }
-
-  /**
-   * 全タスクの明示`cwd`を実行開始前に一括で検証する（design.md §16.2「1件でも該当すれば
-   * 実行を始めない」）。タスクごと（`startTask`内）の事後検証だけだと、正当なcwdの
-   * タスクが先に開始・副作用を残した後で別タスクの違反が判明しうる
-   * （レビュー指摘: warning）。
-   */
-  private async validateExplicitCwds(
-    def: WorkflowDefinition,
-    repoRoot: string,
-  ): Promise<WorkflowIssue[]> {
-    const errors: WorkflowIssue[] = [];
-    for (const task of def.tasks) {
-      if (task.cwd === undefined) {
-        continue;
-      }
-      const resolved = await this.resolveExplicitCwd(task.cwd, repoRoot);
-      if (!resolved.ok) {
-        errors.push(issue(resolved.message, [task.id]));
-      }
-    }
-    return errors;
-  }
-
   private buildResultsMap(live: LiveRun, task: WorkflowTask): Map<string, TaskResult> {
     const map = new Map<string, TaskResult>();
     for (const depId of task.dependsOn) {
@@ -2141,255 +1620,6 @@ export class WorkflowRunner {
     return map;
   }
 
-  private async resolveWorkingDirectory(
-    live: LiveRun,
-    task: WorkflowTask,
-    retry: number | undefined,
-  ): Promise<{
-    cwd: string;
-    branch: string;
-    usedWorktree: boolean;
-    usedPseudoWorktree: boolean;
-    pseudoSnapshot: Snapshot | undefined;
-    originCommit: string;
-  }> {
-    const decision = decideWorkingDirectory(task, live.gitRepo);
-    if (decision.kind === 'explicitCwd') {
-      // decision.kind==='explicitCwd'はtask.cwdが設定されている場合にしか出ない
-      // （decideWorkingDirectoryの実装参照）。ここで無いのは呼び出し元の不整合
-      if (task.cwd === undefined) {
-        throw new Error('内部矛盾: explicitCwdの判定なのにcwdが無いタスクです');
-      }
-      // 実行開始時（start()）の一括検証を必ず通っている前提だが、念のためここでも確かめる
-      // （多層防御。呼び出し順序の変更などで一括検証が経由されなくても危険側に倒れない）
-      const resolved = await this.resolveExplicitCwd(task.cwd, live.repoRoot);
-      if (!resolved.ok) {
-        throw new Error(resolved.message);
-      }
-      return {
-        cwd: resolved.resolved,
-        branch: '',
-        usedWorktree: false,
-        usedPseudoWorktree: false,
-        pseudoSnapshot: undefined,
-        originCommit: '',
-      };
-    }
-    if (decision.kind === 'shared') {
-      return {
-        cwd: live.repoRoot,
-        branch: '',
-        usedWorktree: false,
-        usedPseudoWorktree: false,
-        pseudoSnapshot: undefined,
-        originCommit: '',
-      };
-    }
-    if (decision.kind === 'sharedFallback') {
-      this.deps.log.warn(`[workflow ${live.runId}/${task.id}] ${decision.warning}`);
-      live.warnings.push({ kind: 'gitFallback', taskId: task.id, message: decision.warning });
-      // 疑似worktree（design.md §16.20、Issue #105）。`WorkflowRunnerDeps.pseudoWorktree`が
-      // 渡されていない場合は、従来どおりワークスペース直下を共有する（後方互換）
-      if (live.pseudo !== undefined && this.deps.pseudoWorktree !== undefined) {
-        const cloned = await cloneWorkspace(
-          live.repoRoot,
-          live.runId,
-          task.id,
-          live.pseudo.exclude,
-          this.deps.pseudoWorktree.fs,
-        );
-        if (!cloned.ok) {
-          throw new Error(`疑似worktreeの作成に失敗しました: ${cloned.message}`);
-        }
-        return {
-          cwd: cloned.cwd,
-          branch: '',
-          usedWorktree: false,
-          usedPseudoWorktree: true,
-          pseudoSnapshot: cloned.snapshot,
-          originCommit: '',
-        };
-      }
-      return {
-        cwd: live.repoRoot,
-        branch: '',
-        usedWorktree: false,
-        usedPseudoWorktree: false,
-        pseudoSnapshot: undefined,
-        originCommit: '',
-      };
-    }
-    if (decision.kind === 'error') {
-      throw new Error(decision.message);
-    }
-
-    // タスクブランチの分岐元は「そのタスクを開始する時点の統合ブランチのHEAD」
-    // （design.md §16.17「タスクブランチの分岐元」。現行の「実行開始時のHEAD」から変更）。
-    // 統合worktreeが無い（gitRepoでない）ケースは`decideWorkingDirectory`が`shared`/
-    // `sharedFallback`/`error`のいずれかへ倒すため、ここへは来ない
-    if (live.integration === undefined) {
-      throw new Error(
-        '内部矛盾: 統合worktreeが無い状態でworktree隔離のタスクを開始しようとしました',
-      );
-    }
-    const originCommit = await resolveTaskBranchOrigin(live.repoRoot, live.runId, this.deps.git);
-    if (originCommit === undefined) {
-      throw new Error('統合ブランチのHEADコミットを解決できませんでした');
-    }
-
-    const result = await this.deps.worktreeQueue.create(
-      {
-        repoRoot: live.repoRoot,
-        runId: live.runId,
-        taskId: task.id,
-        headCommit: originCommit,
-        retry,
-      },
-      this.deps.git,
-      this.deps.fs,
-    );
-    if (!result.ok) {
-      throw new Error(`worktreeの作成に失敗しました: ${result.message}`);
-    }
-    return {
-      cwd: result.cwd,
-      branch: result.branch,
-      usedWorktree: true,
-      usedPseudoWorktree: false,
-      pseudoSnapshot: undefined,
-      originCommit,
-    };
-  }
-
-  // ---- 疑似worktree（design.md §16.20、Issue #105） ----
-
-  /**
-   * gitでないワークスペースでの統合先（`<runId>/_integration`）を用意する
-   * （`integration.ts`のgit版と対称の役割）。`WorkflowRunnerDeps.pseudoWorktree`が
-   * 渡されていなければ何もせず`state: undefined`を返す（後方互換。上のJSDoc参照）。
-   */
-  private async resolvePseudoState(
-    repoRoot: string,
-    runId: string,
-  ): Promise<{ ok: true; state: LiveRun['pseudo'] } | { ok: false; message: string }> {
-    const deps = this.deps.pseudoWorktree;
-    if (deps === undefined) {
-      return { ok: true, state: undefined };
-    }
-    const ensured = await ensureIntegrationDir(repoRoot, runId, deps.fs);
-    if (!ensured.ok) {
-      return { ok: false, message: ensured.message };
-    }
-    const baseline = await takeSnapshot(repoRoot, deps.exclude, deps.fs);
-    return {
-      ok: true,
-      state: {
-        integrationDir: ensured.dir,
-        queue: new PseudoWorktreeIntegrationQueue(),
-        baseline,
-        exclude: deps.exclude,
-      },
-    };
-  }
-
-  /**
-   * タスク1件分の疑似worktreeを統合先へ適用する（design.md §16.20。gitの`attemptMerge`と
-   * 対称の役割）。3-way mergeはできないため、同じパスへの変更が複数タスクにまたがれば
-   * 内容を見ずに衝突として扱う（design.md「内容の突き合わせは行わず...」）。
-   *
-   * **衝突解決セッションは開かない。** design.md §16.17の衝突解決セッションは統合worktree
-   * （gitの仕組み）を前提にしており、疑似worktree向けに作り直すのはこのIssueの範囲外
-   * （Issue #105の配線対象は「decideWorkingDirectoryのgit外フォールバックから繋ぐ」
-   * 「runの終了時にワークスペースへ反映する」の2点。最終報告に安全側の判断として記載）。
-   * 衝突したタスクは`blocked`にし、独立した枝は走り続ける（`markMergeBlocked`と同じ扱い）。
-   */
-  private async integratePseudoWorktree(
-    runId: string,
-    taskId: string,
-    pseudo: NonNullable<LiveRun['pseudo']>,
-    liveTask: LiveTask,
-  ): Promise<void> {
-    const live = this.runs.get(runId);
-    const deps = this.deps.pseudoWorktree;
-    if (live === undefined || deps === undefined) {
-      return;
-    }
-    const currentSnapshot = await takeSnapshot(liveTask.cwd, pseudo.exclude, deps.fs);
-    const diff = diffSnapshots(liveTask.pseudoSnapshot ?? new Map(), currentSnapshot);
-    const plan = await pseudo.queue.integrate(
-      taskId,
-      liveTask.cwd,
-      pseudo.integrationDir,
-      diff,
-      deps.fs,
-    );
-
-    if (plan.conflicts.length > 0) {
-      const paths = plan.conflicts.map((c) => c.path).join(', ');
-      this.deps.log.warn(
-        `[workflow ${runId}/${taskId}] 疑似worktreeの統合が衝突しました（3-way mergeができないため）: ${paths}`,
-      );
-      live.warnings.push({
-        kind: 'pseudoWorktreeConflict',
-        taskId,
-        message: `疑似worktreeの統合が衝突しました: ${paths}`,
-      });
-      live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
-    } else {
-      live.runState = markMergeSucceeded(live.runState, live.def.tasks, taskId);
-    }
-    void this.persist(runId);
-    this.notify(runId);
-    this.pump(runId);
-  }
-
-  /**
-   * runの終了時、疑似worktreeの統合先の内容をワークスペースへ反映する
-   * （design.md §16.20「runが終わったら、統合先の内容をワークスペースへ反映する」）。
-   * `pump()`が`outcome !== 'running'`を検出した回だけ、成功/失敗を問わず呼ぶ
-   * （gitの`finalizeForge`が`succeeded`限定なのとは異なる。§16.20はrunの結果を条件に
-   * していないため、それまでに統合できた分は反映する）。
-   *
-   * 反映前にワークスペース側の変更を検知したら、反映せず警告を残す
-   * （design.md「人の編集を上書きしない」。`reflectIntegrationToWorkspace`自身が判定する）。
-   */
-  private async reflectPseudoWorktree(runId: string): Promise<void> {
-    const live = this.runs.get(runId);
-    const deps = this.deps.pseudoWorktree;
-    if (live === undefined || live.pseudo === undefined || deps === undefined) {
-      return;
-    }
-    const result = await reflectIntegrationToWorkspace(
-      live.repoRoot,
-      live.pseudo.integrationDir,
-      live.pseudo.baseline,
-      live.pseudo.queue.getManifest(),
-      live.pseudo.exclude,
-      deps.fs,
-    );
-    if (!result.ok) {
-      this.deps.log.warn(`[workflow ${runId}] ${result.message}`);
-      live.warnings.push({
-        kind: 'pseudoWorktreeReflectBlocked',
-        taskId: undefined,
-        message: `${result.message}（変更されたパス: ${result.changedPaths.join(', ')}）`,
-      });
-    } else {
-      this.deps.log.info(
-        `[workflow ${runId}] 疑似worktreeの統合結果をワークスペースへ反映しました（${result.appliedPaths.length}件）`,
-      );
-    }
-    this.notify(runId);
-  }
-
-  private async buildBoundary(
-    live: LiveRun,
-    cwd: string,
-  ): Promise<{ boundary: TaskBoundary; warning: string | undefined }> {
-    const result = await buildTaskBoundary([cwd], live.repoRoot, this.deps.git, this.deps.fs);
-    return { boundary: result.boundary, warning: result.gitCommonDirWarning };
-  }
-
   // ---- PR/MR作成（design.md §16.18） ----
 
   /**
@@ -2399,7 +1629,8 @@ export class WorkflowRunner {
    * PATH・認証）が欠けていれば `skipped`（呼び出し側が警告を出し、ローカルのマージだけ
    * 進める。design.md「前提が欠けている場合...ワークフロー自体は止めない」）。
    */
-  private async resolveForgeState(repoRoot: string): Promise<LiveRunForgeState> {
+  /** `rebuildLiveRun`（`runnerRestore.ts`、Issue #147）から`self.resolveForgeState(...)`として呼べるよう`private`を外してある。 */
+  async resolveForgeState(repoRoot: string): Promise<LiveRunForgeState> {
     const forgeDeps = this.deps.forge;
     if (forgeDeps === undefined) {
       return { kind: 'disabled' };
@@ -2442,115 +1673,6 @@ export class WorkflowRunner {
       finalMerge: config.finalMerge,
       baseBranch,
     };
-  }
-
-  /**
-   * タスクのマージを試みる。PR/MRの作成が有効（`forge.kind === 'active'` かつ
-   * `shouldCreateTaskPullRequest`）なら、design.mdが定める順序
-   * （`runTaskPullRequestFlow`。push→push→create→merge+push）で行う。無効なら
-   * 従来どおりローカルの統合worktreeへのマージだけを行う。
-   *
-   * PR/MRの作成（`pushTaskBranch`/`pushIntegrationBranch`/`createPullRequest`）が
-   * 失敗しても、統合ブランチへのローカルのマージ（`mergeAndPushIntegration`）は必ず行う
-   * （`runTaskPullRequestFlow`自身の保証。design.md §16.18「前提が欠けている場合」と同じ
-   * 「ワークフロー自体は止めない」方針）。
-   */
-  private async mergeTaskWithForge(
-    live: LiveRun,
-    runId: string,
-    taskId: string,
-    task: WorkflowTask,
-    integration: { cwd: string; branch: string },
-    taskCwd: string,
-    taskBranch: string,
-  ): Promise<{ merge: MergeTaskResult; pullRequest: PullRequestResult | undefined }> {
-    const forgeDeps = this.deps.forge;
-    const forge = live.forge;
-    if (
-      forgeDeps === undefined ||
-      forge.kind !== 'active' ||
-      !shouldCreateTaskPullRequest(forge.pullRequest)
-    ) {
-      const merge = await this.integrationQueue.mergeTask(
-        integration.cwd,
-        runId,
-        taskId,
-        taskBranch,
-        this.deps.git,
-      );
-      return { merge, pullRequest: undefined };
-    }
-
-    const flow = await runTaskPullRequestFlow({
-      pushTaskBranch: () => pushBranch(this.deps.git, taskCwd, taskBranch),
-      pushIntegrationBranch: () => pushBranch(this.deps.git, integration.cwd, integration.branch),
-      createPullRequest: () =>
-        createPullRequest(
-          { cli: forgeDeps.cli, fs: forgeDeps.fs },
-          {
-            host: forge.host,
-            cwd: taskCwd,
-            base: integration.branch,
-            head: taskBranch,
-            title: buildTaskPullRequestTitle(taskId, task.prompt),
-            body: buildTaskPullRequestBody({
-              prompt: task.prompt,
-              done: task.done,
-              runId,
-              dependsOn: task.dependsOn,
-              issue: task.issue,
-            }),
-          },
-        ),
-      mergeAndPushIntegration: async () => {
-        const merged = await this.integrationQueue.mergeTask(
-          integration.cwd,
-          runId,
-          taskId,
-          taskBranch,
-          this.deps.git,
-        );
-        if (merged.kind === 'success') {
-          const push = await pushBranch(this.deps.git, integration.cwd, integration.branch);
-          if (!push.ok) {
-            this.deps.log.warn(
-              `[workflow ${runId}/${taskId}] 統合ブランチのpushに失敗しました: ${push.message}`,
-            );
-            live.warnings.push({
-              kind: 'forgeFailed',
-              taskId,
-              message: `統合ブランチのpushに失敗しました: ${push.message}`,
-            });
-          }
-        }
-        return merged;
-      },
-    });
-
-    if (!flow.pullRequest.created) {
-      this.deps.log.warn(
-        `[workflow ${runId}/${taskId}] PR/MRの作成に失敗しました（${flow.pullRequest.stage}）: ${flow.pullRequest.message}`,
-      );
-      live.warnings.push({
-        kind: 'forgeFailed',
-        taskId,
-        message: `PR/MRの作成に失敗しました（${flow.pullRequest.stage}）: ${flow.pullRequest.message}`,
-      });
-    } else if (flow.pullRequest.url !== undefined) {
-      this.deps.log.info(
-        `[workflow ${runId}/${taskId}] PR/MRを作成しました: ${flow.pullRequest.url}`,
-      );
-    }
-
-    // design.md §16.11「タスクごとの...PR/MRの番号」・Issue #118。番号とURLだけを持ち帰る
-    // （本文は持ち帰らない）。作成できていても`url`が無い（CLIの出力形式が想定外）場合は
-    // 表示に使えないため記録しない（`else if`と同じ条件）
-    const pullRequest: PullRequestResult | undefined =
-      flow.pullRequest.created && flow.pullRequest.url !== undefined
-        ? { number: parsePullRequestNumberFromUrl(flow.pullRequest.url), url: flow.pullRequest.url }
-        : undefined;
-
-    return { merge: flow.mergeOutcome, pullRequest };
   }
 
   /**
@@ -2791,7 +1913,8 @@ export class WorkflowRunner {
         if (liveTask.usedWorktree) {
           // マージまでを拡張機能の責務にする（design.md §16.17）。ループが終わっただけでは
           // `applyLoopStopReason`が`merging`にしてあるだけなので、実際にマージを試みる
-          void this.startMerge(
+          void startMerge(
+            this,
             runId,
             taskId,
             task,
@@ -2801,7 +1924,7 @@ export class WorkflowRunner {
           );
         } else if (liveTask.usedPseudoWorktree && live.pseudo !== undefined) {
           // 疑似worktree（design.md §16.20）。gitのマージに相当する統合を試みる
-          void this.integratePseudoWorktree(runId, taskId, live.pseudo, liveTask);
+          void integratePseudoWorktree(this, runId, taskId, live.pseudo, liveTask);
         } else {
           // `shared` / 明示`cwd`のタスクは統合ブランチへマージする対象となる専用ブランチを
           // 持たない。マージ済みの成果物が最初から無い（あるいは元々`repoRoot`を直接触って
@@ -2821,340 +1944,34 @@ export class WorkflowRunner {
   // ---- マージ（design.md §16.17） ----
 
   /**
-   * タスクが`merging`になった直後に呼ぶ。未コミットの変更を回収してからマージを試みる。
-   * `onTaskFinished`（通常経路）と`resumeMergeAfterReload`（リロード後の再開）の両方から
-   * 呼ばれるため、`LiveTask`ではなくcwd/branch/originCommitを直接受け取る。
-   */
-  private async startMerge(
-    runId: string,
-    taskId: string,
-    task: WorkflowTask,
-    taskCwd: string,
-    taskBranch: string,
-    originCommit: string,
-  ): Promise<void> {
-    const live = this.runs.get(runId);
-    if (live === undefined) {
-      return;
-    }
-    if (live.integration === undefined) {
-      // 内部矛盾（usedWorktreeなタスクが走っている以上、start()が統合worktreeを
-      // 作っているはず）。安全側でfailedにする
-      this.deps.log.error(`[workflow ${runId}/${taskId}] 統合worktreeが無いためマージできません`);
-      live.runState = markMergeFailed(live.runState, live.def.tasks, taskId);
-      void this.persist(runId);
-      this.notify(runId);
-      this.pump(runId);
-      return;
-    }
-
-    // design.md §16.17「タスク完了時のコミット」2.〜4.
-    const commitResult = await commitUncommittedChangesIfNeeded(taskCwd, taskId, this.deps.git);
-    if (!commitResult.ok) {
-      this.deps.log.error(
-        `[workflow ${runId}/${taskId}] 未コミットの変更の回収に失敗しました: ${commitResult.message}`,
-      );
-      live.runState = markMergeFailed(live.runState, live.def.tasks, taskId);
-      void this.persist(runId);
-      this.notify(runId);
-      this.pump(runId);
-      return;
-    }
-
-    await this.attemptMerge(
-      runId,
-      taskId,
-      task,
-      live.integration,
-      taskCwd,
-      taskBranch,
-      originCommit,
-    );
-  }
-
-  /**
-   * 統合worktreeへ実際にマージを試みる。成功なら`done`、衝突なら衝突解決セッションを
-   * 起動、その他の失敗なら`failed`にする（design.md §16.17「マージ」）。
-   *
-   * PR/MRの作成（design.md §16.18）が有効なら、マージ自体も`mergeTaskWithForge`が
-   * design.mdの定める順序で行う。
-   */
-  private async attemptMerge(
-    runId: string,
-    taskId: string,
-    task: WorkflowTask,
-    integration: { cwd: string; branch: string },
-    taskCwd: string,
-    taskBranch: string,
-    originCommit: string,
-  ): Promise<void> {
-    const live = this.runs.get(runId);
-    if (live === undefined) {
-      return;
-    }
-    const { merge, pullRequest } = await this.mergeTaskWithForge(
-      live,
-      runId,
-      taskId,
-      task,
-      integration,
-      taskCwd,
-      taskBranch,
-    );
-
-    // design.md §16.11「タスクごとの...PR/MRの番号」・Issue #118。PR/MRの作成はマージより
-    // 前の手順（design.md §16.18「作る順序」）なので、マージが失敗・衝突した場合でも
-    // 既に作られたPR/MRのリンクは書き込む。`live.tasks.get(taskId)`はリロード直後に
-    // マージを再開した経路（`resumeMergeAfterReload`）では未定義になりうる
-    // （このウィンドウでセッションを開いていないため）。その場合はこの1回分の結果を
-    // 保持できないが、実行そのものは止めない（安全側）
-    const liveTaskForPr = live.tasks.get(taskId);
-    if (liveTaskForPr !== undefined && pullRequest !== undefined) {
-      liveTaskForPr.pullRequest = pullRequest;
-    }
-
-    if (merge.kind === 'success') {
-      live.runState = markMergeSucceeded(live.runState, live.def.tasks, taskId);
-      this.cleanupWorktreeIfNeeded(live, task, taskId, live.tasks.get(taskId));
-      void this.persist(runId);
-      this.notify(runId);
-      this.pump(runId);
-      return;
-    }
-    if (merge.kind === 'failure') {
-      this.deps.log.error(`[workflow ${runId}/${taskId}] マージに失敗しました: ${merge.message}`);
-      live.runState = markMergeFailed(live.runState, live.def.tasks, taskId);
-      void this.persist(runId);
-      this.notify(runId);
-      this.pump(runId);
-      return;
-    }
-
-    // 衝突。design.md §16.17「コンフリクト」1.「衝突した状態のままにしておく」
-    void this.persist(runId);
-    await this.startMergeResolution(runId, taskId, task, integration, merge, originCommit);
-  }
-
-  /**
-   * 衝突解決セッションを開く（design.md §16.17「コンフリクト」3.）。衝突した状態の
-   * 統合worktreeを`cwd`にし、未解決パスの一覧と、突き合わせる相手のタスクの`prompt`/`done`
-   * をプロンプトに渡す。解決用セッションは依存グラフのノードにはしない（design.md
-   * 「コンフリクト」5.）ため、`live.tasks`ではなく`live.mergeResolutions`で管理する。
-   */
-  private async startMergeResolution(
-    runId: string,
-    taskId: string,
-    task: WorkflowTask,
-    integration: { cwd: string; branch: string },
-    conflict: Extract<MergeTaskResult, { kind: 'conflict' }>,
-    originCommit: string,
-  ): Promise<void> {
-    const live = this.runs.get(runId);
-    if (live === undefined) {
-      return;
-    }
-
-    const baseline = this.deps.readBaseline();
-    const effective = buildEffectiveTaskConfig(task, baseline);
-    // startTask()と同じ最終防御（レビュー指摘: critical 3参照）。衝突解決セッションも
-    // 通常のタスクと同じループ制御・承認判定に従う（design.md §16.17「コンフリクト」5.）
-    if (task.provider === 'claude' && effective.config.approvalMode === 'bypassPermissions') {
-      this.deps.log.error(
-        `[workflow ${runId}/${taskId}] 実効approvalModeがbypassPermissionsのため衝突解決セッションを開始できません`,
-      );
-      await this.abortAndBlock(runId, taskId, integration);
-      return;
-    }
-
-    const otherIds =
-      originCommit !== ''
-        ? await findTaskIdsMergedSince(integration.cwd, runId, originCommit, this.deps.git)
-        : [];
-    const others: MergeResolutionTaskInfo[] = otherIds
-      .filter((id) => id !== taskId)
-      .map((id) => live.def.tasks.find((t) => t.id === id))
-      .filter((t): t is WorkflowTask => t !== undefined)
-      .map((t) => ({ id: t.id, prompt: t.prompt, done: t.done }));
-
-    const host = this.deps.hosts[task.provider];
-    let session: TaskSession;
-    try {
-      session = await host.openTaskSession({
-        cwd: integration.cwd,
-        config: effective.config,
-        sandbox: effective.sandbox,
-      });
-    } catch (e) {
-      const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
-      this.deps.log.error(
-        `[workflow ${runId}/${taskId}] 衝突解決セッションを開始できませんでした: ${message}`,
-      );
-      await this.abortAndBlock(runId, taskId, integration);
-      return;
-    }
-    session.open({ preserveFocus: true });
-    live.mergeResolutions.set(taskId, session);
-
-    const prompt = buildMergeResolutionPrompt(
-      { id: taskId, prompt: task.prompt, done: task.done },
-      others,
-      conflict.unresolvedPaths,
-    );
-
-    // 衝突解決セッションの承認は、通常のタスクの`escalation.ts`（境界・allow/escalate）
-    // ではなく、標準の承認カード（`setApprovalHandler`を設定しない既定挙動）へ委ねる。
-    // タスク境界（`TaskBoundary`）は本来そのタスクのworktree用に作られたもので、統合
-    // worktree（別ディレクトリ）向けに作り直すと境界判定の意味が変わってしまう。安全側
-    // （常に人の承認を要求する）に倒すための単純化であり、最終報告に明記する
-    session.onFinished((reason) => {
-      void this.onMergeResolutionFinished(runId, taskId, task, integration, reason);
-    });
-
-    session.runLoop({
-      initialPrompt: prompt,
-      continuePrompt: `続けてください。終了条件: ${MERGE_RESOLUTION_CONDITION}`,
-      maxIterations: MERGE_RESOLUTION_MAX_ITERATIONS,
-      condition: MERGE_RESOLUTION_CONDITION,
-    });
-    this.notify(runId);
-  }
-
-  /** 衝突解決セッションの結果を受けて、`done`（解決済み）か`blocked`（未解決）かを確定する。 */
-  private async onMergeResolutionFinished(
-    runId: string,
-    taskId: string,
-    task: WorkflowTask,
-    integration: { cwd: string; branch: string },
-    reason: LoopStopReason,
-  ): Promise<void> {
-    const live = this.runs.get(runId);
-    if (live === undefined) {
-      return;
-    }
-    const session = live.mergeResolutions.get(taskId);
-    live.mergeResolutions.delete(taskId);
-    session?.dispose();
-
-    if (reason === 'manual' || reason === 'interrupted') {
-      // 人がタブへ直接介入した。通常のタスクと同じく、このタスク自身の状態は変えず
-      // 実行全体だけを止める設計を踏襲する（design.md §16.5）
-      live.runState = applyLoopStopReason(live.runState, live.def.tasks, '', reason);
-      void this.persist(runId);
-      this.notify(runId);
-      this.pump(runId);
-      return;
-    }
-
-    // design.md §16.17「コンフリクト」4.「宣言だけを信じず`git status`でも確かめる」
-    const resolved =
-      reason === 'done' && (await isMergeResolutionComplete(integration.cwd, this.deps.git));
-    if (resolved) {
-      live.runState = markMergeSucceeded(live.runState, live.def.tasks, taskId);
-      this.cleanupWorktreeIfNeeded(live, task, taskId, live.tasks.get(taskId));
-      void this.persist(runId);
-      this.notify(runId);
-      this.pump(runId);
-      return;
-    }
-
-    if (reason === 'done') {
-      this.deps.log.warn(
-        `[workflow ${runId}/${taskId}] 衝突解決セッションはdoneを宣言しましたが、git上は未解決のままでした`,
-      );
-    }
-    await this.abortAndBlock(runId, taskId, integration);
-  }
-
-  /** マージを巻き戻して`blocked`に確定させる共通処理（design.md §16.17「コンフリクト」7.）。 */
-  private async abortAndBlock(
-    runId: string,
-    taskId: string,
-    integration: { cwd: string; branch: string },
-  ): Promise<void> {
-    const live = this.runs.get(runId);
-    if (live === undefined) {
-      return;
-    }
-    const abort = await this.integrationQueue.abortMerge(integration.cwd, this.deps.git);
-    if (!abort.ok) {
-      this.deps.log.warn(
-        `[workflow ${runId}/${taskId}] マージの巻き戻しに失敗しました: ${abort.message}`,
-      );
-    }
-    live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
-    void this.persist(runId);
-    this.notify(runId);
-    this.pump(runId);
-  }
-
-  /**
    * `blocked`のタスクを再マージする（design.md §16.17「Viewから人が解決したうえで
    * 『再マージ』を指示できる」）。Viewからの呼び出しの配線は別Issue（このIssueは
    * `src/view/`を対象外にしている）だが、runner.ts側の入口はここに用意しておく。
    *
-   * タスクのworktree・ブランチはこのウィンドウのライブなセッション（`live.tasks`）が
-   * あればそれを、無ければ永続化された値（リロード後、まだ再実行していない場合）を使う。
+   * 実体は`runnerMerge.ts`（マージと衝突解決、Issue #147）。
    */
   retryMerge(runId: string, taskId: string): boolean {
-    const live = this.runs.get(runId);
-    if (live === undefined || live.integration === undefined) {
-      return false;
-    }
-    const task = live.def.tasks.find((t) => t.id === taskId);
-    if (task === undefined) {
-      return false;
-    }
-    const liveTask = live.tasks.get(taskId);
-    const persistedTask = this.deps.store.find(runId)?.tasks[taskId];
-    const branch = liveTask?.branch ?? persistedTask?.branch;
-    const cwd = liveTask?.cwd ?? persistedTask?.cwd;
-    if (branch === undefined || branch === '' || cwd === undefined) {
-      return false;
-    }
-    const next = retryMergeState(live.runState, taskId);
-    if (next === live.runState) {
-      return false;
-    }
-    live.runState = next;
-    // `pump()`は`live.finished`が立っていると即座に戻ってしまう（design.md §16.5の終了判定を
-    // 一度確定させたら動かさない設計）。`blocked`はrunの終了判定（`getRunOutcome`）を`running`
-    // 以外へ倒すため、`retryTask`（手動の再実行）が同じ理由で`finished`を解除しているのと
-    // 同様、ここでも再開の起点として明示的に解除する
-    live.finished = false;
-    void this.persist(runId);
-    this.notify(runId);
-    void this.startMerge(runId, taskId, task, cwd, branch, liveTask?.originCommit ?? '');
-    return true;
+    return retryMerge(this, runId, taskId);
   }
 
+  /**
+   * `onTaskFinished`からの呼び出しをメソッドの形で残してある（`runner.test.ts`が
+   * `WorkflowRunner.prototype.cleanupWorktreeIfNeeded`をスパイして「interrupted/manualでは
+   * 呼ばれないこと」を検証しているため。実体は`runnerMerge.ts`、Issue #147）。
+   */
   private cleanupWorktreeIfNeeded(
     live: LiveRun,
     task: WorkflowTask,
     taskId: string,
     liveTask: LiveTask | undefined,
   ): void {
-    if (liveTask === undefined || !liveTask.usedWorktree) {
-      return;
-    }
-    const finalState = live.runState.tasks.get(taskId)?.state;
-    if (finalState === undefined || !shouldRemoveWorktree(task.cleanup, finalState)) {
-      return;
-    }
-    const retry = retrySuffixOf(live.runState.tasks.get(taskId)?.retryCount);
-    void this.deps.worktreeQueue
-      .remove(live.repoRoot, live.runId, taskId, retry, this.deps.git)
-      .then((result) => {
-        if (!result.ok) {
-          this.deps.log.warn(
-            `[workflow ${live.runId}/${taskId}] worktreeの撤去に失敗しました: ${result.message}`,
-          );
-        }
-      });
+    cleanupWorktreeIfNeeded(this, live, task, taskId, liveTask);
   }
 
   // ---- 永続化 ----
 
-  private async persist(runId: string): Promise<void> {
+  /** 分割後のファイル（Issue #147）から`self.persist(...)`として呼べるよう`private`を外してある。 */
+  async persist(runId: string): Promise<void> {
     const live = this.runs.get(runId);
     if (live === undefined) {
       return;
@@ -3202,7 +2019,8 @@ export class WorkflowRunner {
   }
 }
 
-function issue(message: string, taskIds: string[] = []): WorkflowIssue {
+/** `runnerWorkingDirectory.ts`（Issue #147）からも使うため`export`する。 */
+export function issue(message: string, taskIds: string[] = []): WorkflowIssue {
   return { taskIds, message };
 }
 
@@ -3213,7 +2031,7 @@ function issue(message: string, taskIds: string[] = []): WorkflowIssue {
  * GitHubは`.../pull/<n>`、GitLabは`.../-/merge_requests/<n>`の形式で、いずれも末尾が
  * 10進数になる。取り出せなければ`undefined`（番号なし・URLだけは引き続き表示に使える）。
  */
-function parsePullRequestNumberFromUrl(url: string): number | undefined {
+export function parsePullRequestNumberFromUrl(url: string): number | undefined {
   const match = /\/(\d+)\/?$/u.exec(url);
   if (match === null) {
     return undefined;
@@ -3233,6 +2051,6 @@ function parsePullRequestNumberFromUrl(url: string): number | undefined {
  * 1回目の再試行が `-retry0`）。1つずらして渡す必要がある
  * （レビュー指摘: high。テスト追加で発覚したオフバイワン）。
  */
-function retrySuffixOf(retryCount: number | undefined): number | undefined {
+export function retrySuffixOf(retryCount: number | undefined): number | undefined {
   return retryCount !== undefined && retryCount > 0 ? retryCount - 1 : undefined;
 }
