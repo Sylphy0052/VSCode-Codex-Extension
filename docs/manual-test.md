@@ -4,6 +4,30 @@
 
 対象CLI: Codex CLI 0.147.0 / Claude Code 2.1.227（確認時の版を各回の記録に残す）。`codex --version` / `claude --version` で確かめる。
 
+## 統合テストで自動化した範囲
+
+`@vscode/test-electron` による統合テスト（`test/integration/`）を導入した。WSL（xvfb-run
+経由）で実際にVSCodeをダウンロード・起動し、拡張機能ホスト上でmochaテストが走ることを
+確認済み。実行方法:
+
+```bash
+npm run test:integration          # ディスプレイのある環境（VSCode上のターミナル等）
+npm run test:integration:xvfb     # ヘッドレスLinux/WSL（xvfb-runで仮想ディスプレイを用意）
+```
+
+**実際に自動化できたのは土台部分だけ**（`test/integration/extension.test.ts` の拡張機能有効化・
+コマンド登録確認、`test/integration/configuration.test.ts` の設定の読み書き。計6件、実行して
+全件passを確認済み）。履歴一覧（TreeView、docs/manual-test.md H群）を狙った
+`test/integration/sessionHistory.test.ts` も書いたが、実CLIを呼ばせない制約と
+`ProviderRegistry.available()`の仕様（実行ファイルを解決できないプロバイダは一覧から
+除外される）が噛み合わず、**現状は`test.skip`で実行されない**。詳細と代替案の検証結果は
+同ファイル冒頭のコメントを参照。該当ケースには個別に注記していない代わりに、この節を
+状況の一次情報とする。
+
+`npm run check`（commit前チェック）には含めていない。実VSCodeのダウンロードと起動が
+毎回走るため手元・CIとも重く、既定の高速フィードバックループを崩すと判断したため。
+必要なときに明示的に呼ぶ運用とする。
+
 ## 進め方
 
 1. 下の「準備」を済ませる
@@ -1154,22 +1178,26 @@ design.md §14.29参照。control_requestに専用の経路が無いため、拡
 - 操作: 新しい会話を1往復だけして、履歴を更新する
 - 期待: 要約名が付く前でも一覧に出る。表示名は最初の指示
 - 確認: Codexの `session_index.jsonl` は要約名の確定後に書かれるため、indexだけを見ていると出てこない（設計書 §4.2.1）
+- 自動化を試みたが未達（`test/integration/sessionHistory.test.ts`、現状`test.skip`で実行されない）: 実CLIを呼ばせないために`codex.executablePath`を存在しないパスへ固定すると`ProviderRegistry.available()`が対象プロバイダごと一覧から除外してしまい、履歴一覧が常に空になる。無害なスタブへ差し替える代替案は`AppServerClient`の書き込み時に未捕捉の`EPIPE`が発生し拡張機能ホストごと巻き込むことを確認した（詳細はテストファイル冒頭のコメント）。この手順は引き続き手動で確認する
 
 ### H-01 プロバイダ混在の一覧
 
 - 操作: CodexとClaude Codeのセッションをそれぞれ作ってから履歴を見る
 - 期待: 1つの一覧にマージされ、それぞれのアイコン/表示で区別できる。並び順が時刻降順で破綻していない
+- 自動化を試みたが未達（`test/integration/sessionHistory.test.ts`、現状`test.skip`）。理由はH-00の注記を参照
 
 ### H-02 対応しない操作が隠れている
 
 - 操作: Claude Codeのセッションを右クリック
 - 期待: `archive` / `unarchive` / `delete` / `セッション名を変更` / `会話を開いて分岐する` がメニューに出ない（`contextValue` による出し分け）
 - 確認: Codexのセッションでは出る
+- 自動化を試みたが未達（`test/integration/sessionHistory.test.ts`、現状`test.skip`）。理由はH-00の注記を参照
 
 ### H-03 表示範囲の切り替え
 
 - 操作: `全ワークスペースを表示`（`codex.showAllSessions`）/ `このワークスペースのみ表示`（`codex.showWorkspaceSessions`）
 - 期待: 一覧が切り替わる。別フォルダのセッションが出入りする
+- 自動化を試みたが未達（`test/integration/sessionHistory.test.ts`、現状`test.skip`）。理由はH-00の注記を参照
 
 ### H-04 archive / unarchive / delete
 
@@ -1196,12 +1224,14 @@ design.md §14.29参照。control_requestに専用の経路が無いため、拡
 
 - 操作: 別のターミナルでCLIから直接セッションを作る / archiveする
 - 期待: ファイル監視でTreeViewが追従する。開いているタブはそのまま残る（既知の制約）
+- 自動化を試みたが未達（`test/integration/sessionHistory.test.ts`、現状`test.skip`）。理由はH-00の注記を参照。「開いているタブがそのまま残る」の部分はいずれにせよ実CLIでの会話タブが要るため対象外
 
 ### H-08 app-serverに繋がっているときの履歴取得（issue #45）
 
 - 操作: 通常の設定のまま（`codex.executablePath` は未変更）、履歴ビューを更新する（`Agent: 更新` またはタイトルバーの更新アイコン）
 - 期待: これまでどおり一覧が出る。表示名・cwd・更新時刻・archived状態が崩れていない
 - 確認: ログ（`Agent: ログを表示`）に「thread/list を使わずファイル読みへ退避しました」という警告が**出ない**（`thread/list` を使えている）
+- 備考: 実際のCodex CLI（`app-server`）が繋がることの確認そのものが目的のため、実CLIを避ける統合テストの対象外。手動のまま残す
 
 ### H-09 app-serverに繋がらないときの履歴取得（退避、issue #45）
 
@@ -1210,6 +1240,7 @@ design.md §14.29参照。control_requestに専用の経路が無いため、拡
 - 期待: 履歴が空にならず、これまでどおりファイル読みでの一覧が出る（`thread/list` が失敗しても表示は失われない）
 - 確認: ログに「thread/list を使わずファイル読みへ退避しました」という警告と失敗理由が出る
 - 後始末: `codex.executablePath` を元に戻す
+- 自動化を試みたが未達（`test/integration/sessionHistory.test.ts`、現状`test.skip`）。理由はH-00の注記を参照。ログメッセージの文言そのものの確認（OutputChannelの内容取得手段が無い）はいずれにせよ手動のまま残る
 
 ## A群: 作業記録（日報連携）
 

@@ -1,11 +1,15 @@
 .vscode/**
+.vscode-test/**
+.vscode-test.mjs
 .git/**
 .gitignore
 .prettierrc.json
 eslint.config.mjs
 tsconfig.json
+tsconfig.integration.json
 src/**
 test/**
+out/**
 scripts/**
 docs/**
 node_modules/**

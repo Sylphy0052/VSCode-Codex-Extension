@@ -1,0 +1,18 @@
+{
+  // test/integration（@vscode/test-electron）専用のコンパイル設定。
+  // 実VSCode拡張機能ホスト上でmocha経由で読み込むため、tsc --noEmitのtsconfig.json
+  // （src/**・test/unit/** 用）とは別にJSへ出力する。ユニットテストのtypecheckへ
+  // mochaのグローバル型（describe/it等）を混ぜないよう分離している（tsconfig.json側の
+  // excludeも参照）。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node10",
+    "types": ["node", "mocha"],
+    "noEmit": false,
+    "outDir": "out/integration",
+    "rootDir": "test/integration"
+  },
+  "include": ["test/integration/**/*.ts"],
+  "exclude": []
+}

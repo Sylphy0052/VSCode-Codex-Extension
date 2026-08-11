@@ -15,18 +15,20 @@ npm run check     # lint + typecheck + test
 
 ## npmスクリプト
 
-| コマンド            | 内容                                            |
-| ------------------- | ----------------------------------------------- |
-| `npm run build`     | esbuildで `dist/extension.js` にバンドルする    |
-| `npm run watch`     | sourcemap付きで監視ビルドする                   |
-| `npm run typecheck` | `tsc --noEmit`                                  |
-| `npm run lint`      | `eslint .`                                      |
-| `npm run format`    | Prettierで整形する                              |
-| `npm test`          | `vitest run`                                    |
-| `npm run check`     | 上記のlint / typecheck / testをまとめて実行する |
-| `npm run package`   | ビルドしてvsixを生成する                        |
+| コマンド                        | 内容                                                                |
+| ------------------------------- | ------------------------------------------------------------------- |
+| `npm run build`                 | esbuildで `dist/extension.js` にバンドルする                        |
+| `npm run watch`                 | sourcemap付きで監視ビルドする                                       |
+| `npm run typecheck`             | `tsc --noEmit`                                                      |
+| `npm run lint`                  | `eslint .`                                                          |
+| `npm run format`                | Prettierで整形する                                                  |
+| `npm test`                      | `vitest run`（`test/unit/**`）                                      |
+| `npm run test:integration`      | 実VSCode上の統合テスト（`test/integration/**`）。ディスプレイが要る |
+| `npm run test:integration:xvfb` | 同上。ヘッドレスLinux/WSLでxvfb-run経由で実行する                   |
+| `npm run check`                 | lint / typecheck / testをまとめて実行する（integrationは含まない）  |
+| `npm run package`               | ビルドしてvsixを生成する                                            |
 
-`scripts/check.sh` はcommit前に全緑であることを必須とする。緑にするためにテストを弱めたりskipしたりしない。
+`scripts/check.sh` はcommit前に全緑であることを必須とする。緑にするためにテストを弱めたりskipしたりしない。`test:integration`は実VSCodeのダウンロード・起動が要り重いため`check.sh`には含めていない。必要なときに明示的に呼ぶ。
 
 ## デバッグ実行
 
@@ -51,7 +53,8 @@ src/
               （Webviewのスクリプトとスタイルは *Script.ts / *Styles.ts に分け、
                構文と hidden の打ち消しをテストで確かめる）
   util/       NDJSONなど横断的な小物
-test/unit/    上記のテスト（vscodeモジュールに非依存）
+test/unit/        上記のテスト（vscodeモジュールに非依存、Vitest）
+test/integration/ 実VSCode上の統合テスト（@vscode/test-electron、Mocha）
 docs/design.md  設計書
 ```
 
@@ -92,7 +95,12 @@ CLI固有の事情（ファイル配置・引数・セッションIDの決まり
 - Arrange-Act-Assertで組み、異常系（壊れた行・欠損フィールド・未知のenum値）を必ず1件は入れる
 - パーサと引数組み立ては純粋関数として切り出し、実CLIを起動せずにテストする
 
-実VSCodeが要る領域（コマンド登録・TreeView・タブ復元・チャット画面の対話）は現状ユニットテストの対象外で、F5による手動確認に頼っている。手順とチェックリストは [docs/manual-test.md](docs/manual-test.md) にある。
+実VSCodeが要る領域のうち、**実CLIプロセスを使わずに確認できるもの**は `test/integration/`（`@vscode/test-electron`）へ切り出す土台を作った。`npm run test:integration` / `npm run test:integration:xvfb` で実行する。書き方はVitestのユニットテストと違い、実VSCodeの拡張機能ホスト上でMochaが動く点に注意（`describe`/`it`ではなく`suite`/`test`）。
+
+- `vscode.extensions.getExtension('Sylphy0052.vscode-codex-extension')` で拡張機能を取得し、`activate()` の戻り値（`ExtensionTestApi`）経由で`view/**`側の実インスタンス（`SessionTreeProvider`）へアクセスする。VSCodeに依存する層はユニットテストからimportできないため（`docs/design.md` §11）、テスト専用の最小限の口として用意してある
+- 実CLI（codex/claude）は絶対に呼ばない。`test/integration/fixtures/setup.mjs` が使い捨てのVSCodeプロファイルを作り、`codex.executablePath` / `claude.executablePath` を存在しない絶対パスへ固定した上で、`codex.codexHome` / `claude.configDir` を一時ディレクトリへ向けている。ユーザーの実環境（`~/.codex` `~/.claude` 実際のVSCodeユーザー設定）には一切触れない
+- **現状自動化できているのは拡張機能の有効化・コマンド登録・設定の読み書き**（`extension.test.ts` / `configuration.test.ts`）だけ。履歴一覧（TreeView）を狙った`sessionHistory.test.ts`は、`codex.executablePath`を存在しないパスに固定すると`ProviderRegistry.available()`が対象プロバイダを一覧からまるごと除外してしまい一覧が空になる一方、無害なスタブへ差し替えると`AppServerClient`の書き込み時に未捕捉の`EPIPE`が発生し他のテストまで巻き込んで失敗することを確認したため、現状`test.skip`のまま残している（詳細は同ファイル冒頭のコメント）
+- Webviewの中身・承認カード・タブ復元・履歴一覧など、実CLIとの対話が要る範囲、および上記の理由で自動化に至らなかった範囲は引き続きF5による手動確認に頼っている。手順とチェックリストは [docs/manual-test.md](docs/manual-test.md) にある
 
 ## 変更を入れるときの流れ
 
