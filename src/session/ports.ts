@@ -32,6 +32,41 @@ export interface FileSystemPort {
 }
 
 /**
+ * メモリ追記（入力欄の行頭 `#`、issue #6/#144）専用の読み取り口。
+ *
+ * 共有の `FileSystemPort.readTextFile` は「読めなければ無い扱い」で他の呼び出し元
+ * （`commandCatalog` 等）には正しいが、メモリ追記でこれを使うと、ENOENT以外の理由
+ * （EACCES/EBUSY/EISDIR等）で読めなかった場合も「ファイルが無い」と誤認し、追記のつもりで
+ * 書いた `- <ノート>\n` だけの本文が既存のCLAUDE.mdを丸ごと上書きしてしまう（issue #144）。
+ * 共有ポートの挙動はそのまま（影響範囲が広いため）にし、メモリ追記の経路だけこちらを使う。
+ */
+export interface MemoryFileSystemPort {
+  /** ファイル全体をUTF-8で読む。ENOENT（存在しない）なら `undefined`、それ以外の例外は投げる。 */
+  readStrict(filePath: string): Promise<string | undefined>;
+  /**
+   * `filePath` がシンボリックリンクかどうか、リンクなら実体の絶対パスを解決できたかを判別する
+   * （issue #144）。判定・解決のどちらも失敗させず、常に `SymlinkResolution` を返す
+   * （追記先の確認自体は失敗させない）。**例外を投げない契約**（呼び出し側が防御的にtry/catchで
+   * 包むことを妨げないが、既定実装はここで完結させる）。
+   */
+  resolveSymlinkTarget(filePath: string): Promise<SymlinkResolution>;
+}
+
+/**
+ * `MemoryFileSystemPort.resolveSymlinkTarget` の戻り値（issue #144）。
+ *
+ * 判別可能ユニオンにして「シンボリックリンクでない」と「シンボリックリンクだが実体パスを
+ * 特定できない」を区別できるようにする。後者を前者と区別せず `undefined` 1種類で表していたのが
+ * 脆弱性だった（壊れたリンク・循環参照・権限不足で`fs.realpath`が失敗すると「リンクでない」
+ * ケースと見分けが付かず、確認ダイアログにも会話記録にも警告が出ないまま
+ * `vscode.workspace.fs.writeFile` がリンクを追従して任意のパスへ書き込んでいた）。
+ */
+export type SymlinkResolution =
+  | { kind: 'not-symlink' }
+  | { kind: 'resolved'; target: string }
+  | { kind: 'unresolved' };
+
+/**
  * `thread/list` を叩く口。SessionStoreはこれを介してのみapp-serverを知る
  * （app-serverの起動・JSON-RPC自体はAppServerClientの責務）。
  *

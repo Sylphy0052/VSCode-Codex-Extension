@@ -68,7 +68,7 @@ import { ProviderRegistry } from './provider/registry';
 import type { AgentProvider } from './provider/types';
 import { createLogger, type Logger } from './log';
 import { nodeCommandRunner as nodeAccountCommandRunner } from './process/commandRunner';
-import { nodeFileSystem } from './session/nodeFileSystem';
+import { nodeFileSystem, nodeMemoryFileSystem } from './session/nodeFileSystem';
 import { nodeFileScan } from './session/nodeFileScan';
 import { FileMentionCatalog } from './provider/fileMentions';
 import { InMemoryMetaCache } from './session/ports';
@@ -230,6 +230,9 @@ export function activate(context: vscode.ExtensionContext): void {
     (activity) => recordActivity({ ...activity, source: 'claude-code' }),
     (usage) => usageBar.updateClaude(usage),
     isTaskManagedThread,
+    // メモリ追記（issue #6/#144）専用の読み取り口と、前回選んだ追記先の記憶先
+    nodeMemoryFileSystem,
+    context.workspaceState,
   );
   context.subscriptions.push(claudeChat);
 

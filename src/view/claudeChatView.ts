@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { basename } from 'node:path';
 import * as vscode from 'vscode';
 import { isApprovalDecision, type ApprovalDecision } from '../appserver/approvals';
 import { isOpenableSearchUrl, type ChatState, type ChatUsage } from '../appserver/chatState';
@@ -10,7 +11,8 @@ import { currentWorkspaceFolder, readClaudeConfig, workspaceFolderPaths } from '
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
-import type { FileSystemPort } from '../session/ports';
+import type { FileSystemPort, MemoryFileSystemPort, SymlinkResolution } from '../session/ports';
+import { nodeMemoryFileSystem } from '../session/nodeFileSystem';
 import { ClaudeUsageProbe } from '../claude/usageProbe';
 import { CommandCatalog } from '../provider/commandCatalog';
 import type { SlashCommand } from '../provider/slashCommands';
@@ -39,10 +41,16 @@ import {
 import type { FileMentionCatalog } from '../provider/fileMentions';
 import {
   appendMemoryLine,
-  resolveProjectMemoryFile,
+  buildProjectMemoryCandidates,
+  describeMemoryAppendResult,
+  MEMORY_LAST_SELECTED_PATH_KEY,
+  orderMemoryCandidates,
   resolveUserMemoryFile,
   routeInputMode,
+  symlinkResolutionEquals,
   type InputModeCall,
+  type MemoryCandidate,
+  type MemoryModeMemento,
 } from '../provider/inputModes';
 import { readPersistedThreadId } from './panelState';
 import { CLAUDE_PERMISSION_MODES } from '../claude/types';
@@ -175,6 +183,21 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
      * `restorePanel` の対象から外す（design.md §16.10の7）。
      */
     private readonly isTaskManagedThread: (sessionId: string) => boolean = () => false,
+    /**
+     * メモリ追記（issue #6/#144）専用の読み取り口。ENOENT以外の例外は投げる・
+     * シンボリックリンクの実体パスを解決する、の2つを共有の `FileSystemPort` から
+     * 切り出したもの（`src/session/ports.ts` を参照）。既定はNode実装。
+     */
+    private readonly memoryFs: MemoryFileSystemPort = nodeMemoryFileSystem,
+    /**
+     * 直前に選んだメモリ追記先を覚えておく口（issue #144）。`vscode.Memento` と構造的に
+     * 一致するため `context.workspaceState` をそのまま渡せる（`extension.ts` 参照）。
+     * 既定は何も覚えない no-op（テスト等でワークスペースを想定しない呼び出しでも壊れない）。
+     */
+    private readonly memoryMemento: MemoryModeMemento = {
+      get: (_key, defaultValue) => defaultValue,
+      update: () => Promise.resolve(),
+    },
   ) {
     this.catalog = new CommandCatalog(fs);
     this.usageProbe = new ClaudeUsageProbe(claudePath, log);
@@ -956,56 +979,142 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
   }
 
   /**
-   * 内容をメモリ（CLAUDE.md）へ追記する（issue #6）。
+   * 内容をメモリ（CLAUDE.md）へ追記する（issue #6、issue #144で安全性を強化）。
    *
-   * 追記先（プロジェクト / ユーザー）を選ばせ、内容と追記先を確認してから書き込む。
+   * 追記先を選ばせ（各workspaceFolder + ユーザー、`resolveMemoryCandidates`）、内容・追記先
+   * （シンボリックリンクなら実体パスも、実体パスが特定できなければ警告も）を確認してから
+   * 書き込む。読み取りに`readStrict`（メモリ追記専用、ENOENT以外は投げる）を使うのは、
+   * 既存ファイルの読み込みに失敗したときに「無い」と誤認して追記のつもりで上書きするのを
+   * 防ぐため（issue #144の核心）。書き込み直前にシンボリックリンクの判定を取り直し、
+   * 確認ダイアログを見せた時点の結果と食い違っていれば書き込みを中止する（TOCTOU対策。
+   * 確認からユーザー応答までは不定長で、その間にリンク先が変わりうる）。
    * 書き込み後は「どこに書いたか」を会話に1行残す（受入基準）。
    */
   private async runMemoryInputMode(entry: ClaudePanel, content: string): Promise<void> {
-    const projectPath = await this.resolveProjectMemoryPath(entry.cwd);
-    const userPath = resolveUserMemoryFile(this.claudeHome);
+    const candidates = await this.resolveMemoryCandidates(entry.cwd);
     const choice = await vscode.window.showQuickPick(
-      [
-        { label: 'プロジェクト', detail: projectPath, path: projectPath },
-        { label: 'ユーザー', detail: userPath, path: userPath },
-      ],
+      candidates.map((c) => ({
+        label: c.label,
+        description: c.exists ? '既存' : '新規作成',
+        detail: c.path,
+        candidate: c,
+      })),
       { title: `メモリへ追記: ${content}`, placeHolder: '追記先を選んでください' },
     );
     if (choice === undefined) {
       return;
     }
-    if (!(await confirmMemoryAppend(content, choice.path))) {
+    // 書き込み先はQuickPickが列挙した候補のパスに限る（パストラバーサルの入口を作らない。issue #144）
+    const targetPath = choice.candidate.path;
+    const confirmedSymlink = await this.resolveSymlinkTargetSafely(targetPath);
+
+    if (!(await confirmMemoryAppend(content, targetPath, confirmedSymlink))) {
+      return;
+    }
+
+    // TOCTOU対策: モーダル確認（ユーザー応答待ちで不定長）の間にリンク先が変わりうるため、
+    // 書き込み直前に取り直し、確認時に見せた結果と食い違えば中止する（issue #144）。
+    const symlinkAtWrite = await this.resolveSymlinkTargetSafely(targetPath);
+    if (!symlinkResolutionEquals(confirmedSymlink, symlinkAtWrite)) {
+      this.reportError(
+        new Error(
+          `追記先の状態が確認時から変わったため、書き込みを中止しました: ${targetPath}。もう一度操作しなおしてください。`,
+        ),
+      );
       return;
     }
 
     let existing: string | undefined;
     try {
-      existing = await this.fs.readTextFile(choice.path);
+      existing = await this.memoryFs.readStrict(targetPath);
     } catch (e) {
+      // ENOENT以外の理由で読めなかった。「無い」と誤認して既存の内容を消さないよう、
+      // ここで打ち切って書き込まない（issue #144の受入基準）
       this.reportError(e);
       return;
     }
     const next = appendMemoryLine(existing, content);
     try {
-      await vscode.workspace.fs.writeFile(vscode.Uri.file(choice.path), Buffer.from(next, 'utf8'));
+      await vscode.workspace.fs.writeFile(vscode.Uri.file(targetPath), Buffer.from(next, 'utf8'));
     } catch (e) {
       this.reportError(e);
       return;
     }
+    // 追記自体は既に成功しているため、記憶の失敗で処理全体は止めない。ただし黙って握り潰さず
+    // 報告する（`src/orchestrator/runStore.ts` は同型の`update`を常に`await`しており、
+    // fire-and-forgetのまま放置しない流儀に揃える。issue #144レビュー指摘）。
+    try {
+      await this.memoryMemento.update(MEMORY_LAST_SELECTED_PATH_KEY, targetPath);
+    } catch (e) {
+      this.reportError(e);
+    }
     entry.session.noteLocalEvent(
       `memoryAppend:${randomUUID()}`,
-      `メモリへ追記しました: ${choice.path}`,
+      describeMemoryAppendResult(targetPath, symlinkAtWrite),
     );
   }
 
   /**
-   * プロジェクト側のメモリ追記先を解決する（`resolveProjectMemoryFile` を参照）。
-   * 存在確認は「読めるか」で行う。専用のstat呼び出しを増やさないため。
+   * `this.memoryFs.resolveSymlinkTarget` を安全に呼ぶ。
+   *
+   * `MemoryFileSystemPort.resolveSymlinkTarget` はJSDoc上「例外を投げない」契約で、既定実装
+   * （`nodeMemoryFileSystem`）もそのとおりだが、`memoryFs` はテストで差し替え可能な口のため、
+   * 契約違反があっても追記処理全体を落とさず、実体パスが分からない扱いへ倒す
+   * （防御的プログラミング。issue #144レビュー指摘）。
    */
-  private async resolveProjectMemoryPath(cwd: string): Promise<string> {
-    const rootExists = (await this.fs.readTextFile(`${cwd}/CLAUDE.md`)) !== undefined;
-    const dotClaudeExists = (await this.fs.readTextFile(`${cwd}/.claude/CLAUDE.md`)) !== undefined;
-    return resolveProjectMemoryFile(cwd, rootExists, dotClaudeExists);
+  private async resolveSymlinkTargetSafely(filePath: string): Promise<SymlinkResolution> {
+    try {
+      return await this.memoryFs.resolveSymlinkTarget(filePath);
+    } catch (e) {
+      this.reportError(e);
+      return { kind: 'unresolved' };
+    }
+  }
+
+  /**
+   * メモリ追記先の候補を列挙する（issue #144）。
+   *
+   * プロジェクト側は各workspaceFolderごとに1件出す（マルチルートワークスペースで
+   * どのフォルダのCLAUDE.mdか分からない問題への対処、受入基準）。加えて、この画面の
+   * 実際の作業ディレクトリ（`fallbackCwd`。タスクのworktree等でworkspaceFolderと
+   * 一致しないことがある）がworkspaceFolderに含まれていなければ、それも候補へ足す
+   * （従来どおりworktree自身のCLAUDE.mdへ追記できるようにするため）。
+   * 存在確認は共有の `FileSystemPort.readTextFile`（読めなければ無い扱いでよい。
+   * ここではラベル表示にしか使わず、書き込み判断には使わない）で行う。
+   */
+  private async resolveMemoryCandidates(fallbackCwd: string): Promise<MemoryCandidate[]> {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    const roots = folders.map((f) => ({ name: f.name, cwd: f.uri.fsPath }));
+    if (!roots.some((r) => r.cwd === fallbackCwd)) {
+      roots.push({ name: basename(fallbackCwd), cwd: fallbackCwd });
+    }
+
+    const projectInputs = await Promise.all(
+      roots.map(async (r) => {
+        const rootExists = (await this.fs.readTextFile(`${r.cwd}/CLAUDE.md`)) !== undefined;
+        const dotClaudeExists = (await this.fs.readTextFile(`${r.cwd}/.claude/CLAUDE.md`)) !== undefined;
+        return {
+          name: r.name,
+          cwd: r.cwd,
+          rootClaudeMdExists: rootExists,
+          dotClaudeMdExists: dotClaudeExists,
+        };
+      }),
+    );
+    const projectCandidates = buildProjectMemoryCandidates(projectInputs);
+
+    const userPath = resolveUserMemoryFile(this.claudeHome);
+    const userCandidate: MemoryCandidate = {
+      label: 'ユーザー',
+      path: userPath,
+      exists: (await this.fs.readTextFile(userPath)) !== undefined,
+    };
+
+    const lastSelected = this.memoryMemento.get<string | undefined>(
+      MEMORY_LAST_SELECTED_PATH_KEY,
+      undefined,
+    );
+    return orderMemoryCandidates([...projectCandidates, userCandidate], lastSelected);
   }
 
   /**
