@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_OUTPUT_CHARS,
   addApproval,
   appendNotice,
   applyEvent,
   buildContextUsage,
+  capOutput,
   initialChatState,
   normalizeItem,
   removeApproval,
@@ -556,5 +558,91 @@ describe('appendNotice', () => {
   it('別のidなら並べる', () => {
     const first = appendNotice(initialChatState, 'settings:1', 'モデル');
     expect(appendNotice(first, 'settings:2', '承認方法').items).toHaveLength(2);
+  });
+});
+
+describe('capOutput', () => {
+  it('上限までなら手を付けない', () => {
+    expect(capOutput('abc')).toEqual({ text: 'abc', truncated: false });
+  });
+
+  it('上限を超えたら末尾を残して先頭を捨てる', () => {
+    const text = 'x'.repeat(MAX_OUTPUT_CHARS) + 'tail';
+    const capped = capOutput(text);
+    expect(capped.truncated).toBe(true);
+    expect(capped.text).toHaveLength(MAX_OUTPUT_CHARS);
+    expect(capped.text.endsWith('tail')).toBe(true);
+  });
+
+  it('切り詰めても印を本文へ混ぜない（コピーがそのまま使える）', () => {
+    const capped = capOutput('y'.repeat(MAX_OUTPUT_CHARS + 10));
+    expect(capped.text).toMatch(/^y+$/);
+  });
+});
+
+describe('applyEvent / item/commandExecution/outputDelta', () => {
+  const started = (): ChatState =>
+    applyEvent(initialChatState, 'item/started', {
+      turnId: TURN,
+      item: { id: 'cmd_1', type: 'commandExecution', command: 'ls -R /', status: 'inProgress' },
+    });
+
+  it('出力を追記して伸ばす', () => {
+    const state = feed(started(), [
+      ['item/commandExecution/outputDelta', { itemId: 'cmd_1', delta: 'one\n' }],
+      ['item/commandExecution/outputDelta', { itemId: 'cmd_1', delta: 'two\n' }],
+    ]);
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]?.text).toBe('one\ntwo\n');
+    expect(state.items[0]?.detail).toBe('ls -R /');
+  });
+
+  it('itemが先に無くてもコマンドの項目として作る', () => {
+    const state = applyEvent(initialChatState, 'item/commandExecution/outputDelta', {
+      itemId: 'cmd_9',
+      delta: 'hello',
+    });
+    expect(state.items[0]).toMatchObject({ id: 'cmd_9', kind: 'commandExecution', text: 'hello' });
+  });
+
+  it('itemIdやdeltaが欠けていれば何もしない', () => {
+    const state = started();
+    expect(applyEvent(state, 'item/commandExecution/outputDelta', { delta: 'x' })).toBe(state);
+    expect(applyEvent(state, 'item/commandExecution/outputDelta', { itemId: 'cmd_1' })).toBe(state);
+  });
+
+  it('上限を超えた出力は末尾を残して切り詰める', () => {
+    const state = applyEvent(started(), 'item/commandExecution/outputDelta', {
+      itemId: 'cmd_1',
+      delta: 'z'.repeat(MAX_OUTPUT_CHARS + 100),
+    });
+    expect(state.items[0]?.text).toHaveLength(MAX_OUTPUT_CHARS);
+    expect(state.items[0]?.truncated).toBe(true);
+  });
+
+  it('完了通知の aggregatedOutput でデルタの本文を消さない', () => {
+    const withDelta = applyEvent(started(), 'item/commandExecution/outputDelta', {
+      itemId: 'cmd_1',
+      delta: '流れてきた出力',
+    });
+    const completed = applyEvent(withDelta, 'item/completed', {
+      turnId: TURN,
+      item: { id: 'cmd_1', type: 'commandExecution', command: 'ls -R /', exitCode: 0 },
+    });
+    expect(completed.items[0]?.text).toBe('流れてきた出力');
+    expect(completed.items[0]?.status).toBe('exit 0');
+  });
+});
+
+describe('normalizeItem / commandExecution の切り詰め', () => {
+  it('aggregatedOutput が長すぎる場合も末尾を残す', () => {
+    const item = normalizeItem({
+      id: 'cmd_2',
+      type: 'commandExecution',
+      command: 'cat big.log',
+      aggregatedOutput: 'a'.repeat(MAX_OUTPUT_CHARS + 1),
+    });
+    expect(item?.text).toHaveLength(MAX_OUTPUT_CHARS);
+    expect(item?.truncated).toBe(true);
   });
 });

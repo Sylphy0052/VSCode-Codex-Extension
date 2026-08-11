@@ -35,6 +35,18 @@ export function chatScript(agentLabel: string): string {
   /** 残りがこの割合を下回ったら警告として見せる。 */
   const LOW_CONTEXT_PERCENT = 20;
 
+  /** コマンド出力を畳まずに出す行数。超えた分は末尾だけ見せる。 */
+  const MAX_VISIBLE_LINES = 20;
+
+  /** app-serverが返すコマンドの状態。そのまま出すと英語のままになる。 */
+  const STATUS_LABEL = {
+    inProgress: '実行中',
+    running: '実行中',
+    completed: '完了',
+    failed: '失敗',
+    declined: '拒否',
+  };
+
   const CLASS_OF = {
     userMessage: 'user',
     agentMessage: 'agent',
@@ -64,7 +76,8 @@ export function chatScript(agentLabel: string): string {
     copy.textContent = 'コピー';
     copy.hidden = true;
     copy.addEventListener('click', () => {
-      const text = node.body.textContent || '';
+      // 畳んでいても全文をコピーする（見えている末尾だけにしない）
+      const text = node.fullText || '';
       navigator.clipboard.writeText(text).then(
         () => {
           copy.textContent = 'コピーしました';
@@ -74,6 +87,16 @@ export function chatScript(agentLabel: string): string {
       );
     });
     actions.appendChild(copy);
+
+    // 長いコマンド出力の展開。開いた状態は要素と一緒に保つ（再描画で閉じない）
+    const expand = document.createElement('button');
+    expand.className = 'secondary';
+    expand.hidden = true;
+    expand.addEventListener('click', () => {
+      node.expanded = !node.expanded;
+      renderBody(node, node.lastItem);
+    });
+    actions.appendChild(expand);
 
     const fork = document.createElement('button');
     fork.className = 'secondary';
@@ -98,8 +121,49 @@ export function chatScript(agentLabel: string): string {
     diffs.hidden = true;
     wrap.appendChild(diffs);
 
-    const node = { wrap, label, body, diffs, diffKey: '', copy, fork, forkTarget: undefined };
+    const node = {
+      wrap,
+      label,
+      body,
+      diffs,
+      diffKey: '',
+      copy,
+      expand,
+      fork,
+      forkTarget: undefined,
+      expanded: false,
+      fullText: '',
+      lastItem: undefined,
+    };
     return node;
+  }
+
+  /**
+   * 本文を描く。コマンド出力が長い場合は末尾だけ見せ、展開できるようにする。
+   *
+   * 出力は途中経過が流れ込んで伸び続けるため、全部を描き続けると重くなる。
+   */
+  function renderBody(node, item) {
+    if (!item) return;
+    node.lastItem = item;
+    const text = item.text || '';
+    node.fullText = text;
+
+    const lines = item.kind === 'commandExecution' ? text.split('\\n') : undefined;
+    const overflow = lines !== undefined && lines.length > MAX_VISIBLE_LINES;
+    const shown =
+      overflow && !node.expanded ? lines.slice(lines.length - MAX_VISIBLE_LINES).join('\\n') : text;
+
+    if (node.body.textContent !== shown) node.body.textContent = shown;
+    node.body.hidden = text === '';
+    node.copy.hidden = text === '';
+
+    node.expand.hidden = !overflow;
+    if (overflow) {
+      node.expand.textContent = node.expanded
+        ? '末尾だけ表示'
+        : '全体を表示（' + lines.length + '行）';
+    }
   }
 
   /** 1ファイル分の差分。既定は畳んでおき、開いた状態は要素を使い回して保つ。 */
@@ -137,14 +201,19 @@ export function chatScript(agentLabel: string): string {
   function updateNode(node, item, forkTarget) {
     const bits = [KIND_LABEL[item.kind] || item.kind];
     if (item.detail) bits.push(item.detail);
-    if (item.status) bits.push(item.status);
+    if (item.status) bits.push(STATUS_LABEL[item.status] || item.status);
+    // 上限を超えて先頭を捨てた分は本文に印を混ぜず、ここで断る
+    if (item.truncated) bits.push('先頭は省略');
     const label = bits.join(' ・ ');
     if (node.label.textContent !== label) node.label.textContent = label;
 
-    const text = item.text || '';
-    if (node.body.textContent !== text) node.body.textContent = text;
-    node.body.hidden = text === '';
-    node.copy.hidden = text === '';
+    // 実行中のコマンドは見た目でも区別する（Codexは inProgress、Claude Codeは running）
+    const running =
+      item.kind === 'commandExecution' &&
+      (item.status === 'inProgress' || item.status === 'running');
+    node.wrap.classList.toggle('running', running);
+
+    renderBody(node, item);
 
     // 中身が同じなら作り直さない。開いた差分が勝手に閉じるのを防ぐ
     const diffs = item.diffs || [];

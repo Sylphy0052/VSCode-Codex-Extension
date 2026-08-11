@@ -50,6 +50,9 @@ export function chatStyles(): string {
     overflow: auto;
   }
   .reasoning .body { color: var(--vscode-descriptionForeground); font-style: italic; }
+  /* 実行中のコマンド。完了したものと見分けが付くようにする */
+  .item.running .body { border-left: 2px solid var(--vscode-progressBar-background); }
+  .item.running .head { color: var(--vscode-foreground); }
   .approval {
     margin: 10px 0;
     padding: 10px 12px;
