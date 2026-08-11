@@ -1,0 +1,639 @@
+import * as fsPromises from 'node:fs/promises';
+import * as path from 'node:path';
+
+import { APPROVAL_MODES, SANDBOX_MODES } from '../codex/types';
+import { LOOP_ITERATION_LIMIT } from '../loop/loopController';
+import type { Logger } from '../log';
+import { stripControlChars } from './sanitize';
+import { buildEffectiveTaskConfig, type ExtensionSafetyBaseline } from './taskConfig';
+import type { TaskSessionHost, TaskSessionInput } from './taskSession';
+import {
+  CLAUDE_PERMISSION_SAFETY_ORDER,
+  CLEANUP_MODES,
+  clampClaudePermissionMode,
+  clampCodexApprovalMode,
+  clampSandbox,
+  DEFAULT_AUTO_APPROVE,
+  DEFAULT_CLEANUP,
+  DEFAULT_CONTINUE_PROMPT,
+  DEFAULT_ISOLATION,
+  DEFAULT_MAX_ITERATIONS,
+  DEFAULT_MAX_PARALLEL,
+  DEFAULT_PROVIDER,
+  ISOLATIONS,
+  MAX_PARALLEL_MAX,
+  MAX_PARALLEL_MIN,
+  MAX_PROMPT_LENGTH,
+  MAX_RETRIES,
+  MAX_TASK_COUNT,
+  parseWorkflowYaml,
+  PROVIDERS,
+  TASK_ID_PATTERN,
+  TEMPLATE_FIELDS,
+  validateWorkflow,
+  type Provider,
+  type WorkflowDefinition,
+  type WorkflowIssue,
+} from './workflow';
+
+/**
+ * ゴール文からワークフロー定義（YAML）を生成する（design.md §16.9）。
+ *
+ * VSCode APIには依存しない。ファイル列挙（`PlannerWorkspacePort`）とセッション
+ * （`TaskSessionHost`）は注入で受け取り、`extension.ts` が実体を組み立てる。
+ * `workflow.ts` の検証・クランプ関数をそのまま再利用し、独自の安全判定は作らない。
+ */
+
+// ---- ワークスペースの情報（design.md §16.9「現在のワークスペースの情報」） ----
+
+/** 分解セッションへ渡すワークスペースの要約。中身は概要のみで、ファイル内容そのものは含まない。 */
+export interface WorkspaceSummary {
+  /** ワークスペース直下の主要エントリ（ディレクトリは末尾に`/`）。ドットファイルは除く。 */
+  topLevelEntries: readonly string[];
+  hasAgentsMd: boolean;
+  hasClaudeMd: boolean;
+}
+
+/** `buildWorkspaceSummary` が使うファイルシステムの口。テストではフェイクに差し替える。 */
+export interface PlannerWorkspacePort {
+  listTopLevelEntries(root: string): Promise<string[]>;
+  fileExists(filePath: string): Promise<boolean>;
+}
+
+/** 巨大なモノレポ直下でも列挙が長くならないようにする上限。 */
+const MAX_TOP_LEVEL_ENTRIES = 40;
+
+export async function buildWorkspaceSummary(
+  root: string,
+  port: PlannerWorkspacePort,
+): Promise<WorkspaceSummary> {
+  const [entries, hasAgentsMd, hasClaudeMd] = await Promise.all([
+    port.listTopLevelEntries(root),
+    port.fileExists(path.join(root, 'AGENTS.md')),
+    port.fileExists(path.join(root, 'CLAUDE.md')),
+  ]);
+  return {
+    topLevelEntries: entries.slice(0, MAX_TOP_LEVEL_ENTRIES),
+    hasAgentsMd,
+    hasClaudeMd,
+  };
+}
+
+/** `node:fs/promises` を使う既定の実装。`runner.ts` の `nodeWorkflowFilePort` と同じ流儀。 */
+export const nodePlannerWorkspacePort: PlannerWorkspacePort = {
+  async listTopLevelEntries(root: string): Promise<string[]> {
+    try {
+      const entries = await fsPromises.readdir(root, { withFileTypes: true });
+      return entries
+        .filter((e) => !e.name.startsWith('.'))
+        .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))
+        .sort((a, b) => a.localeCompare(b));
+    } catch {
+      return [];
+    }
+  },
+  async fileExists(filePath: string): Promise<boolean> {
+    try {
+      await fsPromises.access(filePath);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+};
+
+// ---- スキーマの説明（プロンプトの一部） ----
+
+/**
+ * `workflow.ts` の定数・型からスキーマの説明を組み立てる。
+ *
+ * 列挙値・上限・既定値は全て`workflow.ts`からimportした定数を文字列化しているだけで、
+ * ここに数値や語彙を手で書き写さない。`workflow.ts`側の値が変われば、このプロンプトも
+ * 再ビルドすれば自動的に追従する（二重管理を避ける。design.mdのタスク指示）。
+ * フィールドの意味・必須かどうかの説明文（プローズ）は手で書くしかない部分で、
+ * `test/unit/planner.test.ts` がフィールド名の記載漏れを検出する。
+ */
+export function buildSchemaDescription(): string {
+  return [
+    '# ワークフロー定義（YAML）のスキーマ',
+    '',
+    '## ルート',
+    '- version: 数値。1を指定する',
+    '- name: ワークフロー名（文字列）',
+    '- defaults: 省略可。省略時の既定値は次のとおり:' +
+      ` provider=${DEFAULT_PROVIDER}, isolation=${DEFAULT_ISOLATION},` +
+      ` maxParallel=${DEFAULT_MAX_PARALLEL}（${MAX_PARALLEL_MIN}〜${MAX_PARALLEL_MAX}）,` +
+      ` maxIterations=${DEFAULT_MAX_ITERATIONS}（1〜${LOOP_ITERATION_LIMIT}）,` +
+      ` cleanup=${DEFAULT_CLEANUP}, autoApprove=${DEFAULT_AUTO_APPROVE}`,
+    `- tasks: タスクの配列。1件以上、最大${MAX_TASK_COUNT}件`,
+    '',
+    '## タスク1件のフィールド',
+    `- id（必須）: ワークフロー内で一意。文字種は正規表現 ${TASK_ID_PATTERN.source}` +
+      '（半角英数字・アンダースコア・ハイフンのみ、1〜50文字、先頭にハイフンは使えない）',
+    `- prompt（必須）: 最初に送る指示。${MAX_PROMPT_LENGTH}文字以内`,
+    '- done（必須）: 終了条件。エージェントの応答を読まなくても外から判定できる書き方にすること' +
+      '（例:「テストが通っている」。「頑張って実装した」のような自己申告に頼る書き方は避ける）',
+    '- dependsOn（省略可、既定 []）: 先に完了していなければならないタスクidの配列。' +
+      '並列に進められるタスクは別々のdependsOnに分け、合流させたい場合は両方をdependsOnに挙げた' +
+      '合流タスクを置くこと',
+    `- provider（省略可、既定 defaults.provider）: ${PROVIDERS.join(' または ')}`,
+    `- isolation（省略可、既定 defaults.isolation）: ${ISOLATIONS.join(' または ')}`,
+    `- continuePrompt（省略可、既定「${DEFAULT_CONTINUE_PROMPT}」）: 2回目以降に送る指示`,
+    `- maxIterations（省略可、既定 defaults.maxIterations）: 1〜${LOOP_ITERATION_LIMIT}`,
+    `- retries（省略可、既定 0）: 失敗時の自動再試行回数（上限${MAX_RETRIES}）`,
+    `- cleanup（省略可）: ${CLEANUP_MODES.join(' または ')}。タスク単位では指定できず defaults.cleanup に従う`,
+    '- model / effort / approvalMode / sandbox（省略可）: 拡張機能側の設定より安全な方向にしか' +
+      '動かせない。緩める指定は無視されるので、特別な理由がなければ書かないこと',
+    '- autoApprove（省略可、既定 false）: trueにすると危険と判定した要求以外を自動で許可する。' +
+      'このワークフローは人がレビューする前提の下書きなので、特別な理由がなければ指定しないこと',
+    '- escalate（省略可、既定 []）: 自動承認しないコマンドのパターンを追加する',
+    '- allow（省略可、既定 []）: 既定の停止条件から外すパターン。特別な理由がなければ指定しないこと',
+    '',
+    '## テンプレート変数',
+    `依存タスクの結果を差し込みたい場合だけ、prompt内に {{<id>.<field>}} と書く。` +
+      `<id>はdependsOnに挙げたタスクidに限り、<field>は ${TEMPLATE_FIELDS.join(' | ')} のいずれか。` +
+      '依存タスクの応答を無条件に前置きする必要はない',
+    '',
+    '未知のフィールドは読み飛ばされる。',
+  ].join('\n');
+}
+
+// ---- プロンプトの組み立て ----
+
+export interface BuildPlannerPromptInput {
+  goal: string;
+  workspaceSummary: WorkspaceSummary;
+}
+
+function describeWorkspace(summary: WorkspaceSummary): string {
+  const entries =
+    summary.topLevelEntries.length > 0
+      ? summary.topLevelEntries.join(', ')
+      : '（取得できませんでした）';
+  return [
+    '## 現在のワークスペースの情報',
+    `- 直下の構成: ${entries}`,
+    `- AGENTS.md: ${summary.hasAgentsMd ? 'あり' : 'なし'}`,
+    `- CLAUDE.md: ${summary.hasClaudeMd ? 'あり' : 'なし'}`,
+  ].join('\n');
+}
+
+const OUTPUT_FORMAT_INSTRUCTION =
+  '## 出力形式（厳守）\n' +
+  '出力はYAMLのみとすること。説明文・前置き・コードフェンスなど、YAML以外の文字を' +
+  '一切含めないこと';
+
+/**
+ * ゴール文からタスク分解のYAMLを作らせるための最初のプロンプト（design.md §16.9）。
+ *
+ * このセッションは`sandbox: read-only`相当・承認は全拒否で起動する（`planWorkflow`側の
+ * 設定）。「タスクを実行しないでください」という指示はここにも書くが、それは補助であって、
+ * 実際に実行できない設定になっていることが本来の防御である（design.md §16.9「プロンプトで
+ * 頼むだけでは足りない」）。
+ */
+export function buildPlannerPrompt(input: BuildPlannerPromptInput): string {
+  return [
+    'あなたはワークフロー定義（YAML）の作成担当です。次のゴールを、依存関係を持つ' +
+      'タスクへ分解し、下記スキーマに従うYAML定義だけを出力してください。',
+    '実際にタスクを実行することはしないでください（読み取りと提案のみ）。',
+    '',
+    `## ゴール\n${input.goal}`,
+    '',
+    describeWorkspace(input.workspaceSummary),
+    '',
+    buildSchemaDescription(),
+    '',
+    '## 分解の指針',
+    '- 並列に進められるタスクは、それぞれ独立したタスクとして分け、dependsOnで直列にしないこと',
+    '- 並列に走らせたタスクの結果を統合・レビューする合流タスクを置くこと' +
+      '（design.md §16.4のテンプレート変数で各タスクの結果を参照できる）',
+    '- 全てのタスクにdoneを書くこと。外から判定できる終了条件にすること',
+    '',
+    OUTPUT_FORMAT_INSTRUCTION,
+  ].join('\n');
+}
+
+/** 検証に落ちたときの再生成プロンプト（design.md §16.9「もう1度だけ投げ直す」）。 */
+export function buildRetryPrompt(previousYaml: string, errors: readonly WorkflowIssue[]): string {
+  const errorLines = errors
+    .map((e) => `- ${e.taskIds.length > 0 ? `[${e.taskIds.join(', ')}] ` : ''}${e.message}`)
+    .join('\n');
+  return [
+    '直前に出力したYAMLは、次の検証エラーにより受理できませんでした。' +
+      'エラーを踏まえて修正したYAML定義だけを出力してください。',
+    '',
+    '## 前回のYAML',
+    previousYaml,
+    '',
+    '## 検証エラー',
+    errorLines,
+    '',
+    OUTPUT_FORMAT_INSTRUCTION,
+  ].join('\n');
+}
+
+// ---- 応答からのYAML抽出 ----
+
+/** ```yaml ... ``` / ``` ... ``` の最初のコードフェンスを拾う。 */
+const FENCE_PATTERN = /```(?:ya?ml)?\r?\n([\s\S]*?)```/i;
+/** コードフェンスが無いとき、YAMLのルートキーが現れる行を本文の開始とみなす。 */
+const ROOT_KEY_PATTERN = /^(version|name|defaults|tasks)\s*:/m;
+
+/**
+ * 分解セッションの応答からYAML本文を取り出す（design.md §16.9「コードフェンスで囲まれて
+ * 返ることが多いので、剥がしてからパーサへ渡す」）。
+ *
+ * 優先順位: 1) 最初のコードフェンスの中身 2) フェンスが無ければ、ルートキー
+ * （version/name/defaults/tasks）が最初に現れる行から末尾まで 3) それも無ければ応答全体。
+ * 3)はほぼ確実にparseWorkflowYamlが例外を投げ、通常の再試行経路に合流する。
+ */
+export function extractYamlFromResponse(response: string): string {
+  const fenceMatch = FENCE_PATTERN.exec(response);
+  const fenced = fenceMatch?.[1];
+  if (fenced !== undefined) {
+    return fenced.trim();
+  }
+  const rootKeyMatch = ROOT_KEY_PATTERN.exec(response);
+  if (rootKeyMatch !== null) {
+    return response.slice(rootKeyMatch.index).trim();
+  }
+  return response.trim();
+}
+
+// ---- 生成物のセキュリティ警告（design.md §16.9「通常の検証エラーとは別に強調して知らせる」） ----
+
+export interface SecurityWarning {
+  taskId: string;
+  kind: 'autoApprove' | 'allow' | 'sandbox' | 'approvalMode';
+  message: string;
+}
+
+/**
+ * 生成されたYAMLに、既定の安全設定を上書きする指定が含まれていないかを調べる。
+ *
+ * `autoApprove: true` と非空の `allow` はYAMLに書かれているだけで無条件に警告する
+ * （machineスコープの設定が許していても、生成物としては目立たせる。design.md §16.9）。
+ * `sandbox` / `approvalMode` は「拡張機能側の設定より緩い指定」だけを対象にする。
+ * `workflow.ts` の `clampSandbox` / `clampCodexApprovalMode` / `clampClaudePermissionMode` を
+ * そのまま使い、`runner.ts` の実行時クランプと判定基準を1つに保つ（design.md §16.16）。
+ */
+export function detectSecurityWarnings(
+  def: WorkflowDefinition,
+  baseline: ExtensionSafetyBaseline,
+): SecurityWarning[] {
+  const warnings: SecurityWarning[] = [];
+  for (const task of def.tasks) {
+    if (task.autoApprove) {
+      warnings.push({
+        taskId: task.id,
+        kind: 'autoApprove',
+        message: `${task.id}: autoApprove: true が指定されています。無人実行の設定なので内容を確認してください`,
+      });
+    }
+    if (task.allow.length > 0) {
+      warnings.push({
+        taskId: task.id,
+        kind: 'allow',
+        message: `${task.id}: allow で危険操作チェックの一部を解除しています: ${task.allow.join(', ')}`,
+      });
+    }
+
+    const approvalBaseline =
+      task.provider === 'claude' ? baseline.claudePermissionMode : baseline.codexApprovalMode;
+    const approvalResult =
+      task.provider === 'claude'
+        ? clampClaudePermissionMode(approvalBaseline, task.approvalMode ?? '')
+        : clampCodexApprovalMode(approvalBaseline, task.approvalMode ?? '');
+    if (approvalResult.warning !== undefined) {
+      warnings.push({
+        taskId: task.id,
+        kind: 'approvalMode',
+        message: `${task.id}: approvalModeが既定の安全設定より緩く指定されています（${task.approvalMode}）`,
+      });
+    }
+
+    if (task.provider === 'codex') {
+      const sandboxResult = clampSandbox(baseline.codexSandbox, task.sandbox ?? '');
+      if (sandboxResult.warning !== undefined) {
+        warnings.push({
+          taskId: task.id,
+          kind: 'sandbox',
+          message: `${task.id}: sandboxが既定の安全設定より緩く指定されています（${task.sandbox}）`,
+        });
+      }
+    }
+  }
+  return warnings;
+}
+
+const SECURITY_FIELD_PATTERN: Record<SecurityWarning['kind'], RegExp> = {
+  autoApprove: /^\s*autoApprove\s*:/,
+  allow: /^\s*allow\s*:/,
+  sandbox: /^\s*sandbox\s*:/,
+  approvalMode: /^\s*approvalMode\s*:/,
+};
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * セキュリティ警告に対応する行番号（1始まり）を、生成されたYAMLのテキストから
+ * best-effortで探す。`yaml`パッケージのposition情報は使わない（テキスト上の該当タスクの
+ * ブロック内を探すだけで十分な精度があり、パーサの作り直しをするほどの重みではない）。
+ * 見つからなければ、そのタスクの `id:` 行を返す。タスク自体が見つからなければ `undefined`。
+ */
+export function locateSecurityWarningLine(
+  yamlText: string,
+  taskId: string,
+  kind: SecurityWarning['kind'],
+): number | undefined {
+  const lines = yamlText.split('\n');
+  const idPattern = new RegExp(`^\\s*-?\\s*id\\s*:\\s*["']?${escapeRegExp(taskId)}["']?\\s*$`);
+  const nextTaskPattern = /^\s*-\s*id\s*:/;
+
+  let taskStart = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (idPattern.test(lines[i] ?? '')) {
+      taskStart = i;
+      break;
+    }
+  }
+  if (taskStart === -1) {
+    return undefined;
+  }
+
+  let taskEnd = lines.length;
+  for (let i = taskStart + 1; i < lines.length; i += 1) {
+    if (nextTaskPattern.test(lines[i] ?? '')) {
+      taskEnd = i;
+      break;
+    }
+  }
+
+  const fieldPattern = SECURITY_FIELD_PATTERN[kind];
+  for (let i = taskStart; i < taskEnd; i += 1) {
+    if (fieldPattern.test(lines[i] ?? '')) {
+      return i + 1;
+    }
+  }
+  return taskStart + 1;
+}
+
+// ---- ファイル名（design.md §16.9「ゴール文から作った短いスラッグ」） ----
+
+/** ファイル名として使えない文字。制御文字も含めて空白に潰す。 */
+const UNSAFE_FILENAME_CHARS = /[\\/:*?"<>|\u0020\u002d]/gu;
+const WINDOWS_RESERVED_FILENAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+const SLUG_MAX_LENGTH = 40;
+
+/**
+ * ゴール文から短いスラッグを作る。日本語のゴール文をローマ字化する依存ライブラリは
+ * 使わず、ファイル名として不正な文字だけを除いて元の文字（漢字・かな含む）を残す
+ * （UTF-8のファイル名はLinux/macOS/Windowsのいずれでも問題なく扱える。それより、
+ * ローマ字化で意味が失われるほうが「ゴール文から作った」スラッグの目的に反する）。
+ *
+ * `stripControlChars`（`sanitize.ts`）を先に通す。ゴール文は人が直接入力する値だが、
+ * 双方向制御文字・ゼロ幅文字を含む値がそのままファイル名（＝タブ・ファイル一覧に出る
+ * 表示文字列）へ入り込むのを防ぐ、既存のワークフロー機能と同じ防御線を通しておく。
+ */
+export function slugifyGoal(goal: string): string {
+  const collapsed = stripControlChars(goal)
+    .replace(UNSAFE_FILENAME_CHARS, ' ')
+    .trim()
+    .replace(/\s+/gu, '-');
+  const trimmedDashes = collapsed.replace(/^-+|-+$/gu, '');
+  const truncated = trimmedDashes.slice(0, SLUG_MAX_LENGTH).replace(/-+$/gu, '');
+  if (truncated === '' || WINDOWS_RESERVED_FILENAME.test(truncated)) {
+    return 'workflow';
+  }
+  return truncated;
+}
+
+/** 同名があれば `-2` `-3` ... と連番を足す（design.md §16.9）。 */
+export function resolveUniqueFileName(
+  slug: string,
+  existingBaseNames: ReadonlySet<string>,
+): string {
+  if (!existingBaseNames.has(slug)) {
+    return slug;
+  }
+  let n = 2;
+  while (existingBaseNames.has(`${slug}-${n}`)) {
+    n += 1;
+  }
+  return `${slug}-${n}`;
+}
+
+// ---- 生成の実行 ----
+
+export interface PlanWorkflowInput {
+  goal: string;
+  workspaceSummary: WorkspaceSummary;
+  /** 分解セッションに使うプロバイダ（design.md §16.9「defaults.providerと同じ既定」）。 */
+  provider: Provider;
+  /** `chat` / `claudeChat`（`TaskSessionHost`実装）。`provider`に対応する側を渡すこと。 */
+  host: TaskSessionHost;
+  /** 分解セッションの作業ディレクトリ。読み取り専用なのでworktreeは作らない。 */
+  cwd: string;
+  /** #52のクランプ基準（design.md §16.16）。 */
+  baseline: ExtensionSafetyBaseline;
+  log: Logger;
+}
+
+export interface PlanWorkflowSuccess {
+  ok: true;
+  /** コードフェンスを剥がした後のYAML本文。そのままファイルへ保存できる。 */
+  yaml: string;
+  definition: WorkflowDefinition;
+  /** 空でなければ、保存前に強調して知らせること（design.md §16.9）。 */
+  securityWarnings: readonly SecurityWarning[];
+  attempts: 1 | 2;
+}
+
+export interface PlanWorkflowFailure {
+  ok: false;
+  /** 2回とも検証を通らなかったときの、2回目の生の応答（コードフェンス抽出前）。 */
+  rawResponse: string;
+  attempts: 2;
+  lastErrors: readonly WorkflowIssue[];
+}
+
+export type PlanWorkflowResult = PlanWorkflowSuccess | PlanWorkflowFailure;
+
+interface ParseAttempt {
+  ok: boolean;
+  definition: WorkflowDefinition | undefined;
+  errors: WorkflowIssue[];
+}
+
+function tryParseAndValidate(yamlText: string): ParseAttempt {
+  let def: WorkflowDefinition;
+  try {
+    def = parseWorkflowYaml(yamlText);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return {
+      ok: false,
+      definition: undefined,
+      errors: [{ taskIds: [], message: `YAMLの解析に失敗しました: ${message}` }],
+    };
+  }
+  const validation = validateWorkflow(def);
+  if (validation.errors.length > 0) {
+    return { ok: false, definition: def, errors: validation.errors };
+  }
+  return { ok: true, definition: def, errors: [] };
+}
+
+/**
+ * 分解セッションの`TaskSessionInput`を組み立てる。
+ *
+ * `sandbox: read-only`相当・各プロバイダで最も安全な`approvalMode`を直接指定した上で、
+ * さらに`buildEffectiveTaskConfig`（#52。design.md §16.16の唯一の入口）へ通す。
+ * 呼び出し側が渡す値は既に安全順序の先頭（最も安全）なので、クランプは実質的に
+ * 「常にこの値のまま」を確認する多層防御になる（baseline自体が壊れている異常系でだけ
+ * 意味を持つ）。プロンプトでの指示ではなく、この関数が組み立てる起動設定こそが
+ * 縛りの実体である（design.md §16.9「プロンプトで頼むだけでは足りない」）。
+ */
+function buildPlannerSessionInput(
+  provider: Provider,
+  cwd: string,
+  baseline: ExtensionSafetyBaseline,
+  log: Logger,
+): TaskSessionInput {
+  const safestSandbox = SANDBOX_MODES[0];
+  const safestCodexApproval = APPROVAL_MODES[0];
+  const safestClaudePermission = CLAUDE_PERMISSION_SAFETY_ORDER[0] ?? 'plan';
+  const safestApprovalMode = provider === 'claude' ? safestClaudePermission : safestCodexApproval;
+
+  const effective = buildEffectiveTaskConfig(
+    {
+      provider,
+      model: undefined,
+      effort: undefined,
+      approvalMode: safestApprovalMode,
+      sandbox: safestSandbox,
+      autoApprove: false,
+    },
+    baseline,
+  );
+  for (const w of effective.warnings) {
+    // ここに来るのは baseline 自体が安全順序表に無い値のとき（設定の破損等）だけで、
+    // 通常は発生しない。発生してもフェイルクローズ（拡張機能側の値をそのまま使う）なので
+    // 危険側には倒れないが、想定外の状況としてログにだけ残す
+    log.warn(`[planner] ${w}`);
+  }
+  return { cwd, config: effective.config, sandbox: effective.sandbox };
+}
+
+/**
+ * 分解専用のセッションを1つ開き、1ターンだけ送って応答を受け取り、閉じる。
+ *
+ * `TaskSession.runLoop`（`LoopController`）を`maxIterations: 1, condition: ''`で使う。
+ * `condition`が空文字なら`decoratePrompt`は何も付け足さない（`loopController.ts`参照）ため、
+ * 「YAMLのみを出力する」というこちらの指示とLOOP_DONEの合図が混ざらない。1回送った時点で
+ * `maxReached`として`onFinished`が呼ばれるので、そこで`state.turnResultText`を受け取る。
+ *
+ * 承認要求は理由を問わず全て拒否する（design.md §16.9「承認要求は全て拒否する」）。
+ * `escalation.ts`の危険判定は経由しない。分解セッションに「妥当な危険操作」という
+ * カテゴリは無く、判定するまでもなく拒否してよいため。
+ */
+async function sendSingleTurn(
+  host: TaskSessionHost,
+  input: TaskSessionInput,
+  prompt: string,
+): Promise<string> {
+  const session = await host.openTaskSession(input);
+  session.setApprovalHandler(async () => ({ kind: 'auto', decision: 'decline' }));
+  session.open({ preserveFocus: true });
+  try {
+    return await new Promise<string>((resolve, reject) => {
+      session.onFinished((reason, state) => {
+        if (reason === 'failed') {
+          reject(new Error('分解セッションのターンが失敗しました'));
+          return;
+        }
+        resolve(state.turnResultText);
+      });
+      session.runLoop({
+        initialPrompt: prompt,
+        continuePrompt: '',
+        maxIterations: 1,
+        condition: '',
+      });
+    });
+  } finally {
+    // design.md §16.9「生成が終わったらセッションを閉じる」。1ターンごとに新しいセッション
+    // を開くため（`runner.ts`の再試行が新しいセッションを作るのと同じ流儀）、ここで閉じる
+    session.dispose();
+  }
+}
+
+/**
+ * ゴール文からワークフロー定義（YAML）を生成する（design.md §16.9）。
+ *
+ * 1. 分解セッションへゴール・スキーマ・ワークスペース情報を渡し、YAMLの生成を頼む
+ * 2. 応答からYAMLを取り出し、`workflow.ts`の検証にかける
+ * 3. 通らなければ、検証エラーを添えてもう1度だけ（新しいセッションで）投げ直す
+ * 4. それでも通らなければ、2回目の生の応答を`ok: false`で返す（エディタで開くのは呼び出し側）
+ *
+ * 実行（`WorkflowRunner.start`）は一切呼ばない。この関数はYAML文字列を作るだけで、
+ * ワークフローを走らせる手段を持たない（design.md §16.13「生成したまま自動で実行しない」）。
+ */
+export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkflowResult> {
+  const sessionInput = buildPlannerSessionInput(
+    input.provider,
+    input.cwd,
+    input.baseline,
+    input.log,
+  );
+
+  const firstPrompt = buildPlannerPrompt({
+    goal: input.goal,
+    workspaceSummary: input.workspaceSummary,
+  });
+  const firstResponse = await sendSingleTurn(input.host, sessionInput, firstPrompt);
+  const firstYaml = extractYamlFromResponse(firstResponse);
+  const firstAttempt = tryParseAndValidate(firstYaml);
+  if (firstAttempt.ok && firstAttempt.definition !== undefined) {
+    return {
+      ok: true,
+      yaml: firstYaml,
+      definition: firstAttempt.definition,
+      securityWarnings: detectSecurityWarnings(firstAttempt.definition, input.baseline),
+      attempts: 1,
+    };
+  }
+
+  input.log.warn(
+    `[planner] 生成されたYAMLが検証を通らなかったため再生成します: ${firstAttempt.errors
+      .map((e) => e.message)
+      .join(' / ')}`,
+  );
+  const retryPrompt = buildRetryPrompt(firstYaml, firstAttempt.errors);
+  const secondResponse = await sendSingleTurn(input.host, sessionInput, retryPrompt);
+  const secondYaml = extractYamlFromResponse(secondResponse);
+  const secondAttempt = tryParseAndValidate(secondYaml);
+  if (secondAttempt.ok && secondAttempt.definition !== undefined) {
+    return {
+      ok: true,
+      yaml: secondYaml,
+      definition: secondAttempt.definition,
+      securityWarnings: detectSecurityWarnings(secondAttempt.definition, input.baseline),
+      attempts: 2,
+    };
+  }
+
+  input.log.warn(
+    `[planner] 再生成後もYAMLが検証を通らなかったため、生の応答を人に委ねます: ${secondAttempt.errors
+      .map((e) => e.message)
+      .join(' / ')}`,
+  );
+  return {
+    ok: false,
+    rawResponse: secondResponse,
+    attempts: 2,
+    lastErrors: secondAttempt.errors,
+  };
+}

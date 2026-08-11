@@ -299,6 +299,11 @@
         "command": "agent.workflows.view",
         "title": "ワークフローViewを開く",
         "category": "Agent"
+      },
+      {
+        "command": "agent.workflows.plan",
+        "title": "ゴール文からワークフローを生成…",
+        "category": "Agent"
       }
     ],
     "configuration": {

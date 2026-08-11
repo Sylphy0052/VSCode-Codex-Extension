@@ -154,7 +154,21 @@ export interface LiveRunSummary {
  * （HTMLエスケープが要らないことをここでは前提にしない）。
  */
 export interface WorkflowWarning {
-  kind: 'gitFallback' | 'gitCommonDir' | 'clamp' | 'allowOverride' | 'maxReached' | 'gitignore';
+  kind:
+    | 'gitFallback'
+    | 'gitCommonDir'
+    | 'clamp'
+    | 'allowOverride'
+    | 'maxReached'
+    | 'gitignore'
+    /**
+     * ゴール文から生成したワークフロー（`planner.ts`）が、既定の安全設定を上書きする
+     * 指定（`autoApprove: true` / 非空の `allow` / `sandbox` や `approvalMode` の緩和）を
+     * 含んでいる（design.md §16.9「分解セッションの制限」）。他のkindは実行時に動的へ
+     * 発生するが、これは生成直後のプレビュー（`WorkflowViewManager.previewDefinition`）
+     * でも出す必要があるため区別する。
+     */
+    | 'plannerSecurity';
   /** ワークフロー全体に関わる警告（gitignoreなど）は undefined。 */
   taskId: string | undefined;
   message: string;

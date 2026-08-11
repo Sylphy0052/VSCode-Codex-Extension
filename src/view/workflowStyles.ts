@@ -177,6 +177,7 @@ export function workflowStyles(): string {
     font-size: 0.88em;
   }
   .warning-item.allowOverride { border-left-color: var(--vscode-errorForeground); }
+  .warning-item.plannerSecurity { border-left-color: var(--vscode-errorForeground); }
 
   #empty { color: var(--vscode-descriptionForeground); padding: 24px 0; }
 `;

@@ -381,7 +381,12 @@ export interface WorkflowValidationResult {
   warnings: WorkflowWarning[];
 }
 
-const TEMPLATE_FIELDS = ['result', 'cwd', 'branch', 'files'] as const;
+/**
+ * exportしてある。`planner.ts`がゴール生成プロンプトのスキーマ説明をここから組み立て、
+ * 手書きの一覧との二重管理を避けるため（design.md §16.9のプロンプトはスキーマの説明を
+ * 含む必要があるが、フィールド名の一覧そのものは`workflow.ts`の定義が唯一の正）。
+ */
+export const TEMPLATE_FIELDS = ['result', 'cwd', 'branch', 'files'] as const;
 export type TemplateField = (typeof TEMPLATE_FIELDS)[number];
 
 function isTemplateField(v: string): v is TemplateField {
