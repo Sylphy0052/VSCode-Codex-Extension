@@ -1689,6 +1689,31 @@ Codex TUIの `/ps`（list background terminals）に相当する表示。issue #
 - `src/view/claudeChatView.ts`: `stopBackgroundTask` メッセージを受け、確認してから `ClaudeStreamSession.stopBackgroundTask` を呼ぶ
 - `src/view/chatScript.ts` / `chatStyles.ts`: 一覧の描画。`stoppable: true` の項目にだけ「停止」ボタンを出し、`false`（Codex）は「この画面から停止する経路はありません」と明示する（黙って何もしないボタンを置かない）。コマンド文字列は必ず `textContent` でDOMへ入れる
 
+### 14.26 AGENTS.md / CLAUDE.mdの生成（`/init` 相当）
+
+どちらのCLIも `/init` でプロジェクト向けの指示ファイルを生成する。issue #26、design.mdのTP-46対応。Phase 0（issue #1コメント）では「Codexは効かない」「Claudeはそのまま効く」とされ、本issueでその判定（TP-11）を前提に、Codex側だけ実装するかどうかを判断する調査から始めた。
+
+#### 調査
+
+- **Claude Code**: `/init` はCLIの組込コマンドとして実在する（実測。`claude --print --input-format stream-json --output-format stream-json --verbose` を実際に起動し、`{"type":"control_request","request_id":"1","request":{"subtype":"initialize"}}` を送ったところ、応答の `commands`（90件）に `{"name":"init","description":"Initialize a new CLAUDE.md file with codebase documentation","argumentHint":""}` が含まれていた）。§9.8で確定した通り、Claude Codeの組込コマンドは一覧をハードコードせず`initialize`の応答をそのまま候補に出す作り（`docs/slash-commands.md`）なので、**この拡張機能は既に`/init`を候補として出しており、そのまま送れば動く**。追加の実装は不要
+- **Codex**: `codex app-server generate-json-schema --out <DIR>` で`ClientRequest`の全95メソッドを再確認したが、`init`に相当するメソッドは無い（実測、§14.25と同じ手法）。`AGENTS_MD`という文字列はスキーマ中に1箇所あるが、`ExternalAgentConfigMigrationItemType`（他ツールの設定を移行する機能の種別列挙）の一部であり、生成機能とは無関係。TUIの`/init`はTUI層だけの機能で、app-server越しには存在しない（§9系と同じ構造。`docs/slash-commands.md`の結論を追認）
+- Codexで生成する手段は「モデルへの指示として送る」以外に無い。TUIタブの`/init`（この拡張機能には無い）のほうが公式に作り込まれた指示文である可能性はあるが、拡張機能側からその文面を取得する経路は無い。既存の擬似コマンド（`/compact`）と同じ形で、固定の指示文を通常の発言として送ることにした
+
+#### 実装（Codexのみ。Claude Codeは追加実装なし）
+
+- `src/provider/pseudoCommands.ts`: `PseudoAction` に `'generateAgentsFile'` を追加し、`CODEX_PSEUDO_COMMANDS` へ `/init` を足す。`buildInitInstructionText(agentsFileExists)` を純粋関数として追加し、AGENTS.mdの有無で「新規に作成」「既存の内容を踏まえて更新」と文面を変える
+- `src/view/chatView.ts`: `confirmGenerateAgentsFile()` を追加（`confirmCompact` と同じ形の確認ダイアログ）。`runPseudoCommand` に `generateAgentsFile` の分岐を足し、新設の `runGenerateAgentsFile(entry)` で次を行う
+  1. `entry.cwd`（無ければ `currentWorkspaceFolder()`）でワークスペースの場所を求める。どちらも無ければ生成先が分からない旨をエラー表示して終える（黙って何も起きない状態を作らない）
+  2. `path.join(cwd, 'AGENTS.md')` を`FileSystemPort.readTextFile`で読み、存在すれば`confirmGenerateAgentsFile()`で上書きの確認を取る（拒否されたら何もしない）
+  3. `buildInitInstructionText(existing !== undefined)` の指示文を、送信欄に打った発言と同じ経路（`entry.session.sendOrQueue`）で送る。生成そのものはモデル・CLI側の`apply_patch`に任せ、拡張機能は中身を書かない
+- 上書き確認は既存ファイルがあるときだけ挟む（無ければ新規作成として素通り）。承認モードによる書き込み自体の確認とは別に、**AGENTS.mdの上書きは承認モードの設定に関わらず必ず一度確認する**（`compact`と同じ考え方。基盤になる指示ファイルを壊すと以後の作業全体に影響するため）
+- 会話中に打つ`/init`も、候補から選ぶ場合も同じ経路（`routePseudoCommand`）を通る。Codexの組込`/init`と同名だが、実行されるのは拡張機能側のこの処理だけで、CLIへ`/init`という文字列がそのまま渡ることは無い
+
+#### スコープ外にしたもの
+
+- Codexが実際に生成した内容の品質は保証しない（モデルの応答に依存する。TUI公式の`/init`とは指示文が異なるため、生成される内容が完全に同じにはならない）
+- Claude Code側の上書き確認は、Claude Code CLI自身が`/init`実行時にどう振る舞うか（既存ファイルを読んでから編集するか等）に委ねる。拡張機能側で別途確認ダイアログは挟まない（組込コマンドの一般的な承認フロー・§14.3のツール承認カードに任せる）
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）
