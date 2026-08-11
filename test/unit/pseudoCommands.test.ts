@@ -3,6 +3,7 @@ import {
   buildInitInstructionText,
   CODEX_PSEUDO_COMMANDS,
   routePseudoCommand,
+  trimmedArgsOrUndefined,
   withPseudoCommands,
   type PseudoCommand,
 } from '../../src/provider/pseudoCommands';
@@ -15,11 +16,31 @@ const pseudo: PseudoCommand[] = [
 describe('CODEX_PSEUDO_COMMANDS', () => {
   it('拡張機能側で実行できるものだけを載せる', () => {
     // 対応する動作が無いものを載せると「押しても何も起きない」状態に戻る
-    expect(CODEX_PSEUDO_COMMANDS.map((c) => c.name)).toEqual(['compact', 'init']);
+    expect(CODEX_PSEUDO_COMMANDS.map((c) => c.name)).toEqual(['compact', 'init', 'btw']);
   });
 
   it('説明が付いている', () => {
     expect(CODEX_PSEUDO_COMMANDS.every((c) => c.description !== '')).toBe(true);
+  });
+
+  it('/btw は質問を引数に取る（脇道の質問。issue #24）', () => {
+    const btw = CODEX_PSEUDO_COMMANDS.find((c) => c.name === 'btw');
+    expect(btw?.action).toBe('sideQuestion');
+    expect(btw?.argumentHint).not.toBe('');
+  });
+});
+
+describe('trimmedArgsOrUndefined', () => {
+  it('前後の空白を落として返す', () => {
+    expect(trimmedArgsOrUndefined('  今何時？  ')).toBe('今何時？');
+  });
+
+  it('空文字は undefined', () => {
+    expect(trimmedArgsOrUndefined('')).toBeUndefined();
+  });
+
+  it('空白だけも undefined', () => {
+    expect(trimmedArgsOrUndefined('   ')).toBeUndefined();
   });
 });
 
@@ -42,6 +63,14 @@ describe('routePseudoCommand', () => {
 
   it('知らないコマンドは引き受けない', () => {
     expect(routePseudoCommand(pseudo, '/status')).toBeUndefined();
+  });
+
+  it('/btw は質問を引数として取り出す', () => {
+    expect(routePseudoCommand(CODEX_PSEUDO_COMMANDS, '/btw 今のタイムゾーンは？')).toEqual({
+      name: 'btw',
+      action: 'sideQuestion',
+      args: '今のタイムゾーンは？',
+    });
   });
 
   it('普通の発言は引き受けない', () => {

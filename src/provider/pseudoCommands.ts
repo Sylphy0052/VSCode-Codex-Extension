@@ -13,7 +13,7 @@ import type { SlashCommand } from './slashCommands';
  */
 
 /** 擬似コマンドが起こす動作。 */
-export type PseudoAction = 'compact' | 'generateAgentsFile';
+export type PseudoAction = 'compact' | 'generateAgentsFile' | 'sideQuestion';
 
 export interface PseudoCommand extends SlashCommand {
   action: PseudoAction;
@@ -37,11 +37,27 @@ export const CODEX_PSEUDO_COMMANDS: readonly PseudoCommand[] = [
   },
   {
     name: 'init',
-    description: 'AGENTS.mdを生成する（この画面の機能で実行します。既存があれば確認してから上書きします）',
+    description:
+      'AGENTS.mdを生成する（この画面の機能で実行します。既存があれば確認してから上書きします）',
     argumentHint: '',
     action: 'generateAgentsFile',
   },
+  {
+    name: 'btw',
+    description: '脇道の質問を送る（本流を汚さない使い捨てのスレッドで聞く。issue #24）',
+    argumentHint: '<質問>',
+    action: 'sideQuestion',
+  },
 ];
+
+/**
+ * 擬似コマンドの引数を仕上げる。前後の空白を落とし、空なら「引数が無い」を表す
+ * `undefined` を返す。`/btw` のように引数（質問文）が必須の擬似コマンドで使う。
+ */
+export function trimmedArgsOrUndefined(args: string): string | undefined {
+  const trimmed = args.trim();
+  return trimmed === '' ? undefined : trimmed;
+}
 
 /**
  * 送信テキストが擬似コマンドかどうか調べる。
