@@ -589,6 +589,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     vscode.commands.registerCommand('claude.openChat', (s: SessionSummary) =>
       claudeChat.openThread(s.id, s.threadName ?? s.id.slice(0, 8), s.cwd),
     ),
+    // 設定パネルの「読み直す」から会話中のセッションへ橋渡しする（issue #202、
+    // design.md TP-90）。`newSession` と同じ、webview→VS Codeコマンド→この画面の
+    // 管理クラス、という経路
+    vscode.commands.registerCommand('claude.reloadSkills', () =>
+      claudeChat.reloadSkillsForOpenSessions(),
+    ),
     vscode.commands.registerCommand('codex.renameChat', () => chat.renameActive()),
     vscode.commands.registerCommand('codex.openChat', (s: SessionSummary) =>
       chat.openThread(s.id, s.threadName ?? s.id.slice(0, 8), s.cwd),

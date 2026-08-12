@@ -378,6 +378,33 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
   }
 
   /**
+   * skillsを読み直す（issue #202、design.md TP-90）。設定パネルの「読み直す」ボタンから
+   * `claude.reloadSkills` コマンド経由で呼ばれる（`newSession`と同じ、設定パネルの
+   * webview→VS Codeコマンド→この画面の管理クラス、という橋渡し。設定パネルは
+   * 単発プロセスの`ClaudeSkillsProbe`しか持たず、既に開いている会話のプロセスへは
+   * 直接触れないため）。
+   *
+   * 開いている会話それぞれの生きているプロセスへ`reload_skills`を送り、結果を会話に
+   * 1行残す。`entry.session.reloadSkills()`はプロセスが無ければ`undefined`を返すため、
+   * タブを閉じている（プロセスが無い）会話には何も残さない（`undefined`を「対象外」と
+   * 見なす。`checkMcpStatus`と対称の判断）。
+   */
+  async reloadSkillsForOpenSessions(): Promise<void> {
+    for (const entry of this.panels.values()) {
+      const result = await entry.session.reloadSkills();
+      if (result === undefined) {
+        continue;
+      }
+      entry.session.noteLocalEvent(
+        `reloadSkills:${randomUUID()}`,
+        result.ok
+          ? `設定 ・ skillsを読み直しました（${result.skills.length}件）`
+          : `設定 ・ skillsを読み直せませんでした: ${result.reason}`,
+      );
+    }
+  }
+
+  /**
    * `--resume` は過去のやり取りを流さないため、transcriptを読んで初期表示にする。
    * TODO一覧も同じtranscriptから最後の内容を拾い、専用表示の初期値に使う。
    */

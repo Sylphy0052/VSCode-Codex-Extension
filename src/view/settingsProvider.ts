@@ -500,6 +500,19 @@ export class SettingsProvider {
   }
 
   /**
+   * Claude Codeのskills一覧を読み直す（issue #202、design.md TP-90）。
+   *
+   * Claude Codeには一覧専用の経路が無く、`reload_skills` control_requestが一覧取得を
+   * 兼ねる（`skillsList.ts`参照）ため、`listClaudeSkills`を呼び直すだけで「読み直し」
+   * そのものになる。skills一覧だけを対象にした軽い読み直しにするため、`load()`の
+   * ように他の一覧（モデル・MCP・hooks等）まで含めた全体の読み直しはしない。呼び出し側
+   * （`ControlPanelViewProvider`）はこの後で画面を再描画すること。
+   */
+  async reloadClaudeSkills(): Promise<void> {
+    this.claudeSkills = await this.listClaudeSkills();
+  }
+
+  /**
    * 他エージェントからの設定インポートを実行する（issue #36、design.md TP-57）。
    * **設定を書き換える操作**。実行前に対象（何を・どこから・どこへ）を示して確認を取る
    * （§8のセキュリティ考慮）。

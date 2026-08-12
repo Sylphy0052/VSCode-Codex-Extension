@@ -23,6 +23,7 @@ import {
   buildControlRequest,
   buildControlResponse,
   buildMcpStatusRequest,
+  buildReloadSkillsRequest,
   buildRewindFilesRequest,
   buildSessionCostRequest,
   buildSetEffortRequest,
@@ -47,7 +48,9 @@ import {
 } from './control';
 import type { Attachment } from '../provider/attachments';
 import type { McpServerView } from '../provider/mcpServers';
+import type { SkillsSnapshot } from '../provider/skills';
 import type { SlashCommand } from '../provider/slashCommands';
+import { buildSkillsSnapshot } from './skillsList';
 import { applyStreamEvent, initialClaudeState } from './streamJson';
 import type { ClaudeConfig } from './types';
 
@@ -110,6 +113,12 @@ export class ClaudeStreamSession {
     string,
     (servers: McpServerView[] | undefined) => void
   >();
+  /**
+   * `reload_skills` の応答待ち（issue #202、design.md TP-90）。
+   * `mcpStatusWaiting` と同じ形。プロセスが無ければ`undefined`で即解決する
+   * （`checkMcpStatus`と同じ「見えない」側への倒し方）。
+   */
+  private readonly skillsWaiting = new Map<string, (snapshot: SkillsSnapshot | undefined) => void>();
 
   constructor(
     private readonly claudePath: () => string,
@@ -418,6 +427,37 @@ export class ClaudeStreamSession {
     });
   }
 
+  /**
+   * skillsを読み直す（issue #202、design.md TP-90）。
+   *
+   * 設定パネルの`ClaudeSkillsProbe`（単発起動の問い合わせ）とは別に、**会話中の
+   * このプロセス自身へ**`reload_skills`を送る。単発プロセスへ送っても、既に開いている
+   * この会話のプロセスには何も起きない（プロセスごとにディスクを読む独立した状態を
+   * 持つため）。CLIの `/reload-skills`（「Pick up skills added or changed on disk during
+   * this session」）は元々セッション単位の操作であり、実測（CLI 2.1.227）でも
+   * ここへ送って初めてこのプロセスの一覧が更新されることを確認した。
+   *
+   * 応答には最新のskills一覧が乗る（`reload_skills`は一覧の取得を兼ねる。
+   * `skillsList.ts`参照）。あわせて届く`system/commands_changed`通知は`receive()`の
+   * 既存の経路（`readCommandsChanged`→`setCommands`→`onCommands`）でそのまま
+   * スラッシュコマンドの候補へ反映されるため、ここでは制御要求を送って応答を
+   * 読むだけでよい。
+   *
+   * プロセスが無ければ`undefined`を返す（`checkMcpStatus`と同じ「見えない」側への
+   * 倒し方）。呼び出し側（`ClaudeChatViewManager`）はこれを「対象外」として扱い、
+   * 通知を出さない。
+   */
+  reloadSkills(): Promise<SkillsSnapshot | undefined> {
+    if (this.proc === undefined) {
+      return Promise.resolve(undefined);
+    }
+    const requestId = this.claim('reloadSkills');
+    return new Promise((resolve) => {
+      this.skillsWaiting.set(requestId, resolve);
+      this.write(buildReloadSkillsRequest(requestId));
+    });
+  }
+
   private requestRewindFiles(userMessageId: string, dryRun: boolean): Promise<RewindFilesResult> {
     if (this.proc === undefined) {
       return Promise.resolve({
@@ -633,6 +673,12 @@ export class ClaudeStreamSession {
       return;
     }
 
+    if (outgoing?.kind === 'reloadSkills') {
+      this.skillsWaiting.get(response.requestId)?.(buildSkillsSnapshot(response));
+      this.skillsWaiting.delete(response.requestId);
+      return;
+    }
+
     // `initialize` の応答が使えるコマンドを全部返す。一覧のハードコードは要らない
     const commands = readCommandList(response.payload);
     if (commands !== undefined) {
@@ -739,6 +785,11 @@ export class ClaudeStreamSession {
       resolve(undefined);
     }
     this.mcpStatusWaiting.clear();
+    // reload_skillsの応答待ちも解放する。放置するとawaitしている側が永遠に待つ
+    for (const resolve of this.skillsWaiting.values()) {
+      resolve(undefined);
+    }
+    this.skillsWaiting.clear();
     this.outgoing.clear();
     this.proc?.stdin.end();
     this.proc?.kill();
@@ -754,7 +805,8 @@ type OutgoingKind =
   | 'sessionCost'
   | 'settings'
   | 'rewindFiles'
-  | 'mcpStatus';
+  | 'mcpStatus'
+  | 'reloadSkills';
 
 interface Outgoing {
   kind: OutgoingKind;

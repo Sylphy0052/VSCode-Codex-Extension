@@ -1089,6 +1089,22 @@ Claude Codeの `thinking` ブロックは要約と全文の区別が無い一本
 - 操作: `claude.executablePath` を存在しないパスにしてパネルを開く
 - 期待: 「skills一覧を取得できませんでした」の文言が出る。パネルの他の項目は壊れない
 
+### L-32b skillsを読み直す（Claude Code、issue #202・design.md TP-90）
+
+準備: L-32と同じ環境に加えて、Claude Codeの会話（チャット画面）を1つ開いておく。
+
+- 確認: 設定パネルのClaude Codeタブ、skills一覧の直上に「skillsを読み直す」ボタンがある
+- 操作: 会話を開いたまま `~/.claude/skills/` へ新しいskillを1件追加する（`SKILL.md` に `name` / `description` のfrontmatterを持たせる）
+- 操作: 設定パネルの「skillsを読み直す」を押す
+- 期待: 設定パネルのskills一覧に、追加したskillの行が現れる
+- 確認: 開いていた会話に `設定 ・ skillsを読み直しました（N件）` の行が残る
+- 操作: 会話の入力欄で `/` を打つ
+- 期待: スラッシュコマンドの候補に、追加したskillが出る（`commands_changed` 通知を受けて候補が入れ替わる既存の経路。L-13・slash-commands.md参照。会話を再読込・再オープンしなくても反映される）
+- 操作: 追加したskillを削除してから、もう一度「skillsを読み直す」を押す
+- 期待: 設定パネルのskills一覧・会話のスラッシュコマンド候補の両方から消える
+- 操作: 会話を開かずに設定パネルだけを開いた状態で「skillsを読み直す」を押す
+- 確認: エラーにならず、パネルのskills一覧だけが更新される（会話が無い＝橋渡し先が無いだけで、ボタン自体は失敗しない）
+
 ### L-33 承認方法をShift+Tabで回す（Claude Code）
 
 C-34のClaude Code版。**`bypassPermissions` は循環に含めない**ことを確かめる。

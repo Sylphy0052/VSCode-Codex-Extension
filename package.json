@@ -286,6 +286,11 @@
         "icon": "$(sparkle)"
       },
       {
+        "command": "claude.reloadSkills",
+        "title": "skillsを読み直す（Claude Code）",
+        "category": "Agent"
+      },
+      {
         "command": "agent.workflows.run",
         "title": "ワークフローを実行…",
         "category": "Agent"

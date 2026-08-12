@@ -294,6 +294,69 @@ describe('ClaudeChatViewManager', () => {
     });
   });
 
+  describe('reloadSkillsForOpenSessions（issue #202、design.md TP-90）', () => {
+    it('開いている会話それぞれのreloadSkillsを呼び、結果を会話に1行残す', async () => {
+      const { calls, sessions } = stubStartCapturing();
+      vi.spyOn(ClaudeStreamSession.prototype, 'reloadSkills')
+        .mockResolvedValueOnce({
+          ok: true,
+          skills: [
+            {
+              key: 'zzz-temp',
+              name: 'zzz-temp',
+              description: '増えた一時skill',
+              origin: 'user',
+              originDetail: undefined,
+              enabled: true,
+              toggleable: false,
+            },
+          ],
+          warnings: [],
+        })
+        .mockResolvedValueOnce({ ok: false, reason: 'Unsupported control request subtype' });
+      const { manager } = createManager();
+
+      await manager.openNew('/workspace/root');
+      const firstPanel = __mock.lastCreatedPanel();
+      await manager.openThread('session-y', '2つ目', '/workspace/root');
+      const secondPanel = __mock.lastCreatedPanel();
+      expect(calls).toHaveLength(2);
+
+      await manager.reloadSkillsForOpenSessions();
+
+      expect(sessions).toHaveLength(2);
+      const firstItems = (
+        firstPanel?.webview.sent[firstPanel.webview.sent.length - 1] as {
+          state: { items: Array<{ detail?: string }> };
+        }
+      ).state.items;
+      expect(firstItems.some((i) => i.detail === '設定 ・ skillsを読み直しました（1件）')).toBe(
+        true,
+      );
+      const secondItems = (
+        secondPanel?.webview.sent[secondPanel.webview.sent.length - 1] as {
+          state: { items: Array<{ detail?: string }> };
+        }
+      ).state.items;
+      expect(
+        secondItems.some(
+          (i) =>
+            i.detail ===
+            '設定 ・ skillsを読み直せませんでした: Unsupported control request subtype',
+        ),
+      ).toBe(true);
+    });
+
+    it('プロセスが無い（閉じている）会話にはreloadSkillsがundefinedを返し、何も書き込まない', async () => {
+      stubStartCapturing();
+      vi.spyOn(ClaudeStreamSession.prototype, 'reloadSkills').mockResolvedValue(undefined);
+      const { manager } = createManager();
+      await manager.openNew('/workspace/root');
+
+      await expect(manager.reloadSkillsForOpenSessions()).resolves.toBeUndefined();
+    });
+  });
+
   describe('タスク間メッセージングのMCP設定・可視性確認（design.md §16.21、Issue #123）', () => {
     it('input.mcpを渡すと--mcp-configがadditionalArgsへ追加される（実測: type=http）', async () => {
       const calls = stubStart();
