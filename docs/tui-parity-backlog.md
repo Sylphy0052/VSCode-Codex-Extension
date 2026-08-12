@@ -35,6 +35,7 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 - P2: モデルとeffortの取得・コマンド出力の逐次表示・ターン単位のサンドボックス・会話に出る画像・TODO一覧・コードレビューの起動・カスタムエージェント・MCPサーバ管理・hooks・ログイン状態・ファイルの巻き戻し・課金額とセッション分析の表示
 - **できないと確定したもの**: Claude Codeの会話途中からの分岐（TP-44）。Codexの巻き戻し（TP-41のCodex側。`thread/rollback` はdeprecatedかつファイルを戻さない）
 - **実機確認は追いついていない**。ユニットテストとプロトコル上の実測で確かめた範囲までで、画面上の挙動は [manual-test.md](manual-test.md) の未実施ケースとして残っている。**ここが最大の残作業**
+- **Phase 8（TP-86〜TP-93）は全て実装してマージ済み**（2026-08-12）。Claude Code 2.1.227 の再抽出で見つかった、CLI組込のUI機能のうちチャット画面に無かったもの8件
 
 ### TP項目の後に残っている作業（2026-08-12 起票）
 
@@ -181,11 +182,11 @@ Codex側は同版（0.147.0）でプロトコルの件数も完全一致だっ�
 | TP-86 | Fast mode（`/fast`）の切替と現在値の表示                           | Claude | P2     | [#198](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/198) 済                                                                                    |
 | TP-87 | 会話の名前変更（`/rename`）。Codexは実装済みで非対称になっている   | Claude | P2     | [#199](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/199) 済（`rename_session` は実在。ただし読み戻す索引が無く、表示名は拡張機能側を正とする） |
 | TP-88 | 他エージェントからの設定インポート（`/import`）。Codexのみ実装済み | Claude | P3     | [#200](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/200) 済（control protocolに経路は無し。取り込み元はCodex/Gemini固定）                      |
-| TP-89 | 自動圧縮の窓サイズ（`/autocompact`）                               | Claude | P3     | [#201](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/201)                                                                                       |
+| TP-89 | 自動圧縮の窓サイズ（`/autocompact`）                               | Claude | P3     | [#201](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/201) 済（専用の制御要求は無い。応答が固定書式なのでパースして反映する）                    |
 | TP-90 | セッション中のskill再読込（`/reload-skills`）                      | Claude | P3     | [#202](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/202) 済（`reload_skills` は送った先のプロセスにだけ効く）                                  |
-| TP-91 | セッション要約の生成（`/recap`）                                   | Claude | P3     | [#203](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/203)                                                                                       |
-| TP-92 | 追加クレジット（`/usage-credits`。`/extra-usage` は改名済み）      | Claude | P3     | [#204](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/204)                                                                                       |
-| TP-93 | デバッグログの有効化（`/debug`）                                   | Claude | P3     | [#205](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/205)                                                                                       |
+| TP-91 | セッション要約の生成（`/recap`）                                   | Claude | P3     | [#203](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/203) 済（要約はタブ名・履歴名へ反映しない。非構造化の自然文のため）                        |
+| TP-92 | 追加クレジット（`/usage-credits`。`/extra-usage` は改名済み）      | Claude | P3     | [#204](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/204) 済（現在値は `get_usage` の `rate_limits.extra_usage` から読む）                      |
+| TP-93 | CLIデバッグログを画面から開く（`/debug` での診断も含む）           | Claude | P3     | [#205](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/205) 済（ログは常時出ている。開く導線が主、`/debug` は課金を明示した副導線）               |
 
 対象外にしたもの（理由つき）:
 
