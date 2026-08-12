@@ -63,6 +63,12 @@ export interface ChatTestApiLike {
         ) => FakeClaudeProcess)
       | undefined,
   ): void;
+  /**
+   * 指定したスレッドのCodex画面へ、webviewから届いたふりをしたメッセージを流し込む
+   * （Issue #187）。承認カードの決定・発言の送信・分岐など、本来はwebview内のクリック
+   * でしか起こせない操作を実VSCode上でも駆動するための入口。
+   */
+  simulateCodexWebviewMessage(threadId: string, message: unknown): Promise<void>;
 }
 
 /** 拡張機能を（未活性なら）有効化し、テスト用APIを返す。 */

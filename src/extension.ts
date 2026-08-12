@@ -161,6 +161,13 @@ export interface ChatTestApi {
    * 送っている中身と順序をフェイク側で観測できる。
    */
   setClaudeSpawn(spawn: ClaudeSpawnPort | undefined): void;
+  /**
+   * 統合テスト専用: 指定したスレッドのCodex画面へ、webviewから届いたふりをした
+   * メッセージを流し込む（Issue #187、`ChatViewManager.simulateWebviewMessage` 参照）。
+   * 承認カードの決定・発言の送信・分岐など、本来はwebview内のクリックでしか起こせない
+   * 操作を、実VSCode上でも駆動するための入口。
+   */
+  simulateCodexWebviewMessage(threadId: string, message: unknown): Promise<void>;
 }
 
 /**
@@ -665,6 +672,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
             }
             claudeSpawnOverride.spawn = spawnPort;
           },
+          simulateCodexWebviewMessage: (threadId, message) =>
+            chat.simulateWebviewMessage(threadId, message),
         }
       : undefined,
     workflow: isIntegrationTestMode()
