@@ -947,6 +947,8 @@ export function chatScript(
     el('compact').disabled = !!state.busy;
     // インポートの確認要求も新しいターンを起こす（Claude Code画面のみ、issue #200）
     el('claudeImport').disabled = !!state.busy;
+    // 要約も新しいターンを起こす（Claude Code画面のみ、issue #203）
+    el('recap').disabled = !!state.busy;
     applyPlanMode(state.planMode);
     applyFastMode(state);
     renderAttachments(state.attachments);
@@ -1454,6 +1456,8 @@ export function chatScript(
   el('claudeImport').addEventListener('click', () =>
     vscode.postMessage({ type: 'claudeImport' }),
   );
+  // 会話の1行要約（issue #203）。壊れる操作ではないため確認は無く、押すとそのまま送る
+  el('recap').addEventListener('click', () => vscode.postMessage({ type: 'recap' }));
   // 見た目は状態が返ってきてから変える。押した瞬間に変えると、失敗したとき嘘になる
   el('planToggle').addEventListener('click', () =>
     vscode.postMessage({ type: 'planMode', on: !planMode }),

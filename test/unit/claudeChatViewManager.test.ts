@@ -932,3 +932,64 @@ describe('ClaudeChatViewManagerの他エージェント設定インポート（i
     expect(__mock.messages.errors).toEqual([]);
   });
 });
+
+/**
+ * 会話の1行要約（issue #203、design.md §14.36）。
+ *
+ * compact/importConfigと違って会話を壊したり書き込みが起きたりしないため、確認ダイアログを
+ * 挟まず、Webviewから届いた `recap` メッセージをそのまま `/recap` の発言送信へつなぐだけで
+ * よい（`streamSession.ts` の `recap` のJSDoc参照）。ここでは「確認なしで即座に送る」ことを
+ * 検証する。
+ */
+describe('ClaudeChatViewManagerの会話要約（issue #203）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+  });
+
+  it('確認なしで/recapを送る', async () => {
+    const { sessions } = stubStartCapturing();
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const panel = __mock.lastCreatedPanel();
+    const session = sessions[0];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    const written: string[] = [];
+    (
+      session as unknown as {
+        proc: {
+          killed: boolean;
+          stdin: { write: (line: string) => void; destroyed: boolean; writable: boolean };
+        };
+      }
+    ).proc = {
+      killed: false,
+      stdin: { write: (line) => written.push(line), destroyed: false, writable: true },
+    };
+
+    panel?.webview.simulateMessage({ type: 'recap' });
+    await flush();
+
+    expect(__mock.messages.warnings).toHaveLength(0);
+    expect(written).toHaveLength(1);
+    expect(JSON.parse(written[0]!.trim())).toEqual({
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text: '/recap' }] },
+    });
+  });
+
+  it('セッションが起動していなければエラーとして報告する', async () => {
+    stubStart();
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const panel = __mock.lastCreatedPanel();
+
+    panel?.webview.simulateMessage({ type: 'recap' });
+    await flush();
+
+    expect(__mock.messages.errors).toHaveLength(1);
+  });
+});
