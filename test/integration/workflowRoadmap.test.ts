@@ -124,9 +124,22 @@ suite('ロードマップの更新と片付け（design.md §16.19・§16.17）'
     return fs.readFileSync(roadmapPath, 'utf8').split('\n');
   }
 
+  /**
+   * 項目の行を探す。**見つからなければ空文字を返し、例外は投げない。**
+   *
+   * 書き戻し（`applyRunCompletionToFile`）は `fs.writeFile` で行うため、truncate と write の
+   * 間に読むと空のファイルが見える。ここで例外を投げると `waitFor` がその場で落ち、
+   * 再試行の機会が失われる（実際にそれで散発的に失敗していた）。待ち合わせに使う読み取りは
+   * 「まだ書き終わっていない」を異常ではなく通常の途中経過として扱う。
+   */
+  function findLine(id: string): string {
+    return roadmapLines().find((l) => l.includes(` ${id} `)) ?? '';
+  }
+
+  /** 待ち合わせが済んだ後の検証用。ここでは見つからないことが本当の失敗にあたる。 */
   function lineOf(id: string): string {
-    const found = roadmapLines().find((l) => l.includes(` ${id} `));
-    assert.ok(found !== undefined, `ロードマップに項目 ${id} が無い`);
+    const found = findLine(id);
+    assert.notEqual(found, '', `ロードマップに項目 ${id} が無い`);
     return found;
   }
 
@@ -146,7 +159,7 @@ suite('ロードマップの更新と片付け（design.md §16.19・§16.17）'
 
     // 書き戻しはrunの終了後に非同期で走る。
     await waitFor(
-      () => lineOf('R1'),
+      () => findLine('R1'),
       (line) => line.includes('[x]'),
       WAIT_OPTIONS,
     );
