@@ -165,6 +165,11 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
   private readonly catalog: CommandCatalog;
   private readonly usageProbe: ClaudeUsageProbe;
   private commands: SlashCommand[] | undefined;
+  /**
+   * フォーカスが当たっているタブ（`chatView.ts` の `this.active` と同じ役割。issue #199）。
+   * エディタ右上の「セッション名を変更」はこれを対象にする。
+   */
+  private active: ClaudePanel | undefined;
 
   constructor(
     private readonly claudePath: () => string,
@@ -375,6 +380,8 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       config: readClaudeConfig().claude,
       initialItems: transcript.items,
       initialTodos: transcript.todos,
+      // 人が付けた名前があれば開いた時点からタブ名に反映する（issue #199）
+      initialName: this.store.getName(sessionId),
     });
   }
 
@@ -456,7 +463,44 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       config: readClaudeConfig().claude,
       initialItems: transcript.items,
       initialTodos: transcript.todos,
+      // 人が付けた名前があれば開いた時点からタブ名に反映する（issue #199）
+      initialName: this.store.getName(sessionId),
     });
+  }
+
+  /**
+   * 名前を変更する（issue #199、design.md §14.35）。Codex画面の `renameActive`
+   * （`chatView.ts`）と同じ「アクティブなタブが対象」というUXに揃える。
+   *
+   * 表示用の名前は拡張機能側（`ClaudeSessionStore`）を正として持つ設計のため
+   * （`control.ts` の `buildRenameSessionRequest` のJSDoc参照）、保存が先、CLIへの
+   * 送信は`ClaudeStreamSession.setName`内でのベストエフォートな副送信という順序にする。
+   * 保存に失敗した場合は画面へも反映しない（保存できていないのに変わったように見せない）。
+   */
+  async renameActive(): Promise<void> {
+    const entry = this.active;
+    const sessionId = entry?.session.threadId;
+    if (entry === undefined || sessionId === undefined) {
+      void vscode.window.showInformationMessage('名前を変更するClaude Code画面を開いてください');
+      return;
+    }
+
+    const current = entry.session.getState().name ?? this.store.getName(sessionId) ?? '';
+    const name = await vscode.window.showInputBox({
+      prompt: 'このセッションの名前',
+      value: current,
+      validateInput: (v) => (v.trim() === '' ? '名前を入力してください' : undefined),
+    });
+    if (name === undefined || name.trim() === '' || name === current) {
+      return;
+    }
+
+    try {
+      await this.store.rename(sessionId, name.trim());
+      entry.session.setName(name.trim());
+    } catch (e) {
+      this.reportError(e);
+    }
   }
 
   /** セッションとループだけを組み立てる。パネルはまだ作らない。 */
@@ -519,6 +563,9 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     }
     if (entry.panel !== undefined) {
       entry.panel.reveal(undefined, preserveFocus);
+      if (!preserveFocus) {
+        this.active = entry;
+      }
       return;
     }
     const panel = vscode.window.createWebviewPanel(
@@ -555,13 +602,27 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       showImport: true,
     });
     panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(entry, message));
+    panel.onDidChangeViewState(() => {
+      if (panel.active) {
+        this.active = entry;
+      }
+    });
     panel.onDidDispose(() => {
       entry.panel = undefined;
       if (!entry.taskManaged) {
         // 人が手で開いた画面は、これまで通りタブを閉じたらセッションも終わる
         this.teardown(entry);
+        return;
+      }
+      if (this.active === entry) {
+        this.active = undefined;
       }
     });
+    // 新規作成時にフォーカスが当たっていれば、ここでも捕まえる（chatView.tsのattachPanelと同じ理由。
+    // タスク管理下のパネルは常にpreserveFocus: trueで背面に開くため、無条件にactiveを奪わない）
+    if (panel.active) {
+      this.active = entry;
+    }
   }
 
   /**
@@ -642,6 +703,9 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     entry.session.dispose();
     entry.panel?.dispose();
     entry.panel = undefined;
+    if (this.active === entry) {
+      this.active = undefined;
+    }
     for (const [id, value] of this.panels) {
       if (value === entry) {
         this.panels.delete(id);
@@ -1264,8 +1328,15 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
   }
 }
 
-/** タブ名。Claude Codeは要約名を持たないため、最初の指示から作る。 */
-function deriveTitle(state: ChatState): string | undefined {
+/**
+ * タブ名。解決順は「人が付けた名前（`state.name`） > 最初の指示から作った名前」
+ * （issue #199の受入基準）。Claude Codeは要約名をCLI側に持たないため、後者は
+ * 最初のユーザー発言から作る。
+ */
+export function deriveTitle(state: ChatState): string | undefined {
+  if (state.name !== undefined && state.name.trim() !== '') {
+    return `${LABEL}: ${state.name}`;
+  }
   const first = state.items.find((i) => i.kind === 'userMessage' && i.text.trim() !== '');
   if (first === undefined) {
     return undefined;

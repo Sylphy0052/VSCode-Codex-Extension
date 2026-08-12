@@ -273,6 +273,32 @@ export function buildSetEffortRequest(requestId: string, effort: string): string
 }
 
 /**
+ * 会話の名前を変える（issue #199、design.md §14.35）。
+ *
+ * **実測で見つけた専用の制御要求**（バイナリのstrings解析で `rename_session` /
+ * `rename_generate_name` / `rename_err_code` を発見し、`claude --print --input-format
+ * stream-json --output-format stream-json --verbose` を実際に起動して確認。CLI 2.1.227）。
+ * `{ subtype: 'rename_session', title }` を送ると `{"subtype":"success"}` が返り、
+ * transcript（`~/.claude/projects/**\/*.jsonl`）へ
+ * `{"type":"custom-title","customTitle":"<title>","sessionId":"<id>"}` という行が
+ * その時点で追記されることを実機で確認した（＝CLI側に永続化される。`set_agent` 等の
+ * 「送っても効果を確認できない」経路とは違う）。
+ *
+ * ただし**この行を読み戻して一覧に使うことはしない**。`custom-title` は要求を送った
+ * 時点の会話の位置にそのまま挟まるため、長い会話の途中で改名すると先頭からかなり
+ * 離れた行に現れうる。`ClaudeSessionStore.list()` は一覧のために全セッションの
+ * transcriptを先頭40行だけ読む設計（`HEAD_LINES`。全文読みは件数分のI/Oが重い）のため、
+ * 確実に見つけられる保証が無い。加えてCodexの `thread/name/set` と違って読み出し用の
+ * 索引（`thread/list` 相当）も無い。そのため表示用の名前は拡張機能側
+ * （`ClaudeSessionStore` の `ClaudeSessionNameStore`）を正とし、この要求は「同じ
+ * transcriptを他のツール（TUIなど）で開いたときにも新しい名前が見えるように」という
+ * ベストエフォートの副送信として送る（`streamSession.ts` の `setName`）。
+ */
+export function buildRenameSessionRequest(requestId: string, title: string): string {
+  return buildControlRequest(requestId, { subtype: 'rename_session', title });
+}
+
+/**
  * `initialize` の応答から、いま効いている承認方法を読む。
  *
  * 起動引数で `--permission-mode plan` を渡した場合、`status` 通知は何かが変わるまで

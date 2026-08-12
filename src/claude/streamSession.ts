@@ -24,6 +24,7 @@ import {
   buildControlResponse,
   buildMcpStatusRequest,
   buildReloadSkillsRequest,
+  buildRenameSessionRequest,
   buildRewindFilesRequest,
   buildSessionCostRequest,
   buildSetEffortRequest,
@@ -69,6 +70,11 @@ export interface ClaudeStreamOptions {
   initialItems?: ChatState['items'];
   /** 過去の会話に含まれていた最後のTODO一覧。resume時にtranscriptから読んだものを使う。 */
   initialTodos?: ChatState['todos'];
+  /**
+   * 人が付けた会話名（issue #199）。`ClaudeSessionStore.getName()` を呼び出し側
+   * （`claudeChatView.ts`）が読み、既に付いていれば開いた時点からタブ名に反映する。
+   */
+  initialName?: string | undefined;
 }
 
 /**
@@ -239,6 +245,7 @@ export class ClaudeStreamSession {
       threadId,
       items: options.initialItems ?? [],
       todos: options.initialTodos ?? initialClaudeState.todos,
+      name: options.initialName,
     });
 
     this.initializeControl();
@@ -333,6 +340,27 @@ export class ClaudeStreamSession {
       `effort を ${effort} で送りました（CLIが結果を返さないため、効いたかどうかは確かめられません）`,
     );
     this.write(buildSetEffortRequest(requestId, effort));
+  }
+
+  /**
+   * 会話の名前を変える（issue #199）。
+   *
+   * 表示用の名前は拡張機能側（`ClaudeSessionStore`）を正とする設計のため（理由は
+   * `control.ts` の `buildRenameSessionRequest` のJSDoc参照）、CLIの応答を待たず
+   * `setFastMode` と同じくここで即座に `state.name` を更新して画面（タブ名・入力欄）へ
+   * 反映する。`rename_session` の送信はCLI側との整合を保つためのベストエフォートで、
+   * 失敗しても画面上の名前（呼び出し側が保存済み）は変わらない。
+   */
+  setName(name: string): void {
+    if (name === '') {
+      return;
+    }
+    this.update({ ...this.state, name });
+    if (this.proc === undefined) {
+      return;
+    }
+    const requestId = this.claim('settings', '会話名', `会話名を「${name}」に変更しました`);
+    this.write(buildRenameSessionRequest(requestId, name));
   }
 
   /**
