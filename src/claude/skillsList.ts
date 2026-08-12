@@ -1,4 +1,5 @@
-import type { SkillOrigin, SkillView } from '../provider/skills';
+import type { SkillOrigin, SkillView, SkillsSnapshot } from '../provider/skills';
+import type { ControlResponse } from './control';
 
 /**
  * Claude Codeの `reload_skills` control_requestの応答からskill一覧を組み立てる
@@ -66,6 +67,39 @@ export function parseClaudeSkillsList(raw: unknown): SkillView[] | undefined {
     });
   }
   return skills;
+}
+
+/**
+ * Claude Codeには有効/無効を切り替える経路も、判別する経路もない（実測。design.mdの
+ * 14.17参照）ことの注記。一覧を返す経路（`ClaudeSkillsProbe.read` と
+ * `ClaudeStreamSession.reloadSkills`）のどちらも同じ注記を添えるため、文言を1箇所へ
+ * まとめる（issue #202でこの警告が2箇所に出るようになった際にDRYへ寄せた）。
+ */
+const NO_TOGGLE_WARNING =
+  'Claude Codeには有効/無効を切り替える経路も、判別する経路もありません（実測。' +
+  'design.mdの14.17参照）。出どころ(ユーザー/プロジェクト/プラグイン)はCLIの表示用' +
+  '文字列からの推測です。';
+
+/**
+ * `reload_skills` control_requestの応答（`ControlResponse`）を`SkillsSnapshot`へ組み立てる。
+ *
+ * 設定パネル用の単発問い合わせ（`ClaudeSkillsProbe`）と、会話中のプロセスへ直接送る
+ * `ClaudeStreamSession.reloadSkills`（issue #202、design.md TP-90）の両方から使う
+ * 共通の正規化ロジック。応答が無い／エラー／形が想定外のいずれも `ok:false` へ倒し、
+ * 空配列（0件）とは区別する（design.mdの「黙って何も起きない状態を作らない」方針）。
+ */
+export function buildSkillsSnapshot(response: ControlResponse | undefined): SkillsSnapshot {
+  if (response === undefined) {
+    return { ok: false, reason: '応答がありませんでした' };
+  }
+  if (!response.ok) {
+    return { ok: false, reason: response.error ?? '不明なエラー' };
+  }
+  const skills = parseClaudeSkillsList(response.payload);
+  if (skills === undefined) {
+    return { ok: false, reason: '応答の形が想定外でした' };
+  }
+  return { ok: true, skills, warnings: [NO_TOGGLE_WARNING] };
 }
 
 interface OriginInference {

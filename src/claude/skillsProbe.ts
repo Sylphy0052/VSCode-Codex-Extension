@@ -8,7 +8,7 @@ import {
   readControlResponse,
   type ControlResponse,
 } from './control';
-import { parseClaudeSkillsList } from './skillsList';
+import { buildSkillsSnapshot } from './skillsList';
 
 /** 応答が返らないまま居座らせない。 */
 const TIMEOUT_MS = 20_000;
@@ -31,29 +31,11 @@ export class ClaudeSkillsProbe {
   /** skillsの一覧を読む。取得できなければ理由付きで返す。 */
   async read(): Promise<SkillsSnapshot> {
     const response = await this.send(buildReloadSkillsRequest('reload_skills'), 'reload_skills');
-    if (response === undefined) {
-      const reason = '応答がありませんでした';
-      this.log.warn(`skills一覧を取得できませんでした: ${reason}`);
-      return { ok: false, reason };
+    const snapshot = buildSkillsSnapshot(response);
+    if (!snapshot.ok) {
+      this.log.warn(`skills一覧を取得できませんでした: ${snapshot.reason}`);
     }
-    if (!response.ok) {
-      const reason = response.error ?? '不明なエラー';
-      this.log.warn(`skills一覧を取得できませんでした: ${reason}`);
-      return { ok: false, reason };
-    }
-    const skills = parseClaudeSkillsList(response.payload);
-    if (skills === undefined) {
-      return { ok: false, reason: '応答の形が想定外でした' };
-    }
-    return {
-      ok: true,
-      skills,
-      warnings: [
-        'Claude Codeには有効/無効を切り替える経路も、判別する経路もありません（実測。' +
-          'design.mdの14.17参照）。出どころ(ユーザー/プロジェクト/プラグイン)はCLIの表示用' +
-          '文字列からの推測です。',
-      ],
-    };
+    return snapshot;
   }
 
   /**

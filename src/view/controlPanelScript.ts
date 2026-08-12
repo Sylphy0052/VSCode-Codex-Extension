@@ -963,6 +963,10 @@ export function controlPanelScript(): string {
     vscode.postMessage({ type: 'newSession', provider: 'claude' });
   });
 
+  el('reloadClaudeSkills').addEventListener('click', () => {
+    vscode.postMessage({ type: 'reloadClaudeSkills' });
+  });
+
   selectProvider((vscode.getState() || {}).provider === 'claude' ? 'claude' : 'codex');
 
   window.addEventListener('message', (event) => {

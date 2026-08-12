@@ -1428,6 +1428,50 @@ Phase 0（issue #1 Z-07 / issue #2 Z-10）の時点では「両方とも実装�
 - `src/view/settingsProvider.ts`: `SettingsSnapshot` / `ClaudeSettingsSnapshot` に `skills: SkillsSnapshot` を追加。`toggleCodexSkill(path, enabled)` を新設（Claude Code側には対応する書き込みメソッドを持たない）
 - `src/view/controlPanelView.ts` / `controlPanelScript.ts` / `controlPanelStyles.ts`: 一覧の描画と有効/無効の切替（Codexのみ）。skillの名前・説明は必ず `textContent` でDOMへ入れ、HTMLとして解釈させない
 
+#### skillsを読み直す（issue #202、TP-90）
+
+`/reload-skills`（CLIの説明: 「Pick up skills added or changed on disk during this session」）は、
+その名の通り**セッション単位**の操作。`reload_skills` control_requestを送っても、送った先の
+プロセスの一覧しか更新されない（プロセスごとにディスクを独立に読む）ため、設定パネルが使う
+`ClaudeSkillsProbe`（単発プロセス）へ送っても、既に開いている会話のプロセスには何も起きない。
+
+実測（CLI 2.1.227。`--print --input-format stream-json` で長時間プロセスを1つ起動し、
+`initialize` の後に一時skillをディスクへ作ってから `reload_skills` を送った）:
+
+- 応答（`control_response`）にその場で作った一時skillが載る
+- あわせて `system/commands_changed` 通知が飛び、`commands` 配列にも同じ一時skillが載る（1回のreload_skillsに対し、通知が2回・応答が1回、順不同で届く。実測では
+  `commands_changed` → `control_response` → `commands_changed` の順）
+- 通知は`ClaudeStreamSession.receive()`の既存の経路（`readCommandsChanged`→`setCommands`→
+  `onCommands`）でそのままスラッシュコマンドの候補へ反映される。専用の配線を追加する必要は
+  無かった
+
+この実測結果から、実装は2段構えにした:
+
+1. **`ClaudeStreamSession.reloadSkills()`**（`src/claude/streamSession.ts`）: 会話中の
+   このプロセス自身へ`reload_skills`を送り、応答を`SkillsSnapshot`へ変換して返す。
+   プロセスが無ければ`undefined`（`checkMcpStatus`と同じ「見えない」側への倒し方）。
+   応答の正規化（`buildSkillsSnapshot`）は`ClaudeSkillsProbe.read()`と共通化した
+   （`src/claude/skillsList.ts`。以前は`skillsProbe.ts`だけに書かれていたロジックを
+   ここへ引き上げ、両方から呼ぶ）
+2. **`ClaudeChatViewManager.reloadSkillsForOpenSessions()`**（`src/view/claudeChatView.ts`）:
+   開いている会話それぞれの`reloadSkills()`を呼び、結果を会話に1行残す
+   （`設定 ・ skillsを読み直しました（N件）` / `設定 ・ skillsを読み直せませんでした: <理由>`）。
+   プロセスが無い（タブを閉じている）会話には何も残さない
+
+設定パネルの「読み直す」ボタン（`controlPanelView.ts`のClaude Codeタブ、skills一覧の直上）を
+押すと:
+
+- `SettingsProvider.reloadClaudeSkills()`が`listClaudeSkills`（＝`ClaudeSkillsProbe.read()`）を
+  呼び直し、パネルの一覧を更新する
+- 設定パネルは単発プロセスの`ClaudeSkillsProbe`しか持たず、既に開いている会話へは直接触れない。
+  そこで`newSession`と同じ経路（webview→VS Codeコマンド→`ClaudeChatViewManager`）で
+  `claude.reloadSkills`コマンドを実行し、開いている会話があればそちらの
+  `reloadSkillsForOpenSessions()`も走らせる
+
+Codexには`reload_skills`に相当する制御要求が無く、`skills/list`は呼ぶたびに毎回ディスクを
+読み直す（`forceReload`パラメータはあるが専用ボタンを設ける動機が無い）ため、この「読み直す」
+ボタンはClaude Code専用。
+
 ### 14.20 承認方法をキー操作で回す
 
 TUIは Shift+Tab で承認モードを循環させる。セレクタを開いて選ぶより速く、実際にはこちらばかり使う操作なので、チャット画面にも同じ入口を用意する（issue #13・TP-23）。

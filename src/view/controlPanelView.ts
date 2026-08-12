@@ -178,6 +178,20 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    if (m['type'] === 'reloadClaudeSkills') {
+      // Claude Code専用（issue #202、design.md TP-90）。Codexには`reload_skills`に
+      // 相当する制御要求が無く、一覧の取得自体は`refresh()`のたびに毎回新しく読んでいる
+      // ため「読み直す」操作を別途持つ意味が無い（`skills/list`はforceReloadを渡さない
+      // 限り単なる再読込であり、専用ボタンはClaude Codeにしか無い理由になる）
+      await this.settings.reloadClaudeSkills();
+      // 開いている会話があれば、そちらのプロセスへも送る。設定パネルの
+      // `ClaudeSkillsProbe`は単発プロセスで、既に開いている会話には触れられないため、
+      // VS Codeコマンド経由で`ClaudeChatViewManager`へ橋渡しする（`newSession`と同じ形）
+      await vscode.commands.executeCommand('claude.reloadSkills');
+      await this.post();
+      return;
+    }
+
     if (m['type'] === 'togglePlugin') {
       // Claude Code専用（issue #32）。Codexには有効/無効を切り替える経路が無い
       const cli = m['cli'];
@@ -544,6 +558,8 @@ ${controlPanelStyles()}
 
     <h2 class="sectionTitle">skills</h2>
     <p class="note">skillsはモデルへ渡す指示（プロンプト）です。特にプロジェクト側で定義されたskillは、cloneしただけで効く経路になりえます。Claude Codeにはこの拡張機能から有効/無効を切り替える経路がありません（実測。出どころの表示はCLIの説明文からの推測です）。</p>
+    <button id="reloadClaudeSkills" type="button">skillsを読み直す</button>
+    <p class="note">会話中にディスク上へ増減したskillを読み直します。開いている会話があれば、そちらのスラッシュコマンド候補も入れ替わります。</p>
     <div class="skillsList" id="skillsListClaude"></div>
 
     <h2 class="sectionTitle">plugins</h2>
