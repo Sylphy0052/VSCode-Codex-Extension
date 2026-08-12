@@ -29,6 +29,10 @@ const OVERRIDDEN_BY_FIXTURE = new Set([
   'claude.executablePath',
   'agent.activityLog.enabled',
   'agent.activityLog.dir',
+  // PR/MRの作成と `git push` を封じている（Issue #178）。値は次のテストで確かめる。
+  'agent.workflows.forge',
+  'agent.workflows.pullRequest',
+  'agent.workflows.finalMerge',
 ]);
 
 suite('設定（package.jsonのcontributes.configurationとの整合）', () => {
@@ -57,6 +61,17 @@ suite('設定（package.jsonのcontributes.configurationとの整合）', () => 
     assert.equal(config.get('codex.codexHome'), manifest.codexHome);
     assert.equal(config.get('claude.configDir'), manifest.claudeHome);
     assert.equal(config.get('agent.activityLog.enabled'), false);
+  });
+
+  test('統合テストの実行が origin へ push しうる経路は設定で塞がれている（Issue #178）', async () => {
+    await activateExtension();
+    const config = vscode.workspace.getConfiguration();
+
+    // PR/MRを作らない＝タスクブランチ・統合ブランチのpush（§16.18）そのものが通らない。
+    assert.equal(config.get('agent.workflows.forge'), 'none');
+    assert.equal(config.get('agent.workflows.pullRequest'), 'none');
+    // 統合ブランチ→mainの無人マージも行わせない。
+    assert.equal(config.get('agent.workflows.finalMerge'), 'pr-only');
   });
 
   test('resourceスコープの設定はワークスペースへ書き込むと読み直せる', async () => {
