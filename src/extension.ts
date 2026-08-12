@@ -625,9 +625,17 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     vscode.commands.registerCommand('codex.openConversation', (s: SessionSummary) =>
       conversations.open(s),
     ),
+    // `codex.forkSession` / `claude.forkSession` はコマンド自体を分ける（`codex.openChat` /
+    // `claude.openChat` と同じ、プロバイダ別にコマンドを分ける慣習。package.jsonのメニューの
+    // `when` 句で対象セッションを絞り込む）が、実処理の `forkSession` 関数は共通化する
+    // （issue #218）
     vscode.commands.registerCommand(
       'codex.forkSession',
-      (s: SessionSummary) => void forkSession(providers, chat, log, s),
+      (s: SessionSummary) => void forkSession(providers, chat, claudeChat, log, s),
+    ),
+    vscode.commands.registerCommand(
+      'claude.forkSession',
+      (s: SessionSummary) => void forkSession(providers, chat, claudeChat, log, s),
     ),
     vscode.commands.registerCommand('codex.archiveSession', (s: SessionSummary) =>
       runAction(actions, tree, log, 'archive', s),
@@ -1277,14 +1285,18 @@ async function forkFromTurn(
 }
 
 /**
- * セッション全体を分岐する。
+ * セッション全体を分岐する。`codex.forkSession` / `claude.forkSession` の共通処理
+ * （`openSession` と同じ、プロバイダで分岐して各画面へ委譲する形。issue #218）。
  *
- * Codexはapp-server経由で新しいスレッドを作れる。Claude Codeはidを指定できないため、
- * 分岐先の紐付けは確定しないまま開く。
+ * Codexはapp-server経由で新しいスレッドを作れる（ターンを指定しない分岐は、会話の
+ * 末尾から分岐するのと同じ）。Claude Codeは`-r <id> --fork-session`で分岐するが、
+ * 新しいidをCLIが振るため拡張機能側からは指定できず、分岐先の紐付けは確定しないまま開く
+ * （`ClaudeChatViewManager.openFork`のJSDoc、design.md §14.40参照）。
  */
 async function forkSession(
   providers: ProviderRegistry,
   chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
   log: Logger,
   session: SessionSummary,
 ): Promise<void> {
@@ -1293,14 +1305,12 @@ async function forkSession(
     void vscode.window.showInformationMessage('このセッションは分岐に対応していません');
     return;
   }
-  if (session.provider !== 'codex') {
-    void vscode.window.showInformationMessage(
-      'Claude Codeのセッション全体の分岐には対応していません',
-    );
+  log.info(`セッションを分岐します: ${session.id}`);
+  if (session.provider === 'claude') {
+    await claudeChat.openFork(session.id, `${provider.tabTitle(session)} (fork)`, session.cwd);
     return;
   }
   // ターンを指定しない分岐は、会話の末尾から分岐するのと同じ
-  log.info(`セッションを分岐します: ${session.id}`);
   await chat.openThread(session.id, `${provider.tabTitle(session)} (fork)`, session.cwd);
 }
 

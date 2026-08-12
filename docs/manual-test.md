@@ -15,7 +15,7 @@ npm run test:integration          # ディスプレイのある環境（VSCode�
 npm run test:integration:xvfb     # ヘッドレスLinux/WSL（xvfb-runで仮想ディスプレイを用意）
 ```
 
-自動化できているのは次の78件（実行して全件passを確認済み）。内訳の最新はdesign.md §11にある。
+自動化できているのは次の79件（実行して全件passを確認済み）。内訳の最新はdesign.md §11にある。
 
 - 土台（`extension.test.ts` の拡張機能有効化・コマンド登録・TreeView取得、`configuration.test.ts`
   の設定の読み書き）: 7件
@@ -43,17 +43,25 @@ npm run test:integration:xvfb     # ヘッドレスLinux/WSL（xvfb-runで仮想
   `ChatTestApi.simulateClaudeWebviewMessage`（`src/extension.ts`、Issue #188で新設。
   `ClaudeChatViewManager.simulateWebviewMessage` を追加し、`ChatViewManager` 側と同じ
   `handleMessage` 直呼びの入口にした）からwebview発の操作を駆動している。L群のうち
-  L-07（履歴の表示名の作り方）とL-10（forkでidが未確定になること）は対象外にした。L-07は
-  純粋関数（`transcript.ts`）の話でユニットテスト（`test/unit/claudeTranscript.test.ts`）が
-  既に担保しており、TreeView経由の表示自体もH-00/H-01（`sessionHistory.test.ts`）が別途
-  確かめているため、L群専用のfixtureを足してまで重複した主張を統合テストへ足す価値が薄いと
-  判断した。L-10は、`ClaudeChatViewManager` が `fork`（`-r <id> --fork-session`）を渡す
+  L-07（履歴の表示名の作り方）は対象外にした。純粋関数（`transcript.ts`）の話で
+  ユニットテスト（`test/unit/claudeTranscript.test.ts`）が既に担保しており、TreeView経由の
+  表示自体もH-00/H-01（`sessionHistory.test.ts`）が別途確かめているため、L群専用のfixtureを
+  足してまで重複した主張を統合テストへ足す価値が薄いと判断した。L-10（forkでidが未確定に
+  なること）は、当時`ClaudeChatViewManager` が `fork`（`-r <id> --fork-session`）を渡す
   経路を持たず、`extension.ts` の `forkSession` がClaude Codeセッションを明示的に
   「Claude Codeのセッション全体の分岐には対応していません」で拒否する実装になっており
   （`argvBuilder.ts` の `targetArgs` 自体は `fork` を組み立てられるが、呼び出し側の配線が
-  無い）、駆動する入口が無いため統合テストとして書けなかった。design.mdの「fork（idは
-  未確定のまま）」という記述と実装の間にギャップがあることが分かったので、これは
-  実装側の課題として別Issueに切り出す
+  無い）、駆動する入口が無いため統合テストとして書けず、design.mdの「fork（idは未確定の
+  まま）」という記述と実装のギャップとして実装側の課題（issue #218）へ切り出していた。
+  下記のとおりIssue #218で配線したため、今回L群へ復帰させた
+- Claude Codeセッションのforkの配線（この文書のL-10、`chatClaudeThreadFlow.test.ts`、
+  Issue #218。design.md §14.40）: 1件。`claude.forkSession`コマンド（issue #218で新設）を
+  実行すると`-r <id> --fork-session`が起動引数に渡ること、forkで開いた新しいタブとは別に
+  元のタブが無傷のまま同じidで操作できることを確かめる。分岐先の新しいidはCLIが振るため
+  拡張機能からは追跡できず、`this.panels`に元のidとは別の合成キーで登録される
+  （復元・作業記録の対象外になることの裏付け）。実際に`state.threadId`が確定しないまま
+  になることは`test/unit/claudeChatViewManager.test.ts`側で検証しており、統合テストと
+  ユニットテストを合わせて受入基準を満たす
 
 履歴一覧は当初、実CLIを呼ばせないために`executablePath`を存在しないパスへ固定する制約と
 `ProviderRegistry.available()`の仕様（実行ファイルを解決できないプロバイダを一覧からまるごと
@@ -101,18 +109,19 @@ TreeItemの値までしか確かめられないため、各ケースの手順は
 
 ### L群（Claude Code画面・40件）
 
-- **機械**（15件中13件をIssue #188で自動化済み。`chatClaudeHandshake.test.ts` /
-  `chatClaudeThreadFlow.test.ts` / `chatClaudeSettings.test.ts`）: L-02（`initialize` の
+- **機械**（15件中14件を自動化済み。13件はIssue #188、L-10はIssue #218。
+  `chatClaudeHandshake.test.ts` / `chatClaudeThreadFlow.test.ts` /
+  `chatClaudeSettings.test.ts`）: L-02（`initialize` の
   ハンドシェイク。成功時に警告が出ないことと、失敗時に一度だけ警告が出て会話は続けられる
   こと）、L-03（`can_use_tool` の許可・拒否・セッション内許可の往復）、L-05（`interrupt`）、
   L-06（sessionIdが起動前に採番され`--session-id`と紐付くこと）、L-08 / L-09（`--resume`で
-  起動し、二重に開かないこと）、L-12（`get_context_usage`の自動取得と圧縮ボタンの送信）、
+  起動し、二重に開かないこと）、L-10（forkが`-r <id> --fork-session`で起動し、元のタブは
+  無傷で残ること）、L-12（`get_context_usage`の自動取得と圧縮ボタンの送信）、
   L-14（`set_model` / `set_permission_mode`の送信と、既定へ戻す・bypassPermissions取消時に
   送らないこと）、L-15（Plan modeの往復）、L-18（問い合わせカードの経路が無いこと）、
   L-24（`/code-review`をそのまま発言として送ること）、L-29（`rewind_files`のパラメータと
   対象が無い場合の分岐）、L-39 / L-40（`!`と`#`が拡張機能側で完結する）。
-  L-07（表示名の作り方）とL-10（forkでidが未確定になる）は対象外にした（理由は上の
-  「統合テストで自動化した範囲」参照）
+  L-07（表示名の作り方）は対象外にした（理由は上の「統合テストで自動化した範囲」参照）
 - **一部機械**（19件）: L-01 / L-04 / L-11 / L-13 / L-16 / L-17 / L-19 / L-20 / L-21 / L-22 / L-23 / L-25 / L-26 / L-27 / L-28 / L-30 / L-31 / L-32 / L-34 / L-35 / L-36 / L-37 / L-38 のうち、送受信するデータは機械で、描画は実機
 - **実機**（6件）: L-33（キーバインド）、L-28のlogin/logout、L-26の実エージェントでの応答傾向、L-30の `/insights` レポートの中身、L-34の実検索、L-22の実画像の見え方
 
@@ -751,8 +760,19 @@ transcriptを実際に解決できること、開いたままの同じセッシ�
 
 ### L-10 fork（idが未確定になること）
 
-- 操作: 履歴からClaude Codeセッションをforkする
-- 期待: 新しいタブが開いて会話は継続できるが、**そのタブは復元と作業記録の対象外**になる（CLIが振る新しいidを追跡できないため）
+`claude.forkSession`が`-r <id> --fork-session`で起動すること・元のタブが無傷で残ることは
+統合テストへ移した（Issue #218、`chatClaudeThreadFlow.test.ts`）。**実際にwebviewへ会話が
+描画され続けること**と、`registerWebviewPanelSerializer`がウィンドウリロード時に**このタブ
+だけ復元しない**経路——実VSCodeのライフサイクルが要るため、統合テストでは駆動できない
+（L-08/L-09と同じ理由）。
+
+- 操作: 履歴からClaude Codeセッションをforkする（履歴を右クリック→「このセッションをfork
+  する（Claude Code）」、`claude.forkSession`）
+- 期待: 新しいタブが開いて会話は継続できる。開いた直後に「このタブは元のセッションを
+  分岐したものです。…復元と作業記録（日報・週報）の対象外になります。」の1行が会話に残る
+- 操作: ウィンドウをリロードする（`Developer: Reload Window`）
+- 期待: 元のセッションのタブは（L-09と同じく）復元されるが、**forkで開いたタブだけは
+  復元されない**（CLIが振る新しいidを拡張機能が追跡できないため）
 - 確認: リロード後にそのタブが復元されないことが期待動作であること
 
 ### L-11 使用量の表示
@@ -1428,7 +1448,10 @@ design.md §14.39参照。issue本文の想定（「デバッグログを会話�
 
 - 操作: Codexのセッションを右クリック →「このセッションをforkする」（`codex.forkSession`）
 - 期待: 元のセッションを引き継いだチャット画面が開く。元は無傷で残る
-- 確認: Claude Codeのセッションでは「対応していません」と出る（新しいidを追えないため）
+- 確認: Claude Codeのセッションを右クリックすると代わりに「このセッションをforkする
+  （Claude Code）」（`claude.forkSession`）が出る。実行すると新しいタブが開き会話は継続
+  できるが、CLIが振る新しいidを拡張機能が追跡できないため復元・作業記録の対象外になる
+  （issue #218、design.md §14.40、詳細と自動化した範囲はL-10参照）
 
 ### H-06 コマンドパレットからの再開
 

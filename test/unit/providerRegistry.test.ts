@@ -30,7 +30,7 @@ const fake = (
     label: id,
     installUrl: '',
     executableSettingKey: '',
-    capabilities: { fork: true, forkFromTurn: false, archive: false, delete: false, rename: false },
+    capabilities: { fork: true, forkFromTurn: false, archive: false, delete: false },
     locate: () =>
       options.found === false
         ? { ok: false, reason: 'not-found', attempted: id }

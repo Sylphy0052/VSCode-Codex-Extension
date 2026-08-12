@@ -23,7 +23,6 @@ export class CodexProvider implements AgentProvider {
     forkFromTurn: true,
     archive: true,
     delete: true,
-    rename: true,
   };
 
   constructor(private readonly store: SessionStore) {}

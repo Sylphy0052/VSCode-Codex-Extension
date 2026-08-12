@@ -158,6 +158,71 @@ suite('Claude Code画面: プロトコルの状態遷移と配線（Issue #188�
     assert.equal(openTabLabels().length, 1, 'タブが二重に開いている');
   });
 
+  test('L-10: forkは-r <id> --fork-sessionで起動し、元のタブとは別の、idが未確定なタブが開く', async function () {
+    this.timeout(TEST_TIMEOUT_MS);
+    const manifest = readManifest();
+    const fake = createFakeClaudeSpawn();
+    chat.setClaudeSpawn(fake.spawn);
+
+    // `forkSession`（extension.ts）は`session.provider`でCodex/Claudeを振り分けるため、
+    // `claude.openChat`（provider不問）用の他テストと違い、ここでは明示しないと
+    // `providers.get(undefined)`がundefinedになり何も起きない
+    const session = {
+      id: manifest.claude.inScope.id,
+      provider: 'claude' as const,
+      threadName: manifest.claude.inScope.firstMessage,
+      cwd: manifest.workspaceFolder,
+    };
+
+    // 先に元のセッションを開いておく。fork後もこのタブが無傷のまま残ることを併せて確かめる
+    await vscode.commands.executeCommand('claude.openChat', session);
+    await waitFor(
+      () => fake.processes.length,
+      (count) => count > 0,
+      WAIT_OPTIONS,
+    );
+    // このidで操作できる＝元のタブが`this.panels`に登録されていることの確認（L-06と同じ考え方）
+    await chat.simulateClaudeWebviewMessage(session.id, { type: 'ready' });
+
+    // 履歴のコンテキストメニュー相当のコマンド。`codex.forkSession`を流用せず新設した
+    // `claude.forkSession`（issue #218、package.jsonのview/item/context参照）
+    await vscode.commands.executeCommand('claude.forkSession', session);
+    await waitFor(
+      () => fake.processes.length,
+      (count) => count > 1,
+      WAIT_OPTIONS,
+    );
+
+    // 2件目の起動が実際のfork。`-r <元のid> --fork-session`で、`--session-id`（新規経路）は
+    // 混ざらない（argvBuilder.tsのtargetArgs参照）
+    const forkArgs = fake.calls[1]?.args ?? [];
+    const idx = forkArgs.indexOf('-r');
+    assert.ok(idx >= 0, `-r で起動していない: ${forkArgs.join(' ')}`);
+    assert.equal(forkArgs[idx + 1], session.id);
+    assert.ok(
+      forkArgs.includes('--fork-session'),
+      `--fork-sessionが渡っていない: ${forkArgs.join(' ')}`,
+    );
+    assert.equal(forkArgs.includes('--session-id'), false, 'forkなのに--session-idも渡している');
+
+    // タブが2枚に増える（元のタブを置き換えたのではなく、別タブが開いた）
+    await waitFor(
+      () => openTabLabels().length,
+      (count) => count === 2,
+      WAIT_OPTIONS,
+    );
+
+    // 元のセッションのタブは、forkの後も引き続き同じidで操作できる（無傷で残っている）
+    await chat.simulateClaudeWebviewMessage(session.id, { type: 'ready' });
+
+    // 分岐先の新しいidはCLIが振るため拡張機能からは追跡できず、`this.panels`には元のidとは
+    // 別の合成キーで登録される（design.md §14.40）。外部から確かめられる唯一の手がかりは
+    // 「元のidでは新しいタブを名指しできない」ことで、それはこのテストの前段（元のidが
+    // 引き続き元のタブだけを指すこと）で既に確認済み。復元・作業記録の対象外になることは
+    // `state.threadId`が確定しないという単体テスト側の検証（`claudeChatViewManager.test.ts`）
+    // で担保する
+  });
+
   test('C-13b: 割り込みの手段が無いため待ち行列に積み、ターン完了後に順に送る。「今すぐ送る」は中断してから送る', async function () {
     this.timeout(TEST_TIMEOUT_MS);
     const { proc, sessionId } = await openClaudeChat();

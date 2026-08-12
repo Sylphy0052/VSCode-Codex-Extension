@@ -766,7 +766,7 @@ codex app-server generate-ts --out <DIR>            # TypeScript バインディ
 - テスト
   - unit（vitest、`test/unit/`）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で101ファイル1890件
   - **VSCodeに依存する層（`view/**` など、`vscode` モジュールを直接触るファイル）はunitテストから扱わない**。`vscode` はunitテストのプロセス内でimportできないため、判断が要るロジックは純粋関数へ切り出してそちらを試す（例: `view/panelState.ts`）
-  - integration（`@vscode/test-electron`、`test/integration/`）: 実VSCode（拡張機能ホスト）上で動く。WSL（xvfb-run経由）で実際に動作することを確認済み（issue #147）。自動化済みの範囲は、拡張機能の有効化・コマンド登録・設定の読み書き（`extension.test.ts` / `configuration.test.ts`、計7件）と、**ワークフローの並列実行**（`workflow.test.ts`、5件。Issue #158）、**履歴一覧**（`sessionHistory.test.ts`、5件。Issue #164）、**疑似worktree**（`workflowPseudoWorktree.test.ts`、5件。Issue #168）、**PR/MRの前提が欠けている場合**（`workflowForgePrerequisites.test.ts`、4件。Issue #169。§16.18）、**PR/MRの作成順序と最終マージ**（`workflowForgeOrder.test.ts`、5件。Issue #172。§16.18）、**統合の衝突と自動解決**（`workflowMerge.test.ts`、4件。Issue #170。§16.17）、**タスク間メッセージング**（`workflowMessaging.test.ts`、6件。Issue #171。§16.21）、**ロードマップの更新と片付け**（`workflowRoadmap.test.ts`、4件。Issue #173。§16.19・§16.17）、**チャット画面の統合テストの土台**（`chatHarness.test.ts`、3件。Issue #186）。ワークフローは`T1 → (T2 || T3) → T4`が依存順に進むこと・T2とT3が同時に走ること・両者が別のworktreeで動いて互いのファイルを踏まないこと・「タスク停止」がそのタスクだけを倒すこと・「中断」がターンだけを止めること・ノードから会話タブへの導線が生きていることを、実VSCode上で確かめる。CLIとの境界（`TaskSessionHost.openTaskSession`）だけを`ExtensionTestApi.workflow`経由でフェイクへ差し替え（`AGENT_SESSIONS_INTEGRATION_TEST=1`が立っているときだけ公開する口。立っていなければ差し替えの経路そのものが無い）、worktreeの作成・スケジューリング・状態遷移・workspaceStateへの保存は実物を通す。画面上の見え方（グラフの段組み・ノードの色・1行要約・タブの復元）と実CLIを伴う挙動は自動化できておらず、[manual-test.md](manual-test.md)のW群に残る。W群の手動手順は、機械で確かめられる範囲を除いた「画面の見え方・モデルの出力そのもの・実ホスト（GitHub / GitLab）が絡む部分」だけへ絞ってある（W-A〜W-E。旧番号W-01〜W-21との対応は同ファイルのW群冒頭）。W群の移送はIssue #167（子: #168〜#173）で完了しており、手動に残っているのは実機・実ホスト・モデルの出力に依存するものだけである。疑似worktree（§16.20）の統合テストは`WorkflowRunner.start(defPath, repoRoot)`の`repoRoot`へVSCodeが開いているワークスペース以外のパスを渡すことで、1回のVSCode起動に相乗りしている。**その起点は`os.tmpdir()`の下へ作る**。`isGitWorkingTree`は`git rev-parse`で親ディレクトリを遡って判定するため、`.vscode-test/`の下（＝このリポジトリの作業ツリーの中）に置くと`.gitignore`済みでも「gitリポジトリである」と判定され、疑似worktreeではなくgitのworktree経路へ流れてしまう（Issue #168で実測）。履歴一覧（TreeView）を狙った`sessionHistory.test.ts`は、`executablePath`を存在しないパスへ固定したまま（実CLIを一切呼ばせないまま）一覧が出ることを確かめる。当初は`ProviderRegistry.available()`が実行ファイルを解決できないプロバイダを一覧からまるごと除外していたため5件とも「一覧が空」で失敗していたが、一覧の構築はファイル読みだけで完結しCLIプロセスを要さないため、実行ファイルの解決可否で絞るのをやめた（Issue #164、§5）。`activate()`はテスト専用の最小限の内部参照（`ExtensionTestApi`）を返し、`SessionTreeProvider`の実インスタンスへテストからアクセスできるようにしてある。統合テストの実行がリモートへ到達しないことは、設定（`forge` / `pullRequest` / `finalMerge`）とフィクスチャ側のガードの二重で保証する（§14.33）。チャット画面（C群・L群）についても同じ「CLIとの境界だけを差し替える」方式が取れることを確かめてある（Issue #186）。境界はCodexが`app-server`との接続（`AppServerConnectionPort`。`ChatViewManager`が構築時に1つ作るため、`activate()`の後から差し替えられるよう間へ包みを1枚挟んでいる）、Claude Codeがプロセスの起動（`ClaudeSpawnPort`。stream-jsonの組み立てとcontrol protocolの往復は`ClaudeStreamSession`の実物を通るので、送っているJSONの中身と順序をそのまま観測できる）。どちらも`ExtensionTestApi.chat`（`AGENT_SESSIONS_INTEGRATION_TEST=1`のときだけ公開）から差し替え、渡さなければ実物へ委譲するため本番の経路は変わらない。C群44件・L群40件の「機械で確かめられる / 実機でしか確かめられない」の仕分けは[manual-test.md](manual-test.md)にあり、移送はIssue #187（Codex）・#188（Claude Code）で進める。Codex側（C群）は#187で、機械に仕分けた16件中15件を`chatCodexApprovals.test.ts`・`chatCodexThreadFlow.test.ts`（計15件）へ移した。webviewのボタン操作はレンダラー側（別プロセス）のJSが担うため拡張機能ホスト側のテストコードから直接クリックを再現できず、`ChatTestApi.simulateCodexWebviewMessage`（`AGENT_SESSIONS_INTEGRATION_TEST=1`限定）を新設し、`panel.webview.onDidReceiveMessage`が受け取るのと同じ形のメッセージを`ChatViewManager.handleMessage`へ直接渡すことで承認の決定・発言の送信・分岐などwebview発の操作を駆動している。タブ復元（`registerWebviewPanelSerializer`がウィンドウリロードで実際にパネルを復元する経路）だけは実VSCodeのライフサイクルが要るため対象外で、C-13b（Claude Codeが常に待ち行列に積まれる挙動）はL群側（#188）で自動化した。Claude Code側（L群）は#188で、機械に仕分けた15件中13件を`chatClaudeHandshake.test.ts`（L-02の成功/失敗2ケース・L-03・L-18、計4件）・`chatClaudeThreadFlow.test.ts`（L-05・L-06・L-08/L-09を1テストで両方確認・C-13b、計4件）・`chatClaudeSettings.test.ts`（L-12・L-14・L-15・L-24・L-29・L-39・L-40、計7件）へ移した（計15件）。Codex画面と同じ考え方で`ClaudeChatViewManager.simulateWebviewMessage`（`ChatViewManager`側と同じ`handleMessage`直呼びの入口）を新設し、`ChatTestApi.simulateClaudeWebviewMessage`（`AGENT_SESSIONS_INTEGRATION_TEST=1`限定）から駆動している。L群のうちL-07（履歴の表示名の作り方）はユニットテスト（`test/unit/claudeTranscript.test.ts`）と`sessionHistory.test.ts`のH-00/H-01が既に担保しておりL群専用fixtureを足す価値が薄いため、L-10（forkでidが未確定になること）は`ClaudeChatViewManager`が`fork`ターゲット（`-r <id> --fork-session`）で起動する経路を持たず`extension.ts`の`forkSession`がClaude Codeセッションを明示的に拒否する実装になっていて駆動する入口が無いため、それぞれ対象外にした（後者は設計と実装のギャップとして別Issueへ切り出す）。既定の `npm run check` には含めない（実VSCodeのダウンロード・起動が要り重いため）。`npm run test:integration`（ディスプレイあり）/ `npm run test:integration:xvfb`（ヘッドレスLinux/WSL）で明示的に実行する。後者は`scripts/xvfb-vscode-test.sh`を経由する。`XDG_RUNTIME_DIR`が無い環境ではVSCodeがウィンドウを作る前に無言で止まりハングするため、使い捨てのディレクトリを用意して渡している（§14.32）
+  - integration（`@vscode/test-electron`、`test/integration/`）: 実VSCode（拡張機能ホスト）上で動く。WSL（xvfb-run経由）で実際に動作することを確認済み（issue #147）。自動化済みの範囲は、拡張機能の有効化・コマンド登録・設定の読み書き（`extension.test.ts` / `configuration.test.ts`、計7件）と、**ワークフローの並列実行**（`workflow.test.ts`、5件。Issue #158）、**履歴一覧**（`sessionHistory.test.ts`、5件。Issue #164）、**疑似worktree**（`workflowPseudoWorktree.test.ts`、5件。Issue #168）、**PR/MRの前提が欠けている場合**（`workflowForgePrerequisites.test.ts`、4件。Issue #169。§16.18）、**PR/MRの作成順序と最終マージ**（`workflowForgeOrder.test.ts`、5件。Issue #172。§16.18）、**統合の衝突と自動解決**（`workflowMerge.test.ts`、4件。Issue #170。§16.17）、**タスク間メッセージング**（`workflowMessaging.test.ts`、6件。Issue #171。§16.21）、**ロードマップの更新と片付け**（`workflowRoadmap.test.ts`、4件。Issue #173。§16.19・§16.17）、**チャット画面の統合テストの土台**（`chatHarness.test.ts`、3件。Issue #186）。ワークフローは`T1 → (T2 || T3) → T4`が依存順に進むこと・T2とT3が同時に走ること・両者が別のworktreeで動いて互いのファイルを踏まないこと・「タスク停止」がそのタスクだけを倒すこと・「中断」がターンだけを止めること・ノードから会話タブへの導線が生きていることを、実VSCode上で確かめる。CLIとの境界（`TaskSessionHost.openTaskSession`）だけを`ExtensionTestApi.workflow`経由でフェイクへ差し替え（`AGENT_SESSIONS_INTEGRATION_TEST=1`が立っているときだけ公開する口。立っていなければ差し替えの経路そのものが無い）、worktreeの作成・スケジューリング・状態遷移・workspaceStateへの保存は実物を通す。画面上の見え方（グラフの段組み・ノードの色・1行要約・タブの復元）と実CLIを伴う挙動は自動化できておらず、[manual-test.md](manual-test.md)のW群に残る。W群の手動手順は、機械で確かめられる範囲を除いた「画面の見え方・モデルの出力そのもの・実ホスト（GitHub / GitLab）が絡む部分」だけへ絞ってある（W-A〜W-E。旧番号W-01〜W-21との対応は同ファイルのW群冒頭）。W群の移送はIssue #167（子: #168〜#173）で完了しており、手動に残っているのは実機・実ホスト・モデルの出力に依存するものだけである。疑似worktree（§16.20）の統合テストは`WorkflowRunner.start(defPath, repoRoot)`の`repoRoot`へVSCodeが開いているワークスペース以外のパスを渡すことで、1回のVSCode起動に相乗りしている。**その起点は`os.tmpdir()`の下へ作る**。`isGitWorkingTree`は`git rev-parse`で親ディレクトリを遡って判定するため、`.vscode-test/`の下（＝このリポジトリの作業ツリーの中）に置くと`.gitignore`済みでも「gitリポジトリである」と判定され、疑似worktreeではなくgitのworktree経路へ流れてしまう（Issue #168で実測）。履歴一覧（TreeView）を狙った`sessionHistory.test.ts`は、`executablePath`を存在しないパスへ固定したまま（実CLIを一切呼ばせないまま）一覧が出ることを確かめる。当初は`ProviderRegistry.available()`が実行ファイルを解決できないプロバイダを一覧からまるごと除外していたため5件とも「一覧が空」で失敗していたが、一覧の構築はファイル読みだけで完結しCLIプロセスを要さないため、実行ファイルの解決可否で絞るのをやめた（Issue #164、§5）。`activate()`はテスト専用の最小限の内部参照（`ExtensionTestApi`）を返し、`SessionTreeProvider`の実インスタンスへテストからアクセスできるようにしてある。統合テストの実行がリモートへ到達しないことは、設定（`forge` / `pullRequest` / `finalMerge`）とフィクスチャ側のガードの二重で保証する（§14.33）。チャット画面（C群・L群）についても同じ「CLIとの境界だけを差し替える」方式が取れることを確かめてある（Issue #186）。境界はCodexが`app-server`との接続（`AppServerConnectionPort`。`ChatViewManager`が構築時に1つ作るため、`activate()`の後から差し替えられるよう間へ包みを1枚挟んでいる）、Claude Codeがプロセスの起動（`ClaudeSpawnPort`。stream-jsonの組み立てとcontrol protocolの往復は`ClaudeStreamSession`の実物を通るので、送っているJSONの中身と順序をそのまま観測できる）。どちらも`ExtensionTestApi.chat`（`AGENT_SESSIONS_INTEGRATION_TEST=1`のときだけ公開）から差し替え、渡さなければ実物へ委譲するため本番の経路は変わらない。C群44件・L群40件の「機械で確かめられる / 実機でしか確かめられない」の仕分けは[manual-test.md](manual-test.md)にあり、移送はIssue #187（Codex）・#188（Claude Code）で進める。Codex側（C群）は#187で、機械に仕分けた16件中15件を`chatCodexApprovals.test.ts`・`chatCodexThreadFlow.test.ts`（計15件）へ移した。webviewのボタン操作はレンダラー側（別プロセス）のJSが担うため拡張機能ホスト側のテストコードから直接クリックを再現できず、`ChatTestApi.simulateCodexWebviewMessage`（`AGENT_SESSIONS_INTEGRATION_TEST=1`限定）を新設し、`panel.webview.onDidReceiveMessage`が受け取るのと同じ形のメッセージを`ChatViewManager.handleMessage`へ直接渡すことで承認の決定・発言の送信・分岐などwebview発の操作を駆動している。タブ復元（`registerWebviewPanelSerializer`がウィンドウリロードで実際にパネルを復元する経路）だけは実VSCodeのライフサイクルが要るため対象外で、C-13b（Claude Codeが常に待ち行列に積まれる挙動）はL群側（#188）で自動化した。Claude Code側（L群）は#188で、機械に仕分けた15件中13件を`chatClaudeHandshake.test.ts`（L-02の成功/失敗2ケース・L-03・L-18、計4件）・`chatClaudeThreadFlow.test.ts`（L-05・L-06・L-08/L-09を1テストで両方確認・C-13b、計4件）・`chatClaudeSettings.test.ts`（L-12・L-14・L-15・L-24・L-29・L-39・L-40、計7件）へ移した（計15件）。Codex画面と同じ考え方で`ClaudeChatViewManager.simulateWebviewMessage`（`ChatViewManager`側と同じ`handleMessage`直呼びの入口）を新設し、`ChatTestApi.simulateClaudeWebviewMessage`（`AGENT_SESSIONS_INTEGRATION_TEST=1`限定）から駆動している。L群のうちL-07（履歴の表示名の作り方）はユニットテスト（`test/unit/claudeTranscript.test.ts`）と`sessionHistory.test.ts`のH-00/H-01が既に担保しておりL群専用fixtureを足す価値が薄いため対象外にした。L-10（forkでidが未確定になること）は、当時`ClaudeChatViewManager`が`fork`ターゲット（`-r <id> --fork-session`）で起動する経路を持たず`extension.ts`の`forkSession`がClaude Codeセッションを明示的に拒否する実装になっていて駆動する入口が無いため対象外にし、設計と実装のギャップとして別Issue（#218）へ切り出していた。Issue #218で`ClaudeChatViewManager.openFork`と`claude.forkSession`コマンドを新設して配線し（§14.40）、`chatClaudeThreadFlow.test.ts`へ1件追加してL群へ復帰させた（計16件。`-r <id> --fork-session`が起動引数に渡ることと元のタブが無傷で残ることを確かめ、`state.threadId`が確定しないままになることは`claudeChatViewManager.test.ts`側のユニットテストで補う）。既定の `npm run check` には含めない（実VSCodeのダウンロード・起動が要り重いため）。`npm run test:integration`（ディスプレイあり）/ `npm run test:integration:xvfb`（ヘッドレスLinux/WSL）で明示的に実行する。後者は`scripts/xvfb-vscode-test.sh`を経由する。`XDG_RUNTIME_DIR`が無い環境ではVSCodeがウィンドウを作る前に無言で止まりハングするため、使い捨てのディレクトリを用意して渡している（§14.32）
   - 実CLIプロセス・Webviewの中身・承認カードのような、実際のCodex/Claude Codeとの対話が要る範囲、および上記の理由で自動化に至らなかった範囲は、引き続き[manual-test.md](manual-test.md)のチェックリストと実施記録で担保する
 - `scripts/check.sh` に lint / typecheck / test を集約し、commit前に全緑を必須とする（integrationテストは含まない）
 - パッケージング: `@vscode/vsce`
@@ -848,7 +848,7 @@ src/claude/
 
 検証（2026-08-07、CLI 2.1.223）: 指定したUUIDと同名の transcript が `~/.claude/projects/<slug>/` に作られることを確認。
 
-例外は `fork`（`-r <id> --fork-session`）で、この場合の新しいidはCLIが振るためこちらから指定できない。そのタブは紐付け未確定のまま扱い、復元と作業記録の対象外になる。
+例外は `fork`（`-r <id> --fork-session`）で、この場合の新しいidはCLIが振るためこちらから指定できない。そのタブは紐付け未確定のまま扱い、復元と作業記録の対象外になる。**この段落の記述はissue #218以前は設計のみで、`ClaudeChatViewManager` 側に実際の配線が無かった（§14.40参照）。**
 
 ### 14.4 チャット画面（stream-json）
 
@@ -874,17 +874,17 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 
 ### 14.6 プロバイダごとにできること
 
-| 操作                                                                              | Codex                                                               | Claude Code                                                     |
-| --------------------------------------------------------------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------- |
-| 新規 / resume / タブ復元                                                          | ○                                                                   | ○                                                               |
-| チャット画面（承認・中断込み）                                                    | ○                                                                   | ○                                                               |
-| fork（セッション全体）                                                            | ○                                                                   | ○（idは未確定のまま）                                           |
-| 会話の途中のターンから分岐                                                        | ○                                                                   | ×（CLIに手段が無い）                                            |
-| 巻き戻し（[#21](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/21)） | ×（`thread/rollback` はdeprecatedかつファイルを戻さない。採らない） | ○（`rewind_files`。**ファイルだけ**戻す。会話には触れない）     |
-| archive / unarchive / delete                                                      | ○                                                                   | ×（CLIに手段が無い。ファイルを直接消すことはしない）            |
-| セッション名の変更                                                                | ○                                                                   | ×（要約名の概念が無い）                                         |
-| 問い合わせカード（§9.9）                                                          | ○                                                                   | ×（同じ要求が届かない）                                         |
-| コードレビューの起動（§9.11）                                                     | ○（`review/start`。QuickPickで対象とdeliveryを選ぶ）                | ○（`/code-review` を発言として送るだけ。CLIが対話で対象を聞く） |
+| 操作                                                                              | Codex                                                               | Claude Code                                                                              |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| 新規 / resume / タブ復元                                                          | ○                                                                   | ○                                                                                        |
+| チャット画面（承認・中断込み）                                                    | ○                                                                   | ○                                                                                        |
+| fork（セッション全体、§14.40）                                                    | ○                                                                   | ○（idは未確定のまま）                                                                    |
+| 会話の途中のターンから分岐                                                        | ○                                                                   | ×（CLIに手段が無い）                                                                     |
+| 巻き戻し（[#21](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/21)） | ×（`thread/rollback` はdeprecatedかつファイルを戻さない。採らない） | ○（`rewind_files`。**ファイルだけ**戻す。会話には触れない）                              |
+| archive / unarchive / delete                                                      | ○                                                                   | ×（CLIに手段が無い。ファイルを直接消すことはしない）                                     |
+| セッション名の変更（§14.35）                                                      | ○（app-server側に永続化）                                           | ○（拡張機能ローカルの`ClaudeSessionNameStore`止まり。CLI側の`rename_session`は使わない） |
+| 問い合わせカード（§9.9）                                                          | ○                                                                   | ×（同じ要求が届かない）                                                                  |
+| コードレビューの起動（§9.11）                                                     | ○（`review/start`。QuickPickで対象とdeliveryを選ぶ）                | ○（`/code-review` を発言として送るだけ。CLIが対話で対象を聞く）                          |
 
 対応しない操作はTreeViewの `contextValue`（`codexSession.<provider>`）でメニューから隠す。
 
@@ -897,7 +897,7 @@ Codexの `forkFromTurn`（`thread/fork` に `lastTurnId` を渡す。§9.5「会
 1. **`initialize` の `commands`（90件）に `branch` / `fork` は含まれない**。一方、CLIバイナリの文字列解析では `name:"branch"`（`type:"local-jsx"`、`description:"Create a branch of the current conversation at this point"`）と `name:"fork"`（`type:"local-jsx"`、`description:"Copy this conversation into a new background session and keep working here"`）が実在することを確認した。`local-jsx` は対話的なUIコンポーネント（Ink）の起動を要求する型で、TTYを持たない `--print` では一覧から除かれているとみられる。
 2. **`/branch <name>` / `/fork <directive>` をユーザーメッセージとして送っても実行されない**。CLIは `model: "<synthetic>"` の応答で `"/branch isn't available in this environment."` / `"/fork isn't available in this environment."` を返すだけで、新しいセッションもtranscriptも作られない（実測。CLI自身が安全側に倒して即座に拒否しており、副作用は無い）。
 3. **control_requestのsubtypeにも無い**。`fork_session` `branch_session` `create_branch` `branch` `fork` `branch_conversation` `fork_conversation` `rewind_session` `rewind` `checkpoint` `create_checkpoint` `restore_checkpoint` `session_fork` `session_branch` の14候補を実測し、すべて `Unsupported control request subtype: <name>` で拒否された。
-4. **起動引数にも該当が無い**。`claude --help` に `--fork-session`（セッション全体のfork。既存実装で使用中）はあるが、ターンを指定できる引数は無い。`--resume` はサブコマンドではなくオプションのため専用の `--help` は無い（`claude --resume --help` は通常の `--help` と同じ出力）。
+4. **起動引数にも該当が無い**。`claude --help` に `--fork-session`（セッション全体のfork。`argvBuilder.ts` の `targetArgs` は当初から組み立てられたが、呼び出し側の配線が無く実際には使われていなかった。issue #218で配線した。§14.40）はあるが、ターンを指定できる引数は無い。`--resume` はサブコマンドではなくオプションのため専用の `--help` は無い（`claude --resume --help` は通常の `--help` と同じ出力）。
 
 バイナリ内の実装（`branch` 選択時に呼ばれる関数）を読むと、対象ターンまでのメッセージを新しいsessionIdへ複製しながら `content-replacement` / `relocated`（cwdの引き継ぎ）/ `sessionHistorySuppressed` などのレコードを合わせて書き出す処理になっており、単純なtranscriptの行コピーでは再現できない。加えてこれは公開ドキュメントの無いminifiedコードからの逆解析であり、CLIの更新で予告なく変わりうる。**この処理自体が非対話環境では実行できないよう作られている**ことは、同等の操作を拡張機能側で（transcriptを読んで新しいセッションを組み立てる形で）代替するのが安全でないことの傍証でもある。§8「会話本文を読まない・保存しない」とは別に、CLIの内部ストレージ形式に依存した複製は元のセッションを壊すリスクを避けられないため、この代替は採らない。
 
@@ -2104,6 +2104,7 @@ Codex側（§14.30）は構造化された一覧から選択・確認してか�
 - **応答のパース・構造化表示**: 自然文かつユーザーのCLAUDE.mdに左右されるため、機械的に一覧・ダイジェストを取り出す処理は作らない（壊れやすく実測の裏付けが持てない）
 - **確認コマンドの自動送信**: ダイジェストの自動抽出・再送信はCLIの二段階確認を骨抜きにするため行わない。ユーザー自身がCLIの応答を見て送る
 - **取り込み元の選択UI（Codex/Gemini）**: `/import codex` `/import gemini`で明示できるが、Codex側（§14.30）が単一ソース固定だったのに倣い、まずは引数無しの`/import`（CLI側が自動検出）に留める。選択UIが要る場合は別issueで検討する
+
 ### 14.35 Claude Code画面の会話名変更（issue #199、TP-87）
 
 Issue #195の再抽出で見つかった非対称。Codex画面は`codex.renameChat`→`thread/name/set`で名前を変更でき、CLI側に永続化されるため履歴一覧にも波及する（§14.6・manual-test.md C-09）。Claude Code画面には対応する手段が無かった（TUIには`/rename`があるのに、チャット画面には無い）。
@@ -2136,11 +2137,11 @@ CLI側に永続化される経路が見つかったにもかかわらず、Codex
 
 #### Codexとの違い（受入基準）
 
-| 項目 | Codex | Claude Code |
-| --- | --- | --- |
-| control protocolでの改名 | あり（`thread/name/set`） | **あり**（`rename_session`。実測で確認） |
-| CLI側の永続化 | あり（履歴一覧・TUIタブへ波及） | あり（transcriptへ`custom-title`として追記される）**が、読み出しの索引が無い** |
-| 表示名の正 | CLI側（`thread/name/updated`通知） | **拡張機能側**（`ClaudeSessionNameStore`） |
+| 項目                       | Codex                                   | Claude Code                                                                                |
+| -------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------ |
+| control protocolでの改名   | あり（`thread/name/set`）               | **あり**（`rename_session`。実測で確認）                                                   |
+| CLI側の永続化              | あり（履歴一覧・TUIタブへ波及）         | あり（transcriptへ`custom-title`として追記される）**が、読み出しの索引が無い**             |
+| 表示名の正                 | CLI側（`thread/name/updated`通知）      | **拡張機能側**（`ClaudeSessionNameStore`）                                                 |
 | 履歴一覧・リロード後の反映 | CLI側のファイル変更をファイル監視で拾う | `ClaudeSessionNameStore`が`globalState`へ保存するため、リロード後も`getName()`で読み戻せる |
 
 テストは`test/unit/claudeSessionNames.test.ts`（`ClaudeSessionNameStore`単体）・`test/unit/claudeSessionStore.test.ts`（一覧生成での解決順）・`test/unit/claudeChatViewManager.test.ts`（`renameActive`とタブ名への反映、`deriveTitle`の解決順）で検証する。手動確認手順は`docs/manual-test.md`のL群に追加する。
@@ -2226,15 +2227,15 @@ issue #195の再抽出で見つかった機能。Claude Codeの`initialize`応�
 
 同じstrings解析で`claude`本体に`--autocompact <auto|tokens>`という起動オプションと、`argumentHint:"[auto|<tokens>]"`を持つ同名のスラッシュコマンド定義が見つかった。実際にこの環境で送信し、次を実測した（`buildUserMessage('/autocompact ...')`と同じ形。CLI 2.1.227）。
 
-| 送信 | 応答（1行目） |
-| --- | --- |
-| `/autocompact`（引数無し・未設定） | `Auto-compact window: auto` |
-| `/autocompact`（引数無し・設定済み） | `Auto-compact window: 300k tokens (from settings)` |
-| `/autocompact 300000` | `Auto-compact window set to 300k tokens` |
-| `/autocompact auto` | `Auto-compact window set to auto` |
-| `/autocompact 50000`（下限未満） | `Couldn't parse '50000'. Expected 'auto' or 100k–1M tokens (e.g. 500k, 200000, or 200 as shorthand)` |
-| `/autocompact 2000000`（上限超過） | 同上のパターンで拒否 |
-| `/autocompact banana`（書式不正） | 同上のパターンで拒否 |
+| 送信                                 | 応答（1行目）                                                                                        |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| `/autocompact`（引数無し・未設定）   | `Auto-compact window: auto`                                                                          |
+| `/autocompact`（引数無し・設定済み） | `Auto-compact window: 300k tokens (from settings)`                                                   |
+| `/autocompact 300000`                | `Auto-compact window set to 300k tokens`                                                             |
+| `/autocompact auto`                  | `Auto-compact window set to auto`                                                                    |
+| `/autocompact 50000`（下限未満）     | `Couldn't parse '50000'. Expected 'auto' or 100k–1M tokens (e.g. 500k, 200000, or 200 as shorthand)` |
+| `/autocompact 2000000`（上限超過）   | 同上のパターンで拒否                                                                                 |
+| `/autocompact banana`（書式不正）    | 同上のパターンで拒否                                                                                 |
 
 引数無しの直後にもう一度引数無しで送り直し、失敗した変更（50000等）が値へ反映されていないこと（`300k tokens (from settings)`のまま）も確認した。**受理範囲は100k〜1Mトークン**（バイナリの`.min(1e5).max(1e6)`とも一致）。
 
@@ -2443,6 +2444,63 @@ CLI側のデバッグログ（`~/.claude/debug/<sessionId>.txt`）と、拡張�
 - **`DEBUG` / `DEBUG_SDK`等の環境変数の切り替え**: issue #205のコメントで見つかった別経路（起動時の環境変数）は、会話中に切り替えられずissue本文の「セッション中に有効にする」と意味が変わるため対象外にした
 
 テストは`test/unit/claudeLocator.test.ts`（`debugLogCandidates`単体）・`test/unit/claudeStreamSessionDebug.test.ts`（`sendDebugCommand()`単体）・`test/unit/claudeChatViewManager.test.ts`（`openDebugLog` / `debugCommand`メッセージの配線、候補のフォールバック、確認ダイアログ）・`test/unit/webviewScript.test.ts`（設定行の導線マーカー）で検証する。手動確認手順は`docs/manual-test.md`のL-46に追加する。
+
+### 14.40 Claude Codeセッションのforkの配線（issue #218）
+
+issue #188（L群の統合テスト化）でL-10（fork）を駆動しようとしたところ、入口が無く書けないことが分かった。以下、実測した食い違いと、その配線で埋めた内容を書く。
+
+#### 見つかった食い違い
+
+「メニュー項目は出る」「起動引数の組み立ては対応済み」「呼び出し口が明示的に拒否する」の3つが同時に成立しており、機能として中途半端に配線されていた。
+
+1. **`package.json`のメニュー定義が甘い**。`codex.forkSession`の`view/item/context`の`when`句が`viewItem =~ /^codexSession/`（前方一致・末尾アンカー無し）になっており、Claude Codeセッションの`contextValue`（`codexSession.claude`。`sessionTreeProvider.ts`参照）にもマッチしていた。押しても後述の3で拒否されるだけの「出るが効かない」ボタンになっていた
+2. **`capabilities.fork`は`true`だが、参照箇所は1つだけ**。`src/claude/provider.ts`の`capabilities.fork`は`true`を返すが、これを読むのは`extension.ts`の`forkSession`関数の入口ガードだけで、他のどこにもfork可否の判定には使われていなかった
+3. **`argvBuilder.ts`は実装済みだが呼ばれていなかった**。`buildClaudeShellArgs` / `buildClaudeStreamArgs`の`targetArgs`は`{kind:'fork', sessionId}`から`-r <id> --fork-session`を正しく組み立てられる状態が当初からあったが、これを渡す呼び出し元が無かった
+4. **`ClaudeChatViewManager`にfork起動経路が無い**。`openThread`は常に`{kind:'resume', sessionId}`で`ClaudeStreamSession.start()`を呼び、`{kind:'fork', ...}`を渡す経路自体が存在しなかった
+5. **`extension.ts`の`forkSession`が明示的に拒否**。`session.provider !== 'codex'`のとき「Claude Codeのセッション全体の分岐には対応していません」を出して`return`していた。上記1のとおりメニューからは（本来は）到達しうるため、実質的に「押しても何も起きない」体験になっていた
+6. **`docs/design.md`（§14.3・§14.6）・`README.md`は「対応済み」であるかのように書かれていた**。§14.3の「そのタブは紐付け未確定のまま扱い、復元と作業記録の対象外になる」という記述自体は正しい設計判断だったが、実装が追いついていなかった
+
+#### 配線した内容（A案。Issue本文のA/B案のうちA）
+
+「fork自体への需要は既にissue #188のL-10として受入基準に含まれていた」ことを踏まえ、設計側を「対応しない」へ後退させるのではなく、実装を設計に追いつかせる方を選んだ。
+
+1. **`package.json`**: `codex.forkSession`の`when`句を`viewItem =~ /^codexSession\.codex/`へ絞り、Claude Code用に`claude.forkSession`コマンドを新設して`viewItem =~ /^codexSession\.claude/`のときだけ出す（`codex.openChat` / `claude.openChat`と同じ、プロバイダ別にコマンドを分ける慣習に合わせた）
+2. **`src/extension.ts`**: `forkSession`関数からClaude Codeの拒否分岐を外し、`openSession`と同じ形で`session.provider`により`chat.openThread`（Codex）と`claudeChat.openFork`（Claude Code）へ振り分ける。`codex.forkSession` / `claude.forkSession`のどちらのコマンドハンドラも、この共通化した`forkSession`を呼ぶ
+3. **`src/view/claudeChatView.ts`**: `ClaudeChatViewManager.openFork(sessionId, title, cwd)`を新設。`ClaudeStreamSession.start()`へ`target: {kind:'fork', sessionId}`・`sessionId: undefined`（新しいidはCLIが振るため渡せない）を渡す
+
+#### 「紐付け未確定」「復元・作業記録の対象外」を追加の特別扱い無しで満たす仕組み
+
+`sessionId: undefined`を渡すと、既存の`streamSession.ts`の`start()`がこの1行で`state.threadId`を決めている。
+
+```ts
+const threadId =
+  options.target.kind === 'resume' ? options.target.sessionId : options.sessionId;
+```
+
+`target.kind`が`'fork'`のときは`options.sessionId`（＝`undefined`）がそのまま採用されるため、**`state.threadId`はこのタブが生きている間ずっと`undefined`のまま**になる。この`undefined`が、既存コードの2箇所のガードへそのまま効く。
+
+- `claudeChatView.ts`の`dispatch()`は`entry.session.threadId`が`undefined`なら`onActivity`（作業記録・日報週報連携、§15）を呼ばない
+- `chatScript.ts`の`apply()`は`state.threadId`が真値のときだけ`vscode.setState({threadId: ...})`する。呼ばれなければVSCodeのwebview永続状態に何も残らず、ウィンドウリロード後の`registerWebviewPanelSerializer`（`restorePanel`）は`readPersistedThreadId`が`undefined`を返してパネルを`dispose`するだけになる
+
+つまり「紐付け未確定のまま扱い、復元と作業記録の対象外になる」という設計（§14.3）は、forkターゲットで`sessionId: undefined`を渡しさえすれば、既存の仕組みだけで成立する。`openFork`側に新しい分岐を足す必要は無かった。
+
+`this.panels`（`ClaudeChatViewManager`内部のMap）のキーだけは実セッションidと衝突しないよう`fork:${randomUUID()}`という合成キーにしてある（実CLIのセッションidは常にUUID形式でこの接頭辞を含まない）。このキーはローカルの管理にしか使わず、CLIへは渡らない。
+
+#### 利用者への明示（issue #218の受入基準）
+
+「黙って『復元されないタブ』を作らない」ため、`openFork`は開いた直後に会話へ1行（`noteLocalEvent`）残す。事前の確認ダイアログにはしなかった。分岐そのものは元のセッションを傷つけない可逆な操作で、`/debug`を送る前の確認（§14.39）のような「実モデルが動く・課金される」重い副作用は無いため、`openDebugLog`（§14.39・確認無し）と同じ扱いに揃えた。都度の確認より、会話に残る記録のほうが低摩擦かつ後から見返せると判断した。
+
+#### `capabilities.rename`の整理（同issueでの副次的な後始末）
+
+調査の過程で、`ProviderCapabilities.rename`（`codex/claude/provider.ts`）が#199（§14.35）の会話名変更実装後も参照されない宣言のまま残っていることが分かった。改名メニュー（`codex.renameChat` / `claude.renameChat`）は元からこの値を見ておらず単なるデッドコードだったため、`true/false`のどちらかへ値を直すのではなく**フィールドごと削除した**（`src/provider/types.ts`）。Codexの改名はapp-server側に永続化されるがClaude Codeの改名は拡張機能ローカルの`ClaudeSessionNameStore`止まりという非対称があり（§14.6の表を参照）、「できるか」を1個のbooleanへ単純化しづらいことも理由の一つ。実際にUIの出し分けが必要になったときに定義し直す。
+
+#### テスト
+
+- `test/unit/claudeChatViewManager.test.ts`: `openFork`が`ClaudeStreamSession.start()`へ`{kind:'fork', sessionId}`・`sessionId: undefined`を渡すこと、会話に1行残ること
+- `test/integration/chatClaudeThreadFlow.test.ts`: L-10として、`claude.forkSession`実行で`-r <id> --fork-session`が起動引数に渡ること・元のタブは無傷で残ること
+- `test/unit/providerRegistry.test.ts`: `rename`フィールド削除に合わせてフェイクの`capabilities`を更新
+
+手動確認手順は`docs/manual-test.md`のL-10（復活）・H-05を参照。
 
 ## 15. 作業記録（日報・週報連携）
 
