@@ -15,6 +15,14 @@ export interface FixtureManifest {
     defTemplate: string;
     strictDefTemplate: string;
   };
+  /**
+   * PR/MRの作成順序（Issue #172）用。`root` の下にケースごとの使い捨てディレクトリを掘り、
+   * ローカルのbareリポジトリを `origin` に持つ作業ツリーを作る（`helpers/forgeRepo.ts`）。
+   */
+  forge: {
+    root: string;
+    defTemplate: string;
+  };
   outsideWorkspace: string;
   codexHome: string;
   claudeHome: string;

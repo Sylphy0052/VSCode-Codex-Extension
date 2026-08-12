@@ -155,6 +155,23 @@ function createNonGitRoot() {
   return root;
 }
 
+/**
+ * PR/MRの作成順序（Issue #172）の統合テストが使う起点の親ディレクトリを用意する。
+ *
+ * このテストは**実際に `git push` が走る**経路を通すため、テスト側がケースごとに
+ * 「ローカルのbareリポジトリを `origin` に持つ作業ツリー」を掘る（`helpers/forgeRepo.ts`）。
+ * push先がローカルのファイルパスなので、実行がネットワーク越しのホストへ到達することはない。
+ * 親ディレクトリを `os.tmpdir()` の下へ置く理由は `createNonGitRoot` と同じ。
+ */
+function createForgeRoot() {
+  const root = mkdtempSync(join(tmpdir(), 'agent-forge-'));
+  assertOutsideThisRepository('PR/MR検証用の起点', root);
+  process.on('exit', () => {
+    rmSync(root, { recursive: true, force: true });
+  });
+  return root;
+}
+
 function writeJsonl(filePath, lines) {
   mkdirSync(dirname(filePath), { recursive: true });
   writeFileSync(filePath, `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`, 'utf8');
@@ -232,6 +249,24 @@ tasks:
 `;
 
 /**
+ * PR/MRの作成順序（design.md §16.18、Issue #172）の統合テストが使う定義。
+ *
+ * 順序（タスクブランチのpush→統合ブランチのpush→PR/MR作成→統合worktreeでのマージ）は
+ * タスク1本で確かめられる。並列のタスクを混ぜると、記録した呼び出し列にどのタスクの手順か
+ * を判じる手間が増えるだけで、確かめたい順序そのものは変わらない。
+ */
+const WORKFLOW_FORGE_YAML = `version: 1
+name: integration-forge
+defaults:
+  provider: codex
+  maxParallel: 1
+tasks:
+  - id: T1
+    prompt: T1のプロンプト
+    done: T1の終了条件
+`;
+
+/**
  * テスト用ワークスペースを空のgitリポジトリにする。
  *
  * worktreeによる隔離（design.md §16.3）を実物で確かめるため、`git worktree add` が
@@ -265,6 +300,8 @@ export function prepareFixtures() {
   // 「gitリポジトリである」と判定され、疑似worktreeではなくgitのworktree経路へ流れる
   // （`.gitignore` 済みかどうかは関係ない）。`os.tmpdir()` の下へ逃がす。
   const nonGitWorkspace = createNonGitRoot();
+  // PR/MRの作成順序（Issue #172）用。ケースごとの作業ツリーはテスト側が掘る。
+  const forgeRoot = createForgeRoot();
   const codexHome = join(fixturesRoot, 'codex-home');
   const claudeHome = join(fixturesRoot, 'claude-home');
   const userDataDir = join(fixturesRoot, 'user-data');
@@ -432,6 +469,12 @@ export function prepareFixtures() {
   writeFileSync(pseudoDefTemplate, WORKFLOW_PSEUDO_YAML, 'utf8');
   writeFileSync(pseudoStrictDefTemplate, WORKFLOW_PSEUDO_STRICT_YAML, 'utf8');
 
+  // PR/MRの作成順序（Issue #172）。定義のひな形だけを置く。
+  const forgeTemplateDir = join(forgeRoot, '_templates');
+  mkdirSync(forgeTemplateDir, { recursive: true });
+  const forgeDefTemplate = join(forgeTemplateDir, 'forge.yaml');
+  writeFileSync(forgeDefTemplate, WORKFLOW_FORGE_YAML, 'utf8');
+
   const manifest = {
     workspaceFolder,
     workflow: { defPath: workflowDefPath },
@@ -440,6 +483,12 @@ export function prepareFixtures() {
       root: nonGitWorkspace,
       defTemplate: pseudoDefTemplate,
       strictDefTemplate: pseudoStrictDefTemplate,
+    },
+    // PR/MRの作成順序（Issue #172）。テストは `<root>/<ケース名>` を掘り、その中に
+    // bareリポジトリと作業ツリーを作る。
+    forge: {
+      root: forgeRoot,
+      defTemplate: forgeDefTemplate,
     },
     outsideWorkspace,
     codexHome,

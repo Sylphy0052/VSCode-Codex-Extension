@@ -35,6 +35,7 @@ import {
   nodeGitCommandRunner,
   nodeWorktreeFileSystem,
   WorktreeCreationQueue,
+  type GitCommandRunner,
 } from './orchestrator/worktree';
 import {
   nodeCliAvailability,
@@ -136,9 +137,9 @@ export interface WorkflowTestApi {
    * 実行と、その前提の判定に使う設定を差し替える。**渡した項目だけ**が差し替わり、
    * 省略した項目は実物のまま（`{}` や `undefined` を渡すと全て実物へ戻る）。
    *
-   * `git` は差し替えない。統合テストは実gitでの統合ブランチのマージを確かめたいためで、
-   * `origin` へのpushは `LiveRunForgeState` が `active` の経路でしか呼ばれない
-   * （前提が欠けている状態を作るこのIssueのテストでは、そもそもpushへ到達しない）。
+   * `git` も差し替えられるが、これは**実gitへ委譲しつつ呼び出しを記録する**ための口で
+   * （Issue #172。design.md §16.18「作る順序」はpushとPR/MR作成の順序なので、CLIの記録
+   * だけでは順序を確かめられない）、gitの動作そのものを置き換える用途ではない。
    */
   setForgeOverrides(overrides: ForgeOverrides | undefined): void;
 }
@@ -155,6 +156,12 @@ export interface ForgeOverrides {
     pullRequest: PullRequestLayerConfig;
     finalMerge: FinalMergeConfig;
   };
+  /**
+   * `WorkflowRunner` が使うgitコマンドの実行（`WorkflowRunnerDeps.git`）。forgeまわり
+   * だけでなくworktreeの作成・統合のマージも同じポートを通るため、渡すものは実gitへ
+   * 委譲する実装であることが前提（Issue #172のテストは記録のためだけに使う）。
+   */
+  git?: GitCommandRunner;
 }
 
 /**
@@ -336,7 +343,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       claude: overridableHost('claude', claudeChat),
     },
     worktreeQueue: new WorktreeCreationQueue(),
-    git: nodeGitCommandRunner,
+    git: {
+      run: (args, cwd) => (forgeOverrides.git ?? nodeGitCommandRunner).run(args, cwd),
+    },
     fs: nodeWorktreeFileSystem,
     filePort: nodeWorkflowFilePort,
     store: workflowStore,
@@ -556,6 +565,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
             delete forgeOverrides.cli;
             delete forgeOverrides.cliAvailability;
             delete forgeOverrides.readConfig;
+            delete forgeOverrides.git;
             if (overrides === undefined) {
               return;
             }
@@ -567,6 +577,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
             }
             if (overrides.readConfig !== undefined) {
               forgeOverrides.readConfig = overrides.readConfig;
+            }
+            if (overrides.git !== undefined) {
+              forgeOverrides.git = overrides.git;
             }
           },
         }
