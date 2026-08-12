@@ -163,6 +163,11 @@ export function readModelList(source: unknown): ModelInfo[] | undefined {
       defaultEffort: undefined,
       supportsEffort,
       efforts: supportsEffort ? readEffortLevels(model['supportedEffortLevels']) : [],
+      // Fast mode（Issue #198）。フィールドが無い版では `undefined` のままにして、
+      // 「対応しない」と「情報が無い」を区別する
+      ...('supportsFastMode' in model
+        ? { supportsFastMode: model['supportsFastMode'] === true }
+        : {}),
     });
   }
   return models;
@@ -276,6 +281,21 @@ export function buildSetEffortRequest(requestId: string, effort: string): string
 export function readCurrentPermissionMode(payload: unknown): string | undefined {
   const mode = str(rec(payload)?.['current_permission_mode']);
   return mode === '' ? undefined : mode;
+}
+
+/**
+ * `initialize` の応答から、Fast mode（`/fast`）の現在値を読む（Issue #198）。
+ *
+ * 実測（CLI 2.1.227）の値は `"off"`。応答に含まれない版・そもそも対応しない環境では
+ * `undefined` を返し、呼び出し側は「対応しない」として扱う（承認方法と同じ流儀で、
+ * 取れなかったことと `off` を区別する）。
+ */
+export function readFastModeState(payload: unknown): boolean | undefined {
+  const state = str(rec(payload)?.['fast_mode_state']);
+  if (state === '') {
+    return undefined;
+  }
+  return state === 'on';
 }
 
 /** コンテキスト使用量を問い合わせる要求。TUIの `/context` と同じ数字が返る。 */

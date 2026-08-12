@@ -965,6 +965,7 @@ Codex画面と同じHTML（`renderShell`）を使うため、画面下の設定�
 | 承認方法     | `set_permission_mode { mode }`                      | `system` の `status` 通知が `permissionMode` を返す                                                   |
 | effort       | `apply_flag_settings { settings: { effortLevel } }` | **確かめられない**                                                                                    |
 | エージェント | 無し（起動引数 `--agent` のみ）                     | **専用の制御要求が見つからない**（7候補すべて実測でエラー。下記）                                     |
+| Fast mode    | 無し（`/fast` を発言として送る）                    | `initialize` の `fast_mode_state` のみ。切り替えの通知は来ない（Issue #198）                          |
 
 - **effortには専用の制御要求が無い**。`set_effort` / `set_thinking_effort` / `set_reasoning_effort` はどれも `Unsupported control request subtype` になる（実測）。セッション単位の設定を差し込む `apply_flag_settings` に載せるのが唯一の手段
 - その `apply_flag_settings` は **`effortLevel` に出鱈目な値を入れても success を返し、確認の通知も来ない**。同じ経路で `{ model }` を送ると適用の合図が届くので効いている見込みはあるが、観測できない以上「変わった」とは書かない。画面には「送りました。反映は確かめられません」と出す
@@ -973,6 +974,7 @@ Codex画面と同じHTML（`renderShell`）を使うため、画面下の設定�
 - **「既定」へ戻す操作は送らない**。CLI側に起動時の値へ戻す手段が無く、何を送っても嘘になる。次に開くセッションから効く
 - `bypassPermissions` を選んだときの確認ダイアログを取り消した場合は、セッションへも送らない
 - 変更の結果は `settingsChanged` 種別の項目として会話に残す。失敗も残す（変えたつもりで変わっていない状態を作らないため）
+- **Fast mode（`/fast`）は状態をこちらで持つ**（Issue #198）。`initialize` の応答が `fast_mode_state`（実測値 `"off"`）を返すのでそれを初期値にし、切り替えは `compact` と同じくコマンドを発言として送る（CLIバイナリから `set_` 系のsubtypeを抽出しても該当が無かった）。**切り替えの通知は来ない**ため、送った時点で画面の状態を反転させる。`fast_mode_state` が応答に無い版では**トグルごと画面に出さない**（「対応しない」と「オフ」を見た目で区別する）。モデルごとの対応可否は `models[].supportsFastMode` にあり、対応しないモデルを選んでいる間はeffortのセレクタと同じ流儀でトグルを無効にして理由を出す
 
 ### 14.8 使用量（rate_limit_event）
 

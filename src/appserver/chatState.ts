@@ -294,6 +294,14 @@ export interface ChatState {
    */
   planMode: boolean;
   /**
+   * Fast mode（Claude Codeの `/fast`。Issue #198）の現在値。
+   *
+   * `initialize` の応答の `fast_mode_state` 由来。**Claude Code側にしか無い**概念で、
+   * Codexでは常に `undefined`。対応しない版・そもそも情報が来ない場合も `undefined` に
+   * なり、画面はトグル自体を出さない（`planMode` と違って三値を区別する）。
+   */
+  fastMode?: boolean | undefined;
+  /**
    * Codexのレビュー中か（`review/start` で開始したターン）。
    *
    * app-serverの `NonSteerableTurnKind` に `review` があり、レビュー中のターンへは

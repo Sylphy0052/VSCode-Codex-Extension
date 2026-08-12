@@ -16,6 +16,14 @@ export interface ModelInfo {
    */
   supportsEffort: boolean;
   efforts: EffortInfo[];
+  /**
+   * Fast mode（Claude Codeの `/fast`。Issue #198）を持つモデルか。
+   *
+   * `initialize` の応答の `models[].supportsFastMode` 由来で、**Claude Code側にしか無い**
+   * 概念のためCodexでは常に `undefined`。`supportsEffort` と違って三値（対応する / 対応
+   * しない / そもそも情報が無い）を区別する必要があるので任意項目にしてある。
+   */
+  supportsFastMode?: boolean | undefined;
 }
 
 /**

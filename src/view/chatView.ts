@@ -1680,6 +1680,7 @@ ${chatStyles()}
     <button id="loopToggle" type="button" class="secondary" title="同じ指示を条件成立まで繰り返します">ループ</button>
     <button id="compact" type="button" class="secondary" title="これまでの会話を要約に置き換えてコンテキストを空けます">圧縮</button>
     <button id="planToggle" type="button" class="secondary" aria-pressed="false" title="読み取りだけに絞って計画を立てさせます。ファイルは変更されません">計画</button>
+    <button id="fastToggle" type="button" class="secondary" aria-pressed="false" title="応答を速くします（Fast mode）" hidden>高速</button>
     <button id="review" type="button" class="secondary" title="コードレビューを実行します"${options.review.mode === 'command' ? ' hidden' : ''}>レビュー</button>
     <button id="exportTranscript" type="button" class="secondary" title="会話全体をMarkdownとして取り出します（コピー・ファイル保存・生テキスト表示）">エクスポート</button>
   </div>

@@ -946,6 +946,7 @@ export function chatScript(
     // 圧縮は新しいターンを起こす。応答中に重ねると割り込みになるため止める
     el('compact').disabled = !!state.busy;
     applyPlanMode(state.planMode);
+    applyFastMode(state);
     renderAttachments(state.attachments);
     applyLoop(state.loop);
     renderStatus(state);
@@ -1016,6 +1017,37 @@ export function chatScript(
     const button = el('planToggle');
     button.setAttribute('aria-pressed', planMode ? 'true' : 'false');
     button.className = planMode ? 'toggled' : 'secondary';
+  }
+
+  // いまFast modeか（Claude Codeのみ）。押したときに反転させるため覚えておく
+  let fastMode = false;
+
+  /**
+   * 高速ボタン（Fast mode）の見た目（issue #198）。
+   *
+   * state.fastMode が undefined のときはボタンごと隠す。Codex画面にはこの概念が無く、
+   * Claude Code側でも initialize が fast_mode_state を返さない版があるため、
+   * 「対応しない」と「オフ」を見た目でも区別する。
+   */
+  function applyFastMode(state) {
+    const button = el('fastToggle');
+    if (!button) return;
+    const supported = state.fastMode !== undefined && state.fastMode !== null;
+    button.hidden = !supported;
+    if (!supported) return;
+
+    fastMode = !!state.fastMode;
+    button.setAttribute('aria-pressed', fastMode ? 'true' : 'false');
+    button.className = fastMode ? 'toggled' : 'secondary';
+
+    // 選んでいるモデルがFast modeを持たない場合は押させない（effortのセレクタと同じ扱い）
+    const s = state.settings;
+    const selected = s && s.models ? s.models.find((m) => m.slug === s.model) : undefined;
+    const unsupportedModel = !!selected && selected.supportsFastMode === false;
+    button.disabled = unsupportedModel;
+    button.title = unsupportedModel
+      ? 'このモデルはFast modeに対応していません'
+      : '応答を速くします（Fast mode）';
   }
 
   /**
@@ -1419,6 +1451,10 @@ export function chatScript(
   // 見た目は状態が返ってきてから変える。押した瞬間に変えると、失敗したとき嘘になる
   el('planToggle').addEventListener('click', () =>
     vscode.postMessage({ type: 'planMode', on: !planMode }),
+  );
+  // Fast mode（issue #198）。計画ボタンと同じく、見た目は状態が返ってきてから変える
+  el('fastToggle').addEventListener('click', () =>
+    vscode.postMessage({ type: 'fastMode', on: !fastMode }),
   );
 
   // Codexは対象をQuickPickで選ばせるためホストへ委ねる。Claude Codeはコマンドとして
