@@ -139,6 +139,8 @@ sudo apt install bubblewrap
 
 未確認領域の中心。`codex app-server` との接続・承認・分岐・タブ名が対象。
 
+実施の単位はIssueへ分けてある（結果の記録先もそこ）: C-01〜C-16 は [#189](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/189)、C-17〜C-28b は [#190](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/190)、C-29〜C-44 は [#191](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/191)。このうち機械で確かめられる範囲は [#187](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/187) で統合テストへ移す予定で、移送が済んだケースはこの文書から落とす。
+
 ### C-01 画面が開いて発言が返る
 
 - 操作: サイドバーの `+` アイコン（`codex.newChat`）
@@ -693,6 +695,8 @@ Web検索の項目に、クエリだけでなく結果（タイトルとURL）�
 ## L群: Claude Code画面（stream-json）
 
 `--print --input-format stream-json` の常駐プロセスと control protocol が対象。
+
+実施の単位はIssueへ分けてある（結果の記録先もそこ）: L-01〜L-13 は [#192](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/192)、L-14〜L-24 は [#193](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/193)、L-25〜L-40 は [#194](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/194)。このうち機械で確かめられる範囲は [#188](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/188) で統合テストへ移す予定で、移送が済んだケースはこの文書から落とす。
 
 ### L-01 画面が開いて発言が返る
 

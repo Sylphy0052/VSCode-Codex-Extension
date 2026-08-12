@@ -36,6 +36,16 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 - **できないと確定したもの**: Claude Codeの会話途中からの分岐（TP-44）。Codexの巻き戻し（TP-41のCodex側。`thread/rollback` はdeprecatedかつファイルを戻さない）
 - **実機確認は追いついていない**。ユニットテストとプロトコル上の実測で確かめた範囲までで、画面上の挙動は [manual-test.md](manual-test.md) の未実施ケースとして残っている。**ここが最大の残作業**
 
+### TP項目の後に残っている作業（2026-08-12 起票）
+
+TP-01〜TP-85 は全て決着済み（実装マージ済み、または不可と確定）で、この文書に未起票の項目は無い。次に進める作業は3方向あり、それぞれIssueにしてある。
+
+| 方向                 | 内容                                                                                          | Issue                                                                                                                     |
+| -------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| 実機確認             | manual-test.md のC群46・L群40を実機で通し、結果を記録する。NGは個別Issueへ切り出す           | Codex: [#189](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/189) / [#190](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/190) / [#191](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/191)、Claude: [#192](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/192) / [#193](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/193) / [#194](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/194) |
+| 自動化               | C群・L群のうち機械で確かめられる範囲を統合テストへ移す（W群の #167 と同じ方式）               | 親 [#186](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/186)、子 [#187](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/187)（Codex）/ [#188](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/188)（Claude） |
+| 新しい機能の洗い出し | CLIの新しい版を再抽出し、この文書に無いTUI機能を見つける（手元のClaude Codeは既に 2.1.227）   | [#195](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/195)                                                    |
+
 各表の「Issue」列の印:
 
 - `済` — 実装してマージ済み
