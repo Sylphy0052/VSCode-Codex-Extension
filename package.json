@@ -88,6 +88,11 @@
           "group": "navigation@100"
         },
         {
+          "command": "claude.renameChat",
+          "when": "activeWebviewPanelId == claude.chat",
+          "group": "navigation@100"
+        },
+        {
           "command": "codex.newChat",
           "when": "resourceScheme == file",
           "group": "navigation@100"
@@ -289,6 +294,12 @@
         "command": "claude.reloadSkills",
         "title": "skillsを読み直す（Claude Code）",
         "category": "Agent"
+      },
+      {
+        "command": "claude.renameChat",
+        "title": "セッション名を変更（Claude Code）",
+        "category": "Agent",
+        "icon": "$(edit)"
       },
       {
         "command": "agent.workflows.run",

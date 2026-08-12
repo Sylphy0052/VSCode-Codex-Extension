@@ -14,6 +14,7 @@ import { ClaudeModelProbe } from './claude/modelProbe';
 import { ClaudePluginActions } from './claude/pluginsActions';
 import { ClaudePluginsProbe } from './claude/pluginsProbe';
 import { ClaudeProvider } from './claude/provider';
+import { ClaudeSessionNameStore } from './claude/sessionNames';
 import { ClaudeSessionStore } from './claude/sessionStore';
 import { ClaudeSkillsProbe } from './claude/skillsProbe';
 import { ClaudeTranscriptWatcher } from './claude/transcriptWatcher';
@@ -234,7 +235,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const claudeHome = resolveClaudeHome(readClaudeConfig().configDir, nodeLocatorDeps);
   const claudeDirs = claudePaths(claudeHome);
   log.info(`CLAUDE_CONFIG_DIR=${claudeHome}`);
-  const claudeStore = new ClaudeSessionStore(nodeFileSystem, claudeDirs);
+  // 人が付け直したセッション名（issue #199）。globalStateはワークスペースをまたいで
+  // 有効なため、セッションidがワークスペースをまたいでも一意であることと合わせられる
+  const claudeSessionNames = new ClaudeSessionNameStore(context.globalState);
+  const claudeStore = new ClaudeSessionStore(nodeFileSystem, claudeDirs, claudeSessionNames);
 
   const codex = new CodexProvider(store);
   const claude = new ClaudeProvider(claudeStore);
@@ -596,6 +600,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       claudeChat.reloadSkillsForOpenSessions(),
     ),
     vscode.commands.registerCommand('codex.renameChat', () => chat.renameActive()),
+    // 保存後にツリーへ即時反映させる（issue #199）。転記漏れ防止のため、
+    // キャンセル時も含めて常に呼ぶ（`codex.refreshSessions` と同じく副作用が無いため安全）
+    vscode.commands.registerCommand('claude.renameChat', async () => {
+      await claudeChat.renameActive();
+      tree.refresh();
+    }),
     vscode.commands.registerCommand('codex.openChat', (s: SessionSummary) =>
       chat.openThread(s.id, s.threadName ?? s.id.slice(0, 8), s.cwd),
     ),

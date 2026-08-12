@@ -1,7 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import { claudePaths } from '../../src/claude/cliLocator';
+import { ClaudeSessionNameStore } from '../../src/claude/sessionNames';
 import { ClaudeSessionStore } from '../../src/claude/sessionStore';
 import type { FileSystemPort } from '../../src/session/ports';
+import type { MementoLike } from '../../src/util/memento';
+
+/** `vscode.Memento` 互換のフェイク。実体はMapだけの単純な実装で足りる。 */
+function fakeMemento(): MementoLike {
+  const data = new Map<string, unknown>();
+  return {
+    get: <T>(key: string, defaultValue: T): T => (data.has(key) ? (data.get(key) as T) : defaultValue),
+    update: (key: string, value: unknown): Promise<void> => {
+      data.set(key, value);
+      return Promise.resolve();
+    },
+  };
+}
 
 const HOME = '/home/u/.claude';
 const paths = claudePaths(HOME);
@@ -191,5 +205,52 @@ describe('ClaudeSessionStore', () => {
     const store = new ClaudeSessionStore(fs, paths);
     expect(await store.resolveCwd(ID_A)).toBeUndefined();
     expect(await store.resolveCwd(ID_B)).toBeUndefined();
+  });
+
+  describe('名前の解決順（issue #199）', () => {
+    it('人が付けた名前があればtranscript由来より優先する', async () => {
+      const fs = new FakeFs({
+        [transcript('-w-alpha', ID_A)]: userLine(
+          ID_A,
+          '/w/alpha',
+          '最初の発言',
+          '2026-08-06T20:00:00.000Z',
+        ),
+      });
+      const names = new ClaudeSessionNameStore(fakeMemento());
+      await names.set(ID_A, '人が付けた名前');
+      const store = new ClaudeSessionStore(fs, paths, names);
+
+      const { sessions } = await store.list(options());
+      expect(sessions[0]?.threadName).toBe('人が付けた名前');
+    });
+
+    it('人が付けた名前が無ければtranscriptの最初の発言のままにする', async () => {
+      const fs = new FakeFs({
+        [transcript('-w-alpha', ID_A)]: userLine(
+          ID_A,
+          '/w/alpha',
+          '最初の発言',
+          '2026-08-06T20:00:00.000Z',
+        ),
+      });
+      const store = new ClaudeSessionStore(fs, paths, new ClaudeSessionNameStore(fakeMemento()));
+
+      const { sessions } = await store.list(options());
+      expect(sessions[0]?.threadName).toBe('最初の発言');
+    });
+
+    it('rename/getNameがMementoを介して読み書きできる（リロード後も保たれる想定）', async () => {
+      const memento = fakeMemento();
+      const store = new ClaudeSessionStore(new FakeFs({}), paths, new ClaudeSessionNameStore(memento));
+
+      expect(store.getName(ID_A)).toBeUndefined();
+      await store.rename(ID_A, 'あたらしい名前');
+      expect(store.getName(ID_A)).toBe('あたらしい名前');
+
+      // 同じMementoから作り直した別インスタンス（ウィンドウのリロード相当）でも読める
+      const reloaded = new ClaudeSessionStore(new FakeFs({}), paths, new ClaudeSessionNameStore(memento));
+      expect(reloaded.getName(ID_A)).toBe('あたらしい名前');
+    });
   });
 });

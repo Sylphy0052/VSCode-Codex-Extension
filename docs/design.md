@@ -2104,6 +2104,46 @@ Codex側（§14.30）は構造化された一覧から選択・確認してか�
 - **応答のパース・構造化表示**: 自然文かつユーザーのCLAUDE.mdに左右されるため、機械的に一覧・ダイジェストを取り出す処理は作らない（壊れやすく実測の裏付けが持てない）
 - **確認コマンドの自動送信**: ダイジェストの自動抽出・再送信はCLIの二段階確認を骨抜きにするため行わない。ユーザー自身がCLIの応答を見て送る
 - **取り込み元の選択UI（Codex/Gemini）**: `/import codex` `/import gemini`で明示できるが、Codex側（§14.30）が単一ソース固定だったのに倣い、まずは引数無しの`/import`（CLI側が自動検出）に留める。選択UIが要る場合は別issueで検討する
+### 14.35 Claude Code画面の会話名変更（issue #199、TP-87）
+
+Issue #195の再抽出で見つかった非対称。Codex画面は`codex.renameChat`→`thread/name/set`で名前を変更でき、CLI側に永続化されるため履歴一覧にも波及する（§14.6・manual-test.md C-09）。Claude Code画面には対応する手段が無かった（TUIには`/rename`があるのに、チャット画面には無い）。
+
+#### 調査: control protocolに経路はあるか
+
+**ある**。バイナリのstrings解析（`strings -n 4 <claudeの実行ファイル> | grep -iE '^rename'`）で`rename_session` / `rename_generate_name` / `rename_err_code` / `rename_session: title must be a string` / `rename_session is not supported in this context (onRenameSession callback not registered)`を発見し、実機（`claude --print --input-format stream-json --output-format stream-json --verbose`を起動し、`initialize`のcontrol_requestに続けて候補を送る。CLI 2.1.227）で確認した。
+
+- `{ subtype: 'rename_session', title: '<名前>' }`を送ると`{"subtype":"success"}`が返る（`set_title` / `set_conversation_title` / `set_session_name` / `set_session_title` / `rename` / `rename_conversation` / `set_name` / `update_title`の8候補はいずれも`Unsupported control request subtype`で拒否された）
+- **実際に会話を進めた状態で送ると、transcript（`~/.claude/projects/**/*.jsonl`）へ`{"type":"custom-title","customTitle":"<名前>","sessionId":"<id>"}`という行がその時点で追記されることを確認した**。CLI側に本当に永続化される点は`set_agent`等の「送っても効果を確認できない」経路とは違う
+
+#### 決定: 表示名は拡張機能側（`ClaudeSessionStore`）を正とする
+
+CLI側に永続化される経路が見つかったにもかかわらず、Codexの`thread/name/set`と同じ扱い（読み出しもCLI側に委ねる）にはしなかった。理由は次の2点。
+
+1. **読み戻すための索引が無い**。Codexは`thread/list`で名前を含む一覧を安く引けるが、Claude Codeにはこれに相当するものが無い。`custom-title`行は要求を送った時点の会話の位置にそのまま挟まるため、長い会話の途中で改名すると先頭からかなり離れた行に現れうる
+2. **`ClaudeSessionStore.list()`は先頭40行（`HEAD_LINES`）だけを読む設計**（`sessionStore.ts`）。全セッション分のtranscriptを毎回全文読みするのは履歴一覧のためのI/Oとして高くつくため、意図的に先頭だけを読む形にしてある。`custom-title`を確実に見つけるには全文読みが要るため、この設計とは相容れない
+
+そのため、名前の解決順を**「人が付けた名前（拡張機能側） > transcriptの最初の発言」**に決め、人が付けた名前は`ClaudeSessionNameStore`（`src/claude/sessionNames.ts`）が`context.globalState`（`MementoLike`）へ永続化する。`rename_session`の送信自体は削らず、CLIやTUIなど他のツールで同じtranscriptを開いたときにも新しい名前が見えるようにする**ベストエフォートの副送信**として残す（`ClaudeStreamSession.setName`）。CLIの応答は待たず、保存＋画面反映を先に行う（`control.ts`の`buildRenameSessionRequest`・`sessionNames.ts`・`sessionStore.ts`のJSDoc参照）。
+
+#### 実装
+
+- `src/claude/control.ts`: `buildRenameSessionRequest(requestId, title)`。上記の実測結果をJSDocに残す
+- `src/claude/sessionNames.ts`（新規）: `ClaudeSessionNameStore`。セッションidをキーにした名前の読み書き口。`MementoLike`（`context.globalState`）を渡す。既定はno-op（テスト等でVSCodeの`Memento`を用意しなくても壊れない、`memoryMemento`と同じ流儀）
+- `src/claude/sessionStore.ts`: `ClaudeSessionStore`の第3引数に`ClaudeSessionNameStore`を追加。`list()`の`threadName`と、新設した`getName()` / `rename()`が解決順を実装する
+- `src/claude/streamSession.ts`: `ClaudeStreamSession.setName(name)`。`setFastMode`と同じく、CLIの応答を待たずに`state.name`を即座に更新してから`rename_session`を送る（`this.proc`が無ければ送信自体をスキップする）。`ClaudeStreamOptions.initialName`で、開いた時点で人が付けた名前があればタブ名へ反映する
+- `src/view/claudeChatView.ts`: `ClaudeChatViewManager`に`chatView.ts`と同じ「アクティブなタブ」追跡（`this.active`）を追加し、`renameActive()`を実装（Codexの`renameActive`と同じUX）。`deriveTitle(state)`が名前解決順（`state.name` > 最初の発言）を持つ純粋関数で、タブ名の計算はここへ一本化した
+- `src/extension.ts`: `claude.renameChat`コマンドを登録し、`ClaudeChatViewManager.renameActive()`の後に`tree.refresh()`を呼んで履歴一覧へ反映する（Codex側は`thread/name/set`がファイルへ波及し既存のファイル監視で拾えるが、Claude側は`ClaudeSessionNameStore`の書き込み先が監視対象のファイルではないため、明示的に呼ぶ）
+- `package.json`: `claude.renameChat`コマンドと`editor/title`メニュー（`when: activeWebviewPanelId == claude.chat`）を、Codexの`codex.renameChat`と同じ形で追加
+
+#### Codexとの違い（受入基準）
+
+| 項目 | Codex | Claude Code |
+| --- | --- | --- |
+| control protocolでの改名 | あり（`thread/name/set`） | **あり**（`rename_session`。実測で確認） |
+| CLI側の永続化 | あり（履歴一覧・TUIタブへ波及） | あり（transcriptへ`custom-title`として追記される）**が、読み出しの索引が無い** |
+| 表示名の正 | CLI側（`thread/name/updated`通知） | **拡張機能側**（`ClaudeSessionNameStore`） |
+| 履歴一覧・リロード後の反映 | CLI側のファイル変更をファイル監視で拾う | `ClaudeSessionNameStore`が`globalState`へ保存するため、リロード後も`getName()`で読み戻せる |
+
+テストは`test/unit/claudeSessionNames.test.ts`（`ClaudeSessionNameStore`単体）・`test/unit/claudeSessionStore.test.ts`（一覧生成での解決順）・`test/unit/claudeChatViewManager.test.ts`（`renameActive`とタブ名への反映、`deriveTitle`の解決順）で検証する。手動確認手順は`docs/manual-test.md`のL群に追加する。
 
 ## 15. 作業記録（日報・週報連携）
 

@@ -9,7 +9,7 @@ import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
 import type { McpServerView } from '../../src/provider/mcpServers';
 import { MEMORY_LAST_SELECTED_PATH_KEY, type MemoryModeMemento } from '../../src/provider/inputModes';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
-import { ClaudeChatViewManager } from '../../src/view/claudeChatView';
+import { ClaudeChatViewManager, deriveTitle } from '../../src/view/claudeChatView';
 import { __mock, ViewColumn, window as fakeWindow, type FakeWebviewPanel } from '../mocks/vscode';
 
 const fakeLogger: Logger = {
@@ -58,10 +58,20 @@ function fakeSettingsProvider(): SettingsProvider {
   return settings as unknown as SettingsProvider;
 }
 
-function fakeStore(): ClaudeSessionStore {
+/**
+ * `getName` / `rename` はMapで実体化する（issue #199）。ただの no-op スタブだと
+ * 「保存してから読み直す」往復を検証するテストが書けないため。
+ */
+function fakeStore(overrides?: Partial<ClaudeSessionStore>): ClaudeSessionStore {
+  const names = new Map<string, string>();
   const store = {
     resolveTranscriptPath: async () => undefined,
     resolveCwd: async () => undefined,
+    getName: (sessionId: string) => names.get(sessionId),
+    rename: async (sessionId: string, name: string) => {
+      names.set(sessionId, name);
+    },
+    ...overrides,
   };
   return store as unknown as ClaudeSessionStore;
 }
@@ -93,15 +103,18 @@ function createManager(options?: {
   isTaskManagedThread?: (sessionId: string) => boolean;
   memoryFs?: MemoryFileSystemPort;
   memoryMemento?: MemoryModeMemento;
+  store?: ClaudeSessionStore;
 }): {
   manager: ClaudeChatViewManager;
+  store: ClaudeSessionStore;
 } {
+  const store = options?.store ?? fakeStore();
   const manager = new ClaudeChatViewManager(
     () => 'claude',
     fakeFileSystem,
     fakeMentions(),
     '/fake/claude-home',
-    fakeStore(),
+    store,
     fakeSettingsProvider(),
     fakeLogger,
     () => undefined,
@@ -110,7 +123,7 @@ function createManager(options?: {
     options?.memoryFs ?? fakeMemoryFileSystem(),
     options?.memoryMemento ?? fakeMemento(),
   );
-  return { manager };
+  return { manager, store };
 }
 
 /** `handleMessage` の `send` 分岐は非同期処理を待たずに戻るため、マイクロタスクを流す。 */
@@ -479,6 +492,104 @@ describe('ClaudeChatViewManager', () => {
       task.resumeLoop();
       expect(sendCalls).toEqual(['第1ターン', '続けて', '続けて']);
     });
+  });
+});
+
+/**
+ * 会話の名前変更（issue #199）。
+ *
+ * 表示用の名前は拡張機能側（`ClaudeSessionStore`）を正として持つ設計のため、CLIの応答を
+ * 待たずに `store.rename` → `session.setName` の順で即座に反映されることを確かめる
+ * （`renameActive` のJSDoc参照）。`session.receive(initLine(...))` で `system init` を
+ * 直接流し込み、`stubStart` で実プロセスを起こさずに `threadId` だけ確定させる
+ * （既存の pauseLoop/resumeLoop テストと同じ手法）。
+ */
+describe('ClaudeChatViewManagerの名前変更（issue #199）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+  });
+
+  it('名前変更は選択中の画面のタブ名と履歴一覧の名前解決に反映する', async () => {
+    const { sessions } = stubStartCapturing();
+    const store = fakeStore();
+    const { manager } = createManager({ store });
+
+    await manager.openNew('/workspace/root');
+    const session = sessions[sessions.length - 1];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    session.receive(initLine('session-rename'));
+
+    __mock.showInputBoxAnswer = '設計方針の相談';
+    await manager.renameActive();
+
+    // 拡張機能側のストアに保存され、次回以降の名前解決（getName）に反映される
+    expect(store.getName('session-rename')).toBe('設計方針の相談');
+    // タブ名も即座に追従する（`deriveTitle` が `state.name` を優先するため）
+    expect(__mock.lastCreatedPanel()?.title).toBe('Claude Code: 設計方針の相談');
+  });
+
+  it('変更していない・空文字・キャンセルでは保存しない', async () => {
+    const { sessions } = stubStartCapturing();
+    const store = fakeStore();
+    const { manager } = createManager({ store });
+
+    await manager.openNew('/workspace/root');
+    const session = sessions[sessions.length - 1];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    session.receive(initLine('session-cancel'));
+
+    __mock.showInputBoxAnswer = undefined;
+    await manager.renameActive();
+    expect(store.getName('session-cancel')).toBeUndefined();
+
+    __mock.showInputBoxAnswer = '   ';
+    await manager.renameActive();
+    expect(store.getName('session-cancel')).toBeUndefined();
+  });
+
+  it('アクティブな画面が無ければ案内を出すだけで何もしない', async () => {
+    const { manager } = createManager();
+
+    __mock.showInputBoxAnswer = '使われないはずの名前';
+    await manager.renameActive();
+
+    expect(__mock.messages.infos).toHaveLength(1);
+  });
+});
+
+describe('deriveTitle（issue #199の名前解決順）', () => {
+  const baseState = (
+    overrides: Partial<Parameters<typeof deriveTitle>[0]> = {},
+  ): Parameters<typeof deriveTitle>[0] =>
+    ({
+      items: [],
+      name: undefined,
+      ...overrides,
+    }) as Parameters<typeof deriveTitle>[0];
+
+  it('人が付けた名前があれば最優先で使う', () => {
+    const state = baseState({
+      name: '人が付けた名前',
+      items: [{ kind: 'userMessage', id: '1', text: '最初の発言' } as never],
+    });
+    expect(deriveTitle(state)).toBe('Claude Code: 人が付けた名前');
+  });
+
+  it('人が付けた名前が無ければ最初の発言から作る', () => {
+    const state = baseState({
+      items: [{ kind: 'userMessage', id: '1', text: '設計を見直したい' } as never],
+    });
+    expect(deriveTitle(state)).toBe('Claude Code: 設計を見直したい');
+  });
+
+  it('どちらも無ければ undefined（タブ名は前の値のまま）', () => {
+    expect(deriveTitle(baseState())).toBeUndefined();
   });
 });
 
