@@ -387,6 +387,51 @@ export class ClaudeStreamSession {
   }
 
   /**
+   * 他エージェント（Codex／Gemini）のローカル設定をClaude Codeへ取り込む
+   * （issue #200、design.md TP-88。CodexのTP-57／issue #36に相当するClaude Code側）。
+   *
+   * **経路の実測（CLI 2.1.227）**: control protocolに専用の制御要求は無い。
+   * `import` `import_config` `import_settings` `run_local_command` `local_command`
+   * `invoke_command` `run_command` `run_slash_command`
+   * `external_agent_config_detect` `detect_import` `config_migration_detect`
+   * `migrate_config` の12候補を総当たりし、いずれも
+   * `Unsupported control request subtype: <name>` で拒否されることを確認済み
+   * （CodexのJSON-RPCのような `externalAgentConfig/detect` 相当は存在しない）。
+   *
+   * そのため `compact` / `fast` と同じく、TUIと同じ `/import` をユーザー発言として送る。
+   * バイナリの文字列解析で `claude import [codex|gemini] [--dry-run]
+   * [--yes[=<digest>]]` というサブコマンド定義と、同名のスラッシュコマンド定義
+   * （`type:"local-jsx"` はTTYの対話UI専用、`type:"local"` は
+   * `supportsNonInteractive:true` を持ち非対話環境向け）が見つかり、
+   * `isEnabled` は機能フラグ `tengu_import` を見ている（未提供環境では一覧に出ない）。
+   *
+   * 実際にこの環境で `/import` を送って実測した結果: 一覧に `import` コマンドが
+   * 存在し（フラグが有効）、送るとCLIが実在する `~/.codex` の設定を実際にスキャンし、
+   * 32桁16進のダイジェスト付きプレビュー（何が取り込み可能か・何が自動対応不可か）が
+   * 会話内の応答として返ってきた。**ただしこの応答は構造化JSONではなく、モデルが
+   * 生成する自然文**（応答の言い回しはユーザー自身のCLAUDE.md等の指示にも影響される）
+   * なので、拡張機能側で内容やダイジェストを機械的にパースすることはしない
+   * （壊れやすく、design.mdの「実測できないことを実測したふりで書かない」に反する）。
+   *
+   * 実際に書き込むには、この応答に含まれるダイジェストを付けて
+   * `/import --yes=<digest>` をユーザー自身がもう一度送る必要があり（ダイジェストが
+   * 現在のスキャンと一致しないと拒否される＝確認後に設定が変わっていたら弾かれる）、
+   * 対話ターミナルでの `claude import`（チェックボックスUI）はTTY専用のためこの拡張
+   * からは使えない。つまりこの呼び出し自体は**一切書き込まない**（プレビューの要求を
+   * 送るだけ）。呼び出し側の確認ダイアログは「何を・どこから」を説明するためのもので、
+   * 実際の取り込み可否はCLI自身の二段階確認（本呼び出し→ダイジェスト一致の再送信）に
+   * 委ねる。取り込み元はCodexまたはGemini固定（`claude import` の引数説明より。
+   * このCLI自身をソースにすることはできない）。
+   */
+  importConfig(): void {
+    if (this.proc === undefined) {
+      throw new Error('セッションが起動していません');
+    }
+    this.update({ ...this.state, busy: true, turnFailed: false });
+    this.write(buildUserMessage('/import'));
+  }
+
+  /**
    * 指定した発言の直前まで、ファイルだけを戻せるか確かめる（dry_run）。実際には適用しない。
    *
    * **会話の履歴には触れない**。`rewind_files` はファイルだけを対象にする制御要求で、

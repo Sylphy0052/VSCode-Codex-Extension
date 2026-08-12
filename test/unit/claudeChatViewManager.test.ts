@@ -752,3 +752,72 @@ describe('ClaudeChatViewManagerのメモリ追記（issue #6/#144）', () => {
     });
   });
 });
+
+/**
+ * 他エージェント（Codex／Gemini）からの設定インポート（issue #200、design.md TP-88）。
+ *
+ * control protocolに構造化API（Codex側の`externalAgentConfig/detect`相当）が無いことを
+ * 実測済み（`streamSession.ts`の`importConfig`参照）のため、拡張機能が保証できるのは
+ * 「確認ダイアログで何を・どこから・どこへを明示してから`/import`を送る」ことと
+ * 「取り消したら何も送らない」ことだけ。この2点をここで検証する。
+ */
+describe('ClaudeChatViewManagerの他エージェント設定インポート（issue #200）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+  });
+
+  async function openPanel(manager: ClaudeChatViewManager): Promise<FakeWebviewPanel | undefined> {
+    await manager.openNew('/workspace/root');
+    return __mock.lastCreatedPanel();
+  }
+
+  it('確認ダイアログで対象（Codex/Gemini→Claude Code）を明示してから/importを送る', async () => {
+    const { sessions } = stubStartCapturing();
+    const { manager } = createManager();
+    const panel = await openPanel(manager);
+    const session = sessions[0];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    const written: string[] = [];
+    (
+      session as unknown as {
+        proc: {
+          killed: boolean;
+          stdin: { write: (line: string) => void; destroyed: boolean; writable: boolean };
+        };
+      }
+    ).proc = {
+      killed: false,
+      stdin: { write: (line) => written.push(line), destroyed: false, writable: true },
+    };
+
+    panel?.webview.simulateMessage({ type: 'claudeImport' });
+    await flush();
+
+    expect(__mock.messages.warnings).toHaveLength(1);
+    expect(__mock.messages.warnings[0]).toContain('Codex');
+    expect(__mock.messages.warnings[0]).toContain('Gemini');
+    expect(__mock.messages.warnings[0]).toContain('Claude Code');
+    expect(written).toHaveLength(1);
+    expect(JSON.parse(written[0]!.trim())).toEqual({
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text: '/import' }] },
+    });
+  });
+
+  it('確認ダイアログをキャンセルすると何も送らない', async () => {
+    stubStart();
+    const { manager } = createManager();
+    const panel = await openPanel(manager);
+    __mock.showWarningMessageAnswer = undefined;
+
+    panel?.webview.simulateMessage({ type: 'claudeImport' });
+    await flush();
+
+    // キャンセル時はimportConfig()自体を呼ばないため、未起動セッションでもエラーにならない
+    expect(__mock.messages.errors).toEqual([]);
+  });
+});

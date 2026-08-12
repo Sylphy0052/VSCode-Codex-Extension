@@ -27,6 +27,7 @@ import type {
 } from '../orchestrator/taskSession';
 import {
   addAttachment,
+  confirmClaudeImport,
   confirmCompact,
   confirmMemoryAppend,
   confirmRewindFiles,
@@ -549,6 +550,9 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       showRewind: true,
       // 行頭の !/# の案内（issue #5/#6、design.md §14.29）。CodexのTUIに無い挙動
       showInputModeHints: true,
+      // 他エージェントからの設定インポート（issue #200）。Codexは別のコントロールパネル
+      // UI（issue #36）を持つため、二重導線を避けてClaude Code画面にだけ出す
+      showImport: true,
     });
     panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(entry, message));
     panel.onDidDispose(() => {
@@ -875,6 +879,10 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         void this.compact(entry);
         return;
       }
+      if (type === 'claudeImport') {
+        void this.importConfig(entry);
+        return;
+      }
       if (type === 'stopBackgroundTask' && typeof m['id'] === 'string') {
         void this.stopBackgroundTask(
           entry,
@@ -961,6 +969,27 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       // 圧縮は新しいターンを起こす。ループの指示と重ならないよう割り込み扱いにする
       entry.loop.noteUserAction();
       entry.session.compact();
+    } catch (e) {
+      this.reportError(e);
+    }
+  }
+
+  /**
+   * 他エージェント（Codex／Gemini）の設定インポートのプレビューを要求する
+   * （issue #200、design.md TP-88）。
+   *
+   * ここで書き込みは起きない（`streamSession.ts` の `importConfig` 参照）。それでも
+   * 「何を・どこから・どこへ」を確認してから送るのは、実際に取り込むまでの二段階目
+   * （CLIが提示するダイジェスト付き確認コマンド）へ迷わず進めるようにするため。
+   */
+  private async importConfig(entry: ClaudePanel): Promise<void> {
+    if (!(await confirmClaudeImport())) {
+      return;
+    }
+    try {
+      // compactと同じく新しいターンを起こす。ループの指示と重ならないよう割り込み扱いにする
+      entry.loop.noteUserAction();
+      entry.session.importConfig();
     } catch (e) {
       this.reportError(e);
     }
