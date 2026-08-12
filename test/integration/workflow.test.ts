@@ -16,7 +16,8 @@ import {
 /**
  * ワークフロー（design.md §16）の実行を実VSCode上で確かめる（Issue #158）。
  * 対応する手動手順は [docs/manual-test.md](../../docs/manual-test.md) のW-01 / W-02 /
- * W-04 / W-05。
+ * W-04 / W-05（手順書の圧縮後はW-A。旧番号との対応はW群の冒頭にある）。W-05は手動から
+ * 落としてあり、残る番号の観点も画面の見え方だけがW-Aへ残っている。
  *
  * CLIとの境界（`TaskSessionHost.openTaskSession`）だけをフェイクへ差し替え、worktreeの
  * 作成・スケジューリング・状態遷移・workspaceStateへの保存は実物を通す。ターンは
