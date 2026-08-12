@@ -949,6 +949,9 @@ export function chatScript(
     el('claudeImport').disabled = !!state.busy;
     // 要約も新しいターンを起こす（Claude Code画面のみ、issue #203）
     el('recap').disabled = !!state.busy;
+    // 自動圧縮の確認・変更も新しいターンを起こす（Claude Code画面のみ、issue #201）
+    const autocompactApplyButton = el('autocompactApply');
+    if (autocompactApplyButton) autocompactApplyButton.disabled = !!state.busy;
     applyPlanMode(state.planMode);
     applyFastMode(state);
     renderAttachments(state.attachments);
@@ -1090,6 +1093,26 @@ export function chatScript(
       costSpan.title = cost.title;
       status.appendChild(costSpan);
     }
+
+    // 自動圧縮の窓サイズ（issue #201）。まだ問い合わせていない間は state.autocompactWindow
+    // 自体が無いため何も出さない（「自動」だと決め付けない）。コンテキスト残量のすぐ隣に
+    // 置く（issue本文の置き場指定）
+    const autocompact = formatAutocompactWindow(state.autocompactWindow);
+    if (autocompact !== '') {
+      if (status.childNodes.length > 0) status.appendChild(document.createTextNode(' ・ '));
+      status.appendChild(document.createTextNode(autocompact));
+    }
+  }
+
+  /**
+   * 自動圧縮の窓サイズの表記（issue #201）。formatTokensはコンテキスト残量と同じ
+   * 丸め方（k/M単位）を使い、見え方をそろえる。
+   */
+  function formatAutocompactWindow(win) {
+    if (!win) return '';
+    if (win.mode === 'auto') return '自動圧縮 自動';
+    if (typeof win.tokens === 'number') return '自動圧縮 ' + formatTokens(win.tokens);
+    return '';
   }
 
   // セッションのコスト（issue #37、/cost相当）。レート制限の消費率（usage）とも
@@ -1458,6 +1481,17 @@ export function chatScript(
   );
   // 会話の1行要約（issue #203）。壊れる操作ではないため確認は無く、押すとそのまま送る
   el('recap').addEventListener('click', () => vscode.postMessage({ type: 'recap' }));
+  // 自動圧縮の窓サイズ（issue #201）。Codex画面には要素ごと無い（showAutocompactが
+  // falseだと設定行に描画されない）ため、Fast modeと同じくnullを許して素通しする。
+  // 入力欄が空欄なら現在値の問い合わせ、値があれば変更として拡張機能側で分岐する
+  // （streamSession.tsのsetAutocompactWindow参照）。壊れる操作ではないため確認は無い
+  const autocompactApplyButton = el('autocompactApply');
+  if (autocompactApplyButton) {
+    autocompactApplyButton.addEventListener('click', () => {
+      const input = el('autocompactInput');
+      vscode.postMessage({ type: 'autocompactWindow', window: input ? input.value : '' });
+    });
+  }
   // 見た目は状態が返ってきてから変える。押した瞬間に変えると、失敗したとき嘘になる
   el('planToggle').addEventListener('click', () =>
     vscode.postMessage({ type: 'planMode', on: !planMode }),

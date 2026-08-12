@@ -2204,6 +2204,72 @@ issue本文のとおり、TP-87（#199）で「人が付けた名前 > transcrip
 
 テストは`test/unit/claudeStreamSessionRecap.test.ts`（`recap()`単体）・`test/unit/claudeChatViewManager.test.ts`（`recap`メッセージの配線）で検証する。手動確認手順は`docs/manual-test.md`のL-43に追加する。
 
+### 14.37 Claude Code画面の自動圧縮の窓サイズ設定（`/autocompact`、issue #201、TP-89）
+
+issue #195の再抽出で見つかった機能。Claude Codeの`initialize`応答の`commands`一覧にも`autocompact`（`description: "Configure the auto-compact window size"`）が実在する。拡張機能は手動圧縮（TP-40／#20）とコンテキスト残量の表示（TP-31／#15）を持つが、自動圧縮が走る窓の大きさには触れておらず、残量が減ったときに人が取れる手が「手動で圧縮する」しか無かった。
+
+#### 実測1: control protocolに経路は無い。ただし`apply_flag_settings`は「効いたか確かめられない」形で通る
+
+バイナリのstrings解析（`strings -n 6`）で`autoCompactWindow` `autoCompactEnabled` `CLAUDE_CODE_AUTO_COMPACT_WINDOW`等の識別子を拾い、`claude --print --input-format stream-json --output-format stream-json --verbose`（CLI 2.1.227）へ`initialize`に続けて次の6候補を`control_request`として送った。
+
+`set_autocompact` / `set_autocompact_window` / `autocompact` / `autocompact_window` / `set_auto_compact_window` / `configure_autocompact`
+
+**全6件が`Unsupported control request subtype: <name>`で拒否される**ことを実測した。§14.34の`/import`・§14.36の`/recap`と同じく、専用の制御要求は無い。
+
+一方、`effort`（§14.28、`buildSetEffortRequest`）と同じ抜け道である`apply_flag_settings`に`{settings: {autoCompactWindow: <値>}}`を載せる経路は`{"request_id":"...","response":{}}`という成功応答が返った。ただし直後に`get_settings`を送っても`effective`・`applied`のどちらにも`autoCompactWindow`は現れず、**実際に効いたかどうかを確かめる手段が無い**（`buildSetEffortRequest`のJSDocと同じ限界）。そのため採用しなかった。
+
+#### 実測2: `get_settings`と`initialize`のどちらにも現在値は含まれない
+
+`get_settings`（`buildGetSettingsRequest`）の応答は`{effective, sources, applied}`という形だが、`autoCompactWindow`を明示的に設定していない状態では`effective`にキー自体が現れない（`hooksSettings.ts`が読む`effective.hooks`と同じ構造で、未設定の項目はそもそも出てこない）。`initialize`の応答（`fast_mode_state`等が乗る場所）にも同様に無い。**現在値をここから読む経路は無い**。
+
+#### 実測3: `/autocompact`はCLI内蔵のローカルコマンドで、応答は固定書式（`/recap`と違いモデル呼び出しを経由しない）
+
+同じstrings解析で`claude`本体に`--autocompact <auto|tokens>`という起動オプションと、`argumentHint:"[auto|<tokens>]"`を持つ同名のスラッシュコマンド定義が見つかった。実際にこの環境で送信し、次を実測した（`buildUserMessage('/autocompact ...')`と同じ形。CLI 2.1.227）。
+
+| 送信 | 応答（1行目） |
+| --- | --- |
+| `/autocompact`（引数無し・未設定） | `Auto-compact window: auto` |
+| `/autocompact`（引数無し・設定済み） | `Auto-compact window: 300k tokens (from settings)` |
+| `/autocompact 300000` | `Auto-compact window set to 300k tokens` |
+| `/autocompact auto` | `Auto-compact window set to auto` |
+| `/autocompact 50000`（下限未満） | `Couldn't parse '50000'. Expected 'auto' or 100k–1M tokens (e.g. 500k, 200000, or 200 as shorthand)` |
+| `/autocompact 2000000`（上限超過） | 同上のパターンで拒否 |
+| `/autocompact banana`（書式不正） | 同上のパターンで拒否 |
+
+引数無しの直後にもう一度引数無しで送り直し、失敗した変更（50000等）が値へ反映されていないこと（`300k tokens (from settings)`のまま）も確認した。**受理範囲は100k〜1Mトークン**（バイナリの`.min(1e5).max(1e6)`とも一致）。
+
+この応答は`model:"<synthetic>"`・`stop_reason:"stop_sequence"`で、`/recap`（§14.36）と見た目は同じ`<synthetic>`表示だが、**`total_cost_usd`は送信前後で変化せず、`num_turns`は`0`のまま**だった。つまり`/recap`と違って軽量モデル呼び出しを経由しない、CLI内部だけで完結する固定書式の応答である。そのため`/import`・`/recap`の「自然文なので機械的にパースしない」という判断とは違う結論を取れる（次項）。
+
+#### 設計判断: 固定書式の応答だけを解析し、画面へ反映する
+
+§14.34（`/import`）・§14.36（`/recap`）は応答がモデル生成の自然文（言い回し・長さが会話内容や環境のCLAUDE.md等に左右される）だったため、拡張機能側でのパースを見送った。`/autocompact`の応答は次の点でそれらと性質が異なる。
+
+1. **モデル呼び出しを経由しない**（実測3のコスト・`num_turns`）。会話内容に左右される余地が無い
+2. **文言のバリエーションが数値部分だけ**（`auto`か`<N>k tokens`かの二択で、説明文の後続行は毎回同一）
+3. issue本文が「現在の窓サイズが画面から分かる（取れない場合はその根拠を残し、設定操作だけを提供する）」を受入基準に挙げており、実測1・2のとおり構造化APIが無い以上、この応答を読む以外に窓サイズを画面へ出す手段が無い
+
+そのため`src/claude/autocompactText.ts`の`parseAutocompactReport`で1行目だけを正規表現で読み、`ChatState.autocompactWindow`（`{mode: 'auto'} | {mode: 'fixed', tokens}`）へ落とす。ただし**書式は非公開の実装詳細で保証されていない**ため、`usageText.ts`の`parseUsageReport`と同じ流儀（一致しなければ`undefined`を返すだけで諦める。前の値は変えない）を徹底し、CLIの更新で読めなくなっても壊れずに「表示が消えるだけ」に留める。
+
+失敗応答（範囲外・書式不正）は`Auto-compact window`から始まらないため`parseAutocompactReport`は素通りする（`undefined`）。CLI自身のエラー文がそのまま会話に残るため、失敗したことは画面から分かる（受入基準の「取れない場合はその根拠を残す」は、値が読めない場合だけでなく操作が失敗した場合にも会話の記録で満たされる）。
+
+#### 実装
+
+- `src/appserver/chatState.ts`: `AutocompactWindowView`（`{mode: 'auto' | 'fixed', tokens: number | undefined}`）と、`ChatState.autocompactWindow?: AutocompactWindowView`を追加（Claude Codeのみ。`fastMode`と同じく対応しない・未問い合わせの間は`undefined`）
+- `src/claude/autocompactText.ts`（新規）: `parseAutocompactReport(text)`。実測3の書式を正規表現1本で読む。読めなければ`undefined`
+- `src/claude/streamJson.ts`: `applyAssistant`で、`message.model === '<synthetic>'`のテキスト応答に対してだけ`parseAutocompactReport`を試し、一致すれば`state.autocompactWindow`を更新する（`/recap`の自然文要約など他の`<synthetic>`応答は書式が一致せず素通りするため、判定を`<synthetic>`かどうかだけに絞っても安全）
+- `src/claude/streamSession.ts`: `ClaudeStreamSession.setAutocompactWindow(window)`を追加。空文字なら`/autocompact`（問い合わせ）、それ以外は`/autocompact <window>`（変更）を送るだけで、CLIの受理可否をそのまま信じる（事前バリデーションはしない。`compact` `recap`と同じ流儀）
+- `src/view/chatView.ts`: `ChatShellOptions`に`showAutocompact?: boolean`を追加（Claude Code画面のみ`true`）。`#settings`行へ入力欄（`autocompactInput`）と実行ボタン（`autocompactApply`）を追加
+- `src/view/chatScript.ts`: `autocompactApply`のクリックで入力欄の値（空でもよい）を`{type: 'autocompactWindow', window}`として送る。応答中は無効化する（`compact` `recap`と同じ扱い）。フッターの状態行（`renderStatus`）でコンテキスト残量のすぐ隣に`formatAutocompactWindow`の表示（例:「自動圧縮 自動」「自動圧縮 300k」）を追加し、`state.autocompactWindow`が無ければ何も出さない
+- `src/view/claudeChatView.ts`: `handleMessage`に`autocompactWindow`分岐を追加し、`session.setAutocompactWindow(window)`を呼ぶ`setAutocompactWindow()`メソッドを追加。問い合わせ・変更のどちらも壊れる・戻せない操作ではないため、`recap`と同じく確認ダイアログは挟まない
+
+#### スコープ外にしたもの
+
+- **事前バリデーション（100k〜1Mの範囲チェック等）**: CLI自身が明確なエラー文で拒否するため、拡張機能側での重複実装はしない（`compact` `recap`と同じ「CLIの受理を正とする」方針）
+- **`apply_flag_settings`経由の変更**: 実測1のとおり効いたかどうかを確かめられないため使わない
+- **タブ名・履歴の表示名への反映**: この機能はコンテキスト残量に近い設定値であり、§14.36で見送った「要約を名前に流用する」話とは別物。対象外
+
+テストは`test/unit/claudeAutocompactText.test.ts`（`parseAutocompactReport`単体）・`test/unit/claudeStreamSessionAutocompact.test.ts`（`setAutocompactWindow()`単体）・`test/unit/claudeStreamJson.test.ts`（`<synthetic>`応答からの反映）・`test/unit/claudeChatViewManager.test.ts`（`autocompactWindow`メッセージの配線）で検証する。手動確認手順は`docs/manual-test.md`のL-44に追加する。
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）

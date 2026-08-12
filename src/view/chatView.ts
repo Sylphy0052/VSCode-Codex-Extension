@@ -1654,6 +1654,14 @@ export interface ChatShellOptions {
    * 会話名だけを対象にした改名操作）。二重導線を避けるためCodex画面には出さない。
    */
   showRecap?: boolean;
+  /**
+   * 自動圧縮の窓サイズの確認・変更欄を出すか（Claude Code画面のみ、issue #201、
+   * design.md §14.37）。
+   *
+   * `/autocompact` はTUI由来のローカルコマンドで、Codexに対応する設定は無い
+   * （issue本文の前提どおり）。二重導線を避けるためCodex画面には出さない。
+   */
+  showAutocompact?: boolean;
 }
 
 /**
@@ -1760,6 +1768,12 @@ ${chatStyles()}
     ${
       options.showAgentSelector === true
         ? '<label>エージェント <select id="agent"></select></label>'
+        : ''
+    }
+    ${
+      options.showAutocompact === true
+        ? `<label>自動圧縮 <input id="autocompactInput" type="text" placeholder="autoまたは100k~1M" title="空欄のまま「自動圧縮」を押すと現在値を確認します。'auto'または100k~1Mトークンの数値（例: 500k, 200000, 200）を入れると変更します"></label>
+    <button id="autocompactApply" type="button" class="secondary" title="自動圧縮の窓サイズを確認・変更します（応答は会話に残ります）">自動圧縮</button>`
         : ''
     }
     ${options.settingsNote === undefined ? '' : `<p class="note">${escapeHtml(options.settingsNote)}</p>`}

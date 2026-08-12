@@ -8,6 +8,7 @@ import {
   type ChatState,
 } from '../appserver/chatState';
 import { readClaudeResultImages } from '../provider/imageRefs';
+import { parseAutocompactReport } from './autocompactText';
 import { claudeSearchResults, describeTool, normalizeTodos, TODO_WRITE_TOOL } from './transcript';
 
 /**
@@ -93,20 +94,33 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
   let items = state.items;
   let editedFiles = state.turnEditedFiles;
   let todos = state.todos;
+  let autocompactWindow = state.autocompactWindow;
 
   for (const [position, part] of content.entries()) {
     const type = str(part['type']);
     if (type === 'text') {
+      const text = str(part['text']);
       items = upsert(items, {
         id: blockId(message, position, 'text'),
         kind: 'agentMessage',
-        text: str(part['text']),
+        text,
         detail: '',
         status: undefined,
         turnId: undefined,
         diffs: [],
         searchResults: [],
       });
+      // `/autocompact` はモデル呼び出しを経由しない `<synthetic>` 応答として、固定書式の
+      // テキストで窓サイズを返す（issue #201、design.md §14.37。`autocompactText.ts` 参照）。
+      // 同じ `<synthetic>` でも `/recap` の自然文要約は書式が安定しないため対象外だが、
+      // `parseAutocompactReport` は先頭が一致しない限り undefined を返すだけなので、
+      // どの `<synthetic>` 応答に対しても安全に試せる
+      if (str(message?.['model']) === '<synthetic>') {
+        const parsed = parseAutocompactReport(text);
+        if (parsed !== undefined) {
+          autocompactWindow = parsed;
+        }
+      }
       continue;
     }
     if (type === 'thinking') {
@@ -152,10 +166,15 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
     }
   }
 
-  if (items === state.items && editedFiles === state.turnEditedFiles && todos === state.todos) {
+  if (
+    items === state.items &&
+    editedFiles === state.turnEditedFiles &&
+    todos === state.todos &&
+    autocompactWindow === state.autocompactWindow
+  ) {
     return state;
   }
-  return { ...state, items, turnEditedFiles: editedFiles, todos, busy: true };
+  return { ...state, items, turnEditedFiles: editedFiles, todos, autocompactWindow, busy: true };
 }
 
 /**

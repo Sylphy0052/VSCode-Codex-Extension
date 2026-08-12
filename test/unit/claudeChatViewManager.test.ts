@@ -993,3 +993,89 @@ describe('ClaudeChatViewManagerの会話要約（issue #203）', () => {
     expect(__mock.messages.errors).toHaveLength(1);
   });
 });
+
+/**
+ * 自動圧縮の窓サイズ（issue #201、design.md §14.37）。
+ *
+ * recapと同じく壊れる操作ではないため確認ダイアログを挟まず、Webviewから届いた
+ * `autocompactWindow` メッセージをそのまま `setAutocompactWindow` へつなぐだけでよい
+ * （`streamSession.ts` の `setAutocompactWindow` のJSDoc参照）。
+ */
+describe('ClaudeChatViewManagerの自動圧縮窓サイズ設定（issue #201）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+  });
+
+  function attachFakeProc(session: ClaudeStreamSession): string[] {
+    const written: string[] = [];
+    (
+      session as unknown as {
+        proc: {
+          killed: boolean;
+          stdin: { write: (line: string) => void; destroyed: boolean; writable: boolean };
+        };
+      }
+    ).proc = {
+      killed: false,
+      stdin: { write: (line) => written.push(line), destroyed: false, writable: true },
+    };
+    return written;
+  }
+
+  it('確認なしで空文字を問い合わせとして/autocompactを送る', async () => {
+    const { sessions } = stubStartCapturing();
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const panel = __mock.lastCreatedPanel();
+    const session = sessions[0];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    const written = attachFakeProc(session);
+
+    panel?.webview.simulateMessage({ type: 'autocompactWindow', window: '' });
+    await flush();
+
+    expect(__mock.messages.warnings).toHaveLength(0);
+    expect(written).toHaveLength(1);
+    expect(JSON.parse(written[0]!.trim())).toEqual({
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text: '/autocompact' }] },
+    });
+  });
+
+  it('値を渡すと/autocompact <値>を送る', async () => {
+    const { sessions } = stubStartCapturing();
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const panel = __mock.lastCreatedPanel();
+    const session = sessions[0];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    const written = attachFakeProc(session);
+
+    panel?.webview.simulateMessage({ type: 'autocompactWindow', window: '300000' });
+    await flush();
+
+    expect(written).toHaveLength(1);
+    expect(JSON.parse(written[0]!.trim())).toEqual({
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text: '/autocompact 300000' }] },
+    });
+  });
+
+  it('セッションが起動していなければエラーとして報告する', async () => {
+    stubStart();
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const panel = __mock.lastCreatedPanel();
+
+    panel?.webview.simulateMessage({ type: 'autocompactWindow', window: 'auto' });
+    await flush();
+
+    expect(__mock.messages.errors).toHaveLength(1);
+  });
+});

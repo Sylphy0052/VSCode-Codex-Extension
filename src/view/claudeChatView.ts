@@ -603,6 +603,9 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       // 会話の1行要約（issue #203）。`/recap` はTUI由来のローカルコマンドで、Codexに
       // この概念は無いため、二重導線を避けてClaude Code画面にだけ出す
       showRecap: true,
+      // 自動圧縮の窓サイズ（issue #201）。`/autocompact` もTUI由来のローカルコマンドで、
+      // Codexに対応する設定は無いため、二重導線を避けてClaude Code画面にだけ出す
+      showAutocompact: true,
     });
     panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(entry, message));
     panel.onDidChangeViewState(() => {
@@ -954,6 +957,10 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         this.recap(entry);
         return;
       }
+      if (type === 'autocompactWindow') {
+        this.setAutocompactWindow(entry, typeof m['window'] === 'string' ? m['window'] : '');
+        return;
+      }
       if (type === 'stopBackgroundTask' && typeof m['id'] === 'string') {
         void this.stopBackgroundTask(
           entry,
@@ -1078,6 +1085,22 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     try {
       entry.loop.noteUserAction();
       entry.session.recap();
+    } catch (e) {
+      this.reportError(e);
+    }
+  }
+
+  /**
+   * 自動圧縮の窓サイズを確認・変更する（issue #201、design.md §14.37）。
+   *
+   * 空文字なら現在値の問い合わせ、それ以外なら変更として扱う（`streamSession.ts` の
+   * `setAutocompactWindow` 参照）。`recap`と同じく、壊れる・戻せない操作ではないため
+   * 確認ダイアログは挟まない。
+   */
+  private setAutocompactWindow(entry: ClaudePanel, window: string): void {
+    try {
+      entry.loop.noteUserAction();
+      entry.session.setAutocompactWindow(window);
     } catch (e) {
       this.reportError(e);
     }
