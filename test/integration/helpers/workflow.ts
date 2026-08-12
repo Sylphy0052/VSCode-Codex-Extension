@@ -9,6 +9,8 @@
  * そこだけをこのフェイクへ差し替える。worktreeの作成・スケジューリング・状態遷移・
  * ワークフローView・workspaceStateへの保存は実物を通る。
  */
+import { execFile } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 /** `ChatState` のうち `runner.ts` が `onFinished` で読む項目だけを写したもの。 */
 export interface ChatStateLike {
@@ -185,6 +187,9 @@ export interface TaskSnapshotLike {
   hasLiveSession: boolean;
   /** 失敗理由（`TaskFailureReason`）。診断メッセージへそのまま載せる。 */
   failure?: unknown;
+  /** タスクごとのPR/MR（design.md §16.11、Issue #118・#172）。 */
+  pullRequestNumber?: number | undefined;
+  pullRequestUrl?: string | undefined;
 }
 
 /**
@@ -206,6 +211,11 @@ export interface WorkflowRunSnapshotLike {
   tasks: readonly TaskSnapshotLike[];
   /** 警告欄（`WorkflowWarning`）。失敗時の手がかりとして診断メッセージへ載せる。 */
   warnings?: readonly WorkflowWarningLike[];
+  /** 統合ブランチ→mainのPR/MR（design.md §16.11・§16.18、Issue #172）。 */
+  integrationPullRequestNumber?: number | undefined;
+  integrationPullRequestUrl?: string | undefined;
+  /** 最終マージ（`agent.workflows.finalMerge: auto`）の結果。 */
+  finalMergeOutcome?: 'merged' | 'failed' | undefined;
 }
 
 /** 指定の `kind` の警告だけを取り出す。 */
@@ -245,6 +255,13 @@ export interface CliCommandResultLike {
   stderr: string;
 }
 
+/** `GitCommandResult`（`src/orchestrator/worktree.ts`）と構造互換な最小の口。 */
+export interface GitCommandResultLike {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
 /** `ForgeOverrides`（`src/extension.ts`）と構造互換な口。渡した項目だけが差し替わる。 */
 export interface ForgeOverridesLike {
   cli?: {
@@ -256,6 +273,7 @@ export interface ForgeOverridesLike {
     pullRequest: 'none' | 'integration' | 'per-task';
     finalMerge: string;
   };
+  git?: { run(args: readonly string[], cwd: string): Promise<GitCommandResultLike> };
 }
 
 /** `WorkflowTestApi`（`src/extension.ts`）と構造互換な口。 */
@@ -267,32 +285,167 @@ export interface WorkflowTestApiLike {
 }
 
 /**
+ * gitと `gh` / `glab` の呼び出しを**1本の時系列へ**記録する（Issue #172）。
+ *
+ * design.md §16.18 が定める順序（タスクブランチのpush→統合ブランチのpush→PR/MR作成→
+ * 統合worktreeでのマージと統合ブランチのpush）はgitとCLIにまたがるため、別々の配列では
+ * 相対順序を確かめられない。`RecordingGit` / `RecordingCli` へ同じインスタンスを渡す。
+ */
+export class ForgeCallLog {
+  readonly entries: string[] = [];
+
+  record(entry: string): void {
+    this.entries.push(entry);
+  }
+
+  /**
+   * PR/MRの作成順序に関わる呼び出しだけを、確かめやすい短い名前へ畳んで返す。
+   * worktreeの作成やstatusの確認など、順序の主張に関わらないgitの呼び出しは落とす。
+   */
+  forgeSteps(): string[] {
+    const steps: string[] = [];
+    for (const entry of this.entries) {
+      const push = /^git push origin (\S+):\S+$/u.exec(entry);
+      if (push !== null) {
+        steps.push(`push ${push[1] ?? ''}`);
+        continue;
+      }
+      if (/^gh pr create /u.test(entry) || /^glab api projects\/:id\/merge_requests /u.test(entry)) {
+        steps.push('createPullRequest');
+        continue;
+      }
+      if (/^git merge /u.test(entry)) {
+        steps.push('merge');
+        continue;
+      }
+      if (/^gh pr merge /u.test(entry) || /^glab mr merge /u.test(entry)) {
+        steps.push('finalMerge');
+      }
+    }
+    return steps;
+  }
+}
+
+/** 実gitを呼ぶ最小の `GitCommandRunner` 互換実装（`RecordingGit` の委譲先）。 */
+export const realGit = {
+  run(args: readonly string[], cwd: string): Promise<GitCommandResultLike> {
+    return new Promise((resolve) => {
+      execFile('git', [...args], { cwd, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+        if (error === null) {
+          resolve({ code: 0, stdout, stderr });
+          return;
+        }
+        const code = typeof error.code === 'number' ? error.code : 1;
+        resolve({ code, stdout, stderr: stderr === '' ? error.message : stderr });
+      });
+    });
+  },
+};
+
+/**
  * `gh` / `glab` の呼び出しを記録するだけのフェイク。**何も実行しない**ので、
  * 統合テストがホストへ触れることは無い。`auth status` の結果は `authenticated` で決める。
+ *
+ * PR/MRの作成（`gh pr create` / `glab api ... merge_requests`）に対しては、本物と同じ形の
+ * 出力を返す。`gh` はURLをそのまま標準出力へ、`glab api` は `web_url` を含むJSONを返す
+ * （`src/orchestrator/forge.ts` の `extractGithubPullRequestUrl` /
+ * `extractGitlabMergeRequestUrl`）。URLのホスト名は `.invalid`（RFC 2606）で、
+ * 実在しないことが規約上保証されている。
  */
 export class RecordingCli {
   readonly calls: Array<{ command: string; args: readonly string[]; cwd: string }> = [];
+  /**
+   * PR/MR作成の本文。`forge.ts` は一時ファイルへ書いて `--body-file` / `--field
+   * description=@` で渡し、呼び出しの直後に消すため、呼ばれた時点で読んで控える。
+   */
+  readonly bodies: string[] = [];
+  private created = 0;
 
-  constructor(private readonly authenticated: boolean) {}
+  constructor(
+    private readonly authenticated: boolean,
+    private readonly log?: ForgeCallLog,
+  ) {}
 
-  run(
-    command: string,
-    args: readonly string[],
-    cwd: string,
-  ): Promise<CliCommandResultLike> {
+  run(command: string, args: readonly string[], cwd: string): Promise<CliCommandResultLike> {
     this.calls.push({ command, args, cwd });
+    this.log?.record(`${command} ${args.join(' ')}`);
     const isAuthStatus = args[0] === 'auth' && args[1] === 'status';
-    const code = isAuthStatus && !this.authenticated ? 1 : 0;
-    return Promise.resolve({
-      code,
-      stdout: '',
-      stderr: isAuthStatus && !this.authenticated ? 'not logged in' : '',
-    });
+    if (isAuthStatus) {
+      return Promise.resolve(
+        this.authenticated
+          ? { code: 0, stdout: '', stderr: '' }
+          : { code: 1, stdout: '', stderr: 'not logged in' },
+      );
+    }
+    if (isCreatePullRequest(command, args)) {
+      this.created += 1;
+      const bodyFile = readBodyFilePath(args);
+      if (bodyFile !== undefined) {
+        this.bodies.push(readFileSync(bodyFile, 'utf8'));
+      }
+      const url =
+        command === 'gh'
+          ? `https://github.invalid/o/r/pull/${this.created}`
+          : `https://gitlab.invalid/o/r/-/merge_requests/${this.created}`;
+      const stdout = command === 'gh' ? `${url}\n` : JSON.stringify({ web_url: url });
+      return Promise.resolve({ code: 0, stdout, stderr: '' });
+    }
+    return Promise.resolve({ code: 0, stdout: '', stderr: '' });
   }
 
   /** `auth status` 以外の呼び出し（PR/MRの作成・マージなど）。 */
   nonAuthCalls(): Array<{ command: string; args: readonly string[]; cwd: string }> {
     return this.calls.filter((c) => !(c.args[0] === 'auth' && c.args[1] === 'status'));
+  }
+}
+
+/** `--body-file=<path>`（gh）/ `--field=description=@<path>`（glab）から本文のパスを取る。 */
+function readBodyFilePath(args: readonly string[]): string | undefined {
+  for (const arg of args) {
+    if (arg.startsWith('--body-file=')) {
+      return arg.slice('--body-file='.length);
+    }
+    if (arg.startsWith('--field=description=@')) {
+      return arg.slice('--field=description=@'.length);
+    }
+  }
+  return undefined;
+}
+
+/** `gh pr create` / `glab api projects/:id/merge_requests`（`forge.ts`が組み立てる形）か。 */
+function isCreatePullRequest(command: string, args: readonly string[]): boolean {
+  if (command === 'gh') {
+    return args[0] === 'pr' && args[1] === 'create';
+  }
+  return args[0] === 'api' && args[1] === 'projects/:id/merge_requests';
+}
+
+/**
+ * gitの呼び出しを記録しつつ、**実gitへそのまま委譲する**フェイク（Issue #172）。
+ *
+ * design.md §16.18 が定める順序はpush（git）とPR/MR作成（`gh` / `glab`）にまたがるため、
+ * CLI側の記録だけでは確かめられない。worktreeの作成・統合のマージも同じポートを通るので、
+ * 動作は実物のままにして記録だけを足す。
+ */
+export class RecordingGit {
+  readonly calls: Array<{ args: readonly string[]; cwd: string }> = [];
+
+  constructor(
+    private readonly real: {
+      run(args: readonly string[], cwd: string): Promise<GitCommandResultLike>;
+    },
+    private readonly log?: ForgeCallLog,
+  ) {}
+
+  run(args: readonly string[], cwd: string): Promise<GitCommandResultLike> {
+    this.calls.push({ args, cwd });
+    this.log?.record(`git ${args.join(' ')}`);
+    return this.real.run(args, cwd);
+  }
+
+  /** `git push` の呼び出しだけを、refspecの形（`<branch>:<branch>`）で並べる。 */
+  pushedRefspecs(): string[] {
+    return this.calls.filter((c) => c.args[0] === 'push').map((c) => c.args[2] ?? '');
   }
 }
 
