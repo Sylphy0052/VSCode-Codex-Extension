@@ -2369,6 +2369,81 @@ request, run /usage-credits in an interactive Claude Code session.
 
 テストは`test/unit/claudeControl.test.ts`（`readExtraUsage`単体）・`test/unit/claudeStreamSessionUsageCredits.test.ts`（`requestUsageCredits()`単体、`get_usage`応答からの`extraUsage`反映）・`test/unit/claudeChatViewManager.test.ts`（`usageCreditsRequest`メッセージの配線と確認ダイアログ）・`test/unit/webviewScript.test.ts`（フッターの導線マーカー）で検証する。手動確認手順は`docs/manual-test.md`のL-45に追加する。
 
+### 14.39 Claude Code画面のCLIデバッグログを開く／`/debug`で診断する（issue #205、TP-93）
+
+issue #195の再抽出で見つかった機能。Claude Codeの`initialize`応答の`commands`一覧に`debug`（`description: "Enable debug logging for this session and help diagnose issues"`）が実在する。**issue本文の想定はこの説明文どおり「セッションのデバッグログを会話中に有効にする」だったが、本体の事前実測（issue #205のコメント、CLI 2.1.227）でこの前提が覆っている。**以下、実測の要点と、それに基づいて選び直した実装方針を書く。
+
+#### 実測1: ログは`/debug`を送る前から常時出ている（「有効にする」操作は無い）
+
+`~/.claude/debug/<sessionId>.txt`に、セッション開始の時点で既に書かれていた（実測: 送信前で5678バイト）。`~/.claude/debug/latest`というシンボリックリンクが、CLI全体で最後に書かれたログ（＝直近のセッション）を指す。
+
+```text
+~/.claude/debug/c0bb1d58-....txt
+~/.claude/debug/latest -> ~/.claude/debug/c0bb1d58-....txt
+```
+
+中身は`2026-08-12T11:27:41.304Z [DEBUG] LSP Diagnostics: ...`のような行で、hookの実行結果・API応答時間・skillのロード件数・`autocompact: level=ok effectiveWindow=280000`などが出ている。つまり`description`の「Enable debug logging」という文言とは裏腹に、**拡張機能側で何かを「有効にする」操作は不要**で、CLIは起動直後から常にこのログを書き続けている。
+
+#### 実測2: `/debug`は「既に出ているログをモデルに読ませて診断させる」コマンド（課金される）
+
+`/debug`を実際に送って実測した結果、`<synthetic>`ではなく**`claude-opus-5`の実モデルが動き**、モデルが**Bashツールで`ls`・`cat`を実行**してログファイルを読み、内容を要約して返した。
+
+- `num_turns: 3`
+- **`total_cost_usd: 0.3824885`（実際に課金される）**
+- `Bash`ツールの実行を伴う→承認が要る構成では**承認カードが出る**
+
+control protocolに専用の経路は無い。バイナリから`^(get|set|toggle)_[a-z_]*debug[a-z_]*$`に一致するsubtypeを抽出したが該当は無かった（`set_debug` / `toggle_debug`等は存在しない）。つまり`compact` / `importConfig` / `recap` / `requestUsageCredits`と同じく、TUIと同じ`/debug`をユーザー発言として送るのが唯一の経路。
+
+`/recap`（§14.36。`<synthetic>`だが実際は安価な課金あり）や`/autocompact`（§14.37。`<synthetic>`かつ無償）とは性質が異なり、§14.38の`/usage-credits`よりもさらに重い（`/usage-credits`は`<synthetic>`かつ無償の固定文だったが、`/debug`は実モデル・Bashツール・実測0.38ドル程度の課金を伴う）。
+
+#### 設計判断1: 受入基準を「ログを有効にする」から「ログを開ける」へ組み替える（A案）
+
+issue本文の受入基準は「操作するとデバッグログが有効になり、会話に記録が残る」だったが、実測1のとおり**有効にする操作自体が存在しない**（ログは常時出ている）。issueのコメントに実装への提案として書いたA/B案のうち、**Aを主導線として採用する**: 「デバッグログの場所を画面から開ける」ボタンを置き、`~/.claude/debug/<sessionId>.txt`（無ければ`~/.claude/debug/latest`）を直接エディタで開く。CLIへは何も送らず、課金もツール実行も伴わない。
+
+- `src/claude/cliLocator.ts`の`debugLogCandidates(claudeHome, threadId)`が候補パスを優先順（セッション専用→`latest`）で返す純粋関数。ファイルI/Oはここではしない（`test/unit/claudeLocator.test.ts`で単体テストする）
+- `threadId`（このパネルのセッションid、`ClaudeStreamSession.threadId`）が分かっていればセッション専用のログを最優先にする。複数のClaude Code画面を同時に開いている場合に`latest`が別セッションのログへ上書きされていて「いま見ている会話のログではないものが開く」ズレを避ける狙い。`threadId`がまだ判っていない（`system/init`未受信）場合や、CLIのバージョン差でセッション別ファイルの命名が変わっている場合に備え、`latest`も次点の候補として必ず含める
+- `src/view/claudeChatView.ts`の`openDebugLog(entry)`が候補を先頭から順に`vscode.workspace.openTextDocument`で開けるか試し、開けたら`vscode.window.showTextDocument`で表示する。全滅すればログがまだ無い旨を情報メッセージで案内する（エラー扱いにはしない。CLI起動直後などで実際に起こりうる）
+- 開けたら`entry.session.noteLocalEvent(...)`で「デバッグログを開きました（CLIへは何も送っていません）: ＜開いたパス＞」を会話に1行残す。壊れる・戻せない操作ではないため確認ダイアログは挟まない
+
+#### 設計判断2: `/debug`の送信も副導線として残す（B案）。ただし実モデル起動・課金を明示して確認する
+
+Aだけでは「モデルに要約させて診断する」というissueの元々の狙い（`description`の"help diagnose issues"の部分）に応えられないため、issueのコメントの推奨どおり**Bを副導線として併用する**。「/debugで診断」ボタンは、実測2の内容（実モデルが動く・Bashツールを実行する・実測0.38ドル程度課金される・承認カードが出うる）を確認ダイアログに明示したうえで`/debug`を送る（`confirmDebugCommand`、`src/view/chatView.ts`）。`/usage-credits`（§14.38）と同じく「外部・重い副作用を持つ操作は呼び出し側で必ず確認する」という既存方針に揃える。応答はモデルが生成する自然文（構造化JSONではない）のため、`/import` `/recap`と同じく機械的にはパースせず会話へそのまま残す。
+
+#### 設計判断3: 受入基準・issueタイトルとのズレ
+
+issueのタイトル「セッションのデバッグログを画面から有効にする」・受入基準「操作するとデバッグログが有効になり」は、実測1のとおり実態と合わない（有効にする操作が無い）。このIssueで実装したのは次の2つで、タイトルとは異なるが実測に基づく最も妥当な着地と判断した。
+
+1. 常時出ているログを画面から直接開く（A）
+2. ログをモデルに読ませて診断させる`/debug`を、課金・ツール実行を明示した確認付きで送る（B）
+
+受入基準「常用の操作と混ざらない置き場になっている」は、`#settings`（画面下の設定行。モデル・承認・自動圧縮等の変更頻度が低い設定を集めた場所）へ両ボタンを置くことで満たす（送信ボタンが並ぶ入力欄には置かない）。「ログの行き先が分かり、拡張機能の出力チャネルとの関係が書かれている」は次で満たす。
+
+#### ログの行き先と拡張機能の出力チャネルとの関係
+
+CLI側のデバッグログ（`~/.claude/debug/<sessionId>.txt`）と、拡張機能自身の出力チャネル「Agent Sessions」（`src/extension.ts`の`vscode.window.createOutputChannel('Agent Sessions')`、`Logger`経由で`log.info`等が書く）は**別物**。
+
+- CLI側のログ: `claude`プロセス自身がCLI内部の動作（hook実行・API応答時間・skillロード・autocompact判定等）を記録するもので、拡張機能はここに一切書き込まない。拡張機能から見えるのは「ファイルとして開ける」ことだけ
+- 拡張機能の出力チャネル: `claude`プロセスのstderr（`proc.stderr`のdata、300文字まで`[claude]`という接頭辞を付けて転記）と、拡張機能自身のログ（プロセスの起動・終了、control requestの送受信の要約等）を持つ。stdout（stream-jsonの本体）はここには出さない
+
+つまり「CLIの内部動作を細かく追う」にはCLI側のデバッグログを、「拡張機能から見たプロセスの生死やcontrol requestの流れ」には拡張機能の出力チャネルを見る、という役割分担になる。
+
+#### 実装
+
+- `src/claude/cliLocator.ts`: `debugLogCandidates(claudeHome, threadId)`を追加（純粋関数、パス組み立てのみ）
+- `src/claude/streamSession.ts`: `ClaudeStreamSession.sendDebugCommand()`を追加。`compact` `importConfig` `recap` `requestUsageCredits`と同じく`buildUserMessage('/debug')`を書き込むだけ
+- `src/view/chatView.ts`: `confirmDebugCommand()`を追加（`confirmUsageCreditsRequest`と同じ形の`showWarningMessage`。実測2の内容と、ログを見るだけなら`openDebugLog`のほうが低コストである旨を明記）
+- `src/view/claudeChatView.ts`: `handleMessage`に`openDebugLog` / `debugCommand`分岐を追加。`openDebugLog(entry)`（確認無し、候補を順に開いて会話へ記録）と`sendDebugCommand(entry)`（`confirmDebugCommand()`で確認してから`session.sendDebugCommand()`）を追加
+- `src/view/chatView.ts`: `ChatShellOptions.showDebug`を追加し、`#settings`（設定行）へ「デバッグログを開く」「/debugで診断」の2ボタンを描画する
+- `src/view/chatScript.ts`: 2ボタンのクリックをそれぞれ`{type: 'openDebugLog'}` / `{type: 'debugCommand'}`のpostMessageへつなぐ（`autocompactApply`と同じく、Codex画面には要素が無いため`el()`の結果をnullチェックしてから配線する）
+
+#### スコープ外にしたもの
+
+- **応答の構造化・パース**: `/debug`の応答はモデルが生成する自然文で、`/import` `/recap`と同じ理由（設計判断2）でパースしない
+- **ログの内容の要約・整形**: 拡張機能側では行わない。開いた後の読み方はエディタの検索等に委ねる
+- **`DEBUG` / `DEBUG_SDK`等の環境変数の切り替え**: issue #205のコメントで見つかった別経路（起動時の環境変数）は、会話中に切り替えられずissue本文の「セッション中に有効にする」と意味が変わるため対象外にした
+
+テストは`test/unit/claudeLocator.test.ts`（`debugLogCandidates`単体）・`test/unit/claudeStreamSessionDebug.test.ts`（`sendDebugCommand()`単体）・`test/unit/claudeChatViewManager.test.ts`（`openDebugLog` / `debugCommand`メッセージの配線、候補のフォールバック、確認ダイアログ）・`test/unit/webviewScript.test.ts`（設定行の導線マーカー）で検証する。手動確認手順は`docs/manual-test.md`のL-46に追加する。
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）

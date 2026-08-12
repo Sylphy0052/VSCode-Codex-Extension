@@ -195,6 +195,17 @@ interface MockState {
    * `__mock.showWarningMessageAnswer = undefined`（Escapeで閉じた扱い）等に上書きする。
    */
   showWarningMessageAnswer: string | undefined | typeof AUTO_CONFIRM;
+  /**
+   * `workspace.openTextDocument` が「存在する」と扱うパスの集合（issue #205のデバッグ
+   * ログを開く導線で使う）。既定は空集合＝常に `ENOENT` で reject する（実物の
+   * `vscode.workspace.openTextDocument` がファイルの無いパスに対して行う挙動を模す）。
+   */
+  existingTextDocumentPaths: Set<string>;
+  /**
+   * `openTextDocument` に続けて `window.showTextDocument` まで実際に呼ばれた
+   * （＝エディタに表示された）パスの履歴（issue #205）。
+   */
+  openedTextDocumentPaths: string[];
 }
 
 const state: MockState = {
@@ -208,6 +219,8 @@ const state: MockState = {
   writtenFiles: [],
   writeFileError: undefined,
   showWarningMessageAnswer: AUTO_CONFIRM,
+  existingTextDocumentPaths: new Set(),
+  openedTextDocumentPaths: [],
 };
 
 /** テストコードから内部状態を操作・観測するための入口。実装コードからは使わない。 */
@@ -223,6 +236,8 @@ export const __mock = {
     state.writtenFiles = [];
     state.writeFileError = undefined;
     state.showWarningMessageAnswer = AUTO_CONFIRM;
+    state.existingTextDocumentPaths = new Set();
+    state.openedTextDocumentPaths = [];
   },
   set showInputBoxAnswer(value: string | undefined) {
     state.showInputBoxAnswer = value;
@@ -275,6 +290,17 @@ export const __mock = {
   get messages(): { warnings: string[]; errors: string[]; infos: string[] } {
     return state.messages;
   },
+  /**
+   * `workspace.openTextDocument` を成功させる（＝ファイルが存在する扱いにする）パスを
+   * 指定する（issue #205）。指定しないパスへの `openTextDocument` は reject する。
+   */
+  setExistingTextDocumentPaths(paths: readonly string[]): void {
+    state.existingTextDocumentPaths = new Set(paths);
+  },
+  /** `showTextDocument` まで実際に呼ばれた（＝エディタに表示された）パスの履歴（issue #205）。 */
+  get openedTextDocumentPaths(): string[] {
+    return state.openedTextDocumentPaths;
+  },
 };
 
 function getNested(values: Record<string, unknown>, key: string): unknown {
@@ -326,6 +352,17 @@ export const workspace = {
       return Promise.resolve();
     },
   },
+  /**
+   * テスト用: `__mock.setExistingTextDocumentPaths` で指定したパスだけ成功する
+   * （issue #205のデバッグログを開く導線。候補が複数ある実装のフォールバックを
+   * テストできるよう、実物と同じく無いパスは reject する）。
+   */
+  openTextDocument: (uri: FakeUri): Promise<{ uri: FakeUri }> => {
+    if (!state.existingTextDocumentPaths.has(uri.fsPath)) {
+      return Promise.reject(new Error(`ENOENT: no such file, open '${uri.fsPath}'`));
+    }
+    return Promise.resolve({ uri });
+  },
 };
 
 /** テスト用: `vscode.Uri` の最小フェイク（`Uri.file` のみ実装コードが使う）。 */
@@ -372,6 +409,14 @@ export const window = {
   },
   showInputBox: (_options?: unknown): Promise<string | undefined> =>
     Promise.resolve(state.showInputBoxAnswer),
+  /**
+   * テスト用: 実際にエディタへ表示はせず、渡された文書のパスを
+   * `__mock.openedTextDocumentPaths` へ記録するだけ（issue #205）。
+   */
+  showTextDocument: (doc: { uri: FakeUri }, _options?: unknown): Promise<void> => {
+    state.openedTextDocumentPaths.push(doc.uri.fsPath);
+    return Promise.resolve(undefined);
+  },
   showQuickPick: (items: readonly unknown[], _options?: unknown): Promise<unknown> =>
     Promise.resolve(state.showQuickPickAnswer?.(items)),
   withProgress: async <T>(

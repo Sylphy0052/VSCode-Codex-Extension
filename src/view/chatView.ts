@@ -239,6 +239,30 @@ export async function confirmUsageCreditsRequest(): Promise<boolean> {
 }
 
 /**
+ * `/debug`（CLI側のデバッグログをモデルに読ませて診断させる要求）を送ってよいか確かめる
+ * （issue #205、design.md §14.39。Claude Code画面のみ）。
+ *
+ * 本体の事前実測（issue #205のコメント、CLI 2.1.227）によれば、`/debug`は`/usage-credits`
+ * よりさらに重い操作で、**実モデル（`claude-opus-5`）が動きBashツールで`ls`・`cat`を
+ * 実行**してログを読む。課金される（実測: `total_cost_usd: 0.3824885`）うえ、承認が
+ * 要る構成では承認カードも出る。ログの中身を見るだけなら「デバッグログを開く」
+ * （`openDebugLog`、CLIへは何も送らず無償）のほうが軽いため、その旨も文面に含めて
+ * 誤って高コストな方を選ばないようにする。
+ */
+export async function confirmDebugCommand(): Promise<boolean> {
+  const choice = await vscode.window.showWarningMessage(
+    'デバッグログの診断（/debug）を送ります。\n\n' +
+      '実測（CLI 2.1.227）では実モデルが起動し、Bashツールでログファイルを読んで要約' +
+      'します（実測時のコストはUSD 0.38ほど）。承認が必要な設定では承認カードが出ます。' +
+      'ログ自体は既に~/.claude/debug/配下に常時出ているため、内容を直接確認したい' +
+      'だけなら「デバッグログを開く」のほうが低コストです。',
+    { modal: true },
+    '送る',
+  );
+  return choice === '送る';
+}
+
+/**
  * AGENTS.mdの生成（`/init` 擬似コマンド、issue #26）で、既存ファイルを上書きしてよいか
  * 確かめる。ファイルが無いときは呼ばない。`confirmCompact` と同じく必ず確認を挟む
  * （生成そのものはCLI・モデルに任せるが、上書きの可否は拡張機能側で必ず止める）。
@@ -1685,6 +1709,16 @@ export interface ChatShellOptions {
    * （issue本文の前提どおり）。二重導線を避けるためCodex画面には出さない。
    */
   showAutocompact?: boolean;
+  /**
+   * CLI側のデバッグログを扱う導線（「デバッグログを開く」「/debugで診断」）を
+   * 設定行へ出すか（Claude Code画面のみ、issue #205、design.md §14.39）。
+   *
+   * どちらもTUI由来の概念（CLIのデバッグログ・`/debug`コマンド）で、Codexに対応する
+   * ものは無いため、二重導線を避けてClaude Code画面にだけ出す。常用の操作ではない
+   * ため、送信ボタンが並ぶ入力欄ではなく設定行（`#settings`、普段は開かない場所）に
+   * 置く（issue本文の「常用の操作と混ざらない置き場」）。
+   */
+  showDebug?: boolean;
 }
 
 /**
@@ -1797,6 +1831,12 @@ ${chatStyles()}
       options.showAutocompact === true
         ? `<label>自動圧縮 <input id="autocompactInput" type="text" placeholder="autoまたは100k~1M" title="空欄のまま「自動圧縮」を押すと現在値を確認します。'auto'または100k~1Mトークンの数値（例: 500k, 200000, 200）を入れると変更します"></label>
     <button id="autocompactApply" type="button" class="secondary" title="自動圧縮の窓サイズを確認・変更します（応答は会話に残ります）">自動圧縮</button>`
+        : ''
+    }
+    ${
+      options.showDebug === true
+        ? `<button id="openDebugLog" type="button" class="secondary" title="このセッションのCLIデバッグログ（~/.claude/debug/配下）をエディタで開きます。CLIへは何も送らず、課金もありません">デバッグログを開く</button>
+    <button id="sendDebugCommand" type="button" class="secondary" title="/debugを送り、実モデルにログを読ませて診断させます。実測ではモデルが動き課金されます（送信前に確認します）">/debugで診断</button>`
         : ''
     }
     ${options.settingsNote === undefined ? '' : `<p class="note">${escapeHtml(options.settingsNote)}</p>`}

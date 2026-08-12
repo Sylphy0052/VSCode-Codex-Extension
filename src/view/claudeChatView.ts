@@ -3,6 +3,7 @@ import { basename } from 'node:path';
 import * as vscode from 'vscode';
 import { isApprovalDecision, type ApprovalDecision } from '../appserver/approvals';
 import { isOpenableSearchUrl, type ChatState, type ChatUsage } from '../appserver/chatState';
+import { debugLogCandidates } from '../claude/cliLocator';
 import type { ClaudeSessionStore } from '../claude/sessionStore';
 import { ClaudeStreamSession, type ClaudeSpawnPort } from '../claude/streamSession';
 import { transcriptItems } from '../claude/transcript';
@@ -29,6 +30,7 @@ import {
   addAttachment,
   confirmClaudeImport,
   confirmCompact,
+  confirmDebugCommand,
   confirmMemoryAppend,
   confirmRewindFiles,
   confirmRunShellCommand,
@@ -607,6 +609,9 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       // 自動圧縮の窓サイズ（issue #201）。`/autocompact` もTUI由来のローカルコマンドで、
       // Codexに対応する設定は無いため、二重導線を避けてClaude Code画面にだけ出す
       showAutocompact: true,
+      // CLI側のデバッグログを開く／`/debug`で診断する導線（issue #205）。どちらも
+      // Codexに対応する概念が無いため、二重導線を避けてClaude Code画面にだけ出す
+      showDebug: true,
     });
     panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(entry, message));
     panel.onDidChangeViewState(() => {
@@ -966,6 +971,14 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         this.setAutocompactWindow(entry, typeof m['window'] === 'string' ? m['window'] : '');
         return;
       }
+      if (type === 'openDebugLog') {
+        void this.openDebugLog(entry);
+        return;
+      }
+      if (type === 'debugCommand') {
+        void this.sendDebugCommand(entry);
+        return;
+      }
       if (type === 'stopBackgroundTask' && typeof m['id'] === 'string') {
         void this.stopBackgroundTask(
           entry,
@@ -1128,6 +1141,65 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     try {
       entry.loop.noteUserAction();
       entry.session.setAutocompactWindow(window);
+    } catch (e) {
+      this.reportError(e);
+    }
+  }
+
+  /**
+   * CLI側のデバッグログをエディタで開く（issue #205、design.md §14.39）。
+   *
+   * 本体の実測どおり、ログは`/debug`を送らなくても常時`~/.claude/debug/`配下に
+   * 出ているため、**CLIへは何も送らず**ファイルを直接開くだけで済む（課金もツール
+   * 実行も伴わない。壊れる・戻せない操作ではないため確認ダイアログも挟まない）。
+   *
+   * `debugLogCandidates`が返す候補（このセッション専用のログ→`latest`の順）を先頭から
+   * 順に開けるか試す。`vscode.workspace.openTextDocument`はファイルが無いと reject
+   * するため、候補ごとにtry/catchで次点へ進む。全滅した場合はログがまだ無い旨を案内する
+   * （エラー扱いにはしない。CLIの初回起動直後などで実際に起こりうる）。
+   *
+   * 開けたら「どこを開いたか」を会話に1行残す（issue本文の受入基準「操作すると…会話に
+   * 記録が残る」を、実際の中身に合わせて「ログを開いたこと」の記録として満たす。design.md
+   * §14.39の設計判断を参照）。
+   */
+  private async openDebugLog(entry: ClaudePanel): Promise<void> {
+    const candidates = debugLogCandidates(this.claudeHome, entry.session.threadId);
+    for (const path of candidates) {
+      try {
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(path));
+        await vscode.window.showTextDocument(doc, { preview: false });
+        entry.session.noteLocalEvent(
+          `openDebugLog:${randomUUID()}`,
+          `デバッグログを開きました（CLIへは何も送っていません）: ${path}`,
+        );
+        return;
+      } catch {
+        // 次の候補へ（ファイルが無い等）。最後まで開けなければループの外で案内する
+      }
+    }
+    void vscode.window.showInformationMessage(
+      'デバッグログがまだ見つかりません。セッションを開始した直後は書き込みが' +
+        '間に合っていない可能性があります。少し待ってからもう一度お試しください。',
+    );
+  }
+
+  /**
+   * `/debug`を送り、実モデルにデバッグログを読ませて診断させる（issue #205、
+   * design.md §14.39）。
+   *
+   * `requestUsageCredits`と同じく、実モデルが動き課金・ツール実行（承認カード）を
+   * 伴いうる操作のため、必ず確認してから送る（`streamSession.ts`の`sendDebugCommand`
+   * 参照）。
+   */
+  private async sendDebugCommand(entry: ClaudePanel): Promise<void> {
+    if (!(await confirmDebugCommand())) {
+      return;
+    }
+    try {
+      // compact/importConfig/requestUsageCreditsと同じく新しいターンを起こす。
+      // ループの指示と重ならないよう割り込み扱いにする
+      entry.loop.noteUserAction();
+      entry.session.sendDebugCommand();
     } catch (e) {
       this.reportError(e);
     }

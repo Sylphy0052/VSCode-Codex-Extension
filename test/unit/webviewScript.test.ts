@@ -91,6 +91,12 @@ describe('chatScript', () => {
     expect(source).toContain('formatExtraUsage');
     expect(source).toContain("type: 'usageCreditsRequest'");
   });
+
+  it('デバッグログ（issue #205）: 設定行の導線がopenDebugLog/debugCommandを送る', () => {
+    const source = chatScript('Claude Code', { mode: 'command', commandName: 'code-review' });
+    expect(source).toContain("type: 'openDebugLog'");
+    expect(source).toContain("type: 'debugCommand'");
+  });
 });
 
 describe('controlPanelScript', () => {

@@ -1000,6 +1000,143 @@ describe('ClaudeChatViewManagerの追加クレジット要求（issue #204）', 
 });
 
 /**
+ * CLI側のデバッグログを開く（issue #205、design.md §14.39）。
+ *
+ * `openDebugLog`はCLIへは何も送らないため確認ダイアログを挟まず、`debugLogCandidates`
+ * （このセッション専用のログ→`latest`の順）を順に開けるか試す。開けたら会話に1行残し、
+ * 全滅したら案内だけ出す（会話には何も残さない）。
+ */
+describe('ClaudeChatViewManagerのデバッグログを開く（issue #205）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+  });
+
+  it('このセッション専用のログが開ければそれを開き、会話に記録を残す', async () => {
+    const { sessions } = stubStartCapturing();
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const panel = __mock.lastCreatedPanel();
+    const session = sessions[0];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    session.receive(initLine('session-abc'));
+    __mock.setExistingTextDocumentPaths(['/fake/claude-home/debug/session-abc.txt']);
+
+    panel?.webview.simulateMessage({ type: 'openDebugLog' });
+    await flush();
+
+    expect(__mock.openedTextDocumentPaths).toEqual(['/fake/claude-home/debug/session-abc.txt']);
+    const items = session.getState().items;
+    const last = items[items.length - 1];
+    expect(last?.detail).toContain('/fake/claude-home/debug/session-abc.txt');
+    expect(__mock.messages.infos).toEqual([]);
+  });
+
+  it('セッション専用のログが無ければlatestへフォールバックする', async () => {
+    const { sessions } = stubStartCapturing();
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const panel = __mock.lastCreatedPanel();
+    const session = sessions[0];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    session.receive(initLine('session-abc'));
+    // session-abc.txtは無く、latestだけ存在する状態を再現する
+    __mock.setExistingTextDocumentPaths(['/fake/claude-home/debug/latest']);
+
+    panel?.webview.simulateMessage({ type: 'openDebugLog' });
+    await flush();
+
+    expect(__mock.openedTextDocumentPaths).toEqual(['/fake/claude-home/debug/latest']);
+  });
+
+  it('候補が全部無ければ案内を出し、会話には何も残さない', async () => {
+    const { sessions } = stubStartCapturing();
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const panel = __mock.lastCreatedPanel();
+    const session = sessions[0];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    const itemsBefore = session.getState().items.length;
+
+    panel?.webview.simulateMessage({ type: 'openDebugLog' });
+    await flush();
+
+    expect(__mock.openedTextDocumentPaths).toEqual([]);
+    expect(__mock.messages.infos).toHaveLength(1);
+    expect(session.getState().items.length).toBe(itemsBefore);
+  });
+});
+
+/**
+ * `/debug`の送信（issue #205、design.md §14.39）。
+ *
+ * `/usage-credits`と同じく実モデルが動き課金・ツール実行（承認カード）を伴いうるため、
+ * `confirmDebugCommand`で必ず確認してから送る。
+ */
+describe('ClaudeChatViewManagerの/debug送信（issue #205）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+  });
+
+  it('確認ダイアログを経てから/debugを送る', async () => {
+    const { sessions } = stubStartCapturing();
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const panel = __mock.lastCreatedPanel();
+    const session = sessions[0];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    const written: string[] = [];
+    (
+      session as unknown as {
+        proc: {
+          killed: boolean;
+          stdin: { write: (line: string) => void; destroyed: boolean; writable: boolean };
+        };
+      }
+    ).proc = {
+      killed: false,
+      stdin: { write: (line) => written.push(line), destroyed: false, writable: true },
+    };
+
+    panel?.webview.simulateMessage({ type: 'debugCommand' });
+    await flush();
+
+    expect(__mock.messages.warnings).toHaveLength(1);
+    expect(__mock.messages.warnings[0]).toContain('/debug');
+    expect(written).toHaveLength(1);
+    expect(JSON.parse(written[0]!.trim())).toEqual({
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text: '/debug' }] },
+    });
+  });
+
+  it('確認ダイアログをキャンセルすると何も送らない', async () => {
+    stubStart();
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const panel = __mock.lastCreatedPanel();
+    __mock.showWarningMessageAnswer = undefined;
+
+    panel?.webview.simulateMessage({ type: 'debugCommand' });
+    await flush();
+
+    // キャンセル時はsendDebugCommand()自体を呼ばないため、未起動セッションでもエラーにならない
+    expect(__mock.messages.errors).toEqual([]);
+  });
+});
+
+/**
  * 会話の1行要約（issue #203、design.md §14.36）。
  *
  * compact/importConfigと違って会話を壊したり書き込みが起きたりしないため、確認ダイアログを
