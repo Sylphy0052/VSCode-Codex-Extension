@@ -40,6 +40,11 @@ import {
   nodeCliAvailability,
   nodeCliCommandRunner,
   nodeForgeFileSystem,
+  type CliAvailabilityPort,
+  type CliCommandRunner,
+  type FinalMergeConfig,
+  type ForgeHostConfig,
+  type PullRequestLayerConfig,
 } from './orchestrator/forge';
 import { startHttpMcpTransport } from './orchestrator/messaging';
 import { nodePseudoWorktreeFileSystem } from './orchestrator/pseudoWorktree';
@@ -126,6 +131,30 @@ export interface WorkflowTestApi {
    * （`ChatViewManager` / `ClaudeChatViewManager`）へ戻る。
    */
   setTaskSessionHost(provider: Provider, host: TaskSessionHost | undefined): void;
+  /**
+   * PR/MRまわり（design.md §16.18）の差し替え（Issue #169・#172）。`gh` / `glab` の
+   * 実行と、その前提の判定に使う設定を差し替える。**渡した項目だけ**が差し替わり、
+   * 省略した項目は実物のまま（`{}` や `undefined` を渡すと全て実物へ戻る）。
+   *
+   * `git` は差し替えない。統合テストは実gitでの統合ブランチのマージを確かめたいためで、
+   * `origin` へのpushは `LiveRunForgeState` が `active` の経路でしか呼ばれない
+   * （前提が欠けている状態を作るこのIssueのテストでは、そもそもpushへ到達しない）。
+   */
+  setForgeOverrides(overrides: ForgeOverrides | undefined): void;
+}
+
+/**
+ * `WorkflowTestApi.setForgeOverrides` が受け取る差し替え。`WorkflowRunnerForgeDeps` の
+ * うち、統合テストが実物と入れ替えたい3つだけを任意項目として持つ。
+ */
+export interface ForgeOverrides {
+  cli?: CliCommandRunner;
+  cliAvailability?: CliAvailabilityPort;
+  readConfig?: () => {
+    host: ForgeHostConfig;
+    pullRequest: PullRequestLayerConfig;
+    finalMerge: FinalMergeConfig;
+  };
 }
 
 /**
@@ -297,6 +326,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const overridableHost = (provider: Provider, real: TaskSessionHost): TaskSessionHost => ({
     openTaskSession: (input) => (taskSessionHostOverrides[provider] ?? real).openTaskSession(input),
   });
+  // PR/MRまわりの差し替え口（Issue #169・#172）。`gh` / `glab` の呼び出しと、その前提の
+  // 判定に使う設定を統合テストから差し替えるためのもの。`taskSessionHostOverrides` と同じく
+  // 空のままなら常に実物へ委譲するので、本番の経路は差し替え口が無かったときと変わらない。
+  const forgeOverrides: ForgeOverrides = {};
   const workflowRunner = new WorkflowRunner({
     hosts: {
       codex: overridableHost('codex', chat),
@@ -316,12 +349,19 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // 対応するホストへPR/MRを作る。前提が欠けていれば`runner.ts`側が警告のうえ
     // ローカルのマージだけへ倒す（`checkForgePrerequisites`。ワークフロー自体は止めない）
     forge: {
-      cli: nodeCliCommandRunner,
-      cliAvailability: nodeCliAvailability,
+      cli: {
+        run: (command, args, cwd) =>
+          (forgeOverrides.cli ?? nodeCliCommandRunner).run(command, args, cwd),
+      },
+      cliAvailability: {
+        isOnPath: (command) =>
+          (forgeOverrides.cliAvailability ?? nodeCliAvailability).isOnPath(command),
+      },
       fs: nodeForgeFileSystem,
       readConfig: () => {
         const c = readWorkflowsConfig();
-        return { host: c.forge, pullRequest: c.pullRequest, finalMerge: c.finalMerge };
+        const actual = { host: c.forge, pullRequest: c.pullRequest, finalMerge: c.finalMerge };
+        return forgeOverrides.readConfig?.() ?? actual;
       },
     },
     // 疑似worktree（design.md §16.20、Issue #105）。gitの作業ツリーでないワークスペースで
@@ -511,6 +551,23 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
               return;
             }
             taskSessionHostOverrides[provider] = host;
+          },
+          setForgeOverrides: (overrides) => {
+            delete forgeOverrides.cli;
+            delete forgeOverrides.cliAvailability;
+            delete forgeOverrides.readConfig;
+            if (overrides === undefined) {
+              return;
+            }
+            if (overrides.cli !== undefined) {
+              forgeOverrides.cli = overrides.cli;
+            }
+            if (overrides.cliAvailability !== undefined) {
+              forgeOverrides.cliAvailability = overrides.cliAvailability;
+            }
+            if (overrides.readConfig !== undefined) {
+              forgeOverrides.readConfig = overrides.readConfig;
+            }
           },
         }
       : undefined,

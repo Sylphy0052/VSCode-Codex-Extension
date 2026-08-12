@@ -238,10 +238,62 @@ export interface WorkflowRunnerLike {
   removeWorktrees(runId: string): Promise<{ removed: string[]; failed: string[] }>;
 }
 
+/** `CliCommandResult`（`src/orchestrator/forge.ts`）と構造互換な最小の口。 */
+export interface CliCommandResultLike {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
+/** `ForgeOverrides`（`src/extension.ts`）と構造互換な口。渡した項目だけが差し替わる。 */
+export interface ForgeOverridesLike {
+  cli?: {
+    run(command: string, args: readonly string[], cwd: string): Promise<CliCommandResultLike>;
+  };
+  cliAvailability?: { isOnPath(command: string): Promise<boolean> };
+  readConfig?: () => {
+    host: 'auto' | 'github' | 'gitlab' | 'none';
+    pullRequest: 'none' | 'integration' | 'per-task';
+    finalMerge: string;
+  };
+}
+
 /** `WorkflowTestApi`（`src/extension.ts`）と構造互換な口。 */
 export interface WorkflowTestApiLike {
   readonly runner: WorkflowRunnerLike;
   setTaskSessionHost(provider: 'codex' | 'claude', host: TaskSessionHostLike | undefined): void;
+  /** PR/MRまわりの差し替え（Issue #169・#172）。`undefined` で全て実物へ戻る。 */
+  setForgeOverrides(overrides: ForgeOverridesLike | undefined): void;
+}
+
+/**
+ * `gh` / `glab` の呼び出しを記録するだけのフェイク。**何も実行しない**ので、
+ * 統合テストがホストへ触れることは無い。`auth status` の結果は `authenticated` で決める。
+ */
+export class RecordingCli {
+  readonly calls: Array<{ command: string; args: readonly string[]; cwd: string }> = [];
+
+  constructor(private readonly authenticated: boolean) {}
+
+  run(
+    command: string,
+    args: readonly string[],
+    cwd: string,
+  ): Promise<CliCommandResultLike> {
+    this.calls.push({ command, args, cwd });
+    const isAuthStatus = args[0] === 'auth' && args[1] === 'status';
+    const code = isAuthStatus && !this.authenticated ? 1 : 0;
+    return Promise.resolve({
+      code,
+      stdout: '',
+      stderr: isAuthStatus && !this.authenticated ? 'not logged in' : '',
+    });
+  }
+
+  /** `auth status` 以外の呼び出し（PR/MRの作成・マージなど）。 */
+  nonAuthCalls(): Array<{ command: string; args: readonly string[]; cwd: string }> {
+    return this.calls.filter((c) => !(c.args[0] === 'auth' && c.args[1] === 'status'));
+  }
 }
 
 /** スナップショットからタスク1件を引く。 */
