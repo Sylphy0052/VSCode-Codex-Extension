@@ -10,23 +10,18 @@ import { waitFor } from './helpers/waitFor';
  * docs/manual-test.md のH群（履歴・復元）のうち、実CLIプロセスなしで確認できる範囲を
  * 狙って書いたテスト。
  *
- * 履歴一覧（TreeView）は `ProviderRegistry.available()`（src/provider/registry.ts）が
- * `locate()` で実行ファイルを解決できたプロバイダしか対象にしないため、実CLIを一切
- * 呼ばせない（`codex.executablePath` / `claude.executablePath` を存在しないパスへ
- * 固定する）方針のままだと一覧が常に空になる。「解決はできるが呼んでも即失敗する」
- * 無害なスタブへ差し替える必要がある。
+ * 実CLIを一切呼ばせないため、`codex.executablePath` / `claude.executablePath` は存在
+ * しない絶対パスに固定してある（fixtures/setup.mjs）。この状態でも履歴一覧が出ること
+ * 自体がH-09の確認になる。一覧の構築は `SessionStore.list()` のファイル読みだけで完結
+ * するのに、以前は `ProviderRegistry.available()` が `locate()` できないプロバイダを
+ * 一覧からまるごと除外していたため、5件とも「一覧が空」で失敗していた（issue #164）。
+ * 実装側を直した（実行ファイルの解決可否で一覧を絞らない）ので、前提はそのままでよい。
  *
- * #147では、無害なスタブへ差し替えた状態で `AppServerClient` が書き込み中に相手プロセスが
- * 既に終了しており `EPIPE` の非捕捉例外で拡張機能ホストごと巻き込み、無関係な他のテスト
- * まで道連れに失敗することが実測されたため、全件 `test.skip` にしていた（issue #155）。
- * その対策（`src/process/stdinSafety.ts`、design.md §14.31）は入ったので、この理由は解消
- * している。
- *
- * 現在 `test.skip` のまま残しているのは、**5件とも一覧が空で失敗する**ため（issue #164）。
- * 冒頭に書いたとおり `executablePath` を存在しないパスへ固定している間は
- * `ProviderRegistry.available()` がプロバイダごと除外するので、これは想定どおりの結果で
- * あり、テストの前提を直すか実装を変えるかの判断が要る。EPIPE対策が入った今なら
- * 「解決はできるが呼んでも即失敗する」スタブへ差し替える案を再挑戦できる。
+ * #147では、`locate()` は通るが呼ぶと即失敗するスタブへ差し替えた状態で、`AppServerClient`
+ * が書き込み中に相手プロセスが既に終了しており `EPIPE` の非捕捉例外で拡張機能ホストごと
+ * 巻き込み、無関係な他のテストまで道連れに失敗することが実測された（issue #155、対策は
+ * `src/process/stdinSafety.ts` / design.md §14.31）。実装を直した今はスタブ自体が不要に
+ * なったため、この経路には踏み込まない。
  *
  * 一時期「skipを外すとテストが完了しないまま止まる」と記録していたが、これは誤り。
  * 実行環境の `XDG_RUNTIME_DIR`（`/run/user/<uid>`）が消えており、VSCodeがIPCソケットを
@@ -35,7 +30,7 @@ import { waitFor } from './helpers/waitFor';
  * H-08（thread/list接続時）はそもそも実際のCodex CLIが要るため引き続き対象外。
  */
 suite('履歴一覧（docs/manual-test.md H群）', () => {
-  test.skip('H-00: session_index.jsonlに載っていないセッションも最初の発言から名前が付いて出る', async () => {
+  test('H-00: session_index.jsonlに載っていないセッションも最初の発言から名前が付いて出る', async () => {
     const api = await activateExtension();
     const manifest = readManifest();
     await api.sessionTree.setScope('workspace');
@@ -46,7 +41,7 @@ suite('履歴一覧（docs/manual-test.md H群）', () => {
     assert.equal(unnamed?.threadName, manifest.codex.unnamed.firstMessage);
   });
 
-  test.skip('H-01: CodexとClaude Codeのセッションが1つの一覧にマージされ、区別できる', async () => {
+  test('H-01: CodexとClaude Codeのセッションが1つの一覧にマージされ、区別できる', async () => {
     const api = await activateExtension();
     const manifest = readManifest();
     await api.sessionTree.setScope('workspace');
@@ -75,7 +70,7 @@ suite('履歴一覧（docs/manual-test.md H群）', () => {
     assert.ok(namedIndex < archivedIndex, '更新時刻の新しい順に並んでいない');
   });
 
-  test.skip('H-02: 右クリックメニューの出し分けに使うcontextValueがプロバイダ・archived状態で変わる', async () => {
+  test('H-02: 右クリックメニューの出し分けに使うcontextValueがプロバイダ・archived状態で変わる', async () => {
     const api = await activateExtension();
     const manifest = readManifest();
     await api.sessionTree.setScope('workspace');
@@ -102,7 +97,7 @@ suite('履歴一覧（docs/manual-test.md H群）', () => {
     );
   });
 
-  test.skip('H-03: 表示範囲の切り替えでワークスペース外のセッションが出入りする', async () => {
+  test('H-03: 表示範囲の切り替えでワークスペース外のセッションが出入りする', async () => {
     const api = await activateExtension();
     const manifest = readManifest();
 
@@ -124,17 +119,15 @@ suite('履歴一覧（docs/manual-test.md H群）', () => {
     await vscode.commands.executeCommand('codex.showWorkspaceSessions');
   });
 
-  test.skip('H-07 / H-09: 外部でロールアウトが作られると一覧に追従し、thread/list不通でも一覧は失われない', async () => {
+  test('H-07 / H-09: 外部でロールアウトが作られると一覧に追従し、thread/list不通でも一覧は失われない', async () => {
     const api = await activateExtension();
     const manifest = readManifest();
     await api.sessionTree.setScope('workspace');
 
     const before = await api.sessionTree.getChildren();
     // ここまでの一覧はすべてファイル読みの経路を通っている。`codex.executablePath` は
-    // 即終了するだけのスタブ（fixtures/setup.mjs）を指しているため、`thread/list` は
-    // 応答が届く前に相手プロセスが終了して必ず失敗し、ファイル読みへ退避する
-    // （issue #155で解消したEPIPEの非捕捉は起こさず、失敗として決着する）。
-    // それでも空にならないこと自体がH-09の狙いの確認になる
+    // 存在しない絶対パス（fixtures/setup.mjs）で、app-serverへは一度も繋がらないため
+    // `thread/list` は使えない。それでも一覧が空にならないことがH-09の狙いの確認になる
     assert.ok(before.length > 0, 'thread/listが使えないだけで一覧が空になっている');
 
     const newId = 'ffffffff-0000-0000-0000-000000000000';

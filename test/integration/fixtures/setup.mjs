@@ -212,16 +212,15 @@ export function prepareFixtures() {
   // 実CLI（codex/claude）を絶対に呼ばせないため、実行ファイルパスは存在しない絶対パスに
   // 固定する（PATH経由の解決も `/` を含む指定なので働かない。cliLocator.ts参照）。
   //
-  // 既知のトレードオフ: `ProviderRegistry.available()`（src/provider/registry.ts）は
-  // `locate()` が解決できないプロバイダを一覧からまるごと除外するため、この設定では
-  // 履歴一覧（TreeView）が常に空になる。そのため履歴一覧まわり
-  // （`sessionHistory.test.ts`）は現状 `test.skip` にしてある（issue #164）。
+  // この設定は履歴一覧（TreeView）の前提でもある。CLIが起動できない環境でも
+  // ファイル読みだけで一覧が出ることが `sessionHistory.test.ts` のH-09の狙いで、
+  // `ProviderRegistry` は実行ファイルの解決可否で一覧を絞らない（issue #164）。
   //
-  // 「解決はできるが呼んでも即失敗する」無害なスタブ（`exit 1` するだけのシェル
-  // スクリプト）へ差し替える案は、`AppServerClient` がまだ書き込み中に相手プロセスが
-  // 終了し `EPIPE` の非捕捉例外で拡張機能ホストごと巻き込む形で複数テストが道連れに
-  // 失敗したため見送っていた（2026-08-12に実測）。その後 issue #155 で書き込み時の
-  // EPIPEを捕捉する対応（`src/process/stdinSafety.ts`）が入ったので、再挑戦できる。
+  // 「解決はできるが呼んでも即失敗する」スタブ（`exit 1` するだけのシェルスクリプト）へ
+  // 差し替える案は採らない。`AppServerClient` がまだ書き込み中に相手プロセスが終了し
+  // `EPIPE` の非捕捉例外で拡張機能ホストごと巻き込む形で複数テストが道連れに失敗した
+  // 実績があり（issue #155、対策は `src/process/stdinSafety.ts`）、実CLIを呼ばせない
+  // 目的にはスタブ自体が不要なため。
   const settings = {
     'codex.codexHome': codexHome,
     'codex.executablePath': '/nonexistent/codex-must-not-run',

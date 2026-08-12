@@ -58,15 +58,27 @@ describe('ProviderRegistry', () => {
     expect(sessions.map((s) => s.id)).toEqual(['k1', 'c1']);
   });
 
-  it('実行ファイルが見つからないプロバイダを一覧から除く', async () => {
+  // 一覧はファイル読みだけで作れるため、CLIの実行ファイルが解決できるかどうかで
+  // プロバイダを絞らない（issue #164）。絞ると、CLIをPATHから外しただけで過去の
+  // 履歴が丸ごと消える。
+  it('実行ファイルが見つからないプロバイダのセッションも一覧に出す', async () => {
     const registry = new ProviderRegistry([
       fake('codex', { sessions: [session('c1', '2026-08-06T10:00:00Z', 'codex')] }),
       fake('claude', { found: false, sessions: [session('k1', '2026-08-07T10:00:00Z', 'claude')] }),
     ]);
 
-    expect(registry.available().map((p) => p.id)).toEqual(['codex']);
     const sessions = await registry.listSessions(options, logger());
-    expect(sessions.map((s) => s.id)).toEqual(['c1']);
+    expect(sessions.map((s) => s.id)).toEqual(['k1', 'c1']);
+  });
+
+  it('どのプロバイダも実行ファイルを解決できなくても一覧は空にならない', async () => {
+    const registry = new ProviderRegistry([
+      fake('codex', { found: false, sessions: [session('c1', '2026-08-06T10:00:00Z', 'codex')] }),
+      fake('claude', { found: false, sessions: [session('k1', '2026-08-07T10:00:00Z', 'claude')] }),
+    ]);
+
+    const sessions = await registry.listSessions(options, logger());
+    expect(sessions.map((s) => s.id)).toEqual(['k1', 'c1']);
   });
 
   it('片方が失敗しても、もう片方の一覧を返す', async () => {
