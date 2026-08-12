@@ -176,16 +176,16 @@ Claude Code 2.1.227 の `initialize` が返す一覧を取り直し、**CLI組�
 
 Codex側は同版（0.147.0）でプロトコルの件数も完全一致だったため、この節は全てClaude Code向け。
 
-| ID    | 内容                                                               | 対象   | 優先度 | Issue                                                                   |
-| ----- | ------------------------------------------------------------------ | ------ | ------ | ----------------------------------------------------------------------- |
-| TP-86 | Fast mode（`/fast`）の切替と現在値の表示                           | Claude | P2     | [#198](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/198) |
-| TP-87 | 会話の名前変更（`/rename`）。Codexは実装済みで非対称になっている   | Claude | P2     | [#199](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/199) |
-| TP-88 | 他エージェントからの設定インポート（`/import`）。Codexのみ実装済み | Claude | P3     | [#200](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/200) |
-| TP-89 | 自動圧縮の窓サイズ（`/autocompact`）                               | Claude | P3     | [#201](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/201) |
-| TP-90 | セッション中のskill再読込（`/reload-skills`）                      | Claude | P3     | [#202](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/202) |
-| TP-91 | セッション要約の生成（`/recap`）                                   | Claude | P3     | [#203](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/203) |
-| TP-92 | 追加クレジット（`/usage-credits`。`/extra-usage` は改名済み）      | Claude | P3     | [#204](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/204) |
-| TP-93 | デバッグログの有効化（`/debug`）                                   | Claude | P3     | [#205](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/205) |
+| ID    | 内容                                                               | 対象   | 優先度 | Issue                                                                                                                                                         |
+| ----- | ------------------------------------------------------------------ | ------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| TP-86 | Fast mode（`/fast`）の切替と現在値の表示                           | Claude | P2     | [#198](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/198) 済                                                                                    |
+| TP-87 | 会話の名前変更（`/rename`）。Codexは実装済みで非対称になっている   | Claude | P2     | [#199](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/199) 済（`rename_session` は実在。ただし読み戻す索引が無く、表示名は拡張機能側を正とする） |
+| TP-88 | 他エージェントからの設定インポート（`/import`）。Codexのみ実装済み | Claude | P3     | [#200](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/200) 済（control protocolに経路は無し。取り込み元はCodex/Gemini固定）                      |
+| TP-89 | 自動圧縮の窓サイズ（`/autocompact`）                               | Claude | P3     | [#201](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/201)                                                                                       |
+| TP-90 | セッション中のskill再読込（`/reload-skills`）                      | Claude | P3     | [#202](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/202) 済（`reload_skills` は送った先のプロセスにだけ効く）                                  |
+| TP-91 | セッション要約の生成（`/recap`）                                   | Claude | P3     | [#203](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/203)                                                                                       |
+| TP-92 | 追加クレジット（`/usage-credits`。`/extra-usage` は改名済み）      | Claude | P3     | [#204](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/204)                                                                                       |
+| TP-93 | デバッグログの有効化（`/debug`）                                   | Claude | P3     | [#205](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/205)                                                                                       |
 
 対象外にしたもの（理由つき）:
 
