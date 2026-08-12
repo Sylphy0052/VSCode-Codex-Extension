@@ -192,6 +192,30 @@ export async function confirmCompact(): Promise<boolean> {
 }
 
 /**
+ * 他エージェント（Codex／Gemini）の設定インポートを送ってよいか確かめる
+ * （issue #200、design.md TP-88。Claude Code画面のみ）。
+ *
+ * Codex側（issue #36）は取り込み対象を一覧から選ばせてから確認するが、Claude Code側は
+ * control protocolに構造化された一覧取得手段が無く（`streamSession.ts` の
+ * `importConfig` 参照）、`/import` をそのまま会話へ送ってCLI自身のプレビュー応答に
+ * 委ねるほかない。そのため「何を・どこから・どこへ」をこの確認ダイアログで明示してから
+ * 送る。ここで送るのはプレビュー要求のみで、実際の書き込みにはCLIが返すダイジェスト付き
+ * 確認コマンドをユーザーがもう一度送る必要がある（二段階確認）。
+ */
+export async function confirmClaudeImport(): Promise<boolean> {
+  const choice = await vscode.window.showWarningMessage(
+    'CodexまたはGeminiのローカル設定（MCPサーバー・AGENTS.md・カスタムコマンドなど）を' +
+      'このClaude Codeへ取り込む準備をします。\n\n' +
+      '送るのは確認（プレビュー）の要求だけで、ここでは何も書き換えません。' +
+      'CLIが会話内に取り込み対象と確認コマンドを提示するので、実際に取り込むかどうかは' +
+      'その応答を見てから改めて判断してください。',
+    { modal: true },
+    '確認を送る',
+  );
+  return choice === '確認を送る';
+}
+
+/**
  * AGENTS.mdの生成（`/init` 擬似コマンド、issue #26）で、既存ファイルを上書きしてよいか
  * 確かめる。ファイルが無いときは呼ばない。`confirmCompact` と同じく必ず確認を挟む
  * （生成そのものはCLI・モデルに任せるが、上書きの可否は拡張機能側で必ず止める）。
@@ -1615,6 +1639,14 @@ export interface ChatShellOptions {
    * design.md §14.29）。CodexのTUIにこの挙動は無い。
    */
   showInputModeHints?: boolean;
+  /**
+   * 「他エージェントから設定をインポート」ボタンを出すか（Claude Code画面のみ、
+   * issue #200、design.md TP-88）。
+   *
+   * Codexは同じ機能をコントロールパネルの一覧UI（issue #36）で持っており、この会話
+   * ボタンとは別導線。二重導線を避けるためCodex画面には出さない。
+   */
+  showImport?: boolean;
 }
 
 /**
@@ -1679,6 +1711,7 @@ ${chatStyles()}
     <button id="stop" type="button" class="secondary" title="Escでも中断できます" hidden>中断</button>
     <button id="loopToggle" type="button" class="secondary" title="同じ指示を条件成立まで繰り返します">ループ</button>
     <button id="compact" type="button" class="secondary" title="これまでの会話を要約に置き換えてコンテキストを空けます">圧縮</button>
+    <button id="claudeImport" type="button" class="secondary" title="Codex／Geminiの設定をClaude Codeへ取り込む準備をします"${options.showImport === true ? '' : ' hidden'}>インポート</button>
     <button id="planToggle" type="button" class="secondary" aria-pressed="false" title="読み取りだけに絞って計画を立てさせます。ファイルは変更されません">計画</button>
     <button id="fastToggle" type="button" class="secondary" aria-pressed="false" title="応答を速くします（Fast mode）" hidden>高速</button>
     <button id="review" type="button" class="secondary" title="コードレビューを実行します"${options.review.mode === 'command' ? ' hidden' : ''}>レビュー</button>

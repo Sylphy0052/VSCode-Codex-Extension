@@ -2049,6 +2049,62 @@ PR/MR作成の順序（W-16・W-17。Issue #172）の統合テストも、テス
 
 設定が実際に効いていることは`configuration.test.ts`（実VSCode上で3キーの値を読む）で、ガードの振る舞いは`test/unit/integrationFixtureGuards.test.ts`（vitest、7件）で検証する。統合テスト側のフィクスチャを単体テストから読み込む形になるが、「このリポジトリの中を起点にすると落ちる」ことは実VSCodeを起動せずに確かめられる。
 
+### 14.34 Claude Code側の他エージェントからの設定インポート（issue #200、TP-88。§14.30のCodex実装の対）
+
+issue #195の再抽出で見つかった非対称の解消。Codex側は`externalAgentConfig/*`のJSON-RPCで§14.30のとおり実装済みだが、Claude Code側は手つかずだった。Claude Codeの`initialize`応答の`commands`一覧にも`import`（`description: "Import config from another AI coding agent"`）が実在する。
+
+#### 実測1: control protocolに構造化APIは無い（CLI 2.1.227）
+
+Codexの`externalAgentConfig/detect`のようなJSON-RPCが無いか、`claude --print --input-format stream-json --output-format stream-json --verbose`を起動し、`control_request`で以下の12候補を総当たりした。
+
+`import` / `import_config` / `import_settings` / `run_local_command` / `local_command` / `invoke_command` / `run_command` / `run_slash_command` / `external_agent_config_detect` / `detect_import` / `config_migration_detect` / `migrate_config`
+
+**全12件が`Unsupported control request subtype: <name>`で拒否される**ことを実測した。つまりCodexのような一覧取得→選択→実行のRPCは無く、`compact` `fast`と同じくTUIコマンドを会話へ発言として送るしかない。
+
+#### 実測2: `/import`はCLI内蔵のローカルコマンド（バイナリの文字列解析）
+
+`claude`バイナリ（2.1.227）を`strings`で解析すると、次のサブコマンド定義が見つかった。
+
+```
+claude import [source] [--dry-run] [--yes[=<digest>]]
+  引数: "Which agent to import from (codex, gemini)"
+```
+
+同名のスラッシュコマンド定義も2種類あり、`type:"local-jsx"`（対話ターミナル専用のチェックボックスUI。`immediate:true`）と`type:"local"`（`supportsNonInteractive:true`。非対話環境向け）が並存する。どちらも`isEnabled`が機能フラグ`tengu_import`を見ており、フラグが無効な環境では一覧に出ない（この検証環境では有効だった）。
+
+**取り込み元はCodexまたはGemini固定で、Claude Code自身がソースになることは無い**（Codex側・issue #36とは逆方向。Codex側はソースがClaude Code固定だった）。Cursorは（Codex側と同じく）対象外。
+
+#### 実測3: `/import`を実際に送った結果（この環境の実際の`~/.codex`に対して）
+
+`buildUserMessage('/import')`と同じ形（`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"/import"}]}}`）を実際に送ったところ、CLIが実在する`~/.codex`をスキャンし、MCPサーバー設定（`playwright` `codegraph`）・AGENTS.md・権限モード、自動移植できない項目（`sandbox_mode`・未認識のconfigキー・カスタムコマンド11件など）を挙げたプレビューと、32桁16進のダイジェスト（例: `9ad78a7c0f1038b77addd89a83721254`）付きで「`/import --yes=<digest>`を送ると実行される」という案内が、通常の会話の応答として返ってきた。
+
+**この応答は構造化JSONではなく、モデルが生成する自然文**である（`<local-command-stdout>`のような合成タグの別イベントは一切観測されず、`assistant`イベント1件・実際の課金を伴うAPI呼び出しとして返った）。応答の言い回しはユーザー自身のCLAUDE.md等のカスタム指示にも影響されることを実測で確認しており（原始人モード・ヒアリング規約のA/B/C形式がそのまま反映された）、フォーマットの安定性を前提にできない。そのため拡張機能側では**この応答をパースしない**（design.mdの「実測できないことを実測したふりで書かない」に反するため）。
+
+実際に書き込むには、応答に含まれるダイジェストを一致させて`/import --yes=<digest>`をユーザー自身がもう一度送る必要があり、対話ターミナルの`claude import`（チェックボックスUI）はTTY専用のためこの拡張からは呼べない。
+
+#### 設計判断: 確認ダイアログ＋送信のみ。実行判断はCLI自身の二段階確認に委ねる
+
+Codex側（§14.30）は構造化された一覧から選択・確認してから直接実行するが、Claude Code側は上記の制約から同じ形にできない。そこで次の設計にした。
+
+1. 拡張機能側の確認ダイアログで「CodexまたはGeminiのローカル設定を、このClaude Codeへ取り込む準備をする（プレビュー要求を送るだけで、ここでは何も書き換えない）」ことを明示する（`confirmClaudeImport`、`src/view/chatView.ts`）
+2. 確認すると`/import`を会話へ発言として送る（`ClaudeStreamSession.importConfig()`、`src/claude/streamSession.ts`。`compact()`と同じ実装）
+3. CLI自身の応答（プレビューと確認コマンド）は通常の会話として画面に表示される。実際に取り込むかどうかの最終判断と、確認コマンドの送信はユーザー自身が行う（CLIのダイジェスト一致チェックが、確認後に設定が変わっていた場合の二段目の安全弁になる）
+
+この設計はCodex側より一段階多い確認を要求する分、より保守的である。「取り消すと何も起きない」はダイアログの取り消し時点で成立し（要求自体を送らない）、確認して送った場合もCLIはプレビューしか返さない（書き込みは`--yes=<digest>`の再送信を待つ）ため、拡張機能のこの呼び出し単体では設定は一切変更されない。
+
+#### 実装
+
+- `src/claude/streamSession.ts`: `importConfig()`を追加。`compact()`と同じく`buildUserMessage('/import')`を書き込むだけ。上記の実測結果をコメントに残す
+- `src/view/chatView.ts`: `ChatShellOptions`に`showImport?: boolean`を追加（Claude Code画面のみ`true`。Codexは別導線＝控制パネルのインポート一覧UIを持つため二重導線を避ける）。確認ダイアログ`confirmClaudeImport()`を追加
+- `src/view/chatScript.ts`: `claudeImport`ボタンのクリックで`{type: 'claudeImport'}`を送る。応答中は無効化する（`compact`と同じ扱い）
+- `src/view/claudeChatView.ts`: `handleMessage`に`claudeImport`分岐を追加し、`confirmClaudeImport()`→`session.importConfig()`の`importConfig()`メソッドを追加（`compact()`と同じ形）
+
+#### スコープ外にしたもの
+
+- **応答のパース・構造化表示**: 自然文かつユーザーのCLAUDE.mdに左右されるため、機械的に一覧・ダイジェストを取り出す処理は作らない（壊れやすく実測の裏付けが持てない）
+- **確認コマンドの自動送信**: ダイジェストの自動抽出・再送信はCLIの二段階確認を骨抜きにするため行わない。ユーザー自身がCLIの応答を見て送る
+- **取り込み元の選択UI（Codex/Gemini）**: `/import codex` `/import gemini`で明示できるが、Codex側（§14.30）が単一ソース固定だったのに倣い、まずは引数無しの`/import`（CLI側が自動検出）に留める。選択UIが要る場合は別issueで検討する
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）

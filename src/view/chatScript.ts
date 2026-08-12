@@ -945,6 +945,8 @@ export function chatScript(
     el('send').disabled = false;
     // 圧縮は新しいターンを起こす。応答中に重ねると割り込みになるため止める
     el('compact').disabled = !!state.busy;
+    // インポートの確認要求も新しいターンを起こす（Claude Code画面のみ、issue #200）
+    el('claudeImport').disabled = !!state.busy;
     applyPlanMode(state.planMode);
     applyFastMode(state);
     renderAttachments(state.attachments);
@@ -1448,6 +1450,10 @@ export function chatScript(
   el('send').addEventListener('click', send);
   // 確認は拡張機能側で出す。会話の内容を不可逆に変えるため、押しただけでは実行しない
   el('compact').addEventListener('click', () => vscode.postMessage({ type: 'compact' }));
+  // 他エージェントからの設定インポート（issue #200）。確認は拡張機能側で出す
+  el('claudeImport').addEventListener('click', () =>
+    vscode.postMessage({ type: 'claudeImport' }),
+  );
   // 見た目は状態が返ってきてから変える。押した瞬間に変えると、失敗したとき嘘になる
   el('planToggle').addEventListener('click', () =>
     vscode.postMessage({ type: 'planMode', on: !planMode }),
