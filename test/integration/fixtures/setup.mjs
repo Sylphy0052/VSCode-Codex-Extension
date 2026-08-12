@@ -11,15 +11,104 @@
 // メモリ越しの受け渡しはできない）。
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, '..', '..', '..');
 const fixturesRoot = join(repoRoot, '.vscode-test', 'fixtures');
+
+/**
+ * このリポジトリ（拡張機能自身）の作業ツリーの根。シンボリックリンクを解決した実体で持つ。
+ * `os.tmpdir()` はmacOSでは `/var` → `/private/var` のリンクなので、パスの前後関係を
+ * 比べる前に両側を実体へ揃える必要がある。
+ */
+const thisRepoRoot = realpathSync(repoRoot);
+
+/** `git rev-parse --show-toplevel` の結果を実体パスで返す。作業ツリーでなければ undefined。 */
+function gitToplevelOf(dir) {
+  try {
+    const out = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: dir,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf8',
+    }).trim();
+    return out === '' ? undefined : realpathSync(out);
+  } catch {
+    return undefined;
+  }
+}
+
+/** `dir` が `parent` 自身、またはその配下にあるか。 */
+function isInside(parent, dir) {
+  const rel = relative(parent, dir);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+/**
+ * ワークフローの実行の起点が、このリポジトリの作業ツリーを掴んでいないことを実行前に確かめる
+ * （Issue #178）。
+ *
+ * #168の実装中、統合テストの実行がこのリポジトリ自身にworktreeとブランチを作り、`origin` へ
+ * pushまで到達した。`isGitWorkingTree` は `git rev-parse` で**親ディレクトリを遡って**判定する
+ * ため、起点を `.vscode-test/` の下（＝このリポジトリの作業ツリーの中）へ置くと、`.gitignore`
+ * 済みかどうかに関わらず「このリポジトリが実行対象」として扱われてしまう。
+ *
+ * 起点の置き場を間違えた場合に、テストが1件も始まらないまま失敗するようにする。ここで throw
+ * すると `.vscode-test.mjs` の読み込みが失敗し、VSCodeの起動より前に落ちる。
+ */
+export function assertOutsideThisRepository(label, dir) {
+  const resolved = realpathSync(dir);
+  if (isInside(thisRepoRoot, resolved)) {
+    throw new Error(
+      `統合テストの起点（${label}）がこのリポジトリの作業ツリーの中にあります: ${resolved}\n` +
+        `このまま実行するとワークフローがこのリポジトリ自身へworktree・ブランチを作り、` +
+        `origin へpushしうるため中止します（Issue #178）。os.tmpdir() の下へ置いてください。`,
+    );
+  }
+  const toplevel = gitToplevelOf(resolved);
+  if (toplevel !== undefined && isInside(thisRepoRoot, toplevel)) {
+    throw new Error(
+      `統合テストの起点（${label}）がこのリポジトリの作業ツリーとして解決されます: ` +
+        `${resolved} -> ${toplevel}（Issue #178）`,
+    );
+  }
+}
+
+/**
+ * テスト用ワークスペースが、このリポジトリとは無関係な独立したgitリポジトリであり、かつ
+ * pushする先を持たないことを確かめる（Issue #178）。
+ *
+ * `workspaceFolder` は `.vscode-test/fixtures/` の下（＝このリポジトリの作業ツリーの中）に
+ * あるが、`initGitRepo` で自分自身を根とするリポジトリにしてある。`git rev-parse` は最も近い
+ * `.git` を見つけるため、この初期化が済んでいれば親のこのリポジトリまでは遡らない。初期化の
+ * 失敗や順序の入れ替わりでこの前提が崩れたときに気づけるよう、実行前に確かめる。
+ */
+export function assertIsolatedGitRepo(label, dir) {
+  const resolved = realpathSync(dir);
+  const toplevel = gitToplevelOf(resolved);
+  if (toplevel !== resolved) {
+    throw new Error(
+      `統合テスト用のワークスペース（${label}）が独立したgitリポジトリになっていません: ` +
+        `${resolved}（git的な根は ${toplevel ?? 'なし'}）。このまま実行すると` +
+        `このリポジトリ自身が実行対象になりうるため中止します（Issue #178）。`,
+    );
+  }
+  const remotes = execFileSync('git', ['remote'], {
+    cwd: resolved,
+    stdio: ['ignore', 'pipe', 'ignore'],
+    encoding: 'utf8',
+  }).trim();
+  if (remotes !== '') {
+    throw new Error(
+      `統合テスト用のワークスペース（${label}）にremoteが設定されています: ${remotes}。` +
+        `テストの実行がリモートを書き換えうるため中止します（Issue #178）。`,
+    );
+  }
+}
 
 /**
  * VSCodeへ渡す `XDG_RUNTIME_DIR` を用意する（issue #163）。
@@ -58,6 +147,8 @@ function createRuntimeDir() {
  */
 function createNonGitRoot() {
   const root = mkdtempSync(join(tmpdir(), 'agent-pseudo-'));
+  // 置き場を間違えたときに、テストが始まる前に落とす（Issue #178）。
+  assertOutsideThisRepository('疑似worktreeの起点', root);
   process.on('exit', () => {
     rmSync(root, { recursive: true, force: true });
   });
@@ -304,6 +395,13 @@ export function prepareFixtures() {
     // ワークフローの統合テスト（Issue #158）。危険判定の確認は別途行うため、ここでは
     // 既定（自動承認あり）のまま走らせる。定義の置き場も既定値を明示しておく。
     'agent.workflows.dir': '.agents/workflows',
+    // PR/MRの作成と、それに伴う `git push` を設定の側でも封じる（Issue #178）。統合テストは
+    // ローカルのブランチ操作・マージまでしか確かめない。フィクスチャ側のガード
+    // （`assertOutsideThisRepository` / `assertIsolatedGitRepo`）と二重の防御にして、
+    // 起点の置き場を間違えても被害がローカルで止まるようにする。
+    'agent.workflows.forge': 'none',
+    'agent.workflows.pullRequest': 'none',
+    'agent.workflows.finalMerge': 'pr-only',
   };
   mkdirSync(join(userDataDir, 'User'), { recursive: true });
   writeFileSync(
@@ -318,6 +416,9 @@ export function prepareFixtures() {
   const workflowDefPath = join(workflowDir, 'diamond.yaml');
   writeFileSync(workflowDefPath, WORKFLOW_DIAMOND_YAML, 'utf8');
   initGitRepo(workspaceFolder);
+  // 初期化が済んだ状態で、このリポジトリとは無関係な独立リポジトリになっていることを確かめる
+  // （Issue #178）。
+  assertIsolatedGitRepo('テスト用ワークスペース', workspaceFolder);
 
   // 疑似worktree（Issue #168）。ケースごとに使い捨てのワークスペースを作らせるため、
   // ここでは**親ディレクトリと定義のひな形だけ**を用意する。runの終了時に統合結果が
