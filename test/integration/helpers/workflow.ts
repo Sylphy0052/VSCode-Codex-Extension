@@ -187,6 +187,17 @@ export interface TaskSnapshotLike {
   failure?: unknown;
 }
 
+/**
+ * 警告欄1件（`WorkflowWarning`）と構造互換な最小の口。`kind` は
+ * `src/orchestrator/runner.ts` の union をそのまま写さず、テストが実際に見るものだけを
+ * 文字列として受ける（増えたときにテスト側の型を追随させずに済む）。
+ */
+export interface WorkflowWarningLike {
+  kind: string;
+  taskId?: string | undefined;
+  message: string;
+}
+
 /** `WorkflowRunSnapshot` のうち統合テストが見る項目。 */
 export interface WorkflowRunSnapshotLike {
   runId: string;
@@ -194,7 +205,15 @@ export interface WorkflowRunSnapshotLike {
   outcome: string;
   tasks: readonly TaskSnapshotLike[];
   /** 警告欄（`WorkflowWarning`）。失敗時の手がかりとして診断メッセージへ載せる。 */
-  warnings?: readonly unknown[];
+  warnings?: readonly WorkflowWarningLike[];
+}
+
+/** 指定の `kind` の警告だけを取り出す。 */
+export function warningsOfKind(
+  snapshot: WorkflowRunSnapshotLike | undefined,
+  kind: string,
+): WorkflowWarningLike[] {
+  return (snapshot?.warnings ?? []).filter((w) => w.kind === kind);
 }
 
 /** `WorkflowRunner` のうち統合テストが呼ぶ口。 */
