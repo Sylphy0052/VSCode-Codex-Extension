@@ -69,6 +69,12 @@ export interface ChatTestApiLike {
    * でしか起こせない操作を実VSCode上でも駆動するための入口。
    */
   simulateCodexWebviewMessage(threadId: string, message: unknown): Promise<void>;
+  /**
+   * 統合テスト専用: 指定したセッションのClaude Code画面へ、webviewから届いたふりをした
+   * メッセージを流し込む（Issue #188、`ClaudeChatViewManager.simulateWebviewMessage`
+   * 参照）。`simulateCodexWebviewMessage` のClaude Code版。
+   */
+  simulateClaudeWebviewMessage(sessionId: string, message: unknown): Promise<void>;
 }
 
 /** 拡張機能を（未活性なら）有効化し、テスト用APIを返す。 */

@@ -168,6 +168,12 @@ export interface ChatTestApi {
    * 操作を、実VSCode上でも駆動するための入口。
    */
   simulateCodexWebviewMessage(threadId: string, message: unknown): Promise<void>;
+  /**
+   * 統合テスト専用: 指定したセッションのClaude Code画面へ、webviewから届いたふりをした
+   * メッセージを流し込む（Issue #188、`ClaudeChatViewManager.simulateWebviewMessage` 参照）。
+   * `simulateCodexWebviewMessage` のClaude Code版で、考え方は同じ。
+   */
+  simulateClaudeWebviewMessage(sessionId: string, message: unknown): Promise<void>;
 }
 
 /**
@@ -674,6 +680,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           },
           simulateCodexWebviewMessage: (threadId, message) =>
             chat.simulateWebviewMessage(threadId, message),
+          simulateClaudeWebviewMessage: (sessionId, message) =>
+            claudeChat.simulateWebviewMessage(sessionId, message),
         }
       : undefined,
     workflow: isIntegrationTestMode()
