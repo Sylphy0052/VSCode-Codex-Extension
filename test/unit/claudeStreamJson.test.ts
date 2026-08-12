@@ -829,3 +829,48 @@ describe('Plan mode', () => {
     expect(next.planMode).toBe(true);
   });
 });
+
+describe('自動圧縮の窓サイズ（issue #201、design.md §14.37）', () => {
+  const synthetic = (text: string) => ({
+    type: 'assistant',
+    message: { id: 'm1', model: '<synthetic>', content: [{ type: 'text', text }] },
+  });
+
+  it('/autocompactの問い合わせ応答から窓サイズを拾う', () => {
+    const state = apply([synthetic('Auto-compact window: auto\nAuto-compact summarizes...')]);
+    expect(state.autocompactWindow).toEqual({ mode: 'auto', tokens: undefined });
+  });
+
+  it('設定済みの応答からトークン数を拾う', () => {
+    const state = apply([
+      synthetic('Auto-compact window: 300k tokens (from settings)\nAuto-compact summarizes...'),
+    ]);
+    expect(state.autocompactWindow).toEqual({ mode: 'fixed', tokens: 300000 });
+  });
+
+  it('変更後の確認応答でも上書きする', () => {
+    const first = apply([synthetic('Auto-compact window: auto\n...')]);
+    const next = applyStreamEvent(first, synthetic('Auto-compact window set to 300k tokens'));
+    expect(next.autocompactWindow).toEqual({ mode: 'fixed', tokens: 300000 });
+  });
+
+  it('model=<synthetic>でなければ拾わない（通常の会話文を誤検出しない）', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: { id: 'm1', content: [{ type: 'text', text: 'Auto-compact window: auto' }] },
+      },
+    ]);
+    expect(state.autocompactWindow).toBeUndefined();
+  });
+
+  it('<synthetic>応答でも書式が一致しなければ直前の値を保つ（/recapの自然文要約など）', () => {
+    const withWindow = apply([synthetic('Auto-compact window: auto\n...')]);
+    const next = applyStreamEvent(withWindow, synthetic('1+1を聞かれ、2と答えた。'));
+    expect(next.autocompactWindow).toEqual({ mode: 'auto', tokens: undefined });
+  });
+
+  it('一度も問い合わせていなければ undefined のまま', () => {
+    expect(initialClaudeState.autocompactWindow).toBeUndefined();
+  });
+});

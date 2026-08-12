@@ -499,6 +499,37 @@ export class ClaudeStreamSession {
   }
 
   /**
+   * 自動圧縮の窓サイズを確認・変更する（issue #201、design.md §14.37）。
+   *
+   * **経路の実測（CLI 2.1.227）**: `get_settings` の応答にも `initialize` の応答にも
+   * 現在値は含まれない（未設定時は`effective`に出てこない。実測済み）。専用の制御要求も
+   * 無く、`set_autocompact` 等6候補はいずれも `Unsupported control request subtype` で
+   * 拒否される。`apply_flag_settings` に `autoCompactWindow` を載せる経路は `success` が
+   * 返るが、直後の `get_settings` にも反映が現れず「効いたかどうか確かめられない」
+   * （`setEffort` と同じ限界）。そのため `compact` / `recap` と同じく、TUIと同じ
+   * `/autocompact` をユーザー発言として送るのが唯一の経路。
+   *
+   * 引数無し（空文字）で送ると**現在値を問い合わせるだけ**で、CLI側の状態は変わらない。
+   * 応答は `<synthetic>` の固定書式テキストで返り（モデル呼び出しを経由しない。実測で
+   * コストが増えないことを確認）、`streamJson.ts` の `applyAssistant` が
+   * `parseAutocompactReport`（`autocompactText.ts`）で拾って `state.autocompactWindow` へ
+   * 反映する。値を渡すと `/autocompact <window>` を送り、CLI側で実際に変更する
+   * （`'auto'` または `100k`〜`1M` トークンの数値表現。範囲外・書式不正はCLI自身が
+   * `Couldn't parse ...` を返し、値は変わらない）。どちらの応答も会話にそのまま残るため、
+   * 変更したことは会話の記録からも分かる（issue #201の受入基準）。
+   *
+   * 事前バリデーションはしない（CLIの受理を正とする。`compact` / `recap` と同じ流儀）。
+   */
+  setAutocompactWindow(window: string): void {
+    if (this.proc === undefined) {
+      throw new Error('セッションが起動していません');
+    }
+    this.update({ ...this.state, busy: true, turnFailed: false });
+    const trimmed = window.trim();
+    this.write(buildUserMessage(trimmed === '' ? '/autocompact' : `/autocompact ${trimmed}`));
+  }
+
+  /**
    * 指定した発言の直前まで、ファイルだけを戻せるか確かめる（dry_run）。実際には適用しない。
    *
    * **会話の履歴には触れない**。`rewind_files` はファイルだけを対象にする制御要求で、

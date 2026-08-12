@@ -228,6 +228,23 @@ export function buildContextUsage(
 }
 
 /**
+ * 自動圧縮の窓サイズ（issue #201、design.md §14.37）。Claude Codeのみが持つ概念。
+ *
+ * control protocolに問い合わせ手段が無く（`initialize` / `get_settings` のどちらの応答にも
+ * 現れないことを実測済み。design.md参照）、`/autocompact` をローカルコマンドとして送った
+ * ときの応答（`model:"<synthetic>"` の固定書式テキスト）から読む
+ * （`src/claude/autocompactText.ts` の `parseAutocompactReport` を参照）。CLIの文言が
+ * 変われば読めなくなるため、値そのものが `ChatState.autocompactWindow` ごと `undefined`
+ * になりうる。
+ */
+export interface AutocompactWindowView {
+  /** `'auto'`（CLI既定・モデルに応じた自動選定）か `'fixed'`（数値で固定）か。 */
+  mode: 'auto' | 'fixed';
+  /** `mode: 'fixed'` のときの窓サイズ（トークン数）。`'auto'` のときは undefined。 */
+  tokens: number | undefined;
+}
+
+/**
  * セッションのコスト（issue #37、design.md TP-60）。Claude Codeのみが持つ概念で、
  * レート制限の消費率（`ChatUsage`）ともコンテキストの使用量（`ContextUsage`）とも別物。
  *
@@ -301,6 +318,15 @@ export interface ChatState {
    * なり、画面はトグル自体を出さない（`planMode` と違って三値を区別する）。
    */
   fastMode?: boolean | undefined;
+  /**
+   * 自動圧縮の窓サイズの現在値（Claude Codeのみ、issue #201、design.md §14.37）。
+   *
+   * `fastMode` と同じく、対応しない・まだ問い合わせていない間は `undefined` のままで、
+   * 画面は表示自体を出さない（「自動」だと決め付けない）。`/autocompact` を送るたびに
+   * 応答から読み直す（`streamJson.ts` の `applyAssistant` 参照）。Codexのセッションでは
+   * 常に `undefined`。
+   */
+  autocompactWindow?: AutocompactWindowView | undefined;
   /**
    * Codexのレビュー中か（`review/start` で開始したターン）。
    *
