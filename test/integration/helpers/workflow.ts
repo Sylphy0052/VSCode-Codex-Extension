@@ -65,6 +65,7 @@ export class FakeTaskSession implements TaskSessionLike {
   disposed = false;
   interruptCount = 0;
   pauseLoopCount = 0;
+  setApprovalHandlerCount = 0;
   resumeLoopCount = 0;
   revealCount = 0;
   openCount = 0;
@@ -89,7 +90,13 @@ export class FakeTaskSession implements TaskSessionLike {
   onStateChanged(listener: (state: ChatStateLike) => void): void {
     this.stateListeners.push(listener);
   }
-  setApprovalHandler(): void {}
+  /**
+   * 承認の差し込み口。衝突解決セッションでは**呼ばれない**ことが設計上の主張なので
+   * （design.md §16.17「標準の承認カードへ委ねる」＝常に人の承認を求める）、回数を数える。
+   */
+  setApprovalHandler(): void {
+    this.setApprovalHandlerCount += 1;
+  }
   onApprovalResolved(): void {}
   interrupt(): Promise<void> {
     this.interruptCount += 1;
@@ -132,6 +139,15 @@ export class FakeTaskSession implements TaskSessionLike {
   /** ターンの失敗で終わらせる（`LoopStopReason: 'failed'`）。 */
   finishFailed(): void {
     this.emitFinished('failed', doneState(''));
+  }
+
+  /**
+   * 任意の `LoopStopReason` で終わらせる（`maxIterations` など）。実物のループ制御は
+   * `ChatViewManager` 側にあり、フェイクは回数を数えないため、上限に達した状況は
+   * この口で作る。
+   */
+  finishWith(reason: string): void {
+    this.emitFinished(reason, doneState(''));
   }
 
   private emitFinished(reason: string, state: ChatStateLike): void {
@@ -246,6 +262,8 @@ export interface WorkflowRunnerLike {
   revealTask(runId: string, taskId: string): boolean;
   stopTask(runId: string, taskId: string): void;
   removeWorktrees(runId: string): Promise<{ removed: string[]; failed: string[] }>;
+  /** `blocked` のタスクを再マージする（design.md §16.17、Issue #170）。 */
+  retryMerge(runId: string, taskId: string): boolean;
 }
 
 /** `CliCommandResult`（`src/orchestrator/forge.ts`）と構造互換な最小の口。 */

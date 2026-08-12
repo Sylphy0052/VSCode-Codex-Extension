@@ -249,6 +249,34 @@ tasks:
 `;
 
 /**
+ * 統合の衝突と自動解決（design.md §16.17、Issue #170）の統合テストが使う定義。
+ *
+ * T1とT2は依存が無く並列に走り、テスト側が**同じファイルの同じ行**を書き換えてコミット
+ * するため、後からマージする側で必ず衝突する。T3はT2に依存し（衝突が解けなかったとき
+ * `skipped` になる後続）、T4はどちらにも依存しない（独立した枝が最後まで走ることの確認）。
+ */
+const WORKFLOW_MERGE_CONFLICT_YAML = `version: 1
+name: integration-merge-conflict
+defaults:
+  provider: codex
+  maxParallel: 3
+tasks:
+  - id: T1
+    prompt: T1のプロンプト（共有ファイルの1行目を書き換える）
+    done: T1の終了条件
+  - id: T2
+    prompt: T2のプロンプト（同じ行を別の内容へ書き換える）
+    done: T2の終了条件
+  - id: T3
+    dependsOn: [T2]
+    prompt: T3のプロンプト
+    done: T3の終了条件
+  - id: T4
+    prompt: T4のプロンプト
+    done: T4の終了条件
+`;
+
+/**
  * PR/MRの作成順序（design.md §16.18、Issue #172）の統合テストが使う定義。
  *
  * 順序（タスクブランチのpush→統合ブランチのpush→PR/MR作成→統合worktreeでのマージ）は
@@ -280,7 +308,10 @@ function initGitRepo(dir) {
   git('config', 'user.name', 'Integration Test');
   git('config', 'commit.gpgsign', 'false');
   writeFileSync(join(dir, 'README.md'), '統合テスト用の使い捨てリポジトリ\n', 'utf8');
-  git('add', 'README.md');
+  // 統合の衝突（Issue #170）で2つの並列タスクが同じ行を書き換えるファイル。共通の祖先に
+  // 置いておくことで、add/addではなくmodify/modifyの衝突（実運用で起きる形）になる。
+  writeFileSync(join(dir, 'shared.md'), '共有ファイルの初期内容\n', 'utf8');
+  git('add', '.');
   git('commit', '--no-verify', '-m', 'chore: 統合テスト用の初期コミット');
 }
 
@@ -452,6 +483,10 @@ export function prepareFixtures() {
   mkdirSync(workflowDir, { recursive: true });
   const workflowDefPath = join(workflowDir, 'diamond.yaml');
   writeFileSync(workflowDefPath, WORKFLOW_DIAMOND_YAML, 'utf8');
+  // 統合の衝突（Issue #170）。定義はワークスペース側に置き、実行の起点も同じワークスペース
+  // （remoteを持たない独立したgitリポジトリ）を使う。
+  const workflowConflictDefPath = join(workflowDir, 'merge-conflict.yaml');
+  writeFileSync(workflowConflictDefPath, WORKFLOW_MERGE_CONFLICT_YAML, 'utf8');
   initGitRepo(workspaceFolder);
   // 初期化が済んだ状態で、このリポジトリとは無関係な独立リポジトリになっていることを確かめる
   // （Issue #178）。
@@ -477,7 +512,7 @@ export function prepareFixtures() {
 
   const manifest = {
     workspaceFolder,
-    workflow: { defPath: workflowDefPath },
+    workflow: { defPath: workflowDefPath, conflictDefPath: workflowConflictDefPath },
     // gitリポジトリにしていない親ディレクトリ。テストは `<root>/<ケース名>` を掘って使う。
     pseudoWorktree: {
       root: nonGitWorkspace,

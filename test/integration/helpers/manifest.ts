@@ -5,7 +5,11 @@ import * as vscode from 'vscode';
 export interface FixtureManifest {
   workspaceFolder: string;
   /** ワークフローの統合テスト（Issue #158）用の定義ファイル。 */
-  workflow: { defPath: string };
+  workflow: {
+    defPath: string;
+    /** 統合の衝突（Issue #170）用。同じ行を書き換える2つの並列タスクを含む。 */
+    conflictDefPath: string;
+  };
   /**
    * 疑似worktree（Issue #168）用。`root` は**gitリポジトリではない**親ディレクトリで、
    * テストはこの下にケースごとの使い捨てワークスペースを作り、定義のひな形をコピーして使う。
