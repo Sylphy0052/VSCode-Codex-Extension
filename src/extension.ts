@@ -57,6 +57,7 @@ import {
   nodeRoadmapFileSystem,
   parseRoadmapMarkdown,
   planWorkflowFromRoadmapPhase,
+  withRoadmapReference,
   selectNextRoadmapPhase,
   validateRoadmap,
   type IssueListPort,
@@ -376,6 +377,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // 疑似worktree（design.md §16.20、Issue #105）。gitの作業ツリーでないワークスペースで
     // `isolation: worktree`のタスクを走らせるときの隔離手段。`decideWorkingDirectory`の
     // `sharedFallback`から`resolveWorkingDirectory`が呼ぶ
+    // ロードマップの更新（design.md §16.19、Issue #173）。runが終わったとき、`done`に
+    // なったタスクに対応する項目のチェックを定義の`roadmap`が指すファイルへ書き戻す。
+    roadmap: { fs: nodeRoadmapFileSystem },
     pseudoWorktree: {
       fs: nodePseudoWorktreeFileSystem,
       exclude: readWorkflowsConfig().pseudoWorktreeExclude,
@@ -958,6 +962,15 @@ async function planWorkflowFromRoadmapCommand(
     return;
   }
 
+  // 生成した定義に「どのロードマップから作ったか」を残す（design.md §16.19）。runが
+  // 終わったとき、この値を頼りにチェックを書き戻す。
+  const withRoadmap = withRoadmapReference(
+    result.yaml,
+    result.definition,
+    vscode.workspace.asRelativePath(pickedFile.file, false),
+  );
+  const resultWithRoadmap = { ...result, yaml: withRoadmap.yaml, definition: withRoadmap.definition };
+
   if (result.roadmapMismatches.length > 0) {
     log.warn(
       `[planner] ロードマップの材料が正しく転記されていない可能性があります: ${result.roadmapMismatches
@@ -971,7 +984,7 @@ async function planWorkflowFromRoadmapCommand(
   }
 
   await handlePlanSuccess(
-    result,
+    resultWithRoadmap,
     buildRoadmapPlanGoal(parsed.title, pickedPhase.phase),
     workspaceRoot,
     view,

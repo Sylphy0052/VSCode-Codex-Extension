@@ -13,6 +13,19 @@ export interface FixtureManifest {
     messagingDefPath: string;
   };
   /**
+   * ロードマップ一周（Issue #173）用のひな形。runの終了後に非同期でロードマップが
+   * 書き戻されるため、テストはケースごとに別のロードマップと定義を掘って使う。
+   */
+  roadmap: {
+    markdown: string;
+    /** `roadmap:` が `markdownRelativePath` を指すワークフロー定義のひな形。 */
+    defTemplate: string;
+    markdownRelativePath: string;
+    /** ワークスペース相対のロードマップ置き場・定義置き場。 */
+    dir: string;
+    workflowDir: string;
+  };
+  /**
    * 疑似worktree（Issue #168）用。`root` は**gitリポジトリではない**親ディレクトリで、
    * テストはこの下にケースごとの使い捨てワークスペースを作り、定義のひな形をコピーして使う。
    */

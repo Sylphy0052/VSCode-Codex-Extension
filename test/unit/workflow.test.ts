@@ -161,6 +161,46 @@ tasks:
   });
 });
 
+describe('parseWorkflowYaml の roadmap（Issue #173）', () => {
+  it('roadmap を持つ定義はその値を保持する', () => {
+    const def = parseWorkflowYaml(
+      'version: 1\nroadmap: "docs/roadmap/goal.md"\ntasks:\n  - id: T1\n',
+    );
+
+    expect(def.roadmap).toBe('docs/roadmap/goal.md');
+  });
+
+  it('roadmap が無い・空文字なら undefined（ロードマップ由来ではない）', () => {
+    expect(parseWorkflowYaml('version: 1\ntasks:\n  - id: T1\n').roadmap).toBeUndefined();
+    expect(
+      parseWorkflowYaml('version: 1\nroadmap: ""\ntasks:\n  - id: T1\n').roadmap,
+    ).toBeUndefined();
+  });
+});
+
+describe('validateWorkflow の roadmap（Issue #173）', () => {
+  const withRoadmap = (roadmap: string): ReturnType<typeof parseWorkflowYaml> =>
+    parseWorkflowYaml(
+      `version: 1\nroadmap: ${JSON.stringify(roadmap)}\ntasks:\n  - id: T1\n    prompt: p\n    done: d\n`,
+    );
+
+  it('ワークスペース内の .md を指す相対パスは通る', () => {
+    expect(validateWorkflow(withRoadmap('docs/roadmap/goal.md')).errors).toEqual([]);
+  });
+
+  it.each([
+    ['親ディレクトリへ出る', '../outside/goal.md'],
+    ['絶対パス（POSIX）', '/etc/goal.md'],
+    ['絶対パス（Windows）', 'C:/goal.md'],
+    ['UNCパス', '\\\\server\\share\\goal.md'],
+    ['.md でない', 'docs/roadmap/goal.txt'],
+  ])('%s は拒否する（書き戻し先を任意のパスへ向けさせない）', (_label, value) => {
+    const errors = validateWorkflow(withRoadmap(value)).errors;
+
+    expect(errors.some((e) => e.message.includes('roadmap'))).toBe(true);
+  });
+});
+
 describe('validateWorkflow', () => {
   it('idの重複がエラーになる', () => {
     const def = {

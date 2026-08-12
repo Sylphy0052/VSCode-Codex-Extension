@@ -5,6 +5,7 @@ import type { Logger } from '../../src/log';
 import {
   applyRunCompletion,
   applyRunCompletionToFile,
+  withRoadmapReference,
   buildRoadmapPlanGoal,
   buildRoadmapPrompt,
   createCliIssueListPort,
@@ -877,5 +878,45 @@ describe('createTaskSessionRoadmapGenerationPort', () => {
     if (!result.ok) {
       expect(result.message).toContain('ロードマップ生成セッションが失敗しました');
     }
+  });
+});
+
+describe('withRoadmapReference', () => {
+  const yaml = 'version: 1\nname: sample\ntasks:\n  - id: T1\n';
+  const definition = {
+    version: 1,
+    name: 'sample',
+    maxParallel: 3,
+    tasks: [],
+  };
+
+  it('version の直後へ roadmap を1行だけ足す', () => {
+    const result = withRoadmapReference(yaml, definition, 'docs/roadmap/goal.md');
+
+    expect(result.yaml.split('\n')[1]).toBe('roadmap: "docs/roadmap/goal.md"');
+    expect(result.definition.roadmap).toBe('docs/roadmap/goal.md');
+    // 元の行は増減しない（足したのは1行だけ）
+    expect(result.yaml.split('\n').length).toBe(yaml.split('\n').length + 1);
+  });
+
+  it('パス区切りをPOSIX形式へ揃える', () => {
+    const result = withRoadmapReference(yaml, definition, 'docs\\roadmap\\goal.md');
+
+    expect(result.definition.roadmap).toBe('docs/roadmap/goal.md');
+  });
+
+  it('既に roadmap を持つ定義はそのまま返す（人が書いた値を尊重する）', () => {
+    const already = { ...definition, roadmap: 'docs/roadmap/kept.md' };
+
+    const result = withRoadmapReference(yaml, already, 'docs/roadmap/other.md');
+
+    expect(result.yaml).toBe(yaml);
+    expect(result.definition.roadmap).toBe('docs/roadmap/kept.md');
+  });
+
+  it('version 行が無ければ先頭へ足す', () => {
+    const result = withRoadmapReference('name: sample\n', definition, 'docs/roadmap/goal.md');
+
+    expect(result.yaml.split('\n')[0]).toBe('roadmap: "docs/roadmap/goal.md"');
   });
 });

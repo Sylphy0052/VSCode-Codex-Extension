@@ -249,6 +249,50 @@ tasks:
 `;
 
 /**
+ * ロードマップ一周（design.md §16.19、Issue #173）の統合テストが使うロードマップ。
+ *
+ * 項目idはワークフローのタスクidと同じにしてある（`applyRunCompletion` はこのidで対応を
+ * 取る）。R3は**ワークフローに含めない**項目で、runが終わってもチェックが入らないこと
+ * （関係の無い行に触れないこと）の確認に使う。
+ */
+const ROADMAP_MARKDOWN = `# 統合テスト用のゴール
+
+## Phase 1: 最初のフェーズ
+
+- [ ] R1 最初の項目
+  - 依存: なし
+  - Issue: #1
+- [ ] R2 次の項目
+  - 依存: R1
+- [ ] R3 このrunには含めない項目
+
+## Phase 2: 次のフェーズ
+
+- [ ] R4 別フェーズの項目
+`;
+
+/**
+ * ロードマップ由来のワークフロー定義（design.md §16.19、Issue #173）。`roadmap` は
+ * 実行の起点（ワークスペース）からの相対パスで、`withRoadmapReference` が生成時に足すのと
+ * 同じ形を手で書いてある。R2はR1に依存し、R3・R4はこの定義に含めない。
+ */
+const WORKFLOW_ROADMAP_YAML = `version: 1
+roadmap: "docs/roadmap/sample.md"
+name: integration-roadmap
+defaults:
+  provider: codex
+  maxParallel: 2
+tasks:
+  - id: R1
+    prompt: R1のプロンプト
+    done: R1の終了条件
+  - id: R2
+    dependsOn: [R1]
+    prompt: R2のプロンプト
+    done: R2の終了条件
+`;
+
+/**
  * タスク間メッセージング（design.md §16.21、Issue #171）の統合テストが使う定義。
  *
  * 3タスクとも依存が無く並列に走る。往復（T1とT2）に加えて、**走行中の全タスクが
@@ -514,6 +558,10 @@ export function prepareFixtures() {
   // タスク間メッセージング（Issue #171）。
   const workflowMessagingDefPath = join(workflowDir, 'messaging.yaml');
   writeFileSync(workflowMessagingDefPath, WORKFLOW_MESSAGING_YAML, 'utf8');
+  // ロードマップ一周（Issue #173）。runの終了後に非同期でロードマップが書き戻されるため、
+  // 1組のファイルを使い回すとケース間で書き戻しが混ざる。ここでは**ひな形の文字列だけ**を
+  // 渡し、ケースごとの定義とロードマップはテスト側が掘る（疑似worktreeと同じ流儀）。
+  mkdirSync(join(workspaceFolder, 'docs', 'roadmap'), { recursive: true });
   initGitRepo(workspaceFolder);
   // 初期化が済んだ状態で、このリポジトリとは無関係な独立リポジトリになっていることを確かめる
   // （Issue #178）。
@@ -543,6 +591,17 @@ export function prepareFixtures() {
       defPath: workflowDefPath,
       conflictDefPath: workflowConflictDefPath,
       messagingDefPath: workflowMessagingDefPath,
+    },
+    /**
+     * ロードマップ一周（Issue #173）用のひな形。`defTemplate` の `roadmap:` は
+     * `markdownRelativePath` を指しており、テストはケースごとに別のパスへ置き換えて使う。
+     */
+    roadmap: {
+      markdown: ROADMAP_MARKDOWN,
+      defTemplate: WORKFLOW_ROADMAP_YAML,
+      markdownRelativePath: 'docs/roadmap/sample.md',
+      dir: 'docs/roadmap',
+      workflowDir: '.agents/workflows',
     },
     // gitリポジトリにしていない親ディレクトリ。テストは `<root>/<ケース名>` を掘って使う。
     pseudoWorktree: {
