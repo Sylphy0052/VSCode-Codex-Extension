@@ -45,6 +45,25 @@ function createRuntimeDir() {
   return runtimeDir;
 }
 
+/**
+ * 疑似worktree（design.md §16.20、Issue #168）の実行の起点を用意する。
+ *
+ * `isGitWorkingTree` は `git rev-parse --is-inside-work-tree` で判定するため、
+ * **親ディレクトリを遡って**gitの作業ツリーを見つける。`.vscode-test/` の下は
+ * このリポジトリの作業ツリーの中なので、そこへ置くと「gitリポジトリである」と判定され、
+ * 疑似worktreeではなくgitのworktree経路へ流れてしまう（`.gitignore` 済みかどうかは
+ * 関係ない）。`os.tmpdir()` の直下へ逃がして、gitの作業ツリーの外であることを保証する。
+ *
+ * `createRuntimeDir` と同じくベストエフォートで後始末する。
+ */
+function createNonGitRoot() {
+  const root = mkdtempSync(join(tmpdir(), 'agent-pseudo-'));
+  process.on('exit', () => {
+    rmSync(root, { recursive: true, force: true });
+  });
+  return root;
+}
+
 function writeJsonl(filePath, lines) {
   mkdirSync(dirname(filePath), { recursive: true });
   writeFileSync(filePath, `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`, 'utf8');
@@ -79,6 +98,49 @@ tasks:
 `;
 
 /**
+ * 疑似worktree（design.md §16.20、Issue #168）の統合テストが使う定義。
+ *
+ * gitの作業ツリーでないワークスペースで走らせるため、`isolation` は既定（`worktree`）の
+ * まま。`decideWorkingDirectory` が `sharedFallback` へ倒し、`resolveWorkingDirectory`
+ * から疑似worktreeの複製が使われる経路を通す。T1のあとT2とT3が並列で走る形は
+ * `WORKFLOW_DIAMOND_YAML` と同じで、T4を持たないぶんだけ短い。
+ */
+const WORKFLOW_PSEUDO_YAML = `version: 1
+name: integration-pseudo
+defaults:
+  provider: codex
+  maxParallel: 3
+tasks:
+  - id: T1
+    prompt: T1のプロンプト
+    done: T1の終了条件
+  - id: T2
+    dependsOn: [T1]
+    prompt: T2のプロンプト
+    done: T2の終了条件
+  - id: T3
+    dependsOn: [T1]
+    prompt: T3のプロンプト
+    done: T3の終了条件
+`;
+
+/**
+ * `isolation: worktree-strict` を含む定義（旧W-07）。gitの作業ツリーでない
+ * ワークスペースでは、実行開始前の検証（`resolveStartGitContext`）が1タスクも
+ * 開始しないまま拒否する。
+ */
+const WORKFLOW_PSEUDO_STRICT_YAML = `version: 1
+name: integration-pseudo-strict
+defaults:
+  provider: codex
+tasks:
+  - id: T1
+    isolation: worktree-strict
+    prompt: T1のプロンプト
+    done: T1の終了条件
+`;
+
+/**
  * テスト用ワークスペースを空のgitリポジトリにする。
  *
  * worktreeによる隔離（design.md §16.3）を実物で確かめるため、`git worktree add` が
@@ -102,6 +164,16 @@ export function prepareFixtures() {
 
   const workspaceFolder = join(fixturesRoot, 'workspace');
   const outsideWorkspace = join(fixturesRoot, 'outside-workspace');
+  // 疑似worktree（Issue #168）用。**gitの作業ツリーの外**に置くことがこのフォルダの役割。
+  // VSCodeが開くワークスペースは `workspaceFolder` のままで、こちらは
+  // `WorkflowRunner.start(defPath, repoRoot)` の `repoRoot` として渡す
+  // （実行の起点はワークスペースフォルダである必要がない）。
+  //
+  // `.vscode-test/` の下に置いてはいけない。`isGitWorkingTree` は `git rev-parse` で
+  // **親ディレクトリを遡って**判定するため、このリポジトリの作業ツリーの中にあると
+  // 「gitリポジトリである」と判定され、疑似worktreeではなくgitのworktree経路へ流れる
+  // （`.gitignore` 済みかどうかは関係ない）。`os.tmpdir()` の下へ逃がす。
+  const nonGitWorkspace = createNonGitRoot();
   const codexHome = join(fixturesRoot, 'codex-home');
   const claudeHome = join(fixturesRoot, 'claude-home');
   const userDataDir = join(fixturesRoot, 'user-data');
@@ -247,9 +319,27 @@ export function prepareFixtures() {
   writeFileSync(workflowDefPath, WORKFLOW_DIAMOND_YAML, 'utf8');
   initGitRepo(workspaceFolder);
 
+  // 疑似worktree（Issue #168）。ケースごとに使い捨てのワークスペースを作らせるため、
+  // ここでは**親ディレクトリと定義のひな形だけ**を用意する。runの終了時に統合結果が
+  // ワークスペースへ反映される（design.md §16.20）ので、1つのフォルダを使い回すと
+  // 前のケースが書いたファイルが次のケースのスナップショットへ混ざる。
+  mkdirSync(nonGitWorkspace, { recursive: true });
+  const pseudoTemplateDir = join(nonGitWorkspace, '_templates');
+  mkdirSync(pseudoTemplateDir, { recursive: true });
+  const pseudoDefTemplate = join(pseudoTemplateDir, 'pseudo.yaml');
+  const pseudoStrictDefTemplate = join(pseudoTemplateDir, 'pseudo-strict.yaml');
+  writeFileSync(pseudoDefTemplate, WORKFLOW_PSEUDO_YAML, 'utf8');
+  writeFileSync(pseudoStrictDefTemplate, WORKFLOW_PSEUDO_STRICT_YAML, 'utf8');
+
   const manifest = {
     workspaceFolder,
     workflow: { defPath: workflowDefPath },
+    // gitリポジトリにしていない親ディレクトリ。テストは `<root>/<ケース名>` を掘って使う。
+    pseudoWorktree: {
+      root: nonGitWorkspace,
+      defTemplate: pseudoDefTemplate,
+      strictDefTemplate: pseudoStrictDefTemplate,
+    },
     outsideWorkspace,
     codexHome,
     claudeHome,

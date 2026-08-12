@@ -6,6 +6,15 @@ export interface FixtureManifest {
   workspaceFolder: string;
   /** ワークフローの統合テスト（Issue #158）用の定義ファイル。 */
   workflow: { defPath: string };
+  /**
+   * 疑似worktree（Issue #168）用。`root` は**gitリポジトリではない**親ディレクトリで、
+   * テストはこの下にケースごとの使い捨てワークスペースを作り、定義のひな形をコピーして使う。
+   */
+  pseudoWorktree: {
+    root: string;
+    defTemplate: string;
+    strictDefTemplate: string;
+  };
   outsideWorkspace: string;
   codexHome: string;
   claudeHome: string;
