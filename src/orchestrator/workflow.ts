@@ -173,6 +173,17 @@ export interface WorkflowDefinition {
    * 手組みの `WorkflowDefinition`（テストなど）ではそもそも `defaults` を経由しないため任意項目にしてある。
    */
   defaultsWarnings?: string[];
+  /**
+   * 生成元のロードマップ（design.md §16.19「ロードマップの更新」、Issue #173）。ワークスペース
+   * ルートからの相対パス。ロードマップの1フェーズから生成した定義にだけ入り、ゴール文から
+   * 直接生成した定義には入らない。runが終わったとき、`done` になったタスクに対応する項目の
+   * チェックをここが指すファイルへ書き戻す。
+   *
+   * 値は**ワークスペースの中の `.md` を指す相対パス**に限る（`validateWorkflow` が確かめる）。
+   * ワークフロー定義はエージェントが生成しうるファイルなので、書き戻し先を任意のパスへ
+   * 向けられないようにする（§8の引数インジェクション対策と同じ動機）。
+   */
+  roadmap?: string;
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
@@ -442,12 +453,15 @@ export function parseWorkflowYaml(source: string): WorkflowDefinition {
   const root = rec(raw) ?? {};
   const { defaults, warnings: defaultsWarnings } = resolveDefaults(root['defaults']);
   const tasksRaw = arr(root['tasks']);
+  const roadmap = str(root['roadmap']);
   return {
     version: num(root['version'], 1),
     name: str(root['name']),
     maxParallel: defaults.maxParallel,
     tasks: tasksRaw.map((t) => resolveTask(t, defaults)),
     defaultsWarnings,
+    // 未指定と空文字は同じ「ロードマップ由来ではない」扱いにする（検証側で分岐を増やさない）
+    ...(roadmap !== '' ? { roadmap } : {}),
   };
 }
 
@@ -831,6 +845,31 @@ export function findPermissionEscalationWarnings(
  * `cwd` のワークスペース境界検証は、ファイルシステムに触れるためこのIssueの範囲外。
  * `WorkflowTask.cwd` のコメントの通り、拡張の余地は残してある。
  */
+/**
+ * `roadmap` に許す形（design.md §16.19、Issue #173）。ワークフロー定義はエージェントが
+ * 生成しうるため、書き戻し先を任意のパスへ向けられないようにする。
+ *
+ * - 絶対パス（POSIX / Windowsのドライブレター / UNC）を許さない
+ * - `..` を含むセグメントを許さない（ワークスペースの外へ出られない）
+ * - 拡張子は `.md` のみ
+ * - 制御文字・NUL を含まない
+ */
+function isSafeRoadmapPath(value: string): boolean {
+  // 制御文字の判定は正規表現ではなくコードポイントで見る（`src/provider/import.ts` と同じ流儀。
+  // 正規表現へ直接書くと `no-control-regex` に触れる）
+  if (value === '' || [...value].some((ch) => (ch.codePointAt(0) ?? 0) < 32)) {
+    return false;
+  }
+  if (value.startsWith('/') || value.startsWith('\\\\') || /^[A-Za-z]:/u.test(value)) {
+    return false;
+  }
+  const segments = value.split(/[\\/]/u);
+  if (segments.some((seg) => seg === '..' || seg === '')) {
+    return false;
+  }
+  return value.toLowerCase().endsWith('.md');
+}
+
 export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationResult {
   const errors: WorkflowError[] = [];
   const warnings: WorkflowWarning[] = [];
@@ -847,6 +886,13 @@ export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationRes
     errors.push({
       taskIds: [],
       message: `タスクの総数が上限(${MAX_TASK_COUNT})を超えています: ${tasks.length}`,
+    });
+  }
+
+  if (def.roadmap !== undefined && !isSafeRoadmapPath(def.roadmap)) {
+    errors.push({
+      taskIds: [],
+      message: `roadmap はワークスペース内の .md を指す相対パスにしてください: ${def.roadmap}`,
     });
   }
 

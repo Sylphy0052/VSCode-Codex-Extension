@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
+import * as path from 'node:path';
 
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { ChatState, PendingApproval } from '../appserver/chatState';
@@ -25,6 +26,7 @@ import {
   type PullRequestLayerConfig,
 } from './forge';
 import { INTEGRATION_DIR_NAME, IntegrationMergeQueue } from './integration';
+import { applyRunCompletionToFile, type RoadmapFileSystemPort } from './roadmap';
 import {
   IntegrationQueue as PseudoWorktreeIntegrationQueue,
   type PseudoWorktreeFileSystemPort,
@@ -213,6 +215,13 @@ export interface WorkflowRunnerDeps {
    * ワークスペース直下（`repoRoot`）を直接共有する（後方互換。`forge`と同じ設計判断）。
    */
   pseudoWorktree?: { fs: PseudoWorktreeFileSystemPort; exclude: readonly string[] };
+  /**
+   * ロードマップの更新（design.md §16.19、Issue #173）。runが終わったとき、`done` になった
+   * タスクに対応する項目のチェックを書き戻す。**省略可能**で、省略された場合は書き戻さない
+   * （`forge` / `pseudoWorktree` と同じ設計判断）。書き戻し先はワークフロー定義の
+   * `roadmap`（`validateWorkflow` がワークスペース内の `.md` に限っている）。
+   */
+  roadmap?: { fs: RoadmapFileSystemPort };
   /**
    * タスク間メッセージング（design.md §16.21）。**省略可能。**
    *
@@ -1384,6 +1393,12 @@ export class WorkflowRunner {
       if (outcome === 'succeeded') {
         void this.finalizeForge(runId);
       }
+      // ロードマップの更新（design.md §16.19）もrunの結果を問わず行う。`done`になった
+      // タスクの分だけチェックを入れる処理なので、runが途中で失敗していても、終わった分は
+      // ロードマップへ反映されているのが人の期待に近い
+      if (live.def.roadmap !== undefined) {
+        void this.applyRoadmapCompletion(runId);
+      }
       // 疑似worktree（design.md §16.20）はrunの結果を問わず反映する（forgeとは異なり
       // `succeeded`限定にしない。`reflectPseudoWorktree`自身のJSDoc参照）
       if (live.pseudo !== undefined) {
@@ -1710,6 +1725,52 @@ export class WorkflowRunner {
    * 統合ブランチからmainへのPR/MRを作る。`pump()`から`getRunOutcome`が`succeeded`を
    * 返した回だけ呼ばれる。
    */
+  /**
+   * runが終わったとき、`done`になったタスクに対応するロードマップの項目のチェックを
+   * 書き戻す（design.md §16.19「ロードマップの更新」、Issue #173）。
+   *
+   * 書き換えるのはチェックボックスの記号だけで、人が書いた文には触れない
+   * （`applyRunCompletion`が保証する）。対応が取れないタスクidは何もせずログに残す。
+   *
+   * 書き戻し先は`live.def.roadmap`（ワークスペース相対）。`validateWorkflow`が
+   * ワークスペース内の`.md`に限っているが、実行時にも`repoRoot`の外へ出ていないことを
+   * 確かめる（検証を通らずに組み立てた定義が渡る経路を残さないための二重防御。
+   * `worktree.ts`のブランチ名検証と同じ流儀）。
+   */
+  private async applyRoadmapCompletion(runId: string): Promise<void> {
+    const live = this.runs.get(runId);
+    const roadmap = live?.def.roadmap;
+    const deps = this.deps.roadmap;
+    if (live === undefined || roadmap === undefined || deps === undefined) {
+      return;
+    }
+    const target = path.resolve(live.repoRoot, roadmap);
+    const relative = path.relative(live.repoRoot, target);
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+      this.deps.log.warn(
+        `[workflow ${runId}] ロードマップの書き戻し先がワークスペースの外を指しています: ${roadmap}`,
+      );
+      return;
+    }
+
+    const taskStates = new Map([...live.runState.tasks].map(([id, s]) => [id, s.state] as const));
+    const result = await applyRunCompletionToFile({ fs: deps.fs }, target, taskStates);
+    if (!result.ok) {
+      this.deps.log.warn(`[workflow ${runId}] ${result.message}`);
+      return;
+    }
+    if (result.updatedItemIds.length > 0) {
+      this.deps.log.info(
+        `[workflow ${runId}] ロードマップのチェックを更新しました: ${result.updatedItemIds.join(', ')}`,
+      );
+    }
+    if (result.unmatchedTaskIds.length > 0) {
+      this.deps.log.info(
+        `[workflow ${runId}] ロードマップに対応する項目が無いタスク: ${result.unmatchedTaskIds.join(', ')}`,
+      );
+    }
+  }
+
   private async finalizeForge(runId: string): Promise<void> {
     const live = this.runs.get(runId);
     if (live === undefined || live.integration === undefined) {

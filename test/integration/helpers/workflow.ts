@@ -291,6 +291,16 @@ export interface WorkflowRunnerLike {
   removeWorktrees(runId: string): Promise<{ removed: string[]; failed: string[] }>;
   /** `blocked` のタスクを再マージする（design.md §16.17、Issue #170）。 */
   retryMerge(runId: string, taskId: string): boolean;
+  /**
+   * 統合ブランチと残ったworktreeをまとめて片付ける（design.md §16.17、Issue #173）。
+   * runが `running` の間は統合worktreeを撤去せず、理由を返す。
+   */
+  cleanupIntegration(runId: string): Promise<{
+    tasksRemoved: string[];
+    tasksFailed: string[];
+    integrationRemoved: boolean;
+    integrationFailedMessage: string | undefined;
+  }>;
 }
 
 /** `CliCommandResult`（`src/orchestrator/forge.ts`）と構造互換な最小の口。 */

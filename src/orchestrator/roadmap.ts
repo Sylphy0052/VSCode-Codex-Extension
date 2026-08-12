@@ -861,6 +861,38 @@ export async function generateRoadmap(
   return { ok: true, path: pathResult.path, markdown, parsed, validation };
 }
 
+/**
+ * 生成したワークフロー定義へ、生成元のロードマップへの参照（`roadmap:`）を書き加える
+ * （design.md §16.19「ロードマップの更新」、Issue #173）。
+ *
+ * runが終わったときにどのロードマップへチェックを書き戻すかは、定義ファイル自身が持って
+ * いないと分からない（runと定義の対応しか実行時には残らない）。分解セッションが生成した
+ * YAMLはロードマップの所在を知らないため、保存する直前にオーケストレータ側で足す。
+ *
+ * `version:` の直後（無ければ先頭）へ1行だけ挿入する。値はダブルクォートで囲み、パス区切りは
+ * POSIX形式（`/`）へ揃える。既に `roadmap:` を持つ定義（人が手で書いた場合など）はその値を
+ * 尊重してそのまま返す。
+ */
+export function withRoadmapReference(
+  yaml: string,
+  definition: WorkflowDefinition,
+  roadmapRelativePath: string,
+): { yaml: string; definition: WorkflowDefinition } {
+  const normalized = roadmapRelativePath.split(/[\\/]/u).join('/');
+  if (definition.roadmap !== undefined) {
+    return { yaml, definition };
+  }
+  const lines = yaml.split(/\r?\n/u);
+  const versionIndex = lines.findIndex((line) => /^version\s*:/u.test(line));
+  const inserted = `roadmap: ${JSON.stringify(normalized)}`;
+  const at = versionIndex >= 0 ? versionIndex + 1 : 0;
+  lines.splice(at, 0, inserted);
+  return {
+    yaml: lines.join('\n'),
+    definition: { ...definition, roadmap: normalized },
+  };
+}
+
 export interface ApplyRunCompletionDeps {
   fs: RoadmapFileSystemPort;
 }
