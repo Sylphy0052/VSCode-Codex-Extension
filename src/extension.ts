@@ -18,6 +18,13 @@ import { ClaudeSessionStore } from './claude/sessionStore';
 import { ClaudeSkillsProbe } from './claude/skillsProbe';
 import { ClaudeTranscriptWatcher } from './claude/transcriptWatcher';
 import { CodexAccountActions } from './codex/accountActions';
+import {
+  AppServerConnection,
+  type AppServerConnectionPort,
+  type NotificationHandler,
+  type ServerRequestHandler,
+} from './appserver/connection';
+import type { ClaudeSpawnPort } from './claude/streamSession';
 import { AppServerClient } from './codex/appServerClient';
 import { codexPaths, nodeLocatorDeps, resolveCodexHome } from './codex/cliLocator';
 import { CodexProvider } from './codex/provider';
@@ -116,6 +123,43 @@ export interface ExtensionTestApi {
    * `undefined` になる（Issue #158）。
    */
   readonly workflow?: WorkflowTestApi | undefined;
+  /**
+   * チャット画面（design.md §9.5 / §14.4）の統合テスト専用の口。`workflow` と同じく
+   * `AGENT_SESSIONS_INTEGRATION_TEST=1` が立っているときだけ実体が入る（Issue #186）。
+   */
+  readonly chat?: ChatTestApi | undefined;
+}
+
+/**
+ * 統合テストからチャット画面を動かすための口（Issue #186）。
+ *
+ * 実VSCode上でCLI（codex / claude）を起動することはできないため、**CLIとの境界だけ**を
+ * フェイクへ差し替える。ワークフロー（`WorkflowTestApi`）が `TaskSessionHost` を差し替える
+ * のに対し、こちらはもう1段下（Codexは`app-server`との接続、Claude Codeはプロセスの起動）を
+ * 差し替える。会話の組み立て・承認の往復・状態遷移・パネルの復元は実物を通る。
+ */
+export interface ChatTestApi {
+  /**
+   * Codex画面が使う `app-server` との接続を差し替える。`undefined` で実物へ戻る。
+   *
+   * 引数のファクトリは、`ChatViewManager` が実物へ渡しているのと同じ通知・要求のハンドラを
+   * 受け取る。フェイクはここへ通知（`item/*` など）や承認要求を流し込める。
+   */
+  setCodexConnection(
+    factory:
+      | ((
+          onNotification: NotificationHandler,
+          onServerRequest: ServerRequestHandler,
+        ) => AppServerConnectionPort)
+      | undefined,
+  ): void;
+  /**
+   * Claude Code画面が使う `claude` プロセスの起動を差し替える。`undefined` で実物へ戻る。
+   *
+   * stream-json の組み立てとcontrol protocolの往復は実物（`ClaudeStreamSession`）を通るため、
+   * 送っている中身と順序をフェイク側で観測できる。
+   */
+  setClaudeSpawn(spawn: ClaudeSpawnPort | undefined): void;
 }
 
 /**
@@ -298,6 +342,17 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // `@` のファイル候補。両方の画面で同じ一覧とキャッシュを使う
   const mentions = new FileMentionCatalog(nodeFileScan);
 
+  // Codex画面の統合テスト（Issue #186）。`app-server` との接続を差し替えるための包み。
+  // `ChatViewManager` は構築時に接続を1つ作るため、`activate()` が終わってから差し替える
+  // には、常に間へ1枚挟んでおく必要がある。差し替えが無ければ実物へそのまま委譲するので、
+  // 本番の経路は包みが無かったときと変わらない（`forgeOverrides` と同じ設計判断）。
+  const chatConnectionOverride: { port?: AppServerConnectionPort } = {};
+  let chatConnectionHandlers:
+    | { onNotification: NotificationHandler; onServerRequest: ServerRequestHandler }
+    | undefined;
+  /** Claude Code画面のプロセス起動の差し替え（Issue #186）。空なら実物が起動する。 */
+  const claudeSpawnOverride: { spawn?: ClaudeSpawnPort } = {};
+
   const chat = new ChatViewManager(
     codexPath,
     settings,
@@ -307,6 +362,18 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     log,
     (activity) => recordActivity({ ...activity, source: 'codex' }),
     isTaskManagedThread,
+    (onNotification, onServerRequest) => {
+      chatConnectionHandlers = { onNotification, onServerRequest };
+      const real = new AppServerConnection(codexPath, log, onNotification, onServerRequest);
+      return {
+        ensureStarted: () => (chatConnectionOverride.port ?? real).ensureStarted(),
+        request: (method, params) => (chatConnectionOverride.port ?? real).request(method, params),
+        dispose: () => {
+          real.dispose();
+          chatConnectionOverride.port?.dispose();
+        },
+      };
+    },
   );
   context.subscriptions.push(chat);
 
@@ -324,6 +391,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // メモリ追記（issue #6/#144）専用の読み取り口と、前回選んだ追記先の記憶先
     nodeMemoryFileSystem,
     context.workspaceState,
+    // Claude Code画面の統合テスト（Issue #186）。セッションを作るたびに読み直すため、
+    // `activate()` が終わった後からでも差し替えられる。
+    () => claudeSpawnOverride.spawn,
   );
   context.subscriptions.push(claudeChat);
 
@@ -555,6 +625,32 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
 
   return {
     sessionTree: tree,
+    chat: isIntegrationTestMode()
+      ? {
+          setCodexConnection: (factory) => {
+            chatConnectionOverride.port?.dispose();
+            if (factory === undefined) {
+              delete chatConnectionOverride.port;
+              return;
+            }
+            if (chatConnectionHandlers === undefined) {
+              // `ChatViewManager` は構築時に接続を1つ作るため、ここへ来る時点で必ず埋まっている
+              throw new Error('Codex画面の接続がまだ作られていません');
+            }
+            chatConnectionOverride.port = factory(
+              chatConnectionHandlers.onNotification,
+              chatConnectionHandlers.onServerRequest,
+            );
+          },
+          setClaudeSpawn: (spawnPort) => {
+            if (spawnPort === undefined) {
+              delete claudeSpawnOverride.spawn;
+              return;
+            }
+            claudeSpawnOverride.spawn = spawnPort;
+          },
+        }
+      : undefined,
     workflow: isIntegrationTestMode()
       ? {
           runner: workflowRunner,

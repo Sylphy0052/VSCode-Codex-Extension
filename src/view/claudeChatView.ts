@@ -4,7 +4,7 @@ import * as vscode from 'vscode';
 import { isApprovalDecision, type ApprovalDecision } from '../appserver/approvals';
 import { isOpenableSearchUrl, type ChatState, type ChatUsage } from '../appserver/chatState';
 import type { ClaudeSessionStore } from '../claude/sessionStore';
-import { ClaudeStreamSession } from '../claude/streamSession';
+import { ClaudeStreamSession, type ClaudeSpawnPort } from '../claude/streamSession';
 import { transcriptItems } from '../claude/transcript';
 import { isUnsafeClaudeCombination } from '../claude/argvBuilder';
 import { currentWorkspaceFolder, readClaudeConfig, workspaceFolderPaths } from '../config';
@@ -198,6 +198,12 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       get: (_key, defaultValue) => defaultValue,
       update: () => Promise.resolve(),
     },
+    /**
+     * `claude` プロセスの起こし方（統合テストの差し替え口。Issue #186）。セッションを
+     * 作るたびに読み直すので、`activate()` が終わった後からでも差し替えられる。
+     * `undefined` を返す間は `ClaudeStreamSession` の既定（実際に起動する）が使われる。
+     */
+    private readonly resolveSpawn: () => ClaudeSpawnPort | undefined = () => undefined,
   ) {
     this.catalog = new CommandCatalog(fs);
     this.usageProbe = new ClaudeUsageProbe(claudePath, log);
@@ -445,6 +451,8 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         entry.approvalHandler !== undefined
           ? entry.approvalHandler(approval, rawParams)
           : Promise.resolve({ kind: 'ask' as const }),
+      // 統合テスト（Issue #186）が差し替えている間だけフェイクのプロセスになる。
+      this.resolveSpawn(),
     );
 
     const loop = new LoopController(

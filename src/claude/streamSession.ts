@@ -73,6 +73,19 @@ export interface ClaudeStreamOptions {
  * Codexのapp-serverと違い1プロセス1セッションなので、画面ごとにプロセスを持つ。
  * プロセスは使い回し、発言のたびに起動し直さない（文脈が切れるため）。
  */
+/**
+ * `claude` プロセスの起動（統合テストの差し替え口。Issue #186）。
+ *
+ * stream-json の組み立てとcontrol protocolの往復は `ClaudeStreamSession` 自身の責務なので、
+ * 差し替えるのは**プロセスを起こす一点だけ**にする。フェイクは `stdin` へ書かれた内容を
+ * そのまま観測でき、`stdout` から応答を流し込める。
+ */
+export type ClaudeSpawnPort = (
+  command: string,
+  args: readonly string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv },
+) => ChildProcessWithoutNullStreams;
+
 export class ClaudeStreamSession {
   private proc: ChildProcessWithoutNullStreams | undefined;
   private buffer = '';
@@ -120,6 +133,12 @@ export class ClaudeStreamSession {
       approval: PendingApproval,
       rawParams: Record<string, unknown>,
     ) => Promise<ApprovalHandlerResult> = () => Promise.resolve({ kind: 'ask' }),
+    /**
+     * プロセスの起こし方（Issue #186）。既定は実際に `claude` を起動する。統合テストだけが
+     * ここをフェイクへ差し替え、stdin へ書かれたcontrol_requestを観測する。
+     */
+    private readonly spawnProcess: ClaudeSpawnPort = (command, args, options) =>
+      spawn(command, [...args], { ...options, stdio: ['pipe', 'pipe', 'pipe'] }),
   ) {}
 
   /**
@@ -161,9 +180,8 @@ export class ClaudeStreamSession {
       this.log.warn(w);
     }
 
-    const proc = spawn(this.claudePath(), args, {
+    const proc = this.spawnProcess(this.claudePath(), args, {
       cwd: options.cwd,
-      stdio: ['pipe', 'pipe', 'pipe'],
       // `rewind_files`（ファイルの巻き戻し）はこの環境変数を立てないと、非対話
       // （`--print`）環境ではチェックポイントが作られず常に失敗する（実測。CLIバイナリの
       // strings解析で見つけたゲート関数 `QF()` がinteractive判定を見ている。
