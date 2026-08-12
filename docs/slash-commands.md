@@ -125,3 +125,57 @@ Claude側の一覧を手で見たいときは、`claude --print --input-format s
 ```json
 { "type": "control_request", "request_id": "1", "request": { "subtype": "initialize" } }
 ```
+
+## 2026-08-12 の再抽出（Issue #195）
+
+- Codex CLI 0.147.0（前回と同版）/ Claude Code **2.1.227**（前回は 2.1.226）
+
+### Codex: 差分なし
+
+`codex app-server generate-json-schema --out <DIR>` の出力を数え直した結果、前回と完全に一致した。
+
+| 種別               | 件数 |
+| ------------------ | ---- |
+| ClientRequest      | 95   |
+| ServerNotification | 70   |
+| ServerRequest      | 10   |
+| ClientNotification | 1    |
+
+### Claude Code: 一覧は 90件（前回と同数だが内訳は環境依存）
+
+`initialize` の `commands` は 90件。ただし**ユーザー定義・プラグイン由来が混ざる**ため、件数だけでは版の差分にならない。今回の内訳は次のとおり。
+
+| 区分                                          | 件数 |
+| --------------------------------------------- | ---- |
+| ユーザー定義（`description` 末尾が `(user)`） | 26   |
+| プラグイン由来（`名前:名前` の形）            | 8    |
+| CLI組込 + 同梱skill                           | 56   |
+
+前回（2.1.226）はこの内訳を残していなかったため、厳密な版差分は取れない。**次回から差分が取れるよう、この時点の組込一覧を下に記録する。**
+
+<details>
+<summary>CLI組込 + 同梱skill（56件、2.1.227 実測）</summary>
+
+`__remote-workflow` `agents`（`(removed)` と明記）`artifact-capabilities` `artifact-design` `artifact-diagramming` `autocompact` `batch` `claude-api` `clear` `code-review` `color` `compact` `config` `context` `dataviz` `debug` `deep-research` `design` `design-consent` `design-revoke` `design-sync` `doctor` `effort` `extra-usage` `fast` `fewer-permission-prompts` `goal` `heapdump` `import` `init` `insights` `list-agents` `loop` `mcp` `model` `recap` `reload-skills` `rename` `run` `run-skill-generator` `schedule` `security-review` `simplify` `team-onboarding` `ultrareview` `update-config` `usage` `usage-credits` `verify` `workflow-launch-exec`
+
+</details>
+
+### 一覧のほかに `initialize` が返すもの（実測）
+
+コマンド一覧だけでなく、**画面へ出せる状態**も同じ応答に入っている。今回の再抽出で確認した。
+
+| フィールド                                 | 中身（実測）                                       |
+| ------------------------------------------ | -------------------------------------------------- |
+| `fast_mode_state`                          | `"off"`。Fast mode（`/fast`）の現在値              |
+| `models[].supportsFastMode`                | そのモデルがFast modeを持つか（`true` / 無し）     |
+| `current_permission_mode`                  | 起動時の承認方法                                   |
+| `agents`                                   | カスタムエージェントの一覧（TP-58で利用済み）      |
+| `models[]`                                 | モデルと`supportedEffortLevels`（TP-83で利用済み） |
+| `account`                                  | ログイン状態（TP-53で利用済み）                    |
+| `output_style` / `available_output_styles` | 出力スタイル（拡張機能では未使用）                 |
+
+### この再抽出から起票したもの
+
+同梱skill（`dataviz` `artifact-*` `code-review` `doctor` `batch` `goal` `loop` `schedule` など）は、Claude Codeでは**送ればそのまま効く**うえ候補にも出ているため、拡張機能側の追加実装は要らない。
+
+一方、**CLI組込のUI機能**のうちチャット画面に無いものは残っている。バックログの Phase 8（TP-86〜TP-93）として起票した。
