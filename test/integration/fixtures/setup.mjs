@@ -249,6 +249,30 @@ tasks:
 `;
 
 /**
+ * タスク間メッセージング（design.md §16.21、Issue #171）の統合テストが使う定義。
+ *
+ * 3タスクとも依存が無く並列に走る。往復（T1とT2）に加えて、**走行中の全タスクが
+ * 返信待ちになる状況**を作るのに3本目が要る。2本だと、片方が相手へ送った時点で相手の
+ * 待ちが解けてしまい（`onMessageAccepted`）、全員が待ちの状態にならない。
+ */
+const WORKFLOW_MESSAGING_YAML = `version: 1
+name: integration-messaging
+defaults:
+  provider: codex
+  maxParallel: 3
+tasks:
+  - id: T1
+    prompt: T1のプロンプト
+    done: T1の終了条件
+  - id: T2
+    prompt: T2のプロンプト
+    done: T2の終了条件
+  - id: T3
+    prompt: T3のプロンプト
+    done: T3の終了条件
+`;
+
+/**
  * 統合の衝突と自動解決（design.md §16.17、Issue #170）の統合テストが使う定義。
  *
  * T1とT2は依存が無く並列に走り、テスト側が**同じファイルの同じ行**を書き換えてコミット
@@ -487,6 +511,9 @@ export function prepareFixtures() {
   // （remoteを持たない独立したgitリポジトリ）を使う。
   const workflowConflictDefPath = join(workflowDir, 'merge-conflict.yaml');
   writeFileSync(workflowConflictDefPath, WORKFLOW_MERGE_CONFLICT_YAML, 'utf8');
+  // タスク間メッセージング（Issue #171）。
+  const workflowMessagingDefPath = join(workflowDir, 'messaging.yaml');
+  writeFileSync(workflowMessagingDefPath, WORKFLOW_MESSAGING_YAML, 'utf8');
   initGitRepo(workspaceFolder);
   // 初期化が済んだ状態で、このリポジトリとは無関係な独立リポジトリになっていることを確かめる
   // （Issue #178）。
@@ -512,7 +539,11 @@ export function prepareFixtures() {
 
   const manifest = {
     workspaceFolder,
-    workflow: { defPath: workflowDefPath, conflictDefPath: workflowConflictDefPath },
+    workflow: {
+      defPath: workflowDefPath,
+      conflictDefPath: workflowConflictDefPath,
+      messagingDefPath: workflowMessagingDefPath,
+    },
     // gitリポジトリにしていない親ディレクトリ。テストは `<root>/<ケース名>` を掘って使う。
     pseudoWorktree: {
       root: nonGitWorkspace,

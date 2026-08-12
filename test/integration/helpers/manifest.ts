@@ -9,6 +9,8 @@ export interface FixtureManifest {
     defPath: string;
     /** 統合の衝突（Issue #170）用。同じ行を書き換える2つの並列タスクを含む。 */
     conflictDefPath: string;
+    /** タスク間メッセージング（Issue #171）用。並列に走る2つのタスクを含む。 */
+    messagingDefPath: string;
   };
   /**
    * 疑似worktree（Issue #168）用。`root` は**gitリポジトリではない**親ディレクトリで、
