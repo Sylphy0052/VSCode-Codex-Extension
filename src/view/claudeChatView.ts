@@ -309,6 +309,32 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     });
   }
 
+  /**
+   * 統合テスト専用: webview（レンダラー側のJS）から届いたふりをしたメッセージを流し込む
+   * （Issue #188、`ChatViewManager.simulateWebviewMessage`（`chatView.ts`）と同じ考え方）。
+   *
+   * 実VSCode上の統合テストでは、拡張機能ホスト側のコードから実際のwebview（別プロセスの
+   * レンダラーで動くiframe）へJSを注入してボタンのクリックやEnterキーを再現する手段が無い。
+   * `attachPanel` が `panel.webview.onDidReceiveMessage` に登録しているのと同じ
+   * `handleMessage` を直接呼ぶ入口をここへ用意する。本番のwebviewが送るメッセージは
+   * 形が同じであれば区別なく処理されるため、実際に通る経路（承認の決定・発言の送信・
+   * 設定変更・巻き戻し・行頭 `!`/`#` の処理など）はここを通しても変わらない。呼び出し口は
+   * `ChatTestApi.simulateClaudeWebviewMessage`（`extension.ts`）で、
+   * `AGENT_SESSIONS_INTEGRATION_TEST=1` のときだけ公開される。
+   *
+   * `handleMessage` 自体は同期関数だが、内部で確認ダイアログなどの非同期処理を
+   * fire-and-forget（`void this.compact(entry)` 等）で呼んでいる分岐がある。それらの
+   * 完了を待つ必要があるテストは、呼び出し側で `waitFor`（`helpers/waitFor.ts`）を使うこと
+   * （`chatCodexApprovals.test.ts` 等、既存のwebview経由テストと同じ流儀）。
+   */
+  async simulateWebviewMessage(sessionId: string, message: unknown): Promise<void> {
+    const entry = this.panels.get(sessionId);
+    if (entry === undefined) {
+      throw new Error(`webviewへメッセージを送れませんでした（画面が見つからない）: ${sessionId}`);
+    }
+    this.handleMessage(entry, message);
+  }
+
   /** 新しい会話を開く。idは起動前に決まるため、開いた時点で履歴と紐づく。 */
   async openNew(cwd?: string, taskConfig?: ClaudeConfig): Promise<void> {
     const folder = currentWorkspaceFolder();

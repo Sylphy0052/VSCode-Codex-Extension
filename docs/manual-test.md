@@ -15,7 +15,7 @@ npm run test:integration          # ディスプレイのある環境（VSCode�
 npm run test:integration:xvfb     # ヘッドレスLinux/WSL（xvfb-runで仮想ディスプレイを用意）
 ```
 
-自動化できているのは次の63件（実行して全件passを確認済み）。内訳の最新はdesign.md §11にある。
+自動化できているのは次の78件（実行して全件passを確認済み）。内訳の最新はdesign.md §11にある。
 
 - 土台（`extension.test.ts` の拡張機能有効化・コマンド登録・TreeView取得、`configuration.test.ts`
   の設定の読み書き）: 7件
@@ -35,7 +35,25 @@ npm run test:integration:xvfb     # ヘッドレスLinux/WSL（xvfb-runで仮想
   分岐など）を駆動している。C-11は`thread/resume`の呼び出しとスナップショット適用の部分
   だけがC-12と共通のため自動化済みで、`registerWebviewPanelSerializer`によるウィンドウ
   リロード時の実際の復元は対象外（実機に残す）。C-13bはClaude Code画面（stream-json）側の
-  挙動でこのIssueの範囲外（Issue #188で扱う）
+  挙動のためこのIssueの範囲外で、Issue #188（下記）で自動化した
+- Claude Code画面のプロトコル・状態遷移・配線（この文書のL群、`chatClaudeHandshake.test.ts` /
+  `chatClaudeThreadFlow.test.ts` / `chatClaudeSettings.test.ts`、Issue #188）: 15件
+  （L-02は成功/失敗の2ケース、L-03、L-05、L-06、L-08/L-09（1つのテストで両方を確認）、
+  L-12、L-14、L-15、L-18、L-24、L-29、L-39、L-40、C-13b）。Codex画面（#187）と同じ考え方で
+  `ChatTestApi.simulateClaudeWebviewMessage`（`src/extension.ts`、Issue #188で新設。
+  `ClaudeChatViewManager.simulateWebviewMessage` を追加し、`ChatViewManager` 側と同じ
+  `handleMessage` 直呼びの入口にした）からwebview発の操作を駆動している。L群のうち
+  L-07（履歴の表示名の作り方）とL-10（forkでidが未確定になること）は対象外にした。L-07は
+  純粋関数（`transcript.ts`）の話でユニットテスト（`test/unit/claudeTranscript.test.ts`）が
+  既に担保しており、TreeView経由の表示自体もH-00/H-01（`sessionHistory.test.ts`）が別途
+  確かめているため、L群専用のfixtureを足してまで重複した主張を統合テストへ足す価値が薄いと
+  判断した。L-10は、`ClaudeChatViewManager` が `fork`（`-r <id> --fork-session`）を渡す
+  経路を持たず、`extension.ts` の `forkSession` がClaude Codeセッションを明示的に
+  「Claude Codeのセッション全体の分岐には対応していません」で拒否する実装になっており
+  （`argvBuilder.ts` の `targetArgs` 自体は `fork` を組み立てられるが、呼び出し側の配線が
+  無い）、駆動する入口が無いため統合テストとして書けなかった。design.mdの「fork（idは
+  未確定のまま）」という記述と実装の間にギャップがあることが分かったので、これは
+  実装側の課題として別Issueに切り出す
 
 履歴一覧は当初、実CLIを呼ばせないために`executablePath`を存在しないパスへ固定する制約と
 `ProviderRegistry.available()`の仕様（実行ファイルを解決できないプロバイダを一覧からまるごと
@@ -76,14 +94,25 @@ TreeItemの値までしか確かめられないため、各ケースの手順は
   はC-12と共通処理として自動化済み。ウィンドウリロードで実際にパネルが復元される経路は
   実機に残す）、C-12（二重に開かない）、C-13（`turn/steer` と待ち行列の分岐）、C-18 / C-19
   （問い合わせ・elicitationの往復と拒否・取り消しの扱い）、C-21（`serverRequest/resolved`）、
-  C-41（`/init` が送る指示文）、C-42（`thread/fork` の `ephemeral`）。C-13bのみ未着手
-  （Claude Code画面・stream-json側の挙動のため、L群と合わせてIssue #188で扱う）
+  C-41（`/init` が送る指示文）、C-42（`thread/fork` の `ephemeral`）。C-13b（Claude Code画面
+  ・stream-json側の挙動）はL群と合わせてIssue #188で自動化した（下記L群参照）
 - **一部機械**（22件）: C-01 / C-02 / C-14 / C-16 / C-17 / C-20 / C-22 / C-23 / C-24 / C-25 / C-26 / C-27 / C-28 / C-28b / C-29 / C-30 / C-31 / C-32 / C-33 / C-35 / C-36 / C-37 / C-38 / C-39 / C-40 / C-44 のうち、要求の引数と応答の取り込みは機械で、パネル・会話の描画は実機
 - **実機**（6件）: C-15（入力欄のキー操作）、C-34（`Shift+Tab` のキーバインド）、C-43（サブエージェントの再現性が無い）、およびC-31のlogin/logout・C-35の実検索・C-27の画像生成のように外部の状態を変える操作
 
 ### L群（Claude Code画面・40件）
 
-- **機械**（15件）: L-02（`initialize` のハンドシェイク）、L-03（`can_use_tool` の往復）、L-05（`interrupt`）、L-06（sessionIdとtranscriptの対応）、L-07（表示名の作り方）、L-08 / L-09（`--resume` とtranscript読み込み）、L-10（forkでidが未確定になる）、L-12（`get_context_usage` と圧縮の送信）、L-14（`set_model` / `set_permission_mode` の送信と会話への記録）、L-15（Plan modeの往復）、L-18（問い合わせカードを出さない）、L-24（コマンド一覧に無ければボタンを出さない）、L-29（`rewind_files` のパラメータ）、L-39 / L-40（`!` と `#` が拡張機能側で完結する）
+- **機械**（15件中13件をIssue #188で自動化済み。`chatClaudeHandshake.test.ts` /
+  `chatClaudeThreadFlow.test.ts` / `chatClaudeSettings.test.ts`）: L-02（`initialize` の
+  ハンドシェイク。成功時に警告が出ないことと、失敗時に一度だけ警告が出て会話は続けられる
+  こと）、L-03（`can_use_tool` の許可・拒否・セッション内許可の往復）、L-05（`interrupt`）、
+  L-06（sessionIdが起動前に採番され`--session-id`と紐付くこと）、L-08 / L-09（`--resume`で
+  起動し、二重に開かないこと）、L-12（`get_context_usage`の自動取得と圧縮ボタンの送信）、
+  L-14（`set_model` / `set_permission_mode`の送信と、既定へ戻す・bypassPermissions取消時に
+  送らないこと）、L-15（Plan modeの往復）、L-18（問い合わせカードの経路が無いこと）、
+  L-24（`/code-review`をそのまま発言として送ること）、L-29（`rewind_files`のパラメータと
+  対象が無い場合の分岐）、L-39 / L-40（`!`と`#`が拡張機能側で完結する）。
+  L-07（表示名の作り方）とL-10（forkでidが未確定になる）は対象外にした（理由は上の
+  「統合テストで自動化した範囲」参照）
 - **一部機械**（19件）: L-01 / L-04 / L-11 / L-13 / L-16 / L-17 / L-19 / L-20 / L-21 / L-22 / L-23 / L-25 / L-26 / L-27 / L-28 / L-30 / L-31 / L-32 / L-34 / L-35 / L-36 / L-37 / L-38 のうち、送受信するデータは機械で、描画は実機
 - **実機**（6件）: L-33（キーバインド）、L-28のlogin/logout、L-26の実エージェントでの応答傾向、L-30の `/insights` レポートの中身、L-34の実検索、L-22の実画像の見え方
 
@@ -677,17 +706,8 @@ ephemeralな`thread/fork`が呼ばれること（`ephemeral: true`）・質問�
 - 期待: Claude Code画面が開き、応答が逐次表示される（`--include-partial-messages`）
 - 確認: ログに起動失敗が出ていない。ここが落ちたらL群は中断
 
-### L-02 承認ハンドシェイク
-
-- 操作: L-01の起動直後
-- 期待: `{"subtype":"initialize"}` に `control_response/success` が返る。**警告通知が出ない**
-- 落ちたとき: `この画面ではツール実行の承認を受け取れませんでした。claude.permissionMode の設定に従って動作します。` が1度だけ出る。会話自体は続けられること（通知が出る＝ハンドシェイク失敗。CLI側の版差を疑う）
-
-### L-03 承認カード（許可 / 拒否）
-
-- 操作: ファイル書き込みを指示する
-- 期待: `can_use_tool` を受けて承認カードが出る。「許可」で実行、「拒否」で実行されずに会話が続く
-- 確認: `acceptForSession` を選んだ場合も許可として通る（CLI側に区別が無いため2回目も出る想定）
+L-02（`initialize`ハンドシェイクの成功/失敗）とL-03（`can_use_tool`の許可・拒否・セッション内
+許可の往復）は統合テストへ移した（Issue #188、`chatClaudeHandshake.test.ts`）。
 
 ### L-04 承認無効の警告
 
@@ -695,30 +715,29 @@ ephemeralな`thread/fork`が呼ばれること（`ephemeral: true`）・質問�
 - 期待: モーダルで `承認が無効になっています。Claude Code はツールを確認なしで実行します。` が出て、「実行する」を押すまで進まない
 - 後始末: 確認後は設定を戻す
 
-### L-05 中断
-
-- 操作: 長めの作業を指示し、応答中に「中断」ボタン
-- 期待: control protocol の `interrupt` が飛び、応答が止まる。続けて発言できる
-
-### L-06 セッションIDの紐付け
-
-- 操作: L-01のセッションを1ターン進める
-- 期待: `~/.claude/projects/<cwd-slug>/<sessionId>.jsonl` に、起動時に指定したUUIDと同名のtranscriptができている
-- 確認: `ls -t ~/.claude/projects/*/ | head` で直近のファイル名を見る
+L-05（中断で`interrupt`が飛ぶこと）とL-06（セッションidが起動前に採番され`--session-id`と
+紐付くこと）は統合テストへ移した（Issue #188、`chatClaudeThreadFlow.test.ts`）。L-06のうち
+「実際にCLIがそのidと同名のtranscriptファイルを作る」こと自体はdesign.md §14.3で実機検証済み
+（2026-08-07、CLI 2.1.223）で、統合テストは実CLIを起動しないためこの部分の継続確認はできない
+（design.mdの記録を正とする）。
 
 ### L-07 履歴の表示名
 
 - 操作: サイドバーの履歴を見る
 - 期待: L-01のセッションが**最初の人の発言**から作った名前で並んでいる。subagentの発言やツール結果、IDEが挿入する制御タグが名前になっていない
 
-### L-08 resume の初期表示
+### L-08 / L-09 resumeの初期表示とタブ復元
+
+`claude.openChat` が `-r <id>`（`--session-id` の新規経路ではない）で起動すること、対象の
+transcriptを実際に解決できること、開いたままの同じセッションは二重に開かないことは統合テストへ
+移した（Issue #188、`chatClaudeThreadFlow.test.ts`）。**過去のやり取りがwebviewへ実際に描画
+される**ことと、`registerWebviewPanelSerializer` がウィンドウリロード時に実際にパネルを復元する
+経路——実VSCodeのライフサイクル（ウィンドウの再読み込み）そのものが要るため、統合テストでは
+駆動できない（Codex画面のC-11と同じ理由）。
 
 - 操作: 履歴からL-01のセッションをClaude Code画面で開く（`claude.openChat`）
 - 期待: 過去のやり取りが表示される（`--resume` は標準出力に流さないため、transcript読み込みで作る経路）
 - 確認: そのまま続きを発言できる
-
-### L-09 タブ復元
-
 - 操作: Claude Code画面を2枚開いた状態でウィンドウをリロード（`Developer: Reload Window`）
 - 期待: 両方のタブが会話内容つきで復元される（`registerWebviewPanelSerializer` → transcript読み込み + `--resume`）
 - 確認: 復元後にそのまま発言を続けられる。設定行のモデル・承認方法のプルダウンも操作できる
@@ -745,7 +764,12 @@ ephemeralな`thread/fork`が呼ばれること（`ephemeral: true`）・質問�
 
 ### L-12 コンテキスト残量と手動圧縮
 
-CodexとClaude Codeで入手経路が違うため、両方の画面で確認する。
+CodexとClaude Codeで入手経路が違うため、両方の画面で確認する。Claude Code側のうち
+「ハンドシェイク成功直後に`get_context_usage`を自動で読み直すこと」と「圧縮ボタンは確認
+したときだけ`/compact`を送り、取り消すと送らないこと」は統合テストへ移した（Issue #188、
+`chatClaudeSettings.test.ts`）。フッターの表示・実際に数字が増減すること・会話へ残る行の
+中身・メッセージ不足時のエラー文言・応答中のボタン無効化は画面の描画とモデルの応答が絡む
+ため実機に残す。
 
 - 操作: 会話を1ターン進める
 - 期待: フッターに `コンテキスト <n>k/<n>k（残り<n>%）` が出る。レート制限の消費率とは別の言葉で並んでいる
@@ -773,7 +797,11 @@ CodexとClaude Codeで出どころが違うため、両方の画面で確認す�
 
 ### L-14 Claude Code画面のセッション中の設定変更
 
-Codex画面はターンごとに設定を渡すため元から効く。ここで見るのはClaude Code側。
+Codex画面はターンごとに設定を渡すため元から効く。ここで見るのはClaude Code側。モデル・
+承認方法の変更が正しい`control_request`（`set_model` / `set_permission_mode`）として送られる
+こと、「既定」へ戻す操作とbypassPermissionsの確認取消では何も送らないことは統合テストへ
+移した（Issue #188、`chatClaudeSettings.test.ts`）。会話へ残る通知行の中身と、変更が実際に
+次の発言へ反映されることはモデルの応答が絡むため実機に残す。
 
 - 操作: 会話を1ターン進めてから、画面下の設定行でモデルを変える
 - 期待: 会話に `設定 ・ モデルを <名前> に変えました` が出る
@@ -806,6 +834,10 @@ Codex画面はターンごとに設定を渡すため元から効く。ここで
 ### L-15 Plan mode
 
 CodexとClaude Codeで作りが違うため、両方の画面で確認する。根拠は [design.md](design.md) の 14.10。
+Claude Code側のうち、計画モードへ入る/抜けるがそれぞれ`set_permission_mode`（`mode: 'plan'`、
+抜けるときは設定の承認方法。既定は`manual`）として送られることは統合テストへ移した
+（Issue #188、`chatClaudeSettings.test.ts`）。ボタンの見た目・会話に残る行・実際にファイルの
+変更が止まる/再開することはモデルの応答と画面の描画が絡むため実機に残す。
 
 - 操作: 入力欄の横の「計画」ボタンを押す
 - 期待: ボタンが押された見た目に変わり、入力欄の下に `計画モード（ファイルは変更されません）` が出る
@@ -841,13 +873,9 @@ Codex画面と描画は同じだが、差分の作り方が違う。Codexはapp-
 - 確認: `Read` や `Bash` など、ファイルを変えないツールでは差分の折りたたみが出ない
 - 確認: 履歴から開き直したセッション（L-08）でも、過去の変更の差分が読める（transcriptから組み立てる経路）
 
-### L-18 ツールやMCPからの問い合わせは出ない
-
-**Claude Code画面には問い合わせカードの経路が無い**ことの確認。C-18・C-19 に相当する機能はCodex画面だけにある。
-
-- 操作: Claude Code画面で、ユーザーへ質問するツールやelicitationを投げるMCPサーバを呼ばせる
-- 期待: 問い合わせカードは出ない。ツール側の既定の振る舞い（CLIが返す応答）に従う
-- 確認: 画面が固まらず、会話はそのまま続けられる
+**Claude Code画面には問い合わせカードの経路が無い**（C-18・C-19に相当する機能はCodex画面だけに
+ある）ことと、`can_use_tool`以外の未知の制御要求には空応答を返すだけで会話が固まらないことは
+統合テストへ移した（Issue #188、`chatClaudeHandshake.test.ts`のL-18）。
 
 ### L-19 `@` によるファイル参照の補完
 
@@ -909,6 +937,11 @@ Claude CodeのTUIでの `/todos` に相当する専用表示。会話には積�
 ### L-24 コードレビューの起動（`/code-review`）
 
 Claude Codeには専用のメソッドが無く、実在するコマンド（実測で確認済み）を発言として送るだけ。
+「レビュー」ボタンが押されたふりをした発言が、QuickPickなどを経由せず`/code-review`という
+文字列のままCLIへ送られること（Codexの`/compact`のような擬似コマンドの割り振りが無いこと）は
+統合テストへ移した（Issue #188、`chatClaudeSettings.test.ts`）。ボタンの表示/非表示（コマンド
+一覧に無ければ隠す）と、実際にCLIが対話で対象を尋ねてレビューが実行される様子は画面の描画と
+モデルの応答が絡むため実機に残す。
 
 - 前提: コマンド一覧（`initialize` の応答）に `code-review` が含まれている版のCLIを使う
 - 操作: 入力欄の周りの「レビュー」ボタンを押す
@@ -984,6 +1017,12 @@ Claude Codeには専用のメソッドが無く、実在するコマンド（実
 **ファイルが実際に元へ戻る操作**。準備の「捨てフォルダ」で必ず行い、他のケースで使っている作業フォルダとは分けること（巻き戻すと会話中の編集内容が失われうるため）。
 
 **この機能は未文書化の環境変数に依存している**（`CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=1`。非対話環境ではこれを立てないとチェックポイントが作られず、巻き戻しが常に失敗する。CLIバイナリの `strings` 調査で見つけたもので、公式ドキュメントには無い。design.md参照）。**CLIを更新したら真っ先にこのケースを確認すること。** 変数が消えても会話は壊れず、`rewind_files` が失敗を返すだけになる。
+
+`rewind_files`の要求がスネークケースの`user_message_id` / `dry_run`で送られること、確認
+（dry_run:true）→適用（dry_run:false）の順で送ること、対象ファイルが無いプレビュー結果では
+確認ダイアログを出さないことは統合テストへ移した（Issue #188、`chatClaudeSettings.test.ts`）。
+**実際にファイルが元へ戻ること**は`CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`とファイル
+システムへの実書き込みが絡み、実CLIなしでは確かめようがないため引き続き実機に残す。
 
 - 操作: 会話の中で、Edit/Writeツールを使わせる指示を2ターン以上送り、それぞれ別のファイルを編集させる
 - 確認: 各ターンの**自分の発言**に「ここまで戻す」ボタンが出る
@@ -1131,7 +1170,10 @@ C-38のClaude Code版。操作とQuickPickの3択（コピー/保存/生テキ�
 
 ### L-39 行頭 `!` のシェルコマンド入力（Claude Code、issue #5）
 
-design.md §14.29参照。control_requestに専用の経路が無いため、統合ターミナルへ入力するだけで自動実行はしない。
+design.md §14.29参照。control_requestに専用の経路が無いため、統合ターミナルへ入力するだけで自動実行はしない。確認したときだけ統合ターミナルへ入力すること・取り消すと何も起きないこと・
+CLIへは一切送られないこと（トークンを消費しない）・同じ名前のターミナルが再利用されることは
+統合テストへ移した（Issue #188、`chatClaudeSettings.test.ts`）。入力欄下の案内表示は画面の
+描画のため実機に残す。
 
 - 操作: 入力欄に `!echo hello` と打つ（送信はまだしない）
 - 期待: 入力欄の下に「シェルコマンドとしてターミナルへ入力します: echo hello」の案内が出る
@@ -1147,7 +1189,9 @@ design.md §14.29参照。control_requestに専用の経路が無いため、統
 
 ### L-40 行頭 `#` のメモリ追記（Claude Code、issue #6/#144）
 
-design.md §14.29参照。control_requestに専用の経路が無いため、拡張機能がCLAUDE.mdへ直接追記する。issue #144で、読み込み失敗時の上書き破壊防止・シンボリックリンクの実体パス表示・候補の改善（workspaceFolderごと・既存/新規ラベル・前回選択の記憶）を追加した。
+design.md §14.29参照。control_requestに専用の経路が無いため、拡張機能がCLAUDE.mdへ直接追記する。issue #144で、読み込み失敗時の上書き破壊防止・シンボリックリンクの実体パス表示・候補の改善（workspaceFolderごと・既存/新規ラベル・前回選択の記憶）を追加した。QuickPickでの選択・確認を経てCLIへは送らずCLAUDE.mdへ直接追記されることは統合テストへ移した
+（Issue #188、`chatClaudeSettings.test.ts`）。入力欄下の案内表示・QuickPickの候補一覧の
+見え方・確認ダイアログの文面・会話へ残る通知行の中身は画面の描画のため実機に残す。
 
 - 操作: 入力欄に `#常にpnpmを使う` と打つ（送信はまだしない）
 - 期待: 入力欄の下に「メモリへ追記します: 常にpnpmを使う」の案内が出る
