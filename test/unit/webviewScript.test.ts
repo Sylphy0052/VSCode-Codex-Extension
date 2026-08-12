@@ -84,6 +84,13 @@ describe('chatScript', () => {
     expect(source.includes('outerHTML')).toBe(false);
     expect(source.includes('insertAdjacentHTML')).toBe(false);
   });
+
+  it('追加クレジット（issue #204）: 上限到達時にフッターから/usage-creditsを送る導線を含む', () => {
+    const source = chatScript('Claude Code', { mode: 'command', commandName: 'code-review' });
+    expect(source).toContain('usageCreditsLimited');
+    expect(source).toContain('formatExtraUsage');
+    expect(source).toContain("type: 'usageCreditsRequest'");
+  });
 });
 
 describe('controlPanelScript', () => {

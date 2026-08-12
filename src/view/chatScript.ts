@@ -1102,6 +1102,31 @@ export function chatScript(
       if (status.childNodes.length > 0) status.appendChild(document.createTextNode(' ・ '));
       status.appendChild(document.createTextNode(autocompact));
     }
+
+    // 追加クレジット（issue #204）。状態が取れているときは常に一言添える（受入基準
+    // 「追加クレジットの状態が画面から分かる」）。基本のusage（レート制限の消費率）とは
+    // 別の数字なので見出しを分ける
+    const extraUsageText = formatExtraUsage(state.extraUsage);
+    if (extraUsageText !== '') {
+      if (status.childNodes.length > 0) status.appendChild(document.createTextNode(' ・ '));
+      status.appendChild(document.createTextNode(extraUsageText));
+    }
+
+    // 上限に達している状態のときだけ、追加クレジットを要求する導線を出す（issue #204の
+    // スコープ「フッターの使用量表示から導線を出す」）。extraUsage自体が取れなくても、
+    // 既存のレート制限（state.usage.limited）が立っていれば導線だけは出す（受入基準
+    // 「取れない場合は根拠を残し、コマンド送信の導線だけを提供する」）
+    if (usageCreditsLimited(state)) {
+      if (status.childNodes.length > 0) status.appendChild(document.createTextNode(' ・ '));
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'secondary';
+      button.textContent = '追加クレジットを要求';
+      button.title = '上限に達しています。/usage-creditsを送って設定・管理者への要求ができます';
+      button.disabled = !!state.busy;
+      button.addEventListener('click', () => vscode.postMessage({ type: 'usageCreditsRequest' }));
+      status.appendChild(button);
+    }
   }
 
   /**
@@ -1113,6 +1138,36 @@ export function chatScript(
     if (win.mode === 'auto') return '自動圧縮 自動';
     if (typeof win.tokens === 'number') return '自動圧縮 ' + formatTokens(win.tokens);
     return '';
+  }
+
+  // 追加クレジット（usage credits）の表記（issue #204）。CLIが返すdisabled_reasonの
+  // うち、実測で確認できたものだけ日本語を当てる。未知の値はそのまま出す（増えても
+  // 表示が消えないようにするため）
+  const EXTRA_USAGE_DISABLED_REASON_LABEL = {
+    out_of_credits: 'クレジット切れ',
+  };
+
+  function formatExtraUsage(extraUsage) {
+    if (!extraUsage) return '';
+    if (extraUsage.isEnabled) {
+      return typeof extraUsage.utilization === 'number'
+        ? '追加クレジット ' + Math.round(extraUsage.utilization) + '%'
+        : '追加クレジット 有効';
+    }
+    const reason = extraUsage.disabledReason
+      ? EXTRA_USAGE_DISABLED_REASON_LABEL[extraUsage.disabledReason] || extraUsage.disabledReason
+      : '';
+    return '追加クレジット 無効' + (reason ? '（' + reason + '）' : '');
+  }
+
+  // フッターから追加クレジットの要求導線を出す条件（issue #204のスコープ「上限に達し
+  // ている状態のとき」）。基本プランのレート制限（five_hour/seven_day）到達か、追加
+  // クレジット自体の月次上限到達のどちらか。extraUsageが取れていなくても、既存の
+  // レート制限が立っていれば導線を出す（状態が取れない場合でも導線だけは残す）
+  function usageCreditsLimited(state) {
+    const rateLimited = !!(state.usage && state.usage.limited);
+    const spendLimitReached = !!(state.extraUsage && state.extraUsage.spendLimitReached);
+    return rateLimited || spendLimitReached;
   }
 
   // セッションのコスト（issue #37、/cost相当）。レート制限の消費率（usage）とも

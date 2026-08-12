@@ -2270,6 +2270,105 @@ issue #195の再抽出で見つかった機能。Claude Codeの`initialize`応�
 
 テストは`test/unit/claudeAutocompactText.test.ts`（`parseAutocompactReport`単体）・`test/unit/claudeStreamSessionAutocompact.test.ts`（`setAutocompactWindow()`単体）・`test/unit/claudeStreamJson.test.ts`（`<synthetic>`応答からの反映）・`test/unit/claudeChatViewManager.test.ts`（`autocompactWindow`メッセージの配線）で検証する。手動確認手順は`docs/manual-test.md`のL-44に追加する。
 
+### 14.38 Claude Code画面の追加クレジット（usage credits）の状態表示と要求（`/usage-credits`、issue #204、TP-92）
+
+issue #195の再抽出で見つかった機能。Claude Codeの`initialize`応答の`commands`一覧に`usage-credits`（`description: "Configure usage credits or request them from your admin when you hit a limit"`）と、改名済みの旧名`extra-usage`（`description: "Renamed to /usage-credits"`）が実在する。拡張機能は課金額とセッション分析（TP-60／#37）とレート制限の消費率（L-11）を表示しているが、**上限に達したときに人が取れる手（追加クレジットの確認・要求）が無かった**。
+
+#### 実測1: 現在値は既存の`get_usage`の応答に入っている（専用の制御要求は無い）
+
+issue #204のコメント（本体が事前実測。CLI 2.1.227）のとおり、`buildSessionCostRequest`が送る`get_usage`の応答（`readSessionCost`が読んでいるもの）に`rate_limits.extra_usage`として次の形が入っている。
+
+```json
+{
+  "is_enabled": false,
+  "monthly_limit": 4000,
+  "used_credits": 0,
+  "utilization": 0,
+  "currency": "USD",
+  "decimal_places": 2,
+  "disabled_reason": "out_of_credits",
+  "user_disabled": false,
+  "spend_limit_reached": false,
+  "credits_ever_enabled": true,
+  "daily": null,
+  "weekly": null
+}
+```
+
+`monthly_limit` / `used_credits`は`decimal_places`（実測では常に`2`）で割った実額（例の`4000`は`$40.00`）。`daily` / `weekly` / `user_disabled` / `credits_ever_enabled`はこの機能の対象外（基本のレート制限は既存の`ChatUsage`が別経路の`rate_limit_event`通知で持つため混同を避ける。導線の出し分けも`is_enabled` / `spend_limit_reached` / `disabled_reason`だけで足りる）。
+
+バイナリから`^(get|set)_[a-z_]*(credit|usage)[a-z_]*$`に一致するsubtypeを総当たり抽出しても`get_usage`と`get_context_usage`の2つしか無く、有効化・上限変更・管理者への要求を送る専用の制御要求は存在しない（issue #204のコメント）。つまり**現在値は追加の要求無しで取れるが、要求の操作は§14.34（`/import`）・§14.36（`/recap`）・§14.37（`/autocompact`）と同じくTUIと同じスラッシュコマンドを送るしかない**。
+
+#### 実測2: `usage-credits`はTTY専用UIと非対話用の2定義を持つ（`/import`と同じ形）
+
+バイナリの文字列解析（`strings`）で、このコマンド名には対話専用（`type:"local-jsx"`、`isEnabled` が非対話判定関数の否定、`requires:{ink:true}`）と非対話対応（`type:"local"`、`supportsNonInteractive:true`、`isEnabled`が非対話判定関数そのもの）の2つの定義が見つかった。§14.34の`/import`（`type:"local-jsx"`はTTY専用の対話UI、`type:"local"`は`supportsNonInteractive:true`）と全く同じ構造で、拡張機能のセッションは常に非対話（TTYを持たない`--print --input-format stream-json`）なので実際に使われるのは後者になる。
+
+同じ解析で次の文字列も見つかっている。
+
+```text
+Requesting usage credits notifies your organization admins. To review and send the
+request, run /usage-credits in an interactive Claude Code session.
+```
+
+これは「管理者への通知は対話セッションでのみ起きる」と読める一文で、実測3の結果と整合する。
+
+#### 実測3: 非対話セッションで`/usage-credits`を送ると、常に固定の1文（URL案内）が返る
+
+`buildUserMessage('/usage-credits')`と同じ形（引数無し）を、この環境（追加クレジット無効・`disabled_reason: "out_of_credits"`の状態）で実際に送って実測した（**課金される操作・管理者への実要求は行っていない**。引数無しの単純な送信のみ）。
+
+- `assistant`発言が1件返る。`model`が`"<synthetic>"`、`stop_reason`が`"stop_sequence"`で、`total_cost_usd`は送信前後で変化しない（無償）
+- 本文は常に次の1文だけ: `Visit https://claude.ai/settings/usage?from=cc_cli_limit_message to manage usage credits.`
+- `/recap`（§14.36）のような会話内容に応じた自然文の揺れは無く、`/autocompact`（§14.37）と同じく`<synthetic>`かつ無償だが、`/autocompact`のように状態（`auto`／`<N>k tokens`）に応じて文言が変わることも無い
+
+実測1・2と合わせると、**この拡張機能（常に非対話）から`/usage-credits`を送っても、実際に管理者への要求やクレジットの購入・上限変更は起きず、対話セッションで設定するよう促すURLが返るだけ**という見立てになる。有効化・購入・上限変更・管理者への要求を選ばせるink UI（実測2）はTTY専用で、非対話のこの拡張機能からはそもそも到達できないとみられる。
+
+ただし実測3は**この環境の1状態（追加クレジット無効・`out_of_credits`）だけ**であり、有効時や他の`disabled_reason`、CLIの将来の更新で挙動が変わらない保証は無い（「実測できないことを実測したふりで書かない」の裏返し）。
+
+#### 設計判断1: 応答は固定書式だが、パースしない
+
+`/autocompact`（§14.37）は固定書式のため状態（`autocompactWindow`）へパースして画面へ反映したが、`/usage-credits`の応答は次の理由でパースしない。
+
+1. **文言そのものにバリエーションが無い**（実測3のとおり常に同一文）ため、パースしても構造化された「値」が得られない（URL文字列以外に読み取るものが無い）
+2. 会話へそのまま残るテキストとして表示すれば、ユーザーはURLをそのまま読める（`/import` `/recap`と同じ「会話に残す」扱いで十分）
+3. 実測3のとおり実測できたのは1状態だけで、他の状態で文言が変わる可能性を否定できない。パース処理を作ると、CLIが将来違う文言を返したときに黙って壊れる経路を増やすだけになる
+
+#### 設計判断2: 現在値が分からなくても、レート制限到達を根拠に導線は出す
+
+受入基準「追加クレジットの状態が画面から分かる（取れない場合は根拠を残し、コマンド送信の導線だけを提供する）」を満たすため、フッターの導線（`usageCreditsLimited`）は次のどちらかが成り立てば出す。
+
+- `state.usage.limited`（既存のレート制限。`rate_limit_event`通知由来。issue本文が挙げる「消費率100%」の状態そのもの）
+- `state.extraUsage.spendLimitReached`（追加クレジット自体の月次上限到達）
+
+`extraUsage`自体が`undefined`（組織が対応しない・古いCLI・まだ`get_usage`へ問い合わせていない）でも、`state.usage.limited`が立っていれば導線は出る。「取れない場合でも導線だけは出す」という受入基準をこの2条件のORで満たす。
+
+#### 設計判断3: 応答が固定書式でも、確認ダイアログは省かない
+
+`/recap`・`/autocompact`は壊れる・戻せない操作ではないため確認ダイアログを挟まなかったが、`/usage-credits`は`/import`と同じく確認ダイアログを挟む（issue本文の指定）。実測3の結果だけを見れば「URLを返すだけで何も起きない」ため確認を省く選択肢もあったが、次の理由で安全側に倒した。
+
+1. コマンド自体の説明文が`"...or request them from your admin..."`と、CLIの語彙で明確に「管理者への要求」を挙げている
+2. 実測3で確認できたのは1状態だけで、有効時や別の`disabled_reason`で挙動が変わらない保証が無い（設計判断1と同じ理由）
+3. `/import`（§14.34）も実際には書き込みが起きない1段目の呼び出しに確認を挟んでおり、「外部・他者へ影響しうる語彙を持つ操作には呼び出し側で必ず確認する」という既存の一貫した方針に揃えたほうが、CLIの将来の更新に対しても崩れにくい
+
+確認ダイアログの文面（`confirmUsageCreditsRequest`）には、実測3の見立て（実際には管理ページのURLが返るだけの見込み）と、将来変わりうる可能性の両方を書く。
+
+#### 実装
+
+- `src/appserver/chatState.ts`: `ExtraUsageView`（`{isEnabled, monthlyLimit, usedCredits, utilization, currency, disabledReason, spendLimitReached}`）と、`ChatState.extraUsage?: ExtraUsageView`を追加（Claude Codeのみ。`sessionCost`と同じ`get_usage`の応答から作る）
+- `src/claude/control.ts`: `readExtraUsage(payload)`を追加。`rate_limits.extra_usage`を読み、`decimal_places`で金額を実額へ変換する（変換できなければ`monthlyLimit`は`undefined`、`usedCredits`は`totalLinesAdded`等と同じく0扱い）
+- `src/claude/streamSession.ts`: `ClaudeStreamSession.requestUsageCredits()`を追加。`compact` `importConfig` `recap`と同じく`buildUserMessage('/usage-credits')`を書き込むだけ。`handleControlResponse`の`sessionCost`分岐に相乗りし、同じ応答から`readExtraUsage`も読んで`state.extraUsage`へ反映する（専用の制御要求を増やさない）
+- `src/view/chatView.ts`: `confirmUsageCreditsRequest()`を追加（`confirmClaudeImport`と同じ形の`showWarningMessage`）
+- `src/view/claudeChatView.ts`: `handleMessage`に`usageCreditsRequest`分岐を追加し、`confirmUsageCreditsRequest()`で確認してから`session.requestUsageCredits()`を呼ぶ`requestUsageCredits()`メソッドを追加
+- `src/view/chatScript.ts`: `renderStatus`のフッターへ、`extraUsage`が取れていれば常に一言（`formatExtraUsage`。例:「追加クレジット 無効（クレジット切れ）」「追加クレジット 12%」）を添え、`usageCreditsLimited(state)`が真のときだけ「追加クレジットを要求」ボタンを追加で出す。押すと`{type: 'usageCreditsRequest'}`を送る。応答中は無効化する（`compact` `claudeImport`と同じ扱い）
+- `src/view/chatStyles.ts`: `#status button`にフッターの文言へ馴染む小さめのスタイルを追加
+
+#### スコープ外にしたもの
+
+- **応答の構造化・パース**: 設計判断1のとおり、常に同一文でパースしても値が増えないため
+- **タブ名・履歴の表示名への反映**: §14.36で見送った話と同じで、そもそもこの機能に該当する概念が無い
+- **有効化・購入・上限変更の直接操作**: 実測2のとおりink UI（TTY専用）でしか到達できない。拡張機能から送れるのは「送る」ボタン1つ（`/usage-credits`）だけで、実際の設定操作はCLIが返すURLから対話セッションかブラウザで行う
+
+テストは`test/unit/claudeControl.test.ts`（`readExtraUsage`単体）・`test/unit/claudeStreamSessionUsageCredits.test.ts`（`requestUsageCredits()`単体、`get_usage`応答からの`extraUsage`反映）・`test/unit/claudeChatViewManager.test.ts`（`usageCreditsRequest`メッセージの配線と確認ダイアログ）・`test/unit/webviewScript.test.ts`（フッターの導線マーカー）で検証する。手動確認手順は`docs/manual-test.md`のL-45に追加する。
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）

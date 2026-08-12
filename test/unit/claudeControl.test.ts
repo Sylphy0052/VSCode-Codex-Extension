@@ -21,6 +21,7 @@ import {
   readCommandsChanged,
   readContextUsage,
   readCurrentPermissionMode,
+  readExtraUsage,
   readFastModeState,
   readControlRequest,
   readControlResponse,
@@ -236,6 +237,86 @@ describe('readSessionCost', () => {
   it('コストが読めない応答では何も返さない', () => {
     expect(readSessionCost(undefined, 1000)).toBeUndefined();
     expect(readSessionCost({}, 1000)).toBeUndefined();
+  });
+});
+
+describe('readExtraUsage（issue #204）', () => {
+  it('get_usage の応答（rate_limits.extra_usage）から追加クレジットの状態を読む', () => {
+    // issue #204のコメントに載っている実測値（CLI 2.1.227）そのまま
+    const payload = {
+      rate_limits: {
+        extra_usage: {
+          is_enabled: false,
+          monthly_limit: 4000,
+          used_credits: 0,
+          utilization: 0,
+          currency: 'USD',
+          decimal_places: 2,
+          disabled_reason: 'out_of_credits',
+          user_disabled: false,
+          spend_limit_reached: false,
+          credits_ever_enabled: true,
+          daily: null,
+          weekly: null,
+        },
+      },
+    };
+    expect(readExtraUsage(payload)).toEqual({
+      isEnabled: false,
+      monthlyLimit: 40,
+      usedCredits: 0,
+      utilization: 0,
+      currency: 'USD',
+      disabledReason: 'out_of_credits',
+      spendLimitReached: false,
+    });
+  });
+
+  it('有効時は上限到達フラグと消費率をそのまま読む', () => {
+    const payload = {
+      rate_limits: {
+        extra_usage: {
+          is_enabled: true,
+          monthly_limit: 10000,
+          used_credits: 10000,
+          utilization: 100,
+          currency: 'USD',
+          decimal_places: 2,
+          disabled_reason: null,
+          user_disabled: false,
+          spend_limit_reached: true,
+          credits_ever_enabled: true,
+        },
+      },
+    };
+    expect(readExtraUsage(payload)).toEqual({
+      isEnabled: true,
+      monthlyLimit: 100,
+      usedCredits: 100,
+      utilization: 100,
+      currency: 'USD',
+      disabledReason: undefined,
+      spendLimitReached: true,
+    });
+  });
+
+  it('decimal_placesが読めないときは金額を作らない（0円と決め付けない）', () => {
+    const payload = {
+      rate_limits: {
+        extra_usage: { is_enabled: false, monthly_limit: 4000, used_credits: 500 },
+      },
+    };
+    const result = readExtraUsage(payload);
+    expect(result?.monthlyLimit).toBeUndefined();
+    // usedCreditsは他の数値項目（totalLinesAdded等）と同じく0扱いにする
+    expect(result?.usedCredits).toBe(0);
+  });
+
+  it('rate_limits.extra_usage自体が無ければ何も返さない（組織が対応しない・古いCLI）', () => {
+    expect(readExtraUsage(undefined)).toBeUndefined();
+    expect(readExtraUsage({})).toBeUndefined();
+    expect(readExtraUsage({ rate_limits: {} })).toBeUndefined();
+    expect(readExtraUsage({ rate_limits: { extra_usage: {} } })).toBeUndefined();
   });
 });
 

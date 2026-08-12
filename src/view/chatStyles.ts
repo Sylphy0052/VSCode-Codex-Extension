@@ -297,6 +297,12 @@ export function chatStyles(): string {
     color: var(--vscode-inputValidation-warningForeground, var(--vscode-editorWarning-foreground));
     font-weight: 600;
   }
+  /* 追加クレジットの要求ボタン（issue #204）。フッターの文言に混ぜて出すため小さく揃える */
+  #status button {
+    padding: 1px 8px;
+    font-size: 1em;
+    vertical-align: baseline;
+  }
   /*
    * TODO一覧（Claude CodeのTodoWrite）。入力欄の上、ループ・コンテキスト表示と同じ並びに置く。
    * 会話には積まず、ここだけが書き変わる。
