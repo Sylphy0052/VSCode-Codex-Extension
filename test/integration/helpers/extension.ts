@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import type { AppServerConnectionPortLike, FakeClaudeProcess } from './chat';
 import type { WorkflowTestApiLike } from './workflow';
 
 export const EXTENSION_ID = 'Sylphy0052.vscode-codex-extension';
@@ -36,6 +37,32 @@ export interface ExtensionTestApi {
    * 立っているときだけ実体が入る（`src/extension.ts` の `WorkflowTestApi`、Issue #158）。
    */
   readonly workflow?: WorkflowTestApiLike;
+  /**
+   * チャット画面用の口。`workflow` と同じく `AGENT_SESSIONS_INTEGRATION_TEST=1` が
+   * 立っているときだけ実体が入る（`src/extension.ts` の `ChatTestApi`、Issue #186）。
+   */
+  readonly chat?: ChatTestApiLike;
+}
+
+/** `ChatTestApi`（`src/extension.ts`）と構造互換な口。 */
+export interface ChatTestApiLike {
+  setCodexConnection(
+    factory:
+      | ((
+          onNotification: (method: string, params: Record<string, unknown>) => void,
+          onServerRequest: (request: unknown) => Promise<unknown>,
+        ) => AppServerConnectionPortLike)
+      | undefined,
+  ): void;
+  setClaudeSpawn(
+    spawn:
+      | ((
+          command: string,
+          args: readonly string[],
+          options: { cwd: string; env: NodeJS.ProcessEnv },
+        ) => FakeClaudeProcess)
+      | undefined,
+  ): void;
 }
 
 /** 拡張機能を（未活性なら）有効化し、テスト用APIを返す。 */
