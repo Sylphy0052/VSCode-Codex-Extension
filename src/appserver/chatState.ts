@@ -264,6 +264,39 @@ export interface SessionCostView {
   capturedAt: number;
 }
 
+/**
+ * 追加クレジット（usage credits）の状態（issue #204、design.md §14.38）。Claude Codeのみが
+ * 持つ概念。基本プランのレート制限（`ChatUsage`）を使い切ったときに、追加で使える有償
+ * クレジットの設定・消費状況を表す。
+ *
+ * `sessionCost`と同じ`get_usage` control requestの応答（`rate_limits.extra_usage`）から
+ * 作る（`src/claude/control.ts` の `readExtraUsage` を参照）。組織が対応しない・古いCLIでは
+ * `rate_limits.extra_usage` 自体が応答に無く、その場合は `ChatState.extraUsage` ごと
+ * `undefined` になる（画面は表示・導線ごと出さない。「無効」と決め付けない）。
+ */
+export interface ExtraUsageView {
+  /** 追加クレジットが有効か。 */
+  isEnabled: boolean;
+  /**
+   * 月次の上限額（`currency`建ての実額。応答の`decimal_places`で割った値）。
+   * 上限が読めない場合は `undefined`（0円と決め付けない）。
+   */
+  monthlyLimit: number | undefined;
+  /** 今月使った額（`monthlyLimit`と同じ単位）。読めない場合は0扱い（`totalLinesAdded`等と同じ丸め方）。 */
+  usedCredits: number;
+  /** 消費率（0-100の整数）。CLIが返さない場合は `undefined`。 */
+  utilization: number | undefined;
+  /** 通貨コード（例: `'USD'`）。 */
+  currency: string | undefined;
+  /**
+   * 無効になっている理由（例: `'out_of_credits'`）。CLIの語彙をそのまま持ち、
+   * 訳語は表示側（`chatScript.ts`）で当てる。
+   */
+  disabledReason: string | undefined;
+  /** 月次の上限に達しているか。フッターの導線を出す条件の一つ（issue #204の受入基準）。 */
+  spendLimitReached: boolean;
+}
+
 export interface ChatState {
   threadId: string | undefined;
   /** Codexが会話内容から付ける要約名。ユーザーが変更することもできる。 */
@@ -303,6 +336,14 @@ export interface ChatState {
    * セッションのコスト（Claude Codeのみ）。まだ判らない間・Codexのセッションでは undefined。
    */
   sessionCost: SessionCostView | undefined;
+  /**
+   * 追加クレジット（usage credits）の状態（Claude Codeのみ、issue #204、design.md §14.38）。
+   *
+   * `sessionCost`と同じく`get_usage`の応答から作る（同じ要求への同じ応答なので、追加の
+   * control requestは要らない）。対応しない・まだ問い合わせていない間・Codexのセッション
+   * では `undefined` で、画面は追加クレジットの表示・導線ごと出さない。
+   */
+  extraUsage?: ExtraUsageView | undefined;
   /**
    * Plan mode（読み取りだけに絞って計画を立てる状態）か。
    *

@@ -2,6 +2,7 @@ import type { ApprovalDecision } from '../appserver/approvals';
 import {
   buildContextUsage,
   type ContextUsage,
+  type ExtraUsageView,
   type PendingApproval,
   type SessionCostView,
 } from '../appserver/chatState';
@@ -440,6 +441,55 @@ export function buildSessionCostRequest(requestId: string): string {
 /** `get_usage` の応答からセッションのコストを読む。中身の詳細は `costText.ts` を参照。 */
 export function readSessionCost(payload: unknown, capturedAt: number): SessionCostView | undefined {
   return parseSessionCost(payload, capturedAt);
+}
+
+/**
+ * `get_usage` の応答から追加クレジット（usage credits）の状態を読む
+ * （issue #204、design.md §14.38）。
+ *
+ * `readSessionCost` と同じ応答（`buildSessionCostRequest`で送る）を読む。実測
+ * （CLI 2.1.227）した形: `rate_limits.extra_usage` に
+ * `{is_enabled, monthly_limit, used_credits, utilization, currency, decimal_places,
+ *   disabled_reason, user_disabled, spend_limit_reached, credits_ever_enabled,
+ *   daily, weekly}`。`daily`/`weekly`と`user_disabled`/`credits_ever_enabled`は
+ * この機能の対象外（基本のレート制限は既存の`ChatUsage`が別経路(`rate_limit_event`)で
+ * 持つ。混同を避けるため読まない。導線の出し分けは`is_enabled`/`spend_limit_reached`/
+ * `disabled_reason`だけで足りるため増やさない）。
+ *
+ * `monthly_limit`/`used_credits`は`decimal_places`（実測では常に2）で割った実額に
+ * 変換する。桁数が読めない場合はどちらの値も信用できないため`monthlyLimit`は
+ * `undefined`（作った数字を出さない）、`usedCredits`は他の数値項目
+ * （`parseSessionCost`の`totalLinesAdded`等）と同じく0扱いにする。
+ *
+ * `rate_limits.extra_usage`自体が無い（組織が対応しない・古いCLI）場合は`undefined`を
+ * 返し、画面は追加クレジットの表示・導線ごと出さない。
+ */
+export function readExtraUsage(payload: unknown): ExtraUsageView | undefined {
+  const e = rec(rec(rec(payload)?.['rate_limits'])?.['extra_usage']);
+  const isEnabled = e?.['is_enabled'];
+  if (e === undefined || typeof isEnabled !== 'boolean') {
+    return undefined;
+  }
+
+  const decimalPlaces = num(e['decimal_places']);
+  const scale =
+    decimalPlaces !== undefined && Number.isInteger(decimalPlaces) && decimalPlaces >= 0
+      ? 10 ** decimalPlaces
+      : undefined;
+  const toAmount = (raw: unknown): number | undefined => {
+    const value = num(raw);
+    return value === undefined || scale === undefined ? undefined : value / scale;
+  };
+
+  return {
+    isEnabled,
+    monthlyLimit: toAmount(e['monthly_limit']),
+    usedCredits: toAmount(e['used_credits']) ?? 0,
+    utilization: num(e['utilization']),
+    currency: strOrUndefined(e['currency']),
+    disabledReason: strOrUndefined(e['disabled_reason']),
+    spendLimitReached: e['spend_limit_reached'] === true,
+  };
 }
 
 /**

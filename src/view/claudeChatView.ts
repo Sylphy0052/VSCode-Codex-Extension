@@ -33,6 +33,7 @@ import {
   confirmRewindFiles,
   confirmRunShellCommand,
   confirmStopBackgroundTask,
+  confirmUsageCreditsRequest,
   postFileMentions,
   postImageData,
   renderShell,
@@ -953,6 +954,10 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         void this.importConfig(entry);
         return;
       }
+      if (type === 'usageCreditsRequest') {
+        void this.requestUsageCredits(entry);
+        return;
+      }
       if (type === 'recap') {
         this.recap(entry);
         return;
@@ -1068,6 +1073,28 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       // compactと同じく新しいターンを起こす。ループの指示と重ならないよう割り込み扱いにする
       entry.loop.noteUserAction();
       entry.session.importConfig();
+    } catch (e) {
+      this.reportError(e);
+    }
+  }
+
+  /**
+   * 追加クレジット（usage credits）の設定・管理者への要求を送る
+   * （issue #204、design.md §14.38）。
+   *
+   * `importConfig`と同じく外部（組織の管理者）へ影響しうる操作のため、必ず確認してから
+   * 送る（`streamSession.ts` の `requestUsageCredits` 参照。実測ではこの拡張機能からの
+   * 送信は管理ページへのURLを返すだけの見込みだが、安全側に倒して確認は省かない）。
+   */
+  private async requestUsageCredits(entry: ClaudePanel): Promise<void> {
+    if (!(await confirmUsageCreditsRequest())) {
+      return;
+    }
+    try {
+      // compact/importConfigと同じく新しいターンを起こす。ループの指示と重ならないよう
+      // 割り込み扱いにする
+      entry.loop.noteUserAction();
+      entry.session.requestUsageCredits();
     } catch (e) {
       this.reportError(e);
     }

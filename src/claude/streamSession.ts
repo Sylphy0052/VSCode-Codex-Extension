@@ -40,6 +40,7 @@ import {
   readCurrentPermissionMode,
   readControlRequest,
   readControlResponse,
+  readExtraUsage,
   readMcpServersList,
   readRewindFilesResult,
   readSessionCost,
@@ -387,6 +388,9 @@ export class ClaudeStreamSession {
    * `refreshContext` と同じ作りで別のフィールド（`sessionCost`）へ持つ。会話へ `/cost` を
    * 送ると応答が会話に混ざるため、control protocolで聞く。応答が返らなくても会話は
    * 続けられるので、失敗は黙って見送る。
+   *
+   * 追加クレジット（`extraUsage`、issue #204）も同じ応答（`rate_limits.extra_usage`）から
+   * 読めるため、専用の要求は足さずここに相乗りする（`handleControlResponse`参照）。
    */
   refreshSessionCost(): void {
     // 応答を返さないCLIでは要求が返らない。返事待ちを1件までにして積み上がりを防ぐ
@@ -457,6 +461,49 @@ export class ClaudeStreamSession {
     }
     this.update({ ...this.state, busy: true, turnFailed: false });
     this.write(buildUserMessage('/import'));
+  }
+
+  /**
+   * 追加クレジット（usage credits）の設定・管理者への要求を扱う
+   * （issue #204、design.md §14.38）。
+   *
+   * **経路の実測（CLI 2.1.227）**: 現在値は専用の制御要求を足さなくても取れる
+   * （`get_usage`の応答の`rate_limits.extra_usage`。`refreshSessionCost`/`readExtraUsage`
+   * 参照）。一方で要求（有効化・上限変更・管理者への要求）を送る専用の制御要求は無く
+   * （`^(get|set)_[a-z_]*(credit|usage)[a-z_]*$`に一致するsubtypeは`get_usage`と
+   * `get_context_usage`の2つだけ。issue #204のコメントの実測）、`compact` / `import` /
+   * `recap`と同じくTUIと同じ`/usage-credits`をユーザー発言として送るのが唯一の経路。
+   *
+   * バイナリの文字列解析で、この名前のコマンドには**対話専用**（`type:"local-jsx"`、
+   * `requires:{ink:true}`）と**非対話対応**（`type:"local"`、
+   * `supportsNonInteractive:true`）の2つの定義があると分かった（`/import`と同じ形）。
+   * 拡張機能のセッションは常に非対話（TTY無し）なので、実際に使われるのは後者。
+   *
+   * 実際にこの環境で引数無しの`/usage-credits`を送って実測した結果、CLIは実モデルを
+   * 呼ばず（`model`が`"<synthetic>"`、`total_cost_usd`が増えない＝無償）、常に
+   * 「Visit https://claude.ai/settings/usage?from=cc_cli_limit_message to manage
+   * usage credits.」という**固定の1文**を返した。バイナリ側にも「Requesting usage
+   * credits notifies your organization admins. To review and send the request, run
+   * /usage-credits in an interactive Claude Code session.」という文字列があり、
+   * 実際に管理者へ通知する対話フロー（クレジットの購入・上限変更・管理者への要求の
+   * 選択肢を出すink UI）はTTY専用で、非対話のこの拡張機能からは**そもそも到達できない**
+   * と読める。つまりこの呼び出しは、いまの状態に関わらず**外部（組織の管理者）への
+   * 通知は起こさず**、対話セッションで設定するよう促すURLを返すだけの見込みが高い。
+   *
+   * ただし実測できたのはこの環境の1状態（追加クレジット無効・`out_of_credits`）だけで、
+   * 有効時や他の`disabled_reason`で挙動が変わらない保証はない。応答が固定書式であっても
+   * 「管理者への要求を伴いうる操作」として扱い、呼び出し側の確認ダイアログは省かない
+   * （design.mdの「実測できないことを実測したふりで書かない」の裏返しとして、安全側に
+   * 倒す）。応答は`/import` / `/recap`と同じく会話へそのまま残るテキストで、構造化
+   * JSONではないため機械的にはパースしない（この1文自体はURL以外に読み取る値が無く、
+   * パースしても得るものが無い）。
+   */
+  requestUsageCredits(): void {
+    if (this.proc === undefined) {
+      throw new Error('セッションが起動していません');
+    }
+    this.update({ ...this.state, busy: true, turnFailed: false });
+    this.write(buildUserMessage('/usage-credits'));
   }
 
   /**
@@ -796,8 +843,15 @@ export class ClaudeStreamSession {
 
     if (outgoing?.kind === 'sessionCost') {
       const sessionCost = readSessionCost(response.payload, Date.now());
-      if (sessionCost !== undefined) {
-        this.update({ ...this.state, sessionCost });
+      // 追加クレジット（issue #204）も同じ応答（`rate_limits.extra_usage`）から読む。
+      // 別の制御要求を足す必要が無いため、`sessionCost`の応答待ちにそのまま相乗りする
+      const extraUsage = readExtraUsage(response.payload);
+      if (sessionCost !== undefined || extraUsage !== undefined) {
+        this.update({
+          ...this.state,
+          sessionCost: sessionCost ?? this.state.sessionCost,
+          extraUsage: extraUsage ?? this.state.extraUsage,
+        });
       }
       return;
     }

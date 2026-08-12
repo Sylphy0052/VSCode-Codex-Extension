@@ -934,6 +934,72 @@ describe('ClaudeChatViewManagerの他エージェント設定インポート（i
 });
 
 /**
+ * 追加クレジット（usage credits）の要求（issue #204、design.md §14.38）。
+ *
+ * `/usage-credits`は「管理者への要求」を伴いうるためimportConfigと同じく確認ダイアログを
+ * 挟む（`streamSession.ts`の`requestUsageCredits`のJSDoc参照）。ここでは「確認してから
+ * 送る」ことと「取り消したら何も送らない」ことを検証する。
+ */
+describe('ClaudeChatViewManagerの追加クレジット要求（issue #204）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+  });
+
+  async function openPanel(manager: ClaudeChatViewManager): Promise<FakeWebviewPanel | undefined> {
+    await manager.openNew('/workspace/root');
+    return __mock.lastCreatedPanel();
+  }
+
+  it('確認ダイアログを経てから/usage-creditsを送る', async () => {
+    const { sessions } = stubStartCapturing();
+    const { manager } = createManager();
+    const panel = await openPanel(manager);
+    const session = sessions[0];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    const written: string[] = [];
+    (
+      session as unknown as {
+        proc: {
+          killed: boolean;
+          stdin: { write: (line: string) => void; destroyed: boolean; writable: boolean };
+        };
+      }
+    ).proc = {
+      killed: false,
+      stdin: { write: (line) => written.push(line), destroyed: false, writable: true },
+    };
+
+    panel?.webview.simulateMessage({ type: 'usageCreditsRequest' });
+    await flush();
+
+    expect(__mock.messages.warnings).toHaveLength(1);
+    expect(__mock.messages.warnings[0]).toContain('usage-credits');
+    expect(written).toHaveLength(1);
+    expect(JSON.parse(written[0]!.trim())).toEqual({
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text: '/usage-credits' }] },
+    });
+  });
+
+  it('確認ダイアログをキャンセルすると何も送らない', async () => {
+    stubStart();
+    const { manager } = createManager();
+    const panel = await openPanel(manager);
+    __mock.showWarningMessageAnswer = undefined;
+
+    panel?.webview.simulateMessage({ type: 'usageCreditsRequest' });
+    await flush();
+
+    // キャンセル時はrequestUsageCredits()自体を呼ばないため、未起動セッションでもエラーにならない
+    expect(__mock.messages.errors).toEqual([]);
+  });
+});
+
+/**
  * 会話の1行要約（issue #203、design.md §14.36）。
  *
  * compact/importConfigと違って会話を壊したり書き込みが起きたりしないため、確認ダイアログを

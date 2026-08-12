@@ -216,6 +216,29 @@ export async function confirmClaudeImport(): Promise<boolean> {
 }
 
 /**
+ * 追加クレジット（usage credits）の設定・管理者への要求を送ってよいか確かめる
+ * （issue #204、design.md §14.38。Claude Code画面のみ）。
+ *
+ * 実測（`streamSession.ts` の `requestUsageCredits` 参照）では、この拡張機能の
+ * 非対話セッションから送ると常に管理ページのURLを返すだけの固定文になり、組織の
+ * 管理者への通知はCLIの対話セッションでしか起きないと見られる。ただしこれは1状態
+ * （追加クレジット無効）だけの実測で、有効時や他の理由で挙動が変わらない保証は無い。
+ * `/usage-credits`というコマンド自体がCLIの語彙で「管理者への要求」を明言している
+ * ため、`confirmClaudeImport`と同じく安全側に倒して必ず確認を挟む。
+ */
+export async function confirmUsageCreditsRequest(): Promise<boolean> {
+  const choice = await vscode.window.showWarningMessage(
+    '追加クレジットの設定・管理者への要求（/usage-credits）を送ります。\n\n' +
+      'この拡張機能からの送信は対話操作ができないため、実際には管理ページを開くための' +
+      'リンクが会話に返るだけの見込みです。ただし将来のCLIの更新やアカウントの状態に' +
+      'よっては、この操作が組織の管理者に通知される可能性があります。',
+    { modal: true },
+    '送る',
+  );
+  return choice === '送る';
+}
+
+/**
  * AGENTS.mdの生成（`/init` 擬似コマンド、issue #26）で、既存ファイルを上書きしてよいか
  * 確かめる。ファイルが無いときは呼ばない。`confirmCompact` と同じく必ず確認を挟む
  * （生成そのものはCLI・モデルに任せるが、上書きの可否は拡張機能側で必ず止める）。
