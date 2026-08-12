@@ -47,6 +47,11 @@ export interface TaskSessionLike {
 /** `TaskSessionInput` のうちフェイクが見る項目。 */
 export interface TaskSessionInputLike {
   cwd: string;
+  /**
+   * タスク間メッセージング（design.md §16.21、Issue #171）用のMCPサーバへの接続先。
+   * runごとに立つサーバから、タスクごとに発行されたURLが渡る。
+   */
+  mcp?: { url: string };
 }
 
 /** `TaskSessionHost` と構造互換な最小の口。 */
@@ -66,6 +71,11 @@ export class FakeTaskSession implements TaskSessionLike {
   interruptCount = 0;
   pauseLoopCount = 0;
   setApprovalHandlerCount = 0;
+  /** `checkMessagingToolVisible` の戻り値（テストから変える）。 */
+  messagingToolVisible = true;
+  /** タスクへ渡されたMCPサーバの接続先（`TaskSessionInput.mcp`）。 */
+  mcpUrl: string | undefined;
+  private promptTransform: ((text: string) => string) | undefined;
   resumeLoopCount = 0;
   revealCount = 0;
   openCount = 0;
@@ -83,7 +93,19 @@ export class FakeTaskSession implements TaskSessionLike {
   runLoop(plan: unknown): void {
     this.runLoopCalls.push(plan);
   }
-  setPromptTransform(): void {}
+  /**
+   * 次の指示へ手を入れる差し込み口。タスク間メッセージング（design.md §16.21）では
+   * 届いたメッセージをここで添える（`composeNextPrompt`）ため、テストから呼べるように
+   * 実物と同じく保持する。
+   */
+  setPromptTransform(transform: (text: string) => string): void {
+    this.promptTransform = transform;
+  }
+
+  /** `setPromptTransform` で受け取った変換を通した結果（届いたメッセージが添えられる）。 */
+  transformPrompt(text: string): string {
+    return this.promptTransform?.(text) ?? text;
+  }
   onFinished(listener: (reason: string, state: ChatStateLike) => void): void {
     this.finishedListeners.push(listener);
   }
@@ -108,8 +130,12 @@ export class FakeTaskSession implements TaskSessionLike {
   resumeLoop(): void {
     this.resumeLoopCount += 1;
   }
+  /**
+   * ワークフロー用MCPサーバのツールがCLIから見えているか。design.md §16.21「見えて
+   * いなければ警告を出し、通信なしで走らせる」の経路をテストから作れるようにする。
+   */
   checkMessagingToolVisible(): Promise<boolean> {
-    return Promise.resolve(true);
+    return Promise.resolve(this.messagingToolVisible);
   }
   /**
    * 「タスク停止」操作の実体。実物（`ChatViewManager`）はループを止め、
@@ -169,6 +195,7 @@ export class FakeTaskSessionHost implements TaskSessionHostLike {
   openTaskSession(input: TaskSessionInputLike): Promise<TaskSessionLike> {
     this.counter += 1;
     const session = new FakeTaskSession(input.cwd, this.counter);
+    session.mcpUrl = input.mcp?.url;
     this.sessions.push(session);
     return Promise.resolve(session);
   }
