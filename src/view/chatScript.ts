@@ -952,6 +952,10 @@ export function chatScript(
     // 自動圧縮の確認・変更も新しいターンを起こす（Claude Code画面のみ、issue #201）
     const autocompactApplyButton = el('autocompactApply');
     if (autocompactApplyButton) autocompactApplyButton.disabled = !!state.busy;
+    // /debugでの診断も新しいターンを起こす（Claude Code画面のみ、issue #205）。
+    // 「デバッグログを開く」はCLIへ何も送らないローカル操作のため、応答中でも押せてよい
+    const sendDebugCommandButton = el('sendDebugCommand');
+    if (sendDebugCommandButton) sendDebugCommandButton.disabled = !!state.busy;
     applyPlanMode(state.planMode);
     applyFastMode(state);
     renderAttachments(state.attachments);
@@ -1546,6 +1550,23 @@ export function chatScript(
       const input = el('autocompactInput');
       vscode.postMessage({ type: 'autocompactWindow', window: input ? input.value : '' });
     });
+  }
+  // CLI側のデバッグログ（issue #205）。Codex画面には要素ごと無い（showDebugがfalseだと
+  // 設定行に描画されない）ため、自動圧縮と同じくnullを許して素通しする。
+  // 「デバッグログを開く」はCLIへ何も送らないため確認は無く、押すとそのまま拡張機能側へ
+  // 依頼する（実際にファイルを開けるかは拡張機能側で判定する）。「/debugで診断」は実モデルが
+  // 動き課金されるため、拡張機能側で確認してから送る
+  const openDebugLogButton = el('openDebugLog');
+  if (openDebugLogButton) {
+    openDebugLogButton.addEventListener('click', () =>
+      vscode.postMessage({ type: 'openDebugLog' }),
+    );
+  }
+  const sendDebugCommandButton = el('sendDebugCommand');
+  if (sendDebugCommandButton) {
+    sendDebugCommandButton.addEventListener('click', () =>
+      vscode.postMessage({ type: 'debugCommand' }),
+    );
   }
   // 見た目は状態が返ってきてから変える。押した瞬間に変えると、失敗したとき嘘になる
   el('planToggle').addEventListener('click', () =>

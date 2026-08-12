@@ -507,6 +507,45 @@ export class ClaudeStreamSession {
   }
 
   /**
+   * CLI側のデバッグログを実モデルに読ませて診断させる（`/debug`、issue #205、
+   * design.md §14.39）。
+   *
+   * **issue本文の前提が実測で覆っている点に注意**: issue #195の再抽出時点の想定は
+   * 「セッションのデバッグログを会話中に有効にする」だったが、本体の事前実測
+   * （issue #205のコメント、CLI 2.1.227）で次が判った。
+   *
+   * 1. ログは`/debug`を送る前から常時出ている。`<claudeHome>/debug/<sessionId>.txt`に
+   *    セッション開始の時点で既に書かれており（実測: 送信前で5678バイト）、
+   *    `<claudeHome>/debug/latest`が最新のログを指すシンボリックリンク。つまり
+   *    「有効にする」操作は要らない（`cliLocator.ts`の`debugLogCandidates`／
+   *    `claudeChatView.ts`の`openDebugLog`参照。CLIへは何も送らずログを直接
+   *    エディタで開ける）
+   * 2. `/debug`は「既に出ているログをモデルに読ませて診断させる」コマンド。送ると
+   *    `<synthetic>`ではなく`claude-opus-5`の**実モデルが動き**、モデルが**Bashツールで
+   *    `ls`・`cat`を実行**してログを読み、内容を要約して返す
+   * 3. **課金される**。実測で`num_turns: 3`、`total_cost_usd: 0.3824885`。`Bash`ツールの
+   *    実行を伴うため、承認が要る構成では**承認カードが出る**
+   *
+   * control protocolに専用の経路は無い（`^(get|set|toggle)_[a-z_]*debug[a-z_]*$`に
+   * 一致するsubtypeは存在しない。issue #205のコメントの実測）。つまり`compact` /
+   * `importConfig` / `recap` / `requestUsageCredits`と同じくTUIと同じ`/debug`を
+   * ユーザー発言として送るのが唯一の経路。
+   *
+   * `/recap`・`/autocompact`と違い実モデルが動いて課金・ツール実行（承認カード）を
+   * 伴うため、`/usage-credits`・`/import`と同じく呼び出し側（`chatView.ts`の
+   * `confirmDebugCommand`）で必ず確認する。応答はモデルが生成する自然文（構造化JSON
+   * ではない）のため、`/import`・`/recap`と同じく機械的にはパースせず、会話へ
+   * そのまま残す。
+   */
+  sendDebugCommand(): void {
+    if (this.proc === undefined) {
+      throw new Error('セッションが起動していません');
+    }
+    this.update({ ...this.state, busy: true, turnFailed: false });
+    this.write(buildUserMessage('/debug'));
+  }
+
+  /**
    * 会話の1行要約をその場で作る（issue #203、design.md §14.36）。
    *
    * **経路の実測（CLI 2.1.227）**: 専用の制御要求は無い。バイナリのstrings解析で拾った
