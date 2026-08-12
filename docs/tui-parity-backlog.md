@@ -40,11 +40,11 @@ CLI版が上がるとこの一覧は増減する。再抽出の手順はPhase 0�
 
 TP-01〜TP-85 は全て決着済み（実装マージ済み、または不可と確定）で、この文書に未起票の項目は無い。次に進める作業は3方向あり、それぞれIssueにしてある。
 
-| 方向                 | 内容                                                                                          | Issue                                                                                                                     |
-| -------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| 実機確認             | manual-test.md のC群46・L群40を実機で通し、結果を記録する。NGは個別Issueへ切り出す           | Codex: [#189](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/189) / [#190](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/190) / [#191](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/191)、Claude: [#192](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/192) / [#193](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/193) / [#194](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/194) |
-| 自動化               | C群・L群のうち機械で確かめられる範囲を統合テストへ移す（W群の #167 と同じ方式）               | 親 [#186](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/186)、子 [#187](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/187)（Codex）/ [#188](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/188)（Claude） |
-| 新しい機能の洗い出し | CLIの新しい版を再抽出し、この文書に無いTUI機能を見つける（手元のClaude Codeは既に 2.1.227）   | [#195](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/195)                                                    |
+| 方向                 | 内容                                                                                        | Issue                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| -------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 実機確認             | manual-test.md のC群46・L群40を実機で通し、結果を記録する。NGは個別Issueへ切り出す          | Codex: [#189](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/189) / [#190](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/190) / [#191](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/191)、Claude: [#192](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/192) / [#193](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/193) / [#194](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/194) |
+| 自動化               | C群・L群のうち機械で確かめられる範囲を統合テストへ移す（W群の #167 と同じ方式）             | 親 [#186](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/186)、子 [#187](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/187)（Codex）/ [#188](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/188)（Claude）                                                                                                                                                                                                                      |
+| 新しい機能の洗い出し | CLIの新しい版を再抽出し、この文書に無いTUI機能を見つける（手元のClaude Codeは既に 2.1.227） | [#195](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/195)                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 各表の「Issue」列の印:
 
@@ -169,6 +169,33 @@ Codexはターン単位で model / effort / approvalPolicy を渡せるのにCla
 | TP-56 | skillsの一覧表示と管理。取得は `skillsList.ts` で一部実装済み         | Codex/Claude | P3     | Z-07      | #35 済（Claude Codeは一覧のみ。有効/無効を返す・切り替える経路が無い）                                                                    |
 | TP-57 | 他エージェントからの設定インポート（Codex `/import` 相当）            | Codex        | P3     | Z-07      | #36 済（検出・履歴取得は実測。実行(`externalAgentConfig/import`)は未実行でスキーマ根拠のみ。ソースはClaude Code固定、Cursorはスコープ外） |
 | TP-60 | 課金額とセッション分析（`/cost` `/insights` 相当）                    | Claude       | P2     | Z-13      | #37 済（GitHubラベルと揃えてP3からP2へ変更。分析レポートは既存のスラッシュコマンド送信経路で無変更のまま動く）                            |
+
+## Phase 8: 2026-08-12の再抽出で見つかったもの（Issue #195）
+
+Claude Code 2.1.227 の `initialize` が返す一覧を取り直し、**CLI組込のUI機能のうちチャット画面に無いもの**を洗い出した（同梱skillは送ればそのまま効くため対象外。判定の根拠は [slash-commands.md](slash-commands.md) の「2026-08-12 の再抽出」）。
+
+Codex側は同版（0.147.0）でプロトコルの件数も完全一致だったため、この節は全てClaude Code向け。
+
+| ID    | 内容                                                               | 対象   | 優先度 | Issue                                                                   |
+| ----- | ------------------------------------------------------------------ | ------ | ------ | ----------------------------------------------------------------------- |
+| TP-86 | Fast mode（`/fast`）の切替と現在値の表示                           | Claude | P2     | [#198](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/198) |
+| TP-87 | 会話の名前変更（`/rename`）。Codexは実装済みで非対称になっている   | Claude | P2     | [#199](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/199) |
+| TP-88 | 他エージェントからの設定インポート（`/import`）。Codexのみ実装済み | Claude | P3     | [#200](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/200) |
+| TP-89 | 自動圧縮の窓サイズ（`/autocompact`）                               | Claude | P3     | [#201](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/201) |
+| TP-90 | セッション中のskill再読込（`/reload-skills`）                      | Claude | P3     | [#202](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/202) |
+| TP-91 | セッション要約の生成（`/recap`）                                   | Claude | P3     | [#203](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/203) |
+| TP-92 | 追加クレジット（`/usage-credits`。`/extra-usage` は改名済み）      | Claude | P3     | [#204](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/204) |
+| TP-93 | デバッグログの有効化（`/debug`）                                   | Claude | P3     | [#205](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/205) |
+
+対象外にしたもの（理由つき）:
+
+- `color` / `heapdump`: TUIの見た目・開発者向けで、チャット画面に持ち込む意味が無い
+- `clear`: 拡張機能では「新しい会話」を開けば同じことができる
+- `config`: 拡張機能に設定パネルがある
+- `design` / `design-consent` / `design-revoke`: claude.ai の Design projects へのアクセス許可で、ブラウザ側の操作が要る
+- `__remote-workflow` / `workflow-launch-exec`: サーバが起動したセッション専用
+- `agents`: 応答に `(removed)` と明記されている
+- 同梱skill（`dataviz` `artifact-*` `code-review` `doctor` `batch` `goal` `loop` `schedule` `verify` `run` など）: 候補に出て送れば効くため、追加実装は不要
 
 ## Phase 7: 文書の整合
 
