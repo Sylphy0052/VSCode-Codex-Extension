@@ -21,6 +21,7 @@ import {
   readCommandsChanged,
   readContextUsage,
   readCurrentPermissionMode,
+  readFastModeState,
   readControlRequest,
   readControlResponse,
   readRewindFilesResult,
@@ -368,6 +369,24 @@ describe('readCurrentPermissionMode', () => {
   });
 });
 
+describe('readFastModeState（Issue #198）', () => {
+  it('initialize の応答からFast modeの現在値を読む', () => {
+    // 実測（CLI 2.1.227）の値は "off"
+    expect(readFastModeState({ fast_mode_state: 'off' })).toBe(false);
+    expect(readFastModeState({ fast_mode_state: 'on' })).toBe(true);
+  });
+
+  it('入っていなければ何も返さない（対応しない版と「オフ」を区別する）', () => {
+    expect(readFastModeState({})).toBeUndefined();
+    expect(readFastModeState({ fast_mode_state: '' })).toBeUndefined();
+    expect(readFastModeState(undefined)).toBeUndefined();
+  });
+
+  it('知らない値はオフとして扱う（未知の状態で「オン」に倒さない）', () => {
+    expect(readFastModeState({ fast_mode_state: 'unknown-value' })).toBe(false);
+  });
+});
+
 describe('readModelList', () => {
   // 実測した `initialize` の応答（CLI 2.1.227）
   const payload = {
@@ -415,6 +434,18 @@ describe('readModelList', () => {
 
   it('値が無いモデルを落とす', () => {
     expect(readModelList(payload)?.map((m) => m.slug)).toEqual(['default', 'haiku']);
+  });
+
+  it('supportsFastMode を三値で持つ（Issue #198）', () => {
+    const models = readModelList({
+      models: [
+        { value: 'a', supportsFastMode: true },
+        { value: 'b', supportsFastMode: false },
+        // フィールドそのものが無い版では「情報が無い」として undefined のままにする
+        { value: 'c' },
+      ],
+    });
+    expect(models?.map((m) => m.supportsFastMode)).toEqual([true, false, undefined]);
   });
 
   it('引数として渡せない形のeffortを捨てる', () => {

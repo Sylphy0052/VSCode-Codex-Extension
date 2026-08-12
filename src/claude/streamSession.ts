@@ -32,6 +32,7 @@ import {
   buildUserMessage,
   describeCanUseTool,
   readCommandList,
+  readFastModeState,
   readCommandsChanged,
   readContextUsage,
   readCurrentPermissionMode,
@@ -287,6 +288,24 @@ export class ClaudeStreamSession {
    */
   setPlanMode(on: boolean, fallback: string): void {
     this.setPermissionMode(on ? 'plan' : fallback === '' ? 'manual' : fallback);
+  }
+
+  /**
+   * Fast mode（`/fast`）を切り替える（Issue #198）。
+   *
+   * 専用の制御要求は無い（CLIバイナリから `set_` 系のsubtypeを抽出しても該当が無かった）。
+   * `compact` と同じくTUIと同じコマンドを発言として送る。`/fast` はトグルなので、いまの値と
+   * 同じ向きへの操作は送らない（送ると意図と逆になる）。
+   *
+   * 状態は送った時点で反転させる。`fast_mode_state` は `initialize` の応答にしか無く、
+   * 切り替えの通知が来ないため、ここで持たないと画面が追従できない。
+   */
+  setFastMode(on: boolean): void {
+    if (this.proc === undefined || this.state.fastMode === undefined || this.state.fastMode === on) {
+      return;
+    }
+    this.update({ ...this.state, busy: true, turnFailed: false, fastMode: on });
+    this.write(buildUserMessage('/fast'));
   }
 
   /**
@@ -624,6 +643,13 @@ export class ClaudeStreamSession {
     const permissionMode = readCurrentPermissionMode(response.payload);
     if (permissionMode !== undefined) {
       this.update({ ...this.state, planMode: permissionMode === 'plan' });
+    }
+
+    // Fast mode（Issue #198）。`initialize` の応答だけが現在値を持つ（変更の通知は無い）ため、
+    // ここで拾えなければ画面はトグルを出さない
+    const fastMode = readFastModeState(response.payload);
+    if (fastMode !== undefined) {
+      this.update({ ...this.state, fastMode });
     }
 
     if (this.handshakeDone) {

@@ -874,6 +874,11 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         entry.session.setPlanMode(m['on'] === true, fallback);
         return;
       }
+      if (type === 'fastMode') {
+        entry.loop.noteUserAction();
+        entry.session.setFastMode(m['on'] === true);
+        return;
+      }
       if (type === 'cancelQueued' && typeof m['index'] === 'number') {
         entry.session.cancelQueued(m['index']);
         return;
