@@ -1647,6 +1647,13 @@ export interface ChatShellOptions {
    * ボタンとは別導線。二重導線を避けるためCodex画面には出さない。
    */
   showImport?: boolean;
+  /**
+   * 「会話の1行要約」ボタンを出すか（Claude Code画面のみ、issue #203、design.md §14.36）。
+   *
+   * `/recap` はTUI由来のローカルコマンドで、Codexにこの概念は無い（Codex側で近いものは
+   * 会話名だけを対象にした改名操作）。二重導線を避けるためCodex画面には出さない。
+   */
+  showRecap?: boolean;
 }
 
 /**
@@ -1712,6 +1719,7 @@ ${chatStyles()}
     <button id="loopToggle" type="button" class="secondary" title="同じ指示を条件成立まで繰り返します">ループ</button>
     <button id="compact" type="button" class="secondary" title="これまでの会話を要約に置き換えてコンテキストを空けます">圧縮</button>
     <button id="claudeImport" type="button" class="secondary" title="Codex／Geminiの設定をClaude Codeへ取り込む準備をします"${options.showImport === true ? '' : ' hidden'}>インポート</button>
+    <button id="recap" type="button" class="secondary" title="会話の1行要約をいま作ります（要約は会話に残ります）"${options.showRecap === true ? '' : ' hidden'}>要約</button>
     <button id="planToggle" type="button" class="secondary" aria-pressed="false" title="読み取りだけに絞って計画を立てさせます。ファイルは変更されません">計画</button>
     <button id="fastToggle" type="button" class="secondary" aria-pressed="false" title="応答を速くします（Fast mode）" hidden>高速</button>
     <button id="review" type="button" class="secondary" title="コードレビューを実行します"${options.review.mode === 'command' ? ' hidden' : ''}>レビュー</button>

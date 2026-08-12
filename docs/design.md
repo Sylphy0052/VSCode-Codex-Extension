@@ -2145,6 +2145,65 @@ CLI側に永続化される経路が見つかったにもかかわらず、Codex
 
 テストは`test/unit/claudeSessionNames.test.ts`（`ClaudeSessionNameStore`単体）・`test/unit/claudeSessionStore.test.ts`（一覧生成での解決順）・`test/unit/claudeChatViewManager.test.ts`（`renameActive`とタブ名への反映、`deriveTitle`の解決順）で検証する。手動確認手順は`docs/manual-test.md`のL群に追加する。
 
+### 14.36 Claude Code画面の会話の1行要約（`/recap`、issue #203、TP-91）
+
+issue #195の再抽出で見つかった機能。Claude Codeの`initialize`応答の`commands`一覧にも`recap`（`description: "Generate a one-line session recap now"`）が実在する。§14.34（他エージェント設定インポート）と同じく、TUIにあってチャット画面に無い操作を足す。
+
+#### 実測1: control protocolに専用の経路は無い（CLI 2.1.227）
+
+バイナリ（`strings -n 6`）の解析で拾った`recap`関連の識別子（`recap_command` `recap.trigger` `hadRecap` `ccr_recap_generate`など）を候補に、`claude --print --input-format stream-json --output-format stream-json --verbose`へ`initialize`に続けて次の4件を`control_request`として送った。
+
+`recap_command` / `recap.trigger` / `recap` / `local_command`
+
+**全4件が`Unsupported control request subtype: <name>`で拒否される**ことを実測した。§14.34の`/import`・14.35以前の`compact` `fast`と同じく、専用の制御要求では届かない。
+
+#### 実測2: `/recap`はCLI内蔵のローカルコマンド（バイナリの文字列解析）
+
+同じ`strings`解析で`type:"local"`のスラッシュコマンド定義（`name:"recap"`、`description:"Generate a one-line session recap now"`）が見つかった。実装の内部では「離席から戻ったときの自動要約」（`awaySummary`。`CLAUDE_CODE_ENABLE_REMOTE_RECAP`という環境変数フラグや`awaySummaryEnabled`という設定キーが対応）と同じ生成ロジック（`ccr_recap_generate`）を、ユーザーが明示的に呼び出せる形として`/recap`が公開されている。生成に使う指示文字列も見つかった。
+
+```text
+The user stepped away and is coming back. Recap in under 40 words, 1-2 plain sentences,
+no markdown. Lead with the overall goal and current task, ...
+```
+
+会話が無い状態（`no-turn`）では「Nothing to recap yet — send a message first.」、中断時（`aborted`）では「Recap cancelled.」を返す分岐も同じ解析から見つかっている。
+
+#### 実測3: `/recap`を実際に送った結果
+
+`buildUserMessage('/recap')`と同じ形を、会話を1ターン進めた直後に実際に送ったところ、次の応答が返った。
+
+- `assistant`発言が1件返る。`model`が`"<synthetic>"`、`stop_reason`が`"stop_sequence"`で、通常のモデル応答（`stream_event`のトークン列）を経由しない
+- 本文はその時点の会話内容を踏まえた自然文の要約（例:「1+1を聞かれ、2と答えた。それだけのやり取りで、進行中の作業はない。次の指示待ち。」）で、**会話の言語（この検証では日本語）に揃って返る**
+- この発言はそのまま会話（transcript）に残る（受入基準の「会話に残る」を満たす）
+- 表示は`<synthetic>`扱いだが無償ではない。`result`の`total_cost_usd`は送信前後で実際に増えていた（実測: `0.2192235` → `0.241251`）。実測2の指示文字列と合わせると、内部では軽量なモデル呼び出しで要約を作った上で、会話を継続する「ターン」ではなく「その場に差し込む1発言」として`<synthetic>`表示にしていると見られる
+
+**この応答は構造化JSONではない**。§14.34の`/import`と同じく`{type:"text",value:o.text}`という素通しの形がバイナリ解析でも見つかっており、長さや言い回しは会話の内容に左右される（実測でも40語以内という指示はあるが、日本語では文字数の目安が違うため厳密な長さの保証にはならない）。
+
+#### 設計判断: タブ名・履歴の表示名へは反映しない
+
+issue本文のとおり、TP-87（#199）で「人が付けた名前 > transcript由来」という解決順を`ClaudeSessionNameStore`に決めてある。`/recap`の応答をこの「人が付けた名前」の代わりに機械的に流し込むことも検討したが、**やらない**と決めた。理由は次の3点。
+
+1. **応答が構造化されていない自然文**（実測3参照）。改行・句読点・長さが安定しないため、「短い名前」へ切り詰める処理は壊れやすい。切り詰め方（先頭N文字／最初の文だけ／句読点で区切る等）を決めても、要約の内容次第で不格好な名前になりうる
+2. **要約の対象が「名前」として不適切なことがある**。`/recap`は「これまでの経緯」を書く設計（実測2の生成指示は「goal and current task」）であり、短い固有名詞的なタイトルにはならない。会話の最初の発言から名前を作る既存の設計（design.md L-07）や、ユーザー自身が短い名前を選ぶ改名操作（#199）の方が名前として安定する
+3. **`/recap`は何度でも呼べる**。呼ぶたびに表示名が変わってしまうと、ユーザーが#199で明示的に付けた名前を意図せず上書きしてしまう恐れがある。「要約を作る」と「名前を付ける」は別の操作として扱うほうが事故が少ない
+
+そのため`/recap`は`ClaudeSessionNameStore`・`deriveTitle`のどちらにも一切触れない。会話へ新しい発言を1件増やすだけで、タブ名や履歴一覧の表示は変わらない。名前を変えたい場合は引き続き`claude.renameChat`（#199）を使う。
+
+#### 実装
+
+- `src/claude/streamSession.ts`: `ClaudeStreamSession.recap()`を追加。`compact()` `importConfig()`と同じく`buildUserMessage('/recap')`を書き込むだけ。上記の実測結果をJSDocに残す
+- `src/view/chatView.ts`: `ChatShellOptions`に`showRecap?: boolean`を追加（Claude Code画面のみ`true`。Codexにこの概念は無い）。`recap`ボタンを`claudeImport`の隣に追加
+- `src/view/chatScript.ts`: `recap`ボタンのクリックで`{type: 'recap'}`を送る。応答中は無効化する（`compact` `claudeImport`と同じ扱い）
+- `src/view/claudeChatView.ts`: `handleMessage`に`recap`分岐を追加し、`session.recap()`を呼ぶ`recap()`メソッドを追加。会話を壊す・書き込みが起きるといった不可逆な操作ではないため、`compact` `claudeImport`と違って確認ダイアログは挟まない（`planMode` `fastMode`と同じ扱い）
+
+#### スコープ外にしたもの
+
+- **応答の構造化・パース**: 実測3のとおり自然文かつ長さが安定しないため、要約文字列を機械的に解析する処理は作らない
+- **タブ名・履歴の表示名への反映**: 上記「設計判断」のとおり。反映する場合は、要約とは別に「短い名前を作る」独立した合成ロジックが要る（現状のCLIにその出力は無い）ため、別issueで検討する
+- **離席時の自動要約（`awaySummaryEnabled`）の呼び出し**: `/recap`はユーザーが明示的に呼ぶ手動操作のみを対象にする。CLI内蔵の自動トリガー（5分以上の離席）はTUI専用の挙動で、stream-json経由でこの拡張機能から観測・制御する手段は確認していない
+
+テストは`test/unit/claudeStreamSessionRecap.test.ts`（`recap()`単体）・`test/unit/claudeChatViewManager.test.ts`（`recap`メッセージの配線）で検証する。手動確認手順は`docs/manual-test.md`のL-43に追加する。
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）

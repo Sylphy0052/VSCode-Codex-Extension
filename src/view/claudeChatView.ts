@@ -600,6 +600,9 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       // 他エージェントからの設定インポート（issue #200）。Codexは別のコントロールパネル
       // UI（issue #36）を持つため、二重導線を避けてClaude Code画面にだけ出す
       showImport: true,
+      // 会話の1行要約（issue #203）。`/recap` はTUI由来のローカルコマンドで、Codexに
+      // この概念は無いため、二重導線を避けてClaude Code画面にだけ出す
+      showRecap: true,
     });
     panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(entry, message));
     panel.onDidChangeViewState(() => {
@@ -947,6 +950,10 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         void this.importConfig(entry);
         return;
       }
+      if (type === 'recap') {
+        this.recap(entry);
+        return;
+      }
       if (type === 'stopBackgroundTask' && typeof m['id'] === 'string') {
         void this.stopBackgroundTask(
           entry,
@@ -1054,6 +1061,23 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       // compactと同じく新しいターンを起こす。ループの指示と重ならないよう割り込み扱いにする
       entry.loop.noteUserAction();
       entry.session.importConfig();
+    } catch (e) {
+      this.reportError(e);
+    }
+  }
+
+  /**
+   * 会話の1行要約をその場で作る（issue #203、design.md §14.36）。
+   *
+   * `compact` / `importConfig` と違い、会話の中身を要約へ置き換えたり書き込みが起きたり
+   * することはない（`streamSession.ts` の `recap` のJSDoc参照。実測では新しい発言が
+   * 1件増えるだけ）。壊れる／戻せない操作ではないため、確認ダイアログは挟まない
+   * （`planToggle` / `fastToggle` と同じ扱い）。
+   */
+  private recap(entry: ClaudePanel): void {
+    try {
+      entry.loop.noteUserAction();
+      entry.session.recap();
     } catch (e) {
       this.reportError(e);
     }

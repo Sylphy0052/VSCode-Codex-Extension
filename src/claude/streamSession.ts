@@ -460,6 +460,45 @@ export class ClaudeStreamSession {
   }
 
   /**
+   * 会話の1行要約をその場で作る（issue #203、design.md §14.36）。
+   *
+   * **経路の実測（CLI 2.1.227）**: 専用の制御要求は無い。バイナリのstrings解析で拾った
+   * `recap_command` `recap.trigger` `recap` `local_command` の4候補を実際に
+   * `control_request` として送ったが、いずれも `Unsupported control request subtype: <name>`
+   * で拒否されることを確認した。一方で同じ解析から `type:"local"` のスラッシュコマンド
+   * 定義（`name:"recap"`、`description:"Generate a one-line session recap now"`）が
+   * 見つかっており、`compact` / `fast` / `import` と同じくTUIと同じ `/recap` を
+   * ユーザー発言として送るのが唯一の経路。
+   *
+   * 実際にこの環境で送って実測した結果: 会話を1ターン進めた直後に `/recap` を送ると、
+   * CLIは実モデルの応答ストリーム（`stream_event`）を経由せず、`model` が
+   * `"<synthetic>"`・`stop_reason` が `"stop_sequence"` の `assistant` 発言を1件返し、
+   * それが会話（transcript）にそのまま残った。例: 「1+1を聞かれ、2と答えた。それだけの
+   * やり取りで、進行中の作業はない。次の指示待ち。」（会話の言語に揃って日本語で返ってきた）。
+   * ただし表示上は同期的でも無償ではなく、`result` の `total_cost_usd` は送信前後で
+   * 実際に増えていた（実測: 0.2192235 → 0.241251）。バイナリ側にも
+   * 「Recap in under 40 words, 1-2 plain sentences, no markdown」という指示文字列が
+   * 見つかっており、内部では軽量なモデル呼び出しで要約を作った上で、それを会話ターンでは
+   * なく「その場に差し込む1発言」として`<synthetic>`表示にしていると見られる。
+   *
+   * **この応答は構造化JSONではなく自然文**（strings解析でも `{type:"text",value:o.text}`
+   * という素通しの形が見つかっており、長さや言い回しは会話の内容・言語に引きずられる）。
+   * そのため `compact` / `import` と同じ理由で、この文面をタブ名・履歴の表示名
+   * （`ClaudeSessionNameStore`）へ機械的に反映することはしない。改行や句読点を含む
+   * 可変長の自然文を「短い名前」へ機械的に切り詰める処理は壊れやすく、design.mdの
+   * 「実測できないことを実測したふりで書かない」の裏返しとして、ここでは
+   * 「安全に変換できる保証が無いのでやらない」を選ぶ。名前を変えたい場合は引き続き
+   * issue #199の改名操作（`setName`）を使う。
+   */
+  recap(): void {
+    if (this.proc === undefined) {
+      throw new Error('セッションが起動していません');
+    }
+    this.update({ ...this.state, busy: true, turnFailed: false });
+    this.write(buildUserMessage('/recap'));
+  }
+
+  /**
    * 指定した発言の直前まで、ファイルだけを戻せるか確かめる（dry_run）。実際には適用しない。
    *
    * **会話の履歴には触れない**。`rewind_files` はファイルだけを対象にする制御要求で、
