@@ -37,11 +37,21 @@ export class FakeAppServerConnection implements AppServerConnectionPortLike {
   startedCount = 0;
   disposed = false;
   private readonly responders = new Map<string, (params: unknown) => unknown>();
+  /** `failNext` で登録した、次の1回だけ拒否させる要求。 */
+  private readonly failures = new Map<string, () => Error>();
 
   constructor(
     private readonly onNotification: (method: string, params: Record<string, unknown>) => void,
     private readonly onServerRequest: (request: unknown) => Promise<unknown>,
   ) {}
+
+  /**
+   * 次にその要求が来たとき、応答の代わりに一度だけ拒否させる（C-13: `turn/steer` が
+   * ターンの入れ替わりで失敗し、待ち行列へ積み直される競合を再現するのに使う）。
+   */
+  failNext(method: string, message: string): void {
+    this.failures.set(method, () => new Error(message));
+  }
 
   /** `method` への応答（`result` の中身）を決める。登録が無ければ空オブジェクトを返す。 */
   respond(method: string, build: (params: unknown) => unknown): void {
@@ -56,6 +66,16 @@ export class FakeAppServerConnection implements AppServerConnectionPortLike {
   /** その要求のうち最初のもの。 */
   firstCall(method: string): { method: string; params: unknown } | undefined {
     return this.calls.find((c) => c.method === method);
+  }
+
+  /** その要求のうち最後のもの。同じmethodを複数回呼ぶケース（steer・待ち行列など）で使う。 */
+  lastCall(method: string): { method: string; params: unknown } | undefined {
+    return [...this.calls].reverse().find((c) => c.method === method);
+  }
+
+  /** その要求が来た回数と順序。呼ばれた順を確かめたいケース（分岐→resumeなど）で使う。 */
+  callsFor(method: string): Array<{ method: string; params: unknown }> {
+    return this.calls.filter((c) => c.method === method);
   }
 
   /** サーバからの通知を流し込む。 */
@@ -75,6 +95,11 @@ export class FakeAppServerConnection implements AppServerConnectionPortLike {
 
   request(method: string, params: unknown): Promise<JsonRpcMessageLike> {
     this.calls.push({ method, params });
+    const failer = this.failures.get(method);
+    if (failer !== undefined) {
+      this.failures.delete(method);
+      return Promise.reject(failer());
+    }
     const build = this.responders.get(method);
     return Promise.resolve({ jsonrpc: '2.0', id: this.calls.length, result: build?.(params) ?? {} });
   }

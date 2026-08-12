@@ -617,6 +617,27 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
   }
 
   /**
+   * 統合テスト専用: webview（レンダラー側のJS）から届いたふりをしたメッセージを流し込む
+   * （Issue #187）。
+   *
+   * 実VSCode上の統合テストでは、拡張機能ホスト側のコードから実際のwebview（別プロセスの
+   * レンダラーで動くiframe）へJSを注入してボタンのクリックやEnterキーを再現する手段が無い。
+   * ユニットテストが使う `simulateMessage`（`test/mocks/vscode.ts`）と同じ考え方で、
+   * `attachPanel` が `panel.webview.onDidReceiveMessage` に登録しているのと同じ
+   * `handleMessage` を直接呼ぶ入口をここへ用意する。本番のwebviewが送るメッセージは
+   * 形が同じであれば区別なく処理されるため、実際に通る経路（承認の解決・発言の送信・
+   * 分岐など）はここを通しても変わらない。呼び出し口は `ChatTestApi.simulateCodexWebviewMessage`
+   * （`extension.ts`）で、`AGENT_SESSIONS_INTEGRATION_TEST=1` のときだけ公開される。
+   */
+  async simulateWebviewMessage(threadId: string, message: unknown): Promise<void> {
+    const entry = this.panels.get(threadId);
+    if (entry === undefined) {
+      throw new Error(`webviewへメッセージを送れませんでした（画面が見つからない）: ${threadId}`);
+    }
+    await this.handleMessage(entry, message);
+  }
+
+  /**
    * 新しい会話を開く。
    *
    * `cwd` / `taskConfig` を省略すると、従来通りワークスペース直下・拡張機能の
