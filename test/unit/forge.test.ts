@@ -10,9 +10,11 @@ import {
   createPullRequest,
   detectForgeHost,
   forgeCliCommand,
+  isRetryablePushError,
   normalizeFinalMergeConfig,
   normalizeForgeHostConfig,
   normalizePullRequestLayerConfig,
+  PUSH_BRANCH_MAX_ATTEMPTS,
   pushBranch,
   resolveForgeHost,
   runFinalMerge,
@@ -368,6 +370,93 @@ describe('pushBranch', () => {
     if (!result.ok) {
       expect(result.message).toContain('remote rejected');
     }
+  });
+});
+
+/**
+ * `pushBranch`のリトライ挙動を確かめるための、呼び出し順に応答を返すフェイク。
+ * `FakeGit`（プレフィックス一致で常に同じ応答を返す）では「1回目だけ失敗し2回目で
+ * 成功する」ような連続した呼び出しごとの応答差し替えができないため、この専用フェイクを使う。
+ */
+class SequencedGit implements GitCommandRunner {
+  calls: Array<{ args: string[]; cwd: string }> = [];
+  constructor(private readonly results: GitCommandResult[]) {}
+
+  async run(args: readonly string[], cwd: string): Promise<GitCommandResult> {
+    this.calls.push({ args: [...args], cwd });
+    const next = this.results.shift();
+    return next ?? { code: 0, stdout: '', stderr: '' };
+  }
+}
+
+describe('pushBranch（競合系の一時的失敗のリトライ。Issue #253）', () => {
+  it('1回目にcannot lock refを返しても2回目で成功すれば成功を返す（バックオフを挟んでリトライする）', async () => {
+    const git = new SequencedGit([
+      {
+        code: 1,
+        stdout: '',
+        stderr:
+          '! [remote rejected] wf/x/integration -> wf/x/integration (cannot lock ref for update)',
+      },
+      { code: 0, stdout: '', stderr: '' },
+    ]);
+    const waits: number[] = [];
+    const result = await pushBranch(git, '/repo/integration', INTEGRATION_BRANCH, async (attempt) => {
+      waits.push(attempt);
+    });
+
+    expect(result).toEqual({ ok: true });
+    expect(git.calls).toHaveLength(2);
+    // リトライ前に1回だけ待っている（実時間では待たない。waitはテストからの注入）
+    expect(waits).toEqual([1]);
+  });
+
+  it('認証エラーなど競合を示さない失敗はリトライせず即座に失敗を返す', async () => {
+    const git = new SequencedGit([
+      { code: 1, stdout: '', stderr: 'fatal: Authentication failed for https://example/repo.git' },
+    ]);
+    const waits: number[] = [];
+    const result = await pushBranch(git, '/repo/integration', INTEGRATION_BRANCH, async (attempt) => {
+      waits.push(attempt);
+    });
+
+    expect(result.ok).toBe(false);
+    expect(git.calls).toHaveLength(1);
+    expect(waits).toEqual([]);
+  });
+
+  it('競合が上限回数を超えて続けば失敗を返す', async () => {
+    const failure: GitCommandResult = { code: 1, stdout: '', stderr: 'cannot lock ref for update' };
+    const git = new SequencedGit(
+      Array.from({ length: PUSH_BRANCH_MAX_ATTEMPTS }, () => ({ ...failure })),
+    );
+    const waits: number[] = [];
+    const result = await pushBranch(git, '/repo/integration', INTEGRATION_BRANCH, async (attempt) => {
+      waits.push(attempt);
+    });
+
+    expect(result.ok).toBe(false);
+    expect(git.calls).toHaveLength(PUSH_BRANCH_MAX_ATTEMPTS);
+    expect(waits).toEqual([1, 2]);
+  });
+});
+
+describe('isRetryablePushError', () => {
+  it.each([
+    ['cannot lock ref for update'],
+    ['! [rejected] main -> main (fetch first)'],
+    ['! [rejected] main -> main (non-fast-forward)'],
+    ['CANNOT LOCK REF FOR UPDATE'],
+  ])('競合系のstderr「%s」はリトライ対象と判定する', (stderr) => {
+    expect(isRetryablePushError(stderr)).toBe(true);
+  });
+
+  it.each([
+    ['fatal: Authentication failed for https://example/repo.git'],
+    ['fatal: repository not found'],
+    [''],
+  ])('競合以外のstderr「%s」はリトライ対象外と判定する', (stderr) => {
+    expect(isRetryablePushError(stderr)).toBe(false);
   });
 });
 

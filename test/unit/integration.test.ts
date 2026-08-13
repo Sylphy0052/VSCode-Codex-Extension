@@ -507,6 +507,79 @@ describe('IntegrationMergeQueue.abortMerge', () => {
   });
 });
 
+describe('IntegrationMergeQueue.pushIntegrationBranch（design.md §16.18・Issue #253）', () => {
+  it('forge.tsのpushBranchをキュー経由で呼ぶ', async () => {
+    const git = new FakeGit();
+    git.respond(['push'], { code: 0, stdout: '', stderr: '' });
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+
+    const result = await queue.pushIntegrationBranch(git, INTEGRATION_CWD, INTEGRATION_BRANCH);
+
+    expect(result).toEqual({ ok: true });
+    expect(git.calls).toEqual([
+      {
+        args: ['push', 'origin', `${INTEGRATION_BRANCH}:${INTEGRATION_BRANCH}`],
+        cwd: INTEGRATION_CWD,
+      },
+    ]);
+  });
+
+  it('同じキューを渡すと、複数タスクからのpushIntegrationBranchが直列に走り重ならない（並列タスクの統合ブランチpush競合対策）', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const trackingGit: GitCommandRunner = {
+      async run(_args, _cwd): Promise<GitCommandResult> {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        active -= 1;
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    };
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+
+    const results = await Promise.all([
+      queue.pushIntegrationBranch(trackingGit, INTEGRATION_CWD, INTEGRATION_BRANCH),
+      queue.pushIntegrationBranch(trackingGit, INTEGRATION_CWD, INTEGRATION_BRANCH),
+    ]);
+
+    expect(results).toEqual([{ ok: true }, { ok: true }]);
+    // 直列化されていなければ、20ms遅延の間に両方のpushが同時にactiveへ入りmaxActiveが2になる
+    expect(maxActive).toBe(1);
+  });
+
+  it('worktree.tsのWorktreeCreationQueueと同じキューを渡すと、統合worktreeの作成とpushも直列化される', async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', '--verify'], { code: 1, stdout: '', stderr: '' });
+    git.respond(['worktree', 'add'], { code: 0, stdout: '', stderr: '' });
+    git.respond(['push'], { code: 0, stdout: '', stderr: '' });
+    const fs = new FakeFs();
+    fs.realpaths.set('/repo', '/repo');
+    fs.realpaths.set(INTEGRATION_CWD, INTEGRATION_CWD);
+
+    const worktreeQueue = new WorktreeCreationQueue();
+    const queue = new IntegrationMergeQueue(worktreeQueue);
+
+    const order: string[] = [];
+    const [createResult, pushResult] = await Promise.all([
+      queue
+        .createIntegrationWorktree({ repoRoot: '/repo', runId: RUN_ID, headCommit: HEAD_SHA }, git, fs)
+        .then((r) => {
+          order.push('create');
+          return r;
+        }),
+      queue.pushIntegrationBranch(git, INTEGRATION_CWD, INTEGRATION_BRANCH).then((r) => {
+        order.push('push');
+        return r;
+      }),
+    ]);
+
+    expect(createResult.ok).toBe(true);
+    expect(pushResult).toEqual({ ok: true });
+    expect(order).toHaveLength(2);
+  });
+});
+
 describe('未コミットの変更の自動コミット→マージの流れ（受入基準: 未コミットの変更があるタスクでも、マージ後の統合ブランチにその変更が含まれる）', () => {
   it('commitUncommittedChangesIfNeededで自動コミットしてから、そのコミットを含むブランチをmergeTaskでマージできる', async () => {
     const git = new FakeGit();

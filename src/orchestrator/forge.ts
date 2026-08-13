@@ -448,6 +448,37 @@ function isManagedWorkflowBranch(branch: string): boolean {
 export type PushBranchResult = { ok: true } | { ok: false; message: string };
 
 /**
+ * `pushBranch` のリトライ前の待ち時間を注入するための型。既定は実際に待つ実装
+ * （`defaultPushBranchWait`）だが、テストはこれを差し替えて実時間で待たないようにする
+ * （design.md §16.18・Issue #253）。
+ */
+export type PushBranchWait = (attempt: number) => Promise<void>;
+
+/** `pushBranch` が競合を理由にリトライする最大試行回数（初回を含む。Issue #253）。 */
+export const PUSH_BRANCH_MAX_ATTEMPTS = 3;
+
+/** バックオフの基準時間（ミリ秒）。実際の待ち時間は `attempt * PUSH_BRANCH_RETRY_BASE_DELAY_MS`。 */
+const PUSH_BRANCH_RETRY_BASE_DELAY_MS = 500;
+
+const defaultPushBranchWait: PushBranchWait = (attempt) =>
+  new Promise((resolve) => {
+    setTimeout(resolve, attempt * PUSH_BRANCH_RETRY_BASE_DELAY_MS);
+  });
+
+/**
+ * リモート側が同じrefへの並行更新を弾いたときに出す、一時的な失敗を示すstderrのパターン
+ * （`cannot lock ref` / `fetch first` / `non-fast-forward` / `stale info`。Issue #253）。
+ * 時間をおいて再送すれば通る類の失敗だけをこのパターンに含める。認証エラーや
+ * 不正なブランチ名などはこのパターンに一致しないため、リトライせず即座に失敗として扱う。
+ */
+const RETRYABLE_PUSH_ERROR_PATTERN = /cannot lock ref|fetch first|non-fast-forward|stale info/iu;
+
+/** `pushBranch` の失敗メッセージが、時間をおいて再試行する価値のある一時的な競合かどうか。 */
+export function isRetryablePushError(stderr: string): boolean {
+  return RETRYABLE_PUSH_ERROR_PATTERN.test(stderr);
+}
+
+/**
  * タスクブランチ・統合ブランチを `origin` へpushする（design.md §16.18「作る順序」の
  * 1・2番目の手順）。push先のremoteは常に `origin`（design.md §16.16「push先のremoteを
  * YAMLや設定から選ぶ手段は設けない」）。
@@ -456,11 +487,20 @@ export type PushBranchResult = { ok: true } | { ok: false; message: string };
  * `git push` は、先頭が `-` の文字列を渡されるとフラグとして解釈されうる
  * （`worktree.ts` / `integration.ts` の `HEAD_COMMIT_PATTERN` 等と同じ理由の防御）ため、
  * refspec形式（`<branch>:<branch>`）で1つの引数にまとめたうえで字種も検証する。
+ *
+ * **競合による一時的失敗（`isRetryablePushError`）に限り、バックオフを挟んで最大
+ * `PUSH_BRANCH_MAX_ATTEMPTS` 回まで再試行する（design.md §16.18・Issue #253）。**
+ * 同じ統合ブランチへ複数タスクが並行してpushすると、リモートが `cannot lock ref` で
+ * 一方を弾くことがある。呼び出し側を直列化しても、リモート側では他クライアント
+ * （同じrepoの別クローンや別run）との間で同種の競合が起こりうるため、直列化とは独立に
+ * ここでも吸収する。認証エラーや不正なブランチ名などリトライしても無駄な失敗は対象外で、
+ * 即座に失敗を返す。
  */
 export async function pushBranch(
   git: GitCommandRunner,
   cwd: string,
   branch: string,
+  wait: PushBranchWait = defaultPushBranchWait,
 ): Promise<PushBranchResult> {
   if (!isManagedWorkflowBranch(branch)) {
     return {
@@ -468,17 +508,26 @@ export async function pushBranch(
       message: `不正なブランチ名（wf/<runId>/... の形ではありません）: ${branch}`,
     };
   }
-  const result = await git.run(['push', 'origin', `${branch}:${branch}`], cwd);
-  if (result.code !== 0) {
-    return {
-      ok: false,
-      message:
-        result.stderr.trim() !== ''
-          ? sanitizeForLog(result.stderr)
-          : `git push に失敗しました（終了コード ${result.code}）`,
-    };
+
+  let lastMessage = '';
+  for (let attempt = 1; attempt <= PUSH_BRANCH_MAX_ATTEMPTS; attempt += 1) {
+    const result = await git.run(['push', 'origin', `${branch}:${branch}`], cwd);
+    if (result.code === 0) {
+      return { ok: true };
+    }
+    lastMessage =
+      result.stderr.trim() !== ''
+        ? sanitizeForLog(result.stderr)
+        : `git push に失敗しました（終了コード ${result.code}）`;
+
+    const isLastAttempt = attempt === PUSH_BRANCH_MAX_ATTEMPTS;
+    if (isLastAttempt || !isRetryablePushError(result.stderr)) {
+      return { ok: false, message: lastMessage };
+    }
+    await wait(attempt);
   }
-  return { ok: true };
+  // 上のループは必ずreturnで終わる（TypeScriptの制御フロー解析のためのフォールバック）
+  return { ok: false, message: lastMessage };
 }
 
 /* -------------------------------------------------------------------------------------------- */

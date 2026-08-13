@@ -126,7 +126,12 @@ function buildTaskPullRequestFlowCallbacks(
 ): TaskPullRequestSteps<MergeTaskResult> {
   return {
     pushTaskBranch: () => pushBranch(self.deps.git, taskCwd, taskBranch),
-    pushIntegrationBranch: () => pushBranch(self.deps.git, integration.cwd, integration.branch),
+    // 統合ブランチのpushはタスクごとに並列で走りうるため、worktreeの作成・撤去・マージと
+    // 同じキュー（`IntegrationMergeQueue`）を経由させて直列化する（design.md §16.18・
+    // Issue #253。同じ統合worktreeの同じブランチへの並行pushをリモートが
+    // `cannot lock ref` で弾く事故対策）。直接`pushBranch`を呼ばない
+    pushIntegrationBranch: () =>
+      self.integrationQueue.pushIntegrationBranch(self.deps.git, integration.cwd, integration.branch),
     createPullRequest: () =>
       createPullRequest(
         { cli: forgeDeps.cli, fs: forgeDeps.fs },
