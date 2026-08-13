@@ -185,9 +185,30 @@ export function chatStyles(): string {
   #composer {
     position: relative;
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     padding: 10px 16px 14px;
     border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+  }
+  /*
+   * 送信以外のボタンはアイコンのみ（issue #226）。最大11個並ぶため、幅が足りないと
+   * ラベルが途中で折り返し、flex: 1のtextareaが押し潰されていた。折返しと縮小を止め、
+   * アイコンは中央寄せで揃える。
+   */
+  #composer button {
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  #composer button:not(#send) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 6px;
+  }
+  #composer button:not(#send) svg { display: block; }
+  #composer textarea {
+    /* ボタン列に押し潰されても入力欄だと分かる最小幅を確保する */
+    min-width: 160px;
   }
   textarea {
     flex: 1;

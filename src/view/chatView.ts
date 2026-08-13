@@ -1755,6 +1755,35 @@ function escapeHtml(text: string): string {
     .replace(/"/gu, '&quot;');
 }
 
+/**
+ * `#composer` で送信以外のボタンに使うアイコン（issue #226）。
+ *
+ * codiconのwebfontは使わない。webviewのCSPは `default-src 'none'` で `font-src` を
+ * 開けておらず（`chatCsp.ts`）、未指定のdirectiveは `default-src` に落ちて塞がれるため、
+ * フォント読み込みには新しい許可とアセット同梱が要る。外部CDNも使えない。インライン
+ * `<svg>` はCSPが制御する「読み込み」に当たらずそのまま描画できるため、これで代える。
+ * `currentColor` を使い、通常時／トグルON時のボタン文字色（`chatStyles.ts`の
+ * `button`・`button.toggled`）にそのまま追従させる。押した後の挙動はどれも変えない。
+ */
+const COMPOSER_ICONS = {
+  attach:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><circle cx="5.5" cy="6" r="1.1" fill="currentColor" stroke="none"/><path d="M2 12l4-4 3 3 2-2 4 4"/></svg>',
+  stop: '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor"/></svg>',
+  loop: '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M12.7 4.6A5.5 5.5 0 1 0 13.6 9.2"/><path d="M9.6 2.1l3.3.4-.4 3.3"/></svg>',
+  compact:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 2.5l4 4M2.5 2.5v3.3M2.5 2.5h3.3"/><path d="M13.5 13.5l-4-4M13.5 13.5v-3.3M13.5 13.5h-3.3"/></svg>',
+  import:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v7M5 6.3l3 2.7 3-2.7"/><path d="M2.5 11v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/></svg>',
+  recap:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M3 4h10M3 8h10M3 12h6"/></svg>',
+  plan: '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="2.5" width="10" height="11.5" rx="1"/><path d="M6 1.5h4v1.6H6z" fill="currentColor" stroke="none"/><path d="M5.5 7.2l1.3 1.3L9.6 5.7M5.5 10.8h5"/></svg>',
+  fast: '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M8.6 1.3 3 9h4l-.9 5.7L13 7H9z" fill="currentColor"/></svg>',
+  review:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="6.8" cy="6.8" r="4.3"/><path d="M10.1 10.1 14 14"/></svg>',
+  export:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9V2M5.3 4.7 8 2l2.7 2.7"/><path d="M2.5 11v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/></svg>',
+} as const satisfies Record<string, string>;
+
 export function renderShell(webview: vscode.Webview, options: ChatShellOptions): string {
   const nonce = randomBytes(16).toString('base64');
   const csp = chatCsp(webview.cspSource, nonce);
@@ -1799,17 +1828,17 @@ ${chatStyles()}
     <div id="commands" hidden></div>
     <textarea id="input" placeholder="${options.agentLabel}への指示を入力（Ctrl+Enterで送信、画像はCtrl+Vで貼り付け）"></textarea>
     <input id="filePicker" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
-    <button id="attach" type="button" class="secondary" title="画像を選んで添えます。貼り付け（Ctrl+V）とドラッグ&amp;ドロップもできます">画像</button>
+    <button id="attach" type="button" class="secondary" title="画像を選んで添えます。貼り付け（Ctrl+V）とドラッグ&amp;ドロップもできます">${COMPOSER_ICONS.attach}</button>
     <button id="send" type="button">送信</button>
-    <button id="stop" type="button" class="secondary" title="Escでも中断できます" hidden>中断</button>
-    <button id="loopToggle" type="button" class="secondary" title="同じ指示を条件成立まで繰り返します">ループ</button>
-    <button id="compact" type="button" class="secondary" title="これまでの会話を要約に置き換えてコンテキストを空けます">圧縮</button>
-    <button id="claudeImport" type="button" class="secondary" title="Codex／Geminiの設定をClaude Codeへ取り込む準備をします"${options.showImport === true ? '' : ' hidden'}>インポート</button>
-    <button id="recap" type="button" class="secondary" title="会話の1行要約をいま作ります（要約は会話に残ります）"${options.showRecap === true ? '' : ' hidden'}>要約</button>
-    <button id="planToggle" type="button" class="secondary" aria-pressed="false" title="読み取りだけに絞って計画を立てさせます。ファイルは変更されません">計画</button>
-    <button id="fastToggle" type="button" class="secondary" aria-pressed="false" title="応答を速くします（Fast mode）" hidden>高速</button>
-    <button id="review" type="button" class="secondary" title="コードレビューを実行します"${options.review.mode === 'command' ? ' hidden' : ''}>レビュー</button>
-    <button id="exportTranscript" type="button" class="secondary" title="会話全体をMarkdownとして取り出します（コピー・ファイル保存・生テキスト表示）">エクスポート</button>
+    <button id="stop" type="button" class="secondary" title="Escでも中断できます" hidden>${COMPOSER_ICONS.stop}</button>
+    <button id="loopToggle" type="button" class="secondary" title="同じ指示を条件成立まで繰り返します">${COMPOSER_ICONS.loop}</button>
+    <button id="compact" type="button" class="secondary" title="これまでの会話を要約に置き換えてコンテキストを空けます">${COMPOSER_ICONS.compact}</button>
+    <button id="claudeImport" type="button" class="secondary" title="Codex／Geminiの設定をClaude Codeへ取り込む準備をします"${options.showImport === true ? '' : ' hidden'}>${COMPOSER_ICONS.import}</button>
+    <button id="recap" type="button" class="secondary" title="会話の1行要約をいま作ります（要約は会話に残ります）"${options.showRecap === true ? '' : ' hidden'}>${COMPOSER_ICONS.recap}</button>
+    <button id="planToggle" type="button" class="secondary" aria-pressed="false" title="読み取りだけに絞って計画を立てさせます。ファイルは変更されません">${COMPOSER_ICONS.plan}</button>
+    <button id="fastToggle" type="button" class="secondary" aria-pressed="false" title="応答を速くします（Fast mode）" hidden>${COMPOSER_ICONS.fast}</button>
+    <button id="review" type="button" class="secondary" title="コードレビューを実行します"${options.review.mode === 'command' ? ' hidden' : ''}>${COMPOSER_ICONS.review}</button>
+    <button id="exportTranscript" type="button" class="secondary" title="会話全体をMarkdownとして取り出します（コピー・ファイル保存・生テキスト表示）">${COMPOSER_ICONS.export}</button>
   </div>
   <div id="loop" hidden>
     <label>初回指示（空なら継続指示から始めます）
