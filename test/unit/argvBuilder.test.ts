@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildLaunchEnv,
   buildShellArgs,
+  describeUnsafeCombination,
   isSessionId,
   isUnsafeCombination,
 } from '../../src/codex/argvBuilder';
@@ -123,6 +124,50 @@ describe('buildShellArgs', () => {
     expect(warnings[0]).toContain('codex.approvalsReviewer');
   });
 
+  it('bypassApprovalsAndSandbox で専用フラグを渡す（issue #222）', () => {
+    const { args, warnings } = buildShellArgs({
+      target: { kind: 'new' },
+      cwd: CWD,
+      config: config({ bypassApprovalsAndSandbox: true }),
+    });
+    expect(args).toEqual(['-C', CWD, '--dangerously-bypass-approvals-and-sandbox']);
+    expect(warnings).toEqual([]);
+  });
+
+  it('bypass のときは -s / -a / --approve-for-me を渡さない', () => {
+    // CLIは併用を弾かないが、どちらが勝つかがヘルプに書かれていない。渡す引数の
+    // 意味が一意に決まるよう、こちら側で落とす
+    const { args, warnings } = buildShellArgs({
+      target: { kind: 'new' },
+      cwd: CWD,
+      config: config({
+        bypassApprovalsAndSandbox: true,
+        sandbox: 'read-only',
+        approvalMode: 'untrusted',
+        approvalsReviewer: 'auto_review',
+      }),
+    });
+    expect(args).toEqual(['-C', CWD, '--dangerously-bypass-approvals-and-sandbox']);
+    expect(warnings[0]).toContain('codex.bypassApprovalsAndSandbox');
+  });
+
+  it('bypass でも -m や -p のように承認と無関係な指定は残す', () => {
+    const { args } = buildShellArgs({
+      target: { kind: 'new' },
+      cwd: CWD,
+      config: config({ bypassApprovalsAndSandbox: true, model: 'gpt-5', profile: 'work' }),
+    });
+    expect(args).toEqual([
+      '-C',
+      CWD,
+      '-m',
+      'gpt-5',
+      '-p',
+      'work',
+      '--dangerously-bypass-approvals-and-sandbox',
+    ]);
+  });
+
   it('session idがUUID形式でなければ例外を投げる（引数注入の防止）', () => {
     expect(() =>
       buildShellArgs({
@@ -192,6 +237,51 @@ describe('isUnsafeCombination', () => {
     expect(
       isUnsafeCombination(config({ sandbox: 'workspace-write', approvalsReviewer: 'auto_review' })),
     ).toBe(false);
+  });
+
+  it('bypassApprovalsAndSandbox は単独で真（issue #222）', () => {
+    // 保護を両方外すという意味では danger-full-access + never と同じだが、
+    // こちらはサンドボックス自体を張らない。sandbox の値によらず確認を出す
+    expect(isUnsafeCombination(config({ bypassApprovalsAndSandbox: true }))).toBe(true);
+    expect(
+      isUnsafeCombination(config({ bypassApprovalsAndSandbox: true, sandbox: 'read-only' })),
+    ).toBe(true);
+  });
+});
+
+describe('describeUnsafeCombination', () => {
+  it('安全な設定では何も返さない', () => {
+    expect(describeUnsafeCombination(config())).toBeUndefined();
+    expect(describeUnsafeCombination(config({ sandbox: 'workspace-write' }))).toBeUndefined();
+  });
+
+  it('何がどう危ないかを述べる（確認ダイアログの本文）', () => {
+    expect(describeUnsafeCombination(config({ bypassApprovalsAndSandbox: true }))).toBe(
+      'サンドボックスを張らず、確認も一切求めずに実行します。ファイルの書き換えもネットワークも制限されません。',
+    );
+    expect(
+      describeUnsafeCombination(config({ sandbox: 'danger-full-access', approvalMode: 'never' })),
+    ).toBe('制限なしのサンドボックスで、承認を一切求めずに実行します。');
+    expect(
+      describeUnsafeCombination(
+        config({ sandbox: 'danger-full-access', approvalsReviewer: 'auto_review' }),
+      ),
+    ).toBe(
+      '制限なしのサンドボックスで、承認をCodex内部のsubagentが自動で判定します。人には回りません。',
+    );
+  });
+
+  it('bypassは他の組み合わせより先に説明する', () => {
+    // 両方当てはまる場合、実際に効くのはbypass側（argvも app-server の指定もそちらが勝つ）
+    expect(
+      describeUnsafeCombination(
+        config({
+          bypassApprovalsAndSandbox: true,
+          sandbox: 'danger-full-access',
+          approvalMode: 'never',
+        }),
+      ),
+    ).toContain('サンドボックスを張らず');
   });
 });
 

@@ -16,7 +16,7 @@
  * 送った文面をそのまま送る。
  */
 
-import { sandboxPolicyFor, type SandboxOptions } from '../codex/sandboxPolicy';
+import { bypassSandboxPolicy, sandboxPolicyFor, type SandboxOptions } from '../codex/sandboxPolicy';
 
 /** ターンへ載せる権限。app-serverの形をそのまま持つ。 */
 export interface TurnPolicy {
@@ -62,14 +62,16 @@ export interface TurnPolicyPatch {
 /**
  * そのターンへ載せる権限を決める。`undefined` なら何も載せない。
  *
- * 優先順位は Plan mode > 設定のサンドボックス > 開始時の権限（Plan modeからの復帰用）。
- * Plan modeが最優先なのは「書けないこと」を権限で保証するため。
+ * 優先順位は Plan mode > bypass > 設定のサンドボックス > 開始時の権限（Plan modeからの復帰用）。
+ * Plan modeが最優先なのは「書けないこと」を権限で保証するため。保護を外す指定
+ * （`bypassApprovalsAndSandbox`）に負けてはならない。
  *
  * @param planMode いまPlan modeか
  * @param baseline 開始時に控えた権限。Plan modeを抜けるときの戻し先
  * @param overridden 一度でもPlan modeの権限を送ったか。送っていれば明示的に戻す必要がある
  * @param sandbox 設定のサンドボックス。空文字はCLI側の設定へ委ねる
  * @param options `workspace-write` のときの書き込み範囲とネットワーク
+ * @param bypass 承認もサンドボックスも外すか（issue #222）
  */
 export function turnPolicyFor(
   planMode: boolean,
@@ -77,9 +79,16 @@ export function turnPolicyFor(
   overridden: boolean,
   sandbox: string,
   options?: SandboxOptions,
+  bypass = false,
 ): TurnPolicyPatch | undefined {
   if (planMode) {
     return PLAN_POLICY;
+  }
+
+  if (bypass) {
+    // `thread/start` は `SandboxMode` の3値しか取らないため、フラグ相当の指定は
+    // ここでしか表現できない。承認側と組にして初めてフラグ1枚と同じ意味になる
+    return { approvalPolicy: 'never', sandboxPolicy: bypassSandboxPolicy() };
   }
 
   const fromConfig = sandboxPolicyFor(sandbox, options);

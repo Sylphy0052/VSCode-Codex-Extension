@@ -2653,11 +2653,37 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 拒否（`denied`）と時間切れ（`timedOut`）だけは`ChatSession.deniedReviews`へ覚えておき、`thread/approveGuardianDeniedAction`で人が覆せるようにする。この要求は`event`に「シリアライズ済みの`GuardianAssessmentEvent`」を求めるがスキーマは中身を定義していないため、届いた完了通知をそのまま返す以外に組み立てようが無い。承認済みの審査を覚えないのは、後から「承認済みのものを承認し直す」要求を送れてしまうため。
 
-#### 残課題（issue #222に残す）
+#### 残課題
 
-- `--dangerously-bypass-approvals-and-sandbox`は未対応。
-- `isUnsafeCombination`は**まだどこからも呼ばれていない**（ユニットテストのみ）。危険な組み合わせを選んだときにモーダルで同意を取る配線は、本issue以前から欠けたままになっている。
-- 設定パネル（`settingsProvider` / `controlPanelView`）へ`approvalsReviewer`の選択肢を出す実装。現状はVS Codeの設定画面（`codex.approvalsReviewer`）からのみ変えられる。
+設定パネル（`settingsProvider` / `controlPanelView`）へ`approvalsReviewer`の選択肢を出す実装は入れていない。現状はVS Codeの設定画面（`codex.approvalsReviewer`）からのみ変えられる。
+
+### 14.45 承認とサンドボックスを外す（`--dangerously-bypass-approvals-and-sandbox`、issue #222）
+
+`danger-full-access` + `never`と違い、**サンドボックス自体を張らない**。外側で隔離済みの環境向け。値の意味と実測は[approval-modes.md](approval-modes.md)にまとめてあり、ここには設計判断だけを残す。
+
+#### 真偽値の別軸として持つ
+
+`codex.bypassApprovalsAndSandbox`。`approvalsReviewer`と同じ理由で、`SANDBOX_MODES` / `APPROVAL_MODES`へ値を足さない。これらは**宣言順＝安全順**という前提を持ち、Shift+Tabの循環とYAMLのクランプ（§16.16）がその順序に依存している。「サンドボックスを張らない」はその順序の外側にある。
+
+#### ターン側でしか表現できない
+
+実測では`SandboxPolicy`に`externalSandbox`があり、承認側の`approvalPolicy: never`と組にしてフラグ1枚と同じ意味になる。ただし`ThreadStartParams`は`sandbox`（`SandboxMode`の3値）しか取らず`sandboxPolicy`を持たない。`sandboxPolicy`を取るのは`TurnStartParams`だけであるため、`thread/start`では表現できない。
+
+有効なときは`thread/start`へ承認まわりを一切載せず、ターンごとに`turnPolicyFor`が組を送る。中途半端な値（`sandbox: danger-full-access`など）を送ると、ターン側の指定が届くまでの間だけ別の権限で動くことになる。
+
+#### 優先順位
+
+`Plan mode` > `bypass` > 設定のサンドボックス。計画モードが最優先なのは、読み取り専用の保証（`PLAN_POLICY`、§14.10）が人の承認を前提にしているため。保護を外す指定に負けてはならない。
+
+端末起動（`buildShellArgs`）では、有効なときに`-s` / `-a` / `--approve-for-me`を渡さない。CLIは併用を弾かない（`codex -s read-only --dangerously-bypass-approvals-and-sandbox --version`がパースを通ることを実測）が、どちらが勝つかがヘルプに書かれていないため、引数の意味が一意に決まるようこちらで落として警告を出す。
+
+#### 会話を開くたびに同意を取る
+
+`isUnsafeCombination`が単独で真を返す。この関数は本issueまで**どこからも呼ばれていなかった**ため、あわせて配線した（`confirmUnsafeCombination`、`ChatViewManager.openNew`）。`danger-full-access` + `never`と`danger-full-access` + `auto_review`も同時に確認の対象になる。
+
+確認の本文には設定キー名ではなく**何が起きるか**を書く（`describeUnsafeCombination`）。設定を変えた本人でも、別の日に開いた会話でそれが効いていることは忘れる。当てはまるものが複数ある場合は、実際に効くほう（`bypass`）を述べる。
+
+タスクセッション（`openTaskSession`）は無人実行で人が答えられないため、確認を挟む代わりに`toCodexConfig`が`false`を固定して危険な値を持ち込ませない。
 
 
 ## 15. 作業記録（日報・週報連携）

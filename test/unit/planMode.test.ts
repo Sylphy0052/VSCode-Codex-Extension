@@ -71,6 +71,27 @@ describe('turnPolicyFor', () => {
     expect(turnPolicyFor(false, undefined, true, '')).toBeUndefined();
   });
 
+  it('bypassのときはサンドボックスを張らず承認も求めない（issue #222）', () => {
+    // thread/start は SandboxMode の3値しか取らないため、フラグ相当の指定は
+    // ターン側の sandboxPolicy でしか表現できない
+    expect(turnPolicyFor(false, baseline, false, '', undefined, true)).toEqual({
+      approvalPolicy: 'never',
+      sandboxPolicy: { type: 'externalSandbox' },
+    });
+  });
+
+  it('bypassは設定のサンドボックスより優先する', () => {
+    expect(turnPolicyFor(false, baseline, false, 'read-only', undefined, true)).toEqual({
+      approvalPolicy: 'never',
+      sandboxPolicy: { type: 'externalSandbox' },
+    });
+  });
+
+  it('計画モードはbypassより優先する', () => {
+    // 読み取り専用の保証は人の承認を前提にしている。保護を外す指定に負けてはいけない
+    expect(turnPolicyFor(true, baseline, false, '', undefined, true)).toEqual(PLAN_POLICY);
+  });
+
   it('書き込み範囲とネットワークの指定を載せる', () => {
     expect(
       turnPolicyFor(false, baseline, false, 'workspace-write', {

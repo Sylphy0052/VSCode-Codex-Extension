@@ -86,33 +86,50 @@ export function buildShellArgs(input: BuildInput): BuildResult {
     args.push('-p', config.profile);
   }
 
-  if (config.sandbox !== '') {
-    if (isSandboxMode(config.sandbox)) {
-      args.push('-s', config.sandbox);
-    } else {
-      warnings.push(`codex.sandbox の値が不正なため無視します: ${config.sandbox}`);
-    }
-  }
-
-  if (config.approvalMode !== '') {
-    if (isApprovalMode(config.approvalMode)) {
-      args.push('-a', config.approvalMode);
-    } else {
-      warnings.push(`codex.approvalMode の値が不正なため無視します: ${config.approvalMode}`);
-    }
-  }
-
-  if (config.approvalsReviewer !== '') {
-    if (isApprovalsReviewer(config.approvalsReviewer)) {
-      // `user` はCodex側の既定と同じなので、フラグを増やさない。
-      // 専用フラグがあるのは自動レビュー側だけ（`--approve-for-me`。0.147.0で確認）。
-      if (config.approvalsReviewer === 'auto_review') {
-        args.push('--approve-for-me');
-      }
-    } else {
+  if (config.bypassApprovalsAndSandbox) {
+    // 承認もサンドボックスも外す（issue #222）。CLIは `-s` / `-a` / `--approve-for-me` との
+    // 併用を弾かないが、どちらが勝つかがヘルプに書かれていない。渡す引数の意味が一意に
+    // 決まるよう、承認まわりの指定はこちらで落として、落としたことを知らせる
+    const dropped = [
+      config.sandbox !== '' ? '-s' : '',
+      config.approvalMode !== '' ? '-a' : '',
+      config.approvalsReviewer === 'auto_review' ? '--approve-for-me' : '',
+    ].filter((flag) => flag !== '');
+    if (dropped.length > 0) {
       warnings.push(
-        `codex.approvalsReviewer の値が不正なため無視します: ${config.approvalsReviewer}`,
+        `codex.bypassApprovalsAndSandbox が有効なため次の指定を渡しません: ${dropped.join(' / ')}`,
       );
+    }
+    args.push('--dangerously-bypass-approvals-and-sandbox');
+  } else {
+    if (config.sandbox !== '') {
+      if (isSandboxMode(config.sandbox)) {
+        args.push('-s', config.sandbox);
+      } else {
+        warnings.push(`codex.sandbox の値が不正なため無視します: ${config.sandbox}`);
+      }
+    }
+
+    if (config.approvalMode !== '') {
+      if (isApprovalMode(config.approvalMode)) {
+        args.push('-a', config.approvalMode);
+      } else {
+        warnings.push(`codex.approvalMode の値が不正なため無視します: ${config.approvalMode}`);
+      }
+    }
+
+    if (config.approvalsReviewer !== '') {
+      if (isApprovalsReviewer(config.approvalsReviewer)) {
+        // `user` はCodex側の既定と同じなので、フラグを増やさない。
+        // 専用フラグがあるのは自動レビュー側だけ（`--approve-for-me`。0.147.0で確認）。
+        if (config.approvalsReviewer === 'auto_review') {
+          args.push('--approve-for-me');
+        }
+      } else {
+        warnings.push(
+          `codex.approvalsReviewer の値が不正なため無視します: ${config.approvalsReviewer}`,
+        );
+      }
     }
   }
 
@@ -130,16 +147,38 @@ export function buildShellArgs(input: BuildInput): BuildResult {
 /**
  * Codexの保護を両方とも外す組み合わせ。起動前に確認ダイアログを出す（設計書 §7）。
  *
+ * - `bypassApprovalsAndSandbox`: 単独で該当する（issue #222）。他の3つと違って
+ *   サンドボックス自体を張らないため、`sandbox` に何が入っていても意味を持たない。
  * - `sandbox: danger-full-access` かつ `approvalMode: never`: 承認要求そのものが出ない。
  * - `sandbox: danger-full-access` かつ `approvalsReviewer: auto_review`: 承認要求は出るが、
  *   人ではなくsubagentが答える。制限なしのサンドボックスと組むと、機械の判定だけで
  *   マシン全体への操作が通る。`never` と同じ重さで扱う。
  */
 export function isUnsafeCombination(config: CodexConfig): boolean {
-  if (config.sandbox !== 'danger-full-access') {
-    return false;
+  return describeUnsafeCombination(config) !== undefined;
+}
+
+/**
+ * 保護を外した組み合わせが何をもたらすかの説明。安全なら `undefined`。
+ *
+ * 確認ダイアログの本文に使う。**何が起きるか**を書く（設定キー名を並べるだけでは、
+ * 押してよいかを判断できない）。当てはまるものが複数ある場合は、実際に効くほうを
+ * 述べる（`bypass` は他の指定を打ち消して勝つ。`buildShellArgs` / `turnPolicyFor` 参照）。
+ */
+export function describeUnsafeCombination(config: CodexConfig): string | undefined {
+  if (config.bypassApprovalsAndSandbox) {
+    return 'サンドボックスを張らず、確認も一切求めずに実行します。ファイルの書き換えもネットワークも制限されません。';
   }
-  return config.approvalMode === 'never' || config.approvalsReviewer === 'auto_review';
+  if (config.sandbox !== 'danger-full-access') {
+    return undefined;
+  }
+  if (config.approvalMode === 'never') {
+    return '制限なしのサンドボックスで、承認を一切求めずに実行します。';
+  }
+  if (config.approvalsReviewer === 'auto_review') {
+    return '制限なしのサンドボックスで、承認をCodex内部のsubagentが自動で判定します。人には回りません。';
+  }
+  return undefined;
 }
 
 /** 端末に渡す環境変数。一意タグで session_id を確定的に紐付ける（設計書 §9.1）。 */

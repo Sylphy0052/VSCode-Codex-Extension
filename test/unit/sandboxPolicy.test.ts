@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { isSandboxRelaxed, sandboxPolicyFor } from '../../src/codex/sandboxPolicy';
+import {
+  bypassSandboxPolicy,
+  isSandboxRelaxed,
+  sandboxPolicyFor,
+} from '../../src/codex/sandboxPolicy';
 
 describe('sandboxPolicyFor', () => {
   it('設定が空なら何も返さない（CLI側の設定へ委ねる）', () => {
@@ -17,6 +21,12 @@ describe('sandboxPolicyFor', () => {
 
   it('全許可', () => {
     expect(sandboxPolicyFor('danger-full-access')).toEqual({ type: 'dangerFullAccess' });
+  });
+
+  it('サンドボックスを張らない指定（issue #222）', () => {
+    // `--dangerously-bypass-approvals-and-sandbox` に相当する。CLIのヘルプが言う
+    // 「外側で隔離済みの環境向け」がスキーマ上の externalSandbox にあたる
+    expect(bypassSandboxPolicy()).toEqual({ type: 'externalSandbox' });
   });
 
   it('知らない値は何も返さない', () => {
