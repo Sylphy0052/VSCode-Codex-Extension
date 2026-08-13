@@ -104,6 +104,31 @@ describe('normalizeItem / 画像', () => {
     ]);
   });
 
+  it('生成できたときは result のbase64を本文に出さない', () => {
+    // 実測（Codex CLI 0.147.0）: result は生成した画像そのもののbase64で、
+    // 2MBを超えることがある。サムネイル（savedPath）と修正後のプロンプトで足りる。
+    const item = normalizeItem({
+      id: 'g1',
+      type: 'imageGeneration',
+      status: 'completed',
+      result: 'iVBORw0KGgoAAAANSUhEUgAABOY'.repeat(1000),
+      savedPath: '/tmp/out.png',
+      revisedPrompt: '青い猫',
+    });
+    expect(item?.text).toBe('');
+  });
+
+  it('失敗したときの理由が長すぎれば切り詰める', () => {
+    const item = normalizeItem({
+      id: 'g3',
+      type: 'imageGeneration',
+      status: 'failed',
+      result: 'x'.repeat(5000),
+    });
+    expect(item?.text.length).toBeLessThan(5000);
+    expect(item?.text.endsWith('…')).toBe(true);
+  });
+
   it('生成に失敗した場合は画像を持たない', () => {
     const item = normalizeItem({
       id: 'g2',

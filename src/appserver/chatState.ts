@@ -88,6 +88,25 @@ export interface ChatItem {
  */
 export const MAX_OUTPUT_CHARS = 200_000;
 
+/** 画像生成に失敗したときの理由をそのまま出す上限。base64が紛れても画面を埋めない長さにする。 */
+export const MAX_IMAGE_RESULT_CHARS = 2_000;
+
+/**
+ * 画像生成の本文（issue #247）。
+ *
+ * `result` は生成した画像そのもののbase64で、2MBを超えることがある（Codex CLI 0.147.0で実測）。
+ * 保存先があるならサムネイルと修正後のプロンプトで足りるため、本文には出さない。
+ * 保存先が無い（失敗した）ときだけ理由として出し、長すぎるものは切り詰める。
+ */
+export function imageGenerationText(result: string, savedPath: string): string {
+  if (savedPath !== '') {
+    return '';
+  }
+  return result.length <= MAX_IMAGE_RESULT_CHARS
+    ? result
+    : `${result.slice(0, MAX_IMAGE_RESULT_CHARS)}…`;
+}
+
 /**
  * コマンド出力を上限まで切り詰める。
  *
@@ -659,7 +678,7 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
       const savedPath = str(item['savedPath']);
       return {
         ...base,
-        text: str(item['result']),
+        text: imageGenerationText(str(item['result']), savedPath),
         detail: str(item['revisedPrompt']),
         images:
           savedPath === ''
