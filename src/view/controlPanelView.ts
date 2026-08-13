@@ -80,6 +80,23 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     void this.post();
   }
 
+  /**
+   * 指定したセクションを展開させる（issue #227、design.md §14.34）。
+   *
+   * webview→ホストの`toggleSection`（セクションを展開したときの遅延取得、issue #225）とは
+   * 逆向き（ホスト→webview）の経路がこれまで無かったため、新しく`openSection`メッセージを
+   * 追加した。webview側（`controlPanelScript.ts`）はこれを受けてプロバイダのタブを
+   * 切り替え、対象の`<details>`を`open = true`にする。それが`toggle`イベントを起こし、
+   * 既存の`toggleSection`往復（→`ensureSectionLoaded`）へそのまま合流する。
+   *
+   * `view`がまだ無い（パネルを一度も開いていない）間は送り先が無いため何もしない。
+   * 呼び出し側（`extension.ts`）は`codex.controlPanel.focus`コマンドで先にパネル自体を
+   * 開いてから呼ぶ（`codex.showUsage`コマンドと同じ順序）。
+   */
+  revealSection(id: SectionId): void {
+    void this.view?.webview.postMessage({ type: 'openSection', id });
+  }
+
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     view.webview.options = { enableScripts: true };

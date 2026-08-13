@@ -198,3 +198,27 @@ describe('ControlPanelViewProviderのセクション遅延取得（issue #225）
     },
   );
 });
+
+describe('ControlPanelViewProvider.revealSection（issue #227、ホスト→webviewの逆向き経路）', () => {
+  it('パネルを開いた状態でrevealSectionを呼ぶと、openSectionメッセージを対象セクションのidで送る', async () => {
+    const { settings } = fakeSettingsProvider();
+    const { logger } = fakeLogger();
+    const provider = new ControlPanelViewProvider(settings, logger);
+    const { view, sent } = fakeWebviewView();
+    provider.resolveWebviewView(view as never);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    provider.revealSection('codexImport');
+
+    expect(sent).toContainEqual({ type: 'openSection', id: 'codexImport' });
+  });
+
+  it('パネルを一度も開いていない（viewが無い）間は何もしない（例外を投げない）', () => {
+    const { settings } = fakeSettingsProvider();
+    const { logger } = fakeLogger();
+    const provider = new ControlPanelViewProvider(settings, logger);
+
+    expect(() => provider.revealSection('codexImport')).not.toThrow();
+  });
+});

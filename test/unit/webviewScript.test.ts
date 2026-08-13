@@ -116,6 +116,18 @@ describe('controlPanelScript', () => {
     // 必ず同時に書く1箇所（saveState）にまとまっていることを確かめる
     expect(source.match(/vscode\.setState\(/g)?.length).toBe(1);
   });
+
+  it(
+    'ホストからのopenSectionメッセージを受けてセクションを展開する（issue #227、' +
+      'toggleSectionとは逆向きのホスト→webview経路）',
+    () => {
+      const source = controlPanelScript();
+      expect(source).toContain("event.data.type === 'openSection'");
+      // 新しく取得ロジックを重複させず、既存のtoggleイベント（details.open代入）へ
+      // 合流させる実装になっていることを確かめる
+      expect(source).toContain('details.open = true');
+    },
+  );
 });
 
 describe('workflowScript', () => {

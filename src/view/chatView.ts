@@ -597,6 +597,14 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
      * 開き直す（design.md §16.10の7）。
      */
     private readonly isTaskManagedThread: (threadId: string) => boolean = () => false,
+    /**
+     * インポートボタン（issue #227）を押したときに呼ぶ。設定パネルを表示して
+     * 「他エージェントからの設定インポート」のセクションを展開する実処理は
+     * `extension.ts`側（`ControlPanelViewProvider.revealSection`と
+     * `codex.controlPanel.focus`コマンド）に委ねる。ここでは呼ぶことだけを約束し、
+     * 実際にパネルを持たないユニットテストからは差し替えて「呼ばれたか」だけを見る。
+     */
+    private readonly revealImportSection: () => void | Promise<void> = () => undefined,
     /** テスト用の差し替え口。既定は実際にapp-serverプロセスへ繋ぐ本物の接続。 */
     connectionFactory: (
       onNotification: NotificationHandler,
@@ -831,6 +839,14 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       // 会話の1行要約（issue #228、design.md §14.41）。拡張機能の独自機能として、
       // 要約を依頼する指示文を通常のターンとして送る（`ChatSession.recap()`）
       showRecap: true,
+      // 他エージェントからの設定インポートの入口（issue #227、design.md §14.42）。
+      // 機能の実体はコントロールパネルの一覧UI（issue #36）にあるため、押したときは
+      // 会話へは何も送らず、パネルを表示してインポートのセクションを開くだけにする
+      // （`handleMessage`の`claudeImport`分岐、`revealImportSection`参照）。
+      showImport: {
+        ariaLabel: 'インポート設定を開く',
+        title: '設定パネルの「他エージェントからの設定インポート」を開きます',
+      },
     });
 
     panel.webview.onDidReceiveMessage(
@@ -1111,6 +1127,12 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
         // （`planMode`と同じ扱い。issue #228）
         entry.loop.noteUserAction();
         await entry.session.recap(entry.taskConfig ?? readConfig().codex);
+        return;
+      }
+      if (type === 'claudeImport') {
+        // 会話への送信は起きない（`ChatShellOptions.showImport`のJSDoc参照）ため、
+        // ループへの割り込み扱い（`noteUserAction`）はしない
+        await this.revealImportSection();
         return;
       }
       if (type === 'planMode') {
@@ -1720,13 +1742,17 @@ export interface ChatShellOptions {
    */
   showInputModeHints?: boolean;
   /**
-   * 「他エージェントから設定をインポート」ボタンを出すか（Claude Code画面のみ、
-   * issue #200、design.md TP-88）。
+   * 「他エージェントから設定をインポート」ボタンを出すか。
    *
-   * Codexは同じ機能をコントロールパネルの一覧UI（issue #36）で持っており、この会話
-   * ボタンとは別導線。二重導線を避けるためCodex画面には出さない。
+   * 押したときの動きはプロバイダごとに違う。Claude Code（issue #200、design.md §14.34、
+   * TP-88）は`/import` のプレビューを会話へ送る。Codex（issue #227、design.md §14.42）は
+   * 同じ機能を既にコントロールパネルの一覧UI（issue #36）で持っているため、二重実装は
+   * せず、設定パネルを表示して「他エージェントからの設定インポート」のセクションを
+   * 展開するだけに留める。動きが違う以上ボタンの`aria-label`・`title`も揃えられないため、
+   * `true`（Claude Codeの既定文言のまま出す）か、文言を差し替えるオブジェクトかを選べる
+   * ようにしている。
    */
-  showImport?: boolean;
+  showImport?: boolean | { ariaLabel: string; title: string };
   /**
    * 「会話の1行要約」ボタンを出すか（Claude Code画面: issue #203、design.md §14.36。
    * Codex画面: issue #228、design.md §14.41）。
@@ -1801,9 +1827,18 @@ const COMPOSER_ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9V2M5.3 4.7 8 2l2.7 2.7"/><path d="M2.5 11v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/></svg>',
 } as const satisfies Record<string, string>;
 
+/** Claude Code画面の既定のインポートボタン文言（`showImport: true` のときに使う）。 */
+const DEFAULT_IMPORT_BUTTON_COPY = {
+  ariaLabel: 'インポート',
+  title: 'Codex／Geminiの設定をClaude Codeへ取り込む準備をします',
+} as const;
+
 export function renderShell(webview: vscode.Webview, options: ChatShellOptions): string {
   const nonce = randomBytes(16).toString('base64');
   const csp = chatCsp(webview.cspSource, nonce);
+  const showImportButton = options.showImport === true || typeof options.showImport === 'object';
+  const importCopy =
+    typeof options.showImport === 'object' ? options.showImport : DEFAULT_IMPORT_BUTTON_COPY;
 
   return `<!DOCTYPE html>
 <html lang="ja">
@@ -1850,7 +1885,7 @@ ${chatStyles()}
     <button id="stop" type="button" class="secondary" aria-label="中断" title="Escでも中断できます" hidden>${COMPOSER_ICONS.stop}</button>
     <button id="loopToggle" type="button" class="secondary" aria-label="ループ" title="同じ指示を条件成立まで繰り返します">${COMPOSER_ICONS.loop}</button>
     <button id="compact" type="button" class="secondary" aria-label="圧縮" title="これまでの会話を要約に置き換えてコンテキストを空けます">${COMPOSER_ICONS.compact}</button>
-    <button id="claudeImport" type="button" class="secondary" aria-label="インポート" title="Codex／Geminiの設定をClaude Codeへ取り込む準備をします"${options.showImport === true ? '' : ' hidden'}>${COMPOSER_ICONS.import}</button>
+    <button id="claudeImport" type="button" class="secondary" aria-label="${escapeHtml(importCopy.ariaLabel)}" title="${escapeHtml(importCopy.title)}"${showImportButton ? '' : ' hidden'}>${COMPOSER_ICONS.import}</button>
     <button id="recap" type="button" class="secondary" aria-label="要約" title="会話の1行要約をいま作ります（要約は会話に残ります）"${options.showRecap === true ? '' : ' hidden'}>${COMPOSER_ICONS.recap}</button>
     <button id="planToggle" type="button" class="secondary" aria-pressed="false" aria-label="計画" title="読み取りだけに絞って計画を立てさせます。ファイルは変更されません">${COMPOSER_ICONS.plan}</button>
     <button id="fastToggle" type="button" class="secondary" aria-pressed="false" aria-label="高速" title="応答を速くします（Fast mode）" hidden>${COMPOSER_ICONS.fast}</button>

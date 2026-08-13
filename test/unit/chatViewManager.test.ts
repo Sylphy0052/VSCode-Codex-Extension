@@ -74,6 +74,7 @@ async function tick(times = 5): Promise<void> {
 function createManager(options?: {
   isTaskManagedThread?: (threadId: string) => boolean;
   onActivity?: (activity: ChatActivity) => void;
+  revealImportSection?: () => void | Promise<void>;
 }): {
   manager: ChatViewManager;
   connection: FakeAppServerConnection;
@@ -88,6 +89,7 @@ function createManager(options?: {
     fakeLogger,
     options?.onActivity ?? (() => undefined),
     options?.isTaskManagedThread ?? (() => false),
+    options?.revealImportSection ?? (() => undefined),
     factory,
   );
   return { manager, connection: connection() };
@@ -439,6 +441,32 @@ describe('ChatViewManager', () => {
       await p;
       expect(manager.isOpen('thread-x')).toBe(true);
     });
+
+    it(
+      'インポートボタン（claudeImport）を押すと、会話へは何も送らずrevealImportSectionだけを' +
+        '呼ぶ（issue #227、設定パネルを表示してセクションを開く経路はrevealImportSection側の責務）',
+      async () => {
+        let revealCalls = 0;
+        const { manager, connection } = createManager({
+          revealImportSection: () => {
+            revealCalls += 1;
+          },
+        });
+        const p = manager.openNew();
+        await tick();
+        connection.resolveFirst('thread/start', threadStartResult('thread-import'));
+        await p;
+
+        const panel = __mock.lastCreatedPanel();
+        panel?.webview.simulateMessage({ type: 'claudeImport' });
+        await tick();
+
+        expect(revealCalls).toBe(1);
+        // 会話への発言（turn/start）は起きない。Claude Code側の`/import`プレビュー送信とは
+        // 違い、押しても何も会話へ送らないのが仕様（`ChatShellOptions.showImport`のJSDoc参照）
+        expect(connection.requests.some((r) => r.method === 'turn/start')).toBe(false);
+      },
+    );
 
     it('履歴から開く（openThread）は既に開いていればreveal、無ければ作って resume する', async () => {
       const { manager, connection } = createManager();

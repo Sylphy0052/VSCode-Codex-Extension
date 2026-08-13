@@ -83,6 +83,53 @@ describe('renderShellのボタン（issue #226のアイコン化後、アクセ�
     expect(tag).toContain('hidden');
   });
 
+  describe('showImportに文言オブジェクトを渡したとき（issue #227、Codex画面）', () => {
+    const codexImportCopy = {
+      ariaLabel: 'インポート設定を開く',
+      title: '設定パネルの「他エージェントからの設定インポート」を開きます',
+    };
+
+    it('claudeImportボタンはhidden属性を持たない', () => {
+      const html = renderShell(
+        fakeWebview() as never,
+        buildOptions({ showImport: codexImportCopy }),
+      );
+      const tag = extractButtonOpenTag(html, 'claudeImport');
+
+      expect(tag).not.toContain('hidden');
+    });
+
+    it('渡した文言がそのままaria-label/titleに使われ、Claude Code画面の既定文言（showImport: true）とは異なる', () => {
+      const codexHtml = renderShell(
+        fakeWebview() as never,
+        buildOptions({ showImport: codexImportCopy }),
+      );
+      const codexTag = extractButtonOpenTag(codexHtml, 'claudeImport');
+      expect(codexTag).toContain(`aria-label="${codexImportCopy.ariaLabel}"`);
+      expect(codexTag).toContain(`title="${codexImportCopy.title}"`);
+
+      const claudeHtml = renderShell(
+        fakeWebview() as never,
+        buildOptions({ showImport: true }),
+      );
+      const claudeTag = extractButtonOpenTag(claudeHtml, 'claudeImport');
+
+      expect(codexTag).not.toContain(`aria-label="インポート"`);
+      expect(claudeTag).toContain('aria-label="インポート"');
+      expect(codexTag).not.toBe(claudeTag);
+    });
+  });
+
+  it('showImport: trueのとき（Claude Code画面）は従来通りの文言で、挙動が変わっていない', () => {
+    const html = renderShell(fakeWebview() as never, buildOptions({ showImport: true }));
+    const tag = extractButtonOpenTag(html, 'claudeImport');
+
+    expect(tag).toContain('aria-label="インポート"');
+    expect(tag).toContain(
+      'title="Codex／Geminiの設定をClaude Codeへ取り込む準備をします"',
+    );
+  });
+
   it('showRecapがtrueのときrecapボタンはhidden属性を持たない', () => {
     const html = renderShell(fakeWebview() as never, buildOptions({ showRecap: true }));
     const tag = extractButtonOpenTag(html, 'recap');

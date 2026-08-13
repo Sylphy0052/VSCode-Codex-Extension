@@ -2557,6 +2557,45 @@ Claude Code側は`/recap`をCLI内部が受け取り、会話が無い状態（`
 
 テストは`test/unit/chatSessionRecap.test.ts`（`ChatSession.recap()`単体。会話が空のときに`turn/start`を送らず一言だけ残すこと、会話があるときに`RECAP_INSTRUCTION`を通常のターンとして送ること）・`test/unit/chatViewManager.test.ts`（`recap`メッセージの配線）・`test/unit/chatView.test.ts`（`showRecap`によるボタンの表示切り替え）で検証する。手動確認手順は`docs/manual-test.md`のC-45に追加する。
 
+### 14.42 Codex画面へのインポートの入口の追加（issue #227、§14.30・§14.34の入口だけを増やす）
+
+実機確認（#189）の途中で見つかった非対称。「他エージェントからの設定インポート」はCodex側に既に機能自体がある（issue #36、§14.30、コントロールパネルの一覧UI）が、チャット画面のボタンはClaude Code側（issue #200、§14.34）にしか無く、「Codexにはインポートが無い」という誤解を生む見た目になっていた。
+
+#### 機能を二重に実装しない: 既にある導線への入口を増やすだけ
+
+Codex側の一覧UI（§14.30）はセクション展開時の遅延取得（issue #225）まで含めて完成しており、インポートの実行フロー自体（確認ダイアログ・`runCodexImport`・履歴表示）に変更は無い。本issueが足すのは「チャット画面から設定パネルのインポートのセクションへ辿り着く入口」だけで、実装もその方針に絞った。
+
+- Codex画面の`renderShell`にインポートボタンを出す（`ChatShellOptions.showImport`）
+- 押したら会話へは何も送らず、設定パネル（`codex.controlPanel`）を表示して「他エージェントからの設定インポート」のセクション（`section-codexImport`）を展開するだけ
+
+#### ボタンの動きがClaude Code側と違うため、`showImport`の型を広げた
+
+Claude Code側（§14.34）のボタンは`/import`のプレビューを会話へ送るが、Codex側は設定パネルを開くだけで会話には何も送らない。同じボタン（`id="claudeImport"`、`chatScript.ts`で共有）の`aria-label`・`title`をClaude Codeの「取り込む準備をします」のままにすると実際の動きと食い違うため、`ChatShellOptions.showImport`を`boolean | { ariaLabel: string; title: string }`へ広げた。`true`を渡すと従来通りClaude Codeの既定文言のまま出し（Claude Code側の呼び出し・挙動は変更していない）、Codex側は文言オブジェクト（`aria-label: "インポート設定を開く"`、`title: "設定パネルの「他エージェントからの設定インポート」を開きます"`）を渡して、実際の動きに合う文言を出す。
+
+#### ホスト→webviewの逆向き経路（`openSection`）を新設
+
+セクションの畳み・遅延取得（issue #225）が入ったことで、パネルを開くだけでは目的の一覧が見えなくなっていた（既定で畳まれている）。webview→ホストの`toggleSection`（セクションを展開したときに`ensureSectionLoaded`を呼ぶ経路）はあるが、逆向き（ホスト→webview、「このセクションを開け」）は無かったため新設した。
+
+- `ControlPanelViewProvider.revealSection(id)`（`src/view/controlPanelView.ts`）: `{ type: 'openSection', id }`をwebviewへ`postMessage`する
+- `controlPanelScript.ts`: `openSection`メッセージを受けたら、対象セクションのプロバイダタブへ切り替え（`selectProvider`）、対象の`<details>`を`open = true`にする。新しく取得ロジックを重複させず、既存の`toggle`イベント（`details.open`の変化で発火し`toggleSection`をホストへ送る、issue #225の実装）へそのまま合流させている。結果として`ensureSectionLoaded`は既存の経路のまま呼ばれる
+
+パネル自体を表示する（webviewビューが閉じている・一度も開かれていない状態から出す）には、VS Codeが自動生成する`codex.controlPanel.focus`コマンドを使う（`codex.showUsage`コマンドと同じ順序: `focus`を`await`してから`revealSection`を呼ぶ）。
+
+#### 実装
+
+- `src/view/chatView.ts`: `ChatShellOptions.showImport`の型を`boolean | { ariaLabel: string; title: string }`へ拡張し、JSDocを両プロバイダ対応の説明へ書き換え。`renderShell`は`showImport`がオブジェクトならその文言を、`true`ならClaude Codeの既定文言を出す。Codex画面の`renderShell`呼び出しに`showImport`（Codex向け文言）を追加。`ChatViewManager`のコンストラクタに`revealImportSection`コールバックを追加し、`handleMessage`の`claudeImport`分岐で呼ぶだけにする（会話への送信・`noteUserAction`は行わない）
+- `src/view/controlPanelView.ts`: `ControlPanelViewProvider.revealSection(id)`を追加
+- `src/view/controlPanelScript.ts`: `openSection`メッセージの受信処理を追加
+- `src/extension.ts`: `panel`（`ControlPanelViewProvider`）の構築を`chat`（`ChatViewManager`）より前へ移し、`chat`の`revealImportSection`に`codex.controlPanel.focus`→`panel.revealSection('codexImport')`を配線
+
+#### スコープ外にしたもの
+
+- **インポートの実行フロー自体（issue #36、§14.30）**: 確認ダイアログ・`runCodexImport`・履歴表示は変更していない
+- **Claude Code側の挙動（issue #200、§14.34）**: `/import`のプレビュー送信は変更していない。呼び出しは`showImport: true`のままで、既定文言（Claude Codeの「取り込む準備をします」）も変わらない
+- **セクションまでのスクロール**: パネルを開いてセクションを展開するところまでに留め、スクロール位置の調整はしない
+
+テストは`test/unit/chatView.test.ts`（Codex画面の`renderShell`が独自の`aria-label`・`title`でインポートボタンを出すこと、Claude Code画面の挙動が変わっていないこと）・`test/unit/chatViewManager.test.ts`（`claudeImport`メッセージで`revealImportSection`だけが呼ばれ、会話へは何も送らないこと）・`test/unit/controlPanelView.test.ts`（`revealSection`が`openSection`メッセージを送ること）・`test/unit/webviewScript.test.ts`（`controlPanelScript`が`openSection`を受けてセクションを展開する構文を含むこと）で検証する。手動確認手順は`docs/manual-test.md`のC-44に追加する。
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）
