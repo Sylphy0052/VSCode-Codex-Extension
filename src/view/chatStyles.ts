@@ -182,18 +182,33 @@ export function chatStyles(): string {
     white-space: nowrap;
     color: var(--vscode-descriptionForeground);
   }
+  /*
+   * 下部を3段に固定する（issue #234）。1段目（#composerInputRow）は入力欄と送信/中断、
+   * 2段目（#composerIconRow）はアイコン列、3段目は#settings（モデル・Effort等の
+   * ドロップダウン群）。#composerをflex-direction: columnにして段を縦に積み、折り返しは
+   * 各行の中だけで起こす。こうすることで幅が狭くなっても、アイコンが1段目へ回り込んだり
+   * 入力欄が潰れたりしない。
+   */
   #composer {
     position: relative;
     display: flex;
-    flex-wrap: wrap;
+    flex-direction: column;
     gap: 8px;
     padding: 10px 16px 14px;
     border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
   }
+  #composerInputRow {
+    display: flex;
+    gap: 8px;
+  }
+  #composerIconRow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
   /*
-   * 送信以外のボタンはアイコンのみ（issue #226）。最大11個並ぶため、幅が足りないと
-   * ラベルが途中で折り返し、flex: 1のtextareaが押し潰されていた。折返しと縮小を止め、
-   * アイコンは中央寄せで揃える。
+   * 送信以外のボタンはアイコンのみ（issue #226）。ラベルを消していても折り返すと
+   * 縦に潰れて読みにくいため、ボタン自体はnowrap・縮小なしのままにする。
    */
   #composer button {
     white-space: nowrap;
@@ -206,7 +221,7 @@ export function chatStyles(): string {
     padding: 4px 6px;
   }
   #composer button:not(#send) svg { display: block; }
-  #composer textarea {
+  #composerInputRow textarea {
     /* ボタン列に押し潰されても入力欄だと分かる最小幅を確保する */
     min-width: 160px;
   }

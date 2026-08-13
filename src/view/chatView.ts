@@ -1878,19 +1878,23 @@ ${chatStyles()}
   <div id="inputModeHint" hidden></div>
   <div id="composer">
     <div id="commands" hidden></div>
-    <textarea id="input" placeholder="${options.agentLabel}への指示を入力（Ctrl+Enterで送信、画像はCtrl+Vで貼り付け）"></textarea>
-    <input id="filePicker" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
-    <button id="attach" type="button" class="secondary" aria-label="画像" title="画像を選んで添えます。貼り付け（Ctrl+V）とドラッグ&amp;ドロップもできます">${COMPOSER_ICONS.attach}</button>
-    <button id="send" type="button">送信</button>
-    <button id="stop" type="button" class="secondary" aria-label="中断" title="Escでも中断できます" hidden>${COMPOSER_ICONS.stop}</button>
-    <button id="loopToggle" type="button" class="secondary" aria-label="ループ" title="同じ指示を条件成立まで繰り返します">${COMPOSER_ICONS.loop}</button>
-    <button id="compact" type="button" class="secondary" aria-label="圧縮" title="これまでの会話を要約に置き換えてコンテキストを空けます">${COMPOSER_ICONS.compact}</button>
-    <button id="claudeImport" type="button" class="secondary" aria-label="${escapeHtml(importCopy.ariaLabel)}" title="${escapeHtml(importCopy.title)}"${showImportButton ? '' : ' hidden'}>${COMPOSER_ICONS.import}</button>
-    <button id="recap" type="button" class="secondary" aria-label="要約" title="会話の1行要約をいま作ります（要約は会話に残ります）"${options.showRecap === true ? '' : ' hidden'}>${COMPOSER_ICONS.recap}</button>
-    <button id="planToggle" type="button" class="secondary" aria-pressed="false" aria-label="計画" title="読み取りだけに絞って計画を立てさせます。ファイルは変更されません">${COMPOSER_ICONS.plan}</button>
-    <button id="fastToggle" type="button" class="secondary" aria-pressed="false" aria-label="高速" title="応答を速くします（Fast mode）" hidden>${COMPOSER_ICONS.fast}</button>
-    <button id="review" type="button" class="secondary" aria-label="レビュー" title="コードレビューを実行します"${options.review.mode === 'command' ? ' hidden' : ''}>${COMPOSER_ICONS.review}</button>
-    <button id="exportTranscript" type="button" class="secondary" aria-label="エクスポート" title="会話全体をMarkdownとして取り出します（コピー・ファイル保存・生テキスト表示）">${COMPOSER_ICONS.export}</button>
+    <div id="composerInputRow">
+      <textarea id="input" placeholder="${options.agentLabel}への指示を入力（Ctrl+Enterで送信、画像はCtrl+Vで貼り付け）"></textarea>
+      <button id="send" type="button">送信</button>
+      <button id="stop" type="button" class="secondary" aria-label="中断" title="Escでも中断できます" hidden>${COMPOSER_ICONS.stop}</button>
+    </div>
+    <div id="composerIconRow">
+      <input id="filePicker" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+      <button id="attach" type="button" class="secondary" aria-label="画像" title="画像を選んで添えます。貼り付け（Ctrl+V）とドラッグ&amp;ドロップもできます">${COMPOSER_ICONS.attach}</button>
+      <button id="loopToggle" type="button" class="secondary" aria-label="ループ" title="同じ指示を条件成立まで繰り返します">${COMPOSER_ICONS.loop}</button>
+      <button id="compact" type="button" class="secondary" aria-label="圧縮" title="これまでの会話を要約に置き換えてコンテキストを空けます">${COMPOSER_ICONS.compact}</button>
+      <button id="claudeImport" type="button" class="secondary" aria-label="${escapeHtml(importCopy.ariaLabel)}" title="${escapeHtml(importCopy.title)}"${showImportButton ? '' : ' hidden'}>${COMPOSER_ICONS.import}</button>
+      <button id="recap" type="button" class="secondary" aria-label="要約" title="会話の1行要約をいま作ります（要約は会話に残ります）"${options.showRecap === true ? '' : ' hidden'}>${COMPOSER_ICONS.recap}</button>
+      <button id="planToggle" type="button" class="secondary" aria-pressed="false" aria-label="計画" title="読み取りだけに絞って計画を立てさせます。ファイルは変更されません">${COMPOSER_ICONS.plan}</button>
+      <button id="fastToggle" type="button" class="secondary" aria-pressed="false" aria-label="高速" title="応答を速くします（Fast mode）" hidden>${COMPOSER_ICONS.fast}</button>
+      <button id="review" type="button" class="secondary" aria-label="レビュー" title="コードレビューを実行します"${options.review.mode === 'command' ? ' hidden' : ''}>${COMPOSER_ICONS.review}</button>
+      <button id="exportTranscript" type="button" class="secondary" aria-label="エクスポート" title="会話全体をMarkdownとして取り出します（コピー・ファイル保存・生テキスト表示）">${COMPOSER_ICONS.export}</button>
+    </div>
   </div>
   <div id="loop" hidden>
     <label>初回指示（空なら継続指示から始めます）
