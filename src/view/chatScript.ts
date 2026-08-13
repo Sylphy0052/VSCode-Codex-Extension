@@ -1026,6 +1026,32 @@ export function chatScript(
     }
   }
 
+  /**
+   * ドロップされたものを添付にする（issue #241）。
+   *
+   * 画像を1枚も取れなかったときは理由をホストへ渡す。黙って何も起きない状態にすると
+   * 「ドロップがWebviewまで届いていない」のか「届いたが受け付けられなかった」のかを
+   * 見分けられない。
+   */
+  function offerDropped(dataTransfer) {
+    const files = (dataTransfer && dataTransfer.files) || [];
+    let took = false;
+    for (const file of files) {
+      if (file && String(file.type).indexOf('image/') === 0) {
+        offerFile(file);
+        took = true;
+      }
+    }
+    if (took) return;
+
+    // 実体のあるファイルはfilesに入る。VS Codeのエクスプローラーなど画面内からの
+    // ドラッグはパスだけをtext/uri-listに載せてくるため、両者を分けて理由にする
+    const types = (dataTransfer && dataTransfer.types) || [];
+    const hasUriList = Array.prototype.indexOf.call(types, 'text/uri-list') !== -1;
+    const kind = files.length > 0 ? 'notImage' : hasUriList ? 'pathOnly' : 'empty';
+    vscode.postMessage({ type: 'dropRejected', kind: kind });
+  }
+
   // いまPlan modeか。押したときに反転させるため覚えておく
   let planMode = false;
 
@@ -1623,11 +1649,16 @@ export function chatScript(
     if (took) e.preventDefault();
   });
 
-  // ドラッグ&ドロップ。既定の動作（画像を開く）を止めないと画面が置き換わる
-  for (const name of ['dragover', 'drop']) {
+  // ドラッグ&ドロップ。既定の動作（画像を開く）を止めないと画面が置き換わる。
+  // dragenterも止める（issue #241）。HTML5のD&Dは、ドロップ先として認められるために
+  // dragenterとdragoverの両方で既定動作を打ち消すことを求める。dragoverだけだと
+  // 入った時点で「ここは受け取らない」と判断され、VS Code本体がファイルを開く側へ回る
+  for (const name of ['dragenter', 'dragover', 'drop']) {
     document.addEventListener(name, (e) => {
       e.preventDefault();
-      if (name === 'drop') offerFiles(e.dataTransfer && e.dataTransfer.files);
+      // 外側（VS Codeのワークベンチ）へ渡さない。渡るとエディタでファイルが開く
+      e.stopPropagation();
+      if (name === 'drop') offerDropped(e.dataTransfer);
     });
   }
   el('flushQueue').addEventListener('click', () => vscode.postMessage({ type: 'flushQueue' }));

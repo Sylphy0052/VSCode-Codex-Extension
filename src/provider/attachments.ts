@@ -33,6 +33,30 @@ export const SUPPORTED_MEDIA_TYPES = [
   'image/webp',
 ] as const;
 
+/**
+ * ドロップを受け取れなかったときに画面へ出す理由（issue #241）。
+ *
+ * Webviewから届く種類だけを文言に変える。**知らない値では何も返さない**
+ * （Webviewは信用できない入力元なので、通知の文言をあちら側に作らせない）。
+ *
+ * 理由を出すこと自体に切り分けの意味もある。ドロップがWebviewまで届いていれば
+ * どれかが出るため、何も出ないときはVS Code本体が横取りしていると分かる。
+ */
+export function dropRejectionReason(kind: unknown): string | undefined {
+  if (kind === 'notImage') {
+    return 'ドロップされたファイルに画像がありませんでした';
+  }
+  if (kind === 'pathOnly') {
+    // ホストは会話に出てきたパスしか読まない（imageRefs.ts）。VS Codeのエクスプローラーや
+    // 他のツリーからのドラッグはパスだけを載せてくるため、この経路では受け取れない
+    return 'VS Code内からのドラッグには対応していません。「画像」ボタンかCtrl+Vで添えてください';
+  }
+  if (kind === 'empty') {
+    return 'ドロップされた内容にファイルがありませんでした';
+  }
+  return undefined;
+}
+
 /** 1枚の上限。 */
 export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 /** 1回の送信に添えられる合計。 */

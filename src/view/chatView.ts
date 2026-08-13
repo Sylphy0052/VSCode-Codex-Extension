@@ -10,7 +10,10 @@ import {
 } from '../appserver/approvals';
 import { isOpenableSearchUrl, type ChatItem, type ChatState } from '../appserver/chatState';
 import { ChatSession } from '../appserver/chatSession';
-import { buildTranscriptMarkdown, defaultTranscriptFileName } from '../appserver/transcriptMarkdown';
+import {
+  buildTranscriptMarkdown,
+  defaultTranscriptFileName,
+} from '../appserver/transcriptMarkdown';
 import {
   AppServerConnection,
   type AppServerConnectionPort,
@@ -39,7 +42,7 @@ import type {
   TaskSessionInput,
 } from '../orchestrator/taskSession';
 import { CODEX_APPROVAL_CYCLE } from '../provider/approvalCycle';
-import { AttachmentBox } from '../provider/attachments';
+import { AttachmentBox, dropRejectionReason } from '../provider/attachments';
 import { buildImageReply } from '../provider/imageRefs';
 import { CommandCatalog } from '../provider/commandCatalog';
 import { FileMentionCatalog, filterFiles } from '../provider/fileMentions';
@@ -175,6 +178,19 @@ export function addAttachment(box: AttachmentBox, name: unknown, dataUrl: unknow
   if ('reason' in added) {
     void vscode.window.showWarningMessage(`画像を添えられません: ${added.reason}`);
   }
+}
+
+/**
+ * 画像を取れなかったドロップを知らせる（issue #241）。Codex画面・Claude Code画面で共有する。
+ *
+ * `addAttachment` と同じ考え方で、受け取れなかったときは黙って捨てずに理由を出す。
+ */
+export function noteDropRejected(kind: unknown): void {
+  const reason = dropRejectionReason(kind);
+  if (reason === undefined) {
+    return;
+  }
+  void vscode.window.showWarningMessage(`画像を添えられません: ${reason}`);
 }
 
 /**
@@ -1105,6 +1121,10 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
         this.postState(entry);
         return;
       }
+      if (type === 'dropRejected') {
+        noteDropRejected(m['kind']);
+        return;
+      }
       if (type === 'removeAttachment' && typeof m['id'] === 'string') {
         entry.attachments.remove(m['id']);
         this.postState(entry);
@@ -1305,9 +1325,7 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
   private async runGenerateAgentsFile(entry: ChatPanel): Promise<void> {
     const cwd = entry.cwd ?? currentWorkspaceFolder()?.uri.fsPath;
     if (cwd === undefined) {
-      void vscode.window.showErrorMessage(
-        'AGENTS.mdを生成する先のワークスペースが分かりません',
-      );
+      void vscode.window.showErrorMessage('AGENTS.mdを生成する先のワークスペースが分かりません');
       return;
     }
     const agentsFilePath = path.join(cwd, 'AGENTS.md');
