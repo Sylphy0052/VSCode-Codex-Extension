@@ -12,11 +12,11 @@ CodexとClaude Codeでは承認の設計が違う。Codexは「承認方針(`app
 - `on-request` — モデルが承認を求めるタイミングを自分で決める。サンドボックス内で完結する操作は無承認で動き、外へ出る必要が出たときに承認要求が飛ぶ。
 - `never` — 承認を一切求めない。実行の失敗はそのままモデルへ返る。人へは回らない。
 
-宣言順がそのまま安全順（`untrusted` → `on-request` → `never`）であり、Shift+Tabの循環（[src/provider/approvalCycle.ts](../src/provider/approvalCycle.ts)）とYAMLのクランプ（design.md §16.20）はこの順序に依存している。
+宣言順がそのまま安全順（`untrusted` → `on-request` → `never`）であり、Shift+Tabの循環（[src/provider/approvalCycle.ts](../src/provider/approvalCycle.ts)）とYAMLのクランプ（design.md §16.16「設定の信頼境界」）はこの順序に依存している。
 
 ### `never`を選ぶ場面
 
-読み取り専用を保証したい場面（Plan相当）では`never`が必須になる。`on-request`のままだと、サンドボックスに弾かれた書き込みが「サンドボックス脱出の承認要求」へ化け、そこで人が許可すると読み取り専用でなくなる（design.md §16.16）。
+読み取り専用を保証したい場面（Plan相当）では`never`が必須になる。`on-request`のままだと、サンドボックスに弾かれた書き込みが「サンドボックス脱出の承認要求」へ化け、そこで人が許可すると読み取り専用でなくなる（design.md §14.10「Plan mode」）。
 
 逆に承認カードの経路そのものを確認したい場面（自動承認の判定など）では、要求が飛ばないと判定できないため`on-request`を使う。
 
@@ -26,7 +26,7 @@ CodexとClaude Codeでは承認の設計が違う。Codexは「承認方針(`app
 - `workspace-write` — 作業フォルダ内の書き込みを許す。ネットワークは既定で不可（`codex.sandboxNetworkAccess`で開ける）。
 - `danger-full-access` — ファイルもネットワークも制限なし。
 
-TUIの表示ラベルは`Read Only` / `Workspace` / `Workspace with network access` / `No Sandbox` / `Custom`。
+サンドボックスの選択にあたる文字列は、バイナリ内に`Read Only` / `Workspace` / `Workspace with network access` / `No Sandbox` / `Custom`として入っている（TUI上の正確な表記は実機で未確認）。
 
 ## Claude Codeの`permissionMode`との対応
 
