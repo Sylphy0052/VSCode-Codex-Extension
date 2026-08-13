@@ -136,7 +136,12 @@
         },
         {
           "command": "codex.forkSession",
-          "when": "view == codex.sessions && viewItem =~ /^codexSession/",
+          "when": "view == codex.sessions && viewItem =~ /^codexSession\\.codex/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "claude.forkSession",
+          "when": "view == codex.sessions && viewItem =~ /^codexSession\\.claude/",
           "group": "1_open@1"
         },
         {
@@ -186,6 +191,10 @@
         },
         {
           "command": "claude.openChat",
+          "when": "false"
+        },
+        {
+          "command": "claude.forkSession",
           "when": "false"
         }
       ]
@@ -289,6 +298,11 @@
         "title": "チャット画面で開く（Claude Code）",
         "category": "Agent",
         "icon": "$(sparkle)"
+      },
+      {
+        "command": "claude.forkSession",
+        "title": "このセッションをforkする（Claude Code）",
+        "category": "Agent"
       },
       {
         "command": "claude.reloadSkills",

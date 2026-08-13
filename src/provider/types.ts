@@ -8,6 +8,16 @@ export { PROVIDER_IDS, isProviderId, type ProviderId } from './id';
 /**
  * プロバイダごとに「できること」が違う。
  * Claude Code には archive/delete に相当するCLIが無いため、UIの出し分けに使う。
+ *
+ * `rename` は持たない（issue #218で削除）。以前は `codex/claude/provider.ts` に
+ * `rename: true/false` の宣言があったが、改名メニュー（`codex.renameChat` /
+ * `claude.renameChat`）はこの値を一度も参照せず常に表示しており、単なるデッドコードだった。
+ * 加えて「できるか」も1個のbooleanに単純化しづらい: Codexの改名はapp-server側に永続化される
+ * （`chatView.ts`の`renameActive`参照）のに対し、Claude Codeの改名（issue #199）は拡張機能
+ * ローカルの`ClaudeSessionNameStore`止まりで、CLI側の`rename_session`は使っていない
+ * （`claude/sessionStore.ts`のJSDoc参照。読み戻す索引が無いため）。どちらも利用者から見れば
+ * 「名前を変えれば次回も残る」という同じ体験を提供できているため、素直に`true/false`へ
+ * 戻すよりは、実際にUIの出し分けが必要になったときに定義し直すほうが安全と判断した。
  */
 export interface ProviderCapabilities {
   /** セッション全体の分岐。 */
@@ -16,8 +26,6 @@ export interface ProviderCapabilities {
   forkFromTurn: boolean;
   archive: boolean;
   delete: boolean;
-  /** セッション名の変更をCLI側へ永続化できるか。 */
-  rename: boolean;
 }
 
 /** TUIタブとして起動するために必要な材料。 */

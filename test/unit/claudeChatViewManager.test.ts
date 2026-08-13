@@ -307,6 +307,49 @@ describe('ClaudeChatViewManager', () => {
     });
   });
 
+  describe('セッション全体のfork（issue #218、design.md §14.40）', () => {
+    it('target.kind=forkでClaudeStreamSession.startを起動し、新しいidはCLIに任せる（sessionIdは渡さない）', async () => {
+      const calls = stubStart();
+      const { manager } = createManager();
+
+      await manager.openFork('origin-session-id', '元の会話 (fork)', '/workspace/root');
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.target).toEqual({ kind: 'fork', sessionId: 'origin-session-id' });
+      // --session-idで指定できるのは新規セッションだけ。forkの新しいidはCLIが振るため
+      // ここへ値を渡すと矛盾した起動引数になる（argvBuilder.tsのtargetArgs参照）
+      expect(calls[0]?.sessionId).toBeUndefined();
+      expect(__mock.lastCreatedPanel()).toBeDefined();
+    });
+
+    it('黙って「復元されないタブ」を作らない。開いた直後に会話へ1行残す', async () => {
+      const { sessions } = stubStartCapturing();
+      const { manager } = createManager();
+
+      await manager.openFork('origin-session-id', '元の会話 (fork)', '/workspace/root');
+
+      const session = sessions[0];
+      if (session === undefined) {
+        throw new Error('セッションが記録されていません');
+      }
+      const items = session.getState().items;
+      const notice = items.find((i) => i.id.startsWith('forkNotice:'));
+      expect(notice).toBeDefined();
+      expect(notice?.detail).toContain('復元');
+      expect(notice?.detail).toContain('作業記録');
+    });
+
+    it('cwd省略時はワークスペースフォルダを使う', async () => {
+      const calls = stubStart();
+      const { manager } = createManager();
+
+      await manager.openFork('origin-session-id', '元の会話 (fork)', undefined);
+
+      expect(calls).toHaveLength(1);
+      expect(__mock.lastCreatedPanel()).toBeDefined();
+    });
+  });
+
   describe('reloadSkillsForOpenSessions（issue #202、design.md TP-90）', () => {
     it('開いている会話それぞれのreloadSkillsを呼び、結果を会話に1行残す', async () => {
       const { calls, sessions } = stubStartCapturing();

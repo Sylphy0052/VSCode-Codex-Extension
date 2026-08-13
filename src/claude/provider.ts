@@ -28,8 +28,6 @@ export class ClaudeProvider implements AgentProvider {
     // archive/delete に相当するCLIが無い。transcriptを直接消すことはしない
     archive: false,
     delete: false,
-    // セッション名はCLI側に永続化されない（表示名は初回発言から作る）
-    rename: false,
   };
 
   constructor(private readonly store: ClaudeSessionStore) {}

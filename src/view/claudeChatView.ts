@@ -415,6 +415,53 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
   }
 
   /**
+   * セッション全体を分岐して開く（issue #218、design.md §14.40）。
+   *
+   * `-r <id> --fork-session` はCLIが分岐先の新しいセッションidを自分で振る。Codexのように
+   * idを起動前にこちらで決めて渡す手段が無い（`argvBuilder.ts`の`targetArgs`参照）ため、
+   * `ClaudeStreamSession.start()`へは`sessionId: undefined`を渡す。これにより
+   * `state.threadId`はこのタブが生きている間ずっと確定しないままになる
+   * （`streamSession.ts`の`start()`が`options.target.kind === 'resume'`のときだけ
+   * `target.sessionId`を採用し、それ以外は`options.sessionId`＝`undefined`をそのまま
+   * 使うため）。`threadId`が`undefined`のままだと、`dispatch()`の作業記録
+   * （`onActivity`呼び出し）は`sessionId !== undefined`のガードで送らず、
+   * `chatScript.ts`の`apply()`も`state.threadId`が真値でなければ`vscode.setState`を
+   * 呼ばない。つまり復元（`restorePanel`）にも作業記録（design.md §16.12）にも乗らない、
+   * という仕様どおりの挙動が、特別な分岐を足さなくても自然に成り立つ。
+   *
+   * `this.panels`のキーだけは実セッションidと衝突しないよう`fork:`を接頭辞にした合成キー
+   * にする（実CLIのセッションidは常にUUID形式でこの接頭辞を含まない）。このキーは
+   * ローカルの管理にしか使わず、CLIへは渡らない。
+   *
+   * 黙って「復元されないタブ」を作らないため（issue #218の受入基準）、開いた直後に
+   * その旨を会話へ1行残す。事前の確認ダイアログにはしなかった。分岐そのものは元の
+   * セッションを傷つけない可逆な操作で、`openDebugLog`（issue #205、design.md §14.39）
+   * と同じく「壊れる・戻せない操作ではない」ため、都度の確認より会話に残る記録のほうが
+   * 低摩擦かつ後から見返せると判断した。
+   */
+  async openFork(sessionId: string, title: string, cwd: string | undefined): Promise<void> {
+    const folder = cwd ?? currentWorkspaceFolder()?.uri.fsPath;
+    if (folder === undefined) {
+      void vscode.window.showErrorMessage('作業ディレクトリを特定できませんでした');
+      return;
+    }
+
+    const entry = this.buildEntry(folder, `${LABEL}: ${title}`, false, undefined);
+    this.showPanel(entry, false);
+    this.panels.set(`fork:${randomUUID()}`, entry);
+    entry.session.start({
+      cwd: folder,
+      target: { kind: 'fork', sessionId },
+      sessionId: undefined,
+      config: readClaudeConfig().claude,
+    });
+    entry.session.noteLocalEvent(
+      `forkNotice:${randomUUID()}`,
+      'このタブは元のセッションを分岐したものです。新しいセッションidはCLIが振るため拡張機能からは追跡できず、このタブはウィンドウ再読み込み後の復元と作業記録（日報・週報）の対象外になります。',
+    );
+  }
+
+  /**
    * skillsを読み直す（issue #202、design.md TP-90）。設定パネルの「読み直す」ボタンから
    * `claude.reloadSkills` コマンド経由で呼ばれる（`newSession`と同じ、設定パネルの
    * webview→VS Codeコマンド→この画面の管理クラス、という橋渡し。設定パネルは
