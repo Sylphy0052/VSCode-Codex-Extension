@@ -158,6 +158,7 @@ function wireWindow(memento: WorkflowRunMemento): {
     fakeLogger,
     () => undefined,
     (id) => workflowRunnerRef.current?.isTaskManagedSessionId(id) ?? false,
+    () => undefined,
     factory,
   );
   const store = new WorkflowRunStore(memento);

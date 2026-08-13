@@ -370,6 +370,14 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   /** Claude Code画面のプロセス起動の差し替え（Issue #186）。空なら実物が起動する。 */
   const claudeSpawnOverride: { spawn?: ClaudeSpawnPort } = {};
 
+  // 設定パネル。Codex画面のインポートボタン（issue #227、下の`chat`構築）がパネルを
+  // 表示してセクションを展開する経路（`revealSection`）を使うため、`chat`より先に
+  // 構築しておく（以前はセッション一覧まわりの構築の後段でまとめて作っていた）
+  const panel = new ControlPanelViewProvider(settings, log);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(ControlPanelViewProvider.viewType, panel),
+  );
+
   const chat = new ChatViewManager(
     codexPath,
     settings,
@@ -379,6 +387,13 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     log,
     (activity) => recordActivity({ ...activity, source: 'codex' }),
     isTaskManagedThread,
+    // インポートボタン（issue #227、design.md §14.42）。機能の実体は設定パネル側
+    // （issue #36）にあるため、二重実装せずパネルを表示してセクションを展開するだけに
+    // する（`codex.showUsage`コマンドと同じ、`codex.controlPanel.focus`で先に開く順序）
+    async () => {
+      await vscode.commands.executeCommand('codex.controlPanel.focus');
+      panel.revealSection('codexImport');
+    },
     (onNotification, onServerRequest) => {
       chatConnectionHandlers = { onNotification, onServerRequest };
       const real = new AppServerConnection(codexPath, log, onNotification, onServerRequest);
@@ -520,11 +535,6 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     }),
   );
   void tree.setScope(readConfig().historyScope);
-
-  const panel = new ControlPanelViewProvider(settings, log);
-  context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(ControlPanelViewProvider.viewType, panel),
-  );
 
   const usageReader = new UsageReader(nodeFileSystem, paths);
   const usageBar = new UsageStatusBar();

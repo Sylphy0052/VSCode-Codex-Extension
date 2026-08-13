@@ -1067,9 +1067,28 @@ export function controlPanelScript(): string {
 
   selectProvider(currentProvider);
 
+  // ホストからの「このセクションを開け」の要求（issue #227）。webview→ホストの
+  // toggleSectionとは逆向き（ホスト→webview）で、Codex画面のインポートボタンから
+  // 「設定パネルを表示し、対象セクションを展開する」経路を作るために使う。
+  // プロバイダのタブを切り替えたうえで対象のdetailsをopen=trueにするだけで、
+  // 既存のtoggleイベント（上のループ）がtoggleSectionの送信・読み込み中表示を
+  // 引き続き担う（新しく取得ロジックを重複させない）
+  function openRequestedSection(sectionId) {
+    const details = el('section-' + sectionId);
+    if (!details) {
+      console.error('設定パネル: openSectionで指定されたsection-' + sectionId + ' が見つかりません');
+      return;
+    }
+    selectProvider(sectionId.indexOf('claude') === 0 ? 'claude' : 'codex');
+    details.open = true;
+  }
+
   window.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'state') {
       apply(event.data.state);
+    }
+    if (event.data && event.data.type === 'openSection') {
+      openRequestedSection(event.data.id);
     }
   });
 
