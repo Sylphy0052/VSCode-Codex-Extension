@@ -828,6 +828,9 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       showSettings: true,
       // review/startはapp-serverの標準機能なので、コマンド一覧を待たずに常に出す
       review: { mode: 'quickPick' },
+      // 会話の1行要約（issue #228、design.md §14.41）。拡張機能の独自機能として、
+      // 要約を依頼する指示文を通常のターンとして送る（`ChatSession.recap()`）
+      showRecap: true,
     });
 
     panel.webview.onDidReceiveMessage(
@@ -1099,6 +1102,15 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
         // 圧縮は新しいターンを起こす。ループの指示と重ならないよう割り込み扱いにする
         entry.loop.noteUserAction();
         await entry.session.compact();
+        return;
+      }
+      if (type === 'recap') {
+        // 要約は新しいターンを起こす（会話が空でなければ）。ループの指示と重ならない
+        // よう割り込み扱いにする（`compact`と同じ）。会話を壊す・書き込みが起きるといった
+        // 不可逆な操作ではないため、`compact`と違って確認ダイアログは挟まない
+        // （`planMode`と同じ扱い。issue #228）
+        entry.loop.noteUserAction();
+        await entry.session.recap(entry.taskConfig ?? readConfig().codex);
         return;
       }
       if (type === 'planMode') {
@@ -1716,10 +1728,15 @@ export interface ChatShellOptions {
    */
   showImport?: boolean;
   /**
-   * 「会話の1行要約」ボタンを出すか（Claude Code画面のみ、issue #203、design.md §14.36）。
+   * 「会話の1行要約」ボタンを出すか（Claude Code画面: issue #203、design.md §14.36。
+   * Codex画面: issue #228、design.md §14.41）。
    *
-   * `/recap` はTUI由来のローカルコマンドで、Codexにこの概念は無い（Codex側で近いものは
-   * 会話名だけを対象にした改名操作）。二重導線を避けるためCodex画面には出さない。
+   * ボタンを出すかどうかの意味は両画面で共通だが、**押したときに送る中身はプロバイダごとに
+   * 違う**。Claude CodeはTUI由来のローカルコマンド`/recap`を発言として送る
+   * （`ClaudeStreamSession.recap()`）。Codexにこの概念は無いため、要約を依頼する指示文
+   * （`RECAP_INSTRUCTION`）を通常のターンとして送る（`ChatSession.recap()`）。どちらも
+   * 応答は会話に残るが、Claude Code側は`<synthetic>`表示、Codex側は通常のモデル応答という
+   * 見え方の違いがある（design.md §14.41の対比表参照）。
    */
   showRecap?: boolean;
   /**

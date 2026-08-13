@@ -2502,6 +2502,61 @@ const threadId =
 
 手動確認手順は`docs/manual-test.md`のL-10（復活）・H-05を参照。
 
+### 14.41 Codex画面の会話の1行要約（issue #228、§14.36のCodex実装の対）
+
+実機確認（#189）で、Codex画面とClaude Code画面でボタンの並びが揃っていないという指摘が出た。「会話の1行要約」は§14.36でClaude Code画面にだけ足しており、Codex画面には無かった。
+
+#### Codexに`/recap`に相当する概念は無い
+
+issue #195・#203の調査（§14.36）でClaude Codeの`/recap`はCLI内蔵のローカルコマンドと判っているが、**Codex（app-server）にこの概念自体が無い**。`initialize`相当の応答の一覧にも`recap`は無く、近いものは`thread/rename`（TP-87、会話名の改名。表示名だけが対象で会話の要約ではない）だけである。そのため§14.36の実装（CLI内蔵コマンドを発言として送る）をそのまま横展開できない。
+
+一方で「いま何をしていたかを1行で思い出す」という操作自体はCLIの機能の有無と関係なく有用で、Codex画面にも同じ体験があってよい。TUIのパリティ（TUIにある機能の移植）ではなく、**この拡張機能の独自機能として**Codex画面に足す。
+
+#### 実現方法: 要約を依頼する指示文を通常のターンとして送る
+
+Codexには要約専用のAPIが無いため、拡張機能側が要約を依頼する指示文（`RECAP_INSTRUCTION`、`src/appserver/chatSession.ts`）を組み立て、`turn/start`で**通常のターンとして**送る。応答は`ChatSession.send()`が返す通常のモデル応答として会話にそのまま残る。
+
+指示文は§14.36実測2で見つかったClaude Code内蔵`/recap`の生成指示文（"The user stepped away and is coming back. Recap in under 40 words, 1-2 plain sentences, no markdown. Lead with the overall goal and current task, ..."）と同じ趣旨にした上で、次の一文を明示的に足している。
+
+> Reply in the same language the conversation has been using so far.
+
+Claude Code側は英語の指示文で送っても会話の言語（日本語）に揃った要約が返ることを実測済み（§14.36実測3）だが、**Codex側で同じ実測はできていない**（実CLIを操作できる環境が要るため、この変更のユニットテストでは検証できない）。揃わない場合に備え、指示文自体に言語を合わせる指定を先に足しておくことで受入基準（「揃わない場合は指示文で明示する」）に対応した。実機での確認は`docs/manual-test.md`のC-45で行う。
+
+#### Claude Code側との違い（受け入れる差）
+
+| | Claude Code（§14.36） | Codex（本節） |
+| --- | --- | --- |
+| 経路 | CLI内蔵の`/recap`を発言として送る | 拡張機能が要約を依頼する指示文を通常のターンとして送る |
+| 応答の扱い | `model`が`<synthetic>`、通常のトークン列を経由しない | 通常のモデル応答（トークン列を経由する） |
+| 費用 | 実測で`total_cost_usd`が増える（無償ではない。§14.36実測3） | 通常のターンと同じだけ掛かる |
+| コンテキスト | 会話に残る | 会話に残る（同じ） |
+
+どちらも会話に残る点は同じで、受入基準の「要約が会話に残る」はCodex側でも満たせる。応答の見え方（`<synthetic>`かどうか）と費用の性質だけが違う。
+
+#### 会話が空のときの扱いは拡張機能側で判定する
+
+Claude Code側は`/recap`をCLI内部が受け取り、会話が無い状態（`no-turn`）なら「Nothing to recap yet — send a message first.」を返す分岐をCLI自身が持っている（§14.36実測2）。Codexにはこの判定を持つ経路が無く、指示文をそのまま`turn/start`で送るとモデルのターンを1つ消費するだけになってしまう。
+
+そのため`ChatSession.recap()`（`src/appserver/chatSession.ts`）は送信前に`this.state.items.length === 0`を自前で判定し、該当すれば`turn/start`を送らずに`appendNotice`（`hookBlocked`と同じ経路）で「まだ要約できる会話がありません。まず何か送ってから試してください」という一言だけを会話に残す。会話が1件以上あれば通常どおり`send()`経由で`RECAP_INSTRUCTION`を送る。
+
+#### `ChatShellOptions.showRecap`の意味を両画面共通へ改める
+
+§14.36時点では`showRecap`は「Claude Code画面のみ`true`」というフラグで、JSDocにも「Codexにこの概念は無いため二重導線を避けて出さない」と書いていた。本issueでCodex画面にも要約を出すため、フラグの意味を「ボタンを出すかどうか」だけに絞り、**押したときに送る中身はプロバイダごとに違う**ことをJSDocへ明示する形へ書き換えた（`src/view/chatView.ts`の`ChatShellOptions.showRecap`）。ボタンのUI（`chatScript.ts`の`recap`ボタン・応答中の無効化）自体はプロバイダで共有しており、変更していない。
+
+#### 実装
+
+- `src/appserver/chatSession.ts`: `RECAP_INSTRUCTION`定数と`ChatSession.recap(config)`を追加。会話が空なら`appendNotice`で一言残すだけ、それ以外は`send(RECAP_INSTRUCTION, config)`で通常のターンとして送る
+- `src/view/chatView.ts`: `ChatViewManager`が開くCodex画面の`renderShell`呼び出しに`showRecap: true`を追加。`handleMessage`に`recap`分岐を追加し、`entry.loop.noteUserAction()`（ループの指示と重ならないよう割り込み扱いにする、`compact`と同じ）の後に`entry.session.recap(entry.taskConfig ?? readConfig().codex)`を呼ぶ。会話を壊す・書き込みが起きるといった不可逆な操作ではないため、`compact`と違って確認ダイアログは挟まない（`planMode`と同じ扱い）
+- `ChatShellOptions.showRecap`のJSDocを、Claude Code画面・Codex画面の両方に対応する説明へ書き換え（上記参照）
+
+#### スコープ外にしたもの
+
+- **Claude Code側（`ClaudeStreamSession.recap()`）の挙動変更**: 本節はCodex画面への追加のみで、§14.36の実装・挙動には触れていない
+- **要約の自動生成（離席検知など）**: §14.36と同じく、明示的にボタンを押したときだけ動かす
+- **応答の構造化・パース**: RECAP_INSTRUCTIONへの応答はモデルが生成する自然文で、§14.36の`/recap`応答と同じ理由（長さ・言い回しが安定しない）で機械的に解析しない
+
+テストは`test/unit/chatSessionRecap.test.ts`（`ChatSession.recap()`単体。会話が空のときに`turn/start`を送らず一言だけ残すこと、会話があるときに`RECAP_INSTRUCTION`を通常のターンとして送ること）・`test/unit/chatViewManager.test.ts`（`recap`メッセージの配線）・`test/unit/chatView.test.ts`（`showRecap`によるボタンの表示切り替え）で検証する。手動確認手順は`docs/manual-test.md`のC-45に追加する。
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）

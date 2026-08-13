@@ -5,6 +5,7 @@ import type { FileSystemPort } from '../../src/session/ports';
 import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMentions';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import { ChatViewManager, type ChatActivity } from '../../src/view/chatView';
+import { RECAP_INSTRUCTION } from '../../src/appserver/chatSession';
 import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
 import { __mock, ViewColumn, window as fakeWindow } from '../mocks/vscode';
 import {
@@ -98,7 +99,7 @@ function threadStartResult(threadId: string): unknown {
 
 type StateMessage = {
   type: string;
-  state: { approvals: unknown[]; items: Array<{ text: string }> };
+  state: { approvals: unknown[]; items: Array<{ kind: string; text: string; detail: string }> };
 };
 
 function stateMessagesOf(panel: { webview: { sent: unknown[] } } | undefined): StateMessage[] {
@@ -803,6 +804,65 @@ describe('ChatViewManager', () => {
       task.resumeLoop();
       await tick();
       expect(connection.requests.filter((r) => r.method === 'turn/start')).toHaveLength(2);
+    });
+  });
+
+  /**
+   * 会話の1行要約（issue #228、design.md §14.41）。
+   *
+   * Claude Code画面の`/recap`（issue #203、design.md §14.36）と違い、Codex側は要約専用の
+   * 経路が無いため`RECAP_INSTRUCTION`を通常のターンとして送る。会話が空のときはCLI側に
+   * 「Nothing to recap yet」相当の判定が無いため、`ChatSession.recap()`が拡張機能側で判定して
+   * `turn/start`を送らずに一言だけ残す（`chatSessionRecap.test.ts`のセッション単体テストと
+   * 対になる、`recap`メッセージの配線側の確認）。
+   */
+  describe('会話の1行要約（recapメッセージ、issue #228、design.md §14.41）', () => {
+    it('会話が空の状態で押すとturn/startを送らず、一言だけ会話に残す', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openNew('/workspace/root');
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p;
+
+      const panel = __mock.lastCreatedPanel();
+      panel?.webview.simulateMessage({ type: 'recap' });
+      await tick();
+
+      expect(connection.requests.some((r) => r.method === 'turn/start')).toBe(false);
+      const messages = stateMessagesOf(panel);
+      const last = messages[messages.length - 1];
+      expect(
+        last?.state.items.some(
+          (i) =>
+            i.kind === 'settingsChanged' &&
+            i.detail === 'まだ要約できる会話がありません。まず何か送ってから試してください',
+        ),
+      ).toBe(true);
+    });
+
+    it('会話がある状態で押すとRECAP_INSTRUCTIONを通常のターンとして送る', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openNew('/workspace/root');
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p;
+
+      // 会話が1件以上ある状態を作る
+      connection.notify('item/agentMessage/delta', {
+        threadId: 'thread-A',
+        itemId: 'msg-1',
+        delta: 'これまでの会話',
+      });
+
+      const panel = __mock.lastCreatedPanel();
+      panel?.webview.simulateMessage({ type: 'recap' });
+      await tick();
+
+      const turnStart = connection.requests.find((r) => r.method === 'turn/start');
+      expect(turnStart).toBeDefined();
+      expect(
+        (turnStart?.params as { input?: Array<{ text?: string }> } | undefined)?.input,
+      ).toEqual([{ type: 'text', text: RECAP_INSTRUCTION }]);
     });
   });
 });
