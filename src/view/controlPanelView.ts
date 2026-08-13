@@ -18,6 +18,7 @@ import {
   isEditableKey,
   isSectionId,
   type ClaudeSettingsSnapshot,
+  type SectionId,
   type SettingsProvider,
   type SettingsSnapshot,
 } from './settingsProvider';
@@ -47,6 +48,13 @@ interface PanelState extends Omit<SettingsSnapshot, 'importHistory'> {
   usage: UsageView | undefined;
   claude: ClaudeSettingsSnapshot;
   importHistory: ImportHistoryDisplaySnapshot;
+  /**
+   * 取得中のセクション（issue #225 レビュー指摘1）。webview側はここに載っている
+   * セクションを「取得できませんでした」ではなく「読み込み中」として描画する
+   * （応答待ちの間に別セクションの操作で先に`state`が届いても、誤って失敗表示に
+   * 化けないようにするため）。
+   */
+  loadingSections: SectionId[];
 }
 
 /**
@@ -104,6 +112,7 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       usage: buildUsageView(this.usage),
       claude: this.settings.claudeSnapshot(),
       importHistory: buildImportHistoryView(snapshot.importHistory),
+      loadingSections: this.settings.loadingSections,
     };
   }
 

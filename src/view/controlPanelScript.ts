@@ -841,16 +841,25 @@ export function controlPanelScript(): string {
   }
 
   function apply(state) {
+    // 取得中のセクションはホストがstate.loadingSectionsで知らせてくる（issue #225
+    // レビュー指摘1）。複数セクションをすばやく開いたときに、別セクションの応答で
+    // 「取得できませんでした」へ誤って上書きされないよう、取得中は読み込み中の表示を
+    // 保つ
+    const loadingSections = state.loadingSections || [];
     applyUsage(state.usage);
-    applyClaude(state.claude);
-    renderCodexAccount(state.account);
-    renderMcp('codex', 'mcpListCodex', state.mcpServers);
-    renderHooks('hooksListCodex', state.hooks);
-    renderSkills('skillsListCodex', state.skills);
-    renderPlugins('pluginsListCodex', 'codex', state.plugins);
-    renderApps('appsListCodex', state.apps);
-    renderImport('importListCodex', state.importCandidates);
-    renderImportHistory('importHistoryListCodex', state.importHistory);
+    applyClaude(state.claude, loadingSections);
+    renderSection('codexAccount', loadingSections, () => renderCodexAccount(state.account));
+    renderSection('codexMcp', loadingSections, () => renderMcp('codex', 'mcpListCodex', state.mcpServers));
+    renderSection('codexHooks', loadingSections, () => renderHooks('hooksListCodex', state.hooks));
+    renderSection('codexSkills', loadingSections, () => renderSkills('skillsListCodex', state.skills));
+    renderSection('codexPlugins', loadingSections, () =>
+      renderPlugins('pluginsListCodex', 'codex', state.plugins),
+    );
+    renderSection('codexApps', loadingSections, () => renderApps('appsListCodex', state.apps));
+    renderSection('codexImport', loadingSections, () => {
+      renderImport('importListCodex', state.importCandidates);
+      renderImportHistory('importHistoryListCodex', state.importHistory);
+    });
     models = state.models;
     const nameOf = (slug) => {
       const m = models.find((x) => x.slug === slug);
@@ -885,13 +894,15 @@ export function controlPanelScript(): string {
     el('effortHint').textContent = effort && effort.description ? effort.description : '';
   }
 
-  function applyClaude(c) {
+  function applyClaude(c, loadingSections) {
     if (!c) return;
-    renderClaudeAccount(c.account);
-    renderMcp('claude', 'mcpListClaude', c.mcpServers);
-    renderHooks('hooksListClaude', c.hooks);
-    renderSkills('skillsListClaude', c.skills);
-    renderPlugins('pluginsListClaude', 'claude', c.plugins);
+    renderSection('claudeAccount', loadingSections, () => renderClaudeAccount(c.account));
+    renderSection('claudeMcp', loadingSections, () => renderMcp('claude', 'mcpListClaude', c.mcpServers));
+    renderSection('claudeHooks', loadingSections, () => renderHooks('hooksListClaude', c.hooks));
+    renderSection('claudeSkills', loadingSections, () => renderSkills('skillsListClaude', c.skills));
+    renderSection('claudePlugins', loadingSections, () =>
+      renderPlugins('pluginsListClaude', 'claude', c.plugins),
+    );
     const d = c.defaults || {};
     const nameOf = (slug) => {
       const m = c.models.find((x) => x.slug === slug);
@@ -934,6 +945,20 @@ export function controlPanelScript(): string {
     p.className = 'sectionLoading';
     p.textContent = '読み込み中…';
     container.appendChild(p);
+  }
+
+  // 取得中のセクションは読み込み中のまま留め、無関係な応答で「取得できませんでした」に
+  // 化けさせない（issue #225 レビュー指摘1）。取得中でなければ渡された描画関数をそのまま呼ぶ。
+  // SECTION_CONTAINERSはこの関数より後で定義されるが、実際に呼ばれるのはmessageイベント
+  // 経由（スクリプト全体の実行が終わった後）なので、参照時には初期化済みになっている
+  function renderSection(sectionId, loadingSections, renderFn) {
+    if (loadingSections.includes(sectionId)) {
+      for (const containerId of SECTION_CONTAINERS[sectionId]) {
+        renderLoading(containerId);
+      }
+      return;
+    }
+    renderFn();
   }
 
   // セクションの開閉状態は vscode.setState へ保存する（issue #225）。プロバイダの
@@ -1014,6 +1039,15 @@ export function controlPanelScript(): string {
 
   for (const sectionId of Object.keys(SECTION_CONTAINERS)) {
     const details = el('section-' + sectionId);
+    // SECTION_CONTAINERSとHTML側のid="section-*"がずれていると要素が見つからない
+    // （issue #225 レビュー指摘3）。nullチェック無しでaddEventListenerを呼ぶと
+    // ここで例外が飛び、以降のループ・プロバイダ選択・messageリスナー登録・
+    // readyの送信が一切実行されずパネル全体が黙って動かなくなる。1セクション欠けても
+    // 残りは初期化できるよう、警告を出して次のセクションへ進む
+    if (!details) {
+      console.error('設定パネルの初期化: section-' + sectionId + ' が見つかりません');
+      continue;
+    }
     details.addEventListener('toggle', () => {
       openSections[sectionId] = details.open;
       saveState();

@@ -199,6 +199,21 @@ export class SettingsProvider {
    * のCLIは起動しない。
    */
   private loadedSections: Set<SectionId> = new Set();
+  /**
+   * 進行中のセクション取得（issue #225 レビュー指摘1・2）。
+   *
+   * `toggle` を素早く連打する、あるいは取得中に `refresh()` 相当の操作が挟まるなど、
+   * 同じセクションへ複数の要求が重なる状況がありうる。ここに載っているあいだは
+   * 新しい要求を素通しせず進行中のPromiseを再利用する（CLIの二重起動を防ぐ）とともに、
+   * `loadingSections` として外へ公開し、webview側が「取得できませんでした」ではなく
+   * 「読み込み中」を出せるようにする。
+   */
+  private pendingSectionLoads: Map<SectionId, Promise<void>> = new Map();
+
+  /** 取得中のセクション一覧（issue #225）。`ControlPanelViewProvider` がstateへ載せる。 */
+  get loadingSections(): SectionId[] {
+    return [...this.pendingSectionLoads.keys()];
+  }
 
   private claudeModels: ModelInfo[] = [];
   private claudeDefaults: ClaudeDefaults = noClaudeDefaults;
@@ -406,14 +421,34 @@ export class SettingsProvider {
   }
 
   /**
+   * セクション取得を実行する。同じセクションへ重複して要求が来た場合は、進行中の
+   * Promiseをそのまま返す（issue #225 レビュー指摘2）。`ensureSectionLoaded` と
+   * `load()` の両方がここを通ることで、`toggleSection` の連打と `refresh()` が
+   * 同じセクションへ同時に届いても、CLIの起動は1回にまとまり、完了順序による
+   * 上書きも起きない。
+   */
+  private runFetchSection(id: SectionId): Promise<void> {
+    const inFlight = this.pendingSectionLoads.get(id);
+    if (inFlight !== undefined) {
+      return inFlight;
+    }
+    const promise = this.fetchSection(id).finally(() => {
+      this.pendingSectionLoads.delete(id);
+    });
+    this.pendingSectionLoads.set(id, promise);
+    return promise;
+  }
+
+  /**
    * セクションを未取得なら取得する（issue #225、webviewの`toggleSection`から呼ぶ）。
    * 既に一度取得済みのセクションは何もしない（開き直すたびにCLIを起動し直さないため）。
    * 取り直したいときは `load()` を呼ぶこと。
    */
   async ensureSectionLoaded(id: SectionId): Promise<void> {
-    if (!this.loadedSections.has(id)) {
-      await this.fetchSection(id);
+    if (this.loadedSections.has(id)) {
+      return;
     }
+    await this.runFetchSection(id);
   }
 
   /**
@@ -427,7 +462,7 @@ export class SettingsProvider {
    */
   async load(): Promise<void> {
     await this.loadImmediate();
-    await Promise.all([...this.loadedSections].map((id) => this.fetchSection(id)));
+    await Promise.all([...this.loadedSections].map((id) => this.runFetchSection(id)));
   }
 
   /**

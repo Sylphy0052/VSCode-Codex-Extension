@@ -47,10 +47,20 @@ function fakeWebviewView(): {
 function fakeSettingsProvider(): {
   settings: SettingsProvider;
   ensureSectionLoadedCalls: string[];
+  /**
+   * `settings.loadingSections`をテスト側から差し替える（issue #225 レビュー指摘1）。
+   * `ControlPanelViewProvider.buildState()`がこの値をそのまま`state.loadingSections`
+   * へ載せて送ることを確認するために使う
+   */
+  setLoadingSections: (ids: string[]) => void;
 } {
   const ensureSectionLoadedCalls: string[] = [];
+  let loadingSections: string[] = [];
   const settings = {
     load: async () => undefined,
+    get loadingSections() {
+      return loadingSections;
+    },
     snapshot: () => ({
       models: [],
       efforts: [],
@@ -89,7 +99,13 @@ function fakeSettingsProvider(): {
       ensureSectionLoadedCalls.push(id);
     },
   };
-  return { settings: settings as unknown as SettingsProvider, ensureSectionLoadedCalls };
+  return {
+    settings: settings as unknown as SettingsProvider,
+    ensureSectionLoadedCalls,
+    setLoadingSections: (ids: string[]) => {
+      loadingSections = ids;
+    },
+  };
 }
 
 function fakeLogger(): { logger: Logger; warnings: string[] } {
@@ -157,4 +173,28 @@ describe('ControlPanelViewProviderのセクション遅延取得（issue #225）
     expect(ensureSectionLoadedCalls).toEqual([]);
     expect(warnings.length).toBeGreaterThan(0);
   });
+
+  it(
+    '取得中のセクションはsettings.loadingSectionsからそのままstate.loadingSectionsへ' +
+      '転送される（issue #225 レビュー指摘1）',
+    async () => {
+      const { settings, setLoadingSections } = fakeSettingsProvider();
+      const { logger } = fakeLogger();
+      const provider = new ControlPanelViewProvider(settings, logger);
+      const { view, sent } = fakeWebviewView();
+
+      // セクションAが取得中である状態を模す。別セクションの操作でstateが再送されても
+      // Aの取得中状態が反映され続けることを確かめたいので、resolveWebviewView前に
+      // セットしておく
+      setLoadingSections(['codexMcp']);
+      provider.resolveWebviewView(view as never);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const states = stateMessagesOf(sent) as { state: { loadingSections: string[] } }[];
+      expect(states.length).toBeGreaterThan(0);
+      const last = states[states.length - 1];
+      expect(last?.state.loadingSections).toEqual(['codexMcp']);
+    },
+  );
 });

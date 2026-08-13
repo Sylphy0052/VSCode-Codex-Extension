@@ -19,7 +19,15 @@ const NOT_LOADED_YET = { ok: false as const, reason: 'まだ読み込んでい�
  * `settingsProviderReloadClaudeSkills.test.ts` の `createSettingsProvider` と同じ構造だが、
  * こちらは全依存の呼び出し回数を追う必要があるため別ファイルにしている。
  */
-function createSettingsProvider(): {
+/**
+ * `listCodexMcpServers` の取得を差し替えたいテスト（issue #225 レビュー指摘2の競合
+ * 再現）向けのオプション。省略時は他のセクションと同じ即時応答のフェイクを使う。
+ */
+interface CreateSettingsProviderOptions {
+  listCodexMcpServers?: () => Promise<{ ok: false; reason: string }>;
+}
+
+function createSettingsProvider(options: CreateSettingsProviderOptions = {}): {
   settings: SettingsProvider;
   calls: Record<string, number>;
 } {
@@ -41,6 +49,11 @@ function createSettingsProvider(): {
     return { code: 1, stderr: 'fake' };
   };
 
+  const listCodexMcpServers = async (): Promise<{ ok: false; reason: string }> => {
+    count('listCodexMcpServers');
+    return options.listCodexMcpServers ? options.listCodexMcpServers() : { ok: false, reason: 'fake' };
+  };
+
   const settings = new SettingsProvider(
     { readTextFile: async () => undefined } as never,
     '/fake/models-cache',
@@ -58,7 +71,7 @@ function createSettingsProvider(): {
       count('listClaudeAgents');
       return undefined;
     },
-    notLoadedYetReason('listCodexMcpServers'),
+    listCodexMcpServers,
     notLoadedYetReason('listClaudeMcpServers'),
     notImplementedError('setCodexMcpServerEnabled'),
     notImplementedError('setClaudeMcpServerEnabled'),
@@ -191,4 +204,85 @@ describe('SettingsProviderのセクション単位の遅延取得（issue #225�
 
     expect(calls.listClaudeSkills).toBe(2);
   });
+
+  it(
+    '取得中に同じセクションへ重複してensureSectionLoadedを呼んでもCLIは1回しか' +
+      '起動せず、完了後は両方の呼び出しが解決する（issue #225 レビュー指摘2）',
+    async () => {
+      let resolveFetch: (() => void) | undefined;
+      const { settings, calls } = createSettingsProvider({
+        listCodexMcpServers: () =>
+          new Promise((resolve) => {
+            resolveFetch = () => resolve({ ok: false, reason: 'fake' });
+          }),
+      });
+
+      const first = settings.ensureSectionLoaded('codexMcp');
+      const second = settings.ensureSectionLoaded('codexMcp');
+      // まだ`fetchSection`が解決していないうちに2件目の要求を出しても、CLIの起動は
+      // 1回目の実行中のPromiseへ相乗りするだけで、この時点ではまだ1回しか起動しない
+      expect(calls.listCodexMcpServers).toBe(1);
+
+      resolveFetch?.();
+      await Promise.all([first, second]);
+
+      expect(calls.listCodexMcpServers).toBe(1);
+    },
+  );
+
+  it(
+    '取得中のセクションはloadingSectionsに載り、完了すると外れる' +
+      '（issue #225 レビュー指摘1、ControlPanelViewProviderがstateへ載せる元）',
+    async () => {
+      let resolveFetch: (() => void) | undefined;
+      const { settings } = createSettingsProvider({
+        listCodexMcpServers: () =>
+          new Promise((resolve) => {
+            resolveFetch = () => resolve({ ok: false, reason: 'fake' });
+          }),
+      });
+
+      expect(settings.loadingSections).toEqual([]);
+
+      const loading = settings.ensureSectionLoaded('codexMcp');
+      expect(settings.loadingSections).toEqual(['codexMcp']);
+
+      resolveFetch?.();
+      await loading;
+
+      expect(settings.loadingSections).toEqual([]);
+    },
+  );
+
+  it(
+    '別セクションを開いている間に他のセクションが取得中でも、その別セクションの' +
+      '取得自体は待たされず独立して進む（issue #225 レビュー指摘1の競合再現）',
+    async () => {
+      let resolveMcpFetch: (() => void) | undefined;
+      const { settings, calls } = createSettingsProvider({
+        listCodexMcpServers: () =>
+          new Promise((resolve) => {
+            resolveMcpFetch = () => resolve({ ok: false, reason: 'fake' });
+          }),
+      });
+
+      // セクションA（codexMcp）を開く。fetchSectionはまだ解決しない
+      const loadingA = settings.ensureSectionLoaded('codexMcp');
+
+      // Aの応答を待たずにセクションB（codexAccount）を開く。Bの取得はAとは独立
+      // した別のCLI呼び出しなので、Aの完了を待たずに解決してよい
+      await settings.ensureSectionLoaded('codexAccount');
+
+      expect(calls.readCodexAccount).toBe(1);
+      // このタイミングではAはまだ取得中のまま（loadingSectionsに残っている）。
+      // ここが直る前は、Bのtoggleが引き起こす`post()`でstate全体が再送され、
+      // Aの「読み込み中…」が「取得できませんでした」へ一時的に上書きされていた
+      expect(settings.loadingSections).toEqual(['codexMcp']);
+
+      resolveMcpFetch?.();
+      await loadingA;
+
+      expect(settings.loadingSections).toEqual([]);
+    },
+  );
 });
