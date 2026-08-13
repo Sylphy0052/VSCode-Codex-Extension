@@ -34,8 +34,11 @@ export function parseThreadListPage(result: unknown): ThreadListPage {
  * status, path, cwd, cliVersion, source, canAcceptDirectInput, threadSource, agentNickname,
  * agentRole, gitInfo, name, turns`。ここで使うのは一覧に必要な最小限のみ。
  *
- * - `threadSource !== 'user'` の派生スレッド（subagentなど）はファイル読み経路
- *   （`sessionMeta.isUserThread`）と収録規則を揃えるため除く（design.md §4.1）。
+ * - `threadSource` が明示的に `'user'` 以外の値（`'subagent'` など）を持つ派生スレッドのみ除く。
+ *   実測（codex-cli 0.147.0、`thread/list` を全件ページングし尽くした33件）では `threadSource` は
+ *   全件 `null` だったため、`null` / 未設定はユーザースレッドとして通す。ファイル読み経路
+ *   （`sessionMeta.isUserThread`）は `session_index.jsonl` の `thread_source` に実値が入るため
+ *   従来どおり `=== 'user'` の絞り込みで正しい（design.md §4.4）。
  * - `archived` に相当するフィールドは無いため、`path` が `archivedSessionsDir` 配下かどうかで
  *   判定する（ファイル読み経路と同じ考え方。design.md §4.2）。
  * - `updatedAt` は実測でUnix epoch秒（数値）。文字列（ISO8601）で来た場合も念のため受け付ける。
@@ -49,7 +52,8 @@ export function normalizeThread(
     return undefined;
   }
 
-  if (str(obj['threadSource']) !== 'user') {
+  const threadSource = str(obj['threadSource']);
+  if (threadSource !== '' && threadSource !== 'user') {
     return undefined;
   }
 
