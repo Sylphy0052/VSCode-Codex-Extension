@@ -925,14 +925,40 @@ export function controlPanelScript(): string {
       selectedAgent && selectedAgent.description ? selectedAgent.description : '';
   }
 
+  // セクションを開いたときの読み込み中の表示（issue #225）。応答が届くまでの間、
+  // そのセクションの一覧部分だけを差し替える（見出しや説明文はそのまま残す）
+  function renderLoading(elId) {
+    const container = el(elId);
+    container.replaceChildren();
+    const p = document.createElement('p');
+    p.className = 'sectionLoading';
+    p.textContent = '読み込み中…';
+    container.appendChild(p);
+  }
+
+  // セクションの開閉状態は vscode.setState へ保存する（issue #225）。プロバイダの
+  // 選択状態と同じstateオブジェクトを使う。setStateは丸ごと置き換えのため、
+  // 保存のたびに両方をまとめて書く（片方だけ書くと、もう片方が消える）
+  const persisted = vscode.getState() || {};
+  let currentProvider = persisted.provider === 'claude' ? 'claude' : 'codex';
+  const openSections =
+    persisted.openSections && typeof persisted.openSections === 'object'
+      ? Object.assign({}, persisted.openSections)
+      : {};
+
+  function saveState() {
+    vscode.setState({ provider: currentProvider, openSections: openSections });
+  }
+
   // タブは1クリックで切り替える。選んだ側はリロードしても残す。
   function selectProvider(provider) {
+    currentProvider = provider;
     const claude = provider === 'claude';
     el('panelCodex').hidden = claude;
     el('panelClaude').hidden = !claude;
     el('tabCodex').setAttribute('aria-selected', String(!claude));
     el('tabClaude').setAttribute('aria-selected', String(claude));
-    vscode.setState({ provider });
+    saveState();
   }
 
   el('tabCodex').addEventListener('click', () => selectProvider('codex'));
@@ -967,7 +993,45 @@ export function controlPanelScript(): string {
     vscode.postMessage({ type: 'reloadClaudeSkills' });
   });
 
-  selectProvider((vscode.getState() || {}).provider === 'claude' ? 'claude' : 'codex');
+  // セクションごとの遅延取得（issue #225）。展開したときだけ拡張機能ホストへ
+  // 識別子を送り、応答（stateメッセージ）が届くまでは読み込み中の表示を出す。
+  // 一度取得した結果はホスト側（SettingsProvider）が保持するため、閉じて開き直す
+  // だけではCLIを起動し直さない（取り直したいときはrefresh相当の既存操作を使う）
+  const SECTION_CONTAINERS = {
+    codexAccount: ['accountCodex'],
+    codexMcp: ['mcpListCodex'],
+    codexHooks: ['hooksListCodex'],
+    codexSkills: ['skillsListCodex'],
+    codexPlugins: ['pluginsListCodex'],
+    codexApps: ['appsListCodex'],
+    codexImport: ['importListCodex', 'importHistoryListCodex'],
+    claudeAccount: ['accountClaude'],
+    claudeMcp: ['mcpListClaude'],
+    claudeHooks: ['hooksListClaude'],
+    claudeSkills: ['skillsListClaude'],
+    claudePlugins: ['pluginsListClaude'],
+  };
+
+  for (const sectionId of Object.keys(SECTION_CONTAINERS)) {
+    const details = el('section-' + sectionId);
+    details.addEventListener('toggle', () => {
+      openSections[sectionId] = details.open;
+      saveState();
+      if (details.open) {
+        for (const containerId of SECTION_CONTAINERS[sectionId]) {
+          renderLoading(containerId);
+        }
+        vscode.postMessage({ type: 'toggleSection', id: sectionId });
+      }
+    });
+    // 前回開いていたセクションを復元する。プロパティへの代入でもtoggleイベントは
+    // 発火するため、上の読み込み中の表示・ホストへの要求は自然に行われる
+    if (openSections[sectionId]) {
+      details.open = true;
+    }
+  }
+
+  selectProvider(currentProvider);
 
   window.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'state') {

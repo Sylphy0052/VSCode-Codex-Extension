@@ -115,13 +115,26 @@ export function controlPanelStyles(): string {
     font-size: 0.85em;
     line-height: 1.5;
   }
-  .sectionTitle {
-    margin: 16px 0 8px;
+  .section {
+    margin: 16px 0 0;
     padding-top: 12px;
     border-top: 1px solid var(--vscode-widget-border, transparent);
-    font-size: 0.9em;
-    font-weight: 600;
-    color: var(--vscode-foreground);
+  }
+  .section summary.sectionTitle {
+    margin: 0 0 8px;
+    padding-top: 0;
+    border-top: none;
+    cursor: pointer;
+    /* 三角マーカーはブラウザ標準のものをそのまま使う（design.md §16.8の見た目変更範囲外） */
+  }
+  .section summary.sectionTitle:focus {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: 2px;
+  }
+  .section .sectionBody { padding-top: 2px; }
+  .sectionLoading {
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
   }
   .mcpList { display: flex; flex-direction: column; gap: 6px; }
   .mcpEmpty, .mcpError {

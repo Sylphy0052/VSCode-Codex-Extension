@@ -82,6 +82,33 @@ export function isClaudeEditableKey(value: unknown): value is ClaudeEditableKey 
   return typeof value === 'string' && (CLAUDE_EDITABLE_KEYS as readonly string[]).includes(value);
 }
 
+/**
+ * 遅延取得の対象となるセクション識別子（issue #225）。
+ *
+ * Codex側の7セクション（アカウント/MCP/hooks/skills/plugins/apps/インポート）と
+ * Claude Code側の5セクション（アカウント/MCP/hooks/skills/plugins）を合わせた12種類。
+ * 展開されたときだけ `SettingsProvider.ensureSectionLoaded` が対応する取得を行う。
+ */
+export const SECTION_IDS = [
+  'codexAccount',
+  'codexMcp',
+  'codexHooks',
+  'codexSkills',
+  'codexPlugins',
+  'codexApps',
+  'codexImport',
+  'claudeAccount',
+  'claudeMcp',
+  'claudeHooks',
+  'claudeSkills',
+  'claudePlugins',
+] as const;
+export type SectionId = (typeof SECTION_IDS)[number];
+
+export function isSectionId(value: unknown): value is SectionId {
+  return typeof value === 'string' && (SECTION_IDS as readonly string[]).includes(value);
+}
+
 export interface SettingsSnapshot {
   models: ModelInfo[];
   /** 選択中のモデルで選べるeffort。 */
@@ -166,6 +193,12 @@ export class SettingsProvider {
   private codexImportHistory: ImportHistorySnapshot = importHistoryNotLoadedYet;
   /** `runCodexImport` へそのまま再送するための、キーごとの生の項目（issue #36）。 */
   private codexImportRawByKey: Map<string, unknown> = new Map();
+  /**
+   * 一度でも展開して取得したセクション（issue #225）。`load()` はここに含まれる
+   * セクションだけを読み直し、含まれないセクション（畳んだまま一度も開いていないもの）
+   * のCLIは起動しない。
+   */
+  private loadedSections: Set<SectionId> = new Set();
 
   private claudeModels: ModelInfo[] = [];
   private claudeDefaults: ClaudeDefaults = noClaudeDefaults;
@@ -292,45 +325,21 @@ export class SettingsProvider {
     }
   }
 
-  /** モデル一覧・既定値・MCPサーバー一覧・hooks一覧を読み直す。 */
-  /** モデル一覧・既定値・MCPサーバー一覧・ログイン状態を読み直す。 */
-  async load(): Promise<void> {
+  /**
+   * 即時に読むもの（モデル・reasoning effort・エージェントの選択肢と、config.toml /
+   * settings.jsonの既定値）を読み直す（issue #225）。
+   *
+   * モデル・エージェントの一覧はCLIの起動を伴うが、常にパネルへ表示する項目
+   * （セクションの開閉に関わらず要る）のため、ここでは畳み対応の対象にしない。
+   * config.toml / settings.jsonの読みはファイル読みのみでプロセス起動を伴わない。
+   */
+  private async loadImmediate(): Promise<void> {
     this.loaded = true;
     // CLIの起動を待つ時間が二重にならないよう、まとめて聞く
-    [
-      this.models,
-      this.claudeModels,
-      this.claudeAgents,
-      this.codexMcp,
-      this.claudeMcp,
-      this.codexHooks,
-      this.claudeHooks,
-      this.codexSkills,
-      this.claudeSkills,
-      this.codexAccount,
-      this.claudeAccount,
-      this.codexPlugins,
-      this.claudePlugins,
-      this.codexApps,
-      this.codexImport,
-      this.codexImportHistory,
-    ] = await Promise.all([
+    [this.models, this.claudeModels, this.claudeAgents] = await Promise.all([
       this.loadCodexModels(),
       this.loadClaudeModels(),
       this.loadClaudeAgents(),
-      this.listCodexMcpServers(),
-      this.listClaudeMcpServers(),
-      this.listCodexHooks(),
-      this.listClaudeHooks(),
-      this.listCodexSkills(),
-      this.listClaudeSkills(),
-      this.readCodexAccount(),
-      this.readClaudeAccount(),
-      this.listCodexPlugins(),
-      this.listClaudePlugins(),
-      this.listCodexApps(),
-      this.loadCodexImportCandidates(),
-      this.readCodexImportHistories(),
     ]);
 
     const toml = await this.fs.readTextFile(this.configTomlPath);
@@ -339,6 +348,86 @@ export class SettingsProvider {
     const claudeSettings = await this.fs.readTextFile(this.claudeSettingsPath);
     this.claudeDefaults =
       claudeSettings === undefined ? noClaudeDefaults : extractClaudeDefaults(claudeSettings);
+  }
+
+  /**
+   * 指定したセクション1件だけを実際に取得し、結果を保持する（issue #225）。
+   * 呼ぶたびに必ずCLIを起動し直す。キャッシュを見て起動を省くかどうかは
+   * 呼び出し側（`ensureSectionLoaded`）の責務にする。
+   */
+  private async fetchSection(id: SectionId): Promise<void> {
+    switch (id) {
+      case 'codexAccount':
+        this.codexAccount = await this.readCodexAccount();
+        break;
+      case 'claudeAccount':
+        this.claudeAccount = await this.readClaudeAccount();
+        break;
+      case 'codexMcp':
+        this.codexMcp = await this.listCodexMcpServers();
+        break;
+      case 'claudeMcp':
+        this.claudeMcp = await this.listClaudeMcpServers();
+        break;
+      case 'codexHooks':
+        this.codexHooks = await this.listCodexHooks();
+        break;
+      case 'claudeHooks':
+        this.claudeHooks = await this.listClaudeHooks();
+        break;
+      case 'codexSkills':
+        this.codexSkills = await this.listCodexSkills();
+        break;
+      case 'claudeSkills':
+        this.claudeSkills = await this.listClaudeSkills();
+        break;
+      case 'codexPlugins':
+        this.codexPlugins = await this.listCodexPlugins();
+        break;
+      case 'claudePlugins':
+        this.claudePlugins = await this.listClaudePlugins();
+        break;
+      case 'codexApps':
+        this.codexApps = await this.listCodexApps();
+        break;
+      case 'codexImport':
+        // 候補一覧と履歴は同じ「インポート」セクションの中身なので、まとめて1回で取得する
+        [this.codexImport, this.codexImportHistory] = await Promise.all([
+          this.loadCodexImportCandidates(),
+          this.readCodexImportHistories(),
+        ]);
+        break;
+      default: {
+        const exhaustive: never = id;
+        throw new Error(`未知のセクションです: ${String(exhaustive)}`);
+      }
+    }
+    this.loadedSections.add(id);
+  }
+
+  /**
+   * セクションを未取得なら取得する（issue #225、webviewの`toggleSection`から呼ぶ）。
+   * 既に一度取得済みのセクションは何もしない（開き直すたびにCLIを起動し直さないため）。
+   * 取り直したいときは `load()` を呼ぶこと。
+   */
+  async ensureSectionLoaded(id: SectionId): Promise<void> {
+    if (!this.loadedSections.has(id)) {
+      await this.fetchSection(id);
+    }
+  }
+
+  /**
+   * 即時に読むものと、これまでに一度でも展開して取得したセクションをまとめて読み直す
+   * （issue #225）。一度も展開していないセクションはここでも読まない
+   * （パネルを開いた直後・畳んだままのセクションでCLIを起動しないのが目的）。
+   *
+   * MCPの有効/無効切替やhookの信頼など、既存の操作の直後にこれを呼ぶことで、
+   * 開いているセクションの表示を実際の状態へ揃える（展開済みセクションは
+   * 引き続き読み直しの対象になる）。
+   */
+  async load(): Promise<void> {
+    await this.loadImmediate();
+    await Promise.all([...this.loadedSections].map((id) => this.fetchSection(id)));
   }
 
   /**
@@ -402,7 +491,9 @@ export class SettingsProvider {
     if (fromCli !== undefined) {
       return fromCli;
     }
-    this.log.warn('Claude Codeのエージェント一覧を取得できませんでした。選択肢は既定のみになります');
+    this.log.warn(
+      'Claude Codeのエージェント一覧を取得できませんでした。選択肢は既定のみになります',
+    );
     return [];
   }
 
@@ -510,6 +601,9 @@ export class SettingsProvider {
    */
   async reloadClaudeSkills(): Promise<void> {
     this.claudeSkills = await this.listClaudeSkills();
+    // ボタンはskillsセクションの中にしか無く、押せる時点でセクションは展開済みのはずだが、
+    // 万一のずれに備えて明示的に「取得済み」へ揃えておく（issue #225）
+    this.loadedSections.add('claudeSkills');
   }
 
   /**
@@ -606,7 +700,11 @@ export class SettingsProvider {
    * `claude plugin enable` / `disable` は破壊的操作ではない（コードの削除もダウンロードも
    * 伴わない）ため、MCP/skillsの切替と同じく確認ダイアログは挟まない。
    */
-  async toggleClaudePlugin(id: string, scope: string | undefined, enabled: boolean): Promise<McpToggleResult> {
+  async toggleClaudePlugin(
+    id: string,
+    scope: string | undefined,
+    enabled: boolean,
+  ): Promise<McpToggleResult> {
     const result = await this.toggleClaudePluginCli(id, scope, enabled);
     if (result.code !== 0) {
       const error = result.stderr.trim() || '不明なエラー';
@@ -803,7 +901,10 @@ async function confirmImport(items: ImportItemView[]): Promise<boolean> {
  * pluginのインストールは外部から任意のコード（hookやMCPサーバーを含む）を持ち込む操作
  * のため、何をどこから入れるかを明示して必ず確認を挟む（issue #32、design.md §14.20）。
  */
-async function confirmInstallPlugin(pluginName: string, marketplace: string | undefined): Promise<boolean> {
+async function confirmInstallPlugin(
+  pluginName: string,
+  marketplace: string | undefined,
+): Promise<boolean> {
   const source = marketplace === undefined ? '' : `（マーケットプレイス: ${marketplace}）`;
   const choice = await vscode.window.showWarningMessage(
     `plugin「${pluginName}」${source}をインストールします。hookやMCPサーバーなど任意のコードが持ち込まれる可能性があります。`,

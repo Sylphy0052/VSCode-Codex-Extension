@@ -16,6 +16,7 @@ import { formatAbsoluteTime } from './relativeTime';
 import {
   isClaudeEditableKey,
   isEditableKey,
+  isSectionId,
   type ClaudeSettingsSnapshot,
   type SettingsProvider,
   type SettingsSnapshot,
@@ -40,8 +41,7 @@ interface ImportHistoryEntryDisplay {
 }
 
 type ImportHistoryDisplaySnapshot =
-  | { ok: true; entries: ImportHistoryEntryDisplay[] }
-  | { ok: false; reason: string };
+  { ok: true; entries: ImportHistoryEntryDisplay[] } | { ok: false; reason: string };
 
 interface PanelState extends Omit<SettingsSnapshot, 'importHistory'> {
   usage: UsageView | undefined;
@@ -115,6 +115,20 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
 
     if (m['type'] === 'ready') {
       await this.refresh();
+      return;
+    }
+
+    if (m['type'] === 'toggleSection') {
+      // セクションを展開したときの遅延取得（issue #225）。未取得なら取得し、
+      // 取得済みならCLIを起動し直さずに現在の状態をそのまま送り返す
+      // （webview側は応答を待つあいだ読み込み中の表示を出している）
+      const id = m['id'];
+      if (!isSectionId(id)) {
+        this.log.warn(`セクションの展開要求が不正です: ${JSON.stringify(m)}`);
+        return;
+      }
+      await this.settings.ensureSectionLoaded(id);
+      await this.post();
       return;
     }
 
@@ -293,10 +307,7 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     }
 
     if (m['type'] === 'logoutClaude') {
-      await this.runAccountAction(
-        () => this.settings.logoutClaude(),
-        'Claude Codeからログアウト',
-      );
+      await this.runAccountAction(() => this.settings.logoutClaude(), 'Claude Codeからログアウト');
       return;
     }
 
@@ -489,33 +500,61 @@ ${controlPanelStyles()}
   <p class="note">「既定」はCodex側の <code>config.toml</code> の値を使います。ここでの変更は次に開くセッションに適用されます。実行中のセッションはタブ内のCodexで変更してください。</p>
   <p class="note" id="profileNote"></p>
 
-  <h2 class="sectionTitle">アカウント</h2>
+  <details class="section" id="section-codexAccount">
+  <summary class="sectionTitle">アカウント</summary>
+  <div class="sectionBody">
   <div class="accountBox" id="accountCodex"></div>
+  </div>
+  </details>
 
-  <h2 class="sectionTitle">MCPサーバー</h2>
+  <details class="section" id="section-codexMcp">
+  <summary class="sectionTitle">MCPサーバー</summary>
+  <div class="sectionBody">
   <div class="mcpList" id="mcpListCodex"></div>
+  </div>
+  </details>
 
-  <h2 class="sectionTitle">hooks</h2>
+  <details class="section" id="section-codexHooks">
+  <summary class="sectionTitle">hooks</summary>
+  <div class="sectionBody">
   <p class="note">hooksは任意のコマンドを実行する仕組みです。特にプロジェクト側で定義されたhookは、cloneしただけで任意コマンドが動く経路になりえます。何が実行されるかを確認してから信頼してください。</p>
   <div class="hooksList" id="hooksListCodex"></div>
+  </div>
+  </details>
 
-  <h2 class="sectionTitle">skills</h2>
+  <details class="section" id="section-codexSkills">
+  <summary class="sectionTitle">skills</summary>
+  <div class="sectionBody">
   <p class="note">skillsはモデルへ渡す指示（プロンプト）です。特にプロジェクト側で定義されたskillは、cloneしただけで効く経路になりえます。どこ由来かを確認してから使ってください。</p>
   <div class="skillsList" id="skillsListCodex"></div>
+  </div>
+  </details>
 
-  <h2 class="sectionTitle">plugins</h2>
+  <details class="section" id="section-codexPlugins">
+  <summary class="sectionTitle">plugins</summary>
+  <div class="sectionBody">
   <p class="note">pluginは任意のコード（hookやMCPサーバーなど）を持ち込む仕組みです。中身を確認してから使ってください。Codexには有効/無効を切り替える経路がありません（実測。導入済みかどうかはインストール/アンインストールで扱います）。</p>
   <div class="pluginsList" id="pluginsListCodex"></div>
+  </div>
+  </details>
 
-  <h2 class="sectionTitle">apps</h2>
+  <details class="section" id="section-codexApps">
+  <summary class="sectionTitle">apps</summary>
+  <div class="sectionBody">
   <p class="note">appはChatGPTに接続されたコネクタです。この一覧は閲覧のみです。Codexには有効/無効・インストール/アンインストールを拡張機能から操作する確定した経路がありません。</p>
   <div class="appsList" id="appsListCodex"></div>
+  </div>
+  </details>
 
-  <h2 class="sectionTitle">他エージェントからの設定インポート</h2>
+  <details class="section" id="section-codexImport">
+  <summary class="sectionTitle">他エージェントからの設定インポート</summary>
+  <div class="sectionBody">
   <p class="note">Claude Codeの設定・skills・plugins・最近のセッションなどをCodexへ取り込みます。既存の設定を上書きすることがあるため、実行前に必ず内容を確認してください。</p>
   <div class="importList" id="importListCodex"></div>
   <h3 class="sectionSubTitle">インポート履歴</h3>
   <div class="importHistoryList" id="importHistoryListCodex"></div>
+  </div>
+  </details>
   </div>
 
   <div id="panelClaude" hidden>
@@ -546,25 +585,45 @@ ${controlPanelStyles()}
 
     <p class="note">「既定」はClaude Code側の <code>settings.json</code> の値を使います。使用量はチャット画面に表示されます（ステータスバーはCodex専用）。</p>
 
-    <h2 class="sectionTitle">アカウント</h2>
+    <details class="section" id="section-claudeAccount">
+    <summary class="sectionTitle">アカウント</summary>
+    <div class="sectionBody">
     <div class="accountBox" id="accountClaude"></div>
+    </div>
+    </details>
 
-    <h2 class="sectionTitle">MCPサーバー</h2>
+    <details class="section" id="section-claudeMcp">
+    <summary class="sectionTitle">MCPサーバー</summary>
+    <div class="sectionBody">
     <div class="mcpList" id="mcpListClaude"></div>
+    </div>
+    </details>
 
-    <h2 class="sectionTitle">hooks</h2>
+    <details class="section" id="section-claudeHooks">
+    <summary class="sectionTitle">hooks</summary>
+    <div class="sectionBody">
     <p class="note">hooksは任意のコマンドを実行する仕組みです。特にプロジェクト側で定義されたhookは、cloneしただけで任意コマンドが動く経路になりえます。Claude Codeにはこの拡張機能から信頼状態を確認・操作する経路がありません（実測。CLI側の挙動に委ねます）。</p>
     <div class="hooksList" id="hooksListClaude"></div>
+    </div>
+    </details>
 
-    <h2 class="sectionTitle">skills</h2>
+    <details class="section" id="section-claudeSkills">
+    <summary class="sectionTitle">skills</summary>
+    <div class="sectionBody">
     <p class="note">skillsはモデルへ渡す指示（プロンプト）です。特にプロジェクト側で定義されたskillは、cloneしただけで効く経路になりえます。Claude Codeにはこの拡張機能から有効/無効を切り替える経路がありません（実測。出どころの表示はCLIの説明文からの推測です）。</p>
     <button id="reloadClaudeSkills" type="button">skillsを読み直す</button>
     <p class="note">会話中にディスク上へ増減したskillを読み直します。開いている会話があれば、そちらのスラッシュコマンド候補も入れ替わります。</p>
     <div class="skillsList" id="skillsListClaude"></div>
+    </div>
+    </details>
 
-    <h2 class="sectionTitle">plugins</h2>
+    <details class="section" id="section-claudePlugins">
+    <summary class="sectionTitle">plugins</summary>
+    <div class="sectionBody">
     <p class="note">pluginは任意のコード（hookやMCPサーバーなど）を持ち込む仕組みです。中身を確認してから使ってください。Claude Codeは <code>claude plugin</code> CLI経由で有効/無効・インストール/アンインストールをすべて操作できます。</p>
     <div class="pluginsList" id="pluginsListClaude"></div>
+    </div>
+    </details>
   </div>
 
 <script nonce="${nonce}">

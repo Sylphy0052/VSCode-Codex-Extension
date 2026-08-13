@@ -45,6 +45,13 @@ describe('controlPanelStyles', () => {
   it('括弧が対応している', () => {
     expect(balanced(controlPanelStyles())).toBe(true);
   });
+
+  it('セクションの折りたたみ（details/summary）用のスタイルがある（issue #225）', () => {
+    const css = controlPanelStyles();
+    expect(css).toContain('.section');
+    expect(css).toContain('summary.sectionTitle');
+    expect(css).toContain('.sectionLoading');
+  });
 });
 
 describe('chatCsp', () => {
