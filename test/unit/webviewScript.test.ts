@@ -103,6 +103,19 @@ describe('controlPanelScript', () => {
   it('構文として成立している', () => {
     expect(() => parses(controlPanelScript())).not.toThrow();
   });
+
+  it('セクションを開いたときにtoggleSectionをホストへ送る（issue #225）', () => {
+    const source = controlPanelScript();
+    expect(source).toContain("type: 'toggleSection'");
+  });
+
+  it('開閉状態をprovider選択と同じvscode.setStateへ保存する（issue #225）', () => {
+    const source = controlPanelScript();
+    expect(source).toContain('openSections');
+    // setStateは呼び出しごとに丸ごと置き換わるため、providerとopenSectionsを
+    // 必ず同時に書く1箇所（saveState）にまとまっていることを確かめる
+    expect(source.match(/vscode\.setState\(/g)?.length).toBe(1);
+  });
 });
 
 describe('workflowScript', () => {
