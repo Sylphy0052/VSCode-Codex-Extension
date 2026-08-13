@@ -10,7 +10,10 @@ import {
 } from '../appserver/approvals';
 import { isOpenableSearchUrl, type ChatItem, type ChatState } from '../appserver/chatState';
 import { ChatSession } from '../appserver/chatSession';
-import { buildTranscriptMarkdown, defaultTranscriptFileName } from '../appserver/transcriptMarkdown';
+import {
+  buildTranscriptMarkdown,
+  defaultTranscriptFileName,
+} from '../appserver/transcriptMarkdown';
 import {
   AppServerConnection,
   type AppServerConnectionPort,
@@ -40,7 +43,7 @@ import type {
   TaskSessionInput,
 } from '../orchestrator/taskSession';
 import { CODEX_APPROVAL_CYCLE } from '../provider/approvalCycle';
-import { AttachmentBox } from '../provider/attachments';
+import { AttachmentBox, dropRejectionReason } from '../provider/attachments';
 import { buildImageReply } from '../provider/imageRefs';
 import { CommandCatalog } from '../provider/commandCatalog';
 import { FileMentionCatalog, filterFiles } from '../provider/fileMentions';
@@ -179,6 +182,7 @@ export function addAttachment(box: AttachmentBox, name: unknown, dataUrl: unknow
 }
 
 /**
+/**
  * 保護を外した設定のまま会話を開いてよいか確かめる（issue #222、design.md §7）。
  *
  * 承認とサンドボックスの両方が効かない組み合わせは、モデルの提案がそのまま実行される。
@@ -194,6 +198,19 @@ export async function confirmUnsafeCombination(config: CodexConfig): Promise<boo
   }
   const choice = await vscode.window.showWarningMessage(reason, { modal: true }, 'このまま開く');
   return choice === 'このまま開く';
+}
+
+/**
+ * 画像を取れなかったドロップを知らせる（issue #241）。Codex画面・Claude Code画面で共有する。
+ *
+ * `addAttachment` と同じ考え方で、受け取れなかったときは黙って捨てずに理由を出す。
+ */
+export function noteDropRejected(kind: unknown): void {
+  const reason = dropRejectionReason(kind);
+  if (reason === undefined) {
+    return;
+  }
+  void vscode.window.showWarningMessage(`画像を添えられません: ${reason}`);
 }
 
 /**
@@ -1134,6 +1151,10 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       if (type === 'attach') {
         addAttachment(entry.attachments, m['name'], m['dataUrl']);
         this.postState(entry);
+        return;
+      }
+      if (type === 'dropRejected') {
+        noteDropRejected(m['kind']);
         return;
       }
       if (type === 'removeAttachment' && typeof m['id'] === 'string') {

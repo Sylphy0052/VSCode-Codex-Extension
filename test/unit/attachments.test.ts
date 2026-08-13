@@ -4,6 +4,7 @@ import {
   buildClaudeContent,
   buildCodexInput,
   checkRoom,
+  dropRejectionReason,
   formatSize,
   MAX_ATTACHMENTS,
   parseDataUrl,
@@ -173,5 +174,27 @@ describe('AttachmentBox', () => {
       size: '30B',
       dataUrl: expect.stringContaining('data:image/png;base64,'),
     });
+  });
+});
+
+describe('dropRejectionReason', () => {
+  it('画像が1枚も無かったドロップの理由を返す', () => {
+    expect(dropRejectionReason('notImage')).toBe('ドロップされたファイルに画像がありませんでした');
+    expect(dropRejectionReason('empty')).toBe('ドロップされた内容にファイルがありませんでした');
+  });
+
+  it('VS Code内からのドラッグは対応していないことを理由に出す', () => {
+    // ホストは会話に出てきたパスしか読まない（imageRefs.ts）。パスだけが載ったドロップは
+    // 受け取れないため、代わりの経路を案内する
+    expect(dropRejectionReason('pathOnly')).toBe(
+      'VS Code内からのドラッグには対応していません。「画像」ボタンかCtrl+Vで添えてください',
+    );
+  });
+
+  it('知らない種類では何も出さない', () => {
+    // Webviewからの値は信用しない。想定外は黙って捨て、通知の文言を作らせない
+    expect(dropRejectionReason('other')).toBeUndefined();
+    expect(dropRejectionReason(undefined)).toBeUndefined();
+    expect(dropRejectionReason(42)).toBeUndefined();
   });
 });

@@ -36,6 +36,7 @@ import {
   confirmRunShellCommand,
   confirmStopBackgroundTask,
   confirmUsageCreditsRequest,
+  noteDropRejected,
   postFileMentions,
   postImageData,
   renderShell,
@@ -117,7 +118,8 @@ const SHELL_COMMAND_TERMINAL_NAME = 'Agent Sessions: シェルコマンド入力
  */
 function openShellCommandTerminal(cwd: string, command: string): void {
   const existing = vscode.window.terminals.find((t) => t.name === SHELL_COMMAND_TERMINAL_NAME);
-  const terminal = existing ?? vscode.window.createTerminal({ name: SHELL_COMMAND_TERMINAL_NAME, cwd });
+  const terminal =
+    existing ?? vscode.window.createTerminal({ name: SHELL_COMMAND_TERMINAL_NAME, cwd });
   terminal.show();
   terminal.sendText(command, false);
 }
@@ -1014,6 +1016,10 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         this.refreshSettings(entry);
         return;
       }
+      if (type === 'dropRejected') {
+        noteDropRejected(m['kind']);
+        return;
+      }
       if (type === 'removeAttachment' && typeof m['id'] === 'string') {
         entry.attachments.remove(m['id']);
         this.refreshSettings(entry);
@@ -1285,7 +1291,11 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
    * `background_tasks_changed` 通知（一覧から消える）で画面に反映されるため、ここでは
    * 要求を出すだけでよい。
    */
-  private async stopBackgroundTask(entry: ClaudePanel, taskId: string, command: string): Promise<void> {
+  private async stopBackgroundTask(
+    entry: ClaudePanel,
+    taskId: string,
+    command: string,
+  ): Promise<void> {
     if (!(await confirmStopBackgroundTask(command))) {
       return;
     }
@@ -1444,7 +1454,8 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     const projectInputs = await Promise.all(
       roots.map(async (r) => {
         const rootExists = (await this.fs.readTextFile(`${r.cwd}/CLAUDE.md`)) !== undefined;
-        const dotClaudeExists = (await this.fs.readTextFile(`${r.cwd}/.claude/CLAUDE.md`)) !== undefined;
+        const dotClaudeExists =
+          (await this.fs.readTextFile(`${r.cwd}/.claude/CLAUDE.md`)) !== undefined;
         return {
           name: r.name,
           cwd: r.cwd,
