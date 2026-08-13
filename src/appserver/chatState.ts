@@ -1,5 +1,6 @@
 import type { Attachment } from '../provider/attachments';
 import { NO_IMAGES, readUserInputImages, type ChatImage } from '../provider/imageRefs';
+import { readAutoApprovalReview } from './autoApprovalReview';
 import type { PendingPrompt } from './prompts';
 
 /** 1ファイル分の変更。app-server の `FileUpdateChange` に対応する。 */
@@ -1171,6 +1172,41 @@ export function applyEvent(
       const items = [...state.items];
       items[index] = { ...existing, diffs, detail: diffs.map((d) => d.path).join(', ') };
       return { ...state, items };
+    }
+
+    /**
+     * 承認要求の自動レビュー（`approvalsReviewer: auto_review`）。
+     *
+     * 開始と完了が同じ `reviewId` で届く。1件の項目として状態が進むように見せる
+     * （増やすと、判定中と結果が二重に並ぶ）。人が押していない承認が裏で進むため、
+     * **何が審査され、どう判定されたかは必ず会話へ残す。**
+     */
+    case 'item/autoApprovalReview/started':
+    case 'item/autoApprovalReview/completed': {
+      const review = readAutoApprovalReview(params);
+      if (review === undefined) {
+        return state;
+      }
+      return {
+        ...state,
+        items: upsertItem(state.items, {
+          id: `autoReview:${review.reviewId}`,
+          kind: 'autoApprovalReview',
+          text: review.action,
+          detail: review.outcome,
+          status: review.status === '' ? undefined : review.status,
+          turnId: review.turnId,
+          diffs: NO_DIFFS,
+        }),
+      };
+    }
+
+    /** 自動レビューからの警告。判定そのものではないため、一言だけ残す。 */
+    case 'guardianWarning': {
+      const message = str(params['message']);
+      return message === ''
+        ? state
+        : appendNotice(state, `guardianWarning:${message}`, `自動レビュー: ${message}`);
     }
 
     case 'serverRequest/resolved': {

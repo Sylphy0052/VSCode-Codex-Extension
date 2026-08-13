@@ -416,6 +416,22 @@
           "scope": "machine",
           "markdownDescription": "コマンド実行の承認方針。空なら `~/.codex/config.toml` に委譲する。"
         },
+        "codex.approvalsReviewer": {
+          "type": "string",
+          "enum": [
+            "",
+            "user",
+            "auto_review"
+          ],
+          "enumDescriptions": [
+            "Codex側の既定に委譲する",
+            "承認要求を画面のカードで人へ回す",
+            "承認要求をCodex内部のsubagentが自動で判定する"
+          ],
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "承認要求を誰へ回すか。承認方針（いつ承認を求めるか）とは別の軸。`auto_review` は人の代わりにCodex内部のsubagentがリスクを判定して承認・拒否するため、選ぶ前に確認ダイアログを出す。"
+        },
         "codex.model": {
           "type": "string",
           "default": "",

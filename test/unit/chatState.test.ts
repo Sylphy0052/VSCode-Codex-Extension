@@ -1201,3 +1201,86 @@ describe('normalizeItem / collabAgentToolCall（issue #34）', () => {
     expect(item?.text).toBe('');
   });
 });
+describe("applyEvent / 承認要求の自動レビュー", () => {
+  const started = (over: Record<string, unknown> = {}) => ({
+    reviewId: "r-1",
+    threadId: "th-1",
+    turnId: TURN,
+    targetItemId: "i-1",
+    startedAtMs: 1,
+    action: {
+      type: "command",
+      command: "rm -rf build",
+      cwd: "/w",
+      source: "shell",
+    },
+    review: { status: "inProgress" },
+    ...over,
+  });
+
+  it("開始で判定中の項目を作る", () => {
+    const state = applyEvent(
+      initialChatState,
+      "item/autoApprovalReview/started",
+      started(),
+    );
+    const item = state.items.find((i) => i.id === "autoReview:r-1");
+    expect(item?.kind).toBe("autoApprovalReview");
+    expect(item?.text).toBe("rm -rf build（/w）");
+    expect(item?.detail).toBe("自動レビュー: 判定中");
+    expect(item?.status).toBe("inProgress");
+    expect(item?.turnId).toBe(TURN);
+  });
+
+  it("完了は同じ項目を書き換える（件数を増やさない）", () => {
+    const state = feed(initialChatState, [
+      ["item/autoApprovalReview/started", started()],
+      [
+        "item/autoApprovalReview/completed",
+        started({
+          review: {
+            status: "denied",
+            riskLevel: "high",
+            rationale: "ビルド成果物の全削除",
+          },
+          completedAtMs: 2,
+          decisionSource: "agent",
+        }),
+      ],
+    ]);
+    const reviews = state.items.filter((i) => i.kind === "autoApprovalReview");
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]?.status).toBe("denied");
+    expect(reviews[0]?.detail).toBe(
+      "自動レビュー: 拒否（リスク high） — ビルド成果物の全削除",
+    );
+  });
+
+  it("reviewId が無い通知は捨てる（開始と完了を結び付けられない）", () => {
+    const state = applyEvent(
+      initialChatState,
+      "item/autoApprovalReview/started",
+      {
+        action: { type: "command", command: "ls", cwd: "/w", source: "shell" },
+      },
+    );
+    expect(state).toBe(initialChatState);
+  });
+
+  it("guardianWarning は会話へ一言残す", () => {
+    const state = applyEvent(initialChatState, "guardianWarning", {
+      threadId: "th-1",
+      message: "ネットワークの利用が制限されています",
+    });
+    const notice = state.items.find((i) => i.kind === "settingsChanged");
+    expect(notice?.detail).toBe(
+      "自動レビュー: ネットワークの利用が制限されています",
+    );
+  });
+
+  it("中身の無い guardianWarning は無視する", () => {
+    expect(
+      applyEvent(initialChatState, "guardianWarning", { threadId: "th-1" }),
+    ).toBe(initialChatState);
+  });
+});

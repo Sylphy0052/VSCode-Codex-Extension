@@ -7,6 +7,30 @@ export const APPROVAL_MODES = ['untrusted', 'on-request', 'never'] as const;
 export type ApprovalMode = (typeof APPROVAL_MODES)[number];
 
 /**
+ * 承認要求を誰へ回すか（`--approve-for-me` / `ThreadStartParams.approvalsReviewer`）。
+ *
+ * `approvalMode`（いつ承認を求めるか）とは**別の軸**であり、混ぜてはならない。
+ * `auto_review` は人ではなくCodex内部のsubagentが承認要求を判定する。スキーマの説明では
+ * 「sandbox脱出・ネットワーク遮断・MCPの承認・ARCエスカレーションを、文脈を集めた上で
+ * リスク基準にもとづき承認/拒否する」。
+ *
+ * legacyの `guardian_subagent` は互換のため相手が受け付けるだけの値なので、
+ * こちらからは選ばせない（受け取る側の話であり、設定として提示する意味が無い）。
+ */
+export const APPROVALS_REVIEWERS = ['user', 'auto_review'] as const;
+export type ApprovalsReviewer = (typeof APPROVALS_REVIEWERS)[number];
+
+/**
+ * 設定から読んだ値が `ApprovalsReviewer` かを確かめる。
+ *
+ * 起動引数（`argvBuilder`）とapp-serverへの要求（`chatSession`）の両方が境界になるため、
+ * ここに置いて同じ判定を使う。
+ */
+export function isApprovalsReviewer(value: string): value is ApprovalsReviewer {
+  return (APPROVALS_REVIEWERS as readonly string[]).includes(value);
+}
+
+/**
  * VSCode設定から読んだ生の値。いずれも空文字は「フラグを渡さない」を意味し、
  * Codex側 config.toml へ委譲する（設計書 §7）。
  */
@@ -24,6 +48,11 @@ export interface CodexConfig {
   /** `workspace-write` のときにネットワークへ出られるか。 */
   sandboxNetworkAccess: boolean;
   approvalMode: string;
+  /**
+   * 承認要求の回し先（`APPROVALS_REVIEWERS`）。空ならCodex側の既定（`user`）へ委譲する。
+   * 端末起動では `auto_review` のときだけ `--approve-for-me` を渡す。
+   */
+  approvalsReviewer: string;
   additionalArgs: string[];
 }
 
@@ -35,6 +64,7 @@ export const emptyConfig: CodexConfig = {
   sandboxWritableRoots: [],
   sandboxNetworkAccess: false,
   approvalMode: '',
+  approvalsReviewer: '',
   additionalArgs: [],
 };
 

@@ -93,6 +93,36 @@ describe('buildShellArgs', () => {
     expect(warnings[0]).toContain('codex.approvalMode');
   });
 
+  it('approvalsReviewer が auto_review のときだけ --approve-for-me を渡す', () => {
+    const auto = buildShellArgs({
+      target: { kind: 'new' },
+      cwd: CWD,
+      config: config({ approvalsReviewer: 'auto_review' }),
+    });
+    expect(auto.args).toEqual(['-C', CWD, '--approve-for-me']);
+    expect(auto.warnings).toEqual([]);
+  });
+
+  it('approvalsReviewer が user ならフラグを渡さない（Codexの既定と同じ）', () => {
+    const { args, warnings } = buildShellArgs({
+      target: { kind: 'new' },
+      cwd: CWD,
+      config: config({ approvalsReviewer: 'user' }),
+    });
+    expect(args).toEqual(['-C', CWD]);
+    expect(warnings).toEqual([]);
+  });
+
+  it('不正なapprovalsReviewer値は無視して警告する', () => {
+    const { args, warnings } = buildShellArgs({
+      target: { kind: 'new' },
+      cwd: CWD,
+      config: config({ approvalsReviewer: 'guardian_subagent' }),
+    });
+    expect(args).not.toContain('--approve-for-me');
+    expect(warnings[0]).toContain('codex.approvalsReviewer');
+  });
+
   it('session idがUUID形式でなければ例外を投げる（引数注入の防止）', () => {
     expect(() =>
       buildShellArgs({
@@ -148,6 +178,20 @@ describe('isUnsafeCombination', () => {
       isUnsafeCombination(config({ sandbox: 'danger-full-access', approvalMode: 'on-request' })),
     ).toBe(false);
     expect(isUnsafeCombination(config())).toBe(false);
+  });
+
+  it('制限なしのサンドボックスを自動承認へ任せる組み合わせも真', () => {
+    expect(
+      isUnsafeCombination(
+        config({ sandbox: 'danger-full-access', approvalsReviewer: 'auto_review' }),
+      ),
+    ).toBe(true);
+  });
+
+  it('自動承認でもサンドボックスが効いていれば真にしない', () => {
+    expect(
+      isUnsafeCombination(config({ sandbox: 'workspace-write', approvalsReviewer: 'auto_review' })),
+    ).toBe(false);
   });
 });
 

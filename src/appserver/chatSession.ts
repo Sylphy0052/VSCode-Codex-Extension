@@ -1,4 +1,4 @@
-import type { CodexConfig } from '../codex/types';
+import { isApprovalsReviewer, type CodexConfig } from '../codex/types';
 import type { Logger } from '../log';
 import {
   buildApprovalResponse,
@@ -86,6 +86,15 @@ export class ChatSession {
   private policyOverridden = false;
   /** 採番用。画面へ出す一言のidに使う。 */
   private noticeCount = 0;
+  /**
+   * 自動レビューが止めた操作。`reviewId` から、届いた完了通知そのものを引けるようにする。
+   *
+   * 覆し（`thread/approveGuardianDeniedAction`）は `event` に
+   * 「シリアライズ済みの `GuardianAssessmentEvent`」を要求するが、スキーマはその中身を
+   * 定義していない（CLI 0.147.0）。届いた通知をそのまま返す以外に組み立てようがないため、
+   * 生の `params` を持っておく。
+   */
+  private readonly deniedReviews = new Map<string, Record<string, unknown>>();
 
   constructor(
     private readonly connection: AppServerConnectionPort,
@@ -129,6 +138,9 @@ export class ChatSession {
     }
     if (config.approvalMode !== '') {
       params['approvalPolicy'] = config.approvalMode;
+    }
+    if (isApprovalsReviewer(config.approvalsReviewer)) {
+      params['approvalsReviewer'] = config.approvalsReviewer;
     }
     if (config.model !== '') {
       params['model'] = config.model;
@@ -250,6 +262,11 @@ export class ChatSession {
     }
     if (config.approvalMode !== '') {
       params['approvalPolicy'] = config.approvalMode;
+    }
+    // 計画モード中は載せない。読み取り専用の保証（`PLAN_POLICY`）は人の承認を前提にしており、
+    // 承認要求の判断を自動レビューへ渡すと保証の根拠が変わってしまう
+    if (!this.state.planMode && isApprovalsReviewer(config.approvalsReviewer)) {
+      params['approvalsReviewer'] = config.approvalsReviewer;
     }
 
     const policy = turnPolicyFor(
