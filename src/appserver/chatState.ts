@@ -10,7 +10,10 @@ export interface FileDiff {
   kind: string;
   /** 移動先。`update` で移動を伴う場合だけ入る。 */
   movePath: string | undefined;
-  /** unified diff。CLIが組み立てたものをそのまま持つ。 */
+  /**
+   * unified diff。CLIが組み立てたものをそのまま持つ。ただし `add` / `delete` で
+   * ファイルの中身がそのまま届いたときは行頭に + / - を補う（`normalizeDiffBody`）。
+   */
   diff: string;
 }
 
@@ -669,6 +672,35 @@ export function normalizeItem(raw: unknown): ChatItem | undefined {
   }
 }
 
+/** unified diff かどうかの判定に使う。ハンク見出しの行が1つでもあれば unified とみなす。 */
+const HUNK_HEADER = /^@@/m;
+
+/**
+ * 差分の本文を整える（issue #244）。
+ *
+ * app-server は `add` / `delete` のとき `diff` にファイルの中身をそのまま入れてくる
+ * （Codex CLI 0.147.0で実測）。行頭に + / - が無いため、画面では追加行にも削除行にも
+ * 見えず素のテキストとして出てしまう。ここで行頭の印を補う。
+ *
+ * unified diff が届いているときは触らない。CLIの版によってどちらで来るか変わりうるため、
+ * 形式で見分けて必要なときだけ整える。
+ */
+export function normalizeDiffBody(diff: string, kind: string): string {
+  if (HUNK_HEADER.test(diff)) {
+    return diff;
+  }
+  const marker = kind === 'add' ? '+' : kind === 'delete' ? '-' : undefined;
+  if (marker === undefined) {
+    return diff;
+  }
+  const lines = diff.split('\n');
+  // 末尾の改行で生まれる空要素は落とす。印だけの行が増えるのを避ける。
+  if (lines.length > 0 && lines[lines.length - 1] === '') {
+    lines.pop();
+  }
+  return lines.map((line) => marker + line).join('\n');
+}
+
 /**
  * 変更の差分を取り出す。
  *
@@ -689,11 +721,12 @@ export function readFileDiffs(changes: unknown): FileDiff[] {
     }
     const kind = rec(change['kind']);
     const movePath = str(kind?.['move_path']);
+    const kindName = str(kind?.['type']);
     diffs.push({
       path,
-      kind: str(kind?.['type']),
+      kind: kindName,
       movePath: movePath === '' ? undefined : movePath,
-      diff,
+      diff: normalizeDiffBody(diff, kindName),
     });
   }
   return diffs.length === 0 ? NO_DIFFS : diffs;
