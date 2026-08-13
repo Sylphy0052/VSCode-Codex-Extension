@@ -466,6 +466,10 @@ function toCodexConfig(input: TaskSessionInput): CodexConfig {
     // 安全側の既定（拡張しない）に固定する
     sandboxWritableRoots: [],
     sandboxNetworkAccess: false,
+    // `approvalsReviewer` も同じ理由で空にする（#222）。承認要求を機械の判定へ回すかどうかは
+    // YAMLのスキーマに項目が無く、拡張機能側の設定を継承すると無人実行のタスクへ暗黙に
+    // 伝播する。空ならCodex側の既定（人が答える）へ委譲する
+    approvalsReviewer: '',
     profile: '',
     additionalArgs: [],
   };

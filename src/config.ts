@@ -61,6 +61,7 @@ export function readConfig(): ExtensionConfig {
         : [],
       sandboxNetworkAccess: c.get<boolean>('sandboxNetworkAccess') === true,
       approvalMode: str(c, 'approvalMode'),
+      approvalsReviewer: str(c, 'approvalsReviewer'),
       additionalArgs: Array.isArray(additional)
         ? additional.filter((a): a is string => typeof a === 'string')
         : [],

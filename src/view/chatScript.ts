@@ -59,6 +59,7 @@ export function chatScript(
     exitedReviewMode: 'レビュー終了',
     subAgentActivity: 'サブエージェント',
     collabAgentToolCall: 'サブエージェント操作',
+    autoApprovalReview: '自動承認レビュー',
   };
 
   /** ホスト側から渡されたレビューボタンの動作。 */
@@ -97,6 +98,11 @@ export function chatScript(
     started: '開始',
     interacted: '応答',
     interrupted: '中断',
+    // 承認要求の自動レビュー（GuardianApprovalReviewStatus）
+    approved: '承認',
+    denied: '拒否',
+    timedOut: '時間切れ',
+    aborted: '中止',
   };
 
   const CLASS_OF = {
@@ -108,6 +114,7 @@ export function chatScript(
     mcpToolCall: 'tool',
     subAgentActivity: 'tool',
     collabAgentToolCall: 'tool',
+    autoApprovalReview: 'tool',
   };
 
   // 全体を作り直すと選択中のテキストが消えてコピーできないため、要素を使い回す

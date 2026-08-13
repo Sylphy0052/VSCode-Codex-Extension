@@ -2,6 +2,7 @@ import { isEffortToken } from './modelCatalog';
 import {
   APPROVAL_MODES,
   CodexConfig,
+  isApprovalsReviewer,
   LaunchTarget,
   SANDBOX_MODES,
   type ApprovalMode,
@@ -101,6 +102,20 @@ export function buildShellArgs(input: BuildInput): BuildResult {
     }
   }
 
+  if (config.approvalsReviewer !== '') {
+    if (isApprovalsReviewer(config.approvalsReviewer)) {
+      // `user` はCodex側の既定と同じなので、フラグを増やさない。
+      // 専用フラグがあるのは自動レビュー側だけ（`--approve-for-me`。0.147.0で確認）。
+      if (config.approvalsReviewer === 'auto_review') {
+        args.push('--approve-for-me');
+      }
+    } else {
+      warnings.push(
+        `codex.approvalsReviewer の値が不正なため無視します: ${config.approvalsReviewer}`,
+      );
+    }
+  }
+
   for (const extra of config.additionalArgs) {
     if (typeof extra !== 'string' || extra === '') {
       warnings.push('codex.additionalArgs に空または非文字列の要素があるため無視します');
@@ -113,11 +128,18 @@ export function buildShellArgs(input: BuildInput): BuildResult {
 }
 
 /**
- * `sandbox: danger-full-access` かつ `approvalMode: never` は、Codexの保護を
- * 両方とも外す組み合わせ。起動前に確認ダイアログを出す（設計書 §7）。
+ * Codexの保護を両方とも外す組み合わせ。起動前に確認ダイアログを出す（設計書 §7）。
+ *
+ * - `sandbox: danger-full-access` かつ `approvalMode: never`: 承認要求そのものが出ない。
+ * - `sandbox: danger-full-access` かつ `approvalsReviewer: auto_review`: 承認要求は出るが、
+ *   人ではなくsubagentが答える。制限なしのサンドボックスと組むと、機械の判定だけで
+ *   マシン全体への操作が通る。`never` と同じ重さで扱う。
  */
 export function isUnsafeCombination(config: CodexConfig): boolean {
-  return config.sandbox === 'danger-full-access' && config.approvalMode === 'never';
+  if (config.sandbox !== 'danger-full-access') {
+    return false;
+  }
+  return config.approvalMode === 'never' || config.approvalsReviewer === 'auto_review';
 }
 
 /** 端末に渡す環境変数。一意タグで session_id を確定的に紐付ける（設計書 §9.1）。 */
