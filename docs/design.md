@@ -3208,6 +3208,7 @@ src/
     roadmap.ts      ロードマップの生成・YAML化・完了の書き戻し（§16.19。*）
   view/
     workflowView.ts ワークフローViewのWebview
+    workflowMenu.ts 導線のQuickPickに並べる項目を組み立てる（§16.22。純粋）
 ```
 
 `*` を付けた4ファイルも、`runner.ts` / `extension.ts` からの配線を含めて実装済みで、実行に反映される（§16.13）。
@@ -3813,3 +3814,34 @@ runをまたぐ通信と、ワークフローの外のセッションへの送�
 #### YAMLとの関係
 
 この機能に対応するYAMLのフィールドは設けない。常に有効で、タスクごとの有効無効も持たない。権限を動かす設定ではないため §16.16 のクランプの対象外であり、経路が増えるぶんは受信内容の扱いと配送の上限で受ける。
+
+### 16.22 導線（サイドパネルとチャット画面から開く）
+
+ワークフローの5つのコマンド（`agent.workflows.run` / `view` / `plan` / `roadmap` / `stop`）は、当初コマンドパレットにしか出していなかった。名前を覚えていないと辿り着けず、機能があること自体が画面から見えない。サイドパネルとチャット画面の両方に入口を置く（issue #250）。
+
+#### 置き場所
+
+- **サイドパネル**: 履歴ビュー（`codex.sessions`）の `view/title` に、新しい会話（Codex）・新しい会話（Claude Code）・範囲切替・更新に続けてアイコンを1つ置く（`navigation@5`）。ここは通常のcodicon（`$(type-hierarchy)`）が使える
+- **チャット画面**: 2段目のアイコン列（issue #234でチャット画面の下部を3段に固定したときの2段目）の末尾に置く。Webviewの中なのでcodiconのwebfontは読めず、他のボタンと同じくインラインSVG（`COMPOSER_ICONS.workflow`）で描く。図柄は依存グラフ（1つのノードから2つへ分かれる形）にして、§16.8のグラフと結びつけている。`renderShell` はCodex画面とClaude Code画面で共通のため、1箇所の追加で両方に出る
+
+#### 押したときの挙動
+
+どちらも同じコマンド `agent.workflows.menu` を呼び、QuickPickで操作を選ばせる。アイコンを増やさずに5コマンド全部へ到達させるための集約であり、**メニューを出すこと自体は状態を変えない**（Escapeで閉じれば何も起きない）。
+
+項目の組み立ては `src/view/workflowMenu.ts` の `buildWorkflowMenuEntries(runningCount)` に閉じている。`vscode` に依存しない純粋関数にしてあり、`extension.ts` の `showWorkflowMenu` が実行中の件数（`runner.listLive().filter((r) => r.outcome === 'running').length`。`stopWorkflow` と同じ式）を数えて渡し、選ばれた `command` を `executeCommand` するだけにしている。
+
+- **実行中のrunがあれば「ワークフローViewを開く」を先頭へ出し、件数を説明に添える。** 走っている最中にアイコンを押す動機はまず進行を見ることなので、先頭に無いと二度手間になる
+- **実行中のrunが無いときは「ワークフローを停止…」を出さない。** 選んでも「実行中のワークフローはありません」しか出ず、選択肢として残す意味が無い
+- **チャット画面のボタンは応答中でも押せる。** ワークフローの起動はその会話のターンと関係しないため、`compact` / `recap` のように `state.busy` で無効化する一覧には入れない。会話へは何も送らず、モデルのターンも消費しない
+
+#### webviewからの経路
+
+チャット画面のボタンは `{type: 'workflowMenu'}` を送るだけで、`chatView.ts` / `claudeChatView.ts` の `handleMessage` は `agent.workflows.menu` を `executeCommand` するのみ。QuickPickの組み立てを両方のManagerへ複製せず、`extension.ts` 側の1箇所に保つための形にしてある（`exportTranscript` がホスト側で全部組み立てているのと同じ考え方）。
+
+#### 確かめ方
+
+- `test/unit/workflowMenu.test.ts`: 項目の順序、実行中ありのときのViewの先頭化と件数、実行中なしのときに停止を出さないこと
+- `test/unit/chatView.test.ts`: 2段目のアイコン列にボタンが並ぶこと、`aria-label` と `title` を持つこと
+- `test/unit/webviewScript.test.ts`: クリックで `{type: 'workflowMenu'}` を送ること、`state.busy` で無効化していないこと
+- `test/unit/chatViewManager.test.ts` / `claudeChatViewManager.test.ts`: webview発のメッセージで `agent.workflows.menu` が実行され、会話へは何も送られないこと
+- `test/integration/extension.test.ts`: `package.json` の `contributes.commands` を全件登録確認する既存のテストが `agent.workflows.menu` も見る

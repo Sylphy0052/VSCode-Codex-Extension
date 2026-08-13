@@ -105,6 +105,7 @@ import { formatRelativeTime } from './view/relativeTime';
 import { SessionTreeProvider } from './view/sessionTreeProvider';
 import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
+import { buildWorkflowMenuEntries } from './view/workflowMenu';
 import { WorkflowViewManager } from './view/workflowView';
 
 const META_CACHE_KEY = 'codex.metaCache.v1';
@@ -691,6 +692,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     vscode.commands.registerCommand('agent.workflows.roadmap', () =>
       runRoadmap(roadmapIssuePort, chat, claudeChat, log),
     ),
+    vscode.commands.registerCommand('agent.workflows.menu', () =>
+      showWorkflowMenu(workflowRunner),
+    ),
   );
 
   return {
@@ -848,6 +852,24 @@ async function stopWorkflow(runner: WorkflowRunner): Promise<void> {
     return;
   }
   runner.stop(picked.runId);
+}
+
+/**
+ * ワークフローの操作をまとめたQuickPick（issue #250、design.md §16.22）。
+ *
+ * サイドパネル（Agentsビューのタイトル行）とチャット画面（`#composer` のアイコン）の
+ * どちらから押してもこれが開く。項目の組み立ては `buildWorkflowMenuEntries` にあり、
+ * ここは実行中の件数を数えて選ばれたコマンドへ渡すだけにしてある。
+ */
+async function showWorkflowMenu(runner: WorkflowRunner): Promise<void> {
+  const runningCount = runner.listLive().filter((r) => r.outcome === 'running').length;
+  const picked = await vscode.window.showQuickPick(buildWorkflowMenuEntries(runningCount), {
+    placeHolder: 'ワークフロー（複数タスクの並列実行）の操作を選択',
+  });
+  if (picked === undefined) {
+    return;
+  }
+  await vscode.commands.executeCommand(picked.command);
 }
 
 /** ワークスペース直下の構成（ファイル・ディレクトリ名。隠しファイルは除く）。取得できなければ空配列。 */

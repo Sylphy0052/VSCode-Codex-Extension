@@ -1626,6 +1626,12 @@ export function chatScript(
     vscode.postMessage({ type: 'exportTranscript' }),
   );
 
+  // ワークフローの導線（issue #250）。この会話とは独立した全体の操作なので、
+  // 応答中でも押せるまま（送信中に無効化する要素の一覧には入れない）にしてある
+  el('workflowMenu').addEventListener('click', () =>
+    vscode.postMessage({ type: 'workflowMenu' }),
+  );
+
   el('attach').addEventListener('click', () => el('filePicker').click());
   el('filePicker').addEventListener('change', (e) => {
     offerFiles(e.target.files);

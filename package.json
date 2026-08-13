@@ -79,6 +79,11 @@
           "command": "codex.refreshSessions",
           "when": "view == codex.sessions",
           "group": "navigation@4"
+        },
+        {
+          "command": "agent.workflows.menu",
+          "when": "view == codex.sessions",
+          "group": "navigation@5"
         }
       ],
       "editor/title": [
@@ -326,6 +331,12 @@
         "title": "セッション名を変更（Claude Code）",
         "category": "Agent",
         "icon": "$(edit)"
+      },
+      {
+        "command": "agent.workflows.menu",
+        "title": "ワークフロー…",
+        "category": "Agent",
+        "icon": "$(type-hierarchy)"
       },
       {
         "command": "agent.workflows.run",

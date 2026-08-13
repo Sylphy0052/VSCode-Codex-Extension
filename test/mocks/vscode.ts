@@ -206,6 +206,8 @@ interface MockState {
    * （＝エディタに表示された）パスの履歴（issue #205）。
    */
   openedTextDocumentPaths: string[];
+  /** `commands.executeCommand` に渡されたコマンドIDの履歴（issue #250）。 */
+  executedCommands: string[];
 }
 
 const state: MockState = {
@@ -221,6 +223,7 @@ const state: MockState = {
   showWarningMessageAnswer: AUTO_CONFIRM,
   existingTextDocumentPaths: new Set(),
   openedTextDocumentPaths: [],
+  executedCommands: [],
 };
 
 /** テストコードから内部状態を操作・観測するための入口。実装コードからは使わない。 */
@@ -238,6 +241,11 @@ export const __mock = {
     state.showWarningMessageAnswer = AUTO_CONFIRM;
     state.existingTextDocumentPaths = new Set();
     state.openedTextDocumentPaths = [];
+    state.executedCommands = [];
+  },
+  /** `commands.executeCommand` が呼ばれたコマンドIDの履歴（issue #250）。 */
+  get executedCommands(): string[] {
+    return state.executedCommands;
   },
   set showInputBoxAnswer(value: string | undefined) {
     state.showInputBoxAnswer = value;
@@ -368,6 +376,19 @@ export const workspace = {
 /** テスト用: `vscode.Uri` の最小フェイク（`Uri.file` のみ実装コードが使う）。 */
 export const Uri = {
   file: (fsPath: string): FakeUri => ({ fsPath }),
+};
+
+/**
+ * テスト用: `vscode.commands` の最小フェイク（issue #250）。
+ *
+ * チャット画面のワークフローボタンは `agent.workflows.menu` を呼ぶだけで、実体は
+ * `extension.ts` 側にある。ここでは実行を模さず、呼ばれたコマンドIDを記録するに留める。
+ */
+export const commands = {
+  executeCommand: (command: string, ..._args: unknown[]): Promise<undefined> => {
+    state.executedCommands.push(command);
+    return Promise.resolve(undefined);
+  },
 };
 
 export const window = {

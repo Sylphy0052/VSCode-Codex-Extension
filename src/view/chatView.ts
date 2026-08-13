@@ -1206,6 +1206,12 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
         await runExportTranscript(entry.session.getState().items, 'Codex');
         return;
       }
+      if (type === 'workflowMenu') {
+        // この会話とは関係のない全体の操作（issue #250）。ループへの割り込み扱いにはせず、
+        // 応答中でも押せる。QuickPickの組み立ては`extension.ts`側に一本化してある
+        await vscode.commands.executeCommand('agent.workflows.menu');
+        return;
+      }
       if (type === 'cancelQueued' && typeof m['index'] === 'number') {
         entry.session.cancelQueued(m['index']);
         return;
@@ -1879,6 +1885,8 @@ const COMPOSER_ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="6.8" cy="6.8" r="4.3"/><path d="M10.1 10.1 14 14"/></svg>',
   export:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9V2M5.3 4.7 8 2l2.7 2.7"/><path d="M2.5 11v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/></svg>',
+  workflow:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="3.2" r="1.9"/><circle cx="3.6" cy="12.8" r="1.9"/><circle cx="12.4" cy="12.8" r="1.9"/><path d="M7.2 4.9 4.4 11.1M8.8 4.9l2.8 6.2"/></svg>',
 } as const satisfies Record<string, string>;
 
 /** Claude Code画面の既定のインポートボタン文言（`showImport: true` のときに使う）。 */
@@ -1948,6 +1956,7 @@ ${chatStyles()}
       <button id="fastToggle" type="button" class="secondary" aria-pressed="false" aria-label="高速" title="応答を速くします（Fast mode）" hidden>${COMPOSER_ICONS.fast}</button>
       <button id="review" type="button" class="secondary" aria-label="レビュー" title="コードレビューを実行します"${options.review.mode === 'command' ? ' hidden' : ''}>${COMPOSER_ICONS.review}</button>
       <button id="exportTranscript" type="button" class="secondary" aria-label="エクスポート" title="会話全体をMarkdownとして取り出します（コピー・ファイル保存・生テキスト表示）">${COMPOSER_ICONS.export}</button>
+      <button id="workflowMenu" type="button" class="secondary" aria-label="ワークフロー" title="ワークフロー（複数タスクの並列実行）の実行・View・生成・停止を選びます">${COMPOSER_ICONS.workflow}</button>
     </div>
   </div>
   <div id="loop" hidden>
