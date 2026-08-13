@@ -8,7 +8,10 @@ import {
 const ARCHIVED_DIR = '/home/u/.codex/archived_sessions';
 const SESSIONS_DIR = '/home/u/.codex/sessions/2026/08/11';
 
-/** 実測（codex-cli 0.147.0、`thread/list` `{limit: 3}`）を模したエントリ。 */
+/**
+ * 実測（codex-cli 0.147.0、`thread/list` `{limit: 100}` を全件ページングし尽くした33件）を模した
+ * エントリ。`threadSource` は33件全てで `null` だったため、既定値も `null` にする。
+ */
 const rawThread = (over: Record<string, unknown> = {}) => ({
   id: '019ff049-df7c-7272-ba69-9b333f9d9102',
   sessionId: '019ff049-df7c-7272-ba69-9b333f9d9102',
@@ -24,7 +27,7 @@ const rawThread = (over: Record<string, unknown> = {}) => ({
   cwd: '/home/kfuruhashi/workspace/github/novel-writer',
   cliVersion: '0.147.0-alpha.6.5',
   source: 'vscode',
-  threadSource: 'user',
+  threadSource: null,
   gitInfo: { sha: 'c000', branch: 'feat/reader-lan-url', originUrl: 'git@github.com:x/y.git' },
   name: 'Arc02の改稿を続行',
   turns: [],
@@ -76,7 +79,15 @@ describe('normalizeThread', () => {
 
   it('threadSourceがuser以外の派生スレッドは除く', () => {
     expect(normalizeThread(rawThread({ threadSource: 'subagent' }), ARCHIVED_DIR)).toBeUndefined();
-    expect(normalizeThread(rawThread({ threadSource: undefined }), ARCHIVED_DIR)).toBeUndefined();
+  });
+
+  it('threadSourceがnullや未設定の場合は一覧へ含める（実測では全件nullで返る。issue #224）', () => {
+    expect(normalizeThread(rawThread({ threadSource: null }), ARCHIVED_DIR)).toBeDefined();
+    expect(normalizeThread(rawThread({ threadSource: undefined }), ARCHIVED_DIR)).toBeDefined();
+  });
+
+  it('threadSourceが明示的にuserの場合も一覧へ含める', () => {
+    expect(normalizeThread(rawThread({ threadSource: 'user' }), ARCHIVED_DIR)).toBeDefined();
   });
 
   it('idが無ければ除く', () => {
