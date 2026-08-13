@@ -2627,6 +2627,39 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - `test/unit/menuInlineIcons.test.ts`: `inline`グループのコマンドが全て`icon`を持つこと、メニューが参照するコマンドが`contributes.commands`に実在すること、インラインの並び順が同じ`when`句の中で重複していないこと
 
 
+### 14.44 承認要求の回し先（`--approve-for-me` / `approvalsReviewer`、issue #222）
+
+`codex-cli 0.147.0`の`--approve-for-me`へ対応する。値の意味と実測の詳細は[approval-modes.md](approval-modes.md)にまとめてあり、ここには設計判断だけを残す。
+
+#### 承認方針とは別の軸として持つ
+
+実測（`codex app-server generate-json-schema`）では、CLIフラグ相当の値は`approvalPolicy`ではなく独立した`ApprovalsReviewer`（`user` / `auto_review` / legacyの`guardian_subagent`）で、`ThreadStartParams` / `TurnStartParams`のどちらにも省略可能な項目として載る。
+
+`approvalMode`は「いつ承認を求めるか」、`approvalsReviewer`は「その要求に誰が答えるか」であり、直交する。`APPROVAL_MODES`へ値を足すと**宣言順＝安全順**という前提（Shift+Tabの循環（`src/provider/approvalCycle.ts`）とYAMLのクランプ（§16.16）が依存している）が崩れるため、`codex.approvalsReviewer`という別の設定項目にする。legacyの`guardian_subagent`は受け取る側の互換値でしかないため選択肢に出さない。
+
+#### 安全側へ寄せる3点
+
+1. **循環に入れない**。`approvalMode`と直交するため、Shift+Tabの循環は`APPROVAL_MODES`のままにする。
+2. **`danger-full-access`との併用を`never`と同じ重さで扱う**（`isUnsafeCombination`）。承認要求は出るが人が答えないため、制限なしのサンドボックスと組むと機械の判定だけでマシン全体への操作が通る。
+3. **計画モード中は送らない**。読み取り専用の保証（`PLAN_POLICY`、§14.10）は人の承認を前提にしており、判断を自動レビューへ渡すと保証の根拠が変わる。
+
+ワークフローのタスクセッション（`toCodexConfig`、`src/view/chatView.ts`）へは`sandboxWritableRoots`等と同じ理由で空を固定する。YAMLのスキーマ（§16.2）に項目が無く、拡張機能側の設定を継承すると無人実行のタスクへ暗黙に伝播するため（§16.16の抜け道になる）。
+
+#### 判定の見え方と覆し
+
+`item/autoApprovalReview/started` / `item/autoApprovalReview/completed`は同じ`reviewId`で1件の審査を知らせるため、画面では1件の項目として状態が進むように見せる（`upsertItem`。増やすと判定中と結果が二重に並ぶ）。**人が押していない承認が裏で進む以上、何が審査されどう判定されたかは必ず会話へ残す。**
+
+スキーマ側で`[UNSTABLE]`と明記されている（`GuardianApprovalReview`）。形が変わりうる前提で、読めなかった値は表示を削るだけに留め、**「読めない＝承認された」とは解釈しない**（`src/appserver/autoApprovalReview.ts`）。
+
+拒否（`denied`）と時間切れ（`timedOut`）だけは`ChatSession.deniedReviews`へ覚えておき、`thread/approveGuardianDeniedAction`で人が覆せるようにする。この要求は`event`に「シリアライズ済みの`GuardianAssessmentEvent`」を求めるがスキーマは中身を定義していないため、届いた完了通知をそのまま返す以外に組み立てようが無い。承認済みの審査を覚えないのは、後から「承認済みのものを承認し直す」要求を送れてしまうため。
+
+#### 残課題（issue #222に残す）
+
+- `--dangerously-bypass-approvals-and-sandbox`は未対応。
+- `isUnsafeCombination`は**まだどこからも呼ばれていない**（ユニットテストのみ）。危険な組み合わせを選んだときにモーダルで同意を取る配線は、本issue以前から欠けたままになっている。
+- 設定パネル（`settingsProvider` / `controlPanelView`）へ`approvalsReviewer`の選択肢を出す実装。現状はVS Codeの設定画面（`codex.approvalsReviewer`）からのみ変えられる。
+
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）

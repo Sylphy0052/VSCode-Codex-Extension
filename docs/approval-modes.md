@@ -40,7 +40,7 @@ Codexは2軸なので、Claudeの1軸に対しては組み合わせが対応す�
 | `dontAsk` | 完全に相当する値は無い | Codexの`never`は「聞かずに実行」ではなく「聞かずに失敗」 |
 | `bypassPermissions` | `danger-full-access` + `never` | 承認カードが一切出ない。両者とも起動前にモーダルで同意を取る |
 
-`danger-full-access` + `never`の検出は[src/codex/argvBuilder.ts](../src/codex/argvBuilder.ts)の`isUnsafeCombination`が担う。
+`danger-full-access` + `never`（および`danger-full-access` + `approvalsReviewer: auto_review`）の検出は[src/codex/argvBuilder.ts](../src/codex/argvBuilder.ts)の`isUnsafeCombination`が担う。ただし**この関数はまだどこからも呼ばれていない**（ユニットテストのみ）。モーダルでの同意を出す配線は残っており、issue #222に残課題として書いてある。
 
 ## TUIから変える
 
@@ -54,7 +54,7 @@ TUIのスラッシュコマンドは`/permissions`（旧`/approvals`）。バイ
 | --- | --- | --- |
 | `-a` / `--ask-for-approval` | 承認方針(`untrusted` / `on-request` / `never`) | 対応済み(`codex.approvalMode`) |
 | `-s` / `--sandbox` | サンドボックス(`read-only` / `workspace-write` / `danger-full-access`) | 対応済み(`codex.sandbox`) |
-| `--approve-for-me` | 承認要求を`workspace-write`サンドボックス上の自動レビュー(Guardian)へ回す | 未対応 |
+| `--approve-for-me` | 承認要求を`workspace-write`サンドボックス上の自動レビュー(Guardian)へ回す | 対応済み(`codex.approvalsReviewer`。issue #222) |
 | `--dangerously-bypass-approvals-and-sandbox` | 確認を全て飛ばし、サンドボックスなしで実行する | 未対応（`danger-full-access` + `never`で近い状態は作れる） |
 | `--dangerously-bypass-hook-trust` | hookの信頼確認を省いて実行する | 未対応（承認方法ではなくhook側の話） |
 | `--full-auto` | 0.147.0には存在しない | 対応不要 |
@@ -63,10 +63,32 @@ TUIのスラッシュコマンドは`/permissions`（旧`/approvals`）。バイ
 
 人が承認カードを押す代わりに、Codexが内部の自動レビュー(Guardian)へ承認要求を回す。バイナリにはGuardian用のリスク分類ポリシー（データ持ち出し・破壊的操作などの判定基準）が埋め込まれており、`core/src/guardian/`配下のモジュールがそれを扱う。Claude Codeの`auto`に最も近い挙動になる。
 
-本拡張から使うには次の確認が要る。
+#### app-serverでの表現（実測、`codex app-server generate-json-schema`）
 
-- app-serverのプロトコルで表現できるか。現状は`turn/start`の`approvalPolicy`しか渡していない（[src/appserver/chatSession.ts](../src/appserver/chatSession.ts)）ため、CLIフラグ相当の値が別経路になっていないか確かめる必要がある。
-- 安全順序のどこへ置くか。自動承認である以上`on-request`より緩く、しかし`workspace-write`に固定される点で`never`とは性質が違う。Shift+Tabの循環に入れてよいかも含めて決める。
+CLIフラグ相当の値は`approvalPolicy`ではなく、**独立した`approvalsReviewer`**として定義されている。
+
+- `ApprovalsReviewer`: `enum: ["user", "auto_review", "guardian_subagent"]`。説明文は「承認要求(sandbox脱出・ネットワーク遮断・MCPの承認・ARCエスカレーション)を誰へ回すか。既定は`user`。`auto_review`は文脈を集めた上でリスク基準にもとづき承認/拒否するsubagentを使う。legacyの`guardian_subagent`は互換のため受け付ける」。
+- `ThreadStartParams.approvalsReviewer` / `TurnStartParams.approvalsReviewer`: どちらも省略可。前者は「このスレッドと以降のターン」、後者は「このターンと以降のターン」を上書きする。
+
+したがって`approvalMode`（いつ承認を求めるか）と`approvalsReviewer`（誰が答えるか）は**別の軸**であり、`APPROVAL_MODES`へ値を足す形にはしない。本拡張は`codex.approvalsReviewer`という別の設定項目として持つ（[src/codex/types.ts](../src/codex/types.ts)の`APPROVALS_REVIEWERS`）。legacyの`guardian_subagent`は受け取る側の互換値でしかないため、選択肢としては出さない。
+
+#### 安全順序と循環
+
+`approvalsReviewer`は`approvalMode`と直交するため、Shift+Tabの循環（`APPROVAL_MODES`の宣言順に依存）には**入れない**。安全順序の前提を壊さずに済む。
+
+代わりに次の2点で安全側へ寄せる。
+
+- `danger-full-access` + `auto_review`は`danger-full-access` + `never`と同じ重さの危険な組み合わせとして扱う（`isUnsafeCombination`）。承認要求は出るが人が答えないため、制限なしのサンドボックスと組むと機械の判定だけでマシン全体への操作が通る。
+- 計画モード中は`approvalsReviewer`を送らない。読み取り専用の保証（`PLAN_POLICY`）は人の承認を前提にしており、判断を自動レビューへ渡すと保証の根拠が変わる。
+
+#### 判定の見え方と覆し（実測）
+
+自動レビューの経過は通知で届く（いずれも`[UNSTABLE]`とスキーマに明記されている）。
+
+- `item/autoApprovalReview/started` / `item/autoApprovalReview/completed`: 同じ`reviewId`で1件の審査を知らせる。`action`は`command` / `execve` / `applyPatch` / `networkAccess` / `mcpToolCall` / `requestPermissions`の6種。`review.status`は`inProgress` / `approved` / `denied` / `timedOut` / `aborted`、`riskLevel`は`low` / `medium` / `high` / `critical`。
+- `guardianWarning`: 判定そのものではない警告。
+
+拒否された操作は`thread/approveGuardianDeniedAction`で人が覆せる。要求は`{ threadId, event }`で、`event`は「シリアライズ済みの`GuardianAssessmentEvent`」としか定義されていない（中身の形はスキーマに無い）。こちらで組み立てようが無いため、届いた完了通知をそのまま返す。
 
 ### `--dangerously-bypass-approvals-and-sandbox`
 

@@ -8,7 +8,12 @@ import {
 describe('describeReviewAction', () => {
   it('コマンドは作業ディレクトリを添えて出す', () => {
     expect(
-      describeReviewAction({ type: 'command', command: 'rm -rf build', cwd: '/w', source: 'shell' }),
+      describeReviewAction({
+        type: 'command',
+        command: 'rm -rf build',
+        cwd: '/w',
+        source: 'shell',
+      }),
     ).toBe('rm -rf build（/w）');
   });
 
@@ -25,9 +30,9 @@ describe('describeReviewAction', () => {
   });
 
   it('ファイル変更は対象のパスを並べる', () => {
-    expect(
-      describeReviewAction({ type: 'applyPatch', cwd: '/w', files: ['a.ts', 'b.ts'] }),
-    ).toBe('ファイルの変更: a.ts, b.ts');
+    expect(describeReviewAction({ type: 'applyPatch', cwd: '/w', files: ['a.ts', 'b.ts'] })).toBe(
+      'ファイルの変更: a.ts, b.ts',
+    );
   });
 
   it('ネットワークは宛先を出す', () => {
@@ -43,9 +48,9 @@ describe('describeReviewAction', () => {
   });
 
   it('MCPのツール呼び出しはサーバ名とツール名を出す', () => {
-    expect(
-      describeReviewAction({ type: 'mcpToolCall', server: 'files', toolName: 'write' }),
-    ).toBe('MCPツール: files / write');
+    expect(describeReviewAction({ type: 'mcpToolCall', server: 'files', toolName: 'write' })).toBe(
+      'MCPツール: files / write',
+    );
   });
 
   it('権限の昇格は理由があれば添える', () => {

@@ -107,7 +107,9 @@ export interface AutoApprovalReview {
  *
  * `reviewId` は項目のidに使うため、無ければ扱わない（開始と完了を結び付けられない）。
  */
-export function readAutoApprovalReview(params: Record<string, unknown>): AutoApprovalReview | undefined {
+export function readAutoApprovalReview(
+  params: Record<string, unknown>,
+): AutoApprovalReview | undefined {
   const reviewId = str(params['reviewId']);
   if (reviewId === '') {
     return undefined;

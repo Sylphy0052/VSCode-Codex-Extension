@@ -43,7 +43,6 @@ function isApprovalMode(value: string): value is ApprovalMode {
   return (APPROVAL_MODES as readonly string[]).includes(value);
 }
 
-
 /**
  * 設定と起動対象から codex の起動引数を組み立てる。
  *

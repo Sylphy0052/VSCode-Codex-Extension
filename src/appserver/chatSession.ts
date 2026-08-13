@@ -1,5 +1,6 @@
 import { isApprovalsReviewer, type CodexConfig } from '../codex/types';
 import type { Logger } from '../log';
+import { isBlockedByReview, readAutoApprovalReview } from './autoApprovalReview';
 import {
   buildApprovalResponse,
   defaultDenyResponse,
@@ -39,6 +40,9 @@ import {
   type ReviewDelivery,
   type ReviewTarget,
 } from '../codex/reviewTarget';
+
+/** 自動レビューの判定が出たことを知らせる通知（`approvalsReviewer: auto_review`）。 */
+const AUTO_APPROVAL_REVIEW_COMPLETED = 'item/autoApprovalReview/completed';
 
 /**
  * 会話の1行要約を依頼する指示文（issue #228、design.md §14.41）。
@@ -497,10 +501,44 @@ export class ChatSession {
         this.dropResolvedApproval(requestId);
       }
     }
+    if (method === AUTO_APPROVAL_REVIEW_COMPLETED) {
+      this.rememberDeniedReview(params);
+    }
     const next = applyEvent(this.state, method, params);
     if (next !== this.state) {
       this.update(next);
     }
+  }
+
+  /**
+   * 自動レビューが止めた操作だけを覚えておく（覆しの材料）。
+   *
+   * 承認された審査まで持つと、後から「承認済みのものを承認し直す」要求を送れてしまう。
+   * 止まった状態（`denied` / `timedOut`）に限る。
+   */
+  private rememberDeniedReview(params: Record<string, unknown>): void {
+    const review = readAutoApprovalReview(params);
+    if (review === undefined || !isBlockedByReview(review.status)) {
+      return;
+    }
+    this.deniedReviews.set(review.reviewId, params);
+  }
+
+  /**
+   * 自動レビューが拒否した操作を、人の指示で承認し直す（`thread/approveGuardianDeniedAction`）。
+   *
+   * 覆しの要求は `event` に「シリアライズ済みの `GuardianAssessmentEvent`」を求めるが、
+   * スキーマはその中身を定義していない（CLI 0.147.0）。こちらで組み立てようが無いため、
+   * 届いた完了通知をそのまま返す。知らない `reviewId`（＝止められていない操作）は送らない。
+   */
+  async approveDeniedReview(reviewId: string): Promise<void> {
+    const threadId = this.state.threadId;
+    const event = this.deniedReviews.get(reviewId);
+    if (threadId === undefined || event === undefined) {
+      return;
+    }
+    await this.connection.request('thread/approveGuardianDeniedAction', { threadId, event });
+    this.deniedReviews.delete(reviewId);
   }
 
   /**
