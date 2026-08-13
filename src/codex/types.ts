@@ -53,6 +53,18 @@ export interface CodexConfig {
    * 端末起動では `auto_review` のときだけ `--approve-for-me` を渡す。
    */
   approvalsReviewer: string;
+  /**
+   * 承認もサンドボックスも一切かけずに実行する（`--dangerously-bypass-approvals-and-sandbox`）。
+   *
+   * `sandbox` / `approvalMode` / `approvalsReviewer` とは**別の軸**として持つ（issue #222）。
+   * これらの語彙は宣言順が安全順という前提を持ち、Shift+Tabの循環とYAMLのクランプが
+   * その順序に依存している。「サンドボックスを張らない」はその順序の外側にあるため、
+   * 値として混ぜると前提が壊れる。
+   *
+   * 真のときは他の3つを渡さない。CLIは併用を弾かないが、どちらが勝つかがヘルプに
+   * 書かれていないため、引数の意味が一意に決まるようにこちらで落とす。
+   */
+  bypassApprovalsAndSandbox: boolean;
   additionalArgs: string[];
 }
 
@@ -65,6 +77,7 @@ export const emptyConfig: CodexConfig = {
   sandboxNetworkAccess: false,
   approvalMode: '',
   approvalsReviewer: '',
+  bypassApprovalsAndSandbox: false,
   additionalArgs: [],
 };
 

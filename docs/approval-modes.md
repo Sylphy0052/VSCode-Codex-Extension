@@ -55,7 +55,7 @@ TUIのスラッシュコマンドは`/permissions`（旧`/approvals`）。バイ
 | `-a` / `--ask-for-approval` | 承認方針(`untrusted` / `on-request` / `never`) | 対応済み(`codex.approvalMode`) |
 | `-s` / `--sandbox` | サンドボックス(`read-only` / `workspace-write` / `danger-full-access`) | 対応済み(`codex.sandbox`) |
 | `--approve-for-me` | 承認要求を`workspace-write`サンドボックス上の自動レビュー(Guardian)へ回す | 対応済み(`codex.approvalsReviewer`。issue #222) |
-| `--dangerously-bypass-approvals-and-sandbox` | 確認を全て飛ばし、サンドボックスなしで実行する | 未対応（`danger-full-access` + `never`で近い状態は作れる） |
+| `--dangerously-bypass-approvals-and-sandbox` | 確認を全て飛ばし、サンドボックスなしで実行する | 対応済み(`codex.bypassApprovalsAndSandbox`。issue #222) |
 | `--dangerously-bypass-hook-trust` | hookの信頼確認を省いて実行する | 未対応（承認方法ではなくhook側の話） |
 | `--full-auto` | 0.147.0には存在しない | 対応不要 |
 
@@ -92,7 +92,35 @@ CLIフラグ相当の値は`approvalPolicy`ではなく、**独立した`approva
 
 ### `--dangerously-bypass-approvals-and-sandbox`
 
-`danger-full-access` + `never`と同じ「保護を全部外した状態」だが、こちらはサンドボックス自体を張らない。外側で隔離済みの環境向け、とヘルプが明記している。取り込む場合は`bypassPermissions`と同じくモーダルでの同意が要る（design.md §7）。
+`danger-full-access` + `never`と同じ「保護を全部外した状態」だが、こちらは**サンドボックス自体を張らない**。外側で隔離済みの環境（コンテナ・使い捨てVM）向け、とヘルプが明記している。
+
+本拡張は`codex.bypassApprovalsAndSandbox`（真偽値）として持つ（[src/codex/types.ts](../src/codex/types.ts)）。`sandbox` / `approvalMode` / `approvalsReviewer`とは**別の軸**にする。これらの語彙は宣言順が安全順という前提を持ち、Shift+Tabの循環とYAMLのクランプがその順序に依存しているため、「サンドボックスを張らない」を値として混ぜると前提が壊れる（`approvalsReviewer`を別軸にしたのと同じ理由）。
+
+#### app-serverでの表現（`SandboxPolicy`の実測）
+
+CLIフラグ1枚に対応する単一の値は無く、**2つの指定の組**になる。
+
+- `SandboxPolicy`に`externalSandbox`がある。`{ "type": "externalSandbox" }`が「Codexはサンドボックスを張らない」の意（`networkAccess`は既定`restricted`だが、サンドボックスを張らない以上こちらからは指定しない）。
+- 承認側は`approvalPolicy: "never"`。
+
+置き場所に制約がある。`ThreadStartParams`は`sandbox`（`SandboxMode`の3値）しか取らず、`sandboxPolicy`を**持たない**。`sandboxPolicy`を取るのは`TurnStartParams`だけ。したがって`thread/start`では表現できず、ターンごとに送る（[src/appserver/planMode.ts](../src/appserver/planMode.ts)の`turnPolicyFor`）。有効なときは`thread/start`へ承認まわりを一切載せない（中途半端な値を送るより、ターン側で決める）。
+
+#### 他の指定との優先順位
+
+`Plan mode` > `bypass` > 設定のサンドボックス、の順。
+
+- 計画モードが最優先。読み取り専用の保証（`PLAN_POLICY`）は人の承認を前提にしており、保護を外す指定に負けてはならない。
+- 端末起動（`buildShellArgs`）では、有効なときに`-s` / `-a` / `--approve-for-me`を**渡さない**。CLIは併用を弾かないが、どちらが勝つかがヘルプに書かれていないため、引数の意味が一意に決まるようこちらで落とす（落としたことは警告で知らせる）。
+
+#### 安全側の扱い
+
+- `isUnsafeCombination`が単独で真を返す。`sandbox`に何が入っていても意味を持たないため、組み合わせを見ない。会話を開くたびにモーダルで同意を取る（[src/view/chatView.ts](../src/view/chatView.ts)の`confirmUnsafeCombination`）。本文には設定キー名ではなく**何が起きるか**を書く（`describeUnsafeCombination`）。
+- Shift+Tabの循環には入れない。`APPROVAL_MODES`の値ではないため、そもそも循環の対象にならない。
+- ワークフローのタスクには継承させない。`toCodexConfig`が常に`false`へ固定する。YAMLのスキーマ（design.md §16.2）にこの項目は無く、拡張機能側の設定を継承すると、人が対話セッション用に意識して外した保護が無人実行のタスクへ暗黙に伝播する。
+
+## 未対応（実測で見つかった範囲）
+
+`AskForApproval`には3値の他に`granular`というバリアントがある（`sandbox_approval` / `mcp_elicitations` / `rules` / `request_permissions` / `skill_approval`の真偽値の組）。承認を種類ごとに細かく設定できる形だが、TUIから設定する導線とCLIフラグが見当たらず、本拡張も3値のみを扱う。
 
 ## 出典
 

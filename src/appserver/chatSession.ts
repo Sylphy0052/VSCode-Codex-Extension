@@ -137,14 +137,19 @@ export class ChatSession {
   ): Promise<string> {
     await this.connection.ensureStarted();
     const params: Record<string, unknown> = { cwd };
-    if (config.sandbox !== '') {
-      params['sandbox'] = config.sandbox;
-    }
-    if (config.approvalMode !== '') {
-      params['approvalPolicy'] = config.approvalMode;
-    }
-    if (isApprovalsReviewer(config.approvalsReviewer)) {
-      params['approvalsReviewer'] = config.approvalsReviewer;
+    // `thread/start` は `SandboxMode` の3値しか取らず、サンドボックスを張らない指定
+    // （`externalSandbox`）を表現できない。bypassのときは承認まわりを一切載せず、
+    // ターン側の `sandboxPolicy` で決める（issue #222。`turnPolicyFor` 参照）
+    if (!config.bypassApprovalsAndSandbox) {
+      if (config.sandbox !== '') {
+        params['sandbox'] = config.sandbox;
+      }
+      if (config.approvalMode !== '') {
+        params['approvalPolicy'] = config.approvalMode;
+      }
+      if (isApprovalsReviewer(config.approvalsReviewer)) {
+        params['approvalsReviewer'] = config.approvalsReviewer;
+      }
     }
     if (config.model !== '') {
       params['model'] = config.model;
@@ -264,12 +269,18 @@ export class ChatSession {
     if (config.reasoningEffort !== '') {
       params['effort'] = config.reasoningEffort;
     }
-    if (config.approvalMode !== '') {
+    // bypassのときは承認方針も自動レビューも載せない。`turnPolicyFor` が
+    // `approvalPolicy: never` を返すため、ここで載せると打ち消し合う（issue #222）
+    if (!config.bypassApprovalsAndSandbox && config.approvalMode !== '') {
       params['approvalPolicy'] = config.approvalMode;
     }
     // 計画モード中は載せない。読み取り専用の保証（`PLAN_POLICY`）は人の承認を前提にしており、
     // 承認要求の判断を自動レビューへ渡すと保証の根拠が変わってしまう
-    if (!this.state.planMode && isApprovalsReviewer(config.approvalsReviewer)) {
+    if (
+      !this.state.planMode &&
+      !config.bypassApprovalsAndSandbox &&
+      isApprovalsReviewer(config.approvalsReviewer)
+    ) {
       params['approvalsReviewer'] = config.approvalsReviewer;
     }
 
@@ -282,6 +293,7 @@ export class ChatSession {
         writableRoots: config.sandboxWritableRoots,
         networkAccess: config.sandboxNetworkAccess,
       },
+      config.bypassApprovalsAndSandbox,
     );
     if (policy !== undefined) {
       // Plan modeの指定は設定パネルの承認方針より優先する（書けないことを保証するため）

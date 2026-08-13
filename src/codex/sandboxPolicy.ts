@@ -54,6 +54,21 @@ export function sandboxPolicyFor(
 }
 
 /**
+ * サンドボックスを張らない指定（issue #222）。
+ *
+ * `--dangerously-bypass-approvals-and-sandbox` のサンドボックス側にあたる。CLIのヘルプが
+ * 言う「外側で隔離済みの環境向け」が、スキーマ上の `externalSandbox` に対応する
+ * （`codex app-server generate-json-schema` の `SandboxPolicy` で実測）。承認側は
+ * `approvalPolicy: never` と組にして初めてフラグ1枚と同じ意味になる。
+ *
+ * `sandboxPolicyFor` からは返さない。設定の文字列（`SANDBOX_MODES`）に対応する値ではなく、
+ * 別軸の真偽値から作るものなので、経路を分けて取り違えを防ぐ。
+ */
+export function bypassSandboxPolicy(): Record<string, unknown> {
+  return { type: 'externalSandbox' };
+}
+
+/**
  * サンドボックスの変更が権限を**広げる**方向か。
  *
  * `SANDBOX_MODES` の宣言順がそのまま安全順になっている。広げる変更には確認を挟む。

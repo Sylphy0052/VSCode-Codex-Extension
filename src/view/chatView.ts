@@ -22,6 +22,7 @@ import {
   type ServerRequestHandler,
 } from '../appserver/connection';
 import type { ActivityKind } from '../activity/record';
+import { describeUnsafeCombination } from '../codex/argvBuilder';
 import { summarize } from '../codex/conversation';
 import { readForkedThreadId } from '../codex/jsonRpc';
 import { readSkillsList } from '../codex/skillsList';
@@ -178,6 +179,25 @@ export function addAttachment(box: AttachmentBox, name: unknown, dataUrl: unknow
   if ('reason' in added) {
     void vscode.window.showWarningMessage(`画像を添えられません: ${added.reason}`);
   }
+}
+
+/**
+/**
+ * 保護を外した設定のまま会話を開いてよいか確かめる（issue #222、design.md §7）。
+ *
+ * 承認とサンドボックスの両方が効かない組み合わせは、モデルの提案がそのまま実行される。
+ * 設定を変えた本人でも、別の日に開いた会話でそれが効いていることは忘れる。会話を開く
+ * たびに、何が起きるかを示して同意を取る。
+ *
+ * キャンセルされたら開かない（既定はキャンセル側）。
+ */
+export async function confirmUnsafeCombination(config: CodexConfig): Promise<boolean> {
+  const reason = describeUnsafeCombination(config);
+  if (reason === undefined) {
+    return true;
+  }
+  const choice = await vscode.window.showWarningMessage(reason, { modal: true }, 'このまま開く');
+  return choice === 'このまま開く';
 }
 
 /**
@@ -486,6 +506,10 @@ function toCodexConfig(input: TaskSessionInput): CodexConfig {
     // YAMLのスキーマに項目が無く、拡張機能側の設定を継承すると無人実行のタスクへ暗黙に
     // 伝播する。空ならCodex側の既定（人が答える）へ委譲する
     approvalsReviewer: '',
+    // `bypassApprovalsAndSandbox` も同じ理由で false に固定する（#222）。承認もサンドボックスも
+    // 外す指定はYAMLのスキーマに項目が無く、拡張機能側の設定を継承すると、人が対話セッション用に
+    // 意識して外した保護が無人実行のタスクへ暗黙に伝播する
+    bypassApprovalsAndSandbox: false,
     profile: '',
     additionalArgs: [],
   };
@@ -681,11 +705,19 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       return;
     }
 
+    // 保護を外した設定のまま開こうとしていないか（issue #222）。パネルを作る前に聞く。
+    // タスク用のセッション（`openTaskSession`）は無人実行で人が答えられないため、
+    // そちらは `toCodexConfig` が危険な値を持ち込まないようにして防いでいる
+    const config = taskConfig ?? readConfig().codex;
+    if (!(await confirmUnsafeCombination(config))) {
+      return;
+    }
+
     const entry = this.buildEntry(targetCwd, 'Codex', false, taskConfig);
     this.showPanel(entry, false);
     const pendingKey = this.pendingStarts.begin(entry);
     try {
-      const threadId = await entry.session.start(targetCwd, taskConfig ?? readConfig().codex);
+      const threadId = await entry.session.start(targetCwd, config);
       this.pendingStarts.end(pendingKey);
       this.panels.set(threadId, entry);
     } catch (e) {

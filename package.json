@@ -432,6 +432,12 @@
           "scope": "machine",
           "markdownDescription": "承認要求を誰へ回すか。承認方針（いつ承認を求めるか）とは別の軸。`auto_review` は人の代わりにCodex内部のsubagentがリスクを判定して承認・拒否するため、選ぶ前に確認ダイアログを出す。"
         },
+        "codex.bypassApprovalsAndSandbox": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "markdownDescription": "**危険**。承認もサンドボックスも一切かけずに実行する（`--dangerously-bypass-approvals-and-sandbox`）。外側で隔離済みの環境（コンテナ・使い捨てVM）向け。有効にすると `codex.sandbox` / `codex.approvalMode` / `codex.approvalsReviewer` は渡さない。会話を開くたびに確認ダイアログを出す。"
+        },
         "codex.model": {
           "type": "string",
           "default": "",
