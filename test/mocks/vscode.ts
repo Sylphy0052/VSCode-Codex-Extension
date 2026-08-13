@@ -433,3 +433,38 @@ export type OutputChannel = {
   appendLine(value: string): void;
   show(): void;
 };
+
+/**
+ * ツリービュー関連の最小モック（`SessionTreeProvider` のテスト用）。
+ * 実物と同じく、生成後にプロパティを代入して組み立てる形にする。
+ */
+export enum TreeItemCollapsibleState {
+  None = 0,
+  Collapsed = 1,
+  Expanded = 2,
+}
+
+export class ThemeIcon {
+  constructor(readonly id: string) {}
+}
+
+export class MarkdownString {
+  constructor(public value = '') {}
+}
+
+export class TreeItem {
+  id?: string;
+  description?: string;
+  tooltip?: MarkdownString | string;
+  iconPath?: ThemeIcon;
+  contextValue?: string;
+  command?: { command: string; title: string; arguments?: unknown[] };
+
+  constructor(
+    public label: string,
+    public collapsibleState: TreeItemCollapsibleState = TreeItemCollapsibleState.None,
+  ) {}
+}
+
+/** `vscode.EventEmitter` の代わり。上で定義済みの `Emitter` をそのまま公開する。 */
+export { Emitter as EventEmitter };

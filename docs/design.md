@@ -340,7 +340,7 @@ VSCodeにはターミナル名を直接書き換えるAPIがなく、`workbench.
 | `codex.renameChat`                                      | セッション名を変更                | Codex画面がアクティブなときのエディタタイトル |
 | `codex.resumeSession`                                   | セッションを再開…                 | パレット（QuickPick）                         |
 | `codex.resumeLast`                                      | 直前のセッションを再開            | パレット                                      |
-| `codex.forkSession`                                     | このセッションをforkする          | ツリー右クリック                              |
+| `codex.forkSession`                                     | このセッションをforkする          | ツリー項目のホバー・右クリック                |
 | `codex.archiveSession`                                  | アーカイブする                    | ツリー右クリック（Codexのみ）                 |
 | `codex.unarchiveSession`                                | アーカイブを解除する              | ツリー右クリック（アーカイブ表示時）          |
 | `codex.deleteSession`                                   | 削除する                          | ツリー右クリック（確認ダイアログ必須）        |
@@ -2595,6 +2595,37 @@ Claude Code側（§14.34）のボタンは`/import`のプレビューを会話�
 - **セクションまでのスクロール**: パネルを開いてセクションを展開するところまでに留め、スクロール位置の調整はしない
 
 テストは`test/unit/chatView.test.ts`（Codex画面の`renderShell`が独自の`aria-label`・`title`でインポートボタンを出すこと、Claude Code画面の挙動が変わっていないこと）・`test/unit/chatViewManager.test.ts`（`claudeImport`メッセージで`revealImportSection`だけが呼ばれ、会話へは何も送らないこと）・`test/unit/controlPanelView.test.ts`（`revealSection`が`openSection`メッセージを送ること）・`test/unit/webviewScript.test.ts`（`controlPanelScript`が`openSection`を受けてセクションを展開する構文を含むこと）で検証する。手動確認手順は`docs/manual-test.md`のC-44に追加する。
+
+### 14.43 セッションツリーのメニューへ要素が渡らない不具合とforkの導線（issue #236・#237）
+
+実機確認（#189）のC-16で見つかった不具合。ツリー項目のホバーで出るインラインアイコンからも、右クリックのコンテキストメニューからも、コマンドが`Cannot read properties of undefined (reading 'id')`で落ちていた。`codex.openConversation`だけでなく`codex.openChat`でも同じで、`view/item/context`に登録したコマンド全般で引数の`SessionSummary`が届いていなかった。行そのもののクリック（`codex.openSession`）だけは動いていたが、これは`getTreeItem`が`item.command.arguments`へ`session`を明示的に渡しているため。
+
+#### 原因は`TreeItem.id`の未設定
+
+VS Codeはツリーの要素と`TreeItem`の対応を`id`で保持する。`id`を渡さないとラベルと位置から内部ハンドルを組み立てるが、このツリーのラベルは`threadName ?? '(名称未設定)'`で重複しやすく、さらに`refreshDebounced`（ファイル監視からの再描画。300ms）で並びも頻繁に変わる。その結果ハンドルと要素の対応がずれ、メニュー経由の呼び出しで引数が`undefined`になっていた。
+
+`getTreeItem`で`item.id`を`` `${session.provider}:${session.id}` ``に固定する。プロバイダをまたいでも衝突しないよう、プロバイダ名とセッションIDの組にする（`SessionSummary.id`はプロバイダごとに採番されるため、id単体では理論上ぶつかりうる）。
+
+#### 引数の`undefined`はコマンド側でも受け止める
+
+原因自体は`id`で塞げるが、メニュー定義を増やしたときに同じ壊れ方をしても気付きにくい。`extension.ts`に`withSession(log, command, run)`を置き、`SessionSummary`を引数に取るコマンド（`codex.openSession` / `codex.openChat` / `claude.openChat` / `codex.openConversation` / `codex.forkSession` / `claude.forkSession` / `codex.archiveSession` / `codex.unarchiveSession` / `codex.deleteSession`）をすべてこれで包む。引数が無いときは例外にせず、警告を1行ログへ残して何もしない。
+
+#### forkをホバーのインラインアイコンからも押せるようにする（#237）
+
+fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されておらず、右クリックからしか実行できなかった。履歴からの主要な導線なので、既存の右クリックを残したままインラインにも出す。
+
+- `contributes.commands`の`codex.forkSession` / `claude.forkSession`へ`"icon": "$(repo-forked)"`を足す。`$(git-branch)`は`codex.openConversation`が使っているため避ける。インラインに置いたコマンドは`icon`が無いと何も描画されない
+- `contributes.menus`へインラインの登録を追加する。Codexは`inline@3`（`openChat`・`openConversation`に続く3つめ）、Claude Codeは`inline@2`（`openChat`に続く2つめ）。`when`句は既存の`1_open@1`と同じにして、アーカイブ済みセッションでも出す
+
+#### 実装とテスト
+
+- `src/view/sessionTreeProvider.ts`: `getTreeItem`で`item.id`を設定
+- `src/extension.ts`: `withSession`を追加し、セッションを引数に取る9つのコマンド登録を包む
+- `package.json`: forkの`icon`とインラインの`view/item/context`エントリを追加
+- `test/mocks/vscode.ts`: `TreeItem` / `TreeItemCollapsibleState` / `ThemeIcon` / `MarkdownString` / `EventEmitter`を追加（`SessionTreeProvider`をユニットテストから読み込めるようにするため）
+- `test/unit/sessionTreeProvider.test.ts`: `id`が`<provider>:<id>`になること、ラベルが重複しても`id`が衝突しないこと、行クリックの引数が従来通りであること
+- `test/unit/menuInlineIcons.test.ts`: `inline`グループのコマンドが全て`icon`を持つこと、メニューが参照するコマンドが`contributes.commands`に実在すること、インラインの並び順が同じ`when`句の中で重複していないこと
+
 
 ## 15. 作業記録（日報・週報連携）
 

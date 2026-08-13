@@ -593,8 +593,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('codex.openSession', (s: SessionSummary) =>
-      openSession(chat, claudeChat, log, s),
+    vscode.commands.registerCommand(
+      'codex.openSession',
+      withSession(log, 'codex.openSession', (s) => openSession(chat, claudeChat, log, s)),
     ),
     vscode.commands.registerCommand('codex.resumeSession', () =>
       pickAndResume(providers, chat, claudeChat, tree, log),
@@ -613,8 +614,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     }),
     vscode.commands.registerCommand('codex.newChat', () => chat.openNew()),
     vscode.commands.registerCommand('claude.newChat', () => claudeChat.openNew()),
-    vscode.commands.registerCommand('claude.openChat', (s: SessionSummary) =>
-      claudeChat.openThread(s.id, s.threadName ?? s.id.slice(0, 8), s.cwd),
+    vscode.commands.registerCommand(
+      'claude.openChat',
+      withSession(log, 'claude.openChat', (s) => {
+        void claudeChat.openThread(s.id, s.threadName ?? s.id.slice(0, 8), s.cwd);
+      }),
     ),
     // 設定パネルの「読み直す」から会話中のセッションへ橋渡しする（issue #202、
     // design.md TP-90）。`newSession` と同じ、webview→VS Codeコマンド→この画面の
@@ -629,11 +633,17 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       await claudeChat.renameActive();
       tree.refresh();
     }),
-    vscode.commands.registerCommand('codex.openChat', (s: SessionSummary) =>
-      chat.openThread(s.id, s.threadName ?? s.id.slice(0, 8), s.cwd),
+    vscode.commands.registerCommand(
+      'codex.openChat',
+      withSession(log, 'codex.openChat', (s) => {
+        void chat.openThread(s.id, s.threadName ?? s.id.slice(0, 8), s.cwd);
+      }),
     ),
-    vscode.commands.registerCommand('codex.openConversation', (s: SessionSummary) =>
-      conversations.open(s),
+    vscode.commands.registerCommand(
+      'codex.openConversation',
+      withSession(log, 'codex.openConversation', (s) => {
+        void conversations.open(s);
+      }),
     ),
     // `codex.forkSession` / `claude.forkSession` はコマンド自体を分ける（`codex.openChat` /
     // `claude.openChat` と同じ、プロバイダ別にコマンドを分ける慣習。package.jsonのメニューの
@@ -641,20 +651,33 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // （issue #218）
     vscode.commands.registerCommand(
       'codex.forkSession',
-      (s: SessionSummary) => void forkSession(providers, chat, claudeChat, log, s),
+      withSession(log, 'codex.forkSession', (s) => {
+        void forkSession(providers, chat, claudeChat, log, s);
+      }),
     ),
     vscode.commands.registerCommand(
       'claude.forkSession',
-      (s: SessionSummary) => void forkSession(providers, chat, claudeChat, log, s),
+      withSession(log, 'claude.forkSession', (s) => {
+        void forkSession(providers, chat, claudeChat, log, s);
+      }),
     ),
-    vscode.commands.registerCommand('codex.archiveSession', (s: SessionSummary) =>
-      runAction(actions, tree, log, 'archive', s),
+    vscode.commands.registerCommand(
+      'codex.archiveSession',
+      withSession(log, 'codex.archiveSession', (s) => {
+        void runAction(actions, tree, log, 'archive', s);
+      }),
     ),
-    vscode.commands.registerCommand('codex.unarchiveSession', (s: SessionSummary) =>
-      runAction(actions, tree, log, 'unarchive', s),
+    vscode.commands.registerCommand(
+      'codex.unarchiveSession',
+      withSession(log, 'codex.unarchiveSession', (s) => {
+        void runAction(actions, tree, log, 'unarchive', s);
+      }),
     ),
-    vscode.commands.registerCommand('codex.deleteSession', (s: SessionSummary) =>
-      runAction(actions, tree, log, 'delete', s),
+    vscode.commands.registerCommand(
+      'codex.deleteSession',
+      withSession(log, 'codex.deleteSession', (s) => {
+        void runAction(actions, tree, log, 'delete', s);
+      }),
     ),
     vscode.commands.registerCommand('codex.showLog', () => log.show()),
     vscode.commands.registerCommand('agent.workflows.run', () =>
@@ -1402,6 +1425,29 @@ function resolveExecutable(provider: AgentProvider, log: Logger): string | undef
     }
   });
   return undefined;
+}
+
+/**
+ * セッションツリーの要素を引数に取るコマンドを包む共通ガード（issue #236）。
+ *
+ * `view/item/context`（インラインアイコン・右クリックメニュー）から呼ばれるコマンドは、
+ * VS Codeがツリーの要素を復元できないと引数が `undefined` のまま届く。素通しすると
+ * `Cannot read properties of undefined` で落ちるため、ここで受け止めてログだけ残す。
+ * 復元が壊れる原因自体は `SessionTreeProvider.getTreeItem` の `id` で塞いであり、
+ * これはメニュー定義を増やしたときの再発に備えた防御。
+ */
+function withSession(
+  log: Logger,
+  command: string,
+  run: (session: SessionSummary) => void,
+): (session?: SessionSummary) => void {
+  return (session) => {
+    if (session === undefined) {
+      log.warn(`${command}: 対象のセッションを受け取れませんでした`);
+      return;
+    }
+    run(session);
+  };
 }
 
 /**

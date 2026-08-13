@@ -137,7 +137,17 @@
         {
           "command": "codex.forkSession",
           "when": "view == codex.sessions && viewItem =~ /^codexSession\\.codex/",
+          "group": "inline@3"
+        },
+        {
+          "command": "codex.forkSession",
+          "when": "view == codex.sessions && viewItem =~ /^codexSession\\.codex/",
           "group": "1_open@1"
+        },
+        {
+          "command": "claude.forkSession",
+          "when": "view == codex.sessions && viewItem =~ /^codexSession\\.claude/",
+          "group": "inline@2"
         },
         {
           "command": "claude.forkSession",
@@ -260,7 +270,8 @@
       {
         "command": "codex.forkSession",
         "title": "このセッションをforkする",
-        "category": "Agent"
+        "category": "Agent",
+        "icon": "$(repo-forked)"
       },
       {
         "command": "codex.archiveSession",
@@ -302,7 +313,8 @@
       {
         "command": "claude.forkSession",
         "title": "このセッションをforkする（Claude Code）",
-        "category": "Agent"
+        "category": "Agent",
+        "icon": "$(repo-forked)"
       },
       {
         "command": "claude.reloadSkills",
