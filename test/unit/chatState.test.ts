@@ -73,6 +73,35 @@ describe('normalizeItem', () => {
     ]);
   });
 
+  it('新規ファイルの生の中身は追加行として整える', () => {
+    // 実測（Codex CLI 0.147.0）: kind が add のとき diff にファイルの中身がそのまま入る。
+    // 行頭に + が無いと画面で追加行として色が付かないため、ここで補う。
+    const item = normalizeItem({
+      type: 'fileChange',
+      id: 'f1',
+      changes: [{ path: '/b.ts', kind: { type: 'add' }, diff: 'hello\nworld\n' }],
+    });
+    expect(item?.diffs[0]?.diff).toBe('+hello\n+world');
+  });
+
+  it('削除されたファイルの生の中身は削除行として整える', () => {
+    const item = normalizeItem({
+      type: 'fileChange',
+      id: 'f1',
+      changes: [{ path: '/b.ts', kind: { type: 'delete' }, diff: 'gone\n' }],
+    });
+    expect(item?.diffs[0]?.diff).toBe('-gone');
+  });
+
+  it('unified diff が届いていればそのまま持つ', () => {
+    const item = normalizeItem({
+      type: 'fileChange',
+      id: 'f1',
+      changes: [{ path: '/b.ts', kind: { type: 'add' }, diff: '@@ -0,0 +1 @@\n+added\n' }],
+    });
+    expect(item?.diffs[0]?.diff).toBe('@@ -0,0 +1 @@\n+added\n');
+  });
+
   it('ファイルの移動先も保持する', () => {
     const item = normalizeItem({
       type: 'fileChange',
