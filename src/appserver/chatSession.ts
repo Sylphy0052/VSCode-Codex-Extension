@@ -40,6 +40,24 @@ import {
   type ReviewTarget,
 } from '../codex/reviewTarget';
 
+/**
+ * 会話の1行要約を依頼する指示文（issue #228、design.md §14.41）。
+ *
+ * design.md §14.36に実測が載っているClaude Code内蔵`/recap`の指示文
+ * （"The user stepped away and is coming back. Recap in under 40 words, ..."）と
+ * 同じ趣旨にする。Codex側にはこの指示文を専用に処理する経路が無く、通常のターンとして
+ * 送ってモデルにそのまま従わせる必要があるため、次の一文を明示的に足している。
+ *
+ * - 「会話が使っている言語で答える」: Claude Code側は英語の指示文でも会話の言語に揃って
+ *   返ることを実測済み（design.md §14.36実測3）だが、Codexでの実測はできていない。
+ *   揃わない場合に備えて指示文で先に明示しておく（issue本文の受入基準「揃わない場合は
+ *   指示文で明示する」に対応）
+ */
+export const RECAP_INSTRUCTION =
+  'The user stepped away and is coming back. Recap this conversation in under 40 words, ' +
+  '1-2 plain sentences, no markdown. Lead with the overall goal and current task. ' +
+  'Reply in the same language the conversation has been using so far.';
+
 interface WaitingApproval {
   resolve: (response: unknown) => void;
   approval: PendingApproval;
@@ -375,6 +393,39 @@ export class ChatSession {
     }
     this.update({ ...this.state, busy: true, turnFailed: false });
     await this.connection.request('thread/compact/start', { threadId });
+  }
+
+  /**
+   * 会話の1行要約をいま作る（issue #228、design.md §14.41）。
+   *
+   * Codex CLIには`/recap`に相当する概念が無い（design.md §14.41参照）。そのため
+   * `compact()`のような専用の制御要求は無く、要約を依頼する指示文（`RECAP_INSTRUCTION`）を
+   * 通常のターンとして`send()`経由で送るしかない。応答は`<synthetic>`ではなく通常の
+   * モデル応答として会話に残る。トークン・費用も通常のターンと同じだけ掛かる
+   * （Claude Code側との違い。design.md参照）。
+   *
+   * 会話がまだ無い状態（`items.length === 0`）で呼ぶと、要約する対象が無いままモデルの
+   * ターンを1つ消費するだけになってしまう。Claude Code側はCLI内部の`/recap`がこの判定を
+   * 持ち「Nothing to recap yet」で応答するが、Codexにはその判定を持つ経路が無いため、
+   * ここで同じ判定を拡張機能側で行う。該当すれば`turn/start`は送らず、`hookBlocked`と
+   * 同じ`appendNotice`でその旨だけを会話に一言残す。
+   */
+  async recap(config: CodexConfig): Promise<void> {
+    const threadId = this.state.threadId;
+    if (threadId === undefined) {
+      throw new Error('スレッドが開始されていません');
+    }
+    if (this.state.items.length === 0) {
+      this.update(
+        appendNotice(
+          this.state,
+          `recap:${this.noticeCount++}`,
+          'まだ要約できる会話がありません。まず何か送ってから試してください',
+        ),
+      );
+      return;
+    }
+    await this.send(RECAP_INSTRUCTION, config);
   }
 
   /**
