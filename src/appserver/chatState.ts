@@ -1471,12 +1471,10 @@ function keepsInterruptedMark(item: ChatItem): boolean {
  *
  * 注記は `turnId` ごとに1行にする（issue #258）。中断の要求を投げる前に捕まえた値を
  * 渡すこと。`state.turnId` を読むと、応答を待つ間に中断がもう一度呼ばれたときに値が
- * 落ちていて、同じ中断に対して別idの注記がもう1行出てしまう。
+ * 落ちていて、同じ中断に対して別idの注記がもう1行出てしまう。渡し忘れを型で捕まえたいので
+ * 既定値は置かない。
  */
-export function markInterruptedCommands(
-  state: ChatState,
-  turnId: string | undefined = state.turnId,
-): ChatState {
+export function markInterruptedCommands(state: ChatState, turnId: string | undefined): ChatState {
   if (!state.items.some(isRunningCommand)) {
     return state;
   }

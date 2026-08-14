@@ -831,7 +831,7 @@ describe('markInterruptedCommands', () => {
     ]);
 
   it('実行中のコマンドへ印を付け、注記を1行残す', () => {
-    const state = markInterruptedCommands(withCommand('inProgress'));
+    const state = markInterruptedCommands(withCommand('inProgress'), TURN);
     const command = state.items.find((i) => i.id === 'cmd_1');
     expect(command?.interruptedWhileRunning).toBe(true);
     const notice = state.items.find((i) => i.id === interruptedCommandsNoticeId(TURN));
@@ -839,23 +839,23 @@ describe('markInterruptedCommands', () => {
   });
 
   it('Claude Code の running も実行中として扱う', () => {
-    const state = markInterruptedCommands(withCommand('running'));
+    const state = markInterruptedCommands(withCommand('running'), TURN);
     expect(state.items.find((i) => i.id === 'cmd_1')?.interruptedWhileRunning).toBe(true);
   });
 
   it('実行中のコマンドが無ければ何もしない', () => {
     const before = withCommand('completed');
-    expect(markInterruptedCommands(before)).toBe(before);
+    expect(markInterruptedCommands(before, TURN)).toBe(before);
   });
 
   it('同じターンで呼び直しても注記は増えない', () => {
-    const once = markInterruptedCommands(withCommand('inProgress'));
-    const twice = markInterruptedCommands(once);
+    const once = markInterruptedCommands(withCommand('inProgress'), TURN);
+    const twice = markInterruptedCommands(once, TURN);
     expect(twice.items.filter((i) => i.id === interruptedCommandsNoticeId(TURN))).toHaveLength(1);
   });
 
   it('別のターンで中断すると、注記はそのときの末尾に増える（issue #258）', () => {
-    const first = markInterruptedCommands(withCommand('inProgress'));
+    const first = markInterruptedCommands(withCommand('inProgress'), TURN);
     // 中断した後、次のターンでまた別のコマンドが走り出したところで中断する
     const secondTurn = feed(first, [
       ['turn/started', { turn: { id: NEXT_TURN } }],
@@ -867,7 +867,7 @@ describe('markInterruptedCommands', () => {
         },
       ],
     ]);
-    const second = markInterruptedCommands(secondTurn);
+    const second = markInterruptedCommands(secondTurn, NEXT_TURN);
 
     const notices = second.items.filter((i) => i.id.startsWith('interruptedCommands'));
     expect(notices).toHaveLength(2);
@@ -876,7 +876,7 @@ describe('markInterruptedCommands', () => {
   });
 
   it('中断後に届く item/updated では印が消えない', () => {
-    const interrupted = markInterruptedCommands(withCommand('inProgress'));
+    const interrupted = markInterruptedCommands(withCommand('inProgress'), TURN);
     const updated = applyEvent(interrupted, 'item/updated', {
       turnId: TURN,
       item: { id: 'cmd_1', type: 'commandExecution', command: 'sleep 60', status: 'inProgress' },
@@ -885,7 +885,7 @@ describe('markInterruptedCommands', () => {
   });
 
   it('中断後に届く outputDelta でも印が消えない', () => {
-    const interrupted = markInterruptedCommands(withCommand('inProgress'));
+    const interrupted = markInterruptedCommands(withCommand('inProgress'), TURN);
     const delta = applyEvent(interrupted, 'item/commandExecution/outputDelta', {
       itemId: 'cmd_1',
       delta: 'まだ出力が続いている',
@@ -894,7 +894,7 @@ describe('markInterruptedCommands', () => {
   });
 
   it('statusの読めない更新では印を残す（消すと中断が効かないように見える）', () => {
-    const interrupted = markInterruptedCommands(withCommand('inProgress'));
+    const interrupted = markInterruptedCommands(withCommand('inProgress'), TURN);
     const updated = applyEvent(interrupted, 'item/updated', {
       turnId: TURN,
       item: { id: 'cmd_1', type: 'commandExecution', command: 'sleep 60' },
@@ -903,7 +903,7 @@ describe('markInterruptedCommands', () => {
   });
 
   it('コマンドが本当に終わったら印を落とす', () => {
-    const interrupted = markInterruptedCommands(withCommand('inProgress'));
+    const interrupted = markInterruptedCommands(withCommand('inProgress'), TURN);
     const completed = applyEvent(interrupted, 'item/completed', {
       turnId: TURN,
       item: { id: 'cmd_1', type: 'commandExecution', command: 'sleep 60', status: 'completed' },
@@ -912,7 +912,7 @@ describe('markInterruptedCommands', () => {
   });
 
   it('終わったstatusがitem/updatedで届いたときも印を落とす', () => {
-    const interrupted = markInterruptedCommands(withCommand('inProgress'));
+    const interrupted = markInterruptedCommands(withCommand('inProgress'), TURN);
     const updated = applyEvent(interrupted, 'item/updated', {
       turnId: TURN,
       item: {
