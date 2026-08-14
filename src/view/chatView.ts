@@ -1442,9 +1442,9 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
    * 会話項目は差し分だけを `items` へ載せ、`state.items` は空で送る（issue #262）。
    *
    * webviewへの送信は構造化クローンを通るため、変わったのが末尾の1項目だけでも全項目が
-   * 直列化される。会話が長いほど1回の送信が重くなり（実測: 4001項目で47.8ms。
-   * `STATE_POST_INTERVAL_MS` の50msとほぼ同じ）、間引きの枠が埋まってしまう。
-   * webview側は受け取った差し分を積み直して描画する（`chatScript.ts` の `applyItems`）。
+   * 直列化される。会話が長いほど1回の送信が重くなり、`STATE_POST_INTERVAL_MS`（50ms）の
+   * 間引きの枠が埋まってしまう（実測はdesign.md §9.6。項目数に比例して増える）。
+   * webview側は受け取った差し分を積み直して描画する（`stateDelta.ts` の `mergeItems`）。
    */
   private flushState(entry: ChatPanel): void {
     if (entry.disposed || entry.panel === undefined) {
