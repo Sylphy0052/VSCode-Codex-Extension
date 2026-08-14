@@ -89,6 +89,15 @@ const SIDE_QUESTION_TAB_TITLE = '脇道';
  */
 const MCP_STARTUP_CHECK_TIMEOUT_MS = 8_000;
 
+/**
+ * 画面へ状態を送る最短間隔（issue #246）。
+ *
+ * 巨大なコマンド出力の最中に届くデルタ1件ごとに状態全体を送ると、拡張ホストが直列化で
+ * 埋まり、`turn/interrupt` の応答すら読めなくなる。人の目には連続に見える程度に短く、
+ * かつ送信回数を2桁減らせる長さとして50msを採る（毎秒最大20回）。
+ */
+const STATE_POST_INTERVAL_MS = 50;
+
 interface ChatPanel {
   /**
    * 今そのタブが開いているか。`undefined` はタブが閉じられている状態を表す。
@@ -151,6 +160,10 @@ interface ChatPanel {
    * （`ChatSession.applyNotification`へは転送しない。`routeNotification`参照）。
    */
   mcpStartupListeners: Array<(name: string, status: string) => void>;
+  /** 状態送信の間引き（issue #246）。予約中のタイマー。 */
+  postTimer?: ReturnType<typeof setTimeout> | undefined;
+  /** 状態送信の間引き（issue #246）。最後に実際へ送った時刻。 */
+  lastPostAt?: number | undefined;
 }
 
 /** 拡張機能から実行したセッションを日報バッファへ記録するための通知。 */
@@ -1034,6 +1047,10 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       return;
     }
     entry.disposed = true;
+    if (entry.postTimer !== undefined) {
+      clearTimeout(entry.postTimer);
+      entry.postTimer = undefined;
+    }
     entry.loop.stop('manual');
     entry.session.dispose();
     entry.panel?.dispose();
@@ -1377,10 +1394,37 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
   }
 
   /** 画面へ現在の状態を送る。設定とループの進行はここで一緒に載せる。 */
+  /**
+   * 画面へ状態を送る。短い間隔で続けて呼ばれた分はまとめる（issue #246）。
+   *
+   * `item/commandExecution/outputDelta` は巨大な出力の最中に毎秒何千件も届く。1件ごとに
+   * 状態全体を `postMessage` すると、そのたびに本文を丸ごと直列化することになり
+   * （実測: 2万件で9.7秒の上乗せ）、拡張ホストのイベントループが埋まる。その結果
+   * `turn/interrupt` の応答を読むところまで手が回らず、120秒の要求タイムアウトに達していた。
+   *
+   * 最初の1件はすぐ送り、以降は `STATE_POST_INTERVAL_MS` ごとにまとめる。まとめた分は
+   * 必ず最後に1回送る（送り漏らして古い画面が残らないようにする）。
+   */
   private postState(entry: ChatPanel): void {
+    if (entry.disposed || entry.panel === undefined || entry.postTimer !== undefined) {
+      return;
+    }
+    const since = Date.now() - (entry.lastPostAt ?? 0);
+    if (since >= STATE_POST_INTERVAL_MS) {
+      this.flushState(entry);
+      return;
+    }
+    entry.postTimer = setTimeout(() => {
+      entry.postTimer = undefined;
+      this.flushState(entry);
+    }, STATE_POST_INTERVAL_MS - since);
+  }
+
+  private flushState(entry: ChatPanel): void {
     if (entry.disposed || entry.panel === undefined) {
       return;
     }
+    entry.lastPostAt = Date.now();
     void entry.panel.webview.postMessage({
       type: 'state',
       state: {

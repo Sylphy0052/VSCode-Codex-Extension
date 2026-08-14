@@ -615,6 +615,27 @@ cwdの解決に差があるのは、Claude Codeの `--resume` がcwdを引数と
 
 タブ復元やresumeの直後に応答だけが消えて見えるのはこのため。拡張機能側で本文を退避すれば見た目は保てるが、§8の「会話本文を読まない・保存しない」に反するので採らない。
 
+#### 中断してもコマンドの子プロセスは残る（issue #246）
+
+**`turn/interrupt` はターンを終わらせるが、実行中だったコマンドは止まらない**（実測、Codex CLI 0.147.0）。拡張機能を通さず `codex app-server` へ直接投げて確かめた。
+
+- `turn/start` で60秒かかるループを実行させ、3秒後に `turn/interrupt` を送ると、要求は即座に `{"result": {}}` を返す
+- **その後も `item/commandExecution/outputDelta` が1秒間隔で届き続ける**（12秒観測して12回）
+
+CLI側の挙動そのものは拡張機能では変えられない。そのため、中断した時点で実行中だったコマンドの項目に印（`ChatItem.interruptedWhileRunning`）を付け、会話へ「実行中だったコマンドはCLI側で走り続けることがある」旨の注記を1行残す（`markInterruptedCommands`。`ChatSession.interrupt` から呼ぶ）。これが無いと、ユーザーからは「中断が効かない」としか見えない。
+
+#### 巨大な出力の最中は要求の応答が遅れる（issue #246）
+
+`find / -type f` のような出力の最中に中断すると、`app-serverが応答しません: turn/interrupt`（要求タイムアウトは120秒。`src/appserver/connection.ts` の `REQUEST_TIMEOUT_MS`）に達していた。**原因は拡張機能側**で、`item/commandExecution/outputDelta` 1件ごとに走る2つの処理が重かった（ベンチで実測。デルタ2万件）。
+
+- `appendDelta` がデルタごとに `capOutput` を通していた。上限（`MAX_OUTPUT_CHARS` = 20万字）に達して以降は毎回20万字の連結と `slice` が走る（**4598ms**。1件0.23ms）
+- `ChatViewManager.postState` がデルタごとに状態全体を `postMessage` していた。そのたびに本文を丸ごと直列化する（上の測定へ**さらに9.7秒**の上乗せ）
+
+app-serverからの応答も同じstdoutから読むため、この2つで拡張ホストのイベントループが埋まると `turn/interrupt` の応答をパースするところまで手が回らない。次の2点で直した。
+
+- 追記途中の切り詰めに余裕を持たせる（`OUTPUT_SOFT_CAP_CHARS` = 上限の1.25倍）。上限を超えてもすぐには切らず、余裕を超えたときだけ末尾 `MAX_OUTPUT_CHARS` へ切る。保持する本文は上限〜上限の1.25倍で揺れる。同じベンチで **4598ms → 19ms**
+- `postState` を最短50ms（`STATE_POST_INTERVAL_MS`）でまとめる。最初の1件はすぐ送り、以降はまとめて送る。まとめた分は必ず最後に1回送るので、古い画面が残ることはない
+
 ### 9.7 応答中の指示（割り込みと待ち行列）
 
 送信を弾くと入力を打ち直す羽目になるため、**送信は常に受け付ける**。応答中の扱いはプロバイダで異なる。

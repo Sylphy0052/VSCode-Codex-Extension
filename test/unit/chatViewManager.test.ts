@@ -71,6 +71,16 @@ async function tick(times = 5): Promise<void> {
   }
 }
 
+/**
+ * 状態送信の間引き（`STATE_POST_INTERVAL_MS` = 50ms、issue #246）で予約に回った分を吐き出す。
+ *
+ * 連続して状態が変わると最後の1回はタイマー越しに送られる。マイクロタスクだけでは流れないため、
+ * 送信済みメッセージを検査する前にこれを挟む。
+ */
+async function flushStatePosts(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 80));
+}
+
 function createManager(options?: {
   isTaskManagedThread?: (threadId: string) => boolean;
   onActivity?: (activity: ChatActivity) => void;
@@ -167,6 +177,7 @@ describe('ChatViewManager', () => {
       const panelB = __mock.createdPanels[__mock.createdPanels.length - 1];
       panelA?.webview.simulateMessage({ type: 'ready' });
       panelB?.webview.simulateMessage({ type: 'ready' });
+      await flushStatePosts();
       const lastOf = (panel: typeof panelA): StateMessage | undefined => {
         const messages = stateMessagesOf(panel);
         return messages[messages.length - 1];
@@ -200,6 +211,7 @@ describe('ChatViewManager', () => {
 
       const panel = __mock.createdPanels[__mock.createdPanels.length - 1];
       panel?.webview.simulateMessage({ type: 'ready' });
+      await flushStatePosts();
       const messages = stateMessagesOf(panel);
       const last = messages[messages.length - 1];
       expect(last?.state.items.some((i) => i.text === '着手します')).toBe(true);
@@ -301,6 +313,8 @@ describe('ChatViewManager', () => {
 
       revealedPanel?.webview.simulateMessage({ type: 'ready' });
 
+      await flushStatePosts();
+
       const messages = stateMessagesOf(revealedPanel);
       const last = messages[messages.length - 1];
       expect(last?.state.items.some((i) => i.text === 'これまでの会話')).toBe(true);
@@ -396,6 +410,7 @@ describe('ChatViewManager', () => {
       // askのときは人の決定が無い限り応答しない（承認カードが出た状態のまま）
       expect(resolved).toBe(false);
       const panel = __mock.lastCreatedPanel();
+      await flushStatePosts();
       const messages = stateMessagesOf(panel);
       const last = messages[messages.length - 1];
       expect(last?.state.approvals.length).toBe(1);
@@ -857,6 +872,7 @@ describe('ChatViewManager', () => {
       await tick();
 
       expect(connection.requests.some((r) => r.method === 'turn/start')).toBe(false);
+      await flushStatePosts();
       const messages = stateMessagesOf(panel);
       const last = messages[messages.length - 1];
       expect(

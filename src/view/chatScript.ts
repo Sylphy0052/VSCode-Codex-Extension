@@ -420,6 +420,8 @@ export function chatScript(
     if (item.status) bits.push(STATUS_LABEL[item.status] || item.status);
     // 上限を超えて先頭を捨てた分は本文に印を混ぜず、ここで断る
     if (item.truncated) bits.push('先頭は省略');
+    // 中断しても子プロセスは残る。止まって見えるだけかもしれないと断る（issue #246）
+    if (item.interruptedWhileRunning) bits.push('中断後も継続中の可能性');
     const label = bits.join(' ・ ');
     if (node.label.textContent !== label) node.label.textContent = label;
 
