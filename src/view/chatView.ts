@@ -2051,7 +2051,9 @@ ${chatStyles()}
       <button id="loopStart" type="button">ループ開始</button>
     </div>
   </div>
-  <div id="settings"${options.showSettings ? '' : ' hidden'}>
+  <details id="settingsBox"${options.showSettings ? '' : ' hidden'}>
+    <summary title="モデル・承認などの設定を開閉します"><span class="label">設定</span><span id="settingsSummary"></span></summary>
+    <div id="settings">
     <label>モデル <select id="model"></select></label>
     <label>Effort <select id="reasoningEffort"></select></label>
     <label>承認 <select id="approvalMode">
@@ -2084,7 +2086,8 @@ ${chatStyles()}
         : ''
     }
     ${options.settingsNote === undefined ? '' : `<p class="note">${escapeHtml(options.settingsNote)}</p>`}
-  </div>
+    </div>
+  </details>
 
 <script nonce="${nonce}">
 ${chatScript(options.agentLabel, options.review, options.showRewind === true, options.approvalCycle ?? [], options.showInputModeHints === true)}

@@ -398,18 +398,39 @@ export function chatStyles(): string {
   .item .head .actions button { padding: 1px 8px; font-size: 0.85em; }
   /* 本文は選択してコピーできるようにする */
   .body { user-select: text; cursor: text; }
+  /*
+   * 設定は既定で折りたたむ（issue #266）。開いたままだとドロップダウン群と但し書きで
+   * 下部が6行前後を占め、会話の見える量を削ってしまう。閉じているときは現在値の
+   * 1行サマリだけを見せ、何で動いているかは分かるようにする。
+   */
+  #settingsBox {
+    padding: 0 16px 10px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+  }
+  #settingsBox > summary {
+    cursor: pointer;
+    /* display:flexにすると開閉の三角が消えるため、既定のlist-itemのままにする */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #settingsBox > summary:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: 2px;
+  }
+  #settingsBox > summary .label { font-weight: 600; }
+  #settingsSummary { margin-left: 8px; }
   #settings {
     display: flex;
     flex-wrap: wrap;
     gap: 6px 14px;
-    padding: 0 16px 12px;
+    padding: 8px 0 2px;
   }
   #settings label {
     display: flex;
     align-items: center;
     gap: 4px;
-    color: var(--vscode-descriptionForeground);
-    font-size: 0.85em;
   }
   #settings select {
     padding: 2px 4px;
@@ -425,8 +446,7 @@ export function chatStyles(): string {
   #settings .note {
     flex-basis: 100%;
     margin: 0;
-    color: var(--vscode-descriptionForeground);
-    font-size: 0.8em;
+    font-size: 0.95em;
   }
   #loop {
     display: flex;
