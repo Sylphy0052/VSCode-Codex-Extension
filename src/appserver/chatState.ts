@@ -1440,6 +1440,18 @@ export function interruptedCommandsNoticeId(turnId: string | undefined): string 
     : `interruptedCommands:${turnId}`;
 }
 
+/**
+ * 中断の要求そのものが失敗したときの注記のid（issue #261）。
+ *
+ * `interruptedCommandsNoticeId` と同じくターンごとに分ける。中断できたときの注記とは
+ * 別のidにする（伝える内容が逆であり、上書きし合うと最後に起きたことしか残らない）。
+ */
+export function interruptFailedNoticeId(turnId: string | undefined): string {
+  return turnId === undefined || turnId === ''
+    ? 'interruptFailed'
+    : `interruptFailed:${turnId}`;
+}
+
 /** 中断の対象になりうる（実行中の）コマンドか。CodexはinProgress、Claude Codeはrunning。 */
 function isRunningCommand(item: ChatItem): boolean {
   return (

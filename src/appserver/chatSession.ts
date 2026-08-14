@@ -16,6 +16,7 @@ import {
   deriveReviewing,
   enqueue,
   initialChatState,
+  interruptFailedNoticeId,
   markInterruptedCommands,
   normalizeItem,
   removeApproval,
@@ -91,6 +92,14 @@ export class ChatSession {
   private policyOverridden = false;
   /** 採番用。画面へ出す一言のidに使う。 */
   private noticeCount = 0;
+  /**
+   * いま `turn/interrupt` の応答を待っているターン（issue #261）。
+   *
+   * `Esc` の連打で**同じターンへ**2回目の要求を送らないための番人。2回目は応答が返らない。
+   * ターンごとに持つのは、応答を待つ間に別のターンが始まったとき、そちらの中断まで
+   * 握り潰さないため。
+   */
+  private interruptingTurnId: string | undefined;
   /**
    * 自動レビューが止めた操作。`reviewId` から、届いた完了通知そのものを引けるようにする。
    *
@@ -503,7 +512,35 @@ export class ChatSession {
     if (threadId === undefined || turnId === undefined) {
       return;
     }
-    await this.connection.request('turn/interrupt', { threadId, turnId });
+    // 同じターンへ2回目の`turn/interrupt`を送ると、app-serverは応答を返さない（実測。
+    // design.md §9.6）。要求は120秒のタイムアウトまで宙に浮くため、応答を待っている間の
+    // 呼び出しは要求そのものを送らずに返す（issue #261）
+    if (this.interruptingTurnId === turnId) {
+      return;
+    }
+    this.interruptingTurnId = turnId;
+    try {
+      await this.connection.request('turn/interrupt', { threadId, turnId });
+    } catch (e) {
+      // 失敗しても`busy`は戻す（`startReview`と同じ）。戻さないと画面はスピナーと停止ボタンを
+      // 出したまま固まる。ターンは終わっていない可能性が高いので、`turnId`と実行中コマンドの
+      // 印（`interruptedWhileRunning`）には触らない。呼び出し元（`chatView.ts`）が例外から
+      // エラー通知を出すが、通知は消えるため会話にも1行残す
+      this.update(
+        appendNotice(
+          { ...this.state, busy: false },
+          interruptFailedNoticeId(turnId),
+          '中断できませんでした。ターンはそのまま続いていることがあります。' +
+            'もう一度中断するか、CLI側の状態を確認してください。',
+        ),
+      );
+      throw e;
+    } finally {
+      // 別のターンの中断が始まっていたら、そちらの番人を消さない
+      if (this.interruptingTurnId === turnId) {
+        this.interruptingTurnId = undefined;
+      }
+    }
     // 中断はターンを終わらせるだけで、実行中のコマンドの子プロセスはCLI側に残る（issue #246）。
     // 画面がそれを伝えないと「中断が効かない」としか見えないため、印と注記を残す。
     // 注記のidは要求を投げる前に捕まえた turnId から作る。応答を待つ間に `Esc` をもう一度
