@@ -505,8 +505,11 @@ export class ChatSession {
     }
     await this.connection.request('turn/interrupt', { threadId, turnId });
     // 中断はターンを終わらせるだけで、実行中のコマンドの子プロセスはCLI側に残る（issue #246）。
-    // 画面がそれを伝えないと「中断が効かない」としか見えないため、印と注記を残す
-    this.update(markInterruptedCommands({ ...this.state, busy: false, turnId: undefined }));
+    // 画面がそれを伝えないと「中断が効かない」としか見えないため、印と注記を残す。
+    // 注記のidは要求を投げる前に捕まえた turnId から作る。応答を待つ間に `Esc` をもう一度
+    // 押されると、そのときには state.turnId が落ちていて別idの注記がもう1行出てしまう（issue #258）
+    const marked = markInterruptedCommands({ ...this.state, busy: false }, turnId);
+    this.update({ ...marked, turnId: undefined });
   }
 
   applyNotification(method: string, params: Record<string, unknown>): void {

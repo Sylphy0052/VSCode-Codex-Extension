@@ -1423,8 +1423,22 @@ export function appendNotice(state: ChatState, id: string, text: string): ChatSt
   };
 }
 
-/** 中断の注記のid。呼び直しても行が増えないよう固定にする。 */
-export const INTERRUPTED_COMMANDS_NOTICE_ID = 'interruptedCommands';
+/**
+ * 中断の注記のid（issue #258）。
+ *
+ * ターンごとに別のidにする。中断はターンを終わらせるので、1回の中断につき1行になり、
+ * 同じターンで呼び直しても増えない。会話画面は新しい項目を末尾へ足すだけで既存の並びを
+ * 変えないため（`chatScript.ts` の `syncItems`）、固定idのままだと2回目以降の注記が
+ * 1回目の位置に留まってしまう。ターンごとに別のidにすることで、そのときの末尾に出る。
+ *
+ * ターンが判らないときは固定のidへ落とす。`ChatSession.interrupt` は進行中のターンが
+ * 無ければ何もしないので、そこから来る限りこの分岐には入らない（想定外の呼び方への保険）。
+ */
+export function interruptedCommandsNoticeId(turnId: string | undefined): string {
+  return turnId === undefined || turnId === ''
+    ? 'interruptedCommands'
+    : `interruptedCommands:${turnId}`;
+}
 
 /** 中断の対象になりうる（実行中の）コマンドか。CodexはinProgress、Claude Codeはrunning。 */
 function isRunningCommand(item: ChatItem): boolean {
@@ -1454,8 +1468,13 @@ function keepsInterruptedMark(item: ChatItem): boolean {
  * 残り、`item/commandExecution/outputDelta` が届き続ける（実測。design.md §9.6）。
  * 画面がそれを伝えないと「中断が効かない」としか見えないため、対象のカードに印を付けたうえで
  * 注記を1行出す。実行中のコマンドが無ければ何もしない（余計な行を残さない）。
+ *
+ * 注記は `turnId` ごとに1行にする（issue #258）。中断の要求を投げる前に捕まえた値を
+ * 渡すこと。`state.turnId` を読むと、応答を待つ間に中断がもう一度呼ばれたときに値が
+ * 落ちていて、同じ中断に対して別idの注記がもう1行出てしまう。渡し忘れを型で捕まえたいので
+ * 既定値は置かない。
  */
-export function markInterruptedCommands(state: ChatState): ChatState {
+export function markInterruptedCommands(state: ChatState, turnId: string | undefined): ChatState {
   if (!state.items.some(isRunningCommand)) {
     return state;
   }
@@ -1464,7 +1483,7 @@ export function markInterruptedCommands(state: ChatState): ChatState {
   );
   return appendNotice(
     { ...state, items },
-    INTERRUPTED_COMMANDS_NOTICE_ID,
+    interruptedCommandsNoticeId(turnId),
     'ターンを中断しました。実行中だったコマンドはCLI側で走り続けることがあります' +
       '（中断はターンを終わらせますが、コマンドの子プロセスは残ります）。' +
       '止めるにはターミナルでそのプロセスを終わらせてください。',
