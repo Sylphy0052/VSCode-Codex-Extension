@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { ChatSession } from '../../src/appserver/chatSession';
-import { interruptedCommandsNoticeId } from '../../src/appserver/chatState';
+import {
+  interruptFailedNoticeId,
+  interruptedCommandsNoticeId,
+} from '../../src/appserver/chatState';
 import type { AppServerConnection } from '../../src/appserver/connection';
 import { emptyConfig } from '../../src/codex/types';
 import type { Logger } from '../../src/log';
@@ -28,8 +31,11 @@ interface Fake {
  *
  * `gateInterrupt` を立てると `turn/interrupt` の応答を `releaseInterrupt()` まで保留する。
  * 応答を待つ間に中断がもう一度呼ばれる状況（`Esc` の連打）を再現するために使う。
+ *
+ * `failInterrupt` を立てると `turn/interrupt` を失敗させる。要求のタイムアウトや接続断を
+ * 再現するために使う（issue #261）。
  */
-function fakeSession(options?: { gateInterrupt?: boolean }): Fake {
+function fakeSession(options?: { gateInterrupt?: boolean; failInterrupt?: boolean }): Fake {
   const sent: Sent[] = [];
   let release = (): void => undefined;
   const gate = new Promise<void>((resolve) => {
@@ -47,6 +53,9 @@ function fakeSession(options?: { gateInterrupt?: boolean }): Fake {
       if (method === 'turn/interrupt' && options?.gateInterrupt === true) {
         await gate;
       }
+      if (method === 'turn/interrupt' && options?.failInterrupt === true) {
+        throw new Error('app-serverが応答しません: turn/interrupt');
+      }
       return { result: {} };
     },
   } as unknown as AppServerConnection;
@@ -59,7 +68,10 @@ function fakeSession(options?: { gateInterrupt?: boolean }): Fake {
 }
 
 /** ターンが動いていて、コマンドが1件実行中の状態を作る。 */
-async function runningCommand(options?: { gateInterrupt?: boolean }): Promise<Fake> {
+async function runningCommand(options?: {
+  gateInterrupt?: boolean;
+  failInterrupt?: boolean;
+}): Promise<Fake> {
   const fake = fakeSession(options);
   await fake.session.start('/w', emptyConfig);
   fake.session.applyNotification('turn/started', { threadId: 'th-1', turn: { id: 'turn-1' } });
@@ -128,6 +140,35 @@ describe('ChatSession.interrupt（issue #246、design.md §9.6）', () => {
     await Promise.all([first, second]);
 
     expect(noticesOf(session)).toEqual([interruptedCommandsNoticeId('turn-1')]);
+  });
+
+  it('turn/interruptが失敗しても応答中の見た目のまま固まらない（issue #261）', async () => {
+    const { session } = await runningCommand({ failInterrupt: true });
+
+    await expect(session.interrupt()).rejects.toThrow('app-serverが応答しません');
+
+    const state = session.getState();
+    expect(state.busy).toBe(false);
+    // ターンは終わっていない可能性が高い。turnIdも実行中コマンドの印も触らない
+    expect(state.turnId).toBe('turn-1');
+    expect(state.items.find((i) => i.id === 'cmd_1')?.interruptedWhileRunning).toBeUndefined();
+    const notice = state.items.find((i) => i.id === interruptFailedNoticeId('turn-1'));
+    expect(notice?.detail).toContain('中断できませんでした');
+  });
+
+  it('応答を待つ間の2回目は要求そのものを送らない（issue #261）', async () => {
+    // 同じturnIdへ2回目の`turn/interrupt`を送ると、app-serverは応答を返さない（実測）。
+    // 要求が120秒のタイムアウトまで宙に浮くため、送る前で止める
+    const { session, sent, releaseInterrupt } = await runningCommand({ gateInterrupt: true });
+
+    const first = session.interrupt();
+    const second = session.interrupt();
+    releaseInterrupt();
+    await Promise.all([first, second]);
+
+    expect(sent).toEqual([
+      { method: 'turn/interrupt', params: { threadId: 'th-1', turnId: 'turn-1' } },
+    ]);
   });
 
   it('進行中のターンが無ければ何も送らず、注記も残さない', async () => {
