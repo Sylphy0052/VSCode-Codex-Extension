@@ -1,3 +1,5 @@
+import { MERGE_ITEMS_SOURCE } from './stateDelta';
+
 /**
  * レビューボタンの動作。
  *
@@ -37,6 +39,11 @@ export function chatScript(
   let menuMode = '';
   /** 最後に描いた項目。画像が遅れて届いたときに描き直すため保つ。 */
   let lastItems = undefined;
+  /**
+   * 拡張機能から差し分で届く会話項目を積む先（issue #262）。
+   * 全項目を毎回受け取ると、会話が長いほど1回の受信が重くなる。
+   */
+  let mergedItems = [];
   /** 承認方法をShift+Tabで回すときの並び（issue #13。制限が強い側から緩い側へ）。 */
   const APPROVAL_CYCLE = ${JSON.stringify(approvalCycle)};
   /** いま効いている承認方法。循環の起点にする。 */
@@ -1751,10 +1758,30 @@ export function chatScript(
     }
   });
 
+  /**
+   * 差し分で届いた会話項目を積み直す（issue #262）。実装は stateDelta.ts に置き、
+   * ここへ差し込む（両側へ書くと片方だけ直したときに黙ってずれる）。
+   */
+  ${MERGE_ITEMS_SOURCE}
+
   window.addEventListener('message', (event) => {
     const data = event.data;
     if (!data) return;
-    if (data.type === 'state') apply(data.state);
+    if (data.type === 'state') {
+      // 会話項目を分けて送ってこない画面（Claude Code側）は state.items をそのまま使う
+      if (!data.items) {
+        apply(data.state);
+        return;
+      }
+      const items = mergeItems(mergedItems, data.items);
+      if (items === undefined) {
+        // 取りこぼしか並びのずれ。古い会話を出したままにせず、全量を送り直してもらう
+        vscode.postMessage({ type: 'stateFull' });
+        return;
+      }
+      mergedItems = items;
+      apply(Object.assign({}, data.state, { items: items }));
+    }
     if (data.type === 'commands') {
       commands = data.commands || [];
       // コマンド一覧に無ければボタンを出さない（押しても何も起きない状態を作らない）

@@ -114,16 +114,43 @@ function threadStartResult(threadId: string): unknown {
   return { thread: { id: threadId } };
 }
 
+type StateItem = { id: string; kind: string; text: string; detail: string };
+
 type StateMessage = {
   type: string;
-  state: { approvals: unknown[]; items: Array<{ kind: string; text: string; detail: string }> };
+  state: { approvals: unknown[]; items: StateItem[] };
+  /** 会話項目は差し分で届く（issue #262）。 */
+  items?: { mode: string; items: StateItem[]; total: number };
 };
 
+/**
+ * 送られた状態を、webviewが見るのと同じ形（その時点の全項目つき）へ戻す。
+ *
+ * 会話項目は差し分で送るため（issue #262）、`state.items` は空で届く。webview側の
+ * `mergeItems` と同じ積み方をここで再現し、既存のテストが全項目を見られるようにする。
+ */
 function stateMessagesOf(panel: { webview: { sent: unknown[] } } | undefined): StateMessage[] {
-  return (panel?.webview.sent ?? []).filter(
-    (m): m is StateMessage =>
-      typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'state',
-  );
+  const merged: StateItem[] = [];
+  return (panel?.webview.sent ?? [])
+    .filter(
+      (m): m is StateMessage =>
+        typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'state',
+    )
+    .map((m) => {
+      const delta = m.items;
+      if (delta === undefined) {
+        return m;
+      }
+      if (delta.mode === 'full') {
+        merged.length = 0;
+      }
+      for (const item of delta.items) {
+        const at = merged.findIndex((x) => x.id === item.id);
+        if (at === -1) merged.push(item);
+        else merged[at] = item;
+      }
+      return { ...m, state: { ...m.state, items: [...merged] } };
+    });
 }
 
 describe('ChatViewManager', () => {
@@ -227,6 +254,78 @@ describe('ChatViewManager', () => {
       const messages = stateMessagesOf(panel);
       const last = messages[messages.length - 1];
       expect(last?.state.items.some((i) => i.text === '着手します')).toBe(true);
+    });
+
+    it('2回目からは変わった項目だけを送る（issue #262）', async () => {
+      const { manager, connection } = createManager();
+      const started = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      (await started).open({ preserveFocus: true });
+      const panel = __mock.createdPanels[__mock.createdPanels.length - 1];
+      panel?.webview.simulateMessage({ type: 'ready' });
+      await flushStatePosts();
+
+      connection.notify('item/started', {
+        threadId: 'thread-A',
+        turnId: 'turn-1',
+        item: { id: 'i1', type: 'agentMessage', text: '1件目' },
+      });
+      await flushStatePosts();
+      connection.notify('item/started', {
+        threadId: 'thread-A',
+        turnId: 'turn-1',
+        item: { id: 'i2', type: 'agentMessage', text: '2件目' },
+      });
+      await flushStatePosts();
+
+      const raw = (panel?.webview.sent ?? []).filter(
+        (m): m is StateMessage =>
+          typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'state',
+      );
+      const last = raw[raw.length - 1];
+      // 増えた1件だけが載り、丸ごとの直列化にはならない
+      expect(last?.items?.mode).toBe('delta');
+      expect(last?.items?.items.map((i) => i.id)).toEqual(['i2']);
+      expect(last?.items?.total).toBe(2);
+      expect(last?.state.items).toEqual([]);
+      // それでも積み直せば全項目が揃う
+      const merged = stateMessagesOf(panel);
+      expect(merged[merged.length - 1]?.state.items.map((i) => i.id)).toEqual(['i1', 'i2']);
+    });
+
+    it('webviewが取りこぼしに気付いたら全量を送り直す（issue #262）', async () => {
+      const { manager, connection } = createManager();
+      const started = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      (await started).open({ preserveFocus: true });
+      const panel = __mock.createdPanels[__mock.createdPanels.length - 1];
+      panel?.webview.simulateMessage({ type: 'ready' });
+      connection.notify('item/started', {
+        threadId: 'thread-A',
+        turnId: 'turn-1',
+        item: { id: 'i1', type: 'agentMessage', text: '1件目' },
+      });
+      await flushStatePosts();
+
+      await manager.simulateWebviewMessage('thread-A', { type: 'stateFull' });
+
+      const raw = (panel?.webview.sent ?? []).filter(
+        (m): m is StateMessage =>
+          typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'state',
+      );
+      const last = raw[raw.length - 1];
+      expect(last?.items?.mode).toBe('full');
+      expect(last?.items?.items.map((i) => i.id)).toEqual(['i1']);
     });
 
     it('threadIdが解決済みなら、並列に開始した別タスクではなく正しいタスクへ届く', async () => {
