@@ -12,11 +12,11 @@ import {
   addApproval,
   addPrompt,
   appendNotice,
-  interruptFailedNoticeId,
   applyEvent,
   deriveReviewing,
   enqueue,
   initialChatState,
+  interruptFailedNoticeId,
   markInterruptedCommands,
   normalizeItem,
   removeApproval,
@@ -93,11 +93,13 @@ export class ChatSession {
   /** 採番用。画面へ出す一言のidに使う。 */
   private noticeCount = 0;
   /**
-   * `turn/interrupt` の応答を待っている最中か（issue #261）。
+   * いま `turn/interrupt` の応答を待っているターン（issue #261）。
    *
-   * `Esc` の連打で同じターンへ2回目の要求を送らないための番人。2回目は応答が返らない。
+   * `Esc` の連打で**同じターンへ**2回目の要求を送らないための番人。2回目は応答が返らない。
+   * ターンごとに持つのは、応答を待つ間に別のターンが始まったとき、そちらの中断まで
+   * 握り潰さないため。
    */
-  private interrupting = false;
+  private interruptingTurnId: string | undefined;
   /**
    * 自動レビューが止めた操作。`reviewId` から、届いた完了通知そのものを引けるようにする。
    *
@@ -513,10 +515,10 @@ export class ChatSession {
     // 同じターンへ2回目の`turn/interrupt`を送ると、app-serverは応答を返さない（実測。
     // design.md §9.6）。要求は120秒のタイムアウトまで宙に浮くため、応答を待っている間の
     // 呼び出しは要求そのものを送らずに返す（issue #261）
-    if (this.interrupting) {
+    if (this.interruptingTurnId === turnId) {
       return;
     }
-    this.interrupting = true;
+    this.interruptingTurnId = turnId;
     try {
       await this.connection.request('turn/interrupt', { threadId, turnId });
     } catch (e) {
@@ -534,7 +536,10 @@ export class ChatSession {
       );
       throw e;
     } finally {
-      this.interrupting = false;
+      // 別のターンの中断が始まっていたら、そちらの番人を消さない
+      if (this.interruptingTurnId === turnId) {
+        this.interruptingTurnId = undefined;
+      }
     }
     // 中断はターンを終わらせるだけで、実行中のコマンドの子プロセスはCLI側に残る（issue #246）。
     // 画面がそれを伝えないと「中断が効かない」としか見えないため、印と注記を残す。

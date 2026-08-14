@@ -171,6 +171,23 @@ describe('ChatSession.interrupt（issue #246、design.md §9.6）', () => {
     ]);
   });
 
+  it('応答を待つ間に別のターンが始まれば、そちらの中断は送る（issue #261）', async () => {
+    // 番人はターンごとに持つ。1回目の応答待ちを理由に、別のターンの中断まで
+    // 握り潰してしまうと中断そのものが効かなくなる
+    const { session, sent, releaseInterrupt } = await runningCommand({ gateInterrupt: true });
+
+    const first = session.interrupt();
+    session.applyNotification('turn/started', { threadId: 'th-1', turn: { id: 'turn-2' } });
+    const second = session.interrupt();
+    releaseInterrupt();
+    await Promise.all([first, second]);
+
+    expect(sent).toEqual([
+      { method: 'turn/interrupt', params: { threadId: 'th-1', turnId: 'turn-1' } },
+      { method: 'turn/interrupt', params: { threadId: 'th-1', turnId: 'turn-2' } },
+    ]);
+  });
+
   it('進行中のターンが無ければ何も送らず、注記も残さない', async () => {
     const { session, sent } = fakeSession();
     await session.start('/w', emptyConfig);
