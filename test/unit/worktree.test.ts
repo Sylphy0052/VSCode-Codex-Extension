@@ -46,11 +46,17 @@ class FakeGit implements GitCommandRunner {
   }
 }
 
-/** 実パス解決と`.gitignore`読み取りをMapで差し替えるフェイク。 */
+/**
+ * 実パス解決と`.gitignore`読み取りをMapで差し替えるフェイク。
+ * `pathExists`は「登録が無ければ実在する」を既定にする（`missingPaths`へ登録した
+ * パスだけが「無い」扱いになる）。既存のテストの大半は撤去済みディレクトリのケースを
+ * 想定していないため、この既定にしておくと影響が最小で済む。
+ */
 class FakeFs implements WorktreeFileSystemPort {
   realpaths = new Map<string, string>();
   textFiles = new Map<string, string>();
   symlinks = new Set<string>();
+  missingPaths = new Set<string>();
 
   async realpath(target: string): Promise<string | undefined> {
     return this.realpaths.get(target);
@@ -62,6 +68,10 @@ class FakeFs implements WorktreeFileSystemPort {
 
   async isSymbolicLink(target: string): Promise<boolean> {
     return this.symlinks.has(target);
+  }
+
+  async pathExists(target: string): Promise<boolean> {
+    return !this.missingPaths.has(target);
   }
 }
 
@@ -429,7 +439,7 @@ describe('WorktreeCreationQueue（直列化）', () => {
         git,
         fs,
       ),
-      queue.remove('/repo', RUN_ID, 'T3', undefined, git),
+      queue.remove('/repo', RUN_ID, 'T3', undefined, git, fs),
     ]);
 
     expect(results[0]).toMatchObject({ ok: true });
@@ -441,10 +451,11 @@ describe('WorktreeCreationQueue.remove', () => {
   it('未コミットの変更があるworktreeは撤去されず警告になる', async () => {
     const git = new FakeGit();
     git.respond(['status', '--porcelain'], { code: 0, stdout: ' M file.txt\n', stderr: '' });
+    const fs = new FakeFs();
     const queue = new WorktreeCreationQueue();
 
     const cwd = path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2');
-    const result = await queue.remove('/repo', RUN_ID, 'T2', undefined, git);
+    const result = await queue.remove('/repo', RUN_ID, 'T2', undefined, git, fs);
 
     expect(result).toEqual({
       ok: false,
@@ -458,10 +469,11 @@ describe('WorktreeCreationQueue.remove', () => {
     const git = new FakeGit();
     git.respond(['status', '--porcelain'], { code: 0, stdout: '', stderr: '' });
     git.respond(['worktree', 'remove'], { code: 0, stdout: '', stderr: '' });
+    const fs = new FakeFs();
     const queue = new WorktreeCreationQueue();
 
     const cwd = path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2');
-    const result = await queue.remove('/repo', RUN_ID, 'T2', undefined, git);
+    const result = await queue.remove('/repo', RUN_ID, 'T2', undefined, git, fs);
 
     expect(result).toEqual({ ok: true });
     expect(git.calls).toEqual([
@@ -470,16 +482,17 @@ describe('WorktreeCreationQueue.remove', () => {
     ]);
   });
 
-  it('git statusの取得自体が失敗したらgitErrorを返す', async () => {
+  it('git statusの取得自体が失敗したらgitErrorを返す（本物のgitエラーは従来どおり失敗にする）', async () => {
     const git = new FakeGit();
     git.respond(['status', '--porcelain'], {
       code: 128,
       stdout: '',
       stderr: 'fatal: not a git repository',
     });
+    const fs = new FakeFs();
     const queue = new WorktreeCreationQueue();
 
-    const result = await queue.remove('/repo', RUN_ID, 'T2', undefined, git);
+    const result = await queue.remove('/repo', RUN_ID, 'T2', undefined, git, fs);
     expect(result).toEqual({
       ok: false,
       reason: 'gitError',
@@ -489,9 +502,10 @@ describe('WorktreeCreationQueue.remove', () => {
 
   it('不正なrunId/taskIdはinvalidIdentifierを返し、gitを一切呼ばない（high2修正）', async () => {
     const git = new FakeGit();
+    const fs = new FakeFs();
     const queue = new WorktreeCreationQueue();
 
-    const result = await queue.remove('/repo', 'not-a-uuid', 'T2', undefined, git);
+    const result = await queue.remove('/repo', 'not-a-uuid', 'T2', undefined, git, fs);
     expect(result).toMatchObject({ ok: false, reason: 'invalidIdentifier' });
     expect(git.calls).toEqual([]);
   });
@@ -500,10 +514,11 @@ describe('WorktreeCreationQueue.remove', () => {
     const git = new FakeGit();
     git.respond(['status', '--porcelain'], { code: 0, stdout: '', stderr: '' });
     git.respond(['worktree', 'remove'], { code: 0, stdout: '', stderr: '' });
+    const fs = new FakeFs();
     const queue = new WorktreeCreationQueue();
 
     const expectedCwd = path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2-retry1');
-    const result = await queue.remove('/repo', RUN_ID, 'T2', 1, git);
+    const result = await queue.remove('/repo', RUN_ID, 'T2', 1, git, fs);
 
     expect(result).toEqual({ ok: true });
     expect(git.calls[0]).toEqual({ args: ['status', '--porcelain'], cwd: expectedCwd });
@@ -511,6 +526,22 @@ describe('WorktreeCreationQueue.remove', () => {
       args: ['worktree', 'remove', expectedCwd],
       cwd: '/repo',
     });
+  });
+
+  it('cwdが既に存在しない（撤去済み）ならgitを呼ばずに成功として扱う（Issue #252修正）', async () => {
+    // 既定のcleanup: after-mergeで自動撤去済みのworktreeへワークフローViewの
+    // 「worktreeを撤去」がもう一度触ったケース。cwd不在でspawnがENOENTを返す前に
+    // 存在確認で弾き、gitを一切呼ばない
+    const git = new FakeGit();
+    const fs = new FakeFs();
+    const cwd = path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2');
+    fs.missingPaths.add(cwd);
+    const queue = new WorktreeCreationQueue();
+
+    const result = await queue.remove('/repo', RUN_ID, 'T2', undefined, git, fs);
+
+    expect(result).toEqual({ ok: true });
+    expect(git.calls).toEqual([]);
   });
 });
 
@@ -829,6 +860,7 @@ describe('実gitでの統合テスト', () => {
       'Dirty',
       undefined,
       nodeGitCommandRunner,
+      nodeWorktreeFileSystem,
     );
     expect(dirtyResult).toMatchObject({ ok: false, reason: 'uncommittedChanges' });
     await expect(stat(dirty.cwd)).resolves.toBeDefined();
@@ -839,9 +871,54 @@ describe('実gitでの統合テスト', () => {
       'Clean',
       undefined,
       nodeGitCommandRunner,
+      nodeWorktreeFileSystem,
     );
     expect(cleanResult).toEqual({ ok: true });
     await expect(stat(clean.cwd)).rejects.toThrow();
+  });
+
+  it('撤去済み（既にディレクトリが無い）worktreeへもう一度removeしても成功のまま（実環境でのENOENT再現。Issue #252）', async () => {
+    // 修正前は、既に撤去済みのcwdへ`git status --porcelain`を投げると`spawn git ENOENT`
+    // （cwd不在によるもので「gitが無い」わけではない）になり、gitErrorとして失敗していた
+    const head = await resolveHeadCommit(repoDir, nodeGitCommandRunner);
+    const queue = new WorktreeCreationQueue();
+
+    const created = await queue.create(
+      {
+        repoRoot: repoDir,
+        runId: RUN_ID,
+        taskId: 'AlreadyGone',
+        headCommit: head as string,
+        retry: undefined,
+      },
+      nodeGitCommandRunner,
+      nodeWorktreeFileSystem,
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const first = await queue.remove(
+      repoDir,
+      RUN_ID,
+      'AlreadyGone',
+      undefined,
+      nodeGitCommandRunner,
+      nodeWorktreeFileSystem,
+    );
+    expect(first).toEqual({ ok: true });
+    await expect(stat(created.cwd)).rejects.toThrow();
+
+    // ここでディレクトリは既に無い。ワークフローViewの「worktreeを撤去」を
+    // もう一度押した状況を再現する
+    const second = await queue.remove(
+      repoDir,
+      RUN_ID,
+      'AlreadyGone',
+      undefined,
+      nodeGitCommandRunner,
+      nodeWorktreeFileSystem,
+    );
+    expect(second).toEqual({ ok: true });
   });
 
   it('シェルメタ文字を含む引数がシェル解釈されない（execFileでargv配列を渡すため）', async () => {

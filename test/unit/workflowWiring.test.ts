@@ -103,6 +103,7 @@ const identityFs: WorktreeFileSystemPort = {
   realpath: async (target) => target,
   readTextFile: async () => '.agents/worktrees/\n',
   isSymbolicLink: async () => false,
+  pathExists: async () => true,
 };
 
 function filePort(content: string): WorkflowFilePort {
