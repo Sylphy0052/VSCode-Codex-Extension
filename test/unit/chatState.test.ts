@@ -867,6 +867,15 @@ describe('markInterruptedCommands', () => {
     expect(delta.items.find((i) => i.id === 'cmd_1')?.interruptedWhileRunning).toBe(true);
   });
 
+  it('statusの読めない更新では印を残す（消すと中断が効かないように見える）', () => {
+    const interrupted = markInterruptedCommands(withCommand('inProgress'));
+    const updated = applyEvent(interrupted, 'item/updated', {
+      turnId: TURN,
+      item: { id: 'cmd_1', type: 'commandExecution', command: 'sleep 60' },
+    });
+    expect(updated.items.find((i) => i.id === 'cmd_1')?.interruptedWhileRunning).toBe(true);
+  });
+
   it('コマンドが本当に終わったら印を落とす', () => {
     const interrupted = markInterruptedCommands(withCommand('inProgress'));
     const completed = applyEvent(interrupted, 'item/completed', {
@@ -874,6 +883,21 @@ describe('markInterruptedCommands', () => {
       item: { id: 'cmd_1', type: 'commandExecution', command: 'sleep 60', status: 'completed' },
     });
     expect(completed.items.find((i) => i.id === 'cmd_1')?.interruptedWhileRunning).toBeUndefined();
+  });
+
+  it('終わったstatusがitem/updatedで届いたときも印を落とす', () => {
+    const interrupted = markInterruptedCommands(withCommand('inProgress'));
+    const updated = applyEvent(interrupted, 'item/updated', {
+      turnId: TURN,
+      item: {
+        id: 'cmd_1',
+        type: 'commandExecution',
+        command: 'sleep 60',
+        status: 'completed',
+        exitCode: 0,
+      },
+    });
+    expect(updated.items.find((i) => i.id === 'cmd_1')?.interruptedWhileRunning).toBeUndefined();
   });
 });
 

@@ -969,10 +969,9 @@ function upsertItem(items: readonly ChatItem[], item: ChatItem): ChatItem[] {
     turnId: item.turnId ?? existing?.turnId,
     // 差分は patchUpdated が先に届くことがある。空で上書きしない
     diffs: item.diffs.length === 0 && existing !== undefined ? existing.diffs : item.diffs,
-    // 中断の印は通知には乗らないので、こちらで引き継ぐ（issue #246）。ただし実行中で
-    // なくなった（completedが届いた）ら落とす。本当に終わったものへ「継続中の可能性」は残さない
+    // 中断の印は通知には乗らないので、こちらで引き継ぐ（issue #246）
     interruptedWhileRunning:
-      existing?.interruptedWhileRunning === true && isRunningCommand(item) ? true : undefined,
+      existing?.interruptedWhileRunning === true && keepsInterruptedMark(item) ? true : undefined,
   };
   return next;
 }
@@ -1432,6 +1431,20 @@ function isRunningCommand(item: ChatItem): boolean {
   return (
     item.kind === 'commandExecution' && (item.status === 'inProgress' || item.status === 'running')
   );
+}
+
+/**
+ * 中断の印（`interruptedWhileRunning`）を後続の通知でも残すか（issue #246）。
+ *
+ * 判断の材料は通知の種類ではなく、届いた項目の `status`。終わったと読めたときだけ落とす。
+ * `status` が読めない更新で落とすと「中断が効かない」ようにしか見えない元の問題へ戻るため、
+ * 分からないうちは残す側に倒す。
+ */
+function keepsInterruptedMark(item: ChatItem): boolean {
+  if (item.kind !== 'commandExecution') {
+    return false;
+  }
+  return item.status === undefined || item.status === '' || isRunningCommand(item);
 }
 
 /**
