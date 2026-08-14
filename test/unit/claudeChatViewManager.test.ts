@@ -1325,3 +1325,35 @@ describe('ClaudeChatViewManagerの自動圧縮窓サイズ設定（issue #201）
     expect(__mock.messages.errors).toHaveLength(1);
   });
 });
+
+describe('ワークフローの導線（issue #250）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    __mock.setConfig('claude', {});
+  });
+
+  it('ワークフローボタンを押すとagent.workflows.menuを実行する', async () => {
+    stubStart();
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const panel = __mock.lastCreatedPanel();
+
+    panel?.webview.simulateMessage({ type: 'workflowMenu' });
+    await flush();
+
+    expect(__mock.executedCommands).toContain('agent.workflows.menu');
+  });
+
+  it('セッションが起動していなくてもエラーにしない（会話と独立した操作のため）', async () => {
+    stubStart();
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const panel = __mock.lastCreatedPanel();
+
+    panel?.webview.simulateMessage({ type: 'workflowMenu' });
+    await flush();
+
+    expect(__mock.messages.errors).toHaveLength(0);
+  });
+});

@@ -893,4 +893,34 @@ describe('ChatViewManager', () => {
       ).toEqual([{ type: 'text', text: RECAP_INSTRUCTION }]);
     });
   });
+
+  describe('ワークフローの導線（issue #250）', () => {
+    it('ワークフローボタンを押すとagent.workflows.menuを実行する', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openNew('/workspace/root');
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p;
+
+      const panel = __mock.lastCreatedPanel();
+      panel?.webview.simulateMessage({ type: 'workflowMenu' });
+      await tick();
+
+      expect(__mock.executedCommands).toContain('agent.workflows.menu');
+    });
+
+    it('会話へは何も送らない（ターンを消費しない）', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openNew('/workspace/root');
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p;
+
+      const panel = __mock.lastCreatedPanel();
+      panel?.webview.simulateMessage({ type: 'workflowMenu' });
+      await tick();
+
+      expect(connection.requests.find((r) => r.method === 'turn/start')).toBeUndefined();
+    });
+  });
 });

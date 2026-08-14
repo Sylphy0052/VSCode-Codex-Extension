@@ -42,6 +42,21 @@ describe('chatScript', () => {
     expect(source).toContain("type: 'rewind'");
   });
 
+  it('ワークフローのボタンがメッセージを送る（issue #250）', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+
+    expect(source).toContain("el('workflowMenu')");
+    expect(source).toContain("type: 'workflowMenu'");
+  });
+
+  it('ワークフローのボタンは応答中も無効化しない（issue #250）', () => {
+    // 送信中に落とす要素は state.busy を見て disabled を立てている。
+    // ワークフローは会話と独立した操作なので、その一覧に入っていないことを確かめる。
+    const source = chatScript('Codex', { mode: 'quickPick' });
+
+    expect(source).not.toContain("el('workflowMenu').disabled");
+  });
+
   it('showInputModeHintsを省略すると !/# の案内を出さない（既定はfalse、issue #5/#6）', () => {
     const source = chatScript('Codex', { mode: 'quickPick' });
     expect(source).toContain('SHOW_INPUT_MODE_HINTS = false');

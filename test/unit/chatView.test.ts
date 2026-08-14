@@ -37,6 +37,7 @@ const NON_SEND_BUTTON_LABELS: Record<string, string> = {
   fastToggle: '高速',
   review: 'レビュー',
   exportTranscript: 'エクスポート',
+  workflowMenu: 'ワークフロー',
 };
 
 /** `<button id="...">...</button>` の開始タグ部分だけを取り出す。 */
@@ -170,7 +171,10 @@ function extractRowHtml(html: string, rowId: string): string {
   return match[1];
 }
 
-/** 2段目（アイコン列）に並ぶボタンのid（issue #234の望む構成の並び順どおり）。 */
+/**
+ * 2段目（アイコン列）に並ぶボタンのid（issue #234の望む構成の並び順どおり。
+ * 末尾のワークフローはissue #250で追加）。
+ */
 const ICON_ROW_BUTTON_IDS = [
   'attach',
   'loopToggle',
@@ -181,6 +185,7 @@ const ICON_ROW_BUTTON_IDS = [
   'fastToggle',
   'review',
   'exportTranscript',
+  'workflowMenu',
 ];
 
 describe('チャット下部の3段固定（issue #234）', () => {
@@ -197,7 +202,7 @@ describe('チャット下部の3段固定（issue #234）', () => {
       }
     });
 
-    it('2段目（composerIconRow）は画像/ループ/圧縮/インポート/要約/計画/高速/レビュー/エクスポートの9個を持ち、入力欄・送信・中断は含まない', () => {
+    it('2段目（composerIconRow）は画像/ループ/圧縮/インポート/要約/計画/高速/レビュー/エクスポート/ワークフローの10個を持ち、入力欄・送信・中断は含まない', () => {
       const html = renderShell(fakeWebview() as never, buildOptions());
       const row2 = extractRowHtml(html, 'composerIconRow');
 
