@@ -624,6 +624,10 @@ cwdの解決に差があるのは、Claude Codeの `--resume` がcwdを引数と
 
 CLI側の挙動そのものは拡張機能では変えられない。そのため、中断した時点で実行中だったコマンドの項目に印（`ChatItem.interruptedWhileRunning`）を付け、会話へ「実行中だったコマンドはCLI側で走り続けることがある」旨の注記を1行残す（`markInterruptedCommands`。`ChatSession.interrupt` から呼ぶ）。これが無いと、ユーザーからは「中断が効かない」としか見えない。
 
+印は後続の通知でも消さない。`upsertItem` が引き継ぎ、**終わったと読めたときだけ**落とす（`keepsInterruptedMark`）。判断の材料は通知の種類ではなく届いた項目の `status` で、`status` が読めない更新で落とすと元の問題へ戻るため、分からないうちは残す側に倒している。
+
+**注記のidはターンごとに分ける**（`interruptedCommandsNoticeId`。issue #258）。会話画面は新しい項目を末尾へ足すだけで既存の並びを変えない（`chatScript.ts` の `syncItems`）ため、固定idで上書きすると2回目以降の中断で注記が1回目の位置に取り残される。中断はターンを終わらせるので、ターンごとのidにすれば「1回の中断につき1行」が保たれたまま、そのときの末尾に出る。`ChatSession.interrupt` が `turnId` を落とすのは印を付けた後。
+
 #### 巨大な出力の最中は要求の応答が遅れる（issue #246）
 
 `find / -type f` のような出力の最中に中断すると、`app-serverが応答しません: turn/interrupt`（要求タイムアウトは120秒。`src/appserver/connection.ts` の `REQUEST_TIMEOUT_MS`）に達していた。**原因は拡張機能側**で、`item/commandExecution/outputDelta` 1件ごとに走る2つの処理が重かった（ベンチで実測。デルタ2万件）。

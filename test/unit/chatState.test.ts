@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  INTERRUPTED_COMMANDS_NOTICE_ID,
+  interruptedCommandsNoticeId,
   MAX_OUTPUT_CHARS,
   OUTPUT_SOFT_CAP_CHARS,
   addApproval,
@@ -21,6 +21,7 @@ import {
 } from '../../src/appserver/chatState';
 
 const TURN = '019fd88d-723d-73f2-9100-212a63eb6069';
+const NEXT_TURN = '019fd88d-723d-73f2-9100-212a63eb606a';
 
 const feed = (state: ChatState, events: Array<[string, Record<string, unknown>]>): ChatState =>
   events.reduce((s, [method, params]) => applyEvent(s, method, params), state);
@@ -819,17 +820,21 @@ describe('capOutput', () => {
 });
 
 describe('markInterruptedCommands', () => {
+  // 注記のidは今のターンから作るため（issue #258）、turn/startedを先に流してturnIdを立てる
   const withCommand = (status: string): ChatState =>
-    applyEvent(initialChatState, 'item/started', {
-      turnId: TURN,
-      item: { id: 'cmd_1', type: 'commandExecution', command: 'sleep 60', status },
-    });
+    feed(initialChatState, [
+      ['turn/started', { turn: { id: TURN } }],
+      [
+        'item/started',
+        { turnId: TURN, item: { id: 'cmd_1', type: 'commandExecution', command: 'sleep 60', status } },
+      ],
+    ]);
 
   it('実行中のコマンドへ印を付け、注記を1行残す', () => {
     const state = markInterruptedCommands(withCommand('inProgress'));
     const command = state.items.find((i) => i.id === 'cmd_1');
     expect(command?.interruptedWhileRunning).toBe(true);
-    const notice = state.items.find((i) => i.id === INTERRUPTED_COMMANDS_NOTICE_ID);
+    const notice = state.items.find((i) => i.id === interruptedCommandsNoticeId(TURN));
     expect(notice?.detail).toContain('走り続けることがあります');
   });
 
@@ -843,10 +848,31 @@ describe('markInterruptedCommands', () => {
     expect(markInterruptedCommands(before)).toBe(before);
   });
 
-  it('呼び直しても注記は増えない', () => {
+  it('同じターンで呼び直しても注記は増えない', () => {
     const once = markInterruptedCommands(withCommand('inProgress'));
     const twice = markInterruptedCommands(once);
-    expect(twice.items.filter((i) => i.id === INTERRUPTED_COMMANDS_NOTICE_ID)).toHaveLength(1);
+    expect(twice.items.filter((i) => i.id === interruptedCommandsNoticeId(TURN))).toHaveLength(1);
+  });
+
+  it('別のターンで中断すると、注記はそのときの末尾に増える（issue #258）', () => {
+    const first = markInterruptedCommands(withCommand('inProgress'));
+    // 中断した後、次のターンでまた別のコマンドが走り出したところで中断する
+    const secondTurn = feed(first, [
+      ['turn/started', { turn: { id: NEXT_TURN } }],
+      [
+        'item/started',
+        {
+          turnId: NEXT_TURN,
+          item: { id: 'cmd_2', type: 'commandExecution', command: 'sleep 60', status: 'inProgress' },
+        },
+      ],
+    ]);
+    const second = markInterruptedCommands(secondTurn);
+
+    const notices = second.items.filter((i) => i.id.startsWith('interruptedCommands'));
+    expect(notices).toHaveLength(2);
+    // 会話画面は新しい項目を末尾へ足すだけなので、末尾に来ていることが位置の担保になる
+    expect(second.items[second.items.length - 1]?.id).toBe(interruptedCommandsNoticeId(NEXT_TURN));
   });
 
   it('中断後に届く item/updated では印が消えない', () => {

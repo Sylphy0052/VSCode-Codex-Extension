@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ChatSession } from '../../src/appserver/chatSession';
-import { INTERRUPTED_COMMANDS_NOTICE_ID } from '../../src/appserver/chatState';
+import { interruptedCommandsNoticeId } from '../../src/appserver/chatState';
 import type { AppServerConnection } from '../../src/appserver/connection';
 import { emptyConfig } from '../../src/codex/types';
 import type { Logger } from '../../src/log';
@@ -62,7 +62,7 @@ describe('ChatSession.interrupt（issue #246、design.md §9.6）', () => {
     expect(state.busy).toBe(false);
     expect(state.turnId).toBeUndefined();
     expect(state.items.find((i) => i.id === 'cmd_1')?.interruptedWhileRunning).toBe(true);
-    expect(state.items.find((i) => i.id === INTERRUPTED_COMMANDS_NOTICE_ID)?.detail).toContain(
+    expect(state.items.find((i) => i.id === interruptedCommandsNoticeId('turn-1'))?.detail).toContain(
       '走り続けることがあります',
     );
   });
@@ -95,8 +95,8 @@ describe('ChatSession.interrupt（issue #246、design.md §9.6）', () => {
     await session.interrupt();
 
     expect(sent).toEqual([]);
-    expect(session.getState().items.some((i) => i.id === INTERRUPTED_COMMANDS_NOTICE_ID)).toBe(
-      false,
-    );
+    expect(
+      session.getState().items.some((i) => i.id.startsWith('interruptedCommands')),
+    ).toBe(false);
   });
 });
