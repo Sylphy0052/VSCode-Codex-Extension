@@ -1276,9 +1276,16 @@ export function applyEvent(
      *
      * app-serverのプロトコルには「hookを信頼してください」という要求そのものが無い
      * （`ServerRequest` の10種、`ServerNotification` の全種を実測・スキーマ双方で確認したが
-     * hook信頼専用のものは存在しない）。代わりに、信頼していないhookが動くタイミングで
-     * `status: 'blocked'`（`HookRunStatus` の1値）を伴う `hook/completed` が届く。これが
-     * 「信頼が必要」と気づける唯一の実観測可能な合図なので、会話へ一言残す。
+     * hook信頼専用のものは存在しない）。`HookRunStatus` には `blocked` という値があり、
+     * 信頼していないhookが動くタイミングでそれを伴う `hook/completed` が届くことを期待していた。
+     *
+     * ただし Codex CLI 0.147.0 の実機では、未信頼のhookに対して `hook/started` も
+     * `hook/completed` も届かない（issue #249で実測。hookのコマンド自体も実行されない）。
+     * つまりこの分岐は現状のCLIでは発火しない。将来CLI側がブロックを通知するように
+     * なったときに効くよう、ハンドラはそのまま残してある。
+     *
+     * 未信頼のhookに気づく手立ては設定パネルのhooks一覧の「未信頼」バッジが担う
+     * （会話画面から気づかせる案は issue #249 で「取らない」と判断済み。design.md §14.15）。
      */
     case 'hook/completed': {
       const run = rec(params['run']);
