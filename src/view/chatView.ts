@@ -42,6 +42,7 @@ import type {
   TaskSessionHost,
   TaskSessionInput,
 } from '../orchestrator/taskSession';
+import { buildItemsDelta } from './stateDelta';
 import { CODEX_APPROVAL_CYCLE } from '../provider/approvalCycle';
 import { AttachmentBox, dropRejectionReason } from '../provider/attachments';
 import { buildImageReply } from '../provider/imageRefs';
@@ -164,6 +165,14 @@ interface ChatPanel {
   postTimer?: ReturnType<typeof setTimeout> | undefined;
   /** 状態送信の間引き（issue #246）。最後に実際へ送った時刻。 */
   lastPostAt?: number | undefined;
+  /**
+   * 前回webviewへ送った会話項目（issue #262）。次の送信で差し分を選ぶために持つ。
+   *
+   * `undefined` は「webviewが何を持っているか判らない」状態で、次の送信は全量になる。
+   * webviewを作り直したとき（`ready`）と、webviewが取りこぼしに気付いたとき
+   * （`stateFull`）に戻す。
+   */
+  sentItems?: readonly ChatItem[] | undefined;
 }
 
 /** 拡張機能から実行したセッションを日報バッファへ記録するための通知。 */
@@ -1282,7 +1291,16 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
         this.refreshSettings();
         return;
       }
+      if (type === 'stateFull') {
+        // webview側が会話の取りこぼしに気付いたときの作り直し要求（issue #262）。
+        // 間引きに巻き込むと戻りが遅れるため、その場で送る
+        entry.sentItems = undefined;
+        this.flushState(entry);
+        return;
+      }
       if (type === 'ready') {
+        // webviewを作り直した直後は会話が空。差し分ではなく全量から送り直す（issue #262）
+        entry.sentItems = undefined;
         this.refreshSettings();
         await this.postCommands(entry);
       }
@@ -1420,19 +1438,32 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     }, STATE_POST_INTERVAL_MS - since);
   }
 
+  /**
+   * 会話項目は差し分だけを `items` へ載せ、`state.items` は空で送る（issue #262）。
+   *
+   * webviewへの送信は構造化クローンを通るため、変わったのが末尾の1項目だけでも全項目が
+   * 直列化される。会話が長いほど1回の送信が重くなり、`STATE_POST_INTERVAL_MS`（50ms）の
+   * 間引きの枠が埋まってしまう（実測はdesign.md §9.6。項目数に比例して増える）。
+   * webview側は受け取った差し分を積み直して描画する（`stateDelta.ts` の `mergeItems`）。
+   */
   private flushState(entry: ChatPanel): void {
     if (entry.disposed || entry.panel === undefined) {
       return;
     }
     entry.lastPostAt = Date.now();
+    const state = entry.session.getState();
+    const items = buildItemsDelta(entry.sentItems, state.items);
+    entry.sentItems = state.items;
     void entry.panel.webview.postMessage({
       type: 'state',
       state: {
-        ...entry.session.getState(),
+        ...state,
+        items: [],
         settings: this.settings.snapshot(),
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),
       },
+      items,
     });
   }
 
