@@ -621,7 +621,6 @@ VSCodeが読むPATHはシェルの対話設定（`.bashrc` 等）を経ないこ
 | Web検索結果の表示（タイトル・URL、クリックで外部ブラウザ）                                                                    | 実装完了。CodexとClaude Codeともに実際にWeb検索を伴うターンを回して結果の形を確認済み、画面上は未確認                                                       |
 | pluginの一覧・install/uninstall・有効無効（appはCodexのみ閲覧）                                                               | 実装完了。一覧の取得は実測、Codexのinstall/uninstallと Claude Codeのenable/install/uninstallはスキーマ・`--help`根拠のみで未検証、画面上は未確認            |
 | サブエージェントの状況表示（Codexのみ、切替は不可）                                                                           | 実装完了。項目の形はスキーマ根拠のみ（`generate-json-schema`）。実際にサブエージェントを起動した実データは再現できておらず画面上は未確認                    |
-| ワークフロー（並列実行・worktree隔離・危険操作の検知・View・ゴール→YAML生成）                                                 | 実装完了、実機確認は未実施。統合後のPR/MR作成・ロードマップ生成・再マージ・タスク間メッセージングは未配線（[既知の制約](#既知の制約)）                      |
 | 他エージェントからの設定インポート（Codexのみ）                                                                               | 実装完了。検出・履歴取得は実測（この環境の実際のClaude Code設定で確認）、実行（`externalAgentConfig/import`）は未実行のためスキーマ根拠のみ、画面上は未確認 |
 
 実VSCodeでしか確認できない範囲のチェックリストは [docs/manual-test.md](docs/manual-test.md)、実施記録は [docs/manual-test-2026-08-10.md](docs/manual-test-2026-08-10.md) にある。TUIとの機能差の消化状況は [docs/tui-parity-backlog.md](docs/tui-parity-backlog.md) にまとめてある。

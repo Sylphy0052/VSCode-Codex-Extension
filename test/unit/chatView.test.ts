@@ -225,16 +225,29 @@ describe('チャット下部の3段固定（issue #234）', () => {
       expect(settingsHtml).toContain('id="approvalMode"');
     });
 
-    it('showSettingsがfalseのとき3段目（#settings）自体はhidden属性を持つ（描画はされ続ける）', () => {
+    it('showSettingsがfalseのとき3段目の入れ物（#settingsBox）がhidden属性を持つ（描画はされ続ける）', () => {
       const html = renderShell(fakeWebview() as never, buildOptions({ showSettings: false }));
 
-      expect(html).toMatch(/<div id="settings" hidden>/u);
+      expect(html).toMatch(/<details id="settingsBox" hidden>/u);
     });
 
-    it('showSettingsがtrueのとき3段目（#settings）はhidden属性を持たない', () => {
+    it('showSettingsがtrueのとき3段目の入れ物（#settingsBox）はhidden属性を持たない', () => {
       const html = renderShell(fakeWebview() as never, buildOptions({ showSettings: true }));
 
-      expect(html).toMatch(/<div id="settings">/u);
+      expect(html).toMatch(/<details id="settingsBox">/u);
+    });
+
+    it('3段目はdetailsで折りたためる。open属性を持たないので初期表示は閉じている（issue #266）', () => {
+      const html = renderShell(fakeWebview() as never, buildOptions({ showSettings: true }));
+
+      expect(html).toMatch(/<details id="settingsBox">\n\s*<summary/u);
+      expect(html).not.toMatch(/<details id="settingsBox"[^>]*\sopen/u);
+    });
+
+    it('折りたたみの見出しには現在値を出す枠（#settingsSummary）がある', () => {
+      const html = renderShell(fakeWebview() as never, buildOptions({ showSettings: true }));
+
+      expect(html).toContain('id="settingsSummary"');
     });
   });
 

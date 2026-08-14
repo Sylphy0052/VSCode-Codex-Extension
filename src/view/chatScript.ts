@@ -29,6 +29,14 @@ export function chatScript(
   return `
   const vscode = acquireVsCodeApi();
   const el = (id) => document.getElementById(id);
+  /**
+   * webviewのstateを部分更新する。stateはスレッドIDと設定の開閉を相乗りさせているため、
+   * setStateで丸ごと置き換えると片方が消える。
+   */
+  function patchState(patch) {
+    const prev = vscode.getState() || {};
+    vscode.setState(Object.assign({}, prev, patch));
+  }
   /** この会話で自分が送った発言。古い順。入力欄の履歴に使う。 */
   let sentTexts = [];
   /** 入力欄でスラッシュを打ったときに出す候補。 */
@@ -763,6 +771,8 @@ export function chatScript(
     select.value = current;
   }
 
+  const SETTING_KEYS = ['model', 'reasoningEffort', 'approvalMode', 'sandbox', 'agent'];
+
   function applySettings(s, planning) {
     if (!s) return;
     const nameOf = (slug) => {
@@ -818,13 +828,44 @@ export function chatScript(
           ? selectedAgent.description
           : '次のセッションから効きます';
     }
+
+    updateSettingsSummary();
   }
 
-  for (const key of ['model', 'reasoningEffort', 'approvalMode', 'sandbox', 'agent']) {
+  /**
+   * 折りたたんだ設定の1行サマリ（issue #266）。閉じていても、いまどのモデル・承認で
+   * 動くのかは分かるようにする。既定のままの項目（valueが空）は並べても情報が増えない
+   * ため省き、全部が既定なら「既定のまま」とだけ出す。
+   */
+  function updateSettingsSummary() {
+    const box = el('settingsSummary');
+    if (!box) return;
+    const parts = [];
+    for (const key of SETTING_KEYS) {
+      const select = el(key);
+      if (!select || !select.value) continue;
+      const option = select.options[select.selectedIndex];
+      const text = option ? option.textContent : '';
+      if (text) parts.push(text);
+    }
+    box.textContent = parts.length === 0 ? '既定のまま' : parts.join(' / ');
+  }
+
+  for (const key of SETTING_KEYS) {
     const select = el(key);
     if (!select) continue;
     select.addEventListener('change', (e) => {
       vscode.postMessage({ type: 'config', key, value: e.target.value });
+    });
+  }
+
+  // 設定の開閉はリロードをまたいで覚える（issue #266）。既定は閉じた状態
+  const settingsBox = el('settingsBox');
+  if (settingsBox) {
+    const saved = vscode.getState() || {};
+    settingsBox.open = saved.settingsOpen === true;
+    settingsBox.addEventListener('toggle', () => {
+      patchState({ settingsOpen: settingsBox.open });
     });
   }
 
@@ -934,7 +975,7 @@ export function chatScript(
   function apply(state) {
     // リロード後にVSCodeがパネルを復元したとき、どのスレッドかを思い出すために保持する
     if (state.threadId) {
-      vscode.setState({ threadId: state.threadId });
+      patchState({ threadId: state.threadId });
     }
     sentTexts = state.items
       .filter((i) => i.kind === 'userMessage' && i.text.trim() !== '')
