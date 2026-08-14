@@ -3574,6 +3574,15 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 
 先にマージしてしまうと、baseとheadの間に差分が無くなり作成に失敗する（GitHubは "No commits between" を返す）。4のpushによって、作ったPR/MRはホスト側でマージ済みとして扱われる。
 
+#### 統合ブランチpushの直列化とリトライ（Issue #253）
+
+同じrankの複数タスクは並列に完了しうる（§16.3）。順序2「統合ブランチをpushする」は各タスクのフローが個別に呼ぶため、素朴に実装すると**同じ統合worktreeの同じブランチへ複数タスクが同時にpushする**。リモートはこれを`! [remote rejected] ... (cannot lock ref ...)`で弾き、負けた側のタスクだけPR/MRの作成に進めずタスクPRが欠落する（run自体は`succeeded`で終わるため気づきにくい）。
+
+対策は2つを組み合わせる。
+
+1. **キューでの直列化。** 統合ブランチのpushは、worktreeの作成・撤去・マージと同じ1本のキュー（`IntegrationMergeQueue`。§16.17）へ通す。`IntegrationMergeQueue.pushIntegrationBranch`が`forge.ts`の`pushBranch`をキュー経由で呼び、タスク層のPR/MRフロー（順序2の`pushIntegrationBranch`ステップ）はこのメソッドを経由する。`IntegrationMergeQueue`は`WorktreeCreationQueue`のインスタンスを1つだけ使い回す不変条件（§16.6・§16.17）を保つため、pushもその同じインスタンスへ委譲する。
+2. **競合系の一時的失敗へのリトライ。** 直列化してもリモート側では他クライアント（同じrepoの別クローンや別run）との間で同種の競合が起こりうるため、`pushBranch`自体にもリトライを入れる。stderrが`cannot lock ref` / `fetch first` / `non-fast-forward`などの競合を示すときだけ、バックオフを挟んで最大3回まで再試行する。認証エラーや不正なブランチ名など、再試行しても無駄な失敗（競合パターンに一致しないstderr）は対象外で即座に失敗を返す。待ち時間はテストから注入できる形にしてあり、テストは実時間で待たない。
+
 #### 本文
 
 **タスク層**

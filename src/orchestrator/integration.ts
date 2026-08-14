@@ -2,6 +2,7 @@ import * as path from 'node:path';
 
 import { isPathWithinRoot } from './escalation';
 import { findSymlinkedAncestor, identifierError, runIdError } from './fsGuards';
+import { pushBranch, type PushBranchResult } from './forge';
 import { sanitizeForLog } from './sanitize';
 import { TASK_ID_PATTERN } from './workflow';
 import {
@@ -31,6 +32,14 @@ import {
  * （#93）が担う。このファイルは、その接続で使う純粋寄りの補助（衝突解決プロンプトの
  * 組み立て、衝突解決の完了判定、リロード直後の`merging`タスクの再判定）までを提供する。
  * PR/MRの作成（`forge.ts`）は引き続きこのファイルの範囲に含まない。
+ *
+ * 例外として、統合ブランチのpush（`forge.ts`の`pushBranch`）だけは`IntegrationMergeQueue`が
+ * 直接呼ぶ（`IntegrationMergeQueue.pushIntegrationBranch`。design.md §16.18・Issue #253）。
+ * 並列タスクが同じ統合worktreeの同じブランチへ同時にpushすると、リモートが
+ * `cannot lock ref` で一方を弾く（worktreeの作成・撤去・マージが直列化されているのと
+ * 同じ`index.lock`系の理由）。pushをworktree操作と同じキューへ通して直列化するには、
+ * `forge.ts`の`pushBranch`をこのファイルから呼ぶ必要がある。PR/MRの作成そのもの
+ * （`createPullRequest`等）は引き続き`forge.ts`側の責務のままで、ここへは持ち込まない。
  */
 
 /** 統合先ディレクトリのタスクid相当の固定名。design.md §16.17「`_integration` はタスクidとして予約する」。 */
@@ -463,6 +472,24 @@ export class IntegrationMergeQueue {
   /** 進行中のマージを取り消す（`abortMerge` をキュー経由で呼ぶ）。 */
   abortMerge(integrationWorktreeCwd: string, git: GitCommandRunner): Promise<AbortMergeResult> {
     return this.worktreeQueue.enqueue(() => abortMerge(integrationWorktreeCwd, git));
+  }
+
+  /**
+   * 統合ブランチをoriginへpushする（`forge.ts`の`pushBranch`をキュー経由で呼ぶ。
+   * design.md §16.18・Issue #253）。
+   *
+   * タスクブランチのpushとは異なり、統合ブランチへのpushは同じrun内の複数タスクが
+   * ほぼ同時に行いうる（同じrankのタスクが並列で完了する場合）。作成・撤去・マージと
+   * 同じキューへ通すことで、同じ統合worktree・同じ統合ブランチに対するpushが重ならない
+   * ようにする（直列化してもリモート側で他クライアントとの競合は起こりうるため、
+   * `pushBranch`自体のリトライと併用する）。
+   */
+  pushIntegrationBranch(
+    git: GitCommandRunner,
+    integrationWorktreeCwd: string,
+    integrationBranch: string,
+  ): Promise<PushBranchResult> {
+    return this.worktreeQueue.enqueue(() => pushBranch(git, integrationWorktreeCwd, integrationBranch));
   }
 }
 
