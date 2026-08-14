@@ -70,6 +70,13 @@ export interface ChatItem {
    */
   cwd?: string | undefined;
   /**
+   * 中断した時点で実行中だったコマンド（issue #246）。`commandExecution` のみ。
+   *
+   * `turn/interrupt` はターンを終わらせるが、実行中のコマンドの子プロセスは残る（実測）。
+   * この印が立っている項目は、画面上は止まって見えてもCLI側でまだ動いている可能性がある。
+   */
+  interruptedWhileRunning?: boolean | undefined;
+  /**
    * 実行中のPTYプロセスの識別子。`commandExecution` が `status: inProgress` の間だけ、
    * 実測で分かる場合がある（issue #33）。
    *
@@ -87,6 +94,19 @@ export interface ChatItem {
  * 描画が重くなるため、**末尾を残して先頭を捨てる**。TUIも古い行から流れて消える。
  */
 export const MAX_OUTPUT_CHARS = 200_000;
+
+/**
+ * デルタの追記中に切り詰めを走らせる閾値（issue #246）。
+ *
+ * デルタが届くたびに `capOutput` を通すと、上限に達して以降は毎回 `MAX_OUTPUT_CHARS` 分の
+ * 連結とコピーが走る（実測: `item/commandExecution/outputDelta` 2万件で4.6秒。1件0.23ms）。
+ * `find / -type f` のような巨大な出力の最中はこれがイベントループを埋め、`turn/interrupt`
+ * の応答を読むところまで手が回らなくなる（120秒の要求タイムアウトに達する）。
+ *
+ * そこで上限を超えてもすぐには切らず、この値を超えたときだけ末尾 `MAX_OUTPUT_CHARS` へ
+ * 切る。保持する本文は `MAX_OUTPUT_CHARS` から `OUTPUT_SOFT_CAP_CHARS` の間で揺れる。
+ */
+export const OUTPUT_SOFT_CAP_CHARS = MAX_OUTPUT_CHARS + MAX_OUTPUT_CHARS / 4;
 
 /** 画像生成に失敗したときの理由をそのまま出す上限。base64が紛れても画面を埋めない長さにする。 */
 export const MAX_IMAGE_RESULT_CHARS = 2_000;
@@ -115,6 +135,20 @@ export function imageGenerationText(result: string, savedPath: string): string {
  */
 export function capOutput(text: string): { text: string; truncated: boolean } {
   if (text.length <= MAX_OUTPUT_CHARS) {
+    return { text, truncated: false };
+  }
+  return { text: text.slice(text.length - MAX_OUTPUT_CHARS), truncated: true };
+}
+
+/**
+ * 追記の途中で使う切り詰め（issue #246）。`OUTPUT_SOFT_CAP_CHARS` を超えたときだけ切る。
+ *
+ * 切る回数を減らすためのもので、切ったあとの長さは `capOutput` と同じ `MAX_OUTPUT_CHARS`。
+ * まだ切っていない（上限を少し超えているだけの）間は `truncated` を立てない。実際に
+ * 捨てていないものを「先頭は省略」と出さないため。
+ */
+function capOutputDuringAppend(text: string): { text: string; truncated: boolean } {
+  if (text.length <= OUTPUT_SOFT_CAP_CHARS) {
     return { text, truncated: false };
   }
   return { text: text.slice(text.length - MAX_OUTPUT_CHARS), truncated: true };
@@ -935,6 +969,9 @@ function upsertItem(items: readonly ChatItem[], item: ChatItem): ChatItem[] {
     turnId: item.turnId ?? existing?.turnId,
     // 差分は patchUpdated が先に届くことがある。空で上書きしない
     diffs: item.diffs.length === 0 && existing !== undefined ? existing.diffs : item.diffs,
+    // 中断の印は通知には乗らないので、こちらで引き継ぐ（issue #246）
+    interruptedWhileRunning:
+      existing?.interruptedWhileRunning === true && keepsInterruptedMark(item) ? true : undefined,
   };
   return next;
 }
@@ -952,7 +989,7 @@ function appendDelta(
   kind: string,
 ): ChatItem[] {
   const cap = (text: string): { text: string; truncated: boolean } =>
-    kind === 'commandExecution' ? capOutput(text) : { text, truncated: false };
+    kind === 'commandExecution' ? capOutputDuringAppend(text) : { text, truncated: false };
 
   const index = items.findIndex((i) => i.id === itemId);
   if (index === -1) {
@@ -1384,6 +1421,54 @@ export function appendNotice(state: ChatState, id: string, text: string): ChatSt
       diffs: NO_DIFFS,
     }),
   };
+}
+
+/** 中断の注記のid。呼び直しても行が増えないよう固定にする。 */
+export const INTERRUPTED_COMMANDS_NOTICE_ID = 'interruptedCommands';
+
+/** 中断の対象になりうる（実行中の）コマンドか。CodexはinProgress、Claude Codeはrunning。 */
+function isRunningCommand(item: ChatItem): boolean {
+  return (
+    item.kind === 'commandExecution' && (item.status === 'inProgress' || item.status === 'running')
+  );
+}
+
+/**
+ * 中断の印（`interruptedWhileRunning`）を後続の通知でも残すか（issue #246）。
+ *
+ * 判断の材料は通知の種類ではなく、届いた項目の `status`。終わったと読めたときだけ落とす。
+ * `status` が読めない更新で落とすと「中断が効かない」ようにしか見えない元の問題へ戻るため、
+ * 分からないうちは残す側に倒す。
+ */
+function keepsInterruptedMark(item: ChatItem): boolean {
+  if (item.kind !== 'commandExecution') {
+    return false;
+  }
+  return item.status === undefined || item.status === '' || isRunningCommand(item);
+}
+
+/**
+ * 中断した時点で実行中だったコマンドに印を付け、会話へ1行残す（issue #246）。
+ *
+ * `turn/interrupt` は即座に成功を返してターンを終わらせるが、実行中のコマンドの子プロセスは
+ * 残り、`item/commandExecution/outputDelta` が届き続ける（実測。design.md §9.6）。
+ * 画面がそれを伝えないと「中断が効かない」としか見えないため、対象のカードに印を付けたうえで
+ * 注記を1行出す。実行中のコマンドが無ければ何もしない（余計な行を残さない）。
+ */
+export function markInterruptedCommands(state: ChatState): ChatState {
+  if (!state.items.some(isRunningCommand)) {
+    return state;
+  }
+  const items = state.items.map((item) =>
+    isRunningCommand(item) ? { ...item, interruptedWhileRunning: true } : item,
+  );
+  return appendNotice(
+    { ...state, items },
+    INTERRUPTED_COMMANDS_NOTICE_ID,
+    'ターンを中断しました。実行中だったコマンドはCLI側で走り続けることがあります' +
+      '（中断はターンを終わらせますが、コマンドの子プロセスは残ります）。' +
+      '止めるにはターミナルでそのプロセスを終わらせてください。',
+  );
 }
 
 export function addApproval(state: ChatState, approval: PendingApproval): ChatState {

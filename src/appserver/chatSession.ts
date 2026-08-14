@@ -16,6 +16,7 @@ import {
   deriveReviewing,
   enqueue,
   initialChatState,
+  markInterruptedCommands,
   normalizeItem,
   removeApproval,
   removePrompt,
@@ -503,7 +504,9 @@ export class ChatSession {
       return;
     }
     await this.connection.request('turn/interrupt', { threadId, turnId });
-    this.update({ ...this.state, busy: false, turnId: undefined });
+    // 中断はターンを終わらせるだけで、実行中のコマンドの子プロセスはCLI側に残る（issue #246）。
+    // 画面がそれを伝えないと「中断が効かない」としか見えないため、印と注記を残す
+    this.update(markInterruptedCommands({ ...this.state, busy: false, turnId: undefined }));
   }
 
   applyNotification(method: string, params: Record<string, unknown>): void {

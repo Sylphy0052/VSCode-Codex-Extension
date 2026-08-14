@@ -50,6 +50,9 @@ function headingOf(item: ChatItem, agentLabel: string): string {
   if (item.truncated === true) {
     bits.push('先頭は省略');
   }
+  if (item.interruptedWhileRunning === true) {
+    bits.push('中断後も継続中の可能性');
+  }
   return `## ${bits.join(' ・ ')}`;
 }
 

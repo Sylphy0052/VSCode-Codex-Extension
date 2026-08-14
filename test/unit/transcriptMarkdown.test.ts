@@ -74,6 +74,18 @@ describe('buildTranscriptMarkdown', () => {
     expect(buildTranscriptMarkdown([item], 'Codex')).toContain('先頭は省略');
   });
 
+  it('中断した時点で実行中だったコマンドには注記が付く', () => {
+    const item = makeItem({
+      id: 'c3',
+      kind: 'commandExecution',
+      text: 'line 1',
+      detail: 'sleep 60',
+      status: 'inProgress',
+      interruptedWhileRunning: true,
+    });
+    expect(buildTranscriptMarkdown([item], 'Codex')).toContain('中断後も継続中の可能性');
+  });
+
   it('fileChange は差分をdiffフェンスで出す', () => {
     const item = makeItem({
       id: 'f1',

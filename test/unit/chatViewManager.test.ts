@@ -1,10 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { noDefaults } from '../../src/codex/configToml';
 import type { Logger } from '../../src/log';
 import type { FileSystemPort } from '../../src/session/ports';
 import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMentions';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
-import { ChatViewManager, type ChatActivity } from '../../src/view/chatView';
+import {
+  ChatViewManager,
+  STATE_POST_INTERVAL_MS,
+  type ChatActivity,
+} from '../../src/view/chatView';
 import { RECAP_INSTRUCTION } from '../../src/appserver/chatSession';
 import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
 import { __mock, ViewColumn, window as fakeWindow } from '../mocks/vscode';
@@ -71,6 +75,17 @@ async function tick(times = 5): Promise<void> {
   }
 }
 
+/**
+ * 状態送信の間引き（`STATE_POST_INTERVAL_MS`、issue #246）で予約に回った分を吐き出す。
+ *
+ * 連続して状態が変わると最後の1回はタイマー越しに送られる。マイクロタスクだけでは流れないため、
+ * 送信済みメッセージを検査する前にこれを挟む。実時間で待つとCIの負荷次第で不安定になるので、
+ * 偽のタイマーを間隔ぶん進めて確定させる。
+ */
+async function flushStatePosts(): Promise<void> {
+  await vi.advanceTimersByTimeAsync(STATE_POST_INTERVAL_MS);
+}
+
 function createManager(options?: {
   isTaskManagedThread?: (threadId: string) => boolean;
   onActivity?: (activity: ChatActivity) => void;
@@ -116,6 +131,13 @@ describe('ChatViewManager', () => {
     __mock.reset();
     __mock.setWorkspaceFolder('/workspace/root');
     __mock.setConfig('codex', {});
+    // 状態送信の間引き（issue #246）を確定的に進めるため。`shouldAdvanceTime` を立てて
+    // おくと実時間も進むので、タイマーを明示的に進めない既存のテストはそのまま通る
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe('並列開始時の宛先解決（design.md §16.10の3の回帰）', () => {
@@ -167,6 +189,7 @@ describe('ChatViewManager', () => {
       const panelB = __mock.createdPanels[__mock.createdPanels.length - 1];
       panelA?.webview.simulateMessage({ type: 'ready' });
       panelB?.webview.simulateMessage({ type: 'ready' });
+      await flushStatePosts();
       const lastOf = (panel: typeof panelA): StateMessage | undefined => {
         const messages = stateMessagesOf(panel);
         return messages[messages.length - 1];
@@ -200,6 +223,7 @@ describe('ChatViewManager', () => {
 
       const panel = __mock.createdPanels[__mock.createdPanels.length - 1];
       panel?.webview.simulateMessage({ type: 'ready' });
+      await flushStatePosts();
       const messages = stateMessagesOf(panel);
       const last = messages[messages.length - 1];
       expect(last?.state.items.some((i) => i.text === '着手します')).toBe(true);
@@ -301,6 +325,8 @@ describe('ChatViewManager', () => {
 
       revealedPanel?.webview.simulateMessage({ type: 'ready' });
 
+      await flushStatePosts();
+
       const messages = stateMessagesOf(revealedPanel);
       const last = messages[messages.length - 1];
       expect(last?.state.items.some((i) => i.text === 'これまでの会話')).toBe(true);
@@ -396,6 +422,7 @@ describe('ChatViewManager', () => {
       // askのときは人の決定が無い限り応答しない（承認カードが出た状態のまま）
       expect(resolved).toBe(false);
       const panel = __mock.lastCreatedPanel();
+      await flushStatePosts();
       const messages = stateMessagesOf(panel);
       const last = messages[messages.length - 1];
       expect(last?.state.approvals.length).toBe(1);
@@ -857,6 +884,7 @@ describe('ChatViewManager', () => {
       await tick();
 
       expect(connection.requests.some((r) => r.method === 'turn/start')).toBe(false);
+      await flushStatePosts();
       const messages = stateMessagesOf(panel);
       const last = messages[messages.length - 1];
       expect(

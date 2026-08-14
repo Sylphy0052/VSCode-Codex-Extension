@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  INTERRUPTED_COMMANDS_NOTICE_ID,
   MAX_OUTPUT_CHARS,
+  OUTPUT_SOFT_CAP_CHARS,
   addApproval,
   appendNotice,
   applyEvent,
@@ -10,6 +12,7 @@ import {
   deriveReviewing,
   initialChatState,
   isOpenableSearchUrl,
+  markInterruptedCommands,
   normalizeItem,
   readWebSearchResults,
   removeApproval,
@@ -815,6 +818,89 @@ describe('capOutput', () => {
   });
 });
 
+describe('markInterruptedCommands', () => {
+  const withCommand = (status: string): ChatState =>
+    applyEvent(initialChatState, 'item/started', {
+      turnId: TURN,
+      item: { id: 'cmd_1', type: 'commandExecution', command: 'sleep 60', status },
+    });
+
+  it('実行中のコマンドへ印を付け、注記を1行残す', () => {
+    const state = markInterruptedCommands(withCommand('inProgress'));
+    const command = state.items.find((i) => i.id === 'cmd_1');
+    expect(command?.interruptedWhileRunning).toBe(true);
+    const notice = state.items.find((i) => i.id === INTERRUPTED_COMMANDS_NOTICE_ID);
+    expect(notice?.detail).toContain('走り続けることがあります');
+  });
+
+  it('Claude Code の running も実行中として扱う', () => {
+    const state = markInterruptedCommands(withCommand('running'));
+    expect(state.items.find((i) => i.id === 'cmd_1')?.interruptedWhileRunning).toBe(true);
+  });
+
+  it('実行中のコマンドが無ければ何もしない', () => {
+    const before = withCommand('completed');
+    expect(markInterruptedCommands(before)).toBe(before);
+  });
+
+  it('呼び直しても注記は増えない', () => {
+    const once = markInterruptedCommands(withCommand('inProgress'));
+    const twice = markInterruptedCommands(once);
+    expect(twice.items.filter((i) => i.id === INTERRUPTED_COMMANDS_NOTICE_ID)).toHaveLength(1);
+  });
+
+  it('中断後に届く item/updated では印が消えない', () => {
+    const interrupted = markInterruptedCommands(withCommand('inProgress'));
+    const updated = applyEvent(interrupted, 'item/updated', {
+      turnId: TURN,
+      item: { id: 'cmd_1', type: 'commandExecution', command: 'sleep 60', status: 'inProgress' },
+    });
+    expect(updated.items.find((i) => i.id === 'cmd_1')?.interruptedWhileRunning).toBe(true);
+  });
+
+  it('中断後に届く outputDelta でも印が消えない', () => {
+    const interrupted = markInterruptedCommands(withCommand('inProgress'));
+    const delta = applyEvent(interrupted, 'item/commandExecution/outputDelta', {
+      itemId: 'cmd_1',
+      delta: 'まだ出力が続いている',
+    });
+    expect(delta.items.find((i) => i.id === 'cmd_1')?.interruptedWhileRunning).toBe(true);
+  });
+
+  it('statusの読めない更新では印を残す（消すと中断が効かないように見える）', () => {
+    const interrupted = markInterruptedCommands(withCommand('inProgress'));
+    const updated = applyEvent(interrupted, 'item/updated', {
+      turnId: TURN,
+      item: { id: 'cmd_1', type: 'commandExecution', command: 'sleep 60' },
+    });
+    expect(updated.items.find((i) => i.id === 'cmd_1')?.interruptedWhileRunning).toBe(true);
+  });
+
+  it('コマンドが本当に終わったら印を落とす', () => {
+    const interrupted = markInterruptedCommands(withCommand('inProgress'));
+    const completed = applyEvent(interrupted, 'item/completed', {
+      turnId: TURN,
+      item: { id: 'cmd_1', type: 'commandExecution', command: 'sleep 60', status: 'completed' },
+    });
+    expect(completed.items.find((i) => i.id === 'cmd_1')?.interruptedWhileRunning).toBeUndefined();
+  });
+
+  it('終わったstatusがitem/updatedで届いたときも印を落とす', () => {
+    const interrupted = markInterruptedCommands(withCommand('inProgress'));
+    const updated = applyEvent(interrupted, 'item/updated', {
+      turnId: TURN,
+      item: {
+        id: 'cmd_1',
+        type: 'commandExecution',
+        command: 'sleep 60',
+        status: 'completed',
+        exitCode: 0,
+      },
+    });
+    expect(updated.items.find((i) => i.id === 'cmd_1')?.interruptedWhileRunning).toBeUndefined();
+  });
+});
+
 describe('applyEvent / item/commandExecution/outputDelta', () => {
   const started = (): ChatState =>
     applyEvent(initialChatState, 'item/started', {
@@ -846,12 +932,34 @@ describe('applyEvent / item/commandExecution/outputDelta', () => {
     expect(applyEvent(state, 'item/commandExecution/outputDelta', { itemId: 'cmd_1' })).toBe(state);
   });
 
-  it('上限を超えた出力は末尾を残して切り詰める', () => {
+  it('上限を少し超えただけでは切らない（切る回数を減らす余裕。issue #246）', () => {
     const state = applyEvent(started(), 'item/commandExecution/outputDelta', {
       itemId: 'cmd_1',
       delta: 'z'.repeat(MAX_OUTPUT_CHARS + 100),
     });
+    expect(state.items[0]?.text).toHaveLength(MAX_OUTPUT_CHARS + 100);
+    // まだ何も捨てていないので「先頭は省略」は出さない
+    expect(state.items[0]?.truncated).toBeFalsy();
+  });
+
+  it('余裕も超えたら末尾を残して切り詰める', () => {
+    const state = applyEvent(started(), 'item/commandExecution/outputDelta', {
+      itemId: 'cmd_1',
+      delta: 'z'.repeat(OUTPUT_SOFT_CAP_CHARS + 1),
+    });
     expect(state.items[0]?.text).toHaveLength(MAX_OUTPUT_CHARS);
+    expect(state.items[0]?.truncated).toBe(true);
+  });
+
+  it('一度切ったら、その後の追記で余裕の内に戻っても印は残る', () => {
+    const state = feed(started(), [
+      [
+        'item/commandExecution/outputDelta',
+        { itemId: 'cmd_1', delta: 'z'.repeat(OUTPUT_SOFT_CAP_CHARS + 1) },
+      ],
+      ['item/commandExecution/outputDelta', { itemId: 'cmd_1', delta: 'tail' }],
+    ]);
+    expect(state.items[0]?.text).toHaveLength(MAX_OUTPUT_CHARS + 4);
     expect(state.items[0]?.truncated).toBe(true);
   });
 
