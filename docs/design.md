@@ -2954,6 +2954,7 @@ Viewからの手動の「再実行」だけを受け付ける。手動の再実�
 - タスクの成果は拡張機能が統合ブランチへマージする（§16.17）。合流タスクのpromptでマージを指示する必要はない
 - 実行後の後始末は `cleanup` で決める。既定の `after-merge` はマージが済んだ時点で撤去する（§16.17）。`failed` / `blocked` のものは残す
 - 撤去は `git worktree remove`。ディレクトリを直接消さない。未コミットの変更があるworktreeは撤去せず警告する
+- **撤去済み（ディレクトリが既に無い）worktreeへの撤去要求は成功として扱う。** 既定の `cleanup: after-merge` で自動撤去された後にワークフローViewの「worktreeを撤去」を押すと、全タスクがこの経路に入る。cwdが実在しないままNode.jsの`spawn`（`git status --porcelain`）を呼ぶと`ENOENT`（「gitが無い」ではなく「cwdが無い」ことによるもの）になり、本物のgitエラーと見分けが付かなくなる。`removeWorktree`はgitを呼ぶ前にcwdの実在を`WorktreeFileSystemPort.pathExists`で確かめ、無ければ撤去の目的（ディレクトリが無いこと）は既に達成されているとみなして `{ ok: true }` を返す（Issue #252）
 
 #### 実装上の注意
 

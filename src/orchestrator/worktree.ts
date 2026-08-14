@@ -79,7 +79,11 @@ export const nodeGitCommandRunner: GitCommandRunner = {
   },
 };
 
-/** ファイルシステムへのアクセスの抽象。実パス解決と `.gitignore` の読み取りだけに絞る。 */
+/**
+ * ファイルシステムへのアクセスの抽象。実パス解決・`.gitignore` の読み取り・存在確認だけに絞る。
+ * 削除系のメソッドは持たせない（`removeWorktree` がディレクトリを直接消せない構造にするため。
+ * design.md §16.6）。
+ */
 export interface WorktreeFileSystemPort {
   /** シンボリックリンクを解決した実パス。存在しなければ undefined。 */
   realpath(target: string): Promise<string | undefined>;
@@ -91,6 +95,11 @@ export interface WorktreeFileSystemPort {
    * リンクでないかを確かめるために使う（design.md §16.6、レビュー指摘: critical 4）。
    */
   isSymbolicLink(target: string): Promise<boolean>;
+  /**
+   * `target` が実在するか。`removeWorktree` が撤去済み（＝既にディレクトリが無い）
+   * worktreeを検知するために使う（Issue #252）。存在確認だけで、削除は行わない。
+   */
+  pathExists(target: string): Promise<boolean>;
 }
 
 export const nodeWorktreeFileSystem: WorktreeFileSystemPort = {
@@ -112,6 +121,14 @@ export const nodeWorktreeFileSystem: WorktreeFileSystemPort = {
     try {
       const stat = await fsPromises.lstat(target);
       return stat.isSymbolicLink();
+    } catch {
+      return false;
+    }
+  },
+  async pathExists(target: string): Promise<boolean> {
+    try {
+      await fsPromises.stat(target);
+      return true;
     } catch {
       return false;
     }
@@ -498,9 +515,16 @@ export type RemoveWorktreeResult =
  * パスを取り違えて `.agents/worktrees/` の外にある無関係なworktreeを渡す余地を無くすため。
  *
  * 未コミットの変更があれば撤去せず警告として返す。ディレクトリを直接消すことはしない
- * （`git worktree remove` のみを使う。design.md §16.6）。この関数自体はファイルシステムに
- * 触れないため、構造的にディレクトリの直接削除ができない
- * （`WorktreeFileSystemPort` に削除メソッドを持たせていない）。
+ * （`git worktree remove` のみを使う。design.md §16.6）。`WorktreeFileSystemPort` に
+ * 削除メソッドを持たせていないため、構造的にディレクトリの直接削除ができない
+ * （存在確認の `pathExists` だけが読み取り専用の例外）。
+ *
+ * **cwdの実在を先に確かめる（Issue #252）。** Node.jsの `spawn` はcwdに指定した
+ * ディレクトリが実在しないと `ENOENT` を返す。既定の `cleanup: after-merge` で
+ * 既に自動撤去済みのworktreeへこの関数がもう一度呼ばれると、`git status` の実行が
+ * cwd不在のせいで失敗し、本物のgitエラーと区別が付かないまま `reason: 'gitError'` に
+ * なっていた。撤去の目的（ディレクトリが無いこと）は既に達成されているため、
+ * cwdが無ければgitを呼ばずに成功として返す。
  */
 async function removeWorktree(
   repoRoot: string,
@@ -508,12 +532,17 @@ async function removeWorktree(
   taskId: string,
   retry: number | undefined,
   git: GitCommandRunner,
+  fs: WorktreeFileSystemPort,
 ): Promise<RemoveWorktreeResult> {
   const identifierMessage = identifierError(runId, taskId);
   if (identifierMessage !== undefined) {
     return { ok: false, reason: 'invalidIdentifier', message: identifierMessage };
   }
   const cwd = worktreePath(repoRoot, runId, taskId, retry);
+
+  if (!(await fs.pathExists(cwd))) {
+    return { ok: true };
+  }
 
   const status = await git.run(['status', '--porcelain'], cwd);
   if (status.code !== 0) {
@@ -584,8 +613,9 @@ export class WorktreeCreationQueue {
     taskId: string,
     retry: number | undefined,
     git: GitCommandRunner,
+    fs: WorktreeFileSystemPort,
   ): Promise<RemoveWorktreeResult> {
-    return this.queue.enqueue(() => removeWorktree(repoRoot, runId, taskId, retry, git));
+    return this.queue.enqueue(() => removeWorktree(repoRoot, runId, taskId, retry, git, fs));
   }
 
   /**

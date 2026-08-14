@@ -236,6 +236,11 @@ export class WorkflowViewManager implements vscode.Disposable {
         void vscode.window.showWarningMessage(
           `worktreeの撤去に失敗したタスクがあります: ${result.failed.join(', ')}`,
         );
+      } else if (result.removed.length === 0) {
+        // `cleanup: after-merge`（既定）の正常完了直後は自動撤去済みで対象が1件も無い。
+        // 何も起きず黙るだけだと「押しても反応が無い」ように見えるため、その旨を伝える
+        // （Issue #252）
+        void vscode.window.showInformationMessage('撤去するworktreeはありません（既に撤去済みです）。');
       }
       return;
     }

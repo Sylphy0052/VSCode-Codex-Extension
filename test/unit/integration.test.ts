@@ -49,6 +49,7 @@ class FakeFs implements WorktreeFileSystemPort {
   realpaths = new Map<string, string>();
   textFiles = new Map<string, string>();
   symlinks = new Set<string>();
+  missingPaths = new Set<string>();
 
   async realpath(target: string): Promise<string | undefined> {
     return this.realpaths.get(target);
@@ -60,6 +61,10 @@ class FakeFs implements WorktreeFileSystemPort {
 
   async isSymbolicLink(target: string): Promise<boolean> {
     return this.symlinks.has(target);
+  }
+
+  async pathExists(target: string): Promise<boolean> {
+    return !this.missingPaths.has(target);
   }
 }
 

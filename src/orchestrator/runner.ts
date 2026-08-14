@@ -1267,6 +1267,7 @@ export class WorkflowRunner {
         task.id,
         retry,
         this.deps.git,
+        this.deps.fs,
       );
       if (result.ok) {
         removed.push(task.id);
@@ -1344,6 +1345,7 @@ export class WorkflowRunner {
       INTEGRATION_DIR_NAME,
       undefined,
       this.deps.git,
+      this.deps.fs,
     );
     this.notify(runId);
     if (result.ok) {

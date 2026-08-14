@@ -336,6 +336,7 @@ const identityFs: WorktreeFileSystemPort = {
   realpath: async (target) => target,
   readTextFile: async () => '.agents/worktrees/\n',
   isSymbolicLink: async () => false,
+  pathExists: async () => true,
 };
 
 /** `gh` CLIの呼び出しをフェイクで完結させる（design.md §16.18のforgeテスト用）。 */
@@ -568,6 +569,7 @@ function createHarness(
     codexApprovalMode?: string;
     claudePermissionMode?: string;
     git?: FakeGitHandle;
+    fs?: WorktreeFileSystemPort;
     forge?: WorkflowRunnerForgeDeps;
     pseudoWorktree?: { fs: PseudoWorktreeFileSystemPort; exclude: readonly string[] };
     messaging?: WorkflowRunnerMessagingDeps;
@@ -583,7 +585,7 @@ function createHarness(
     hosts,
     worktreeQueue: new WorktreeCreationQueue(),
     git,
-    fs: identityFs,
+    fs: options?.fs ?? identityFs,
     filePort: filePort(yaml),
     store,
     log: fakeLogger,
@@ -1753,6 +1755,50 @@ tasks:
     expect(outcome.removed).toContain('T1');
     const after = git.calls.filter((c) => c.args[0] === 'worktree' && c.args[1] === 'remove');
     expect(after).toHaveLength(1);
+  });
+
+  it('既定のcleanup（after-merge）で自動撤去済みのworktreeへ「worktreeを撤去」を押しても、失敗として報告しない（Issue #252修正）', async () => {
+    // 自動撤去（`shouldRemoveWorktree`）でディレクトリが既に消えている状態を、
+    // `pathExists`が常にfalseを返すfsで再現する。修正前は`git status --porcelain`が
+    // 不在のcwdに対して`spawn git ENOENT`を返し、gitErrorとして`failed`に積まれていた
+    const missingFs: WorktreeFileSystemPort = {
+      realpath: async (target) => target,
+      readTextFile: async () => '.agents/worktrees/\n',
+      isSymbolicLink: async () => false,
+      pathExists: async () => false,
+    };
+    const singleTaskYaml = `
+version: 1
+name: view-ops-test-already-gone
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+    const git = fakeGit();
+    const { runner, codexHost } = createHarness(singleTaskYaml, { git, fs: missingFs });
+    const result = await runner.start('/repo/.agents/workflows/remove.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // 撤去の呼び出し中にgitが使われたかだけを見る（タスクの完了までにマージ経路が
+    // 呼ぶ `git status` と混ざらないよう、ここまでの呼び出しは対象から外す）
+    const callsBeforeRemove = git.calls.length;
+    const outcome = await runner.removeWorktrees(runId);
+    expect(outcome.failed).toEqual([]);
+    expect(outcome.removed).toContain('T1');
+    // cwdが無いと分かった時点で返すため、`git status` / `git worktree remove` は
+    // どちらも呼ばれない
+    const callsDuringRemove = git.calls.slice(callsBeforeRemove);
+    expect(
+      callsDuringRemove.some(
+        (c) => c.args[0] === 'status' || (c.args[0] === 'worktree' && c.args[1] === 'remove'),
+      ),
+    ).toBe(false);
   });
 });
 

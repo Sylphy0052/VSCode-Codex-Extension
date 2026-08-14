@@ -8,6 +8,7 @@ const identityFs: WorktreeFileSystemPort = {
   realpath: async (target) => target,
   readTextFile: async () => undefined,
   isSymbolicLink: async () => false,
+  pathExists: async () => true,
 };
 
 function commandApproval(itemId?: string): PendingApproval {
@@ -167,6 +168,7 @@ describe('buildEscalationRequest（design.md §16.7: 判定へは生の要求パ
       realpath: async (target) => `/resolved${target}`,
       readTextFile: async () => undefined,
       isSymbolicLink: async () => false,
+      pathExists: async () => true,
     };
     const request = await buildEscalationRequest(
       'claude',
