@@ -969,6 +969,10 @@ function upsertItem(items: readonly ChatItem[], item: ChatItem): ChatItem[] {
     turnId: item.turnId ?? existing?.turnId,
     // 差分は patchUpdated が先に届くことがある。空で上書きしない
     diffs: item.diffs.length === 0 && existing !== undefined ? existing.diffs : item.diffs,
+    // 中断の印は通知には乗らないので、こちらで引き継ぐ（issue #246）。ただし実行中で
+    // なくなった（completedが届いた）ら落とす。本当に終わったものへ「継続中の可能性」は残さない
+    interruptedWhileRunning:
+      existing?.interruptedWhileRunning === true && isRunningCommand(item) ? true : undefined,
   };
   return next;
 }

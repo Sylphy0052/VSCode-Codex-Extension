@@ -848,6 +848,33 @@ describe('markInterruptedCommands', () => {
     const twice = markInterruptedCommands(once);
     expect(twice.items.filter((i) => i.id === INTERRUPTED_COMMANDS_NOTICE_ID)).toHaveLength(1);
   });
+
+  it('中断後に届く item/updated では印が消えない', () => {
+    const interrupted = markInterruptedCommands(withCommand('inProgress'));
+    const updated = applyEvent(interrupted, 'item/updated', {
+      turnId: TURN,
+      item: { id: 'cmd_1', type: 'commandExecution', command: 'sleep 60', status: 'inProgress' },
+    });
+    expect(updated.items.find((i) => i.id === 'cmd_1')?.interruptedWhileRunning).toBe(true);
+  });
+
+  it('中断後に届く outputDelta でも印が消えない', () => {
+    const interrupted = markInterruptedCommands(withCommand('inProgress'));
+    const delta = applyEvent(interrupted, 'item/commandExecution/outputDelta', {
+      itemId: 'cmd_1',
+      delta: 'まだ出力が続いている',
+    });
+    expect(delta.items.find((i) => i.id === 'cmd_1')?.interruptedWhileRunning).toBe(true);
+  });
+
+  it('コマンドが本当に終わったら印を落とす', () => {
+    const interrupted = markInterruptedCommands(withCommand('inProgress'));
+    const completed = applyEvent(interrupted, 'item/completed', {
+      turnId: TURN,
+      item: { id: 'cmd_1', type: 'commandExecution', command: 'sleep 60', status: 'completed' },
+    });
+    expect(completed.items.find((i) => i.id === 'cmd_1')?.interruptedWhileRunning).toBeUndefined();
+  });
 });
 
 describe('applyEvent / item/commandExecution/outputDelta', () => {

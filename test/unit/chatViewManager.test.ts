@@ -1,10 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { noDefaults } from '../../src/codex/configToml';
 import type { Logger } from '../../src/log';
 import type { FileSystemPort } from '../../src/session/ports';
 import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMentions';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
-import { ChatViewManager, type ChatActivity } from '../../src/view/chatView';
+import {
+  ChatViewManager,
+  STATE_POST_INTERVAL_MS,
+  type ChatActivity,
+} from '../../src/view/chatView';
 import { RECAP_INSTRUCTION } from '../../src/appserver/chatSession';
 import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
 import { __mock, ViewColumn, window as fakeWindow } from '../mocks/vscode';
@@ -72,13 +76,14 @@ async function tick(times = 5): Promise<void> {
 }
 
 /**
- * 状態送信の間引き（`STATE_POST_INTERVAL_MS` = 50ms、issue #246）で予約に回った分を吐き出す。
+ * 状態送信の間引き（`STATE_POST_INTERVAL_MS`、issue #246）で予約に回った分を吐き出す。
  *
  * 連続して状態が変わると最後の1回はタイマー越しに送られる。マイクロタスクだけでは流れないため、
- * 送信済みメッセージを検査する前にこれを挟む。
+ * 送信済みメッセージを検査する前にこれを挟む。実時間で待つとCIの負荷次第で不安定になるので、
+ * 偽のタイマーを間隔ぶん進めて確定させる。
  */
 async function flushStatePosts(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 80));
+  await vi.advanceTimersByTimeAsync(STATE_POST_INTERVAL_MS);
 }
 
 function createManager(options?: {
@@ -126,6 +131,13 @@ describe('ChatViewManager', () => {
     __mock.reset();
     __mock.setWorkspaceFolder('/workspace/root');
     __mock.setConfig('codex', {});
+    // 状態送信の間引き（issue #246）を確定的に進めるため。`shouldAdvanceTime` を立てて
+    // おくと実時間も進むので、タイマーを明示的に進めない既存のテストはそのまま通る
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe('並列開始時の宛先解決（design.md §16.10の3の回帰）', () => {

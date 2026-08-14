@@ -96,7 +96,7 @@ const MCP_STARTUP_CHECK_TIMEOUT_MS = 8_000;
  * 埋まり、`turn/interrupt` の応答すら読めなくなる。人の目には連続に見える程度に短く、
  * かつ送信回数を2桁減らせる長さとして50msを採る（毎秒最大20回）。
  */
-const STATE_POST_INTERVAL_MS = 50;
+export const STATE_POST_INTERVAL_MS = 50;
 
 interface ChatPanel {
   /**
@@ -1393,9 +1393,9 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     this.reportActivity(entry, text);
   }
 
-  /** 画面へ現在の状態を送る。設定とループの進行はここで一緒に載せる。 */
   /**
-   * 画面へ状態を送る。短い間隔で続けて呼ばれた分はまとめる（issue #246）。
+   * 画面へ現在の状態を送る。設定とループの進行はここで一緒に載せる。
+   * 短い間隔で続けて呼ばれた分はまとめる（issue #246）。
    *
    * `item/commandExecution/outputDelta` は巨大な出力の最中に毎秒何千件も届く。1件ごとに
    * 状態全体を `postMessage` すると、そのたびに本文を丸ごと直列化することになり
