@@ -6,6 +6,7 @@ import {
   clampCodexApprovalMode,
   clampSandbox,
   clampToSafer,
+  dropUndeclaredTemplateRefs,
   expandTemplate,
   MAX_EXPANDED_PROMPT_LENGTH,
   MAX_TEMPLATE_RESULT_LENGTH,
@@ -1282,5 +1283,120 @@ describe('withCommitRequirement', () => {
     expect(result).toContain('コミット');
     // 元のdone文言が壊されず、末尾に連結されているだけであることを確認する
     expect(result.startsWith('作業が終わっている')).toBe(true);
+  });
+});
+
+describe('dropUndeclaredTemplateRefs', () => {
+  it('dependsOnに挙げていないタスクへの参照を落とす', () => {
+    const yaml = [
+      'version: 1',
+      'name: x',
+      'tasks:',
+      '  - id: R1',
+      '    prompt: 設計する',
+      '    done: d',
+      '  - id: R2',
+      '    dependsOn: [R1]',
+      '    prompt: "{{R1.result}} を踏まえ {{R3.cwd}} で実装する"',
+      '    done: d',
+      '  - id: R3',
+      '    prompt: UIを作る',
+      '    done: d',
+    ].join('\n');
+
+    const result = dropUndeclaredTemplateRefs(yaml);
+
+    // 依存に挙げているR1への参照は残り、挙げていないR3への参照だけが消える
+    expect(result.yaml).toContain('{{R1.result}}');
+    expect(result.yaml).not.toContain('{{R3.cwd}}');
+    expect(result.dropped).toEqual([{ taskId: 'R2', ref: '{{R3.cwd}}' }]);
+
+    // 落とした後は検証を通る
+    expect(validateWorkflow(parseWorkflowYaml(result.yaml)).errors).toEqual([]);
+  });
+
+  it('同じ参照でも、依存を正しく書けているタスクのものは落とさない', () => {
+    const yaml = [
+      'version: 1',
+      'name: x',
+      'tasks:',
+      '  - id: R1',
+      '    prompt: 設計する',
+      '    done: d',
+      '  - id: R2',
+      '    dependsOn: [R1]',
+      '    prompt: "{{R1.result}} を使う"',
+      '    done: d',
+      '  - id: R3',
+      '    prompt: "{{R1.result}} を使う"',
+      '    done: d',
+    ].join('\n');
+
+    const result = dropUndeclaredTemplateRefs(yaml);
+
+    expect(result.dropped).toEqual([{ taskId: 'R3', ref: '{{R1.result}}' }]);
+    const tasks = parseWorkflowYaml(result.yaml).tasks;
+    expect(tasks.find((t) => t.id === 'R2')?.prompt).toContain('{{R1.result}}');
+    expect(tasks.find((t) => t.id === 'R3')?.prompt).not.toContain('{{R1.result}}');
+  });
+
+  it('未定義のタスクidへの参照は落とさない（分解そのものの誤りとして検証で見せる）', () => {
+    const yaml = [
+      'version: 1',
+      'name: x',
+      'tasks:',
+      '  - id: R1',
+      '    prompt: "{{R9.result}} を使う"',
+      '    done: d',
+    ].join('\n');
+
+    const result = dropUndeclaredTemplateRefs(yaml);
+
+    expect(result.dropped).toEqual([]);
+    expect(result.yaml).toContain('{{R9.result}}');
+  });
+
+  it('continuePromptの参照も対象にする', () => {
+    const yaml = [
+      'version: 1',
+      'name: x',
+      'tasks:',
+      '  - id: R1',
+      '    prompt: p',
+      '    continuePrompt: "{{R2.result}} を見て続ける"',
+      '    done: d',
+      '  - id: R2',
+      '    prompt: p',
+      '    done: d',
+    ].join('\n');
+
+    const result = dropUndeclaredTemplateRefs(yaml);
+
+    expect(result.dropped).toEqual([{ taskId: 'R1', ref: '{{R2.result}}' }]);
+    expect(result.yaml).not.toContain('{{R2.result}}');
+  });
+
+  it('落とすものが無ければYAMLを書き換えない（整形を保つ）', () => {
+    const yaml = [
+      'version: 1',
+      'name: x',
+      '# コメントも残る',
+      'tasks:',
+      '  - id: R1',
+      '    prompt: p',
+      '    done: d',
+    ].join('\n');
+
+    const result = dropUndeclaredTemplateRefs(yaml);
+
+    expect(result.yaml).toBe(yaml);
+    expect(result.dropped).toEqual([]);
+  });
+
+  it('パースできないYAMLは触らない', () => {
+    const broken = 'tasks: [\n  - id: R1\n';
+    const result = dropUndeclaredTemplateRefs(broken);
+    expect(result.yaml).toBe(broken);
+    expect(result.dropped).toEqual([]);
   });
 });

@@ -1380,6 +1380,15 @@ async function handlePlanSuccess(
   const doc = await vscode.workspace.openTextDocument(filePath);
   const editor = await vscode.window.showTextDocument(doc, { preview: false });
 
+  if (result.droppedTemplateRefs.length > 0) {
+    const detail = result.droppedTemplateRefs.map((r) => `${r.taskId}: ${r.ref}`).join(', ');
+    log.warn(`[planner] dependsOnに無いタスクを参照するテンプレート変数を落としました: ${detail}`);
+    void vscode.window.showWarningMessage(
+      `dependsOnに挙げていないタスクを参照していたテンプレート変数を${result.droppedTemplateRefs.length}件` +
+        '落としました（そのままでは検証を通らないため）。参照が消えて文意が通らないタスクがないか確認してください（詳しくはログ）',
+    );
+  }
+
   if (result.securityWarnings.length > 0) {
     const first = result.securityWarnings[0];
     if (first !== undefined) {
