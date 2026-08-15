@@ -64,7 +64,10 @@ import {
   generateRoadmap,
   nodeRoadmapFileSystem,
   parseRoadmapMarkdown,
-  planWorkflowFromRoadmapPhase,
+  planWorkflowFromRoadmapPhases,
+  splitRoadmapPhasesIntoChunks,
+  type ParsedRoadmap,
+  type RoadmapPhase,
   withRoadmapReference,
   selectNextRoadmapPhase,
   validateRoadmap,
@@ -84,7 +87,7 @@ import {
   locateSecurityWarningLine,
   type PlanWorkflowResult,
 } from './orchestrator/planner';
-import { MAX_PROMPT_LENGTH } from './orchestrator/workflow';
+import { MAX_PROMPT_LENGTH, MAX_TASK_COUNT } from './orchestrator/workflow';
 import type { Provider } from './orchestrator/workflow';
 import { ProviderRegistry } from './provider/registry';
 import type { AgentProvider } from './provider/types';
@@ -1155,79 +1158,154 @@ async function planWorkflowFromRoadmapCommand(
     );
   }
 
-  const nextPhase = selectNextRoadmapPhase(parsed);
-  const phasePicks = parsed.phases.map((phase) => ({
-    label: phase.name === '' ? '(無題のフェーズ)' : phase.name,
-    phase,
-    // `exactOptionalPropertyTypes`下では`description: undefined`を明示できないため、
-    // 次のフェーズでなければキー自体を持たせない
-    ...(phase === nextPhase ? { description: '次に着手すべきフェーズ' } : {}),
-  }));
-  const pickedPhase = await vscode.window.showQuickPick(phasePicks, {
-    placeHolder: '変換するフェーズを選択（1回のワークフローで扱うのは一部でよい）',
-    ignoreFocusOut: true,
-  });
-  if (pickedPhase === undefined) {
+  const pickedPhases = await pickRoadmapPhases(parsed);
+  if (pickedPhases === undefined) {
     return;
+  }
+
+  // 選んだフェーズをまとめて1本のYAMLにする。合計がタスク数の上限を超える選択では
+  // フェーズ単位で複数のYAMLへ分ける（design.md §16.19 2段目）
+  const chunks = splitRoadmapPhasesIntoChunks(pickedPhases);
+  if (chunks.length > 1) {
+    void vscode.window.showInformationMessage(
+      `選んだフェーズの項目数がタスク数の上限（${MAX_TASK_COUNT}件）を超えるため、` +
+        `${chunks.length}個のワークフローへ分けて生成します。` +
+        '分けた分は別々のrunになるため、前のrunが終わってから次を実行してください。',
+    );
   }
 
   const host = provider === 'claude' ? claudeChat : chat;
   const workspaceRoot = folder.uri.fsPath;
+  const roadmapPath = vscode.workspace.asRelativePath(pickedFile.file, false);
+  let failed = 0;
 
-  const result = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: 'ワークフローを生成しています…' },
-    async () => {
-      const workspaceSummary = await buildWorkspaceSummary(workspaceRoot, nodePlannerWorkspacePort);
-      return planWorkflowFromRoadmapPhase({
-        roadmapTitle: parsed.title,
-        phase: pickedPhase.phase,
-        workspaceSummary,
-        provider,
-        host,
-        cwd: workspaceRoot,
-        baseline: readSafetyBaseline(),
-        log,
-      });
-    },
-  );
+  for (const [index, chunk] of chunks.entries()) {
+    const progressTitle =
+      chunks.length > 1
+        ? `ワークフローを生成しています…（${index + 1}/${chunks.length}）`
+        : 'ワークフローを生成しています…';
+    const result = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: progressTitle },
+      async () => {
+        const workspaceSummary = await buildWorkspaceSummary(
+          workspaceRoot,
+          nodePlannerWorkspacePort,
+        );
+        return planWorkflowFromRoadmapPhases({
+          roadmapTitle: parsed.title,
+          chunk,
+          workspaceSummary,
+          provider,
+          host,
+          cwd: workspaceRoot,
+          baseline: readSafetyBaseline(),
+          log,
+        });
+      },
+    );
 
-  if (!result.ok) {
-    await handlePlanFailure(result, log);
-    return;
+    if (!result.ok) {
+      failed += 1;
+      await handlePlanFailure(result, log);
+      continue;
+    }
+
+    // 生成した定義に「どのロードマップから作ったか」を残す（design.md §16.19）。runが
+    // 終わったとき、この値を頼りにチェックを書き戻す。
+    const withRoadmap = withRoadmapReference(result.yaml, result.definition, roadmapPath);
+    const resultWithRoadmap = {
+      ...result,
+      yaml: withRoadmap.yaml,
+      definition: withRoadmap.definition,
+    };
+
+    if (result.roadmapMismatches.length > 0) {
+      log.warn(
+        `[planner] ロードマップの材料が正しく転記されていない可能性があります: ${result.roadmapMismatches
+          .map((m) => m.message)
+          .join(' / ')}`,
+      );
+      void vscode.window.showWarningMessage(
+        '生成されたワークフローが、ロードマップの内容（id・依存・Issue）と一致しない箇所があります' +
+          `（${result.roadmapMismatches.length}件）。内容を確認してください（詳しくはログ）`,
+      );
+    }
+
+    if (result.droppedDependencies.length > 0) {
+      const detail = result.droppedDependencies
+        .map((d) => `${d.itemId} → ${d.dependsOnId}`)
+        .join(', ');
+      log.warn(`[planner] 分割によりYAMLをまたぐ依存を落としました: ${detail}`);
+      void vscode.window.showWarningMessage(
+        `分割したため、このワークフローでは表現できない依存を${result.droppedDependencies.length}件` +
+          '落としました。落とした依存の順序は、runを実行する順で守ってください（詳しくはログ）',
+      );
+    }
+
+    if (chunk.overCapacity) {
+      log.warn(
+        `[planner] 1フェーズだけでタスク数の上限を超えています（${chunk.phaseNames.join(', ')}: ${chunk.items.length}件）`,
+      );
+      void vscode.window.showWarningMessage(
+        `「${chunk.phaseNames.join('」「')}」は1フェーズだけでタスク数の上限（${MAX_TASK_COUNT}件）を超えています。` +
+          'ロードマップ側でフェーズを分けてください',
+      );
+    }
+
+    await handlePlanSuccess(
+      resultWithRoadmap,
+      buildRoadmapPlanGoal(parsed.title, chunk.phaseNames),
+      workspaceRoot,
+      view,
+      log,
+    );
   }
 
-  // 生成した定義に「どのロードマップから作ったか」を残す（design.md §16.19）。runが
-  // 終わったとき、この値を頼りにチェックを書き戻す。
-  const withRoadmap = withRoadmapReference(
-    result.yaml,
-    result.definition,
-    vscode.workspace.asRelativePath(pickedFile.file, false),
-  );
-  const resultWithRoadmap = {
-    ...result,
-    yaml: withRoadmap.yaml,
-    definition: withRoadmap.definition,
+  if (failed > 0) {
+    void vscode.window.showErrorMessage(
+      `${chunks.length}個のうち${failed}個のワークフローを生成できませんでした（開いたエディタの内容を確認してください）`,
+    );
+  }
+}
+
+/**
+ * YAML化するフェーズを選ばせる（design.md §16.19 2段目）。
+ *
+ * 複数選択できる。フェーズをまたいで1本のYAMLにできるため、「全フェーズ」を先頭に置いて
+ * ワンクリックで全体を選べるようにする（1つも選ばずに閉じた場合と、キャンセルした場合は
+ * どちらも `undefined`）。返す順はロードマップ上の並び順に揃える（選んだ順ではない）。
+ */
+async function pickRoadmapPhases(parsed: ParsedRoadmap): Promise<RoadmapPhase[] | undefined> {
+  const nextPhase = selectNextRoadmapPhase(parsed);
+  const allPick = {
+    label: `$(check-all) 全フェーズ（${parsed.phases.length}件）`,
+    phase: undefined,
+    description: 'ロードマップ全体を対象にします',
   };
+  const phasePicks: { label: string; phase: RoadmapPhase | undefined; description?: string }[] = [
+    allPick,
+    ...parsed.phases.map((phase) => ({
+      label: phase.name === '' ? '(無題のフェーズ)' : phase.name,
+      phase,
+      // `exactOptionalPropertyTypes`下では`description: undefined`を明示できないため、
+      // 次のフェーズでなければキー自体を持たせない
+      ...(phase === nextPhase ? { description: '次に着手すべきフェーズ' } : {}),
+    })),
+  ];
 
-  if (result.roadmapMismatches.length > 0) {
-    log.warn(
-      `[planner] ロードマップの材料が正しく転記されていない可能性があります: ${result.roadmapMismatches
-        .map((m) => m.message)
-        .join(' / ')}`,
-    );
-    void vscode.window.showWarningMessage(
-      '生成されたワークフローが、ロードマップの内容（id・依存・Issue）と一致しない箇所があります' +
-        `（${result.roadmapMismatches.length}件）。内容を確認してください（詳しくはログ）`,
-    );
+  const picked = await vscode.window.showQuickPick(phasePicks, {
+    placeHolder: '変換するフェーズを選択（複数選べます。まとめて1本のYAMLにします）',
+    ignoreFocusOut: true,
+    canPickMany: true,
+  });
+  if (picked === undefined || picked.length === 0) {
+    return undefined;
   }
-
-  await handlePlanSuccess(
-    resultWithRoadmap,
-    buildRoadmapPlanGoal(parsed.title, pickedPhase.phase),
-    workspaceRoot,
-    view,
-    log,
-  );
+  if (picked.some((item) => item.phase === undefined)) {
+    return [...parsed.phases];
+  }
+  const selected = new Set(picked.map((item) => item.phase));
+  return parsed.phases.filter((phase) => selected.has(phase));
 }
 
 /**
