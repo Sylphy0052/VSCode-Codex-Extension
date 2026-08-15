@@ -14,9 +14,12 @@ import {
   formatRoadmapMaterial,
   generateRoadmap,
   parseRoadmapMarkdown,
-  planWorkflowFromRoadmapPhase,
+  planWorkflowFromRoadmapPhases,
+  selectRoadmapPhasesItems,
+  splitRoadmapPhasesIntoChunks,
   resolveRoadmapOutputPath,
   selectNextRoadmapPhase,
+  type RoadmapPhase,
   selectRoadmapPhaseItems,
   slugifyGoal,
   stripMarkdownCodeFence,
@@ -326,7 +329,7 @@ describe('buildRoadmapPlanGoal', () => {
     const parsed = parseRoadmapMarkdown(SAMPLE_ROADMAP);
     const phase = parsed.phases[0];
     if (phase === undefined) throw new Error('phase not found');
-    const goal = buildRoadmapPlanGoal(parsed.title, phase);
+    const goal = buildRoadmapPlanGoal(parsed.title, [phase.name]);
     expect(goal).toContain('認証機能を追加する');
     expect(goal).toContain('Phase 1: 設計');
   });
@@ -407,7 +410,93 @@ describe('detectRoadmapMaterialMismatches（design.md §16.19 2段目の転記�
   });
 });
 
-describe('planWorkflowFromRoadmapPhase（design.md §16.19 2段目）', () => {
+/** テスト用に、指定した件数の項目を持つフェーズを組み立てる。 */
+function phaseWith(name: string, ids: readonly string[], deps: Record<string, string[]> = {}) {
+  return {
+    name,
+    items: ids.map((id, index) => ({
+      id,
+      checked: false,
+      text: `${id}の作業`,
+      dependsOn: deps[id] ?? [],
+      issue: undefined,
+      line: index,
+    })),
+  };
+}
+
+describe('splitRoadmapPhasesIntoChunks（design.md §16.19 2段目「複数フェーズをまとめる」）', () => {
+  it('合計が上限に収まるなら、選んだフェーズ全部を1つのチャンクにする', () => {
+    const chunks = splitRoadmapPhasesIntoChunks(
+      [phaseWith('P0', ['R1', 'R2']), phaseWith('P1', ['R3'])],
+      50,
+    );
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.phaseNames).toEqual(['P0', 'P1']);
+    expect(chunks[0]?.items.map((i) => i.id)).toEqual(['R1', 'R2', 'R3']);
+    expect(chunks[0]?.overCapacity).toBe(false);
+  });
+
+  it('上限を超えるとフェーズ単位で分ける（フェーズの途中では割らない）', () => {
+    const chunks = splitRoadmapPhasesIntoChunks(
+      [phaseWith('P0', ['R1', 'R2']), phaseWith('P1', ['R3', 'R4']), phaseWith('P2', ['R5'])],
+      3,
+    );
+    expect(chunks.map((c) => c.phaseNames)).toEqual([['P0'], ['P1', 'P2']]);
+    expect(chunks.map((c) => c.items.length)).toEqual([2, 3]);
+  });
+
+  it('チャンクをまたぐ依存は落とし、落とした分をdroppedDependenciesに残す', () => {
+    // R3（P1）がR1（P0）に依存する。別チャンクになるためYAMLでは表現できない
+    const chunks = splitRoadmapPhasesIntoChunks(
+      [phaseWith('P0', ['R1', 'R2']), phaseWith('P1', ['R3'], { R3: ['R1'] })],
+      2,
+    );
+    expect(chunks).toHaveLength(2);
+    expect(chunks[1]?.items[0]?.dependsOn).toEqual([]);
+    expect(chunks[1]?.droppedDependencies).toEqual([{ itemId: 'R3', dependsOnId: 'R1' }]);
+  });
+
+  it('同じチャンクに入る依存は落とさない', () => {
+    const chunks = splitRoadmapPhasesIntoChunks(
+      [phaseWith('P0', ['R1']), phaseWith('P1', ['R2'], { R2: ['R1'] })],
+      50,
+    );
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.items[1]?.dependsOn).toEqual(['R1']);
+    expect(chunks[0]?.droppedDependencies).toEqual([]);
+  });
+
+  it('1フェーズだけで上限を超える場合はovercapacityを立てる（それ以上は割れない）', () => {
+    const chunks = splitRoadmapPhasesIntoChunks([phaseWith('P0', ['R1', 'R2', 'R3'])], 2);
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.overCapacity).toBe(true);
+    expect(chunks[0]?.items).toHaveLength(3);
+  });
+
+  it('フェーズを1つも選ばなければチャンクも作らない', () => {
+    expect(splitRoadmapPhasesIntoChunks([], 50)).toEqual([]);
+  });
+});
+
+describe('selectRoadmapPhasesItems', () => {
+  it('複数フェーズの項目を、渡された順に連結する', () => {
+    const items = selectRoadmapPhasesItems([
+      phaseWith('P0', ['R1', 'R2']),
+      phaseWith('P1', ['R3']),
+    ]);
+    expect(items.map((i) => i.id)).toEqual(['R1', 'R2', 'R3']);
+  });
+});
+
+describe('planWorkflowFromRoadmapPhases（design.md §16.19 2段目）', () => {
+  /** 1フェーズだけを1つのチャンクにする（分割の必要が無い既存のケース）。 */
+  const chunkOf = (phase: RoadmapPhase) => {
+    const chunk = splitRoadmapPhasesIntoChunks([phase])[0];
+    if (chunk === undefined) throw new Error('chunk not built');
+    return chunk;
+  };
+
   const baseInput = {
     roadmapTitle: '認証機能を追加する',
     workspaceSummary: { topLevelEntries: [], hasAgentsMd: false, hasClaudeMd: false },
@@ -442,7 +531,11 @@ describe('planWorkflowFromRoadmapPhase（design.md §16.19 2段目）', () => {
     ].join('\n');
     const host = new FakeRoadmapHost(yaml);
 
-    const result = await planWorkflowFromRoadmapPhase({ ...baseInput, phase, host });
+    const result = await planWorkflowFromRoadmapPhases({
+      ...baseInput,
+      chunk: chunkOf(phase),
+      host,
+    });
 
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -461,7 +554,7 @@ describe('planWorkflowFromRoadmapPhase（design.md §16.19 2段目）', () => {
     const host = new FakeRoadmapHost(
       ['version: 1', 'name: x', 'tasks:', '  - id: R1', '    prompt: p', '    done: d'].join('\n'),
     );
-    await planWorkflowFromRoadmapPhase({ ...baseInput, phase, host });
+    await planWorkflowFromRoadmapPhases({ ...baseInput, chunk: chunkOf(phase), host });
     const sentPrompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
     expect(sentPrompt).toContain('認証機能を追加する');
     expect(sentPrompt).toContain('Phase 1: 設計');
@@ -473,7 +566,11 @@ describe('planWorkflowFromRoadmapPhase（design.md §16.19 2段目）', () => {
     if (phase === undefined) throw new Error('phase not found');
     const invalidYaml = ['version: 1', 'name: x', 'tasks:', '  - id: R1'].join('\n');
     const host = new FakeRoadmapHost(invalidYaml);
-    const result = await planWorkflowFromRoadmapPhase({ ...baseInput, phase, host });
+    const result = await planWorkflowFromRoadmapPhases({
+      ...baseInput,
+      chunk: chunkOf(phase),
+      host,
+    });
     expect(result.ok).toBe(false);
   });
 
@@ -491,7 +588,11 @@ describe('planWorkflowFromRoadmapPhase（design.md §16.19 2段目）', () => {
       '    done: 設計が終わっている',
     ].join('\n');
     const host = new FakeRoadmapHost(yaml);
-    const result = await planWorkflowFromRoadmapPhase({ ...baseInput, phase, host });
+    const result = await planWorkflowFromRoadmapPhases({
+      ...baseInput,
+      chunk: chunkOf(phase),
+      host,
+    });
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(

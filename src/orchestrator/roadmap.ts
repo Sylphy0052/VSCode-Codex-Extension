@@ -18,6 +18,7 @@ import type { TaskSessionHost } from './taskSession';
 import type { GitCommandRunner } from './worktree';
 import {
   findCycleGroups,
+  MAX_TASK_COUNT,
   TASK_ID_PATTERN,
   type Provider,
   type WorkflowDefinition,
@@ -265,6 +266,98 @@ export function selectRoadmapPhaseItems(phase: RoadmapPhase): RoadmapMaterialIte
   }));
 }
 
+/** 複数フェーズ分の項目を、渡された順にそのまま連結する。 */
+export function selectRoadmapPhasesItems(phases: readonly RoadmapPhase[]): RoadmapMaterialItem[] {
+  return phases.flatMap((phase) => selectRoadmapPhaseItems(phase));
+}
+
+/**
+ * チャンク分割によって落とした依存1件（design.md §16.19 2段目「複数フェーズをまとめて
+ * YAML化する」）。落とした側の項目idと、参照先だった項目idを持つ。
+ */
+export interface DroppedRoadmapDependency {
+  itemId: string;
+  dependsOnId: string;
+}
+
+/**
+ * 1つのYAMLへまとめるフェーズの束。
+ *
+ * `items` の `dependsOn` は**このチャンクの中に存在する項目だけ**に絞ってある。チャンクを
+ * またぐ依存はYAMLでは表現できない（別のrunになるため、存在しないタスクidへの`dependsOn`は
+ * §16.2の検証で弾かれる）。落とした依存は `droppedDependencies` に残し、呼び出し側が人へ
+ * 知らせる（チャンクの実行順序は人が守る必要がある）。
+ */
+export interface RoadmapPhaseChunk {
+  /** このチャンクに入ったフェーズ名（ロードマップ上の順）。 */
+  phaseNames: string[];
+  items: RoadmapMaterialItem[];
+  droppedDependencies: DroppedRoadmapDependency[];
+  /**
+   * 1フェーズだけで上限を超えており、これ以上フェーズ単位では割れないチャンク。
+   * 生成しても§16.2のタスク数上限で弾かれる可能性が高いことを呼び出し側へ知らせる。
+   */
+  overCapacity: boolean;
+}
+
+/**
+ * 選んだフェーズを、1つのYAMLへ収まる単位（チャンク）へ分ける（design.md §16.19 2段目）。
+ *
+ * フェーズをまたいで1本のYAMLにできるようにしたが、タスク数には上限（`MAX_TASK_COUNT`）が
+ * あるため、合計が上限を超える選択では複数のYAMLへ分ける。**区切りはフェーズ単位**で、
+ * フェーズの途中では割らない（フェーズの中の項目は互いに関係が深く、途中で切ると
+ * 依存を落とす量が増えるため）。ロードマップ上の順を保ったまま、前から貪欲に詰める。
+ *
+ * 1フェーズだけで上限を超える場合は、そのフェーズだけで1チャンクにし `overCapacity` を
+ * 立てる（フェーズ単位という区切り方を保つ以上、これ以上は割れない）。
+ */
+export function splitRoadmapPhasesIntoChunks(
+  phases: readonly RoadmapPhase[],
+  maxItemsPerChunk: number = MAX_TASK_COUNT,
+): RoadmapPhaseChunk[] {
+  const limit = Math.max(1, maxItemsPerChunk);
+  const groups: RoadmapPhase[][] = [];
+  let current: RoadmapPhase[] = [];
+  let currentCount = 0;
+
+  for (const phase of phases) {
+    const count = phase.items.length;
+    if (current.length > 0 && currentCount + count > limit) {
+      groups.push(current);
+      current = [];
+      currentCount = 0;
+    }
+    current.push(phase);
+    currentCount += count;
+  }
+  if (current.length > 0) {
+    groups.push(current);
+  }
+
+  return groups.map((group) => {
+    const items = selectRoadmapPhasesItems(group);
+    const idsInChunk = new Set(items.map((item) => item.id));
+    const droppedDependencies: DroppedRoadmapDependency[] = [];
+    const scopedItems = items.map((item) => {
+      const kept: string[] = [];
+      for (const dep of item.dependsOn) {
+        if (idsInChunk.has(dep)) {
+          kept.push(dep);
+          continue;
+        }
+        droppedDependencies.push({ itemId: item.id, dependsOnId: dep });
+      }
+      return { ...item, dependsOn: kept };
+    });
+    return {
+      phaseNames: group.map((phase) => phase.name),
+      items: scopedItems,
+      droppedDependencies,
+      overCapacity: group.length === 1 && items.length > limit,
+    };
+  });
+}
+
 /**
  * 選んだ項目を、分解セッションへ渡すテキストの材料として整形する（design.md §16.19 2段目
  * 「項目をtasksに、依存をdependsOnに写す」「Issue番号を持つ項目は…issueフィールドとして
@@ -300,9 +393,13 @@ export function formatRoadmapMaterial(items: readonly RoadmapMaterialItem[]): st
   return lines.join('\n');
 }
 
-/** `planWorkflowFromRoadmapPhase`が使う既定のゴール文。ロードマップのタイトルとフェーズ名から組み立てる。 */
-export function buildRoadmapPlanGoal(roadmapTitle: string, phase: RoadmapPhase): string {
-  return `${roadmapTitle}のうち「${phase.name}」を実行できるワークフローに分解する`;
+/**
+ * `planWorkflowFromRoadmapPhases`が使う既定のゴール文。ロードマップのタイトルと
+ * フェーズ名から組み立てる。複数フェーズをまとめてYAML化する場合は全ての名前を並べる。
+ */
+export function buildRoadmapPlanGoal(roadmapTitle: string, phaseNames: readonly string[]): string {
+  const names = phaseNames.map((name) => `「${name}」`).join('');
+  return `${roadmapTitle}のうち${names}を実行できるワークフローに分解する`;
 }
 
 /** `detectRoadmapMaterialMismatches`が返す1件。 */
@@ -371,8 +468,12 @@ export function detectRoadmapMaterialMismatches(
 
 export interface PlanWorkflowFromRoadmapInput {
   roadmapTitle: string;
-  phase: RoadmapPhase;
-  /** 既定は `buildRoadmapPlanGoal(roadmapTitle, phase)`。呼び出し側が上書きできる。 */
+  /**
+   * このYAMLへまとめるフェーズの束（`splitRoadmapPhasesIntoChunks`が返すチャンク）。
+   * `items`の`dependsOn`はチャンクの中だけに絞られている前提で扱う。
+   */
+  chunk: RoadmapPhaseChunk;
+  /** 既定は `buildRoadmapPlanGoal(roadmapTitle, chunk.phaseNames)`。呼び出し側が上書きできる。 */
   goal?: string;
   workspaceSummary: WorkspaceSummary;
   /** 分解セッションに使うプロバイダ（`planner.ts`の`PlanWorkflowInput`と同じ）。 */
@@ -384,25 +485,29 @@ export interface PlanWorkflowFromRoadmapInput {
 }
 
 export type PlanWorkflowFromRoadmapResult =
-  | (PlanWorkflowSuccess & { roadmapMismatches: readonly RoadmapMaterialMismatch[] })
+  | (PlanWorkflowSuccess & {
+      roadmapMismatches: readonly RoadmapMaterialMismatch[];
+      /** このチャンクで落とした、チャンクをまたぐ依存（`RoadmapPhaseChunk`参照）。 */
+      droppedDependencies: readonly DroppedRoadmapDependency[];
+    })
   | PlanWorkflowFailure;
 
 /**
- * ロードマップの1フェーズ分から、ワークフロー定義（YAML）を生成する（design.md §16.19
- * 2段目）。`planner.ts`の分解セッション（§16.9）をそのまま使い、材料としてこのフェーズの
- * 項目（id・依存・Issue）を渡す。生成後、材料が正しく転記されたかを
+ * ロードマップの1チャンク（1つ以上のフェーズ）から、ワークフロー定義（YAML）を生成する
+ * （design.md §16.19 2段目）。`planner.ts`の分解セッション（§16.9）をそのまま使い、
+ * 材料としてチャンクの項目（id・依存・Issue）を渡す。生成後、材料が正しく転記されたかを
  * `detectRoadmapMaterialMismatches`で確認し、結果に含める。
  *
  * 分解セッションの安全設定（`sandbox: read-only`相当・承認全拒否）は`planWorkflow`が
  * `buildPlannerSessionInput`経由で組み立てる。ここで独自に安全設定を作らない
  * （`createTaskSessionRoadmapGenerationPort`と同じ「重複を残さない」判断）。
  */
-export async function planWorkflowFromRoadmapPhase(
+export async function planWorkflowFromRoadmapPhases(
   input: PlanWorkflowFromRoadmapInput,
 ): Promise<PlanWorkflowFromRoadmapResult> {
-  const items = selectRoadmapPhaseItems(input.phase);
+  const items = input.chunk.items;
   const material = formatRoadmapMaterial(items);
-  const goal = input.goal ?? buildRoadmapPlanGoal(input.roadmapTitle, input.phase);
+  const goal = input.goal ?? buildRoadmapPlanGoal(input.roadmapTitle, input.chunk.phaseNames);
 
   const planInput: PlanWorkflowInput = {
     goal,
@@ -421,6 +526,7 @@ export async function planWorkflowFromRoadmapPhase(
   return {
     ...result,
     roadmapMismatches: detectRoadmapMaterialMismatches(items, result.definition),
+    droppedDependencies: input.chunk.droppedDependencies,
   };
 }
 
