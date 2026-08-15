@@ -20,6 +20,7 @@ import {
   DEFAULT_MAX_ITERATIONS,
   DEFAULT_MAX_PARALLEL,
   DEFAULT_PROVIDER,
+  dropUndeclaredTemplateRefs,
   isProvider,
   ISOLATIONS,
   MAX_PARALLEL_MAX,
@@ -33,6 +34,7 @@ import {
   TASK_ID_PATTERN,
   TEMPLATE_FIELDS,
   validateWorkflow,
+  type DroppedTemplateRef,
   type Provider,
   type WorkflowDefinition,
   type WorkflowIssue,
@@ -174,6 +176,12 @@ export function buildSchemaDescription(): string {
     `依存タスクの結果を差し込みたい場合だけ、prompt内に {{<id>.<field>}} と書く。` +
       `<id>はdependsOnに挙げたタスクidに限り、<field>は ${TEMPLATE_FIELDS.join(' | ')} のいずれか。` +
       '依存タスクの応答を無条件に前置きする必要はない',
+    '**dependsOnに挙げていないタスクを参照してはならない。** 依存を増やせない場合' +
+      '（ロードマップの依存をそのまま写す場合など）は、テンプレート変数を使わず、' +
+      '必要なことをpromptの文章として直接書くこと。',
+    '各タスクは独立したgit worktreeで走り、成果は統合ブランチを介して次のタスクへ渡る。' +
+      '他タスクの作業ディレクトリやブランチを直接読む必要はないため、' +
+      '{{<id>.cwd}} や {{<id>.branch}} は基本的に書かないこと。',
     '',
     '未知のフィールドは読み飛ばされる。',
   ].join('\n');
@@ -479,9 +487,15 @@ export interface PlanWorkflowInput {
 
 export interface PlanWorkflowSuccess {
   ok: true;
-  /** コードフェンスを剥がした後のYAML本文。そのままファイルへ保存できる。 */
+  /** コードフェンスを剥がし、未依存のテンプレート変数を落とした後のYAML本文。そのままファイルへ保存できる。 */
   yaml: string;
   definition: WorkflowDefinition;
+  /**
+   * `dependsOn` に挙げていないタスクを参照していたため落としたテンプレート変数
+   * （`dropUndeclaredTemplateRefs`）。空でなければ、参照が消えて意味が通らなくなった箇所が
+   * ありうるので人へ知らせること。
+   */
+  droppedTemplateRefs: readonly DroppedTemplateRef[];
   /** 空でなければ、保存前に強調して知らせること（design.md §16.9）。 */
   securityWarnings: readonly SecurityWarning[];
   attempts: 1 | 2;
@@ -700,6 +714,20 @@ export async function sendSingleTurn(
 }
 
 /**
+ * 応答からYAMLを取り出し、`dependsOn` に挙げていないタスクを参照するテンプレート変数を
+ * 落としてから返す。
+ *
+ * 修復を検証の前に置くのは、この誤りが再生成で直らないため。ロードマップ経路では依存を
+ * 増やすことを禁じているので、モデルは参照を消すしか辻褄の合わせようがないが、実際には
+ * 同じ参照を書き続けて2回とも失敗する（`dropUndeclaredTemplateRefs`のコメント参照）。
+ */
+function extractAndRepair(response: string): { yaml: string; dropped: DroppedTemplateRef[] } {
+  const extracted = extractYamlFromResponse(response);
+  const repaired = dropUndeclaredTemplateRefs(extracted);
+  return { yaml: repaired.yaml, dropped: repaired.dropped };
+}
+
+/**
  * ゴール文からワークフロー定義（YAML）を生成する（design.md §16.9）。
  *
  * 1. 分解セッションへゴール・スキーマ・ワークスペース情報を渡し、YAMLの生成を頼む
@@ -722,7 +750,8 @@ export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkfl
     ...(input.roadmapMaterial !== undefined ? { roadmapMaterial: input.roadmapMaterial } : {}),
   });
   const firstResponse = await sendSingleTurn(input.host, input.provider, sessionInput, firstPrompt);
-  const firstYaml = extractYamlFromResponse(firstResponse);
+  const first = extractAndRepair(firstResponse);
+  const firstYaml = first.yaml;
   const firstAttempt = tryParseAndValidate(firstYaml);
   if (firstAttempt.ok && firstAttempt.definition !== undefined) {
     return {
@@ -730,6 +759,7 @@ export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkfl
       yaml: firstYaml,
       definition: firstAttempt.definition,
       securityWarnings: detectSecurityWarnings(firstAttempt.definition, input.baseline),
+      droppedTemplateRefs: first.dropped,
       attempts: 1,
     };
   }
@@ -746,7 +776,8 @@ export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkfl
     sessionInput,
     retryPrompt,
   );
-  const secondYaml = extractYamlFromResponse(secondResponse);
+  const second = extractAndRepair(secondResponse);
+  const secondYaml = second.yaml;
   const secondAttempt = tryParseAndValidate(secondYaml);
   if (secondAttempt.ok && secondAttempt.definition !== undefined) {
     return {
@@ -754,6 +785,7 @@ export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkfl
       yaml: secondYaml,
       definition: secondAttempt.definition,
       securityWarnings: detectSecurityWarnings(secondAttempt.definition, input.baseline),
+      droppedTemplateRefs: second.dropped,
       attempts: 2,
     };
   }

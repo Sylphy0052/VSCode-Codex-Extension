@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { parse } from 'yaml';
+import { isMap, isScalar, isSeq, parse, parseDocument } from 'yaml';
 
 import { APPROVAL_MODES, SANDBOX_MODES } from '../codex/types';
 import { LOOP_ITERATION_LIMIT } from '../loop/loopController';
@@ -463,6 +463,107 @@ export function parseWorkflowYaml(source: string): WorkflowDefinition {
     // 未指定と空文字は同じ「ロードマップ由来ではない」扱いにする（検証側で分岐を増やさない）
     ...(roadmap !== '' ? { roadmap } : {}),
   };
+}
+
+/** `dropUndeclaredTemplateRefs` が落とした参照1件。 */
+export interface DroppedTemplateRef {
+  taskId: string;
+  /** 落とした参照の文字列（`{{R3.cwd}}` の形）。 */
+  ref: string;
+}
+
+/**
+ * `dependsOn` に挙げていないタスクを参照するテンプレート変数を、YAMLのテキストから落とす。
+ *
+ * 分解セッション（LLM）は `{{R3.cwd}}` のような参照を、依存に挙げていないタスクに対しても
+ * 書いてしまう。特にロードマップ経路では「依存はロードマップのものをそのまま写し、それ以外の
+ * 依存を追加しないこと」と縛っているため、モデルは依存を増やして辻褄を合わせることができず、
+ * 再生成しても同じ検証エラー（`テンプレート変数が dependsOn に挙げていないタスクを
+ * 参照しています`）を繰り返して生成が失敗し続ける。プロンプトでの指示だけでは防げなかった
+ * ため、検証にかける前に機械的に落とす。
+ *
+ * **落とすのは参照だけで、`dependsOn` は増やさない。** 依存を足す方向で辻褄を合わせると、
+ * ロードマップに書かれた依存と食い違ううえ（§16.19の転記確認に引っかかる）、並列度が落ち、
+ * 循環依存を作る危険もある。参照が消えて意味が通らなくなった箇所は人が直す前提で、
+ * 落とした件数を呼び出し側から知らせる（生成物は人がレビューしてから実行する設計）。
+ *
+ * 未定義のタスクidを参照している場合はここでは触らない。それは依存の書き忘れではなく
+ * 分解そのものの誤りで、検証エラーとして人へ見せるべきものだから。
+ *
+ * YAMLの整形やコメントを保つため、テキストの置換ではなくDocument APIで該当スカラーだけを
+ * 書き換える（同じ文字列が別のタスクにも現れうるため、単純な全置換では依存を正しく
+ * 書けているほうまで壊してしまう）。
+ */
+export function dropUndeclaredTemplateRefs(yamlText: string): {
+  yaml: string;
+  dropped: DroppedTemplateRef[];
+} {
+  const dropped: DroppedTemplateRef[] = [];
+  let doc;
+  try {
+    doc = parseDocument(yamlText);
+  } catch {
+    // パースできないYAMLは修復の対象外（検証側がYAMLの解析エラーとして扱う）
+    return { yaml: yamlText, dropped };
+  }
+  if (doc.errors.length > 0) {
+    return { yaml: yamlText, dropped };
+  }
+
+  const tasksNode = doc.get('tasks', true);
+  if (!isSeq(tasksNode)) {
+    return { yaml: yamlText, dropped };
+  }
+
+  // 定義済みのタスクid。未定義タスクへの参照は落とさず検証エラーとして残す
+  const definedIds = new Set<string>();
+  for (const item of tasksNode.items) {
+    if (!isMap(item)) {
+      continue;
+    }
+    const id = item.get('id');
+    if (typeof id === 'string') {
+      definedIds.add(id);
+    }
+  }
+
+  let changed = false;
+  for (const item of tasksNode.items) {
+    if (!isMap(item)) {
+      continue;
+    }
+    const rawId = item.get('id');
+    const taskId = typeof rawId === 'string' ? rawId : '';
+    const dependsOnNode = item.get('dependsOn', true);
+    const dependsOn = new Set<string>();
+    if (isSeq(dependsOnNode)) {
+      for (const dep of dependsOnNode.items) {
+        if (isScalar(dep) && typeof dep.value === 'string') {
+          dependsOn.add(dep.value);
+        }
+      }
+    }
+
+    for (const key of ['prompt', 'continuePrompt']) {
+      const node = item.get(key, true);
+      if (!isScalar(node) || typeof node.value !== 'string') {
+        continue;
+      }
+      const next = node.value.replace(templatePattern(), (whole: string, id: string) => {
+        if (!definedIds.has(id) || dependsOn.has(id)) {
+          return whole;
+        }
+        dropped.push({ taskId, ref: whole });
+        return '';
+      });
+      if (next !== node.value) {
+        node.value = next;
+        changed = true;
+      }
+    }
+  }
+
+  return { yaml: changed ? String(doc) : yamlText, dropped };
 }
 
 export interface WorkflowIssue {

@@ -444,6 +444,41 @@ describe('planWorkflow（design.md §16.9）', () => {
     expect(host.openCalls).toHaveLength(1);
   });
 
+  it('dependsOnに無いタスクを参照するテンプレート変数は落として生成を通し、落とした分を返す', async () => {
+    const withUndeclaredRef = [
+      'version: 1',
+      'name: サンプル',
+      'tasks:',
+      '  - id: T1',
+      '    prompt: 何かする',
+      '    done: 終わっている',
+      '  - id: T2',
+      '    prompt: "{{T1.cwd}} で続きをする"',
+      '    done: 終わっている',
+    ].join('\n');
+    const host = new FakePlannerHost([withUndeclaredRef]);
+
+    const result = await planWorkflow({ ...baseInput, host });
+
+    // 再生成せず1回で通り、参照だけが消えている
+    expect(host.openCalls).toHaveLength(1);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.attempts).toBe(1);
+      expect(result.yaml).not.toContain('{{T1.cwd}}');
+      expect(result.droppedTemplateRefs).toEqual([{ taskId: 'T2', ref: '{{T1.cwd}}' }]);
+    }
+  });
+
+  it('落とすものが無ければdroppedTemplateRefsは空', async () => {
+    const host = new FakePlannerHost([VALID_YAML]);
+    const result = await planWorkflow({ ...baseInput, host });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.droppedTemplateRefs).toEqual([]);
+    }
+  });
+
   it('コードフェンス付きの応答からでも生成できる', async () => {
     const fenced = ['```yaml', VALID_YAML, '```'].join('\n');
     const host = new FakePlannerHost([fenced]);
