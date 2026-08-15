@@ -1,14 +1,14 @@
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { APPROVAL_MODES, SANDBOX_MODES } from '../codex/types';
+import type { ClaudePermissionMode } from '../claude/types';
+import { SANDBOX_MODES, type ApprovalMode } from '../codex/types';
 import { LOOP_ITERATION_LIMIT } from '../loop/loopController';
 import type { Logger } from '../log';
 import { stripControlChars } from './sanitize';
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { TaskSessionHost, TaskSessionInput } from './taskSession';
 import {
-  CLAUDE_PERMISSION_SAFETY_ORDER,
   CLEANUP_MODES,
   clampClaudePermissionMode,
   clampCodexApprovalMode,
@@ -20,6 +20,7 @@ import {
   DEFAULT_MAX_ITERATIONS,
   DEFAULT_MAX_PARALLEL,
   DEFAULT_PROVIDER,
+  isProvider,
   ISOLATIONS,
   MAX_PARALLEL_MAX,
   MAX_PARALLEL_MIN,
@@ -540,15 +541,53 @@ function tryParseAndValidate(yamlText: string): ParseAttempt {
   return { ok: true, definition: def, errors: [] };
 }
 
-/** 各プロバイダで最も安全な`approvalMode`（Codexの`APPROVAL_MODES`/Claudeの安全順序表の先頭）。 */
-function safestApprovalModeFor(provider: Provider): string {
-  if (provider === 'claude') {
-    // CLAUDE_PERMISSION_SAFETY_ORDERは`readonly string[]`型（tupleではない）なので
-    // `[0]`はnoUncheckedIndexedAccess下でstring|undefinedになる。配列は非空定数であり
-    // 実際には常に'plan'が使われる。フォールバックは型を満たすためだけの保険
-    return CLAUDE_PERMISSION_SAFETY_ORDER[0] ?? 'plan';
-  }
-  return APPROVAL_MODES[0];
+/**
+ * Codexの分解セッションで使う`approvalMode`。
+ *
+ * **安全順序表の先頭（`untrusted`）ではなく`never`を使う。** 分解セッションは承認要求を
+ * 理由を問わず全て拒否する（`sendSingleTurn`）ため、`untrusted`（信頼済み以外は全て承認を
+ * 求める）と組み合わせると、read-onlyサンドボックスの中で完結する単なるファイル読みまで
+ * 一律で拒否されてしまう。実際に材料を読もうとしたコマンドが拒否され、中身の無い応答しか
+ * 返らずロードマップ・ワークフローの生成が成立しなかった（issue #266）。
+ *
+ * `never`は「承認を求めず、サンドボックスの中でできることだけをする」という意味であり、
+ * サンドボックスを出る必要がある操作は承認へ回らずそのまま失敗する。分解セッションに
+ * 与えたい権限（ワークスペースの読み取りだけ）とちょうど一致する。一次防御は引き続き
+ * `sandbox: read-only`が担う（design.md §16.9「一次防御はサンドボックス」）。
+ */
+const PLANNER_CODEX_APPROVAL_MODE: ApprovalMode = 'never';
+
+/**
+ * Claudeの分解セッションで使う`permissionMode`。
+ *
+ * こちらも安全順序表の先頭（`plan`）は使わない。`plan`はモデルに計画を立てさせて
+ * `ExitPlanMode`で承認を求めさせるモードであり、承認を全て拒否する分解セッションでは
+ * 計画が却下されたまま終わる。「YAML（またはMarkdown）だけを出力せよ」という分解
+ * セッションの指示ともかみ合わない。
+ *
+ * `manual`（公式ドキュメントの表記では`default`。CLIの表示名がManual）は
+ * 「What runs without asking: Reads only」であり、読み取りは承認を経ずに通り、書き込みや
+ * コマンド実行は承認要求として現れて`sendSingleTurn`が拒否する。Codex側の`never`+
+ * read-onlyサンドボックスと同じ権限になる。
+ */
+const PLANNER_CLAUDE_PERMISSION_MODE: ClaudePermissionMode = 'manual';
+
+/**
+ * コマンド引数で渡されたプロバイダの手がかりを`Provider`へ解決する（issue #266）。
+ *
+ * チャット画面のアイコンから起動したときは、その画面のプロバイダが
+ * `executeCommand('agent.workflows.menu', 'claude')` のように引数で届く。ただし
+ * `executeCommand` は拡張機能の外からも呼べるため、値は信用せず`isProvider`を通す。
+ * 未知の値・欠落はどちらも`undefined`（起動元を特定できなかった）として返し、
+ * 呼び出し側がその場で選ばせる。
+ */
+export function providerHintToProvider(hint: unknown): Provider | undefined {
+  return typeof hint === 'string' && isProvider(hint) ? hint : undefined;
+}
+
+/** 分解セッションの`approvalMode`（Codex）/`permissionMode`（Claude）。 */
+function plannerApprovalModeFor(provider: Provider): string {
+  return provider === 'claude' ? PLANNER_CLAUDE_PERMISSION_MODE : PLANNER_CODEX_APPROVAL_MODE;
 }
 
 /**
@@ -562,8 +601,13 @@ function safestApprovalModeFor(provider: Provider): string {
  * 最安全値を明示しても無視される抜け穴があった（#58セキュリティ監査 critical）。
  * `clampToSafer`自体も「YAML側が安全順序の最安全値なら採用する」よう直したが、
  * plannerはそもそもbaselineに依存する必要が無いため、ここでは固定値を直接使う
- * （baselineが何であっても分解セッションは常に最も安全な設定で起動するべきなので、
- * 「baselineより安全な方向にしか動かせない」という汎用クランプの意味論に頼らない）。
+ * （baselineが何であっても分解セッションの権限は一定にするべきなので、「baselineより
+ * 安全な方向にしか動かせない」という汎用クランプの意味論に頼らない）。
+ *
+ * 与える権限は「ワークスペースの読み取りだけ」で固定する。承認要求は全て拒否するため、
+ * 承認を経ないと何も読めない設定（Codexの`untrusted`、Claudeの`plan`）を選ぶと、分解に
+ * 必要な読み取りごと潰れて生成が成立しない（`PLANNER_CODEX_APPROVAL_MODE` /
+ * `PLANNER_CLAUDE_PERMISSION_MODE`のコメント、issue #266）。
  *
  * プロンプトでの指示ではなく、この関数が組み立てる起動設定こそが縛りの実体である
  * （design.md §16.9「プロンプトで頼むだけでは足りない」）。
@@ -578,14 +622,14 @@ function safestApprovalModeFor(provider: Provider): string {
 export function buildPlannerSessionInput(provider: Provider, cwd: string): TaskSessionInput {
   return {
     cwd,
-    config: { model: '', effort: '', approvalMode: safestApprovalModeFor(provider) },
+    config: { model: '', effort: '', approvalMode: plannerApprovalModeFor(provider) },
     sandbox: SANDBOX_MODES[0],
   };
 }
 
 /**
- * `buildPlannerSessionInput`が組み立てた値が、期待する最安全値からずれていないかを
- * 起動直前に確かめる。`runner.ts`の`startTask`が実効`approvalMode`について
+ * `buildPlannerSessionInput`が組み立てた値が、分解セッション用に決めた固定値から
+ * ずれていないかを起動直前に確かめる。`runner.ts`の`startTask`が実効`approvalMode`について
  * `bypassPermissions`を弾く最終防御と同じ形（design.md §16.16セキュリティ監査対応）。
  *
  * 通常のコード経路では`buildPlannerSessionInput`の戻り値をそのまま渡すだけなので
@@ -594,16 +638,16 @@ export function buildPlannerSessionInput(provider: Provider, cwd: string): TaskS
  * 混入した場合に、プロンプトでの指示だけに頼らず起動そのものを止める最後の砦にする。
  */
 function assertPlannerSessionIsSafe(provider: Provider, input: TaskSessionInput): void {
-  const expectedApprovalMode = safestApprovalModeFor(provider);
+  const expectedApprovalMode = plannerApprovalModeFor(provider);
   if (input.config.approvalMode !== expectedApprovalMode) {
     throw new Error(
-      '分解セッションの実効approvalModeが期待した最安全値と一致しないため、' +
+      '分解セッションの実効approvalModeが期待値と一致しないため、' +
         `起動を中止しました（実効値: "${input.config.approvalMode}", 期待値: "${expectedApprovalMode}"）`,
     );
   }
   if (provider === 'codex' && input.sandbox !== SANDBOX_MODES[0]) {
     throw new Error(
-      '分解セッションの実効sandboxが期待した最安全値と一致しないため、' +
+      '分解セッションの実効sandboxが期待値と一致しないため、' +
         `起動を中止しました（実効値: "${input.sandbox}", 期待値: "${SANDBOX_MODES[0]}"）`,
     );
   }
