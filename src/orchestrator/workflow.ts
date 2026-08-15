@@ -234,7 +234,7 @@ const num = (v: unknown, fallback: number): number => {
   return Number.isFinite(n) ? n : fallback;
 };
 
-function isProvider(v: string): v is Provider {
+export function isProvider(v: string): v is Provider {
   return (PROVIDERS as readonly string[]).includes(v);
 }
 function isIsolation(v: string): v is Isolation {

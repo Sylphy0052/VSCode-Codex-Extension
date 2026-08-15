@@ -494,11 +494,15 @@ describe('planWorkflowFromRoadmapPhase（design.md §16.19 2段目）', () => {
     const result = await planWorkflowFromRoadmapPhase({ ...baseInput, phase, host });
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.roadmapMismatches.some((m) => m.itemId === 'R1' && m.kind === 'issueMismatch')).toBe(
+      expect(
+        result.roadmapMismatches.some((m) => m.itemId === 'R1' && m.kind === 'issueMismatch'),
+      ).toBe(true);
+      expect(result.roadmapMismatches.some((m) => m.itemId === 'R2' && m.kind === 'missing')).toBe(
         true,
       );
-      expect(result.roadmapMismatches.some((m) => m.itemId === 'R2' && m.kind === 'missing')).toBe(true);
-      expect(result.roadmapMismatches.some((m) => m.itemId === 'R3' && m.kind === 'missing')).toBe(true);
+      expect(result.roadmapMismatches.some((m) => m.itemId === 'R3' && m.kind === 'missing')).toBe(
+        true,
+      );
     }
   });
 });
@@ -852,8 +856,10 @@ describe('createTaskSessionRoadmapGenerationPort', () => {
       expect(result.text).toContain('R1 やる');
     }
     expect(host.openCalls).toHaveLength(1);
-    // sandbox: read-only相当（`planner.ts`のbuildPlannerSessionInputが組み立てる最安全値）
+    // `planner.ts`のbuildPlannerSessionInputが組み立てる分解セッション用の固定値
+    // （sandboxはread-only、承認要求が起きないapprovalMode。issue #266）
     expect(host.openCalls[0]?.sandbox).toBe('read-only');
+    expect(host.openCalls[0]?.config.approvalMode).toBe('never');
     expect(host.openCalls[0]?.cwd).toBe('/repo');
 
     const session = host.sessions[0];

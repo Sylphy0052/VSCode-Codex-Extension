@@ -1073,8 +1073,10 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       }
       if (type === 'workflowMenu') {
         // この会話とは関係のない全体の操作（issue #250）。`chatView.ts`と同じ扱いで、
-        // 応答中でも押せる。QuickPickの組み立ては`extension.ts`側に一本化してある
-        void vscode.commands.executeCommand('agent.workflows.menu');
+        // 応答中でも押せる。QuickPickの組み立ては`extension.ts`側に一本化してある。
+        // 生成（分解・ロードマップ）をこの画面と同じエージェントで走らせるため、
+        // プロバイダを添えて渡す（issue #266。省略するとその場で選ばされる）
+        void vscode.commands.executeCommand('agent.workflows.menu', 'claude');
         return;
       }
       if (type === 'rewind' && typeof m['messageId'] === 'string') {

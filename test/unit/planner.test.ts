@@ -27,6 +27,7 @@ import {
   resolveUniqueFileName,
   slugifyGoal,
   type PlannerWorkspacePort,
+  providerHintToProvider,
 } from '../../src/orchestrator/planner';
 import {
   CLEANUP_MODES,
@@ -213,7 +214,8 @@ describe('buildPlannerPrompt（design.md §16.9）', () => {
     const prompt = buildPlannerPrompt({
       goal: 'ゴール',
       workspaceSummary: { topLevelEntries: [], hasAgentsMd: false, hasClaudeMd: false },
-      roadmapMaterial: '## ロードマップの材料\n- id: R1\n  内容: 設計する\n  依存: なし\n  Issue: #12',
+      roadmapMaterial:
+        '## ロードマップの材料\n- id: R1\n  内容: 設計する\n  依存: なし\n  Issue: #12',
     });
     expect(prompt).toContain('## ロードマップの材料');
     expect(prompt).toContain('id: R1');
@@ -491,26 +493,32 @@ describe('planWorkflow（design.md §16.9）', () => {
     expect(session?.disposed).toBe(true);
   });
 
-  it('分解セッションはsandbox: read-only相当・最も安全なapprovalModeで起動する', async () => {
+  it('分解セッションはsandbox: read-only・approvalMode: neverで起動する（issue #266）', async () => {
+    // `untrusted`（安全順序表の先頭）ではなく`never`を使う。承認要求を全て拒否する
+    // 分解セッションで`untrusted`を選ぶと、read-onlyサンドボックスの中で完結する
+    // ファイル読みまで拒否され、材料を読めないまま中身の無い応答しか返らなくなる
     const host = new FakePlannerHost([VALID_YAML]);
     await planWorkflow({ ...baseInput, host, provider: 'codex' });
     expect(host.openCalls[0]?.sandbox).toBe('read-only');
-    expect(host.openCalls[0]?.config.approvalMode).toBe('untrusted');
+    expect(host.openCalls[0]?.config.approvalMode).toBe('never');
   });
 
-  it('Claudeプロバイダでも最も安全なapprovalMode（permissionMode）で起動する', async () => {
+  it('ClaudeプロバイダはpermissionMode: manual（読み取りのみ承認不要）で起動する（issue #266）', async () => {
+    // `plan`は計画を立てて`ExitPlanMode`で承認を求めるモードで、承認を全て拒否する
+    // 分解セッションとはかみ合わない。`manual`なら読み取りだけが承認を経ずに通る
     const host = new FakePlannerHost([VALID_YAML]);
     await planWorkflow({ ...baseInput, host, provider: 'claude' });
-    expect(host.openCalls[0]?.config.approvalMode).toBe('plan');
+    expect(host.openCalls[0]?.config.approvalMode).toBe('manual');
   });
 
-  it('拡張機能の設定が既定の空文字（CLIへ委譲）でも、最も安全な値で起動する（#58セキュリティ監査 critical）', async () => {
+  it('拡張機能の設定が既定の空文字（CLIへ委譲）でも、分解セッション用の固定値で起動する（#58セキュリティ監査 critical）', async () => {
     // 修正前は`buildPlannerSessionInput`が`buildEffectiveTaskConfig`（クランプ）を経由しており、
     // baselineが空文字（`codex.sandbox`等の既定値。CLI側の設定に委譲する、の意）のとき
     // `clampToSafer`が安全性を判定できずbaselineをそのまま採用してしまっていた。結果、
     // 分解セッションが「最も安全な値で起動する」という要求は無視され、空文字のまま
     // `openTaskSession`へ渡って利用者のCLI設定（自律実行向けかもしれない）に委ねられていた。
     // 現在の実装はクランプを経由せず固定値を直接使うため、baselineが空文字でも影響を受けない
+    // （固定値そのものは issue #266 で`untrusted`/`plan`から`never`/`manual`へ改めた）
     const emptyBaseline = {
       codexSandbox: '',
       codexApprovalMode: '',
@@ -520,7 +528,7 @@ describe('planWorkflow（design.md §16.9）', () => {
     const host = new FakePlannerHost([VALID_YAML]);
     await planWorkflow({ ...baseInput, host, baseline: emptyBaseline, provider: 'codex' });
     expect(host.openCalls[0]?.sandbox).toBe('read-only');
-    expect(host.openCalls[0]?.config.approvalMode).toBe('untrusted');
+    expect(host.openCalls[0]?.config.approvalMode).toBe('never');
 
     const claudeHost = new FakePlannerHost([VALID_YAML]);
     await planWorkflow({
@@ -529,7 +537,7 @@ describe('planWorkflow（design.md §16.9）', () => {
       baseline: emptyBaseline,
       provider: 'claude',
     });
-    expect(claudeHost.openCalls[0]?.config.approvalMode).toBe('plan');
+    expect(claudeHost.openCalls[0]?.config.approvalMode).toBe('manual');
   });
 
   it('承認要求は理由を問わず全て拒否する', async () => {
@@ -586,5 +594,21 @@ describe('planWorkflow（design.md §16.9）', () => {
     if (!result.ok) {
       expect(result.lastErrors.some((e) => e.message.includes('大きすぎる'))).toBe(true);
     }
+  });
+});
+
+describe('providerHintToProvider', () => {
+  it('チャット画面から渡されたプロバイダをそのまま採用する（issue #266）', () => {
+    expect(providerHintToProvider('codex')).toBe('codex');
+    expect(providerHintToProvider('claude')).toBe('claude');
+  });
+
+  it('未知の値・欠落は「起動元を特定できなかった」として undefined を返す', () => {
+    // `executeCommand`は拡張機能の外からも呼べるため、引数は信用せずに検証する
+    expect(providerHintToProvider(undefined)).toBeUndefined();
+    expect(providerHintToProvider('')).toBeUndefined();
+    expect(providerHintToProvider('gemini')).toBeUndefined();
+    expect(providerHintToProvider(1)).toBeUndefined();
+    expect(providerHintToProvider({ provider: 'claude' })).toBeUndefined();
   });
 });

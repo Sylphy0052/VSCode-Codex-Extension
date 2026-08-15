@@ -78,12 +78,13 @@ import {
   buildWorkspaceSummary,
   nodePlannerWorkspacePort,
   planWorkflow,
+  providerHintToProvider,
   resolveUniqueFileName,
   slugifyGoal,
   locateSecurityWarningLine,
   type PlanWorkflowResult,
 } from './orchestrator/planner';
-import { DEFAULT_PROVIDER, MAX_PROMPT_LENGTH } from './orchestrator/workflow';
+import { MAX_PROMPT_LENGTH } from './orchestrator/workflow';
 import type { Provider } from './orchestrator/workflow';
 import { ProviderRegistry } from './provider/registry';
 import type { AgentProvider } from './provider/types';
@@ -366,8 +367,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 本番の経路は包みが無かったときと変わらない（`forgeOverrides` と同じ設計判断）。
   const chatConnectionOverride: { port?: AppServerConnectionPort } = {};
   let chatConnectionHandlers:
-    | { onNotification: NotificationHandler; onServerRequest: ServerRequestHandler }
-    | undefined;
+    { onNotification: NotificationHandler; onServerRequest: ServerRequestHandler } | undefined;
   /** Claude Code画面のプロセス起動の差し替え（Issue #186）。空なら実物が起動する。 */
   const claudeSpawnOverride: { spawn?: ClaudeSpawnPort } = {};
 
@@ -686,14 +686,14 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     ),
     vscode.commands.registerCommand('agent.workflows.stop', () => stopWorkflow(workflowRunner)),
     vscode.commands.registerCommand('agent.workflows.view', () => workflowView.show()),
-    vscode.commands.registerCommand('agent.workflows.plan', () =>
-      planWorkflowCommand(chat, claudeChat, workflowView, log),
+    vscode.commands.registerCommand('agent.workflows.plan', (providerHint?: unknown) =>
+      planWorkflowCommand(chat, claudeChat, workflowView, log, providerHint),
     ),
-    vscode.commands.registerCommand('agent.workflows.roadmap', () =>
-      runRoadmap(roadmapIssuePort, chat, claudeChat, log),
+    vscode.commands.registerCommand('agent.workflows.roadmap', (providerHint?: unknown) =>
+      runRoadmap(roadmapIssuePort, chat, claudeChat, log, providerHint),
     ),
-    vscode.commands.registerCommand('agent.workflows.menu', () =>
-      showWorkflowMenu(workflowRunner),
+    vscode.commands.registerCommand('agent.workflows.menu', (providerHint?: unknown) =>
+      showWorkflowMenu(workflowRunner, providerHint),
     ),
   );
 
@@ -860,8 +860,11 @@ async function stopWorkflow(runner: WorkflowRunner): Promise<void> {
  * サイドパネル（Agentsビューのタイトル行）とチャット画面（`#composer` のアイコン）の
  * どちらから押してもこれが開く。項目の組み立ては `buildWorkflowMenuEntries` にあり、
  * ここは実行中の件数を数えて選ばれたコマンドへ渡すだけにしてある。
+ *
+ * `providerHint` はチャット画面から押されたときだけ入る（その画面のプロバイダ）。生成系の
+ * コマンドへそのまま素通しし、どのエージェントで生成するかの判断は受け手に委ねる。
  */
-async function showWorkflowMenu(runner: WorkflowRunner): Promise<void> {
+async function showWorkflowMenu(runner: WorkflowRunner, providerHint?: unknown): Promise<void> {
   const runningCount = runner.listLive().filter((r) => r.outcome === 'running').length;
   const picked = await vscode.window.showQuickPick(buildWorkflowMenuEntries(runningCount), {
     placeHolder: 'ワークフロー（複数タスクの並列実行）の操作を選択',
@@ -869,7 +872,37 @@ async function showWorkflowMenu(runner: WorkflowRunner): Promise<void> {
   if (picked === undefined) {
     return;
   }
-  await vscode.commands.executeCommand(picked.command);
+  await vscode.commands.executeCommand(picked.command, providerHint);
+}
+
+/**
+ * 生成セッション（分解・ロードマップ）を走らせるプロバイダを決める（issue #266）。
+ *
+ * チャット画面のアイコンから起動したときは、その画面のプロバイダをそのまま使う
+ * （Claude Codeの画面から押したらClaude Codeで生成する）。サイドパネルやコマンド
+ * パレットのように起動元が特定できないときだけ、その場で選んでもらう。
+ *
+ * `hint` は `executeCommand` の引数、つまり拡張機能の外からも渡せる値なので、
+ * `isProvider` を通してから使う（未知の文字列は「指定なし」と同じ扱いにする）。
+ * 選択せずに閉じたときは `undefined` を返し、呼び出し側は何もしない。
+ */
+async function resolvePlannerProvider(hint: unknown): Promise<Provider | undefined> {
+  const fromHint = providerHintToProvider(hint);
+  if (fromHint !== undefined) {
+    return fromHint;
+  }
+  const picked = await vscode.window.showQuickPick(
+    [
+      { label: 'Codex', description: 'codex CLIで生成します', provider: 'codex' as const },
+      {
+        label: 'Claude Code',
+        description: 'claude CLIで生成します',
+        provider: 'claude' as const,
+      },
+    ],
+    { placeHolder: '生成に使うエージェントを選択', ignoreFocusOut: true },
+  );
+  return picked?.provider;
 }
 
 /** ワークスペース直下の構成（ファイル・ディレクトリ名。隠しファイルは除く）。取得できなければ空配列。 */
@@ -899,14 +932,15 @@ async function fileExists(folder: vscode.WorkspaceFolder, name: string): Promise
  * ゴールの文からロードマップを生成する（design.md §16.19、#95・配線はIssue #105）。
  *
  * 生成セッションの起動は `roadmap.ts` の `createTaskSessionRoadmapGenerationPort` に委ねる。
- * `planWorkflowCommand`（分解セッション）と同じく、プロバイダは `defaults.provider` の
- * 組み込み既定値（`codex`）に固定する（design.md §16.9「設定での切り替えは提供しない」）。
+ * `planWorkflowCommand`（分解セッション）と同じく、プロバイダは起動元のチャット画面から
+ * 受け取り、特定できないときは `resolvePlannerProvider` が選ばせる（issue #266）。
  */
 async function runRoadmap(
   issues: IssueListPort,
   chat: ChatViewManager,
   claudeChat: ClaudeChatViewManager,
   log: Logger,
+  providerHint?: unknown,
 ): Promise<void> {
   const folder = currentWorkspaceFolder();
   if (folder === undefined) {
@@ -921,8 +955,11 @@ async function runRoadmap(
     return;
   }
 
+  const provider = await resolvePlannerProvider(providerHint);
+  if (provider === undefined) {
+    return;
+  }
   const workspaceRoot = folder.uri.fsPath;
-  const provider = DEFAULT_PROVIDER;
   const host = provider === 'claude' ? claudeChat : chat;
   const generation = createTaskSessionRoadmapGenerationPort(host, provider, workspaceRoot);
   const [workspaceSummary, hasAgentsFile, hasClaudeFile] = await Promise.all([
@@ -973,6 +1010,7 @@ async function planWorkflowCommand(
   claudeChat: ClaudeChatViewManager,
   view: WorkflowViewManager,
   log: Logger,
+  providerHint?: unknown,
 ): Promise<void> {
   const folder = currentWorkspaceFolder();
   if (folder === undefined) {
@@ -994,11 +1032,15 @@ async function planWorkflowCommand(
   if (source === undefined) {
     return;
   }
-  if (source.sourceKind === 'roadmap') {
-    await planWorkflowFromRoadmapCommand(chat, claudeChat, view, log, folder);
+  const provider = await resolvePlannerProvider(providerHint);
+  if (provider === undefined) {
     return;
   }
-  await planWorkflowFromGoalCommand(chat, claudeChat, view, log, folder);
+  if (source.sourceKind === 'roadmap') {
+    await planWorkflowFromRoadmapCommand(chat, claudeChat, view, log, folder, provider);
+    return;
+  }
+  await planWorkflowFromGoalCommand(chat, claudeChat, view, log, folder, provider);
 }
 
 /**
@@ -1015,6 +1057,7 @@ async function planWorkflowFromGoalCommand(
   view: WorkflowViewManager,
   log: Logger,
   folder: vscode.WorkspaceFolder,
+  provider: Provider,
 ): Promise<void> {
   const goal = await vscode.window.showInputBox({
     title: 'ワークフローのゴール',
@@ -1033,7 +1076,6 @@ async function planWorkflowFromGoalCommand(
     return;
   }
 
-  const provider = DEFAULT_PROVIDER;
   const host = provider === 'claude' ? claudeChat : chat;
   const workspaceRoot = folder.uri.fsPath;
 
@@ -1076,6 +1118,7 @@ async function planWorkflowFromRoadmapCommand(
   view: WorkflowViewManager,
   log: Logger,
   folder: vscode.WorkspaceFolder,
+  provider: Provider,
 ): Promise<void> {
   const roadmapDir = readWorkflowsConfig().roadmapDir;
   const pattern = new vscode.RelativePattern(folder, `${roadmapDir}/**/*.md`);
@@ -1128,7 +1171,6 @@ async function planWorkflowFromRoadmapCommand(
     return;
   }
 
-  const provider = DEFAULT_PROVIDER;
   const host = provider === 'claude' ? claudeChat : chat;
   const workspaceRoot = folder.uri.fsPath;
 
@@ -1161,7 +1203,11 @@ async function planWorkflowFromRoadmapCommand(
     result.definition,
     vscode.workspace.asRelativePath(pickedFile.file, false),
   );
-  const resultWithRoadmap = { ...result, yaml: withRoadmap.yaml, definition: withRoadmap.definition };
+  const resultWithRoadmap = {
+    ...result,
+    yaml: withRoadmap.yaml,
+    definition: withRoadmap.definition,
+  };
 
   if (result.roadmapMismatches.length > 0) {
     log.warn(

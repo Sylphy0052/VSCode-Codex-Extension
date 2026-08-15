@@ -1234,8 +1234,10 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       }
       if (type === 'workflowMenu') {
         // この会話とは関係のない全体の操作（issue #250）。ループへの割り込み扱いにはせず、
-        // 応答中でも押せる。QuickPickの組み立ては`extension.ts`側に一本化してある
-        await vscode.commands.executeCommand('agent.workflows.menu');
+        // 応答中でも押せる。QuickPickの組み立ては`extension.ts`側に一本化してある。
+        // 生成（分解・ロードマップ）をこの画面と同じエージェントで走らせるため、
+        // プロバイダを添えて渡す（issue #266。省略するとその場で選ばされる）
+        await vscode.commands.executeCommand('agent.workflows.menu', 'codex');
         return;
       }
       if (type === 'cancelQueued' && typeof m['index'] === 'number') {
