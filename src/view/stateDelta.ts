@@ -39,26 +39,63 @@ export function buildItemsDelta(
 ): ItemsDelta {
   const total = next.length;
   if (previous === undefined || previous.length > total) {
-    return { mode: 'full', items: next, total };
+    return { mode: 'full', items: stripHostOnlyItems(next), total };
   }
   const changed: ChatItem[] = [];
   for (let i = 0; i < previous.length; i += 1) {
     const before = previous[i];
     const after = next[i];
     if (before === undefined || after === undefined || before.id !== after.id) {
-      return { mode: 'full', items: next, total };
+      return { mode: 'full', items: stripHostOnlyItems(next), total };
     }
     if (before !== after) {
-      changed.push(after);
+      changed.push(stripHostOnlyFields(after));
     }
   }
   for (let i = previous.length; i < total; i += 1) {
     const added = next[i];
     if (added !== undefined) {
-      changed.push(added);
+      changed.push(stripHostOnlyFields(added));
     }
   }
   return { mode: 'delta', items: changed, total };
+}
+
+/**
+ * webviewが描画に使わない項目を落としてから送る（issue #320）。
+ *
+ * `FileDiff.editReplace`（issue #310でClaude CodeのEditツール由来の復元用に足した
+ * `old_string` / `new_string` の生の値）を見るのはホスト側の `diffRestore.ts` だけで、
+ * webview側は一切参照しない。表示用の `diff` テキストが `MAX_DIFF_LINES` で切り詰め
+ * られているのに対しこちらは切り詰めていないため、そのまま送ると描画に使わないデータが
+ * 上限を素通りして直列化に載る。この経路の重さは issue #246・#262 で二度手当てしている
+ * ので、載せる必要が無いものは載せない。
+ *
+ * ホスト側は差分の実体をwebviewから受け取らず、`itemId` と差分の添字からセッションの
+ * 状態を引き直す（`chatView.ts`）。落としても「差分を開く」「この変更を戻す」は動く。
+ *
+ * 落とす対象を持たない項目は**同じ参照のまま返す**。全項目を作り直すと、送信を軽くする
+ * ために足したこの処理自体が割り当てを増やしてしまうため。なお `flushState` が次回の
+ * 比較に使う `sentItems` は元の項目を指したままなので、参照の同一性で変化を捉える
+ * {@link buildItemsDelta} の判定はここでの作り替えに影響されない。
+ */
+function stripHostOnlyFields(item: ChatItem): ChatItem {
+  if (!item.diffs.some((diff) => diff.editReplace !== undefined)) {
+    return item;
+  }
+  return {
+    ...item,
+    diffs: item.diffs.map((diff) =>
+      diff.editReplace === undefined ? diff : { ...diff, editReplace: undefined },
+    ),
+  };
+}
+
+/** {@link stripHostOnlyFields} を並び全体へ掛ける。落とす対象が無ければ元の配列を返す。 */
+export function stripHostOnlyItems(items: readonly ChatItem[]): readonly ChatItem[] {
+  return items.some((item) => item.diffs.some((diff) => diff.editReplace !== undefined))
+    ? items.map(stripHostOnlyFields)
+    : items;
 }
 
 /**
