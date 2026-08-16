@@ -143,6 +143,13 @@
           "group": "navigation@102"
         }
       ],
+      "editor/context": [
+        {
+          "command": "agent.sendSelectionToChat",
+          "when": "editorHasSelection",
+          "group": "9_agent@1"
+        }
+      ],
       "view/item/context": [
         {
           "command": "claude.openChat",
@@ -460,6 +467,11 @@
       {
         "command": "agent.workflows.plan",
         "title": "ゴール文からワークフローを生成…",
+        "category": "Agent"
+      },
+      {
+        "command": "agent.sendSelectionToChat",
+        "title": "Agentへ送る",
         "category": "Agent"
       }
     ],

@@ -697,6 +697,55 @@ describe('ChatViewManager', () => {
     });
   });
 
+  describe('エディタの選択範囲の送り先（getActiveComposerTarget、issue #292）', () => {
+    it('開いているタブが無ければundefined', () => {
+      const { manager } = createManager();
+      expect(manager.getActiveComposerTarget()).toBeUndefined();
+    });
+
+    it('選択中の画面の入力欄へテキストを挿し込み、そのタブを表に出す', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openNew();
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-insert'));
+      await p;
+
+      const target = manager.getActiveComposerTarget();
+      expect(target).toBeDefined();
+
+      const panel = __mock.lastCreatedPanel();
+      const revealCountBefore = panel?.revealCount ?? 0;
+
+      target?.insert('src/foo.ts:1-1\nconst x = 1;');
+
+      expect(panel?.webview.sent).toContainEqual({
+        type: 'insertComposerText',
+        text: 'src/foo.ts:1-1\nconst x = 1;',
+      });
+      expect(panel?.revealCount).toBe(revealCountBefore + 1);
+      expect(panel?.active).toBe(true);
+    });
+
+    it('activeSequenceは後からアクティブになったタブの方が大きい（Claude Code側との横断比較に使う）', async () => {
+      const { manager, connection } = createManager();
+      const p1 = manager.openNew();
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-1'));
+      await p1;
+      const first = manager.getActiveComposerTarget();
+
+      const p2 = manager.openNew();
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-2'));
+      await p2;
+      const second = manager.getActiveComposerTarget();
+
+      expect(first).toBeDefined();
+      expect(second).toBeDefined();
+      expect(second?.activeSequence).toBeGreaterThan(first?.activeSequence as number);
+    });
+  });
+
   describe('会話のクリア（TUIの /clear 相当）', () => {
     it('いまの会話を閉じて、同じ作業フォルダで新しい会話を開き直す', async () => {
       const { manager, connection } = createManager();

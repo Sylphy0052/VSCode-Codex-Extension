@@ -91,6 +91,7 @@ import {
   type ReviewTargetKind,
 } from '../codex/reviewTarget';
 import { buildSideQuestionForkParams } from '../codex/sideQuestion';
+import { nextActivePanelSequence, type ActiveComposerTarget } from './activePanelSequence';
 import { chatCsp } from './chatCsp';
 import { chatScript, type ReviewButtonConfig } from './chatScript';
 import { chatStyles } from './chatStyles';
@@ -1060,6 +1061,12 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
   private readonly pendingStarts = new PendingStartRegistry<ChatPanel>();
   /** 名前変更コマンドの対象。最後にアクティブだったCodex画面。 */
   private active: ChatPanel | undefined;
+  /**
+   * `active` が（再）設定されるたびに進む採番（issue #292）。Claude Code側
+   * （`claudeChatView.ts`）と比べて、エディタの選択範囲をどちらへ挿すか決めるのに使う
+   * （`getActiveComposerTarget` 参照）。
+   */
+  private activeSequence = 0;
 
   private readonly catalog: CommandCatalog;
   private commands: SlashCommand[] | undefined;
@@ -1318,6 +1325,7 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       entry.panel.reveal(undefined, preserveFocus);
       if (!preserveFocus) {
         this.active = entry;
+        this.activeSequence = nextActivePanelSequence();
       }
       return;
     }
@@ -1375,6 +1383,7 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     panel.onDidChangeViewState(() => {
       if (panel.active) {
         this.active = entry;
+        this.activeSequence = nextActivePanelSequence();
       }
     });
     panel.onDidDispose(() => {
@@ -1395,6 +1404,7 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     // 実際にフォーカスが当たっているか（panel.active）を見て決める
     if (panel.active) {
       this.active = entry;
+      this.activeSequence = nextActivePanelSequence();
     }
   }
 
@@ -2209,6 +2219,31 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     const cwd = entry.cwd;
     this.teardown(entry);
     await this.openNew(cwd);
+  }
+
+  /**
+   * エディタの選択範囲（issue #292）を送る先。最後にアクティブだったCodex画面を返す
+   * （`this.active`。名前変更・クリアと同じ対象）。開いているタブが無ければ`undefined`。
+   *
+   * Claude Code側（`claudeChatView.ts`の同名メソッド）と`activeSequence`を比べて、
+   * 呼び出し側（`extension.ts`）がどちらへ挿すかを決める。ここではプロバイダ内の
+   * 判定だけを行い、実際の送り先の決定・パスの組み立て・0件時の新規会話は行わない。
+   */
+  getActiveComposerTarget(): ActiveComposerTarget | undefined {
+    const entry = this.active;
+    if (entry === undefined || entry.panel === undefined) {
+      return undefined;
+    }
+    return {
+      activeSequence: this.activeSequence,
+      insert: (text: string) => {
+        if (entry.panel === undefined) {
+          return;
+        }
+        void entry.panel.webview.postMessage({ type: 'insertComposerText', text });
+        this.showPanel(entry, false);
+      },
+    };
   }
 
   /**

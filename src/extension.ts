@@ -111,7 +111,14 @@ import { SessionActions, nodeCommandRunner, type SessionAction } from './session
 import { SessionWatcher } from './session/sessionWatcher';
 import { UsageReader } from './session/usageReader';
 import { PinnedSessionStore } from './util/pinnedSessions';
+import {
+  buildSelectionPayload,
+  computeSelectionLineRange,
+  selectionTextExceedsLimit,
+  MAX_SELECTION_BYTES,
+} from './util/editorSelection';
 import { ChatViewManager } from './view/chatView';
+import type { ActiveComposerTarget } from './view/activePanelSequence';
 import { ClaudeChatViewManager } from './view/claudeChatView';
 import { ControlPanelViewProvider } from './view/controlPanelView';
 import { ConversationViewManager } from './view/conversationView';
@@ -752,6 +759,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       }),
     ),
     vscode.commands.registerCommand('codex.showLog', () => log.show()),
+    // エディタの選択範囲をチャットへ送る（issue #292、design.md §14.57）。
+    // 送信はしない（入力欄へ挿すだけ）
+    vscode.commands.registerCommand('agent.sendSelectionToChat', () =>
+      sendEditorSelectionToChat(chat, claudeChat),
+    ),
     vscode.commands.registerCommand('agent.workflows.run', () =>
       runWorkflow(workflowRunner, workflowView, log),
     ),
@@ -1106,6 +1118,112 @@ async function resolvePlannerProvider(hint: unknown): Promise<Provider | undefin
     { placeHolder: '生成に使うエージェントを選択', ignoreFocusOut: true },
   );
   return picked?.provider;
+}
+
+/**
+ * エディタの選択範囲をチャットの入力欄へ送る（issue #292、design.md §14.57）。
+ *
+ * 「パス:開始行-終了行」を見出し行にした本文を、直近にアクティブだったタブの入力欄へ
+ * 挿すだけで、**送信はしない**（人が指示を書き足してから自分で送る。受入基準）。
+ * メニューの`when`句（`editorHasSelection`）で選択が空のときは通常出ないが、
+ * コマンドパレット経由の直接実行に備えて実行時にも防御する。
+ */
+async function sendEditorSelectionToChat(
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
+): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (editor === undefined || editor.selection.isEmpty) {
+    return;
+  }
+
+  const text = editor.document.getText(editor.selection);
+  if (selectionTextExceedsLimit(text)) {
+    void vscode.window.showWarningMessage(
+      `選択範囲が大きすぎるため送れません（上限${MAX_SELECTION_BYTES}バイト）`,
+    );
+    return;
+  }
+
+  const range = computeSelectionLineRange(
+    editor.selection.start.line,
+    editor.selection.end.line,
+    editor.selection.end.character,
+  );
+  const payload = buildSelectionPayload(workspaceRelativeDisplayPath(editor.document.uri), range, text);
+
+  // 複数開いているときは直近にアクティブだったタブを使う（Codex/Claude Codeを横断して
+  // `activeSequence`で比べる。`ChatViewManager.getActiveComposerTarget`のJSDoc参照）
+  const target = pickActiveComposerTarget(chat, claudeChat);
+  if (target !== undefined) {
+    target.insert(payload);
+    return;
+  }
+
+  // チャットタブが1枚も無いときは、新しい会話を開いてから挿入する（受入基準）。
+  // 起動元がエディタのため、どちらのエージェントを使うかは選んでもらう
+  // （`resolvePlannerProvider`と同じ形だが、文言が「生成」専用のため使い回さない）
+  const provider = await pickProviderForNewChat();
+  if (provider === undefined) {
+    return;
+  }
+  const manager = provider === 'codex' ? chat : claudeChat;
+  await manager.openNew();
+  manager.getActiveComposerTarget()?.insert(payload);
+}
+
+/** Codex/Claude Codeのうち、より最近アクティブだった方の挿入先を返す。両方無ければ`undefined`。 */
+function pickActiveComposerTarget(
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
+): ActiveComposerTarget | undefined {
+  const codex = chat.getActiveComposerTarget();
+  const claude = claudeChat.getActiveComposerTarget();
+  if (codex === undefined) {
+    return claude;
+  }
+  if (claude === undefined) {
+    return codex;
+  }
+  return codex.activeSequence >= claude.activeSequence ? codex : claude;
+}
+
+/**
+ * 選択範囲を送るための新しい会話を、どちらのエージェントで開くか選ばせる（issue #292）。
+ * `resolvePlannerProvider`（issue #266）と同じ形のQuickPickだが、あちらの文言は
+ * 「生成」専用（ワークフローの分解・ロードマップ生成）のためこの用途では使い回さない。
+ */
+async function pickProviderForNewChat(): Promise<Provider | undefined> {
+  const picked = await vscode.window.showQuickPick(
+    [
+      {
+        label: 'Codex',
+        description: 'codex CLIで新しい会話を開きます',
+        provider: 'codex' as const,
+      },
+      {
+        label: 'Claude Code',
+        description: 'claude CLIで新しい会話を開きます',
+        provider: 'claude' as const,
+      },
+    ],
+    { placeHolder: '新しい会話を開くエージェントを選択', ignoreFocusOut: true },
+  );
+  return picked?.provider;
+}
+
+/**
+ * 見出し行に使うパスの表示形式（issue #292）。ワークスペース直下からの相対パスにする。
+ *
+ * ワークスペース外のファイル（別フォルダを直接開いている等）は、ホームディレクトリ等の
+ * 絶対パスをそのまま会話へ流し込まないよう、ファイル名だけを返す（会話はCLIプロセスへ
+ * 送られ、記録にも残るため。design.md §14.57の判断）。
+ */
+function workspaceRelativeDisplayPath(uri: vscode.Uri): string {
+  if (vscode.workspace.getWorkspaceFolder(uri) === undefined) {
+    return path.basename(uri.fsPath);
+  }
+  return vscode.workspace.asRelativePath(uri, false);
 }
 
 /** ワークスペース直下の構成（ファイル・ディレクトリ名。隠しファイルは除く）。取得できなければ空配列。 */

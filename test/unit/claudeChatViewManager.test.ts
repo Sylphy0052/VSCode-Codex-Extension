@@ -688,6 +688,55 @@ describe('ClaudeChatViewManagerの会話クリア（CLIの /clear 相当）', ()
   });
 });
 
+describe('エディタの選択範囲の送り先（getActiveComposerTarget、issue #292）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+  });
+
+  it('開いているタブが無ければundefined', () => {
+    const { manager } = createManager();
+    expect(manager.getActiveComposerTarget()).toBeUndefined();
+  });
+
+  it('選択中の画面の入力欄へテキストを挿し込み、そのタブを表に出す', async () => {
+    stubStartCapturing();
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+
+    const target = manager.getActiveComposerTarget();
+    expect(target).toBeDefined();
+
+    const panel = __mock.lastCreatedPanel();
+    const revealCountBefore = panel?.revealCount ?? 0;
+
+    target?.insert('src/foo.ts:1-1\nconst x = 1;');
+
+    expect(panel?.webview.sent).toContainEqual({
+      type: 'insertComposerText',
+      text: 'src/foo.ts:1-1\nconst x = 1;',
+    });
+    expect(panel?.revealCount).toBe(revealCountBefore + 1);
+    expect(panel?.active).toBe(true);
+  });
+
+  it('activeSequenceは後からアクティブになったタブの方が大きい（Codex側との横断比較に使う）', async () => {
+    stubStartCapturing();
+    const { manager } = createManager();
+
+    await manager.openNew('/workspace/root/a');
+    const first = manager.getActiveComposerTarget();
+
+    await manager.openNew('/workspace/root/b');
+    const second = manager.getActiveComposerTarget();
+
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    expect(second?.activeSequence).toBeGreaterThan(first?.activeSequence as number);
+  });
+});
+
 describe('deriveTitle（issue #199の名前解決順）', () => {
   const baseState = (
     overrides: Partial<Parameters<typeof deriveTitle>[0]> = {},

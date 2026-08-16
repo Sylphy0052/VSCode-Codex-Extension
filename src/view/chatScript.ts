@@ -2180,6 +2180,17 @@ export function chatScript(
       // 届いた画像を反映する。差分がある項目だけ描き直される
       if (lastItems) syncItems(lastItems);
     }
+    if (data.type === 'insertComposerText' && typeof data.text === 'string') {
+      // エディタの選択範囲を入力欄へ挿す（issue #292）。ホスト側（chatView.ts /
+      // claudeChatView.ts）が挿す先のタブと本文を決め、ここは受け取って反映するだけ。
+      // 既に入力中の内容は壊さず末尾へ追記する（空でも改行を余分に挟まないよう分ける）。
+      // 送信はしない（人が指示を書き足してから自分で送る）
+      const input = el('input');
+      const needsNewline = input.value.length > 0 && input.value.slice(-1) !== '\\n';
+      input.value = input.value + (needsNewline ? '\\n' : '') + data.text;
+      input.selectionStart = input.selectionEnd = input.value.length;
+      input.focus();
+    }
   });
 
   vscode.postMessage({ type: 'ready' });
