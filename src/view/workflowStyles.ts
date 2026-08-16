@@ -106,7 +106,19 @@ export function workflowStyles(): string {
   }
 
   /* ---- 依存グラフ ---- */
-  #graphWrap { overflow-x: auto; padding: 8px 0; }
+  .section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; }
+  .graph-tools { display: flex; align-items: center; gap: 6px; }
+  .graph-tools .hint { color: var(--vscode-descriptionForeground); font-size: 0.85em; }
+  .graph-tools .zoom-label {
+    min-width: 5.5em;
+    text-align: center;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+    font-variant-numeric: tabular-nums;
+  }
+  /* 縮小しても収まらない場合の逃げ道として、縦横どちらもスクロールできるようにする
+     （高さは中身なりなので、通常は縦のスクロールバーは出ない） */
+  #graphWrap { overflow: auto; padding: 8px 0; }
   #graph { display: block; }
   .wf-node-rect {
     fill: var(--vscode-editorWidget-background, var(--vscode-editor-background));
