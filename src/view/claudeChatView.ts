@@ -86,6 +86,7 @@ import { CLAUDE_APPROVAL_CYCLE } from '../provider/approvalCycle';
 import type { ClaudeConfig } from '../claude/types';
 import type { ClaudeEditableKey, SettingsProvider } from './settingsProvider';
 import type { ChatActivity } from './chatView';
+import { nextActivePanelSequence, type ActiveComposerTarget } from './activePanelSequence';
 
 interface ClaudePanel {
   /** タブが今開いているか。`undefined` は閉じている状態（design.md §16.10の4）。 */
@@ -213,6 +214,12 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
    * エディタ右上の「セッション名を変更」はこれを対象にする。
    */
   private active: ClaudePanel | undefined;
+  /**
+   * `active` が（再）設定されるたびに進む採番（issue #292）。Codex側
+   * （`chatView.ts`）と比べて、エディタの選択範囲をどちらへ挿すか決めるのに使う
+   * （`getActiveComposerTarget` 参照）。
+   */
+  private activeSequence = 0;
 
   constructor(
     private readonly claudePath: () => string,
@@ -671,6 +678,31 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     await this.openNew(cwd);
   }
 
+  /**
+   * エディタの選択範囲（issue #292）を送る先。最後にアクティブだったClaude Code画面を返す
+   * （`this.active`。名前変更・クリアと同じ対象）。開いているタブが無ければ`undefined`。
+   *
+   * Codex側（`chatView.ts`の同名メソッド）と`activeSequence`を比べて、呼び出し側
+   * （`extension.ts`）がどちらへ挿すかを決める。ここではプロバイダ内の判定だけを行い、
+   * 実際の送り先の決定・パスの組み立て・0件時の新規会話は行わない。
+   */
+  getActiveComposerTarget(): ActiveComposerTarget | undefined {
+    const entry = this.active;
+    if (entry === undefined || entry.panel === undefined) {
+      return undefined;
+    }
+    return {
+      activeSequence: this.activeSequence,
+      insert: (text: string) => {
+        if (entry.panel === undefined) {
+          return;
+        }
+        void entry.panel.webview.postMessage({ type: 'insertComposerText', text });
+        this.showPanel(entry, false);
+      },
+    };
+  }
+
   /** セッションとループだけを組み立てる。パネルはまだ作らない。 */
   private buildEntry(
     cwd: string,
@@ -734,6 +766,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       entry.panel.reveal(undefined, preserveFocus);
       if (!preserveFocus) {
         this.active = entry;
+        this.activeSequence = nextActivePanelSequence();
       }
       return;
     }
@@ -794,6 +827,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     panel.onDidChangeViewState(() => {
       if (panel.active) {
         this.active = entry;
+        this.activeSequence = nextActivePanelSequence();
       }
     });
     panel.onDidDispose(() => {
@@ -811,6 +845,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     // タスク管理下のパネルは常にpreserveFocus: trueで背面に開くため、無条件にactiveを奪わない）
     if (panel.active) {
       this.active = entry;
+      this.activeSequence = nextActivePanelSequence();
     }
   }
 

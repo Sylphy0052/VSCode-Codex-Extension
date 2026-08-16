@@ -3168,6 +3168,62 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - プリセットの並び順はそのまま`agent.sessionPresets`の配列順（QuickPickでの並び替え・お気に入り等は無い）
 - 依存Issue #289（主要コマンドへの既定キーバインド割り当て）は完了済みだが、`agent.openPresetChat`には既定のキーバインドを割り当てていない（プリセットの有無・件数が利用者ごとに異なり、決め打ちの1キーを割り当てる根拠が無いため）
 
+### 14.57 エディタの選択範囲をそのまま送れるようにする（issue #292）
+
+コードをエージェントへ渡す経路が`@`によるファイル指定しか無かった。「この関数だけ見せたい」ときに行番号を手で打つ必要があり、選択範囲そのものを渡す手段が無かった。エディタの右クリックメニューへ「Agentへ送る」を足し、`パス:開始行-終了行`と選択本文を、アクティブなチャットタブの入力欄へ挿入する。**送信はしない**（人が指示を書き足してから自分で送る、受入基準）。
+
+#### 挿入経路は新設した。既存の「コードブロックをエディタへ挿入」（§14.51）とは向きが逆
+
+§14.51の`insertCode`はWebview→ホスト→アクティブエディタへの一方向（コードブロックの内容をエディタに書き込む）で、今回必要なのはホスト→Webviewの逆方向（エディタの選択範囲をチャットの入力欄に書き込む）だった。既存のホスト→Webviewの一方向メッセージ（`state` / `commands` / `files` / `imageData`）と同じ形で`insertComposerText`を新設し、`chatScript.ts`の`window.addEventListener('message', ...)`へ受信処理を足した（`{ type: 'insertComposerText', text }`）。入力欄（`#input`）の末尾へ追記し、既に入力中の内容は壊さない。空でなければ直前に改行を1つ挟んでから足す（カーソル位置ではなく**末尾へ追記**する方を選んだ。右クリックした時点でエディタにフォーカスがあり入力欄のカーソル位置が不定なため、常に同じ場所＝末尾に置く方が挙動を予測しやすいと判断した）。挿入後はカーソルを末尾へ置いて`focus()`する。送信ボタンは押さない。
+
+#### 「直近にアクティブだったタブ」はCodex/Claude Codeを横断して比べる
+
+`ChatViewManager` / `ClaudeChatViewManager`はそれぞれ`private active`（issue #199・#286、`onDidChangeViewState`で`panel.active`になった瞬間だけ更新し、フォーカスが外れても保持し続ける）を持つが、これはプロバイダ内でしか「直近」を表せない。この拡張機能はCodex/Claude Codeの両方を同時に開ける（README）ため、右クリック時にどちらのタブが真に最後にアクティブだったかはプロバイダをまたいで比べる必要がある。
+
+プロセス全体で共有する単調増加カウンタ（`src/view/activePanelSequence.ts`の`nextActivePanelSequence`）を新設し、両管理クラスの`active`が（再）設定される3箇所（`showPanel`のreveal分岐、`attachPanel`の`onDidChangeViewState`、`attachPanel`生成直後の`panel.active`チェック）すべてで採番し直す。`Date.now()`ではなく専用カウンタにしたのは、同一ミリ秒内で連続してフォーカスが移る操作（テストでの模擬含む）でも順序を一意に付けるため。
+
+両管理クラスに`getActiveComposerTarget(): ActiveComposerTarget | undefined`を追加した（`ActiveComposerTarget`は`{ activeSequence, insert(text) }`、`activePanelSequence.ts`で定義）。`insert`は`insertComposerText`を`postMessage`し、`showPanel(entry, false)`でそのタブを表に出す（フォーカスも当たる）。`src/extension.ts`の`pickActiveComposerTarget`が両方の`activeSequence`を比べ、大きい方（より最近アクティブだった方）を採用する。
+
+#### タブが1枚も無いときはエージェントを選ばせる
+
+`resolvePlannerProvider`（issue #266、ワークフローの分解・ロードマップ生成向け）と同じ形のQuickPickだが、あちらの文言（「生成に使うエージェントを選択」「codex CLIで生成します」）は生成タスク専用のため使い回さず、`pickProviderForNewChat`として文言だけ変えて別に持つ（「新しい会話を開くエージェントを選択」）。選んだ側の`openNew()`で新しい会話を開いてから、そのタブへ挿入する。
+
+#### パスはワークスペース相対にし、ワークスペース外はファイル名だけにする
+
+会話はCLIプロセスへ送られ記録にも残るため、利用者のホームディレクトリ等の絶対パスをそのまま流し込まない。`workspaceRelativeDisplayPath`（`extension.ts`）は`vscode.workspace.getWorkspaceFolder(uri)`でワークスペース内かを判定し、内側なら`vscode.workspace.asRelativePath(uri, false)`（既存の`@`ファイル候補と同じ関数）、外側（別フォルダを直接開いている・マルチルートの対象外フォルダ等）なら`path.basename`でファイル名だけを返す。`asRelativePath`はワークスペース外の入力に対しては渡された値（絶対パス）をそのまま返す仕様のため、判定を経ずに使うと絶対パスが漏れる。
+
+行範囲の1始まり変換は`computeSelectionLineRange`（`src/util/editorSelection.ts`）。行末から次の行の先頭（`endCharacter === 0`）までドラッグして選択を終えたときは、実際には選んでいない次の行を`endLine`が指してしまう（VSCode標準の選択範囲の性質）ため、その場合は1つ前の行を最終行として扱う。
+
+#### 選択本文の上限は1MBに固定した
+
+`selectionTextExceedsLimit`（`src/util/editorSelection.ts`）はUTF-8換算で`MAX_SELECTION_BYTES`（1MB、`src/orchestrator/workflow.ts`の`MAX_WORKFLOW_FILE_BYTES`と同じ値）を超える選択を拒み、`extension.ts`側で警告を出して何もしない（挿入しない）。通常の関数・ファイル単位の選択は数KB〜数十KBに収まり、1MBはその2桁以上上。テキストエリアへの直接代入・Webviewへの`postMessage`・後段でCLIプロセスへ渡る経路のいずれも、数百MB級の入力までは許さない方が安全側に倒せると判断し、上限自体は設ける方を選んだ（上限無しにする根拠が無い）。
+
+#### ロジック層とvscode依存層の分離
+
+行範囲計算・見出し行の組み立て・サイズ判定は`vscode`に依存しない純粋関数として`src/util/editorSelection.ts`へ切り出し、`test/unit/editorSelection.test.ts`から直接テストする。一方`vscode.window.activeTextEditor`の読み取り・パス解決・QuickPick・実際の挿入呼び出し（`sendEditorSelectionToChat`本体）は`src/extension.ts`に置き、単体テストの対象にしていない。これは§14.51の`insertCodeIntoEditor`・`openCodeInNewFile`（同じく`vscode.window.activeTextEditor`に直接触れる関数）が単体テストの対象になっていないのと同じ、このリポジトリの既存の切り分け方に揃えたもの。`vscode`に依存する側の動作確認は`docs/manual-test.md`のU-19に委ねる。`getActiveComposerTarget`自体（`vscode`には依存するが`activeTextEditor`には依存しない、`this.active`と`this.activeSequence`だけを見る判定）は既存の`renameActive` / `clearActive`と同じ形でテスト可能なため、`chatViewManager.test.ts` / `claudeChatViewManager.test.ts`に追加した。
+
+#### メニューの出し分け
+
+`package.json`の`contributes.menus["editor/context"]`に`agent.sendSelectionToChat`を`when: "editorHasSelection"`で登録した。選択が空のときはメニュー自体に出ない（受入基準）。グループは既存のどの分類にも当てはまらないため新設の`9_agent`にし、既存のカット・コピー・貼り付け（`9_cutcopypaste`）等とは別のセパレータで区切って末尾側に置いた。
+
+#### 実装とテスト
+
+- `src/util/editorSelection.ts`: `computeSelectionLineRange` / `formatSelectionHeader` / `buildSelectionPayload` / `selectionTextExceedsLimit`（すべて純粋関数）、`MAX_SELECTION_BYTES`
+- `src/view/activePanelSequence.ts`: `nextActivePanelSequence`（単調増加カウンタ）、`ActiveComposerTarget`型
+- `src/view/chatView.ts` / `src/view/claudeChatView.ts`: `activeSequence`フィールドの追加・3箇所での採番・`getActiveComposerTarget`の追加
+- `src/view/chatScript.ts`: `insertComposerText`メッセージの受信処理（`window.addEventListener('message', ...)`内）
+- `src/extension.ts`: コマンド`agent.sendSelectionToChat`の登録、`sendEditorSelectionToChat` / `pickActiveComposerTarget` / `pickProviderForNewChat` / `workspaceRelativeDisplayPath`
+- `package.json`: コマンド`agent.sendSelectionToChat`、`menus["editor/context"]`（`when: "editorHasSelection"`）
+- `test/unit/editorSelection.test.ts`: 行範囲計算・見出し行・サイズ上限のテスト
+- `test/unit/chatViewManager.test.ts` / `test/unit/claudeChatViewManager.test.ts`: `getActiveComposerTarget`の追加分（開いていないときの`undefined`・挿入とタブのreveal・`activeSequence`が`active`の更新のたびに進むこと）
+- `test/unit/webviewScript.test.ts`: `insertComposerText`分岐を含めても構文（バッククォート・テンプレートリテラルの整合）が壊れていないことの回帰確認
+
+#### 残る制約
+
+- Webview側のDOM操作・実際のキー入力を伴う統合的な動作確認（右クリック→挿入→入力欄に反映される見た目）はvitestのnode環境では自動化できていない（§14.51・§14.52と同じ制約）。`docs/manual-test.md`のU-19に委ねる
+- 「直近にアクティブだったタブ」はタブが一度も`panel.active`になっていない場合（例: タスクが`preserveFocus: true`で背面に開いたまま人が一度も表に出していないタブ）は候補に入らない。その状態でタブが他に無ければ「1枚も無い」扱いと同じ経路（新しい会話を開く）に落ちる。これは意図した簡略化で、フォーカスされたことのないタブへ黙って挿すより、明示的に新しい会話を開く方が誤送信のリスクが低いと判断した
+- 選択範囲の上限（1MB）に近い巨大な選択を送った場合、CLI側の応答速度やコンテキスト消費については未検証（上限判定そのものの単体テストのみ）
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）
