@@ -60,6 +60,13 @@ export function chatScript(
   const APPROVAL_CYCLE = ${JSON.stringify(approvalCycle)};
   /** いま効いている承認方法。循環の起点にする。 */
   let currentApproval = '';
+  /**
+   * ワークスペースフォルダの絶対パス一覧（issue #291）。差分の見出し行の操作
+   * （エディタで開く・差分を開く・戻す）をボタンとして出すかどうかの目安に使う。
+   * 権威ある判定はホスト側（handleOpenDiffFile等、chatView.ts）が改めて行うため、
+   * ここでの判定はUXのためのヒントに過ぎない
+   */
+  let workspaceRoots = [];
 
   const KIND_LABEL = {
     userMessage: 'あなた',
@@ -586,15 +593,92 @@ export function chatScript(
     container.appendChild(details);
   }
 
-  /** 1ファイル分の差分。既定は畳んでおき、開いた状態は要素を使い回して保つ。 */
-  function createDiff(diff) {
+  /** パス文字列が..セグメントを含むか。含めばどう解決してもワークスペース外扱いにする。 */
+  function containsParentSegment(p) {
+    return p.split(/[\\\\/]/).some((seg) => seg === '..');
+  }
+
+  /**
+   * パスがワークスペース内へ解決できそうかの簡易判定（issue #291）。
+   *
+   * 文字列だけで判定するUX用のヒント。相対パスはホスト側でワークスペースルートへ
+   * 結合されるためここでは通すが、..を含む場合と、ワークスペース外を指す絶対パスは
+   * ここで弾く。権威ある判定・シンボリックリンクの確認はホスト側
+   * （resolveDiffFileForAction、chatView.ts）が行う
+   */
+  function withinWorkspace(p) {
+    if (!p || containsParentSegment(p)) return false;
+    if (workspaceRoots.length === 0) return false;
+    const isAbsolute = /^([a-zA-Z]:[\\\\/]|[\\\\/])/.test(p);
+    if (!isAbsolute) return true;
+    return workspaceRoots.some((root) => {
+      const norm = root.replace(/[\\\\/]+$/, '');
+      return p === norm || p.indexOf(norm + '/') === 0 || p.indexOf(norm + '\\\\') === 0;
+    });
+  }
+
+  /**
+   * 差分の見出し行に足す操作ボタン（issue #291）。「エディタで開く」「差分を開く」
+   * 「この変更を戻す」を、種類とパスから出し分ける。実際の復元可否（ハンクの解析等）は
+   * ここでは見ない（Webview側は文字列のパース器を持たないため）。ホスト側が
+   * planDiffActions（src/util/diffRestore.ts）で改めて判定し、出せない操作は
+   * 理由を添えて断る
+   */
+  function buildDiffActions(diff, itemId, index) {
+    const targetPath = diff.movePath || diff.path;
+    if (!withinWorkspace(targetPath)) return null;
+
+    const offerOpenEditor = diff.kind !== 'delete';
+    const offerOpenDiff = diff.kind === 'add' || diff.kind === 'delete' || diff.kind === 'update';
+    const offerRevert = offerOpenDiff && !diff.movePath;
+    if (!offerOpenEditor && !offerOpenDiff && !offerRevert) return null;
+
+    const wrap = document.createElement('span');
+    wrap.className = 'diff-actions';
+
+    function addButton(label, messageType) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'secondary';
+      button.textContent = label;
+      button.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        vscode.postMessage({ type: messageType, itemId: itemId, diffIndex: index });
+      });
+      wrap.appendChild(button);
+    }
+
+    if (offerOpenEditor) addButton('エディタで開く', 'openDiffFile');
+    if (offerOpenDiff) addButton('差分を開く', 'openDiffEditor');
+    if (offerRevert) addButton('この変更を戻す', 'revertDiff');
+
+    return wrap;
+  }
+
+  /**
+   * 1ファイル分の差分。既定は畳んでおき、開いた状態は要素を使い回して保つ。
+   *
+   * interactiveが真のときだけ操作ボタンを出す（issue #291）。承認カードのプレビュー
+   * （renderApproval）は、まだ適用されていない変更の見込みを見せているだけで、
+   * 開く・戻すが指す実体が無いため操作を出さない
+   */
+  function createDiff(diff, itemId, index, interactive) {
     const details = document.createElement('details');
     details.className = 'diff';
 
     const summary = document.createElement('summary');
     const kindLabel = { add: '追加', delete: '削除', update: '変更' }[diff.kind] || diff.kind;
-    summary.textContent = diff.path + (diff.movePath ? ' → ' + diff.movePath : '') +
+    const label = document.createElement('span');
+    label.className = 'diff-label';
+    label.textContent = diff.path + (diff.movePath ? ' → ' + diff.movePath : '') +
       ' ・ ' + kindLabel;
+    summary.appendChild(label);
+
+    if (interactive) {
+      const actions = buildDiffActions(diff, itemId, index);
+      if (actions) summary.appendChild(actions);
+    }
     details.appendChild(summary);
 
     const pre = document.createElement('pre');
@@ -612,9 +696,11 @@ export function chatScript(
     return details;
   }
 
-  function renderDiffs(container, diffs) {
+  function renderDiffs(container, diffs, itemId, interactive) {
     container.replaceChildren();
-    for (const diff of diffs) container.appendChild(createDiff(diff));
+    for (let i = 0; i < diffs.length; i++) {
+      container.appendChild(createDiff(diffs[i], itemId, i, !!interactive));
+    }
     container.hidden = diffs.length === 0;
   }
 
@@ -658,7 +744,8 @@ export function chatScript(
     const diffKey = JSON.stringify(diffs);
     if (node.diffKey !== diffKey) {
       node.diffKey = diffKey;
-      renderDiffs(node.diffs, diffs);
+      // 適用済みの実変更なので操作ボタンを出す（issue #291）
+      renderDiffs(node.diffs, diffs, item.id, true);
     }
 
     // 分岐は「この指示の手前まで」。押した指示からやり直せるようにする
@@ -716,7 +803,8 @@ export function chatScript(
     if (diffs.length > 0) {
       const box = document.createElement('div');
       box.className = 'diffs';
-      renderDiffs(box, diffs);
+      // まだ適用されていない見込みの表示なので操作ボタンは出さない（issue #291）
+      renderDiffs(box, diffs, undefined, false);
       wrap.appendChild(box);
     }
 
@@ -1165,6 +1253,10 @@ export function chatScript(
     // リロード後にVSCodeがパネルを復元したとき、どのスレッドかを思い出すために保持する
     if (state.threadId) {
       patchState({ threadId: state.threadId });
+    }
+    // 届かない・配列でない回（未知の状態）では前回の値を保つ（issue #291）
+    if (Array.isArray(state.workspaceRoots)) {
+      workspaceRoots = state.workspaceRoots;
     }
     sentTexts = state.items
       .filter((i) => i.kind === 'userMessage' && i.text.trim() !== '')
