@@ -10,6 +10,7 @@ import {
   buildPlannerSessionInput,
   planWorkflow,
   sendSingleTurn,
+  stripPathLikeTokens,
   type PlanWorkflowFailure,
   type PlanWorkflowInput,
   type PlanWorkflowSuccess,
@@ -882,18 +883,24 @@ const WINDOWS_RESERVED_NAME_PATTERN = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
 const SLUG_INVALID_CHARS_PATTERN = /[\\/:*?"<>|\s]+/gu;
 const SLUG_MAX_LENGTH = 60;
 
+
 /**
  * ゴールの文からファイル名（拡張子なし）を作る。Windowsでも使えないパス区切り文字・
  * 予約デバイス名は避けるが、日本語の文字自体は残す（一般的なファイルシステムはUnicode
  * ファイル名を扱えるため、無理に英数字へ変換しない）。
+ *
+ * ゴールにファイルパスが含まれる場合は、そのファイル名（拡張子なし）へ縮めてから繋ぐ
+ * （`stripPathLikeTokens`）。ここは機械的な既定値の生成であって最終的な名前ではなく、
+ * 利用者は保存前に名前を確認・編集できる（`extension.ts` の入力欄）。
  */
 export function slugifyGoal(goal: string): string {
-  const collapsed = goal
+  const withoutPaths = stripPathLikeTokens(goal);
+  const collapsed = withoutPaths
     .trim()
     .replace(SLUG_INVALID_CHARS_PATTERN, '-')
     .replace(/-+/gu, '-')
     .replace(/^-|-$/gu, '');
-  const truncated = collapsed.slice(0, SLUG_MAX_LENGTH);
+  const truncated = collapsed.slice(0, SLUG_MAX_LENGTH).replace(/-$/u, '');
   if (truncated === '' || WINDOWS_RESERVED_NAME_PATTERN.test(truncated)) {
     return 'roadmap';
   }
@@ -1024,6 +1031,14 @@ export interface GenerateRoadmapInput {
   workspaceSummary: readonly string[];
   hasAgentsFile: boolean;
   hasClaudeFile: boolean;
+  /**
+   * 保存先のファイル名（拡張子なし）。省略すると `slugifyGoal(goal)` から作る。
+   *
+   * 呼び出し側（`extension.ts`）は既定値を入力欄へ出して利用者に確認・編集させ、その結果を
+   * ここへ渡す。ゴール文をそのままファイル名にすると読みにくい名前になりやすいため
+   * （`slugifyGoal` のコメント参照）。
+   */
+  slug?: string;
 }
 
 export type GenerateRoadmapResult =
@@ -1044,7 +1059,8 @@ export async function generateRoadmap(
   deps: GenerateRoadmapDeps,
   input: GenerateRoadmapInput,
 ): Promise<GenerateRoadmapResult> {
-  const slug = slugifyGoal(input.goal);
+  // 利用者が名前を確認・編集した場合はそれを使い、無ければゴール文から機械的に作る
+  const slug = input.slug ?? slugifyGoal(input.goal);
   const pathResult = resolveRoadmapOutputPath(input.workspaceRoot, input.roadmapDir, slug);
   if (!pathResult.ok) {
     return { ok: false, reason: 'pathOutsideWorkspace', message: pathResult.message };
