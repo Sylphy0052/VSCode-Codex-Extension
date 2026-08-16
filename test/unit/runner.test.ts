@@ -1040,8 +1040,7 @@ tasks:
 });
 
 describe('WorkflowRunner.stop', () => {
-  it('実行全体を停止すると、新規タスクは開始されない', async () => {
-    const YAML = `
+  const YAML = `
 version: 1
 name: stop-test
 defaults:
@@ -1055,6 +1054,8 @@ tasks:
     prompt: p
     done: d
 `;
+
+  it('実行全体を停止すると、新規タスクは開始されない', async () => {
     const { runner, codexHost, store } = createHarness(YAML);
     const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
     const runId = result.runId as string;
@@ -1064,14 +1065,129 @@ tasks:
     await flush();
 
     const t1 = codexHost.byTaskId('T1');
-    t1.finish('done', doneState('ok'));
+    t1.finish('taskStopped' as LoopStopReason, { ...initialChatState });
     await flush();
 
-    // T1は走り続けて完了できるが、停止済みなのでT2は開始されない
     const run = store.find(runId) as PersistedRun;
-    expect(run.tasks['T1']?.state).toBe('done');
     expect(run.tasks['T2']?.state).toBe('skipped');
     expect(run.haltedByUser).toBe(true);
+  });
+
+  /**
+   * 「全体の停止」は新しいタスクの開始を止めるだけで、走っているタスクのループはそのまま
+   * 回り続けていた（issue #322）。終了条件を満たすか回数を使い切るまで指示が送られ続ける
+   * ため、ボタン名と挙動が食い違っていた。
+   */
+  describe('走行中のタスクのループも止める（issue #322）', () => {
+    it('走行中のタスクへstopLoopを送り、進行中のターンには割り込まない', async () => {
+      const { runner, codexHost } = createHarness(YAML);
+      const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+      const t1 = codexHost.byTaskId('T1');
+
+      runner.stop(runId);
+      await flush();
+
+      expect(t1.stopLoopCount).toBe(1);
+      // 中途半端な編集をworktreeへ残さないため、そのターンが終わるまでは待つ
+      expect(t1.interruptCount).toBe(0);
+    });
+
+    it('止めたタスクはfailed（手動停止）として確定し、未開始のタスクはskippedのまま', async () => {
+      const { runner, codexHost, store } = createHarness(YAML);
+      const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+      const t1 = codexHost.byTaskId('T1');
+
+      runner.stop(runId);
+      // フェイクはstopLoopCountを数えるだけなので、実際の停止は`finish`で模擬する
+      t1.finish('taskStopped' as LoopStopReason, { ...initialChatState });
+      await flush();
+
+      const run = store.find(runId) as PersistedRun;
+      expect(run.tasks['T1']?.state).toBe('failed');
+      expect(run.tasks['T1']?.failure).toEqual({ kind: 'manualStop' });
+      expect(run.tasks['T2']?.state).toBe('skipped');
+    });
+
+    it('承認待ちのタスクも止める（セッションは生きており枠を占めている）', async () => {
+      const approvalYaml = `
+version: 1
+name: stop-waiting-approval
+tasks:
+  - id: T1
+    autoApprove: true
+    prompt: p
+    done: d
+`;
+      const { runner, codexHost, store } = createHarness(approvalYaml, {
+        allowAutoApprove: true,
+      });
+      const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+      const t1 = codexHost.byTaskId('T1');
+      // 既定で危険と判定される要求を出して人待ちにする
+      await t1.requestApproval(
+        { requestId: 1, kind: 'command', title: '', detail: '', itemId: undefined },
+        { command: 'git push --force origin main', cwd: t1.cwd },
+      );
+      await flush();
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingApproval');
+
+      runner.stop(runId);
+      await flush();
+
+      expect(t1.stopLoopCount).toBe(1);
+    });
+
+    it('確定済みのタスクへは送らない', async () => {
+      const { runner, codexHost, store } = createHarness(YAML);
+      const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      const t2 = codexHost.byTaskId('T2');
+
+      runner.stop(runId);
+      await flush();
+
+      expect(t1.stopLoopCount).toBe(0);
+      expect(t2.stopLoopCount).toBe(1);
+    });
+
+    it('リロード後に復元しただけの実行でも例外にならない', async () => {
+      const { runner, store } = createHarness(YAML);
+      const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      // 新しいプロセス（リロード後）を模す。復元だけなのでライブなセッションは無い
+      const reloadedRunner = new WorkflowRunner({
+        hosts: { codex: new FakeHost(), claude: new FakeHost() },
+        worktreeQueue: new WorktreeCreationQueue(),
+        git: fakeGit(),
+        fs: identityFs,
+        filePort: filePort(YAML),
+        store,
+        log: fakeLogger,
+        readBaseline: () => ({
+          codexSandbox: 'read-only',
+          codexApprovalMode: 'on-request',
+          claudePermissionMode: 'manual',
+          allowAutoApprove: true,
+          allowClaudeBypassPermissions: false,
+        }),
+      });
+      await reloadedRunner.restoreRunsForView();
+
+      expect(() => reloadedRunner.stop(runId)).not.toThrow();
+    });
   });
 });
 
