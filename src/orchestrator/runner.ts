@@ -29,6 +29,7 @@ import { INTEGRATION_DIR_NAME, IntegrationMergeQueue } from './integration';
 import { applyRunCompletionToFile, type RoadmapFileSystemPort } from './roadmap';
 import {
   IntegrationQueue as PseudoWorktreeIntegrationQueue,
+  removePseudoWorktree,
   type PseudoWorktreeFileSystemPort,
   type Snapshot,
 } from './pseudoWorktree';
@@ -51,6 +52,7 @@ import {
   continueTask as continueTaskState,
   type RunState,
   type TaskFailureReason,
+  type TaskRunState,
   type TaskState,
 } from './runState';
 import {
@@ -1271,11 +1273,16 @@ export class WorkflowRunner {
   }
 
   /**
-   * 終わった（`done`/`failed`/`skipped`）タスクのworktreeをまとめて撤去する
+   * 終わった（`done`/`failed`/`blocked`/`skipped`）タスクのworktreeをまとめて撤去する
    * （design.md §16.8「そのほか」の操作。`cleanup: keep` のまま放置されたものを
-   * 後から片付ける手段）。
+   * 後から片付ける手段）。`onTaskDone`は対象タスク1件の処理（撤去できた・できなかった・
+   * そもそも対象外だった、いずれも含む）が終わるたびに呼ぶ（`cleanupIntegration`の
+   * 進捗表示、Issue #298「進捗が分からない」から使う。省略可能）。
    */
-  async removeWorktrees(runId: string): Promise<{ removed: string[]; failed: string[] }> {
+  async removeWorktrees(
+    runId: string,
+    onTaskDone?: (taskId: string) => void,
+  ): Promise<{ removed: string[]; failed: string[] }> {
     const live = this.runs.get(runId);
     if (live === undefined) {
       return { removed: [], failed: [] };
@@ -1287,6 +1294,7 @@ export class WorkflowRunner {
       // `merging`（マージ未了。統合ブランチへ入るまで消してはいけない）は対象外にする。
       // `blocked`は自動撤去（`shouldRemoveWorktree`）の対象からは外れているが、これは
       // 人が明示的に「終わったタスクのworktreeをまとめて撤去する」操作なので含める
+      // （gitの場合。疑似worktreeの`blocked`は下の`removePseudoTaskWorktree`が別途除く）
       if (
         state === undefined ||
         (state.state !== 'done' &&
@@ -1297,18 +1305,54 @@ export class WorkflowRunner {
         continue;
       }
       const liveTask = live.tasks.get(task.id);
-      // このウィンドウでworktreeを作ったことが判っている（liveTask.usedWorktree）場合を
-      // 優先し、リロード復元でliveTaskが無い場合は定義から推定する（cwdを明示していない
-      // worktree系isolationかつgitリポジトリなら作られたはず、という近似）
-      const usedWorktree =
-        liveTask?.usedWorktree ??
-        (task.cwd === undefined &&
-          (task.isolation === 'worktree' || task.isolation === 'worktree-strict') &&
-          live.gitRepo);
-      if (!usedWorktree) {
-        continue;
+      if (live.gitRepo) {
+        await this.removeGitTaskWorktree(live, runId, task, state, liveTask, removed, failed);
+      } else {
+        await this.removePseudoTaskWorktree(live, runId, task, state, liveTask, removed, failed);
       }
-      const retry = retrySuffixOf(state.retryCount, state.manualRetryCount);
+      onTaskDone?.(task.id);
+    }
+    this.notify(runId);
+    return { removed, failed };
+  }
+
+  /**
+   * gitワークスペースの1タスク分のworktreeを、すべての試行分撤去する（Issue #298）。
+   *
+   * `worktreePath`は再試行のたびに`<taskId>` → `<taskId>-retry0` → `<taskId>-retry1`と
+   * 別ディレクトリを作る（design.md §16.5「新しいworktreeでやり直す」）。以前は
+   * `retrySuffixOf`が返す**現在の**試行1件しか撤去しておらず、過去の試行分（人が中身を
+   * 見られるように残してあるもの。§16.17）がすべて残ってしまっていた。撤去対象は
+   * 「retryなし（初回）」と`0..合計試行数-1`のすべてにする。既に存在しないパスは
+   * `removeWorktree`が`pathExists`で成功扱いにするため、実在を気にせず全件呼んでよい。
+   * 1件でも失敗すればそのタスクは`failed`側に入れる。
+   */
+  private async removeGitTaskWorktree(
+    live: LiveRun,
+    runId: string,
+    task: WorkflowTask,
+    state: TaskRunState,
+    liveTask: LiveTask | undefined,
+    removed: string[],
+    failed: string[],
+  ): Promise<void> {
+    // このウィンドウでworktreeを作ったことが判っている（liveTask.usedWorktree）場合を
+    // 優先し、リロード復元でliveTaskが無い場合は定義から推定する（cwdを明示していない
+    // worktree系isolationかつgitリポジトリなら作られたはず、という近似）
+    const usedWorktree =
+      liveTask?.usedWorktree ??
+      (task.cwd === undefined &&
+        (task.isolation === 'worktree' || task.isolation === 'worktree-strict'));
+    if (!usedWorktree) {
+      return;
+    }
+    const totalAttempts = state.retryCount + state.manualRetryCount;
+    const retries: Array<number | undefined> = [
+      undefined,
+      ...Array.from({ length: totalAttempts }, (_, i) => i),
+    ];
+    const messages: string[] = [];
+    for (const retry of retries) {
       const result = await this.deps.worktreeQueue.remove(
         live.repoRoot,
         runId,
@@ -1317,44 +1361,104 @@ export class WorkflowRunner {
         this.deps.git,
         this.deps.fs,
       );
-      if (result.ok) {
-        removed.push(task.id);
-      } else {
-        failed.push(task.id);
-        this.deps.log.warn(
-          `[workflow ${runId}/${task.id}] worktreeの撤去に失敗しました: ${result.message}`,
-        );
+      if (!result.ok) {
+        messages.push(result.message);
       }
     }
-    this.notify(runId);
-    return { removed, failed };
+    if (messages.length === 0) {
+      removed.push(task.id);
+    } else {
+      failed.push(task.id);
+      this.deps.log.warn(
+        `[workflow ${runId}/${task.id}] worktreeの撤去に失敗しました: ${messages.join(' / ')}`,
+      );
+    }
   }
 
   /**
-   * 統合ブランチのworktreeと、終わったタスクの残りworktreeをまとめて撤去する
-   * （design.md §16.8「そのほか」の操作・§16.17「worktreeの片付け」、Issue #118）。
+   * gitでないワークスペース（疑似worktree、design.md §16.20）の1タスク分の複製を撤去する
+   * （Issue #298「疑似worktreeが撤去対象にならない」）。
+   *
+   * **`blocked`のタスクの複製は残す。** gitならタスクブランチが残るため撤去しても
+   * 中身を後から辿れるが、疑似worktreeにはブランチが無く、複製を消すと未統合の差分
+   * （3-way mergeができず衝突として弾かれた分。design.md §16.20）を復元する手段が
+   * 無くなってしまう。
+   */
+  private async removePseudoTaskWorktree(
+    live: LiveRun,
+    runId: string,
+    task: WorkflowTask,
+    state: TaskRunState,
+    liveTask: LiveTask | undefined,
+    removed: string[],
+    failed: string[],
+  ): Promise<void> {
+    const pseudoWorktreeDeps = this.deps.pseudoWorktree;
+    if (live.pseudo === undefined || pseudoWorktreeDeps === undefined) {
+      return;
+    }
+    if (state.state === 'blocked') {
+      return;
+    }
+    const usedPseudoWorktree =
+      liveTask?.usedPseudoWorktree ??
+      (task.cwd === undefined &&
+        (task.isolation === 'worktree' || task.isolation === 'worktree-strict'));
+    if (!usedPseudoWorktree) {
+      return;
+    }
+    const result = await removePseudoWorktree(live.repoRoot, runId, task.id, pseudoWorktreeDeps.fs);
+    if (result.ok) {
+      removed.push(task.id);
+    } else {
+      failed.push(task.id);
+      this.deps.log.warn(
+        `[workflow ${runId}/${task.id}] 疑似worktreeの撤去に失敗しました: ${result.message}`,
+      );
+    }
+  }
+
+  /**
+   * 統合worktree（gitの`_integration`worktree、または疑似worktreeの統合先）と、
+   * 終わったタスクの残りworktreeをまとめて撤去する
+   * （design.md §16.8「そのほか」の操作・§16.17「worktreeの片付け」・§16.20、
+   * Issue #118・Issue #298）。
    *
    * **統合worktreeの撤去は、この操作からの明示的な呼び出しでしか行わない。** `blocked`
    * タスクの再マージ（`retryMerge`）は統合worktreeを使い続けるため、runの終了時に
    * 無条件で撤去してはいけない（Issue #118のコメント「統合worktreeの撤去タイミングは
    * 未解決の論点」への回答）。runがまだ`running`の間は、後続タスクが統合worktreeを
    * 必要としうるため撤去せず失敗として返す（安全側。人が明示的に押した操作であっても
-   * 走っているタスクの前提を壊してはいけない）。
+   * 走っているタスクの前提を壊してはいけない）。この判定はgit・疑似worktreeのどちらの
+   * 統合先にも同じく適用する。
    *
-   * 統合worktreeの実体は `worktreePath(repoRoot, runId, '_integration')` が指す場所で、
-   * `integrationWorktreePath` と同じディレクトリを指す（design.md §16.17「`_integration`は
-   * タスクidとして予約する」）。そのため `deps.worktreeQueue.remove` をタスクのworktree撤去と
-   * 同じ入口から呼べる。未コミットの変更が残っていれば（`removeWorktree`自身の
-   * `uncommittedChanges`判定）撤去せず警告する（既存の方針を踏襲。設計上、統合worktreeで
-   * 衝突が未解決のまま残っている場合もここで弾かれる）。
-   *
+   * gitの統合worktreeの実体は `worktreePath(repoRoot, runId, '_integration')` が指す
+   * 場所で、`integrationWorktreePath` と同じディレクトリを指す（design.md §16.17
+   * 「`_integration`はタスクidとして予約する」）。そのため `deps.worktreeQueue.remove` を
+   * タスクのworktree撤去と同じ入口から呼べる。未コミットの変更が残っていれば
+   * （`removeWorktree`自身の`uncommittedChanges`判定）撤去せず警告する（既存の方針を
+   * 踏襲。設計上、統合worktreeで衝突が未解決のまま残っている場合もここで弾かれる）。
    * ブランチ自体は消さない（`git worktree remove`はworktreeの参照を外すだけ。
    * design.md §16.17「ブランチは消さない。PR/MRから辿れる必要がある」）。
+   *
+   * 疑似worktree（gitリポジトリでないワークスペース、design.md §16.20）では
+   * `live.pseudo`の統合先（`_integration`、`integrationPath`と同じ場所）を
+   * `removePseudoWorktree`で撤去する。gitと違い履歴が無いため「ブランチを残す」概念は
+   * 無いが、実体をまとめて消すという意味では同じ操作になる。
+   *
+   * `onProgress`はタスク1件・統合先1件（対象がある場合）を処理するたびに呼ぶ
+   * （Viewの`vscode.window.withProgress`から使う想定。Issue #298「進捗が分からない」。
+   * 省略可能で、省略時は従来どおり進捗を報告しない）。
    */
-  async cleanupIntegration(runId: string): Promise<{
+  async cleanupIntegration(
+    runId: string,
+    onProgress?: (progress: { done: number; total: number; label: string }) => void,
+  ): Promise<{
     tasksRemoved: string[];
     tasksFailed: string[];
     integrationRemoved: boolean;
+    /** 統合worktree（gitまたは疑似worktree）がこのrunの対象として存在したか。 */
+    integrationApplicable: boolean;
     integrationFailedMessage: string | undefined;
   }> {
     const live = this.runs.get(runId);
@@ -1363,16 +1467,40 @@ export class WorkflowRunner {
         tasksRemoved: [],
         tasksFailed: [],
         integrationRemoved: false,
+        integrationApplicable: false,
         integrationFailedMessage: undefined,
       };
     }
-    const taskResult = await this.removeWorktrees(runId);
 
-    if (live.integration === undefined) {
+    const integrationTarget = this.resolveIntegrationTarget(live);
+    const integrationApplicable = integrationTarget.kind !== 'none';
+
+    // 進捗の合計件数はタスク分＋統合先1件（対象がある場合）
+    const targetTaskCount = live.def.tasks.filter((task) => {
+      const state = live.runState.tasks.get(task.id);
+      return (
+        state !== undefined &&
+        (state.state === 'done' ||
+          state.state === 'failed' ||
+          state.state === 'blocked' ||
+          state.state === 'skipped')
+      );
+    }).length;
+    const total = targetTaskCount + (integrationApplicable ? 1 : 0);
+    let progressDone = 0;
+    const reportProgress = (label: string): void => {
+      progressDone += 1;
+      onProgress?.({ done: progressDone, total, label });
+    };
+
+    const taskResult = await this.removeWorktrees(runId, () => reportProgress('タスクのworktree'));
+
+    if (integrationTarget.kind === 'none') {
       return {
         tasksRemoved: taskResult.removed,
         tasksFailed: taskResult.failed,
         integrationRemoved: false,
+        integrationApplicable: false,
         integrationFailedMessage: undefined,
       };
     }
@@ -1383,24 +1511,35 @@ export class WorkflowRunner {
         tasksRemoved: taskResult.removed,
         tasksFailed: taskResult.failed,
         integrationRemoved: false,
+        integrationApplicable: true,
         integrationFailedMessage: message,
       };
     }
 
-    const result = await this.deps.worktreeQueue.remove(
-      live.repoRoot,
-      runId,
-      INTEGRATION_DIR_NAME,
-      undefined,
-      this.deps.git,
-      this.deps.fs,
-    );
+    const result =
+      integrationTarget.kind === 'git'
+        ? await this.deps.worktreeQueue.remove(
+            live.repoRoot,
+            runId,
+            INTEGRATION_DIR_NAME,
+            undefined,
+            this.deps.git,
+            this.deps.fs,
+          )
+        : await removePseudoWorktree(
+            live.repoRoot,
+            runId,
+            INTEGRATION_DIR_NAME,
+            integrationTarget.fs,
+          );
+    reportProgress('統合worktree');
     this.notify(runId);
     if (result.ok) {
       return {
         tasksRemoved: taskResult.removed,
         tasksFailed: taskResult.failed,
         integrationRemoved: true,
+        integrationApplicable: true,
         integrationFailedMessage: undefined,
       };
     }
@@ -1409,8 +1548,28 @@ export class WorkflowRunner {
       tasksRemoved: taskResult.removed,
       tasksFailed: taskResult.failed,
       integrationRemoved: false,
+      integrationApplicable: true,
       integrationFailedMessage: result.message,
     };
+  }
+
+  /**
+   * このrunの統合worktreeがgit・疑似worktreeのどちらの形か（あるいは対象が無いか）を
+   * 判定する（`cleanupIntegration`専用のヘルパー。Issue #298）。疑似worktreeの
+   * `deps.pseudoWorktree`が省略されている場合は、`live.pseudo`があっても対象にしない
+   * （`removeWorktrees`の`removePseudoTaskWorktree`と同じ判断）。
+   */
+  private resolveIntegrationTarget(
+    live: LiveRun,
+  ): { kind: 'none' } | { kind: 'git' } | { kind: 'pseudo'; fs: PseudoWorktreeFileSystemPort } {
+    if (live.integration !== undefined) {
+      return { kind: 'git' };
+    }
+    const pseudoWorktreeDeps = this.deps.pseudoWorktree;
+    if (!live.gitRepo && live.pseudo !== undefined && pseudoWorktreeDeps !== undefined) {
+      return { kind: 'pseudo', fs: pseudoWorktreeDeps.fs };
+    }
+    return { kind: 'none' };
   }
 
   // ---- スケジューリング ----
