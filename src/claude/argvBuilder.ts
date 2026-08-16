@@ -73,6 +73,14 @@ export function buildClaudeShellArgs(input: ClaudeBuildInput): ClaudeBuildResult
 /**
  * Webviewチャット用。stdin/stdoutをNDJSONで繋いだまま常駐させる。
  * `--verbose` は stream-json 出力の前提条件で、`--print` 無しでは各フラグが効かない。
+ *
+ * `--permission-prompt-tool stdio` は承認要求をcontrol protocolへ流すための必須指定
+ * （§14.5、issue #276）。これが無いと `--print` 経路のCLIは承認が要るツール呼び出しを
+ * **拡張機能へ問い合わせないまま自動で拒否する**（実測: `bash -c "echo hi"` が
+ * `This command requires approval` で失敗し、`can_use_tool` は一度も届かない。CLI 2.1.229）。
+ * 承認カード・§16.7の危険判定・`autoApprove` は全て `can_use_tool` の到着が前提のため、
+ * ここを落とすとそれらが丸ごと働かなくなる。TUIタブ（`buildClaudeShellArgs`）はCLI自身が
+ * 承認を対話で聞くため付けない。
  */
 export function buildClaudeStreamArgs(input: ClaudeBuildInput): ClaudeBuildResult {
   const warnings: string[] = [];
@@ -85,6 +93,8 @@ export function buildClaudeStreamArgs(input: ClaudeBuildInput): ClaudeBuildResul
     '--verbose',
     '--include-partial-messages',
     '--replay-user-messages',
+    '--permission-prompt-tool',
+    'stdio',
     ...targetArgs(input),
     ...configArgs(input.config, warnings),
   ];
