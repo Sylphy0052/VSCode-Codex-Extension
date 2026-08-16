@@ -13,6 +13,7 @@ import {
 import { DEFAULT_REPLY_TIMEOUT_SEC } from './orchestrator/messaging';
 import { DEFAULT_PSEUDO_WORKTREE_EXCLUDE } from './orchestrator/pseudoWorktree';
 import type { HistoryScope } from './session/sessionStore';
+import { normalizeComposerButtons, type ComposerButtonsResult } from './view/composerButtons';
 import { normalizeSendOn, type SendOnMode } from './view/sendKey';
 import type { HistoryGroupBy } from './util/sessionGrouping';
 import { parseSessionPresets, type SessionPreset } from './sessionPresets';
@@ -135,6 +136,19 @@ export function readChatRenderMarkdownConfig(): boolean {
 export function readChatSendOnConfig(): SendOnMode {
   const c = vscode.workspace.getConfiguration('agent');
   return normalizeSendOn(c.get<string>('chat.sendOn'));
+}
+
+/**
+ * 入力欄アイコン列（`#composerIconRow`）の表に直接出すボタン（`agent.chat.
+ * composerButtons`、既定は変更前の並びの先頭4つ、issue #296）。それ以外は「…」
+ * メニューへ畳む（`chatView.ts`の`renderShell`参照）。検証・既定への丸めは
+ * `normalizeComposerButtons`（`vscode`に依存しない純粋関数）が行い、ここでは生値を
+ * 渡すだけ。`renderMarkdown` / `sendOn`と同じ`agent.chat.*`名前空間・`window`スコープ
+ * （`package.json`）。
+ */
+export function readChatComposerButtonsConfig(): ComposerButtonsResult {
+  const c = vscode.workspace.getConfiguration('agent');
+  return normalizeComposerButtons(c.get<unknown>('chat.composerButtons'));
 }
 
 /** ターンの完了・承認待ちの通知（issue #286、design.md §14.55）。 */

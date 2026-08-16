@@ -221,6 +221,43 @@ export function chatStyles(): string {
     padding: 4px 6px;
   }
   #composer button:not(#send) svg { display: block; }
+  /*
+   * アイコン列の「…」メニュー（issue #296）。位置の基準にするため入れ物
+   * （#composerOverflow）だけ相対配置にし、メニュー本体（#composerOverflowMenu）は
+   * トグルボタンの右下に絶対配置で開く。#commandsと同じ浮き出し方（枠線・影・z-index）
+   * に揃える。
+   */
+  #composerOverflow { position: relative; display: inline-flex; }
+  #composerOverflowMenu {
+    position: absolute;
+    right: 0;
+    top: 100%;
+    margin-top: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 4px;
+    min-width: 180px;
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-radius: 4px;
+    background-color: var(--vscode-editorSuggestWidget-background, var(--vscode-editorWidget-background));
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    z-index: 10;
+  }
+  /*
+   * メニュー項目はアイコンのみだった元のボタンにラベル文字列を添えて出す
+   * （renderComposerButtonのmenu variant）。「tooltipを読むまで区別できない」という
+   * 課題の発端を畳んだ先で繰り返さないため、ここだけは左寄せ・横幅いっぱいにする
+   * （#composer button:not(#send)の中央寄せ・詰め padding を上書き。同じ詳細度なので
+   * 後発のこの規則が勝つ）。
+   */
+  #composerOverflowMenu button:not(#send) {
+    justify-content: flex-start;
+    gap: 8px;
+    width: 100%;
+    padding: 5px 8px;
+  }
+  .composerOverflowLabel { white-space: nowrap; }
   #composerInputRow textarea {
     /* ボタン列に押し潰されても入力欄だと分かる最小幅を確保する */
     min-width: 160px;

@@ -1988,6 +1988,89 @@ export function chatScript(
     vscode.postMessage({ type: 'workflowMenu' }),
   );
 
+  /**
+   * アイコン列の「…」メニューの開閉（issue #296）。畳んだボタンはcomposerIconRowの
+   * 中に実体をそのまま置いてあり、hidden属性で表と行き来させているだけなので、
+   * 応答中のdisabled切替・state更新によるhidden切替（fastToggle等、applyFastMode
+   * 参照）はこのブロックを触らずとも既存のコードのままどちら側でも効く。
+   */
+  const composerOverflow = el('composerOverflow');
+  const composerOverflowToggle = el('composerOverflowToggle');
+  const composerOverflowMenu = el('composerOverflowMenu');
+
+  /** 隠していない（=いま押せる）メニュー項目だけを、DOM順のまま返す。 */
+  function overflowMenuItems() {
+    return Array.prototype.filter.call(composerOverflowMenu.querySelectorAll('button'), (b) => !b.hidden);
+  }
+
+  function closeOverflowMenu(focusToggle) {
+    if (composerOverflowMenu.hidden) return;
+    composerOverflowMenu.hidden = true;
+    composerOverflowToggle.setAttribute('aria-expanded', 'false');
+    if (focusToggle) composerOverflowToggle.focus();
+  }
+
+  function openOverflowMenu() {
+    composerOverflowMenu.hidden = false;
+    composerOverflowToggle.setAttribute('aria-expanded', 'true');
+    const items = overflowMenuItems();
+    if (items.length > 0) items[0].focus();
+  }
+
+  composerOverflowToggle.addEventListener('click', () => {
+    if (composerOverflowMenu.hidden) {
+      openOverflowMenu();
+    } else {
+      closeOverflowMenu(false);
+    }
+  });
+
+  // メニュー内はTab/矢印キーで移動し、端で折り返す（フォーカスがメニュー外へ逃げない）。
+  // Escapeは閉じてトグルボタンへフォーカスを戻す
+  composerOverflowMenu.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeOverflowMenu(true);
+      return;
+    }
+    const items = overflowMenuItems();
+    if (items.length === 0) return;
+    const index = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      items[(index + 1 + items.length) % items.length].focus();
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      items[(index - 1 + items.length) % items.length].focus();
+      return;
+    }
+    if (e.key === 'Tab') {
+      // 最後の項目でTab・最初の項目でShift+Tabを押されたら折り返す。それ以外は
+      // ブラウザ標準のTab移動に任せてよい（項目同士の間はメニュー内にとどまる）
+      if (e.shiftKey && index <= 0) {
+        e.preventDefault();
+        items[items.length - 1].focus();
+      } else if (!e.shiftKey && index >= items.length - 1) {
+        e.preventDefault();
+        items[0].focus();
+      }
+    }
+  });
+
+  // 項目を押したら閉じる（トグル系も含め、他の操作に進めるよう他のメニューUIと揃える）
+  composerOverflowMenu.addEventListener('click', (e) => {
+    if (e.target.closest('button')) closeOverflowMenu(false);
+  });
+
+  // メニュー外クリックで閉じる
+  document.addEventListener('click', (e) => {
+    if (!composerOverflowMenu.hidden && !composerOverflow.contains(e.target)) {
+      closeOverflowMenu(false);
+    }
+  });
+
   el('attach').addEventListener('click', () => el('filePicker').click());
   el('filePicker').addEventListener('change', (e) => {
     offerFiles(e.target.files);

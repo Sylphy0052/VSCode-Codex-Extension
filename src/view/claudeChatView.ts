@@ -15,6 +15,7 @@ import { transcriptItems } from '../claude/transcript';
 import { isUnsafeClaudeCombination } from '../claude/argvBuilder';
 import {
   currentWorkspaceFolder,
+  readChatComposerButtonsConfig,
   readChatRenderMarkdownConfig,
   readChatSendOnConfig,
   readClaudeConfig,
@@ -791,12 +792,20 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     panel.title = entry.title;
     // 復元されたパネルはスクリプトの許可が落ちているため、ここで入れ直す
     panel.webview.options = { enableScripts: true };
+    // 入力欄アイコン列の表に出すボタン（設定 agent.chat.composerButtons、issue #296）。
+    // chatView.ts（Codex）と同じ配線。検証・既定への丸めはreadChatComposerButtonsConfig
+    // 側（normalizeComposerButtons）が行うため、ここは警告が有ればログへ出すだけ
+    const composerButtonsConfig = readChatComposerButtonsConfig();
+    if (composerButtonsConfig.warning !== undefined) {
+      this.log.warn(composerButtonsConfig.warning);
+    }
     panel.webview.html = renderShell(panel.webview, {
       agentLabel: LABEL,
       approvalModes: CLAUDE_PERMISSION_MODES,
       approvalCycle: CLAUDE_APPROVAL_CYCLE,
       showSettings: true,
       showAgentSelector: true,
+      composerButtons: composerButtonsConfig.buttons,
       // effort・エージェントだけ扱いが違う。黙って効かないより、効くタイミングを書くほうがまし
       settingsNote:
         'モデルと承認は今の会話にすぐ効きます。Effortは送りますが、CLIが結果を返さないため反映は確かめられません。エージェントは起動引数でのみ決まるため、変更は次のセッションから効きます。「既定」へ戻す操作も次のセッションから効きます。',
