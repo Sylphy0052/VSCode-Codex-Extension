@@ -2998,7 +2998,7 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - 絶対パスでなければ無視して警告を返す。相対パスは複数ワークスペースフォルダのどれを基準にするか一意に決められないため受け付けない（`agent.workflows.dir`のような「ワークスペースフォルダ相対」の規約とは逆に、こちらは基準フォルダそのものを選ぶ設定であるため絶対パスにした）
 - `path.resolve`で正規化した上で、いずれかのワークスペースフォルダと完全一致するか、その配下（`path.relative`が`..`で始まらない）であることを確認する。外を指す値は無視して警告を返す
 
-シンボリックリンクの実体解決（realpath）はしない。§16.16の分解セッション（§16.6）が触れている「`git worktree add`がリンクを黙って辿る」問題はワークフローの無人実行に対する多層防御であり、こちらは対話的にQuickPickで作業ディレクトリを選ぶ操作の入力補助に過ぎないため、同じ強度は求めないと判断した（文字列比較のみで足りる）。
+候補パス・ワークスペースフォルダの両方を`fs.realpath`（`node:fs/promises`）で実体解決してから包含判定する。当初は§16.6が触れている「`git worktree add`がリンクを黙って辿る」問題への対策（`buildTaskBoundary` / `findSymlinkedAncestor`）をワークフローの無人実行専用の多層防御とみなし、対話的にQuickPickで作業ディレクトリを選ぶだけのこちらは文字列比較のみで足りると判断していた。しかしセキュリティ監査で、リポジトリ内に外部を指すシンボリックリンク（例: `escape -> /home/victim`）をコミットしておき`workingDirectory`にそのパスを指定すると、文字列比較だけの境界チェックはすり抜けてしまい、`sandbox: workspace-write`の基準点がワークスペース外へ付け替わることが指摘された。`.vscode/settings.json`経由で供給される`workingDirectory`は利用者の手入力ではなくcloneしたリポジトリが与えうる値であるため、`approvalMode` / `sandbox`と同じ強度の防御が必要と判断し、実体解決へ切り替えた。候補パスの実体解決に失敗した場合（存在しない・アクセス不可等）は「解決できなかった」として拒否する（fail-closed）。
 
 無効な`workingDirectory`は無視した上で、通常の作業ディレクトリの決め方へフォールバックする。
 
@@ -3019,7 +3019,7 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 #### 実装とテスト
 
-- `src/sessionPresets.ts`: `parseSessionPresets`（検証）・`buildEffectivePresetConfig`（クランプの唯一の入口）・`resolveWorkingDirectory`（作業ディレクトリの境界検証）。いずれも純粋関数
+- `src/sessionPresets.ts`: `parseSessionPresets`（検証）・`buildEffectivePresetConfig`（クランプの唯一の入口）はいずれも純粋関数。`resolveWorkingDirectory`（作業ディレクトリの境界検証）は`fs.realpath`による実体解決を行うため非同期・非純粋（`vscode`には依存しない）
 - `src/config.ts`: `readSessionPresetsConfig`（`agent.sessionPresets`の生値を読み、`parseSessionPresets`へ渡すだけ）
 - `src/extension.ts`: `updateSessionPresetsContext`（コンテキストキー更新）・`openPresetChat`（QuickPickの配線・実効値の組み立て・`openNew`呼び出し）・コマンド`agent.openPresetChat`の登録・`onDidChangeConfiguration`への`agent.sessionPresets`監視の追加
 - `package.json`: `agent.sessionPresets`設定（`resource`スコープ）、コマンド`agent.openPresetChat`、`view/title`（`navigation@8`、既存の`@1`〜`@7`は変更していない）・`commandPalette`への`when`句付き登録
@@ -3028,7 +3028,6 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 #### 残る制約
 
 - プリセットの編集は設定ファイル（`settings.json`）を直接書く前提で、設定パネル（`controlPanelView.ts`）からの編集UIは今回は用意していない
-- `workingDirectory`のワークスペース境界チェックはシンボリックリンクの実体解決をしない文字列比較のみ（前述）
 - プリセットの並び順はそのまま`agent.sessionPresets`の配列順（QuickPickでの並び替え・お気に入り等は無い）
 - 依存Issue #289（主要コマンドへの既定キーバインド割り当て）は完了済みだが、`agent.openPresetChat`には既定のキーバインドを割り当てていない（プリセットの有無・件数が利用者ごとに異なり、決め打ちの1キーを割り当てる根拠が無いため）
 

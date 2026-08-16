@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   buildEffectivePresetConfig,
   parseSessionPresets,
@@ -161,6 +165,21 @@ describe('buildEffectivePresetConfig（design.md §14.56・§16.16と同じク�
     expect(result.warnings).toEqual([]);
   });
 
+  it('拡張機能の設定より厳しいapprovalMode（Codex）の指定は通る', () => {
+    const result = buildEffectivePresetConfig(codexPreset({ approvalMode: 'untrusted' }), {
+      ...baseline,
+      codexApprovalMode: 'never',
+    });
+    expect(result.approvalMode).toBe('untrusted');
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('approvalMode未指定（Claude）なら拡張機能側の現在値を継承する', () => {
+    const result = buildEffectivePresetConfig(claudePreset(), baseline);
+    expect(result.approvalMode).toBe('manual');
+    expect(result.warnings).toEqual([]);
+  });
+
   it('未知のapprovalMode値は安全性を判定できないため無視される', () => {
     const result = buildEffectivePresetConfig(
       codexPreset({ approvalMode: 'not-a-real-mode' }),
@@ -196,45 +215,124 @@ describe('buildEffectivePresetConfig（design.md §14.56・§16.16と同じク�
 });
 
 describe('resolveWorkingDirectory（design.md §14.56）', () => {
-  const roots = ['/workspace/a', '/workspace/b'];
+  // 実体解決（fs.realpath）を挟むようになったため、存在しない架空のパス（旧テストの
+  // `/workspace/a`等）ではfail-closedで常に拒否されてしまう。実在する一時ディレクトリを
+  // 使って検証する（セキュリティ監査指摘: シンボリックリンクによる境界チェック迂回）。
+  let tmpRoot: string;
+  let rootA: string;
+  let rootB: string;
+  let outsideDir: string;
 
-  it('未指定（空文字）はそのままundefinedを返し、警告も出さない', () => {
-    expect(resolveWorkingDirectory('', roots)).toEqual({ path: undefined, warning: undefined });
+  // シンボリックリンク作成の可否を、テスト登録時点（`it.skipIf`の判定）で同期に確かめる。
+  // `beforeAll`はテスト登録が終わった後に実行されるため`skipIf`の条件には使えない。
+  // Windowsでは開発者モード/管理者権限が無いと`EPERM`になりうるため、その場合は
+  // 関連テストをスキップする（理由をここに明記する）。
+  const symlinksSupported = (() => {
+    const probeDir = mkdtempSync(path.join(os.tmpdir(), 'session-presets-symlink-probe-'));
+    try {
+      const target = path.join(probeDir, 'target');
+      const link = path.join(probeDir, 'link');
+      mkdirSync(target);
+      symlinkSync(target, link, 'dir');
+      return true;
+    } catch {
+      return false;
+    } finally {
+      rmSync(probeDir, { recursive: true, force: true });
+    }
+  })();
+
+  beforeAll(async () => {
+    tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'session-presets-test-'));
+    rootA = path.join(tmpRoot, 'workspace-a');
+    rootB = path.join(tmpRoot, 'workspace-b');
+    outsideDir = path.join(tmpRoot, 'outside');
+    await mkdir(path.join(rootA, 'packages', 'api'), { recursive: true });
+    await mkdir(path.join(rootB, 'sub'), { recursive: true });
+    await mkdir(path.join(tmpRoot, 'workspace-ab'), { recursive: true });
+    await mkdir(outsideDir, { recursive: true });
   });
 
-  it('ワークスペースフォルダ配下の絶対パスはそのまま通る', () => {
-    const result = resolveWorkingDirectory('/workspace/a/packages/api', roots);
-    expect(result.path).toBe('/workspace/a/packages/api');
+  afterAll(async () => {
+    await rm(tmpRoot, { recursive: true, force: true });
+  });
+
+  const roots = () => [rootA, rootB];
+
+  it('未指定（空文字）はそのままundefinedを返し、警告も出さない', async () => {
+    await expect(resolveWorkingDirectory('', roots())).resolves.toEqual({
+      path: undefined,
+      warning: undefined,
+    });
+  });
+
+  it('ワークスペースフォルダ配下の実在する絶対パスはそのまま通る', async () => {
+    const candidate = path.join(rootA, 'packages', 'api');
+    const result = await resolveWorkingDirectory(candidate, roots());
+    expect(result.path).toBe(candidate);
     expect(result.warning).toBeUndefined();
   });
 
-  it('ワークスペースフォルダそのものも通る', () => {
-    const result = resolveWorkingDirectory('/workspace/b', roots);
-    expect(result.path).toBe('/workspace/b');
+  it('ワークスペースフォルダそのものも通る', async () => {
+    const result = await resolveWorkingDirectory(rootB, roots());
+    expect(result.path).toBe(rootB);
     expect(result.warning).toBeUndefined();
   });
 
-  it('ワークスペースフォルダの外を指す絶対パスは無視され、警告が出る', () => {
-    const result = resolveWorkingDirectory('/etc/passwd', roots);
+  it('ワークスペースフォルダの外を指す絶対パスは無視され、警告が出る', async () => {
+    const result = await resolveWorkingDirectory(outsideDir, roots());
     expect(result.path).toBeUndefined();
     expect(result.warning).toContain('ワークスペースの外');
   });
 
-  it('似た名前だが別フォルダの兄弟パス（/workspace/ab）は外側とみなす', () => {
-    const result = resolveWorkingDirectory('/workspace/ab', roots);
+  it('似た名前だが別フォルダの兄弟パス（workspace-ab）は外側とみなす', async () => {
+    const sibling = path.join(tmpRoot, 'workspace-ab');
+    const result = await resolveWorkingDirectory(sibling, roots());
     expect(result.path).toBeUndefined();
     expect(result.warning).toContain('ワークスペースの外');
   });
 
-  it('相対パスは無視され、警告が出る', () => {
-    const result = resolveWorkingDirectory('packages/api', roots);
+  it('相対パスは無視され、警告が出る', async () => {
+    const result = await resolveWorkingDirectory('packages/api', roots());
     expect(result.path).toBeUndefined();
     expect(result.warning).toContain('絶対パス');
   });
 
-  it('".." を含む絶対パスはpath.resolveで正規化された上で境界チェックされる', () => {
-    const result = resolveWorkingDirectory('/workspace/a/../b/sub', roots);
-    expect(result.path).toBe('/workspace/b/sub');
+  it('".." を含む絶対パスはpath.resolveで正規化された上で境界チェックされる', async () => {
+    // `path.join`は内部で正規化してしまい".."が消えるため、意図的に文字列結合で組み立てる
+    // （関数内部の`path.resolve`による正規化そのものを検証するため）
+    const candidate = `${rootA}${path.sep}..${path.sep}workspace-b${path.sep}sub`;
+    const result = await resolveWorkingDirectory(candidate, roots());
+    expect(result.path).toBe(path.join(rootB, 'sub'));
     expect(result.warning).toBeUndefined();
   });
+
+  it('存在しないパスはfail-closedで拒否され、警告が出る', async () => {
+    const missing = path.join(rootA, 'does-not-exist');
+    const result = await resolveWorkingDirectory(missing, roots());
+    expect(result.path).toBeUndefined();
+    expect(result.warning).toContain('実体を解決できない');
+  });
+
+  it.skipIf(!symlinksSupported)(
+    'ワークスペース外を指すシンボリックリンクは拒否され、警告が出る（境界チェックの迂回対策）',
+    async () => {
+      const link = path.join(rootA, 'escape');
+      await symlink(outsideDir, link, 'dir');
+      const result = await resolveWorkingDirectory(link, roots());
+      expect(result.path).toBeUndefined();
+      expect(result.warning).toContain('ワークスペースの外');
+    },
+  );
+
+  it.skipIf(!symlinksSupported)(
+    'ワークスペース内を指すシンボリックリンクは通る（正当なケースを誤って壊さない）',
+    async () => {
+      const link = path.join(rootA, 'link-to-b');
+      await symlink(rootB, link, 'dir');
+      const result = await resolveWorkingDirectory(link, roots());
+      expect(result.path).toBe(link);
+      expect(result.warning).toBeUndefined();
+    },
+  );
 });

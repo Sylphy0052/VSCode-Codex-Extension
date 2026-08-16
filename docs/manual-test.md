@@ -1887,7 +1887,7 @@ Codex画面・Claude Code画面の両方に共通する機能（`chatScript.ts`/
 
 ### U-20 プリセットからの新しい会話（`agent.sessionPresets`、design.md §14.56、issue #295）
 
-- 前提: `agent.sessionPresets`にCodex・Claude Codeそれぞれ1件以上のプリセットを設定する（例: `[{"name": "調査用Codex", "provider": "codex", "model": "gpt-5", "approvalMode": "untrusted", "sandbox": "read-only"}, {"name": "実装用Claude", "provider": "claude", "permissionMode相当のapprovalMode": "acceptEdits"}]`のように`name` / `provider`は必須、他は任意）
+- 前提: `agent.sessionPresets`にCodex・Claude Codeそれぞれ1件以上のプリセットを設定する（例: `[{"name": "調査用Codex", "provider": "codex", "model": "gpt-5", "approvalMode": "untrusted", "sandbox": "read-only"}, {"name": "実装用Claude", "provider": "claude", "approvalMode": "acceptEdits"}]`のように`name` / `provider`は必須、他は任意）
 - 操作: コマンドパレットから「Agent: プリセットから新しい会話を開く…」（`agent.openPresetChat`）
 - 期待: 設定したプリセットの一覧がQuickPickに出る（ラベルはプリセット名、説明にprovider/model/effort、詳細に承認・サンドボックス・作業ディレクトリが出る）
 - 操作: いずれかを選ぶ

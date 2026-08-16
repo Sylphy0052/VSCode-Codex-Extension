@@ -662,10 +662,28 @@
               },
               "approvalMode": {
                 "type": "string",
-                "description": "承認方針（Codexは`untrusted`/`on-request`/`never`、Claudeは`permissionMode`の値）。拡張機能側の現在の設定より緩い方向へは適用されず、無視した場合は警告を出す。"
+                "enum": [
+                  "",
+                  "untrusted",
+                  "on-request",
+                  "never",
+                  "manual",
+                  "auto",
+                  "acceptEdits",
+                  "plan",
+                  "dontAsk",
+                  "bypassPermissions"
+                ],
+                "description": "承認方針（Codexは`untrusted`/`on-request`/`never`、Claudeは`permissionMode`の値である`manual`/`auto`/`acceptEdits`/`plan`/`dontAsk`/`bypassPermissions`）。providerに応じてどちらかの値域を使う。拡張機能側の現在の設定より緩い方向へは適用されず、無視した場合は警告を出す。"
               },
               "sandbox": {
                 "type": "string",
+                "enum": [
+                  "",
+                  "read-only",
+                  "workspace-write",
+                  "danger-full-access"
+                ],
                 "description": "サンドボックスの方針（`read-only`/`workspace-write`/`danger-full-access`）。Codexのみ意味を持つ。拡張機能側の現在の設定より緩い方向へは適用されない。"
               },
               "workingDirectory": {

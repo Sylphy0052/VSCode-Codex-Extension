@@ -1,3 +1,4 @@
+import { realpath } from 'node:fs/promises';
 import * as path from 'node:path';
 import { isProviderId, type ProviderId } from './provider/id';
 import {
@@ -191,10 +192,61 @@ export function buildEffectivePresetConfig(
   };
 }
 
+/** QuickPickの1件分の表示用文字列（ラベル・説明・詳細）。`vscode`には依存しない純粋関数。 */
+export interface SessionPresetQuickPickLabel {
+  label: string;
+  description: string;
+  detail: string;
+}
+
+/**
+ * プリセット1件分のQuickPick表示文字列を組み立てる（`src/extension.ts`の`openPresetChat`から
+ * 切り出し。design.md §14.56）。
+ *
+ * `detail`の承認・サンドボックスは`buildEffectivePresetConfig`を通した実効値を使う。
+ * プリセットの生値（`preset.approvalMode` / `preset.sandbox`）をそのまま出すと、選択画面には
+ * `danger-full-access`のような値が見えるのに、実際に開く会話はクランプ済みの値になり、
+ * 表示と実際の挙動が食い違う（コードレビュー指摘）。
+ */
+export function buildSessionPresetQuickPickLabel(
+  preset: SessionPreset,
+  baseline: PresetSafetyBaseline,
+): SessionPresetQuickPickLabel {
+  const effective = buildEffectivePresetConfig(preset, baseline);
+  return {
+    label: preset.name,
+    description: [preset.provider, preset.model, preset.effort]
+      .filter((v) => v !== '')
+      .join(' / '),
+    detail: [
+      effective.approvalMode !== '' ? `承認: ${effective.approvalMode}` : undefined,
+      preset.provider === 'codex' && effective.sandbox !== ''
+        ? `サンドボックス: ${effective.sandbox}`
+        : undefined,
+      preset.workingDirectory !== '' ? `作業ディレクトリ: ${preset.workingDirectory}` : undefined,
+    ]
+      .filter((v): v is string => v !== undefined)
+      .join('  '),
+  };
+}
+
 export interface ResolvedWorkingDirectory {
   /** 有効な作業ディレクトリ。未指定または無効なら`undefined`。 */
   path: string | undefined;
   warning: string | undefined;
+}
+
+/**
+ * `path`を`fs.realpath`で実体解決する。存在しない（`ENOENT`）・アクセス権が無い等、
+ * 理由を問わず失敗した場合は`undefined`を返し、例外を外へ投げない
+ * （`src/orchestrator/worktree.ts`の`nodeWorktreeFileSystem.realpath`と同じ流儀）。
+ */
+async function tryRealpath(target: string): Promise<string | undefined> {
+  try {
+    return await realpath(target);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -204,15 +256,21 @@ export interface ResolvedWorkingDirectory {
  * どれを基準にするか一意に決められないため受け付けない。外を指す、または絶対パスでない
  * 値は無視して警告を返す（呼び出し側はその後の作業ディレクトリ選択にフォールバックする）。
  *
- * 文字列比較のみで判定し、シンボリックリンクの実体解決はしない。`buildTaskBoundary`
- * （`src/orchestrator/worktree.ts`）のような実パス解決はワークフローの無人実行向けの
- * 多層防御であり、こちらは対話的にQuickPickで選ぶ操作の入力補助にすぎないため、
- * 同じ強度は求めない（design.md §14.56に明記）。
+ * 候補パス・ワークスペースフォルダの両方を`fs.realpath`で実体解決してから包含判定する
+ * （セキュリティ監査指摘: `escape -> /home/victim`のようなリポジトリ内シンボリックリンクを
+ * `workingDirectory`に指定すると、文字列比較のみの境界チェックはすり抜けてしまい、
+ * `sandbox: workspace-write`の基準点がワークスペース外へ付け替わる）。片方だけ解決しても
+ * 不十分で、ワークスペースルート自体がシンボリックリンク経由で開かれている環境では
+ * 正当なパスを誤って弾く。候補パスの実体解決に失敗した場合（存在しない・権限が無い等）は
+ * 「解決できなかった」として拒否する（fail-closed。存在しないディレクトリを作業ディレクトリに
+ * 指定する意味は無い）。`.vscode/settings.json`経由で供給される値は利用者の手入力ではなく
+ * cloneしたリポジトリが与えうる値のため、`approvalMode` / `sandbox`と同じ強度の防御が要る
+ * と判断した（design.md §14.56）。
  */
-export function resolveWorkingDirectory(
+export async function resolveWorkingDirectory(
   candidate: string,
   workspaceFolderPaths: readonly string[],
-): ResolvedWorkingDirectory {
+): Promise<ResolvedWorkingDirectory> {
   if (candidate.trim() === '') {
     return { path: undefined, warning: undefined };
   }
@@ -224,14 +282,30 @@ export function resolveWorkingDirectory(
   }
 
   const normalized = path.resolve(candidate);
-  const inside = workspaceFolderPaths.some((root) => {
-    const normalizedRoot = path.resolve(root);
-    if (normalized === normalizedRoot) {
-      return true;
+  const realCandidate = await tryRealpath(normalized);
+  if (realCandidate === undefined) {
+    return {
+      path: undefined,
+      warning: `プリセットの作業ディレクトリの実体を解決できないため無視しました（存在しないか、アクセスできません）: ${candidate}`,
+    };
+  }
+
+  let inside = false;
+  for (const root of workspaceFolderPaths) {
+    const realRoot = await tryRealpath(path.resolve(root));
+    if (realRoot === undefined) {
+      continue;
     }
-    const rel = path.relative(normalizedRoot, normalized);
-    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
-  });
+    if (realCandidate === realRoot) {
+      inside = true;
+      break;
+    }
+    const rel = path.relative(realRoot, realCandidate);
+    if (rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+      inside = true;
+      break;
+    }
+  }
   if (!inside) {
     return {
       path: undefined,

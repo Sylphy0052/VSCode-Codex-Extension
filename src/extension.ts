@@ -96,7 +96,9 @@ import type { AgentProvider } from './provider/types';
 import { createLogger, type Logger } from './log';
 import {
   buildEffectivePresetConfig,
+  buildSessionPresetQuickPickLabel,
   resolveWorkingDirectory,
+  type PresetSafetyBaseline,
   type SessionPreset,
 } from './sessionPresets';
 import { nodeCommandRunner as nodeAccountCommandRunner } from './process/commandRunner';
@@ -862,13 +864,8 @@ interface SessionPresetPick extends vscode.QuickPickItem {
 /**
  * プリセットを選んで新しい会話を開く（issue #295、design.md §14.56）。
  *
- * `chat.openNew` / `claudeChat.openNew` は`cwd`/`taskConfig`を渡せる既存のAPI
- * （`src/view/chatView.ts` / `src/view/claudeChatView.ts`。ワークフローのタスクセッションが
- * 使っているのと同じ経路）にそのまま乗せる。`chatView.ts` / `claudeChatView.ts` 自体は
- * 変更しない。
- *
- * 実効値の組み立ては`buildEffectivePresetConfig`（拡張機能側の現在の設定より緩めない）に
- * 委ね、ここでは作業ディレクトリの解決とQuickPickの配線だけを行う。
+ * QuickPickの表示文字列の組み立ては`buildSessionPresetQuickPickLabel`（`src/sessionPresets.ts`）
+ * へ切り出した。実際に会話を開く処理は`applyPresetChat`が担う。
  */
 async function openPresetChat(
   chat: ChatViewManager,
@@ -888,30 +885,39 @@ async function openPresetChat(
     return;
   }
 
+  const baseline = readSafetyBaseline();
   const items: SessionPresetPick[] = presets.map((preset) => ({
-    label: preset.name,
-    description: [preset.provider, preset.model, preset.effort].filter((v) => v !== '').join(' / '),
-    detail: [
-      preset.approvalMode !== '' ? `承認: ${preset.approvalMode}` : undefined,
-      preset.provider === 'codex' && preset.sandbox !== ''
-        ? `サンドボックス: ${preset.sandbox}`
-        : undefined,
-      preset.workingDirectory !== '' ? `作業ディレクトリ: ${preset.workingDirectory}` : undefined,
-    ]
-      .filter((v): v is string => v !== undefined)
-      .join('  '),
+    ...buildSessionPresetQuickPickLabel(preset, baseline),
     preset,
   }));
   const picked = await vscode.window.showQuickPick(items, { placeHolder: 'プリセットを選択' });
   if (picked === undefined) {
     return;
   }
-  const preset = picked.preset;
 
-  const effective = buildEffectivePresetConfig(preset, readSafetyBaseline());
+  await applyPresetChat(picked.preset, baseline, chat, claudeChat, log);
+}
+
+/**
+ * 選んだプリセットの実効値（`buildEffectivePresetConfig`、拡張機能側の現在の設定より
+ * 緩めない）を組み立て、作業ディレクトリを解決してから会話を開く。
+ *
+ * `chat.openNew` / `claudeChat.openNew` は`cwd`/`taskConfig`を渡せる既存のAPI
+ * （`src/view/chatView.ts` / `src/view/claudeChatView.ts`。ワークフローのタスクセッションが
+ * 使っているのと同じ経路）にそのまま乗せる。`chatView.ts` / `claudeChatView.ts` 自体は
+ * 変更しない。
+ */
+async function applyPresetChat(
+  preset: SessionPreset,
+  baseline: PresetSafetyBaseline,
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
+  log: Logger,
+): Promise<void> {
+  const effective = buildEffectivePresetConfig(preset, baseline);
   const warnings = [...effective.warnings];
 
-  const resolvedCwd = resolveWorkingDirectory(preset.workingDirectory, workspaceFolderPaths());
+  const resolvedCwd = await resolveWorkingDirectory(preset.workingDirectory, workspaceFolderPaths());
   if (resolvedCwd.warning !== undefined) {
     warnings.push(resolvedCwd.warning);
   }
