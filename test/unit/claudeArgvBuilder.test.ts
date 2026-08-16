@@ -155,7 +155,7 @@ describe('buildClaudeStreamArgs', () => {
       cwd: '/w/repo',
       config: config({ model: 'sonnet' }),
     });
-    expect(args.slice(0, 8)).toEqual([
+    expect(args.slice(0, 10)).toEqual([
       '--print',
       '--input-format',
       'stream-json',
@@ -164,10 +164,37 @@ describe('buildClaudeStreamArgs', () => {
       '--verbose',
       '--include-partial-messages',
       '--replay-user-messages',
+      '--permission-prompt-tool',
+      'stdio',
     ]);
     expect(args).toContain('--session-id');
     expect(args).toContain(NEW_ID);
     expect(args).toContain('sonnet');
+  });
+
+  // issue #276: これが無いとCLIは承認要求を出さずにツール呼び出しを自動拒否する
+  it('承認要求をcontrol protocolへ流す指定を必ず含む', () => {
+    for (const permissionMode of ['', 'manual', 'acceptEdits', 'plan', 'bypassPermissions']) {
+      const { args } = buildClaudeStreamArgs({
+        target: { kind: 'new' },
+        sessionId: NEW_ID,
+        cwd: '/w/repo',
+        config: config({ permissionMode }),
+      });
+      const at = args.indexOf('--permission-prompt-tool');
+      expect(at).toBeGreaterThanOrEqual(0);
+      expect(args[at + 1]).toBe('stdio');
+    }
+  });
+
+  it('TUIタブ用の引数には付けない（CLI自身が対話で承認を聞くため）', () => {
+    const { args } = buildClaudeShellArgs({
+      target: { kind: 'new' },
+      sessionId: NEW_ID,
+      cwd: '/w/repo',
+      config: config({ permissionMode: 'acceptEdits' }),
+    });
+    expect(args).not.toContain('--permission-prompt-tool');
   });
 
   it('resumeでは -r を使い --session-id を渡さない', () => {

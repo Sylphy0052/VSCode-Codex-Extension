@@ -943,7 +943,7 @@ src/claude/
 
 ```
 claude --print --input-format stream-json --output-format stream-json --verbose
-       --include-partial-messages --replay-user-messages
+       --include-partial-messages --replay-user-messages --permission-prompt-tool stdio
        [--session-id <uuid> | -r <id>] [--model …] [--effort …] [--permission-mode …]
 ```
 
@@ -960,6 +960,25 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 3. ハンドシェイクが失敗した場合は **会話は続けたまま** 1度だけ通知し、以後は `claude.permissionMode` の設定に委ねる。
 
 `acceptForSession`（この会話では常に許可）はCLI側に区別が無いため、許可として返す。
+
+#### `--permission-prompt-tool stdio` が承認要求の前提（issue #276）
+
+**`initialize` のハンドシェイクが成功しても、この指定が無ければ `can_use_tool` は一度も届かない。** `--print` 経路のCLIは、承認が要るツール呼び出しを拡張機能へ問い合わせないまま自動的に拒否する。実測（CLI 2.1.229、拡張機能と同じ引数で再現）:
+
+| 起動引数                                | `bash -c "echo hi"` の結果                                             |
+| --------------------------------------- | ---------------------------------------------------------------------- |
+| `--permission-mode acceptEdits` のみ    | `can_use_tool` は届かず、ツール結果が `This command requires approval` |
+| 上記 + `--permission-prompt-tool stdio` | `can_use_tool` が届き、`allow` で応答するとコマンドが実行される        |
+
+ここが抜けていた間、次が全て働いていなかった（`settings.json` の `permissions.allow` に載っているコマンドだけが素通りし、それ以外は無言で拒否されていた）。
+
+- チャット画面の承認カード（このセクション）。承認要求が来ないだけなので画面は正常に見え、劣化検知（`onApprovalUnavailable`）も `initialize` の失敗しか見ていないため無反応
+- ワークフローの危険判定一式（§16.7の `classifyApprovalRequest` / `autoApprove` / `escalate` / `allow`）。判定の入口が `can_use_tool` であるため、一度も呼ばれない
+- §16.16の `bypassPermissions` 読み替え（§16.7）。`acceptEdits` へ落としてタスクを開始できるようにしても、コマンド実行は拒否され続ける
+
+実害の例（issue #276）: ワークフローのタスクが `./scripts/ai-harness/check.sh` を実行できず（`toolDenialKind: user-rejected`）、「変化なし」を繰り返して20ターン空回りしたまま失敗した。
+
+TUIタブ（`buildClaudeShellArgs`、§14.2）には付けない。CLI自身が対話で承認を聞くため不要で、`stdio` を指定すると応答する相手がいない。
 
 ### 14.6 プロバイダごとにできること
 
