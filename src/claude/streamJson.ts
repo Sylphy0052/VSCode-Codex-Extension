@@ -33,6 +33,9 @@ export const initialClaudeState: ChatState = {
   usage: undefined,
   context: undefined,
   sessionCost: undefined,
+  // Claude Codeには `thread/tokenUsage/updated` に相当する通知が無く、常にundefinedのまま
+  // （Codexのみ、issue #294）
+  sessionTokens: undefined,
   planMode: false,
   // Codexのレビュー中フラグに相当する概念がClaude Codeには無い
   reviewing: false,

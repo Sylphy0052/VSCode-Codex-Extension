@@ -139,6 +139,22 @@ describe('chatScript', () => {
     expect(source).toContain('compositionend');
     expect(source).toContain('decideSendKeyAction(');
   });
+
+  it('セッション累計のトークン数（issue #294）: state.sessionTokensがフッターへ出る配線がある', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+    expect(source).toContain('formatSessionTokens');
+    expect(source).toContain('state.sessionTokens');
+    // 値が数値で届いていない間は枠ごと出さない（0や-を出さない。受入基準）
+    expect(source).toContain("typeof tokens !== 'number'");
+  });
+
+  it('セッション累計のトークン数: Claude Codeのコスト表示（formatSessionCost）と共存する', () => {
+    // 既存のコスト表示のロジックを壊していないことを、両方の関数が揃って残っていることで
+    // 機械的に確かめる（issue #294のやらないこと「コスト表示を作り変えない」）
+    const source = chatScript('Claude Code', { mode: 'command', commandName: 'code-review' });
+    expect(source).toContain('function formatSessionCost(cost)');
+    expect(source).toContain('function formatSessionTokens(tokens)');
+  });
 });
 
 describe('controlPanelScript', () => {
