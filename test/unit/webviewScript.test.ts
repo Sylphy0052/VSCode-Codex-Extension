@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { chatScript } from '../../src/view/chatScript';
 import { controlPanelScript } from '../../src/view/controlPanelScript';
 import { workflowScript } from '../../src/view/workflowScript';
+import { workflowStyles } from '../../src/view/workflowStyles';
 
 /**
  * Webviewのスクリプトはテンプレートリテラルの中身で、型検査もlintも効かない。
@@ -145,6 +146,25 @@ describe('controlPanelScript', () => {
   );
 });
 
+describe('workflowStyles', () => {
+  // Issue #280: 一覧のバッジはグラフのノード枠と同じ配色を使う。どちらか片方だけ
+  // 色を足して図と一覧が食い違う事故を機械的に防ぐ
+  it('状態ごとのバッジの色を定義している', () => {
+    const styles = workflowStyles();
+    for (const state of ['running', 'waitingApproval', 'waitingReply', 'blocked', 'done', 'merging', 'failed']) {
+      expect(styles).toContain('.state-pill.state-' + state);
+    }
+    expect(styles).toContain('--wf-state-color');
+  });
+
+  it('バッジの色にグラフのノード枠と同じ変数を使う', () => {
+    const styles = workflowStyles();
+    for (const color of ['--vscode-charts-blue', '--vscode-charts-yellow', '--vscode-charts-green', '--vscode-errorForeground']) {
+      expect(styles).toContain(color);
+    }
+  });
+});
+
 describe('workflowScript', () => {
   it('構文として成立している', () => {
     expect(() => parses(workflowScript())).not.toThrow();
@@ -173,6 +193,11 @@ describe('workflowScript', () => {
     expect(source).toContain("el('graphZoomInBtn')");
     expect(source).toContain("el('graphZoomOutBtn')");
     expect(source).toContain("el('graphZoomFitBtn')");
+  });
+
+  it('タスク一覧の状態に状態ごとのクラスを付ける（Issue #280）', () => {
+    const source = workflowScript();
+    expect(source).toContain("'state-pill state-' + task.state");
   });
 
   it('動的な値をHTMLへ文字列結合しない（innerHTML/outerHTMLを使わない）', () => {

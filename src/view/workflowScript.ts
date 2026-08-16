@@ -581,7 +581,9 @@ export function workflowScript(): string {
       row.appendChild(text('td', '', task.id));
 
       const stateCell = el2('td', 'state-badge');
-      stateCell.appendChild(text('span', '', STATE_LABEL[task.state] || task.state));
+      stateCell.appendChild(
+        text('span', 'state-pill state-' + task.state, STATE_LABEL[task.state] || task.state),
+      );
       const failureText = describeFailure(task);
       if (failureText) {
         stateCell.appendChild(text('span', 'hint', '（' + failureText + '）'));
