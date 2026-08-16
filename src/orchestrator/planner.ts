@@ -24,6 +24,7 @@ import {
   DEFAULT_MAX_PARALLEL,
   DEFAULT_PROVIDER,
   dropUndeclaredTemplateRefs,
+  ensureDefaultsProvider,
   isProvider,
   ISOLATIONS,
   MAX_PARALLEL_MAX,
@@ -137,6 +138,11 @@ export interface SchemaDescriptionOptions {
    * 食い違う説明を人に読ませることになる。
    */
   unattended?: boolean;
+  /**
+   * 分解に使っているエージェント（issue #321）。生成されるYAMLの `defaults.provider` へ
+   * これを書くよう指示する。省略時は `DEFAULT_PROVIDER`。
+   */
+  provider?: Provider;
 }
 
 /**
@@ -150,6 +156,7 @@ export interface SchemaDescriptionOptions {
  */
 export function buildSchemaDescription(options: SchemaDescriptionOptions = {}): string {
   const unattended = options.unattended ?? false;
+  const provider = options.provider ?? DEFAULT_PROVIDER;
   return [
     '# ワークフロー定義（YAML）のスキーマ',
     '',
@@ -161,6 +168,10 @@ export function buildSchemaDescription(options: SchemaDescriptionOptions = {}): 
       ` maxParallel=${DEFAULT_MAX_PARALLEL}（${MAX_PARALLEL_MIN}〜${MAX_PARALLEL_MAX}）,` +
       ` maxIterations=${DEFAULT_MAX_ITERATIONS}（1〜${LOOP_ITERATION_LIMIT}）,` +
       ` cleanup=${DEFAULT_CLEANUP}, autoApprove=${DEFAULT_AUTO_APPROVE}`,
+    // 分解に使っているエージェントと、出来たワークフローを実行するエージェントを
+    // 揃える（issue #321）。書かれなかった場合は`ensureDefaultsProvider`が補う
+    `- defaults.provider には ${provider} を書くこと（この分解を行っているエージェントに` +
+      `合わせる。省略すると${DEFAULT_PROVIDER}で実行される）`,
     `- tasks: タスクの配列。1件以上、最大${MAX_TASK_COUNT}件`,
     '',
     '## タスク1件のフィールド',
@@ -228,6 +239,10 @@ export interface BuildPlannerPromptInput {
    * 無人実行向けの指定を書かせるか（`buildSchemaDescription` へそのまま渡す。issue #278）。
    */
   unattended?: boolean;
+  /**
+   * 分解に使っているエージェント（`buildSchemaDescription` へそのまま渡す。issue #321）。
+   */
+  provider?: Provider;
 }
 
 function describeWorkspace(summary: WorkspaceSummary): string {
@@ -271,7 +286,10 @@ export function buildPlannerPrompt(input: BuildPlannerPromptInput): string {
   parts.push(
     describeWorkspace(input.workspaceSummary),
     '',
-    buildSchemaDescription({ unattended: input.unattended ?? false }),
+    buildSchemaDescription({
+      unattended: input.unattended ?? false,
+      provider: input.provider ?? DEFAULT_PROVIDER,
+    }),
     '',
     '## 分解の指針',
     '- 並列に進められるタスクは、それぞれ独立したタスクとして分け、dependsOnで直列にしないこと',
@@ -750,10 +768,16 @@ export async function sendSingleTurn(
  * 増やすことを禁じているので、モデルは参照を消すしか辻褄の合わせようがないが、実際には
  * 同じ参照を書き続けて2回とも失敗する（`dropUndeclaredTemplateRefs`のコメント参照）。
  */
-function extractAndRepair(response: string): { yaml: string; dropped: DroppedTemplateRef[] } {
+function extractAndRepair(
+  response: string,
+  provider: Provider,
+): { yaml: string; dropped: DroppedTemplateRef[] } {
   const extracted = extractYamlFromResponse(response);
   const repaired = dropUndeclaredTemplateRefs(extracted);
-  return { yaml: repaired.yaml, dropped: repaired.dropped };
+  // 分解に使ったエージェントを実行にも引き継ぐ（issue #321）。プロンプトで指示しても
+  // 書かれないことがあるため、検証にかける前に補う。明示されていれば上書きしない
+  const withProvider = ensureDefaultsProvider(repaired.yaml, provider);
+  return { yaml: withProvider.yaml, dropped: repaired.dropped };
 }
 
 /**
@@ -779,9 +803,11 @@ export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkfl
     ...(input.roadmapMaterial !== undefined ? { roadmapMaterial: input.roadmapMaterial } : {}),
     // 無人実行を許した環境（machineスコープ設定がon）でだけ、生成の時点でその形にする
     unattended: input.baseline.allowAutoApprove,
+    // 分解に使ったエージェントを、そのまま実行にも使う（issue #321）
+    provider: input.provider,
   });
   const firstResponse = await sendSingleTurn(input.host, input.provider, sessionInput, firstPrompt);
-  const first = extractAndRepair(firstResponse);
+  const first = extractAndRepair(firstResponse, input.provider);
   const firstYaml = first.yaml;
   const firstAttempt = tryParseAndValidate(firstYaml);
   if (firstAttempt.ok && firstAttempt.definition !== undefined) {
@@ -807,7 +833,7 @@ export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkfl
     sessionInput,
     retryPrompt,
   );
-  const second = extractAndRepair(secondResponse);
+  const second = extractAndRepair(secondResponse, input.provider);
   const secondYaml = second.yaml;
   const secondAttempt = tryParseAndValidate(secondYaml);
   if (secondAttempt.ok && secondAttempt.definition !== undefined) {
