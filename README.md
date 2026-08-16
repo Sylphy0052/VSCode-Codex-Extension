@@ -396,7 +396,7 @@ Codexがサブエージェントを起動したとき、その活動を会話の
 
 - **危険と判定した操作だけは自動で通さず、そのタスクを止めて人へ回す。** 判定はパターン照合による補助でしかなく、一次防御ではない（後述）
 - **一次防御はサンドボックスであり、既定で有効。** `sandbox`（Codex）/ `approvalMode` / `permissionMode` はYAMLから拡張機能の設定より**緩める方向へは動かせない**。緩める指定は無視され警告が出る
-- **Claude Codeの `bypassPermissions` はワークフローでは使われない。** この設定では承認要求そのものが発行されず、上の危険判定が丸ごと働かない。`claude.permissionMode` を `bypassPermissions` にしている場合、ワークフローのタスクは `acceptEdits` へ読み替えて実行し、その旨を警告に出す（チャットの設定はそのまま。ワークフロー実行時だけの読み替え）
+- **Claude Codeの `bypassPermissions` はワークフローでは使われない。** この設定では承認要求そのものが発行されず、上の危険判定が丸ごと働かない。`claude.permissionMode` を `bypassPermissions` にしている場合、ワークフローのタスクは `acceptEdits` へ読み替えて実行し、その旨を警告に出す（チャットの設定はそのまま。ワークフロー実行時だけの読み替え）。**確認を挟まずに走らせたい場合は、`bypassPermissions` ではなく `autoApprove` を使う**（[後述](#確認を挟まずに走らせたい場合)）
 - **タスクの `allow` を書くと、そのタスクに関する限り危険判定そのものが効かなくなる。** `allow` は「既定の停止条件から外すパターン」を追加するフィールドで、書いた分だけそのタスクは自動承認の対象が広がる（`.git` 配下への書き込みなど一部は `allow` でも解除できない）。使っているワークフローは実行前に確認が出て、ワークフローViewの警告欄に常時表示される
 - **`autoApprove: true` はYAMLに書くだけでは効かない。** machineスコープの設定 `agent.workflows.allowAutoApprove`（既定 `false`）が有効なときだけ意味を持つ。無効のままなら、YAMLに何と書かれていても全ての承認要求を人へ回して走る（設定は[後述](#設定)）
 - **`agent.workflows.finalMerge` の既定は `auto`。** 全タスクが `done` になると、統合ブランチからmainへのPR/MRを作ったうえで、そのままmainへマージする（`gh pr merge` / `glab mr merge`）。**人の目を通さずmainが進む。** MRの自己マージを禁じる運用規約がある場合は、machineスコープの設定で `agent.workflows.finalMerge` を `pr-only` にする。PR/MRを作って止め、mainへの書き込みは人が行う
@@ -501,6 +501,46 @@ tasks:
 5. 人がレビューして直す（分解の誤りを一番安く直せる段）。直したら「ゴール文からYAMLを生成する」の「ロードマップから生成」でYAML化する（1フェーズだけでも、複数フェーズまとめてでも、全フェーズ一度にでもよい）
 
 runが終わると、そのrunで `done` になったタスクに対応するロードマップの項目にチェックが入る（人が書いた文は書き換えない）。
+
+### 確認を挟まずに走らせたい場合
+
+`bypassPermissions` で走らせることはできない（上記のとおり読み替えられる）。承認要求そのものが発行されない設定では、危険なコマンドを止める仕組みが一切残らないため。人が席を外していても進むようにしたいなら、**危険判定を残したまま自動承認する** `autoApprove` を使う。
+
+1. User settings（`settings.json`）へ `"agent.workflows.allowAutoApprove": true` を書く。machineスコープなので、リポジトリ側の `.vscode/settings.json` からは有効にできない（cloneしただけのリポジトリが無人実行を勝手に有効化する経路を残さないため）
+2. ワークフローYAMLの `defaults` へ `autoApprove: true` を書く（タスクごとに書かなくてよい）
+
+```yaml
+version: 1
+name: 例
+defaults:
+  autoApprove: true
+tasks:
+  - id: T1
+    prompt: ...
+```
+
+この状態での挙動:
+
+- ファイルの編集は承認要求自体が出ない（`acceptEdits`）ので、そのまま進む
+- 通常のコマンドは承認要求が出るが、自動で許可される
+- **危険と判定したものだけ、そのタスクを止めて人へ回す**（ワークフローViewの「承認」で決める）
+
+止まるのは次の場合（既定の停止条件。括弧内は `allow` で解除するときのid）。
+
+- 作業ディレクトリ・worktreeの境界の外を触る（`outside-working-directory`）
+- シェルメタ文字を含む、または複数のコマンドが連結されている（`shell-metacharacters`）
+- 再帰的な強制削除、`rm -rf` 相当（`recursive-force-delete`）
+- 追跡外ファイルの一括削除、`git clean` の強制実行（`untracked-clean`）
+- 作業ツリーの強制巻き戻し（`worktree-reset`）
+- ブランチまたはタグの削除（`branch-tag-delete`）
+- `DROP TABLE` / `TRUNCATE`（`db-drop-truncate`）
+- `find` の `-delete` / `-exec`（`find-delete-exec`）
+- リモートへの強制push（`force-push`）
+- デプロイまたはパッケージの公開（`deploy-publish`）
+- 外部へ到達しうるコマンド、`curl` / `wget` / `nc` 系（`external-egress`）
+- `base64` / `xxd` によるデコード（`decode`）
+
+**`&&` や `|` を含むコマンドは `shell-metacharacters` に当たるため止まる。** ここも自動で通したいなら、そのタスクの `allow` に上のidを書いて個別に解除する。ただし `allow` を書いた分だけそのタスクの危険判定は働かなくなるので、タスクを分けてコマンドを単純にするほうが安全である（`.git` 配下への書き込みなど、`allow` でも解除できないものもある）。
 
 ## 設定
 
