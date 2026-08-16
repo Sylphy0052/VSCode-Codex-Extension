@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { readChatSendOnConfig, readClaudeConfig, readWorkflowsConfig } from '../../src/config';
+import {
+  readChatSendOnConfig,
+  readClaudeConfig,
+  readNotificationsConfig,
+  readWorkflowsConfig,
+} from '../../src/config';
 import { __mock } from '../mocks/vscode';
 
 describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
@@ -150,5 +155,25 @@ describe('readChatSendOnConfig（issue #288）', () => {
   it('未知の値は既定（ctrlEnter）へ丸める', () => {
     __mock.setConfig('agent', { 'chat.sendOn': 'always' });
     expect(readChatSendOnConfig()).toBe('ctrlEnter');
+  });
+});
+
+describe('readNotificationsConfig（issue #286）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('既定はapprovalPending: true・turnComplete: false', () => {
+    expect(readNotificationsConfig()).toEqual({ approvalPending: true, turnComplete: false });
+  });
+
+  it('agent.notifications.approvalPendingをfalseにできる', () => {
+    __mock.setConfig('agent', { 'notifications.approvalPending': false });
+    expect(readNotificationsConfig().approvalPending).toBe(false);
+  });
+
+  it('agent.notifications.turnCompleteをtrueにできる', () => {
+    __mock.setConfig('agent', { 'notifications.turnComplete': true });
+    expect(readNotificationsConfig().turnComplete).toBe(true);
   });
 });

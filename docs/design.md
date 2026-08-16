@@ -3038,6 +3038,79 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - ピン留めは`globalState`（ワークスペースをまたいで共通）。ワークスペースごとに別のピンを持ちたい場合は非対応
 
 
+### 14.55 応答の完了と承認待ちを利用者へ届ける（issue #286）
+
+背面タブでターンが終わっても、承認カードが出ても、通知もタブ名の変化も無く、利用者は自分でタブを見に行くまで気付けなかった。3箇所（タブ名・履歴ツリー・通知）へ同じ状態を出す。
+
+#### 状態の判定を1箇所に集約する（`src/view/sessionActivity.ts`）
+
+タブ名の印（`chatView.ts` / `claudeChatView.ts`）と履歴ツリーのアイコン・`description`（`sessionTreeProvider.ts`）が別々の判定基準を持つと必ずズレる。両方が同じ`ChatState`から同じ結論を導けるよう、`vscode`に依存しない純粋関数として`src/view/sessionActivity.ts`へ切り出した。
+
+- `deriveSessionActivityState(state)`: `'idle' | 'running' | 'approvalPending'`を返す。優先順位は**承認待ち＞実行中＞待機中**。承認要求が出ている間も`busy`は`true`のまま（`turn/started`〜`turn/completed`の間はターンが終わっていないため）なので、`busy`だけを見ると承認待ちが実行中の印に埋もれてしまう
+- `decoratePanelTitle(baseTitle, activity)`: タブ名の先頭に印を付ける
+- `sanitizeForNotification(value, maxLen)`: 通知本文へ差し込む文字列の安全化（後述）
+
+#### (a) タブ名の先頭の印
+
+`WebviewPanel.title`は文字列しか受け付けず、`vscode.ThemeIcon`は使えない（VS Code API制約）。記号で表す：実行中は`*`、承認待ちは`!`（半角1文字＋空白）。`*`は「実行中」を表す記号としてよく使われるものをそのまま採用し、`!`は「要対応」を示す記号として、承認待ちが実行中より優先度が高いことを表す。絵文字は使っていない。
+
+`chatView.ts`（Codex）・`claudeChatView.ts`（Claude Code）どちらの`onSessionChange`も、名前（`state.name`由来のタイトル）が変わっていなくても`state`が変わるたびに`entry.panel.title = decoratePanelTitle(entry.title, deriveSessionActivityState(state))`を毎回適用する。`entry.title`自体（印を含まない生のタイトル）は従来どおり名前解決の唯一の値として保つ——パネルを作り直すとき（タブを閉じて開き直す等）に印付きの文字列を再利用してしまわないようにするため。
+
+#### (b) 履歴ツリーのアイコン・`description`
+
+`sessionTreeProvider.ts`の`buildSessionTreeItem`は、`open ? 'circle-filled' : session.archived ? 'archive' : ...`という「開いているか」だけを見る分岐だった。承認待ち・実行中はこれより優先して出す：
+
+- アイコン: 承認待ちは`bell-dot`、実行中は`sync~spin`（VS Code本体が拡張機能の一覧などで「進行中」を表すのに使っている回転アイコン）。どちらでも無ければ従来の分岐
+- `description`: 既存の`[ラベル, 相対時刻, cwd]`の先頭へ「承認待ち」「実行中」を差し込む
+
+**セッションの葉ノードは生の`SessionSummary`のまま**という不変条件（issue #236・#293、`TreeElement = SessionSummary | SessionGroupNode`）は崩していない。状態はラップではなく、コンストラクタへ渡す関数`getActivity: (session: SessionSummary) => SessionActivityState | undefined`から都度引く形にした。`isOpen: (sessionId: string) => boolean`だった既存の引数をこの関数へ差し替えている（`undefined`が「未オープン」で、旧`isOpen`の`false`に相当）。
+
+状態の実体は`chat`（Codex）・`claudeChat`（Claude Code）の各`ChatViewManager`が持つ。両方に`getActivityState(id): SessionActivityState | undefined`を追加した（既存の`isOpen`と同じく`panels`にエントリがあるかどうかで「開いているか」を判定し、あれば`entry.session.getState()`を`deriveSessionActivityState`へ渡す）。`src/extension.ts`は`session.provider`で`chat` / `claudeChat`のどちらを引くか振り分ける関数を組み立ててツリーへ渡す。
+
+これで、これまで`chat.isOpen`（Codexのみ）しか配線されておらず、Claude Codeのセッションは常に「未オープン」（`sparkle`アイコン固定）だった配線も、`getActivityState`経由で両プロバイダとも同じ経路を通るようになった（副次的な改善。回帰チェックは`test/unit/sessionTreeProvider.test.ts`で`getActivity`が呼ばれることそのものを見ているため、両プロバイダの分岐が壊れていないことも別途確認済み）。
+
+#### (c) 承認待ちの通知
+
+`vscode.window.showInformationMessage`（モーダルにしない。「開く」ボタン付き）を使う。3つの受入基準をそれぞれこう満たした。
+
+**「見えているか」は`WebviewPanel.visible`で判定する。** `active`（フォーカスが当たっているか）とは別物にした——分割表示やSide-by-sideで前面に見えていればフォーカスが無くても通知を出す必要は無い、という判断。`entry.panel === undefined`（タブが閉じている）も「見えていない」扱いにする。
+
+**同じ要求で通知が重複しない。** `ChatPanel` / `ClaudePanel`へ`notifiedApprovalRequestIds: Set<string>`を持たせ、`state.approvals`に新しく現れた`requestId`（`String(requestId)`。Codexは`number | string`、Claudeは`string`）ごとに1回だけ判定する。設定で無効・タブが見えている等の理由で通知を出さなかった場合も含めて`notifiedApprovalRequestIds`へ積み、二度と判定し直さない。
+
+**判定は「承認要求が新しく現れた瞬間」の一度きり。** そのときタブが見えていれば何もせず、後から可視性が変わっても遡って通知しない（＝見えている間に出た承認要求は、後でタブを裏に回しても通知されない）。逆に、そのとき見えていなければ通知し、以後タブを表に出しても取り消さない（通知はもう出てしまっているため）。この設計により「タブを表に出している間は通知を出さない」「同じ要求で重複しない」を1つの判定タイミングと1つのSetだけで両立できる。
+
+「開く」ボタンを押すと`showPanel(entry, false)`でそのタブをrevealする（`TaskSession.reveal`と同じ経路）。
+
+**通知本文の安全化。** 承認カード（`PendingApproval`）の`title`はCodexでは固定の日本語（「コマンドの実行を許可しますか」等）だが、Claude Codeの汎用ツール呼び出しは`${tool_name} の実行を許可しますか`のように**CLIから届いたツール名をそのまま埋め込む**（`src/claude/control.ts`の`describeCanUseTool`）。これは未信頼な値であり、改行や極端に長い値を含みうる。`sanitizeForNotification`（改行・連続空白を1つの半角空白へ畳み、上限を超えた分を省略記号で切り詰める）を通してから通知へ差し込む。同じ理由でセッション名（`entry.title`。Codexの`state.name`もCLI由来）も同様に処理する。`detail`（コマンド本体や差分の理由。長大になりうる）は通知には出さず、詳細は「開く」で承認カードを見てもらう設計にした——トースト通知に生のコマンド文字列を丸ごと流し込むと、通知欄が壊れる・読みにくいの両方の問題があるため。
+
+#### ターン完了の通知（既定オフ）
+
+承認待ちと同じ`notifyTurnComplete`を用意したが、`requestId`のような一意な識別子が無い。`onSessionChange`の`finished`（`busy`の立ち下がり検知、既存の`reportTurnResult`と同じトリガー）は同じターンで重複して呼ばれない作りのため、追加のdedup機構は不要だった。既定を`false`にしたのは、承認待ちと違って対応が急がず、頻度も高い（発言のたびに1回）ため、既定で有効にすると通知疲れを招くと判断したため。
+
+#### 追加した設定
+
+`agent.notifications.approvalPending`（既定`true`）・`agent.notifications.turnComplete`（既定`false`）。読み出しは`src/config.ts`の`readNotificationsConfig`。
+
+**スコープは`window`にした**（`agent.chat.renderMarkdown` / `agent.chat.sendOn`と同じ）。通知の出し方の好みであり、実行経路や権限には一切関わらない——`agent.workflows.forge`のような「`.vscode/settings.json`からリポジトリ側に強制されると困る」種類の設定ではないため、`machine`系スコープに固定する理由が無い。一方で`resource`（ワークスペースごとに変えたい）ほどの細かさも要らないと判断し、User設定・Workspace設定単位で足りる`window`を選んだ。
+
+#### 実装とテスト
+
+- `src/view/sessionActivity.ts`: `deriveSessionActivityState` / `decoratePanelTitle` / `sanitizeForNotification`（すべて純粋関数）
+- `src/config.ts`: `readNotificationsConfig`（`NotificationsConfig`）
+- `src/view/chatView.ts` / `src/view/claudeChatView.ts`: `getActivityState`の追加、`onSessionChange`でのタブ名適用・`notifyNewApprovals` / `notifyApprovalPending` / `notifyTurnComplete`の追加、`ChatPanel` / `ClaudePanel`への`notifiedApprovalRequestIds`追加
+- `src/view/sessionTreeProvider.ts`: コンストラクタの`isOpen`を`getActivity`へ差し替え、`buildSessionTreeItem`のアイコン・`description`分岐
+- `src/extension.ts`: `getSessionActivity`（`session.provider`での振り分け）を`SessionTreeProvider`へ配線
+- `package.json`: `agent.notifications.approvalPending` / `agent.notifications.turnComplete`設定
+- `test/mocks/vscode.ts`: `FakeWebviewPanel.simulateVisibilityChange`（`dispose`せずに`visible`だけ変える。実VSCodeの「タブは残ったまま背面へ回る」を模す）、`showInformationMessageAnswer`（`showWarningMessageAnswer`と同じ設計で、通知を閉じただけ＝ボタンを押していない経路をテストできるようにする）
+- `test/unit/sessionActivity.test.ts` / `config.test.ts`（追加分）/ `chatViewManager.test.ts`（追加分）/ `claudeChatViewManager.test.ts`（追加分）/ `sessionTreeProvider.test.ts`（追加分）
+
+#### 残る制約
+
+- タブ名の印は英数記号のみ（`*` / `!`）。ローカライズや、印の意味を凡例として画面内に示す導線は無い（ホバーで見るタブのツールチップ自体がVS Code標準機能に無いため、意味は本ドキュメントとREADMEでのみ説明する）
+- ターン完了の通知は成功・失敗を区別しない（`turnFailed`の値を見ていない）。文言も「応答が終わりました」で共通
+- 通知の「開く」はタブをrevealするだけで、承認カード自体へスクロールする等の追加の誘導は無い（既存の承認カードは会話の最新項目に出るため、revealで大抵は視界に入る）
+
+
 ### 14.56 名前付きセッションプリセット（issue #295）
 
 新しい会話を開くたびに、モデル・承認・サンドボックス・作業ディレクトリを設定パネルで組み直す必要があった。さらにマルチルートワークスペースでは`currentWorkspaceFolder()`（`src/config.ts`）がアクティブエディタの属するフォルダ、それも無ければ先頭フォルダを機械的に選ぶだけで、狙ったフォルダを毎回選び直す手段が無かった。

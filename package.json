@@ -631,6 +631,18 @@
           "scope": "window",
           "markdownDescription": "チャット画面の入力欄でEnterを送信に使うか。候補メニュー（`/` `@`）を開いている間はEnterが候補の確定として優先され、IME変換中のEnterは送信しない。**Codex画面のみ**（Claude Code画面は今回のスコープ外で常に`ctrlEnter`のまま）。"
         },
+        "agent.notifications.approvalPending": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "承認要求が出た直後、そのタブが見えていなければ通知を出す（Codex/Claude Code両画面共通）。同じ要求で通知が重複することはない。無効にすると承認待ちの通知を一切出さない（タブ名の印・履歴ツリーの表示は変わらない）。"
+        },
+        "agent.notifications.turnComplete": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "ターンが完了した直後、そのタブが見えていなければ通知を出す（Codex/Claude Code両画面共通）。既定は無効（頻度が高く、承認待ちほど対応が急がないため）。"
+        },
         "agent.sessionPresets": {
           "type": "array",
           "items": {

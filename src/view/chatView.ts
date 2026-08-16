@@ -14,6 +14,7 @@ import {
   type ChatItem,
   type ChatState,
   type FileDiff,
+  type PendingApproval,
 } from '../appserver/chatState';
 import { ChatSession } from '../appserver/chatSession';
 import {
@@ -38,6 +39,7 @@ import {
   readChatRenderMarkdownConfig,
   readChatSendOnConfig,
   readConfig,
+  readNotificationsConfig,
   workspaceFolderPaths,
 } from '../config';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
@@ -54,6 +56,12 @@ import type {
   TaskSessionHost,
   TaskSessionInput,
 } from '../orchestrator/taskSession';
+import {
+  decoratePanelTitle,
+  deriveSessionActivityState,
+  sanitizeForNotification,
+  type SessionActivityState,
+} from './sessionActivity';
 import { buildItemsDelta } from './stateDelta';
 import { CODEX_APPROVAL_CYCLE } from '../provider/approvalCycle';
 import { AttachmentBox, dropRejectionReason } from '../provider/attachments';
@@ -202,6 +210,17 @@ interface ChatPanel {
    * （`stateFull`）に戻す。
    */
   sentItems?: readonly ChatItem[] | undefined;
+  /**
+   * 通知を出した承認要求の`requestId`（issue #286）。`String(requestId)`で持つ
+   * （requestIdは`number | string`のどちらも来るため、Setのキーとして安定させる）。
+   *
+   * 一度でも通知の要否を判定した`requestId`はここへ積み、二度と判定し直さない
+   * （タブの表示・非表示が何度切り替わっても、同じ承認要求で通知を重複させない）。
+   * 「見えているか」は通知するかどうかを決めた**その瞬間**の`entry.panel?.visible`
+   * だけを見る。後から可視性が変わっても、既に判定済みの要求を再評価しない
+   * （`notifyNewApprovals`参照）。
+   */
+  notifiedApprovalRequestIds: Set<string>;
 }
 
 /** 拡張機能から実行したセッションを日報バッファへ記録するための通知。 */
@@ -1092,6 +1111,18 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
   }
 
   /**
+   * そのスレッドの活動状態（issue #286、design.md §14.55）。
+   *
+   * 開いていなければ`undefined`（履歴ツリーの印に使う。`isOpen`と同じく`panels`に
+   * エントリがあるかどうかで判定する。タスク管理下のセッションはタブを閉じても
+   * `panels`に残り続けるため、タブが閉じていても実行中のタスクは`undefined`にならない）。
+   */
+  getActivityState(threadId: string): SessionActivityState | undefined {
+    const entry = this.panels.get(threadId);
+    return entry === undefined ? undefined : deriveSessionActivityState(entry.session.getState());
+  }
+
+  /**
    * 統合テスト専用: webview（レンダラー側のJS）から届いたふりをしたメッセージを流し込む
    * （Issue #187）。
    *
@@ -1269,6 +1300,7 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       finishedListeners: [],
       approvalResolvedListeners: [],
       mcpStartupListeners: [],
+      notifiedApprovalRequestIds: new Set(),
     };
     return entry;
   }
@@ -1501,20 +1533,92 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     }
     if (finished) {
       reportTurnResult(this.onActivity, entry.session.threadId, entry.cwd, state);
+      this.notifyTurnComplete(entry);
     }
     const title = deriveTitle(state);
     if (title !== undefined && entry.title !== title) {
       entry.title = title;
-      if (entry.panel !== undefined) {
-        entry.panel.title = title;
-      }
     }
+    // 名前が変わっていなくても、実行中／承認待ちの状態は変わりうるので毎回適用する
+    // （issue #286、design.md §14.55）
+    if (entry.panel !== undefined) {
+      entry.panel.title = decoratePanelTitle(entry.title, deriveSessionActivityState(state));
+    }
+    this.notifyNewApprovals(entry, state);
     // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
     entry.loop.observe(state);
     this.postState(entry);
     for (const listener of entry.stateListeners) {
       listener(state);
     }
+  }
+
+  /**
+   * 承認待ちの通知（issue #286、design.md §14.55）。
+   *
+   * `state.approvals`に新しく現れた要求ごとに1回だけ判定する。`entry.notifiedApprovalRequestIds`
+   * へ積んだ要求は、設定で無効・タブが見えている等の理由で通知を出さなかった場合も含めて
+   * 二度と判定し直さない（同じ要求で通知を重複させないため）。
+   */
+  private notifyNewApprovals(entry: ChatPanel, state: ChatState): void {
+    for (const approval of state.approvals) {
+      const key = String(approval.requestId);
+      if (entry.notifiedApprovalRequestIds.has(key)) {
+        continue;
+      }
+      entry.notifiedApprovalRequestIds.add(key);
+      this.notifyApprovalPending(entry, approval);
+    }
+  }
+
+  /**
+   * 承認待ちの通知を実際に出す。
+   *
+   * 「見えているか」は`WebviewPanel.visible`で判定する（`active`＝フォーカスが
+   * 当たっているかとは別物。分割表示やSide-by-sideで前面に見えていればフォーカスが
+   * 無くても通知を出す必要は無い、という判断）。判定は呼び出された瞬間の一度きりで、
+   * 後から可視性が変わっても再評価しない（`notifyNewApprovals`のJSDoc参照）。
+   */
+  private notifyApprovalPending(entry: ChatPanel, approval: PendingApproval): void {
+    if (!readNotificationsConfig().approvalPending) {
+      return;
+    }
+    if (entry.panel !== undefined && entry.panel.visible) {
+      return;
+    }
+    const sessionLabel = sanitizeForNotification(entry.title);
+    const approvalLabel = sanitizeForNotification(approval.title);
+    void vscode.window
+      .showInformationMessage(`${sessionLabel} が承認待ちです（${approvalLabel}）`, '開く')
+      .then((choice) => {
+        if (choice === '開く') {
+          this.showPanel(entry, false);
+        }
+      });
+  }
+
+  /**
+   * ターン完了の通知（issue #286、design.md §14.55、既定オフ）。
+   *
+   * 承認待ちの通知と違い`requestId`のような一意な識別子が無いが、`finished`は
+   * `busy`の立ち下がり（`true→false`）を検知した1回だけ呼ばれる呼び出し元
+   * （`onSessionChange`）の作りにより、同じターンで重複して呼ばれることは無い。
+   */
+  private notifyTurnComplete(entry: ChatPanel): void {
+    if (!readNotificationsConfig().turnComplete) {
+      return;
+    }
+    if (entry.panel !== undefined && entry.panel.visible) {
+      return;
+    }
+    const sessionLabel = sanitizeForNotification(entry.title);
+    void vscode.window
+      .showInformationMessage(`${sessionLabel} の応答が終わりました`, '開く')
+      .then((choice) => {
+        if (choice === '開く') {
+          this.showPanel(entry, false);
+        }
+      });
   }
 
   /** ループの状態変化。停止（running: true→false）を検知して `onFinished` を1度だけ呼ぶ。 */

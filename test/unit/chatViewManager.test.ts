@@ -1103,4 +1103,235 @@ describe('ChatViewManager', () => {
       expect(connection.requests.find((r) => r.method === 'turn/start')).toBeUndefined();
     });
   });
+
+  describe('タブ名の状態表示（issue #286、design.md §14.55）', () => {
+    it('実行中はタブ名の先頭に * が付く', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      const task = await p;
+      task.open({ preserveFocus: true });
+
+      connection.notify('turn/started', { turn: { id: 't1' } });
+
+      expect(__mock.lastCreatedPanel()?.title).toBe('* Codex');
+    });
+
+    it('承認待ちはタブ名の先頭に ! が付く（実行中より優先）', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      const task = await p;
+      task.open({ preserveFocus: true });
+      connection.notify('turn/started', { turn: { id: 't1' } });
+
+      void connection.serverRequest(1, 'item/commandExecution/requestApproval', {
+        threadId: 'thread-A',
+        itemId: 'i1',
+        command: 'ls',
+        cwd: '/workspace/root/task-a',
+      });
+      await tick();
+
+      expect(__mock.lastCreatedPanel()?.title).toBe('! Codex');
+    });
+
+    it('承認が解決すると印が外れる（実行中の印へ戻る）', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      const task = await p;
+      task.open({ preserveFocus: true });
+      connection.notify('turn/started', { turn: { id: 't1' } });
+      void connection.serverRequest(1, 'item/commandExecution/requestApproval', {
+        threadId: 'thread-A',
+        itemId: 'i1',
+        command: 'ls',
+        cwd: '/workspace/root/task-a',
+      });
+      await tick();
+      expect(__mock.lastCreatedPanel()?.title).toBe('! Codex');
+
+      task.decideApproval(1, 'accept');
+
+      expect(__mock.lastCreatedPanel()?.title).toBe('* Codex');
+    });
+  });
+
+  describe('承認待ち・ターン完了の通知（issue #286、design.md §14.55）', () => {
+    beforeEach(() => {
+      __mock.setConfig('agent', {});
+    });
+
+    async function openHiddenTaskPanel(): Promise<{
+      task: Awaited<ReturnType<ChatViewManager['openTaskSession']>>;
+      connection: FakeAppServerConnection;
+    }> {
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      const task = await p;
+      task.open({ preserveFocus: true });
+      // 既定では作られた直後のパネルは`visible: true`（唯一のタブなので前面にある）。
+      // 「背面タブ」を模すため、明示的に見えない状態へ切り替える
+      __mock.lastCreatedPanel()?.simulateVisibilityChange(false);
+      return { task, connection };
+    }
+
+    it('非表示のタブで承認待ちになった直後に通知が1回出て、開くでタブを表示する', async () => {
+      const { connection } = await openHiddenTaskPanel();
+
+      void connection.serverRequest(1, 'item/commandExecution/requestApproval', {
+        threadId: 'thread-A',
+        itemId: 'i1',
+        command: 'ls',
+        cwd: '/workspace/root/task-a',
+      });
+      await tick();
+
+      expect(__mock.messages.infos).toHaveLength(1);
+      expect(__mock.messages.infos[0]).toContain('コマンドの実行を許可しますか');
+
+      // 既定（AUTO_CONFIRM）は通知の最初のボタン（「開く」）を選んだ扱いになる
+      await tick();
+      expect(__mock.lastCreatedPanel()?.revealCount).toBeGreaterThan(0);
+    });
+
+    it('タブが見えている間は通知を出さない', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      const task = await p;
+      task.open({ preserveFocus: true });
+      // simulateVisibilityChangeを呼ばないため visible: true のまま
+
+      void connection.serverRequest(1, 'item/commandExecution/requestApproval', {
+        threadId: 'thread-A',
+        itemId: 'i1',
+        command: 'ls',
+        cwd: '/workspace/root/task-a',
+      });
+      await tick();
+
+      expect(__mock.messages.infos).toHaveLength(0);
+    });
+
+    it('見えている間に来た承認要求は、あとでタブを背面へ回しても通知しない', async () => {
+      // 判定は承認要求を受け取ったその瞬間の一度きり（design.md §14.55）。
+      // `onDidChangeViewState` は通知判定を呼ばないという構造でこれを保証しているため、
+      // 将来そこへ再判定を足すと黙って壊れる。その回帰を捕まえるためのテスト
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      const task = await p;
+      task.open({ preserveFocus: true });
+      // visible: true のまま承認要求を受け取る
+
+      void connection.serverRequest(1, 'item/commandExecution/requestApproval', {
+        threadId: 'thread-A',
+        itemId: 'i1',
+        command: 'ls',
+        cwd: '/workspace/root/task-a',
+      });
+      await tick();
+      expect(__mock.messages.infos).toHaveLength(0);
+
+      // ここで背面へ回しても、既に判定済みの要求を蒸し返さない
+      __mock.lastCreatedPanel()?.simulateVisibilityChange(false);
+      await tick();
+
+      expect(__mock.messages.infos).toHaveLength(0);
+    });
+
+    it('同じ承認要求では通知が重複しない（後続の状態更新でも1回のまま）', async () => {
+      const { task, connection } = await openHiddenTaskPanel();
+
+      const approvalPromise = connection.serverRequest(1, 'item/commandExecution/requestApproval', {
+        threadId: 'thread-A',
+        itemId: 'i1',
+        command: 'ls',
+        cwd: '/workspace/root/task-a',
+      });
+      await tick();
+      expect(__mock.messages.infos).toHaveLength(1);
+
+      // 同じ承認要求が保留のまま、無関係な通知（別の項目開始）で状態更新が続いても
+      // 通知は増えない
+      connection.notify('item/started', {
+        item: { id: 'i2', type: 'agentMessage', text: '' },
+      });
+      connection.notify('item/started', {
+        item: { id: 'i3', type: 'agentMessage', text: '' },
+      });
+      expect(__mock.messages.infos).toHaveLength(1);
+
+      task.decideApproval(1, 'accept');
+      await approvalPromise;
+    });
+
+    it('設定 agent.notifications.approvalPending を false にすると承認待ちの通知を出さない', async () => {
+      __mock.setConfig('agent', { 'notifications.approvalPending': false });
+      const { connection } = await openHiddenTaskPanel();
+
+      void connection.serverRequest(1, 'item/commandExecution/requestApproval', {
+        threadId: 'thread-A',
+        itemId: 'i1',
+        command: 'ls',
+        cwd: '/workspace/root/task-a',
+      });
+      await tick();
+
+      expect(__mock.messages.infos).toHaveLength(0);
+    });
+
+    it('ターン完了の通知は既定オフ（非表示タブでも出ない）', async () => {
+      const { connection } = await openHiddenTaskPanel();
+
+      connection.notify('turn/started', { turn: { id: 't1' } });
+      connection.notify('turn/completed', { turn: { id: 't1' } });
+
+      expect(__mock.messages.infos).toHaveLength(0);
+    });
+
+    it('設定 agent.notifications.turnComplete を true にすると非表示タブでターン完了の通知が出る', async () => {
+      __mock.setConfig('agent', { 'notifications.turnComplete': true });
+      const { connection } = await openHiddenTaskPanel();
+
+      connection.notify('turn/started', { turn: { id: 't1' } });
+      connection.notify('turn/completed', { turn: { id: 't1' } });
+
+      expect(__mock.messages.infos).toHaveLength(1);
+      expect(__mock.messages.infos[0]).toContain('応答が終わりました');
+    });
+  });
 });

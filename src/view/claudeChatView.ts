@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import * as vscode from 'vscode';
 import { isApprovalDecision, type ApprovalDecision } from '../appserver/approvals';
-import { isOpenableSearchUrl, type ChatState, type ChatUsage } from '../appserver/chatState';
+import {
+  isOpenableSearchUrl,
+  type ChatState,
+  type ChatUsage,
+  type PendingApproval,
+} from '../appserver/chatState';
 import { debugLogCandidates } from '../claude/cliLocator';
 import type { ClaudeSessionStore } from '../claude/sessionStore';
 import { ClaudeStreamSession, type ClaudeSpawnPort } from '../claude/streamSession';
@@ -13,6 +18,7 @@ import {
   readChatRenderMarkdownConfig,
   readChatSendOnConfig,
   readClaudeConfig,
+  readNotificationsConfig,
   workspaceFolderPaths,
 } from '../config';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
@@ -55,6 +61,12 @@ import {
   runExportTranscript,
 } from './chatView';
 import type { FileMentionCatalog } from '../provider/fileMentions';
+import {
+  decoratePanelTitle,
+  deriveSessionActivityState,
+  sanitizeForNotification,
+  type SessionActivityState,
+} from './sessionActivity';
 import {
   appendMemoryLine,
   buildProjectMemoryCandidates,
@@ -113,6 +125,11 @@ interface ClaudePanel {
   finishedListeners: Array<(reason: LoopStopReason, state: ChatState) => void>;
   /** `TaskSession.onApprovalResolved` のリスナー。 */
   approvalResolvedListeners: Array<(outcome: ApprovalOutcome) => void>;
+  /**
+   * 通知を出した承認要求の`requestId`（issue #286）。`chatView.ts`の`ChatPanel`と同じ
+   * 役割・同じ判定方針（`notifyNewApprovals`のJSDoc参照）。
+   */
+  notifiedApprovalRequestIds: Set<string>;
 }
 
 const VIEW_TYPE = 'claude.chat';
@@ -361,6 +378,18 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       throw new Error(`webviewへメッセージを送れませんでした（画面が見つからない）: ${sessionId}`);
     }
     this.handleMessage(entry, message);
+  }
+
+  /**
+   * そのセッションの活動状態（issue #286、design.md §14.55）。
+   *
+   * `chatView.ts`の`ChatViewManager.getActivityState`と同じ判定方針。開いていなければ
+   * `undefined`（`panels`にエントリがあるかどうかで判定。タスク管理下のセッションは
+   * タブを閉じても`panels`に残り続ける）。
+   */
+  getActivityState(sessionId: string): SessionActivityState | undefined {
+    const entry = this.panels.get(sessionId);
+    return entry === undefined ? undefined : deriveSessionActivityState(entry.session.getState());
   }
 
   /** 新しい会話を開く。idは起動前に決まるため、開いた時点で履歴と紐づく。 */
@@ -688,6 +717,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       stateListeners: [],
       finishedListeners: [],
       approvalResolvedListeners: [],
+      notifiedApprovalRequestIds: new Set(),
     };
     return entry;
   }
@@ -884,14 +914,18 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     }
     if (finished) {
       reportTurnResult(this.onActivity, entry.session.threadId, entry.cwd, state);
+      this.notifyTurnComplete(entry);
     }
     const next = deriveTitle(state);
     if (next !== undefined && entry.title !== next) {
       entry.title = next;
-      if (entry.panel !== undefined) {
-        entry.panel.title = next;
-      }
     }
+    // 名前が変わっていなくても、実行中／承認待ちの状態は変わりうるので毎回適用する
+    // （issue #286、design.md §14.55。`chatView.ts`の`onSessionChange`と同じ扱い）
+    if (entry.panel !== undefined) {
+      entry.panel.title = decoratePanelTitle(entry.title, deriveSessionActivityState(state));
+    }
+    this.notifyNewApprovals(entry, state);
     if (state.usage !== undefined) {
       this.onUsage(state.usage);
     }
@@ -904,6 +938,58 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     for (const listener of entry.stateListeners) {
       listener(state);
     }
+  }
+
+  /**
+   * 承認待ちの通知（issue #286、design.md §14.55）。`chatView.ts`の
+   * `notifyNewApprovals`と同じ判定方針（JSDoc参照）。
+   */
+  private notifyNewApprovals(entry: ClaudePanel, state: ChatState): void {
+    for (const approval of state.approvals) {
+      const key = String(approval.requestId);
+      if (entry.notifiedApprovalRequestIds.has(key)) {
+        continue;
+      }
+      entry.notifiedApprovalRequestIds.add(key);
+      this.notifyApprovalPending(entry, approval);
+    }
+  }
+
+  /** `chatView.ts`の`notifyApprovalPending`と同じ判定方針（JSDoc参照）。 */
+  private notifyApprovalPending(entry: ClaudePanel, approval: PendingApproval): void {
+    if (!readNotificationsConfig().approvalPending) {
+      return;
+    }
+    if (entry.panel !== undefined && entry.panel.visible) {
+      return;
+    }
+    const sessionLabel = sanitizeForNotification(entry.title);
+    const approvalLabel = sanitizeForNotification(approval.title);
+    void vscode.window
+      .showInformationMessage(`${sessionLabel} が承認待ちです（${approvalLabel}）`, '開く')
+      .then((choice) => {
+        if (choice === '開く') {
+          this.showPanel(entry, false);
+        }
+      });
+  }
+
+  /** `chatView.ts`の`notifyTurnComplete`と同じ判定方針（JSDoc参照）。既定オフ。 */
+  private notifyTurnComplete(entry: ClaudePanel): void {
+    if (!readNotificationsConfig().turnComplete) {
+      return;
+    }
+    if (entry.panel !== undefined && entry.panel.visible) {
+      return;
+    }
+    const sessionLabel = sanitizeForNotification(entry.title);
+    void vscode.window
+      .showInformationMessage(`${sessionLabel} の応答が終わりました`, '開く')
+      .then((choice) => {
+        if (choice === '開く') {
+          this.showPanel(entry, false);
+        }
+      });
   }
 
   /** ループの状態変化。停止（running: true→false）を検知して `onFinished` を1度だけ呼ぶ。 */

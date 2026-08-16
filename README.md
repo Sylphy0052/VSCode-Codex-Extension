@@ -658,6 +658,8 @@ tasks:
 | `agent.activityLog.dir`     | `""`        | machine  | 空なら `DAILY_BUFFER_DIR` → `~/workspace/dairy/.buffer` |
 | `agent.chat.renderMarkdown` | `true`      | window   | [応答本文をMarkdownとして描画するか](#応答のmarkdown描画)。`false`で従来の生テキスト表示に戻す |
 | `agent.chat.sendOn`         | `ctrlEnter` | window   | [入力欄の送信キー](#送信キーの切り替え)。`ctrlEnter` / `enter`（Codex/Claude Code両画面共通） |
+| `agent.notifications.approvalPending` | `true`  | window   | 承認要求が出た直後、そのタブが見えていなければ通知を出す（Codex/Claude Code両画面共通）。同じ要求での重複通知はしない |
+| `agent.notifications.turnComplete`    | `false` | window   | ターンが完了した直後、そのタブが見えていなければ通知を出す。既定は無効 |
 | `agent.sessionPresets`      | `[]`        | resource | [プリセットから新しい会話を開く](#プリセットから新しい会話を開く)。`name` / `provider` / `model` / `effort` / `approvalMode` / `sandbox` / `workingDirectory` を持つ配列。`approvalMode` / `sandbox` は拡張機能側の現在の設定より緩められない |
 
 空文字は「そのフラグを渡さない」を意味し、CLI側の設定（`~/.codex/config.toml` / `~/.claude/settings.json`）に委譲する。設定パネルには委譲先の実際の値が `既定: gpt-5.6-terra` のように表示される。パネル上部のタブでCodexとClaude Codeを切り替える。

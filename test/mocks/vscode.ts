@@ -84,6 +84,16 @@ export interface FakeWebviewPanel {
   readonly preserveFocusHistory: boolean[];
   /** テスト用: `reveal()` が呼ばれた回数。 */
   readonly revealCount: number;
+  /**
+   * テスト用（issue #286）: パネルを破棄せずに可視性だけを変える。
+   *
+   * 実VSCodeでは、背面タブへ切り替わると `visible` は `false` になるが `dispose` は
+   * 呼ばれない（タブ自体は残る）。実物の `dispose()` は `visible` も `false` にするが
+   * 同時にパネルを閉じてしまうため、「タブは開いたまま背面にある」状態を再現できない。
+   * `active`（フォーカスの有無）とは独立に変えられるようにしてある
+   * （`WebviewPanel.visible` と `active` は別物、design.md §14.55参照）。
+   */
+  simulateVisibilityChange(visible: boolean): void;
 }
 
 function makeFakeWebview(): FakeWebview {
@@ -139,6 +149,14 @@ function makeFakeWebviewPanel(
       panel.active = false;
       panel.visible = false;
       onDidDisposeEmitter.fire(undefined);
+    },
+    simulateVisibilityChange: (visible: boolean) => {
+      panel.visible = visible;
+      if (!visible) {
+        // 見えていないタブはフォーカスも持ちえない
+        panel.active = false;
+      }
+      onDidChangeViewStateEmitter.fire({ webviewPanel: panel });
     },
     get disposed() {
       return disposed;
@@ -196,6 +214,13 @@ interface MockState {
    */
   showWarningMessageAnswer: string | undefined | typeof AUTO_CONFIRM;
   /**
+   * `window.showInformationMessage` が返す値（issue #286）。既定は `AUTO_CONFIRM`
+   * （渡されたボタン文字列を自動で選ぶ＝常にクリックされた扱い）。通知を閉じただけ
+   * （ボタンを押していない）経路をテストするときだけ
+   * `__mock.showInformationMessageAnswer = undefined` に上書きする。
+   */
+  showInformationMessageAnswer: string | undefined | typeof AUTO_CONFIRM;
+  /**
    * `workspace.openTextDocument` が「存在する」と扱うパスの集合（issue #205のデバッグ
    * ログを開く導線で使う）。既定は空集合＝常に `ENOENT` で reject する（実物の
    * `vscode.workspace.openTextDocument` がファイルの無いパスに対して行う挙動を模す）。
@@ -221,6 +246,7 @@ const state: MockState = {
   writtenFiles: [],
   writeFileError: undefined,
   showWarningMessageAnswer: AUTO_CONFIRM,
+  showInformationMessageAnswer: AUTO_CONFIRM,
   existingTextDocumentPaths: new Set(),
   openedTextDocumentPaths: [],
   executedCommands: [],
@@ -239,6 +265,7 @@ export const __mock = {
     state.writtenFiles = [];
     state.writeFileError = undefined;
     state.showWarningMessageAnswer = AUTO_CONFIRM;
+    state.showInformationMessageAnswer = AUTO_CONFIRM;
     state.existingTextDocumentPaths = new Set();
     state.openedTextDocumentPaths = [];
     state.executedCommands = [];
@@ -268,6 +295,10 @@ export const __mock = {
   /** 確認ダイアログ（`showWarningMessage`）をキャンセルさせたいときだけ設定する。 */
   set showWarningMessageAnswer(value: string | undefined) {
     state.showWarningMessageAnswer = value;
+  },
+  /** 通知（`showInformationMessage`）を閉じただけの経路をテストしたいときだけ設定する（issue #286）。 */
+  set showInformationMessageAnswer(value: string | undefined) {
+    state.showInformationMessageAnswer = value;
   },
   setConfig(section: string, values: Record<string, unknown>): void {
     state.configs.set(section, values);
@@ -426,6 +457,9 @@ export const window = {
   },
   showInformationMessage: (message: string, ...items: string[]): Promise<string | undefined> => {
     state.messages.infos.push(message);
+    if (state.showInformationMessageAnswer !== AUTO_CONFIRM) {
+      return Promise.resolve(state.showInformationMessageAnswer);
+    }
     return Promise.resolve(items[0]);
   },
   showInputBox: (_options?: unknown): Promise<string | undefined> =>

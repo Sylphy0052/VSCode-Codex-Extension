@@ -137,6 +137,31 @@ export function readChatSendOnConfig(): SendOnMode {
   return normalizeSendOn(c.get<string>('chat.sendOn'));
 }
 
+/** ターンの完了・承認待ちの通知（issue #286、design.md §14.55）。 */
+export interface NotificationsConfig {
+  /** 承認待ちになった直後、タブが見えていなければ通知を出すか（既定 `true`）。 */
+  approvalPending: boolean;
+  /** ターンが完了した直後、タブが見えていなければ通知を出すか（既定 `false`）。 */
+  turnComplete: boolean;
+}
+
+/**
+ * `agent.notifications.*` を読む（issue #286）。
+ *
+ * 通知の出し方の好みであり権限には関わらないため、`agent.chat.renderMarkdown` /
+ * `agent.chat.sendOn`と同じ`window`スコープにしてある（`.vscode/settings.json`から
+ * リポジトリ側が強制することはできないが、User設定・Workspace設定としては変えられる。
+ * `machine`系スコープが必要なのは実行経路・権限に関わる設定だけで、通知はそれに
+ * 当たらない）。
+ */
+export function readNotificationsConfig(): NotificationsConfig {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    approvalPending: c.get<boolean>('notifications.approvalPending') ?? true,
+    turnComplete: c.get<boolean>('notifications.turnComplete') ?? false,
+  };
+}
+
 export interface SessionPresetsConfig {
   presets: SessionPreset[];
   /** 検証で無視した項目の理由。呼び出し側（`extension.ts`）がログ・通知へ出す。 */
