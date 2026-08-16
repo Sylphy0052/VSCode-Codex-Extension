@@ -490,6 +490,25 @@ describe('retryTask（手動の再実行）', () => {
     expect(isRunHalted(retried)).toBe(false);
   });
 
+  it('manualRetryCountを増やす（retryCountは増やさない）', () => {
+    // worktreeのディレクトリ名とブランチ名は試行の回数から決まるため、増やさないと
+    // 前の試行が残したブランチと衝突して再実行が必ず失敗する（issue #275）
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = applyLoopStopReason(run, tasks, 'T1', 'maxReached');
+
+    const once = retryTask(run, tasks, 'T1');
+    expect(stateOf(once, 'T1').manualRetryCount).toBe(1);
+    // 自動再試行の権利は人の操作で復活させない
+    expect(stateOf(once, 'T1').retryCount).toBe(stateOf(run, 'T1').retryCount);
+
+    // 2回目の再実行でも積み上がる
+    let second = markRunning(once, 'T1');
+    second = applyLoopStopReason(second, tasks, 'T1', 'maxReached');
+    expect(stateOf(retryTask(second, tasks, 'T1'), 'T1').manualRetryCount).toBe(2);
+  });
+
   it('done・running・pendingのタスクは対象外で、何も変えない', () => {
     const tasks = chainTasks();
     let run = createRunState(tasks);

@@ -167,6 +167,8 @@ async function reconcileRestoredTaskStates(
       state,
       submissionCount: t.submissionCount,
       retryCount: t.retryCount,
+      // このフィールドが無い古い永続データは0として扱う（issue #275より前の形式）
+      manualRetryCount: t.manualRetryCount ?? 0,
       failure,
       sessionId: t.sessionId,
       cwd: t.cwd,

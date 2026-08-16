@@ -1260,7 +1260,7 @@ export class WorkflowRunner {
       if (!usedWorktree) {
         continue;
       }
-      const retry = retrySuffixOf(state.retryCount);
+      const retry = retrySuffixOf(state.retryCount, state.manualRetryCount);
       const result = await this.deps.worktreeQueue.remove(
         live.repoRoot,
         runId,
@@ -1425,7 +1425,8 @@ export class WorkflowRunner {
     taskId: string,
     runId: string,
   ): Promise<TaskLaunchPreparation> {
-    const retry = retrySuffixOf(live.runState.tasks.get(taskId)?.retryCount);
+    const taskRunState = live.runState.tasks.get(taskId);
+    const retry = retrySuffixOf(taskRunState?.retryCount, taskRunState?.manualRetryCount);
     const { cwd, branch, usedWorktree, usedPseudoWorktree, pseudoSnapshot, originCommit } =
       await resolveWorkingDirectory(this.internals, live, task, retry);
 
@@ -2089,6 +2090,7 @@ export class WorkflowRunner {
           branch: liveTask?.branch ?? current?.tasks[id]?.branch,
           submissionCount: s.submissionCount,
           retryCount: s.retryCount,
+          manualRetryCount: s.manualRetryCount,
           failure: s.failure,
           // design.md §16.11「タスクごとの...PR/MRの番号」・Issue #118。branchと同じ理由で
           // liveTaskが無ければ前回persistした値を引き継ぐ
@@ -2138,16 +2140,27 @@ export function parsePullRequestNumberFromUrl(url: string): number | undefined {
 }
 
 /**
- * `TaskRunState.retryCount`（0開始。「これまでの自動再試行回数」）から、
- * `worktreePath` / `branchName` が受け取る `retry` サフィックス番号（0開始）へ変換する。
+ * `TaskRunState` の試行回数から、`worktreePath` / `branchName` が受け取る `retry`
+ * サフィックス番号（0開始）へ変換する。
+ *
+ * `retryCount`（自動再試行）と `manualRetryCount`（ワークフローViewからの手動の再実行）を
+ * **合計する**。名前が表すのは「何回目の試行か」であって、どちらの経路でやり直したかでは
+ * ないため。合計しないと、手動の再実行が前の試行と同じブランチ名を作ろうとして
+ * `branchExists` で必ず失敗する（失敗した試行のworktreeとブランチは人が中身を見られる
+ * ように残るため。issue #275で実測）。
  *
  * `retryCount` は `applyLoopStopReason` が**次の試行を始める前に**インクリメントする
  * （design.md §16.5の再試行判定）ため、1回目の失敗直後は `retryCount === 1` になる。
  * これは「1回retryを消費した」という意味であり、そのままworktreeのサフィックスに使うと
  * 1回目の再試行が `-retry1` になってしまう（`worktree.test.ts` が固定している規約は
  * 1回目の再試行が `-retry0`）。1つずらして渡す必要がある
- * （レビュー指摘: high。テスト追加で発覚したオフバイワン）。
+ * （レビュー指摘: high。テスト追加で発覚したオフバイワン）。`manualRetryCount` も
+ * `retryTask` が次の試行を始める前に増やすため、同じ数え方に乗る。
  */
-export function retrySuffixOf(retryCount: number | undefined): number | undefined {
-  return retryCount !== undefined && retryCount > 0 ? retryCount - 1 : undefined;
+export function retrySuffixOf(
+  retryCount: number | undefined,
+  manualRetryCount?: number | undefined,
+): number | undefined {
+  const total = (retryCount ?? 0) + (manualRetryCount ?? 0);
+  return total > 0 ? total - 1 : undefined;
 }
