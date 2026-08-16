@@ -96,6 +96,18 @@ export interface TaskSession {
   /** 終了条件つきの繰り返しを始める（LoopControllerをそのまま使う）。 */
   runLoop(plan: LoopPlan): void;
   /**
+   * 本文を1回だけ送る（design.md §16.23）。ループは使わない。
+   *
+   * オーケストレーターセッション（人と話す1つのセッション）は「話しかけられたら1ターン
+   * 返す」形で、終了条件つきの繰り返しではない。`maxIterations: 1` の `runLoop` を発話の
+   * たびに呼ぶ案は採らない。`LoopController` の状態（`iteration` / `stopReason` / 終了条件の
+   * 判定）がそのたびにリセットされ、チャット画面の「ループ中」表示とも噛み合わないため。
+   *
+   * `runLoop` 経由の送信と違い `setPromptTransform` の変換は通さず、作業記録
+   * （design.md §16.12）にも本文を残さない（§16.23「信頼境界」）。
+   */
+  send(text: string): void;
+  /**
    * 実際に送信する直前に本文を変換する。テンプレート展開（design.md §16.4）専用の差し込み口。
    *
    * design.mdのTaskSession定義には無い。`runLoop`へ渡す`LoopPlan`の本文は

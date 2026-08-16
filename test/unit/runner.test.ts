@@ -87,6 +87,11 @@ class FakeTaskSession implements TaskSession {
   runLoop(plan: LoopPlan): void {
     this.runLoopCalls.push(plan);
   }
+  /** `TaskSession.send`（design.md §16.23）。ループを介さない1回きりの送信。 */
+  sentTexts: string[] = [];
+  send(text: string): void {
+    this.sentTexts.push(text);
+  }
   setPromptTransform(transform: (text: string) => string): void {
     this.promptTransform = transform;
   }
@@ -367,7 +372,11 @@ function fakeForgeCli(options?: {
       if (args[0] === 'pr' && args[1] === 'create') {
         return options?.failCreate
           ? { code: 1, stdout: '', stderr: 'fake pr create failure' }
-          : { code: 0, stdout: `${options?.prUrl ?? 'https://github.com/acme/repo/pull/1'}\n`, stderr: '' };
+          : {
+              code: 0,
+              stdout: `${options?.prUrl ?? 'https://github.com/acme/repo/pull/1'}\n`,
+              stderr: '',
+            };
       }
       if (args[0] === 'pr' && args[1] === 'merge') {
         return options?.failMerge
@@ -3506,7 +3515,9 @@ tasks:
 
     const cleanup = await runner.cleanupIntegration(runId);
     expect(cleanup.integrationRemoved).toBe(false);
-    expect(cleanup.integrationFailedMessage).toBe('runが実行中のため統合worktreeは撤去しませんでした');
+    expect(cleanup.integrationFailedMessage).toBe(
+      'runが実行中のため統合worktreeは撤去しませんでした',
+    );
   });
 
   it('未コミットの変更が残っている統合worktreeは撤去せず失敗として返す（既存の方針。design.md §16.17）', async () => {
@@ -3815,7 +3826,12 @@ tasks:
     await flush();
 
     const t2 = codexHost.byTaskId('T2');
-    const result = state.hub?.sendMessage({ from: 'T1', to: 'T2', body: 'hi T2', expectReply: false });
+    const result = state.hub?.sendMessage({
+      from: 'T1',
+      to: 'T2',
+      body: 'hi T2',
+      expectReply: false,
+    });
     expect(result?.accepted).toBe(true);
 
     const composed = t2.promptTransform?.('続けてください') ?? '';
