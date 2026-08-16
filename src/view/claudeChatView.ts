@@ -107,6 +107,16 @@ interface ClaudePanel {
 const VIEW_TYPE = 'claude.chat';
 const LABEL = 'Claude Code';
 
+/**
+ * Claude Codeチャットパネルの生成オプション（design.md §14.48、issue #287）。
+ * `enableFindWidget: true` でCtrl+Fの検索窓を有効にする。オブジェクトの組み立てを
+ * 関数として切り出すことで、`createWebviewPanel`（vscode本体のAPI）を実際に呼ばずとも
+ * 内容をテストできるようにしている。
+ */
+export function buildClaudeChatPanelOptions(): vscode.WebviewPanelOptions & vscode.WebviewOptions {
+  return { enableScripts: true, retainContextWhenHidden: true, enableFindWidget: true };
+}
+
 /** 行頭 `!` のシェルコマンド（issue #5）を入力するターミナルの名前。既存があれば使い回す。 */
 const SHELL_COMMAND_TERMINAL_NAME = 'Agent Sessions: シェルコマンド入力';
 
@@ -685,11 +695,18 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       VIEW_TYPE,
       entry.title,
       { viewColumn: vscode.ViewColumn.Active, preserveFocus },
-      { enableScripts: true, retainContextWhenHidden: true },
+      buildClaudeChatPanelOptions(),
     );
     this.attachPanel(entry, panel);
   }
 
+  /**
+   * `panel.webview.options`（`enableScripts`等）はここで入れ直すが、`enableFindWidget`
+   * （design.md §14.48、issue #287）は`WebviewPanel.options`側の値で読み取り専用のため、
+   * ここから再設定する手段が無い。`restorePanel`経由（タブ復元）で渡ってくるパネルは
+   * VSCode本体が新規に構築したもので、`enableFindWidget`を含む`WebviewPanelOptions`は
+   * 生成時にしか指定できない。
+   */
   private attachPanel(entry: ClaudePanel, panel: vscode.WebviewPanel): void {
     entry.panel = panel;
     panel.title = entry.title;

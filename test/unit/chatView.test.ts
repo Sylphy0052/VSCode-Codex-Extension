@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { renderShell, type ChatShellOptions } from '../../src/view/chatView';
+import { buildChatPanelOptions, renderShell, type ChatShellOptions } from '../../src/view/chatView';
 import type { ReviewButtonConfig } from '../../src/view/chatScript';
 
 /**
@@ -374,6 +374,16 @@ describe('チャット下部の3段固定（issue #234）', () => {
       const tag = extractButtonOpenTag(row2, 'fastToggle');
 
       expect(tag).toContain('hidden');
+    });
+  });
+});
+
+describe('buildChatPanelOptions（Ctrl+Fの検索窓、issue #287、design.md §14.48）', () => {
+  it('enableFindWidgetをtrueにし、既存のenableScripts/retainContextWhenHiddenを保つ', () => {
+    expect(buildChatPanelOptions()).toEqual({
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      enableFindWidget: true,
     });
   });
 });

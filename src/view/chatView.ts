@@ -75,6 +75,16 @@ import { isEditableKey, type SettingsProvider } from './settingsProvider';
 const VIEW_TYPE = 'codex.chat';
 
 /**
+ * Codexチャットパネルの生成オプション（design.md §14.48、issue #287）。
+ * `enableFindWidget: true` でCtrl+Fの検索窓を有効にする。オブジェクトの組み立てを
+ * 関数として切り出すことで、`createWebviewPanel`（vscode本体のAPI）を実際に呼ばずとも
+ * 内容をテストできるようにしている。
+ */
+export function buildChatPanelOptions(): vscode.WebviewPanelOptions & vscode.WebviewOptions {
+  return { enableScripts: true, retainContextWhenHidden: true, enableFindWidget: true };
+}
+
+/**
  * 脇道の質問（issue #24）用に新しく開くタブの見出し。
  *
  * 「分岐」（`forkFrom`）と紛れないよう別の語を使う。ephemeralスレッドはディスクに
@@ -892,12 +902,20 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       VIEW_TYPE,
       entry.title,
       { viewColumn: vscode.ViewColumn.Active, preserveFocus },
-      { enableScripts: true, retainContextWhenHidden: true },
+      buildChatPanelOptions(),
     );
     this.attachPanel(entry, panel);
   }
 
-  /** 実際のパネルへ表示を結び付け、イベントを配線する。 */
+  /**
+   * 実際のパネルへ表示を結び付け、イベントを配線する。
+   *
+   * `panel.webview.options`（`enableScripts`等）はここで入れ直すが、`enableFindWidget`
+   * （design.md §14.48、issue #287）は`WebviewPanel.options`側の値で読み取り専用のため、
+   * ここから再設定する手段が無い。`restorePanel`経由（タブ復元）で渡ってくるパネルは
+   * VSCode本体が新規に構築したもので、`enableFindWidget`を含む`WebviewPanelOptions`は
+   * 生成時にしか指定できない。
+   */
   private attachPanel(entry: ChatPanel, panel: vscode.WebviewPanel): void {
     entry.panel = panel;
     panel.title = entry.title;

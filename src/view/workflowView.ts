@@ -15,6 +15,17 @@ import { workflowScript } from './workflowScript';
 import { workflowStyles } from './workflowStyles';
 
 /**
+ * ワークフローViewパネルの生成オプション（design.md §14.48、issue #287）。
+ * `enableFindWidget: true` でCtrl+Fの検索窓を有効にする。オブジェクトの組み立てを
+ * 関数として切り出すことで、`createWebviewPanel`（vscode本体のAPI）を実際に呼ばずとも
+ * 内容をテストできるようにしている。ワークフローViewはタブ復元（`WebviewPanelSerializer`）
+ * を登録していないため、生成時のこの1箇所だけで完結する。
+ */
+export function buildWorkflowPanelOptions(): vscode.WebviewPanelOptions & vscode.WebviewOptions {
+  return { enableScripts: true, retainContextWhenHidden: true, enableFindWidget: true };
+}
+
+/**
  * ワークフローViewのWebviewパネル（design.md §16.8）。専用パネル（`workflow.run`）で
  * 進捗の要約・依存グラフ・タスク一覧・会話への導線・ノードからの操作を1枚にまとめる。
  *
@@ -104,7 +115,7 @@ export class WorkflowViewManager implements vscode.Disposable {
       WorkflowViewManager.viewType,
       'ワークフロー',
       vscode.ViewColumn.Beside,
-      { enableScripts: true, retainContextWhenHidden: true },
+      buildWorkflowPanelOptions(),
     );
     panel.webview.options = { enableScripts: true };
     panel.webview.html = this.render(panel.webview);

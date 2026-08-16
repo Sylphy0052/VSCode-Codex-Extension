@@ -2808,6 +2808,27 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - 確認ダイアログは進行中のターンがあるときだけ出す。会話はロールアウト／transcriptに残り履歴から開き直せるので、通常のクリアは取り返しのつく操作
 - タスク（オーケストレータ）管理下のタブはクリアできない。寿命を持っているのは走らせている側（§16.10の4）
 
+### 14.48 チャット画面・ワークフローViewでCtrl+Fを効かせる（issue #287）
+
+背景: `createWebviewPanel`の生成オプションへ`enableFindWidget`を渡していなかったため、Codex画面・Claude Code画面・ワークフローViewのどのタブでもCtrl+Fが効かず、長い会話を検索で遡る手段が無かった。
+
+実測した事実:
+
+- `enableFindWidget`は`WebviewPanelOptions`（`createWebviewPanel`の第4引数）にのみ存在し、`WebviewPanel.options`は`readonly`（`@types/vscode`）。生成後に変更するAPIは無い
+- `panel.webview.options`（`WebviewOptions`型）は`enableScripts`等だけを持ち、`enableFindWidget`を含まない。`chatView.ts`/`claudeChatView.ts`の`attachPanel`が`panel.webview.options = { enableScripts: true }`を再設定している箇所は、この理由により`enableFindWidget`とは無関係
+- タブ復元（`registerWebviewPanelSerializer`）でVSCode本体が復元・生成する`WebviewPanel`は、拡張機能の`deserializeWebviewPanel`へ渡された時点で既に生成済みのインスタンスであり、`enableFindWidget`を含む`WebviewPanelOptions`を後から指定する経路はAPI上存在しない。VSCode本体側のシリアライズ処理（`webviewEditorInputSerializer.ts`、`toJson`/`fromJson`）を確認した限り、保存されるJSONには`webview.options`/`webview.contentOptions`（`enableScripts`等）は含まれるが、`WebviewPanelOptions`（`enableFindWidget`・`retainContextWhenHidden`相当）に該当するフィールドは見当たらない。つまり復元後のタブで検索窓が有効かどうかは拡張機能側では制御できず、VSCode本体の実装に委ねられる（実機での確認は未実施）
+
+設計の判断:
+
+- `chatView.ts`（Codex）・`claudeChatView.ts`（Claude Code）・`workflowView.ts`の3箇所の`createWebviewPanel`呼び出しへ、それぞれ`buildChatPanelOptions()`・`buildClaudeChatPanelOptions()`・`buildWorkflowPanelOptions()`という小さな純粋関数を切り出し、`{ enableScripts: true, retainContextWhenHidden: true, enableFindWidget: true }`を渡す。関数化したのは、`vscode`の実APIを呼ばずにオプションの中身をユニットテストで検証できるようにするため
+- ワークフローViewはタブ復元用の`WebviewPanelSerializer`を登録していない（`extension.ts`で`codex.chat`/`claude.chat`のみ登録）ため、復元経路そのものが無く、生成時の1箇所だけで完結する
+- `attachPanel`側の`panel.webview.options = { enableScripts: true }`はそのまま残す（`enableFindWidget`を扱わない別プロパティのため変更不要）。将来ここに`enableFindWidget`を足そうとして無駄な変更をしないよう、コメントで理由を明記した
+
+残る制約:
+
+- 折りたたんだ部分（コマンド出力・思考の要約の折りたたみ、`<details>`の中）はDOM上非表示のため検索対象にならない。開いている範囲だけが検索できる
+- タブ復元後に検索窓が実際に効くかどうかは、上記の通りVSCode本体の実装依存で拡張機能側からは制御できず、実機での確認が済んでいない（`docs/manual-test.md` U-04）
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）
