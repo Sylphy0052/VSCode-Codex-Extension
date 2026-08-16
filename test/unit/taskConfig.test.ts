@@ -139,7 +139,7 @@ describe('buildEffectiveTaskConfig（design.md §16.16の唯一の入口）', ()
     expect(result.sandbox).toBe('');
   });
 
-  it('拡張機能側の設定が既にbypassPermissionsのとき、実効値の継承について警告する（レビュー指摘: critical 3）', () => {
+  it('拡張機能側の設定が既にbypassPermissionsのとき、危険判定が働く値へ落として警告する（issue #271）', () => {
     const result = buildEffectiveTaskConfig(
       {
         provider: 'claude',
@@ -151,8 +151,41 @@ describe('buildEffectiveTaskConfig（design.md §16.16の唯一の入口）', ()
       },
       { ...baseline, claudePermissionMode: 'bypassPermissions' },
     );
-    expect(result.config.approvalMode).toBe('bypassPermissions');
+    // 落としたうえで続行する。落とさないと最終防御（runner.ts）が全タスクの開始を拒むため
+    expect(result.config.approvalMode).toBe('acceptEdits');
     expect(result.warnings.some((w) => w.includes('bypassPermissions'))).toBe(true);
+  });
+
+  it('CodexタスクはbypassPermissionsの読み替えの対象外（Claude固有の値のため）', () => {
+    const result = buildEffectiveTaskConfig(
+      {
+        provider: 'codex',
+        model: undefined,
+        effort: undefined,
+        approvalMode: undefined,
+        sandbox: undefined,
+        autoApprove: false,
+      },
+      { ...baseline, claudePermissionMode: 'bypassPermissions' },
+    );
+    expect(result.config.approvalMode).toBe(baseline.codexApprovalMode);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('拡張機能側がbypassPermissionsでも、YAMLがより安全な値を明示すればそちらが勝つ', () => {
+    const result = buildEffectiveTaskConfig(
+      {
+        provider: 'claude',
+        model: undefined,
+        effort: undefined,
+        approvalMode: 'manual',
+        sandbox: undefined,
+        autoApprove: false,
+      },
+      { ...baseline, claudePermissionMode: 'bypassPermissions' },
+    );
+    expect(result.config.approvalMode).toBe('manual');
+    expect(result.warnings).toEqual([]);
   });
 
   it('拡張機能の設定が既定の空文字（CLIへ委譲）でも、YAMLがsandbox: read-onlyを明示すれば通る', () => {
