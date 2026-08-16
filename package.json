@@ -84,6 +84,16 @@
           "command": "agent.workflows.menu",
           "when": "view == codex.sessions",
           "group": "navigation@5"
+        },
+        {
+          "command": "codex.filterSessions",
+          "when": "view == codex.sessions",
+          "group": "navigation@6"
+        },
+        {
+          "command": "codex.clearSessionFilter",
+          "when": "view == codex.sessions && codex.sessionFilterActive",
+          "group": "navigation@7"
         }
       ],
       "editor/title": [
@@ -180,14 +190,24 @@
           "group": "1_open@1"
         },
         {
-          "command": "codex.archiveSession",
-          "when": "view == codex.sessions && viewItem == codexSession.codex",
+          "command": "codex.pinSession",
+          "when": "view == codex.sessions && viewItem =~ /^codexSession\\.(codex|claude)(\\.archived)?$/",
           "group": "2_manage@1"
         },
         {
-          "command": "codex.unarchiveSession",
-          "when": "view == codex.sessions && viewItem == codexSession.codex.archived",
+          "command": "codex.unpinSession",
+          "when": "view == codex.sessions && viewItem =~ /^codexSession\\..*\\.pinned$/",
           "group": "2_manage@1"
+        },
+        {
+          "command": "codex.archiveSession",
+          "when": "view == codex.sessions && viewItem =~ /^codexSession\\.codex(\\.pinned)?$/",
+          "group": "2_manage@2"
+        },
+        {
+          "command": "codex.unarchiveSession",
+          "when": "view == codex.sessions && viewItem =~ /^codexSession\\.codex\\.archived(\\.pinned)?$/",
+          "group": "2_manage@2"
         },
         {
           "command": "codex.deleteSession",
@@ -222,6 +242,14 @@
         },
         {
           "command": "codex.deleteSession",
+          "when": "false"
+        },
+        {
+          "command": "codex.pinSession",
+          "when": "false"
+        },
+        {
+          "command": "codex.unpinSession",
           "when": "false"
         },
         {
@@ -267,6 +295,30 @@
         "title": "このワークスペースのみ表示",
         "category": "Agent",
         "icon": "$(filter-filled)"
+      },
+      {
+        "command": "codex.filterSessions",
+        "title": "履歴を絞り込む…",
+        "category": "Agent",
+        "icon": "$(search)"
+      },
+      {
+        "command": "codex.clearSessionFilter",
+        "title": "絞り込みを解除",
+        "category": "Agent",
+        "icon": "$(close)"
+      },
+      {
+        "command": "codex.pinSession",
+        "title": "ピン留めする",
+        "category": "Agent",
+        "icon": "$(pinned)"
+      },
+      {
+        "command": "codex.unpinSession",
+        "title": "ピン留めを外す",
+        "category": "Agent",
+        "icon": "$(pin)"
       },
       {
         "command": "codex.newChat",
@@ -515,6 +567,22 @@
           "minimum": 1,
           "scope": "window",
           "markdownDescription": "履歴一覧を構築する際に読む最大件数。更新時刻の新しい順に絞る。"
+        },
+        "codex.history.groupBy": {
+          "type": "string",
+          "enum": [
+            "date",
+            "folder",
+            "none"
+          ],
+          "enumDescriptions": [
+            "今日・昨日・今週・それ以前でグループ化する",
+            "作業ディレクトリ別にグループ化する（全ワークスペース表示のときに使いやすい）",
+            "グループ化しないフラットな一覧（従来の表示）"
+          ],
+          "default": "date",
+          "scope": "window",
+          "markdownDescription": "履歴一覧のグループ化。ピン留めしたセッションはどの設定でも先頭の「ピン留め」グループへ出る（`none`を除く）。"
         },
         "agent.activityLog.enabled": {
           "type": "boolean",

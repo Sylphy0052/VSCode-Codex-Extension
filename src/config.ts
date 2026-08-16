@@ -14,6 +14,7 @@ import { DEFAULT_REPLY_TIMEOUT_SEC } from './orchestrator/messaging';
 import { DEFAULT_PSEUDO_WORKTREE_EXCLUDE } from './orchestrator/pseudoWorktree';
 import type { HistoryScope } from './session/sessionStore';
 import { normalizeSendOn, type SendOnMode } from './view/sendKey';
+import type { HistoryGroupBy } from './util/sessionGrouping';
 
 export interface ExtensionConfig {
   executablePath: string;
@@ -21,6 +22,7 @@ export interface ExtensionConfig {
   codex: CodexConfig;
   historyScope: HistoryScope;
   historyMaxEntries: number;
+  historyGroupBy: HistoryGroupBy;
 }
 
 /** 日報/週報へ流す作業記録の設定。プロバイダを跨ぐため `agent.*` 名前空間に置く。 */
@@ -70,7 +72,13 @@ export function readConfig(): ExtensionConfig {
     },
     historyScope: c.get<string>('history.scope') === 'all' ? 'all' : 'workspace',
     historyMaxEntries: num(c, 'history.maxEntries', 200),
+    historyGroupBy: normalizeHistoryGroupBy(c.get<string>('history.groupBy')),
   };
+}
+
+/** `codex.history.groupBy` の生値を安全な値へ丸める。未知の値は既定の `date` に倒す。 */
+function normalizeHistoryGroupBy(value: string | undefined): HistoryGroupBy {
+  return value === 'folder' || value === 'none' ? value : 'date';
 }
 
 export interface ClaudeExtensionConfig {

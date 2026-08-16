@@ -2902,6 +2902,77 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - テーブル・引用・水平線・ネストした強調は扱わない
 - リンクURLは`([^)\s]+)`という簡易パターンで区切っており、URLに空白を含む記法や、閉じ括弧を含む一部のURLは正しく拾えない
 - webview側のDOM組み立て（`renderMarkdownInto`・`appendInline`・`createCodeBlock`）はvitestのnode環境では実行できない（jsdom/happy-domを導入していない）。自動化できているのは構文チェック（`new Function`）とMarkdownパース結果の一致テストまでで、実際のDOM描画・ボタンの動作確認は`docs/manual-test.md`のU群（U-08〜U-10）に委ねる
+### 14.54 履歴の検索・グループ化・ピン留め（issue #293）
+
+履歴（`codex.sessions`）は`codex.history.maxEntries`（既定200件）までのセッションが更新時刻降順の1本のフラットなリストで並ぶだけで、検索・グループ・ピン留めのいずれも無かった。全ワークスペース表示（`codex.history.scope: all`）にすると複数リポジトリのセッションが混ざり、目的のセッションを探すのが実質できない。
+
+#### `TreeDataProvider<T>`の型を直和へ広げる（issue #236の再発防止）
+
+グループを表現するには`TreeDataProvider<SessionSummary>`のままでは足りない。かといってセッション側を`{ kind: 'session', session }`のように包んでしまうと、`view/item/context`（右クリックメニュー・インラインアイコン）から呼ばれるコマンドへ渡る引数がラッパーオブジェクトになり、`codex.archiveSession`等が期待する`SessionSummary`と食い違う。VS Codeは`TreeDataProvider<T>`の`T`をそのままコマンド引数として渡すため、直和型`TreeElement = SessionSummary | SessionGroupNode`とし、セッション側は**包まず**生の`SessionSummary`のまま扱う（`src/view/sessionTreeProvider.ts`）。
+
+グループ側の`id`は常に`group:<groupKind>:<key>`の形にし、セッション側の`id`（`<provider>:<id>`、providerは`codex` | `claude`のみ）とは`group:`という接頭辞で構造的に衝突しないようにした。`getChildren(element)`は、要素がグループならそのグループの`sessions`を返し、要素がセッション（葉）なら空配列を返す形に統一した。
+
+#### 日付の区切りは暦日、`vscode`に依存しない純粋関数として分離
+
+「今日・昨日・今週・それ以前」の判定は`src/util/dateBucket.ts`の`dateBucketFor(isoTimestamp, now)`に切り出した。CONTRIBUTING.mdのレイヤの制約（`src/util`は`vscode`をimportしない）に従い、`test/unit/dateBucket.test.ts`から実VSCode無しでテストできる。
+
+- 既存の`formatRelativeTime`（`src/view/relativeTime.ts`）は「経過ミリ秒」基準のローリング判定（59分前・23時間前、のように）だが、こちらは暦日（ローカルのカレンダー日）で区切る。「今日触ったもの」を探す直感（日付を跨いだら今日ではなくなる）に合わせた判断で、Finder/Gmail等の日付グルーピングと同じ考え方
+- 「今週」は暦週（月曜起点など）ではなく、今日・昨日を除く直近7日以内のローリング判定にした。週の起点は locale 依存で決めが割れやすく、実装も表示も「直近7日」の方が説明しやすいと判断した
+- 解釈できないタイムスタンプは`older`（それ以前）に倒す。未来のタイムスタンプ（クロックのずれ）は`today`に丸める。どちらも例外にしない（CONTRIBUTING.mdの「未知の入力で壊さない」方針）
+
+#### `groupBy: folder` と `none`
+
+`codex.history.groupBy`（`date` / `folder` / `none`、既定`date`）を追加した。
+
+- `folder`は作業ディレクトリ（`cwd`）別。ラベルはbasenameだが、異なるパスが同じbasenameを持つ場合（`~/a/app`と`~/b/app`）はフルパスへ差し替えて区別する。グループの並び順は`Map`の挿入順をそのまま使い、追加のソートはしない。入力（`ProviderRegistry.listSessions`の結果）は更新時刻降順のため、結果として「直近に触った作業ディレクトリが先頭」になる
+- `none`は既存の表示（フラットな1リスト）へそのまま戻す。全ワークスペース表示は`folder`と組み合わせると使いやすい、という位置付け（issue本文の「全ワークスペース表示のときは作業ディレクトリ別も選べる」はこの設定の切替として実現した。scope自体に紐付けた自動切替はしていない——workspaceスコープでも`folder`を選べる方が単純で、選択の自由を制限しない）
+
+#### 絞り込みは表示だけを変える
+
+タイトルバーに`codex.filterSessions`（`$(search)`、`showInputBox`）を追加した。入力語をセッション名（`threadName`）と作業ディレクトリ（`cwd`）に対して大小文字を無視した部分一致で照合する（`src/util/sessionFilter.ts`の`matchesSessionQuery`、純粋関数）。
+
+- フィルタは`SessionTreeProvider`が読み込み済みの一覧に対して掛けるだけで、`providers.listSessions`へ渡す`maxEntries`には一切関与しない（受入基準）。`test/unit/sessionTreeProvider.test.ts`で、絞り込みの前後で`listSessions`へ渡る引数が変わらないことを確認している
+- 絞り込み中はツリービューの`description`（タイトル横の補助テキスト）に`絞り込み中: "<query>"`を出す（`src/extension.ts`）。解除は`codex.clearSessionFilter`（`$(close)`、`codex.sessionFilterActive`コンテキストキーが立っているときだけタイトルバーに出す）
+- `showInputBox`をEscでキャンセルすると`undefined`が返る。これは「現在の絞り込みを変えない」と区別し、空文字での確定（クリア相当）だけを絞り込み解除として扱う
+
+#### ピン留めと`groupBy: none`の関係
+
+ピン留め（`codex.pinSession` / `codex.unpinSession`）は`globalState`に`<provider>:<id>`のキー配列で持つ（`src/util/pinnedSessions.ts`の`PinnedSessionStore`。`ClaudeSessionNameStore`と同じくグローバルスコープ・no-op既定の流儀）。ピン留めしたセッションは`date` / `folder`のどちらでも先頭の「ピン留め」グループへ出る。
+
+**`groupBy: none`のときはピン留めしていてもグループ化しない。** 受入基準の「`none`で現状とまったく同じフラットな表示に戻る」を文字どおり満たす選択で、ピン留めの有無で`none`の並びが変わらないようにした。ピン留めの解除自体は`none`でも`contextValue`（後述）経由でできるため、機能が完全に隠れるわけではない——グループとしての強調表示だけが`none`では出ない、という整理。
+
+ピン留めの実体側の整合は`partitionPinned`（`src/util/pinnedSessions.ts`）が担う。`pinnedKeys`に残っているキーのうち、渡された現在のセッション一覧に実体が無いものは単に`pinned`配列へ現れない（ストレージ側を書き換えたりはしない、読み取り専用の純粋関数）。これにより、アーカイブ・削除されたセッションのピンが残っていても「幽霊グループ」が出たり一覧が壊れたりしない（受入基準）。
+
+#### `contextValue`の出し分け（`.archived` / `.pinned`の共存）
+
+セッションの`contextValue`は`codexSession.<provider>[.archived][.pinned]`の形にした（順序は固定。`archived`が先、`pinned`が後）。既存の`codex.archiveSession` / `codex.unarchiveSession`の`when`句は`viewItem == codexSession.codex`のような完全一致だったため、`.pinned`サフィックスが付くと一致しなくなる。正規表現へ変更した。
+
+- `codex.archiveSession`: `/^codexSession\.codex(\.pinned)?$/`（未アーカイブのみ、ピン留めの有無は問わない）
+- `codex.unarchiveSession`: `/^codexSession\.codex\.archived(\.pinned)?$/`
+- `codex.pinSession`: `/^codexSession\.(codex|claude)(\.archived)?$/`（`.pinned`が付いていないものだけ）
+- `codex.unpinSession`: `/^codexSession\..*\.pinned$/`
+
+グループのノード（`SessionGroupNode`）の`contextValue`は`codexSessionGroup`という別語にした。既存の`/^codexSession\./`系のwhen句とは（`.`が続かないため）一致せず、グループへ右クリック操作は出ない。
+
+#### 実装とテスト
+
+- `src/util/dateBucket.ts`: 日付バケット判定（純粋関数）
+- `src/util/sessionGrouping.ts`: `buildDateGroups` / `buildFolderGroups`（純粋関数）
+- `src/util/sessionFilter.ts`: `matchesSessionQuery`（純粋関数）
+- `src/util/pinnedSessions.ts`: `PinnedSessionStore` / `partitionPinned` / `pinKeyFor`
+- `src/util/paths.ts`: `basenameOf`（`sessionTreeProvider.ts`が持っていた同等のprivate関数を抽出・共通化）
+- `src/view/sessionTreeProvider.ts`: `TreeElement`直和型、`getChildren`のグループ化・絞り込み・ピン留め統合、`contextValue`の出し分け
+- `src/config.ts`: `codex.history.groupBy`の読み出し（`historyGroupBy`、未知の値は`date`へ丸める）
+- `src/extension.ts`: `PinnedSessionStore`の生成・配線、`codex.filterSessions` / `codex.clearSessionFilter` / `codex.pinSession` / `codex.unpinSession`コマンド登録、絞り込み中のツリービュー`description`更新
+- `package.json`: `codex.history.groupBy`設定、上記4コマンドの`contributes.commands` / `view/title` / `view/item/context` / `commandPalette`、既存archive/unarchiveの`when`句を正規表現へ変更
+- `test/unit/dateBucket.test.ts` / `sessionGrouping.test.ts` / `sessionFilter.test.ts` / `pinnedSessions.test.ts` / `sessionTreeProvider.test.ts`（追加分）
+
+#### 残る制約
+
+- グループのラベル・並びはローカライズしていない（日本語固定。他の画面文言と同じ）
+- `folder`グループの並び順は「初出順」であり、グループ内の更新時刻とは独立に変わりうる厳密なソートではない（例えばグループAの2番目のセッションがグループBの1番目より新しくても、グループの先頭順はグループの最初のセッションが出た時点で決まる）。実用上は「直近に触った作業ディレクトリが先頭」でおおむね一致するため、追加のソートコストは掛けていない
+- 絞り込みはクライアントサイドの部分一致のみ。あいまい検索・複数語のAND/OR等は無い
+- ピン留めは`globalState`（ワークスペースをまたいで共通）。ワークスペースごとに別のピンを持ちたい場合は非対応
 
 ## 15. 作業記録（日報・週報連携）
 
