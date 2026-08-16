@@ -1700,3 +1700,94 @@ describe('buildClaudeChatPanelOptions（Ctrl+Fの検索窓、issue #287、design
     });
   });
 });
+
+/**
+ * Claude CodeのEditツール由来の `editReplace`（issue #310）を見るのはホスト側の復元処理
+ * だけで、webviewは描画に一切使わない。表示用の `diff` と違い `MAX_DIFF_LINES` の切り詰めが
+ * 掛からないため、送信内容からは落とす（issue #320）。
+ *
+ * `editReplace` を作るのはClaude Codeの会話項目だけなので（`src/claude/transcript.ts`）、
+ * 落とし忘れが実害になるのはこの画面の送信経路。
+ */
+describe('webviewへ送る項目からeditReplaceを落とす（issue #320）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    __mock.setConfig('agent', {});
+    vi.restoreAllMocks();
+  });
+
+  const editToolLine = (): string =>
+    `${JSON.stringify({
+      type: 'assistant',
+      message: {
+        id: 'msg-320',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tool-320',
+            name: 'Edit',
+            input: {
+              file_path: '/workspace/root/a.ts',
+              old_string: 'const a = 1;',
+              new_string: 'const a = 10;',
+            },
+          },
+        ],
+      },
+    })}\n`;
+
+  /** 直近に送った `state` メッセージの会話項目。 */
+  function lastSentItems(): { diffs?: { diff?: string; editReplace?: unknown }[] }[] {
+    const sent = __mock.lastCreatedPanel()?.webview.sent ?? [];
+    for (let i = sent.length - 1; i >= 0; i -= 1) {
+      const message = sent[i] as { type?: string; state?: { items?: unknown } } | undefined;
+      if (message?.type === 'state' && Array.isArray(message.state?.items)) {
+        return message.state.items as { diffs?: { diff?: string; editReplace?: unknown }[] }[];
+      }
+    }
+    throw new Error('state メッセージが送られていません');
+  }
+
+  async function openWithEdit(): Promise<ClaudeStreamSession> {
+    const { sessions } = stubStartCapturing();
+    const { manager } = createManager();
+
+    await manager.openNew('/workspace/root');
+    const session = sessions[sessions.length - 1];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    session.receive(initLine('session-320'));
+    session.receive(editToolLine());
+    await flush();
+    return session;
+  }
+
+  it('Edit由来の差分にeditReplaceを載せない', async () => {
+    await openWithEdit();
+
+    const diffs = lastSentItems().flatMap((item) => item.diffs ?? []);
+    expect(diffs.length).toBeGreaterThan(0);
+    for (const diff of diffs) {
+      expect(diff.editReplace).toBeUndefined();
+    }
+  });
+
+  it('表示用の差分本文は残す', async () => {
+    await openWithEdit();
+
+    const diffs = lastSentItems().flatMap((item) => item.diffs ?? []);
+    expect(diffs[0]?.diff).toBe('-const a = 1;\n+const a = 10;');
+  });
+
+  it('ホスト側の状態は書き換えない（復元はeditReplaceを使い続ける）', async () => {
+    const session = await openWithEdit();
+
+    const diffs = session.getState().items.flatMap((item) => item.diffs);
+    expect(diffs[0]?.editReplace).toEqual({
+      oldString: 'const a = 1;',
+      newString: 'const a = 10;',
+    });
+  });
+});

@@ -82,6 +82,7 @@ import {
   type MemoryModeMemento,
 } from '../provider/inputModes';
 import { readPersistedThreadId } from './panelState';
+import { stripHostOnlyItems } from './stateDelta';
 import { CLAUDE_PERMISSION_MODES } from '../claude/types';
 import { CLAUDE_APPROVAL_CYCLE } from '../provider/approvalCycle';
 import type { ClaudeConfig } from '../claude/types';
@@ -309,10 +310,14 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       return;
     }
     const snapshot = this.settings.claudeSnapshot();
+    const state = entry.session.getState();
     void entry.panel.webview.postMessage({
       type: 'state',
       state: {
-        ...entry.session.getState(),
+        ...state,
+        // 描画に使わない項目を落としてから送る（issue #320）。Editツール由来の
+        // `editReplace` を持つのはClaude Codeの会話項目だけなので、この経路が本命
+        items: stripHostOnlyItems(state.items),
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),
         // 差分の見出し行の操作（issue #291）をWebview側でも出し分けるための一覧。
@@ -351,10 +356,13 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     if (entry.disposed || entry.panel === undefined) {
       return;
     }
+    const state = entry.session.getState();
     void entry.panel.webview.postMessage({
       type: 'state',
       state: {
-        ...entry.session.getState(),
+        ...state,
+        // 描画に使わない項目を落としてから送る（issue #320）
+        items: stripHostOnlyItems(state.items),
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),
         workspaceRoots: workspaceFolderPaths(),

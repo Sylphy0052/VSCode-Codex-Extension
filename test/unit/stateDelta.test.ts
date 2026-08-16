@@ -64,6 +64,65 @@ describe('buildItemsDelta（issue #262）', () => {
 });
 
 /**
+ * `editReplace`（issue #310）はホスト側の復元処理だけが見るもので、webviewは描画に
+ * 使わない。表示用の `diff` と違い切り詰めが掛からないため、送信内容から落とす。
+ */
+describe('buildItemsDelta: editReplaceを送らない（issue #320）', () => {
+  const editItem = (id: string): ChatItem => ({
+    ...item(id),
+    kind: 'fileChange',
+    diffs: [
+      {
+        path: 'src/a.ts',
+        kind: 'update',
+        movePath: undefined,
+        diff: '-古い\n+新しい',
+        editReplace: { oldString: '古い', newString: '新しい' },
+      },
+    ],
+  });
+
+  it('全量で送るときも落とす', () => {
+    const delta = buildItemsDelta(undefined, [editItem('a')]);
+
+    expect(delta.items[0]?.diffs[0]?.editReplace).toBeUndefined();
+  });
+
+  it('差し分で送るときも落とす', () => {
+    const a = item('a');
+
+    const delta = buildItemsDelta([a], [a, editItem('b')]);
+
+    expect(delta.mode).toBe('delta');
+    expect(delta.items[0]?.diffs[0]?.editReplace).toBeUndefined();
+  });
+
+  it('落としても表示用の差分本文とパスは残す', () => {
+    const delta = buildItemsDelta(undefined, [editItem('a')]);
+
+    expect(delta.items[0]?.diffs[0]?.diff).toBe('-古い\n+新しい');
+    expect(delta.items[0]?.diffs[0]?.path).toBe('src/a.ts');
+  });
+
+  it('元の項目は書き換えない（ホスト側は復元にeditReplaceを使い続ける）', () => {
+    const original = editItem('a');
+
+    buildItemsDelta(undefined, [original]);
+
+    expect(original.diffs[0]?.editReplace).toEqual({ oldString: '古い', newString: '新しい' });
+  });
+
+  it('落とす対象が無ければ同じ参照のまま返す（余計な割り当てをしない）', () => {
+    const a = item('a');
+    const b = item('b');
+
+    const delta = buildItemsDelta([a], [a, b]);
+
+    expect(delta.items[0]).toBe(b);
+  });
+});
+
+/**
  * webview側の積み直しは `chatScript` へソースとして埋め込まれ、型検査もlintも効かない。
  * ここで評価して振る舞いだけを確かめる（`webviewScript.test.ts` は構文しか見ない）。
  */
