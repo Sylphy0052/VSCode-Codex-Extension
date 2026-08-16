@@ -3803,3 +3803,127 @@ tasks:
     expect(runner.getSnapshot(runId)?.haltedByUser).toBe(true);
   });
 });
+
+describe('WorkflowRunner: 回数切れから続ける（design.md §16.8、issue #284）', () => {
+  const YAML = `
+version: 1
+name: continue-test
+tasks:
+  - id: T1
+    prompt: p
+    continuePrompt: つづき
+    maxIterations: 3
+    done: d
+  - id: T2
+    dependsOn: [T1]
+    prompt: p2
+    done: d2
+`;
+
+  it('回数切れではセッションを解放せず、続けるで同じセッションへ継続プロンプトを送る', async () => {
+    const { runner, codexHost, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/continue.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('maxReached', { ...initialChatState });
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+    // 続きから走らせる唯一の足がかりなので、回数切れだけはセッションを残す
+    expect(t1.disposed).toBe(false);
+
+    expect(runner.continueTask(runId, 'T1')).toBe(true);
+    await flush();
+
+    // 新しいセッションは作らない（同じ会話・同じworktreeのまま）
+    expect(codexHost.sessions).toHaveLength(1);
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+    expect(store.find(runId)?.tasks['T1']?.failure).toBeUndefined();
+    // worktreeもブランチも作り直さないため、再試行の回数は増やさない
+    expect(store.find(runId)?.tasks['T1']?.retryCount).toBe(0);
+    expect(store.find(runId)?.tasks['T1']?.manualRetryCount).toBe(0);
+
+    expect(t1.runLoopCalls).toHaveLength(2);
+    const second = t1.runLoopCalls[1];
+    // 初回の指示を送り直すと最初からやり直させることになる（継続指示から再開する）
+    expect(second?.initialPrompt).toBe('');
+    expect(second?.continuePrompt).toBe('つづき');
+    // 送信回数の予算はmaxIterations分そのまま足される
+    expect(second?.maxIterations).toBe(3);
+    expect(second?.condition).toContain('d');
+    // 専用ブランチを持つタスクなので「コミットしてあること」も同じように足す
+    expect(second?.condition).toContain('コミット');
+  });
+
+  it('続けると、連鎖してskippedになった依存先がpendingへ戻る', async () => {
+    const { runner, codexHost, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/continue.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('maxReached', { ...initialChatState });
+    await flush();
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('skipped');
+    // failedによる停止は`hasFailedTask`から導出される（`haltedByUser`は立たない）
+    expect(runner.getSnapshot(runId)?.outcome).toBe('failed');
+
+    expect(runner.continueTask(runId, 'T1')).toBe(true);
+    await flush();
+
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('pending');
+    // T1がfailedでなくなったので実行全体も止まっていない
+    expect(runner.getSnapshot(runId)?.outcome).toBe('running');
+    expect(runner.getSnapshot(runId)?.haltedByUser).toBe(false);
+  });
+
+  it('回数切れ以外の失敗ではセッションを解放し、続けるも受け付けない', async () => {
+    const { runner, codexHost, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/continue.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('failed', { ...initialChatState, turnFailed: true });
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+    expect(t1.disposed).toBe(true);
+    expect(runner.continueTask(runId, 'T1')).toBe(false);
+    expect(t1.runLoopCalls).toHaveLength(1);
+  });
+
+  it('回数切れのあと再実行を選んだ場合、残っていたセッションを解放してから作り直す', async () => {
+    const { runner, codexHost, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/continue.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const attempt1 = codexHost.byTaskId('T1');
+    attempt1.finish('maxReached', { ...initialChatState });
+    await flush();
+    expect(attempt1.disposed).toBe(false);
+
+    expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+    await flush();
+
+    // 残したセッションを解放しないとCLIのプロセスが宙に浮く
+    expect(attempt1.disposed).toBe(true);
+    expect(codexHost.sessions).toHaveLength(2);
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+  });
+
+  it('未知のrun・未知のtaskIdでは何もしない', async () => {
+    const { runner, codexHost } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/continue.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('maxReached', { ...initialChatState });
+    await flush();
+
+    expect(runner.continueTask('no-such-run', 'T1')).toBe(false);
+    expect(runner.continueTask(runId, 'no-such-task')).toBe(false);
+  });
+});

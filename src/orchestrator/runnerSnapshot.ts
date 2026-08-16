@@ -278,10 +278,15 @@ export function deriveMaxReachedWarnings(live: LiveRun): WorkflowWarning[] {
   const warnings: WorkflowWarning[] = [];
   for (const [taskId, state] of live.runState.tasks) {
     if (state.state === 'failed' && state.failure?.kind === 'maxReached') {
+      // セッションが残っていれば「続ける」で続きから走らせられる（issue #284）。
+      // リロード後は会話が失われていて「再実行」しかできないため、案内も出し分ける
+      const hint = live.tasks.has(taskId)
+        ? '。「続ける」で同じ会話のまま送信回数を足して再開できます'
+        : '';
       warnings.push({
         kind: 'maxReached',
         taskId,
-        message: `送信回数の上限に達しました（終了条件が満たされないまま停止）: ${taskId}`,
+        message: `送信回数の上限に達しました（終了条件が満たされないまま停止）: ${taskId}${hint}`,
       });
     }
   }

@@ -222,6 +222,15 @@ describe('workflowScript', () => {
     expect(source).toContain("'state-pill state-' + task.state");
   });
 
+  it('回数切れかつセッションが生きているタスクにだけ「続ける」を出す（Issue #284）', () => {
+    const source = workflowScript();
+    expect(source).toContain("'続ける'");
+    expect(source).toContain("type: 'continueTask'");
+    // 回数切れ以外の失敗や、リロード後（セッションが無い）のタスクには出さない
+    expect(source).toContain("task.failure.kind === 'maxReached'");
+    expect(source).toContain('task.hasLiveSession === true');
+  });
+
   it('動的な値をHTMLへ文字列結合しない（innerHTML/outerHTMLを使わない）', () => {
     // design.md §16.8「画面に出す動的な文字列は必ずテキストノードとして挿入する」。
     // innerHTML系のAPIを使わないことをここで機械的に固定しておく

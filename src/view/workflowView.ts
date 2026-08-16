@@ -341,6 +341,14 @@ export class WorkflowViewManager implements vscode.Disposable {
       await this.retryWithAllowConfirmation(runId, taskId);
       return;
     }
+    if (type === 'continueTask') {
+      // 回数切れで止まったタスクを同じ会話のまま続ける（design.md §16.8、issue #284）。
+      // 対象外のタスクや存在しないidに対しては`runner.ts`側が何もせず`false`を返す。
+      // `allow`の確認を挟まないのはセッションが生きている場合しか成立しない操作だから
+      // （そのセッションを起動した時点で確認済み。`WorkflowRunner.continueTask`に理由を書いた）
+      this.runner.continueTask(runId, taskId);
+      return;
+    }
     if (type === 'retryMerge') {
       // design.md §16.17「Viewから人が解決したうえで『再マージ』を指示できる」（Issue #104）。
       // `blocked`以外のタスクや存在しないidに対しては`runner.ts`側が何もせず`false`を

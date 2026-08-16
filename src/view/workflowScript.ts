@@ -430,6 +430,18 @@ export function workflowScript(): string {
 
   // ---- タスク一覧 ----
 
+  /**
+   * 「続ける」を出せるか（issue #284）。回数切れで止まっていて、かつこのウィンドウに
+   * セッションが残っているタスクだけ。リロードするとセッションは失われるため、
+   * そのあとは「再実行」だけになる。
+   */
+  function canContinueTask(task) {
+    return (
+      task.state === 'failed' && task.failure && task.failure.kind === 'maxReached'
+      && task.hasLiveSession === true
+    );
+  }
+
   function buildOpsCell(task) {
     const cell = el2('td', 'ops');
     if (task.hasLiveSession) {
@@ -458,6 +470,18 @@ export function workflowScript(): string {
         vscode.postMessage({ type: 'stopTask', taskId: task.id });
       });
       cell.appendChild(stopBtn);
+    }
+    if (canContinueTask(task)) {
+      // 回数切れ（maxReached）で止まったタスクだけに出す（design.md §16.8、issue #284）。
+      // セッションが生きている間しか続きから走らせられないため、hasLiveSessionも見る
+      const continueBtn = text('button', 'secondary', '続ける');
+      continueBtn.type = 'button';
+      continueBtn.title = '同じ会話のまま、送信回数の上限をもう一度足して続きを走らせる';
+      continueBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ type: 'continueTask', taskId: task.id });
+      });
+      cell.appendChild(continueBtn);
     }
     if (task.state === 'failed' || task.state === 'skipped') {
       const retryBtn = text('button', 'secondary', '再実行');

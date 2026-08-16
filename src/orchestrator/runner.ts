@@ -48,6 +48,7 @@ import {
   recordSubmissionCount,
   resumeFromApproval,
   retryTask as retryTaskState,
+  continueTask as continueTaskState,
   type RunState,
   type TaskFailureReason,
   type TaskState,
@@ -1208,6 +1209,53 @@ export class WorkflowRunner {
   }
 
   /**
+   * 回数切れ（`maxReached`）で止まったタスクを、同じ会話のまま続きから走らせる
+   * （design.md §16.8「続ける」、issue #284）。対象外なら何もせず `false` を返す。
+   *
+   * 「再実行」（`retryTask`）との違いは、新しいセッション・worktreeを作らないこと。
+   * 生きているセッションへ `runLoop` をもう1度かけ、`initialPrompt` を空にして
+   * 継続プロンプトから再開する（`LoopController.start` が空の初回指示を継続指示で
+   * 代替する）。送信回数の予算は `maxIterations` 分そのまま増える。
+   *
+   * このウィンドウでセッションが生きていることが前提なので、リロード後の復元した実行では
+   * 使えない（`live.tasks` が空。Viewもボタンを出さない）。同じ理由で `allow` の実行前確認は
+   * 挟まない。セッションが生きている＝このプロセスの `start()` / `retryTask` が既に確認を
+   * 通してからこのタスクを起動している、ということだから。
+   */
+  continueTask(runId: string, taskId: string): boolean {
+    const live = this.runs.get(runId);
+    const liveTask = live?.tasks.get(taskId);
+    if (live === undefined || liveTask === undefined) {
+      return false;
+    }
+    const task = live.def.tasks.find((t) => t.id === taskId);
+    if (task === undefined) {
+      return false;
+    }
+    const next = continueTaskState(live.runState, live.def.tasks, taskId);
+    if (next === live.runState) {
+      return false;
+    }
+    live.runState = next;
+    // 停止していた実行を人の操作で再開する起点（`retryTask`と同じ）
+    live.finished = false;
+    // `finishTaskLaunch`と同じ終了条件を組み立てる。専用ブランチを持つタスクは
+    // 「コミットしてあること」を自動で足す（design.md §16.17）
+    const condition = liveTask.usedWorktree ? withCommitRequirement(task.done) : task.done;
+    liveTask.session.runLoop({
+      // 初回の指示は送らない。ここは会話の続きであり、`task.prompt`をもう1度送ると
+      // 同じ作業を最初からやり直させることになる
+      initialPrompt: '',
+      continuePrompt: task.continuePrompt,
+      maxIterations: task.maxIterations,
+      condition,
+    });
+    this.notify(runId);
+    void this.persist(runId);
+    return true;
+  }
+
+  /**
    * `waitingApproval` の要求を、チャット画面のタブを開かずその場で決める
    * （design.md §16.8「承認」）。`handleApproval` が保留した `pendingApproval` の
    * `requestId` を使って `TaskSession.decideApproval` を呼ぶ。対象が無ければ何もしない。
@@ -1639,6 +1687,10 @@ export class WorkflowRunner {
       session.open({ preserveFocus: true });
 
       const liveTask = this.buildLiveTask(session, prepared);
+      // 回数切れ（`maxReached`）で残したセッション（issue #284）が同じタスクに残っている
+      // ことがある。「続ける」ではなく「再実行」を選んだ場合で、差し替える前に解放しないと
+      // CLIのプロセスが宙に浮く
+      live.tasks.get(taskId)?.session.dispose();
       live.tasks.set(taskId, liveTask);
       live.runState = recordSessionInfo(live.runState, taskId, session.sessionId, prepared.cwd);
 
@@ -2010,9 +2062,20 @@ export class WorkflowRunner {
     live.runState = applyLoopStopReason(live.runState, live.def.tasks, taskId, reason);
 
     if (reason !== 'manual' && reason !== 'interrupted') {
-      // done / maxReached / failed。セッションを解放する（design.md §16.10の4）。
+      // done / maxReached / failed。
+      //
+      // `maxReached`（回数切れ）だけはセッションを残す（issue #284）。「続ける」
+      // （`continueTask`）が同じ会話・同じworktreeのまま送信回数の予算を足して再開する
+      // ための唯一の足がかりで、ここで解放すると続きから走らせる手段が無くなる。
+      // 残ったセッションは、`startTask`が同じタスクを開き直すとき（「再実行」）と
+      // run全体の`dispose`で解放される。worktreeは元から`done`のときしか撤去しない
+      // （`shouldRemoveWorktree`）ので、こちらは変更しなくてよい。
+      //
+      // それ以外（done / failed）は従来どおり解放する（design.md §16.10の4）。
       // 再試行はここで新しいセッション・worktreeを新規に作るため、古いものは残さない
-      liveTask?.session.dispose();
+      if (reason !== 'maxReached') {
+        liveTask?.session.dispose();
+      }
 
       if (reason === 'done' && liveTask !== undefined) {
         if (liveTask.usedWorktree) {
