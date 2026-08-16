@@ -27,6 +27,7 @@ import {
   planWorkflow,
   resolveUniqueFileName,
   slugifyGoal,
+  validateSlugInput,
   type PlannerWorkspacePort,
   providerHintToProvider,
 } from '../../src/orchestrator/planner';
@@ -755,5 +756,80 @@ describe('providerHintToProvider', () => {
     expect(providerHintToProvider('gemini')).toBeUndefined();
     expect(providerHintToProvider(1)).toBeUndefined();
     expect(providerHintToProvider({ provider: 'claude' })).toBeUndefined();
+  });
+});
+
+/**
+ * ゴール文にファイルパスが混じっていると、区切りが潰れて `docs-plan-x.md...` という
+ * 読みにくいファイル名になっていた（issue #328）。パスの部分はファイル名（拡張子なし）へ
+ * 縮めてから残りと繋ぐ。
+ */
+describe('slugifyGoal: ゴール文のパスを縮める（issue #328）', () => {
+  it('パスはファイル名（拡張子なし）へ縮める', () => {
+    expect(slugifyGoal('docs/plan/p3-alignment-roadmap.mdを読んで')).toBe(
+      'p3-alignment-roadmapを読んで',
+    );
+  });
+
+  it('文中に埋まったパスも縮める', () => {
+    expect(slugifyGoal('P3設計 (docs/plan/x.md の実行)')).toBe('P3設計-(x-の実行)');
+  });
+
+  it('日本語の間の区切りはパスとみなさない（意味のある語を落とさない）', () => {
+    expect(slugifyGoal('認証 機能/を追加')).toBe('認証-機能-を追加');
+  });
+
+  it('拡張子で終わらない区切りはパスとみなさない', () => {
+    expect(slugifyGoal('src/orchestrator を整理する')).toBe('src-orchestrator-を整理する');
+  });
+
+  it('パス以外のドットは残す（バージョン表記を壊さない）', () => {
+    expect(slugifyGoal('v1.2 のリリース準備')).toBe('v1.2-のリリース準備');
+  });
+});
+
+/**
+ * `slugifyGoal` の既定値は利用者が入力欄で編集できる（`extension.ts`）。編集後の値が
+ * 出力先の外を指したり、ファイル名として使えない形になっていないかを入口で弾く。
+ */
+describe('validateSlugInput（issue #328）', () => {
+  it('通常の名前は通る', () => {
+    expect(validateSlugInput('p3-alignment-roadmap')).toBeUndefined();
+    expect(validateSlugInput('日本語の名前')).toBeUndefined();
+  });
+
+  it('空・空白だけは弾く', () => {
+    expect(validateSlugInput('')).toBeDefined();
+    expect(validateSlugInput('   ')).toBeDefined();
+  });
+
+  it('パス区切りを含む名前は弾く（出力先の外へ出さない）', () => {
+    expect(validateSlugInput('../outside')).toBeDefined();
+    expect(validateSlugInput('sub/dir')).toBeDefined();
+    expect(validateSlugInput('a\\b')).toBeDefined();
+  });
+
+  it('ファイル名として使えない記号は弾く', () => {
+    expect(validateSlugInput('a:b')).toBeDefined();
+    expect(validateSlugInput('a?b')).toBeDefined();
+    expect(validateSlugInput('a|b')).toBeDefined();
+  });
+
+  it('. と .. は弾く', () => {
+    expect(validateSlugInput('.')).toBeDefined();
+    expect(validateSlugInput('..')).toBeDefined();
+  });
+
+  it('Windowsの予約名は弾く', () => {
+    expect(validateSlugInput('CON')).toBeDefined();
+    expect(validateSlugInput('lpt1')).toBeDefined();
+  });
+
+  it('制御文字を含む名前は弾く', () => {
+    expect(validateSlugInput('a\u0000b')).toBeDefined();
+  });
+
+  it('長すぎる名前は弾く', () => {
+    expect(validateSlugInput('a'.repeat(200))).toBeDefined();
   });
 });

@@ -86,6 +86,7 @@ import {
   providerHintToProvider,
   resolveUniqueFileName,
   slugifyGoal,
+  validateSlugInput,
   locateSecurityWarningLine,
   type PlanWorkflowResult,
 } from './orchestrator/planner';
@@ -1294,15 +1295,23 @@ async function runRoadmap(
     fileExists(folder, 'CLAUDE.md'),
   ]);
 
+  const roadmapDir = readWorkflowsConfig().roadmapDir;
+  const fileName = await askOutputFileName(goal, roadmapDir, '.md');
+  if (fileName === undefined) {
+    log.info('ロードマップの生成を取り消しました');
+    return;
+  }
+
   const result = await generateRoadmap(
     { generation, issues, fs: nodeRoadmapFileSystem },
     {
       goal,
       workspaceRoot,
-      roadmapDir: readWorkflowsConfig().roadmapDir,
+      roadmapDir,
       workspaceSummary,
       hasAgentsFile,
       hasClaudeFile,
+      slug: fileName,
     },
   );
 
@@ -1648,6 +1657,29 @@ async function pickRoadmapPhases(parsed: ParsedRoadmap): Promise<RoadmapPhase[] 
  * 呼び出しが同名で先に作っていた）なら、その名前を候補集合へ足して連番を1つ進め、
  * 空いている名前が見つかるまで再試行する。
  */
+/**
+ * 生成物の保存先ファイル名（拡張子なし）を利用者に確認してもらう。
+ *
+ * 既定値は `slugifyGoal` がゴール文から機械的に作るが、ゴールにファイルパスや指示の
+ * 言い回しが混ざっているとそのまま読みにくい名前になる。保存の直前に一度見せて直せる
+ * ようにする（Enterでそのまま採用できるので、既定で良ければ操作は増えない）。
+ *
+ * 取り消し（Escape）は `undefined` を返す。呼び出し側は保存を中止する。
+ */
+async function askOutputFileName(
+  goal: string,
+  relativeDir: string,
+  extension: string,
+): Promise<string | undefined> {
+  const value = await vscode.window.showInputBox({
+    prompt: `保存先のファイル名（${relativeDir}/<名前>${extension}）`,
+    value: slugifyGoal(goal),
+    ignoreFocusOut: true,
+    validateInput: (input) => validateSlugInput(input),
+  });
+  return value === undefined ? undefined : value.trim();
+}
+
 async function writeUniqueWorkflowFile(
   dirAbs: string,
   slug: string,
@@ -1692,9 +1724,14 @@ async function handlePlanSuccess(
   const existingBaseNames = new Set(
     existingFiles.map((f) => path.basename(f.fsPath).replace(/\.ya?ml$/i, '')),
   );
+  const fileName = await askOutputFileName(goal, dirConfig, '.yaml');
+  if (fileName === undefined) {
+    log.info('ワークフロー定義の保存を取り消しました');
+    return;
+  }
   const filePath = await writeUniqueWorkflowFile(
     dirAbs,
-    slugifyGoal(goal),
+    fileName,
     existingBaseNames,
     result.yaml,
   );

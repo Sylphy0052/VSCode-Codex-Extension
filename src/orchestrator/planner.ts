@@ -473,8 +473,25 @@ export function locateSecurityWarningLine(
 
 /** ファイル名として使えない文字。制御文字も含めて空白に潰す。 */
 const UNSAFE_FILENAME_CHARS = /[\\/:*?"<>|\u0020\u002d]/gu;
+/**
+ * ゴール文に混じったファイルパスらしき断片。
+ *
+ * 「`docs/plan/x.md` を読んで」のようなゴールをそのままファイル名にすると、パス区切りが
+ * 潰れて `docs-plan-x.md...` という読みにくい名前になる（実測: issue #328）。パスの部分は
+ * ファイル名（拡張子なし）へ縮めてから残りと繋ぐ。
+ *
+ * **ASCIIのパス構成文字だけで書かれ、拡張子で終わるものに限る。** 「認証 機能/を追加」の
+ * ように区切り文字を別の意味で使っている日本語混じりの文まで巻き込むと、意味のある語が
+ * 落ちてしまうため（区切りの前後が日本語ならパスとみなさない）。
+ */
+const PATH_LIKE_TOKEN = /(?:[A-Za-z0-9._-]+[\\/])+([A-Za-z0-9._-]+)\.[A-Za-z0-9]{1,8}/gu;
 const WINDOWS_RESERVED_FILENAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 const SLUG_MAX_LENGTH = 40;
+/**
+ * 人が入力欄で付けられる名前の上限（`validateSlugInput`）。自動生成の `SLUG_MAX_LENGTH`
+ * より緩い。機械的に切り詰めた既定値と違い、人が意図して付けた名前は途中で切りたくない。
+ */
+const SLUG_INPUT_MAX_LENGTH = 80;
 
 /**
  * ゴール文から短いスラッグを作る。日本語のゴール文をローマ字化する依存ライブラリは
@@ -486,8 +503,49 @@ const SLUG_MAX_LENGTH = 40;
  * 双方向制御文字・ゼロ幅文字を含む値がそのままファイル名（＝タブ・ファイル一覧に出る
  * 表示文字列）へ入り込むのを防ぐ、既存のワークフロー機能と同じ防御線を通しておく。
  */
+/**
+ * ゴール文からファイルパスらしき断片を取り除き、そのファイル名（拡張子なし）へ縮める。
+ * `slugifyGoal` の前処理。`roadmap.ts` 側の `slugifyGoal` も同じ前処理を通すため、
+ * 実装はここ1つに置いて共有する（`roadmap.ts` は `planner.ts` を参照しているので、
+ * この向きの依存なら循環しない）。
+ */
+export function stripPathLikeTokens(goal: string): string {
+  return goal.replace(PATH_LIKE_TOKEN, (_match, base: string) => base);
+}
+
+/**
+ * 人が入力したファイル名（拡張子なし）を検証する。問題があれば理由を返す
+ * （`vscode.window.showInputBox` の `validateInput` へそのまま渡せる形）。
+ *
+ * `slugifyGoal` が作る既定値は必ずこの検証を通るが、利用者はそれを編集できるため、
+ * パス区切りを書いて出力先の外へ出ることを防ぐ必要がある（出力先の解決側でも検証して
+ * いるが、入口でも弾いて理由をその場で見せる）。
+ */
+export function validateSlugInput(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (trimmed === '') {
+    return 'ファイル名を入力してください';
+  }
+  if (trimmed !== stripControlChars(trimmed)) {
+    return '制御文字は使えません';
+  }
+  if (/[\\/:*?"<>|]/u.test(trimmed)) {
+    return 'パス区切り・記号（\\ / : * ? " < > |）は使えません';
+  }
+  if (trimmed === '.' || trimmed === '..') {
+    return 'ファイル名として使えません';
+  }
+  if (WINDOWS_RESERVED_FILENAME.test(trimmed)) {
+    return 'Windowsの予約名は使えません';
+  }
+  if (trimmed.length > SLUG_INPUT_MAX_LENGTH) {
+    return `${SLUG_INPUT_MAX_LENGTH}文字以内にしてください`;
+  }
+  return undefined;
+}
+
 export function slugifyGoal(goal: string): string {
-  const collapsed = stripControlChars(goal)
+  const collapsed = stripPathLikeTokens(stripControlChars(goal))
     .replace(UNSAFE_FILENAME_CHARS, ' ')
     .trim()
     .replace(/\s+/gu, '-');
