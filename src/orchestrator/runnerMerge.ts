@@ -351,7 +351,13 @@ async function startMergeResolution(
   // 通常のタスクと同じループ制御・承認判定に従う（design.md §16.17「コンフリクト」5.）。
   // startTask()側と同じく、`buildEffectiveTaskConfig`の読み替え（issue #271）により
   // 通常この分岐へは入らない。多層防御として残す
-  if (task.provider === 'claude' && effective.config.approvalMode === 'bypassPermissions') {
+  // `agent.workflows.allowClaudeBypassPermissions` が有効なら、startTask()側と同じく通す
+  // （issue #278）
+  if (
+    task.provider === 'claude' &&
+    effective.config.approvalMode === 'bypassPermissions' &&
+    !baseline.allowClaudeBypassPermissions
+  ) {
     self.deps.log.error(
       `[workflow ${runId}/${taskId}] 実効approvalModeがbypassPermissionsのため衝突解決セッションを開始できません`,
     );

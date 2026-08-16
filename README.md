@@ -396,7 +396,7 @@ Codexがサブエージェントを起動したとき、その活動を会話の
 
 - **危険と判定した操作だけは自動で通さず、そのタスクを止めて人へ回す。** 判定はパターン照合による補助でしかなく、一次防御ではない（後述）
 - **一次防御はサンドボックスであり、既定で有効。** `sandbox`（Codex）/ `approvalMode` / `permissionMode` はYAMLから拡張機能の設定より**緩める方向へは動かせない**。緩める指定は無視され警告が出る
-- **Claude Codeの `bypassPermissions` はワークフローでは使われない。** この設定では承認要求そのものが発行されず、上の危険判定が丸ごと働かない。`claude.permissionMode` を `bypassPermissions` にしている場合、ワークフローのタスクは `acceptEdits` へ読み替えて実行し、その旨を警告に出す（チャットの設定はそのまま。ワークフロー実行時だけの読み替え）。**確認を挟まずに走らせたい場合は、`bypassPermissions` ではなく `autoApprove` を使う**（[後述](#確認を挟まずに走らせたい場合)）
+- **Claude Codeの `bypassPermissions` はワークフローでは使われない**（`agent.workflows.allowClaudeBypassPermissions` で明示的に許可した場合を除く）**。** この設定では承認要求そのものが発行されず、上の危険判定が丸ごと働かない。`claude.permissionMode` を `bypassPermissions` にしている場合、ワークフローのタスクは `acceptEdits` へ読み替えて実行し、その旨を警告に出す（チャットの設定はそのまま。ワークフロー実行時だけの読み替え）。**確認を挟まずに走らせたい場合は、`bypassPermissions` ではなく `autoApprove` を使う**（[後述](#確認を挟まずに走らせたい場合)）
 - **タスクの `allow` を書くと、そのタスクに関する限り危険判定そのものが効かなくなる。** `allow` は「既定の停止条件から外すパターン」を追加するフィールドで、書いた分だけそのタスクは自動承認の対象が広がる（`.git` 配下への書き込みなど一部は `allow` でも解除できない）。使っているワークフローは実行前に確認が出て、ワークフローViewの警告欄に常時表示される
 - **`autoApprove: true` はYAMLに書くだけでは効かない。** machineスコープの設定 `agent.workflows.allowAutoApprove`（既定 `false`）が有効なときだけ意味を持つ。無効のままなら、YAMLに何と書かれていても全ての承認要求を人へ回して走る（設定は[後述](#設定)）
 - **`agent.workflows.finalMerge` の既定は `auto`。** 全タスクが `done` になると、統合ブランチからmainへのPR/MRを作ったうえで、そのままmainへマージする（`gh pr merge` / `glab mr merge`）。**人の目を通さずmainが進む。** MRの自己マージを禁じる運用規約がある場合は、machineスコープの設定で `agent.workflows.finalMerge` を `pr-only` にする。PR/MRを作って止め、mainへの書き込みは人が行う
@@ -504,10 +504,12 @@ runが終わると、そのrunで `done` になったタスクに対応するロ
 
 ### 確認を挟まずに走らせたい場合
 
-`bypassPermissions` で走らせることはできない（上記のとおり読み替えられる）。承認要求そのものが発行されない設定では、危険なコマンドを止める仕組みが一切残らないため。人が席を外していても進むようにしたいなら、**危険判定を残したまま自動承認する** `autoApprove` を使う。
+既定では `bypassPermissions` のまま走らせることはできない（上記のとおり読み替えられる）。承認要求そのものが発行されない設定では、危険なコマンドを止める仕組みが一切残らないため。人が席を外していても進むようにしたいなら、まず**危険判定を残したまま自動承認する** `autoApprove` を使う。
 
 1. User settings（`settings.json`）へ `"agent.workflows.allowAutoApprove": true` を書く。machineスコープなので、リポジトリ側の `.vscode/settings.json` からは有効にできない（cloneしただけのリポジトリが無人実行を勝手に有効化する経路を残さないため）
 2. ワークフローYAMLの `defaults` へ `autoApprove: true` を書く（タスクごとに書かなくてよい）
+
+なお、1を有効にしている環境では**生成（`agent.workflows.plan`）の時点で** `defaults.autoApprove: true` と各タスクの `allow: [shell-metacharacters]` を書いたYAMLを作る。無効な環境では従来どおり、どちらも書かないYAMLを作る。
 
 ```yaml
 version: 1
@@ -541,6 +543,14 @@ tasks:
 - `base64` / `xxd` によるデコード（`decode`）
 
 **`&&` や `|` を含むコマンドは `shell-metacharacters` に当たるため止まる。** ここも自動で通したいなら、そのタスクの `allow` に上のidを書いて個別に解除する。ただし `allow` を書いた分だけそのタスクの危険判定は働かなくなるので、タスクを分けてコマンドを単純にするほうが安全である（`.git` 配下への書き込みなど、`allow` でも解除できないものもある）。
+
+#### 承認要求そのものを出さずに走らせる（非推奨）
+
+`autoApprove` でも承認カードが出るのが困る場合の最後の手段として、`bypassPermissions` の読み替えを止める設定がある。User settings へ `"agent.workflows.allowClaudeBypassPermissions": true` を書き、`claude.permissionMode` を `bypassPermissions` にすると、ワークフローのClaudeタスクもその設定のまま走る。
+
+**この設定を有効にすると、上に挙げた12の停止条件は全て無効になる。** Claude Code CLIがツール実行の可否を一切問い合わせなくなるため、この拡張機能側に判定の機会が無い。`rm -rf` 相当・force push・外部への送信・作業ディレクトリ外への操作を含め、ワークフローが生成したコマンドは内容にかかわらず実行される。使う場合は、失っても構わない環境（使い捨てのコンテナやVM）に限ること。
+
+`agent.workflows.allowAutoApprove` と同じくmachineスコープで、リポジトリ側の設定からは有効にできない。
 
 ## 設定
 
@@ -592,6 +602,7 @@ tasks:
 | --------------------------------------- | ------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `agent.workflows.dir`                   | `.agents/workflows`             | resource            | ワークフロー定義ファイル（`.yaml` / `.yml`）を探すディレクトリ                                                                       |
 | `agent.workflows.allowAutoApprove`      | `false`                         | machine             | YAMLの `autoApprove: true` を有効化できるようにする。**これが `false` のままだと、YAMLに何と書かれていても全ての承認要求を人へ回す** |
+| `agent.workflows.allowClaudeBypassPermissions` | `false`                   | machine             | **危険**: `claude.permissionMode` が `bypassPermissions` のとき、ワークフローのClaudeタスクもその設定のまま実行する。有効にすると危険判定が全て無効になる（[承認要求そのものを出さずに走らせる](#承認要求そのものを出さずに走らせる非推奨)参照）                     |
 | `agent.workflows.replyTimeoutSec`       | `300`                           | machine-overridable | タスク間メッセージング（[後述](#ワークフロー並列オーケストレーション)）の返信待ちの上限秒数                                          |
 | `agent.workflows.roadmapDir`            | `docs/roadmap`                  | machine-overridable | ロードマップの出力先ディレクトリ                                                                                                     |
 | `agent.workflows.pseudoWorktreeExclude` | `[node_modules,.venv,dist,out]` | machine-overridable | 疑似worktree（gitでないフォルダでの複製ベースの隔離）で複製から除外するディレクトリ名                                                |

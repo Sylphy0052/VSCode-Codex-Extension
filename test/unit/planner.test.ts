@@ -10,6 +10,7 @@ import {
   type LoopStopReason,
 } from '../../src/loop/loopController';
 import type { Logger } from '../../src/log';
+import { DANGER_PATTERN_IDS } from '../../src/orchestrator/escalation';
 import type { ExtensionSafetyBaseline } from '../../src/orchestrator/taskConfig';
 import type {
   ApprovalHandler,
@@ -70,6 +71,7 @@ const baseline: ExtensionSafetyBaseline = {
   codexApprovalMode: 'on-request',
   claudePermissionMode: 'acceptEdits',
   allowAutoApprove: false,
+  allowClaudeBypassPermissions: false,
 };
 
 const VALID_YAML = [
@@ -237,6 +239,54 @@ describe('buildPlannerPrompt（design.md §16.9）', () => {
     });
     expect(prompt).toContain('issue');
     expect(prompt).toContain('Closes #');
+  });
+});
+
+describe('buildPlannerPrompt: 無人実行向けの生成（issue #278）', () => {
+  const summary = {
+    topLevelEntries: ['src/'],
+    hasAgentsMd: false,
+    hasClaudeMd: false,
+  };
+
+  it('unattendedのとき autoApprove: true と allow を書くよう指示する', () => {
+    const prompt = buildPlannerPrompt({ goal: 'g', workspaceSummary: summary, unattended: true });
+
+    expect(prompt).toContain('defaults へ autoApprove: true を書くこと');
+    expect(prompt).toContain(DANGER_PATTERN_IDS.shellMetacharacters);
+    expect(prompt).not.toContain('特別な理由がなければ指定しないこと');
+  });
+
+  it('既定（unattendedでない）では従来どおり指定しないよう指示する', () => {
+    const prompt = buildPlannerPrompt({ goal: 'g', workspaceSummary: summary });
+
+    expect(prompt).toContain('特別な理由がなければ指定しないこと');
+    expect(prompt).not.toContain('defaults へ autoApprove: true を書くこと');
+  });
+
+  it('planWorkflowは allowAutoApprove が有効なときだけ無人実行向けの指示を出す', async () => {
+    const planInput = {
+      goal: 'ゴール',
+      workspaceSummary: summary,
+      provider: 'codex' as const,
+      cwd: '/repo',
+      log: fakeLogger,
+    };
+    const onHost = new FakePlannerHost([VALID_YAML]);
+    await planWorkflow({
+      ...planInput,
+      host: onHost,
+      baseline: { ...baseline, allowAutoApprove: true },
+    });
+    expect(onHost.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '').toContain(
+      'defaults へ autoApprove: true を書くこと',
+    );
+
+    const offHost = new FakePlannerHost([VALID_YAML]);
+    await planWorkflow({ ...planInput, host: offHost, baseline });
+    expect(offHost.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '').not.toContain(
+      'defaults へ autoApprove: true を書くこと',
+    );
   });
 });
 
@@ -559,6 +609,7 @@ describe('planWorkflow（design.md §16.9）', () => {
       codexApprovalMode: '',
       claudePermissionMode: '',
       allowAutoApprove: false,
+      allowClaudeBypassPermissions: false,
     };
     const host = new FakePlannerHost([VALID_YAML]);
     await planWorkflow({ ...baseInput, host, baseline: emptyBaseline, provider: 'codex' });

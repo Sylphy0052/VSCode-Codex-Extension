@@ -9,6 +9,7 @@ const baseline: ExtensionSafetyBaseline = {
   codexApprovalMode: 'on-request',
   claudePermissionMode: 'manual',
   allowAutoApprove: false,
+  allowClaudeBypassPermissions: false,
 };
 
 describe('buildEffectiveTaskConfig（design.md §16.16の唯一の入口）', () => {
@@ -156,6 +157,26 @@ describe('buildEffectiveTaskConfig（design.md §16.16の唯一の入口）', ()
     expect(result.warnings.some((w) => w.includes('bypassPermissions'))).toBe(true);
   });
 
+  it('allowClaudeBypassPermissionsが有効なら読み替えず、危険判定が働かない旨を警告する（issue #278）', () => {
+    const result = buildEffectiveTaskConfig(
+      {
+        provider: 'claude',
+        model: undefined,
+        effort: undefined,
+        approvalMode: undefined,
+        sandbox: undefined,
+        autoApprove: false,
+      },
+      {
+        ...baseline,
+        claudePermissionMode: 'bypassPermissions',
+        allowClaudeBypassPermissions: true,
+      },
+    );
+    expect(result.config.approvalMode).toBe('bypassPermissions');
+    expect(result.warnings.some((w) => w.includes('危険判定'))).toBe(true);
+  });
+
   it('CodexタスクはbypassPermissionsの読み替えの対象外（Claude固有の値のため）', () => {
     const result = buildEffectiveTaskConfig(
       {
@@ -198,6 +219,7 @@ describe('buildEffectiveTaskConfig（design.md §16.16の唯一の入口）', ()
       codexApprovalMode: '',
       claudePermissionMode: '',
       allowAutoApprove: false,
+      allowClaudeBypassPermissions: false,
     };
     const result = buildEffectiveTaskConfig(
       {
@@ -221,6 +243,7 @@ describe('buildEffectiveTaskConfig（design.md §16.16の唯一の入口）', ()
       codexApprovalMode: '',
       claudePermissionMode: '',
       allowAutoApprove: false,
+      allowClaudeBypassPermissions: false,
     };
     const result = buildEffectiveTaskConfig(
       {

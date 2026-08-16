@@ -115,6 +115,13 @@ export interface WorkflowsConfig {
    */
   allowAutoApprove: boolean;
   /**
+   * `claude.permissionMode` が `bypassPermissions` のとき、ワークフローのClaudeタスクも
+   * その設定のまま実行するか（machineスコープ、既定 false）。有効にすると `can_use_tool` が
+   * 一切発行されず、危険判定（§16.7）が全て無効になる。無効なら `acceptEdits` へ読み替える
+   * （design.md §16.16、issue #271・#278）。
+   */
+  allowClaudeBypassPermissions: boolean;
+  /**
    * ロードマップ（design.md §16.19）の出力先ディレクトリ。ワークスペースフォルダからの
    * 相対パス（既定 `docs/roadmap`）。`agent.workflows.dir` と同じく `machine-overridable`
    * （§16.16「成果の統合まわりの設定」）。出力先のパス自体であって実行するコマンドの選択には
@@ -199,6 +206,8 @@ export function readWorkflowsConfig(): WorkflowsConfig {
   return {
     dir: isSafeRelativeDir(rawDir) ? rawDir : DEFAULT_WORKFLOWS_DIR,
     allowAutoApprove: c.get<boolean>('workflows.allowAutoApprove') ?? false,
+    allowClaudeBypassPermissions:
+      c.get<boolean>('workflows.allowClaudeBypassPermissions') ?? false,
     roadmapDir: isSafeRelativeDir(rawRoadmapDir) ? rawRoadmapDir : DEFAULT_ROADMAP_DIR,
     pseudoWorktreeExclude: normalizePseudoWorktreeExclude(
       c.get<unknown>('workflows.pseudoWorktreeExclude'),
