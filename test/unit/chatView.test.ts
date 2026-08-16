@@ -378,6 +378,27 @@ describe('チャット下部の3段固定（issue #234）', () => {
   });
 });
 
+describe('renderShellの入力欄プレースホルダ（送信キー設定 agent.chat.sendOn、issue #288）', () => {
+  it('sendOn未指定（既定ctrlEnter）では従来どおり「Ctrl+Enterで送信」と案内する', () => {
+    const html = renderShell(fakeWebview() as never, buildOptions());
+
+    expect(html).toContain('Codexへの指示を入力（Ctrl+Enterで送信、画像はCtrl+Vで貼り付け）');
+  });
+
+  it('sendOn: "ctrlEnter"を明示しても同じ案内文になる', () => {
+    const html = renderShell(fakeWebview() as never, buildOptions({ sendOn: 'ctrlEnter' }));
+
+    expect(html).toContain('Ctrl+Enterで送信');
+  });
+
+  it('sendOn: "enter"では「Enterで送信、Shift+Enterで改行」に切り替わる', () => {
+    const html = renderShell(fakeWebview() as never, buildOptions({ sendOn: 'enter' }));
+
+    expect(html).toContain('Codexへの指示を入力（Enterで送信、Shift+Enterで改行、画像はCtrl+Vで貼り付け）');
+    expect(html).not.toContain('Ctrl+Enterで送信');
+  });
+});
+
 describe('buildChatPanelOptions（Ctrl+Fの検索窓、issue #287、design.md §14.48）', () => {
   it('enableFindWidgetをtrueにし、既存のenableScripts/retainContextWhenHiddenを保つ', () => {
     expect(buildChatPanelOptions()).toEqual({

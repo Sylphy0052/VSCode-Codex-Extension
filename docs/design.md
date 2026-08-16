@@ -2829,6 +2829,30 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - 折りたたんだ部分（コマンド出力・思考の要約の折りたたみ、`<details>`の中）はDOM上非表示のため検索対象にならない。開いている範囲だけが検索できる
 - タブ復元後に検索窓が実際に効くかどうかは、上記の通りVSCode本体の実装依存で拡張機能側からは制御できず、実機での確認が済んでいない（`docs/manual-test.md` U-04）
 
+### 14.49 送信キーを選べるようにする（issue #288）
+
+背景: 送信が`Ctrl+Enter`固定で、`Enter`は改行のままだった（`chatScript.ts`の`el('input').addEventListener('keydown', ...)`）。他のチャット系ツールは`Enter`送信が主流で、乗り換え直後に躓く（issue本文）。
+
+実測した事実:
+
+- 既存の`keydown`ハンドラは`if (menuOpen()) { ... }`ブロックを最初に評価しており、候補メニュー（`/` `@`）が開いている間の`Tab`・`Enter`（Ctrl/Cmd無し）は`acceptItem`が先取りする。この分岐は今回変更していない
+- `Ctrl+Enter` / `Cmd+Enter`は`menuOpen()`ブロックの中では処理されず、メニューが開いていても素通りして送信される（改修前から）。今回もこの挙動は維持した
+- Webview（Chromiumベース）の`KeyboardEvent`は`isComposing`を持つが、IMEの実装差を考慮し`compositionstart`/`compositionend`の追跡も二重に持たせた方が安全と判断した（`markdown.md` §14.51の`RENDER_MARKDOWN`のような単純な真偽値と異なり、キー判定はブラウザ間の挙動差に触れるため）
+
+設計の判断:
+
+- 設定`agent.chat.sendOn`（`string`のenum、既定`ctrlEnter`）を追加。`ctrlEnter`は現状維持、`enter`は`Enter`で送信・`Shift+Enter`で改行。**`Ctrl+Enter`/`Cmd+Enter`はどちらのモードでも送信を維持する**（`ctrlEnter`に慣れた手を`enter`へ乗り換えても潰さないため、issue本文の「従来の指が使えなくならないように」）
+- キー判定のロジックは`vscode`にもDOMにも依存しない純粋関数`decideSendKeyAction`として`src/view/sendKey.ts`へ切り出した（CONTRIBUTING.mdの「レイヤの制約」・「パーサと引数組み立ては純粋関数として切り出す」に従う）。`test/unit/sendKey.test.ts`から直接テストできる
+- `chatScript.ts`はテンプレートリテラルの中身でTypeScriptとして実行できないため、`stateDelta.ts`の`MERGE_ITEMS_SOURCE`・`markdown.ts`の`MARKDOWN_PARSE_SOURCE`と同じ流儀で、`sendKey.ts`が同じロジックをJSソース文字列（`SEND_KEY_SOURCE`）として二重に持ち、`chatScript.ts`へ差し込む。`test/unit/sendKey.test.ts`は`SEND_KEY_SOURCE`を`new Function`で評価し、TS実装と同じ結果になることを確かめて乖離を検知する（`markdown.test.ts`と同じ検知の仕組み）
+- IME変換中は`compositionstart`〜`compositionend`の間を追跡した`imeComposing`と、`KeyboardEvent.isComposing`のORを`decideSendKeyAction`へ渡す。どちらか一方でも真なら送信しない。変換確定のEnterを送信に奪われると日本語入力が使い物にならないため（issue本文の受入基準）、両モードで無条件に`ignore`を返す
+- `decideSendKeyAction`は候補メニューの開閉を関知しない。メニューが開いているときの確定は既存の`menuOpen()`ブロックが先に処理して`return`するため、この関数が呼ばれるのはメニューが閉じているときだけ（既存の分岐を壊さないための切り分け）
+- 入力欄のプレースホルダ（`chatView.ts`の`renderShell`）は`options.sendOn`（既定`ctrlEnter`）に応じて「Ctrl+Enterで送信」/「Enterで送信、Shift+Enterで改行」を出し分ける。HTML生成時（サーバー側、実TypeScript）に確定する文字列のため、webview側のJSへ持ち込む必要は無い
+- **Codex画面（`chatView.ts`）にのみ配線した。** `ChatShellOptions.sendOn`は`renderShell`（両画面共通）のオプションとして足したが、`claudeChatView.ts`は本Issueのスコープ外（触ってはいけないファイルの指定）のため、`readChatSendOnConfig()`の呼び出しを追加していない。Claude Code画面は`options.sendOn`が常に`undefined`のまま`renderShell`へ渡り、既定の`ctrlEnter`扱いになる。§14.34や§14.51の`renderMarkdown`と異なり両画面配線ではない点に注意（Claude Code画面への配線は別Issue）
+
+残る制約:
+
+- Claude Code画面（`claudeChatView.ts`）には配線しておらず、常に`ctrlEnter`のまま。同じ設定を効かせるには別Issueで`claudeChatView.ts`側から`readChatSendOnConfig()`を呼ぶ変更が要る
+- IME変換確定時のブラウザ間の`isComposing`挙動差は実機（Windows IME・macOS日本語入力・Linux fcitx等）ごとの確認をしていない。`compositionstart`/`compositionend`の追跡を保険として二重に持たせているが、特殊なIME実装で両方とも取りこぼす経路が無い保証は無い
 ### 14.50 主要コマンドへ既定のキーバインドを割り当てる（issue #289）
 
 背景: `contributes.keybindings`が存在せず、`codex.newChat`・`claude.newChat`・`codex.resumeLast`・`agent.workflows.view`を含む全ての操作がコマンドパレットかクリック経由でしか呼べなかった。

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { readClaudeConfig, readWorkflowsConfig } from '../../src/config';
+import { readChatSendOnConfig, readClaudeConfig, readWorkflowsConfig } from '../../src/config';
 import { __mock } from '../mocks/vscode';
 
 describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
@@ -130,5 +130,25 @@ describe('readClaudeConfig', () => {
   it('claude.agentを読む', () => {
     __mock.setConfig('claude', { agent: 'code-reviewer' });
     expect(readClaudeConfig().claude.agent).toBe('code-reviewer');
+  });
+});
+
+describe('readChatSendOnConfig（issue #288）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('既定はctrlEnter', () => {
+    expect(readChatSendOnConfig()).toBe('ctrlEnter');
+  });
+
+  it('enterを読む', () => {
+    __mock.setConfig('agent', { 'chat.sendOn': 'enter' });
+    expect(readChatSendOnConfig()).toBe('enter');
+  });
+
+  it('未知の値は既定（ctrlEnter）へ丸める', () => {
+    __mock.setConfig('agent', { 'chat.sendOn': 'always' });
+    expect(readChatSendOnConfig()).toBe('ctrlEnter');
   });
 });
