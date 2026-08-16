@@ -701,3 +701,53 @@ export function retryTask(run: RunState, tasks: readonly WorkflowTask[], taskId:
   }
   return { ...run, tasks: nextTasks, haltedByUser: false };
 }
+
+/**
+ * 回数切れ（`maxReached`）で止まったタスクを、同じセッションのまま `running` へ戻す
+ * （design.md §16.8「続ける」、issue #284）。
+ *
+ * 「再実行」（`retryTask`）が新しいworktree・新しい会話で最初のプロンプトからやり直すのに
+ * 対し、こちらは止まったところから走らせるための操作。worktreeもブランチも作り直さないため
+ * `retryCount` / `manualRetryCount` は増やさない（増やすとディレクトリ名とブランチ名が
+ * 変わってしまう。`retrySuffixOf`）。`submissionCount` も通算のまま残す。
+ *
+ * 受け付けるのは「回数切れで `failed` になったタスク」だけ。ほかの失敗（`loopFailed` /
+ * `manualStop` / `approvalRejected` など）は途中から続ける前提が無い。呼び出し側の
+ * `runner.ts` は加えて、そのタスクのセッションがこのウィンドウで生きていることも要求する
+ * （リロード後は会話が失われているため「再実行」しかできない）。
+ *
+ * 連鎖して `skipped` になった依存先を `pending` へ戻すことと、`haltedByUser` を解除する
+ * ことは `retryTask` と同じ（人の明示操作を再開の合図として扱う）。
+ */
+export function continueTask(
+  run: RunState,
+  tasks: readonly WorkflowTask[],
+  taskId: string,
+): RunState {
+  const current = run.tasks.get(taskId);
+  const task = tasks.find((t) => t.id === taskId);
+  if (task === undefined || current === undefined) {
+    return run;
+  }
+  if (current.state !== 'failed' || current.failure?.kind !== 'maxReached') {
+    return run;
+  }
+  const depsAllDone = task.dependsOn.every((dep) => run.tasks.get(dep)?.state === 'done');
+  if (!depsAllDone) {
+    return run;
+  }
+
+  const dependents = buildDependentsIndex(tasks);
+  const toRestore = collectDependents(taskId, dependents);
+
+  const nextTasks = new Map(run.tasks);
+  nextTasks.set(taskId, { ...current, state: 'running', failure: undefined });
+  for (const id of toRestore) {
+    const s = nextTasks.get(id);
+    if (s === undefined || s.state !== 'skipped') {
+      continue;
+    }
+    nextTasks.set(id, { ...s, state: 'pending', failure: undefined });
+  }
+  return { ...run, tasks: nextTasks, haltedByUser: false };
+}

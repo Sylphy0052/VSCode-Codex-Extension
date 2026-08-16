@@ -17,6 +17,7 @@ import {
   resumeFromWaitingReply,
   retryMergeState,
   retryTask,
+  continueTask,
   type RunState,
   type TaskRunState,
 } from '../../src/orchestrator/runState';
@@ -724,5 +725,73 @@ describe('マージの結果に応じた遷移（design.md §16.17）', () => {
       expect(retryMergeState(run, 'T1')).toBe(run);
       expect(retryMergeState(run, 'unknown')).toBe(run);
     });
+  });
+});
+
+describe('continueTask（回数切れから続ける、issue #284）', () => {
+  it('回数切れのfailedをrunningへ戻し、依存するskippedもpendingへ戻す', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = finishDone(run, tasks, 'T1');
+    run = markRunning(run, 'T2');
+    run = recordSubmissionCount(run, 'T2', 20);
+    run = applyLoopStopReason(run, tasks, 'T2', 'maxReached'); // T2: failed, T3・T4: skipped
+
+    const continued = continueTask(run, tasks, 'T2');
+    expect(stateOf(continued, 'T2').state).toBe('running');
+    expect(stateOf(continued, 'T2').failure).toBeUndefined();
+    expect(stateOf(continued, 'T3').state).toBe('pending');
+    expect(stateOf(continued, 'T4').state).toBe('pending');
+    expect(isRunHalted(continued)).toBe(false);
+    // worktreeもブランチも作り直さないため試行の回数は増やさず、送信回数も通算のまま残す
+    expect(stateOf(continued, 'T2').manualRetryCount).toBe(0);
+    expect(stateOf(continued, 'T2').retryCount).toBe(0);
+    expect(stateOf(continued, 'T2').submissionCount).toBe(20);
+  });
+
+  it('回数切れ以外の失敗は対象外で、何も変えない', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = applyLoopStopReason(run, tasks, 'T1', 'taskStopped'); // manualStop
+    expect(stateOf(run, 'T1').failure).toEqual({ kind: 'manualStop' });
+
+    expect(continueTask(run, tasks, 'T1')).toBe(run);
+  });
+
+  it('running・done・skippedのタスクは対象外で、何も変えない', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    expect(continueTask(run, tasks, 'T1')).toBe(run);
+
+    run = finishDone(run, tasks, 'T1');
+    expect(continueTask(run, tasks, 'T1')).toBe(run);
+
+    run = markRunning(run, 'T2');
+    run = applyLoopStopReason(run, tasks, 'T2', 'maxReached');
+    expect(stateOf(run, 'T3').state).toBe('skipped');
+    expect(continueTask(run, tasks, 'T3')).toBe(run);
+  });
+
+  it('依存が全てdoneでなければ戻せない', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T2');
+    run = applyLoopStopReason(run, tasks, 'T2', 'maxReached');
+
+    expect(stateOf(run, 'T1').state).not.toBe('done');
+    expect(continueTask(run, tasks, 'T2')).toBe(run);
+  });
+
+  it('haltedByUserを解除する（人の明示操作を再開の合図として扱う。retryTaskと同じ）', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = applyLoopStopReason(run, tasks, 'T1', 'maxReached');
+    run = { ...run, haltedByUser: true };
+
+    expect(continueTask(run, tasks, 'T1').haltedByUser).toBe(false);
   });
 });
