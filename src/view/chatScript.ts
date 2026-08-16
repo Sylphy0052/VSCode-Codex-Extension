@@ -1,4 +1,5 @@
 import { MARKDOWN_PARSE_SOURCE } from './markdown';
+import { SEND_KEY_SOURCE, type SendOnMode } from './sendKey';
 import { MERGE_ITEMS_SOURCE } from './stateDelta';
 
 /**
@@ -27,6 +28,7 @@ export function chatScript(
   approvalCycle: readonly string[] = [],
   showInputModeHints = false,
   renderMarkdown = true,
+  sendOn: SendOnMode = 'ctrlEnter',
 ): string {
   return `
   const vscode = acquireVsCodeApi();
@@ -101,6 +103,13 @@ export function chatScript(
    * このフラグに関わらず常に生テキストのまま（renderBody参照）。
    */
   const RENDER_MARKDOWN = ${JSON.stringify(renderMarkdown)};
+
+  /**
+   * 送信キーの設定（設定 agent.chat.sendOn、既定'ctrlEnter'、issue #288）。
+   * 'enter'ならEnterで送信・Shift+Enterで改行、'ctrlEnter'なら従来どおりEnterは改行の
+   * まま（Ctrl/Cmd+Enterはどちらのモードでも送信を維持する。decideSendKeyAction参照）。
+   */
+  const SEND_ON = ${JSON.stringify(sendOn)};
 
   /** 残りがこの割合を下回ったら警告として見せる。 */
   const LOW_CONTEXT_PERCENT = 20;
@@ -1926,6 +1935,26 @@ export function chatScript(
 
   el('input').addEventListener('blur', closeMenu);
 
+  /**
+   * IME変換中かどうかの追跡（issue #288）。keydownのe.isComposingだけに頼ると
+   * ブラウザ差で取りこぼすことがあるため、compositionstart/compositionendでも
+   * 二重に追う（decideSendKeyAction呼び出し側でどちらか一方の真を採用する）。
+   */
+  let imeComposing = false;
+  el('input').addEventListener('compositionstart', () => {
+    imeComposing = true;
+  });
+  el('input').addEventListener('compositionend', () => {
+    imeComposing = false;
+  });
+
+  /**
+   * 送信キー判定の実装（issue #288）。vscodeに依存しない純粋関数として
+   * src/view/sendKey.tsに書き、ここへソースとして差し込む（mergeItemsと同じ流儀。
+   * sendKey.tsのSEND_KEY_SOURCEのJSDoc参照）。
+   */
+  ${SEND_KEY_SOURCE}
+
   el('input').addEventListener('keydown', (e) => {
     if (menuOpen()) {
       if (e.key === 'ArrowDown') {
@@ -1963,9 +1992,22 @@ export function chatScript(
       return;
     }
 
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      send();
+    if (e.key === 'Enter') {
+      const composing = imeComposing || e.isComposing === true;
+      const action = decideSendKeyAction(
+        {
+          key: e.key,
+          ctrlKey: e.ctrlKey,
+          metaKey: e.metaKey,
+          shiftKey: e.shiftKey,
+          isComposing: composing,
+        },
+        SEND_ON,
+      );
+      if (action === 'send') {
+        e.preventDefault();
+        send();
+      }
       return;
     }
 

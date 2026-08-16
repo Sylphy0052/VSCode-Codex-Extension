@@ -11,6 +11,7 @@ import { isUnsafeClaudeCombination } from '../claude/argvBuilder';
 import {
   currentWorkspaceFolder,
   readChatRenderMarkdownConfig,
+  readChatSendOnConfig,
   readClaudeConfig,
   workspaceFolderPaths,
 } from '../config';
@@ -748,6 +749,8 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       showDebug: true,
       // 応答本文のMarkdown描画（issue #290、設定 agent.chat.renderMarkdown）
       renderMarkdown: readChatRenderMarkdownConfig(),
+      // 送信キー（issue #288、設定 agent.chat.sendOn）。chatView.ts（Codex）と同じ配線
+      sendOn: readChatSendOnConfig(),
     });
     panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(entry, message));
     panel.onDidChangeViewState(() => {

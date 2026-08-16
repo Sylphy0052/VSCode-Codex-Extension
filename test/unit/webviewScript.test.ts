@@ -113,6 +113,32 @@ describe('chatScript', () => {
     expect(source).toContain("type: 'openDebugLog'");
     expect(source).toContain("type: 'debugCommand'");
   });
+
+  it('sendOnを省略すると既定のctrlEnterが埋め込まれる（issue #288）', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+    expect(source).toContain('SEND_ON = "ctrlEnter"');
+  });
+
+  it('sendOnを指定するとその値が埋め込まれる（issue #288）', () => {
+    const source = chatScript(
+      'Codex',
+      { mode: 'quickPick' },
+      false,
+      [],
+      false,
+      true,
+      'enter',
+    );
+    expect(() => parses(source)).not.toThrow();
+    expect(source).toContain('SEND_ON = "enter"');
+  });
+
+  it('IME変換の追跡とdecideSendKeyActionの呼び出しを配線している（issue #288）', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+    expect(source).toContain('compositionstart');
+    expect(source).toContain('compositionend');
+    expect(source).toContain('decideSendKeyAction(');
+  });
 });
 
 describe('controlPanelScript', () => {

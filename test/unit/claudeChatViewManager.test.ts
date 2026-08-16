@@ -286,6 +286,31 @@ describe('ClaudeChatViewManager', () => {
     });
   });
 
+  describe('送信キー設定の配線（agent.chat.sendOn、issue #288）', () => {
+    it('設定を読んでいなければ既定のctrlEnter扱いの文言のままになる', async () => {
+      stubStart();
+      const { manager } = createManager();
+
+      await manager.openNew();
+
+      const html = __mock.lastCreatedPanel()?.webview.html ?? '';
+      expect(html).toContain('SEND_ON = "ctrlEnter"');
+      expect(html).toContain('Ctrl+Enterで送信');
+    });
+
+    it('agent.chat.sendOnをenterにするとwebview側の定数とプレースホルダに反映される', async () => {
+      __mock.setConfig('agent', { 'chat.sendOn': 'enter' });
+      stubStart();
+      const { manager } = createManager();
+
+      await manager.openNew();
+
+      const html = __mock.lastCreatedPanel()?.webview.html ?? '';
+      expect(html).toContain('SEND_ON = "enter"');
+      expect(html).toContain('Enterで送信、Shift+Enterで改行');
+    });
+  });
+
   describe('既存機能の回帰', () => {
     it('新しい会話（openNew）は引数無しでも従来通り動く', async () => {
       const calls = stubStart();

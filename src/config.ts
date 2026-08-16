@@ -13,6 +13,7 @@ import {
 import { DEFAULT_REPLY_TIMEOUT_SEC } from './orchestrator/messaging';
 import { DEFAULT_PSEUDO_WORKTREE_EXCLUDE } from './orchestrator/pseudoWorktree';
 import type { HistoryScope } from './session/sessionStore';
+import { normalizeSendOn, type SendOnMode } from './view/sendKey';
 
 export interface ExtensionConfig {
   executablePath: string;
@@ -113,6 +114,18 @@ export function readActivityLogConfig(): ActivityLogConfig {
 export function readChatRenderMarkdownConfig(): boolean {
   const c = vscode.workspace.getConfiguration('agent');
   return c.get<boolean>('chat.renderMarkdown') ?? true;
+}
+
+/**
+ * チャット入力欄の送信キー（`agent.chat.sendOn`、既定 `ctrlEnter`、issue #288）。
+ * `enter` にするとEnterで送信・Shift+Enterで改行になる（`chatScript.ts` の
+ * `decideSendKeyAction` / `SEND_ON` へそのまま渡る）。未知の値は `normalizeSendOn` が
+ * 既定へ丸める。Codex（`chatView.ts`）・Claude Code（`claudeChatView.ts`）両画面の
+ * `attachPanel`から呼ばれる（design.md §14.49）。
+ */
+export function readChatSendOnConfig(): SendOnMode {
+  const c = vscode.workspace.getConfiguration('agent');
+  return normalizeSendOn(c.get<string>('chat.sendOn'));
 }
 
 /** ワークフロー実行（design.md §16）の設定。 */

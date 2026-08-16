@@ -30,6 +30,7 @@ import { readRateLimits, type UsageSnapshot } from '../codex/usage';
 import {
   currentWorkspaceFolder,
   readChatRenderMarkdownConfig,
+  readChatSendOnConfig,
   readConfig,
   workspaceFolderPaths,
 } from '../config';
@@ -75,6 +76,7 @@ import { chatScript, type ReviewButtonConfig } from './chatScript';
 import { chatStyles } from './chatStyles';
 import { PendingStartRegistry } from './pendingStarts';
 import { readPersistedThreadId } from './panelState';
+import { DEFAULT_SEND_ON, type SendOnMode } from './sendKey';
 import { isEditableKey, type SettingsProvider } from './settingsProvider';
 
 const VIEW_TYPE = 'codex.chat';
@@ -1013,6 +1015,9 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       },
       // 応答本文のMarkdown描画（issue #290、設定 agent.chat.renderMarkdown）
       renderMarkdown: readChatRenderMarkdownConfig(),
+      // 送信キー（issue #288、設定 agent.chat.sendOn）。Codex画面にのみ配線している
+      // （ChatShellOptions.sendOnのJSDoc参照）
+      sendOn: readChatSendOnConfig(),
     });
 
     panel.webview.onDidReceiveMessage(
@@ -2065,6 +2070,20 @@ export interface ChatShellOptions {
    * `RENDER_MARKDOWN` 参照）。
    */
   renderMarkdown?: boolean;
+  /**
+   * 入力欄でEnterを送信に使うか（設定 `agent.chat.sendOn`、既定 `ctrlEnter`、issue #288）。
+   *
+   * `ctrlEnter`はCtrl+Enter / Cmd+Enterで送信しEnterは改行のまま（従来の挙動）。`enter`は
+   * Enterで送信しShift+Enterで改行に回す（Ctrl+Enterでも送信は維持する）。省略時は
+   * `ctrlEnter`扱い（`chatScript`のデフォルト引数と`DEFAULT_SEND_ON`が一致することを
+   * `sendKey.ts`で保証する）。判定の純粋関数は`sendKey.ts`の`decideSendKeyAction`、
+   * webview側の実装は`chatScript.ts`の`SEND_ON`/`SEND_KEY_SOURCE`参照。
+   *
+   * `renderMarkdown`（issue #290）と同じく、Codex（本ファイル）・Claude Code
+   * （`claudeChatView.ts`）双方の`attachPanel`から`readChatSendOnConfig()`を呼んで
+   * 渡している（design.md §14.49）。
+   */
+  sendOn?: SendOnMode;
 }
 
 /**
@@ -2123,6 +2142,10 @@ export function renderShell(webview: vscode.Webview, options: ChatShellOptions):
   const showImportButton = options.showImport === true || typeof options.showImport === 'object';
   const importCopy =
     typeof options.showImport === 'object' ? options.showImport : DEFAULT_IMPORT_BUTTON_COPY;
+  const sendOn = options.sendOn ?? DEFAULT_SEND_ON;
+  // 入力欄の案内文を設定に追随させる（issue #288）。既定（ctrlEnter）は従来と同じ文言。
+  const sendKeyHint =
+    sendOn === 'enter' ? 'Enterで送信、Shift+Enterで改行' : 'Ctrl+Enterで送信';
 
   return `<!DOCTYPE html>
 <html lang="ja">
@@ -2163,7 +2186,7 @@ ${chatStyles()}
   <div id="composer">
     <div id="commands" hidden></div>
     <div id="composerInputRow">
-      <textarea id="input" placeholder="${options.agentLabel}への指示を入力（Ctrl+Enterで送信、画像はCtrl+Vで貼り付け）"></textarea>
+      <textarea id="input" placeholder="${options.agentLabel}への指示を入力（${sendKeyHint}、画像はCtrl+Vで貼り付け）"></textarea>
       <button id="send" type="button">送信</button>
       <button id="stop" type="button" class="secondary" aria-label="中断" title="Escでも中断できます" hidden>${COMPOSER_ICONS.stop}</button>
     </div>
@@ -2237,7 +2260,7 @@ ${chatStyles()}
   </details>
 
 <script nonce="${nonce}">
-${chatScript(options.agentLabel, options.review, options.showRewind === true, options.approvalCycle ?? [], options.showInputModeHints === true, options.renderMarkdown !== false)}
+${chatScript(options.agentLabel, options.review, options.showRewind === true, options.approvalCycle ?? [], options.showInputModeHints === true, options.renderMarkdown !== false, sendOn)}
 </script>
 </body>
 </html>`;

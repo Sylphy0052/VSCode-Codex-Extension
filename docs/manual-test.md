@@ -1759,6 +1759,39 @@ C群・L群・W群のように画面単位ではなく、チャット画面・�
 - 操作: Codex画面またはClaude Code画面で何か1往復会話したあと、ウィンドウをリロード（`Developer: Reload Window`）してタブを復元し、復元後のタブで `Ctrl+F` を押す
 - 期待: 検索窓が出る。design.md §14.48の通り、復元経路（`registerWebviewPanelSerializer`）ではVSCode本体が新規に構築したパネルを拡張機能へ渡すため、`enableFindWidget` を拡張機能側から再設定する手段はAPI上存在しない。挙動はVSCode本体の実装に委ねられており、このケースを実施するまで結果は未確定
 
+### U-05 送信キーの切り替え（`agent.chat.sendOn`、design.md §14.49、issue #288）
+
+**Codex / Claude Code両画面共通**（design.md §14.49）。
+
+- 準備: 設定`agent.chat.sendOn`が既定（`ctrlEnter`、または未設定）のまま、Codex画面を開く
+- 期待: 入力欄のプレースホルダに「Ctrl+Enterで送信」と出る
+- 操作: 入力欄に文字を打ち、`Enter`だけを押す
+- 期待: 送信されず、入力欄に改行が入る（従来どおり）
+- 操作: 同じ入力欄で`Ctrl+Enter`（macOSは`Cmd+Enter`でも可）を押す
+- 期待: 送信される
+- 操作: 設定`agent.chat.sendOn`を`enter`にする → Codex画面を開き直す（またはリロード）
+- 期待: 入力欄のプレースホルダが「Enterで送信、Shift+Enterで改行」に変わる
+- 操作: 複数行の文章を書きたいので`Shift+Enter`を数回押してから、最後に`Enter`だけを押す
+- 期待: `Shift+Enter`ではその都度改行が入り、最後の`Enter`単独で送信される
+- 操作: `enter`のまま`Ctrl+Enter`を押す
+- 期待: 送信される（`ctrlEnter`に慣れた手のままでも送れることの確認）
+- 確認: `agent.chat.sendOn`を既定（`ctrlEnter`）へ戻すと、プレースホルダ・キー挙動とも元の状態に一致する
+
+### U-06 IME変換中のEnterと候補メニューが開いているときのEnter（design.md §14.49、issue #288）
+
+**Codex / Claude Code両画面共通**。日本語入力（IME）が使える環境で行う。
+
+- 準備: 設定`agent.chat.sendOn`を`enter`にする
+- 操作: 入力欄で日本語をIME変換中の状態にし（変換候補が出ている状態で）、確定のために`Enter`を押す
+- 期待: 送信されず、変換だけが確定する（確定後にもう一度`Enter`を押すと、その時点で送信される）
+- 操作: 入力欄で `/` を打って候補メニュー（スラッシュコマンド）を開いた状態で、`Enter`（Ctrl/Cmdなし）を押す
+- 期待: メッセージは送信されず、候補が確定して入力欄へ入る（従来どおり`menuOpen()`/`acceptItem()`の分岐が優先される）
+- 操作: 同様に `@` でファイル候補メニューを開いた状態で`Enter`を押す
+- 期待: 同様に候補が確定し、送信されない
+- 操作: 候補メニューを開いた状態で`Ctrl+Enter`を押す
+- 期待: 候補は確定されず、その場でメッセージが送信される（改修前から変わらない挙動）
+- 確認: `agent.chat.sendOn`を既定（`ctrlEnter`）に戻した状態でも、IME変換中の`Enter`は送信されないこと・候補メニューの確定優先が変わらないことを1往復ずつ確認する
+
 ### U-07 既定のキーバインドの動作確認（design.md §14.50、issue #289）
 
 `contributes.keybindings`で追加した4件（`codex.newChat` `claude.newChat` `codex.resumeLast` `agent.workflows.view`）を実機で確認する。衝突調査自体はdesign.md §14.50のとおりVS Code本体の既定キーバインドJSONの完全一致検索で済ませてあるため、ここでは実機での発火・`when`句の効き方だけを見る。

@@ -534,6 +534,20 @@
           "scope": "window",
           "markdownDescription": "チャット画面の応答本文を見出し・箇条書き・強調・インラインコード・コードブロック・リンクとして描画する。コードブロックには「コピー」「エディタへ挿入」「新規ファイルで開く」を付ける。無効にすると従来どおり生テキストのまま表示する（Codex/Claude Code両画面共通）。"
         },
+        "agent.chat.sendOn": {
+          "type": "string",
+          "enum": [
+            "ctrlEnter",
+            "enter"
+          ],
+          "enumDescriptions": [
+            "Ctrl+Enter / Cmd+Enterで送信する。Enterは改行のまま（従来の挙動）",
+            "Enterで送信し、Shift+Enterで改行する。Ctrl+Enter / Cmd+Enterでも送信できる"
+          ],
+          "default": "ctrlEnter",
+          "scope": "window",
+          "markdownDescription": "チャット画面の入力欄でEnterを送信に使うか。候補メニュー（`/` `@`）を開いている間はEnterが候補の確定として優先され、IME変換中のEnterは送信しない。**Codex画面のみ**（Claude Code画面は今回のスコープ外で常に`ctrlEnter`のまま）。"
+        },
         "agent.workflows.dir": {
           "type": "string",
           "default": ".agents/workflows",
