@@ -61,6 +61,14 @@ export interface TaskSessionConfig {
 }
 
 export interface TaskSessionInput {
+  /**
+   * このセッションの役割（design.md §16.23）。既定は `task`（従来どおりのタスク用）。
+   *
+   * `orchestrator` はrunごとに1つだけ開く「人と話すセッション」で、依存グラフのノードでは
+   * ない。ホスト側はタブ名を分ける用途に使う。**権限の決定には使わない**（クランプは
+   * `buildOrchestratorConfig` が済ませた値が `config` / `sandbox` に入っている）。
+   */
+  role?: 'task' | 'orchestrator';
   /** タスクの作業ディレクトリ（worktreeまたは明示cwd）。 */
   cwd: string;
   config: TaskSessionConfig;

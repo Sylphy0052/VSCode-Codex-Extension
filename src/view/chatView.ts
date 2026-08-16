@@ -1203,7 +1203,10 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
    */
   async openTaskSession(input: TaskSessionInput): Promise<TaskSession> {
     const taskConfig = toCodexConfig(input);
-    const entry = this.buildEntry(input.cwd, 'Codex', true, taskConfig);
+    // オーケストレーターセッション（design.md §16.23）はタスクと同じ経路で開くが、
+    // タブ名だけ分けて人が見分けられるようにする
+    const title = input.role === 'orchestrator' ? 'Codex: オーケストレーター' : 'Codex';
+    const entry = this.buildEntry(input.cwd, title, true, taskConfig);
     const pendingKey = this.pendingStarts.begin(entry);
     // タスク間メッセージング（design.md §16.21）。`input.mcp`が渡されていれば、
     // このスレッドだけに見せるMCPサーバとして`thread/start`のconfigへ差し込む

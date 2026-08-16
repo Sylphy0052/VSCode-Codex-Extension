@@ -169,7 +169,14 @@ class FakeTaskSession implements TaskSession {
 }
 
 class FakeHost implements TaskSessionHost {
+  /**
+   * タスク用に開いたセッションだけを並べる。オーケストレーターセッション
+   * （design.md §16.23。`role: 'orchestrator'`）は`orchestratorSessions`へ分ける。
+   * 混ぜると「タスクの何番目のセッションか」を見ている既存のテストが、runごとに1つ増える
+   * オーケストレーターのぶんだけずれてしまうため。
+   */
   sessions: FakeTaskSession[] = [];
+  orchestratorSessions: FakeTaskSession[] = [];
   openInputs: TaskSessionInput[] = [];
   private counter = 0;
   /** 次の`openTaskSession`呼び出しだけ失敗させる（例: app-serverが落ちている等の再現）。 */
@@ -185,16 +192,29 @@ class FakeHost implements TaskSessionHost {
     this.pendingRejection = error;
   }
 
+  /** オーケストレーターセッション（design.md §16.23）の生成だけを失敗させる。 */
+  rejectOrchestrator: Error | undefined;
+
   async openTaskSession(input: TaskSessionInput): Promise<TaskSession> {
-    if (this.pendingRejection !== undefined) {
+    if (input.role === 'orchestrator') {
+      if (this.rejectOrchestrator !== undefined) {
+        throw this.rejectOrchestrator;
+      }
+    } else if (this.pendingRejection !== undefined) {
+      // `rejectNext`はタスクの起動失敗を再現するためのもの。オーケストレーターの生成が
+      // 先に走るため、役割で分けないとそちらが身代わりに失敗してしまう
       const error = this.pendingRejection;
       this.pendingRejection = undefined;
       throw error;
     }
-    this.openInputs.push(input);
     this.counter += 1;
     const session = new FakeTaskSession(input.cwd, this.counter);
     session.messagingToolVisible = this.defaultMessagingToolVisible;
+    if (input.role === 'orchestrator') {
+      this.orchestratorSessions.push(session);
+      return session;
+    }
+    this.openInputs.push(input);
     this.sessions.push(session);
     return session;
   }
@@ -3811,7 +3831,8 @@ tasks:
     await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
     await flush();
 
-    expect(state.handle?.registeredTasks.sort()).toEqual(['T1', 'T2']);
+    // オーケストレーター（design.md §16.23）にも専用の接続を1本発行する
+    expect(state.handle?.registeredTasks.sort()).toEqual(['-orchestrator-', 'T1', 'T2']);
     const t1Input = codexHost.openInputs.find((i) => i.cwd.endsWith('/T1'));
     const t2Input = codexHost.openInputs.find((i) => i.cwd.endsWith('/T2'));
     expect(t1Input?.mcp?.url).toContain('/mcp/');
@@ -4604,5 +4625,96 @@ tasks:
 
     expect(runner.continueTask('no-such-run', 'T1')).toBe(false);
     expect(runner.continueTask(runId, 'no-such-task')).toBe(false);
+  });
+});
+
+describe('WorkflowRunner: オーケストレーターセッション（design.md §16.23）', () => {
+  const YAML_ONE = `version: 1
+name: orchestrator
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+
+  it('run開始でタスクとは別に1つ開き、読み取り専用・ワークスペース直下で動かす', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE);
+    await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    await flush();
+
+    expect(codexHost.orchestratorSessions).toHaveLength(1);
+    // 依存グラフのノードではないので、タスクのセッションには混ざらない
+    expect(codexHost.sessions).toHaveLength(1);
+    const session = codexHost.orchestratorSessions[0] as FakeTaskSession;
+    // worktreeを作らず、メインのワークスペースで動かす
+    expect(session.cwd).toBe('/repo');
+  });
+
+  it('run開始の通知を送る（役割と道具の説明つき）', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE);
+    await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    await flush();
+
+    const session = codexHost.orchestratorSessions[0] as FakeTaskSession;
+    expect(session.sentTexts).toHaveLength(1);
+    expect(session.sentTexts[0]).toContain('オーケストレーター');
+    expect(session.sentTexts[0]).toContain('update_task_prompt');
+    // ループは使わない（1回きりの送信だけ）
+    expect(session.runLoopCalls).toHaveLength(0);
+  });
+
+  it('タスクが完了すると通知が届き、run終了ではセッションを解放しない', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE);
+    await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    await flush();
+    const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+    // run開始の通知でターンが走っている。走行中は割り込まないので、まず終わらせる
+    orchestrator.emitState({ ...initialChatState, busy: true });
+    orchestrator.emitState({ ...initialChatState, busy: false });
+    const sentBefore = orchestrator.sentTexts.length;
+
+    (codexHost.sessions[0] as FakeTaskSession).finish('done', doneState('ok'));
+    await flush();
+
+    const added = orchestrator.sentTexts.slice(sentBefore).join('\n');
+    expect(added).toContain('T1');
+    expect(added).toContain('完了');
+
+    // run終了の通知は、この送信で始まったターンが終わるまで溜まる（割り込まない）
+    orchestrator.emitState({ ...initialChatState, busy: true });
+    orchestrator.emitState({ ...initialChatState, busy: false });
+    const last = orchestrator.sentTexts[orchestrator.sentTexts.length - 1] as string;
+    expect(last).toContain('実行が終了しました');
+    expect(last).toContain('もう使えません');
+    // runが終わってもセッションは解放しない（design.md §16.23「セッションの生成と寿命」）
+    expect(orchestrator.disposed).toBe(false);
+  });
+
+  it('人の発話を送れる。セッションが無ければfalseを返す', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE);
+    const result = await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+
+    expect(runner.sendToOrchestrator(runId, '進捗を教えて')).toBe(true);
+    expect(orchestrator.sentTexts[orchestrator.sentTexts.length - 1]).toBe('進捗を教えて');
+    // 空文字は送らない
+    expect(runner.sendToOrchestrator(runId, '   ')).toBe(false);
+    expect(runner.sendToOrchestrator('unknown-run', 'x')).toBe(false);
+  });
+
+  it('セッションを開けなくても実行は止まらず、警告欄に出る', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE);
+    codexHost.rejectOrchestrator = new Error('CLIが見つかりません');
+
+    const result = await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    expect(codexHost.sessions).toHaveLength(1);
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.warnings.some((w) => w.kind === 'orchestratorUnavailable')).toBe(true);
+    expect(runner.sendToOrchestrator(runId, 'x')).toBe(false);
   });
 });

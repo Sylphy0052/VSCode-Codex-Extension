@@ -87,3 +87,16 @@ export function sanitizeForLog(value: string, maxLen: number = SANITIZE_MAX_LEN)
   const collapsed = masked.replace(/ {2,}/gu, ' ').trim();
   return collapsed.length > maxLen ? `${collapsed.slice(0, maxLen)}…` : collapsed;
 }
+
+/**
+ * `<` `>` をHTML実体参照に置き換える。**本文に囲いのタグと同じ文字列（`</task-message>` 等）が
+ * 含まれていても、囲いを破れないようにする**（design.md §16.21・§16.23）ための一次防御。
+ * 本文中の全ての `<` を実体参照化しておけば、本文だけからは `<...>` という
+ * タグ構造そのものを再構成できない（＝どんな文字列を書かれても閉じタグを偽装できない）。
+ *
+ * タスク間メッセージング（`messaging.ts` の `wrapTaskMessage`）とオーケストレーターへの
+ * イベント通知（`orchestratorSession.ts`）の両方が使うため、ここに置く。
+ */
+export function escapeAngleBrackets(text: string): string {
+  return text.replace(/</gu, '&lt;').replace(/>/gu, '&gt;');
+}

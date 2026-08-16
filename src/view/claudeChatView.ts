@@ -446,7 +446,10 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
   async openTaskSession(input: TaskSessionInput): Promise<TaskSession> {
     const taskConfig = toClaudeConfig(input);
     const sessionId = randomSessionId();
-    const entry = this.buildEntry(input.cwd, LABEL, true, taskConfig);
+    // オーケストレーターセッション（design.md §16.23）はタスクと同じ経路で開くが、
+    // タブ名だけ分けて人が見分けられるようにする
+    const title = input.role === 'orchestrator' ? `${LABEL}: オーケストレーター` : LABEL;
+    const entry = this.buildEntry(input.cwd, title, true, taskConfig);
     this.panels.set(sessionId, entry);
     entry.session.start({
       cwd: input.cwd,

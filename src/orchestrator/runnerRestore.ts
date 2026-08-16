@@ -1,4 +1,8 @@
-import { integrationBranchName, integrationWorktreePath, reconcileMergingTaskOnReload } from './integration';
+import {
+  integrationBranchName,
+  integrationWorktreePath,
+  reconcileMergingTaskOnReload,
+} from './integration';
 import { resolvePseudoState } from './runnerWorkingDirectory';
 import { startMerge } from './runnerMerge';
 import { markMergeBlocked, type RunState, type TaskRunState } from './runState';
@@ -62,7 +66,11 @@ export async function restoreRunsForView(self: WorkflowRunnerInternals): Promise
  * （`LiveTask`）は無いため、永続化された`branch`/`cwd`を直接使う。どちらか欠けている
  * （古い永続化形式・作成前に中断した等）場合は再開できないため、安全側で`blocked`にする。
  */
-function resumeMergeAfterReload(self: WorkflowRunnerInternals, runId: string, taskId: string): void {
+function resumeMergeAfterReload(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  taskId: string,
+): void {
   const live = self.runs.get(runId);
   if (live === undefined || live.integration === undefined) {
     return;
@@ -213,7 +221,10 @@ async function resolveRestoredPseudoState(
   return undefined;
 }
 
-async function rebuildLiveRun(self: WorkflowRunnerInternals, p: PersistedRun): Promise<LiveRun | undefined> {
+async function rebuildLiveRun(
+  self: WorkflowRunnerInternals,
+  p: PersistedRun,
+): Promise<LiveRun | undefined> {
   const def = await loadPersistedWorkflowDefinition(self, p);
   if (def === undefined) {
     return undefined;
@@ -223,7 +234,9 @@ async function rebuildLiveRun(self: WorkflowRunnerInternals, p: PersistedRun): P
   // 元のHEADは永続化していない（design.md §16.11は応答本文以外も最小限しか保存しない
   // 方針）ため、復元した時点のHEADを分岐元にする。再実行は元々「新しいスレッド・
   // worktreeでやり直す」設計（design.md §16.5）なので、この差異は再実行の意味を壊さない
-  const headCommit = gitRepo ? ((await resolveHeadCommit(p.workspaceRoot, self.deps.git)) ?? '') : '';
+  const headCommit = gitRepo
+    ? ((await resolveHeadCommit(p.workspaceRoot, self.deps.git)) ?? '')
+    : '';
 
   // 統合ブランチ・統合worktree（design.md §16.17）。gitRepoでない実行には統合の概念が
   // 無い。永続化された`integrationBranch`（古い形式や空文字なら決定的に導ける値）を使う
@@ -267,6 +280,10 @@ async function rebuildLiveRun(self: WorkflowRunnerInternals, p: PersistedRun): P
     // 「無くても実行は止めない」設計に揃える）
     messaging: undefined,
     mergeResolutions: new Map(),
+    // 復元した実行にはオーケストレーターセッションを作り直さない（会話は復元できない。
+    // design.md §16.23「永続化と復元」）
+    orchestrator: undefined,
+    orchestratorSeenStates: new Map(),
     // 統合PR/MRの結果・最終マージの成否はこのプロセスでまだ何も試みていない
     // （design.md §16.11。Viewは`getSnapshot`が読む永続化された値へフォールバックする）
     integrationPullRequest: undefined,
