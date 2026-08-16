@@ -3279,6 +3279,40 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - メニューの実際のキー操作・フォーカス移動・クリックでの開閉は、chatScript.ts側のDOM操作であり、vitestのnode環境では自動化できていない（§14.51・§14.52・§14.57と同じ制約）。動作確認は`docs/manual-test.md`のU-23に委ねる
 - メニュー項目の可読ラベル（`.composerOverflowLabel`）は受入基準そのものには無い追加。アイコンのみのままでも受入基準は満たせるが、畳んだ先で元の課題（tooltip依存）を繰り返さないための判断であり、外す方向の指摘があれば追従できる
 
+### 14.59 実行ファイルの解決失敗を黙ってフォールバックしない（issue #305）
+
+`codexPath()` / `claudePath()`（`src/extension.ts`）は、`AgentProvider.locate()`（`cliLocator.ts`の`resolveExecutable`）が失敗を返しても`?? 'codex'` / `?? 'claude'`で裸のコマンド名へ落としており、`codex.executablePath` / `claude.executablePath`に存在しない絶対パスを明示していても、利用者に気付かせないままPATH上の別のバイナリが起動していた。
+
+#### 「明示指定あり」と「指定なし」は`LocateResult.reason`で最初から区別できていた
+
+`resolveCodexPath` / `resolveClaudePath`が返す`LocateResult`は失敗時に`reason: 'setting-not-executable' | 'not-found'`を持つ。設定値がスラッシュを含む（明示的にパスを指定した）場合はPATHへフォールバックせず`setting-not-executable`を返し、含まない場合（未設定または裸のコマンド名）はPATH探索の結果を`not-found`で返す。この区別自体は本Issue以前から存在しており、`src/extension.ts`のローカル関数`resolveExecutable(provider, log)`（旧名。本対応で`createExecutablePathResolver`へ置き換えた）も両者に応じたメッセージを組み立てて`showErrorMessage`まで出していた。壊れていたのはその先で、通知した直後に`?? 'codex'`で結果を捨てて裸の名前へ落としていた点だけだった。
+
+#### 修正: 失敗時は「実際に試した文字列」をそのまま返す
+
+`src/provider/executableResolution.ts`（新設、`vscode`非依存）の`resolveSpawnPath(located)`は、成功時は`located.path`を、失敗時は`located.attempted`をそのまま返す。`setting-not-executable`の`attempted`はスラッシュを含む明示指定のパスそのものであり、Node.jsの`child_process.spawn`はスラッシュを含む文字列をPATH探索せず文字通りのパスとして扱うため、`spawn`は`ENOENT`等で明確に失敗する（別のバイナリへすり替わらない）。`not-found`の`attempted`は探索に使った名前（未設定なら既定名、指定していたが見つからなかったカスタム名ならその名前）で、これは従来通りspawn自身のPATH解決に委ねる（指定が無いのだからPATH解決に委ねるのが自然、という受入基準の要求のまま）。
+
+結果として、既存の`spawn(...).on('error', ...)`ハンドラ（`appserver/connection.ts` / `codex/appServerClient.ts` / `process/commandRunner.ts`等、issue #155で入れたもの）がそのまま失敗を拾う。新しいエラーハンドリング経路を足す必要は無かった。
+
+#### 通知の重複抑止: `ResolutionNotificationTracker`
+
+`codexPath()` / `claudePath()`はCLIを呼ぶ操作のたびに呼ばれるクロージャで、対策が無いと同じ設定ミスについて操作ごとに`showErrorMessage`が出て煩わしい。`ResolutionNotificationTracker`（`executableResolution.ts`）が直前に通知した失敗の識別キー（`reason:attempted`）を1個だけ覚えておき、同じ失敗が続く間は`showErrorMessage`を出さない。設定を直して一度解決に成功する、またはキーが変わる（別のパス/原因になる）と、次の失敗であらためて通知する。`log.error`によるログ出力は毎回行う（診断用途であり、通知ほど煩わしくないため区別した）。
+
+Codex側・Claude側は同じ`createExecutablePathResolver(provider, log)`（`src/extension.ts`）を通るため、扱いは完全に共通。プロバイダごとの差は`AgentProvider`の`label` / `executableSettingKey` / `installUrl`のみ。
+
+#### レイヤ制約の遵守
+
+`resolveSpawnPath` / `formatResolutionFailureMessage` / `resolutionFailureKey` / `ResolutionNotificationTracker`はいずれも`src/provider/executableResolution.ts`に置き、`vscode`をimportしない（CONTRIBUTING.mdのレイヤ制約、`src/provider`は対象）。`vscode.window.showErrorMessage`等の実際の通知は`src/extension.ts`側の`createExecutablePathResolver`だけが行う。
+
+#### 実装とテスト
+
+- `src/provider/executableResolution.ts`（新設）: `resolveSpawnPath` / `formatResolutionFailureMessage` / `resolutionFailureKey` / `ResolutionNotificationTracker`
+- `src/extension.ts`: `resolveExecutable(provider, log)`を`createExecutablePathResolver(provider, log)`へ置き換え。`codexPath` / `claudePath`の生成をこの関数の呼び出しへ変更（ハードコードされた`?? 'codex'` / `?? 'claude'`を削除）
+- `test/unit/executableResolution.test.ts`（新設）: `resolveSpawnPath`が明示指定・PATH探索・カスタム名それぞれの失敗で裸の既定名へ丸めないこと、`formatResolutionFailureMessage`のメッセージ内容、`resolutionFailureKey`の同値性、`ResolutionNotificationTracker`の再通知条件（同じ失敗では通知しない・原因やパスが変われば通知する・成功を挟むと再度通知する）
+
+#### 副次効果として整合した点（統合テスト）
+
+`test/integration/fixtures/setup.mjs`は元々`codex.executablePath: '/nonexistent/codex-must-not-run'`という、存在しない絶対パスをfixtureに設定していた（実CLIを掴ませないための対策）。従来の実装はこの明示指定が解決に失敗しても`?? 'codex'`で裸の`'codex'`へ落としていたため、`.vscode-test.mjs`の`PATH`制限がVSCode Linux版のシェル環境解決で上書きされる開発機では、`spawn('codex', ...)`が実PATH上の本物のCLIを掴んでいた。本対応後は`resolveSpawnPath`が`/nonexistent/codex-must-not-run`をそのまま返すため、`spawn`はこの存在しないパスを文字通り試みて`ENOENT`になる。これは本Issueの主目的（明示指定の失敗を握りつぶさない）の直接の帰結であり、統合テスト救済のために設計を曲げたものではない。実際に`npm run test:integration:xvfb`を走らせての確認はしていない（重いため。issue #305のIssue本文にある通り、この検証は必須要件にはしていない）。
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）

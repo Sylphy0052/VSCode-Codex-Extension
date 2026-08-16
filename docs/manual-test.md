@@ -2038,6 +2038,20 @@ Codex画面・Claude Code画面の両方に共通する機能（`chatScript.ts`/
 - 期待: 入力欄は壊れず、既定の4つ（画像・ループ・圧縮・インポート）に戻る。出力チャネル「Agent Sessions」（Codex・Claude Code共通）に警告が記録される
 - 操作: `agent.chat.composerButtons`を未設定に戻す
 
+### U-25 実行ファイル解決失敗の通知（design.md §14.59、issue #305）
+
+- 前提: `codex.executablePath`に存在しないパス（例: `/nonexistent/codex-must-not-run`）を設定する
+- 操作: Codexの会話を新規に開く、またはアカウント状態などCodex CLIを呼ぶ操作を行う
+- 期待: エラー通知が出る（`codex.executablePath が実行できません: /nonexistent/codex-must-not-run`のような文言）。「インストール手順」「設定を開く」のボタンが付く。PATH上に本物の`codex`があっても、それが黙って起動しない
+- 操作: 通知を閉じたあと、続けて別のCodex操作（例: モデル一覧の再取得）を行う
+- 期待: 出力チャネルにはログが残るが、同じ内容のエラー通知は再度は出ない（連打にならない）
+- 操作: `codex.executablePath`を正しいパスへ直し、Codexの操作を行った後、再度存在しないパスへ戻して操作する
+- 期待: 直してから再び壊すと、あらためてエラー通知が出る（一度成功を挟むと再通知される）
+- 操作: `codex.executablePath`を空に戻す（未設定）
+- 期待: 通知は出ず、PATH上の`codex`がそのまま使われる（従来通りの挙動）
+- 操作: 同じ手順を`claude.executablePath` / Claude Codeの操作でも確認する
+- 期待: Codexと同じ挙動になる（通知文言の主語だけがClaude Codeに変わる）
+
 ## 記録テンプレート
 
 確認のたびに以下を残す（Issueまたは `docs/manual-test-<YYYY-MM-DD>.md`）。
