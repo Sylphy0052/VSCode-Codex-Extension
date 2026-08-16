@@ -1,3 +1,4 @@
+import { MARKDOWN_PARSE_SOURCE } from './markdown';
 import { MERGE_ITEMS_SOURCE } from './stateDelta';
 
 /**
@@ -25,6 +26,7 @@ export function chatScript(
   showRewind = false,
   approvalCycle: readonly string[] = [],
   showInputModeHints = false,
+  renderMarkdown = true,
 ): string {
   return `
   const vscode = acquireVsCodeApi();
@@ -92,6 +94,13 @@ export function chatScript(
    * design.md §14.29）。CodexのTUIにこの挙動は無い。
    */
   const SHOW_INPUT_MODE_HINTS = ${JSON.stringify(showInputModeHints)};
+
+  /**
+   * 応答本文をMarkdownとして描画するか（設定 agent.chat.renderMarkdown、既定true、issue #290）。
+   * falseなら従来どおりtextContentのみで出す。commandExecutionとreasoningは
+   * このフラグに関わらず常に生テキストのまま（renderBody参照）。
+   */
+  const RENDER_MARKDOWN = ${JSON.stringify(renderMarkdown)};
 
   /** 残りがこの割合を下回ったら警告として見せる。 */
   const LOW_CONTEXT_PERCENT = 20;
@@ -239,8 +248,165 @@ export function chatScript(
       expanded: false,
       fullText: '',
       lastItem: undefined,
+      // Markdown描画のキャッシュ（issue #290）。'text' はtextContentのみ、
+      // 'markdown' はrenderMarkdownIntoで組み立てたDOM。どちらも直前と同じキーなら
+      // 作り直さない（選択中のテキストが消える事故を防ぐ、他のキャッシュと同じ考え方）
+      bodyMode: 'text',
+      bodyKey: undefined,
     };
     return node;
+  }
+
+  /**
+   * Markdownのパース（issue #290）。実装は markdown.ts に置き、ここへ差し込む
+   * （両側へ書くと片方だけ直したときに黙ってずれる。stateDelta.ts の
+   * MERGE_ITEMS_SOURCE と同じ流儀）。ここでは parseMarkdown(text) だけを使う。
+   */
+  ${MARKDOWN_PARSE_SOURCE}
+
+  /**
+   * インライントークン列をDOMへ差し込む。HTML文字列を組み立ててDOMへ流し込むAPIは
+   * 使わない。すべて createElement / createTextNode で作り、エージェントの出力が
+   * HTMLとして評価されることはない（issue #290の受入基準）。
+   */
+  function appendInline(parent, tokens) {
+    for (const token of tokens) {
+      if (token.type === 'text') {
+        parent.appendChild(document.createTextNode(token.value));
+        continue;
+      }
+      if (token.type === 'bold') {
+        const strong = document.createElement('strong');
+        strong.textContent = token.value;
+        parent.appendChild(strong);
+        continue;
+      }
+      if (token.type === 'italic') {
+        const em = document.createElement('em');
+        em.textContent = token.value;
+        parent.appendChild(em);
+        continue;
+      }
+      if (token.type === 'code') {
+        const code = document.createElement('code');
+        code.textContent = token.value;
+        parent.appendChild(code);
+        continue;
+      }
+      if (token.type === 'link') {
+        const a = document.createElement('a');
+        a.href = '#';
+        a.textContent = token.value;
+        // Webviewから直接遷移はさせない。押した行き先は既存のopenUrl経路（Web検索結果と
+        // 同じ）でホスト側へ渡し、vscode.env.openExternalで開く
+        a.addEventListener('click', (e) => {
+          e.preventDefault();
+          vscode.postMessage({ type: 'openUrl', url: token.url });
+        });
+        parent.appendChild(a);
+      }
+    }
+  }
+
+  /** コードブロック1つ。コピー・エディタへ挿入・新規ファイルで開くの3操作を付ける。 */
+  function createCodeBlock(token) {
+    const wrap = document.createElement('div');
+    wrap.className = 'md-code';
+
+    const head = document.createElement('div');
+    head.className = 'md-code-head';
+    const lang = document.createElement('span');
+    lang.className = 'md-code-lang';
+    lang.textContent = token.lang || 'text';
+    head.appendChild(lang);
+
+    const actions = document.createElement('span');
+    actions.className = 'md-code-actions';
+
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'secondary';
+    copyBtn.textContent = 'コピー';
+    copyBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(token.code).then(
+        () => {
+          copyBtn.textContent = 'コピーしました';
+          setTimeout(() => (copyBtn.textContent = 'コピー'), 1200);
+        },
+        () => (copyBtn.textContent = 'コピーできません'),
+      );
+    });
+    actions.appendChild(copyBtn);
+
+    // どちらもWebviewからは実行できない操作。ホスト側（chatView.ts / claudeChatView.ts の
+    // handleMessage）へ要求を送るだけにする（openUrl・requestImageと同じ往復の形）
+    const insertBtn = document.createElement('button');
+    insertBtn.type = 'button';
+    insertBtn.className = 'secondary';
+    insertBtn.textContent = 'エディタへ挿入';
+    insertBtn.addEventListener('click', () => {
+      vscode.postMessage({ type: 'insertCode', code: token.code, lang: token.lang });
+    });
+    actions.appendChild(insertBtn);
+
+    const openBtn = document.createElement('button');
+    openBtn.type = 'button';
+    openBtn.className = 'secondary';
+    openBtn.textContent = '新規ファイルで開く';
+    openBtn.addEventListener('click', () => {
+      vscode.postMessage({ type: 'openCodeFile', code: token.code, lang: token.lang });
+    });
+    actions.appendChild(openBtn);
+
+    head.appendChild(actions);
+    wrap.appendChild(head);
+
+    const pre = document.createElement('pre');
+    const code = document.createElement('code');
+    code.textContent = token.code;
+    pre.appendChild(code);
+    wrap.appendChild(pre);
+    return wrap;
+  }
+
+  /**
+   * 本文コンテナへMarkdownを組み立てて差し込む。呼ぶたびに中身を作り直す
+   * （renderBody側でテキストが変わったときだけ呼ぶよう間引いている）。
+   */
+  function renderMarkdownInto(container, text) {
+    container.replaceChildren();
+    const tokens = parseMarkdown(text);
+    for (const token of tokens) {
+      if (token.type === 'heading') {
+        const level = Math.min(6, Math.max(1, token.level));
+        const heading = document.createElement('h' + level);
+        appendInline(heading, token.inline);
+        container.appendChild(heading);
+        continue;
+      }
+      if (token.type === 'paragraph') {
+        const p = document.createElement('p');
+        token.lines.forEach((lineTokens, index) => {
+          if (index > 0) p.appendChild(document.createElement('br'));
+          appendInline(p, lineTokens);
+        });
+        container.appendChild(p);
+        continue;
+      }
+      if (token.type === 'list') {
+        const list = document.createElement(token.ordered ? 'ol' : 'ul');
+        for (const item of token.items) {
+          const li = document.createElement('li');
+          appendInline(li, item);
+          list.appendChild(li);
+        }
+        container.appendChild(list);
+        continue;
+      }
+      if (token.type === 'codeblock') {
+        container.appendChild(createCodeBlock(token));
+      }
+    }
   }
 
   /**
@@ -284,7 +450,21 @@ export function chatScript(
         ? lines.slice(lines.length - MAX_VISIBLE_LINES).join('\\n')
         : primary;
 
-    if (node.body.textContent !== shown) node.body.textContent = shown;
+    // Markdownとして解釈するのは通常の発言・応答（userMessage/agentMessage）だけ。
+    // commandExecution・reasoningは折りたたみ含め従来どおり生テキストのまま（issue #290）
+    const useMarkdown =
+      RENDER_MARKDOWN && (item.kind === 'userMessage' || item.kind === 'agentMessage');
+    const bodyMode = useMarkdown ? 'markdown' : 'text';
+    if (node.bodyMode !== bodyMode || node.bodyKey !== shown) {
+      node.bodyMode = bodyMode;
+      node.bodyKey = shown;
+      if (useMarkdown) {
+        renderMarkdownInto(node.body, shown);
+      } else {
+        node.body.replaceChildren();
+        node.body.textContent = shown;
+      }
+    }
     node.body.hidden = primary === '';
     node.copy.hidden = primary === '';
 

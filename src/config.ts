@@ -105,6 +105,16 @@ export function readActivityLogConfig(): ActivityLogConfig {
   };
 }
 
+/**
+ * チャット応答本文をMarkdownとして描画するか（issue #290）。既定は `true`。
+ * `false` にすると `textContent` + `white-space: pre-wrap` の従来表示に戻る
+ * （`chatScript.ts` の `RENDER_MARKDOWN` へそのまま渡る）。
+ */
+export function readChatRenderMarkdownConfig(): boolean {
+  const c = vscode.workspace.getConfiguration('agent');
+  return c.get<boolean>('chat.renderMarkdown') ?? true;
+}
+
 /** ワークフロー実行（design.md §16）の設定。 */
 export interface WorkflowsConfig {
   /** 定義ファイルの置き場。ワークスペースフォルダ配下の相対パス（既定 `.agents/workflows`）。 */
@@ -191,9 +201,7 @@ function normalizePseudoWorktreeExclude(value: unknown): readonly string[] {
   if (!Array.isArray(value)) {
     return DEFAULT_PSEUDO_WORKTREE_EXCLUDE;
   }
-  const entries = value.filter(
-    (v): v is string => typeof v === 'string' && v.trim() !== '',
-  );
+  const entries = value.filter((v): v is string => typeof v === 'string' && v.trim() !== '');
   return entries.length === value.length && entries.length > 0
     ? entries
     : DEFAULT_PSEUDO_WORKTREE_EXCLUDE;
@@ -206,8 +214,7 @@ export function readWorkflowsConfig(): WorkflowsConfig {
   return {
     dir: isSafeRelativeDir(rawDir) ? rawDir : DEFAULT_WORKFLOWS_DIR,
     allowAutoApprove: c.get<boolean>('workflows.allowAutoApprove') ?? false,
-    allowClaudeBypassPermissions:
-      c.get<boolean>('workflows.allowClaudeBypassPermissions') ?? false,
+    allowClaudeBypassPermissions: c.get<boolean>('workflows.allowClaudeBypassPermissions') ?? false,
     roadmapDir: isSafeRelativeDir(rawRoadmapDir) ? rawRoadmapDir : DEFAULT_ROADMAP_DIR,
     pseudoWorktreeExclude: normalizePseudoWorktreeExclude(
       c.get<unknown>('workflows.pseudoWorktreeExclude'),

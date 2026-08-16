@@ -27,7 +27,12 @@ import { summarize } from '../codex/conversation';
 import { readForkedThreadId } from '../codex/jsonRpc';
 import { readSkillsList } from '../codex/skillsList';
 import { readRateLimits, type UsageSnapshot } from '../codex/usage';
-import { currentWorkspaceFolder, readConfig, workspaceFolderPaths } from '../config';
+import {
+  currentWorkspaceFolder,
+  readChatRenderMarkdownConfig,
+  readConfig,
+  workspaceFolderPaths,
+} from '../config';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
@@ -516,6 +521,73 @@ export async function runExportTranscript(
   await vscode.window.showTextDocument(doc, { preview: false });
 }
 
+/**
+ * コードブロックの言語表記からVSCodeの言語IDへの雑な対応表（issue #290）。
+ * Markdown内の言語表記（```ts など）はCommonMarkの決まりが無く自由記法のため、
+ * よく出るものだけ変換し、当てはまらないものはそのまま言語IDとして渡す
+ * （VSCodeは未知の言語IDでもプレーンテキストとして開くだけで落ちない）。
+ */
+const CODE_FENCE_LANGUAGE_IDS: Readonly<Record<string, string>> = {
+  js: 'javascript',
+  jsx: 'javascriptreact',
+  ts: 'typescript',
+  tsx: 'typescriptreact',
+  py: 'python',
+  rb: 'ruby',
+  sh: 'shellscript',
+  bash: 'shellscript',
+  zsh: 'shellscript',
+  yml: 'yaml',
+  md: 'markdown',
+  html: 'html',
+  cs: 'csharp',
+  cpp: 'cpp',
+  rs: 'rust',
+  kt: 'kotlin',
+};
+
+function codeFenceLanguageId(lang: string): string {
+  const trimmed = lang.trim().toLowerCase();
+  if (trimmed === '') {
+    return 'plaintext';
+  }
+  return CODE_FENCE_LANGUAGE_IDS[trimmed] ?? trimmed;
+}
+
+/**
+ * コードブロックの「エディタへ挿入」（issue #290）。
+ *
+ * Webviewから直接エディタへは書き込めないため、`vscode.postMessage` でホスト側へ
+ * 要求を送り（`chatScript.ts` の `insertCode`）、ここで実際のアクティブエディタへ
+ * 差し込む。開いているエディタが無ければ何もできないので、その旨を伝えて終わる。
+ */
+export async function insertCodeIntoEditor(code: string): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (editor === undefined) {
+    void vscode.window.showInformationMessage('挿入先のエディタが開かれていません');
+    return;
+  }
+  await editor.edit((builder) => {
+    for (const selection of editor.selections) {
+      builder.replace(selection, code);
+    }
+  });
+}
+
+/**
+ * コードブロックの「新規ファイルで開く」（issue #290）。
+ *
+ * `runExportTranscript` の「生テキストで開く」と同じ手（`vscode.workspace.openTextDocument`
+ * に保存前のコンテンツを渡すだけ）で、保存前の未タイトルタブとして開く。
+ */
+export async function openCodeInNewFile(code: string, lang: string): Promise<void> {
+  const doc = await vscode.workspace.openTextDocument({
+    content: code,
+    language: codeFenceLanguageId(lang),
+  });
+  await vscode.window.showTextDocument(doc, { preview: false });
+}
+
 /** `TaskSessionInput` をCodexの `thread/start`/`turn/start` が読む形へ写す。 */
 function toCodexConfig(input: TaskSessionInput): CodexConfig {
   return {
@@ -939,6 +1011,8 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
         ariaLabel: 'インポート設定を開く',
         title: '設定パネルの「他エージェントからの設定インポート」を開きます',
       },
+      // 応答本文のMarkdown描画（issue #290、設定 agent.chat.renderMarkdown）
+      renderMarkdown: readChatRenderMarkdownConfig(),
     });
 
     panel.webview.onDidReceiveMessage(
@@ -1190,6 +1264,17 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
         if (isOpenableSearchUrl(m['url'])) {
           void vscode.env.openExternal(vscode.Uri.parse(m['url']));
         }
+        return;
+      }
+      if (type === 'insertCode' && typeof m['code'] === 'string') {
+        // コードブロックの「エディタへ挿入」。Webviewからは直接エディタへ書けないため
+        // ホスト側で行う（issue #290）。発言や中断とは独立した操作
+        await insertCodeIntoEditor(m['code']);
+        return;
+      }
+      if (type === 'openCodeFile' && typeof m['code'] === 'string') {
+        // コードブロックの「新規ファイルで開く」（issue #290）
+        await openCodeInNewFile(m['code'], typeof m['lang'] === 'string' ? m['lang'] : '');
         return;
       }
       if (type === 'attach') {
@@ -1973,6 +2058,13 @@ export interface ChatShellOptions {
    * 置く（issue本文の「常用の操作と混ざらない置き場」）。
    */
   showDebug?: boolean;
+  /**
+   * 応答本文をMarkdownとして描画するか（設定 `agent.chat.renderMarkdown`、既定 `true`、
+   * issue #290）。両画面共通の設定で、`false` なら旧来の `textContent` +
+   * `white-space: pre-wrap` の生テキスト表示へ戻る（`chatScript.ts` の
+   * `RENDER_MARKDOWN` 参照）。
+   */
+  renderMarkdown?: boolean;
 }
 
 /**
@@ -2145,7 +2237,7 @@ ${chatStyles()}
   </details>
 
 <script nonce="${nonce}">
-${chatScript(options.agentLabel, options.review, options.showRewind === true, options.approvalCycle ?? [], options.showInputModeHints === true)}
+${chatScript(options.agentLabel, options.review, options.showRewind === true, options.approvalCycle ?? [], options.showInputModeHints === true, options.renderMarkdown !== false)}
 </script>
 </body>
 </html>`;
