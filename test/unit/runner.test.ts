@@ -919,7 +919,13 @@ tasks:
           status: undefined,
           turnId: undefined,
           diffs: [
-            { path: `${a.cwd}/.git/hooks/pre-commit`, kind: 'add', movePath: undefined, diff: '' },
+            {
+              path: `${a.cwd}/.git/hooks/pre-commit`,
+              kind: 'add',
+              movePath: undefined,
+              diff: '',
+              editReplace: undefined,
+            },
           ],
         },
       ],
@@ -949,7 +955,15 @@ tasks:
           detail: '',
           status: undefined,
           turnId: undefined,
-          diffs: [{ path: `${a.cwd}/src/index.ts`, kind: 'update', movePath: undefined, diff: '' }],
+          diffs: [
+            {
+              path: `${a.cwd}/src/index.ts`,
+              kind: 'update',
+              movePath: undefined,
+              diff: '',
+              editReplace: undefined,
+            },
+          ],
         },
       ],
     });

@@ -2909,20 +2909,27 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 実測した事実:
 
 - **CodexとClaude Codeとで、届く差分の形式が異なる。** Codex（`chatState.ts`の`readFileDiffs`）は`update`のとき app-serverが組み立てたunified diff（`@@ -a,b +c,d @@`のハンク見出し付き）をそのまま渡す。`add`/`delete`のときは行の中身をそのまま渡してくるためハンク見出しが無く、`normalizeDiffBody`が行頭へ`+`/`-`を補うだけ（ファイル全体が対象なので見出しは元々不要）。一方Claude Code（`transcript.ts`の`editDiff`）はEditツールの`old_string`/`new_string`をそのまま`-`行・`+`行として並べるだけで、**ハンク見出しも行番号も持たない**（ファイル中のどこへ適用するかの情報が無い）
-- この差により、「変更前の内容を復元できるか」はCLIの種類とkindの組み合わせで変わる。Codexの`update`は復元できるが、Claude Codeの`update`（Editツール由来）は原理的に復元できない
+- この差により、ハンク見出しを解析して復元する経路（`parseUnifiedDiffHunks`・`reverseApplyHunks`）はCodexの`update`にしか使えない。Claude Codeの`update`（Editツール由来）は原理的にこの経路では復元できないため、issue #310で別の経路（`editReplace`、下記）を足した
 
 設計の判断:
 
-- **変更前の内容は、gitの索引とは比較せず、差分自身から復元する。** 理由は3つ。(1) この拡張機能は他の機能でもgitへ依存しておらず、対象ワークスペースがgit管理下にあるとは限らない。(2) 差分を取った時点と「今」の間でユーザーが手動編集・コミットを重ねている可能性があり、gitの索引と比較しても「差分を取ったときの前後」を正しく再現できるとは限らない。(3) 会話に届いた差分と実ファイルの現在の内容さえ突き合わせれば、gitが無くても同じ検証ができる。純粋ロジックは`src/util/diffRestore.ts`に置く（`parseUnifiedDiffHunks`・`reverseApplyHunks`・`reconstructWholeFile`・`computeDiffContents`・`planDiffActions`）
-- **kindごとの復元方法。** `add`/`delete`は差分本文が全て`+`/`-`行というシンプルな形を利用し、印を剥がして連結するだけで復元する（`reconstructWholeFile`）。`update`はハンク見出しを解析し（`parseUnifiedDiffHunks`）、現在のファイル内容へ逆適用して変更前を作る（`reverseApplyHunks`）。文脈（context）行・追加行が現在の内容と一致するかをハンクの周辺だけ検証し、ファイル全体の一致は求めない（unified diffの一般的な適用と同じ粒度）
-- **復元が破綻する形（ハンク見出しが無い・宣言された行数と実際が食い違う）は操作を出さない。** `planDiffActions`が`openDiff: false`/`revert: false`を返し、「エディタで開く」だけに絞る。Claude CodeのEdit由来の`update`はこの経路に必ず落ちる（実測のとおりハンク見出しを持たないため）。「エディタで開く」は復元を必要としないため、この場合でも出す（ジャンプ先の行だけ分からないので先頭で開く）
+- **変更前の内容は、gitの索引とは比較せず、差分自身から復元する。** 理由は3つ。(1) この拡張機能は他の機能でもgitへ依存しておらず、対象ワークスペースがgit管理下にあるとは限らない。(2) 差分を取った時点と「今」の間でユーザーが手動編集・コミットを重ねている可能性があり、gitの索引と比較しても「差分を取ったときの前後」を正しく再現できるとは限らない。(3) 会話に届いた差分と実ファイルの現在の内容さえ突き合わせれば、gitが無くても同じ検証ができる。純粋ロジックは`src/util/diffRestore.ts`に置く（`parseUnifiedDiffHunks`・`reverseApplyHunks`・`reconstructWholeFile`・`reverseApplyEditReplace`・`computeDiffContents`・`planDiffActions`）
+- **kindごとの復元方法。** `add`/`delete`は差分本文が全て`+`/`-`行というシンプルな形を利用し、印を剥がして連結するだけで復元する（`reconstructWholeFile`）。`update`は2通りの経路を持つ。(1) ハンク見出しを解析できる場合（Codex）は、それを解析し（`parseUnifiedDiffHunks`）現在のファイル内容へ逆適用して変更前を作る（`reverseApplyHunks`）。文脈（context）行・追加行が現在の内容と一致するかをハンクの周辺だけ検証し、ファイル全体の一致は求めない（unified diffの一般的な適用と同じ粒度）。(2) ハンク見出しを持たない場合（Claude CodeのEditツール由来、issue #310）は、`old_string`/`new_string`の検索置換で復元する（`editReplace`、下記）
+- **復元が破綻する形（ハンク見出しが無い・宣言された行数と実際が食い違う・`editReplace`も無い）は操作を出さない。** `planDiffActions`が`openDiff: false`/`revert: false`を返し、「エディタで開く」だけに絞る。「エディタで開く」は復元を必要としないため、この場合でも出す（ジャンプ先の行だけ分からないので先頭で開く）
+- **Claude CodeのEditツール由来の`update`は、`old_string`/`new_string`を検索置換して復元する（issue #310）。** Editツールは`old_string`がファイル内で一意に一致することを前提に使われるツールのため、復元も同じ前提（`new_string`が現在の内容に一意に見つかる）に立つ。データの持ち方・3つの分岐の決定は以下のとおり:
+  - **データの持ち方。** `old_string`/`new_string`の生の文字列を`FileDiff.editReplace`（`{ oldString, newString }`）としてそのまま保持する（`transcript.ts`の`buildEditReplace`）。表示用の`diff`テキスト（`-`/`+`行に整形したもの）は`MAX_DIFF_LINES`（200行）で切り詰められることがあり、切り詰め後のテキストを逆パースして`old_string`/`new_string`を再構成する方式は、200行を超える編集で一致判定が壊れる。そのため`diff`とは別に切り詰めない生の文字列を持たせた
+  - **`new_string`が現在の内容に1件も見つからない場合: 失敗させる。** 「差分を取ったときから内容が変わっています」と理由を出し、書き換えない。issue #291のadd/delete/updateの既存判断（消えている・変わっていれば何もしない）と揃える
+  - **`new_string`が複数箇所に一致する場合: 失敗させる（全件置換はしない）。** どこを戻すべきか一意に決められない以上、全件置換は意図しない箇所まで書き換えるリスクがある。先頭の一致だけを機械的に選ぶことも、同じ理由（利用者の意図しない箇所を選びうる）で避けた。安全側（何もしない）へ倒す
+  - **`new_string`が空文字（純粋な削除編集）の場合: 失敗させる。** 空文字は現在の内容の「どこにでも見つかる」ため、複数箇所一致と同じ理由で書き換え位置を一意に特定できない。この判定は現在のファイル内容を読むまでもなく`editReplace`の中身だけで構造的に決まるため、`planDiffActions`の時点（`computeDiffContents`より前）で「エディタで開く」だけに絞る
+  - **ジャンプ先の行番号は出せない。** ハンク見出しを持つCodexの`update`とは異なり、`editReplace`は一致位置が現在のファイル内容を読むまで分からない。`planDiffActions`は構造（`diff`本文・種類）だけで判定する既存の設計（現在のファイル内容を読まない）を崩したくなかったため、`jumpToLine`は常に`undefined`のままとした（残る制約に記載）
 - **add/delete/update/移動（`movePath`）ごとに出す操作を分けた。**
 
   | kind | エディタで開く | 差分を開く | 戻す |
   | --- | --- | --- | --- |
   | add | ○（先頭へジャンプ） | ○（復元できれば） | ○（復元できれば。ファイル削除） |
   | delete | ×（ファイルが無い） | ○（復元できれば） | ○（復元できれば。ファイル再作成） |
-  | update（移動無し） | ○（ハンクの先頭行へジャンプ、可能なら） | ○（ハンク解析できれば） | ○（ハンク解析できれば） |
+  | update（移動無し、Codex・ハンク見出しあり） | ○（ハンクの先頭行へジャンプ、可能なら） | ○（ハンク解析できれば） | ○（ハンク解析できれば） |
+  | update（移動無し、Claude Code・`editReplace`あり） | ○（ジャンプ先は不明。先頭で開く） | ○（`new_string`が空文字でなければ。実際に一意に見つかるかは開いた時点で判定） | ○（同左） |
   | update（`movePath`あり） | ○（移動後の場所を開く） | ○（移動後の場所と比較） | ×（下記参照） |
   | 未知の種類 | ○（開くだけ） | × | × |
 
@@ -2939,7 +2946,9 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - シンボリックリンクの検出は`fs.realpath`によるベストエフォートで、実行直前に再確認してはいるが、確認から実際の読み書きまでの間に対象が入れ替わる可能性を理論上完全には排除できない（TOCTOUの一般的な限界）
 - 移動（`movePath`）を伴う`update`の「戻す」は対応していない（設計判断として上述のとおり見送った）。手動でSCM等から戻す必要がある
 - 復元の検証はハンクの周辺（文脈行・追加行）だけを見ており、ファイル全体が一致するかは確認しない。ハンクの外側で無関係な変更が入っていても、その変更ごと変更前の内容として引き継がれる
-- Webview側のDOM組み立て・実際のボタン押下はvitestのnode環境では自動化できていない（§14.51と同じ制約）。構文チェック（`webviewScript.test.ts`）とロジック層のテスト（`test/unit/diffRestore.test.ts`・`test/unit/diffWorkspacePath.test.ts`）までで、実際の動作確認は`docs/manual-test.md`のU-11〜U-13に委ねる
+- **Claude CodeのEditツール由来の`update`（`editReplace`）は「エディタで開く」のジャンプ先行番号を出さない（issue #310）。** 一致位置は現在のファイル内容を読むまで分からず、`planDiffActions`は構造だけで判定する（ファイルを読まない）既存の設計を保つ判断をしたため。一意な位置が実際には決まる場合でも、現状は先頭で開く
+- **`editReplace`の一致判定は文字列の完全一致で、空白の揺れ（改行コード・末尾空白等）を吸収しない。** Editツールが実際に使った`old_string`/`new_string`をそのまま比較するため、CLIが送ってくる値と現在のファイル内容の間で改行コードの差（CRLF/LF）等があれば「一致しない」と判定され、復元できない側へ倒れる（fail-closedの方針どおり、誤って書き換えるよりは安全側）
+- Webview側のDOM組み立て・実際のボタン押下はvitestのnode環境では自動化できていない（§14.51と同じ制約）。構文チェック（`webviewScript.test.ts`）とロジック層のテスト（`test/unit/diffRestore.test.ts`・`test/unit/diffWorkspacePath.test.ts`・`test/unit/claudeTranscript.test.ts`）までで、実際の動作確認は`docs/manual-test.md`のU-11〜U-13・U-24に委ねる
 
 ### 14.53 Codexのセッション累計トークン数の表示（issue #294）
 

@@ -21,10 +21,48 @@ describe('describeTool の差分', () => {
     expect(tool.diffs[0]?.diff).toBe('-const a = 1;\n-const b = 2;\n+const a = 10;');
   });
 
+  it('Edit は old_string/new_string を切り詰め前の生の文字列のまま editReplace へ持つ（issue #310）', () => {
+    const tool = describeTool('Edit', {
+      file_path: '/work/a.ts',
+      old_string: 'const a = 1;\nconst b = 2;',
+      new_string: 'const a = 10;',
+    });
+    expect(tool.diffs[0]?.editReplace).toEqual({
+      oldString: 'const a = 1;\nconst b = 2;',
+      newString: 'const a = 10;',
+    });
+  });
+
+  it('Edit で old_string が空（実質新規追加）のときは kind が add になり editReplace は無い', () => {
+    const tool = describeTool('Edit', {
+      file_path: '/work/new.ts',
+      old_string: '',
+      new_string: 'const a = 1;',
+    });
+    expect(tool.diffs[0]).toMatchObject({ path: '/work/new.ts', kind: 'add' });
+    expect(tool.diffs[0]?.editReplace).toBeUndefined();
+  });
+
+  it('Edit の内容が200行を超えても、editReplaceは切り詰めずに完全な文字列を持つ（issue #310）', () => {
+    // diff（表示用テキスト）はMAX_DIFF_LINES（200行）で切り詰められるが、
+    // editReplaceは復元の検索置換に使うため切り詰めてはいけない
+    const oldString = Array.from({ length: 300 }, (_, i) => `old${i}`).join('\n');
+    const newString = Array.from({ length: 300 }, (_, i) => `new${i}`).join('\n');
+    const tool = describeTool('Edit', {
+      file_path: '/work/big.ts',
+      old_string: oldString,
+      new_string: newString,
+    });
+    expect(tool.diffs[0]?.editReplace).toEqual({ oldString, newString });
+    // diff本文（表示用）の方は従来どおり省略される
+    expect(tool.diffs[0]?.diff).toContain('省略');
+  });
+
   it('Write は全行を追加として扱う', () => {
     const tool = describeTool('Write', { file_path: '/work/new.ts', content: 'line1\nline2' });
     expect(tool.diffs[0]).toMatchObject({ path: '/work/new.ts', kind: 'add' });
     expect(tool.diffs[0]?.diff).toBe('+line1\n+line2');
+    expect(tool.diffs[0]?.editReplace).toBeUndefined();
   });
 
   it('巨大な内容は切り詰めて省略を知らせる', () => {
