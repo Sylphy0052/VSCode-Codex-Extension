@@ -1241,6 +1241,38 @@ describe('ChatViewManager', () => {
       expect(__mock.messages.infos).toHaveLength(0);
     });
 
+    it('見えている間に来た承認要求は、あとでタブを背面へ回しても通知しない', async () => {
+      // 判定は承認要求を受け取ったその瞬間の一度きり（design.md §14.55）。
+      // `onDidChangeViewState` は通知判定を呼ばないという構造でこれを保証しているため、
+      // 将来そこへ再判定を足すと黙って壊れる。その回帰を捕まえるためのテスト
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      const task = await p;
+      task.open({ preserveFocus: true });
+      // visible: true のまま承認要求を受け取る
+
+      void connection.serverRequest(1, 'item/commandExecution/requestApproval', {
+        threadId: 'thread-A',
+        itemId: 'i1',
+        command: 'ls',
+        cwd: '/workspace/root/task-a',
+      });
+      await tick();
+      expect(__mock.messages.infos).toHaveLength(0);
+
+      // ここで背面へ回しても、既に判定済みの要求を蒸し返さない
+      __mock.lastCreatedPanel()?.simulateVisibilityChange(false);
+      await tick();
+
+      expect(__mock.messages.infos).toHaveLength(0);
+    });
+
     it('同じ承認要求では通知が重複しない（後続の状態更新でも1回のまま）', async () => {
       const { task, connection } = await openHiddenTaskPanel();
 
