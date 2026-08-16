@@ -675,7 +675,33 @@
           "markdownDescription": "使用するエージェント (`--agent`)。組込エージェント (`claude` / `Explore` / `Plan` / `general-purpose` など) やユーザー定義のカスタムエージェントの名前を指定する。空なら渡さず、Claude Code 側の `agent` 設定に委譲する。起動時にのみ効き、会話の途中では切り替えられない。"
         }
       }
-    }
+    },
+    "keybindings": [
+      {
+        "command": "codex.newChat",
+        "key": "ctrl+k x",
+        "mac": "cmd+k x",
+        "when": "!terminalFocus && !inputFocus"
+      },
+      {
+        "command": "claude.newChat",
+        "key": "ctrl+k l",
+        "mac": "cmd+k l",
+        "when": "!terminalFocus && !inputFocus"
+      },
+      {
+        "command": "codex.resumeLast",
+        "key": "ctrl+k b",
+        "mac": "cmd+k b",
+        "when": "!terminalFocus && !inputFocus"
+      },
+      {
+        "command": "agent.workflows.view",
+        "key": "ctrl+k a",
+        "mac": "cmd+k a",
+        "when": "!terminalFocus && !inputFocus"
+      }
+    ]
   },
   "scripts": {
     "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node20",

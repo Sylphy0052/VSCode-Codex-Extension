@@ -1759,6 +1759,25 @@ C群・L群・W群のように画面単位ではなく、チャット画面・�
 - 操作: Codex画面またはClaude Code画面で何か1往復会話したあと、ウィンドウをリロード（`Developer: Reload Window`）してタブを復元し、復元後のタブで `Ctrl+F` を押す
 - 期待: 検索窓が出る。design.md §14.48の通り、復元経路（`registerWebviewPanelSerializer`）ではVSCode本体が新規に構築したパネルを拡張機能へ渡すため、`enableFindWidget` を拡張機能側から再設定する手段はAPI上存在しない。挙動はVSCode本体の実装に委ねられており、このケースを実施するまで結果は未確定
 
+### U-07 既定のキーバインドの動作確認（design.md §14.50、issue #289）
+
+`contributes.keybindings`で追加した4件（`codex.newChat` `claude.newChat` `codex.resumeLast` `agent.workflows.view`）を実機で確認する。衝突調査自体はdesign.md §14.50のとおりVS Code本体の既定キーバインドJSONの完全一致検索で済ませてあるため、ここでは実機での発火・`when`句の効き方だけを見る。
+
+- 準備: 何かのファイルをエディタで開き、カーソルをテキスト中に置いておく
+- 操作: `Ctrl+K X`（macは`Cmd+K X`）を押す
+- 期待: 新しい会話（Codex）が開く。エディタの文字やカーソル位置は変化しない
+- 操作: `Ctrl+K L`（mac: `Cmd+K L`）を押す
+- 期待: 新しい会話（Claude Code）が開く
+- 操作: 少なくとも1つセッションを開いた状態で `Ctrl+K B`（mac: `Cmd+K B`）を押す
+- 期待: 直前のセッションが再開する（コマンドパレットの「直前のセッションを再開」と同じ結果）
+- 操作: `Ctrl+K A`（mac: `Cmd+K A`）を押す
+- 期待: ワークフローViewが開く
+- 操作: 統合ターミナルにフォーカスした状態で、上記4つのキーをそれぞれ押す
+- 期待: いずれも発火せず、ターミナル側の既定動作（`Ctrl+K`はシェルのkill-line等）が優先される（`when: !terminalFocus`の確認）
+- 操作: コマンドパレットや検索ボックスなど汎用の入力ボックスにフォーカスした状態で、上記4つのキーをそれぞれ押す
+- 期待: いずれも発火せず、入力ボックスへの通常の文字入力として扱われる（`when: !inputFocus`の確認）
+- 確認: `Ctrl+Shift+P`から`Preferences: Open Keyboard Shortcuts`を開き、`ctrl+k x` / `ctrl+k l` / `ctrl+k b` / `ctrl+k a`で検索して、VSCode本体の既定コマンドと衝突表示（同じキーに複数コマンドが並ぶ状態）が出ないことを目視で確認する
+
 Codex画面・Claude Code画面の両方に共通する機能（`chatScript.ts`/`chatStyles.ts`/`markdown.ts`）。特に断りが無ければどちらの画面でも同じ手順で確認する。パースの正しさ自体（見出し・箇条書き・強調・インラインコード・コードフェンス・リンク・未完のフェンス・HTMLに見える入力）は`test/unit/markdown.test.ts`で機械的に確認済みのため、ここではDOMへの実際の描画・ボタンの動作・設定の切り替えだけを見る。
 
 ### U-08 Markdown描画の見た目と設定によるオン/オフ
