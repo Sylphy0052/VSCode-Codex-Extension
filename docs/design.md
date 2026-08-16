@@ -2829,6 +2829,33 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - 折りたたんだ部分（コマンド出力・思考の要約の折りたたみ、`<details>`の中）はDOM上非表示のため検索対象にならない。開いている範囲だけが検索できる
 - タブ復元後に検索窓が実際に効くかどうかは、上記の通りVSCode本体の実装依存で拡張機能側からは制御できず、実機での確認が済んでいない（`docs/manual-test.md` U-04）
 
+### 14.50 主要コマンドへ既定のキーバインドを割り当てる（issue #289）
+
+背景: `contributes.keybindings`が存在せず、`codex.newChat`・`claude.newChat`・`codex.resumeLast`・`agent.workflows.view`を含む全ての操作がコマンドパレットかクリック経由でしか呼べなかった。
+
+調べた事実:
+
+- ローカルの`~/.vscode-server`はRemote-SSH/WSL用のヘッドレスビルドで、レンダラー側（`vs/workbench/contrib`のUIコントリビューション）を含まずKeybindingsRegistryへの既定登録が存在しない（`grep -rl "KeybindingWeight" out`が1件のみ、`out/vs/workbench`配下のファイル数も17件しか無い）。実機インストールから既定一覧を抽出する方法はこの環境では使えなかった
+- 代わりに、VS Code本体の既定キーバインドをGitHub Actionsで新バージョンごとに再生成・追従している[codebling/vs-code-default-keybindings](https://github.com/codebling/vs-code-default-keybindings)（取得時点でVS Code 1.133.0向け、Windows 1187件・macOS 1278件・Linux 1173件）を取得し、手元でJSONとしてパースして照合した
+- `ctrl+k`は本体側に単体バインドが無く（`"when": "false"`の無効化エントリが1件あるのみ）、2打鍵目を待つ和音のプレフィックスとして安全に使える
+- `ctrl+k`から始まる和音のうち2打鍵目にctrl修飾が無いものは、Windows/Linux/macOSいずれも{c, d, e, f, i, m, o, p, r, s, t, u, v, w, y, z}の16文字が既定コマンド（`editor.action.addCommentLine`・`workbench.action.toggleZenMode`・`markdown.showPreviewToSide`・`workbench.action.files.copyPathOfActiveFile`など）に割り当て済みで、{a, b, g, h, j, k, l, n, q, x}の10文字は3OSとも未使用だった
+- 上記10文字のうち`ctrl+k a` / `ctrl+k b` / `ctrl+k l` / `ctrl+k x`（macOSは`cmd+k`側も同様）が、ダウンロードしたJSON全件に対する完全一致検索で本体の既定と衝突しないことを最終確認した
+
+設計の判断:
+
+- 和音は`ctrl+k`（mac: `cmd+k`）を軸にし、2打鍵目へ上記で確認した未使用文字を割り当てた。単打鍵の修飾キー付き（例: `ctrl+n`）は本体の既定と衝突しやすいため、issueの指示どおり和音を優先した
+  - `codex.newChat`（新しい会話・Codex） → `ctrl+k x` / `cmd+k x`。「codeX」の語呂
+  - `claude.newChat`（新しい会話・Claude Code） → `ctrl+k l` / `cmd+k l`。「cLaude」の語呂
+  - `codex.resumeLast`（直前のセッションを再開） → `ctrl+k b` / `cmd+k b`。「Back（前のセッションへ戻る）」の語呂
+  - `agent.workflows.view`（ワークフローViewを開く） → `ctrl+k a` / `cmd+k a`。コマンドID接頭辞`agent.`の「Agent」から
+- `when`は4件とも`!terminalFocus && !inputFocus`で統一した。`ctrl+k`和音自体は文字を挿入しないため、エディタ本体にカーソルがある状態（`editorTextFocus`）で発火してもコード編集を壊すことは無く、コーディング中にそのままチャットを呼べる利点をあえて残した。一方で統合ターミナルはシェルが`Ctrl+K`（readlineのkill-line等）を使う慣習があり、`when`を書かないとVSCode側のキーバインドがシェルより先にキーを奪ってしまう実害があるため`!terminalFocus`で除外した。クイックオープン・検索・リネームなど汎用の入力ボックス（`inputFocus`）中の暴発も同様に除外した
+- `package.json`の`contributes.keybindings`は本タスクで新設したキーのみを追加し、既存の`commands`/`menus`/`configuration`は並行作業との衝突を避けるため一切触っていない
+
+残る制約:
+
+- サードパーティ拡張機能（GitLensなど）が`ctrl+k`以下の和音を独自に登録している場合の衝突は、VS Code本体の既定一覧には含まれないため確認できていない。ユーザー環境で衝突する場合は`keybindings.json`側で個別に上書きする前提
+- `!terminalFocus && !inputFocus`の組み合わせはVS Code本体の既定JSONには直接現れない合成条件のため、実機（複数OS）での動作確認は`docs/manual-test.md` U-07に残す
+
 ### 14.51 応答本文のMarkdown描画とコードブロック操作（issue #290）
 
 背景: 応答本文は`textContent`と`white-space: pre-wrap`だけで出しており、見出し・箇条書き・強調が記号のまま表示されていた（`chatScript.ts`の`renderBody`、`chatStyles.ts`）。会話の取り出し（§14.23、`runExportTranscript`）はMarkdownとして書き出すため、画面表示との落差があった。コピーも項目単位の全文コピーのみで、コードブロックだけを取り出す手段が無かった。
