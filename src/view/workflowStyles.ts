@@ -174,6 +174,12 @@ export function workflowStyles(): string {
 
   .wf-edge { stroke: var(--vscode-descriptionForeground); stroke-width: 1.5; fill: none; }
   .wf-edge.dim { opacity: 0.35; }
+  /* ノードを選んでいるあいだの強調（Issue #282）。関係する辺だけ濃く太く、
+     それ以外は下げる。dimは依存元がまだ完了していないことを表す別の軸なので残す */
+  .wf-edge.related { stroke: var(--vscode-charts-blue); stroke-width: 2.5; opacity: 1; }
+  .wf-edge.faded { opacity: 0.12; }
+  .wf-arrow-head { fill: var(--vscode-descriptionForeground); }
+  .wf-arrow-head.related { fill: var(--vscode-charts-blue); }
 
   /* ---- タスク一覧 ---- */
   table#taskTable { width: 100%; border-collapse: collapse; font-size: 0.9em; }
