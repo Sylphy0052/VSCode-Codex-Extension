@@ -19,6 +19,7 @@ import {
   pseudoWorktreePath,
   pseudoWorktreesRootDir,
   reflectIntegrationToWorkspace,
+  removePseudoWorktree,
   serializeManifest,
   takeSnapshot,
   type DiffEntry,
@@ -333,6 +334,93 @@ describe('実ファイルシステムでの統合テスト', () => {
     } finally {
       await rm(outsideDir, { recursive: true, force: true });
     }
+  });
+
+  describe('removePseudoWorktree（Issue #298）', () => {
+    it('cloneWorkspaceで作った複製を撤去する', async () => {
+      await writeWorkspaceFile('a.txt', 'a\n');
+      const cloned = await cloneWorkspace(
+        workspace,
+        RUN_ID,
+        'T1',
+        [],
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(cloned.ok).toBe(true);
+      if (!cloned.ok) return;
+
+      const result = await removePseudoWorktree(
+        workspace,
+        RUN_ID,
+        'T1',
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result).toEqual({ ok: true });
+      await expect(readdir(cloned.cwd)).rejects.toThrow();
+    });
+
+    it('taskIdに_integrationを渡すと統合先も同じ入口で撤去できる', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+
+      const result = await removePseudoWorktree(
+        workspace,
+        RUN_ID,
+        '_integration',
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result).toEqual({ ok: true });
+      await expect(readdir(integration.dir)).rejects.toThrow();
+    });
+
+    it('撤去対象が既に存在しなければ、消さずに成功として返す（冪等）', async () => {
+      const result = await removePseudoWorktree(
+        workspace,
+        RUN_ID,
+        'T1',
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result).toEqual({ ok: true });
+    });
+
+    /**
+     * `<runId>`ディレクトリがシンボリックリンクへ差し替えられていると、素朴な文字列結合の
+     * パスは`.agents/worktrees`の外（ここでは`outsideDir`）の実体を指す。実パス解決した
+     * 結果が`.agents/worktrees`の配下に無ければ、`removeDirRecursive`を呼ばずに
+     * `boundaryEscape`として弾く（境界逸脱時に外側の実体を巻き込んで消さないことの確認）。
+     */
+    it('.agents/worktrees配下の外を指す実体は撤去せずboundaryEscapeを返す', async () => {
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-outside-'));
+      try {
+        await mkdir(path.join(outsideDir, 'T1'), { recursive: true });
+        await writeFile(path.join(outsideDir, 'T1', 'secret.txt'), 'secret\n');
+        await mkdir(pseudoWorktreesRootDir(workspace), { recursive: true });
+        await symlink(outsideDir, path.join(pseudoWorktreesRootDir(workspace), RUN_ID));
+
+        const result = await removePseudoWorktree(
+          workspace,
+          RUN_ID,
+          'T1',
+          nodePseudoWorktreeFileSystem,
+        );
+
+        expect(result).toMatchObject({ ok: false, reason: 'boundaryEscape' });
+        // 外側の実体は消えず残っている
+        await expect(readFile(path.join(outsideDir, 'T1', 'secret.txt'), 'utf8')).resolves.toBe(
+          'secret\n',
+        );
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    });
   });
 
   it('片方のタスクだけが変えたファイルが、統合先へそのまま入る（受入基準）', async () => {

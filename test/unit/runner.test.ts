@@ -25,6 +25,7 @@ import type {
   ForgeHostConfig,
   PullRequestLayerConfig,
 } from '../../src/orchestrator/forge';
+import { integrationPath } from '../../src/orchestrator/pseudoWorktree';
 import type {
   PseudoWorktreeDirEntry,
   PseudoWorktreeFileStat,
@@ -1887,6 +1888,56 @@ tasks:
       ),
     ).toBe(false);
   });
+
+  it('removeWorktreesは再試行したタスクの、retryなし（初回）と過去の再試行分もすべて撤去する（Issue #298）', async () => {
+    // 以前は`retrySuffixOf`が返す現在の試行1件（この場合`-retry1`）しか撤去しておらず、
+    // 過去の試行（初回の`T1`、1回目の再試行`T1-retry0`）が残ったままだった
+    const keepYaml = `
+version: 1
+name: view-ops-test-retry-cleanup
+defaults:
+  cleanup: keep
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+    const git = fakeGit();
+    const { runner, codexHost, store } = createHarness(keepYaml, { git });
+    const result = await runner.start('/repo/.agents/workflows/retry-cleanup.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const attempt1 = codexHost.byTaskId('T1');
+    attempt1.finish('failed', { ...initialChatState, turnFailed: true });
+    await flush();
+
+    expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+    await flush();
+    const attempt2 = codexHost.sessions.find((s) => s.cwd.endsWith('/T1-retry0'));
+    attempt2?.finish('failed', { ...initialChatState, turnFailed: true });
+    await flush();
+
+    expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+    await flush();
+    const attempt3 = codexHost.sessions.find((s) => s.cwd.endsWith('/T1-retry1'));
+    attempt3?.finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(store.find(runId)?.tasks['T1']?.manualRetryCount).toBe(2);
+
+    const outcome = await runner.removeWorktrees(runId);
+    expect(outcome.removed).toEqual(['T1']);
+    expect(outcome.failed).toEqual([]);
+
+    const removeCalls = git.calls.filter((c) => c.args[0] === 'worktree' && c.args[1] === 'remove');
+    const removedPaths = removeCalls.map((c) => c.args[2]);
+    expect(removedPaths.some((p) => p !== undefined && p.endsWith('/T1'))).toBe(true);
+    expect(removedPaths.some((p) => p !== undefined && p.endsWith('/T1-retry0'))).toBe(true);
+    expect(removedPaths.some((p) => p !== undefined && p.endsWith('/T1-retry1'))).toBe(true);
+    expect(removeCalls).toHaveLength(3);
+  });
 });
 
 describe('WorkflowRunner: リロード後の実行再開（design.md §16.11）', () => {
@@ -2910,6 +2961,7 @@ tasks:
     await flush();
 
     const cleanup = await runner.cleanupIntegration(runId);
+    expect(cleanup.integrationApplicable).toBe(true);
     expect(cleanup.integrationRemoved).toBe(true);
     expect(cleanup.integrationFailedMessage).toBeUndefined();
     expect(cleanup.tasksRemoved).toContain('T1');
@@ -2974,6 +3026,27 @@ tasks:
     const cleanup = await runner.cleanupIntegration(runId);
     expect(cleanup.integrationRemoved).toBe(false);
     expect(cleanup.integrationFailedMessage).toContain('未コミットの変更');
+  });
+
+  it('onProgressにタスク分＋統合worktree1件分の進捗を順に報告する（Issue #298）', async () => {
+    const git = fakeGit();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/cleanup-progress.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const progressUpdates: Array<{ done: number; total: number; label: string }> = [];
+    const cleanup = await runner.cleanupIntegration(runId, (p) => progressUpdates.push(p));
+
+    expect(cleanup.integrationRemoved).toBe(true);
+    // タスク（T1）1件＋統合worktree1件で合計2件、doneが1→2と単調に増える
+    expect(progressUpdates).toHaveLength(2);
+    expect(progressUpdates[0]).toMatchObject({ done: 1, total: 2 });
+    expect(progressUpdates[1]).toMatchObject({ done: 2, total: 2 });
   });
 });
 
@@ -3106,6 +3179,82 @@ tasks:
     expect(store.find(runId)?.tasks['T2']?.state).toBe('blocked');
     const snapshot = runner.getSnapshot(runId);
     expect(snapshot?.warnings.some((w) => w.kind === 'pseudoWorktreeConflict')).toBe(true);
+
+    // removeWorktreesはblockedのタスクの複製を残す（Issue #298）。gitと違いブランチが
+    // 無く、削除すると衝突として弾かれた未統合の差分を復元する手段が無くなるため
+    const outcome = await runner.removeWorktrees(runId);
+    expect(outcome.removed).toEqual(['T1']);
+    expect(outcome.failed).toEqual([]);
+    expect(fs.dirs.has(cloneDir1)).toBe(false);
+    expect(fs.dirs.has(cloneDir2)).toBe(true);
+    expect(fs.files.get(path.join(cloneDir2, 'a.txt'))).toEqual({ size: 30, mtimeMs: 300 });
+  });
+
+  it('cleanupIntegrationは疑似worktreeでも統合先（_integration）を撤去する（runが終わっていれば。Issue #298）', async () => {
+    const git = fakeGit({ notGitRepo: true });
+    const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      pseudoWorktree: { fs, exclude: [] },
+    });
+    const result = await runner.start('/repo/.agents/workflows/pseudo-cleanup.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const integrationDir = integrationPath('/repo', runId);
+    expect(fs.dirs.has(integrationDir)).toBe(true);
+
+    const cleanup = await runner.cleanupIntegration(runId);
+    expect(cleanup.integrationApplicable).toBe(true);
+    expect(cleanup.integrationRemoved).toBe(true);
+    expect(cleanup.integrationFailedMessage).toBeUndefined();
+    expect(cleanup.tasksRemoved).toEqual(['T1']);
+    expect(fs.dirs.has(integrationDir)).toBe(false);
+  });
+
+  it('cleanupIntegrationはrunが実行中の間、疑似worktreeの統合先を撤去しない（Issue #298）', async () => {
+    const git = fakeGit({ notGitRepo: true });
+    const fs = new FakePseudoFs();
+    const yaml = `
+version: 1
+name: pseudo-cleanup-running
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    dependsOn: [T1]
+    prompt: p2
+    done: d2
+`;
+    const { runner, codexHost } = createHarness(yaml, {
+      git,
+      pseudoWorktree: { fs, exclude: [] },
+    });
+    const result = await runner.start(
+      '/repo/.agents/workflows/pseudo-cleanup-running.yaml',
+      '/repo',
+    );
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+    // T2はT1完了後に走り始めるが、まだ終わっていない（runは`running`のまま）
+
+    const integrationDir = integrationPath('/repo', runId);
+    const cleanup = await runner.cleanupIntegration(runId);
+    expect(cleanup.integrationApplicable).toBe(true);
+    expect(cleanup.integrationRemoved).toBe(false);
+    expect(cleanup.integrationFailedMessage).toBe(
+      'runが実行中のため統合worktreeは撤去しませんでした',
+    );
+    expect(fs.dirs.has(integrationDir)).toBe(true);
   });
 
   it('WorkflowRunnerDeps.pseudoWorktreeが渡されていなければ、従来どおりワークスペース直下を共有する（後方互換）', async () => {
@@ -3297,14 +3446,10 @@ tasks:
 
       const snapshot = runner.getSnapshot(runId);
       expect(
-        snapshot?.warnings.some(
-          (w) => w.kind === 'messagingUnavailable' && w.taskId === 'T1',
-        ),
+        snapshot?.warnings.some((w) => w.kind === 'messagingUnavailable' && w.taskId === 'T1'),
       ).toBe(true);
       expect(
-        snapshot?.warnings.some(
-          (w) => w.kind === 'messagingUnavailable' && w.taskId === 'T2',
-        ),
+        snapshot?.warnings.some((w) => w.kind === 'messagingUnavailable' && w.taskId === 'T2'),
       ).toBe(true);
 
       const t1 = codexHost.byTaskId('T1');
@@ -3383,7 +3528,10 @@ tasks:
         messaging: deps,
         codexSandbox: 'workspace-write',
       });
-      const result = await runner.start('/repo/.agents/workflows/messaging-escalation.yaml', '/repo');
+      const result = await runner.start(
+        '/repo/.agents/workflows/messaging-escalation.yaml',
+        '/repo',
+      );
       const runId = result.runId as string;
       await flush();
 
@@ -3419,7 +3567,10 @@ tasks:
         messaging: deps,
         codexSandbox: 'workspace-write',
       });
-      const result = await runner.start('/repo/.agents/workflows/messaging-no-escalation.yaml', '/repo');
+      const result = await runner.start(
+        '/repo/.agents/workflows/messaging-no-escalation.yaml',
+        '/repo',
+      );
       const runId = result.runId as string;
       await flush();
 
@@ -3458,7 +3609,10 @@ tasks:
     it('lastSentPromptは実際にCLIへ送った本文（メッセージの合成後）と一致する', async () => {
       const { deps, state } = fakeMessagingDeps();
       const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, { messaging: deps });
-      const result = await runner.start('/repo/.agents/workflows/messaging-last-sent.yaml', '/repo');
+      const result = await runner.start(
+        '/repo/.agents/workflows/messaging-last-sent.yaml',
+        '/repo',
+      );
       const runId = result.runId as string;
       await flush();
 

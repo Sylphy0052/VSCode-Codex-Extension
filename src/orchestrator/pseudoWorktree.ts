@@ -282,7 +282,11 @@ export interface PseudoWorktreeFileSystemPort {
   copyFile(from: string, to: string): Promise<void>;
   /** ファイルを削除する。存在しなくてもエラーにしない。 */
   removeFile(target: string): Promise<void>;
-  /** ディレクトリを再帰的に削除する。存在しなくてもエラーにしない（境界逸脱時の後始末専用）。 */
+  /**
+   * ディレクトリを再帰的に削除する。存在しなくてもエラーにしない。境界逸脱時の後始末
+   * （`cloneWorkspace` / `ensureIntegrationDir`が作成直後に自分の作った分だけを消す）と、
+   * `removePseudoWorktree`による明示的な撤去（Issue #298）の両方から使う。
+   */
   removeDirRecursive(target: string): Promise<void>;
 }
 
@@ -481,6 +485,58 @@ export async function cloneWorkspace(
 
   const snapshot = await takeSnapshot(target, exclude, fs);
   return { ok: true, cwd: target, snapshot };
+}
+
+// ---------------------------------------------------------------------------
+// 撤去（design.md §16.17「worktreeの片付け」・§16.20、Issue #298）
+// ---------------------------------------------------------------------------
+
+export type RemovePseudoWorktreeResult =
+  | { ok: true }
+  | { ok: false; reason: 'invalidIdentifier' | 'boundaryEscape'; message: string };
+
+/**
+ * 疑似worktree（`<workspace>/.agents/worktrees/<runId>/<taskId>`）を1件撤去する。
+ * `taskId`に`'_integration'`を渡せば統合先（`integrationPath`と同じ場所）も同じ入口で
+ * 撤去できる（`pseudoWorktreePath`と`integrationPath`は同じ組み立てのため）。
+ *
+ * gitの`removeWorktree`（`worktree.ts`）と違い「`git worktree remove`だけを使う」という
+ * 安全弁が無く、`removeDirRecursive`でディレクトリを直接消す必要がある。`cloneWorkspace`が
+ * 作成時に行う二段構え（一次防御: 祖先ディレクトリのシンボリックリンク検知、二次防御:
+ * 作成後の実パス解決による境界確認）のうち、ここでは後段だけを撤去向けに行う。
+ * **消す前に対象を実パス解決し、その実体が`.agents/worktrees`の配下にあることを確かめる。**
+ * ここで確かめずに`removeDirRecursive`へ渡すと、`.agents/worktrees`自体がシンボリックリンクに
+ * 差し替えられていた場合にリンク先（ワークスペースの外）を再帰削除してしまう。
+ *
+ * 対象が実在しなければ（既に撤去済み）、`worktree.ts`の`removeWorktree`と同じく成功として返す。
+ */
+export async function removePseudoWorktree(
+  workspaceRoot: string,
+  runId: string,
+  taskId: string,
+  fs: PseudoWorktreeFileSystemPort,
+): Promise<RemovePseudoWorktreeResult> {
+  const identifierMessage = identifierError(runId, taskId);
+  if (identifierMessage !== undefined) {
+    return { ok: false, reason: 'invalidIdentifier', message: identifierMessage };
+  }
+  const target = pseudoWorktreePath(workspaceRoot, runId, taskId);
+
+  const realTarget = await fs.realpath(target);
+  if (realTarget === undefined) {
+    return { ok: true };
+  }
+  const realWorktreesRoot = await fs.realpath(pseudoWorktreesRootDir(workspaceRoot));
+  if (realWorktreesRoot === undefined || !isPathWithinRoot(realTarget, realWorktreesRoot)) {
+    return {
+      ok: false,
+      reason: 'boundaryEscape',
+      message: `撤去対象が.agents/worktreesの外を指しているため撤去しませんでした: ${realTarget}`,
+    };
+  }
+
+  await fs.removeDirRecursive(target);
+  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------

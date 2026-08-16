@@ -306,7 +306,19 @@ export class WorkflowViewManager implements vscode.Disposable {
       if (choice !== '撤去する') {
         return;
       }
-      const result = await this.runner.cleanupIntegration(runId);
+      // 撤去はタスク数だけ`git status`と`git worktree remove`（疑似worktreeなら
+      // ディレクトリの再帰削除）を逐次待つため、時間がかかることがある。押しても
+      // 反応が無いように見えないよう進捗を出す（Issue #298「進捗が分からない」）
+      const result = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'worktreeを撤去しています' },
+        (progress) =>
+          this.runner.cleanupIntegration(runId, ({ done, total, label }) => {
+            progress.report({
+              message: `${label}（${done}/${total}）`,
+              increment: total > 0 ? 100 / total : 0,
+            });
+          }),
+      );
       const problems: string[] = [];
       if (result.tasksFailed.length > 0) {
         problems.push(`worktreeの撤去に失敗したタスクがあります: ${result.tasksFailed.join(', ')}`);
@@ -317,7 +329,26 @@ export class WorkflowViewManager implements vscode.Disposable {
       if (problems.length > 0) {
         this.log.warn(`[workflowView] ${problems.join(' / ')}`);
         void vscode.window.showWarningMessage(problems.join(' / '));
+        return;
       }
+      // 成功時は無言で終わらず、何をどれだけ撤去したかを伝える（Issue #298
+      // 「成功しても何も表示されない」）。「worktreeの撤去」（Issue #252）と同じ扱いで、
+      // 対象が0件（既に撤去済み、または統合worktreeがそもそも対象で無い）なら
+      // その旨だけ伝える
+      if (result.tasksRemoved.length === 0 && !result.integrationRemoved) {
+        // 統合worktreeがそもそも作られていないrun（gitの作業ツリーでも疑似worktreeでも
+        // ないため統合先を持たないrun）と、既に撤去済みのrunとを言い分ける
+        void vscode.window.showInformationMessage(
+          result.integrationApplicable
+            ? '撤去するworktreeはありません（既に撤去済みです）。'
+            : '撤去するworktreeはありません（このワークフローは統合worktreeを作っていません）。',
+        );
+        return;
+      }
+      const integrationNote = result.integrationRemoved ? '、統合worktreeも撤去しました' : '';
+      void vscode.window.showInformationMessage(
+        `worktreeを${result.tasksRemoved.length}件撤去しました${integrationNote}。`,
+      );
       return;
     }
 
