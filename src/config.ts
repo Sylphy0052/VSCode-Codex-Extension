@@ -15,6 +15,7 @@ import { DEFAULT_PSEUDO_WORKTREE_EXCLUDE } from './orchestrator/pseudoWorktree';
 import type { HistoryScope } from './session/sessionStore';
 import { normalizeSendOn, type SendOnMode } from './view/sendKey';
 import type { HistoryGroupBy } from './util/sessionGrouping';
+import { parseSessionPresets, type SessionPreset } from './sessionPresets';
 
 export interface ExtensionConfig {
   executablePath: string;
@@ -134,6 +135,28 @@ export function readChatRenderMarkdownConfig(): boolean {
 export function readChatSendOnConfig(): SendOnMode {
   const c = vscode.workspace.getConfiguration('agent');
   return normalizeSendOn(c.get<string>('chat.sendOn'));
+}
+
+export interface SessionPresetsConfig {
+  presets: SessionPreset[];
+  /** 検証で無視した項目の理由。呼び出し側（`extension.ts`）がログ・通知へ出す。 */
+  warnings: string[];
+}
+
+/**
+ * 名前付きセッションプリセット（`agent.sessionPresets`、issue #295、design.md §14.56）。
+ *
+ * `resource`スコープ（`.vscode/settings.json`から与えられる）のままにしてある。プリセット
+ * 自体は権限を緩められない（`buildEffectivePresetConfig`が拡張機能側の現在の設定より
+ * 緩い方向のapprovalMode/sandboxを無視する）ため、machineスコープに固定する必要が無い。
+ *
+ * 検証・クランプの実体は `src/sessionPresets.ts`（vscodeをimportしないロジック層）に
+ * 切り出してあり、ここでは生値を渡すだけ。
+ */
+export function readSessionPresetsConfig(): SessionPresetsConfig {
+  const c = vscode.workspace.getConfiguration('agent');
+  const { presets, warnings } = parseSessionPresets(c.get<unknown>('sessionPresets'));
+  return { presets, warnings };
 }
 
 /** ワークフロー実行（design.md §16）の設定。 */

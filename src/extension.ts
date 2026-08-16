@@ -26,16 +26,18 @@ import {
   type ServerRequestHandler,
 } from './appserver/connection';
 import type { ClaudeSpawnPort } from './claude/streamSession';
+import type { ClaudeConfig } from './claude/types';
 import { AppServerClient } from './codex/appServerClient';
 import { codexPaths, nodeLocatorDeps, resolveCodexHome } from './codex/cliLocator';
 import { CodexProvider } from './codex/provider';
-import type { SessionMeta, SessionSummary } from './codex/types';
+import type { CodexConfig, SessionMeta, SessionSummary } from './codex/types';
 import type { UsageSnapshot } from './codex/usage';
 import {
   currentWorkspaceFolder,
   readActivityLogConfig,
   readClaudeConfig,
   readConfig,
+  readSessionPresetsConfig,
   readWorkflowsConfig,
   workspaceFolderPaths,
 } from './config';
@@ -92,6 +94,13 @@ import type { Provider } from './orchestrator/workflow';
 import { ProviderRegistry } from './provider/registry';
 import type { AgentProvider } from './provider/types';
 import { createLogger, type Logger } from './log';
+import {
+  buildEffectivePresetConfig,
+  buildSessionPresetQuickPickLabel,
+  resolveWorkingDirectory,
+  type PresetSafetyBaseline,
+  type SessionPreset,
+} from './sessionPresets';
 import { nodeCommandRunner as nodeAccountCommandRunner } from './process/commandRunner';
 import { nodeFileSystem, nodeMemoryFileSystem } from './session/nodeFileSystem';
 import { nodeFileScan } from './session/nodeFileScan';
@@ -541,6 +550,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   });
   context.subscriptions.push(tree, sessionsView);
   void tree.setScope(readConfig().historyScope);
+  // プリセットが空のときはコマンドを出さない（issue #295、design.md §14.56）
+  void updateSessionPresetsContext(log);
 
   // 絞り込み中はタイトルバーにその旨を出す（issue #293）。`setFilter`/`clearFilter`は
   // それぞれ`refresh()`まで済ませるので、ここでは表示テキストだけ合わせる
@@ -603,6 +614,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         chat.refreshSettings();
         tree.refresh();
       }
+      if (e.affectsConfiguration('agent.sessionPresets')) {
+        void updateSessionPresetsContext(log);
+      }
     }),
   );
 
@@ -657,6 +671,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     }),
     vscode.commands.registerCommand('codex.newChat', () => chat.openNew()),
     vscode.commands.registerCommand('claude.newChat', () => claudeChat.openNew()),
+    // プリセットを選んで新しい会話を開く（issue #295、design.md §14.56）。既存の
+    // `codex.newChat` / `claude.newChat` は変えず、別コマンドとして追加する
+    vscode.commands.registerCommand('agent.openPresetChat', () =>
+      openPresetChat(chat, claudeChat, log),
+    ),
     vscode.commands.registerCommand(
       'claude.openChat',
       withSession(log, 'claude.openChat', (s) => {
@@ -820,6 +839,137 @@ function readSafetyBaseline(): ExtensionSafetyBaseline {
     allowAutoApprove: readWorkflowsConfig().allowAutoApprove,
     allowClaudeBypassPermissions: readWorkflowsConfig().allowClaudeBypassPermissions,
   };
+}
+
+/**
+ * `agent.hasSessionPresets` コンテキストキーを更新する（issue #295、design.md §14.56）。
+ *
+ * `package.json`の`menus.commandPalette`・`view/title`の`when`句がこれを見て、プリセットが
+ * 空（既定）のときは「プリセットから新しい会話を開く」を出さない。検証で無視した項目が
+ * あればここでログにも残す（活性化のたび・設定変更のたびに呼ぶため、ここで
+ * `showWarningMessage`は出さない。実際に選ぶ操作をしたときの`openPresetChat`側で通知する）。
+ */
+async function updateSessionPresetsContext(log: Logger): Promise<void> {
+  const { presets, warnings } = readSessionPresetsConfig();
+  for (const w of warnings) {
+    log.warn(w);
+  }
+  await vscode.commands.executeCommand('setContext', 'agent.hasSessionPresets', presets.length > 0);
+}
+
+interface SessionPresetPick extends vscode.QuickPickItem {
+  preset: SessionPreset;
+}
+
+/**
+ * プリセットを選んで新しい会話を開く（issue #295、design.md §14.56）。
+ *
+ * QuickPickの表示文字列の組み立ては`buildSessionPresetQuickPickLabel`（`src/sessionPresets.ts`）
+ * へ切り出した。実際に会話を開く処理は`applyPresetChat`が担う。
+ */
+async function openPresetChat(
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
+  log: Logger,
+): Promise<void> {
+  const { presets, warnings: parseWarnings } = readSessionPresetsConfig();
+  for (const w of parseWarnings) {
+    log.warn(w);
+  }
+  // `when`句（`agent.hasSessionPresets`）で通常は出ないはずだが、コマンドパレットの
+  // 直接実行など`when`句を経由しない呼び出しに備えて実行時にも防御する
+  if (presets.length === 0) {
+    void vscode.window.showInformationMessage(
+      'プリセットが設定されていません（設定 agent.sessionPresets）',
+    );
+    return;
+  }
+
+  const baseline = readSafetyBaseline();
+  const items: SessionPresetPick[] = presets.map((preset) => ({
+    ...buildSessionPresetQuickPickLabel(preset, baseline),
+    preset,
+  }));
+  const picked = await vscode.window.showQuickPick(items, { placeHolder: 'プリセットを選択' });
+  if (picked === undefined) {
+    return;
+  }
+
+  await applyPresetChat(picked.preset, baseline, chat, claudeChat, log);
+}
+
+/**
+ * 選んだプリセットの実効値（`buildEffectivePresetConfig`、拡張機能側の現在の設定より
+ * 緩めない）を組み立て、作業ディレクトリを解決してから会話を開く。
+ *
+ * `chat.openNew` / `claudeChat.openNew` は`cwd`/`taskConfig`を渡せる既存のAPI
+ * （`src/view/chatView.ts` / `src/view/claudeChatView.ts`。ワークフローのタスクセッションが
+ * 使っているのと同じ経路）にそのまま乗せる。`chatView.ts` / `claudeChatView.ts` 自体は
+ * 変更しない。
+ */
+async function applyPresetChat(
+  preset: SessionPreset,
+  baseline: PresetSafetyBaseline,
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
+  log: Logger,
+): Promise<void> {
+  const effective = buildEffectivePresetConfig(preset, baseline);
+  const warnings = [...effective.warnings];
+
+  const resolvedCwd = await resolveWorkingDirectory(preset.workingDirectory, workspaceFolderPaths());
+  if (resolvedCwd.warning !== undefined) {
+    warnings.push(resolvedCwd.warning);
+  }
+  // 出力チャネルへは、この後フォルダ選択をキャンセルして会話を開かなかった場合でも残す
+  // （設定の異常はキャンセルの有無に関わらず記録しておく価値があるため）
+  for (const w of warnings) {
+    log.warn(w);
+  }
+
+  let cwd = resolvedCwd.path;
+  if (cwd === undefined) {
+    // マルチルートのときだけ作業ディレクトリを選ばせる（issue #295の受入基準。
+    // フォルダが1つのときは毎回1択を選ばせず、`openNew`の既定（`currentWorkspaceFolder`）に委ねる）
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (folders.length > 1) {
+      const pickedFolder = await vscode.window.showQuickPick(
+        folders.map((f) => ({ label: f.name, description: f.uri.fsPath, folder: f })),
+        { placeHolder: '作業ディレクトリを選択' },
+      );
+      if (pickedFolder === undefined) {
+        return;
+      }
+      cwd = pickedFolder.folder.uri.fsPath;
+    }
+  }
+
+  if (warnings.length > 0) {
+    void vscode.window.showWarningMessage(
+      `プリセット「${preset.name}」の一部の指定を無視しました:\n${warnings.join('\n')}`,
+    );
+  }
+
+  if (effective.provider === 'codex') {
+    const base = readConfig().codex;
+    const config: CodexConfig = {
+      ...base,
+      model: effective.model,
+      reasoningEffort: effective.effort,
+      approvalMode: effective.approvalMode,
+      sandbox: effective.sandbox,
+    };
+    await chat.openNew(cwd, config);
+  } else {
+    const base = readClaudeConfig().claude;
+    const config: ClaudeConfig = {
+      ...base,
+      model: effective.model,
+      effort: effective.effort,
+      permissionMode: effective.approvalMode,
+    };
+    await claudeChat.openNew(cwd, config);
+  }
 }
 
 /**
