@@ -7,3 +7,6 @@ coverage/
 
 # Claude Code のローカル作業領域（worktreeなど）。共有しない
 .claude/
+
+# ワークフローがタスクごとに作るworktree。実行中だけ存在する作業領域なので共有しない
+.agents/worktrees/

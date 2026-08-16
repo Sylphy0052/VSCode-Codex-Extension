@@ -1219,6 +1219,17 @@ async function planWorkflowFromRoadmapCommand(
       definition: withRoadmap.definition,
     };
 
+    if (result.correctedIssues.length > 0) {
+      const detail = result.correctedIssues
+        .map((c) => `${c.itemId}: ${c.actual ?? 'なし'} → ${c.expected ?? 'なし'}`)
+        .join(', ');
+      log.warn(`[planner] issueをロードマップの値へ直しました: ${detail}`);
+      void vscode.window.showWarningMessage(
+        `生成されたワークフローのissueがロードマップと違っていたため、${result.correctedIssues.length}件を` +
+          'ロードマップの値へ直しました（誤った番号のままだとPR/MRのマージで無関係のIssueが閉じるため）',
+      );
+    }
+
     if (result.roadmapMismatches.length > 0) {
       log.warn(
         `[planner] ロードマップの材料が正しく転記されていない可能性があります: ${result.roadmapMismatches
