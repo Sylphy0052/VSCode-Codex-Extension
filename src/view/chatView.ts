@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { realpath as fsRealpath } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import {
@@ -8,7 +9,12 @@ import {
   isApprovalDecision,
   type ApprovalDecision,
 } from '../appserver/approvals';
-import { isOpenableSearchUrl, type ChatItem, type ChatState } from '../appserver/chatState';
+import {
+  isOpenableSearchUrl,
+  type ChatItem,
+  type ChatState,
+  type FileDiff,
+} from '../appserver/chatState';
 import { ChatSession } from '../appserver/chatSession';
 import {
   buildTranscriptMarkdown,
@@ -64,6 +70,12 @@ import {
 } from '../provider/pseudoCommands';
 import { buildMemoryAppendConfirmation } from '../provider/inputModes';
 import type { SlashCommand } from '../provider/slashCommands';
+import { computeDiffContents, planDiffActions } from '../util/diffRestore';
+import {
+  resolveWithinWorkspace,
+  verifyRealPathWithinWorkspace,
+  type DiffPathResolution,
+} from '../util/diffWorkspacePath';
 import {
   buildReviewTarget,
   type ReviewDelivery,
@@ -588,6 +600,311 @@ export async function openCodeInNewFile(code: string, lang: string): Promise<voi
     language: codeFenceLanguageId(lang),
   });
   await vscode.window.showTextDocument(doc, { preview: false });
+}
+
+/**
+ * Webviewから届いた差分の操作要求（`itemId` + `diffIndex`）を、会話が実際に持つ差分へ
+ * 引き当てる（issue #291）。
+ *
+ * Webviewが送ってくる可能性のある path・diff本文・種類をそのまま信用せず、会話状態
+ * （`entry.session.getState().items`）から引き直す。転写された内容（エージェントの
+ * 出力に由来する文字列）を経路の判断にそのまま使わない、というこのリポジトリの方針に
+ * 沿う（`buildImageReply` が画像パスを会話の中身から引き当てるのと同じ考え方）。
+ */
+function resolveDiffTarget(
+  items: readonly ChatItem[],
+  itemId: unknown,
+  diffIndex: unknown,
+): FileDiff | undefined {
+  if (typeof itemId !== 'string' || typeof diffIndex !== 'number') {
+    return undefined;
+  }
+  const item = items.find((i) => i.id === itemId);
+  return item?.diffs[diffIndex];
+}
+
+/**
+ * 差分の対象パス（`movePath` があればそちら）をワークスペース内へ解決する（issue #291）。
+ *
+ * 文字列だけの境界判定（`resolveWithinWorkspace`）のあと、実ファイルシステムに触れて
+ * シンボリックリンクによる脱出も無いかを確かめる（`verifyRealPathWithinWorkspace`。
+ * issue #144の追記処理と同じ考え方）。Webview側（`chatScript.ts`）にも簡易な判定を
+ * 置いてボタンの出し分けに使うが、ここが最終判定であり、Webview側の結果は信用しない。
+ */
+async function resolveDiffFileForAction(diff: FileDiff): Promise<DiffPathResolution> {
+  const targetPath = diff.movePath ?? diff.path;
+  const roots = workspaceFolderPaths();
+  const staticCheck = resolveWithinWorkspace(targetPath, roots);
+  if (!staticCheck.ok) {
+    return staticCheck;
+  }
+  return verifyRealPathWithinWorkspace(staticCheck.absolutePath, roots, fsRealpath);
+}
+
+/**
+ * 差分の見出し行「エディタで開く」（issue #291）。
+ *
+ * 対象ファイルを開き、可能ならハンクの最初の行（`planDiffActions` の `jumpToLine`）へ
+ * カーソルを移す。`delete` の差分はファイルが既に無い前提のため、`planDiffActions` が
+ * `openEditor: false` を返し、ここへは到達しない（呼び出し側で弾く）。
+ */
+export async function handleOpenDiffFile(
+  items: readonly ChatItem[],
+  itemId: unknown,
+  diffIndex: unknown,
+): Promise<void> {
+  const diff = resolveDiffTarget(items, itemId, diffIndex);
+  if (diff === undefined) {
+    return;
+  }
+  const plan = planDiffActions(diff);
+  if (!plan.openEditor) {
+    void vscode.window.showInformationMessage(
+      `このファイルは開けません（削除された変更、または未対応の種類です）: ${diff.path}`,
+    );
+    return;
+  }
+  const resolved = await resolveDiffFileForAction(diff);
+  if (!resolved.ok) {
+    void vscode.window.showWarningMessage(resolved.error);
+    return;
+  }
+  let doc: vscode.TextDocument;
+  try {
+    doc = await vscode.workspace.openTextDocument(vscode.Uri.file(resolved.absolutePath));
+  } catch (e) {
+    void vscode.window.showWarningMessage(
+      `ファイルを開けませんでした: ${resolved.absolutePath}（${e instanceof Error ? e.message : String(e)}）`,
+    );
+    return;
+  }
+  const editor = await vscode.window.showTextDocument(doc, { preview: false });
+  if (plan.jumpToLine !== undefined && editor !== undefined) {
+    const line = Math.min(Math.max(plan.jumpToLine - 1, 0), Math.max(doc.lineCount - 1, 0));
+    const pos = new vscode.Position(line, 0);
+    editor.selection = new vscode.Selection(pos, pos);
+    editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+  }
+}
+
+/**
+ * 差分の対象ファイルの、現在の実際の内容を読む（無ければ `undefined`）。
+ *
+ * `delete` の差分は「ファイルは既に無い」ことを前提に再作成する。ここで読みに行かず
+ * 常に `undefined` を返してしまうと、`computeDiffContents` の delete 分岐にある
+ * 「ファイルが既に存在します」の検査が構造的に一度も真にならず、差分を取ったあとに
+ * 同じパスへ作り直された別のファイルを、確認だけ通して無条件に上書きしてしまう
+ * （`vscode.workspace.fs.writeFile` はゴミ箱を経由しないため復旧もできない）。
+ *
+ * 存在の判定に `FileSystemPort.readTextFile` を使わないのは、あれが「読めなければ無い扱い」
+ * であり、ENOENT以外（EACCES/EISDIR等）でも `undefined` を返すため（`src/session/ports.ts`
+ * のissue #144のメモ参照）。実在するのに読めないファイルを「無い」と誤認すると、まさに
+ * 上書きしてはいけない場面で上書きしてしまう。`stat` はENOENTを他の失敗と区別できるので、
+ * 判断が付かないときは「在る」側（＝戻す操作を止める側）へ倒す。
+ */
+async function readCurrentDiffContent(
+  fs: FileSystemPort,
+  diff: FileDiff,
+  absolutePath: string,
+): Promise<string | undefined> {
+  if (diff.kind === 'delete') {
+    return existingContentForDeleteRevert(fs, absolutePath);
+  }
+  return fs.readTextFile(absolutePath);
+}
+
+/**
+ * `delete` の「戻す」の前に、対象パスに今なにか在るかを確かめる。
+ *
+ * 戻り値は `computeDiffContents` の delete 分岐が見る「`undefined` か否か」だけが意味を持つ。
+ * 在ることが分かった場合・判断が付かない場合は、中身を読めなくても文字列を返して
+ * 「状況が変わっている」と扱わせる。
+ */
+async function existingContentForDeleteRevert(
+  fs: FileSystemPort,
+  absolutePath: string,
+): Promise<string | undefined> {
+  try {
+    await vscode.workspace.fs.stat(vscode.Uri.file(absolutePath));
+  } catch (e) {
+    if (e instanceof vscode.FileSystemError && e.code === 'FileNotFound') {
+      return undefined;
+    }
+    // ENOENT以外で確かめられなかった場合は安全側（＝在る扱い）へ倒す
+    return '';
+  }
+  return (await fs.readTextFile(absolutePath)) ?? '';
+}
+
+/**
+ * 実ファイルが存在すれば、その言語IDを借りる（差分エディタの左右で構文の色付けを揃える）。
+ * 読めなければ既定（プレーンテキスト相当）のまま返す。あくまで見た目のための best effort で、
+ * 失敗しても操作自体は続ける。
+ */
+async function guessDiffLanguageId(absolutePath: string): Promise<string | undefined> {
+  try {
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absolutePath));
+    return doc.languageId;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 保存前の仮想ドキュメントを開く（差分エディタの片側に使う）。`language` が
+ * `undefined` のときはキー自体を渡さない（`exactOptionalPropertyTypes` のため。
+ * `{ language: undefined }` は許されない）。
+ */
+async function openVirtualDiffDocument(
+  content: string,
+  language: string | undefined,
+): Promise<vscode.TextDocument> {
+  return vscode.workspace.openTextDocument(
+    language === undefined ? { content } : { content, language },
+  );
+}
+
+/**
+ * 差分の見出し行「差分を開く」（issue #291）。
+ *
+ * 変更前の内容の作り方は design.md §14.52 の設計判断を参照。要約すると、gitの索引とは
+ * 比較せず、会話に届いた unified diff 自身から復元する（`computeDiffContents`）。
+ * 復元の過程で現在の実ファイルの内容と突き合わせ、差分を取ったときから変わっていれば
+ * 開かずに理由を返す（issue #291の受入基準）。
+ *
+ * 変更前はその場で組み立てた保存前ドキュメント（`openTextDocument({content, language})`）、
+ * 変更後は原則として実ファイルそのもの（そのまま編集・保存もできる）を使う。`delete` の
+ * 差分だけは実ファイルが既に無いため、変更後側も空文字の保存前ドキュメントにする。
+ */
+export async function handleOpenDiffEditor(
+  fs: FileSystemPort,
+  items: readonly ChatItem[],
+  itemId: unknown,
+  diffIndex: unknown,
+): Promise<void> {
+  const diff = resolveDiffTarget(items, itemId, diffIndex);
+  if (diff === undefined) {
+    return;
+  }
+  const plan = planDiffActions(diff);
+  if (!plan.openDiff) {
+    void vscode.window.showWarningMessage(
+      `この差分は復元できないため開けません（ハンク見出しが無い、またはコンテキストが足りない可能性があります）: ${diff.path}`,
+    );
+    return;
+  }
+  const resolved = await resolveDiffFileForAction(diff);
+  if (!resolved.ok) {
+    void vscode.window.showWarningMessage(resolved.error);
+    return;
+  }
+  const currentContent = await readCurrentDiffContent(fs, diff, resolved.absolutePath);
+  const computed = computeDiffContents(diff, currentContent);
+  if (!computed.ok) {
+    void vscode.window.showWarningMessage(`差分を開けません: ${computed.error}`);
+    return;
+  }
+  const language = await guessDiffLanguageId(resolved.absolutePath);
+  const beforeDoc = await openVirtualDiffDocument(computed.before, language);
+  const afterUri =
+    diff.kind === 'delete'
+      ? (await openVirtualDiffDocument(computed.after, language)).uri
+      : vscode.Uri.file(resolved.absolutePath);
+  await vscode.commands.executeCommand(
+    'vscode.diff',
+    beforeDoc.uri,
+    afterUri,
+    `${diff.path}（変更前 ↔ 変更後）`,
+  );
+}
+
+/**
+ * 「この変更を戻す」を実行してよいか確かめる（issue #291）。
+ *
+ * 破壊的な操作（`add`ならファイルを削除、`delete`なら再作成、`update`なら内容の上書き）
+ * のため、既存の破壊的操作（`confirmRewindFiles`・`confirmStopBackgroundTask`）と同じく
+ * 必ずモーダルで確認する。
+ */
+export async function confirmRevertDiff(diff: FileDiff): Promise<boolean> {
+  const detail =
+    diff.kind === 'add'
+      ? `ファイルを削除します: ${diff.path}`
+      : diff.kind === 'delete'
+        ? `ファイルを元の内容で復元します: ${diff.path}`
+        : `ファイルの内容を、この変更を適用する前の状態へ戻します: ${diff.path}`;
+  const choice = await vscode.window.showWarningMessage(
+    `この差分の変更を戻します。元には戻せません。\n\n${detail}`,
+    { modal: true },
+    '戻す',
+  );
+  return choice === '戻す';
+}
+
+/**
+ * 差分の見出し行「この変更を戻す」（issue #291）。
+ *
+ * 確認モーダル（`confirmRevertDiff`）の前後2回、現在の内容を読み直して差分の想定と
+ * 突き合わせる。1回目は確認を出す価値があるかどうかの事前チェック、2回目はTOCTOU対策
+ * （ユーザーの応答待ちは不定長で、その間に内容が変わりうる。issue #144のメモリ追記と
+ * 同じ考え方）。`add`の取り消しはファイルの削除（ゴミ箱へ）、それ以外は内容の書き込みで行う。
+ */
+export async function handleRevertDiff(
+  fs: FileSystemPort,
+  items: readonly ChatItem[],
+  itemId: unknown,
+  diffIndex: unknown,
+): Promise<void> {
+  const diff = resolveDiffTarget(items, itemId, diffIndex);
+  if (diff === undefined) {
+    return;
+  }
+  const plan = planDiffActions(diff);
+  if (!plan.revert) {
+    void vscode.window.showWarningMessage(
+      `この変更は戻せません（移動を伴う変更、または差分を復元できない形式です）: ${diff.path}`,
+    );
+    return;
+  }
+  const resolved = await resolveDiffFileForAction(diff);
+  if (!resolved.ok) {
+    void vscode.window.showWarningMessage(resolved.error);
+    return;
+  }
+  const beforeConfirm = await readCurrentDiffContent(fs, diff, resolved.absolutePath);
+  const precheck = computeDiffContents(diff, beforeConfirm);
+  if (!precheck.ok) {
+    void vscode.window.showWarningMessage(`変更を戻せません: ${precheck.error}`);
+    return;
+  }
+  if (!(await confirmRevertDiff(diff))) {
+    return;
+  }
+  // TOCTOU対策: 確認モーダル（ユーザー応答待ちで不定長）の間に内容が変わりうるため、
+  // 書き込み・削除の直前にもう一度読み直して確かめる（issue #144のメモリ追記と同じ考え方）
+  const atRevert = await readCurrentDiffContent(fs, diff, resolved.absolutePath);
+  const recomputed = computeDiffContents(diff, atRevert);
+  if (!recomputed.ok) {
+    void vscode.window.showWarningMessage(`変更を戻せませんでした: ${recomputed.error}`);
+    return;
+  }
+  try {
+    if (diff.kind === 'add') {
+      await vscode.workspace.fs.delete(vscode.Uri.file(resolved.absolutePath), {
+        useTrash: true,
+      });
+    } else {
+      await vscode.workspace.fs.writeFile(
+        vscode.Uri.file(resolved.absolutePath),
+        Buffer.from(recomputed.before, 'utf8'),
+      );
+    }
+  } catch (e) {
+    void vscode.window.showErrorMessage(
+      `変更を戻せませんでした: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return;
+  }
+  void vscode.window.showInformationMessage(`変更を戻しました: ${diff.path}`);
 }
 
 /** `TaskSessionInput` をCodexの `thread/start`/`turn/start` が読む形へ写す。 */
@@ -1282,6 +1599,31 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
         await openCodeInNewFile(m['code'], typeof m['lang'] === 'string' ? m['lang'] : '');
         return;
       }
+      if (type === 'openDiffFile') {
+        // 差分の見出し行「エディタで開く」（issue #291）
+        await handleOpenDiffFile(entry.session.getState().items, m['itemId'], m['diffIndex']);
+        return;
+      }
+      if (type === 'openDiffEditor') {
+        // 差分の見出し行「差分を開く」（issue #291）
+        await handleOpenDiffEditor(
+          this.fs,
+          entry.session.getState().items,
+          m['itemId'],
+          m['diffIndex'],
+        );
+        return;
+      }
+      if (type === 'revertDiff') {
+        // 差分の見出し行「この変更を戻す」（issue #291）
+        await handleRevertDiff(
+          this.fs,
+          entry.session.getState().items,
+          m['itemId'],
+          m['diffIndex'],
+        );
+        return;
+      }
       if (type === 'attach') {
         addAttachment(entry.attachments, m['name'], m['dataUrl']);
         this.postState(entry);
@@ -1572,6 +1914,10 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
         settings: this.settings.snapshot(),
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),
+        // 差分の見出し行の操作（issue #291）をWebview側でも出し分けるための一覧。
+        // 権威ある判定はホスト側（handleOpenDiffFile等）が行うため、ここは
+        // ボタン表示のヒントに過ぎない
+        workspaceRoots: workspaceFolderPaths(),
       },
       items,
     });

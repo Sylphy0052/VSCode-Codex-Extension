@@ -490,6 +490,10 @@ export function chatStyles(): string {
     border-radius: 3px;
   }
   .diff > summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     padding: 4px 8px;
     color: var(--vscode-descriptionForeground);
     font-size: 0.85em;
@@ -499,6 +503,10 @@ export function chatStyles(): string {
   .diff[open] > summary {
     border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
   }
+  .diff-label { overflow-wrap: anywhere; }
+  /* 差分の見出し行の操作ボタン（issue #291）。コードブロックのmd-code-actionsと揃える */
+  .diff-actions { display: flex; flex-shrink: 0; gap: 4px; flex-wrap: wrap; }
+  .diff-actions button { padding: 1px 8px; font-size: 0.85em; }
   .diff-body {
     /* 長い差分でも会話全体が伸びきらないようにする */
     max-height: 420px;

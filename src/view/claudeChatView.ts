@@ -42,6 +42,9 @@ import {
   confirmRunShellCommand,
   confirmStopBackgroundTask,
   confirmUsageCreditsRequest,
+  handleOpenDiffEditor,
+  handleOpenDiffFile,
+  handleRevertDiff,
   insertCodeIntoEditor,
   noteDropRejected,
   openCodeInNewFile,
@@ -287,6 +290,10 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         ...entry.session.getState(),
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),
+        // 差分の見出し行の操作（issue #291）をWebview側でも出し分けるための一覧。
+        // 権威ある判定はホスト側（handleOpenDiffFile等）が行うため、ここは
+        // ボタン表示のヒントに過ぎない
+        workspaceRoots: workspaceFolderPaths(),
         settings: {
           models: snapshot.models,
           efforts: snapshot.efforts,
@@ -325,6 +332,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         ...entry.session.getState(),
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),
+        workspaceRoots: workspaceFolderPaths(),
       },
     });
   }
@@ -1083,6 +1091,31 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       if (type === 'openCodeFile' && typeof m['code'] === 'string') {
         // コードブロックの「新規ファイルで開く」（issue #290）
         void openCodeInNewFile(m['code'], typeof m['lang'] === 'string' ? m['lang'] : '');
+        return;
+      }
+      if (type === 'openDiffFile') {
+        // 差分の見出し行「エディタで開く」。`chatView.ts` と共通の実装（issue #291）
+        void handleOpenDiffFile(entry.session.getState().items, m['itemId'], m['diffIndex']);
+        return;
+      }
+      if (type === 'openDiffEditor') {
+        // 差分の見出し行「差分を開く」。`chatView.ts` と共通の実装（issue #291）
+        void handleOpenDiffEditor(
+          this.fs,
+          entry.session.getState().items,
+          m['itemId'],
+          m['diffIndex'],
+        );
+        return;
+      }
+      if (type === 'revertDiff') {
+        // 差分の見出し行「この変更を戻す」。`chatView.ts` と共通の実装（issue #291）
+        void handleRevertDiff(
+          this.fs,
+          entry.session.getState().items,
+          m['itemId'],
+          m['diffIndex'],
+        );
         return;
       }
       if (type === 'attach') {
