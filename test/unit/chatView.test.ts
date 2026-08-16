@@ -109,10 +109,7 @@ describe('renderShellのボタン（issue #226のアイコン化後、アクセ�
       expect(codexTag).toContain(`aria-label="${codexImportCopy.ariaLabel}"`);
       expect(codexTag).toContain(`title="${codexImportCopy.title}"`);
 
-      const claudeHtml = renderShell(
-        fakeWebview() as never,
-        buildOptions({ showImport: true }),
-      );
+      const claudeHtml = renderShell(fakeWebview() as never, buildOptions({ showImport: true }));
       const claudeTag = extractButtonOpenTag(claudeHtml, 'claudeImport');
 
       expect(codexTag).not.toContain(`aria-label="インポート"`);
@@ -126,9 +123,7 @@ describe('renderShellのボタン（issue #226のアイコン化後、アクセ�
     const tag = extractButtonOpenTag(html, 'claudeImport');
 
     expect(tag).toContain('aria-label="インポート"');
-    expect(tag).toContain(
-      'title="Codex／Geminiの設定をClaude Codeへ取り込む準備をします"',
-    );
+    expect(tag).toContain('title="Codex／Geminiの設定をClaude Codeへ取り込む準備をします"');
   });
 
   it('showRecapがtrueのときrecapボタンはhidden属性を持たない', () => {
@@ -378,6 +373,250 @@ describe('チャット下部の3段固定（issue #234）', () => {
   });
 });
 
+/**
+ * ボタンidが「…」メニュー（`#composerOverflowMenu`）の中にあるか、表
+ * （`#composerIconRow`直下）にあるかを、文字列上の出現位置で判定する。
+ * `renderComposerButton`は表向け・メニュー向けで同じidの`<button>`を1個しか出力
+ * しないため（`composerButtons`の設定で必ずどちらか一方に決まる）、
+ * `<div id="composerOverflowMenu"`の開始タグより後に現れるかどうかで判別できる。
+ */
+function isInOverflowMenu(html: string, id: string): boolean {
+  const menuOpenIndex = html.indexOf('<div id="composerOverflowMenu"');
+  const buttonIndex = html.indexOf(`<button id="${id}"`);
+  if (menuOpenIndex === -1 || buttonIndex === -1) {
+    throw new Error(`composerOverflowMenu または button#${id} が見つからない`);
+  }
+  return buttonIndex > menuOpenIndex;
+}
+
+describe('入力欄アイコン列の「…」メニュー折りたたみ（issue #296）', () => {
+  it('composerButtons省略時は既定の4つ（attach/loopToggle/compact/claudeImport）が表、残り6つが「…」メニューに入る', () => {
+    const html = renderShell(fakeWebview() as never, buildOptions({ showImport: true }));
+
+    for (const id of ['attach', 'loopToggle', 'compact', 'claudeImport']) {
+      expect(isInOverflowMenu(html, id), `${id} は表にあるはず`).toBe(false);
+    }
+    for (const id of [
+      'recap',
+      'planToggle',
+      'fastToggle',
+      'review',
+      'exportTranscript',
+      'workflowMenu',
+    ]) {
+      expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
+    }
+  });
+
+  it('composerButtonsを指定すると、そこに挙げたIDだけが表に出て、残りは「…」メニューに入る（表に出なくなったボタンがどこからも到達できなくならないことの確認）', () => {
+    const html = renderShell(
+      fakeWebview() as never,
+      buildOptions({ composerButtons: ['review', 'workflowMenu'] }),
+    );
+
+    for (const id of ['review', 'workflowMenu']) {
+      expect(isInOverflowMenu(html, id), `${id} は表にあるはず`).toBe(false);
+    }
+    for (const id of [
+      'attach',
+      'loopToggle',
+      'compact',
+      'claudeImport',
+      'recap',
+      'planToggle',
+      'fastToggle',
+      'exportTranscript',
+    ]) {
+      expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
+    }
+  });
+
+  it('composerButtonsに10個すべてを指定すると「…」メニューは空になり、入れ物（#composerOverflow）自体がhiddenになる', () => {
+    const html = renderShell(
+      fakeWebview() as never,
+      buildOptions({
+        composerButtons: [
+          'attach',
+          'loopToggle',
+          'compact',
+          'claudeImport',
+          'recap',
+          'planToggle',
+          'fastToggle',
+          'review',
+          'exportTranscript',
+          'workflowMenu',
+        ],
+      }),
+    );
+
+    const overflowTag = html.match(/<div id="composerOverflow"[^>]*>/u)?.[0];
+    expect(overflowTag).toBeDefined();
+    expect(overflowTag).toContain('hidden');
+  });
+
+  it('composerButtonsが空配列だと10個すべてが「…」メニューに入り、#composerOverflowはhiddenを持たない', () => {
+    const html = renderShell(fakeWebview() as never, buildOptions({ composerButtons: [] }));
+
+    const overflowTag = html.match(/<div id="composerOverflow"[^>]*>/u)?.[0];
+    expect(overflowTag).toBeDefined();
+    expect(overflowTag).not.toContain('hidden');
+    for (const id of ICON_ROW_BUTTON_IDS) {
+      expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
+    }
+  });
+
+  describe('条件付きで出入りするボタンは、表にあっても「…」メニューにあっても同じ条件でhiddenになる（今回いちばん壊れやすい箇所）', () => {
+    it('claudeImport: showImportがtrueなら、表でも「…」メニューでもhidden属性を持たない', () => {
+      const inToolbar = renderShell(
+        fakeWebview() as never,
+        buildOptions({ showImport: true, composerButtons: ['claudeImport'] }),
+      );
+      const inMenu = renderShell(
+        fakeWebview() as never,
+        buildOptions({ showImport: true, composerButtons: [] }),
+      );
+
+      expect(isInOverflowMenu(inToolbar, 'claudeImport')).toBe(false);
+      expect(isInOverflowMenu(inMenu, 'claudeImport')).toBe(true);
+      expect(extractButtonOpenTag(inToolbar, 'claudeImport')).not.toContain('hidden');
+      expect(extractButtonOpenTag(inMenu, 'claudeImport')).not.toContain('hidden');
+    });
+
+    it('claudeImport: showImportが未指定なら、表でも「…」メニューでもhidden属性を持つ', () => {
+      const inToolbar = renderShell(
+        fakeWebview() as never,
+        buildOptions({ composerButtons: ['claudeImport'] }),
+      );
+      const inMenu = renderShell(fakeWebview() as never, buildOptions({ composerButtons: [] }));
+
+      expect(extractButtonOpenTag(inToolbar, 'claudeImport')).toContain('hidden');
+      expect(extractButtonOpenTag(inMenu, 'claudeImport')).toContain('hidden');
+    });
+
+    it('recap: showRecapがtrueなら、表でも「…」メニューでもhidden属性を持たない', () => {
+      const inToolbar = renderShell(
+        fakeWebview() as never,
+        buildOptions({ showRecap: true, composerButtons: ['recap'] }),
+      );
+      const inMenu = renderShell(
+        fakeWebview() as never,
+        buildOptions({ showRecap: true, composerButtons: [] }),
+      );
+
+      expect(isInOverflowMenu(inToolbar, 'recap')).toBe(false);
+      expect(isInOverflowMenu(inMenu, 'recap')).toBe(true);
+      expect(extractButtonOpenTag(inToolbar, 'recap')).not.toContain('hidden');
+      expect(extractButtonOpenTag(inMenu, 'recap')).not.toContain('hidden');
+    });
+
+    it('recap: showRecapが未指定なら、表でも「…」メニューでもhidden属性を持つ', () => {
+      const inToolbar = renderShell(
+        fakeWebview() as never,
+        buildOptions({ composerButtons: ['recap'] }),
+      );
+      const inMenu = renderShell(fakeWebview() as never, buildOptions({ composerButtons: [] }));
+
+      expect(extractButtonOpenTag(inToolbar, 'recap')).toContain('hidden');
+      expect(extractButtonOpenTag(inMenu, 'recap')).toContain('hidden');
+    });
+
+    it('fastToggle: 表にあっても「…」メニューにあっても、初期描画では既定でhidden属性を持つ（応答中の出し分けはJS側のstateで制御するため）', () => {
+      const inToolbar = renderShell(
+        fakeWebview() as never,
+        buildOptions({ composerButtons: ['fastToggle'] }),
+      );
+      const inMenu = renderShell(fakeWebview() as never, buildOptions({ composerButtons: [] }));
+
+      expect(isInOverflowMenu(inToolbar, 'fastToggle')).toBe(false);
+      expect(isInOverflowMenu(inMenu, 'fastToggle')).toBe(true);
+      expect(extractButtonOpenTag(inToolbar, 'fastToggle')).toContain('hidden');
+      expect(extractButtonOpenTag(inMenu, 'fastToggle')).toContain('hidden');
+    });
+
+    it('review: mode: "command"なら、表でも「…」メニューでもhidden属性を持つ（コマンド一覧待ち）', () => {
+      const review: ReviewButtonConfig = { mode: 'command', commandName: 'review' };
+      const inToolbar = renderShell(
+        fakeWebview() as never,
+        buildOptions({ review, composerButtons: ['review'] }),
+      );
+      const inMenu = renderShell(
+        fakeWebview() as never,
+        buildOptions({ review, composerButtons: [] }),
+      );
+
+      expect(extractButtonOpenTag(inToolbar, 'review')).toContain('hidden');
+      expect(extractButtonOpenTag(inMenu, 'review')).toContain('hidden');
+    });
+
+    it('review: mode: "quickPick"なら、表でも「…」メニューでもhidden属性を持たない（常時表示）', () => {
+      const review: ReviewButtonConfig = { mode: 'quickPick' };
+      const inToolbar = renderShell(
+        fakeWebview() as never,
+        buildOptions({ review, composerButtons: ['review'] }),
+      );
+      const inMenu = renderShell(
+        fakeWebview() as never,
+        buildOptions({ review, composerButtons: [] }),
+      );
+
+      expect(isInOverflowMenu(inToolbar, 'review')).toBe(false);
+      expect(isInOverflowMenu(inMenu, 'review')).toBe(true);
+      expect(extractButtonOpenTag(inToolbar, 'review')).not.toContain('hidden');
+      expect(extractButtonOpenTag(inMenu, 'review')).not.toContain('hidden');
+    });
+  });
+
+  describe('アクセシビリティ（Tab/矢印キーで辿れる・Escapeで閉じる、issue #296）', () => {
+    it('「…」トグルボタンはaria-haspopupとaria-expanded="false"（閉じている）を持つ', () => {
+      const html = renderShell(fakeWebview() as never, buildOptions());
+      const tag = extractButtonOpenTag(html, 'composerOverflowToggle');
+
+      expect(tag).toContain('aria-haspopup="true"');
+      expect(tag).toContain('aria-expanded="false"');
+    });
+
+    it('メニュー本体（#composerOverflowMenu）はrole="menu"を持ち、初期描画ではhidden', () => {
+      const html = renderShell(fakeWebview() as never, buildOptions());
+      const match = html.match(/<div id="composerOverflowMenu"[^>]*>/u);
+
+      expect(match).not.toBeNull();
+      expect(match?.[0]).toContain('role="menu"');
+      expect(match?.[0]).toContain('hidden');
+    });
+
+    it('メニュー項目はrole="menuitem"を持つbutton要素で、aria-label/titleを表のボタンから引き継ぐ', () => {
+      const html = renderShell(
+        fakeWebview() as never,
+        buildOptions({ showImport: true, showRecap: true }),
+      );
+
+      for (const [id, label] of Object.entries(NON_SEND_BUTTON_LABELS)) {
+        if (
+          id === 'stop' ||
+          id === 'attach' ||
+          id === 'loopToggle' ||
+          id === 'compact' ||
+          id === 'claudeImport'
+        ) {
+          continue; // 表側の既定4つ（+stop）はここでは検査済み（別テスト）
+        }
+        const tag = extractButtonOpenTag(html, id);
+        expect(tag, `${id} はメニュー項目のはず`).toContain('role="menuitem"');
+        expect(tag).toContain(`aria-label="${label}"`);
+        expect(tag).toMatch(/title="[^"]+"/u);
+      }
+    });
+
+    it('planToggle/fastToggleは「…」メニューに移ってもaria-pressedを保つ（トグル状態が分かるように）', () => {
+      const html = renderShell(fakeWebview() as never, buildOptions());
+
+      expect(extractButtonOpenTag(html, 'planToggle')).toContain('aria-pressed="false"');
+      expect(extractButtonOpenTag(html, 'fastToggle')).toContain('aria-pressed="false"');
+    });
+  });
+});
+
 describe('renderShellの入力欄プレースホルダ（送信キー設定 agent.chat.sendOn、issue #288）', () => {
   it('sendOn未指定（既定ctrlEnter）では従来どおり「Ctrl+Enterで送信」と案内する', () => {
     const html = renderShell(fakeWebview() as never, buildOptions());
@@ -394,7 +633,9 @@ describe('renderShellの入力欄プレースホルダ（送信キー設定 agen
   it('sendOn: "enter"では「Enterで送信、Shift+Enterで改行」に切り替わる', () => {
     const html = renderShell(fakeWebview() as never, buildOptions({ sendOn: 'enter' }));
 
-    expect(html).toContain('Codexへの指示を入力（Enterで送信、Shift+Enterで改行、画像はCtrl+Vで貼り付け）');
+    expect(html).toContain(
+      'Codexへの指示を入力（Enterで送信、Shift+Enterで改行、画像はCtrl+Vで貼り付け）',
+    );
     expect(html).not.toContain('Ctrl+Enterで送信');
   });
 });

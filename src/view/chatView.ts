@@ -36,6 +36,7 @@ import { readSkillsList } from '../codex/skillsList';
 import { readRateLimits, type UsageSnapshot } from '../codex/usage';
 import {
   currentWorkspaceFolder,
+  readChatComposerButtonsConfig,
   readChatRenderMarkdownConfig,
   readChatSendOnConfig,
   readConfig,
@@ -95,6 +96,11 @@ import { nextActivePanelSequence, type ActiveComposerTarget } from './activePane
 import { chatCsp } from './chatCsp';
 import { chatScript, type ReviewButtonConfig } from './chatScript';
 import { chatStyles } from './chatStyles';
+import {
+  DEFAULT_COMPOSER_BUTTONS,
+  overflowComposerButtons,
+  type ComposerButtonId,
+} from './composerButtons';
 import { PendingStartRegistry } from './pendingStarts';
 import { readPersistedThreadId } from './panelState';
 import { DEFAULT_SEND_ON, type SendOnMode } from './sendKey';
@@ -1351,12 +1357,20 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     entry.panel = panel;
     panel.title = entry.title;
     panel.webview.options = { enableScripts: true };
+    // 入力欄アイコン列の表に出すボタン（設定 agent.chat.composerButtons、issue #296）。
+    // 検証・既定への丸めは readChatComposerButtonsConfig 側（normalizeComposerButtons）
+    // が行うため、ここは警告が有ればログへ出すだけ
+    const composerButtonsConfig = readChatComposerButtonsConfig();
+    if (composerButtonsConfig.warning !== undefined) {
+      this.log.warn(composerButtonsConfig.warning);
+    }
     panel.webview.html = renderShell(panel.webview, {
       agentLabel: 'Codex',
       approvalModes: APPROVAL_MODES,
       approvalCycle: CODEX_APPROVAL_CYCLE,
       sandboxModes: SANDBOX_MODES,
       showSettings: true,
+      composerButtons: composerButtonsConfig.buttons,
       // review/startはapp-serverの標準機能なので、コマンド一覧を待たずに常に出す
       review: { mode: 'quickPick' },
       // 会話の1行要約（issue #228、design.md §14.41）。拡張機能の独自機能として、
@@ -2569,6 +2583,18 @@ export interface ChatShellOptions {
    * 渡している（design.md §14.49）。
    */
   sendOn?: SendOnMode;
+  /**
+   * 入力欄アイコン列（`#composerIconRow`）の表に直接出すボタン（設定`agent.chat.
+   * composerButtons`、既定は`DEFAULT_COMPOSER_BUTTONS`＝変更前の並びの先頭4つ、
+   * issue #296）。それ以外の既存ボタンは正準の並び（`COMPOSER_BUTTON_IDS`）のまま
+   * 「…」メニュー（`#composerOverflowMenu`）へ畳む。**畳んだ後もボタン要素そのものは
+   * 移動するだけで、`id`・`hidden`条件・イベント配線は一切変えない**
+   * （`composerButtonMarkup`参照）。表・メニューのどちらにあっても`chatScript.ts`が
+   * `el(id)`で同じ要素を触るため、`showRecap` / `showImportButton` /
+   * `options.review.mode`や、応答中の状態更新（`fastToggle`等）による`hidden`の
+   * 出し入れはそのまま効く。省略時は`DEFAULT_COMPOSER_BUTTONS`。
+   */
+  composerButtons?: readonly ComposerButtonId[];
 }
 
 /**
@@ -2621,6 +2647,145 @@ const DEFAULT_IMPORT_BUTTON_COPY = {
   title: 'Codex／Geminiの設定をClaude Codeへ取り込む準備をします',
 } as const;
 
+/**
+ * `composerButtonSpec`が呼び出しごとに参照する、`renderShell`のオプションから決まる
+ * 出し分け条件（issue #296）。表に出すか「…」メニューに畳むかで内容を変えない
+ * （変えるのは置き場所だけ）ための唯一の入力。
+ */
+interface ComposerButtonContext {
+  importCopy: { ariaLabel: string; title: string };
+  showImportButton: boolean;
+  showRecap: boolean;
+  reviewMode: ReviewButtonConfig['mode'];
+}
+
+/** `composerButtonSpec`が返す、id1つ分のaria-label・title・hidden条件・アイコン。 */
+interface ComposerButtonSpec {
+  ariaLabel: string;
+  title: string;
+  hidden: boolean;
+  /** トグルボタン（計画・高速）だけ`aria-pressed="false"`を持つ。 */
+  pressed: boolean;
+  icon: string;
+}
+
+/**
+ * 10個のボタンの元の仕様（aria-label・title・hidden条件・アイコン）を1か所にまとめる
+ * （issue #296）。表・「…」メニューのどちらへ描画するかは`renderComposerButton`が
+ * 決め、ここでは条件を変えない。**この関数を触るだけで置き場所に関わらず両方へ効く**
+ * ことが、受入基準「畳んだ後も同じ条件で出入りする」の実装上の担保。
+ */
+function composerButtonSpec(id: ComposerButtonId, ctx: ComposerButtonContext): ComposerButtonSpec {
+  switch (id) {
+    case 'attach':
+      return {
+        ariaLabel: '画像',
+        title: '画像を選んで添えます。貼り付け（Ctrl+V）とドラッグ&ドロップもできます',
+        hidden: false,
+        pressed: false,
+        icon: COMPOSER_ICONS.attach,
+      };
+    case 'loopToggle':
+      return {
+        ariaLabel: 'ループ',
+        title: '同じ指示を条件成立まで繰り返します',
+        hidden: false,
+        pressed: false,
+        icon: COMPOSER_ICONS.loop,
+      };
+    case 'compact':
+      return {
+        ariaLabel: '圧縮',
+        title: 'これまでの会話を要約に置き換えてコンテキストを空けます',
+        hidden: false,
+        pressed: false,
+        icon: COMPOSER_ICONS.compact,
+      };
+    case 'claudeImport':
+      return {
+        ariaLabel: ctx.importCopy.ariaLabel,
+        title: ctx.importCopy.title,
+        hidden: !ctx.showImportButton,
+        pressed: false,
+        icon: COMPOSER_ICONS.import,
+      };
+    case 'recap':
+      return {
+        ariaLabel: '要約',
+        title: '会話の1行要約をいま作ります（要約は会話に残ります）',
+        hidden: !ctx.showRecap,
+        pressed: false,
+        icon: COMPOSER_ICONS.recap,
+      };
+    case 'planToggle':
+      return {
+        ariaLabel: '計画',
+        title: '読み取りだけに絞って計画を立てさせます。ファイルは変更されません',
+        hidden: false,
+        pressed: true,
+        icon: COMPOSER_ICONS.plan,
+      };
+    case 'fastToggle':
+      return {
+        ariaLabel: '高速',
+        title: '応答を速くします（Fast mode）',
+        // 応答中の高速切替可否はJS側のstateで制御するため、初期描画では既定でhidden
+        // （`chatScript.ts`の`applyFastMode`参照）。表・メニューどちらでも同じ
+        hidden: true,
+        pressed: true,
+        icon: COMPOSER_ICONS.fast,
+      };
+    case 'review':
+      return {
+        ariaLabel: 'レビュー',
+        title: 'コードレビューを実行します',
+        hidden: ctx.reviewMode === 'command',
+        pressed: false,
+        icon: COMPOSER_ICONS.review,
+      };
+    case 'exportTranscript':
+      return {
+        ariaLabel: 'エクスポート',
+        title: '会話全体をMarkdownとして取り出します（コピー・ファイル保存・生テキスト表示）',
+        hidden: false,
+        pressed: false,
+        icon: COMPOSER_ICONS.export,
+      };
+    case 'workflowMenu':
+      return {
+        ariaLabel: 'ワークフロー',
+        title: 'ワークフロー（複数タスクの並列実行）の実行・View・生成・停止を選びます',
+        hidden: false,
+        pressed: false,
+        icon: COMPOSER_ICONS.workflow,
+      };
+  }
+}
+
+/**
+ * ボタン1個分のHTMLを組み立てる（issue #296）。`variant: 'toolbar'`は表
+ * （`#composerIconRow`直下）向けで従来と同じアイコンのみの見た目、`'menu'`は「…」
+ * メニュー（`#composerOverflowMenu`）向けで`role="menuitem"`と可読のラベル文字列を
+ * 添える（tooltipを読まなくても区別できるように。アイコン化そのものが今回の課題の
+ * 発端だったため、畳んだ先でまで同じ問題を繰り返さない判断）。`id`・aria-label・
+ * title・hidden条件は`composerButtonSpec`の一箇所だけを見るため、置き場所によって
+ * 条件がずれることがない。
+ */
+function renderComposerButton(
+  id: ComposerButtonId,
+  ctx: ComposerButtonContext,
+  variant: 'toolbar' | 'menu',
+): string {
+  const spec = composerButtonSpec(id, ctx);
+  const ariaLabel = escapeHtml(spec.ariaLabel);
+  const title = escapeHtml(spec.title);
+  const pressedAttr = spec.pressed ? ' aria-pressed="false"' : '';
+  const roleAttr = variant === 'menu' ? ' role="menuitem"' : '';
+  const label = variant === 'menu' ? `<span class="composerOverflowLabel">${ariaLabel}</span>` : '';
+  const hiddenAttr = spec.hidden ? ' hidden' : '';
+  return `<button id="${id}" type="button" class="secondary"${pressedAttr} aria-label="${ariaLabel}" title="${title}"${roleAttr}${hiddenAttr}>${spec.icon}${label}</button>`;
+}
+
 export function renderShell(webview: vscode.Webview, options: ChatShellOptions): string {
   const nonce = randomBytes(16).toString('base64');
   const csp = chatCsp(webview.cspSource, nonce);
@@ -2631,6 +2796,18 @@ export function renderShell(webview: vscode.Webview, options: ChatShellOptions):
   // 入力欄の案内文を設定に追随させる（issue #288）。既定（ctrlEnter）は従来と同じ文言。
   const sendKeyHint =
     sendOn === 'enter' ? 'Enterで送信、Shift+Enterで改行' : 'Ctrl+Enterで送信';
+  // 表に直接出すボタン（設定 agent.chat.composerButtons、issue #296）。それ以外は
+  // 正準の並び（COMPOSER_BUTTON_IDS）のまま「…」メニューへ畳む
+  // （overflowComposerButtons）。読み込み・検証は呼び出し側（chatView.ts /
+  // claudeChatView.tsのattachPanel）の責務で、ここでは既に検証済みの配列を受け取るだけ
+  const primaryComposerButtons = options.composerButtons ?? DEFAULT_COMPOSER_BUTTONS;
+  const overflowButtons = overflowComposerButtons(primaryComposerButtons);
+  const composerButtonCtx: ComposerButtonContext = {
+    importCopy,
+    showImportButton,
+    showRecap: options.showRecap === true,
+    reviewMode: options.review.mode,
+  };
 
   return `<!DOCTYPE html>
 <html lang="ja">
@@ -2677,16 +2854,17 @@ ${chatStyles()}
     </div>
     <div id="composerIconRow">
       <input id="filePicker" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
-      <button id="attach" type="button" class="secondary" aria-label="画像" title="画像を選んで添えます。貼り付け（Ctrl+V）とドラッグ&amp;ドロップもできます">${COMPOSER_ICONS.attach}</button>
-      <button id="loopToggle" type="button" class="secondary" aria-label="ループ" title="同じ指示を条件成立まで繰り返します">${COMPOSER_ICONS.loop}</button>
-      <button id="compact" type="button" class="secondary" aria-label="圧縮" title="これまでの会話を要約に置き換えてコンテキストを空けます">${COMPOSER_ICONS.compact}</button>
-      <button id="claudeImport" type="button" class="secondary" aria-label="${escapeHtml(importCopy.ariaLabel)}" title="${escapeHtml(importCopy.title)}"${showImportButton ? '' : ' hidden'}>${COMPOSER_ICONS.import}</button>
-      <button id="recap" type="button" class="secondary" aria-label="要約" title="会話の1行要約をいま作ります（要約は会話に残ります）"${options.showRecap === true ? '' : ' hidden'}>${COMPOSER_ICONS.recap}</button>
-      <button id="planToggle" type="button" class="secondary" aria-pressed="false" aria-label="計画" title="読み取りだけに絞って計画を立てさせます。ファイルは変更されません">${COMPOSER_ICONS.plan}</button>
-      <button id="fastToggle" type="button" class="secondary" aria-pressed="false" aria-label="高速" title="応答を速くします（Fast mode）" hidden>${COMPOSER_ICONS.fast}</button>
-      <button id="review" type="button" class="secondary" aria-label="レビュー" title="コードレビューを実行します"${options.review.mode === 'command' ? ' hidden' : ''}>${COMPOSER_ICONS.review}</button>
-      <button id="exportTranscript" type="button" class="secondary" aria-label="エクスポート" title="会話全体をMarkdownとして取り出します（コピー・ファイル保存・生テキスト表示）">${COMPOSER_ICONS.export}</button>
-      <button id="workflowMenu" type="button" class="secondary" aria-label="ワークフロー" title="ワークフロー（複数タスクの並列実行）の実行・View・生成・停止を選びます">${COMPOSER_ICONS.workflow}</button>
+      ${primaryComposerButtons
+        .map((id) => renderComposerButton(id, composerButtonCtx, 'toolbar'))
+        .join('\n      ')}
+      <div id="composerOverflow"${overflowButtons.length === 0 ? ' hidden' : ''}>
+        <button id="composerOverflowToggle" type="button" class="secondary" aria-haspopup="true" aria-expanded="false" aria-label="その他" title="その他の操作を開きます">...</button>
+        <div id="composerOverflowMenu" role="menu" hidden>
+          ${overflowButtons
+            .map((id) => renderComposerButton(id, composerButtonCtx, 'menu'))
+            .join('\n          ')}
+        </div>
+      </div>
     </div>
   </div>
   <div id="loop" hidden>

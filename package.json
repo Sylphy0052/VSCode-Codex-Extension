@@ -643,6 +643,44 @@
           "scope": "window",
           "markdownDescription": "チャット画面の入力欄でEnterを送信に使うか。候補メニュー（`/` `@`）を開いている間はEnterが候補の確定として優先され、IME変換中のEnterは送信しない。**Codex画面のみ**（Claude Code画面は今回のスコープ外で常に`ctrlEnter`のまま）。"
         },
+        "agent.chat.composerButtons": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "attach",
+              "loopToggle",
+              "compact",
+              "claudeImport",
+              "recap",
+              "planToggle",
+              "fastToggle",
+              "review",
+              "exportTranscript",
+              "workflowMenu"
+            ],
+            "enumDescriptions": [
+              "画像を添付する",
+              "ループ（同じ指示を条件成立まで繰り返す）を開く",
+              "会話を要約に置き換えてコンテキストを空ける（圧縮）",
+              "他エージェントから設定をインポートする",
+              "会話の1行要約をいま作る",
+              "計画モード（読み取りだけに絞る）を切り替える",
+              "高速モード（Fast mode）を切り替える",
+              "コードレビューを実行する",
+              "会話全体をMarkdownとして取り出す（エクスポート）",
+              "ワークフローの実行・View・生成・停止を選ぶ"
+            ]
+          },
+          "default": [
+            "attach",
+            "loopToggle",
+            "compact",
+            "claudeImport"
+          ],
+          "scope": "window",
+          "markdownDescription": "チャット入力欄のアイコン列（`#composerIconRow`）の表に直接並べるボタン。ここに無いボタンは「…」メニューへ畳まれる（無くなるわけではない、issue #296）。既定は変更前の並びの先頭4つ。未知のIDや重複を含む場合は既定へ丸める。Codex/Claude Code両画面共通（実行時の条件で元から出ないボタン、例えば`fastToggle`はFast mode非対応環境では終始非表示、を指定しても、その状態のままなら出ない）。"
+        },
         "agent.notifications.approvalPending": {
           "type": "boolean",
           "default": true,

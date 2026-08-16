@@ -3224,6 +3224,61 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - 「直近にアクティブだったタブ」はタブが一度も`panel.active`になっていない場合（例: タスクが`preserveFocus: true`で背面に開いたまま人が一度も表に出していないタブ）は候補に入らない。その状態でタブが他に無ければ「1枚も無い」扱いと同じ経路（新しい会話を開く）に落ちる。これは意図した簡略化で、フォーカスされたことのないタブへ黙って挿すより、明示的に新しい会話を開く方が誤送信のリスクが低いと判断した
 - 選択範囲の上限（1MB）に近い巨大な選択を送った場合、CLI側の応答速度やコンテキスト消費については未検証（上限判定そのものの単体テストのみ）
 
+### 14.58 入力欄のアイコン列を整理する（issue #296）
+
+`#composerIconRow`にラベルの無いアイコンボタンが10個（画像・ループ・圧縮・インポート・要約・計画・高速・レビュー・エクスポート・ワークフロー）並び、使用頻度が大きく違う操作が同列に置かれてtooltipを読むまで区別が付かなかった。よく使う4つ（画像・ループ・圧縮・インポート、変更前の並びの先頭4つ）を表に残し、残り6つを「…」メニューへ畳んだ。表に出す並びは設定`agent.chat.composerButtons`で変えられる。
+
+#### ボタンの実体は1個のまま、置き場所だけをHTML側で決める
+
+10個のボタンは元から`id`・`aria-label`・`title`・`hidden`条件・クリック時の`postMessage`がそれぞれ1対1で決まっており、`chatScript.ts`はすべて`el(id)`（`document.getElementById`）で触れる。表・「…」メニューのどちらに置いても**同じ`id`の同じ`<button>`要素を1個だけ**出力する設計にし、クリックの配線（`el('recap').addEventListener(...)`等）・応答中の`disabled`切替・状態更新による`hidden`の出し入れ（`applyFastMode`等）は一切変えていない。置き場所を変えるだけで機能や条件がずれる余地を無くすため。
+
+`chatView.ts`に`composerButtonSpec(id, ctx)`（aria-label・title・hidden条件・アイコンを1か所にまとめる関数）と`renderComposerButton(id, ctx, variant)`（`variant: 'toolbar' | 'menu'`でタグの组み立てを分ける）を追加した。`hidden`条件（`showImportButton` / `options.showRecap` / `options.review.mode` / `fastToggle`の既定hidden）は`composerButtonSpec`の1箇所だけが持ち、`variant`では変えない。これが受入基準「畳んだ後も同じ条件で出入りする」の実装上の担保で、`test/unit/chatView.test.ts`の「条件付きで出入りするボタンは、表にあっても「…」メニューにあっても同じ条件でhiddenになる」で、4つの対象（`claudeImport` / `recap` / `fastToggle` / `review`）それぞれについて表・メニュー両方の描画結果を比較して固定した。
+
+#### ボタンのID一覧・既定・検証は`vscode`に依存しない別モジュールへ
+
+`src/view/composerButtons.ts`に`COMPOSER_BUTTON_IDS`（正準の並び、変更前の10個の既定順そのまま）・`DEFAULT_COMPOSER_BUTTONS`（先頭4つ）・`normalizeComposerButtons`（設定の生値の検証）・`overflowComposerButtons`（表に出す分を除いた残りを正準の並びの順で返す）を置いた。`vscode`に依存しない純粋関数のみで、`config.ts`（検証）と`chatView.ts`（描画）の両方から使う。
+
+`normalizeComposerButtons`は、配列でない・未知のIDを含む・IDが重複する、のいずれかであれば**丸ごと**`DEFAULT_COMPOSER_BUTTONS`へ戻す（`config.ts`の`normalizePseudoWorktreeExclude`と同じ「壊れた設定値は既定へ丸める」方針。一部のIDだけ間引く実装も検討したが、利用者が意図しない並びのまま中途半端に描画されるより、既定へ全戻しして警告を出す方が事故に気付きやすいと判断した）。空配列は「表には何も出さず全部畳む」という有効な指定として受け入れる。
+
+#### 設定の読み込み・警告のログ出しは呼び出し側（`attachPanel`）
+
+`config.ts`の`readChatComposerButtonsConfig()`は`agent.chat.composerButtons`の生値を`normalizeComposerButtons`へ渡し、`{ buttons, warning? }`を返す（`readSessionPresetsConfig`と同じ「検証はconfig.ts、ログは呼び出し側」という役割分担）。`chatView.ts` / `claudeChatView.ts`の`attachPanel`はどちらもこれを呼び、`warning`があれば`this.log.warn`へ出してから`renderShell`の`composerButtons`へ渡す。スコープは既存の`agent.chat.renderMarkdown` / `agent.chat.sendOn`と同じ`window`。
+
+#### 「…」メニューはキーボードで完結する（アクセシビリティ）
+
+トグルボタン`#composerOverflowToggle`に`aria-haspopup="true"`・`aria-expanded`（開閉状態を反映）を持たせ、メニュー本体`#composerOverflowMenu`は`role="menu"`、各項目は`role="menuitem"`を持つ`<button>`のまま（機能を変えず属性を足しただけ）。`chatScript.ts`に以下を実装した（`vscode`には依存しないDOM操作のみ）。
+
+- 開くと最初の項目へフォーカスを移す。閉じている項目（`hidden`）はフォーカス対象から除く（`overflowMenuItems()`）
+- メニュー内では`ArrowUp` / `ArrowDown`で項目間を移動（端で折り返す）、`Tab` / `Shift+Tab`も端で折り返してメニュー外へフォーカスが逃げないようにする
+- `Escape`で閉じてトグルボタンへフォーカスを戻す
+- メニュー外クリック、またはメニュー項目のクリックで閉じる（項目のクリックは元の`click`ハンドラが先に動いてから閉じる。ボタンの機能自体は変えていない）
+
+グローバルの`document.addEventListener('keydown', ...)`（応答中に`Escape`で`interrupt`を送る、既存実装）とメニューの`Escape`ハンドラはどちらも`stopPropagation`を呼ばない。これは既存の候補メニュー（`/` `@`の入力補完、`closeMenu()`）の`Escape`処理も同様に`stopPropagation`していない、このリポジトリの既存の書き方に揃えたもの（応答中にメニューを閉じるつもりで押した`Escape`が同時に中断も送る、という既存の挙動をそのまま踏襲する）。
+
+メニュー項目は表のボタンと違い、アイコンだけでなく可読のラベル文字列（`aria-label`と同じ文字列）も添えて出す（`renderComposerButton`の`variant: 'menu'`、`.composerOverflowLabel`）。「tooltipを読むまで区別が付かない」という今回の課題の発端を、畳んだ先のメニューでまで繰り返さないための判断（受入基準には無いが、アイコン化そのものが元の課題である以上、これをやらないとメニューの中で同じ問題が残る）。
+
+#### CSS: `#commands`と同じ浮き出し方に揃える
+
+`#composerOverflow`を`position: relative`にし、`#composerOverflowMenu`をその右下へ`position: absolute`で開く。枠線・影・`z-index`は既存の`#commands`（`/` `@`の候補一覧）と揃えた。メニュー項目は`#composer button:not(#send)`の中央寄せ・詰めpaddingを`#composerOverflowMenu button:not(#send)`で上書きし、左寄せ・横幅いっぱいにしてラベル文字列を読みやすくしている（同じ詳細度のセレクタなので、後発の規則が勝つCSSの通常の優先順位に依っている。`!important`は使っていない）。
+
+#### 実装とテスト
+
+- `src/view/composerButtons.ts`: `COMPOSER_BUTTON_IDS` / `DEFAULT_COMPOSER_BUTTONS` / `normalizeComposerButtons` / `overflowComposerButtons` / `isComposerButtonId`（新設、`vscode`非依存）
+- `src/config.ts`: `readChatComposerButtonsConfig`（新設）
+- `src/view/chatView.ts`: `ChatShellOptions.composerButtons`（新設）、`composerButtonSpec` / `renderComposerButton`（新設）、`renderShell`の`#composerIconRow`を表＋`#composerOverflow`（`#composerOverflowToggle` + `#composerOverflowMenu`）構成へ変更、`attachPanel`で`readChatComposerButtonsConfig()`を呼んで渡す
+- `src/view/claudeChatView.ts`: `attachPanel`で同じく`readChatComposerButtonsConfig()`を呼んで渡す（Codex画面と同じ配線）
+- `src/view/chatScript.ts`: メニューの開閉・フォーカス移動（`overflowMenuItems` / `openOverflowMenu` / `closeOverflowMenu`）・`ArrowUp` / `ArrowDown` / `Tab` / `Escape`のハンドラ・メニュー外クリックでの close
+- `src/view/chatStyles.ts`: `#composerOverflow` / `#composerOverflowMenu` / `.composerOverflowLabel`
+- `package.json`: `agent.chat.composerButtons`（`contributes.configuration`、配列・`items.enum`・既定は先頭4つ・`window`スコープ）
+- `test/unit/composerButtons.test.ts`: `normalizeComposerButtons` / `overflowComposerButtons` / `isComposerButtonId`の単体テスト（既定・未知ID・重複・空配列の扱い）
+- `test/unit/config.test.ts`: `readChatComposerButtonsConfig`の既定・カスタム・未知ID時の警告
+- `test/unit/chatView.test.ts`: 表・「…」メニューへの振り分け、設定変更時の到達可能性、条件付き4ボタンの表/メニュー間での条件一致、アクセシビリティ属性（`aria-haspopup` / `aria-expanded` / `role` / `aria-pressed`）
+
+#### 残る制約
+
+- メニューの実際のキー操作・フォーカス移動・クリックでの開閉は、chatScript.ts側のDOM操作であり、vitestのnode環境では自動化できていない（§14.51・§14.52・§14.57と同じ制約）。動作確認は`docs/manual-test.md`のU-23に委ねる
+- メニュー項目の可読ラベル（`.composerOverflowLabel`）は受入基準そのものには無い追加。アイコンのみのままでも受入基準は満たせるが、畳んだ先で元の課題（tooltip依存）を繰り返さないための判断であり、外す方向の指摘があれば追従できる
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）

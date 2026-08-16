@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  readChatComposerButtonsConfig,
   readChatSendOnConfig,
   readClaudeConfig,
   readNotificationsConfig,
   readWorkflowsConfig,
 } from '../../src/config';
+import { DEFAULT_COMPOSER_BUTTONS } from '../../src/view/composerButtons';
 import { __mock } from '../mocks/vscode';
 
 describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
@@ -155,6 +157,32 @@ describe('readChatSendOnConfig（issue #288）', () => {
   it('未知の値は既定（ctrlEnter）へ丸める', () => {
     __mock.setConfig('agent', { 'chat.sendOn': 'always' });
     expect(readChatSendOnConfig()).toBe('ctrlEnter');
+  });
+});
+
+describe('readChatComposerButtonsConfig（issue #296）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('既定はDEFAULT_COMPOSER_BUTTONS（変更前の並びの先頭4つ）で、警告は無い', () => {
+    const result = readChatComposerButtonsConfig();
+    expect(result.buttons).toEqual(DEFAULT_COMPOSER_BUTTONS);
+    expect(result.warning).toBeUndefined();
+  });
+
+  it('agent.chat.composerButtonsに既知のIDの配列を指定するとその順のまま使う', () => {
+    __mock.setConfig('agent', { 'chat.composerButtons': ['review', 'workflowMenu'] });
+    const result = readChatComposerButtonsConfig();
+    expect(result.buttons).toEqual(['review', 'workflowMenu']);
+    expect(result.warning).toBeUndefined();
+  });
+
+  it('未知のIDを含む場合は既定へ丸め、呼び出し側がログへ出せる警告を返す', () => {
+    __mock.setConfig('agent', { 'chat.composerButtons': ['attach', 'nope'] });
+    const result = readChatComposerButtonsConfig();
+    expect(result.buttons).toEqual(DEFAULT_COMPOSER_BUTTONS);
+    expect(result.warning).toContain('nope');
   });
 });
 

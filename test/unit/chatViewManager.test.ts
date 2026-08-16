@@ -557,6 +557,73 @@ describe('ChatViewManager', () => {
     });
   });
 
+  describe('入力欄アイコン列の設定配線（agent.chat.composerButtons、issue #296）', () => {
+    /**
+     * ボタンidが「…」メニュー（`#composerOverflowMenu`）の中にあるか、表
+     * （`#composerIconRow`直下）にあるかを、`<div id="composerOverflowMenu"`の
+     * 開始タグより後に現れるかどうかで判別する（chatView.test.tsの同名ヘルパーと同じ判定）。
+     */
+    function isInOverflowMenu(html: string, id: string): boolean {
+      const menuOpenIndex = html.indexOf('<div id="composerOverflowMenu"');
+      const buttonIndex = html.indexOf(`id="${id}"`);
+      if (menuOpenIndex < 0 || buttonIndex < 0) {
+        throw new Error(`composerOverflowMenu または button#${id} が見つからない`);
+      }
+      return buttonIndex > menuOpenIndex;
+    }
+
+    it('設定を読んでいなければCodex側の実描画でも既定4つ（attach/loopToggle/compact/claudeImport）が表に残り、残り6つはメニューへ畳まれる', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openNew();
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-composer-buttons'));
+      await p;
+
+      const html = __mock.lastCreatedPanel()?.webview.html ?? '';
+      for (const id of ['attach', 'loopToggle', 'compact', 'claudeImport']) {
+        expect(isInOverflowMenu(html, id), `${id} は表にあるはず`).toBe(false);
+      }
+      for (const id of ['recap', 'planToggle', 'fastToggle', 'review', 'exportTranscript', 'workflowMenu']) {
+        expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
+      }
+    });
+
+    it('agent.chat.composerButtonsをreview/workflowMenuに絞るとCodex側の実描画にも反映される', async () => {
+      __mock.setConfig('agent', { 'chat.composerButtons': ['review', 'workflowMenu'] });
+      const { manager, connection } = createManager();
+      const p = manager.openNew();
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-composer-buttons-2'));
+      await p;
+
+      const html = __mock.lastCreatedPanel()?.webview.html ?? '';
+      expect(isInOverflowMenu(html, 'review'), 'review は表にあるはず').toBe(false);
+      expect(isInOverflowMenu(html, 'workflowMenu'), 'workflowMenu は表にあるはず').toBe(false);
+      expect(isInOverflowMenu(html, 'attach'), 'attach は「…」メニューにあるはず').toBe(true);
+      expect(isInOverflowMenu(html, 'claudeImport'), 'claudeImport は「…」メニューにあるはず').toBe(
+        true,
+      );
+    });
+
+    it('未知のIDを含む設定は既定へ丸められ、Codex側のロガーへ警告が出る', async () => {
+      __mock.setConfig('agent', { 'chat.composerButtons': ['attach', 'nope'] });
+      const warnSpy = vi.spyOn(fakeLogger, 'warn');
+      const { manager, connection } = createManager();
+      const p = manager.openNew();
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-composer-buttons-3'));
+      await p;
+
+      const html = __mock.lastCreatedPanel()?.webview.html ?? '';
+      for (const id of ['attach', 'loopToggle', 'compact', 'claudeImport']) {
+        expect(isInOverflowMenu(html, id), `${id} は表にあるはず`).toBe(false);
+      }
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('nope'));
+
+      warnSpy.mockRestore();
+    });
+  });
+
   describe('既存機能の回帰', () => {
     it('新しい会話（openNew）は引数無しでも従来通り動く', async () => {
       const { manager, connection } = createManager();
