@@ -1791,6 +1791,7 @@ C群・L群・W群のように画面単位ではなく、チャット画面・�
 - 操作: 候補メニューを開いた状態で`Ctrl+Enter`を押す
 - 期待: 候補は確定されず、その場でメッセージが送信される（改修前から変わらない挙動）
 - 確認: `agent.chat.sendOn`を既定（`ctrlEnter`）に戻した状態でも、IME変換中の`Enter`は送信されないこと・候補メニューの確定優先が変わらないことを1往復ずつ確認する
+
 ### U-07 既定のキーバインドの動作確認（design.md §14.50、issue #289）
 
 `contributes.keybindings`で追加した4件（`codex.newChat` `claude.newChat` `codex.resumeLast` `agent.workflows.view`）を実機で確認する。衝突調査自体はdesign.md §14.50のとおりVS Code本体の既定キーバインドJSONの完全一致検索で済ませてあるため、ここでは実機での発火・`when`句の効き方だけを見る。

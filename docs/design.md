@@ -2852,6 +2852,7 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 残る制約:
 
 - IME変換確定時のブラウザ間の`isComposing`挙動差は実機（Windows IME・macOS日本語入力・Linux fcitx等）ごとの確認をしていない。`compositionstart`/`compositionend`の追跡を保険として二重に持たせているが、特殊なIME実装で両方とも取りこぼす経路が無い保証は無い
+
 ### 14.50 主要コマンドへ既定のキーバインドを割り当てる（issue #289）
 
 背景: `contributes.keybindings`が存在せず、`codex.newChat`・`claude.newChat`・`codex.resumeLast`・`agent.workflows.view`を含む全ての操作がコマンドパレットかクリック経由でしか呼べなかった。
