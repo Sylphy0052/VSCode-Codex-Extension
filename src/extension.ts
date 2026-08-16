@@ -91,6 +91,11 @@ import {
 } from './orchestrator/planner';
 import { MAX_PROMPT_LENGTH, MAX_TASK_COUNT } from './orchestrator/workflow';
 import type { Provider } from './orchestrator/workflow';
+import {
+  formatResolutionFailureMessage,
+  resolveSpawnPath,
+  ResolutionNotificationTracker,
+} from './provider/executableResolution';
 import { ProviderRegistry } from './provider/registry';
 import type { AgentProvider } from './provider/types';
 import { createLogger, type Logger } from './log';
@@ -279,7 +284,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const claude = new ClaudeProvider(claudeStore);
   const providers = new ProviderRegistry([codex, claude]);
   /** Codex固有の機能（app-server・設定パネル・破壊操作）が使う実行ファイル。 */
-  const codexPath = (): string => resolveExecutable(codex, log) ?? 'codex';
+  const codexPath = createExecutablePathResolver(codex, log);
 
   const activity = new ActivityLogger(
     nodeActivityAppender,
@@ -297,7 +302,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   };
 
   /** Claude Code固有の機能（設定パネル・モデル一覧）が使う実行ファイル。 */
-  const claudePath = (): string => resolveExecutable(claude, log) ?? 'claude';
+  const claudePath = createExecutablePathResolver(claude, log);
 
   // 単発の問い合わせ（fork・モデル一覧・エージェント一覧・MCP一覧・hooks一覧・ログイン状態）に
   // 使う。会話用の接続とは別プロセス
@@ -1884,31 +1889,45 @@ export function deactivate(): void {
 }
 
 /**
- * CLIの実行ファイルを解決する。見つからなければ導入手順への導線を出す。
+ * CLIの実行ファイルを解決するクロージャを作る（issue #305）。
+ *
+ * 明示指定（`codex.executablePath` / `claude.executablePath`）が壊れていても、
+ * 黙って別のバイナリ（PATH上の裸のコマンド名）へすり替えない。解決結果は
+ * `resolveSpawnPath`が決め、失敗時は「実際に試したパスや名前」をそのまま返すため、
+ * 明示指定の失敗はspawn自体の失敗（ENOENT等）として利用者に伝わる。指定が無い場合は
+ * 従来通りその名前をspawnのPATH解決に委ねる。
+ *
+ * 通知（`showErrorMessage`）は`ResolutionNotificationTracker`により同じ失敗の間は
+ * 一度だけに絞る。ログ（`log.error`）は毎回出す（診断用途で、通知ほど煩わしくないため）。
  */
-function resolveExecutable(provider: AgentProvider, log: Logger): string | undefined {
-  const located = provider.locate();
-  if (located.ok) {
-    return located.path;
-  }
+function createExecutablePathResolver(provider: AgentProvider, log: Logger): () => string {
+  const tracker = new ResolutionNotificationTracker();
 
-  const message =
-    located.reason === 'setting-not-executable'
-      ? `${provider.executableSettingKey} が実行できません: ${located.attempted}`
-      : `${located.attempted} コマンドが見つかりません。${provider.label} を導入するか ${provider.executableSettingKey} を設定してください`;
-  log.error(message);
-
-  void vscode.window.showErrorMessage(message, 'インストール手順', '設定を開く').then((choice) => {
-    if (choice === 'インストール手順') {
-      void vscode.env.openExternal(vscode.Uri.parse(provider.installUrl));
-    } else if (choice === '設定を開く') {
-      void vscode.commands.executeCommand(
-        'workbench.action.openSettings',
-        provider.executableSettingKey,
-      );
+  return (): string => {
+    const located = provider.locate();
+    const spawnPath = resolveSpawnPath(located);
+    if (located.ok) {
+      tracker.shouldNotify(located);
+      return spawnPath;
     }
-  });
-  return undefined;
+
+    const message = formatResolutionFailureMessage(provider, located);
+    log.error(message);
+
+    if (tracker.shouldNotify(located)) {
+      void vscode.window.showErrorMessage(message, 'インストール手順', '設定を開く').then((choice) => {
+        if (choice === 'インストール手順') {
+          void vscode.env.openExternal(vscode.Uri.parse(provider.installUrl));
+        } else if (choice === '設定を開く') {
+          void vscode.commands.executeCommand(
+            'workbench.action.openSettings',
+            provider.executableSettingKey,
+          );
+        }
+      });
+    }
+    return spawnPath;
+  };
 }
 
 /**
