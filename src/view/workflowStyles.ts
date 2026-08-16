@@ -187,7 +187,29 @@ export function workflowStyles(): string {
   #taskTable tr.task-row { cursor: pointer; }
   #taskTable tr.task-row:hover { background-color: var(--vscode-list-hoverBackground); }
   #taskTable .ops { display: flex; gap: 4px; flex-wrap: wrap; }
-  #taskTable .state-badge { display: inline-flex; align-items: center; gap: 4px; }
+  #taskTable .state-badge { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+
+  /* 状態のバッジ（Issue #280）。色はグラフのノード枠（.wf-node.state-*）と同じ配色を使い、
+     図と一覧で同じ状態が同じ色に見えるようにする。文字は色だけに頼らず常に併記する */
+  .state-pill {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 0.92em;
+    white-space: nowrap;
+    border: 1px solid transparent;
+    background-color: color-mix(in srgb, var(--wf-state-color) 22%, var(--vscode-editor-background));
+    border-color: color-mix(in srgb, var(--wf-state-color) 55%, transparent);
+    color: var(--vscode-foreground);
+    --wf-state-color: var(--vscode-descriptionForeground);
+  }
+  .state-pill.state-running { --wf-state-color: var(--vscode-charts-blue); }
+  .state-pill.state-waitingApproval,
+  .state-pill.state-waitingReply,
+  .state-pill.state-blocked { --wf-state-color: var(--vscode-charts-yellow); }
+  .state-pill.state-done,
+  .state-pill.state-merging { --wf-state-color: var(--vscode-charts-green); }
+  .state-pill.state-failed { --wf-state-color: var(--vscode-errorForeground); }
   #taskTable .summary-cell { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #taskTable .hint, #integrationInfo .hint { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
 
