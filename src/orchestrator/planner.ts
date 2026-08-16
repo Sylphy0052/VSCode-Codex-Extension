@@ -10,10 +10,12 @@ import { stripControlChars } from './sanitize';
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { TaskSessionHost, TaskSessionInput } from './taskSession';
 import {
-  CLEANUP_MODES,
   clampClaudePermissionMode,
   clampCodexApprovalMode,
   clampSandbox,
+} from '../util/safetyClamp';
+import {
+  CLEANUP_MODES,
   DEFAULT_AUTO_APPROVE,
   DEFAULT_CLEANUP,
   DEFAULT_CONTINUE_PROMPT,
