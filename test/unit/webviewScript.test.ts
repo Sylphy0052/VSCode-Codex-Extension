@@ -162,6 +162,19 @@ describe('workflowScript', () => {
     expect(/\$\{/.test(source)).toBe(false);
   });
 
+  it('グラフの描画幅を拡張機能へ伝える（段の折り返し用）', () => {
+    const source = workflowScript();
+    expect(source).toContain("type: 'viewport'");
+    expect(source).toContain('ResizeObserver');
+  });
+
+  it('グラフのズーム操作を配線している（拡大・縮小・全体表示）', () => {
+    const source = workflowScript();
+    expect(source).toContain("el('graphZoomInBtn')");
+    expect(source).toContain("el('graphZoomOutBtn')");
+    expect(source).toContain("el('graphZoomFitBtn')");
+  });
+
   it('動的な値をHTMLへ文字列結合しない（innerHTML/outerHTMLを使わない）', () => {
     // design.md §16.8「画面に出す動的な文字列は必ずテキストノードとして挿入する」。
     // innerHTML系のAPIを使わないことをここで機械的に固定しておく

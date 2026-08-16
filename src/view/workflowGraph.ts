@@ -22,6 +22,11 @@ export interface GraphNodeLayout {
   rank: number;
   /** 同じ段の中での並び順（0始まり）。定義ファイルに書かれた順を保つ。 */
   indexInRank: number;
+  /**
+   * 縦方向の行番号（0始まり）。折り返しが起きなければ `rank` と一致する。
+   * 段が幅に収まらず複数行へ折り返された場合だけ `rank` より大きくなる。
+   */
+  row: number;
   /** ノード中心のx座標。 */
   x: number;
   /** ノード中心のy座標。 */
@@ -34,13 +39,25 @@ export interface GraphEdgeLayout {
 }
 
 export interface GraphLayout {
-  /** 段ごとのタスクid（定義順）。 */
+  /** 段ごとのタスクid（定義順）。折り返しが起きても段の区切りはそのまま保つ。 */
   ranks: readonly (readonly string[])[];
   nodes: readonly GraphNodeLayout[];
   edges: readonly GraphEdgeLayout[];
   /** SVGの`viewBox`に使う全体サイズ。 */
   width: number;
   height: number;
+  /** 折り返しが1箇所でも起きたか。View側で注記を出す判断に使う。 */
+  wrapped: boolean;
+}
+
+/** `layoutGraph` の調整値。 */
+export interface LayoutOptions {
+  /**
+   * 描画領域の幅（px）。これを超える段は複数行へ折り返す（design.md §16.8「同じ段のタスクを
+   * 横に並べる」を保ちつつ、パネル幅に収まらない並列数でも全体が見えるようにする）。
+   * 未指定なら折り返さない（従来どおり1段=1行）。
+   */
+  maxWidth?: number | undefined;
 }
 
 export const NODE_WIDTH = 168;
@@ -101,13 +118,35 @@ export function computeRanks(tasks: readonly GraphTaskInput[]): Map<string, numb
 }
 
 /**
+ * 描画幅 `maxWidth` に何ノードまで横並びできるかを求める。
+ * `n` ノードの並びは `n * NODE_WIDTH + (n - 1) * NODE_GAP_X + MARGIN_X * 2` の幅を要する。
+ * 1ノードすら入らない極端に狭い幅でも、行が空にならないよう最低1を返す（残りは
+ * View側の縮小表示・横スクロールが受け持つ）。
+ */
+function nodesPerRow(maxWidth: number | undefined): number {
+  if (maxWidth === undefined || !Number.isFinite(maxWidth) || maxWidth <= 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const usable = maxWidth - MARGIN_X * 2 + NODE_GAP_X;
+  return Math.max(1, Math.floor(usable / (NODE_WIDTH + NODE_GAP_X)));
+}
+
+/**
  * 段レイアウトを計算する（design.md §16.8「依存グラフ」）。
  *
  * 同じ段のタスクは横に並べ、段全体を横方向の中心へ揃える。段が変われば縦に積む。
  * 同じ段内の並び順は定義ファイルに書かれた順（`tasks` 配列の順）をそのまま使う
  * （design.md §16.3「定義ファイルに書かれた順で埋める」とスケジューリングの見た目を揃える）。
+ *
+ * `options.maxWidth` を渡すと、その幅に収まらない段は同じ段のまま複数行へ折り返す。
+ * 並列数が多いワークフローでもパネル幅の中に全体が入る（Viewは折り返し後の幅で更に
+ * 縮小表示する）。折り返しても段の順序（rank）は保たれるので、依存元の行は依存先の行より
+ * 必ず上に来る。
  */
-export function layoutGraph(tasks: readonly GraphTaskInput[]): GraphLayout {
+export function layoutGraph(
+  tasks: readonly GraphTaskInput[],
+  options: LayoutOptions = {},
+): GraphLayout {
   const rankOf = computeRanks(tasks);
   const maxRank = tasks.reduce((max, t) => Math.max(max, rankOf.get(t.id) ?? 0), 0);
   const ranks: string[][] = Array.from({ length: tasks.length === 0 ? 0 : maxRank + 1 }, () => []);
@@ -115,20 +154,41 @@ export function layoutGraph(tasks: readonly GraphTaskInput[]): GraphLayout {
     ranks[rankOf.get(t.id) ?? 0]?.push(t.id);
   }
 
-  const rowWidths = ranks.map(
-    (ids) => ids.length * NODE_WIDTH + Math.max(0, ids.length - 1) * NODE_GAP_X,
+  // 段を「実際に描く行」へ割り付ける。折り返しが無ければ1段=1行で従来と同じ結果になる
+  const perRow = nodesPerRow(options.maxWidth);
+  const rows: { rank: number; entries: { id: string; indexInRank: number }[] }[] = [];
+  ranks.forEach((ids, rankIndex) => {
+    for (let offset = 0; offset < ids.length; offset += perRow) {
+      const slice = ids.slice(offset, offset + perRow);
+      rows.push({
+        rank: rankIndex,
+        entries: slice.map((id, i) => ({ id, indexInRank: offset + i })),
+      });
+    }
+  });
+  const wrapped = rows.length > ranks.length;
+
+  const rowWidths = rows.map(
+    (row) => row.entries.length * NODE_WIDTH + Math.max(0, row.entries.length - 1) * NODE_GAP_X,
   );
   const width = Math.max(0, ...rowWidths) + MARGIN_X * 2;
   const centerX = width / 2;
 
   const nodes: GraphNodeLayout[] = [];
-  ranks.forEach((ids, rankIndex) => {
-    const rowWidth = rowWidths[rankIndex] ?? 0;
+  rows.forEach((row, rowIndex) => {
+    const rowWidth = rowWidths[rowIndex] ?? 0;
     const startX = centerX - rowWidth / 2;
-    ids.forEach((id, indexInRank) => {
-      const x = startX + indexInRank * (NODE_WIDTH + NODE_GAP_X) + NODE_WIDTH / 2;
-      const y = rankIndex * (NODE_HEIGHT + RANK_GAP_Y) + NODE_HEIGHT / 2 + MARGIN_X;
-      nodes.push({ id, rank: rankIndex, indexInRank, x, y });
+    row.entries.forEach((entry, indexInRow) => {
+      const x = startX + indexInRow * (NODE_WIDTH + NODE_GAP_X) + NODE_WIDTH / 2;
+      const y = rowIndex * (NODE_HEIGHT + RANK_GAP_Y) + NODE_HEIGHT / 2 + MARGIN_X;
+      nodes.push({
+        id: entry.id,
+        rank: row.rank,
+        indexInRank: entry.indexInRank,
+        row: rowIndex,
+        x,
+        y,
+      });
     });
   });
 
@@ -141,8 +201,8 @@ export function layoutGraph(tasks: readonly GraphTaskInput[]): GraphLayout {
     }
   }
 
-  const height = ranks.length === 0 ? 0 : ranks.length * (NODE_HEIGHT + RANK_GAP_Y) + MARGIN_X;
-  return { ranks: ranks.map((ids) => [...ids]), nodes, edges, width, height };
+  const height = rows.length === 0 ? 0 : rows.length * (NODE_HEIGHT + RANK_GAP_Y) + MARGIN_X;
+  return { ranks: ranks.map((ids) => [...ids]), nodes, edges, width, height, wrapped };
 }
 
 /** 全体の進捗集計（design.md §16.8「全体の進捗」）。 */

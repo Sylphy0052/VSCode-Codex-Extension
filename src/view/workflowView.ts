@@ -33,6 +33,13 @@ export class WorkflowViewManager implements vscode.Disposable {
    * 変化しようがない）。
    */
   private previewSnapshot: WorkflowRunSnapshot | undefined;
+  /**
+   * Webviewが報告してきたグラフ描画領域の幅（px、design.md §16.8「依存グラフ」）。
+   * 段の折り返し（`layoutGraph`の`maxWidth`）に使う。パネルの幅は拡張機能側からは
+   * 取れないため、Webview側の`ResizeObserver`から`viewport`メッセージで受け取る。
+   * 未受信の間は`undefined`＝折り返さない（従来どおりのレイアウト）。
+   */
+  private graphViewportWidth: number | undefined;
   private readonly unsubscribeChanged: () => void;
 
   constructor(
@@ -104,6 +111,9 @@ export class WorkflowViewManager implements vscode.Disposable {
     panel.webview.onDidReceiveMessage((message: unknown) => void this.handleMessage(message));
     panel.onDidDispose(() => {
       this.panel = undefined;
+      // 次にパネルを開いたときは新しいWebviewが幅を報告し直す。古い幅を持ち越すと
+      // 開き直した直後の1回だけ違う幅で折り返してしまう
+      this.graphViewportWidth = undefined;
     });
     this.panel = panel;
     return panel;
@@ -165,7 +175,7 @@ export class WorkflowViewManager implements vscode.Disposable {
       return;
     }
     this.panel.title = (snapshot.name === '' ? 'ワークフロー' : snapshot.name) + titleSuffix;
-    const layout = layoutGraph(snapshot.tasks);
+    const layout = layoutGraph(snapshot.tasks, { maxWidth: this.graphViewportWidth });
     // 進捗の内訳・統合の状況の集計は`workflowGraph.ts`の純粋関数（テスト済み）で行い、
     // Webview側では受け取った結果を表示するだけにする（design.md §16.8「全体の進捗」・
     // 「そのほか」・Issue #104。以前はWebview内のJavaScriptで独自に集計しており、
@@ -188,6 +198,21 @@ export class WorkflowViewManager implements vscode.Disposable {
 
     if (type === 'ready') {
       this.postAll();
+      return;
+    }
+    if (type === 'viewport' && typeof m['width'] === 'number') {
+      // Webviewは信頼境界の外側。NaN・負値・極端な値をそのままレイアウトへ渡さない
+      // （`layoutGraph`側も最低1ノードは並べるが、ここでも常識的な範囲に丸めておく）
+      const raw = m['width'];
+      if (!Number.isFinite(raw)) {
+        return;
+      }
+      const width = Math.min(20000, Math.max(0, Math.round(raw)));
+      if (width === this.graphViewportWidth) {
+        return;
+      }
+      this.graphViewportWidth = width;
+      this.postState();
       return;
     }
     if (type === 'selectRun' && typeof m['runId'] === 'string') {
@@ -240,7 +265,9 @@ export class WorkflowViewManager implements vscode.Disposable {
         // `cleanup: after-merge`（既定）の正常完了直後は自動撤去済みで対象が1件も無い。
         // 何も起きず黙るだけだと「押しても反応が無い」ように見えるため、その旨を伝える
         // （Issue #252）
-        void vscode.window.showInformationMessage('撤去するworktreeはありません（既に撤去済みです）。');
+        void vscode.window.showInformationMessage(
+          '撤去するworktreeはありません（既に撤去済みです）。',
+        );
       }
       return;
     }
@@ -411,7 +438,16 @@ ${workflowStyles()}
   </div>
 
   <div id="content" hidden>
-    <h2>依存グラフ</h2>
+    <div class="section-head">
+      <h2>依存グラフ</h2>
+      <div class="graph-tools">
+        <span id="graphWrapNote" class="hint" hidden>幅に合わせて折り返し表示</span>
+        <button id="graphZoomOutBtn" type="button" class="secondary" title="縮小">−</button>
+        <span id="graphZoomLabel" class="zoom-label"></span>
+        <button id="graphZoomInBtn" type="button" class="secondary" title="拡大">＋</button>
+        <button id="graphZoomFitBtn" type="button" class="secondary" title="幅に合わせて全体を表示">全体表示</button>
+      </div>
+    </div>
     <div id="graphWrap">
       <svg id="graph" xmlns="http://www.w3.org/2000/svg"></svg>
     </div>

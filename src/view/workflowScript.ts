@@ -44,6 +44,23 @@ export function workflowScript(): string {
   let currentSnapshot = null;
   let currentLayout = null;
 
+  // ---- グラフの表示倍率（design.md §16.8「依存グラフ」） ----
+  // グラフがパネル幅に収まらないと全体を見渡せないため、次の3段構えで対処する。
+  //   1. 段の折り返し: 描画領域の幅を拡張機能側へ伝え、layoutGraphが1段を複数行へ折る
+  //   2. 幅に合わせた縮小: 折り返しても収まらなければviewBoxごと縮小する（下限あり）
+  //   3. 手動ズーム: 拡大して細部を読む・縮小して更に広く見る操作を人に開放する
+  // 'fit'は1と2の自動追随、'manual'は人が選んだ倍率を保つ。
+  let zoomMode = 'fit';
+  let zoomScale = 1;
+  /** 自動縮小の下限。これ以上小さくすると文字が読めないので、残りは横スクロールに任せる。 */
+  const MIN_FIT_SCALE = 0.5;
+  const MIN_ZOOM = 0.25;
+  const MAX_ZOOM = 2;
+  const ZOOM_STEP = 1.25;
+  /** 直近に拡張機能へ伝えた描画領域の幅。同じ値の往復とスクロールバー分の振動を抑える。 */
+  let reportedGraphWidth = -1;
+  let viewportTimer = 0;
+
   // ---- ユーティリティ ----
 
   function svgEl(tag, attrs) {
@@ -262,12 +279,74 @@ export function workflowScript(): string {
     return group;
   }
 
+  /** グラフ描画領域の内寸（px）。パネルが閉じている等で取れなければ0。 */
+  function graphViewportWidth() {
+    const wrap = el('graphWrap');
+    if (!wrap) return 0;
+    const style = window.getComputedStyle(wrap);
+    const padding = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+    return Math.max(0, wrap.clientWidth - padding);
+  }
+
+  /**
+   * 段の折り返しに使う幅を拡張機能へ伝える（layoutGraphのmaxWidth）。
+   * 手動で縮小しているときは実寸より多くのノードが横に入るので、倍率で割った値を渡す。
+   */
+  function reportViewport() {
+    const available = graphViewportWidth();
+    if (available <= 0) return;
+    const scale = zoomMode === 'manual' ? zoomScale : 1;
+    const width = Math.round(available / scale);
+    // スクロールバーの出入りで数px揺れるだけの変化は無視する（再レイアウトの往復で
+    // 折り返しが振動するのを防ぐ）
+    if (Math.abs(width - reportedGraphWidth) < 8) return;
+    reportedGraphWidth = width;
+    vscode.postMessage({ type: 'viewport', width });
+  }
+
+  function scheduleReportViewport() {
+    clearTimeout(viewportTimer);
+    viewportTimer = setTimeout(reportViewport, 150);
+  }
+
+  /** 現在の倍率。'fit'なら描画領域の幅に収まる倍率（下限 MIN_FIT_SCALE、拡大はしない）。 */
+  function effectiveScale(layout) {
+    if (zoomMode === 'manual') return zoomScale;
+    const available = graphViewportWidth();
+    if (available <= 0 || !layout || layout.width <= 0) return 1;
+    return Math.max(MIN_FIT_SCALE, Math.min(1, available / layout.width));
+  }
+
+  /** SVGの表示サイズ（viewBoxは実寸のまま）と倍率表示を現在の倍率へ合わせる。 */
+  function applyGraphScale() {
+    const layout = currentLayout;
+    if (!layout) return;
+    const svg = el('graph');
+    const scale = effectiveScale(layout);
+    const height = Math.max(1, layout.height);
+    svg.setAttribute('width', String(Math.max(1, Math.round(layout.width * scale))));
+    svg.setAttribute('height', String(Math.max(1, Math.round(height * scale))));
+    const label = el('graphZoomLabel');
+    label.textContent = Math.round(scale * 100) + '%' + (zoomMode === 'fit' ? '（自動）' : '');
+    el('graphZoomFitBtn').disabled = zoomMode === 'fit';
+    el('graphZoomInBtn').disabled = zoomMode === 'manual' && zoomScale >= MAX_ZOOM;
+    el('graphZoomOutBtn').disabled = zoomMode === 'manual' && zoomScale <= MIN_ZOOM;
+    el('graphWrapNote').hidden = !layout.wrapped;
+  }
+
+  function setZoom(next) {
+    zoomMode = 'manual';
+    zoomScale = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, next));
+    applyGraphScale();
+    // 倍率が変わると1行に入るノード数も変わるため、折り返し幅を伝え直す
+    scheduleReportViewport();
+  }
+
   function renderGraph(snapshot, layout) {
     const svg = el('graph');
     svg.replaceChildren();
     svg.setAttribute('viewBox', '0 0 ' + layout.width + ' ' + Math.max(1, layout.height));
-    svg.setAttribute('width', String(layout.width));
-    svg.setAttribute('height', String(Math.max(1, layout.height)));
+    svg.setAttribute('preserveAspectRatio', 'xMidYMin meet');
 
     const byId = {};
     for (const t of snapshot.tasks) byId[t.id] = t;
@@ -299,6 +378,7 @@ export function workflowScript(): string {
       nodeGroup.appendChild(buildNode(task, n));
     }
     svg.appendChild(nodeGroup);
+    applyGraphScale();
   }
 
   // ---- タスク一覧 ----
@@ -646,6 +726,8 @@ export function workflowScript(): string {
     renderTable(snapshot);
     renderWarnings(snapshot);
     renderIntegration(snapshot, integration);
+    // 初回表示（contentのhidden解除）直後は描画領域の幅が確定するので折り返し幅を伝える
+    scheduleReportViewport();
     const select = el('runSelect');
     if (select.value !== snapshot.runId) select.value = snapshot.runId;
   }
@@ -676,6 +758,27 @@ export function workflowScript(): string {
   }, 1000);
 
   // ---- 操作 ----
+
+  // 'fit'から拡大・縮小するときは今見えている倍率を起点にする（1.0起点だと見た目が飛ぶ）
+  el('graphZoomInBtn').addEventListener('click', () =>
+    setZoom(effectiveScale(currentLayout) * ZOOM_STEP),
+  );
+  el('graphZoomOutBtn').addEventListener('click', () =>
+    setZoom(effectiveScale(currentLayout) / ZOOM_STEP),
+  );
+  el('graphZoomFitBtn').addEventListener('click', () => {
+    zoomMode = 'fit';
+    applyGraphScale();
+    scheduleReportViewport();
+  });
+
+  // パネル幅が変わったら折り返し幅を伝え直し、'fit'なら倍率も追随させる
+  // （ResizeObserverはVSCodeのWebview（Chromium）で常に使える）
+  const graphResizeObserver = new ResizeObserver(() => {
+    applyGraphScale();
+    scheduleReportViewport();
+  });
+  graphResizeObserver.observe(el('graphWrap'));
 
   el('runSelect').addEventListener('change', (e) => {
     vscode.postMessage({ type: 'selectRun', runId: e.target.value });

@@ -4,6 +4,7 @@ import {
   computeRanks,
   layoutGraph,
   NODE_GAP_X,
+  NODE_HEIGHT,
   NODE_WIDTH,
   summarizeIntegration,
   type GraphTaskInput,
@@ -15,6 +16,12 @@ const DIAMOND: GraphTaskInput[] = [
   { id: 'T2', dependsOn: ['T1'] },
   { id: 'T3', dependsOn: ['T1'] },
   { id: 'T4', dependsOn: ['T2', 'T3'] },
+];
+
+/** rank1に6タスクが並ぶ形。折り返さなければ 6*168 + 5*28 + 56 = 1252px 必要になる。 */
+const WIDE_RANK: GraphTaskInput[] = [
+  { id: 'T1', dependsOn: [] },
+  ...Array.from({ length: 6 }, (_, i) => ({ id: 'W' + (i + 1), dependsOn: ['T1'] })),
 ];
 
 describe('computeRanks（design.md §16.8「依存グラフ」）', () => {
@@ -118,6 +125,73 @@ describe('layoutGraph（design.md §16.8「依存グラフ」の段レイアウ�
     const layout = layoutGraph([{ id: 'T1', dependsOn: [] }]);
     expect(layout.ranks).toEqual([['T1']]);
     expect(layout.nodes).toHaveLength(1);
+  });
+
+  it('maxWidthを渡さなければ折り返さない（従来どおり1段=1行）', () => {
+    const layout = layoutGraph(WIDE_RANK);
+    expect(layout.wrapped).toBe(false);
+    const ys = new Set(layout.nodes.filter((n) => n.rank === 1).map((n) => n.y));
+    expect(ys.size).toBe(1);
+  });
+});
+
+describe('layoutGraph の折り返し（グラフが描画幅に収まらない場合）', () => {
+  const rowWidthFor = (count: number): number =>
+    count * NODE_WIDTH + (count - 1) * NODE_GAP_X + NODE_GAP_X * 2;
+
+  it('描画幅に収まらない段は複数行へ折り返す', () => {
+    // 3ノード分の幅しか無い場合、6タスクの段は3+3の2行になる
+    const layout = layoutGraph(WIDE_RANK, { maxWidth: rowWidthFor(3) });
+    expect(layout.wrapped).toBe(true);
+    const rows = new Set(layout.nodes.filter((n) => n.rank === 1).map((n) => n.row));
+    expect(rows.size).toBe(2);
+  });
+
+  it('折り返しても全体の幅は描画幅に収まる', () => {
+    const maxWidth = rowWidthFor(3);
+    const layout = layoutGraph(WIDE_RANK, { maxWidth });
+    expect(layout.width).toBeLessThanOrEqual(maxWidth);
+    for (const node of layout.nodes) {
+      expect(node.x - NODE_WIDTH / 2).toBeGreaterThanOrEqual(0);
+      expect(node.x + NODE_WIDTH / 2).toBeLessThanOrEqual(layout.width);
+    }
+  });
+
+  it('折り返した分だけ高さが伸びる（ノードが縦にはみ出さない）', () => {
+    const layout = layoutGraph(WIDE_RANK, { maxWidth: rowWidthFor(3) });
+    for (const node of layout.nodes) {
+      expect(node.y + NODE_HEIGHT / 2).toBeLessThanOrEqual(layout.height);
+    }
+  });
+
+  it('折り返しても段の区切り（ranks）と定義順は変わらない', () => {
+    const layout = layoutGraph(WIDE_RANK, { maxWidth: rowWidthFor(2) });
+    expect(layout.ranks).toEqual([['T1'], ['W1', 'W2', 'W3', 'W4', 'W5', 'W6']]);
+    // indexInRankは段全体を通した並び順のまま（行内の位置ではない）
+    const indexes = layout.nodes.filter((n) => n.rank === 1).map((n) => n.indexInRank);
+    expect(indexes).toEqual([0, 1, 2, 3, 4, 5]);
+  });
+
+  it('折り返しても依存元は依存先より上に来る', () => {
+    const layout = layoutGraph(WIDE_RANK, { maxWidth: rowWidthFor(2) });
+    const yOf = (id: string): number => layout.nodes.find((n) => n.id === id)?.y ?? -1;
+    for (let i = 1; i <= 6; i += 1) {
+      expect(yOf('T1')).toBeLessThan(yOf('W' + i));
+    }
+  });
+
+  it('1ノードすら入らない幅でも1行1ノードで並べる（残りは縮小・スクロールに任せる）', () => {
+    const layout = layoutGraph(WIDE_RANK, { maxWidth: 10 });
+    const rows = new Set(layout.nodes.filter((n) => n.rank === 1).map((n) => n.row));
+    expect(rows.size).toBe(6);
+    expect(layout.width).toBe(NODE_WIDTH + NODE_GAP_X * 2);
+  });
+
+  it('十分な幅があれば折り返さない', () => {
+    const layout = layoutGraph(WIDE_RANK, { maxWidth: rowWidthFor(6) });
+    expect(layout.wrapped).toBe(false);
+    const rows = new Set(layout.nodes.filter((n) => n.rank === 1).map((n) => n.row));
+    expect(rows.size).toBe(1);
   });
 });
 
