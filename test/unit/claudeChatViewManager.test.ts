@@ -177,6 +177,17 @@ function stubMcpStatus(servers: McpServerView[] | undefined): void {
 const initLine = (sessionId: string): string =>
   `${JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId })}\n`;
 const resultLine = (): string => `${JSON.stringify({ type: 'result' })}\n`;
+/** `can_use_tool`制御要求（issue #286の承認待ち通知テスト用）。 */
+const canUseToolLine = (
+  requestId: string,
+  toolName: string,
+  input: Record<string, unknown> = {},
+): string =>
+  `${JSON.stringify({
+    type: 'control_request',
+    request_id: requestId,
+    request: { subtype: 'can_use_tool', tool_name: toolName, input },
+  })}\n`;
 
 describe('ClaudeChatViewManager', () => {
   beforeEach(() => {
@@ -600,8 +611,10 @@ describe('ClaudeChatViewManagerの名前変更（issue #199）', () => {
 
     // 拡張機能側のストアに保存され、次回以降の名前解決（getName）に反映される
     expect(store.getName('session-rename')).toBe('設計方針の相談');
-    // タブ名も即座に追従する（`deriveTitle` が `state.name` を優先するため）
-    expect(__mock.lastCreatedPanel()?.title).toBe('Claude Code: 設計方針の相談');
+    // タブ名も即座に追従する（`deriveTitle` が `state.name` を優先するため）。
+    // `system init` 直後は`busy: true`（`streamJson.ts`）なので、実行中の印
+    // （issue #286、design.md §14.55）が先頭に付く
+    expect(__mock.lastCreatedPanel()?.title).toBe('* Claude Code: 設計方針の相談');
   });
 
   it('変更していない・空文字・キャンセルでは保存しない', async () => {
@@ -1424,6 +1437,144 @@ describe('ワークフローの導線（issue #250）', () => {
     await flush();
 
     expect(__mock.messages.errors).toHaveLength(0);
+  });
+});
+
+describe('タブ名の状態表示・通知（issue #286、design.md §14.55）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    __mock.setConfig('agent', {});
+    vi.restoreAllMocks();
+  });
+
+  it('承認待ちはタブ名の先頭に ! が付く', async () => {
+    const { sessions } = stubStartCapturing();
+    const { manager } = createManager();
+
+    const task = await manager.openTaskSession({
+      cwd: '/workspace/root/task-a',
+      config: EMPTY_TASK_CONFIG,
+      sandbox: '',
+    });
+    task.open({ preserveFocus: true });
+    const session = sessions[sessions.length - 1];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+
+    session.receive(canUseToolLine('req-1', 'Bash', { command: 'ls' }));
+    await flush();
+
+    expect(__mock.lastCreatedPanel()?.title).toBe('! Claude Code');
+  });
+
+  async function openHiddenTaskPanel(): Promise<{
+    session: ClaudeStreamSession;
+    task: Awaited<ReturnType<ClaudeChatViewManager['openTaskSession']>>;
+  }> {
+    const { sessions } = stubStartCapturing();
+    const { manager } = createManager();
+
+    const task = await manager.openTaskSession({
+      cwd: '/workspace/root/task-a',
+      config: EMPTY_TASK_CONFIG,
+      sandbox: '',
+    });
+    task.open({ preserveFocus: true });
+    const session = sessions[sessions.length - 1];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    // 既定では作られた直後のパネルは`visible: true`。「背面タブ」を模すため
+    // 明示的に見えない状態へ切り替える
+    __mock.lastCreatedPanel()?.simulateVisibilityChange(false);
+    return { session, task };
+  }
+
+  it('非表示のタブで承認待ちになった直後に通知が1回出て、開くでタブを表示する', async () => {
+    const { session } = await openHiddenTaskPanel();
+
+    session.receive(canUseToolLine('req-1', 'Bash', { command: 'ls' }));
+    await flush();
+
+    expect(__mock.messages.infos).toHaveLength(1);
+    expect(__mock.messages.infos[0]).toContain('コマンドの実行を許可しますか');
+
+    // 既定（AUTO_CONFIRM）は通知の最初のボタン（「開く」）を選んだ扱いになる
+    await flush();
+    expect(__mock.lastCreatedPanel()?.revealCount).toBeGreaterThan(0);
+  });
+
+  it('タブが見えている間は通知を出さない', async () => {
+    const { sessions } = stubStartCapturing();
+    const { manager } = createManager();
+    const task = await manager.openTaskSession({
+      cwd: '/workspace/root/task-a',
+      config: EMPTY_TASK_CONFIG,
+      sandbox: '',
+    });
+    task.open({ preserveFocus: true });
+    const session = sessions[sessions.length - 1];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    // simulateVisibilityChangeを呼ばないため visible: true のまま
+
+    session.receive(canUseToolLine('req-1', 'Bash', { command: 'ls' }));
+    await flush();
+
+    expect(__mock.messages.infos).toHaveLength(0);
+  });
+
+  it('同じ承認要求では通知が重複しない（後続の状態更新でも1回のまま）', async () => {
+    const { session, task } = await openHiddenTaskPanel();
+
+    session.receive(canUseToolLine('req-1', 'Bash', { command: 'ls' }));
+    await flush();
+    expect(__mock.messages.infos).toHaveLength(1);
+
+    // 同じ承認要求が保留のまま、無関係な状態更新（レート制限の通知）が続いても
+    // 通知は増えない（`state.approvals`自体は変わらない）
+    const rateLimitLine = `${JSON.stringify({
+      type: 'rate_limit_event',
+      rate_limit_info: { status: 'allowed' },
+    })}\n`;
+    session.receive(rateLimitLine);
+    session.receive(rateLimitLine);
+    expect(__mock.messages.infos).toHaveLength(1);
+
+    task.decideApproval('req-1', 'accept');
+  });
+
+  it('設定 agent.notifications.approvalPending を false にすると承認待ちの通知を出さない', async () => {
+    __mock.setConfig('agent', { 'notifications.approvalPending': false });
+    const { session } = await openHiddenTaskPanel();
+
+    session.receive(canUseToolLine('req-1', 'Bash', { command: 'ls' }));
+    await flush();
+
+    expect(__mock.messages.infos).toHaveLength(0);
+  });
+
+  it('ターン完了の通知は既定オフ（非表示タブでも出ない）', async () => {
+    const { session } = await openHiddenTaskPanel();
+
+    session.receive(initLine('session-turn'));
+    session.receive(resultLine());
+
+    expect(__mock.messages.infos).toHaveLength(0);
+  });
+
+  it('設定 agent.notifications.turnComplete を true にすると非表示タブでターン完了の通知が出る', async () => {
+    __mock.setConfig('agent', { 'notifications.turnComplete': true });
+    const { session } = await openHiddenTaskPanel();
+
+    session.receive(initLine('session-turn'));
+    session.receive(resultLine());
+
+    expect(__mock.messages.infos).toHaveLength(1);
+    expect(__mock.messages.infos[0]).toContain('応答が終わりました');
   });
 });
 

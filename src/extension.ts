@@ -543,7 +543,13 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // `ClaudeSessionNameStore`と同じくglobalStateへ持たせる
   const pinnedSessions = new PinnedSessionStore(context.globalState);
   // 開いているかどうかはチャット画面が持つ
-  const tree = new SessionTreeProvider(providers, (id) => chat.isOpen(id), log, pinnedSessions);
+  // 開いているか・実行中か・承認待ちかはチャット画面（`chat` / `claudeChat`）が持つ
+  // （issue #286、design.md §14.55）。providerでどちらのマネージャへ引くかを決める
+  const getSessionActivity = (session: SessionSummary) =>
+    session.provider === 'claude'
+      ? claudeChat.getActivityState(session.id)
+      : chat.getActivityState(session.id);
+  const tree = new SessionTreeProvider(providers, getSessionActivity, log, pinnedSessions);
   const sessionsView = vscode.window.createTreeView('codex.sessions', {
     treeDataProvider: tree,
     showCollapseAll: false,

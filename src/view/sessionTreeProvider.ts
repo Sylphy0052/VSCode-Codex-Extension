@@ -9,6 +9,7 @@ import { PinnedSessionStore, partitionPinned, pinKeyFor } from '../util/pinnedSe
 import { matchesSessionQuery } from '../util/sessionFilter';
 import { buildDateGroups, buildFolderGroups, type SessionGroup } from '../util/sessionGrouping';
 import { formatAbsoluteTime, formatRelativeTime } from './relativeTime';
+import type { SessionActivityState } from './sessionActivity';
 
 /**
  * グループの見出し用ツリー要素（issue #293。日付/作業ディレクトリ/ピン留めのグループ化）。
@@ -58,7 +59,13 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement>
 
   constructor(
     private readonly providers: ProviderRegistry,
-    private readonly isOpen: (sessionId: string) => boolean,
+    /**
+     * セッションの活動状態を引く（issue #286、design.md §14.55）。`undefined`は
+     * 「開いていない」（従来の`isOpen`相当）。`SessionSummary`を渡すのは、実体
+     * （`chat` / `claudeChat`のどちらのマネージャへ引くか）を`session.provider`で
+     * 決める必要があるため（`src/extension.ts`の配線を参照）。
+     */
+    private readonly getActivity: (session: SessionSummary) => SessionActivityState | undefined,
     private readonly log: Logger,
     private readonly pinnedStore: PinnedSessionStore = new PinnedSessionStore(),
   ) {}
@@ -190,7 +197,8 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement>
   }
 
   private buildSessionTreeItem(session: SessionSummary): vscode.TreeItem {
-    const open = this.isOpen(session.id);
+    const activity = this.getActivity(session);
+    const open = activity !== undefined;
     const item = new vscode.TreeItem(
       session.threadName ?? '(名称未設定)',
       vscode.TreeItemCollapsibleState.None,
@@ -210,6 +218,13 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement>
     const parts = [label, formatRelativeTime(session.updatedAt, Date.now())];
     if (this.scope === 'all' && session.cwd !== undefined) {
       parts.push(basenameOf(session.cwd));
+    }
+    // 実行中／承認待ちは他の情報より優先度が高いので先頭へ差し込む（issue #286、
+    // design.md §14.55）。`idle`（開いてはいるが動いていない）・未オープンでは何も足さない
+    if (activity === 'approvalPending') {
+      parts.unshift('承認待ち');
+    } else if (activity === 'running') {
+      parts.unshift('実行中');
     }
     item.description = parts.filter((p) => p !== '').join('  ');
 
@@ -233,14 +248,20 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement>
       ].join('\n'),
     );
 
+    // 承認待ち／実行中はオープン状態より優先して出す（issue #286、design.md §14.55）。
+    // どちらでも無ければ従来どおりの分岐（open ? circle-filled : archived ? archive : ...）
     item.iconPath = new vscode.ThemeIcon(
-      open
-        ? 'circle-filled'
-        : session.archived
-          ? 'archive'
-          : session.provider === 'claude'
-            ? 'sparkle'
-            : 'comment-discussion',
+      activity === 'approvalPending'
+        ? 'bell-dot'
+        : activity === 'running'
+          ? 'sync~spin'
+          : open
+            ? 'circle-filled'
+            : session.archived
+              ? 'archive'
+              : session.provider === 'claude'
+                ? 'sparkle'
+                : 'comment-discussion',
     );
     // メニューの出し分けにプロバイダ・アーカイブ状態・ピン留め状態を含める
     // （Claude Codeにはarchive/deleteが無い。`package.json`のwhen句は正規表現で

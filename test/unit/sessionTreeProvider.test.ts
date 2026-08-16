@@ -6,6 +6,7 @@ import type { MementoLike } from '../../src/util/memento';
 import { PinnedSessionStore } from '../../src/util/pinnedSessions';
 import { __mock } from '../mocks/vscode';
 import { SessionTreeProvider, type SessionGroupNode, type TreeElement } from '../../src/view/sessionTreeProvider';
+import type { SessionActivityState } from '../../src/view/sessionActivity';
 
 /**
  * `vscode.Memento` 互換のフェイク（`test/unit/pinnedSessions.test.ts`と同じ流儀）。
@@ -65,8 +66,9 @@ function makeProvider(
   sessions: SessionSummary[] = [],
   pinnedStore: PinnedSessionStore = new PinnedSessionStore(),
   calls: ListSessionsCall[] = [],
+  getActivity: (session: SessionSummary) => SessionActivityState | undefined = () => undefined,
 ): SessionTreeProvider {
-  return new SessionTreeProvider(fakeProviders(sessions, calls), () => false, fakeLogger(), pinnedStore);
+  return new SessionTreeProvider(fakeProviders(sessions, calls), getActivity, fakeLogger(), pinnedStore);
 }
 
 function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
@@ -132,6 +134,50 @@ describe('SessionTreeProvider.getTreeItem のid（issue #236）', () => {
 
     expect(item.command?.command).toBe('codex.openSession');
     expect(item.command?.arguments).toEqual([s]);
+  });
+});
+
+describe('SessionTreeProvider.getTreeItem の活動状態表示（issue #286、design.md §14.55）', () => {
+  it('未オープン（getActivityがundefined）は従来どおりの分岐（未アーカイブのCodex）', () => {
+    const s = session({ id: 's1', provider: 'codex', archived: false });
+    const provider = makeProvider([s], new PinnedSessionStore(), [], () => undefined);
+
+    const item = provider.getTreeItem(s);
+
+    expect((item.iconPath as { id: string }).id).toBe('comment-discussion');
+    expect(String(item.description).startsWith('実行中')).toBe(false);
+    expect(String(item.description).startsWith('承認待ち')).toBe(false);
+  });
+
+  it('実行中はアイコンがsync~spinになり、descriptionの先頭に「実行中」が付く', () => {
+    const s = session({ id: 's1' });
+    const provider = makeProvider([s], new PinnedSessionStore(), [], () => 'running');
+
+    const item = provider.getTreeItem(s);
+
+    expect((item.iconPath as { id: string }).id).toBe('sync~spin');
+    expect(String(item.description).startsWith('実行中')).toBe(true);
+  });
+
+  it('承認待ちはアイコンがbell-dotになり、descriptionの先頭に「承認待ち」が付く（実行中より優先）', () => {
+    const s = session({ id: 's1' });
+    const provider = makeProvider([s], new PinnedSessionStore(), [], () => 'approvalPending');
+
+    const item = provider.getTreeItem(s);
+
+    expect((item.iconPath as { id: string }).id).toBe('bell-dot');
+    expect(String(item.description).startsWith('承認待ち')).toBe(true);
+  });
+
+  it('開いてはいるが待機中（idle）は従来どおりcircle-filledで、状態の接頭辞は付かない', () => {
+    const s = session({ id: 's1' });
+    const provider = makeProvider([s], new PinnedSessionStore(), [], () => 'idle');
+
+    const item = provider.getTreeItem(s);
+
+    expect((item.iconPath as { id: string }).id).toBe('circle-filled');
+    expect(String(item.description).startsWith('実行中')).toBe(false);
+    expect(String(item.description).startsWith('承認待ち')).toBe(false);
   });
 });
 
