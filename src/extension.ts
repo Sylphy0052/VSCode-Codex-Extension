@@ -45,6 +45,7 @@ import {
   nodeGitCommandRunner,
   nodeWorktreeFileSystem,
   WorktreeCreationQueue,
+  type BranchNaming,
   type GitCommandRunner,
 } from './orchestrator/worktree';
 import {
@@ -241,6 +242,8 @@ export interface ForgeOverrides {
     host: ForgeHostConfig;
     pullRequest: PullRequestLayerConfig;
     finalMerge: FinalMergeConfig;
+    branchNaming: BranchNaming;
+    draftPullRequest: boolean;
   };
   /**
    * `WorkflowRunner` が使うgitコマンドの実行（`WorkflowRunnerDeps.git`）。forgeまわり
@@ -498,7 +501,13 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       fs: nodeForgeFileSystem,
       readConfig: () => {
         const c = readWorkflowsConfig();
-        const actual = { host: c.forge, pullRequest: c.pullRequest, finalMerge: c.finalMerge };
+        const actual = {
+          host: c.forge,
+          pullRequest: c.pullRequest,
+          finalMerge: c.finalMerge,
+          branchNaming: c.branchNaming,
+          draftPullRequest: c.draftPullRequest,
+        };
         return forgeOverrides.readConfig?.() ?? actual;
       },
     },

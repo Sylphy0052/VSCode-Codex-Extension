@@ -38,7 +38,9 @@ import {
   type WorkflowRunMemento,
 } from '../../src/orchestrator/runStore';
 import {
+  DEFAULT_BRANCH_NAMING,
   WorktreeCreationQueue,
+  type BranchNaming,
   type GitCommandRunner,
   type WorktreeFileSystemPort,
 } from '../../src/orchestrator/worktree';
@@ -349,6 +351,7 @@ function fakeForgeCli(options?: {
   authenticated?: boolean;
   failCreate?: boolean;
   failMerge?: boolean;
+  failReady?: boolean;
   prUrl?: string;
 }): FakeForgeCli {
   const calls: Array<{ command: string; args: string[]; cwd: string }> = [];
@@ -369,6 +372,37 @@ function fakeForgeCli(options?: {
       if (args[0] === 'pr' && args[1] === 'merge') {
         return options?.failMerge
           ? { code: 1, stdout: '', stderr: 'fake pr merge failure' }
+          : { code: 0, stdout: '', stderr: '' };
+      }
+      // `markPullRequestReady`（GitHub）が呼ぶ`gh pr ready <number>`のフェイク応答
+      if (args[0] === 'pr' && args[1] === 'ready') {
+        return options?.failReady
+          ? { code: 1, stdout: '', stderr: 'fake pr ready failure' }
+          : { code: 0, stdout: '', stderr: '' };
+      }
+      // GitLab（`glab`）側の配線。`buildCreatePullRequestArgs`（forge.ts）はMR作成に
+      // `glab api projects/:id/merge_requests`を使い、`web_url`を含むJSONを返す想定
+      if (args[0] === 'api' && args[1] === 'projects/:id/merge_requests') {
+        return options?.failCreate
+          ? { code: 1, stdout: '', stderr: 'fake mr create failure' }
+          : {
+              code: 0,
+              stdout: `${JSON.stringify({
+                web_url: options?.prUrl ?? 'https://gitlab.example.com/acme/repo/-/merge_requests/1',
+              })}\n`,
+              stderr: '',
+            };
+      }
+      // `markPullRequestReady`（GitLab）が呼ぶ`glab mr update <number> --ready`のフェイク応答
+      if (args[0] === 'mr' && args[1] === 'update') {
+        return options?.failReady
+          ? { code: 1, stdout: '', stderr: 'fake mr update failure' }
+          : { code: 0, stdout: '', stderr: '' };
+      }
+      // `runFinalMerge`（GitLab）が呼ぶ`glab mr merge --remove-source-branch`のフェイク応答
+      if (args[0] === 'mr' && args[1] === 'merge') {
+        return options?.failMerge
+          ? { code: 1, stdout: '', stderr: 'fake mr merge failure' }
           : { code: 0, stdout: '', stderr: '' };
       }
       return { code: 1, stdout: '', stderr: `unhandled: ${command} ${args.join(' ')}` };
@@ -473,6 +507,8 @@ function fakeForgeDeps(
     host?: ForgeHostConfig;
     pullRequest?: PullRequestLayerConfig;
     finalMerge?: FinalMergeConfig;
+    branchNaming?: BranchNaming;
+    draftPullRequest?: boolean;
   },
   cliAvailability: CliAvailabilityPort = fakeForgeCliAvailability,
 ): WorkflowRunnerForgeDeps {
@@ -484,6 +520,9 @@ function fakeForgeDeps(
       host: config?.host ?? 'auto',
       pullRequest: config?.pullRequest ?? 'per-task',
       finalMerge: config?.finalMerge ?? 'auto',
+      // 既定は`wf`/`false`。branchNaming・draftPullRequestを明示するテストだけ上書きする
+      branchNaming: config?.branchNaming ?? DEFAULT_BRANCH_NAMING,
+      draftPullRequest: config?.draftPullRequest ?? false,
     }),
   };
 }
@@ -2808,6 +2847,344 @@ tasks:
   });
 });
 
+describe('WorkflowRunner: タスクのtypeがコミットメッセージへ反映される（design.md §16.6）', () => {
+  it('typeを指定したタスクは、マージコミットのメッセージが<type>(<taskId>): merge task (...)になる', async () => {
+    const YAML = `
+version: 1
+name: type-test
+tasks:
+  - id: T1
+    type: fix
+    prompt: p1
+    done: d1
+`;
+    const git = fakeGit();
+    const { runner, codexHost, store } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/type.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    const mergeCall = git.calls.find((c) => c.args[0] === 'merge' && c.args[1] === '--no-ff');
+    expect(mergeCall?.args).toContain(`fix(T1): merge task (run ${runId})`);
+  });
+
+  it('typeを省略したタスクは、既定のchoreがマージコミットのメッセージに使われる', async () => {
+    const YAML = `
+version: 1
+name: type-default-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+    const git = fakeGit();
+    const { runner, codexHost, store } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/type-default.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    const mergeCall = git.calls.find((c) => c.args[0] === 'merge' && c.args[1] === '--no-ff');
+    expect(mergeCall?.args).toContain(`chore(T1): merge task (run ${runId})`);
+  });
+});
+
+describe('WorkflowRunner: ブランチ命名（agent.workflows.branchNaming、design.md §16.6）', () => {
+  it('branchNaming: conventional かつタスクにissueがあれば、GitLab運用規約形式のブランチでworktreeが作られる', async () => {
+    const YAML = `
+version: 1
+name: branch-naming-test
+tasks:
+  - id: T1
+    type: fix
+    issue: 42
+    prompt: p1
+    done: d1
+`;
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost, store } = createHarness(YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { branchNaming: 'conventional' }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/branch-naming.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    // 統合worktree（1回目のworktree add）は常にwf形式。タスクworktree（T1、2回目）が
+    // conventional形式（fix/42/t1-<runId先頭8文字>）になっているかを見る
+    const taskWorktreeAdd = git.calls.find(
+      (c) =>
+        c.args[0] === 'worktree' &&
+        c.args[1] === 'add' &&
+        typeof c.args[3] === 'string' &&
+        c.args[3].startsWith('fix/42/'),
+    );
+    expect(taskWorktreeAdd).toBeDefined();
+  });
+
+  it('branchNaming: conventional でもissueが無いタスクは、従来どおりwf形式のブランチになる（後方互換）', async () => {
+    const YAML = `
+version: 1
+name: branch-naming-fallback-test
+tasks:
+  - id: T1
+    type: fix
+    prompt: p1
+    done: d1
+`;
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost, store } = createHarness(YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { branchNaming: 'conventional' }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/branch-naming-fallback.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    const taskWorktreeAdd = git.calls.find(
+      (c) =>
+        c.args[0] === 'worktree' &&
+        c.args[1] === 'add' &&
+        typeof c.args[3] === 'string' &&
+        c.args[3].startsWith(`wf/${runId}/T1`),
+    );
+    expect(taskWorktreeAdd).toBeDefined();
+  });
+
+  it('branchNaming: wf（既定）のときは、issueがあってもwf形式のブランチのまま（既定挙動は変えない）', async () => {
+    const YAML = `
+version: 1
+name: branch-naming-default-test
+tasks:
+  - id: T1
+    type: fix
+    issue: 42
+    prompt: p1
+    done: d1
+`;
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost, store } = createHarness(YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { branchNaming: 'wf' }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/branch-naming-default.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    const taskWorktreeAdd = git.calls.find(
+      (c) =>
+        c.args[0] === 'worktree' &&
+        c.args[1] === 'add' &&
+        typeof c.args[3] === 'string' &&
+        c.args[3].startsWith(`wf/${runId}/T1`),
+    );
+    expect(taskWorktreeAdd).toBeDefined();
+  });
+});
+
+describe('WorkflowRunner: Draft PR/MR（agent.workflows.draftPullRequest、design.md §16.18）', () => {
+  const SINGLE_TASK_YAML = `
+version: 1
+name: draft-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+  it('draftPullRequest: falseのとき（既定）--draftを付けず、readyへの切替も呼ばない（既存挙動そのまま）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { draftPullRequest: false }),
+    });
+    await runner.start('/repo/.agents/workflows/draft.yaml', '/repo');
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const createCalls = cli.calls.filter((c) => c.args[0] === 'pr' && c.args[1] === 'create');
+    expect(createCalls.length).toBe(2); // タスク層＋統合層
+    expect(createCalls.every((c) => !c.args.includes('--draft'))).toBe(true);
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'ready')).toBe(false);
+  });
+
+  it(
+    'draftPullRequest: trueのとき、タスク層PR/MRは--draft付きで作られ、' +
+      '統合ブランチへのマージ後にreadyへ切り替わる',
+    async () => {
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+      const cli = fakeForgeCli();
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { draftPullRequest: true, finalMerge: 'pr-only' }),
+      });
+      await runner.start('/repo/.agents/workflows/draft.yaml', '/repo');
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      const createCallIndex = cli.calls.findIndex(
+        (c) => c.args[0] === 'pr' && c.args[1] === 'create' && c.args.some((a) => a.startsWith('--base=wf/')),
+      );
+      const taskCreateCall = cli.calls[createCallIndex];
+      expect(taskCreateCall?.args).toContain('--draft');
+
+      // 統合ブランチへのローカルマージ（`git merge --no-ff`）自体は起きている
+      expect(git.calls.some((c) => c.args[0] === 'merge' && c.args[1] === '--no-ff')).toBe(true);
+      // readyへの切替（`gh pr ready 1`）はPR/MR作成より後、cliの呼び出し順で見て後ろに来る
+      // （マージとの厳密な前後関係はrunTaskPullRequestFlowの型で強制済み・forge.test.tsで
+      // 検証済みのため、ここではwiring自体が動いていること＝ready呼び出しの発生を見る）
+      const readyCallIndex = cli.calls.findIndex(
+        (c) => c.args[0] === 'pr' && c.args[1] === 'ready',
+      );
+      expect(readyCallIndex).toBeGreaterThan(createCallIndex);
+    },
+  );
+
+  it(
+    'GitLabホスト経由でも、draftPullRequest: trueのときタスク層MRは--field=draft=true付きで' +
+      '作られ、統合ブランチへのマージ後にreadyへ切り替わる（レビュー指摘: 既存のDraft配線' +
+      'テストがgit@github.com:...のGitHubパスだけだったため追加）',
+    async () => {
+      const git = fakeGit({ originRemoteUrl: 'git@gitlab.example.com:acme/repo.git' });
+      const cli = fakeForgeCli();
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { draftPullRequest: true, finalMerge: 'pr-only' }),
+      });
+      await runner.start('/repo/.agents/workflows/draft.yaml', '/repo');
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      const createCallIndex = cli.calls.findIndex(
+        (c) =>
+          c.args[0] === 'api' &&
+          c.args[1] === 'projects/:id/merge_requests' &&
+          c.args.some((a) => a.startsWith('--field=source_branch=wf/')),
+      );
+      const taskCreateCall = cli.calls[createCallIndex];
+      expect(taskCreateCall?.args).toContain('--field=draft=true');
+
+      // 統合ブランチへのローカルマージ（`git merge --no-ff`）自体は起きている
+      expect(git.calls.some((c) => c.args[0] === 'merge' && c.args[1] === '--no-ff')).toBe(true);
+      // readyへの切替（`glab mr update <n> --ready`）はMR作成より後
+      const readyCallIndex = cli.calls.findIndex(
+        (c) => c.args[0] === 'mr' && c.args[1] === 'update' && c.args.includes('--ready'),
+      );
+      expect(readyCallIndex).toBeGreaterThan(createCallIndex);
+    },
+  );
+
+  it('draftPullRequest: trueのとき、統合層PR/MRも--draft付きで作られ、最終マージの直前にreadyへ切り替わる', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { draftPullRequest: true }),
+    });
+    await runner.start('/repo/.agents/workflows/draft.yaml', '/repo');
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const createCalls = cli.calls.filter((c) => c.args[0] === 'pr' && c.args[1] === 'create');
+    const integrationCreateCall = createCalls.find((c) => c.args.some((a) => a === '--base=main'));
+    expect(integrationCreateCall?.args).toContain('--draft');
+
+    // 統合層は「最終マージの直前にready化」という、タスク層（マージの後）と逆の順序になる
+    const readyCallIndices = cli.calls
+      .map((c, i) => ({ c, i }))
+      .filter(({ c }) => c.args[0] === 'pr' && c.args[1] === 'ready')
+      .map(({ i }) => i);
+    const finalMergeCallIndex = cli.calls.findIndex(
+      (c) => c.args[0] === 'pr' && c.args[1] === 'merge',
+    );
+    expect(readyCallIndices.length).toBe(2); // タスク層＋統合層
+    expect(finalMergeCallIndex).toBeGreaterThan(readyCallIndices[readyCallIndices.length - 1] ?? -1);
+  });
+
+  it('readyへの切替に失敗しても、ワークフロー自体は止めず警告として残す（design.mdの「ワークフロー自体は止めない」方針）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli({ failReady: true });
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { draftPullRequest: true, finalMerge: 'pr-only' }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/draft.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // ready化の失敗はワークフローを止めない：タスク自体はdoneのまま
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.warnings.some((w) => w.kind === 'forgeFailed')).toBe(true);
+  });
+
+  it('PR/MRのURLから番号を取り出せないときは、ready化を飛ばして警告を残す', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    // 番号を含まないURLにして`parsePullRequestNumberFromUrl`が失敗する経路を通す
+    const cli = fakeForgeCli({ prUrl: 'https://github.com/acme/repo/pull/not-a-number' });
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { draftPullRequest: true, finalMerge: 'pr-only' }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/draft.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'ready')).toBe(false);
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.warnings.some((w) => w.kind === 'forgeFailed')).toBe(true);
+  });
+});
+
 describe('WorkflowRunner: PR/MRの結果の保持・露出・永続化（design.md §16.11・§16.18、Issue #118）', () => {
   const SINGLE_TASK_YAML = `
 version: 1
@@ -3853,13 +4230,15 @@ tasks:
 
     const git = fakeGit();
     // マージコミットが既に履歴にある（マージ自体は完了していたが、リロードでその後の
-    // 状態遷移が失われたケースを模す）
+    // 状態遷移が失われたケースを模す）。`reconcileMergingTaskOnReload`は`--grep`ではなく
+    // 件名の一覧（`git log --format=%s`）をJS側で照合するため、実際のマージコミットの
+    // 固定文言（`<type>(<taskId>): merge task (run <runId>)`。typeは既定の`chore`）を返す
     const originalRun = git.run.bind(git);
     const gitWithLog: FakeGitHandle = {
       ...git,
       run: async (args, cwd) => {
         if (args[0] === 'log') {
-          return { code: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '' };
+          return { code: 0, stdout: `chore(T1): merge task (run ${runId})\n`, stderr: '' };
         }
         return originalRun(args, cwd);
       },

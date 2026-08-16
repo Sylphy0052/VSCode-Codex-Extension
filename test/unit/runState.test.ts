@@ -33,6 +33,7 @@ const task = (id: string, dependsOn: string[] = [], retries = 0): WorkflowTask =
   maxIterations: 20,
   provider: 'codex',
   isolation: 'worktree',
+  type: 'chore',
   cwd: undefined,
   model: undefined,
   effort: undefined,

@@ -38,6 +38,17 @@ export const CLEANUP_MODES = ['keep', 'after-merge', 'remove'] as const;
 export type CleanupMode = (typeof CLEANUP_MODES)[number];
 
 /**
+ * Conventional Commitsのtype語彙（GitLab運用規約の短形に合わせる）。拡張機能が
+ * 自動生成するコミットメッセージ（`integration.ts`の`uncommittedChangesCommitMessage` /
+ * `mergeCommitMessage`）のtypeと、`branchNaming: conventional`（`worktree.ts`の
+ * `branchName`）のブランチ名の先頭セグメントの両方がこの語彙を共有する。
+ */
+export const COMMIT_TYPES = ['feat', 'fix', 'refactor', 'docs', 'test', 'chore', 'perf', 'ci'] as const;
+export type CommitType = (typeof COMMIT_TYPES)[number];
+/** `type` 未指定・未知の値のときの既定値。安全側（最も無難な種別）に倒す。 */
+export const DEFAULT_COMMIT_TYPE: CommitType = 'chore';
+
+/**
  * タスクidの字種。そのままworktreeのパスとブランチ名に入るため絞る。
  * `codex/argvBuilder.ts` がセッションidをUUIDで検証しているのと同じ理由（design.md §16.2）。
  *
@@ -121,6 +132,12 @@ export interface WorkflowTask {
   maxIterations: number;
   provider: Provider;
   isolation: Isolation;
+  /**
+   * Conventional Commitsのtype。拡張機能が自動生成するコミットメッセージのtypeと、
+   * `branchNaming: conventional` のときのブランチ名の先頭セグメントに使う。
+   * 未指定なら `chore`。
+   */
+  type: CommitType;
   /**
    * 明示するとworktreeを作らずここで走る（`isolation` より優先）。
    * ワークスペース境界の検証はファイルシステムに触れるためこのIssueの範囲外（design.md §16.16）。
@@ -247,6 +264,23 @@ function isIsolation(v: string): v is Isolation {
 function isCleanup(v: string): v is CleanupMode {
   return (CLEANUP_MODES as readonly string[]).includes(v);
 }
+function isCommitType(v: string): v is CommitType {
+  return (COMMIT_TYPES as readonly string[]).includes(v);
+}
+
+/**
+ * 未知の値を`DEFAULT_COMMIT_TYPE`へ倒す。`integration.ts`のコミットメッセージ組み立てと
+ * `worktree.ts`の`branchName`（`branchNaming: conventional`時のbranchType読み替え）の
+ * 両方が使う、型の妥当性チェックの唯一の実装（重複実装しない）。
+ *
+ * `value`を`unknown`で受けるのは、`worktree.ts`の`BranchNamingOptions.type`や
+ * `integration.ts`の`uncommittedChangesCommitMessage` / `mergeCommitMessage`の
+ * `type?: string`（省略可能な引数）が、実行時には文字列以外（`undefined`を含む）を
+ * 渡しうるため。
+ */
+export function normalizeCommitType(value: unknown): CommitType {
+  return typeof value === 'string' && isCommitType(value) ? value : DEFAULT_COMMIT_TYPE;
+}
 
 /** `resolveIssue` の戻り値。`error` はフィールドが指定されていたが不正な値だった場合にだけ入る。 */
 interface ResolvedIssue {
@@ -267,7 +301,11 @@ function resolveIssue(raw: unknown): ResolvedIssue {
     return { value: undefined, error: undefined };
   }
   const n = typeof raw === 'number' ? raw : Number.parseInt(str(raw), 10);
-  if (!Number.isInteger(n) || n <= 0) {
+  // `Number.isInteger`だけでは上限が無く、`issue: 1e21`のような値も通ってしまう
+  // （`Number.isInteger(1e21) === true`）。`String(1e21)`は`"1e+21"`になり、ブランチ名へ
+  // 展開すると`CONVENTIONAL_BRANCH_PATTERN`に一致しない形になってpush/mergeが失敗し、
+  // runが途中で止まる（レビュー指摘）。`Number.isSafeInteger`（2^53-1以下）で弾く
+  if (!Number.isSafeInteger(n) || n <= 0) {
     return {
       value: undefined,
       error: `issue が正の整数ではありません: ${JSON.stringify(raw)}`,
@@ -313,6 +351,7 @@ interface ResolvedDefaults {
   effort: string | undefined;
   approvalMode: string | undefined;
   maxParallel: number;
+  type: CommitType;
 }
 
 /** `resolveDefaults` の戻り値。`warnings` は `defaults` ブロック自体の値が未知だった場合のメッセージ。 */
@@ -326,6 +365,7 @@ function resolveDefaults(raw: unknown): ResolvedDefaultsResult {
   const provider = resolveEnum(d['provider'], isProvider, DEFAULT_PROVIDER);
   const isolation = resolveEnum(d['isolation'], isIsolation, DEFAULT_ISOLATION);
   const cleanup = resolveEnum(d['cleanup'], isCleanup, DEFAULT_CLEANUP);
+  const type = resolveEnum(d['type'], isCommitType, DEFAULT_COMMIT_TYPE);
 
   const warnings: string[] = [];
   if (provider.invalidRaw !== undefined) {
@@ -343,6 +383,11 @@ function resolveDefaults(raw: unknown): ResolvedDefaultsResult {
       `defaults.cleanup に未知の値が指定されたため既定値(${DEFAULT_CLEANUP})を使いました: ${cleanup.invalidRaw}`,
     );
   }
+  if (type.invalidRaw !== undefined) {
+    warnings.push(
+      `defaults.type に未知の値が指定されたため既定値(${DEFAULT_COMMIT_TYPE})を使いました: ${type.invalidRaw}`,
+    );
+  }
 
   return {
     defaults: {
@@ -356,6 +401,7 @@ function resolveDefaults(raw: unknown): ResolvedDefaultsResult {
       effort: optStr(d['effort']),
       approvalMode: optStr(d['approvalMode']),
       maxParallel: num(d['maxParallel'], DEFAULT_MAX_PARALLEL),
+      type: type.value,
     },
     warnings,
   };
@@ -378,6 +424,12 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
   if (isolation.invalidRaw !== undefined) {
     parseWarnings.push(
       `isolation に未知の値が指定されたため既定値(${isolation.value})を使いました: ${isolation.invalidRaw}`,
+    );
+  }
+  const type = resolveEnum(t['type'], isCommitType, defaults.type);
+  if (type.invalidRaw !== undefined) {
+    parseWarnings.push(
+      `type に未知の値が指定されたため既定値(${type.value})を使いました: ${type.invalidRaw}`,
     );
   }
 
@@ -428,6 +480,7 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
     maxIterations: num(t['maxIterations'], defaults.maxIterations),
     provider: provider.value,
     isolation: isolation.value,
+    type: type.value,
     cwd: optStr(t['cwd']),
     model: optStr(t['model']) ?? defaults.model,
     effort: optStr(t['effort']) ?? defaults.effort,

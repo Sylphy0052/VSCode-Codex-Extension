@@ -692,6 +692,8 @@ tasks:
 | `agent.workflows.forge`                 | `auto`                          | machine             | PR/MR作成に使うホスト（`auto` / `github` / `gitlab` / `none`）                                                                       |
 | `agent.workflows.pullRequest`           | `per-task`                      | machine-overridable | 作るPR/MRの層（`none` / `integration` / `per-task`）                                                                                 |
 | `agent.workflows.finalMerge`            | `auto`                          | machine             | 統合ブランチ→mainのPR/MRを無人でマージするか（`auto` / `pr-only`。[無人実行についての注意](#無人実行についての注意)参照）            |
+| `agent.workflows.branchNaming`          | `wf`                            | machine-overridable | タスクブランチの命名方式（`wf` = `wf/<runId>/<taskId>` / `conventional` = `<type>/<IID>/<slug>`）                                    |
+| `agent.workflows.draftPullRequest`      | `false`                         | machine-overridable | PR/MRをDraftで作り、統合ブランチへのマージ後にreadyへ切り替えるか                                                                    |
 
 **`allowAutoApprove` は既定 `false` の machine スコープ設定。** タスクのYAMLに `autoApprove: true` と書いても、この設定を有効にしない限り効かない（意図しない無人実行を、設定パネルを一度も開かないまま有効化させないための保護。[無人実行についての注意](#無人実行についての注意)参照）。
 

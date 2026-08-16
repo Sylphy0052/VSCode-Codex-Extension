@@ -9,10 +9,14 @@ import {
   branchName,
   buildTaskBoundary,
   checkWorktreesGitignored,
+  CONVENTIONAL_BRANCH_PATTERN,
   decideWorkingDirectory,
+  DEFAULT_BRANCH_NAMING,
   isGitWorkingTree,
+  isWorkflowBranchName,
   nodeGitCommandRunner,
   nodeWorktreeFileSystem,
+  normalizeBranchNaming,
   resolveGitCommonDir,
   resolveHeadCommit,
   shouldRemoveWorktree,
@@ -114,6 +118,98 @@ describe('worktreePath / branchName', () => {
   it('不正なtaskId（パストラバーサル等）は例外になる', () => {
     expect(() => worktreePath('/repo', RUN_ID, '../../../../etc/evil')).toThrow(/taskId/);
     expect(() => branchName(RUN_ID, '../../../../etc/evil')).toThrow(/taskId/);
+  });
+});
+
+describe('branchName（options: BranchNamingOptions。GitLab運用規約形式との切替）', () => {
+  it('optionsを渡さない場合は既定のwf形式のまま（後方互換）', () => {
+    expect(branchName(RUN_ID, 'T2', undefined, undefined)).toBe(`wf/${RUN_ID}/T2`);
+  });
+
+  it('naming: wfを明示した場合もwf形式のまま', () => {
+    expect(
+      branchName(RUN_ID, 'T2', undefined, { naming: 'wf', type: 'feat', issue: 42 }),
+    ).toBe(`wf/${RUN_ID}/T2`);
+  });
+
+  it('naming: conventionalかつissueありでGitLab運用規約形式<type>/<issue>/<slug>になる', () => {
+    const result = branchName(RUN_ID, 'my-task', undefined, {
+      naming: 'conventional',
+      type: 'fix',
+      issue: 42,
+    });
+    expect(result).toBe(`fix/42/my-task-${RUN_ID.slice(0, 8)}`);
+    expect(CONVENTIONAL_BRANCH_PATTERN.test(result)).toBe(true);
+  });
+
+  it('typeがfeatのときブランチ名の語彙はfeatureへ読み替える（GitLab運用規約側の語彙に合わせる）', () => {
+    const result = branchName(RUN_ID, 'my-task', undefined, {
+      naming: 'conventional',
+      type: 'feat',
+      issue: 7,
+    });
+    expect(result.startsWith('feature/7/')).toBe(true);
+  });
+
+  it('typeが未知の値のときchoreへ倒す（normalizeCommitTypeと同じ既定）', () => {
+    const result = branchName(RUN_ID, 'my-task', undefined, {
+      naming: 'conventional',
+      type: 'bogus',
+      issue: 7,
+    });
+    expect(result.startsWith('chore/7/')).toBe(true);
+  });
+
+  it('retryを渡すとslugに-retry<n>が挟まる', () => {
+    const result = branchName(RUN_ID, 'my-task', 2, {
+      naming: 'conventional',
+      type: 'fix',
+      issue: 42,
+    });
+    expect(result).toBe(`fix/42/my-task-retry2-${RUN_ID.slice(0, 8)}`);
+  });
+
+  it('naming: conventionalでもissueが未指定ならwf形式へ落とす（対応するIssueが無い場合の後方互換）', () => {
+    const result = branchName(RUN_ID, 'T2', undefined, {
+      naming: 'conventional',
+      type: 'fix',
+      issue: undefined,
+    });
+    expect(result).toBe(`wf/${RUN_ID}/T2`);
+  });
+
+  it('長いtaskIdはCONVENTIONAL_BRANCH_PATTERNの30文字制約に収まるよう末尾から削られる', () => {
+    const longTaskId = 'a'.repeat(50);
+    const result = branchName(RUN_ID, longTaskId, undefined, {
+      naming: 'conventional',
+      type: 'fix',
+      issue: 1,
+    });
+    expect(CONVENTIONAL_BRANCH_PATTERN.test(result)).toBe(true);
+  });
+});
+
+describe('normalizeBranchNaming（不正値は既定へ丸める）', () => {
+  it('wf/conventionalはそのまま通す', () => {
+    expect(normalizeBranchNaming('wf')).toBe('wf');
+    expect(normalizeBranchNaming('conventional')).toBe('conventional');
+  });
+
+  it('未知の値・空文字はDEFAULT_BRANCH_NAMING（wf）へ丸める', () => {
+    expect(normalizeBranchNaming('bogus')).toBe(DEFAULT_BRANCH_NAMING);
+    expect(normalizeBranchNaming('')).toBe(DEFAULT_BRANCH_NAMING);
+  });
+});
+
+describe('isWorkflowBranchName（conventional形式も認識する）', () => {
+  it('wf形式・conventional形式のどちらも真になる', () => {
+    expect(isWorkflowBranchName(`wf/${RUN_ID}/T2`)).toBe(true);
+    expect(isWorkflowBranchName('fix/42/my-task-deadbeef')).toBe(true);
+  });
+
+  it('どちらの形にも一致しない文字列は偽になる', () => {
+    expect(isWorkflowBranchName('main')).toBe(false);
+    expect(isWorkflowBranchName('-rf')).toBe(false);
   });
 });
 
@@ -231,6 +327,107 @@ describe('WorktreeCreationQueue.create', () => {
       },
     ]);
   });
+
+  it('branchNaming: conventionalかつissueありのとき、GitLab運用規約形式のブランチで作られる', async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', '--verify'], { code: 1, stdout: '', stderr: '' });
+    git.respond(['worktree', 'add'], { code: 0, stdout: '', stderr: '' });
+    const queue = new WorktreeCreationQueue();
+    const cwd = path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2');
+    const fs = new FakeFs();
+    fs.realpaths.set(cwd, cwd);
+    fs.realpaths.set('/repo', '/repo');
+
+    const result = await queue.create(
+      {
+        repoRoot: '/repo',
+        runId: RUN_ID,
+        taskId: 'T2',
+        headCommit: HEAD_SHA,
+        retry: undefined,
+        branchNaming: { naming: 'conventional', type: 'fix', issue: 42 },
+      },
+      git,
+      fs,
+    );
+
+    const expectedBranch = `fix/42/t2-${RUN_ID.slice(0, 8)}`;
+    expect(result).toEqual({
+      ok: true,
+      cwd,
+      branch: expectedBranch,
+    });
+    expect(git.calls[0]?.args).toEqual([
+      'rev-parse',
+      '--verify',
+      '--quiet',
+      `refs/heads/${expectedBranch}`,
+    ]);
+  });
+
+  it('branchNaming: conventionalでもissue未指定なら、従来どおりwf形式のブランチで作られる', async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', '--verify'], { code: 1, stdout: '', stderr: '' });
+    git.respond(['worktree', 'add'], { code: 0, stdout: '', stderr: '' });
+    const queue = new WorktreeCreationQueue();
+    const cwd = path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2');
+    const fs = new FakeFs();
+    fs.realpaths.set(cwd, cwd);
+    fs.realpaths.set('/repo', '/repo');
+
+    const result = await queue.create(
+      {
+        repoRoot: '/repo',
+        runId: RUN_ID,
+        taskId: 'T2',
+        headCommit: HEAD_SHA,
+        retry: undefined,
+        branchNaming: { naming: 'conventional', type: 'fix', issue: undefined },
+      },
+      git,
+      fs,
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      cwd,
+      branch: `wf/${RUN_ID}/T2`,
+    });
+  });
+
+  it(
+    '作成に成功したときのブランチ名は必ずisWorkflowBranchNameを満たす（多層防御。' +
+      'branchName()の生成ロジックの正しさだけに依存しない自己検証を持つことの回帰確認。' +
+      'レビュー指摘: pushBranch/mergeTaskBranchと同じくgitへ渡す直前で再検証する）',
+    async () => {
+      const git = new FakeGit();
+      git.respond(['rev-parse', '--verify'], { code: 1, stdout: '', stderr: '' });
+      git.respond(['worktree', 'add'], { code: 0, stdout: '', stderr: '' });
+      const queue = new WorktreeCreationQueue();
+      const cwd = path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2');
+      const fs = new FakeFs();
+      fs.realpaths.set(cwd, cwd);
+      fs.realpaths.set('/repo', '/repo');
+
+      const result = await queue.create(
+        {
+          repoRoot: '/repo',
+          runId: RUN_ID,
+          taskId: 'T2',
+          headCommit: HEAD_SHA,
+          retry: undefined,
+          branchNaming: { naming: 'conventional', type: 'fix', issue: 42 },
+        },
+        git,
+        fs,
+      );
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(isWorkflowBranchName(result.branch)).toBe(true);
+      }
+    },
+  );
 
   it('同名のブランチが既にあるときエラーになり、git worktree addを試みない', async () => {
     const git = new FakeGit();

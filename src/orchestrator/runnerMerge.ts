@@ -3,9 +3,11 @@ import {
   createPullRequest,
   buildTaskPullRequestBody,
   buildTaskPullRequestTitle,
+  markPullRequestReady,
   pushBranch,
   runTaskPullRequestFlow,
   shouldCreateTaskPullRequest,
+  type ForgeStepOutcome,
   type TaskPullRequestFlowResult,
   type TaskPullRequestSteps,
 } from './forge';
@@ -85,6 +87,7 @@ export async function mergeTaskWithForge(
       taskId,
       taskBranch,
       self.deps.git,
+      task.type,
     );
     return { merge, pullRequest: undefined };
   }
@@ -148,6 +151,7 @@ function buildTaskPullRequestFlowCallbacks(
             dependsOn: task.dependsOn,
             issue: task.issue,
           }),
+          draft: live.draftPullRequest,
         },
       ),
     mergeAndPushIntegration: async () => {
@@ -157,6 +161,7 @@ function buildTaskPullRequestFlowCallbacks(
         taskId,
         taskBranch,
         self.deps.git,
+        task.type,
       );
       if (merged.kind === 'success') {
         const push = await pushBranch(self.deps.git, integration.cwd, integration.branch);
@@ -173,6 +178,35 @@ function buildTaskPullRequestFlowCallbacks(
       }
       return merged;
     },
+    // design.md §16.18「作る順序」5.「draftPullRequestが有効なら、3で作ったPR/MRをreadyへ
+    // 切り替える」。無効なコールバックを渡さない（`runTaskPullRequestFlow`はcallback自体が
+    // undefinedならready化を試みない。design.md「既定を`false`にしているのは後方互換のため」）
+    ...(live.draftPullRequest
+      ? { markPullRequestReady: buildMarkTaskPullRequestReady(forgeDeps, forge, taskCwd) }
+      : {}),
+  };
+}
+
+/**
+ * タスクのPR/MRをreadyへ切り替えるコールバック（`runTaskPullRequestFlow`の
+ * `markPullRequestReady`）を組み立てる。URLから番号を取り出せなければready化を飛ばし、
+ * 失敗として返す（design.md §16.18「URLから番号を取り出せなかった場合はready化を飛ばし、
+ * 警告を残す」。呼び出し側の`finalizeTaskPullRequestFlow`が警告へ変換する）。
+ */
+function buildMarkTaskPullRequestReady(
+  forgeDeps: NonNullable<WorkflowRunnerInternals['deps']['forge']>,
+  forge: Extract<LiveRun['forge'], { kind: 'active' }>,
+  taskCwd: string,
+): (url: string | undefined) => Promise<ForgeStepOutcome> {
+  return async (url) => {
+    const number = url !== undefined ? parsePullRequestNumberFromUrl(url) : undefined;
+    if (number === undefined) {
+      return {
+        ok: false,
+        message: 'PR/MRの番号をURLから取り出せなかったため、ready化を飛ばしました',
+      };
+    }
+    return markPullRequestReady(forgeDeps.cli, forge.host, taskCwd, number);
   };
 }
 
@@ -197,6 +231,19 @@ function finalizeTaskPullRequestFlow(
     self.deps.log.info(
       `[workflow ${runId}/${taskId}] PR/MRを作成しました: ${flow.pullRequest.url}`,
     );
+  }
+
+  // ready化（design.md §16.18「5の失敗はワークフローを止めない」）の失敗はログ・警告へ
+  // 反映するだけで、`merge`/`pullRequest`の戻り値は変えない
+  if (flow.markReady !== undefined && !flow.markReady.ok) {
+    self.deps.log.warn(
+      `[workflow ${runId}/${taskId}] PR/MRのready化に失敗しました: ${flow.markReady.message}`,
+    );
+    live.warnings.push({
+      kind: 'forgeFailed',
+      taskId,
+      message: `PR/MRのready化に失敗しました: ${flow.markReady.message}`,
+    });
   }
 
   // design.md §16.11「タスクごとの...PR/MRの番号」・Issue #118。番号とURLだけを持ち帰る
@@ -242,7 +289,7 @@ export async function startMerge(
   }
 
   // design.md §16.17「タスク完了時のコミット」2.〜4.
-  const commitResult = await commitUncommittedChangesIfNeeded(taskCwd, taskId, self.deps.git);
+  const commitResult = await commitUncommittedChangesIfNeeded(taskCwd, taskId, self.deps.git, task.type);
   if (!commitResult.ok) {
     self.deps.log.error(
       `[workflow ${runId}/${taskId}] 未コミットの変更の回収に失敗しました: ${commitResult.message}`,

@@ -3408,6 +3408,7 @@ T4は「T2とT3のブランチをマージする」タスクではない。マ�
 | `allow`                                   | -    | `[]`                     | 既定の停止条件から外すパターン。解除できない固定ルールがある（§16.16）                                             |
 | `retries`                                 | -    | `0`                      | 失敗時の再試行回数                                                                                                 |
 | `issue`                                   | -    | -                        | 対応するIssue番号。PR/MRの本文へ `Closes #<N>` として出す（§16.18・§16.19）                                        |
+| `type`                                    | -    | defaults（既定 `chore`） | Conventional Commitsのtype（`feat` / `fix` / `refactor` / `docs` / `test` / `chore` / `perf` / `ci`）。拡張機能が自動生成するコミットメッセージのtypeと、`branchNaming: conventional` のときのブランチ名の先頭セグメントに使う（§16.6・§16.17）              |
 
 未知のフィールドは読み飛ばす（CLIやスキーマの更新で壊れないようにする）。
 
@@ -3434,7 +3435,7 @@ T4は「T2とT3のブランチをマージする」タスクではない。マ�
 - `cwd` がワークスペースフォルダの外を指している（§16.16）
 - Claudeタスクの `approvalMode` が `bypassPermissions` である。この設定では危険判定そのものが働かない（§16.7）。拡張機能側の設定がこの値である場合はYAMLの記述では判定できないため、実行時に `acceptEdits` へ読み替える（§16.16）
 - `isolation: shared` のタスク同士が、依存関係の上で同時に走りうる。ファイル衝突が避けられないため警告する（`cwd` を明示していれば警告しない）
-- `provider` / `isolation` / `cleanup` に未知の値が指定されている（空文字＝未指定は対象外）。既定値へ黙って置き換わる前に気づけるよう警告する（例: `isolation: Worktree-Strict` のようなタイプミスが、安全側の指定のつもりで既定の `worktree` にすり替わる事故を防ぐ）
+- `provider` / `isolation` / `cleanup` / `type` に未知の値が指定されている（空文字＝未指定は対象外）。既定値へ黙って置き換わる前に気づけるよう警告する（例: `isolation: Worktree-Strict` のようなタイプミスが、安全側の指定のつもりで既定の `worktree` にすり替わる事故を防ぐ）
 - `escalate` / `dependsOn` の配列に文字列以外の要素が混ざっている。特に `escalate` は自動承認を止める側（安全性を強める側）のフィールドで、黙って要素を捨てるとフェイルオープンになりうるため警告する。`allow` の配列も同様に警告するが、こちらは停止条件を緩める側のフィールドで、要素を捨てても安全側に倒れる（設定ミスに気づけるようにするための警告）
 
 ### 16.3 スケジューリング
@@ -3603,13 +3604,37 @@ Viewからの手動の「再実行」だけを受け付ける。手動の再実�
 `isolation: worktree` のタスクは、専用のgit worktreeで走らせる。同時に走るタスクが同じファイルを書いて壊れるのを、原理的に防ぐため。
 
 - 置き場: `<repo>/.agents/worktrees/<runId>/<taskId>`
-- ブランチ: `wf/<runId>/<taskId>`。分岐元は**そのタスクを開始する時点の統合ブランチ**（§16.17）。依存先の成果を引き継いだ状態から始めるため
+- ブランチ: `wf/<runId>/<taskId>`（既定）。分岐元は**そのタスクを開始する時点の統合ブランチ**（§16.17）。依存先の成果を引き継いだ状態から始めるため
 - `<repo>` はワークフローの定義ファイルが属するワークスペースフォルダに固定する。マルチルートでも `currentWorkspaceFolder()`（アクティブエディタ基準で揺れる）は使わない
 - `runId` はUUID。`taskId` は §16.2 の検証で字種を絞ってある
 - タスクの成果は拡張機能が統合ブランチへマージする（§16.17）。合流タスクのpromptでマージを指示する必要はない
 - 実行後の後始末は `cleanup` で決める。既定の `after-merge` はマージが済んだ時点で撤去する（§16.17）。`failed` / `blocked` のものは残す
 - 撤去は `git worktree remove`。ディレクトリを直接消さない。未コミットの変更があるworktreeは撤去せず警告する
 - **撤去済み（ディレクトリが既に無い）worktreeへの撤去要求は成功として扱う。** 既定の `cleanup: after-merge` で自動撤去された後にワークフローViewの「worktreeを撤去」を押すと、全タスクがこの経路に入る。cwdが実在しないままNode.jsの`spawn`（`git status --porcelain`）を呼ぶと`ENOENT`（「gitが無い」ではなく「cwdが無い」ことによるもの）になり、本物のgitエラーと見分けが付かなくなる。`removeWorktree`はgitを呼ぶ前にcwdの実在を`WorktreeFileSystemPort.pathExists`で確かめ、無ければ撤去の目的（ディレクトリが無いこと）は既に達成されているとみなして `{ ok: true }` を返す（Issue #252）
+
+#### ブランチの命名方式
+
+設定 `agent.workflows.branchNaming`（`wf` / `conventional`、既定 `wf`、`machine-overridable`）でタスクブランチの形を選ぶ。
+
+| 値             | 形                        | 例                        |
+| -------------- | ------------------------- | ------------------------- |
+| `wf`（既定）   | `wf/<runId>/<taskId>`     | `wf/<uuid>/T1`            |
+| `conventional` | `<type>/<IID>/<slug>`     | `feature/123/t1-a1b2c3d4` |
+
+`conventional` は「ブランチ名を `<type>/<IID>/<slug>` にする」運用規約を持つリポジトリのためにある。組み立て方は次のとおり。
+
+- `<type>`: タスクの `type`（§16.2）。ブランチ側の語彙は `feature` / `fix` / `refactor` / `docs` / `test` / `chore` / `perf` / `ci` で、Conventional Commitsの `feat` だけ綴りが違うため `feature` へ読み替える
+- `<IID>`: タスクの `issue`。**`issue` を書いていないタスクは `conventional` を指定していても `wf` 形式へ落とす。** IIDの無いブランチ名を規約準拠の形で作ることはできず、`0` のような偽の番号を混ぜるほうが害が大きい
+- `<slug>`: `<taskIdをkebab-caseへ正規化したもの>[-retry<n>]-<runIdの先頭8文字>`。全体を先頭英数字のkebab-caseで30文字以内へ収める（超える分は先頭のtaskId部分を削る）
+- **runIdの先頭8文字は必ず残す。** 同じIssueに対する別のrunが同じブランチ名を作ると、2回目の `git worktree add` が必ず失敗する。`-retry<n>` を残すのも同じ理由（§16.5「再試行は新しいworktreeでやり直す」）
+
+worktreeの置き場（`<repo>/.agents/worktrees/<runId>/<taskId>`）は命名方式によらず変わらない。パス側は既に `<runId>` でrun単位に分かれており衝突しないため、ブランチ名の形とディレクトリ名の形は独立させてある。
+
+統合ブランチ（`wf/<runId>/integration`、§16.17）は命名方式の対象外。統合はrun単位でIssueに紐づかないため、`<type>/<IID>/<slug>` の形を作れない。
+
+`git push` / `git merge` へ位置引数として渡すブランチ名の検証（§8の引数インジェクション対策）は、両方の形を受け付ける1つの関数（`isWorkflowBranchName`）へ集約する。どちらの形も先頭が英数字であることは崩さない。
+
+**「そのブランチが自分のrunのものか」の判定強度は、命名方式によって異なる。** `wf` 形式は `wf/<runId>/...` の `runId` 部分（UUID全体）をそのまま文字列一致で確かめられるが、`conventional` 形式は `runId` がブランチ名の先頭に来ないため、slug末尾の `runId` 先頭8文字（16進数32bit相当）だけで判定する。これは `wf` 形式のUUID全体一致より検証強度が弱いが、32bit の一致を偶然作ることは実用上ない。将来 `runId` の生成方式が変わってこの前提が崩れた場合に追跡できるよう、ここに明記しておく。
 
 #### 実装上の注意
 
@@ -4128,7 +4153,7 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 | `sandboxWritableRoots` `sandboxNetworkAccess` | **YAMLからは指定できず、拡張機能の設定も継承しない**。タスクでは常に空・無効に固定する（後述）                                                                                         |
 | `model` `effort`                              | 自由に指定できる（これらは `machine-overridable` であり、実行経路や権限には関わらない）                                                                                                |
 | `issue`                                       | 正の整数のみ。PR/MR本文の `Closes #<N>` とホストのCLIの引数に入る（§16.18）                                                                                                            |
-| 統合・PR/MR・最終マージの設定                 | **YAMLからは指定できない**。`agent.workflows.forge` / `pullRequest` / `finalMerge` は拡張機能の設定にだけ置く（後述）                                                                  |
+| 統合・PR/MR・最終マージの設定                 | **YAMLからは指定できない**。`agent.workflows.forge` / `pullRequest` / `finalMerge` / `branchNaming` / `draftPullRequest` は拡張機能の設定にだけ置く（後述）                                                                  |
 
 **baselineが空文字（CLIの設定へ委譲する、の意）のときの扱い。** `codex.sandbox` / `codex.approvalMode` / `claude.permissionMode` はいずれも既定値が空文字で、これは拡張機能を入れた直後の素の状態（`~/.codex/config.toml` や Claude の `settings.json` に委ねる）を表す。空文字は安全順序表のどの値とも一致しないため、素朴には「大小を比較できない＝判定不能」として拡張機能側の値（空文字）をそのまま採用してしまう。しかしこれには抜け穴があった。**空文字は「パラメータを送らない」の意味であり、YAML側が `sandbox: read-only` のように最も安全な値を明示しても無視され、実効的にはCLI側の設定（自律実行向けかもしれない）にそのまま委ねられてしまう**（#58セキュリティ監査 critical。分解セッション（本節）・実行タスクの `sandbox` 明示指定の両方が影響を受けていた）。
 
@@ -4162,7 +4187,7 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 
 #### ワークフロー設定の一覧
 
-`agent.workflows.*` の全8項目。実際に登録している値（型・既定値・markdownDescription）は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている（§7と同じ原則）。
+`agent.workflows.*` の全11項目。実際に登録している値（型・既定値・markdownDescription）は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている（§7と同じ原則）。
 
 | 設定                                    | スコープ            | 用途・理由                                                                                                                                             |
 | --------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -4174,6 +4199,8 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 | `agent.workflows.pullRequest`           | machine-overridable | 作るPR/MRの層。権限には関わらない                                                                                                                      |
 | `agent.workflows.roadmapDir`            | machine-overridable | ロードマップの出力先のパス。ワークスペースフォルダの配下に限る                                                                                         |
 | `agent.workflows.pseudoWorktreeExclude` | machine-overridable | 疑似worktreeで複製から外すディレクトリ名。増やしても安全側にしか働かない                                                                               |
+| `agent.workflows.branchNaming`          | machine-overridable | タスクブランチの命名方式（§16.6）。ブランチ名の形を決めるだけで、push先も権限も変えない                                                                |
+| `agent.workflows.draftPullRequest`      | machine-overridable | PR/MRをDraftで作るかどうか（§16.18）。有効にするほうが「人の確認を挟む」側へ倒れるため、強い制限は要らない                                             |
 
 push先のremoteをYAMLや設定から選ぶ手段は設けない。常に `origin` を使う。任意のURLへpushできると、リポジトリの中身を別の宛先へ出す経路になる。
 
@@ -4213,7 +4240,7 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 
 1. 終了条件に「変更をコミットしてあること」を拡張機能側が自動で足す（`decoratePrompt` と同じ経路。人が書いた `done` はそのまま残す）
 2. それでも未コミットの変更が残っていたら、拡張機能が `git add -A` と `git commit` を実行してからマージへ進む
-3. 自動コミットのメッセージは固定文言（`wf(<taskId>): uncommitted changes at task completion`）にする。エージェントの出力を混ぜない。改行やオプションに見える文字列が入りうるため
+3. 自動コミットのメッセージは固定文言（`<type>(<taskId>): uncommitted changes at task completion`）にする。エージェントの出力を混ぜない。改行やオプションに見える文字列が入りうるため。`<type>` はタスクの `type`（§16.2、既定 `chore`）で、メッセージ全体がConventional Commitsの形になる。以前は `wf(<taskId>): ...` だったが、`wf` はConventional Commitsのtype語彙に無く、コミットメッセージの規約を機械で検査しているリポジトリで弾かれるため改めた
 4. `-A` で追跡対象外のファイルも拾う。新規ファイルがマージから落ちるほうが実害が大きい。`.gitignore` は効くのでビルド生成物は入らない
 
 粒度とメッセージはエージェントに委ね、取りこぼしだけ拡張機能が拾う、という分担になる。
@@ -4222,7 +4249,8 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 
 - タスクが `done` になった時点で、統合worktreeで `git merge --no-ff <taskBranch>` を実行する
 - `--no-ff` にするのは、タスク単位の境界をあとから辿れるようにするため
-- マージコミットのメッセージは固定文言（`Merge task <taskId> (run <runId>)`）
+- マージコミットのメッセージは固定文言（`<type>(<taskId>): merge task (run <runId>)`）。以前は `Merge task <taskId> (run <runId>)` だったが、Conventional Commitsの形ではなかったため、自動コミットのメッセージと同じくタスクの `type` を使う形へ改めた
+- **リロード直後の `merging` タスクの再判定（§16.11）や衝突解決プロンプトの相手特定は、マージコミットの件名を `--grep` の完全一致ではなく `git log --format=%s` で一覧化してJS側で照合する方式を取り、新旧どちらの形式（`<type>(<taskId>): merge task (run <runId>)` / 旧 `Merge task <taskId> (run <runId>)`）の件名にも一致させる。** これにより、runの実行中にワークフローYAMLの `type:` を書き換えてからリロードする経路や、旧バージョンの拡張機能で走らせた実行中のrunを新バージョンへ上げてからリロードする経路のどちらでも、既にマージ済みのタスクを誤って `merging`（やり直し対象）と判定し二重マージが走る事故を防ぐ
 - **マージはworktreeの作成・撤去と同じ1本のキューに通して直列化する。** 並列タスクが同時に完了しても順に処理する。同じリポジトリの `index.lock` で競合するため（§16.6 の直列化と同じ理由）
 
 マージが終わるまで、次に開始するタスクの起点は決まらない。そこでタスクの状態に `merging` を足し、**`done` は「統合ブランチへ入った」を指す**ことにする。ループが終わっただけの状態は `merging` であり、スケジューラは `done` になるまで後続を開始しない。
@@ -4299,8 +4327,26 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 2. 統合ブランチが未pushならpushする。baseが存在しないとPR/MRを作れない
 3. PR/MRを作る（base=統合ブランチ、head=タスクブランチ）
 4. 統合worktreeでマージし、統合ブランチをpushする
+5. `draftPullRequest` が有効なら、3で作ったPR/MRをreadyへ切り替える
 
 先にマージしてしまうと、baseとheadの間に差分が無くなり作成に失敗する（GitHubは "No commits between" を返す）。4のpushによって、作ったPR/MRはホスト側でマージ済みとして扱われる。
+
+5を4の後に置くのは、「統合ブランチへ入るまではDraftのまま」という状態をホスト側でも読めるようにするため。3が失敗していれば5は行わない。5の失敗はワークフローを止めない（PR/MRまわりの失敗で実行全体を落とさない方針は「前提が欠けている場合」と同じ）。
+
+#### Draftとして作る
+
+設定 `agent.workflows.draftPullRequest`（boolean、既定 `false`、`machine-overridable`）。有効にすると、PR/MRをDraftとして作り、統合ブランチへのマージが済んでからreadyへ切り替える。
+
+| 手順      | GitHub                    | GitLab                                  |
+| --------- | ------------------------- | --------------------------------------- |
+| Draft作成 | `gh pr create --draft`    | `glab api ... --field=draft=true`       |
+| ready化   | `gh pr ready <number>`    | `glab mr update <number> --ready`       |
+
+- GitLabのMR作成は `glab mr create` ではなく `glab api projects/:id/merge_requests` へのPOSTを使っている（「本文」参照）ため、Draft指定もAPIのフィールド（`draft`）で渡す。`glab mr create --draft` のようなフラグは経由しない
+- `--field=draft=true` は文字列 `"true"` ではなく、真にJSON booleanとして送られる。実測済み: `glab 1.112.0` の `glab api --help` に「The `--field` flag behaves like `--raw-field` but converts values based on their format: Literal values `true`, `false`, `null`, and integer numbers are converted to the matching JSON types.」とある（`--raw-field` を使った場合は文字列のまま送られ、GitLab APIのboolean検証に落ちる）
+- ready化には**PR/MRの番号が要る**（下の「PR/MRの番号」）。URLから番号を取り出せなかった場合はready化を飛ばし、警告を残す。Draftのまま残るほうが、誤った番号のPR/MRをreadyにするより害が小さい
+- 統合層のPR/MRもDraftで作る。ただしこちらは**最終マージ（`finalMerge: auto`）の直前**にreadyへ切り替える。Draftのままではマージできないため、タスク層とは順序が違う
+- 既定を `false` にしているのは後方互換のため。Draftを前提としないリポジトリで、いきなり全てのPR/MRがDraftになると人手のレビュー導線が変わる
 
 #### 統合ブランチpushの直列化とリトライ（Issue #253）
 

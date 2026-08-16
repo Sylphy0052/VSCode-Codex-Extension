@@ -4,8 +4,9 @@ import { isPathWithinRoot } from './escalation';
 import { findSymlinkedAncestor, identifierError, runIdError } from './fsGuards';
 import { pushBranch, type PushBranchResult } from './forge';
 import { sanitizeForLog } from './sanitize';
-import { TASK_ID_PATTERN } from './workflow';
+import { COMMIT_TYPES, normalizeCommitType, TASK_ID_PATTERN } from './workflow';
 import {
+  CONVENTIONAL_BRANCH_PATTERN,
   isWorkflowBranchName,
   resolveHeadCommit,
   worktreesRootDir,
@@ -52,19 +53,37 @@ export const INTEGRATION_DIR_NAME = '_integration';
 const HEAD_COMMIT_PATTERN = /^[0-9a-f]{7,40}$/;
 
 /**
- * `taskBranch` が「この `runId` の」`wf/<runId>/<...>` の形をしているかを確かめる。
+ * `taskBranch` が「この `runId` の」タスクブランチの形をしているかを確かめる。
  *
  * マージ対象のブランチ名は `git merge --no-ff -m <message> <taskBranch>` の末尾の位置引数
  * として渡す。`--` の区切りが無いため、`-` から始まる文字列を渡されるとフラグとして解釈
  * されうる（`worktree.ts` の `HEAD_COMMIT_PATTERN` と同じ理由の防御）。形そのものの検証
- * （`branchName()` が生成する `wf/<runId>/<taskId>` または再試行時の
- * `wf/<runId>/<taskId>-retry<n>`）は `worktree.ts` の `isWorkflowBranchName` へ一本化した
- * （Issue #146）。ここではそれに加えて、渡された `taskBranch` が「他のrunのブランチでは
- * なく、まさにこの `runId` のものであること」まで確かめる（`isWorkflowBranchName` は
- * runIdを問わないため、この一段厳しい確認は`integration.ts`固有の責務として残す）。
+ * （`branchName()` が生成する `wf/<runId>/<taskId>` / `wf/<runId>/<taskId>-retry<n>`、
+ * または conventional形式の `<type>/<issue>/<slug>`）は `worktree.ts` の
+ * `isWorkflowBranchName` へ一本化した（Issue #146）。ここではそれに加えて、渡された
+ * `taskBranch` が「他のrunのブランチではなく、まさにこの `runId` のものであること」まで
+ * 確かめる（`isWorkflowBranchName` はrunIdを問わないため、この一段厳しい確認は
+ * `integration.ts`固有の責務として残す）。
+ *
+ * - `wf/<runId>/...` 形式: 従来どおり、`wf/${runId}/` で始まり `isWorkflowBranchName` を
+ *   満たすことで確かめる。
+ * - conventional形式（`<type>/<issue>/<slug>`）: runIdが先頭に来ないため、
+ *   `CONVENTIONAL_BRANCH_PATTERN` を満たし、かつslugが `-<runId先頭8文字>` で終わることで
+ *   確かめる（`branchName()` の `naming: 'conventional'` はslugの末尾に必ずrunId先頭8文字を
+ *   残す設計。`-retry<n>` が付く場合も `...-retry<n>-<runId8>` の並びになるため、単純な
+ *   `endsWith` で判定できる）。runId先頭8文字だけの照合は理論上は別runと衝突しうる弱さが
+ *   あるが、UUIDの先頭8文字なので実用上は衝突しない。それでも「他のrunのブランチを誤って
+ *   マージしない」という元の目的（取り違え防止）は満たす。
  */
-function isValidTaskBranch(taskBranch: string, runId: string): boolean {
-  return taskBranch.startsWith(`wf/${runId}/`) && isWorkflowBranchName(taskBranch);
+export function isValidTaskBranch(taskBranch: string, runId: string): boolean {
+  if (taskBranch.startsWith(`wf/${runId}/`) && isWorkflowBranchName(taskBranch)) {
+    return true;
+  }
+  if (CONVENTIONAL_BRANCH_PATTERN.test(taskBranch)) {
+    const runId8 = runId.slice(0, 8).toLowerCase();
+    return taskBranch.endsWith(`-${runId8}`);
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -94,19 +113,28 @@ export function integrationWorktreePath(repoRoot: string, runId: string): string
 
 /**
  * タスク完了時に未コミットの変更を拾うための固定文言のコミットメッセージ。
- * `wf(<taskId>): uncommitted changes at task completion`（design.md §16.17）。
- * **エージェントの出力を混ぜない**。引数は検証済みの `taskId` のみを受け取る。
+ * `<type>(<taskId>): uncommitted changes at task completion`（design.md §16.17）。
+ * **エージェントの出力を混ぜない**。引数は検証済みの `taskId` / `type` のみを受け取る。
+ *
+ * 以前は `wf(<taskId>): uncommitted changes at task completion` という固定文言だったが、
+ * `wf` はConventional Commitsのtype語彙に無いため、規約準拠の形へ改めた。`type` は
+ * 省略可能で、未指定・未知の値は `normalizeCommitType`（`workflow.ts`）が`chore`へ倒す
+ * （GitLab運用規約のConventional Commits短形に合わせる）。
  */
-export function uncommittedChangesCommitMessage(taskId: string): string {
-  return `wf(${taskId}): uncommitted changes at task completion`;
+export function uncommittedChangesCommitMessage(taskId: string, type?: string): string {
+  return `${normalizeCommitType(type)}(${taskId}): uncommitted changes at task completion`;
 }
 
 /**
- * マージコミットの固定文言メッセージ。`Merge task <taskId> (run <runId>)`
+ * マージコミットの固定文言メッセージ。`<type>(<taskId>): merge task (run <runId>)`
  * （design.md §16.17）。**エージェントの出力を混ぜない**。
+ *
+ * 以前は `Merge task <taskId> (run <runId>)` という固定文言だったが、Conventional
+ * Commits形式そのものではなかったため、規約準拠の形へ改めた。`type` は省略可能で、
+ * 未指定・未知の値は `normalizeCommitType`（`workflow.ts`）が`chore`へ倒す。
  */
-export function mergeCommitMessage(taskId: string, runId: string): string {
-  return `Merge task ${taskId} (run ${runId})`;
+export function mergeCommitMessage(taskId: string, runId: string, type?: string): string {
+  return `${normalizeCommitType(type)}(${taskId}): merge task (run ${runId})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,11 +281,15 @@ export type CommitUncommittedChangesResult =
  * `worktree.ts` の作成・撤去や本ファイルのマージのような直列化キューは要らない
  * （`index.lock` の競合が起きるのは共有の管理領域を触る操作だけ）。**exportして直接
  * 呼べる。**
+ *
+ * `type` はコミットメッセージのConventional Commits typeを指定する省略可能な引数
+ * （`uncommittedChangesCommitMessage` へそのまま渡す。未指定・未知の値は`chore`）。
  */
 export async function commitUncommittedChangesIfNeeded(
   taskWorktreeCwd: string,
   taskId: string,
   git: GitCommandRunner,
+  type?: string,
 ): Promise<CommitUncommittedChangesResult> {
   if (!TASK_ID_PATTERN.test(taskId)) {
     return {
@@ -297,7 +329,7 @@ export async function commitUncommittedChangesIfNeeded(
   }
 
   const commit = await git.run(
-    ['commit', '-m', uncommittedChangesCommitMessage(taskId)],
+    ['commit', '-m', uncommittedChangesCommitMessage(taskId, type)],
     taskWorktreeCwd,
   );
   if (commit.code !== 0) {
@@ -337,6 +369,9 @@ export type MergeTaskResult =
  * `IntegrationMergeQueue.mergeTask` を経由すること（`worktree.ts` の作成・撤去と同じ
  * `index.lock` の競合を避けるため。design.md §16.17「マージはworktreeの作成・撤去と
  * 同じ1本のキューに通して直列化する」）。
+ *
+ * `type` はマージコミットのConventional Commits typeを指定する省略可能な引数
+ * （`mergeCommitMessage` へそのまま渡す。未指定・未知の値は`chore`）。
  */
 async function mergeTaskBranch(
   integrationWorktreeCwd: string,
@@ -344,13 +379,19 @@ async function mergeTaskBranch(
   taskId: string,
   taskBranch: string,
   git: GitCommandRunner,
+  type?: string,
 ): Promise<MergeTaskResult> {
   const idMessage = identifierError(runId, taskId);
   if (idMessage !== undefined) {
     return { kind: 'failure', message: idMessage };
   }
   if (!isValidTaskBranch(taskBranch, runId)) {
-    return { kind: 'failure', message: `不正なtaskBranch（wf/${runId}/... の形ではありません）: ${taskBranch}` };
+    return {
+      kind: 'failure',
+      message:
+        `不正なtaskBranch（wf/${runId}/... の形にも、conventional形式（<type>/<issue>/<slug>、` +
+        `末尾がこのrunIdの先頭8文字）にも一致しません）: ${taskBranch}`,
+    };
   }
 
   const before = await git.run(['rev-parse', 'HEAD'], integrationWorktreeCwd);
@@ -360,7 +401,7 @@ async function mergeTaskBranch(
   }
 
   const merge = await git.run(
-    ['merge', '--no-ff', '-m', mergeCommitMessage(taskId, runId), taskBranch],
+    ['merge', '--no-ff', '-m', mergeCommitMessage(taskId, runId, type), taskBranch],
     integrationWorktreeCwd,
   );
   if (merge.code === 0) {
@@ -456,16 +497,20 @@ export class IntegrationMergeQueue {
     return this.worktreeQueue.enqueue(() => createIntegrationWorktree(request, git, fs));
   }
 
-  /** タスクブランチを統合worktreeへマージする（`mergeTaskBranch` をキュー経由で呼ぶ）。 */
+  /**
+   * タスクブランチを統合worktreeへマージする（`mergeTaskBranch` をキュー経由で呼ぶ）。
+   * `type` は省略可能（マージコミットのConventional Commits type。未指定は`chore`）。
+   */
   mergeTask(
     integrationWorktreeCwd: string,
     runId: string,
     taskId: string,
     taskBranch: string,
     git: GitCommandRunner,
+    type?: string,
   ): Promise<MergeTaskResult> {
     return this.worktreeQueue.enqueue(() =>
-      mergeTaskBranch(integrationWorktreeCwd, runId, taskId, taskBranch, git),
+      mergeTaskBranch(integrationWorktreeCwd, runId, taskId, taskBranch, git, type),
     );
   }
 
@@ -503,12 +548,24 @@ export class IntegrationMergeQueue {
  * 直す」）。永続化された状態はマージが途中で切れている可能性があるため信用しない。
  *
  * - 未解決の衝突が残っていれば `blocked`
- * - 対象タスクのマージコミット（`mergeCommitMessage`の固定文言）が統合ブランチの
- *   履歴に見つかれば `done`
+ * - 対象タスクのマージコミット（`mergeCommitMessage`の固定文言。旧形式
+ *   `Merge task <taskId> (run <runId>)` も含む）が統合ブランチの履歴に見つかれば `done`
  * - どちらでもなければ `merging`（呼び出し側がマージをやり直す）
  *
  * `runId` / `taskId` が不正な場合や、統合worktreeが読めない場合（gitコマンド自体が
  * 失敗する）は安全側の `merging`（やり直し対象）を返す。
+ *
+ * **`type`引数は持たない。** 以前は`mergeCommitMessage(taskId, runId, type)`の固定文言を
+ * そのまま`--grep`（`--fixed-strings`付きの完全一致）に使っており、マージ時に実際へ渡した
+ * `type`と呼び出し側が揃えないと見つからなかった。`type`は`PersistedTaskState`
+ * （`runStore.ts`）に永続化されておらず、リロード時は定義ファイルを再パースした結果から
+ * 引き直すしかない値のため、「ワークフローYAMLの`type:`をrunの実行中に書き換えてから
+ * リロードする」「旧バージョンの拡張機能（旧形式のマージコミット）で走らせたrunを、この
+ * 変更を含む新バージョンへ上げてからリロードする」の2経路で、既にマージ済みのタスクを
+ * `merging`（やり直し対象）へ誤判定し、同じタスクブランチへ二重マージが走る事故になって
+ * いた。`findTaskIdsMergedSince`と同じ「gitには件名の一覧を出させ、照合はJS側で行う」
+ * 方式へ寄せ、`type`を問わず（`COMMIT_TYPES`のいずれでも）・新旧どちらの形式でもマッチ
+ * させることでこの2経路を塞ぐ。
  */
 export type ReconcileMergingOutcome = 'done' | 'merging' | 'blocked';
 
@@ -531,14 +588,15 @@ export async function reconcileMergingTaskOnReload(
     return 'blocked';
   }
 
-  const log = await git.run(
-    ['log', '--fixed-strings', `--grep=${mergeCommitMessage(taskId, runId)}`, '-1', '--format=%H'],
-    integrationWorktreeCwd,
-  );
-  if (log.code === 0 && log.stdout.trim() !== '') {
-    return 'done';
+  const log = await git.run(['log', '--format=%s'], integrationWorktreeCwd);
+  if (log.code !== 0) {
+    return 'merging';
   }
-  return 'merging';
+  const pattern = buildMergeCommitSubjectPattern(runId);
+  const found = log.stdout
+    .split(/\r?\n/u)
+    .some((line) => extractMergedTaskId(line, pattern) === taskId);
+  return found ? 'done' : 'merging';
 }
 
 // ---------------------------------------------------------------------------
@@ -598,10 +656,62 @@ export function buildMergeResolutionPrompt(
 }
 
 /**
+ * マージコミットのsubjectから`taskId`を取り出す正規表現を組み立てる。`mergeCommitMessage`が
+ * 生成する現行形（`<type>(<taskId>): merge task (run <runId>)`）に加え、以前の固定文言
+ * （`Merge task <taskId> (run <runId>)`）にも一致させる。**呼び出し側は必ず`runIdError`で
+ * 検証を通してから呼ぶこと（fail-closed）。** ここで改めて検証するのは、`findTaskIdsMergedSince`
+ * のように既に検証済みの呼び出し元だけでなく、将来この関数が別の経路から呼ばれた場合にも
+ * 規律だけに頼らず安全側で止めるため（レビュー指摘）。
+ *
+ * 旧形式を受け付けるのは、アップグレードを跨いで実行中のrun（統合ブランチに旧バージョンの
+ * 拡張機能が作った旧形式のマージコミットが既にある）を、この変更を含む新バージョンで
+ * リロードしても壊さないため。
+ *
+ * `<type>`は`normalizeCommitType`が返す`COMMIT_TYPES`のいずれか（英数字のみで regexの
+ * メタ文字を含まない）に固定し、`runId`は呼び出し側が`runIdError`で検証済み（UUID形式。
+ * 16進数とハイフンのみ）のため、そのまま正規表現へ埋め込んでも意図しないパターンには
+ * ならない。`taskId`部分は貪欲すぎない`[^()]+`で受け、`TASK_ID_PATTERN`で改めて検証する
+ * （字種が想定と違うものを拾わないための二重チェック）。新形式・旧形式のどちらにマッチ
+ * したかで名前付きキャプチャ（`newId` / `oldId`）を分け、`extractMergedTaskId`が両方を見る。
+ */
+function buildMergeCommitSubjectPattern(runId: string): RegExp {
+  const message = runIdError(runId);
+  if (message !== undefined) {
+    throw new Error(message);
+  }
+  const types = COMMIT_TYPES.join('|');
+  return new RegExp(
+    `^(?:(?:${types})\\((?<newId>[^()]+)\\): merge task \\(run ${runId}\\)` +
+      `|Merge task (?<oldId>[^()]+) \\(run ${runId}\\))$`,
+    'u',
+  );
+}
+
+/**
+ * マージコミットのsubject1行から`taskId`を取り出す。`buildMergeCommitSubjectPattern`が
+ * 生成する正規表現を1回適用し、新形式・旧形式どちらの名前付きキャプチャにもマッチしなければ
+ * `undefined`。取り出せた値は`TASK_ID_PATTERN`で再検証する（字種が想定と違うものを
+ * 拾わないための二重チェック。`buildMergeCommitSubjectPattern`のJSDoc参照）。
+ */
+function extractMergedTaskId(subject: string, pattern: RegExp): string | undefined {
+  const match = pattern.exec(subject);
+  const id = match?.groups?.['newId'] ?? match?.groups?.['oldId'];
+  return id !== undefined && TASK_ID_PATTERN.test(id) ? id : undefined;
+}
+
+/**
  * `sinceCommit`（対象タスクのブランチの分岐元）から統合ブランチの現在のHEADまでの間に
  * マージされたタスクidの一覧を、マージコミットの固定文言（`mergeCommitMessage`）から
  * 逆算する。衝突解決プロンプトの「突き合わせる」相手を特定するために使う
  * （`buildMergeResolutionPrompt`の`others`）。
+ *
+ * `mergeCommitMessage`は`type`（省略時`chore`）を先頭に持つ形（`<type>(<taskId>): merge
+ * task (run <runId>)`）を生成するため、ここでの逆算も同じ形に一致させる
+ * （`buildMergeCommitSubjectPattern`）。マージ時に渡した`type`が何であっても、
+ * `COMMIT_TYPES`のいずれかである限り拾える。**以前の固定文言
+ * （`Merge task <taskId> (run <runId>)`）のマージコミットも拾う**（アップグレードを
+ * 跨いだrunで、衝突解決プロンプトの「突き合わせる」相手（旧形式でマージ済みのタスク）を
+ * 取りこぼさないため）。
  *
  * `sinceCommit`が不正な形式（コミットのSHAでない）なら空配列を返す（安全側）。
  */
@@ -618,15 +728,12 @@ export async function findTaskIdsMergedSince(
   if (log.code !== 0) {
     return [];
   }
-  const prefix = 'Merge task ';
-  const suffix = ` (run ${runId})`;
+  const pattern = buildMergeCommitSubjectPattern(runId);
   const ids: string[] = [];
   for (const line of log.stdout.split(/\r?\n/u)) {
-    if (line.startsWith(prefix) && line.endsWith(suffix)) {
-      const id = line.slice(prefix.length, line.length - suffix.length);
-      if (TASK_ID_PATTERN.test(id) && !ids.includes(id)) {
-        ids.push(id);
-      }
+    const id = extractMergedTaskId(line, pattern);
+    if (id !== undefined && !ids.includes(id)) {
+      ids.push(id);
     }
   }
   return ids;
