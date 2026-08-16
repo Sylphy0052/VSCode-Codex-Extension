@@ -91,7 +91,15 @@ describe('buildTranscriptMarkdown', () => {
       id: 'f1',
       kind: 'fileChange',
       detail: 'a.ts',
-      diffs: [{ path: 'a.ts', kind: 'update', movePath: undefined, diff: '@@ -1 +1 @@\n-old\n+new' }],
+      diffs: [
+        {
+          path: 'a.ts',
+          kind: 'update',
+          movePath: undefined,
+          diff: '@@ -1 +1 @@\n-old\n+new',
+          editReplace: undefined,
+        },
+      ],
     });
     const md = buildTranscriptMarkdown([item], 'Codex');
     expect(md).toContain('## ファイル変更 ・ a.ts');
@@ -103,7 +111,9 @@ describe('buildTranscriptMarkdown', () => {
     const item = makeItem({
       id: 'f2',
       kind: 'fileChange',
-      diffs: [{ path: 'old.ts', kind: 'update', movePath: 'new.ts', diff: 'x' }],
+      diffs: [
+        { path: 'old.ts', kind: 'update', movePath: 'new.ts', diff: 'x', editReplace: undefined },
+      ],
     });
     expect(buildTranscriptMarkdown([item], 'Codex')).toContain('old.ts → new.ts（変更）');
   });
@@ -112,7 +122,9 @@ describe('buildTranscriptMarkdown', () => {
     const item = makeItem({
       id: 'f3',
       kind: 'fileChange',
-      diffs: [{ path: 'a.ts', kind: 'rename', movePath: undefined, diff: 'x' }],
+      diffs: [
+        { path: 'a.ts', kind: 'rename', movePath: undefined, diff: 'x', editReplace: undefined },
+      ],
     });
     expect(buildTranscriptMarkdown([item], 'Codex')).toContain('a.ts（rename）');
   });

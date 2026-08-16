@@ -3,6 +3,19 @@ import { NO_IMAGES, readUserInputImages, type ChatImage } from '../provider/imag
 import { readAutoApprovalReview } from './autoApprovalReview';
 import type { PendingPrompt } from './prompts';
 
+/**
+ * Claude CodeのEditツールが渡す置換前後の生の文字列（issue #310）。
+ *
+ * `diff`（表示用のテキスト、`MAX_DIFF_LINES` で切り詰められうる）とは別に持つ。
+ * 復元（`src/util/diffRestore.ts` の `reverseApplyEditReplace`）は現在のファイル内容から
+ * `newString` を検索する必要があり、切り詰められたテキストからの再構成では一致判定が
+ * 壊れるため、切り詰め前の値をそのまま保持する。
+ */
+export interface EditReplace {
+  oldString: string;
+  newString: string;
+}
+
 /** 1ファイル分の変更。app-server の `FileUpdateChange` に対応する。 */
 export interface FileDiff {
   path: string;
@@ -15,6 +28,11 @@ export interface FileDiff {
    * ファイルの中身がそのまま届いたときは行頭に + / - を補う（`normalizeDiffBody`）。
    */
   diff: string;
+  /**
+   * Claude CodeのEditツール由来の `update` のときだけ入る置換前後の生の文字列（issue #310）。
+   * Codex側・Claude CodeのWrite/NotebookEdit由来では常に `undefined`。
+   */
+  editReplace: EditReplace | undefined;
 }
 
 /**
@@ -795,6 +813,8 @@ export function readFileDiffs(changes: unknown): FileDiff[] {
       kind: kindName,
       movePath: movePath === '' ? undefined : movePath,
       diff: normalizeDiffBody(diff, kindName),
+      // Codex側は old_string/new_string を持たないため常に undefined（issue #310）
+      editReplace: undefined,
     });
   }
   return diffs.length === 0 ? NO_DIFFS : diffs;

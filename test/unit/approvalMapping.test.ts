@@ -44,8 +44,20 @@ describe('buildEscalationRequest（design.md §16.7: 判定へは生の要求パ
         status: undefined,
         turnId: undefined,
         diffs: [
-          { path: '/repo/task/a.ts', kind: 'update', movePath: undefined, diff: '' },
-          { path: '/repo/task/b.ts', kind: 'add', movePath: undefined, diff: '' },
+          {
+            path: '/repo/task/a.ts',
+            kind: 'update',
+            movePath: undefined,
+            diff: '',
+            editReplace: undefined,
+          },
+          {
+            path: '/repo/task/b.ts',
+            kind: 'add',
+            movePath: undefined,
+            diff: '',
+            editReplace: undefined,
+          },
         ],
       },
     ];

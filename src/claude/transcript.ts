@@ -3,6 +3,7 @@ import {
   NO_TODOS,
   readWebSearchResults,
   type ChatItem,
+  type EditReplace,
   type FileDiff,
   type TodoItem,
   type WebSearchResult,
@@ -253,7 +254,7 @@ export function describeTool(
     case 'BashOutput':
       return { kind: 'commandExecution', detail: str(input['command']), diffs: [] };
     case 'Edit':
-      return fileChange(input, editDiff(input));
+      return fileChange(input, editDiff(input), buildEditReplace(input));
     case 'Write':
       return fileChange(input, addedDiff(input, str(input['content'])));
     case 'NotebookEdit':
@@ -272,13 +273,17 @@ export function describeTool(
 function fileChange(
   input: Record<string, unknown>,
   diff: string,
+  editReplace: EditReplace | undefined = undefined,
 ): { kind: string; detail: string; diffs: FileDiff[] } {
   const path = str(input['file_path']) || str(input['notebook_path']);
   const kind = str(input['old_string']) === '' ? 'add' : 'update';
   return {
     kind: 'fileChange',
     detail: path,
-    diffs: path === '' || diff === '' ? [] : [{ path, kind, movePath: undefined, diff }],
+    diffs:
+      path === '' || diff === ''
+        ? []
+        : [{ path, kind, movePath: undefined, diff, editReplace }],
   };
 }
 
@@ -287,6 +292,22 @@ function editDiff(input: Record<string, unknown>): string {
   const removed = prefixLines(str(input['old_string']), '-');
   const added = prefixLines(str(input['new_string']), '+');
   return [removed, added].filter((s) => s !== '').join('\n');
+}
+
+/**
+ * Editツールの `old_string` / `new_string` を、切り詰め前の生の文字列のまま保持する
+ * （issue #310）。`editDiff` が作る `diff` テキストは表示用に `MAX_DIFF_LINES` で
+ * 切り詰められうるが、こちらは復元（`diffRestore.ts` の `reverseApplyEditReplace`）が
+ * 現在のファイル内容から `new_string` を過不足なく検索するために使うので切り詰めない。
+ * `old_string` が空（Editが実質新規追加として使われた場合、kindは`add`になる）のときは
+ * `undefined` を返す。
+ */
+function buildEditReplace(input: Record<string, unknown>): EditReplace | undefined {
+  const oldString = str(input['old_string']);
+  if (oldString === '') {
+    return undefined;
+  }
+  return { oldString, newString: str(input['new_string']) };
 }
 
 /** 新しく書いた内容を追加行として並べる。 */

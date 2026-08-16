@@ -4,6 +4,7 @@ import {
   parseUnifiedDiffHunks,
   planDiffActions,
   reconstructWholeFile,
+  reverseApplyEditReplace,
   reverseApplyHunks,
 } from '../../src/util/diffRestore';
 
@@ -81,6 +82,40 @@ describe('reverseApplyHunks', () => {
   });
 });
 
+describe('reverseApplyEditReplace（issue #310: Claude CodeのEditツール由来）', () => {
+  it('newStringが現在の内容に1件だけ見つかれば、そこをoldStringへ置き換えて返す', () => {
+    const result = reverseApplyEditReplace('const a = 10;\nconst b = 2;', {
+      oldString: 'const a = 1;',
+      newString: 'const a = 10;',
+    });
+    expect(result).toEqual({ ok: true, before: 'const a = 1;\nconst b = 2;' });
+  });
+
+  it('newStringが現在の内容に無ければ失敗を返す（差分を取ったときから変わった）', () => {
+    const result = reverseApplyEditReplace('unrelated content', {
+      oldString: 'const a = 1;',
+      newString: 'const a = 10;',
+    });
+    expect(result).toEqual({
+      ok: false,
+      error: 'ファイルの内容が差分を取ったときから変わっています',
+    });
+  });
+
+  it('newStringが複数箇所に一致すれば失敗を返す（全件置換も先頭のみの置換もしない）', () => {
+    const result = reverseApplyEditReplace('dup\ndup', { oldString: 'x', newString: 'dup' });
+    expect(result).toEqual({
+      ok: false,
+      error: '同じ内容が複数箇所に一致するため、どこを戻すか特定できません',
+    });
+  });
+
+  it('newStringが空文字（純粋な削除編集）なら位置を一意に特定できず失敗を返す', () => {
+    const result = reverseApplyEditReplace('anything', { oldString: 'removed', newString: '' });
+    expect(result.ok).toBe(false);
+  });
+});
+
 describe('reconstructWholeFile', () => {
   it('全て+行なら中身を復元する（add）', () => {
     const result = reconstructWholeFile('+line1\n+line2', '+');
@@ -143,6 +178,72 @@ describe('computeDiffContents', () => {
     const result = computeDiffContents({ kind: 'rename', diff: 'irrelevant' }, 'irrelevant');
     expect(result.ok).toBe(false);
   });
+
+  describe('update: editReplace（issue #310: Claude CodeのEdit由来、ハンク見出しを持たない）', () => {
+    it('newStringが1件だけ見つかればbefore/afterの両方を返す', () => {
+      const result = computeDiffContents(
+        {
+          kind: 'update',
+          diff: '-const a = 1;\n+const a = 10;',
+          editReplace: { oldString: 'const a = 1;', newString: 'const a = 10;' },
+        },
+        'const a = 10;\nconst b = 2;',
+      );
+      expect(result).toEqual({
+        ok: true,
+        before: 'const a = 1;\nconst b = 2;',
+        after: 'const a = 10;\nconst b = 2;',
+      });
+    });
+
+    it('newStringが現在の内容に見つからなければ失敗を返す', () => {
+      const result = computeDiffContents(
+        {
+          kind: 'update',
+          diff: '-const a = 1;\n+const a = 10;',
+          editReplace: { oldString: 'const a = 1;', newString: 'const a = 10;' },
+        },
+        '既に別の内容に書き換わっている',
+      );
+      expect(result.ok).toBe(false);
+    });
+
+    it('newStringが複数箇所に一致すれば失敗を返す（全件置換しない）', () => {
+      const result = computeDiffContents(
+        {
+          kind: 'update',
+          diff: '-x\n+dup',
+          editReplace: { oldString: 'x', newString: 'dup' },
+        },
+        'dup\ndup',
+      );
+      expect(result.ok).toBe(false);
+    });
+
+    it('newStringが空文字（純粋な削除編集）なら失敗を返す', () => {
+      const result = computeDiffContents(
+        {
+          kind: 'update',
+          diff: '-removed',
+          editReplace: { oldString: 'removed', newString: '' },
+        },
+        'anything',
+      );
+      expect(result.ok).toBe(false);
+    });
+
+    it('ファイルが無ければ失敗を返す', () => {
+      const result = computeDiffContents(
+        {
+          kind: 'update',
+          diff: '-const a = 1;\n+const a = 10;',
+          editReplace: { oldString: 'const a = 1;', newString: 'const a = 10;' },
+        },
+        undefined,
+      );
+      expect(result.ok).toBe(false);
+    });
+  });
 });
 
 describe('planDiffActions', () => {
@@ -197,6 +298,51 @@ describe('planDiffActions', () => {
       openDiff: false,
       revert: false,
       jumpToLine: undefined,
+    });
+  });
+
+  describe('update: editReplace（issue #310: Claude CodeのEdit由来）', () => {
+    it('newStringが空文字でなければ、実際に一意に見つかるかを問わず構造的には3操作とも出す', () => {
+      const plan = planDiffActions({
+        kind: 'update',
+        diff: '-const a = 1;\n+const a = 10;',
+        editReplace: { oldString: 'const a = 1;', newString: 'const a = 10;' },
+      });
+      expect(plan).toEqual({
+        openEditor: true,
+        openDiff: true,
+        revert: true,
+        jumpToLine: undefined,
+      });
+    });
+
+    it('newStringが空文字（純粋な削除編集）なら開くだけに絞る', () => {
+      const plan = planDiffActions({
+        kind: 'update',
+        diff: '-removed',
+        editReplace: { oldString: 'removed', newString: '' },
+      });
+      expect(plan).toEqual({
+        openEditor: true,
+        openDiff: false,
+        revert: false,
+        jumpToLine: undefined,
+      });
+    });
+
+    it('移動を伴えば、開く・差分は出すが戻すは出さない', () => {
+      const plan = planDiffActions({
+        kind: 'update',
+        diff: '-const a = 1;\n+const a = 10;',
+        editReplace: { oldString: 'const a = 1;', newString: 'const a = 10;' },
+        movePath: 'new/path.ts',
+      });
+      expect(plan).toEqual({
+        openEditor: true,
+        openDiff: true,
+        revert: false,
+        jumpToLine: undefined,
+      });
     });
   });
 });
