@@ -2079,9 +2079,9 @@ export interface ChatShellOptions {
    * `sendKey.ts`で保証する）。判定の純粋関数は`sendKey.ts`の`decideSendKeyAction`、
    * webview側の実装は`chatScript.ts`の`SEND_ON`/`SEND_KEY_SOURCE`参照。
    *
-   * このオプションはCodex画面（本ファイルの`renderShell`呼び出し）にのみ配線している。
-   * `claudeChatView.ts`は本Issue（#288）のスコープ外のため触っておらず、Claude Code画面は
-   * 常に既定（`ctrlEnter`）のまま動く（design.md §14.49）。
+   * `renderMarkdown`（issue #290）と同じく、Codex（本ファイル）・Claude Code
+   * （`claudeChatView.ts`）双方の`attachPanel`から`readChatSendOnConfig()`を呼んで
+   * 渡している（design.md §14.49）。
    */
   sendOn?: SendOnMode;
 }

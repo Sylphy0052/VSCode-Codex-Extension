@@ -111,7 +111,7 @@ Claude Codeには会話の要約名が無いため、一覧とタブ名は最初
 | 待たせた指示をすぐ送る                                             | 待ち行列の「今すぐ送る」（Claude Codeは応答を中断して送る）                                                                                                                                                  |
 | 応答を中断する                                                     | チャット画面の「中断」ボタン、または `Esc`                                                                                                                                                                   |
 | 会話を検索する                                                     | チャット画面（ワークフローViewも同様）で `Ctrl+F`。折り畳んでいない範囲の本文が対象                                                                                                                          |
-| 送信キーの切り替え（`Enter`送信 / `Ctrl+Enter`送信）               | 既定は`Ctrl+Enter`で送信、`Enter`は改行。設定でどちらもEnter送信へ変えられる（Codexのみ。[後述](#送信キーの切り替え)）                                                                                       |
+| 送信キーの切り替え（`Enter`送信 / `Ctrl+Enter`送信）               | 既定は`Ctrl+Enter`で送信、`Enter`は改行。設定でどちらもEnter送信へ変えられる（Codex / Claude Code両画面共通。[後述](#送信キーの切り替え)）                                                                  |
 | 同じ指示を繰り返す                                                 | チャット画面の「ループ」ボタン                                                                                                                                                                               |
 | 前の発言を呼び出す                                                 | チャット画面の入力欄で `↑` / `↓`（1行目・最終行のとき）                                                                                                                                                      |
 | 会話の途中から分岐                                                 | Codex画面の各発言にある「ここから分岐」                                                                                                                                                                      |
@@ -256,7 +256,7 @@ Codexのapp-serverにはPlan modeそのものが無いため、**権限で作っ
 
 ### 送信キーの切り替え
 
-入力欄の送信キーを選べる（issue #288・design.md §14.49）。**Codex画面のみ**（Claude Code画面は今回のスコープ外で常に`Ctrl+Enter`のまま）。
+入力欄の送信キーを選べる（issue #288・design.md §14.49）。**Codex / Claude Code両画面共通**。
 
 - 既定（`ctrlEnter`）: `Ctrl+Enter` / `Cmd+Enter`で送信、`Enter`は改行のまま
 - `enter`: `Enter`で送信、`Shift+Enter`で改行。`Ctrl+Enter` / `Cmd+Enter`でも送信できる（`ctrlEnter`に慣れた手のままでも送れる）
@@ -618,7 +618,7 @@ tasks:
 | `agent.activityLog.enabled` | `true`      | window   | 実行したセッションを日報バッファへ記録する              |
 | `agent.activityLog.dir`     | `""`        | machine  | 空なら `DAILY_BUFFER_DIR` → `~/workspace/dairy/.buffer` |
 | `agent.chat.renderMarkdown` | `true`      | window   | [応答本文をMarkdownとして描画するか](#応答のmarkdown描画)。`false`で従来の生テキスト表示に戻す |
-| `agent.chat.sendOn`         | `ctrlEnter` | window   | [入力欄の送信キー](#送信キーの切り替え)。`ctrlEnter` / `enter`。Codex画面のみ |
+| `agent.chat.sendOn`         | `ctrlEnter` | window   | [入力欄の送信キー](#送信キーの切り替え)。`ctrlEnter` / `enter`（Codex/Claude Code両画面共通） |
 
 空文字は「そのフラグを渡さない」を意味し、CLI側の設定（`~/.codex/config.toml` / `~/.claude/settings.json`）に委譲する。設定パネルには委譲先の実際の値が `既定: gpt-5.6-terra` のように表示される。パネル上部のタブでCodexとClaude Codeを切り替える。
 

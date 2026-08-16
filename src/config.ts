@@ -120,7 +120,8 @@ export function readChatRenderMarkdownConfig(): boolean {
  * チャット入力欄の送信キー（`agent.chat.sendOn`、既定 `ctrlEnter`、issue #288）。
  * `enter` にするとEnterで送信・Shift+Enterで改行になる（`chatScript.ts` の
  * `decideSendKeyAction` / `SEND_ON` へそのまま渡る）。未知の値は `normalizeSendOn` が
- * 既定へ丸める。Codex画面（`chatView.ts`）にのみ配線している（design.md §14.49）。
+ * 既定へ丸める。Codex（`chatView.ts`）・Claude Code（`claudeChatView.ts`）両画面の
+ * `attachPanel`から呼ばれる（design.md §14.49）。
  */
 export function readChatSendOnConfig(): SendOnMode {
   const c = vscode.workspace.getConfiguration('agent');

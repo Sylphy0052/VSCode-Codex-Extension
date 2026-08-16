@@ -2847,11 +2847,10 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - IME変換中は`compositionstart`〜`compositionend`の間を追跡した`imeComposing`と、`KeyboardEvent.isComposing`のORを`decideSendKeyAction`へ渡す。どちらか一方でも真なら送信しない。変換確定のEnterを送信に奪われると日本語入力が使い物にならないため（issue本文の受入基準）、両モードで無条件に`ignore`を返す
 - `decideSendKeyAction`は候補メニューの開閉を関知しない。メニューが開いているときの確定は既存の`menuOpen()`ブロックが先に処理して`return`するため、この関数が呼ばれるのはメニューが閉じているときだけ（既存の分岐を壊さないための切り分け）
 - 入力欄のプレースホルダ（`chatView.ts`の`renderShell`）は`options.sendOn`（既定`ctrlEnter`）に応じて「Ctrl+Enterで送信」/「Enterで送信、Shift+Enterで改行」を出し分ける。HTML生成時（サーバー側、実TypeScript）に確定する文字列のため、webview側のJSへ持ち込む必要は無い
-- **Codex画面（`chatView.ts`）にのみ配線した。** `ChatShellOptions.sendOn`は`renderShell`（両画面共通）のオプションとして足したが、`claudeChatView.ts`は本Issueのスコープ外（触ってはいけないファイルの指定）のため、`readChatSendOnConfig()`の呼び出しを追加していない。Claude Code画面は`options.sendOn`が常に`undefined`のまま`renderShell`へ渡り、既定の`ctrlEnter`扱いになる。§14.34や§14.51の`renderMarkdown`と異なり両画面配線ではない点に注意（Claude Code画面への配線は別Issue）
+- **Codex / Claude Code両画面共通で配線した。** `ChatShellOptions.sendOn`を`renderShell`（両画面共通）のオプションとして足し、`chatView.ts`（Codex）・`claudeChatView.ts`（Claude Code）の双方の`attachPanel`から`readChatSendOnConfig()`を呼んで渡す。§14.34や§14.51の`renderMarkdown`と同じ配線の形（設定1つを両画面の`attachPanel`が個別に読む）。当初はレビュー時点で`claudeChatView.ts`が別作業と競合するため触らない前提だったが、その作業が完了したためこのPR内で両画面へ配線した
 
 残る制約:
 
-- Claude Code画面（`claudeChatView.ts`）には配線しておらず、常に`ctrlEnter`のまま。同じ設定を効かせるには別Issueで`claudeChatView.ts`側から`readChatSendOnConfig()`を呼ぶ変更が要る
 - IME変換確定時のブラウザ間の`isComposing`挙動差は実機（Windows IME・macOS日本語入力・Linux fcitx等）ごとの確認をしていない。`compositionstart`/`compositionend`の追跡を保険として二重に持たせているが、特殊なIME実装で両方とも取りこぼす経路が無い保証は無い
 ### 14.50 主要コマンドへ既定のキーバインドを割り当てる（issue #289）
 
