@@ -630,6 +630,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     vscode.commands.registerCommand('claude.reloadSkills', () =>
       claudeChat.reloadSkillsForOpenSessions(),
     ),
+    // 会話をクリアして同じフォルダで開き直す（TUI/CLIの `/clear` 相当）。対象は
+    // 名前変更と同じく最後にアクティブだったチャット画面
+    vscode.commands.registerCommand('codex.clearChat', () => chat.clearActive()),
+    vscode.commands.registerCommand('claude.clearChat', () => claudeChat.clearActive()),
     vscode.commands.registerCommand('codex.renameChat', () => chat.renameActive()),
     // 保存後にツリーへ即時反映させる（issue #199）。転記漏れ防止のため、
     // キャンセル時も含めて常に呼ぶ（`codex.refreshSessions` と同じく副作用が無いため安全）

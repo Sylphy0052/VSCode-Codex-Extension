@@ -697,6 +697,59 @@ describe('ChatViewManager', () => {
     });
   });
 
+  describe('会話のクリア（TUIの /clear 相当）', () => {
+    it('いまの会話を閉じて、同じ作業フォルダで新しい会話を開き直す', async () => {
+      const { manager, connection } = createManager();
+      const opened = manager.openNew('/workspace/root/sub');
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-old'));
+      await opened;
+      const oldPanel = __mock.lastCreatedPanel();
+
+      const cleared = manager.clearActive();
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-new'));
+      await cleared;
+
+      expect(manager.isOpen('thread-old')).toBe(false);
+      expect(manager.isOpen('thread-new')).toBe(true);
+      expect(oldPanel?.disposed).toBe(true);
+      // 作業フォルダは引き継ぐ（ワークスペース直下へ戻さない）
+      const starts = connection.requests.filter((r) => r.method === 'thread/start');
+      expect((starts[starts.length - 1]?.params as { cwd?: string } | undefined)?.cwd).toBe(
+        '/workspace/root/sub',
+      );
+    });
+
+    it('応答の途中は確認を出し、キャンセルすれば会話を残す', async () => {
+      const { manager, connection } = createManager();
+      const opened = manager.openNew();
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-busy'));
+      await opened;
+
+      // 送信は `turn/start` の応答待ちで解決しないため、待たずに進めてbusyだけ作る
+      void manager.simulateWebviewMessage('thread-busy', { type: 'send', text: 'こんにちは' });
+      await tick();
+
+      __mock.showWarningMessageAnswer = undefined;
+      await manager.clearActive();
+
+      expect(__mock.messages.warnings).toHaveLength(1);
+      expect(manager.isOpen('thread-busy')).toBe(true);
+      expect(connection.requests.filter((r) => r.method === 'thread/start')).toHaveLength(1);
+    });
+
+    it('アクティブな画面が無ければ案内を出すだけで何もしない', async () => {
+      const { manager, connection } = createManager();
+
+      await manager.clearActive();
+
+      expect(__mock.messages.infos).toHaveLength(1);
+      expect(connection.requests.filter((r) => r.method === 'thread/start')).toHaveLength(0);
+    });
+  });
+
   describe('タスク管理下スレッドの汎用復元除外（design.md §16.10の7）', () => {
     it('isTaskManagedThreadがtrueを返すスレッドはrestorePanelの対象から外れる', async () => {
       const { manager } = createManager({ isTaskManagedThread: (id) => id === 'thread-task' });

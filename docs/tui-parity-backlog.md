@@ -191,7 +191,7 @@ Codex側は同版（0.147.0）でプロトコルの件数も完全一致だっ�
 対象外にしたもの（理由つき）:
 
 - `color` / `heapdump`: TUIの見た目・開発者向けで、チャット画面に持ち込む意味が無い
-- `clear`: 拡張機能では「新しい会話」を開けば同じことができる
+- `clear`: エディタ右上のクリアアイコン（`codex.clearChat` / `claude.clearChat`。design.md §14.46）として実装済み。中身は「いまのタブを閉じて同じ作業フォルダで新しい会話を開き直す」
 - `config`: 拡張機能に設定パネルがある
 - `design` / `design-consent` / `design-revoke`: claude.ai の Design projects へのアクセス許可で、ブラウザ側の操作が要る
 - `__remote-workflow` / `workflow-launch-exec`: サーバが起動したセッション専用
