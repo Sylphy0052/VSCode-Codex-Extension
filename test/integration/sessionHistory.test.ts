@@ -2,8 +2,9 @@ import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { activateExtension, type SessionSummaryLike } from './helpers/extension';
+import { activateExtension } from './helpers/extension';
 import { readManifest } from './helpers/manifest';
+import { flattenSessions, isGroupNode } from './helpers/sessionTree';
 import { waitFor } from './helpers/waitFor';
 
 /**
@@ -35,7 +36,7 @@ suite('履歴一覧（docs/manual-test.md H群）', () => {
     const manifest = readManifest();
     await api.sessionTree.setScope('workspace');
 
-    const children = await api.sessionTree.getChildren();
+    const children = await flattenSessions(api.sessionTree);
     const unnamed = children.find((s) => s.id === manifest.codex.unnamed.id);
     assert.ok(unnamed, 'session_index.jsonlに載っていないセッションが一覧から漏れている');
     assert.equal(unnamed?.threadName, manifest.codex.unnamed.firstMessage);
@@ -46,14 +47,14 @@ suite('履歴一覧（docs/manual-test.md H群）', () => {
     const manifest = readManifest();
     await api.sessionTree.setScope('workspace');
 
-    const children = await api.sessionTree.getChildren();
+    const children = await flattenSessions(api.sessionTree);
     const codexItem = children.find((s) => s.id === manifest.codex.named.id);
     const claudeItem = children.find((s) => s.id === manifest.claude.inScope.id);
     assert.ok(codexItem, 'Codexのセッションが一覧から漏れている');
     assert.ok(claudeItem, 'Claude Codeのセッションが一覧から漏れている');
 
-    const codexIcon = api.sessionTree.getTreeItem(codexItem as SessionSummaryLike).iconPath;
-    const claudeIcon = api.sessionTree.getTreeItem(claudeItem as SessionSummaryLike).iconPath;
+    const codexIcon = api.sessionTree.getTreeItem(codexItem).iconPath;
+    const claudeIcon = api.sessionTree.getTreeItem(claudeItem).iconPath;
     assert.ok(codexIcon instanceof vscode.ThemeIcon, 'Codexセッションのアイコンが無い');
     assert.ok(claudeIcon instanceof vscode.ThemeIcon, 'Claude Codeセッションのアイコンが無い');
     assert.notEqual(
@@ -75,22 +76,19 @@ suite('履歴一覧（docs/manual-test.md H群）', () => {
     const manifest = readManifest();
     await api.sessionTree.setScope('workspace');
 
-    const children = await api.sessionTree.getChildren();
+    const children = await flattenSessions(api.sessionTree);
     const codexActive = children.find((s) => s.id === manifest.codex.named.id);
     const codexArchived = children.find((s) => s.id === manifest.codex.archived.id);
     const claudeItem = children.find((s) => s.id === manifest.claude.inScope.id);
     assert.ok(codexActive && codexArchived && claudeItem);
 
+    assert.equal(api.sessionTree.getTreeItem(codexActive).contextValue, 'codexSession.codex');
     assert.equal(
-      api.sessionTree.getTreeItem(codexActive as SessionSummaryLike).contextValue,
-      'codexSession.codex',
-    );
-    assert.equal(
-      api.sessionTree.getTreeItem(codexArchived as SessionSummaryLike).contextValue,
+      api.sessionTree.getTreeItem(codexArchived).contextValue,
       'codexSession.codex.archived',
     );
     assert.equal(
-      api.sessionTree.getTreeItem(claudeItem as SessionSummaryLike).contextValue,
+      api.sessionTree.getTreeItem(claudeItem).contextValue,
       'codexSession.claude',
       // archive/unarchive/delete/セッション名を変更/会話を開いて分岐する、が出ないことは
       // package.json側のwhen句がこの値で出し分けている（design.md §6 TreeView）
@@ -102,14 +100,14 @@ suite('履歴一覧（docs/manual-test.md H群）', () => {
     const manifest = readManifest();
 
     await vscode.commands.executeCommand('codex.showWorkspaceSessions');
-    const workspaceOnly = await api.sessionTree.getChildren();
+    const workspaceOnly = await flattenSessions(api.sessionTree);
     assert.ok(
       !workspaceOnly.some((s) => s.id === manifest.claude.outOfScope.id),
       'workspaceスコープなのにワークスペース外のセッションが出ている',
     );
 
     await vscode.commands.executeCommand('codex.showAllSessions');
-    const all = await api.sessionTree.getChildren();
+    const all = await flattenSessions(api.sessionTree);
     assert.ok(
       all.some((s) => s.id === manifest.claude.outOfScope.id),
       '全ワークスペース表示に切り替えてもワークスペース外のセッションが出てこない',
@@ -124,7 +122,7 @@ suite('履歴一覧（docs/manual-test.md H群）', () => {
     const manifest = readManifest();
     await api.sessionTree.setScope('workspace');
 
-    const before = await api.sessionTree.getChildren();
+    const before = await flattenSessions(api.sessionTree);
     // ここまでの一覧はすべてファイル読みの経路を通っている。`codex.executablePath` は
     // 存在しない絶対パス（fixtures/setup.mjs）で、app-serverへは一度も繋がらないため
     // `thread/list` は使えない。それでも一覧が空にならないことがH-09の狙いの確認になる
@@ -149,12 +147,61 @@ suite('履歴一覧（docs/manual-test.md H群）', () => {
 
     try {
       await waitFor(
-        () => api.sessionTree.getChildren(),
+        () => flattenSessions(api.sessionTree),
         (list) => list.some((s) => s.id === newId),
         { timeoutMs: 8000, intervalMs: 200 },
       );
     } finally {
       fs.rmSync(rolloutPath, { force: true });
+    }
+  });
+});
+
+/**
+ * docs/manual-test.md のU群（issue #293）のうち、実CLIプロセスなしで確認できる範囲。
+ *
+ * `SessionTreeProvider.getChildren()` は`codex.history.groupBy`の既定値（`date`）では
+ * ルートへグループノードを返す（`src/view/sessionTreeProvider.ts`）。他のH群のテストは
+ * `flattenSessions`（`helpers/sessionTree.ts`）でこの段を吸収しているが、ここではグループ化
+ * そのものが起きていること・`none`で従来どおりフラットに戻ることを直接確かめる。
+ */
+suite('履歴のグループ化（docs/manual-test.md U群、issue #293）', () => {
+  test('U-16: 既定（groupBy: date）ではルートがグループノードになり、groupBy: noneでは平坦になる', async () => {
+    const api = await activateExtension();
+    const manifest = readManifest();
+    await api.sessionTree.setScope('workspace');
+
+    const config = vscode.workspace.getConfiguration('codex');
+    const originalGroupBy = config.get<string>('history.groupBy');
+
+    try {
+      await config.update('history.groupBy', 'date', vscode.ConfigurationTarget.Workspace);
+      const grouped = await api.sessionTree.getChildren();
+      assert.ok(grouped.length > 0, 'グループが1つも無い');
+      assert.ok(
+        grouped.every((element) => isGroupNode(element)),
+        'groupBy: dateなのにルートへセッションが直接出ている',
+      );
+
+      const flattened = await flattenSessions(api.sessionTree);
+      assert.ok(
+        flattened.some((s) => s.id === manifest.codex.named.id),
+        'グループを辿ってもセッションが見つからない',
+      );
+
+      await config.update('history.groupBy', 'none', vscode.ConfigurationTarget.Workspace);
+      const flat = await api.sessionTree.getChildren();
+      assert.ok(flat.length > 0, 'groupBy: noneなのに一覧が空');
+      assert.ok(
+        flat.every((element) => !isGroupNode(element)),
+        'groupBy: noneなのにグループノードが出ている',
+      );
+      assert.ok(
+        flat.some((element) => !isGroupNode(element) && element.id === manifest.codex.named.id),
+        'groupBy: noneで既存のセッションが一覧から消えている',
+      );
+    } finally {
+      await config.update('history.groupBy', originalGroupBy, vscode.ConfigurationTarget.Workspace);
     }
   });
 });

@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { activateExtension, EXTENSION_ID } from './helpers/extension';
+import { flattenSessions } from './helpers/sessionTree';
 
 /**
  * 統合テストの土台。実VSCode（拡張機能ホスト）上で拡張機能が有効化され、
@@ -35,7 +36,7 @@ suite('拡張機能の有効化とコマンド登録（土台）', () => {
 
   test('セッション一覧TreeViewが取得でき、初期状態で例外を投げない', async () => {
     const api = await activateExtension();
-    const children = await api.sessionTree.getChildren();
+    const children = await flattenSessions(api.sessionTree);
     assert.ok(Array.isArray(children));
   });
 });

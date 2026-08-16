@@ -19,9 +19,26 @@ export interface SessionSummaryLike {
   archived: boolean;
 }
 
+/**
+ * グループの見出しノードと構造互換な最小限の宣言（`src/view/sessionTreeProvider.ts`の
+ * `SessionGroupNode`、issue #293）。`getChildren()`の既定挙動（`codex.history.groupBy`が
+ * 既定の`date`）はルートへこのノードを返すため、`SessionSummaryLike`と同列に扱えるよう
+ * ここへ持つ。
+ */
+export interface SessionGroupNodeLike {
+  kind: 'group';
+  groupKind: 'pinned' | 'date' | 'folder';
+  id: string;
+  label: string;
+  sessions: SessionSummaryLike[];
+}
+
+/** `getChildren()`が返す要素の直和型。セッションは`kind`を持たない（判別に使う）。 */
+export type SessionTreeElementLike = SessionSummaryLike | SessionGroupNodeLike;
+
 export interface SessionTreeLike {
-  getChildren(): Promise<SessionSummaryLike[]>;
-  getTreeItem(session: SessionSummaryLike): vscode.TreeItem;
+  getChildren(element?: SessionTreeElementLike): Promise<SessionTreeElementLike[]>;
+  getTreeItem(element: SessionTreeElementLike): vscode.TreeItem;
   setScope(scope: 'workspace' | 'all'): Promise<void>;
 }
 
