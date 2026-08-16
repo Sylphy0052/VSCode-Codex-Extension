@@ -606,6 +606,46 @@ describe('ClaudeChatViewManagerの名前変更（issue #199）', () => {
   });
 });
 
+describe('ClaudeChatViewManagerの会話クリア（CLIの /clear 相当）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+  });
+
+  it('いまの会話を閉じて、同じ作業フォルダで新しい会話を開き直す', async () => {
+    const { calls, sessions } = stubStartCapturing();
+    const { manager } = createManager();
+
+    await manager.openNew('/workspace/root/sub');
+    const session = sessions[sessions.length - 1];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    session.receive(initLine('session-old'));
+    const oldPanel = __mock.lastCreatedPanel();
+
+    await manager.clearActive();
+
+    expect(oldPanel?.disposed).toBe(true);
+    expect(calls).toHaveLength(2);
+    // 作業フォルダは引き継ぐ。新しいセッションとして開き直す
+    expect(calls[1]?.cwd).toBe('/workspace/root/sub');
+    expect(calls[1]?.target).toEqual({ kind: 'new' });
+    expect(calls[1]?.sessionId).not.toBe(calls[0]?.sessionId);
+  });
+
+  it('アクティブな画面が無ければ案内を出すだけで何もしない', async () => {
+    const { calls } = stubStartCapturing();
+    const { manager } = createManager();
+
+    await manager.clearActive();
+
+    expect(__mock.messages.infos).toHaveLength(1);
+    expect(calls).toHaveLength(0);
+  });
+});
+
 describe('deriveTitle（issue #199の名前解決順）', () => {
   const baseState = (
     overrides: Partial<Parameters<typeof deriveTitle>[0]> = {},

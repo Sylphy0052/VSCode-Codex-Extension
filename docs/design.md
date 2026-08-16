@@ -338,6 +338,7 @@ VSCodeにはターミナル名を直接書き換えるAPIがなく、`workbench.
 | `claude.openChat`                                       | チャット画面で開く（Claude Code） | ツリー項目のホバー                            |
 | `codex.openConversation`                                | 会話を開いて分岐する              | ツリー項目のホバー（Codexのみ）               |
 | `codex.renameChat`                                      | セッション名を変更                | Codex画面がアクティブなときのエディタタイトル |
+| `codex.clearChat` / `claude.clearChat`                  | 会話をクリアして新規開始          | チャット画面がアクティブなときのタイトル      |
 | `codex.resumeSession`                                   | セッションを再開…                 | パレット（QuickPick）                         |
 | `codex.resumeLast`                                      | 直前のセッションを再開            | パレット                                      |
 | `codex.forkSession`                                     | このセッションをforkする          | ツリー項目のホバー・右クリック                |
@@ -2775,6 +2776,18 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 タスクセッション（`openTaskSession`）は無人実行で人が答えられないため、確認を挟む代わりに`toCodexConfig`が`false`を固定して危険な値を持ち込ませない。
 
+
+### 14.46 会話をクリアして新しく始める（TUI/CLIの `/clear` 相当）
+
+いまの会話を捨てて始め直す導線が、Codex画面・Claude Code画面のどちらにも無かった。TUIは`/clear`で同じことができ、`docs/tui-parity-backlog.md`では「新しい会話を開けばよい」として対象外にしていたが、その新しい会話を開く導線がサイドバー（履歴ビューのタイトルバー）にしか無く、チャット画面を開いている間は手が届かない。
+
+決めたこと:
+
+- `codex.clearChat` / `claude.clearChat` を追加し、エディタタイトル（`when: activeWebviewPanelId == codex.chat` / `claude.chat`）へ出す。対象は名前変更（§14.35）と同じ「最後にアクティブだったチャット画面」
+- 同じ`when`で`codex.newChat` / `claude.newChat`もエディタタイトルへ出す。チャット画面を開いたままでも新しい会話を始められるようにする（サイドバーへ戻らずに済む）
+- クリアは**タブを作り直す**。`teardown`（タブごと閉じ、セッションを終わらせる）→`openNew(cwd)`（同じ作業フォルダで開き直す）の順に呼ぶだけにして、既存のタブは使い回さない。webviewへ配線済みの`onDidReceiveMessage`ハンドラは差し替えられないため、使い回すと古いセッションを掴んだハンドラが残る
+- 確認ダイアログは進行中のターンがあるときだけ出す。会話はロールアウト／transcriptに残り履歴から開き直せるので、通常のクリアは取り返しのつく操作
+- タスク（オーケストレータ）管理下のタブはクリアできない。寿命を持っているのは走らせている側（§16.10の4）
 
 ## 15. 作業記録（日報・週報連携）
 

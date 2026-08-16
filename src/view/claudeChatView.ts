@@ -581,6 +581,41 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     }
   }
 
+  /**
+   * いまの会話を捨てて、同じ作業フォルダで新しい会話を始める（CLIの `/clear` 相当）。
+   * Codex画面の `clearActive`（`chatView.ts`）と同じUX・同じ手順に揃える。
+   *
+   * 会話はtranscriptに残り履歴から開き直せるため、確認は進行中のターンがあるときだけ出す。
+   * タブは作り直す（`teardown` がタブごと閉じ、`openNew` が同じ列へ開く）。既存のタブを
+   * 使い回すと、webviewへ配線済みのハンドラが古いセッションを掴んだまま残るため。
+   */
+  async clearActive(): Promise<void> {
+    const entry = this.active;
+    if (entry === undefined) {
+      void vscode.window.showInformationMessage('クリアするClaude Code画面を開いてください');
+      return;
+    }
+    // タスク（オーケストレータ）管理下のタブは、走らせている側が寿命を持つ
+    if (entry.taskManaged) {
+      void vscode.window.showWarningMessage('タスクが動かしている画面はクリアできません');
+      return;
+    }
+    if (entry.session.getState().busy) {
+      const choice = await vscode.window.showWarningMessage(
+        '応答の途中です。クリアすると進行中のターンは中断されます。',
+        { modal: true },
+        'クリアする',
+      );
+      if (choice !== 'クリアする') {
+        return;
+      }
+    }
+
+    const cwd = entry.cwd;
+    this.teardown(entry);
+    await this.openNew(cwd);
+  }
+
   /** セッションとループだけを組み立てる。パネルはまだ作らない。 */
   private buildEntry(
     cwd: string,

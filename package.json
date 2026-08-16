@@ -106,6 +106,26 @@
           "command": "claude.newChat",
           "when": "resourceScheme == file",
           "group": "1_new@1"
+        },
+        {
+          "command": "codex.newChat",
+          "when": "activeWebviewPanelId == codex.chat",
+          "group": "navigation@101"
+        },
+        {
+          "command": "codex.clearChat",
+          "when": "activeWebviewPanelId == codex.chat",
+          "group": "navigation@102"
+        },
+        {
+          "command": "claude.newChat",
+          "when": "activeWebviewPanelId == claude.chat",
+          "group": "navigation@101"
+        },
+        {
+          "command": "claude.clearChat",
+          "when": "activeWebviewPanelId == claude.chat",
+          "group": "navigation@102"
         }
       ],
       "view/item/context": [
@@ -253,6 +273,18 @@
         "title": "新しい会話（Codex）",
         "category": "Agent",
         "icon": "$(add)"
+      },
+      {
+        "command": "codex.clearChat",
+        "title": "会話をクリアして新しく始める（Codex）",
+        "category": "Agent",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "claude.clearChat",
+        "title": "会話をクリアして新しく始める（Claude Code）",
+        "category": "Agent",
+        "icon": "$(clear-all)"
       },
       {
         "command": "codex.renameChat",
