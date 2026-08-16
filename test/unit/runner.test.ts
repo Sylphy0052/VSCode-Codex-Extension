@@ -1145,7 +1145,7 @@ tasks:
   });
 });
 
-describe('WorkflowRunner: bypassPermissionsの実効値に対する最終防御（design.md §16.7、レビュー指摘: critical 3）', () => {
+describe('WorkflowRunner: bypassPermissionsの実効値の読み替え（design.md §16.7、issue #271）', () => {
   // approvalModeを一切指定しないClaudeタスク。workflow.tsのvalidateWorkflowは
   // YAMLリテラルの`bypassPermissions`一致だけを見るため、未指定はここを素通りする
   const YAML = `
@@ -1158,7 +1158,7 @@ tasks:
     done: d
 `;
 
-  it('拡張機能側の設定が既にbypassPermissionsのとき、実効値を継承したタスクを開始しない', async () => {
+  it('拡張機能側の設定が既にbypassPermissionsのとき、危険判定が働く値へ読み替えて開始する', async () => {
     const { runner, claudeHost, store } = createHarness(YAML, {
       claudePermissionMode: 'bypassPermissions',
     });
@@ -1168,9 +1168,11 @@ tasks:
 
     // bypassPermissionsでは can_use_tool 自体が発行されず、classifyApprovalRequestも
     // autoApproveもescalateもallowも一度も呼ばれない（#54の危険判定が丸ごと無意味になる）。
-    // タスクを開始せずfailedにするのが唯一の歯止め
-    expect(claudeHost.openInputs).toHaveLength(0);
-    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+    // 以前はタスクを開始しないことで歯止めにしていたが、それだとこの設定の利用者は
+    // ワークフローが1タスクも開始できない（issue #271）ため、acceptEditsへ落として続行する
+    expect(claudeHost.openInputs).toHaveLength(1);
+    expect(claudeHost.openInputs[0]?.config.approvalMode).toBe('acceptEdits');
+    expect(store.find(runId)?.tasks['T1']?.state).not.toBe('failed');
   });
 
   it('拡張機能側の設定がbypassPermissionsでなければ通常通り開始する', async () => {

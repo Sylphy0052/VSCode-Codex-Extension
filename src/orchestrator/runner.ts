@@ -1449,7 +1449,11 @@ export class WorkflowRunner {
     // 一度も呼ばれない。workflow.tsのvalidateWorkflowはYAMLリテラルの
     // `approvalMode: bypassPermissions`一致だけを見るため、YAML側が何も指定せず
     // 拡張機能側の設定が既にbypassPermissionsの場合は素通りしてしまう（実測で確認済み）。
-    // ここは実効値（クランプ後の値）に対する検査であり、YAMLの記述に関わらず効く
+    // ここは実効値（クランプ後の値）に対する検査であり、YAMLの記述に関わらず効く。
+    //
+    // 現在は`buildEffectiveTaskConfig`が実効値をacceptEditsへ読み替えるため（issue #271）
+    // 通常この分岐へは入らない。実効値を組み立てる経路がそこ1本であることに依存した
+    // 「入らないはず」なので、経路が増えたときのために多層防御として残す
     if (task.provider === 'claude' && effective.config.approvalMode === 'bypassPermissions') {
       throw new Error(
         '実効approvalModeがbypassPermissionsのため、このタスクは開始できません' +

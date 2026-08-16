@@ -394,6 +394,7 @@ Codexがサブエージェントを起動したとき、その活動を会話の
 
 - **危険と判定した操作だけは自動で通さず、そのタスクを止めて人へ回す。** 判定はパターン照合による補助でしかなく、一次防御ではない（後述）
 - **一次防御はサンドボックスであり、既定で有効。** `sandbox`（Codex）/ `approvalMode` / `permissionMode` はYAMLから拡張機能の設定より**緩める方向へは動かせない**。緩める指定は無視され警告が出る
+- **Claude Codeの `bypassPermissions` はワークフローでは使われない。** この設定では承認要求そのものが発行されず、上の危険判定が丸ごと働かない。`claude.permissionMode` を `bypassPermissions` にしている場合、ワークフローのタスクは `acceptEdits` へ読み替えて実行し、その旨を警告に出す（チャットの設定はそのまま。ワークフロー実行時だけの読み替え）
 - **タスクの `allow` を書くと、そのタスクに関する限り危険判定そのものが効かなくなる。** `allow` は「既定の停止条件から外すパターン」を追加するフィールドで、書いた分だけそのタスクは自動承認の対象が広がる（`.git` 配下への書き込みなど一部は `allow` でも解除できない）。使っているワークフローは実行前に確認が出て、ワークフローViewの警告欄に常時表示される
 - **`autoApprove: true` はYAMLに書くだけでは効かない。** machineスコープの設定 `agent.workflows.allowAutoApprove`（既定 `false`）が有効なときだけ意味を持つ。無効のままなら、YAMLに何と書かれていても全ての承認要求を人へ回して走る（設定は[後述](#設定)）
 - **`agent.workflows.finalMerge` の既定は `auto`。** 全タスクが `done` になると、統合ブランチからmainへのPR/MRを作ったうえで、そのままmainへマージする（`gh pr merge` / `glab mr merge`）。**人の目を通さずmainが進む。** MRの自己マージを禁じる運用規約がある場合は、machineスコープの設定で `agent.workflows.finalMerge` を `pr-only` にする。PR/MRを作って止め、mainへの書き込みは人が行う
