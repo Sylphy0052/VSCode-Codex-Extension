@@ -688,8 +688,19 @@ export async function handleOpenDiffFile(
 }
 
 /**
- * 差分の対象ファイルの、現在の実際の内容を読む。`delete` の差分はファイルが既に無い前提
- * （＝ `undefined` を期待する）ため、そちらでは読みに行かない。
+ * 差分の対象ファイルの、現在の実際の内容を読む（無ければ `undefined`）。
+ *
+ * `delete` の差分は「ファイルは既に無い」ことを前提に再作成する。ここで読みに行かず
+ * 常に `undefined` を返してしまうと、`computeDiffContents` の delete 分岐にある
+ * 「ファイルが既に存在します」の検査が構造的に一度も真にならず、差分を取ったあとに
+ * 同じパスへ作り直された別のファイルを、確認だけ通して無条件に上書きしてしまう
+ * （`vscode.workspace.fs.writeFile` はゴミ箱を経由しないため復旧もできない）。
+ *
+ * 存在の判定に `FileSystemPort.readTextFile` を使わないのは、あれが「読めなければ無い扱い」
+ * であり、ENOENT以外（EACCES/EISDIR等）でも `undefined` を返すため（`src/session/ports.ts`
+ * のissue #144のメモ参照）。実在するのに読めないファイルを「無い」と誤認すると、まさに
+ * 上書きしてはいけない場面で上書きしてしまう。`stat` はENOENTを他の失敗と区別できるので、
+ * 判断が付かないときは「在る」側（＝戻す操作を止める側）へ倒す。
  */
 async function readCurrentDiffContent(
   fs: FileSystemPort,
@@ -697,9 +708,32 @@ async function readCurrentDiffContent(
   absolutePath: string,
 ): Promise<string | undefined> {
   if (diff.kind === 'delete') {
-    return undefined;
+    return existingContentForDeleteRevert(fs, absolutePath);
   }
   return fs.readTextFile(absolutePath);
+}
+
+/**
+ * `delete` の「戻す」の前に、対象パスに今なにか在るかを確かめる。
+ *
+ * 戻り値は `computeDiffContents` の delete 分岐が見る「`undefined` か否か」だけが意味を持つ。
+ * 在ることが分かった場合・判断が付かない場合は、中身を読めなくても文字列を返して
+ * 「状況が変わっている」と扱わせる。
+ */
+async function existingContentForDeleteRevert(
+  fs: FileSystemPort,
+  absolutePath: string,
+): Promise<string | undefined> {
+  try {
+    await vscode.workspace.fs.stat(vscode.Uri.file(absolutePath));
+  } catch (e) {
+    if (e instanceof vscode.FileSystemError && e.code === 'FileNotFound') {
+      return undefined;
+    }
+    // ENOENT以外で確かめられなかった場合は安全側（＝在る扱い）へ倒す
+    return '';
+  }
+  return (await fs.readTextFile(absolutePath)) ?? '';
 }
 
 /**
