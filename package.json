@@ -528,6 +528,12 @@
           "scope": "machine",
           "markdownDescription": "作業記録の出力先ディレクトリ。空なら環境変数 `DAILY_BUFFER_DIR`、それも無ければ `~/workspace/dairy/.buffer` を使う。"
         },
+        "agent.chat.renderMarkdown": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "チャット画面の応答本文を見出し・箇条書き・強調・インラインコード・コードブロック・リンクとして描画する。コードブロックには「コピー」「エディタへ挿入」「新規ファイルで開く」を付ける。無効にすると従来どおり生テキストのまま表示する（Codex/Claude Code両画面共通）。"
+        },
         "agent.workflows.dir": {
           "type": "string",
           "default": ".agents/workflows",

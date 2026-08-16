@@ -553,5 +553,69 @@ export function chatStyles(): string {
   }
   .search-results-fold[open] > summary { margin-bottom: 4px; }
   .search-results-fold .search-result { margin-bottom: 4px; }
+
+  /*
+   * 応答本文のMarkdown描画（issue #290）。'.body' 直下だけに効かせる（'.tool .body'
+   * などコマンド出力・思考は従来どおり生テキストのままのため、ここには来ない）。
+   */
+  .body > *:first-child { margin-top: 0; }
+  .body > *:last-child { margin-bottom: 0; }
+  .body p { margin: 0 0 8px; }
+  .body h1, .body h2, .body h3, .body h4, .body h5, .body h6 {
+    margin: 10px 0 6px;
+    line-height: 1.3;
+    font-weight: 600;
+  }
+  .body h1 { font-size: 1.3em; }
+  .body h2 { font-size: 1.2em; }
+  .body h3 { font-size: 1.1em; }
+  .body h4, .body h5, .body h6 { font-size: 1em; }
+  .body ul, .body ol { margin: 4px 0 8px; padding-left: 1.4em; }
+  .body li { margin: 2px 0; }
+  .body strong { font-weight: 600; }
+  .body em { font-style: italic; }
+  .body a { color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: none; }
+  .body a:hover { text-decoration: underline; }
+  /* インラインコード。コードブロック内（.md-code pre code）は下で上書きする */
+  .body code {
+    padding: 1px 4px;
+    border-radius: 3px;
+    background-color: var(--vscode-textCodeBlock-background);
+    font-family: var(--vscode-editor-font-family);
+    font-size: 0.9em;
+  }
+  .md-code {
+    margin: 6px 0;
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .md-code-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 8px;
+    background-color: var(--vscode-editorWidget-background);
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.8em;
+  }
+  .md-code-lang { font-family: var(--vscode-editor-font-family); }
+  .md-code-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+  .md-code-actions button { padding: 1px 8px; font-size: 0.85em; }
+  .md-code pre {
+    margin: 0;
+    padding: 8px 10px;
+    overflow: auto;
+    font-family: var(--vscode-editor-font-family);
+    font-size: 0.9em;
+    line-height: 1.45;
+  }
+  .md-code pre code {
+    padding: 0;
+    background-color: transparent;
+    font-family: inherit;
+    font-size: inherit;
+  }
 `;
 }

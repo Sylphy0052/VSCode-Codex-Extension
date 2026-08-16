@@ -8,7 +8,12 @@ import type { ClaudeSessionStore } from '../claude/sessionStore';
 import { ClaudeStreamSession, type ClaudeSpawnPort } from '../claude/streamSession';
 import { transcriptItems } from '../claude/transcript';
 import { isUnsafeClaudeCombination } from '../claude/argvBuilder';
-import { currentWorkspaceFolder, readClaudeConfig, workspaceFolderPaths } from '../config';
+import {
+  currentWorkspaceFolder,
+  readChatRenderMarkdownConfig,
+  readClaudeConfig,
+  workspaceFolderPaths,
+} from '../config';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
@@ -36,7 +41,9 @@ import {
   confirmRunShellCommand,
   confirmStopBackgroundTask,
   confirmUsageCreditsRequest,
+  insertCodeIntoEditor,
   noteDropRejected,
+  openCodeInNewFile,
   postFileMentions,
   postImageData,
   renderShell,
@@ -739,6 +746,8 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       // CLI側のデバッグログを開く／`/debug`で診断する導線（issue #205）。どちらも
       // Codexに対応する概念が無いため、二重導線を避けてClaude Code画面にだけ出す
       showDebug: true,
+      // 応答本文のMarkdown描画（issue #290、設定 agent.chat.renderMarkdown）
+      renderMarkdown: readChatRenderMarkdownConfig(),
     });
     panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(entry, message));
     panel.onDidChangeViewState(() => {
@@ -1061,6 +1070,16 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         if (isOpenableSearchUrl(m['url'])) {
           void vscode.env.openExternal(vscode.Uri.parse(m['url']));
         }
+        return;
+      }
+      if (type === 'insertCode' && typeof m['code'] === 'string') {
+        // コードブロックの「エディタへ挿入」。`chatView.ts` と共通の実装（issue #290）
+        void insertCodeIntoEditor(m['code']);
+        return;
+      }
+      if (type === 'openCodeFile' && typeof m['code'] === 'string') {
+        // コードブロックの「新規ファイルで開く」（issue #290）
+        void openCodeInNewFile(m['code'], typeof m['lang'] === 'string' ? m['lang'] : '');
         return;
       }
       if (type === 'attach') {

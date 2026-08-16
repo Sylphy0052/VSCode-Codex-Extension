@@ -2829,6 +2829,29 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - 折りたたんだ部分（コマンド出力・思考の要約の折りたたみ、`<details>`の中）はDOM上非表示のため検索対象にならない。開いている範囲だけが検索できる
 - タブ復元後に検索窓が実際に効くかどうかは、上記の通りVSCode本体の実装依存で拡張機能側からは制御できず、実機での確認が済んでいない（`docs/manual-test.md` U-04）
 
+### 14.51 応答本文のMarkdown描画とコードブロック操作（issue #290）
+
+背景: 応答本文は`textContent`と`white-space: pre-wrap`だけで出しており、見出し・箇条書き・強調が記号のまま表示されていた（`chatScript.ts`の`renderBody`、`chatStyles.ts`）。会話の取り出し（§14.23、`runExportTranscript`）はMarkdownとして書き出すため、画面表示との落差があった。コピーも項目単位の全文コピーのみで、コードブロックだけを取り出す手段が無かった。
+
+決めたこと:
+
+- **外部ライブラリ（marked等）は追加しない。** 依存を増やさない方針のリポジトリで、ワークフローViewの依存グラフも自前で組んでいる（§16.8）のと同じ考え方
+- Markdownのパースはロジックとして`src/view/markdown.ts`へ切り出す。`vscode`に依存しない純粋関数`parseMarkdown`/`parseInline`とし、`test/unit/markdown.test.ts`から直接テストする。トークンは見出し（`heading`）・段落（`paragraph`。行ごとのinlineトークン配列を保ち、改行はそのまま行分けとして残す）・箇条書き（`list`）・コードフェンス（`codeblock`）の4種類のブロックトークンと、地の文・太字・斜体・インラインコード・リンクの5種類のinlineトークンに絞る。ネストした強調（太字の中の斜体等）・テーブル・引用・水平線は扱わない（issue本文の受入基準に絞ったスコープ）
+- webview側のスクリプト（`chatScript.ts`）はテンプレートリテラルの中身でTypeScriptとして実行できない。`stateDelta.ts`の`MERGE_ITEMS_SOURCE`と同じ流儀で、`markdown.ts`が同じロジックをJSソース文字列（`MARKDOWN_PARSE_SOURCE`）として二重に持ち、`chatScript.ts`へ差し込む。実装を1か所に書いて両側へコピーしないと片方だけ直したときに黙ってずれるが、テンプレートリテラルの中はTypeScriptとして実行できないため二重管理を避けられない。`test/unit/markdown.test.ts`は`MARKDOWN_PARSE_SOURCE`を`new Function`で評価し、複数の入力（見出し・箇条書き・コードフェンス・未完のフェンス・HTMLに見える文字列）でTS実装と同じ結果になることを確かめ、乖離を検知する
+- **実測**: コードフェンス・インラインコードの記法自体がバッククォートを使うため、`MARKDOWN_PARSE_SOURCE`の中にバッククォート文字をそのまま書くと、`chatScript()`の出力全体にバッククォートが混ざる。既存のテスト（`webviewScript.test.ts`の「テンプレートリテラルを閉じる文字が混ざっていない」）はこれをゼロ件で機械チェックしており、実装中に実際に検知された。対応として`String.fromCharCode(96)`から作った`BACKTICK`変数を経由し、バッククォートが絡む正規表現もすべて`new RegExp(...)`で組み立てる（正規表現リテラル`` /`.../ ``は使わない）
+- DOMへの差し込みは`createElement`/`createTextNode`だけで行い、`innerHTML`等のHTML文字列を流し込むAPIは使わない。エージェントの出力がHTMLとして評価されることはない（受入基準）。CSP（`chatCsp.ts`）は変更していない
+- Markdownとして解釈するのは`userMessage`/`agentMessage`の本文だけ。`commandExecution`・`reasoning`は設定に関わらず常に生テキストのまま（`renderBody`の行数折りたたみ・`MAX_VISIBLE_LINES`はこの2種類にしか効かず、Markdown化の対象と重ならないため両立する）
+- コードブロックには「コピー」「エディタへ挿入」「新規ファイルで開く」を付ける。後の2つはWebviewから直接実行できないため、`vscode.postMessage`で`insertCode`/`openCodeFile`をホスト側（`chatView.ts`/`claudeChatView.ts`の`handleMessage`）へ送る。既存の`openUrl`・`requestImage`の往復（§14.4・画像表示）と同じ形。挿入（`insertCodeIntoEditor`）は`vscode.window.activeTextEditor`の現在の選択範囲を置き換え、開いているエディタが無ければ「挿入先のエディタが開かれていません」と伝えて終わる（実行不能な操作を黙って握りつぶさない）。新規ファイル（`openCodeInNewFile`）はコードフェンスの言語表記からVSCodeの言語IDへの簡易対応表（`CODE_FENCE_LANGUAGE_IDS`）を経由し、対応表に無い表記はそのまま言語IDとして渡す（VSCodeは未知の言語IDでもプレーンテキストとして開くだけで落ちない）。どちらも`runExportTranscript`と同様`chatView.ts`に置き、`claudeChatView.ts`からimportして共有する
+- リンクは`<a>`要素のクリックで既定の遷移をさせず（`preventDefault`）、Web検索結果（issue #18）と同じ`openUrl`メッセージでホスト側へ渡す。ホスト側の許可判定（`isOpenableSearchUrl`）とURLを開く経路（`vscode.env.openExternal`）は変えていない。Webviewから直接遷移させることはない
+- **ストリーミング中の部分的なMarkdown。** `renderBody`は現在の全文をそのつど`parseMarkdown`へ渡す（差分ではなく毎回全文を渡す既存の設計をそのまま使う）。閉じていないコードフェンスは最後まで`codeblock`（`closed: false`）として取り込み、閉じるフェンスが届いた次回の呼び出しで`closed: true`になり描き直される。閉じていない太字・インラインコードは、対応する閉じ側が正規表現にマッチしないため地の文としてそのまま残る（例外を投げない・トークン列が壊れない）
+- 設定`agent.chat.renderMarkdown`（既定`true`）を無効化すると、`chatScript`の`RENDER_MARKDOWN`定数がfalseになり、`renderBody`は`textContent`だけを使う従来の経路に完全に戻る。`ChatShellOptions.renderMarkdown`を`renderShell`のオプションへ足しただけで、両画面（Codex/Claude Code）へ配線している
+
+残る制約:
+
+- テーブル・引用・水平線・ネストした強調は扱わない
+- リンクURLは`([^)\s]+)`という簡易パターンで区切っており、URLに空白を含む記法や、閉じ括弧を含む一部のURLは正しく拾えない
+- webview側のDOM組み立て（`renderMarkdownInto`・`appendInline`・`createCodeBlock`）はvitestのnode環境では実行できない（jsdom/happy-domを導入していない）。自動化できているのは構文チェック（`new Function`）とMarkdownパース結果の一致テストまでで、実際のDOM描画・ボタンの動作確認は`docs/manual-test.md`のU群（U-08〜U-10）に委ねる
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）
