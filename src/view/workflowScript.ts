@@ -342,6 +342,46 @@ export function workflowScript(): string {
     scheduleReportViewport();
   }
 
+  // 辺の矢印。markerの中身は参照元のstrokeを継承しないため、色ごとに別idで用意する。
+  // 濃淡（dim / faded）は参照元のopacityがmarkerごと下げてくれるので、id は色の2種類で足りる
+  const ARROW_IDS = { normal: 'wfArrow', related: 'wfArrowRelated' };
+
+  function arrowIdFor(related) {
+    return related ? ARROW_IDS.related : ARROW_IDS.normal;
+  }
+
+  function buildArrowDefs() {
+    const defs = svgEl('defs');
+    const variants = [
+      { id: ARROW_IDS.normal, cls: 'wf-arrow-head' },
+      { id: ARROW_IDS.related, cls: 'wf-arrow-head related' },
+    ];
+    for (const v of variants) {
+      const marker = svgEl('marker', {
+        id: v.id,
+        viewBox: '0 0 10 10',
+        refX: 9,
+        refY: 5,
+        markerWidth: 6,
+        markerHeight: 6,
+        orient: 'auto-start-reverse',
+      });
+      marker.appendChild(svgEl('path', { class: v.cls, d: 'M 0 0 L 10 5 L 0 10 z' }));
+      defs.appendChild(marker);
+    }
+    return defs;
+  }
+
+  /**
+   * 依存元の下端から依存先の上端へ引く3次ベジェ。制御点を縦方向へ伸ばして、
+   * 出入りの向きを縦に揃える（同じ段へ折り返した辺でも破綻しないよう最低量を確保する）
+   */
+  function edgePath(x1, y1, x2, y2) {
+    const k = Math.max(18, Math.abs(y2 - y1) / 2);
+    return 'M ' + x1 + ' ' + y1 +
+      ' C ' + x1 + ' ' + (y1 + k) + ', ' + x2 + ' ' + (y2 - k) + ', ' + x2 + ' ' + y2;
+  }
+
   function renderGraph(snapshot, layout) {
     const svg = el('graph');
     svg.replaceChildren();
@@ -353,6 +393,11 @@ export function workflowScript(): string {
     const posById = {};
     for (const n of layout.nodes) posById[n.id] = n;
 
+    svg.appendChild(buildArrowDefs());
+
+    // 依存が選ばれているあいだは、その入出力の辺だけを濃くする（Issue #282）。
+    // 段が広いと辺が何本も交差するため、色の濃淡で追う先を1本に絞る
+    const hasSelection = Boolean(selectedTaskId && posById[selectedTaskId]);
     const edgeGroup = svgEl('g', { class: 'wf-edges' });
     for (const edge of layout.edges) {
       const from = posById[edge.from];
@@ -360,14 +405,16 @@ export function workflowScript(): string {
       if (!from || !to) continue;
       const fromTask = byId[edge.from];
       const dim = !fromTask || fromTask.state !== 'done';
-      const line = svgEl('line', {
-        class: 'wf-edge' + (dim ? ' dim' : ''),
-        x1: from.x,
-        y1: from.y + 30,
-        x2: to.x,
-        y2: to.y - 30,
+      const related = hasSelection && (edge.from === selectedTaskId || edge.to === selectedTaskId);
+      const faded = hasSelection && !related;
+      const classes = 'wf-edge' + (dim ? ' dim' : '') + (related ? ' related' : '') +
+        (faded ? ' faded' : '');
+      const path = svgEl('path', {
+        class: classes,
+        d: edgePath(from.x, from.y + 30, to.x, to.y - 30),
+        'marker-end': 'url(#' + arrowIdFor(related) + ')',
       });
-      edgeGroup.appendChild(line);
+      edgeGroup.appendChild(path);
     }
     svg.appendChild(edgeGroup);
 

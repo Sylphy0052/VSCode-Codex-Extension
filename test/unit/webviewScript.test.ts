@@ -157,6 +157,13 @@ describe('workflowStyles', () => {
     expect(styles).toContain('--wf-state-color');
   });
 
+  it('辺の強調と矢印の色を定義している（Issue #282）', () => {
+    const styles = workflowStyles();
+    expect(styles).toContain('.wf-edge.related');
+    expect(styles).toContain('.wf-edge.faded');
+    expect(styles).toContain('.wf-arrow-head');
+  });
+
   it('バッジの色にグラフのノード枠と同じ変数を使う', () => {
     const styles = workflowStyles();
     for (const color of ['--vscode-charts-blue', '--vscode-charts-yellow', '--vscode-charts-green', '--vscode-errorForeground']) {
@@ -193,6 +200,21 @@ describe('workflowScript', () => {
     expect(source).toContain("el('graphZoomInBtn')");
     expect(source).toContain("el('graphZoomOutBtn')");
     expect(source).toContain("el('graphZoomFitBtn')");
+  });
+
+  it('依存の辺を矢印付きの曲線で描く（Issue #282）', () => {
+    const source = workflowScript();
+    expect(source).toContain('marker-end');
+    expect(source).toContain("svgEl('defs')");
+    // 直線ではなくpathのベジェで描く（line要素は状態の記号に使うため残る）
+    expect(source).toContain("' C '");
+    expect(source).toContain('d: edgePath(');
+  });
+
+  it('選択中のタスクに繋がる辺だけを強調する（Issue #282）', () => {
+    const source = workflowScript();
+    expect(source).toContain("' related'");
+    expect(source).toContain("' faded'");
   });
 
   it('タスク一覧の状態に状態ごとのクラスを付ける（Issue #280）', () => {
