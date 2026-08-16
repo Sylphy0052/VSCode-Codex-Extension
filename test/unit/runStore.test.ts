@@ -16,6 +16,7 @@ function task(state: PersistedTaskState['state']): PersistedTaskState {
     branch: state === 'pending' ? undefined : 'wf/run-1/T1',
     submissionCount: state === 'pending' ? 0 : 1,
     retryCount: 0,
+    manualRetryCount: 0,
     failure: undefined,
     pullRequestNumber: undefined,
     pullRequestUrl: undefined,
@@ -152,6 +153,7 @@ describe('WorkflowRunStore（design.md §16.11）', () => {
             branch: 'wf/run-legacy/T1',
             submissionCount: 1,
             retryCount: 0,
+            manualRetryCount: 0,
             failure: undefined,
             // pullRequestNumber / pullRequestUrl を持たない旧形式
           },

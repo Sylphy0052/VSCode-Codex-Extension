@@ -25,6 +25,12 @@ export interface PersistedTaskState {
   branch: string | undefined;
   submissionCount: number;
   retryCount: number;
+  /**
+   * 手動の再実行の回数（`TaskRunState.manualRetryCount`）。既存の永続データ
+   * （このフィールドが無い形式）を読んでも `undefined` になるだけで壊れない
+   * （復元側が0として扱う）。
+   */
+  manualRetryCount: number | undefined;
   failure: TaskFailureReason | undefined;
   /**
    * タスクPR/MRの番号（design.md §16.11「タスクごとの...PR/MRの番号」、Issue #118）。

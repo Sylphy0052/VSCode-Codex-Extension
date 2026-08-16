@@ -105,6 +105,17 @@ export interface TaskRunState {
   readonly submissionCount: number;
   /** これまでの自動再試行回数（0開始）。手動の再実行ではここを増やさない。 */
   readonly retryCount: number;
+  /**
+   * ワークフローViewからの手動の再実行の回数（0開始）。`retries`の権利とは別に数える。
+   *
+   * 分けて持つのは、`retryCount`が「自動再試行を何回使ったか」という**権利の消費**を
+   * 表しているからで、人の操作でそれを増やすと使える自動再試行が減ってしまう。
+   * 一方でworktreeのディレクトリ名とブランチ名（`wf/<runId>/<taskId>-retry<n>`。§16.5）は
+   * **試行が何回目か**で決まる必要がある。失敗した試行のworktreeとブランチは人が中身を
+   * 見られるように残るため、同じ名前で作り直そうとすると`branchExists`で必ず失敗する
+   * （issue #275で実測）。名前は両者の合計から決める（`retrySuffixOf`）。
+   */
+  readonly manualRetryCount: number;
   /** `state` が `failed` / `skipped` のときだけ意味を持つ。 */
   readonly failure: TaskFailureReason | undefined;
   /**
@@ -138,6 +149,7 @@ const initialTaskRunState: TaskRunState = {
   state: 'pending',
   submissionCount: 0,
   retryCount: 0,
+  manualRetryCount: 0,
   failure: undefined,
   sessionId: undefined,
   cwd: undefined,
@@ -645,6 +657,9 @@ export function recordSessionInfo(
  *
  * `retryCount`（自動再試行の消費回数）は引き継いだままにする。手動の再実行は自動再試行とは
  * 別の経路であり、すでに使った自動再試行の権利を人の操作で復活させることはしない。
+ * 代わりに`manualRetryCount`を増やす。worktreeのディレクトリ名とブランチ名は両者の合計から
+ * 決まるため（`retrySuffixOf`）、前の試行が残したブランチと衝突しない
+ * （増やさないと`branchExists`で再実行が必ず失敗する。issue #275）。
  *
  * **成功したときは `haltedByUser` を解除する。** 人の明示操作（手動の再実行）そのものを
  * 「再開の合図」として扱う（design.md §16.8のViewが「実行、全体の停止、失敗タスクの再実行」
@@ -671,7 +686,12 @@ export function retryTask(run: RunState, tasks: readonly WorkflowTask[], taskId:
   const toRestore = collectDependents(taskId, dependents);
 
   const nextTasks = new Map(run.tasks);
-  nextTasks.set(taskId, { ...current, state: 'pending', failure: undefined });
+  nextTasks.set(taskId, {
+    ...current,
+    state: 'pending',
+    manualRetryCount: current.manualRetryCount + 1,
+    failure: undefined,
+  });
   for (const id of toRestore) {
     const s = nextTasks.get(id);
     if (s === undefined || s.state !== 'skipped') {

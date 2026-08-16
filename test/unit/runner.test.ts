@@ -1185,6 +1185,51 @@ tasks:
   });
 });
 
+describe('WorkflowRunner: 手動の再実行とworktree名（issue #275）', () => {
+  const YAML = `
+version: 1
+name: manual-retry-test
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+
+  it('手動の再実行は前の試行と別のworktree・別のブランチで走る', async () => {
+    const { runner, codexHost, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/manual.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const attempt1 = codexHost.sessions.find((s) => s.cwd.endsWith('/T1'));
+    expect(attempt1).toBeDefined();
+    // retries未指定（0）なので自動再試行は無く、1回目の失敗でfailedが確定する
+    attempt1?.finish('failed', { ...initialChatState, turnFailed: true });
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+
+    expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+    await flush();
+
+    // 失敗した試行のworktreeとブランチは人が中身を見られるように残るため、同じ名前で
+    // 作り直そうとするとbranchExistsで必ず失敗していた（issue #275）
+    const attempt2 = codexHost.sessions.find((s) => s.cwd.endsWith('/T1-retry0'));
+    expect(attempt2).toBeDefined();
+    expect(attempt2?.cwd).not.toBe(attempt1?.cwd);
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+    // 自動再試行の権利は消費していない
+    expect(store.find(runId)?.tasks['T1']?.retryCount).toBe(0);
+    expect(store.find(runId)?.tasks['T1']?.manualRetryCount).toBe(1);
+
+    // 2回目の手動再実行も、さらに別の名前になる
+    attempt2?.finish('failed', { ...initialChatState, turnFailed: true });
+    await flush();
+    expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+    await flush();
+    expect(codexHost.sessions.find((s) => s.cwd.endsWith('/T1-retry1'))).toBeDefined();
+  });
+});
+
 describe('WorkflowRunner: retriesによる自動再試行（design.md §16.5、レビュー指摘: high）', () => {
   const YAML = `
 version: 1
@@ -3463,6 +3508,7 @@ tasks:
           branch: `wf/${runId}/T1`,
           submissionCount: 1,
           retryCount: 0,
+          manualRetryCount: 0,
           failure: undefined,
           pullRequestNumber: undefined,
           pullRequestUrl: undefined,
@@ -3513,6 +3559,7 @@ tasks:
           branch: `wf/${runId}/T1`,
           submissionCount: 1,
           retryCount: 0,
+          manualRetryCount: 0,
           failure: undefined,
           pullRequestNumber: undefined,
           pullRequestUrl: undefined,
@@ -3553,6 +3600,7 @@ tasks:
           branch: `wf/${runId}/T1`,
           submissionCount: 1,
           retryCount: 0,
+          manualRetryCount: 0,
           failure: undefined,
           pullRequestNumber: undefined,
           pullRequestUrl: undefined,
