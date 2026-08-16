@@ -10,6 +10,7 @@ import {
   buildRoadmapPrompt,
   createCliIssueListPort,
   createTaskSessionRoadmapGenerationPort,
+  alignRoadmapIssues,
   detectRoadmapMaterialMismatches,
   formatRoadmapMaterial,
   generateRoadmap,
@@ -595,9 +596,11 @@ describe('planWorkflowFromRoadmapPhases（design.md §16.19 2段目）', () => {
     });
     expect(result.ok).toBe(true);
     if (result.ok) {
+      // R1のissueは落ちていたが、alignRoadmapIssuesが材料の値へ直すため不一致には残らない
+      expect(result.correctedIssues.some((c) => c.itemId === 'R1')).toBe(true);
       expect(
         result.roadmapMismatches.some((m) => m.itemId === 'R1' && m.kind === 'issueMismatch'),
-      ).toBe(true);
+      ).toBe(false);
       expect(result.roadmapMismatches.some((m) => m.itemId === 'R2' && m.kind === 'missing')).toBe(
         true,
       );
@@ -1025,5 +1028,113 @@ describe('withRoadmapReference', () => {
     const result = withRoadmapReference('name: sample\n', definition, 'docs/roadmap/goal.md');
 
     expect(result.yaml.split('\n')[0]).toBe('roadmap: "docs/roadmap/goal.md"');
+  });
+});
+
+describe('alignRoadmapIssues（design.md §16.19。誤ったCloses #<N>を防ぐ）', () => {
+  const material: RoadmapMaterialItem[] = [
+    { id: 'R1', text: '設計する', dependsOn: [], issue: 12 },
+    { id: 'R2', text: '実装する', dependsOn: ['R1'], issue: undefined },
+  ];
+
+  it('ロードマップにIssueが無い項目へ書かれたissueを削る', () => {
+    const yaml = [
+      'version: 1',
+      'name: x',
+      'tasks:',
+      '  - id: R1',
+      '    prompt: p',
+      '    done: d',
+      '    issue: 12',
+      '  - id: R2',
+      '    dependsOn: [R1]',
+      '    prompt: p',
+      '    done: d',
+      '    issue: 12',
+    ].join('\n');
+
+    const result = alignRoadmapIssues(yaml, material);
+
+    expect(result.corrected).toEqual([{ itemId: 'R2', actual: 12, expected: undefined }]);
+    const tasks = parseWorkflowYaml(result.yaml).tasks;
+    // ロードマップにあるR1の番号はそのまま、無いR2からは消える
+    expect(tasks.find((t) => t.id === 'R1')?.issue).toBe(12);
+    expect(tasks.find((t) => t.id === 'R2')?.issue).toBeUndefined();
+    expect(detectRoadmapMaterialMismatches(material, parseWorkflowYaml(result.yaml))).toEqual([]);
+  });
+
+  it('番号が食い違っていればロードマップの値へ直す', () => {
+    const yaml = [
+      'version: 1',
+      'name: x',
+      'tasks:',
+      '  - id: R1',
+      '    prompt: p',
+      '    done: d',
+      '    issue: 99',
+    ].join('\n');
+
+    const result = alignRoadmapIssues(yaml, material);
+
+    expect(result.corrected).toEqual([{ itemId: 'R1', actual: 99, expected: 12 }]);
+    expect(parseWorkflowYaml(result.yaml).tasks[0]?.issue).toBe(12);
+  });
+
+  it('ロードマップにIssueがあるのに書かれていなければ足す', () => {
+    const yaml = [
+      'version: 1',
+      'name: x',
+      'tasks:',
+      '  - id: R1',
+      '    prompt: p',
+      '    done: d',
+    ].join('\n');
+
+    const result = alignRoadmapIssues(yaml, material);
+
+    expect(result.corrected).toEqual([{ itemId: 'R1', actual: undefined, expected: 12 }]);
+    expect(parseWorkflowYaml(result.yaml).tasks[0]?.issue).toBe(12);
+  });
+
+  it('材料に無いタスクのissueは触らない（転記確認の担当範囲）', () => {
+    const yaml = [
+      'version: 1',
+      'name: x',
+      'tasks:',
+      '  - id: X9',
+      '    prompt: p',
+      '    done: d',
+      '    issue: 77',
+    ].join('\n');
+
+    const result = alignRoadmapIssues(yaml, material);
+
+    expect(result.corrected).toEqual([]);
+    expect(result.yaml).toBe(yaml);
+  });
+
+  it('直すものが無ければYAMLを書き換えない（整形を保つ）', () => {
+    const yaml = [
+      'version: 1',
+      'name: x',
+      '# コメントも残る',
+      'tasks:',
+      '  - id: R1',
+      '    prompt: p',
+      '    done: d',
+      '    issue: 12',
+    ].join('\n');
+
+    const result = alignRoadmapIssues(yaml, material);
+
+    expect(result.yaml).toBe(yaml);
+    expect(result.corrected).toEqual([]);
+  });
+
+  it('パースできないYAMLは触らない', () => {
+    const broken = 'tasks: [\n  - id: R1\n';
+    const result = alignRoadmapIssues(broken, material);
+    expect(result.yaml).toBe(broken);
+    expect(result.corrected).toEqual([]);
   });
 });

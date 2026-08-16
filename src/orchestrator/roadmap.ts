@@ -1,6 +1,8 @@
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
+import { isMap, isSeq, parseDocument } from 'yaml';
+
 import type { Logger } from '../log';
 import { isPathWithinRoot } from './escalation';
 import { detectForgeHost, type CliCommandRunner } from './forge';
@@ -19,6 +21,7 @@ import type { GitCommandRunner } from './worktree';
 import {
   findCycleGroups,
   MAX_TASK_COUNT,
+  parseWorkflowYaml,
   TASK_ID_PATTERN,
   type Provider,
   type WorkflowDefinition,
@@ -366,8 +369,9 @@ export function splitRoadmapPhasesIntoChunks(
  * idと依存とIssue番号はそのまま転記するよう明示的に指示する。分解セッション（LLM）が
  * 依存関係やIssue番号を書き換えてしまうと、依存順序が壊れたまま実行されたり、誤った
  * Issueへ`Closes #<N>`が送られたりする。ここでの指示はあくまで補助で、一次防御ではない
- * （`planWorkflowFromRoadmapPhase`が生成後に`detectRoadmapMaterialMismatches`で機械的にも
- * 確認する）。
+ * （`planWorkflowFromRoadmapPhases`が生成後に`detectRoadmapMaterialMismatches`で機械的にも
+ * 確認し、`issue`については`alignRoadmapIssues`が実際に直す）。**この指示だけでは防げない
+ * ことは実測済み**で、Issue番号を持つ項目の隣にある無関係な項目へ同じ番号が並んだ。
  */
 export function formatRoadmapMaterial(items: readonly RoadmapMaterialItem[]): string {
   const lines: string[] = [];
@@ -466,6 +470,84 @@ export function detectRoadmapMaterialMismatches(
   return mismatches;
 }
 
+/** `alignRoadmapIssues` が直した1件。 */
+export interface CorrectedIssue {
+  itemId: string;
+  /** 生成されたYAMLに書かれていた値（無ければ `undefined`）。 */
+  actual: number | undefined;
+  /** ロードマップ側の値（無ければ `undefined`。この場合は`issue`を削る）。 */
+  expected: number | undefined;
+}
+
+/**
+ * 生成されたYAMLの `issue` を、ロードマップの値へ機械的に揃える（design.md §16.19）。
+ *
+ * 分解セッション（LLM）は、ロードマップにIssue番号が無い項目にも近くの番号を書き写して
+ * しまう（実測では、Issue番号を持つ項目の隣にある無関係な項目へ同じ番号が並んだ）。
+ * `issue` はPR/MR本文の `Closes #<N>` になる（§16.18）ため、**誤った番号のまま走ると
+ * 無関係のIssueがマージで閉じられる**。転記の誤りとして警告するだけでは取り返しがつかない
+ * ので、ロードマップ側の値へ直してから保存する。
+ *
+ * ロードマップが正であり、YAML側の値は材料の写しでしかない（§16.19 2段目）。
+ * ロードマップに番号が無ければ `issue` の行ごと削る。
+ *
+ * 対象はロードマップの項目に対応するタスクだけ。材料に無いタスク（分解セッションが
+ * 独自に足したもの）は触らない。そちらは `detectRoadmapMaterialMismatches` が
+ * 転記の誤りとして人へ見せる範囲である。
+ *
+ * YAMLの整形とコメントを保つため、`yaml`パッケージのDocument APIで該当ノードだけを
+ * 書き換える（`dropUndeclaredTemplateRefs`と同じ方針）。
+ */
+export function alignRoadmapIssues(
+  yamlText: string,
+  material: readonly RoadmapMaterialItem[],
+): { yaml: string; corrected: CorrectedIssue[] } {
+  const corrected: CorrectedIssue[] = [];
+  const expectedById = new Map(material.map((item) => [item.id, item.issue] as const));
+
+  let doc;
+  try {
+    doc = parseDocument(yamlText);
+  } catch {
+    return { yaml: yamlText, corrected };
+  }
+  if (doc.errors.length > 0) {
+    return { yaml: yamlText, corrected };
+  }
+
+  const tasksNode = doc.get('tasks', true);
+  if (!isSeq(tasksNode)) {
+    return { yaml: yamlText, corrected };
+  }
+
+  let changed = false;
+  for (const item of tasksNode.items) {
+    if (!isMap(item)) {
+      continue;
+    }
+    const rawId = item.get('id');
+    if (typeof rawId !== 'string' || !expectedById.has(rawId)) {
+      continue;
+    }
+    const expected = expectedById.get(rawId);
+    const rawIssue = item.get('issue');
+    const actual = typeof rawIssue === 'number' ? rawIssue : undefined;
+    if (actual === expected) {
+      continue;
+    }
+
+    if (expected === undefined) {
+      item.delete('issue');
+    } else {
+      item.set('issue', expected);
+    }
+    corrected.push({ itemId: rawId, actual, expected });
+    changed = true;
+  }
+
+  return { yaml: changed ? String(doc) : yamlText, corrected };
+}
+
 export interface PlanWorkflowFromRoadmapInput {
   roadmapTitle: string;
   /**
@@ -489,6 +571,8 @@ export type PlanWorkflowFromRoadmapResult =
       roadmapMismatches: readonly RoadmapMaterialMismatch[];
       /** このチャンクで落とした、チャンクをまたぐ依存（`RoadmapPhaseChunk`参照）。 */
       droppedDependencies: readonly DroppedRoadmapDependency[];
+      /** ロードマップの値へ直した `issue`（`alignRoadmapIssues`）。 */
+      correctedIssues: readonly CorrectedIssue[];
     })
   | PlanWorkflowFailure;
 
@@ -523,10 +607,31 @@ export async function planWorkflowFromRoadmapPhases(
   if (!result.ok) {
     return result;
   }
+
+  // `issue` だけは警告に留めず直す。誤った番号は `Closes #<N>` として無関係のIssueを
+  // 閉じてしまうため（`alignRoadmapIssues`のコメント参照）。直した後のYAMLから定義を
+  // 組み直し、YAMLと定義がずれないようにする
+  const aligned = alignRoadmapIssues(result.yaml, items);
+  let yaml = result.yaml;
+  let definition = result.definition;
+  if (aligned.corrected.length > 0) {
+    try {
+      definition = parseWorkflowYaml(aligned.yaml);
+      yaml = aligned.yaml;
+    } catch {
+      // 直した結果がパースできないことは`issue`の書き換えだけである以上まず起きないが、
+      // 起きたときは直す前のものをそのまま使い、転記の誤りとして人へ見せる
+      input.log.warn('[roadmap] issueを直した後のYAMLを解釈できなかったため、元のまま使います');
+    }
+  }
+
   return {
     ...result,
-    roadmapMismatches: detectRoadmapMaterialMismatches(items, result.definition),
+    yaml,
+    definition,
+    roadmapMismatches: detectRoadmapMaterialMismatches(items, definition),
     droppedDependencies: input.chunk.droppedDependencies,
+    correctedIssues: aligned.corrected,
   };
 }
 
