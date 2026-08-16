@@ -565,6 +565,7 @@ function createHarness(
   yaml: string,
   options?: {
     allowAutoApprove?: boolean;
+    allowClaudeBypassPermissions?: boolean;
     codexSandbox?: string;
     codexApprovalMode?: string;
     claudePermissionMode?: string;
@@ -594,6 +595,7 @@ function createHarness(
       codexApprovalMode: options?.codexApprovalMode ?? 'on-request',
       claudePermissionMode: options?.claudePermissionMode ?? 'manual',
       allowAutoApprove: options?.allowAutoApprove ?? true,
+      allowClaudeBypassPermissions: options?.allowClaudeBypassPermissions ?? false,
     }),
     ...(options?.forge !== undefined ? { forge: options.forge } : {}),
     ...(options?.pseudoWorktree !== undefined ? { pseudoWorktree: options.pseudoWorktree } : {}),
@@ -1182,6 +1184,44 @@ tasks:
 
     expect(claudeHost.openInputs).toHaveLength(1);
     expect(claudeHost.openInputs[0]?.config.approvalMode).toBe('manual');
+  });
+
+  // issue #278: 承認要求そのものを出したくない無人実行のための逃げ道。有効にすると
+  // 危険判定は一切働かなくなるため、machineスコープ設定でしか開けられない
+  it('allowClaudeBypassPermissionsが有効なら読み替えず、bypassPermissionsのまま開始する', async () => {
+    const { runner, claudeHost, store } = createHarness(YAML, {
+      claudePermissionMode: 'bypassPermissions',
+      allowClaudeBypassPermissions: true,
+    });
+    const result = await runner.start('/repo/.agents/workflows/bypass.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    expect(claudeHost.openInputs).toHaveLength(1);
+    expect(claudeHost.openInputs[0]?.config.approvalMode).toBe('bypassPermissions');
+    expect(store.find(runId)?.tasks['T1']?.state).not.toBe('failed');
+  });
+
+  it('allowClaudeBypassPermissionsが有効でも、Codexタスクには影響しない', async () => {
+    const codexYaml = `
+version: 1
+name: bypass-codex
+tasks:
+  - id: T1
+    provider: codex
+    prompt: p
+    done: d
+`;
+    const { runner, codexHost } = createHarness(codexYaml, {
+      claudePermissionMode: 'bypassPermissions',
+      allowClaudeBypassPermissions: true,
+      codexApprovalMode: 'on-request',
+    });
+    await runner.start('/repo/.agents/workflows/bypass-codex.yaml', '/repo');
+    await flush();
+
+    expect(codexHost.openInputs).toHaveLength(1);
+    expect(codexHost.openInputs[0]?.config.approvalMode).toBe('on-request');
   });
 });
 
@@ -1885,6 +1925,7 @@ tasks:
         codexApprovalMode: 'on-request',
         claudePermissionMode: 'manual',
         allowAutoApprove: true,
+        allowClaudeBypassPermissions: false,
       }),
     });
 
@@ -1945,6 +1986,7 @@ tasks:
           codexApprovalMode: 'on-request',
           claudePermissionMode: 'manual',
           allowAutoApprove: true,
+          allowClaudeBypassPermissions: false,
         }),
       });
       await reloadedRunner.restoreRunsForView();
@@ -1997,6 +2039,7 @@ tasks:
         codexApprovalMode: 'on-request',
         claudePermissionMode: 'manual',
         allowAutoApprove: true,
+        allowClaudeBypassPermissions: false,
       }),
     });
 
@@ -2028,6 +2071,7 @@ tasks:
         codexApprovalMode: 'on-request',
         claudePermissionMode: 'manual',
         allowAutoApprove: true,
+        allowClaudeBypassPermissions: false,
       }),
     });
 
@@ -2829,6 +2873,7 @@ tasks:
         codexApprovalMode: 'on-request',
         claudePermissionMode: 'manual',
         allowAutoApprove: true,
+        allowClaudeBypassPermissions: false,
       }),
     });
     await reloadedRunner.restoreRunsForView();
@@ -3487,6 +3532,7 @@ tasks:
         codexApprovalMode: 'on-request',
         claudePermissionMode: 'manual',
         allowAutoApprove: true,
+        allowClaudeBypassPermissions: false,
       }),
     });
   }

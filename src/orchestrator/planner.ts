@@ -5,6 +5,7 @@ import type { ClaudePermissionMode } from '../claude/types';
 import { SANDBOX_MODES, type ApprovalMode } from '../codex/types';
 import { LOOP_ITERATION_LIMIT } from '../loop/loopController';
 import type { Logger } from '../log';
+import { DANGER_PATTERN_IDS } from './escalation';
 import { stripControlChars } from './sanitize';
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { TaskSessionHost, TaskSessionInput } from './taskSession';
@@ -124,6 +125,18 @@ export const nodePlannerWorkspacePort: PlannerWorkspacePort = {
 
 // ---- スキーマの説明（プロンプトの一部） ----
 
+export interface SchemaDescriptionOptions {
+  /**
+   * 無人実行向けの指定（`defaults.autoApprove: true` と `allow`）を書かせるか
+   * （design.md §16.9、issue #278）。
+   *
+   * 有効にするのは `agent.workflows.allowAutoApprove`（machineスコープ）が既にonのときだけ。
+   * offのまま書かせても `clampAutoApprove` が無視して警告を足すだけで、YAMLと実際の挙動が
+   * 食い違う説明を人に読ませることになる。
+   */
+  unattended?: boolean;
+}
+
 /**
  * `workflow.ts` の定数・型からスキーマの説明を組み立てる。
  *
@@ -133,7 +146,8 @@ export const nodePlannerWorkspacePort: PlannerWorkspacePort = {
  * フィールドの意味・必須かどうかの説明文（プローズ）は手で書くしかない部分で、
  * `test/unit/planner.test.ts` がフィールド名の記載漏れを検出する。
  */
-export function buildSchemaDescription(): string {
+export function buildSchemaDescription(options: SchemaDescriptionOptions = {}): string {
+  const unattended = options.unattended ?? false;
   return [
     '# ワークフロー定義（YAML）のスキーマ',
     '',
@@ -167,10 +181,19 @@ export function buildSchemaDescription(): string {
     `- cleanup（省略可）: ${CLEANUP_MODES.join(' または ')}。タスク単位では指定できず defaults.cleanup に従う`,
     '- model / effort / approvalMode / sandbox（省略可）: 拡張機能側の設定より安全な方向にしか' +
       '動かせない。緩める指定は無視されるので、特別な理由がなければ書かないこと',
-    '- autoApprove（省略可、既定 false）: trueにすると危険と判定した要求以外を自動で許可する。' +
-      'このワークフローは人がレビューする前提の下書きなので、特別な理由がなければ指定しないこと',
+    unattended
+      ? '- autoApprove（省略可、既定 false）: trueにすると危険と判定した要求以外を自動で許可する。' +
+        'このワークフローは無人で実行するので、defaults へ autoApprove: true を書くこと'
+      : '- autoApprove（省略可、既定 false）: trueにすると危険と判定した要求以外を自動で許可する。' +
+        'このワークフローは人がレビューする前提の下書きなので、特別な理由がなければ指定しないこと',
     '- escalate（省略可、既定 []）: 自動承認しないコマンドのパターンを追加する',
-    '- allow（省略可、既定 []）: 既定の停止条件から外すパターン。特別な理由がなければ指定しないこと',
+    unattended
+      ? '- allow（省略可、既定 []）: 既定の停止条件から外すパターン。' +
+        `テストやビルドのコマンドはパイプ・リダイレクトを含むと ${DANGER_PATTERN_IDS.shellMetacharacters} に当たって` +
+        `毎回人の承認を待つため、全てのタスクへ allow: [${DANGER_PATTERN_IDS.shellMetacharacters}] を書くこと` +
+        '（allowはタスク単位のフィールドで、defaultsには書けない）。' +
+        'それ以外のidは書かないこと（削除・force push・外部送信の停止条件を外すことになる）'
+      : '- allow（省略可、既定 []）: 既定の停止条件から外すパターン。特別な理由がなければ指定しないこと',
     '',
     '## テンプレート変数',
     `依存タスクの結果を差し込みたい場合だけ、prompt内に {{<id>.<field>}} と書く。` +
@@ -199,6 +222,10 @@ export interface BuildPlannerPromptInput {
    * 型を知らない。文字列を受け取るだけにして、planner.ts と roadmap.ts の循環import を避ける）。
    */
   roadmapMaterial?: string;
+  /**
+   * 無人実行向けの指定を書かせるか（`buildSchemaDescription` へそのまま渡す。issue #278）。
+   */
+  unattended?: boolean;
 }
 
 function describeWorkspace(summary: WorkspaceSummary): string {
@@ -242,7 +269,7 @@ export function buildPlannerPrompt(input: BuildPlannerPromptInput): string {
   parts.push(
     describeWorkspace(input.workspaceSummary),
     '',
-    buildSchemaDescription(),
+    buildSchemaDescription({ unattended: input.unattended ?? false }),
     '',
     '## 分解の指針',
     '- 並列に進められるタスクは、それぞれ独立したタスクとして分け、dependsOnで直列にしないこと',
@@ -748,6 +775,8 @@ export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkfl
     // 書き込めない（プロパティ自体の省略と`undefined`代入を区別する）ため、
     // 値がある場合だけキーを足す（`runner.ts`の`mcp`と同じ書き方）
     ...(input.roadmapMaterial !== undefined ? { roadmapMaterial: input.roadmapMaterial } : {}),
+    // 無人実行を許した環境（machineスコープ設定がon）でだけ、生成の時点でその形にする
+    unattended: input.baseline.allowAutoApprove,
   });
   const firstResponse = await sendSingleTurn(input.host, input.provider, sessionInput, firstPrompt);
   const first = extractAndRepair(firstResponse);

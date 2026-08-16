@@ -52,6 +52,11 @@ export interface ExtensionSafetyBaseline {
   claudePermissionMode: string;
   /** machineスコープ設定 `agent.workflows.allowAutoApprove`。 */
   allowAutoApprove: boolean;
+  /**
+   * machineスコープ設定 `agent.workflows.allowClaudeBypassPermissions`。
+   * trueなら `bypassPermissions` を読み替えず、そのままタスクを実行する（危険判定は働かない）。
+   */
+  allowClaudeBypassPermissions: boolean;
 }
 
 export interface EffectiveTaskConfig {
@@ -116,13 +121,24 @@ export function buildEffectiveTaskConfig(
   // YAMLが明示した bypassPermissions は §16.2 の検証が先に弾くため、ここへ来るのは
   // 拡張機能側の設定を継承した場合だけである。runner.ts / runnerMerge.ts の最終防御は
   // 多層防御として残す（この関数を経由しない経路が将来生えた場合に効かせるため）。
+  //
+  // 読み替えは `agent.workflows.allowClaudeBypassPermissions`（machineスコープ、既定false）
+  // で止められる（issue #278）。承認要求そのものを出したくない無人実行のための逃げ道で、
+  // 有効にした場合は危険判定が全て無効になることを警告として必ず残す。
   let approvalMode = approvalResult.value;
   if (task.provider === 'claude' && approvalMode === 'bypassPermissions') {
-    approvalMode = CLAUDE_BYPASS_FALLBACK_PERMISSION_MODE;
-    warnings.push(
-      '拡張機能側の設定がbypassPermissionsですが、この設定では危険判定（承認）が一切' +
-        `働かないため、このタスクは${CLAUDE_BYPASS_FALLBACK_PERMISSION_MODE}で実行します`,
-    );
+    if (baseline.allowClaudeBypassPermissions) {
+      warnings.push(
+        'agent.workflows.allowClaudeBypassPermissions が有効なため、このタスクは' +
+          'bypassPermissionsのまま実行します。危険判定（承認）は一切働きません',
+      );
+    } else {
+      approvalMode = CLAUDE_BYPASS_FALLBACK_PERMISSION_MODE;
+      warnings.push(
+        '拡張機能側の設定がbypassPermissionsですが、この設定では危険判定（承認）が一切' +
+          `働かないため、このタスクは${CLAUDE_BYPASS_FALLBACK_PERMISSION_MODE}で実行します`,
+      );
+    }
   }
 
   return {

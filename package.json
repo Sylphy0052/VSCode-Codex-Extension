@@ -540,6 +540,12 @@
           "scope": "machine",
           "markdownDescription": "ワークフロー定義（YAML）の `autoApprove: true` を有効化できるようにする。無効のままだと、YAMLに何と書かれていても全ての承認要求を人へ回す。リポジトリ側のYAMLから無人実行を勝手に有効化されないよう machine スコープに固定している（設計書 §16.16）。"
         },
+        "agent.workflows.allowClaudeBypassPermissions": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "markdownDescription": "**危険**: `claude.permissionMode` が `bypassPermissions` のとき、ワークフローのClaudeタスクもその設定のまま実行する。有効にすると Claude Code CLI がツール実行の可否を一切問い合わせなくなるため、この拡張機能の危険判定（`rm -rf` 相当・force push・外部送信・作業ディレクトリ外への操作など）が**全て無効**になり、ワークフローが生成したコマンドは内容にかかわらず実行される。無効（既定）のときは、そのタスクだけ `acceptEdits` へ読み替えて危険判定を働かせる（設計書 §16.16）。リポジトリ側の設定から勝手に有効化されないよう machine スコープに固定している。"
+        },
         "agent.workflows.replyTimeoutSec": {
           "type": "number",
           "default": 300,

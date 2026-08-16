@@ -1455,7 +1455,14 @@ export class WorkflowRunner {
     // 現在は`buildEffectiveTaskConfig`が実効値をacceptEditsへ読み替えるため（issue #271）
     // 通常この分岐へは入らない。実効値を組み立てる経路がそこ1本であることに依存した
     // 「入らないはず」なので、経路が増えたときのために多層防御として残す
-    if (task.provider === 'claude' && effective.config.approvalMode === 'bypassPermissions') {
+    //
+    // `agent.workflows.allowClaudeBypassPermissions`（machineスコープ、既定false）を
+    // 有効にした場合だけ、利用者が危険判定を捨てると明示したものとして通す（issue #278）
+    if (
+      task.provider === 'claude' &&
+      effective.config.approvalMode === 'bypassPermissions' &&
+      !baseline.allowClaudeBypassPermissions
+    ) {
       throw new Error(
         '実効approvalModeがbypassPermissionsのため、このタスクは開始できません' +
           '（危険判定が働かない設定での無人実行はできません）',

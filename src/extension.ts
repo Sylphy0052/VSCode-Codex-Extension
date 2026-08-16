@@ -779,6 +779,7 @@ function readSafetyBaseline(): ExtensionSafetyBaseline {
     codexApprovalMode: readConfig().codex.approvalMode,
     claudePermissionMode: readClaudeConfig().claude.permissionMode,
     allowAutoApprove: readWorkflowsConfig().allowAutoApprove,
+    allowClaudeBypassPermissions: readWorkflowsConfig().allowClaudeBypassPermissions,
   };
 }
 

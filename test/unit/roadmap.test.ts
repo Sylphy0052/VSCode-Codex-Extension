@@ -271,6 +271,7 @@ const baseline: ExtensionSafetyBaseline = {
   codexApprovalMode: 'on-request',
   claudePermissionMode: 'acceptEdits',
   allowAutoApprove: false,
+  allowClaudeBypassPermissions: false,
 };
 
 describe('selectNextRoadmapPhase（design.md §16.19 2段目「次のフェーズだけYAMLにする」）', () => {

@@ -177,6 +177,7 @@ function wireWindow(memento: WorkflowRunMemento): {
       codexApprovalMode: 'on-request',
       claudePermissionMode: 'manual',
       allowAutoApprove: true,
+      allowClaudeBypassPermissions: false,
     }),
   });
   workflowRunnerRef.current = runner;
