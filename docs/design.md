@@ -2974,6 +2974,64 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - 絞り込みはクライアントサイドの部分一致のみ。あいまい検索・複数語のAND/OR等は無い
 - ピン留めは`globalState`（ワークスペースをまたいで共通）。ワークスペースごとに別のピンを持ちたい場合は非対応
 
+### 14.56 名前付きセッションプリセット（issue #295）
+
+新しい会話を開くたびに、モデル・承認・サンドボックス・作業ディレクトリを設定パネルで組み直す必要があった。さらにマルチルートワークスペースでは`currentWorkspaceFolder()`（`src/config.ts`）がアクティブエディタの属するフォルダ、それも無ければ先頭フォルダを機械的に選ぶだけで、狙ったフォルダを毎回選び直す手段が無かった。
+
+#### 実効値を組み立てる唯一の入口を、ワークフローYAMLのクランプ（§16.16）と同じ形で用意する
+
+`agent.sessionPresets`（配列、`name` / `provider` / `model` / `effort` / `approvalMode` / `sandbox` / `workingDirectory`）はワークスペース内の設定ファイル（`.vscode/settings.json`）から差し替えられる`resource`スコープに置く。§16.16が警告する「ワークスペース設定による任意コマンド実行」と同じ脅威にプリセットもさらされるため、`approvalMode`（Codexの承認方針・Claudeの`permissionMode`）と`sandbox`（Codexのみ）は**拡張機能側の現在の設定より緩い方向へは適用しない**。
+
+クランプの実体は新規に作らず、`src/orchestrator/workflow.ts`の`clampCodexApprovalMode` / `clampClaudePermissionMode` / `clampSandbox`（ワークフロータスクの実効値をクランプしているのと同じ関数）をそのまま再利用した。安全順序表（`CODEX_APPROVAL_SAFETY_ORDER`等）を二重に持たず、「緩めない」の実装を1箇所に保つための判断で、ワークフロー側のクランプにバグ修正が入れば自動的にプリセット側にも効く。
+
+- `model` / `effort`はクランプ対象外（§16.16の表の「machine-overridable」な設定と同じ扱い。実行経路や権限には関わらない）。プリセットで未指定（設定に項目自体が無い）なら空文字（CLI側の設定に委譲する、の意）にする。**拡張機能の現在の`codex.model`等を暗黙に継承することはしない。** `buildEffectiveTaskConfig`（ワークフロータスク）が`task.model ?? ''`としているのと同じ方針で、プリセットは「指定しなかった項目はCLIの既定へ委譲する自己完結した束」として扱う
+- `sandbox`はCodex固有の概念（Claudeには起動時のサンドボックスフラグが無い）。Claude向けプリセットで`sandbox`を書いても、クランプ自体が無意味なため常に空文字にする（警告も出さない。§16.16の`buildEffectiveTaskConfig`と同じ扱い）
+- `approvalMode`が拡張機能側の`bypassPermissions`（Claude）を継承した場合の`acceptEdits`読み替え（§16.16、issue #271）は**プリセットには適用しない**。ワークフロー実行は無人で人が承認できないためこの読み替えが要るが、プリセットは対話的なチャット画面を開く操作であり、`openNew`側の`confirmUnsafeCombination` / `isUnsafeClaudeCombination`（`chatView.ts` / `claudeChatView.ts`、既存のまま変更していない）が起動前の確認ダイアログを出す。人が確認できる経路が既にあるため、読み替えの多層防御を重ねる必要が無いと判断した
+
+検証（配列であること・各要素がオブジェクトであること・`name`/`provider`の必須性・型違いの拒否）とクランプの純粋ロジックは`src/sessionPresets.ts`に切り出した。CONTRIBUTING.mdのレイヤの制約（ロジック層は`vscode`をimportしない）に従い、`test/unit/sessionPresets.test.ts`から実VSCode無しでテストする。`src/util/**`ではなく`src/`直下に置いたのは、クランプの実体を持つ`src/orchestrator/workflow.ts`に依存するため（`src/util`は横断的な小物の置き場であり、機能領域である`orchestrator`へ依存させると層の向きが逆転する）。
+
+#### 作業ディレクトリはワークスペースフォルダ配下の絶対パスに限る
+
+`workingDirectory`を無検証で許すと、`sandbox: workspace-write`の「workspace」の基準そのものを付け替えられてしまう（§16.16が`cwd`について書いているのと同じ懸念）。`resolveWorkingDirectory`（`src/sessionPresets.ts`）は次の規則で検証する。
+
+- 空文字（未指定）はそのまま「未指定」を返す
+- 絶対パスでなければ無視して警告を返す。相対パスは複数ワークスペースフォルダのどれを基準にするか一意に決められないため受け付けない（`agent.workflows.dir`のような「ワークスペースフォルダ相対」の規約とは逆に、こちらは基準フォルダそのものを選ぶ設定であるため絶対パスにした）
+- `path.resolve`で正規化した上で、いずれかのワークスペースフォルダと完全一致するか、その配下（`path.relative`が`..`で始まらない）であることを確認する。外を指す値は無視して警告を返す
+
+シンボリックリンクの実体解決（realpath）はしない。§16.16の分解セッション（§16.6）が触れている「`git worktree add`がリンクを黙って辿る」問題はワークフローの無人実行に対する多層防御であり、こちらは対話的にQuickPickで作業ディレクトリを選ぶ操作の入力補助に過ぎないため、同じ強度は求めないと判断した（文字列比較のみで足りる）。
+
+無効な`workingDirectory`は無視した上で、通常の作業ディレクトリの決め方へフォールバックする。
+
+- ワークスペースフォルダが2つ以上（マルチルート）なら`showQuickPick`でフォルダを選ばせる（受入基準）
+- フォルダが1つ、または0（フォルダを開いていない）なら選ばせず、`chat.openNew` / `claudeChat.openNew`の既定の`cwd`解決（`currentWorkspaceFolder()`）にそのまま委ねる。毎回1択を選ばせない、という受入基準をこの分岐で満たす
+
+#### 実装は`chatView.ts` / `claudeChatView.ts`を変更せずに乗せる
+
+`ChatViewManager.openNew(cwd?, taskConfig?)` / `ClaudeChatViewManager.openNew(cwd?, taskConfig?)`は、ワークフローのタスクセッション（`openTaskSession`）向けに既にcwdと設定を明示的に渡せる形になっていた（design.md §16.10）。プリセットもこの既存の口にそのまま乗せるだけで済み、`chatView.ts` / `claudeChatView.ts`には一切手を入れていない。
+
+`src/extension.ts`の`openPresetChat`が、`readConfig().codex` / `readClaudeConfig().claude`（拡張機能側の現在の設定）をベースに、クランプ済みの`model` / `effort` / `approvalMode` / `sandbox`だけを上書きした`CodexConfig` / `ClaudeConfig`を組み立てて`openNew`へ渡す。`profile` / `sandboxWritableRoots` / `sandboxNetworkAccess` / `approvalsReviewer` / `bypassApprovalsAndSandbox` / `additionalArgs` / `agent`（Claudeの`--agent`）はプリセットの管理対象外のため、常にベース設定をそのまま引き継ぐ。
+
+#### コマンドの出し分け
+
+プリセットが1件も無い（既定）ときはコマンド`agent.openPresetChat`をコマンドパレット・履歴ビューのタイトルバーのどちらにも出さない。`package.json`の`menus.commandPalette` / `menus["view/title"]`に`when: "agent.hasSessionPresets"`を付け、このコンテキストキーは拡張機能の有効化時と`agent.sessionPresets`の変更時に`updateSessionPresetsContext`（`src/extension.ts`）が`setContext`で更新する。コマンドパレットからの直接実行のように`when`句を経由しない呼び出しにも備え、`openPresetChat`自身もプリセットが空なら「プリセットが設定されていません」と伝えて何もしない（`when`句を主、実行時ガードを保険とする二重の対策）。
+
+既存の`codex.newChat` / `claude.newChat`は引数無しで呼ぶ既存の登録のまま変更していない。挙動は変わらない。
+
+#### 実装とテスト
+
+- `src/sessionPresets.ts`: `parseSessionPresets`（検証）・`buildEffectivePresetConfig`（クランプの唯一の入口）・`resolveWorkingDirectory`（作業ディレクトリの境界検証）。いずれも純粋関数
+- `src/config.ts`: `readSessionPresetsConfig`（`agent.sessionPresets`の生値を読み、`parseSessionPresets`へ渡すだけ）
+- `src/extension.ts`: `updateSessionPresetsContext`（コンテキストキー更新）・`openPresetChat`（QuickPickの配線・実効値の組み立て・`openNew`呼び出し）・コマンド`agent.openPresetChat`の登録・`onDidChangeConfiguration`への`agent.sessionPresets`監視の追加
+- `package.json`: `agent.sessionPresets`設定（`resource`スコープ）、コマンド`agent.openPresetChat`、`view/title`（`navigation@8`、既存の`@1`〜`@7`は変更していない）・`commandPalette`への`when`句付き登録
+- `test/unit/sessionPresets.test.ts`: 検証・クランプ・作業ディレクトリ境界のテスト
+
+#### 残る制約
+
+- プリセットの編集は設定ファイル（`settings.json`）を直接書く前提で、設定パネル（`controlPanelView.ts`）からの編集UIは今回は用意していない
+- `workingDirectory`のワークスペース境界チェックはシンボリックリンクの実体解決をしない文字列比較のみ（前述）
+- プリセットの並び順はそのまま`agent.sessionPresets`の配列順（QuickPickでの並び替え・お気に入り等は無い）
+- 依存Issue #289（主要コマンドへの既定キーバインド割り当て）は完了済みだが、`agent.openPresetChat`には既定のキーバインドを割り当てていない（プリセットの有無・件数が利用者ごとに異なり、決め打ちの1キーを割り当てる根拠が無いため）
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）

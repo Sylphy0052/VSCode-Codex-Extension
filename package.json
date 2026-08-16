@@ -94,6 +94,11 @@
           "command": "codex.clearSessionFilter",
           "when": "view == codex.sessions && codex.sessionFilterActive",
           "group": "navigation@7"
+        },
+        {
+          "command": "agent.openPresetChat",
+          "when": "view == codex.sessions && agent.hasSessionPresets",
+          "group": "navigation@8"
         }
       ],
       "editor/title": [
@@ -259,6 +264,10 @@
         {
           "command": "claude.forkSession",
           "when": "false"
+        },
+        {
+          "command": "agent.openPresetChat",
+          "when": "agent.hasSessionPresets"
         }
       ]
     },
@@ -325,6 +334,12 @@
         "title": "新しい会話（Codex）",
         "category": "Agent",
         "icon": "$(add)"
+      },
+      {
+        "command": "agent.openPresetChat",
+        "title": "プリセットから新しい会話を開く…",
+        "category": "Agent",
+        "icon": "$(list-selection)"
       },
       {
         "command": "codex.clearChat",
@@ -615,6 +630,53 @@
           "default": "ctrlEnter",
           "scope": "window",
           "markdownDescription": "チャット画面の入力欄でEnterを送信に使うか。候補メニュー（`/` `@`）を開いている間はEnterが候補の確定として優先され、IME変換中のEnterは送信しない。**Codex画面のみ**（Claude Code画面は今回のスコープ外で常に`ctrlEnter`のまま）。"
+        },
+        "agent.sessionPresets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "provider"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "プリセットの表示名（QuickPickのラベル）。空・重複は無視される。"
+              },
+              "provider": {
+                "type": "string",
+                "enum": [
+                  "codex",
+                  "claude"
+                ],
+                "description": "開く先。codexまたはclaude。"
+              },
+              "model": {
+                "type": "string",
+                "description": "使用するモデル。空なら拡張機能の現在の設定（`codex.model` / `claude.model`）を渡さず、CLI側の既定に委譲する。"
+              },
+              "effort": {
+                "type": "string",
+                "description": "推論の深さ。空ならCLI側の既定に委譲する。"
+              },
+              "approvalMode": {
+                "type": "string",
+                "description": "承認方針（Codexは`untrusted`/`on-request`/`never`、Claudeは`permissionMode`の値）。拡張機能側の現在の設定より緩い方向へは適用されず、無視した場合は警告を出す。"
+              },
+              "sandbox": {
+                "type": "string",
+                "description": "サンドボックスの方針（`read-only`/`workspace-write`/`danger-full-access`）。Codexのみ意味を持つ。拡張機能側の現在の設定より緩い方向へは適用されない。"
+              },
+              "workingDirectory": {
+                "type": "string",
+                "description": "開始時の作業ディレクトリ。ワークスペースフォルダ配下の絶対パスに限る。外を指す場合は無視して警告を出す。"
+              }
+            }
+          },
+          "default": [],
+          "scope": "resource",
+          "markdownDescription": "名前付きのセッションプリセット。コマンド`エージェント: プリセットから新しい会話を開く…`（コマンドパレット・履歴ビューのタイトルバー）から選んで、モデル・承認・サンドボックス・作業ディレクトリをまとめて指定した新しい会話を開ける。\n\n`approvalMode`（Codexの承認方針・Claudeの`permissionMode`）と`sandbox`（Codexのみ）は、拡張機能側の現在の設定（`codex.approvalMode` / `codex.sandbox` / `claude.permissionMode`）より緩い方向へは適用されない。緩める指定は無視し、選択時に警告を出す（ワークフロー定義YAMLのクランプと同じ方針。設計書 §14.56・§16.16）。`model` / `effort`はクランプ対象外で自由に指定できる。\n\n`workingDirectory`はワークスペースフォルダ配下の絶対パスに限る。外を指す値は無視して警告を出し、通常の作業ディレクトリの決め方（マルチルートならQuickPickで選択、単一フォルダならそのフォルダ）へフォールバックする。\n\nプリセット自体は拡張機能の設定より権限を緩められないため、`machine`スコープには固定していない。リポジトリの`.vscode/settings.json`からプリセットを追加できる。プリセットが1件も無いときはコマンドを出さない。"
         },
         "agent.workflows.dir": {
           "type": "string",

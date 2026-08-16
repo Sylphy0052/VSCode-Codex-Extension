@@ -1885,6 +1885,40 @@ Codex画面・Claude Code画面の両方に共通する機能（`chatScript.ts`/
 - 期待: 一覧が壊れない（空のピン留めグループが残ったり、存在しないセッションの行が出たりしない）。アーカイブ済みでもピン留めの右クリックメニューは出せる
 - 確認: ウィンドウをリロードしてもピン留めの状態が保たれる（`globalState`永続化）
 
+### U-20 プリセットからの新しい会話（`agent.sessionPresets`、design.md §14.56、issue #295）
+
+- 前提: `agent.sessionPresets`にCodex・Claude Codeそれぞれ1件以上のプリセットを設定する（例: `[{"name": "調査用Codex", "provider": "codex", "model": "gpt-5", "approvalMode": "untrusted", "sandbox": "read-only"}, {"name": "実装用Claude", "provider": "claude", "permissionMode相当のapprovalMode": "acceptEdits"}]`のように`name` / `provider`は必須、他は任意）
+- 操作: コマンドパレットから「Agent: プリセットから新しい会話を開く…」（`agent.openPresetChat`）
+- 期待: 設定したプリセットの一覧がQuickPickに出る（ラベルはプリセット名、説明にprovider/model/effort、詳細に承認・サンドボックス・作業ディレクトリが出る）
+- 操作: いずれかを選ぶ
+- 期待: 選んだプリセットのmodel/effort/承認/サンドボックスで新しい会話が開く。開始前の安全でない組み合わせの確認ダイアログ（既存の`openNew`の挙動）は変わらず出る
+- 操作: 履歴ビュー（`codex.sessions`）のタイトルバーからも同じコマンドを実行する
+- 期待: コマンドパレットと同じ挙動になる
+
+### U-21 プリセットのクランプ（拡張機能の設定より緩めない、design.md §14.56・§16.16）
+
+- 前提: `codex.approvalMode`を`on-request`、`codex.sandbox`を`read-only`にしておく
+- 操作: `approvalMode: "never"` / `sandbox: "danger-full-access"`を指定したCodexプリセットを追加し、U-20の手順で開く
+- 期待: 実際に開いた会話の承認・サンドボックスは`on-request` / `read-only`のまま（緩まない）。警告のメッセージ（`showWarningMessage`）が出て、無視した指定が読める。出力チャネル「Agent Sessions」にも同内容が記録される
+- 操作: 同様に`claude.permissionMode`を`manual`にした状態で、`approvalMode: "bypassPermissions"`のClaudeプリセットを開く
+- 期待: 実効値は`manual`のまま。警告が出る
+- 操作: 逆に拡張機能側より**厳しい**指定（例: `codex.sandbox`が`workspace-write`のときにプリセットで`sandbox: "read-only"`）を指定したプリセットを開く
+- 期待: 警告なしでプリセットの指定どおり`read-only`になる
+
+### U-22 作業ディレクトリの選択（マルチルート、design.md §14.56、issue #295）
+
+- 前提: マルチルートワークスペース（フォルダを2つ以上開く）
+- 操作: `workingDirectory`を指定していないプリセットをU-20の手順で開く
+- 期待: 開く前に作業ディレクトリを選ぶQuickPickが出る（フォルダ名と絶対パスの一覧）。選んだフォルダで会話が始まる
+- 操作: `workingDirectory`にいずれかのワークスペースフォルダ配下の絶対パス（サブディレクトリでも可）を指定したプリセットを開く
+- 期待: 作業ディレクトリのQuickPickは出ず、指定したパスで直接会話が始まる
+- 操作: `workingDirectory`にワークスペースフォルダの外の絶対パス（例: `/tmp`）を指定したプリセットを開く
+- 期待: 指定は無視され、警告が出た上で、通常の作業ディレクトリ選択（マルチルートならQuickPick、単一ならそのフォルダ）にフォールバックする
+- 操作: フォルダを1つだけ開いた状態（シングルルート）で、`workingDirectory`未指定のプリセットを開く
+- 期待: 作業ディレクトリのQuickPickは出ない（毎回1択を選ばされない）。既存の`codex.newChat` / `claude.newChat`と同じフォルダで開く
+- 操作: `agent.sessionPresets`を空配列に戻す
+- 期待: コマンドパレット・履歴ビューのタイトルバーのどちらからも「プリセットから新しい会話を開く…」が出なくなる
+
 ## 記録テンプレート
 
 確認のたびに以下を残す（Issueまたは `docs/manual-test-<YYYY-MM-DD>.md`）。
