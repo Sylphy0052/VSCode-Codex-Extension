@@ -1,10 +1,10 @@
 import {
-  clampAutoApprove,
   clampClaudePermissionMode,
   clampCodexApprovalMode,
   clampSandbox,
-  type WorkflowTask,
-} from './workflow';
+  type SafetyBaseline,
+} from '../util/safetyClamp';
+import { clampAutoApprove, type WorkflowTask } from './workflow';
 import type { TaskSessionConfig } from './taskSession';
 
 /**
@@ -42,14 +42,14 @@ import type { TaskSessionConfig } from './taskSession';
  */
 const CLAUDE_BYPASS_FALLBACK_PERMISSION_MODE = 'acceptEdits';
 
-/** 拡張機能側の現在の設定値。クランプの基準（安全側の上限）になる。 */
-export interface ExtensionSafetyBaseline {
-  /** `codex.sandbox`。空文字はCodex CLI側（config.toml）への委譲を意味する。 */
-  codexSandbox: string;
-  /** `codex.approvalMode`。 */
-  codexApprovalMode: string;
-  /** `claude.permissionMode`。 */
-  claudePermissionMode: string;
+/**
+ * 拡張機能側の現在の設定値。クランプの基準（安全側の上限）になる。
+ *
+ * `codexSandbox` / `codexApprovalMode` / `claudePermissionMode` は`sessionPresets.ts`の
+ * `PresetSafetyBaseline`と共通のため、重複定義を避けて`SafetyBaseline`（`src/util/safetyClamp.ts`）
+ * から拡張する（issue #308）。
+ */
+export interface ExtensionSafetyBaseline extends SafetyBaseline {
   /** machineスコープ設定 `agent.workflows.allowAutoApprove`。 */
   allowAutoApprove: boolean;
   /**

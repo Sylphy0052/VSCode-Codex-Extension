@@ -3119,13 +3119,13 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 `agent.sessionPresets`（配列、`name` / `provider` / `model` / `effort` / `approvalMode` / `sandbox` / `workingDirectory`）はワークスペース内の設定ファイル（`.vscode/settings.json`）から差し替えられる`resource`スコープに置く。§16.16が警告する「ワークスペース設定による任意コマンド実行」と同じ脅威にプリセットもさらされるため、`approvalMode`（Codexの承認方針・Claudeの`permissionMode`）と`sandbox`（Codexのみ）は**拡張機能側の現在の設定より緩い方向へは適用しない**。
 
-クランプの実体は新規に作らず、`src/orchestrator/workflow.ts`の`clampCodexApprovalMode` / `clampClaudePermissionMode` / `clampSandbox`（ワークフロータスクの実効値をクランプしているのと同じ関数）をそのまま再利用した。安全順序表（`CODEX_APPROVAL_SAFETY_ORDER`等）を二重に持たず、「緩めない」の実装を1箇所に保つための判断で、ワークフロー側のクランプにバグ修正が入れば自動的にプリセット側にも効く。
+クランプの実体は新規に作らず、`src/util/safetyClamp.ts`の`clampCodexApprovalMode` / `clampClaudePermissionMode` / `clampSandbox`（ワークフロータスクの実効値をクランプしているのと同じ関数）をそのまま再利用した。安全順序表（`CODEX_APPROVAL_SAFETY_ORDER`等）を二重に持たず、「緩めない」の実装を1箇所に保つための判断で、ワークフロー側のクランプにバグ修正が入れば自動的にプリセット側にも効く。クランプの実体は当初`src/orchestrator/workflow.ts`にあったが、ワークフロー実行専用のファイルへ無関係な機能が依存する向きになっていたため、issue #308で`vscode`に依存しない中立な場所（`src/util/safetyClamp.ts`）へ抽出し、`taskConfig.ts`と`sessionPresets.ts`の両方がそこへ依存する形に改めた。
 
 - `model` / `effort`はクランプ対象外（§16.16の表の「machine-overridable」な設定と同じ扱い。実行経路や権限には関わらない）。プリセットで未指定（設定に項目自体が無い）なら空文字（CLI側の設定に委譲する、の意）にする。**拡張機能の現在の`codex.model`等を暗黙に継承することはしない。** `buildEffectiveTaskConfig`（ワークフロータスク）が`task.model ?? ''`としているのと同じ方針で、プリセットは「指定しなかった項目はCLIの既定へ委譲する自己完結した束」として扱う
 - `sandbox`はCodex固有の概念（Claudeには起動時のサンドボックスフラグが無い）。Claude向けプリセットで`sandbox`を書いても、クランプ自体が無意味なため常に空文字にする（警告も出さない。§16.16の`buildEffectiveTaskConfig`と同じ扱い）
 - `approvalMode`が拡張機能側の`bypassPermissions`（Claude）を継承した場合の`acceptEdits`読み替え（§16.16、issue #271）は**プリセットには適用しない**。ワークフロー実行は無人で人が承認できないためこの読み替えが要るが、プリセットは対話的なチャット画面を開く操作であり、`openNew`側の`confirmUnsafeCombination` / `isUnsafeClaudeCombination`（`chatView.ts` / `claudeChatView.ts`、既存のまま変更していない）が起動前の確認ダイアログを出す。人が確認できる経路が既にあるため、読み替えの多層防御を重ねる必要が無いと判断した
 
-検証（配列であること・各要素がオブジェクトであること・`name`/`provider`の必須性・型違いの拒否）とクランプの純粋ロジックは`src/sessionPresets.ts`に切り出した。CONTRIBUTING.mdのレイヤの制約（ロジック層は`vscode`をimportしない）に従い、`test/unit/sessionPresets.test.ts`から実VSCode無しでテストする。`src/util/**`ではなく`src/`直下に置いたのは、クランプの実体を持つ`src/orchestrator/workflow.ts`に依存するため（`src/util`は横断的な小物の置き場であり、機能領域である`orchestrator`へ依存させると層の向きが逆転する）。
+検証（配列であること・各要素がオブジェクトであること・`name`/`provider`の必須性・型違いの拒否）は`src/sessionPresets.ts`に切り出した。CONTRIBUTING.mdのレイヤの制約（ロジック層は`vscode`をimportしない）に従い、`test/unit/sessionPresets.test.ts`から実VSCode無しでテストする。クランプの純粋ロジック自体は`src/util/safetyClamp.ts`にあり（前述のissue #308の抽出）、`sessionPresets.ts`はそれを再利用する側になる。`sessionPresets.ts`自身を`src/util/**`ではなく`src/`直下に置いているのは、`agent.sessionPresets`の読み込み・検証・実効値の組み立てという機能のまとまりを保つためで、`src/util`を横断的な小物の置き場という位置付けのままにするための判断である。
 
 #### 作業ディレクトリはワークスペースフォルダ配下の絶対パスに限る
 

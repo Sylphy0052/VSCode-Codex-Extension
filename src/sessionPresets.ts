@@ -5,7 +5,8 @@ import {
   clampClaudePermissionMode,
   clampCodexApprovalMode,
   clampSandbox,
-} from './orchestrator/workflow';
+  type SafetyBaseline,
+} from './util/safetyClamp';
 
 /**
  * 検証済みのセッションプリセット1件（issue #295、design.md §14.56）。
@@ -120,15 +121,13 @@ export function parseSessionPresets(raw: unknown): ParsedSessionPresets {
   return { presets, warnings };
 }
 
-/** {@link buildEffectivePresetConfig} が緩める方向へ動かせないようにする基準値。 */
-export interface PresetSafetyBaseline {
-  /** `codex.sandbox`。 */
-  codexSandbox: string;
-  /** `codex.approvalMode`。 */
-  codexApprovalMode: string;
-  /** `claude.permissionMode`。 */
-  claudePermissionMode: string;
-}
+/**
+ * {@link buildEffectivePresetConfig} が緩める方向へ動かせないようにする基準値。
+ *
+ * `taskConfig.ts`の`ExtensionSafetyBaseline`と共通の3項目のため、重複定義を避けて
+ * `SafetyBaseline`（`src/util/safetyClamp.ts`）をそのまま使う（issue #308）。
+ */
+export type PresetSafetyBaseline = SafetyBaseline;
 
 export interface EffectivePresetConfig {
   provider: ProviderId;
@@ -146,9 +145,9 @@ export interface EffectivePresetConfig {
  *
  * `approvalMode` / `sandbox` は拡張機能側の現在の設定（`baseline`）より緩い方向へは動かず、
  * 無視した場合は警告を返す。`clampCodexApprovalMode` / `clampClaudePermissionMode` /
- * `clampSandbox`（`src/orchestrator/workflow.ts`、ワークフローYAMLのクランプと同じ実装）を
- * そのまま再利用する。`model` / `effort` はクランプ対象外（machine-overridableな設定と同じ
- * 扱い。実行経路や権限には関わらないため）。
+ * `clampSandbox`（`src/util/safetyClamp.ts`、ワークフローYAMLのクランプ・`taskConfig.ts`と
+ * 共有する実装）をそのまま再利用する。`model` / `effort` はクランプ対象外
+ * （machine-overridableな設定と同じ扱い。実行経路や権限には関わらないため）。
  */
 export function buildEffectivePresetConfig(
   preset: SessionPreset,
