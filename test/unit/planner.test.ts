@@ -535,8 +535,67 @@ describe('planWorkflow（design.md §16.9）', () => {
     const result = await planWorkflow({ ...baseInput, host });
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.yaml).toBe(VALID_YAML);
+      // フェンスは剥がれる。`defaults.provider` は生成に使ったエージェントで補われる（issue #321）
+      expect(result.yaml).not.toContain('```');
+      expect(result.yaml).toContain('name: サンプル');
+      expect(result.definition.tasks.map((t) => t.id)).toEqual(['T1']);
     }
+  });
+
+  /**
+   * 分解に使ったエージェントと、出来たワークフローを実行するエージェントを揃える
+   * （issue #321）。生成物に `provider` が書かれないことが多く、書かれない場合の既定は
+   * `codex` なので、Claude Codeの画面から生成したのにCodexで走る、というねじれが起きていた。
+   */
+  describe('分解に使ったエージェントの引き継ぎ（issue #321）', () => {
+    it('Claude Codeで生成したYAMLへ defaults.provider: claude が入る', async () => {
+      const host = new FakePlannerHost([VALID_YAML]);
+      const result = await planWorkflow({ ...baseInput, provider: 'claude', host });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.yaml).toContain('provider: claude');
+        expect(result.definition.tasks[0]?.provider).toBe('claude');
+      }
+    });
+
+    it('Codexで生成したYAMLへ defaults.provider: codex が入る', async () => {
+      const host = new FakePlannerHost([VALID_YAML]);
+      const result = await planWorkflow({ ...baseInput, provider: 'codex', host });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.definition.tasks[0]?.provider).toBe('codex');
+      }
+    });
+
+    it('生成物が既に defaults.provider を持つ場合は上書きしない', async () => {
+      const explicit = [
+        'version: 1',
+        'name: サンプル',
+        'defaults:',
+        '  provider: codex',
+        'tasks:',
+        '  - id: T1',
+        '    prompt: 何かする',
+        '    done: 終わっている',
+      ].join('\n');
+      const host = new FakePlannerHost([explicit]);
+      const result = await planWorkflow({ ...baseInput, provider: 'claude', host });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.definition.tasks[0]?.provider).toBe('codex');
+      }
+    });
+
+    it('分解のプロンプトにも、書くべきproviderを指示する', async () => {
+      const host = new FakePlannerHost([VALID_YAML]);
+      await planWorkflow({ ...baseInput, provider: 'claude', host });
+
+      const prompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+      expect(prompt).toContain('defaults.provider には claude を書くこと');
+    });
   });
 
   it('1回目が検証を通らなければ、エラーを添えてもう1度だけ投げ直す', async () => {

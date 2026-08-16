@@ -570,6 +570,71 @@ export function dropUndeclaredTemplateRefs(yamlText: string): {
   return { yaml: changed ? String(doc) : yamlText, dropped };
 }
 
+/**
+ * 生成されたYAMLへ `defaults.provider` を補う（issue #321）。
+ *
+ * 分解セッションに使ったエージェントと、出来たワークフローを実行するエージェントは
+ * 一致しているのが人の期待になる（Claude Codeの画面から生成したのにCodexで実行される、
+ * というねじれを起こさない）。ところがスキーマ説明は `provider` を「省略可」としか
+ * 言えないため、生成物には書かれないことが多く、その場合は `DEFAULT_PROVIDER`（codex）で
+ * 実行される。プロンプトでの指示（`buildSchemaDescription`）だけでは守られないので、
+ * 検証にかける前に機械的に補う（`dropUndeclaredTemplateRefs` と同じ考え方）。
+ *
+ * **明示された値は上書きしない。** `defaults.provider` が既にある場合はそのまま返す。
+ * タスク単位の `provider` はそもそも `defaults` より優先されるため触る必要が無い
+ * （プロバイダを混ぜたワークフローを壊さない）。
+ *
+ * YAMLの整形とコメントを保つため、テキストの結合ではなくDocument APIで書き換える。
+ * `defaults` ごと無い場合は `tasks` の直前へ差し込む（末尾に足すとタスク定義のあとに
+ * 既定値が並ぶ読みにくいYAMLになる）。解析できないYAMLには何もしない（検証側が
+ * 解析エラーとして人へ見せる）。
+ */
+export function ensureDefaultsProvider(
+  yamlText: string,
+  provider: Provider,
+): { yaml: string; applied: boolean } {
+  let doc;
+  try {
+    doc = parseDocument(yamlText);
+  } catch {
+    return { yaml: yamlText, applied: false };
+  }
+  if (doc.errors.length > 0) {
+    return { yaml: yamlText, applied: false };
+  }
+  const contents = doc.contents;
+  if (!isMap(contents)) {
+    return { yaml: yamlText, applied: false };
+  }
+
+  const defaultsNode = doc.get('defaults', true);
+  if (isMap(defaultsNode)) {
+    if (defaultsNode.has('provider')) {
+      return { yaml: yamlText, applied: false };
+    }
+    defaultsNode.set('provider', provider);
+    return { yaml: String(doc), applied: true };
+  }
+  if (defaultsNode !== undefined && defaultsNode !== null) {
+    // `defaults` がマップ以外（スカラーや配列）。検証側がエラーにする形なので触らない
+    return { yaml: yamlText, applied: false };
+  }
+
+  // `doc.set`で足すと末尾（tasksの後ろ）に付くため、追加された1件を`tasks`の直前へ移す。
+  // `createPair`の戻り値を直接itemsへ入れると、解析済みノード（`ParsedNode`）の配列に
+  // 未解析のノードを混ぜることになり型が合わない
+  doc.set('defaults', { provider });
+  const added = contents.items.pop();
+  if (added === undefined) {
+    return { yaml: String(doc), applied: true };
+  }
+  const tasksIndex = contents.items.findIndex(
+    (item) => isScalar(item.key) && item.key.value === 'tasks',
+  );
+  contents.items.splice(tasksIndex >= 0 ? tasksIndex : contents.items.length, 0, added);
+  return { yaml: String(doc), applied: true };
+}
+
 export interface WorkflowIssue {
   /** 関係するタスクid。ワークフロー全体に関わるもの（タスク総数超過など）は空配列。 */
   taskIds: string[];

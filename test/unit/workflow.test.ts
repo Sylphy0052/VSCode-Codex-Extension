@@ -3,6 +3,7 @@ import {
   CLEANUP_MODES,
   clampAutoApprove,
   dropUndeclaredTemplateRefs,
+  ensureDefaultsProvider,
   expandTemplate,
   MAX_EXPANDED_PROMPT_LENGTH,
   MAX_TEMPLATE_RESULT_LENGTH,
@@ -1252,5 +1253,109 @@ describe('dropUndeclaredTemplateRefs', () => {
     const result = dropUndeclaredTemplateRefs(broken);
     expect(result.yaml).toBe(broken);
     expect(result.dropped).toEqual([]);
+  });
+});
+
+describe('ensureDefaultsProvider（分解に使ったエージェントの引き継ぎ、issue #321）', () => {
+  it('defaultsごと無いYAMLへ、tasksの直前にdefaults.providerを足す', () => {
+    const yaml = `version: 1
+name: w
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+    const result = ensureDefaultsProvider(yaml, 'claude');
+    expect(result.applied).toBe(true);
+    expect(result.yaml).toContain('provider: claude');
+    // tasksより前に置く（タスク定義のあとに既定値が並ぶ読みにくいYAMLにしない）
+    expect(result.yaml.indexOf('defaults:')).toBeLessThan(result.yaml.indexOf('tasks:'));
+    // 補ったYAMLはそのまま検証を通り、タスクへ解決される
+    const parsed = parseWorkflowYaml(result.yaml);
+    expect(parsed.tasks[0]?.provider).toBe('claude');
+  });
+
+  it('defaultsはあるがproviderが無い場合、そこへ足す', () => {
+    const yaml = `version: 1
+name: w
+defaults:
+  isolation: worktree
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+    const result = ensureDefaultsProvider(yaml, 'claude');
+    expect(result.applied).toBe(true);
+    expect(parseWorkflowYaml(result.yaml).tasks[0]?.provider).toBe('claude');
+    // 元からあった指定は残る
+    expect(result.yaml).toContain('isolation: worktree');
+  });
+
+  it('defaults.providerが既にあれば上書きしない', () => {
+    const yaml = `version: 1
+name: w
+defaults:
+  provider: codex
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+    const result = ensureDefaultsProvider(yaml, 'claude');
+    expect(result.applied).toBe(false);
+    expect(result.yaml).toBe(yaml);
+  });
+
+  it('タスク単位のprovider指定は変えない（プロバイダを混ぜたワークフローを壊さない）', () => {
+    const yaml = `version: 1
+name: w
+tasks:
+  - id: T1
+    provider: codex
+    prompt: p
+    done: d
+  - id: T2
+    prompt: p
+    done: d
+`;
+    const result = ensureDefaultsProvider(yaml, 'claude');
+    const parsed = parseWorkflowYaml(result.yaml);
+    expect(parsed.tasks[0]?.provider).toBe('codex');
+    expect(parsed.tasks[1]?.provider).toBe('claude');
+  });
+
+  it('コメントと整形を保つ', () => {
+    const yaml = `version: 1
+# 生成メモ
+name: w
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+    const result = ensureDefaultsProvider(yaml, 'claude');
+    expect(result.yaml).toContain('# 生成メモ');
+  });
+
+  it('解析できないYAMLには何もしない（検証側がエラーとして人へ見せる）', () => {
+    const broken = 'version: 1\n\tname: w\n';
+    const result = ensureDefaultsProvider(broken, 'claude');
+    expect(result.applied).toBe(false);
+    expect(result.yaml).toBe(broken);
+  });
+
+  it('defaultsがマップ以外なら触らない', () => {
+    const yaml = `version: 1
+name: w
+defaults: codex
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+    const result = ensureDefaultsProvider(yaml, 'claude');
+    expect(result.applied).toBe(false);
+    expect(result.yaml).toBe(yaml);
   });
 });
