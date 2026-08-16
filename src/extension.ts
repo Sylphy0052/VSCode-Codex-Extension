@@ -101,6 +101,7 @@ import { SessionStore } from './session/sessionStore';
 import { SessionActions, nodeCommandRunner, type SessionAction } from './session/sessionActions';
 import { SessionWatcher } from './session/sessionWatcher';
 import { UsageReader } from './session/usageReader';
+import { PinnedSessionStore } from './util/pinnedSessions';
 import { ChatViewManager } from './view/chatView';
 import { ClaudeChatViewManager } from './view/claudeChatView';
 import { ControlPanelViewProvider } from './view/controlPanelView';
@@ -529,16 +530,25 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
 
   const actions = new SessionActions(nodeCommandRunner, codexPath);
 
+  // ピン留め（issue #293）。セッションidはワークスペースをまたいでも一意なため、
+  // `ClaudeSessionNameStore`と同じくglobalStateへ持たせる
+  const pinnedSessions = new PinnedSessionStore(context.globalState);
   // 開いているかどうかはチャット画面が持つ
-  const tree = new SessionTreeProvider(providers, (id) => chat.isOpen(id), log);
-  context.subscriptions.push(
-    tree,
-    vscode.window.createTreeView('codex.sessions', {
-      treeDataProvider: tree,
-      showCollapseAll: false,
-    }),
-  );
+  const tree = new SessionTreeProvider(providers, (id) => chat.isOpen(id), log, pinnedSessions);
+  const sessionsView = vscode.window.createTreeView('codex.sessions', {
+    treeDataProvider: tree,
+    showCollapseAll: false,
+  });
+  context.subscriptions.push(tree, sessionsView);
   void tree.setScope(readConfig().historyScope);
+
+  // 絞り込み中はタイトルバーにその旨を出す（issue #293）。`setFilter`/`clearFilter`は
+  // それぞれ`refresh()`まで済ませるので、ここでは表示テキストだけ合わせる
+  const updateSessionFilterDescription = (): void => {
+    // `TreeView.description`はexactOptionalPropertyTypesの都合でundefinedを明示代入できない
+    // （vscode.d.tsの宣言が`description?: string`のため）。絞り込み無しは空文字で表す
+    sessionsView.description = tree.filterActive ? `絞り込み中: "${tree.filterQuery}"` : '';
+  };
 
   const usageReader = new UsageReader(nodeFileSystem, paths);
   const usageBar = new UsageStatusBar();
@@ -611,6 +621,35 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     vscode.commands.registerCommand('codex.showAllSessions', () => tree.setScope('all')),
     vscode.commands.registerCommand('codex.showWorkspaceSessions', () =>
       tree.setScope('workspace'),
+    ),
+    // 履歴の絞り込み（issue #293）。セッション名・作業ディレクトリに対する部分一致
+    vscode.commands.registerCommand('codex.filterSessions', async () => {
+      const value = await vscode.window.showInputBox({
+        title: '履歴を絞り込む',
+        prompt: 'セッション名・作業ディレクトリに対して部分一致で絞り込みます',
+        placeHolder: '例: 認証まわり, my-project',
+        value: tree.filterQuery,
+      });
+      // Escでのキャンセルはundefinedが返る。空文字での確定（クリア相当）とは区別し、
+      // キャンセル時は現在の絞り込みを変えない
+      if (value === undefined) {
+        return;
+      }
+      await tree.setFilter(value);
+      updateSessionFilterDescription();
+    }),
+    vscode.commands.registerCommand('codex.clearSessionFilter', async () => {
+      await tree.clearFilter();
+      updateSessionFilterDescription();
+    }),
+    // ピン留め（issue #293）。globalStateへ保存し、先頭のグループへ出す
+    vscode.commands.registerCommand(
+      'codex.pinSession',
+      withSession(log, 'codex.pinSession', (s) => void tree.pin(s)),
+    ),
+    vscode.commands.registerCommand(
+      'codex.unpinSession',
+      withSession(log, 'codex.unpinSession', (s) => void tree.unpin(s)),
     ),
     vscode.commands.registerCommand('codex.showUsage', async () => {
       await vscode.commands.executeCommand('codex.controlPanel.focus');
