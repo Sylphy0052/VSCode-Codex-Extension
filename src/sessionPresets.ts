@@ -312,5 +312,8 @@ export async function resolveWorkingDirectory(
       warning: `プリセットの作業ディレクトリがワークスペースの外を指しているため無視しました: ${candidate}`,
     };
   }
-  return { path: normalized, warning: undefined };
+  // 実体解決したパスを返す（解決前の`normalized`ではなく）。CLIへ渡すのが実体パスであれば、
+  // 検証したあと・実際に使うまでの間にシンボリックリンクを差し替えられても、その差し替えが
+  // 作業ディレクトリの行き先を変えられない。判定と利用で同じ実体を指すようにするための選択。
+  return { path: realCandidate, warning: undefined };
 }

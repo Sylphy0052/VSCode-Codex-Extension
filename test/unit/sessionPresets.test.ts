@@ -1,5 +1,5 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -326,12 +326,14 @@ describe('resolveWorkingDirectory（design.md §14.56）', () => {
   );
 
   it.skipIf(!symlinksSupported)(
-    'ワークスペース内を指すシンボリックリンクは通る（正当なケースを誤って壊さない）',
+    'ワークスペース内を指すシンボリックリンクは通り、実体解決したパスを返す（正当なケースを誤って壊さない）',
     async () => {
       const link = path.join(rootA, 'link-to-b');
       await symlink(rootB, link, 'dir');
       const result = await resolveWorkingDirectory(link, roots());
-      expect(result.path).toBe(link);
+      // 判定と利用で同じ実体を指すよう、リンクそのものではなく解決後のパスを返す
+      // （検証したあとにリンクを差し替えられても行き先が変わらない）
+      expect(result.path).toBe(await realpath(rootB));
       expect(result.warning).toBeUndefined();
     },
   );
