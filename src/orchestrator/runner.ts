@@ -1091,8 +1091,22 @@ export class WorkflowRunner {
   }
 
   /**
-   * 実行全体を停止する。人の割り込み（`manual`）と同じ扱いで、新しいタスクの開始だけを
-   * 止める。既に `running` のタスクはそのまま走らせ切る（design.md §16.5）。
+   * 実行全体を停止する（design.md §16.5）。人の割り込み（`manual`）と同じ扱いで
+   * `haltedByUser` を立て、まだ開始していない `pending` を `skipped` にしたうえで、
+   * **走行中のタスクのループも止める**（issue #322）。
+   *
+   * 以前は新しいタスクの開始を止めるだけで、走っているタスクのループはそのまま回り続けて
+   * いた。終了条件を満たすか回数を使い切るまで指示が送られ続けるため、「全体の停止」という
+   * ボタン名と挙動が食い違っていた。
+   *
+   * 止め方は `stopTask` と同じ `TaskSession.stopLoop()`（`LoopStopReason: 'taskStopped'` →
+   * `failed`（手動停止）で確定）。**進行中のターンには割り込まない**（`interrupt()` は
+   * 呼ばない）。中途半端な編集をworktreeへ残さないためで、そのターンが終わってから次の
+   * 指示を送らずに止める。worktreeとブランチは従来どおり残り、人が中身を確認できる。
+   *
+   * 対象はセッションが生きている未確定のタスクだけ。`merging` はループが既に終わっていて
+   * 止める対象が無いため含めない（`isActiveTaskState` をそのまま使わないのはこのため）。
+   * リロード直後で復元しただけの実行は `live.tasks` が空なので、何も呼ばずに抜ける。
    */
   stop(runId: string): void {
     const live = this.runs.get(runId);
@@ -1103,6 +1117,16 @@ export class WorkflowRunner {
     // 空文字で十分だが、意図を示すため定数として明示しておく
     const NO_SPECIFIC_TASK = '';
     live.runState = applyLoopStopReason(live.runState, live.def.tasks, NO_SPECIFIC_TASK, 'manual');
+    // `stopLoop()` は完了検知経路（`onFinished` → `onTaskFinished`）へ合流し、その中で
+    // `live.runState` と `live.tasks` が書き換わる。走らせながら絞り込むと取りこぼすため、
+    // 対象を先に確定させてから止める
+    const targets = [...live.tasks.entries()].filter(([taskId]) => {
+      const state = live.runState.tasks.get(taskId)?.state;
+      return state === 'running' || state === 'waitingApproval' || state === 'waitingReply';
+    });
+    for (const [, liveTask] of targets) {
+      liveTask.session.stopLoop();
+    }
     this.notify(runId);
     void this.persist(runId);
   }
