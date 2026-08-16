@@ -2941,6 +2941,30 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - 復元の検証はハンクの周辺（文脈行・追加行）だけを見ており、ファイル全体が一致するかは確認しない。ハンクの外側で無関係な変更が入っていても、その変更ごと変更前の内容として引き継がれる
 - Webview側のDOM組み立て・実際のボタン押下はvitestのnode環境では自動化できていない（§14.51と同じ制約）。構文チェック（`webviewScript.test.ts`）とロジック層のテスト（`test/unit/diffRestore.test.ts`・`test/unit/diffWorkspacePath.test.ts`）までで、実際の動作確認は`docs/manual-test.md`のU-11〜U-13に委ねる
 
+### 14.53 Codexのセッション累計トークン数の表示（issue #294）
+
+背景: §14.17（TP-60）でClaude Codeのみにコスト表示（`sessionCost`）を実装した際、Codex側は「金額を取得する経路が無い」ため実装を見送った。ただしissue本文の指摘どおり、Codexの会話ではトークン数そのものも画面に出ていなかった（ステータスバー・チャット画面ともレート制限の消費率のみ）。本issueはCodexのセッションについて、コストの代わりに**セッション累計のトークン数**をClaude Codeのコストと同じ場所（チャット画面フッター）へ出す。
+
+実測・既存実装の再確認:
+
+- Codexには依然として金額を返す経路が無い（§14.17で確認済みの内容を再確認しただけで、新しい調査結果は無い）。`account/usage/read` はトークン数・連続日数の統計のみで金額を含まず、しかも値がアカウント全体・全期間の累計でありセッション単位ではない
+- 一方、**セッション単位の累計トークン数は既に届いている**。`thread/tokenUsage/updated` 通知の `tokenUsage` は `{ last, total, modelContextWindow }` の形で（§14.9で実測済み）、`total.totalTokens` が「スレッド全体の累計」。この通知自体は既にコンテキスト残量（`ContextUsage`、`last.totalTokens` 由来）の算出に使われていたが、`total` 側は読み捨てられていた（`chatState.ts` の `thread/tokenUsage/updated` ハンドラ）
+- つまり本issueは新しい問い合わせ経路を追加する必要がなく、**既存の通知から読み捨てていた値を拾うだけ**で実装できる
+
+設計の判断:
+
+- `ChatState` に `sessionTokens: number | undefined` を追加する。`context`（コンテキスト残量、圧縮で減る）とは別のフィールドで、`sessionCost` と対になる位置づけ（Codexのみ値が入り、Claude Codeのセッションでは常に `undefined`）
+- `thread/tokenUsage/updated` ハンドラで `tokenUsage.total.totalTokens` を読み、数値として読めたときだけ更新する。読めない更新では前の値を保つ（`account/rateLimits/updated` の `usedPercent` と同じ倒し方。届いた値がたまたま欠けていても、直前まで表示していた数字を消さない）
+- 表示は `chatScript.ts` の `renderStatus` に、既存の `formatSessionCost` のすぐ下へ `formatSessionTokens` を追加する形で行う。**値が数値でない間（undefined）は要素ごと出さない**（issue本文の受入基準どおり。0や-を出すと「取れていない」のか「本当に0」なのか混同する）
+- ラベルは `累計トークン <k/M単位>`。桁数の丸め方は既存の `formatTokens`（コンテキスト残量と共通）をそのまま使い、見た目をそろえる。ホバー（`title`）には正確な値（`toLocaleString('ja-JP')`）と、**金額を出さない理由を1行添える**（issue本文の受入基準）。Claude Codeの `formatSessionCost` がサブスクリプションの注記をホバーに入れているのと同じ置き場
+- Claude Code側の `formatSessionCost` 自体には手を入れていない。`initialClaudeState`（`streamJson.ts`）に `sessionTokens: undefined` を追加しただけで、Claude Codeのセッションでは既存のコスト表示だけが出る（回帰なし）
+
+残る制約:
+
+- `total.totalTokens` は「app-serverが最後に通知した値」であり、Codex CLI/app-server側の集計方法（キャッシュ分の扱い等）をこちらで検証してはいない。表示はCLIが返す値をそのまま信じる（他の使用量表示と同じ方針）
+- スレッドを再開（resume）した直後、まだ一度もターンが進んでいない・`thread/tokenUsage/updated` が届いていない間は表示されない（`sessionTokens` が `undefined` のまま）。過去のロールアウトから累計トークン数を再構成する経路は無い
+- Webview側の実際の表示確認は`docs/manual-test.md`のU-14に委ねる（§14.52と同じ制約。vitestのnode環境ではDOM描画を自動化できていない）
+
 ### 14.54 履歴の検索・グループ化・ピン留め（issue #293）
 
 履歴（`codex.sessions`）は`codex.history.maxEntries`（既定200件）までのセッションが更新時刻降順の1本のフラットなリストで並ぶだけで、検索・グループ・ピン留めのいずれも無かった。全ワークスペース表示（`codex.history.scope: all`）にすると複数リポジトリのセッションが混ざり、目的のセッションを探すのが実質できない。

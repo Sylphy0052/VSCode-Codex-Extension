@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { initialClaudeState } from '../../src/claude/streamJson';
 import {
   interruptedCommandsNoticeId,
   MAX_OUTPUT_CHARS,
@@ -706,11 +707,11 @@ describe('buildContextUsage', () => {
 
 describe('applyEvent / thread/tokenUsage/updated', () => {
   // 実測した通知の形。`total` はスレッド全体の累計で、コンテキストの占有量は `last`
-  const notification = (lastTotal: number, window: number | null) => ({
+  const notification = (lastTotal: number, window: number | null, total = 21541) => ({
     threadId: 't1',
     turnId: TURN,
     tokenUsage: {
-      total: { totalTokens: 21541, inputTokens: 21536, cachedInputTokens: 6912, outputTokens: 5 },
+      total: { totalTokens: total, inputTokens: 21536, cachedInputTokens: 6912, outputTokens: 5 },
       last: { totalTokens: lastTotal, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
       modelContextWindow: window,
     },
@@ -763,6 +764,85 @@ describe('applyEvent / thread/tokenUsage/updated', () => {
     const state = applyEvent(withUsage, 'thread/tokenUsage/updated', notification(21541, 258400));
     expect(state.usage?.usedPercent).toBe(42);
     expect(state.context?.usedTokens).toBe(21541);
+  });
+});
+
+describe('applyEvent / thread/tokenUsage/updated（セッション累計のトークン数、issue #294）', () => {
+  const notification = (lastTotal: number, window: number | null, total: number) => ({
+    threadId: 't1',
+    turnId: TURN,
+    tokenUsage: {
+      total: { totalTokens: total, inputTokens: total - 5, cachedInputTokens: 0, outputTokens: 5 },
+      last: { totalTokens: lastTotal, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
+      modelContextWindow: window,
+    },
+  });
+
+  it('初期状態では未定義（0や-を出さない）', () => {
+    expect(initialChatState.sessionTokens).toBeUndefined();
+  });
+
+  it('total からセッション累計のトークン数を得る', () => {
+    const state = applyEvent(
+      initialChatState,
+      'thread/tokenUsage/updated',
+      notification(21541, 258400, 21541),
+    );
+    expect(state.sessionTokens).toBe(21541);
+  });
+
+  it('圧縮で last が下がっても累計（total）は変わらない', () => {
+    const before = applyEvent(
+      initialChatState,
+      'thread/tokenUsage/updated',
+      notification(21541, 258400, 21541),
+    );
+    const after = applyEvent(
+      before,
+      'thread/tokenUsage/updated',
+      notification(4831, 258400, 21541),
+    );
+    expect(after.context?.usedTokens).toBe(4831);
+    expect(after.sessionTokens).toBe(21541);
+  });
+
+  it('ターンが進んで累計が増えると更新する', () => {
+    const before = applyEvent(
+      initialChatState,
+      'thread/tokenUsage/updated',
+      notification(21541, 258400, 21541),
+    );
+    const after = applyEvent(
+      before,
+      'thread/tokenUsage/updated',
+      notification(30000, 258400, 40000),
+    );
+    expect(after.sessionTokens).toBe(40000);
+  });
+
+  it('totalが読めない更新では前の値を保つ', () => {
+    const before = applyEvent(
+      initialChatState,
+      'thread/tokenUsage/updated',
+      notification(21541, 258400, 21541),
+    );
+    const after = applyEvent(before, 'thread/tokenUsage/updated', {
+      threadId: 't1',
+      turnId: TURN,
+      tokenUsage: { total: {}, last: { totalTokens: 30000 }, modelContextWindow: 258400 },
+    });
+    expect(after.context?.usedTokens).toBe(30000);
+    expect(after.sessionTokens).toBe(21541);
+  });
+
+  it('読めない通知では状態を変えない（sessionTokensも含めて）', () => {
+    const state = applyEvent(initialChatState, 'thread/tokenUsage/updated', {});
+    expect(state).toBe(initialChatState);
+    expect(state.sessionTokens).toBeUndefined();
+  });
+
+  it('Claude Codeのセッションでは常にundefinedのまま（initialClaudeStateの既定値）', () => {
+    expect(initialClaudeState.sessionTokens).toBeUndefined();
   });
 });
 

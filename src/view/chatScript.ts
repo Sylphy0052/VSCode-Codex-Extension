@@ -1462,6 +1462,18 @@ export function chatScript(
       status.appendChild(costSpan);
     }
 
+    // セッション累計のトークン数（Codexのみ、issue #294）。Claude Codeのコストと同じ場所に
+    // 並べるが、値が届いていない間は枠ごと出さない（0や-で「取れていない」と「本当に0」を
+    // 混同させないため）
+    const sessionTokens = formatSessionTokens(state.sessionTokens);
+    if (sessionTokens) {
+      if (status.childNodes.length > 0) status.appendChild(document.createTextNode(' ・ '));
+      const tokensSpan = document.createElement('span');
+      tokensSpan.textContent = sessionTokens.text;
+      tokensSpan.title = sessionTokens.title;
+      status.appendChild(tokensSpan);
+    }
+
     // 自動圧縮の窓サイズ（issue #201）。まだ問い合わせていない間は state.autocompactWindow
     // 自体が無いため何も出さない（「自動」だと決め付けない）。コンテキスト残量のすぐ隣に
     // 置く（issue本文の置き場指定）
@@ -1558,6 +1570,19 @@ export function chatScript(
       titleBits.push('取得時刻: ' + new Date(cost.capturedAt).toLocaleString('ja-JP'));
     }
     return { text: 'コスト $' + amount, title: titleBits.join(' / ') };
+  }
+
+  // セッション累計のトークン数（issue #294）。Codexには金額（コスト）を取得する経路が無い
+  // ため、formatSessionCostに相当する表示としてトークン数を出す。値が数値で届いていない間は
+  // undefinedを返し、呼び出し側で枠ごと出さない（0や-を出すと「取れていない」のか
+  // 「本当に0」なのか区別できなくなるため）。
+  function formatSessionTokens(tokens) {
+    if (typeof tokens !== 'number') return undefined;
+    const titleBits = [
+      'このセッションの累計トークン数: ' + tokens.toLocaleString('ja-JP'),
+      'Codexには金額（コスト）を取得する経路が無いため、代わりにトークン数を表示しています',
+    ];
+    return { text: '累計トークン ' + formatTokens(tokens), title: titleBits.join(' / ') };
   }
 
   /**

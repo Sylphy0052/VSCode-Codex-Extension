@@ -394,6 +394,20 @@ export interface ChatState {
    */
   sessionCost: SessionCostView | undefined;
   /**
+   * セッション累計のトークン数（Codexのみ、issue #294）。
+   *
+   * `thread/tokenUsage/updated` の `tokenUsage.total.totalTokens`（スレッド全体の累計）から得る。
+   * `context.usedTokens`（`last.totalTokens`、いまコンテキストに載っている量）とは別物で、
+   * 圧縮しても減らない（design.md §14.9で実測: `total` は圧縮の前後で変わらない）。
+   *
+   * Codexには金額（コスト）を取得する経路が無い（design.md §14.17で確認済み。
+   * `account/usage/read` は金額を持たず、しかもアカウント全体・全期間の値でセッション単位の
+   * コストではない）。そのためClaude Codeの `sessionCost`（金額）に相当する表示として、
+   * こちらはトークン数を出す。まだ届いていない間は undefined（0や-を出さない。issue #294の
+   * 受入基準）。Claude Codeのセッションでは常に undefined のまま。
+   */
+  sessionTokens: number | undefined;
+  /**
    * 追加クレジット（usage credits）の状態（Claude Codeのみ、issue #204、design.md §14.38）。
    *
    * `sessionCost`と同じく`get_usage`の応答から作る（同じ要求への同じ応答なので、追加の
@@ -473,6 +487,7 @@ export const initialChatState: ChatState = {
   usage: undefined,
   context: undefined,
   sessionCost: undefined,
+  sessionTokens: undefined,
   planMode: false,
   reviewing: false,
   turnResultText: '',
@@ -1222,7 +1237,13 @@ export function applyEvent(
         return state;
       }
       const context = buildContextUsage(usedTokens, numberOf(tokenUsage['modelContextWindow']));
-      return context === undefined ? state : { ...state, context };
+      if (context === undefined) {
+        return state;
+      }
+      // セッション累計のトークン数（issue #294）。読めない更新では前の値を保つ
+      // （`account/rateLimits/updated` の usedPercent と同じ倒し方）
+      const sessionTokens = numberOf(rec(tokenUsage['total'])?.['totalTokens']);
+      return { ...state, context, sessionTokens: sessionTokens ?? state.sessionTokens };
     }
 
     case 'turn/plan/updated': {
