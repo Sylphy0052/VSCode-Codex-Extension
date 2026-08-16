@@ -8,7 +8,7 @@ import type {
 } from '../../src/orchestrator/runner';
 import type { GraphLayout } from '../../src/view/workflowGraph';
 import { NODE_GAP_X, NODE_WIDTH } from '../../src/view/workflowGraph';
-import { WorkflowViewManager } from '../../src/view/workflowView';
+import { buildWorkflowPanelOptions, WorkflowViewManager } from '../../src/view/workflowView';
 import { __mock } from '../mocks/vscode';
 
 /**
@@ -156,5 +156,15 @@ describe('WorkflowViewManager: グラフが幅に収まらない場合（design.
     expect(panel.webview.html).toContain('id="graphZoomInBtn"');
     expect(panel.webview.html).toContain('id="graphZoomOutBtn"');
     view.dispose();
+  });
+});
+
+describe('buildWorkflowPanelOptions（Ctrl+Fの検索窓、issue #287、design.md §14.48）', () => {
+  it('enableFindWidgetをtrueにし、既存のenableScripts/retainContextWhenHiddenを保つ', () => {
+    expect(buildWorkflowPanelOptions()).toEqual({
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      enableFindWidget: true,
+    });
   });
 });

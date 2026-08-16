@@ -9,7 +9,11 @@ import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
 import type { McpServerView } from '../../src/provider/mcpServers';
 import { MEMORY_LAST_SELECTED_PATH_KEY, type MemoryModeMemento } from '../../src/provider/inputModes';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
-import { ClaudeChatViewManager, deriveTitle } from '../../src/view/claudeChatView';
+import {
+  buildClaudeChatPanelOptions,
+  ClaudeChatViewManager,
+  deriveTitle,
+} from '../../src/view/claudeChatView';
 import { __mock, ViewColumn, window as fakeWindow, type FakeWebviewPanel } from '../mocks/vscode';
 
 const fakeLogger: Logger = {
@@ -1395,5 +1399,15 @@ describe('ワークフローの導線（issue #250）', () => {
     await flush();
 
     expect(__mock.messages.errors).toHaveLength(0);
+  });
+});
+
+describe('buildClaudeChatPanelOptions（Ctrl+Fの検索窓、issue #287、design.md §14.48）', () => {
+  it('enableFindWidgetをtrueにし、既存のenableScripts/retainContextWhenHiddenを保つ', () => {
+    expect(buildClaudeChatPanelOptions()).toEqual({
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      enableFindWidget: true,
+    });
   });
 });
