@@ -1203,7 +1203,10 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
    */
   async openTaskSession(input: TaskSessionInput): Promise<TaskSession> {
     const taskConfig = toCodexConfig(input);
-    const entry = this.buildEntry(input.cwd, 'Codex', true, taskConfig);
+    // オーケストレーターセッション（design.md §16.23）はタスクと同じ経路で開くが、
+    // タブ名だけ分けて人が見分けられるようにする
+    const title = input.role === 'orchestrator' ? 'Codex: オーケストレーター' : 'Codex';
+    const entry = this.buildEntry(input.cwd, title, true, taskConfig);
     const pendingKey = this.pendingStarts.begin(entry);
     // タスク間メッセージング（design.md §16.21）。`input.mcp`が渡されていれば、
     // このスレッドだけに見せるMCPサーバとして`thread/start`のconfigへ差し込む
@@ -1433,6 +1436,9 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     return {
       sessionId: threadId,
       runLoop: (plan: LoopPlan) => entry.loop.start(plan),
+      send: (text: string) => {
+        void this.sendOnce(entry, text);
+      },
       setPromptTransform: (transform) => {
         entry.promptTransform = transform;
       },
@@ -2066,6 +2072,21 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     } catch (e) {
       this.reportError(e);
       throw e;
+    }
+  }
+
+  /**
+   * ループを介さずに本文を1回だけ送る（`TaskSession.send`。design.md §16.23）。
+   *
+   * `sendFromLoop` と違い `promptTransform` は通さず、作業記録にも残さない。この口を使う
+   * のはオーケストレーターセッションだけで、その会話本文は §16.12 の記録対象外にしてある。
+   * 送信の失敗はループを止める理由にならないため、報告するだけで投げ直さない。
+   */
+  private async sendOnce(entry: ChatPanel, text: string): Promise<void> {
+    try {
+      await entry.session.send(text, entry.taskConfig ?? readConfig().codex);
+    } catch (e) {
+      this.reportError(e);
     }
   }
 
@@ -2794,8 +2815,7 @@ export function renderShell(webview: vscode.Webview, options: ChatShellOptions):
     typeof options.showImport === 'object' ? options.showImport : DEFAULT_IMPORT_BUTTON_COPY;
   const sendOn = options.sendOn ?? DEFAULT_SEND_ON;
   // 入力欄の案内文を設定に追随させる（issue #288）。既定（ctrlEnter）は従来と同じ文言。
-  const sendKeyHint =
-    sendOn === 'enter' ? 'Enterで送信、Shift+Enterで改行' : 'Ctrl+Enterで送信';
+  const sendKeyHint = sendOn === 'enter' ? 'Enterで送信、Shift+Enterで改行' : 'Ctrl+Enterで送信';
   // 表に直接出すボタン（設定 agent.chat.composerButtons、issue #296）。それ以外は
   // 正準の並び（COMPOSER_BUTTON_IDS）のまま「…」メニューへ畳む
   // （overflowComposerButtons）。読み込み・検証は呼び出し側（chatView.ts /

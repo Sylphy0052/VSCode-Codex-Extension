@@ -31,7 +31,11 @@ import type {
   PseudoWorktreeFileStat,
   PseudoWorktreeFileSystemPort,
 } from '../../src/orchestrator/pseudoWorktree';
-import type { HttpMcpTransportHandle, TaskMessagingHub } from '../../src/orchestrator/messaging';
+import type {
+  HttpMcpTransportHandle,
+  OrchestratorControlPort,
+  TaskMessagingHub,
+} from '../../src/orchestrator/messaging';
 import {
   WorkflowRunStore,
   type PersistedRun,
@@ -86,6 +90,11 @@ class FakeTaskSession implements TaskSession {
 
   runLoop(plan: LoopPlan): void {
     this.runLoopCalls.push(plan);
+  }
+  /** `TaskSession.send`（design.md §16.23）。ループを介さない1回きりの送信。 */
+  sentTexts: string[] = [];
+  send(text: string): void {
+    this.sentTexts.push(text);
   }
   setPromptTransform(transform: (text: string) => string): void {
     this.promptTransform = transform;
@@ -164,7 +173,14 @@ class FakeTaskSession implements TaskSession {
 }
 
 class FakeHost implements TaskSessionHost {
+  /**
+   * タスク用に開いたセッションだけを並べる。オーケストレーターセッション
+   * （design.md §16.23。`role: 'orchestrator'`）は`orchestratorSessions`へ分ける。
+   * 混ぜると「タスクの何番目のセッションか」を見ている既存のテストが、runごとに1つ増える
+   * オーケストレーターのぶんだけずれてしまうため。
+   */
   sessions: FakeTaskSession[] = [];
+  orchestratorSessions: FakeTaskSession[] = [];
   openInputs: TaskSessionInput[] = [];
   private counter = 0;
   /** 次の`openTaskSession`呼び出しだけ失敗させる（例: app-serverが落ちている等の再現）。 */
@@ -180,16 +196,29 @@ class FakeHost implements TaskSessionHost {
     this.pendingRejection = error;
   }
 
+  /** オーケストレーターセッション（design.md §16.23）の生成だけを失敗させる。 */
+  rejectOrchestrator: Error | undefined;
+
   async openTaskSession(input: TaskSessionInput): Promise<TaskSession> {
-    if (this.pendingRejection !== undefined) {
+    if (input.role === 'orchestrator') {
+      if (this.rejectOrchestrator !== undefined) {
+        throw this.rejectOrchestrator;
+      }
+    } else if (this.pendingRejection !== undefined) {
+      // `rejectNext`はタスクの起動失敗を再現するためのもの。オーケストレーターの生成が
+      // 先に走るため、役割で分けないとそちらが身代わりに失敗してしまう
       const error = this.pendingRejection;
       this.pendingRejection = undefined;
       throw error;
     }
-    this.openInputs.push(input);
     this.counter += 1;
     const session = new FakeTaskSession(input.cwd, this.counter);
     session.messagingToolVisible = this.defaultMessagingToolVisible;
+    if (input.role === 'orchestrator') {
+      this.orchestratorSessions.push(session);
+      return session;
+    }
+    this.openInputs.push(input);
     this.sessions.push(session);
     return session;
   }
@@ -367,7 +396,11 @@ function fakeForgeCli(options?: {
       if (args[0] === 'pr' && args[1] === 'create') {
         return options?.failCreate
           ? { code: 1, stdout: '', stderr: 'fake pr create failure' }
-          : { code: 0, stdout: `${options?.prUrl ?? 'https://github.com/acme/repo/pull/1'}\n`, stderr: '' };
+          : {
+              code: 0,
+              stdout: `${options?.prUrl ?? 'https://github.com/acme/repo/pull/1'}\n`,
+              stderr: '',
+            };
       }
       if (args[0] === 'pr' && args[1] === 'merge') {
         return options?.failMerge
@@ -3506,7 +3539,9 @@ tasks:
 
     const cleanup = await runner.cleanupIntegration(runId);
     expect(cleanup.integrationRemoved).toBe(false);
-    expect(cleanup.integrationFailedMessage).toBe('runが実行中のため統合worktreeは撤去しませんでした');
+    expect(cleanup.integrationFailedMessage).toBe(
+      'runが実行中のため統合worktreeは撤去しませんでした',
+    );
   });
 
   it('未コミットの変更が残っている統合worktreeは撤去せず失敗として返す（既存の方針。design.md §16.17）', async () => {
@@ -3800,7 +3835,8 @@ tasks:
     await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
     await flush();
 
-    expect(state.handle?.registeredTasks.sort()).toEqual(['T1', 'T2']);
+    // オーケストレーター（design.md §16.23）にも専用の接続を1本発行する
+    expect(state.handle?.registeredTasks.sort()).toEqual(['-orchestrator-', 'T1', 'T2']);
     const t1Input = codexHost.openInputs.find((i) => i.cwd.endsWith('/T1'));
     const t2Input = codexHost.openInputs.find((i) => i.cwd.endsWith('/T2'));
     expect(t1Input?.mcp?.url).toContain('/mcp/');
@@ -3815,7 +3851,12 @@ tasks:
     await flush();
 
     const t2 = codexHost.byTaskId('T2');
-    const result = state.hub?.sendMessage({ from: 'T1', to: 'T2', body: 'hi T2', expectReply: false });
+    const result = state.hub?.sendMessage({
+      from: 'T1',
+      to: 'T2',
+      body: 'hi T2',
+      expectReply: false,
+    });
     expect(result?.accepted).toBe(true);
 
     const composed = t2.promptTransform?.('続けてください') ?? '';
@@ -4588,5 +4629,371 @@ tasks:
 
     expect(runner.continueTask('no-such-run', 'T1')).toBe(false);
     expect(runner.continueTask(runId, 'no-such-task')).toBe(false);
+  });
+});
+
+describe('WorkflowRunner: オーケストレーターセッション（design.md §16.23）', () => {
+  const YAML_ONE = `version: 1
+name: orchestrator
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+
+  it('run開始でタスクとは別に1つ開き、読み取り専用・ワークスペース直下で動かす', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE);
+    await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    await flush();
+
+    expect(codexHost.orchestratorSessions).toHaveLength(1);
+    // 依存グラフのノードではないので、タスクのセッションには混ざらない
+    expect(codexHost.sessions).toHaveLength(1);
+    const session = codexHost.orchestratorSessions[0] as FakeTaskSession;
+    // worktreeを作らず、メインのワークスペースで動かす
+    expect(session.cwd).toBe('/repo');
+  });
+
+  it('run開始の通知を送る（役割と道具の説明つき）', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE);
+    await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    await flush();
+
+    const session = codexHost.orchestratorSessions[0] as FakeTaskSession;
+    expect(session.sentTexts).toHaveLength(1);
+    expect(session.sentTexts[0]).toContain('オーケストレーター');
+    expect(session.sentTexts[0]).toContain('update_task_prompt');
+    // ループは使わない（1回きりの送信だけ）
+    expect(session.runLoopCalls).toHaveLength(0);
+  });
+
+  it('タスクが完了すると通知が届き、run終了ではセッションを解放しない', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE);
+    await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    await flush();
+    const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+    // run開始の通知でターンが走っている。走行中は割り込まないので、まず終わらせる
+    orchestrator.emitState({ ...initialChatState, busy: true });
+    orchestrator.emitState({ ...initialChatState, busy: false });
+    const sentBefore = orchestrator.sentTexts.length;
+
+    (codexHost.sessions[0] as FakeTaskSession).finish('done', doneState('ok'));
+    await flush();
+
+    const added = orchestrator.sentTexts.slice(sentBefore).join('\n');
+    expect(added).toContain('T1');
+    expect(added).toContain('完了');
+
+    // run終了の通知は、この送信で始まったターンが終わるまで溜まる（割り込まない）
+    orchestrator.emitState({ ...initialChatState, busy: true });
+    orchestrator.emitState({ ...initialChatState, busy: false });
+    const last = orchestrator.sentTexts[orchestrator.sentTexts.length - 1] as string;
+    expect(last).toContain('実行が終了しました');
+    expect(last).toContain('もう使えません');
+    // runが終わってもセッションは解放しない（design.md §16.23「セッションの生成と寿命」）
+    expect(orchestrator.disposed).toBe(false);
+  });
+
+  it('人の発話を送れる。セッションが無ければfalseを返す', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE);
+    const result = await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+
+    expect(runner.sendToOrchestrator(runId, '進捗を教えて')).toBe(true);
+    expect(orchestrator.sentTexts[orchestrator.sentTexts.length - 1]).toBe('進捗を教えて');
+    // 空文字は送らない
+    expect(runner.sendToOrchestrator(runId, '   ')).toBe(false);
+    expect(runner.sendToOrchestrator('unknown-run', 'x')).toBe(false);
+  });
+
+  it('セッションを開けなくても実行は止まらず、警告欄に出る', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE);
+    codexHost.rejectOrchestrator = new Error('CLIが見つかりません');
+
+    const result = await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    expect(codexHost.sessions).toHaveLength(1);
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.warnings.some((w) => w.kind === 'orchestratorUnavailable')).toBe(true);
+    expect(runner.sendToOrchestrator(runId, 'x')).toBe(false);
+  });
+
+  it('スナップショットにオーケストレーター欄の値が載る（応答本文は載らない）', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE);
+    const result = await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+
+    // run開始の通知でターンが走っている
+    orchestrator.emitState({ ...initialChatState, busy: true });
+    expect(runner.getSnapshot(runId)?.orchestrator).toMatchObject({
+      available: true,
+      provider: 'codex',
+      busy: true,
+    });
+
+    // ターンが終わると要約が入り、未読が増える
+    orchestrator.emitState({ ...doneState('方針を確認しました'), busy: false });
+    const after = runner.getSnapshot(runId)?.orchestrator;
+    expect(after?.busy).toBe(false);
+    expect(after?.lastResponseSummary).toContain('方針');
+    expect(after?.unreadCount).toBeGreaterThan(0);
+
+    // 会話を開くと未読が消える
+    expect(runner.revealOrchestrator(runId)).toBe(true);
+    expect(runner.getSnapshot(runId)?.orchestrator?.unreadCount).toBe(0);
+  });
+
+  it('セッションを開けなかったrunの欄はavailable: falseになる', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE);
+    codexHost.rejectOrchestrator = new Error('CLIが見つかりません');
+    const result = await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    expect(runner.getSnapshot(runId)?.orchestrator).toEqual({
+      available: false,
+      busy: false,
+      lastResponseSummary: '',
+      unreadCount: 0,
+    });
+    expect(runner.revealOrchestrator(runId)).toBe(false);
+  });
+});
+describe("WorkflowRunner: オーケストレーターの制御ツール（design.md §16.23「道具」）", () => {
+  const TWO_TASK_YAML = `
+version: 1
+name: control-test
+defaults:
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    continuePrompt: c1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+
+  /** 制御ツールの実体（オーケストレーター専用接続に見せているもの）を取り出す。 */
+  function control(state: FakeMessagingState): OrchestratorControlPort {
+    const port = state.hub?.orchestratorControl;
+    if (port === undefined) {
+      throw new Error("制御ツールが配線されていません");
+    }
+    return port;
+  }
+
+  it("get_run_statusはタスクの状態と警告を返し、プロンプトの全文は含めない", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await flush();
+    codexHost.byTaskId("T1");
+
+    const status = control(state).getRunStatus() as {
+      name: string;
+      tasks: { id: string; state: string }[];
+      warnings: unknown[];
+      integration: Record<string, unknown>;
+    };
+
+    expect(status.name).toBe("control-test");
+    expect(status.tasks.map((t) => t.id).sort()).toEqual(["T1", "T2"]);
+    expect(status.tasks.every((t) => t.state === "running")).toBe(true);
+    expect(JSON.stringify(status)).not.toContain("p1");
+    expect(status.integration).toBeDefined();
+  });
+
+  it("stop_taskは走行中タスクのループを止め、存在しないidは理由付きで拒否する", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await flush();
+
+    const accepted = control(state).stopTask("T1");
+    const rejected = control(state).stopTask("T9");
+
+    expect(accepted.accepted).toBe(true);
+    expect(codexHost.byTaskId("T1").stopLoopCount).toBe(1);
+    expect(rejected.accepted).toBe(false);
+    expect(rejected.reason).toContain("T9");
+  });
+
+  it("continue_taskは止まっているタスクを続きから走らせる", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    const result = await runner.start(
+      "/repo/.agents/workflows/control.yaml",
+      "/repo",
+    );
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId("T1");
+    // `continueTask`が受け付けるのは`failed`かつ`failure.kind === 'maxReached'`だけ
+    // （`runState.ts`の`continueTask`）。送信回数を使い切った状態を作る
+    t1.finish("maxReached", { ...initialChatState });
+    await flush();
+
+    const before = t1.runLoopCalls.length;
+    const outcome = control(state).continueTask("T1");
+
+    expect(outcome.accepted).toBe(true);
+    expect(t1.runLoopCalls.length).toBe(before + 1);
+    expect(
+      runner.getSnapshot(runId)?.tasks.find((t) => t.id === "T1")?.state,
+    ).toBe("running");
+  });
+
+  it("decide_approvalはacceptとdeclineだけを受け付ける（セッション全体への承認は選べない）", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await flush();
+
+    const t1 = codexHost.byTaskId("T1");
+    void t1.requestApproval({
+      requestId: 7,
+      kind: "execCommand",
+      title: "rm -rf",
+      detail: "",
+      itemId: "item-1",
+    });
+    await flush();
+
+    const widened = control(state).decideApproval("T1", "acceptForSession");
+    const accepted = control(state).decideApproval("T1", "accept");
+
+    expect(widened.accepted).toBe(false);
+    expect(accepted.accepted).toBe(true);
+    expect(t1.decideApprovalCalls).toEqual([
+      { requestId: 7, decision: "accept" },
+    ]);
+  });
+
+  it("run終了後の制御ツールは理由付きで拒否され、get_run_statusだけは答え続ける", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    const result = await runner.start(
+      "/repo/.agents/workflows/control.yaml",
+      "/repo",
+    );
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId("T1").finish("done", doneState("ok1"));
+    codexHost.byTaskId("T2").finish("done", doneState("ok2"));
+    await flush();
+    expect(runner.getSnapshot(runId)?.outcome).not.toBe("running");
+
+    // 会話は続けられるが、動かす対象がもう無いので制御ツールだけが無効になる
+    // （design.md §16.23「run終了後の制御ツールは無効。過去のrunを後から動かす経路は
+    // 作らない」）。理由を返すのは、モデルが使えないツールを呼び続けないようにするため
+    const port = control(state);
+    for (const outcome of [
+      port.stopTask("T1"),
+      port.retryTask("T1"),
+      port.continueTask("T1"),
+      port.decideApproval("T1", "accept"),
+      port.updateTaskPrompt("T1", "以降はこの方針で"),
+    ]) {
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain("終了");
+    }
+
+    // 「なぜ失敗したのか」を走り終えた後に聞く経路は残す
+    const status = port.getRunStatus() as { tasks: { id: string }[] };
+    expect(status.tasks.map((t) => t.id).sort()).toEqual(["T1", "T2"]);
+    // 会話そのものは続けられる
+    expect(runner.sendToOrchestrator(runId, "なぜT1は時間がかかったの？")).toBe(true);
+  });
+
+  it("update_task_promptは以降の送信本文を差し替え、警告欄へ出す", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    const result = await runner.start(
+      "/repo/.agents/workflows/control.yaml",
+      "/repo",
+    );
+    const runId = result.runId as string;
+    await flush();
+
+    const outcome = control(state).updateTaskPrompt(
+      "T1",
+      "これからは設計だけをやること",
+    );
+
+    expect(outcome.accepted).toBe(true);
+    const t1 = codexHost.byTaskId("T1");
+    expect(t1.promptTransform?.("c1")).toBe("これからは設計だけをやること");
+    const warning = runner
+      .getSnapshot(runId)
+      ?.warnings.find((w) => w.kind === "orchestratorPromptOverride");
+    expect(warning?.taskId).toBe("T1");
+    expect(warning?.message).toContain("これからは設計だけをやること");
+  });
+
+  it("update_task_promptはテンプレート変数を展開しない（リテラルとして送る）", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await flush();
+
+    control(state).updateTaskPrompt("T2", "T1の結果は {{T1.result}} を見よ");
+
+    expect(codexHost.byTaskId("T2").promptTransform?.("c2")).toBe(
+      "T1の結果は {{T1.result}} を見よ",
+    );
+  });
+
+  it("update_task_promptは上限超過と空文字を受付自体で拒否する", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await flush();
+
+    const tooLong = control(state).updateTaskPrompt("T1", "あ".repeat(4001));
+    const empty = control(state).updateTaskPrompt("T1", "   ");
+
+    expect(tooLong.accepted).toBe(false);
+    expect(tooLong.reason).toContain("4000");
+    expect(empty.accepted).toBe(false);
+    // 拒否されたので差し替わっていない
+    expect(codexHost.byTaskId("T1").promptTransform?.("c1")).toBe("c1");
+  });
+
+  it("セッションが無いタスク（開始前・終了後）の差し替えは拒否する", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await flush();
+
+    const outcome = control(state).updateTaskPrompt("T9", "方針転換");
+
+    expect(outcome.accepted).toBe(false);
+    expect(outcome.reason).toContain("T9");
   });
 });

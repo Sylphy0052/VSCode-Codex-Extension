@@ -225,6 +225,31 @@ describe('ChatViewManager', () => {
       expect(lastOf(panelB)?.state.approvals).toEqual([]);
     });
 
+    it('sendはループを介さず本文をそのまま送り、作業記録に残さない（design.md §16.23）', async () => {
+      const activities: ChatActivity[] = [];
+      const { manager, connection } = createManager({ onActivity: (a) => activities.push(a) });
+
+      const started = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      const task = await started;
+      // `setPromptTransform` の変換は `runLoop` 経由の送信専用で、`send` は通さない
+      task.setPromptTransform((text) => `変換済み: ${text}`);
+
+      task.send('進捗を教えて');
+      await tick();
+
+      const turn = connection.requests.filter((r) => r.method === 'turn/start');
+      expect(turn).toHaveLength(1);
+      expect(JSON.stringify(turn[0]?.params)).toContain('進捗を教えて');
+      expect(JSON.stringify(turn[0]?.params)).not.toContain('変換済み');
+      expect(activities).toHaveLength(0);
+    });
+
     it('開始待ちが1件だけなら、thread/startの応答前に届いた通知も取りこぼさない', async () => {
       // 応答前にもそのスレッド宛の通知は届く（従来の実装が単一の`pending`へ流していた理由）。
       // 開始待ちが1件しか無ければ宛先は一意に定まるので、拾わないと開始直後の通知を落とす。
@@ -583,7 +608,14 @@ describe('ChatViewManager', () => {
       for (const id of ['attach', 'loopToggle', 'compact', 'claudeImport']) {
         expect(isInOverflowMenu(html, id), `${id} は表にあるはず`).toBe(false);
       }
-      for (const id of ['recap', 'planToggle', 'fastToggle', 'review', 'exportTranscript', 'workflowMenu']) {
+      for (const id of [
+        'recap',
+        'planToggle',
+        'fastToggle',
+        'review',
+        'exportTranscript',
+        'workflowMenu',
+      ]) {
         expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
       }
     });

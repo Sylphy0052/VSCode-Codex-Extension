@@ -199,6 +199,13 @@ describe('workflowStyles', () => {
     expect(styles).toContain('--wf-state-color');
   });
 
+  it('オーケストレーター欄のスタイルを定義している（design.md §16.23、Issue #326）', () => {
+    const styles = workflowStyles();
+    expect(styles).toContain('#orchestrator');
+    expect(styles).toContain('.orch-summary');
+    expect(styles).toContain('.orch-unread');
+  });
+
   it('辺の強調と矢印の色を定義している（Issue #282）', () => {
     const styles = workflowStyles();
     expect(styles).toContain('.wf-edge.related');
@@ -229,6 +236,36 @@ describe('workflowScript', () => {
     const source = workflowScript();
     expect(source.includes('`')).toBe(false);
     expect(/\$\{/.test(source)).toBe(false);
+  });
+
+  it('オーケストレーター欄が1行の指示を送り、会話を開く導線を持つ（design.md §16.23、Issue #326）', () => {
+    const source = workflowScript();
+    expect(source).toContain("type: 'orchestratorSend'");
+    expect(source).toContain("type: 'orchestratorReveal'");
+    expect(source).toContain("el('orchSendBtn')");
+    expect(source).toContain("el('orchOpenBtn')");
+    // 要約の押下でも会話を開く
+    expect(source).toContain("el('orchSummary').addEventListener");
+  });
+
+  it('オーケストレーター欄は応答の全文をDOMへ入れず、要約だけをtextContentで挿入する', () => {
+    const source = workflowScript();
+    expect(source).toContain('orch.lastResponseSummary');
+    // 応答本文はスナップショットに無い。名前で参照していないことを機械的に固定する
+    expect(source).not.toContain('lastResponseText');
+    expect(source).not.toContain('innerHTML');
+  });
+
+  it('セッションを開けていないrunでは入力欄と会話を開くを無効にする', () => {
+    const source = workflowScript();
+    expect(source).toContain('orch.available');
+    expect(source).toContain('利用できません');
+  });
+
+  it('未読の印を出す（design.md §16.23「人が最後に見てから応答が増えていれば」）', () => {
+    const source = workflowScript();
+    expect(source).toContain('orch.unreadCount');
+    expect(source).toContain("el('orchUnread')");
   });
 
   it('グラフの描画幅を拡張機能へ伝える（段の折り返し用）', () => {

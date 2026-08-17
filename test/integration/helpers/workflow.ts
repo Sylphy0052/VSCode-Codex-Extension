@@ -28,6 +28,7 @@ export function doneState(text: string): ChatStateLike {
 export interface TaskSessionLike {
   readonly sessionId: string;
   runLoop(plan: unknown): void;
+  send(text: string): void;
   setPromptTransform(transform: (text: string) => string): void;
   onFinished(listener: (reason: string, state: ChatStateLike) => void): void;
   onStateChanged(listener: (state: ChatStateLike) => void): void;
@@ -92,6 +93,11 @@ export class FakeTaskSession implements TaskSessionLike {
 
   runLoop(plan: unknown): void {
     this.runLoopCalls.push(plan);
+  }
+  /** `TaskSession.send`（design.md §16.23）。ループを介さない1回きりの送信。 */
+  readonly sentTexts: string[] = [];
+  send(text: string): void {
+    this.sentTexts.push(text);
   }
   /**
    * 次の指示へ手を入れる差し込み口。タスク間メッセージング（design.md §16.21）では
@@ -365,7 +371,10 @@ export class ForgeCallLog {
         steps.push(`push ${push[1] ?? ''}`);
         continue;
       }
-      if (/^gh pr create /u.test(entry) || /^glab api projects\/:id\/merge_requests /u.test(entry)) {
+      if (
+        /^gh pr create /u.test(entry) ||
+        /^glab api projects\/:id\/merge_requests /u.test(entry)
+      ) {
         steps.push('createPullRequest');
         continue;
       }

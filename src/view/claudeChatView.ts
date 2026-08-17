@@ -446,7 +446,10 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
   async openTaskSession(input: TaskSessionInput): Promise<TaskSession> {
     const taskConfig = toClaudeConfig(input);
     const sessionId = randomSessionId();
-    const entry = this.buildEntry(input.cwd, LABEL, true, taskConfig);
+    // オーケストレーターセッション（design.md §16.23）はタスクと同じ経路で開くが、
+    // タブ名だけ分けて人が見分けられるようにする
+    const title = input.role === 'orchestrator' ? `${LABEL}: オーケストレーター` : LABEL;
+    const entry = this.buildEntry(input.cwd, title, true, taskConfig);
     this.panels.set(sessionId, entry);
     entry.session.start({
       cwd: input.cwd,
@@ -881,6 +884,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     return {
       sessionId,
       runLoop: (plan: LoopPlan) => entry.loop.start(plan),
+      send: (text: string) => this.sendOnce(entry, text),
       setPromptTransform: (transform) => {
         entry.promptTransform = transform;
       },
@@ -1153,6 +1157,22 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
   }
 
   /**
+   * ループを介さずに本文を1回だけ送る（`TaskSession.send`。design.md §16.23）。
+   *
+   * `sendFromLoop` と違い `promptTransform` は通さず、`dispatch` も経由しない（`dispatch`
+   * は必ず作業記録へ通知するため）。この口を使うのはオーケストレーターセッションだけで、
+   * その会話本文は §16.12 の記録対象外にしてある。送信の失敗はループを止める理由に
+   * ならないため、報告するだけで投げ直さない。
+   */
+  private sendOnce(entry: ClaudePanel, text: string): void {
+    try {
+      entry.session.sendOrQueue(text, []);
+    } catch (e) {
+      this.reportError(e);
+    }
+  }
+
+  /**
    * ループからの送信。失敗はループを止める理由になるため、報告したうえで投げ直す。
    *
    * `promptTransform` が設定されていれば、実際にCLIへ送る本文だけそちらを通す。
@@ -1248,12 +1268,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       }
       if (type === 'revertDiff') {
         // 差分の見出し行「この変更を戻す」。`chatView.ts` と共通の実装（issue #291）
-        void handleRevertDiff(
-          this.fs,
-          entry.session.getState().items,
-          m['itemId'],
-          m['diffIndex'],
-        );
+        void handleRevertDiff(this.fs, entry.session.getState().items, m['itemId'], m['diffIndex']);
         return;
       }
       if (type === 'attach') {

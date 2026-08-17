@@ -7,7 +7,11 @@ import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMe
 import { MESSAGING_MCP_SERVER_NAME } from '../../src/orchestrator/messaging';
 import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
 import type { McpServerView } from '../../src/provider/mcpServers';
-import { MEMORY_LAST_SELECTED_PATH_KEY, type MemoryModeMemento } from '../../src/provider/inputModes';
+import {
+  MEMORY_LAST_SELECTED_PATH_KEY,
+  type MemoryModeMemento,
+} from '../../src/provider/inputModes';
+import type { ChatActivity } from '../../src/view/chatView';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import {
   buildClaudeChatPanelOptions,
@@ -95,7 +99,8 @@ function fakeMemoryFileSystem(overrides?: Partial<MemoryFileSystemPort>): Memory
 function fakeMemento(): MemoryModeMemento {
   const store = new Map<string, unknown>();
   return {
-    get: <T>(key: string, defaultValue: T): T => (store.has(key) ? (store.get(key) as T) : defaultValue),
+    get: <T>(key: string, defaultValue: T): T =>
+      store.has(key) ? (store.get(key) as T) : defaultValue,
     update: (key: string, value: unknown): Thenable<void> => {
       store.set(key, value);
       return Promise.resolve();
@@ -108,6 +113,7 @@ function createManager(options?: {
   memoryFs?: MemoryFileSystemPort;
   memoryMemento?: MemoryModeMemento;
   store?: ClaudeSessionStore;
+  onActivity?: (activity: ChatActivity) => void;
 }): {
   manager: ClaudeChatViewManager;
   store: ClaudeSessionStore;
@@ -121,7 +127,7 @@ function createManager(options?: {
     store,
     fakeSettingsProvider(),
     fakeLogger,
-    () => undefined,
+    options?.onActivity ?? (() => undefined),
     () => undefined,
     options?.isTaskManagedThread ?? (() => false),
     options?.memoryFs ?? fakeMemoryFileSystem(),
@@ -236,6 +242,44 @@ describe('ClaudeChatViewManager', () => {
     });
   });
 
+  describe('ループを介さない1回きりの送信（TaskSession.send。design.md §16.23）', () => {
+    it('本文をそのままCLIへ送る（promptTransformは通さない）', async () => {
+      stubStart();
+      const sent: string[] = [];
+      vi.spyOn(ClaudeStreamSession.prototype, 'sendOrQueue').mockImplementation((text: string) => {
+        sent.push(text);
+        return 'sent';
+      });
+      const { manager } = createManager();
+
+      const task = await manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      task.setPromptTransform((text) => `変換済み: ${text}`);
+      task.send('進捗を教えて');
+
+      expect(sent).toEqual(['進捗を教えて']);
+    });
+
+    it('作業記録には残さない（design.md §16.23「信頼境界」）', async () => {
+      stubStart();
+      vi.spyOn(ClaudeStreamSession.prototype, 'sendOrQueue').mockImplementation(() => 'sent');
+      const activities: ChatActivity[] = [];
+      const { manager } = createManager({ onActivity: (a) => activities.push(a) });
+
+      const task = await manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      task.send('進捗を教えて');
+
+      expect(activities).toHaveLength(0);
+    });
+  });
+
   describe('タスク単位の設定（design.md §16.10の5）', () => {
     it('タスクの設定がClaudeStreamSession.startへそのまま渡る', async () => {
       const calls = stubStart();
@@ -347,7 +391,14 @@ describe('ClaudeChatViewManager', () => {
       for (const id of ['attach', 'loopToggle', 'compact', 'claudeImport']) {
         expect(isInOverflowMenu(html, id), `${id} は表にあるはず`).toBe(false);
       }
-      for (const id of ['recap', 'planToggle', 'fastToggle', 'review', 'exportTranscript', 'workflowMenu']) {
+      for (const id of [
+        'recap',
+        'planToggle',
+        'fastToggle',
+        'review',
+        'exportTranscript',
+        'workflowMenu',
+      ]) {
         expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
       }
     });
@@ -556,7 +607,13 @@ describe('ClaudeChatViewManager', () => {
     it('mcp_statusでサーバがconnectedならcheckMessagingToolVisible()はtrueを返す', async () => {
       stubStart();
       stubMcpStatus([
-        { name: MESSAGING_MCP_SERVER_NAME, state: 'connected', toolCount: 2, version: '1', reason: undefined },
+        {
+          name: MESSAGING_MCP_SERVER_NAME,
+          state: 'connected',
+          toolCount: 2,
+          version: '1',
+          reason: undefined,
+        },
       ]);
       const { manager } = createManager();
 
@@ -888,9 +945,11 @@ describe('ClaudeChatViewManagerのメモリ追記（issue #6/#144）', () => {
     const lastState = panel?.webview.sent[panel.webview.sent.length - 1] as {
       state: { items: Array<{ detail?: string }> };
     };
-    expect(lastState.state.items.some((i) => i.detail === 'メモリへ追記しました: /workspace/root/CLAUDE.md')).toBe(
-      true,
-    );
+    expect(
+      lastState.state.items.some(
+        (i) => i.detail === 'メモリへ追記しました: /workspace/root/CLAUDE.md',
+      ),
+    ).toBe(true);
   });
 
   it('追記先がシンボリックリンクなら、確認と会話の記録の両方に実体パスが出る', async () => {
@@ -912,7 +971,9 @@ describe('ClaudeChatViewManagerのメモリ追記（issue #6/#144）', () => {
       state: { items: Array<{ detail?: string }> };
     };
     expect(
-      lastState.state.items.some((i) => i.detail?.includes('リンク先: /home/user/dotfiles/CLAUDE.md')),
+      lastState.state.items.some((i) =>
+        i.detail?.includes('リンク先: /home/user/dotfiles/CLAUDE.md'),
+      ),
     ).toBe(true);
   });
 
@@ -929,7 +990,9 @@ describe('ClaudeChatViewManagerのメモリ追記（issue #6/#144）', () => {
     await send(panel, '#note');
 
     expect(__mock.messages.warnings.at(-1)).toContain('実体のパスを特定できません');
-    expect(__mock.writtenFiles).toEqual([{ path: '/workspace/root/CLAUDE.md', content: '- note\n' }]);
+    expect(__mock.writtenFiles).toEqual([
+      { path: '/workspace/root/CLAUDE.md', content: '- note\n' },
+    ]);
     const lastState = panel?.webview.sent[panel.webview.sent.length - 1] as {
       state: { items: Array<{ detail?: string }> };
     };
@@ -1043,7 +1106,8 @@ describe('ClaudeChatViewManagerのメモリ追記（issue #6/#144）', () => {
       manager: ClaudeChatViewManager,
       openCwd: string | undefined,
     ): Promise<Array<{ label: string; path: string }>> {
-      let seenItems: Array<{ candidate: { label: string; path: string; exists: boolean } }> | undefined;
+      let seenItems:
+        Array<{ candidate: { label: string; path: string; exists: boolean } }> | undefined;
       __mock.showQuickPickAnswer = (items) => {
         seenItems = items as unknown as Array<{
           candidate: { label: string; path: string; exists: boolean };

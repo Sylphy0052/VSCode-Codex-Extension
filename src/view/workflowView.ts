@@ -363,6 +363,20 @@ export class WorkflowViewManager implements vscode.Disposable {
       return;
     }
 
+    if (type === 'orchestratorSend' && typeof m['text'] === 'string') {
+      // design.md §16.23「会話のUI」。入力欄の文字列は**人の入力**であってタスクの出力では
+      // ないため、`wrapTaskMessage`の囲いは付けずそのまま渡す。空文字・空白のみは
+      // `sendToOrchestrator`（runner.ts）側が弾く
+      this.runner.sendToOrchestrator(runId, m['text']);
+      return;
+    }
+    if (type === 'orchestratorReveal') {
+      // 同じセッションのチャットタブを前面に出す（`reveal`）。オーケストレーター用の
+      // チャット画面は作らず、既存の画面をそのまま使う。開いた時点で未読の印が消える
+      this.runner.revealOrchestrator(runId);
+      return;
+    }
+
     const taskId = m['taskId'];
     if (typeof taskId !== 'string') {
       return;
@@ -485,6 +499,19 @@ ${workflowStyles()}
     <div id="progressBar"><div class="fill" id="progressFill"></div></div>
     <div id="progressPercent"></div>
     <div id="banner" hidden></div>
+    <div id="orchestrator" hidden>
+      <div class="orch-head">
+        <span class="orch-title">オーケストレーター</span>
+        <span id="orchStatus" class="orch-status"></span>
+        <span id="orchUnread" class="orch-unread" hidden></span>
+      </div>
+      <div id="orchSummary" class="orch-summary"></div>
+      <div class="orch-input">
+        <input id="orchInput" type="text" placeholder="run全体への指示や質問を1行で送る">
+        <button id="orchSendBtn" type="button">送る</button>
+        <button id="orchOpenBtn" type="button" class="secondary">会話を開く</button>
+      </div>
+    </div>
   </div>
 
   <div id="content" hidden>

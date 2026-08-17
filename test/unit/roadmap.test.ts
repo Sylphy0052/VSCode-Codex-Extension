@@ -55,6 +55,11 @@ class FakeRoadmapSession implements TaskSession {
     private readonly shouldFail: boolean,
   ) {}
 
+  /** `TaskSession.send`（design.md §16.23）。この経路では使わない。 */
+  sentTexts: string[] = [];
+  send(text: string): void {
+    this.sentTexts.push(text);
+  }
   runLoop(plan: LoopPlan): void {
     this.runLoopCalls.push(plan);
     this.finishedListener?.(this.shouldFail ? 'failed' : 'maxReached', {

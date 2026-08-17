@@ -702,6 +702,57 @@ export function workflowScript(): string {
 
   // ---- 警告欄 ----
 
+  // ---- 最上段: オーケストレーター欄（design.md §16.23「会話のUI」） ----
+
+  /**
+   * 直近の応答の1行要約・状態（応答中／待機）・未読の印を出し、1行入力と会話を開くを
+   * 有効／無効にする。**応答の全文はここに出さない**（拡張機能側も送ってこない）。全文・
+   * 承認カード・Markdown描画は会話を開くで前面に出す既存のチャット画面が担う。
+   *
+   * 要約はエージェントの出力なので、必ずtextContentへ代入して挿入する
+   * （design.md §16.8「画面に出す動的な文字列は必ずテキストノードとして挿入する」）。
+   */
+  function renderOrchestrator(snapshot) {
+    const box = el('orchestrator');
+    const orch = snapshot.orchestrator;
+    if (!orch) {
+      // 拡張機能が欄の値を送ってこないrun（下書きプレビュー等）では欄そのものを出さない
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+
+    const input = el('orchInput');
+    const sendBtn = el('orchSendBtn');
+    const openBtn = el('orchOpenBtn');
+    input.disabled = !orch.available;
+    sendBtn.disabled = !orch.available;
+    openBtn.disabled = !orch.available;
+
+    if (!orch.available) {
+      el('orchStatus').textContent = '利用できません';
+      el('orchSummary').textContent =
+        'このrunではオーケストレーターセッションを開けていません（生成に失敗した、または拡張機能をリロードして復元したrunです）。';
+      el('orchUnread').hidden = true;
+      return;
+    }
+
+    el('orchStatus').textContent = orch.busy ? '応答中' : '待機';
+    el('orchSummary').textContent = orch.lastResponseSummary || 'まだ応答はありません。';
+    const unread = el('orchUnread');
+    unread.hidden = orch.unreadCount <= 0;
+    unread.textContent = '未読 ' + orch.unreadCount;
+  }
+
+  /** 入力欄の内容を送って空にする。空白のみの入力は送らない（拡張機能側も弾く）。 */
+  function sendOrchestratorInput() {
+    const input = el('orchInput');
+    const text = input.value;
+    if (!text.trim()) return;
+    vscode.postMessage({ type: 'orchestratorSend', text: text });
+    input.value = '';
+  }
+
   function renderWarnings(snapshot) {
     const box = el('warnings');
     box.replaceChildren();
@@ -795,6 +846,7 @@ export function workflowScript(): string {
     el('content').hidden = false;
     el('empty').hidden = true;
     renderHeader(snapshot, progress);
+    renderOrchestrator(snapshot);
     renderGraph(snapshot, layout);
     renderTable(snapshot);
     renderWarnings(snapshot);
@@ -811,6 +863,8 @@ export function workflowScript(): string {
     el('content').hidden = true;
     el('empty').hidden = false;
     el('openIntegrationPrBtn').disabled = true;
+    // オーケストレーター欄は#header側にあり#contentのhiddenでは消えないため明示的に隠す
+    el('orchestrator').hidden = true;
   }
 
   // ---- 経過時間: ローカルで毎秒更新する（拡張機能からは状態が変わったときだけ届く） ----
@@ -868,6 +922,26 @@ export function workflowScript(): string {
   el('cleanupIntegrationBtn').addEventListener('click', () =>
     vscode.postMessage({ type: 'cleanupIntegration' }),
   );
+
+  // オーケストレーター欄（design.md §16.23「会話のUI」）。Enterでも送れるようにする
+  // （1行の指示をViewから離れずに送るための欄なので、改行を入れる用途が無い）
+  el('orchSendBtn').addEventListener('click', sendOrchestratorInput);
+  el('orchInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing) {
+      e.preventDefault();
+      sendOrchestratorInput();
+    }
+  });
+  el('orchOpenBtn').addEventListener('click', () =>
+    vscode.postMessage({ type: 'orchestratorReveal' }),
+  );
+  el('orchSummary').addEventListener('click', () => {
+    // 要約の押下でも会話を開く（design.md §16.23「会話を開く（またはオーケストレーター
+    // 欄の要約の押下）で同じ画面を前面に出す」）
+    if (!el('orchOpenBtn').disabled) {
+      vscode.postMessage({ type: 'orchestratorReveal' });
+    }
+  });
 
   window.addEventListener('message', (event) => {
     const msg = event.data;

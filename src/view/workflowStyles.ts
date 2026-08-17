@@ -266,6 +266,44 @@ export function workflowStyles(): string {
      permissionEscalationと同じ重大度として同じ色にする（経路が違うだけでリスクの質は同じ）。 */
   .warning-item.messagingPermissionEscalation { border-left-color: var(--vscode-errorForeground); }
 
+  /* ---- オーケストレーター欄（design.md §16.23「会話のUI」） ---- */
+  #orchestrator {
+    margin-top: 8px;
+    padding: 6px 8px;
+    border: 1px solid var(--vscode-widget-border, transparent);
+    border-radius: 4px;
+    background-color: color-mix(in srgb, var(--vscode-charts-purple) 6%, transparent);
+  }
+  .orch-head { display: flex; align-items: center; gap: 8px; }
+  .orch-title { font-weight: 600; font-size: 0.9em; }
+  .orch-status { color: var(--vscode-descriptionForeground); font-size: 0.85em; }
+  .orch-unread {
+    padding: 0 6px;
+    border-radius: 8px;
+    background-color: var(--vscode-charts-purple);
+    color: var(--vscode-editor-background);
+    font-size: 0.78em;
+  }
+  /* 要約は1行に収め、押すと会話を開く（全文はチャット画面が出す） */
+  .orch-summary {
+    margin: 4px 0;
+    font-size: 0.88em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+  }
+  .orch-input { display: flex; gap: 6px; }
+  .orch-input input {
+    flex: 1;
+    min-width: 0;
+    padding: 2px 6px;
+    color: var(--vscode-input-foreground);
+    background-color: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, transparent);
+  }
+  .orch-input input:disabled { opacity: 0.5; }
+
   #empty { color: var(--vscode-descriptionForeground); padding: 24px 0; }
 `;
 }

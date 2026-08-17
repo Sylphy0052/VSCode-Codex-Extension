@@ -2583,8 +2583,7 @@ issue #188（L群の統合テスト化）でL-10（fork）を駆動しようと�
 `sessionId: undefined`を渡すと、既存の`streamSession.ts`の`start()`がこの1行で`state.threadId`を決めている。
 
 ```ts
-const threadId =
-  options.target.kind === 'resume' ? options.target.sessionId : options.sessionId;
+const threadId = options.target.kind === 'resume' ? options.target.sessionId : options.sessionId;
 ```
 
 `target.kind`が`'fork'`のときは`options.sessionId`（＝`undefined`）がそのまま採用されるため、**`state.threadId`はこのタブが生きている間ずっと`undefined`のまま**になる。この`undefined`が、既存コードの2箇所のガードへそのまま効く。
@@ -2634,12 +2633,12 @@ Claude Code側は英語の指示文で送っても会話の言語（日本語）
 
 #### Claude Code側との違い（受け入れる差）
 
-| | Claude Code（§14.36） | Codex（本節） |
-| --- | --- | --- |
-| 経路 | CLI内蔵の`/recap`を発言として送る | 拡張機能が要約を依頼する指示文を通常のターンとして送る |
-| 応答の扱い | `model`が`<synthetic>`、通常のトークン列を経由しない | 通常のモデル応答（トークン列を経由する） |
-| 費用 | 実測で`total_cost_usd`が増える（無償ではない。§14.36実測3） | 通常のターンと同じだけ掛かる |
-| コンテキスト | 会話に残る | 会話に残る（同じ） |
+|              | Claude Code（§14.36）                                       | Codex（本節）                                          |
+| ------------ | ----------------------------------------------------------- | ------------------------------------------------------ |
+| 経路         | CLI内蔵の`/recap`を発言として送る                           | 拡張機能が要約を依頼する指示文を通常のターンとして送る |
+| 応答の扱い   | `model`が`<synthetic>`、通常のトークン列を経由しない        | 通常のモデル応答（トークン列を経由する）               |
+| 費用         | 実測で`total_cost_usd`が増える（無償ではない。§14.36実測3） | 通常のターンと同じだけ掛かる                           |
+| コンテキスト | 会話に残る                                                  | 会話に残る（同じ）                                     |
 
 どちらも会話に残る点は同じで、受入基準の「要約が会話に残る」はCodex側でも満たせる。応答の見え方（`<synthetic>`かどうか）と費用の性質だけが違う。
 
@@ -2736,7 +2735,6 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - `test/unit/sessionTreeProvider.test.ts`: `id`が`<provider>:<id>`になること、ラベルが重複しても`id`が衝突しないこと、行クリックの引数が従来通りであること
 - `test/unit/menuInlineIcons.test.ts`: `inline`グループのコマンドが全て`icon`を持つこと、メニューが参照するコマンドが`contributes.commands`に実在すること、インラインの並び順が同じ`when`句の中で重複していないこと
 
-
 ### 14.44 承認要求の回し先（`--approve-for-me` / `approvalsReviewer`、issue #222）
 
 `codex-cli 0.147.0`の`--approve-for-me`へ対応する。値の意味と実測の詳細は[approval-modes.md](approval-modes.md)にまとめてあり、ここには設計判断だけを残す。
@@ -2794,7 +2792,6 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 確認の本文には設定キー名ではなく**何が起きるか**を書く（`describeUnsafeCombination`）。設定を変えた本人でも、別の日に開いた会話でそれが効いていることは忘れる。当てはまるものが複数ある場合は、実際に効くほう（`bypass`）を述べる。
 
 タスクセッション（`openTaskSession`）は無人実行で人が答えられないため、確認を挟む代わりに`toCodexConfig`が`false`を固定して危険な値を持ち込ませない。
-
 
 ### 14.46 会話をクリアして新しく始める（TUI/CLIの `/clear` 相当）
 
@@ -2889,7 +2886,7 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - **外部ライブラリ（marked等）は追加しない。** 依存を増やさない方針のリポジトリで、ワークフローViewの依存グラフも自前で組んでいる（§16.8）のと同じ考え方
 - Markdownのパースはロジックとして`src/view/markdown.ts`へ切り出す。`vscode`に依存しない純粋関数`parseMarkdown`/`parseInline`とし、`test/unit/markdown.test.ts`から直接テストする。トークンは見出し（`heading`）・段落（`paragraph`。行ごとのinlineトークン配列を保ち、改行はそのまま行分けとして残す）・箇条書き（`list`）・コードフェンス（`codeblock`）の4種類のブロックトークンと、地の文・太字・斜体・インラインコード・リンクの5種類のinlineトークンに絞る。ネストした強調（太字の中の斜体等）・テーブル・引用・水平線は扱わない（issue本文の受入基準に絞ったスコープ）
 - webview側のスクリプト（`chatScript.ts`）はテンプレートリテラルの中身でTypeScriptとして実行できない。`stateDelta.ts`の`MERGE_ITEMS_SOURCE`と同じ流儀で、`markdown.ts`が同じロジックをJSソース文字列（`MARKDOWN_PARSE_SOURCE`）として二重に持ち、`chatScript.ts`へ差し込む。実装を1か所に書いて両側へコピーしないと片方だけ直したときに黙ってずれるが、テンプレートリテラルの中はTypeScriptとして実行できないため二重管理を避けられない。`test/unit/markdown.test.ts`は`MARKDOWN_PARSE_SOURCE`を`new Function`で評価し、複数の入力（見出し・箇条書き・コードフェンス・未完のフェンス・HTMLに見える文字列）でTS実装と同じ結果になることを確かめ、乖離を検知する
-- **実測**: コードフェンス・インラインコードの記法自体がバッククォートを使うため、`MARKDOWN_PARSE_SOURCE`の中にバッククォート文字をそのまま書くと、`chatScript()`の出力全体にバッククォートが混ざる。既存のテスト（`webviewScript.test.ts`の「テンプレートリテラルを閉じる文字が混ざっていない」）はこれをゼロ件で機械チェックしており、実装中に実際に検知された。対応として`String.fromCharCode(96)`から作った`BACKTICK`変数を経由し、バッククォートが絡む正規表現もすべて`new RegExp(...)`で組み立てる（正規表現リテラル`` /`.../ ``は使わない）
+- **実測**: コードフェンス・インラインコードの記法自体がバッククォートを使うため、`MARKDOWN_PARSE_SOURCE`の中にバッククォート文字をそのまま書くと、`chatScript()`の出力全体にバッククォートが混ざる。既存のテスト（`webviewScript.test.ts`の「テンプレートリテラルを閉じる文字が混ざっていない」）はこれをゼロ件で機械チェックしており、実装中に実際に検知された。対応として`String.fromCharCode(96)`から作った`BACKTICK`変数を経由し、バッククォートが絡む正規表現もすべて`new RegExp(...)`で組み立てる（正規表現リテラル``/`.../``は使わない）
 - DOMへの差し込みは`createElement`/`createTextNode`だけで行い、`innerHTML`等のHTML文字列を流し込むAPIは使わない。エージェントの出力がHTMLとして評価されることはない（受入基準）。CSP（`chatCsp.ts`）は変更していない
 - Markdownとして解釈するのは`userMessage`/`agentMessage`の本文だけ。`commandExecution`・`reasoning`は設定に関わらず常に生テキストのまま（`renderBody`の行数折りたたみ・`MAX_VISIBLE_LINES`はこの2種類にしか効かず、Markdown化の対象と重ならないため両立する）
 - コードブロックには「コピー」「エディタへ挿入」「新規ファイルで開く」を付ける。後の2つはWebviewから直接実行できないため、`vscode.postMessage`で`insertCode`/`openCodeFile`をホスト側（`chatView.ts`/`claudeChatView.ts`の`handleMessage`）へ送る。既存の`openUrl`・`requestImage`の往復（§14.4・画像表示）と同じ形。挿入（`insertCodeIntoEditor`）は`vscode.window.activeTextEditor`の現在の選択範囲を置き換え、開いているエディタが無ければ「挿入先のエディタが開かれていません」と伝えて終わる（実行不能な操作を黙って握りつぶさない）。新規ファイル（`openCodeInNewFile`）はコードフェンスの言語表記からVSCodeの言語IDへの簡易対応表（`CODE_FENCE_LANGUAGE_IDS`）を経由し、対応表に無い表記はそのまま言語IDとして渡す（VSCodeは未知の言語IDでもプレーンテキストとして開くだけで落ちない）。どちらも`runExportTranscript`と同様`chatView.ts`に置き、`claudeChatView.ts`からimportして共有する
@@ -2902,6 +2899,7 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - テーブル・引用・水平線・ネストした強調は扱わない
 - リンクURLは`([^)\s]+)`という簡易パターンで区切っており、URLに空白を含む記法や、閉じ括弧を含む一部のURLは正しく拾えない
 - webview側のDOM組み立て（`renderMarkdownInto`・`appendInline`・`createCodeBlock`）はvitestのnode環境では実行できない（jsdom/happy-domを導入していない）。自動化できているのは構文チェック（`new Function`）とMarkdownパース結果の一致テストまでで、実際のDOM描画・ボタンの動作確認は`docs/manual-test.md`のU群（U-08〜U-10）に委ねる
+
 ### 14.52 会話の差分からファイルとdiffを開く（issue #291）
 
 背景: 会話に出るファイル変更の差分は、パスを`<summary>`のテキストとして出すだけでクリックできなかった（`chatScript.ts`の`createDiff`）。VSCodeの中にいる利点（diffエディタ・該当行ジャンプ・戻す）が使えていなかった。「エディタで開く」「差分を開く」「この変更を戻す」の3操作を見出し行へ足す。
@@ -2924,16 +2922,17 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
   - **ジャンプ先の行番号は出せない。** ハンク見出しを持つCodexの`update`とは異なり、`editReplace`は一致位置が現在のファイル内容を読むまで分からない。`planDiffActions`は構造（`diff`本文・種類）だけで判定する既存の設計（現在のファイル内容を読まない）を崩したくなかったため、`jumpToLine`は常に`undefined`のままとした（残る制約に記載）
 - **add/delete/update/移動（`movePath`）ごとに出す操作を分けた。**
 
-  | kind | エディタで開く | 差分を開く | 戻す |
-  | --- | --- | --- | --- |
-  | add | ○（先頭へジャンプ） | ○（復元できれば） | ○（復元できれば。ファイル削除） |
-  | delete | ×（ファイルが無い） | ○（復元できれば） | ○（復元できれば。ファイル再作成） |
-  | update（移動無し、Codex・ハンク見出しあり） | ○（ハンクの先頭行へジャンプ、可能なら） | ○（ハンク解析できれば） | ○（ハンク解析できれば） |
-  | update（移動無し、Claude Code・`editReplace`あり） | ○（ジャンプ先は不明。先頭で開く） | ○（`new_string`が空文字でなければ。実際に一意に見つかるかは開いた時点で判定） | ○（同左） |
-  | update（`movePath`あり） | ○（移動後の場所を開く） | ○（移動後の場所と比較） | ×（下記参照） |
-  | 未知の種類 | ○（開くだけ） | × | × |
+  | kind                                               | エディタで開く                          | 差分を開く                                                                    | 戻す                              |
+  | -------------------------------------------------- | --------------------------------------- | ----------------------------------------------------------------------------- | --------------------------------- |
+  | add                                                | ○（先頭へジャンプ）                     | ○（復元できれば）                                                             | ○（復元できれば。ファイル削除）   |
+  | delete                                             | ×（ファイルが無い）                     | ○（復元できれば）                                                             | ○（復元できれば。ファイル再作成） |
+  | update（移動無し、Codex・ハンク見出しあり）        | ○（ハンクの先頭行へジャンプ、可能なら） | ○（ハンク解析できれば）                                                       | ○（ハンク解析できれば）           |
+  | update（移動無し、Claude Code・`editReplace`あり） | ○（ジャンプ先は不明。先頭で開く）       | ○（`new_string`が空文字でなければ。実際に一意に見つかるかは開いた時点で判定） | ○（同左）                         |
+  | update（`movePath`あり）                           | ○（移動後の場所を開く）                 | ○（移動後の場所と比較）                                                       | ×（下記参照）                     |
+  | 未知の種類                                         | ○（開くだけ）                           | ×                                                                             | ×                                 |
 
   移動を伴う`update`で「戻す」を出さないのは、改名を安全に取り消すには「内容を書き戻す」と「`movePath`から`path`へ戻す」の2操作を組み合わせる必要があり、どちらか一方が失敗すると（disk full・権限・競合等）ファイルがどちらの場所にも正しい状態で残らない、単純な書き戻しよりリスクの高い操作になるため。エディタで開く・差分を開くは移動後の場所（`movePath`）に対して引き続き出す
+
 - **パスの検証は2段構え。** (1) 文字列だけの判定（`resolveWithinWorkspace`、`src/util/diffWorkspacePath.ts`）で、`..`セグメントを含む・ワークスペース外を指す絶対パスを拒む。(2) 実ファイルシステムに触れる`verifyRealPathWithinWorkspace`で、`fs.realpath`により対象（存在しなければ実在する直近の祖先まで遡る）とワークスペースルートの両方を実体パスへ解決し、シンボリックリンクによる脱出も検出する。Webview側（`chatScript.ts`の`withinWorkspace`）にも文字列だけの簡易版を置きボタンの出し分けに使うが、これはUXのためのヒントに過ぎず、**ホスト側（`resolveDiffFileForAction`）が独立に同じ判定をやり直してから実際の操作を行う**（Webview側の出し分けだけに頼らない。エージェントの出力に由来する文字列を信用しない、というこのリポジトリの方針）
 - **Webviewは差分の中身を送らず、`itemId`+`diffIndex`だけを送る。** ホスト側（`resolveDiffTarget`、`chatView.ts`）が会話状態（`entry.session.getState().items`）から差分を引き直し、Webviewが自称する path・diff本文・kindをそのまま信用しない。画像表示（`buildImageReply`）が会話に実在するパスだけを対象にするのと同じ考え方
 - **「この変更を戻す」は実行前に必ずモーダルで確認する。** 破壊的操作（`add`は削除、`delete`は再作成、`update`は上書き）の既存の確認（`confirmRewindFiles`等）と同じ`showWarningMessage(..., { modal: true }, ...)`の形。確認モーダルはユーザーの応答待ちで不定長のため、直前（確認を出す前）と直後（書き込み・削除の直前）の2回、現在の内容を読み直して差分の想定と突き合わせる（TOCTOU対策、issue #144のメモリ追記と同じ考え方）。食い違えば理由を出して何もしない
@@ -3046,7 +3045,6 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - 絞り込みはクライアントサイドの部分一致のみ。あいまい検索・複数語のAND/OR等は無い
 - ピン留めは`globalState`（ワークスペースをまたいで共通）。ワークスペースごとに別のピンを持ちたい場合は非対応
 
-
 ### 14.55 応答の完了と承認待ちを利用者へ届ける（issue #286）
 
 背面タブでターンが終わっても、承認カードが出ても、通知もタブ名の変化も無く、利用者は自分でタブを見に行くまで気付けなかった。3箇所（タブ名・履歴ツリー・通知）へ同じ状態を出す。
@@ -3118,7 +3116,6 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - タブ名の印は英数記号のみ（`*` / `!`）。ローカライズや、印の意味を凡例として画面内に示す導線は無い（ホバーで見るタブのツールチップ自体がVS Code標準機能に無いため、意味は本ドキュメントとREADMEでのみ説明する）
 - ターン完了の通知は成功・失敗を区別しない（`turnFailed`の値を見ていない）。文言も「応答が終わりました」で共通
 - 通知の「開く」はタブをrevealするだけで、承認カード自体へスクロールする等の追加の誘導は無い（既存の承認カードは会話の最新項目に出るため、revealで大抵は視界に入る）
-
 
 ### 14.56 名前付きセッションプリセット（issue #295）
 
@@ -4637,3 +4634,145 @@ runをまたぐ通信と、ワークフローの外のセッションへの送�
 - `test/unit/webviewScript.test.ts`: クリックで `{type: 'workflowMenu'}` を送ること、`state.busy` で無効化していないこと
 - `test/unit/chatViewManager.test.ts` / `claudeChatViewManager.test.ts`: webview発のメッセージで `agent.workflows.menu` が実行され、会話へは何も送られないこと
 - `test/integration/extension.test.ts`: `package.json` の `contributes.commands` を全件登録確認する既存のテストが `agent.workflows.menu` も見る
+
+### 16.23 オーケストレーターセッション（人と話す1つのセッション）
+
+runごとに、タスクとは別のセッションを1つだけ立てる。人はこのセッションと会話することで、実行中のワークフローに対して方針転換・進捗確認・疑問点の解消・追加の指示を行う（issue未起票）。
+
+#### 位置付けと既存機能との違い
+
+これまで「オーケストレータ」と呼んできたのは `runner.ts` のプログラム制御（依存解決・並列枠・状態遷移・統合）であり、モデルではない。人がrunへ介入する手段はワークフローViewのボタン（`中断` / `タスク停止` / `再実行` / `続ける` / `承認` / `再マージ`）だけで、**「この方針は変えたい」「なぜ止まっているのか」を自然文で伝える口が無かった**。個々のタスクのチャットタブへ入って話しかけることはできるが、それはそのタスク1つを見ているだけで、run全体を見渡した判断にはならない。
+
+既存の3つと役割が重ならないことを明示しておく。
+
+- `planner.ts` の分解セッション（§16.9）は**実行前**に1回だけ動き、YAMLを作って役目を終える。実行中のrunは見ない
+- `runner.ts` は実行中のrunを完全に把握しているが、モデルではないので人の自然文を解釈しない
+- タスク間メッセージング（§16.21）は**タスク同士**の横の通信で、人は関与しない
+
+オーケストレーターセッションは、この3つの隙間にある「実行中のrun全体を見て、人と自然文で話し、必要なら実行へ手を入れる」役を担う。
+
+#### セッションの生成と寿命
+
+- `WorkflowRunner.start()` の中で、タスクを1つも起動する前に `TaskSessionHost.openTaskSession` で1つ開く。`LiveRun.orchestrator` として保持する（`LiveRun.tasks` には入れない。依存グラフのノードでもない。§16.17の衝突解決セッション（`mergeResolutions`）と同じ扱い）
+- runごとに1つ。runを跨いで共有しない。`list_tasks` と同じく、見える範囲を1つのrunに閉じるため
+- provider は `defaults.provider`。model / effort は拡張機能の既定に委ねる（タスクの `TaskSessionConfig` と同じく空文字）
+- cwd は**メインのワークスペース**。worktreeも疑似worktree（§16.20）も作らない。オーケストレーターは書かないため（次項）
+- チャットタブは背面で開く（`open({preserveFocus: true})`）。タスクの開始時と同じ扱い（§16.8）
+- **run完了後もセッションは生かす**。「なぜ失敗したのか」を聞くのは走り終えた後が多い。`dispose` はrunがliveから外れるとき（`stop` によるrun破棄・拡張機能の終了）に行う。run完了後は後述の制御ツールだけが無効になり、会話は続けられる
+
+生成に失敗した場合（CLIが起動できない等）、runは止めない。ワークフローViewの警告欄へ出して、オーケストレーター欄を「利用できません」にするだけにする。§16.21のMCPツールが見えないときと同じ方針（「見えていなければ通信なしで走らせる」）を踏襲する。
+
+#### 権限
+
+オーケストレーターにはコードを書かせない。判断と対話と実行制御に限る。
+
+- `sandbox` は `read-only`、承認は Codex なら `on-request`、Claude Code なら `manual`（読み取りのみ）へ**クランプする**（`clampSandbox` / `clampCodexApprovalMode` / `clampClaudePermissionMode`。`src/util/safetyClamp.ts`）。§16.16のクランプと同じ関数を使い、独自の判定は持たない
+- YAMLからは指定できない。ワークフロー定義に対応するフィールドを設けない（§16.21と同じ立て付け）。定義ファイルの書き手がオーケストレーターの権限を緩められると、§16.16のクランプを迂回する新しい経路になる
+- `autoApprove`（§16.7）の対象外。承認要求が出た場合は通常の承認カードで人に聞く。無人実行で自動承認したい対象はタスクであって、run全体を動かせる側ではない
+
+**書けないのに実行制御はできる**という非対称は意図したものである。ファイルを書き換える権限は個々のタスクが持ち、オーケストレーターは「どのタスクに何をさせるか」だけを動かす。両方を1つのセッションへ与えると、run全体を見渡す権限とワークスペースを書き換える権限が同じ場所に集まる。
+
+#### 送信の口（`TaskSession.send` の追加）
+
+現在の `TaskSession`（`src/orchestrator/taskSession.ts`）には `runLoop` / `pauseLoop` / `resumeLoop` / `stopLoop` / `interrupt` しか無く、**1回だけ本文を送る口が無い**。オーケストレーターは終了条件つきの繰り返しではなく「話しかけられたら1ターン返す」形なので、そのままでは動かせない。
+
+`TaskSession` に `send(text: string): void` を足す。`ChatViewManager` / `ClaudeChatViewManager` の両方が実装する（既存の呼び出しは1つも壊れない。使わなければ従来どおり）。
+
+`maxIterations: 1` の `runLoop` を発話のたびに呼ぶ案は採らない。`LoopController` の状態（`iteration` / `stopReason` / 終了条件の判定）がそのたびにリセットされ、ワークフローView・チャット画面の「ループ中」表示とも噛み合わない。ループの語彙で1発話を表現するのは意味の取り違えになる。
+
+#### 何が駆動するか
+
+モデルのセッションは入力を送らないと動かないため、駆動源を決める必要がある。**重要なイベントの通知と、人の発話の2つだけ**にする。
+
+送るイベントは次に限る。走っているタスクの逐一の状態遷移を全部流すと、run 1本でターンが数十回積み上がり、レート制限とコンテキストを食い潰す。
+
+| 契機                 | 送る内容                                           |
+| -------------------- | -------------------------------------------------- |
+| run開始              | ゴール・タスクid一覧・依存関係・並列枠の要約       |
+| タスクが `done`      | id・所要・直近の応答の1行要約                      |
+| タスクが `failed`    | id・理由（回数切れ／ターン失敗／手動停止）         |
+| `waitingApproval` へ | id・要求の1行要約（`TaskPendingApprovalSnapshot`） |
+| `blocked` へ         | id・衝突して統合できていない旨                     |
+| run終了              | 全体の結果・統合とPR/MRの結果                      |
+
+- 送信は走行中のターンへ割り込まない。ターン実行中に起きたイベントは溜めておき、**次の送信へまとめて添える**。§16.21の `composeNextPrompt` と同じ流儀にする（合流させないと、並列で3タスクが同時に終わった瞬間に3ターン連続で走る）
+- 人の発話とイベント通知が同時に溜まった場合、**人の発話を基準の本文とし、イベントはその前に添える**。§16.21の対処（`basePrompt` は常に全量温存し、削るのはメッセージ側だけ）と同じ理由で、人の指示が押し出されてはならない
+- run全体で送るイベント通知の総数に上限を置く（`MAX_ORCHESTRATOR_EVENTS_PER_RUN`。`MAX_MESSAGES_PER_RUN` と同じ500）。超えた分は落とし、落としたことを次の通知に添える
+
+定期ポーリング（N秒ごとに現状を見せて報告させる）は採らない。変化が無い間もターンを消費し続けるうえ、イベント通知があれば「変化した瞬間」に必ず届くため、ポーリングで拾える追加の情報が無い。
+
+#### 道具（MCPツール）
+
+§16.21のMCPサーバ（`messaging.ts` の `TaskMessagingHub` / `startHttpMcpTransport`）をそのまま使い、**オーケストレーター専用の接続を1本発行する**。サーバを別に立てない（runごとにポートが2つ開くことになり、§16.21で作った受信上限・トークン付きURL・送信元判別の仕組みを二重に持つことになる）。
+
+送信元の判別は既存の流儀どおり**接続で行う**（引数でタスクidを名乗らせない）。オーケストレーター用の接続にだけ、次の制御ツールを追加で見せる。タスク用の接続からは `tools/list` に現れない。**あるタスクがオーケストレーターを騙ってrunを操作することは、接続が違う以上できない。**
+
+| ツール               | 引数                          | 実体                                                 |
+| -------------------- | ----------------------------- | ---------------------------------------------------- |
+| `list_tasks`         | なし                          | 既存（`LIST_TASKS_TOOL`）                            |
+| `send_message`       | `to` / `body` / `expectReply` | 既存（`SEND_MESSAGE_TOOL`）。差出人は `orchestrator` |
+| `get_run_status`     | なし                          | `WorkflowRunner.getSnapshot` の要約                  |
+| `stop_task`          | `taskId`                      | `WorkflowRunner.stopTask`                            |
+| `retry_task`         | `taskId`                      | `WorkflowRunner.retryTask`                           |
+| `continue_task`      | `taskId`                      | `WorkflowRunner.continueTask`                        |
+| `decide_approval`    | `taskId` / `decision`         | `WorkflowRunner.decideApproval`                      |
+| `update_task_prompt` | `taskId` / `continuePrompt`   | 後述（新設）                                         |
+
+- 制御ツールは**既存のrunnerのメソッドをそのまま呼ぶ**。Viewのボタンが通るのと同じ経路にし、モデル用の別経路を作らない。状態遷移の正しさを1か所（`runState.ts`）に保つため
+- `get_run_status` が返すのは進捗の件数・タスクの状態・直近の応答の1行要約・警告欄の内容・統合の状況まで。**応答本文そのものは返さない**（`LiveTask` が本文を持たないのと同じ。§16.11）
+- **run終了時にMCPサーバごと閉じる**（§16.21のとおり、runが終われば新しいタスクは開始されないため接続は要らない）。以降オーケストレーターからは制御ツールも `list_tasks` も見えなくなり、**会話だけが続けられる**。「制御ツールだけを無効にしてサーバは残す」形は採らない。runごとのHTTPサーバがウィンドウの寿命まで開いたままになるうえ、runが終わったあとに動かせる対象がもう無いため。run終了の通知（次項の表）に「以降ツールは使えない」ことを明記して、モデルが使えないツールを呼び続けないようにする
+- `stop`（run全体の停止）はツールにしない。run全体を止めるのは人の判断に残す
+
+`update_task_prompt` が方針転換の実体になる。走行中のタスクへ「以降はこの方針でやれ」を届ける手段が、現状は `send_message`（次の指示の先頭へ添えるだけで、元の `continuePrompt` は残り続ける）しか無い。
+
+- `LiveTask` に `continuePromptOverride` を持たせ、以降の送信では `composeNextPrompt` の基準本文（`basePrompt`）にこちらを使う
+- **テンプレート変数（`{{T1.result}}`）は展開しない。リテラルとして扱う。** オーケストレーターの自由記述からテンプレート展開を起こすと、§16.4が `dependsOn` で縛っている「上流の結果が下流へ流れる」経路を、依存関係を無視して増やすことになる
+- 長さの上限は `MAX_MESSAGE_BODY_LENGTH`（4000文字）に揃える。上限超過は `send_message` と同じく**受付自体を拒否する**（モデルが短くして送り直せるため）
+- 差し替えたことは**必ずワークフローViewの警告欄へ出す**（種別 `orchestratorPromptOverride`）。人がYAMLに書いた指示が実行中に別のものへ変わるのは、Viewを見ている人から見て最も気付きにくい変化であり、黙って行ってよい種類の変更ではない
+- 差し替え後の値は「プロンプトを見る」（§16.8）にも出る。`lastSentPrompt`（§16.21）は実送信文面そのものなので、こちらは追加の対処なしで反映される
+- 権限は動かせない。`sandbox` / `approvalMode` / `autoApprove` を変えるツールは置かない（§16.16のクランプを迂回する経路になるため）
+
+#### 会話のUI
+
+§16.8のワークフローViewと、通常のチャットタブの両方に置く。
+
+- **ワークフローView**: 最上段の全体進捗の下に「オーケストレーター」欄を置く。中身は、直近の応答の1行要約・状態（応答中／待機）・1行の入力欄・`会話を開く` ボタン。短い指示や質問はViewから離れずに送れる
+- **チャットタブ**: 全文・思考の折りたたみ・承認カード・Markdown描画は通常のチャット画面がすでに持っている。オーケストレーター用に作り直さず、`会話を開く`（またはオーケストレーター欄の要約の押下）で同じ画面を前面に出す（`reveal`）
+- webview → ホスト: `{type: 'orchestratorSend', text}` / `{type: 'orchestratorReveal'}`（`workflowScript.ts` → `workflowView.ts` の `handleMessage`）
+- ホスト → webview: 既存の `state` メッセージへ `orchestrator: {available, busy, lastSummary}` を足す（差分のみ送る既存の流儀に乗せる）
+- **人が最後に見てから応答が増えていれば、オーケストレーター欄に未読の印を出す。** 疑問点の確認（オーケストレーターから人への質問）はこの経路で気付かせる。専用の `ask_user` ツールは置かない。質問は普通の応答として出せば足り、ツールにすると「返事があるまでツールの中で待つ」形になって§16.21が避けたデッドロックを持ち込む
+- 入力欄へ入れた文字列は人の入力であり、タスクの出力ではない。`wrapTaskMessage` の囲いは付けない。逆に、イベント通知に含まれるタスク由来の文字列（応答の1行要約・失敗理由）は**エージェントの出力なので囲う**（`wrapTaskMessage` / `TASK_MESSAGE_GUIDANCE` を再利用し、`stripControlCharsPreservingNewlines` を通す）
+
+#### 信頼境界
+
+- オーケストレーターの発言は信用しない。制御ツールで動かせるのは**そのrunの中だけ**で、ワークフロー定義の書き換え・設定の変更・他のrunへの干渉はできない
+- オーケストレーターのセッションid は `isTaskManagedSessionId` と同じ扱いにし、履歴一覧では通常の会話と区別する（人が明示的に開いたものではないため）
+- 会話の本文は `workspaceState` へ保存しない（§16.11・§16.21と同じ理由）。PR/MRの本文にも入れない（§16.18）
+- 作業記録（§16.12）には、`{{T1.result}}` の展開・メッセージの配送と同じ扱いで、**本文を落として**記録する（run単位で「オーケストレーターセッションを使った」ことだけが残る）
+
+#### 永続化と復元
+
+§16.11のとおり、ウィンドウをリロードするとCLIのプロセスは失われる。オーケストレーターセッションも例外ではなく、復元できるのは会話ではなく「run再実行時に新しく立て直す」ことになる。`continuePromptOverride` は `LiveTask` の他の実行時の値と同じく永続化しない（リロード後はYAMLの `continuePrompt` に戻る）。この挙動はワークフローViewの警告欄へ出す。
+
+#### 制約
+
+- runごとに1つ。複数人が別々のオーケストレーターと話す形は考えない
+- オーケストレーター自身はワークフロー定義（YAML）を書き換えない。タスクの追加・依存の変更は行えず、方針転換は既存タスクの `continuePrompt` の差し替えと `send_message` の範囲に収まる。定義そのものを変えたい場合は、人が定義ファイルを直して再実行する（§16.9の経路）
+- run終了後の制御ツールは無効。過去のrunを後から動かす経路は作らない
+
+#### 実装順序（TDD）
+
+1. `TaskSession.send` の追加（`taskSession.ts` / `chatView.ts` / `claudeChatView.ts`）
+2. `LiveRun.orchestrator` の生成・権限クランプ・寿命（`runner.ts`）
+3. イベント通知の合流と送信（`runner.ts`。合流のロジックは `messaging.ts` の `composeNextPrompt` と同じ形で分離して単体テストできるようにする）
+4. オーケストレーター専用接続と制御ツール（`messaging.ts` / `runner.ts`）
+5. `update_task_prompt` と警告欄（`runner.ts` / `runState.ts`）
+6. ワークフローViewのオーケストレーター欄（`workflowView.ts` / `workflowScript.ts` / `workflowStyles.ts`）
+
+#### 確かめ方
+
+- `test/unit/orchestratorSession.test.ts`（新規）: 権限のクランプ、イベント通知の合流（走行中は溜める・次の送信へ添える・人の発話を押し出さない）、上限超過時の間引き
+- `test/unit/workflowMessaging.test.ts`: オーケストレーター用の接続にだけ制御ツールが見えること、タスク用の接続の `tools/list` に現れないこと、引数で `orchestrator` を名乗っても無視されること
+- `test/unit/runner.test.ts`: run開始でセッションが1つ開くこと、run完了後も `dispose` されないこと、run終了後の制御ツールが理由付きで拒否されること、`update_task_prompt` が以降の送信本文を変え警告欄へ積むこと
+- `test/unit/workflowWiring.test.ts` / `webviewScript.test.ts`: `orchestratorSend` / `orchestratorReveal` の送出、`state` への `orchestrator` の反映、未読の印
+- `test/integration/workflowMessaging.test.ts`: 実transport経由で制御ツールを呼び、実際にタスクが停止・再実行されること

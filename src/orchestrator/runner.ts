@@ -35,11 +35,7 @@ import {
   type PseudoWorktreeFileSystemPort,
   type Snapshot,
 } from './pseudoWorktree';
-import {
-  composeNextPrompt,
-  TaskMessagingHub,
-  type HttpMcpTransportHandle,
-} from './messaging';
+import { composeNextPrompt, TaskMessagingHub, type HttpMcpTransportHandle } from './messaging';
 import {
   applyLoopStopReason,
   createRunState,
@@ -81,6 +77,16 @@ import {
 } from './runnerWorkingDirectory';
 import { getRunOutcome, nextTasksToStart, type RunOutcome } from './scheduler';
 import { WorkflowRunStore, type PersistedTaskState } from './runStore';
+import type { OrchestratorEvent } from './orchestratorSession';
+import {
+  buildOrchestratorControlPort,
+  disposeOrchestrator,
+  markOrchestratorRead,
+  notifyOrchestratorRunFinished,
+  sendUserMessageToOrchestrator,
+  setupOrchestratorForStart,
+  syncOrchestratorTaskEvents,
+} from './runnerOrchestrator';
 import { sanitizeForLog, stripControlChars, stripControlCharsPreservingNewlines } from './sanitize';
 import {
   buildEffectiveTaskConfig,
@@ -358,7 +364,19 @@ export interface WorkflowWarning {
      * タスク間メッセージングの待ちぼうけが解けた（design.md §16.21「待ちぼうけを検出する
      * 経路」）。`buildStalledWaitingReplyWarning`が組み立てた文言をそのまま使う。
      */
-    | 'messagingStalled';
+    | 'messagingStalled'
+    /**
+     * オーケストレーターセッション（design.md §16.23）を開始できなかった。実行は止めず、
+     * ワークフローViewのオーケストレーター欄を「利用できません」にするだけにする
+     * （§16.21の`messagingUnavailable`と同じ方針）。
+     */
+    | 'orchestratorUnavailable'
+    /**
+     * オーケストレーターが `update_task_prompt` で走行中タスクの継続指示を差し替えた
+     * （design.md §16.23「道具」）。人がYAMLに書いた指示が実行中に別のものへ変わるのは
+     * Viewを見ている人から最も気付きにくい変化なので、黙って行わず必ず警告欄へ出す。
+     */
+    | 'orchestratorPromptOverride';
   /** ワークフロー全体に関わる警告（gitignoreなど）は undefined。 */
   taskId: string | undefined;
   message: string;
@@ -476,6 +494,31 @@ export interface WorkflowRunSnapshot {
    * `undefined`（`finalMerge: pr-only`、統合PR/MRの作成に失敗、runがまだ終わっていない等）。
    */
   finalMergeOutcome?: 'merged' | 'failed' | undefined;
+  /**
+   * オーケストレーターセッション（design.md §16.23「会話のUI」）の状態。ワークフローView
+   * の「オーケストレーター」欄がこれを描く。セッションを開けなかったrun・リロードで復元した
+   * runでは`available: false`（欄は「利用できません」になる）。
+   */
+  orchestrator?: OrchestratorSnapshot | undefined;
+}
+
+/**
+ * ワークフローViewの「オーケストレーター」欄に出す値（design.md §16.23「会話のUI」）。
+ *
+ * **応答本文そのものは含めない。** 出すのは1行要約だけで、全文・承認カード・Markdown描画は
+ * `会話を開く`で前面に出す既存のチャット画面が担う（オーケストレーター用に作り直さない）。
+ */
+export interface OrchestratorSnapshot {
+  /** セッションが開けているか。`false`なら欄は「利用できません」になる。 */
+  available: boolean;
+  /** セッションを開いたプロバイダ。`available: false`なら`undefined`。 */
+  provider?: Provider | undefined;
+  /** ターンが走っている最中か（欄の状態表示「応答中」／「待機」）。 */
+  busy: boolean;
+  /** 直近の応答の1行要約。まだ応答が無ければ空文字。 */
+  lastResponseSummary: string;
+  /** 人が最後に会話を開いてから増えた応答の数（未読の印）。 */
+  unreadCount: number;
 }
 
 /**
@@ -608,6 +651,16 @@ export interface LiveTask {
    */
   lastSentPrompt: string | undefined;
   /**
+   * オーケストレーターが差し替えた継続指示（design.md §16.23 `update_task_prompt`）。
+   * 設定されている間、以降の送信では`continuePrompt`の代わりにこの本文を使う。
+   *
+   * **テンプレート変数は展開しない（リテラルとして送る）。** オーケストレーターの
+   * 自由記述から`{{T1.result}}`の展開を起こすと、§16.4が`dependsOn`で縛っている
+   * 「上流の結果が下流へ流れる」経路を依存関係を無視して増やすことになるため。
+   * `lastSentPrompt`と同じく永続化しない（リロード後はYAMLの値に戻る）。
+   */
+  continuePromptOverride: string | undefined;
+  /**
    * `waitingReply`（design.md §16.21）へ遷移した時刻（ms）。それ以外の状態では
    * `undefined`。`checkWaitingReplyStalls`の経路2（`detectTimedOutWaitingReplies`）の
    * 入力に使う。
@@ -619,6 +672,26 @@ export interface LiveTask {
    * 書き込む。作られていなければ`undefined`。
    */
   pullRequest: PullRequestResult | undefined;
+}
+
+/**
+ * オーケストレーターセッション（design.md §16.23）の実行時の状態。`LiveRun.tasks`
+ * （依存グラフのノード＝通常のタスク）とは別に、runごとに1つだけ持つ。
+ */
+export interface LiveOrchestrator {
+  session: TaskSession;
+  /** セッションを開いたプロバイダ（`pickOrchestratorProvider`が決める）。 */
+  provider: Provider;
+  /** ターンが走っている最中か。走行中はイベントを溜め、割り込まない。 */
+  busy: boolean;
+  /** まだ送っていないイベント通知。ターンが終わったらまとめて送る。 */
+  pending: OrchestratorEvent[];
+  /** run全体で送ったイベント通知の総数（`MAX_ORCHESTRATOR_EVENTS_PER_RUN`の判定用）。 */
+  eventsSent: number;
+  /** 直近の応答の1行要約（Viewのオーケストレーター欄。応答本文そのものは持たない）。 */
+  lastResponseSummary: string;
+  /** 人が最後に会話を開いてから増えた応答の数。Viewの未読の印に使う。 */
+  unreadCount: number;
 }
 
 /** `LiveTask`と同じ理由（直前のコメント参照）で`export`する（Issue #147）。 */
@@ -688,6 +761,16 @@ export interface LiveRun {
    * taskIdをキーにする（1タスクにつき同時に1件のマージしか走らない）。
    */
   mergeResolutions: Map<string, TaskSession>;
+  /**
+   * オーケストレーターセッション（design.md §16.23）。runごとに1つ。開始に失敗した場合と、
+   * リロード後に復元しただけの実行では`undefined`（会話は復元できないため。§16.11）。
+   */
+  orchestrator: LiveOrchestrator | undefined;
+  /**
+   * オーケストレーターへイベントを送った時点のタスクの状態（`syncOrchestratorTaskEvents`）。
+   * 状態が変わった瞬間だけ通知するための、前回見た値の記録。
+   */
+  orchestratorSeenStates: Map<string, TaskState>;
   /**
    * 統合PR/MRの結果（design.md §16.11・§16.18、Issue #118）。`finalizeForge`で書き込む。
    * 作られていなければ`undefined`。
@@ -805,6 +888,9 @@ export class WorkflowRunner {
    * 公開範囲は`WorkflowRunnerInternals`に閉じる（`runs`と同じ理由。上のコメント参照）。
    */
   private notify(runId: string): void {
+    // タスクの状態が変わっていればオーケストレーターへ通知する（design.md §16.23）。
+    // 状態遷移の呼び出し箇所へ個別に差し込むと漏れるため、Viewへの通知と同じ1点に集約する
+    syncOrchestratorTaskEvents(this.internals, runId);
     this.changeEmitter.fire(runId);
   }
 
@@ -1006,6 +1092,9 @@ export class WorkflowRunner {
     const hub = new TaskMessagingHub({
       listRunTasks: () => buildRunTaskSnapshots(this.internals, runId),
       onAccepted: (message) => onMessageAccepted(this.internals, runId, message),
+      // オーケストレーター専用の接続にだけ見せる制御ツール（design.md §16.23）。
+      // Viewのボタンと同じ公開メソッド（`this`）を通す
+      orchestratorControl: buildOrchestratorControlPort(this.internals, this, runId),
     });
     try {
       const transport = await messaging.startTransport(hub);
@@ -1125,6 +1214,8 @@ export class WorkflowRunner {
       pseudo,
       messaging: undefined,
       mergeResolutions: new Map(),
+      orchestrator: undefined,
+      orchestratorSeenStates: new Map(),
       integrationPullRequest: undefined,
       finalMergeOutcome: undefined,
     };
@@ -1133,6 +1224,16 @@ export class WorkflowRunner {
     if (this.deps.messaging !== undefined) {
       await this.setupMessagingForStart(runId, live, this.deps.messaging);
     }
+    // オーケストレーターセッション（design.md §16.23）。MCPサーバ（上の
+    // `setupMessagingForStart`）の後に開くのは、制御ツール用の接続URLをそこから
+    // 発行するため。失敗しても実行は止めない。
+    //
+    // **`await`しない。** CLIの起動を待つあいだタスクの開始が止まってしまい、
+    // オーケストレーターが立ち上がるまで実行が始まらない形になる（§16.21の
+    // `checkMessagingToolVisible`を投げっぱなしにしているのと同じ理由）。セッションが
+    // 用意できるまでのあいだに起きた状態変化は、`syncOrchestratorTaskEvents`が
+    // 「前回見た状態」を持たないところから始めるため、用意できた直後にまとめて届く
+    void setupOrchestratorForStart(this.internals, runId, live);
 
     await this.persist(runId);
     this.notify(runId);
@@ -1329,6 +1430,40 @@ export class WorkflowRunner {
     this.notify(runId);
     void this.persist(runId);
     return true;
+  }
+
+  /**
+   * オーケストレーターセッション（design.md §16.23）へ人の発話を送る。ワークフローViewの
+   * 入力欄から呼ぶ。セッションが無い（開始に失敗した・復元しただけの実行）場合と空文字は
+   * `false` を返し、View側は何も起きなかったことにする。
+   */
+  sendToOrchestrator(runId: string, text: string): boolean {
+    return sendUserMessageToOrchestrator(this.internals, runId, text);
+  }
+
+  /**
+   * オーケストレーターセッションのチャットタブを前面に出す（design.md §16.23「会話のUI」）。
+   * 開いた時点で未読の印を消す。
+   */
+  revealOrchestrator(runId: string): boolean {
+    const orchestrator = this.runs.get(runId)?.orchestrator;
+    if (orchestrator === undefined) {
+      return false;
+    }
+    orchestrator.session.reveal();
+    markOrchestratorRead(this.internals, runId);
+    return true;
+  }
+
+  /**
+   * 拡張機能の終了時にオーケストレーターセッションを解放する（design.md §16.23
+   * 「セッションの生成と寿命」の`dispose`）。runの終了では解放しない（run完了後も
+   * 会話を続けられるようにするため）。
+   */
+  dispose(): void {
+    for (const live of this.runs.values()) {
+      disposeOrchestrator(live);
+    }
   }
 
   /**
@@ -1689,6 +1824,10 @@ export class WorkflowRunner {
       }
       // タスク間メッセージング（design.md §16.21）のMCPサーバはrunの結果を問わず閉じる。
       // 以降新しいタスクは開始されない（`live.finished`）ため、これ以上の接続は要らない
+      // オーケストレーターへの最後の通知は、MCPサーバを閉じる前に積む（送信そのものは
+      // CLIへの本文送信なので順序に依存しないが、「以降ツールは使えない」を伝える文面と
+      // 実際の閉鎖の順序を合わせておく）
+      notifyOrchestratorRunFinished(this.internals, runId, outcome);
       if (live.messaging !== undefined) {
         void live.messaging.transport.close();
         clearInterval(live.messaging.waitingReplyPollTimer);
@@ -1804,6 +1943,7 @@ export class WorkflowRunner {
       expandedPrompt: undefined,
       expandedContinuePrompt: undefined,
       lastSentPrompt: undefined,
+      continuePromptOverride: undefined,
       waitingReplySinceMs: undefined,
       pullRequest: undefined,
     };
@@ -1830,7 +1970,13 @@ export class WorkflowRunner {
     const resultsMap = this.buildResultsMap(live, task);
     const templateNonce = this.deps.randomId?.() ?? randomUUID();
     session.setPromptTransform((text) => {
-      const expanded = expandTemplate(text, resultsMap, templateNonce);
+      // 差し替えられた継続指示があればそちらを基準の本文にする（design.md §16.23
+      // `update_task_prompt`）。**テンプレート変数は展開しない**（リテラルとして送る）。
+      // 差し替えられるのは走行中＝最初の指示を送ったあとなので、ここで区別せず
+      // 以降のすべての送信に適用してよい
+      const override = liveTask.continuePromptOverride;
+      const expanded =
+        override === undefined ? expandTemplate(text, resultsMap, templateNonce) : override;
       // 受け取ったメッセージは、次の指示の先頭へ添える（design.md §16.21「配送」）。
       // `takeDeliverableMessages`は呼ぶたびに未配送分を取り出す（配送済みとして消費する）
       // ため、送信のたびにここで取りに行く必要がある
@@ -1840,7 +1986,14 @@ export class WorkflowRunner {
       // （design.md §16.21、Issue #132「1. 権限差の警告」）。静的には検査できない
       // （送信はモデルの判断で実行時に起きる）ため、実際に配送するこの時点でのみ判定できる
       if (delivered.length > 0) {
-        checkMessagingPermissionEscalation(this.internals, live, task, taskId, effective, delivered);
+        checkMessagingPermissionEscalation(
+          this.internals,
+          live,
+          task,
+          taskId,
+          effective,
+          delivered,
+        );
       }
       const composed = composeNextPrompt(expanded, delivered);
       // Viewで実際に送った文面を確認できるようにする（design.md §16.21、Issue #132
@@ -2451,7 +2604,8 @@ export class WorkflowRunner {
         // design.md §16.11「統合PR/MRの番号」・Issue #118。同じく前回persistした値を引き継ぐ
         integrationPullRequestNumber:
           live.integrationPullRequest?.number ?? current?.integrationPullRequestNumber,
-        integrationPullRequestUrl: live.integrationPullRequest?.url ?? current?.integrationPullRequestUrl,
+        integrationPullRequestUrl:
+          live.integrationPullRequest?.url ?? current?.integrationPullRequestUrl,
         finalMergeOutcome: live.finalMergeOutcome ?? current?.finalMergeOutcome,
       };
     });

@@ -102,6 +102,11 @@ class FakePlannerSession implements TaskSession {
 
   constructor(private readonly responseText: string) {}
 
+  /** `TaskSession.send`（design.md §16.23）。この経路では使わない。 */
+  sentTexts: string[] = [];
+  send(text: string): void {
+    this.sentTexts.push(text);
+  }
   runLoop(plan: LoopPlan): void {
     this.runLoopCalls.push(plan);
     // フェイクなのでCLIは起動しない。登録済みのリスナーへ即座に1ターン分の応答を返す

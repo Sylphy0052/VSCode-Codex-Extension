@@ -198,7 +198,18 @@ describe('isTaskManagedThreadの結線（design.md §16.10の7、レビュー指
     const result = await before.runner.start('/repo/.agents/workflows/w.yaml', '/repo');
     expect(result.ok).toBe(true);
     await flush();
-    before.connection.resolveFirst('thread/start', { thread: { id: 'thread-task' } });
+    // オーケストレーターセッション（design.md §16.23）ぶんの`thread/start`も同時に出るため、
+    // 「最初の1件」ではなく作業ディレクトリで見分けて解決する（オーケストレーターは
+    // ワークスペース直下、タスクはworktree配下）
+    for (const request of before.connection.requests.filter((r) => r.method === 'thread/start')) {
+      const cwd = (request.params as { cwd?: string } | undefined)?.cwd ?? '';
+      before.connection.resolve(
+        request.id,
+        cwd === '/repo'
+          ? { thread: { id: 'thread-orchestrator' } }
+          : { thread: { id: 'thread-task' } },
+      );
+    }
     await flush();
 
     // 実際にタスクのセッションが開始されている（前提の確認）
