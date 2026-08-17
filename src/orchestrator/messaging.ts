@@ -956,7 +956,10 @@ export class MessagingMcpServer {
     }
 
     const target = str(args['taskId']);
-    const result = ((): OrchestratorControlResult => {
+    // `default`は「未知のツール」で閉じる。`ORCHESTRATOR_CONTROL_TOOLS`へツールを足したのに
+    // ここへcaseを書き忘れたとき、いずれかの既存ツール（特に走行中タスクの継続指示を
+    // 差し替える`update_task_prompt`）として黙って実行されるのを防ぐ
+    const result = ((): OrchestratorControlResult | undefined => {
       switch (name) {
         case STOP_TASK_TOOL.name:
           return control.stopTask(target);
@@ -966,10 +969,15 @@ export class MessagingMcpServer {
           return control.continueTask(target);
         case DECIDE_APPROVAL_TOOL.name:
           return control.decideApproval(target, str(args['decision']));
-        default:
+        case UPDATE_TASK_PROMPT_TOOL.name:
           return control.updateTaskPrompt(target, str(args['continuePrompt']));
+        default:
+          return undefined;
       }
     })();
+    if (result === undefined) {
+      return failure(request.id, -32602, `未知のツールです: ${name}`);
+    }
     return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
   }
 }
