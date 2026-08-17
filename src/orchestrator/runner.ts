@@ -79,6 +79,7 @@ import { getRunOutcome, nextTasksToStart, type RunOutcome } from './scheduler';
 import { WorkflowRunStore, type PersistedTaskState } from './runStore';
 import type { OrchestratorEvent } from './orchestratorSession';
 import {
+  buildOrchestratorControlPort,
   disposeOrchestrator,
   markOrchestratorRead,
   notifyOrchestratorRunFinished,
@@ -625,6 +626,16 @@ export interface LiveTask {
    */
   lastSentPrompt: string | undefined;
   /**
+   * オーケストレーターが差し替えた継続指示（design.md §16.23 `update_task_prompt`）。
+   * 設定されている間、以降の送信では`continuePrompt`の代わりにこの本文を使う。
+   *
+   * **テンプレート変数は展開しない（リテラルとして送る）。** オーケストレーターの
+   * 自由記述から`{{T1.result}}`の展開を起こすと、§16.4が`dependsOn`で縛っている
+   * 「上流の結果が下流へ流れる」経路を依存関係を無視して増やすことになるため。
+   * `lastSentPrompt`と同じく永続化しない（リロード後はYAMLの値に戻る）。
+   */
+  continuePromptOverride: string | undefined;
+  /**
    * `waitingReply`（design.md §16.21）へ遷移した時刻（ms）。それ以外の状態では
    * `undefined`。`checkWaitingReplyStalls`の経路2（`detectTimedOutWaitingReplies`）の
    * 入力に使う。
@@ -1056,6 +1067,9 @@ export class WorkflowRunner {
     const hub = new TaskMessagingHub({
       listRunTasks: () => buildRunTaskSnapshots(this.internals, runId),
       onAccepted: (message) => onMessageAccepted(this.internals, runId, message),
+      // オーケストレーター専用の接続にだけ見せる制御ツール（design.md §16.23）。
+      // Viewのボタンと同じ公開メソッド（`this`）を通す
+      orchestratorControl: buildOrchestratorControlPort(this.internals, this, runId),
     });
     try {
       const transport = await messaging.startTransport(hub);
@@ -1904,6 +1918,7 @@ export class WorkflowRunner {
       expandedPrompt: undefined,
       expandedContinuePrompt: undefined,
       lastSentPrompt: undefined,
+      continuePromptOverride: undefined,
       waitingReplySinceMs: undefined,
       pullRequest: undefined,
     };
@@ -1930,7 +1945,13 @@ export class WorkflowRunner {
     const resultsMap = this.buildResultsMap(live, task);
     const templateNonce = this.deps.randomId?.() ?? randomUUID();
     session.setPromptTransform((text) => {
-      const expanded = expandTemplate(text, resultsMap, templateNonce);
+      // 差し替えられた継続指示があればそちらを基準の本文にする（design.md §16.23
+      // `update_task_prompt`）。**テンプレート変数は展開しない**（リテラルとして送る）。
+      // 差し替えられるのは走行中＝最初の指示を送ったあとなので、ここで区別せず
+      // 以降のすべての送信に適用してよい
+      const override = liveTask.continuePromptOverride;
+      const expanded =
+        override === undefined ? expandTemplate(text, resultsMap, templateNonce) : override;
       // 受け取ったメッセージは、次の指示の先頭へ添える（design.md §16.21「配送」）。
       // `takeDeliverableMessages`は呼ぶたびに未配送分を取り出す（配送済みとして消費する）
       // ため、送信のたびにここで取りに行く必要がある

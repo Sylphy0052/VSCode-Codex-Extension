@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import * as http from 'node:http';
 
+import { ORCHESTRATOR_CONNECTION_ID } from './orchestratorSession';
 import type { TaskState } from './runState';
 import { escapeAngleBrackets, stripControlCharsPreservingNewlines } from './sanitize';
 import { truncateByCodePoint } from './workflow';
@@ -531,6 +532,128 @@ export const SEND_MESSAGE_TOOL: McpToolDefinition = {
   },
 };
 
+/* ------------------------------------------------------------------------ *
+ * オーケストレーター専用の制御ツール（design.md §16.23「道具」）
+ * ------------------------------------------------------------------------ */
+
+/**
+ * 制御ツールの実体（`WorkflowRunner`の公開メソッド）へ橋渡しする口。
+ *
+ * ここに置くのは「runを1本指定した後の操作」だけで、run全体の停止（`stop`）は含めない
+ * （design.md §16.23「`stop`（run全体の停止）はツールにしない」）。実体は既存の
+ * runnerのメソッドをそのまま呼び、モデル用の別経路を作らない（状態遷移の正しさを
+ * `runState.ts` 1か所に保つため）。
+ */
+export interface OrchestratorControlPort {
+  /** 進捗の要約。応答本文そのものは含めない（design.md §16.11・§16.23）。 */
+  getRunStatus(): unknown;
+  stopTask(taskId: string): OrchestratorControlResult;
+  retryTask(taskId: string): OrchestratorControlResult;
+  continueTask(taskId: string): OrchestratorControlResult;
+  decideApproval(taskId: string, decision: string): OrchestratorControlResult;
+  updateTaskPrompt(taskId: string, continuePrompt: string): OrchestratorControlResult;
+}
+
+/** 制御ツールの結果。`send_message` と同じく「受け付けたかどうかと、その理由」を返す。 */
+export interface OrchestratorControlResult {
+  accepted: boolean;
+  reason: string;
+}
+
+const TASK_ID_ARG = { type: 'string', description: '対象タスクのid' } as const;
+
+export const GET_RUN_STATUS_TOOL: McpToolDefinition = {
+  name: 'get_run_status',
+  description:
+    'この実行の状況（タスクの状態・警告・統合の状況）を読む。応答の本文そのものは含まれず、' +
+    '直近の応答の1行要約だけが入る。',
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+};
+
+export const STOP_TASK_TOOL: McpToolDefinition = {
+  name: 'stop_task',
+  description: '走行中のタスクのループを止める（ワークフローViewの「タスク停止」と同じ）。',
+  inputSchema: {
+    type: 'object',
+    properties: { taskId: TASK_ID_ARG },
+    required: ['taskId'],
+    additionalProperties: false,
+  },
+};
+
+export const RETRY_TASK_TOOL: McpToolDefinition = {
+  name: 'retry_task',
+  description: '失敗・停止したタスクを新しいセッションでやり直す（Viewの「再実行」と同じ）。',
+  inputSchema: {
+    type: 'object',
+    properties: { taskId: TASK_ID_ARG },
+    required: ['taskId'],
+    additionalProperties: false,
+  },
+};
+
+export const CONTINUE_TASK_TOOL: McpToolDefinition = {
+  name: 'continue_task',
+  description: '止まっているタスクを同じセッションのまま続きから走らせる（Viewの「続ける」と同じ）。',
+  inputSchema: {
+    type: 'object',
+    properties: { taskId: TASK_ID_ARG },
+    required: ['taskId'],
+    additionalProperties: false,
+  },
+};
+
+export const DECIDE_APPROVAL_TOOL: McpToolDefinition = {
+  name: 'decide_approval',
+  description: '承認待ちのタスクの承認要求に答える。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      taskId: TASK_ID_ARG,
+      decision: {
+        type: 'string',
+        description: "承認するなら 'accept'、拒否するなら 'decline'",
+      },
+    },
+    required: ['taskId', 'decision'],
+    additionalProperties: false,
+  },
+};
+
+export const UPDATE_TASK_PROMPT_TOOL: McpToolDefinition = {
+  name: 'update_task_prompt',
+  description:
+    '走行中のタスクへ以降送る指示（continuePrompt）を差し替える（方針転換）。' +
+    'テンプレート変数（{{T1.result}}）は展開されず、そのままの文字列として送られる。' +
+    `本文の上限は${MAX_MESSAGE_BODY_LENGTH}文字。`,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      taskId: TASK_ID_ARG,
+      continuePrompt: { type: 'string', description: '以降のターンで送る指示の本文' },
+    },
+    required: ['taskId', 'continuePrompt'],
+    additionalProperties: false,
+  },
+};
+
+/**
+ * オーケストレーター用の接続にだけ見せるツール（design.md §16.23）。
+ * タスク用の接続の `tools/list` には現れず、呼んでも「未知のツール」として拒否される。
+ */
+export const ORCHESTRATOR_CONTROL_TOOLS: readonly McpToolDefinition[] = [
+  GET_RUN_STATUS_TOOL,
+  STOP_TASK_TOOL,
+  RETRY_TASK_TOOL,
+  CONTINUE_TASK_TOOL,
+  DECIDE_APPROVAL_TOOL,
+  UPDATE_TASK_PROMPT_TOOL,
+];
+
+const ORCHESTRATOR_CONTROL_TOOL_NAMES: ReadonlySet<string> = new Set(
+  ORCHESTRATOR_CONTROL_TOOLS.map((t) => t.name),
+);
+
 /**
  * MCPのツール呼び出し結果の最小形（`content` に1件のテキストを持つ）。
  * SDKの型を使わずここで自前定義する（後述の「依存を追加しない」判断）。
@@ -606,6 +729,12 @@ export interface TaskMessagingHubDeps {
    * 自体は状態遷移を持たないため、遷移の実行はこの通知を受け取った側（実行層）の責務にする。
    */
   onAccepted?: (message: StoredMessage) => void;
+  /**
+   * オーケストレーター専用の接続（`ORCHESTRATOR_CONNECTION_ID`）にだけ見せる制御ツールの
+   * 実体（design.md §16.23「道具」）。**省略可能**（省略時は制御ツールが一切現れず、
+   * §16.21のタスク間メッセージングだけが動く）。
+   */
+  orchestratorControl?: OrchestratorControlPort;
 }
 
 /**
@@ -623,6 +752,14 @@ export class TaskMessagingHub {
 
   listTasks(): ListTasksEntry[] {
     return buildListTasksResult(this.deps.listRunTasks());
+  }
+
+  /**
+   * オーケストレーター専用の制御ツールの実体（無ければ `undefined`）。
+   * `MessagingMcpServer` がオーケストレーターの接続を判別したときにだけ使う。
+   */
+  get orchestratorControl(): OrchestratorControlPort | undefined {
+    return this.deps.orchestratorControl;
   }
 
   /**
@@ -744,12 +881,32 @@ export class MessagingMcpServer {
       case 'initialize':
         return success(request.id, SERVER_INFO_RESULT);
       case 'tools/list':
-        return success(request.id, { tools: [LIST_TASKS_TOOL, SEND_MESSAGE_TOOL] });
+        return success(request.id, { tools: this.visibleTools(taskId) });
       case 'tools/call':
         return this.handleToolCall(taskId, request);
       default:
         return failure(request.id, -32601, `未知のメソッドです: ${request.method}`);
     }
+  }
+
+  /**
+   * この接続から見えるツール。制御ツールはオーケストレーターの接続にだけ足す
+   * （design.md §16.23）。ここも `connection.taskId` だけで判断し、引数は見ない。
+   */
+  private visibleTools(taskId: string): McpToolDefinition[] {
+    const base = [LIST_TASKS_TOOL, SEND_MESSAGE_TOOL];
+    return this.controlFor(taskId) === undefined ? base : [...base, ...ORCHESTRATOR_CONTROL_TOOLS];
+  }
+
+  /**
+   * 制御ツールの実体を返す。オーケストレーターの接続でなければ `undefined`。
+   *
+   * **タスクが `-orchestrator-` を名乗ることはできない。** この値は接続の発行時
+   * （`registerTask`）に決まり、`TASK_ID_PATTERN` に反する文字列なので同じidのタスクを
+   * ワークフロー定義に書くこともできない（`ORCHESTRATOR_CONNECTION_ID` のJSDoc参照）。
+   */
+  private controlFor(taskId: string): OrchestratorControlPort | undefined {
+    return taskId === ORCHESTRATOR_CONNECTION_ID ? this.hub.orchestratorControl : undefined;
   }
 
   private handleToolCall(taskId: string, request: JsonRpcRequest): JsonRpcResponse {
@@ -771,7 +928,49 @@ export class MessagingMcpServer {
       return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
     }
 
+    if (ORCHESTRATOR_CONTROL_TOOL_NAMES.has(name)) {
+      return this.handleControlToolCall(taskId, request, name, args);
+    }
+
     return failure(request.id, -32602, `未知のツールです: ${name}`);
+  }
+
+  /**
+   * 制御ツール（design.md §16.23）の呼び出し。オーケストレーターの接続でなければ、
+   * ツール名を知っていても「未知のツール」として拒否する（`tools/list` に出さないだけでは
+   * 名前を推測して呼ばれる余地が残るため、実行側でも同じ条件で弾く）。
+   */
+  private handleControlToolCall(
+    taskId: string,
+    request: JsonRpcRequest,
+    name: string,
+    args: Record<string, unknown>,
+  ): JsonRpcResponse {
+    const control = this.controlFor(taskId);
+    if (control === undefined) {
+      return failure(request.id, -32602, `未知のツールです: ${name}`);
+    }
+
+    if (name === GET_RUN_STATUS_TOOL.name) {
+      return success(request.id, toolTextResult(JSON.stringify(control.getRunStatus())));
+    }
+
+    const target = str(args['taskId']);
+    const result = ((): OrchestratorControlResult => {
+      switch (name) {
+        case STOP_TASK_TOOL.name:
+          return control.stopTask(target);
+        case RETRY_TASK_TOOL.name:
+          return control.retryTask(target);
+        case CONTINUE_TASK_TOOL.name:
+          return control.continueTask(target);
+        case DECIDE_APPROVAL_TOOL.name:
+          return control.decideApproval(target, str(args['decision']));
+        default:
+          return control.updateTaskPrompt(target, str(args['continuePrompt']));
+      }
+    })();
+    return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
   }
 }
 

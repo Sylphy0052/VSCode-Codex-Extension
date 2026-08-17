@@ -31,7 +31,11 @@ import type {
   PseudoWorktreeFileStat,
   PseudoWorktreeFileSystemPort,
 } from '../../src/orchestrator/pseudoWorktree';
-import type { HttpMcpTransportHandle, TaskMessagingHub } from '../../src/orchestrator/messaging';
+import type {
+  HttpMcpTransportHandle,
+  OrchestratorControlPort,
+  TaskMessagingHub,
+} from '../../src/orchestrator/messaging';
 import {
   WorkflowRunStore,
   type PersistedRun,
@@ -4716,5 +4720,198 @@ tasks:
     const snapshot = runner.getSnapshot(runId);
     expect(snapshot?.warnings.some((w) => w.kind === 'orchestratorUnavailable')).toBe(true);
     expect(runner.sendToOrchestrator(runId, 'x')).toBe(false);
+  });
+});
+describe("WorkflowRunner: オーケストレーターの制御ツール（design.md §16.23「道具」）", () => {
+  const TWO_TASK_YAML = `
+version: 1
+name: control-test
+defaults:
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    continuePrompt: c1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+
+  /** 制御ツールの実体（オーケストレーター専用接続に見せているもの）を取り出す。 */
+  function control(state: FakeMessagingState): OrchestratorControlPort {
+    const port = state.hub?.orchestratorControl;
+    if (port === undefined) {
+      throw new Error("制御ツールが配線されていません");
+    }
+    return port;
+  }
+
+  it("get_run_statusはタスクの状態と警告を返し、プロンプトの全文は含めない", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await flush();
+    codexHost.byTaskId("T1");
+
+    const status = control(state).getRunStatus() as {
+      name: string;
+      tasks: { id: string; state: string }[];
+      warnings: unknown[];
+      integration: Record<string, unknown>;
+    };
+
+    expect(status.name).toBe("control-test");
+    expect(status.tasks.map((t) => t.id).sort()).toEqual(["T1", "T2"]);
+    expect(status.tasks.every((t) => t.state === "running")).toBe(true);
+    expect(JSON.stringify(status)).not.toContain("p1");
+    expect(status.integration).toBeDefined();
+  });
+
+  it("stop_taskは走行中タスクのループを止め、存在しないidは理由付きで拒否する", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await flush();
+
+    const accepted = control(state).stopTask("T1");
+    const rejected = control(state).stopTask("T9");
+
+    expect(accepted.accepted).toBe(true);
+    expect(codexHost.byTaskId("T1").stopLoopCount).toBe(1);
+    expect(rejected.accepted).toBe(false);
+    expect(rejected.reason).toContain("T9");
+  });
+
+  it("continue_taskは止まっているタスクを続きから走らせる", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    const result = await runner.start(
+      "/repo/.agents/workflows/control.yaml",
+      "/repo",
+    );
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId("T1");
+    // `continueTask`が受け付けるのは`failed`かつ`failure.kind === 'maxReached'`だけ
+    // （`runState.ts`の`continueTask`）。送信回数を使い切った状態を作る
+    t1.finish("maxReached", { ...initialChatState });
+    await flush();
+
+    const before = t1.runLoopCalls.length;
+    const outcome = control(state).continueTask("T1");
+
+    expect(outcome.accepted).toBe(true);
+    expect(t1.runLoopCalls.length).toBe(before + 1);
+    expect(
+      runner.getSnapshot(runId)?.tasks.find((t) => t.id === "T1")?.state,
+    ).toBe("running");
+  });
+
+  it("decide_approvalはacceptとdeclineだけを受け付ける（セッション全体への承認は選べない）", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await flush();
+
+    const t1 = codexHost.byTaskId("T1");
+    void t1.requestApproval({
+      requestId: 7,
+      kind: "execCommand",
+      title: "rm -rf",
+      detail: "",
+      itemId: "item-1",
+    });
+    await flush();
+
+    const widened = control(state).decideApproval("T1", "acceptForSession");
+    const accepted = control(state).decideApproval("T1", "accept");
+
+    expect(widened.accepted).toBe(false);
+    expect(accepted.accepted).toBe(true);
+    expect(t1.decideApprovalCalls).toEqual([
+      { requestId: 7, decision: "accept" },
+    ]);
+  });
+
+  it("update_task_promptは以降の送信本文を差し替え、警告欄へ出す", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    const result = await runner.start(
+      "/repo/.agents/workflows/control.yaml",
+      "/repo",
+    );
+    const runId = result.runId as string;
+    await flush();
+
+    const outcome = control(state).updateTaskPrompt(
+      "T1",
+      "これからは設計だけをやること",
+    );
+
+    expect(outcome.accepted).toBe(true);
+    const t1 = codexHost.byTaskId("T1");
+    expect(t1.promptTransform?.("c1")).toBe("これからは設計だけをやること");
+    const warning = runner
+      .getSnapshot(runId)
+      ?.warnings.find((w) => w.kind === "orchestratorPromptOverride");
+    expect(warning?.taskId).toBe("T1");
+    expect(warning?.message).toContain("これからは設計だけをやること");
+  });
+
+  it("update_task_promptはテンプレート変数を展開しない（リテラルとして送る）", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await flush();
+
+    control(state).updateTaskPrompt("T2", "T1の結果は {{T1.result}} を見よ");
+
+    expect(codexHost.byTaskId("T2").promptTransform?.("c2")).toBe(
+      "T1の結果は {{T1.result}} を見よ",
+    );
+  });
+
+  it("update_task_promptは上限超過と空文字を受付自体で拒否する", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await flush();
+
+    const tooLong = control(state).updateTaskPrompt("T1", "あ".repeat(4001));
+    const empty = control(state).updateTaskPrompt("T1", "   ");
+
+    expect(tooLong.accepted).toBe(false);
+    expect(tooLong.reason).toContain("4000");
+    expect(empty.accepted).toBe(false);
+    // 拒否されたので差し替わっていない
+    expect(codexHost.byTaskId("T1").promptTransform?.("c1")).toBe("c1");
+  });
+
+  it("セッションが無いタスク（開始前・終了後）の差し替えは拒否する", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await flush();
+
+    const outcome = control(state).updateTaskPrompt("T9", "方針転換");
+
+    expect(outcome.accepted).toBe(false);
+    expect(outcome.reason).toContain("T9");
   });
 });

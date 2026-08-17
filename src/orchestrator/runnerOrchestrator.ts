@@ -1,4 +1,10 @@
+import type { ApprovalDecision } from '../appserver/approvals';
 import type { ChatState } from '../appserver/chatState';
+import {
+  MAX_MESSAGE_BODY_LENGTH,
+  type OrchestratorControlPort,
+  type OrchestratorControlResult,
+} from './messaging';
 import {
   buildOrchestratorConfig,
   composeOrchestratorPrompt,
@@ -7,11 +13,12 @@ import {
   pickOrchestratorProvider,
   type OrchestratorEvent,
 } from './orchestratorSession';
-import { sanitizeForLog } from './sanitize';
+import { sanitizeForLog, stripControlChars } from './sanitize';
 import { buildResponseSummary } from './taskSummary';
 import type { TaskState } from './runState';
-import type { LiveOrchestrator, LiveRun } from './runner';
+import type { LiveOrchestrator, LiveRun, RetryTaskResult, WorkflowRunSnapshot } from './runner';
 import type { WorkflowRunnerInternals } from './runnerInternals';
+import { truncateByCodePoint } from './workflow';
 
 /**
  * オーケストレーターセッション（design.md §16.23）の配線を集めたモジュール。
@@ -44,6 +51,171 @@ function buildIntroBody(live: LiveRun): string {
     `タスク（${live.def.tasks.length}件、並列上限 ${live.def.maxParallel}）:`,
     tasks,
   ].join('\n');
+}
+
+/* ------------------------------------------------------------------------ *
+ * 制御ツール（design.md §16.23「道具」）
+ * ------------------------------------------------------------------------ */
+
+/**
+ * 制御ツールが呼ぶ `WorkflowRunner` の公開メソッド。
+ *
+ * `WorkflowRunnerInternals`（内部の可変状態と状態遷移の入口）ではなく、Viewのボタンが
+ * 通るのと同じ公開メソッドを受け取る。モデル用の別経路を作らないための制約で、
+ * `WorkflowRunner` がそのまま構造的に満たす（キャストしないので、ずれれば `tsc` が止める）。
+ */
+export interface OrchestratorControlActions {
+  getSnapshot(runId: string): WorkflowRunSnapshot | undefined;
+  stopTask(runId: string, taskId: string): void;
+  retryTask(runId: string, taskId: string, options?: { allowConfirmed?: boolean }): RetryTaskResult;
+  continueTask(runId: string, taskId: string): boolean;
+  decideApproval(runId: string, taskId: string, decision: ApprovalDecision): boolean;
+}
+
+/** 差し替えた継続指示のうち、警告欄へ出す先頭部分の長さ。 */
+const PROMPT_OVERRIDE_PREVIEW_LENGTH = 200;
+
+const ok = (reason: string): OrchestratorControlResult => ({ accepted: true, reason });
+const no = (reason: string): OrchestratorControlResult => ({ accepted: false, reason });
+
+/**
+ * オーケストレーター専用の接続に見せる制御ツールの実体を組み立てる（design.md §16.23）。
+ *
+ * runを1本に固定した口を返す。オーケストレーターは自分のrun以外を指定できない
+ * （`runId` を引数に取るツールを置かない）。
+ */
+export function buildOrchestratorControlPort(
+  self: WorkflowRunnerInternals,
+  actions: OrchestratorControlActions,
+  runId: string,
+): OrchestratorControlPort {
+  return {
+    getRunStatus: () => buildRunStatus(actions, runId),
+    stopTask: (taskId) => {
+      const state = self.runs.get(runId)?.runState.tasks.get(taskId)?.state;
+      if (state === undefined) {
+        return no(`タスクが見つかりません: ${taskId}`);
+      }
+      actions.stopTask(runId, taskId);
+      return ok(`${taskId} のループを止めました（状態: ${state}）。`);
+    },
+    retryTask: (taskId) => {
+      // `allow`（design.md §16.7）を含むタスクの再実行は人の確認が要る。オーケストレーターに
+      // `allowConfirmed: true` を名乗らせない（確認の意味が無くなるため）
+      const result = actions.retryTask(runId, taskId);
+      if (result.needsAllowConfirmation === true) {
+        return no(
+          `${taskId} は allow を含むため、人がワークフローViewで確認してから再実行します。`,
+        );
+      }
+      return result.ok
+        ? ok(`${taskId} を新しいセッションでやり直しています。`)
+        : no(`${taskId} は再実行できる状態ではありません。`);
+    },
+    continueTask: (taskId) =>
+      actions.continueTask(runId, taskId)
+        ? ok(`${taskId} を続きから走らせています。`)
+        : no(`${taskId} は続きから走らせられる状態ではありません。`),
+    decideApproval: (taskId, decision) => {
+      // 承認をセッション全体へ広げる `acceptForSession` は選ばせない（1件ずつの判断に限る）
+      if (decision !== 'accept' && decision !== 'decline') {
+        return no(`decision は 'accept' か 'decline' のどちらかです: ${decision}`);
+      }
+      return actions.decideApproval(runId, taskId, decision)
+        ? ok(`${taskId} の承認要求に ${decision} で答えました。`)
+        : no(`${taskId} に承認待ちの要求はありません。`);
+    },
+    updateTaskPrompt: (taskId, continuePrompt) =>
+      updateTaskPrompt(self, runId, taskId, continuePrompt),
+  };
+}
+
+/**
+ * `get_run_status` が返す要約（design.md §16.23）。
+ *
+ * **応答本文・プロンプトの全文は含めない。** `TaskSnapshot` には `expandedPrompt` /
+ * `lastSentPrompt`（実際に送った文面）が入っているが、ここでは写さない。`LiveTask` が
+ * 応答本文を持たないのと同じ理由（§16.11）に加え、他タスクへ渡ったメッセージの中身が
+ * オーケストレーター経由で読めてしまうのを避けるため。
+ */
+function buildRunStatus(actions: OrchestratorControlActions, runId: string): unknown {
+  const snapshot = actions.getSnapshot(runId);
+  if (snapshot === undefined) {
+    return { error: '実行が見つかりません（すでに破棄されています）。' };
+  }
+  return {
+    runId: snapshot.runId,
+    name: snapshot.name,
+    outcome: snapshot.outcome,
+    haltedByUser: snapshot.haltedByUser,
+    tasks: snapshot.tasks.map((t) => ({
+      id: t.id,
+      state: t.state,
+      dependsOn: t.dependsOn,
+      provider: t.provider,
+      retryCount: t.retryCount,
+      submissionCount: t.submissionCount,
+      lastResponseSummary: t.lastResponseSummary,
+      failure: t.failure,
+      pendingApproval: t.pendingApproval?.title,
+      branch: t.branch,
+    })),
+    warnings: snapshot.warnings.map((w) => ({
+      kind: w.kind,
+      taskId: w.taskId,
+      message: w.message,
+    })),
+    integration: {
+      branch: snapshot.integrationBranch,
+      pullRequestNumber: snapshot.integrationPullRequestNumber,
+      pullRequestUrl: snapshot.integrationPullRequestUrl,
+      finalMergeOutcome: snapshot.finalMergeOutcome,
+    },
+  };
+}
+
+/**
+ * 走行中のタスクの継続指示を差し替える（design.md §16.23 `update_task_prompt`）。
+ *
+ * 上限超過は`send_message`と同じく**受付自体を拒否する**（モデルが短くして送り直せる）。
+ * 差し替えは必ずワークフローViewの警告欄へ出す。人がYAMLに書いた指示が実行中に別のものへ
+ * 変わるのは、Viewを見ている人から見て最も気付きにくい変化であるため。
+ */
+function updateTaskPrompt(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  taskId: string,
+  continuePrompt: string,
+): OrchestratorControlResult {
+  const live = self.runs.get(runId);
+  const liveTask = live?.tasks.get(taskId);
+  if (live === undefined || liveTask === undefined) {
+    return no(`タスクのセッションがありません（開始前・終了後は差し替えられません）: ${taskId}`);
+  }
+  if (continuePrompt.trim() === '') {
+    return no('継続指示が空です。');
+  }
+  if (continuePrompt.length > MAX_MESSAGE_BODY_LENGTH) {
+    return no(
+      `継続指示が長すぎます（上限${MAX_MESSAGE_BODY_LENGTH}文字）: ${continuePrompt.length}文字`,
+    );
+  }
+
+  liveTask.continuePromptOverride = continuePrompt;
+  const preview = truncateByCodePoint(
+    stripControlChars(continuePrompt),
+    PROMPT_OVERRIDE_PREVIEW_LENGTH,
+  );
+  live.warnings.push({
+    kind: 'orchestratorPromptOverride',
+    taskId,
+    message:
+      `${taskId} の継続指示をオーケストレーターが差し替えました（以降のターンはこの本文を送ります。` +
+      `テンプレート変数は展開しません。ウィンドウのリロード後は定義ファイルの値に戻ります）: ` +
+      `${preview.text}${preview.truncated ? '…' : ''}`,
+  });
+  self.notify(runId);
+  return ok(`${taskId} の継続指示を差し替えました。`);
 }
 
 /**
