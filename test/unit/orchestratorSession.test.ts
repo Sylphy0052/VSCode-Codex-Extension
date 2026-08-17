@@ -27,6 +27,7 @@ function definition(providers: readonly ('codex' | 'claude')[]): WorkflowDefinit
     tasks: providers.map((provider, i) => ({
       id: `T${i + 1}`,
       provider,
+      type: 'chore' as const,
       prompt: 'p',
       continuePrompt: 'c',
       done: '',
