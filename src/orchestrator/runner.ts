@@ -13,6 +13,8 @@ import {
   createIntegrationPullRequest,
   buildIntegrationPullRequestBody,
   buildIntegrationPullRequestTitle,
+  markPullRequestReady,
+  parsePullRequestNumberFromUrl,
   resolveForgeHost,
   runFinalMerge,
   shouldCreateIntegrationPullRequest,
@@ -94,9 +96,11 @@ import type {
 } from './taskSession';
 import {
   checkWorktreesGitignored,
+  DEFAULT_BRANCH_NAMING,
   isGitWorkingTree,
   resolveHeadCommit,
   WorktreeCreationQueue,
+  type BranchNaming,
   type GitCommandRunner,
   type WorktreeFileSystemPort,
 } from './worktree';
@@ -168,13 +172,21 @@ export interface WorkflowRunnerForgeDeps {
   cliAvailability: CliAvailabilityPort;
   fs: ForgeFileSystemPort;
   /**
-   * 設定 `agent.workflows.forge` / `.pullRequest` / `.finalMerge`。実行開始時に一度だけ
-   * 読み直す（`readBaseline` と同じく使い捨てのオブジェクトではなく関数で渡す）。
+   * 設定 `agent.workflows.forge` / `.pullRequest` / `.finalMerge` / `.branchNaming` /
+   * `.draftPullRequest`。実行開始時に一度だけ読み直す（`readBaseline` と同じく使い捨ての
+   * オブジェクトではなく関数で渡す）。
+   *
+   * `branchNaming` / `draftPullRequest` はPR/MR作成そのものとは別の関心事（前者はブランチ名の
+   * 形、後者はDraft/ready化）だが、設定を`runner.ts`まで運ぶ経路を新設せず、既存の
+   * `host`/`pullRequest`/`finalMerge`と同じ「実行開始時に一度読む」経路（`resolveForgeState`・
+   * `resolveBranchNamingAndDraft`）へ相乗りさせてある。
    */
   readConfig: () => {
     host: ForgeHostConfig;
     pullRequest: PullRequestLayerConfig;
     finalMerge: FinalMergeConfig;
+    branchNaming: BranchNaming;
+    draftPullRequest: boolean;
   };
 }
 
@@ -489,6 +501,29 @@ export type LiveRunForgeState =
     };
 
 /**
+ * タスクブランチの命名方式（design.md §16.6）とDraft PR/MR（design.md §16.18）の設定を読む。
+ *
+ * `deps.forge`（`WorkflowRunnerForgeDeps`）が渡されていなければ（テスト等で`forge`を
+ * 省略している既存の呼び出し元）、`branchNaming`は`DEFAULT_BRANCH_NAMING`（`wf`）、
+ * `draftPullRequest`は`false`という、これまでの挙動と完全に一致する既定へ倒す
+ * （`resolveForgeState`が`deps.forge`未指定時に`disabled`へ倒すのと同じ設計判断。
+ * `WorkflowRunnerDeps.forge`のJSDoc参照）。
+ *
+ * `start()`（新規実行）と`rebuildLiveRun()`（`runnerRestore.ts`、リロード後の復元）の
+ * 両方から呼ぶため、`WorkflowRunner`のprivateメソッドにせずモジュール関数にしてある。
+ */
+export function resolveBranchNamingAndDraft(deps: WorkflowRunnerDeps): {
+  branchNaming: BranchNaming;
+  draftPullRequest: boolean;
+} {
+  const config = deps.forge?.readConfig();
+  return {
+    branchNaming: config?.branchNaming ?? DEFAULT_BRANCH_NAMING,
+    draftPullRequest: config?.draftPullRequest ?? false,
+  };
+}
+
+/**
  * PR/MRの結果（design.md §16.11・§16.18、Issue #118）。タスク層・統合層のどちらにも使う。
  * **番号とURLだけを持ち、本文は持たない**（§16.11「応答本文は保存しない」・§16.21と同じ
  * 方針。`prompt`/`done`はホストへ送るだけで、ここへは持ち帰らない）。`number`は
@@ -608,6 +643,17 @@ export interface LiveRun {
   integration: { cwd: string; branch: string } | undefined;
   /** PR/MR作成の状態（design.md §16.18）。実行開始時に一度だけ決める。 */
   forge: LiveRunForgeState;
+  /**
+   * タスクブランチの命名方式（design.md §16.6「ブランチの命名方式」）。実行開始時に
+   * 一度だけ決める（`resolveBranchNamingAndDraft`）。`forge`の活性状態（`disabled` /
+   * `skipped` / `active`）とは無関係に決まる（PR/MRを作らない実行でもブランチ名の形には効く）。
+   */
+  branchNaming: BranchNaming;
+  /**
+   * PR/MRをDraftとして作るか（design.md §16.18「Draftとして作る」）。実行開始時に
+   * 一度だけ決める（`resolveBranchNamingAndDraft`）。
+   */
+  draftPullRequest: boolean;
   /**
    * 疑似worktree（design.md §16.20）。`!gitRepo` かつ
    * `WorkflowRunnerDeps.pseudoWorktree`が渡されているときだけ実行開始時に一度作る
@@ -1058,6 +1104,8 @@ export class WorkflowRunner {
     }
     const { pseudo } = pseudoResult;
 
+    const { branchNaming, draftPullRequest } = resolveBranchNamingAndDraft(this.deps);
+
     const live: LiveRun = {
       runId,
       def,
@@ -1072,6 +1120,8 @@ export class WorkflowRunner {
       warnings,
       integration,
       forge,
+      branchNaming,
+      draftPullRequest,
       pseudo,
       messaging: undefined,
       mergeResolutions: new Map(),
@@ -2063,6 +2113,7 @@ export class WorkflowRunner {
         integrationBranch: live.integration.branch,
         title,
         body,
+        draft: live.draftPullRequest,
       },
     );
 
@@ -2089,6 +2140,42 @@ export class WorkflowRunner {
     // `shouldRunFinalMerge`が`created`（PR/MRを作れたか）を見て判定するため、ここでは
     // ガードを重ねず素直に結果へ従う
     if (shouldRunFinalMerge(forge.finalMerge, created)) {
+      // design.md §16.18「統合層のPR/MRもDraftで作る。ただしこちらは最終マージの直前に
+      // readyへ切り替える。Draftのままではマージできないため、タスク層とは順序が違う」。
+      // タスク層（`runTaskPullRequestFlow`）はマージ後にreadyへ切り替えるが、統合層は
+      // 逆に「readyへ切り替えてからマージする」順序になる
+      if (live.draftPullRequest && live.integrationPullRequest !== undefined) {
+        const number = live.integrationPullRequest.number;
+        if (number === undefined) {
+          // design.md §16.18「URLから番号を取り出せなかった場合はready化を飛ばし、警告を
+          // 残す。Draftのまま残るほうが、誤った番号のPR/MRをreadyにするより害が小さい」
+          this.deps.log.warn(
+            `[workflow ${runId}] 統合PR/MRの番号をURLから取り出せなかったため、ready化を飛ばします`,
+          );
+          live.warnings.push({
+            kind: 'forgeFailed',
+            taskId: undefined,
+            message: '統合PR/MRの番号をURLから取り出せなかったため、ready化を飛ばしました',
+          });
+        } else {
+          const ready = await markPullRequestReady(
+            forgeDeps.cli,
+            forge.host,
+            live.integration.cwd,
+            number,
+          );
+          if (!ready.ok) {
+            // ready化の失敗はワークフローを止めない（design.md §16.18「5の失敗はワークフローを
+            // 止めない」）。以降の最終マージはそのまま試みる
+            this.deps.log.warn(`[workflow ${runId}] 統合PR/MRのready化に失敗しました: ${ready.message}`);
+            live.warnings.push({
+              kind: 'forgeFailed',
+              taskId: undefined,
+              message: `統合PR/MRのready化に失敗しました: ${ready.message}`,
+            });
+          }
+        }
+      }
       const merge = await runFinalMerge(forgeDeps.cli, forge.host, live.integration.cwd);
       if (!merge.ok) {
         this.deps.log.warn(`[workflow ${runId}] 最終マージに失敗しました: ${merge.message}`);
@@ -2378,19 +2465,13 @@ export function issue(message: string, taskIds: string[] = []): WorkflowIssue {
 
 /**
  * PR/MRのURLから番号を取り出す（design.md §16.11「タスクごとの...PR/MRの番号」・
- * 「統合PR/MRの番号」、Issue #118）。`forge.ts`の`CreatePullRequestOutcome`はURLしか
- * 返さない（`gh pr create`の標準出力・`glab api`が返す`web_url`）ため、ここで拾う。
- * GitHubは`.../pull/<n>`、GitLabは`.../-/merge_requests/<n>`の形式で、いずれも末尾が
- * 10進数になる。取り出せなければ`undefined`（番号なし・URLだけは引き続き表示に使える）。
+ * 「統合PR/MRの番号」、Issue #118）。実装は`forge.ts`へ一本化した（レビュー指摘: 以前は
+ * ここに同じ実装がそのまま複製されており、本体コード（`runner.ts` / `runnerMerge.ts`）は
+ * どちらも`./runner`からimportしていたため`forge.ts`側が実質デッドコードになっていた）。
+ * `import { parsePullRequestNumberFromUrl } from './runner'` という既存の呼び出し方を
+ * 壊さないよう、ここでは`forge.ts`の実装をそのまま再exportする。
  */
-export function parsePullRequestNumberFromUrl(url: string): number | undefined {
-  const match = /\/(\d+)\/?$/u.exec(url);
-  if (match === null) {
-    return undefined;
-  }
-  const n = Number(match[1]);
-  return Number.isSafeInteger(n) && n > 0 ? n : undefined;
-}
+export { parsePullRequestNumberFromUrl };
 
 /**
  * `TaskRunState` の試行回数から、`worktreePath` / `branchName` が受け取る `retry`

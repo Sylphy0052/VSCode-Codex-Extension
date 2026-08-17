@@ -12,6 +12,7 @@ import {
 } from './orchestrator/forge';
 import { DEFAULT_REPLY_TIMEOUT_SEC } from './orchestrator/messaging';
 import { DEFAULT_PSEUDO_WORKTREE_EXCLUDE } from './orchestrator/pseudoWorktree';
+import { normalizeBranchNaming, type BranchNaming } from './orchestrator/worktree';
 import type { HistoryScope } from './session/sessionStore';
 import { normalizeComposerButtons, type ComposerButtonsResult } from './view/composerButtons';
 import { normalizeSendOn, type SendOnMode } from './view/sendKey';
@@ -251,6 +252,18 @@ export interface WorkflowsConfig {
    * 関わらないため`forge`/`finalMerge`ほど強い制限は要らない。
    */
   replyTimeoutSec: number;
+  /**
+   * タスクブランチの命名方式（design.md §16.6「ブランチの命名方式」）。`machine-overridable`。
+   * ブランチ名の形を決めるだけで、push先も権限も変えないため`forge`/`finalMerge`ほど
+   * 強い制限は要らない。
+   */
+  branchNaming: BranchNaming;
+  /**
+   * PR/MRをDraftとして作り、統合ブランチへのマージが済んでからreadyへ切り替えるか
+   * （design.md §16.18「Draftとして作る」）。`machine-overridable`。有効にするほうが
+   * 「人の確認を挟む」側へ倒れるため、`forge`/`finalMerge`ほど強い制限は要らない。
+   */
+  draftPullRequest: boolean;
 }
 
 const DEFAULT_WORKFLOWS_DIR = '.agents/workflows';
@@ -306,6 +319,8 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     pullRequest: normalizePullRequestLayerConfig(str(c, 'workflows.pullRequest', 'per-task')),
     finalMerge: normalizeFinalMergeConfig(str(c, 'workflows.finalMerge', 'auto')),
     replyTimeoutSec: normalizeReplyTimeoutSec(c.get<unknown>('workflows.replyTimeoutSec')),
+    branchNaming: normalizeBranchNaming(str(c, 'workflows.branchNaming', 'wf')),
+    draftPullRequest: c.get<boolean>('workflows.draftPullRequest') ?? false,
   };
 }
 

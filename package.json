@@ -836,6 +836,22 @@
           "scope": "machine",
           "markdownDescription": "統合ブランチ→mainのPR/MRを無人でマージするか。`auto` は `gh pr merge --merge` / `glab mr merge --remove-source-branch` まで実行する。`pr-only` はPR/MRを作って止め、mainへの書き込みは人が行う。mainを無人で書き換えるかどうかを決めるため、machineスコープに固定している。リポジトリの `.vscode/settings.json` から `auto` へは変えられない。MRの自己マージを禁じる運用規約を持つ組織では `pr-only` にする（設計書 §16.16・§16.18）。"
         },
+        "agent.workflows.branchNaming": {
+          "type": "string",
+          "enum": [
+            "wf",
+            "conventional"
+          ],
+          "default": "wf",
+          "scope": "machine-overridable",
+          "markdownDescription": "タスクブランチの命名方式。`wf` は `wf/<runId>/<taskId>`。`conventional` は `<type>/<IID>/<slug>`（例 `feature/123/t1-a1b2c3d4`）で、この形のブランチ名を要求する運用規約に合わせる。`conventional` はタスクに `issue` が指定されている場合にだけ効き、指定が無いタスクは `wf` 形式へ落ちる（設計書 §16.6）。"
+        },
+        "agent.workflows.draftPullRequest": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine-overridable",
+          "markdownDescription": "PR/MRをDraftとして作り、統合ブランチへのマージが済んでからreadyへ切り替えるか。`gh pr create --draft` / `glab api --field=draft=true` で作り、`gh pr ready` / `glab mr update --ready` で外す（設計書 §16.18）。"
+        },
         "claude.executablePath": {
           "type": "string",
           "default": "claude",

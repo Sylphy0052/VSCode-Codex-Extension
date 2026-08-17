@@ -24,6 +24,7 @@ const task = (overrides: Partial<WorkflowTask> = {}): WorkflowTask => ({
   maxIterations: 20,
   provider: 'codex',
   isolation: 'worktree',
+  type: 'chore',
   cwd: undefined,
   model: undefined,
   effort: undefined,
@@ -588,6 +589,38 @@ tasks:
     expect(errors.some((e) => e.message.includes('issue'))).toBe(false);
   });
 
+  it(
+    'issueがNumber.isSafeIntegerの範囲を超えるとエラーになる（issue: 1e21はNumber.isInteger' +
+      'は通過するがString(1e21)==="1e+21"となりCONVENTIONAL_BRANCH_PATTERNに一致しない' +
+      'ブランチ名を作ってしまうため。レビュー指摘）',
+    () => {
+      const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+    issue: 1e21
+`;
+      const { errors } = validateWorkflow(parseWorkflowYaml(yaml));
+      expect(
+        errors.some((e) => e.message.includes('issue') && e.taskIds.includes('T1')),
+      ).toBe(true);
+    },
+  );
+
+  it('issueがNumber.isSafeIntegerの上限(2^53-1)ちょうどならエラーにならない', () => {
+    const def = {
+      version: 1,
+      name: 'テスト',
+      maxParallel: 3,
+      tasks: [task({ issue: Number.MAX_SAFE_INTEGER })],
+    };
+    const { errors } = validateWorkflow(def);
+    expect(errors.some((e) => e.message.includes('issue'))).toBe(false);
+  });
+
   it.each([0, 201])('maxIterationsが範囲外(%i)だとエラーになる', (maxIterations) => {
     const def = { version: 1, name: 'テスト', maxParallel: 3, tasks: [task({ maxIterations })] };
     const { errors } = validateWorkflow(def);
@@ -697,6 +730,54 @@ tasks:
     const def = parseWorkflowYaml(yaml);
     const { warnings } = validateWorkflow(def);
     expect(warnings.some((w) => w.message.includes('cleanup'))).toBe(true);
+  });
+
+  it('defaults.typeに未知の値が指定されていると警告になる', () => {
+    const yaml = `
+version: 1
+name: テスト
+defaults:
+  type: totally-invalid
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+    const { warnings } = validateWorkflow(def);
+    expect(warnings.some((w) => w.message.includes('type'))).toBe(true);
+  });
+
+  it('タスク単位のtypeに未知の値が指定されていると警告になる', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    type: totally-invalid
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+    const { warnings } = validateWorkflow(def);
+    expect(warnings.some((w) => w.taskIds.includes('T1') && w.message.includes('type'))).toBe(
+      true,
+    );
+  });
+
+  it('タスクがtypeを省略したときdefaults.typeを継承する', () => {
+    const yaml = `
+version: 1
+name: テスト
+defaults:
+  type: fix
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+    expect(def.tasks[0]?.type).toBe('fix');
   });
 
   it('provider/isolationが未指定(空文字)なら警告にならない', () => {

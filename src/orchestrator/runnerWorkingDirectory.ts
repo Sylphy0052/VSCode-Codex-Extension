@@ -206,6 +206,10 @@ async function resolveWorktreeWorkingDirectory(
       taskId: task.id,
       headCommit: originCommit,
       retry,
+      // ブランチの命名方式（design.md §16.6「ブランチの命名方式」）。`live.branchNaming`が
+      // `wf`、または対応する`issue`が無いタスクは、`branchName`自身の判定により
+      // 従来どおり`wf/<runId>/<taskId>`へ落ちる（`BranchNamingOptions`のJSDoc参照）
+      branchNaming: { naming: live.branchNaming, type: task.type, issue: task.issue },
     },
     self.deps.git,
     self.deps.fs,

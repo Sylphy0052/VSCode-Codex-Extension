@@ -11,7 +11,7 @@ import {
 import type { TaskState } from './runState';
 import { sanitizeForLog } from './sanitize';
 import { SerialQueue } from './serialQueue';
-import type { CleanupMode, Isolation } from './workflow';
+import { normalizeCommitType, type CleanupMode, type Isolation } from './workflow';
 
 /**
  * タスクごとの作業ディレクトリ分離とgit外フォールバック（design.md §16.6）。
@@ -156,6 +156,14 @@ export function worktreesRootDir(repoRoot: string): string {
  * `failed` になったタスク（design.mdの規則で撤去されず残る）をリトライしたときに
  * 同じディレクトリへ2回目の `git worktree add` を試みて必ず失敗する
  * （セキュリティ監査指摘・high1。§16.5「再試行は新しいworktreeでやり直す」との食い違い）。
+ *
+ * **`branchName` が `naming: 'conventional'` を選んでも、ここのディレクトリ名の形
+ * （`<runId>/<taskId>`、再試行時は `<runId>/<taskId>-retry<n>`）は変えない。** worktreeの
+ * 置き場は `.agents/worktrees/<runId>/` 配下で既にrun単位に分かれており、パス側は
+ * 元々衝突しない構造になっている（ブランチ名のように「他のrunと被らないための工夫」を
+ * 別途要らない）。ブランチ名の形とディレクトリ名の形を独立させておくことで、
+ * ブランチ命名規約（GitLab運用規約 `<type>/<IID>/<slug>` 等）が変わってもファイル
+ * システム側のパス組み立てには影響しない。
  */
 export function worktreePath(
   repoRoot: string,
@@ -167,12 +175,113 @@ export function worktreePath(
   return path.join(worktreesRootDir(repoRoot), runId, withRetrySuffix(taskId, retry));
 }
 
+/** `branchName` の命名方式。`wf`が従来形式、`conventional`がGitLab運用規約形式。 */
+export type BranchNaming = 'wf' | 'conventional';
+export const BRANCH_NAMINGS = ['wf', 'conventional'] as const;
+export const DEFAULT_BRANCH_NAMING: BranchNaming = 'wf';
+
+/**
+ * 設定 `agent.workflows.branchNaming` の生値を安全な既定（`DEFAULT_BRANCH_NAMING`）へ丸める。
+ * `config.ts` の `normalizeForgeHostConfig`（`forge.ts`）・`normalizePullRequestLayerConfig`と
+ * 同じ「壊れた値は既定へ倒す」方針。`BranchNaming`自体が`worktree.ts`の定義のため、
+ * `forge.ts`の正規化関数群と同じく定義の隣（このファイル）へ置き、`config.ts`からimportする。
+ */
+export function normalizeBranchNaming(value: string): BranchNaming {
+  return (BRANCH_NAMINGS as readonly string[]).includes(value) ? (value as BranchNaming) : DEFAULT_BRANCH_NAMING;
+}
+
+/** `branchName` の命名方式の指定。省略時は従来どおり `wf/<runId>/<taskId>`。 */
+export interface BranchNamingOptions {
+  naming: BranchNaming;
+  /** Conventional Commitsのtype（`workflow.ts` の `CommitType`）。未知の値は`chore`へ倒す。 */
+  type: string;
+  /** 対応するIssue番号。未指定なら conventional 形式を作れないため `wf` 形式へ落とす。 */
+  issue: number | undefined;
+}
+
+/** `CONVENTIONAL_BRANCH_PATTERN` のslug部分が満たす形（1〜30文字、先頭は英数字）。 */
+const CONVENTIONAL_SLUG_MAX_LENGTH = 30;
+
+/**
+ * `taskId` をkebab-caseへ変換する。小文字化し、`_` を `-` へ寄せたうえで、
+ * 英数字と `-` 以外の文字（記号・非ASCII等）は落とす。連続する `-` は1つへ潰し、
+ * 先頭・末尾の `-` も落とす。結果が空になる（記号だけのidだった場合等）ときは
+ * `task` を使う。
+ */
+function kebabCase(taskId: string): string {
+  const lowered = taskId.toLowerCase().replace(/_/gu, '-');
+  const onlyAllowedChars = lowered.replace(/[^a-z0-9-]/gu, '');
+  const collapsed = onlyAllowedChars.replace(/-+/gu, '-').replace(/^-+|-+$/gu, '');
+  return collapsed === '' ? 'task' : collapsed;
+}
+
+/**
+ * conventional形式のブランチ名のslug部分を組み立てる。
+ * `<kebab(taskId)>[-retry<n>]-<runId先頭8文字>` を基本形にし、`CONVENTIONAL_BRANCH_PATTERN`
+ * の制約（先頭が英数字・kebab-case・30文字以内）へ収める。
+ *
+ * runId先頭8文字と `-retry<n>` は必ず残す（runIdは同じrunの他タスクとの衝突を避けるため、
+ * retryサフィックスは同一runの再試行同士の衝突を避けるため）。30文字を超える場合は
+ * `kebab(taskId)` の部分だけを末尾から削って収める。削った結果が空になれば `t` 1文字にする。
+ */
+function buildConventionalSlug(taskId: string, runId: string, retry: number | undefined): string {
+  // runIdはUUID形式（`assertValidIdentifiers`で検証済み）で16進数に大文字を許すため、
+  // slugは小文字のみという制約（`/^[a-z0-9][a-z0-9-]{0,29}$/`）に合わせて小文字化する
+  const runId8 = runId.slice(0, 8).toLowerCase();
+  const retrySuffix = retry === undefined ? '' : `-retry${retry}`;
+  const fixedSuffix = `${retrySuffix}-${runId8}`;
+
+  const maxBaseLength = Math.max(0, CONVENTIONAL_SLUG_MAX_LENGTH - fixedSuffix.length);
+  const base = kebabCase(taskId);
+  // 末尾から削った結果が`-`で終わると`fixedSuffix`（`-`始まり）と繋がって`--`になるため、
+  // 削ったあとの末尾の`-`も落とす
+  const trimmedBase =
+    maxBaseLength > 0 ? base.slice(0, maxBaseLength).replace(/-+$/u, '') : '';
+  const finalBase = trimmedBase === '' ? 't' : trimmedBase;
+
+  return `${finalBase}${fixedSuffix}`;
+}
+
+/**
+ * conventional形式のブランチ名 `<branchType>/<issue>/<slug>` を組み立てる。
+ *
+ * `branchType`はConventional Commitsのtype（`type`）をそのまま使うが、`feat`だけは
+ * `feature`へ読み替える。GitLab運用規約側のブランチtype語彙が
+ * `feature|fix|refactor|docs|test|chore|perf|ci`で、Conventional Commitsの`feat`と
+ * 綴りが違うため（コミットメッセージのtypeとブランチ名のtypeで別の慣習が使われている）。
+ */
+function conventionalBranchName(
+  taskId: string,
+  runId: string,
+  retry: number | undefined,
+  type: string,
+  issue: number,
+): string {
+  const normalizedType = normalizeCommitType(type);
+  const branchType = normalizedType === 'feat' ? 'feature' : normalizedType;
+  const slug = buildConventionalSlug(taskId, runId, retry);
+  return `${branchType}/${issue}/${slug}`;
+}
+
 /**
  * worktreeのブランチ名。再試行時は `-retry<n>` を付ける（design.md §16.5）。
  * `retry` を渡さない1回目の実行と、`retry: 0` 以降の再試行を区別するため `undefined` を既定にする。
+ *
+ * `options` を渡さない、または `options.naming === 'wf'`、または `options.issue` が
+ * `undefined`（対応するIssueが無い＝GitLab運用規約の `<type>/<IID>/<slug>` を作れない）
+ * のときは、従来どおり `wf/<runId>/<taskId>` を返す。`options.naming === 'conventional'`
+ * かつ `issue` があるときだけ `<branchType>/<issue>/<slug>`（GitLab運用規約形式）を返す。
  */
-export function branchName(runId: string, taskId: string, retry?: number): string {
+export function branchName(
+  runId: string,
+  taskId: string,
+  retry?: number,
+  options?: BranchNamingOptions,
+): string {
   assertValidIdentifiers(runId, taskId);
+  if (options !== undefined && options.naming === 'conventional' && options.issue !== undefined) {
+    return conventionalBranchName(taskId, runId, retry, options.type, options.issue);
+  }
   return `wf/${runId}/${withRetrySuffix(taskId, retry)}`;
 }
 
@@ -191,9 +300,23 @@ export function branchName(runId: string, taskId: string, retry?: number): strin
 export const WF_BRANCH_PATTERN =
   /^wf\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\/[A-Za-z0-9_][A-Za-z0-9_-]{0,60}$/u;
 
-/** `branch` が `branchName()` の生成形（どの `runId` でもよい）かどうか。 */
+/**
+ * `<type>/<IID>/<slug>` 形式のブランチ名。GitLab運用規約に合わせた形（`branchName` が
+ * `naming: 'conventional'` で生成する形）。
+ *
+ * `WF_BRANCH_PATTERN` と同じ理由（引数インジェクション対策。design.md §8）で、
+ * 先頭が英数字であることを崩さない。IIDは`0`始まり・先頭`0`を許さない正の整数、
+ * slugは1〜30文字の英数字・kebab-case（先頭は英数字）に絞る。
+ */
+export const CONVENTIONAL_BRANCH_PATTERN =
+  /^(feature|fix|refactor|docs|test|chore|perf|ci)\/[1-9][0-9]*\/[a-z0-9][a-z0-9-]{0,29}$/u;
+
+/**
+ * `branch` が `branchName()` の生成形（`WF_BRANCH_PATTERN` または
+ * `CONVENTIONAL_BRANCH_PATTERN`、どの `runId` / `issue` でもよい）かどうか。
+ */
 export function isWorkflowBranchName(branch: string): boolean {
-  return WF_BRANCH_PATTERN.test(branch);
+  return WF_BRANCH_PATTERN.test(branch) || CONVENTIONAL_BRANCH_PATTERN.test(branch);
 }
 
 /** ワークスペースがgitの作業ツリーかどうか（ベアリポジトリを除く）。 */
@@ -388,6 +511,11 @@ export interface CreateWorktreeRequest {
   headCommit: string;
   /** 再試行回数。1回目は undefined（design.md §16.5）。 */
   retry: number | undefined;
+  /**
+   * ブランチの命名方式（design.md §16.6「ブランチの命名方式」）。`branchName`へそのまま渡す。
+   * 省略時は`branchName`自身の既定どおり `wf/<runId>/<taskId>` になる（後方互換）。
+   */
+  branchNaming?: BranchNamingOptions;
 }
 
 export type CreateWorktreeResult =
@@ -444,7 +572,19 @@ async function createWorktree(
     };
   }
 
-  const branch = branchName(request.runId, request.taskId, request.retry);
+  const branch = branchName(request.runId, request.taskId, request.retry, request.branchNaming);
+  // `branchName()`が生成した値を無検証で`git worktree add -b <branch>`（`-b`の直後はオプション値
+  // として消費されるため現時点で実害は無い）へ渡さず、ここでも`isWorkflowBranchName`で自己検証
+  // する（多層防御。レビュー指摘）。`pushBranch`（`forge.ts`）や`mergeTaskBranch`（`integration.ts`）
+  // はgitへ渡す直前に同種の再検証を行っており、防御が生成ロジックの正しさだけに依存する
+  // 一枚防御になっていた
+  if (!isWorkflowBranchName(branch)) {
+    return {
+      ok: false,
+      reason: 'invalidIdentifier',
+      message: `不正なブランチ名（branchName()の生成形に一致しません）: ${branch}`,
+    };
+  }
   const cwd = worktreePath(request.repoRoot, request.runId, request.taskId, request.retry);
 
   // 一次防御: `git worktree add` を呼ぶ前に、作成先までの経路にシンボリックリンクが

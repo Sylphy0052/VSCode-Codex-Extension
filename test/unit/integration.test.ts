@@ -10,6 +10,7 @@ import {
   integrationWorktreePath,
   IntegrationMergeQueue,
   isMergeResolutionComplete,
+  isValidTaskBranch,
   mergeCommitMessage,
   reconcileMergingTaskOnReload,
   resolveTaskBranchOrigin,
@@ -87,21 +88,66 @@ describe('integrationBranchName / integrationWorktreePath', () => {
 });
 
 describe('固定文言（エージェントの出力を混ぜない）', () => {
-  it('未コミット変更の自動コミットメッセージはwf(<taskId>): uncommitted changes at task completionになる', () => {
+  it('未コミット変更の自動コミットメッセージはchore(<taskId>): uncommitted changes at task completionになる（type省略時）', () => {
     expect(uncommittedChangesCommitMessage('T2')).toBe(
-      'wf(T2): uncommitted changes at task completion',
+      'chore(T2): uncommitted changes at task completion',
     );
   });
 
-  it('マージコミットのメッセージはMerge task <taskId> (run <runId>)になる', () => {
-    expect(mergeCommitMessage('T2', RUN_ID)).toBe(`Merge task T2 (run ${RUN_ID})`);
+  it('未コミット変更の自動コミットメッセージは指定したtypeを使う', () => {
+    expect(uncommittedChangesCommitMessage('T2', 'fix')).toBe(
+      'fix(T2): uncommitted changes at task completion',
+    );
   });
 
-  it('固定文言はtaskId/runId以外の外部入力（prompt・doneやエージェントの応答）を一切受け取らない引数構成になっている', () => {
-    // 関数のシグネチャ自体がtaskId/runIdしか取らないため、
+  it('未コミット変更の自動コミットメッセージは未知のtypeをchoreへ倒す', () => {
+    expect(uncommittedChangesCommitMessage('T2', 'not-a-type')).toBe(
+      'chore(T2): uncommitted changes at task completion',
+    );
+  });
+
+  it('マージコミットのメッセージはchore(<taskId>): merge task (run <runId>)になる（type省略時）', () => {
+    expect(mergeCommitMessage('T2', RUN_ID)).toBe(`chore(T2): merge task (run ${RUN_ID})`);
+  });
+
+  it('マージコミットのメッセージは指定したtypeを使う', () => {
+    expect(mergeCommitMessage('T2', RUN_ID, 'feat')).toBe(`feat(T2): merge task (run ${RUN_ID})`);
+  });
+
+  it('固定文言はtaskId/runId/type以外の外部入力（prompt・doneやエージェントの応答）を一切受け取らない引数構成になっている', () => {
+    // 関数のシグネチャ自体がtaskId/runId/typeしか取らないため、
     // 呼び出し側がエージェントの出力を混ぜようとしても型の上で渡す先が無い。
-    expect(uncommittedChangesCommitMessage.length).toBe(1);
-    expect(mergeCommitMessage.length).toBe(2);
+    expect(uncommittedChangesCommitMessage.length).toBe(2);
+    expect(mergeCommitMessage.length).toBe(3);
+  });
+});
+
+describe('isValidTaskBranch（wf形式・conventional形式の両方をrunId込みで検証する）', () => {
+  it('wf/<runId>/<taskId>形式はこのrunIdならtrue', () => {
+    expect(isValidTaskBranch(`wf/${RUN_ID}/T1`, RUN_ID)).toBe(true);
+    expect(isValidTaskBranch(`wf/${RUN_ID}/T1-retry2`, RUN_ID)).toBe(true);
+  });
+
+  it('wf/<runId>/<taskId>形式でも別のrunIdならfalse（他runのブランチの取り違え防止）', () => {
+    expect(
+      isValidTaskBranch(`wf/${RUN_ID}/T1`, '22222222-2222-4222-8222-222222222222'),
+    ).toBe(false);
+  });
+
+  it('conventional形式（<type>/<issue>/<slug>）は、slugの末尾がこのrunIdの先頭8文字ならtrue', () => {
+    const runId8 = RUN_ID.slice(0, 8);
+    expect(isValidTaskBranch(`fix/42/my-task-${runId8}`, RUN_ID)).toBe(true);
+  });
+
+  it('conventional形式でも、runIdの先頭8文字だけが違う（別runを装う）ブランチはfalse', () => {
+    // 先頭8文字だけ変え、残りは同じ文字列にすることで「別runを装う」ケースを模す
+    const otherRunId8 = '99999999';
+    expect(isValidTaskBranch(`fix/42/my-task-${otherRunId8}`, RUN_ID)).toBe(false);
+  });
+
+  it('どちらの形式にも一致しないブランチ名はfalse', () => {
+    expect(isValidTaskBranch('main', RUN_ID)).toBe(false);
+    expect(isValidTaskBranch('--upload-pack=evil', RUN_ID)).toBe(false);
   });
 });
 
@@ -320,7 +366,7 @@ describe('commitUncommittedChangesIfNeeded', () => {
       { args: ['status', '--porcelain'], cwd: '/repo/task-T2' },
       { args: ['add', '-A'], cwd: '/repo/task-T2' },
       {
-        args: ['commit', '-m', 'wf(T2): uncommitted changes at task completion'],
+        args: ['commit', '-m', 'chore(T2): uncommitted changes at task completion'],
         cwd: '/repo/task-T2',
       },
     ]);
@@ -381,7 +427,7 @@ describe('IntegrationMergeQueue.mergeTask', () => {
     expect(result).toEqual({ kind: 'success', mergeCommit: HEAD_SHA });
     expect(git.calls.filter((c) => c.args[0] === 'merge')).toEqual([
       {
-        args: ['merge', '--no-ff', '-m', `Merge task T2 (run ${RUN_ID})`, TASK_BRANCH],
+        args: ['merge', '--no-ff', '-m', `chore(T2): merge task (run ${RUN_ID})`, TASK_BRANCH],
         cwd: INTEGRATION_CWD,
       },
     ]);
@@ -453,6 +499,46 @@ describe('IntegrationMergeQueue.mergeTask', () => {
     );
     expect(flagInjection.kind).toBe('failure');
 
+    expect(git.calls).toEqual([]);
+  });
+
+  it('不正なtaskBranchのメッセージはwf形式・conventional形式の両方に触れる（旧メッセージがwf形式しか案内しない指摘への修正）', async () => {
+    const git = new FakeGit();
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+
+    const result = await queue.mergeTask(INTEGRATION_CWD, RUN_ID, 'T2', 'not-a-branch', git);
+
+    expect(result.kind).toBe('failure');
+    if (result.kind !== 'failure') return;
+    expect(result.message).toContain('wf/');
+    expect(result.message).toContain('conventional');
+  });
+
+  it('conventional形式（runIdの先頭8文字が一致する）のタスクブランチもマージできる', async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', 'HEAD'], { code: 0, stdout: `${HEAD_SHA}\n`, stderr: '' });
+    git.respond(['merge', '--no-ff'], { code: 0, stdout: '', stderr: '' });
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    const conventionalBranch = `fix/42/t2-${RUN_ID.slice(0, 8)}`;
+
+    const result = await queue.mergeTask(
+      INTEGRATION_CWD,
+      RUN_ID,
+      'T2',
+      conventionalBranch,
+      git,
+    );
+
+    expect(result).toEqual({ kind: 'success', mergeCommit: HEAD_SHA });
+  });
+
+  it('conventional形式でもrunIdの先頭8文字だけが違う（別runを装う）ブランチはfailureを返し、gitを一切呼ばない', async () => {
+    const git = new FakeGit();
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+
+    const result = await queue.mergeTask(INTEGRATION_CWD, RUN_ID, 'T2', 'fix/42/t2-99999999', git);
+
+    expect(result.kind).toBe('failure');
     expect(git.calls).toEqual([]);
   });
 
@@ -622,15 +708,42 @@ describe('reconcileMergingTaskOnReload（design.md §16.11）', () => {
     expect(result).toBe('blocked');
   });
 
-  it('未解決の衝突が無く、マージコミットが履歴に見つかればdone', async () => {
+  it('未解決の衝突が無く、マージコミットが履歴に見つかればdone（--grepではなく件名一覧をJS側で照合する）', async () => {
     const git = new FakeGit();
     git.respond(['diff', '--name-only', '--diff-filter=U'], { code: 0, stdout: '', stderr: '' });
-    git.respond(['log'], { code: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '' });
+    git.respond(['log'], { code: 0, stdout: `${mergeCommitMessage('T1', RUN_ID)}\n`, stderr: '' });
     const result = await reconcileMergingTaskOnReload(INTEGRATION_CWD, RUN_ID, 'T1', git);
     expect(result).toBe('done');
 
     const logCall = git.calls.find((c) => c.args[0] === 'log');
-    expect(logCall?.args).toContain(`--grep=${mergeCommitMessage('T1', RUN_ID)}`);
+    expect(logCall?.args).toEqual(['log', '--format=%s']);
+    expect(logCall?.args.some((a) => a.startsWith('--grep='))).toBe(false);
+  });
+
+  it('マージ時のtypeが今回の呼び出しと違っていてもdone（type引数を持たず、COMMIT_TYPESのいずれでも認識する）', async () => {
+    const git = new FakeGit();
+    git.respond(['diff', '--name-only', '--diff-filter=U'], { code: 0, stdout: '', stderr: '' });
+    // マージ時は`feat`だったが、リロード時に定義ファイルの`type`が`chore`へ変わっていても
+    // （§16.2「typeを実行中に書き換えてからリロード」の事故経路）doneと判定できること
+    git.respond(['log'], { code: 0, stdout: `${mergeCommitMessage('T1', RUN_ID, 'feat')}\n`, stderr: '' });
+    const result = await reconcileMergingTaskOnReload(INTEGRATION_CWD, RUN_ID, 'T1', git);
+    expect(result).toBe('done');
+  });
+
+  it('旧形式（Merge task <taskId> (run <runId>)）のマージコミットでもdone（アップグレードを跨いだrunを壊さない）', async () => {
+    const git = new FakeGit();
+    git.respond(['diff', '--name-only', '--diff-filter=U'], { code: 0, stdout: '', stderr: '' });
+    git.respond(['log'], { code: 0, stdout: `Merge task T1 (run ${RUN_ID})\n`, stderr: '' });
+    const result = await reconcileMergingTaskOnReload(INTEGRATION_CWD, RUN_ID, 'T1', git);
+    expect(result).toBe('done');
+  });
+
+  it('別のタスクidのマージコミットしか無ければmerging（自分のタスクだけを見る）', async () => {
+    const git = new FakeGit();
+    git.respond(['diff', '--name-only', '--diff-filter=U'], { code: 0, stdout: '', stderr: '' });
+    git.respond(['log'], { code: 0, stdout: `${mergeCommitMessage('T2', RUN_ID)}\n`, stderr: '' });
+    const result = await reconcileMergingTaskOnReload(INTEGRATION_CWD, RUN_ID, 'T1', git);
+    expect(result).toBe('merging');
   });
 
   it('未解決の衝突が無く、マージコミットも見つからなければmerging（やり直し対象）', async () => {
@@ -684,14 +797,14 @@ describe('isMergeResolutionComplete（design.md §16.17「コンフリクト」4
 });
 
 describe('findTaskIdsMergedSince', () => {
-  it('マージコミットの固定文言からタスクidを逆算する', async () => {
+  it('マージコミットの固定文言からタスクidを逆算する（typeが混在していても拾える）', async () => {
     const git = new FakeGit();
     git.respond(['log'], {
       code: 0,
       stdout: [
-        `Merge task T2 (run ${RUN_ID})`,
+        mergeCommitMessage('T2', RUN_ID),
         'some unrelated commit',
-        `Merge task T3 (run ${RUN_ID})`,
+        mergeCommitMessage('T3', RUN_ID, 'feat'),
       ].join('\n'),
       stderr: '',
     });
@@ -706,11 +819,22 @@ describe('findTaskIdsMergedSince', () => {
     const git = new FakeGit();
     git.respond(['log'], {
       code: 0,
-      stdout: [`Merge task T2 (run ${RUN_ID})`, `Merge task T2 (run ${RUN_ID})`].join('\n'),
+      stdout: [mergeCommitMessage('T2', RUN_ID), mergeCommitMessage('T2', RUN_ID)].join('\n'),
       stderr: '',
     });
     const ids = await findTaskIdsMergedSince(INTEGRATION_CWD, RUN_ID, HEAD_SHA, git);
     expect(ids).toEqual(['T2']);
+  });
+
+  it('旧形式（Merge task <taskId> (run <runId>)）のマージコミットも拾う（アップグレードを跨いだrunの衝突解決プロンプトが取りこぼさないように）', async () => {
+    const git = new FakeGit();
+    git.respond(['log'], {
+      code: 0,
+      stdout: [`Merge task T2 (run ${RUN_ID})`, mergeCommitMessage('T3', RUN_ID)].join('\n'),
+      stderr: '',
+    });
+    const ids = await findTaskIdsMergedSince(INTEGRATION_CWD, RUN_ID, HEAD_SHA, git);
+    expect(ids).toEqual(['T2', 'T3']);
   });
 
   it('不正なsinceCommitは空配列（gitを呼ばない）', async () => {

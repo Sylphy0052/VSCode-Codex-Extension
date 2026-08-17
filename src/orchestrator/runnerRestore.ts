@@ -11,7 +11,7 @@ import {
   validateWorkflow,
   type WorkflowDefinition,
 } from './workflow';
-import type { LiveRun, LiveRunForgeState } from './runner';
+import { resolveBranchNamingAndDraft, type LiveRun, type LiveRunForgeState } from './runner';
 import type { WorkflowRunnerInternals } from './runnerInternals';
 
 /**
@@ -129,6 +129,15 @@ async function loadPersistedWorkflowDefinition(
  * 永続化されたタスク状態を、統合ブランチの実際の状態から判定し直す
  * （design.md §16.11「`merging`だったタスクは、状態の記録ではなく統合ブランチの実際の
  * 状態から判定し直す」）。
+ *
+ * 以前はここで定義ファイルから該当タスクの`type`を引き、`reconcileMergingTaskOnReload`へ
+ * 渡していた（マージ時に使った`type`と揃っていないと`--grep`の完全一致に失敗するため）。
+ * `type`は`PersistedTaskState`に永続化されておらず定義ファイルの再パース結果に頼るしか
+ * なかったため、「runの実行中にワークフローYAMLの`type:`を書き換えてからリロードする」
+ * 経路で不一致が起き、マージ済みタスクを誤って`merging`（やり直し対象）と判定して二重
+ * マージが走る事故になっていた。`reconcileMergingTaskOnReload`側が`type`を問わず
+ * （`COMMIT_TYPES`のいずれでも）マージコミットを認識するよう改めたため、この関数は
+ * `type`の配線を持たない（定義ファイル`def`も不要になった）。
  */
 async function reconcileRestoredTaskStates(
   self: WorkflowRunnerInternals,
@@ -145,7 +154,12 @@ async function reconcileRestoredTaskStates(
       if (integration === undefined) {
         state = 'blocked';
       } else {
-        const outcome = await reconcileMergingTaskOnReload(integration.cwd, p.runId, id, self.deps.git);
+        const outcome = await reconcileMergingTaskOnReload(
+          integration.cwd,
+          p.runId,
+          id,
+          self.deps.git,
+        );
         if (outcome === 'done') {
           state = 'done';
         } else if (outcome === 'blocked') {
@@ -224,6 +238,7 @@ async function rebuildLiveRun(self: WorkflowRunnerInternals, p: PersistedRun): P
   const forge: LiveRunForgeState = gitRepo
     ? await self.resolveForgeState(p.workspaceRoot)
     : { kind: 'disabled' };
+  const { branchNaming, draftPullRequest } = resolveBranchNamingAndDraft(self.deps);
   const pseudo = gitRepo ? undefined : await resolveRestoredPseudoState(self, p);
 
   return {
@@ -242,6 +257,8 @@ async function rebuildLiveRun(self: WorkflowRunnerInternals, p: PersistedRun): P
     warnings: [],
     integration,
     forge,
+    branchNaming,
+    draftPullRequest,
     pseudo,
     // タスク間メッセージング（design.md §16.21）はこのウィンドウで新たに始める実行にだけ
     // 立てる（リロード直後の復元では作らない。再実行すればstartTask()相当の経路で

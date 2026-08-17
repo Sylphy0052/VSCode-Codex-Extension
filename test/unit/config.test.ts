@@ -123,6 +123,40 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
     __mock.setConfig('agent', { 'workflows.replyTimeoutSec': 60.7 });
     expect(readWorkflowsConfig().replyTimeoutSec).toBe(60);
   });
+
+  it('branchNamingの既定はwf（GitLab運用規約形式は明示指定したときだけ有効になる）', () => {
+    expect(readWorkflowsConfig().branchNaming).toBe('wf');
+  });
+
+  it('branchNamingはwf/conventionalをそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.branchNaming': 'conventional' });
+    expect(readWorkflowsConfig().branchNaming).toBe('conventional');
+
+    __mock.setConfig('agent', { 'workflows.branchNaming': 'wf' });
+    expect(readWorkflowsConfig().branchNaming).toBe('wf');
+  });
+
+  it('branchNamingが未知の値なら既定値（wf）へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.branchNaming': 'bogus' });
+    expect(readWorkflowsConfig().branchNaming).toBe('wf');
+  });
+
+  it('draftPullRequestの既定はfalse（既存の「作成後すぐready」の挙動を変えない）', () => {
+    expect(readWorkflowsConfig().draftPullRequest).toBe(false);
+  });
+
+  it('draftPullRequestはtrueを指定したとおりに使う', () => {
+    __mock.setConfig('agent', { 'workflows.draftPullRequest': true });
+    expect(readWorkflowsConfig().draftPullRequest).toBe(true);
+  });
+
+  it('draftPullRequestが未設定（undefined）なら既定値（false）へ落とす', () => {
+    // 他の真偽値設定（allowAutoApprove等）と同じ `c.get<boolean>() ?? false` の形。
+    // 値の型そのものの妥当性はpackage.jsonのJSON Schema（type: boolean）がVSCode側で
+    // 担保する前提のため、ここでは「未設定→既定値」だけを見る
+    __mock.setConfig('agent', {});
+    expect(readWorkflowsConfig().draftPullRequest).toBe(false);
+  });
 });
 
 describe('readClaudeConfig', () => {

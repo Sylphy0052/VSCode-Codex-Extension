@@ -542,6 +542,17 @@ export interface CreatePullRequestRequest {
   head: string;
   title: string;
   body: string;
+  /**
+   * Draft指定で作るか（「Draft PR/MRとして作成し、統合マージ後にreadyへ切り替える」フロー用）。
+   * 省略時・`false`は従来どおりDraftなしで作る（既存呼び出し元に影響を与えない）。readyへの
+   * 切り替えは`markPullRequestReady`が担う。
+   *
+   * `?: boolean | undefined`にしているのは、`CreateIntegrationPullRequestRequest.draft`
+   * （同じくoptional）をそのまま中継する`createIntegrationPullRequest`からの呼び出しが
+   * `exactOptionalPropertyTypes: true`の下でも成立するようにするため（`runner.ts`の
+   * `integrationBranch?: string | undefined`と同じ書き方）。
+   */
+  draft?: boolean | undefined;
 }
 
 export type CreatePullRequestOutcome =
@@ -575,35 +586,48 @@ function invalidCliArgumentValue(value: string): boolean {
  * のときにフラグとして誤解釈される余地が残る。`--flag=value` なら1トークンに収まるため、
  * 値の中身に関わらずパーサが値として一貫して扱う（`worktree.ts` / `integration.ts` が
  * 位置引数について講じている防御と同じ動機を、フラグ引数について満たす形）。
+ *
+ * `draft`（省略時・`false`は付けない）:
+ * - GitHub: `gh pr create` に `--draft` を足す。値を取らないフラグなのでそのまま1トークン
+ * - GitLab: `glab api projects/:id/merge_requests` へのPOSTに `--field=draft=true` を足す
+ *   （GitLab APIのMR作成エンドポイントは`draft` booleanを受け付ける）
  */
 function buildCreatePullRequestArgs(
   host: ForgeHost,
-  params: { base: string; head: string; title: string; bodyFilePath: string },
+  params: {
+    base: string;
+    head: string;
+    title: string;
+    bodyFilePath: string;
+    draft?: boolean | undefined;
+  },
 ): { command: 'gh' | 'glab'; args: string[] } {
   if (host === 'github') {
-    return {
-      command: 'gh',
-      args: [
-        'pr',
-        'create',
-        `--base=${params.base}`,
-        `--head=${params.head}`,
-        `--title=${params.title}`,
-        `--body-file=${params.bodyFilePath}`,
-      ],
-    };
+    const args = [
+      'pr',
+      'create',
+      `--base=${params.base}`,
+      `--head=${params.head}`,
+      `--title=${params.title}`,
+      `--body-file=${params.bodyFilePath}`,
+    ];
+    if (params.draft === true) {
+      args.push('--draft');
+    }
+    return { command: 'gh', args };
   }
-  return {
-    command: 'glab',
-    args: [
-      'api',
-      'projects/:id/merge_requests',
-      `--field=source_branch=${params.head}`,
-      `--field=target_branch=${params.base}`,
-      `--field=title=${params.title}`,
-      `--field=description=@${params.bodyFilePath}`,
-    ],
-  };
+  const args = [
+    'api',
+    'projects/:id/merge_requests',
+    `--field=source_branch=${params.head}`,
+    `--field=target_branch=${params.base}`,
+    `--field=title=${params.title}`,
+    `--field=description=@${params.bodyFilePath}`,
+  ];
+  if (params.draft === true) {
+    args.push('--field=draft=true');
+  }
+  return { command: 'glab', args };
 }
 
 /** `gh pr create` は成功時にPRのURLをそのまま標準出力へ出す。 */
@@ -659,6 +683,7 @@ export async function createPullRequest(
       head: request.head,
       title: stripControlChars(request.title),
       bodyFilePath,
+      draft: request.draft,
     });
     const result = await deps.cli.run(command, args, request.cwd);
     if (result.code !== 0) {
@@ -682,6 +707,33 @@ export async function createPullRequest(
 }
 
 /* -------------------------------------------------------------------------------------------- */
+/* PR/MRの番号の取り出し                                                                         */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * PR/MRのURLから番号を取り出す（design.md §16.11「タスクごとの...PR/MRの番号」・
+ * 「統合PR/MRの番号」、Issue #118）。`createPullRequest` の戻り値はURLしか返さない
+ * （`gh pr create`の標準出力・`glab api`が返す`web_url`）ため、ここで拾う。GitHubは
+ * `.../pull/<n>`、GitLabは`.../-/merge_requests/<n>`の形式で、いずれも末尾が10進数になる。
+ * 取り出せなければ`undefined`（番号なし・URLだけは引き続き表示に使える）。
+ *
+ * 実装はここへ一本化してある。`runner.ts`は元々同名関数を複製していたが、本体コード
+ * （`runner.ts` / `runnerMerge.ts`）はどちらも`./runner`からimportしていたためこちら側は
+ * `forge.test.ts`からしか呼ばれない実質デッドコードになっていた（レビュー指摘）。
+ * `runner.ts`側は`export { parsePullRequestNumberFromUrl } from './forge'`の再exportへ
+ * 差し替え、既存の`import { parsePullRequestNumberFromUrl } from './runner'`を壊さない形で
+ * 重複を解消した。
+ */
+export function parsePullRequestNumberFromUrl(url: string): number | undefined {
+  const match = /\/(\d+)\/?$/u.exec(url);
+  if (match === null) {
+    return undefined;
+  }
+  const n = Number(match[1]);
+  return Number.isSafeInteger(n) && n > 0 ? n : undefined;
+}
+
+/* -------------------------------------------------------------------------------------------- */
 /* タスク層のPR/MR作成フロー（呼び出し順の固定）                                                  */
 /* -------------------------------------------------------------------------------------------- */
 
@@ -702,6 +754,11 @@ export interface TaskPullRequestSteps<TMerge> {
   pushIntegrationBranch: () => Promise<ForgeStepOutcome>;
   createPullRequest: () => Promise<CreatePullRequestOutcome>;
   mergeAndPushIntegration: () => Promise<TMerge>;
+  /**
+   * Draftで作ったPR/MRをreadyへ切り替える。Draftを使わない設定なら undefined。
+   * PR/MRの作成に成功したときだけ、mergeAndPushIntegration の後に呼ぶ。
+   */
+  markPullRequestReady?: (url: string | undefined) => Promise<ForgeStepOutcome>;
 }
 
 export interface TaskPullRequestFlowResult<TMerge> {
@@ -713,11 +770,14 @@ export interface TaskPullRequestFlowResult<TMerge> {
         message: string;
       };
   mergeOutcome: TMerge;
+  /** ready化を試みた場合の結果。試みていなければ undefined。 */
+  markReady?: ForgeStepOutcome;
 }
 
 /**
  * タスク層のPR/MR作成フローを、design.mdが定める順序（タスクブランチをpush→統合ブランチを
- * push→PR/MRを作る→マージして統合ブランチをpush）で実行する。
+ * push→PR/MRを作る→マージして統合ブランチをpush→（あれば）Draftで作ったPR/MRをreadyへ
+ * 切り替える）で実行する。**既存の4手順の順序は変えない。ready化は5番目として最後に足す。**
  *
  * **先にマージしてしまうと、baseとheadの間に差分が無くなりPR/MRの作成に失敗する**
  * （GitHubは"No commits between"を返す。design.md §16.18）ため、この順序を型で強制する
@@ -728,6 +788,11 @@ export interface TaskPullRequestFlowResult<TMerge> {
  * `mergeAndPushIntegration` は必ず最後に実行する。統合ブランチへのローカルのマージは
  * PR/MRの成否に関わらず進める必要がある（design.md §16.18「前提が欠けている場合」と
  * 同じ「ワークフロー自体は止めない」方針を、PR/MR作成の他の失敗要因にも一貫して適用する）。
+ *
+ * ready化（`markPullRequestReady`）は「統合ブランチへのマージが済んでからDraftを外す」ため
+ * `mergeAndPushIntegration` の後に置く。PR/MRが作れていないとき（作成に失敗した、または
+ * 前段のpush失敗で作成自体を試みていないとき）はready化の対象が無いため呼ばない。
+ * ready化の失敗もワークフロー自体は止めない（同じ方針の踏襲）。結果は `markReady` へ残すだけ。
  */
 export async function runTaskPullRequestFlow<TMerge>(
   steps: TaskPullRequestSteps<TMerge>,
@@ -754,7 +819,15 @@ export async function runTaskPullRequestFlow<TMerge>(
   }
 
   const mergeOutcome = await steps.mergeAndPushIntegration();
-  return { pullRequest, mergeOutcome };
+
+  let markReady: ForgeStepOutcome | undefined;
+  if (pullRequest.created && steps.markPullRequestReady !== undefined) {
+    markReady = await steps.markPullRequestReady(pullRequest.url);
+  }
+
+  return markReady === undefined
+    ? { pullRequest, mergeOutcome }
+    : { pullRequest, mergeOutcome, markReady };
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -771,6 +844,20 @@ export interface CreateIntegrationPullRequestRequest {
   integrationBranch: string;
   title: string;
   body: string;
+  /**
+   * Draft指定で作るか。省略時・`false`は従来どおりDraftなしで作る。
+   *
+   * 統合層のready化は、**最終マージ（`runFinalMerge`）の直前**に行う必要がある（Draftのままで
+   * はマージできないため）。ただし`runFinalMerge`自体は現状「呼び出し側がガードを判定してから
+   * 呼ぶ」構造になっており、ここへ`markPullRequestReady`の呼び出しを組み込むと「PR/MRを作る」
+   * と「readyへ切り替える」という別の関心事がこの関数の中で結合してしまう。統合層でも
+   * タスク層（`runTaskPullRequestFlow`）と同じく「作る順序を型で強制する」形にするのは
+   * 本Issueの範囲外とし、このファイルでは`markPullRequestReady`をexportするところまでに
+   * 留める。統合層での呼び出し順序の強制
+   * （`createIntegrationPullRequest` → ローカルマージ → `markPullRequestReady` →
+   * `runFinalMerge`という並び）は配線担当（`runner.ts`側）が行う。
+   */
+  draft?: boolean;
 }
 
 export interface CreateIntegrationPullRequestResult {
@@ -801,6 +888,7 @@ export async function createIntegrationPullRequest(
     head: request.integrationBranch,
     title: request.title,
     body: request.body,
+    draft: request.draft,
   });
   return { push, pullRequest };
 }
@@ -830,6 +918,78 @@ export async function runFinalMerge(
   cwd: string,
 ): Promise<RunFinalMergeResult> {
   const { command, args } = buildFinalMergeArgs(host);
+  const result = await cli.run(command, args, cwd);
+  if (result.code !== 0) {
+    return {
+      ok: false,
+      message:
+        result.stderr.trim() !== ''
+          ? sanitizeForLog(result.stderr)
+          : `${command} ${args.join(' ')} に失敗しました（終了コード ${result.code}）`,
+    };
+  }
+  return { ok: true };
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Draft PR/MRのready化                                                                          */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * ホストごとのready化コマンド。
+ *
+ * - GitHub: `gh pr ready <number>`
+ * - GitLab: `glab mr update <number> --ready`
+ *
+ * `number`は正の整数のみ受け付ける（`buildTaskPullRequestTitle`が不正な`taskId`を例外にする
+ * のと同じ流儀）。数値は`String(number)`で文字列化してからargv配列の1要素としてそのまま渡す
+ * （`execFile`はシェルを経由しない。design.md §16.18）ため、引数インジェクションの余地は無い。
+ *
+ * 不正な`number`は例外ではなく`{ ok: false }`で返す（レビュー指摘）。以前は`throw`していたが、
+ * 呼び出し元の`markPullRequestReady`がこれをcatchせず素通しするうえ、そのまた呼び出し元
+ * （`runner.ts`の`finalizeForge`）は`void this.finalizeForge(runId)`というfloating promiseで
+ * 起動されているため、例外が起きると`runFinalMerge` / `persist` / `notify`が実行されないまま
+ * 打ち切られてしまう。「ready化の失敗はワークフローを止めない」（design.md §16.18）という方針と
+ * 食い違うため、このコードベースの他のCLI呼び出し（`runFinalMerge`等）と同じくResult型へ揃える。
+ */
+function buildMarkReadyArgs(
+  host: ForgeHost,
+  number: number,
+): { ok: true; command: 'gh' | 'glab'; args: string[] } | { ok: false; message: string } {
+  if (!Number.isInteger(number) || number <= 0) {
+    return { ok: false, message: `不正なPR/MR番号（正の整数ではありません）: ${number}` };
+  }
+  if (host === 'github') {
+    return { ok: true, command: 'gh', args: ['pr', 'ready', String(number)] };
+  }
+  return { ok: true, command: 'glab', args: ['mr', 'update', String(number), '--ready'] };
+}
+
+export type MarkPullRequestReadyResult = { ok: true } | { ok: false; message: string };
+
+/**
+ * Draftで作ったPR/MRをreadyへ切り替える（`gh pr ready` / `glab mr update --ready`）。
+ * `runFinalMerge`と同じ形（失敗してもエラーにせず結果型で返し、失敗時はstderrを
+ * `sanitizeForLog`へ通してメッセージにする）。不正な`number`（`buildMarkReadyArgs`が
+ * `{ ok: false }`を返す場合）も同じ結果型で返し、例外を投げない。
+ *
+ * 「Draft PR/MRとして作成し、統合マージ後にreadyへ切り替える」フローの最後の手順に当たる。
+ * タスク層では`runTaskPullRequestFlow`が`mergeAndPushIntegration`の後に呼ぶ（design.md
+ * §16.18「ready化は統合ブランチへのマージが済んでからDraftを外す」）。統合層での呼び出し順序
+ * （最終マージの直前に呼ぶ必要があること）の強制は`CreateIntegrationPullRequestRequest.draft`
+ * のJSDocに記載のとおり配線担当の責務で、この関数自体はいつ呼ばれても同じように動く。
+ */
+export async function markPullRequestReady(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  number: number,
+): Promise<MarkPullRequestReadyResult> {
+  const built = buildMarkReadyArgs(host, number);
+  if (!built.ok) {
+    return { ok: false, message: built.message };
+  }
+  const { command, args } = built;
   const result = await cli.run(command, args, cwd);
   if (result.code !== 0) {
     return {

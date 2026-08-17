@@ -11,9 +11,11 @@ import {
   detectForgeHost,
   forgeCliCommand,
   isRetryablePushError,
+  markPullRequestReady,
   normalizeFinalMergeConfig,
   normalizeForgeHostConfig,
   normalizePullRequestLayerConfig,
+  parsePullRequestNumberFromUrl,
   PUSH_BRANCH_MAX_ATTEMPTS,
   pushBranch,
   resolveForgeHost,
@@ -599,6 +601,126 @@ describe('createPullRequest', () => {
     }
     expect(fs.removed).toEqual([fs.written[0]?.path]);
   });
+
+  describe('draft指定（「Draft PR/MRとして作成し、統合マージ後にreadyへ切り替える」フロー）', () => {
+    it('GitHubはdraft=trueなら--draftを足す', async () => {
+      const cli = new FakeCli();
+      cli.respond('gh', ['pr', 'create'], { code: 0, stdout: 'https://example/pr/1\n', stderr: '' });
+      const fs = new FakeForgeFileSystem();
+
+      await createPullRequest(
+        { cli, fs },
+        {
+          host: 'github',
+          cwd: '/repo',
+          base: INTEGRATION_BRANCH,
+          head: TASK_BRANCH,
+          title: 't',
+          body: 'b',
+          draft: true,
+        },
+      );
+
+      expect(cli.calls[0]?.args).toContain('--draft');
+    });
+
+    it('GitHubはdraft=false（または省略）なら--draftを足さず既存と同じ引数列になる', async () => {
+      const cli = new FakeCli();
+      cli.respond('gh', ['pr', 'create'], { code: 0, stdout: 'https://example/pr/1\n', stderr: '' });
+      const fsWithDraftFalse = new FakeForgeFileSystem();
+      const fsOmitted = new FakeForgeFileSystem();
+
+      await createPullRequest(
+        { cli, fs: fsWithDraftFalse },
+        {
+          host: 'github',
+          cwd: '/repo',
+          base: INTEGRATION_BRANCH,
+          head: TASK_BRANCH,
+          title: 't',
+          body: 'b',
+          draft: false,
+        },
+      );
+      await createPullRequest(
+        { cli, fs: fsOmitted },
+        {
+          host: 'github',
+          cwd: '/repo',
+          base: INTEGRATION_BRANCH,
+          head: TASK_BRANCH,
+          title: 't',
+          body: 'b',
+        },
+      );
+
+      expect(cli.calls[0]?.args).toEqual([
+        'pr',
+        'create',
+        `--base=${INTEGRATION_BRANCH}`,
+        `--head=${TASK_BRANCH}`,
+        '--title=t',
+        `--body-file=${fsWithDraftFalse.written[0]?.path}`,
+      ]);
+      expect(cli.calls[1]?.args).toEqual([
+        'pr',
+        'create',
+        `--base=${INTEGRATION_BRANCH}`,
+        `--head=${TASK_BRANCH}`,
+        '--title=t',
+        `--body-file=${fsOmitted.written[0]?.path}`,
+      ]);
+    });
+
+    it('GitLabはdraft=trueなら--field=draft=trueを足す', async () => {
+      const cli = new FakeCli();
+      cli.respond('glab', ['api'], {
+        code: 0,
+        stdout: JSON.stringify({ web_url: 'https://gitlab.example.com/org/repo/-/merge_requests/1' }),
+        stderr: '',
+      });
+      const fs = new FakeForgeFileSystem();
+
+      await createPullRequest(
+        { cli, fs },
+        {
+          host: 'gitlab',
+          cwd: '/repo',
+          base: INTEGRATION_BRANCH,
+          head: TASK_BRANCH,
+          title: 't',
+          body: 'b',
+          draft: true,
+        },
+      );
+
+      expect(cli.calls[0]?.args).toContain('--field=draft=true');
+    });
+
+    it('GitLabはdraft=false（または省略）なら--field=draft=trueを足さない', async () => {
+      const cli = new FakeCli();
+      cli.respond('glab', ['api'], {
+        code: 0,
+        stdout: JSON.stringify({ web_url: 'https://gitlab.example.com/org/repo/-/merge_requests/1' }),
+        stderr: '',
+      });
+      const fs = new FakeForgeFileSystem();
+
+      await createPullRequest(
+        { cli, fs },
+        {
+          host: 'gitlab',
+          cwd: '/repo',
+          base: INTEGRATION_BRANCH,
+          head: TASK_BRANCH,
+          title: 't',
+          body: 'b',
+        },
+      );
+
+      expect(cli.calls[0]?.args.some((a) => a.includes('draft'))).toBe(false);
+    });
+  });
 });
 
 describe('runTaskPullRequestFlow（design.md §16.18の作る順序を型で固定する）', () => {
@@ -606,9 +728,16 @@ describe('runTaskPullRequestFlow（design.md §16.18の作る順序を型で固�
     pushTaskBranch?: ForgeStepOutcome;
     pushIntegrationBranch?: ForgeStepOutcome;
     createPullRequest?: Awaited<ReturnType<typeof createPullRequest>>;
-  }): { order: string[]; steps: Parameters<typeof runTaskPullRequestFlow<{ merged: boolean }>>[0] } {
+    markPullRequestReady?: ForgeStepOutcome;
+  }): {
+    order: string[];
+    /** `markPullRequestReady`が呼ばれた際に渡されたurl引数（呼ばれなければ空配列）。 */
+    markPullRequestReadyUrls: Array<string | undefined>;
+    steps: Parameters<typeof runTaskPullRequestFlow<{ merged: boolean }>>[0];
+  } {
     const order: string[] = [];
-    const steps = {
+    const markPullRequestReadyUrls: Array<string | undefined> = [];
+    const base = {
       pushTaskBranch: async (): Promise<ForgeStepOutcome> => {
         order.push('pushTaskBranch');
         return overrides?.pushTaskBranch ?? { ok: true };
@@ -626,7 +755,20 @@ describe('runTaskPullRequestFlow（design.md §16.18の作る順序を型で固�
         return { merged: true };
       },
     };
-    return { order, steps };
+    // `markPullRequestReady`はoptionalなプロパティ（`?:`）のため、指定されなかった場合は
+    // プロパティ自体を持たせない（`exactOptionalPropertyTypes`下で`undefined`を明示代入しない）
+    const steps =
+      overrides?.markPullRequestReady === undefined
+        ? base
+        : {
+            ...base,
+            markPullRequestReady: async (url: string | undefined): Promise<ForgeStepOutcome> => {
+              order.push('markPullRequestReady');
+              markPullRequestReadyUrls.push(url);
+              return overrides.markPullRequestReady as ForgeStepOutcome;
+            },
+          };
+    return { order, markPullRequestReadyUrls, steps };
   }
 
   it('成功時は push task → push integration → create → merge の順に呼ぶ', async () => {
@@ -687,6 +829,57 @@ describe('runTaskPullRequestFlow（design.md §16.18の作る順序を型で固�
       stage: 'createPullRequest',
       message: '作成失敗',
     });
+  });
+
+  it('markPullRequestReadyを渡すと、mergeAndPushIntegrationの後に呼ばれる', async () => {
+    const { order, steps, markPullRequestReadyUrls } = recordingSteps({
+      markPullRequestReady: { ok: true },
+    });
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(order).toEqual([
+      'pushTaskBranch',
+      'pushIntegrationBranch',
+      'createPullRequest',
+      'mergeAndPushIntegration',
+      'markPullRequestReady',
+    ]);
+    expect(markPullRequestReadyUrls).toEqual(['https://example/pr/1']);
+    expect(result.markReady).toEqual({ ok: true });
+  });
+
+  it('createPullRequestが失敗したときはmarkPullRequestReadyが呼ばれない', async () => {
+    const { order, markPullRequestReadyUrls, steps } = recordingSteps({
+      createPullRequest: { ok: false, reason: 'cliError', message: '作成失敗' },
+      markPullRequestReady: { ok: true },
+    });
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(order).toEqual([
+      'pushTaskBranch',
+      'pushIntegrationBranch',
+      'createPullRequest',
+      'mergeAndPushIntegration',
+    ]);
+    expect(markPullRequestReadyUrls).toEqual([]);
+    expect(result.markReady).toBeUndefined();
+  });
+
+  it('markPullRequestReadyが失敗してもmergeOutcomeは返る', async () => {
+    const { steps } = recordingSteps({
+      markPullRequestReady: { ok: false, message: 'ready化失敗' },
+    });
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(result.mergeOutcome).toEqual({ merged: true });
+    expect(result.markReady).toEqual({ ok: false, message: 'ready化失敗' });
+  });
+
+  it('markPullRequestReadyを渡さなければ結果のmarkReadyはundefined', async () => {
+    const { steps } = recordingSteps();
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(result.markReady).toBeUndefined();
   });
 });
 
@@ -781,5 +974,75 @@ describe('runFinalMerge', () => {
     if (!result.ok) {
       expect(result.message).toContain('merge conflict');
     }
+  });
+});
+
+describe('markPullRequestReady（Draftで作ったPR/MRをreadyへ切り替える）', () => {
+  it('GitHubは gh pr ready <number> を呼ぶ', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'ready'], { code: 0, stdout: '', stderr: '' });
+    const result = await markPullRequestReady(cli, 'github', '/repo/task', 12);
+    expect(result).toEqual({ ok: true });
+    expect(cli.calls[0]).toEqual({
+      command: 'gh',
+      args: ['pr', 'ready', '12'],
+      cwd: '/repo/task',
+    });
+  });
+
+  it('GitLabは glab mr update <number> --ready を呼ぶ', async () => {
+    const cli = new FakeCli();
+    cli.respond('glab', ['mr', 'update'], { code: 0, stdout: '', stderr: '' });
+    const result = await markPullRequestReady(cli, 'gitlab', '/repo/task', 12);
+    expect(result).toEqual({ ok: true });
+    expect(cli.calls[0]).toEqual({
+      command: 'glab',
+      args: ['mr', 'update', '12', '--ready'],
+      cwd: '/repo/task',
+    });
+  });
+
+  it('非0終了コードならstderr由来のメッセージ付きで{ ok: false }を返す', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'ready'], { code: 1, stdout: '', stderr: 'pull request not found' });
+    const result = await markPullRequestReady(cli, 'github', '/repo/task', 12);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain('pull request not found');
+    }
+  });
+
+  it.each([[0], [-1], [1.5]])(
+    '不正なnumber（%s）は例外にせず、{ ok: false }を返す（floating promiseで起動される' +
+      'finalizeForgeを打ち切らないため。レビュー指摘）',
+    async (invalid) => {
+      const cli = new FakeCli();
+      const result = await markPullRequestReady(cli, 'github', '/repo/task', invalid);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.message).toMatch(/正の整数/);
+      }
+      expect(cli.calls).toEqual([]);
+    },
+  );
+});
+
+describe('parsePullRequestNumberFromUrl', () => {
+  it('GitHubのURL末尾の数字を取り出す', () => {
+    expect(parsePullRequestNumberFromUrl('https://github.com/o/r/pull/12')).toBe(12);
+  });
+
+  it('GitLabのURL末尾の数字を取り出す', () => {
+    expect(
+      parsePullRequestNumberFromUrl('https://gitlab.example.com/g/p/-/merge_requests/34'),
+    ).toBe(34);
+  });
+
+  it('末尾が数字でないURLはundefined', () => {
+    expect(parsePullRequestNumberFromUrl('https://github.com/o/r/pulls')).toBeUndefined();
+  });
+
+  it('undefined相当の入力（空文字）はundefined', () => {
+    expect(parsePullRequestNumberFromUrl('')).toBeUndefined();
   });
 });
