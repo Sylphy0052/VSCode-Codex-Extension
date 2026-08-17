@@ -494,6 +494,31 @@ export interface WorkflowRunSnapshot {
    * `undefined`（`finalMerge: pr-only`、統合PR/MRの作成に失敗、runがまだ終わっていない等）。
    */
   finalMergeOutcome?: 'merged' | 'failed' | undefined;
+  /**
+   * オーケストレーターセッション（design.md §16.23「会話のUI」）の状態。ワークフローView
+   * の「オーケストレーター」欄がこれを描く。セッションを開けなかったrun・リロードで復元した
+   * runでは`available: false`（欄は「利用できません」になる）。
+   */
+  orchestrator?: OrchestratorSnapshot | undefined;
+}
+
+/**
+ * ワークフローViewの「オーケストレーター」欄に出す値（design.md §16.23「会話のUI」）。
+ *
+ * **応答本文そのものは含めない。** 出すのは1行要約だけで、全文・承認カード・Markdown描画は
+ * `会話を開く`で前面に出す既存のチャット画面が担う（オーケストレーター用に作り直さない）。
+ */
+export interface OrchestratorSnapshot {
+  /** セッションが開けているか。`false`なら欄は「利用できません」になる。 */
+  available: boolean;
+  /** セッションを開いたプロバイダ。`available: false`なら`undefined`。 */
+  provider?: Provider | undefined;
+  /** ターンが走っている最中か（欄の状態表示「応答中」／「待機」）。 */
+  busy: boolean;
+  /** 直近の応答の1行要約。まだ応答が無ければ空文字。 */
+  lastResponseSummary: string;
+  /** 人が最後に会話を開いてから増えた応答の数（未読の印）。 */
+  unreadCount: number;
 }
 
 /**

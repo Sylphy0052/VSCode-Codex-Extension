@@ -4721,6 +4721,49 @@ tasks:
     expect(snapshot?.warnings.some((w) => w.kind === 'orchestratorUnavailable')).toBe(true);
     expect(runner.sendToOrchestrator(runId, 'x')).toBe(false);
   });
+
+  it('スナップショットにオーケストレーター欄の値が載る（応答本文は載らない）', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE);
+    const result = await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+
+    // run開始の通知でターンが走っている
+    orchestrator.emitState({ ...initialChatState, busy: true });
+    expect(runner.getSnapshot(runId)?.orchestrator).toMatchObject({
+      available: true,
+      provider: 'codex',
+      busy: true,
+    });
+
+    // ターンが終わると要約が入り、未読が増える
+    orchestrator.emitState({ ...doneState('方針を確認しました'), busy: false });
+    const after = runner.getSnapshot(runId)?.orchestrator;
+    expect(after?.busy).toBe(false);
+    expect(after?.lastResponseSummary).toContain('方針');
+    expect(after?.unreadCount).toBeGreaterThan(0);
+
+    // 会話を開くと未読が消える
+    expect(runner.revealOrchestrator(runId)).toBe(true);
+    expect(runner.getSnapshot(runId)?.orchestrator?.unreadCount).toBe(0);
+  });
+
+  it('セッションを開けなかったrunの欄はavailable: falseになる', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE);
+    codexHost.rejectOrchestrator = new Error('CLIが見つかりません');
+    const result = await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    expect(runner.getSnapshot(runId)?.orchestrator).toEqual({
+      available: false,
+      busy: false,
+      lastResponseSummary: '',
+      unreadCount: 0,
+    });
+    expect(runner.revealOrchestrator(runId)).toBe(false);
+  });
 });
 describe("WorkflowRunner: オーケストレーターの制御ツール（design.md §16.23「道具」）", () => {
   const TWO_TASK_YAML = `
@@ -4841,6 +4884,45 @@ tasks:
     expect(t1.decideApprovalCalls).toEqual([
       { requestId: 7, decision: "accept" },
     ]);
+  });
+
+  it("run終了後の制御ツールは理由付きで拒否され、get_run_statusだけは答え続ける", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    const result = await runner.start(
+      "/repo/.agents/workflows/control.yaml",
+      "/repo",
+    );
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId("T1").finish("done", doneState("ok1"));
+    codexHost.byTaskId("T2").finish("done", doneState("ok2"));
+    await flush();
+    expect(runner.getSnapshot(runId)?.outcome).not.toBe("running");
+
+    // 会話は続けられるが、動かす対象がもう無いので制御ツールだけが無効になる
+    // （design.md §16.23「run終了後の制御ツールは無効。過去のrunを後から動かす経路は
+    // 作らない」）。理由を返すのは、モデルが使えないツールを呼び続けないようにするため
+    const port = control(state);
+    for (const outcome of [
+      port.stopTask("T1"),
+      port.retryTask("T1"),
+      port.continueTask("T1"),
+      port.decideApproval("T1", "accept"),
+      port.updateTaskPrompt("T1", "以降はこの方針で"),
+    ]) {
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain("終了");
+    }
+
+    // 「なぜ失敗したのか」を走り終えた後に聞く経路は残す
+    const status = port.getRunStatus() as { tasks: { id: string }[] };
+    expect(status.tasks.map((t) => t.id).sort()).toEqual(["T1", "T2"]);
+    // 会話そのものは続けられる
+    expect(runner.sendToOrchestrator(runId, "なぜT1は時間がかかったの？")).toBe(true);
   });
 
   it("update_task_promptは以降の送信本文を差し替え、警告欄へ出す", async () => {

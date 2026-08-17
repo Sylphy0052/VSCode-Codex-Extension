@@ -79,6 +79,28 @@ const ok = (reason: string): OrchestratorControlResult => ({ accepted: true, rea
 const no = (reason: string): OrchestratorControlResult => ({ accepted: false, reason });
 
 /**
+ * runが終わっているなら理由を返す（design.md §16.23「run完了後は後述の制御ツールだけが
+ * 無効になり、会話は続けられる」・「run終了後の制御ツールは無効。過去のrunを後から動かす
+ * 経路は作らない」）。走っていれば `undefined`。
+ *
+ * 実運用ではrun終了時にMCPサーバごと閉じる（§16.21）ためツール自体が見えなくなるが、
+ * 閉じるまでの隙間と、サーバの寿命に依存しない多層防御としてここでも止める。**`get_run_status`
+ * は無効にしない**（走り終えた後に「なぜ失敗したのか」を聞く経路を残すため）。
+ */
+function runFinishedReason(
+  actions: OrchestratorControlActions,
+  runId: string,
+): string | undefined {
+  const outcome = actions.getSnapshot(runId)?.outcome;
+  if (outcome === undefined) {
+    return 'この実行はすでに破棄されているため、制御ツールは使えません。';
+  }
+  return outcome === 'running'
+    ? undefined
+    : `この実行はすでに終了しています（${outcome}）。制御ツールは使えません。会話は続けられます。`;
+}
+
+/**
  * オーケストレーター専用の接続に見せる制御ツールの実体を組み立てる（design.md §16.23）。
  *
  * runを1本に固定した口を返す。オーケストレーターは自分のrun以外を指定できない
@@ -92,6 +114,10 @@ export function buildOrchestratorControlPort(
   return {
     getRunStatus: () => buildRunStatus(actions, runId),
     stopTask: (taskId) => {
+      const finished = runFinishedReason(actions, runId);
+      if (finished !== undefined) {
+        return no(finished);
+      }
       const state = self.runs.get(runId)?.runState.tasks.get(taskId)?.state;
       if (state === undefined) {
         return no(`タスクが見つかりません: ${taskId}`);
@@ -100,6 +126,10 @@ export function buildOrchestratorControlPort(
       return ok(`${taskId} のループを止めました（状態: ${state}）。`);
     },
     retryTask: (taskId) => {
+      const finished = runFinishedReason(actions, runId);
+      if (finished !== undefined) {
+        return no(finished);
+      }
       // `allow`（design.md §16.7）を含むタスクの再実行は人の確認が要る。オーケストレーターに
       // `allowConfirmed: true` を名乗らせない（確認の意味が無くなるため）
       const result = actions.retryTask(runId, taskId);
@@ -112,11 +142,20 @@ export function buildOrchestratorControlPort(
         ? ok(`${taskId} を新しいセッションでやり直しています。`)
         : no(`${taskId} は再実行できる状態ではありません。`);
     },
-    continueTask: (taskId) =>
-      actions.continueTask(runId, taskId)
+    continueTask: (taskId) => {
+      const finished = runFinishedReason(actions, runId);
+      if (finished !== undefined) {
+        return no(finished);
+      }
+      return actions.continueTask(runId, taskId)
         ? ok(`${taskId} を続きから走らせています。`)
-        : no(`${taskId} は続きから走らせられる状態ではありません。`),
+        : no(`${taskId} は続きから走らせられる状態ではありません。`);
+    },
     decideApproval: (taskId, decision) => {
+      const finished = runFinishedReason(actions, runId);
+      if (finished !== undefined) {
+        return no(finished);
+      }
       // 承認をセッション全体へ広げる `acceptForSession` は選ばせない（1件ずつの判断に限る）
       if (decision !== 'accept' && decision !== 'decline') {
         return no(`decision は 'accept' か 'decline' のどちらかです: ${decision}`);
@@ -125,8 +164,12 @@ export function buildOrchestratorControlPort(
         ? ok(`${taskId} の承認要求に ${decision} で答えました。`)
         : no(`${taskId} に承認待ちの要求はありません。`);
     },
-    updateTaskPrompt: (taskId, continuePrompt) =>
-      updateTaskPrompt(self, runId, taskId, continuePrompt),
+    updateTaskPrompt: (taskId, continuePrompt) => {
+      const finished = runFinishedReason(actions, runId);
+      return finished !== undefined
+        ? no(finished)
+        : updateTaskPrompt(self, runId, taskId, continuePrompt);
+    },
   };
 }
 

@@ -10,6 +10,7 @@ import type { StoredMessage } from './messaging';
 import { getRunOutcome } from './scheduler';
 import type {
   LiveRun,
+  OrchestratorSnapshot,
   TaskSnapshot,
   WorkflowRunSnapshot,
   WorkflowWarning,
@@ -64,6 +65,31 @@ export function getSnapshot(self: WorkflowRunnerInternals, runId: string): Workf
     integrationPullRequestUrl:
       live.integrationPullRequest?.url ?? persisted?.integrationPullRequestUrl,
     finalMergeOutcome: live.finalMergeOutcome ?? persisted?.finalMergeOutcome,
+    orchestrator: buildOrchestratorSnapshot(live),
+  };
+}
+
+/**
+ * オーケストレーター欄（design.md §16.23「会話のUI」）に出す値を組み立てる。
+ *
+ * セッションが無い（生成に失敗した・リロードで復元したrun）ときは `available: false` を
+ * 返す。`undefined`ではなく常にオブジェクトを返すのは、Viewが「欄そのものを出さない」と
+ * 「欄を出して『利用できません』と書く」を区別できるようにするため（design.md §16.23
+ * 「オーケストレーター欄を『利用できません』にするだけにする」）。
+ *
+ * **応答本文は写さない**（`LiveOrchestrator`がそもそも持たない。§16.11と同じ理由）。
+ */
+function buildOrchestratorSnapshot(live: LiveRun): OrchestratorSnapshot {
+  const orchestrator = live.orchestrator;
+  if (orchestrator === undefined) {
+    return { available: false, busy: false, lastResponseSummary: '', unreadCount: 0 };
+  }
+  return {
+    available: true,
+    provider: orchestrator.provider,
+    busy: orchestrator.busy,
+    lastResponseSummary: orchestrator.lastResponseSummary,
+    unreadCount: orchestrator.unreadCount,
   };
 }
 
