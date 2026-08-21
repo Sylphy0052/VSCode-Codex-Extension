@@ -249,6 +249,12 @@ function updateTaskPrompt(
     stripControlChars(continuePrompt),
     PROMPT_OVERRIDE_PREVIEW_LENGTH,
   );
+  // 同一taskIdの差し替えは`update_task_prompt`の呼び出し回数だけ際限なく積まれてしまうため
+  // （Issue #366）、直近1件へ丸める。差し替えが起きた事実自体は最新の1件として残るので
+  // 「警告が出た事実が失われる」ことはない（自己レビュー参照）
+  live.warnings = live.warnings.filter(
+    (w) => !(w.kind === 'orchestratorPromptOverride' && w.taskId === taskId),
+  );
   live.warnings.push({
     kind: 'orchestratorPromptOverride',
     taskId,

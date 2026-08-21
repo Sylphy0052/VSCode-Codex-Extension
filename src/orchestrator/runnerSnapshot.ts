@@ -7,6 +7,7 @@ import {
 } from './workflow';
 import type { EffectiveTaskConfig } from './taskConfig';
 import type { StoredMessage } from './messaging';
+import type { PersistedRun } from './runStore';
 import { getRunOutcome } from './scheduler';
 import type {
   LiveRun,
@@ -39,12 +40,15 @@ export function getSnapshot(self: WorkflowRunnerInternals, runId: string): Workf
   if (live === undefined) {
     return undefined;
   }
-  const tasks = live.def.tasks.map((task) => buildTaskSnapshot(self, live, task));
   // 統合PR/MRの結果・最終マージの成否は、このプロセスでまだ何も試みていない
   // （`live.integrationPullRequest`/`live.finalMergeOutcome`が`undefined`の）間、
   // 永続化された値（前のウィンドウで作られた等）へフォールバックする
-  // （design.md §16.11「リロードしてもPR/MRへのリンクが残る」・Issue #118）
+  // （design.md §16.11「リロードしてもPR/MRへのリンクが残る」・Issue #118）。
+  // タスクごとの`buildTaskSnapshot`にも同じ永続化データが要るため、ここで1回だけ
+  // 引いた`persisted`を渡す（Issue #366: タスクごとに引き直すとタスク数+1回の
+  // ストア読み出しになっていた）
   const persisted = self.deps.store.find(runId);
+  const tasks = live.def.tasks.map((task) => buildTaskSnapshot(live, task, persisted));
   return {
     runId: live.runId,
     name: live.def.name,
@@ -93,14 +97,18 @@ function buildOrchestratorSnapshot(live: LiveRun): OrchestratorSnapshot {
   };
 }
 
-function buildTaskSnapshot(self: WorkflowRunnerInternals, live: LiveRun, task: WorkflowTask): TaskSnapshot {
+function buildTaskSnapshot(
+  live: LiveRun,
+  task: WorkflowTask,
+  persisted: PersistedRun | undefined,
+): TaskSnapshot {
   const state = live.runState.tasks.get(task.id);
   const liveTask = live.tasks.get(task.id);
   // PR/MRの結果も、branch同様このウィンドウでまだセッションを開いていない
   // （リロード復元直後の）タスクでは`liveTask`が無い。branchと違い、PR/MRのリンクは
   // リロード後も出す必要がある（design.md §16.11「リロードしてもPR/MRへのリンクが残る」・
   // Issue #118の受入基準）ため、永続化された値へフォールバックする
-  const persistedTask = self.deps.store.find(live.runId)?.tasks[task.id];
+  const persistedTask = persisted?.tasks[task.id];
   return {
     id: task.id,
     dependsOn: task.dependsOn,
