@@ -1,0 +1,298 @@
+version: 1
+name: review-fixes-ui-2026-08-22
+# 2026-08-22の全体レビュー（50k LOC / 162ファイルを7領域で並列監査）で挙がった指摘のうち、
+# View層の修正計画。
+#
+# このファイルの役割は「各タスクの詳細指示（根拠・変更内容・受入基準・自己レビュー手順）の
+# 原本」であり、タスクの担当分けはここでは決めない。現行の分割は
+# docs/roadmap/review-and-feature-consolidation.md を見ること。
+# 元々の core / ui / final の3分割は、そのロードマップの7ワークフロー（WF-A〜WF-G）へ
+# 置き換わっている。このファイルの maxParallel / provider の指定も、分割の変更にともなって
+# 参考値として扱う。
+#
+# 各タスクのpromptには「検証済み」「未検証」を明記してある。検証済みはレビュー時に
+# 実際のコードを読んで根拠を確認したもの、未検証は監査エージェントの報告のままで
+# 裏取りが済んでいないもの。未検証のタスクは修正前に再現条件の確認から始める。
+#
+# dependsOn は論理的な前後関係だけでなく、同じファイルを触るタスク同士の直列化にも
+# 使っている。担当の分け方が変わっても、この前後関係は守ること。
+#
+# レビューは2段構えにしてある。
+#  1. 各タスクが自分の差分を自己レビューしてから完了する（doneの条件に含めてある）
+#  2. ワークフローの最後に全体レビューを1段置く（Z01_core_review / Z02_ui_review /
+#     T27_final_review がその指示の原本）
+#
+# なお `done` の末尾には、拡張のワークフロー機能で実行する場合に限り runner が自動で
+# 「かつすべての変更をコミットしてあること」を付け足す
+# （src/orchestrator/runner.ts:1421 の withCommitRequirement）。
+# 今回はワークフロー機能では実行しないため、コミットとPRは上記ロードマップの運用規約に従う。
+defaults:
+  provider: codex
+  maxParallel: 2
+  isolation: worktree
+  cleanup: after-merge
+  type: fix
+  maxIterations: 20
+
+tasks:
+  - id: T11_claude_poststate
+    type: perf
+    prompt: |
+      Claude側のwebview状態送信に間引きが無く、ストリーミング中に負荷がかかる問題を直す。
+
+      根拠（監査エージェントの報告。着手前に自分で確認すること）:
+      - src/view/claudeChatView.ts:355 付近の postState は間引きなしで state.items 全量を
+        postMessage している
+      - 一方 Codex側の src/view/chatView.ts:2012 付近の postState / flushState は
+        STATE_POST_INTERVAL_MS（50ms、chatView.ts:144）で間引き、かつ buildItemsDelta で
+        差分だけを送っている
+      - 呼び出し元の claudeChatView.ts:961 付近の onSessionChange は、
+        src/claude/streamSession.ts:791 付近の receive がNDJSONイベント1件ごとに
+        this.update(next) を呼ぶたび同期的に発火する
+      - つまりストリーミング中は構造化クローンの直列化コストがイベント頻度のまま
+        拡張機能ホストへかかる
+
+      変更内容:
+      - Claude側にも postTimer / lastPostAt / sentItems 相当のデルタ間引きを追加する
+      - クライアント側（src/view/chatScript.ts:2233 付近）は既に data.items が無い場合の
+        全量フォールバックを持っているため、追加は拡張機能側だけで完結するはず。
+        実際にそうなっているか確認してから実装すること
+      - Codex側と同じロジックを2箇所に書くことになるので共通化できるなら共通化する。
+        ただしこのタスクの主目的は間引きの追加であり、大規模なリファクタリングには広げない
+        （chatView.ts の構造整理は T23 / T24 が担当する）
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、間引きによって最後の状態が送信されずに終わる経路が
+        無いか確認する（ターン終了時のフラッシュが必ず走ること）
+      - パネル破棄後にタイマーが残らないか確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - 短時間に連続した状態更新が間引かれて送信されることを検証するテスト
+      - 最終状態が必ず送信されることを検証するテスト
+      - パネル破棄でタイマーが解放されることを検証するテスト
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: Claude側のpostStateに間引きと差分送信が実装され最終状態のフラッシュも保証され、テストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T18_view_dispose
+    prompt: |
+      View層の軽微な2件を直す。
+
+      根拠（いずれも監査エージェントの報告。着手前に自分で確認すること）:
+
+      1. コントロールパネルのビュー参照が残る（src/view/controlPanelView.ts:100）
+         - resolveWebviewView は this.view = view を設定するのみで view.onDidDispose が無く、
+           this.view をクリアするタイミングが無い
+         - 破棄後に revealSection / post が呼ばれても postMessage は例外を投げず黙って失敗するため
+           実害は小さいが、他パネル（chatView.ts の teardown が entry.panel = undefined で
+           確実にクリアする設計）と非対称
+
+      2. CSPの組み立てが1箇所に集約されていない（src/view/conversationView.ts:145）
+         - chatCsp()（src/view/chatCsp.ts:11）へ委譲せず独自にインライン組み立てしている
+         - img-src data: が無い分だけ実質的な差分はあるが、
+           「チャット系画面のCSPは1箇所で管理する」という chatCsp.ts のコメント意図から外れている
+
+      変更内容:
+      - view.onDidDispose(() => { this.view = undefined; }) を追加する
+      - 許容差分（img-src無し）を chatCsp() のオプションにするか、
+        意図的な別ポリシーである旨をコメントで明記する。どちらを選んだか報告する
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、CSPを緩めていないことを必ず確認する
+        （img-src data: を不用意に足すと画像経由の情報持ち出し面が広がる）
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - ビュー破棄で参照がクリアされることを検証するテスト
+      - CSPの内容が変わっていないこと（または変えた場合はその理由が明記されていること）
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: ビュー破棄時の参照クリアとCSPの扱いの明確化が完了し、テストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T22_chatview_tests
+    type: test
+    prompt: |
+      chatView.ts の破壊的操作系にテストを追加する。実装は変更せず、テストだけを足す。
+
+      根拠（監査エージェントの報告。着手前に自分で確認すること）:
+      - src/view/chatView.ts の ChatViewManager が呼ぶ export 関数 21個のうち 18個が
+        test/unit/ のどこからも参照されていない
+      - 対象には confirmCompact / confirmClaudeImport / confirmRevertDiff / confirmRewindFiles /
+        confirmRunShellCommand / confirmStopBackgroundTask / confirmUsageCreditsRequest /
+        confirmGenerateAgentsFile / confirmUnsafeCombination / handleOpenDiffFile /
+        handleOpenDiffEditor / handleRevertDiff / runExportTranscript / postImageData /
+        postFileMentions / insertCodeIntoEditor / openCodeInNewFile / reportTurnResult /
+        noteDropRejected / addAttachment が含まれる
+      - test/unit/chatView.test.ts は buildChatPanelOptions と renderShell のみを対象にした
+        純関数テスト
+      - test/unit/chatViewManager.test.ts と claudeChatViewManager.test.ts も
+        revertDiff / openDiffFile / openDiffEditor / postFileMentions / postImageData の
+        webviewメッセージ経路を起動していない
+
+      つまり diff差し戻し（handleRevertDiff、実ファイルを上書きする）やシェルコマンド確認
+      （confirmRunShellCommand）といった破壊的操作の入口が無テストのまま残っている。
+
+      変更内容:
+      - 優先度の高い順にテストを追加する:
+        1. handleRevertDiff（実ファイルを書き換える。ワークスペース境界の検証が効いているか）
+        2. confirmRunShellCommand（確認ダイアログを経ずに実行されないか）
+        3. confirmRevertDiff / confirmRewindFiles（同上）
+        4. handleOpenDiffFile / handleOpenDiffEditor
+        5. postImageData / postFileMentions / addAttachment
+      - 実装のバグを見つけた場合は、このタスクでは直さずに最終報告へ記録する
+        （テスト追加と実装修正を同じタスクで混ぜると差分が読みにくくなるため）。
+        ただし CRITICAL 級の問題を見つけた場合はその限りではなく、直したうえで報告する
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、テストが実ファイルシステムやユーザーのワークスペースを
+        壊さない形になっているか必ず確認する
+      - 「呼ばれたことだけ確認して結果を見ていない」弱いアサーションになっていないか確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - 上記1〜3が最低限テストされていること
+      - テストが実ファイルシステムを破壊しないこと
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: chatViewの破壊的操作系にテストが追加され実ファイルを壊さないことが確認され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T23_chat_shared_extract
+    type: refactor
+    dependsOn: [T11_claude_poststate, T22_chatview_tests]
+    prompt: |
+      chatView.ts が抱えているプロバイダ非依存の共有ユーティリティを中立モジュールへ切り出す。
+      差分が大きくなるため、テスト（T22）が入った後に実行する。
+
+      根拠（監査エージェントの報告。着手前に自分で確認すること）:
+      - src/view/claudeChatView.ts:38 から 61 は renderShell / confirmCompact /
+        confirmClaudeImport / handleOpenDiffFile / postImageData / postFileMentions /
+        insertCodeIntoEditor / runExportTranscript / reportTurnResult など19シンボルを
+        ./chatView から輸入している
+      - これらはCodex固有機能ではなく、Codex用ファイル（chatView.ts）がプロバイダ非依存の
+        共有ユーティリティ集も兼ねているため、「Claude側がCodex側に依存する」非対称な構造になっている
+      - chatView.ts は2950行あり、確認ダイアログ群（271-475行）、diff操作（640-936行）、
+        renderShell によるHTML組み立て（2810-2950行）が同居している
+
+      変更内容:
+      - プロバイダ非依存のヘルパー（確認ダイアログ群・diff操作群・transcript export・
+        attachments / 画像投稿系）を chatShared.ts のような中立モジュールへ切り出す
+      - chatView.ts と claudeChatView.ts の両方がそこから輸入する形にする
+      - 挙動は変えない。純粋な移動と再輸出に徹すること
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、移動以外の変更（ロジックの書き換え）が
+        混ざっていないか確認する。混ざっている場合は分離するか、理由を明記する
+      - 循環importが生まれていないか確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - 既存のテストが1つも変更なしで通ること（挙動を変えていないことの証明）
+        変更が必要になった場合は、なぜ必要だったかを最終報告に明記する
+      - chatView.ts の行数が明確に減っていること
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: プロバイダ非依存のヘルパーが中立モジュールへ切り出され既存テストが変更なしで通り、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T24_chat_manager_base
+    type: refactor
+    dependsOn: [T23_chat_shared_extract]
+    prompt: |
+      ChatViewManager と ClaudeChatViewManager の重複を基底クラスへ抽出する。
+      T23 の後に実行する。
+
+      根拠（監査エージェントの報告。着手前に自分で確認すること）:
+      - src/view/chatView.ts:1059 以降の ChatViewManager と
+        src/view/claudeChatView.ts:207 以降の ClaudeChatViewManager は、
+        attachPanel（chatView.ts:1359 / claudeChatView.ts:801）、
+        teardown（chatView.ts:1530 / claudeChatView.ts:942）、
+        onSessionChange（chatView.ts:1554 / claudeChatView.ts:961）、
+        notifyNewApprovals / notifyApprovalPending / notifyTurnComplete
+        （chatView.ts:1593-1654 / claudeChatView.ts:1003-1051）がほぼ同一実装
+      - コメント自身が「chatView.ts の◯◯と同じ」と明記している
+      - 両クラスとも同じ TaskSessionHost インターフェースを実装しているのに
+        共通基底へ抽出されていない
+
+      変更内容:
+      - パネルのライフサイクル管理と通知判定を共通の抽象クラスへ切り出す
+      - Codex / Claude 固有部分（handleMessage の分岐、buildTaskSession の差分）だけを
+        オーバーライドする構成にする
+      - 挙動は変えない
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、両者で微妙に異なっていた挙動を
+        片方に寄せてしまっていないか確認する（「ほぼ同一」の「ほぼ」の部分が重要）
+      - 差異を見つけた場合、それが意図的な差異か単なる実装のズレかを判断し、
+        判断の根拠を最終報告に書く
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - 既存のテストが通ること
+      - 両マネージャの重複コードが明確に減っていること
+      - 統合の過程で見つけた挙動差がすべて報告されていること
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: 両マネージャの共通部分が基底クラスへ抽出され挙動差が報告され、全テストが緑で、差分の自己レビューを終えていること
+
+  # ================================================================
+  # フェーズ4: リポジトリ衛生と全体へ波及する変更
+  # ================================================================
+
+  # ================================================================
+  # 横断レビュー（このワークフローの全タスクの後）
+  # ================================================================
+  - id: Z02_ui_review
+    provider: claude
+    type: refactor
+    dependsOn:
+      - T11_claude_poststate
+      - T18_view_dispose
+      - T22_chatview_tests
+      - T23_chat_shared_extract
+      - T24_chat_manager_base
+    prompt: |
+      統合ブランチに入ったView層の全変更をまとめてレビューする。
+      このタスクは実装ではなくレビューが主目的。
+
+      背景: このワークフローは2026-08-22の全体レビューで挙がったView層の指摘を
+      5タスクで修正してきた。うち T23 と T24 は chatView.ts / claudeChatView.ts の
+      構造リファクタで差分が大きい。各タスクは自分の差分を自己レビューしているが、
+      リファクタで挙動が変わっていないかの通しの確認はここでしかできない。
+
+      あなたのworktreeは統合ブランチから切られているため、先行する全タスクの成果が入っている。
+
+      重要: View層以外（orchestrator / loop / appserver / claude / codex / session / extension）は
+      別のワークフロー（review-fixes-core.yaml）が担当している。
+      このレビューでは src/view/ 以外を変更しないこと。問題を見つけた場合は
+      修正せず、報告書へ記録するだけにとどめる。
+
+      レビュー手順:
+      1. `git log --oneline` と `git diff main...HEAD` で変更の全体像を把握する
+      2. 次の観点で通しでレビューする:
+         - リファクタで挙動が変わっていないか: T23 の切り出しと T24 の基底抽出は
+           「純粋な移動」のはずである。ロジックの書き換えが混ざっていないか差分で確認する
+         - 「ほぼ同一」だった両ViewManagerの差異: T24 が統合した際に、
+           意図的な差異まで片方へ寄せていないか。報告書に差異の一覧があるはずなので、
+           それが妥当か検証する
+         - Codex側とClaude側の対称性: T11 で Claude側に間引きを入れた結果、
+           両者の状態送信の挙動が揃っているか。片方だけ最終状態のフラッシュが
+           抜けていないか
+         - リソース解放: パネル破棄後にタイマー・リスナ・ビュー参照が残らないか
+           （T11 のタイマーと T18 の onDidDispose が対象）
+         - セキュリティ: CSP が緩んでいないか（特に img-src / script-src）。
+           innerHTML 系のAPIが新たに使われていないか。外部由来テキストが
+           テキストノード以外の経路で挿入されていないか
+         - テストの質: T22 で追加したテストが実ファイルシステムを壊さないか。
+           弱いアサーションになっていないか
+      3. 見つけた問題のうち、その場で直せるものは直す（src/view/ の範囲内で）
+      4. 直せないもの・判断が要るものは、docs/ 配下にレビュー結果の文書として残す
+
+      重要:
+      - 「問題なし」で終わらせないこと。構造リファクタが2件入っている以上、
+        挙動差や見落としが1つも無い可能性は低い。最低でも各観点について
+        「確認した結果どうだったか」を書くこと
+      - 一方で、無理に問題をでっち上げないこと
+      - 大規模な作り直しには広げない
+
+      受入基準:
+      - docs/ 配下にレビュー結果の文書が追加されていること
+      - 上記の各観点について確認結果が書かれていること
+      - その場で直した問題があれば、その差分が含まれていること
+      - src/view/ 以外を変更していないこと
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: View層の全変更が横断的にレビューされ結果が docs 配下の文書に残り、直せる問題は修正され、src/view/ 以外を変更しておらず、全テストが緑であること

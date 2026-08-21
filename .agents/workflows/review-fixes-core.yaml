@@ -1,0 +1,1025 @@
+version: 1
+name: review-fixes-core-2026-08-22
+# 2026-08-22の全体レビュー（50k LOC / 162ファイルを7領域で並列監査）で挙がった指摘のうち、
+# ワークフロー基盤側の修正計画。
+#
+# このファイルの役割は「各タスクの詳細指示（根拠・変更内容・受入基準・自己レビュー手順）の
+# 原本」であり、タスクの担当分けはここでは決めない。現行の分割は
+# docs/roadmap/review-and-feature-consolidation.md を見ること。
+# 元々の core / ui / final の3分割は、そのロードマップの7ワークフロー（WF-A〜WF-G）へ
+# 置き換わっている。このファイルの maxParallel / provider の指定も、分割の変更にともなって
+# 参考値として扱う。
+#
+# 各タスクのpromptには「検証済み」「未検証」を明記してある。検証済みはレビュー時に
+# 実際のコードを読んで根拠を確認したもの、未検証は監査エージェントの報告のままで
+# 裏取りが済んでいないもの。未検証のタスクは修正前に再現条件の確認から始める。
+#
+# dependsOn は論理的な前後関係だけでなく、同じファイルを触るタスク同士の直列化にも
+# 使っている。担当の分け方が変わっても、この前後関係は守ること。
+#
+# レビューは2段構えにしてある。
+#  1. 各タスクが自分の差分を自己レビューしてから完了する（doneの条件に含めてある）
+#  2. ワークフローの最後に全体レビューを1段置く（Z01_core_review / Z02_ui_review /
+#     T27_final_review がその指示の原本）
+#
+# なお `done` の末尾には、拡張のワークフロー機能で実行する場合に限り runner が自動で
+# 「かつすべての変更をコミットしてあること」を付け足す
+# （src/orchestrator/runner.ts:1421 の withCommitRequirement）。
+# 今回はワークフロー機能では実行しないため、コミットとPRは上記ロードマップの運用規約に従う。
+defaults:
+  provider: codex
+  maxParallel: 3
+  isolation: worktree
+  cleanup: after-merge
+  type: fix
+  maxIterations: 20
+
+tasks:
+  - id: T01_ci
+    type: ci
+    prompt: |
+      GitHub ActionsのCIワークフローを新規追加する。
+
+      現状（検証済み）: リポジトリに .github/ ディレクトリが存在せず、.gitlab-ci.yml など
+      他のCI設定も無い。scripts/check.sh（lint → typecheck → test）はローカル手動実行のみで、
+      PRで機械検証される仕組みが皆無。vitestは145ファイル2830テストが通る状態だが、
+      「書いてあるのに実行されない」リスクが常時ある。
+
+      変更内容:
+      - .github/workflows/ci.yml を新規作成する
+      - トリガーは push（mainブランチ）と pull_request
+      - Node.js 20 系（package.json の engines は node >=20）で npm ci を実行
+      - npm run lint / npm run typecheck / npm test を実行する
+      - 統合テスト（npm run test:integration）はVSCodeのダウンロードとxvfbが必要なため
+        このタスクでは含めない。含めるかどうかは別途判断する
+      - actions/checkout と actions/setup-node はメジャーバージョンを固定する
+      - npm キャッシュを有効にして実行時間を抑える
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で変更差分を読み直し、意図しない変更が混ざっていないか確認する
+      - ワークフローの権限設定（permissions）が必要最小限になっているか確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - .github/workflows/ci.yml が存在し、YAMLとして妥当であること
+      - ワークフローが lint / typecheck / test の3つを実行すること
+      - ローカルで scripts/check.sh を実行して全緑であること
+
+      注意: このタスクは .github/ 配下のみを触る。src/ や test/ には手を入れない。
+    done: .github/workflows/ci.yml が追加され、scripts/check.sh がローカルで全緑になり、差分の自己レビューを終えていること
+
+  # ================================================================
+  # フェーズ2: 検証済みの確定バグ
+  # ================================================================
+  - id: T02_waiting_reply_settle
+    prompt: |
+      waitingReply 状態のタスクがターン失敗時に確定せず、並列枠を永久に占有する不具合を直す。
+      レビューで最も深刻と判断した指摘（CRITICAL）。根拠はコードを読んで検証済み。
+
+      根拠（検証済み）:
+      - src/orchestrator/runState.ts:234 の isUnsettled は pending / running / waitingApproval の
+        3状態しか返さず、waitingReply を含まない
+      - src/loop/loopController.ts:244 は paused（= waitingReply）中に turnFailed を観測すると
+        stop('failed') を呼ぶ。コメント自身が「返信待ちのまま実は失敗していた、を黙って
+        握り潰さない」と書いており、waitingReply 状態で failed が飛ぶ経路は設計上存在する
+      - src/orchestrator/runner.ts:2485 が applyLoopStopReason(..., 'failed') を呼ぶが、
+        src/orchestrator/runState.ts:396 の `if (!isUnsettled(current.state)) return run;` で
+        素通りするため markFailed に到達せず、状態は waitingReply のまま残る
+      - 一方 src/orchestrator/runner.ts:2487 の条件 `reason !== 'manual' && reason !== 'interrupted'`
+        は真なので session.dispose() は実行される
+      - 結果としてセッションは破棄済みなのにタスクは waitingReply のままとなり、
+        isActiveTaskState が真を返し続けて maxParallel の枠を占有し、getRunOutcome が
+        永久に running を返す
+
+      重要な前提（誤解を避けるため）: manual / interrupted は runState.ts:375 で早期returnされ
+      isUnsettled ガードに到達しないため、「全体の停止」ボタン自体は正しく動作する。
+      stop() の対象リストにも waitingReply は含まれている。今回直すのは failed 経路のみ。
+
+      変更内容:
+      - isUnsettled に waitingReply を追加する
+      - JSDoc の「この3状態」という記述を実態に合わせて更新する
+      - runState.ts:33 の isActiveTaskState のJSDocが「状態を1つ足すたび3箇所を揃える」と
+        書いている集合に isUnsettled も含まれることを明記する
+      - merging を isUnsettled に含めるべきかどうかも検討し、含めない場合はその理由を
+        コメントに残す（マージ中の停止理由の扱いは別の設計判断のため、安易に変えない）
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、状態集合の変更が他の判定へ想定外の影響を与えていないか確認する
+      - isUnsettled を使っている全箇所を grep で洗い出し、waitingReply が加わることで
+        挙動が変わる箇所をすべて把握したうえで、それが意図どおりか判断する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - waitingReply 状態のタスクに applyLoopStopReason(..., 'failed') を与えると failed へ確定する
+        回帰テストを test/unit/runState.test.ts へ追加する
+      - waitingReply 中に turnFailed を観測した場合にタスクが確定することを、
+        test/unit/runner.test.ts のレベルでも確認する回帰テストを追加する
+        （既存テストは running / waitingApproval しか検証していないため、この穴を塞ぐ）
+      - manual / interrupted の既存挙動（タスク自身の状態を変えない）が変わっていないこと
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: isUnsettled に waitingReply が含まれ、failed 経路での確定を検証する回帰テストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T03_runner_dispose
+    prompt: |
+      WorkflowRunner.dispose() が一度も呼ばれず、オーケストレーターセッションが解放されない
+      問題を直す。根拠はコードを読んで検証済み。
+
+      根拠（検証済み）:
+      - src/orchestrator/runner.ts:1463 の WorkflowRunner.dispose() は JSDoc で
+        「拡張機能の終了時にオーケストレーターセッションを解放する」と契約しているが、
+        `.dispose()` の呼び出しが src 配下に一つも無い
+      - src/extension.ts:473 で生成した workflowRunner は context.subscriptions に登録されていない
+      - src/extension.ts:1933 の deactivate() は「subscriptions で破棄されるため個別の後始末は不要」
+        とコメントしているが、この runner はその subscriptions に載っていない
+
+      変更内容:
+      - src/extension.ts:536 の `workflowRunnerRef.current = workflowRunner;` の直後で
+        context.subscriptions.push({ dispose: () => workflowRunner.dispose() }) を追加する
+      - 同種の登録漏れを防ぐため、「生成したDisposableは生成直後に context.subscriptions へ
+        登録する」という規約をコメントで明記する
+      - extension.ts 内の他の生成物についても subscriptions への登録漏れが無いか確認し、
+        漏れがあれば同様に登録する（発見した漏れは最終報告に明記する）
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、dispose の順序が他のDisposableと矛盾しないか確認する
+      - dispose が二重に呼ばれても安全か確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - workflowRunner が context.subscriptions に登録されていること
+      - 拡張の deactivate 時に dispose が呼ばれることを確認するテストを追加できるなら追加する
+      - npm test / npm run typecheck / npm run lint が全緑
+
+      注意: このタスクは src/extension.ts を触る。同じファイルを触る他タスクとは
+      dependsOn で直列化してあるので、順序に従うこと。
+    done: workflowRunner が context.subscriptions へ登録され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T04_retry_suffix
+    prompt: |
+      再試行時のworktree撤去が誤ったディレクトリを対象にする不具合を直す。
+      人が調査用に残したworktreeを消す可能性があるため優先度が高い。
+
+      根拠（監査エージェントの報告。着手前に自分で再確認すること）:
+      - src/orchestrator/runnerMerge.ts:595 は
+        retrySuffixOf(live.runState.tasks.get(taskId)?.retryCount) を呼んでおり、
+        第2引数の manualRetryCount を渡していない
+      - 一方、worktreeを作る側の src/orchestrator/runner.ts:1849 は retryCount と
+        manualRetryCount の両方を渡して `-retry<n>` のサフィックスを決めている
+      - src/orchestrator/runner.ts:2634 の retrySuffixOf のJSDoc自身が「合計する」と明記している
+      - したがって手動再実行が1回でも行われていると、撤去対象のパスが実際に使っている
+        worktreeとは別のディレクトリ（前の試行分。人が調査のために残してあるもの）になる
+
+      変更内容:
+      - runnerMerge.ts:595 の呼び出しを retrySuffixOf(state?.retryCount, state?.manualRetryCount) へ揃える
+      - 同じ計算を複数箇所で書いていることが原因なので、サフィックス算出を1つの関数呼び出しに
+        集約できないか検討する（呼び出し側が引数を1つ忘れるだけで別のディレクトリを指す
+        設計自体が危うい）
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、パス算出の変更が撤去以外の経路へ波及していないか確認する
+      - 破壊的操作（ディレクトリ削除）の対象が正しく絞られているか、境界条件（retryCount=0、
+        manualRetryCount=0、両方undefined）を洗い出して確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - manualRetryCount が 1 以上のときに、生成側と撤去側が同じパスを指すことを検証する
+        回帰テストを追加する
+      - npm test / npm run typecheck / npm run lint が全緑
+
+      安全上の注意: worktreeの削除を伴うコードなので、テストは実際のファイルシステムを
+      破壊しない形（モックまたは一時ディレクトリ）で書くこと。
+    done: 撤去側と生成側が同じサフィックスを算出することを検証する回帰テストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T05_connection_exit
+    prompt: |
+      app-server接続の初期化失敗と接続断で、待機中のPromiseが解放されない問題を直す。
+
+      根拠（1点目は検証済み、2点目以降は監査エージェントの報告）:
+
+      1. 初期化未完了の接続を使い続ける（検証済み）
+         - src/appserver/connection.ts:63 の ensureStarted() は this.proc !== undefined だけを見て
+           早期returnする
+         - src/appserver/connection.ts:76 で this.proc = proc を代入した後、
+           src/appserver/connection.ts:99 で await this.request('initialize', ...) している
+         - initialize が REQUEST_TIMEOUT_MS でタイムアウトしてもプロセス自体は生きているため
+           exit ハンドラは発火せず reset() が呼ばれない。this.proc が残ったままになる
+         - 以降の ensureStarted() は proc !== undefined で即座に成功扱いとなり、
+           ハンドシェイクが完了していない壊れた接続を使い続ける
+
+      2. 接続断が各セッションへ伝わらない（未検証。着手前に確認すること）
+         - src/appserver/connection.ts:177 の reset() は自身の pending（RPC要求）だけを解決し、
+           各 ChatSession に登録済みの waiting / waitingPrompts（承認カード・問い合わせフォーム）へは
+           通知しない
+         - AppServerConnection は全Codexスレッドで共有される単一プロセスのため、
+           app-serverがクラッシュすると開いている全スレッドの承認待ちがタイムアウトも無く
+           永久にハングする
+
+      3. deniedReviews が dispose で解放されない（未検証。軽微）
+         - src/appserver/chatSession.ts の dispose() は waiting / waitingPrompts のみ解放し、
+           deniedReviews は対象外
+
+      変更内容:
+      - start() を try/catch で囲み、initialize が失敗したときは proc.kill() したうえで
+        this.proc と this.starting をリセットする
+      - AppServerConnection に接続断の通知経路（コールバック等）を追加し、reset() から
+        呼び出し側が各 ChatSession の待機Promiseを解放できるようにする
+      - ChatSession.dispose() で deniedReviews もクリアする
+      - 2点目については、実際に ChatSession 側の waiting / waitingPrompts が
+        接続断で解放されないことをコードで確認してから修正する。確認の結果すでに
+        別経路で解放されているなら、その旨を報告して修正を見送ってよい
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、接続断の通知が二重に発火しないか確認する
+      - reset() が再入したときに無限ループにならないか確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - initialize が失敗した後の ensureStarted() が再度起動を試みることを検証するテスト
+      - 接続断で待機中のPromiseが解決されることを検証するテスト
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: 初期化失敗時に接続がリセットされ、接続断が待機Promiseへ伝わることを検証するテストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T06_stream_exit
+    prompt: |
+      Claude CLIが異常終了したときに応答待ちのPromiseが解放されず永久ハングする問題を直す。
+      根拠はコードを読んで検証済み。
+
+      根拠（検証済み）:
+      - src/claude/streamSession.ts:230 の proc.on('exit', ...) ハンドラは this.proc = undefined と
+        state の busy: false / turnFailed: true を設定するだけ
+      - 一方 src/claude/streamSession.ts:1003 の dispose() は waiting（承認）・rewindWaiting・
+        mcpStatusWaiting・skillsWaiting をすべて明示的に解放しており、コメントも
+        「放置するとawaitしている側が永遠に待つ」と書いている
+      - exit / error ハンドラはこの解放処理を一切通らないため、CLIがクラッシュすると
+        requestRewindFiles() / checkMcpStatus() / reloadSkills() のawait元が永久にハングする
+
+      これは connection.ts と共通のパターンで、「dispose() 経路は丁寧だが exit / error 経路だけ
+      解放が抜ける」という非対称がレビューで2ファイルにわたって観測されている。
+
+      変更内容:
+      - exit ハンドラと error ハンドラから、dispose() と同等の解放処理を呼ぶ
+      - 解放処理を private メソッド（例: releasePendingWaiters）へ切り出し、
+        dispose() と異常終了ハンドラの両方がそれを呼ぶ形にする。
+        dispose() 側にはプロセスの kill と stdin の終了が含まれるので、
+        「待機の解放」と「プロセスの後始末」を分けること
+      - start() が同一インスタンス上で複数回呼ばれる（src/view/claudeChatView.ts の
+        複数箇所から同じ entry.session に対して呼ばれる）ため、クラッシュと再起動を
+        繰り返すと前プロセス分の未解決エントリがMapへ積み上がる。start() の冒頭で
+        各Mapをクリアすべきか判断し、クリアする場合は理由をコメントに残す
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、解放処理が二重に走っても安全か確認する
+      - dispose と異常終了の両方から呼ばれる関数が、部分的な状態でも正しく動くか確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - プロセスが応答前に exit したときに rewindWaiting / mcpStatusWaiting / skillsWaiting の
+        await元が解決されることを検証する回帰テストを追加する
+      - 承認待ち（waiting）についても同様に解放されることを確認する
+      - start() の再呼び出しでMapが肥大しないことを確認する
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: exit / error ハンドラが dispose と同等の待機解放を行い、それを検証する回帰テストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T07_pseudo_worktree_catch
+    prompt: |
+      疑似worktreeの統合・反映で未ハンドルrejectが起き、タスクが merging のまま枠を占有する
+      問題を直す。
+
+      根拠（監査エージェントの報告。着手前に自分で確認すること）:
+      - src/orchestrator/runner.ts:2518 の `void integratePseudoWorktree(...)` は try/catch を持たない
+      - その先の applyDiffToIntegration が呼ぶ src/orchestrator/pseudoWorktree.ts:340 付近の
+        fs.mkdir / fs.copyFile は、他のポートメソッドと違って例外をcatchせずthrowする実装になっている
+      - EACCES / ENOSPC などで未ハンドルrejectとなり、タスクは merging のまま永久に枠を占める
+      - src/orchestrator/runner.ts:1823 の `void reflectPseudoWorktree(...)` も同様に無防備で、
+        reflectIntegrationToWorkspace の fs.copyFile / fs.removeFile が throw すると
+        run終了処理の途中で未ハンドルrejectになる
+
+      変更内容:
+      - integratePseudoWorktree の呼び出しを try/catch で包み、失敗を markMergeFailed へ落とす
+      - reflectPseudoWorktree の呼び出しも同様に包み、失敗を警告として記録する
+        （run終了処理の途中なので、ここで例外を投げると後始末が中断する）
+      - pseudoWorktree.ts 側のポートメソッドが throw する設計と、他のポートメソッドが
+        catchする設計が混在している点を確認し、どちらかへ揃えるべきか判断して報告する
+      - runner.ts 内の他の `void someAsyncFn(...)` 形式についても、rejectしうるものが
+        放置されていないか確認する。特に `void this.persist(runId)` は SerialQueue.enqueue が
+        呼び出し元へrejectするPromiseを返すため、memento.update が失敗すると
+        未ハンドルrejectになる。persist 内でcatchしてログへ落とす
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、catchが例外を握り潰すだけになっていないか確認する
+        （必ずログか状態遷移のどちらかで失敗が可視化されること）
+      - 失敗時にタスクが確実に終端状態へ落ちるか、経路を追って確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - 統合・反映が失敗したときにタスクが merging のまま残らず、失敗として確定することを
+        検証する回帰テストを追加する
+      - persist の失敗がログへ落ちることを確認する
+      - npm test / npm run typecheck / npm run lint が全緑
+
+      注意: このタスクは src/orchestrator/runner.ts を触る。同じファイルを触る T08 とは
+      dependsOn で直列化してある。
+    done: 疑似worktreeの統合・反映の失敗が捕捉されてタスクが確定し、それを検証する回帰テストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T08_stop_and_persist
+    dependsOn: [T07_pseudo_worktree_catch]
+    prompt: |
+      「全体の停止」が衝突解決セッションを止めない問題と、永続化の時点ずれを直す。
+
+      根拠（いずれも監査エージェントの報告。着手前に自分で確認すること）:
+
+      1. 衝突解決セッションが停止対象から漏れている
+         - src/orchestrator/runner.ts:1274 の stop() は live.tasks しか走査しておらず、
+           src/orchestrator/runner.ts:763 付近で管理している live.mergeResolutions
+           （統合worktree上で開く衝突解決セッション）へ stopLoop() を送っていない
+         - Issue #322 が問題視した「停止ボタンを押しても指示が送られ続ける」状態が、
+           衝突解決セッションについてはそのまま残っている
+
+      2. stop() が pump() を呼ばない
+         - ライブセッションが1つも無いrun（リロード後の復元済みなど）を停止したとき、
+           run終了時の後始末（transport.close / clearInterval / オーケストレーターへの終了通知、
+           runner.ts:1830 付近）が一度も走らない可能性がある
+
+      3. persist の outcome が別時点の値になる
+         - src/orchestrator/runner.ts:2570 の persist() は outcome を呼び出し時点で計算する一方、
+           store.update に渡す updater は直列キューが捌く時点の live.runState / live.tasks を読む
+         - 両者が別時点の値になるため、終了済みのタスク一覧に finishedAt: undefined が付く、
+           あるいは早すぎる finishedAt が固定される（`current?.finishedAt ?? ...` で上書き不能）
+
+      補足（レビューで確認済みの事実。誤解しないこと）: stop() 自体は正しく動作しており、
+      live.tasks 側の running / waitingApproval / waitingReply には stopLoop() が送られている。
+      applyLoopStopReason の manual 経路も設計どおり haltedByUser を立てる。
+      不足しているのは mergeResolutions の走査と pump の呼び出し。
+
+      変更内容:
+      - stop() で live.mergeResolutions の各セッションにも stopLoop() を送る
+      - 停止された衝突解決セッションが onMergeResolutionFinished の manual / interrupted 経路へ
+        合流し、タスクが適切な状態へ落ちることを確認する
+      - stop() の末尾で pump(runId) を呼ぶべきか確認し、必要なら追加する
+      - persist の updater の内側で getRunOutcome を計算するよう直す
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、pump の追加が停止処理中に新しいタスクを開始してしまわないか
+        確認する（haltedByUser が立っている状態で pump が何をするかを必ず追うこと）
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - 衝突解決セッションが走っている状態で stop() を呼ぶと、そのセッションにも
+        stopLoop() が送られることを検証する回帰テストを追加する
+      - ライブセッションが無いrunを停止したときに後始末が走ることを確認する
+      - persist の outcome とタスク一覧が同一時点の値になることを検証するテストを追加する
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: stop() が衝突解決セッションも停止し pump を通し、persist の時点ずれが解消され、回帰テストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T09_forge
+    prompt: |
+      PR/MR操作の2件の不具合を直す。
+
+      根拠（いずれも監査エージェントの報告。着手前に自分で確認すること）:
+
+      1. マージが番号なしで実行される（重大）
+         - src/orchestrator/forge.ts:897 の buildFinalMergeArgs は
+           `gh pr merge --merge` / `glab mr merge --remove-source-branch` を番号なしで実行している
+         - 番号を省略すると、マージ対象は「cwd（統合worktree）のカレントブランチに紐づくPR/MR」という
+           暗黙の状態依存になる。ブランチがずれていれば無関係のPR/MRがmainへマージされる
+         - 直前に呼ばれる markPullRequestReady は src/orchestrator/runner.ts:2300 付近で
+           live.integrationPullRequest.number を持っているため、同じ番号をマージにも渡せる
+
+      2. Windowsで gh / glab を発見できない
+         - src/orchestrator/forge.ts:173 の nodeCliAvailability.isOnPath は
+           path.join(dir, command) を拡張子なしで見るだけなので、Windowsでは gh.exe / glab.cmd を
+           見つけられず常に「PATHに無い」と判定される
+         - checkForgePrerequisites は警告を出すだけでrunは続くため、PR/MR作成が黙って飛ばされる
+         - src/codex/cliLocator.ts が同種の解決をどう扱っているか確認し、そちらへ揃える
+
+      変更内容:
+      - runFinalMerge に PR/MR 番号を渡し、buildFinalMergeArgs が番号付きのコマンドを組み立てる
+      - 番号が取得できないときは、ready化と同様にマージを飛ばして警告を出す
+        （番号不明のままカレントブランチ依存でマージするのは危険なので「わからないなら実行しない」に倒す）
+      - 引数は既存の方針どおり `--flag=value` の1トークン形式を維持すること
+      - isOnPath を PATHEXT を考慮した候補展開へ直す
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、CLI引数の組み立てで値がオプションとして解釈されうる
+        形になっていないか確認する（既存の1トークン形式の防御を壊していないこと）
+      - マージを飛ばす条件が広すぎて正常系まで止めていないか確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - buildFinalMergeArgs が番号を含むことを検証するテスト
+      - 番号が undefined のときにマージを実行せず警告を返すことを検証するテスト
+      - Windowsの拡張子付き実行ファイルを発見できることを検証するテスト
+      - npm test / npm run typecheck / npm run lint が全緑
+
+      安全上の注意: このコードは実際にmainブランチへのマージを行う。テストでは実CLIを
+      呼ばず、コマンド引数の組み立て結果を検証する形にすること。
+    done: 最終マージがPR/MR番号を指定して実行され番号不明時は実行せず、Windowsでも実行ファイルを発見でき、テストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T10_untrusted_text
+    prompt: |
+      外部由来テキストがプロンプトへ無加工で流れる経路を塞ぎ、サニタイズを1箇所へ集約する。
+
+      背景: レビューで「外部テキストを指示として再解釈させない」防御が src/orchestrator/workflow.ts に
+      集中し、planner.ts は入口の一部だけ、roadmap.ts はほぼ無防備という濃度差が指摘された。
+
+      根拠（いずれも監査エージェントの報告。着手前に自分で確認すること）:
+
+      1. src/orchestrator/workflow.ts:1422
+         - テンプレート変数 files の展開値は result.files.join('\n') をそのまま差し込むだけで、
+           wrapAsUntrustedData も truncateForTemplate も通らない
+         - workflow.ts:993 付近の referencedResultFields が result / summary 以外を除外するため、
+           権限エスカレーション警告の対象にもならない
+         - 実体は src/orchestrator/runner.ts:2476 の state.turnEditedFiles、
+           つまりCLIが報告した編集ファイル名というエージェント由来の文字列である
+
+      2. src/orchestrator/roadmap.ts:764
+         - 既存Issueのタイトルを `- #<番号> <タイトル>` の形で生成プロンプトへ無加工結合している
+         - 入力は gh issue list / glab issue list の戻り、つまり誰でも起票できる外部テキスト
+         - 改行を含むタイトルで偽の見出しや指示文を注入できる
+         - 生成されたロードマップは後段でワークフローの prompt になるため、実行系まで届く
+
+      3. src/orchestrator/roadmap.ts:745
+         - workspaceSummary（src/extension.ts:1245 の listWorkspaceSummary 由来）が
+           sanitizeEntryName を通しておらず、planner経路（planner.ts:96）にある防御が
+           ロードマップ経路にだけ無い
+
+      4. src/orchestrator/roadmap.ts:394 と 405
+         - formatRoadmapMaterial がロードマップ項目の本文を、buildRoadmapPlanGoal が
+           ロードマップのタイトルを、いずれも囲い・長さ上限なしで分解プロンプトへ埋め込む
+         - planner.ts:266 の goal 埋め込みも同様
+
+      変更内容:
+      - untrustedテキストの整形（制御文字除去 + 長さ切り詰め + 「データであって指示ではない」囲い）を
+        1つのモジュールへ抽出する
+      - workflow.ts / roadmap.ts / planner.ts のプロンプト組み立て経路をすべてそこへ通す
+      - files の展開も result / summary と同じ囲いと上限を通し、referencedResultFields の
+        対象フィールドへ files を加える
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、サニタイズを通していない経路が残っていないか grep で確認する
+      - 囲いの区切り文字列自体を注入されて脱出できないか（nonce の扱い）を確認する
+      - 既存の防御を弱めていないか確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - 改行や制御文字を含むIssueタイトルがプロンプトへ注入できないことを検証するテスト
+      - files の展開に長さ上限と囲いが効いていることを検証するテスト
+      - 既存のテンプレート展開のテストが壊れていないこと
+      - npm test / npm run typecheck / npm run lint が全緑
+
+      注意: このタスクは workflow.ts / roadmap.ts / planner.ts を触る。
+      後続の T15 / T16 が同じファイルを触るため dependsOn で直列化してある。
+    done: untrustedテキストの整形が1モジュールへ集約され全経路がそこを通り、注入を防ぐテストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T12_dead_code
+    provider: claude
+    type: refactor
+    prompt: |
+      未使用になっている AgentProvider.buildLaunch 経路を整理する。
+      根拠はコードを読んで検証済み。
+
+      根拠（検証済み）:
+      - `.buildLaunch(` の呼び出しが src 配下に一つも無い
+      - src/provider/types.ts:75 に buildLaunch がインターフェースとして宣言され、
+        src/codex/provider.ts:38 と src/claude/provider.ts:43 が両方とも実装しているが、
+        どこからも呼ばれていない
+      - 巻き添えで次の関数も src 内では buildLaunch 経由でしか使われていない:
+        src/codex/argvBuilder.ts:52 の buildShellArgs、
+        src/codex/argvBuilder.ts:185 の buildLaunchEnv、
+        src/claude/argvBuilder.ts:63 の buildClaudeShellArgs
+      - test/unit/argvBuilder.test.ts（294行）がこの未使用コードを検証している
+
+      重要（削除範囲を誤らないこと）: 同じファイル内の次の関数は現役で使われているため、
+      argvBuilder.ts をファイルごと削除してはいけない:
+      - isSessionId（src/codex/appServerClient.ts:106 と src/claude/transcript.ts:32 が使用）
+      - describeUnsafeCombination（src/view/chatView.ts:272 が使用）
+      - buildClaudeStreamArgs（src/claude/streamSession.ts:190 が使用）
+      - isUnsafeClaudeCombination（src/view/claudeChatView.ts:422 が使用）
+
+      変更内容:
+      - まず buildLaunch がなぜ実装されていて呼ばれていないのか、git log で経緯を調べる。
+        将来の配線を見越して意図的に用意された可能性があるため、削除の前に判断材料を集める
+      - 削除が妥当と判断した場合は、buildLaunch / buildShellArgs / buildLaunchEnv /
+        buildClaudeShellArgs と、それらを対象とするテストを削除する
+      - 将来使う意図があると判断した場合は削除せず、「現在は未配線である」ことを
+        JSDocへ明記して、なぜ残すのかを記録する
+      - どちらを選んだかとその理由を最終報告に必ず書くこと
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、現役の関数を巻き込んで消していないか確認する
+      - 削除後に npm run typecheck が通ることで参照漏れが無いことを確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - 現役の関数（上記4つ）が引き続き使われ、テストも残っていること
+      - npm test / npm run typecheck / npm run lint が全緑
+      - 判断の理由が報告されていること
+    done: buildLaunch経路の扱いが判断され削除または意図の明記が完了し、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T13_manifest_restore
+    prompt: |
+      リロード復元後に統合成果がワークスペースへ届かない問題を直す。
+      「失敗が成功に見える」型の不具合のため、他のMEDIUM指摘より優先度が高い。
+
+      根拠（監査エージェントの報告。着手前に自分で確認すること）:
+
+      1. マニフェストが復元されない
+         - src/orchestrator/runnerWorkingDirectory.ts:255 は、リロード復元時に
+           new PseudoWorktreeIntegrationQueue() を空のマニフェストで作り直す
+         - src/orchestrator/pseudoWorktree.ts:147 の serializeManifest と
+           同:152 の deserializeManifest は本体コードのどこからも呼ばれておらず、
+           参照はテストのみ。つまり統合済みパスの記録が永続化も復元もされていない
+
+      2. その帰結として成果が黙って消える
+         - src/orchestrator/runnerWorkingDirectory.ts:324 で復元後にrunが終了すると、
+           reflectIntegrationToWorkspace は空マニフェストを走査して「0件反映」で成功扱いになる
+         - 統合できていた成果がワークスペースへ届かないまま、エラーも警告も出ない
+
+      3. 分岐元の読み取りに競合がある
+         - src/orchestrator/runnerWorkingDirectory.ts:197 の resolveTaskBranchOrigin
+           （統合worktreeのHEAD読み取り）が worktreeQueue の外で行われ、
+           その後の worktreeQueue.create との間に別タスクのマージが割り込みうる
+         - 分岐元が1マージ分古くなり、避けられたはずの衝突を生む
+
+      変更内容:
+      - マニフェストを統合ディレクトリ配下へ永続化し、復元時に読み戻す
+      - 復元できない場合は「0件で成功」にせず、反映を行わずに明示的な警告を出す
+        （黙って成果を捨てるより、人が気づける形にする方が安全）
+      - resolveTaskBranchOrigin のHEAD読み取りと worktree 作成を同一の enqueue にまとめる
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、マニフェストの書き込みが失敗したときに
+        run 本体が巻き込まれて落ちないか確認する
+      - 「反映しない」判断に倒したとき、人がその事実に気づける経路（警告・ログ）が
+        確実にあるか確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - マニフェストが永続化され復元されることを検証するテスト
+      - 復元できないときに黙って成功扱いにせず警告を出すことを検証するテスト
+      - HEAD読み取りと worktree 作成が排他されることを検証するテスト
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: マニフェストの永続化と復元が実装され復元不能時は警告を出し、HEAD読み取りが排他され、テストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T14_messaging
+    prompt: |
+      タスク間メッセージングの4件の不具合を直す。
+
+      根拠（いずれも監査エージェントの報告。着手前に自分で確認すること）:
+
+      1. トークンが失効しない（src/orchestrator/messaging.ts:1141）
+         - registerTask はトークンを tokenToTaskId へ追加するだけで古いトークンを消さない
+         - messaging.ts:999 付近のJSDocが書いている「古いURLは以後404になる」が成立していない
+         - 再試行前の古いセッション（残存CLIプロセス）が同じタスクidを名乗って
+           send_message を送り続けられる
+
+      2. dispatch の例外でCLIがハングする（src/orchestrator/messaging.ts:873）
+         - handleConnection は dispatch を try/catch せずに呼ぶため、制御ツール実体
+           （OrchestratorControlPort の各メソッド）が例外を投げるとHTTPレスポンスが返らない
+         - 呼び出したCLIはそのツール呼び出しで待ち続け、例外は拡張機能ホストの
+           未処理例外になる
+
+      3. 自己宛送信が成立する（src/orchestrator/messaging.ts:149）
+         - validateSendMessage は to === from を弾かない
+         - src/orchestrator/runnerMessaging.ts:57 付近の onMessageAccepted が
+           同一タスクを waitingReply にした直後に自分で解除するという無意味な往復が起きる
+
+      4. 長さ判定の単位がずれている（src/orchestrator/messaging.ts:155）
+         - input.body.length（UTF-16コード単位）で上限判定しているが、同種の上限
+           （workflow.ts:1329 の truncateByCodePoint）はコードポイント単位
+
+      変更内容:
+      - 発行時に同一 taskId の既存トークンを削除し、run終了時にマップを空にする
+      - dispatch を try/catch で包み、JSON-RPCのエラーレスポンス（-32603）へ変換する
+      - 自己宛は accepted: false で拒否する
+      - 長さ判定をコードポイント単位へ揃える
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、トークン削除のタイミングが正常系の送信を巻き込まないか確認する
+      - エラーレスポンスに内部情報（スタックトレース・パス）が漏れていないか確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - 再登録で古いトークンが無効になることを検証するテスト
+      - dispatch が例外を投げてもエラーレスポンスが返ることを検証するテスト
+      - 自己宛送信が拒否されることを検証するテスト
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: トークン失効・dispatch例外処理・自己宛拒否・コードポイント単位の長さ判定が実装され、テストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T15_planner
+    dependsOn: [T10_untrusted_text]
+    prompt: |
+      ワークフロー生成（planner）の3件の不具合を直す。
+
+      根拠（いずれも監査エージェントの報告。着手前に自分で確認すること）:
+
+      1. コードフェンスの選び方が誤っている（src/orchestrator/planner.ts:339）
+         - extractYamlFromResponse の「最初のコードフェンス」規則は、応答に先行する
+           別言語のフェンス（例: bash）があると、その閉じフェンスから次のフェンスまで、
+           つまり本文ではなく地の文を拾う
+         - 監査時の実測では "これが定義です。\n" のような地の文が返ることが確認されている
+
+      2. 切り詰められた応答が「成功」になる（同上）
+         - 応答がタスク境界で切れた場合、YAMLとしては正しくパースできてしまう
+           （yaml.parse は途中終了に寛容）
+         - validateWorkflow も件数を知らないため、タスクが欠けた定義が成功として保存されうる
+
+      3. 単発ターンにタイムアウトが無い（src/orchestrator/planner.ts:799）
+         - sendSingleTurn の Promise はタイムアウトを持たず、onFinished が一度も
+           呼ばれない終わり方（プロセス消滅・イベント取りこぼし）をすると永久に解決しない
+         - finally の session.dispose() にも到達しないためセッションが残ったままコマンドが固まる
+
+      変更内容:
+      - 言語タグを見て yaml または無印のフェンスを優先し、複数候補があれば
+        パースに成功したものを選ぶ
+      - 期待タスク数（ロードマップ経路では材料の件数）との突き合わせを
+        tryParseAndValidate の後に必ず行い、欠落があれば detectRoadmapMaterialMismatches と
+        同じ扱いで人へ見せる
+      - 上限時間つきの Promise.race で打ち切り、打ち切り時も dispose する
+      - src/orchestrator/planner.ts:547 の slugifyGoal と roadmap.ts:896 の同名関数が
+        別実装で二重に存在する問題も確認する（統合は T16 が担当するので、
+        ここでは planner.ts 側を正とする前提で状況を報告するだけでよい）
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、フェンス選択の変更で既存の正常な応答が
+        パースできなくなっていないか確認する
+      - タイムアウト値が短すぎて正常な生成を打ち切らないか確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - 先行する別言語フェンスがある応答から正しくYAMLを取り出せることを検証するテスト
+      - タスクが欠けた応答を検出することを検証するテスト
+      - タイムアウトで打ち切られセッションが解放されることを検証するテスト
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: フェンス選択と欠落検出とタイムアウトが実装され、テストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T16_roadmap_parse
+    dependsOn: [T10_untrusted_text, T15_planner]
+    prompt: |
+      ロードマップMarkdownのパースを堅くし、破壊的な自動修正の入力として安全にする。
+
+      背景: ロードマップのパースは正規表現の直列読みで揺れに弱く、しかも
+      alignRoadmapIssues という破壊的な自動修正の入力になっている。
+
+      根拠（いずれも監査エージェントの報告。着手前に自分で確認すること）:
+
+      1. Issue行のパターンが厳しすぎる（src/orchestrator/roadmap.ts:76）
+         - ISSUE_LINE_PATTERN は `- Issue: #12` の完全一致しか受けない
+         - `- Issue: #12（既存）` のような揺れで item.issue が undefined になり、
+           src/orchestrator/roadmap.ts:541 の alignRoadmapIssues が生成YAMLの正しい issue: を
+           機械的に削除して `Closes #<N>` の紐付けを失う
+
+      2. チェックボックス行のパターンが厳しすぎる（src/orchestrator/roadmap.ts:74）
+         - CHECKBOX_ITEM_PATTERN は行頭 `- [ ] ` の形しか受け付けず、
+           インデントされた項目や `* [ ]` 表記は無言で捨てられる
+
+      3. 改行コードが書き換わる（src/orchestrator/roadmap.ts:695）
+         - applyRunCompletion は split して join('\n') で書き戻すため、
+           チェック1個の更新でCRLFのロードマップ全体がLFへ書き換わる
+
+      4. 重複idで意図しない行にチェックが入る（src/orchestrator/roadmap.ts:672）
+         - itemsById は同一idの項目が複数あると後勝ちになり、applyRunCompletionToFile は
+           validateRoadmap（重複をエラーにする）を経由しない
+
+      5. slugifyGoal の二重実装（src/orchestrator/roadmap.ts:896）
+         - planner.ts:547 と同名・別実装で、上限40文字と60文字、文字クラスも異なる
+         - roadmap.ts 側だけ stripControlChars を通さないため、双方向制御文字やNULが
+           そのままファイル名候補になる（現在の配線では未使用の経路）
+
+      変更内容:
+      - 行末の余剰テキストを許容するか、パース不能な Issue: 行を検出したら
+        削除ではなく警告に倒す（自動修正は「確実に読めた項目」に限る）
+      - 先頭の空白と `-` / `*` / `+` を許容し、チェックボックスらしき未マッチ行が
+        残った場合は警告として返す
+      - 元の改行コードを検出して復元する
+      - 書き戻し前に重複idを検出し、その場合は何もせず警告を返す
+      - slugifyGoal は planner.ts の実装へ一本化し、roadmap.ts 側は削除する
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、パースの緩和が誤検出を生まないか確認する
+      - 破壊的な自動修正（alignRoadmapIssues）の発火条件が狭まっていることを確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - 揺れのあるIssue行・チェックボックス行を扱えることを検証するテスト
+      - CRLFのロードマップが改行を保ったまま更新されることを検証するテスト
+      - 重複idのときに書き戻さず警告を返すことを検証するテスト
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: ロードマップのパースが揺れに耐え改行を保ち重複idで停止し slugifyGoal が一本化され、テストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T17_stream_robustness
+    dependsOn: [T05_connection_exit, T06_stream_exit]
+    prompt: |
+      ストリーム受信とプロセス終了の頑健性を上げる。T05 / T06 と同じファイルを触るため
+      それらの後に実行する。
+
+      根拠（いずれも監査エージェントの報告。着手前に自分で確認すること）:
+
+      1. 受信バッファが無制限（src/codex/jsonRpc.ts:19 の consumeFrames、
+         src/util/ndjson.ts:13 の consumeNdjson）
+         - どちらも改行が来るまで buffer へ無制限に連結し続ける
+         - CLI側が改行を含まない巨大な非JSON出力（診断ログの乱れ・バイナリ混入等）を
+           吐き続けた場合、上限なくメモリを消費する
+
+      2. kill にエスカレーションが無い（src/appserver/connection.ts:188、
+         src/claude/streamSession.ts:1031、src/codex/appServerClient.ts:742 ほか全 proc.kill()）
+         - いずれも既定のSIGTERM送信のみで、exit が実際に発火したかの確認や
+           SIGKILLへのエスカレーションが無い
+         - 子プロセスがハングしてSIGTERMに応答しない場合、回収されずに残り続ける
+
+      3. finish 後に pending が宙に浮く（src/codex/appServerClient.ts:736 と 790）
+         - finish() がタイムアウトや exit で先に確定した場合でも、body() が内部で
+           待っている request() の Promise は未解決のまま放置される
+
+      変更内容:
+      - バッファ長に上限を設け、超過時は接続を切って再起動する
+      - kill() 後に短いタイマーで exit 未発火なら kill('SIGKILL') する共通処理を用意し、
+        全ての proc.kill() 呼び出しをそこへ寄せる
+      - finish() 内で pending の残りエントリもエラー値で即時解決する
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、バッファ上限が正常な大きい応答を切ってしまわないか確認する
+        （上限値の根拠を必ずコメントに残すこと）
+      - SIGKILLのタイマーがプロセス正常終了後も残らないか確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - バッファ上限超過で接続が切られることを検証するテスト
+      - SIGTERMに応答しないプロセスがSIGKILLされることを検証するテスト
+      - finish 後に pending が解決されることを検証するテスト
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: バッファ上限とSIGKILLエスカレーションとpendingの解放が実装され、テストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T19_session_perf
+    dependsOn: [T03_runner_dispose]
+    prompt: |
+      セッション一覧まわりの性能とキャッシュの3件を直す。src/extension.ts を触るため
+      T03 の後に実行する。
+
+      根拠（1件目は検証済み、他は監査エージェントの報告）:
+
+      1. pruneCache が呼ばれない（検証済み）
+         - src/session/sessionStore.ts:279 の pruneCache() は src 配下から一度も呼ばれていない
+           （参照は test/unit/sessionStore.test.ts のみ）
+         - 既定経路である thread/list 成功時の buildFromThreadList（sessionStore.ts:106 付近）は
+           キャッシュ削除処理を一切通らない
+         - このため thread/list が使える環境では、アーカイブ・削除済みセッションの SessionMeta が
+           globalState の META_CACHE_KEY（src/extension.ts:139 と 274 付近）に溜まり続ける
+
+      2. 逐次の mtime 取得（src/session/usageReader.ts:32、src/session/sessionStore.ts:185）
+         - newestRollout() が全rolloutファイルへ mtimeMs を逐次（並列化なし）呼ぶ。
+           app-server経由の使用量取得が失敗・未接続のときのフォールバックとして、
+           会話中は onRolloutChanged の1.5秒debounceのたびに実行されうる
+         - orderByRecency は listFromFiles 経路で maxEntries による絞り込み前に
+           located全件へ mtimeMs を逐次呼ぶ
+
+      3. basename の再実装（src/session/sessionStore.ts:47）
+         - src/util/paths.ts:6 の basenameOf と同一目的・同一実装を再実装している
+         - 同種の重複が src/provider/commandCatalog.ts:19 と src/claude/sessionStore.ts:14 にもある
+         - util側は sessionTreeProvider.ts と sessionGrouping.ts では正しく利用されている
+
+      変更内容:
+      - activate() の起動時か適切な契機で store.pruneCache() を呼ぶ経路を追加する。
+        起動時に呼ぶ場合は非同期で実行し、失敗してもactivateを妨げないようにする
+      - mtime 取得を Promise.all で並列化するか、絞り込み後に限定する
+      - basename の再実装を util/paths.ts の basenameOf へ一本化する
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、起動処理に同期的な重い処理を足していないか確認する
+      - basename の統合で挙動が変わるエッジケース（末尾スラッシュ、Windowsのバックスラッシュ）を確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - pruneCache が実行経路から呼ばれることを検証するテスト
+      - basename の統合後も既存テストが通ること
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: pruneCacheが呼ばれmtime取得が並列化されbasenameが一本化され、テストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T20_orchestrator_warn
+    prompt: |
+      オーケストレーターの警告が無制限に増える問題を直す。
+
+      根拠（監査エージェントの報告。着手前に自分で確認すること）:
+      - src/orchestrator/runnerOrchestrator.ts:252 の orchestratorPromptOverride の警告だけ
+        重複排除も上限も無い
+      - 同種の checkEffectivePermissionEscalation / checkMessagingPermissionEscalation は
+        src/orchestrator/runnerSnapshot.ts:220 と 288 で alreadyWarned を見ている
+      - update_task_prompt の呼び出し回数に上限が無いため live.warnings が無制限に伸び、
+        その都度 notify でView全体へ送られる
+      - あわせて src/orchestrator/runnerSnapshot.ts:103 の buildTaskSnapshot が
+        タスクごとに store.find(runId)（memento全件走査）を呼ぶため、
+        getSnapshot 1回でタスク数+1回のストア読み出しが起きる。notify は
+        ストリーミング中の状態変化ごとに発火するので頻度が高い
+
+      変更内容:
+      - 同一taskIdの警告を直近1件へ丸めるか、件数上限を設ける
+      - getSnapshot の先頭で1回引いた persisted を buildTaskSnapshot へ渡す
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、警告の丸めで重要な情報が失われないか確認する
+        （警告が出た事実自体は残ること）
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - 同一taskIdの警告が無制限に増えないことを検証するテスト
+      - getSnapshot のストア読み出しが1回になることを検証するテスト
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: 警告の重複排除とスナップショットのストア読み出し削減が実装され、テストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  - id: T21_integration_lock
+    provider: claude
+    dependsOn: [T04_retry_suffix, T13_manifest_restore]
+    prompt: |
+      統合worktreeの排他制御を調査し、必要なら修正する。
+      このタスクは「未検証の指摘の裏取り」から始める点が他と異なる。
+
+      監査エージェントはこれをCRITICAL 2件として報告したが、レビュー時に本体側での
+      裏取りができていない。したがって、まず再現条件をコードから確認し、
+      実際に問題があると確認できた場合にのみ修正すること。問題が無いと判断した場合は、
+      なぜ無いのか（既存のどの仕組みが守っているのか）を報告して修正を見送ってよい。
+
+      報告された内容（未検証）:
+
+      1. 衝突解決中の統合worktreeが排他制御の外にある
+         - src/orchestrator/runnerMerge.ts:372 は衝突時、統合worktreeを衝突状態のまま放置して
+           衝突解決セッション（LLMの複数ターン）を開く
+         - この「占有」は IntegrationMergeQueue の外にある
+         - 並列タスクが同時期に完了すると src/orchestrator/integration.ts:403 の mergeTaskBranch が
+           同じ統合worktreeで git merge を叩き、失敗後の
+           src/orchestrator/integration.ts:412 の `git diff --diff-filter=U` が
+           前の衝突の未解決パスを返すため、2件目も conflict と誤判定される
+
+      2. abortMerge が他方の作業を巻き戻す
+         - 上の状態で片方が abortAndBlock に到達すると、
+           src/orchestrator/runnerMerge.ts:529 の abortMerge（git merge --abort）が
+           もう一方の解決セッションの作業中インデックスごと巻き戻す
+         - 破壊的操作の前に「自分が起こしたマージか」を確認していない
+
+      3. 復元時のマージが一斉に走る（src/orchestrator/runnerRestore.ts:55）
+         - 復元時に merging の全タスクへ同時に startMerge を投げるため、
+           上の競合が復元直後にまとめて発火しうる
+
+      4. 衝突解決セッションに上限が無い（src/orchestrator/runnerMerge.ts:455）
+         - onStateChanged も承認ハンドラも付けず、タイムアウトも無い
+         - 人が承認カードを放置すると merging のまま無期限に枠を占め、runが終わらない
+
+      調査手順:
+      - IntegrationMergeQueue の実装を読み、衝突解決中に他タスクの mergeTask が
+        実行されうるかを確認する
+      - 確認できたら、その状態で git diff --diff-filter=U が何を返すかを整理する
+      - abortMerge の呼び出し条件と、そのとき MERGE_HEAD が何を指しているかを確認する
+
+      修正する場合の方針:
+      - 統合worktreeを「1度に1つの操作しか持てない資源」として明示的にリース化し、
+        衝突解決の占有も IntegrationMergeQueue に載せる
+      - abortMerge の実行前に、解決対象が現在の MERGE_HEAD に対応することを確認する
+      - 復元経路のマージは1件ずつ直列に行う
+      - MERGE_RESOLUTION_MAX_ITERATIONS とは別に経過時間の上限を設けるか、
+        Viewから解決セッションを止められるようにする
+
+      自己レビュー（完了前に必ず実施）:
+      - git diff で差分を読み直し、リースの取得と解放が例外経路でも必ず対になっているか確認する
+        （解放漏れはデッドロックになる）
+      - git merge --abort の実行条件が十分に狭いか確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - 調査結果（問題の有無と根拠）が報告されていること
+      - 問題があった場合は、並列マージ時に衝突解決が排他されることを検証するテストを追加する
+      - npm test / npm run typecheck / npm run lint が全緑
+
+      安全上の注意: git merge --abort を扱うコードなので、テストは実リポジトリを
+      破壊しない形（一時リポジトリまたはモック）で書くこと。
+    done: 統合worktreeの排他制御について調査結果が報告され問題があれば修正とテストが追加され、全テストが緑で、差分の自己レビューを終えていること
+
+  # ================================================================
+  # フェーズ3: テスト補強と構造リファクタ
+  # ================================================================
+  - id: T25_repo_hygiene
+    provider: claude
+    type: docs
+    prompt: |
+      リポジトリ衛生の課題を調査し、対処方針を文書としてまとめる。
+
+      重要（安全上の制約）: このタスクでは破壊的操作を実行してはいけない。
+      リモートブランチの削除、git filter-branch、force push、履歴の書き換えは
+      いずれも実行せず、「何をすべきか」の提案だけを文書に残すこと。
+      実行するかどうかは人が判断する。
+
+      調査対象（レビューで観測済み）:
+
+      1. リポジトリサイズ
+         - git count-objects の size-pack が 48.5 MiB
+         - docs/design.md が 729KB あり、156回のコミットで改訂されている
+         - 累積の blob サイズを見ると上位10件がすべて docs/design.md の各版
+         - つまり pack 肥大の主因はこのファイルの改訂履歴
+
+      2. 不要ブランチ
+         - origin/feat/327/workflow-branch-naming-conventions がマージ済みのまま残存している
+
+      3. カバレッジ計測の不在
+         - @vitest/coverage-v8 等が package.json に無く、vitest.config.ts にも coverage ブロックが無い
+         - .gitignore に coverage/ はあるが生成する仕組みが無く形骸化している
+         - CLAUDE.md の「Test coverage 80%以上」という規約を機械的に検証する術が無い
+
+      変更内容:
+      - docs/ 配下に調査結果と提案をまとめた文書を1つ作る
+      - design.md については、分割（章ごとのファイルへ）・履歴の扱い・今後の運用の
+        選択肢を並べ、それぞれの利点と欠点を書く。履歴書き換えは「可能だが推奨しない」
+        理由も含めて書くこと（共有リポジトリでの force push の影響）
+      - 残存ブランチは削除コマンドを提示するだけにとどめる
+      - カバレッジ計測の導入手順と、閾値をいきなり80%にすべきでない理由
+        （既存テストの実態を測ってから決める）を書く
+
+      自己レビュー（完了前に必ず実施）:
+      - 文書に破壊的コマンドを「実行してよい」と読める書き方をしていないか確認する
+      - 指摘が出たら潰す。潰せないものは最終報告に残す
+
+      受入基準:
+      - docs/ 配下に提案文書が1つ追加されていること
+      - 破壊的操作を実行していないこと
+      - 提案がそれぞれ利点と欠点つきで書かれていること
+    done: リポジトリ衛生の調査結果と提案が docs 配下の文書としてまとまり破壊的操作を実行しておらず、差分の自己レビューを終えていること
+
+
+  # ================================================================
+  # 横断レビュー（このワークフローの全タスクの後）
+  # ================================================================
+  - id: Z01_core_review
+    provider: claude
+    type: refactor
+    dependsOn:
+      - T01_ci
+      - T02_waiting_reply_settle
+      - T03_runner_dispose
+      - T04_retry_suffix
+      - T05_connection_exit
+      - T06_stream_exit
+      - T07_pseudo_worktree_catch
+      - T08_stop_and_persist
+      - T09_forge
+      - T10_untrusted_text
+      - T12_dead_code
+      - T13_manifest_restore
+      - T14_messaging
+      - T15_planner
+      - T16_roadmap_parse
+      - T17_stream_robustness
+      - T19_session_perf
+      - T20_orchestrator_warn
+      - T21_integration_lock
+      - T25_repo_hygiene
+    prompt: |
+      統合ブランチに入った全変更をまとめてレビューする。このタスクは実装ではなくレビューが主目的。
+
+      背景: このワークフローは2026-08-22の全体レビューで挙がった指摘のうち、
+      ワークフロー基盤側（orchestrator / loop / appserver / claude / codex / session / extension）を
+      20タスクで修正してきた。各タスクは自分の差分を自己レビューしているが、
+      タスク横断の問題（タスク間の矛盾、重複した修正、片方だけ直された非対称、
+      統合時に生まれた不整合）は個々のタスクからは見えない。それをここで拾う。
+
+      あなたのworktreeは統合ブランチから切られているため、先行する全タスクの成果が入っている。
+
+      重要: View層（src/view/）は別のワークフロー（review-fixes-ui.yaml）が担当している。
+      このレビューでは src/view/ を変更しないこと。src/view/ に問題を見つけた場合は
+      修正せず、報告書へ記録するだけにとどめる（別担当が同じファイルを触っているため、
+      ここで直すと衝突する）。
+
+      レビュー手順:
+      1. まず `git log --oneline` と `git diff main...HEAD` でこのrunが加えた変更の全体像を把握する
+      2. 次の観点で通しでレビューする:
+         - タスク間の矛盾: 同じ問題を2つのタスクが別々の方法で直していないか
+         - 非対称の残存: dispose だけ直して exit ハンドラが残っている、Codex側だけ直して
+           Claude側が残っている、といった片側修正が無いか
+           （このレビューで見つかった不具合の多くがこの型だったため、特に注意して見ること）
+         - 抽象化の破れ: T10 で作った untrusted テキストの整形モジュールを
+           通っていない経路が新たに増えていないか
+         - リースや解放の対称性: T21 でリースを導入した場合、取得と解放が
+           例外経路でも対になっているか（解放漏れはデッドロックになる）
+         - エラーの握り潰し: catch でログも状態遷移もせず握り潰している箇所が無いか
+         - 状態機械の一貫性: T02 で isUnsettled に waitingReply を足した影響が、
+           他の状態判定（isActiveTaskState / getRunOutcome）と矛盾していないか
+         - テストの質: 「呼ばれたことだけ確認して結果を見ていない」弱いアサーションが無いか
+         - セキュリティ: 子プロセスの引数組み立て、パス検証、外部由来テキストの扱いが
+           弱まっていないか。特に git の破壊的操作（worktree削除・merge --abort）の
+           発火条件が広がっていないか
+      3. 見つけた問題のうち、その場で直せるものは直す（src/view/ を除く）
+      4. 直せないもの・判断が要るものは、docs/ 配下にレビュー結果の文書として残す
+         （file:line と根拠、なぜ直さなかったかを書く）
+
+      重要:
+      - 「問題なし」で終わらせないこと。20タスク分の変更が入っている以上、
+        横断的な見落としが1つも無い可能性は低い。最低でも各観点について
+        「確認した結果どうだったか」を書くこと
+      - 一方で、無理に問題をでっち上げないこと。確認して問題が無かった観点は
+        「確認済み、問題なし」と書けばよい
+      - 大規模な作り直しには広げない。目的は横断的な不整合の是正であって、
+        新しい設計の導入ではない
+
+      受入基準:
+      - docs/ 配下にレビュー結果の文書が追加されていること
+      - 上記の各観点について確認結果が書かれていること
+      - その場で直した問題があれば、その差分が含まれていること
+      - src/view/ を変更していないこと
+      - npm test / npm run typecheck / npm run lint が全緑
+    done: ワークフロー基盤側の全変更が横断的にレビューされ結果が docs 配下の文書に残り、直せる問題は修正され、src/view/ を変更しておらず、全テストが緑であること
