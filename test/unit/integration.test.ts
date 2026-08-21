@@ -1045,7 +1045,39 @@ describe('IntegrationMergeQueue: 統合worktreeの占有（Issue #412）', () =>
     expect(git.calls).toEqual([]);
   });
 
-  it('MERGE_HEADが残っていればマージへ進まずfailureにする（占有の外から呼ばれた場合の多層防御）', async () => {
+  /**
+   * ハンドルの確認をキュー投入前にしか行わないと、キュー待ちの間に`releaseAllLeases()`
+   * （`WorkflowRunner.dispose()`）が走ったとき、失効済みのハンドルのままジョブ本体が
+   * 実行され、`git merge` / `git merge --abort`が実際に走ってしまう（レビュー指摘4）。
+   * ジョブ本体の先頭でも確認していることを、キューを先行ジョブで塞いで確かめる。
+   */
+  it('キュー待ちの間に占有が失効したら、ジョブが動いてもgitを触らない', async () => {
+    const git = new FakeGit();
+    const worktreeQueue = new WorktreeCreationQueue();
+    const queue = new IntegrationMergeQueue(worktreeQueue);
+    const held = await queue.acquireLease(INTEGRATION_CWD, 'T1');
+
+    // 先行ジョブでキューを塞ぎ、mergeTask / abortMerge を「投入済み・未実行」にする
+    let unblock: () => void = () => {};
+    const blocker = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    const blocked = worktreeQueue.enqueue(() => blocker);
+
+    const merging = queue.mergeTask(held, RUN_ID, 'T1', `wf/${RUN_ID}/T1`, git);
+    const aborting = queue.abortMerge(held, git);
+
+    // 投入時点では有効だったハンドルが、run破棄でここで失効する
+    queue.releaseAllLeases();
+    unblock();
+    await blocked;
+
+    expect(await merging).toMatchObject({ kind: 'failure' });
+    expect(await aborting).toMatchObject({ ok: false, reason: 'leaseNotHeld' });
+    expect(git.calls).toEqual([]);
+  });
+
+  it('MERGE_HEADが残っていればマージへ進まずbusy（回復可能）にする（占有の外から呼ばれた場合の多層防御）', async () => {
     const git = new FakeGit();
     git.respond(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], {
       code: 0,
@@ -1062,13 +1094,15 @@ describe('IntegrationMergeQueue: 統合worktreeの占有（Issue #412）', () =>
       git,
     );
 
-    expect(result.kind).toBe('failure');
+    // `failure`ではなく`busy`。`failure`だと呼び出し側が`markMergeFailed`で`failed`を
+    // 確定させ、`retryMergeState`（`blocked`専用）でも戻せない行き止まりになる（指摘1）
+    expect(result.kind).toBe('busy');
     // 他タスクの未解決パスを自分の衝突として拾う経路（`git merge`→`diff --diff-filter=U`）
     // へそもそも入らない
     expect(git.calls.some((c) => c.args[0] === 'merge')).toBe(false);
   });
 
-  it('MERGE_HEADが無くても未解決パスが残っていればマージへ進まずfailureにする', async () => {
+  it('MERGE_HEADが無くても未解決パスが残っていればマージへ進まずbusy（回復可能）にする', async () => {
     const git = new FakeGit();
     git.respond(['diff', '--name-only', '--diff-filter=U'], {
       code: 0,
@@ -1085,7 +1119,7 @@ describe('IntegrationMergeQueue: 統合worktreeの占有（Issue #412）', () =>
       git,
     );
 
-    expect(result.kind).toBe('failure');
+    expect(result.kind).toBe('busy');
     expect(git.calls.some((c) => c.args[0] === 'merge')).toBe(false);
   });
 });

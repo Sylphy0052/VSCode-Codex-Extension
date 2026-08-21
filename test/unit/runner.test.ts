@@ -268,6 +268,12 @@ function fakeGit(options?: {
   headBranch?: string;
   /** `git push` を常に失敗させる。 */
   failPush?: boolean;
+  /**
+   * `git merge --abort` を常に失敗させる（未解決の衝突は残ったまま）。停止・巻き戻しが
+   * 効かず統合worktreeに`MERGE_HEAD`が残ったまま次のタスクがマージへ来る状況の再現用
+   * （Issue #412のレビュー指摘1）。
+   */
+  failMergeAbort?: boolean;
   /** `git`の作業ツリーでないワークスペースを模す（design.md §16.20の疑似worktreeテスト用）。 */
   notGitRepo?: boolean;
 }): FakeGitHandle {
@@ -342,6 +348,10 @@ function fakeGit(options?: {
         return { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'merge' && args[1] === '--abort') {
+        if (options?.failMergeAbort) {
+          // 巻き戻しに失敗＝未解決の衝突は残り続ける
+          return { code: 1, stdout: '', stderr: 'fatal: fake merge --abort failure' };
+        }
         unresolvedConflict = false;
         return { code: 0, stdout: '', stderr: '' };
       }
@@ -5826,6 +5836,95 @@ tasks:
     expect(merges[1]?.args).toContain(`wf/${runId}/T2`);
   });
 
+  /**
+   * 停止・巻き戻しが効かず、統合worktreeに`MERGE_HEAD`と未解決パスが残ったまま占有だけが
+   * 解放される経路がある（衝突解決セッションを人が止めた場合や、`git merge --abort`自体が
+   * 失敗した場合）。そこへ次のタスクのマージが来たとき、多層防御のゲート
+   * （`findMergeInProgress`）が`failure`を返すと`markMergeFailed`で`failed`が確定し、
+   * `retryMergeState`は`blocked`からしか戻せないためViewの「再マージ」でも復帰できない
+   * 行き止まりになる（レビュー指摘1）。回復可能な`blocked`へ倒すことを確かめる。
+   */
+  it('他タスクの未解決の衝突が残った統合worktreeへぶつかったタスクは、failedではなくblockedになり再マージで復帰できる', async () => {
+    // 巻き戻しに失敗させ、`MERGE_HEAD`が残ったまま占有が解放される状況を作る
+    const git = fakeGit({ conflictOnce: true, failMergeAbort: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/lease.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    const resolution = codexHost.sessions.at(-1);
+    expect(resolution).toBeDefined();
+
+    // 解決セッションはdoneを宣言するがgit上は未解決のまま。巻き戻しにも失敗するため、
+    // 統合worktreeは`MERGE_HEAD`を抱えたまま占有だけが解放される
+    resolution?.finish('done', doneState('解決したつもり'));
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+
+    // そこへT2のマージが来る
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+
+    // 修正前はここで`failure`→`failed`が確定し、以後どうやっても戻せなかった
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('blocked');
+    expect(store.find(runId)?.tasks['T2']?.failure).toBeUndefined();
+    // 他タスクの未解決パスを自分の衝突として拾わない（解決セッションも開かない）
+    expect(codexHost.sessions).toHaveLength(3);
+    expect(
+      runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'mergeBusy' && w.taskId === 'T2'),
+    ).toBe(true);
+
+    // 人が統合worktreeを片付けてからViewの「再マージ」を押せば、そのまま先へ進める
+    git.resolveConflict();
+    expect(runner.retryMerge(runId, 'T2')).toBe(true);
+    await flush();
+
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+    expect(mergeCalls(git)).toHaveLength(2);
+  });
+
+  /**
+   * `acquireLease`は無期限で待ち、`stop()`は`haltedByUser`を立てるだけで待機中の取得を
+   * 起こさない。そのため、他タスクの衝突解決が長引いている間に人が停止しても、占有が
+   * 解けた瞬間に`git merge --no-ff`が走り、衝突すれば新しい解決セッションまで開いてしまう
+   * （レビュー指摘2）。取得直後の再確認でこれを止める。
+   */
+  it('占有の順番待ちの間に停止されたら、占有が解けてもマージを始めない', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/lease.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    const resolution = codexHost.sessions.at(-1);
+
+    // T2は占有待ちで止まっている
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    expect(mergeCalls(git)).toHaveLength(1);
+
+    // 待っている最中にユーザーが停止する
+    runner.stop(runId);
+    await flush();
+    const sessionCountAtStop = codexHost.sessions.length;
+
+    // T1の解決が終わって占有が解ける
+    git.resolveConflict();
+    resolution?.finish('done', doneState('衝突を解決しました'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    // 修正前はここでT2の`git merge --no-ff`が走っていた
+    expect(mergeCalls(git)).toHaveLength(1);
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('merging');
+    // 新しい衝突解決セッションも開かない
+    expect(codexHost.sessions).toHaveLength(sessionCountAtStop);
+  });
+
   it('衝突解決セッションを開けなかった（例外）経路でも占有は解放され、次のタスクのマージが進む', async () => {
     const git = fakeGit({ conflictOnce: true });
     const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
@@ -5850,7 +5949,16 @@ tasks:
     expect(mergeCalls(git)).toHaveLength(2);
   });
 
-  it('リロード後の復元は複数のmergingタスクを一斉に走らせず、1件ずつ順番待ちにする', async () => {
+  /**
+   * `merging`のまま残った2件を持つ永続化データと、それを復元するrunnerを用意する
+   * （リロード後のやり直しの検証用）。
+   */
+  async function restoreHarness(git: FakeGitHandle): Promise<{
+    runner: WorkflowRunner;
+    host: FakeHost;
+    store: WorkflowRunStore;
+    runId: string;
+  }> {
     const store = new WorkflowRunStore(fakeMemento());
     const runId = '00000000-0000-4000-8000-000000000412';
     const persistedTask = (id: string) => ({
@@ -5879,7 +5987,6 @@ tasks:
       finalMergeOutcome: undefined,
     }));
 
-    const git = fakeGit({ conflictOnce: true });
     const host = new FakeHost();
     const runner = new WorkflowRunner({
       hosts: { codex: host, claude: host },
@@ -5897,6 +6004,101 @@ tasks:
         allowClaudeBypassPermissions: false,
       }),
     });
+    return { runner, host, store, runId };
+  }
+
+  /**
+   * 復元のやり直しが**1件ずつ直列**であることを、占有の順番待ちに頼らずに確かめる。
+   *
+   * 衝突しないgitで2件を復元すると、1件目のマージは待たされないまま終わる。直列なら
+   * 「T1の全ての手順（未コミット回収→マージ）が終わってからT2の1回目のgitコマンドが出る」
+   * のに対し、一斉に`void`で投げると、T1がawaitへ入った隙にT2の未コミット回収
+   * （T2のworktreeでの`git status`）が始まり、T1のマージより前に現れる。
+   *
+   * 以前のテストは`conflictOnce`で1件目を衝突させていたため、`void`の一斉投入へ戻しても
+   * 2件目が占有待ちで止まって観測結果が変わらず、直列化そのものを区別できていなかった
+   * （レビュー指摘8）。
+   */
+  it('リロード後の復元は、衝突しない場合でもmergingタスクを1件ずつ順番に走らせる', async () => {
+    const git = fakeGit();
+    const { runner, store, runId } = await restoreHarness(git);
+
+    await runner.restoreRunsForView();
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+
+    const t1MergeIndex = git.calls.findIndex(
+      (c) => c.args[0] === 'merge' && c.args[1] === '--no-ff' && c.args.includes(`wf/${runId}/T1`),
+    );
+    const t2MergeIndex = git.calls.findIndex(
+      (c) => c.args[0] === 'merge' && c.args[1] === '--no-ff' && c.args.includes(`wf/${runId}/T2`),
+    );
+    expect(t1MergeIndex).toBeGreaterThanOrEqual(0);
+    expect(t2MergeIndex).toBeGreaterThan(t1MergeIndex);
+
+    // T2側のworktreeを触るgitコマンドは、T1のマージが終わるまで1つも出ない
+    const firstT2CallIndex = git.calls.findIndex((c) => c.cwd.endsWith('/T2'));
+    expect(firstT2CallIndex).toBeGreaterThan(t1MergeIndex);
+  });
+
+  /**
+   * `dispose()`の`releaseAllLeases()`で起き上がった待機者が、そのまま`markMergeFailed`→
+   * `persist`/`notify`まで進むと、破棄済みのEventEmitter・workspaceStateへ書き込む
+   * （レビュー指摘6）。起こす前に「即戻る」状態にしてあることを確かめる。
+   */
+  it('占有待ちの最中にdispose()されても、起き上がった側は破棄済みのrunへ書き戻さない', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/lease.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    expect(mergeCalls(git)).toHaveLength(1);
+
+    runner.dispose();
+    await flush();
+
+    // 失効したハンドルで起き上がっても、マージも状態の書き換えも行わない
+    expect(mergeCalls(git)).toHaveLength(1);
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('merging');
+    expect(store.find(runId)?.tasks['T2']?.failure).toBeUndefined();
+  });
+
+  /**
+   * 復元のやり直しを直列にしたぶん、1件目が例外を投げるとそこで打ち切られて2件目以降が
+   * 永久に`merging`のまま残る（レビュー指摘7）。1件ごとに拾って先へ進むことを確かめる。
+   */
+  it('リロード後の復元は、1件目が例外で落ちても2件目のやり直しを続ける', async () => {
+    const base = fakeGit();
+    const throwingGit: FakeGitHandle = {
+      calls: base.calls,
+      resolveConflict: () => base.resolveConflict(),
+      run: async (args, cwd) => {
+        if (cwd.endsWith('/T1')) {
+          throw new Error('gitの起動に失敗しました');
+        }
+        return base.run(args, cwd);
+      },
+    };
+    const { runner, store, runId } = await restoreHarness(throwingGit);
+
+    await runner.restoreRunsForView();
+    await flush();
+
+    // 1件目は例外で終わる（状態は動かない）が、2件目のやり直しは走り切る
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+  });
+
+  it('リロード後の復元は1件目が衝突しても2件目を割り込ませない', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, host, store, runId } = await restoreHarness(git);
 
     await runner.restoreRunsForView();
     await flush();
