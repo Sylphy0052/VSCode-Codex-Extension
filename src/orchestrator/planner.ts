@@ -9,6 +9,7 @@ import { DANGER_PATTERN_IDS } from './escalation';
 import { stripControlChars } from './sanitize';
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { TaskSessionHost, TaskSessionInput } from './taskSession';
+import { formatUntrusted, sanitizeInlineText } from './untrustedText';
 import {
   clampClaudePermissionMode,
   clampCodexApprovalMode,
@@ -77,14 +78,14 @@ const MAX_ENTRY_NAME_LENGTH = 100;
  * ファイル名は`runner.ts`の`handleApproval`や`sanitizeForLog`が扱うCLI・エージェント
  * 由来の文字列と同じく信用しない（design.md §16.9セキュリティ監査 medium 1）。
  * ファイル名には改行を含められるため、無害化せずにプロンプトへ結合すると、偽の見出しや
- * 偽YAMLをファイル名に仕込んでプロンプトの構造を偽装できてしまう。`stripControlChars`
- * （改行・タブを含む制御文字を空白へ畳む）を通し、長さも切り詰める。
+ * 偽YAMLをファイル名に仕込んでプロンプトの構造を偽装できてしまう。
+ *
+ * 実体は`untrustedText.ts`の`sanitizeInlineText`に委譲する（design.md §16.24、
+ * Issue #369。ここに残していた独自実装は`roadmap.ts`側の同種の一覧（Issueタイトル・
+ * workspaceSummary）から再利用できず、`buildRoadmapPrompt`が無防備なままになっていた）。
  */
 function sanitizeEntryName(name: string): string {
-  const stripped = stripControlChars(name);
-  return stripped.length > MAX_ENTRY_NAME_LENGTH
-    ? `${stripped.slice(0, MAX_ENTRY_NAME_LENGTH)}…`
-    : stripped;
+  return sanitizeInlineText(name, MAX_ENTRY_NAME_LENGTH);
 }
 
 export async function buildWorkspaceSummary(
@@ -264,12 +265,22 @@ const OUTPUT_FORMAT_INSTRUCTION =
   '一切含めないこと';
 
 /**
+ * ゴール文の展開に設ける長さ上限。人が直接入力する値だが、ロードマップの生成セッション
+ * （LLM）が組み立てた`buildRoadmapPlanGoal`の返値がここへ渡ることもあり、由来を問わず
+ * 一律に上限を設ける（design.md §16.24、Issue #369）。
+ */
+const MAX_GOAL_LENGTH = 8000;
+
+/**
  * ゴール文からタスク分解のYAMLを作らせるための最初のプロンプト（design.md §16.9）。
  *
  * このセッションは`sandbox: read-only`相当・承認は全拒否で起動する（`planWorkflow`側の
  * 設定）。「タスクを実行しないでください」という指示はここにも書くが、それは補助であって、
  * 実際に実行できない設定になっていることが本来の防御である（design.md §16.9「プロンプトで
  * 頼むだけでは足りない」）。
+ *
+ * `input.goal`は`untrustedText.ts`の`formatUntrusted`で囲う（design.md §16.24、
+ * Issue #369）。以前は無加工・上限なしで連結していた。
  */
 export function buildPlannerPrompt(input: BuildPlannerPromptInput): string {
   const parts = [
@@ -277,7 +288,7 @@ export function buildPlannerPrompt(input: BuildPlannerPromptInput): string {
       'タスクへ分解し、下記スキーマに従うYAML定義だけを出力してください。',
     '実際にタスクを実行することはしないでください（読み取りと提案のみ）。',
     '',
-    `## ゴール\n${input.goal}`,
+    `## ゴール\n${formatUntrusted(input.goal, { id: 'planner', field: 'goal', maxLength: MAX_GOAL_LENGTH, preserveNewlines: true })}`,
     '',
   ];
   if (input.roadmapMaterial !== undefined && input.roadmapMaterial !== '') {

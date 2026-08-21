@@ -18,6 +18,7 @@ import {
 } from './planner';
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { TaskSessionHost } from './taskSession';
+import { formatUntrusted, sanitizeInlineText } from './untrustedText';
 import type { GitCommandRunner } from './worktree';
 import {
   findCycleGroups,
@@ -374,6 +375,13 @@ export function splitRoadmapPhasesIntoChunks(
  * 確認し、`issue`については`alignRoadmapIssues`が実際に直す）。**この指示だけでは防げない
  * ことは実測済み**で、Issue番号を持つ項目の隣にある無関係な項目へ同じ番号が並んだ。
  */
+/**
+ * ロードマップ項目の本文（`item.text`）に設ける長さ上限。前段のLLM生成セッションが
+ * 出力したロードマップMarkdown由来の自由記述であり、上限が無いと下流のプロンプトを
+ * 圧迫する（design.md §16.24、Issue #369）。
+ */
+const ROADMAP_ITEM_TEXT_MAX_LENGTH = 2000;
+
 export function formatRoadmapMaterial(items: readonly RoadmapMaterialItem[]): string {
   const lines: string[] = [];
   lines.push('## ロードマップの材料');
@@ -390,21 +398,42 @@ export function formatRoadmapMaterial(items: readonly RoadmapMaterialItem[]): st
   for (const item of items) {
     const depends = item.dependsOn.length > 0 ? item.dependsOn.join(', ') : 'なし';
     const issueText = item.issue !== undefined ? `#${item.issue}` : 'なし';
+    // `item.text`は前段のLLM生成セッションが出力したロードマップMarkdown由来の自由記述
+    // （外部由来テキスト）のため、`formatUntrusted`で囲う（design.md §16.24、Issue #369）
+    const safeText = formatUntrusted(item.text, {
+      id: item.id,
+      field: 'text',
+      maxLength: ROADMAP_ITEM_TEXT_MAX_LENGTH,
+      preserveNewlines: true,
+    });
     lines.push(`- id: ${item.id}`);
-    lines.push(`  内容: ${item.text}`);
+    lines.push(`  内容: ${safeText}`);
     lines.push(`  依存: ${depends}`);
     lines.push(`  Issue: ${issueText}`);
   }
   return lines.join('\n');
 }
 
+/** `buildRoadmapPlanGoal`が受け取るタイトル・フェーズ名の1要素あたりの表示上限。 */
+const ROADMAP_TITLE_MAX_LENGTH = 200;
+const PHASE_NAME_MAX_LENGTH = 100;
+
 /**
  * `planWorkflowFromRoadmapPhases`が使う既定のゴール文。ロードマップのタイトルと
  * フェーズ名から組み立てる。複数フェーズをまとめてYAML化する場合は全ての名前を並べる。
+ *
+ * `roadmapTitle` / `phaseNames`はロードマップ生成セッション（LLM）が出力したMarkdownの
+ * 見出しであり、外部由来テキストである。ここでは一覧の要素として`sanitizeInlineText`で
+ * 1行に均すだけにする（`formatUntrusted`の囲いは付けない）。組み立てた返値はこのあと
+ * `buildPlannerPrompt`の`goal`としてそのまま渡り、そちらで改めて`formatUntrusted`により
+ * 囲われるため、ここで囲うと二重になる（design.md §16.24、Issue #369）。
  */
 export function buildRoadmapPlanGoal(roadmapTitle: string, phaseNames: readonly string[]): string {
-  const names = phaseNames.map((name) => `「${name}」`).join('');
-  return `${roadmapTitle}のうち${names}を実行できるワークフローに分解する`;
+  const safeTitle = sanitizeInlineText(roadmapTitle, ROADMAP_TITLE_MAX_LENGTH);
+  const names = phaseNames
+    .map((name) => `「${sanitizeInlineText(name, PHASE_NAME_MAX_LENGTH)}」`)
+    .join('');
+  return `${safeTitle}のうち${names}を実行できるワークフローに分解する`;
 }
 
 /** `detectRoadmapMaterialMismatches`が返す1件。 */
@@ -709,6 +738,15 @@ export interface RoadmapPromptInput {
   existingIssues: readonly RoadmapIssueSummary[] | undefined;
 }
 
+/**
+ * `buildRoadmapPrompt`が一覧として並べるworkspaceSummaryの1要素・既存Issueタイトルの
+ * 表示上限（design.md §16.24、Issue #369）。`planner.ts`の`MAX_ENTRY_NAME_LENGTH`と
+ * 揃え、`extension.ts`の`listWorkspaceSummary`・`planner.ts`の`buildWorkspaceSummary`
+ * のどちらを経由しても同じ扱いになるようにする。
+ */
+const WORKSPACE_ENTRY_MAX_LENGTH = 100;
+const ISSUE_TITLE_MAX_LENGTH = 200;
+
 const ROADMAP_FORMAT_EXAMPLE = `# <ゴール>
 
 ## Phase 1: <フェーズ名>
@@ -742,8 +780,12 @@ export function buildRoadmapPrompt(input: RoadmapPromptInput): string {
   if (input.workspaceSummary.length === 0) {
     lines.push('（取得できませんでした）');
   } else {
+    // ファイル名には改行を含められるため、`sanitizeInlineText`で1行に均す
+    // （`planner.ts`の`buildWorkspaceSummary`経由の場合は既に通っているが、
+    // このパス（`extension.ts`の`listWorkspaceSummary`経由）は通っていないため、
+    // 呼び出し元を問わずsink側で防御する。design.md §16.24、Issue #369）
     for (const entry of input.workspaceSummary) {
-      lines.push(`- ${entry}`);
+      lines.push(`- ${sanitizeInlineText(entry, WORKSPACE_ENTRY_MAX_LENGTH)}`);
     }
   }
   lines.push('');
@@ -761,8 +803,10 @@ export function buildRoadmapPrompt(input: RoadmapPromptInput): string {
   } else if (input.existingIssues.length === 0) {
     lines.push('（既存のIssueはありません）');
   } else {
+    // Issueタイトルは`gh issue list` / `glab issue list`の出力をJSON.parseしただけの
+    // 値で、無害化を一切通っていない（design.md §16.24、Issue #369）
     for (const issue of input.existingIssues) {
-      lines.push(`- #${issue.number} ${issue.title}`);
+      lines.push(`- #${issue.number} ${sanitizeInlineText(issue.title, ISSUE_TITLE_MAX_LENGTH)}`);
     }
   }
   lines.push('');
@@ -882,7 +926,6 @@ const WINDOWS_RESERVED_NAME_PATTERN = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
 /** ファイル名・パスの区切りとして使えない文字、および空白類。 */
 const SLUG_INVALID_CHARS_PATTERN = /[\\/:*?"<>|\s]+/gu;
 const SLUG_MAX_LENGTH = 60;
-
 
 /**
  * ゴールの文からファイル名（拡張子なし）を作る。Windowsでも使えないパス区切り文字・
