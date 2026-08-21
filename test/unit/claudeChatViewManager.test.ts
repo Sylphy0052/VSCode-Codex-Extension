@@ -189,6 +189,14 @@ function stateMessagesOf(panel: { webview: { sent: unknown[] } } | undefined): S
         if (at === -1) merged.push(item);
         else merged[at] = item;
       }
+      // 実クライアントのmergeItems（stateDelta.tsのMERGE_ITEMS_SOURCE）が持つ安全弁と
+      // 同じ検証。積み直した件数がtotalと合わなければbuildItemsDeltaの回帰であり、
+      // 実クライアントはstateFull要求へ倒して黙って復旧するが、テストでは見逃さず落とす
+      if (merged.length !== delta.total) {
+        throw new Error(
+          `postStateの差分でtotalが合わない（積み直し後${merged.length}件 / total${delta.total}件）`,
+        );
+      }
       return { ...m, state: { ...m.state, items: [...merged] } };
     });
 }

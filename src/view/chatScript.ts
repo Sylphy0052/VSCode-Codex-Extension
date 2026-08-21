@@ -2283,7 +2283,7 @@ export function chatScript(
     const data = event.data;
     if (!data) return;
     if (data.type === 'state') {
-      // 会話項目を分けて送ってこない画面（Claude Code側）は state.items をそのまま使う
+      // items（差し分）を送ってこない送信元は state.items を全量としてそのまま使う
       if (!data.items) {
         apply(data.state);
         return;
