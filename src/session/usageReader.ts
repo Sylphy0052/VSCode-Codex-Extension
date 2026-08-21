@@ -31,16 +31,19 @@ export class UsageReader {
 
   private async newestRollout(): Promise<string | undefined> {
     const files = await this.fs.listRollouts(this.paths.sessions);
+    // 会話中は`onRolloutChanged`のたびに全件呼ばれうるため、逐次待ちだと件数に比例して
+    // 遅くなる。並列化する（issue #382）。
+    const mtimes = await Promise.all(files.map((file) => this.fs.mtimeMs(file)));
+
     let newest: string | undefined;
     let newestMtime = -1;
-
-    for (const file of files) {
-      const mtime = await this.fs.mtimeMs(file);
+    files.forEach((file, i) => {
+      const mtime = mtimes[i];
       if (mtime !== undefined && mtime > newestMtime) {
         newestMtime = mtime;
         newest = file;
       }
-    }
+    });
     return newest;
   }
 }
