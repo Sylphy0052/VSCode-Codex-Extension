@@ -29,11 +29,10 @@ import {
   consumeFrames,
   encodeNotification,
   encodeRequest,
-  killWithEscalation,
-  MAX_LINE_BUFFER_BYTES,
   readForkedThreadId,
   type JsonRpcMessage,
 } from './jsonRpc';
+import { killWithEscalation, MAX_LINE_BUFFER_BYTES } from '../process/childProcess';
 import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
 import {
   mergeMcpServers,
@@ -733,6 +732,7 @@ export class AppServerClient {
       };
       let buffer = '';
       let settled = false;
+      let alreadyExited = false;
       let nextId = 1;
 
       const finish = (result: CallResult<T>): void => {
@@ -749,9 +749,16 @@ export class AppServerClient {
           resolvePending({ error: { code: -1, message: 'app-serverとのやり取りが終了しました' } });
         }
         pending.clear();
-        // SIGTERMに応答しないハングしたプロセスも回収できるよう、SIGKILLへの
-        // エスカレーションを共通処理へ寄せる（issue #402、2点目）
-        killWithEscalation(proc);
+        // `proc.on('exit')`経由で`finish()`に来た場合、子は既に終了している。そこへ
+        // `killWithEscalation()`を掛けると、死んだpidへ無駄なSIGTERM/SIGKILLを送りかね
+        // ない上、3秒のエスカレーションタイマーだけが無意味に残る（issue #419、LOW）。
+        // SIGTERMに応答しないハングしたプロセスの回収が目的なので、既に終了済みなら
+        // 何もしない
+        if (!alreadyExited) {
+          // SIGTERMに応答しないハングしたプロセスも回収できるよう、SIGKILLへの
+          // エスカレーションを共通処理へ寄せる（issue #402、2点目）
+          killWithEscalation(proc);
+        }
         resolve(result);
       };
 
@@ -830,6 +837,7 @@ export class AppServerClient {
 
       proc.on('error', (e) => finish({ ok: false, error: e.message }));
       proc.on('exit', (code) => {
+        alreadyExited = true;
         if (!settled) {
           finish({ ok: false, error: `app-serverが終了しました (code ${code ?? 'unknown'})` });
         }

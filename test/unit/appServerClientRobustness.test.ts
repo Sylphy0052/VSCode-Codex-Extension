@@ -1,8 +1,7 @@
-import { EventEmitter } from 'node:events';
-import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Logger } from '../../src/log';
-import { MAX_LINE_BUFFER_BYTES, type JsonRpcMessage } from '../../src/codex/jsonRpc';
+import { type JsonRpcMessage } from '../../src/codex/jsonRpc';
+import { MAX_LINE_BUFFER_BYTES } from '../../src/process/childProcess';
 
 /**
  * issue #402（T17: ストリーム受信とプロセス終了の頑健性）の2点目・3点目を、
@@ -18,45 +17,7 @@ vi.mock('node:child_process', () => ({
 
 // `vi.mock`はホイストされるため、この静的importは差し替え後の`spawn`を使う
 import { AppServerClient } from '../../src/codex/appServerClient';
-
-interface FakeChildProcess {
-  proc: ChildProcessWithoutNullStreams;
-  kill: ReturnType<typeof vi.fn>;
-  writes: string[];
-  emitStdout: (line: string) => void;
-  emitExit: (code: number | null) => void;
-}
-
-function fakeChildProcess(): FakeChildProcess {
-  const emitter = new EventEmitter();
-  const writes: string[] = [];
-  const stdin = Object.assign(new EventEmitter(), {
-    destroyed: false,
-    writable: true,
-    write: (chunk: string) => {
-      writes.push(chunk);
-      return true;
-    },
-  });
-  const stdout = new EventEmitter();
-  const stderr = new EventEmitter();
-  const kill = vi.fn();
-  const proc = Object.assign(emitter, {
-    stdin,
-    stdout,
-    stderr,
-    kill,
-    killed: false,
-  }) as unknown as ChildProcessWithoutNullStreams;
-
-  return {
-    proc,
-    kill,
-    writes,
-    emitStdout: (line: string) => stdout.emit('data', Buffer.from(`${line}\n`)),
-    emitExit: (code: number | null) => emitter.emit('exit', code),
-  };
-}
+import { createFakeChildProcess as fakeChildProcess } from '../helpers/fakeChildProcess';
 
 function fakeLogger(): Logger {
   return {
@@ -142,6 +103,32 @@ describe('AppServerClient: SIGKILLエスカレーション（issue #402、2点�
 
     // タイマーがクリアされているため、猶予後もSIGKILLは送られない
     expect(fake.kill).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('AppServerClient: exit経由のfinish()ではkillを飛ばさない（issue #419、LOW）', () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it('子プロセスが自分で終了した場合、finish()は既に死んだ子へkillWithEscalationを掛けない', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.forkThread(
+      '11111111-1111-1111-1111-111111111111',
+      '22222222-2222-2222-2222-222222222222',
+    );
+
+    // `initialize`へ応答する前に、子プロセスが自分で終了した想定（`proc.on('exit')`から
+    // `finish()`が呼ばれる経路）。修正前はここで死んだ子へ`kill()`（SIGTERM相当）を送り、
+    // 3秒のエスカレーションタイマーだけが無意味に残っていた
+    fake.emitExit(1);
+
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(fake.kill).not.toHaveBeenCalled();
   });
 });
 

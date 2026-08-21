@@ -1,9 +1,9 @@
-import { EventEmitter } from 'node:events';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { ClaudeStreamSession, type ClaudeSpawnPort } from '../../src/claude/streamSession';
 import { emptyClaudeConfig } from '../../src/claude/types';
 import type { Logger } from '../../src/log';
+import { createFakeChildProcess } from '../helpers/fakeChildProcess';
 
 const fakeLogger: Logger = {
   info: () => undefined,
@@ -12,36 +12,13 @@ const fakeLogger: Logger = {
   show: () => undefined,
 };
 
-/**
- * `child_process.spawn` の最低限の形を模したフェイク（issue #355）。
- *
- * `start()`は実プロセスを起動するため、`ClaudeSpawnPort`（issue #186で導入された
- * 差し替え口）へこのフェイクを渡す。`exit`/`error`はプロセス自身へ、`stdout`/`stdin`は
- * それぞれ別のEventEmitterへ流れる（実際の`ChildProcessWithoutNullStreams`と同じ形）。
- */
-class FakeChildProcess extends EventEmitter {
-  killed = false;
-  readonly stdout = new EventEmitter();
-  readonly stderr = new EventEmitter();
-  readonly stdin = Object.assign(new EventEmitter(), {
-    destroyed: false,
-    writable: true,
-    write: (_chunk: string) => true,
-    end: () => undefined,
-  });
-  kill(): boolean {
-    this.killed = true;
-    return true;
-  }
-}
-
 /** `start()` まで済ませたセッションと、フェイクプロセスを返す。 */
 function createStartedSession(): {
   session: ClaudeStreamSession;
-  proc: FakeChildProcess;
+  proc: ChildProcessWithoutNullStreams;
 } {
-  const proc = new FakeChildProcess();
-  const spawnProcess: ClaudeSpawnPort = () => proc as unknown as ChildProcessWithoutNullStreams;
+  const { proc } = createFakeChildProcess();
+  const spawnProcess: ClaudeSpawnPort = () => proc;
   const session = new ClaudeStreamSession(
     () => 'claude',
     fakeLogger,
@@ -129,8 +106,7 @@ describe('ClaudeStreamSession: exit/errorハンドラからの応答待ち解放
     // 再度start()が呼ばれるケースを模す。プロセスは呼ぶたびに新しいものを返す
     // （実際の`spawn()`と同じ）。releasePendingWaiters()がstart()の冒頭で呼ばれるため、
     // 前回分の応答待ちはここで解決され、Mapへ積み上がらない
-    const spawnProcess: ClaudeSpawnPort = () =>
-      new FakeChildProcess() as unknown as ChildProcessWithoutNullStreams;
+    const spawnProcess: ClaudeSpawnPort = () => createFakeChildProcess().proc;
     const session = new ClaudeStreamSession(
       () => 'claude',
       fakeLogger,

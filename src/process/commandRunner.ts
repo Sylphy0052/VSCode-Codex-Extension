@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { killWithEscalation } from '../codex/jsonRpc';
+import { killWithEscalation } from './childProcess';
 import { canWriteStdin, guardStdinErrors } from './stdinSafety';
 
 /**

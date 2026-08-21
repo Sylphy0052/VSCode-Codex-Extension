@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { consumeNdjson, MAX_LINE_BUFFER_BYTES } from '../../src/util/ndjson';
+import { consumeNdjson } from '../../src/util/ndjson';
+import { MAX_LINE_BUFFER_BYTES } from '../../src/process/childProcess';
 
 describe('consumeNdjson', () => {
   it('完成した行だけを値にする', () => {

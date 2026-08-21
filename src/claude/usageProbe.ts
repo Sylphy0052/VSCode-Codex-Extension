@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { killWithEscalation } from '../codex/jsonRpc';
+import { killWithEscalation } from '../process/childProcess';
 import type { ChatUsage } from '../appserver/chatState';
 import type { Logger } from '../log';
 import { parseUsageReport } from './usageText';
