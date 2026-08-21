@@ -1480,6 +1480,10 @@ export class WorkflowRunner {
     for (const live of this.runs.values()) {
       disposeOrchestrator(live);
     }
+    // 統合worktreeの占有（Issue #412）の強制解放。通常は`runnerMerge.ts`側の`finally`が
+    // 解放するが、解放漏れが1つでもあると以後そのrunのマージが全て待ち続ける。破棄時に
+    // まとめて解放して待ち行列を空にする（待っていた側は失効したハンドルで失敗する）
+    this.integrationQueue.releaseAllLeases();
   }
 
   /**

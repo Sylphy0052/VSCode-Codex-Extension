@@ -18,6 +18,7 @@ import {
   isMergeResolutionComplete,
   MERGE_RESOLUTION_CONDITION,
   MERGE_RESOLUTION_MAX_ITERATIONS,
+  type IntegrationLease,
   type MergeResolutionTaskInfo,
   type MergeTaskResult,
 } from './integration';
@@ -73,6 +74,7 @@ export async function mergeTaskWithForge(
   integration: { cwd: string; branch: string },
   taskCwd: string,
   taskBranch: string,
+  lease: IntegrationLease,
 ): Promise<{ merge: MergeTaskResult; pullRequest: PullRequestResult | undefined }> {
   const forgeDeps = self.deps.forge;
   const forge = live.forge;
@@ -82,7 +84,7 @@ export async function mergeTaskWithForge(
     !shouldCreateTaskPullRequest(forge.pullRequest)
   ) {
     const merge = await self.integrationQueue.mergeTask(
-      integration.cwd,
+      lease,
       runId,
       taskId,
       taskBranch,
@@ -104,6 +106,7 @@ export async function mergeTaskWithForge(
       taskBranch,
       forgeDeps,
       forge,
+      lease,
     ),
   );
   return finalizeTaskPullRequestFlow(self, live, runId, taskId, flow);
@@ -126,6 +129,7 @@ function buildTaskPullRequestFlowCallbacks(
   taskBranch: string,
   forgeDeps: NonNullable<WorkflowRunnerInternals['deps']['forge']>,
   forge: Extract<LiveRun['forge'], { kind: 'active' }>,
+  lease: IntegrationLease,
 ): TaskPullRequestSteps<MergeTaskResult> {
   return {
     pushTaskBranch: () => pushBranch(self.deps.git, taskCwd, taskBranch),
@@ -156,7 +160,7 @@ function buildTaskPullRequestFlowCallbacks(
       ),
     mergeAndPushIntegration: async () => {
       const merged = await self.integrationQueue.mergeTask(
-        integration.cwd,
+        lease,
         runId,
         taskId,
         taskBranch,
@@ -310,6 +314,15 @@ export async function startMerge(
  *
  * PR/MRの作成（design.md §16.18）が有効なら、マージ自体も`mergeTaskWithForge`が
  * design.mdの定める順序で行う。
+ *
+ * 統合worktreeの占有（`IntegrationMergeQueue.acquireLease`。Issue #412）はこの関数が取る。
+ * 他タスクが衝突解決中ならここで順番待ちになる。解放の責任は次のとおり:
+ *
+ * - 成功・失敗・例外: この関数の`finally`が解放する
+ * - 衝突して解決セッションが立った場合のみ、占有は解決セッション側（
+ *   `onMergeResolutionFinished` / `abortAndBlock`）へ引き継ぐ（`handedOver`）。
+ *   セッションを立てられなかった経路は`startMergeResolution`が`false`を返すため、
+ *   この関数の`finally`が解放する
  */
 async function attemptMerge(
   self: WorkflowRunnerInternals,
@@ -321,9 +334,48 @@ async function attemptMerge(
   taskBranch: string,
   originCommit: string,
 ): Promise<void> {
+  if (self.runs.get(runId) === undefined) {
+    return;
+  }
+  const lease = await self.integrationQueue.acquireLease(integration.cwd, taskId);
+  let handedOver = false;
+  try {
+    handedOver = await mergeWithLease(
+      self,
+      runId,
+      taskId,
+      task,
+      integration,
+      taskCwd,
+      taskBranch,
+      originCommit,
+      lease,
+    );
+  } finally {
+    if (!handedOver) {
+      self.integrationQueue.releaseLease(lease);
+    }
+  }
+}
+
+/**
+ * `attemptMerge`の中身（占有を取ったあとの処理）。衝突解決セッションへ占有を引き継いだ
+ * 場合だけ`true`を返す（呼び出し側はそのときだけ解放しない）。
+ */
+async function mergeWithLease(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  taskId: string,
+  task: WorkflowTask,
+  integration: { cwd: string; branch: string },
+  taskCwd: string,
+  taskBranch: string,
+  originCommit: string,
+  lease: IntegrationLease,
+): Promise<boolean> {
   const live = self.runs.get(runId);
   if (live === undefined) {
-    return;
+    return false;
   }
   const { merge, pullRequest } = await mergeTaskWithForge(
     self,
@@ -334,6 +386,7 @@ async function attemptMerge(
     integration,
     taskCwd,
     taskBranch,
+    lease,
   );
 
   // design.md §16.11「タスクごとの...PR/MRの番号」・Issue #118。PR/MRの作成はマージより
@@ -356,7 +409,7 @@ async function attemptMerge(
     void self.persist(runId);
     self.notify(runId);
     self.pump(runId);
-    return;
+    return false;
   }
   if (merge.kind === 'failure') {
     self.deps.log.error(`[workflow ${runId}/${taskId}] マージに失敗しました: ${merge.message}`);
@@ -364,12 +417,21 @@ async function attemptMerge(
     void self.persist(runId);
     self.notify(runId);
     self.pump(runId);
-    return;
+    return false;
   }
 
   // 衝突。design.md §16.17「コンフリクト」1.「衝突した状態のままにしておく」
   void self.persist(runId);
-  await startMergeResolution(self, runId, taskId, task, integration, merge, originCommit);
+  return await startMergeResolution(
+    self,
+    runId,
+    taskId,
+    task,
+    integration,
+    merge,
+    originCommit,
+    lease,
+  );
 }
 
 /**
@@ -377,6 +439,10 @@ async function attemptMerge(
  * 統合worktreeを`cwd`にし、未解決パスの一覧と、突き合わせる相手のタスクの`prompt`/`done`
  * をプロンプトに渡す。解決用セッションは依存グラフのノードにはしない（design.md
  * 「コンフリクト」5.）ため、`live.tasks`ではなく`live.mergeResolutions`で管理する。
+ *
+ * 統合worktreeの占有（`lease`）を解決セッションへ引き継げた場合だけ`true`を返す
+ * （Issue #412）。セッションを開けなかった経路（承認モードによる拒否・`openTaskSession`の
+ * 例外）は`abortAndBlock`が巻き戻してから`false`を返し、呼び出し側の`finally`が解放する。
  */
 async function startMergeResolution(
   self: WorkflowRunnerInternals,
@@ -386,10 +452,11 @@ async function startMergeResolution(
   integration: { cwd: string; branch: string },
   conflict: Extract<MergeTaskResult, { kind: 'conflict' }>,
   originCommit: string,
-): Promise<void> {
+  lease: IntegrationLease,
+): Promise<boolean> {
   const live = self.runs.get(runId);
   if (live === undefined) {
-    return;
+    return false;
   }
 
   const baseline = self.deps.readBaseline();
@@ -408,8 +475,8 @@ async function startMergeResolution(
     self.deps.log.error(
       `[workflow ${runId}/${taskId}] 実効approvalModeがbypassPermissionsのため衝突解決セッションを開始できません`,
     );
-    await abortAndBlock(self, runId, taskId, integration);
-    return;
+    await abortAndBlock(self, runId, taskId, integration, lease);
+    return false;
   }
 
   const otherIds =
@@ -435,8 +502,8 @@ async function startMergeResolution(
     self.deps.log.error(
       `[workflow ${runId}/${taskId}] 衝突解決セッションを開始できませんでした: ${message}`,
     );
-    await abortAndBlock(self, runId, taskId, integration);
-    return;
+    await abortAndBlock(self, runId, taskId, integration, lease);
+    return false;
   }
   session.open({ preserveFocus: true });
   live.mergeResolutions.set(taskId, session);
@@ -452,8 +519,10 @@ async function startMergeResolution(
   // タスク境界（`TaskBoundary`）は本来そのタスクのworktree用に作られたもので、統合
   // worktree（別ディレクトリ）向けに作り直すと境界判定の意味が変わってしまう。安全側
   // （常に人の承認を要求する）に倒すための単純化であり、最終報告に明記する
+  // 統合worktreeの占有はここで解決セッションへ引き継ぐ。`onMergeResolutionFinished`が
+  // 全ての出口（done / blocked / manual / interrupted / 例外）で解放する（Issue #412）
   session.onFinished((reason) => {
-    void onMergeResolutionFinished(self, runId, taskId, task, integration, reason);
+    void onMergeResolutionFinished(self, runId, taskId, task, integration, reason, lease);
   });
 
   session.runLoop({
@@ -463,9 +532,17 @@ async function startMergeResolution(
     condition: MERGE_RESOLUTION_CONDITION,
   });
   self.notify(runId);
+  return true;
 }
 
-/** 衝突解決セッションの結果を受けて、`done`（解決済み）か`blocked`（未解決）かを確定する。 */
+/**
+ * 衝突解決セッションの結果を受けて、`done`（解決済み）か`blocked`（未解決）かを確定する。
+ *
+ * `startMergeResolution`から引き継いだ統合worktreeの占有（`lease`）を、**どの出口でも
+ * 必ず解放する**（`finally`。Issue #412。解放漏れは以後そのrunのマージが全て詰まる
+ * デッドロックになる）。`abortAndBlock`が先に解放していても、解放は冪等なので二重解放に
+ * ならない。
+ */
 async function onMergeResolutionFinished(
   self: WorkflowRunnerInternals,
   runId: string,
@@ -473,6 +550,24 @@ async function onMergeResolutionFinished(
   task: WorkflowTask,
   integration: { cwd: string; branch: string },
   reason: LoopStopReason,
+  lease: IntegrationLease,
+): Promise<void> {
+  try {
+    await finishMergeResolution(self, runId, taskId, task, integration, reason, lease);
+  } finally {
+    self.integrationQueue.releaseLease(lease);
+  }
+}
+
+/** `onMergeResolutionFinished`の中身（占有の解放は呼び出し側の`finally`が受け持つ）。 */
+async function finishMergeResolution(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  taskId: string,
+  task: WorkflowTask,
+  integration: { cwd: string; branch: string },
+  reason: LoopStopReason,
+  lease: IntegrationLease,
 ): Promise<void> {
   const live = self.runs.get(runId);
   if (live === undefined) {
@@ -512,21 +607,30 @@ async function onMergeResolutionFinished(
       `[workflow ${runId}/${taskId}] 衝突解決セッションはdoneを宣言しましたが、git上は未解決のままでした`,
     );
   }
-  await abortAndBlock(self, runId, taskId, integration);
+  await abortAndBlock(self, runId, taskId, integration, lease);
 }
 
-/** マージを巻き戻して`blocked`に確定させる共通処理（design.md §16.17「コンフリクト」7.）。 */
+/**
+ * マージを巻き戻して`blocked`に確定させる共通処理（design.md §16.17「コンフリクト」7.）。
+ *
+ * `git merge --abort`は統合worktree全体を巻き戻すため、**自分が占有しているマージだけを
+ * 巻き戻せる**ように占有ハンドルを必須にする（Issue #412の指摘2。ハンドル無しだと、他
+ * タスクの衝突解決セッションが編集中の内容ごと巻き戻していた）。ハンドルが失効していれば
+ * `IntegrationMergeQueue.abortMerge`が`leaseNotHeld`で拒否し、`git merge --abort`自体が
+ * 走らない。
+ */
 async function abortAndBlock(
   self: WorkflowRunnerInternals,
   runId: string,
   taskId: string,
   integration: { cwd: string; branch: string },
+  lease: IntegrationLease,
 ): Promise<void> {
   const live = self.runs.get(runId);
   if (live === undefined) {
     return;
   }
-  const abort = await self.integrationQueue.abortMerge(integration.cwd, self.deps.git);
+  const abort = await self.integrationQueue.abortMerge(lease, self.deps.git);
   if (!abort.ok) {
     self.deps.log.warn(
       `[workflow ${runId}/${taskId}] マージの巻き戻しに失敗しました: ${abort.message}`,
