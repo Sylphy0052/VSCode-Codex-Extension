@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  buildClaudeShellArgs,
-  buildClaudeStreamArgs,
-  isUnsafeClaudeCombination,
-} from '../../src/claude/argvBuilder';
+import { buildClaudeStreamArgs, isUnsafeClaudeCombination } from '../../src/claude/argvBuilder';
 import { emptyClaudeConfig, type ClaudeConfig } from '../../src/claude/types';
 
 const ID = '019fd79f-1e16-7b60-b9d2-0324b275ed81';
@@ -12,139 +8,6 @@ const NEW_ID = '019fd7a6-d25e-7bd2-b181-751e467277f3';
 const config = (overrides: Partial<ClaudeConfig> = {}): ClaudeConfig => ({
   ...emptyClaudeConfig,
   ...overrides,
-});
-
-describe('buildClaudeShellArgs', () => {
-  it('新規セッションは起動前に決めたidを渡す', () => {
-    const { args } = buildClaudeShellArgs({
-      target: { kind: 'new' },
-      sessionId: NEW_ID,
-      cwd: '/w/repo',
-      config: config(),
-    });
-    expect(args).toEqual(['--session-id', NEW_ID]);
-  });
-
-  it('resumeは -r を渡す', () => {
-    const { args } = buildClaudeShellArgs({
-      target: { kind: 'resume', sessionId: ID },
-      sessionId: undefined,
-      cwd: '/w/repo',
-      config: config(),
-    });
-    expect(args).toEqual(['-r', ID]);
-  });
-
-  it('forkは --fork-session を添える', () => {
-    const { args } = buildClaudeShellArgs({
-      target: { kind: 'fork', sessionId: ID },
-      sessionId: undefined,
-      cwd: '/w/repo',
-      config: config(),
-    });
-    expect(args).toEqual(['-r', ID, '--fork-session']);
-  });
-
-  it('UUID以外のidを拒否する（引数注入の防止）', () => {
-    expect(() =>
-      buildClaudeShellArgs({
-        target: { kind: 'resume', sessionId: '--dangerously-skip-permissions' },
-        sessionId: undefined,
-        cwd: '/w/repo',
-        config: config(),
-      }),
-    ).toThrow();
-
-    expect(() =>
-      buildClaudeShellArgs({
-        target: { kind: 'new' },
-        sessionId: 'not-a-uuid',
-        cwd: '/w/repo',
-        config: config(),
-      }),
-    ).toThrow();
-  });
-
-  it('モデル・effort・権限モード・エージェントを渡す', () => {
-    const { args, warnings } = buildClaudeShellArgs({
-      target: { kind: 'new' },
-      sessionId: NEW_ID,
-      cwd: '/w/repo',
-      config: config({
-        model: 'opus',
-        effort: 'high',
-        permissionMode: 'acceptEdits',
-        agent: 'code-reviewer',
-      }),
-    });
-    expect(args).toEqual([
-      '--session-id',
-      NEW_ID,
-      '--model',
-      'opus',
-      '--effort',
-      'high',
-      '--permission-mode',
-      'acceptEdits',
-      '--agent',
-      'code-reviewer',
-    ]);
-    expect(warnings).toEqual([]);
-  });
-
-  it('未知のeffort/権限モードは無視して警告する', () => {
-    const { args, warnings } = buildClaudeShellArgs({
-      target: { kind: 'new' },
-      sessionId: NEW_ID,
-      cwd: '/w/repo',
-      config: config({ effort: 'ultra', permissionMode: 'yolo' }),
-    });
-    expect(args).toEqual(['--session-id', NEW_ID]);
-    expect(warnings).toHaveLength(2);
-  });
-
-  it('エージェント名は空なら渡さない', () => {
-    const { args, warnings } = buildClaudeShellArgs({
-      target: { kind: 'new' },
-      sessionId: NEW_ID,
-      cwd: '/w/repo',
-      config: config({ agent: '' }),
-    });
-    expect(args).toEqual(['--session-id', NEW_ID]);
-    expect(warnings).toEqual([]);
-  });
-
-  it('プラグイン由来のエージェント名（コロン区切り）も渡せる', () => {
-    const { args } = buildClaudeShellArgs({
-      target: { kind: 'new' },
-      sessionId: NEW_ID,
-      cwd: '/w/repo',
-      config: config({ agent: 'genshijin:genshijin-builder' }),
-    });
-    expect(args).toEqual(['--session-id', NEW_ID, '--agent', 'genshijin:genshijin-builder']);
-  });
-
-  it('引数注入になりうるエージェント名は無視して警告する（先頭がハイフン等）', () => {
-    const { args, warnings } = buildClaudeShellArgs({
-      target: { kind: 'new' },
-      sessionId: NEW_ID,
-      cwd: '/w/repo',
-      config: config({ agent: '--dangerously-skip-permissions' }),
-    });
-    expect(args).toEqual(['--session-id', NEW_ID]);
-    expect(warnings).toHaveLength(1);
-  });
-
-  it('追加引数の空要素を捨てる', () => {
-    const { args, warnings } = buildClaudeShellArgs({
-      target: { kind: 'new' },
-      sessionId: NEW_ID,
-      cwd: '/w/repo',
-      config: config({ additionalArgs: ['--verbose', ''] }),
-    });
-    expect(args).toEqual(['--session-id', NEW_ID, '--verbose']);
-    expect(warnings).toHaveLength(1);
-  });
 });
 
 describe('buildClaudeStreamArgs', () => {
@@ -185,16 +48,6 @@ describe('buildClaudeStreamArgs', () => {
       expect(at).toBeGreaterThanOrEqual(0);
       expect(args[at + 1]).toBe('stdio');
     }
-  });
-
-  it('TUIタブ用の引数には付けない（CLI自身が対話で承認を聞くため）', () => {
-    const { args } = buildClaudeShellArgs({
-      target: { kind: 'new' },
-      sessionId: NEW_ID,
-      cwd: '/w/repo',
-      config: config({ permissionMode: 'acceptEdits' }),
-    });
-    expect(args).not.toContain('--permission-prompt-tool');
   });
 
   it('resumeでは -r を使い --session-id を渡さない', () => {

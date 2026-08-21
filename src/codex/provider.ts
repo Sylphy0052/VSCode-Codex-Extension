@@ -1,7 +1,6 @@
 import { readConfig } from '../config';
-import type { AgentProvider, LaunchInput, LaunchSpec } from '../provider/types';
+import type { AgentProvider } from '../provider/types';
 import type { ListOptions, ListResult, SessionStore } from '../session/sessionStore';
-import { buildLaunchEnv, buildShellArgs } from './argvBuilder';
 import { nodeLocatorDeps, resolveCodexPath, type LocateResult } from './cliLocator';
 import type { SessionSummary } from './types';
 
@@ -33,21 +32,6 @@ export class CodexProvider implements AgentProvider {
 
   async listSessions(options: ListOptions): Promise<ListResult> {
     return this.store.list(options);
-  }
-
-  buildLaunch(input: LaunchInput): LaunchSpec {
-    const { args, warnings } = buildShellArgs({
-      target: input.target,
-      cwd: input.cwd,
-      config: readConfig().codex,
-    });
-    return {
-      args,
-      env: buildLaunchEnv(input.tag),
-      // fork は新しいセッションになるため、id は起動後の紐付けで確定させる
-      sessionId: input.target.kind === 'resume' ? input.target.sessionId : undefined,
-      warnings,
-    };
   }
 
   tabTitle(session: Pick<SessionSummary, 'id' | 'threadName'>): string {
