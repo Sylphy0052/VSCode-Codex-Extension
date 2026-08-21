@@ -1488,8 +1488,9 @@ export class WorkflowRunner {
       // 統合worktreeの占有待ちで止まっているマージを、起こす前に「即戻る」状態にしておく
       // （Issue #412のレビュー指摘6）。`releaseAllLeases()`で起き上がった待機者は
       // `attemptMerge`の続きへ進むため、この印が無いと`markMergeFailed`→`persist`/`notify`が
-      // 破棄済みのEventEmitter・workspaceStateへ書き込む。`canProceedAfterLease`が
-      // `live.finished`を見て何もせず解放するようにしてから解放する（順序が重要）
+      // 破棄済みのEventEmitter・workspaceStateへ書き込む。起き上がった側は
+      // `decideAfterLeaseWait`が「占有が失効している」ことを見て何もせず戻るが、
+      // `live.finished`は`pump()`が新しいタスクを開始しないための印としても要る
       live.finished = true;
     }
     // 統合worktreeの占有（Issue #412）の強制解放。通常は`runnerMerge.ts`側の`finally`が

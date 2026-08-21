@@ -343,7 +343,7 @@ async function attemptMerge(
   if (before === undefined) {
     return;
   }
-  // 順番待ちの**前**の停止状態を控えておく（`canProceedAfterLease`の判定に使う）。
+  // 順番待ちの**前**の停止状態を控えておく（`decideAfterLeaseWait`の判定に使う）。
   // 「もともと停止中だったrunの、走り切ったタスクのマージ」は従来どおり行う
   // （design.md §16.5「`running`のものは走らせ切る」。`interrupted`の既存テスト参照）ので、
   // 見るのは「待っている間に停止・終了へ変わったかどうか」だけにする
