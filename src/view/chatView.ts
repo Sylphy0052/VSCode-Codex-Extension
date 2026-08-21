@@ -5,14 +5,8 @@ import {
   defaultDenyResponse,
   describeApproval,
   isApprovalDecision,
-  type ApprovalDecision,
 } from '../appserver/approvals';
-import {
-  isOpenableSearchUrl,
-  type ChatItem,
-  type ChatState,
-  type PendingApproval,
-} from '../appserver/chatState';
+import { isOpenableSearchUrl, type ChatItem, type ChatState } from '../appserver/chatState';
 import { ChatSession } from '../appserver/chatSession';
 import {
   AppServerConnection,
@@ -32,7 +26,6 @@ import {
   readChatRenderMarkdownConfig,
   readChatSendOnConfig,
   readConfig,
-  readNotificationsConfig,
   workspaceFolderPaths,
 } from '../config';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
@@ -49,13 +42,9 @@ import type {
   TaskSessionHost,
   TaskSessionInput,
 } from '../orchestrator/taskSession';
-import {
-  decoratePanelTitle,
-  deriveSessionActivityState,
-  sanitizeForNotification,
-  type SessionActivityState,
-} from './sessionActivity';
+import { decoratePanelTitle, deriveSessionActivityState } from './sessionActivity';
 import { buildItemsDelta } from './stateDelta';
+import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import { APPROVAL_LEVEL_CYCLE, isApprovalLevel } from '../provider/approvalLevel';
 import { AttachmentBox } from '../provider/attachments';
 import { CommandCatalog } from '../provider/commandCatalog';
@@ -76,7 +65,6 @@ import {
   type ReviewTargetKind,
 } from '../codex/reviewTarget';
 import { buildSideQuestionForkParams } from '../codex/sideQuestion';
-import { nextActivePanelSequence, type ActiveComposerTarget } from './activePanelSequence';
 import { PendingStartRegistry } from './pendingStarts';
 import { readPersistedThreadId } from './panelState';
 import { isEditableKey, type SettingsProvider } from './settingsProvider';
@@ -168,7 +156,7 @@ const SIDE_QUESTION_TAB_TITLE = '脇道';
  */
 const MCP_STARTUP_CHECK_TIMEOUT_MS = 8_000;
 
-interface ChatPanel {
+interface ChatPanel extends BaseChatPanel {
   /**
    * 今そのタブが開いているか。`undefined` はタブが閉じられている状態を表す。
    *
@@ -363,23 +351,14 @@ const REVIEW_TARGET_INPUT: Record<
  * `TaskSessionHost` を実装し、オーケストレータ（`runner.ts`。次の依頼で実装）がプロバイダを
  * 見ずにタスクのセッションを扱えるようにする（design.md §16.10）。
  */
-export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
+export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements TaskSessionHost {
   private readonly connection: AppServerConnectionPort;
-  private readonly panels = new Map<string, ChatPanel>();
   /**
    * `thread/start` の応答待ち。複数件を同時に持てる（design.md §16.10の3）。
    * 「最後に開始した1件」を決め打ちで返すと、並列開始時に別タスク宛の通知・承認要求を
    * 誤配送する（詳しくは `pendingStarts.ts` のコメント）。
    */
   private readonly pendingStarts = new PendingStartRegistry<ChatPanel>();
-  /** 名前変更コマンドの対象。最後にアクティブだったCodex画面。 */
-  private active: ChatPanel | undefined;
-  /**
-   * `active` が（再）設定されるたびに進む採番（issue #292）。Claude Code側
-   * （`claudeChatView.ts`）と比べて、エディタの選択範囲をどちらへ挿すか決めるのに使う
-   * （`getActiveComposerTarget` 参照）。
-   */
-  private activeSequence = 0;
 
   private readonly catalog: CommandCatalog;
   private commands: SlashCommand[] | undefined;
@@ -419,6 +398,7 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     ) => AppServerConnectionPort = (onNotification, onServerRequest, onDisconnect) =>
       new AppServerConnection(codexPath, log, onNotification, onServerRequest, onDisconnect),
   ) {
+    super();
     this.catalog = new CommandCatalog(this.fs);
     this.connection = connectionFactory(
       (method, params) => this.routeNotification(method, params),
@@ -454,18 +434,6 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
   /** そのスレッドの画面を開いているか。履歴の印に使う。 */
   isOpen(threadId: string): boolean {
     return this.panels.has(threadId);
-  }
-
-  /**
-   * そのスレッドの活動状態（issue #286、design.md §14.55）。
-   *
-   * 開いていなければ`undefined`（履歴ツリーの印に使う。`isOpen`と同じく`panels`に
-   * エントリがあるかどうかで判定する。タスク管理下のセッションはタブを閉じても
-   * `panels`に残り続けるため、タブが閉じていても実行中のタスクは`undefined`にならない）。
-   */
-  getActivityState(threadId: string): SessionActivityState | undefined {
-    const entry = this.panels.get(threadId);
-    return entry === undefined ? undefined : deriveSessionActivityState(entry.session.getState());
   }
 
   /**
@@ -659,40 +627,18 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
    * （design.md §16.10の4「reveal()でパネルを作り直し、ChatStateから会話を描き直す」）。
    * 会話の再描画は、webview起動時の `ready` 通知への応答（`postState`）に任せる。
    */
-  private showPanel(entry: ChatPanel, preserveFocus: boolean): void {
-    if (entry.disposed) {
-      return;
-    }
-    if (entry.panel !== undefined) {
-      entry.panel.reveal(undefined, preserveFocus);
-      if (!preserveFocus) {
-        this.active = entry;
-        this.activeSequence = nextActivePanelSequence();
-      }
-      return;
-    }
-    const panel = vscode.window.createWebviewPanel(
+  /** `BaseChatViewManager.showPanel`（基底クラス）が新規作成時に呼ぶ、Codex用のパネル生成。 */
+  protected override createWebviewPanel(entry: ChatPanel, preserveFocus: boolean): vscode.WebviewPanel {
+    return vscode.window.createWebviewPanel(
       VIEW_TYPE,
       entry.title,
       { viewColumn: vscode.ViewColumn.Active, preserveFocus },
       buildChatPanelOptions(),
     );
-    this.attachPanel(entry, panel);
   }
 
-  /**
-   * 実際のパネルへ表示を結び付け、イベントを配線する。
-   *
-   * `panel.webview.options`（`enableScripts`等）はここで入れ直すが、`enableFindWidget`
-   * （design.md §14.48、issue #287）は`WebviewPanel.options`側の値で読み取り専用のため、
-   * ここから再設定する手段が無い。`restorePanel`経由（タブ復元）で渡ってくるパネルは
-   * VSCode本体が新規に構築したもので、`enableFindWidget`を含む`WebviewPanelOptions`は
-   * 生成時にしか指定できない。
-   */
-  private attachPanel(entry: ChatPanel, panel: vscode.WebviewPanel): void {
-    entry.panel = panel;
-    panel.title = entry.title;
-    panel.webview.options = { enableScripts: true };
+  /** `BaseChatViewManager.attachPanel`（基底クラス）が呼ぶ、Codex用のwebview HTML組み立て。 */
+  protected override renderPanelHtml(entry: ChatPanel, panel: vscode.WebviewPanel): string {
     // 入力欄アイコン列の表に出すボタン（設定 agent.chat.composerButtons、issue #296）。
     // 検証・既定への丸めは readChatComposerButtonsConfig 側（normalizeComposerButtons）
     // が行うため、ここは警告が有ればログへ出すだけ
@@ -700,7 +646,7 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     if (composerButtonsConfig.warning !== undefined) {
       this.log.warn(composerButtonsConfig.warning);
     }
-    panel.webview.html = renderShell(panel.webview, {
+    return renderShell(panel.webview, {
       agentLabel: 'Codex',
       provider: 'codex',
       approvalModes: APPROVAL_MODES,
@@ -727,36 +673,11 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       // （ChatShellOptions.sendOnのJSDoc参照）
       sendOn: readChatSendOnConfig(),
     });
+  }
 
-    panel.webview.onDidReceiveMessage(
-      (message: unknown) => void this.handleMessage(entry, message),
-    );
-    panel.onDidChangeViewState(() => {
-      if (panel.active) {
-        this.active = entry;
-        this.activeSequence = nextActivePanelSequence();
-      }
-    });
-    panel.onDidDispose(() => {
-      entry.panel = undefined;
-      if (!entry.taskManaged) {
-        // 人が手で開いた画面は、これまで通りタブを閉じたらセッションも終わる
-        this.teardown(entry);
-        return;
-      }
-      if (this.active === entry) {
-        this.active = undefined;
-      }
-    });
-    // showPanelのreveal分岐（既存タブ）はpreserveFocusを見てactiveを更新するのに、
-    // 新規作成のこの分岐だけ無条件にactiveを奪っていた（レビュー指摘: critical 2）。
-    // タスクは必ずpreserveFocus: trueで背面に開く（design.md §16.10の2）ため、
-    // 無条件のままだと背面のタスクが「名前変更」等の対象を奪ってしまう。
-    // 実際にフォーカスが当たっているか（panel.active）を見て決める
-    if (panel.active) {
-      this.active = entry;
-      this.activeSequence = nextActivePanelSequence();
-    }
+  /** `BaseChatViewManager.attachPanel`（基底クラス）が配線する、webviewからのメッセージの実処理。 */
+  protected override dispatchMessage(entry: ChatPanel, message: unknown): void {
+    void this.handleMessage(entry, message);
   }
 
   /**
@@ -839,50 +760,11 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
   }
 
   /**
-   * 承認要求を決定する。webviewの承認カード（`approve`メッセージ）とワークフローViewの
-   * 「承認」操作（`TaskSession.decideApproval`）の両方から呼ばれる共通経路にしておくことで、
-   * どちらの入口から決定しても `onApprovalResolved` のリスナーへ同じ通知が届く。
+   * `BaseChatViewManager.teardown`（基底クラス）の拡張フック。`pendingStarts`
+   * （`thread/start`応答待ち登録。Claude Codeには対応する概念が無い）からも取り除く。
    */
-  private resolveApproval(
-    entry: ChatPanel,
-    requestId: number | string,
-    decision: ApprovalDecision,
-  ): void {
-    entry.session.decide(requestId, decision);
-    for (const listener of entry.approvalResolvedListeners) {
-      listener({ requestId, decision });
-    }
-  }
-
-  /**
-   * エントリを完全に破棄する。ループを止め、セッションを解放し（保留中の承認は拒否される）、
-   * パネルが開いていれば閉じ、全ての管理表から取り除く。
-   *
-   * 二重に呼んでも安全（`disposed` で早期return）。タブを閉じたことによる破棄と、
-   * 明示的な `dispose()` 呼び出しの両方から通る。
-   */
-  private teardown(entry: ChatPanel): void {
-    if (entry.disposed) {
-      return;
-    }
-    entry.disposed = true;
-    if (entry.postTimer !== undefined) {
-      clearTimeout(entry.postTimer);
-      entry.postTimer = undefined;
-    }
-    entry.loop.stop('manual');
-    entry.session.dispose();
-    entry.panel?.dispose();
-    entry.panel = undefined;
-    if (this.active === entry) {
-      this.active = undefined;
-    }
+  protected override onTeardown(entry: ChatPanel): void {
     this.pendingStarts.remove(entry);
-    for (const [id, value] of this.panels) {
-      if (value === entry) {
-        this.panels.delete(id);
-      }
-    }
   }
 
   private onSessionChange(entry: ChatPanel, state: ChatState): void {
@@ -915,74 +797,6 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     for (const listener of entry.stateListeners) {
       listener(state);
     }
-  }
-
-  /**
-   * 承認待ちの通知（issue #286、design.md §14.55）。
-   *
-   * `state.approvals`に新しく現れた要求ごとに1回だけ判定する。`entry.notifiedApprovalRequestIds`
-   * へ積んだ要求は、設定で無効・タブが見えている等の理由で通知を出さなかった場合も含めて
-   * 二度と判定し直さない（同じ要求で通知を重複させないため）。
-   */
-  private notifyNewApprovals(entry: ChatPanel, state: ChatState): void {
-    for (const approval of state.approvals) {
-      const key = String(approval.requestId);
-      if (entry.notifiedApprovalRequestIds.has(key)) {
-        continue;
-      }
-      entry.notifiedApprovalRequestIds.add(key);
-      this.notifyApprovalPending(entry, approval);
-    }
-  }
-
-  /**
-   * 承認待ちの通知を実際に出す。
-   *
-   * 「見えているか」は`WebviewPanel.visible`で判定する（`active`＝フォーカスが
-   * 当たっているかとは別物。分割表示やSide-by-sideで前面に見えていればフォーカスが
-   * 無くても通知を出す必要は無い、という判断）。判定は呼び出された瞬間の一度きりで、
-   * 後から可視性が変わっても再評価しない（`notifyNewApprovals`のJSDoc参照）。
-   */
-  private notifyApprovalPending(entry: ChatPanel, approval: PendingApproval): void {
-    if (!readNotificationsConfig().approvalPending) {
-      return;
-    }
-    if (entry.panel !== undefined && entry.panel.visible) {
-      return;
-    }
-    const sessionLabel = sanitizeForNotification(entry.title);
-    const approvalLabel = sanitizeForNotification(approval.title);
-    void vscode.window
-      .showInformationMessage(`${sessionLabel} が承認待ちです（${approvalLabel}）`, '開く')
-      .then((choice) => {
-        if (choice === '開く') {
-          this.showPanel(entry, false);
-        }
-      });
-  }
-
-  /**
-   * ターン完了の通知（issue #286、design.md §14.55、既定オフ）。
-   *
-   * 承認待ちの通知と違い`requestId`のような一意な識別子が無いが、`finished`は
-   * `busy`の立ち下がり（`true→false`）を検知した1回だけ呼ばれる呼び出し元
-   * （`onSessionChange`）の作りにより、同じターンで重複して呼ばれることは無い。
-   */
-  private notifyTurnComplete(entry: ChatPanel): void {
-    if (!readNotificationsConfig().turnComplete) {
-      return;
-    }
-    if (entry.panel !== undefined && entry.panel.visible) {
-      return;
-    }
-    const sessionLabel = sanitizeForNotification(entry.title);
-    void vscode.window
-      .showInformationMessage(`${sessionLabel} の応答が終わりました`, '開く')
-      .then((choice) => {
-        if (choice === '開く') {
-          this.showPanel(entry, false);
-        }
-      });
   }
 
   /** ループの状態変化。停止（running: true→false）を検知して `onFinished` を1度だけ呼ぶ。 */
@@ -1602,31 +1416,6 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
   }
 
   /**
-   * エディタの選択範囲（issue #292）を送る先。最後にアクティブだったCodex画面を返す
-   * （`this.active`。名前変更・クリアと同じ対象）。開いているタブが無ければ`undefined`。
-   *
-   * Claude Code側（`claudeChatView.ts`の同名メソッド）と`activeSequence`を比べて、
-   * 呼び出し側（`extension.ts`）がどちらへ挿すかを決める。ここではプロバイダ内の
-   * 判定だけを行い、実際の送り先の決定・パスの組み立て・0件時の新規会話は行わない。
-   */
-  getActiveComposerTarget(): ActiveComposerTarget | undefined {
-    const entry = this.active;
-    if (entry === undefined || entry.panel === undefined) {
-      return undefined;
-    }
-    return {
-      activeSequence: this.activeSequence,
-      insert: (text: string) => {
-        if (entry.panel === undefined) {
-          return;
-        }
-        void entry.panel.webview.postMessage({ type: 'insertComposerText', text });
-        this.showPanel(entry, false);
-      },
-    };
-  }
-
-  /**
    * 入力欄の候補を送る。
    *
    * 一度読んだら使い回す。ファイル数は多くないが、画面を開くたびに走査する意味も無い。
@@ -1688,7 +1477,12 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     }
   }
 
-  private allPanels(): ChatPanel[] {
+  /**
+   * `BaseChatViewManager.allPanels`のオーバーライド。`thread/start`応答待ち
+   * （`pendingStarts`）もここへ含める（Claude Codeには対応する概念が無い非対称。
+   * `chatManagerBase.ts`のクラスJSDoc参照）。
+   */
+  protected override allPanels(): ChatPanel[] {
     return [...this.panels.values(), ...this.pendingStarts.values()];
   }
 
@@ -1778,11 +1572,11 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     void vscode.window.showErrorMessage(`Codex: ${message}`);
   }
 
-  dispose(): void {
-    for (const entry of this.allPanels()) {
-      this.teardown(entry);
-    }
-    this.panels.clear();
+  /**
+   * `BaseChatViewManager.dispose`の拡張フック。全スレッドで共有する`AppServerConnection`
+   * を解放する（Claude Codeはセッションごとに別プロセスのため対応する処理が無い）。
+   */
+  protected override onDispose(): void {
     this.connection.dispose();
   }
 }
