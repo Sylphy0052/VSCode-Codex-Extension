@@ -923,3 +923,169 @@ describe('buildMergeResolutionPrompt', () => {
     expect(prompt).toContain('T2');
   });
 });
+
+/**
+ * 統合worktreeの占有（Issue #412）。`mergeTask` / `abortMerge` の入口で、
+ * 「自分がいま占有している統合worktreeか」を確かめる部分の単体テスト。
+ * `git merge --abort` は統合worktree全体を巻き戻すため、他タスクの衝突解決セッションが
+ * 編集中の内容ごと消してしまう事故を型と実行時の両方で塞ぐ。
+ */
+describe('IntegrationMergeQueue: 統合worktreeの占有（Issue #412）', () => {
+  it('占有は1件ずつしか渡らず、解放すると待っている次の取得へFIFOで渡る', async () => {
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+
+    const first = await queue.acquireLease(INTEGRATION_CWD, 'T1');
+    expect(queue.leaseHolderTaskId(INTEGRATION_CWD)).toBe('T1');
+
+    const order: string[] = [];
+    const second = queue.acquireLease(INTEGRATION_CWD, 'T2').then((l) => {
+      order.push('T2');
+      return l;
+    });
+    const third = queue.acquireLease(INTEGRATION_CWD, 'T3').then((l) => {
+      order.push('T3');
+      return l;
+    });
+    await Promise.resolve();
+    // T1が持っている間は誰にも渡らない
+    expect(order).toEqual([]);
+
+    queue.releaseLease(first);
+    const secondLease = await second;
+    expect(order).toEqual(['T2']);
+    expect(queue.leaseHolderTaskId(INTEGRATION_CWD)).toBe('T2');
+
+    queue.releaseLease(secondLease);
+    queue.releaseLease(await third);
+    expect(order).toEqual(['T2', 'T3']);
+    expect(queue.leaseHolderTaskId(INTEGRATION_CWD)).toBeUndefined();
+  });
+
+  it('別の統合worktree（別run）の占有は互いに待たない', async () => {
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    const otherCwd = path.join('/repo', '.agents', 'worktrees', 'other-run', '_integration');
+
+    await queue.acquireLease(INTEGRATION_CWD, 'T1');
+    const other = await queue.acquireLease(otherCwd, 'T1');
+
+    expect(other.integrationWorktreeCwd).toBe(otherCwd);
+    expect(queue.leaseHolderTaskId(otherCwd)).toBe('T1');
+  });
+
+  it('占有していないハンドルのabortMergeは拒否され、git merge --abortを呼ばない', async () => {
+    const git = new FakeGit();
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    await queue.acquireLease(INTEGRATION_CWD, 'T1');
+
+    // 他タスクが「自分は占有している」と偽って作ったハンドル
+    const forged: IntegrationLease = { integrationWorktreeCwd: INTEGRATION_CWD, taskId: 'T2' };
+    const result = await queue.abortMerge(forged, git);
+
+    expect(result).toMatchObject({ ok: false, reason: 'leaseNotHeld' });
+    expect(git.calls).toEqual([]);
+  });
+
+  it('解放済みのハンドルではもうabortMergeもmergeTaskもできない', async () => {
+    const git = new FakeGit();
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    const stale = await queue.acquireLease(INTEGRATION_CWD, 'T1');
+    queue.releaseLease(stale);
+
+    expect(await queue.abortMerge(stale, git)).toMatchObject({
+      ok: false,
+      reason: 'leaseNotHeld',
+    });
+    expect(await queue.mergeTask(stale, RUN_ID, 'T1', `wf/${RUN_ID}/T1`, git)).toMatchObject({
+      kind: 'failure',
+    });
+    expect(git.calls).toEqual([]);
+  });
+
+  it('占有者と異なるtaskIdのマージは拒否される（取り違え防止）', async () => {
+    const git = new FakeGit();
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    const held = await queue.acquireLease(INTEGRATION_CWD, 'T1');
+
+    const result = await queue.mergeTask(held, RUN_ID, 'T2', `wf/${RUN_ID}/T2`, git);
+
+    expect(result.kind).toBe('failure');
+    expect(git.calls).toEqual([]);
+  });
+
+  it('解放は冪等で、二重解放しても次の待ち行列を壊さない', async () => {
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    const first = await queue.acquireLease(INTEGRATION_CWD, 'T1');
+    const second = queue.acquireLease(INTEGRATION_CWD, 'T2');
+    const third = queue.acquireLease(INTEGRATION_CWD, 'T3');
+
+    queue.releaseLease(first);
+    queue.releaseLease(first);
+    await second;
+
+    expect(queue.leaseHolderTaskId(INTEGRATION_CWD)).toBe('T2');
+    queue.releaseLease(await second);
+    await third;
+    expect(queue.leaseHolderTaskId(INTEGRATION_CWD)).toBe('T3');
+  });
+
+  it('releaseAllLeasesは待っている取得を起こし、そのハンドルは失効している（run破棄時の強制解放）', async () => {
+    const git = new FakeGit();
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    await queue.acquireLease(INTEGRATION_CWD, 'T1');
+    const waiting = queue.acquireLease(INTEGRATION_CWD, 'T2');
+
+    queue.releaseAllLeases();
+
+    // 待ち続けて固まるのではなく、失効したハンドルとして起き上がる（fail-closed）
+    const woken = await waiting;
+    expect(await queue.mergeTask(woken, RUN_ID, 'T2', `wf/${RUN_ID}/T2`, git)).toMatchObject({
+      kind: 'failure',
+    });
+    expect(queue.leaseHolderTaskId(INTEGRATION_CWD)).toBeUndefined();
+    expect(git.calls).toEqual([]);
+  });
+
+  it('MERGE_HEADが残っていればマージへ進まずfailureにする（占有の外から呼ばれた場合の多層防御）', async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], {
+      code: 0,
+      stdout: `${'a'.repeat(40)}\n`,
+      stderr: '',
+    });
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+
+    const result = await queue.mergeTask(
+      await lease(queue, 'T2'),
+      RUN_ID,
+      'T2',
+      `wf/${RUN_ID}/T2`,
+      git,
+    );
+
+    expect(result.kind).toBe('failure');
+    // 他タスクの未解決パスを自分の衝突として拾う経路（`git merge`→`diff --diff-filter=U`）
+    // へそもそも入らない
+    expect(git.calls.some((c) => c.args[0] === 'merge')).toBe(false);
+  });
+
+  it('MERGE_HEADが無くても未解決パスが残っていればマージへ進まずfailureにする', async () => {
+    const git = new FakeGit();
+    git.respond(['diff', '--name-only', '--diff-filter=U'], {
+      code: 0,
+      stdout: 'a.ts\n',
+      stderr: '',
+    });
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+
+    const result = await queue.mergeTask(
+      await lease(queue, 'T2'),
+      RUN_ID,
+      'T2',
+      `wf/${RUN_ID}/T2`,
+      git,
+    );
+
+    expect(result.kind).toBe('failure');
+    expect(git.calls.some((c) => c.args[0] === 'merge')).toBe(false);
+  });
+});
