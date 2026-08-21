@@ -144,6 +144,20 @@ describe('sanitizeInlineText（design.md §16.24、Issue #369）', () => {
     expect(sanitizeInlineText('short.ts', 100)).toBe('short.ts');
   });
 
+  it('空文字はそのまま返す', () => {
+    expect(sanitizeInlineText('', 100)).toBe('');
+  });
+
+  it('上限ちょうどの長さでは省略記号を付けない', () => {
+    const exact = 'a'.repeat(100);
+    expect(sanitizeInlineText(exact, 100)).toBe(exact);
+  });
+
+  it('上限を1文字超えると省略記号を付ける', () => {
+    const overByOne = 'a'.repeat(101);
+    expect(sanitizeInlineText(overByOne, 100)).toBe(`${'a'.repeat(100)}…`);
+  });
+
   it('囲い（nonce付き区切り）を付けない', () => {
     expect(sanitizeInlineText('foo', 100)).not.toContain('-----');
   });

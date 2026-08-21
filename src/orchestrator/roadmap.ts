@@ -747,6 +747,13 @@ export interface RoadmapPromptInput {
 const WORKSPACE_ENTRY_MAX_LENGTH = 100;
 const ISSUE_TITLE_MAX_LENGTH = 200;
 
+/**
+ * `buildRoadmapPrompt`が展開するgoal文の長さ上限（design.md §16.24、Issue #369）。
+ * `planner.ts`の`buildPlannerPrompt`が`input.goal`に設ける`MAX_GOAL_LENGTH`と同じ値・
+ * 同じ理由（人が直接入力する値だが、由来を問わず一律に上限を設ける）。
+ */
+const ROADMAP_GOAL_MAX_LENGTH = 8000;
+
 const ROADMAP_FORMAT_EXAMPLE = `# <ゴール>
 
 ## Phase 1: <フェーズ名>
@@ -766,6 +773,10 @@ const ROADMAP_FORMAT_EXAMPLE = `# <ゴール>
  * `workflow.ts` の分解セッション（§16.9）と同じく、返答はMarkdownのみとするよう指示する。
  * 既存のIssueと重複する項目を作らせないため、および項目にIssue番号を紐づけるために
  * `existingIssues` を材料へ含める。
+ *
+ * `input.goal`は`untrustedText.ts`の`formatUntrusted`で囲う（design.md §16.24、
+ * Issue #369）。以前は無加工・上限なしで連結していた（`planner.ts`の`buildPlannerPrompt`が
+ * `input.goal`に対して行った対応と同じ）。
  */
 export function buildRoadmapPrompt(input: RoadmapPromptInput): string {
   const lines: string[] = [];
@@ -773,7 +784,14 @@ export function buildRoadmapPrompt(input: RoadmapPromptInput): string {
   lines.push('');
   lines.push('## ゴール');
   lines.push('');
-  lines.push(input.goal);
+  lines.push(
+    formatUntrusted(input.goal, {
+      id: 'roadmap',
+      field: 'goal',
+      maxLength: ROADMAP_GOAL_MAX_LENGTH,
+      preserveNewlines: true,
+    }),
+  );
   lines.push('');
   lines.push('## ワークスペースの構成（直下）');
   lines.push('');

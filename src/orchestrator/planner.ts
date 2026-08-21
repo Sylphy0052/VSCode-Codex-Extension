@@ -313,7 +313,15 @@ export function buildPlannerPrompt(input: BuildPlannerPromptInput): string {
   return parts.join('\n');
 }
 
-/** 検証に落ちたときの再生成プロンプト（design.md §16.9「もう1度だけ投げ直す」）。 */
+/**
+ * 検証に落ちたときの再生成プロンプト（design.md §16.9「もう1度だけ投げ直す」）。
+ *
+ * `previousYaml`（直前のLLM応答）は`formatUntrusted`等の囲いを通さず、そのまま埋め込む。
+ * 同一セッションへの折り返し（分解セッション自身の直前の応答を、同じセッションへ
+ * 再度渡すだけ）であり、信頼境界を跨がないため。将来この値を別のセッション（別の
+ * 権限・別の指示文脈を持つセッション）へ渡す変更を加える場合は、`untrustedText.ts`の
+ * `formatUntrusted`を通すこと。
+ */
 export function buildRetryPrompt(previousYaml: string, errors: readonly WorkflowIssue[]): string {
   const errorLines = errors
     .map((e) => `- ${e.taskIds.length > 0 ? `[${e.taskIds.join(', ')}] ` : ''}${e.message}`)

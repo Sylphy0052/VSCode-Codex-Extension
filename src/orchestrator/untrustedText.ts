@@ -110,6 +110,11 @@ export function truncateByCodePoint(
  * 前置き・後書きであり、指示として解釈しないようモデルへ期待するだけの、安価な補助策に
  * すぎない。一次防御は呼び出し元がすでに持つ権限の最小化（`sandbox` / `autoApprove`等）で
  * あり、この区切りはそれを補うものでしかない。
+ *
+ * `workflow.ts`が持っていた旧`truncateForTemplate`（`{{T1.result}}`展開時に黙って
+ * 切り詰めるだけの関数）の責務は、この関数の2（長さ切り詰め）に吸収した。
+ * `messaging.ts`の`composeNextPrompt`が参照する`{{T1.result}}`側の切り詰めも、
+ * 実体はこの関数を経由する（`workflow.ts`の`expandTemplate`経由）。
  */
 export function formatUntrusted(text: string, options: UntrustedTextOptions): string {
   if (text === '') {
