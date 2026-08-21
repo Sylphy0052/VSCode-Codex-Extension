@@ -149,17 +149,75 @@ export function serializeManifest(manifest: IntegrationManifest): string {
 }
 
 /**
+ * マニフェストへ持ち込めるエントリ数の上限。これを超えるJSONは壊れているか異常な
+ * ものとして扱い、パース失敗と同等に倒す（レビュー指摘: risk、Issue #380の追加指摘）。
+ *
+ * 根拠: 統合先（`_integration`）は差分（追加・変更されたファイル）だけを持つ疎な構成
+ * のため、1回のrunで複数タスクが変更するファイル数は通常でも数百〜数千件程度に収まる。
+ * 極端に大規模なモノレポでの全面書き換えを想定しても数万件が現実的な上限であり、
+ * 10万件はその数倍にあたる安全側の値（かつ`Map`構築のメモリ・CPUコストが実用上
+ * 無視できる範囲に収まる規模）として選んだ。
+ */
+const MAX_MANIFEST_ENTRIES = 100_000;
+
+/**
+ * マニフェストのキー（ワークスペースへ反映する際の相対パス）として妥当かどうかを
+ * 検証する（レビュー指摘: high、パストラバーサル。Issue #380の追加指摘）。
+ *
+ * このキーは`reflectIntegrationToWorkspace`で`relPath.split('/')`された後
+ * `path.join(workspaceRoot, ...segments)`へそのまま渡り、ワークスペースへの
+ * 反映先を決める。`manifest.json`はワークスペース内のファイルとして読み戻す
+ * （Issue #380）ため、細工されたファイルを事前に置かれると外部入力がこの経路へ
+ * 流れうる。空文字・絶対パス（POSIX/Windowsドライブレター双方）・バックスラッシュ
+ * 区切り・`..`/`.`セグメントを含むキーは、いずれも`workspaceRoot`の外を指す
+ * 余地を作るため拒否する。
+ */
+function isValidManifestKey(key: string): boolean {
+  if (key === '' || key.includes('\\') || path.isAbsolute(key)) {
+    return false;
+  }
+  // WindowsのドライブレターはPOSIX上の`path.isAbsolute`では絶対パスと判定されない
+  // （例: `C:/x`）ため、別途弾く。
+  if (/^[a-zA-Z]:/.test(key)) {
+    return false;
+  }
+  const segments = key.split('/');
+  return segments.every((segment) => segment !== '' && segment !== '.' && segment !== '..');
+}
+
+/** `manifestFromParsedJson` の結果。`ok: false` は不正なキーを含む・エントリ数が上限を超える等、破棄が起きたことを表す。 */
+interface ManifestParseResult {
+  manifest: IntegrationManifest;
+  ok: boolean;
+}
+
+/**
  * `JSON.parse`済みの値からマニフェストを組み立てる純粋関数。`deserializeManifest`（壊れた
  * JSONを安全側の空マニフェストへ倒す）と、復元の成否を呼び出し側へ伝える必要がある
  * `loadPersistedManifest`（壊れたJSONを「復元できなかった」ことが分かる形で返す。
  * Issue #380）の両方から共有する。
+ *
+ * キーが不正（`isValidManifestKey`が偽）なエントリは破棄し、`ok: false`で報告する
+ * （レビュー指摘: high。`deserializeManifest`は従来どおり安全側へ倒すため`ok`を捨てるが、
+ * `loadPersistedManifest`はこれを見て「復元できなかった」として反映を止める）。
+ * 値の形が不正なエントリ（`taskId`/`kind`が期待の型でない）は、キーの妥当性とは
+ * 別問題（パストラバーサルの脅威ではない）のため、従来どおり黙って読み飛ばすだけに留める。
  */
-function manifestFromParsedJson(parsed: unknown): IntegrationManifest {
+function manifestFromParsedJson(parsed: unknown): ManifestParseResult {
   if (typeof parsed !== 'object' || parsed === null) {
-    return new Map();
+    return { manifest: new Map(), ok: true };
+  }
+  const rawEntries = Object.entries(parsed as Record<string, unknown>);
+  if (rawEntries.length > MAX_MANIFEST_ENTRIES) {
+    return { manifest: new Map(), ok: false };
   }
   const result = new Map<string, IntegrationManifestEntry>();
-  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+  let ok = true;
+  for (const [key, value] of rawEntries) {
+    if (!isValidManifestKey(key)) {
+      ok = false;
+      continue;
+    }
     if (
       typeof value === 'object' &&
       value !== null &&
@@ -172,13 +230,13 @@ function manifestFromParsedJson(parsed: unknown): IntegrationManifest {
       }
     }
   }
-  return result;
+  return { manifest: result, ok };
 }
 
-/** `serializeManifest` の逆変換。壊れたJSONは空のマニフェストとして扱う（安全側）。 */
+/** `serializeManifest` の逆変換。壊れたJSON・不正なエントリは空のマニフェストとして扱う（安全側）。 */
 export function deserializeManifest(json: string): IntegrationManifest {
   try {
-    return manifestFromParsedJson(JSON.parse(json));
+    return manifestFromParsedJson(JSON.parse(json)).manifest;
   } catch {
     return new Map();
   }
@@ -207,9 +265,15 @@ export type LoadManifestResult =
  *
  * ファイルが無い場合（初回実行、またはまだ1件も統合していない実行）は「復元できない」
  * ではなく「復元すべきものがまだ無い」正常系のため、空のマニフェストで`ok: true`を返す。
- * ファイルはあるが内容を解析できない場合（破損）だけ`ok: false`にする。ここを
+ * ファイルはあるが内容を解析できない場合（破損）、不正なキー（パストラバーサルの疑いが
+ * あるエントリ）を含む場合、エントリ数が上限を超える場合は`ok: false`にする。ここを
  * `deserializeManifest`のように黙って空マニフェストへ倒すと、統合済みだった成果が
  * あったことに呼び出し側が気づけない（「0件で成功」に見えてしまう。Issueの本題）。
+ *
+ * 読み込みの前に、`integrationManifestPath`が指す経路にシンボリックリンクが含まれて
+ * いないかを確かめる（レビュー指摘: medium）。`.agents/worktrees/<runId>`の親のいずれかが
+ * シンボリックリンクだと境界外のファイルを読んでしまう。`ensureIntegrationDir`等と同じ
+ * `findSymlinkedAncestor`による一次防御をI/Oの前に通す。
  */
 export async function loadPersistedManifest(
   workspaceRoot: string,
@@ -217,18 +281,36 @@ export async function loadPersistedManifest(
   fs: PseudoWorktreeFileSystemPort,
 ): Promise<LoadManifestResult> {
   const filePath = integrationManifestPath(workspaceRoot, runId);
+
+  const symlinkedAncestor = await findSymlinkedAncestor(workspaceRoot, filePath, fs);
+  if (symlinkedAncestor !== undefined) {
+    return {
+      ok: false,
+      message: `疑似worktreeの統合マニフェストの読み込み元の経路にシンボリックリンクが含まれています。読み込みを中止しました: ${symlinkedAncestor}`,
+    };
+  }
+
   const content = await fs.readTextFile(filePath);
   if (content === undefined) {
     return { ok: true, manifest: new Map() };
   }
+  let parsed: unknown;
   try {
-    return { ok: true, manifest: manifestFromParsedJson(JSON.parse(content)) };
+    parsed = JSON.parse(content);
   } catch {
     return {
       ok: false,
       message: `疑似worktreeの統合マニフェストを復元できませんでした（内容を解析できません）: ${filePath}`,
     };
   }
+  const { manifest, ok } = manifestFromParsedJson(parsed);
+  if (!ok) {
+    return {
+      ok: false,
+      message: `疑似worktreeの統合マニフェストを復元できませんでした（不正なエントリ、またはエントリ数が上限を超えています）: ${filePath}`,
+    };
+  }
+  return { ok: true, manifest };
 }
 
 /**
@@ -236,6 +318,9 @@ export async function loadPersistedManifest(
  * （`IntegrationQueue.integrate`）が成功するたびに呼び出し側（`integratePseudoWorktree`）
  * から呼ぶ。書き込み失敗（EACCES/ENOSPC等）はここでは吸収せず、他のポートメソッドと
  * 同じく素通しでthrowする（呼び出し側が「統合自体は成立している」ことと区別して扱うため）。
+ *
+ * 書き込みの前に、`loadPersistedManifest`と同じくシンボリックリンクの経路検知を行う
+ * （レビュー指摘: medium）。
  */
 export async function persistManifest(
   workspaceRoot: string,
@@ -244,6 +329,14 @@ export async function persistManifest(
   fs: PseudoWorktreeFileSystemPort,
 ): Promise<void> {
   const filePath = integrationManifestPath(workspaceRoot, runId);
+
+  const symlinkedAncestor = await findSymlinkedAncestor(workspaceRoot, filePath, fs);
+  if (symlinkedAncestor !== undefined) {
+    throw new Error(
+      `疑似worktreeの統合マニフェストの永続化先の経路にシンボリックリンクが含まれています。書き込みを中止しました: ${symlinkedAncestor}`,
+    );
+  }
+
   await fs.mkdir(path.dirname(filePath));
   await fs.writeTextFile(filePath, serializeManifest(manifest));
 }
@@ -748,18 +841,38 @@ export class IntegrationQueue {
     return this.manifestRestoreError;
   }
 
-  /** タスク1件分の差分を統合先へ適用する（`planIntegration` + `applyDiffToIntegration` をキュー経由で呼ぶ）。 */
+  /**
+   * タスク1件分の差分を統合先へ適用する（`planIntegration` + `applyDiffToIntegration` をキュー経由で呼ぶ）。
+   *
+   * `onIntegrated`（省略可）はマニフェスト更新後の永続化用のフック（レビュー指摘: risk、
+   * Issue #380の追加指摘）。`persistManifest`の呼び出しをこの`enqueue`の外で行うと、
+   * `integrate`自体は直列化されていても後段の書き込み同士には順序保証が無く、
+   * 先に完了したタスクの古いマニフェストが、後から完了した別タスクの新しい書き込みより
+   * 後にディスクへ着地しうる（Issueが防ごうとした事象の再発）。`enqueue`されたこの関数の
+   * 中で`await`することで、次のタスクの`integrate`（と、その`onIntegrated`）が始まる前に
+   * 必ず書き込みが完了している状態を保証する。
+   *
+   * 呼び出し側が渡す`onIntegrated`が例外を投げると、それがそのままこの`Promise`の
+   * rejectになり統合自体の失敗として扱われてしまう。永続化の失敗は統合の成否とは
+   * 別問題（`integratePseudoWorktree`が従来から独立したtry/catchで警告に留めている
+   * 判断はここでも変えない）のため、失敗を統合の成否に混ぜたくない呼び出し側は
+   * `onIntegrated`自身の内側でtry/catchすること。
+   */
   integrate(
     taskId: string,
     taskDir: string,
     integrationDir: string,
     diff: readonly DiffEntry[],
     fs: PseudoWorktreeFileSystemPort,
+    onIntegrated?: (manifest: IntegrationManifest) => Promise<void>,
   ): Promise<IntegrationPlan> {
     return this.enqueue(async () => {
       const plan = planIntegration(taskId, diff, this.manifest);
       await applyDiffToIntegration(taskDir, integrationDir, plan.toApply, fs);
       this.manifest = plan.manifest;
+      if (onIntegrated !== undefined) {
+        await onIntegrated(plan.manifest);
+      }
       return plan;
     });
   }
@@ -830,10 +943,20 @@ export async function reflectIntegrationToWorkspace(
     const segments = relPath.split('/');
     const target = path.join(workspaceRoot, ...segments);
     try {
+      // マニフェストの出どころ（実行時に内部生成されたものか、永続化ファイルから
+      // 読み戻されたものか）に関わらず、反映処理自体が境界を守る（レビュー指摘: high、
+      // 多層防御の2段目）。`manifestFromParsedJson`のキー検証（1段目）をすり抜けた
+      // 場合でも、ここで`workspaceRoot`/`integrationDir`の外を指すエントリを弾く。
+      if (!isPathWithinRoot(target, workspaceRoot)) {
+        throw new Error(`反映先がワークスペースの外を指しています（${relPath}）`);
+      }
       if (manifestEntry.kind === 'deleted') {
         await fs.removeFile(target);
       } else {
         const source = path.join(integrationDir, ...segments);
+        if (!isPathWithinRoot(source, integrationDir)) {
+          throw new Error(`反映元が統合先の外を指しています（${relPath}）`);
+        }
         await fs.mkdir(path.dirname(target));
         await fs.copyFile(source, target);
       }

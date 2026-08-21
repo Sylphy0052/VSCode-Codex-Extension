@@ -25,7 +25,7 @@ import type {
   ForgeHostConfig,
   PullRequestLayerConfig,
 } from '../../src/orchestrator/forge';
-import { integrationPath } from '../../src/orchestrator/pseudoWorktree';
+import { deserializeManifest, integrationPath } from '../../src/orchestrator/pseudoWorktree';
 import type {
   PseudoWorktreeDirEntry,
   PseudoWorktreeFileStat,
@@ -3993,6 +3993,76 @@ tasks:
     }
     expect(rejectionListener).not.toHaveBeenCalled();
   });
+
+  it(
+    'マニフェストの永続化はintegrateと同じSerialQueue項目内で行われ、' +
+      '後段の書き込み同士の順序も保証される（レビュー指摘: risk、Issue #380の追加指摘）',
+    async () => {
+      const git = fakeGit({ notGitRepo: true });
+      const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+      const yaml = `
+version: 1
+name: pseudo-persist-order-test
+defaults:
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+      const { runner, codexHost, store } = createHarness(yaml, {
+        git,
+        pseudoWorktree: { fs, exclude: [] },
+      });
+      const result = await runner.start(
+        '/repo/.agents/workflows/pseudo-persist-order.yaml',
+        '/repo',
+      );
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      const t2 = codexHost.byTaskId('T2');
+      const cloneDir1 = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+      const cloneDir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T2');
+      fs.setFile(path.join(cloneDir1, 'x.txt'), { size: 1, mtimeMs: 1 });
+      fs.setFile(path.join(cloneDir2, 'y.txt'), { size: 2, mtimeMs: 2 });
+
+      // T1のマニフェスト永続化（manifest.jsonへのwriteTextFile）だけをわざと遅らせる。
+      // 永続化がqueue.integrateの外（直列化されない箇所）で行われていれば、後から完了する
+      // T2の速い書き込みがT1の遅い書き込みより先に完了し、最終的にT1の（T2を含まない）
+      // 内容で上書きされる（Issue #380が防ごうとした事象の再発）
+      const manifestPath = path.join('/repo', '.agents', 'worktrees', runId, 'manifest.json');
+      const originalWriteTextFile = fs.writeTextFile.bind(fs);
+      let delayedOnce = false;
+      fs.writeTextFile = async (target: string, content: string): Promise<void> => {
+        if (target === manifestPath && !delayedOnce) {
+          delayedOnce = true;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        await originalWriteTextFile(target, content);
+      };
+
+      t1.finish('done', doneState('ok'));
+      t2.finish('done', doneState('ok'));
+      // T1側の遅延（実時間）が解消されるまで待つ。flush()はマイクロタスクを消化するだけで
+      // 実時間の経過は待たないため、ここだけは実際の待機が要る
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+
+      // 直列化により、後（enqueue順で2番目）のT2の永続化はT1の永続化完了後にしか
+      // 始まらないため、最終的な内容にはT1・T2両方の記録が残る
+      const finalManifest = deserializeManifest(fs.textFiles.get(manifestPath) ?? '');
+      expect(finalManifest.get('x.txt')).toEqual({ taskId: 'T1', kind: 'added' });
+      expect(finalManifest.get('y.txt')).toEqual({ taskId: 'T2', kind: 'added' });
+    },
+  );
 
   describe('リロード復元後のマニフェスト（Issue #380）', () => {
     // T1は疑似worktree（統合が要る）、T2は明示cwd（統合を経由しない）にして、リロード後の

@@ -301,28 +301,33 @@ export async function integratePseudoWorktree(
   try {
     const currentSnapshot = await takeSnapshot(liveTask.cwd, pseudo.exclude, deps.fs);
     const diff = diffSnapshots(liveTask.pseudoSnapshot ?? new Map(), currentSnapshot);
+    // マニフェストの永続化（design.md §16.11の対象。Issue #380）を`queue.integrate`と
+    // 同じ`SerialQueue`項目の中で行う（レビュー指摘: risk）。ここを`await queue.integrate`
+    // の外で呼ぶと、`integrate`自体は直列化されていても書き込み同士には順序保証が無く、
+    // 先に完了したタスクの古いマニフェストの書き込みが、後から完了した別タスクの新しい
+    // 書き込みより後にディスクへ着地して統合済みの成果が消えうる（Issueが防ごうとした
+    // 事象の再発）。書き込み自体の失敗は統合成立とは別の問題のため、独立したtry/catchで
+    // 警告に留め、統合そのものの成否には影響させない（`IntegrationQueue.integrate`の
+    // JSDoc参照）
     const plan = await pseudo.queue.integrate(
       taskId,
       liveTask.cwd,
       pseudo.integrationDir,
       diff,
       deps.fs,
+      async (manifest) => {
+        try {
+          await persistManifest(live.repoRoot, runId, manifest, deps.fs);
+        } catch (persistError) {
+          const message = sanitizeForLog(
+            persistError instanceof Error ? persistError.message : String(persistError),
+          );
+          self.deps.log.warn(
+            `[workflow ${runId}/${taskId}] 疑似worktreeの統合マニフェストの永続化に失敗しました: ${message}`,
+          );
+        }
+      },
     );
-
-    // マニフェストを永続化する（design.md §16.11の対象。Issue #380）。ここを怠ると、
-    // リロード復元後に統合済みの記録が失われ、run終了時の反映（`reflectPseudoWorktree`）が
-    // 「0件で成功」に見えてしまう（Issueの本題）。書き込み自体の失敗は統合成立とは別の
-    // 問題のため、独立したtry/catchで警告に留め、統合そのものの成否には影響させない
-    try {
-      await persistManifest(live.repoRoot, runId, pseudo.queue.getManifest(), deps.fs);
-    } catch (persistError) {
-      const message = sanitizeForLog(
-        persistError instanceof Error ? persistError.message : String(persistError),
-      );
-      self.deps.log.warn(
-        `[workflow ${runId}/${taskId}] 疑似worktreeの統合マニフェストの永続化に失敗しました: ${message}`,
-      );
-    }
 
     if (plan.conflicts.length > 0) {
       const paths = plan.conflicts.map((c) => c.path).join(', ');
@@ -403,7 +408,7 @@ export async function reflectPseudoWorktree(
       live.warnings.push({
         kind: 'pseudoWorktreeReflectBlocked',
         taskId: undefined,
-        message: `${result.message}（変更されたパス: ${result.changedPaths.join(', ')}）`,
+        message: `${result.message}（変更されたパス: ${formatPathList(result.changedPaths)}）`,
       });
     } else if (!result.ok) {
       // 'partialApply': 途中でI/Oエラーが起き、それ以前のパスだけが適用された状態
@@ -418,8 +423,8 @@ export async function reflectPseudoWorktree(
       };
       const unresolvedPaths = [result.failedPath, ...result.remainingPaths];
       const detail =
-        `（適用済み: ${result.appliedPaths.length > 0 ? result.appliedPaths.map(describe).join(', ') : 'なし'}` +
-        ` / 未適用: ${unresolvedPaths.map(describe).join(', ')}）`;
+        `（適用済み: ${formatPathList(result.appliedPaths.map(describe))}` +
+        ` / 未適用: ${formatPathList(unresolvedPaths.map(describe))}）`;
       self.deps.log.warn(`[workflow ${runId}] ${result.message}${detail}`);
       live.warnings.push({
         kind: 'pseudoWorktreeReflectBlocked',
@@ -447,6 +452,28 @@ export async function reflectPseudoWorktree(
     });
   }
   self.notify(runId);
+}
+
+/**
+ * 警告メッセージ内のパス一覧が無制限に肥大化しないよう、先頭N件と残り件数の省略表示へ
+ * 丸める（レビュー指摘: risk）。Issue #372で`orchestratorPromptOverride`を直近1件へ
+ * 丸めた判断、`workflow.ts`の`truncateByCodePoint`が文字列長で同種の問題に対処した
+ * 判断と同じ理由（エントリ数が多い実行で`live.warnings`とログ行が際限なく伸びるため）。
+ *
+ * 20件は経験値: 反映失敗で人が実際に見て把握したいのは典型的には数件〜十数件程度で、
+ * それを大きく超える表示はログの可読性を落とすだけになる。
+ */
+const MAX_LISTED_REFLECT_PATHS = 20;
+
+function formatPathList(paths: readonly string[]): string {
+  if (paths.length === 0) {
+    return 'なし';
+  }
+  if (paths.length <= MAX_LISTED_REFLECT_PATHS) {
+    return paths.join(', ');
+  }
+  const shown = paths.slice(0, MAX_LISTED_REFLECT_PATHS).join(', ');
+  return `${shown}, ...ほか${paths.length - MAX_LISTED_REFLECT_PATHS}件`;
 }
 
 export async function buildBoundary(
