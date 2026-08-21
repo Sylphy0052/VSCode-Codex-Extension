@@ -3997,8 +3997,11 @@ tasks:
       await flush();
       expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingReply');
 
-      // waitingReply中に、返信を待たずにターン自体が失敗したことを観測した経路
-      // （loopControllerの`observe()`が`turnFailed`を見て`stop('failed')`を呼ぶ）
+      // waitingReply中に、返信を待たずにターン自体が失敗した経路。ここではフェイクの
+      // セッションから`reason='failed'`を直接流し、runner側の配線
+      // （applyLoopStopReason→markFailed）を検証する。この`failed`を生む
+      // loopControllerの`observe()`側（`turnFailed`を見て`stop('failed')`を呼ぶ）は
+      // test/unit/loopController.test.ts が別途カバーしている
       t1.finish('failed', { ...initialChatState, turnFailed: true });
       await flush();
 
