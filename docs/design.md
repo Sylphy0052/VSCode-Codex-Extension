@@ -4841,12 +4841,12 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 #### 今回の対応で通した経路
 
 - `workflow.ts` のテンプレート展開（§16.4）。`{{T1.files}}` は以前、「拡張機能が組み立てた構造化データ」という前提のもとで `result` / `summary` と異なり無防備のまま展開していた。だが実体を追うと、`files` は `runner.ts` の `state.turnEditedFiles`、つまり `streamJson.ts` が CLI の `tool_use` 引数から取り出した文字列であり、モデル自身が生成した値である。ファイルシステム上の実在検証も通っていない。この前提が誤りだったため、`files` も `formatUntrusted` で囲うようにし、`referencedResultFields`（上流・下流の権限差分を警告する仕組み。§16.4案2）の対象にも加えた。`cwd` / `branch` は引き続き拡張機能自身が組み立てた値なので対象外のまま
-- `roadmap.ts` の `formatRoadmapMaterial`（ロードマップ項目の本文 `item.text` を `formatUntrusted` で囲う）、`buildRoadmapPlanGoal`（ロードマップのタイトル・フェーズ名を `sanitizeInlineText` で1行に均す）、`buildRoadmapPrompt`（Issueタイトルとワークスペースの一覧の各要素を `sanitizeInlineText` で均す）
+- `roadmap.ts` の `formatRoadmapMaterial`（ロードマップ項目の本文 `item.text` を `formatUntrusted` で囲う）、`buildRoadmapPlanGoal`（ロードマップのタイトル・フェーズ名を `sanitizeInlineText` で1行に均す）、`buildRoadmapPrompt`（`goal` を `formatUntrusted` で囲い、Issueタイトルとワークスペースの一覧の各要素を `sanitizeInlineText` で均す）
 - `planner.ts` の `buildPlannerPrompt`（ゴール文を `formatUntrusted` で囲う）と `sanitizeEntryName`（旧来の独自実装を `sanitizeInlineText` への委譲に置き換えた）
 
 `buildRoadmapPlanGoal` が組み立てたゴール文は、そのまま `buildPlannerPrompt` の `goal` として渡り、そちらで改めて `formatUntrusted` により囲われる。`buildRoadmapPlanGoal` の側で `formatUntrusted` の囲いまで付けると二重囲いになるため、そちらでは `sanitizeInlineText` による1行化だけにとどめてある。囲いを二重に掛けても安全性が下がるわけではないが、プロンプトの見た目が余計に複雑になるだけで実益が無いという判断である。
 
-`roadmap.ts` の `buildRoadmapPrompt` が受け取る `goal`（ロードマップ生成そのものの元になる、人が入力欄で直接入力するゴール文）は、外部由来テキストではなく人の入力であるため、この節の対象外としてある（ワークフロー分解の起点になる `planner.ts` 側のゴール文とは別物である点に注意）。
+`roadmap.ts` の `buildRoadmapPrompt` が受け取る `goal`（ロードマップ生成そのものの元になるゴール文。ワークフロー分解の起点になる `planner.ts` 側のゴール文とは別物である点に注意）も `formatUntrusted` で囲う。人が入力欄で直接打つ値ではあるが、囲わない理由にはならない。ゴール文は他所からの貼り付けで入ってくることがあり、そこにプロンプトの指示に見える文字列が混じっていても、囲いが無ければモデルからは指示と区別が付かない。上限（`ROADMAP_GOAL_MAX_LENGTH`）も同時に効くようになる。`planner.ts` の `buildPlannerPrompt` が同じ理由でゴール文を囲っているのと揃えてある。
 
 #### 今回は直さなかったもの
 
