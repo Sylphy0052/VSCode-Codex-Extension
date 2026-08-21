@@ -33,7 +33,6 @@ import { AttachmentBox } from '../provider/attachments';
 import { MESSAGING_MCP_SERVER_NAME } from '../orchestrator/messaging';
 import type {
   ApprovalHandler,
-  ApprovalOutcome,
   TaskSession,
   TaskSessionHost,
   TaskSessionInput,
@@ -86,24 +85,22 @@ import {
   isApprovalLevel,
 } from '../provider/approvalLevel';
 import type { ClaudeConfig } from '../claude/types';
-import type { ClaudeEditableKey, SettingsProvider } from './settingsProvider';
+import type {
+  ClaudeEditableKey,
+  ClaudeSettingsSnapshot,
+  SettingsProvider,
+} from './settingsProvider';
 import type { ChatActivity } from './chatShared';
 
 interface ClaudePanel extends BaseChatPanel {
-  /** タブが今開いているか。`undefined` は閉じている状態（design.md §16.10の4）。 */
-  panel: vscode.WebviewPanel | undefined;
+  // `panel` / `loop` / `disposed` / `title` / `taskManaged` / `postTimer` /
+  // `approvalResolvedListeners` / `notifiedApprovalRequestIds` は`BaseChatPanel`
+  // （chatManagerBase.ts）が定義済み（issue #420、#410のフォローアップ）。ここでは
+  // 基底の`ChatSessionLike`より狭い`ClaudeStreamSession`へ絞るため`session`だけ再宣言する
   session: ClaudeStreamSession;
-  /** この画面で走らせているループ。走っていなければ待機状態のまま。 */
-  loop: LoopController;
   cwd: string;
   /** 送信前の添付画像。送るまでここに溜める。 */
   attachments: AttachmentBox;
-  /** 破棄済みか。破棄済みのWebviewへ送るとVSCodeが例外を投げるため見張る。 */
-  disposed: boolean;
-  /** パネルの見出し。タブが閉じている間もタイトルを見失わないよう別に保持する。 */
-  title: string;
-  /** タスク（オーケストレータ）管理下のセッションか（design.md §16.10の4）。 */
-  taskManaged: boolean;
   /**
    * タスク単位の設定。`ClaudeStreamSession` は起動時の引数で固定されるため、
    * Codexと違い送信のたびに読み直す必要は無いが、Plan modeを抜けるときの
@@ -125,19 +122,45 @@ interface ClaudePanel extends BaseChatPanel {
   stateListeners: Array<(state: ChatState) => void>;
   /** `TaskSession.onFinished` のリスナー。 */
   finishedListeners: Array<(reason: LoopStopReason, state: ChatState) => void>;
-  /** `TaskSession.onApprovalResolved` のリスナー。 */
-  approvalResolvedListeners: Array<(outcome: ApprovalOutcome) => void>;
-  /**
-   * 通知を出した承認要求の`requestId`（issue #286）。`chatView.ts`の`ChatPanel`と同じ
-   * 役割・同じ判定方針（`notifyNewApprovals`のJSDoc参照）。
-   */
-  notifiedApprovalRequestIds: Set<string>;
-  /** `postState`の間引き用タイマー（issue #356、`chatView.ts`の`ChatPanel`と同じ役割）。 */
-  postTimer?: ReturnType<typeof setTimeout> | undefined;
   /** 直近に`flushState`が送信した時刻（`STATE_POST_INTERVAL_MS`の間引き判定に使う）。 */
   lastPostAt?: number | undefined;
   /** 直近に送った会話項目。`buildItemsDelta`が次回との差分を取るための基準。 */
   sentItems?: readonly ChatItem[] | undefined;
+}
+
+/**
+ * 画面下の設定行へ送る形（`ClaudeChatViewManager.buildSettingsPayload()`の戻り値、
+ * issue #420レビュー指摘）。
+ *
+ * 以前は`Record<string, unknown>`を返しており、webview側（`chatScript.ts`）が読む
+ * キー名の打ち間違いを型検査で拾えなかった。描画はCodex画面と同じスクリプトを使うが、
+ * `ClaudeSettingsSnapshot`とはキー名が異なる（`effort`→`reasoningEffort`、
+ * `permissionMode`→`approvalMode`）ため`SettingsSnapshot`とも一致しない、
+ * Claude Code専用の形として定義する。
+ */
+interface ChatSettingsPayload {
+  models: ClaudeSettingsSnapshot['models'];
+  efforts: ClaudeSettingsSnapshot['efforts'];
+  agents: ClaudeSettingsSnapshot['agents'];
+  model: string;
+  reasoningEffort: string;
+  approvalMode: string;
+  approvalLevel: string;
+  agent: string;
+  defaults: {
+    /** `ClaudeDefaults`と同じく、settings.jsonに指定が無ければ`undefined`。 */
+    model: string | undefined;
+    reasoningEffort: string | undefined;
+    approvalMode: string | undefined;
+    /** Claude CodeにはCodexの`sandbox`に対応する設定が無いため常に`undefined`。 */
+    sandbox: undefined;
+    /**
+     * エージェントの既定値はsettings.jsonから読んでいない（表示のみの用途に対して
+     * 追跡コストが見合わないため）。「既定 (CLI側に指定なし)」とだけ出す
+     */
+    agent: undefined;
+  };
+  profile: string;
 }
 
 const VIEW_TYPE = 'claude.chat';
@@ -297,16 +320,60 @@ export class ClaudeChatViewManager
   }
 
   /**
-   * 画面下の設定行へ現在値と選択肢を送る。
+   * 画面下の設定行に出す現在値と選択肢を組み立てる（戻り値の形は`ChatSettingsPayload`参照）。
    *
-   * 描画はCodex画面と同じスクリプトなので、Codex側のスナップショットと同じ形に整えて渡す。
+   * 描画はCodex画面と同じスクリプトなので、Codex側のスナップショットと同じ形に整えて返す。
    * モデルの一覧は `initialize` の応答から取ったもの（取れなければエイリアス）。
+   * `refreshSettings`・`flushState`の両方から呼ぶ（issue #420: 揃える前は`refreshSettings`
+   * だけがこれを組み立てて送っており、`flushState`経由の更新には設定が乗らなかった）。
+   */
+  private buildSettingsPayload(): ChatSettingsPayload {
+    const snapshot = this.settings.claudeSnapshot();
+    return {
+      models: snapshot.models,
+      efforts: snapshot.efforts,
+      agents: snapshot.agents,
+      model: snapshot.model,
+      reasoningEffort: snapshot.effort,
+      approvalMode: snapshot.permissionMode,
+      approvalLevel: snapshot.approvalLevel,
+      agent: snapshot.agent,
+      defaults: {
+        model: snapshot.defaults.model,
+        reasoningEffort: snapshot.defaults.effort,
+        approvalMode: snapshot.defaults.permissionMode,
+        sandbox: undefined,
+        // エージェントの既定値はsettings.jsonから読んでいない（表示のみの用途に対して
+        // 追跡コストが見合わないため）。「既定 (CLI側に指定なし)」とだけ出す
+        agent: undefined,
+      },
+      profile: '',
+    };
+  }
+
+  /**
+   * 画面下の設定行へ現在値と選択肢を送る。設定パネルでの変更など、人の操作へ即座に
+   * 反映したい場面でだけ呼ぶ（`postState`の間引きを待たせない）。
+   *
+   * 会話項目は全量を送るが、`items`キーは付けない（`flushState`と違い、この経路は
+   * 差し分ではなく全量なので不要）。そのため webview 側（`chatScript.ts`の
+   * `window.addEventListener('message', ...)`）は`!data.items`の枝へ入り、
+   * `apply(data.state)`だけを呼んで`mergedItems`（差し分の積み先）には触れない。
+   * つまりここで送った内容はwebview側の差し分の基準には反映されない。
+   *
+   * **`entry.sentItems`をここで更新してはならない**（issue #420レビュー指摘、HIGH）。
+   * 一度`entry.sentItems = state.items`と書いたところ、webview側は上記の理由で
+   * 追随していないのに、ホスト側の基準だけが進んでしまい、次の`flushState`が
+   * 送る差分を`mergeItems`（`chatScript.ts`側）が`total`の不一致で`undefined`と
+   * 判定 → `stateFull`要求 → 全量再送、という往復を毎回生んだ（`ready`直後に
+   * `entry.sentItems = undefined`へリセットした効果も、続けて呼ばれる
+   * `refreshSettings`が誤って埋め戻すことで無効化されていた）。`entry.sentItems`は
+   * 従来通り`flushState`だけが更新する。
    */
   private refreshSettings(entry: ClaudePanel): void {
     if (entry.disposed || entry.panel === undefined) {
       return;
     }
-    const snapshot = this.settings.claudeSnapshot();
     const state = entry.session.getState();
     void entry.panel.webview.postMessage({
       type: 'state',
@@ -321,26 +388,7 @@ export class ClaudeChatViewManager
         // 権威ある判定はホスト側（handleOpenDiffFile等）が行うため、ここは
         // ボタン表示のヒントに過ぎない
         workspaceRoots: workspaceFolderPaths(),
-        settings: {
-          models: snapshot.models,
-          efforts: snapshot.efforts,
-          agents: snapshot.agents,
-          model: snapshot.model,
-          reasoningEffort: snapshot.effort,
-          approvalMode: snapshot.permissionMode,
-          approvalLevel: snapshot.approvalLevel,
-          agent: snapshot.agent,
-          defaults: {
-            model: snapshot.defaults.model,
-            reasoningEffort: snapshot.defaults.effort,
-            approvalMode: snapshot.defaults.permissionMode,
-            sandbox: undefined,
-            // エージェントの既定値はsettings.jsonから読んでいない（表示のみの用途に対して
-            // 追跡コストが見合わないため）。「既定 (CLI側に指定なし)」とだけ出す
-            agent: undefined,
-          },
-          profile: '',
-        },
+        settings: this.buildSettingsPayload(),
       },
     });
   }
@@ -377,6 +425,12 @@ export class ClaudeChatViewManager
    * `chatView.ts`の`flushState`と同じ流儀。`stripHostOnlyItems`相当の除去は
    * `buildItemsDelta`が内部で行う）。webview側は`chatScript.ts`の`mergeItems`
    * （実装は`stateDelta.ts`の`MERGE_ITEMS_SOURCE`）で積み直す。
+   *
+   * `settings`も`chatView.ts`の`flushState`と同じく毎回載せる（issue #420）。以前は
+   * ここで設定を送らず、`onLoopStatus`が間引きを迂回する`refreshSettings`を別途呼ぶ
+   * ことで設定の反映を担っていた。`onLoopStatus`をCodexと同じ`postState`（間引き済みの
+   * このメソッド）呼び出しへ揃えたため、設定もここに乗せないとループ実行中の設定反映が
+   * 抜け落ちる。
    */
   private flushState(entry: ClaudePanel): void {
     if (entry.disposed || entry.panel === undefined) {
@@ -394,6 +448,7 @@ export class ClaudeChatViewManager
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),
         workspaceRoots: workspaceFolderPaths(),
+        settings: this.buildSettingsPayload(),
       },
       items,
     });
@@ -909,11 +964,18 @@ export class ClaudeChatViewManager
     }
   }
 
-  /** ループの状態変化。停止（running: true→false）を検知して `onFinished` を1度だけ呼ぶ。 */
+  /**
+   * ループの状態変化。停止（running: true→false）を検知して `onFinished` を1度だけ呼ぶ。
+   *
+   * 反復のたびに呼ばれるため、`refreshSettings`（間引き・差分を通さない全量送信）ではなく
+   * `postState`（Codex側の`onLoopStatus`と同じ、`STATE_POST_INTERVAL_MS`の間引きに乗る
+   * 経路）を呼ぶ（issue #420）。設定は`flushState`が毎回`settings`を載せるようにしたため、
+   * この経路でも反映は途切れない。
+   */
   private onLoopStatus(entry: ClaudePanel, status: LoopStatus): void {
     const stopped = entry.wasLoopRunning && !status.running;
     entry.wasLoopRunning = status.running;
-    this.refreshSettings(entry);
+    this.postState(entry);
     if (stopped && status.stopReason !== undefined) {
       const state = entry.session.getState();
       for (const listener of entry.finishedListeners) {

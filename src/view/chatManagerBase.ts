@@ -29,16 +29,53 @@ export interface ChatSessionLike {
  * `ChatViewManager`（chatView.ts）と`ClaudeChatViewManager`（claudeChatView.ts）が
  * 共に持つパネルエントリの最小集合（issue #410）。両ファイルの`ChatPanel`/`ClaudePanel`は
  * これを含む形で拡張して定義する。
+ *
+ * 各フィールドの詳しい説明は、issue #420で`ChatPanel`/`ClaudePanel`側の重複宣言を
+ * 消したときにここへ移設したもの（元は両サブクラスがほぼ同文のJSDocを重複して持っていた）。
  */
 export interface BaseChatPanel {
+  /**
+   * 今そのタブが開いているか。`undefined` はタブが閉じられている状態を表す。
+   *
+   * タスク管理下のセッション（`taskManaged: true`）は、タブを閉じてもこのエントリ自体は
+   * `panels` に残り続ける（design.md §16.10「セッションの寿命をパネルから切り離す」）。
+   * `reveal()` / `open()` はこの値が `undefined` ならパネルを作り直す。
+   */
   panel: vscode.WebviewPanel | undefined;
   session: ChatSessionLike;
+  /** この画面で走らせているループ。走っていなければ待機状態のまま。 */
   loop: LoopController;
+  /**
+   * 破棄済みか。
+   *
+   * 保留中の承認を解放すると、その結果の通知が破棄後に届くことがある。破棄済みの
+   * セッションへ送るとVSCodeが例外を投げるため、ここで止める。`panel === undefined`
+   * とは別の概念（タスク管理下のセッションはタブが閉じても破棄されない）。
+   */
   disposed: boolean;
+  /** パネルの見出し。タブが閉じている間もタイトルを見失わないよう、パネルとは別に保持する。 */
   title: string;
+  /**
+   * タスク（オーケストレータ）管理下のセッションか。
+   *
+   * `true` の場合だけタブを閉じてもセッションを維持する（design.md §16.10の4）。
+   * 人が手で開いた画面（`false`）は従来通りタブを閉じたらセッションも終わる。
+   */
   taskManaged: boolean;
+  /** `TaskSession.onApprovalResolved` のリスナー。 */
   approvalResolvedListeners: Array<(outcome: ApprovalOutcome) => void>;
+  /**
+   * 通知を出した承認要求の`requestId`（issue #286）。`String(requestId)`で持つ
+   * （requestIdは`number | string`のどちらも来るため、Setのキーとして安定させる）。
+   *
+   * 一度でも通知の要否を判定した`requestId`はここへ積み、二度と判定し直さない
+   * （タブの表示・非表示が何度切り替わっても、同じ承認要求で通知を重複させない）。
+   * 「見えているか」は通知するかどうかを決めた**その瞬間**の`entry.panel?.visible`
+   * だけを見る。後から可視性が変わっても、既に判定済みの要求を再評価しない
+   * （`notifyNewApprovals`参照）。
+   */
   notifiedApprovalRequestIds: Set<string>;
+  /** 状態送信の間引き（issue #246）。予約中のタイマー。 */
   postTimer?: ReturnType<typeof setTimeout> | undefined;
 }
 
@@ -58,13 +95,14 @@ export interface BaseChatPanel {
  *   この非対称は実装のズレではなく、プロバイダのアーキテクチャそのものの違いなので
  *   基底クラスへは引き上げず、`allPanels()`のオーバーライドと`onTeardown`/`onDispose`
  *   フックだけをCodex側に残す
- * - Codexの`postState`/`flushState`は毎回`settings`を埋め込んで送るのに対し、
- *   Claude Codeは会話項目の差分だけを送る`postState`/`flushState`と、設定込みで
- *   会話項目を全量送り直す`refreshSettings`とを使い分けている。これは意図的な差異と
- *   判断した（Claude Codeは1プロセス1セッションで設定変更がターンをまたいで永続する
- *   ため、変更があった時だけ全量を送り直す構造の方が理にかなう）。片方へ寄せると
- *   Codexの「毎回settingsを見る」前提とClaude Codeの「変更時だけ送る」前提のどちらかを
- *   壊すため、統合しなかった
+ * - `settings`はCodex・Claude Codeどちらも`flushState`が毎回載せて送る（issue #420で
+ *   揃えた。以前はClaude Code側だけ`refreshSettings`という別経路でしか設定を送れず、
+ *   `onLoopStatus`がその別経路を呼ぶことで間引きを迂回していた問題があった）。
+ *   残る違いは`refreshSettings`（Claude Codeのみ）が、設定パネルでの変更など人の操作へ
+ *   即座に反映したい場面で`postState`の間引きを迂回して即時送信する点だけ。会話項目は
+ *   全量を送るが`items`キーを付けないため、webview側の差し分の積み先
+ *   （`chatScript.ts`の`mergedItems`）には影響しない（`entry.sentItems`を書き換えては
+ *   ならない理由も同じ。`claudeChatView.ts`の`refreshSettings`のJSDoc参照）
  */
 export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   implements vscode.Disposable

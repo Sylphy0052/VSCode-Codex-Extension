@@ -17,6 +17,7 @@ import {
 } from '../provider/approvalLevel';
 import { isProviderId } from '../provider/id';
 import type { ImportHistoryItemTypeResultView, ImportHistorySnapshot } from '../provider/import';
+import { chatCsp } from './chatCsp';
 import { controlPanelScript } from './controlPanelScript';
 import { controlPanelStyles } from './controlPanelStyles';
 import { formatAbsoluteTime } from './relativeTime';
@@ -486,11 +487,10 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
 
   private render(webview: vscode.Webview): string {
     const nonce = randomBytes(16).toString('base64');
-    const csp = [
-      "default-src 'none'",
-      `style-src ${webview.cspSource} 'unsafe-inline'`,
-      `script-src 'nonce-${nonce}'`,
-    ].join('; ');
+    // #376で集約したCSP組み立てへ揃える（issue #420）。この画面は画像を扱わないため
+    // `chatView.ts`/`claudeChatView.ts`と同じく`includeImgData: false`を渡す。値は
+    // ここに手組みしていたディレクティブ列と同一（バイト単位で変わらないことをテストで確認）
+    const csp = chatCsp(webview.cspSource, nonce, { includeImgData: false });
 
     const approvalOptions = APPROVAL_MODES.map((m) => `<option value="${m}">${m}</option>`).join(
       '',

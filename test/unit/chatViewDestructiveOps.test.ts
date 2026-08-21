@@ -14,7 +14,7 @@ import {
   handleRevertDiff,
   postFileMentions,
   postImageData,
-} from '../../src/view/chatView';
+} from '../../src/view/chatShared';
 import type { ChatItem, FileDiff } from '../../src/appserver/chatState';
 import type { FileSystemPort } from '../../src/session/ports';
 import { AttachmentBox } from '../../src/provider/attachments';

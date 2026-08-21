@@ -11,7 +11,7 @@ import {
   MEMORY_LAST_SELECTED_PATH_KEY,
   type MemoryModeMemento,
 } from '../../src/provider/inputModes';
-import { STATE_POST_INTERVAL_MS, type ChatActivity } from '../../src/view/chatView';
+import { STATE_POST_INTERVAL_MS, type ChatActivity } from '../../src/view/chatShared';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import {
   buildClaudeChatPanelOptions,
@@ -2102,5 +2102,39 @@ describe('Claude側のpostState間引きと差分送信（issue #356）', () => 
     const sentBefore = panel.webview.sent.length;
     await vi.advanceTimersByTimeAsync(STATE_POST_INTERVAL_MS * 5);
     expect(panel.webview.sent.length).toBe(sentBefore);
+  });
+
+  it('readyの後、次のflushStateはdeltaではなくmode: fullで送る（issue #420レビュー指摘、HIGH）', async () => {
+    const { session, panel } = await openWithSession();
+    // webview側の積み先（mergedItems）を実際に進めておく（1件目はすでに送信済み）
+    session.receive(assistantTextLine('item-a', '1件目'));
+    await flush();
+    expect(stateMessagesOf(panel).at(-1)?.items?.mode).toBe('delta');
+
+    // webviewを作り直した（`ready`）。`refreshSettings`はitemsキーを付けずに送るため、
+    // webview側のmergedItemsはこの時点では更新されない（`chatScript.ts`の
+    // `!data.items`分岐がstate.itemsをそのまま`apply`するだけで、差し分の基準は
+    // 進まない）。ホスト側の基準（entry.sentItems）だけ`undefined`へ戻る
+    panel.webview.simulateMessage({ type: 'ready' });
+    const sentBeforeNextChange = panel.webview.sent.length;
+
+    // ready直後に会話が進む。次のflushStateは「前回との差分」ではなく、
+    // entry.sentItemsがundefinedのままであることを根拠に全量（mode: 'full'）を送らないと、
+    // webviewの古いmergedItemsを基準にした差分計算がtotal不一致でstateFullの
+    // 往復を招く（回帰前の実際の壊れ方）
+    session.receive(assistantTextLine('item-b', '2件目'));
+    await flush();
+
+    const sentAfterReady = panel.webview.sent.slice(sentBeforeNextChange);
+    const stateMessagesAfterReady = sentAfterReady.filter(
+      (m): m is StateMessage =>
+        typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'state',
+    );
+    expect(stateMessagesAfterReady.length).toBe(1);
+    expect(stateMessagesAfterReady[0]?.items?.mode).toBe('full');
+    expect(stateMessagesAfterReady[0]?.items?.items.map((i) => i.id)).toEqual([
+      'item-a:text:0',
+      'item-b:text:0',
+    ]);
   });
 });

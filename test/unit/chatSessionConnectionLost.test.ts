@@ -42,6 +42,48 @@ function fakeSession(): { session: ChatSession; sent: Sent[] } {
   return { session: new ChatSession(connection, log, () => undefined), sent };
 }
 
+/**
+ * `turn/start`の応答だけを保留できる`ChatSession`（issue #420レビュー指摘）。
+ *
+ * `fakeSession()`は全要求へ即座に応答するため、`send()`が`busy: true`にした直後の
+ * 「応答待ち中」を実際に再現できない（`turn/start`が即解決してしまう）。接続断が
+ * 応答待ちの最中に起きたことを検証するテストでは、こちらを使って`resolveNext()`を
+ * 呼ぶまで応答を保留する。
+ */
+function fakeHoldingSession(): {
+  session: ChatSession;
+  resolveNext: (method: string, result?: unknown) => void;
+} {
+  const waiting = new Map<string, Array<(response: { result: unknown }) => void>>();
+  const connection = {
+    async ensureStarted() {
+      return undefined;
+    },
+    request(method: string, _params: unknown) {
+      if (method === 'thread/start') {
+        return Promise.resolve({ result: START_RESULT });
+      }
+      return new Promise<{ result: unknown }>((resolve) => {
+        const pending = waiting.get(method) ?? [];
+        pending.push(resolve);
+        waiting.set(method, pending);
+      });
+    },
+  } as unknown as AppServerConnection;
+  const log = { info() {}, warn() {}, error() {} } as unknown as Logger;
+  return {
+    session: new ChatSession(connection, log, () => undefined),
+    resolveNext: (method, result = {}) => {
+      const pending = waiting.get(method);
+      const resolve = pending?.shift();
+      if (resolve === undefined) {
+        throw new Error(`保留中の要求がありません: ${method}`);
+      }
+      resolve({ result });
+    },
+  };
+}
+
 describe('接続断で保留中の承認・問い合わせを解放する（issue #354）', () => {
   it('承認カードの応答Promiseが接続断で解決される', async () => {
     const { session } = fakeSession();
@@ -120,6 +162,48 @@ describe('接続断で保留中の承認・問い合わせを解放する（issu
     await session.approveDeniedReview('r-9');
 
     expect(sent.some((s) => s.method === 'thread/approveGuardianDeniedAction')).toBe(true);
+  });
+});
+
+describe('接続断でbusyが戻らない問題を直す（issue #420）', () => {
+  it('turn/start応答待ち中に接続が切れたら、markTurnFailed()でbusyがfalse・turnFailedがtrueに戻る', async () => {
+    const { session, resolveNext } = fakeHoldingSession();
+    await session.start('/w', config());
+
+    // send()はturn/startの応答を待つ間busy: trueのまま。fakeHoldingSessionの
+    // connectionはturn/startだけ応答を保留するため、実際に「応答待ち中」の状態を
+    // 作ってから接続断の後始末（releasePendingApprovals→markTurnFailed）を呼ぶ
+    // （`chatView.ts`のhandleConnectionLostと同じ順番）
+    const sent = session.send('こんにちは', config());
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(session.getState().busy).toBe(true);
+
+    session.releasePendingApprovals();
+    session.markTurnFailed();
+
+    const state = session.getState();
+    expect(state.busy).toBe(false);
+    expect(state.turnFailed).toBe(true);
+
+    // ぶら下がったままのPromiseを片付ける（テスト終了後に解決してもアサーションには
+    // 影響しないが、後始末として応答を返しておく）
+    resolveNext('turn/start');
+    await sent;
+  });
+
+  it('応答待ちでない（busy: false）ときに呼んでも何もしない（不要なupdate通知を撒かない）', async () => {
+    const { session } = fakeSession();
+    await session.start('/w', config());
+    const before = session.getState();
+    expect(before.busy).toBe(false);
+
+    session.markTurnFailed();
+
+    // ガード無しだと`turnFailed: true`が立ってしまうところ、busyでなければ
+    // 何もしない（issue #420レビュー指摘: 応答待ちでない全セッションに
+    // turnFailedを立てて不要なpostStateを撒いていた問題の回帰防止）
+    expect(session.getState()).toEqual(before);
   });
 });
 
