@@ -16,6 +16,7 @@ import {
   type PlanWorkflowSuccess,
   type WorkspaceSummary,
 } from './planner';
+import { sanitizeForLog } from './sanitize';
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { TaskSessionHost } from './taskSession';
 import { formatUntrusted, sanitizeInlineText } from './untrustedText';
@@ -96,15 +97,28 @@ const CHECKBOX_ITEM_PATTERN = /^\s*[-*+]\s*\[([ xX])\]\s+(\S+)\s*(.*)$/u;
  * （Markdownリンク `- [text](url)`）を除外することで、自由記述のロードマップに実在する
  * リンクの箇条書き（例: `docs/roadmap/review-and-feature-consolidation.md:22`）を
  * 誤検出しないようにしてある。
+ *
+ * **`[]`の中身は0〜3文字までしか警告対象にしない（4文字以上は無音で読み飛ばす）。**
+ * 上限を設けず`[^\]]*`にすると、Markdownリンクの箇条書き（`- [ux-improvements.md](...)`
+ * や `- [text](url)`）の`[]`部分まで拾ってしまい、正当なリンク行を誤って
+ * 「チェックボックスらしき行」として警告してしまう（実測: `[ux-improvements.md]`は
+ * 18文字あり、桁数で区別しないと`(`の直後除外だけでは弾けない場合がある）。
+ * 実在のロードマップのチェックボックス記号（` `/`x`/`X`程度、たまに`z`等の誤字1文字）は
+ * 3文字以内に収まるため、境界を3文字に置き、4文字以上は「チェックボックスではなく
+ * 自由記述のリンク等だろう」と判断して無視する（レビュー指摘: minor 5）。
  */
 const CHECKBOX_LIKE_PATTERN = /^\s*[-*+]\s*\[[^\]]{0,3}\](?!\()/u;
 const DEPENDS_LINE_PATTERN = /^\s*-\s*依存:\s*(.*)$/;
 /**
  * `- Issue: #12` / `- Issue: 12` に加え、番号の直後の余剰テキストも許容する
  * （Issue #408 根拠1。実測で `- Issue: #12（既存）` は旧パターンでは不一致だった）。
- * 数字の直後に別の数字が続く場合（`#123` の `12` だけを拾ってしまう等）は除外する。
+ *
+ * 末尾の`(?!\d)`は付けていない。`\d+`は貪欲マッチのため、数字が続く限り呑み込んでから
+ * バックトラックする形にしかならず、この否定先読みは常に真になる（＝no-op。実測で
+ * 削除前後の挙動に差が無いことを確認済み。レビュー指摘: minor 6）。「`#123`のうち
+ * `12`だけを拾ってしまう」ような誤読は、`\d+`が貪欲である時点で起きない。
  */
-const ISSUE_LINE_PATTERN = /^\s*-\s*Issue:\s*#?(\d+)(?!\d).*$/u;
+const ISSUE_LINE_PATTERN = /^\s*-\s*Issue:\s*#?(\d+).*$/u;
 /**
  * `Issue:` 行そのものの検出用（数字が読めるかは問わない）。`ISSUE_LINE_PATTERN`が不一致でも
  * この緩いパターンが一致すれば「Issue行のつもりだが数値として読めなかった」と判定できる
@@ -114,6 +128,23 @@ const ISSUE_LINE_PATTERN = /^\s*-\s*Issue:\s*#?(\d+)(?!\d).*$/u;
 const ISSUE_LINE_CANDIDATE_PATTERN = /^\s*-\s*Issue:\s*(.*)$/u;
 /** `依存: なし` のような「無い」ことを表す値。 */
 const NO_DEPENDENCY_TOKENS = new Set(['なし', 'none', '']);
+
+/**
+ * GitHub/GitLabのIssue番号として現実的とみなす最大桁数（レビュー指摘: medium 2）。
+ * 両サービスとも実際のissue/iidが10桁（100億件超）に達することはまず無いため、
+ * これを超える桁数は「数字らしき文字列ではあるが番号としては扱わない」判断に使う。
+ * `Number.isSafeInteger`だけでは、10桁でも安全整数の範囲に収まる値（例:
+ * `9999999999`は10桁で安全整数）を弾けないため、別途この桁数チェックを設けてある。
+ */
+const MAX_ISSUE_NUMBER_DIGITS = 10;
+
+/**
+ * 1回のパース（`parseRoadmapMarkdown`）で積む警告件数の上限（レビュー指摘: low 4）。
+ * 壊れたロードマップMarkdownは「チェックボックスらしき行」が大量に一致しうるため、
+ * 無制限に積むとOutput panelが警告で埋まる。上限を超えた分は個別の警告を積まず、
+ * 末尾に「他N件」の警告を1件だけ積む。
+ */
+const MAX_ROADMAP_PARSE_WARNINGS = 20;
 
 function parseDependsValue(raw: string): string[] {
   return raw
@@ -134,6 +165,15 @@ export function parseRoadmapMarkdown(markdown: string): ParsedRoadmap {
   const phases: RoadmapPhase[] = [];
   let currentPhase: RoadmapPhase | undefined;
   const warnings: RoadmapIssueEntry[] = [];
+  // 上限（`MAX_ROADMAP_PARSE_WARNINGS`）を超えた分はここで数えるだけにし、個別には積まない
+  let suppressedWarningCount = 0;
+  const addWarning = (entry: RoadmapIssueEntry): void => {
+    if (warnings.length < MAX_ROADMAP_PARSE_WARNINGS) {
+      warnings.push(entry);
+    } else {
+      suppressedWarningCount += 1;
+    }
+  };
 
   const ensurePhase = (): RoadmapPhase => {
     if (currentPhase === undefined) {
@@ -188,8 +228,32 @@ export function parseRoadmapMarkdown(markdown: string): ParsedRoadmap {
         }
         const issueMatch = ISSUE_LINE_PATTERN.exec(sub);
         if (issueMatch !== null) {
-          const n = Number.parseInt(issueMatch[1] ?? '', 10);
-          item.issue = Number.isFinite(n) ? n : undefined;
+          const rawNumber = issueMatch[1] ?? '';
+          const n = Number.parseInt(rawNumber, 10);
+          // `Number.parseInt`は桁溢れした数字列（例: 20桁の`9`並び）を`Infinity`として
+          // 返す。`Number.isFinite`だけで弾いても、`Infinity`にならない程度の桁溢れ
+          // （安全整数の範囲を超えるが有限）は`Number.isSafeInteger`でないと弾けず、
+          // さらに安全整数の範囲に収まる10桁超の値（現実には存在しない桁数のIssue番号）
+          // は桁数チェックでないと弾けない。3つとも満たさなければ「番号として読めなかった」
+          // 扱いにする（レビュー指摘: medium 2。以前は`Number.isFinite`だけを見ており、
+          // 桁溢れで`Infinity`になった場合に`issueUnparseable`が立たず、`ISSUE_LINE_PATTERN`
+          // に一致した時点で`continue`するため後段の`ISSUE_LINE_CANDIDATE_PATTERN`
+          // フォールバックへも到達せず、「Issue行が無い」場合と誤って同一視されていた）
+          const isValidIssueNumber =
+            Number.isFinite(n) &&
+            Number.isSafeInteger(n) &&
+            rawNumber.length <= MAX_ISSUE_NUMBER_DIGITS;
+          if (isValidIssueNumber) {
+            item.issue = n;
+          } else {
+            item.issueUnparseable = true;
+            addWarning({
+              itemIds: [item.id],
+              message:
+                `${item.id}: Issue番号が大きすぎて読み取れませんでした: ` +
+                `"${sanitizeForLog(rawNumber)}"`,
+            });
+          }
           i += 1;
           continue;
         }
@@ -198,11 +262,11 @@ export function parseRoadmapMarkdown(markdown: string): ParsedRoadmap {
           // Issue行のつもりだが数値として読めなかった（例: 「未起票」）。削除ではなく
           // 警告に倒し、「そもそもIssue行が無い」場合と区別する（Issue #408 根拠1）
           item.issueUnparseable = true;
-          warnings.push({
+          addWarning({
             itemIds: [item.id],
             message:
               `${item.id}: Issue行を番号として読み取れませんでした: ` +
-              `"${(issueCandidateMatch[1] ?? '').trim()}"`,
+              `"${sanitizeForLog((issueCandidateMatch[1] ?? '').trim())}"`,
           });
           i += 1;
           continue;
@@ -215,15 +279,24 @@ export function parseRoadmapMarkdown(markdown: string): ParsedRoadmap {
 
     const checkboxLikeMatch = CHECKBOX_LIKE_PATTERN.exec(line);
     if (checkboxLikeMatch !== null) {
-      warnings.push({
+      addWarning({
         itemIds: [],
-        message: `チェックボックスらしき行を認識できませんでした（行 ${i + 1}）: "${line.trim()}"`,
+        message:
+          `チェックボックスらしき行を認識できませんでした（行 ${i + 1}）: ` +
+          `"${sanitizeForLog(line.trim())}"`,
       });
       i += 1;
       continue;
     }
 
     i += 1;
+  }
+
+  if (suppressedWarningCount > 0) {
+    warnings.push({
+      itemIds: [],
+      message: `他${suppressedWarningCount}件の警告は上限のため省略しました`,
+    });
   }
 
   return { title, phases, warnings };
@@ -827,7 +900,9 @@ export function applyRunCompletion(
         ...parsed.warnings,
         {
           itemIds: duplicateIds,
-          message: `項目idが重複しているため書き戻しを中止しました: ${duplicateIds.join(', ')}`,
+          // idは`CHECKBOX_ITEM_PATTERN`の`\S+`由来で任意の非空白文字を許すため、
+          // 双方向制御文字等を含みうる。ログへ埋め込む前に無害化する（レビュー指摘: medium 3）
+          message: `項目idが重複しているため書き戻しを中止しました: ${duplicateIds.map((id) => sanitizeForLog(id)).join(', ')}`,
         },
       ],
     };

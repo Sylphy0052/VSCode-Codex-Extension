@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { initialChatState, type ChatState } from '../../src/appserver/chatState';
 import type { LoopPlan, LoopStopReason } from '../../src/loop/loopController';
@@ -234,6 +232,30 @@ describe('parseRoadmapMarkdown: チェックボックス行の揺れ（Issue #40
     expect(parsed.warnings).toHaveLength(1);
     expect(parsed.warnings[0]?.message).toContain('チェックボックス');
   });
+
+  it('制御文字を含む行を警告メッセージへ埋め込む前に無害化する（sanitizeForLog、レビュー指摘: medium 3）', () => {
+    const rtlOverride = String.fromCodePoint(0x202e);
+    const md = `# g\n\n## Phase 1\n\n- [z] R1 foo${rtlOverride}bar\n`;
+    const parsed = parseRoadmapMarkdown(md);
+    expect(parsed.warnings).toHaveLength(1);
+    expect(parsed.warnings[0]?.message).not.toContain(rtlOverride);
+  });
+});
+
+describe('parseRoadmapMarkdown: CHECKBOX_LIKE_PATTERNの境界（[]の中身は0〜3文字まで、Issue #408 minor 5）', () => {
+  it('[]の中身が3文字（境界内）なら警告になる', () => {
+    const md = '# g\n\n## Phase 1\n\n- [abc] R7\n';
+    const parsed = parseRoadmapMarkdown(md);
+    expect(parsed.phases[0]?.items).toEqual([]);
+    expect(parsed.warnings).toHaveLength(1);
+  });
+
+  it('[]の中身が4文字（境界外）なら項目にも警告にもならず読み飛ばす', () => {
+    const md = '# g\n\n## Phase 1\n\n- [todo] R7\n';
+    const parsed = parseRoadmapMarkdown(md);
+    expect(parsed.phases[0]?.items).toEqual([]);
+    expect(parsed.warnings).toEqual([]);
+  });
 });
 
 describe('parseRoadmapMarkdown: Issue行の揺れ（Issue #408 根拠1）', () => {
@@ -264,6 +286,41 @@ describe('parseRoadmapMarkdown: Issue行の揺れ（Issue #408 根拠1）', () =
   });
 });
 
+describe(
+  'parseRoadmapMarkdown: Issue番号の桁溢れ（レビュー指摘: medium 2。ISSUE_LINE_PATTERNには' +
+    '一致するがNumber.parseIntが読めない場合にissueUnparseableが立つことを確かめる）',
+  () => {
+    it('桁溢れでNumber.parseIntがInfinityを返す数字列はissueUnparseableにする', () => {
+      const overflowing = '9'.repeat(400);
+      const md = `# g\n\n## Phase 1\n\n- [ ] R1 foo\n  - Issue: #${overflowing}\n`;
+      const parsed = parseRoadmapMarkdown(md);
+      const item = parsed.phases[0]?.items[0];
+      expect(item?.issue).toBeUndefined();
+      expect(item?.issueUnparseable).toBe(true);
+      expect(parsed.warnings).toHaveLength(1);
+      expect(parsed.warnings[0]?.itemIds).toEqual(['R1']);
+    });
+
+    it('10桁を超えるが有限な数値もissueUnparseableにする（現実的なIssue番号の桁数を超えるため）', () => {
+      const md = '# g\n\n## Phase 1\n\n- [ ] R1 foo\n  - Issue: #12345678901\n';
+      const parsed = parseRoadmapMarkdown(md);
+      const item = parsed.phases[0]?.items[0];
+      expect(item?.issue).toBeUndefined();
+      expect(item?.issueUnparseable).toBe(true);
+      expect(parsed.warnings).toHaveLength(1);
+    });
+
+    it('10桁ちょうどの数値は正常に読み取る（境界値）', () => {
+      const md = '# g\n\n## Phase 1\n\n- [ ] R1 foo\n  - Issue: #1234567890\n';
+      const parsed = parseRoadmapMarkdown(md);
+      const item = parsed.phases[0]?.items[0];
+      expect(item?.issue).toBe(1234567890);
+      expect(item?.issueUnparseable).toBe(false);
+      expect(parsed.warnings).toEqual([]);
+    });
+  },
+);
+
 describe('parseRoadmapMarkdown: 改行コードの検出', () => {
   it('CRLFのみのファイルでも構造は変わらず読める', () => {
     const md = '# g\r\n\r\n## Phase 1\r\n\r\n- [ ] R1 foo\r\n  - 依存: なし\r\n';
@@ -272,38 +329,98 @@ describe('parseRoadmapMarkdown: 改行コードの検出', () => {
   });
 });
 
-describe('parseRoadmapMarkdown: 運用中のロードマップが従来どおりパースできる（Issue #408 の受入基準）', () => {
-  const fixtures: Array<{ file: string; expectedIds: string[] }> = [
-    {
-      file: 'ux-improvements.md',
-      expectedIds: ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9', 'R10', 'R11'],
-    },
-    { file: 'chat-conversation-parity.md', expectedIds: ['X1', 'X2', 'X3'] },
-    { file: 'workflow-autonomy.md', expectedIds: ['W1', 'W3', 'W2', 'W4', 'W5'] },
-  ];
-
-  for (const fixture of fixtures) {
-    it(`docs/roadmap/${fixture.file} は同じ項目集合でパースできる`, () => {
-      const md = readFileSync(
-        path.resolve(__dirname, `../../docs/roadmap/${fixture.file}`),
-        'utf8',
-      );
-      const parsed = parseRoadmapMarkdown(md);
-      const ids = parsed.phases.flatMap((p) => p.items.map((it) => it.id));
-      expect(ids).toEqual(fixture.expectedIds);
-    });
-  }
-
-  it('review-and-feature-consolidation.md（自由記述・非チェックボックス形式）は項目0件のまま、誤検出の警告も出さない', () => {
-    const md = readFileSync(
-      path.resolve(__dirname, '../../docs/roadmap/review-and-feature-consolidation.md'),
-      'utf8',
-    );
+describe('parseRoadmapMarkdown: 警告件数の上限（レビュー指摘: low 4）', () => {
+  it('壊れたチェックボックスらしき行が大量にあっても、警告は上限件数＋まとめ1件に収まる', () => {
+    const brokenLines = Array.from({ length: 30 }, (_, idx) => `- [z${idx}] broken`).join('\n');
+    const md = `# g\n\n## Phase 1\n\n${brokenLines}\n`;
     const parsed = parseRoadmapMarkdown(md);
-    const totalItems = parsed.phases.reduce((sum, p) => sum + p.items.length, 0);
-    expect(totalItems).toBe(0);
-    expect(parsed.warnings).toEqual([]);
+    // 上限20件 + まとめ警告1件 = 21件
+    expect(parsed.warnings).toHaveLength(21);
+    const summary = parsed.warnings[parsed.warnings.length - 1];
+    expect(summary?.message).toContain('他10件');
   });
+
+  it('上限以下ならまとめ警告は積まない', () => {
+    const brokenLines = Array.from({ length: 5 }, (_, idx) => `- [z${idx}] broken`).join('\n');
+    const md = `# g\n\n## Phase 1\n\n${brokenLines}\n`;
+    const parsed = parseRoadmapMarkdown(md);
+    expect(parsed.warnings).toHaveLength(5);
+  });
+});
+
+// 以前はここで`docs/roadmap/`配下の実ファイルを直接読んでいたが、ロードマップの日常的な
+// 編集（他のワークフローによるチェック更新・項目の追加削除）でテストが壊れるため、
+// 実ファイルから代表的な行を抜き出したfixture文字列へ切り替えた（レビュー指摘: minor 7）。
+// 回帰検出力を落とさないよう、実際にハマった2パターン（太字見出し・Markdownリンクの
+// 箇条書き）を必ず含める。
+
+/**
+ * `docs/roadmap/ux-improvements.md`のチェックボックス形式（フェーズ見出し・依存・Issue付き
+ * 項目）を代表する行を抜き出したfixture。実際の項目本文・Issue番号はそのまま使わず、
+ * 構造（見出しの深さ・依存の書式・Issueの余剰テキスト）だけを保っている。
+ */
+const CHECKBOX_ROADMAP_FIXTURE = `# 利用者目線のUX改善
+
+## フェーズ1 即効（低コスト・体感差大）
+
+- [x] R1 応答の完了と承認待ちを利用者へ届ける
+  - 依存: なし
+  - Issue: #286
+- [x] R2 チャット画面でCtrl+Fを効かせる
+  - 依存: なし
+  - Issue: #287（対応済み）
+
+## フェーズ2 積み残し
+
+- [ ] R3 未起票のまま残っている項目
+  - 依存: R1, R2
+  - Issue: 未起票（着手時に起票する）
+`;
+
+/**
+ * `docs/roadmap/review-and-feature-consolidation.md`の自由記述形式（チェックボックスを
+ * 使わず太字見出し・Markdownリンクの箇条書きで構成）を代表する行を抜き出したfixture。
+ */
+const FREEFORM_ROADMAP_FIXTURE = `# レビュー指摘と機能追加の統合ロードマップ
+
+## docs/roadmap/ の4本の関係
+
+- [ux-improvements.md](ux-improvements.md) — R1〜R11。**全項目完了済み**（epic #297 もクローズ）。
+  記録として残してある
+- [workflow-autonomy.md](workflow-autonomy.md) — W1〜W5。本ロードマップの WF-E が担当する
+
+## ワークフローと波
+
+### 第1波 土台の修正（並列4）
+
+- **WF-A オーケストレーター実行系**（11項目）
+  - T02 \`waitingReply\`のタスクがターン失敗時に確定せず並列枠を占有する
+  - T03 \`WorkflowRunner.dispose()\`がどこからも呼ばれない
+`;
+
+describe('parseRoadmapMarkdown: 運用中のロードマップの形式が従来どおりパースできる（Issue #408 の受入基準）', () => {
+  it('チェックボックス形式（docs/roadmap/ux-improvements.md由来）は項目集合・依存・Issueをそのまま読む', () => {
+    const parsed = parseRoadmapMarkdown(CHECKBOX_ROADMAP_FIXTURE);
+    const ids = parsed.phases.flatMap((p) => p.items.map((it) => it.id));
+    expect(ids).toEqual(['R1', 'R2', 'R3']);
+
+    const r3 = parsed.phases[1]?.items[0];
+    expect(r3?.dependsOn).toEqual(['R1', 'R2']);
+    expect(r3?.issueUnparseable).toBe(true);
+    expect(parsed.warnings).toHaveLength(1);
+  });
+
+  it(
+    '自由記述・非チェックボックス形式（docs/roadmap/review-and-feature-consolidation.md由来）は' +
+      '項目0件のまま、太字見出し（WF-A行）・Markdownリンクの箇条書き（ux-improvements.md行）を' +
+      '誤って項目化・警告化しない',
+    () => {
+      const parsed = parseRoadmapMarkdown(FREEFORM_ROADMAP_FIXTURE);
+      const totalItems = parsed.phases.reduce((sum, p) => sum + p.items.length, 0);
+      expect(totalItems).toBe(0);
+      expect(parsed.warnings).toEqual([]);
+    },
+  );
 });
 
 describe('validateRoadmap', () => {
