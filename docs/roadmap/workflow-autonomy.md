@@ -41,13 +41,21 @@
 - [ ] W1 mainへの最終マージに人の承認を必須にする
   - 依存: なし
   - Issue: #335
-  - 現状: `agent.workflows.finalMerge` の既定が `auto`。全タスクが `done` になると統合ブランチから
-    mainへのPR/MRを作り、そのまま `gh pr merge` / `glab mr merge` まで進む。人の目を通さずmainが進む
+  - 現状: `FinalMergeConfig` は `'auto' | 'pr-only'`（[forge.ts](../../src/orchestrator/forge.ts)）で
+    **既定が `auto`**。全タスクが `done` になると統合ブランチからmainへのPR/MRを作り、そのまま
+    `gh pr merge` / `glab mr merge` まで進む。人の目を通さずmainが進む。
+    既存の `pr-only` はPR/MRを作った時点で**runを終える**設定で、そのあと人がマージしたかどうかを
+    拡張側は追わない（承認を待つ状態が無い）
   - 変更: `FinalMergeConfig` へ `confirm` を足して**新しい既定にする**。統合PR/MRを作ったあと人の
     承認を待ち、承認されたときだけマージする。承認の導線はワークフローViewへ置き、PR/MRのURLを
-    添える。`auto` は明示指定したときだけ残す。タスクブランチ→統合ブランチのマージは従来どおり自動
+    添える。`auto` は明示指定したときだけ残す。タスクブランチ→統合ブランチのマージは従来どおり自動。
+    **`pr-only` は消さずに残す。** 3つの使い分けは次のとおりで、READMEと設定の説明にもこの形で書く。
+    - `auto` — PR/MRを作ってそのままマージする（従来の既定）
+    - `confirm` — PR/MRを作って承認を待ち、承認されたら**拡張がマージする**（新しい既定）
+    - `pr-only` — PR/MRを作った時点でrunを終える。マージは拡張の外（GitHub/GitLab上）で行う
   - 受入基準: 設定を書いていないワークフローで統合PR/MRが作られたあと承認待ちになる／承認すると
-    マージされ拒否するとPR/MRが残る／`auto` を明示したときは従来どおり／前提チェックが通らず
+    マージされ拒否するとPR/MRが残る／`auto` を明示したときは従来どおり／`pr-only` を明示したときも
+    従来どおり（承認待ちにならずrunが終わる）／前提チェックが通らず
     PR/MRを作れなかった場合は従来どおりmainへマージしない
   - 影響: [forge.ts](../../src/orchestrator/forge.ts) / [config.ts](../../src/config.ts) /
     [runner.ts](../../src/orchestrator/runner.ts) / [workflowView.ts](../../src/view/workflowView.ts) /

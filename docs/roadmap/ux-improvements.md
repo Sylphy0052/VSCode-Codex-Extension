@@ -4,6 +4,10 @@
 出典は2026-08-16のレビュー（機能の不足ではなく、既にある機能へ届かない・気づけないことが中心）。
 進捗の追跡は epic Issue [#297](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/297) に集める。
 
+> **このロードマップは R1〜R11 すべて完了済み。** epic Issue #297 もクローズしてある。
+> 以降は着手時の記録として残してあるだけで、新しく着手する項目は無い。
+> 現在動いているロードマップは [review-and-feature-consolidation.md](review-and-feature-consolidation.md) を見ること。
+
 方針は次の3つ。
 
 1. **裏で走らせたタスクの状態が分かること**を最優先にする。複数タブ並列が前提の拡張でありながら、
@@ -160,36 +164,24 @@
 - 実VSCodeでしか確かめられない受入基準は [docs/manual-test.md](../manual-test.md) へ追記する
 - 各項目の完了時にREADMEの使い方・設定・既知の制約を同じPRで更新する
 
-## 番号の事前割り当て
+## 番号の割り当て（実績）
 
-並列で進めると設計書の節番号と手動テストのケース番号を取り合い、rebaseで必ず衝突する。
-着手前に次のとおり割り当ててある。担当する項目は、ここに書かれた番号だけを使う。
+着手前に設計書の節番号と手動テストのケース番号を割り当てていたが、並列で進めた結果、
+実際に採番された番号は当初の割り当てとずれた。下表は**実際に使われた番号**である
+（`docs/design.md` と `docs/manual-test.md` の見出しで確認した値）。
 
-| 項目 | Issue | ブランチ | design.md | manual-test.md |
-| --- | --- | --- | --- | --- |
-| R1 | #286 | `feat/286/notify-turn-and-approval` | §14.47 | U-01〜U-03 |
-| R2 | #287 | `feat/287/enable-find-widget` | §14.48 | U-04 |
-| R3 | #288 | `feat/288/send-on-enter` | §14.49 | U-05, U-06 |
-| R4 | #289 | `feat/289/default-keybindings` | §14.50 | U-07 |
-| R5 | #290 | `feat/290/render-markdown` | §14.51 | U-08〜U-10 |
-| R6 | #291 | `feat/291/open-diff-from-chat` | §14.52 | U-11〜U-13 |
-| R7 | #292 | `feat/292/send-editor-selection` | §14.53 | U-14, U-15 |
-| R8 | #293 | `feat/293/history-search` | §14.54 | U-16〜U-18 |
-| R9 | #294 | `feat/294/codex-session-tokens` | §14.55 | U-19 |
-| R10 | #295 | `feat/295/session-presets` | §14.56 | U-20〜U-22 |
-| R11 | #296 | `feat/296/composer-overflow-menu` | §14.57 | U-23, U-24 |
+| 項目 | Issue | design.md | manual-test.md |
+| --- | --- | --- | --- |
+| R1 | #286 | §14.55 | U-15 |
+| R2 | #287 | §14.48 | U-04 |
+| R3 | #288 | §14.49 | U-05, U-06 |
+| R4 | #289 | §14.50 | U-07 |
+| R5 | #290 | §14.51 | U-08〜U-10 |
+| R6 | #291 | §14.52 | U-11〜U-13（後日 #310 で U-24 を追加） |
+| R7 | #292 | §14.57 | U-19 |
+| R8 | #293 | §14.54 | U-16〜U-18 |
+| R9 | #294 | §14.53 | U-14 |
+| R10 | #295 | §14.56 | U-20〜U-22 |
+| R11 | #296 | §14.58 | U-23 |
 
-手動テストのU群は、この改善で新しく増える確認項目のための接頭辞。既存のC群（Codex画面）・
-L群（Claude Code画面）・W群（ワークフロー）とは番号を取り合わない。
-
-## 並列の順序
-
-同じファイルを触る項目を同時に走らせると衝突するため、次の波に分けて進める。
-`chatView.ts` は R1・R3・R6・R7・R11 が、`chatScript.ts` は R3・R5・R6・R9・R11 が触るため、
-この2ファイルを触る項目は同じ波へ入れない。
-
-1. 第1波（並列3）: R5（chatScript系）/ R8（tree・extension）/ R2（chatView・claudeChatView・workflowView）
-2. 第2波（並列3）: R3（chatScript・chatView）/ R10（extension・config・controlPanel）/ R4（package.json・README）
-3. 第3波（並列2）: R9（chatScript・chatState・usage）/ R1（chatView・claudeChatView・tree・extension）
-4. 第4波（逐次）: R6 → R7（どちらも chatView を触る）
-5. 第5波: R11（R5・R6・R10 の完了が前提）
+U-01〜U-03 は当初 R1 へ割り当てていたが、実際には使われていない（欠番）。
