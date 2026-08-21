@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 import { isApprovalDecision, type ApprovalDecision } from '../appserver/approvals';
 import {
   isOpenableSearchUrl,
+  type ChatItem,
   type ChatState,
   type ChatUsage,
   type PendingApproval,
@@ -60,6 +61,7 @@ import {
   renderShell,
   reportTurnResult,
   runExportTranscript,
+  STATE_POST_INTERVAL_MS,
 } from './chatView';
 import type { FileMentionCatalog } from '../provider/fileMentions';
 import {
@@ -82,7 +84,7 @@ import {
   type MemoryModeMemento,
 } from '../provider/inputModes';
 import { readPersistedThreadId } from './panelState';
-import { stripHostOnlyItems } from './stateDelta';
+import { buildItemsDelta, stripHostOnlyItems } from './stateDelta';
 import { CLAUDE_PERMISSION_MODES } from '../claude/types';
 import {
   APPROVAL_LEVEL_CYCLE,
@@ -137,6 +139,12 @@ interface ClaudePanel {
    * 役割・同じ判定方針（`notifyNewApprovals`のJSDoc参照）。
    */
   notifiedApprovalRequestIds: Set<string>;
+  /** `postState`の間引き用タイマー（issue #356、`chatView.ts`の`ChatPanel`と同じ役割）。 */
+  postTimer?: ReturnType<typeof setTimeout> | undefined;
+  /** 直近に`flushState`が送信した時刻（`STATE_POST_INTERVAL_MS`の間引き判定に使う）。 */
+  lastPostAt?: number | undefined;
+  /** 直近に送った会話項目。`buildItemsDelta`が次回との差分を取るための基準。 */
+  sentItems?: readonly ChatItem[] | undefined;
 }
 
 const VIEW_TYPE = 'claude.chat';
@@ -356,22 +364,53 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
    * 画面へ現在の状態だけを送る（設定は含めない）。ストリーミング中の細かい更新は
    * こちらを使い、設定込みの完全な状態は `refreshSettings` が担う
    * （既存の挙動をそのまま踏襲。webview側は届かないキーを前回の値のまま保つ）。
+   *
+   * 呼び出し元の`onSessionChange`はNDJSONイベント1件ごとに同期的に発火する
+   * （`ClaudeStreamSession.receive`）。以前は間引きが無く、`state.items`全量を
+   * イベントの頻度のまま構造化クローンで直列化していた（issue #356）。
+   * `chatView.ts`の`postState`/`flushState`と同じ流儀で、最初の1件はすぐ送り、
+   * 以降は`STATE_POST_INTERVAL_MS`ごとにまとめる。まとめた分は必ず最後に1回
+   * 送る（送り漏らして古い画面が残らないようにする）。
    */
   private postState(entry: ClaudePanel): void {
+    if (entry.disposed || entry.panel === undefined || entry.postTimer !== undefined) {
+      return;
+    }
+    const since = Date.now() - (entry.lastPostAt ?? 0);
+    if (since >= STATE_POST_INTERVAL_MS) {
+      this.flushState(entry);
+      return;
+    }
+    entry.postTimer = setTimeout(() => {
+      entry.postTimer = undefined;
+      this.flushState(entry);
+    }, STATE_POST_INTERVAL_MS - since);
+  }
+
+  /**
+   * 会話項目は差し分だけを`items`へ載せ、`state.items`は空で送る（issue #356、
+   * `chatView.ts`の`flushState`と同じ流儀。`stripHostOnlyItems`相当の除去は
+   * `buildItemsDelta`が内部で行う）。webview側は`chatScript.ts`の`mergeItems`
+   * （実装は`stateDelta.ts`の`MERGE_ITEMS_SOURCE`）で積み直す。
+   */
+  private flushState(entry: ClaudePanel): void {
     if (entry.disposed || entry.panel === undefined) {
       return;
     }
+    entry.lastPostAt = Date.now();
     const state = entry.session.getState();
+    const items = buildItemsDelta(entry.sentItems, state.items);
+    entry.sentItems = state.items;
     void entry.panel.webview.postMessage({
       type: 'state',
       state: {
         ...state,
-        // 描画に使わない項目を落としてから送る（issue #320）
-        items: stripHostOnlyItems(state.items),
+        items: [],
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),
         workspaceRoots: workspaceFolderPaths(),
       },
+      items,
     });
   }
 
@@ -950,6 +989,10 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       return;
     }
     entry.disposed = true;
+    if (entry.postTimer !== undefined) {
+      clearTimeout(entry.postTimer);
+      entry.postTimer = undefined;
+    }
     entry.loop.stop('manual');
     entry.session.dispose();
     entry.panel?.dispose();
@@ -1407,7 +1450,18 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         entry.loop.stop('manual');
         return;
       }
+      if (type === 'stateFull') {
+        // webview側が会話の取りこぼしに気付いたときの作り直し要求（issue #262、
+        // `chatView.ts`の同名分岐と同じ理由）。間引きに巻き込むと戻りが遅れるため、
+        // その場で送る
+        entry.sentItems = undefined;
+        this.flushState(entry);
+        return;
+      }
       if (type === 'ready') {
+        // webviewを作り直した直後は会話項目の積み直し状態（`mergedItems`）が空に戻る。
+        // 差し分ではなく全量から送り直す（issue #262、#356）
+        entry.sentItems = undefined;
         this.refreshSettings(entry);
         void this.postCommands(entry);
         return;
