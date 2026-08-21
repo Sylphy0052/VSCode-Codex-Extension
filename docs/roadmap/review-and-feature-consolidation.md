@@ -107,7 +107,7 @@
   - W3 生成したワークフローの分解が妥当かをレビューする段を足す（[#337](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/337)）
   - W4 オーケストレーターがタスクを追加・削除・依存変更できるようにする（[#338](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/338)）
   - W5 PR/MRのレビュー結果を取り込んでタスクへ反映する（[#339](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/339)）
-  - W6 タスクごとにIssueとPRを作り統合ブランチへマージする（後述。Issueは未起票）
+  - W6 タスクごとにIssueを起票し、PRのレビューを経てマージする（後述。Issueは未起票）
   - 依存: W2←W1 / W4←W2 / W5←W4 / W6←W1
   - 前提: WF-AとWF-Bの完了（`runner.ts` / `forge.ts` / `planner.ts` / `roadmap.ts` を共有する）
 
