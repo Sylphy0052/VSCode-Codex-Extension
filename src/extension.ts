@@ -113,6 +113,7 @@ import { nodeFileSystem, nodeMemoryFileSystem } from './session/nodeFileSystem';
 import { nodeFileScan } from './session/nodeFileScan';
 import { FileMentionCatalog } from './provider/fileMentions';
 import { InMemoryMetaCache } from './session/ports';
+import { pruneMetaCacheOnStartup } from './session/pruneOnStartup';
 import { SessionStore } from './session/sessionStore';
 import { SessionActions, nodeCommandRunner, type SessionAction } from './session/sessionActions';
 import { SessionWatcher } from './session/sessionWatcher';
@@ -275,6 +276,17 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     context.globalState.get<Record<string, SessionMeta>>(META_CACHE_KEY) ?? {},
   );
   const store = new SessionStore(nodeFileSystem, paths, cache);
+  // 実体が消えたセッションのメタキャッシュを起動時に掃除する（issue #382）。activateを
+  // 妨げないよう非同期で投げっぱなしにし、失敗してもここで吸収する
+  // （`pruneMetaCacheOnStartup` 参照）
+  void pruneMetaCacheOnStartup(
+    store,
+    (removed) => {
+      log.info(`起動時にメタキャッシュを${removed}件掃除しました`);
+      return persistCache(context, cache);
+    },
+    log,
+  );
 
   const claudeHome = resolveClaudeHome(readClaudeConfig().configDir, nodeLocatorDeps);
   const claudeDirs = claudePaths(claudeHome);
