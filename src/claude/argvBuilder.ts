@@ -55,22 +55,6 @@ function isAgentToken(value: string): boolean {
 }
 
 /**
- * TUIタブとして起動するための引数を組み立てる。
- *
- * `claude` には `-C` に相当する作業ディレクトリ指定が無いため、cwdは
- * `createTerminal({ cwd })` 側で与える（引数には現れない）。
- */
-export function buildClaudeShellArgs(input: ClaudeBuildInput): ClaudeBuildResult {
-  const args: string[] = [];
-  const warnings: string[] = [];
-
-  args.push(...targetArgs(input));
-  args.push(...configArgs(input.config, warnings));
-
-  return { args, warnings };
-}
-
-/**
  * Webviewチャット用。stdin/stdoutをNDJSONで繋いだまま常駐させる。
  * `--verbose` は stream-json 出力の前提条件で、`--print` 無しでは各フラグが効かない。
  *
@@ -79,8 +63,8 @@ export function buildClaudeShellArgs(input: ClaudeBuildInput): ClaudeBuildResult
  * **拡張機能へ問い合わせないまま自動で拒否する**（実測: `bash -c "echo hi"` が
  * `This command requires approval` で失敗し、`can_use_tool` は一度も届かない。CLI 2.1.229）。
  * 承認カード・§16.7の危険判定・`autoApprove` は全て `can_use_tool` の到着が前提のため、
- * ここを落とすとそれらが丸ごと働かなくなる。TUIタブ（`buildClaudeShellArgs`）はCLI自身が
- * 承認を対話で聞くため付けない。
+ * ここを落とすとそれらが丸ごと働かなくなる。他のCLIオプションと違い、対話でCLI自身が
+ * 承認を聞く経路が無いwebviewチャット固有の指定のため付ける。
  */
 export function buildClaudeStreamArgs(input: ClaudeBuildInput): ClaudeBuildResult {
   const warnings: string[] = [];

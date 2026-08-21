@@ -1,5 +1,5 @@
 import type { LocateResult } from '../codex/cliLocator';
-import type { LaunchTarget, SessionSummary } from '../codex/types';
+import type { SessionSummary } from '../codex/types';
 import type { ListOptions, ListResult } from '../session/sessionStore';
 import type { ProviderId } from './id';
 
@@ -28,32 +28,6 @@ export interface ProviderCapabilities {
   delete: boolean;
 }
 
-/** TUIタブとして起動するために必要な材料。 */
-export interface LaunchSpec {
-  /** 実行ファイル名を含まない引数列。シェルを経由しないためエスケープは不要。 */
-  args: string[];
-  env: Record<string, string>;
-  /**
-   * 起動前に確定しているセッションid。
-   * Codexは起動後の事後紐付けになるため undefined になる（設計書 §9.1）。
-   */
-  sessionId: string | undefined;
-  /** 無視した設定値。呼び出し側でログに残す。 */
-  warnings: string[];
-}
-
-export interface LaunchInput {
-  target: LaunchTarget;
-  cwd: string | undefined;
-  /**
-   * 起動ごとの一意なタグ。Codexは環境変数で渡して事後紐付けに使う（設計書 §9.1）。
-   * idを起動前に決められるプロバイダは使わない。
-   */
-  tag: string;
-  /** resume時など、CLIへ渡せる表示名。 */
-  name?: string | undefined;
-}
-
 /**
  * CLIエージェント1種類分の境界。
  *
@@ -72,7 +46,6 @@ export interface AgentProvider {
 
   locate(): LocateResult;
   listSessions(options: ListOptions): Promise<ListResult>;
-  buildLaunch(input: LaunchInput): LaunchSpec;
   /** 一覧に出すタブ名。プロバイダ名を接頭辞に付ける。 */
   tabTitle(session: Pick<SessionSummary, 'id' | 'threadName'>): string;
 }

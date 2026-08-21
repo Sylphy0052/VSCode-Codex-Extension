@@ -41,7 +41,6 @@ const fake = (
       }
       return { sessions: options.sessions ?? [], skippedIndexLines: 0, unresolved: 0 };
     },
-    buildLaunch: () => ({ args: [], env: {}, sessionId: undefined, warnings: [] }),
     tabTitle: (s) => `${id}: ${s.id}`,
   }) as AgentProvider;
 

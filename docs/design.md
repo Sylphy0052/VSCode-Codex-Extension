@@ -911,7 +911,7 @@ Codex専用だった構成に薄い抽象を1枚入れ、Claude Code CLI（`clau
 ```
 src/provider/
   id.ts        ProviderId ('codex' | 'claude')
-  types.ts     AgentProvider（locate / listSessions / buildLaunch / capabilities / tabTitle）
+  types.ts     AgentProvider（locate / listSessions / capabilities / tabTitle。buildLaunchはTUIタブ方式廃止に伴い#357で削除済み）
   registry.ts  利用可能なプロバイダの束。一覧を1本にマージする
 src/codex/provider.ts   既存のargvBuilder・cliLocator・SessionStoreを束ねたアダプタ
 src/claude/
@@ -985,7 +985,7 @@ stdin/stdoutのNDJSON上を流れる `control_request` / `control_response` で�
 
 実害の例（issue #276）: ワークフローのタスクが `./scripts/ai-harness/check.sh` を実行できず（`toolDenialKind: user-rejected`）、「変化なし」を繰り返して20ターン空回りしたまま失敗した。
 
-TUIタブ（`buildClaudeShellArgs`、§14.2）には付けない。CLI自身が対話で承認を聞くため不要で、`stdio` を指定すると応答する相手がいない。
+TUIタブ（当時の`buildClaudeShellArgs`、§14.2）には付けない。CLI自身が対話で承認を聞くため不要で、`stdio` を指定すると応答する相手がいない。**`buildClaudeShellArgs`はTUIタブ方式廃止に伴い#357で削除済み**（この段落はTUIタブ方式当時の設計記録）。
 
 ### 14.6 プロバイダごとにできること
 
@@ -2793,7 +2793,7 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 `Plan mode` > `bypass` > 設定のサンドボックス。計画モードが最優先なのは、読み取り専用の保証（`PLAN_POLICY`、§14.10）が人の承認を前提にしているため。保護を外す指定に負けてはならない。
 
-端末起動（`buildShellArgs`）では、有効なときに`-s` / `-a` / `--approve-for-me`を渡さない。CLIは併用を弾かない（`codex -s read-only --dangerously-bypass-approvals-and-sandbox --version`がパースを通ることを実測）が、どちらが勝つかがヘルプに書かれていないため、引数の意味が一意に決まるようこちらで落として警告を出す。
+端末起動（当時の`buildShellArgs`。TUIタブ方式廃止に伴い#357で削除済み）では、有効なときに`-s` / `-a` / `--approve-for-me`を渡さない。CLIは併用を弾かない（`codex -s read-only --dangerously-bypass-approvals-and-sandbox --version`がパースを通ることを実測）が、どちらが勝つかがヘルプに書かれていないため、引数の意味が一意に決まるようこちらで落として警告を出す。
 
 #### 会話を開くたびに同意を取る
 
