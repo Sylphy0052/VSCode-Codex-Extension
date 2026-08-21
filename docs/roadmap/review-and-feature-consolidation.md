@@ -214,9 +214,38 @@ W1〜W5とX1〜X3のIssue番号・ブランチ名・design.mdの節・manual-tes
   271行分残っている（`table` / `quote` / `hr` / `strike` / ネスト付き `ListItem` の追加まで進んでいる）。
   X1の担当は、この差分を捨てずに検分してから続きを実装する。
   `chatScript.ts` / `chatStyles.ts` / `MARKDOWN_PARSE_SOURCE` / テストは未確認
-- **不要なworktreeを整理する。** `approval-levels` は登録だけが残りディレクトリの実体が無い
-  （`git worktree prune` の対象）。`feat/335/final-merge-confirm` などmainとの差分が無いブランチも
-  着手時に切り直す
+- **不要なブランチの整理は済んでいる**（2026-08-22）。`feat/unified-approval-levels`（PR #343 で
+  マージ済み）、`worktree-agent-a5ff0a7b5eea5cdfd`、`feat/335/final-merge-confirm`（いずれも独自の
+  コミットが無い空ブランチ）と、リモートの `feat/327/workflow-branch-naming-conventions`
+  （PR #330 でマージ済み）を削除した。W1のブランチは着手時に現在のmainから切り直す
+
+### YAMLの行番号は古い
+
+[.agents/workflows/](../../.agents/workflows/) の各タスクが根拠として挙げている行番号は、
+全体レビューを実施した時点のmain（`cac40c73`）のものである。その後 PR
+[#343](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/343)（承認方法をCodexとClaude Codeで
+共通の3段階に揃える）がマージされ、次が変わっている。
+
+- 変更: `src/view/chatScript.ts` / `chatView.ts` / `claudeChatView.ts` / `controlPanelView.ts` /
+  `controlPanelScript.ts` / `chatStyles.ts` / `controlPanelStyles.ts` / `settingsProvider.ts`
+- 削除: `src/provider/approvalCycle.ts`（かわりに `src/provider/approvalLevel.ts` が新設された）
+
+**ずれているのはWF-Cの範囲だけで、`src/orchestrator/` 配下は変わっていない。**
+WF-A / WF-B の根拠行はそのまま使える。WF-Cの根拠行を実測した結果は次のとおりで、
+対象のコード自体はいずれも残っている。
+
+| 根拠 | YAMLの記載 | 現在のmain |
+| --- | --- | --- |
+| `claudeChatView.ts` の `postState` | 355 | 360 |
+| `chatView.ts` の `STATE_POST_INTERVAL_MS` | 144 | 151 |
+| `chatView.ts` の `postState` | 2012 | 2028 |
+| `controlPanelView.ts` の `this.view = view` | 100 | 108 |
+| `conversationView.ts` のCSP組み立て | 145 | 157 |
+| `chatCsp.ts` の `chatCsp()` | 11 | 11（ずれなし） |
+
+行番号ではなくシンボル名と説明文で該当箇所を特定すること。また PR #343 は承認まわりで
+`chatView.ts` と `claudeChatView.ts` に手を入れているため、T23 / T24 の抽出設計はその結果を
+読んでから決める。承認まわりの変更で既に解消している指摘があれば、直さずにその旨を報告する。
 
 ## 進め方
 
