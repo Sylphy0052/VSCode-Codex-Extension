@@ -250,7 +250,7 @@ export function parseRoadmapMarkdown(markdown: string): ParsedRoadmap {
             addWarning({
               itemIds: [item.id],
               message:
-                `${item.id}: Issue番号が大きすぎて読み取れませんでした: ` +
+                `${sanitizeForLog(item.id)}: Issue番号が大きすぎて読み取れませんでした: ` +
                 `"${sanitizeForLog(rawNumber)}"`,
             });
           }
@@ -265,7 +265,7 @@ export function parseRoadmapMarkdown(markdown: string): ParsedRoadmap {
           addWarning({
             itemIds: [item.id],
             message:
-              `${item.id}: Issue行を番号として読み取れませんでした: ` +
+              `${sanitizeForLog(item.id)}: Issue行を番号として読み取れませんでした: ` +
               `"${sanitizeForLog((issueCandidateMatch[1] ?? '').trim())}"`,
           });
           i += 1;
@@ -344,13 +344,13 @@ export function validateRoadmap(parsed: ParsedRoadmap): RoadmapValidationResult 
     if (!TASK_ID_PATTERN.test(item.id)) {
       errors.push({
         itemIds: [item.id],
-        message: `id の形式が不正です（半角英数字・_・-のみ、1〜50文字にしてください）: "${item.id}"`,
+        message: `id の形式が不正です（半角英数字・_・-のみ、1〜50文字にしてください）: "${sanitizeForLog(item.id)}"`,
       });
     }
   }
   for (const [id, count] of idCounts) {
     if (count > 1) {
-      errors.push({ itemIds: [id], message: `id が重複しています: ${id}` });
+      errors.push({ itemIds: [id], message: `id が重複しています: ${sanitizeForLog(id)}` });
     }
   }
 
@@ -360,14 +360,17 @@ export function validateRoadmap(parsed: ParsedRoadmap): RoadmapValidationResult 
       if (!idSet.has(dep)) {
         errors.push({
           itemIds: [item.id],
-          message: `依存が未定義の項目を参照しています: ${dep}`,
+          message: `依存が未定義の項目を参照しています: ${sanitizeForLog(dep)}`,
         });
       }
     }
   }
 
   for (const group of findCycleGroups(items)) {
-    errors.push({ itemIds: group, message: `依存が循環しています: ${group.join(', ')}` });
+    errors.push({
+      itemIds: group,
+      message: `依存が循環しています: ${group.map((id) => sanitizeForLog(id)).join(', ')}`,
+    });
   }
 
   return { errors, warnings };
@@ -614,7 +617,7 @@ export function detectRoadmapMaterialMismatches(
       mismatches.push({
         itemId: item.id,
         kind: 'missing',
-        message: `ロードマップの項目 ${item.id} に対応するタスクが生成されていません`,
+        message: `ロードマップの項目 ${sanitizeForLog(item.id)} に対応するタスクが生成されていません`,
       });
       continue;
     }
@@ -624,13 +627,15 @@ export function detectRoadmapMaterialMismatches(
     const dependsOnMatches =
       expectedDeps.size === actualDeps.size && [...expectedDeps].every((d) => actualDeps.has(d));
     if (!dependsOnMatches) {
+      const expectedText =
+        [...expectedDeps].map((d) => sanitizeForLog(d)).join(', ') || 'なし';
+      const actualText = [...actualDeps].map((d) => sanitizeForLog(d)).join(', ') || 'なし';
       mismatches.push({
         itemId: item.id,
         kind: 'dependsOnMismatch',
         message:
-          `${item.id}: dependsOnがロードマップの依存と一致しません` +
-          `（期待: ${[...expectedDeps].join(', ') || 'なし'}, ` +
-          `実際: ${[...actualDeps].join(', ') || 'なし'}）`,
+          `${sanitizeForLog(item.id)}: dependsOnがロードマップの依存と一致しません` +
+          `（期待: ${expectedText}, 実際: ${actualText}）`,
       });
     }
 
@@ -639,7 +644,7 @@ export function detectRoadmapMaterialMismatches(
         itemId: item.id,
         kind: 'issueMismatch',
         message:
-          `${item.id}: issueがロードマップと一致しません` +
+          `${sanitizeForLog(item.id)}: issueがロードマップと一致しません` +
           `（期待: ${item.issue ?? 'なし'}, 実際: ${task.issue ?? 'なし'}）`,
       });
     }
