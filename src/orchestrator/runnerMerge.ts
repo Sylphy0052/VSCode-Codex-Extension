@@ -518,8 +518,9 @@ async function startMergeResolution(
   // ではなく、標準の承認カード（`setApprovalHandler`を設定しない既定挙動）へ委ねる。
   // タスク境界（`TaskBoundary`）は本来そのタスクのworktree用に作られたもので、統合
   // worktree（別ディレクトリ）向けに作り直すと境界判定の意味が変わってしまう。安全側
-  // （常に人の承認を要求する）に倒すための単純化であり、最終報告に明記する
-  // 統合worktreeの占有はここで解決セッションへ引き継ぐ。`onMergeResolutionFinished`が
+  // （常に人の承認を要求する）に倒すための単純化であり、最終報告に明記する。
+  //
+  // あわせて、統合worktreeの占有はここで解決セッションへ引き継ぐ。`onMergeResolutionFinished`が
   // 全ての出口（done / blocked / manual / interrupted / 例外）で解放する（Issue #412）
   session.onFinished((reason) => {
     void onMergeResolutionFinished(self, runId, taskId, task, integration, reason, lease);
