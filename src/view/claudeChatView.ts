@@ -62,7 +62,7 @@ import {
   reportTurnResult,
   runExportTranscript,
   STATE_POST_INTERVAL_MS,
-} from './chatView';
+} from './chatShared';
 import type { FileMentionCatalog } from '../provider/fileMentions';
 import {
   decoratePanelTitle,
@@ -93,7 +93,7 @@ import {
 } from '../provider/approvalLevel';
 import type { ClaudeConfig } from '../claude/types';
 import type { ClaudeEditableKey, SettingsProvider } from './settingsProvider';
-import type { ChatActivity } from './chatView';
+import type { ChatActivity } from './chatShared';
 import { nextActivePanelSequence, type ActiveComposerTarget } from './activePanelSequence';
 
 interface ClaudePanel {
