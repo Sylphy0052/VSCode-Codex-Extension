@@ -578,6 +578,114 @@ describe('WorktreeCreationQueue.create', () => {
   });
 });
 
+describe('WorktreeCreationQueue.createWithOrigin（Issue #380）', () => {
+  it('resolveOriginが返したHEADでworktreeを作り、originCommitとして返す', async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', '--verify'], { code: 1, stdout: '', stderr: '' });
+    git.respond(['worktree', 'add'], { code: 0, stdout: '', stderr: '' });
+    const queue = new WorktreeCreationQueue();
+    const cwd = path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2');
+    const fs = new FakeFs();
+    fs.realpaths.set(cwd, cwd);
+    fs.realpaths.set('/repo', '/repo');
+
+    const result = await queue.createWithOrigin(
+      async () => HEAD_SHA,
+      (headCommit) => ({
+        repoRoot: '/repo',
+        runId: RUN_ID,
+        taskId: 'T2',
+        headCommit,
+        retry: undefined,
+      }),
+      git,
+      fs,
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      cwd,
+      branch: `wf/${RUN_ID}/T2`,
+      originCommit: HEAD_SHA,
+    });
+    // worktree作成の直前に、渡したHEADで`git worktree add`が呼ばれている
+    expect(git.calls.at(-1)).toEqual({
+      args: ['worktree', 'add', '-b', `wf/${RUN_ID}/T2`, cwd, HEAD_SHA],
+      cwd: '/repo',
+    });
+  });
+
+  it('resolveOriginがundefinedを返すとheadUnresolvedで失敗し、gitを一切呼ばない', async () => {
+    const git = new FakeGit();
+    const queue = new WorktreeCreationQueue();
+    const fs = new FakeFs();
+
+    const result = await queue.createWithOrigin(
+      async () => undefined,
+      (headCommit) => ({
+        repoRoot: '/repo',
+        runId: RUN_ID,
+        taskId: 'T2',
+        headCommit,
+        retry: undefined,
+      }),
+      git,
+      fs,
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'headUnresolved',
+      message: '統合ブランチのHEADコミットを解決できませんでした',
+    });
+    expect(git.calls).toEqual([]);
+  });
+
+  it(
+    'HEAD解決とworktree作成の間に他の項目（マージ相当）が割り込まない' +
+      '（分岐元が1マージ分古くなる競合の再現。Issue #380の指摘3）',
+    async () => {
+      const git = new FakeGit();
+      git.respond(['rev-parse', '--verify'], { code: 1, stdout: '', stderr: '' });
+      git.respond(['worktree', 'add'], { code: 0, stdout: '', stderr: '' });
+      const queue = new WorktreeCreationQueue();
+      const cwd = path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2');
+      const fs = new FakeFs();
+      fs.realpaths.set(cwd, cwd);
+      fs.realpaths.set('/repo', '/repo');
+
+      const order: string[] = [];
+      // HEAD解決自体に遅延を挟み、その間に別項目がキューへ割り込もうとする隙を作る
+      const createPromise = queue.createWithOrigin(
+        async () => {
+          order.push('resolveOrigin:start');
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          order.push('resolveOrigin:end');
+          return HEAD_SHA;
+        },
+        (headCommit) => ({
+          repoRoot: '/repo',
+          runId: RUN_ID,
+          taskId: 'T2',
+          headCommit,
+          retry: undefined,
+        }),
+        git,
+        fs,
+      );
+      // 「別タスクのマージ」に相当する、同じキューへの割り込み
+      const mergePromise = queue.enqueue(async () => {
+        order.push('merge');
+      });
+
+      await Promise.all([createPromise, mergePromise]);
+
+      // マージ相当の項目は、HEAD解決とworktree作成の間ではなく、両方が終わった後に走る
+      expect(order).toEqual(['resolveOrigin:start', 'resolveOrigin:end', 'merge']);
+    },
+  );
+});
+
 describe('WorktreeCreationQueue（直列化）', () => {
   it('worktree作成が直列化され、同時に複数要求してもgit呼び出しが重ならない', async () => {
     let active = 0;

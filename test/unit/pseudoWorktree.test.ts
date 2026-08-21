@@ -11,10 +11,13 @@ import {
   deserializeManifest,
   diffSnapshots,
   ensureIntegrationDir,
+  integrationManifestPath,
   integrationPath,
   IntegrationQueue,
   isExcludedPath,
+  loadPersistedManifest,
   nodePseudoWorktreeFileSystem,
+  persistManifest,
   planIntegration,
   pseudoWorktreePath,
   pseudoWorktreesRootDir,
@@ -585,13 +588,125 @@ describe('実ファイルシステムでの統合テスト', () => {
     );
 
     expect(result).toMatchObject({ reason: 'workspaceChanged' });
-    if (result.ok) return;
+    if (result.ok || result.reason !== 'workspaceChanged') return;
     expect(result.changedPaths).toEqual(['a.txt']);
     // 反映されておらず、人の編集がそのまま残っている
     await expect(readFile(path.join(workspace, 'a.txt'), 'utf8')).resolves.toBe(
       'edited by a human during the run\n',
     );
   });
+
+  it('マニフェストを永続化し、読み戻すと同じ内容が復元される（受入基準、Issue #380）', async () => {
+    const integration = await ensureIntegrationDir(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+    expect(integration.ok).toBe(true);
+    if (!integration.ok) return;
+
+    const manifest: IntegrationManifest = new Map([
+      ['a.txt', { taskId: 'T1', kind: 'modified' }],
+      ['b.txt', { taskId: 'T2', kind: 'added' }],
+    ]);
+    await persistManifest(workspace, RUN_ID, manifest, nodePseudoWorktreeFileSystem);
+
+    const loaded = await loadPersistedManifest(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+    expect(loaded).toEqual({ ok: true, manifest });
+
+    // 永続化先はrunId配下（_integrationと同じ階層）で、.agents/worktrees配下＝
+    // スナップショット走査から常に除外される場所にある
+    expect(integrationManifestPath(workspace, RUN_ID)).toBe(
+      path.join(pseudoWorktreesRootDir(workspace), RUN_ID, 'manifest.json'),
+    );
+  });
+
+  it(
+    'マニフェストがまだ永続化されていない場合（初回実行）は復元できないのではなく、' +
+      '空マニフェストで正常に扱う',
+    async () => {
+      const loaded = await loadPersistedManifest(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+      expect(loaded).toEqual({ ok: true, manifest: new Map() });
+    },
+  );
+
+  it(
+    '永続化されたマニフェストの内容が壊れている場合は「復元できない」ことが' +
+      '分かる形で返す（黙って空マニフェストへ倒さない。受入基準、Issue #380）',
+    async () => {
+      const filePath = integrationManifestPath(workspace, RUN_ID);
+      await mkdir(path.dirname(filePath), { recursive: true });
+      await writeFile(filePath, 'not valid json{{{');
+
+      const loaded = await loadPersistedManifest(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+      expect(loaded.ok).toBe(false);
+      if (loaded.ok) return;
+      expect(loaded.message).toContain('復元できません');
+    },
+  );
+
+  it(
+    '反映が途中で失敗すると、適用済み・未適用のパスの両方が結果に残る' +
+      '（受入基準・追加の指摘、Issue #380）',
+    async () => {
+      await writeWorkspaceFile('a.txt', 'original a\n');
+      await writeWorkspaceFile('b.txt', 'original b\n');
+      const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+
+      const t1 = await cloneWorkspace(workspace, RUN_ID, 'T1', [], nodePseudoWorktreeFileSystem);
+      expect(t1.ok).toBe(true);
+      if (!t1.ok) return;
+
+      await writeFile(path.join(t1.cwd, 'a.txt'), 'updated a, longer than before\n');
+      await writeFile(path.join(t1.cwd, 'b.txt'), 'updated b, longer than before\n');
+      const diff = diffSnapshots(
+        t1.snapshot,
+        await takeSnapshot(t1.cwd, [], nodePseudoWorktreeFileSystem),
+      );
+      const queue = new IntegrationQueue();
+      await queue.integrate('T1', t1.cwd, integration.dir, diff, nodePseudoWorktreeFileSystem);
+
+      // 2件目（b.txt）のワークスペースへの反映だけが失敗するフェイクへ差し替える
+      let copyCount = 0;
+      const failingFs: typeof nodePseudoWorktreeFileSystem = {
+        ...nodePseudoWorktreeFileSystem,
+        copyFile: async (from, to) => {
+          copyCount += 1;
+          if (copyCount >= 2) {
+            throw new Error('ENOSPC: no space left on device');
+          }
+          await nodePseudoWorktreeFileSystem.copyFile(from, to);
+        },
+      };
+
+      const result = await reflectIntegrationToWorkspace(
+        workspace,
+        integration.dir,
+        workspaceBaseline,
+        queue.getManifest(),
+        [],
+        failingFs,
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.reason).toBe('partialApply');
+      if (result.reason !== 'partialApply') return;
+      expect(result.appliedPaths).toEqual(['a.txt']);
+      expect(result.failedPath).toBe('b.txt');
+      expect(result.remainingPaths).toEqual([]);
+      // 失敗した1件より前は実際にワークスペースへ反映されている
+      await expect(readFile(path.join(workspace, 'a.txt'), 'utf8')).resolves.toBe(
+        'updated a, longer than before\n',
+      );
+      // 失敗した1件はワークスペース側に反映されていない
+      await expect(readFile(path.join(workspace, 'b.txt'), 'utf8')).resolves.toBe('original b\n');
+    },
+  );
 });
 
 describe('applyDiffToIntegration', () => {
@@ -612,6 +727,8 @@ describe('applyDiffToIntegration', () => {
       removeFile: async (t) => {
         calls.push(`remove:${t}`);
       },
+      readTextFile: async () => undefined,
+      writeTextFile: async () => {},
       removeDirRecursive: async () => {},
     };
 

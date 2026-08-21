@@ -532,6 +532,22 @@ export type CreateWorktreeResult =
       message: string;
     };
 
+/** `WorktreeCreationQueue.createWithOrigin` の戻り値。Issue #380。 */
+export type CreateWorktreeWithOriginResult =
+  | { ok: true; cwd: string; branch: string; originCommit: string }
+  | {
+      ok: false;
+      reason:
+        | 'headUnresolved'
+        | 'branchExists'
+        | 'gitError'
+        | 'invalidIdentifier'
+        | 'invalidHeadCommit'
+        | 'symlinkDetected'
+        | 'boundaryEscape';
+      message: string;
+    };
+
 /**
  * `headCommit` はコミットのSHA（省略形を含む7〜40桁の16進数）に限る。
  *
@@ -744,6 +760,43 @@ export class WorktreeCreationQueue {
     fs: WorktreeFileSystemPort,
   ): Promise<CreateWorktreeResult> {
     return this.queue.enqueue(() => createWorktree(request, git, fs));
+  }
+
+  /**
+   * タスクブランチの分岐元HEADの解決と、worktreeの作成を同一のキュー項目にまとめて行う
+   * （design.md §16.17「タスクブランチの分岐元」、Issue #380）。
+   *
+   * `resolveOrigin`を呼び出し側で先に呼んでから`create`を別に呼ぶと、両者の間に他の
+   * タスクのマージ（`integration.ts`の`IntegrationMergeQueue`もこの`WorktreeCreationQueue`の
+   * インスタンスを共有するため、ここへ割り込みうる）が挟まり、分岐元が1マージ分古くなる
+   * （避けられたはずの衝突を生む）。`resolveOrigin`と`createWorktree`を1回の
+   * `queue.enqueue`にまとめることで、この2手順の間に他の項目が割り込めなくする。
+   *
+   * `create`をこの内側からは呼ばない（`create`自体が`queue.enqueue`する。同じ`SerialQueue`
+   * インスタンスへ実行中のタスクの中から再度`enqueue`すると、後段が前段の完了を待ち、
+   * 前段は後段の結果を待つ形になり噛み合わなくなる）。`createWorktree`を直接呼ぶ。
+   */
+  createWithOrigin(
+    resolveOrigin: () => Promise<string | undefined>,
+    buildRequest: (headCommit: string) => CreateWorktreeRequest,
+    git: GitCommandRunner,
+    fs: WorktreeFileSystemPort,
+  ): Promise<CreateWorktreeWithOriginResult> {
+    return this.queue.enqueue(async () => {
+      const headCommit = await resolveOrigin();
+      if (headCommit === undefined) {
+        return {
+          ok: false,
+          reason: 'headUnresolved',
+          message: '統合ブランチのHEADコミットを解決できませんでした',
+        };
+      }
+      const result = await createWorktree(buildRequest(headCommit), git, fs);
+      if (!result.ok) {
+        return result;
+      }
+      return { ...result, originCommit: headCommit };
+    });
   }
 
   /** worktreeを1件撤去する（`removeWorktree` をキュー経由で呼ぶ）。 */

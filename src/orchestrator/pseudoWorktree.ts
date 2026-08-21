@@ -148,31 +148,104 @@ export function serializeManifest(manifest: IntegrationManifest): string {
   return JSON.stringify(Object.fromEntries(manifest), null, 2);
 }
 
+/**
+ * `JSON.parse`済みの値からマニフェストを組み立てる純粋関数。`deserializeManifest`（壊れた
+ * JSONを安全側の空マニフェストへ倒す）と、復元の成否を呼び出し側へ伝える必要がある
+ * `loadPersistedManifest`（壊れたJSONを「復元できなかった」ことが分かる形で返す。
+ * Issue #380）の両方から共有する。
+ */
+function manifestFromParsedJson(parsed: unknown): IntegrationManifest {
+  if (typeof parsed !== 'object' || parsed === null) {
+    return new Map();
+  }
+  const result = new Map<string, IntegrationManifestEntry>();
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (
+      typeof value === 'object' &&
+      value !== null &&
+      typeof (value as { taskId?: unknown }).taskId === 'string' &&
+      typeof (value as { kind?: unknown }).kind === 'string'
+    ) {
+      const kind = (value as { kind: string }).kind;
+      if (kind === 'added' || kind === 'modified' || kind === 'deleted') {
+        result.set(key, { taskId: (value as { taskId: string }).taskId, kind });
+      }
+    }
+  }
+  return result;
+}
+
 /** `serializeManifest` の逆変換。壊れたJSONは空のマニフェストとして扱う（安全側）。 */
 export function deserializeManifest(json: string): IntegrationManifest {
   try {
-    const parsed: unknown = JSON.parse(json);
-    if (typeof parsed !== 'object' || parsed === null) {
-      return new Map();
-    }
-    const result = new Map<string, IntegrationManifestEntry>();
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (
-        typeof value === 'object' &&
-        value !== null &&
-        typeof (value as { taskId?: unknown }).taskId === 'string' &&
-        typeof (value as { kind?: unknown }).kind === 'string'
-      ) {
-        const kind = (value as { kind: string }).kind;
-        if (kind === 'added' || kind === 'modified' || kind === 'deleted') {
-          result.set(key, { taskId: (value as { taskId: string }).taskId, kind });
-        }
-      }
-    }
-    return result;
+    return manifestFromParsedJson(JSON.parse(json));
   } catch {
     return new Map();
   }
+}
+
+/**
+ * マニフェストの永続化先（`<runId>/manifest.json`。`_integration`と同じ`<runId>`配下、
+ * かつ`.agents/worktrees`配下のため常にスナップショット走査（`listFiles`）の除外対象に
+ * 入る。ワークスペースへの反映（`reflectIntegrationToWorkspace`）がこのファイル自身を
+ * 誤って拾うことはない）。Issue #380。
+ */
+export function integrationManifestPath(workspaceRoot: string, runId: string): string {
+  const message = runIdError(runId);
+  if (message !== undefined) {
+    throw new Error(message);
+  }
+  return path.join(pseudoWorktreesRootDir(workspaceRoot), runId, 'manifest.json');
+}
+
+export type LoadManifestResult =
+  | { ok: true; manifest: IntegrationManifest }
+  | { ok: false; message: string };
+
+/**
+ * 永続化されたマニフェストを読み戻す（design.md §16.11の対象。Issue #380）。
+ *
+ * ファイルが無い場合（初回実行、またはまだ1件も統合していない実行）は「復元できない」
+ * ではなく「復元すべきものがまだ無い」正常系のため、空のマニフェストで`ok: true`を返す。
+ * ファイルはあるが内容を解析できない場合（破損）だけ`ok: false`にする。ここを
+ * `deserializeManifest`のように黙って空マニフェストへ倒すと、統合済みだった成果が
+ * あったことに呼び出し側が気づけない（「0件で成功」に見えてしまう。Issueの本題）。
+ */
+export async function loadPersistedManifest(
+  workspaceRoot: string,
+  runId: string,
+  fs: PseudoWorktreeFileSystemPort,
+): Promise<LoadManifestResult> {
+  const filePath = integrationManifestPath(workspaceRoot, runId);
+  const content = await fs.readTextFile(filePath);
+  if (content === undefined) {
+    return { ok: true, manifest: new Map() };
+  }
+  try {
+    return { ok: true, manifest: manifestFromParsedJson(JSON.parse(content)) };
+  } catch {
+    return {
+      ok: false,
+      message: `疑似worktreeの統合マニフェストを復元できませんでした（内容を解析できません）: ${filePath}`,
+    };
+  }
+}
+
+/**
+ * マニフェストを永続化する（design.md §16.11の対象。Issue #380）。タスク1件分の統合
+ * （`IntegrationQueue.integrate`）が成功するたびに呼び出し側（`integratePseudoWorktree`）
+ * から呼ぶ。書き込み失敗（EACCES/ENOSPC等）はここでは吸収せず、他のポートメソッドと
+ * 同じく素通しでthrowする（呼び出し側が「統合自体は成立している」ことと区別して扱うため）。
+ */
+export async function persistManifest(
+  workspaceRoot: string,
+  runId: string,
+  manifest: IntegrationManifest,
+  fs: PseudoWorktreeFileSystemPort,
+): Promise<void> {
+  const filePath = integrationManifestPath(workspaceRoot, runId);
+  await fs.mkdir(path.dirname(filePath));
+  await fs.writeTextFile(filePath, serializeManifest(manifest));
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +356,16 @@ export interface PseudoWorktreeFileSystemPort {
   /** ファイルを削除する。存在しなくてもエラーにしない。 */
   removeFile(target: string): Promise<void>;
   /**
+   * テキストファイルを読む。存在しない・読めない場合は undefined（他の読み取り系
+   * ポートメソッドと同じ規約）。マニフェストの永続化・復元（Issue #380）にだけ使う。
+   */
+  readTextFile(target: string): Promise<string | undefined>;
+  /**
+   * テキストファイルを書く（親ディレクトリは呼び出し側が事前に作る）。マニフェストの
+   * 永続化（Issue #380）にだけ使う。書き込み失敗は素通しでthrowする（`copyFile`等と同じ）。
+   */
+  writeTextFile(target: string, content: string): Promise<void>;
+  /**
    * ディレクトリを再帰的に削除する。存在しなくてもエラーにしない。境界逸脱時の後始末
    * （`cloneWorkspace` / `ensureIntegrationDir`が作成直後に自分の作った分だけを消す）と、
    * `removePseudoWorktree`による明示的な撤去（Issue #298）の両方から使う。
@@ -345,6 +428,16 @@ export const nodePseudoWorktreeFileSystem: PseudoWorktreeFileSystemPort = {
   },
   async removeFile(target: string): Promise<void> {
     await fsPromises.rm(target, { force: true });
+  },
+  async readTextFile(target: string): Promise<string | undefined> {
+    try {
+      return await fsPromises.readFile(target, 'utf8');
+    } catch {
+      return undefined;
+    }
+  },
+  async writeTextFile(target: string, content: string): Promise<void> {
+    await fsPromises.writeFile(target, content, 'utf8');
   },
   async removeDirRecursive(target: string): Promise<void> {
     await fsPromises.rm(target, { recursive: true, force: true });
@@ -631,14 +724,28 @@ export async function applyDiffToIntegration(
 export class IntegrationQueue {
   private readonly queue = new SerialQueue();
   private manifest: IntegrationManifest;
+  private readonly manifestRestoreError: string | undefined;
 
-  constructor(initialManifest: IntegrationManifest = new Map()) {
+  /**
+   * `manifestRestoreError`はリロード復元時（Issue #380）、永続化されたマニフェストが
+   * 壊れていて読み戻せなかった場合に呼び出し側（`resolvePseudoState`）が渡す。定義されて
+   * いれば、このrunの統合状態はもう分からない（空マニフェストのまま続行すると「復元済み
+   * だが実は何も統合していない」と区別が付かない）ため、`reflectPseudoWorktree`側が
+   * ワークスペースへの反映を「0件で成功」にせず明示的に止める判定材料として使う。
+   */
+  constructor(initialManifest: IntegrationManifest = new Map(), manifestRestoreError?: string) {
     this.manifest = initialManifest;
+    this.manifestRestoreError = manifestRestoreError;
   }
 
   /** 現在のマニフェスト（永続化・`reflectIntegrationToWorkspace` へ渡す用）。 */
   getManifest(): IntegrationManifest {
     return this.manifest;
+  }
+
+  /** マニフェストの復元に失敗していればその理由。成功・初回実行時は undefined。 */
+  getManifestRestoreError(): string | undefined {
+    return this.manifestRestoreError;
   }
 
   /** タスク1件分の差分を統合先へ適用する（`planIntegration` + `applyDiffToIntegration` をキュー経由で呼ぶ）。 */
@@ -668,7 +775,18 @@ export class IntegrationQueue {
 
 export type ReflectToWorkspaceResult =
   | { ok: true; appliedPaths: string[] }
-  | { ok: false; reason: 'workspaceChanged'; message: string; changedPaths: string[] };
+  | { ok: false; reason: 'workspaceChanged'; message: string; changedPaths: string[] }
+  | {
+      ok: false;
+      reason: 'partialApply';
+      message: string;
+      /** 反映済み（成功した）パス。 */
+      appliedPaths: string[];
+      /** 反映に失敗した1件（この後は試みていない）。 */
+      failedPath: string;
+      /** `failedPath`より後ろにあり、まだ試みていないパス。 */
+      remainingPaths: string[];
+    };
 
 /**
  * runの終了時に、統合先の内容をワークスペースへ反映する（design.md §16.20）。
@@ -701,16 +819,41 @@ export async function reflectIntegrationToWorkspace(
     };
   }
 
+  const entries = [...manifest.entries()];
   const appliedPaths: string[] = [];
-  for (const [relPath, entry] of manifest) {
+  for (let i = 0; i < entries.length; i += 1) {
+    const entry = entries[i];
+    if (entry === undefined) {
+      continue;
+    }
+    const [relPath, manifestEntry] = entry;
     const segments = relPath.split('/');
     const target = path.join(workspaceRoot, ...segments);
-    if (entry.kind === 'deleted') {
-      await fs.removeFile(target);
-    } else {
-      const source = path.join(integrationDir, ...segments);
-      await fs.mkdir(path.dirname(target));
-      await fs.copyFile(source, target);
+    try {
+      if (manifestEntry.kind === 'deleted') {
+        await fs.removeFile(target);
+      } else {
+        const source = path.join(integrationDir, ...segments);
+        await fs.mkdir(path.dirname(target));
+        await fs.copyFile(source, target);
+      }
+    } catch (e) {
+      // 途中のI/Oエラーで中断した場合、それ以前のパスだけが適用済みの中途半端な状態に
+      // なる。ここで例外を投げ直すと、どこまで適用できたか・どこから先が未適用かの情報が
+      // 呼び出し側から失われる（Issue #380の追加指摘）。適用済み・失敗した1件・まだ
+      // 試みていない残りを、呼び出し側が警告として人に見せられる形で返す
+      const message = e instanceof Error ? e.message : String(e);
+      return {
+        ok: false,
+        reason: 'partialApply',
+        message: `統合結果のワークスペースへの反映が${relPath}で失敗し、途中で中断しました: ${message}`,
+        appliedPaths: [...appliedPaths].sort((a, b) => a.localeCompare(b)),
+        failedPath: relPath,
+        remainingPaths: entries
+          .slice(i + 1)
+          .map(([p]) => p)
+          .sort((a, b) => a.localeCompare(b)),
+      };
     }
     appliedPaths.push(relPath);
   }

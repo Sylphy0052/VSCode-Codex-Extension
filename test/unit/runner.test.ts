@@ -458,6 +458,8 @@ const fakeForgeFs: ForgeFileSystemPort = {
 class FakePseudoFs implements PseudoWorktreeFileSystemPort {
   readonly files = new Map<string, PseudoWorktreeFileStat>();
   readonly dirs = new Set<string>();
+  /** マニフェストの永続化（Issue #380）用。テキストファイルはサイズ・更新時刻を持たないため別管理。 */
+  readonly textFiles = new Map<string, string>();
   /**
    * Issue #364の回帰テスト用。`nodePseudoWorktreeFileSystem`の`mkdir`/`copyFile`/`removeFile`は
    * 他のポートメソッドと違いEACCES/ENOSPC等をそのままthrowする実装のため、そのふるまいを
@@ -534,11 +536,26 @@ class FakePseudoFs implements PseudoWorktreeFileSystemPort {
     }
     this.files.delete(target);
   }
+  async readTextFile(target: string): Promise<string | undefined> {
+    return this.textFiles.get(target);
+  }
+  async writeTextFile(target: string, content: string): Promise<void> {
+    if (this.failWith !== undefined) {
+      throw this.failWith;
+    }
+    this.textFiles.set(target, content);
+    this.ensureDirsFor(target);
+  }
   async removeDirRecursive(target: string): Promise<void> {
     const prefix = `${target}${path.sep}`;
     for (const p of [...this.files.keys()]) {
       if (p === target || p.startsWith(prefix)) {
         this.files.delete(p);
+      }
+    }
+    for (const p of [...this.textFiles.keys()]) {
+      if (p === target || p.startsWith(prefix)) {
+        this.textFiles.delete(p);
       }
     }
     for (const d of [...this.dirs]) {
@@ -3975,6 +3992,153 @@ tasks:
       process.off('unhandledRejection', rejectionListener);
     }
     expect(rejectionListener).not.toHaveBeenCalled();
+  });
+
+  describe('リロード復元後のマニフェスト（Issue #380）', () => {
+    // T1は疑似worktree（統合が要る）、T2は明示cwd（統合を経由しない）にして、リロード後の
+    // 再実行（retryTask）が疑似worktreeの複製先の衝突（T2の再クローンが以前の複製と
+    // ぶつかる。Issue #380の範囲外の別の制約）を踏まないようにする
+    const TWO_TASK_YAML = `
+version: 1
+name: pseudo-reload-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    cwd: /repo/T2
+    prompt: p2
+    done: d2
+`;
+
+    it(
+      'リロード復元後も、復元前に統合済みだった成果がワークスペースへ届く' +
+        '（受入基準: マニフェストが永続化され復元される）',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-reload.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        // T1だけ先に完了・統合させる（統合先へのマニフェストがこの時点で永続化される）。
+        // T2はまだ`running`のまま（リロード＝プロセス再起動を、走行中のタスクがある
+        // 途中で迎えた状況を再現する）
+        const t1 = codexHost.byTaskId('T1');
+        const cloneDir1 = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+        fs.setFile(path.join(cloneDir1, 'a.txt'), { size: 20, mtimeMs: 200 });
+        t1.finish('done', doneState('ok'));
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+        // まだリロード前なので、runは終わっておらずワークスペースへの反映はまだ起きない
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 10, mtimeMs: 100 });
+
+        // 新しいプロセス（リロード後）を模す。同じstore・同じ疑似worktreeのfs
+        // （＝同じディスク）を使い回すが、ライブな状態（`IntegrationQueue`のインスタンス・
+        // メモリ上のマニフェスト）は失われる
+        const newCodexHost = new FakeHost();
+        const reloadedRunner = new WorkflowRunner({
+          hosts: { codex: newCodexHost, claude: newCodexHost },
+          worktreeQueue: new WorktreeCreationQueue(),
+          git: fakeGit({ notGitRepo: true }),
+          fs: identityFs,
+          filePort: filePort(TWO_TASK_YAML),
+          store,
+          pseudoWorktree: { fs, exclude: [] },
+          log: fakeLogger,
+          readBaseline: () => ({
+            codexSandbox: 'read-only',
+            codexApprovalMode: 'on-request',
+            claudePermissionMode: 'manual',
+            allowAutoApprove: true,
+            allowClaudeBypassPermissions: false,
+          }),
+        });
+        await reloadedRunner.restoreRunsForView();
+
+        // リロードで中断扱いになったT2を再実行し、runを最後まで進める
+        expect(reloadedRunner.retryTask(runId, 'T2')).toEqual({ ok: true });
+        await flush();
+        const t2 = newCodexHost.byTaskId('T2');
+        t2.finish('done', doneState('ok'));
+        await flush();
+
+        // T1（リロード前に統合済み）の成果がワークスペースへ届く。マニフェストが
+        // 復元されていなければ（空マニフェストのままなら）a.txtは反映されない
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 20, mtimeMs: 200 });
+        const snapshot = reloadedRunner.getSnapshot(runId);
+        expect(
+          snapshot?.warnings.some((w) => w.kind === 'pseudoWorktreeReflectBlocked'),
+        ).toBe(false);
+      },
+    );
+
+    it(
+      '永続化されたマニフェストが壊れていて復元できない場合、' +
+        '黙って0件成功にせず反映を止めて警告を出す（受入基準）',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start(
+          '/repo/.agents/workflows/pseudo-reload-corrupt.yaml',
+          '/repo',
+        );
+        const runId = result.runId as string;
+        await flush();
+
+        const t1 = codexHost.byTaskId('T1');
+        const cloneDir1 = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+        fs.setFile(path.join(cloneDir1, 'a.txt'), { size: 20, mtimeMs: 200 });
+        t1.finish('done', doneState('ok'));
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+
+        // 永続化されたマニフェストのファイルが壊れている状況を再現する（ディスク破損等）
+        const manifestPath = path.join('/repo', '.agents', 'worktrees', runId, 'manifest.json');
+        fs.textFiles.set(manifestPath, 'not valid json{{{');
+
+        const newCodexHost = new FakeHost();
+        const reloadedRunner = new WorkflowRunner({
+          hosts: { codex: newCodexHost, claude: newCodexHost },
+          worktreeQueue: new WorktreeCreationQueue(),
+          git: fakeGit({ notGitRepo: true }),
+          fs: identityFs,
+          filePort: filePort(TWO_TASK_YAML),
+          store,
+          pseudoWorktree: { fs, exclude: [] },
+          log: fakeLogger,
+          readBaseline: () => ({
+            codexSandbox: 'read-only',
+            codexApprovalMode: 'on-request',
+            claudePermissionMode: 'manual',
+            allowAutoApprove: true,
+            allowClaudeBypassPermissions: false,
+          }),
+        });
+        await reloadedRunner.restoreRunsForView();
+
+        expect(reloadedRunner.retryTask(runId, 'T2')).toEqual({ ok: true });
+        await flush();
+        const t2 = newCodexHost.byTaskId('T2');
+        t2.finish('done', doneState('ok'));
+        await flush();
+
+        // 反映が止まり、ワークスペース側はリロード前のまま（0件成功に見えていない）
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 10, mtimeMs: 100 });
+        const snapshot = reloadedRunner.getSnapshot(runId);
+        const warning = snapshot?.warnings.find((w) => w.kind === 'pseudoWorktreeReflectBlocked');
+        expect(warning).toBeDefined();
+        expect(warning?.message).toContain('復元できなかった');
+      },
+    );
   });
 });
 
