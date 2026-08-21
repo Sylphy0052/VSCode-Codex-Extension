@@ -458,6 +458,12 @@ const fakeForgeFs: ForgeFileSystemPort = {
 class FakePseudoFs implements PseudoWorktreeFileSystemPort {
   readonly files = new Map<string, PseudoWorktreeFileStat>();
   readonly dirs = new Set<string>();
+  /**
+   * Issue #364の回帰テスト用。`nodePseudoWorktreeFileSystem`の`mkdir`/`copyFile`/`removeFile`は
+   * 他のポートメソッドと違いEACCES/ENOSPC等をそのままthrowする実装のため、そのふるまいを
+   * フェイクでも再現できるようにする（既定はthrowしない。既存テストへの影響を避けるため）。
+   */
+  failWith: Error | undefined;
 
   constructor(seedFiles: Record<string, PseudoWorktreeFileStat> = {}) {
     for (const [p, meta] of Object.entries(seedFiles)) {
@@ -507,16 +513,25 @@ class FakePseudoFs implements PseudoWorktreeFileSystemPort {
     return target;
   }
   async mkdir(target: string): Promise<void> {
+    if (this.failWith !== undefined) {
+      throw this.failWith;
+    }
     this.dirs.add(target);
     this.ensureDirsFor(target);
   }
   async copyFile(from: string, to: string): Promise<void> {
+    if (this.failWith !== undefined) {
+      throw this.failWith;
+    }
     const meta = this.files.get(from);
     if (meta !== undefined) {
       this.setFile(to, meta);
     }
   }
   async removeFile(target: string): Promise<void> {
+    if (this.failWith !== undefined) {
+      throw this.failWith;
+    }
     this.files.delete(target);
   }
   async removeDirRecursive(target: string): Promise<void> {
@@ -647,11 +662,13 @@ function createHarness(
     forge?: WorkflowRunnerForgeDeps;
     pseudoWorktree?: { fs: PseudoWorktreeFileSystemPort; exclude: readonly string[] };
     messaging?: WorkflowRunnerMessagingDeps;
+    memento?: WorkflowRunMemento;
+    log?: Logger;
   },
 ): Harness {
   const codexHost = new FakeHost();
   const claudeHost = new FakeHost();
-  const store = new WorkflowRunStore(fakeMemento());
+  const store = new WorkflowRunStore(options?.memento ?? fakeMemento());
   const hosts: Record<Provider, TaskSessionHost> = { codex: codexHost, claude: claudeHost };
   const git = options?.git ?? fakeGit();
   let seq = 0;
@@ -662,7 +679,7 @@ function createHarness(
     fs: options?.fs ?? identityFs,
     filePort: filePort(yaml),
     store,
-    log: fakeLogger,
+    log: options?.log ?? fakeLogger,
     readBaseline: () => ({
       codexSandbox: options?.codexSandbox ?? 'read-only',
       codexApprovalMode: options?.codexApprovalMode ?? 'on-request',
@@ -3826,6 +3843,138 @@ tasks:
     t1.finish('done', doneState('ok'));
     await flush();
     expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+  });
+
+  it(
+    '疑似worktreeの統合先へのファイルシステム操作が失敗（EACCES等）しても未ハンドルrejectにならず、' +
+      'タスクをmergingのまま残さずfailedへ確定させる（Issue #364）',
+    async () => {
+      const rejectionListener = vi.fn();
+      process.on('unhandledRejection', rejectionListener);
+      try {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-integrate-fail.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const t1 = codexHost.byTaskId('T1');
+        const cloneDir = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+        // 統合先へコピーする対象を1件作っておく。統合（`applyDiffToIntegration`の
+        // `fs.mkdir`/`fs.copyFile`）がここでEACCES相当のエラーを投げるようにする
+        fs.setFile(path.join(cloneDir, 'b.txt'), { size: 5, mtimeMs: 50 });
+        fs.failWith = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+
+        t1.finish('done', doneState('ok'));
+        await flush();
+
+        // `merging`のまま残らず、`failed`として確定する
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+      } finally {
+        process.off('unhandledRejection', rejectionListener);
+      }
+      // `void integratePseudoWorktree(...)`（呼び出し元）から見て未ハンドルrejectが
+      // 発生していない
+      expect(rejectionListener).not.toHaveBeenCalled();
+    },
+  );
+
+  it(
+    'run終了時のワークスペースへの反映（reflectPseudoWorktree）がファイルシステムエラーで失敗しても、' +
+      '未ハンドルrejectにならず警告として記録する（Issue #364）',
+    async () => {
+      const rejectionListener = vi.fn();
+      process.on('unhandledRejection', rejectionListener);
+      try {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-reflect-fail.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const t1 = codexHost.byTaskId('T1');
+        const cloneDir = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+        fs.setFile(path.join(cloneDir, 'a.txt'), { size: 20, mtimeMs: 200 });
+
+        // 統合（integratePseudoWorktree）自体は正常に終わらせ、run終了時の反映
+        // （reflectPseudoWorktree → reflectIntegrationToWorkspace）だけを失敗させたいため、
+        // タスク完了直後（統合の直後・反映の直前）でfailWithを立てる
+        const originalCopyFile = fs.copyFile.bind(fs);
+        let copyCount = 0;
+        fs.copyFile = async (from: string, to: string): Promise<void> => {
+          copyCount += 1;
+          // 1回目は統合先（_integration）へのコピー（integratePseudoWorktree経由）、
+          // 2回目以降がワークスペースへの反映（reflectPseudoWorktree経由）
+          if (copyCount >= 2) {
+            throw Object.assign(new Error('ENOSPC: no space left on device'), {
+              code: 'ENOSPC',
+            });
+          }
+          await originalCopyFile(from, to);
+        };
+
+        t1.finish('done', doneState('ok'));
+        await flush();
+
+        // 統合（マージ）自体はdoneのまま確定する。失敗したのは反映だけ
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+        // ワークスペース側は反映されずに元のまま（反映がエラーで中断したため）
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 10, mtimeMs: 100 });
+        const snapshot = runner.getSnapshot(runId);
+        expect(
+          snapshot?.warnings.some((w) => w.kind === 'pseudoWorktreeReflectBlocked'),
+        ).toBe(true);
+      } finally {
+        process.off('unhandledRejection', rejectionListener);
+      }
+      expect(rejectionListener).not.toHaveBeenCalled();
+    },
+  );
+
+  it('persist（実行状態の永続化）がmemento.updateの失敗時に未ハンドルrejectにならず、ログへ記録する（Issue #364）', async () => {
+    const rejectionListener = vi.fn();
+    process.on('unhandledRejection', rejectionListener);
+    const errorLog = vi.fn();
+    try {
+      const git = fakeGit({ notGitRepo: true });
+      const fs = new FakePseudoFs();
+      const failingMemento: WorkflowRunMemento = {
+        get<T>(key: string, defaultValue: T): T {
+          return defaultValue;
+        },
+        update(): Thenable<void> {
+          return Promise.reject(new Error('workspaceStateへの書き込みに失敗しました'));
+        },
+      };
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        pseudoWorktree: { fs, exclude: [] },
+        memento: failingMemento,
+        log: { ...fakeLogger, error: errorLog },
+      });
+      const result = await runner.start('/repo/.agents/workflows/persist-fail.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // runは（永続化に失敗しても）そのまま完了として扱われる。永続化の失敗はログへ落ちる
+      expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe('done');
+      expect(errorLog).toHaveBeenCalledWith(expect.stringContaining('実行状態の永続化に失敗しました'));
+    } finally {
+      process.off('unhandledRejection', rejectionListener);
+    }
+    expect(rejectionListener).not.toHaveBeenCalled();
   });
 });
 

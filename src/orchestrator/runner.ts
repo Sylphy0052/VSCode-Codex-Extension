@@ -2320,7 +2320,9 @@ export class WorkflowRunner {
           if (!ready.ok) {
             // ready化の失敗はワークフローを止めない（design.md §16.18「5の失敗はワークフローを
             // 止めない」）。以降の最終マージはそのまま試みる
-            this.deps.log.warn(`[workflow ${runId}] 統合PR/MRのready化に失敗しました: ${ready.message}`);
+            this.deps.log.warn(
+              `[workflow ${runId}] 統合PR/MRのready化に失敗しました: ${ready.message}`,
+            );
             live.warnings.push({
               kind: 'forgeFailed',
               taskId: undefined,
@@ -2568,47 +2570,60 @@ export class WorkflowRunner {
       return;
     }
     const outcome = getRunOutcome(live.runState);
-    await this.deps.store.update(runId, (current) => {
-      const tasks: Record<string, PersistedTaskState> = {};
-      for (const [id, s] of live.runState.tasks) {
-        const liveTask = live.tasks.get(id);
-        tasks[id] = {
-          state: s.state,
-          sessionId: s.sessionId,
-          cwd: s.cwd,
-          // liveTaskはこのウィンドウでまだセッションを開いていないタスク（リロード直後で
-          // 復元しただけの実行に多い）では undefined になる。その場合は前回persistした値を
-          // 引き継ぐ（`current`）。素通しで`undefined`を書くと、既にdone/failed/skipped
-          // 確定済みのタスクのbranchがリロード後の初回persistで失われてしまう
-          branch: liveTask?.branch ?? current?.tasks[id]?.branch,
-          submissionCount: s.submissionCount,
-          retryCount: s.retryCount,
-          manualRetryCount: s.manualRetryCount,
-          failure: s.failure,
-          // design.md §16.11「タスクごとの...PR/MRの番号」・Issue #118。branchと同じ理由で
-          // liveTaskが無ければ前回persistした値を引き継ぐ
-          pullRequestNumber: liveTask?.pullRequest?.number ?? current?.tasks[id]?.pullRequestNumber,
-          pullRequestUrl: liveTask?.pullRequest?.url ?? current?.tasks[id]?.pullRequestUrl,
+    try {
+      await this.deps.store.update(runId, (current) => {
+        const tasks: Record<string, PersistedTaskState> = {};
+        for (const [id, s] of live.runState.tasks) {
+          const liveTask = live.tasks.get(id);
+          tasks[id] = {
+            state: s.state,
+            sessionId: s.sessionId,
+            cwd: s.cwd,
+            // liveTaskはこのウィンドウでまだセッションを開いていないタスク（リロード直後で
+            // 復元しただけの実行に多い）では undefined になる。その場合は前回persistした値を
+            // 引き継ぐ（`current`）。素通しで`undefined`を書くと、既にdone/failed/skipped
+            // 確定済みのタスクのbranchがリロード後の初回persistで失われてしまう
+            branch: liveTask?.branch ?? current?.tasks[id]?.branch,
+            submissionCount: s.submissionCount,
+            retryCount: s.retryCount,
+            manualRetryCount: s.manualRetryCount,
+            failure: s.failure,
+            // design.md §16.11「タスクごとの...PR/MRの番号」・Issue #118。branchと同じ理由で
+            // liveTaskが無ければ前回persistした値を引き継ぐ
+            pullRequestNumber:
+              liveTask?.pullRequest?.number ?? current?.tasks[id]?.pullRequestNumber,
+            pullRequestUrl: liveTask?.pullRequest?.url ?? current?.tasks[id]?.pullRequestUrl,
+          };
+        }
+        return {
+          runId,
+          defPath: live.defPath,
+          workspaceRoot: live.repoRoot,
+          startedAt: current?.startedAt ?? live.startedAt,
+          finishedAt:
+            outcome === 'running' ? undefined : (current?.finishedAt ?? new Date().toISOString()),
+          tasks,
+          haltedByUser: live.runState.haltedByUser,
+          integrationBranch: live.integration?.branch ?? current?.integrationBranch ?? '',
+          // design.md §16.11「統合PR/MRの番号」・Issue #118。同じく前回persistした値を引き継ぐ
+          integrationPullRequestNumber:
+            live.integrationPullRequest?.number ?? current?.integrationPullRequestNumber,
+          integrationPullRequestUrl:
+            live.integrationPullRequest?.url ?? current?.integrationPullRequestUrl,
+          finalMergeOutcome: live.finalMergeOutcome ?? current?.finalMergeOutcome,
         };
-      }
-      return {
-        runId,
-        defPath: live.defPath,
-        workspaceRoot: live.repoRoot,
-        startedAt: current?.startedAt ?? live.startedAt,
-        finishedAt:
-          outcome === 'running' ? undefined : (current?.finishedAt ?? new Date().toISOString()),
-        tasks,
-        haltedByUser: live.runState.haltedByUser,
-        integrationBranch: live.integration?.branch ?? current?.integrationBranch ?? '',
-        // design.md §16.11「統合PR/MRの番号」・Issue #118。同じく前回persistした値を引き継ぐ
-        integrationPullRequestNumber:
-          live.integrationPullRequest?.number ?? current?.integrationPullRequestNumber,
-        integrationPullRequestUrl:
-          live.integrationPullRequest?.url ?? current?.integrationPullRequestUrl,
-        finalMergeOutcome: live.finalMergeOutcome ?? current?.finalMergeOutcome,
-      };
-    });
+      });
+    } catch (e) {
+      // `store.update`は`WorkflowRunStore`内の`SerialQueue`を経由する。`SerialQueue.enqueue`は
+      // `this.tail`を必ずresolved側へ戻すため、`memento.update`（`vscode.Memento.update`）が
+      // 失敗しても止まるのはその呼び出し自身が返すPromiseだけで、後続のenqueueは影響を
+      // 受けない。ただしその失敗したPromiseを呼び出し元（`void this.persist(runId)`。
+      // runner.ts内に多数）でcatchしていないと未ハンドルrejectになるため、ここで受け止める
+      // （Issue #364。実行状態の永続化に失敗しただけで、実行中のrun自体は継続できるため
+      // 状態遷移は変えない）
+      const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+      this.deps.log.error(`[workflow ${runId}] 実行状態の永続化に失敗しました: ${message}`);
+    }
   }
 }
 

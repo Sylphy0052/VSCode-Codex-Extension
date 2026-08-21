@@ -9,9 +9,10 @@ import {
   IntegrationQueue as PseudoWorktreeIntegrationQueue,
   type Snapshot,
 } from './pseudoWorktree';
-import { markMergeBlocked, markMergeSucceeded } from './runState';
+import { markMergeBlocked, markMergeFailed, markMergeSucceeded } from './runState';
 import { issue, type LiveRun, type LiveTask } from './runner';
 import type { WorkflowRunnerInternals } from './runnerInternals';
+import { sanitizeForLog } from './sanitize';
 import { buildTaskBoundary, decideWorkingDirectory } from './worktree';
 import type { WorkflowDefinition, WorkflowIssue, WorkflowTask } from './workflow';
 
@@ -190,9 +191,7 @@ async function resolveWorktreeWorkingDirectory(
   // 統合worktreeが無い（gitRepoでない）ケースは`decideWorkingDirectory`が`shared`/
   // `sharedFallback`/`error`のいずれかへ倒すため、ここへは来ない
   if (live.integration === undefined) {
-    throw new Error(
-      '内部矛盾: 統合worktreeが無い状態でworktree隔離のタスクを開始しようとしました',
-    );
+    throw new Error('内部矛盾: 統合worktreeが無い状態でworktree隔離のタスクを開始しようとしました');
   }
   const originCommit = await resolveTaskBranchOrigin(live.repoRoot, live.runId, self.deps.git);
   if (originCommit === undefined) {
@@ -282,29 +281,42 @@ export async function integratePseudoWorktree(
   if (live === undefined || deps === undefined) {
     return;
   }
-  const currentSnapshot = await takeSnapshot(liveTask.cwd, pseudo.exclude, deps.fs);
-  const diff = diffSnapshots(liveTask.pseudoSnapshot ?? new Map(), currentSnapshot);
-  const plan = await pseudo.queue.integrate(
-    taskId,
-    liveTask.cwd,
-    pseudo.integrationDir,
-    diff,
-    deps.fs,
-  );
-
-  if (plan.conflicts.length > 0) {
-    const paths = plan.conflicts.map((c) => c.path).join(', ');
-    self.deps.log.warn(
-      `[workflow ${runId}/${taskId}] 疑似worktreeの統合が衝突しました（3-way mergeができないため）: ${paths}`,
-    );
-    live.warnings.push({
-      kind: 'pseudoWorktreeConflict',
+  try {
+    const currentSnapshot = await takeSnapshot(liveTask.cwd, pseudo.exclude, deps.fs);
+    const diff = diffSnapshots(liveTask.pseudoSnapshot ?? new Map(), currentSnapshot);
+    const plan = await pseudo.queue.integrate(
       taskId,
-      message: `疑似worktreeの統合が衝突しました: ${paths}`,
-    });
-    live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
-  } else {
-    live.runState = markMergeSucceeded(live.runState, live.def.tasks, taskId);
+      liveTask.cwd,
+      pseudo.integrationDir,
+      diff,
+      deps.fs,
+    );
+
+    if (plan.conflicts.length > 0) {
+      const paths = plan.conflicts.map((c) => c.path).join(', ');
+      self.deps.log.warn(
+        `[workflow ${runId}/${taskId}] 疑似worktreeの統合が衝突しました（3-way mergeができないため）: ${paths}`,
+      );
+      live.warnings.push({
+        kind: 'pseudoWorktreeConflict',
+        taskId,
+        message: `疑似worktreeの統合が衝突しました: ${paths}`,
+      });
+      live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
+    } else {
+      live.runState = markMergeSucceeded(live.runState, live.def.tasks, taskId);
+    }
+  } catch (e) {
+    // `pseudoWorktree.ts`のポートメソッド（`fs.mkdir`/`fs.copyFile`等）はEACCES/ENOSPC等を
+    // 素通しでthrowする（他のポートメソッドと違いcatchしない実装）。ここで受け止めないと
+    // `void integratePseudoWorktree(...)`（呼び出し元）が未ハンドルrejectになり、タスクが
+    // `merging`のまま永久に枠を占有する（Issue #364）。gitの`attemptMerge`が
+    // その他の失敗を`markMergeFailed`に落とすのと同じ扱いにする
+    const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+    self.deps.log.error(
+      `[workflow ${runId}/${taskId}] 疑似worktreeの統合に失敗しました: ${message}`,
+    );
+    live.runState = markMergeFailed(live.runState, live.def.tasks, taskId);
   }
   void self.persist(runId);
   self.notify(runId);
@@ -321,31 +333,50 @@ export async function integratePseudoWorktree(
  * 反映前にワークスペース側の変更を検知したら、反映せず警告を残す
  * （design.md「人の編集を上書きしない」。`reflectIntegrationToWorkspace`自身が判定する）。
  */
-export async function reflectPseudoWorktree(self: WorkflowRunnerInternals, runId: string): Promise<void> {
+export async function reflectPseudoWorktree(
+  self: WorkflowRunnerInternals,
+  runId: string,
+): Promise<void> {
   const live = self.runs.get(runId);
   const deps = self.deps.pseudoWorktree;
   if (live === undefined || live.pseudo === undefined || deps === undefined) {
     return;
   }
-  const result = await reflectIntegrationToWorkspace(
-    live.repoRoot,
-    live.pseudo.integrationDir,
-    live.pseudo.baseline,
-    live.pseudo.queue.getManifest(),
-    live.pseudo.exclude,
-    deps.fs,
-  );
-  if (!result.ok) {
-    self.deps.log.warn(`[workflow ${runId}] ${result.message}`);
+  try {
+    const result = await reflectIntegrationToWorkspace(
+      live.repoRoot,
+      live.pseudo.integrationDir,
+      live.pseudo.baseline,
+      live.pseudo.queue.getManifest(),
+      live.pseudo.exclude,
+      deps.fs,
+    );
+    if (!result.ok) {
+      self.deps.log.warn(`[workflow ${runId}] ${result.message}`);
+      live.warnings.push({
+        kind: 'pseudoWorktreeReflectBlocked',
+        taskId: undefined,
+        message: `${result.message}（変更されたパス: ${result.changedPaths.join(', ')}）`,
+      });
+    } else {
+      self.deps.log.info(
+        `[workflow ${runId}] 疑似worktreeの統合結果をワークスペースへ反映しました（${result.appliedPaths.length}件）`,
+      );
+    }
+  } catch (e) {
+    // `reflectIntegrationToWorkspace`が呼ぶ`fs.copyFile`/`fs.removeFile`もEACCES/ENOSPC等を
+    // 素通しでthrowしうる。ここはrun終了処理の途中（`pump()`から呼ばれる）で、ここで
+    // 例外を投げ直すとその後の後始末が中断してしまうため、警告としてログ・`live.warnings`へ
+    // 記録するだけに留める（Issue #364）
+    const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+    self.deps.log.warn(
+      `[workflow ${runId}] 疑似worktreeの統合結果のワークスペースへの反映に失敗しました: ${message}`,
+    );
     live.warnings.push({
       kind: 'pseudoWorktreeReflectBlocked',
       taskId: undefined,
-      message: `${result.message}（変更されたパス: ${result.changedPaths.join(', ')}）`,
+      message: `疑似worktreeの統合結果のワークスペースへの反映に失敗しました: ${message}`,
     });
-  } else {
-    self.deps.log.info(
-      `[workflow ${runId}] 疑似worktreeの統合結果をワークスペースへ反映しました（${result.appliedPaths.length}件）`,
-    );
   }
   self.notify(runId);
 }
