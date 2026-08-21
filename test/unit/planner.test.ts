@@ -957,6 +957,40 @@ describe('slugifyGoal: ゴール文のパスを縮める（issue #328）', () =>
 });
 
 /**
+ * `stripPathLikeTokens` の正規表現 `PATH_LIKE_TOKEN` は
+ * `(?:[A-Za-z0-9._-]+[\\/])+` というネストした可変長量指定子の繰り返しを持つ。
+ * 拡張子（末尾の `\.[A-Za-z0-9]{1,8}`）にマッチしない入力を与えると、区切りの
+ * 分け方をすべて試すバックトラッキングが発生し、入力長に対して二次以上の時間が
+ * かかる（ReDoS。issue #416）。`'a/'.repeat(n) + 'a'` で実測すると
+ * n=20000（入力長約40000）で約9.7秒かかっていた。
+ */
+describe('slugifyGoal: 長い入力でのReDoS対策（issue #416）', () => {
+  it('拡張子にマッチしない長い入力でも一定時間内に終わる', () => {
+    // CIマシンの性能差を吸収するため十分な余裕（1秒）を持たせた閾値。
+    // 対策前はn=2000（入力長約4000）でも実測400ms前後かかっており、
+    // n=20000（入力長約40000）では約9.7秒かかっていた。
+    const REDOS_TIME_LIMIT_MS = 1000;
+    const worstCaseInput = 'a/'.repeat(20000) + 'a';
+
+    const start = Date.now();
+    const result = slugifyGoal(worstCaseInput);
+    const elapsedMs = Date.now() - start;
+
+    expect(elapsedMs).toBeLessThan(REDOS_TIME_LIMIT_MS);
+    // 例外を投げず、意味のあるslugを返すこと。
+    expect(result.length).toBeGreaterThan(0);
+  });
+
+  it('上限を超える長さの入力でも例外を投げず、意味のあるslugを返す', () => {
+    const longGoal = `${'x'.repeat(2000)}を実行する`;
+    expect(() => slugifyGoal(longGoal)).not.toThrow();
+    const result = slugifyGoal(longGoal);
+    expect(result.length).toBeGreaterThan(0);
+    expect(result.length).toBeLessThanOrEqual(40);
+  });
+});
+
+/**
  * `slugifyGoal` の既定値は利用者が入力欄で編集できる（`extension.ts`）。編集後の値が
  * 出力先の外を指したり、ファイル名として使えない形になっていないかを入口で弾く。
  */

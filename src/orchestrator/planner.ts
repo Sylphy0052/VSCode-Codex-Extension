@@ -598,6 +598,24 @@ const PATH_LIKE_TOKEN = /(?:[A-Za-z0-9._-]+[\\/])+([A-Za-z0-9._-]+)\.[A-Za-z0-9]
 const WINDOWS_RESERVED_FILENAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 const SLUG_MAX_LENGTH = 40;
 /**
+ * `PATH_LIKE_TOKEN` を実行する対象の先頭からの文字数上限（issue #416）。
+ *
+ * `(?:[A-Za-z0-9._-]+[\\/])+` はネストした可変長量指定子の繰り返しになっており、
+ * 拡張子（末尾の `\.[A-Za-z0-9]{1,8}`）にマッチしない入力を与えると、区切りの
+ * 分け方をすべて試すバックトラッキングが発生して入力長に対し二次以上の時間が
+ * かかる（実測: `'a/'.repeat(n) + 'a'` でn=20000＝入力長約40000のときこの環境で
+ * 約2.9秒）。`slugifyGoal` はこの前処理の後、結果を最終的に`SLUG_MAX_LENGTH`
+ * （40文字）へ切り詰めるため、入力の先頭のごく一部しか結果に影響しえない。
+ * そこで正規表現の実行範囲を先頭からこの文字数までに絞り、残りはパス縮小を
+ * 行わずそのまま繋ぐ（縮小されないぶん記号が残ることはあっても、情報を
+ * 捨てたり例外を投げたりはしない）。
+ *
+ * 値は`SLUG_MAX_LENGTH`（40）に対して十分な余裕（25倍）を持たせつつ、この
+ * 上限ちょうどの長さの最悪ケース入力でも数ミリ秒に収まるよう選んだ
+ * （実測: 長さ1000文字の最悪ケースで約2ms）。
+ */
+const PATH_LIKE_TOKEN_SCAN_LIMIT = 1000;
+/**
  * 人が入力欄で付けられる名前の上限（`validateSlugInput`）。自動生成の `SLUG_MAX_LENGTH`
  * より緩い。機械的に切り詰めた既定値と違い、人が意図して付けた名前は途中で切りたくない。
  */
@@ -620,7 +638,12 @@ const SLUG_INPUT_MAX_LENGTH = 80;
  * この向きの依存なら循環しない）。
  */
 export function stripPathLikeTokens(goal: string): string {
-  return goal.replace(PATH_LIKE_TOKEN, (_match, base: string) => base);
+  if (goal.length <= PATH_LIKE_TOKEN_SCAN_LIMIT) {
+    return goal.replace(PATH_LIKE_TOKEN, (_match, base: string) => base);
+  }
+  const head = goal.slice(0, PATH_LIKE_TOKEN_SCAN_LIMIT);
+  const tail = goal.slice(PATH_LIKE_TOKEN_SCAN_LIMIT);
+  return head.replace(PATH_LIKE_TOKEN, (_match, base: string) => base) + tail;
 }
 
 /**
