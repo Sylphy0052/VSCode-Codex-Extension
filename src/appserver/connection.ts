@@ -51,6 +51,13 @@ export class AppServerConnection {
   private nextId = 1;
   private readonly pending = new Map<number, (message: JsonRpcMessage) => void>();
   private starting: Promise<void> | undefined;
+  /**
+   * `reset()`が後始末すべき状態を持っているか（issue #354のレビュー指摘・LOW）。
+   *
+   * `proc`/`starting`/`pending`の3フィールドから推測するより、`start()`で明示的に
+   * 立てて`reset()`で明示的に倒すほうが、将来経路が増えても壊れにくい。
+   */
+  private connected = false;
 
   constructor(
     private readonly codexPath: () => string,
@@ -79,6 +86,7 @@ export class AppServerConnection {
   private async start(): Promise<void> {
     const proc = spawn(this.codexPath(), ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'] });
     this.proc = proc;
+    this.connected = true;
 
     // `proc.on('error')`は起動失敗しか拾わない。起動後に相手が終了した状態へ書き込むと
     // 飛ぶEPIPE等はここで捕まえないとNodeの未捕捉例外になる（issue #155、design.md §14.31）。
@@ -201,9 +209,10 @@ export class AppServerConnection {
    * 呼ばれうるため、既に後始末済みなら何もしない（二重発火防止。自己レビュー参照）。
    */
   private reset(): void {
-    if (this.proc === undefined && this.starting === undefined && this.pending.size === 0) {
+    if (!this.connected) {
       return;
     }
+    this.connected = false;
     this.proc = undefined;
     this.starting = undefined;
     this.buffer = '';
@@ -211,7 +220,14 @@ export class AppServerConnection {
       resolve({ error: { code: -1, message: 'app-serverとの接続が切れました' } });
     }
     this.pending.clear();
-    this.onDisconnect();
+    // `onDisconnect`は呼び出し側（`ChatViewManager`等）が用意したコールバック。ここは
+    // `proc`の`exit`ハンドラから同期的に呼ばれるため、投げられた例外を捕まえ損ねると
+    // Nodeの未捕捉例外になる（呼び出し側でも個別にtry/catchしているが、二重の安全策）。
+    try {
+      this.onDisconnect();
+    } catch (e) {
+      this.log.error(`接続断の通知処理に失敗しました: ${errorMessage(e)}`);
+    }
   }
 
   dispose(): void {

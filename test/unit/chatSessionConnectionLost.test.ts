@@ -55,9 +55,10 @@ describe('接続断で保留中の承認・問い合わせを解放する（issu
 
     session.releasePendingApprovals();
 
-    // decide(id, 'cancel')と同じ形（buildApprovalResponse）で解決される。
-    // ハングせず解決されること自体が受入基準（値の形は`decide`側で検証済み）
-    await expect(responded).resolves.toBeDefined();
+    // 受入基準: 接続断で「承認された」扱いになってはいけない。decide(id, 'cancel')と
+    // 同じ拒否側の値（{ decision: 'cancel' }）で解決されることを実際の値で確かめる
+    // （`.resolves.toBeDefined()`だけだと、acceptを返すよう壊れても検知できない）
+    await expect(responded).resolves.toEqual({ decision: 'cancel' });
   });
 
   it('問い合わせフォームの応答Promiseも接続断で解決される', async () => {
@@ -72,7 +73,9 @@ describe('接続断で保留中の承認・問い合わせを解放する（issu
 
     session.releasePendingApprovals();
 
-    await expect(responded).resolves.toBeDefined();
+    // cancel（`{ action: 'cancel', values: {} }`）と同じ扱いで解決される。
+    // userInputは常に`{ answers }`の形で、未提出の項目は空配列になる（`buildPromptResponse`）
+    await expect(responded).resolves.toEqual({ answers: { q1: { answers: [] } } });
   });
 
   it('複数スレッド分のセッションがあっても、それぞれ独立に解放できる', async () => {
@@ -97,8 +100,9 @@ describe('接続断で保留中の承認・問い合わせを解放する（issu
     a.releasePendingApprovals();
     b.releasePendingApprovals();
 
-    await expect(respondedA).resolves.toBeDefined();
-    await expect(respondedB).resolves.toBeDefined();
+    // どちらも承認された扱いにならず、拒否側の値で解決される
+    await expect(respondedA).resolves.toEqual({ decision: 'cancel' });
+    await expect(respondedB).resolves.toEqual({ decision: 'cancel' });
   });
 
   it('releasePendingApprovals自体は自動レビューの覆し履歴（deniedReviews）を消さない', async () => {
@@ -149,6 +153,6 @@ describe('dispose()でdeniedReviewsも解放する（issue #354・3点目）', (
 
     session.dispose();
 
-    await expect(responded).resolves.toBeDefined();
+    await expect(responded).resolves.toEqual({ decision: 'cancel' });
   });
 });

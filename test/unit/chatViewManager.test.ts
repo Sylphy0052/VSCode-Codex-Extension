@@ -389,6 +389,37 @@ describe('ChatViewManager', () => {
     });
   });
 
+  describe('接続断で保留中の承認を解放する（issue #354）', () => {
+    it('thread/start応答待ち（pendingStarts）に出た承認カードも、接続断で解放される', async () => {
+      const { manager, connection } = createManager();
+
+      // thread/startがまだ応答していない間はpanelsではなくpendingStartsに居る
+      // （design.md §16.10の3）。この状態で届いた承認要求も、接続断で解放されなければ
+      // ならない（レビュー指摘: handleConnectionLostがpanelsだけを見ていた問題の回帰防止）
+      const p1 = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+
+      const responded = connection.serverRequest(1, 'item/commandExecution/requestApproval', {
+        threadId: 'thread-A',
+        itemId: 'i1',
+        command: 'ls',
+        cwd: '/workspace/root/task-a',
+      });
+
+      connection.simulateDisconnect();
+
+      // 承認された扱いにならず、拒否側の値（decide(id, 'cancel')と同じ）で解決される
+      await expect(responded).resolves.toEqual({ decision: 'cancel' });
+
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p1;
+    });
+  });
+
   describe('セッションの寿命をパネルから切り離す（design.md §16.10の4）', () => {
     it('タスク管理下のセッションはタブを閉じてもpanelsに残り、通知が届き続ける', async () => {
       const { manager, connection } = createManager();
