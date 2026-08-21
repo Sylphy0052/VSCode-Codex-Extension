@@ -4,6 +4,8 @@ import {
   cloneWorkspace,
   diffSnapshots,
   ensureIntegrationDir,
+  loadPersistedManifest,
+  persistManifest,
   reflectIntegrationToWorkspace,
   takeSnapshot,
   IntegrationQueue as PseudoWorktreeIntegrationQueue,
@@ -193,27 +195,29 @@ async function resolveWorktreeWorkingDirectory(
   if (live.integration === undefined) {
     throw new Error('内部矛盾: 統合worktreeが無い状態でworktree隔離のタスクを開始しようとしました');
   }
-  const originCommit = await resolveTaskBranchOrigin(live.repoRoot, live.runId, self.deps.git);
-  if (originCommit === undefined) {
-    throw new Error('統合ブランチのHEADコミットを解決できませんでした');
-  }
-
-  const result = await self.deps.worktreeQueue.create(
-    {
+  // HEAD読み取りとworktree作成を同一のキュー項目へまとめる（Issue #380）。分けて
+  // 呼ぶと、両者の間に他タスクのマージが割り込み、分岐元が1マージ分古くなりえる
+  // （`worktreeQueue`は`integration.ts`のマージ処理とも共有されているキューのため）
+  const result = await self.deps.worktreeQueue.createWithOrigin(
+    () => resolveTaskBranchOrigin(live.repoRoot, live.runId, self.deps.git),
+    (headCommit) => ({
       repoRoot: live.repoRoot,
       runId: live.runId,
       taskId: task.id,
-      headCommit: originCommit,
+      headCommit,
       retry,
       // ブランチの命名方式（design.md §16.6「ブランチの命名方式」）。`live.branchNaming`が
       // `wf`、または対応する`issue`が無いタスクは、`branchName`自身の判定により
       // 従来どおり`wf/<runId>/<taskId>`へ落ちる（`BranchNamingOptions`のJSDoc参照）
       branchNaming: { naming: live.branchNaming, type: task.type, issue: task.issue },
-    },
+    }),
     self.deps.git,
     self.deps.fs,
   );
   if (!result.ok) {
+    if (result.reason === 'headUnresolved') {
+      throw new Error(result.message);
+    }
     throw new Error(`worktreeの作成に失敗しました: ${result.message}`);
   }
   return {
@@ -222,7 +226,7 @@ async function resolveWorktreeWorkingDirectory(
     usedWorktree: true,
     usedPseudoWorktree: false,
     pseudoSnapshot: undefined,
-    originCommit,
+    originCommit: result.originCommit,
   };
 }
 
@@ -232,6 +236,12 @@ async function resolveWorktreeWorkingDirectory(
  * gitでないワークスペースでの統合先（`<runId>/_integration`）を用意する
  * （`integration.ts`のgit版と対称の役割）。`WorkflowRunnerDeps.pseudoWorktree`が
  * 渡されていなければ何もせず`state: undefined`を返す（後方互換。上のJSDoc参照）。
+ *
+ * 実行開始時・リロード復元時（`runnerRestore.ts`）の両方から呼ばれる。永続化された
+ * マニフェスト（`<runId>/manifest.json`。Issue #380）を必ず読み戻す。初回実行はまだ
+ * ファイルが無いため空のマニフェストになる（正常系）。ファイルはあるが壊れている場合
+ * だけ`queue`へ復元失敗の理由を持たせ、`reflectPseudoWorktree`側がワークスペースへの
+ * 反映を「0件で成功」にせず明示的に止める判定材料にする。
  */
 export async function resolvePseudoState(
   self: WorkflowRunnerInternals,
@@ -247,11 +257,18 @@ export async function resolvePseudoState(
     return { ok: false, message: ensured.message };
   }
   const baseline = await takeSnapshot(repoRoot, deps.exclude, deps.fs);
+  const loadedManifest = await loadPersistedManifest(repoRoot, runId, deps.fs);
+  if (!loadedManifest.ok) {
+    self.deps.log.warn(`[workflow ${runId}] ${loadedManifest.message}`);
+  }
+  const queue = loadedManifest.ok
+    ? new PseudoWorktreeIntegrationQueue(loadedManifest.manifest)
+    : new PseudoWorktreeIntegrationQueue(new Map(), loadedManifest.message);
   return {
     ok: true,
     state: {
       integrationDir: ensured.dir,
-      queue: new PseudoWorktreeIntegrationQueue(),
+      queue,
       baseline,
       exclude: deps.exclude,
     },
@@ -284,12 +301,32 @@ export async function integratePseudoWorktree(
   try {
     const currentSnapshot = await takeSnapshot(liveTask.cwd, pseudo.exclude, deps.fs);
     const diff = diffSnapshots(liveTask.pseudoSnapshot ?? new Map(), currentSnapshot);
+    // マニフェストの永続化（design.md §16.11の対象。Issue #380）を`queue.integrate`と
+    // 同じ`SerialQueue`項目の中で行う（レビュー指摘: risk）。ここを`await queue.integrate`
+    // の外で呼ぶと、`integrate`自体は直列化されていても書き込み同士には順序保証が無く、
+    // 先に完了したタスクの古いマニフェストの書き込みが、後から完了した別タスクの新しい
+    // 書き込みより後にディスクへ着地して統合済みの成果が消えうる（Issueが防ごうとした
+    // 事象の再発）。書き込み自体の失敗は統合成立とは別の問題のため、独立したtry/catchで
+    // 警告に留め、統合そのものの成否には影響させない（`IntegrationQueue.integrate`の
+    // JSDoc参照）
     const plan = await pseudo.queue.integrate(
       taskId,
       liveTask.cwd,
       pseudo.integrationDir,
       diff,
       deps.fs,
+      async (manifest) => {
+        try {
+          await persistManifest(live.repoRoot, runId, manifest, deps.fs);
+        } catch (persistError) {
+          const message = sanitizeForLog(
+            persistError instanceof Error ? persistError.message : String(persistError),
+          );
+          self.deps.log.warn(
+            `[workflow ${runId}/${taskId}] 疑似worktreeの統合マニフェストの永続化に失敗しました: ${message}`,
+          );
+        }
+      },
     );
 
     if (plan.conflicts.length > 0) {
@@ -332,6 +369,11 @@ export async function integratePseudoWorktree(
  *
  * 反映前にワークスペース側の変更を検知したら、反映せず警告を残す
  * （design.md「人の編集を上書きしない」。`reflectIntegrationToWorkspace`自身が判定する）。
+ *
+ * 永続化されたマニフェストの復元に失敗していた場合（Issue #380）、この時点の
+ * `queue`のマニフェストは実態を反映していない（空、または一部欠けている）可能性がある。
+ * そのまま反映すると「0件で成功」に見えてしまい、統合済みだった成果が黙って消える
+ * （Issueの本題）ため、反映そのものを行わず、その旨を明示的な警告として残す。
  */
 export async function reflectPseudoWorktree(
   self: WorkflowRunnerInternals,
@@ -340,6 +382,16 @@ export async function reflectPseudoWorktree(
   const live = self.runs.get(runId);
   const deps = self.deps.pseudoWorktree;
   if (live === undefined || live.pseudo === undefined || deps === undefined) {
+    return;
+  }
+  const manifestRestoreError = live.pseudo.queue.getManifestRestoreError();
+  if (manifestRestoreError !== undefined) {
+    const message =
+      `疑似worktreeの統合マニフェストを復元できなかったため、ワークスペースへの反映を行いません` +
+      `（黙って0件成功として扱うと、統合済みだった成果が失われたことに気づけないため）: ${manifestRestoreError}`;
+    self.deps.log.warn(`[workflow ${runId}] ${message}`);
+    live.warnings.push({ kind: 'pseudoWorktreeReflectBlocked', taskId: undefined, message });
+    self.notify(runId);
     return;
   }
   try {
@@ -351,12 +403,33 @@ export async function reflectPseudoWorktree(
       live.pseudo.exclude,
       deps.fs,
     );
-    if (!result.ok) {
+    if (!result.ok && result.reason === 'workspaceChanged') {
       self.deps.log.warn(`[workflow ${runId}] ${result.message}`);
       live.warnings.push({
         kind: 'pseudoWorktreeReflectBlocked',
         taskId: undefined,
-        message: `${result.message}（変更されたパス: ${result.changedPaths.join(', ')}）`,
+        message: `${result.message}（変更されたパス: ${formatPathList(result.changedPaths)}）`,
+      });
+    } else if (!result.ok) {
+      // 'partialApply': 途中でI/Oエラーが起き、それ以前のパスだけが適用された状態
+      // （追加の指摘、Issue #380）。適用済み・未適用（失敗した1件＋まだ試みていない残り）の
+      // 双方をパスの持ち主（タスクid）付きで警告に残す。対象タスクの状態自体は`done`の
+      // まま据え置く（統合＝マージ自体は既に成立しているため）が、この警告により
+      // 「doneだが反映は一部しか行われていない」という不整合を人が把握できるようにする
+      const manifest = live.pseudo.queue.getManifest();
+      const describe = (p: string): string => {
+        const owner = manifest.get(p)?.taskId;
+        return owner !== undefined ? `${p}(${owner})` : p;
+      };
+      const unresolvedPaths = [result.failedPath, ...result.remainingPaths];
+      const detail =
+        `（適用済み: ${formatPathList(result.appliedPaths.map(describe))}` +
+        ` / 未適用: ${formatPathList(unresolvedPaths.map(describe))}）`;
+      self.deps.log.warn(`[workflow ${runId}] ${result.message}${detail}`);
+      live.warnings.push({
+        kind: 'pseudoWorktreeReflectBlocked',
+        taskId: undefined,
+        message: `${result.message}${detail}`,
       });
     } else {
       self.deps.log.info(
@@ -379,6 +452,29 @@ export async function reflectPseudoWorktree(
     });
   }
   self.notify(runId);
+}
+
+/**
+ * 警告メッセージ内のパス一覧が無制限に肥大化しないよう、先頭N件と残り件数の省略表示へ
+ * 丸める（レビュー指摘: risk）。Issue #372で`orchestratorPromptOverride`を直近1件へ
+ * 丸めた判断、`workflow.ts`の`truncateByCodePoint`が文字列長で同種の問題に対処した
+ * 判断と同じ理由（エントリ数が多い実行で`live.warnings`とログ行が際限なく伸びるため）。
+ *
+ * 20件は経験値: 反映失敗で人が実際に見て把握したいのは典型的には数件〜十数件程度で、
+ * それを大きく超える表示はログの可読性を落とすだけになる。
+ */
+const MAX_LISTED_REFLECT_PATHS = 20;
+
+/** テスト（`test/unit/runner.test.ts`）のためだけにexportする（レビュー指摘: risk、Issue #380）。 */
+export function formatPathList(paths: readonly string[]): string {
+  if (paths.length === 0) {
+    return 'なし';
+  }
+  if (paths.length <= MAX_LISTED_REFLECT_PATHS) {
+    return paths.join(', ');
+  }
+  const shown = paths.slice(0, MAX_LISTED_REFLECT_PATHS).join(', ');
+  return `${shown}, ...ほか${paths.length - MAX_LISTED_REFLECT_PATHS}件`;
 }
 
 export async function buildBoundary(
