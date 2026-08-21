@@ -1,5 +1,3 @@
-import { EventEmitter } from 'node:events';
-import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Logger } from '../../src/log';
 
@@ -18,46 +16,8 @@ vi.mock('node:child_process', () => ({
 
 // `vi.mock`はホイストされるため、この静的importは差し替え後の`spawn`を使う
 import { AppServerConnection } from '../../src/appserver/connection';
-import { MAX_LINE_BUFFER_BYTES } from '../../src/codex/jsonRpc';
-
-interface FakeChildProcess {
-  proc: ChildProcessWithoutNullStreams;
-  kill: ReturnType<typeof vi.fn>;
-  writes: string[];
-  emitStdout: (line: string) => void;
-  emitExit: (code: number | null) => void;
-}
-
-function fakeChildProcess(): FakeChildProcess {
-  const emitter = new EventEmitter();
-  const writes: string[] = [];
-  const stdin = Object.assign(new EventEmitter(), {
-    destroyed: false,
-    writable: true,
-    write: (chunk: string) => {
-      writes.push(chunk);
-      return true;
-    },
-  });
-  const stdout = new EventEmitter();
-  const stderr = new EventEmitter();
-  const kill = vi.fn();
-  const proc = Object.assign(emitter, {
-    stdin,
-    stdout,
-    stderr,
-    kill,
-    killed: false,
-  }) as unknown as ChildProcessWithoutNullStreams;
-
-  return {
-    proc,
-    kill,
-    writes,
-    emitStdout: (line: string) => stdout.emit('data', Buffer.from(`${line}\n`)),
-    emitExit: (code: number | null) => emitter.emit('exit', code),
-  };
-}
+import { MAX_LINE_BUFFER_BYTES } from '../../src/process/childProcess';
+import { createFakeChildProcess as fakeChildProcess } from '../helpers/fakeChildProcess';
 
 function fakeLogger(): Logger {
   return {
@@ -319,5 +279,59 @@ describe('AppServerConnection: 通常起動後の接続断（issue #354・2点�
 
     proc.emitExit(1);
     expect(onDisconnect).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('AppServerConnection: 古い世代のプロセスからの通知を捨てる（issue #419、CRITICAL）', () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it('overflowでreset()した後、新しい接続が繋がってから古いprocのexitが遅れて届いても、新しい接続を落とさない', async () => {
+    const proc1 = fakeChildProcess();
+    const proc2 = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(proc1.proc).mockReturnValueOnce(proc2.proc);
+    const onDisconnect = vi.fn();
+    const connection = new AppServerConnection(
+      () => 'codex',
+      fakeLogger(),
+      () => undefined,
+      async () => undefined,
+      onDisconnect,
+    );
+
+    // proc1で起動し、上限超過でreset()させる（issue #402と同じ経路で古い世代を作る）
+    const started = connection.ensureStarted();
+    const initId1 = initializeRequestId(proc1.writes);
+    proc1.emitStdout(JSON.stringify({ jsonrpc: '2.0', id: initId1, result: {} }));
+    await started;
+    proc1.proc.stdout.emit('data', Buffer.from('x'.repeat(MAX_LINE_BUFFER_BYTES + 1)));
+    expect(onDisconnect).toHaveBeenCalledTimes(1);
+
+    // 新しいプロセス（proc2）で繋ぎ直す
+    const second = connection.ensureStarted();
+    const initId2 = initializeRequestId(proc2.writes);
+    proc2.emitStdout(JSON.stringify({ jsonrpc: '2.0', id: initId2, result: {} }));
+    await second;
+
+    // 新しい接続（proc2）越しに要求を出す。まだ応答は届いていない状態にしておく
+    const pending = connection.request('thread/fork', { threadId: 'a', lastTurnId: 'b' });
+    const forkId = (JSON.parse(proc2.writes.at(-1)!.trim()) as { id: number }).id;
+
+    // 修正前は、古い世代（proc1）のexitが遅れて届くと`connected`だけを見て素通りし、
+    // 新しい接続（proc2）を巻き込んでreset()してしまっていた（onDisconnectの二重発火、
+    // proc2越しのpendingが「app-serverとの接続が切れました」で誤って棄却される）
+    proc1.emitExit(null);
+
+    // 古い世代からの通知は捨てられるため、onDisconnectは増えない
+    expect(onDisconnect).toHaveBeenCalledTimes(1);
+
+    // proc2越しのpendingも誤って棄却されておらず、実際の応答で正常に解決される
+    proc2.emitStdout(JSON.stringify({ jsonrpc: '2.0', id: forkId, result: { ok: true } }));
+    await expect(pending).resolves.toEqual({
+      jsonrpc: '2.0',
+      id: forkId,
+      result: { ok: true },
+    });
   });
 });

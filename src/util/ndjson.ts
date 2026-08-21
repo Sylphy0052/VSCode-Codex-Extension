@@ -1,3 +1,5 @@
+import { MAX_LINE_BUFFER_BYTES } from '../process/childProcess';
+
 export interface NdjsonResult<T> {
   values: T[];
   /** 次のチャンクと連結するために残す、行として完成していない部分。 */
@@ -11,20 +13,6 @@ export interface NdjsonResult<T> {
    */
   overflow: boolean;
 }
-
-/**
- * 改行を含まない1行分のバッファ上限（issue #402、1点目）。
- *
- * CLIは改行までbufferへ無制限に連結し続けるため、改行を含まない巨大な非JSON出力
- * （診断ログの乱れ・バイナリ混入等）を吐き続けると際限なくメモリを消費する。一方で
- * 正常な1メッセージ（大きめの差分やbase64画像を含むツール結果など）を誤って
- * 切り捨てたくない。
- *
- * `src/codex/jsonRpc.ts` の `MAX_LINE_BUFFER_BYTES` と同じ10MBに揃える（根拠は
- * そちらのコメント参照）。値をimportで共有せずここでも定義しているのは、`src/util/`
- * 配下を特定ドメイン（`codex/`）へ依存させない、末端utilとしての位置付けを保つため。
- */
-export const MAX_LINE_BUFFER_BYTES = 10 * 1024 * 1024;
 
 /**
  * 改行区切りJSONのストリームから、完成した行だけを取り出す。

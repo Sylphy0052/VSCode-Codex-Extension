@@ -1,11 +1,10 @@
-import { EventEmitter } from 'node:events';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ClaudeStreamSession, type ClaudeSpawnPort } from '../../src/claude/streamSession';
 import { emptyClaudeConfig } from '../../src/claude/types';
 import type { Logger } from '../../src/log';
-import { KILL_ESCALATION_DELAY_MS } from '../../src/codex/jsonRpc';
-import { MAX_LINE_BUFFER_BYTES } from '../../src/util/ndjson';
+import { KILL_ESCALATION_DELAY_MS, MAX_LINE_BUFFER_BYTES } from '../../src/process/childProcess';
+import { createFakeChildProcess } from '../helpers/fakeChildProcess';
 
 const fakeLogger: Logger = {
   info: () => undefined,
@@ -14,35 +13,17 @@ const fakeLogger: Logger = {
   show: () => undefined,
 };
 
-/**
- * `child_process.spawn` の最低限の形を模したフェイク（`claudeStreamSessionExitRelease.test.ts`
- * と同じ方針）。`EventEmitter`を継承しているため`kill()`後の`once('exit', ...)`
- * （issue #402のSIGKILLエスカレーション）もそのまま扱える。
- */
-class FakeChildProcess extends EventEmitter {
-  killed = false;
-  readonly stdout = new EventEmitter();
-  readonly stderr = new EventEmitter();
-  readonly stdin = Object.assign(new EventEmitter(), {
-    destroyed: false,
-    writable: true,
-    write: (_chunk: string) => true,
-    end: () => undefined,
-  });
-  kill = vi.fn((_signal?: string) => {
-    this.killed = true;
-    return true;
-  });
-}
+/** `proc.kill`をvitestのmockアサーション（`toHaveBeenCalledTimes`等）で検証するための型。 */
+type MockedChildProcess = ChildProcessWithoutNullStreams & { kill: ReturnType<typeof vi.fn> };
 
 function createStartedSession(
   onCommands: (commands: readonly { name: string }[]) => void = () => undefined,
 ): {
   session: ClaudeStreamSession;
-  proc: FakeChildProcess;
+  proc: MockedChildProcess;
 } {
-  const proc = new FakeChildProcess();
-  const spawnProcess: ClaudeSpawnPort = () => proc as unknown as ChildProcessWithoutNullStreams;
+  const { proc } = createFakeChildProcess();
+  const spawnProcess: ClaudeSpawnPort = () => proc;
   const session = new ClaudeStreamSession(
     () => 'claude',
     fakeLogger,
@@ -58,7 +39,7 @@ function createStartedSession(
     sessionId: '11111111-1111-1111-1111-111111111111',
     config: emptyClaudeConfig,
   });
-  return { session, proc };
+  return { session, proc: proc as MockedChildProcess };
 }
 
 describe('ClaudeStreamSession: 受信バッファの上限（issue #402、1点目）', () => {

@@ -13,9 +13,9 @@ import {
 import type { LaunchTarget } from '../codex/types';
 import type { Logger } from '../log';
 import type { ApprovalHandlerResult } from '../orchestrator/taskSession';
-import { killWithEscalation } from '../codex/jsonRpc';
+import { killWithEscalation, MAX_LINE_BUFFER_BYTES } from '../process/childProcess';
 import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
-import { consumeNdjson, MAX_LINE_BUFFER_BYTES } from '../util/ndjson';
+import { consumeNdjson } from '../util/ndjson';
 import { buildClaudeStreamArgs } from './argvBuilder';
 import {
   buildCanUseToolResponse,

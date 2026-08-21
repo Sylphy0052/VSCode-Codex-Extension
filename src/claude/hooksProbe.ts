@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { killWithEscalation } from '../codex/jsonRpc';
+import { killWithEscalation } from '../process/childProcess';
 import type { Logger } from '../log';
 import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
 import type { HooksSnapshot } from '../provider/hooks';

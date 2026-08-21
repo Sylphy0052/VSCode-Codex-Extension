@@ -7,10 +7,9 @@ import {
   encodeRequest,
   encodeResponse,
   isServerRequest,
-  killWithEscalation,
-  MAX_LINE_BUFFER_BYTES,
   type JsonRpcMessage,
 } from '../codex/jsonRpc';
+import { killWithEscalation, MAX_LINE_BUFFER_BYTES } from '../process/childProcess';
 import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
 
 export interface ServerRequest {
@@ -93,7 +92,18 @@ export class AppServerConnection {
     // `proc.on('error')`は起動失敗しか拾わない。起動後に相手が終了した状態へ書き込むと
     // 飛ぶEPIPE等はここで捕まえないとNodeの未捕捉例外になる（issue #155、design.md §14.31）。
     // 常駐接続なので、接続が死んだものとして既存のexitハンドラと同じ経路（reset）へ寄せる。
+    //
+    // 以下の3ハンドラは、`start()`のこの呼び出しでクロージャに捕まえた`proc`（この世代の
+    // プロセス）を対象とする。overflow等で`reset()`済みの後、`ensureStarted()`が次の
+    // プロセスを起動し終えてから、古い世代の`exit`/`error`/`stdin`エラーが遅れて届く
+    // ことがある（issue #419、CRITICAL）。その時点で`this.proc`は既に新しいプロセスを
+    // 指しているため、素通りで`reset()`を呼ぶと新しい接続の`pending`まで巻き込んで壊す。
+    // `connected`はグローバルなラッチで世代を識別できないため、`this.proc !== proc`で
+    // 世代のずれを検出し、古い世代からの通知は捨てる。
     guardStdinErrors(proc, (e) => {
+      if (this.proc !== proc) {
+        return;
+      }
       this.log.error(`app-serverへの書き込みに失敗しました: ${e.message}`);
       this.reset();
     });
@@ -106,10 +116,16 @@ export class AppServerConnection {
       }
     });
     proc.on('exit', (code) => {
+      if (this.proc !== proc) {
+        return;
+      }
       this.log.warn(`app-serverが終了しました (code ${code ?? 'unknown'})`);
       this.reset();
     });
     proc.on('error', (e) => {
+      if (this.proc !== proc) {
+        return;
+      }
       this.log.error(`app-serverを起動できません: ${e.message}`);
       this.reset();
     });
