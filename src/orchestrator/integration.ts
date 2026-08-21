@@ -365,6 +365,45 @@ export type MergeTaskResult =
   | { kind: 'failure'; message: string };
 
 /**
+ * 統合worktreeで既にマージが進行中（他タスクの衝突が未解決のまま残っている）かどうかを
+ * 調べ、進行中ならその理由の文言を返す（Issue #412）。
+ *
+ * `IntegrationMergeQueue`の占有（リース）で本来は防がれるが、リースを取らずに
+ * `mergeTaskBranch`へ到達した場合でも「他タスクの未解決状態を自分の衝突として拾う」
+ * 誤判定を起こさないための多層防御。ここで止めれば、`git merge`が
+ * `Merging is not possible because you have unmerged files.` で失敗したあとに
+ * `git diff --diff-filter=U`が**他タスクの**未解決パスを返す経路そのものへ入らない。
+ *
+ * 判定は2つ:
+ *
+ * - `git rev-parse -q --verify MERGE_HEAD` が成功する（マージの途中）
+ * - `git diff --name-only --diff-filter=U` が非空（`MERGE_HEAD`が無くても未解決が残る形）
+ *
+ * どちらの確認も、gitコマンド自体が失敗した場合は「判定できない」として素通りさせる
+ * （統合worktreeが壊れている場合は続く`git merge`自身が失敗し、`failure`へ倒れる）。
+ */
+async function findMergeInProgress(
+  integrationWorktreeCwd: string,
+  git: GitCommandRunner,
+): Promise<string | undefined> {
+  const mergeHead = await git.run(
+    ['rev-parse', '-q', '--verify', 'MERGE_HEAD'],
+    integrationWorktreeCwd,
+  );
+  if (mergeHead.code === 0 && mergeHead.stdout.trim() !== '') {
+    return '統合worktreeで別のマージが進行中（MERGE_HEADが残っている）ためマージできません';
+  }
+  const unresolved = await git.run(
+    ['diff', '--name-only', '--diff-filter=U'],
+    integrationWorktreeCwd,
+  );
+  if (unresolved.code === 0 && unresolved.stdout.trim() !== '') {
+    return '統合worktreeに未解決の衝突が残っているためマージできません';
+  }
+  return undefined;
+}
+
+/**
  * タスクブランチを統合worktreeへマージする。**exportしない。** 呼び出し側は必ず
  * `IntegrationMergeQueue.mergeTask` を経由すること（`worktree.ts` の作成・撤去と同じ
  * `index.lock` の競合を避けるため。design.md §16.17「マージはworktreeの作成・撤去と
@@ -392,6 +431,11 @@ async function mergeTaskBranch(
         `不正なtaskBranch（wf/${runId}/... の形にも、conventional形式（<type>/<issue>/<slug>、` +
         `末尾がこのrunIdの先頭8文字）にも一致しません）: ${taskBranch}`,
     };
+  }
+
+  const inProgress = await findMergeInProgress(integrationWorktreeCwd, git);
+  if (inProgress !== undefined) {
+    return { kind: 'failure', message: inProgress };
   }
 
   const before = await git.run(['rev-parse', 'HEAD'], integrationWorktreeCwd);
@@ -439,7 +483,7 @@ async function mergeTaskBranch(
 
 export type AbortMergeResult =
   | { ok: true }
-  | { ok: false; reason: 'gitError'; message: string };
+  | { ok: false; reason: 'gitError' | 'leaseNotHeld'; message: string };
 
 /**
  * 進行中のマージを取り消し、統合ブランチをマージ前の状態へ戻す（`git merge --abort`。
@@ -465,8 +509,41 @@ async function abortMerge(
 }
 
 // ---------------------------------------------------------------------------
-// 直列化キュー
+// 統合worktreeの占有（リース）と直列化キュー
 // ---------------------------------------------------------------------------
+
+/**
+ * 統合worktreeを1タスクが占有していることを表すハンドル（Issue #412）。
+ *
+ * `IntegrationMergeQueue.acquireLease`だけが作れる不透明な値で、`mergeTask` /
+ * `abortMerge` の引数として要求される。**マージ1件の全区間**（`git merge`から、衝突した
+ * 場合は解決セッションが終わって`done`／`blocked`が確定するまで）をこのハンドルで守る。
+ *
+ * 従来は`WorktreeCreationQueue`の直列化しか無く、キュー項目の粒度が「gitコマンド1回」
+ * だったため、衝突解決セッション（LLMの複数ターン。数分〜数十分）の間は統合worktreeが
+ * 無防備だった。その隙に別タスクのマージが走ると、他タスクの未解決パスを自分の衝突として
+ * 拾う・他タスクの解決作業を`git merge --abort`で巻き戻す、といった壊れ方をする。
+ */
+export interface IntegrationLease {
+  /** 占有している統合worktreeのcwd。 */
+  readonly integrationWorktreeCwd: string;
+  /** 占有しているタスクのid。 */
+  readonly taskId: string;
+}
+
+/**
+ * `IntegrationLease`の実体。**exportしない**（外から偽造したハンドルで`mergeTask` /
+ * `abortMerge`を通せないようにするため。`owner`の同一性まで見る）。
+ */
+class IntegrationLeaseHandle implements IntegrationLease {
+  released = false;
+
+  constructor(
+    readonly owner: IntegrationMergeQueue,
+    readonly integrationWorktreeCwd: string,
+    readonly taskId: string,
+  ) {}
+}
 
 /**
  * 統合ブランチ・統合worktreeの作成とマージ・巻き戻しを直列化する。
@@ -488,6 +565,101 @@ async function abortMerge(
 export class IntegrationMergeQueue {
   constructor(private readonly worktreeQueue: WorktreeCreationQueue) {}
 
+  /**
+   * 統合worktreeごとの現在の占有者（`acquireLease`が渡したハンドル）。キーは統合worktreeの
+   * cwd（runごとに異なるディレクトリなので、1つのキューを複数runで共有しても混ざらない）。
+   */
+  private readonly leaseHolders = new Map<string, IntegrationLeaseHandle>();
+
+  /** 占有待ちの行列（FIFO）。統合worktreeのcwdごとに持つ。 */
+  private readonly leaseWaiters = new Map<
+    string,
+    Array<{ handle: IntegrationLeaseHandle; resolve: () => void }>
+  >();
+
+  /**
+   * 統合worktreeの占有（リース）を取る。既に他タスクが占有していれば、解放されるまで
+   * FIFOで待つ（Issue #412）。
+   *
+   * **必ず`try/finally`で`releaseLease`と対にすること。** 解放し忘れると、以後そのrunの
+   * マージが全て待ち続ける（デッドロック）。run破棄時の保険として`releaseAllLeases`も
+   * 用意してある。
+   */
+  async acquireLease(integrationWorktreeCwd: string, taskId: string): Promise<IntegrationLease> {
+    const handle = new IntegrationLeaseHandle(this, integrationWorktreeCwd, taskId);
+    if (!this.leaseHolders.has(integrationWorktreeCwd)) {
+      this.leaseHolders.set(integrationWorktreeCwd, handle);
+      return handle;
+    }
+    await new Promise<void>((resolve) => {
+      const waiters = this.leaseWaiters.get(integrationWorktreeCwd) ?? [];
+      waiters.push({ handle, resolve });
+      this.leaseWaiters.set(integrationWorktreeCwd, waiters);
+    });
+    return handle;
+  }
+
+  /**
+   * 占有を解放し、待っている次のタスクへ渡す。**同じハンドルで何度呼んでも安全**
+   * （2度目以降は何もしない）。「衝突解決の途中で例外が起きた経路」と「`finally`」の
+   * 両方から呼ばれても二重解放にならないようにするため。
+   */
+  releaseLease(lease: IntegrationLease): void {
+    if (!(lease instanceof IntegrationLeaseHandle) || lease.owner !== this || lease.released) {
+      return;
+    }
+    lease.released = true;
+    const cwd = lease.integrationWorktreeCwd;
+    if (this.leaseHolders.get(cwd) !== lease) {
+      return;
+    }
+    const waiters = this.leaseWaiters.get(cwd);
+    const next = waiters?.shift();
+    if (next === undefined) {
+      this.leaseHolders.delete(cwd);
+      this.leaseWaiters.delete(cwd);
+      return;
+    }
+    this.leaseHolders.set(cwd, next.handle);
+    next.resolve();
+  }
+
+  /**
+   * 全ての占有を強制的に解放する（`WorkflowRunner.dispose()`から呼ぶ保険）。
+   *
+   * 待っているタスクは「解放済みのハンドル」を受け取った状態で起き上がるため、その
+   * `mergeTask` / `abortMerge` は`failure`で返る。待ち続けて固まるより、失敗として
+   * 表面化するほうが安全（fail-closed）。
+   */
+  releaseAllLeases(): void {
+    const holders = [...this.leaseHolders.values()];
+    const waiters = [...this.leaseWaiters.values()].flat();
+    this.leaseHolders.clear();
+    this.leaseWaiters.clear();
+    for (const handle of holders) {
+      handle.released = true;
+    }
+    for (const waiter of waiters) {
+      waiter.handle.released = true;
+      waiter.resolve();
+    }
+  }
+
+  /** テスト・診断用。いま占有されている統合worktreeのcwdなら占有者のtaskIdを返す。 */
+  leaseHolderTaskId(integrationWorktreeCwd: string): string | undefined {
+    return this.leaseHolders.get(integrationWorktreeCwd)?.taskId;
+  }
+
+  /** 有効な占有ハンドルかどうか（このキューが今まさに占有者として認めているか）。 */
+  private holdsLease(lease: IntegrationLease): lease is IntegrationLeaseHandle {
+    return (
+      lease instanceof IntegrationLeaseHandle &&
+      lease.owner === this &&
+      !lease.released &&
+      this.leaseHolders.get(lease.integrationWorktreeCwd) === lease
+    );
+  }
+
   /** 統合ブランチ・統合worktreeを1件作る（`createIntegrationWorktree` をキュー経由で呼ぶ）。 */
   createIntegrationWorktree(
     request: CreateIntegrationWorktreeRequest,
@@ -500,23 +672,53 @@ export class IntegrationMergeQueue {
   /**
    * タスクブランチを統合worktreeへマージする（`mergeTaskBranch` をキュー経由で呼ぶ）。
    * `type` は省略可能（マージコミットのConventional Commits type。未指定は`chore`）。
+   *
+   * 第1引数は`acquireLease`で取った占有ハンドル。統合worktreeのcwdはハンドルが持つ
+   * （呼び出し側が別のcwdを渡せない）。ハンドルが失効していれば`failure`を返す。
    */
   mergeTask(
-    integrationWorktreeCwd: string,
+    lease: IntegrationLease,
     runId: string,
     taskId: string,
     taskBranch: string,
     git: GitCommandRunner,
     type?: string,
   ): Promise<MergeTaskResult> {
+    if (!this.holdsLease(lease)) {
+      return Promise.resolve({
+        kind: 'failure',
+        message: '統合worktreeの占有（リース）を持っていないためマージできません',
+      });
+    }
+    if (lease.taskId !== taskId) {
+      return Promise.resolve({
+        kind: 'failure',
+        message: `占有（リース）の持ち主（${lease.taskId}）とマージ対象のタスク（${taskId}）が食い違います`,
+      });
+    }
+    const cwd = lease.integrationWorktreeCwd;
     return this.worktreeQueue.enqueue(() =>
-      mergeTaskBranch(integrationWorktreeCwd, runId, taskId, taskBranch, git, type),
+      mergeTaskBranch(cwd, runId, taskId, taskBranch, git, type),
     );
   }
 
-  /** 進行中のマージを取り消す（`abortMerge` をキュー経由で呼ぶ）。 */
-  abortMerge(integrationWorktreeCwd: string, git: GitCommandRunner): Promise<AbortMergeResult> {
-    return this.worktreeQueue.enqueue(() => abortMerge(integrationWorktreeCwd, git));
+  /**
+   * 進行中のマージを取り消す（`abortMerge` をキュー経由で呼ぶ）。
+   *
+   * **占有ハンドルを持つタスクだけが巻き戻せる。** ハンドルを要求しないと、衝突解決中の
+   * 他タスクの作業（未コミットの解決結果とインデックス）を`git merge --abort`で巻き戻して
+   * しまう（Issue #412の指摘2）。
+   */
+  abortMerge(lease: IntegrationLease, git: GitCommandRunner): Promise<AbortMergeResult> {
+    if (!this.holdsLease(lease)) {
+      return Promise.resolve({
+        ok: false,
+        reason: 'leaseNotHeld',
+        message: '統合worktreeの占有（リース）を持っていないためマージを巻き戻せません',
+      });
+    }
+    const cwd = lease.integrationWorktreeCwd;
+    return this.worktreeQueue.enqueue(() => abortMerge(cwd, git));
   }
 
   /**
