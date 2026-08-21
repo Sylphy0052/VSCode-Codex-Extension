@@ -94,6 +94,71 @@ describe('sanitizeForLog（ホームディレクトリ配下の絶対パスマ�
   });
 });
 
+describe('sanitizeForLog（セキュリティ監査指摘: 否定先読みによるマスク回避。MEDIUM）', () => {
+  it('NixOS標準レイアウト（/var/home/<user>）でもユーザー名を露出しない', () => {
+    const raw = 'at /var/home/alice/project/index.ts';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('/var/home/***/project/index.ts');
+  });
+
+  it('BSD系レイアウト（/usr/home/<user>）でもユーザー名を露出しない', () => {
+    const raw = '/usr/home/alice/project';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('/usr/home/***/project');
+  });
+
+  it('Solaris/illumos系レイアウト（/export/home/<user>）でもユーザー名を露出しない', () => {
+    const raw = '/export/home/alice/project';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('/export/home/***/project');
+  });
+
+  it('file://形式のURI（file:///home/<user>）でもユーザー名を露出しない', () => {
+    const raw = 'file:///home/alice/project/index.ts';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('file:///home/***/project/index.ts');
+  });
+
+  it('大文字のHOMEディレクトリ（/HOME/<user>）でもユーザー名を露出しない', () => {
+    const raw = '/HOME/alice/project';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('/HOME/***/project');
+  });
+
+  it('小文字のdrive/usersパス（C:\\users\\<user>）でもユーザー名を露出しない', () => {
+    const raw = 'C:\\users\\alice\\project';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('C:\\users\\***\\project');
+  });
+});
+
+describe('sanitizeForLog（セキュリティ監査指摘: UNCパスが対象外。LOW）', () => {
+  it('UNC形式（\\\\fileserver\\Users\\<user>\\...）のローミングプロファイルでもユーザー名を露出しない', () => {
+    const raw = '\\\\fileserver\\Users\\alice\\project\\index.ts';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('\\\\fileserver\\Users\\***\\project\\index.ts');
+  });
+});
+
+describe('sanitizeForLog（iフラグ追加後も過剰マスクが起きないことの確認）', () => {
+  it('大文字小文字を区別しなくても相対パスの"Users"ディレクトリは誤検知しない', () => {
+    expect(sanitizeForLog('src/Users/foo.ts の型エラー')).toBe('src/Users/foo.ts の型エラー');
+    expect(sanitizeForLog('SRC/USERS/foo.ts の型エラー')).toBe('SRC/USERS/foo.ts の型エラー');
+  });
+
+  it('"home"や"users"を含むが該当パターンではない通常の単語は変えない', () => {
+    expect(sanitizeForLog('homework/alice/notes.md')).toBe('homework/alice/notes.md');
+    expect(sanitizeForLog('income/report.csv')).toBe('income/report.csv');
+  });
+});
+
 describe('maskHomeDir（Issue #378: ホームディレクトリ配下のユーザー名マスク、テスト容易性）', () => {
   it('os.homedir()相当の値と完全一致する接頭辞を~へ置換する', () => {
     expect(maskHomeDir('/home/kfuruhashi/repo/foo.ts', '/home/kfuruhashi')).toBe('~/repo/foo.ts');

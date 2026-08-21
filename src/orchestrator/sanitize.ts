@@ -30,12 +30,30 @@ function maskUrlUserinfo(value: string): string {
  * ディレクトリ名・後続のサブパス）は保持する。「どのファイルで失敗したか」を切り分けられる
  * 情報を失わせないため（Issue #378 自己レビュー観点）、パス全体は畳まない。
  *
- * 直前の文字が英数字または`/`の場合はマッチさせない（`(?<!...)`）。相対パス中に偶然
- * `Users`という名前のディレクトリがあるだけのケース（例: `src/Users/foo.ts`）を
- * 誤ってホームディレクトリと誤認しないようにするため。
+ * 対応する形状（セキュリティ監査指摘: MEDIUM/LOW対応）:
+ * - POSIX標準: `/home/<user>`
+ * - `/home` の前に既知の祖先ディレクトリが付くレイアウト: `/var/home/`（NixOS）・
+ *   `/usr/home/`（BSD系）・`/export/home/`（Solaris/illumos系）
+ * - `file://` スキームのURI: `file:///home/<user>`（`file://` + `/home/` の連結）
+ * - macOS: `/Users/<user>`
+ * - Windows: `X:\Users\<user>` `X:/Users/<user>`（大文字小文字は`i`フラグで区別しない）
+ * - UNC（ローミングプロファイル等）: `\\server\Users\<user>`
+ *
+ * 旧パターンは `(?<![A-Za-z0-9_/\\])` を `/home/` 等の直前にのみ適用していたため、
+ * 祖先ディレクトリやスキームが挟まる形状（`/var/home/…` の直前は英数字の `r`、
+ * `file:///home/…` の3連スラッシュの直前は `/`）が軒並み不成立になりマスクを回避できた。
+ * 対策として、祖先ディレクトリ・スキームを否定先読みの対象外（キャプチャ対象の内側）へ
+ * 取り込み、否定先読み自体は各分岐の先頭（`/var` や `file` の直前）にのみ適用する形へ
+ * 変更した。この位置なら実際のホームディレクトリパスは常に文字列の先頭・空白・引用符の
+ * 直後から始まり、`src/Users/foo.ts` のような相対パス中の偶然の一致（`Users`の直前が
+ * 英数字の`c`）だけを引き続き除外できる。
+ *
+ * `i`フラグにより大文字小文字を区別しない（`/HOME/` `C:\users\` 等）。過剰マスクの
+ * 懸念（`homework/` `income/` 等）は、いずれも`/home/`直後に区切り文字が続かないため
+ * 該当しない（`sanitize.test.ts` で回帰確認済み）。
  */
 const HOME_DIR_USERNAME_PATTERN =
-  /(?<![A-Za-z0-9_/\\])(\/home\/|\/Users\/|[A-Za-z]:[\\/]Users[\\/])([^/\\\s'"]+)/gu;
+  /(?<![A-Za-z0-9_/\\])((?:file:\/\/)?(?:\/(?:var|usr|export))?\/home\/|(?:file:\/\/)?\/Users\/|[A-Za-z]:[\\/]Users[\\/]|\\\\[^\\\s]+\\Users\\)([^/\\\s'"]+)/giu;
 
 function maskHomeDirUsername(value: string): string {
   return value.replace(HOME_DIR_USERNAME_PATTERN, (_match, prefix: string) => `${prefix}***`);
