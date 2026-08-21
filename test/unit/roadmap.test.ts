@@ -643,6 +643,51 @@ describe('planWorkflowFromRoadmapPhases（design.md §16.19 2段目）', () => {
       );
     }
   });
+
+  it('タスク境界で切れた応答（issue #389 根拠2）でも、欠けたタスクをroadmapMismatchesで検出する', async () => {
+    const parsed = parseRoadmapMarkdown(SAMPLE_ROADMAP);
+    const phase = parsed.phases[0];
+    if (phase === undefined) throw new Error('phase not found');
+    // 生のCLI応答を模擬: 先行するbashフェンス（issue #389 根拠1） + タスク境界で
+    // 切れたYAMLフェンス（R3が丸ごと欠ける）。extractYamlFromResponseの修正と
+    // detectRoadmapMaterialMismatchesの両方が効いて初めて、欠落が人へ届くことを確かめる
+    const rawResponse = [
+      '```bash',
+      'ls -la',
+      '```',
+      '',
+      '出力します:',
+      '```yaml',
+      'version: 1',
+      'name: x',
+      'tasks:',
+      '  - id: R1',
+      '    prompt: 認証方式を決めて設計を書く',
+      '    done: 設計が終わっている',
+      '    issue: 12',
+      '  - id: R2',
+      '    dependsOn: [R1]',
+      '    prompt: API側を実装する',
+      '    done: 実装が終わっている',
+      '    issue: 13',
+      '```',
+    ].join('\n');
+    const host = new FakeRoadmapHost(rawResponse);
+    const result = await planWorkflowFromRoadmapPhases({
+      ...baseInput,
+      chunk: chunkOf(phase),
+      host,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // 検証(validateWorkflow)自体はR1・R2だけの自己完結したYAMLとして通ってしまうため、
+      // 欠落はroadmapMismatchesの側で検出される
+      expect(result.definition.tasks.map((t) => t.id)).toEqual(['R1', 'R2']);
+      expect(result.roadmapMismatches).toEqual([
+        expect.objectContaining({ itemId: 'R3', kind: 'missing' }),
+      ]);
+    }
+  });
 });
 
 describe('applyRunCompletion', () => {
