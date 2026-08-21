@@ -1,0 +1,29 @@
+import type { Logger } from '../log';
+import type { SessionStore } from './sessionStore';
+
+/**
+ * 起動時にメタキャッシュ（`SessionMeta` の永続キャッシュ）を掃除する（issue #382）。
+ *
+ * 既定経路である thread/list 成功時（`SessionStore.list` → `buildFromThreadList`）は
+ * キャッシュ削除処理を一切通らないため、thread/list が使える環境では実体が消えた
+ * セッションの `SessionMeta` が globalState へ溜まり続ける。`pruneCache()` 自体は
+ * 以前から実装されていたが、`src` 配下のどこからも呼ばれていなかった
+ * （`SessionStore.pruneCache` のJSDoc参照）。
+ *
+ * 呼び出し側（`activate()`）は必ず `void` で投げっぱなしにする。ここでは
+ * `pruneCache()` が失敗しても例外を外へ出さず、`activate()` を妨げない。
+ */
+export async function pruneMetaCacheOnStartup(
+  store: Pick<SessionStore, 'pruneCache'>,
+  persistIfChanged: (removed: number) => Promise<void>,
+  log: Logger,
+): Promise<void> {
+  try {
+    const removed = await store.pruneCache();
+    if (removed > 0) {
+      await persistIfChanged(removed);
+    }
+  } catch (e) {
+    log.warn(`起動時のメタキャッシュ掃除に失敗しました: ${String(e)}`);
+  }
+}
