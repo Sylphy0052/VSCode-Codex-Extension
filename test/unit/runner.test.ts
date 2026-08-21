@@ -1682,6 +1682,21 @@ tasks:
     expect(t1Snapshot?.hasLiveSession).toBe(true);
   });
 
+  it('getSnapshotはタスク数によらずストア読み出しが1回になる（Issue #366）', async () => {
+    const { runner, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const findSpy = vi.spyOn(store, 'find');
+    const snapshot = runner.getSnapshot(runId);
+
+    // YAMLはT1・T2の2タスク。以前は`buildTaskSnapshot`がタスクごとに`store.find`を
+    // 呼んでいたため、`getSnapshot`の`persisted`分と合わせてタスク数+1回になっていた
+    expect(snapshot?.tasks).toHaveLength(2);
+    expect(findSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('getSnapshotは統合ブランチ名を含む（design.md §16.17・Issue #104）', async () => {
     const { runner } = createHarness(YAML);
     const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
@@ -4950,6 +4965,34 @@ tasks:
       ?.warnings.find((w) => w.kind === "orchestratorPromptOverride");
     expect(warning?.taskId).toBe("T1");
     expect(warning?.message).toContain("これからは設計だけをやること");
+  });
+
+  it("update_task_promptは同一taskIdへの複数回の差し替えでも警告が無制限に増えない（Issue #366）", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    const result = await runner.start(
+      "/repo/.agents/workflows/control.yaml",
+      "/repo",
+    );
+    const runId = result.runId as string;
+    await flush();
+
+    const port = control(state);
+    for (let i = 0; i < 5; i += 1) {
+      const outcome = port.updateTaskPrompt("T1", `方針転換その${i}`);
+      expect(outcome.accepted).toBe(true);
+    }
+
+    const warnings = runner
+      .getSnapshot(runId)
+      ?.warnings.filter((w) => w.kind === "orchestratorPromptOverride");
+    // 直近1件へ丸められるため、5回呼んでも件数は増えない
+    expect(warnings).toHaveLength(1);
+    // 警告が出た事実自体は失われず、最新の差し替え内容が残っている
+    expect(warnings?.[0]?.taskId).toBe("T1");
+    expect(warnings?.[0]?.message).toContain("方針転換その4");
   });
 
   it("update_task_promptはテンプレート変数を展開しない（リテラルとして送る）", async () => {
