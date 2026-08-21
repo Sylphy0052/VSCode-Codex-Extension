@@ -1638,6 +1638,49 @@ tasks:
   });
 });
 
+describe('WorkflowRunner: 手動再実行後のworktree撤去（issue #407）', () => {
+  const YAML = `
+version: 1
+name: manual-retry-cleanup-test
+defaults:
+  cleanup: remove
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+
+  it('手動再実行の後にdoneになったタスクは、実際に使ったretry付きworktreeを撤去する', async () => {
+    const git = fakeGit();
+    const { runner, codexHost } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/manual-retry-cleanup.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const attempt1 = codexHost.byTaskId('T1');
+    attempt1.finish('failed', { ...initialChatState, turnFailed: true });
+    await flush();
+
+    expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+    await flush();
+
+    const attempt2 = codexHost.sessions.find((s) => s.cwd.endsWith('/T1-retry0'));
+    expect(attempt2).toBeDefined();
+    // 手動再実行のみ（自動retryは未消費）: retryCount=0, manualRetryCount=1
+    expect(attempt2?.cwd).not.toBe(attempt1.cwd);
+
+    attempt2?.finish('done', doneState('ok'));
+    await flush();
+
+    // 撤去対象は実際にこの試行で使ったworktree（T1-retry0）であるべき。
+    // retrySuffixOfがmanualRetryCountを見落とすと、代わりに未使用のT1（初回分。
+    // 存在しないので撤去はできない）が対象になり、attempt2のworktreeが残ってしまう
+    const removeCall = git.calls.find((c) => c.args[0] === 'worktree' && c.args[1] === 'remove');
+    expect(removeCall).toBeDefined();
+    expect(removeCall?.args[2]).toBe(attempt2?.cwd);
+  });
+});
+
 describe('WorkflowRunner: retriesによる自動再試行（design.md §16.5、レビュー指摘: high）', () => {
   const YAML = `
 version: 1

@@ -592,7 +592,7 @@ export function cleanupWorktreeIfNeeded(
   if (finalState === undefined || !shouldRemoveWorktree(task.cleanup, finalState)) {
     return;
   }
-  const retry = retrySuffixOf(live.runState.tasks.get(taskId)?.retryCount);
+  const retry = retrySuffixOf(live.runState.tasks.get(taskId));
   void self.deps.worktreeQueue
     .remove(live.repoRoot, live.runId, taskId, retry, self.deps.git, self.deps.fs)
     .then((result) => {

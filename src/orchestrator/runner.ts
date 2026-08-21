@@ -1862,7 +1862,7 @@ export class WorkflowRunner {
     runId: string,
   ): Promise<TaskLaunchPreparation> {
     const taskRunState = live.runState.tasks.get(taskId);
-    const retry = retrySuffixOf(taskRunState?.retryCount, taskRunState?.manualRetryCount);
+    const retry = retrySuffixOf(taskRunState);
     const { cwd, branch, usedWorktree, usedPseudoWorktree, pseudoSnapshot, originCommit } =
       await resolveWorkingDirectory(this.internals, live, task, retry);
 
@@ -2692,11 +2692,16 @@ export { parsePullRequestNumberFromUrl };
  * 1回目の再試行が `-retry0`）。1つずらして渡す必要がある
  * （レビュー指摘: high。テスト追加で発覚したオフバイワン）。`manualRetryCount` も
  * `retryTask` が次の試行を始める前に増やすため、同じ数え方に乗る。
+ *
+ * 引数は `retryCount` / `manualRetryCount` を個別に受け取らず、`TaskRunState`（の該当
+ * 2フィールド）をまとめて受け取る。以前は呼び出し側が2引数を別々に渡す形にしていたため、
+ * `runnerMerge.ts`側の撤去経路が`manualRetryCount`の受け渡しを忘れ、手動再実行後の
+ * 撤去対象パスが実際に使ったworktreeと食い違う不具合があった（issue #407）。1つの
+ * オブジェクトで渡す形にすることで、フィールドの渡し忘れ自体を型で防ぐ。
  */
 export function retrySuffixOf(
-  retryCount: number | undefined,
-  manualRetryCount?: number | undefined,
+  state: Pick<TaskRunState, 'retryCount' | 'manualRetryCount'> | undefined,
 ): number | undefined {
-  const total = (retryCount ?? 0) + (manualRetryCount ?? 0);
+  const total = (state?.retryCount ?? 0) + (state?.manualRetryCount ?? 0);
   return total > 0 ? total - 1 : undefined;
 }
