@@ -627,6 +627,43 @@ function fakeMemento(): WorkflowRunMemento {
   };
 }
 
+/**
+ * `memento.update()`の実際の書き込みを、テストが1件ずつ手で解放できるように留め置く
+ * フェイク（issue #381「persistのoutcomeが別時点の値になる」の再現用）。`store.update`
+ * （`WorkflowRunStore`内の`SerialQueue`）は前の項目のPromiseが解決するまで次の項目の
+ * `updater`を呼ばないため、`releaseOne()`を呼ぶまで`updater`の実行そのものを止められる。
+ * これにより「`persist()`呼び出し時点」と「`updater`が実際に走る時点」の間へ、
+ * 好きなだけ他の状態変化（`live.runState`の書き換え）を割り込ませられる。
+ */
+function controllableMemento(): {
+  memento: WorkflowRunMemento;
+  pendingCount: () => number;
+  releaseOne: () => void;
+} {
+  const store = new Map<string, unknown>();
+  const pending: Array<() => void> = [];
+  return {
+    memento: {
+      get<T>(key: string, defaultValue: T): T {
+        return (store.has(key) ? store.get(key) : defaultValue) as T;
+      },
+      update(key: string, value: unknown): Thenable<void> {
+        return new Promise<void>((resolve) => {
+          pending.push(() => {
+            store.set(key, value);
+            resolve();
+          });
+        });
+      },
+    },
+    pendingCount: () => pending.length,
+    releaseOne: () => {
+      const next = pending.shift();
+      next?.();
+    },
+  };
+}
+
 function filePort(content: string): WorkflowFilePort {
   return {
     fileSize: async () => Buffer.byteLength(content, 'utf8'),
@@ -1278,6 +1315,99 @@ tasks:
       expect(() => reloadedRunner.stop(runId)).not.toThrow();
     });
   });
+});
+
+/**
+ * `persist()`はrunの永続化を`WorkflowRunStore`（`workspaceState`書き込みを1本の
+ * `SerialQueue`で直列化）へ委ねる。以前は`outcome`（`finishedAt`を確定するかどうかを
+ * 決める）を`persist()`の呼び出し時点、`updater`の外側で計算していた。`updater`
+ * （`store.update`に渡す関数）自体は`SerialQueue`が捌く時点まで実行が遅延されうるため、
+ * 同じ`runId`に対して短時間に複数回`persist()`が呼ばれる（`void this.persist(runId)`が
+ * `runner.ts`に多数ある）と、先に呼ばれた`persist()`の`outcome`が古いまま、`updater`が
+ * 実際に読む`live.runState.tasks`（同じ`live`を指す最新の値）だけ新しくなる
+ * ことがあった（issue #381）。
+ */
+describe('WorkflowRunner.persist: outcomeとtasksの時点整合性（issue #381）', () => {
+  it(
+    '先に呼ばれたpersistの書き込みが遅れて、その間に手動再実行でタスクが' +
+      'running へ戻っても、実際に書き込まれる時点のtasksに整合したfinishedAtになる' +
+      '（`outcome`をupdaterの外で計算する古い実装では、走り出している最中の実行に' +
+      '`finishedAt`が固定されてしまう）',
+    async () => {
+      const YAML_SINGLE = `
+version: 1
+name: persist-timing-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+      const { memento, pendingCount, releaseOne } = controllableMemento();
+      const { runner, codexHost, store } = createHarness(YAML_SINGLE, { memento });
+
+      // 積み残っているpersistを全て解放して書き込みを追いつかせる（テストの節目ごとに
+      // 呼ぶ。`start()`は「定義済みの`await this.persist(runId)`」の後にも`pump()`が
+      // 追加でpersistを積むため、1回の解放だけでは足りない）
+      const drainAll = async (): Promise<void> => {
+        while (pendingCount() > 0) {
+          releaseOne();
+          await flush();
+        }
+      };
+
+      const startPromise = runner.start('/repo/.agents/workflows/persist-timing.yaml', '/repo');
+      await flush();
+      await drainAll();
+      const result = await startPromise;
+      const runId = result.runId as string;
+      await flush();
+      await drainAll();
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+
+      const t1 = codexHost.byTaskId('T1');
+      // 回数切れ（`maxReached`）でfailedに確定させる。`onTaskFinished`は`persist()`を
+      // 2回呼ぶ（`onTaskFinished`自身と、その中で呼ぶ`pump()`）。1回目（X）の
+      // `updater`はキューが空なのでほぼ即座に走り、`tasks`（'failed'）と`outcome`
+      // （バグ有りの実装では呼び出し時点で固定、'failed'）を同じ時点で読むため
+      // 矛盾は起きない。2回目（Y）は`updater`本体の実行がXの`memento.update`が
+      // 解決するまで遅延される（`SerialQueue`が直列に繋ぐため）。これから、Xだけを
+      // 先に解放し、Yの`updater`本体はまだ走らせないまま「再実行」を割り込ませる
+      t1.finish('maxReached' as LoopStopReason, { ...initialChatState });
+      await flush();
+      expect(pendingCount()).toBe(1); // X（1件目）だけが`memento.update`待ちで残る
+
+      // Xを解放する。「解決した」ことがマイクロタスクとしてキューへ積まれるだけで、
+      // Yの`updater`本体はまだ走らない（`await`を挟むまで走らない）。ここで
+      // `await`せずに続けて`retryTask`を呼ぶことで、「Yのupdater本体が実際に走る
+      // 前に、人がワークフローViewから再実行した」状況を作る
+      releaseOne();
+
+      // ここで人が「再実行」する。`live.runState`はpendingを経てすぐrunningへ戻る
+      // （`retryTask`内の`pump()`がその場で次のタスクを開始する）。Yの`updater`は
+      // まだ走っていないため、この時点の`live.runState`の変化はYにまだ見えていない
+      const retried = runner.retryTask(runId, 'T1');
+      expect(retried.ok).toBe(true);
+
+      // ここで初めてYの`updater`本体が走る。`live.runState`（今はrunning）を実行時点で
+      // 読むため`tasks`は最新化されるが、`outcome`を呼び出し時点（まだ'failed'だった
+      // 頃）で固定する古い実装では'failed'のまま渡ってしまい、`finishedAt`に
+      // タイムスタンプが固定される（Xが既に`finishedAt`を確定させているため
+      // `current?.finishedAt ?? ...`では上書きできない）
+      await flush();
+      expect(pendingCount()).toBe(1); // Yがmemento.update待ちで残る
+
+      releaseOne();
+      await flush();
+
+      const run = store.find(runId) as PersistedRun;
+      // 再実行でrunningへ戻っている以上、`finishedAt`は付いていてはいけない
+      expect(run.tasks['T1']?.state).toBe('running');
+      expect(run.finishedAt).toBeUndefined();
+
+      // 残りのpersistも解放して後始末する（次のテストへ影響を残さない）
+      await drainAll();
+    },
+  );
 });
 
 describe('WorkflowRunner: 定義ファイルの検証', () => {
@@ -2508,6 +2638,48 @@ tasks:
     await flush();
 
     expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+  });
+
+  /**
+   * 「全体の停止」は衝突解決セッションを止め対象から漏らしていた（issue #381。issue #322の
+   * 「停止ボタンを押しても指示が送られ続ける」が衝突解決セッションについてだけ残っていた）。
+   * `stop()`が`live.mergeResolutions`にも`stopLoop()`を送ることと、停止された衝突解決
+   * セッションが`onMergeResolutionFinished`へ合流して`blocked`（マージは巻き戻し）へ
+   * 落ち着くことを確かめる。
+   */
+  it('全体の停止は衝突解決セッションにもstopLoopを送り、マージを巻き戻してblockedにする（issue #381）', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // T1は衝突したのでまだmergingのまま、衝突解決セッションが開いている
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    const resolutionSession = codexHost.sessions.at(-1);
+    expect(resolutionSession).toBeDefined();
+
+    runner.stop(runId);
+    await flush();
+
+    // 修正前は`live.tasks`しか走査しないため0のまま（このテストがそれを検知する）
+    expect(resolutionSession?.stopLoopCount).toBe(1);
+    expect(store.find(runId)?.haltedByUser).toBe(true);
+
+    // `stopLoop()`は衝突解決セッションでも`LoopStopReason: 'taskStopped'`でonFinishedを呼ぶ。
+    // `onMergeResolutionFinished`は'manual'/'interrupted'以外（'taskStopped'を含む）を
+    // 「gitが未解決のまま」の経路と同じく扱い、マージを巻き戻してblockedに確定させる
+    resolutionSession?.finish('taskStopped' as LoopStopReason, { ...initialChatState });
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+    // マージの巻き戻し（`git merge --abort`）が呼ばれ、統合ブランチはマージ前へ戻っている
+    const abortCall = git.calls.find((c) => c.args[0] === 'merge' && c.args[1] === '--abort');
+    expect(abortCall).toBeDefined();
   });
 
   it(

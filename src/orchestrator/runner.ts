@@ -1258,6 +1258,16 @@ export class WorkflowRunner {
    * 対象はセッションが生きている未確定のタスクだけ。`merging` はループが既に終わっていて
    * 止める対象が無いため含めない（`isActiveTaskState` をそのまま使わないのはこのため）。
    * リロード直後で復元しただけの実行は `live.tasks` が空なので、何も呼ばずに抜ける。
+   *
+   * **衝突解決セッション（`live.mergeResolutions`、design.md §16.17「コンフリクト」5.）にも
+   * 同じく `stopLoop()` を送る。** 統合worktreeで開く衝突解決セッションは `live.tasks` の
+   * 管理下に無いため、ここへ含めないとissue #322が問題視した「停止ボタンを押しても指示が
+   * 送られ続ける」状態が衝突解決セッションについてだけ残ってしまう（issue #381）。
+   * `stopLoop()` は衝突解決セッションでも `LoopStopReason: 'taskStopped'` で
+   * `onFinished` を呼び、`runnerMerge.ts` の `onMergeResolutionFinished` へ合流する。
+   * そちらは `reason === 'done'` かつgit上も解決済みのときだけ `done` にし、それ以外
+   * （`'taskStopped'` を含む）はマージを巻き戻して `blocked` に確定させる（実行中のタスク
+   * を `stopLoop()` で `failed`（手動停止）にするのと対になる「適切な状態」）。
    */
   stop(runId: string): void {
     const live = this.runs.get(runId);
@@ -1277,6 +1287,12 @@ export class WorkflowRunner {
     });
     for (const [, liveTask] of targets) {
       liveTask.session.stopLoop();
+    }
+    // 衝突解決セッションは`live.tasks`に無い別枠の管理（`revealTask`と同じ扱い）のため、
+    // 上のフィルタには乗らない。生きているものへ全て送る（対象は`merging`のタスクだけの
+    // はずで、常に1件ずつしか無いが、複数あっても構わない形にしておく）
+    for (const mergeResolutionSession of live.mergeResolutions.values()) {
+      mergeResolutionSession.stopLoop();
     }
     this.notify(runId);
     void this.persist(runId);
@@ -2569,9 +2585,17 @@ export class WorkflowRunner {
     if (live === undefined) {
       return;
     }
-    const outcome = getRunOutcome(live.runState);
     try {
       await this.deps.store.update(runId, (current) => {
+        // `outcome`はupdaterの中、`live.runState`を実際に読む直前で計算する（issue #381）。
+        // `store.update`は`WorkflowRunStore`内の`SerialQueue`を経由するため、この関数
+        // （updater）が実際に呼ばれるのは呼び出し時点ではなくキューが捌く時点になりうる。
+        // 呼び出し時点で`outcome`を計算して閉じ込めると、キューで順番待ちしている間に
+        // 別の`persist()`呼び出しが`live.runState`を書き換え、`tasks`（このupdater内で
+        // 都度読む最新の`live.runState`）と`outcome`（呼び出し時点のまま固定された古い値）
+        // が別時点の値になる（`finishedAt`に`undefined`が付く、または早すぎる
+        // `finishedAt`が`current?.finishedAt ?? ...`で上書き不能なまま固定される）
+        const outcome = getRunOutcome(live.runState);
         const tasks: Record<string, PersistedTaskState> = {};
         for (const [id, s] of live.runState.tasks) {
           const liveTask = live.tasks.get(id);
