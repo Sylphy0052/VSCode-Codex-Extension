@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { noDefaults } from '../../src/codex/configToml';
 import { noClaudeDefaults } from '../../src/claude/settingsJson';
 import type { Logger } from '../../src/log';
+import { chatCsp } from '../../src/view/chatCsp';
 import { ControlPanelViewProvider } from '../../src/view/controlPanelView';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 
@@ -253,5 +254,41 @@ describe('ControlPanelViewProvider（issue #358、パネル破棄時の参照ク
     await expect(provider.refresh()).resolves.toBeUndefined();
     // 破棄後は送り先（this.view）が無いので何も送られない
     expect(sent).toEqual([]);
+  });
+});
+
+describe('CSPを`chatCsp()`へ集約する（issue #420）', () => {
+  it('生成されるCSP文字列は、集約前に手組みしていたものとバイト単位で変わらない', async () => {
+    const { settings } = fakeSettingsProvider();
+    const { logger } = fakeLogger();
+    const provider = new ControlPanelViewProvider(settings, logger);
+    const { view } = fakeWebviewView();
+
+    provider.resolveWebviewView(view as never);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const html = (view.webview as { html: string }).html;
+    const match = html.match(/<meta http-equiv="Content-Security-Policy" content="([^"]*)">/);
+    expect(match).not.toBeNull();
+    const actualCsp = match?.[1] ?? '';
+
+    // nonceは`render()`のたびに乱数で変わるため、実際に埋め込まれたnonceを抜き出して
+    // 期待値の組み立てに使う（値そのものの一致ではなく、組み立て方が変わっていないことを見る）
+    const nonceMatch = actualCsp.match(/script-src 'nonce-([^']+)'/);
+    expect(nonceMatch).not.toBeNull();
+    const nonce = nonceMatch?.[1] ?? '';
+
+    // 集約前にこのファイルへ直接手組みしていたディレクティブ列
+    // （`"default-src 'none'"`, `style-src ${cspSource} 'unsafe-inline'`,
+    // `script-src 'nonce-${nonce}'`を`; `で結合）と同一の値になることを確かめる。
+    // この画面は画像を扱わないため`includeImgData: false`（既定はtrueで`img-src data:`が付く）
+    const expectedCsp = chatCsp('https://fake-webview.test', nonce, { includeImgData: false });
+
+    expect(actualCsp).toBe(expectedCsp);
+    expect(actualCsp).toBe(
+      "default-src 'none'; style-src https://fake-webview.test 'unsafe-inline'; " +
+        `script-src 'nonce-${nonce}'`,
+    );
   });
 });

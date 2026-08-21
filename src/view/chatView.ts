@@ -37,7 +37,6 @@ import type { PromptSubmission } from '../appserver/prompts';
 import { MESSAGING_MCP_SERVER_NAME } from '../orchestrator/messaging';
 import type {
   ApprovalHandler,
-  ApprovalOutcome,
   TaskSession,
   TaskSessionHost,
   TaskSessionInput,
@@ -70,15 +69,7 @@ import { readPersistedThreadId } from './panelState';
 import { isEditableKey, type SettingsProvider } from './settingsProvider';
 import {
   addAttachment,
-  confirmClaudeImport,
   confirmCompact,
-  confirmDebugCommand,
-  confirmMemoryAppend,
-  confirmRevertDiff,
-  confirmRewindFiles,
-  confirmRunShellCommand,
-  confirmStopBackgroundTask,
-  confirmUsageCreditsRequest,
   handleOpenDiffEditor,
   handleOpenDiffFile,
   handleRevertDiff,
@@ -92,41 +83,7 @@ import {
   runExportTranscript,
   STATE_POST_INTERVAL_MS,
   type ChatActivity,
-  type ChatShellOptions,
 } from './chatShared';
-
-/**
- * 以下は`chatShared.ts`（issue #403）へ移した、プロバイダ非依存の共有ヘルパーの
- * 再輸出。元は本ファイルに定義があり、`claudeChatView.ts`がここから輸入していた
- * （Claude Code側がCodex用ファイルに依存する非対称な構造だった）。移動後も
- * 既存の輸入元（本ファイル・テスト）を壊さないよう、ここで再輸出しておく。
- */
-export {
-  addAttachment,
-  confirmClaudeImport,
-  confirmCompact,
-  confirmDebugCommand,
-  confirmMemoryAppend,
-  confirmRevertDiff,
-  confirmRewindFiles,
-  confirmRunShellCommand,
-  confirmStopBackgroundTask,
-  confirmUsageCreditsRequest,
-  handleOpenDiffEditor,
-  handleOpenDiffFile,
-  handleRevertDiff,
-  insertCodeIntoEditor,
-  noteDropRejected,
-  openCodeInNewFile,
-  postFileMentions,
-  postImageData,
-  renderShell,
-  reportTurnResult,
-  runExportTranscript,
-  STATE_POST_INTERVAL_MS,
-  type ChatActivity,
-  type ChatShellOptions,
-};
 
 const VIEW_TYPE = 'codex.chat';
 
@@ -157,38 +114,15 @@ const SIDE_QUESTION_TAB_TITLE = '脇道';
 const MCP_STARTUP_CHECK_TIMEOUT_MS = 8_000;
 
 interface ChatPanel extends BaseChatPanel {
-  /**
-   * 今そのタブが開いているか。`undefined` はタブが閉じられている状態を表す。
-   *
-   * タスク管理下のセッション（`taskManaged: true`）は、タブを閉じてもこのエントリ自体は
-   * `panels` に残り続ける（design.md §16.10「セッションの寿命をパネルから切り離す」）。
-   * `reveal()` / `open()` はこの値が `undefined` ならパネルを作り直す。
-   */
-  panel: vscode.WebviewPanel | undefined;
+  // `panel` / `loop` / `disposed` / `title` / `taskManaged` / `postTimer` /
+  // `approvalResolvedListeners` / `notifiedApprovalRequestIds` は`BaseChatPanel`
+  // （chatManagerBase.ts）が定義済み（issue #420、#410のフォローアップ）。ここでは
+  // 基底の`ChatSessionLike`より狭い`ChatSession`へ絞るため`session`だけ再宣言する
   session: ChatSession;
-  /** この画面で走らせているループ。走っていなければ待機状態のまま。 */
-  loop: LoopController;
   /** 作業記録に載せるディレクトリ。resume時はセッション自身のcwd。 */
   cwd: string | undefined;
   /** 送信前の添付画像。送るまでここに溜める。 */
   attachments: AttachmentBox;
-  /**
-   * 破棄済みか。
-   *
-   * 保留中の承認を解放すると、その結果の通知が破棄後に届くことがある。破棄済みの
-   * セッションへ送るとVSCodeが例外を投げるため、ここで止める。`panel === undefined`
-   * とは別の概念（タスク管理下のセッションはタブが閉じても破棄されない）。
-   */
-  disposed: boolean;
-  /** パネルの見出し。タブが閉じている間もタイトルを見失わないよう、パネルとは別に保持する。 */
-  title: string;
-  /**
-   * タスク（オーケストレータ）管理下のセッションか。
-   *
-   * `true` の場合だけタブを閉じてもセッションを維持する（design.md §16.10の4）。
-   * 人が手で開いた画面（`false`）は従来通りタブを閉じたらセッションも終わる。
-   */
-  taskManaged: boolean;
   /**
    * タスク単位の設定。指定されていれば、この画面からの送信は常にこちらを使い、
    * `readConfig().codex`（拡張機能のグローバル設定）を見ない（design.md §16.10の5）。
@@ -209,8 +143,6 @@ interface ChatPanel extends BaseChatPanel {
   stateListeners: Array<(state: ChatState) => void>;
   /** `TaskSession.onFinished` のリスナー。 */
   finishedListeners: Array<(reason: LoopStopReason, state: ChatState) => void>;
-  /** `TaskSession.onApprovalResolved` のリスナー。 */
-  approvalResolvedListeners: Array<(outcome: ApprovalOutcome) => void>;
   /**
    * `mcpServer/startupStatus/updated`通知（design.md §16.21）を待つリスナー。
    * `checkMessagingToolVisible`がツールの可視性を確かめるために使う。この通知は
@@ -218,8 +150,6 @@ interface ChatPanel extends BaseChatPanel {
    * （`ChatSession.applyNotification`へは転送しない。`routeNotification`参照）。
    */
   mcpStartupListeners: Array<(name: string, status: string) => void>;
-  /** 状態送信の間引き（issue #246）。予約中のタイマー。 */
-  postTimer?: ReturnType<typeof setTimeout> | undefined;
   /** 状態送信の間引き（issue #246）。最後に実際へ送った時刻。 */
   lastPostAt?: number | undefined;
   /**
@@ -230,17 +160,6 @@ interface ChatPanel extends BaseChatPanel {
    * （`stateFull`）に戻す。
    */
   sentItems?: readonly ChatItem[] | undefined;
-  /**
-   * 通知を出した承認要求の`requestId`（issue #286）。`String(requestId)`で持つ
-   * （requestIdは`number | string`のどちらも来るため、Setのキーとして安定させる）。
-   *
-   * 一度でも通知の要否を判定した`requestId`はここへ積み、二度と判定し直さない
-   * （タブの表示・非表示が何度切り替わっても、同じ承認要求で通知を重複させない）。
-   * 「見えているか」は通知するかどうかを決めた**その瞬間**の`entry.panel?.visible`
-   * だけを見る。後から可視性が変わっても、既に判定済みの要求を再評価しない
-   * （`notifyNewApprovals`参照）。
-   */
-  notifiedApprovalRequestIds: Set<string>;
 }
 
 /**
@@ -424,6 +343,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     for (const entry of this.allPanels()) {
       try {
         entry.session.releasePendingApprovals();
+        // `turn/start`等を待っている最中に切れた場合、`busy: true`のままでは
+        // 応答が二度と来ず画面が固まる。Claude側と同じ`turnFailed`まで戻す（issue #420）
+        entry.session.markTurnFailed();
       } catch (e) {
         const reason = e instanceof Error ? e.message : String(e);
         this.log.error(`接続断の後始末に失敗しました: ${reason}`);

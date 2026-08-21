@@ -123,6 +123,34 @@ describe('接続断で保留中の承認・問い合わせを解放する（issu
   });
 });
 
+describe('接続断でbusyが戻らない問題を直す（issue #420）', () => {
+  it('turn/start応答待ち中に接続が切れたら、markTurnFailed()でbusyがfalse・turnFailedがtrueに戻る', async () => {
+    const { session } = fakeSession();
+    await session.start('/w', config());
+
+    // send()はturn/startの応答を待つ間busy: trueのまま。fakeSessionのconnectionは
+    // 即座に解決するため、ここでは接続断の後始末（releasePendingApprovals→
+    // markTurnFailed）だけを取り出して呼び、`chatView.ts`のhandleConnectionLostと
+    // 同じ順番で呼ばれることを確かめる
+    session.releasePendingApprovals();
+    session.markTurnFailed();
+
+    const state = session.getState();
+    expect(state.busy).toBe(false);
+    expect(state.turnFailed).toBe(true);
+  });
+
+  it('応答中でない（busy: false）ときに呼んでも安全（turnFailedが立つだけ）', () => {
+    const { session } = fakeSession();
+
+    session.markTurnFailed();
+
+    const state = session.getState();
+    expect(state.busy).toBe(false);
+    expect(state.turnFailed).toBe(true);
+  });
+});
+
 describe('dispose()でdeniedReviewsも解放する（issue #354・3点目）', () => {
   it('dispose後は覚えていた覆し履歴が消え、approveDeniedReviewが何も送らない', async () => {
     const { session, sent } = fakeSession();

@@ -11,7 +11,7 @@ import {
   MEMORY_LAST_SELECTED_PATH_KEY,
   type MemoryModeMemento,
 } from '../../src/provider/inputModes';
-import { STATE_POST_INTERVAL_MS, type ChatActivity } from '../../src/view/chatView';
+import { STATE_POST_INTERVAL_MS, type ChatActivity } from '../../src/view/chatShared';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import {
   buildClaudeChatPanelOptions,
