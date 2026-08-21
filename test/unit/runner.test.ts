@@ -26,6 +26,7 @@ import type {
   PullRequestLayerConfig,
 } from '../../src/orchestrator/forge';
 import { integrationPath } from '../../src/orchestrator/pseudoWorktree';
+import type { RoadmapFileSystemPort } from '../../src/orchestrator/roadmap';
 import type {
   PseudoWorktreeDirEntry,
   PseudoWorktreeFileStat,
@@ -647,6 +648,8 @@ function createHarness(
     forge?: WorkflowRunnerForgeDeps;
     pseudoWorktree?: { fs: PseudoWorktreeFileSystemPort; exclude: readonly string[] };
     messaging?: WorkflowRunnerMessagingDeps;
+    roadmap?: { fs: RoadmapFileSystemPort };
+    log?: Logger;
   },
 ): Harness {
   const codexHost = new FakeHost();
@@ -662,7 +665,7 @@ function createHarness(
     fs: options?.fs ?? identityFs,
     filePort: filePort(yaml),
     store,
-    log: fakeLogger,
+    log: options?.log ?? fakeLogger,
     readBaseline: () => ({
       codexSandbox: options?.codexSandbox ?? 'read-only',
       codexApprovalMode: options?.codexApprovalMode ?? 'on-request',
@@ -673,6 +676,7 @@ function createHarness(
     ...(options?.forge !== undefined ? { forge: options.forge } : {}),
     ...(options?.pseudoWorktree !== undefined ? { pseudoWorktree: options.pseudoWorktree } : {}),
     ...(options?.messaging !== undefined ? { messaging: options.messaging } : {}),
+    ...(options?.roadmap !== undefined ? { roadmap: options.roadmap } : {}),
     randomId: () => `00000000-0000-4000-8000-${String((seq += 1)).padStart(12, '0')}`,
   });
   return { runner, codexHost, claudeHost, store, git };
@@ -4995,5 +4999,133 @@ tasks:
 
     expect(outcome.accepted).toBe(false);
     expect(outcome.reason).toContain("T9");
+  });
+});
+
+describe('WorkflowRunner: ロードマップの警告をログへ届ける（design.md §16.19、Issue #408）', () => {
+  const ROADMAP_YAML = `
+version: 1
+name: roadmap-warn-test
+roadmap: "docs/roadmap/g.md"
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+  // Issue行はあるが番号として読めない実例（`roadmap.test.ts`の同種の文言と同じ形）。
+  // `applyRunCompletionToFile`経由の`applyRunCompletion`が返す`warnings`に1件積まれる想定
+  const ROADMAP_MD_WITH_WARNING = `# g
+
+## Phase 1
+
+- [ ] T1 foo
+  - Issue: 未起票（着手時に起票する）
+`;
+
+  it('runが終わったとき、ロードマップのパース警告がlog.warn経由で人へ届く（受入基準: 警告が人へ届く）', async () => {
+    const warnCalls: string[] = [];
+    const log: Logger = {
+      info: () => undefined,
+      warn: (message) => warnCalls.push(message),
+      error: () => undefined,
+      show: () => undefined,
+    };
+    const roadmapFs: RoadmapFileSystemPort = {
+      readTextFile: async () => ROADMAP_MD_WITH_WARNING,
+      writeTextFile: async () => undefined,
+    };
+    const { runner, codexHost } = createHarness(ROADMAP_YAML, {
+      log,
+      roadmap: { fs: roadmapFs },
+    });
+    const result = await runner.start('/repo/.agents/workflows/roadmap-warn.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const roadmapWarnLogs = warnCalls.filter((message) =>
+      message.startsWith(`[workflow ${runId}] ロードマップの警告:`),
+    );
+    expect(roadmapWarnLogs).toHaveLength(1);
+    expect(roadmapWarnLogs[0]).toContain('T1: Issue行を番号として読み取れませんでした');
+  });
+
+  it('ロードマップの警告が複数件あれば、その件数分だけlog.warnが呼ばれる', async () => {
+    const warnCalls: string[] = [];
+    const log: Logger = {
+      info: () => undefined,
+      warn: (message) => warnCalls.push(message),
+      error: () => undefined,
+      show: () => undefined,
+    };
+    const twoWarningsMd = `# g
+
+## Phase 1
+
+- [ ] T1 foo
+  - Issue: 未起票（着手時に起票する）
+- [z] broken checkbox line
+`;
+    const roadmapFs: RoadmapFileSystemPort = {
+      readTextFile: async () => twoWarningsMd,
+      writeTextFile: async () => undefined,
+    };
+    const { runner, codexHost } = createHarness(ROADMAP_YAML, {
+      log,
+      roadmap: { fs: roadmapFs },
+    });
+    const result = await runner.start('/repo/.agents/workflows/roadmap-warn-2.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const roadmapWarnLogs = warnCalls.filter((message) =>
+      message.startsWith(`[workflow ${runId}] ロードマップの警告:`),
+    );
+    expect(roadmapWarnLogs).toHaveLength(2);
+  });
+
+  it('ロードマップの警告が無ければ、ロードマップの警告経由のlog.warnは呼ばれない', async () => {
+    const warnCalls: string[] = [];
+    const log: Logger = {
+      info: () => undefined,
+      warn: (message) => warnCalls.push(message),
+      error: () => undefined,
+      show: () => undefined,
+    };
+    const cleanMd = `# g
+
+## Phase 1
+
+- [ ] T1 foo
+  - 依存: なし
+`;
+    const roadmapFs: RoadmapFileSystemPort = {
+      readTextFile: async () => cleanMd,
+      writeTextFile: async () => undefined,
+    };
+    const { runner, codexHost } = createHarness(ROADMAP_YAML, {
+      log,
+      roadmap: { fs: roadmapFs },
+    });
+    const result = await runner.start('/repo/.agents/workflows/roadmap-clean.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const roadmapWarnLogs = warnCalls.filter((message) =>
+      message.startsWith(`[workflow ${runId}] ロードマップの警告:`),
+    );
+    expect(roadmapWarnLogs).toEqual([]);
   });
 });
