@@ -771,15 +771,10 @@ export class AppServerClient {
         buffer += chunk.toString('utf8');
         const { messages, rest, overflow } = consumeFrames(buffer);
         buffer = rest;
-        if (overflow) {
-          // 改行を含まない出力が上限を超えて溜まり続けた（issue #402、1点目）。単発の
-          // 問い合わせなので、既に決着させる作りの`finish`へそのまま寄せて打ち切る
-          finish({
-            ok: false,
-            error: `app-serverからの出力が上限（${MAX_LINE_BUFFER_BYTES}バイト）を超えて改行なしで届きました`,
-          });
-          return;
-        }
+        // 完成した行（messages）は、上限超過の判定より先に処理する（レビュー指摘・MEDIUM）。
+        // overflowを先に見て早期returnすると、同じチャンクの中に「正常に完成した応答」と
+        // 「上限超過の未完成行」が同居していた場合、正常に届いていた応答まで握りつぶして
+        // しまう（本来成功していた応答が失敗応答へすり替わってしまう）
         for (const message of messages) {
           if (typeof message.id === 'number') {
             pending.get(message.id)?.(message);
@@ -791,6 +786,25 @@ export class AppServerClient {
               listener(message);
             }
           }
+        }
+        if (overflow) {
+          // 改行を含まない出力が上限を超えて溜まり続けた（issue #402、1点目）。単発の
+          // 問い合わせなので、既に決着させる作りの`finish`へそのまま寄せて打ち切る。
+          //
+          // ただし`finish`をここで同期的に呼ぶと、直前の`for`ループで応答を受け取った
+          // 直後の`request()`（Promiseは既に解決済み）が、`body`側の`await`の続き
+          // （`.then`のマイクロタスク）を消化する前に`settled`を先取りしてしまい、
+          // 本来成功していた応答が失敗応答へすり替わる（レビュー指摘・MEDIUM）。
+          // `setImmediate`（マクロタスク）まで遅らせることで、既に受け取り済みの応答を
+          // 使い切る`body`の同期的な後続処理（追加のI/O待ちが無い部分）を先に終わらせて
+          // から`finish`する。`body`がまだ別の応答を待っている場合はどのみち届かないため、
+          // 遅らせても結果は変わらない
+          setImmediate(() => {
+            finish({
+              ok: false,
+              error: `app-serverからの出力が上限（${MAX_LINE_BUFFER_BYTES}バイト）を超えて改行なしで届きました`,
+            });
+          });
         }
       });
 

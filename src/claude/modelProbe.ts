@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { killWithEscalation } from '../codex/jsonRpc';
 import type { ModelInfo } from '../codex/modelCatalog';
 import type { Logger } from '../log';
 import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
@@ -40,7 +41,9 @@ export class ClaudeModelProbe {
         }
         settled = true;
         clearTimeout(timer);
-        proc.kill();
+        // SIGTERMに応答しないハングしたプロセスも回収できるよう、SIGKILLへの
+        // エスカレーションを共通処理へ寄せる（issue #402、2点目のLOW対応）。
+        killWithEscalation(proc);
         resolve(models);
       };
 

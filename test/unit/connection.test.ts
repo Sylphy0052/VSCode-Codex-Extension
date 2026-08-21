@@ -220,6 +220,43 @@ describe('AppServerConnection: 受信バッファの上限（issue #402、1点�
     expect(proc.kill).not.toHaveBeenCalled();
     expect(onDisconnect).not.toHaveBeenCalled();
   });
+
+  it('同じチャンクに正常な応答と上限超過の未完成行が同居しても、正常な応答は処理される（レビュー指摘・MEDIUM）', async () => {
+    const proc = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(proc.proc);
+    const onDisconnect = vi.fn();
+    const connection = new AppServerConnection(
+      () => 'codex',
+      fakeLogger(),
+      () => undefined,
+      async () => undefined,
+      onDisconnect,
+    );
+
+    const started = connection.ensureStarted();
+    const initId = initializeRequestId(proc.writes);
+    proc.emitStdout(JSON.stringify({ jsonrpc: '2.0', id: initId, result: {} }));
+    await started;
+
+    // `request()`で送った要求の応答を、完成した行として先頭に置く
+    const pending = connection.request('thread/fork', { threadId: 'a', lastTurnId: 'b' });
+    const forkId = (JSON.parse(proc.writes.at(-1)!.trim()) as { id: number }).id;
+    const responseLine = `${JSON.stringify({ jsonrpc: '2.0', id: forkId, result: { ok: true } })}
+`;
+    // 同じstdoutチャンクの中に、改行を含まない上限超過分（未完成行）を同居させる
+    const overflowTail = 'x'.repeat(MAX_LINE_BUFFER_BYTES + 1);
+    proc.proc.stdout.emit('data', Buffer.from(responseLine + overflowTail));
+
+    // overflowより先にmessagesが処理されるため、正常だった応答は失敗へすり替わらない
+    await expect(pending).resolves.toEqual({
+      jsonrpc: '2.0',
+      id: forkId,
+      result: { ok: true },
+    });
+    // その後、上限超過分でreset()（接続断）は起きる
+    expect(proc.kill).toHaveBeenCalledTimes(1);
+    expect(onDisconnect).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('AppServerConnection: 通常起動後の接続断（issue #354・2点目の土台）', () => {

@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Logger } from '../../src/log';
-import type { JsonRpcMessage } from '../../src/codex/jsonRpc';
+import { MAX_LINE_BUFFER_BYTES, type JsonRpcMessage } from '../../src/codex/jsonRpc';
 
 /**
  * issue #402（T17: ストリーム受信とプロセス終了の頑健性）の2点目・3点目を、
@@ -185,5 +185,43 @@ describe('AppServerClient: finish()後のpending解放（issue #402、3点目）
     expect(result.ok).toBe(false);
     // `probe/second`の応答待ちがfinish()でエラー値により解決され、bodyの続きが実行された
     expect(seen).toEqual(['first-resolved', 'second-resolved']);
+  });
+});
+
+describe('AppServerClient: 受信バッファの上限（issue #402、1点目・レビュー指摘のMEDIUM）', () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it('同じチャンクに正常な応答と上限超過の未完成行が同居しても、正常な応答は処理される', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.forkThread(
+      '11111111-1111-1111-1111-111111111111',
+      '22222222-2222-2222-2222-222222222222',
+    );
+
+    // `initialize`に応答して起動シーケンスを終わらせる
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // `thread/fork`への正常な応答を、完成した行として先頭に置く
+    const forkId = requestId(fake.writes, 'thread/fork');
+    const responseLine = `${respond(forkId, {
+      thread: { id: '019fd880-dd5b-7a03-a07a-bfd9a1fc4808' },
+    })}
+`;
+    // 同じstdoutチャンクの中に、改行を含まない上限超過分（未完成行）を同居させる
+    const overflowTail = 'x'.repeat(MAX_LINE_BUFFER_BYTES + 1);
+    fake.proc.stdout.emit('data', Buffer.from(responseLine + overflowTail));
+
+    // overflowより先にmessagesが処理されるため、正常だった応答は失敗へすり替わらない
+    await expect(pending).resolves.toEqual({
+      ok: true,
+      threadId: '019fd880-dd5b-7a03-a07a-bfd9a1fc4808',
+    });
   });
 });

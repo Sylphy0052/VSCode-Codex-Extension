@@ -79,6 +79,26 @@ describe('ClaudeStreamSession: 受信バッファの上限（issue #402、1点�
     expect(proc.kill).not.toHaveBeenCalled();
     expect(session.getState().turnFailed).toBe(false);
   });
+
+  it('同じチャンクに正常なイベントと上限超過の未完成行が同居しても、正常なイベントは処理される（レビュー指摘・MEDIUM）', () => {
+    const { session, proc } = createStartedSession();
+
+    const commandsChangedLine = `${JSON.stringify({
+      type: 'system',
+      subtype: 'commands_changed',
+      commands: [{ name: 'compact', description: '要約する', argumentHint: '' }],
+    })}
+`;
+    // 同じチャンクの中に、改行を含まない上限超過分（未完成行）を同居させる
+    const overflowTail = 'x'.repeat(MAX_LINE_BUFFER_BYTES + 1);
+    session.receive(commandsChangedLine + overflowTail);
+
+    // overflowより先にvaluesが処理されるため、正常だったイベントは握りつぶされない
+    expect(session.commands.map((c) => c.name)).toEqual(['compact']);
+    // その後、上限超過分でセッションは打ち切られる
+    expect(proc.kill).toHaveBeenCalledTimes(1);
+    expect(session.getState().turnFailed).toBe(true);
+  });
 });
 
 describe('ClaudeStreamSession: SIGKILLエスカレーション（issue #402、2点目）', () => {
