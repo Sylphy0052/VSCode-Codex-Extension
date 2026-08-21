@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   codexPaths,
+  executableNameCandidates,
   resolveCodexHome,
   resolveCodexPath,
   type LocatorDeps,
@@ -73,6 +74,57 @@ describe('resolveCodexPath', () => {
       deps({ env: { PATH: '/usr/bin' }, isExecutable: (p) => p === '/usr/bin/codex' }),
     );
     expect(result.ok).toBe(true);
+  });
+});
+
+describe('executableNameCandidates（Windowsの拡張子解決。Issue #404）', () => {
+  it('PATHEXT未設定（Windows以外）なら元の名前だけを候補にする', () => {
+    expect(executableNameCandidates('gh', {})).toEqual(['gh']);
+  });
+
+  it('PATHEXTが空文字なら元の名前だけを候補にする', () => {
+    expect(executableNameCandidates('gh', { PATHEXT: '' })).toEqual(['gh']);
+  });
+
+  it('PATHEXT設定時は元の名前に続けて各拡張子を付けた候補を返す', () => {
+    expect(executableNameCandidates('gh', { PATHEXT: '.COM;.EXE;.BAT;.CMD' })).toEqual([
+      'gh',
+      'gh.COM',
+      'gh.EXE',
+      'gh.BAT',
+      'gh.CMD',
+    ]);
+  });
+
+  it('既に拡張子付きの名前は展開しない（大文字小文字を無視して判定）', () => {
+    expect(executableNameCandidates('gh.exe', { PATHEXT: '.COM;.EXE;.BAT;.CMD' })).toEqual([
+      'gh.exe',
+    ]);
+  });
+});
+
+describe('resolveCodexPath（Windowsの拡張子解決。Issue #404）', () => {
+  it('PATH上に拡張子付き（gh.exe相当）でしか無くても見つかる', () => {
+    const result = resolveCodexPath(
+      '',
+      deps({
+        env: { PATH: 'C:\\tools', PATHEXT: '.COM;.EXE;.BAT;.CMD' },
+        delimiter: ';',
+        isExecutable: (p) => p === 'C:\\tools/codex.EXE',
+      }),
+    );
+    expect(result).toEqual({ ok: true, path: 'C:\\tools/codex.EXE', source: 'path' });
+  });
+
+  it('パス指定の設定値も拡張子省略から解決できる', () => {
+    const result = resolveCodexPath(
+      '/opt/codex/bin/codex',
+      deps({
+        env: { PATHEXT: '.COM;.EXE;.BAT;.CMD' },
+        isExecutable: (p) => p === '/opt/codex/bin/codex.CMD',
+      }),
+    );
+    expect(result).toEqual({ ok: true, path: '/opt/codex/bin/codex.CMD', source: 'setting' });
   });
 });
 
