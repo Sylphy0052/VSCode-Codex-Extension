@@ -11,6 +11,12 @@ on:
       - main
   pull_request:
 
+# 同一ブランチ・同一PRへの連続pushで複数のCI実行が並走しないようにする。
+# 古い実行を残しても結果を使わないため、新しいpushが来たら古い実行はキャンセルする。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # 必要最小限の権限のみ付与する（チェックアウトとログ閲覧のみで足りるためcontents: read）。
 permissions:
   contents: read
@@ -19,6 +25,10 @@ jobs:
   check:
     name: lint / typecheck / test
     runs-on: ubuntu-latest
+    # 既定の360分は長すぎるため妥当な値に短縮する。
+    # ローカルでのscripts/check.sh全体の所要は30秒強であり、依存インストール（npm ci）を
+    # 含めても10分あれば十分に足りるため、10分をタイムアウトとする。
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
