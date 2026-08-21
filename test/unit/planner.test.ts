@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   initialChatState,
   type ChatState,
@@ -476,6 +476,46 @@ describe('extractYamlFromResponse（design.md §16.9「剥がしてからパー�
       '```',
     ].join('\n');
     expect(extractYamlFromResponse(response)).toBe(VALID_YAML);
+  });
+
+  it('候補が複数あってもlooksLikeWorkflowYamlが全滅すれば、先頭の候補へフォールバックする', () => {
+    // 3つの候補いずれも`tasks:`を持たない地の文で、パースはできてもtasks件数が0になる
+    // （＝`looksLikeWorkflowYaml`が全滅する）ケース。JSDoc記載の「全滅なら先頭の候補に
+    // フォールバックし、後続の検証エラーとして扱う」分岐を確認する（#400コードレビュー
+    // 指摘 minor 2）
+    const firstCandidate = '前置きの方針です。';
+    const response = [
+      '```',
+      firstCandidate,
+      '```',
+      '```yaml',
+      '別の方針の説明です。',
+      '```',
+      '```yml',
+      'さらに別の説明です。',
+      '```',
+    ].join('\n');
+    expect(extractYamlFromResponse(response)).toBe(firstCandidate);
+  });
+
+  it('候補フェンスがMAX_YAML_FENCE_CANDIDATESを超えると、超過分を切り捨てて警告を残す（#400コードレビュー指摘 medium 1）', () => {
+    // 上限を超える数の偽候補（tasksを持たない地の文）の後ろに本物のYAMLフェンスを置く。
+    // 個数の上限で足切りされるため、本物までは辿り着けず先頭候補へフォールバックする
+    const decoyCount = 24;
+    const decoys = Array.from({ length: decoyCount }, () => ['```', '地の文です。', '```'].join('\n'));
+    const response = [...decoys, '```yaml', VALID_YAML, '```'].join('\n');
+
+    const warnCalls: string[] = [];
+    const recordingLogger: Logger = {
+      ...fakeLogger,
+      warn: (m) => warnCalls.push(m),
+    };
+
+    const result = extractYamlFromResponse(response, recordingLogger);
+
+    expect(result).toBe('地の文です。');
+    expect(warnCalls).toHaveLength(1);
+    expect(warnCalls[0]).toMatch(/20件を超えたため5件を切り捨てました/);
   });
 });
 
@@ -963,13 +1003,26 @@ describe('validateSlugInput（issue #328）', () => {
 });
 
 describe('sendSingleTurn: タイムアウト（issue #389 根拠3）', () => {
+  // 実時間の`setTimeout`に依存させず（#400コードレビュー指摘 minor 1）、フェイクタイマーで
+  // 決定的に進める。既存の作法は`test/unit/runner.test.ts`の
+  // 「replyTimeoutSecを超えたwaitingReplyは...」テスト（`vi.useFakeTimers()` →
+  // `vi.advanceTimersByTimeAsync(...)`）と`test/unit/chatViewManager.test.ts`の
+  // `beforeEach`（`vi.useFakeTimers({ shouldAdvanceTime: true })`）を参照した
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('タイムアウトで打ち切られ、interruptが呼ばれ、セッションが解放される', async () => {
+    vi.useFakeTimers();
     const host = new FakeHangingHost();
     const input = buildPlannerSessionInput('codex', '/repo');
 
-    await expect(sendSingleTurn(host, 'codex', input, 'goal', 20)).rejects.toThrow(
-      /打ち切りました/,
-    );
+    const promise = sendSingleTurn(host, 'codex', input, 'goal', 20);
+    // `rejects`のハンドラを先に登録してから進める（先にタイマーだけ進めると、
+    // rejectが同期的に確定してから`.rejects`が付くまでの間unhandled rejectionになる）
+    const assertion = expect(promise).rejects.toThrow(/打ち切りました/);
+    await vi.advanceTimersByTimeAsync(20);
+    await assertion;
 
     const session = host.sessions[0];
     expect(session).toBeDefined();
@@ -978,12 +1031,16 @@ describe('sendSingleTurn: タイムアウト（issue #389 根拠3）', () => {
   });
 
   it('タイムアウト後にonFinishedが遅れて届いても、二重にresolve/rejectされずdisposeも1回のまま', async () => {
+    vi.useFakeTimers();
     const host = new FakeHangingHost();
     const input = buildPlannerSessionInput('codex', '/repo');
 
-    await expect(sendSingleTurn(host, 'codex', input, 'goal', 20)).rejects.toThrow(
-      /打ち切りました/,
-    );
+    const promise = sendSingleTurn(host, 'codex', input, 'goal', 20);
+    // `rejects`のハンドラを先に登録してから進める（先にタイマーだけ進めると、
+    // rejectが同期的に確定してから`.rejects`が付くまでの間unhandled rejectionになる）
+    const assertion = expect(promise).rejects.toThrow(/打ち切りました/);
+    await vi.advanceTimersByTimeAsync(20);
+    await assertion;
 
     const session = host.sessions[0];
     expect(session).toBeDefined();

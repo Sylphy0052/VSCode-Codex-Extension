@@ -6,7 +6,7 @@ import { SANDBOX_MODES, type ApprovalMode } from '../codex/types';
 import { LOOP_ITERATION_LIMIT } from '../loop/loopController';
 import type { Logger } from '../log';
 import { DANGER_PATTERN_IDS } from './escalation';
-import { stripControlChars } from './sanitize';
+import { sanitizeForLog, stripControlChars } from './sanitize';
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { TaskSessionHost, TaskSessionInput } from './taskSession';
 import { formatUntrusted, sanitizeInlineText } from './untrustedText';
@@ -355,6 +355,26 @@ const FENCE_BLOCK_PATTERN = /```([A-Za-z0-9_+-]*)\r?\n([\s\S]*?)```/g;
 /** コードフェンスが無いとき、YAMLのルートキーが現れる行を本文の開始とみなす。 */
 const ROOT_KEY_PATTERN = /^(version|name|defaults|tasks)\s*:/m;
 
+/**
+ * `looksLikeWorkflowYaml`によるフル解析（YAMLパース）にかける候補フェンスの個数の上限
+ * （#400コードレビュー指摘 medium 1）。
+ *
+ * 候補ごとのサイズは`MAX_WORKFLOW_FILE_BYTES`で足切りしているが、候補の**個数**には
+ * 上限が無かった。`candidates.find(looksLikeWorkflowYaml)`は成功する候補が見つかるまで
+ * 先頭から順に`parseWorkflowYaml`を呼ぶため、大量の偽フェンス（例: 数千個）を含む応答では
+ * 拡張機能ホスト（シングルスレッド）のメインスレッドを一時的に占有しうる。
+ *
+ * 「フルパースの前に軽量な文字列チェックを挟む」案ではなく、候補の個数そのものに
+ * 上限を設ける案を選んだ。軽量チェック（例: `tasks:`行の有無）は悪意ある応答が
+ * 各偽フェンスへ`tasks:`という文字列を混ぜるだけで素通りしてしまい、処理量の上限を
+ * 保証できない。個数の上限は応答の中身に関わらず処理量を頭打ちにできる。
+ *
+ * 20件という値は、実際の分解セッションの応答が持つフェンス数（通常1、検証エラーを
+ * 添えた再生成の説明を含めてもせいぜい数個）に対して十分な余裕を残しつつ、
+ * 悪意ある大量偽フェンスによる処理コストを頭打ちにする値として、監査の推奨に合わせた。
+ */
+const MAX_YAML_FENCE_CANDIDATES = 20;
+
 interface FenceBlock {
   lang: string;
   content: string;
@@ -401,14 +421,18 @@ function looksLikeWorkflowYaml(content: string): boolean {
  * 優先順位:
  * 1. 応答中の全コードフェンスのうち、言語タグが`yaml`/`yml`または無指定のものを候補にする
  *    （`bash`等の他言語タグを持つフェンスは候補から除く。issue #389 根拠1）
- * 2. 候補が1つならそれを使う。複数あれば、`looksLikeWorkflowYaml`でパースに成功した
- *    最初の候補を使う（全滅なら先頭の候補にフォールバックし、後続の検証エラーとして扱う）
+ * 2. 候補が1つならそれを使う。複数あれば、先頭`MAX_YAML_FENCE_CANDIDATES`件のうち
+ *    `looksLikeWorkflowYaml`でパースに成功した最初の候補を使う（全滅なら先頭の候補に
+ *    フォールバックし、後続の検証エラーとして扱う）
  * 3. フェンスの候補が無ければ、ルートキー（version/name/defaults/tasks）が最初に現れる
  *    行から末尾まで
  * 4. それも無ければ応答全体。4)はほぼ確実にparseWorkflowYamlが例外を投げ、通常の
  *    再試行経路に合流する。
+ *
+ * `log`を渡すと、候補数が`MAX_YAML_FENCE_CANDIDATES`を超えて切り捨てた場合に警告を残す
+ * （黙って切り捨てない）。
  */
-export function extractYamlFromResponse(response: string): string {
+export function extractYamlFromResponse(response: string, log?: Logger): string {
   const blocks = extractFenceBlocks(response);
   const candidates = blocks.filter(
     (b) => b.lang === '' || b.lang === 'yaml' || b.lang === 'yml',
@@ -417,7 +441,15 @@ export function extractYamlFromResponse(response: string): string {
     return (candidates[0]?.content ?? '').trim();
   }
   if (candidates.length > 1) {
-    const best = candidates.find((b) => looksLikeWorkflowYaml(b.content)) ?? candidates[0];
+    const searchCandidates = candidates.slice(0, MAX_YAML_FENCE_CANDIDATES);
+    if (searchCandidates.length < candidates.length) {
+      log?.warn(
+        `[planner] 応答中のYAMLフェンス候補が${candidates.length}件あり、上限` +
+          `${MAX_YAML_FENCE_CANDIDATES}件を超えたため${candidates.length - searchCandidates.length}件を切り捨てました`,
+      );
+    }
+    const best =
+      searchCandidates.find((b) => looksLikeWorkflowYaml(b.content)) ?? searchCandidates[0];
     return (best?.content ?? '').trim();
   }
   const rootKeyMatch = ROOT_KEY_PATTERN.exec(response);
@@ -901,6 +933,7 @@ export async function sendSingleTurn(
   input: TaskSessionInput,
   prompt: string,
   timeoutMs: number = PLANNER_TURN_TIMEOUT_MS,
+  log?: Logger,
 ): Promise<string> {
   assertPlannerSessionIsSafe(provider, input);
   const session = await host.openTaskSession(input);
@@ -915,8 +948,14 @@ export async function sendSingleTurn(
         }
         settled = true;
         // 完了・失敗を待たず投げっぱなしにする（interrupt自体がハングしても、
-        // このタイムアウトが打ち切りとして確定することを妨げない）
-        void session.interrupt().catch(() => undefined);
+        // このタイムアウトが打ち切りとして確定することを妨げない）。ただし、
+        // interrupt()自体が失敗した場合はCLIプロセスが残り続けている可能性があるため、
+        // 内部情報（スタックトレース・絶対パス・プロンプト全文）を含まない形で
+        // ログには残す（#400コードレビュー指摘 low 2。完全に握り潰さない）
+        void session.interrupt().catch((e: unknown) => {
+          const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+          log?.warn(`[planner] タイムアウト後のinterrupt()に失敗しました: ${message}`);
+        });
         reject(
           new Error(
             `分解セッションのターンが${timeoutMs}ミリ秒以内に完了しなかったため打ち切りました`,
@@ -960,8 +999,9 @@ export async function sendSingleTurn(
 function extractAndRepair(
   response: string,
   provider: Provider,
+  log?: Logger,
 ): { yaml: string; dropped: DroppedTemplateRef[] } {
-  const extracted = extractYamlFromResponse(response);
+  const extracted = extractYamlFromResponse(response, log);
   const repaired = dropUndeclaredTemplateRefs(extracted);
   // 分解に使ったエージェントを実行にも引き継ぐ（issue #321）。プロンプトで指示しても
   // 書かれないことがあるため、検証にかける前に補う。明示されていれば上書きしない
@@ -995,8 +1035,15 @@ export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkfl
     // 分解に使ったエージェントを、そのまま実行にも使う（issue #321）
     provider: input.provider,
   });
-  const firstResponse = await sendSingleTurn(input.host, input.provider, sessionInput, firstPrompt);
-  const first = extractAndRepair(firstResponse, input.provider);
+  const firstResponse = await sendSingleTurn(
+    input.host,
+    input.provider,
+    sessionInput,
+    firstPrompt,
+    PLANNER_TURN_TIMEOUT_MS,
+    input.log,
+  );
+  const first = extractAndRepair(firstResponse, input.provider, input.log);
   const firstYaml = first.yaml;
   const firstAttempt = tryParseAndValidate(firstYaml);
   if (firstAttempt.ok && firstAttempt.definition !== undefined) {
@@ -1021,8 +1068,10 @@ export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkfl
     input.provider,
     sessionInput,
     retryPrompt,
+    PLANNER_TURN_TIMEOUT_MS,
+    input.log,
   );
-  const second = extractAndRepair(secondResponse, input.provider);
+  const second = extractAndRepair(secondResponse, input.provider, input.log);
   const secondYaml = second.yaml;
   const secondAttempt = tryParseAndValidate(secondYaml);
   if (secondAttempt.ok && secondAttempt.definition !== undefined) {
