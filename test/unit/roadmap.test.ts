@@ -284,6 +284,17 @@ describe('parseRoadmapMarkdown: Issue行の揺れ（Issue #408 根拠1）', () =
     expect(parsed.phases[0]?.items[0]?.issueUnparseable).toBe(false);
     expect(parsed.warnings).toEqual([]);
   });
+
+  it('idに双方向制御文字・ゼロ幅文字を含む場合、Issue行未解釈の警告から無害化前のidが残らない', () => {
+    const rtlOverride = String.fromCodePoint(0x202e);
+    const zeroWidth = String.fromCodePoint(0x200b);
+    const poisonedId = `R1${rtlOverride}evil${zeroWidth}`;
+    const md = `# g\n\n## Phase 1\n\n- [ ] ${poisonedId} foo\n  - Issue: 未起票（着手時に起票する）\n`;
+    const parsed = parseRoadmapMarkdown(md);
+    expect(parsed.warnings).toHaveLength(1);
+    expect(parsed.warnings[0]?.message).not.toContain(rtlOverride);
+    expect(parsed.warnings[0]?.message).not.toContain(zeroWidth);
+  });
 });
 
 describe(
@@ -317,6 +328,18 @@ describe(
       expect(item?.issue).toBe(1234567890);
       expect(item?.issueUnparseable).toBe(false);
       expect(parsed.warnings).toEqual([]);
+    });
+
+    it('idに双方向制御文字・ゼロ幅文字を含む場合、桁溢れ警告から無害化前のidが残らない', () => {
+      const rtlOverride = String.fromCodePoint(0x202e);
+      const zeroWidth = String.fromCodePoint(0x200b);
+      const poisonedId = `R1${rtlOverride}evil${zeroWidth}`;
+      const overflowing = '9'.repeat(400);
+      const md = `# g\n\n## Phase 1\n\n- [ ] ${poisonedId} foo\n  - Issue: #${overflowing}\n`;
+      const parsed = parseRoadmapMarkdown(md);
+      expect(parsed.warnings).toHaveLength(1);
+      expect(parsed.warnings[0]?.message).not.toContain(rtlOverride);
+      expect(parsed.warnings[0]?.message).not.toContain(zeroWidth);
     });
   },
 );
@@ -493,6 +516,64 @@ describe('validateRoadmap', () => {
 `;
     const result = validateRoadmap(parseRoadmapMarkdown(md));
     expect(result.errors.length).toBeGreaterThanOrEqual(2);
+  });
+
+  describe('双方向制御文字・ゼロ幅文字を含むidの無害化（Trojan Source対策、sanitizeForLog）', () => {
+    const rtlOverride = String.fromCodePoint(0x202e);
+    const zeroWidth = String.fromCodePoint(0x200b);
+    const poisonedId = `R1${rtlOverride}evil${zeroWidth}`;
+
+    it('idの形式不正エラーに、無害化前のidが残らない', () => {
+      const md = `# g\n\n## Phase 1\n\n- [ ] ${poisonedId} a\n  - 依存: なし\n`;
+      const result = validateRoadmap(parseRoadmapMarkdown(md));
+      const formatError = result.errors.find((e) => e.message.includes('id の形式'));
+      expect(formatError).toBeDefined();
+      expect(formatError?.message).not.toContain(rtlOverride);
+      expect(formatError?.message).not.toContain(zeroWidth);
+    });
+
+    it('重複idエラーに、無害化前のidが残らない', () => {
+      const md = `# g
+
+## Phase 1
+
+- [ ] ${poisonedId} a
+  - 依存: なし
+- [ ] ${poisonedId} b
+  - 依存: なし
+`;
+      const result = validateRoadmap(parseRoadmapMarkdown(md));
+      const duplicateError = result.errors.find((e) => e.message.includes('重複'));
+      expect(duplicateError).toBeDefined();
+      expect(duplicateError?.message).not.toContain(rtlOverride);
+      expect(duplicateError?.message).not.toContain(zeroWidth);
+    });
+
+    it('未定義の依存参照エラーに、無害化前の依存名が残らない', () => {
+      const md = `# g\n\n## Phase 1\n\n- [ ] R1 a\n  - 依存: ${poisonedId}\n`;
+      const result = validateRoadmap(parseRoadmapMarkdown(md));
+      const dependsError = result.errors.find((e) => e.message.includes('未定義'));
+      expect(dependsError).toBeDefined();
+      expect(dependsError?.message).not.toContain(rtlOverride);
+      expect(dependsError?.message).not.toContain(zeroWidth);
+    });
+
+    it('循環依存エラーに、無害化前のidが残らない', () => {
+      const md = `# g
+
+## Phase 1
+
+- [ ] ${poisonedId} a
+  - 依存: R2
+- [ ] R2 b
+  - 依存: ${poisonedId}
+`;
+      const result = validateRoadmap(parseRoadmapMarkdown(md));
+      const cycleError = result.errors.find((e) => e.message.includes('循環'));
+      expect(cycleError).toBeDefined();
+      expect(cycleError?.message).not.toContain(rtlOverride);
+      expect(cycleError?.message).not.toContain(zeroWidth);
+    });
   });
 });
 
@@ -692,6 +773,71 @@ describe('detectRoadmapMaterialMismatches（design.md §16.19 2段目の転記�
     );
     const mismatches = detectRoadmapMaterialMismatches(material, def);
     expect(mismatches.some((m) => m.itemId === 'R1' && m.kind === 'issueMismatch')).toBe(true);
+  });
+
+  describe('双方向制御文字・ゼロ幅文字を含むid・依存名の無害化（Trojan Source対策、sanitizeForLog）', () => {
+    const rtlOverride = String.fromCodePoint(0x202e);
+    const zeroWidth = String.fromCodePoint(0x200b);
+    const poisonedId = `R1${rtlOverride}evil${zeroWidth}`;
+
+    it('missingのメッセージから無害化前のidが残らない', () => {
+      const poisonedMaterial: RoadmapMaterialItem[] = [
+        { id: poisonedId, text: '設計する', dependsOn: [], issue: undefined },
+      ];
+      const def = parseWorkflowYaml(['version: 1', 'name: x', 'tasks: []'].join('\n'));
+      const mismatches = detectRoadmapMaterialMismatches(poisonedMaterial, def);
+      const missing = mismatches.find((m) => m.kind === 'missing');
+      expect(missing).toBeDefined();
+      expect(missing?.message).not.toContain(rtlOverride);
+      expect(missing?.message).not.toContain(zeroWidth);
+    });
+
+    it('dependsOnMismatchのメッセージから無害化前のidが残らない（項目id・依存名の両方）', () => {
+      const poisonedMaterial: RoadmapMaterialItem[] = [
+        { id: 'R1', text: '設計する', dependsOn: [], issue: undefined },
+        { id: poisonedId, text: '実装する', dependsOn: ['R1'], issue: undefined },
+      ];
+      const def = parseWorkflowYaml(
+        [
+          'version: 1',
+          'name: x',
+          'tasks:',
+          '  - id: R1',
+          '    prompt: p',
+          '    done: d',
+          `  - id: ${JSON.stringify(poisonedId)}`,
+          '    prompt: p',
+          '    done: d',
+        ].join('\n'),
+      );
+      const mismatches = detectRoadmapMaterialMismatches(poisonedMaterial, def);
+      const mismatch = mismatches.find((m) => m.kind === 'dependsOnMismatch');
+      expect(mismatch).toBeDefined();
+      expect(mismatch?.message).not.toContain(rtlOverride);
+      expect(mismatch?.message).not.toContain(zeroWidth);
+    });
+
+    it('issueMismatchのメッセージから無害化前のidが残らない', () => {
+      const poisonedMaterial: RoadmapMaterialItem[] = [
+        { id: poisonedId, text: '設計する', dependsOn: [], issue: 12 },
+      ];
+      const def = parseWorkflowYaml(
+        [
+          'version: 1',
+          'name: x',
+          'tasks:',
+          `  - id: ${JSON.stringify(poisonedId)}`,
+          '    prompt: p',
+          '    done: d',
+          '    issue: 99',
+        ].join('\n'),
+      );
+      const mismatches = detectRoadmapMaterialMismatches(poisonedMaterial, def);
+      const mismatch = mismatches.find((m) => m.kind === 'issueMismatch');
+      expect(mismatch).toBeDefined();
+      expect(mismatch?.message).not.toContain(rtlOverride);
+      expect(mismatch?.message).not.toContain(zeroWidth);
+    });
   });
 });
 
