@@ -3143,6 +3143,58 @@ tasks:
     const snapshot = runner.getSnapshot(runId);
     expect(snapshot?.warnings.some((w) => w.kind === 'forgeSkipped')).toBe(false);
   });
+
+  it(
+    '最終マージには統合PR/MRの番号（live.integrationPullRequest.number）を明示的に渡す' +
+      '（design.md §16.18・Issue #404の回帰）',
+    async () => {
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      const cli = fakeForgeCli({ prUrl: 'https://github.com/acme/repo/pull/77' });
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { pullRequest: 'integration' }),
+      });
+      const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      const mergeCall = cli.calls.find((c) => c.args[0] === 'pr' && c.args[1] === 'merge');
+      expect(mergeCall?.args).toEqual(['pr', 'merge', '77', '--merge']);
+    },
+  );
+
+  it(
+    '統合PR/MRのURLから番号を取り出せなければ最終マージを飛ばし、' +
+      '「番号が不明」を含む警告を残す（design.md §16.18・Issue #404の回帰）',
+    async () => {
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      // 末尾が10進数にならないURLにして`parsePullRequestNumberFromUrl`が失敗する経路を通す
+      const cli = fakeForgeCli({ prUrl: 'https://github.com/acme/repo/pull/not-a-number' });
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { pullRequest: 'integration' }),
+      });
+      const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      // 番号が不明なので`runFinalMerge`自体がCLIを呼ばない
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+      const snapshot = runner.getSnapshot(runId);
+      const warning = snapshot?.warnings.find((w) => w.kind === 'forgeFailed');
+      expect(warning?.message).toContain('番号が不明');
+    },
+  );
 });
 
 describe('WorkflowRunner: タスクのtypeがコミットメッセージへ反映される（design.md §16.6）', () => {
