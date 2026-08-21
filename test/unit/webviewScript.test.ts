@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { chatScript } from '../../src/view/chatScript';
+import { approvalLevelMeta } from '../../src/provider/approvalLevel';
 import { controlPanelScript } from '../../src/view/controlPanelScript';
 import { workflowScript } from '../../src/view/workflowScript';
 import { workflowStyles } from '../../src/view/workflowStyles';
@@ -18,6 +19,28 @@ const parses = (source: string): void => {
 describe('chatScript', () => {
   it('構文として成立している', () => {
     expect(() => parses(chatScript('Codex', { mode: 'quickPick' }))).not.toThrow();
+  });
+
+  it('承認レベルのメタを注入してもスクリプトが壊れず、両プロバイダで同じ語彙になる', () => {
+    const meta = JSON.stringify(approvalLevelMeta());
+    for (const provider of ['codex', 'claude'] as const) {
+      const source = chatScript(
+        'Codex',
+        { mode: 'quickPick' },
+        false,
+        ['ask', 'auto'],
+        false,
+        true,
+        'ctrlEnter',
+        meta,
+        provider,
+      );
+      expect(() => parses(source)).not.toThrow();
+      expect(source).toContain('全確認');
+      // Shift+Tabは3段階を回す。生の承認方法を直接送る経路は残っていない
+      expect(source).toContain("type: 'approvalLevel'");
+      expect(source).not.toContain("type: 'config', key: 'approvalMode'");
+    }
   });
 
   it('プロバイダ名を差し替えても壊れない', () => {
@@ -159,16 +182,25 @@ describe('chatScript', () => {
 
 describe('controlPanelScript', () => {
   it('構文として成立している', () => {
-    expect(() => parses(controlPanelScript())).not.toThrow();
+    expect(() => parses(controlPanelScript(JSON.stringify(approvalLevelMeta())))).not.toThrow();
+  });
+
+  it('承認レベルのメタを注入してもスクリプトが壊れない', () => {
+    const source = controlPanelScript(JSON.stringify(approvalLevelMeta()));
+    expect(() => parses(source)).not.toThrow();
+    // 表示名の定義元は src/provider/approvalLevel.ts。ここへ書き写していないことを、
+    // 注入された値が実際に含まれることで確かめる
+    expect(source).toContain('全確認');
+    expect(source).toContain("type: 'updateApprovalLevel'");
   });
 
   it('セクションを開いたときにtoggleSectionをホストへ送る（issue #225）', () => {
-    const source = controlPanelScript();
+    const source = controlPanelScript(JSON.stringify(approvalLevelMeta()));
     expect(source).toContain("type: 'toggleSection'");
   });
 
   it('開閉状態をprovider選択と同じvscode.setStateへ保存する（issue #225）', () => {
-    const source = controlPanelScript();
+    const source = controlPanelScript(JSON.stringify(approvalLevelMeta()));
     expect(source).toContain('openSections');
     // setStateは呼び出しごとに丸ごと置き換わるため、providerとopenSectionsを
     // 必ず同時に書く1箇所（saveState）にまとまっていることを確かめる
@@ -179,7 +211,7 @@ describe('controlPanelScript', () => {
     'ホストからのopenSectionメッセージを受けてセクションを展開する（issue #227、' +
       'toggleSectionとは逆向きのホスト→webview経路）',
     () => {
-      const source = controlPanelScript();
+      const source = controlPanelScript(JSON.stringify(approvalLevelMeta()));
       expect(source).toContain("event.data.type === 'openSection'");
       // 新しく取得ロジックを重複させず、既存のtoggleイベント（details.open代入）へ
       // 合流させる実装になっていることを確かめる

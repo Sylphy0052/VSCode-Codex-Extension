@@ -64,7 +64,14 @@ import {
   type SessionActivityState,
 } from './sessionActivity';
 import { buildItemsDelta } from './stateDelta';
-import { CODEX_APPROVAL_CYCLE } from '../provider/approvalCycle';
+import {
+  APPROVAL_LEVELS,
+  APPROVAL_LEVEL_CYCLE,
+  APPROVAL_LEVEL_LABELS,
+  approvalLevelMeta,
+  isApprovalLevel,
+} from '../provider/approvalLevel';
+import type { ProviderId } from '../provider/id';
 import { AttachmentBox, dropRejectionReason } from '../provider/attachments';
 import { buildImageReply } from '../provider/imageRefs';
 import { CommandCatalog } from '../provider/commandCatalog';
@@ -1369,8 +1376,9 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     }
     panel.webview.html = renderShell(panel.webview, {
       agentLabel: 'Codex',
+      provider: 'codex',
       approvalModes: APPROVAL_MODES,
-      approvalCycle: CODEX_APPROVAL_CYCLE,
+      approvalCycle: APPROVAL_LEVEL_CYCLE,
       sandboxModes: SANDBOX_MODES,
       showSettings: true,
       composerButtons: composerButtonsConfig.buttons,
@@ -1865,6 +1873,17 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
       }
       if (type === 'fork' && typeof m['turnId'] === 'string') {
         await this.forkFrom(entry, m['turnId']);
+        return;
+      }
+      if (type === 'approvalLevel') {
+        // 承認レベル（3段階）。Codexでは承認方法・サンドボックス・承認要求の回し先の
+        // 3項目へ展開される（`SettingsProvider.updateApprovalLevel`）
+        const level = m['level'];
+        if (isApprovalLevel(level)) {
+          // 取り消された場合も表示を現在値へ戻すため、結果によらず再送する
+          await this.settings.updateApprovalLevel('codex', level);
+        }
+        this.refreshSettings();
         return;
       }
       if (type === 'config') {
@@ -2499,10 +2518,15 @@ function readSubmission(raw: unknown): PromptSubmission | undefined {
 export interface ChatShellOptions {
   /** 画面に出すCLIの名前。発言の見出しと入力欄の案内に使う。 */
   agentLabel: string;
-  /** 承認方法の選択肢。プロバイダごとに異なる。 */
+  /**
+   * この画面のプロバイダ。承認レベル（3段階）が実際にどの値へ展開されるかの
+   * 出し分けに使う（Codexは承認方法とサンドボックスの2軸、Claude Codeは1軸）。
+   */
+  provider: ProviderId;
+  /** 承認方法の選択肢。プロバイダごとに異なる（承認の詳細に出す生の値）。 */
   approvalModes: readonly string[];
   /**
-   * Shift+Tabで回す承認方法の並び（issue #13）。渡さなければキー操作を効かせない。
+   * Shift+Tabで回す承認レベルの並び（issue #13）。渡さなければキー操作を効かせない。
    */
   approvalCycle?: readonly string[];
   /**
@@ -2909,7 +2933,12 @@ ${chatStyles()}
     <div id="settings">
     <label>モデル <select id="model"></select></label>
     <label>Effort <select id="reasoningEffort"></select></label>
-    <label>承認 <select id="approvalMode">
+    <label>承認 <select id="approvalLevel">
+      ${APPROVAL_LEVELS.map((l) => `<option value="${l}">${APPROVAL_LEVEL_LABELS[l]}</option>`).join('')}
+    </select></label>
+    <details id="approvalDetails">
+    <summary title="承認方法・サンドボックスを個別に指定します"><span class="label">承認の詳細</span></summary>
+    <label>承認方法 <select id="approvalMode">
       <option value="">既定</option>
       ${options.approvalModes.map((m) => `<option value="${m}">${m}</option>`).join('')}
     </select></label>
@@ -2926,6 +2955,7 @@ ${chatStyles()}
         ? '<label>エージェント <select id="agent"></select></label>'
         : ''
     }
+    </details>
     ${
       options.showAutocompact === true
         ? `<label>自動圧縮 <input id="autocompactInput" type="text" placeholder="autoまたは100k~1M" title="空欄のまま「自動圧縮」を押すと現在値を確認します。'auto'または100k~1Mトークンの数値（例: 500k, 200000, 200）を入れると変更します"></label>
@@ -2943,7 +2973,7 @@ ${chatStyles()}
   </details>
 
 <script nonce="${nonce}">
-${chatScript(options.agentLabel, options.review, options.showRewind === true, options.approvalCycle ?? [], options.showInputModeHints === true, options.renderMarkdown !== false, sendOn)}
+${chatScript(options.agentLabel, options.review, options.showRewind === true, options.approvalCycle ?? [], options.showInputModeHints === true, options.renderMarkdown !== false, sendOn, JSON.stringify(approvalLevelMeta()), options.provider)}
 </script>
 </body>
 </html>`;

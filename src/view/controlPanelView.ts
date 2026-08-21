@@ -9,6 +9,13 @@ import {
   type UsageSnapshot,
 } from '../codex/usage';
 import type { Logger } from '../log';
+import {
+  APPROVAL_LEVELS,
+  APPROVAL_LEVEL_LABELS,
+  approvalLevelMeta,
+  isApprovalLevel,
+} from '../provider/approvalLevel';
+import { isProviderId } from '../provider/id';
 import type { ImportHistoryItemTypeResultView, ImportHistorySnapshot } from '../provider/import';
 import { controlPanelScript } from './controlPanelScript';
 import { controlPanelStyles } from './controlPanelStyles';
@@ -162,6 +169,21 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       await vscode.commands.executeCommand(
         m['provider'] === 'claude' ? 'claude.newChat' : 'codex.newChat',
       );
+      return;
+    }
+
+    if (m['type'] === 'updateApprovalLevel') {
+      // 承認レベル（3段階）はCodexでは3項目、Claude Codeでは1項目へ展開して書く。
+      // どちらのプロバイダを触っているかはwebview側が渡す
+      const provider = m['provider'];
+      const level = m['level'];
+      if (!isProviderId(provider) || !isApprovalLevel(level)) {
+        this.log.warn(`承認レベルの変更要求が不正です: ${JSON.stringify(m)}`);
+        return;
+      }
+      // 取り消された場合も表示を現在値へ戻す必要がある
+      await this.settings.updateApprovalLevel(provider, level);
+      await this.post();
       return;
     }
 
@@ -468,6 +490,10 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       '',
     );
     const sandboxOptions = SANDBOX_MODES.map((m) => `<option value="${m}">${m}</option>`).join('');
+    // 承認レベル（3段階）の選択肢。CodexとClaude Codeで同じ語彙・同じ並びを使う
+    const levelOptions = APPROVAL_LEVELS.map(
+      (level) => `<option value="${level}">${APPROVAL_LEVEL_LABELS[level]}</option>`,
+    ).join('');
 
     return `<!DOCTYPE html>
 <html lang="ja">
@@ -506,6 +532,17 @@ ${controlPanelStyles()}
   </div>
 
   <div class="row">
+    <label for="approvalLevel">承認</label>
+    <select id="approvalLevel">
+      ${levelOptions}
+    </select>
+    <div class="hint" id="approvalLevelHint"></div>
+  </div>
+
+  <details class="section">
+  <summary class="sectionTitle">承認の詳細</summary>
+  <div class="sectionBody">
+  <div class="row">
     <label for="approvalMode">承認方法</label>
     <select id="approvalMode">
       <option value="">既定 (config.toml)</option>
@@ -520,6 +557,8 @@ ${controlPanelStyles()}
       ${sandboxOptions}
     </select>
   </div>
+  </div>
+  </details>
 
   <button id="newSession" type="button">この設定で新しい会話を開く</button>
 
@@ -597,6 +636,17 @@ ${controlPanelStyles()}
     </div>
 
     <div class="row">
+      <label for="claudeApprovalLevel">承認</label>
+      <select id="claudeApprovalLevel">
+        ${levelOptions}
+      </select>
+      <div class="hint" id="claudeApprovalLevelHint"></div>
+    </div>
+
+    <details class="section">
+    <summary class="sectionTitle">承認の詳細</summary>
+    <div class="sectionBody">
+    <div class="row">
       <label for="claudePermissionMode">承認方法</label>
       <select id="claudePermissionMode"></select>
     </div>
@@ -606,6 +656,8 @@ ${controlPanelStyles()}
       <select id="claudeAgent"></select>
       <div class="hint" id="claudeAgentHint"></div>
     </div>
+    </div>
+    </details>
 
     <button id="newClaudeSession" type="button">この設定で新しい会話を開く</button>
 
@@ -653,7 +705,7 @@ ${controlPanelStyles()}
   </div>
 
 <script nonce="${nonce}">
-${controlPanelScript()}
+${controlPanelScript(JSON.stringify(approvalLevelMeta()))}
 </script>
 </body>
 </html>`;

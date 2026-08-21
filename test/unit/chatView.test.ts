@@ -15,6 +15,7 @@ function buildOptions(overrides: Partial<ChatShellOptions> = {}): ChatShellOptio
   const review: ReviewButtonConfig = { mode: 'quickPick' };
   return {
     agentLabel: 'Codex',
+    provider: 'codex',
     approvalModes: ['read-only', 'auto'],
     showSettings: false,
     review,
