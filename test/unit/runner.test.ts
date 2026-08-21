@@ -3982,6 +3982,32 @@ tasks:
   );
 
   it(
+    'waitingReply中にターン失敗を観測するとfailedへ確定し、セッションも解放される' +
+      '（Issue #362。isUnsettledにwaitingReplyを含めないと、applyLoopStopReasonが' +
+      'markFailedへ到達せずタスクがwaitingReplyのまま残り、maxParallelの枠を占有し続ける）',
+    async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: '状況は?', expectReply: true });
+      await flush();
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingReply');
+
+      // waitingReply中に、返信を待たずにターン自体が失敗したことを観測した経路
+      // （loopControllerの`observe()`が`turnFailed`を見て`stop('failed')`を呼ぶ）
+      t1.finish('failed', { ...initialChatState, turnFailed: true });
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+      expect(t1.disposed).toBe(true);
+    },
+  );
+
+  it(
     'MCPツールがタスクから見えなければ警告を出すが、runは止めずに最後まで走る' +
       '（design.md §16.21「ツールの可視性の確認」・受入基準）',
     async () => {
