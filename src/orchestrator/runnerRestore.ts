@@ -4,6 +4,7 @@ import {
   reconcileMergingTaskOnReload,
 } from './integration';
 import { resolvePseudoState } from './runnerWorkingDirectory';
+import { sanitizeForLog } from './sanitize';
 import { startMerge } from './runnerMerge';
 import { markMergeBlocked, type RunState, type TaskRunState } from './runState';
 import type { PersistedRun } from './runStore';
@@ -62,7 +63,16 @@ export async function restoreRunsForView(self: WorkflowRunnerInternals): Promise
       // 呼び出して「復元時のやり直しは1件ずつ」という意図をコードの形でも残す。
       // `restoreRunsForView`自体は待たない（衝突解決は数分〜数十分かかりうるため、
       // 復元の完了をそこまで引き延ばさない）
-      void resumeMergesSequentially(self, p.runId, merging);
+      // rejectを回収する（Issue #412のレビュー指摘7）。`void`のままだと、1件目が投げた
+      // 時点でunhandled rejectionになり、2件目以降の復元も走らなくなる
+      const runId = p.runId;
+      void resumeMergesSequentially(self, runId, merging).catch((e: unknown) => {
+        self.deps.log.error(
+          `[workflow ${runId}] リロード後のマージのやり直しに失敗しました: ${sanitizeForLog(
+            e instanceof Error ? e.message : String(e),
+          )}`,
+        );
+      });
     }
   }
 }
@@ -78,7 +88,17 @@ async function resumeMergesSequentially(
   taskIds: readonly string[],
 ): Promise<void> {
   for (const taskId of taskIds) {
-    await resumeMergeAfterReload(self, runId, taskId);
+    // 1件が投げても残りのやり直しは続ける（Issue #412のレビュー指摘7）。ここで抜けると、
+    // 直列化したぶんだけ「1件目の失敗で2件目以降が永久に`merging`のまま」になる
+    try {
+      await resumeMergeAfterReload(self, runId, taskId);
+    } catch (e) {
+      self.deps.log.error(
+        `[workflow ${runId}/${taskId}] リロード後のマージのやり直しに失敗しました: ${sanitizeForLog(
+          e instanceof Error ? e.message : String(e),
+        )}`,
+      );
+    }
   }
 }
 
