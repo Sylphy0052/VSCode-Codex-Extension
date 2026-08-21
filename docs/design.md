@@ -711,6 +711,13 @@ app-serverからの応答も同じstdoutから読むため、この2つで拡張
 
 差し分は項目数によらず0.19MB・1ms未満で頭打ちになる（再測でも同じ形。全量側の絶対値は上の表と実行環境が違うため一致しないが、比例して増える形は変わらない）。**1回のコストが会話の長さに依存しなくなる**のがこの変更の目的で、これで50msの間引き幅が埋まることはなくなる。
 
+#### ファイル構成: Codex/Claude Code画面の共有実装（issue #409/#415）
+
+Codex画面（`chatView.ts`）とClaude Code画面（`claudeChatView.ts`）が共通で使う実装は、次の2ファイルへ集約している。
+
+- `src/view/chatShared.ts`（issue #409）: 確認ダイアログ群（`confirmCompact` / `confirmRewindFiles` / `confirmStopBackgroundTask` / `confirmRunShellCommand` / `confirmMemoryAppend` / `confirmClaudeImport` / `confirmUsageCreditsRequest` / `confirmDebugCommand` / `confirmRevertDiff`）、diff操作（`handleOpenDiffFile` / `handleOpenDiffEditor` / `handleRevertDiff`）、`runExportTranscript`、`insertCodeIntoEditor` / `openCodeInNewFile`、画像・ファイル添付の投稿（`postImageData` / `postFileMentions`）、画面のHTML本体を組み立てる `ChatShellOptions` / `renderShell` など、プロバイダに依存しないヘルパーをまとめる。`chatView.ts` は後方互換のため移した関数を再輸出する
+- `src/view/chatManagerBase.ts`（issue #415。§16.10「実装の集約」参照）: `ChatViewManager` / `ClaudeChatViewManager` の重複を抽出した基底クラス `BaseChatViewManager` と、両者のパネルエントリが満たす最小集合 `BaseChatPanel`。パネルの表示・アタッチ・破棄、承認待ち・ターン完了の通知判定を持つ。`handleMessage` の分岐・`onSessionChange`・各種 `open*` メソッドはプロバイダごとの差が大きいため、引き続き各サブクラスに残る
+
 ### 9.7 応答中の指示（割り込みと待ち行列）
 
 送信を弾くと入力を打ち直す羽目になるため、**送信は常に受け付ける**。応答中の扱いはプロバイダで異なる。
@@ -1058,7 +1065,7 @@ Issue #21着手時点でのIssue #2（Z-11）の記録は「`rewind_files` 実�
 5. **`user_message_id` には会話に実在する人の発言のuuidを渡す**。拡張機能は `--replay-user-messages` で発言を送り返してもらっており、その `user` イベントの `uuid` を `ChatItem.id`（`kind: 'userMessage'`）としてそのまま保持している（`src/claude/streamJson.ts` の `applyUser`）ため、新たに紐付けを持つ必要は無い
 6. **会話には触れない**。1で確認したとおり `rewind` subtype 自体が存在せず、`rewind_files` の応答にも会話（items/turn）に関するフィールドは無い。TUIの確認画面が「The conversation will be forked」と言っているのは、TUI自身がRewind操作の一部として**別途** `fork` 相当の処理を行っているためで、`rewind_files` 単体の効果ではない
 
-**画面の文言**: 「ファイルを戻します。会話の履歴は変わりません。元には戻せません。」で統一し、対象ファイルを列挙してから確認する（`confirmRewindFiles`、`src/view/chatView.ts`）。「会話も戻る」と誤解させる書き方はしない。
+**画面の文言**: 「ファイルを戻します。会話の履歴は変わりません。元には戻せません。」で統一し、対象ファイルを列挙してから確認する（`confirmRewindFiles`、`src/view/chatShared.ts`）。「会話も戻る」と誤解させる書き方はしない。
 
 **実装箇所**: `src/claude/control.ts`（`buildRewindFilesRequest` / `readRewindFilesResult`）、`src/claude/streamSession.ts`（`previewRewindFiles` / `applyRewindFiles`。`start()` で環境変数を設定）、`src/view/claudeChatView.ts`（`rewindFiles`。dry_run→確認→適用の順で、対象が無ければ確認ダイアログを出さず、成功・失敗のどちらも画面に返す）、`src/view/chatScript.ts`（発言ごとの「ここまで戻す」ボタン。Claude Code画面のみ、`showRewind` で出し分け）。
 
@@ -1814,7 +1821,7 @@ CodexのTUIは Ctrl+T でトランスクリプトを表示し、`/raw` で選択
 - `src/appserver/transcriptMarkdown.ts`: `buildTranscriptMarkdown(items, agentLabel)` が `ChatState.items` からMarkdownを組む純粋関数。`vscode` を import する `src/view/**` から独立させ、ユニットテストで直接確かめる。項目ごとに `## 見出し（種類・detail・status・truncated注記）` と本文を並べ、`---` で区切る。見出しの語彙は `chatScript.ts` の `KIND_LABEL` に揃えた。本文が無い項目（`enteredReviewMode` など）も見出しだけ残し、イベントを取りこぼさない。`reasoning` は全文（`reasoningFull`）があればそちらを優先する（issue #19と同じ考え方。画面の折りたたみは表示だけの都合で書き出しには影響させない）。ファイル変更は`diff`フェンス、Web検索結果はMarkdownリンクの箇条書き、画像はパス/代替テキストの箇条書きにする
 - 同ファイルの `MAX_TRANSCRIPT_CHARS`（500万文字）: `MAX_OUTPUT_CHARS`（1項目あたりの上限）と同じ考え方を会話全体の合計にも適用し、超えた分は先頭を捨てて末尾（直近のやり取り）を残す。「長い会話でも取り出しが完了する」という受入基準に対応する。組み立てはWebviewではなく拡張機能ホスト側（Node）で行うため、大きな会話でもWebviewの描画スレッドは固まらない
 - `defaultTranscriptFileName(now)`: 保存ダイアログの既定ファイル名（`transcript-yyyyMMdd-HHmmss.md`）を作る純粋関数
-- `src/view/chatView.ts`: `runExportTranscript(items, agentLabel)` を追加し、Codex画面・Claude Code画面の両方で共有する（`confirmCompact` 等と同じ共有関数の置き場）。会話が空なら「取り出せません」と伝えて終わる（黙って何も起きない状態を作らない）。空でなければ `showQuickPick` で「クリップボードへコピー」「ファイルへ保存」「生テキストで開く」の3択を出す（`runReview` の対象選択と同じQuickPickの流儀）
+- `src/view/chatShared.ts`: `runExportTranscript(items, agentLabel)` を追加し、Codex画面・Claude Code画面の両方で共有する（`confirmCompact` 等と同じ共有関数の置き場）。会話が空なら「取り出せません」と伝えて終わる（黙って何も起きない状態を作らない）。空でなければ `showQuickPick` で「クリップボードへコピー」「ファイルへ保存」「生テキストで開く」の3択を出す（`runReview` の対象選択と同じQuickPickの流儀）
   - コピー: `vscode.env.clipboard.writeText(markdown)`
   - 保存: `showSaveDialog`（既定ファイル名は `defaultTranscriptFileName`）→ `vscode.workspace.fs.writeFile`
   - 生テキストで開く: `vscode.workspace.openTextDocument({content: markdown, language: 'markdown'})` → `showTextDocument(doc, {preview: false})`。装飾（バブル・折りたたみ・画像）を持たない通常のエディタタブとして開くため、これがそのまま「生テキストモード」になる。同じ手は `extension.ts` の `handlePlanFailure`（ワークフロー生成失敗時に生の応答をエディタで開く）で既に使っている
@@ -1855,7 +1862,7 @@ Codex TUIの `/ps`（list background terminals）に相当する表示。issue #
 - `src/claude/streamJson.ts`: `background_tasks_changed` 通知を `backgroundTerminals` へ丸ごと置き換える（`applyBackgroundTasksChanged`）。`task_id` の無い要素は捨てる
 - `src/claude/control.ts`: `buildStopTaskRequest(requestId, taskId)` を追加（`{subtype:'stop_task', task_id}`）
 - `src/claude/streamSession.ts`: `ClaudeStreamSession.stopBackgroundTask(taskId)` を追加。`interrupt()` と同じく発行するだけで、応答（常に空）は見ない。実際に止まったかは後続の `background_tasks_changed` 通知が反映する
-- `src/view/chatView.ts`: `confirmStopBackgroundTask(command)` を追加（`confirmCompact` と同じ形の確認ダイアログ。実行中の処理を打ち切る破壊的操作のため必ず挟む）。Codex/Claude Code両画面で共有するHTMLへ `#backgroundTerminals` を追加（TODO一覧と同じ並び）
+- `src/view/chatShared.ts`: `confirmStopBackgroundTask(command)` を追加（`confirmCompact` と同じ形の確認ダイアログ。実行中の処理を打ち切る破壊的操作のため必ず挟む）。Codex/Claude Code両画面で共有するHTMLへ `#backgroundTerminals` を追加（TODO一覧と同じ並び）
 - `src/view/claudeChatView.ts`: `stopBackgroundTask` メッセージを受け、確認してから `ClaudeStreamSession.stopBackgroundTask` を呼ぶ
 - `src/view/chatScript.ts` / `chatStyles.ts`: 一覧の描画。`stoppable: true` の項目にだけ「停止」ボタンを出し、`false`（Codex）は「この画面から停止する経路はありません」と明示する（黙って何もしないボタンを置かない）。コマンド文字列は必ず `textContent` でDOMへ入れる
 
@@ -2034,7 +2041,7 @@ type SymlinkResolution =
 - `src/session/nodeFileSystem.ts`: `MemoryFileSystemPort`の既定実装 `nodeMemoryFileSystem`（`fs.readFile`のENOENT判定、`fs.lstat`+`fs.realpath`でのシンボリックリンク解決。判定・解決の失敗を`not-symlink`と`unresolved`で区別する）
 - `src/claude/streamSession.ts`: `ClaudeStreamSession.noteLocalEvent(id, text)`（#141）。CLIとはやり取りせず、既存の `appendNotice`（`chatState.ts`。hookBlockedと同じ仕組み）で会話に1行残すだけ
 - `src/view/claudeChatView.ts`: `handleMessage` の `send` 分岐で `routeInputMode` を呼び、該当すれば `runInputMode` へ委ねてCLIへは送らない（#141）。シェルコマンドは `openShellCommandTerminal`（`sendText(command, false)`）、メモリ追記は `runMemoryInputMode`（候補列挙→QuickPick→シンボリックリンク解決→確認→**書き込み直前の再解決とTOCTOU検証**→`readStrict`→`vscode.workspace.fs.writeFile`→`workspaceState`更新→`noteLocalEvent`）。`MemoryFileSystemPort` / `MemoryModeMemento` はコンストラクタ末尾のoptional引数で注入（既定はそれぞれ`nodeMemoryFileSystem`・何も覚えないno-op）し、既存の呼び出し箇所を壊さない
-- `src/view/chatView.ts`: 確認ダイアログ `confirmRunShellCommand` / `confirmMemoryAppend` を追加（既存の `confirmCompact` 等と同じ置き場、#141）。`confirmMemoryAppend`は`symlink`（`SymlinkResolution`）引数を追加し、本文は`buildMemoryAppendConfirmation`（純粋関数）へ委譲（#144）。`ChatShellOptions.showInputModeHints` を追加（Claude Code画面のみ`true`）
+- `src/view/chatShared.ts`: 確認ダイアログ `confirmRunShellCommand` / `confirmMemoryAppend` を追加（既存の `confirmCompact` 等と同じ置き場、#141）。`confirmMemoryAppend`は`symlink`（`SymlinkResolution`）引数を追加し、本文は`buildMemoryAppendConfirmation`（純粋関数）へ委譲（#144）。`ChatShellOptions.showInputModeHints` を追加（Claude Code画面のみ`true`）
 - `src/view/chatScript.ts` / `chatStyles.ts`: 送信前に入力欄の下へ案内を出す `#inputModeHint`。判定ロジックは `routeInputMode` と同じ規則をJSで書き直している（テンプレートリテラルの中からは関数を呼べないため。`renderArgumentHint` と同じ事情）
 - `src/extension.ts`: `ClaudeChatViewManager` の構築時に `nodeMemoryFileSystem` と `context.workspaceState` を渡す（#144。`WorkflowRunStore`と同じく`context.workspaceState`をそのまま`MemoryModeMemento`として渡せる）
 
@@ -2206,7 +2213,7 @@ claude import [source] [--dry-run] [--yes[=<digest>]]
 
 Codex側（§14.30）は構造化された一覧から選択・確認してから直接実行するが、Claude Code側は上記の制約から同じ形にできない。そこで次の設計にした。
 
-1. 拡張機能側の確認ダイアログで「CodexまたはGeminiのローカル設定を、このClaude Codeへ取り込む準備をする（プレビュー要求を送るだけで、ここでは何も書き換えない）」ことを明示する（`confirmClaudeImport`、`src/view/chatView.ts`）
+1. 拡張機能側の確認ダイアログで「CodexまたはGeminiのローカル設定を、このClaude Codeへ取り込む準備をする（プレビュー要求を送るだけで、ここでは何も書き換えない）」ことを明示する（`confirmClaudeImport`、`src/view/chatShared.ts`）
 2. 確認すると`/import`を会話へ発言として送る（`ClaudeStreamSession.importConfig()`、`src/claude/streamSession.ts`。`compact()`と同じ実装）
 3. CLI自身の応答（プレビューと確認コマンド）は通常の会話として画面に表示される。実際に取り込むかどうかの最終判断と、確認コマンドの送信はユーザー自身が行う（CLIのダイジェスト一致チェックが、確認後に設定が変わっていた場合の二段目の安全弁になる）
 
@@ -2215,7 +2222,7 @@ Codex側（§14.30）は構造化された一覧から選択・確認してか�
 #### 実装
 
 - `src/claude/streamSession.ts`: `importConfig()`を追加。`compact()`と同じく`buildUserMessage('/import')`を書き込むだけ。上記の実測結果をコメントに残す
-- `src/view/chatView.ts`: `ChatShellOptions`に`showImport?: boolean`を追加（Claude Code画面のみ`true`。Codexは別導線＝控制パネルのインポート一覧UIを持つため二重導線を避ける）。確認ダイアログ`confirmClaudeImport()`を追加
+- `src/view/chatShared.ts`: `ChatShellOptions`に`showImport?: boolean`を追加（Claude Code画面のみ`true`。Codexは別導線＝控制パネルのインポート一覧UIを持つため二重導線を避ける）。確認ダイアログ`confirmClaudeImport()`を追加
 - `src/view/chatScript.ts`: `claudeImport`ボタンのクリックで`{type: 'claudeImport'}`を送る。応答中は無効化する（`compact`と同じ扱い）
 - `src/view/claudeChatView.ts`: `handleMessage`に`claudeImport`分岐を追加し、`confirmClaudeImport()`→`session.importConfig()`の`importConfig()`メソッドを追加（`compact()`と同じ形）
 
@@ -2313,7 +2320,7 @@ issue本文のとおり、TP-87（#199）で「人が付けた名前 > transcrip
 #### 実装
 
 - `src/claude/streamSession.ts`: `ClaudeStreamSession.recap()`を追加。`compact()` `importConfig()`と同じく`buildUserMessage('/recap')`を書き込むだけ。上記の実測結果をJSDocに残す
-- `src/view/chatView.ts`: `ChatShellOptions`に`showRecap?: boolean`を追加（Claude Code画面のみ`true`。Codexにこの概念は無い）。`recap`ボタンを`claudeImport`の隣に追加
+- `src/view/chatShared.ts`: `ChatShellOptions`に`showRecap?: boolean`を追加（Claude Code画面のみ`true`。Codexにこの概念は無い）。`recap`ボタンを`claudeImport`の隣に追加
 - `src/view/chatScript.ts`: `recap`ボタンのクリックで`{type: 'recap'}`を送る。応答中は無効化する（`compact` `claudeImport`と同じ扱い）
 - `src/view/claudeChatView.ts`: `handleMessage`に`recap`分岐を追加し、`session.recap()`を呼ぶ`recap()`メソッドを追加。会話を壊す・書き込みが起きるといった不可逆な操作ではないため、`compact` `claudeImport`と違って確認ダイアログは挟まない（`planMode` `fastMode`と同じ扱い）
 
@@ -2379,7 +2386,7 @@ issue #195の再抽出で見つかった機能。Claude Codeの`initialize`応�
 - `src/claude/autocompactText.ts`（新規）: `parseAutocompactReport(text)`。実測3の書式を正規表現1本で読む。読めなければ`undefined`
 - `src/claude/streamJson.ts`: `applyAssistant`で、`message.model === '<synthetic>'`のテキスト応答に対してだけ`parseAutocompactReport`を試し、一致すれば`state.autocompactWindow`を更新する（`/recap`の自然文要約など他の`<synthetic>`応答は書式が一致せず素通りするため、判定を`<synthetic>`かどうかだけに絞っても安全）
 - `src/claude/streamSession.ts`: `ClaudeStreamSession.setAutocompactWindow(window)`を追加。空文字なら`/autocompact`（問い合わせ）、それ以外は`/autocompact <window>`（変更）を送るだけで、CLIの受理可否をそのまま信じる（事前バリデーションはしない。`compact` `recap`と同じ流儀）
-- `src/view/chatView.ts`: `ChatShellOptions`に`showAutocompact?: boolean`を追加（Claude Code画面のみ`true`）。`#settings`行へ入力欄（`autocompactInput`）と実行ボタン（`autocompactApply`）を追加
+- `src/view/chatShared.ts`: `ChatShellOptions`に`showAutocompact?: boolean`を追加（Claude Code画面のみ`true`）。`#settings`行へ入力欄（`autocompactInput`）と実行ボタン（`autocompactApply`）を追加
 - `src/view/chatScript.ts`: `autocompactApply`のクリックで入力欄の値（空でもよい）を`{type: 'autocompactWindow', window}`として送る。応答中は無効化する（`compact` `recap`と同じ扱い）。フッターの状態行（`renderStatus`）でコンテキスト残量のすぐ隣に`formatAutocompactWindow`の表示（例:「自動圧縮 自動」「自動圧縮 300k」）を追加し、`state.autocompactWindow`が無ければ何も出さない
 - `src/view/claudeChatView.ts`: `handleMessage`に`autocompactWindow`分岐を追加し、`session.setAutocompactWindow(window)`を呼ぶ`setAutocompactWindow()`メソッドを追加。問い合わせ・変更のどちらも壊れる・戻せない操作ではないため、`recap`と同じく確認ダイアログは挟まない
 
@@ -2477,7 +2484,7 @@ request, run /usage-credits in an interactive Claude Code session.
 - `src/appserver/chatState.ts`: `ExtraUsageView`（`{isEnabled, monthlyLimit, usedCredits, utilization, currency, disabledReason, spendLimitReached}`）と、`ChatState.extraUsage?: ExtraUsageView`を追加（Claude Codeのみ。`sessionCost`と同じ`get_usage`の応答から作る）
 - `src/claude/control.ts`: `readExtraUsage(payload)`を追加。`rate_limits.extra_usage`を読み、`decimal_places`で金額を実額へ変換する（変換できなければ`monthlyLimit`は`undefined`、`usedCredits`は`totalLinesAdded`等と同じく0扱い）
 - `src/claude/streamSession.ts`: `ClaudeStreamSession.requestUsageCredits()`を追加。`compact` `importConfig` `recap`と同じく`buildUserMessage('/usage-credits')`を書き込むだけ。`handleControlResponse`の`sessionCost`分岐に相乗りし、同じ応答から`readExtraUsage`も読んで`state.extraUsage`へ反映する（専用の制御要求を増やさない）
-- `src/view/chatView.ts`: `confirmUsageCreditsRequest()`を追加（`confirmClaudeImport`と同じ形の`showWarningMessage`）
+- `src/view/chatShared.ts`: `confirmUsageCreditsRequest()`を追加（`confirmClaudeImport`と同じ形の`showWarningMessage`）
 - `src/view/claudeChatView.ts`: `handleMessage`に`usageCreditsRequest`分岐を追加し、`confirmUsageCreditsRequest()`で確認してから`session.requestUsageCredits()`を呼ぶ`requestUsageCredits()`メソッドを追加
 - `src/view/chatScript.ts`: `renderStatus`のフッターへ、`extraUsage`が取れていれば常に一言（`formatExtraUsage`。例:「追加クレジット 無効（クレジット切れ）」「追加クレジット 12%」）を添え、`usageCreditsLimited(state)`が真のときだけ「追加クレジットを要求」ボタンを追加で出す。押すと`{type: 'usageCreditsRequest'}`を送る。応答中は無効化する（`compact` `claudeImport`と同じ扱い）
 - `src/view/chatStyles.ts`: `#status button`にフッターの文言へ馴染む小さめのスタイルを追加
@@ -2528,7 +2535,7 @@ issue本文の受入基準は「操作するとデバッグログが有効にな
 
 #### 設計判断2: `/debug`の送信も副導線として残す（B案）。ただし実モデル起動・課金を明示して確認する
 
-Aだけでは「モデルに要約させて診断する」というissueの元々の狙い（`description`の"help diagnose issues"の部分）に応えられないため、issueのコメントの推奨どおり**Bを副導線として併用する**。「/debugで診断」ボタンは、実測2の内容（実モデルが動く・Bashツールを実行する・実測0.38ドル程度課金される・承認カードが出うる）を確認ダイアログに明示したうえで`/debug`を送る（`confirmDebugCommand`、`src/view/chatView.ts`）。`/usage-credits`（§14.38）と同じく「外部・重い副作用を持つ操作は呼び出し側で必ず確認する」という既存方針に揃える。応答はモデルが生成する自然文（構造化JSONではない）のため、`/import` `/recap`と同じく機械的にはパースせず会話へそのまま残す。
+Aだけでは「モデルに要約させて診断する」というissueの元々の狙い（`description`の"help diagnose issues"の部分）に応えられないため、issueのコメントの推奨どおり**Bを副導線として併用する**。「/debugで診断」ボタンは、実測2の内容（実モデルが動く・Bashツールを実行する・実測0.38ドル程度課金される・承認カードが出うる）を確認ダイアログに明示したうえで`/debug`を送る（`confirmDebugCommand`、`src/view/chatShared.ts`）。`/usage-credits`（§14.38）と同じく「外部・重い副作用を持つ操作は呼び出し側で必ず確認する」という既存方針に揃える。応答はモデルが生成する自然文（構造化JSONではない）のため、`/import` `/recap`と同じく機械的にはパースせず会話へそのまま残す。
 
 #### 設計判断3: 受入基準・issueタイトルとのズレ
 
@@ -2552,9 +2559,9 @@ CLI側のデバッグログ（`~/.claude/debug/<sessionId>.txt`）と、拡張�
 
 - `src/claude/cliLocator.ts`: `debugLogCandidates(claudeHome, threadId)`を追加（純粋関数、パス組み立てのみ）
 - `src/claude/streamSession.ts`: `ClaudeStreamSession.sendDebugCommand()`を追加。`compact` `importConfig` `recap` `requestUsageCredits`と同じく`buildUserMessage('/debug')`を書き込むだけ
-- `src/view/chatView.ts`: `confirmDebugCommand()`を追加（`confirmUsageCreditsRequest`と同じ形の`showWarningMessage`。実測2の内容と、ログを見るだけなら`openDebugLog`のほうが低コストである旨を明記）
+- `src/view/chatShared.ts`: `confirmDebugCommand()`を追加（`confirmUsageCreditsRequest`と同じ形の`showWarningMessage`。実測2の内容と、ログを見るだけなら`openDebugLog`のほうが低コストである旨を明記）
 - `src/view/claudeChatView.ts`: `handleMessage`に`openDebugLog` / `debugCommand`分岐を追加。`openDebugLog(entry)`（確認無し、候補を順に開いて会話へ記録）と`sendDebugCommand(entry)`（`confirmDebugCommand()`で確認してから`session.sendDebugCommand()`）を追加
-- `src/view/chatView.ts`: `ChatShellOptions.showDebug`を追加し、`#settings`（設定行）へ「デバッグログを開く」「/debugで診断」の2ボタンを描画する
+- `src/view/chatShared.ts`: `ChatShellOptions.showDebug`を追加し、`#settings`（設定行）へ「デバッグログを開く」「/debugで診断」の2ボタンを描画する
 - `src/view/chatScript.ts`: 2ボタンのクリックをそれぞれ`{type: 'openDebugLog'}` / `{type: 'debugCommand'}`のpostMessageへつなぐ（`autocompactApply`と同じく、Codex画面には要素が無いため`el()`の結果をnullチェックしてから配線する）
 
 #### スコープ外にしたもの
@@ -2660,7 +2667,7 @@ Claude Code側は`/recap`をCLI内部が受け取り、会話が無い状態（`
 
 #### `ChatShellOptions.showRecap`の意味を両画面共通へ改める
 
-§14.36時点では`showRecap`は「Claude Code画面のみ`true`」というフラグで、JSDocにも「Codexにこの概念は無いため二重導線を避けて出さない」と書いていた。本issueでCodex画面にも要約を出すため、フラグの意味を「ボタンを出すかどうか」だけに絞り、**押したときに送る中身はプロバイダごとに違う**ことをJSDocへ明示する形へ書き換えた（`src/view/chatView.ts`の`ChatShellOptions.showRecap`）。ボタンのUI（`chatScript.ts`の`recap`ボタン・応答中の無効化）自体はプロバイダで共有しており、変更していない。
+§14.36時点では`showRecap`は「Claude Code画面のみ`true`」というフラグで、JSDocにも「Codexにこの概念は無いため二重導線を避けて出さない」と書いていた。本issueでCodex画面にも要約を出すため、フラグの意味を「ボタンを出すかどうか」だけに絞り、**押したときに送る中身はプロバイダごとに違う**ことをJSDocへ明示する形へ書き換えた（`src/view/chatShared.ts`の`ChatShellOptions.showRecap`）。ボタンのUI（`chatScript.ts`の`recap`ボタン・応答中の無効化）自体はプロバイダで共有しており、変更していない。
 
 #### 実装
 
@@ -2702,7 +2709,8 @@ Claude Code側（§14.34）のボタンは`/import`のプレビューを会話�
 
 #### 実装
 
-- `src/view/chatView.ts`: `ChatShellOptions.showImport`の型を`boolean | { ariaLabel: string; title: string }`へ拡張し、JSDocを両プロバイダ対応の説明へ書き換え。`renderShell`は`showImport`がオブジェクトならその文言を、`true`ならClaude Codeの既定文言を出す。Codex画面の`renderShell`呼び出しに`showImport`（Codex向け文言）を追加。`ChatViewManager`のコンストラクタに`revealImportSection`コールバックを追加し、`handleMessage`の`claudeImport`分岐で呼ぶだけにする（会話への送信・`noteUserAction`は行わない）
+- `src/view/chatShared.ts`: `ChatShellOptions.showImport`の型を`boolean | { ariaLabel: string; title: string }`へ拡張し、JSDocを両プロバイダ対応の説明へ書き換え。`renderShell`は`showImport`がオブジェクトならその文言を、`true`ならClaude Codeの既定文言を出す
+- `src/view/chatView.ts`: Codex画面の`renderShell`呼び出しに`showImport`（Codex向け文言）を追加。`ChatViewManager`のコンストラクタに`revealImportSection`コールバックを追加し、`handleMessage`の`claudeImport`分岐で呼ぶだけにする（会話への送信・`noteUserAction`は行わない）
 - `src/view/controlPanelView.ts`: `ControlPanelViewProvider.revealSection(id)`を追加
 - `src/view/controlPanelScript.ts`: `openSection`メッセージの受信処理を追加
 - `src/extension.ts`: `panel`（`ControlPanelViewProvider`）の構築を`chat`（`ChatViewManager`）より前へ移し、`chat`の`revealImportSection`に`codex.controlPanel.focus`→`panel.revealSection('codexImport')`を配線
@@ -2822,7 +2830,7 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 実測した事実:
 
 - `enableFindWidget`は`WebviewPanelOptions`（`createWebviewPanel`の第4引数）にのみ存在し、`WebviewPanel.options`は`readonly`（`@types/vscode`）。生成後に変更するAPIは無い
-- `panel.webview.options`（`WebviewOptions`型）は`enableScripts`等だけを持ち、`enableFindWidget`を含まない。`chatView.ts`/`claudeChatView.ts`の`attachPanel`が`panel.webview.options = { enableScripts: true }`を再設定している箇所は、この理由により`enableFindWidget`とは無関係
+- `panel.webview.options`（`WebviewOptions`型）は`enableScripts`等だけを持ち、`enableFindWidget`を含まない。`chatManagerBase.ts`の`attachPanel`（Codex/Claude Code共通の基底クラスのメソッド、issue #410/#415）が`panel.webview.options = { enableScripts: true }`を再設定している箇所は、この理由により`enableFindWidget`とは無関係
 - タブ復元（`registerWebviewPanelSerializer`）でVSCode本体が復元・生成する`WebviewPanel`は、拡張機能の`deserializeWebviewPanel`へ渡された時点で既に生成済みのインスタンスであり、`enableFindWidget`を含む`WebviewPanelOptions`を後から指定する経路はAPI上存在しない。VSCode本体側のシリアライズ処理（`webviewEditorInputSerializer.ts`、`toJson`/`fromJson`）を確認した限り、保存されるJSONには`webview.options`/`webview.contentOptions`（`enableScripts`等）は含まれるが、`WebviewPanelOptions`（`enableFindWidget`・`retainContextWhenHidden`相当）に該当するフィールドは見当たらない。つまり復元後のタブで検索窓が有効かどうかは拡張機能側では制御できず、VSCode本体の実装に委ねられる（実機での確認は未実施）
 
 設計の判断:
@@ -2853,8 +2861,8 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - `chatScript.ts`はテンプレートリテラルの中身でTypeScriptとして実行できないため、`stateDelta.ts`の`MERGE_ITEMS_SOURCE`・`markdown.ts`の`MARKDOWN_PARSE_SOURCE`と同じ流儀で、`sendKey.ts`が同じロジックをJSソース文字列（`SEND_KEY_SOURCE`）として二重に持ち、`chatScript.ts`へ差し込む。`test/unit/sendKey.test.ts`は`SEND_KEY_SOURCE`を`new Function`で評価し、TS実装と同じ結果になることを確かめて乖離を検知する（`markdown.test.ts`と同じ検知の仕組み）
 - IME変換中は`compositionstart`〜`compositionend`の間を追跡した`imeComposing`と、`KeyboardEvent.isComposing`のORを`decideSendKeyAction`へ渡す。どちらか一方でも真なら送信しない。変換確定のEnterを送信に奪われると日本語入力が使い物にならないため（issue本文の受入基準）、両モードで無条件に`ignore`を返す
 - `decideSendKeyAction`は候補メニューの開閉を関知しない。メニューが開いているときの確定は既存の`menuOpen()`ブロックが先に処理して`return`するため、この関数が呼ばれるのはメニューが閉じているときだけ（既存の分岐を壊さないための切り分け）
-- 入力欄のプレースホルダ（`chatView.ts`の`renderShell`）は`options.sendOn`（既定`ctrlEnter`）に応じて「Ctrl+Enterで送信」/「Enterで送信、Shift+Enterで改行」を出し分ける。HTML生成時（サーバー側、実TypeScript）に確定する文字列のため、webview側のJSへ持ち込む必要は無い
-- **Codex / Claude Code両画面共通で配線した。** `ChatShellOptions.sendOn`を`renderShell`（両画面共通）のオプションとして足し、`chatView.ts`（Codex）・`claudeChatView.ts`（Claude Code）の双方の`attachPanel`から`readChatSendOnConfig()`を呼んで渡す。§14.34や§14.51の`renderMarkdown`と同じ配線の形（設定1つを両画面の`attachPanel`が個別に読む）。当初はレビュー時点で`claudeChatView.ts`が別作業と競合するため触らない前提だったが、その作業が完了したためこのPR内で両画面へ配線した
+- 入力欄のプレースホルダ（`chatShared.ts`の`renderShell`）は`options.sendOn`（既定`ctrlEnter`）に応じて「Ctrl+Enterで送信」/「Enterで送信、Shift+Enterで改行」を出し分ける。HTML生成時（サーバー側、実TypeScript）に確定する文字列のため、webview側のJSへ持ち込む必要は無い
+- **Codex / Claude Code両画面共通で配線した。** `ChatShellOptions.sendOn`を`renderShell`（両画面共通）のオプションとして足し、`chatView.ts`（Codex）・`claudeChatView.ts`（Claude Code）の双方の`renderPanelHtml`から`readChatSendOnConfig()`を呼んで渡す。§14.34や§14.51の`renderMarkdown`と同じ配線の形（設定1つを両画面の`renderPanelHtml`が個別に読む）。当初はレビュー時点で`claudeChatView.ts`が別作業と競合するため触らない前提だったが、その作業が完了したためこのPR内で両画面へ配線した
 
 残る制約:
 
@@ -2899,7 +2907,7 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - **実測**: コードフェンス・インラインコードの記法自体がバッククォートを使うため、`MARKDOWN_PARSE_SOURCE`の中にバッククォート文字をそのまま書くと、`chatScript()`の出力全体にバッククォートが混ざる。既存のテスト（`webviewScript.test.ts`の「テンプレートリテラルを閉じる文字が混ざっていない」）はこれをゼロ件で機械チェックしており、実装中に実際に検知された。対応として`String.fromCharCode(96)`から作った`BACKTICK`変数を経由し、バッククォートが絡む正規表現もすべて`new RegExp(...)`で組み立てる（正規表現リテラル``/`.../``は使わない）
 - DOMへの差し込みは`createElement`/`createTextNode`だけで行い、`innerHTML`等のHTML文字列を流し込むAPIは使わない。エージェントの出力がHTMLとして評価されることはない（受入基準）。CSP（`chatCsp.ts`）は変更していない
 - Markdownとして解釈するのは`userMessage`/`agentMessage`の本文だけ。`commandExecution`・`reasoning`は設定に関わらず常に生テキストのまま（`renderBody`の行数折りたたみ・`MAX_VISIBLE_LINES`はこの2種類にしか効かず、Markdown化の対象と重ならないため両立する）
-- コードブロックには「コピー」「エディタへ挿入」「新規ファイルで開く」を付ける。後の2つはWebviewから直接実行できないため、`vscode.postMessage`で`insertCode`/`openCodeFile`をホスト側（`chatView.ts`/`claudeChatView.ts`の`handleMessage`）へ送る。既存の`openUrl`・`requestImage`の往復（§14.4・画像表示）と同じ形。挿入（`insertCodeIntoEditor`）は`vscode.window.activeTextEditor`の現在の選択範囲を置き換え、開いているエディタが無ければ「挿入先のエディタが開かれていません」と伝えて終わる（実行不能な操作を黙って握りつぶさない）。新規ファイル（`openCodeInNewFile`）はコードフェンスの言語表記からVSCodeの言語IDへの簡易対応表（`CODE_FENCE_LANGUAGE_IDS`）を経由し、対応表に無い表記はそのまま言語IDとして渡す（VSCodeは未知の言語IDでもプレーンテキストとして開くだけで落ちない）。どちらも`runExportTranscript`と同様`chatView.ts`に置き、`claudeChatView.ts`からimportして共有する
+- コードブロックには「コピー」「エディタへ挿入」「新規ファイルで開く」を付ける。後の2つはWebviewから直接実行できないため、`vscode.postMessage`で`insertCode`/`openCodeFile`をホスト側（`chatView.ts`/`claudeChatView.ts`の`handleMessage`）へ送る。既存の`openUrl`・`requestImage`の往復（§14.4・画像表示）と同じ形。挿入（`insertCodeIntoEditor`）は`vscode.window.activeTextEditor`の現在の選択範囲を置き換え、開いているエディタが無ければ「挿入先のエディタが開かれていません」と伝えて終わる（実行不能な操作を黙って握りつぶさない）。新規ファイル（`openCodeInNewFile`）はコードフェンスの言語表記からVSCodeの言語IDへの簡易対応表（`CODE_FENCE_LANGUAGE_IDS`）を経由し、対応表に無い表記はそのまま言語IDとして渡す（VSCodeは未知の言語IDでもプレーンテキストとして開くだけで落ちない）。どちらも`runExportTranscript`と同様`chatShared.ts`に置き、`chatView.ts`・`claudeChatView.ts`の双方からimportして共有する
 - リンクは`<a>`要素のクリックで既定の遷移をさせず（`preventDefault`）、Web検索結果（issue #18）と同じ`openUrl`メッセージでホスト側へ渡す。ホスト側の許可判定（`isOpenableSearchUrl`）とURLを開く経路（`vscode.env.openExternal`）は変えていない。Webviewから直接遷移させることはない
 - **ストリーミング中の部分的なMarkdown。** `renderBody`は現在の全文をそのつど`parseMarkdown`へ渡す（差分ではなく毎回全文を渡す既存の設計をそのまま使う）。閉じていないコードフェンスは最後まで`codeblock`（`closed: false`）として取り込み、閉じるフェンスが届いた次回の呼び出しで`closed: true`になり描き直される。閉じていない太字・インラインコードは、対応する閉じ側が正規表現にマッチしないため地の文としてそのまま残る（例外を投げない・トークン列が壊れない）
 - 設定`agent.chat.renderMarkdown`（既定`true`）を無効化すると、`chatScript`の`RENDER_MARKDOWN`定数がfalseになり、`renderBody`は`textContent`だけを使う従来の経路に完全に戻る。`ChatShellOptions.renderMarkdown`を`renderShell`のオプションへ足しただけで、両画面（Codex/Claude Code）へ配線している
@@ -2944,9 +2952,9 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
   移動を伴う`update`で「戻す」を出さないのは、改名を安全に取り消すには「内容を書き戻す」と「`movePath`から`path`へ戻す」の2操作を組み合わせる必要があり、どちらか一方が失敗すると（disk full・権限・競合等）ファイルがどちらの場所にも正しい状態で残らない、単純な書き戻しよりリスクの高い操作になるため。エディタで開く・差分を開くは移動後の場所（`movePath`）に対して引き続き出す
 
 - **パスの検証は2段構え。** (1) 文字列だけの判定（`resolveWithinWorkspace`、`src/util/diffWorkspacePath.ts`）で、`..`セグメントを含む・ワークスペース外を指す絶対パスを拒む。(2) 実ファイルシステムに触れる`verifyRealPathWithinWorkspace`で、`fs.realpath`により対象（存在しなければ実在する直近の祖先まで遡る）とワークスペースルートの両方を実体パスへ解決し、シンボリックリンクによる脱出も検出する。Webview側（`chatScript.ts`の`withinWorkspace`）にも文字列だけの簡易版を置きボタンの出し分けに使うが、これはUXのためのヒントに過ぎず、**ホスト側（`resolveDiffFileForAction`）が独立に同じ判定をやり直してから実際の操作を行う**（Webview側の出し分けだけに頼らない。エージェントの出力に由来する文字列を信用しない、というこのリポジトリの方針）
-- **Webviewは差分の中身を送らず、`itemId`+`diffIndex`だけを送る。** ホスト側（`resolveDiffTarget`、`chatView.ts`）が会話状態（`entry.session.getState().items`）から差分を引き直し、Webviewが自称する path・diff本文・kindをそのまま信用しない。画像表示（`buildImageReply`）が会話に実在するパスだけを対象にするのと同じ考え方
+- **Webviewは差分の中身を送らず、`itemId`+`diffIndex`だけを送る。** ホスト側（`resolveDiffTarget`、`chatShared.ts`）が会話状態（`entry.session.getState().items`）から差分を引き直し、Webviewが自称する path・diff本文・kindをそのまま信用しない。画像表示（`buildImageReply`）が会話に実在するパスだけを対象にするのと同じ考え方
 - **「この変更を戻す」は実行前に必ずモーダルで確認する。** 破壊的操作（`add`は削除、`delete`は再作成、`update`は上書き）の既存の確認（`confirmRewindFiles`等）と同じ`showWarningMessage(..., { modal: true }, ...)`の形。確認モーダルはユーザーの応答待ちで不定長のため、直前（確認を出す前）と直後（書き込み・削除の直前）の2回、現在の内容を読み直して差分の想定と突き合わせる（TOCTOU対策、issue #144のメモリ追記と同じ考え方）。食い違えば理由を出して何もしない
-- **`delete`の「戻す」でも、対象パスに今なにか在るかを実際に確かめる**（`existingContentForDeleteRevert`、`chatView.ts`）。`delete`は「ファイルはもう無い」前提の再作成だが、その前提を確かめずに常に「無い」と決め打つと、`computeDiffContents`のdelete分岐にある「ファイルが既に存在します」の検査が構造的に一度も真にならず、差分を取ったあとに同じパスへ作り直された別のファイルを、モーダルの確認だけ通して無条件に上書きしてしまう。`add`の「戻す」は`useTrash: true`でゴミ箱を経由するが、こちらは`writeFile`による上書きで復旧手段が無いため影響が大きい。存在の判定に`FileSystemPort.readTextFile`を使わないのは、あれが「読めなければ無い扱い」でENOENT以外（EACCES/EISDIR等）でも`undefined`を返すため（`src/session/ports.ts`のissue #144のメモ）。実在するのに読めないファイルを「無い」と誤認すると、まさに上書きしてはいけない場面で上書きすることになる。ENOENTを他の失敗と区別できる`vscode.workspace.fs.stat`で判定し、判断が付かないときは「在る」側（＝戻す操作を止める側）へ倒す
+- **`delete`の「戻す」でも、対象パスに今なにか在るかを実際に確かめる**（`existingContentForDeleteRevert`、`chatShared.ts`）。`delete`は「ファイルはもう無い」前提の再作成だが、その前提を確かめずに常に「無い」と決め打つと、`computeDiffContents`のdelete分岐にある「ファイルが既に存在します」の検査が構造的に一度も真にならず、差分を取ったあとに同じパスへ作り直された別のファイルを、モーダルの確認だけ通して無条件に上書きしてしまう。`add`の「戻す」は`useTrash: true`でゴミ箱を経由するが、こちらは`writeFile`による上書きで復旧手段が無いため影響が大きい。存在の判定に`FileSystemPort.readTextFile`を使わないのは、あれが「読めなければ無い扱い」でENOENT以外（EACCES/EISDIR等）でも`undefined`を返すため（`src/session/ports.ts`のissue #144のメモ）。実在するのに読めないファイルを「無い」と誤認すると、まさに上書きしてはいけない場面で上書きすることになる。ENOENTを他の失敗と区別できる`vscode.workspace.fs.stat`で判定し、判断が付かないときは「在る」側（＝戻す操作を止める側）へ倒す
 - **差分エディタの右側（変更後）は、`delete`以外は実ファイルそのものを使う。** 仮想ドキュメント同士を比較するより、そのまま編集・保存もできて実用的なため。`delete`だけはファイルが既に無いため、両側とも保存前の仮想ドキュメント（`vscode.workspace.openTextDocument({content, language})`、`runExportTranscript`の「生テキストで開く」・コードブロックの「新規ファイルで開く」と同じ手）にする。左側（変更前）の言語IDは、実ファイルが読めればそこから借りる（`guessDiffLanguageId`）
 - 承認カード（`renderApproval`）のプレビューに出る差分には操作ボタンを出さない。まだ適用されていない変更の見込みを見せているだけで、開く・戻すの対象となる実体が無いため
 
@@ -3114,7 +3122,8 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 - `src/view/sessionActivity.ts`: `deriveSessionActivityState` / `decoratePanelTitle` / `sanitizeForNotification`（すべて純粋関数）
 - `src/config.ts`: `readNotificationsConfig`（`NotificationsConfig`）
-- `src/view/chatView.ts` / `src/view/claudeChatView.ts`: `getActivityState`の追加、`onSessionChange`でのタブ名適用・`notifyNewApprovals` / `notifyApprovalPending` / `notifyTurnComplete`の追加、`ChatPanel` / `ClaudePanel`への`notifiedApprovalRequestIds`追加
+- `src/view/chatManagerBase.ts`（`BaseChatViewManager` / `BaseChatPanel`。issue #410/#415で基底クラスへ集約、§16.10参照）: `getActivityState` / `notifyNewApprovals` / `notifyApprovalPending` / `notifyTurnComplete`の追加、`notifiedApprovalRequestIds`フィールドの追加
+- `src/view/chatView.ts` / `src/view/claudeChatView.ts`: `onSessionChange`でのタブ名適用（プロバイダごとの実装のため引き続き各サブクラスに残る）
 - `src/view/sessionTreeProvider.ts`: コンストラクタの`isOpen`を`getActivity`へ差し替え、`buildSessionTreeItem`のアイコン・`description`分岐
 - `src/extension.ts`: `getSessionActivity`（`session.provider`での振り分け）を`SessionTreeProvider`へ配線
 - `package.json`: `agent.notifications.approvalPending` / `agent.notifications.turnComplete`設定
@@ -3226,7 +3235,7 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 - `src/util/editorSelection.ts`: `computeSelectionLineRange` / `formatSelectionHeader` / `buildSelectionPayload` / `selectionTextExceedsLimit`（すべて純粋関数）、`MAX_SELECTION_BYTES`
 - `src/view/activePanelSequence.ts`: `nextActivePanelSequence`（単調増加カウンタ）、`ActiveComposerTarget`型
-- `src/view/chatView.ts` / `src/view/claudeChatView.ts`: `activeSequence`フィールドの追加・3箇所での採番・`getActiveComposerTarget`の追加
+- `src/view/chatManagerBase.ts`（`BaseChatViewManager`。issue #410/#415で基底クラスへ集約）: `activeSequence`フィールドの追加・3箇所での採番・`getActiveComposerTarget`の追加
 - `src/view/chatScript.ts`: `insertComposerText`メッセージの受信処理（`window.addEventListener('message', ...)`内）
 - `src/extension.ts`: コマンド`agent.sendSelectionToChat`の登録、`sendEditorSelectionToChat` / `pickActiveComposerTarget` / `pickProviderForNewChat` / `workspaceRelativeDisplayPath`
 - `package.json`: コマンド`agent.sendSelectionToChat`、`menus["editor/context"]`（`when: "editorHasSelection"`）
@@ -3248,17 +3257,17 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 10個のボタンは元から`id`・`aria-label`・`title`・`hidden`条件・クリック時の`postMessage`がそれぞれ1対1で決まっており、`chatScript.ts`はすべて`el(id)`（`document.getElementById`）で触れる。表・「…」メニューのどちらに置いても**同じ`id`の同じ`<button>`要素を1個だけ**出力する設計にし、クリックの配線（`el('recap').addEventListener(...)`等）・応答中の`disabled`切替・状態更新による`hidden`の出し入れ（`applyFastMode`等）は一切変えていない。置き場所を変えるだけで機能や条件がずれる余地を無くすため。
 
-`chatView.ts`に`composerButtonSpec(id, ctx)`（aria-label・title・hidden条件・アイコンを1か所にまとめる関数）と`renderComposerButton(id, ctx, variant)`（`variant: 'toolbar' | 'menu'`でタグの组み立てを分ける）を追加した。`hidden`条件（`showImportButton` / `options.showRecap` / `options.review.mode` / `fastToggle`の既定hidden）は`composerButtonSpec`の1箇所だけが持ち、`variant`では変えない。これが受入基準「畳んだ後も同じ条件で出入りする」の実装上の担保で、`test/unit/chatView.test.ts`の「条件付きで出入りするボタンは、表にあっても「…」メニューにあっても同じ条件でhiddenになる」で、4つの対象（`claudeImport` / `recap` / `fastToggle` / `review`）それぞれについて表・メニュー両方の描画結果を比較して固定した。
+`chatShared.ts`に`composerButtonSpec(id, ctx)`（aria-label・title・hidden条件・アイコンを1か所にまとめる関数）と`renderComposerButton(id, ctx, variant)`（`variant: 'toolbar' | 'menu'`でタグの组み立てを分ける）を追加した。`hidden`条件（`showImportButton` / `options.showRecap` / `options.review.mode` / `fastToggle`の既定hidden）は`composerButtonSpec`の1箇所だけが持ち、`variant`では変えない。これが受入基準「畳んだ後も同じ条件で出入りする」の実装上の担保で、`test/unit/chatView.test.ts`の「条件付きで出入りするボタンは、表にあっても「…」メニューにあっても同じ条件でhiddenになる」で、4つの対象（`claudeImport` / `recap` / `fastToggle` / `review`）それぞれについて表・メニュー両方の描画結果を比較して固定した。
 
 #### ボタンのID一覧・既定・検証は`vscode`に依存しない別モジュールへ
 
-`src/view/composerButtons.ts`に`COMPOSER_BUTTON_IDS`（正準の並び、変更前の10個の既定順そのまま）・`DEFAULT_COMPOSER_BUTTONS`（先頭4つ）・`normalizeComposerButtons`（設定の生値の検証）・`overflowComposerButtons`（表に出す分を除いた残りを正準の並びの順で返す）を置いた。`vscode`に依存しない純粋関数のみで、`config.ts`（検証）と`chatView.ts`（描画）の両方から使う。
+`src/view/composerButtons.ts`に`COMPOSER_BUTTON_IDS`（正準の並び、変更前の10個の既定順そのまま）・`DEFAULT_COMPOSER_BUTTONS`（先頭4つ）・`normalizeComposerButtons`（設定の生値の検証）・`overflowComposerButtons`（表に出す分を除いた残りを正準の並びの順で返す）を置いた。`vscode`に依存しない純粋関数のみで、`config.ts`（検証）と`chatShared.ts`（描画）の両方から使う。
 
 `normalizeComposerButtons`は、配列でない・未知のIDを含む・IDが重複する、のいずれかであれば**丸ごと**`DEFAULT_COMPOSER_BUTTONS`へ戻す（`config.ts`の`normalizePseudoWorktreeExclude`と同じ「壊れた設定値は既定へ丸める」方針。一部のIDだけ間引く実装も検討したが、利用者が意図しない並びのまま中途半端に描画されるより、既定へ全戻しして警告を出す方が事故に気付きやすいと判断した）。空配列は「表には何も出さず全部畳む」という有効な指定として受け入れる。
 
-#### 設定の読み込み・警告のログ出しは呼び出し側（`attachPanel`）
+#### 設定の読み込み・警告のログ出しは呼び出し側（`renderPanelHtml`）
 
-`config.ts`の`readChatComposerButtonsConfig()`は`agent.chat.composerButtons`の生値を`normalizeComposerButtons`へ渡し、`{ buttons, warning? }`を返す（`readSessionPresetsConfig`と同じ「検証はconfig.ts、ログは呼び出し側」という役割分担）。`chatView.ts` / `claudeChatView.ts`の`attachPanel`はどちらもこれを呼び、`warning`があれば`this.log.warn`へ出してから`renderShell`の`composerButtons`へ渡す。スコープは既存の`agent.chat.renderMarkdown` / `agent.chat.sendOn`と同じ`window`。
+`config.ts`の`readChatComposerButtonsConfig()`は`agent.chat.composerButtons`の生値を`normalizeComposerButtons`へ渡し、`{ buttons, warning? }`を返す（`readSessionPresetsConfig`と同じ「検証はconfig.ts、ログは呼び出し側」という役割分担）。`chatView.ts` / `claudeChatView.ts`の`renderPanelHtml`はどちらもこれを呼び、`warning`があれば`this.log.warn`へ出してから`renderShell`の`composerButtons`へ渡す。スコープは既存の`agent.chat.renderMarkdown` / `agent.chat.sendOn`と同じ`window`。
 
 #### 「…」メニューはキーボードで完結する（アクセシビリティ）
 
@@ -3281,8 +3290,9 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 - `src/view/composerButtons.ts`: `COMPOSER_BUTTON_IDS` / `DEFAULT_COMPOSER_BUTTONS` / `normalizeComposerButtons` / `overflowComposerButtons` / `isComposerButtonId`（新設、`vscode`非依存）
 - `src/config.ts`: `readChatComposerButtonsConfig`（新設）
-- `src/view/chatView.ts`: `ChatShellOptions.composerButtons`（新設）、`composerButtonSpec` / `renderComposerButton`（新設）、`renderShell`の`#composerIconRow`を表＋`#composerOverflow`（`#composerOverflowToggle` + `#composerOverflowMenu`）構成へ変更、`attachPanel`で`readChatComposerButtonsConfig()`を呼んで渡す
-- `src/view/claudeChatView.ts`: `attachPanel`で同じく`readChatComposerButtonsConfig()`を呼んで渡す（Codex画面と同じ配線）
+- `src/view/chatShared.ts`: `ChatShellOptions.composerButtons`（新設）、`composerButtonSpec` / `renderComposerButton`（新設）、`renderShell`の`#composerIconRow`を表＋`#composerOverflow`（`#composerOverflowToggle` + `#composerOverflowMenu`）構成へ変更
+- `src/view/chatView.ts`: `renderPanelHtml`で`readChatComposerButtonsConfig()`を呼んで渡す
+- `src/view/claudeChatView.ts`: `renderPanelHtml`で同じく`readChatComposerButtonsConfig()`を呼んで渡す（Codex画面と同じ配線）
 - `src/view/chatScript.ts`: メニューの開閉・フォーカス移動（`overflowMenuItems` / `openOverflowMenu` / `closeOverflowMenu`）・`ArrowUp` / `ArrowDown` / `Tab` / `Escape`のハンドラ・メニュー外クリックでの close
 - `src/view/chatStyles.ts`: `#composerOverflow` / `#composerOverflowMenu` / `.composerOverflowLabel`
 - `package.json`: `agent.chat.composerButtons`（`contributes.configuration`、配列・`items.enum`・既定は先頭4つ・`window`スコープ）
@@ -4021,6 +4031,8 @@ interface TaskSession {
 `ChatPanel` の `panel` を「今そのタブがあるか」を表す省略可能な値にし、エントリ自体は `panels` に残す。`reveal()` でパネルを作り直し、`ChatState` から会話を描き直す。承認の保留も持ち越す（閉じた時点で拒否しない）。
 
 この切り離しは、閉じ忘れたセッションが残り続ける危険と裏表なので、範囲をタスク実行中のセッションだけに限る。人が手で開いた画面はこれまで通りタブを閉じたら終わる。タスクが `done` / `failed` になった時点でセッションを解放する。
+
+**実装の集約（issue #410/#415）**: `ChatViewManager` / `ClaudeChatViewManager` はどちらもこの性質を持つ必要があるため、パネルの表示・アタッチ・破棄（`showPanel` / `attachPanel` / `teardown`）とこのセッション寿命の切り離し（`taskManaged` によるタブを閉じたときの非解放）は、両クラスの共通の基底クラス `BaseChatViewManager`（`src/view/chatManagerBase.ts`）へ抽出した（§9.6「ファイル構成」参照）。`handleMessage` の分岐・`onSessionChange`・各種 `open*` メソッド（cwd・タスク単位の設定の受け渡しを含む）はプロバイダごとの差が大きいため、引き続き各サブクラスに残る。
 
 **5. タスク単位の設定を画面ごとに持つ**
 
