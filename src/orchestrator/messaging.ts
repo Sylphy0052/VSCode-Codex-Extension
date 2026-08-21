@@ -81,6 +81,23 @@ export const MAX_MESSAGES_PER_RUN = 500;
 export const MAX_MESSAGE_BODY_LENGTH = 4000;
 
 /**
+ * 文字列をUnicodeのコードポイント単位（サロゲートペアを1文字として数える）で数える
+ * （`workflow.ts`の`truncateByCodePoint`と同じ規則、Issue #365）。
+ *
+ * `validateSendMessage`は以前`input.body.length`（UTF-16コード単位）で上限判定しており、
+ * 同種の上限（`workflow.ts`の`truncateByCodePoint`が守る`MAX_TEMPLATE_RESULT_LENGTH`等）が
+ * コードポイント単位であることとずれていた。サロゲートペアで表現される文字（絵文字や
+ * CJK拡張漢字）を含む本文だと、実際の文字数より長いUTF-16長で誤って拒否しうる。
+ *
+ * `truncateByCodePoint`と同じ高速path（UTF-16長が`fastPathMax`以下ならコードポイント数も
+ * 必ずそれ以下になる）で、通常サイズの文字列に対して毎回コードポイント分割という
+ * 高コストな処理をしないで済む。
+ */
+function codePointLength(value: string, fastPathMax: number): number {
+  return value.length <= fastPathMax ? value.length : Array.from(value).length;
+}
+
+/**
  * `composeNextPrompt` が合成した後の総量の上限（design.md §16.21、Issue #132）。
  *
  * `composeNextPrompt` は未配送のメッセージを**全て連結**して次の指示の先頭へ添えるが、
@@ -138,10 +155,15 @@ export interface SendMessageValidationResult {
 }
 
 /**
- * 宛先の存在・本文の長さ・run全体の総数上限・宛先の状態を検証する（design.md §16.21）。
- * 純粋関数。呼び出し順は「宛先の存在」→「本文の長さ」→「総数上限」→「宛先の状態」で、
- * 1件見つかった時点で返す（複数該当してもどれか1つの理由を返せば十分なため、
- * `validateWorkflow` のように全件集めることはしない）。
+ * 宛先の存在・自己宛かどうか・本文の長さ・run全体の総数上限・宛先の状態を検証する
+ * （design.md §16.21）。純粋関数。呼び出し順は「宛先の存在」→「自己宛」→「本文の長さ」→
+ * 「総数上限」→「宛先の状態」で、1件見つかった時点で返す（複数該当してもどれか1つの理由を
+ * 返せば十分なため、`validateWorkflow` のように全件集めることはしない）。
+ *
+ * 自己宛（`to === from`）は拒否する（Issue #365）。`runnerMessaging.ts`の`onMessageAccepted`は
+ * `expectReply: true`で送信元を`waitingReply`へ倒した直後、同じメッセージの宛先が送信元と
+ * 同じなら`waitingReply`から即座に戻す（＝自分自身が宛先でもある）ため、自己宛を通すと
+ * 「一時停止して即再開する」という意味のない往復が起きる。
  */
 export function validateSendMessage(
   input: SendMessageValidationInput,
@@ -152,10 +174,17 @@ export function validateSendMessage(
       reason: `宛先が見つかりません（同じrunのタスクではありません）: ${input.to}`,
     };
   }
-  if (input.body.length > MAX_MESSAGE_BODY_LENGTH) {
+  if (input.to === input.from) {
     return {
       accepted: false,
-      reason: `本文が長すぎます（上限${MAX_MESSAGE_BODY_LENGTH}文字）: ${input.body.length}文字`,
+      reason: `自分自身へは送信できません: ${input.to}`,
+    };
+  }
+  const bodyLength = codePointLength(input.body, MAX_MESSAGE_BODY_LENGTH);
+  if (bodyLength > MAX_MESSAGE_BODY_LENGTH) {
+    return {
+      accepted: false,
+      reason: `本文が長すぎます（上限${MAX_MESSAGE_BODY_LENGTH}文字）: ${bodyLength}文字`,
     };
   }
   if (input.totalMessagesInRun >= MAX_MESSAGES_PER_RUN) {
@@ -871,9 +900,25 @@ export class MessagingMcpServer {
 
   private handleConnection(connection: McpConnection): void {
     connection.onRequest((request) => {
-      const response = this.dispatch(connection.taskId, request);
+      const response = this.safeDispatch(connection.taskId, request);
       connection.send(response);
     });
+  }
+
+  /**
+   * `dispatch` を例外から守る（Issue #365）。制御ツール実体（`OrchestratorControlPort` の
+   * 各メソッド）が例外を投げると、`try/catch` が無ければHTTPレスポンスが返らずCLI側は
+   * そのツール呼び出しで待ち続け、例外は拡張機能ホストの未処理例外になっていた。
+   *
+   * 返すエラーメッセージには`error`の内容（スタックトレース・パスを含みうる）を一切含めない。
+   * JSON-RPCの`-32603`（Internal error）として固定の文言だけを返す。
+   */
+  private safeDispatch(taskId: string, request: JsonRpcRequest): JsonRpcResponse {
+    try {
+      return this.dispatch(taskId, request);
+    } catch {
+      return failure(request.id, -32603, '内部エラーが発生しました');
+    }
   }
 
   private dispatch(taskId: string, request: JsonRpcRequest): JsonRpcResponse {
@@ -1137,12 +1182,26 @@ export function startHttpMcpTransport(hub: TaskMessagingHub): Promise<HttpMcpTra
         transport,
         baseUrl,
         registerTask(taskId: string): string {
+          // 同じtaskIdに対して以前発行したトークンをすべて無効化する（Issue #365）。
+          // これが無いと、再試行前の古いセッション（残存CLIプロセス）が同じタスクidを
+          // 名乗って`send_message`を送り続けられ、design.md「古いURLは以後404になる」が
+          // 成立しなくなる。
+          for (const [existingToken, existingTaskId] of tokenToTaskId) {
+            if (existingTaskId === taskId) {
+              tokenToTaskId.delete(existingToken);
+            }
+          }
           const token = randomBytes(16).toString('hex');
           tokenToTaskId.set(token, taskId);
           return `${baseUrl}/mcp/${token}`;
         },
         close(): Promise<void> {
-          return new Promise((resolveClose) => server.close(() => resolveClose()));
+          return new Promise((resolveClose) =>
+            server.close(() => {
+              tokenToTaskId.clear();
+              resolveClose();
+            }),
+          );
         },
       });
     });

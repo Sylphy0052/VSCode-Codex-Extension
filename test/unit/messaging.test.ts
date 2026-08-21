@@ -156,6 +156,48 @@ describe('isDeliverableState / validateSendMessage（design.md §16.21「配送�
     });
     expect(result.accepted).toBe(true);
   });
+
+  it('自分自身が宛先だと拒否する（Issue #365: 自己宛でaccepted: falseになる）', () => {
+    const result = validateSendMessage({
+      from: 'T1',
+      to: 'T1',
+      body: 'hi',
+      knownTaskIds: new Set(['T1', 'T2']),
+      recipientState: 'running',
+      totalMessagesInRun: 0,
+    });
+    expect(result.accepted).toBe(false);
+    expect(result.reason).toContain('T1');
+  });
+
+  it('サロゲートペア（絵文字）を含む本文はコードポイント単位で数える（Issue #365: UTF-16長ではなく文字数で判定する）', () => {
+    // 1絵文字はUTF-16では2コード単位。MAX_MESSAGE_BODY_LENGTHちょうどの絵文字数なら
+    // UTF-16長は上限の2倍になるが、コードポイント数としては上限ちょうどなので受け付ける。
+    const body = '\u{1F600}'.repeat(MAX_MESSAGE_BODY_LENGTH);
+    const result = validateSendMessage({
+      from: 'T1',
+      to: 'T2',
+      body,
+      knownTaskIds: new Set(['T1', 'T2']),
+      recipientState: 'running',
+      totalMessagesInRun: 0,
+    });
+    expect(result.accepted).toBe(true);
+  });
+
+  it('サロゲートペア（絵文字）がコードポイント単位で上限を1つ超えると拒否する', () => {
+    const body = '\u{1F600}'.repeat(MAX_MESSAGE_BODY_LENGTH + 1);
+    const result = validateSendMessage({
+      from: 'T1',
+      to: 'T2',
+      body,
+      knownTaskIds: new Set(['T1', 'T2']),
+      recipientState: 'running',
+      totalMessagesInRun: 0,
+    });
+    expect(result.accepted).toBe(false);
+    expect(result.reason).toContain(String(MAX_MESSAGE_BODY_LENGTH + 1));
+  });
 });
 
 describe('MessageStore（design.md §16.21）', () => {
@@ -681,6 +723,39 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
     const response = conn.sent[0];
     expect(response && 'error' in response).toBe(true);
   });
+
+  it(
+    'ツール実体が例外を投げてもJSON-RPCのエラーレスポース（-32603）が返り、内部情報は漏れない' +
+      '（Issue #365: dispatchの例外でCLIがハングする）',
+    () => {
+      const transport = new FakeTransport();
+      const hub = new TaskMessagingHub({
+        listRunTasks: () => {
+          throw new Error('/secret/path/leaked-stack-trace.ts:42 のようなスタックトレース');
+        },
+      });
+      new MessagingMcpServer(hub, transport);
+      const conn = new FakeConnection('T1');
+      transport.connect(conn);
+
+      conn.fireRequest({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'list_tasks', arguments: {} },
+      });
+
+      expect(conn.sent).toHaveLength(1);
+      const response = conn.sent[0];
+      expect(response && 'error' in response).toBe(true);
+      if (response && 'error' in response) {
+        expect(response.error.code).toBe(-32603);
+        expect(response.error.message).not.toContain('secret');
+        expect(response.error.message).not.toContain('.ts:');
+        expect(response.error.message).not.toContain('leaked-stack-trace');
+      }
+    },
+  );
 });
 
 describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタスク」、Issue #105）', () => {
@@ -835,6 +910,45 @@ describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタ�
     });
     expect(accepted.status).toBe(200);
     expect(hub.takeDeliverableMessages('T2')).toHaveLength(1);
+  });
+
+  it('同じタスクへ再登録すると古いURLは無効になる（Issue #365: 古いトークンが失効しない）', async () => {
+    const hub = buildHub([
+      { id: 'T1', state: 'running', summary: '' },
+      { id: 'T2', state: 'running', summary: '' },
+    ]);
+    handle = await startHttpMcpTransport(hub);
+    const oldUrl = handle.registerTask('T1');
+    const newUrl = handle.registerTask('T1');
+    expect(newUrl).not.toBe(oldUrl);
+
+    const oldResponse = await fetch(oldUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'send_message', arguments: { to: 'T2', body: 'via-old-url', expectReply: false } },
+      }),
+    });
+    expect(oldResponse.status).toBe(404);
+    expect(hub.takeDeliverableMessages('T2')).toHaveLength(0);
+
+    const newResponse = await fetch(newUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'send_message', arguments: { to: 'T2', body: 'via-new-url', expectReply: false } },
+      }),
+    });
+    expect(newResponse.status).toBe(200);
+    const delivered = hub.takeDeliverableMessages('T2');
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.body).toBe('via-new-url');
   });
 
   it('タスクごとに別のURLが発行される（同じサーバを1つのrunで使い回す）', async () => {
