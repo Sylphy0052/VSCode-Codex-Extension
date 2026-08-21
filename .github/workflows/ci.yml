@@ -1,8 +1,7 @@
 # mainへのpushとPRのたびにlint / typecheck / testを自動実行する。
 # 統合テスト（test:integration）はVSCodeのダウンロードとxvfbが必要なため対象外（Issue #360）。
 # ブランチ保護のrequired status checksはこのワークフローでは設定しない。
-# WF-A / WF-B / WF-C が同時進行中のため、必須化すると進行中のPRが即座にブロックされる。
-# 必須化の判断は全ワークフロー完了後に人が行う（詳細はPR本文を参照）。
+# 必須化の手順・チェック名・判断のタイミングはdocs/repository-hygiene.mdを参照。
 name: CI
 
 on:

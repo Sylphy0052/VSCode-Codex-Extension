@@ -141,7 +141,7 @@ git push origin --delete <ここに削除対象ブランチ名を人が入力す
 
 - `package.json` の `devDependencies` に `@vitest/coverage-v8` 等のカバレッジ関連パッケージは無い（`grep -i coverage package.json` で該当なし）
 - `vitest.config.ts` に `coverage` ブロックが無い（`test.include` / `test.exclude` のみで、閾値設定は存在しない）
-- `.gitignore` に `coverage/` の記載はある（6行目）が、それを生成する仕組み（`vitest run --coverage` 相当のスクリプトやCI設定）は無い
+- `.gitignore` に `coverage/` の記載はある（6行目）が、それを生成する仕組み（`vitest run --coverage` 相当のスクリプト）は無い。CI（`.github/workflows/ci.yml`）は存在するが、`lint` / `typecheck` / `test` の3ステップのみでカバレッジは計測していない
 - `package.json` の `test` スクリプトは `vitest run`（カバレッジ計測フラグ無し）
 - 現状のテスト規模: `test/unit/**/*.test.ts` が145ファイル、`src/**/*.ts` が162ファイル
 
@@ -154,7 +154,7 @@ CLAUDE.mdの「Test coverage 80%以上」は、これらの状況により**機�
 3. `package.json` の `scripts` に計測用スクリプトを追加する（例: `"test:coverage": "vitest run --coverage"`）。既存の `"test": "vitest run"` は変更せず併存させる
 4. まず**閾値を設定せずに計測だけ**を回し、現状のカバレッジ実測値を取得する
 5. 実測値をもとに、直近で現実的に維持できる閾値を決め、`coverage.thresholds` に設定する
-6. CI（`.github/` 配下）へ組み込むかどうかは、閾値確定後に別タスクとして判断する（本タスクの対象外。`.github/` は同時進行のT01が触っているため、本文書では変更しない）
+6. CI（`.github/workflows/ci.yml`）へ組み込むかどうかは、閾値確定後に別タスクとして判断する（本タスクの対象外）。現在のCIは `lint` / `typecheck` / `test` の3ステップのみでカバレッジを計測していない。組み込む場合は `test` ステップの後に `npm run test:coverage` を追加する形になる。判断のタイミングは #386 で追跡する
 
 ### 閾値をいきなり80%にすべきでない理由
 
@@ -169,6 +169,31 @@ CLAUDE.mdの「Test coverage 80%以上」は、これらの状況により**機�
 3. 中期目標: 新規追加コード（diffベース）にはより高いカバレッジを求め、既存コードは維持を求める形（例: vitestの `coverage.thresholds` を全体とファイル単位で分けて設定、あるいは別途diff-coverageツールの導入）で徐々に底上げする
 4. 長期目標: CLAUDE.mdが定める80%に、時間をかけて到達する。到達時期は固定せず、実測値の推移を見ながら都度見直す
 
+## 4. ブランチ保護の必須チェック
+
+### 実測値（ブランチ保護）
+
+- `gh api repos/Sylphy0052/VSCode-Codex-Extension/branches/main/protection` を実行すると `Branch not protected`（404）が返る。現在mainにはブランチ保護ルール自体が設定されておらず、必須チェック（required status checks）も未設定
+- 現状、CI（`ci.yml`）が赤くなってもマージはブロックされない。結果はPR上に可視化されるのみ
+
+### 必須にすべきチェック名
+
+`ci.yml` の `jobs.check.name` は `lint / typecheck / test`、ワークフロー名は `CI` であるため、GitHub上のstatus check名は `CI / lint / typecheck / test` の形になる。必須チェックとして設定する場合はこの名前を指定する。
+
+### 設定場所
+
+リポジトリの Settings > Branches > Branch protection rules。
+
+### いま設定しない理由
+
+第1波の4ワークフロー（WF-A / WF-B / WF-C / WF-D）が同時進行中であり、必須化すると進行中のPRが即座にブロックされる。
+
+### 判断のタイミング
+
+第1波の全ワークフロー完了後に人が判断する（#386 で追跡）。
+
+本節も他の節と同じく調査結果と提案の提示に留まる。ここに書かれた内容は設定変更を自動で実行してよいという意味ではなく、実行するかどうかとその実行自体は人が判断する。
+
 ## まとめ
 
 | 項目 | 状態 | 対応要否 |
@@ -176,5 +201,6 @@ CLAUDE.mdの「Test coverage 80%以上」は、これらの状況により**機�
 | リポジトリサイズ（`docs/design.md` の履歴肥大） | size-pack 48.54 MiB、design.mdが199版で上位blobを独占 | 分割（選択肢A）を推奨。履歴書き換え（選択肢B）は非推奨 |
 | 不要ブランチ `feat/327/...` | 既に削除済みで残存していない | 対応不要（解消済み） |
 | カバレッジ計測の不在 | 導入自体がされていない | 導入を推奨。閾値はベースライン計測後に段階設定 |
+| ブランチ保護の必須チェック | 未設定（`Branch not protected`） | 第1波の全ワークフロー完了後に人が判断（#386） |
 
 いずれも本文書は調査と選択肢の提示のみを行っており、実行判断は人に委ねる。
