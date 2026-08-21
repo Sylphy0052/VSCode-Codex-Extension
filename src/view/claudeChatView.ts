@@ -85,7 +85,11 @@ import {
   isApprovalLevel,
 } from '../provider/approvalLevel';
 import type { ClaudeConfig } from '../claude/types';
-import type { ClaudeEditableKey, SettingsProvider } from './settingsProvider';
+import type {
+  ClaudeEditableKey,
+  ClaudeSettingsSnapshot,
+  SettingsProvider,
+} from './settingsProvider';
 import type { ChatActivity } from './chatShared';
 
 interface ClaudePanel extends BaseChatPanel {
@@ -122,6 +126,41 @@ interface ClaudePanel extends BaseChatPanel {
   lastPostAt?: number | undefined;
   /** 直近に送った会話項目。`buildItemsDelta`が次回との差分を取るための基準。 */
   sentItems?: readonly ChatItem[] | undefined;
+}
+
+/**
+ * 画面下の設定行へ送る形（`ClaudeChatViewManager.buildSettingsPayload()`の戻り値、
+ * issue #420レビュー指摘）。
+ *
+ * 以前は`Record<string, unknown>`を返しており、webview側（`chatScript.ts`）が読む
+ * キー名の打ち間違いを型検査で拾えなかった。描画はCodex画面と同じスクリプトを使うが、
+ * `ClaudeSettingsSnapshot`とはキー名が異なる（`effort`→`reasoningEffort`、
+ * `permissionMode`→`approvalMode`）ため`SettingsSnapshot`とも一致しない、
+ * Claude Code専用の形として定義する。
+ */
+interface ChatSettingsPayload {
+  models: ClaudeSettingsSnapshot['models'];
+  efforts: ClaudeSettingsSnapshot['efforts'];
+  agents: ClaudeSettingsSnapshot['agents'];
+  model: string;
+  reasoningEffort: string;
+  approvalMode: string;
+  approvalLevel: string;
+  agent: string;
+  defaults: {
+    /** `ClaudeDefaults`と同じく、settings.jsonに指定が無ければ`undefined`。 */
+    model: string | undefined;
+    reasoningEffort: string | undefined;
+    approvalMode: string | undefined;
+    /** Claude CodeにはCodexの`sandbox`に対応する設定が無いため常に`undefined`。 */
+    sandbox: undefined;
+    /**
+     * エージェントの既定値はsettings.jsonから読んでいない（表示のみの用途に対して
+     * 追跡コストが見合わないため）。「既定 (CLI側に指定なし)」とだけ出す
+     */
+    agent: undefined;
+  };
+  profile: string;
 }
 
 const VIEW_TYPE = 'claude.chat';
@@ -281,14 +320,14 @@ export class ClaudeChatViewManager
   }
 
   /**
-   * 画面下の設定行に出す現在値と選択肢を組み立てる。
+   * 画面下の設定行に出す現在値と選択肢を組み立てる（戻り値の形は`ChatSettingsPayload`参照）。
    *
    * 描画はCodex画面と同じスクリプトなので、Codex側のスナップショットと同じ形に整えて返す。
    * モデルの一覧は `initialize` の応答から取ったもの（取れなければエイリアス）。
    * `refreshSettings`・`flushState`の両方から呼ぶ（issue #420: 揃える前は`refreshSettings`
    * だけがこれを組み立てて送っており、`flushState`経由の更新には設定が乗らなかった）。
    */
-  private buildSettingsPayload(): Record<string, unknown> {
+  private buildSettingsPayload(): ChatSettingsPayload {
     const snapshot = this.settings.claudeSnapshot();
     return {
       models: snapshot.models,
@@ -316,17 +355,26 @@ export class ClaudeChatViewManager
    * 画面下の設定行へ現在値と選択肢を送る。設定パネルでの変更など、人の操作へ即座に
    * 反映したい場面でだけ呼ぶ（`postState`の間引きを待たせない）。
    *
-   * 会話項目は全量を送るが、間引き経由の`flushState`が次に呼ばれたときの差分計算が
-   * 狂わないよう、送った内容を`entry.sentItems`へ反映しておく（issue #420）。
-   * 反映し忘れていた版は、ここで全量を送った直後に`flushState`が「前回との差分」を
-   * 誤って再計算し、直前に送った項目をもう一度差分として送ってしまっていた。
+   * 会話項目は全量を送るが、`items`キーは付けない（`flushState`と違い、この経路は
+   * 差し分ではなく全量なので不要）。そのため webview 側（`chatScript.ts`の
+   * `window.addEventListener('message', ...)`）は`!data.items`の枝へ入り、
+   * `apply(data.state)`だけを呼んで`mergedItems`（差し分の積み先）には触れない。
+   * つまりここで送った内容はwebview側の差し分の基準には反映されない。
+   *
+   * **`entry.sentItems`をここで更新してはならない**（issue #420レビュー指摘、HIGH）。
+   * 一度`entry.sentItems = state.items`と書いたところ、webview側は上記の理由で
+   * 追随していないのに、ホスト側の基準だけが進んでしまい、次の`flushState`が
+   * 送る差分を`mergeItems`（`chatScript.ts`側）が`total`の不一致で`undefined`と
+   * 判定 → `stateFull`要求 → 全量再送、という往復を毎回生んだ（`ready`直後に
+   * `entry.sentItems = undefined`へリセットした効果も、続けて呼ばれる
+   * `refreshSettings`が誤って埋め戻すことで無効化されていた）。`entry.sentItems`は
+   * 従来通り`flushState`だけが更新する。
    */
   private refreshSettings(entry: ClaudePanel): void {
     if (entry.disposed || entry.panel === undefined) {
       return;
     }
     const state = entry.session.getState();
-    entry.sentItems = state.items;
     void entry.panel.webview.postMessage({
       type: 'state',
       state: {

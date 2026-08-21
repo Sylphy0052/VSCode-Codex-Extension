@@ -701,10 +701,16 @@ export class ChatSession {
    * （`ClaudeStreamSession`の`exit`/`error`ハンドラ）は接続が切れた時点で
    * `busy: false, turnFailed: true`まで戻しており、`releasePendingApprovals()`と並べて
    * `handleConnectionLost()`から呼び、Codex側も同じ状態・同じ文言（`turnFailed`）に揃える。
-   * 応答中でない（`busy: false`）ときに呼んでも実害は無い（`turnFailed`が立つだけ）ため、
-   * 呼び出し側で応答待ちかどうかを判定する必要は無い。
+   *
+   * 応答待ちでない（`busy: false`）セッションには何もしない（issue #420レビュー指摘）。
+   * `handleConnectionLost()`は開いている全パネルへ無条件に呼ぶため、ガード無しだと
+   * ターンを送っていないセッションにまで`turnFailed: true`が立ち、`update()`経由で
+   * 全パネルに不要な`postState`が撒かれてしまう。
    */
   markTurnFailed(): void {
+    if (!this.state.busy) {
+      return;
+    }
     this.update({ ...this.state, busy: false, turnFailed: true });
   }
 
