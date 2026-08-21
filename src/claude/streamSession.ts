@@ -815,59 +815,66 @@ export class ClaudeStreamSession {
     const { values, rest, overflow } = consumeNdjson(this.buffer);
     this.buffer = rest;
 
-    // 完成した行（values）は、上限超過の判定より先に処理する（レビュー指摘・MEDIUM）。
-    // overflowを先に見て早期returnすると、同じチャンクの中に「正常に完成したイベント」と
-    // 「上限超過の未完成行」が同居していた場合、正常に届いていたイベントまで握りつぶして
-    // しまう（後続の一括解放で待機自体は解けるが、本来成功していたターンが失敗扱いへ
-    // すり替わってしまう）。
-    for (const event of values) {
-      // コマンドの増減。CLIは差分ではなく一覧を押し付けてくるので入れ替える
-      const changed = readCommandsChanged(event);
-      if (changed !== undefined) {
-        this.setCommands(changed);
-      }
+    try {
+      // 完成した行（values）は、上限超過の判定より先に処理する（レビュー指摘・MEDIUM）。
+      // overflowを先に見て早期returnすると、同じチャンクの中に「正常に完成したイベント」と
+      // 「上限超過の未完成行」が同居していた場合、正常に届いていたイベントまで握りつぶして
+      // しまう（後続の一括解放で待機自体は解けるが、本来成功していたターンが失敗扱いへ
+      // すり替わってしまう）。
+      for (const event of values) {
+        // コマンドの増減。CLIは差分ではなく一覧を押し付けてくるので入れ替える
+        const changed = readCommandsChanged(event);
+        if (changed !== undefined) {
+          this.setCommands(changed);
+        }
 
-      const request = readControlRequest(event);
-      if (request !== undefined) {
-        this.handleControlRequest(request);
-        continue;
-      }
+        const request = readControlRequest(event);
+        if (request !== undefined) {
+          this.handleControlRequest(request);
+          continue;
+        }
 
-      const response = readControlResponse(event);
-      if (response !== undefined) {
-        this.handleControlResponse(response);
-        continue;
-      }
+        const response = readControlResponse(event);
+        if (response !== undefined) {
+          this.handleControlResponse(response);
+          continue;
+        }
 
-      const wasBusy = this.state.busy;
-      const next = applyStreamEvent(this.state, event);
-      if (next !== this.state) {
-        this.update(next);
+        const wasBusy = this.state.busy;
+        const next = applyStreamEvent(this.state, event);
+        if (next !== this.state) {
+          this.update(next);
+        }
+        // ターンが終わるたびに読み直す。圧縮の効果もここで表示へ反映される
+        if (wasBusy && !next.busy) {
+          this.refreshContext();
+          this.refreshSessionCost();
+        }
       }
-      // ターンが終わるたびに読み直す。圧縮の効果もここで表示へ反映される
-      if (wasBusy && !next.busy) {
-        this.refreshContext();
-        this.refreshSessionCost();
+    } finally {
+      // `finally`へ置くのは、forループ中のハンドラ（`setCommands`/`update`等、
+      // 呼び出し側が渡すコールバックを経由する）が同期的に例外を投げた場合でも、
+      // overflow時の後始末（プロセスの打ち切り）を必ず実行するため（レビュー指摘・LOW）。
+      // ループを先に処理する形へ入れ替えた際、例外で`if (overflow)`まで到達しない
+      // 経路ができていた
+      if (overflow) {
+        // 改行を含まない出力（診断ログの乱れ・バイナリ混入等）が上限を超えて溜まり続けた
+        // （issue #402、1点目）。このまま連結し続けると無制限にメモリを消費するため、
+        // プロセスを回収して打ち切る。exit/errorハンドラと同じ「ターン失敗」の経路
+        // （`releasePendingWaiters()` + `turnFailed: true`）へ寄せ、続きは送らせない。
+        // `this.buffer`を`''`へ戻すため、上のforループで処理済みの`values`とは別に、
+        // 上限超過分の`rest`がバッファに残り続けることはない
+        this.log.error(
+          `claudeからの出力が上限（${MAX_LINE_BUFFER_BYTES}バイト）を超えて改行なしで届いたため、セッションを打ち切ります`,
+        );
+        if (this.proc !== undefined) {
+          killWithEscalation(this.proc);
+        }
+        this.proc = undefined;
+        this.buffer = '';
+        this.releasePendingWaiters();
+        this.update({ ...this.state, busy: false, turnFailed: true });
       }
-    }
-
-    if (overflow) {
-      // 改行を含まない出力（診断ログの乱れ・バイナリ混入等）が上限を超えて溜まり続けた
-      // （issue #402、1点目）。このまま連結し続けると無制限にメモリを消費するため、
-      // プロセスを回収して打ち切る。exit/errorハンドラと同じ「ターン失敗」の経路
-      // （`releasePendingWaiters()` + `turnFailed: true`）へ寄せ、続きは送らせない。
-      // `this.buffer`を`''`へ戻すため、上のforループで処理済みの`values`とは別に、
-      // 上限超過分の`rest`がバッファに残り続けることはない
-      this.log.error(
-        `claudeからの出力が上限（${MAX_LINE_BUFFER_BYTES}バイト）を超えて改行なしで届いたため、セッションを打ち切ります`,
-      );
-      if (this.proc !== undefined) {
-        killWithEscalation(this.proc);
-      }
-      this.proc = undefined;
-      this.buffer = '';
-      this.releasePendingWaiters();
-      this.update({ ...this.state, busy: false, turnFailed: true });
     }
   }
 

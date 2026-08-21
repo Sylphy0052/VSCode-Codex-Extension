@@ -35,7 +35,9 @@ class FakeChildProcess extends EventEmitter {
   });
 }
 
-function createStartedSession(): {
+function createStartedSession(
+  onCommands: (commands: readonly { name: string }[]) => void = () => undefined,
+): {
   session: ClaudeStreamSession;
   proc: FakeChildProcess;
 } {
@@ -46,7 +48,7 @@ function createStartedSession(): {
     fakeLogger,
     () => undefined,
     () => undefined,
-    () => undefined,
+    onCommands,
     undefined,
     spawnProcess,
   );
@@ -96,6 +98,30 @@ describe('ClaudeStreamSession: 受信バッファの上限（issue #402、1点�
     // overflowより先にvaluesが処理されるため、正常だったイベントは握りつぶされない
     expect(session.commands.map((c) => c.name)).toEqual(['compact']);
     // その後、上限超過分でセッションは打ち切られる
+    expect(proc.kill).toHaveBeenCalledTimes(1);
+    expect(session.getState().turnFailed).toBe(true);
+  });
+
+  it('onCommandsが同期的に例外を投げても、overflow時の後始末（プロセス打ち切り）は行われる（レビュー指摘・LOW）', () => {
+    const { session, proc } = createStartedSession(() => {
+      throw new Error('boom');
+    });
+
+    const commandsChangedLine = `${JSON.stringify({
+      type: 'system',
+      subtype: 'commands_changed',
+      commands: [{ name: 'compact', description: '要約する', argumentHint: '' }],
+    })}
+`;
+    const overflowTail = 'x'.repeat(MAX_LINE_BUFFER_BYTES + 1);
+
+    // onCommandsの例外はforループ内で起きるため、receive()の外まで伝播する
+    // （try/finallyは握り潰さない。ここではfinallyでの後始末だけを確かめる）
+    expect(() => {
+      session.receive(commandsChangedLine + overflowTail);
+    }).toThrow('boom');
+
+    // 例外が起きても、finally側の後始末（プロセス打ち切り）は実行される
     expect(proc.kill).toHaveBeenCalledTimes(1);
     expect(session.getState().turnFailed).toBe(true);
   });

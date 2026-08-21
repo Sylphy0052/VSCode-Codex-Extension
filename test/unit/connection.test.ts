@@ -257,6 +257,41 @@ describe('AppServerConnection: 受信バッファの上限（issue #402、1点�
     expect(proc.kill).toHaveBeenCalledTimes(1);
     expect(onDisconnect).toHaveBeenCalledTimes(1);
   });
+
+  it('通知ハンドラが同期的に例外を投げても、overflow時の後始末（切断・再起動）は行われる（レビュー指摘・LOW）', async () => {
+    const proc = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(proc.proc);
+    const onDisconnect = vi.fn();
+    const connection = new AppServerConnection(
+      () => 'codex',
+      fakeLogger(),
+      () => {
+        throw new Error('boom');
+      },
+      async () => undefined,
+      onDisconnect,
+    );
+
+    const started = connection.ensureStarted();
+    const initId = initializeRequestId(proc.writes);
+    proc.emitStdout(JSON.stringify({ jsonrpc: '2.0', id: initId, result: {} }));
+    await started;
+
+    // 完成した通知行の直後に、改行を含まない上限超過分を同居させる
+    const notifyLine = `${JSON.stringify({ jsonrpc: '2.0', method: 'some/event', params: {} })}
+`;
+    const overflowTail = 'x'.repeat(MAX_LINE_BUFFER_BYTES + 1);
+
+    // 通知ハンドラの例外はforループ内で起きるため、receive()の外まで伝播する
+    // （try/finallyは握り潰さない。ここではfinallyでの後始末だけを確かめる）
+    expect(() => {
+      proc.proc.stdout.emit('data', Buffer.from(notifyLine + overflowTail));
+    }).toThrow('boom');
+
+    // 例外が起きても、finally側の後始末（切断・再起動できる状態にする）は実行される
+    expect(proc.kill).toHaveBeenCalledTimes(1);
+    expect(onDisconnect).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('AppServerConnection: 通常起動後の接続断（issue #354・2点目の土台）', () => {

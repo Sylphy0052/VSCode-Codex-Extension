@@ -224,4 +224,83 @@ describe('AppServerClient: 受信バッファの上限（issue #402、1点目・
       threadId: '019fd880-dd5b-7a03-a07a-bfd9a1fc4808',
     });
   });
+
+  it('overflow検知時にクロージャ内のbufferが確実にクリアされる（レビュー指摘・MEDIUM）', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.forkThread(
+      '11111111-1111-1111-1111-111111111111',
+      '22222222-2222-2222-2222-222222222222',
+    );
+
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // 改行を一切含まない上限超過分だけのチャンク（completeなmessagesは無い）
+    const overflowTail = 'x'.repeat(MAX_LINE_BUFFER_BYTES + 1);
+    fake.proc.stdout.emit('data', Buffer.from(overflowTail));
+
+    // bufferがクリアされていれば、続くチャンクは単独で解釈される。クリアされて
+    // いなければ、10MB超のoverflow分（改行なし）へ連結された結果、この応答行の
+    // 直前に改行が無いままとなり、1行としてパースに失敗し応答が届かない
+    const forkId = requestId(fake.writes, 'thread/fork');
+    const responseLine = `${respond(forkId, {
+      thread: { id: '019fd880-dd5b-7a03-a07a-bfd9a1fc4808' },
+    })}
+`;
+    fake.proc.stdout.emit('data', Buffer.from(responseLine));
+
+    // bufferがクリアされているため、この応答は単独で完成した行として解決され、
+    // `body`の続きが（overflow起因のfinishより先に）成功で確定する
+    await expect(pending).resolves.toEqual({
+      ok: true,
+      threadId: '019fd880-dd5b-7a03-a07a-bfd9a1fc4808',
+    });
+  });
+
+  it('通知リスナーが同期的に例外を投げても、overflow時の後始末（打ち切りの予約）は行われる（レビュー指摘・LOW）', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const call = (client as unknown as { call: CallMethod }).call;
+    const outer = call.call(
+      client,
+      async (_request, notify) => {
+        notify.onEach(() => {
+          throw new Error('boom');
+        });
+        // 通知が届くまで待つだけ。応答は来ない想定で、決着は overflow 起因の
+        // finish() に任せる
+        return await new Promise<{ ok: true; value: string } | { ok: false; error: string }>(
+          () => undefined,
+        );
+      },
+      30,
+    );
+
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // 完成した通知行の直後に、改行を含まない上限超過分を同居させる
+    const notifyLine = `${JSON.stringify({ jsonrpc: '2.0', method: 'some/event', params: {} })}
+`;
+    const overflowTail = 'x'.repeat(MAX_LINE_BUFFER_BYTES + 1);
+
+    // 通知リスナーの例外はforループ内で起きるため、'data'イベントの外まで伝播する
+    // （try/finallyは握り潰さない。ここではfinallyでの後始末だけを確かめる）
+    expect(() => {
+      fake.proc.stdout.emit('data', Buffer.from(notifyLine + overflowTail));
+    }).toThrow('boom');
+
+    // 例外が起きても、finally側でoverflow時の打ち切り（finishのsetImmediate予約）は
+    // 行われる
+    const result = await outer;
+    expect(result.ok).toBe(false);
+    expect(fake.kill).toHaveBeenCalledTimes(1);
+  });
 });

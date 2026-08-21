@@ -142,40 +142,46 @@ export class AppServerConnection {
     const { messages, rest, overflow } = consumeFrames(this.buffer);
     this.buffer = rest;
 
-    // 完成した行（messages）は、上限超過の判定より先に処理する（レビュー指摘・MEDIUM）。
-    // overflowを先に見て早期returnすると、同じチャンクの中に「正常に完成したメッセージ」と
-    // 「上限超過の未完成行」が同居していた場合、正常に届いていた応答まで握りつぶしてしまう
-    // （後続のreset()による一括エラー解決で待機自体は解けるが、本来成功していた応答が
-    // 失敗応答へすり替わってしまう）。
-    for (const message of messages) {
-      if (isServerRequest(message)) {
-        void this.handleServerRequest(message);
-        continue;
+    try {
+      // 完成した行（messages）は、上限超過の判定より先に処理する（レビュー指摘・MEDIUM）。
+      // overflowを先に見て早期returnすると、同じチャンクの中に「正常に完成したメッセージ」と
+      // 「上限超過の未完成行」が同居していた場合、正常に届いていた応答まで握りつぶしてしまう
+      // （後続のreset()による一括エラー解決で待機自体は解けるが、本来成功していた応答が
+      // 失敗応答へすり替わってしまう）。
+      for (const message of messages) {
+        if (isServerRequest(message)) {
+          void this.handleServerRequest(message);
+          continue;
+        }
+        if (typeof message.id === 'number' && this.pending.has(message.id)) {
+          this.pending.get(message.id)?.(message);
+          this.pending.delete(message.id);
+          continue;
+        }
+        if (message.method !== undefined) {
+          this.onNotification(message.method, asRecord(message.params));
+        }
       }
-      if (typeof message.id === 'number' && this.pending.has(message.id)) {
-        this.pending.get(message.id)?.(message);
-        this.pending.delete(message.id);
-        continue;
+    } finally {
+      // `finally`へ置くのは、forループ中のハンドラ（`onNotification`等、呼び出し側が
+      // 渡すコールバック）が同期的に例外を投げた場合でも、overflow時の後始末（接続の
+      // 切断・再起動）を必ず実行するため（レビュー指摘・LOW）。ループを先に処理する形へ
+      // 入れ替えた際、例外で`if (overflow)`まで到達しない経路ができていた
+      if (overflow) {
+        // 改行を含まない出力（診断ログの乱れ・バイナリ混入等）が上限を超えて溜まり続けた
+        // （issue #402、1点目）。このまま連結し続けると無制限にメモリを消費するため、
+        // 接続を切って回収する。`reset()`が`this.buffer`も`''`へ戻すため、上のforループで
+        // 処理済みの`messages`とは別に、上限超過分の`rest`がバッファに残り続けることはない。
+        // `this.proc`も`undefined`へ戻るので、次の`ensureStarted()`が新しいプロセスを
+        // 起動し直す（＝「切って再起動」はここで達成する）
+        this.log.error(
+          `app-serverからの出力が上限（${MAX_LINE_BUFFER_BYTES}バイト）を超えて改行なしで届いたため、接続を切って再起動します`,
+        );
+        if (this.proc !== undefined) {
+          killWithEscalation(this.proc);
+        }
+        this.reset();
       }
-      if (message.method !== undefined) {
-        this.onNotification(message.method, asRecord(message.params));
-      }
-    }
-
-    if (overflow) {
-      // 改行を含まない出力（診断ログの乱れ・バイナリ混入等）が上限を超えて溜まり続けた
-      // （issue #402、1点目）。このまま連結し続けると無制限にメモリを消費するため、
-      // 接続を切って回収する。`reset()`が`this.buffer`も`''`へ戻すため、上のforループで
-      // 処理済みの`messages`とは別に、上限超過分の`rest`がバッファに残り続けることはない。
-      // `this.proc`も`undefined`へ戻るので、次の`ensureStarted()`が新しいプロセスを
-      // 起動し直す（＝「切って再起動」はここで達成する）
-      this.log.error(
-        `app-serverからの出力が上限（${MAX_LINE_BUFFER_BYTES}バイト）を超えて改行なしで届いたため、接続を切って再起動します`,
-      );
-      if (this.proc !== undefined) {
-        killWithEscalation(this.proc);
-      }
-      this.reset();
     }
   }
 
