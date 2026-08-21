@@ -1115,14 +1115,29 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     connectionFactory: (
       onNotification: NotificationHandler,
       onServerRequest: ServerRequestHandler,
-    ) => AppServerConnectionPort = (onNotification, onServerRequest) =>
-      new AppServerConnection(codexPath, log, onNotification, onServerRequest),
+      onDisconnect: () => void,
+    ) => AppServerConnectionPort = (onNotification, onServerRequest, onDisconnect) =>
+      new AppServerConnection(codexPath, log, onNotification, onServerRequest, onDisconnect),
   ) {
     this.catalog = new CommandCatalog(this.fs);
     this.connection = connectionFactory(
       (method, params) => this.routeNotification(method, params),
       (request) => this.routeServerRequest(request),
+      () => this.handleConnectionLost(),
     );
+  }
+
+  /**
+   * 接続断（app-serverのクラッシュ等）を、開いている全スレッドの`ChatSession`へ伝える
+   * （issue #354）。`AppServerConnection`は全スレッドで共有される単一プロセスのため、
+   * ここで各セッションの保留中の承認・問い合わせを解放しないと、承認カードが
+   * 永久にハングしたままになる。パネルやセッション状態自体は残す（テスト用の
+   * `FakeAppServerConnection`は`onDisconnect`を呼ばないため、本番の接続でのみ働く）。
+   */
+  private handleConnectionLost(): void {
+    for (const entry of this.panels.values()) {
+      entry.session.releasePendingApprovals();
+    }
   }
 
   /** そのスレッドの画面を開いているか。履歴の印に使う。 */

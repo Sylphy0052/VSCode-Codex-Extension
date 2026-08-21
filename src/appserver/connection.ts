@@ -57,6 +57,14 @@ export class AppServerConnection {
     private readonly log: Logger,
     private readonly onNotification: NotificationHandler,
     private readonly onServerRequest: ServerRequestHandler,
+    /**
+     * 接続断（`reset()`が実際に状態を巻き戻したとき）を知らせる（issue #354）。
+     *
+     * `AppServerConnection` は全スレッドで共有される単一プロセスのため、ここで各
+     * `ChatSession` の待機Promise（承認カード・問い合わせフォーム）を解放しないと、
+     * app-serverがクラッシュしたときに開いている全スレッドの承認待ちが永久にハングする。
+     */
+    private readonly onDisconnect: () => void = () => undefined,
   ) {}
 
   /** 起動と初期化。多重呼び出しは同じ処理を共有する。 */
@@ -96,9 +104,23 @@ export class AppServerConnection {
       this.reset();
     });
 
-    await this.request('initialize', {
-      clientInfo: { name: CLIENT_NAME, version: CLIENT_VERSION },
-    });
+    // `initialize`がタイムアウト等で失敗しても、プロセス自体は生きていて`exit`は
+    // 発火しない（issue #354）。ここで捕まえて明示的に殺し、`this.proc`を残さない
+    // ようにしないと、以降の`ensureStarted()`が`proc !== undefined`だけを見て
+    // ハンドシェイク未完了の壊れた接続を使い続けてしまう。
+    try {
+      await this.request('initialize', {
+        clientInfo: { name: CLIENT_NAME, version: CLIENT_VERSION },
+      });
+    } catch (e) {
+      this.log.error(`app-serverの初期化に失敗しました: ${errorMessage(e)}`);
+      proc.kill();
+      // `proc.kill()`は非同期に`exit`を発火させる。そちらでも`reset()`は呼ばれるが、
+      // `this.proc`は下の`reset()`で既に`undefined`になっているため、`reset()`の
+      // 先頭ガードで二重発火にはならない（自己レビュー: 再入時の無限ループなし）。
+      this.reset();
+      throw e;
+    }
     this.write(encodeNotification('initialized', {}));
     this.log.info('app-serverに接続しました');
   }
@@ -174,7 +196,14 @@ export class AppServerConnection {
     }
   }
 
+  /**
+   * 接続断の後始末。`proc`の`exit`/`error`ハンドラと、`start()`内の初期化失敗の両方から
+   * 呼ばれうるため、既に後始末済みなら何もしない（二重発火防止。自己レビュー参照）。
+   */
   private reset(): void {
+    if (this.proc === undefined && this.starting === undefined && this.pending.size === 0) {
+      return;
+    }
     this.proc = undefined;
     this.starting = undefined;
     this.buffer = '';
@@ -182,6 +211,7 @@ export class AppServerConnection {
       resolve({ error: { code: -1, message: 'app-serverとの接続が切れました' } });
     }
     this.pending.clear();
+    this.onDisconnect();
   }
 
   dispose(): void {
@@ -192,4 +222,8 @@ export class AppServerConnection {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }

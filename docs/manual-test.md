@@ -797,6 +797,23 @@ Codex CLIには `/recap` に相当する概念が無いため、要約を依頼�
 - 操作: Codex画面を開いたまま、エディタ右上の `+` アイコンを押す
 - 期待: いまのタブはそのまま残り、新しいCodexの会話がもう1つ開く（サイドバーへ戻らずに始められる）
 
+### C-47 app-server接続断で承認カードがハングしない（issue #354）
+
+`AppServerConnection`は全Codexスレッドで共有される単一プロセス。app-serverがクラッシュした
+ときに、開いている全スレッドの承認カード・問い合わせフォームが解放されることを確認する。
+ロジック層（`ensureStarted()`の再起動・`ChatSession.releasePendingApprovals()`）はユニット
+テストで確認済みだが、実際のプロセスkillと複数webviewパネルへの反映は実VSCode上でしか
+見えない。
+
+- 準備: Codex画面を2つ開き、両方でコマンド実行など承認カードが出る発言をして、両方の画面に
+  承認カードを出したまま待たせる
+- 操作: ターミナルから `pkill -f "codex app-server"`（環境に応じて実際のプロセス名で）を実行し、
+  app-serverを強制終了する
+- 期待: 両方の画面で承認カードが消える（宙に浮いたままにならない）。出力パネルのCodexログに
+  「app-serverが終了しました」が1回だけ出る（二重に出ない）
+- 操作: どちらかの画面で新しく発言する
+- 期待: `ensureStarted()`が新しいapp-serverプロセスを起動し直し、会話が続けられる
+
 ## L群: Claude Code画面（stream-json）
 
 `--print --input-format stream-json` の常駐プロセスと control protocol が対象。
