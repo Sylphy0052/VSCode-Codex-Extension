@@ -17,6 +17,14 @@
 別々に進めると統合ブランチでのマージ衝突が後段へ集中するため、34項目を統合して分割し直した。
 あわせて、後述の運用規約から導かれる項目をW6として1件追加した（計35項目）。
 
+## docs/roadmap/ の4本の関係
+
+- [ux-improvements.md](ux-improvements.md) — R1〜R11。**全項目完了済み**（epic #297 もクローズ）。
+  記録として残してある
+- [workflow-autonomy.md](workflow-autonomy.md) — W1〜W5。本ロードマップの WF-E が担当する
+- [chat-conversation-parity.md](chat-conversation-parity.md) — X1〜X3。WF-F が担当する
+- 本ドキュメント — 上の8項目と全体レビューの26指摘を統合した、7ワークフローの分割と運用規約
+
 ## 方針
 
 1. **ワークフロー同士がファイルを共有しない。** 分割の第一基準は担当領域の意味ではなく、
@@ -118,25 +126,32 @@
   - 依存: 第1波・第2波の全完了
   - ファイル: `src` 全域（型情報ルールの導入は全ファイルへ波及する）
 
-## W6 タスクごとにIssueとPRを作り統合ブランチへマージする
+## W6 タスクごとにIssueを起票し、PRのレビューを経てマージする
 
 - 依存: W1
 - Issue: 未起票（着手時に起票する）
-- 現状: [runner.ts](../../src/orchestrator/runner.ts) はタスクのworktreeで作業したあと、
-  統合ブランチ（`wf/<runId>/integration`）へ直接マージする。タスク単位のIssueもPRも作らないため、
-  個々のタスクの意図と差分がGitHub/GitLab上に残らず、レビューの単位も存在しない。
-  PR/MRを作るのは [forge.ts](../../src/orchestrator/forge.ts) が扱う統合ブランチ→mainの1本だけ
-- 変更: タスクの開始時にIssueを起票し、完了時に統合ブランチを宛先とするPR/MRを作る。
-  レビューを通してからマージする。`forge.ts` のPR/MR作成をタスク単位でも使えるようにし、
-  宛先ブランチを引数で受け取れるようにする。Issue本文とPR本文はタスクの `prompt` と `done` から
-  組み立て、外部由来テキストは[T10で集約するサニタイズ](#第1波-土台の修正並列4)を通す。
-  この挙動は設定で切り替えられるようにし、既定をどちらにするかは実装時に決めて design.md へ残す
-- 受入基準: タスクの開始でIssueが起票される／完了で統合ブランチ宛のPR/MRが作られる／
-  レビューを経てマージされる／PR/MRを作れない環境（CLI・認証が無い）では警告を出して
-  従来どおり直接マージへ退避しrunは止まらない／設定で従来の挙動へ戻せる
-- 影響: [forge.ts](../../src/orchestrator/forge.ts) / [runner.ts](../../src/orchestrator/runner.ts) /
-  [runnerMerge.ts](../../src/orchestrator/runnerMerge.ts) / [config.ts](../../src/config.ts) /
-  [workflowView.ts](../../src/view/workflowView.ts)
+- 現状: **タスクごとのPR作成は既に実装されている。** `agent.workflows.pullRequest` の既定が
+  `per-task` で（[config.ts](../../src/config.ts) の `normalizePullRequestLayerConfig`）、
+  [runnerMerge.ts](../../src/orchestrator/runnerMerge.ts) が `shouldCreateTaskPullRequest` を見て
+  [forge.ts](../../src/orchestrator/forge.ts) の `runTaskPullRequestFlow` を回す。その段取りは
+  「タスクブランチをpush → 統合ブランチをpush → PRを作る → ローカルでマージして統合ブランチをpush →
+  PRをready化」である。PR作成時の宛先ブランチも引数（`baseBranch`）で受け取っている。
+  無いのは次の2つだけ。
+  - **タスクごとのIssue起票**（`gh issue create` を呼ぶ経路が `src` 配下に無い）
+  - **PRのレビューを経てからマージする段**（PRは記録として残すだけで、マージはローカルで行うため、
+    PR上のレビューを待つ余地が無い）
+- 変更: 上の2点だけを足す。既にある `per-task` のフローを作り直さない。
+  - (a) タスクの開始時にIssueを起票し、PR本文から参照する。Issue本文はタスクの `prompt` と `done`
+    から組み立て、外部由来テキストはT10で集約するサニタイズを通す
+  - (b) PRを作ったあと、ローカルマージの前にレビューを1段挟む。レビューの実施主体
+    （別セッションを立てるのか、forgeのレビュー機能を使うのか）は実装時に決めて design.md へ残す
+  - どちらも設定で切り替えられるようにし、既定をどちらにするかは実装時に決めて design.md へ残す
+- 受入基準: タスクの開始でIssueが起票されPR本文から参照される／PRがレビューを経てからマージされる／
+  Issueを起票できない環境（CLIや認証が無い）では警告を出して従来どおり進み、runは止まらない／
+  設定で従来の挙動へ戻せる／`per-task` 以外（`none` / `integration`）を選んだときの挙動が変わらない
+- 影響: [forge.ts](../../src/orchestrator/forge.ts) /
+  [runnerMerge.ts](../../src/orchestrator/runnerMerge.ts) / [runner.ts](../../src/orchestrator/runner.ts) /
+  [config.ts](../../src/config.ts) / [workflowView.ts](../../src/view/workflowView.ts)
 
 ## 運用規約
 
@@ -207,8 +222,9 @@ W1〜W5とX1〜X3のIssue番号・ブランチ名・design.mdの節・manual-tes
 
 第1波を始める前に次を済ませる。
 
-- **このロードマップを含むPR [#342](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/342) を
-  mainへマージする。** W/X群のIssueが参照しており、第2波の前提になる
+- **このロードマップを含むPR [#342](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/342) の
+  マージは済んでいる**（2026-08-22）。取りこぼした差分も PR
+  [#345](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/345) で回収済み
 - **`feat/332/markdown-table-quote-nested-list` の未コミット変更を引き継ぐ。**
   worktree `.claude/worktrees/agent-afc5d95d062c971b9` に `src/view/markdown.ts` の変更が
   271行分残っている（`table` / `quote` / `hr` / `strike` / ネスト付き `ListItem` の追加まで進んでいる）。
