@@ -113,6 +113,12 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       void this.handleMessage(message);
     });
 
+    // パネルが破棄されたら参照をクリアする。chatView.tsのteardown（entry.panel = undefined）と
+    // 同じく、破棄後にrevealSection/postが古いviewへpostMessageし続けないようにする。
+    view.onDidDispose(() => {
+      this.view = undefined;
+    });
+
     void this.refresh();
   }
 

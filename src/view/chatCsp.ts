@@ -8,12 +8,25 @@
  * `chatView.ts` から切り出してあるのは、あちらが `vscode` を読み込んでいてテストから
  * 触れないため。
  */
-export function chatCsp(cspSource: string, nonce: string): string {
-  return [
+export interface ChatCspOptions {
+  /**
+   * `img-src data:` を含めるか（既定はtrue）。添付画像のサムネイルをデータURLで渡す画面向け。
+   * 画像を扱わない画面（例: `conversationView.ts`、本文はすべてエスケープ表示のみ）は
+   * `false` を渡して不要な許可を増やさない。
+   */
+  includeImgData?: boolean;
+}
+
+export function chatCsp(cspSource: string, nonce: string, options: ChatCspOptions = {}): string {
+  const { includeImgData = true } = options;
+  const directives = [
     "default-src 'none'",
     `style-src ${cspSource} 'unsafe-inline'`,
     `script-src 'nonce-${nonce}'`,
+  ];
+  if (includeImgData) {
     // 添付画像のサムネイルはデータURLで渡す。外部から取ってくることは無い
-    'img-src data:',
-  ].join('; ');
+    directives.push('img-src data:');
+  }
+  return directives.join('; ');
 }

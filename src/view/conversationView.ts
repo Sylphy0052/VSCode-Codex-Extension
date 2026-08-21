@@ -5,6 +5,7 @@ import type { SessionSummary } from '../codex/types';
 import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
 import type { SessionStore } from '../session/sessionStore';
+import { chatCsp } from './chatCsp';
 import { formatAbsoluteTime } from './relativeTime';
 
 export type ForkHandler = (session: SessionSummary, turnId: string) => Promise<void>;
@@ -144,11 +145,9 @@ function summarizeTools(names: readonly string[]): string {
 
 function render(webview: vscode.Webview, title: string, turns: ConversationTurn[]): string {
   const nonce = randomBytes(16).toString('base64');
-  const csp = [
-    "default-src 'none'",
-    `style-src ${webview.cspSource} 'unsafe-inline'`,
-    `script-src 'nonce-${nonce}'`,
-  ].join('; ');
+  // このビューアは画像を扱わない（本文はすべてエスケープしてそのまま表示するだけ）ため、
+  // chatCsp()の既定であるimg-src data:は意図的に含めない（chatCsp.ts参照）。
+  const csp = chatCsp(webview.cspSource, nonce, { includeImgData: false });
 
   return `<!DOCTYPE html>
 <html lang="ja">
