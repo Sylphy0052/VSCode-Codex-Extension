@@ -1,3 +1,5 @@
+import * as os from 'os';
+
 /**
  * ログ・理由文字列へ埋め込む前に、外部プロセス（git・CLI）由来のテキストを無害化する
  * 共通ヘルパー（design.md §16.7の `sanitizeForReason` と同じ考え方。レビュー指摘: warning）。
@@ -20,6 +22,44 @@ const URL_USERINFO_PATTERN = /(\b[a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^\s/@]+@/gu;
 
 function maskUrlUserinfo(value: string): string {
   return value.replace(URL_USERINFO_PATTERN, '$1***@');
+}
+
+/**
+ * 慣習的なホームディレクトリの直下（`/home/<user>` `/Users/<user>` `X:\Users\<user>`）を検出し、
+ * ユーザー名部分だけを `***` に置き換える。パスの残りの構造（ドライブレター・`Users`という
+ * ディレクトリ名・後続のサブパス）は保持する。「どのファイルで失敗したか」を切り分けられる
+ * 情報を失わせないため（Issue #378 自己レビュー観点）、パス全体は畳まない。
+ *
+ * 直前の文字が英数字または`/`の場合はマッチさせない（`(?<!...)`）。相対パス中に偶然
+ * `Users`という名前のディレクトリがあるだけのケース（例: `src/Users/foo.ts`）を
+ * 誤ってホームディレクトリと誤認しないようにするため。
+ */
+const HOME_DIR_USERNAME_PATTERN =
+  /(?<![A-Za-z0-9_/\\])(\/home\/|\/Users\/|[A-Za-z]:[\\/]Users[\\/])([^/\\\s'"]+)/gu;
+
+function maskHomeDirUsername(value: string): string {
+  return value.replace(HOME_DIR_USERNAME_PATTERN, (_match, prefix: string) => `${prefix}***`);
+}
+
+/**
+ * `os.homedir()` が返す実際のホームディレクトリ（`/home/<user>` `/Users/<user>` の慣習に
+ * 沿わない値を含む。例: コンテナの `/root`）と厳密に一致する接頭辞を丸ごと `~` へ置換する。
+ * 後続のパス区切り（`/` `\`）または文字列末尾が続く場合のみマッチさせ、
+ * `/home/kfuruhashi2/...` のような「別ユーザーの、たまたま前方一致するパス」を
+ * 誤ってマスクしないようにする。
+ *
+ * テスト容易性のため `homeDir` を第2引数として受け取れるようにしてある（既定は
+ * `os.homedir()`）。本番の呼び出し（`sanitizeForLog`）は既定値のまま呼ぶため、実行環境の
+ * ホームディレクトリが自動的に使われる。テストは実ホームディレクトリに依存せず、
+ * 任意の`homeDir`を明示的に渡して検証できる。
+ */
+export function maskHomeDir(value: string, homeDir: string = os.homedir()): string {
+  if (!homeDir) {
+    return maskHomeDirUsername(value);
+  }
+  const escaped = homeDir.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const exactHomeDirPattern = new RegExp(`${escaped}(?=[\\\\/]|$)`, 'gu');
+  return maskHomeDirUsername(value.replace(exactHomeDirPattern, '~'));
 }
 
 /**
@@ -78,12 +118,19 @@ export function stripControlCharsPreservingNewlines(value: string): string {
 }
 
 /**
- * 制御文字・改行を空白に畳み、URL中のuserinfoをマスクし、長すぎる値を切り詰める。
- * HTMLエスケープはView側の責務（design.md §16.8）であり、ここでは行わない。
+ * 制御文字・改行を空白に畳み、URL中のuserinfoとホームディレクトリ配下のユーザー名をマスクし、
+ * 長すぎる値を切り詰める。HTMLエスケープはView側の責務（design.md §16.8）であり、
+ * ここでは行わない。
+ *
+ * Node.jsのfsエラーは慣習的に絶対パスをメッセージへ埋め込む（例:
+ * `EACCES: permission denied, open '/home/<username>/...'`）。Windowsの
+ * `C:\Users\<username>\...` も同様。`maskHomeDir` によりユーザー名だけを隠し、
+ * パスの構造（どのファイルで失敗したかの手がかり）は残す（Issue #378）。
  */
 export function sanitizeForLog(value: string, maxLen: number = SANITIZE_MAX_LEN): string {
   const normalized = stripControlChars(value);
-  const masked = maskUrlUserinfo(normalized);
+  const urlMasked = maskUrlUserinfo(normalized);
+  const masked = maskHomeDir(urlMasked);
   const collapsed = masked.replace(/ {2,}/gu, ' ').trim();
   return collapsed.length > maxLen ? `${collapsed.slice(0, maxLen)}…` : collapsed;
 }
