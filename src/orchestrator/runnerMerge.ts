@@ -628,11 +628,13 @@ async function startMergeResolution(
     self.deps.log.error(
       `[workflow ${runId}/${taskId}] 衝突解決セッションを開始できませんでした: ${message}`,
     );
-    live.mergeResolutions.delete(taskId);
-    session.dispose();
     try {
+      live.mergeResolutions.delete(taskId);
+      session.dispose();
       await abortAndBlock(self, runId, taskId, integration, lease);
     } finally {
+      // 引き継ぎ済み（`handover.done`）なので呼び出し側の`finally`は解放しない。
+      // 後始末の途中で何が起きても、占有はここで必ず手放す
       self.integrationQueue.releaseLease(lease);
     }
   }
