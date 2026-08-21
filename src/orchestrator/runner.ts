@@ -2614,10 +2614,11 @@ export class WorkflowRunner {
         };
       });
     } catch (e) {
-      // `store.update`は`WorkflowRunStore`内の`SerialQueue`を経由するため、`memento.update`
-      // （`vscode.Memento.update`）が失敗すると、キューへ積んだ後続の呼び出しも含めて
-      // rejectされたPromiseを返す。ここを呼び出し元（`void this.persist(runId)`。runner.ts内に
-      // 多数）でcatchしていないと未ハンドルrejectになるため、ここで受け止めてログへ落とす
+      // `store.update`は`WorkflowRunStore`内の`SerialQueue`を経由する。`SerialQueue.enqueue`は
+      // `this.tail`を必ずresolved側へ戻すため、`memento.update`（`vscode.Memento.update`）が
+      // 失敗しても止まるのはその呼び出し自身が返すPromiseだけで、後続のenqueueは影響を
+      // 受けない。ただしその失敗したPromiseを呼び出し元（`void this.persist(runId)`。
+      // runner.ts内に多数）でcatchしていないと未ハンドルrejectになるため、ここで受け止める
       // （Issue #364。実行状態の永続化に失敗しただけで、実行中のrun自体は継続できるため
       // 状態遷移は変えない）
       const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
