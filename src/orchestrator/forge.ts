@@ -4,6 +4,7 @@ import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import { executableNameCandidates } from '../codex/cliLocator';
 import { sanitizeForLog, stripControlChars } from './sanitize';
 import { TASK_ID_PATTERN } from './workflow';
 import { isWorkflowBranchName, type GitCommandRunner } from './worktree';
@@ -163,25 +164,35 @@ export interface CliAvailabilityPort {
  * PATH上の各ディレクトリを順に見て、実行可能なファイルとして見つかれば true。
  *
  * `src/codex/cliLocator.ts` の `resolveExecutable` と同じ考え方（PATH区切りで走査し、
- * 実行可能ビットを確認する）だが、意図的に複製する。`codex/cliLocator.ts` はCodex/Claude
- * 実行ファイルの解決という別ドメインの関心事（`machine` スコープの `executablePath` 設定を
- * 受け取る等）を持つ専用モジュールで、orchestrator配下からそこへ結合させると
- * 「たまたま走査ロジックが同じだけ」の依存が生まれる（`worktree.ts` / `integration.ts` が
- * 他ファイルの非exportヘルパーを複製しているのと同じ方針）。
+ * 実行可能ビットを確認する）だが、走査そのもの（同期`fs`か非同期`fs/promises`か等）は
+ * 意図的に複製する。`codex/cliLocator.ts` はCodex/Claude実行ファイルの解決という別ドメイン
+ * の関心事（`machine` スコープの `executablePath` 設定を受け取る等）を持つ専用モジュールで、
+ * orchestrator配下からそこへ結合させると「たまたま走査ロジックが同じだけ」の依存が生まれる
+ * （`worktree.ts` / `integration.ts` が他ファイルの非exportヘルパーを複製しているのと同じ
+ * 方針）。
+ *
+ * ただし**候補となる実行ファイル名の組み立て（`PATHEXT`を考慮した拡張子展開）だけは
+ * `executableNameCandidates`として`cliLocator.ts`側へ一本化し、ここからimportして使う**
+ * （Issue #404）。以前はここで`path.join(dir, command)`と拡張子なしのまま`fs.access`して
+ * いたため、Windowsでは`gh.exe` / `glab.cmd`を見つけられず常に「PATHに無い」と誤判定して
+ * いた。走査ロジックの重複は許容しても、同じ拡張子解決ロジックを2箇所に書くと片方だけ
+ * 直して他方が取り残される実害（このIssueの根本原因）が起きるため、そこだけは共通化する。
  */
 export const nodeCliAvailability: CliAvailabilityPort = {
   async isOnPath(command: string): Promise<boolean> {
     const dirs = (process.env['PATH'] ?? '').split(path.delimiter).filter((d) => d !== '');
     for (const dir of dirs) {
-      const candidate = path.join(dir, command);
-      try {
-        await fsPromises.access(candidate, fsConstants.X_OK);
-        const stat = await fsPromises.stat(candidate);
-        if (stat.isFile()) {
-          return true;
+      for (const candidateName of executableNameCandidates(command, process.env)) {
+        const candidate = path.join(dir, candidateName);
+        try {
+          await fsPromises.access(candidate, fsConstants.X_OK);
+          const stat = await fsPromises.stat(candidate);
+          if (stat.isFile()) {
+            return true;
+          }
+        } catch {
+          // 見つからなければ次の候補へ
         }
-      } catch {
-        // 見つからなければ次の候補へ
       }
     }
     return false;
@@ -893,31 +904,68 @@ export async function createIntegrationPullRequest(
   return { push, pullRequest };
 }
 
-/** ホストごとの最終マージコマンド（design.md §16.18「最終マージ」）。 */
-function buildFinalMergeArgs(host: ForgeHost): { command: 'gh' | 'glab'; args: string[] } {
+/**
+ * ホストごとの最終マージコマンド（design.md §16.18「最終マージ」）。
+ *
+ * **番号を必ず引数へ含める（Issue #404）。** 番号を省略すると、マージ対象は「cwd
+ * （統合worktree）のカレントブランチに紐づくPR/MR」という暗黙の状態依存になり、
+ * ブランチがずれていれば無関係のPR/MRがmainへマージされる。`markPullRequestReady`と同じ
+ * 直前の手順（`finalizeForge`）が`live.integrationPullRequest.number`を既に持っているため、
+ * その番号をそのまま位置引数として渡す。`buildMarkReadyArgs`と同じく正の整数のみ受け付け、
+ * `String(number)`で文字列化してからargv配列の1要素としてそのまま渡す（`execFile`はシェルを
+ * 経由しないため、引数インジェクションの余地は無い）。
+ */
+function buildFinalMergeArgs(
+  host: ForgeHost,
+  number: number,
+): { ok: true; command: 'gh' | 'glab'; args: string[] } | { ok: false; message: string } {
+  if (!Number.isInteger(number) || number <= 0) {
+    return { ok: false, message: `不正なPR/MR番号（正の整数ではありません）: ${number}` };
+  }
   if (host === 'github') {
-    return { command: 'gh', args: ['pr', 'merge', '--merge'] };
+    return { ok: true, command: 'gh', args: ['pr', 'merge', String(number), '--merge'] };
   }
   // GitLabの `--remove-source-branch` はリモート（origin）上のsource branchを消すだけで、
   // ローカルの統合worktree・ブランチは残る。design.md §16.18「mainへマージした後も統合
   // ブランチは残す」と矛盾しない（片付けはViewの操作から行う別の関心事）。
-  return { command: 'glab', args: ['mr', 'merge', '--remove-source-branch'] };
+  return {
+    ok: true,
+    command: 'glab',
+    args: ['mr', 'merge', String(number), '--remove-source-branch'],
+  };
 }
 
 export type RunFinalMergeResult = { ok: true } | { ok: false; message: string };
 
 /**
- * 統合→mainのPR/MRを実際にマージする（`gh pr merge --merge` / `glab mr merge
- * --remove-source-branch`。design.md §16.18「最終マージ」）。呼び出し側は
+ * 統合→mainのPR/MRを実際にマージする（`gh pr merge <number> --merge` / `glab mr merge
+ * <number> --remove-source-branch`。design.md §16.18「最終マージ」）。呼び出し側は
  * `shouldRunFinalMerge` の判定を経てからこの関数を呼ぶこと（このファイル自体は
  * 常に実行する。ガードは呼び出し側の責務にして二重化しない）。
+ *
+ * `number`は統合PR/MRの番号（`live.integrationPullRequest.number`）。**`undefined`のときは
+ * カレントブランチ依存でのマージが危険なため、CLIを呼ばずに`{ ok: false }`を返す**
+ * （Issue #404。`markPullRequestReady`の番号不明時と同じ「わからないなら実行しない」方針）。
  */
 export async function runFinalMerge(
   cli: CliCommandRunner,
   host: ForgeHost,
   cwd: string,
+  number: number | undefined,
 ): Promise<RunFinalMergeResult> {
-  const { command, args } = buildFinalMergeArgs(host);
+  if (number === undefined) {
+    return {
+      ok: false,
+      message:
+        '統合PR/MRの番号が不明なため、最終マージを飛ばしました' +
+        '（カレントブランチに依存したマージは危険なため実行しません）',
+    };
+  }
+  const built = buildFinalMergeArgs(host, number);
+  if (!built.ok) {
+    return { ok: false, message: built.message };
+  }
+  const { command, args } = built;
   const result = await cli.run(command, args, cwd);
   if (result.code !== 0) {
     return {

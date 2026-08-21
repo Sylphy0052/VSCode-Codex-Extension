@@ -2347,7 +2347,16 @@ export class WorkflowRunner {
           }
         }
       }
-      const merge = await runFinalMerge(forgeDeps.cli, forge.host, live.integration.cwd);
+      // design.md §16.18・Issue #404「番号を省略すると、マージ対象はcwdのカレント
+      // ブランチに紐づくPR/MRという暗黙の状態依存になる」ため、直前に取り出した統合PR/MRの
+      // 番号（`live.integrationPullRequest.number`）を明示的に渡す。番号が不明なとき
+      // （URLから取り出せなかった等）は`runFinalMerge`自体がCLIを呼ばず警告を返す
+      const merge = await runFinalMerge(
+        forgeDeps.cli,
+        forge.host,
+        live.integration.cwd,
+        live.integrationPullRequest?.number,
+      );
       if (!merge.ok) {
         this.deps.log.warn(`[workflow ${runId}] 最終マージに失敗しました: ${merge.message}`);
         live.warnings.push({
