@@ -7,6 +7,8 @@ import {
   encodeRequest,
   encodeResponse,
   isServerRequest,
+  killWithEscalation,
+  MAX_LINE_BUFFER_BYTES,
   type JsonRpcMessage,
 } from '../codex/jsonRpc';
 import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
@@ -122,7 +124,9 @@ export class AppServerConnection {
       });
     } catch (e) {
       this.log.error(`app-serverの初期化に失敗しました: ${errorMessage(e)}`);
-      proc.kill();
+      // SIGTERMに応答しないハングしたプロセスも回収できるよう、SIGKILLへの
+      // エスカレーションを共通処理へ寄せる（issue #402、2点目）。
+      killWithEscalation(proc);
       // `proc.kill()`は非同期に`exit`を発火させる。そちらでも`reset()`は呼ばれるが、
       // `this.proc`は下の`reset()`で既に`undefined`になっているため、`reset()`の
       // 先頭ガードで二重発火にはならない（自己レビュー: 再入時の無限ループなし）。
@@ -135,8 +139,23 @@ export class AppServerConnection {
 
   private receive(chunk: string): void {
     this.buffer += chunk;
-    const { messages, rest } = consumeFrames(this.buffer);
+    const { messages, rest, overflow } = consumeFrames(this.buffer);
     this.buffer = rest;
+
+    if (overflow) {
+      // 改行を含まない出力（診断ログの乱れ・バイナリ混入等）が上限を超えて溜まり続けた
+      // （issue #402、1点目）。このまま連結し続けると無制限にメモリを消費するため、
+      // 接続を切って回収する。`reset()`が`this.proc`を`undefined`へ戻すので、次の
+      // `ensureStarted()`が新しいプロセスを起動し直す（＝「切って再起動」はここで達成する）
+      this.log.error(
+        `app-serverからの出力が上限（${MAX_LINE_BUFFER_BYTES}バイト）を超えて改行なしで届いたため、接続を切って再起動します`,
+      );
+      if (this.proc !== undefined) {
+        killWithEscalation(this.proc);
+      }
+      this.reset();
+      return;
+    }
 
     for (const message of messages) {
       if (isServerRequest(message)) {
@@ -231,7 +250,9 @@ export class AppServerConnection {
   }
 
   dispose(): void {
-    this.proc?.kill();
+    if (this.proc !== undefined) {
+      killWithEscalation(this.proc);
+    }
     this.reset();
   }
 }

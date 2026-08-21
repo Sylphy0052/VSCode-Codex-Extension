@@ -1,8 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { EventEmitter } from 'node:events';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   consumeFrames,
   encodeNotification,
   encodeRequest,
+  killWithEscalation,
+  KILL_ESCALATION_DELAY_MS,
+  MAX_LINE_BUFFER_BYTES,
   readForkedThreadId,
 } from '../../src/codex/jsonRpc';
 
@@ -38,6 +42,69 @@ describe('consumeFrames', () => {
 
   it('空行を無視する', () => {
     expect(consumeFrames('\n\n{"id":1}\n').messages).toHaveLength(1);
+  });
+
+  it('restが上限以内ならoverflowは立たない', () => {
+    const { overflow } = consumeFrames('{"id":1}\n' + 'x'.repeat(1024));
+    expect(overflow).toBe(false);
+  });
+
+  it('改行を含まない出力が上限を超えるとoverflowが立つ（issue #402、1点目）', () => {
+    // 改行が一切無いため、既存メッセージには影響しない（messagesは空のまま）
+    const huge = 'x'.repeat(MAX_LINE_BUFFER_BYTES + 1);
+    const { messages, rest, overflow } = consumeFrames(huge);
+    expect(messages).toEqual([]);
+    expect(rest).toBe(huge);
+    expect(overflow).toBe(true);
+  });
+
+  it('上限ちょうどまではoverflowが立たない（境界値）', () => {
+    const atLimit = 'x'.repeat(MAX_LINE_BUFFER_BYTES);
+    expect(consumeFrames(atLimit).overflow).toBe(false);
+  });
+});
+
+describe('killWithEscalation（issue #402、2点目）', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function fakeProc(): {
+    proc: { kill: (signal?: NodeJS.Signals | number) => boolean; once: EventEmitter['once'] };
+    kill: ReturnType<typeof vi.fn>;
+    emitter: EventEmitter;
+  } {
+    const emitter = new EventEmitter();
+    const kill = vi.fn(() => true);
+    const proc = { kill, once: emitter.once.bind(emitter) };
+    return { proc, kill, emitter };
+  }
+
+  it('まずSIGTERM相当（既定シグナル）を送る', () => {
+    const { proc, kill } = fakeProc();
+    killWithEscalation(proc);
+    expect(kill).toHaveBeenCalledTimes(1);
+    expect(kill).toHaveBeenCalledWith();
+  });
+
+  it('猶予時間内にexitが届かなければSIGKILLへエスカレーションする', () => {
+    const { proc, kill } = fakeProc();
+    killWithEscalation(proc);
+    vi.advanceTimersByTime(KILL_ESCALATION_DELAY_MS);
+    expect(kill).toHaveBeenCalledTimes(2);
+    expect(kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+  });
+
+  it('猶予時間内にexitが届けばSIGKILLを送らず、タイマーも残らない（自己レビュー: 正常終了後の残留確認）', () => {
+    const { proc, kill, emitter } = fakeProc();
+    killWithEscalation(proc);
+    emitter.emit('exit', 0, null);
+    vi.advanceTimersByTime(KILL_ESCALATION_DELAY_MS);
+    expect(kill).toHaveBeenCalledTimes(1);
   });
 });
 

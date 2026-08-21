@@ -18,6 +18,7 @@ vi.mock('node:child_process', () => ({
 
 // `vi.mock`はホイストされるため、この静的importは差し替え後の`spawn`を使う
 import { AppServerConnection } from '../../src/appserver/connection';
+import { MAX_LINE_BUFFER_BYTES } from '../../src/codex/jsonRpc';
 
 interface FakeChildProcess {
   proc: ChildProcessWithoutNullStreams;
@@ -156,6 +157,68 @@ describe('AppServerConnection.ensureStarted（issue #354・1点目）', () => {
     // `proc.kill()`は非同期にexitを発火させる。既にreset済みのため二度目は無視される
     proc1.emitExit(null);
     expect(onDisconnect).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('AppServerConnection: 受信バッファの上限（issue #402、1点目）', () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it('改行を含まない出力が上限を超えて届くと、接続を切って再起動できる状態にする', async () => {
+    const proc1 = fakeChildProcess();
+    const proc2 = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(proc1.proc).mockReturnValueOnce(proc2.proc);
+    const onDisconnect = vi.fn();
+    const connection = new AppServerConnection(
+      () => 'codex',
+      fakeLogger(),
+      () => undefined,
+      async () => undefined,
+      onDisconnect,
+    );
+
+    const started = connection.ensureStarted();
+    const id = initializeRequestId(proc1.writes);
+    proc1.emitStdout(JSON.stringify({ jsonrpc: '2.0', id, result: {} }));
+    await started;
+
+    // 改行を一切含まない巨大な出力（診断ログの乱れ・バイナリ混入等を模す）
+    proc1.proc.stdout.emit('data', Buffer.from('x'.repeat(MAX_LINE_BUFFER_BYTES + 1)));
+
+    expect(proc1.kill).toHaveBeenCalledTimes(1);
+    expect(onDisconnect).toHaveBeenCalledTimes(1);
+
+    // `reset()`により`this.proc`が`undefined`へ戻るため、次の`ensureStarted()`が
+    // 新しいプロセスを起動し直す（＝「切って再起動」を確かめる）
+    const second = connection.ensureStarted();
+    const id2 = initializeRequestId(proc2.writes);
+    proc2.emitStdout(JSON.stringify({ jsonrpc: '2.0', id: id2, result: {} }));
+    await expect(second).resolves.toBeUndefined();
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('上限以内の出力（改行なしでも）では接続を切らない', async () => {
+    const proc = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(proc.proc);
+    const onDisconnect = vi.fn();
+    const connection = new AppServerConnection(
+      () => 'codex',
+      fakeLogger(),
+      () => undefined,
+      async () => undefined,
+      onDisconnect,
+    );
+
+    const started = connection.ensureStarted();
+    const id = initializeRequestId(proc.writes);
+    proc.emitStdout(JSON.stringify({ jsonrpc: '2.0', id, result: {} }));
+    await started;
+
+    proc.proc.stdout.emit('data', Buffer.from('x'.repeat(1024)));
+
+    expect(proc.kill).not.toHaveBeenCalled();
+    expect(onDisconnect).not.toHaveBeenCalled();
   });
 });
 

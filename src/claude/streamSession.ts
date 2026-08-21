@@ -13,8 +13,9 @@ import {
 import type { LaunchTarget } from '../codex/types';
 import type { Logger } from '../log';
 import type { ApprovalHandlerResult } from '../orchestrator/taskSession';
+import { killWithEscalation } from '../codex/jsonRpc';
 import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
-import { consumeNdjson } from '../util/ndjson';
+import { consumeNdjson, MAX_LINE_BUFFER_BYTES } from '../util/ndjson';
 import { buildClaudeStreamArgs } from './argvBuilder';
 import {
   buildCanUseToolResponse,
@@ -811,8 +812,26 @@ export class ClaudeStreamSession {
    */
   receive(chunk: string): void {
     this.buffer += chunk;
-    const { values, rest } = consumeNdjson(this.buffer);
+    const { values, rest, overflow } = consumeNdjson(this.buffer);
     this.buffer = rest;
+
+    if (overflow) {
+      // 改行を含まない出力（診断ログの乱れ・バイナリ混入等）が上限を超えて溜まり続けた
+      // （issue #402、1点目）。このまま連結し続けると無制限にメモリを消費するため、
+      // プロセスを回収して打ち切る。exit/errorハンドラと同じ「ターン失敗」の経路
+      // （`releasePendingWaiters()` + `turnFailed: true`）へ寄せ、続きは送らせない
+      this.log.error(
+        `claudeからの出力が上限（${MAX_LINE_BUFFER_BYTES}バイト）を超えて改行なしで届いたため、セッションを打ち切ります`,
+      );
+      if (this.proc !== undefined) {
+        killWithEscalation(this.proc);
+      }
+      this.proc = undefined;
+      this.buffer = '';
+      this.releasePendingWaiters();
+      this.update({ ...this.state, busy: false, turnFailed: true });
+      return;
+    }
 
     for (const event of values) {
       // コマンドの増減。CLIは差分ではなく一覧を押し付けてくるので入れ替える
@@ -1071,7 +1090,9 @@ export class ClaudeStreamSession {
   dispose(): void {
     this.releasePendingWaiters();
     this.proc?.stdin.end();
-    this.proc?.kill();
+    if (this.proc !== undefined) {
+      killWithEscalation(this.proc);
+    }
     this.proc = undefined;
     this.buffer = '';
   }

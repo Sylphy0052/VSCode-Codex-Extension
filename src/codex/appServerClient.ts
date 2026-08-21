@@ -29,6 +29,8 @@ import {
   consumeFrames,
   encodeNotification,
   encodeRequest,
+  killWithEscalation,
+  MAX_LINE_BUFFER_BYTES,
   readForkedThreadId,
   type JsonRpcMessage,
 } from './jsonRpc';
@@ -739,7 +741,17 @@ export class AppServerClient {
         }
         settled = true;
         clearTimeout(timer);
-        proc.kill();
+        // `finish()`がタイムアウトやexitで先に確定しても、`body`が内部で`await`している
+        // `request()`のPromiseが未解決のまま残ると、そちらを待ち続ける処理が永久にハング
+        // する（issue #402、3点目）。`pending`に残っている応答待ちをここでエラー値により
+        // 即時解決し、Mapを空にする
+        for (const resolvePending of pending.values()) {
+          resolvePending({ error: { code: -1, message: 'app-serverとのやり取りが終了しました' } });
+        }
+        pending.clear();
+        // SIGTERMに応答しないハングしたプロセスも回収できるよう、SIGKILLへの
+        // エスカレーションを共通処理へ寄せる（issue #402、2点目）
+        killWithEscalation(proc);
         resolve(result);
       };
 
@@ -757,8 +769,17 @@ export class AppServerClient {
 
       proc.stdout.on('data', (chunk: Buffer) => {
         buffer += chunk.toString('utf8');
-        const { messages, rest } = consumeFrames(buffer);
+        const { messages, rest, overflow } = consumeFrames(buffer);
         buffer = rest;
+        if (overflow) {
+          // 改行を含まない出力が上限を超えて溜まり続けた（issue #402、1点目）。単発の
+          // 問い合わせなので、既に決着させる作りの`finish`へそのまま寄せて打ち切る
+          finish({
+            ok: false,
+            error: `app-serverからの出力が上限（${MAX_LINE_BUFFER_BYTES}バイト）を超えて改行なしで届きました`,
+          });
+          return;
+        }
         for (const message of messages) {
           if (typeof message.id === 'number') {
             pending.get(message.id)?.(message);
