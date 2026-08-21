@@ -637,11 +637,16 @@ export class IntegrationMergeQueue {
     }
     const cwd = lease.integrationWorktreeCwd;
     if (this.leaseHolders.get(cwd) !== lease) {
-      // まだ占有を渡されていない（＝待ち行列に並んでいる）ハンドルへの解放要求。
-      // **`released`を立てる前に保持者を照合する**（Issue #412のレビュー指摘3）。順序が逆だと、
-      // 行列に並んだままのハンドルが失効だけして、後で`leaseHolders.set(cwd, next.handle)`が
-      // 死んだハンドルへ占有を渡し、そのcwdのマージが永久に詰まる
-      this.cancelWaiter(lease);
+      // 失効していないのに保持者でもないハンドル。**`released`を立てる前に保持者を照合する**
+      // （Issue #412のレビュー指摘3）。順序が逆だと、行列に並んだままのハンドルが失効だけして、
+      // 後で`leaseHolders.set(cwd, next.handle)`が死んだハンドルへ占有を渡し、そのcwdの
+      // マージが永久に詰まる。
+      //
+      // **この分岐は公開APIからは到達しない**（同レビュー指摘9）。`acquireLease`は「保持者に
+      // なった」か「`releaseAllLeases`で失効させられた」かのどちらかになるまでresolveしない
+      // ため、呼び出し側へ渡るハンドルは常に「現在の保持者」か「失効済み」のいずれかで、
+      // 待ち行列に並んだままのハンドルは外から触れない。将来`acquireLease`にキャンセルを
+      // 足したときに、待機中のハンドルを黙って失効させないための最終防御として残す
       return;
     }
     lease.released = true;
@@ -654,28 +659,6 @@ export class IntegrationMergeQueue {
     }
     this.leaseHolders.set(cwd, next.handle);
     next.resolve();
-  }
-
-  /**
-   * まだ占有を渡されていないハンドルへの解放要求を、待ち行列から取り除く形で処理する
-   * （Issue #412のレビュー指摘3）。取り除いたうえで失効させ、待っている`acquireLease`は
-   * 「失効したハンドル」で起こす（待ち続けて固まるより、`mergeTask` / `abortMerge`が
-   * `leaseNotHeld`で失敗して表面化するほうが安全。`releaseAllLeases`と同じfail-closed）。
-   * 行列に居なければ（既に解放済み・別cwd等）何もしない。
-   */
-  private cancelWaiter(lease: IntegrationLeaseHandle): void {
-    const cwd = lease.integrationWorktreeCwd;
-    const waiters = this.leaseWaiters.get(cwd);
-    const index = waiters?.findIndex((w) => w.handle === lease) ?? -1;
-    if (waiters === undefined || index < 0) {
-      return;
-    }
-    const [waiter] = waiters.splice(index, 1);
-    if (waiters.length === 0) {
-      this.leaseWaiters.delete(cwd);
-    }
-    lease.released = true;
-    waiter?.resolve();
   }
 
   /**
@@ -697,6 +680,17 @@ export class IntegrationMergeQueue {
       waiter.handle.released = true;
       waiter.resolve();
     }
+  }
+
+  /**
+   * そのハンドルがいまも有効な占有かどうか（`releaseAllLeases`で失効していないか）。
+   *
+   * 占有待ちから起き上がった呼び出し側が「自分はまだ統合worktreeを触ってよいか」を
+   * 確かめるために使う（Issue #412のレビュー指摘9）。`releaseAllLeases`（run破棄）で
+   * 起こされた場合は`false`になるので、破棄済みのrunへ状態を書き戻さずに戻れる。
+   */
+  isLeaseHeld(lease: IntegrationLease): boolean {
+    return this.holdsLease(lease);
   }
 
   /** テスト・診断用。いま占有されている統合worktreeのcwdなら占有者のtaskIdを返す。 */

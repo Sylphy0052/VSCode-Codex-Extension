@@ -1028,6 +1028,32 @@ describe('IntegrationMergeQueue: 統合worktreeの占有（Issue #412）', () =>
     expect(queue.leaseHolderTaskId(INTEGRATION_CWD)).toBe('T3');
   });
 
+  /**
+   * 占有待ちから起き上がった呼び出し側が「自分はまだ統合worktreeを触ってよいか」を確かめる
+   * ための判定（Issue #412のレビュー指摘9）。`runnerMerge.ts`の`decideAfterLeaseWait`が、
+   * run破棄で起こされた場合に破棄済みのrunへ状態を書き戻さないために使う。
+   */
+  it('isLeaseHeldは、いま有効な占有ハンドルのときだけtrueを返す', async () => {
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    const held = await queue.acquireLease(INTEGRATION_CWD, 'T1');
+    expect(queue.isLeaseHeld(held)).toBe(true);
+
+    // 偽造したハンドルは通らない
+    const forged: IntegrationLease = { integrationWorktreeCwd: INTEGRATION_CWD, taskId: 'T1' };
+    expect(queue.isLeaseHeld(forged)).toBe(false);
+
+    // 待ち行列の次へ渡ったハンドルは有効、手放した側は無効
+    const waiting = queue.acquireLease(INTEGRATION_CWD, 'T2');
+    queue.releaseLease(held);
+    const next = await waiting;
+    expect(queue.isLeaseHeld(held)).toBe(false);
+    expect(queue.isLeaseHeld(next)).toBe(true);
+
+    // run破棄（強制解放）でも無効になる
+    queue.releaseAllLeases();
+    expect(queue.isLeaseHeld(next)).toBe(false);
+  });
+
   it('releaseAllLeasesは待っている取得を起こし、そのハンドルは失効している（run破棄時の強制解放）', async () => {
     const git = new FakeGit();
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
