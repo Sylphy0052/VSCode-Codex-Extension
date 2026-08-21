@@ -26,6 +26,7 @@ import type {
   PullRequestLayerConfig,
 } from '../../src/orchestrator/forge';
 import { deserializeManifest, integrationPath } from '../../src/orchestrator/pseudoWorktree';
+import { formatPathList } from '../../src/orchestrator/runnerWorkingDirectory';
 import type {
   PseudoWorktreeDirEntry,
   PseudoWorktreeFileStat,
@@ -5465,5 +5466,25 @@ tasks:
 
     expect(outcome.accepted).toBe(false);
     expect(outcome.reason).toContain("T9");
+  });
+});
+
+describe('formatPathList（先頭20件+残り件数の丸め、レビュー指摘: risk、Issue #380）', () => {
+  it('20件以下はそのまま全件をカンマ区切りで表示する（境界値）', () => {
+    const paths = Array.from({ length: 20 }, (_, i) => `f${i}.txt`);
+
+    expect(formatPathList(paths)).toBe(paths.join(', '));
+  });
+
+  it('21件になると先頭20件+残り1件の省略表示になる（境界値）', () => {
+    const paths = Array.from({ length: 21 }, (_, i) => `f${i}.txt`);
+
+    const result = formatPathList(paths);
+
+    expect(result).toBe(`${paths.slice(0, 20).join(', ')}, ...ほか1件`);
+  });
+
+  it('0件は「なし」を返す', () => {
+    expect(formatPathList([])).toBe('なし');
   });
 });

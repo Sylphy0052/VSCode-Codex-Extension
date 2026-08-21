@@ -161,6 +161,16 @@ export function serializeManifest(manifest: IntegrationManifest): string {
 const MAX_MANIFEST_ENTRIES = 100_000;
 
 /**
+ * マニフェストのファイル本体として許容する最大サイズ（バイト）。`MAX_MANIFEST_ENTRIES`の
+ * チェックは`JSON.parse`が成功した後にしか効かず、`JSON.parse`自体は入力サイズに比例した
+ * メモリを確保するため、キー数は少なくても値が巨大な文字列・深いネスト等の入力では
+ * 上限チェックへ到達する前にメモリを圧迫しうる（レビュー指摘: medium、Issue #380の
+ * 追加指摘）。`MAX_MANIFEST_ENTRIES`（10万件）×1エントリあたり数百バイト程度を見込んでも
+ * 数十MBに収まるため、安全マージンを掛けた50MiBをパース前の足切りとして設ける。
+ */
+const MAX_MANIFEST_FILE_BYTES = 50 * 1024 * 1024;
+
+/**
  * マニフェストのキー（ワークスペースへ反映する際の相対パス）として妥当かどうかを
  * 検証する（レビュー指摘: high、パストラバーサル。Issue #380の追加指摘）。
  *
@@ -274,6 +284,17 @@ export type LoadManifestResult =
  * いないかを確かめる（レビュー指摘: medium）。`.agents/worktrees/<runId>`の親のいずれかが
  * シンボリックリンクだと境界外のファイルを読んでしまう。`ensureIntegrationDir`等と同じ
  * `findSymlinkedAncestor`による一次防御をI/Oの前に通す。
+ *
+ * 一次防御（事前のシンボリックリンク検知）と実際の読み込みの間には短いが実在する
+ * ウィンドウがあり、その間に経路がシンボリックリンクへ差し替えられるとすり抜ける
+ * （TOCTOU、レビュー指摘: medium）。`cloneWorkspace`/`ensureIntegrationDir`が「作成後に
+ * `realpath`で実パスを確認し、境界外なら撤去する」二次防御を対にしているのと同じ考え方で、
+ * 読み込んだファイルの実パスを事後に`realpath`で確認し、`workspaceRoot`の外を指して
+ * いれば読んだ内容を破棄して「復元できなかった」として扱う（撤去ではなく破棄で足りる
+ * のは、読み込みは書き込みと違って対象への副作用を残さないため）。
+ *
+ * ファイルサイズの上限（`MAX_MANIFEST_FILE_BYTES`）による足切りも`JSON.parse`の前に行う
+ * （レビュー指摘: medium、Issue #380の追加指摘。`MAX_MANIFEST_ENTRIES`の項のコメント参照）。
  */
 export async function loadPersistedManifest(
   workspaceRoot: string,
@@ -290,10 +311,28 @@ export async function loadPersistedManifest(
     };
   }
 
+  const stat = await fs.statFile(filePath);
+  if (stat !== undefined && stat.size > MAX_MANIFEST_FILE_BYTES) {
+    return {
+      ok: false,
+      message: `疑似worktreeの統合マニフェストを復元できませんでした（ファイルサイズが上限を超えています）: ${filePath}`,
+    };
+  }
+
   const content = await fs.readTextFile(filePath);
   if (content === undefined) {
     return { ok: true, manifest: new Map() };
   }
+
+  const realFilePath = await fs.realpath(filePath);
+  const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
+  if (realFilePath === undefined || !isPathWithinRoot(realFilePath, realRoot)) {
+    return {
+      ok: false,
+      message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際にはワークスペースの外を指しています）: ${filePath}`,
+    };
+  }
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
@@ -321,6 +360,12 @@ export async function loadPersistedManifest(
  *
  * 書き込みの前に、`loadPersistedManifest`と同じくシンボリックリンクの経路検知を行う
  * （レビュー指摘: medium）。
+ *
+ * さらに、`cloneWorkspace`/`ensureIntegrationDir`と同じ二段構えの二段目（書き込み後に
+ * `realpath`で実パスを確認し、境界外なら撤去する）も対にする（レビュー指摘: medium、
+ * TOCTOU）。ここは間に`fs.mkdir(path.dirname(filePath))`を挟むぶん一次防御から実I/Oまでの
+ * ウィンドウが他箇所より広く、非対称のまま放置すると一次防御をすり抜けられた場合に
+ * 唯一無防備になる。
  */
 export async function persistManifest(
   workspaceRoot: string,
@@ -339,6 +384,16 @@ export async function persistManifest(
 
   await fs.mkdir(path.dirname(filePath));
   await fs.writeTextFile(filePath, serializeManifest(manifest));
+
+  const realFilePath = await fs.realpath(filePath);
+  const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
+  if (realFilePath === undefined || !isPathWithinRoot(realFilePath, realRoot)) {
+    await fs.removeFile(filePath);
+    throw new Error(
+      `疑似worktreeの統合マニフェストの永続化先が実際にはワークスペースの外を指していたため、` +
+        `書き込みを取り消しました: ${realFilePath ?? filePath}`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -908,6 +908,107 @@ describe('実ファイルシステムでの統合テスト', () => {
     },
     20_000,
   );
+
+  it(
+    'ファイルサイズが上限を超える場合は内容を解析する前に復元できなかったとして扱う' +
+      '（レビュー指摘: medium、Issue #380の追加指摘。エントリ数チェックはJSON.parse後にしか' +
+      '効かないため、パース前にファイルサイズで弾く二次防御を確かめる）',
+    async () => {
+      const filePath = integrationManifestPath(workspace, RUN_ID);
+      await mkdir(path.dirname(filePath), { recursive: true });
+      // 実際の内容は妥当な小さいJSONにしておき、statFileだけが巨大なサイズを返す
+      // ようにする。JSON.parseへ到達する前にstatFileの結果だけで弾かれることを確かめる
+      await writeFile(filePath, '{}');
+
+      const fakeFs: typeof nodePseudoWorktreeFileSystem = {
+        ...nodePseudoWorktreeFileSystem,
+        statFile: async (target) => {
+          if (target === filePath) {
+            return { size: 500 * 1024 * 1024, mtimeMs: 0 };
+          }
+          return nodePseudoWorktreeFileSystem.statFile(target);
+        },
+      };
+
+      const loaded = await loadPersistedManifest(workspace, RUN_ID, fakeFs);
+      expect(loaded.ok).toBe(false);
+      if (loaded.ok) return;
+      expect(loaded.message).toContain('サイズ');
+    },
+  );
+
+  it(
+    '書き込み直後にrealpathで境界外と判明した場合は撤去して失敗とする' +
+      '（レビュー指摘: medium、TOCTOU対策の二段目。cloneWorkspace/ensureIntegrationDirと' +
+      '同じ「作成後に実パス解決して境界確認、外れていれば撤去する」二段構えをpersistManifest' +
+      'にも対にする）',
+    async () => {
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-toctou-'));
+      try {
+        const filePath = integrationManifestPath(workspace, RUN_ID);
+        const manifest: IntegrationManifest = new Map([
+          ['a.txt', { taskId: 'T1', kind: 'added' }],
+        ]);
+
+        // シンボリックリンク検知（一次防御）は通過するが、書き込み直後のrealpathでは
+        // 境界外を指すよう差し替え、書き込みと実パス確認の間に経路が差し替えられた
+        // 状況（TOCTOU）を再現する
+        const fakeFs: typeof nodePseudoWorktreeFileSystem = {
+          ...nodePseudoWorktreeFileSystem,
+          realpath: async (target) => {
+            if (target === filePath) {
+              return path.join(outsideDir, 'manifest.json');
+            }
+            return nodePseudoWorktreeFileSystem.realpath(target);
+          },
+        };
+
+        await expect(persistManifest(workspace, RUN_ID, manifest, fakeFs)).rejects.toThrow(
+          /ワークスペースの外/,
+        );
+
+        // 撤去されており、実体としては残っていない
+        await expect(readFile(filePath)).rejects.toThrow();
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    '読み込み直後にrealpathで境界外と判明した場合は復元できなかったとして扱う' +
+      '（レビュー指摘: medium、TOCTOU対策の二段目）',
+    async () => {
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-toctou-read-'));
+      try {
+        const filePath = integrationManifestPath(workspace, RUN_ID);
+        await mkdir(path.dirname(filePath), { recursive: true });
+        const manifest: IntegrationManifest = new Map([
+          ['a.txt', { taskId: 'T1', kind: 'added' }],
+        ]);
+        await writeFile(filePath, serializeManifest(manifest));
+
+        // シンボリックリンク検知（一次防御）は通過するが、読み込み直後のrealpathでは
+        // 境界外を指すよう差し替える（一次防御と実I/Oの間に経路が差し替えられた想定）
+        const fakeFs: typeof nodePseudoWorktreeFileSystem = {
+          ...nodePseudoWorktreeFileSystem,
+          realpath: async (target) => {
+            if (target === filePath) {
+              return path.join(outsideDir, 'manifest.json');
+            }
+            return nodePseudoWorktreeFileSystem.realpath(target);
+          },
+        };
+
+        const loaded = await loadPersistedManifest(workspace, RUN_ID, fakeFs);
+        expect(loaded.ok).toBe(false);
+        if (loaded.ok) return;
+        expect(loaded.message).toContain('復元できません');
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe('applyDiffToIntegration', () => {

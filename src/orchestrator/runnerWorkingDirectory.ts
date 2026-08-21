@@ -465,7 +465,8 @@ export async function reflectPseudoWorktree(
  */
 const MAX_LISTED_REFLECT_PATHS = 20;
 
-function formatPathList(paths: readonly string[]): string {
+/** テスト（`test/unit/runner.test.ts`）のためだけにexportする（レビュー指摘: risk、Issue #380）。 */
+export function formatPathList(paths: readonly string[]): string {
   if (paths.length === 0) {
     return 'なし';
   }
