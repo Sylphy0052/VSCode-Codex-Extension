@@ -1638,6 +1638,49 @@ tasks:
   });
 });
 
+describe('WorkflowRunner: 手動再実行後のworktree撤去（issue #407）', () => {
+  const YAML = `
+version: 1
+name: manual-retry-cleanup-test
+defaults:
+  cleanup: remove
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+
+  it('手動再実行の後にdoneになったタスクは、実際に使ったretry付きworktreeを撤去する', async () => {
+    const git = fakeGit();
+    const { runner, codexHost } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/manual-retry-cleanup.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const attempt1 = codexHost.byTaskId('T1');
+    attempt1.finish('failed', { ...initialChatState, turnFailed: true });
+    await flush();
+
+    expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+    await flush();
+
+    const attempt2 = codexHost.sessions.find((s) => s.cwd.endsWith('/T1-retry0'));
+    expect(attempt2).toBeDefined();
+    // 手動再実行のみ（自動retryは未消費）: retryCount=0, manualRetryCount=1
+    expect(attempt2?.cwd).not.toBe(attempt1.cwd);
+
+    attempt2?.finish('done', doneState('ok'));
+    await flush();
+
+    // 撤去対象は実際にこの試行で使ったworktree（T1-retry0）であるべき。
+    // retrySuffixOfがmanualRetryCountを見落とすと、代わりに未使用のT1（初回分。
+    // 存在しないので撤去はできない）が対象になり、attempt2のworktreeが残ってしまう
+    const removeCall = git.calls.find((c) => c.args[0] === 'worktree' && c.args[1] === 'remove');
+    expect(removeCall).toBeDefined();
+    expect(removeCall?.args[2]).toBe(attempt2?.cwd);
+  });
+});
+
 describe('WorkflowRunner: retriesによる自動再試行（design.md §16.5、レビュー指摘: high）', () => {
   const YAML = `
 version: 1
@@ -3100,6 +3143,58 @@ tasks:
     const snapshot = runner.getSnapshot(runId);
     expect(snapshot?.warnings.some((w) => w.kind === 'forgeSkipped')).toBe(false);
   });
+
+  it(
+    '最終マージには統合PR/MRの番号（live.integrationPullRequest.number）を明示的に渡す' +
+      '（design.md §16.18・Issue #404の回帰）',
+    async () => {
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      const cli = fakeForgeCli({ prUrl: 'https://github.com/acme/repo/pull/77' });
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { pullRequest: 'integration' }),
+      });
+      const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      const mergeCall = cli.calls.find((c) => c.args[0] === 'pr' && c.args[1] === 'merge');
+      expect(mergeCall?.args).toEqual(['pr', 'merge', '77', '--merge']);
+    },
+  );
+
+  it(
+    '統合PR/MRのURLから番号を取り出せなければ最終マージを飛ばし、' +
+      '「番号が不明」を含む警告を残す（design.md §16.18・Issue #404の回帰）',
+    async () => {
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      // 末尾が10進数にならないURLにして`parsePullRequestNumberFromUrl`が失敗する経路を通す
+      const cli = fakeForgeCli({ prUrl: 'https://github.com/acme/repo/pull/not-a-number' });
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { pullRequest: 'integration' }),
+      });
+      const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      // 番号が不明なので`runFinalMerge`自体がCLIを呼ばない
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+      const snapshot = runner.getSnapshot(runId);
+      const warning = snapshot?.warnings.find((w) => w.kind === 'forgeFailed');
+      expect(warning?.message).toContain('番号が不明');
+    },
+  );
 });
 
 describe('WorkflowRunner: タスクのtypeがコミットメッセージへ反映される（design.md §16.6）', () => {
