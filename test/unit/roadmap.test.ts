@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { initialChatState, type ChatState } from '../../src/appserver/chatState';
 import type { LoopPlan, LoopStopReason } from '../../src/loop/loopController';
@@ -22,7 +24,6 @@ import {
   selectNextRoadmapPhase,
   type RoadmapPhase,
   selectRoadmapPhaseItems,
-  slugifyGoal,
   stripMarkdownCodeFence,
   validateRoadmap,
   type GenerateRoadmapDeps,
@@ -191,6 +192,120 @@ describe('parseRoadmapMarkdown', () => {
   });
 });
 
+describe('parseRoadmapMarkdown: チェックボックス行の揺れ（Issue #408 根拠2）', () => {
+  it('先頭にインデントがあっても読む', () => {
+    const md = '# g\n\n## Phase 1\n\n  - [ ] R1 foo\n';
+    const parsed = parseRoadmapMarkdown(md);
+    expect(parsed.phases[0]?.items[0]?.id).toBe('R1');
+  });
+
+  it('マーカーが * でも読む', () => {
+    const md = '# g\n\n## Phase 1\n\n* [ ] R1 foo\n';
+    const parsed = parseRoadmapMarkdown(md);
+    expect(parsed.phases[0]?.items[0]?.id).toBe('R1');
+  });
+
+  it('マーカーが + でも読む', () => {
+    const md = '# g\n\n## Phase 1\n\n+ [x] R1 foo\n';
+    const parsed = parseRoadmapMarkdown(md);
+    expect(parsed.phases[0]?.items[0]?.checked).toBe(true);
+  });
+
+  it('太字の見出し行（自由記述のロードマップに実在する形）を項目として誤認しない', () => {
+    // docs/roadmap/review-and-feature-consolidation.md:58 に実在する形
+    const md = '# g\n\n## Phase 1\n\n- **WF-A オーケストレーター実行系**（11項目）\n  - T02 foo\n';
+    const parsed = parseRoadmapMarkdown(md);
+    expect(parsed.phases[0]?.items).toEqual([]);
+    expect(parsed.warnings).toEqual([]);
+  });
+
+  it('Markdownリンクの箇条書き（自由記述のロードマップに実在する形）を項目として誤認せず、警告も出さない', () => {
+    // docs/roadmap/review-and-feature-consolidation.md:22 に実在する形
+    const md = '# g\n\n## Phase 1\n\n- [ux-improvements.md](ux-improvements.md) — 説明文\n';
+    const parsed = parseRoadmapMarkdown(md);
+    expect(parsed.phases[0]?.items).toEqual([]);
+    expect(parsed.warnings).toEqual([]);
+  });
+
+  it('チェックボックスらしき行（マークが不正）が未マッチのまま残った場合は警告にする', () => {
+    const md = '# g\n\n## Phase 1\n\n- [z] R1 foo\n';
+    const parsed = parseRoadmapMarkdown(md);
+    expect(parsed.phases[0]?.items).toEqual([]);
+    expect(parsed.warnings).toHaveLength(1);
+    expect(parsed.warnings[0]?.message).toContain('チェックボックス');
+  });
+});
+
+describe('parseRoadmapMarkdown: Issue行の揺れ（Issue #408 根拠1）', () => {
+  it('番号の後に余剰テキストがあっても番号を読む', () => {
+    const md = '# g\n\n## Phase 1\n\n- [ ] R1 foo\n  - Issue: #12（既存）\n';
+    const parsed = parseRoadmapMarkdown(md);
+    expect(parsed.phases[0]?.items[0]?.issue).toBe(12);
+    expect(parsed.phases[0]?.items[0]?.issueUnparseable).toBe(false);
+    expect(parsed.warnings).toEqual([]);
+  });
+
+  it('「未起票」のように番号でないものは番号として拾わず、警告に倒す', () => {
+    // docs/roadmap/review-and-feature-consolidation.md:132 に実在する文言
+    const md = '# g\n\n## Phase 1\n\n- [ ] R1 foo\n  - Issue: 未起票（着手時に起票する）\n';
+    const parsed = parseRoadmapMarkdown(md);
+    const item = parsed.phases[0]?.items[0];
+    expect(item?.issue).toBeUndefined();
+    expect(item?.issueUnparseable).toBe(true);
+    expect(parsed.warnings).toHaveLength(1);
+    expect(parsed.warnings[0]?.itemIds).toEqual(['R1']);
+  });
+
+  it('Issue行自体が無ければissueUnparseableもfalseのまま（依存無しと同じ「そもそも書かれていない」扱い）', () => {
+    const md = '# g\n\n## Phase 1\n\n- [ ] R1 foo\n  - 依存: なし\n';
+    const parsed = parseRoadmapMarkdown(md);
+    expect(parsed.phases[0]?.items[0]?.issueUnparseable).toBe(false);
+    expect(parsed.warnings).toEqual([]);
+  });
+});
+
+describe('parseRoadmapMarkdown: 改行コードの検出', () => {
+  it('CRLFのみのファイルでも構造は変わらず読める', () => {
+    const md = '# g\r\n\r\n## Phase 1\r\n\r\n- [ ] R1 foo\r\n  - 依存: なし\r\n';
+    const parsed = parseRoadmapMarkdown(md);
+    expect(parsed.phases[0]?.items[0]?.id).toBe('R1');
+  });
+});
+
+describe('parseRoadmapMarkdown: 運用中のロードマップが従来どおりパースできる（Issue #408 の受入基準）', () => {
+  const fixtures: Array<{ file: string; expectedIds: string[] }> = [
+    {
+      file: 'ux-improvements.md',
+      expectedIds: ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9', 'R10', 'R11'],
+    },
+    { file: 'chat-conversation-parity.md', expectedIds: ['X1', 'X2', 'X3'] },
+    { file: 'workflow-autonomy.md', expectedIds: ['W1', 'W3', 'W2', 'W4', 'W5'] },
+  ];
+
+  for (const fixture of fixtures) {
+    it(`docs/roadmap/${fixture.file} は同じ項目集合でパースできる`, () => {
+      const md = readFileSync(
+        path.resolve(__dirname, `../../docs/roadmap/${fixture.file}`),
+        'utf8',
+      );
+      const parsed = parseRoadmapMarkdown(md);
+      const ids = parsed.phases.flatMap((p) => p.items.map((it) => it.id));
+      expect(ids).toEqual(fixture.expectedIds);
+    });
+  }
+
+  it('review-and-feature-consolidation.md（自由記述・非チェックボックス形式）は項目0件のまま、誤検出の警告も出さない', () => {
+    const md = readFileSync(
+      path.resolve(__dirname, '../../docs/roadmap/review-and-feature-consolidation.md'),
+      'utf8',
+    );
+    const parsed = parseRoadmapMarkdown(md);
+    const totalItems = parsed.phases.reduce((sum, p) => sum + p.items.length, 0);
+    expect(totalItems).toBe(0);
+    expect(parsed.warnings).toEqual([]);
+  });
+});
+
 describe('validateRoadmap', () => {
   it('正常なロードマップはエラー無しで通る', () => {
     const parsed = parseRoadmapMarkdown(SAMPLE_ROADMAP);
@@ -239,7 +354,7 @@ describe('validateRoadmap', () => {
   });
 
   it('項目が1件も無い場合はエラーにする', () => {
-    const result = validateRoadmap({ title: 'g', phases: [] });
+    const result = validateRoadmap({ title: 'g', phases: [], warnings: [] });
     expect(result.errors.some((e) => e.message.includes('項目が1件も'))).toBe(true);
   });
 
@@ -310,9 +425,27 @@ describe('selectRoadmapPhaseItems / formatRoadmapMaterial（design.md §16.19 2�
     if (phase === undefined) throw new Error('phase not found');
     const items = selectRoadmapPhaseItems(phase);
     expect(items).toEqual([
-      { id: 'R1', text: '認証方式を決めて設計を書く', dependsOn: [], issue: 12 },
-      { id: 'R2', text: 'API側を実装する', dependsOn: ['R1'], issue: 13 },
-      { id: 'R3', text: 'UI側を実装する', dependsOn: ['R1'], issue: undefined },
+      {
+        id: 'R1',
+        text: '認証方式を決めて設計を書く',
+        dependsOn: [],
+        issue: 12,
+        issueUnparseable: false,
+      },
+      {
+        id: 'R2',
+        text: 'API側を実装する',
+        dependsOn: ['R1'],
+        issue: 13,
+        issueUnparseable: false,
+      },
+      {
+        id: 'R3',
+        text: 'UI側を実装する',
+        dependsOn: ['R1'],
+        issue: undefined,
+        issueUnparseable: false,
+      },
     ]);
   });
 
@@ -455,6 +588,7 @@ function phaseWith(name: string, ids: readonly string[], deps: Record<string, st
       text: `${id}の作業`,
       dependsOn: deps[id] ?? [],
       issue: undefined,
+      issueUnparseable: false,
       line: index,
     })),
   };
@@ -742,6 +876,58 @@ describe('applyRunCompletion', () => {
     );
     expect(result.updatedItemIds.sort()).toEqual(['R1', 'R2']);
   });
+
+  it('警告が無ければwarningsは空配列', () => {
+    const result = applyRunCompletion(SAMPLE_ROADMAP, new Map([['R1', 'done']]));
+    expect(result.warnings).toEqual([]);
+  });
+});
+
+describe('applyRunCompletion: 改行コードの復元（Issue #408 根拠3）', () => {
+  it('CRLFのロードマップはCRLFのまま更新される', () => {
+    const md = '# g\r\n\r\n## Phase 1\r\n\r\n- [ ] R1 a\r\n  - 依存: なし\r\n';
+    const result = applyRunCompletion(md, new Map([['R1', 'done']]));
+    expect(result.updatedItemIds).toEqual(['R1']);
+    expect(result.markdown).toContain('\r\n');
+    expect(result.markdown.split('\r\n').join('')).not.toContain('\n');
+    expect(result.markdown).toBe(
+      '# g\r\n\r\n## Phase 1\r\n\r\n- [x] R1 a\r\n  - 依存: なし\r\n',
+    );
+  });
+
+  it('LFのロードマップは引き続きLFのまま更新される', () => {
+    const md = '# g\n\n## Phase 1\n\n- [ ] R1 a\n  - 依存: なし\n';
+    const result = applyRunCompletion(md, new Map([['R1', 'done']]));
+    expect(result.markdown).not.toContain('\r');
+  });
+
+  it('改行コードが混在するファイルは、1行目で使われている改行コードへ揃える' +
+    '（方針: 全体を一貫させることを優先し、行ごとの改行種別までは保持しない）', () => {
+    const md = '# g\r\n\n## Phase 1\r\n\n- [ ] R1 a\n  - 依存: なし\r\n';
+    const result = applyRunCompletion(md, new Map([['R1', 'done']]));
+    // 1行目（"# g\r\n"）がCRLFなので、書き戻し全体がCRLFへ揃う
+    expect(result.markdown.split('\r\n')).toEqual([
+      '# g',
+      '',
+      '## Phase 1',
+      '',
+      '- [x] R1 a',
+      '  - 依存: なし',
+      '',
+    ]);
+  });
+});
+
+describe('applyRunCompletion: 重複idの検出（Issue #408 根拠4）', () => {
+  it('項目idが重複していれば書き戻さず警告を返す', () => {
+    const md = '# g\n\n## Phase 1\n\n- [ ] R1 a\n  - 依存: なし\n- [ ] R1 b\n  - 依存: なし\n';
+    const result = applyRunCompletion(md, new Map([['R1', 'done']]));
+    expect(result.markdown).toBe(md);
+    expect(result.updatedItemIds).toEqual([]);
+    expect(result.warnings.length).toBeGreaterThan(0);
+    expect(result.warnings[0]?.message).toContain('重複');
+    expect(result.warnings[0]?.itemIds).toEqual(['R1']);
+  });
 });
 
 describe('stripMarkdownCodeFence', () => {
@@ -915,28 +1101,9 @@ describe('createCliIssueListPort', () => {
   });
 });
 
-describe('slugifyGoal', () => {
-  it('空白・パス区切り文字をハイフンへ置き換える', () => {
-    expect(slugifyGoal('認証 機能/を追加')).toBe('認証-機能-を追加');
-  });
-
-  it('前後の空白は取り除く', () => {
-    expect(slugifyGoal('  ゴール  ')).toBe('ゴール');
-  });
-
-  it('空文字になる場合はroadmapへ倒す', () => {
-    expect(slugifyGoal('   ')).toBe('roadmap');
-  });
-
-  it('Windowsの予約デバイス名になる場合はroadmapへ倒す', () => {
-    expect(slugifyGoal('CON')).toBe('roadmap');
-  });
-
-  it('長すぎる場合は切り詰める', () => {
-    const long = 'a'.repeat(200);
-    expect(slugifyGoal(long).length).toBeLessThanOrEqual(60);
-  });
-});
+// `slugifyGoal` はIssue #408でplanner.ts側の実装へ一本化し、roadmap.ts側の独自実装は削除した
+// （挙動の違いはplanner.test.tsの`slugifyGoal`テストで固定済み）。generateRoadmapが
+// 一本化後の実装（上限40文字）を使っていることは、下の`generateRoadmap`describeで確認する。
 
 describe('resolveRoadmapOutputPath', () => {
   it('ワークスペース配下なら解決できる', () => {
@@ -991,6 +1158,32 @@ describe('generateRoadmap', () => {
       expect(await d.fs.readTextFile(result.path)).toBe(stripMarkdownCodeFence(SAMPLE_ROADMAP));
     }
   });
+
+  it(
+    'slugが省略された場合、既定値はplanner.ts側へ一本化したslugifyGoalで作られ、' +
+      '上限は40文字になる（一本化前は60文字だった。Issue #408）',
+    async () => {
+      const d = deps();
+      const longGoal = 'あ'.repeat(200);
+      const result = await generateRoadmap(d, {
+        goal: longGoal,
+        workspaceRoot: '/repo',
+        roadmapDir: 'docs/roadmap',
+        workspaceSummary: [],
+        hasAgentsFile: false,
+        hasClaudeFile: false,
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        const prefix = '/repo/docs/roadmap/';
+        const suffix = '.md';
+        expect(result.path.startsWith(prefix)).toBe(true);
+        expect(result.path.endsWith(suffix)).toBe(true);
+        const slug = result.path.slice(prefix.length, result.path.length - suffix.length);
+        expect(slug).toBe('あ'.repeat(40));
+      }
+    },
+  );
 
   it('出力先がワークスペースの外なら生成セッションを呼ばずエラーにする', async () => {
     let called = false;
@@ -1080,6 +1273,32 @@ describe('applyRunCompletionToFile', () => {
       expect(outcome.reason).toBe('readFailed');
     }
   });
+
+  it(
+    '重複idを検出した場合、warningsを引き継ぎ、書き込まない' +
+      '（Issue #408。呼び出し側（runner.tsの`applyRoadmapCompletion`）はこのwarningsを' +
+      'ログへ出して人へ届ける）',
+    async () => {
+      const duplicated = '# g\n\n## Phase 1\n\n- [ ] R1 a\n  - 依存: なし\n- [ ] R1 b\n  - 依存: なし\n';
+      let writeCount = 0;
+      const fs: RoadmapFileSystemPort = {
+        writeTextFile: async () => {
+          writeCount += 1;
+        },
+        readTextFile: async () => duplicated,
+      };
+      const outcome = await applyRunCompletionToFile(
+        { fs },
+        '/repo/docs/roadmap/g.md',
+        new Map([['R1', 'done']]),
+      );
+      expect(writeCount).toBe(0);
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) {
+        expect(outcome.warnings.some((w) => w.message.includes('重複'))).toBe(true);
+      }
+    },
+  );
 });
 
 describe('createTaskSessionRoadmapGenerationPort', () => {
@@ -1271,4 +1490,29 @@ describe('alignRoadmapIssues（design.md §16.19。誤ったCloses #<N>を防ぐ
     expect(result.yaml).toBe(broken);
     expect(result.corrected).toEqual([]);
   });
+
+  it(
+    'パース不能なIssue行（issueUnparseable）の項目は、issueが無いのと区別し、' +
+      '生成されたYAMLのissueを削除しない（Issue #408。誤って削るとCloses #<N>の紐付けが失われる）',
+    () => {
+      const materialWithUnparseable: RoadmapMaterialItem[] = [
+        { id: 'R1', text: '設計する', dependsOn: [], issue: undefined, issueUnparseable: true },
+      ];
+      const yaml = [
+        'version: 1',
+        'name: x',
+        'tasks:',
+        '  - id: R1',
+        '    prompt: p',
+        '    done: d',
+        '    issue: 12',
+      ].join('\n');
+
+      const result = alignRoadmapIssues(yaml, materialWithUnparseable);
+
+      expect(result.corrected).toEqual([]);
+      expect(result.yaml).toBe(yaml);
+      expect(parseWorkflowYaml(result.yaml).tasks[0]?.issue).toBe(12);
+    },
+  );
 });
