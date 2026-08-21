@@ -598,6 +598,35 @@ const PATH_LIKE_TOKEN = /(?:[A-Za-z0-9._-]+[\\/])+([A-Za-z0-9._-]+)\.[A-Za-z0-9]
 const WINDOWS_RESERVED_FILENAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 const SLUG_MAX_LENGTH = 40;
 /**
+ * `PATH_LIKE_TOKEN` を実行する対象の先頭からの文字数上限（issue #416）。
+ *
+ * `(?:[A-Za-z0-9._-]+[\\/])+` はネストした可変長量指定子の繰り返しになっており、
+ * 拡張子（末尾の `\.[A-Za-z0-9]{1,8}`）にマッチしない入力を与えると、区切りの
+ * 分け方をすべて試すバックトラッキングが発生して入力長に対し二次以上の時間が
+ * かかる（実測: `'a/'.repeat(n) + 'a'` でn=20000＝入力長約40000のときこの環境で
+ * 約2.9秒）。そこで正規表現の実行範囲を先頭からこの文字数までに絞り、残りは
+ * パス縮小を行わずそのまま繋ぐ。
+ *
+ * **これは意図的なトレードオフを伴う。** 上限を超える入力では、1000文字目
+ * 以降にあるパスらしき断片は縮小されずそのまま残るため、issue #328が本来
+ * 意図した「パスを読みやすい名前へ縮める」効果がその部分では働かない
+ * （例: 先頭1000文字が空白・記号主体で`slugifyGoal`の空白畳み込みにより
+ * ほぼ消え、境界の直後にパス断片が続く入力）。これを許容できるのは、
+ * 実害が生成される既定ファイル名の意味が一部落ちることに留まり、かつこの
+ * 既定値は利用者が入力欄（`validateSlugInput`）で編集できるため。例外は
+ * 投げず、パス区切り文字（`/` `\`）はこの後段で`UNSAFE_FILENAME_CHARS`が
+ * 全文に対して確実に潰すため、パストラバーサルにはつながらない
+ * （`roadmap.ts`の`resolveRoadmapOutputPath`が行う`isPathWithinRoot`検証も
+ * 別途効いている）。この劣化が起きるのは「1000文字を超え、かつ先頭1000
+ * 文字が空白・記号でほぼ埋まり、かつ境界付近にパスらしき断片がある」という
+ * 形の入力に限られ、実際のゴール文ではまず起こらない。
+ *
+ * 値は`SLUG_MAX_LENGTH`（40）に対して十分な余裕（25倍）を持たせつつ、この
+ * 上限ちょうどの長さの最悪ケース入力でも数ミリ秒に収まるよう選んだ
+ * （実測: 長さ1000文字の最悪ケースで約2ms）。
+ */
+const PATH_LIKE_TOKEN_SCAN_LIMIT = 1000;
+/**
  * 人が入力欄で付けられる名前の上限（`validateSlugInput`）。自動生成の `SLUG_MAX_LENGTH`
  * より緩い。機械的に切り詰めた既定値と違い、人が意図して付けた名前は途中で切りたくない。
  */
@@ -618,9 +647,21 @@ const SLUG_INPUT_MAX_LENGTH = 80;
  * `slugifyGoal` の前処理。`roadmap.ts` 側の `slugifyGoal` も同じ前処理を通すため、
  * 実装はここ1つに置いて共有する（`roadmap.ts` は `planner.ts` を参照しているので、
  * この向きの依存なら循環しない）。
+ *
+ * `PATH_LIKE_TOKEN_SCAN_LIMIT` を超えた末尾部分は無検査（パス縮小もパス区切りの
+ * 除去も行わず）そのまま連結する。それが安全なのは、この関数の呼び出し元
+ * `slugifyGoal` が結果全体に `UNSAFE_FILENAME_CHARS` を適用してパス区切り文字を
+ * 潰し、さらに `roadmap.ts` の `resolveRoadmapOutputPath` が `isPathWithinRoot` で
+ * 出力先を検証しているため。どちらか一方でも変更・削除する場合はこの前提が
+ * 崩れないか確認すること。
  */
 export function stripPathLikeTokens(goal: string): string {
-  return goal.replace(PATH_LIKE_TOKEN, (_match, base: string) => base);
+  if (goal.length <= PATH_LIKE_TOKEN_SCAN_LIMIT) {
+    return goal.replace(PATH_LIKE_TOKEN, (_match, base: string) => base);
+  }
+  const head = goal.slice(0, PATH_LIKE_TOKEN_SCAN_LIMIT);
+  const tail = goal.slice(PATH_LIKE_TOKEN_SCAN_LIMIT);
+  return head.replace(PATH_LIKE_TOKEN, (_match, base: string) => base) + tail;
 }
 
 /**
