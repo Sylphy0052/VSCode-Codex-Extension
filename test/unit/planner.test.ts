@@ -981,12 +981,44 @@ describe('slugifyGoal: 長い入力でのReDoS対策（issue #416）', () => {
     expect(result.length).toBeGreaterThan(0);
   });
 
-  it('上限を超える長さの入力でも例外を投げず、意味のあるslugを返す', () => {
+  it('上限を超える長さの入力でも例外を投げず、意味のあるslugを返す（ReDoS回帰の検出ではない）', () => {
+    // この入力は拡張子付きパス断片を含まないため `PATH_LIKE_TOKEN` がそもそも
+    // 一致せず、上限を撤去してもReDoSは発火しない。ここで確認しているのは
+    // 「単に長いだけの入力でも例外を投げず有限の結果を返すこと」であり、
+    // ReDoS対策の回帰検出は上のテスト（n=20000の計時テスト）が担う。
     const longGoal = `${'x'.repeat(2000)}を実行する`;
     expect(() => slugifyGoal(longGoal)).not.toThrow();
     const result = slugifyGoal(longGoal);
     expect(result.length).toBeGreaterThan(0);
     expect(result.length).toBeLessThanOrEqual(40);
+  });
+});
+
+/**
+ * `PATH_LIKE_TOKEN_SCAN_LIMIT`（1000文字）方式には、上限を超える入力では
+ * 1000文字目以降のパス断片が縮小されないというトレードオフが実在する
+ * （issue #416のレビューで判明）。「壊れている」のではなく許容している仕様
+ * であることを、境界の前後で挙動が変わる形で固定する。
+ */
+describe('slugifyGoal: 上限超の入力ではパス縮小が部分的に効かない（issue #416、仕様として許容）', () => {
+  it('仕様: 上限を超える入力では、先頭が空白主体で畳み込まれて消えると、境界を跨いだパス断片が縮小されずに残る', () => {
+    // 先頭999文字の空白は `slugifyGoal` の `.trim()` と `\s+` 畳み込みでほぼ消える
+    // ため、1000文字目以降にあるパス断片（1000文字目以降＝走査対象外）が
+    // 縮小されないまま最終40文字へ届く。これはIssue #328の目的（パスを読みやすい
+    // 名前へ縮める）が部分的に果たされないことを意味するが、実害は既定の
+    // ファイル名の意味が落ちることに留まり、利用者は入力欄で編集できるため
+    // 許容している（例外もパストラバーサルも発生しない）。
+    const input = `${' '.repeat(999)}C:\\projdir\\subdir\\importantfile.exe を実行する`;
+    expect(input.length).toBeGreaterThan(1000);
+    expect(slugifyGoal(input)).toBe('C-projdir-subdir-importantfile.exe-を実行する');
+  });
+
+  it('対比: 上限以下の入力では、境界を跨がない限り従来どおりパスが縮小される', () => {
+    // 先頭からの合計が上限（1000文字）以下に収まるよう空白を900個に減らしただけで、
+    // 同じパス断片が正しく `importantfile`（拡張子なし）へ縮む。
+    const input = `${' '.repeat(900)}C:\\projdir\\subdir\\importantfile.exe を実行する`;
+    expect(input.length).toBeLessThanOrEqual(1000);
+    expect(slugifyGoal(input)).toBe('C-importantfile-を実行する');
   });
 });
 
