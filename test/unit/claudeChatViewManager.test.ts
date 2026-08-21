@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ClaudeSessionStore } from '../../src/claude/sessionStore';
 import { ClaudeStreamSession, type ClaudeStreamOptions } from '../../src/claude/streamSession';
 import type { Logger } from '../../src/log';
@@ -11,7 +11,7 @@ import {
   MEMORY_LAST_SELECTED_PATH_KEY,
   type MemoryModeMemento,
 } from '../../src/provider/inputModes';
-import type { ChatActivity } from '../../src/view/chatView';
+import { STATE_POST_INTERVAL_MS, type ChatActivity } from '../../src/view/chatView';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import {
   buildClaudeChatPanelOptions,
@@ -136,9 +136,61 @@ function createManager(options?: {
   return { manager, store };
 }
 
-/** `handleMessage` の `send` 分岐は非同期処理を待たずに戻るため、マイクロタスクを流す。 */
+/**
+ * `handleMessage` の `send` 分岐は非同期処理を待たずに戻るため、マイクロタスクを流す。
+ *
+ * `postState` の間引き（`STATE_POST_INTERVAL_MS`、issue #356）で予約に回った分もここで
+ * 確定させる。フェイクタイマー越しに進めることで、実時間待ちによるCIの不安定化を避ける
+ * （`chatViewManager.test.ts`の`flushStatePosts`と同じ理由）。
+ */
 async function flush(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await vi.advanceTimersByTimeAsync(STATE_POST_INTERVAL_MS);
+}
+
+type StateItem = {
+  id: string;
+  detail?: string;
+  text?: string;
+  diffs?: { diff?: string; editReplace?: unknown }[];
+};
+
+type StateMessage = {
+  type: string;
+  state: { items: StateItem[]; [key: string]: unknown };
+  /** 会話項目は差し分で届く（issue #356）。 */
+  items?: { mode: string; items: StateItem[]; total: number };
+};
+
+/**
+ * 送られた状態を、webviewが見るのと同じ形（その時点の全項目つき）へ戻す。
+ *
+ * 会話項目は差し分で送るため（issue #356）、`state.items` は空で届く。webview側の
+ * `mergeItems`（実装は`stateDelta.ts`の`MERGE_ITEMS_SOURCE`）と同じ積み方をここで
+ * 再現し、既存のテストが全項目を見られるようにする
+ * （`chatViewManager.test.ts`の`stateMessagesOf`と同じ考え方）。
+ */
+function stateMessagesOf(panel: { webview: { sent: unknown[] } } | undefined): StateMessage[] {
+  const merged: StateItem[] = [];
+  return (panel?.webview.sent ?? [])
+    .filter(
+      (m): m is StateMessage =>
+        typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'state',
+    )
+    .map((m) => {
+      const delta = m.items;
+      if (delta === undefined) {
+        return m;
+      }
+      if (delta.mode === 'full') {
+        merged.length = 0;
+      }
+      for (const item of delta.items) {
+        const at = merged.findIndex((x) => x.id === item.id);
+        if (at === -1) merged.push(item);
+        else merged[at] = item;
+      }
+      return { ...m, state: { ...m.state, items: [...merged] } };
+    });
 }
 
 /**
@@ -183,6 +235,13 @@ function stubMcpStatus(servers: McpServerView[] | undefined): void {
 const initLine = (sessionId: string): string =>
   `${JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId })}\n`;
 const resultLine = (): string => `${JSON.stringify({ type: 'result' })}\n`;
+/** 発言テキスト1件分の`agentMessage`。`uuid`をそのまま項目idに使う（issue #356の間引きテスト用）。 */
+const assistantTextLine = (uuid: string, text: string): string =>
+  `${JSON.stringify({
+    type: 'assistant',
+    uuid,
+    message: { id: uuid, content: [{ type: 'text', text }] },
+  })}\n`;
 /** `can_use_tool`制御要求（issue #286の承認待ち通知テスト用）。 */
 const canUseToolLine = (
   requestId: string,
@@ -200,6 +259,12 @@ describe('ClaudeChatViewManager', () => {
     __mock.reset();
     __mock.setWorkspaceFolder('/workspace/root');
     vi.restoreAllMocks();
+    // 状態送信の間引き（issue #356）を確定的に進めるため
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe('セッションの寿命をパネルから切り離す（design.md §16.10の4）', () => {
@@ -534,21 +599,16 @@ describe('ClaudeChatViewManager', () => {
       expect(calls).toHaveLength(2);
 
       await manager.reloadSkillsForOpenSessions();
+      await flush();
 
       expect(sessions).toHaveLength(2);
-      const firstItems = (
-        firstPanel?.webview.sent[firstPanel.webview.sent.length - 1] as {
-          state: { items: Array<{ detail?: string }> };
-        }
-      ).state.items;
+      const firstMessages = stateMessagesOf(firstPanel);
+      const firstItems = firstMessages[firstMessages.length - 1]?.state.items ?? [];
       expect(firstItems.some((i) => i.detail === '設定 ・ skillsを読み直しました（1件）')).toBe(
         true,
       );
-      const secondItems = (
-        secondPanel?.webview.sent[secondPanel.webview.sent.length - 1] as {
-          state: { items: Array<{ detail?: string }> };
-        }
-      ).state.items;
+      const secondMessages = stateMessagesOf(secondPanel);
+      const secondItems = secondMessages[secondMessages.length - 1]?.state.items ?? [];
       expect(
         secondItems.some(
           (i) =>
@@ -713,6 +773,12 @@ describe('ClaudeChatViewManagerの名前変更（issue #199）', () => {
     __mock.reset();
     __mock.setWorkspaceFolder('/workspace/root');
     vi.restoreAllMocks();
+    // 状態送信の間引き（issue #356）を確定的に進めるため
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('名前変更は選択中の画面のタブ名と履歴一覧の名前解決に反映する', async () => {
@@ -774,6 +840,12 @@ describe('ClaudeChatViewManagerの会話クリア（CLIの /clear 相当）', ()
     __mock.reset();
     __mock.setWorkspaceFolder('/workspace/root');
     vi.restoreAllMocks();
+    // 状態送信の間引き（issue #356）を確定的に進めるため
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('いまの会話を閉じて、同じ作業フォルダで新しい会話を開き直す', async () => {
@@ -814,6 +886,12 @@ describe('エディタの選択範囲の送り先（getActiveComposerTarget、is
     __mock.reset();
     __mock.setWorkspaceFolder('/workspace/root');
     vi.restoreAllMocks();
+    // 状態送信の間引き（issue #356）を確定的に進めるため
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('開いているタブが無ければundefined', () => {
@@ -900,6 +978,12 @@ describe('ClaudeChatViewManagerのメモリ追記（issue #6/#144）', () => {
     __mock.reset();
     __mock.setWorkspaceFolder('/workspace/root');
     vi.restoreAllMocks();
+    // 状態送信の間引き（issue #356）を確定的に進めるため
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   async function openPanel(manager: ClaudeChatViewManager): Promise<FakeWebviewPanel | undefined> {
@@ -942,11 +1026,10 @@ describe('ClaudeChatViewManagerのメモリ追記（issue #6/#144）', () => {
     expect(memento.get<string | undefined>(MEMORY_LAST_SELECTED_PATH_KEY, undefined)).toBe(
       '/workspace/root/CLAUDE.md',
     );
-    const lastState = panel?.webview.sent[panel.webview.sent.length - 1] as {
-      state: { items: Array<{ detail?: string }> };
-    };
+    const lastMessages = stateMessagesOf(panel);
+    const lastItems = lastMessages[lastMessages.length - 1]?.state.items ?? [];
     expect(
-      lastState.state.items.some(
+      lastItems.some(
         (i) => i.detail === 'メモリへ追記しました: /workspace/root/CLAUDE.md',
       ),
     ).toBe(true);
@@ -967,11 +1050,10 @@ describe('ClaudeChatViewManagerのメモリ追記（issue #6/#144）', () => {
     await send(panel, '#note');
 
     expect(__mock.messages.warnings.at(-1)).toContain('リンク先: /home/user/dotfiles/CLAUDE.md');
-    const lastState = panel?.webview.sent[panel.webview.sent.length - 1] as {
-      state: { items: Array<{ detail?: string }> };
-    };
+    const lastMessages = stateMessagesOf(panel);
+    const lastItems = lastMessages[lastMessages.length - 1]?.state.items ?? [];
     expect(
-      lastState.state.items.some((i) =>
+      lastItems.some((i) =>
         i.detail?.includes('リンク先: /home/user/dotfiles/CLAUDE.md'),
       ),
     ).toBe(true);
@@ -993,11 +1075,10 @@ describe('ClaudeChatViewManagerのメモリ追記（issue #6/#144）', () => {
     expect(__mock.writtenFiles).toEqual([
       { path: '/workspace/root/CLAUDE.md', content: '- note\n' },
     ]);
-    const lastState = panel?.webview.sent[panel.webview.sent.length - 1] as {
-      state: { items: Array<{ detail?: string }> };
-    };
+    const lastMessages = stateMessagesOf(panel);
+    const lastItems = lastMessages[lastMessages.length - 1]?.state.items ?? [];
     expect(
-      lastState.state.items.some((i) => i.detail?.includes('実体のパスを特定できません')),
+      lastItems.some((i) => i.detail?.includes('実体のパスを特定できません')),
     ).toBe(true);
   });
 
@@ -1179,6 +1260,12 @@ describe('ClaudeChatViewManagerの他エージェント設定インポート（i
     __mock.reset();
     __mock.setWorkspaceFolder('/workspace/root');
     vi.restoreAllMocks();
+    // 状態送信の間引き（issue #356）を確定的に進めるため
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   async function openPanel(manager: ClaudeChatViewManager): Promise<FakeWebviewPanel | undefined> {
@@ -1247,6 +1334,12 @@ describe('ClaudeChatViewManagerの追加クレジット要求（issue #204）', 
     __mock.reset();
     __mock.setWorkspaceFolder('/workspace/root');
     vi.restoreAllMocks();
+    // 状態送信の間引き（issue #356）を確定的に進めるため
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   async function openPanel(manager: ClaudeChatViewManager): Promise<FakeWebviewPanel | undefined> {
@@ -1313,6 +1406,12 @@ describe('ClaudeChatViewManagerのデバッグログを開く（issue #205）', 
     __mock.reset();
     __mock.setWorkspaceFolder('/workspace/root');
     vi.restoreAllMocks();
+    // 状態送信の間引き（issue #356）を確定的に進めるため
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('このセッション専用のログが開ければそれを開き、会話に記録を残す', async () => {
@@ -1387,6 +1486,12 @@ describe('ClaudeChatViewManagerの/debug送信（issue #205）', () => {
     __mock.reset();
     __mock.setWorkspaceFolder('/workspace/root');
     vi.restoreAllMocks();
+    // 状態送信の間引き（issue #356）を確定的に進めるため
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('確認ダイアログを経てから/debugを送る', async () => {
@@ -1451,6 +1556,12 @@ describe('ClaudeChatViewManagerの会話要約（issue #203）', () => {
     __mock.reset();
     __mock.setWorkspaceFolder('/workspace/root');
     vi.restoreAllMocks();
+    // 状態送信の間引き（issue #356）を確定的に進めるため
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('確認なしで/recapを送る', async () => {
@@ -1511,6 +1622,12 @@ describe('ClaudeChatViewManagerの自動圧縮窓サイズ設定（issue #201）
     __mock.reset();
     __mock.setWorkspaceFolder('/workspace/root');
     vi.restoreAllMocks();
+    // 状態送信の間引き（issue #356）を確定的に進めるため
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   function attachFakeProc(session: ClaudeStreamSession): string[] {
@@ -1590,6 +1707,12 @@ describe('ワークフローの導線（issue #250）', () => {
     __mock.reset();
     __mock.setWorkspaceFolder('/workspace/root');
     __mock.setConfig('claude', {});
+    // 状態送信の間引き（issue #356）を確定的に進めるため
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('ワークフローボタンを押すとagent.workflows.menuを実行する', async () => {
@@ -1623,6 +1746,12 @@ describe('タブ名の状態表示・通知（issue #286、design.md §14.55）'
     __mock.setWorkspaceFolder('/workspace/root');
     __mock.setConfig('agent', {});
     vi.restoreAllMocks();
+    // 状態送信の間引き（issue #356）を確定的に進めるため
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('承認待ちはタブ名の先頭に ! が付く', async () => {
@@ -1779,6 +1908,12 @@ describe('webviewへ送る項目からeditReplaceを落とす（issue #320）', 
     __mock.setWorkspaceFolder('/workspace/root');
     __mock.setConfig('agent', {});
     vi.restoreAllMocks();
+    // 状態送信の間引き（issue #356）を確定的に進めるため
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   const editToolLine = (): string =>
@@ -1803,14 +1938,14 @@ describe('webviewへ送る項目からeditReplaceを落とす（issue #320）', 
 
   /** 直近に送った `state` メッセージの会話項目。 */
   function lastSentItems(): { diffs?: { diff?: string; editReplace?: unknown }[] }[] {
-    const sent = __mock.lastCreatedPanel()?.webview.sent ?? [];
-    for (let i = sent.length - 1; i >= 0; i -= 1) {
-      const message = sent[i] as { type?: string; state?: { items?: unknown } } | undefined;
-      if (message?.type === 'state' && Array.isArray(message.state?.items)) {
-        return message.state.items as { diffs?: { diff?: string; editReplace?: unknown }[] }[];
-      }
+    // 会話項目は差し分で届く（issue #356）ため、`mergeItems`と同じ積み方で
+    // 積み直してから最後の状態を見る（`stateMessagesOf`参照）。
+    const messages = stateMessagesOf(__mock.lastCreatedPanel());
+    const last = messages[messages.length - 1];
+    if (last === undefined) {
+      throw new Error('state メッセージが送られていません');
     }
-    throw new Error('state メッセージが送られていません');
+    return last.state.items;
   }
 
   async function openWithEdit(): Promise<ClaudeStreamSession> {
@@ -1853,5 +1988,111 @@ describe('webviewへ送る項目からeditReplaceを落とす（issue #320）', 
       oldString: 'const a = 1;',
       newString: 'const a = 10;',
     });
+  });
+});
+
+/**
+ * Claude側の`postState`間引き（issue #356）。
+ *
+ * `onSessionChange`はNDJSONイベント1件ごとに同期的に発火するため、間引きが無いと
+ * ストリーミング中は毎回`state.items`全量が構造化クローンで直列化される
+ * （Codex側は`STATE_POST_INTERVAL_MS`と`buildItemsDelta`で既に対処済み、issue #246/#262）。
+ * ここではCodex側と同じ挙動がClaude側にも入ったことを確かめる。
+ */
+describe('Claude側のpostState間引きと差分送信（issue #356）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+    // 「タイマーが進むまで送信されない」ことを確認するテストのため、他のdescribeと違い
+    // `shouldAdvanceTime` は立てない（実時間が紛れ込むとDate.now()の差が不安定になる）
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function openWithSession(): Promise<{
+    session: ClaudeStreamSession;
+    panel: FakeWebviewPanel;
+  }> {
+    const { sessions } = stubStartCapturing();
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const session = sessions[sessions.length - 1];
+    const panel = __mock.lastCreatedPanel();
+    if (session === undefined || panel === undefined) {
+      throw new Error('セッションかパネルが記録されていません');
+    }
+    // 最初の1件は間引きに巻き込まれず即座に送られる（`postState`のJSDoc参照）。
+    // ここで送信済みにしてから、以降の連続更新の挙動を見る
+    session.receive(initLine('session-throttle'));
+    return { session, panel };
+  }
+
+  it('短時間に連続した状態更新は間引かれ、まとめて1回だけ送られる', async () => {
+    const { session, panel } = await openWithSession();
+    const sentBefore = panel.webview.sent.length;
+
+    // STATE_POST_INTERVAL_MS未満の間隔で複数件届く（実際のストリーミングを模す）
+    session.receive(assistantTextLine('item-a', '1件目'));
+    session.receive(assistantTextLine('item-b', '2件目'));
+
+    // タイマーが進むまでは追加の送信が無い（間引かれている）
+    expect(panel.webview.sent.length).toBe(sentBefore);
+
+    await flush();
+
+    const stateMessages = panel.webview.sent
+      .slice(sentBefore)
+      .filter(
+        (m): m is StateMessage =>
+          typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'state',
+      );
+    // まとめられて1回だけ送られる（2件がそれぞれ別送信にならない）
+    expect(stateMessages.length).toBe(1);
+    expect(stateMessages[0]?.items?.mode).toBe('delta');
+    expect(stateMessages[0]?.items?.items.map((i) => i.id)).toEqual([
+      'item-a:text:0',
+      'item-b:text:0',
+    ]);
+    // 直列化コストを避けるため、`state.items`自体は空で送る
+    expect(stateMessages[0]?.state.items).toEqual([]);
+  });
+
+  it('間引き中に増えた分も含め、最終状態が必ず送信される（送り漏らしが無い）', async () => {
+    const { session, panel } = await openWithSession();
+
+    session.receive(assistantTextLine('item-a', '1件目'));
+    await flush();
+    session.receive(assistantTextLine('item-b', '2件目'));
+    session.receive(assistantTextLine('item-c', '3件目'));
+    // ここではまだタイマーを進めない → 直近2件は間引きの予約に乗ったまま
+    await flush();
+
+    const messages = stateMessagesOf(panel);
+    const last = messages[messages.length - 1];
+    expect(last?.state.items.map((i) => i.id)).toEqual([
+      'item-a:text:0',
+      'item-b:text:0',
+      'item-c:text:0',
+    ]);
+  });
+
+  it('パネルを破棄すると間引きタイマーが解放される（放置されたタイマーが残らない）', async () => {
+    const { session, panel } = await openWithSession();
+
+    // 更新を1件だけ届け、間引きの予約（setTimeout）を積ませる
+    session.receive(assistantTextLine('item-a', '1件目'));
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    __mock.lastCreatedPanel()?.dispose();
+
+    // タイマーが解放され、以降どれだけ時間を進めても新しい送信は起きない
+    expect(vi.getTimerCount()).toBe(0);
+    const sentBefore = panel.webview.sent.length;
+    await vi.advanceTimersByTimeAsync(STATE_POST_INTERVAL_MS * 5);
+    expect(panel.webview.sent.length).toBe(sentBefore);
   });
 });
