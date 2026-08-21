@@ -15,6 +15,15 @@ import { effortsFor, parseModelCatalog, type ModelInfo } from '../codex/modelCat
 import { isSandboxRelaxed } from '../codex/sandboxPolicy';
 import { readClaudeConfig, readConfig } from '../config';
 import type { Logger } from '../log';
+import {
+  claudePermissionModeForLevel,
+  codexSettingsForLevel,
+  isUnsafeLevel,
+  levelFromClaudePermissionMode,
+  levelFromCodexSettings,
+  type ApprovalLevel,
+} from '../provider/approvalLevel';
+import type { ProviderId } from '../provider/id';
 import type { HooksSnapshot } from '../provider/hooks';
 import { accountNotLoadedYet, type AccountSnapshot } from '../provider/account';
 import type { McpServersSnapshot } from '../provider/mcpServers';
@@ -117,6 +126,12 @@ export interface SettingsSnapshot {
   reasoningEffort: string;
   approvalMode: string;
   sandbox: string;
+  /**
+   * `approvalMode` / `sandbox` / `approvalsReviewer` の組み合わせが対応する承認レベル
+   * （3段階、`src/provider/approvalLevel.ts`）。どのレベルとも一致しなければ空文字
+   * （画面では「カスタム」）。
+   */
+  approvalLevel: string;
   /** 設定が空のときに実際に使われる値（config.toml 由来）。 */
   defaults: CodexDefaults;
   profile: string;
@@ -152,6 +167,12 @@ export interface ClaudeSettingsSnapshot {
   model: string;
   effort: string;
   permissionMode: string;
+  /**
+   * `permissionMode` が対応する承認レベル（3段階、`src/provider/approvalLevel.ts`）。
+   * `acceptEdits` / `plan` / `dontAsk` のようにレベルへ対応しない値のときは空文字
+   * （画面では「カスタム」）。
+   */
+  approvalLevel: string;
   /** 起動時にのみ効く。セッション中は切り替えられない（設計書 §6・Issue #30）。 */
   agent: string;
   /** 設定が空のときに実際に使われる値（settings.json 由来）。 */
@@ -541,6 +562,7 @@ export class SettingsProvider {
       reasoningEffort: config.codex.reasoningEffort,
       approvalMode: config.codex.approvalMode,
       sandbox: config.codex.sandbox,
+      approvalLevel: levelFromCodexSettings(config.codex) ?? '',
       defaults: this.defaults,
       profile: config.codex.profile,
       mcpServers: this.codexMcp,
@@ -564,6 +586,7 @@ export class SettingsProvider {
       model: config.model,
       effort: config.effort,
       permissionMode: config.permissionMode,
+      approvalLevel: levelFromClaudePermissionMode(config.permissionMode) ?? '',
       agent: config.agent,
       defaults: this.claudeDefaults,
       mcpServers: this.claudeMcp,
@@ -838,6 +861,49 @@ export class SettingsProvider {
   }
 
   /**
+   * 承認レベル（3段階）を書き換える（`src/provider/approvalLevel.ts`）。
+   *
+   * Codexは `approvalMode` / `sandbox` / `approvalsReviewer` の3項目、Claude Codeは
+   * `permissionMode` の1項目へ展開して書く。いずれも machine スコープのため
+   * ユーザー設定へ書く（`update` / `updateClaude` と同じ）。
+   *
+   * 確認は**レベルごとに1回だけ**にする。`update` を3回呼ぶ形にすると、サンドボックスの
+   * 緩和確認（`confirmRelaxedSandbox`）と危険な組み合わせの確認（`confirmUnsafe`）が
+   * 続けて出るうえ、途中で取り消されると3項目が食い違ったまま残る。レベルは「どこまで
+   * 任せるか」を1つ選ぶ操作なので、同意も1つにまとめる。
+   *
+   * @returns 実際に変更したら true。確認で取り消された場合は false。
+   */
+  async updateApprovalLevel(provider: ProviderId, level: ApprovalLevel): Promise<boolean> {
+    if (isUnsafeLevel(level) && !(await confirmFullApproval(provider))) {
+      return false;
+    }
+
+    if (provider === 'claude') {
+      const section = vscode.workspace.getConfiguration('claude');
+      await section.update(
+        'permissionMode',
+        claudePermissionModeForLevel(level),
+        vscode.ConfigurationTarget.Global,
+      );
+      this.log.info(`Claudeの承認レベルを ${level} にしました`);
+      return true;
+    }
+
+    const next = codexSettingsForLevel(level);
+    const section = vscode.workspace.getConfiguration('codex');
+    await section.update('approvalMode', next.approvalMode, vscode.ConfigurationTarget.Global);
+    await section.update('sandbox', next.sandbox, vscode.ConfigurationTarget.Global);
+    await section.update(
+      'approvalsReviewer',
+      next.approvalsReviewer,
+      vscode.ConfigurationTarget.Global,
+    );
+    this.log.info(`Codexの承認レベルを ${level} にしました`);
+    return true;
+  }
+
+  /**
    * Claude Code側の設定を書き換える。
    *
    * `permissionMode` を `bypassPermissions` にすると確認なしでツールが動くため、
@@ -988,6 +1054,25 @@ async function confirmRelaxedSandbox(value: string): Promise<boolean> {
   const detail = RELAXED_SANDBOX_DETAIL[value] ?? 'Codexの権限が広がります。';
   const choice = await vscode.window.showWarningMessage(
     `サンドボックスを ${value} に変更します。${detail}`,
+    { modal: true },
+    'この設定にする',
+  );
+  return choice === 'この設定にする';
+}
+
+/**
+ * 承認レベルを「全承認」にするときの同意（`updateApprovalLevel`）。
+ *
+ * 本文には設定キー名ではなく**何が起きるか**を書く（`describeUnsafeCombination` と同じ方針）。
+ * Codexはサンドボックスも同時に外れるため、そこまで含めて書く。
+ */
+async function confirmFullApproval(provider: ProviderId): Promise<boolean> {
+  const detail =
+    provider === 'claude'
+      ? 'Claude Codeはツールを確認なしで実行します。'
+      : 'Codexはコマンドを確認なしで実行し、ファイルもネットワークも制限なく扱えるようになります。';
+  const choice = await vscode.window.showWarningMessage(
+    `承認レベルを「全承認」にします。${detail}`,
     { modal: true },
     'この設定にする',
   );

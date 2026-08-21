@@ -4,11 +4,42 @@
  * テンプレートリテラルの中身なので型検査もlintも効かない。壊れるとパネルが黙って
  * 動かなくなるため、`controlPanelScript.test.ts` で構文だけは機械的に確かめている。
  */
-export function controlPanelScript(): string {
+export function controlPanelScript(approvalLevelMetaJson: string): string {
   return `
   const vscode = acquireVsCodeApi();
   const el = (id) => document.getElementById(id);
   let models = [];
+
+  // 承認レベル（3段階）の表示名・説明・プロバイダごとの実効値。拡張機能側の
+  // src/provider/approvalLevel.ts が唯一の定義元で、ここへは組み立て済みの値が入る
+  const APPROVAL_LEVEL_META = ${approvalLevelMetaJson};
+
+  /**
+   * 承認レベルのセレクタと補足を現在の設定に合わせる。
+   *
+   * どのレベルとも一致しない設定（詳細で個別に指定した状態）のときだけ「カスタム」を
+   * 選択肢へ足す。選ばせるためではなく、いまの状態を正しく見せるために出す。
+   */
+  function applyApprovalLevel(selectId, hintId, provider, level) {
+    const select = el(selectId);
+    const custom = select.querySelector('option[value=""]');
+    if (level) {
+      if (custom) custom.remove();
+      select.value = level;
+    } else {
+      if (!custom) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = 'カスタム（詳細で個別に指定）';
+        select.insertBefore(opt, select.firstChild);
+      }
+      select.value = '';
+    }
+    const meta = level ? APPROVAL_LEVEL_META[level] : undefined;
+    el(hintId).textContent = meta
+      ? meta.description + '（' + meta.effective[provider] + '）'
+      : '承認の詳細で個別に指定されています';
+  }
 
   function defaultLabel(value) {
     return value ? '既定: ' + value : '既定 (CLI側に指定なし)';
@@ -883,6 +914,7 @@ export function controlPanelScript(): string {
     setDefaultLabel(el('sandbox'), d.sandbox);
     el('approvalMode').value = state.approvalMode;
     el('sandbox').value = state.sandbox;
+    applyApprovalLevel('approvalLevel', 'approvalLevelHint', 'codex', state.approvalLevel);
 
     el('profileNote').textContent = state.profile
       ? 'プロファイル「' + state.profile + '」の適用時は上の既定と異なる場合があります。'
@@ -917,6 +949,7 @@ export function controlPanelScript(): string {
     );
     fill(el('claudeEffort'), c.efforts, c.effort, defaultLabel(d.effort));
     fill(el('claudePermissionMode'), c.permissionModes, c.permissionMode, defaultLabel(d.permissionMode));
+    applyApprovalLevel('claudeApprovalLevel', 'claudeApprovalLevelHint', 'claude', c.approvalLevel);
     fill(
       el('claudeAgent'),
       (c.agents || []).map((a) => a.name),
@@ -992,6 +1025,17 @@ export function controlPanelScript(): string {
   for (const key of ['model', 'reasoningEffort', 'approvalMode', 'sandbox']) {
     el(key).addEventListener('change', (e) => {
       vscode.postMessage({ type: 'update', key, value: e.target.value });
+    });
+  }
+
+  // 承認レベルは1つ選ぶと複数の設定項目へ展開される。空文字（カスタム）は選ばせない
+  for (const [id, provider] of [
+    ['approvalLevel', 'codex'],
+    ['claudeApprovalLevel', 'claude'],
+  ]) {
+    el(id).addEventListener('change', (e) => {
+      if (!e.target.value) return;
+      vscode.postMessage({ type: 'updateApprovalLevel', provider, level: e.target.value });
     });
   }
 

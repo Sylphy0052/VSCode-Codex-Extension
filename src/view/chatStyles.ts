@@ -479,6 +479,23 @@ export function chatStyles(): string {
     font-size: inherit;
   }
   #settings select:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  /* 「承認の詳細」。承認は3段階のセレクタを主にし、生の値はここへ畳む。行を折り返して
+     全幅に置き、開いたときの中身は他の設定と同じ横並びにする */
+  #approvalDetails { flex-basis: 100%; }
+  #approvalDetails > summary {
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  #approvalDetails > summary:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: 2px;
+  }
+  #approvalDetails .detailBody {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    padding: 6px 0 2px;
+  }
   /* 変更がいつから効くかの但し書き。行を折り返して全幅に置く */
   #settings .note {
     flex-basis: 100%;

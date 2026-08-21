@@ -84,7 +84,11 @@ import {
 import { readPersistedThreadId } from './panelState';
 import { stripHostOnlyItems } from './stateDelta';
 import { CLAUDE_PERMISSION_MODES } from '../claude/types';
-import { CLAUDE_APPROVAL_CYCLE } from '../provider/approvalCycle';
+import {
+  APPROVAL_LEVEL_CYCLE,
+  claudePermissionModeForLevel,
+  isApprovalLevel,
+} from '../provider/approvalLevel';
 import type { ClaudeConfig } from '../claude/types';
 import type { ClaudeEditableKey, SettingsProvider } from './settingsProvider';
 import type { ChatActivity } from './chatView';
@@ -331,6 +335,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
           model: snapshot.model,
           reasoningEffort: snapshot.effort,
           approvalMode: snapshot.permissionMode,
+          approvalLevel: snapshot.approvalLevel,
           agent: snapshot.agent,
           defaults: {
             model: snapshot.defaults.model,
@@ -812,8 +817,9 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     }
     panel.webview.html = renderShell(panel.webview, {
       agentLabel: LABEL,
+      provider: 'claude',
       approvalModes: CLAUDE_PERMISSION_MODES,
-      approvalCycle: CLAUDE_APPROVAL_CYCLE,
+      approvalCycle: APPROVAL_LEVEL_CYCLE,
       showSettings: true,
       showAgentSelector: true,
       composerButtons: composerButtonsConfig.buttons,
@@ -1059,6 +1065,26 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         listener(status.stopReason, state);
       }
     }
+  }
+
+  /**
+   * 承認レベル（3段階）を適用する。
+   *
+   * Claude Codeでは `permissionMode` 1項目へ展開される。書き込みは
+   * `SettingsProvider.updateApprovalLevel` が担い（「全承認」の同意もそこで取る）、
+   * 実行中のセッションへの反映は `permissionMode` を変えたときと同じ経路に乗せる。
+   */
+  private async applyApprovalLevel(entry: ClaudePanel, level: unknown): Promise<void> {
+    if (!isApprovalLevel(level)) {
+      this.log.warn(`承認レベルの変更要求が不正です: ${String(level)}`);
+      return;
+    }
+    // 取り消された場合も表示を現在値へ戻すため、結果によらず再送する
+    const applied = await this.settings.updateApprovalLevel('claude', level);
+    if (applied) {
+      this.applyToSession(entry, 'permissionMode', claudePermissionModeForLevel(level));
+    }
+    this.refreshSettings(entry);
   }
 
   /** 設定行のキーはCodex画面と共通なので、Claude側のキーへ読み替える。 */
@@ -1384,6 +1410,10 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       if (type === 'ready') {
         this.refreshSettings(entry);
         void this.postCommands(entry);
+        return;
+      }
+      if (type === 'approvalLevel') {
+        void this.applyApprovalLevel(entry, m['level']);
         return;
       }
       if (type === 'config') {

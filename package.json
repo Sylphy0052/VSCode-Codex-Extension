@@ -509,7 +509,7 @@
           ],
           "default": "",
           "scope": "machine",
-          "markdownDescription": "サンドボックスの方針。空なら `~/.codex/config.toml` に委譲する。会話の途中で変えると次の発言から効く。"
+          "markdownDescription": "サンドボックスの方針。空なら `~/.codex/config.toml` に委譲する。会話の途中で変えると次の発言から効く。\n\n画面の「承認」（3段階）を選ぶと `codex.approvalMode` / `codex.approvalsReviewer` と一緒に書き換わる。"
         },
         "codex.sandboxWritableRoots": {
           "type": "array",
@@ -536,7 +536,7 @@
           ],
           "default": "",
           "scope": "machine",
-          "markdownDescription": "コマンド実行の承認方針。空なら `~/.codex/config.toml` に委譲する。"
+          "markdownDescription": "コマンド実行の承認方針。空なら `~/.codex/config.toml` に委譲する。\n\n設定パネルやチャット画面の「承認」（全確認 / Auto / 全承認の3段階）を選ぶと、この項目と `codex.sandbox` / `codex.approvalsReviewer` がまとめて書き換わる。個別に指定した場合、3段階のどれとも一致しない組み合わせは画面に「カスタム」と表示される（対応表は docs/approval-modes.md）。"
         },
         "codex.approvalsReviewer": {
           "type": "string",
@@ -552,7 +552,7 @@
           ],
           "default": "",
           "scope": "machine",
-          "markdownDescription": "承認要求を誰へ回すか。承認方針（いつ承認を求めるか）とは別の軸。`auto_review` は人の代わりにCodex内部のsubagentがリスクを判定して承認・拒否するため、選ぶ前に確認ダイアログを出す。"
+          "markdownDescription": "承認要求を誰へ回すか。承認方針（いつ承認を求めるか）とは別の軸。`auto_review` は人の代わりにCodex内部のsubagentがリスクを判定して承認・拒否するため、選ぶ前に確認ダイアログを出す。\n\n画面の「承認」で `Auto`（承認をエージェントに任せる）を選ぶと `auto_review` になる。Claude Codeの `auto` と判定主体を揃えるため。"
         },
         "codex.bypassApprovalsAndSandbox": {
           "type": "boolean",
@@ -886,7 +886,7 @@
           ],
           "default": "",
           "scope": "machine",
-          "markdownDescription": "ツール実行の承認方針。空なら Claude Code 側の設定に委譲する。`bypassPermissions` は全確認を飛ばすため、起動前に確認ダイアログを出す。"
+          "markdownDescription": "ツール実行の承認方針。空なら Claude Code 側の設定に委譲する。`bypassPermissions` は全確認を飛ばすため、起動前に確認ダイアログを出す。\n\n画面の「承認」（全確認 / Auto / 全承認の3段階）はこの項目へ `manual` / `auto` / `bypassPermissions` として展開される。`acceptEdits` / `plan` / `dontAsk` は3段階に対応しないため、選ぶと画面には「カスタム」と表示される（対応表は docs/approval-modes.md）。"
         },
         "claude.model": {
           "type": "string",

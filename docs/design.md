@@ -370,7 +370,12 @@ Agents
 
 ### 操作パネル（Webview）
 
-サイドバーの上段に、モデル・reasoning effort・承認方法・サンドボックスを切り替えるWebviewを置く。CodexとClaude Codeをタブで切り替える。公式Codex拡張機能のサイドバーが提供する `Select model` / `Reasoning effort` と同等の操作をこちらでも行えるようにするため。
+サイドバーの上段に、モデル・reasoning effort・承認を切り替えるWebviewを置く。CodexとClaude Codeをタブで切り替える。公式Codex拡張機能のサイドバーが提供する `Select model` / `Reasoning effort` と同等の操作をこちらでも行えるようにするため。
+
+**承認は3段階（全確認 / Auto / 全承認）を主にする。** Codexは承認方針とサンドボックスの2軸、Claude Codeは `permissionMode` の1軸で承認が決まるため、生の値をそのまま並べると同じ画面の同じ位置に別の語彙が出る。両者の上に共通の3段階（`src/provider/approvalLevel.ts`）を置き、選ばれた段階からプロバイダごとの値へ展開する。生の値は「承認の詳細」（既定は閉じた `<details>`）を開けば従来どおり個別に選べ、3段階のどれとも一致しない組み合わせは「カスタム」と表示する。対応表と選定理由は [approval-modes.md](approval-modes.md) の「本拡張の承認レベル(3段階)」。
+
+- 3段階を選んだときの書き込みは `SettingsProvider.updateApprovalLevel` に集約する。Codexでは `approvalMode` / `sandbox` / `approvalsReviewer` の3項目を書くため、`update` を3回呼ぶ形にすると確認ダイアログが続けて出るうえ、途中で取り消されると3項目が食い違ったまま残る。同意は「全承認」を選んだときの1回だけにする。
+- クランプ（§16.16）とセッションプリセット（§14.56）は従来どおり生の値を見る。レベルは生の値へ展開されてから既存のクランプに乗るため、`src/util/safetyClamp.ts` はレベルを知らない。
 
 - 選択肢は `codex app-server` の `model/list` から読む。応答は `{data: [{id, model, displayName, description, hidden, defaultReasoningEffort, supportedReasoningEfforts: [{reasoningEffort, description}]}], nextCursor}` で、**effortごとの説明文まで返る**。`hidden` のモデルは選択肢に出さない。
 - **effortはモデルごとに異なる**ため（例: `gpt-5.5` は `low`〜`xhigh`、`gpt-5.6-sol` は `ultra` まで）、モデル選択に連動して選択肢を差し替える。モデルを変えた結果それまでのeffortが非対応になった場合は既定へ戻す。
@@ -392,6 +397,8 @@ Claude Code側で扱う設定と選択肢の出どころは次のとおり。
 | effort       | モデルごとの `supportedEffortLevels`             | `settings.json` の `effortLevel`                            |
 | 承認方法     | `--permission-mode` が受け付ける6種              | `settings.json` の `permissions.defaultMode`                |
 | エージェント | `initialize` の応答の `agents`（`name` を渡す）  | 出どころ無し（`settings.json` の値は追跡していない。§14.7） |
+
+承認方法とエージェントは「承認の詳細」（既定は閉じた `<details>`）の中に置く。画面の主な入口は共通の3段階で、`permissionMode` を直接選ぶ操作とエージェントの指定はどちらもそこを開いたときだけ出す。
 
 Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡張機能側の既定値として持つ。Codex側の「空＝CLIへ委譲」とは異なるが、未指定だと何が使われるか画面から分からないため、既定を明示する方を採った。「既定」を選べば従来どおり `settings.json` へ委譲する。**エージェントだけは空文字を既定にした**（`claude.model` / `claude.effort` と違い、意味のある既定値を1つに決められない。カスタムエージェントは環境ごとに違うため）。
 
@@ -1059,7 +1066,10 @@ Issue #21着手時点でのIssue #2（Z-11）の記録は「`rewind_files` 実�
 
 ### 14.7 チャット画面の設定行
 
-Codex画面と同じHTML（`renderShell`）を使うため、画面下の設定行はClaude Code側にも出る。承認方法の選択肢だけプロバイダごとに差し替える（Codexは `APPROVAL_MODES`、Claude Codeは `--permission-mode` の6種）。
+Codex画面と同じHTML（`renderShell`）を使うため、画面下の設定行はClaude Code側にも出る。承認は共通の3段階（全確認 / Auto / 全承認）を両画面に同じ語彙で出し、生の値は「承認の詳細」の中でプロバイダごとに差し替える（Codexは `APPROVAL_MODES` とサンドボックス、Claude Codeは `--permission-mode` の6種とエージェント）。3段階の展開先は `src/provider/approvalLevel.ts`、対応表は [approval-modes.md](approval-modes.md)。
+
+- 3段階を変えたときのメッセージは `config`（キーと値の組）ではなく専用の `approvalLevel` にする。Codexでは1回の操作が複数の設定項目の変更になるため、キー1つの経路には載らない。Claude Code側は展開後の `permissionMode` を、セレクタから直接変えたときと同じ経路で実行中のセッションへ流す。
+- Shift+Tabの循環（issue #13）は生の承認方法ではなく3段階を回る。「全承認」は循環に含めない。
 
 - Webview側のスクリプトはCodexのスナップショット形状を前提にしているため、Claude側は同じ形へ整えて送る。モデル一覧は `initialize` の応答を `ModelInfo` へ正規化したものを渡し、キーは `reasoningEffort` → `effort`、`approvalMode` → `permissionMode` と読み替える。エージェントはCodexに概念が無いため専用の `showAgentSelector` フラグでセレクタごと出し分ける（Sandboxセレクタと同じ「無ければ描画しない」方式）。
 - effortを持たないモデルを選んでいる間は、effortのセレクタを無効にして理由を出す（黙って選べなくしない）。

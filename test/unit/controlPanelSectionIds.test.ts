@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { noDefaults } from '../../src/codex/configToml';
 import { noClaudeDefaults } from '../../src/claude/settingsJson';
 import type { Logger } from '../../src/log';
+import { approvalLevelMeta } from '../../src/provider/approvalLevel';
 import { ControlPanelViewProvider } from '../../src/view/controlPanelView';
 import { controlPanelScript } from '../../src/view/controlPanelScript';
 import { SECTION_IDS, type SettingsProvider } from '../../src/view/settingsProvider';
@@ -11,21 +12,21 @@ import { SECTION_IDS, type SettingsProvider } from '../../src/view/settingsProvi
  * されていない（issue #225 レビュー指摘3）。
  *
  * - `SettingsProvider.SECTION_IDS`（取得ロジック側の正）
- * - `controlPanelScript()` が出力するJS内の `SECTION_CONTAINERS`（webview側の開閉・
+ * - `controlPanelScript(JSON.stringify(approvalLevelMeta()))` が出力するJS内の `SECTION_CONTAINERS`（webview側の開閉・
  *   読み込み中表示の対象）
  * - `ControlPanelViewProvider` が出すHTMLの `id="section-*"`（`<details>` 要素）
  *
- * 3箇所がずれると、`controlPanelScript()` の初期化ループが
+ * 3箇所がずれると、`controlPanelScript(JSON.stringify(approvalLevelMeta()))` の初期化ループが
  * `el('section-' + sectionId)` を解決できずパネル全体の初期化が止まる
  * （プロバイダ選択・messageリスナー登録・readyの送信まで巻き込む）。ここでは
  * 3つの集合を突き合わせ、ズレを機械的に検出する。
  */
 
-/** `controlPanelScript()` の出力から `SECTION_CONTAINERS` のキー集合を取り出す。 */
+/** `controlPanelScript(JSON.stringify(approvalLevelMeta()))` の出力から `SECTION_CONTAINERS` のキー集合を取り出す。 */
 function extractSectionContainerKeys(scriptSource: string): string[] {
   const match = scriptSource.match(/const SECTION_CONTAINERS = \{([\s\S]*?)\n {2}\};/);
   if (!match) {
-    throw new Error('controlPanelScript()の出力からSECTION_CONTAINERSが見つかりません');
+    throw new Error('controlPanelScript(JSON.stringify(approvalLevelMeta()))の出力からSECTION_CONTAINERSが見つかりません');
   }
   const body = match[1] ?? '';
   const keys: string[] = [];
@@ -124,7 +125,7 @@ function renderedHtml(): string {
 
 describe('セクション識別子の整合性（issue #225 レビュー指摘3）', () => {
   it('SECTION_IDSとSECTION_CONTAINERSのキー集合が一致する', () => {
-    const containerKeys = extractSectionContainerKeys(controlPanelScript());
+    const containerKeys = extractSectionContainerKeys(controlPanelScript(JSON.stringify(approvalLevelMeta())));
     expect(new Set(containerKeys)).toEqual(new Set(SECTION_IDS));
     // 重複が紛れ込んでいないことも確認する
     expect(containerKeys.length).toBe(SECTION_IDS.length);
@@ -137,7 +138,7 @@ describe('セクション識別子の整合性（issue #225 レビュー指摘3�
   });
 
   it('SECTION_CONTAINERSのキー集合とHTMLのid="section-*"の集合が一致する', () => {
-    const containerKeys = extractSectionContainerKeys(controlPanelScript());
+    const containerKeys = extractSectionContainerKeys(controlPanelScript(JSON.stringify(approvalLevelMeta())));
     const htmlIds = extractSectionHtmlIds(renderedHtml());
     expect(new Set(containerKeys)).toEqual(new Set(htmlIds));
   });

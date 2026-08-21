@@ -132,6 +132,14 @@ export function controlPanelStyles(): string {
     outline-offset: 2px;
   }
   .section .sectionBody { padding-top: 2px; }
+  /* 承認の下位項目（承認の詳細）。アカウント等の大セクションと同じ重さに見えないよう、
+     区切り線を引かず余白も詰める */
+  .subsection {
+    margin: 4px 0 0;
+    padding-top: 0;
+    border-top: none;
+  }
+  .subsection summary.sectionTitle { margin: 0 0 4px; }
   .sectionLoading {
     color: var(--vscode-descriptionForeground);
     font-size: 0.85em;

@@ -1,3 +1,4 @@
+import type { ProviderId } from '../provider/id';
 import { MARKDOWN_PARSE_SOURCE } from './markdown';
 import { SEND_KEY_SOURCE, type SendOnMode } from './sendKey';
 import { MERGE_ITEMS_SOURCE } from './stateDelta';
@@ -29,6 +30,13 @@ export function chatScript(
   showInputModeHints = false,
   renderMarkdown = true,
   sendOn: SendOnMode = 'ctrlEnter',
+  /**
+   * 承認レベル（3段階）の表示情報。`approvalLevelMeta()` をJSON化した文字列。
+   * webviewのJSは型検査が効かないため、表示名の定義を持ち込まずここへ注入する。
+   */
+  approvalLevelMetaJson = '{}',
+  /** この画面のプロバイダ。レベルの実効値（Codexは2軸、Claudeは1軸）の出し分けに使う。 */
+  approvalProvider: ProviderId = 'codex',
 ): string {
   return `
   const vscode = acquireVsCodeApi();
@@ -56,10 +64,17 @@ export function chatScript(
    * 全項目を毎回受け取ると、会話が長いほど1回の受信が重くなる。
    */
   let mergedItems = [];
-  /** 承認方法をShift+Tabで回すときの並び（issue #13。制限が強い側から緩い側へ）。 */
+  /** 承認レベルをShift+Tabで回すときの並び（issue #13。制限が強い側から緩い側へ）。 */
   const APPROVAL_CYCLE = ${JSON.stringify(approvalCycle)};
-  /** いま効いている承認方法。循環の起点にする。 */
+  /** いま効いている承認レベル。循環の起点にする。どのレベルとも一致しなければ空文字。 */
   let currentApproval = '';
+  /**
+   * 承認レベル（3段階）の表示名・説明・プロバイダごとの実効値。
+   * 定義元は拡張機能側の src/provider/approvalLevel.ts で、ここへは組み立て済みの値が入る。
+   */
+  const APPROVAL_LEVEL_META = ${approvalLevelMetaJson};
+  /** この画面のプロバイダ（レベルの実効値の出し分けに使う）。 */
+  const APPROVAL_PROVIDER = ${JSON.stringify(approvalProvider)};
   /**
    * ワークスペースフォルダの絶対パス一覧（issue #291）。差分の見出し行の操作
    * （エディタで開く・差分を開く・戻す）をボタンとして出すかどうかの目安に使う。
@@ -1073,7 +1088,25 @@ export function chatScript(
     const approvalDefault = el('approvalMode').querySelector('option[value=""]');
     if (approvalDefault) approvalDefault.textContent = defaultLabel(d.approvalMode);
     el('approvalMode').value = s.approvalMode;
-    currentApproval = s.approvalMode || '';
+    // 承認レベル（3段階）。詳細で個別に指定した状態のときだけ「カスタム」を足す
+    currentApproval = s.approvalLevel || '';
+    const level = el('approvalLevel');
+    if (level) {
+      const custom = level.querySelector('option[value=""]');
+      if (currentApproval) {
+        if (custom) custom.remove();
+      } else if (!custom) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = 'カスタム（詳細で個別に指定）';
+        level.insertBefore(opt, level.firstChild);
+      }
+      level.value = currentApproval;
+      const meta = currentApproval ? APPROVAL_LEVEL_META[currentApproval] : undefined;
+      level.title = meta
+        ? meta.description + '（' + meta.effective[APPROVAL_PROVIDER] + '）'
+        : '承認の詳細で個別に指定されています';
+    }
 
     // サンドボックスはCodex画面にしか無い（Claude Codeは承認方法に集約されている）
     const sandbox = el('sandbox');
@@ -1118,7 +1151,12 @@ export function chatScript(
     const box = el('settingsSummary');
     if (!box) return;
     const parts = [];
-    for (const key of SETTING_KEYS) {
+    // 承認は3段階の表示名で出す。詳細で個別に指定した状態（レベルが空）のときだけ、
+    // 中身が分かるよう生の値（承認方法・サンドボックス）を並べる
+    const keys = currentApproval
+      ? ['model', 'reasoningEffort', 'approvalLevel', 'agent']
+      : SETTING_KEYS;
+    for (const key of keys) {
       const select = el(key);
       if (!select || !select.value) continue;
       const option = select.options[select.selectedIndex];
@@ -1126,6 +1164,15 @@ export function chatScript(
       if (text) parts.push(text);
     }
     box.textContent = parts.length === 0 ? '既定のまま' : parts.join(' / ');
+  }
+
+  // 承認レベルは1つ選ぶと複数の設定項目へ展開される。空文字（カスタム）は選ばせない
+  const approvalLevelSelect = el('approvalLevel');
+  if (approvalLevelSelect) {
+    approvalLevelSelect.addEventListener('change', (e) => {
+      if (!e.target.value) return;
+      vscode.postMessage({ type: 'approvalLevel', level: e.target.value });
+    });
   }
 
   for (const key of SETTING_KEYS) {
@@ -1434,8 +1481,11 @@ export function chatScript(
     status.replaceChildren();
 
     const bits = [];
-    // 承認方法は常に見えるようにする（Shift+Tabで回すため。issue #13）
-    const approval = state.settings && state.settings.approvalMode;
+    // 承認は常に見えるようにする（Shift+Tabで回すため。issue #13）。3段階のどれかに
+    // 当てはまるならその表示名を、当てはまらないなら生の値をそのまま出す
+    const settings = state.settings || {};
+    const levelMeta = settings.approvalLevel ? APPROVAL_LEVEL_META[settings.approvalLevel] : undefined;
+    const approval = levelMeta ? levelMeta.label : settings.approvalMode;
     bits.push('承認 ' + (approval ? approval : '既定'));
     if (state.planMode) bits.push('計画モード（ファイルは変更されません）');
     if (state.reviewing) bits.push('レビュー中は割り込めません');
@@ -2181,14 +2231,16 @@ export function chatScript(
       }
     }
 
-    // Shift+Tab で承認方法を回す（TUIと同じ操作。入力欄にいるときだけ効かせる）
+    // Shift+Tab で承認レベルを回す（TUIと同じ操作。入力欄にいるときだけ効かせる）。
+    // 「全承認」は循環に入っていないため、連打で保護が外れることはない
     if (e.key === 'Tab' && e.shiftKey && APPROVAL_CYCLE.length > 0) {
       e.preventDefault();
       const index = APPROVAL_CYCLE.indexOf(currentApproval);
       const next = index === -1 ? APPROVAL_CYCLE[0] : APPROVAL_CYCLE[(index + 1) % APPROVAL_CYCLE.length];
       currentApproval = next;
-      el('approvalMode').value = next;
-      vscode.postMessage({ type: 'config', key: 'approvalMode', value: next });
+      const level = el('approvalLevel');
+      if (level) level.value = next;
+      vscode.postMessage({ type: 'approvalLevel', level: next });
       return;
     }
 
