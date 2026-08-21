@@ -227,7 +227,18 @@ export class ClaudeStreamSession {
     // 飛ぶEPIPE等はここで捕まえないとNodeの未捕捉例外になる（issue #155、design.md
     // §14.31）。常駐セッションなので、既存のexit/errorハンドラと同じ「ターン失敗」の
     // 経路へ寄せる。
+    //
+    // 以下の5ハンドラは、この`start()`呼び出しでクロージャに捕まえた`proc`（この世代の
+    // プロセス）を対象とする。overflow等で`this.proc`を`undefined`へ戻した後、次の
+    // `start()`が新しいプロセスを起こし終えてから、古い世代の`exit`/`error`/`stdin`
+    // エラーやstdout/stderrの出力が遅れて届くことがある（issue #419、`connection.ts`の
+    // CRITICALと同種）。その時点で`this.proc`は既に新しいプロセスを指しているため、
+    // 素通りで`this.proc = undefined`にすると新しいターンを巻き込んで壊す。
+    // `this.proc !== proc`で世代のずれを検出し、古い世代からの通知は捨てる。
     guardStdinErrors(proc, (e) => {
+      if (this.proc !== proc) {
+        return;
+      }
       this.log.error(`claudeへの書き込みに失敗しました: ${e.message}`);
       this.proc = undefined;
       // exit/errorハンドラと同じ「ターン失敗」の経路なので、承認待ち・各種応答待ちも
@@ -236,14 +247,25 @@ export class ClaudeStreamSession {
       this.update({ ...this.state, busy: false, turnFailed: true });
     });
 
-    proc.stdout.on('data', (chunk: Buffer) => this.receive(chunk.toString('utf8')));
+    proc.stdout.on('data', (chunk: Buffer) => {
+      if (this.proc !== proc) {
+        return;
+      }
+      this.receive(chunk.toString('utf8'));
+    });
     proc.stderr.on('data', (chunk: Buffer) => {
+      if (this.proc !== proc) {
+        return;
+      }
       const line = chunk.toString('utf8').trim();
       if (line !== '') {
         this.log.info(`[claude] ${line.slice(0, 300)}`);
       }
     });
     proc.on('exit', (code) => {
+      if (this.proc !== proc) {
+        return;
+      }
       this.log.info(`claudeが終了しました (code ${code ?? 'unknown'})`);
       this.proc = undefined;
       // 承認待ち（waiting）・rewind_files/mcp_status/reload_skillsの応答待ちを解放する。
@@ -254,6 +276,9 @@ export class ClaudeStreamSession {
       this.update({ ...this.state, busy: false, turnFailed: true });
     });
     proc.on('error', (e) => {
+      if (this.proc !== proc) {
+        return;
+      }
       this.log.error(`claudeを起動できません: ${e.message}`);
       this.proc = undefined;
       // 起動直後にCLIが異常終了した場合も、exitハンドラと同様に解放する（issue #355）

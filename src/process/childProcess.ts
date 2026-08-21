@@ -53,9 +53,10 @@ export interface KillableProcess {
  * プロセスをSIGTERMで止め、一定時間内に`exit`が発火しなければSIGKILLへエスカレーション
  * する共通処理（issue #402、2点目）。
  *
- * `connection.ts` / `streamSession.ts` / `appServerClient.ts` の全`proc.kill()`呼び出しが
- * ここを経由する。ハングした子プロセス（SIGTERMに応答しない）を回収するためのもので、
- * 正常に`exit`したプロセスにはSIGKILLを送らない。
+ * 子プロセスを`spawn()`する全モジュール（`appserver/connection.ts` / `claude/streamSession.ts` /
+ * `codex/appServerClient.ts` / `process/commandRunner.ts` / `claude/*Probe.ts`各種）の
+ * 全`proc.kill()`呼び出しがここを経由する。ハングした子プロセス（SIGTERMに応答しない）を
+ * 回収するためのもので、正常に`exit`したプロセスにはSIGKILLを送らない。
  *
  * タイマーは`unref()`し、`exit`が先に届いたら`clearTimeout`する。これによりプロセスが
  * 正常終了した後にタイマーだけがイベントループに残ることはない（自己レビュー: SIGKILL

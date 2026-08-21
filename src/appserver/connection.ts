@@ -81,7 +81,23 @@ export class AppServerConnection {
       return;
     }
     this.starting ??= this.start();
-    await this.starting;
+    try {
+      await this.starting;
+    } catch (e) {
+      // `initialize`失敗（`reset()`経由）は`reset()`内で既に`this.starting`を
+      // `undefined`へ戻しているためここでは実質no-opだが、`spawn()`自体が同期的に
+      // 投げる場合（EACCES等）は`reset()`を通らない。その経路は`start()`が最初の
+      // `await`へ到達する前に例外を投げるため、`start()`内で`this.starting`を
+      // 書き換えても、その代入は呼び出し元（この関数）の`this.starting ??= this.start()`
+      // が返り値を代入するより前に走ってしまい、直後に上書きされて意味を持たない
+      // （`??=`の右辺評価はメソッド呼び出しが返ってから代入される）。そのため
+      // `ensureStarted()`側で`await`の失敗を捕まえて戻すことで、両経路を一箇所で
+      // 確実にカバーする（issue #419、レビュー指摘・LOW）。ここで戻さないと、
+      // 以降の`ensureStarted()`が同じ失敗したPromiseを返し続けるだけで、再起動を
+      // 試みなくなる
+      this.starting = undefined;
+      throw e;
+    }
   }
 
   private async start(): Promise<void> {
@@ -93,13 +109,15 @@ export class AppServerConnection {
     // 飛ぶEPIPE等はここで捕まえないとNodeの未捕捉例外になる（issue #155、design.md §14.31）。
     // 常駐接続なので、接続が死んだものとして既存のexitハンドラと同じ経路（reset）へ寄せる。
     //
-    // 以下の3ハンドラは、`start()`のこの呼び出しでクロージャに捕まえた`proc`（この世代の
+    // 以下の5ハンドラは、`start()`のこの呼び出しでクロージャに捕まえた`proc`（この世代の
     // プロセス）を対象とする。overflow等で`reset()`済みの後、`ensureStarted()`が次の
-    // プロセスを起動し終えてから、古い世代の`exit`/`error`/`stdin`エラーが遅れて届く
-    // ことがある（issue #419、CRITICAL）。その時点で`this.proc`は既に新しいプロセスを
-    // 指しているため、素通りで`reset()`を呼ぶと新しい接続の`pending`まで巻き込んで壊す。
-    // `connected`はグローバルなラッチで世代を識別できないため、`this.proc !== proc`で
-    // 世代のずれを検出し、古い世代からの通知は捨てる。
+    // プロセスを起動し終えてから、古い世代のexit/error/stdinエラー・stdout/stderrの
+    // 出力が遅れて届くことがある（issue #419、CRITICAL）。その時点で`this.proc`は
+    // 既に新しいプロセスを指しているため、素通りで`reset()`を呼ぶ・`this.receive()`へ
+    // 流すと新しい接続を巻き込んで壊す。`connected`はグローバルなラッチで世代を識別
+    // できないため、`this.proc !== proc`で世代のずれを検出し、古い世代からの通知は
+    // 捨てる（stdout/stderrも、overflow reset後にkillWithEscalation()がexitさせる
+    // までの間に古いprocが吐き残す出力を無視するため同様に見る）。
     guardStdinErrors(proc, (e) => {
       if (this.proc !== proc) {
         return;
@@ -108,8 +126,16 @@ export class AppServerConnection {
       this.reset();
     });
 
-    proc.stdout.on('data', (chunk: Buffer) => this.receive(chunk.toString('utf8')));
+    proc.stdout.on('data', (chunk: Buffer) => {
+      if (this.proc !== proc) {
+        return;
+      }
+      this.receive(chunk.toString('utf8'));
+    });
     proc.stderr.on('data', (chunk: Buffer) => {
+      if (this.proc !== proc) {
+        return;
+      }
       const line = chunk.toString('utf8').trim();
       if (line !== '') {
         this.log.info(`[app-server] ${line.slice(0, 300)}`);
@@ -140,12 +166,24 @@ export class AppServerConnection {
       });
     } catch (e) {
       this.log.error(`app-serverの初期化に失敗しました: ${errorMessage(e)}`);
-      // SIGTERMに応答しないハングしたプロセスも回収できるよう、SIGKILLへの
-      // エスカレーションを共通処理へ寄せる（issue #402、2点目）。
-      killWithEscalation(proc);
-      // `proc.kill()`は非同期に`exit`を発火させる。そちらでも`reset()`は呼ばれるが、
-      // `this.proc`は下の`reset()`で既に`undefined`になっているため、`reset()`の
-      // 先頭ガードで二重発火にはならない（自己レビュー: 再入時の無限ループなし）。
+      // `initialize`待ちの間にoverflow（`receive()`）が起きていた場合、そちらで既に
+      // `killWithEscalation(proc)` + `reset()`が済んでおり、`this.proc`は既にこの
+      // `proc`とは別（`undefined`）になっている。ここで無条件にもう一度killすると、
+      // 同じプロセスへ`kill()`を二重に呼び、3秒のエスカレーションタイマーと
+      // `once('exit', ...)`リスナも2組残ってしまう（`exit`が来るまで解除されない）。
+      // `this.proc === proc`の間だけ、まだ誰も後始末していない世代と判断してkillする
+      // （issue #419、レビュー指摘・LOW）
+      if (this.proc === proc) {
+        // SIGTERMに応答しないハングしたプロセスも回収できるよう、SIGKILLへの
+        // エスカレーションを共通処理へ寄せる（issue #402、2点目）。
+        killWithEscalation(proc);
+      }
+      // `this.proc`が既に`undefined`（上のoverflow経由の`reset()`が先に済んでいる）
+      // 場合はここは何もしない。まだこの`proc`のままなら、ここで`reset()`することで
+      // `this.proc`を`undefined`に戻す。`proc.kill()`は非同期に`exit`を発火させるが、
+      // その時点では`this.proc !== proc`（世代のずれ）としてexitハンドラ側の
+      // 世代判定で素通りされるため、二重発火にはならない（自己レビュー: 再入時の
+      // 無限ループなし）。
       this.reset();
       throw e;
     }
