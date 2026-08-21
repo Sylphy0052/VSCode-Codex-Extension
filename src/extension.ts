@@ -534,6 +534,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // isTaskManagedThreadのクロージャが参照する箱を埋める。以降の`workflowRunner`
   // （コマンド登録などで使う）はこの束縛を指し、常にWorkflowRunnerとして扱える
   workflowRunnerRef.current = workflowRunner;
+  // 生成したDisposableは生成直後にcontext.subscriptionsへ登録する（規約）。
+  // `WorkflowRunner.dispose()`はオーケストレーターセッションを解放する契約（design.md
+  // §16.23「セッションの生成と寿命」）だが、ここで登録し忘れると拡張機能の終了時に
+  // 一度も呼ばれない（Issue #363）。`dispose()`は複数回呼ばれても安全
+  // （`disposeOrchestrator`が`live.orchestrator`をundefinedへ戻すため冪等）。
+  context.subscriptions.push({ dispose: () => workflowRunner.dispose() });
 
   // ワークフローView（#57）。`restoreRunsForView`がworkspaceStateのreconcileと
   // メモリ上への復元（design.md §16.11「リロード後の実行再開」）を両方行う
