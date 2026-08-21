@@ -581,20 +581,20 @@ export function markMergeFailed(
  * （タスクそのものの再実行）と違い、まだブロック中の後続を勝手に再開させない意図で
  * 含めない（再マージが成功して`done`になった時点で、`nextTasksToStart`が改めて拾う）。
  *
- * **成功したときは`haltedByUser`を解除する**（`retryTask`と同じ考え方。Issue #412）。
- * 「再マージ」は人の明示操作そのものであり、これを起点に再開する意思表示なので、直前の
- * 停止（`stop()`）を引きずらせない。実行層（`runnerMerge.ts`の`attemptMerge`）は、統合
- * worktreeの占有を取った直後に`haltedByUser`を見てマージを見送るため、ここで解除して
- * おかないと「再マージ」を押してもマージが始まらない。すでに`skipped`になった`pending`は
- * ここでは戻さない（上のとおり、ブロック中の後続を勝手に再開させないため）。
+ * **`haltedByUser`は解除しない**（Issue #412のレビュー指摘B）。「再マージ」は人の明示操作
+ * だが、解除すると`markMergeSucceeded`が依存先の`skipped`（`mergeBlocked`）を`pending`へ
+ * 戻した瞬間に`nextTasksToStart`の停止判定（`isRunHalted`）が外れ、ユーザーが停止したrunの
+ * 後続タスクが新しいセッションを開いて走り出す（「再マージ1件」の操作でワークフロー全体が
+ * 再開してしまう）。停止中でもそのタスクのマージ自体は走る。実行層（`runnerMerge.ts`の
+ * `decideAfterLeaseWait`）が見るのは「統合worktreeの順番待ちの**間に**停止へ変わったか」
+ * という差分だけで、`retryMerge`起点なら待つ前から停止中のため素通りするため。
  */
 export function retryMergeState(run: RunState, taskId: string): RunState {
   const current = run.tasks.get(taskId);
   if (current === undefined || current.state !== 'blocked') {
     return run;
   }
-  const next = setTask(run, taskId, { ...current, state: 'merging', failure: undefined });
-  return next.haltedByUser ? { ...next, haltedByUser: false } : next;
+  return setTask(run, taskId, { ...current, state: 'merging', failure: undefined });
 }
 
 /** `pending` のタスクを `running` にする。対象外の状態・未知のidは無視する。 */
