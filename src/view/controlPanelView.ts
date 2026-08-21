@@ -539,7 +539,7 @@ ${controlPanelStyles()}
     <div class="hint" id="approvalLevelHint"></div>
   </div>
 
-  <details class="section">
+  <details class="section subsection">
   <summary class="sectionTitle">承認の詳細</summary>
   <div class="sectionBody">
   <div class="row">
@@ -643,7 +643,7 @@ ${controlPanelStyles()}
       <div class="hint" id="claudeApprovalLevelHint"></div>
     </div>
 
-    <details class="section">
+    <details class="section subsection">
     <summary class="sectionTitle">承認の詳細</summary>
     <div class="sectionBody">
     <div class="row">

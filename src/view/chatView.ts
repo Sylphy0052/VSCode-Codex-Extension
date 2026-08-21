@@ -2938,6 +2938,7 @@ ${chatStyles()}
     </select></label>
     <details id="approvalDetails">
     <summary title="承認方法・サンドボックスを個別に指定します"><span class="label">承認の詳細</span></summary>
+    <div class="detailBody">
     <label>承認方法 <select id="approvalMode">
       <option value="">既定</option>
       ${options.approvalModes.map((m) => `<option value="${m}">${m}</option>`).join('')}
@@ -2955,6 +2956,7 @@ ${chatStyles()}
         ? '<label>エージェント <select id="agent"></select></label>'
         : ''
     }
+    </div>
     </details>
     ${
       options.showAutocompact === true
