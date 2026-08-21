@@ -318,6 +318,12 @@ export interface WorkflowWarning {
     /** PR/MRの作成・push・最終マージのいずれかが失敗した（ワークフロー自体は止めない）。 */
     | 'forgeFailed'
     /**
+     * 統合worktreeに他タスクの未解決の衝突が残っていたため、このタスクのマージを
+     * 始められなかった（Issue #412）。人が統合worktreeを片付ければViewの「再マージ」で
+     * 先へ進めるため、`failed`ではなく`blocked`になる。
+     */
+    | 'mergeBusy'
+    /**
      * 疑似worktree（design.md §16.20）の統合が衝突した。3-way mergeができないため、
      * 同じファイルへの変更は全て衝突になる（このタスクは`blocked`になる）。
      */
@@ -1479,6 +1485,12 @@ export class WorkflowRunner {
   dispose(): void {
     for (const live of this.runs.values()) {
       disposeOrchestrator(live);
+      // 統合worktreeの占有待ちで止まっているマージを、起こす前に「即戻る」状態にしておく
+      // （Issue #412のレビュー指摘6）。`releaseAllLeases()`で起き上がった待機者は
+      // `attemptMerge`の続きへ進むため、この印が無いと`markMergeFailed`→`persist`/`notify`が
+      // 破棄済みのEventEmitter・workspaceStateへ書き込む。`canProceedAfterLease`が
+      // `live.finished`を見て何もせず解放するようにしてから解放する（順序が重要）
+      live.finished = true;
     }
     // 統合worktreeの占有（Issue #412）の強制解放。通常は`runnerMerge.ts`側の`finally`が
     // 解放するが、解放漏れが1つでもあると以後そのrunのマージが全て待ち続ける。破棄時に

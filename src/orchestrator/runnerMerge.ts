@@ -320,9 +320,13 @@ export async function startMerge(
  *
  * - 成功・失敗・例外: この関数の`finally`が解放する
  * - 衝突して解決セッションが立った場合のみ、占有は解決セッション側（
- *   `onMergeResolutionFinished` / `abortAndBlock`）へ引き継ぐ（`handedOver`）。
- *   セッションを立てられなかった経路は`startMergeResolution`が`false`を返すため、
- *   この関数の`finally`が解放する
+ *   `onMergeResolutionFinished` / `abortAndBlock`）へ引き継ぐ（`handover.done`）。
+ *   セッションを立てられなかった経路は引き継ぎが立たないため、この関数の`finally`が解放する
+ *
+ * **占有を取ったあとで停止・終了を再確認する**（`canProceedAfterLease`）。`acquireLease`は
+ * 無期限で待つのに対し、`stop()`は`haltedByUser`を立てるだけで待機中の取得を起こさないため、
+ * 他タスクの衝突解決が長引いている間にユーザーが停止すると、解放と同時にこのタスクの
+ * `git merge --no-ff`が走り、新しい衝突解決セッションまで開いてしまう（レビュー指摘2）。
  */
 async function attemptMerge(
   self: WorkflowRunnerInternals,
@@ -334,13 +338,26 @@ async function attemptMerge(
   taskBranch: string,
   originCommit: string,
 ): Promise<void> {
-  if (self.runs.get(runId) === undefined) {
+  const before = self.runs.get(runId);
+  if (before === undefined) {
     return;
   }
+  // 順番待ちの**前**の停止状態を控えておく（`canProceedAfterLease`の判定に使う）。
+  // 「もともと停止中だったrunの、走り切ったタスクのマージ」は従来どおり行う
+  // （design.md §16.5「`running`のものは走らせ切る」。`interrupted`の既存テスト参照）ので、
+  // 見るのは「待っている間に停止・終了へ変わったかどうか」だけにする
+  const haltedBefore = { halted: before.runState.haltedByUser, finished: before.finished };
   const lease = await self.integrationQueue.acquireLease(integration.cwd, taskId);
-  let handedOver = false;
+  // 衝突解決セッションへ占有を引き継いだかどうかを、`startMergeResolution`の**途中から**
+  // 共有するための箱（Issue #412のレビュー指摘5）。戻り値で受け取る形だと、引き継ぎの確定が
+  // 関数の`return`まで遅れ、その手前（`session.runLoop`等）で例外が起きたときに
+  // 「セッションは生きているのに`finally`が占有を解放する」ズレが生まれる
+  const handover = { done: false };
   try {
-    handedOver = await mergeWithLease(
+    if (!canProceedAfterLease(self, runId, taskId, haltedBefore)) {
+      return;
+    }
+    await mergeWithLease(
       self,
       runId,
       taskId,
@@ -350,17 +367,57 @@ async function attemptMerge(
       taskBranch,
       originCommit,
       lease,
+      handover,
     );
   } finally {
-    if (!handedOver) {
+    if (!handover.done) {
       self.integrationQueue.releaseLease(lease);
     }
   }
 }
 
 /**
+ * 占有を取った直後に、いまマージを始めてよいかを確かめる（Issue #412のレビュー指摘2）。
+ *
+ * `acquireLease`は他タスクの衝突解決が終わるまで無期限で待つ。その待ち時間の間に
+ * 実行が停止（`stop()`）・終了・破棄されていることがあるため、待つ前の判断のまま
+ * `git merge`へ進んではいけない。ここで止めた場合そのタスクは`merging`のまま残るが、
+ * 実行自体が止まっている状態なので、`blocked`や`failed`を勝手に確定させるより安全側。
+ *
+ * 停止・終了は**待つ前と比べて変わった場合だけ**見る。もともと停止中のrunでも、既に
+ * 走っていたタスクは走らせ切ってマージまで進める設計（design.md §16.5）なので、
+ * 現在値だけで弾くと`interrupted`後に完走したタスクがマージされなくなる。
+ * 一方「まだ`merging`かどうか」は待つ前と比べる必要がない（`merging`でなくなっていれば、
+ * 誰かが既にこのタスクのマージを決着させている）。
+ */
+function canProceedAfterLease(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  taskId: string,
+  before: { halted: boolean; finished: boolean },
+): boolean {
+  const live = self.runs.get(runId);
+  if (live === undefined) {
+    return false;
+  }
+  if ((live.finished && !before.finished) || (live.runState.haltedByUser && !before.halted)) {
+    self.deps.log.info(
+      `[workflow ${runId}/${taskId}] 統合worktreeの順番待ちの間に実行が停止したため、マージを始めません`,
+    );
+    return false;
+  }
+  if (live.runState.tasks.get(taskId)?.state !== 'merging') {
+    self.deps.log.info(
+      `[workflow ${runId}/${taskId}] 統合worktreeの順番待ちの間にmerging以外へ変わったため、マージを始めません`,
+    );
+    return false;
+  }
+  return true;
+}
+
+/**
  * `attemptMerge`の中身（占有を取ったあとの処理）。衝突解決セッションへ占有を引き継いだ
- * 場合だけ`true`を返す（呼び出し側はそのときだけ解放しない）。
+ * ときは`handover.done`を立てる（呼び出し側はそのときだけ解放しない）。
  */
 async function mergeWithLease(
   self: WorkflowRunnerInternals,
@@ -372,10 +429,11 @@ async function mergeWithLease(
   taskBranch: string,
   originCommit: string,
   lease: IntegrationLease,
-): Promise<boolean> {
+  handover: { done: boolean },
+): Promise<void> {
   const live = self.runs.get(runId);
   if (live === undefined) {
-    return false;
+    return;
   }
   const { merge, pullRequest } = await mergeTaskWithForge(
     self,
@@ -409,7 +467,24 @@ async function mergeWithLease(
     void self.persist(runId);
     self.notify(runId);
     self.pump(runId);
-    return false;
+    return;
+  }
+  if (merge.kind === 'busy') {
+    // 統合worktreeに他タスクの未解決の衝突が残っていて、いまは始められない（Issue #412）。
+    // `failed`ではなく`blocked`にする。`failed`は`retryMergeState`（`blocked`専用）で戻せず、
+    // 以後そのrunのマージが全て同じ理由で`failed`になる行き止まりを作るため
+    // （レビュー指摘1）。`blocked`ならViewの「再マージ」で復帰できる
+    self.deps.log.warn(`[workflow ${runId}/${taskId}] マージを見送りました: ${merge.message}`);
+    live.warnings.push({
+      kind: 'mergeBusy',
+      taskId,
+      message: merge.message,
+    });
+    live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
+    void self.persist(runId);
+    self.notify(runId);
+    self.pump(runId);
+    return;
   }
   if (merge.kind === 'failure') {
     self.deps.log.error(`[workflow ${runId}/${taskId}] マージに失敗しました: ${merge.message}`);
@@ -417,12 +492,12 @@ async function mergeWithLease(
     void self.persist(runId);
     self.notify(runId);
     self.pump(runId);
-    return false;
+    return;
   }
 
   // 衝突。design.md §16.17「コンフリクト」1.「衝突した状態のままにしておく」
   void self.persist(runId);
-  return await startMergeResolution(
+  await startMergeResolution(
     self,
     runId,
     taskId,
@@ -431,6 +506,7 @@ async function mergeWithLease(
     merge,
     originCommit,
     lease,
+    handover,
   );
 }
 
@@ -440,9 +516,16 @@ async function mergeWithLease(
  * をプロンプトに渡す。解決用セッションは依存グラフのノードにはしない（design.md
  * 「コンフリクト」5.）ため、`live.tasks`ではなく`live.mergeResolutions`で管理する。
  *
- * 統合worktreeの占有（`lease`）を解決セッションへ引き継げた場合だけ`true`を返す
+ * 統合worktreeの占有（`lease`）を解決セッションへ引き継げた場合だけ`handover.done`を立てる
  * （Issue #412）。セッションを開けなかった経路（承認モードによる拒否・`openTaskSession`の
- * 例外）は`abortAndBlock`が巻き戻してから`false`を返し、呼び出し側の`finally`が解放する。
+ * 例外）は`abortAndBlock`が巻き戻し、`handover.done`が立たないまま戻るので呼び出し側の
+ * `finally`が解放する。
+ *
+ * **引き継ぎの確定は`session.onFinished`を登録した直後に行う**（レビュー指摘5）。関数の
+ * `return`まで遅らせると、その手前の`session.runLoop` / `self.notify`が投げたときに
+ * 「セッションは生きているのに`attemptMerge`の`finally`が占有を解放する」ズレが生まれ、
+ * 以後その解決セッションの`onFinished`→`abortAndBlock`は`leaseNotHeld`で拒否されて
+ * `git merge --abort`が走らず、`MERGE_HEAD`が残る。
  */
 async function startMergeResolution(
   self: WorkflowRunnerInternals,
@@ -453,10 +536,11 @@ async function startMergeResolution(
   conflict: Extract<MergeTaskResult, { kind: 'conflict' }>,
   originCommit: string,
   lease: IntegrationLease,
-): Promise<boolean> {
+  handover: { done: boolean },
+): Promise<void> {
   const live = self.runs.get(runId);
   if (live === undefined) {
-    return false;
+    return;
   }
 
   const baseline = self.deps.readBaseline();
@@ -476,7 +560,7 @@ async function startMergeResolution(
       `[workflow ${runId}/${taskId}] 実効approvalModeがbypassPermissionsのため衝突解決セッションを開始できません`,
     );
     await abortAndBlock(self, runId, taskId, integration, lease);
-    return false;
+    return;
   }
 
   const otherIds =
@@ -503,7 +587,7 @@ async function startMergeResolution(
       `[workflow ${runId}/${taskId}] 衝突解決セッションを開始できませんでした: ${message}`,
     );
     await abortAndBlock(self, runId, taskId, integration, lease);
-    return false;
+    return;
   }
   session.open({ preserveFocus: true });
   live.mergeResolutions.set(taskId, session);
@@ -525,15 +609,33 @@ async function startMergeResolution(
   session.onFinished((reason) => {
     void onMergeResolutionFinished(self, runId, taskId, task, integration, reason, lease);
   });
+  // ここから先、占有を解放する責任は`onMergeResolutionFinished`にある。登録が済んだ
+  // 時点で引き継ぎを確定させ、以降の例外はこの関数が自分で始末する（レビュー指摘5）
+  handover.done = true;
 
-  session.runLoop({
-    initialPrompt: prompt,
-    continuePrompt: `続けてください。終了条件: ${MERGE_RESOLUTION_CONDITION}`,
-    maxIterations: MERGE_RESOLUTION_MAX_ITERATIONS,
-    condition: MERGE_RESOLUTION_CONDITION,
-  });
-  self.notify(runId);
-  return true;
+  try {
+    session.runLoop({
+      initialPrompt: prompt,
+      continuePrompt: `続けてください。終了条件: ${MERGE_RESOLUTION_CONDITION}`,
+      maxIterations: MERGE_RESOLUTION_MAX_ITERATIONS,
+      condition: MERGE_RESOLUTION_CONDITION,
+    });
+    self.notify(runId);
+  } catch (e) {
+    // セッションは開けたが走らせられなかった。`onFinished`はもう登録済みなので、
+    // 呼び出し側の`finally`には任せず、ここでセッションを畳んでから巻き戻して解放する
+    const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+    self.deps.log.error(
+      `[workflow ${runId}/${taskId}] 衝突解決セッションを開始できませんでした: ${message}`,
+    );
+    live.mergeResolutions.delete(taskId);
+    session.dispose();
+    try {
+      await abortAndBlock(self, runId, taskId, integration, lease);
+    } finally {
+      self.integrationQueue.releaseLease(lease);
+    }
+  }
 }
 
 /**
@@ -581,6 +683,13 @@ async function finishMergeResolution(
   if (reason === 'manual' || reason === 'interrupted') {
     // 人がタブへ直接介入した。通常のタスクと同じく、このタスク自身の状態は変えず
     // 実行全体だけを止める設計を踏襲する（design.md §16.5）
+    //
+    // **ここで`git merge --abort`はしない**（Issue #412のレビュー指摘1）。人が統合worktreeで
+    // 直接手を動かしている経路であり、巻き戻すとその解決作業を破棄してしまう
+    // （design.md §16.17が「衝突した状態のままにしておく」としているのと同じ理由）。
+    // 結果として統合worktreeは`MERGE_HEAD`と未解決パスを抱えたまま占有だけが解放されるが、
+    // 次にマージへ来たタスクは`mergeTaskBranch`のゲートで`busy`を受け、`failed`ではなく
+    // `blocked`（Viewの「再マージ」で復帰できる）になる
     live.runState = applyLoopStopReason(live.runState, live.def.tasks, '', reason);
     void self.persist(runId);
     self.notify(runId);

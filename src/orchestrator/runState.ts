@@ -580,13 +580,21 @@ export function markMergeFailed(
  * 状態を戻すだけ。依存先の`skipped`（`mergeBlocked`）を戻す処理は、`retryTask`
  * （タスクそのものの再実行）と違い、まだブロック中の後続を勝手に再開させない意図で
  * 含めない（再マージが成功して`done`になった時点で、`nextTasksToStart`が改めて拾う）。
+ *
+ * **成功したときは`haltedByUser`を解除する**（`retryTask`と同じ考え方。Issue #412）。
+ * 「再マージ」は人の明示操作そのものであり、これを起点に再開する意思表示なので、直前の
+ * 停止（`stop()`）を引きずらせない。実行層（`runnerMerge.ts`の`attemptMerge`）は、統合
+ * worktreeの占有を取った直後に`haltedByUser`を見てマージを見送るため、ここで解除して
+ * おかないと「再マージ」を押してもマージが始まらない。すでに`skipped`になった`pending`は
+ * ここでは戻さない（上のとおり、ブロック中の後続を勝手に再開させないため）。
  */
 export function retryMergeState(run: RunState, taskId: string): RunState {
   const current = run.tasks.get(taskId);
   if (current === undefined || current.state !== 'blocked') {
     return run;
   }
-  return setTask(run, taskId, { ...current, state: 'merging', failure: undefined });
+  const next = setTask(run, taskId, { ...current, state: 'merging', failure: undefined });
+  return next.haltedByUser ? { ...next, haltedByUser: false } : next;
 }
 
 /** `pending` のタスクを `running` にする。対象外の状態・未知のidは無視する。 */
