@@ -4708,6 +4708,21 @@ tasks:
     expect(runner.sendToOrchestrator('unknown-run', 'x')).toBe(false);
   });
 
+  it('dispose()でオーケストレーターセッションを解放する（design.md §16.23「セッションの生成と寿命」。Issue #363: 拡張機能のdeactivate時にextension.tsがcontext.subscriptionsへ登録して呼び出す）', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE);
+    await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    await flush();
+    const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+
+    expect(orchestrator.disposed).toBe(false);
+    runner.dispose();
+    expect(orchestrator.disposed).toBe(true);
+
+    // 二重に呼ばれても安全（自己レビュー観点）。既にorchestratorはundefinedに
+    // 戻っているため、2回目は何もせず例外も投げない
+    expect(() => runner.dispose()).not.toThrow();
+  });
+
   it('セッションを開けなくても実行は止まらず、警告欄に出る', async () => {
     const { runner, codexHost } = createHarness(YAML_ONE);
     codexHost.rejectOrchestrator = new Error('CLIが見つかりません');
