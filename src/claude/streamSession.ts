@@ -187,14 +187,16 @@ export class ClaudeStreamSession {
 
   /** プロセスを起動する。発言はこの後 `send` で流す。 */
   start(options: ClaudeStreamOptions): void {
-    // `entry.session`は使い回され、同一インスタンスへ複数回`start()`が呼ばれる
-    // （`claudeChatView.ts`の複数箇所）。前回のプロセスがクラッシュし、`exit`/`error`
-    // ハンドラの解放を経ていない状態（またはハンドラ自体は解放済みで実質no-opの状態）で
-    // 再度`start()`が呼ばれても、待機中のPromiseを積み残さないよう新しいプロセスを
-    // 起こす前に必ず解放しておく。通常運転では直前の`exit`/`error`ハンドラが既に
-    // 空にしているため大半はno-opだが、その解放を待たずに`start()`が呼ばれる競合や、
-    // 将来`dispose()`を経ずに`start()`が再利用される呼び出し順の変化に備える保険とする
-    // （issue #355）。
+    // 現状の`claudeChatView.ts`（`openNew`/`openTaskSession`/resume/fork/restore）は
+    // いずれも`buildEntry()`で`new ClaudeStreamSession(...)`した直後のインスタンスへ
+    // 一度だけ`start()`を呼ぶ経路で、同一インスタンスへ再度`start()`が呼ばれる経路は
+    // 現状無い。ただしそれは呼び出し側の運用に依存した前提であり、`ClaudeStreamSession`
+    // 自身が「一度きりの前提」を強制してもいない。将来同一インスタンスを使い回す変更が
+    // 入った場合や、クラッシュ後の再起動が同一インスタンスへ`start()`し直す形に変わった
+    // 場合に備え、前回分の応答待ちを積み残さないよう新しいプロセスを起こす前に必ず
+    // 解放しておく。現状の呼び出し方では各Mapは常に空のため、この呼び出しは実質no-op
+    // （issue #355のレビュー指摘: 断定していた「複数回呼ばれる」根拠が誤りだったため
+    // 訂正）。
     this.releasePendingWaiters();
 
     const { args, warnings } = buildClaudeStreamArgs({
