@@ -187,6 +187,16 @@ export class ClaudeStreamSession {
 
   /** プロセスを起動する。発言はこの後 `send` で流す。 */
   start(options: ClaudeStreamOptions): void {
+    // `entry.session`は使い回され、同一インスタンスへ複数回`start()`が呼ばれる
+    // （`claudeChatView.ts`の複数箇所）。前回のプロセスがクラッシュし、`exit`/`error`
+    // ハンドラの解放を経ていない状態（またはハンドラ自体は解放済みで実質no-opの状態）で
+    // 再度`start()`が呼ばれても、待機中のPromiseを積み残さないよう新しいプロセスを
+    // 起こす前に必ず解放しておく。通常運転では直前の`exit`/`error`ハンドラが既に
+    // 空にしているため大半はno-opだが、その解放を待たずに`start()`が呼ばれる競合や、
+    // 将来`dispose()`を経ずに`start()`が再利用される呼び出し順の変化に備える保険とする
+    // （issue #355）。
+    this.releasePendingWaiters();
+
     const { args, warnings } = buildClaudeStreamArgs({
       target: options.target,
       sessionId: options.sessionId,
@@ -217,6 +227,9 @@ export class ClaudeStreamSession {
     guardStdinErrors(proc, (e) => {
       this.log.error(`claudeへの書き込みに失敗しました: ${e.message}`);
       this.proc = undefined;
+      // exit/errorハンドラと同じ「ターン失敗」の経路なので、承認待ち・各種応答待ちも
+      // 同じく解放する。放置するとawaitしている側が永遠に待つ（issue #355）
+      this.releasePendingWaiters();
       this.update({ ...this.state, busy: false, turnFailed: true });
     });
 
@@ -230,12 +243,18 @@ export class ClaudeStreamSession {
     proc.on('exit', (code) => {
       this.log.info(`claudeが終了しました (code ${code ?? 'unknown'})`);
       this.proc = undefined;
+      // 承認待ち（waiting）・rewind_files/mcp_status/reload_skillsの応答待ちを解放する。
+      // 放置するとCLIの異常終了時にawaitしている側が永遠に待つ（issue #355、dispose()と
+      // 同じ解放処理を共有）
+      this.releasePendingWaiters();
       // 会話の途中でプロセスが消えた形なので、続きは送れない
       this.update({ ...this.state, busy: false, turnFailed: true });
     });
     proc.on('error', (e) => {
       this.log.error(`claudeを起動できません: ${e.message}`);
       this.proc = undefined;
+      // 起動直後にCLIが異常終了した場合も、exitハンドラと同様に解放する（issue #355）
+      this.releasePendingWaiters();
       this.update({ ...this.state, busy: false, turnFailed: true });
     });
 
@@ -1000,7 +1019,25 @@ export class ClaudeStreamSession {
     return this.sawApprovalRequest;
   }
 
-  dispose(): void {
+  /**
+   * 承認待ち（waiting）・rewind_files/mcp_status/reload_skillsの応答待ちを解放する
+   * （issue #355）。
+   *
+   * `dispose()`（利用者が明示的に会話を閉じる経路）と、`start()`内の`proc.on('exit')` /
+   * `proc.on('error')` / `guardStdinErrors`（CLIが自分で終了・クラッシュする経路）の
+   * どちらからも呼ばれる共通処理。放置するとこれらの応答をawaitしている側
+   * （`requestRewindFiles()` / `checkMcpStatus()` / `reloadSkills()`の呼び出し元）が
+   * 永遠に待ち続ける。
+   *
+   * プロセスの後始末（kill・stdinのend）はここに含めない。異常終了ハンドラが呼ばれる
+   * 時点では既にプロセスは終了しており、killし直す意味が無いため、`dispose()`側だけが
+   * 担う（「待機の解放」と「プロセスの後始末」を分ける）。
+   *
+   * 二重呼び出しでも安全: 各Mapは解放後に`clear()`するため、既に空のMapに対して
+   * ループしても何もしない。`decide()`も存在しない`requestId`には何もしないため、
+   * `waiting`が空になった後の再呼び出しも安全。
+   */
+  private releasePendingWaiters(): void {
     // 保留中の承認は拒否側で解放する。放置するとCLIが待ち続ける
     for (const [requestId] of this.waiting) {
       this.decide(requestId, 'cancel');
@@ -1027,6 +1064,10 @@ export class ClaudeStreamSession {
     }
     this.skillsWaiting.clear();
     this.outgoing.clear();
+  }
+
+  dispose(): void {
+    this.releasePendingWaiters();
     this.proc?.stdin.end();
     this.proc?.kill();
     this.proc = undefined;
