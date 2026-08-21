@@ -1,0 +1,42 @@
+# mainへのpushとPRのたびにlint / typecheck / testを自動実行する。
+# 統合テスト（test:integration）はVSCodeのダウンロードとxvfbが必要なため対象外（Issue #360）。
+# ブランチ保護のrequired status checksはこのワークフローでは設定しない。
+# WF-A / WF-B / WF-C が同時進行中のため、必須化すると進行中のPRが即座にブロックされる。
+# 必須化の判断は全ワークフロー完了後に人が行う（詳細はPR本文を参照）。
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+# 必要最小限の権限のみ付与する（チェックアウトとログ閲覧のみで足りるためcontents: read）。
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: lint / typecheck / test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
