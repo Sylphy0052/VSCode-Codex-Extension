@@ -1115,14 +1115,40 @@ export class ChatViewManager implements vscode.Disposable, TaskSessionHost {
     connectionFactory: (
       onNotification: NotificationHandler,
       onServerRequest: ServerRequestHandler,
-    ) => AppServerConnectionPort = (onNotification, onServerRequest) =>
-      new AppServerConnection(codexPath, log, onNotification, onServerRequest),
+      onDisconnect: () => void,
+    ) => AppServerConnectionPort = (onNotification, onServerRequest, onDisconnect) =>
+      new AppServerConnection(codexPath, log, onNotification, onServerRequest, onDisconnect),
   ) {
     this.catalog = new CommandCatalog(this.fs);
     this.connection = connectionFactory(
       (method, params) => this.routeNotification(method, params),
       (request) => this.routeServerRequest(request),
+      () => this.handleConnectionLost(),
     );
+  }
+
+  /**
+   * 接続断（app-serverのクラッシュ等）を、開いている全スレッドの`ChatSession`へ伝える
+   * （issue #354）。`AppServerConnection`は全スレッドで共有される単一プロセスのため、
+   * ここで各セッションの保留中の承認・問い合わせを解放しないと、承認カードが
+   * 永久にハングしたままになる。パネルやセッション状態自体は残す（テスト用の
+   * `FakeAppServerConnection`は`onDisconnect`を呼ばないため、本番の接続でのみ働く）。
+   *
+   * `thread/start`応答待ちの間（`pendingStarts`）に届いた承認要求も`findByThreadId`が
+   * ルーティングしうるため、`panels`だけでなく`allPanels()`（`pendingStarts`も含む）を
+   * 走査する。1セッションの解放が例外を投げても他セッションを解放し続けられるよう、
+   * 個別にtry/catchで囲む（ここは`proc`の`exit`ハンドラから同期的に呼ばれるため、
+   * 捕まえ損ねるとNodeの未捕捉例外になる）。
+   */
+  private handleConnectionLost(): void {
+    for (const entry of this.allPanels()) {
+      try {
+        entry.session.releasePendingApprovals();
+      } catch (e) {
+        const reason = e instanceof Error ? e.message : String(e);
+        this.log.error(`接続断の後始末に失敗しました: ${reason}`);
+      }
+    }
   }
 
   /** そのスレッドの画面を開いているか。履歴の印に使う。 */

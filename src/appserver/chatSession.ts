@@ -673,8 +673,16 @@ export class ChatSession {
     this.update(removePrompt(this.state, requestId));
   }
 
-  /** 画面を閉じるときなど。保留中の要求を全て拒否して解放する。 */
-  dispose(): void {
+  /**
+   * 接続断（app-serverのクラッシュ等）で保留中の承認・問い合わせを解放する（issue #354）。
+   *
+   * `AppServerConnection`は全スレッドで共有される単一プロセスのため、app-serverが落ちると
+   * `waiting` / `waitingPrompts` は二度と解決されない応答を待ち続け、承認カード・問い合わせ
+   * フォームが永久にハングする。画面やセッション状態そのものは残し、次の発言で
+   * `ensureStarted()`が再接続を試みられるようにする（`dispose()`と違い、ここでは
+   * `deniedReviews`には触れない。まだ有効な自動レビューの覆し履歴のため）。
+   */
+  releasePendingApprovals(): void {
     for (const [requestId] of this.waiting) {
       this.decide(requestId, 'cancel');
     }
@@ -682,6 +690,14 @@ export class ChatSession {
     for (const [requestId] of this.waitingPrompts) {
       this.answerPrompt(requestId, { action: 'cancel', values: {} });
     }
+  }
+
+  /** 画面を閉じるときなど。保留中の要求を全て拒否して解放し、覚えていた状態も破棄する。 */
+  dispose(): void {
+    this.releasePendingApprovals();
+    // 自動レビューが拒否した操作の覚え書き（issue #354）。画面を閉じた後に
+    // `approveDeniedReview`を呼べても意味が無いため、他の保留と同様にここで解放する
+    this.deniedReviews.clear();
   }
 }
 
