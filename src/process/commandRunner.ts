@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { killWithEscalation } from '../codex/jsonRpc';
 import { canWriteStdin, guardStdinErrors } from './stdinSafety';
 
 /**
@@ -38,7 +39,9 @@ export const nodeCommandRunner: CommandRunner = {
       };
 
       const timer = setTimeout(() => {
-        proc.kill();
+        // SIGTERMに応答しないハングしたプロセスも回収できるよう、SIGKILLへの
+        // エスカレーションを共通処理へ寄せる（issue #402、2点目のLOW対応）。
+        killWithEscalation(proc);
         finish({ code: 1, stderr: '応答がありませんでした' });
       }, TIMEOUT_MS);
 

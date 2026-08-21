@@ -29,6 +29,8 @@ import {
   consumeFrames,
   encodeNotification,
   encodeRequest,
+  killWithEscalation,
+  MAX_LINE_BUFFER_BYTES,
   readForkedThreadId,
   type JsonRpcMessage,
 } from './jsonRpc';
@@ -739,7 +741,17 @@ export class AppServerClient {
         }
         settled = true;
         clearTimeout(timer);
-        proc.kill();
+        // `finish()`がタイムアウトやexitで先に確定しても、`body`が内部で`await`している
+        // `request()`のPromiseが未解決のまま残ると、そちらを待ち続ける処理が永久にハング
+        // する（issue #402、3点目）。`pending`に残っている応答待ちをここでエラー値により
+        // 即時解決し、Mapを空にする
+        for (const resolvePending of pending.values()) {
+          resolvePending({ error: { code: -1, message: 'app-serverとのやり取りが終了しました' } });
+        }
+        pending.clear();
+        // SIGTERMに応答しないハングしたプロセスも回収できるよう、SIGKILLへの
+        // エスカレーションを共通処理へ寄せる（issue #402、2点目）
+        killWithEscalation(proc);
         resolve(result);
       };
 
@@ -757,18 +769,54 @@ export class AppServerClient {
 
       proc.stdout.on('data', (chunk: Buffer) => {
         buffer += chunk.toString('utf8');
-        const { messages, rest } = consumeFrames(buffer);
+        const { messages, rest, overflow } = consumeFrames(buffer);
         buffer = rest;
-        for (const message of messages) {
-          if (typeof message.id === 'number') {
-            pending.get(message.id)?.(message);
-            pending.delete(message.id);
-          } else if (message.method !== undefined) {
-            // idを持たないメッセージ（通知）。既定のメソッドは要求・応答だけで完結し
-            // 通知を無視するが、`runImport` のように非同期の続報を待つ呼び出しもある
-            for (const listener of notificationListeners) {
-              listener(message);
+        try {
+          // 完成した行（messages）は、上限超過の判定より先に処理する（レビュー指摘・MEDIUM）。
+          // overflowを先に見て早期returnすると、同じチャンクの中に「正常に完成した応答」と
+          // 「上限超過の未完成行」が同居していた場合、正常に届いていた応答まで握りつぶして
+          // しまう（本来成功していた応答が失敗応答へすり替わってしまう）
+          for (const message of messages) {
+            if (typeof message.id === 'number') {
+              pending.get(message.id)?.(message);
+              pending.delete(message.id);
+            } else if (message.method !== undefined) {
+              // idを持たないメッセージ（通知）。既定のメソッドは要求・応答だけで完結し
+              // 通知を無視するが、`runImport` のように非同期の続報を待つ呼び出しもある
+              for (const listener of notificationListeners) {
+                listener(message);
+              }
             }
+          }
+        } finally {
+          // `finally`へ置くのは、forループ中のリスナー（`notificationListeners`）が
+          // 同期的に例外を投げた場合でも、overflow時の後始末（バッファ解放・打ち切り）を
+          // 必ず実行するため（レビュー指摘・LOW）。ループを先に処理する形へ入れ替えた際、
+          // 例外で`if (overflow)`まで到達しない経路ができていた
+          if (overflow) {
+            // 改行を含まない出力が上限を超えて溜まり続けた（issue #402、1点目）。
+            // クロージャ内の`buffer`（このコールバックの外側で`let`宣言）はここで
+            // 明示的に空にする。overflow検知時点の`rest`＝上限超過分そのものが
+            // `buffer`に残ったままだと、`setImmediate`で`finish`するまでの間に
+            // 次の`data`イベントが来た場合、10MB超のバッファへさらに追記して
+            // `consumeFrames`のフル再パースが走ってしまう（レビュー指摘・MEDIUM）
+            buffer = '';
+            // 単発の問い合わせなので、既に決着させる作りの`finish`へそのまま寄せて打ち切る。
+            //
+            // ただし`finish`をここで同期的に呼ぶと、直前の`for`ループで応答を受け取った
+            // 直後の`request()`（Promiseは既に解決済み）が、`body`側の`await`の続き
+            // （`.then`のマイクロタスク）を消化する前に`settled`を先取りしてしまい、
+            // 本来成功していた応答が失敗応答へすり替わる（レビュー指摘・MEDIUM）。
+            // `setImmediate`（マクロタスク）まで遅らせることで、既に受け取り済みの応答を
+            // 使い切る`body`の同期的な後続処理（追加のI/O待ちが無い部分）を先に終わらせて
+            // から`finish`する。`body`がまだ別の応答を待っている場合はどのみち届かないため、
+            // 遅らせても結果は変わらない
+            setImmediate(() => {
+              finish({
+                ok: false,
+                error: `app-serverからの出力が上限（${MAX_LINE_BUFFER_BYTES}バイト）を超えて改行なしで届きました`,
+              });
+            });
           }
         }
       });
