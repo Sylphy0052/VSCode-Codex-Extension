@@ -12,12 +12,14 @@ import type { SettingsProvider } from '../../src/view/settingsProvider';
  * （`test/mocks/vscode.ts` の `FakeWebview` はexportされていないため、ここで最小限を組む）。
  */
 function fakeWebviewView(): {
-  view: { webview: Record<string, unknown> };
+  view: { webview: Record<string, unknown>; onDidDispose: (listener: () => void) => { dispose: () => void } };
   sent: unknown[];
   simulateMessage: (message: unknown) => Promise<void>;
+  simulateDispose: () => void;
 } {
   const sent: unknown[] = [];
   let handler: ((message: unknown) => void) | undefined;
+  let disposeListener: (() => void) | undefined;
   const webview = {
     options: {},
     html: '',
@@ -32,7 +34,15 @@ function fakeWebviewView(): {
     },
   };
   return {
-    view: { webview },
+    view: {
+      webview,
+      // `vscode.WebviewView.onDidDispose`の最小フェイク。破棄をテストから起こせるように
+      // 登録されたlistenerを`simulateDispose`から呼べるようにしておく
+      onDidDispose: (listener: () => void) => {
+        disposeListener = listener;
+        return { dispose: () => undefined };
+      },
+    },
     sent,
     // handleMessageは非同期なので、送出したメッセージへの反応を待ちたいテスト側は
     // このヘルパーの返すPromiseを待つ
@@ -40,6 +50,9 @@ function fakeWebviewView(): {
       handler?.(message);
       await Promise.resolve();
       await Promise.resolve();
+    },
+    simulateDispose: () => {
+      disposeListener?.();
     },
   };
 }
@@ -220,5 +233,25 @@ describe('ControlPanelViewProvider.revealSection（issue #227、ホスト→webv
     const provider = new ControlPanelViewProvider(settings, logger);
 
     expect(() => provider.revealSection('codexImport')).not.toThrow();
+  });
+});
+
+describe('ControlPanelViewProvider（issue #358、パネル破棄時の参照クリア）', () => {
+  it('viewが破棄されると参照をクリアし、以後のrevealSection/refreshは何もしない（例外を投げない）', async () => {
+    const { settings } = fakeSettingsProvider();
+    const { logger } = fakeLogger();
+    const provider = new ControlPanelViewProvider(settings, logger);
+    const { view, sent, simulateDispose } = fakeWebviewView();
+    provider.resolveWebviewView(view as never);
+    await Promise.resolve();
+    await Promise.resolve();
+    sent.length = 0;
+
+    simulateDispose();
+
+    expect(() => provider.revealSection('codexImport')).not.toThrow();
+    await expect(provider.refresh()).resolves.toBeUndefined();
+    // 破棄後は送り先（this.view）が無いので何も送られない
+    expect(sent).toEqual([]);
   });
 });

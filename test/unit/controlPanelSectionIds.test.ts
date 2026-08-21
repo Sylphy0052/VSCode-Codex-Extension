@@ -117,6 +117,7 @@ function renderedHtml(): string {
       onDidReceiveMessage: () => ({ dispose: () => undefined }),
       postMessage: () => Promise.resolve(true),
     },
+    onDidDispose: () => ({ dispose: () => undefined }),
   };
   const provider = new ControlPanelViewProvider(fakeSettingsProvider(), fakeLogger());
   provider.resolveWebviewView(view as never);
