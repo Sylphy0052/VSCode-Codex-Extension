@@ -1,13 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import * as vscode from 'vscode';
-import { isApprovalDecision, type ApprovalDecision } from '../appserver/approvals';
+import { isApprovalDecision } from '../appserver/approvals';
 import {
   isOpenableSearchUrl,
   type ChatItem,
   type ChatState,
   type ChatUsage,
-  type PendingApproval,
 } from '../appserver/chatState';
 import { debugLogCandidates } from '../claude/cliLocator';
 import type { ClaudeSessionStore } from '../claude/sessionStore';
@@ -20,7 +19,6 @@ import {
   readChatRenderMarkdownConfig,
   readChatSendOnConfig,
   readClaudeConfig,
-  readNotificationsConfig,
   workspaceFolderPaths,
 } from '../config';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
@@ -64,12 +62,7 @@ import {
   STATE_POST_INTERVAL_MS,
 } from './chatShared';
 import type { FileMentionCatalog } from '../provider/fileMentions';
-import {
-  decoratePanelTitle,
-  deriveSessionActivityState,
-  sanitizeForNotification,
-  type SessionActivityState,
-} from './sessionActivity';
+import { decoratePanelTitle, deriveSessionActivityState } from './sessionActivity';
 import {
   appendMemoryLine,
   buildProjectMemoryCandidates,
@@ -85,6 +78,7 @@ import {
 } from '../provider/inputModes';
 import { readPersistedThreadId } from './panelState';
 import { buildItemsDelta, stripHostOnlyItems } from './stateDelta';
+import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import { CLAUDE_PERMISSION_MODES } from '../claude/types';
 import {
   APPROVAL_LEVEL_CYCLE,
@@ -94,9 +88,8 @@ import {
 import type { ClaudeConfig } from '../claude/types';
 import type { ClaudeEditableKey, SettingsProvider } from './settingsProvider';
 import type { ChatActivity } from './chatShared';
-import { nextActivePanelSequence, type ActiveComposerTarget } from './activePanelSequence';
 
-interface ClaudePanel {
+interface ClaudePanel extends BaseChatPanel {
   /** タブが今開いているか。`undefined` は閉じている状態（design.md §16.10の4）。 */
   panel: vscode.WebviewPanel | undefined;
   session: ClaudeStreamSession;
@@ -216,24 +209,15 @@ function toClaudeConfig(input: TaskSessionInput): ClaudeConfig {
  * オーケストレータ（`runner.ts`。次の依頼）がプロバイダを見ずにタスクを扱えるようにする
  * （design.md §16.10）。
  */
-export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost {
-  private readonly panels = new Map<string, ClaudePanel>();
+export class ClaudeChatViewManager
+  extends BaseChatViewManager<ClaudePanel>
+  implements TaskSessionHost
+{
   private approvalWarned = false;
 
   private readonly catalog: CommandCatalog;
   private readonly usageProbe: ClaudeUsageProbe;
   private commands: SlashCommand[] | undefined;
-  /**
-   * フォーカスが当たっているタブ（`chatView.ts` の `this.active` と同じ役割。issue #199）。
-   * エディタ右上の「セッション名を変更」はこれを対象にする。
-   */
-  private active: ClaudePanel | undefined;
-  /**
-   * `active` が（再）設定されるたびに進む採番（issue #292）。Codex側
-   * （`chatView.ts`）と比べて、エディタの選択範囲をどちらへ挿すか決めるのに使う
-   * （`getActiveComposerTarget` 参照）。
-   */
-  private activeSequence = 0;
 
   constructor(
     private readonly claudePath: () => string,
@@ -275,6 +259,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
      */
     private readonly resolveSpawn: () => ClaudeSpawnPort | undefined = () => undefined,
   ) {
+    super();
     this.catalog = new CommandCatalog(fs);
     this.usageProbe = new ClaudeUsageProbe(claudePath, log);
   }
@@ -438,18 +423,6 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       throw new Error(`webviewへメッセージを送れませんでした（画面が見つからない）: ${sessionId}`);
     }
     this.handleMessage(entry, message);
-  }
-
-  /**
-   * そのセッションの活動状態（issue #286、design.md §14.55）。
-   *
-   * `chatView.ts`の`ChatViewManager.getActivityState`と同じ判定方針。開いていなければ
-   * `undefined`（`panels`にエントリがあるかどうかで判定。タスク管理下のセッションは
-   * タブを閉じても`panels`に残り続ける）。
-   */
-  getActivityState(sessionId: string): SessionActivityState | undefined {
-    const entry = this.panels.get(sessionId);
-    return entry === undefined ? undefined : deriveSessionActivityState(entry.session.getState());
   }
 
   /** 新しい会話を開く。idは起動前に決まるため、開いた時点で履歴と紐づく。 */
@@ -734,31 +707,6 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     await this.openNew(cwd);
   }
 
-  /**
-   * エディタの選択範囲（issue #292）を送る先。最後にアクティブだったClaude Code画面を返す
-   * （`this.active`。名前変更・クリアと同じ対象）。開いているタブが無ければ`undefined`。
-   *
-   * Codex側（`chatView.ts`の同名メソッド）と`activeSequence`を比べて、呼び出し側
-   * （`extension.ts`）がどちらへ挿すかを決める。ここではプロバイダ内の判定だけを行い、
-   * 実際の送り先の決定・パスの組み立て・0件時の新規会話は行わない。
-   */
-  getActiveComposerTarget(): ActiveComposerTarget | undefined {
-    const entry = this.active;
-    if (entry === undefined || entry.panel === undefined) {
-      return undefined;
-    }
-    return {
-      activeSequence: this.activeSequence,
-      insert: (text: string) => {
-        if (entry.panel === undefined) {
-          return;
-        }
-        void entry.panel.webview.postMessage({ type: 'insertComposerText', text });
-        this.showPanel(entry, false);
-      },
-    };
-  }
-
   /** セッションとループだけを組み立てる。パネルはまだ作らない。 */
   private buildEntry(
     cwd: string,
@@ -810,43 +758,21 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     return entry;
   }
 
-  /**
-   * パネルを表に出す。既にタブがあれば `reveal`、閉じていれば作り直す
-   * （design.md §16.10の4）。会話の再描画はwebview起動時の `ready` 通知への応答に任せる。
-   */
-  private showPanel(entry: ClaudePanel, preserveFocus: boolean): void {
-    if (entry.disposed) {
-      return;
-    }
-    if (entry.panel !== undefined) {
-      entry.panel.reveal(undefined, preserveFocus);
-      if (!preserveFocus) {
-        this.active = entry;
-        this.activeSequence = nextActivePanelSequence();
-      }
-      return;
-    }
-    const panel = vscode.window.createWebviewPanel(
+  /** `BaseChatViewManager.showPanel`（基底クラス）が新規作成時に呼ぶ、Claude Code用のパネル生成。 */
+  protected override createWebviewPanel(
+    entry: ClaudePanel,
+    preserveFocus: boolean,
+  ): vscode.WebviewPanel {
+    return vscode.window.createWebviewPanel(
       VIEW_TYPE,
       entry.title,
       { viewColumn: vscode.ViewColumn.Active, preserveFocus },
       buildClaudeChatPanelOptions(),
     );
-    this.attachPanel(entry, panel);
   }
 
-  /**
-   * `panel.webview.options`（`enableScripts`等）はここで入れ直すが、`enableFindWidget`
-   * （design.md §14.48、issue #287）は`WebviewPanel.options`側の値で読み取り専用のため、
-   * ここから再設定する手段が無い。`restorePanel`経由（タブ復元）で渡ってくるパネルは
-   * VSCode本体が新規に構築したもので、`enableFindWidget`を含む`WebviewPanelOptions`は
-   * 生成時にしか指定できない。
-   */
-  private attachPanel(entry: ClaudePanel, panel: vscode.WebviewPanel): void {
-    entry.panel = panel;
-    panel.title = entry.title;
-    // 復元されたパネルはスクリプトの許可が落ちているため、ここで入れ直す
-    panel.webview.options = { enableScripts: true };
+  /** `BaseChatViewManager.attachPanel`（基底クラス）が呼ぶ、Claude Code用のwebview HTML組み立て。 */
+  protected override renderPanelHtml(entry: ClaudePanel, panel: vscode.WebviewPanel): string {
     // 入力欄アイコン列の表に出すボタン（設定 agent.chat.composerButtons、issue #296）。
     // chatView.ts（Codex）と同じ配線。検証・既定への丸めはreadChatComposerButtonsConfig
     // 側（normalizeComposerButtons）が行うため、ここは警告が有ればログへ出すだけ
@@ -854,7 +780,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     if (composerButtonsConfig.warning !== undefined) {
       this.log.warn(composerButtonsConfig.warning);
     }
-    panel.webview.html = renderShell(panel.webview, {
+    return renderShell(panel.webview, {
       agentLabel: LABEL,
       provider: 'claude',
       approvalModes: CLAUDE_PERMISSION_MODES,
@@ -888,30 +814,11 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       // 送信キー（issue #288、設定 agent.chat.sendOn）。chatView.ts（Codex）と同じ配線
       sendOn: readChatSendOnConfig(),
     });
-    panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(entry, message));
-    panel.onDidChangeViewState(() => {
-      if (panel.active) {
-        this.active = entry;
-        this.activeSequence = nextActivePanelSequence();
-      }
-    });
-    panel.onDidDispose(() => {
-      entry.panel = undefined;
-      if (!entry.taskManaged) {
-        // 人が手で開いた画面は、これまで通りタブを閉じたらセッションも終わる
-        this.teardown(entry);
-        return;
-      }
-      if (this.active === entry) {
-        this.active = undefined;
-      }
-    });
-    // 新規作成時にフォーカスが当たっていれば、ここでも捕まえる（chatView.tsのattachPanelと同じ理由。
-    // タスク管理下のパネルは常にpreserveFocus: trueで背面に開くため、無条件にactiveを奪わない）
-    if (panel.active) {
-      this.active = entry;
-      this.activeSequence = nextActivePanelSequence();
-    }
+  }
+
+  /** `BaseChatViewManager.attachPanel`（基底クラス）が配線する、webviewからのメッセージの実処理。 */
+  protected override dispatchMessage(entry: ClaudePanel, message: unknown): void {
+    this.handleMessage(entry, message);
   }
 
   /**
@@ -964,49 +871,6 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     };
   }
 
-  /**
-   * 承認要求を決定する。webviewの承認カードとワークフローViewの「承認」操作
-   * （`TaskSession.decideApproval`）の共通経路（design.md §16.8）。`chatView.ts`と同じ理由で
-   * 分けてある。
-   */
-  private resolveApproval(
-    entry: ClaudePanel,
-    requestId: number | string,
-    decision: ApprovalDecision,
-  ): void {
-    entry.session.decide(requestId, decision);
-    for (const listener of entry.approvalResolvedListeners) {
-      listener({ requestId, decision });
-    }
-  }
-
-  /**
-   * エントリを完全に破棄する。二重に呼んでも安全（`disposed` で早期return）。
-   * タブを閉じたことによる破棄と、明示的な `dispose()` 呼び出しの両方から通る。
-   */
-  private teardown(entry: ClaudePanel): void {
-    if (entry.disposed) {
-      return;
-    }
-    entry.disposed = true;
-    if (entry.postTimer !== undefined) {
-      clearTimeout(entry.postTimer);
-      entry.postTimer = undefined;
-    }
-    entry.loop.stop('manual');
-    entry.session.dispose();
-    entry.panel?.dispose();
-    entry.panel = undefined;
-    if (this.active === entry) {
-      this.active = undefined;
-    }
-    for (const [id, value] of this.panels) {
-      if (value === entry) {
-        this.panels.delete(id);
-      }
-    }
-  }
-
   private onSessionChange(entry: ClaudePanel, state: ChatState): void {
     if (entry.disposed) {
       return;
@@ -1043,58 +907,6 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     for (const listener of entry.stateListeners) {
       listener(state);
     }
-  }
-
-  /**
-   * 承認待ちの通知（issue #286、design.md §14.55）。`chatView.ts`の
-   * `notifyNewApprovals`と同じ判定方針（JSDoc参照）。
-   */
-  private notifyNewApprovals(entry: ClaudePanel, state: ChatState): void {
-    for (const approval of state.approvals) {
-      const key = String(approval.requestId);
-      if (entry.notifiedApprovalRequestIds.has(key)) {
-        continue;
-      }
-      entry.notifiedApprovalRequestIds.add(key);
-      this.notifyApprovalPending(entry, approval);
-    }
-  }
-
-  /** `chatView.ts`の`notifyApprovalPending`と同じ判定方針（JSDoc参照）。 */
-  private notifyApprovalPending(entry: ClaudePanel, approval: PendingApproval): void {
-    if (!readNotificationsConfig().approvalPending) {
-      return;
-    }
-    if (entry.panel !== undefined && entry.panel.visible) {
-      return;
-    }
-    const sessionLabel = sanitizeForNotification(entry.title);
-    const approvalLabel = sanitizeForNotification(approval.title);
-    void vscode.window
-      .showInformationMessage(`${sessionLabel} が承認待ちです（${approvalLabel}）`, '開く')
-      .then((choice) => {
-        if (choice === '開く') {
-          this.showPanel(entry, false);
-        }
-      });
-  }
-
-  /** `chatView.ts`の`notifyTurnComplete`と同じ判定方針（JSDoc参照）。既定オフ。 */
-  private notifyTurnComplete(entry: ClaudePanel): void {
-    if (!readNotificationsConfig().turnComplete) {
-      return;
-    }
-    if (entry.panel !== undefined && entry.panel.visible) {
-      return;
-    }
-    const sessionLabel = sanitizeForNotification(entry.title);
-    void vscode.window
-      .showInformationMessage(`${sessionLabel} の応答が終わりました`, '開く')
-      .then((choice) => {
-        if (choice === '開く') {
-          this.showPanel(entry, false);
-        }
-      });
   }
 
   /** ループの状態変化。停止（running: true→false）を検知して `onFinished` を1度だけ呼ぶ。 */
@@ -1902,12 +1714,6 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     return choice === '実行する';
   }
 
-  dispose(): void {
-    for (const entry of this.panels.values()) {
-      this.teardown(entry);
-    }
-    this.panels.clear();
-  }
 }
 
 /**
