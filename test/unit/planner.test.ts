@@ -20,12 +20,14 @@ import type {
 } from '../../src/orchestrator/taskSession';
 import {
   buildPlannerPrompt,
+  buildPlannerSessionInput,
   buildWorkspaceSummary,
   detectSecurityWarnings,
   extractYamlFromResponse,
   locateSecurityWarningLine,
   planWorkflow,
   resolveUniqueFileName,
+  sendSingleTurn,
   slugifyGoal,
   validateSlugInput,
   type PlannerWorkspacePort,
@@ -138,6 +140,60 @@ class FakePlannerSession implements TaskSession {
   }
   dispose(): void {
     this.disposed = true;
+  }
+}
+
+/**
+ * `sendSingleTurn`のタイムアウトを試すためのフェイク。`runLoop`を呼んでも
+ * `onFinished`のリスナーを即座には呼ばず、テスト側が`finishLate`で好きなタイミングで
+ * （タイムアウト成立後も含めて）呼び出せるようにする。ハングしたCLIプロセスの模擬。
+ */
+class FakeHangingSession implements TaskSession {
+  readonly sessionId = 'planner-hanging-session';
+  runLoopCalls: LoopPlan[] = [];
+  interruptCalls = 0;
+  disposeCalls = 0;
+  private finishedListener: ((reason: LoopStopReason, state: ChatState) => void) | undefined;
+
+  send(): void {}
+  runLoop(plan: LoopPlan): void {
+    this.runLoopCalls.push(plan);
+    // 意図的に何もしない（ハングを模擬）。`finishLate`が呼ばれるまで`onFinished`は発火しない
+  }
+  setPromptTransform(): void {}
+  onFinished(listener: (reason: LoopStopReason, state: ChatState) => void): void {
+    this.finishedListener = listener;
+  }
+  onStateChanged(): void {}
+  setApprovalHandler(): void {}
+  onApprovalResolved(): void {}
+  async interrupt(): Promise<void> {
+    this.interruptCalls += 1;
+  }
+  pauseLoop(): void {}
+  resumeLoop(): void {}
+  async checkMessagingToolVisible(): Promise<boolean> {
+    return true;
+  }
+  stopLoop(): void {}
+  decideApproval(): void {}
+  reveal(): void {}
+  open(): void {}
+  dispose(): void {
+    this.disposeCalls += 1;
+  }
+  /** 本来の応答が（タイムアウト成立後も含めて）遅れて届いたことを模擬する。 */
+  finishLate(text: string): void {
+    this.finishedListener?.('maxReached', { ...initialChatState, turnResultText: text });
+  }
+}
+
+class FakeHangingHost implements TaskSessionHost {
+  sessions: FakeHangingSession[] = [];
+  async openTaskSession(): Promise<TaskSession> {
+    const session = new FakeHangingSession();
+    this.sessions.push(session);
+    return session;
   }
 }
 
@@ -371,6 +427,55 @@ describe('extractYamlFromResponse（design.md §16.9「剥がしてからパー�
 
   it('素のYAMLのみの応答はそのまま返す', () => {
     expect(extractYamlFromResponse(VALID_YAML)).toBe(VALID_YAML);
+  });
+
+  it('先行する別言語フェンス（bash等）の閉じフェンスを開始位置として拾わない（issue #389 根拠1）', () => {
+    // node実測で確認した実際の再現条件: 先行するbashフェンスの開き（`bash`という言語タグの
+    // ため、旧実装の正規表現には一致しない）の後、その閉じフェンスが「言語タグなし+改行」の
+    // 形に一致し、そこを開始位置として次のYAMLフェンスの開きまでの地の文を捕まえていた
+    const response = [
+      '```bash',
+      'ls -la',
+      'echo done',
+      '```',
+      '',
+      '次にYAMLを出力します:',
+      '```yaml',
+      VALID_YAML,
+      '```',
+    ].join('\n');
+    expect(extractYamlFromResponse(response)).toBe(VALID_YAML);
+  });
+
+  it('言語タグの無いフェンスが唯一かつYAML本体であるケースは、他言語フェンス混入ケースと区別できる', () => {
+    // 「言語タグなしフェンスのみ」の既存ケース（上の`言語指定の無いコードフェンスからも
+    // 取り出せる`）と、bashフェンスが混じるケースが同じ挙動へ収束しないことを確かめる
+    const withoutOtherLangFence = ['```', VALID_YAML, '```'].join('\n');
+    const withOtherLangFence = [
+      '```bash',
+      'echo hi',
+      '```',
+      '```',
+      VALID_YAML,
+      '```',
+    ].join('\n');
+    expect(extractYamlFromResponse(withoutOtherLangFence)).toBe(VALID_YAML);
+    expect(extractYamlFromResponse(withOtherLangFence)).toBe(VALID_YAML);
+  });
+
+  it('候補（yaml/yml/無指定）が複数あれば、パースに成功したものを選ぶ', () => {
+    // 1つ目の無指定フェンスは前置きの地の文をそのままフェンスへ入れてしまった想定
+    // （tasksを持たないためlooksLikeWorkflowYamlはfalseになる）、2つ目が本体
+    const response = [
+      '```',
+      'まずワークフローの方針を説明します。並列タスクは分けます。',
+      '```',
+      '',
+      '```yaml',
+      VALID_YAML,
+      '```',
+    ].join('\n');
+    expect(extractYamlFromResponse(response)).toBe(VALID_YAML);
   });
 });
 
@@ -854,5 +959,54 @@ describe('validateSlugInput（issue #328）', () => {
 
   it('長すぎる名前は弾く', () => {
     expect(validateSlugInput('a'.repeat(200))).toBeDefined();
+  });
+});
+
+describe('sendSingleTurn: タイムアウト（issue #389 根拠3）', () => {
+  it('タイムアウトで打ち切られ、interruptが呼ばれ、セッションが解放される', async () => {
+    const host = new FakeHangingHost();
+    const input = buildPlannerSessionInput('codex', '/repo');
+
+    await expect(sendSingleTurn(host, 'codex', input, 'goal', 20)).rejects.toThrow(
+      /打ち切りました/,
+    );
+
+    const session = host.sessions[0];
+    expect(session).toBeDefined();
+    expect(session?.interruptCalls).toBe(1);
+    expect(session?.disposeCalls).toBe(1);
+  });
+
+  it('タイムアウト後にonFinishedが遅れて届いても、二重にresolve/rejectされずdisposeも1回のまま', async () => {
+    const host = new FakeHangingHost();
+    const input = buildPlannerSessionInput('codex', '/repo');
+
+    await expect(sendSingleTurn(host, 'codex', input, 'goal', 20)).rejects.toThrow(
+      /打ち切りました/,
+    );
+
+    const session = host.sessions[0];
+    expect(session).toBeDefined();
+    // 遅れて届いた本来の応答。これを呼んでも例外にならず、状態も変わらないことを確認する
+    expect(() => session?.finishLate('version: 1\nname: x\ntasks: []')).not.toThrow();
+    expect(session?.disposeCalls).toBe(1);
+    expect(session?.interruptCalls).toBe(1);
+  });
+
+  it('タイムアウト前に完了すれば、打ち切られずdisposeは1回だけ呼ばれる', async () => {
+    const host = new FakeHangingHost();
+    const input = buildPlannerSessionInput('codex', '/repo');
+
+    const promise = sendSingleTurn(host, 'codex', input, 'goal', 10_000);
+    // `sendSingleTurn`が`onFinished`のリスナーを登録するところまで進むのを待ってから、
+    // 正常応答を模擬する（マクロタスク境界を挟むことで、Promiseチェーンの途中で
+    // 呼んでしまう事故を避ける）
+    await new Promise((r) => setTimeout(r, 0));
+    const session = host.sessions[0];
+    session?.finishLate(VALID_YAML);
+
+    await expect(promise).resolves.toBe(VALID_YAML);
+    expect(session?.interruptCalls).toBe(0);
+    expect(session?.disposeCalls).toBe(1);
   });
 });

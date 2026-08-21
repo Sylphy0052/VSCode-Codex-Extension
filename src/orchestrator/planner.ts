@@ -342,24 +342,83 @@ export function buildRetryPrompt(previousYaml: string, errors: readonly Workflow
 
 // ---- 応答からのYAML抽出 ----
 
-/** ```yaml ... ``` / ``` ... ``` の最初のコードフェンスを拾う。 */
-const FENCE_PATTERN = /```(?:ya?ml)?\r?\n([\s\S]*?)```/i;
+/**
+ * 応答中の全コードフェンスを、言語タグと中身の組として拾う（`g`付き、順に`exec`で走査する）。
+ *
+ * 言語タグ部分は`[A-Za-z0-9_+-]*`（空文字も可）にしてある。以前は`(?:ya?ml)?`だけを
+ * 許していたため、`bash`のような他言語タグを持つ開きフェンスを開始位置として認識できず、
+ * 正規表現エンジンがその**閉じ**フェンス（言語タグなし+改行の形に一致する）を開始位置として
+ * 誤って拾ってしまっていた（issue #389 根拠1、node実測で確認）。あらゆる言語タグを開始位置
+ * として認識できるようにし、閉じ位置の誤認識を無くす。
+ */
+const FENCE_BLOCK_PATTERN = /```([A-Za-z0-9_+-]*)\r?\n([\s\S]*?)```/g;
 /** コードフェンスが無いとき、YAMLのルートキーが現れる行を本文の開始とみなす。 */
 const ROOT_KEY_PATTERN = /^(version|name|defaults|tasks)\s*:/m;
+
+interface FenceBlock {
+  lang: string;
+  content: string;
+}
+
+function extractFenceBlocks(response: string): FenceBlock[] {
+  const pattern = new RegExp(FENCE_BLOCK_PATTERN);
+  const blocks: FenceBlock[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(response)) !== null) {
+    blocks.push({ lang: (match[1] ?? '').toLowerCase(), content: match[2] ?? '' });
+  }
+  return blocks;
+}
+
+/**
+ * フェンスの中身がYAMLのワークフロー定義らしいかを判定する。`parseWorkflowYaml`は
+ * スキーマ違反があっても例外を投げず既定値で埋める作りのため、単に例外が無いことだけでは
+ * 「地の文（自然文）を拾っただけ」と区別できない。`tasks`が1件以上あることまで確認する
+ * （地の文は`tasks:`キーを持たないため、`parseWorkflowYaml`の既定値である空配列のままになる）。
+ *
+ * `tryParseAndValidate`と同じく、パース前に`MAX_WORKFLOW_FILE_BYTES`で足切りする
+ * （#58セキュリティ監査 medium 2の再発防止。ここは複数フェンス候補の中から選ぶだけの
+ * 判定であり、巨大な候補を無検査で`yaml`パッケージの`parse`へ渡してよい理由にはならない）。
+ * 足切りされた候補は「YAMLらしくない」として扱う（`extractYamlFromResponse`が最終的に
+ * この候補を選んでも、実際のサイズ超過エラーは`tryParseAndValidate`側で改めて報告される）。
+ */
+function looksLikeWorkflowYaml(content: string): boolean {
+  const trimmed = content.trim();
+  if (Buffer.byteLength(trimmed, 'utf8') > MAX_WORKFLOW_FILE_BYTES) {
+    return false;
+  }
+  try {
+    return parseWorkflowYaml(trimmed).tasks.length > 0;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * 分解セッションの応答からYAML本文を取り出す（design.md §16.9「コードフェンスで囲まれて
  * 返ることが多いので、剥がしてからパーサへ渡す」）。
  *
- * 優先順位: 1) 最初のコードフェンスの中身 2) フェンスが無ければ、ルートキー
- * （version/name/defaults/tasks）が最初に現れる行から末尾まで 3) それも無ければ応答全体。
- * 3)はほぼ確実にparseWorkflowYamlが例外を投げ、通常の再試行経路に合流する。
+ * 優先順位:
+ * 1. 応答中の全コードフェンスのうち、言語タグが`yaml`/`yml`または無指定のものを候補にする
+ *    （`bash`等の他言語タグを持つフェンスは候補から除く。issue #389 根拠1）
+ * 2. 候補が1つならそれを使う。複数あれば、`looksLikeWorkflowYaml`でパースに成功した
+ *    最初の候補を使う（全滅なら先頭の候補にフォールバックし、後続の検証エラーとして扱う）
+ * 3. フェンスの候補が無ければ、ルートキー（version/name/defaults/tasks）が最初に現れる
+ *    行から末尾まで
+ * 4. それも無ければ応答全体。4)はほぼ確実にparseWorkflowYamlが例外を投げ、通常の
+ *    再試行経路に合流する。
  */
 export function extractYamlFromResponse(response: string): string {
-  const fenceMatch = FENCE_PATTERN.exec(response);
-  const fenced = fenceMatch?.[1];
-  if (fenced !== undefined) {
-    return fenced.trim();
+  const blocks = extractFenceBlocks(response);
+  const candidates = blocks.filter(
+    (b) => b.lang === '' || b.lang === 'yaml' || b.lang === 'yml',
+  );
+  if (candidates.length === 1) {
+    return (candidates[0]?.content ?? '').trim();
+  }
+  if (candidates.length > 1) {
+    const best = candidates.find((b) => looksLikeWorkflowYaml(b.content)) ?? candidates[0];
+    return (best?.content ?? '').trim();
   }
   const rootKeyMatch = ROOT_KEY_PATTERN.exec(response);
   if (rootKeyMatch !== null) {
@@ -792,6 +851,25 @@ function assertPlannerSessionIsSafe(provider: Provider, input: TaskSessionInput)
 }
 
 /**
+ * `sendSingleTurn`の既定タイムアウト（issue #389 根拠3）。
+ *
+ * リポジトリ内に単発LLMターンの待ち時間の既存の目安値は無かった（`planner.ts`/`roadmap.ts`に
+ * `CancellationToken`/`AbortController`/`AbortSignal`/`setTimeout`が1件も無いことをgrepで
+ * 確認済み）。近い性質を持つ既存の値としては、Codex CLIのインポート完了通知を待つ
+ * `appServerClient.ts`の`IMPORT_COMPLETE_TIMEOUT_MS`（5分）が最も長く、それ以外の
+ * `TIMEOUT_MS`系（15〜20秒）はプロービング等の軽い単発リクエストで、ワークスペースを
+ * 読みに行くツール呼び出しを挟まない。
+ *
+ * 分解セッションは「YAMLのみ出力せよ」という指示の下でも、ワークスペースの走査（1つ以上の
+ * read系ツール呼び出し）と数十〜百行規模のYAML生成を1ターンの中でこなす必要があり、
+ * 単純なチャット応答より長くかかることが普通にありうる。短すぎるタイムアウトは正常な生成を
+ * 打ち切ってしまう（design.mdに明記の失敗モード）。`IMPORT_COMPLETE_TIMEOUT_MS`と同じ
+ * 5分を既定にし、正常系を打ち切らない側に倒す。ハングしたセッションを検知して解放する
+ * ことが目的であり、遅いだけの正常系を犠牲にしてまで短くする理由は無い。
+ */
+export const PLANNER_TURN_TIMEOUT_MS = 5 * 60_000;
+
+/**
  * 分解専用のセッションを1つ開き、1ターンだけ送って応答を受け取り、閉じる。
  *
  * `TaskSession.runLoop`（`LoopController`）を`maxIterations: 1, condition: ''`で使う。
@@ -802,6 +880,19 @@ function assertPlannerSessionIsSafe(provider: Provider, input: TaskSessionInput)
  * 承認要求は理由を問わず全て拒否する（design.md §16.9「承認要求は全て拒否する」）。
  * `escalation.ts`の危険判定は経由しない。分解セッションに「妥当な危険操作」という
  * カテゴリは無く、判定するまでもなく拒否してよいため。
+ *
+ * `timeoutMs`（既定`PLANNER_TURN_TIMEOUT_MS`）以内に`onFinished`が呼ばれなければ、
+ * ハングしたとみなして打ち切る（issue #389 根拠3。CLIプロセスのハング・イベントの
+ * 取りこぼしで`onFinished`が一度も呼ばれないと、以前は`Promise`が永久に解決せず
+ * `finally`の`session.dispose()`にも到達しなかった）。
+ *
+ * 打ち切り時は`session.interrupt()`を呼び、進行中のターン・CLIプロセス側も止める
+ * （`interrupt()`自体がハングする可能性もあるため、その完了を待たずにタイムアウトの
+ * `reject`を確定させる。`interrupt()`は結果を問わず投げっぱなしにする）。`settled`で
+ * 「最初に決着した経路」だけを採用し、後から本来の`onFinished`が遅れて呼ばれても
+ * 二重にresolve/rejectしない（`Promise`はそもそも2度目以降の決着を無視するが、
+ * ここでは`clearTimeout`忘れやログの二重出力も避ける）。`session.dispose()`は
+ * 経路によらず`finally`で1回だけ呼ぶ。
  */
 /** `roadmap.ts`からも使う（`buildPlannerSessionInput`と同じ理由でexportする）。 */
 export async function sendSingleTurn(
@@ -809,6 +900,7 @@ export async function sendSingleTurn(
   provider: Provider,
   input: TaskSessionInput,
   prompt: string,
+  timeoutMs: number = PLANNER_TURN_TIMEOUT_MS,
 ): Promise<string> {
   assertPlannerSessionIsSafe(provider, input);
   const session = await host.openTaskSession(input);
@@ -816,7 +908,27 @@ export async function sendSingleTurn(
   session.open({ preserveFocus: true });
   try {
     return await new Promise<string>((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        // 完了・失敗を待たず投げっぱなしにする（interrupt自体がハングしても、
+        // このタイムアウトが打ち切りとして確定することを妨げない）
+        void session.interrupt().catch(() => undefined);
+        reject(
+          new Error(
+            `分解セッションのターンが${timeoutMs}ミリ秒以内に完了しなかったため打ち切りました`,
+          ),
+        );
+      }, timeoutMs);
       session.onFinished((reason, state) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
         if (reason === 'failed') {
           reject(new Error('分解セッションのターンが失敗しました'));
           return;
