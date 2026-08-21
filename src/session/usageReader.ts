@@ -1,9 +1,16 @@
 import type { CodexPaths } from '../codex/cliLocator';
 import { findLastTokenCount, type UsageSnapshot } from '../codex/usage';
+import { mapWithLimit } from '../util/concurrency';
 import type { FileSystemPort } from './ports';
 
 /** 末尾から読む量。token_countイベントは数百バイト程度なので十分な余裕がある。 */
 const TAIL_BYTES = 64 * 1024;
+
+/**
+ * `newestRollout`で`fs.mtimeMs`を並列発火する上限。逐次との比較で十分な短縮効果が
+ * ある一方、件数分を無制限に同時発火しないための頭打ち値。
+ */
+const MTIME_CONCURRENCY_LIMIT = 32;
 
 /**
  * 現在のレート制限使用量を読む。
@@ -32,8 +39,11 @@ export class UsageReader {
   private async newestRollout(): Promise<string | undefined> {
     const files = await this.fs.listRollouts(this.paths.sessions);
     // 会話中は`onRolloutChanged`のたびに全件呼ばれうるため、逐次待ちだと件数に比例して
-    // 遅くなる。並列化する（issue #382）。
-    const mtimes = await Promise.all(files.map((file) => this.fs.mtimeMs(file)));
+    // 遅くなる。並列化する（issue #382）。ただし件数分を無制限に同時発火しないよう
+    // 上限を設ける（レビュー指摘）。
+    const mtimes = await mapWithLimit(files, MTIME_CONCURRENCY_LIMIT, (file) =>
+      this.fs.mtimeMs(file),
+    );
 
     let newest: string | undefined;
     let newestMtime = -1;

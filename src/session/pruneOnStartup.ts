@@ -12,6 +12,11 @@ import type { SessionStore } from './sessionStore';
  *
  * 呼び出し側（`activate()`）は必ず `void` で投げっぱなしにする。ここでは
  * `pruneCache()` が失敗しても例外を外へ出さず、`activate()` を妨げない。
+ *
+ * `pruneCache()`は`locateRollouts()`のスナップショットと現在状態の間にウィンドウが
+ * あるため、起動直後に作られたセッションのメタを消しうる。ただし対象はメタキャッシュ
+ * のみで実ファイルは削除せず、キャッシュミスは`resolveMeta`が読み直して自己修復する
+ * ため実害はない。この関数を実ファイル削除やアーカイブ処理へ転用しないこと。
  */
 export async function pruneMetaCacheOnStartup(
   store: Pick<SessionStore, 'pruneCache'>,

@@ -7,10 +7,17 @@ import {
   sessionIdFromRolloutName,
 } from '../codex/sessionMeta';
 import type { SessionMeta, SessionSummary } from '../codex/types';
+import { mapWithLimit } from '../util/concurrency';
 import { basenameOf } from '../util/paths';
 import type { FileSystemPort, MetaCachePort, ThreadListPort } from './ports';
 
 export type HistoryScope = 'workspace' | 'all';
+
+/**
+ * `orderByRecency`で`fs.mtimeMs`を並列発火する上限。逐次との比較で十分な短縮効果が
+ * ある一方、件数分を無制限に同時発火しないための頭打ち値。
+ */
+const MTIME_CONCURRENCY_LIMIT = 32;
 
 /**
  * 表示名を作るために読む先頭行数。
@@ -187,16 +194,15 @@ export class SessionStore {
   ): Promise<Array<{ id: string; location: RolloutLocation; updatedAt: string }>> {
     // indexに無いものだけmtimeが要る。件数分逐次待つと台数に比例して遅くなるため
     // 並列化する（issue #382）。最終的に全件ソートするため呼び出し順は問わない。
-    const rows = await Promise.all(
-      located.map(async ([id, location]) => {
-        const fromIndex = indexed.get(id)?.updatedAt;
-        if (fromIndex !== undefined) {
-          return { id, location, updatedAt: fromIndex };
-        }
-        const mtimeMs = await this.fs.mtimeMs(location.filePath);
-        return { id, location, updatedAt: new Date(mtimeMs ?? 0).toISOString() };
-      }),
-    );
+    // ただし件数分を無制限に同時発火しないよう上限を設ける（レビュー指摘）。
+    const rows = await mapWithLimit(located, MTIME_CONCURRENCY_LIMIT, async ([id, location]) => {
+      const fromIndex = indexed.get(id)?.updatedAt;
+      if (fromIndex !== undefined) {
+        return { id, location, updatedAt: fromIndex };
+      }
+      const mtimeMs = await this.fs.mtimeMs(location.filePath);
+      return { id, location, updatedAt: new Date(mtimeMs ?? 0).toISOString() };
+    });
 
     return rows.sort((a, b) =>
       a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0,
