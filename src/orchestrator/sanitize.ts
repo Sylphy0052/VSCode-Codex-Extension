@@ -94,6 +94,22 @@ export function maskHomeDir(value: string, homeDir: string = os.homedir()): stri
  * 通した文字列を `createLogger` が再度この関数へ通しても結果は変わらない。
  *
  * `homeDir` はテスト容易性のために受け取れるようにしてある（既定は `os.homedir()`）。
+ *
+ * **限界（セキュリティ監査指摘）**: マスクするのはURLのuserinfoとホームディレクトリ配下の
+ * ユーザー名の2種類だけで、それ以外の秘密情報（APIキー・トークン・認証ヘッダ等。例:
+ * `Bearer <token>` `ghp_...` `sk-...`）は対象外のためそのまま素通りする。外部CLIの
+ * stderrをそのまま `log.warn` / `log.error` へ渡す経路（`src/view/settingsProvider.ts`・
+ * `src/extension.ts` 等）は、マスク済みのログでもこれらの文字列が含まれていれば漏れうる。
+ * 「マスク済みだから安全」と誤解してログを共有しないこと。この穴自体を塞ぐ対応は
+ * Issue #474で追跡する（ここでは限界の明記のみ）。
+ *
+ * 監査が実測で確認した既知のすり抜け例（いずれも対応の意図的な範囲外）:
+ * - パーセントエンコードされたURL（例: `https://token%40example.com@host/...` のように
+ *   `@` 自体がエンコードされている場合、`URL_USERINFO_PATTERN` は元の記法通りの
+ *   `user:pass@host` 形状しか見ないため一致しない）
+ * - `\\` にエスケープされたWindowsパス（例: JSON化されたエラーメッセージ中の
+ *   `C:\\\\Users\\\\alice\\\\...` は `HOME_DIR_USERNAME_PATTERN` が想定する
+ *   `C:\Users\alice` の形状と一致せず素通りする）
  */
 export function maskForLog(value: string, homeDir?: string): string {
   return maskHomeDir(maskUrlUserinfo(value), homeDir);
