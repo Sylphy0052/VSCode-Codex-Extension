@@ -553,7 +553,17 @@ export interface WorkflowWarning {
      * 直近1件へ丸める（`orchestratorPromptOverride`と同じ規律。taskIdを持たない警告なので
      * `persistFailed`と同じく「このrunの直近1件」の意味になる）。
      */
-    | 'finalMergeDecision';
+    | 'finalMergeDecision'
+    /**
+     * ループが停滞したと判定されて自動的に止まった（design.md §16.27、Issue #336）。
+     * タスク間メッセージングの待ちぼうけ（`messagingStalled`、design.md §16.21）とは
+     * 別の機序（こちらは1タスクの応答そのものが同じ内容を繰り返している）のため、
+     * 混同しないよう別のkindにする。状態は`maxReached`と同じく`deriveMaxReachedWarnings`
+     * と対になる`deriveStalledWarnings`が`live.runState`から都度導出する（1回だけ積むと
+     * ウィンドウのリロードで復元した実行では二度と出せない。`deriveAllowWarnings`と
+     * 同じ理由）。
+     */
+    | 'loopStalled';
   /** ワークフロー全体に関わる警告（gitignoreなど）は undefined。 */
   taskId: string | undefined;
   message: string;
@@ -2034,8 +2044,9 @@ export class WorkflowRunner {
   }
 
   /**
-   * 回数切れ（`maxReached`）で止まったタスクを、同じ会話のまま続きから走らせる
-   * （design.md §16.8「続ける」、issue #284）。対象外なら何もせず `false` を返す。
+   * 回数切れ（`maxReached`）・停滞（`stalled`、design.md §16.27、Issue #336）で止まった
+   * タスクを、同じ会話のまま続きから走らせる（design.md §16.8「続ける」、issue #284）。
+   * 対象外なら何もせず `false` を返す。
    *
    * 「再実行」（`retryTask`）との違いは、新しいセッション・worktreeを作らないこと。
    * 生きているセッションへ `runLoop` をもう1度かけ、`initialPrompt` を空にして
@@ -3534,18 +3545,20 @@ export class WorkflowRunner {
     live.runState = applyLoopStopReason(live.runState, live.def.tasks, taskId, reason);
 
     if (reason !== 'manual' && reason !== 'interrupted') {
-      // done / maxReached / failed。
+      // done / maxReached / stalled / failed。
       //
-      // `maxReached`（回数切れ）だけはセッションを残す（issue #284）。「続ける」
-      // （`continueTask`）が同じ会話・同じworktreeのまま送信回数の予算を足して再開する
-      // ための唯一の足がかりで、ここで解放すると続きから走らせる手段が無くなる。
+      // `maxReached`（回数切れ）・`stalled`（停滞、design.md §16.27、Issue #336）は
+      // セッションを残す（issue #284、#336）。「続ける」（`continueTask`）が同じ会話・
+      // 同じworktreeのまま再開するための唯一の足がかりで、ここで解放すると続きから
+      // 走らせる手段が無くなる。停滞はCLIやセッションが壊れたわけではなく「同じ内容を
+      // 繰り返しているだけ」なので、`maxReached`と同じ理由でセッションを残す価値がある。
       // 残ったセッションは、`startTask`が同じタスクを開き直すとき（「再実行」）と
       // run全体の`dispose`で解放される。worktreeは元から`done`のときしか撤去しない
       // （`shouldRemoveWorktree`）ので、こちらは変更しなくてよい。
       //
       // それ以外（done / failed）は従来どおり解放する（design.md §16.10の4）。
       // 再試行はここで新しいセッション・worktreeを新規に作るため、古いものは残さない
-      if (reason !== 'maxReached') {
+      if (reason !== 'maxReached' && reason !== 'stalled') {
         liveTask?.session.dispose();
       }
 

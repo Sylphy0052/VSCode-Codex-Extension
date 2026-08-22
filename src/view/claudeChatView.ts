@@ -27,6 +27,7 @@ import {
   readChatRenderMarkdownConfig,
   readChatSendOnConfig,
   readClaudeConfig,
+  readWorkflowsConfig,
   workspaceFolderPaths,
 } from '../config';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
@@ -996,6 +997,9 @@ export class ClaudeChatViewManager
     const loop = new LoopController(
       (text) => this.sendFromLoop(entry, text),
       (status) => this.onLoopStatus(entry, status),
+      // 停滞判定のしきい値（design.md §16.27、Issue #336）。LoopControllerはvscodeに
+      // 依存しないため、設定の読み出しはここ（view層）で行う
+      readWorkflowsConfig().stallRepeatCount,
     );
 
     const entry: ClaudePanel = {

@@ -120,6 +120,40 @@ describe('applyLoopStopReason', () => {
     expect(t2.failure).toEqual({ kind: 'maxReached' });
   });
 
+  it('stalledはfailedになり、理由をmaxReachedと区別して記録する（design.md §16.27、Issue #336）', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T2');
+    run = applyLoopStopReason(run, tasks, 'T2', 'stalled');
+    const t2 = stateOf(run, 'T2');
+    expect(t2.state).toBe('failed');
+    expect(t2.failure).toEqual({ kind: 'stalled' });
+    expect(t2.failure).not.toEqual({ kind: 'loopFailed' });
+  });
+
+  it('stalledはretriesを消費しない（failedとは別経路。retryCountが増えない）', () => {
+    const tasks = chainTasks(2); // T2のretries: 2
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = finishDone(run, tasks, 'T1');
+    run = markRunning(run, 'T2');
+    run = applyLoopStopReason(run, tasks, 'T2', 'stalled');
+    const t2 = stateOf(run, 'T2');
+    // retriesが残っていても、failedのように自動でpendingへ戻さず即座にfailedで確定する
+    // （taskStopped=manualStopと同じ扱い。design.md §16.27）
+    expect(t2.state).toBe('failed');
+    expect(t2.retryCount).toBe(0);
+  });
+
+  it('stalledは依存する後続をskippedにする（failedの波及と同じ）', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T2');
+    run = applyLoopStopReason(run, tasks, 'T2', 'stalled'); // T3・T4が依存
+    expect(stateOf(run, 'T3').state).toBe('skipped');
+    expect(stateOf(run, 'T3').failure).toEqual({ kind: 'dependencyFailed', failedTaskIds: ['T2'] });
+  });
+
   it('failedはretriesの範囲でpendingへ戻し、再試行回数を増やす', () => {
     const tasks = chainTasks(2);
     let run = createRunState(tasks);
@@ -952,5 +986,22 @@ describe('continueTask（回数切れから続ける、issue #284）', () => {
     run = { ...run, haltedByUser: true };
 
     expect(continueTask(run, tasks, 'T1').haltedByUser).toBe(false);
+  });
+
+  it('停滞（stalled）もmaxReachedと同じくrunningへ戻せる（design.md §16.27、Issue #336）', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = finishDone(run, tasks, 'T1');
+    run = markRunning(run, 'T2');
+    run = recordSubmissionCount(run, 'T2', 5);
+    run = applyLoopStopReason(run, tasks, 'T2', 'stalled'); // T2: failed(stalled), T3・T4: skipped
+
+    const continued = continueTask(run, tasks, 'T2');
+    expect(stateOf(continued, 'T2').state).toBe('running');
+    expect(stateOf(continued, 'T2').failure).toBeUndefined();
+    expect(stateOf(continued, 'T3').state).toBe('pending');
+    expect(stateOf(continued, 'T2').manualRetryCount).toBe(0);
+    expect(stateOf(continued, 'T2').submissionCount).toBe(5);
   });
 });
