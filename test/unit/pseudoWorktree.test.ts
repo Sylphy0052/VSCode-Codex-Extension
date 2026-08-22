@@ -539,6 +539,67 @@ describe('実ファイルシステムでの統合テスト', () => {
     }
   });
 
+  /**
+   * Issue #505（監査指摘）: `cloneWorkspace`の事後確認は、`mkdir(target)`直後に
+   * `isPathWithinRoot`（境界内か）しか見ていなかった。`target`の親ディレクトリ
+   * （`<runId>`）が、この確認と大量のファイルコピーの間にワークスペース内の別ディレクトリ
+   * （典型的には`.git/hooks`）を指すシンボリックリンクへ差し替えられると、そこに既に
+   * 同名（`taskId`）のディレクトリさえあれば「境界内」として素通りし、コピーループが
+   * `.git/hooks`配下の既存ディレクトリへワークスペースの内容を書き込んでしまう
+   * （`hasGitSegment`によるIssue #406の`.git`無条件拒否は`relPath`の文字列にしか
+   * 掛からないため迂回される）。
+   *
+   * `reflectIntegrationToWorkspace`の書き込み経路（PR #504）と同じ「確認時点で想定して
+   * いた場所そのものか」の厳密一致にすることで、この差し替えを確実に検知できることを
+   * 確認する。
+   */
+  it(
+    '複製先の親ディレクトリがワークスペース内の`.git/hooks`へ差し替えられても、' +
+      '想定した場所以外への複製として検知し撤去する（境界内リダイレクト、Issue #505）',
+    async () => {
+      await writeWorkspaceFile('secret.txt', 'top-secret\n');
+
+      const hooksDir = path.join(workspace, '.git', 'hooks');
+      const target = pseudoWorktreePath(workspace, RUN_ID, 'T1');
+      const victimDir = path.join(hooksDir, path.basename(target));
+      await mkdir(victimDir, { recursive: true });
+      await writeFile(path.join(victimDir, 'pre-commit'), 'original-hook\n');
+
+      const parentDir = path.dirname(target);
+      let swapped = false;
+      // `parentDir`（`<runId>`ディレクトリ）の実パス確認（`mkdir(target)`直後の1回目の
+      // 呼び出し）が正しい値を返した直後に、`parentDir`自体を`.git/hooks`への
+      // シンボリックリンクへ差し替える（TOCTOU窓の再現。`reflectIntegrationToWorkspace`の
+      // 同種テストと同じ形）。`victimDir`を`.git/hooks`配下に`taskId`と同じ名前で
+      // 事前に用意しているため、差し替え後も`target`の実パス解決自体は成功する
+      // （`realpath`が`undefined`を返す弱い検知では捕まえられないケースを再現する）。
+      const raceFs: typeof nodePseudoWorktreeFileSystem = {
+        ...nodePseudoWorktreeFileSystem,
+        realpath: async (t) => {
+          const result = await nodePseudoWorktreeFileSystem.realpath(t);
+          if (!swapped && t === parentDir) {
+            swapped = true;
+            await rm(parentDir, { recursive: true, force: true });
+            await symlink(hooksDir, parentDir);
+          }
+          return result;
+        },
+      };
+
+      const result = await cloneWorkspace(workspace, RUN_ID, 'T1', [], raceFs);
+
+      expect(result).toMatchObject({ ok: false, reason: 'boundaryEscape' });
+
+      // 既存のフックは書き換わっていない
+      await expect(readFile(path.join(victimDir, 'pre-commit'), 'utf8')).resolves.toBe(
+        'original-hook\n',
+      );
+      // ワークスペースの内容が`.git/hooks`配下へ漏れ出ていない
+      const victimEntries = await readdir(victimDir);
+      expect(victimEntries).toEqual(['pre-commit']);
+    },
+  );
+
   describe('removePseudoWorktree（Issue #298）', () => {
     it('cloneWorkspaceで作った複製を撤去する', async () => {
       await writeWorkspaceFile('a.txt', 'a\n');
@@ -1602,7 +1663,7 @@ describe('実ファイルシステムでの統合テスト', () => {
         };
 
         await expect(persistManifest(workspace, RUN_ID, manifest, fakeFs)).rejects.toThrow(
-          /ワークスペースの外/,
+          /想定した場所以外/,
         );
 
         // 撤去されており、実体としては残っていない
@@ -1610,6 +1671,58 @@ describe('実ファイルシステムでの統合テスト', () => {
       } finally {
         await rm(outsideDir, { recursive: true, force: true });
       }
+    },
+  );
+
+  /**
+   * Issue #505（監査指摘）: 上のテストは`filePath`のrealpathを直接偽装して「ワークスペースの
+   * 外」を再現するものだったが、実際の脅威（Issue #484と同種）は「境界の外」ではなく
+   * 「境界内の別ディレクトリ」（典型的には`.git/hooks`）への差し替えだった。旧実装の
+   * 事後確認は`isPathWithinRoot`（境界内か）しか見ていなかったため、`dirPath`が
+   * ワークスペース内の`.git/hooks`へ差し替えられても素通りしてしまう。
+   *
+   * `reflectIntegrationToWorkspace`の書き込み経路（PR #504）と同じ「`mkdir`直後に確認した
+   * `dirPath`の実パスそのものか」の厳密一致にすることで、この差し替えを確実に検知できる
+   * ことを確認する。
+   */
+  it(
+    '永続化先ディレクトリがワークスペース内の`.git/hooks`へ差し替えられても、' +
+      '想定した場所以外への書き込みとして検知し取り消す（境界内リダイレクト、Issue #505）',
+    async () => {
+      const hooksDir = path.join(workspace, '.git', 'hooks');
+      await mkdir(hooksDir, { recursive: true });
+
+      const filePath = integrationManifestPath(workspace, RUN_ID);
+      const dirPath = path.dirname(filePath);
+      const manifest: IntegrationManifest = new Map([
+        ['a.txt', { taskId: 'T1', kind: 'added' }],
+      ]);
+
+      let swapped = false;
+      // `dirPath`（`<runId>`ディレクトリ）の実パス確認（`mkdir(dirPath)`直後の1回目の
+      // 呼び出し）が正しい値を返した直後に、`dirPath`自体を`.git/hooks`への
+      // シンボリックリンクへ差し替える（TOCTOU窓の再現）。以降の`writeTextFile`は
+      // 実際には`.git/hooks/manifest.json`へ書き込まれる
+      const raceFs: typeof nodePseudoWorktreeFileSystem = {
+        ...nodePseudoWorktreeFileSystem,
+        realpath: async (target) => {
+          const result = await nodePseudoWorktreeFileSystem.realpath(target);
+          if (!swapped && target === dirPath) {
+            swapped = true;
+            await rm(dirPath, { recursive: true, force: true });
+            await symlink(hooksDir, dirPath);
+          }
+          return result;
+        },
+      };
+
+      await expect(persistManifest(workspace, RUN_ID, manifest, raceFs)).rejects.toThrow(
+        /想定した場所以外/,
+      );
+
+      // `.git/hooks`配下にマニフェストの内容が漏れ出て残っていない
+      const hooksEntries = await readdir(hooksDir);
+      expect(hooksEntries).toEqual([]);
     },
   );
 
@@ -1642,6 +1755,50 @@ describe('実ファイルシステムでの統合テスト', () => {
         expect(loaded.ok).toBe(false);
         if (loaded.ok) return;
         expect(loaded.message).toContain('復元できません');
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  /**
+   * Issue #505（監査指摘）: `loadPersistedManifest`は`readTextFile`（読み出し本体）を
+   * 境界確認（`realpath`による`isPathWithinRoot`判定）より先に実行しており、他の
+   * 読み出し箇所（`reflectIntegrationToWorkspace`の反映元コピー、コメント参照）が
+   * 「読み出しの前に確認する」方針を明言しているのと非対称だった。確認を読み出しより
+   * 前へ動かし、境界外と判明した場合は`readTextFile`が一度も呼ばれないことを確認する。
+   */
+  it(
+    '境界外への差し替えを検知した場合、readTextFileを呼ぶ前に復元を打ち切る' +
+      '（読み出し順序の非対称の解消、Issue #505）',
+    async () => {
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-order-'));
+      try {
+        const filePath = integrationManifestPath(workspace, RUN_ID);
+        await mkdir(path.dirname(filePath), { recursive: true });
+        const manifest: IntegrationManifest = new Map([
+          ['a.txt', { taskId: 'T1', kind: 'added' }],
+        ]);
+        await writeFile(filePath, serializeManifest(manifest));
+
+        let readTextFileCalled = false;
+        const fakeFs: typeof nodePseudoWorktreeFileSystem = {
+          ...nodePseudoWorktreeFileSystem,
+          realpath: async (target) => {
+            if (target === filePath) {
+              return path.join(outsideDir, 'manifest.json');
+            }
+            return nodePseudoWorktreeFileSystem.realpath(target);
+          },
+          readTextFile: async (target) => {
+            readTextFileCalled = true;
+            return nodePseudoWorktreeFileSystem.readTextFile(target);
+          },
+        };
+
+        const loaded = await loadPersistedManifest(workspace, RUN_ID, fakeFs);
+        expect(loaded.ok).toBe(false);
+        expect(readTextFileCalled).toBe(false);
       } finally {
         await rm(outsideDir, { recursive: true, force: true });
       }

@@ -313,9 +313,16 @@ export type LoadManifestResult =
  * ウィンドウがあり、その間に経路がシンボリックリンクへ差し替えられるとすり抜ける
  * （TOCTOU、レビュー指摘: medium）。`cloneWorkspace`/`ensureIntegrationDir`が「作成後に
  * `realpath`で実パスを確認し、境界外なら撤去する」二次防御を対にしているのと同じ考え方で、
- * 読み込んだファイルの実パスを事後に`realpath`で確認し、`workspaceRoot`の外を指して
- * いれば読んだ内容を破棄して「復元できなかった」として扱う（撤去ではなく破棄で足りる
- * のは、読み込みは書き込みと違って対象への副作用を残さないため）。
+ * `filePath`の実パスを`realpath`で確認し、`workspaceRoot`の外を指していれば「復元できな
+ * かった」として扱う。
+ *
+ * **この確認は`readTextFile`より前に行う（Issue #505、確認順序の非対称の解消）。**
+ * 以前はここが読み込みの後にあり、「読み込んだ内容がこの関数の外へ出ないので事後確認で
+ * 足りる」という理由で許容していたが、他の読み出し箇所（`reflectIntegrationToWorkspace`の
+ * 反映元コピー）が「読み出しの前に確認する」方針を明言しているのと非対称だった。ファイルが
+ * まだ存在しない（初回実行等）場合の`realpath`の`undefined`はここでは正常系（後段の
+ * `readTextFile`も`undefined`を返し、空マニフェストとして扱われる）のため、
+ * `realFilePath !== undefined`のときだけ境界を確認し、フェイルクローズしない。
  *
  * ファイルサイズの上限（`MAX_MANIFEST_FILE_BYTES`）による足切りも`JSON.parse`の前に行う
  * （レビュー指摘: medium、Issue #380の追加指摘。`MAX_MANIFEST_ENTRIES`の項のコメント参照）。
@@ -335,6 +342,26 @@ export async function loadPersistedManifest(
     };
   }
 
+  // Issue #505（監査指摘、確認順序の非対称）: 事後の境界確認（realpathによる
+  // isPathWithinRoot判定）を`readTextFile`より前に動かす。従来はこの確認が読み出しの
+  // 後にあり、「読み込んだ内容がこの関数の外へ出ないので事後確認で足りる」という理由
+  // （`reflectIntegrationToWorkspace`の反映元コピー側のコメント参照）で許容していたが、
+  // その反映元コピーが「読み出しの前に確認する」方針を明言しているのと非対称だった。
+  //
+  // ファイルがまだ存在しない（初回実行、統合未実施）場合の`realpath`の`undefined`は
+  // ここでは正常系（後段の`readTextFile`も`undefined`を返し、空マニフェストとして
+  // `ok: true`になる）のため、境界確認は`realFilePath !== undefined`のときだけ行う。
+  const realFilePath = await fs.realpath(filePath);
+  if (realFilePath !== undefined) {
+    const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
+    if (!isPathWithinRoot(realFilePath, realRoot)) {
+      return {
+        ok: false,
+        message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際にはワークスペースの外を指しています）: ${sanitizeForLog(filePath)}`,
+      };
+    }
+  }
+
   const stat = await fs.statFile(filePath);
   if (stat !== undefined && stat.size > MAX_MANIFEST_FILE_BYTES) {
     return {
@@ -346,15 +373,6 @@ export async function loadPersistedManifest(
   const content = await fs.readTextFile(filePath);
   if (content === undefined) {
     return { ok: true, manifest: new Map() };
-  }
-
-  const realFilePath = await fs.realpath(filePath);
-  const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
-  if (realFilePath === undefined || !isPathWithinRoot(realFilePath, realRoot)) {
-    return {
-      ok: false,
-      message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際にはワークスペースの外を指しています）: ${sanitizeForLog(filePath)}`,
-    };
   }
 
   let parsed: unknown;
@@ -385,11 +403,24 @@ export async function loadPersistedManifest(
  * 書き込みの前に、`loadPersistedManifest`と同じくシンボリックリンクの経路検知を行う
  * （レビュー指摘: medium）。
  *
- * さらに、`cloneWorkspace`/`ensureIntegrationDir`と同じ二段構えの二段目（書き込み後に
- * `realpath`で実パスを確認し、境界外なら撤去する）も対にする（レビュー指摘: medium、
- * TOCTOU）。ここは間に`fs.mkdir(path.dirname(filePath))`を挟むぶん一次防御から実I/Oまでの
- * ウィンドウが他箇所より広く、非対称のまま放置すると一次防御をすり抜けられた場合に
- * 唯一無防備になる。
+ * さらに、`reflectIntegrationToWorkspace`の書き込み経路（PR #504）と同じ二段構えの
+ * 二段目（書き込み後に実パスを確認し、境界外なら撤去する）も対にする（レビュー指摘:
+ * medium、TOCTOU）。ここは間に`fs.mkdir(path.dirname(filePath))`を挟むぶん一次防御から
+ * 実I/Oまでのウィンドウが他箇所より広く、非対称のまま放置すると一次防御をすり抜けられた
+ * 場合に唯一無防備になる。
+ *
+ * **事後確認は「境界内か」（`isPathWithinRoot`）ではなく「`mkdir`直後に確認した
+ * `dirPath`の実パスそのものか」の厳密一致にする（Issue #505、監査指摘）。**
+ * `isPathWithinRoot`だけだと、`dirPath`（`<runId>`ディレクトリ）が`mkdir`から
+ * `writeTextFile`までの間にワークスペース内の別ディレクトリ（典型的には`.git/hooks`）を
+ * 指すシンボリックリンクへ差し替えられた場合に「境界内」として素通りしてしまい、
+ * `manifest.json`という名前の既存ファイルを上書きしうる（`hasGitSegment`による
+ * Issue #406の`.git`無条件拒否は`relPath`の文字列にしか掛からないため迂回される）。
+ * `dirPath`は`mkdir`が`recursive: true`で必ず作る（作れなければ`mkdir`自体が例外を
+ * 投げてこの先へ進まない）ため、直後の`realpath`が`undefined`を返すのはここでは
+ * 正常系ではなく異常（TOCTOU窓の間に削除・差し替えされた）としてフェイルクローズする
+ * （`reflectIntegrationToWorkspace`の削除経路と違い、こちらは新規作成の前提があるため
+ * 「無ければ何もしない」の余地が無い）。
  */
 export async function persistManifest(
   workspaceRoot: string,
@@ -398,6 +429,7 @@ export async function persistManifest(
   fs: PseudoWorktreeFileSystemPort,
 ): Promise<void> {
   const filePath = integrationManifestPath(workspaceRoot, runId);
+  const dirPath = path.dirname(filePath);
 
   const symlinkedAncestor = await findSymlinkedAncestor(workspaceRoot, filePath, fs);
   if (symlinkedAncestor !== undefined) {
@@ -406,15 +438,23 @@ export async function persistManifest(
     );
   }
 
-  await fs.mkdir(path.dirname(filePath));
+  await fs.mkdir(dirPath);
+
+  const realDirPath = await fs.realpath(dirPath);
+  if (realDirPath === undefined) {
+    throw new Error(
+      `疑似worktreeの統合マニフェストの永続化先ディレクトリを確認できませんでした（作成直後に削除・差し替えされた可能性があります）: ${sanitizeForLog(dirPath)}`,
+    );
+  }
+
   await fs.writeTextFile(filePath, serializeManifest(manifest));
 
   const realFilePath = await fs.realpath(filePath);
-  const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
-  if (realFilePath === undefined || !isPathWithinRoot(realFilePath, realRoot)) {
+  const expectedFilePath = path.join(realDirPath, path.basename(filePath));
+  if (realFilePath === undefined || realFilePath !== expectedFilePath) {
     await fs.removeFile(filePath);
     throw new Error(
-      `疑似worktreeの統合マニフェストの永続化先が実際にはワークスペースの外を指していたため、` +
+      `疑似worktreeの統合マニフェストの永続化先が実際には想定した場所以外を指していたため、` +
         `書き込みを取り消しました: ${sanitizeForLog(realFilePath ?? filePath)}`,
     );
   }
@@ -744,14 +784,25 @@ export type CloneWorkspaceResult =
  * 2. 一次防御: 作成先までの経路にシンボリックリンクが無いかを確かめる
  * 3. 複製先が既に存在すればエラーにする（既存の作業を踏まない。gitの「同名ブランチ」と同じ意図）
  * 4. 複製先ディレクトリを作る
- * 5. 二次防御: 実際に作られた場所を実パス解決し、`workspaceRoot` の配下にあることを確認する。
- *    ここで多数のファイルをコピーする前に確認することで、境界を外れた場合の書き込みを
- *    最小限（空ディレクトリ1つ）に抑える
+ * 5. 二次防御: 実際に作られた場所を実パス解決し、`mkdir`直後に確認した親ディレクトリの
+ *    実パスそのものであることを確認する。ここで多数のファイルをコピーする前に確認する
+ *    ことで、境界を外れた場合の書き込みを最小限（空ディレクトリ1つ）に抑える
  * 6. ワークスペースを複製し、複製先のスナップショットを返す
  *
  * `retry`は`worktree.ts`の`createWorktree`と同じ意味（Issue #396）。再試行のたびに
  * 呼び出し側（`runnerWorkingDirectory.ts`）が異なる`retry`を渡すことで、`pseudoWorktreePath`が
  * 別ディレクトリを指すようになり、前回の複製が残っていても`alreadyExists`にならない。
+ *
+ * **5.の事後確認は「境界内か」（`isPathWithinRoot`）ではなく「`mkdir`直後に確認した
+ * 親ディレクトリ（`parentDir`）の実パスそのものか」の厳密一致にする（Issue #505、
+ * 監査指摘）。** `isPathWithinRoot`だけだと、`target`自身が`mkdir`から実パス確認までの
+ * 間にワークスペース内の別ディレクトリ（典型的には`.git/hooks`）を指すシンボリック
+ * リンクへ差し替えられた場合に「境界内」として素通りしてしまい、後続のコピーループが
+ * `.git/hooks`配下へワークスペースの内容を書き込みうる（`hasGitSegment`によるIssue #406の
+ * `.git`無条件拒否は`relPath`の文字列にしか掛からないため迂回される）。`parentDir`は
+ * `mkdir`が`recursive: true`で必ず作る（作れなければ`mkdir`自体が例外を投げてこの先へ
+ * 進まない）ため、直後の`realpath`が`undefined`を返すのはここでは正常系ではなく異常
+ * （TOCTOU窓の間に削除・差し替えされた）としてフェイルクローズする。
  */
 export async function cloneWorkspace(
   workspaceRoot: string,
@@ -787,14 +838,27 @@ export async function cloneWorkspace(
 
   await fs.mkdir(target);
 
+  const parentDir = path.dirname(target);
+  const realParentDir = await fs.realpath(parentDir);
   const realTarget = await fs.realpath(target);
-  const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
-  if (realTarget === undefined || !isPathWithinRoot(realTarget, realRoot)) {
-    await fs.removeDirRecursive(target);
+  const expectedTarget =
+    realParentDir !== undefined ? path.join(realParentDir, path.basename(target)) : undefined;
+  if (realTarget === undefined || expectedTarget === undefined || realTarget !== expectedTarget) {
+    // Issue #505（監査指摘）: ここで`fs.removeDirRecursive(target)`を呼ぶと、`parentDir`が
+    // `.git/hooks`等の既存ディレクトリへ差し替えられていた場合、`target`は文字列上は
+    // 「自分がmkdirした空ディレクトリ」でも、実体はそのシンボリックリンクを辿った先の
+    // 既存ディレクトリ（`.git/hooks/<taskId>`等）になっている。この状態で再帰削除すると、
+    // 攻撃者の差し替え先にあった既存の内容ごと消してしまい、境界外へのコピーより悪い
+    // 結果（任意ディレクトリの再帰削除）になる。`target`が本当に自分の作った空ディレクトリ
+    // なのか、差し替えられた先の既存ディレクトリなのかを、渡されたパス文字列だけでは
+    // 区別できない（`fs.promises`にはこれを安全に見分ける`openat`相当が無い。design.mdの
+    // 同種の残存TOCTOU窓の記述を参照）ため、ここでは削除を試みず、複製自体を打ち切る
+    // だけに留める（残りうるのは、境界の外・想定と異なる場所に作られた空ディレクトリ1つ
+    // であり、書き込み・削除のどちらよりも被害が小さい）。
     return {
       ok: false,
       reason: 'boundaryEscape',
-      message: `複製先がワークスペースの外に作られたため、撤去しました: ${sanitizeForLog(realTarget ?? target)}`,
+      message: `複製先が実際には想定した場所以外を指しているため、複製を中止しました: ${sanitizeForLog(realTarget ?? target)}`,
     };
   }
 
