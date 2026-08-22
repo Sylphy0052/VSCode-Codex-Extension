@@ -3525,6 +3525,7 @@ Codexの`/btw`は`thread/fork`で**新しいスレッド**を作ってから聞�
 
 残る制約:
 
+- **「CLIのtranscriptに残らない」は拡張機能自身の書き出しには及ばない。** `transcriptMarkdown.ts`の`KIND_TITLE`へ`sideQuestion`を足したため、「会話を書き出す」（クリップボード・ファイル・生テキスト）には`/btw`の質問・応答が他の発言と同じく含まれる。画面には`kind:'sideQuestion'`の項目として残っている以上、書き出しから除外すると画面と食い違うため意図的にこうしている。利用者向けの説明はREADMEと`docs/slash-commands.md`にも同じ非対称を明記した（issue #340横断レビュー指摘）
 - webview側の候補表示・実際の送信・表示の更新は`docs/manual-test.md`のU-32・U-33に委ねる（vitestのnode環境では実VSCode webviewの表示を確認できないため）
 - 上記「依然として未確認のまま残ること」（X3節）は今回のスコープでは実測せず、コメントで明記するに留めた
 
