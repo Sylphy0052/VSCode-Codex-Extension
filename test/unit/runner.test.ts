@@ -489,7 +489,8 @@ function fakeForgeCli(options?: {
           : {
               code: 0,
               stdout: `${JSON.stringify({
-                web_url: options?.prUrl ?? 'https://gitlab.example.com/acme/repo/-/merge_requests/1',
+                web_url:
+                  options?.prUrl ?? 'https://gitlab.example.com/acme/repo/-/merge_requests/1',
               })}\n`,
               stderr: '',
             };
@@ -3024,9 +3025,9 @@ tasks:
 
     // 停止中でも、そのタスクのマージは走り切る
     expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
-    expect(
-      git.calls.filter((c) => c.args[0] === 'merge' && c.args[1] === '--no-ff'),
-    ).toHaveLength(2);
+    expect(git.calls.filter((c) => c.args[0] === 'merge' && c.args[1] === '--no-ff')).toHaveLength(
+      2,
+    );
 
     // 停止は解除されないので、後続は新しいセッションを開かない
     expect(store.find(runId)?.haltedByUser).toBe(true);
@@ -3447,7 +3448,10 @@ tasks:
       git,
       forge: fakeForgeDeps(cli, { branchNaming: 'conventional' }),
     });
-    const result = await runner.start('/repo/.agents/workflows/branch-naming-fallback.yaml', '/repo');
+    const result = await runner.start(
+      '/repo/.agents/workflows/branch-naming-fallback.yaml',
+      '/repo',
+    );
     const runId = result.runId as string;
     await flush();
 
@@ -3483,7 +3487,10 @@ tasks:
       git,
       forge: fakeForgeDeps(cli, { branchNaming: 'wf' }),
     });
-    const result = await runner.start('/repo/.agents/workflows/branch-naming-default.yaml', '/repo');
+    const result = await runner.start(
+      '/repo/.agents/workflows/branch-naming-default.yaml',
+      '/repo',
+    );
     const runId = result.runId as string;
     await flush();
 
@@ -3551,7 +3558,10 @@ tasks:
       await flush();
 
       const createCallIndex = cli.calls.findIndex(
-        (c) => c.args[0] === 'pr' && c.args[1] === 'create' && c.args.some((a) => a.startsWith('--base=wf/')),
+        (c) =>
+          c.args[0] === 'pr' &&
+          c.args[1] === 'create' &&
+          c.args.some((a) => a.startsWith('--base=wf/')),
       );
       const taskCreateCall = cli.calls[createCallIndex];
       expect(taskCreateCall?.args).toContain('--draft');
@@ -3632,7 +3642,9 @@ tasks:
       (c) => c.args[0] === 'pr' && c.args[1] === 'merge',
     );
     expect(readyCallIndices.length).toBe(2); // タスク層＋統合層
-    expect(finalMergeCallIndex).toBeGreaterThan(readyCallIndices[readyCallIndices.length - 1] ?? -1);
+    expect(finalMergeCallIndex).toBeGreaterThan(
+      readyCallIndices[readyCallIndices.length - 1] ?? -1,
+    );
   });
 
   it('readyへの切替に失敗しても、ワークフロー自体は止めず警告として残す（design.mdの「ワークフロー自体は止めない」方針）', async () => {
@@ -4287,7 +4299,10 @@ tasks:
           git,
           pseudoWorktree: { fs, exclude: [] },
         });
-        const result = await runner.start('/repo/.agents/workflows/pseudo-integrate-fail.yaml', '/repo');
+        const result = await runner.start(
+          '/repo/.agents/workflows/pseudo-integrate-fail.yaml',
+          '/repo',
+        );
         const runId = result.runId as string;
         await flush();
 
@@ -4325,7 +4340,10 @@ tasks:
           git,
           pseudoWorktree: { fs, exclude: [] },
         });
-        const result = await runner.start('/repo/.agents/workflows/pseudo-reflect-fail.yaml', '/repo');
+        const result = await runner.start(
+          '/repo/.agents/workflows/pseudo-reflect-fail.yaml',
+          '/repo',
+        );
         const runId = result.runId as string;
         await flush();
 
@@ -4358,9 +4376,9 @@ tasks:
         // ワークスペース側は反映されずに元のまま（反映がエラーで中断したため）
         expect(fs.files.get('/repo/a.txt')).toEqual({ size: 10, mtimeMs: 100 });
         const snapshot = runner.getSnapshot(runId);
-        expect(
-          snapshot?.warnings.some((w) => w.kind === 'pseudoWorktreeReflectBlocked'),
-        ).toBe(true);
+        expect(snapshot?.warnings.some((w) => w.kind === 'pseudoWorktreeReflectBlocked')).toBe(
+          true,
+        );
       } finally {
         process.off('unhandledRejection', rejectionListener);
       }
@@ -4491,7 +4509,9 @@ tasks:
 
       // runは（永続化に失敗しても）そのまま完了として扱われる。永続化の失敗はログへ落ちる
       expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe('done');
-      expect(errorLog).toHaveBeenCalledWith(expect.stringContaining('実行状態の永続化に失敗しました'));
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining('実行状態の永続化に失敗しました'),
+      );
     } finally {
       process.off('unhandledRejection', rejectionListener);
     }
@@ -4645,9 +4665,9 @@ tasks:
         // 復元されていなければ（空マニフェストのままなら）a.txtは反映されない
         expect(fs.files.get('/repo/a.txt')).toEqual({ size: 20, mtimeMs: 200 });
         const snapshot = reloadedRunner.getSnapshot(runId);
-        expect(
-          snapshot?.warnings.some((w) => w.kind === 'pseudoWorktreeReflectBlocked'),
-        ).toBe(false);
+        expect(snapshot?.warnings.some((w) => w.kind === 'pseudoWorktreeReflectBlocked')).toBe(
+          false,
+        );
       },
     );
 
@@ -5711,7 +5731,7 @@ tasks:
     expect(runner.revealOrchestrator(runId)).toBe(false);
   });
 });
-describe("WorkflowRunner: オーケストレーターの制御ツール（design.md §16.23「道具」）", () => {
+describe('WorkflowRunner: オーケストレーターの制御ツール（design.md §16.23「道具」）', () => {
   const TWO_TASK_YAML = `
 version: 1
 name: control-test
@@ -5731,19 +5751,19 @@ tasks:
   function control(state: FakeMessagingState): OrchestratorControlPort {
     const port = state.hub?.orchestratorControl;
     if (port === undefined) {
-      throw new Error("制御ツールが配線されていません");
+      throw new Error('制御ツールが配線されていません');
     }
     return port;
   }
 
-  it("get_run_statusはタスクの状態と警告を返し、プロンプトの全文は含めない", async () => {
+  it('get_run_statusはタスクの状態と警告を返し、プロンプトの全文は含めない', async () => {
     const { deps, state } = fakeMessagingDeps();
     const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
       messaging: deps,
     });
-    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await runner.start('/repo/.agents/workflows/control.yaml', '/repo');
     await flush();
-    codexHost.byTaskId("T1");
+    codexHost.byTaskId('T1');
 
     const status = control(state).getRunStatus() as {
       name: string;
@@ -5752,223 +5772,204 @@ tasks:
       integration: Record<string, unknown>;
     };
 
-    expect(status.name).toBe("control-test");
-    expect(status.tasks.map((t) => t.id).sort()).toEqual(["T1", "T2"]);
-    expect(status.tasks.every((t) => t.state === "running")).toBe(true);
-    expect(JSON.stringify(status)).not.toContain("p1");
+    expect(status.name).toBe('control-test');
+    expect(status.tasks.map((t) => t.id).sort()).toEqual(['T1', 'T2']);
+    expect(status.tasks.every((t) => t.state === 'running')).toBe(true);
+    expect(JSON.stringify(status)).not.toContain('p1');
     expect(status.integration).toBeDefined();
   });
 
-  it("stop_taskは走行中タスクのループを止め、存在しないidは理由付きで拒否する", async () => {
+  it('stop_taskは走行中タスクのループを止め、存在しないidは理由付きで拒否する', async () => {
     const { deps, state } = fakeMessagingDeps();
     const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
       messaging: deps,
     });
-    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await runner.start('/repo/.agents/workflows/control.yaml', '/repo');
     await flush();
 
-    const accepted = control(state).stopTask("T1");
-    const rejected = control(state).stopTask("T9");
+    const accepted = control(state).stopTask('T1');
+    const rejected = control(state).stopTask('T9');
 
     expect(accepted.accepted).toBe(true);
-    expect(codexHost.byTaskId("T1").stopLoopCount).toBe(1);
+    expect(codexHost.byTaskId('T1').stopLoopCount).toBe(1);
     expect(rejected.accepted).toBe(false);
-    expect(rejected.reason).toContain("T9");
+    expect(rejected.reason).toContain('T9');
   });
 
-  it("continue_taskは止まっているタスクを続きから走らせる", async () => {
+  it('continue_taskは止まっているタスクを続きから走らせる', async () => {
     const { deps, state } = fakeMessagingDeps();
     const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
       messaging: deps,
     });
-    const result = await runner.start(
-      "/repo/.agents/workflows/control.yaml",
-      "/repo",
-    );
+    const result = await runner.start('/repo/.agents/workflows/control.yaml', '/repo');
     const runId = result.runId as string;
     await flush();
 
-    const t1 = codexHost.byTaskId("T1");
+    const t1 = codexHost.byTaskId('T1');
     // `continueTask`が受け付けるのは`failed`かつ`failure.kind === 'maxReached'`だけ
     // （`runState.ts`の`continueTask`）。送信回数を使い切った状態を作る
-    t1.finish("maxReached", { ...initialChatState });
+    t1.finish('maxReached', { ...initialChatState });
     await flush();
 
     const before = t1.runLoopCalls.length;
-    const outcome = control(state).continueTask("T1");
+    const outcome = control(state).continueTask('T1');
 
     expect(outcome.accepted).toBe(true);
     expect(t1.runLoopCalls.length).toBe(before + 1);
-    expect(
-      runner.getSnapshot(runId)?.tasks.find((t) => t.id === "T1")?.state,
-    ).toBe("running");
+    expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe('running');
   });
 
-  it("decide_approvalはacceptとdeclineだけを受け付ける（セッション全体への承認は選べない）", async () => {
+  it('decide_approvalはacceptとdeclineだけを受け付ける（セッション全体への承認は選べない）', async () => {
     const { deps, state } = fakeMessagingDeps();
     const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
       messaging: deps,
     });
-    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await runner.start('/repo/.agents/workflows/control.yaml', '/repo');
     await flush();
 
-    const t1 = codexHost.byTaskId("T1");
+    const t1 = codexHost.byTaskId('T1');
     void t1.requestApproval({
       requestId: 7,
-      kind: "execCommand",
-      title: "rm -rf",
-      detail: "",
-      itemId: "item-1",
+      kind: 'execCommand',
+      title: 'rm -rf',
+      detail: '',
+      itemId: 'item-1',
     });
     await flush();
 
-    const widened = control(state).decideApproval("T1", "acceptForSession");
-    const accepted = control(state).decideApproval("T1", "accept");
+    const widened = control(state).decideApproval('T1', 'acceptForSession');
+    const accepted = control(state).decideApproval('T1', 'accept');
 
     expect(widened.accepted).toBe(false);
     expect(accepted.accepted).toBe(true);
-    expect(t1.decideApprovalCalls).toEqual([
-      { requestId: 7, decision: "accept" },
-    ]);
+    expect(t1.decideApprovalCalls).toEqual([{ requestId: 7, decision: 'accept' }]);
   });
 
-  it("run終了後の制御ツールは理由付きで拒否され、get_run_statusだけは答え続ける", async () => {
+  it('run終了後の制御ツールは理由付きで拒否され、get_run_statusだけは答え続ける', async () => {
     const { deps, state } = fakeMessagingDeps();
     const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
       messaging: deps,
     });
-    const result = await runner.start(
-      "/repo/.agents/workflows/control.yaml",
-      "/repo",
-    );
+    const result = await runner.start('/repo/.agents/workflows/control.yaml', '/repo');
     const runId = result.runId as string;
     await flush();
 
-    codexHost.byTaskId("T1").finish("done", doneState("ok1"));
-    codexHost.byTaskId("T2").finish("done", doneState("ok2"));
+    codexHost.byTaskId('T1').finish('done', doneState('ok1'));
+    codexHost.byTaskId('T2').finish('done', doneState('ok2'));
     await flush();
-    expect(runner.getSnapshot(runId)?.outcome).not.toBe("running");
+    expect(runner.getSnapshot(runId)?.outcome).not.toBe('running');
 
     // 会話は続けられるが、動かす対象がもう無いので制御ツールだけが無効になる
     // （design.md §16.23「run終了後の制御ツールは無効。過去のrunを後から動かす経路は
     // 作らない」）。理由を返すのは、モデルが使えないツールを呼び続けないようにするため
     const port = control(state);
     for (const outcome of [
-      port.stopTask("T1"),
-      port.retryTask("T1"),
-      port.continueTask("T1"),
-      port.decideApproval("T1", "accept"),
-      port.updateTaskPrompt("T1", "以降はこの方針で"),
+      port.stopTask('T1'),
+      port.retryTask('T1'),
+      port.continueTask('T1'),
+      port.decideApproval('T1', 'accept'),
+      port.updateTaskPrompt('T1', '以降はこの方針で'),
     ]) {
       expect(outcome.accepted).toBe(false);
-      expect(outcome.reason).toContain("終了");
+      expect(outcome.reason).toContain('終了');
     }
 
     // 「なぜ失敗したのか」を走り終えた後に聞く経路は残す
     const status = port.getRunStatus() as { tasks: { id: string }[] };
-    expect(status.tasks.map((t) => t.id).sort()).toEqual(["T1", "T2"]);
+    expect(status.tasks.map((t) => t.id).sort()).toEqual(['T1', 'T2']);
     // 会話そのものは続けられる
-    expect(runner.sendToOrchestrator(runId, "なぜT1は時間がかかったの？")).toBe(true);
+    expect(runner.sendToOrchestrator(runId, 'なぜT1は時間がかかったの？')).toBe(true);
   });
 
-  it("update_task_promptは以降の送信本文を差し替え、警告欄へ出す", async () => {
+  it('update_task_promptは以降の送信本文を差し替え、警告欄へ出す', async () => {
     const { deps, state } = fakeMessagingDeps();
     const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
       messaging: deps,
     });
-    const result = await runner.start(
-      "/repo/.agents/workflows/control.yaml",
-      "/repo",
-    );
+    const result = await runner.start('/repo/.agents/workflows/control.yaml', '/repo');
     const runId = result.runId as string;
     await flush();
 
-    const outcome = control(state).updateTaskPrompt(
-      "T1",
-      "これからは設計だけをやること",
-    );
+    const outcome = control(state).updateTaskPrompt('T1', 'これからは設計だけをやること');
 
     expect(outcome.accepted).toBe(true);
-    const t1 = codexHost.byTaskId("T1");
-    expect(t1.promptTransform?.("c1")).toBe("これからは設計だけをやること");
+    const t1 = codexHost.byTaskId('T1');
+    expect(t1.promptTransform?.('c1')).toBe('これからは設計だけをやること');
     const warning = runner
       .getSnapshot(runId)
-      ?.warnings.find((w) => w.kind === "orchestratorPromptOverride");
-    expect(warning?.taskId).toBe("T1");
-    expect(warning?.message).toContain("これからは設計だけをやること");
+      ?.warnings.find((w) => w.kind === 'orchestratorPromptOverride');
+    expect(warning?.taskId).toBe('T1');
+    expect(warning?.message).toContain('これからは設計だけをやること');
   });
 
-  it("update_task_promptは同一taskIdへの複数回の差し替えでも警告が無制限に増えない（Issue #366）", async () => {
+  it('update_task_promptは同一taskIdへの複数回の差し替えでも警告が無制限に増えない（Issue #366）', async () => {
     const { deps, state } = fakeMessagingDeps();
     const { runner } = createHarness(TWO_TASK_YAML, {
       messaging: deps,
     });
-    const result = await runner.start(
-      "/repo/.agents/workflows/control.yaml",
-      "/repo",
-    );
+    const result = await runner.start('/repo/.agents/workflows/control.yaml', '/repo');
     const runId = result.runId as string;
     await flush();
 
     const port = control(state);
     for (let i = 0; i < 5; i += 1) {
-      const outcome = port.updateTaskPrompt("T1", `方針転換その${i}`);
+      const outcome = port.updateTaskPrompt('T1', `方針転換その${i}`);
       expect(outcome.accepted).toBe(true);
     }
 
     const warnings = runner
       .getSnapshot(runId)
-      ?.warnings.filter((w) => w.kind === "orchestratorPromptOverride");
+      ?.warnings.filter((w) => w.kind === 'orchestratorPromptOverride');
     // 直近1件へ丸められるため、5回呼んでも件数は増えない
     expect(warnings).toHaveLength(1);
     // 警告が出た事実自体は失われず、最新の差し替え内容が残っている
-    expect(warnings?.[0]?.taskId).toBe("T1");
-    expect(warnings?.[0]?.message).toContain("方針転換その4");
+    expect(warnings?.[0]?.taskId).toBe('T1');
+    expect(warnings?.[0]?.message).toContain('方針転換その4');
   });
 
-  it("update_task_promptはテンプレート変数を展開しない（リテラルとして送る）", async () => {
+  it('update_task_promptはテンプレート変数を展開しない（リテラルとして送る）', async () => {
     const { deps, state } = fakeMessagingDeps();
     const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
       messaging: deps,
     });
-    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await runner.start('/repo/.agents/workflows/control.yaml', '/repo');
     await flush();
 
-    control(state).updateTaskPrompt("T2", "T1の結果は {{T1.result}} を見よ");
+    control(state).updateTaskPrompt('T2', 'T1の結果は {{T1.result}} を見よ');
 
-    expect(codexHost.byTaskId("T2").promptTransform?.("c2")).toBe(
-      "T1の結果は {{T1.result}} を見よ",
+    expect(codexHost.byTaskId('T2').promptTransform?.('c2')).toBe(
+      'T1の結果は {{T1.result}} を見よ',
     );
   });
 
-  it("update_task_promptは上限超過と空文字を受付自体で拒否する", async () => {
+  it('update_task_promptは上限超過と空文字を受付自体で拒否する', async () => {
     const { deps, state } = fakeMessagingDeps();
     const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
       messaging: deps,
     });
-    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await runner.start('/repo/.agents/workflows/control.yaml', '/repo');
     await flush();
 
-    const tooLong = control(state).updateTaskPrompt("T1", "あ".repeat(4001));
-    const empty = control(state).updateTaskPrompt("T1", "   ");
+    const tooLong = control(state).updateTaskPrompt('T1', 'あ'.repeat(4001));
+    const empty = control(state).updateTaskPrompt('T1', '   ');
 
     expect(tooLong.accepted).toBe(false);
-    expect(tooLong.reason).toContain("4000");
+    expect(tooLong.reason).toContain('4000');
     expect(empty.accepted).toBe(false);
     // 拒否されたので差し替わっていない
-    expect(codexHost.byTaskId("T1").promptTransform?.("c1")).toBe("c1");
+    expect(codexHost.byTaskId('T1').promptTransform?.('c1')).toBe('c1');
   });
 
-  it("セッションが無いタスク（開始前・終了後）の差し替えは拒否する", async () => {
+  it('セッションが無いタスク（開始前・終了後）の差し替えは拒否する', async () => {
     const { deps, state } = fakeMessagingDeps();
     const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
-    await runner.start("/repo/.agents/workflows/control.yaml", "/repo");
+    await runner.start('/repo/.agents/workflows/control.yaml', '/repo');
     await flush();
 
-    const outcome = control(state).updateTaskPrompt("T9", "方針転換");
+    const outcome = control(state).updateTaskPrompt('T9', '方針転換');
 
     expect(outcome.accepted).toBe(false);
-    expect(outcome.reason).toContain("T9");
+    expect(outcome.reason).toContain('T9');
   });
 });
 
@@ -6002,7 +6003,6 @@ describe('formatPathList（先頭20件+残り件数の丸め、レビュー指�
       expect(result).not.toContain('\u202E');
     },
   );
-
 });
 
 /**
@@ -6706,6 +6706,22 @@ tasks:
     done: d1
 `;
 
+  /** 直列実行（`maxParallel: 1`）。T1が走っている間、T2は未着手（`pending`）で残る。 */
+  const SERIAL_YAML = `
+version: 1
+name: dispose-serial-test
+defaults:
+  provider: codex
+  maxParallel: 1
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -6810,5 +6826,41 @@ tasks:
     expect(() => runner.dispose()).not.toThrow();
     expect(state.handle?.closeCount).toBe(1);
     expect(clearIntervalSpy).not.toHaveBeenCalled();
+  });
+  /**
+   * `TaskSession.dispose()`は実装（`chatManagerBase.ts`の`teardown()`）が
+   * `loop.stop('manual')`を先に呼ぶため、走行中のループの`onFinished`を`manual`で
+   * **同期的に**発火する。これが`onTaskFinished`まで届くと、`applyLoopStopReason('manual')`が
+   * taskIdを見ずに`haltedByUser`を立て、未着手の`pending`を全て`skipped`にしたうえで
+   * `persist`する。deactivateしただけの実行が「人が手動停止した」ものとして永続化され、
+   * 次の起動では`skipped`のタスクを手で1件ずつ再実行しないと続きが進まない
+   * （Issue #374のレビュー指摘high）。`live.finished`は`pump()`を止めるだけで、
+   * `onTaskFinished`自体の再入は止められない。
+   */
+  it('タスクセッションの解放が発火するonFinishedでrunの状態を書き換えない', async () => {
+    const { runner, codexHost, store } = createHarness(SERIAL_YAML);
+    const result = await runner.start('/repo/.agents/workflows/dispose.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // 直列実行なのでT1だけが走り、T2は未着手のまま残っている
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('pending');
+    const persistedBefore = JSON.stringify(store.find(runId));
+
+    // deactivate時、実タブの片付けが走行中のループを`manual`で止める
+    codexHost.byTaskId('T1').disposeFinishReason = 'manual';
+    const updateSpy = vi.spyOn(store, 'update');
+    runner.dispose();
+    await flush();
+
+    // 永続化そのものが起きない（破棄の最中にworkspaceStateへ書きに行かない）
+    expect(updateSpy).not.toHaveBeenCalled();
+    expect(JSON.stringify(store.find(runId))).toBe(persistedBefore);
+    // メモリ上の`runState`も据え置き。未着手のT2が`skipped`へ倒れない
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.haltedByUser).toBe(false);
+    expect(snapshot?.tasks.find((t) => t.id === 'T1')?.state).toBe('running');
+    expect(snapshot?.tasks.find((t) => t.id === 'T2')?.state).toBe('pending');
   });
 });

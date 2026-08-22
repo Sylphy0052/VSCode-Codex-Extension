@@ -877,6 +877,23 @@ export class WorkflowRunner {
   private readonly integrationQueue: IntegrationMergeQueue;
 
   /**
+   * `dispose()`が始まった印（Issue #374のレビュー指摘high）。
+   *
+   * `TaskSession.dispose()`は実装（`chatManagerBase.ts`の`teardown()`）が
+   * `loop.stop('manual')`を先に呼ぶため、走行中のタスクを解放すると`onFinished`が
+   * `manual`で**同期的に**発火する。`live.finished`は`pump()`が次のタスクを始めないための
+   * 印でしかなく、`onTaskFinished`自体の再入は止められない。素通しすると
+   * `applyLoopStopReason('manual')`がrun全体を「人が手動停止した」ことにして
+   * （未着手の`pending`は全て`skipped`）永続化してしまい、deactivateしただけの実行が
+   * 次の起動で続きから進まなくなる。
+   *
+   * 一度立てたら下ろさない。`dispose()`の後にこのrunnerを使い続ける経路は無い
+   * （VSCodeのdeactivate時にだけ呼ばれる）。再入を印で黙らせる形は、衝突解決セッションの
+   * `abandoned`（`runnerMerge.ts`、Issue #412のレビュー指摘D）と同じ考え方。
+   */
+  private disposing = false;
+
+  /**
    * 分割後のファイル（`runnerSnapshot.ts`等、Issue #147）へ渡す内部の口
    * （`runnerInternals.ts`のJSDoc参照）。
    *
@@ -1530,10 +1547,16 @@ export class WorkflowRunner {
    * **冪等**。解放したものは`undefined`にするかMapから消すので、2度目の呼び出しは
    * 何もしない。
    *
-   * runの状態（`runState`）は書き換えないため、deactivate中に`persist`が要る変更は
-   * 起きない（`live.finished`はメモリ上の印で、永続化される値ではない）。
+   * runの状態（`runState`）は書き換えない。解放が発火する`onFinished`は`disposing`が
+   * 黙らせ、`persist()`も同じ印で早期に戻るため、deactivate中にworkspaceStateへ書きに
+   * 行くことは無い（`live.finished`・`disposing`はどちらもメモリ上の印で、永続化される
+   * 値ではない）。
    */
   dispose(): void {
+    // 解放より先に立てる。走行中のセッションの解放が`onFinished`→`onTaskFinished`を
+    // 同期的に呼び戻すため、この印が無いとrun全体が手動停止として永続化される
+    // （フィールドのJSDoc参照）
+    this.disposing = true;
     for (const live of this.runs.values()) {
       // 解放より先に立てる。`session.dispose()`は`onFinished`を同期的に発火しうる
       // （`chatView.ts`。テスト「catchのsession.dispose()」参照）ため、この印が無いと
@@ -2581,6 +2604,12 @@ export class WorkflowRunner {
     reason: LoopStopReason,
     state: ChatState,
   ): void {
+    if (this.disposing) {
+      // 拡張機能の終了時の解放が呼び戻した終了（`reason`は`manual`）。ここから先は
+      // `runState`の書き換え・`persist`・マージの開始まで一式が走るため、印を見て黙る
+      // （`disposing`のJSDoc参照）。片付けの続きは`dispose()`が受け持つ
+      return;
+    }
     const live = this.runs.get(runId);
     if (live === undefined) {
       return;
@@ -2682,6 +2711,13 @@ export class WorkflowRunner {
 
   /** 分割後のファイル（Issue #147）から`self.persist(...)`として呼ぶ（公開範囲は`WorkflowRunnerInternals`に閉じる）。 */
   private async persist(runId: string): Promise<void> {
+    if (this.disposing) {
+      // 破棄の最中に呼ばれた永続化は捨てる。`onTaskFinished`以外にも解放が呼び戻す経路が
+      // あり（衝突解決セッションの`onMergeResolutionFinished`など）、そこから来る書き込みは
+      // 「人が停止した」等の実態と違う値をworkspaceStateへ残す。deactivate後に残すべき値は
+      // 破棄の直前までに書き終えている
+      return;
+    }
     const live = this.runs.get(runId);
     if (live === undefined) {
       return;
