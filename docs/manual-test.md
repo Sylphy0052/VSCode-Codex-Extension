@@ -1891,6 +1891,25 @@ YAMLとロードマップの**中身が使えるものになっているか**を
 - 期待: 「タスク分解のレビューで指摘があります」は出ず、通常の「ワークフローを生成しました」の通知だけになる
 - 確認: いずれの場合も、レビューによってYAMLの中身が書き換わっていない（保存直後のファイルとエディタの内容が一致している）
 
+### W-L タスクからオーケストレーターへ判断を仰ぐ経路（design.md §16.32、Issue #571）
+
+`ask_orchestrator`の宛先固定・`kind: 'question'`の意味づけ・待ちぼうけ検出との関係・`maxIterations`到達時の失敗確定はユニットテストで確かめてある（`test/unit/messaging.test.ts`の`describe('ask_orchestrator（design.md §16.32、Issue #571）')`・`test/unit/runner.test.ts`の`describe('WorkflowRunner: ask_orchestrator（design.md §16.32、Issue #571）')`）。ここで見るのは、実際のCLIプロセス（タスク）とオーケストレーターのCLIプロセスの間で、実物のMCP接続を通して`ask_orchestrator`が機能するか。
+
+- 前提: タスクT1が走るワークフローを用意し、T1のプロンプトで`ask_orchestrator`（`blocking: false`）を呼ばせる
+- 操作: ワークフローを実行する
+- 期待: オーケストレーターのチャットタブに、T1からの問い（本文・`blocking: なし`である旨）が通知として届く。既存の`taskMessage`（T-N/W-Nで確認したメッセージ）とは異なる文面（「問いが届きました」）で区別できる
+- 確認: T1はワークフローView上で`running`のまま止まらず、問いを送った後も次のターンへ進む
+- 前提: 同じワークフローで、T1のプロンプトを`ask_orchestrator`（`blocking: true`）に差し替える
+- 操作: ワークフローを実行する
+- 期待: T1がワークフローView上で「返信待ち」（`waitingReply`）になる
+- 操作: オーケストレーターのチャットタブから、問うたタスク（T1）宛てに既存の`send_message`で答える（専用の返信ツールが無いことを、オーケストレーターへ見せているMCPツール一覧（`tools/list`）に`ask_orchestrator`が含まれず`send_message`しか無いことでも確認する）
+- 期待: T1が`waitingReply`から`running`へ戻り、答えの内容を踏まえて次のターンを続ける
+- 確認: ワークフローViewの「プロンプトを見る」（T1側）に、答えの内容を含む実際の送信文面が残っている。オーケストレーターのチャットタブにも、T1からの問いと答えの両方が会話として残っている（往復ともViewから追える）
+- 前提: 上のワークフローで、`agent.workflows.replyTimeoutSec`を短い値（例: `5`）に設定し、T1が`blocking: true`で問うた後、誰も答えないまま放置する
+- 期待: 設定した秒数を超えた時点でT1が`waitingReply`から`running`へ自動的に戻り、ワークフローViewの警告欄に「返信を待たずに再開しました」旨が残る（design.md §16.21「待ちぼうけを検出する経路」が`ask_orchestrator`由来の問いにも機能することの確認）
+- 前提: T1の`maxIterations`を小さい値（例: `2`）にし、`blocking: true`で問うた後、答えないまま待ちぼうけ検出で解放させ、その後も`done`を満たせないプロンプトのままT1を走らせ続ける
+- 期待: T1が回数切れ（`failed`）として確定する。ワークフローView上でT1が「返信待ちのまま」動かなくなることはなく、いずれ失敗として確定して並列枠を明け渡す（受入基準「答えが来ないままmaxIterationsに達したらタスクが失敗として確定する」の実機確認）
+
 ### W-N タスク間の直接メッセージングを廃し、オーケストレーターの中継にする（design.md §16.34、Issue #547）
 
 `send_message`の宛先固定・待ちぼうけ経路の維持はユニットテストで確かめてある（`test/unit/messaging.test.ts`・`test/unit/runner.test.ts`の`describe('WorkflowRunner: 直接メッセージングを廃しオーケストレーター中継にする（design.md §16.34、Issue #547）')`）。ここで見るのは、実際のCLIプロセス2つ（別々のタスク）とオーケストレーターのCLIプロセスの間で、実物のMCP接続を通してこの制約が機能するか。

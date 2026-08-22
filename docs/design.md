@@ -5241,6 +5241,109 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 
 `validateWorkflow`（構文的な検証）と`planWorkflow`の再生成ループ（検証エラーを踏まえた1度だけの投げ直し、§16.9）は変えていない。レビューは検証が通った後、**保存が確定してから**動く独立した工程であり、レビューの結果によって再生成が走ることも、検証の合否が変わることも無い。`plannerSecurity`（§16.9の安全設定の上書き検出）と`plannerReview`（本節）は別の`WorkflowWarning.kind`として区別し、`WorkflowViewManager.previewDefinition`の警告一覧に両方を並べて表示する。
 
+### 16.32 タスクからオーケストレーターへ判断を仰ぐ経路（`ask_orchestrator`、roadmap W7、Issue #571）
+
+§16.21・§16.34のとおり、`send_message`の宛先はタスクからは常にオーケストレーターに固定されている。しかしこれは「送れる」だけで、「判断を仰いでいる」という意味づけは無かった。タスクが行き詰まったとき、いまできるのは`maxIterations`を消費し尽くすか、`done`を満たさないまま終わるかのどちらかで、能動的にオーケストレーターへ「この方針でよいか」と問う経路が無かった。
+
+**この節が足すのは新しい配送経路ではない。** §16.21・§16.34が作った中継（`send_message`→`deliverTaskMessageToOrchestrator`→`notifyOrchestrator`）の上に、「問い」という意味づけと`blocking`の扱いを載せるだけである。新しい直通経路を作ると、W9（§16.34）で「タスク間の直接メッセージングを廃し、オーケストレーターの中継にする」として潰した形（スター型を崩すメッシュ型の経路）へ戻ることになる。
+
+#### `ask_orchestrator`ツール（`messaging.ts`）
+
+タスク側の接続にだけ見せる（`list_tasks` / `send_message`と同じ基本ツールの並びに追加する）。**オーケストレーター自身の接続には見せない**（`MessagingMcpServer.visibleTools`）。タスクが判断を仰ぐための道具であり、オーケストレーターが自分自身へ問うことに意味が無いため。`tools/list`に出さないだけでなく、名前を推測して呼ばれた場合に備えて`handleToolCall`側でも同じ条件（`taskId === ORCHESTRATOR_CONNECTION_ID`）で「未知のツール」として拒否する（§16.23の制御ツールが採る多層防御と同じ流儀）。
+
+| 引数 | 型 | 意味 |
+| --- | --- | --- |
+| `question` | string | 問いの本文 |
+| `blocking` | boolean | 答えが届くまで待つ場合はtrue |
+
+呼び出しの実体は、`from`を接続の`taskId`（既存の`send_message`と同じくサーバ側が判別。引数には含めない）、`to`を`ORCHESTRATOR_CONNECTION_ID`に固定した`TaskMessagingHub.sendMessage`の呼び出しに変換するだけである。`expectReply`には`blocking`をそのまま渡す。
+
+```
+hub.sendMessage({ from: taskId, to: ORCHESTRATOR_CONNECTION_ID, body: question, expectReply: blocking, kind: 'question' })
+```
+
+`validateSendMessage`（宛先固定・`MAX_MESSAGE_BODY_LENGTH`・`MAX_MESSAGES_PER_RUN`・宛先の配送可否）は`send_message`と完全に共有する。`ask_orchestrator`専用の検証は追加していない。
+
+#### 「問い」という意味づけ（`StoredMessage.kind`）
+
+`StoredMessage`に`kind: 'message' | 'question'`を足した。`send_message`が送るものは常に`'message'`（`TaskMessagingHub.sendMessage`の既定値）、`ask_orchestrator`が送るものだけ`'question'`になる。
+
+`kind`が変えるのは、オーケストレーターへ届ける通知の**種別と文面**だけである。
+
+- `runnerMessaging.ts`の`deliverTaskMessageToOrchestrator`が`message.kind`を見て、`OrchestratorEventKind`を`taskMessage`（従来どおり）か`taskQuestion`（新設）のどちらにするかを分岐する
+- 本文の組み立ても`buildTaskMessageEventBody`と`buildTaskQuestionEventBody`に分かれる。後者は「問いが届いた」「`blocking: true`なら答えるまでこのタスクは進めない」「`send_message`（`to`に問うたタスクのid）で答えること」を明記する
+- **配送そのもの（`notifyOrchestrator`の呼び出し・`hub.takeDeliverableMessages`によるキュー消費）はkindを問わず共通**（§16.34「タスクからオーケストレーターへの配送」の一手をそのまま使う）。ここを2経路に分けなかった理由は次項
+
+`OrchestratorEventKind`への`taskQuestion`の追加は`orchestratorSession.ts`で行った。囲い（`wrapEvent`の`escapeAngleBrackets(stripControlCharsPreservingNewlines(...))`）は`kind`属性の値が変わるだけで、無害化の仕組み自体はkindを問わず共通のまま（次項参照）。
+
+#### 本文の無害化は1回に一本化されたまま（二重適用も素通りも作らない）
+
+§16.34が明記したとおり、タスク→オーケストレーターの経路では本文の無害化を`wrapEvent`（`orchestratorSession.ts`）の1箇所に一本化してある。`buildTaskMessageEventBody`と同じく、新設した`buildTaskQuestionEventBody`も**無害化前のプレーンテキストを組み立てるだけ**にした（`escapeAngleBrackets`や`stripControlCharsPreservingNewlines`をここで呼ばない）。`wrapEvent`が`<workflow-event kind="taskQuestion">`で囲む際にまとめて無害化するため、二重適用（見た目が壊れる）も素通り（無害化されないまま届く）もどちらも起きない。
+
+#### `blocking`と`waitingReply`（新しい状態遷移は増やしていない）
+
+`blocking: true`は`expectReply: true`としてそのまま`hub.sendMessage`へ渡るため、送信元タスクを`waitingReply`へ倒す処理（`onMessageAccepted`の`markWaitingReply` + `session.pauseLoop()`）は**`kind`を一切見ない既存のロジックがそのまま動く**。答えは既存の`send_message`（オーケストレーターから、`to`に問うたタスクのidを指定）で行う。**答えるための新しいツールは追加していない**（Issue #571の受入基準・実装上の注意のとおり）。
+
+このため、`src/orchestrator/runState.ts`・`src/orchestrator/runner.ts`（`waitingReply`への遷移・解除そのものを担う部分）・`src/orchestrator/loopController.ts`（`maxIterations`のカウントそのもの）には変更を加えていない。**「既存の仕組みで足りる」の根拠は次項**。
+
+#### 答えが来ないまま`maxIterations`に達した場合の失敗確定（新しい終了経路は増やしていない）
+
+受入基準は「答えが来ないまま`maxIterations`に達した場合は、タスクが失敗として確定する（返事待ちで枠を占有し続けない）」である。これは次の3つの**既存の仕組みの組み合わせ**でそのまま成立し、`ask_orchestrator`のために新しい終了経路を足す必要が無かった。
+
+1. `waitingReply`は`pauseLoop()`でループを実際に止めるため、待っている間は`maxIterations`のカウント（送信回数）も進まない。ここだけを見ると「答えが来ない限り永遠に待つ」ように見える
+2. しかし`waitingReply`には既存の待ちぼうけ検出（§16.21「待ちぼうけを検出する経路」）が必ず効く。全走行中タスクが`waitingReply`かつ未配送メッセージ0件（経路1、`detectAllWaitingStalemate`）、または`agent.workflows.replyTimeoutSec`（既定300秒）を超えた（経路2、タイムアウト）のどちらかで、答えが無くても`running`へ戻される。**この2つの検出関数はどちらも`TaskState`と経過時間だけを見ており、`StoredMessage.kind`（問いか通常のメッセージか）を一切参照しない。** そのため`blocking: true`の`ask_orchestrator`が増えても、判定対象になる`waitingReply`の母数が増えるだけで、検出の仕組み自体は変わらない
+3. `running`へ戻った後は通常のループが再開し、`continuePrompt`を送り続ける。答えが結局来ないまま`maxIterations`（送信回数の上限）を使い切れば、`LoopStopReason: 'maxReached'`が`onFinished`経由で届き、`applyLoopStopReason`（`runState.ts`）が`retries`の判定を経ずに`markFailed`で`failed`へ確定する（`maxReached`は元から`retries`の対象外。§16.5の表）。これは`ask_orchestrator`の有無に関わらず、回数切れのタスクが辿る唯一の経路である
+
+**「答えが来ないまま`maxIterations`に達したら失敗」は、`waitingReply`の待ちぼうけ検出（新しい終了経路を持ち込まない）と、`maxReached`の既存の失敗確定（`retries`を経ない）を単純に直列させただけで成立する。** 新しい判定コード（例えば「blocking待ちの間だけmaxIterationsを別枠で数える」ような特別扱い）を入れていない。特別扱いを入れなかった理由は、待ちぼうけ検出がある以上「blocking待ちのまま永遠に枠を占有し続ける」状態そのものが既に起こり得ないため。
+
+この直列（`ask_orchestrator(blocking: true)`→`waitingReply`→待ちぼうけ検出で解放→`running`で継続→`maxReached`→`failed`）を`test/unit/runner.test.ts`の`describe('WorkflowRunner: ask_orchestrator（design.md §16.32、Issue #571）')`で実際の呼び出し経路（`FakeTaskSession`・`vi.useFakeTimers`によるタイムアウト実測・`t1.finish('maxReached', ...)`）を通して固定した。
+
+#### `detectAllWaitingStalemate`との関係（壊していないことの固定）
+
+前項3のとおり、待ちぼうけ検出の2関数（`detectAllWaitingStalemate` / `detectTimedOutWaitingReplies`、`messaging.ts`）はどちらも`StoredMessage`や`kind`を引数に取らず、`TaskState`のマップと経過時間だけを見る純粋関数である。`ask_orchestrator`はこれらの関数のシグネチャにも実装にも触れていない。`blocking: true`が増えることで変わるのは「`waitingReply`というTaskStateを持つタスクが増えるかもしれない」という**入力側の母数**だけで、判定ロジック自体は一切変えていない。
+
+`test/unit/runner.test.ts`に「答えが来ないままreplyTimeoutSecを超えても待ちぼうけ検出で解放される」テストを追加し、`kind: 'question'`のメッセージで`waitingReply`に入ったタスクが、既存のタイムアウト経路（経路2）でこれまでどおり`running`へ戻り、`messagingStalled`警告が積まれることを確認した。経路1（`detectAllWaitingStalemate`そのもの）は`messaging.ts`の`kind`を取らないシグネチャによって構造的に`kind`非依存であることが自明なため、経路2（実行層の配線を通す）だけを実行層のテストとして追加し、経路1は純粋関数レベルの既存テスト（`test/unit/messaging.test.ts`）がそのままカバーする。
+
+#### 問いと答えの両方がワークフローViewへ残る（新しいUIは追加していない）
+
+§16.34「往復の内容をワークフローViewへ残す」と同じ理由で、新しい永続ログや専用UIは追加していない。
+
+- **タスク→オーケストレーター（問い）**: `taskQuestion`イベントは`notifyOrchestrator`経由でオーケストレーターのセッションへ実際に送信される。チャットタブ（§16.23「会話のUI」）から見える
+- **オーケストレーター→タスク（答え）**: 既存の`send_message`で転送されるため、宛先タスクの次の送信で`composeNextPrompt`により合成され、`LiveTask.lastSentPrompt`（§16.21「人が目視確認できるようにする」）へそのまま反映される。ワークフローViewの「プロンプトを見る」から確認できる
+
+このため`src/view/workflowView.ts`には変更を加えていない。
+
+#### `decide_approval`の承認経路とは独立（探した範囲）
+
+「`ask_orchestrator`が承認経路の検査を素通りする道になっていないか」を確認した。`ask_orchestrator`は`TaskMessagingHub.sendMessage`を呼ぶだけで、承認経路（`runner.ts`の`handleApproval`・`escalation.ts`の`classifyApprovalRequest`・`runState.ts`の`pendingApproval`/`waitingApproval`・制御ツール`decide_approval`が呼ぶ`WorkflowRunner.decideApproval`）のどの関数も呼ばない。`ask_orchestrator`はタスクの`sandbox`/`approvalMode`/`autoApprove`を一切変更せず、危険操作の実行そのものも行わない（純粋な情報伝達）。そのタスクが実際に危険な操作を試みる場合は、これまでどおり`session.setApprovalHandler`経由で`handleApproval`が呼ばれ、`decide_approval`（人またはオーケストレーター）の判断を経る。両者は経路として交わらない。**素通りする道は見つからなかった。**
+
+#### 兄弟の穴の確認
+
+- **他のタスク側ツール（`send_message`）**: `expectReply: true`は`ask_orchestrator`の`blocking: true`と全く同じ機構（`markWaitingReply` + `pauseLoop()`）を使うため、同じ待ちぼうけ検出・同じ`maxReached`直列が既に効いている。`send_message`側の穴では無い
+- **他の通知種別（`taskDone` / `taskFailed` / `taskWaitingApproval` / `taskBlocked` / `finalMergeDecision` / `runFinished` / `runHaltedByUser`）**: これらはいずれもタスクの状態遷移や実行全体の区切りをオーケストレーターへ知らせるだけの一方向通知で、`waitingReply`のような「タスクが人（に相当するオーケストレーター）の応答を待って占有し続ける」性質を持たない。同じ穴は無い
+- **他の待ち状態（`waitingApproval`）**: `waitingApproval`は承認要求に対する待ちで、`decide_approval`が答えるまで待つが、これは`maxIterations`のカウント方法自体は`waitingReply`と同様にループが止まっているため進まない。承認待ちが`maxIterations`到達で失敗するかどうかはこのIssueのスコープ外（既存の承認経路の話であり、`ask_orchestrator`が触れていない）だが、構造は同じ（ループが止まる→待ちぼうけに相当する解除機構が要る）ため、承認待ちが無期限に残り得るかどうかは別途確認の価値がある。**このIssueでは変更していない（報告のみ）**
+
+#### `orchestratorSession.ts` / `runnerOrchestrator.ts`への最小限の変更（W2との交差）
+
+この2ファイルは並行しているW2（roadmap、Issue #336）も触っている。この節の実装で加えた変更は次の2点のみで、どちらもW2の対象（`loopController.ts` / `runState.ts`のタスク実行制御そのもの）とは重ならない。
+
+- `orchestratorSession.ts`: `OrchestratorEventKind`へ`'taskQuestion'`を1行追加しただけ（既存の`'taskMessage'`と並ぶ列挙値の追加）
+- `runnerOrchestrator.ts`: `buildIntroBody`（run開始時にオーケストレーターへ渡す道具の説明文）へ、`ask_orchestrator`で届いた問いにも既存の`send_message`で答えられることを1文追記しただけ
+
+#### 影響範囲
+
+- `messaging.ts`: `ASK_ORCHESTRATOR_TOOL`の追加・`StoredMessage.kind`の追加・`TaskMessagingHub.sendMessage`の`kind`引数・`visibleTools`/`handleToolCall`への配線
+- `runnerMessaging.ts`: `deliverTaskMessageToOrchestrator`のkind分岐・`buildTaskQuestionEventBody`の新設
+- `orchestratorSession.ts`: `OrchestratorEventKind`へ`taskQuestion`を追加
+- `runnerOrchestrator.ts`: `buildIntroBody`の説明文に1文追記
+- `docs/manual-test.md` W-L: 実VSCodeでしか確かめられない受入基準（追記のみ、実施はしない）
+
+#### 確かめ方
+
+- `test/unit/messaging.test.ts`（`describe('ask_orchestrator（design.md §16.32、Issue #571）')`）: `tools/call`経由で`ask_orchestrator`を呼ぶと`send_message`と同じ経路でオーケストレーター宛に積まれ`kind: 'question'`が付くこと、`blocking: true`が`expectReply: true`として伝わること、送信元は接続から判別され引数のなりすましが効かないこと、オーケストレーター自身の接続には見えず名指しでも拒否されること、`MAX_MESSAGE_BODY_LENGTH`を共有すること
+- `test/unit/runner.test.ts`（`describe('WorkflowRunner: ask_orchestrator（design.md §16.32、Issue #571）')`）: 問いが`taskQuestion`として（`taskMessage`ではなく）届くこと、`blocking: true`で`waitingReply`へ入り既存の`send_message`の返信で再開すること、答えが来ないまま`replyTimeoutSec`を超えても既存の待ちぼうけ検出で解放されること、解放後も答えが来ないまま`maxIterations`を使い切ると`failed`へ確定すること（RED実測は`runnerMessaging.ts`の`deliverTaskMessageToOrchestrator`のkind分岐1行のみを潰して行い、「taskQuestionとして届く」テスト1件だけが失敗することを確認済み）
+- `docs/manual-test.md` W-L: 実VSCode上でask_orchestratorが実際にオーケストレーターへ届くこと・blockingの実際の待ち・問いと答えがチャットタブに残ることを確認する
+
 ### 16.34 タスク間の直接メッセージングを廃し、オーケストレーターの中継にする（roadmap W9、Issue #547）
 
 §16.21のタスク間メッセージングは、`send_message`の宛先を「同じrunのタスク」に限っていた（`knownTaskIds`判定）。これはタスクからタスクへ直接届くメッシュ型で、WF-Eの方針2「やりとりは必ずオーケストレーターを通す。人 ←→ オーケストレーター ←→ タスク の3層に固定する（スター型）」に反していた。タスクがn個あれば経路はn×(n-1)本になり、オーケストレーターはどのタスクが何を伝えたのかを一切知らないままだった。

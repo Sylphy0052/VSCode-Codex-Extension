@@ -48,7 +48,8 @@ function buildIntroBody(live: LiveRun): string {
     '',
     'できること（MCPツール）:',
     '- list_tasks / get_run_status: 進行状況を読む',
-    '- send_message: 走行中のタスクへメッセージを送る',
+    '- send_message: 走行中のタスクへメッセージを送る（タスクからask_orchestratorで問いが' +
+      '届いた場合も、この send_message（to に問うたタスクのidを指定）で答える）',
     '- stop_task / retry_task / continue_task / decide_approval: タスクを止める・やり直す・続ける・承認する',
     '- update_task_prompt: 走行中のタスクの継続指示を差し替える（方針転換）',
     '',

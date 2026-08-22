@@ -113,6 +113,25 @@ function buildTaskMessageEventBody(message: StoredMessage): string {
 }
 
 /**
+ * `ask_orchestrator`が送った「問い」用の本文（design.md §16.32、Issue #571）。
+ * `buildTaskMessageEventBody`と役割は同じ（無害化は`wrapEvent`の1回に一本化。ここでは
+ * 無害化前のプレーンテキストを組み立てるだけ）だが、「問い」であることが伝わる文面にする。
+ * `blocking: true`（`expectReply: true`）なら答えるまでそのタスクが進めないことも明記し、
+ * 既存の`send_message`（`to`に問うたタスクのidを指定）で答えるよう案内する。
+ */
+function buildTaskQuestionEventBody(message: StoredMessage): string {
+  const blockingNote = message.expectReply
+    ? 'あり（答えが届くかmaxIterationsを使い切るまで、このタスクは次のターンへ進めません）'
+    : 'なし（答えを待たずに進めています）';
+  return [
+    `タスク ${message.from} から判断を仰ぐ問いが届きました（blocking: ${blockingNote}）。`,
+    `send_message（to: "${message.from}"）で答えてください。`,
+    '問い:',
+    message.body,
+  ].join('\n');
+}
+
+/**
  * タスクからオーケストレーターへのメッセージ（`to === ORCHESTRATOR_CONNECTION_ID`）を
  * `notifyOrchestrator`でプッシュし、`TaskMessagingHub`のキューからも取り除く
  * （design.md §16.34、Issue #547）。
@@ -141,7 +160,13 @@ function deliverTaskMessageToOrchestrator(
   live: LiveRun,
   message: StoredMessage,
 ): void {
-  notifyOrchestrator(self, runId, { kind: 'taskMessage', body: buildTaskMessageEventBody(message) });
+  // 「問い」（ask_orchestrator、design.md §16.32、Issue #571）は種別を分けて伝える。
+  // 配送経路そのもの（notifyOrchestrator→キュー消費）はkindを問わず共通
+  const event =
+    message.kind === 'question'
+      ? { kind: 'taskQuestion' as const, body: buildTaskQuestionEventBody(message) }
+      : { kind: 'taskMessage' as const, body: buildTaskMessageEventBody(message) };
+  notifyOrchestrator(self, runId, event);
   live.messaging?.hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID);
 }
 

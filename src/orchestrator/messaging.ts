@@ -242,6 +242,18 @@ export function validateSendMessage(
  * メッセージの保管（純粋・不変な状態）
  * ------------------------------------------------------------------------ */
 
+/**
+ * メッセージの種類（design.md §16.32、Issue #571）。
+ *
+ * `'message'`は`send_message`が送った通常のメッセージ、`'question'`は`ask_orchestrator`が
+ * 送った「問い」。配送・検証（`validateSendMessage`）・待ちぼうけ検出は種類を区別せず
+ * 同じ経路をそのまま通る（design.md §16.32「既存の中継の上に載せる」）。区別が要るのは
+ * オーケストレーターへ届ける通知の意味づけ（`OrchestratorEventKind`を`taskMessage`と
+ * `taskQuestion`のどちらにするか）だけで、`runnerMessaging.ts`の
+ * `deliverTaskMessageToOrchestrator`がここを見て分岐する。
+ */
+export type MessageKind = 'message' | 'question';
+
 /** 1件のメッセージ。`id` / `createdAtMs` は呼び出し側（`TaskMessagingHub`）が生成して渡す。 */
 export interface StoredMessage {
   readonly id: string;
@@ -250,6 +262,8 @@ export interface StoredMessage {
   readonly body: string;
   readonly expectReply: boolean;
   readonly createdAtMs: number;
+  /** 省略時は`'message'`（`TaskMessagingHub.sendMessage`が既定する）。design.md §16.32。 */
+  readonly kind: MessageKind;
 }
 
 /**
@@ -605,6 +619,39 @@ export const SEND_MESSAGE_TOOL: McpToolDefinition = {
   },
 };
 
+/**
+ * `ask_orchestrator`ツール（design.md §16.32、Issue #571）。
+ *
+ * タスク側の道具。オーケストレーターへ判断を仰ぐ「問い」を送る。`decide_approval`
+ * （承認要求に対してオーケストレーターが裁く経路）とは別物で、こちらはタスクが能動的に
+ * 判断を仰ぐ経路。実体は`send_message`（宛先固定・`MAX_MESSAGE_BODY_LENGTH`・
+ * `MAX_MESSAGES_PER_RUN`を含む既存の検証）をそのまま通り、`kind: 'question'`だけが
+ * `send_message`と違う（`MessagingMcpServer.handleToolCall`参照）。答えるための専用の
+ * ツールは無く、オーケストレーターは既存の`send_message`（`to`に問うたタスクのidを
+ * 指定）で答える。
+ *
+ * **オーケストレーター自身の接続には見せない**（`MessagingMcpServer.visibleTools`）。
+ * タスクが判断を仰ぐための道具であり、オーケストレーターが自分自身へ問うことに意味が無い。
+ */
+export const ASK_ORCHESTRATOR_TOOL: McpToolDefinition = {
+  name: 'ask_orchestrator',
+  description:
+    'オーケストレーターへ判断を仰ぐ問いを送る。blocking: trueの場合、このタスクは' +
+    '答えが届くまで次のターンを送らない（waitingReplyへ入る）。答えが届かないまま' +
+    'このタスクのmaxIterationsを使い切った場合は、そのまま失敗として確定する' +
+    '（返事待ちのまま枠を占有し続けない）。blocking: falseなら待たずに次のターンへ進む。' +
+    'オーケストレーターは既存のsend_messageで答える（専用の返信ツールは無い）。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      question: { type: 'string', description: '問いの本文' },
+      blocking: { type: 'boolean', description: '答えが届くまで待つ場合はtrue' },
+    },
+    required: ['question', 'blocking'],
+    additionalProperties: false,
+  },
+};
+
 /* ------------------------------------------------------------------------ *
  * オーケストレーター専用の制御ツール（design.md §16.23「道具」）
  * ------------------------------------------------------------------------ */
@@ -894,6 +941,8 @@ export class TaskMessagingHub {
     to: string;
     body: string;
     expectReply: boolean;
+    /** 省略時は`'message'`（design.md §16.32、Issue #571。`ask_orchestrator`は`'question'`を渡す）。 */
+    kind?: MessageKind;
   }): SendMessageValidationResult {
     const snapshot = this.deps.listRunTasks();
     const knownTaskIds = new Set(snapshot.map((t) => t.id));
@@ -918,6 +967,7 @@ export class TaskMessagingHub {
       body: input.body,
       expectReply: input.expectReply,
       createdAtMs: this.deps.now?.() ?? Date.now(),
+      kind: input.kind ?? 'message',
     };
     this.store = enqueueMessage(this.store, message);
     this.deps.onAccepted?.(message);
@@ -1142,7 +1192,15 @@ export class MessagingMcpServer {
    */
   private visibleTools(taskId: string): McpToolDefinition[] {
     const base = [LIST_TASKS_TOOL, SEND_MESSAGE_TOOL];
-    return this.controlFor(taskId) === undefined ? base : [...base, ...ORCHESTRATOR_CONTROL_TOOLS];
+    // ask_orchestrator（design.md §16.32、Issue #571）はタスク側の道具で、
+    // オーケストレーター自身の接続には見せない（自分自身へ問う意味が無い）。
+    // 接続の種類はtaskId自体で判定する（`orchestratorControl`未設定のオーケストレーター
+    // 接続も「タスク扱い」にしないため。制御ツールの実体の有無とは独立に判定する）
+    if (taskId === ORCHESTRATOR_CONNECTION_ID) {
+      const control = this.controlFor(taskId);
+      return control === undefined ? base : [...base, ...ORCHESTRATOR_CONTROL_TOOLS];
+    }
+    return [...base, ASK_ORCHESTRATOR_TOOL];
   }
 
   /**
@@ -1172,6 +1230,27 @@ export class MessagingMcpServer {
       // `from` はconnection.taskIdのみを使う。argsに含まれる同名フィールド（あれば）は
       // rec()で拾えるが、意図的に一切参照しない（上のクラスコメント参照）。
       const result = this.hub.sendMessage({ from: taskId, to, body, expectReply });
+      return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
+    }
+
+    if (name === 'ask_orchestrator') {
+      // オーケストレーター自身の接続からは見せていない（visibleTools）が、名前を推測して
+      // 呼ばれる余地に備え、ここでも同じ条件で弾く（制御ツールと同じ多層防御の流儀）
+      if (taskId === ORCHESTRATOR_CONNECTION_ID) {
+        return failure(request.id, -32602, `未知のツールです: ${name}`);
+      }
+      const question = str(args['question']);
+      const blocking = args['blocking'] === true;
+      // 宛先はオーケストレーターに固定（send_messageのタスク分岐と同じ）。kind: 'question'
+      // だけが異なり、待ちぼうけ検出・配送・長さ上限などは既存のsend_messageの経路を
+      // そのまま通る（design.md §16.32「既存の中継の上に載せる」）
+      const result = this.hub.sendMessage({
+        from: taskId,
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: question,
+        expectReply: blocking,
+        kind: 'question',
+      });
       return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
     }
 

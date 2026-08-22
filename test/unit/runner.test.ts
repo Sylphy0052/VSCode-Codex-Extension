@@ -6680,6 +6680,199 @@ tasks:
  * `false`へ戻す（design.md §16.5参照）。この3経路のいずれで再開しても、run全体が
  * 再び終了状態へ確定した時点で`notifyOrchestratorRunFinished`を重ねて送ってはいけない。
  */
+/**
+ * design.md §16.32、Issue #571: タスク側ツール`ask_orchestrator`。
+ *
+ * 配送・waitingReplyへの遷移・待ちぼうけ検出は`send_message`（design.md §16.21・§16.34）と
+ * 完全に共有する経路で、ここでは`ask_orchestrator`固有の差分だけを確認する:
+ * `StoredMessage.kind: 'question'`がオーケストレーターへの通知種別を`taskQuestion`へ
+ * 変えること、`blocking: true`（`expectReply: true`）でも既存のwaitingReply・待ちぼうけ
+ * 検出（`detectAllWaitingStalemate`・タイムアウト）がそのまま機能すること、答えが来ないまま
+ * 解放されたタスクがその後`maxIterations`を使い切ると通常どおり`failed`で確定すること
+ * （返事待ちで枠を占有し続けない）。ツール呼び出し自体（`ask_orchestrator`→
+ * `hub.sendMessage({kind: 'question'})`への変換）は`test/unit/messaging.test.ts`の
+ * `MessagingMcpServer`レベルのテストが確認済みなので、ここでは既存の慣例どおり
+ * `state.hub.sendMessage(...)`を直接呼んで実行層の配線を確認する。
+ */
+describe('WorkflowRunner: ask_orchestrator（design.md §16.32、Issue #571）', () => {
+  const ASK_YAML = `
+version: 1
+name: ask-orchestrator-test
+defaults:
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    continuePrompt: つづき
+    maxIterations: 2
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+
+  it(
+    '問い（kind: question）はtaskMessageではなくtaskQuestionとしてオーケストレーターへ届く' +
+      '（「問い」という意味づけ、design.md §16.32）',
+    async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(ASK_YAML, { messaging: deps });
+      await runner.start('/repo/.agents/workflows/ask.yaml', '/repo');
+      await flush();
+
+      const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+      // run開始の通知でターンが走っている。まず終わらせる
+      orchestrator.emitState({ ...initialChatState, busy: true });
+      orchestrator.emitState({ ...initialChatState, busy: false });
+
+      const result = state.hub?.sendMessage({
+        from: 'T1',
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: 'この方針で進めてよいですか',
+        expectReply: false,
+        kind: 'question',
+      });
+      expect(result?.accepted).toBe(true);
+      await flush();
+
+      // notifyOrchestratorはbusyの間pendingに積むだけなので、もう一度ターンを終わらせる
+      orchestrator.emitState({ ...initialChatState, busy: true });
+      orchestrator.emitState({ ...initialChatState, busy: false });
+      const last = orchestrator.sentTexts[orchestrator.sentTexts.length - 1] as string;
+      expect(last).toContain('kind="taskQuestion"');
+      expect(last).not.toContain('kind="taskMessage"');
+      expect(last).toContain('この方針で進めてよいですか');
+    },
+  );
+
+  it(
+    'blocking: true（expectReply: true）で送るとwaitingReplyへ遷移し、' +
+      '既存のsend_messageで答えると再開する（新しい返信専用ツールは無い）',
+    async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost, store } = createHarness(ASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/ask.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      state.hub?.sendMessage({
+        from: 'T1',
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: '進めてよいですか',
+        expectReply: true,
+        kind: 'question',
+      });
+      await flush();
+
+      expect(t1.pauseLoopCount).toBe(1);
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingReply');
+
+      state.hub?.sendMessage({
+        from: ORCHESTRATOR_CONNECTION_ID,
+        to: 'T1',
+        body: '進めてください',
+        expectReply: false,
+      });
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+      expect(t1.resumeLoopCount).toBe(1);
+    },
+  );
+
+  it(
+    '答えが来ないままreplyTimeoutSecを超えても待ちぼうけ検出で解放される' +
+      '（design.md §16.21「待ちぼうけを検出する経路」を壊していないことの固定。' +
+      'blocking: trueが増えても既存の検出は変わらない）',
+    async () => {
+      vi.useFakeTimers();
+      try {
+        const { deps, state } = fakeMessagingDeps();
+        const readReplyTimeoutSec = () => 10;
+        const { runner, codexHost, store } = createHarness(ASK_YAML, {
+          messaging: { ...deps, readReplyTimeoutSec },
+        });
+        const result = await runner.start('/repo/.agents/workflows/ask.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const t1 = codexHost.byTaskId('T1');
+        // T2は無反応のまま走り続ける。問いは`kind: 'question'`
+        state.hub?.sendMessage({
+          from: 'T1',
+          to: ORCHESTRATOR_CONNECTION_ID,
+          body: '進めてよいですか',
+          expectReply: true,
+          kind: 'question',
+        });
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingReply');
+
+        await vi.advanceTimersByTimeAsync(10_000 + WAITING_REPLY_POLL_INTERVAL_MS);
+        await flush();
+
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+        expect(t1.resumeLoopCount).toBe(1);
+        const snapshot = runner.getSnapshot(runId);
+        expect(snapshot?.warnings.some((w) => w.kind === 'messagingStalled')).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it(
+    '答えが来ないまま待ちぼうけ検出で解放された後、maxIterationsを使い切ると失敗として確定する' +
+      '（受入基準「答えが来ないままmaxIterationsに達したらタスクが失敗として確定する' +
+      '（返事待ちで枠を占有し続けない）」。RED実測はrunnerMessaging.tsのJSDoc・報告に記録）',
+    async () => {
+      vi.useFakeTimers();
+      try {
+        const { deps, state } = fakeMessagingDeps();
+        const readReplyTimeoutSec = () => 10;
+        const { runner, codexHost, store } = createHarness(ASK_YAML, {
+          messaging: { ...deps, readReplyTimeoutSec },
+        });
+        const result = await runner.start('/repo/.agents/workflows/ask.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const t1 = codexHost.byTaskId('T1');
+        state.hub?.sendMessage({
+          from: 'T1',
+          to: ORCHESTRATOR_CONNECTION_ID,
+          body: '進めてよいですか',
+          expectReply: true,
+          kind: 'question',
+        });
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingReply');
+
+        // 誰も答えないまま時間切れで解放される（待ちぼうけ検出の経路2）
+        await vi.advanceTimersByTimeAsync(10_000 + WAITING_REPLY_POLL_INTERVAL_MS);
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+
+        // 解放後も答えが来ないまま、このタスクのmaxIterations（2）を使い切って
+        // ループが回数切れになった経路（LoopController自体はtest/unit/loopController.test.ts
+        // が別途カバーする。ここでは`waitingReply`からの解放後もmaxIterationsの管理が
+        // 生きていて、占有し続けず失敗に確定することだけを確認する）
+        t1.finish('maxReached', { ...initialChatState });
+        await flush();
+
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+        // 回数切れだけはセッションを残す（issue #284と同じ扱い）。「占有し続けない」とは
+        // waitingReplyのまま並列枠を塞ぎ続けないことで、ここではT1がfailedへ確定して
+        // 枠を明け渡したこと自体を確認する（T2はT1に依存しないため走り続けてよい）
+        expect(t1.disposed).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+});
+
 describe('WorkflowRunner: run終了処理はrunにつき1度だけ（Issue #432-2）', () => {
   /**
    * オーケストレーターへの通知はターン中は`pending`に溜まり、ターンが終わって

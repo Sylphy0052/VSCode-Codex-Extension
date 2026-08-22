@@ -73,6 +73,16 @@ export type OrchestratorEventKind =
    */
   | 'taskMessage'
   /**
+   * タスクが`ask_orchestrator`でオーケストレーターへ判断を仰いだ（design.md §16.32、
+   * Issue #571）。`taskMessage`（上）と配送経路は完全に同じ（`runnerMessaging.ts`の
+   * `onMessageAccepted`→`deliverTaskMessageToOrchestrator`）で、`StoredMessage.kind`が
+   * `'question'`のときにこちらの種別を使う。「問い」という意味づけを`taskMessage`と
+   * 区別して伝えるための種別で、配送・待ちぼうけ検出・`blocking`（`expectReply`）の扱いは
+   * `taskMessage`と共通（新しい経路は増やしていない）。答えはこれまでどおり
+   * オーケストレーターの`send_message`で行う（専用の返信ツールは無い）。
+   */
+  | 'taskQuestion'
+  /**
    * 統合PR/MRを作成した後、mainへ最終マージするかどうかの判断を求める
    * （design.md §16.26、`finalMerge: orchestrator`）。`decide_final_merge`ツールで
    * `merge` / `hold` を理由付きで答える。応答が無いまま`agent.workflows.

@@ -20,6 +20,7 @@ import {
   MessagingMcpServer,
   NO_REPLY_NOTICE,
   SEND_MESSAGE_TOOL,
+  ASK_ORCHESTRATOR_TOOL,
   startHttpMcpTransport,
   TASK_MESSAGE_GUIDANCE,
   TaskMessagingHub,
@@ -47,6 +48,7 @@ const message = (overrides: Partial<StoredMessage> = {}): StoredMessage => ({
   body: 'hello',
   expectReply: false,
   createdAtMs: 0,
+  kind: 'message',
   ...overrides,
 });
 
@@ -593,6 +595,7 @@ describe('TaskMessagingHubDeps.onAccepted（design.md §16.21「waitingReplyへ�
         body: 'hi',
         expectReply: true,
         createdAtMs: 123,
+        kind: 'message',
       },
     ]);
   });
@@ -625,7 +628,7 @@ describe('TaskMessagingHubDeps.onAccepted（design.md §16.21「waitingReplyへ�
 });
 
 describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側が接続で判別する」）', () => {
-  it('tools/listでlist_tasksとsend_messageの2つが見える', () => {
+  it('tools/listでlist_tasks・send_message・ask_orchestratorの3つが見える（design.md §16.32、Issue #571）', () => {
     const transport = new FakeTransport();
     const hub = buildHub([{ id: 'T1', state: 'running', summary: '' }]);
     new MessagingMcpServer(hub, transport);
@@ -637,7 +640,7 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
     expect(response && 'result' in response).toBe(true);
     if (response && 'result' in response) {
       const result = response.result as { tools: unknown[] };
-      expect(result.tools).toEqual([LIST_TASKS_TOOL, SEND_MESSAGE_TOOL]);
+      expect(result.tools).toEqual([LIST_TASKS_TOOL, SEND_MESSAGE_TOOL, ASK_ORCHESTRATOR_TOOL]);
     }
   });
 
@@ -1056,6 +1059,143 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
   });
 });
 
+describe('ask_orchestrator（design.md §16.32、Issue #571）', () => {
+  it('tools/callでask_orchestratorを呼ぶと、send_messageと同じ経路でオーケストレーター宛に積まれる', () => {
+    const transport = new FakeTransport();
+    const tasks: RunTaskSnapshot[] = [{ id: 'T1', state: 'running', summary: '' }];
+    const hub = buildHub(tasks);
+    new MessagingMcpServer(hub, transport);
+    const conn = new FakeConnection('T1');
+    transport.connect(conn);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'ask_orchestrator',
+        arguments: { question: 'この方針でよいですか', blocking: false },
+      },
+    });
+
+    const response = conn.sent[0];
+    expect(response && 'result' in response).toBe(true);
+    if (response && 'result' in response) {
+      const result = response.result as { content: [{ type: 'text'; text: string }] };
+      const parsed = JSON.parse(result.content[0].text) as { accepted: boolean };
+      expect(parsed.accepted).toBe(true);
+    }
+    const delivered = hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.from).toBe('T1');
+    expect(delivered[0]?.body).toBe('この方針でよいですか');
+    expect(delivered[0]?.kind).toBe('question');
+  });
+
+  it('blocking: trueはexpectReply: trueとして扱われる', () => {
+    const transport = new FakeTransport();
+    const tasks: RunTaskSnapshot[] = [{ id: 'T1', state: 'running', summary: '' }];
+    const hub = buildHub(tasks);
+    new MessagingMcpServer(hub, transport);
+    const conn = new FakeConnection('T1');
+    transport.connect(conn);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'ask_orchestrator', arguments: { question: 'q', blocking: true } },
+    });
+
+    const delivered = hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID);
+    expect(delivered[0]?.expectReply).toBe(true);
+  });
+
+  it('引数に別のタスクidを混ぜても、送信元は接続から判別した側の値になる（なりすまし不可）', () => {
+    const transport = new FakeTransport();
+    const tasks: RunTaskSnapshot[] = [
+      { id: 'T1', state: 'running', summary: '' },
+      { id: 'T2', state: 'running', summary: '' },
+    ];
+    const hub = buildHub(tasks);
+    new MessagingMcpServer(hub, transport);
+    const conn = new FakeConnection('T1');
+    transport.connect(conn);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'ask_orchestrator',
+        arguments: { question: 'q', blocking: false, from: 'T2', taskId: 'T2' },
+      },
+    });
+
+    const delivered = hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID);
+    expect(delivered[0]?.from).toBe('T1');
+  });
+
+  it('オーケストレーター自身の接続のtools/listにはask_orchestratorが現れず、名指しで呼んでも拒否される', () => {
+    const transport = new FakeTransport();
+    const tasks: RunTaskSnapshot[] = [{ id: 'T1', state: 'running', summary: '' }];
+    const hub = buildHub(tasks);
+    new MessagingMcpServer(hub, transport);
+    const conn = new FakeConnection(ORCHESTRATOR_CONNECTION_ID);
+    transport.connect(conn);
+
+    conn.fireRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    const listResponse = conn.sent[0];
+    expect(listResponse && 'result' in listResponse).toBe(true);
+    if (listResponse && 'result' in listResponse) {
+      const result = listResponse.result as { tools: { name: string }[] };
+      expect(result.tools.map((t) => t.name)).not.toContain('ask_orchestrator');
+    }
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'ask_orchestrator', arguments: { question: 'q', blocking: false } },
+    });
+    const callResponse = conn.sent[1];
+    expect(callResponse && 'error' in callResponse).toBe(true);
+    if (callResponse && 'error' in callResponse) {
+      expect(callResponse.error.message).toContain('未知のツール');
+    }
+  });
+
+  it('send_messageと同じ本文の長さ上限を共有する（MAX_MESSAGE_BODY_LENGTH）', () => {
+    const transport = new FakeTransport();
+    const tasks: RunTaskSnapshot[] = [{ id: 'T1', state: 'running', summary: '' }];
+    const hub = buildHub(tasks);
+    new MessagingMcpServer(hub, transport);
+    const conn = new FakeConnection('T1');
+    transport.connect(conn);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'ask_orchestrator',
+        arguments: { question: 'x'.repeat(MAX_MESSAGE_BODY_LENGTH + 1), blocking: false },
+      },
+    });
+
+    const response = conn.sent[0];
+    expect(response && 'result' in response).toBe(true);
+    if (response && 'result' in response) {
+      const result = response.result as { content: [{ type: 'text'; text: string }]; isError?: boolean };
+      expect(result.isError).toBe(true);
+      const parsed = JSON.parse(result.content[0].text) as { accepted: boolean; reason: string };
+      expect(parsed.accepted).toBe(false);
+      expect(parsed.reason).toContain('長すぎます');
+    }
+    expect(hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID)).toEqual([]);
+  });
+});
+
 describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタスク」、Issue #105）', () => {
   let handle: HttpMcpTransportHandle | undefined;
 
@@ -1407,12 +1547,12 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
     ]);
   });
 
-  it("タスクの接続のtools/listには制御ツールが現れない", () => {
+  it("タスクの接続のtools/listには制御ツールが現れない（ask_orchestratorは現れる）", () => {
     const { port } = fakeControl();
 
     const names = toolNames(wire(port)("T1"));
 
-    expect(names).toEqual(["list_tasks", "send_message"]);
+    expect(names).toEqual(["list_tasks", "send_message", "ask_orchestrator"]);
   });
 
   it("タスクの接続から制御ツールを名指しで呼んでも拒否される", () => {
