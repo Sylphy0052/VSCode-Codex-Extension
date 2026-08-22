@@ -25,7 +25,7 @@ permissions:
 
 jobs:
   check:
-    name: lint / typecheck / test
+    name: checks
     runs-on: ubuntu-latest
     # 既定の360分は長すぎるため妥当な値に短縮する。
     # ローカルでのscripts/check.sh全体の所要は30秒強であり、依存インストール（npm ci）を
