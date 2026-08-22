@@ -57,5 +57,8 @@ jobs:
       - name: Build
         run: npm run build
 
+      # カバレッジ計測付きで実行し、vitest.config.tsのthresholdsを下回ったら失敗させる
+      # （#455）。npm testより速度は落ちる（ローカル実測で約+23秒）が、
+      # 下限を機械的に強制するステップを別に持つより単純なため、testステップ自体を置き換える。
       - name: Test
-        run: npm test
+        run: npm run test:coverage

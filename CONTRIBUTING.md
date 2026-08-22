@@ -23,6 +23,7 @@ npm run check     # lint + typecheck + test
 | `npm run lint`                  | `eslint .`                                                          |
 | `npm run format`                | Prettierで整形する                                                  |
 | `npm test`                      | `vitest run`（`test/unit/**`）                                      |
+| `npm run test:coverage`         | 上記にカバレッジ計測を付けて実行する。下限を下回ると失敗する        |
 | `npm run test:integration`      | 実VSCode上の統合テスト（`test/integration/**`）。ディスプレイが要る |
 | `npm run test:integration:xvfb` | 同上。ヘッドレスLinux/WSLでxvfb-run経由で実行する                   |
 | `npm run check`                 | lint / typecheck / testをまとめて実行する（integrationは含まない）  |
@@ -32,13 +33,13 @@ npm run check     # lint + typecheck + test
 
 ## CI
 
-mainへのpushとPRのたびに、GitHub Actions（`.github/workflows/ci.yml`）で `npm run lint` / `npm run typecheck` / `npm run build` / `npm test` が自動実行される。Node.js 20系で `npm ci` してから走る。
+mainへのpushとPRのたびに、GitHub Actions（`.github/workflows/ci.yml`）で `npm run lint` / `npm run typecheck` / `npm run build` / `npm run test:coverage` が自動実行される。Node.js 20系で `npm ci` してから走る。
 
 `scripts/check.sh`（`npm run lint` / `npm run typecheck` / `npm test` の3つ）とは一致しない。CIは`npm run build`の分だけ検証範囲が広く、tsc --noEmitでは検出できないバンドル失敗（動的import、モジュール解決の差、--externalの指定漏れなど）を拾う。`scripts/check.sh` 自体は変更していないため、手元で全緑にしてもCIのbuildステップは別途確認が必要。
 
 統合テスト（`npm run test:integration`）はCIで回らない。実VSCodeのダウンロードとxvfbが要るため対象外にしてある。実VSCodeが要る範囲は引き続き手元で確認する。
 
-カバレッジもCIでは計測していない。計測の仕組み自体が未導入で、導入手順と閾値の決め方は `docs/repository-hygiene.md` にまとめてある。
+カバレッジはCIで計測しており、下限（statements 70% / branches 68% / functions 70% / lines 70%）を下回るとCIが失敗する。この下限は実測値（導入時点でstatements 74.92% / branches 72.33% / functions 74.93% / lines 74.82%）をわずかに下回る値であり、当面は低下防止のみを目的とする。CLAUDE.mdが定める80%への引き上げは未着手。導入の経緯と既知の注意点（`src/extension.ts`が計測対象外であることなど）は `docs/repository-hygiene.md` にまとめてある。
 
 現時点ではブランチ保護の必須チェック（required status checks）に設定していない。CIが赤くてもマージはブロックされない（可視化のみ）。
 
