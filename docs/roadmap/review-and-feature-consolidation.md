@@ -110,14 +110,21 @@
   - W5 PR/MRのレビュー結果を取り込んでタスクへ反映する（[#339](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/339)）
   - W6 タスクごとにIssueを起票し、PRのレビューを経てマージする（後述。Issueは未起票）
   - 依存: W2←W1 / W4←W2 / W5←W4 / W6←W1
-  - 前提: WF-AとWF-Bの完了（`runner.ts` / `forge.ts` / `planner.ts` / `roadmap.ts` を共有する）
+  - 前提: WF-AとWF-Bの完了（`runner.ts` / `forge.ts` / `planner.ts` / `roadmap.ts` を共有する）。
+    両者とも完了済み（2026-08-22、WF-A: PR #447 / WF-B: PR #429）。着手可
+  - 事実: WF-A2（[#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466)）も
+    `runner.ts`（例: #374 `WorkflowRunner.dispose()`）を触るため、WF-Eとファイルの集合が交差する。
+    ワークフロー同士がファイルを共有しないという本ロードマップの並列規則に照らして判断すること
+  - **決定: WF-EはWF-A2（#466）の完了を待つ**（2026-08-22）。上の交差があるため、
+    並列規則に照らして順序を付けた。第2波はWF-Fのみ先に着手する
 
 - **WF-F チャット画面の会話操作と表示**（3項目、詳細は [chat-conversation-parity.md](chat-conversation-parity.md)）
   - X1 応答のMarkdown描画へ表・引用・ネストしたリストを足す（[#332](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/332)）
   - X2 Claude Codeでも会話の途中のターンから分岐できるようにする（[#333](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/333)）
   - X3 Claude Codeでも脇道の質問を使えるようにする（[#334](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/334)）
   - 依存: X1 → X2 → X3（逐次。3項目とも `chatScript.ts` かcontrol protocol層を触る）
-  - 前提: WF-Cの完了（`chatScript.ts` / `claudeChatView.ts` / `streamSession.ts` を共有する）
+  - 前提: WF-Cの完了（`chatScript.ts` / `claudeChatView.ts` / `streamSession.ts` を共有する）。
+    完了済み（2026-08-22、PR #431）。着手可
 
 ### 第3波 仕上げ
 
@@ -183,6 +190,13 @@
 - 実VSCodeでしか確かめられない受入基準は [docs/manual-test.md](../manual-test.md) へ追記する
 - 権限や信頼境界に触れる変更は、[design.md](../design.md) §16.16（設定の信頼境界）の方針から
   外れないことを確かめてから入れる
+- **横断レビューの結果は epic Issue と、統合ブランチから main へ出すPRの本文へ残す。docs配下に
+  別の文書は作らない。** WF-A（epic #352 / PR #447）・WF-B（PR #429）・WF-C（PR #431）はいずれも
+  この形で残しており、docs配下にレビュー記録の文書は存在しない。
+  [.agents/workflows/](../../.agents/workflows/)（`review-fixes-core.yaml` の `Z01_core_review`、
+  `review-fixes-ui.yaml` の `Z02_ui_review`）の `done` にある「docs配下の文書に残る」という記述は、
+  この運用に置き換わっている。YAML自体は第1波の全タスクが終わった時点で歴史的な資料であり、
+  文言は直さない
 
 ### 担当セッションの動き方
 
@@ -205,15 +219,16 @@
 
 epic Issueは各ワークフローの開始時に起票し、採番できた時点でこの表へ追記する。
 
-| ワークフロー | 波 | 項目数 | epic Issue | 統合ブランチ |
-| --- | --- | --- | --- | --- |
-| WF-A オーケストレーター実行系 | 1 | 11 | 未採番 | `wf/wf-a/integration` |
-| WF-B 生成・安全系 | 1 | 4 | [#350](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/350)（完了） | `wf/wf-b/integration`（mainへマージ済み・削除） |
-| WF-C チャットUIの土台 | 1 | 9 | 未採番 | `wf/wf-c/integration` |
-| WF-D リポジトリ基盤 | 1 | 2 | 未採番 | `wf/wf-d/integration` |
-| WF-E ワークフローの自律性 | 2 | 6 | [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341) | `wf/wf-e/integration` |
-| WF-F チャットの会話操作と表示 | 2 | 3 | [#340](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/340) | `wf/wf-f/integration` |
-| WF-G 横断の仕上げ | 3 | 2 | 未採番 | `wf/wf-g/integration` |
+| ワークフロー | 波 | 項目数 | epic Issue | 統合ブランチ | 状態 |
+| --- | --- | --- | --- | --- | --- |
+| WF-A オーケストレーター実行系 | 1 | 11 | [#352](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/352) | `wf/wf-a/integration` | 完了（PR [#447](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/447)、mainへマージ済み。統合ブランチは削除済み）。後続はWF-A2行（次行）を参照 |
+| WF-A2 オーケストレーター実行系の追いIssue | 1 | 16 | [#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466) | `wf/wf-a2/integration` | 進行中（WF-Aの後続。実装過程とその後の横断レビューで分離した16件） |
+| WF-B 生成・安全系 | 1 | 4 | [#350](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/350) | `wf/wf-b/integration` | 完了（PR [#429](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/429)、mainへマージ済み。統合ブランチは削除済み） |
+| WF-C チャットUIの土台 | 1 | 9 | [#351](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/351) | `wf/wf-c/integration` | 完了（PR [#431](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/431)、mainへマージ済み。統合ブランチは削除済み） |
+| WF-D リポジトリ基盤 | 1 | 2 | [#353](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/353) | `wf/wf-d/integration` | 完了（PR [#394](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/394)、mainへマージ済み。統合ブランチは削除済み） |
+| WF-E ワークフローの自律性 | 2 | 6 | [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341) | `wf/wf-e/integration` | WF-A2（#466）の完了待ち（`runner.ts` / `forge.ts` が交差するため） |
+| WF-F チャットの会話操作と表示 | 2 | 3 | [#340](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/340) | `wf/wf-f/integration` | 着手（第1波が全完了。WF-A2とファイルが交差しない） |
+| WF-G 横断の仕上げ | 3 | 2 | 未採番 | `wf/wf-g/integration` | 第2波の完了待ち |
 
 W1〜W5とX1〜X3のIssue番号・ブランチ名・design.mdの節・manual-test.mdの番号は、
 [workflow-autonomy.md](workflow-autonomy.md) と [chat-conversation-parity.md](chat-conversation-parity.md) で
@@ -264,10 +279,23 @@ WF-A / WF-B の根拠行はそのまま使える。WF-Cの根拠行を実測し�
 `chatView.ts` と `claudeChatView.ts` に手を入れているため、T23 / T24 の抽出設計はその結果を
 読んでから決める。承認まわりの変更で既に解消している指摘があれば、直さずにその旨を報告する。
 
+**この節はWF-C着手前の申し送りだったが、WF-Cは完了した**（2026-08-22、PR #431でmainへマージ済み）。
+その後さらにWF-A（PR #447）とWF-B（PR #429）もmainへマージされており、
+`.agents/workflows/` の行番号は当時（`cac40c73`時点）のまま一切更新されていないため、
+上表の「現在のmain」列との差分に加えて、WF-A / WF-B / WF-Cそれぞれの変更分だけ
+さらにずれが積み重なっている。WF-E / WF-Fの担当は、YAMLの行番号をそのまま信じず、
+シンボル名と説明文で現物を確認してから着手すること。
+
 ## 進め方
 
 - 第1波の4ワークフローは同時に始めてよい。互いにファイルを共有しない
-- 第2波は第1波の全完了を待つ。WF-E / WF-Fは互いに交差しないので並列に進める
+- 第2波は第1波の全完了を待つ。**第1波は4本とも完了済み**（2026-08-22、WF-A: PR #447 / WF-B: PR #429 /
+  WF-C: PR #431 / WF-D: PR #394、いずれもmainへマージ済み）。WF-Aの後続として、実装過程とその後の
+  横断レビューで分離した追いIssue epic [#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466)
+  （16件、統合ブランチ `wf/wf-a2/integration`）が進行中。**第2波はWF-Fのみ先に着手する**
+  （2026-08-22の決定）。**WF-EはWF-A2（#466）の完了を待つ**。`runner.ts` / `forge.ts` を
+  共有し、ファイルの集合が交差するため。WF-EとWF-Fは互いに交差しないので、
+  WF-A2の完了後は並列に進めてよい
 - 第3波は第2波の完了後。型情報ルールの導入は全ファイルへ波及するため最後に置く
 - 各ワークフローの完了時に、READMEの該当箇所（機能の節・設定・既知の制約）を同じPRで更新する
 - 全実装の完了後、拡張のワークフロー機能そのものでこの運用を回せるか（ドッグフーディング）を
