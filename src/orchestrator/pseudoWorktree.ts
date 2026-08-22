@@ -1086,6 +1086,14 @@ export async function reflectIntegrationToWorkspace(
         const targetDir = path.dirname(target);
         await fs.mkdir(targetDir);
         const realTargetDir = await fs.realpath(targetDir);
+        // ここでは`cloneWorkspace` / `ensureIntegrationDir`と違い、
+        // **作ったディレクトリを`removeDirRecursive`で撤去しない**（レビュー指摘への裁定。
+        // 揃っていないのは意図的なので、将来のレビューで安易に揃えないこと）。
+        // 撤去対象は「`realpath`が境界外に解決されたディレクトリ」であり、その実体は
+        // シンボリックリンクの指す先＝既にユーザーのデータが入っている可能性のある場所。
+        // 空ディレクトリが1つ残る害と、境界外を再帰削除する害が釣り合わない。
+        // `cloneWorkspace`側が撤去できるのは、そこで作るのが自分専用の新規ディレクトリ
+        // （`<runId>/<taskId>`）だからで、前提が違う。
         if (realTargetDir === undefined || !isPathWithinRoot(realTargetDir, realRoot)) {
           throw new Error(
             `反映先のディレクトリが実際にはワークスペースの外を指しています（${safeRelPath}）: ${sanitizeForLog(realTargetDir ?? targetDir)}`,
