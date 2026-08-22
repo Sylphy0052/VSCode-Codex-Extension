@@ -111,7 +111,7 @@
   - W6 タスクごとにIssueを起票し、PRのレビューを経てマージする（後述。Issueは未起票）
   - 依存: W2←W1 / W4←W2 / W5←W4 / W6←W1
   - 前提: WF-AとWF-Bの完了（`runner.ts` / `forge.ts` / `planner.ts` / `roadmap.ts` を共有する）。
-    両者とも完了済み（2026-08-22、WF-A: PR #447 / WF-B: PR #429）。着手可
+    両者とも完了済み（2026-08-22、WF-A: PR #447 / WF-B: PR #429）
   - 事実: WF-A2（[#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466)）も
     `runner.ts`（例: #374 `WorkflowRunner.dispose()`）を触るため、WF-Eとファイルの集合が交差する。
     ワークフロー同士がファイルを共有しないという本ロードマップの並列規則に照らして判断すること
@@ -234,18 +234,17 @@ W1〜W5とX1〜X3のIssue番号・ブランチ名・design.mdの節・manual-tes
 [workflow-autonomy.md](workflow-autonomy.md) と [chat-conversation-parity.md](chat-conversation-parity.md) で
 既に割り当ててある。担当はそこに書かれた番号だけを使う。
 
-## 着手前の整理
+## 着手前の整理（完了済みの記録）
 
-第1波を始める前に次を済ませる。
+第1波を始める前に済ませた項目。**すべて完了しており、これから対応するものは無い。**
 
 - **このロードマップを含むPR [#342](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/342) の
   マージは済んでいる**（2026-08-22）。取りこぼした差分も PR
   [#345](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/345) で回収済み
-- **`feat/332/markdown-table-quote-nested-list` の未コミット変更を引き継ぐ。**
-  worktree `.claude/worktrees/agent-afc5d95d062c971b9` に `src/view/markdown.ts` の変更が
-  271行分残っている（`table` / `quote` / `hr` / `strike` / ネスト付き `ListItem` の追加まで進んでいる）。
-  X1の担当は、この差分を捨てずに検分してから続きを実装する。
-  `chatScript.ts` / `chatStyles.ts` / `MARKDOWN_PARSE_SOURCE` / テストは未確認
+- **`feat/332/markdown-table-quote-nested-list` の未コミット変更の引き継ぎは完了した**（2026-08-22）。
+  worktree `.claude/worktrees/agent-afc5d95d062c971b9` に残っていた `src/view/markdown.ts` の
+  271行分の変更を、X1の担当が検分したうえでコミットし `wf/wf-f/integration` へ rebase した
+  （`markdown.ts` は `cac40c73` 以降 main で変更されていなかったためコンフリクトなし）
 - **不要なブランチの整理は済んでいる**（2026-08-22）。`feat/unified-approval-levels`（PR #343 で
   マージ済み）、`worktree-agent-a5ff0a7b5eea5cdfd`、`feat/335/final-merge-confirm`（いずれも独自の
   コミットが無い空ブランチ）と、リモートの `feat/327/workflow-branch-naming-conventions`
