@@ -2985,8 +2985,15 @@ tasks:
       git.calls.filter((c) => c.args[0] === 'merge' && c.args[1] === '--no-ff'),
     ).toHaveLength(2);
 
-    // 停止は解除されないので、`pending`へ戻った後続は新しいセッションを開かない
+    // 停止は解除されないので、後続は新しいセッションを開かない
     expect(store.find(runId)?.haltedByUser).toBe(true);
+    // ここで観測している`pending`は**現状の観測であって、望ましい仕様ではない**。
+    // `markMergeSucceeded`が`haltedByUser`を見ずに`mergeBlocked`の後続を`pending`へ戻すため、
+    // 停止中のrunでは誰にも開始されない`pending`が残り、`getRunOutcome`が`running`を返し
+    // 続けてrunが終了判定へ進めない（Issue #432。本PRが作った欠陥ではなく、`attemptMerge`に
+    // 停止チェックが無かった従来も同じ経路だった）。このテストの主題はあくまで
+    // 「停止が尊重されること」なので、袋小路そのもの（`finishedAt`が付くかどうか）は
+    // ここでは何も主張しない。Issue #432の対応時にこの期待値も見直すこと
     expect(store.find(runId)?.tasks['T2']?.state).toBe('pending');
     expect(store.find(runId)?.tasks['T3']?.state).toBe('pending');
     expect(codexHost.sessions).toHaveLength(sessionCountAtStop);
