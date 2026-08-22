@@ -10,6 +10,7 @@ import {
 } from './fsGuards';
 import { sanitizeForLog } from './sanitize';
 import { SerialQueue } from './serialQueue';
+import { withRetrySuffix } from './worktree';
 
 /**
  * gitの作業ツリーでないワークスペースでの隔離（design.md §16.20 / Issue #96）。
@@ -452,10 +453,28 @@ export function pseudoWorktreesRootDir(workspaceRoot: string): string {
   return path.join(workspaceRoot, '.agents', 'worktrees');
 }
 
-/** タスク1件分の複製先の絶対パス。`<workspace>/.agents/worktrees/<runId>/<taskId>`（design.md §16.20）。 */
-export function pseudoWorktreePath(workspaceRoot: string, runId: string, taskId: string): string {
+/**
+ * タスク1件分の複製先の絶対パス。`<workspace>/.agents/worktrees/<runId>/<taskId>`
+ * （design.md §16.20）。`retry`を渡すとディレクトリ名にも`-retry<n>`が付く。
+ *
+ * `worktree.ts`の`worktreePath`と対称にする（Issue #396）。以前はここが`retry`を
+ * 受け取らず、`failed`になったタスクを再試行すると`cloneWorkspace`が前回の複製先と
+ * 同じパスへ2回目の複製を試みて必ず`alreadyExists`で失敗していた（gitの`worktreePath`は
+ * 既にretry対応済みで、疑似worktree側だけが取り残されていた）。`-retry<n>`の組み立て
+ * ロジック自体は`worktree.ts`の`withRetrySuffix`をそのまま使い、ここで複製しない。
+ *
+ * **`_integration`（統合先、design.md §16.17で予約済みのタスクid）には接尾辞を付けない。**
+ * 統合先には「再試行」という概念が無く、`integrationPath`が指す場所とずれてしまうため。
+ */
+export function pseudoWorktreePath(
+  workspaceRoot: string,
+  runId: string,
+  taskId: string,
+  retry?: number,
+): string {
   assertValidIdentifiers(runId, taskId);
-  return path.join(pseudoWorktreesRootDir(workspaceRoot), runId, taskId);
+  const dirName = taskId === INTEGRATION_DIR_NAME ? taskId : withRetrySuffix(taskId, retry);
+  return path.join(pseudoWorktreesRootDir(workspaceRoot), runId, dirName);
 }
 
 /** 統合先の絶対パス。`<runId>/_integration`（design.md §16.20 / §16.17）。 */
@@ -671,6 +690,10 @@ export type CloneWorkspaceResult =
  *    ここで多数のファイルをコピーする前に確認することで、境界を外れた場合の書き込みを
  *    最小限（空ディレクトリ1つ）に抑える
  * 6. ワークスペースを複製し、複製先のスナップショットを返す
+ *
+ * `retry`は`worktree.ts`の`createWorktree`と同じ意味（Issue #396）。再試行のたびに
+ * 呼び出し側（`runnerWorkingDirectory.ts`）が異なる`retry`を渡すことで、`pseudoWorktreePath`が
+ * 別ディレクトリを指すようになり、前回の複製が残っていても`alreadyExists`にならない。
  */
 export async function cloneWorkspace(
   workspaceRoot: string,
@@ -678,13 +701,14 @@ export async function cloneWorkspace(
   taskId: string,
   exclude: readonly string[],
   fs: PseudoWorktreeFileSystemPort,
+  retry?: number,
 ): Promise<CloneWorkspaceResult> {
   const identifierMessage = identifierError(runId, taskId);
   if (identifierMessage !== undefined) {
     return { ok: false, reason: 'invalidIdentifier', message: identifierMessage };
   }
 
-  const target = pseudoWorktreePath(workspaceRoot, runId, taskId);
+  const target = pseudoWorktreePath(workspaceRoot, runId, taskId, retry);
 
   const symlinkedAncestor = await findSymlinkedAncestor(workspaceRoot, target, fs);
   if (symlinkedAncestor !== undefined) {
@@ -751,18 +775,23 @@ export type RemovePseudoWorktreeResult =
  * 差し替えられていた場合にリンク先（ワークスペースの外）を再帰削除してしまう。
  *
  * 対象が実在しなければ（既に撤去済み）、`worktree.ts`の`removeWorktree`と同じく成功として返す。
+ *
+ * `retry`を渡すと、その番号の複製先（`cloneWorkspace`に同じ`retry`を渡して作った場所）
+ * だけを撤去する（Issue #396）。全試行分をまとめて撤去したい場合は
+ * `removePseudoWorktreeAttempts`を使う。
  */
 export async function removePseudoWorktree(
   workspaceRoot: string,
   runId: string,
   taskId: string,
   fs: PseudoWorktreeFileSystemPort,
+  retry?: number,
 ): Promise<RemovePseudoWorktreeResult> {
   const identifierMessage = identifierError(runId, taskId);
   if (identifierMessage !== undefined) {
     return { ok: false, reason: 'invalidIdentifier', message: identifierMessage };
   }
-  const target = pseudoWorktreePath(workspaceRoot, runId, taskId);
+  const target = pseudoWorktreePath(workspaceRoot, runId, taskId, retry);
 
   const realTarget = await fs.realpath(target);
   if (realTarget === undefined) {
@@ -779,6 +808,49 @@ export async function removePseudoWorktree(
 
   await fs.removeDirRecursive(target);
   return { ok: true };
+}
+
+/**
+ * 疑似worktreeの1タスク分の複製を、すべての試行分まとめて撤去する（Issue #396）。
+ *
+ * `worktree.ts`側の`runner.ts`にある`removeGitTaskWorktree`と対になる撤去で、対象は
+ * 「retryなし（初回）」と`0..totalAttempts-1`のすべて。`cloneWorkspace`が`retry`ごとに
+ * 別ディレクトリ（ワークスペース丸ごとの複製）を作るため、1件も撤去し忘れると
+ * ディスクを試行回数ぶん無駄に占有し続ける（過去の試行分は`blocked`の場合を除き
+ * 中身を後から見返す必要が無いため、gitのブランチのように残す理由が無い）。
+ *
+ * 既に存在しないパスは`removePseudoWorktree`が撤去済みとして成功扱いにするため、
+ * 実在を気にせず全件呼んでよい。1件でも失敗すればそれらのメッセージをまとめて返す
+ * （`removeGitTaskWorktree`と同じ集約の仕方）。
+ */
+export async function removePseudoWorktreeAttempts(
+  workspaceRoot: string,
+  runId: string,
+  taskId: string,
+  totalAttempts: number,
+  fs: PseudoWorktreeFileSystemPort,
+): Promise<RemovePseudoWorktreeResult> {
+  const retries: Array<number | undefined> = [
+    undefined,
+    ...Array.from({ length: totalAttempts }, (_, i) => i),
+  ];
+  const messages: string[] = [];
+  let firstFailureReason: Extract<RemovePseudoWorktreeResult, { ok: false }>['reason'] | undefined;
+  for (const retry of retries) {
+    const result = await removePseudoWorktree(workspaceRoot, runId, taskId, fs, retry);
+    if (!result.ok) {
+      messages.push(result.message);
+      firstFailureReason ??= result.reason;
+    }
+  }
+  if (messages.length === 0) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    reason: firstFailureReason ?? 'boundaryEscape',
+    message: messages.join(' / '),
+  };
 }
 
 // ---------------------------------------------------------------------------
