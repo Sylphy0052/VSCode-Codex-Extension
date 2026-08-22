@@ -16,5 +16,19 @@ export default defineConfig({
     // 実行できない（実物の'vscode'モジュールが要る）ため、test/unit配下だけに絞る。
     include: ['test/unit/**/*.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**', '.claude/**', 'test/integration/**'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'lcov'],
+      include: ['src/**/*.ts'],
+      // #455: 実測（statements 74.92% / branches 72.33% / functions 74.93% / lines 74.82%、
+      // Issue #386調査時点）を下回らない値で下限を敷き、以後の低下だけを防ぐ。
+      // 80%への引き上げは段階的に別Issueで行う（詳細はdocs/repository-hygiene.mdを参照）。
+      thresholds: {
+        statements: 70,
+        branches: 68,
+        functions: 70,
+        lines: 70,
+      },
+    },
   },
 });
