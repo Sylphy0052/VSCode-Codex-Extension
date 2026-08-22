@@ -8,6 +8,7 @@ import {
   DEFAULT_REPLY_TIMEOUT_SEC,
   detectAllWaitingStalemate,
   detectTimedOutWaitingReplies,
+  DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL,
   enqueueMessage,
   hasQueuedMessages,
   isDeliverableState,
@@ -847,7 +848,9 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
         });
       }
 
-      // 上限件数分の個別ログ + 上限到達を知らせる1行だけが記録され、それ以上は増えない
+      // 上限件数分の個別ログ + 上限到達を知らせる1行だけが記録され、それ以上は増えない。
+      // 注: この試行回数（+5）はDISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL未満なので、
+      // ここでは集計ログはまだ出ない（集計ログの検証は別テストで行う）。
       expect(logs).toHaveLength(MAX_DISPATCH_ERROR_LOG_COUNT + 1);
       expect(logs.slice(0, MAX_DISPATCH_ERROR_LOG_COUNT).every((m) => m.includes('boom'))).toBe(
         true,
@@ -855,6 +858,52 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
       expect(logs[MAX_DISPATCH_ERROR_LOG_COUNT]).toContain(String(MAX_DISPATCH_ERROR_LOG_COUNT));
 
       // 記録が止まっても、レスポンス自体は引き続き固定文言の-32603で返る（応答は壊れない）
+      expect(conn.sent).toHaveLength(attempts);
+      expect(conn.sent.every((r) => 'error' in r && r.error.code === -32603)).toBe(true);
+    },
+  );
+
+  it(
+    '上限到達後も抑制中の件数を数え続け、' +
+      'DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL件おきに集計ログを1行出す' +
+      '（Issue #375、PR #488監査指摘: medium。正当な例外で上限を先に使い切られても、' +
+      'その後の攻撃の規模・継続有無を集計ログだけで追えるようにする）',
+    () => {
+      const logs: string[] = [];
+      const logPort: DispatchErrorLogPort = { error: (m) => logs.push(m) };
+      const transport = new FakeTransport();
+      const hub = new TaskMessagingHub({
+        listRunTasks: () => {
+          throw new Error('boom');
+        },
+      });
+      new MessagingMcpServer(hub, transport, logPort);
+      const conn = new FakeConnection('T1');
+      transport.connect(conn);
+
+      // 上限到達 + 集計ログがちょうど2回出る回数まで試行する
+      const attempts = MAX_DISPATCH_ERROR_LOG_COUNT + DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL * 2;
+      for (let i = 0; i < attempts; i += 1) {
+        conn.fireRequest({
+          jsonrpc: '2.0',
+          id: i,
+          method: 'tools/call',
+          params: { name: 'list_tasks', arguments: {} },
+        });
+      }
+
+      // 個別ログ(上限件数) + 上限到達通知1行 + 集計ログ2行 = 上限件数+3
+      expect(logs).toHaveLength(MAX_DISPATCH_ERROR_LOG_COUNT + 3);
+
+      const firstSummary = logs[MAX_DISPATCH_ERROR_LOG_COUNT + 1];
+      const secondSummary = logs[MAX_DISPATCH_ERROR_LOG_COUNT + 2];
+      expect(firstSummary).toContain(String(DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL));
+      expect(secondSummary).toContain(String(DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL * 2));
+      // 集計ログの主語がrun単位（複数タスクの接続を含む）であることを明示している
+      expect(firstSummary).toContain('run');
+      expect(secondSummary).toContain('run');
+
+      // ログ行数自体は増え続けず、応答は引き続き固定文言の-32603で返る
       expect(conn.sent).toHaveLength(attempts);
       expect(conn.sent.every((r) => 'error' in r && r.error.code === -32603)).toBe(true);
     },
