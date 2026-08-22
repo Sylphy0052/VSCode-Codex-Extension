@@ -508,6 +508,8 @@ Codexがサブエージェントを起動したとき、その活動を会話の
 
   MRの自己マージを禁じる運用規約がある場合は、machineスコープの設定で `agent.workflows.finalMerge` を `pr-only` にする
 
+  **どのモードでも、マージを実行する直前にCIチェックの完了を待つ。** 赤ならマージせずタスクを失敗として確定し、理由をワークフローViewの警告欄に残す。CIが1件も設定されていないリポジトリでは待たずに即マージする。マージが「baseの最新でない」（strictなブランチ保護の下で他のPRが先にmainへ入った場合等）ことで拒否されたときは、`gh pr update-branch` / `glab mr rebase` で自動的に取り込み直し、CIの完了を待ち直してから再度マージを試みる（上限は `agent.workflows.ciWaitTimeoutSec` / `agent.workflows.ciUpdateBranchMaxRetries`、[後述](#設定)）
+
 ### 最小のYAML
 
 ワークフロー定義は`.agents/workflows/`（既定。設定 `agent.workflows.dir` で変更可）配下の `.yaml` / `.yml` ファイルに置く。
@@ -748,6 +750,8 @@ tasks:
 | `agent.workflows.pullRequest`           | `per-task`                      | machine-overridable | 作るPR/MRの層（`none` / `integration` / `per-task`）                                                                                 |
 | `agent.workflows.finalMerge`            | `orchestrator`                  | machine             | 統合ブランチ→mainのPR/MRをマージするかどうかをどう決めるか（`auto` / `orchestrator` / `confirm` / `pr-only`。[無人実行についての注意](#無人実行についての注意)参照）           |
 | `agent.workflows.finalMergeDecisionTimeoutSec` | `900`                     | machine-overridable | `finalMerge: orchestrator` で、オーケストレーターが `decide_final_merge` に応答するのを待つ上限秒数。超えたら自動的に `hold` にする |
+| `agent.workflows.ciWaitTimeoutSec`      | `1800`                          | machine-overridable | 最終マージの前にCIチェックの完了を待つ上限秒数。超えたらCIが赤扱いでマージせずタスクを失敗にする。CIが1件も設定されていないPR/MRは待たずに即マージする              |
+| `agent.workflows.ciUpdateBranchMaxRetries` | `2`                           | machine-overridable | マージが「baseの最新でない」ため拒否されたとき、`gh pr update-branch` / `glab mr rebase` で取り込み直してCI待ち・マージを再試行する回数の上限。超えたら失敗にする |
 | `agent.workflows.branchNaming`          | `wf`                            | machine-overridable | タスクブランチの命名方式（`wf` = `wf/<runId>/<taskId>` / `conventional` = `<type>/<IID>/<slug>`）                                    |
 | `agent.workflows.draftPullRequest`      | `false`                         | machine-overridable | PR/MRをDraftで作り、統合ブランチへのマージ後にreadyへ切り替えるか                                                                    |
 
@@ -807,6 +811,7 @@ VSCodeが読むPATHはシェルの対話設定（`.bashrc` 等）を経ないこ
 - **ウィンドウを跨いだ排他はしない**: 同一ウィンドウ内の二重オープンは防ぐが、別ウィンドウで同じセッションを開くことは止めない
 - **CLIから直接archive/deleteした場合**: 履歴は追従するが、開いているタブは残る
 - **ワークフローは実装・配線ともに完了しているが実機確認は途上**: 統合ブランチからのPR/MR自動作成、`agent.workflows.roadmap` によるゴール→ロードマップ→YAMLの2段階生成、`blocked` タスクのワークフローViewからの「再マージ」、タスク間メッセージング（MCPツール `list_tasks` / `send_message`。宛先はオーケストレーターに固定してあり、タスク同士が直接やり取りすることはできない）、gitリポジトリでないフォルダでの複製による隔離（疑似worktree）は、いずれも実行層（`runner.ts`）への配線を含めて実装済みで動く。ユニットテストとプロトコル上の実測までは済んでいるが、実VSCode上で通しで確認した記録はまだ無い。詳細は[docs/design.md](docs/design.md) §16.13を参照
+- **最終マージ前のCI完了待ちとブランチ保護への対応は実機未確認**: CIチェックの完了待ち・タイムアウト時の失敗確定・マージが「baseの最新でない」ため拒否されたときの `gh pr update-branch` / `glab mr rebase` による自動取り込み直しは、いずれもユニットテストのみで検証済み。実際のGitHub/GitLab上でstrictなブランチ保護・CIパイプラインと組み合わせた確認はまだ無い。詳細は[docs/design.md](docs/design.md) §16.36、[docs/manual-test.md](docs/manual-test.md) W-Pを参照
 - **Codexの履歴取得はthread/list優先**: app-serverに繋がっていれば `thread/list` を使い、繋がらない・応答が空のときはファイル読みへ退避する。退避したときは出力チャネル（`Agent: ログを表示`）に理由が残る（詳細は設計書 §4.0）
 - **agent threadを切り替える経路が無い**: Codex app-serverのClientRequest 95メソッドを全数確認したが、「アクティブなagent threadを切り替える」に相当するものが無い（実測。詳細は設計書 §14.26）。サブエージェントの状況は会話内の項目として見えるが、そこへ「切り替える」操作は無い
 - **検索（Ctrl+F）は折り畳んだ部分を拾わない**: コマンド出力・思考の要約の折りたたみ、`<details>` の中はDOM上非表示のため検索対象にならない。畳んでいる箇所を検索したい場合は開いてから検索する（詳細は設計書 §14.48）

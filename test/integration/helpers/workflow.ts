@@ -490,6 +490,19 @@ export class RecordingCli {
       const stdout = command === 'gh' ? `${url}\n` : JSON.stringify({ web_url: url });
       return Promise.resolve({ code: 0, stdout, stderr: '' });
     }
+    if (isCiStatusCheck(command, args)) {
+      // design.md §16.36（Issue #556）。統合テストは実ホストへ触れないため、CI状態取得
+      // （`gh pr view --json=statusCheckRollup` / `glab api .../merge_requests/<iid>`）にも
+      // 応答を用意する必要がある。あえて「チェックが1件あって緑」の形にした
+      // （空応答のままだと`statusCheckRollup: []` / `head_pipeline: null`と同じ形になり、
+      // `conclusion: 'none'`＝CI未設定のリポジトリと同じ経路を通ってしまい、統合テストが
+      // 確かめたい「CIの完了を待ってからマージする」経路を素通りしてしまうため）。
+      const stdout =
+        command === 'gh'
+          ? JSON.stringify({ statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }] })
+          : JSON.stringify({ head_pipeline: { status: 'success' } });
+      return Promise.resolve({ code: 0, stdout, stderr: '' });
+    }
     return Promise.resolve({ code: 0, stdout: '', stderr: '' });
   }
 
@@ -510,6 +523,19 @@ function readBodyFilePath(args: readonly string[]): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * `gh pr view <number> --json=statusCheckRollup` / `glab api projects/:id/merge_requests/<iid>`
+ * （CI状態取得。`forge.ts`の`buildCiStatusArgs`が組み立てる形）か。後者は`glab api
+ * projects/:id/merge_requests`（PR/MR作成。`isCreatePullRequest`）と先頭が同じだが、
+ * 作成側は末尾にiidが付かない点で区別できる。
+ */
+function isCiStatusCheck(command: string, args: readonly string[]): boolean {
+  if (command === 'gh') {
+    return args[0] === 'pr' && args[1] === 'view';
+  }
+  return args[0] === 'api' && /^projects\/:id\/merge_requests\/\d+$/u.test(args[1] ?? '');
 }
 
 /** `gh pr create` / `glab api projects/:id/merge_requests`（`forge.ts`が組み立てる形）か。 */

@@ -13,23 +13,30 @@ import {
   createIntegrationPullRequest,
   createPullRequest,
   detectForgeHost,
+  fetchCiConclusion,
   forgeCliCommand,
+  isBranchNotUpToDateError,
   isRetryablePushError,
   markPullRequestReady,
   nodeCliAvailability,
   normalizeFinalMergeConfig,
   normalizeForgeHostConfig,
   normalizePullRequestLayerConfig,
+  parseGithubCiConclusion,
+  parseGitlabCiConclusion,
   parsePullRequestNumberFromUrl,
   PUSH_BRANCH_MAX_ATTEMPTS,
   pushBranch,
   resolveForgeHost,
   runFinalMerge,
+  runFinalMergeWithCiGate,
   runTaskPullRequestFlow,
   shouldCreateIntegrationPullRequest,
   shouldCreateTaskPullRequest,
   shouldRunFinalMerge,
   needsFinalMergeDecision,
+  updatePullRequestBranch,
+  waitForCiChecks,
   type CliAvailabilityPort,
   type CliCommandResult,
   type CliCommandRunner,
@@ -1135,5 +1142,578 @@ describe('parsePullRequestNumberFromUrl', () => {
 
   it('undefined相当の入力（空文字）はundefined', () => {
     expect(parsePullRequestNumberFromUrl('')).toBeUndefined();
+  });
+});
+
+/**
+ * `waitForCiChecks` / `runFinalMergeWithCiGate` の呼び出し順を確かめるための、呼び出し順に
+ * 応答を返すフェイク（`SequencedGit`と同じ方針）。`FakeCli`（プレフィックス一致で常に同じ
+ * 応答を返す）では「1回目はpendingを返し2回目でpassedになる」ような連続した呼び出しごとの
+ * 応答差し替えができないため、この専用フェイクを使う。
+ */
+class SequencedCli implements CliCommandRunner {
+  calls: Array<{ command: string; args: string[]; cwd: string }> = [];
+  constructor(private readonly results: CliCommandResult[]) {}
+
+  async run(command: string, args: readonly string[], cwd: string): Promise<CliCommandResult> {
+    this.calls.push({ command, args: [...args], cwd });
+    const next = this.results.shift();
+    return next ?? { code: 0, stdout: '', stderr: '' };
+  }
+}
+
+const githubNoChecks = { code: 0, stdout: JSON.stringify({ statusCheckRollup: [] }), stderr: '' };
+const githubPending = {
+  code: 0,
+  stdout: JSON.stringify({
+    statusCheckRollup: [{ status: 'IN_PROGRESS', conclusion: null }],
+  }),
+  stderr: '',
+};
+const githubPassed = {
+  code: 0,
+  stdout: JSON.stringify({
+    statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }],
+  }),
+  stderr: '',
+};
+const githubFailed = {
+  code: 0,
+  stdout: JSON.stringify({
+    statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'FAILURE' }],
+  }),
+  stderr: '',
+};
+
+describe('parseGithubCiConclusion', () => {
+  it('statusCheckRollupが空配列ならnone（CI未設定）', () => {
+    expect(parseGithubCiConclusion(githubNoChecks.stdout)).toEqual({ conclusion: 'none' });
+  });
+
+  it('全て完了かつ全てSUCCESSならpassed', () => {
+    expect(parseGithubCiConclusion(githubPassed.stdout)).toEqual({ conclusion: 'passed' });
+  });
+
+  it('1件でも未完了（status !== COMPLETED）ならpending', () => {
+    expect(parseGithubCiConclusion(githubPending.stdout)).toEqual({ conclusion: 'pending' });
+  });
+
+  it('完了したチェックにFAILUREがあればfailed（理由付き）', () => {
+    const result = parseGithubCiConclusion(githubFailed.stdout);
+    expect(result.conclusion).toBe('failed');
+    expect(result.message).toContain('FAILURE');
+  });
+
+  it('StatusContext形式（stateフィールドのみ）のPENDINGもpendingとして扱う', () => {
+    const stdout = JSON.stringify({ statusCheckRollup: [{ state: 'PENDING' }] });
+    expect(parseGithubCiConclusion(stdout)).toEqual({ conclusion: 'pending' });
+  });
+
+  it('StatusContext形式のERRORはfailed', () => {
+    const stdout = JSON.stringify({ statusCheckRollup: [{ state: 'ERROR' }] });
+    expect(parseGithubCiConclusion(stdout).conclusion).toBe('failed');
+  });
+
+  it('壊れたJSONはfailedとして扱う（pendingのまま無期限に待たせない）', () => {
+    expect(parseGithubCiConclusion('not json').conclusion).toBe('failed');
+  });
+
+  it('statusCheckRollupキー自体が無い応答はnone（0件）ではなくfailed（想定外の応答形。セキュリティ監査の指摘）', () => {
+    const result = parseGithubCiConclusion(JSON.stringify({ someOtherField: 1 }));
+    expect(result.conclusion).toBe('failed');
+  });
+
+  it('statusCheckRollupが配列でない応答もfailed（想定外の応答形）', () => {
+    const result = parseGithubCiConclusion(JSON.stringify({ statusCheckRollup: 'not-an-array' }));
+    expect(result.conclusion).toBe('failed');
+  });
+
+  it('conclusionが成功値ホワイトリストに無い未知の値（STALE等）はfailed（fail-closed。成功値のホワイトリスト方式）', () => {
+    const stdout = JSON.stringify({
+      statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'STALE' }],
+    });
+    const result = parseGithubCiConclusion(stdout);
+    expect(result.conclusion).toBe('failed');
+    expect(result.message).toContain('STALE');
+  });
+});
+
+describe('parseGitlabCiConclusion', () => {
+  it('head_pipelineがnullならnone（CI未設定）', () => {
+    expect(parseGitlabCiConclusion(JSON.stringify({ head_pipeline: null }))).toEqual({
+      conclusion: 'none',
+    });
+  });
+
+  it('status: successはpassed', () => {
+    expect(
+      parseGitlabCiConclusion(JSON.stringify({ head_pipeline: { status: 'success' } })),
+    ).toEqual({ conclusion: 'passed' });
+  });
+
+  it('status: failedはfailed（理由付き）', () => {
+    const result = parseGitlabCiConclusion(JSON.stringify({ head_pipeline: { status: 'failed' } }));
+    expect(result.conclusion).toBe('failed');
+    expect(result.message).toContain('failed');
+  });
+
+  it('status: runningはpending', () => {
+    expect(
+      parseGitlabCiConclusion(JSON.stringify({ head_pipeline: { status: 'running' } })),
+    ).toEqual({ conclusion: 'pending' });
+  });
+
+  it('壊れたJSONはfailedとして扱う', () => {
+    expect(parseGitlabCiConclusion('not json').conclusion).toBe('failed');
+  });
+
+  it('head_pipelineキー自体が無い応答はnone（パイプライン無し）ではなくfailed（想定外の応答形。セキュリティ監査の指摘）', () => {
+    const result = parseGitlabCiConclusion(JSON.stringify({ someOtherField: 1 }));
+    expect(result.conclusion).toBe('failed');
+  });
+
+  it('head_pipelineがオブジェクトでも配列でもない（例: 文字列）応答もfailed', () => {
+    const result = parseGitlabCiConclusion(JSON.stringify({ head_pipeline: 'unexpected' }));
+    expect(result.conclusion).toBe('failed');
+  });
+});
+
+describe('fetchCiConclusion', () => {
+  it('GitHubは gh pr view <number> --json=statusCheckRollup を呼ぶ', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], githubPassed);
+    const result = await fetchCiConclusion(cli, 'github', '/repo/_integration', 42);
+    expect(result).toEqual({ conclusion: 'passed' });
+    expect(cli.calls[0]).toEqual({
+      command: 'gh',
+      args: ['pr', 'view', '42', '--json=statusCheckRollup'],
+      cwd: '/repo/_integration',
+    });
+  });
+
+  it('GitLabは glab api projects/:id/merge_requests/<number> を呼ぶ', async () => {
+    const cli = new FakeCli();
+    cli.respond('glab', ['api'], {
+      code: 0,
+      stdout: JSON.stringify({ head_pipeline: { status: 'success' } }),
+      stderr: '',
+    });
+    const result = await fetchCiConclusion(cli, 'gitlab', '/repo/_integration', 7);
+    expect(result).toEqual({ conclusion: 'passed' });
+    expect(cli.calls[0]).toEqual({
+      command: 'glab',
+      args: ['api', 'projects/:id/merge_requests/7'],
+      cwd: '/repo/_integration',
+    });
+  });
+
+  it('CLI呼び出し自体が失敗（終了コード非0）すればfailedとして扱う', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], { code: 1, stdout: '', stderr: 'authentication failed' });
+    const result = await fetchCiConclusion(cli, 'github', '/repo/_integration', 42);
+    expect(result.conclusion).toBe('failed');
+    expect(result.message).toContain('authentication failed');
+  });
+});
+
+describe('isBranchNotUpToDateError', () => {
+  it.each([
+    ['GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)'],
+    ['Pull Request is not up to date with the base branch'],
+    ['The head branch was modified. Review and try the merge again.'],
+    ['This branch is out of date with the base branch'],
+    ['Merge request needs a rebase before it can be merged'],
+  ])('baseの遅れを示すメッセージ「%s」はtrue', (message) => {
+    expect(isBranchNotUpToDateError(message)).toBe(true);
+  });
+
+  it.each([['merge conflict'], ['fatal: Authentication failed for https://example/repo.git'], ['']])(
+    'baseの遅れと無関係なメッセージ「%s」はfalse',
+    (message) => {
+      expect(isBranchNotUpToDateError(message)).toBe(false);
+    },
+  );
+});
+
+describe('waitForCiChecks', () => {
+  it('CI未設定（statusCheckRollupが空）なら待たずにnoneを返す', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], githubNoChecks);
+    const waits: number[] = [];
+    const result = await waitForCiChecks(
+      cli,
+      'github',
+      '/repo/_integration',
+      42,
+      60_000,
+      () => 0,
+      async () => {
+        waits.push(1);
+      },
+    );
+    expect(result).toEqual({ kind: 'none' });
+    expect(waits).toEqual([]);
+  });
+
+  it('すでに成功していれば待たずにpassedを返す', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], githubPassed);
+    const result = await waitForCiChecks(cli, 'github', '/repo/_integration', 42, 60_000, () => 0);
+    expect(result).toEqual({ kind: 'passed' });
+  });
+
+  it('赤なら待たずにfailedを返す', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], githubFailed);
+    const result = await waitForCiChecks(cli, 'github', '/repo/_integration', 42, 60_000, () => 0);
+    expect(result.kind).toBe('failed');
+  });
+
+  it('pendingが続いた後にpassedへ変われば、ポーリングを挟んでpassedを返す（実時間では待たない）', async () => {
+    const cli = new SequencedCli([githubPending, githubPending, githubPassed]);
+    const waits: number[] = [];
+    const result = await waitForCiChecks(
+      cli,
+      'github',
+      '/repo/_integration',
+      42,
+      60_000,
+      () => 0,
+      async () => {
+        waits.push(1);
+      },
+    );
+    expect(result).toEqual({ kind: 'passed' });
+    expect(cli.calls).toHaveLength(3);
+    // pending→pending→passedの間に2回だけ待っている
+    expect(waits).toEqual([1, 1]);
+  });
+
+  it('待ち時間の上限を超えてもpendingのままならtimeoutを返す（赤と同じ扱い）', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], githubPending);
+    // nowを1回目の呼び出しでdeadlineちょうど、2回目以降は超過させる
+    let now = 0;
+    const result = await waitForCiChecks(
+      cli,
+      'github',
+      '/repo/_integration',
+      42,
+      1000,
+      () => {
+        const current = now;
+        now += 2000;
+        return current;
+      },
+      async () => {
+        // 実時間では待たない
+      },
+    );
+    expect(result.kind).toBe('timeout');
+  });
+
+  it('isCancelledがtrueなら、CI状態の確認すら行わずcancelledを返す（セキュリティ監査の指摘。2026-08-23）', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], githubPassed);
+    const result = await waitForCiChecks(
+      cli,
+      'github',
+      '/repo/_integration',
+      42,
+      60_000,
+      () => 0,
+      undefined,
+      () => true,
+    );
+    expect(result).toEqual({ kind: 'cancelled' });
+    // CI状態の取得自体を行わない（停止していれば何も問い合わせない）
+    expect(cli.calls).toEqual([]);
+  });
+
+  it('ポーリングの途中でisCancelledがtrueへ変わればcancelledで打ち切る（wait()を跨いだ次の周回で確認する）', async () => {
+    const cli = new SequencedCli([githubPending, githubPassed]);
+    let cancelled = false;
+    const result = await waitForCiChecks(
+      cli,
+      'github',
+      '/repo/_integration',
+      42,
+      60_000,
+      () => 0,
+      async () => {
+        // 1回目のwait()の最中に人が停止した、という状況を模す
+        cancelled = true;
+      },
+      () => cancelled,
+    );
+    expect(result).toEqual({ kind: 'cancelled' });
+    // 1回目のCI確認（pending）はするが、2回目（passedのはず）はCI状態を見る前に打ち切る
+    expect(cli.calls).toHaveLength(1);
+  });
+});
+
+describe('updatePullRequestBranch', () => {
+  it('GitHubは gh pr update-branch <number> を呼ぶ', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'update-branch'], { code: 0, stdout: '', stderr: '' });
+    const result = await updatePullRequestBranch(cli, 'github', '/repo/_integration', 42);
+    expect(result).toEqual({ ok: true });
+    expect(cli.calls[0]).toEqual({
+      command: 'gh',
+      args: ['pr', 'update-branch', '42'],
+      cwd: '/repo/_integration',
+    });
+  });
+
+  it('GitLabは glab mr rebase <number> を呼ぶ', async () => {
+    const cli = new FakeCli();
+    cli.respond('glab', ['mr', 'rebase'], { code: 0, stdout: '', stderr: '' });
+    const result = await updatePullRequestBranch(cli, 'gitlab', '/repo/_integration', 7);
+    expect(result).toEqual({ ok: true });
+    expect(cli.calls[0]).toEqual({
+      command: 'glab',
+      args: ['mr', 'rebase', '7'],
+      cwd: '/repo/_integration',
+    });
+  });
+
+  it('失敗すればメッセージ付きで返す', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'update-branch'], { code: 1, stdout: '', stderr: 'cannot rebase' });
+    const result = await updatePullRequestBranch(cli, 'github', '/repo/_integration', 42);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain('cannot rebase');
+    }
+  });
+});
+
+describe('runFinalMergeWithCiGate（design.md §16.36、Issue #556）', () => {
+  const gateConfig = { waitTimeoutMs: 60_000, maxUpdateBranchRetries: 2, now: () => 0 };
+
+  it('CI未設定なら待たずに即マージする（従来どおり）', async () => {
+    const cli = new SequencedCli([githubNoChecks, { code: 0, stdout: '', stderr: '' }]);
+    const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, gateConfig);
+    expect(result).toEqual({ ok: true });
+    expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([
+      ['pr', 'view'],
+      ['pr', 'merge'],
+    ]);
+  });
+
+  it('CIが緑ならマージする', async () => {
+    const cli = new SequencedCli([githubPassed, { code: 0, stdout: '', stderr: '' }]);
+    const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, gateConfig);
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('CIが赤ならマージせず理由付きで失敗を返す（マージコマンドを呼ばない）', async () => {
+    const cli = new SequencedCli([githubFailed]);
+    const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, gateConfig);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('ciFailed');
+    }
+    expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([['pr', 'view']]);
+  });
+
+  it('待ち時間の上限を超えたら赤と同じ扱いで失敗を返す（マージコマンドを呼ばない）', async () => {
+    const cli = new SequencedCli([githubPending]);
+    let now = 0;
+    const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, {
+      waitTimeoutMs: 1000,
+      maxUpdateBranchRetries: 2,
+      now: () => {
+        const current = now;
+        now += 2000;
+        return current;
+      },
+      wait: async () => {},
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('ciTimeout');
+    }
+    expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([['pr', 'view']]);
+  });
+
+  it('「baseの最新でない」で拒否されたら取り込み直してから再度CIを待ち、マージを再試行する', async () => {
+    const notUpToDate = {
+      code: 1,
+      stdout: '',
+      stderr: 'GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)',
+    };
+    const cli = new SequencedCli([
+      githubPassed, // 1回目のCI確認
+      notUpToDate, // 1回目のマージ（失敗）
+      { code: 0, stdout: '', stderr: '' }, // update-branch
+      githubPassed, // 取り込み直し後のCI再確認
+      { code: 0, stdout: '', stderr: '' }, // 2回目のマージ（成功）
+    ]);
+    const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, gateConfig);
+    expect(result).toEqual({ ok: true });
+    expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([
+      ['pr', 'view'],
+      ['pr', 'merge'],
+      ['pr', 'update-branch'],
+      ['pr', 'view'],
+      ['pr', 'merge'],
+    ]);
+  });
+
+  it('「baseの最新でない」以外の失敗（コンフリクト等）は取り込み直しを試みず即座に失敗を返す', async () => {
+    const conflict = { code: 1, stdout: '', stderr: 'merge conflict' };
+    const cli = new SequencedCli([githubPassed, conflict]);
+    const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, gateConfig);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('mergeFailed');
+      expect(result.message).toContain('merge conflict');
+    }
+    // update-branchは呼ばれない
+    expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([
+      ['pr', 'view'],
+      ['pr', 'merge'],
+    ]);
+  });
+
+  it('取り込み直しが失敗すればそこで失敗を確定する', async () => {
+    const notUpToDate = { code: 1, stdout: '', stderr: 'base branch was modified' };
+    const updateBranchFailure = { code: 1, stdout: '', stderr: 'cannot rebase: conflict' };
+    const cli = new SequencedCli([githubPassed, notUpToDate, updateBranchFailure]);
+    const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, gateConfig);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('updateBranchFailed');
+    }
+  });
+
+  it('取り込み直しの上限回数を超えて「baseの最新でない」が続けば失敗として確定する', async () => {
+    const notUpToDate = { code: 1, stdout: '', stderr: 'base branch was modified' };
+    const updateOk = { code: 0, stdout: '', stderr: '' };
+    // maxUpdateBranchRetries: 2 → マージ試行は最大3回（初回+2リトライ）
+    const cli = new SequencedCli([
+      githubPassed,
+      notUpToDate,
+      updateOk,
+      githubPassed,
+      notUpToDate,
+      updateOk,
+      githubPassed,
+      notUpToDate,
+    ]);
+    const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, {
+      waitTimeoutMs: 60_000,
+      maxUpdateBranchRetries: 2,
+      now: () => 0,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('mergeFailed');
+      expect(result.updateBranchAttempts).toBe(2);
+    }
+    expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([
+      ['pr', 'view'],
+      ['pr', 'merge'],
+      ['pr', 'update-branch'],
+      ['pr', 'view'],
+      ['pr', 'merge'],
+      ['pr', 'update-branch'],
+      ['pr', 'view'],
+      ['pr', 'merge'],
+    ]);
+  });
+
+  it('番号がundefinedのときはCI確認をせずrunFinalMergeと同じ振る舞いになる（カレントブランチ依存を避ける）', async () => {
+    const cli = new FakeCli();
+    const result = await runFinalMergeWithCiGate(
+      cli,
+      'github',
+      '/repo/_integration',
+      undefined,
+      gateConfig,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain('番号が不明');
+    }
+    expect(cli.calls).toEqual([]);
+  });
+
+  describe('停止（isCancelled）', () => {
+    it('停止を立ててからCI待ちに入ると、その後CIが緑になってもpr mergeは一度も呼ばれない（セキュリティ監査の指摘。2026-08-23）', async () => {
+      // pendingが1回続いた後に緑（githubPassed）へ変わる状況を用意する。isCancelled()は
+      // 「その1回目のwait()の最中に人が停止した」を模して、1回目の呼び出し以降ずっとtrueを
+      // 返す。cli.callsに'pr merge'が一度も現れないことで、CIが後から緑になってもマージへ
+      // 進まないことを確かめる（cli.callsで確認する、というレビュー指摘の形そのもの）
+      const cli = new SequencedCli([githubPending, githubPassed]);
+      let cancelCalls = 0;
+      const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, {
+        waitTimeoutMs: 60_000,
+        maxUpdateBranchRetries: 2,
+        now: () => 0,
+        wait: async () => {
+          // ポーリングの待ち時間中に人が停止した、という状況を模す
+        },
+        isCancelled: () => {
+          cancelCalls += 1;
+          return cancelCalls > 1;
+        },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe('cancelled');
+      }
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+      // 1回目のCI確認（pending）はするが、2回目（passedのはず）は確認する前に打ち切る
+      expect(cli.calls).toHaveLength(1);
+    });
+
+    it('CIが緑になった直後（マージを呼ぶ直前）に停止していればマージを呼ばずcancelledを返す', async () => {
+      // waitForCiChecksが'none'/'passed'で即座に返った直後、runFinalMergeを呼ぶ前にも
+      // isCancelledを確認する（waitForCiChecksのポーリングを1回も経ないため、その内部の
+      // 確認だけでは捕まえられない抜けを塞ぐ）。1回目（waitForCiChecksのループ先頭）は
+      // falseを返して実際にCI状態を取得させ、2回目（runFinalMergeWithCiGate側の、
+      // マージ直前の確認）でtrueへ変える
+      const cli = new SequencedCli([githubPassed]);
+      let calls = 0;
+      const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, {
+        ...gateConfig,
+        isCancelled: () => {
+          calls += 1;
+          return calls > 1;
+        },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe('cancelled');
+      }
+      expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([['pr', 'view']]);
+    });
+
+    it('「baseの最新でない」で拒否された後、取り込み直しを呼ぶ直前に停止していれば取り込み直さずcancelledを返す', async () => {
+      const notUpToDate = { code: 1, stdout: '', stderr: 'base branch was modified' };
+      const cli = new SequencedCli([githubPassed, notUpToDate]);
+      let calls = 0;
+      const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, {
+        ...gateConfig,
+        isCancelled: () => {
+          calls += 1;
+          // 1回目（waitForCiChecksのループ先頭）・2回目（マージ直前）は通して、実際に
+          // マージが「baseの最新でない」で失敗するところまで進める。3回目
+          // （update-branch直前）で停止を検知させる
+          return calls > 2;
+        },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe('cancelled');
+      }
+      // update-branchは呼ばれない
+      expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([
+        ['pr', 'view'],
+        ['pr', 'merge'],
+      ]);
+    });
   });
 });

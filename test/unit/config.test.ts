@@ -280,6 +280,52 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
     expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(2147483);
   });
 
+  it('ciWaitTimeoutSecの既定は1800秒（design.md §16.36・DEFAULT_CI_WAIT_TIMEOUT_SEC）', () => {
+    expect(readWorkflowsConfig().ciWaitTimeoutSec).toBe(1800);
+  });
+
+  it('ciWaitTimeoutSecは指定値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.ciWaitTimeoutSec': 60 });
+    expect(readWorkflowsConfig().ciWaitTimeoutSec).toBe(60);
+  });
+
+  it('ciWaitTimeoutSecが数値でない・1未満・上限超過なら既定値へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.ciWaitTimeoutSec': 'たくさん' });
+    expect(readWorkflowsConfig().ciWaitTimeoutSec).toBe(1800);
+
+    __mock.setConfig('agent', { 'workflows.ciWaitTimeoutSec': 0 });
+    expect(readWorkflowsConfig().ciWaitTimeoutSec).toBe(1800);
+
+    __mock.setConfig('agent', { 'workflows.ciWaitTimeoutSec': 2147484 });
+    expect(readWorkflowsConfig().ciWaitTimeoutSec).toBe(1800);
+  });
+
+  it('ciUpdateBranchMaxRetriesの既定は2回（design.md §16.36・DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES）', () => {
+    expect(readWorkflowsConfig().ciUpdateBranchMaxRetries).toBe(2);
+  });
+
+  it('ciUpdateBranchMaxRetriesは指定値をそのまま使う（0も有効な値として扱う）', () => {
+    __mock.setConfig('agent', { 'workflows.ciUpdateBranchMaxRetries': 5 });
+    expect(readWorkflowsConfig().ciUpdateBranchMaxRetries).toBe(5);
+
+    __mock.setConfig('agent', { 'workflows.ciUpdateBranchMaxRetries': 0 });
+    expect(readWorkflowsConfig().ciUpdateBranchMaxRetries).toBe(0);
+  });
+
+  it('ciUpdateBranchMaxRetriesが数値でない・負値・非整数・上限（100）超過なら既定値へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.ciUpdateBranchMaxRetries': 'たくさん' });
+    expect(readWorkflowsConfig().ciUpdateBranchMaxRetries).toBe(2);
+
+    __mock.setConfig('agent', { 'workflows.ciUpdateBranchMaxRetries': -1 });
+    expect(readWorkflowsConfig().ciUpdateBranchMaxRetries).toBe(2);
+
+    __mock.setConfig('agent', { 'workflows.ciUpdateBranchMaxRetries': 1.5 });
+    expect(readWorkflowsConfig().ciUpdateBranchMaxRetries).toBe(2);
+
+    __mock.setConfig('agent', { 'workflows.ciUpdateBranchMaxRetries': 101 });
+    expect(readWorkflowsConfig().ciUpdateBranchMaxRetries).toBe(2);
+  });
+
   it('branchNamingの既定はwf（GitLab運用規約形式は明示指定したときだけ有効になる）', () => {
     expect(readWorkflowsConfig().branchNaming).toBe('wf');
   });

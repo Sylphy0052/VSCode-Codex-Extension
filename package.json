@@ -800,6 +800,22 @@
           "scope": "machine-overridable",
           "markdownDescription": "`agent.workflows.finalMerge` が `orchestrator` のとき、統合PR/MRの作成後にオーケストレーターが `decide_final_merge` で応答するのを待つ時間の上限（秒）。超えたら応答が無かったものとして自動的に `hold`（マージせずPR/MRを残す）へ倒す（判断を待って無限に止まらないため。設計書 §16.26）。`confirm`（人の承認待ち）には効かない。権限には関わらないため`forge`/`finalMerge`ほど強い制限は要らない。上限は`2147483`秒（約24.8日、`setTimeout`の32bit上限）。範囲外（1未満・上限超過・非数値）の値は既定値（900秒）にフォールバックする。"
         },
+        "agent.workflows.ciWaitTimeoutSec": {
+          "type": "number",
+          "default": 1800,
+          "minimum": 1,
+          "maximum": 2147483,
+          "scope": "machine-overridable",
+          "markdownDescription": "統合PR/MRをマージする前に、CIチェック（`statusCheckRollup` / パイプライン）の完了を待つ時間の上限（秒）。超えたら赤（CI失敗）と同じ扱いでタスクを失敗として確定する（設計書 §16.36）。CIが1件も設定されていないリポジトリでは待たずに即マージする。権限には関わらないため`forge`/`finalMerge`ほど強い制限は要らない。上限は`2147483`秒（約24.8日、`setTimeout`の32bit上限）。範囲外（1未満・上限超過・非数値）の値は既定値（1800秒）にフォールバックする。"
+        },
+        "agent.workflows.ciUpdateBranchMaxRetries": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 100,
+          "scope": "machine-overridable",
+          "markdownDescription": "統合PR/MRのマージが「baseの最新でない」ことで拒否されたときに、`gh pr update-branch` / `glab mr rebase` で取り込み直してから再試行する最大回数（初回のマージ試行は含まない）。取り込み直すたびにCIの完了を待ち直す。上限を超えたら失敗として確定する（設計書 §16.36）。0にすると取り込み直しをせず初回の失敗をそのまま確定する。範囲外（0未満・100超過・非整数）の値は既定値（2回）にフォールバックする。"
+        },
         "agent.workflows.roadmapDir": {
           "type": "string",
           "default": "docs/roadmap",

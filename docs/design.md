@@ -4413,7 +4413,7 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 
 #### ワークフロー設定の一覧
 
-`agent.workflows.*` の全13項目。実際に登録している値（型・既定値・markdownDescription）は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている（§7と同じ原則）。
+`agent.workflows.*` の全15項目。実際に登録している値（型・既定値・markdownDescription）は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている（§7と同じ原則）。
 
 | 設定                                    | スコープ            | 用途・理由                                                                                                                                             |
 | --------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -4430,6 +4430,8 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 | `agent.workflows.draftPullRequest`      | machine-overridable | PR/MRをDraftで作るかどうか（§16.18）。有効にするほうが「人の確認を挟む」側へ倒れるため、強い制限は要らない                                             |
 | `agent.workflows.mergeApprovalTimeoutSec` | machine-overridable | 衝突解決セッション（§16.17「コンフリクト」）が承認待ちのまま止まってよい上限秒数（既定3600秒）。超えたら自動でセッションを止め`blocked`にする。権限には関わらない                |
 | `agent.workflows.finalMergeDecisionTimeoutSec` | machine-overridable | `finalMerge: orchestrator` の最終マージ判断待ちの上限秒数（既定900秒、§16.26）。タイムアウトすると `hold` へ倒す                                 |
+| `agent.workflows.ciWaitTimeoutSec`      | machine-overridable | 統合PR/MRをマージする前にCIチェックの完了を待つ上限秒数（既定1800秒、§16.36）。超えたら赤と同じ扱いで失敗にする。権限には関わらない                   |
+| `agent.workflows.ciUpdateBranchMaxRetries` | machine-overridable | マージが「baseの最新でない」ことで拒否されたときの取り込み直しの最大リトライ回数（既定2、§16.36）。権限には関わらない                              |
 
 push先のremoteをYAMLや設定から選ぶ手段は設けない。常に `origin` を使う。任意のURLへpushできると、リポジトリの中身を別の宛先へ出す経路になる。
 
@@ -4628,6 +4630,8 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 
 この設定はmainを書き換えるかどうかを決めるので、**machineスコープに固定する**（§16.16）。リポジトリの `.vscode/settings.json` から緩められてはいけない。MRの自己マージを禁じる運用規約を持つ組織のリポジトリでは、利用者がmachine設定で `pr-only` にする。
 
+**マージを実行する直前に、CIチェックの完了を待つ（§16.36、Issue #556）。** `auto` / `orchestrator` / `confirm` のいずれも、実際に`gh pr merge` / `glab mr merge`を呼ぶ直前で統合PR/MRのCIチェック（`statusCheckRollup` / パイプライン）の完了を待ち、赤ならマージせずタスクを失敗として確定する。CIが1件も設定されていないリポジトリでは待たずに即マージする（チェックが0件なのと赤なのを取り違えない）。マージが「baseの最新でない」ことで拒否された場合は`gh pr update-branch` / `glab mr rebase`で取り込み直し、CIの完了を待ち直してから再度マージを試みる。詳細は§16.36を参照。
+
 mainへマージした後も統合ブランチは残す。片付けはViewの操作から行う。
 
 #### 前提が欠けている場合
@@ -4642,7 +4646,7 @@ mainへマージした後も統合ブランチは残す。片付けはViewの操
 
 この場合、`finalMerge: auto` であってもmainへのマージは行わない。PR/MRを介さずにmainを書き換えることはしない。統合ブランチが残るので、人が後から確かめてマージする。
 
-「作る順序」と最終マージそのものは`test/integration/workflowForgeOrder.test.ts`（5件。Issue #172）が実VSCode上で確かめる。実行の起点に**ローカルのbareリポジトリを`origin`に持つ作業ツリー**を使い（`test/integration/helpers/forgeRepo.ts`）、`git push`は本物を走らせる。push先がローカルのファイルパスなので、本番と同じ手順を通しながらネットワーク越しのホストへは到達しない（§14.33）。`gh` / `glab`は記録するだけのフェイクが受け、gitは記録しつつ実物へ委譲する（`RecordingCli` / `RecordingGit`）。pushとPR/MR作成にまたがる順序は1本の時系列（`ForgeCallLog`）へ落として比べる。確かめるのは、タスク層が`push <taskBranch>` → `push <integrationBranch>` → PR/MR作成 → マージ → `push <integrationBranch>`の順に進むこと・`pullRequest`が`per-task` / `integration` / `none`で作られる層が変わること・GitHubなら`gh`、GitLabなら`glab`（本文は`--field description=@<path>`）が選ばれること・`finalMerge: auto`で統合PR/MRの作成に続けて`gh pr merge --merge` / `glab mr merge --remove-source-branch`まで進み、`pr-only`では作成で止まること・mainへマージした後も統合ブランチがローカルに残ることの5点。実ホストで実引数が受理されるかは[manual-test.md](manual-test.md)のW-Dに残る（1回通せば足りる）。
+「作る順序」と最終マージそのものは`test/integration/workflowForgeOrder.test.ts`（5件。Issue #172）が実VSCode上で確かめる。実行の起点に**ローカルのbareリポジトリを`origin`に持つ作業ツリー**を使い（`test/integration/helpers/forgeRepo.ts`）、`git push`は本物を走らせる。push先がローカルのファイルパスなので、本番と同じ手順を通しながらネットワーク越しのホストへは到達しない（§14.33）。`gh` / `glab`は記録するだけのフェイクが受け、gitは記録しつつ実物へ委譲する（`RecordingCli` / `RecordingGit`）。pushとPR/MR作成にまたがる順序は1本の時系列（`ForgeCallLog`）へ落として比べる。確かめるのは、タスク層が`push <taskBranch>` → `push <integrationBranch>` → PR/MR作成 → マージ → `push <integrationBranch>`の順に進むこと・`pullRequest`が`per-task` / `integration` / `none`で作られる層が変わること・GitHubなら`gh`、GitLabなら`glab`（本文は`--field description=@<path>`）が選ばれること・`finalMerge: auto`で統合PR/MRの作成に続けて`gh pr merge --merge` / `glab mr merge --remove-source-branch`まで進み、`pr-only`では作成で止まること・mainへマージした後も統合ブランチがローカルに残ることの5点。**§16.36（Issue #556）以降、`RecordingCli`は`gh pr view --json=statusCheckRollup` / `glab api .../merge_requests/<iid>`（CI状態取得）にも応答する。**あえて「チェックが1件あって緑」の形にしてある（空応答のままだと`fetchCiConclusion`が`JSON.parse('')`で例外を投げ、fail-closedの設計どおり`conclusion: 'failed'`へ倒れてマージが一度も呼ばれなくなるため。空配列を返すと今度は「CI未設定」の経路に落ちて、`finalMerge: auto`が確かめたい「CIの完了を待ってからマージする」経路を通らなくなる。セキュリティ監査の指摘で判明。2026-08-23）。実ホストで実引数が受理されるかは[manual-test.md](manual-test.md)のW-Dに残る（1回通せば足りる）。
 
 この経路は`test/integration/workflowForgePrerequisites.test.ts`（4件。Issue #169）が実VSCode上で確かめる。統合テストのfixtureリポジトリは`origin` remoteを持たず`PATH`も絞ってあるため、**前提が欠けている状態が既定**で、追加の外部依存なしに再現できる。ホストの判定結果・`gh` / `glab`のPATH上の有無・認証状態だけを`ExtensionTestApi.workflow.setForgeOverrides()`（`AGENT_SESSIONS_INTEGRATION_TEST=1`のときだけ公開する差し替え口。`setTaskSessionHost`と同じ仕組みで、渡した項目だけが差し替わる）で入れ替え、欠けている項目を1つずつ変える。`git`は差し替えないので統合ブランチへのマージは実gitで行われ、`gh` / `glab`は記録するだけのフェイク（`RecordingCli`）が受けるため、テストがホストへ触れることはない。確かめるのは、警告が`WorkflowRunSnapshot.warnings`へ出ること・PR/MRの作成が飛ばされること（`auth status`以外のCLI呼び出しが1件も無いこと）・ローカルのマージが最後まで進んでrunが完走すること・`finalMerge: auto`でもmainが動かず統合ブランチがローカルに残ることの4点。
 
@@ -5308,3 +5312,48 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 - `test/unit/runner.test.ts`（`describe('WorkflowRunner: 直接メッセージングを廃しオーケストレーター中継にする（design.md §16.34、Issue #547）')`）: タスクからタスクid宛の直接送信が拒否されること／タスク→オーケストレーターの`onMessageAccepted`が`notifyOrchestrator`を呼ぶこと・`takeDeliverableMessages`でキューを空にすること（`totalUndeliveredCount()`が0へ戻ることを直接観測）／`expectReply: true`での`waitingReply`遷移が中継後も成立すること（オーケストレーターからの送り返しで実際に`resumeLoop`されるところまで）／オーケストレーターの自己宛拒否・未知宛先拒否が変わらないこと（RED実測は`takeDeliverableMessages`呼び出し1行だけを戻して行う）
 - `test/unit/runner.test.ts`（既存の`describe('メッセージング経由の権限差の警告・実際の送信文面の表示...')`）: 上記の`messagingPermissionEscalation`不発火を明示のテストとして固定・`lastSentPrompt`（実送信文面の表示、Trojan Source対策の制御文字除去）は宛先をオーケストレーターへ差し替えて維持
 - `docs/manual-test.md` W-N: 実VSCode上でタスクからタスクへ直接届かないこと・オーケストレーターの転送が実際のCLIプロセスへ届くことを確認する
+### 16.36 CIの完了待ちとブランチ保護への対応（roadmap W11、Issue #556）
+
+2026-08-22、mainにブランチ保護（PR必須・`checks`必須・**strict**）を入れた直後に、PR #481のマージでPR #482が「baseの最新でない」ことを理由にブロックされ詰まった。**strictなブランチ保護の下では、mainへ1本マージするたびに他の全てのopen PRが古くなる。** 統合ブランチからmainへ複数のPRを順に出す運用（§16.17）では必ず起きる。
+
+§16.18「最終マージ」が呼ぶ`gh pr merge` / `glab mr merge`は、それまでCIの結果を一切見ずに実行していた。`forge.ts`が呼ぶGitHub/GitLabの操作は`pr create` / `pr merge` / `pr ready`の3つだけで、CIチェックの完了を待つ手段も、baseを取り込み直す手段（`gh pr update-branch`相当）も無かった。本節はこの2つを`forge.ts`へ足す。
+
+#### CIの完了を待つ（`runFinalMergeWithCiGate`）
+
+`performFinalMerge`（`runner.ts`）は、`runFinalMerge`を直接呼ぶ代わりに`runFinalMergeWithCiGate`（`forge.ts`）を呼ぶ。`auto` / `orchestrator` / `confirm`のどのモードでも同じ1箇所（`performFinalMerge`）を経由するため（§16.26参照）、CIの完了待ちは`finalMerge`の値と無関係に一律で効く。
+
+1. **CI状態の取得。** GitHubは`gh pr view <number> --json=statusCheckRollup`、GitLabは`glab api projects/:id/merge_requests/<iid>`（`head_pipeline.status`）で取得する。GitLabは`glab ci status`が対象を「ブランチ」で指定するテキスト向けコマンドでJSON出力を持たない（実機の`--help`で確認済み。`glab` 1.112.0）ため使わず、`createPullRequest`と同じ理由で構造化データを得やすい`glab api`へ寄せた。「同じ形で用意する」（ロードマップ方針5・providerを問わない）はコマンド名の一致ではなく、CIの完了待ち・失敗判定という挙動の一致を指す
+2. **集約結果は4値。** `none`（チェックが1件も無い＝CI未設定）・`pending`（未完了のチェックがある）・`passed`（全て完了し失敗が無い）・`failed`（完了したチェックに失敗がある。CLI呼び出し自体の失敗もここに含める——認証切れ等で状態を取得できない異常状態を`pending`のまま無期限に待たせないため）
+3. **`none`は待たずに即マージへ進む。** 受入基準「CIが設定されていないリポジトリでは従来どおり即マージする」。**`none`はリポジトリ側が意味を持って返す明示的な形（`statusCheckRollup: []` / `head_pipeline: null`）に限る。** JSONの解析自体には成功したが期待するキーが無い・型が違う（`gh`/`glab`のバージョン差やAPIのスキーマ変更を想定）場合は`none`ではなく`failed`へ倒す（セキュリティ監査の指摘。2026-08-23。以前の実装は`statusCheckRollup`キーの有無・型を確認せず、無ければ即座に空配列と同じ`none`扱いにしていたため、応答の形が想定外でもCIが赤かどうか見ずにマージする経路になっていた）。「チェックが0件」と「応答の形が想定外」を`parseGithubCiConclusion` / `parseGitlabCiConclusion`の内部で型のレベルで区別しており、取り違えようがない
+4. **GitHubの`conclusion`は成功値のホワイトリストで判定する。** 失敗値のホワイトリスト（`FAILURE` / `CANCELLED`等を列挙）から成功値のホワイトリスト（`SUCCESS` / `NEUTRAL` / `SKIPPED`）へ反転した（セキュリティ監査の指摘。2026-08-23）。失敗値のホワイトリストは、そこに載っていない未知の値（例: baseが進んだ後の再実行待ちを示す`STALE`）を素通しして成功寄りに扱う構造的なfail-openになる。mainへの実マージを左右する機能のため、知らない`conclusion`は失敗側へ倒す（fail-closed）ほうが安全という判断
+5. **`pending`はポーリングで待つ。** `agent.workflows.ciWaitTimeoutSec`（既定1800秒、`machine-overridable`）を超えたら`timeout`を返し、`failed`と同じ扱いにする（受入基準「待ち時間の上限を超えたら赤と同じ扱いになる」）。ポーリング間隔は15秒固定で、そのタイマーは`.unref()`している（`beginFinalMergeDecision`の判断待ちタイマーと同じく、テスト・プロセス終了を妨げないため。レビュー指摘。2026-08-23）。`now`/`wait`はテストから注入できる（`pushBranch`の`PushBranchWait`と同じ流儀。テストは実時間で待たない）
+6. **`failed`・`timeout`はマージせずタスクを失敗として確定する。** `performFinalMerge`は`live.finalMergeOutcome`を`'failed'`にし、理由を`WorkflowWarning`（`kind: 'forgeFailed'`）へ積む。これはワークフローViewの警告欄に残る（受入基準「赤ならマージせずタスクが失敗で確定する（理由がワークフローViewに残る）」）
+7. **`failed`の理由メッセージ（失敗したチェック名の列挙・パイプラインのstatus）は`sanitizeForLog`を通す。** 件数・文字列長の上限が無いと、チェックが数百あるリポジトリでこのメッセージがそのまま`live.warnings`・ログへ入り巨大化する（レビュー指摘。2026-08-23）。他のCLI出力由来のメッセージと表記を揃える意味もある
+
+#### baseの取り込み直し（`updatePullRequestBranch`）
+
+`runFinalMergeWithCiGate`は、CIが`none`/`passed`でマージを試み、それが失敗したときだけ次の判定へ進む。
+
+1. **「baseの最新でない」ことによる拒否かどうかを、stderrのテキストパターン（`isBranchNotUpToDateError`）で判定する。** `gh pr merge`はGraphQLエラー文字列（例: `Base branch was modified. Review and try the merge again.`）を、`glab mr merge`はREST APIのエラーメッセージをそのままstderrへ出すため、`isRetryablePushError`（§16.18「統合ブランチpushの直列化とリトライ」）と同じ、既知の文言をパターンで拾う方式にした。一致しなければ「baseの最新でない」以外の失敗（コンフリクト・権限不足等）として扱い、取り込み直しは試みない。**逆に、実際は別の失敗（コンフリクト解消の案内文等）でもパターンに誤って一致する場合がありうる**（テキストパターン照合の限界。レビュー指摘。2026-08-23）。誤って一致しても、取り込み直しを1回無駄に試みるだけで、それでも解決しなければ次の`runFinalMerge`が同じ理由で再び失敗し、`ciUpdateBranchMaxRetries`の上限で必ず止まる（無限リトライにはならない）
+2. **一致すれば取り込み直す。** GitHubは`gh pr update-branch <number>`、GitLabは`glab mr rebase <number>`（いずれも実機のドキュメント・`--help`で確認済み）
+3. **取り込み直した後、CIの完了を待ち直してから再度マージを試みる。** baseの内容が変わった以上、直前のCI結果は使い回さず再取得する
+4. **リトライ回数の上限は`agent.workflows.ciUpdateBranchMaxRetries`（既定2、`machine-overridable`）。** 初回のマージ試行を含まない回数で、超えたら失敗として確定する（受入基準「再試行の上限を超えたら失敗として確定する」）
+
+#### 呼び出しの入口は1箇所
+
+`performFinalMerge`（`runner.ts`）は`auto`（`finalizeForge`から直接呼ばれる経路）・`orchestrator`/`confirm`（`decideFinalMerge`が判断確定後に呼ぶ経路）のいずれからも同じ関数として呼ばれる（§16.26）。タスク層のPR/MR（`runTaskPullRequestFlow`の`mergeAndPushIntegration`）は`gh pr merge` / `glab mr merge`を呼ばずローカルの`git merge`+pushで完結する（§16.18「作る順序」4番目の手順のJSDoc「4のpushによって、作ったPR/MRはホスト側でマージ済みとして扱われる」）ため、CIの完了待ちが要るのは統合層の最終マージだけであり、`performFinalMerge`という単一の入口へ足すことで両ホスト・全`finalMerge`モードに一律で効く。タスク層と統合層で対称性が崩れる余地は無い。
+
+#### 全体の停止（`haltedByUser`）への対応
+
+W1（Issue #335）は「最終マージの判断が確定する瞬間」を`decideFinalMerge`のガード（`live.runState.haltedByUser`が立っていれば`decision: 'merge'`を拒否する）で守った。W11はその判断が確定した**後**に、CIの完了を待つ長い区間（既定で最大`ciWaitTimeoutSec` × (`ciUpdateBranchMaxRetries` + 1）秒、既定値では約90分）を新設した。瞬間だけを守るガードはこの区間をカバーしないため、追加で次の対応をしている（セキュリティ監査の指摘。2026-08-23）。
+
+1. **`performFinalMerge`の入口で確認する。** `finalMerge: auto`は`finalizeForge`から`decideFinalMerge`を経由せず直接`performFinalMerge`を呼ぶため、W1のガード（`decideFinalMerge`にしか無い）が素通りする兄弟の穴になっていた。`performFinalMerge`は`auto` / `orchestrator` / `confirm`のどのモードでも合流する唯一の入口（前掲「呼び出しの入口は1箇所」）なので、ここに置けば全モードを一律で守れる
+2. **`runFinalMergeWithCiGate`（`forge.ts`）へ`isCancelled: () => boolean`コールバックを渡す。** `forge.ts`はロジック層で`LiveRun`を直接見られないため、`config.now` / `config.wait`と同じ流儀で、`runner.ts`側が`() => live.runState.haltedByUser || this.disposing`を渡す（`disposing`は`WorkflowRunner.dispose()`が立てる印。拡張機能終了後もポーリングが動き続けるのを防ぐ）
+3. **確認する箇所は3つ。** `waitForCiChecks`のポーリングの各周回（ループ先頭。「`wait()`の前」であると同時に、2周目以降は「直前の`wait()`の後」でもあるため1箇所の確認で両方を満たす）・`waitForCiChecks`から制御が戻った直後（`none`/`passed`で即座に返った場合を含む。ポーリングを1回も経ないまま`runFinalMerge`を呼んでしまう抜けを防ぐ）・`updatePullRequestBranch`を呼ぶ直前（baseへ実際に変更を及ぼす操作のため）
+4. **停止していれば`{ ok: false, reason: 'cancelled', message: '人が停止したため最終マージを中止しました' }`を返す。** `performFinalMerge`はこれを他の失敗と同じ経路で扱い、`live.finalMergeOutcome`を`'failed'`にして理由を`WorkflowWarning`（`kind: 'forgeFailed'`）へ積む。W1の「判断の内容と理由は必ず警告欄へ残る」という考え方と揃える
+
+**停止を解除しても、最終マージは自動では再開しない。** `retryTask` / `continueTask`（`runState.ts`）は`haltedByUser`を`false`へ戻すが、いずれも個別タスクの再開を意図した操作で、既に`failed`として確定した`performFinalMerge`をもう一度呼び直す経路は無い（レビュー指摘。2026-08-23。セキュリティ監査は当初「`haltedByUser`を戻す箇所自体が無い」と報告したが、これは事実誤認で`retryTask`/`continueTask`が戻す。ただし戻すのは人の明示操作であり、危険はない）。CI待ちの最中に止めてから停止を解除した場合、mainへマージしたければ人が統合PR/MRを手動でマージするか、ワークフローを再実行する必要がある。[manual-test.md](manual-test.md)のW-Pに確認項目がある。
+
+#### 検証
+
+`test/unit/forge.test.ts`が、GitHub/GitLabそれぞれのCI状態パース（`parseGithubCiConclusion` / `parseGitlabCiConclusion`。CheckRun/StatusContextの混在・`head_pipeline`が`null`の場合に加え、**キー自体が無い／型が違う想定外の応答形は`none`ではなく`failed`へ倒れること**・**GitHubの`conclusion`が成功値ホワイトリストに無い未知の値（`STALE`等）は`failed`になること**を含む）・`waitForCiChecks`のポーリングとタイムアウト（実時間では待たない）・**`isCancelled`が真になったときの打ち切り（ポーリング開始前・ポーリングの周回中の両方）**・`isBranchNotUpToDateError`の既知パターン一致/不一致・`updatePullRequestBranch`のホストごとのコマンド組み立て・`runFinalMergeWithCiGate`の一連の流れ（CI未設定は待たずに即マージ・赤はマージコマンドを呼ばずに失敗・タイムアウトも同様・「baseの最新でない」からの取り込み直し→再CI確認→再マージ・無関係な失敗は取り込み直しを試みない・リトライ上限超過・番号不明時は`runFinalMerge`と同じ振る舞い・**`isCancelled`の3箇所の確認点それぞれで`{ reason: 'cancelled' }`になりマージコマンドを呼ばないこと**）を確かめる。`test/unit/runner.test.ts`が`performFinalMerge`の配線（CI確認が`pr merge`より前に呼ばれること・CIが赤なら`finalMergeOutcome`が`failed`になり警告欄に残ること・「baseの最新でない」からの取り込み直しを経て`merged`になること・**`finalMerge: auto`の経路で統合PR/MR作成の完了時点で既に停止していればCI確認もマージも一切呼ばれないこと（旧: 兄弟の穴の回帰テスト。`isCancelled`が同じ`haltedByUser`を見るため`pr view`/`pr merge`が呼ばれないことだけを見ると入口ガードだけを消しても赤くならず2重の防御の片方がもう片方をマスクしてしまう。レビュー指摘。2026-08-23。`isCancelled`より手前で起きる副作用——タスク層自身のPRのready化とは別に、統合PR/MRぶんの`pr ready`が呼ばれないこと——を観測点にして入口ガード単体を検証する形にした。`runner.ts`の入口ガードの条件だけを`if (false)`へ戻して赤くなることを実測済み）**・**CI状態を実際に取得している最中に「全体の停止」が押されると、その後CIが緑だと分かってもマージコマンドが一度も呼ばれないこと（本番の呼び出し経路`performFinalMerge` → `runFinalMergeWithCiGate`を通し、`cli.calls`で確認する）**）を確かめる。`test/unit/config.test.ts`が`ciWaitTimeoutSec` / `ciUpdateBranchMaxRetries`の丸め（既定値・範囲外の値の扱い）を確かめる。**`test/integration/helpers/workflow.ts`の`RecordingCli`にもCI状態取得コマンド（`gh pr view` / `glab api .../merge_requests/<iid>`）への応答を足してあり（「チェックが1件あって緑」の形。空応答のままだと`fetchCiConclusion`のJSON解析が失敗して`failed`へ倒れ、マージが一度も呼ばれずに`workflowForgeOrder.test.ts`の既存2件が壊れていた。セキュリティ監査の指摘で判明。2026-08-23）、`npm run test:integration:xvfb`で実VSCode上でも確認済み。**実ホストでのCI状態取得・取り込み直しコマンドが実引数として受理されるかは[manual-test.md](manual-test.md)のW-Pに残す。
