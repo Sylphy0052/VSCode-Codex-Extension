@@ -540,35 +540,51 @@ describe('stripControlCharsPreservingNewlines（design.md §16.4、セキュリ�
 describe('sanitizeForLog（ReDoS対策: 約100万文字規模の敵対的入力でも線形時間で完了する）', () => {
   // しきい値は環境差を吸収しつつ「明らかな指数・多項式的悪化」だけを検出できる値に設定。
   // 線形であれば数十〜数百ms程度で完了する想定（実測はPR報告に記載）。
-  const REDOS_TIMEOUT_MS = 5000;
+  //
+  // REDOS_TIMEOUT_MSとこのdescribe配下6件のitタイムアウトについて（Issue #522）:
+  // このアサーションはperformance.now()差分による壁時計時間の測定であり、
+  // npm test（全体実行）では実質的に他テストとのCPU競合を測ってしまう。
+  // このリポジトリのサンドボックス環境で全体実行を4回繰り返し実測したところ、
+  // 6件とも0.4〜5.2秒の範囲で揺れた（単体実行では数百msで完了）。一方、この
+  // テストが検出したい{n,}量指定子由来の破局的バックトラッキングは、下の
+  // 「パーセントエンコードされたスキーム区切り」テストの回帰コメントの通り
+  // 90万文字規模で「20秒を超える」という、桁が異なる規模で現れる。つまり
+  // 5000msという値には「CPU競合による数秒の揺れ」と「本来検出したい規模の
+  // 劣化（20秒超）」を区別する余地が最初から無かった。実測最大値5.2秒に対し
+  // 2倍以上の余裕を持たせつつ、既知の劣化が現れる20秒台には遠く届かない
+  // 12000msへ引き上げる。これにより高負荷時の誤検知は無くなり、桁違いに
+  // 遅い本物の劣化への検出能力は維持される。個々のitタイムアウトも、この
+  // アサーションより先に打ち切られないよう15000msへ揃える。
+  const REDOS_TIMEOUT_MS = 12_000;
+  const IT_TIMEOUT_MS = 15_000;
 
   it('/home/ の10万回連続でも高速に完了する', () => {
     const input = '/home/'.repeat(100_000);
     const start = performance.now();
     sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
     expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  });
+  }, IT_TIMEOUT_MS);
 
   it('\\\\ + 20万文字 + \\Users\\ + 20万文字でも高速に完了する', () => {
     const input = '\\\\' + 'a'.repeat(200_000) + '\\Users\\' + 'b'.repeat(200_000);
     const start = performance.now();
     sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
     expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  });
+  }, IT_TIMEOUT_MS);
 
   it('scheme:// で終端しない50万+50万文字でも高速に完了する', () => {
     const input = 'https://' + 'a'.repeat(500_000) + 'b'.repeat(500_000);
     const start = performance.now();
     sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
     expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  });
+  }, IT_TIMEOUT_MS);
 
   it('スタックトレース行の5万回連続でも高速に完了する', () => {
     const input = '    at foo (/home/alice/a.ts:1:1)\n'.repeat(50_000);
     const start = performance.now();
     sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
     expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  });
+  }, IT_TIMEOUT_MS);
 
   it('パーセントエンコードされたスキーム区切りが%40なしで大量に連続しても高速に完了する（回帰確認）', () => {
     // 実装当初、末尾に%40が一切現れない大きな入力でO(n^2)のバックトラックが発生し
@@ -578,7 +594,7 @@ describe('sanitizeForLog（ReDoS対策: 約100万文字規模の敵対的入力�
     const start = performance.now();
     sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
     expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  });
+  }, IT_TIMEOUT_MS);
 
   it('Bearer/ghp_/sk-様の巨大なトークン様文字列でも高速に完了する', () => {
     const input =
@@ -591,7 +607,7 @@ describe('sanitizeForLog（ReDoS対策: 約100万文字規模の敵対的入力�
     const start = performance.now();
     sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
     expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  });
+  }, IT_TIMEOUT_MS);
 });
 
 describe('maskForLog（セキュリティ監査指摘: {n,}量指定子が約5.6MB超の単一トークンでV8をクラッシュさせる、high）', () => {
