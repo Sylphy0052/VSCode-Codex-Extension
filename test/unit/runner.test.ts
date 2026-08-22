@@ -4641,6 +4641,73 @@ tasks:
       expect(errorLog).toHaveBeenCalledWith(
         expect.stringContaining('実行状態の永続化に失敗しました'),
       );
+      // Issue #379: ログだけでなく`live.warnings`（Viewの警告欄）へも記録される
+      const warning = runner
+        .getSnapshot(runId)
+        ?.warnings.find((w) => w.kind === 'persistFailed');
+      expect(warning).toBeDefined();
+      expect(warning?.taskId).toBeUndefined();
+      expect(warning?.message).toContain('実行状態の永続化に失敗しました');
+    } finally {
+      process.off('unhandledRejection', rejectionListener);
+    }
+    expect(rejectionListener).not.toHaveBeenCalled();
+  });
+
+  it('persistが繰り返し失敗しても、persistFailed警告は直近1件へ丸められ無制限に増えない（Issue #379）', async () => {
+    const rejectionListener = vi.fn();
+    process.on('unhandledRejection', rejectionListener);
+    try {
+      const git = fakeGit({ notGitRepo: true });
+      const fs = new FakePseudoFs();
+      let updateCount = 0;
+      const failingMemento: WorkflowRunMemento = {
+        get<T>(key: string, defaultValue: T): T {
+          return defaultValue;
+        },
+        update(): Thenable<void> {
+          updateCount += 1;
+          return Promise.reject(new Error(`workspaceStateへの書き込みに失敗しました(${updateCount})`));
+        },
+      };
+      const TWO_TASK_YAML = `
+version: 1
+name: persist-fail-repeat-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+      const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+        git,
+        pseudoWorktree: { fs, exclude: [] },
+        memento: failingMemento,
+        log: fakeLogger,
+      });
+      const result = await runner.start('/repo/.agents/workflows/persist-fail-repeat.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+      const t2 = codexHost.byTaskId('T2');
+      t2.finish('done', doneState('ok'));
+      await flush();
+
+      // 複数回失敗しているはず（startとタスク完了のたびにpersistが呼ばれる）
+      expect(updateCount).toBeGreaterThan(1);
+
+      const warnings = runner
+        .getSnapshot(runId)
+        ?.warnings.filter((w) => w.kind === 'persistFailed');
+      // 直近1件へ丸められるため、複数回失敗しても件数は増えない
+      expect(warnings).toHaveLength(1);
+      // 警告が出た事実自体は失われず、最新の失敗内容が残っている
+      expect(warnings?.[0]?.message).toContain(`(${updateCount})`);
     } finally {
       process.off('unhandledRejection', rejectionListener);
     }
