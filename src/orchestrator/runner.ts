@@ -885,7 +885,11 @@ export class WorkflowRunner {
    * 印でしかなく、`onTaskFinished`自体の再入は止められない。素通しすると
    * `applyLoopStopReason('manual')`がrun全体を「人が手動停止した」ことにして
    * （未着手の`pending`は全て`skipped`）永続化してしまい、deactivateしただけの実行が
-   * 次の起動で続きから進まなくなる。
+   * 次の起動で続きから進まなくなる。同じ理由で`runnerMerge.ts`の`finishMergeResolution`
+   * （衝突解決セッションの解放が呼び戻す）と`blockMergeAfterLeaseWait`（`releaseAllLeases()`が
+   * 起こす順番待ち）も黙らせる（`WorkflowRunnerInternals.isDisposing`）。**`persist()`の
+   * 入口で止める形は採らない**: キュー待ちのpersistには効かず、破棄直前に確定した値
+   * （PRのURL・マージ成功）まで落とすため（`persist()`のコメント参照）。
    *
    * 一度立てたら下ろさない。`dispose()`の後にこのrunnerを使い続ける経路は無い
    * （VSCodeのdeactivate時にだけ呼ばれる）。再入を印で黙らせる形は、衝突解決セッションの
@@ -915,6 +919,7 @@ export class WorkflowRunner {
       deps: this.deps,
       runs: this.runs,
       integrationQueue: this.integrationQueue,
+      isDisposing: () => this.disposing,
       notify: (runId) => this.notify(runId),
       pump: (runId) => this.pump(runId),
       persist: (runId) => this.persist(runId),
@@ -1547,10 +1552,15 @@ export class WorkflowRunner {
    * **冪等**。解放したものは`undefined`にするかMapから消すので、2度目の呼び出しは
    * 何もしない。
    *
-   * runの状態（`runState`）は書き換えない。解放が発火する`onFinished`は`disposing`が
-   * 黙らせ、`persist()`も同じ印で早期に戻るため、deactivate中にworkspaceStateへ書きに
-   * 行くことは無い（`live.finished`・`disposing`はどちらもメモリ上の印で、永続化される
-   * 値ではない）。
+   * runの状態（`runState`）は書き換えない。解放が呼び戻す経路（`onTaskFinished`と、
+   * `runnerMerge.ts`の`finishMergeResolution`・`blockMergeAfterLeaseWait`）はどれも
+   * `disposing`が黙らせるため、メモリ上の`runState`が破棄中に汚れることが無い
+   * （`live.finished`・`disposing`はどちらもメモリ上の印で、永続化される値ではない）。
+   *
+   * 一方で`persist()`自体は止めない。破棄より前に積まれたpersistはキュー待ちの間に
+   * `disposing`が立っても走り、しかもupdaterは`live.runState`を実行時点で読み直すため、
+   * 入口で止めても素通りされる（`persist()`のコメント参照）。汚染を止めるのは書き換え側の
+   * 責務で、その前提が立てば残りのpersistは「破棄の直前に確定した値」を正しく書き切る。
    */
   dispose(): void {
     // 解放より先に立てる。走行中のセッションの解放が`onFinished`→`onTaskFinished`を
@@ -2711,13 +2721,18 @@ export class WorkflowRunner {
 
   /** 分割後のファイル（Issue #147）から`self.persist(...)`として呼ぶ（公開範囲は`WorkflowRunnerInternals`に閉じる）。 */
   private async persist(runId: string): Promise<void> {
-    if (this.disposing) {
-      // 破棄の最中に呼ばれた永続化は捨てる。`onTaskFinished`以外にも解放が呼び戻す経路が
-      // あり（衝突解決セッションの`onMergeResolutionFinished`など）、そこから来る書き込みは
-      // 「人が停止した」等の実態と違う値をworkspaceStateへ残す。deactivate後に残すべき値は
-      // 破棄の直前までに書き終えている
-      return;
-    }
+    // ここに`disposing`の全面停止ガードは置かない（Issue #374のレビュー2周目）。
+    //
+    // 止めても足りない: `store.update`は`SerialQueue`越しで、updaterが走るのはキューが
+    // 捌く時点、しかもupdaterは`live.runState`を実行時点で読み直す（issue #381）。破棄より
+    // 前に積まれたpersistは入口のガードを素通りするため、汚染を防ぐには`runState`を書き換える
+    // 側（`onTaskFinished`・`finishMergeResolution`・`blockMergeAfterLeaseWait`）で止めるしかない。
+    //
+    // 止めると害がある: `liveTask.pullRequest`・`markMergeSucceeded`・`finalMergeOutcome`は
+    // `live`にしか無く、ここを通してしか永続化されない。PR作成直後や`git merge`成功直後に
+    // deactivateが挟まると、確定済みの値（PRのURL・番号、マージ済み）を落としてしまい、
+    // 次の起動でPRの情報が失われたり、マージ済みのタスクが`merging`のまま復元されて
+    // `resumeMergeAfterReload`がやり直したりする
     const live = this.runs.get(runId);
     if (live === undefined) {
       return;

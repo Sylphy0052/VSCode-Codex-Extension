@@ -516,6 +516,13 @@ function blockMergeAfterLeaseWait(
   taskId: string,
   reason: LeaseWaitBlockReason,
 ): void {
+  if (self.isDisposing()) {
+    // 拡張機能の終了時の`releaseAllLeases()`が起こした順番待ち。`decideAfterLeaseWait`が
+    // `live.finished`を見て`skip`へ倒すのが本筋だが、`blocked`確定は「人が再マージで直す」
+    // 前提の後戻りできない書き換えなので、破棄中は入口でも止める。破棄しただけの実行は
+    // `merging`のまま残し、次の起動の`resumeMergeAfterReload`に再判定させる
+    return;
+  }
   const live = self.runs.get(runId);
   if (live === undefined) {
     return;
@@ -836,6 +843,14 @@ async function finishMergeResolution(
   reason: LoopStopReason,
   lease: IntegrationLease,
 ): Promise<void> {
+  if (self.isDisposing()) {
+    // `WorkflowRunner.dispose()`が`live.mergeResolutions`のセッションを解放したときの
+    // 呼び戻し（`reason`は`manual`）。下の`manual`分岐は`applyLoopStopReason`でrun全体を
+    // 手動停止にし、未着手の`pending`まで`skipped`にするため、deactivateしただけの実行が
+    // 次の起動で続きから進まなくなる。セッションの解放は`dispose()`が済ませているので、
+    // ここは何もせず戻る（`WorkflowRunnerInternals.isDisposing`のJSDoc参照）
+    return;
+  }
   const live = self.runs.get(runId);
   if (live === undefined) {
     return;

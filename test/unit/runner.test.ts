@@ -7173,7 +7173,8 @@ tasks:
     runner.dispose();
     await flush();
 
-    // 永続化そのものが起きない（破棄の最中にworkspaceStateへ書きに行かない）
+    // `runState`を書き換える側が黙るので、破棄をきっかけにした永続化がそもそも起きない
+    // （`persist()`側に全面停止のガードは置いていない。Issue #374のレビュー2周目）
     expect(updateSpy).not.toHaveBeenCalled();
     expect(JSON.stringify(store.find(runId))).toBe(persistedBefore);
     // メモリ上の`runState`も据え置き。未着手のT2が`skipped`へ倒れない
@@ -7181,5 +7182,163 @@ tasks:
     expect(snapshot?.haltedByUser).toBe(false);
     expect(snapshot?.tasks.find((t) => t.id === 'T1')?.state).toBe('running');
     expect(snapshot?.tasks.find((t) => t.id === 'T2')?.state).toBe('pending');
+  });
+
+  /** 依存の無い2タスク。T1が衝突すると、T2のマージは統合worktreeの占有待ちで止まる。 */
+  const PARALLEL_YAML = `
+version: 1
+name: dispose-lease-test
+defaults:
+  provider: codex
+  maxParallel: 3
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+
+  /**
+   * 衝突解決セッションを抱えたままの破棄（経路1）。`dispose()`が
+   * `live.mergeResolutions`のセッションを解放すると`onFinished('manual')`が同期的に
+   * 発火し、`onMergeResolutionFinished`→`finishMergeResolution`の`manual`分岐が
+   * `applyLoopStopReason(..., '', 'manual')`でrun全体を手動停止にしてしまう
+   * （Issue #374のレビュー2周目のmedium）。`onTaskFinished`側の印だけでは塞げない別経路。
+   */
+  it('衝突解決セッションを抱えたままdispose()しても、runの状態を書き換えない', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/dispose.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // T1が衝突して衝突解決セッションが開き、T2は占有待ちで`merging`のまま止まる
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    const resolution = codexHost.sessions.at(-1);
+    if (resolution === undefined) {
+      throw new Error('衝突解決セッションが開かれていません');
+    }
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    const persistedBefore = JSON.stringify(store.find(runId));
+
+    // deactivate時、実タブの片付けが解決セッションのループを`manual`で止める
+    resolution.disposeFinishReason = 'manual';
+    runner.dispose();
+    await flush();
+
+    // メモリ上の`runState`が汚染されない（修正前はここで`haltedByUser`が立っていた）
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.haltedByUser).toBe(false);
+    expect(snapshot?.tasks.find((t) => t.id === 'T1')?.state).toBe('merging');
+    expect(JSON.stringify(store.find(runId))).toBe(persistedBefore);
+  });
+
+  /**
+   * 占有待ちのマージを抱えたままの破棄（経路2）。`dispose()`末尾の`releaseAllLeases()`が
+   * 待機者を起こすため、`decideAfterLeaseWait`→`blockMergeAfterLeaseWait`が`merging`を
+   * `blocked`へ倒しうる。破棄しただけの実行は次の起動で`merging`から再判定
+   * （`resumeMergeAfterReload`）できなければならない。
+   */
+  it('占有待ちのマージを抱えたままdispose()しても、mergingがblockedへ倒れない', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/dispose.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    // T2は統合worktreeの占有待ち（`merging`のまま、マージは始まっていない）
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('merging');
+    const persistedBefore = JSON.stringify(store.find(runId));
+
+    runner.dispose();
+    await flush();
+
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.tasks.find((t) => t.id === 'T2')?.state).toBe('merging');
+    expect(
+      snapshot?.warnings.some((w) => w.kind === 'mergeBusy' && w.taskId === 'T2'),
+    ).toBe(false);
+    expect(JSON.stringify(store.find(runId))).toBe(persistedBefore);
+  });
+
+  /**
+   * **破棄の直前に積まれたpersistは、破棄の後にupdaterが走る**（レビュー2周目のmedium）。
+   * `WorkflowRunStore.update`は`SerialQueue`越しで、しかもupdaterは`live.runState`を
+   * 実行時点で読み直す（issue #381）。そのため`persist()`の冒頭で`disposing`を見て
+   * 早期returnしても、**既にキューへ入っている**persistは素通りし、破棄中に汚染された
+   * `runState`をそのままworkspaceStateへ書く。塞ぐには汚染そのものを起こさせるな、
+   * という理屈の検証。
+   */
+  it('破棄の直前に積まれたpersistが破棄後に走っても、runの状態を汚染しない', async () => {
+    const { memento, pendingCount, releaseOne } = controllableMemento();
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git, memento });
+
+    // `memento.update`を留め置くので、`start()`のpersistは手で解放しないと返らない
+    const drainAll = async (): Promise<void> => {
+      while (pendingCount() > 0) {
+        releaseOne();
+        await flush();
+      }
+    };
+    const startPromise = runner.start('/repo/.agents/workflows/dispose.yaml', '/repo');
+    await flush();
+    await drainAll();
+    const result = await startPromise;
+    const runId = result.runId as string;
+    await flush();
+    await drainAll();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    const resolution = codexHost.sessions.at(-1);
+    if (resolution === undefined) {
+      throw new Error('衝突解決セッションが開かれていません');
+    }
+    // ここでは**あえて解放しない**。先頭の`memento.update`が未解決のまま
+    // `SerialQueue`が詰まり、後続のpersistはupdater未実行のままキューに積まれている
+    expect(pendingCount()).toBe(1);
+
+    resolution.disposeFinishReason = 'manual';
+    runner.dispose();
+    await flush();
+
+    // 破棄の後になってキュー待ちのupdaterが走る。読み直す`live.runState`が汚れていれば
+    // そのまま永続化される（`persist()`の冒頭ガードでは止められない）
+    await drainAll();
+
+    const run = store.find(runId) as PersistedRun;
+    expect(run.haltedByUser).toBe(false);
+    expect(run.tasks['T1']?.state).toBe('merging');
+    expect(run.tasks['T2']?.state).toBe('merging');
+  });
+
+  /**
+   * `disposing`は破棄経路だけの印であり、人が明示的に止める`stop()`には影響しない
+   * （手動停止では従来どおり`haltedByUser`が立ち、未着手の`pending`は`skipped`になる）。
+   */
+  it('disposingはstop()に影響しない（手動停止は従来どおり確定する）', async () => {
+    const { runner, codexHost, store } = createHarness(SERIAL_YAML);
+    const result = await runner.start('/repo/.agents/workflows/dispose.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('pending');
+
+    runner.stop(runId);
+    await flush();
+    codexHost.byTaskId('T1').finish('taskStopped' as LoopStopReason, { ...initialChatState });
+    await flush();
+
+    const run = store.find(runId) as PersistedRun;
+    expect(run.haltedByUser).toBe(true);
+    expect(run.tasks['T2']?.state).toBe('skipped');
   });
 });
