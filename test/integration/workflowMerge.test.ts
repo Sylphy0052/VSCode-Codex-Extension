@@ -8,6 +8,7 @@ import {
   describeSnapshot,
   FakeTaskSession,
   FakeTaskSessionHost,
+  mergeCommitSubject,
   stateOf,
   taskOf,
   type WorkflowRunSnapshotLike,
@@ -183,8 +184,9 @@ suite('統合の衝突と自動解決（design.md §16.17）', () => {
       'utf8',
     );
     git(resolution.cwd, 'add', SHARED_FILE);
-    // マージ中のコミットなので `--no-edit` で `MERGE_MSG`（`Merge task <id> (run <runId>)`）が
-    // そのまま使われる。リロード後の再判定（design.md §16.11）がこの文言を手がかりにする。
+    // マージ中のコミットなので `--no-edit` で `MERGE_MSG`（`<type>(<taskId>): merge task
+    // (run <runId>)`）がそのまま使われる。リロード後の再判定（design.md §16.11）が
+    // この文言を手がかりにする。
     git(resolution.cwd, 'commit', '--no-verify', '--no-edit');
     resolution.finishDone('解決した');
 
@@ -193,7 +195,7 @@ suite('統合の衝突と自動解決（design.md §16.17）', () => {
 
     const log = git(resolution.cwd, 'log', '--oneline', '--format=%s');
     assert.ok(
-      log.includes(`Merge task T2 (run ${runId})`),
+      log.includes(mergeCommitSubject('T2', runId)),
       `統合ブランチにT2のマージコミットが無い: ${log}`,
     );
 
@@ -269,7 +271,7 @@ suite('統合の衝突と自動解決（design.md §16.17）', () => {
     assert.equal(stateOf(snapshot, 'T2'), 'done');
     const log = git(integrationCwd, 'log', '--format=%s');
     assert.ok(
-      log.includes(`Merge task T2 (run ${runId})`),
+      log.includes(mergeCommitSubject('T2', runId)),
       `再マージ後も統合ブランチにマージコミットが無い: ${log}`,
     );
   });
