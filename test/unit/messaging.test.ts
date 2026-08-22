@@ -25,6 +25,7 @@ import {
   totalUndeliveredCount,
   validateSendMessage,
   wrapTaskMessage,
+  type DispatchErrorLogPort,
   type HttpMcpTransportHandle,
   type JsonRpcRequest,
   type JsonRpcResponse,
@@ -756,6 +757,89 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
       }
     },
   );
+
+  it(
+    'dispatchが例外を投げたとき、型名とメッセージがlogPortへ記録される' +
+      '（Issue #375: 例外が起きた事実がどこにも記録されない）',
+    () => {
+      const logs: string[] = [];
+      const logPort: DispatchErrorLogPort = { error: (m) => logs.push(m) };
+      const transport = new FakeTransport();
+      const hub = new TaskMessagingHub({
+        listRunTasks: () => {
+          throw new RangeError('boom');
+        },
+      });
+      new MessagingMcpServer(hub, transport, logPort);
+      const conn = new FakeConnection('T1');
+      transport.connect(conn);
+
+      conn.fireRequest({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'list_tasks', arguments: {} },
+      });
+
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toContain('RangeError');
+      expect(logs[0]).toContain('boom');
+    },
+  );
+
+  it(
+    'ログにはスタックトレースとファイルパスを含めない' +
+      '（Issue #375: レスポンス本体だけでなくログ側も内部情報を漏らさない）',
+    () => {
+      const logs: string[] = [];
+      const logPort: DispatchErrorLogPort = { error: (m) => logs.push(m) };
+      const transport = new FakeTransport();
+      const hub = new TaskMessagingHub({
+        listRunTasks: () => {
+          throw new Error('boom');
+        },
+      });
+      new MessagingMcpServer(hub, transport, logPort);
+      const conn = new FakeConnection('T1');
+      transport.connect(conn);
+
+      conn.fireRequest({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'list_tasks', arguments: {} },
+      });
+
+      expect(logs).toHaveLength(1);
+      // スタックトレースの行形式（"    at ..."）もこのテストファイル自身のパスも
+      // 含まれないこと。実際のError.stackには両方が含まれるため、これが通るのは
+      // 実装がerror.stackを一切読んでいない場合のみ
+      expect(logs[0]).not.toContain(' at ');
+      expect(logs[0]).not.toContain(__filename);
+    },
+  );
+
+  it('logPortを渡さなくても例外時に落ちない（後方互換）', () => {
+    const transport = new FakeTransport();
+    const hub = new TaskMessagingHub({
+      listRunTasks: () => {
+        throw new Error('boom');
+      },
+    });
+    new MessagingMcpServer(hub, transport);
+    const conn = new FakeConnection('T1');
+    transport.connect(conn);
+
+    expect(() =>
+      conn.fireRequest({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'list_tasks', arguments: {} },
+      }),
+    ).not.toThrow();
+    expect(conn.sent).toHaveLength(1);
+  });
 });
 
 describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタスク」、Issue #105）', () => {
@@ -963,6 +1047,38 @@ describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタ�
     expect(url1.startsWith(handle.baseUrl)).toBe(true);
     expect(url2.startsWith(handle.baseUrl)).toBe(true);
   });
+
+  it(
+    '渡したlogPortへdispatchの例外が記録される（Issue #375）' +
+      '（`MessagingMcpServer`への配線が`startHttpMcpTransport`経由でも保たれることの確認）',
+    async () => {
+      const logs: string[] = [];
+      const logPort: DispatchErrorLogPort = { error: (m) => logs.push(m) };
+      const hub = new TaskMessagingHub({
+        listRunTasks: () => {
+          throw new Error('boom');
+        },
+      });
+      handle = await startHttpMcpTransport(hub, logPort);
+      const url = handle.registerTask('T1');
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'list_tasks', arguments: {} },
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toContain('Error');
+      expect(logs[0]).toContain('boom');
+    },
+  );
 });
 describe("オーケストレーター専用の制御ツール（design.md §16.23「道具」）", () => {
   /** 呼ばれた制御ツールを記録するだけのフェイク。 */

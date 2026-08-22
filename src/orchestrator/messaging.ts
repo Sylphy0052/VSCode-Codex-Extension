@@ -3,7 +3,11 @@ import * as http from 'node:http';
 
 import { ORCHESTRATOR_CONNECTION_ID } from './orchestratorSession';
 import type { TaskState } from './runState';
-import { escapeAngleBrackets, stripControlCharsPreservingNewlines } from './sanitize';
+import {
+  escapeAngleBrackets,
+  sanitizeForLog,
+  stripControlCharsPreservingNewlines,
+} from './sanitize';
 import { truncateByCodePoint } from './workflow';
 
 /**
@@ -874,6 +878,21 @@ export interface McpTransportPort {
   onConnection(handler: (connection: McpConnection) => void): void;
 }
 
+/**
+ * `safeDispatch`が捕捉した例外を記録するための最小限の出力口（Issue #375）。
+ *
+ * `log.ts`の`Logger`をそのまま要求せず専用の最小interfaceにするのは、本ファイル冒頭の
+ * JSDocが述べる「VSCode APIには一切依存しない」という方針を保つため（`log.ts`は`vscode`
+ * モジュールへ依存する）。`McpTransportPort`と同じ「外部依存はportの向こうに置く」流儀。
+ *
+ * 呼び出し側（`runner.ts`）が`Logger`を持つ場合は`{ error: (m) => log.error(m) }`のように
+ * 包んで渡せば足りる。渡さなければ`MessagingMcpServer`は記録せず、従来どおり黙って
+ * `-32603`を返すだけになる（後方互換）。
+ */
+export interface DispatchErrorLogPort {
+  error(message: string): void;
+}
+
 const SERVER_INFO_RESULT = {
   protocolVersion: '2024-11-05',
   serverInfo: { name: 'vscode-codex-extension-messaging', version: '1' },
@@ -894,6 +913,7 @@ export class MessagingMcpServer {
   constructor(
     private readonly hub: TaskMessagingHub,
     transport: McpTransportPort,
+    private readonly logPort?: DispatchErrorLogPort,
   ) {
     transport.onConnection((connection) => this.handleConnection(connection));
   }
@@ -912,13 +932,35 @@ export class MessagingMcpServer {
    *
    * 返すエラーメッセージには`error`の内容（スタックトレース・パスを含みうる）を一切含めない。
    * JSON-RPCの`-32603`（Internal error）として固定の文言だけを返す。
+   *
+   * 例外が起きた事実自体は`logPort`（渡されていれば）へ記録する（Issue #375）。以前は
+   * ここで完全に握り潰しており、同一runの他タスクが意図的に例外を誘発する呼び出しを
+   * 繰り返しても事後調査ができなかった。
    */
   private safeDispatch(taskId: string, request: JsonRpcRequest): JsonRpcResponse {
     try {
       return this.dispatch(taskId, request);
-    } catch {
+    } catch (error) {
+      this.logDispatchError(error);
       return failure(request.id, -32603, '内部エラーが発生しました');
     }
+  }
+
+  /**
+   * 例外の型名とメッセージだけを`logPort`へ記録する（Issue #375）。`error.stack`は
+   * 意図的に一切読まない。スタックトレースにはこの拡張機能自身のソースファイルパスが
+   * 含まれ、`-32603`のレスポンス本体を固定文言にしている理由（内部情報を漏らさない）と
+   * 同じ配慮がログ経路にも要るため。
+   */
+  private logDispatchError(error: unknown): void {
+    if (this.logPort === undefined) {
+      return;
+    }
+    const typeName = error instanceof Error ? error.constructor.name : typeof error;
+    const message = error instanceof Error ? error.message : String(error);
+    this.logPort.error(
+      `[task-messaging] dispatchで例外が発生しました: ${typeName}: ${sanitizeForLog(message)}`,
+    );
   }
 
   private dispatch(taskId: string, request: JsonRpcRequest): JsonRpcResponse {
@@ -1082,8 +1124,14 @@ const MAX_MCP_REQUEST_BODY_BYTES = 64 * 1024;
  *   形で問題なく満たせるため、`MessagingMcpServer`側のロジックを変えずに使える
  * - サーバは `127.0.0.1` のエフェメラルポート（OSが割り当てる空きポート）で待ち受ける。
  *   ワークスペースの外・他プロセスから推測されうる固定ポートを避けるため
+ *
+ * `logPort`は`MessagingMcpServer`へそのまま橋渡しするだけ（Issue #375）。省略時の挙動は
+ * 変わらない（後方互換）。
  */
-export function startHttpMcpTransport(hub: TaskMessagingHub): Promise<HttpMcpTransportHandle> {
+export function startHttpMcpTransport(
+  hub: TaskMessagingHub,
+  logPort?: DispatchErrorLogPort,
+): Promise<HttpMcpTransportHandle> {
   const tokenToTaskId = new Map<string, string>();
   let connectionHandler: ((connection: McpConnection) => void) | undefined;
 
@@ -1092,7 +1140,7 @@ export function startHttpMcpTransport(hub: TaskMessagingHub): Promise<HttpMcpTra
       connectionHandler = handler;
     },
   };
-  const mcpServer = new MessagingMcpServer(hub, transport);
+  const mcpServer = new MessagingMcpServer(hub, transport, logPort);
   void mcpServer; // 生成することで`transport.onConnection`にハンドラを登録させる
 
   const server = http.createServer((req, res) => {
