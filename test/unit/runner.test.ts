@@ -4596,6 +4596,152 @@ tasks:
     },
   );
 
+  describe('疑似worktreeの再試行（Issue #396）', () => {
+    const RETRY_SINGLE_TASK_YAML = `
+version: 1
+name: pseudo-retry-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+    it(
+      '手動再実行は前回と別ディレクトリへ複製し、決定的に失敗しない' +
+        '（以前は複製先が前回と同じパスになり、cloneWorkspaceのalreadyExistsで' +
+        '再試行そのものが即failedになっていた）',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, codexHost, store } = createHarness(RETRY_SINGLE_TASK_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-retry.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const attempt1 = codexHost.byTaskId('T1');
+        const cloneDir1 = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+        expect(attempt1.cwd).toBe(cloneDir1);
+        attempt1.finish('failed', { ...initialChatState, turnFailed: true });
+        await flush();
+
+        // 修正前はこの時点で（新しいセッションが開始される前に）resolveWorkingDirectoryが
+        // 同じパスへの複製を試みて例外を投げ、即座に'failed'で確定していた
+        expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+        await flush();
+
+        const cloneDir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T1-retry0');
+        const attempt2 = codexHost.sessions.find((s) => s.cwd === cloneDir2);
+        expect(attempt2).toBeDefined();
+        // 新しい複製先にもワークスペースの内容が複製されている（別ディレクトリとして
+        // 成立していることの確認）
+        expect(fs.files.get(path.join(cloneDir2, 'a.txt'))).toEqual({ size: 10, mtimeMs: 100 });
+
+        attempt2?.finish('done', doneState('ok'));
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      },
+    );
+
+    it(
+      '自動再試行（retries: 1）でも、疑似worktreeが前回と別ディレクトリを使って成功する',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const yaml = `
+version: 1
+name: pseudo-auto-retry-test
+tasks:
+  - id: T1
+    retries: 1
+    prompt: p1
+    done: d1
+`;
+        const { runner, codexHost, store } = createHarness(yaml, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-auto-retry.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const attempt1 = codexHost.byTaskId('T1');
+        attempt1.finish('failed', { ...initialChatState, turnFailed: true });
+        await flush();
+
+        // 自動再試行が同じ経路で即死すると、retryCountだけが1に進み'loopFailed'で
+        // 確定してしまう（修正前の症状）。修正後は新しいディレクトリで実際にセッションが
+        // 開始される
+        expect(store.find(runId)?.tasks['T1']?.retryCount).toBe(1);
+        const cloneDir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T1-retry0');
+        const attempt2 = codexHost.sessions.find((s) => s.cwd === cloneDir2);
+        expect(attempt2).toBeDefined();
+
+        attempt2?.finish('done', doneState('ok'));
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      },
+    );
+
+    it(
+      'removeWorktreesは疑似worktreeでも再試行したタスクの全試行分（初回+全retry）を撤去する' +
+        '（Issue #396、git側のremoveGitTaskWorktreeと対になる撤去）',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, codexHost, store } = createHarness(RETRY_SINGLE_TASK_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start(
+          '/repo/.agents/workflows/pseudo-retry-cleanup.yaml',
+          '/repo',
+        );
+        const runId = result.runId as string;
+        await flush();
+
+        const dir0 = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+        const dir1 = path.join('/repo', '.agents', 'worktrees', runId, 'T1-retry0');
+        const dir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T1-retry1');
+
+        const attempt1 = codexHost.byTaskId('T1');
+        attempt1.finish('failed', { ...initialChatState, turnFailed: true });
+        await flush();
+
+        expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+        await flush();
+        const attempt2 = codexHost.sessions.find((s) => s.cwd === dir1);
+        attempt2?.finish('failed', { ...initialChatState, turnFailed: true });
+        await flush();
+
+        expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+        await flush();
+        const attempt3 = codexHost.sessions.find((s) => s.cwd === dir2);
+        attempt3?.finish('done', doneState('ok'));
+        await flush();
+
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+        expect(store.find(runId)?.tasks['T1']?.manualRetryCount).toBe(2);
+
+        // 撤去前は全試行分の複製ディレクトリが残っている
+        expect(fs.dirs.has(dir0)).toBe(true);
+        expect(fs.dirs.has(dir1)).toBe(true);
+        expect(fs.dirs.has(dir2)).toBe(true);
+
+        const outcome = await runner.removeWorktrees(runId);
+        expect(outcome.removed).toEqual(['T1']);
+        expect(outcome.failed).toEqual([]);
+
+        // 全試行分（接尾辞付きも含め）が残らず撤去されている
+        expect(fs.dirs.has(dir0)).toBe(false);
+        expect(fs.dirs.has(dir1)).toBe(false);
+        expect(fs.dirs.has(dir2)).toBe(false);
+      },
+    );
+  });
+
   describe('リロード復元後のマニフェスト（Issue #380）', () => {
     // T1は疑似worktree（統合が要る）、T2は明示cwd（統合を経由しない）にして、リロード後の
     // 再実行（retryTask）が疑似worktreeの複製先の衝突（T2の再クローンが以前の複製と

@@ -32,6 +32,7 @@ import { applyRunCompletionToFile, type RoadmapFileSystemPort } from './roadmap'
 import {
   IntegrationQueue as PseudoWorktreeIntegrationQueue,
   removePseudoWorktree,
+  removePseudoWorktreeAttempts,
   type PseudoWorktreeFileSystemPort,
   type Snapshot,
 } from './pseudoWorktree';
@@ -1746,13 +1747,18 @@ export class WorkflowRunner {
   }
 
   /**
-   * gitでないワークスペース（疑似worktree、design.md §16.20）の1タスク分の複製を撤去する
-   * （Issue #298「疑似worktreeが撤去対象にならない」）。
+   * gitでないワークスペース（疑似worktree、design.md §16.20）の1タスク分の複製を、
+   * すべての試行分撤去する（Issue #298「疑似worktreeが撤去対象にならない」、Issue #396）。
    *
    * **`blocked`のタスクの複製は残す。** gitならタスクブランチが残るため撤去しても
    * 中身を後から辿れるが、疑似worktreeにはブランチが無く、複製を消すと未統合の差分
    * （3-way mergeができず衝突として弾かれた分。design.md §16.20）を復元する手段が
    * 無くなってしまう。
+   *
+   * `totalAttempts`はgit側の`removeGitTaskWorktree`と同じ`state.retryCount +
+   * state.manualRetryCount`（Issue #396）。以前は`removePseudoWorktree`を`retry`無しで
+   * 1回呼ぶだけで、再試行のたびに`cloneWorkspace`が作った`-retry<n>`付きの複製が
+   * 撤去されずに残っていた。
    */
   private async removePseudoTaskWorktree(
     live: LiveRun,
@@ -1777,7 +1783,14 @@ export class WorkflowRunner {
     if (!usedPseudoWorktree) {
       return;
     }
-    const result = await removePseudoWorktree(live.repoRoot, runId, task.id, pseudoWorktreeDeps.fs);
+    const totalAttempts = state.retryCount + state.manualRetryCount;
+    const result = await removePseudoWorktreeAttempts(
+      live.repoRoot,
+      runId,
+      task.id,
+      totalAttempts,
+      pseudoWorktreeDeps.fs,
+    );
     if (result.ok) {
       removed.push(task.id);
     } else {

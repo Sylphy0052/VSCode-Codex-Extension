@@ -108,7 +108,7 @@ export async function resolveWorkingDirectory(
     };
   }
   if (decision.kind === 'sharedFallback') {
-    return resolveSharedFallbackWorkingDirectory(self, live, task, decision.warning);
+    return resolveSharedFallbackWorkingDirectory(self, live, task, decision.warning, retry);
   }
   if (decision.kind === 'error') {
     throw new Error(decision.message);
@@ -147,18 +147,24 @@ async function resolveSharedFallbackWorkingDirectory(
   live: LiveRun,
   task: WorkflowTask,
   warning: string,
+  retry: number | undefined,
 ): Promise<WorkingDirectoryResolution> {
   self.deps.log.warn(`[workflow ${live.runId}/${task.id}] ${warning}`);
   live.warnings.push({ kind: 'gitFallback', taskId: task.id, message: warning });
   // 疑似worktree（design.md §16.20、Issue #105）。`WorkflowRunnerDeps.pseudoWorktree`が
   // 渡されていない場合は、従来どおりワークスペース直下を共有する（後方互換）
   if (live.pseudo !== undefined && self.deps.pseudoWorktree !== undefined) {
+    // `retry`はgit側の`resolveWorktreeWorkingDirectory`と同じ値（呼び出し元の
+    // `prepareTaskLaunch`が`retrySuffixOf(taskRunState)`で算出したもの）を共有する
+    // （Issue #396）。以前はここへ流さず、再試行のたびに`cloneWorkspace`が前回と同じ
+    // パスへ複製しようとして`alreadyExists`で必ず失敗していた
     const cloned = await cloneWorkspace(
       live.repoRoot,
       live.runId,
       task.id,
       live.pseudo.exclude,
       self.deps.pseudoWorktree.fs,
+      retry,
     );
     if (!cloned.ok) {
       throw new Error(`疑似worktreeの作成に失敗しました: ${cloned.message}`);
