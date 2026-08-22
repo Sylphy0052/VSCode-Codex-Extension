@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  __resetPseudoWorktreeExcludeWarningForTestOnly,
   readChatComposerButtonsConfig,
   readChatSendOnConfig,
   readClaudeConfig,
@@ -12,6 +13,10 @@ import { __mock } from '../mocks/vscode';
 describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
   beforeEach(() => {
     __mock.reset();
+    // lastPseudoWorktreeExcludeWarningはモジュールスコープのため__mock.reset()では
+    // リセットされない。放置すると同じ不正値を検証するテスト同士が実行順に依存する
+    // （レビュー指摘1）。
+    __resetPseudoWorktreeExcludeWarningForTestOnly();
   });
 
   it('既定値は .agents/workflows', () => {
@@ -160,6 +165,21 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
       'dist',
       'out',
     ]);
+  });
+
+  // レビュー指摘1: 重複除け用のモジュール状態（lastPseudoWorktreeExcludeWarning）が
+  // テスト間でリセットされないと、同じ不正値を検証する2つ目のテストで警告が0件になり
+  // 落ちる。この2件を連続で並べて実行順に依存しないことを確認する。
+  it('pseudoWorktreeExcludeの警告は同じ不正値を検証する別テスト1件目でも出る（レビュー指摘1・順序依存の再現）', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['.git'] });
+    readWorkflowsConfig();
+    expect(__mock.messages.warnings).toHaveLength(1);
+  });
+
+  it('pseudoWorktreeExcludeの警告は同じ不正値を検証する別テスト2件目でも出る（レビュー指摘1・順序依存の再現）', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['.git'] });
+    readWorkflowsConfig();
+    expect(__mock.messages.warnings).toHaveLength(1);
   });
 
   it('replyTimeoutSecの既定は300秒（design.md §16.21・DEFAULT_REPLY_TIMEOUT_SEC）', () => {

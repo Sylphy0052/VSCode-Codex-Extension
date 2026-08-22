@@ -384,6 +384,18 @@ function normalizePseudoWorktreeExclude(value: unknown): PseudoWorktreeExcludeRe
  */
 let lastPseudoWorktreeExcludeWarning: string | undefined;
 
+/**
+ * テスト専用: `lastPseudoWorktreeExcludeWarning` をリセットする。
+ *
+ * モジュールスコープの状態のためテストから直接書き換えられず、リセットしないと
+ * 「同じ不正値を検証するテストが2つあると、後勝ちの1つは重複除けで警告0件になる」
+ * という実行順依存が生まれる（レビュー指摘: medium）。`test/unit/config.test.ts` の
+ * `beforeEach` から呼ぶ。本体コードから呼んではならない。
+ */
+export function __resetPseudoWorktreeExcludeWarningForTestOnly(): void {
+  lastPseudoWorktreeExcludeWarning = undefined;
+}
+
 /** 検証で弾いた設定を人へ見せる（通知＝設定を書いた本人が気づける唯一の場所）。 */
 function notifyPseudoWorktreeExcludeWarnings(warnings: readonly string[]): void {
   const message = warnings.join(' / ');
