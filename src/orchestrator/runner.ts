@@ -378,6 +378,24 @@ export interface WorkflowWarning {
      */
     | 'pseudoWorktreeReflectBlocked'
     /**
+     * 疑似worktree（design.md §16.20）の反映（`reflectPseudoWorktree`）を、`retryMerge`/
+     * `retryTask`/`continueTask`による再開後の2周目以降では行わなかった（Issue #432-2）。
+     *
+     * `reflectIntegrationToWorkspace`が比較に使う`live.pseudo.baseline`はrun開始時に
+     * 一度だけ取ったスナップショットで、1周目の反映後も更新されない。そのため2周目を
+     * 素通しすると必ず`pseudoWorktreeReflectBlocked`（「実行中にワークスペースが変更
+     * された」という誤検知）になってしまうため、2周目以降は`reflectPseudoWorktree`
+     * 自体を呼ばないようにした。だが`integratePseudoWorktree`（統合キューへの追加）は
+     * runの周回に関わらず呼ばれるため、2周目に新たに`done`になったタスクの統合内容は
+     * 実在し、それを反映する経路は`reflectPseudoWorktree`しかない。呼ばないだけでは
+     * その統合内容が警告なしにワークスペースへ届かないまま消えるため、事実どおりの
+     * この警告だけは出す。
+     *
+     * 暫定対応であり、真の修正（`baseline`を1周目の反映成功後に更新し、2周目以降も
+     * 正しく反映できるようにすること）はIssue #511へ切り出し済み。
+     */
+    | 'pseudoWorktreeReflectSkipped'
+    /**
      * ゴール文から生成したワークフロー（`planner.ts`）が、既定の安全設定を上書きする
      * 指定（`autoApprove: true` / 非空の `allow` / `sandbox` や `approvalMode` の緩和）を
      * 含んでいる（design.md §16.9「分解セッションの制限」）。他のkindは実行時に動的へ
@@ -2226,6 +2244,25 @@ export class WorkflowRunner {
       // 誤検知が起きる
       if (live.pseudo !== undefined && !live.finishedNotified) {
         void reflectPseudoWorktree(this.internals, runId);
+      } else if (live.pseudo !== undefined && live.finishedNotified) {
+        // 2周目以降はここへ来る。反映自体は行わないが、`integratePseudoWorktree`
+        // （タスク完了のたびに呼ばれ、runの周回を問わない）が2周目に新たに`done`に
+        // なったタスクの分を統合キューへ積んでいる可能性があるため、それがワーク
+        // スペースへ届いていないという事実だけは`live.warnings`へ残す
+        // （`pseudoWorktreeReflectSkipped`、Issue #432-2）。反映そのものを試みていない
+        // ため`pseudoWorktreeReflectBlocked`とは別kindにする。`persistFailed`
+        // （Issue #379）が採った「同一kindの直近1件へ丸める」規律に揃える。
+        //
+        // 暫定対応。真の修正（`baseline`を1周目の反映成功後に更新する）はIssue #511。
+        live.warnings = live.warnings.filter((w) => w.kind !== 'pseudoWorktreeReflectSkipped');
+        live.warnings.push({
+          kind: 'pseudoWorktreeReflectSkipped',
+          taskId: undefined,
+          message:
+            '疑似worktreeの反映は初回の終了時にのみ行われるため、再開後に統合された内容は' +
+            'ワークスペースへ反映されていません（暫定対応。真の修正はIssue #511）。',
+        });
+        this.notify(runId);
       }
       // タスク間メッセージング（design.md §16.21）のMCPサーバはrunの結果を問わず閉じる。
       // 以降新しいタスクは開始されない（`live.finished`）ため、これ以上の接続は要らない

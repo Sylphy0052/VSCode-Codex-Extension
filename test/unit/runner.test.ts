@@ -6010,6 +6010,145 @@ tasks:
     // notifyOrchestratorRunFinishedはrunにつき1度だけ（2周目で重ねて送られない）
     expect(countRunFinishedNotices(codexHost)).toBe(1);
   });
+
+  /**
+   * Issue #432-2のレビュー・監査で追加確認された指摘: `reflectPseudoWorktree`を
+   * `finishedNotified`で絞ったことで、2周目以降は反映自体を試みなくなった。だが
+   * `integratePseudoWorktree`（タスク完了ごとに呼ばれる）はrunの周回を問わず統合
+   * キューへ積むため、2周目に新たに`done`になったタスクの統合内容は実在し、それを
+   * 反映する経路は`reflectPseudoWorktree`しかない。反映を絞る判断自体は維持しつつ、
+   * 「反映されていない」という事実どおりの警告（`pseudoWorktreeReflectSkipped`）を
+   * 1件だけ残すことを検証する。
+   */
+  describe('疑似worktree（design.md §16.20）の反映は絞るが、警告は事実どおりに残す', () => {
+    const PSEUDO_RETRY_YAML = `
+version: 1
+name: pseudo-retry-test
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+  - id: T2
+    dependsOn: [T1]
+    prompt: p2
+    done: d2
+`;
+
+    it('1周目の終了ではpseudoWorktreeReflectSkippedは積まれない（誤検知防止）', async () => {
+      const git = fakeGit({ notGitRepo: true });
+      const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+      const { runner, codexHost, store } = createHarness(PSEUDO_RETRY_YAML, {
+        git,
+        pseudoWorktree: { fs, exclude: [] },
+      });
+      const result = await runner.start('/repo/.agents/workflows/pseudo-retry.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      codexHost.byTaskId('T1').finish('failed', { ...initialChatState, turnFailed: true });
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+      const snapshot = runner.getSnapshot(runId);
+      expect(snapshot?.warnings.some((w) => w.kind === 'pseudoWorktreeReflectSkipped')).toBe(
+        false,
+      );
+    });
+
+    it(
+      'retryTask経由で2周目に終了すると、reflectPseudoWorktreeは呼ばれず、' +
+        'pseudoWorktreeReflectSkippedが1件積まれる',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, codexHost, store } = createHarness(PSEUDO_RETRY_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-retry.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        // 1周目: T1が失敗し、T2はskippedになってrunはfailedで終わる
+        // （疑似worktreeのbaseline取得のみ。T1の複製先には変更を加えない）
+        codexHost.byTaskId('T1').finish('failed', { ...initialChatState, turnFailed: true });
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+        expect(store.find(runId)?.tasks['T2']?.state).toBe('skipped');
+
+        // 人がT1を再実行し、依存先T2も含めて最後まで走らせる
+        expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+        await flush();
+        codexHost.byTaskId('T1').finish('done', doneState('ok'));
+        await flush();
+
+        // T2の複製先でファイルを変更する。統合（integratePseudoWorktree）自体は
+        // runの周回を問わず呼ばれるため、この変更は統合キューへ積まれるはず
+        const cloneDir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T2');
+        fs.setFile(path.join(cloneDir2, 'a.txt'), { size: 999, mtimeMs: 999 });
+        codexHost.byTaskId('T2').finish('done', doneState('ok'));
+        await flush();
+
+        // 2周目: 今度はsucceededで終わる
+        expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+        // 2周目の統合内容（a.txtの変更）はワークスペースへ反映されていない
+        // （reflectPseudoWorktreeが2周目は呼ばれないため）
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 10, mtimeMs: 100 });
+        const snapshot = runner.getSnapshot(runId);
+        const warnings = snapshot?.warnings.filter(
+          (w) => w.kind === 'pseudoWorktreeReflectSkipped',
+        );
+        expect(warnings).toHaveLength(1);
+        expect(warnings?.[0]?.message).not.toContain('実行中にワークスペースが変更された');
+      },
+    );
+
+    it('3回以上終了しても、pseudoWorktreeReflectSkippedは直近1件へ丸められる', async () => {
+      const YAML = `
+version: 1
+name: pseudo-retry-multi-test
+tasks:
+  - id: T1
+    prompt: p
+    continuePrompt: つづき
+    maxIterations: 5
+    done: d
+`;
+      const git = fakeGit({ notGitRepo: true });
+      const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+      const { runner, codexHost, store } = createHarness(YAML, {
+        git,
+        pseudoWorktree: { fs, exclude: [] },
+      });
+      const result = await runner.start('/repo/.agents/workflows/pseudo-retry-multi.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+
+      // 1周目: 回数切れでfailed（maxReached）
+      t1.finish('maxReached', { ...initialChatState });
+      await flush();
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+
+      // 2周目: continueTaskで続け、また回数切れにする
+      expect(runner.continueTask(runId, 'T1')).toBe(true);
+      await flush();
+      t1.finish('maxReached', { ...initialChatState });
+      await flush();
+
+      // 3周目: さらにcontinueTaskで続け、今度はdoneにする
+      expect(runner.continueTask(runId, 'T1')).toBe(true);
+      await flush();
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      const snapshot = runner.getSnapshot(runId);
+      const warnings = snapshot?.warnings.filter((w) => w.kind === 'pseudoWorktreeReflectSkipped');
+      expect(warnings).toHaveLength(1);
+    });
+  });
 });
 
 describe('WorkflowRunner: マージのリロード後再判定（design.md §16.11）', () => {
