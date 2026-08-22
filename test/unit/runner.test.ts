@@ -2761,11 +2761,14 @@ tasks:
   /**
    * 「全体の停止」は衝突解決セッションを止め対象から漏らしていた（issue #381。issue #322の
    * 「停止ボタンを押しても指示が送られ続ける」が衝突解決セッションについてだけ残っていた）。
-   * `stop()`が`live.mergeResolutions`にも`stopLoop()`を送ることと、停止された衝突解決
-   * セッションが`onMergeResolutionFinished`へ合流して`blocked`（マージは巻き戻し）へ
-   * 落ち着くことを確かめる。
+   * `stop()`が`live.mergeResolutions`にも`stopLoop()`を送ること自体は#381のまま守る。
+   *
+   * ただし停止の後始末で`git merge --abort`はしない（issue #434）。統合worktreeで人が解いた
+   * 未コミットの解決結果を破棄してしまい、復旧手段が無いため。タブへの直接介入
+   * （`manual`/`interrupted`）と同じ非破壊の経路へ合流し、タスクは`merging`のまま統合
+   * worktreeの占有だけが解放されることを確かめる。
    */
-  it('全体の停止は衝突解決セッションにもstopLoopを送り、マージを巻き戻してblockedにする（issue #381）', async () => {
+  it('全体の停止は衝突解決セッションにもstopLoopを送るが、解決作業を巻き戻さない（issue #381・#434）', async () => {
     const git = fakeGit({ conflictOnce: true });
     const { runner, codexHost, store } = createHarness(YAML, { git });
     const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
@@ -2789,15 +2792,21 @@ tasks:
     expect(store.find(runId)?.haltedByUser).toBe(true);
 
     // `stopLoop()`は衝突解決セッションでも`LoopStopReason: 'taskStopped'`でonFinishedを呼ぶ。
-    // `onMergeResolutionFinished`は'manual'/'interrupted'以外（'taskStopped'を含む）を
-    // 「gitが未解決のまま」の経路と同じく扱い、マージを巻き戻してblockedに確定させる
+    // `onMergeResolutionFinished`は'taskStopped'を'manual'/'interrupted'と同じ非破壊の
+    // 経路として扱う（issue #434）
     resolutionSession?.finish('taskStopped' as LoopStopReason, { ...initialChatState });
     await flush();
 
-    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
-    // マージの巻き戻し（`git merge --abort`）が呼ばれ、統合ブランチはマージ前へ戻っている
+    // マージの巻き戻し（`git merge --abort`）は呼ばれない。統合worktreeは`MERGE_HEAD`と
+    // 未解決パスを抱えたまま残り、人が解いた内容が保たれる
     const abortCall = git.calls.find((c) => c.args[0] === 'merge' && c.args[1] === '--abort');
-    expect(abortCall).toBeDefined();
+    expect(abortCall).toBeUndefined();
+    // タスク自身の状態は変えない（`manual`/`interrupted`と同じ。run全体だけが止まっている）
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    // 衝突解決セッションは片付けられ、統合worktreeの占有だけが解放されている
+    expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.mergeResolutionActive).toBe(
+      false,
+    );
   });
 
   it(

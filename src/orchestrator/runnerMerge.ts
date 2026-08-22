@@ -800,17 +800,27 @@ async function finishMergeResolution(
   live.mergeResolutions.delete(taskId);
   session?.dispose();
 
-  if (reason === 'manual' || reason === 'interrupted') {
-    // 人がタブへ直接介入した。通常のタスクと同じく、このタスク自身の状態は変えず
-    // 実行全体だけを止める設計を踏襲する（design.md §16.5）
+  if (reason === 'manual' || reason === 'interrupted' || reason === 'taskStopped') {
+    // 人が止めた経路。タブへの直接介入（`manual` / `interrupted`）に加えて、ワークフローView
+    // の「全体停止」（`WorkflowRunner.stop()`が衝突解決セッションへ送る`stopLoop()` →
+    // `taskStopped`。issue #381で止め対象に加えた）もここへ合流する。通常のタスクと同じく、
+    // このタスク自身の状態は変えず実行全体だけを止める設計を踏襲する（design.md §16.5）。
     //
-    // **ここで`git merge --abort`はしない**（Issue #412のレビュー指摘1）。人が統合worktreeで
-    // 直接手を動かしている経路であり、巻き戻すとその解決作業を破棄してしまう
+    // **ここで`git merge --abort`はしない**（Issue #412のレビュー指摘1・Issue #434）。人が
+    // 統合worktreeで直接手を動かしている経路であり、巻き戻すとその解決作業を破棄してしまう
     // （design.md §16.17が「衝突した状態のままにしておく」としているのと同じ理由）。
+    // 「全体停止」も、人が統合worktreeで解いている途中の未コミットの解決結果を巻き上げる点は
+    // 同じで、破棄すると復旧手段が無い（「再マージ」してもゼロからやり直しになる）。
     // 結果として統合worktreeは`MERGE_HEAD`と未解決パスを抱えたまま占有だけが解放されるが、
     // 次にマージへ来たタスクは`mergeTaskBranch`のゲートで`busy`を受け、`failed`ではなく
-    // `blocked`（Viewの「再マージ」で復帰できる）になる
-    live.runState = applyLoopStopReason(live.runState, live.def.tasks, '', reason);
+    // `blocked`（Viewの「再マージ」で復帰できる）になる。
+    //
+    // `taskStopped`はrun全体を止める操作なので、run単位の停止としては`manual`と同じ扱いに
+    // する（`stop()`が呼び出し前に既に`haltedByUser`を立てているため、この呼び出しは冪等）。
+    // `taskStopped`のまま渡すと`applyLoopStopReason`はタスク単位の`manualStop`確定を試み、
+    // taskIdを渡さないこの呼び出しでは何も起きない、という分かりにくい形になる。
+    const haltReason: LoopStopReason = reason === 'taskStopped' ? 'manual' : reason;
+    live.runState = applyLoopStopReason(live.runState, live.def.tasks, '', haltReason);
     void self.persist(runId);
     self.notify(runId);
     self.pump(runId);

@@ -1271,9 +1271,11 @@ export class WorkflowRunner {
    * 送られ続ける」状態が衝突解決セッションについてだけ残ってしまう（issue #381）。
    * `stopLoop()` は衝突解決セッションでも `LoopStopReason: 'taskStopped'` で
    * `onFinished` を呼び、`runnerMerge.ts` の `onMergeResolutionFinished` へ合流する。
-   * そちらは `reason === 'done'` かつgit上も解決済みのときだけ `done` にし、それ以外
-   * （`'taskStopped'` を含む）はマージを巻き戻して `blocked` に確定させる（実行中のタスク
-   * を `stopLoop()` で `failed`（手動停止）にするのと対になる「適切な状態」）。
+   * そちらは `reason === 'done'` かつgit上も解決済みのときだけ `done` にする。
+   * **`'taskStopped'` ではマージを巻き戻さない**（issue #434）。人が統合worktreeで解いている
+   * 途中の未コミットの解決結果を `git merge --abort` が破棄してしまい、復旧手段が無いため。
+   * タブへの直接介入（`'manual'` / `'interrupted'`）と同じ非破壊の経路へ合流し、タスクは
+   * `merging` のまま統合worktreeの占有だけが解放される（issue #412と同じ論法）。
    */
   stop(runId: string): void {
     const live = this.runs.get(runId);
