@@ -789,6 +789,34 @@ export interface LiveRun {
       }
     | undefined;
   /**
+   * `messaging.hub`と同じインスタンスを、`messaging`が`closeMessaging`で`undefined`へ
+   * 戻った後も持ち続けるための参照（Issue #475）。
+   *
+   * `ensureMessaging`（`retryTask` / `retryMerge`成功後の`pending`再開が通る
+   * `prepareTaskLaunch`の単一チョークポイント）が、run終了後にメッセージングを
+   * 立て直すとき、ここに残っている`hub`があればそれを再利用し、無ければ新規に作る。
+   * hubを作り直すと`MAX_MESSAGES_PER_RUN`（500件）のカウンタと未配送キューが
+   * リセットされ、「run全体で500件」という上限が再開のたびに緩んでしまうため、
+   * transport・タイマーだけを`closeMessaging`/`ensureMessaging`で開け閉めし、
+   * hub自体は同じrunが`this.runs`に残っている間ずっと生かす。
+   *
+   * ウィンドウのリロード後に復元した実行（`rebuildLiveRun`）では`undefined`のまま
+   * 始まる。復元はこのプロセスでまだhubを作っていないため再利用のしようがなく、
+   * `ensureMessaging`が最初の`retryTask`等で新規に作る（`messaging: undefined`と
+   * 同じ「無くても実行は止めない」設計）。
+   */
+  messagingHub: TaskMessagingHub | undefined;
+  /**
+   * `ensureMessaging`の多重起動を防ぐための進行中Promise（Issue #475）。
+   *
+   * 再マージ成功で複数の`pending`タスクが一斉に`pump()`される経路（`markMergeSucceeded`が
+   * 後続を`pending`へ戻す）では、`prepareTaskLaunch`が同じtickで複数回呼ばれうる。
+   * `ensureMessaging`は`await`を挟むため、進行中のセットアップを待たずに後続の呼び出しが
+   * 素通りすると、MCPサーバ（`startTransport`）とポーリングタイマーが二重に立ってしまう。
+   * ここへ進行中のPromiseを積み、後続の呼び出しはそれを待つだけにする。
+   */
+  messagingSetupInFlight: Promise<void> | undefined;
+  /**
    * 衝突解決セッション（design.md §16.17「コンフリクト」5.「解決用セッションは依存グラフの
    * ノードにはしない」）。`live.tasks`（グラフのノード＝通常のタスク）とは別に持つ。
    * taskIdをキーにする（1タスクにつき同時に1件のマージしか走らない）。
@@ -1159,21 +1187,64 @@ export class WorkflowRunner {
   }
 
   /**
-   * タスク間メッセージング（design.md §16.21）。省略可能（`WorkflowRunnerDeps.messaging`
-   * のJSDoc参照）。MCPサーバの起動に失敗しても実行は止めない。
+   * タスク間メッセージング（design.md §16.21）を、生きていなければ立てる（Issue #475）。
+   * 省略可能（`WorkflowRunnerDeps.messaging`のJSDoc参照）。MCPサーバの起動に失敗しても
+   * 実行は止めない。
+   *
+   * **冪等**: `live.messaging`が既に生きていれば何もしない。
+   *
+   * **`prepareTaskLaunch`の`registerTask`直前という単一のチョークポイントから呼ぶ**
+   * （`start()`からも呼ぶが、これは最初のタスクが`prepareTaskLaunch`へ届くより前に
+   * オーケストレーターセッション（`setupOrchestratorForStart`）が接続用URLを要求するため。
+   * `live.messaging`が既に生きていれば以降は何もしないので二重には立たない）。
+   * `retryTask` / `continueTask` / `retryMerge`へ個別に呼び出しを足さない。新しい
+   * セッションを開く経路は必ず`prepareTaskLaunch`を通るため、呼び出し漏れが構造的に
+   * 起きない。`continueTask`（生きているセッションへ`runLoop`を掛け直すだけ）は
+   * `prepareTaskLaunch`を経由しないため対象外（design.md「MCP URLは差し替えられない」、
+   * Issue #475の調査コメント参照）。
+   *
+   * **hubは捨てず、`live.messagingHub`にあれば再利用する。** transportとタイマーだけを
+   * 立て直す。作り直すと`MAX_MESSAGES_PER_RUN`（500件）のカウンタと未配送キューが
+   * リセットされ、「run全体で500件」という上限が再開のたびに緩む。
+   *
+   * **同時に複数タスクが起動する経路（再マージ成功で複数の`pending`が一斉に`pump()`
+   * される）でも二重に立てない。** `live.messagingSetupInFlight`へ進行中のPromiseを積み、
+   * 後続の呼び出しはそれを待つだけにする。
    */
-  private async setupMessagingForStart(
+  private async ensureMessaging(runId: string, live: LiveRun): Promise<void> {
+    const messaging = this.deps.messaging;
+    if (messaging === undefined || live.messaging !== undefined) {
+      return;
+    }
+    if (live.messagingSetupInFlight !== undefined) {
+      await live.messagingSetupInFlight;
+      return;
+    }
+    const setup = this.startMessagingTransport(runId, live, messaging);
+    live.messagingSetupInFlight = setup;
+    try {
+      await setup;
+    } finally {
+      live.messagingSetupInFlight = undefined;
+    }
+  }
+
+  /** `ensureMessaging`の実処理。hubの再利用・transport/タイマーの起動・失敗時の警告ログを行う。 */
+  private async startMessagingTransport(
     runId: string,
     live: LiveRun,
     messaging: WorkflowRunnerMessagingDeps,
   ): Promise<void> {
-    const hub = new TaskMessagingHub({
-      listRunTasks: () => buildRunTaskSnapshots(this.internals, runId),
-      onAccepted: (message) => onMessageAccepted(this.internals, runId, message),
-      // オーケストレーター専用の接続にだけ見せる制御ツール（design.md §16.23）。
-      // Viewのボタンと同じ公開メソッド（`this`）を通す
-      orchestratorControl: buildOrchestratorControlPort(this.internals, this, runId),
-    });
+    const hub =
+      live.messagingHub ??
+      new TaskMessagingHub({
+        listRunTasks: () => buildRunTaskSnapshots(this.internals, runId),
+        onAccepted: (message) => onMessageAccepted(this.internals, runId, message),
+        // オーケストレーター専用の接続にだけ見せる制御ツール（design.md §16.23）。
+        // Viewのボタンと同じ公開メソッド（`this`）を通す
+        orchestratorControl: buildOrchestratorControlPort(this.internals, this, runId),
+      });
+    live.messagingHub = hub;
     try {
       // dispatch例外の記録先（Issue #375）。`log.ts`はVSCode APIへ依存するため、
       // `messaging.ts`（VSCode非依存方針）へは直接渡さず最小限のportで包む
@@ -1294,6 +1365,8 @@ export class WorkflowRunner {
       draftPullRequest,
       pseudo,
       messaging: undefined,
+      messagingHub: undefined,
+      messagingSetupInFlight: undefined,
       mergeResolutions: new Map(),
       orchestrator: undefined,
       orchestratorSeenStates: new Map(),
@@ -1302,11 +1375,9 @@ export class WorkflowRunner {
     };
     this.runs.set(runId, live);
 
-    if (this.deps.messaging !== undefined) {
-      await this.setupMessagingForStart(runId, live, this.deps.messaging);
-    }
+    await this.ensureMessaging(runId, live);
     // オーケストレーターセッション（design.md §16.23）。MCPサーバ（上の
-    // `setupMessagingForStart`）の後に開くのは、制御ツール用の接続URLをそこから
+    // `ensureMessaging`）の後に開くのは、制御ツール用の接続URLをそこから
     // 発行するため。失敗しても実行は止めない。
     //
     // **`await`しない。** CLIの起動を待つあいだタスクの開始が止まってしまい、
@@ -2068,10 +2139,15 @@ export class WorkflowRunner {
       );
     }
 
-    // タスク間メッセージング（design.md §16.21）。runにMCPサーバが立っていれば、
-    // このタスク専用の接続用URLを1つ発行する。実際にCLIの起動へ渡す配線
-    // （`TaskSessionInput.mcp`を読む側）はsrc/view/の変更が要るため、このIssueの範囲外
-    // （`WorkflowRunnerMessagingDeps`のJSDoc参照）。ここでは値を渡すところまで
+    // タスク間メッセージング（design.md §16.21）。`registerTask`の直前で`ensureMessaging`を
+    // 呼ぶ（Issue #475の単一チョークポイント）。run終了後の`retryTask` / 再マージ成功で
+    // `pending`へ戻った後続タスクなど、`live.messaging`が閉じた状態で新しいセッションを
+    // 開こうとする経路はすべてここを通るため、再構築の呼び出し漏れが構造的に起きない。
+    // 既に生きていれば`ensureMessaging`は何もしない（冪等）
+    await this.ensureMessaging(runId, live);
+    // runにMCPサーバが立っていれば、このタスク専用の接続用URLを1つ発行する。実際にCLIの
+    // 起動へ渡す配線（`TaskSessionInput.mcp`を読む側）はsrc/view/の変更が要るため、この
+    // Issueの範囲外（`WorkflowRunnerMessagingDeps`のJSDoc参照）。ここでは値を渡すところまで
     const messagingUrl = live.messaging?.transport.registerTask(taskId);
     const input: TaskSessionInput = {
       cwd,

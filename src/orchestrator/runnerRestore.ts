@@ -320,7 +320,14 @@ async function rebuildLiveRun(
     // 改めてタスクが動き出すが、メッセージングはrunそのものに紐づく短命なサーバのため、
     // 復元だけでは作り直さない。`WorkflowRunnerDeps.messaging`が省略可能なのと同じ
     // 「無くても実行は止めない」設計に揃える）
+    //
+    // 実害が出るのは復元そのものではなく、そのあと`retryTask`等で再開したとき
+    // （Issue #475）。`ensureMessaging`（`prepareTaskLaunch`の単一チョークポイント）が
+    // このプロセスで初めてhubを作る。復元はプロセスをまたぐため再利用できるhubが
+    // そもそも無く、`messagingHub`も`undefined`から始める
     messaging: undefined,
+    messagingHub: undefined,
+    messagingSetupInFlight: undefined,
     mergeResolutions: new Map(),
     // 復元した実行にはオーケストレーターセッションを作り直さない（会話は復元できない。
     // design.md §16.23「永続化と復元」）

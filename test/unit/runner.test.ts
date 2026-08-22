@@ -693,15 +693,66 @@ interface FakeMessagingState {
     | undefined;
   /** `startTransport`へ実際に渡された`logPort`（Issue #375、配線の検証用）。 */
   logPort: DispatchErrorLogPort | undefined;
+  /**
+   * `startTransport`が呼ばれた回数と、そのたびに渡された`hub`の履歴（Issue #475）。
+   * `ensureMessaging`の冪等性（既に生きていれば二重に呼ばない）と、hubの再利用
+   * （closeMessaging後の再構築で同じインスタンスを渡す）を検証するために使う。
+   */
+  startCallCount: number;
+  hubHistory: TaskMessagingHub[];
+  /**
+   * `blockStart: true`のとき、保留中の`startTransport`呼び出しを1件だけ解決させる
+   * （呼び出し順のFIFO）。保留が無ければ何もしない。
+   */
+  releaseStart: () => void;
 }
 
-function fakeMessagingDeps(options?: { failStart?: boolean; failClose?: boolean }): {
+/**
+ * `TaskSessionInput.cwd`が指定タスクのディレクトリかどうかを、再実行の枝番
+ * （`resolveWorkingDirectory`が付ける`-retry0`等のサフィックス、Issue #475のテストで
+ * 「再実行後の最新の入力」を取り違えないために使う）まで含めて判定する。
+ */
+function cwdEndsWithTask(cwd: string, taskId: string): boolean {
+  return new RegExp(`/${taskId}(-retry\\d+)?$`).test(cwd);
+}
+
+function fakeMessagingDeps(options?: {
+  failStart?: boolean;
+  failClose?: boolean;
+  /**
+   * 2回目以降の`startTransport`呼び出しを、`state.releaseStart()`が呼ばれるまで個別に
+   * 保留する（Issue #475）。**1回目（`start()`が最初に立てる呼び出し）は保留しない** ——
+   * `start()`自身がこの呼び出しの完了を`await`するため、1回目まで保留すると
+   * `runner.start()`自体が返らずテストがデッドロックする。`ensureMessaging`の同時起動
+   * ガード（`live.messagingSetupInFlight`）は run終了後の再構築（2回目以降）でしか
+   * 起きないため、これで検証したい範囲はちょうど賄える。
+   */
+  blockStart?: boolean;
+}): {
   deps: WorkflowRunnerMessagingDeps;
   state: FakeMessagingState;
 } {
-  const state: FakeMessagingState = { hub: undefined, handle: undefined, logPort: undefined };
+  const pendingReleases: Array<() => void> = [];
+  const state: FakeMessagingState = {
+    hub: undefined,
+    handle: undefined,
+    logPort: undefined,
+    startCallCount: 0,
+    hubHistory: [],
+    releaseStart: () => {
+      const release = pendingReleases.shift();
+      release?.();
+    },
+  };
   const deps: WorkflowRunnerMessagingDeps = {
     startTransport: async (hub, logPort) => {
+      state.startCallCount += 1;
+      state.hubHistory.push(hub);
+      if (options?.blockStart === true && state.startCallCount > 1) {
+        await new Promise<void>((resolve) => {
+          pendingReleases.push(resolve);
+        });
+      }
       state.hub = hub;
       state.logPort = logPort;
       if (options?.failStart) {
@@ -5236,6 +5287,214 @@ tasks:
       expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
     },
   );
+
+  describe('run再開時のメッセージング再構築（Issue #475）', () => {
+    /**
+     * `TWO_TASK_YAML`はT1・T2が依存無しで独立に走る（`maxParallel: 2`）。両方を
+     * `failed`にしてから`retryTask`を呼ぶとき、**片方だけを再実行しても実際には
+     * 走り出さない**点に注意（`scheduler.ts`の`isRunHalted`は`haltedByUser`に加えて
+     * 「1件でも`failed`が残っていれば」runを止めたままにする。`retryTask`は対象の1件だけを
+     * `pending`へ戻すため、もう一方がまだ`failed`のままだと`nextTasksToStart`は何も返さない）。
+     * そのため以下のテストは両方を`retryTask`してから初めてpump()が両方を同時に開始する。
+     * これは実際の障害経路（再マージ成功で複数の`pending`が一斉に`pump()`される）と同じ形の
+     * 「複数タスクが同一tickで同時に起動する」状況を、素の`retryTask`だけで自然に再現できる。
+     */
+    async function failBothTasks(codexHost: FakeHost): Promise<void> {
+      codexHost.byTaskId('T1').finish('failed', { ...initialChatState, turnFailed: true });
+      codexHost.byTaskId('T2').finish('failed', { ...initialChatState, turnFailed: true });
+      await flush();
+    }
+
+    it(
+      'run終了後にretryTaskで再開すると、hubを再利用してtransportを立て直し、' +
+        'タスク間のメッセージ送受信が実際に機能する',
+      async () => {
+        const { deps, state } = fakeMessagingDeps();
+        const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, { messaging: deps });
+        const result = await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const hub1 = state.hub;
+        const handle1 = state.handle;
+        expect(state.startCallCount).toBe(1);
+
+        // 両タスクとも失敗させ、runを終了させる（run終了時にMCPサーバは閉じる）
+        await failBothTasks(codexHost);
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+        expect(store.find(runId)?.tasks['T2']?.state).toBe('failed');
+        expect(handle1?.closed).toBe(true);
+
+        // 「再実行」（retryTask）で両方を再開する。修正前は`live.messaging`が`undefined`の
+        // ままで、`TaskSessionInput`にmcpキー自体が乗らなかった（Issue #475の受入基準）。
+        // T1を先に呼んだ時点ではT2がまだ`failed`のため実際には走り出さず、T2を呼んだ瞬間に
+        // pump()が両方を同時に開始する（このdescribeの冒頭コメント参照）
+        expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+        expect(runner.retryTask(runId, 'T2')).toEqual({ ok: true });
+        await flush();
+
+        // hubは作り直さず再利用する（MAX_MESSAGES_PER_RUNのカウンタを引き継ぐため）。
+        // T1・T2が同一tickで同時に起動しても、`startTransport`が呼ばれるのは1回だけ
+        // （`messagingSetupInFlight`による同時起動ガード）
+        expect(state.startCallCount).toBe(2);
+        expect(state.hub).toBe(hub1);
+        expect(state.handle).not.toBe(handle1);
+        expect(state.handle?.closed).toBe(false);
+
+        const t1Inputs = codexHost.openInputs.filter((i) => cwdEndsWithTask(i.cwd, 'T1'));
+        const t2Inputs = codexHost.openInputs.filter((i) => cwdEndsWithTask(i.cwd, 'T2'));
+        const rebuiltT1Input = t1Inputs[t1Inputs.length - 1];
+        const rebuiltT2Input = t2Inputs[t2Inputs.length - 1];
+        expect(rebuiltT1Input?.mcp?.url).toContain('/mcp/');
+        expect(rebuiltT2Input?.mcp?.url).toContain('/mcp/');
+
+        // 実際にメッセージがやり取りできることを確かめる
+        const t2 = codexHost.byTaskId('T2');
+        const sendResult = state.hub?.sendMessage({
+          from: 'T1',
+          to: 'T2',
+          body: '再開後のテストメッセージ',
+          expectReply: false,
+        });
+        expect(sendResult?.accepted).toBe(true);
+        const composed = t2.promptTransform?.('続けてください') ?? '';
+        expect(composed).toContain('再開後のテストメッセージ');
+      },
+    );
+
+    it(
+      'run全体で500件のメッセージ数カウンタは、再開をまたいでも作り直されずリセットされない',
+      async () => {
+        const { deps, state } = fakeMessagingDeps();
+        const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, { messaging: deps });
+        const result = await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        // 送受信できる状態で何件か送っておき、カウンタを進める
+        state.hub?.sendMessage({ from: 'T1', to: 'T2', body: 'a', expectReply: false });
+        state.hub?.sendMessage({ from: 'T2', to: 'T1', body: 'b', expectReply: false });
+        const totalBeforeClose = state.hub?.snapshotStore().totalSent;
+        expect(totalBeforeClose).toBe(2);
+
+        await failBothTasks(codexHost);
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+
+        expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+        expect(runner.retryTask(runId, 'T2')).toEqual({ ok: true });
+        await flush();
+
+        // hubを作り直していれば`totalSent`は0へ戻ってしまう。再利用していれば引き継がれる
+        expect(state.hub?.snapshotStore().totalSent).toBe(totalBeforeClose);
+      },
+    );
+
+    it('ensureMessagingは冪等で、既に生きているメッセージングを二重に立てない', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
+      await flush();
+
+      // T1・T2・オーケストレーターの3セッションが同じrunで開くが、
+      // `startTransport`（MCPサーバの起動）自体は1回しか呼ばれない
+      expect(state.startCallCount).toBe(1);
+    });
+
+    it(
+      '再マージ成功で複数のpendingタスクが一斉に再開しても、' +
+        'MCPサーバとタイマーを二重に立てない（messagingSetupInFlightによる同時起動ガード。' +
+        'startTransportの解決を人為的に遅らせ、同時起動の窓を決定的に作って検証する）',
+      async () => {
+        const { deps, state } = fakeMessagingDeps({ blockStart: true });
+        const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, { messaging: deps });
+        const result = await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+        expect(state.startCallCount).toBe(1);
+
+        await failBothTasks(codexHost);
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+        expect(store.find(runId)?.tasks['T2']?.state).toBe('failed');
+
+        // T1とT2を同時に再開する（このdescribeの冒頭コメントのとおり、T2を呼んだ瞬間に
+        // pump()が両方を同一tickで開始する）
+        expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+        expect(runner.retryTask(runId, 'T2')).toEqual({ ok: true });
+        await flush();
+
+        // `startTransport`は呼ばれたが、`blockStart`により保留中で1件だけ解放できる状態の
+        // はず（同時に起動した2件のうち、実際に呼んだのは1回だけ。もう一方は
+        // `messagingSetupInFlight`を待っただけで`startTransport`自体を呼んでいない）
+        expect(state.startCallCount).toBe(2);
+        state.releaseStart();
+        await flush();
+
+        expect(state.handle?.closed).toBe(false);
+        const t1Inputs = codexHost.openInputs.filter((i) => cwdEndsWithTask(i.cwd, 'T1'));
+        const t2Inputs = codexHost.openInputs.filter((i) => cwdEndsWithTask(i.cwd, 'T2'));
+        expect(t1Inputs[t1Inputs.length - 1]?.mcp?.url).toContain('/mcp/');
+        expect(t2Inputs[t2Inputs.length - 1]?.mcp?.url).toContain('/mcp/');
+      },
+    );
+
+    it(
+      'ウィンドウのリロード後に復元した実行をretryTaskで再開すると、' +
+        '新しいセッションへ有効なメッセージングURLが渡る（design.md §16.11 + Issue #475）',
+      async () => {
+        const SINGLE_TASK_YAML = `
+version: 1
+name: reload-messaging-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+        const { deps: deps1 } = fakeMessagingDeps();
+        const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, { messaging: deps1 });
+        const result = await runner.start('/repo/.agents/workflows/reload-messaging.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+        codexHost.byTaskId('T1');
+
+        // 新しいプロセス（リロード後）を模す。同じstoreを使い回すが、ライブな状態は空
+        const { deps: deps2, state: state2 } = fakeMessagingDeps();
+        const newCodexHost = new FakeHost();
+        const reloadedRunner = new WorkflowRunner({
+          hosts: { codex: newCodexHost, claude: newCodexHost },
+          worktreeQueue: new WorktreeCreationQueue(),
+          git: fakeGit(),
+          fs: identityFs,
+          filePort: filePort(SINGLE_TASK_YAML),
+          store,
+          log: fakeLogger,
+          messaging: deps2,
+          readBaseline: () => ({
+            codexSandbox: 'read-only',
+            codexApprovalMode: 'on-request',
+            claudePermissionMode: 'manual',
+            allowAutoApprove: true,
+            allowClaudeBypassPermissions: false,
+          }),
+        });
+        await reloadedRunner.restoreRunsForView();
+
+        // 復元直後は中断扱い（failed）。このプロセスではまだメッセージングのhubを
+        // 一度も作っていない（`rebuildLiveRun`は`messagingHub: undefined`のまま復元する）
+        const snapshot = reloadedRunner.getSnapshot(runId);
+        expect(snapshot?.tasks.find((t) => t.id === 'T1')?.failure).toEqual({
+          kind: 'reloadInterrupted',
+        });
+
+        expect(reloadedRunner.retryTask(runId, 'T1')).toEqual({ ok: true });
+        await flush();
+
+        expect(state2.startCallCount).toBe(1);
+        const rebuiltInput = newCodexHost.openInputs.find((i) => cwdEndsWithTask(i.cwd, 'T1'));
+        expect(rebuiltInput?.mcp?.url).toContain('/mcp/');
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+      },
+    );
+  });
 
   describe('待ちぼうけの検出（design.md §16.21「待ちぼうけを検出する経路」）', () => {
     // 経路1（全員waitingReplyかつ未配送0件）はここでは再現しない: `onMessageAccepted`は
