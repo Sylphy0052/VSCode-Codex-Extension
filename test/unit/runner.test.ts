@@ -2917,12 +2917,14 @@ tasks:
    * 「停止ボタンを押しても指示が送られ続ける」が衝突解決セッションについてだけ残っていた）。
    * `stop()`が`live.mergeResolutions`にも`stopLoop()`を送ること自体は#381のまま守る。
    *
-   * ただし停止の後始末で`git merge --abort`はしない（issue #434）。統合worktreeで人が解いた
+   * 停止の後始末で`git merge --abort`はしない（issue #434）。統合worktreeで人が解いた
    * 未コミットの解決結果を破棄してしまい、復旧手段が無いため。タブへの直接介入
-   * （`manual`/`interrupted`）と同じ非破壊の経路へ合流し、タスクは`merging`のまま統合
-   * worktreeの占有だけが解放されることを確かめる。
+   * （`manual`/`interrupted`）と同じ非破壊の経路へ合流するが、**タスク自身は`merging`の
+   * まま残さず`blocked`にする**（Issue #443、案A）。`merging`のまま残すと`getRunOutcome`が
+   * `running`を返し続け、runが終了確定せず「再マージ」の対象にもならない行き止まりに
+   * なるため。
    */
-  it('全体の停止は衝突解決セッションにもstopLoopを送るが、解決作業を巻き戻さない（issue #381・#434）', async () => {
+  it('全体の停止は衝突解決セッションにもstopLoopを送り、解決作業は巻き戻さずblockedにする（issue #381・#434・#443）', async () => {
     const git = fakeGit({ conflictOnce: true });
     const { runner, codexHost, store } = createHarness(YAML, { git });
     const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
@@ -2955,12 +2957,18 @@ tasks:
     // 未解決パスを抱えたまま残り、人が解いた内容が保たれる
     const abortCall = git.calls.find((c) => c.args[0] === 'merge' && c.args[1] === '--abort');
     expect(abortCall).toBeUndefined();
-    // タスク自身の状態は変えない（`manual`/`interrupted`と同じ。run全体だけが止まっている）
-    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    // タスク自身は`blocked`へ確定する（Issue #443・案A）。巻き戻していないため、Viewが
+    // その事実を伝えられるよう`mergeInterrupted`警告を積む
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+    const warnings = runner.getSnapshot(runId)?.warnings ?? [];
+    expect(warnings.some((w) => w.kind === 'mergeInterrupted' && w.taskId === 'T1')).toBe(true);
     // 衝突解決セッションは片付けられ、統合worktreeの占有だけが解放されている
     expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.mergeResolutionActive).toBe(
       false,
     );
+    // `blocked`になった以上、runは`running`を返し続けない（他タスクはT1がmergingでは
+    // 開始できないため`pending`のまま`skipped`に倒れており、run全体は`blocked`で終了確定する）
+    expect(runner.getSnapshot(runId)?.outcome).toBe('blocked');
   });
 
   it(
@@ -6414,8 +6422,18 @@ tasks:
     expect(store.find(runId)?.tasks['A']?.state).toBe('running');
   });
 
-  it('衝突解決セッションがmanualで終わったとき、対象タスクはblockedにならず状態が変わらない', async () => {
-    const SOLO_MERGE_YAML = `
+  /**
+   * Issue #443（案A）: 衝突解決セッションが人に止められたとき（`manual`/`interrupted`/
+   * `taskStopped`）、対象タスクの`merging`は必ず閉じて`blocked`にする。`merging`のまま
+   * 残すと`getRunOutcome`が`running`を返し続け、runが終了確定せず`retryMergeState`
+   * （`blocked`からしか動かない）の「再マージ」の対象にもならない行き止まりになるため
+   * （Issue #443本文）。`git merge --abort`は呼ばない（Issue #412・#434の「巻き戻さない」を
+   * 維持する）。
+   */
+  it.each(['manual', 'interrupted', 'taskStopped'] as const)(
+    '衝突解決セッションが%sで終わったとき、対象タスクはblockedになり実行全体は終了確定する',
+    async (reason) => {
+      const SOLO_MERGE_YAML = `
 version: 1
 name: manual-merge-test
 tasks:
@@ -6423,33 +6441,44 @@ tasks:
     prompt: p1
     done: d1
 `;
-    const git = fakeGit({ conflictOnce: true });
-    const { runner, codexHost, store } = createHarness(SOLO_MERGE_YAML, { git });
-    const result = await runner.start('/repo/.agents/workflows/manual-merge.yaml', '/repo');
-    const runId = result.runId as string;
-    await flush();
+      const git = fakeGit({ conflictOnce: true });
+      const { runner, codexHost, store } = createHarness(SOLO_MERGE_YAML, { git });
+      const result = await runner.start('/repo/.agents/workflows/manual-merge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
 
-    const t1 = codexHost.byTaskId('T1');
-    t1.finish('done', doneState('ok'));
-    await flush();
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
 
-    // T1は衝突したのでmergingのまま、衝突解決セッションが開いている
-    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
-    const resolutionSession = codexHost.sessions.at(-1);
-    expect(resolutionSession).toBeDefined();
-    expect(resolutionSession?.cwd.endsWith('_integration')).toBe(true);
+      // T1は衝突したのでmergingのまま、衝突解決セッションが開いている
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+      const resolutionSession = codexHost.sessions.at(-1);
+      expect(resolutionSession).toBeDefined();
+      expect(resolutionSession?.cwd.endsWith('_integration')).toBe(true);
 
-    resolutionSession?.finish('manual', { ...initialChatState });
-    await flush();
+      resolutionSession?.finish(reason as LoopStopReason, { ...initialChatState });
+      await flush();
 
-    // 人がタブへ直接介入した。対象タスクの状態は変えず、実行全体だけを止める設計を
-    // 踏襲する（design.md §16.5）。`blocked`（衝突未解決の確定）にはしない
-    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
-    // abortAndBlock（マージの巻き戻し）を経由していないことをgit呼び出しでも確認する
-    const abortCall = git.calls.find((c) => c.args[0] === 'merge' && c.args[1] === '--abort');
-    expect(abortCall).toBeUndefined();
-    expect(runner.getSnapshot(runId)?.haltedByUser).toBe(true);
-  });
+      // 人が止めた。実行全体は停止するが、タスク自身は`merging`のまま残さず`blocked`に
+      // 確定させる（Issue #443・案A）
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+      // abortAndBlock（マージの巻き戻し）は経由しない。git merge --abortは呼ばれない
+      const abortCall = git.calls.find((c) => c.args[0] === 'merge' && c.args[1] === '--abort');
+      expect(abortCall).toBeUndefined();
+      expect(runner.getSnapshot(runId)?.haltedByUser).toBe(true);
+      // `merging`が無くなった以上、runは`running`を返し続けない（`getRunOutcome`が
+      // 終了状態を返す。Issue #443の中心的な症状の解消を確かめる）
+      expect(runner.getSnapshot(runId)?.outcome).toBe('blocked');
+
+      // `blocked`になったので「再マージ」の対象にできる（`retryMergeState`は`blocked`
+      // からしか動かない。修正前は`merging`のまま残るため対象にならなかった）
+      git.resolveConflict();
+      expect(runner.retryMerge(runId, 'T1')).toBe(true);
+      await flush();
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    },
+  );
 });
 
 describe('WorkflowRunner: 回数切れから続ける（design.md §16.8、issue #284）', () => {
@@ -7593,9 +7622,10 @@ tasks:
     resolution.finish('manual', { ...initialChatState });
     await flush();
 
-    // Issue #434の規律どおり、タスク自身の状態は変わらない（`merging`のまま）。
-    // 修正前は`dispose()`の例外が`markMergeFailed`へ落ちて`failed`になっていた
-    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    // Issue #434の規律どおり、`dispose()`の例外は`markMergeFailed`（`failed`）へは落ちない。
+    // ただしIssue #443（案A）により、タスク自身は`merging`のまま残さず`blocked`に確定する
+    // （`git merge --abort`は呼ばれない。巻き戻さない規律はそのまま守る）
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
     expect(store.find(runId)?.haltedByUser).toBe(true);
   });
 

@@ -360,6 +360,16 @@ export interface WorkflowWarning {
      */
     | 'mergeBusy'
     /**
+     * 人が衝突解決セッションを止めた（タブへの直接介入 = `manual`/`interrupted`、
+     * ワークフローViewの「全体停止」 = `taskStopped`）ため、`merging`を`blocked`へ
+     * 確定させた（Issue #443、design.md §16.17「コンフリクト」7.）。`git merge --abort`は
+     * 呼んでいない。統合worktreeは衝突した状態のまま（`MERGE_HEAD`・未解決パスが残る）で、
+     * `mergeBusy`（他タスクの衝突で始められなかった＝まだ何も解決作業をしていない）とは
+     * 「作業が中断された」という点で意味が違うため、`blocked`の`failure`が`undefined`に
+     * なる（`markMergeBlocked`）ぶんの区別をこの警告で持たせる。
+     */
+    | 'mergeInterrupted'
+    /**
      * 疑似worktree（design.md §16.20）の統合が衝突した。3-way mergeができないため、
      * 同じファイルへの変更は全て衝突になる（このタスクは`blocked`になる）。
      */

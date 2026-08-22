@@ -775,6 +775,72 @@ describe('マージの結果に応じた遷移（design.md §16.17）', () => {
     });
   });
 
+  /**
+   * Issue #443（案A）: 人が衝突解決セッションを止めたとき（`manual`/`interrupted`/
+   * `taskStopped`）、実行層（`runnerMerge.ts`の`finishMergeResolution`）は
+   * `applyLoopStopReason(run, tasks, '', haltReason)`の**後**に`markMergeBlocked`を呼ぶ。
+   * この2関数の組み合わせが実際にどう状態を変えるかを、純粋ロジック側で確かめる
+   * （実行層のテストは`runner.test.ts`側の統合テストが担う）。
+   */
+  describe('人が止めた衝突解決の後始末（applyLoopStopReasonの後にmarkMergeBlocked、Issue #443）', () => {
+    it('mergingのタスクをblockedにし、runは終了状態へ確定する（git merge --abort相当は呼ばない）', () => {
+      const tasks = chainTasks();
+      let run = createRunState(tasks);
+      run = finishDone(run, tasks, 'T1'); // T1: done
+      run = toMerging(tasks, 'T2', run); // T2: merging
+
+      run = applyLoopStopReason(run, tasks, '', 'manual');
+      run = markMergeBlocked(run, tasks, 'T2');
+
+      expect(stateOf(run, 'T2').state).toBe('blocked');
+      expect(stateOf(run, 'T2').failure).toBeUndefined();
+      expect(run.haltedByUser).toBe(true);
+      // `merging`が無くなったので`getRunOutcome`は`running`を返し続けない
+      expect(getRunOutcome(run)).not.toBe('running');
+      // `blocked`になった以上「再マージ」の対象にできる
+      expect(stateOf(retryMergeState(run, 'T2'), 'T2').state).toBe('merging');
+    });
+
+    it('順序どおりなら、依存する後続はrunHaltedのままでmergeBlockedに上書きされない', () => {
+      const tasks = chainTasks();
+      let run = createRunState(tasks);
+      run = finishDone(run, tasks, 'T1'); // T1: done
+      run = toMerging(tasks, 'T2', run); // T2: merging。T3・T4はまだpending
+
+      // 1. 先にapplyLoopStopReasonが`pending`のT3・T4をskipped(runHalted)にする
+      run = applyLoopStopReason(run, tasks, '', 'manual');
+      expect(stateOf(run, 'T3').state).toBe('skipped');
+      expect(stateOf(run, 'T3').failure).toEqual({ kind: 'runHalted' });
+      expect(stateOf(run, 'T4').state).toBe('skipped');
+      expect(stateOf(run, 'T4').failure).toEqual({ kind: 'runHalted' });
+
+      // 2. 後からmarkMergeBlockedを呼んでも、T3・T4は既に`pending`ではないため
+      //    `appendCascadeTaskId`はkind不一致（'runHalted' !== 'mergeBlocked'）で何もしない
+      run = markMergeBlocked(run, tasks, 'T2');
+      expect(stateOf(run, 'T3').state).toBe('skipped');
+      expect(stateOf(run, 'T3').failure).toEqual({ kind: 'runHalted' });
+      expect(stateOf(run, 'T4').state).toBe('skipped');
+      expect(stateOf(run, 'T4').failure).toEqual({ kind: 'runHalted' });
+    });
+
+    it('逆順（markMergeBlockedを先に呼ぶ）だと、後続はmergeBlockedとして記録されてしまう（順序に意味がある証拠）', () => {
+      const tasks = chainTasks();
+      let run = createRunState(tasks);
+      run = finishDone(run, tasks, 'T1');
+      run = toMerging(tasks, 'T2', run);
+
+      // 逆順: markMergeBlockedを先に呼ぶと、pendingのT3・T4はmergeBlockedとして
+      // skippedになる
+      run = markMergeBlocked(run, tasks, 'T2');
+      expect(stateOf(run, 'T3').failure).toEqual({ kind: 'mergeBlocked', blockedTaskIds: ['T2'] });
+
+      // 後からapplyLoopStopReasonのskipRemainingPendingを呼んでも、対象は`pending`
+      // だけなので、既に`skipped`のT3・T4には触れない（`runHalted`へは倒れない）
+      run = applyLoopStopReason(run, tasks, '', 'manual');
+      expect(stateOf(run, 'T3').failure).toEqual({ kind: 'mergeBlocked', blockedTaskIds: ['T2'] });
+    });
+  });
+
   describe('markMergeFailed', () => {
     it('mergingのタスクをfailedにし、failedと同じく依存する後続をskipped・実行全体を停止する', () => {
       const tasks = chainTasks();
