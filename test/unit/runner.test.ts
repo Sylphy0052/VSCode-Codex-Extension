@@ -3221,15 +3221,14 @@ tasks:
 
     // 停止は解除されないので、後続は新しいセッションを開かない
     expect(store.find(runId)?.haltedByUser).toBe(true);
-    // ここで観測している`pending`は**現状の観測であって、望ましい仕様ではない**。
-    // `markMergeSucceeded`が`haltedByUser`を見ずに`mergeBlocked`の後続を`pending`へ戻すため、
-    // 停止中のrunでは誰にも開始されない`pending`が残り、`getRunOutcome`が`running`を返し
-    // 続けてrunが終了判定へ進めない（Issue #432。本PRが作った欠陥ではなく、`attemptMerge`に
-    // 停止チェックが無かった従来も同じ経路だった）。このテストの主題はあくまで
-    // 「停止が尊重されること」なので、袋小路そのもの（`finishedAt`が付くかどうか）は
-    // ここでは何も主張しない。Issue #432の対応時にこの期待値も見直すこと
-    expect(store.find(runId)?.tasks['T2']?.state).toBe('pending');
-    expect(store.find(runId)?.tasks['T3']?.state).toBe('pending');
+    // `markMergeSucceeded`は停止中（`haltedByUser`）を見て、`mergeBlocked`だった後続を
+    // `pending`へ戻さず`skipped`（`runHalted`）のままにする（Issue #432-1）。`pending`に
+    // 戻すと誰にも開始されず`getRunOutcome`が`running`を返し続けてrunが終わらなくなる。
+    // `skipped`のままなら`retryTask`が受理して人が拾い直せる。
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('skipped');
+    expect(store.find(runId)?.tasks['T2']?.failure).toEqual({ kind: 'runHalted' });
+    expect(store.find(runId)?.tasks['T3']?.state).toBe('skipped');
+    expect(store.find(runId)?.tasks['T3']?.failure).toEqual({ kind: 'runHalted' });
     expect(codexHost.sessions).toHaveLength(sessionCountAtStop);
   });
 

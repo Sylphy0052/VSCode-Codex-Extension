@@ -493,6 +493,15 @@ export function markApprovalRejected(
  * （`retryTask`が`dependencyFailed`のskippedを戻すのと同じ考え方）。複数の親から
  * ブロックされていた場合でも、`nextTasksToStart`の依存充足チェック（`dependsOn`が
  * 全て`done`）が残りの親を待つため、ここでは無条件に戻してよい。
+ *
+ * ただし**停止中（`run.haltedByUser`）は`pending`へ戻さない**（Issue #432-1）。
+ * `retryMergeState`は「再マージ」という人の明示操作でも`haltedByUser`を解除しない
+ * （コメント参照）。停止中は`nextTasksToStart`が新規開始を一切しないため、ここで
+ * `pending`に戻すと誰にも開始されない`pending`が永久に残り、`getRunOutcome`が
+ * `running`を返し続けてrunが終わらなくなる（`retryTask`/`continueTask`は`pending`を
+ * 受理しないため人も救えない）。停止中は`skipped`（`runHalted`）のままにしておけば、
+ * `retryTask`が理由を問わず`skipped`を受理して`haltedByUser`も解除するため、
+ * 人が「再実行」で拾い直せる。
  */
 export function markMergeSucceeded(
   run: RunState,
@@ -511,6 +520,10 @@ export function markMergeSucceeded(
   for (const id of toRestore) {
     const s = nextTasks.get(id);
     if (s === undefined || s.state !== 'skipped' || s.failure?.kind !== 'mergeBlocked') {
+      continue;
+    }
+    if (run.haltedByUser) {
+      nextTasks.set(id, { ...s, failure: { kind: 'runHalted' } });
       continue;
     }
     nextTasks.set(id, { ...s, state: 'pending', failure: undefined });

@@ -642,6 +642,41 @@ describe('マージの結果に応じた遷移（design.md §16.17）', () => {
       expect(stateOf(run, 'T4').state).toBe('pending');
       expect(stateOf(run, 'T4').failure).toBeUndefined();
     });
+
+    /**
+     * Issue #432-1: 停止中（`haltedByUser: true`）に再マージが成功しても、
+     * `mergeBlocked`でskippedになっていた依存先を`pending`へ戻してはならない。
+     *
+     * `nextTasksToStart`は停止中のrunで新規開始を一切しないため、`pending`へ戻すと
+     * 誰にも開始されない`pending`が残り、`getRunOutcome`が`running`を返し続けて
+     * runが永久に終わらない（`retryTask`/`continueTask`は`pending`を受理しないため
+     * 人も救えない）。`skipped`（`runHalted`）のままにしておけば、人が`retryTask`で
+     * 拾い直せる（`retryTask`は`skipped`なら理由を問わず受理し`haltedByUser`も解除する）。
+     */
+    it('停止中に再マージが成功しても、mergeBlockedのskippedをpendingへ戻さずrunHaltedへ倒す', () => {
+      const tasks = chainTasks();
+      let run = toMerging(tasks, 'T1');
+      run = markMergeSucceeded(run, tasks, 'T1');
+      run = markRunning(run, 'T2');
+      run = applyLoopStopReason(run, tasks, 'T2', 'done'); // T2: merging
+      run = markMergeBlocked(run, tasks, 'T2'); // T2: blocked, T4: skipped(mergeBlocked)
+      expect(stateOf(run, 'T4').failure).toEqual({ kind: 'mergeBlocked', blockedTaskIds: ['T2'] });
+
+      // ユーザーが実行全体を停止する
+      run = { ...run, haltedByUser: true };
+
+      // 停止中でも「再マージ」自体は走る（Issue #412のレビュー指摘B。retryMergeStateは
+      // haltedByUserを解除しない）
+      run = retryMergeState(run, 'T2');
+      expect(stateOf(run, 'T2').state).toBe('merging');
+
+      run = markMergeSucceeded(run, tasks, 'T2');
+      expect(stateOf(run, 'T2').state).toBe('done');
+      expect(run.haltedByUser).toBe(true);
+      // pendingへ戻さず、skipped(runHalted)のままにする
+      expect(stateOf(run, 'T4').state).toBe('skipped');
+      expect(stateOf(run, 'T4').failure).toEqual({ kind: 'runHalted' });
+    });
   });
 
   describe('markMergeBlocked', () => {
