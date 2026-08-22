@@ -721,19 +721,21 @@ function scheduleApprovalTimeout(
  * `finishMergeResolution`の非破壊分岐（対象タスクだけを`blocked`にし、`git merge --abort`は
  * 呼ばない）へ合流させる。
  *
- * **停止中（`haltedByUser`）の扱い**: 判定時点で`haltedByUser`なら何もしない。
- * `WorkflowRunner.stop()`は`live.mergeResolutions`の全エントリへ`stopLoop()`を送ってから
- * `haltedByUser`を立てる（`stop()`のJSDoc参照）ため、run全体が停止済みならこの解決セッションの
- * エントリは既に`finishMergeResolution`で消えているはずで、下の`entry === undefined`チェックが
- * 先に弾く。それでも`haltedByUser`を明示的に確認するのは、この前提（「停止済みならエントリは
- * 必ず消える」）が将来の変更で崩れたときの多層防御と、意図の記録を兼ねる。
+ * **停止中（`haltedByUser`）でもタイムアウトさせる（Issue #539）。** かつては
+ * 「run全体が停止済みならこの解決セッションのエントリは`finishMergeResolution`で既に
+ * 消えているはず」という前提のもと`haltedByUser`なら何もせず戻っていたが、この前提は
+ * 成立しない。「再マージ」（`retryMerge`）は`haltedByUser`を解除しない設計（Issue #517/
+ * #525・design.md §16.17「再マージ」）のため、run全体が停止したままでも新しい衝突解決
+ * セッションが開くことがあり、そのセッションが承認待ちに入るとこの関数へ到達する。
+ * ここで何もせず戻ると、`scheduleApprovalTimeout`が張るタイマーは
+ * `waitingApprovalSinceMs`が変わらない限り一発物（`scheduleApprovalTimeout`のJSDoc参照）
+ * なので、以後そのセッションのタイムアウトは二度と発火せず、対象タスクが`merging`のまま
+ * 永久に残る（`getRunOutcome`が`running`を返し続け、runが終了確定しない）。
  *
- * **`haltedByUser`の間はタイマーの経過時間も数えない**という選択でもある。停止解除の瞬間に
- * 積み上がった経過時間で即タイムアウトする事故（人が止めている間の時間を数えると、解除した
- * 瞬間に「もう1時間経っている」と判定してしまう）を避けるため。停止中に新しい衝突解決
- * セッションが開くことは無い（`decideAfterLeaseWait`が`haltedByUser`を見て`block`へ倒す）ので、
- * 実際にこの分岐へ来るのは「停止直後、`stopLoop()`のonFinished経由の解放がまだ終わっていない
- * 一瞬」の間だけだが、その一瞬でも二重に`stopLoop()`を呼ばないようにする。
+ * 下の`markMergeBlocked`（`localOnlyStopKind === 'approvalTimeout'`分岐）は対象タスク
+ * だけを`blocked`にし、`live.runState.haltedByUser`には触れない。**run全体の停止状態は
+ * タイムアウトでは変えない**（人が明示的に止めた事実をタイムアウトが上書きしない）ため、
+ * ここで`haltedByUser`を無条件でタイムアウトさせても安全側に倒れる。
  *
  * `waitingApprovalSinceMs`は張った時点の値をそのまま比較する（承認待ちが一度解けて再び
  * 承認待ちへ戻っていれば値が変わっているため、古いタイマーの取りこぼしを検知できる。
@@ -757,11 +759,6 @@ function handleMergeApprovalTimeout(
   ) {
     // 既に承認待ちを抜けた、解決セッション自体が終わった、または新しい承認待ちへ
     // 張り替わった後（多層防御。上のJSDoc参照）
-    return;
-  }
-  if (live.runState.haltedByUser) {
-    // 上のJSDoc参照。実行が停止済みなら、このエントリは通常ここに残っていないはずだが
-    // 多層防御として確認する
     return;
   }
   self.deps.log.warn(
