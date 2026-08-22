@@ -1537,8 +1537,8 @@ C-46と同じ導線をClaude Code画面でも確認する。クリア後は新�
 ### L-48 claudeがSIGTERMに応答しない・改行なしの出力が続く（issue #402、C-48のClaude Code版）
 
 C-48と同じ内容をClaude Code画面（`ClaudeStreamSession`）でも確認する。バッファ上限と
-SIGKILLエスカレーションはジェネレーターが共通の実装（`src/codex/jsonRpc.ts`の
-`killWithEscalation`）を使うため、ロジックはC-48と共通だが、対象プロセスが`claude`である点
+SIGKILLエスカレーションは共通の実装（`src/process/childProcess.ts`の`killWithEscalation` /
+`MAX_LINE_BUFFER_BYTES`）を使うため、ロジックはC-48と共通だが、対象プロセスが`claude`である点
 が違う。
 
 - 準備: Claude Code画面を開いて何か1往復会話する
@@ -1553,6 +1553,22 @@ SIGKILLエスカレーションはジェネレーターが共通の実装（`src
   複数回行う
 - 期待: 正常な大きめの応答（10MB未満）が途中で切られない。「上限を超えて…セッションを
   打ち切ります」という趣旨のエラーが出力パネルのClaude Codeログに出ない
+
+### L-49 claudeの異常終了で承認カードが解放される（issue #393、C-47のClaude Code版）
+
+`ClaudeStreamSession`はCodexの`AppServerConnection`と違い画面ごとに専用の`claude`プロセスを
+持つが、そのプロセスが応答を返さないまま異常終了すると、承認待ちの`decide()`を誰も呼ばず承認
+カードが宙に浮く点はC-47と同じ問題になりうる。`releasePendingWaiters()`（`exit` / `error`
+ハンドラ・stdinへの書き込み失敗のいずれからも呼ばれる）が保留中の承認を`cancel`で解放し、
+`busy: false` に戻ることを実機で確認する。
+
+- 準備: Claude Code画面を開き、コマンド実行など承認カードが出る発言をして、承認カードを
+  出したまま待たせる
+- 操作: ターミナルから、いま起動している`claude`プロセスのPIDへ `kill -9 <pid>`（強制終了）
+  を送る
+- 期待: 承認カードが消える（宙に浮いたままにならない）。入力欄が再び使える状態に戻る
+- 操作: 同じ画面で新しく発言する
+- 期待: 新しい`claude`プロセスが起動し直され、会話が続けられる
 
 ## P群: ループ実行
 
