@@ -775,6 +775,7 @@ export class ClaudeStreamSession {
         ok: false,
         prefillText: undefined,
         error: 'forkしていないセッションへは送れません（元セッションのtranscriptが壊れるため）',
+        succeededCount: 0,
       });
     }
     if (this.proc === undefined) {
@@ -782,6 +783,7 @@ export class ClaudeStreamSession {
         ok: false,
         prefillText: undefined,
         error: 'セッションが起動していません',
+        succeededCount: 0,
       });
     }
     return forkFromTurn(userMessageUuids, targetUuid, (uuid) =>

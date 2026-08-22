@@ -9,6 +9,7 @@ import {
   type ChatUsage,
 } from '../appserver/chatState';
 import { debugLogCandidates } from '../claude/cliLocator';
+import { describeForkFromTurnError } from '../claude/forkFromTurn';
 import type { ClaudeSessionStore } from '../claude/sessionStore';
 import { ClaudeStreamSession, type ClaudeSpawnPort } from '../claude/streamSession';
 import { transcriptItems } from '../claude/transcript';
@@ -642,6 +643,14 @@ export class ClaudeChatViewManager
    * 戻し切れると応答の`prefillText`（対象の発言本文）を入力欄へ挿す。既存の
    * `insertComposerText`（issue #292、エディタの選択範囲を挿す機構）をそのまま流用する
    * （新しいタブの入力欄は空のため、追記と設定は同じ結果になる）。
+   *
+   * 逐次rewindが途中で失敗した場合（issue #494のレビュー指摘）は
+   * `ForkFromTurnResult.succeededCount`で2通りに分ける。
+   * - 0件（1件も戻せていない）: fork側のCLIは何も削除していないため、開いたばかりの
+   *   新しいタブを黙って閉じる（`teardown`）。元のタブは無傷なので操作をやり直せる
+   * - 1件以上（途中まで戻ってから失敗）: fork側のCLIは既に一部のユーザー発言を削除済みで、
+   *   タブの会話状態は中途半端。タブは閉じずに残し、`noteLocalEvent`でタブ自身に
+   *   不整合な状態であることを明示し、そのまま入力を続けないよう促す
    */
   async openForkFromTurn(
     sessionId: string,
@@ -676,7 +685,21 @@ export class ClaudeChatViewManager
     );
 
     if (!result.ok) {
-      void vscode.window.showErrorMessage(`この指示から分岐できませんでした: ${result.error}`);
+      const reason = describeForkFromTurnError(result.error);
+      if (result.succeededCount === 0) {
+        // 1件も戻せていない＝fork側のCLIは何も削除していない。新しいタブを黙って
+        // 閉じれば無害（元のタブは無傷）
+        this.teardown(entry);
+        void vscode.window.showErrorMessage(`この指示から分岐できませんでした: ${reason}`);
+        return;
+      }
+      // 途中まで戻ってから失敗＝fork側のCLIは既に一部のユーザー発言を削除済み。
+      // タブは閉じず、不整合な状態であることを画面上に明示する
+      const warning =
+        'この指示への分岐が途中で失敗しました。会話は一部だけ巻き戻った不整合な状態です。' +
+        `このタブへ入力を続けず、閉じてやり直してください（${reason}）`;
+      entry.session.noteLocalEvent(`forkFromTurnFailed:${randomUUID()}`, warning);
+      void vscode.window.showErrorMessage(warning);
       return;
     }
     if (result.prefillText !== undefined && result.prefillText !== '') {

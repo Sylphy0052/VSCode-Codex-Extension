@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildRewindSequence,
+  describeForkFromTurnError,
   forkFromTurn,
   type SendRewindConversation,
 } from '../../src/claude/forkFromTurn';
@@ -90,10 +91,15 @@ describe('forkFromTurn（issue #333、design.md §14.61）', () => {
 
     const result = await forkFromTurn(uuids, 'u1', sendRewind);
 
-    expect(result).toEqual({ ok: true, prefillText: '最初の発言の本文', error: undefined });
+    expect(result).toEqual({
+      ok: true,
+      prefillText: '最初の発言の本文',
+      error: undefined,
+      succeededCount: 3,
+    });
   });
 
-  it('途中で rewound:false が返ったら即座に打ち切り、それ以降は送らない', async () => {
+  it('途中で rewound:false が返ったら即座に打ち切り、それ以降は送らない。成功件数も返す（issue #494のレビュー指摘）', async () => {
     const uuids = ['u1', 'u2', 'u3'];
     const calls: string[] = [];
     const sendRewind: SendRewindConversation = async (uuid) => {
@@ -106,7 +112,28 @@ describe('forkFromTurn（issue #333、design.md §14.61）', () => {
 
     // u3（1件目）は成功、u2（2件目）で失敗。u1（3件目）へは進まない
     expect(calls).toEqual(['u3', 'u2']);
-    expect(result).toEqual({ ok: false, prefillText: undefined, error: 'stale target' });
+    expect(result).toEqual({
+      ok: false,
+      prefillText: undefined,
+      error: 'stale target',
+      // u3の1件だけ成功済み。呼び出し側（claudeChatView.ts）はこれを見て
+      // 「途中まで戻ってから失敗した」と判定する
+      succeededCount: 1,
+    });
+  });
+
+  it('1件も成功せずに失敗すると succeededCount:0 を返す（issue #494のレビュー指摘）', async () => {
+    const uuids = ['u1', 'u2'];
+    const sendRewind: SendRewindConversation = async () => failure('turn running');
+
+    const result = await forkFromTurn(uuids, 'u1', sendRewind);
+
+    expect(result).toEqual({
+      ok: false,
+      prefillText: undefined,
+      error: 'turn running',
+      succeededCount: 0,
+    });
   });
 
   it('ok:trueだけの封筒（rewoundを持たない不正な応答）は失敗として扱う', async () => {
@@ -140,5 +167,47 @@ describe('forkFromTurn（issue #333、design.md §14.61）', () => {
     expect(calls).toEqual([]);
     expect(result.ok).toBe(false);
     expect(result.error).toBeDefined();
+    expect(result.succeededCount).toBe(0);
+  });
+});
+
+describe('describeForkFromTurnError（issue #494のレビュー指摘、vscode非依存の層でCLIの生文言を日本語へマッピングする）', () => {
+  it.each([
+    'turn running',
+    'commands queued',
+    'target not found',
+    'stale target',
+    'no preceding assistant',
+    'failed to persist rewind anchor',
+    'state changed',
+  ])('既知のCLIエラー値 %s は日本語の説明を返し、生の英語文言を含まない', (error) => {
+    const message = describeForkFromTurnError(error);
+    expect(message).not.toBe(error);
+    expect(message.length).toBeGreaterThan(0);
+    // 英字だけの生文言（'turn running'等）がそのまま漏れていないことを確かめる
+    expect(message).not.toMatch(/^[a-z ]+$/);
+  });
+
+  it('forkFromTurn自身が返す非CLI由来のエラー（既に日本語）はそのまま通す', () => {
+    expect(describeForkFromTurnError('対象の発言が見つかりません')).toBe(
+      '対象の発言が見つかりません',
+    );
+  });
+
+  it('未知のエラー値は汎用文言へ丸める（CLIの内部文言をそのまま露出しない）', () => {
+    const message = describeForkFromTurnError('some future internal reason from the CLI');
+    expect(message).not.toContain('some future internal reason');
+    expect(message.length).toBeGreaterThan(0);
+  });
+
+  it('undefinedも汎用文言へ丸める', () => {
+    const message = describeForkFromTurnError(undefined);
+    expect(message.length).toBeGreaterThan(0);
+  });
+
+  it('同じ既知の値は常に同じ文言を返す（安定した表示）', () => {
+    expect(describeForkFromTurnError('stale target')).toBe(
+      describeForkFromTurnError('stale target'),
+    );
   });
 });

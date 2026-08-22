@@ -176,6 +176,8 @@ describe('ClaudeStreamSession の会話フォーク（rewind_conversation、issu
       ok: false,
       prefillText: undefined,
       error: 'stale target',
+      // 最初（u3）で失敗したため1件も成功していない
+      succeededCount: 0,
     });
     // u2・u1への要求は送られない（打ち切り）
     expect(rewindRequestsWritten(written)).toHaveLength(1);
@@ -211,6 +213,7 @@ describe('ClaudeStreamSession の会話フォーク（rewind_conversation、issu
       ok: true,
       prefillText: '最初の発言',
       error: undefined,
+      succeededCount: 2,
     });
   });
 
@@ -236,6 +239,7 @@ describe('ClaudeStreamSession の会話フォーク（rewind_conversation、issu
       ok: false,
       prefillText: undefined,
       error: 'no preceding assistant',
+      succeededCount: 0,
     });
   });
 

@@ -16,6 +16,15 @@ export interface ForkFromTurnResult {
   /** 対象の発言本文。成功時のみ入る。入力欄への差し戻しに使う。 */
   prefillText: string | undefined;
   error: string | undefined;
+  /**
+   * `rewind_conversation` の逐次送信のうち、成功した件数（issue #494のレビュー指摘）。
+   *
+   * 呼び出し側（`claudeChatView.ts`）が「1件も戻せずに失敗した」（新しいタブを黙って
+   * 閉じても無害）と「途中まで戻ってから失敗した」（fork側のCLIは既に一部のユーザー発言を
+   * 削除済み。タブを無言で残すと不整合な状態のまま会話を続けさせてしまう）を区別するために
+   * 持たせる。`ok:true` のときは `sequence.length` と一致する。
+   */
+  succeededCount: number;
 }
 
 /**
@@ -62,15 +71,65 @@ export async function forkFromTurn(
 ): Promise<ForkFromTurnResult> {
   const sequence = buildRewindSequence(userMessageUuids, targetUuid);
   if (sequence.length === 0) {
-    return { ok: false, prefillText: undefined, error: '対象の発言が見つかりません' };
+    return {
+      ok: false,
+      prefillText: undefined,
+      error: '対象の発言が見つかりません',
+      succeededCount: 0,
+    };
   }
 
   let last: RewindConversationResult | undefined;
+  let succeededCount = 0;
   for (const uuid of sequence) {
     last = await sendRewind(uuid);
     if (!last.rewound) {
-      return { ok: false, prefillText: undefined, error: last.error ?? '不明なエラー' };
+      return {
+        ok: false,
+        prefillText: undefined,
+        error: last.error ?? '不明なエラー',
+        succeededCount,
+      };
     }
+    succeededCount += 1;
   }
-  return { ok: true, prefillText: last?.prefillText, error: undefined };
+  return { ok: true, prefillText: last?.prefillText, error: undefined, succeededCount };
 }
+
+/**
+ * `rewind_conversation` が返す既知のエラー値を、日本語の説明へマッピングする
+ * （issue #494のレビュー指摘）。
+ *
+ * CLIの応答文言（`payload.error`。実測、CLI 2.1.235。全量は`docs/design.md`§14.61と
+ * `/tmp`の実測記録参照）を`vscode.window.showErrorMessage`へそのまま流すと、CLI側の
+ * 実装変更（内部的な言い回しへの変更等）がそのままユーザーへ露出してしまう。既知の値だけ
+ * 日本語へ置き換え、未知の値（自分たちが把握していないCLIの新しいエラー、または将来値が
+ * 変わった場合）は汎用文言へ丸める。
+ *
+ * `forkFromTurn`自身が返す非CLI由来のエラー（対象が見つからない等、既に日本語）もここへ
+ * 通してよいよう、恒等マッピングとして含めている（呼び出し側でCLI由来かどうかを
+ * 判定させないため）。
+ */
+export function describeForkFromTurnError(error: string | undefined): string {
+  if (error === undefined) {
+    return GENERIC_FORK_ERROR_MESSAGE;
+  }
+  return KNOWN_FORK_ERROR_MESSAGES[error] ?? GENERIC_FORK_ERROR_MESSAGE;
+}
+
+const GENERIC_FORK_ERROR_MESSAGE = '分岐できませんでした（原因不明のエラーです）';
+
+const KNOWN_FORK_ERROR_MESSAGES: Readonly<Record<string, string>> = {
+  'turn running':
+    '前のターンがまだ実行中のため分岐できませんでした。しばらく待ってからやり直してください。',
+  'commands queued':
+    '実行待ちのコマンドが残っているため分岐できませんでした。完了を待ってからやり直してください。',
+  'target not found': '分岐元の発言が見つかりませんでした。会話が変わった可能性があります。',
+  'stale target': '会話がその後に進んでいるため、この発言からは分岐できませんでした。',
+  'no preceding assistant': 'この発言より前に応答が無いため分岐できませんでした。',
+  'failed to persist rewind anchor': '分岐した状態を保存できませんでした。',
+  'state changed': '会話の状態が変わったため分岐できませんでした。',
+  // forkFromTurn自身が返す非CLI由来のエラー（既に日本語）。恒等マッピングとして含める
+  対象の発言が見つかりません: '対象の発言が見つかりません',
+  不明なエラー: GENERIC_FORK_ERROR_MESSAGE,
+};

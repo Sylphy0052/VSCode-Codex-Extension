@@ -3413,13 +3413,30 @@ Codex側・Claude側は同じ`createExecutablePathResolver(provider, log)`（`sr
 - **新しいセッションidの扱いは未確認**。forkで作られる新セッションのidを拡張機能側が特定・追跡する手段は今回調べておらず、`openForkFromTurn`は既存の`openFork`と同様にidを追跡しない前提（タブはウィンドウ再読み込み後の復元・作業記録の対象外）としている
 - **`rewind_conversation`も`rewind_files`と同様、非公開の内部プロトコルであり将来のCLI更新で無くなる・形が変わる可能性がある**。その場合は`readRewindConversationResult`が`rewound:false`側に倒れ、エラーメッセージとして画面に返るだけで、他の操作には影響しない
 
+#### 逐次rewindが途中で失敗したときの後始末（issue #494のレビュー指摘）
+
+逐次送信（上記2）は途中の1件が失敗する余地がある。失敗した時点で、fork側のCLIは**それより前に成功した件数だけ既にユーザー発言を削除している**（`wr.splice(ki)`）。この「1件も戻せていない（無害）」と「途中まで戻ってから失敗した（会話が不整合な状態）」を区別できないと、新しいタブを何もせず残した場合にユーザーが中途半端な状態のまま入力を続けてしまう。
+
+`ForkFromTurnResult`に`succeededCount`（逐次送信のうち成功した件数）を持たせ、`openForkFromTurn`（`src/view/claudeChatView.ts`）で次のように分ける。
+
+- `succeededCount === 0`（1件も戻せていない）: fork側のCLIは何も削除していないため、開いたばかりの新しいタブを`teardown`で閉じる。元のタブは無傷なのでユーザーは操作をやり直せる
+- `succeededCount > 0`（途中まで戻ってから失敗）: タブは閉じずに残す。`ClaudeStreamSession.noteLocalEvent`で「会話は一部だけ巻き戻った不整合な状態」であることを会話へ直接残し（`vscode.window.showErrorMessage`と両方に出す）、そのまま入力を続けないよう促す。会話へ残す形にしたのは、通知は閉じられて見落とされうるが、会話内の注記はタブを開き直しても残るため
+
+いずれの場合もユーザーへ表示する文言は変える（後者にだけ「不整合」「タブを閉じてやり直す」という誘導を含める）。
+
+#### CLIのエラー文言を画面へそのまま出さない（issue #494のレビュー指摘）
+
+`rewind_conversation`の`payload.error`（`stale target`等、実測値は上の「実測した挙動」参照）は非公開の内部プロトコルの文言であり、CLI側の実装変更で内部的な言い回しに変わる可能性がある。これをそのまま`vscode.window.showErrorMessage`へ流すと、その変更がそのままユーザーへ露出する。
+
+`src/claude/forkFromTurn.ts`（vscode非依存）に`describeForkFromTurnError`を追加し、既知のエラー値（`turn running` / `commands queued` / `target not found` / `stale target` / `no preceding assistant` / `failed to persist rewind anchor` / `state changed`）だけを日本語の説明へマッピングする。未知の値（自分たちが把握していない新しいCLIのエラー、または将来値が変わった場合）は汎用文言へ丸め、生のCLI文言を露出しない。`openForkFromTurn`はこの関数を通した文言だけを画面へ出す。
+
 #### 実装
 
 - `src/claude/control.ts`: `buildRewindConversationRequest`（要求の組み立て）、`readRewindConversationResult`（`rewound`で成否判定する専用リーダー）
-- `src/claude/forkFromTurn.ts`（新設、vscode非依存）: `buildRewindSequence`（対象以降を新しい順に並べる）、`forkFromTurn`（1件ずつawaitして逐次送信し、`rewound:false`で即座に打ち切る）
+- `src/claude/forkFromTurn.ts`（新設、vscode非依存）: `buildRewindSequence`（対象以降を新しい順に並べる）、`forkFromTurn`（1件ずつawaitして逐次送信し、`rewound:false`で即座に打ち切る。成功件数`succeededCount`も返す）、`describeForkFromTurnError`（CLIの既知のエラー値を日本語へマッピングし、未知の値は汎用文言へ丸める）
 - `src/claude/streamSession.ts`: `ClaudeStreamSession.rewindConversationToTurn`（forkガード→`forkFromTurn`呼び出し）、`requestRewindConversation`（`interrupt_if_running:true`固定で送信）。プロセス終了時は`releasePendingWaiters`で待機中の要求を`rewound:false`として解放する
 - `src/view/chatShared.ts` / `src/view/chatScript.ts`: 既存のfork導線（Codexの`forkFromTurn`、§9.5）が使っていたボタンDOM・クリックハンドラをそのまま流用し、対象idの計算だけを`turnForkTarget()`で出し分ける（`SHOW_TURN_FORK`フラグ。Codexは`previousTurnId`、Claude Codeは`item.id`自身）
-- `src/view/claudeChatView.ts`: `openForkFromTurn`（新しいタブを開く→`rewindConversationToTurn`を新しい順に送る→成功なら`prefillText`を`insertComposerText`（issue #292）で入力欄へ流し込む。失敗ならエラー表示のみで元のタブには何もしない）
+- `src/view/claudeChatView.ts`: `openForkFromTurn`（新しいタブを開く→`rewindConversationToTurn`を新しい順に送る→成功なら`prefillText`を`insertComposerText`（issue #292）で入力欄へ流し込む。失敗なら`succeededCount`で「1件も戻せていない」（タブを閉じる）と「途中まで戻ってから失敗」（タブを残し会話へ不整合な状態を明示）を分け、`describeForkFromTurnError`で日本語化した文言だけを表示する）
 
 残る制約:
 
