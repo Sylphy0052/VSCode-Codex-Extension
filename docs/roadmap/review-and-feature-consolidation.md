@@ -138,11 +138,24 @@
 
 ### 第3波 仕上げ
 
-- **WF-G 横断の仕上げ**（2項目）
+- **WF-G 横断の仕上げ**（3項目）
   - T26 eslintへ型情報を要するルールを導入し、未処理Promiseを機械的に検出できるようにする
+  - [#491](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/491)
+    終了したrunを `retry_task` で再開してもオーケストレーターの制御ツールが復活しない
   - 全体レビュー（第1波・第2波の全変更を横断でレビューする）
   - 依存: 第1波・第2波の全完了
   - ファイル: `src` 全域（型情報ルールの導入は全ファイルへ波及する）
+  - **申し送り**（2026-08-22、WF-A2 の担当から）
+    - **#491 をここへ送った理由**: オーケストレーターのMCP URLはCLIプロセスの起動時に固定される
+      （Codexは `thread/start` の `config.mcp_servers.<name>`、Claude Codeは `--mcp-config`）。
+      サーバを立て直しても既存プロセスは古いURLを掴んだままなので、Issue #475 の案A
+      （hubを捨てず再利用する）では救えない。救うにはオーケストレーターセッションの再起動か
+      URLを差し替え可能にする設計変更が要り、WF-A2 の追いIssueの範囲を超える。あわせて
+      #401 の方向(b)が制御ツールの可視性そのものにガードを足すため、**その着地を見てからでないと
+      正しい形が決まらない**
+    - **`chatScript.ts`（2333行）はテンプレートリテラルのため型検査もlintも効かない。**
+      WF-G は型情報を要するeslintルールを入れる回なので、この負債も同じ回で扱うのが筋
+      （WF-C の担当からの申し送り）
 
 ## W6 タスクごとにIssueを起票し、PRのレビューを経てマージする
 
@@ -238,7 +251,7 @@ epic Issueは各ワークフローの開始時に起票し、採番できた時�
 | WF-D リポジトリ基盤 | 1 | 2 | [#353](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/353) | `wf/wf-d/integration` | 完了（PR [#394](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/394)、mainへマージ済み。統合ブランチは削除済み） |
 | WF-E ワークフローの自律性 | 2 | 12 | [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341) | `wf/wf-e/integration` | WF-A2（#466）の完了待ち（`runner.ts` / `forge.ts` が交差するため） |
 | WF-F チャットの会話操作と表示 | 2 | 3 | [#340](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/340) | `wf/wf-f/integration` | 着手（第1波が全完了。WF-A2とファイルが交差しない） |
-| WF-G 横断の仕上げ | 3 | 2 | 未採番 | `wf/wf-g/integration` | 第2波の完了待ち |
+| WF-G 横断の仕上げ | 3 | 3 | 未採番 | `wf/wf-g/integration` | 第2波の完了待ち |
 
 W1〜W5とX1〜X3のIssue番号・ブランチ名・design.mdの節・manual-test.mdの番号は、
 [workflow-autonomy.md](workflow-autonomy.md) と [chat-conversation-parity.md](chat-conversation-parity.md) で
