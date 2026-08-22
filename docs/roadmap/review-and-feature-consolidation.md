@@ -162,7 +162,7 @@
 
 ### 第3波 仕上げ
 
-- **WF-G 横断の仕上げ**（9項目）
+- **WF-G 横断の仕上げ**（10項目）
   - T26 eslintへ型情報を要するルールを導入し、未処理Promiseを機械的に検出できるようにする
   - [#491](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/491)
     終了したrunを `retry_task` で再開してもオーケストレーターの制御ツールが復活しない
@@ -182,6 +182,14 @@
     複数の親からブロックされた後続が、停止解除後に自動復帰しない
   - [#533](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/533)
     セッションのタブ名の組み立てがユニットテストで検証されていない
+  - [#541](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/541)
+    統合テスト C-42 が並列負荷下で間欠タイムアウトし、統合テスト全緑がEvidenceにならない。
+    **再現は1回のみで成立未確認。着手する場合は修正から入らず再現条件の特定から始め、
+    再現しなければ直さずに報告して閉じてよい。** 対象は1テストではなく
+    `test/integration/helpers/waitFor.ts` を使う統合テスト全体の待ち方であり、
+    C-42 に個別タイムアウトを与える対処は次に別のテストで同じことを起こす。
+    Issue #522（PR #523で解消）と同じクラスで、**そこで実際に起きた害は
+    「テストが落ちること」ではなく「実装者が失敗を無視する習慣をつけたこと」だった**
   - 全体レビュー（第1波・第2波の全変更を横断でレビューする）
   - 依存: 第1波・第2波の全完了
   - ファイル: `src` 全域（型情報ルールの導入は全ファイルへ波及する）
@@ -347,6 +355,27 @@
   `review-fixes-ui.yaml` の `Z02_ui_review`）の `done` にある「docs配下の文書に残る」という記述は、
   この運用に置き換わっている。YAML自体は第1波の全タスクが終わった時点で歴史的な資料であり、
   文言は直さない
+- **変更した振る舞いについて書かれた既存の文が近くにないかを、実装後に必ず確認する。**
+  コードの変更が、同じファイルの既存の説明文を黙って偽にする事故が WF-A で5回起きた。
+  JSDocが「〜という経路は現状無い」と書いている直下で、そのコミットがまさにその経路を
+  実装している（PR #537）。`docs/design.md` の見出しが Issue #528〜#531 を扱うと書きながら、
+  本文が #528 に触れていない（PR #535）。JSDocが「この状況は起こりえない」と断言したものが、
+  実際には起きていた（PR #536 → Issue #539 / PR #540）。**差分だけを見ているレビューでは
+  見つからない**性質のもので、差分の外を見る理由が要る
+- **同じクラスの穴が兄弟にもないかを探してから直す。** 片方だけ塞ぐPRが繰り返し出た。
+  PR #536 は `mergeApprovalTimeoutSec` に上限を入れる修正だったが、同じ形の `replyTimeoutSec`
+  にも同じ穴があった（両方直した）。Issue #541 の C-42 も、1テストに個別タイムアウトを与える
+  対処は次に別のテストで同じことを起こす。**規律を文章で残すときは「どの起点か」まで特定して
+  書く**: Issue #526 では「ルート起点で検査する」とだけ書いたため `.agents/worktrees` 起点が
+  正解として扱われ、同じ循環が1段上で再発した（正しくは `workspaceRoot` 起点）
+- **テストが本当に何かを検証しているかの確認は [design.md](../design.md) §16.25 に従う**
+  （一般則と確認項目8件）。ここには内容を持たない（二重管理を避ける）
+- **恒久的に残したい文書を書く前に `git check-ignore -v <path>` で確認する。** このリポジトリは
+  `.gitignore` が `.claude/` をまるごと無視している。同一マシン上の別セッションからは読めるため、
+  **書いた側が「残した」と錯覚しやすい**。WF-A の申し送りが実際にこの形で `.claude/handoff/`
+  へ書かれ、リポジトリに入っていなかった
+- **統合テストは `XDG_RUNTIME_DIR` の実在が要る。** 未設定だと mocha の出力が一切ないまま止まる。
+  `XDG_RUNTIME_DIR=/run/user/$(id -u) npm run test:integration:xvfb` の形で回す
 - **エディタが出す診断は、撤去した worktree を指す古いバッファのことがある。** 実体が無いのに
   「モジュールが見つからない」「implicit any」といった診断がファイル全体へ大量に出る。
   worktree を撤去した直後に起きやすい。**診断を信じて直しにかからず、まず実際に作業している
@@ -377,13 +406,13 @@ epic Issueは各ワークフローの開始時に起票し、採番できた時�
 | ワークフロー | 波 | 項目数 | epic Issue | 統合ブランチ | 状態 |
 | --- | --- | --- | --- | --- | --- |
 | WF-A オーケストレーター実行系 | 1 | 11 | [#352](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/352) | `wf/wf-a/integration` | 完了（PR [#447](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/447)、mainへマージ済み。統合ブランチは削除済み）。後続はWF-A2行（次行）を参照 |
-| WF-A2 オーケストレーター実行系の追いIssue | 1 | 16 | [#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466) | `wf/wf-a2/integration` | 進行中（WF-Aの後続。実装過程とその後の横断レビューで分離した16件） |
+| WF-A2 オーケストレーター実行系の追いIssue | 1 | 16 | [#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466) | `wf/wf-a2/integration` | 完了（PR [#542](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/542)、mainへマージ済み。統合ブランチは削除済み）。必須7件（[#528](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/528)・[#529](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/529)・[#530](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/530)・[#531](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/531)・[#413](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/413)・[#514](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/514)・[#511](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/511)）を解消し、残件はWF-Gへ送った（下の「WF-G 横断の仕上げ」を参照） |
 | WF-B 生成・安全系 | 1 | 4 | [#350](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/350) | `wf/wf-b/integration` | 完了（PR [#429](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/429)、mainへマージ済み。統合ブランチは削除済み） |
 | WF-C チャットUIの土台 | 1 | 9 | [#351](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/351) | `wf/wf-c/integration` | 完了（PR [#431](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/431)、mainへマージ済み。統合ブランチは削除済み） |
 | WF-D リポジトリ基盤 | 1 | 2 | [#353](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/353) | `wf/wf-d/integration` | 完了（PR [#394](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/394)、mainへマージ済み。統合ブランチは削除済み） |
 | WF-E ワークフローの自律性 | 2 | 12 | [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341) | `wf/wf-e/integration` | WF-A2（#466）の完了待ち（`runner.ts` / `forge.ts` が交差するため） |
 | WF-F チャットの会話操作と表示 | 2 | 3 | [#340](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/340) | `wf/wf-f/integration` | 完了（PR [#510](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/510)、mainへマージ済み。統合ブランチは削除済み） |
-| WF-G 横断の仕上げ | 3 | 9 | 未採番 | `wf/wf-g/integration` | 第2波の完了待ち |
+| WF-G 横断の仕上げ | 3 | 10 | 未採番 | `wf/wf-g/integration` | 第2波の完了待ち |
 
 W1〜W5とX1〜X3のIssue番号・ブランチ名・design.mdの節・manual-test.mdの番号は、
 [workflow-autonomy.md](workflow-autonomy.md) と [chat-conversation-parity.md](chat-conversation-parity.md) で
