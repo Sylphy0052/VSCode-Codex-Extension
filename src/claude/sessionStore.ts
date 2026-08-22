@@ -1,6 +1,11 @@
 import type { SessionSummary } from '../codex/types';
 import type { FileSystemPort } from '../session/ports';
-import { isWithinAny, type ListOptions, type ListResult } from '../session/sessionStore';
+import {
+  isWithinAny,
+  MTIME_CONCURRENCY_LIMIT,
+  type ListOptions,
+  type ListResult,
+} from '../session/sessionStore';
 import { mapWithLimit } from '../util/concurrency';
 import { basenameOf } from '../util/paths';
 import type { ClaudePaths } from './cliLocator';
@@ -12,13 +17,6 @@ import { parseTranscriptHead, sessionIdFromTranscriptName } from './transcript';
  * `queue-operation` などが数行挟まるため1行では足りない。
  */
 const HEAD_LINES = 40;
-
-/**
- * `orderedTranscripts`で`fs.mtimeMs`を並列発火する上限。
- * Codex側（`src/session/sessionStore.ts`の`MTIME_CONCURRENCY_LIMIT`）と同じ値を使う
- * （issue #436）。件数分を無制限に同時発火しないための頭打ち値。
- */
-const MTIME_CONCURRENCY_LIMIT = 32;
 
 /**
  * Claude Code のセッション一覧。

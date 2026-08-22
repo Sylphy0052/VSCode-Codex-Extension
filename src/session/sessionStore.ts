@@ -16,8 +16,11 @@ export type HistoryScope = 'workspace' | 'all';
 /**
  * `orderByRecency`で`fs.mtimeMs`を並列発火する上限。逐次との比較で十分な短縮効果が
  * ある一方、件数分を無制限に同時発火しないための頭打ち値。
+ *
+ * Codex側・Claude側（`src/claude/sessionStore.ts`）の両方でこの上限を使う（issue #436）。
+ * 値の重複による乖離を防ぐため、変更する場合はここだけを直せばよい。
  */
-const MTIME_CONCURRENCY_LIMIT = 32;
+export const MTIME_CONCURRENCY_LIMIT = 32;
 
 /**
  * 表示名を作るために読む先頭行数。
