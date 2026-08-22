@@ -5142,7 +5142,7 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 3. その後を追いかけて（`await`せず）`reviewWorkflowPlan`を呼ぶ（`vscode.window.withProgress`で「ワークフローをレビューしています…」の進捗を出す。§16.9の生成そのものと同じ流儀）
 4. 指摘が見つかった時点で、`securityWarnings`と`review.findings`の両方を渡して`previewDefinition`をもう一度呼び（同じ`defPath`へのスナップショット差し替えなので安全に上書きされる）、`vscode.window.showWarningMessage`でも知らせる。指摘が0件ならこの手順は何もしない
 
-2.と3.の間に`await`を挟まない設計にした理由は、レビューが`PLANNER_TURN_TIMEOUT_MS`（既定5分）までかかりうるため、完了を待ってから表示すると「保存は妨げない」という受入基準の実質（人がすぐ結果を見られる）を損なうため。3.のレビューセッションの起動・応答待ちが失敗しても（タイムアウト等）、1.で保存したファイル・2.で表示済みの内容はそのまま残る。`reviewWorkflowPlan`は例外を投げず、`findings: []`と`error`にエラー理由を返す設計にしてあるため、`handlePlanSuccess`側でこの後続処理を`try/catch`で包む必要が無い（design.md §16.25 確認事項3の裏返しで、保存という「本番の効果」が先に確定してから、失敗しうるレビューを後に置く順序そのものが安全側になる）。
+2.と3.の間に`await`を挟まない設計にした理由は、レビューが`PLANNER_TURN_TIMEOUT_MS`（既定5分）までかかりうるため、完了を待ってから表示すると「保存は妨げない」という受入基準の実質（人がすぐ結果を見られる）を損なうため。3.〜4.は`handlePlanSuccess`本体からは`await`されない`void`な即時実行関数（IIFE）の中で走る——本体は既に`resolve`済みのため、この中で例外を投げても受け取る呼び出し元がどこにも無く、未処理rejectになる。`reviewWorkflowPlan`自体は例外を投げず`findings: []`と`error`を返す設計だが、**IIFEの中には`vscode.window.withProgress`・`previewDefinition`・`showWarningMessage`という他の呼び出しもあり、これらは投げうる**（拡張のdeactivate中やViewパネル破棄後の呼び出し等）。そのため`reviewWorkflowPlan`が例外を投げないことだけを根拠にIIFEを無防備にはできない——**IIFE全体を`try/catch`で囲み、catchでは`log.warn`（`sanitizeForLog`を通す）に留めて表示済みの内容や保存済みファイルへは波及させない**。design.md §16.25 確認事項3の裏返しで、保存という「本番の効果」が先に確定してから、失敗しうるレビューを後に置く順序そのものが安全側になる、という設計意図自体は変わらない。
 
 なお、指摘到着時に呼び直す`previewDefinition`はViewパネルの現在の表示（`activeRunId`）を無条件にプレビューへ戻す。ユーザーがレビュー完了前に別のrunの表示へ切り替えていた場合、その表示がレビュー到着で差し替わりうる（フォーカスは奪わない）。この取り回しはW3の受入基準の対象外として許容している。
 

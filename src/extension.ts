@@ -984,10 +984,7 @@ async function applyPresetChat(
   const effective = buildEffectivePresetConfig(preset, baseline);
   const warnings = [...effective.warnings];
 
-  const resolvedCwd = await resolveWorkingDirectory(
-    preset.workingDirectory,
-    workspaceFolderPaths(),
-  );
+  const resolvedCwd = await resolveWorkingDirectory(preset.workingDirectory, workspaceFolderPaths());
   if (resolvedCwd.warning !== undefined) {
     warnings.push(resolvedCwd.warning);
   }
@@ -1202,11 +1199,7 @@ async function sendEditorSelectionToChat(
     editor.selection.end.line,
     editor.selection.end.character,
   );
-  const payload = buildSelectionPayload(
-    workspaceRelativeDisplayPath(editor.document.uri),
-    range,
-    text,
-  );
+  const payload = buildSelectionPayload(workspaceRelativeDisplayPath(editor.document.uri), range, text);
 
   // 複数開いているときは直近にアクティブだったタブを使う（Codex/Claude Codeを横断して
   // `activeSequence`で比べる。`ChatViewManager.getActiveComposerTarget`のJSDoc参照）
@@ -1329,7 +1322,9 @@ export function formatRoadmapWarningsDetail(
  */
 export function formatCorrectedIssuesDetail(issues: readonly CorrectedIssue[]): string {
   return issues
-    .map((c) => `${sanitizeForLog(c.itemId)}: ${c.actual ?? 'なし'} → ${c.expected ?? 'なし'}`)
+    .map(
+      (c) => `${sanitizeForLog(c.itemId)}: ${c.actual ?? 'なし'} → ${c.expected ?? 'なし'}`,
+    )
     .join(', ');
 }
 
@@ -1337,7 +1332,9 @@ export function formatCorrectedIssuesDetail(issues: readonly CorrectedIssue[]): 
  * `droppedDependencies`をログ表示用の1行にまとめる（Issue #427）。
  * `formatCorrectedIssuesDetail`と同じ理由で要素ごとに`sanitizeForLog`を通す。
  */
-export function formatDroppedDependenciesDetail(deps: readonly DroppedRoadmapDependency[]): string {
+export function formatDroppedDependenciesDetail(
+  deps: readonly DroppedRoadmapDependency[],
+): string {
   return deps
     .map((d) => `${sanitizeForLog(d.itemId)} → ${sanitizeForLog(d.dependsOnId)}`)
     .join(', ');
@@ -1829,8 +1826,16 @@ async function writeUniqueWorkflowFile(
  * と「保存は妨げない」という受入基準の実質を損なう。表示はまず`securityWarnings`だけで
  * 出し、レビューはバックグラウンドで走らせて、指摘が見つかった時点で`previewDefinition`
  * をもう一度呼んで警告欄へ追加し、`showWarningMessage`も別途出す（design.md §16.28）。
- * レビューセッションの起動・応答待ちが失敗・タイムアウトしても表示済みの内容には影響
- * しない（`reviewWorkflowPlan`は例外を投げず`error`を返す）。
+ * このもう一度の呼び出しは無条件——ユーザーが既に別のrunの表示へ切り替えていた場合、
+ * その表示がレビュー結果の到着で差し替わりうる（フォーカスは奪わない。W3の受入基準の
+ * 対象外として許容している）。
+ *
+ * レビューを追いかける処理はバックグラウンドの`void`な即時実行関数（IIFE）の中にあり、
+ * この関数自体は先に`resolve`済みのため、IIFE内で投げた例外を受け取る呼び出し元が無い。
+ * `reviewWorkflowPlan`自体は例外を投げない設計だが、IIFE内の他の呼び出し
+ * （`withProgress`・`previewDefinition`・`showWarningMessage`）は投げうるため、
+ * **IIFE全体を`try/catch`で囲み、失敗しても`log.warn`に留めて表示済みの内容へは
+ * 波及させない。**
  */
 async function handlePlanSuccess(
   result: Extract<PlanWorkflowResult, { ok: true }>,
@@ -1910,54 +1915,65 @@ async function handlePlanSuccess(
   }
 
   // タスク分解のレビュー（design.md §16.28）は表示の後を追いかけて走らせる。保存済み
-  // ファイル・既に開いたエディタ・上のトーストは待たない（await しない）。レビューが
-  // 失敗・タイムアウトしても`reviewWorkflowPlan`は例外を投げないため、表示済みの内容は
-  // 壊れない。指摘があれば、開いたままのプレビューへ後から追加する
-  // （`previewDefinition`は毎回スナップショットを作り直すため、この2回目の呼び出しは
-  // 1回目を安全に上書きする）
+  // ファイル・既に開いたエディタ・上のトーストは待たない（await しない）。指摘があれば、
+  // 開いたままのプレビューへ後から追加する（`previewDefinition`は毎回スナップショットを
+  // 作り直すため、この2回目の呼び出しは1回目を上書きする。ただしユーザーが既に別のrunの
+  // 表示へ切り替えていた場合はその表示が差し替わりうる——design.md §16.28「限界」参照）。
+  //
+  // `reviewWorkflowPlan`自体は例外を投げない設計だが、この関数の外側は既に`resolve`済み
+  // （`handlePlanSuccess`の呼び出し元は待っていない）なので、IIFE内の他の呼び出し
+  // （`withProgress`・`previewDefinition`・`showWarningMessage`）が投げた場合に受け取る
+  // 呼び出し元がどこにも無く、未処理rejectになる。そのためIIFE全体を`try/catch`で囲み、
+  // catchでは`log.warn`に留める（レビューは警告を足すだけの機能なので、この経路の失敗で
+  // 保存済みの状態や既に開いた表示へ波及させてはならない）。
   void (async () => {
-    const review = await vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: 'ワークフローをレビューしています…',
-      },
-      () =>
-        reviewWorkflowPlan({
-          goal,
-          yaml: result.yaml,
-          provider,
-          host,
-          cwd: workspaceRoot,
-          log,
-        }),
-    );
+    try {
+      const review = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'ワークフローをレビューしています…',
+        },
+        () =>
+          reviewWorkflowPlan({
+            goal,
+            yaml: result.yaml,
+            provider,
+            host,
+            cwd: workspaceRoot,
+            log,
+          }),
+      );
 
-    if (review.findings.length === 0) {
-      return;
+      if (review.findings.length === 0) {
+        return;
+      }
+
+      view.previewDefinition(filePath, result.definition, [
+        ...result.securityWarnings.map((w) => ({
+          kind: 'plannerSecurity' as const,
+          taskId: w.taskId,
+          message: w.message,
+        })),
+        ...review.findings.map((f) => ({
+          kind: 'plannerReview' as const,
+          taskId: f.taskIds[0],
+          message: f.taskIds.length > 0 ? `[${f.taskIds.join(', ')}] ${f.message}` : f.message,
+        })),
+      ]);
+
+      log.warn(
+        `[planner] タスク分解のレビューで指摘があります: ${review.findings
+          .map((f) => sanitizeForLog(f.message))
+          .join(' / ')}`,
+      );
+      void vscode.window.showWarningMessage(
+        `タスク分解のレビューで指摘があります（${review.findings.length}件）。` +
+          '内容を確認してください（自動では直していません。詳しくはログ）',
+      );
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      log.warn(`[planner] タスク分解のレビュー表示中にエラーが発生しました: ${sanitizeForLog(message)}`);
     }
-
-    view.previewDefinition(filePath, result.definition, [
-      ...result.securityWarnings.map((w) => ({
-        kind: 'plannerSecurity' as const,
-        taskId: w.taskId,
-        message: w.message,
-      })),
-      ...review.findings.map((f) => ({
-        kind: 'plannerReview' as const,
-        taskId: f.taskIds[0],
-        message: f.taskIds.length > 0 ? `[${f.taskIds.join(', ')}] ${f.message}` : f.message,
-      })),
-    ]);
-
-    log.warn(
-      `[planner] タスク分解のレビューで指摘があります: ${review.findings
-        .map((f) => sanitizeForLog(f.message))
-        .join(' / ')}`,
-    );
-    void vscode.window.showWarningMessage(
-      `タスク分解のレビューで指摘があります（${review.findings.length}件）。` +
-        '内容を確認してください（自動では直していません。詳しくはログ）',
-    );
   })();
 }
 
@@ -2126,18 +2142,16 @@ function createExecutablePathResolver(provider: AgentProvider, log: Logger): () 
     log.error(message);
 
     if (tracker.shouldNotify(located)) {
-      void vscode.window
-        .showErrorMessage(message, 'インストール手順', '設定を開く')
-        .then((choice) => {
-          if (choice === 'インストール手順') {
-            void vscode.env.openExternal(vscode.Uri.parse(provider.installUrl));
-          } else if (choice === '設定を開く') {
-            void vscode.commands.executeCommand(
-              'workbench.action.openSettings',
-              provider.executableSettingKey,
-            );
-          }
-        });
+      void vscode.window.showErrorMessage(message, 'インストール手順', '設定を開く').then((choice) => {
+        if (choice === 'インストール手順') {
+          void vscode.env.openExternal(vscode.Uri.parse(provider.installUrl));
+        } else if (choice === '設定を開く') {
+          void vscode.commands.executeCommand(
+            'workbench.action.openSettings',
+            provider.executableSettingKey,
+          );
+        }
+      });
     }
     return spawnPath;
   };
