@@ -183,7 +183,7 @@
 2026-08-22の実運用で出た要求（方針1・2）を満たすための3項目。**現行のタスク間メッセージングは
 タスク同士が直接つながるメッシュ型で、方針2に反している。** ここを作り替える。
 
-- [ ] W9 タスク間の直接メッセージングを廃し、オーケストレーターの中継にする
+- [ ] W9 タスク間の直接メッセージングを廃し、オーケストレーターの中継にする（Issue [#547](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/547)）
   - 依存: なし
   - Issue: 未起票（着手時に起票する）
   - 現状: `send_message` の宛先は「同じrunのタスク」に限られ（[messaging.ts](../../src/orchestrator/messaging.ts)
@@ -351,7 +351,7 @@
 | W6 | 未起票 | `feat/<IID>/task-issue-and-review` | §16.31 | W-K |
 | W7 | 未起票 | `feat/<IID>/ask-orchestrator` | §16.32 | W-L |
 | W8 | 未起票 | `feat/<IID>/ask-user` | §16.33 | W-M |
-| W9 | 未起票 | `refactor/<IID>/messaging-via-orchestrator` | §16.34 | W-N |
+| W9 | [#547](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/547) | `refactor/547/messaging-via-orchestrator` | §16.34 | W-N |
 | W10 | 未起票 | `feat/<IID>/auto-resume` | §16.35 | W-O |
 | W11 | 未起票 | `feat/<IID>/ci-wait-and-update-branch` | §16.36 | W-P |
 | W12 | 未起票 | `feat/<IID>/program-of-runs` | §16.37 | W-Q |
@@ -370,6 +370,12 @@ W6〜W12 は2026-08-22に追加した項目（Issue #497）。**W6 の内容は
 grep -nE '^### 16\.[0-9]+' docs/design.md      # 16系の最大値と空きを見る
 grep -nE '^### W-' docs/manual-test.md          # W群の体系を見る
 ```
+
+**この表と epic Issue のチェックリストは、どちらも棚である。** Issueを起票したら、
+**同じ操作で両方へ番号を書き込む。** 片方だけ更新されると、もう片方を読んだ担当が
+「未起票」と判断して二重に起票する。2026-08-23 に W9 で実際に起きた（Issue #547 は
+epic [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341) の
+チェックリストへは入ったが、**この割当表だけが「未起票」のまま残った**）。
 
 事前割り当ては「並列で作業しても採番が衝突しないこと」だけを保証する仕組みで、
 **その後に起きる採番や体系の変更には追随しない**。実際、この表は3回腐っている。
@@ -403,10 +409,10 @@ W-A〜W-E のいずれかに収まるなら、新しい記号を起こさずそ�
 
 ## 並列の順序
 
-**着手そのものが WF-A2（epic [#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466)）の
-完了待ちである**（2026-08-22の決定）。WF-A2 も `runner.ts` / `forge.ts` を触るため、
-このロードマップの全項目とファイルの集合が交差する。詳細は
-[review-and-feature-consolidation.md](review-and-feature-consolidation.md) の WF-E の項を見ること。
+**着手可能**（2026-08-23）。着手を待たせていた WF-A2（epic
+[#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466)）は
+PR [#542](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/542) で完了し、
+`runner.ts` / `forge.ts` の交差が解けた。統合ブランチ `wf/wf-a2/integration` も削除済み。
 
 着手後の順序は次のとおり。`runner.ts` と `messaging.ts` を複数の項目が触るため、波に分けて進める。
 
