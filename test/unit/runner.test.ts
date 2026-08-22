@@ -7832,6 +7832,116 @@ tasks:
   });
 });
 
+describe('WorkflowRunner: 停滞（stalled）で止まる（design.md §16.27、Issue #336）', () => {
+  const YAML = `
+version: 1
+name: stall-test
+tasks:
+  - id: T1
+    prompt: p
+    continuePrompt: つづき
+    maxIterations: 20
+    done: d
+  - id: T2
+    dependsOn: [T1]
+    prompt: p2
+    done: d2
+`;
+
+  it('停滞ではセッションを解放せず、maxReachedとは区別できる理由でfailedに確定する', async () => {
+    const { runner, codexHost, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/stall.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('stalled', { ...initialChatState });
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+    expect(store.find(runId)?.tasks['T1']?.failure).toEqual({ kind: 'stalled' });
+    // maxReachedと同じく、続けるための足がかりとしてセッションを残す
+    expect(t1.disposed).toBe(false);
+    // 依存する後続はfailedの波及と同じくskippedになる
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('skipped');
+  });
+
+  it('停滞は続ける（continueTask）で同じセッションのまま再開できる', async () => {
+    const { runner, codexHost, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/stall.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('stalled', { ...initialChatState });
+    await flush();
+
+    expect(runner.continueTask(runId, 'T1')).toBe(true);
+    await flush();
+
+    // 新しいセッションは作らない（同じ会話・同じworktreeのまま）
+    expect(codexHost.sessions).toHaveLength(1);
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+    expect(store.find(runId)?.tasks['T1']?.failure).toBeUndefined();
+    expect(t1.runLoopCalls).toHaveLength(2);
+  });
+
+  it('停滞はワークフローViewの警告欄にloopStalledとして出る（maxReachedとは別kind）', async () => {
+    const { runner, codexHost } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/stall.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('stalled', { ...initialChatState });
+    await flush();
+
+    const snapshot = runner.getSnapshot(runId);
+    const warning = snapshot?.warnings.find((w) => w.kind === 'loopStalled');
+    expect(warning?.taskId).toBe('T1');
+    expect(warning?.message).toContain('T1');
+    // maxReached専用の警告としては出ない（別kindで区別できる）
+    expect(snapshot?.warnings.find((w) => w.kind === 'maxReached')).toBeUndefined();
+  });
+
+  it('停滞はオーケストレーターへtaskFailedではなくtaskStalledとして通知される', async () => {
+    const { runner, codexHost } = createHarness(YAML);
+    await runner.start('/repo/.agents/workflows/stall.yaml', '/repo');
+    await flush();
+    const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+    // run開始の通知でターンが走っている。走行中は割り込まないので、まず終わらせる
+    orchestrator.emitState({ ...initialChatState, busy: true });
+    orchestrator.emitState({ ...initialChatState, busy: false });
+    const sentBefore = orchestrator.sentTexts.length;
+
+    codexHost.byTaskId('T1').finish('stalled', { ...initialChatState });
+    await flush();
+
+    // notifyOrchestratorはbusyの間pendingに積むだけなので、ここでも1回ターンを終わらせる
+    // （design.md §16.25 確認事項4。busyゲートを通過させるところまで状態を進める）
+    orchestrator.emitState({ ...initialChatState, busy: true });
+    orchestrator.emitState({ ...initialChatState, busy: false });
+
+    const added = orchestrator.sentTexts.slice(sentBefore).join('\n');
+    expect(added).toContain('T1');
+    expect(added).toContain('停滞');
+    expect(added).toContain('continue_task');
+    expect(added).not.toContain('kind="taskFailed"');
+  });
+
+  it('未知のrun・未知のtaskIdでは何もしない', async () => {
+    const { runner, codexHost } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/continue.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('maxReached', { ...initialChatState });
+    await flush();
+
+    expect(runner.continueTask('no-such-run', 'T1')).toBe(false);
+    expect(runner.continueTask(runId, 'no-such-task')).toBe(false);
+  });
+});
+
 describe('WorkflowRunner: オーケストレーターセッション（design.md §16.23）', () => {
   const YAML_ONE = `version: 1
 name: orchestrator

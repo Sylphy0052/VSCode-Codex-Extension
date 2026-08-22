@@ -70,6 +70,15 @@ export type TaskFailureReason =
    * `approvalRejected` と同じ理由（同じ操作を勝手にやり直さない）で自動再試行の対象にしない。
    */
   | { readonly kind: 'manualStop' }
+  /**
+   * ループが停滞したと判定されて自動的に止まった（design.md §16.27、Issue #336）。
+   * `loopFailed`（ターンそのものが失敗した）とは原因が異なるため区別する。`manualStop`と
+   * 同じ理由（人・オーケストレーターの判断を挟まずに勝手にやり直さない）で自動再試行の
+   * 対象にしない。セッションは`maxReached`と同じく`onTaskFinished`が残すため、
+   * `continueTask`で同じ会話のまま続きを試せる（`retryTask`による「再実行」＝新しい
+   * worktreeでの最初からのやり直しも従来どおり選べる）。
+   */
+  | { readonly kind: 'stalled' }
   /** 依存先タスクの失敗が波及して `skipped` になった。 */
   | { readonly kind: 'dependencyFailed'; readonly failedTaskIds: readonly string[] }
   /**
@@ -383,6 +392,7 @@ function markFailed(
  * | `done`                   | `merging`（マージが済んで初めて`done`。design.md §16.17。マージ結果に応じた `done` / `blocked` / `failed` への遷移は `markMergeSucceeded` / `markMergeBlocked` / `markMergeFailed` が担う） |
  * | `maxReached`             | `failed`（回数切れ）                     |
  * | `failed`                 | `failed`（`retries` の範囲で再試行）     |
+ * | `stalled`                | `failed`（停滞。design.md §16.27、Issue #336。`retries`は消費しない） |
  * | `manual` / `interrupted` | 実行全体を停止（このタスク自身は変えない）|
  *
  * `manual` / `interrupted` は「タスクの結果」の対応が表に無い（design.mdは「実行全体を
@@ -438,6 +448,14 @@ export function applyLoopStopReason(
     // ワークフローViewの「タスク停止」（design.md §16.8）。`markApprovalRejected`と同じく
     // `retries`の自動再試行の経路には乗せない（人が明示的に止めたタスクを勝手にやり直さない）。
     return markFailed(run, tasks, taskId, { kind: 'manualStop' });
+  }
+
+  if (reason === 'stalled') {
+    // 停滞判定（design.md §16.27、Issue #336）。`taskStopped`と同じく`retries`の
+    // 自動再試行の経路には乗せない——同じ内容を繰り返すだけの状態を、原因を変えずに
+    // 機械的にやり直しても再び停滞する可能性が高いため、人・オーケストレーターの判断
+    // （`continueTask`で続きを試す／`retryTask`で最初からやり直す）を挟む
+    return markFailed(run, tasks, taskId, { kind: 'stalled' });
   }
 
   // reason === 'failed'。`retries`の範囲内なら、新しいスレッド・worktreeでやり直す前提で
@@ -806,18 +824,21 @@ export function retryTask(run: RunState, tasks: readonly WorkflowTask[], taskId:
 }
 
 /**
- * 回数切れ（`maxReached`）で止まったタスクを、同じセッションのまま `running` へ戻す
- * （design.md §16.8「続ける」、issue #284）。
+ * 回数切れ（`maxReached`）・停滞（`stalled`、design.md §16.27、Issue #336）で止まった
+ * タスクを、同じセッションのまま `running` へ戻す（design.md §16.8「続ける」、issue #284）。
  *
  * 「再実行」（`retryTask`）が新しいworktree・新しい会話で最初のプロンプトからやり直すのに
  * 対し、こちらは止まったところから走らせるための操作。worktreeもブランチも作り直さないため
  * `retryCount` / `manualRetryCount` は増やさない（増やすとディレクトリ名とブランチ名が
  * 変わってしまう。`retrySuffixOf`）。`submissionCount` も通算のまま残す。
  *
- * 受け付けるのは「回数切れで `failed` になったタスク」だけ。ほかの失敗（`loopFailed` /
- * `manualStop` / `approvalRejected` など）は途中から続ける前提が無い。呼び出し側の
- * `runner.ts` は加えて、そのタスクのセッションがこのウィンドウで生きていることも要求する
- * （リロード後は会話が失われているため「再実行」しかできない）。
+ * 受け付けるのは「回数切れ・停滞で `failed` になったタスク」だけ。ほかの失敗（`loopFailed` /
+ * `manualStop` / `approvalRejected` など）は途中から続ける前提が無い。`stalled`を
+ * `maxReached`と同列に加えたのは、どちらも「セッションは生きている・会話は壊れていない」
+ * まま自動的に止まった点が同じで、続きから走らせる前提が崩れていないため（停滞は
+ * 「同じ内容を繰り返しているだけ」であり、指示を変えれば続けられる余地がある）。
+ * 呼び出し側の`runner.ts`は加えて、そのタスクのセッションがこのウィンドウで生きていることも
+ * 要求する（リロード後は会話が失われているため「再実行」しかできない）。
  *
  * 連鎖して `skipped` になった依存先を `pending` へ戻すことと、`haltedByUser` を解除する
  * ことは `retryTask` と同じ（人の明示操作を再開の合図として扱う）。
@@ -832,7 +853,10 @@ export function continueTask(
   if (task === undefined || current === undefined) {
     return run;
   }
-  if (current.state !== 'failed' || current.failure?.kind !== 'maxReached') {
+  if (
+    current.state !== 'failed' ||
+    (current.failure?.kind !== 'maxReached' && current.failure?.kind !== 'stalled')
+  ) {
     return run;
   }
   const depsAllDone = task.dependsOn.every((dep) => run.tasks.get(dep)?.state === 'done');

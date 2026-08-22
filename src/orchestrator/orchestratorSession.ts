@@ -60,6 +60,14 @@ export type OrchestratorEventKind =
   | 'taskWaitingApproval'
   | 'taskBlocked'
   /**
+   * タスクのループが停滞したと判定されて自動的に止まった（design.md §16.27、Issue #336）。
+   * `taskFailed`とは意図的に別種別にする——停滞はCLIやセッションが壊れたわけではなく
+   * 「同じ応答が繰り返されているだけ」であり、`retry_task`（新しいworktreeでの
+   * やり直し）だけでなく`continue_task`（同じ会話のまま続き）も選べることを
+   * オーケストレーターへ伝える必要があるため。
+   */
+  | 'taskStalled'
+  /**
    * タスクが`send_message`でオーケストレーターへメッセージを送った（design.md §16.34、
    * Issue #547）。タスク間の直接メッセージングを廃し、宛先をオーケストレーターへ固定した
    * ことで新設した経路。`runnerMessaging.ts`の`onMessageAccepted`が、宛先が

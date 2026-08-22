@@ -59,6 +59,7 @@ export function getSnapshot(self: WorkflowRunnerInternals, runId: string): Workf
     warnings: [
       ...live.warnings,
       ...deriveMaxReachedWarnings(live),
+      ...deriveStalledWarnings(live),
       ...deriveAllowWarnings(live),
       ...derivePermissionEscalationWarnings(live),
     ],
@@ -347,6 +348,30 @@ export function deriveMaxReachedWarnings(live: LiveRun): WorkflowWarning[] {
         kind: 'maxReached',
         taskId,
         message: `送信回数の上限に達しました（終了条件が満たされないまま停止）: ${taskId}${hint}`,
+      });
+    }
+  }
+  return warnings;
+}
+
+/**
+ * 停滞（design.md §16.27、Issue #336）も`maxReached`と同じく状態としてすでに`failed`が
+ * 持っているため、都度導出する（`deriveMaxReachedWarnings`と同じ理由）。
+ */
+export function deriveStalledWarnings(live: LiveRun): WorkflowWarning[] {
+  const warnings: WorkflowWarning[] = [];
+  for (const [taskId, state] of live.runState.tasks) {
+    if (state.state === 'failed' && state.failure?.kind === 'stalled') {
+      // セッションが残っていれば「続ける」で続きから走らせられる（`continueTask`が
+      // `maxReached`と同じ扱いに拡張してある）。リロード後は会話が失われているため
+      // 「再実行」しかできない
+      const hint = live.tasks.has(taskId)
+        ? '。「続ける」で同じ会話のまま指示を変えて再開できます'
+        : '';
+      warnings.push({
+        kind: 'loopStalled',
+        taskId,
+        message: `同じ応答が繰り返され、進捗が無いまま停止しました: ${taskId}${hint}`,
       });
     }
   }

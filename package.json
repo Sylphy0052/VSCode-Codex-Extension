@@ -887,6 +887,14 @@
           "scope": "machine-overridable",
           "markdownDescription": "PR/MRをDraftとして作り、統合ブランチへのマージが済んでからreadyへ切り替えるか。`gh pr create --draft` / `glab api --field=draft=true` で作り、`gh pr ready` / `glab mr update --ready` で外す（設計書 §16.18）。"
         },
+        "agent.workflows.stallRepeatCount": {
+          "type": "number",
+          "default": 4,
+          "minimum": 2,
+          "maximum": 50,
+          "scope": "machine-overridable",
+          "markdownDescription": "タスクのループが停滞したとみなすまでに必要な、同一の応答が連続する回数。直近の応答要約がこの回数だけ連続して同一になったら、送信回数の上限（`maxIterations`）を使い切る前にループを止め、失敗とは区別できる状態（停滞）でオーケストレーターへ通知する（設計書 §16.27）。既定値は誤検知しない側（大きめ）に振ってある。範囲外（2未満・50超過・非整数）の値は既定値（4）にフォールバックする。"
+        },
         "claude.executablePath": {
           "type": "string",
           "default": "claude",

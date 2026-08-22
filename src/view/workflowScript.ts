@@ -38,6 +38,8 @@ export function workflowScript(): string {
     runHalted: '実行停止のため未着手',
     reloadInterrupted: 'リロードによる中断',
     manualStop: '手動停止',
+    // design.md §16.27、Issue #336。同じ応答が繰り返され進捗が無いまま停止した
+    stalled: '停滞',
   };
 
   let currentRuns = [];
@@ -442,8 +444,12 @@ export function workflowScript(): string {
    * そのあとは「再実行」だけになる。
    */
   function canContinueTask(task) {
+    // 回数切れ（maxReached）に加え、停滞（stalled、design.md §16.27、Issue #336）も
+    // 同じ会話のまま続けられる。どちらもセッションは生きたまま止まっている
     return (
-      task.state === 'failed' && task.failure && task.failure.kind === 'maxReached'
+      task.state === 'failed'
+      && task.failure
+      && (task.failure.kind === 'maxReached' || task.failure.kind === 'stalled')
       && task.hasLiveSession === true
     );
   }
@@ -486,7 +492,8 @@ export function workflowScript(): string {
       cell.appendChild(stopBtn);
     }
     if (canContinueTask(task)) {
-      // 回数切れ（maxReached）で止まったタスクだけに出す（design.md §16.8、issue #284）。
+      // 回数切れ（maxReached）・停滞（stalled、design.md §16.27、Issue #336）で
+      // 止まったタスクだけに出す（design.md §16.8、issue #284）。
       // セッションが生きている間しか続きから走らせられないため、hasLiveSessionも見る
       const continueBtn = text('button', 'secondary', '続ける');
       continueBtn.type = 'button';
