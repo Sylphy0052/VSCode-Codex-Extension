@@ -5187,6 +5187,56 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 #### 検証
 
 `test/unit/forge.test.ts`が`needsFinalMergeDecision`を、`test/unit/runner.test.ts`の「WorkflowRunner: 最終マージの判断」ブロックが判断待ちへ入ること・MCPサーバがそれまで閉じないこと・`decide_final_merge`相当の確定経路（`decideFinalMerge`）が`merge`/`hold`それぞれで正しい結果と警告を残すこと・タイムアウトで自動的に`hold`へ倒れること・`confirm`はタイムアウトしないことを確かめる。実ホストでのMCPツール呼び出し・ワークフローViewのボタンの見た目・実際のオーケストレーターモデルの判断挙動は[manual-test.md](manual-test.md)のW-Fに残す。
+
+### 16.27 タスクのループ・停滞を検知して止める（Issue #336、ロードマップW2）
+
+無人実行の停止条件（§16.7）は「送信回数の上限（`maxIterations`）に達した」「CLIが`done`を宣言した」「CLIがエラーで落ちた」の3種類を持つが、いずれにも当てはまらないまま**同じ内容を繰り返すだけで実質的に進んでいない**タスクを止める手段が無かった。CLIは正常応答を返し続けるため`failed`にはならず、`maxIterations`まで待つしかコストの上限が無い。
+
+#### 検知方式の選択
+
+停滞の検知方法として次の3案を検討した。
+
+- **A（採用）応答要約が直近N回連続で完全一致**
+- B 連続N回、編集ファイル数が0
+- C 同一のエラー文字列が繰り返される
+
+**Aを選んだ理由**: Issueが問題としているのは「ループ」、すなわち同じやり取りの反復そのものであり、A はこれを直接検知する。加えてCは「同一エラー文字列の繰り返し」だが、エラー文字列が繰り返されるとき応答要約（`buildResponseSummary`が作る`lastResponseSummary`）自体もほぼ同一になるため、Cが検知する事象はAが検知する集合に包含される特殊ケースにすぎず、別実装を持つ価値が無い。
+
+**Bを採用しなかった理由**: 「連続N回、編集ファイル数が0」は誤検知が大きすぎる。調査・レビュー・原因切り分けなど、正当に何度もファイルを編集せず思考・報告だけを重ねるタスクが存在し、そうしたタスクをBは停滞と誤判定してしまう。停滞検知は「壊れているタスクを止める」ためのものであり、「編集しないタスクを止める」ためのものではない。
+
+#### 実装（`src/loop/stallDetector.ts`）
+
+`vscode`に依存しない純粋関数として実装した（`loop/`は`orchestrator/`より下位の層であり、`orchestrator/`に依存できない、§16.10）。
+
+- `extractTurnSignature(state: ChatState): string` — 比較用の文字列を1ターン分取り出す。`state.turnResultText`があればそれを優先し、無ければ`lastNonEmptyAgentMessageText`（`appserver/chatState.ts`に共有ヘルパーとして切り出した。元は`orchestrator/taskSummary.ts`の`buildResponseSummary`専用だったものを、`loop/`からも使えるよう最下層へ移した）で直近の空でないエージェント発言を拾う。この文字列は比較にしか使わず、通知やログへそのまま出すことは無いため、サニタイズ・切り詰めをしない
+- `pushTurnSignature(history, signature, threshold)` — 履歴へ1件追加し、`threshold`件（最低`MIN_STALL_REPEAT_COUNT=2`件）だけ末尾を残す。無制限に伸ばさない
+- `detectStalledLoop(history, threshold)` — 履歴の末尾`threshold`件がすべて同一かつ空文字列でないときだけ`true`。空文字列同士の一致は停滞と見なさない（応答要約が取れないケースの誤検知を避けるため）
+
+`LoopController.observe()`は毎ターン、`declaresDone`の判定の後・`maxIterations`到達判定の前に`pushTurnSignature`→`detectStalledLoop`を挟み、真であれば`this.stop('stalled')`で止める。`maxIterations`到達より先に判定することで、閾値さえ超えれば送信回数の上限を待たずに止まる。
+
+#### `LoopStopReason: 'stalled'`と`failed`との区別
+
+`LoopStopReason`（`loop/loopController.ts`）に`'stalled'`を追加した。**`failed`とは意図的に別種別にする**。`failed`はCLIプロセスが異常終了した状態だが、停滞はCLIもセッションも壊れておらず「同じ応答を繰り返しているだけ」であり、`retry_task`（新しいworktreeでの最初からのやり直し）だけでなく`continue_task`（同じセッション・同じ会話のまま指示を変えて続ける）でも復帰できる余地がある。この非対称性を`runState.ts`の`applyLoopStopReason`・`continueTask`の両方に反映した。
+
+- `applyLoopStopReason`: `stalled`は`taskStopped`（手動停止）と同じく即座に`failed`確定へ倒す。`maxReached`のように自動リトライの予算を消費させない（`TaskFailureReason: { kind: 'stalled' }`を`markFailed`へ渡す）
+- `continueTask`: 従来`current.failure?.kind === 'maxReached'`のときだけ再開を許していたガードへ`'stalled'`も追加した。セッション（`runner.ts`の`onTaskFinished`）も`maxReached`と同様に`dispose()`しない（`reason !== 'maxReached' && reason !== 'stalled'`のときだけ破棄）ため、`continueTask`が同じ会話を実際に再開できる
+
+#### オーケストレーターへの通知（既存の通知テーブルへの追加のみ）
+
+新しい直接通知経路は作らず、`runnerOrchestrator.ts`の`buildTaskEvent`の既存`case 'failed':`分岐へ、`failure.kind === 'stalled'`のときだけ`taskFailed`ではなく`taskStalled`（`OrchestratorEventKind`へ追加、`orchestratorSession.ts`）を返す判定を足しただけである。本文は既存の`withSummary`（内部で`lastResponseSummary`を埋め込む）を使い、`wrapEvent`（`escapeAngleBrackets(stripControlCharsPreservingNewlines(...))`）による単一のサニタイズ点をそのまま通過する。二重にエスケープしない・素通りもさせない。
+
+#### ワークフローViewへの表示
+
+`runnerSnapshot.ts`に`deriveStalledWarnings`を追加し、`live.runState`から`failure.kind === 'stalled'`のタスクを毎回導出して`WorkflowWarning.kind: 'loopStalled'`として警告欄へ出す（`live.warnings`へ一度だけpushする方式ではなく、既存の`deriveMaxReachedWarnings`等と同じ「都度導出」方式。VSCodeのウィンドウ再読み込みでもrunStateの永続化から復元できる）。`kind`名は既存の`'messagingStalled'`（§16.21、タスク間メッセージングの返信待ち膠着とは別の仕組み）と紛れないよう`'loopStalled'`とした。`workflowScript.ts`の`FAILURE_LABEL`へ`stalled: '停滞'`を、`canContinueTask`へ`maxReached`と並べて`stalled`を追加し、「続ける」ボタンが押せるようにした。チャット画面側（`chatScript.ts`の`LOOP_STOP_LABEL`）にも表示文言を足した。
+
+#### 設定（`agent.workflows.stallRepeatCount`、既定4）
+
+閾値は`agent.workflows.stallRepeatCount`（`config.ts`、既定4・範囲2〜50・`scope: machine-overridable`）で変更できる。範囲外・非数値は既定値へフォールバックする（`normalizeStallRepeatCount`、他の`agent.workflows.*`設定と同じ規約で`config.ts`側に正規化関数を置く）。既定値4は**誤検知しない側（大きめ）**に振ってある。閾値を小さくしすぎると、たまたま似た応答が続いただけの正常なタスクを停滞と誤判定するおそれがあるため、既定は保守的に倒し、必要なら利用者が下げられるようにした。
+
+#### 確かめ方
+
+`test/unit/stallDetector.test.ts`が`extractTurnSignature`・`pushTurnSignature`・`detectStalledLoop`を単体で、`test/unit/loopController.test.ts`の「LoopController: 停滞検知」ブロックが実際のターン進行の中で閾値通りに止まること・閾値を変えると検知タイミングが変わること・`start()`し直すと履歴がリセットされることを確かめる。`test/unit/runState.test.ts`は`applyLoopStopReason`が`stalled`を`maxReached`と異なる理由で`failed`にすること・retryCountを消費しないこと・`continueTask`で再開できることを、`test/unit/runner.test.ts`の「WorkflowRunner: 停滞（stalled）で止まる」ブロックがセッションを破棄しないこと・警告欄に`loopStalled`として出ること・オーケストレーターへ`taskStalled`として通知されること（`taskFailed`にはならないこと）を確かめる。
+
 ### 16.28 生成したワークフローの分解レビュー（`reviewWorkflowPlan`、roadmap W3、Issue #337）
 
 §16.9の分解セッションへ渡す生成プロンプトは「並列にできるタスクを直列にしない」「合流タスクを置く」「外から判定できる`done`を書く」という指針を含むが、生成したYAMLが実際にこの指針へ従っているかどうかは検証していなかった。`validateWorkflow`（§16.2）が見るのはタスク数・id形式・循環依存・未定義参照・プロンプト長・権限の緩和といった構文的な妥当性だけで、分解そのものの質は見ない。

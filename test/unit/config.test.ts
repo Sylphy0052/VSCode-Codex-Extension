@@ -280,6 +280,29 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
     expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(2147483);
   });
 
+  it('stallRepeatCountの既定は4回（design.md §16.27・DEFAULT_STALL_REPEAT_COUNT、Issue #336）', () => {
+    expect(readWorkflowsConfig().stallRepeatCount).toBe(4);
+  });
+
+  it('stallRepeatCountは範囲内（2〜50）の指定値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.stallRepeatCount': 6 });
+    expect(readWorkflowsConfig().stallRepeatCount).toBe(6);
+  });
+
+  it('stallRepeatCountが数値でない・2未満・50超過・非整数なら既定値（4）へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.stallRepeatCount': 'たくさん' });
+    expect(readWorkflowsConfig().stallRepeatCount).toBe(4);
+
+    __mock.setConfig('agent', { 'workflows.stallRepeatCount': 1 });
+    expect(readWorkflowsConfig().stallRepeatCount).toBe(4);
+
+    __mock.setConfig('agent', { 'workflows.stallRepeatCount': 51 });
+    expect(readWorkflowsConfig().stallRepeatCount).toBe(4);
+
+    __mock.setConfig('agent', { 'workflows.stallRepeatCount': 3.5 });
+    expect(readWorkflowsConfig().stallRepeatCount).toBe(4);
+  });
+
   it('ciWaitTimeoutSecの既定は1800秒（design.md §16.36・DEFAULT_CI_WAIT_TIMEOUT_SEC）', () => {
     expect(readWorkflowsConfig().ciWaitTimeoutSec).toBe(1800);
   });

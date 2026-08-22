@@ -626,8 +626,24 @@ function buildTaskEvent(
   switch (state) {
     case 'done':
       return { kind: 'taskDone', body: withSummary(`タスク ${taskId} が完了しました。`) };
-    case 'failed':
+    case 'failed': {
+      // 停滞（design.md §16.27、Issue #336）は`failed`と同じ状態だが、通知は
+      // `taskFailed`とは別の`taskStalled`にする（Issue #336の受入基準
+      // 「オーケストレーターに通知が届く」がこの種別を明示的に求めている）。
+      // `failed`と一緒くたにすると、オーケストレーターは「壊れて失敗した」のか
+      // 「同じ内容を繰り返しているだけ」なのかを区別できない
+      const failure = live.runState.tasks.get(taskId)?.failure;
+      if (failure?.kind === 'stalled') {
+        return {
+          kind: 'taskStalled',
+          body: withSummary(
+            `タスク ${taskId} が停滞したため停止しました（同じ応答が繰り返されました）。` +
+              'continue_taskで指示を変えて続けるか、retry_taskで最初からやり直せます。',
+          ),
+        };
+      }
       return { kind: 'taskFailed', body: withSummary(`タスク ${taskId} が失敗しました。`) };
+    }
     case 'waitingApproval': {
       const approval = live.tasks.get(taskId)?.pendingApproval;
       const detail = approval === undefined ? '' : `\n要求: ${approval.title}`;

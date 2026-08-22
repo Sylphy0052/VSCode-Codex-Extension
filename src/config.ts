@@ -18,6 +18,7 @@ import {
   DEFAULT_CI_WAIT_TIMEOUT_SEC,
   DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES,
 } from './orchestrator/forge';
+import { DEFAULT_STALL_REPEAT_COUNT, MIN_STALL_REPEAT_COUNT, MAX_STALL_REPEAT_COUNT } from './loop/stallDetector';
 import { DEFAULT_PSEUDO_WORKTREE_EXCLUDE } from './orchestrator/pseudoWorktree';
 import { sanitizeForLog } from './orchestrator/sanitize';
 import { normalizeBranchNaming, type BranchNaming } from './orchestrator/worktree';
@@ -306,6 +307,15 @@ export interface WorkflowsConfig {
    */
   branchNaming: BranchNaming;
   /**
+   * ループの停滞判定（design.md §16.27、Issue #336）で「同じ応答が連続したら停滞とみなす」
+   * しきい値（`agent.workflows.stallRepeatCount`、既定4、`machine-overridable`）。
+   * 権限には関わらず、大きくするほど検知が遅く（誤検知しにくく）なるだけの調整値のため
+   * `forge`/`finalMerge`ほど強い制限は要らない。`loop/loopController.ts`はvscodeに
+   * 依存しないため、この値は`LoopController`を組み立てる`view/chatView.ts` /
+   * `view/claudeChatView.ts`側で読み、コンストラクタへ渡す。
+   */
+  stallRepeatCount: number;
+  /**
    * PR/MRをDraftとして作り、統合ブランチへのマージが済んでからreadyへ切り替えるか
    * （design.md §16.18「Draftとして作る」）。`machine-overridable`。有効にするほうが
    * 「人の確認を挟む」側へ倒れるため、`forge`/`finalMerge`ほど強い制限は要らない。
@@ -487,6 +497,7 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     ),
     branchNaming: normalizeBranchNaming(str(c, 'workflows.branchNaming', 'wf')),
     draftPullRequest: c.get<boolean>('workflows.draftPullRequest') ?? false,
+    stallRepeatCount: normalizeStallRepeatCount(c.get<unknown>('workflows.stallRepeatCount')),
     ciWaitTimeoutSec: normalizeCiWaitTimeoutSec(c.get<unknown>('workflows.ciWaitTimeoutSec')),
     ciUpdateBranchMaxRetries: normalizeCiUpdateBranchMaxRetries(
       c.get<unknown>('workflows.ciUpdateBranchMaxRetries'),
@@ -573,6 +584,21 @@ function normalizeCiUpdateBranchMaxRetries(value: unknown): number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 100
     ? value
     : DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES;
+}
+
+/**
+ * `agent.workflows.stallRepeatCount` の生値を安全なしきい値へ丸める（design.md §16.27）。
+ * 整数でない・`MIN_STALL_REPEAT_COUNT`未満・`MAX_STALL_REPEAT_COUNT`超過はいずれも
+ * 既定値（`DEFAULT_STALL_REPEAT_COUNT`）へ丸める（`normalizeCiUpdateBranchMaxRetries`と
+ * 同じ「範囲外は既定へ」方針）。
+ */
+function normalizeStallRepeatCount(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= MIN_STALL_REPEAT_COUNT &&
+    value <= MAX_STALL_REPEAT_COUNT
+    ? value
+    : DEFAULT_STALL_REPEAT_COUNT;
 }
 
 /** アクティブエディタが属するワークスペースフォルダ。無ければ先頭（設計書 §10）。 */

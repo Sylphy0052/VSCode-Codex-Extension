@@ -1,4 +1,10 @@
 import type { ChatState } from '../appserver/chatState';
+import {
+  detectStalledLoop,
+  extractTurnSignature,
+  pushTurnSignature,
+  DEFAULT_STALL_REPEAT_COUNT,
+} from './stallDetector';
 
 /**
  * ループの終了をエージェント自身に宣言させるための合図。
@@ -32,6 +38,17 @@ export type LoopStopReason =
   | 'manual'
   /** 手動の発言や中断が割り込んだ */
   | 'interrupted'
+  /**
+   * 同じ応答が一定回数連続し、進捗の無いまま回っていると判定された（design.md §16.27、
+   * Issue #336）。**`failed`とは区別する。** 送信そのものは成功しておりCLIも落ちていない
+   * ため、`failed`（ターンの失敗）と同一視すると「壊れた」のか「同じ内容を繰り返して
+   * いるだけ」なのかが失われる。`applyLoopStopReason`（`runState.ts`）は`taskStopped`と
+   * 同じ扱い（`retries`を消費する自動再試行の経路には乗せない）にしつつ、`failure.kind`は
+   * 別の値（`stalled`）にしてViewから区別できるようにする。セッションは`maxReached`と
+   * 同じく残す（`runner.ts`の`onTaskFinished`）——停滞はセッションや会話が壊れたわけでは
+   * ないため、「続ける」（`continueTask`）で同じ会話のまま続きを試せる余地を残す。
+   */
+  | 'stalled'
   /**
    * ワークフローViewの「タスク停止」操作（design.md §16.8）による停止。
    *
@@ -139,10 +156,22 @@ export class LoopController {
    * 「waitingReplyも並列の枠を占める」という状態と整合する。
    */
   private paused = false;
+  /**
+   * 直近ターンの応答テキストの履歴（design.md §16.27、Issue #336）。`stallThreshold`件を
+   * 超えた古い分は持たない。`start()`・`stop()`で空に戻す（前のループ実行の履歴を
+   * 次の実行へ持ち越さない）。
+   */
+  private stallHistory: string[] = [];
 
   constructor(
     private readonly send: (text: string) => void | Promise<void>,
     private readonly onStatus: (status: LoopStatus) => void = () => undefined,
+    /**
+     * 停滞と判定するまでに必要な、同一応答の連続回数（design.md §16.27）。
+     * `agent.workflows.stallRepeatCount`（`config.ts`）の値を呼び出し側が渡す想定。
+     * `LoopController`自身はvscodeに依存させないため、設定の読み出しは呼び出し側の責務。
+     */
+    private readonly stallThreshold: number = DEFAULT_STALL_REPEAT_COUNT,
   ) {}
 
   getStatus(): LoopStatus {
@@ -185,6 +214,7 @@ export class LoopController {
   /** ループを開始し、1回目の指示を送る。 */
   start(plan: LoopPlan): void {
     this.plan = plan;
+    this.stallHistory = [];
     this.status = {
       running: true,
       iteration: 0,
@@ -214,6 +244,7 @@ export class LoopController {
     this.plan = undefined;
     this.sawBusy = false;
     this.paused = false;
+    this.stallHistory = [];
     this.status = { ...this.status, running: false, stopReason: reason };
     this.onStatus(this.status);
     return true;
@@ -264,6 +295,19 @@ export class LoopController {
     }
     if (plan.condition !== '' && declaresDone(state)) {
       this.stop('done');
+      return;
+    }
+    // 停滞判定（design.md §16.27、Issue #336）。回数上限に達する前に、同じ応答が
+    // `stallThreshold`回連続していないかを見る。履歴の更新は判定の対象になった
+    // ターンの直後、maxReachedの判定より先に行う——停滞と回数切れが同時に成立しうる
+    // 最終ターンでは、進捗の無さそのものを理由にできる停滞判定を優先する
+    this.stallHistory = pushTurnSignature(
+      this.stallHistory,
+      extractTurnSignature(state),
+      this.stallThreshold,
+    );
+    if (detectStalledLoop(this.stallHistory, this.stallThreshold)) {
+      this.stop('stalled');
       return;
     }
     if (this.status.iteration >= plan.maxIterations) {

@@ -1,4 +1,4 @@
-import type { ChatItem, ChatState } from '../appserver/chatState';
+import { lastNonEmptyAgentMessageText, type ChatState } from '../appserver/chatState';
 import { stripControlChars } from './sanitize';
 
 /**
@@ -21,18 +21,8 @@ export const MAX_SUMMARY_LENGTH = 120;
  */
 export function buildResponseSummary(state: ChatState): string {
   const source =
-    state.turnResultText !== '' ? state.turnResultText : lastAgentMessageText(state.items);
+    state.turnResultText !== '' ? state.turnResultText : lastNonEmptyAgentMessageText(state.items);
   return firstLineOf(source);
-}
-
-function lastAgentMessageText(items: readonly ChatItem[]): string {
-  for (let i = items.length - 1; i >= 0; i -= 1) {
-    const item = items[i];
-    if (item !== undefined && item.kind === 'agentMessage' && item.text.trim() !== '') {
-      return item.text;
-    }
-  }
-  return '';
 }
 
 /**
