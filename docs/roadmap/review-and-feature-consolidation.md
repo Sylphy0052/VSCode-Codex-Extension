@@ -21,7 +21,7 @@
 
 - [ux-improvements.md](ux-improvements.md) — R1〜R11。**全項目完了済み**（epic #297 もクローズ）。
   記録として残してある
-- [workflow-autonomy.md](workflow-autonomy.md) — W1〜W5。本ロードマップの WF-E が担当する
+- [workflow-autonomy.md](workflow-autonomy.md) — W1〜W12。本ロードマップの WF-E が担当する
 - [chat-conversation-parity.md](chat-conversation-parity.md) — X1〜X3。WF-F が担当する
 - 本ドキュメント — 上の8項目と全体レビューの26指摘を統合した、7ワークフローの分割と運用規約
 
@@ -102,14 +102,24 @@
 
 ### 第2波 機能の追加（並列2）
 
-- **WF-E ワークフローの自律性と安全な統制**（6項目、詳細は [workflow-autonomy.md](workflow-autonomy.md)）
-  - W1 mainへの最終マージに人の承認を必須にする（[#335](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/335)）
+- **WF-E ワークフローの自律性と安全な統制**（12項目、詳細は [workflow-autonomy.md](workflow-autonomy.md)）
+  - W1 mainへの最終マージをオーケストレーターが判断する（[#335](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/335)）
   - W2 タスクのループ・停滞を検知して止める（[#336](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/336)）
   - W3 生成したワークフローの分解が妥当かをレビューする段を足す（[#337](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/337)）
   - W4 オーケストレーターがタスクを追加・削除・依存変更できるようにする（[#338](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/338)）
   - W5 PR/MRのレビュー結果を取り込んでタスクへ反映する（[#339](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/339)）
   - W6 タスクごとにIssueを起票し、PRのレビューを経てマージする（後述。Issueは未起票）
-  - 依存: W2←W1 / W4←W2 / W5←W4 / W6←W1
+  - W7 タスクからオーケストレーターへ判断を仰ぐ経路を作る（Issueは未起票）
+  - W8 オーケストレーターからユーザーへ確認する経路を作る（Issueは未起票）
+  - W9 タスク間の直接メッセージングを廃し、オーケストレーターの中継にする（Issueは未起票）
+  - W10 中断からの自動再開（Issueは未起票）
+  - W11 CIの完了待ちとブランチ保護への対応（Issueは未起票）
+  - W12 runをまたぐ統括（Issueは未起票）
+  - 依存: W2←W1 / W7←W9 / W8←W7 / W4←W2, W8 / W5←W4 / W6←W1 / W11←W1 /
+    W12←W1, W7, W8, W9, W10
+  - **W6〜W12 は2026-08-22に追加した**（Issue #497）。同日、この拡張のワークフロー機能を使わずに
+    人手で7ワークフローを回した実運用から出た要求による。あわせてW1・W4の方針を
+    「人の承認を必須にする」から「オーケストレーターが判断し、人への確認は最低限」へ転換した
   - 前提: WF-AとWF-Bの完了（`runner.ts` / `forge.ts` / `planner.ts` / `roadmap.ts` を共有する）。
     両者とも完了済み（2026-08-22、WF-A: PR #447 / WF-B: PR #429）
   - 事実: WF-A2（[#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466)）も
@@ -226,7 +236,7 @@ epic Issueは各ワークフローの開始時に起票し、採番できた時�
 | WF-B 生成・安全系 | 1 | 4 | [#350](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/350) | `wf/wf-b/integration` | 完了（PR [#429](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/429)、mainへマージ済み。統合ブランチは削除済み） |
 | WF-C チャットUIの土台 | 1 | 9 | [#351](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/351) | `wf/wf-c/integration` | 完了（PR [#431](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/431)、mainへマージ済み。統合ブランチは削除済み） |
 | WF-D リポジトリ基盤 | 1 | 2 | [#353](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/353) | `wf/wf-d/integration` | 完了（PR [#394](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/394)、mainへマージ済み。統合ブランチは削除済み） |
-| WF-E ワークフローの自律性 | 2 | 6 | [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341) | `wf/wf-e/integration` | WF-A2（#466）の完了待ち（`runner.ts` / `forge.ts` が交差するため） |
+| WF-E ワークフローの自律性 | 2 | 12 | [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341) | `wf/wf-e/integration` | WF-A2（#466）の完了待ち（`runner.ts` / `forge.ts` が交差するため） |
 | WF-F チャットの会話操作と表示 | 2 | 3 | [#340](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/340) | `wf/wf-f/integration` | 着手（第1波が全完了。WF-A2とファイルが交差しない） |
 | WF-G 横断の仕上げ | 3 | 2 | 未採番 | `wf/wf-g/integration` | 第2波の完了待ち |
 
