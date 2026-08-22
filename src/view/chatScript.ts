@@ -107,6 +107,7 @@ export function chatScript(
     subAgentActivity: 'サブエージェント',
     collabAgentToolCall: 'サブエージェント操作',
     autoApprovalReview: '自動承認レビュー',
+    sideQuestion: '脇道の質問',
   };
 
   /** ホスト側から渡されたレビューボタンの動作。 */
@@ -603,10 +604,13 @@ export function chatScript(
         ? lines.slice(lines.length - MAX_VISIBLE_LINES).join('\\n')
         : primary;
 
-    // Markdownとして解釈するのは通常の発言・応答（userMessage/agentMessage）だけ。
-    // commandExecution・reasoningは折りたたみ含め従来どおり生テキストのまま（issue #290）
+    // Markdownとして解釈するのは通常の発言・応答（userMessage/agentMessage）と
+    // 脇道の質問（sideQuestion、issue #334。質問と応答を1本文にまとめており、応答部分は
+    // 普通の発言と同じ体裁で見せたい）。commandExecution・reasoningは折りたたみ含め
+    // 従来どおり生テキストのまま（issue #290）
     const useMarkdown =
-      RENDER_MARKDOWN && (item.kind === 'userMessage' || item.kind === 'agentMessage');
+      RENDER_MARKDOWN &&
+      (item.kind === 'userMessage' || item.kind === 'agentMessage' || item.kind === 'sideQuestion');
     const bodyMode = useMarkdown ? 'markdown' : 'text';
     if (node.bodyMode !== bodyMode || node.bodyKey !== shown) {
       node.bodyMode = bodyMode;

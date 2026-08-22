@@ -51,6 +51,21 @@ export const CODEX_PSEUDO_COMMANDS: readonly PseudoCommand[] = [
 ];
 
 /**
+ * Claude Code画面向けの擬似コマンド（issue #334、design.md §14.62）。
+ *
+ * `/btw`（脇道の質問）だけを`CODEX_PSEUDO_COMMANDS`から抜き出したもの。`/compact`と
+ * `/init`はClaude Code側では扱わない（`/compact`はCLI組込コマンド・画面のボタンの
+ * 両方で既に完結しており、`/init`に相当する専用の導線も無い）。ここへ`CODEX_PSEUDO_COMMANDS`
+ * をそのまま流用すると、Claude Code画面で`/compact`や`/init`と打ったときに「拡張機能側の
+ * 機能」として静かに素通しされ、Codex専用の後始末（`runGenerateAgentsFile`等）が無いまま
+ * 何も起きない状態になる（Codex側の挙動は変えない、という制約とは別に、Claude Code側の
+ * 既存の`/compact`ボタンの経路とも重複してしまう）。
+ */
+export const CLAUDE_PSEUDO_COMMANDS: readonly PseudoCommand[] = CODEX_PSEUDO_COMMANDS.filter(
+  (command) => command.action === 'sideQuestion',
+);
+
+/**
  * 擬似コマンドの引数を仕上げる。前後の空白を落とし、空なら「引数が無い」を表す
  * `undefined` を返す。`/btw` のように引数（質問文）が必須の擬似コマンドで使う。
  */

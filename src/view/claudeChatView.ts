@@ -10,6 +10,12 @@ import {
 } from '../appserver/chatState';
 import { debugLogCandidates } from '../claude/cliLocator';
 import { describeForkFromTurnError } from '../claude/forkFromTurn';
+import {
+  finishedSideQuestionDisplay,
+  pendingSideQuestionDisplay,
+  progressSideQuestionDisplay,
+} from '../claude/sideQuestion';
+import type { SideQuestionHistoryEntry } from '../claude/control';
 import type { ClaudeSessionStore } from '../claude/sessionStore';
 import { ClaudeStreamSession, type ClaudeSpawnPort } from '../claude/streamSession';
 import { transcriptItems } from '../claude/transcript';
@@ -29,6 +35,13 @@ import type { FileSystemPort, MemoryFileSystemPort, SymlinkResolution } from '..
 import { nodeMemoryFileSystem } from '../session/nodeFileSystem';
 import { ClaudeUsageProbe } from '../claude/usageProbe';
 import { CommandCatalog } from '../provider/commandCatalog';
+import {
+  CLAUDE_PSEUDO_COMMANDS,
+  routePseudoCommand,
+  trimmedArgsOrUndefined,
+  withPseudoCommands,
+  type PseudoCommandCall,
+} from '../provider/pseudoCommands';
 import type { SlashCommand } from '../provider/slashCommands';
 import { AttachmentBox } from '../provider/attachments';
 import { MESSAGING_MCP_SERVER_NAME } from '../orchestrator/messaging';
@@ -127,6 +140,13 @@ interface ClaudePanel extends BaseChatPanel {
   lastPostAt?: number | undefined;
   /** 直近に送った会話項目。`buildItemsDelta`が次回との差分を取るための基準。 */
   sentItems?: readonly ChatItem[] | undefined;
+  /**
+   * このタブで送った脇道の質問の履歴（issue #334、design.md §14.62）。
+   *
+   * `side_question` の `history` にそのまま渡す。本流の会話（`entry.session`の
+   * transcript）とは別物で、このタブを閉じれば消える（拡張機能側にも永続化しない）。
+   */
+  sideQuestionHistory: SideQuestionHistoryEntry[];
 }
 
 /**
@@ -317,7 +337,11 @@ export class ClaudeChatViewManager
       fromCli.length > 0
         ? fromCli
         : (this.commands ??= await this.catalog.forClaude(this.claudeHome, workspaceFolderPaths()));
-    void entry.panel.webview.postMessage({ type: 'commands', commands });
+    // `/btw`（脇道の質問、issue #334）はCLIの一覧に無いため、拡張機能側で先頭へ足す
+    void entry.panel.webview.postMessage({
+      type: 'commands',
+      commands: withPseudoCommands(CLAUDE_PSEUDO_COMMANDS, commands),
+    });
   }
 
   /**
@@ -711,6 +735,71 @@ export class ClaudeChatViewManager
   }
 
   /**
+   * 擬似コマンドを実行する。CLIへは何も送らない（`chatView.ts`の`runPseudoCommand`と
+   * 同じ考え方）。Claude Code画面は`CLAUDE_PSEUDO_COMMANDS`（`/btw`のみ）しか候補に
+   * 出さないため、ここへ来る要求は必ず`sideQuestion`になる。
+   */
+  private async runPseudoCommand(entry: ClaudePanel, call: PseudoCommandCall): Promise<void> {
+    if (call.action !== 'sideQuestion') {
+      // CLAUDE_PSEUDO_COMMANDSに無い動作がここへ来ることは無いが、将来増えたときに
+      // 黙って何も起きない状態を作らないよう、判る形で残す
+      this.log.warn(`Claude Code画面が扱わない擬似コマンドです: ${call.name}`);
+      return;
+    }
+    const question = trimmedArgsOrUndefined(call.args);
+    if (question === undefined) {
+      void vscode.window.showErrorMessage(
+        '脇道の質問を入力してください（例: /btw 今のタイムゾーンは？）',
+      );
+      return;
+    }
+    await this.startSideQuestion(entry, question);
+  }
+
+  /**
+   * 脇道の質問を送る（issue #334、design.md §14.62、Codexの `/btw` 相当）。
+   *
+   * Codex側（`chatView.ts`の`startSideQuestion`）は`thread/fork`で新しいタブを開き、
+   * そこへ普通の会話として質問と応答を差し込む。Claude Codeの`side_question`は
+   * 新しいセッションを作らない1往復の制御要求のため、同じタブの中に
+   * `kind:'sideQuestion'`の1項目として残す（`ClaudeStreamSession.noteSideQuestion`）。
+   * これは実際のCLIとのやり取り（transcript）には一切乗らない、拡張機能側だけの表示
+   * （design.md §14.62で実測済み）。
+   *
+   * このタブで過去に送った脇道の質問（`entry.sideQuestionHistory`）を`history`として
+   * 添え、`/btw`を連続で送ったときに前のやり取りを踏まえられるようにする
+   * （本流の会話そのものは踏まえない。`control.ts`の`buildSideQuestionRequest`参照）。
+   */
+  private async startSideQuestion(entry: ClaudePanel, question: string): Promise<void> {
+    const id = `sideQuestion:${randomUUID()}`;
+    entry.session.noteSideQuestion(id, pendingSideQuestionDisplay(question));
+
+    const result = await entry.session.askSideQuestion(
+      question,
+      entry.sideQuestionHistory,
+      (progress) => {
+        const display = progressSideQuestionDisplay(question, progress);
+        if (display !== undefined) {
+          entry.session.noteSideQuestion(id, display);
+        }
+      },
+    );
+
+    entry.session.noteSideQuestion(id, finishedSideQuestionDisplay(question, result));
+    if (result.ok && result.response !== undefined) {
+      const historyEntry: SideQuestionHistoryEntry = {
+        question,
+        response: result.response,
+        fallbackNotice:
+          result.refusalFallback === undefined
+            ? undefined
+            : `${result.refusalFallback.originalModel} が拒否したため ${result.refusalFallback.fallbackModel} が応答`,
+      };
+      entry.sideQuestionHistory = [...entry.sideQuestionHistory, historyEntry];
+    }
+  }
+
+  /**
    * skillsを読み直す（issue #202、design.md TP-90）。設定パネルの「読み直す」ボタンから
    * `claude.reloadSkills` コマンド経由で呼ばれる（`newSession`と同じ、設定パネルの
    * webview→VS Codeコマンド→この画面の管理クラス、という橋渡し。設定パネルは
@@ -910,6 +999,7 @@ export class ClaudeChatViewManager
       finishedListeners: [],
       approvalResolvedListeners: [],
       notifiedApprovalRequestIds: new Set(),
+      sideQuestionHistory: [],
     };
     return entry;
   }
@@ -1261,6 +1351,13 @@ export class ClaudeChatViewManager
         const inputMode = routeInputMode(text);
         if (inputMode !== undefined) {
           void this.runInputMode(entry, inputMode);
+          return;
+        }
+        // `/btw`（脇道の質問、issue #334）はCLIへ送らず拡張機能側の機能として扱う。
+        // CLIへ送っても普通の発言として素通しされるだけ（`pseudoCommands.ts`参照）
+        const pseudo = routePseudoCommand(CLAUDE_PSEUDO_COMMANDS, text);
+        if (pseudo !== undefined) {
+          void this.runPseudoCommand(entry, pseudo);
           return;
         }
         this.dispatch(entry, text, true);
