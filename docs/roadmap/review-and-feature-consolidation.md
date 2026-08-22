@@ -72,11 +72,12 @@
     `integration.ts`, `pseudoWorktree.ts`, `messaging.ts`, `scheduler.ts`, `src/extension.ts`,
     `src/session/*`, `src/claude/sessionStore.ts`, `src/util/paths.ts`, `src/codex/cliLocator.ts`
 
-- **WF-B 生成・安全系**（3項目）
+- **WF-B 生成・安全系**（4項目）
   - T10 外部由来テキストの整形を1モジュールへ集約し、全プロンプト経路をそこへ通す
   - T15 ワークフロー生成（planner）の3件の不具合
   - T16 ロードマップMarkdownのパースを堅くする
-  - 依存: T15←T10 / T16←T10, T15
+  - T27 `slugifyGoal` の前処理にあるReDoSで長いゴール文がUIスレッドを止める（着手後に見つけて足した項目）
+  - 依存: T15←T10 / T16←T10, T15 / T27←T15
   - ファイル: `src/orchestrator/workflow.ts`, `roadmap.ts`, `planner.ts`
 
 - **WF-C チャットUIの土台**（9項目）
@@ -207,7 +208,7 @@ epic Issueは各ワークフローの開始時に起票し、採番できた時�
 | ワークフロー | 波 | 項目数 | epic Issue | 統合ブランチ |
 | --- | --- | --- | --- | --- |
 | WF-A オーケストレーター実行系 | 1 | 11 | 未採番 | `wf/wf-a/integration` |
-| WF-B 生成・安全系 | 1 | 3 | [#350](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/350) | `wf/wf-b/integration` |
+| WF-B 生成・安全系 | 1 | 4 | [#350](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/350)（完了） | `wf/wf-b/integration`（mainへマージ済み・削除） |
 | WF-C チャットUIの土台 | 1 | 9 | 未採番 | `wf/wf-c/integration` |
 | WF-D リポジトリ基盤 | 1 | 2 | 未採番 | `wf/wf-d/integration` |
 | WF-E ワークフローの自律性 | 2 | 6 | [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341) | `wf/wf-e/integration` |
