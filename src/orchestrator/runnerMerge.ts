@@ -267,6 +267,14 @@ function finalizeTaskPullRequestFlow(
  * タスクが`merging`になった直後に呼ぶ。未コミットの変更を回収してからマージを試みる。
  * `onTaskFinished`（通常経路）と`resumeMergeAfterReload`（リロード後の再開）の両方から
  * 呼ばれるため、`LiveTask`ではなくcwd/branch/originCommitを直接受け取る。
+ *
+ * **この関数はrejectしない。** `runner.ts`の`onTaskFinished`と`retryMerge`（本ファイル）は
+ * この関数を`void`で発火するため、内部で投げると呼び出し元が未ハンドルrejectになり、
+ * タスクが`merging`のまま統合worktreeの枠を永久に占有する（`getRunOutcome`は`merging`を
+ * `running`扱いするため、runの終了判定も進まない）。疑似worktree側（`integratePseudoWorktree`。
+ * Issue #376）が全体をtry/catchで包んで`markMergeFailed`へ落としているのと同じ形に揃える
+ * （Issue #437）。`nodeGitCommandRunner`/`nodeCliCommandRunner`は基本的にresolveしか返さない
+ * ため実害は起きにくいが、ENOSPC等の想定外の例外が起きたときの安全網として必要
  */
 export async function startMerge(
   self: WorkflowRunnerInternals,
@@ -292,20 +300,31 @@ export async function startMerge(
     return;
   }
 
-  // design.md §16.17「タスク完了時のコミット」2.〜4.
-  const commitResult = await commitUncommittedChangesIfNeeded(taskCwd, taskId, self.deps.git, task.type);
-  if (!commitResult.ok) {
-    self.deps.log.error(
-      `[workflow ${runId}/${taskId}] 未コミットの変更の回収に失敗しました: ${commitResult.message}`,
-    );
+  try {
+    // design.md §16.17「タスク完了時のコミット」2.〜4.
+    const commitResult = await commitUncommittedChangesIfNeeded(taskCwd, taskId, self.deps.git, task.type);
+    if (!commitResult.ok) {
+      self.deps.log.error(
+        `[workflow ${runId}/${taskId}] 未コミットの変更の回収に失敗しました: ${commitResult.message}`,
+      );
+      live.runState = markMergeFailed(live.runState, live.def.tasks, taskId);
+      void self.persist(runId);
+      self.notify(runId);
+      self.pump(runId);
+      return;
+    }
+
+    await attemptMerge(self, runId, taskId, task, live.integration, taskCwd, taskBranch, originCommit);
+  } catch (e) {
+    // gitのメイン経路で想定外の例外が起きた場合の安全網（Issue #437）。他の失敗を
+    // `markMergeFailed`に落とすのと同じ扱いにする
+    const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+    self.deps.log.error(`[workflow ${runId}/${taskId}] マージ中に例外が発生しました: ${message}`);
     live.runState = markMergeFailed(live.runState, live.def.tasks, taskId);
     void self.persist(runId);
     self.notify(runId);
     self.pump(runId);
-    return;
   }
-
-  await attemptMerge(self, runId, taskId, task, live.integration, taskCwd, taskBranch, originCommit);
 }
 
 /**
@@ -765,6 +784,11 @@ async function startMergeResolution(
  * 必ず解放する**（`finally`。Issue #412。解放漏れは以後そのrunのマージが全て詰まる
  * デッドロックになる）。`abortAndBlock`が先に解放していても、解放は冪等なので二重解放に
  * ならない。
+ *
+ * **この関数はrejectしない。** `startMergeResolution`の`session.onFinished`はこの関数を
+ * `void`で発火するため、`finishMergeResolution`が投げると呼び出し元が未ハンドルrejectに
+ * なり、タスクが`merging`のまま統合worktreeの枠を永久に占有する（Issue #437）。gitの
+ * メイン経路の他の失敗を`markMergeFailed`に落とすのと同じ扱いにする
  */
 async function onMergeResolutionFinished(
   self: WorkflowRunnerInternals,
@@ -777,6 +801,18 @@ async function onMergeResolutionFinished(
 ): Promise<void> {
   try {
     await finishMergeResolution(self, runId, taskId, task, integration, reason, lease);
+  } catch (e) {
+    const live = self.runs.get(runId);
+    if (live !== undefined) {
+      const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+      self.deps.log.error(
+        `[workflow ${runId}/${taskId}] 衝突解決の後始末で例外が発生しました: ${message}`,
+      );
+      live.runState = markMergeFailed(live.runState, live.def.tasks, taskId);
+      void self.persist(runId);
+      self.notify(runId);
+      self.pump(runId);
+    }
   } finally {
     self.integrationQueue.releaseLease(lease);
   }
