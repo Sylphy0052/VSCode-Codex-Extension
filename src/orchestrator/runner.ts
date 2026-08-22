@@ -378,6 +378,29 @@ export interface WorkflowWarning {
      */
     | 'pseudoWorktreeReflectBlocked'
     /**
+     * 疑似worktree（design.md §16.20）の反映（`reflectPseudoWorktree`）を、`retryMerge`/
+     * `retryTask`/`continueTask`による再開後の2周目以降では行わなかった（Issue #432-2）。
+     *
+     * `reflectIntegrationToWorkspace`が比較に使う`live.pseudo.baseline`はrun開始時に
+     * 一度だけ取ったスナップショットで、1周目の反映後も更新されない。そのため2周目を
+     * 素通しすると必ず`pseudoWorktreeReflectBlocked`（「実行中にワークスペースが変更
+     * された」という誤検知）になってしまうため、2周目以降は`reflectPseudoWorktree`
+     * 自体を呼ばないようにした。だが`integratePseudoWorktree`（統合キューへの追加）は
+     * runの周回に関わらず呼ばれるため、2周目に新たに`done`になったタスクの統合内容は
+     * 実在し、それを反映する経路は`reflectPseudoWorktree`しかない。呼ばないだけでは
+     * その統合内容が警告なしにワークスペースへ届かないまま消えるため、事実どおりの
+     * この警告だけは出す。
+     *
+     * 暫定対応であり、真の修正（`baseline`を1周目の反映成功後に更新し、2周目以降も
+     * 正しく反映できるようにすること）はIssue #511へ切り出し済み。
+     *
+     * **Issue #511が入ったら、この警告の送出箇所（`runner.ts`の`pump()`終了ブロック）と
+     * このkindの定義そのものを削除すること。** 真の修正が入れば2周目以降も正しく反映
+     * されるため、この警告は事実に反するものになる。Issue #511の受入基準にも同じことを
+     * 明記してある。
+     */
+    | 'pseudoWorktreeReflectSkipped'
+    /**
      * ゴール文から生成したワークフロー（`planner.ts`）が、既定の安全設定を上書きする
      * 指定（`autoApprove: true` / 非空の `allow` / `sandbox` や `approvalMode` の緩和）を
      * 含んでいる（design.md §16.9「分解セッションの制限」）。他のkindは実行時に動的へ
@@ -765,6 +788,15 @@ export interface LiveRun {
   runState: RunState;
   tasks: Map<string, LiveTask>;
   finished: boolean;
+  /**
+   * run終了時の後始末（`pump()`の終了ブロック）を実行済みかどうか（design.md §16.5、Issue #432-2）。
+   *
+   * `finished`は`retryMerge`/`retryTask`/`continueTask`が再開の起点として`false`へ戻すため、
+   * run全体が再び終了状態へ確定すると終了ブロックの2周目が走りうる。`finishedNotified`は
+   * それとは別に**一度立てたら戻さない**（再開そのものは正当な操作であり、後始末を1度に
+   * 絞りたいだけなので、`finished`と違って再開時にリセットしない）。
+   */
+  finishedNotified: boolean;
   /** design.md §16.8「警告欄」。発生した順に積む（`maxReached` はスナップショット生成時に動的に足す）。 */
   warnings: WorkflowWarning[];
   /**
@@ -1450,6 +1482,7 @@ export class WorkflowRunner {
       runState: createRunState(def.tasks),
       tasks: new Map(),
       finished: false,
+      finishedNotified: false,
       warnings,
       integration,
       forge,
@@ -2176,29 +2209,84 @@ export class WorkflowRunner {
     if (outcome !== 'running' && !live.finished) {
       live.finished = true;
       this.deps.log.info(`[workflow ${runId}] 実行が終了しました: ${outcome}`);
-      // 全タスクがdoneになったときだけ統合→mainのPR/MRを作る（design.md §16.18）
+      // 全タスクがdoneになったときだけ統合→mainのPR/MRを作る（design.md §16.18）。
+      //
+      // ここは`finishedNotified`で絞らない。2周目がここへ到達する（＝`outcome ===
+      // 'succeeded'`）には、1周目の時点で`retryMerge`/`retryTask`/`continueTask`の
+      // いずれかが起きている必要があるが、その3経路はいずれも1周目の対象タスクが
+      // `blocked`（`retryMergeState`）/`failed`または`skipped`（`retryTask`）/
+      // `failed(maxReached)`（`continueTask`）であることを前提にしており、これらは
+      // どれも`getRunOutcome`を`succeeded`以外へ倒す（`anyFailed`/`anyBlocked`が立つ）。
+      // つまり1周目が`succeeded`だった run は、この3経路のどれも呼べる状態にならない。
+      // したがって2周目の`succeeded`到達（＝`finalizeForge`の2回目の呼び出し）は
+      // 現状のコードでは起こらない（Issue #432-2）
       if (outcome === 'succeeded') {
         void this.finalizeForge(runId);
       }
       // ロードマップの更新（design.md §16.19）もrunの結果を問わず行う。`done`になった
       // タスクの分だけチェックを入れる処理なので、runが途中で失敗していても、終わった分は
-      // ロードマップへ反映されているのが人の期待に近い
+      // ロードマップへ反映されているのが人の期待に近い。
+      //
+      // ここも`finishedNotified`で絞らない。`applyRunCompletionToFile`
+      // （`roadmap.ts`）は現在のロードマップファイルとの差分（`updatedItemIds`）を
+      // 計算し、変更が無ければ書き戻さないため2周目に再実行しても無害（冪等）。
+      // むしろ2周目で新たに`done`になったタスクのチェックを反映する必要があるため、
+      // 絞らない方が正しい（Issue #432-2）
       if (live.def.roadmap !== undefined) {
         void this.applyRoadmapCompletion(runId);
       }
       // 疑似worktree（design.md §16.20）はrunの結果を問わず反映する（forgeとは異なり
-      // `succeeded`限定にしない。`reflectPseudoWorktree`自身のJSDoc参照）
-      if (live.pseudo !== undefined) {
+      // `succeeded`限定にしない。`reflectPseudoWorktree`自身のJSDoc参照）。
+      //
+      // ただし`retryMerge`/`retryTask`/`continueTask`による再開後の2周目はここで絞る
+      // （Issue #432-2）。`reflectIntegrationToWorkspace`は`live.pseudo.baseline`
+      // （run開始時に一度だけ取ったスナップショット）とワークスペースの現在値を比較して
+      // 差分が無いことを確かめてから反映する。1周目で既に反映が成功していると、その時点で
+      // ワークスペースは`baseline`から意図的に変わっているため、2周目は「実行中にワーク
+      // スペースが変更された」という**誤検知**の警告（`pseudoWorktreeReflectBlocked`）で
+      // 反映を拒否してしまう。`baseline`はrun中ずっと固定で1周目の反映後も更新されない
+      // （`reflectIntegrationToWorkspace`自身にもJSDoc参照）ため、絞らないと必ずこの
+      // 誤検知が起きる
+      if (live.pseudo !== undefined && !live.finishedNotified) {
         void reflectPseudoWorktree(this.internals, runId);
+      } else if (live.pseudo !== undefined && live.finishedNotified) {
+        // 2周目以降はここへ来る。反映自体は行わないが、`integratePseudoWorktree`
+        // （タスク完了のたびに呼ばれ、runの周回を問わない）が2周目に新たに`done`に
+        // なったタスクの分を統合キューへ積んでいる可能性があるため、それがワーク
+        // スペースへ届いていないという事実だけは`live.warnings`へ残す
+        // （`pseudoWorktreeReflectSkipped`、Issue #432-2）。反映そのものを試みていない
+        // ため`pseudoWorktreeReflectBlocked`とは別kindにする。`persistFailed`
+        // （Issue #379）が採った「同一kindの直近1件へ丸める」規律に揃える。
+        //
+        // 暫定対応。真の修正（`baseline`を1周目の反映成功後に更新する）はIssue #511。
+        // **Issue #511が入ったら、この`else if`の分岐ごと削除すること。**
+        live.warnings = live.warnings.filter((w) => w.kind !== 'pseudoWorktreeReflectSkipped');
+        live.warnings.push({
+          kind: 'pseudoWorktreeReflectSkipped',
+          taskId: undefined,
+          message:
+            '疑似worktreeの反映は初回の終了時にのみ行われるため、再開後に統合された内容は' +
+            'ワークスペースへ反映されていません（暫定対応。真の修正はIssue #511）。',
+        });
+        this.notify(runId);
       }
       // タスク間メッセージング（design.md §16.21）のMCPサーバはrunの結果を問わず閉じる。
       // 以降新しいタスクは開始されない（`live.finished`）ため、これ以上の接続は要らない
       // オーケストレーターへの最後の通知は、MCPサーバを閉じる前に積む（送信そのものは
       // CLIへの本文送信なので順序に依存しないが、「以降ツールは使えない」を伝える文面と
-      // 実際の閉鎖の順序を合わせておく）
-      notifyOrchestratorRunFinished(this.internals, runId, outcome);
-      // 後始末は`dispose()`と共通の関数へ寄せてある（Issue #374）。冪等なので、
-      // run終了の直後に`dispose()`が来ても二重解放にならない
+      // 実際の閉鎖の順序を合わせておく）。
+      //
+      // `notifyOrchestratorRunFinished`はrunにつき1度だけ送る（Issue #432-2）。
+      // `retryMerge`/`retryTask`/`continueTask`は再開の起点として`live.finished`を
+      // `false`へ戻すため、この終了ブロックは再開後にもう一周走りうる。`notifyOrchestrator`
+      // （`runnerOrchestrator.ts`）は件数上限しか持たず重複排除しないため、絞らないと
+      // 「実行が終了しました」がオーケストレーターへ二重に届く
+      if (!live.finishedNotified) {
+        notifyOrchestratorRunFinished(this.internals, runId, outcome);
+        live.finishedNotified = true;
+      }
+      // `closeMessaging`自体は`live.messaging === undefined`なら即returnする既に冪等な
+      // 実装なので、`finishedNotified`では絞らない（絞ると意味が重複するだけ）
       closeMessaging(live);
     }
   }

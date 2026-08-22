@@ -3119,6 +3119,67 @@ tasks:
   });
 
   /**
+   * Issue #432-2: `retryMerge`は再開の起点として`live.finished`を戻す（design.md §16.5参照）。
+   * 一度`blocked`でrunが終了しoutcomeが確定した後、`retryMerge`で再開して最終的に
+   * 全タスクがdoneになると、`pump()`の終了ブロックが2周目を走る。`notifyOrchestratorRunFinished`
+   * はrunにつき1度だけ送るべきで、2周目で重ねて送ってはいけない。
+   */
+  it('blockedで終了→再マージ成功→再度終了、の一連でnotifyOrchestratorRunFinishedが1回だけ送られる', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+    const resolutionSession = codexHost.sessions.at(-1);
+    resolutionSession?.finish('maxReached', { ...initialChatState });
+    await flush();
+    // 1周目: blockedで終了する
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+
+    // オーケストレーターへの通知はターン中は`pending`に溜まり、ターンが終わって
+    // （`busy: true → false`）初めて`session.send`へ渡る。実CLIの応答を模して
+    // 明示的にターンを終わらせないと`sentTexts`から観測できない
+    const flushOrchestratorTurn = (): void => {
+      const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession | undefined;
+      if (orchestrator === undefined) {
+        return;
+      }
+      orchestrator.emitState({ ...initialChatState, busy: true });
+      orchestrator.emitState({ ...initialChatState, busy: false });
+    };
+    const countRunFinishedNotices = (): number => {
+      const orchestrator = codexHost.orchestratorSessions[0];
+      const joined = orchestrator?.sentTexts.join('\n') ?? '';
+      return (joined.match(/ワークフローの実行が終了しました/g) ?? []).length;
+    };
+    flushOrchestratorTurn();
+    expect(countRunFinishedNotices()).toBe(1);
+
+    // 人が統合worktreeを手で直し、再マージを指示する。以降は依存先も含めて最後まで走らせる
+    git.resolveConflict();
+    expect(runner.retryMerge(runId, 'T1')).toBe(true);
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    codexHost.byTaskId('T3').finish('done', doneState('ok'));
+    await flush();
+    codexHost.byTaskId('T4').finish('done', doneState('ok'));
+    await flush();
+    flushOrchestratorTurn();
+
+    // 2周目: 今度はsucceededで終了する
+    expect(store.find(runId)?.tasks['T4']?.state).toBe('done');
+    expect(store.find(runId)?.haltedByUser).toBe(false);
+    // notifyOrchestratorRunFinishedはrunにつき1度だけ（2周目で重ねて送られない）
+    expect(countRunFinishedNotices()).toBe(1);
+  });
+
+  /**
    * 停止中の「再マージ」は、そのタスクのマージだけを走らせる（Issue #412のレビュー指摘B）。
    *
    * `retryMergeState`が`haltedByUser`を解除してしまうと、マージ成功→`markMergeSucceeded`が
@@ -5810,6 +5871,282 @@ tasks:
       const snapshot = runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2');
       expect(snapshot?.lastSentPrompt).not.toContain(rtlOverride);
       expect(snapshot?.lastSentPrompt?.includes('\n')).toBe(true);
+    });
+  });
+});
+
+/**
+ * Issue #432-2: run終了時の後始末（`pump()`の終了ブロック）はrunにつき1度だけ行う。
+ *
+ * `live.finished`は`retryMerge`/`retryTask`/`continueTask`が再開の起点として
+ * `false`へ戻す（design.md §16.5参照）。この3経路のいずれで再開しても、run全体が
+ * 再び終了状態へ確定した時点で`notifyOrchestratorRunFinished`を重ねて送ってはいけない。
+ */
+describe('WorkflowRunner: run終了処理はrunにつき1度だけ（Issue #432-2）', () => {
+  /**
+   * オーケストレーターへの通知はターン中は`pending`に溜まり、ターンが終わって
+   * （`busy: true → false`）初めて`session.send`へ渡る（`onOrchestratorStateChanged`）。
+   * テストでは実CLIの応答を模して明示的にターンを終わらせないと、送信済みの本文を
+   * `sentTexts`から観測できない。
+   */
+  const flushOrchestratorTurn = (codexHost: FakeHost): void => {
+    const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession | undefined;
+    if (orchestrator === undefined) {
+      return;
+    }
+    orchestrator.emitState({ ...initialChatState, busy: true });
+    orchestrator.emitState({ ...initialChatState, busy: false });
+  };
+
+  const countRunFinishedNotices = (codexHost: FakeHost): number => {
+    const orchestrator = codexHost.orchestratorSessions[0];
+    const joined = orchestrator?.sentTexts.join('\n') ?? '';
+    return (joined.match(/ワークフローの実行が終了しました/g) ?? []).length;
+  };
+
+  it('通常の1回で終わるrunでは、従来どおりnotifyOrchestratorRunFinishedが1回だけ送られる（誤検知防止）', async () => {
+    const YAML = `
+version: 1
+name: single-shot-test
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+    const { runner, codexHost, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/single.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    flushOrchestratorTurn(codexHost);
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(countRunFinishedNotices(codexHost)).toBe(1);
+  });
+
+  it('retryTask経由でも、失敗で終了→再実行成功→再度終了、の一連で1回だけ送られる', async () => {
+    const YAML = `
+version: 1
+name: retry-task-test
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+  - id: T2
+    dependsOn: [T1]
+    prompt: p2
+    done: d2
+`;
+    const { runner, codexHost, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/retry-task.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // 1周目: T1が失敗し、T2はskippedになってrunはfailedで終わる
+    codexHost.byTaskId('T1').finish('failed', { ...initialChatState, turnFailed: true });
+    await flush();
+    flushOrchestratorTurn(codexHost);
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('skipped');
+    expect(countRunFinishedNotices(codexHost)).toBe(1);
+
+    // 人がT1を再実行し、依存先T2も含めて最後まで走らせる
+    expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+    await flush();
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    flushOrchestratorTurn(codexHost);
+
+    // 2周目: 今度はsucceededで終わる
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+    // notifyOrchestratorRunFinishedはrunにつき1度だけ（2周目で重ねて送られない）
+    expect(countRunFinishedNotices(codexHost)).toBe(1);
+  });
+
+  it('continueTask経由でも、回数切れで終了→続けて成功→再度終了、の一連で1回だけ送られる', async () => {
+    const YAML = `
+version: 1
+name: continue-task-test
+tasks:
+  - id: T1
+    prompt: p
+    continuePrompt: つづき
+    maxIterations: 3
+    done: d
+  - id: T2
+    dependsOn: [T1]
+    prompt: p2
+    done: d2
+`;
+    const { runner, codexHost, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/continue-task.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // 1周目: T1が回数切れでfailed（maxReached）になり、T2はskippedでrunはfailedで終わる
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('maxReached', { ...initialChatState });
+    await flush();
+    flushOrchestratorTurn(codexHost);
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('skipped');
+    expect(countRunFinishedNotices(codexHost)).toBe(1);
+
+    // 人が「続ける」を選び、同じセッションのまま最後まで走らせる
+    expect(runner.continueTask(runId, 'T1')).toBe(true);
+    await flush();
+    t1.finish('done', doneState('ok'));
+    await flush();
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    flushOrchestratorTurn(codexHost);
+
+    // 2周目: 今度はsucceededで終わる
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+    // notifyOrchestratorRunFinishedはrunにつき1度だけ（2周目で重ねて送られない）
+    expect(countRunFinishedNotices(codexHost)).toBe(1);
+  });
+
+  /**
+   * Issue #432-2のレビュー・監査で追加確認された指摘: `reflectPseudoWorktree`を
+   * `finishedNotified`で絞ったことで、2周目以降は反映自体を試みなくなった。だが
+   * `integratePseudoWorktree`（タスク完了ごとに呼ばれる）はrunの周回を問わず統合
+   * キューへ積むため、2周目に新たに`done`になったタスクの統合内容は実在し、それを
+   * 反映する経路は`reflectPseudoWorktree`しかない。反映を絞る判断自体は維持しつつ、
+   * 「反映されていない」という事実どおりの警告（`pseudoWorktreeReflectSkipped`）を
+   * 1件だけ残すことを検証する。
+   */
+  describe('疑似worktree（design.md §16.20）の反映は絞るが、警告は事実どおりに残す', () => {
+    const PSEUDO_RETRY_YAML = `
+version: 1
+name: pseudo-retry-test
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+  - id: T2
+    dependsOn: [T1]
+    prompt: p2
+    done: d2
+`;
+
+    it('1周目の終了ではpseudoWorktreeReflectSkippedは積まれない（誤検知防止）', async () => {
+      const git = fakeGit({ notGitRepo: true });
+      const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+      const { runner, codexHost, store } = createHarness(PSEUDO_RETRY_YAML, {
+        git,
+        pseudoWorktree: { fs, exclude: [] },
+      });
+      const result = await runner.start('/repo/.agents/workflows/pseudo-retry.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      codexHost.byTaskId('T1').finish('failed', { ...initialChatState, turnFailed: true });
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+      const snapshot = runner.getSnapshot(runId);
+      expect(snapshot?.warnings.some((w) => w.kind === 'pseudoWorktreeReflectSkipped')).toBe(
+        false,
+      );
+    });
+
+    it(
+      'retryTask経由で2周目に終了すると、reflectPseudoWorktreeは呼ばれず、' +
+        'pseudoWorktreeReflectSkippedが1件積まれる',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, codexHost, store } = createHarness(PSEUDO_RETRY_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-retry.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        // 1周目: T1が失敗し、T2はskippedになってrunはfailedで終わる
+        // （疑似worktreeのbaseline取得のみ。T1の複製先には変更を加えない）
+        codexHost.byTaskId('T1').finish('failed', { ...initialChatState, turnFailed: true });
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+        expect(store.find(runId)?.tasks['T2']?.state).toBe('skipped');
+
+        // 人がT1を再実行し、依存先T2も含めて最後まで走らせる
+        expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+        await flush();
+        codexHost.byTaskId('T1').finish('done', doneState('ok'));
+        await flush();
+
+        // T2の複製先でファイルを変更する。統合（integratePseudoWorktree）自体は
+        // runの周回を問わず呼ばれるため、この変更は統合キューへ積まれるはず
+        const cloneDir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T2');
+        fs.setFile(path.join(cloneDir2, 'a.txt'), { size: 999, mtimeMs: 999 });
+        codexHost.byTaskId('T2').finish('done', doneState('ok'));
+        await flush();
+
+        // 2周目: 今度はsucceededで終わる
+        expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+        // 2周目の統合内容（a.txtの変更）はワークスペースへ反映されていない
+        // （reflectPseudoWorktreeが2周目は呼ばれないため）
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 10, mtimeMs: 100 });
+        const snapshot = runner.getSnapshot(runId);
+        const warnings = snapshot?.warnings.filter(
+          (w) => w.kind === 'pseudoWorktreeReflectSkipped',
+        );
+        expect(warnings).toHaveLength(1);
+        expect(warnings?.[0]?.message).not.toContain('実行中にワークスペースが変更された');
+      },
+    );
+
+    it('3回以上終了しても、pseudoWorktreeReflectSkippedは直近1件へ丸められる', async () => {
+      const YAML = `
+version: 1
+name: pseudo-retry-multi-test
+tasks:
+  - id: T1
+    prompt: p
+    continuePrompt: つづき
+    maxIterations: 5
+    done: d
+`;
+      const git = fakeGit({ notGitRepo: true });
+      const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+      const { runner, codexHost, store } = createHarness(YAML, {
+        git,
+        pseudoWorktree: { fs, exclude: [] },
+      });
+      const result = await runner.start('/repo/.agents/workflows/pseudo-retry-multi.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+
+      // 1周目: 回数切れでfailed（maxReached）
+      t1.finish('maxReached', { ...initialChatState });
+      await flush();
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+
+      // 2周目: continueTaskで続け、また回数切れにする
+      expect(runner.continueTask(runId, 'T1')).toBe(true);
+      await flush();
+      t1.finish('maxReached', { ...initialChatState });
+      await flush();
+
+      // 3周目: さらにcontinueTaskで続け、今度はdoneにする
+      expect(runner.continueTask(runId, 'T1')).toBe(true);
+      await flush();
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      const snapshot = runner.getSnapshot(runId);
+      const warnings = snapshot?.warnings.filter((w) => w.kind === 'pseudoWorktreeReflectSkipped');
+      expect(warnings).toHaveLength(1);
     });
   });
 });
