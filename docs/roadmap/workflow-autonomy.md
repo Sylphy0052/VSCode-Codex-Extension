@@ -115,7 +115,7 @@
 
 ## フェーズ2 詰まりを検知する
 
-- [ ] W2 タスクのループ・停滞を検知して止める
+- [x] W2 タスクのループ・停滞を検知して止める
   - 依存: W1
   - Issue: #336
   - 現状: [loopController.ts](../../src/loop/loopController.ts) の停止条件は6つ（`done` /
@@ -203,7 +203,7 @@
     [runner.ts](../../src/orchestrator/runner.ts) / [workflowView.ts](../../src/view/workflowView.ts) /
     [design.md](../design.md) §16.21
 
-- [ ] W7 タスクからオーケストレーターへ判断を仰ぐ経路を作る
+- [x] W7 タスクからオーケストレーターへ判断を仰ぐ経路を作る
   - 依存: W9
   - Issue: [#571](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/571)
   - 現状: タスクがオーケストレーターへ能動的に判断を仰ぐ道具が無い。`decide_approval` は
@@ -226,7 +226,7 @@
 
 - [ ] W8 オーケストレーターからユーザーへ確認する経路を作る
   - 依存: W7
-  - Issue: 未起票（着手時に起票する）
+  - Issue: [#583](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/583)
   - 現状: オーケストレーターが持つ8つのツールに、人へ問う道具が無い。`decide_approval` は
     **人の代わりにオーケストレーターが裁く**方向の道具で、向きが逆である
   - 変更: `ask_user` を足す。問いと選択肢（2〜4個）を取り、ワークフローViewへ出す。人が選ぶまで
@@ -253,7 +253,7 @@
 
 - [ ] W10 中断からの自動再開
   - 依存: なし
-  - Issue: 未起票（着手時に起票する）
+  - Issue: [#584](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/584)
   - 現状: リロード後の復元は実装済みで（[runnerRestore.ts](../../src/orchestrator/runnerRestore.ts)、
     design.md §16.11）、`workspaceState` に残ったrunをメモリへ戻し、`merging` で切れたものは
     マージからやり直す。**ただし復元したrunは自動では進まない。** 走行中だったタスクは中断扱いへ
@@ -350,9 +350,9 @@
 | W5 | #339 | `feat/339/import-review-comments` | §16.30 | W-J |
 | W6 | 未起票 | `feat/<IID>/task-issue-and-review` | §16.31 | W-K |
 | W7 | [#571](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/571) | `feat/571/ask-orchestrator` | §16.32 | W-L |
-| W8 | 未起票 | `feat/<IID>/ask-user` | §16.33 | W-M |
+| W8 | [#583](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/583) | `feat/583/ask-user` | §16.33 | W-M |
 | W9 | [#547](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/547) | `refactor/547/messaging-via-orchestrator` | §16.34 | W-N |
-| W10 | 未起票 | `feat/<IID>/auto-resume` | §16.35 | W-O |
+| W10 | [#584](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/584) | `feat/584/auto-resume` | §16.35 | W-O |
 | W11 | [#556](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/556) | `feat/556/ci-wait-and-update-branch` | §16.36 | W-P |
 | W12 | 未起票 | `feat/<IID>/program-of-runs` | §16.37 | W-Q |
 
