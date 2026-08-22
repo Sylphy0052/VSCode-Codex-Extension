@@ -511,9 +511,10 @@ export function markApprovalRejected(
  * 別の門が足されれば3回目が起きる。だから「どの門を見るか」ではなく「開始されない
  * `pending`を作らない」という不変条件の形で書いてある。
  *
- * **これは`retryMergeState`のJSDoc（Issue #412のレビュー指摘B）が「`isRunHalted`を
- * 判定に使ってはならない」と書いているのと矛盾しない。** あちらが答えるべき問いは
- * 「**人が**停止したか」（オーケストレーター制御ツールの停止判定・`runnerOrchestrator.ts`）
+ * **これは`runnerOrchestrator.ts`の`runHaltedByUserReason`のJSDoc（PR #503、107-108行付近）
+ * が「必ず`snapshot.haltedByUser`だけを見る。`isRunHalted`を使ってはならない」と書いて
+ * いるのと矛盾しない。** あちらが答えるべき問いは
+ * 「**人が**停止したか」（オーケストレーター制御ツールの停止判定）
  * であり`haltedByUser`を直接見る必要があるのに対し、ここで答えるべき問いは
  * 「**スケジューラはこのタスクを開始するのか**」であって、スケジューラ自身の門
  * （`nextTasksToStart`の`isRunHalted`）と同じ判定に揃えるのが正しい。
