@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { buildChatPanelOptions, renderShell, type ChatShellOptions } from '../../src/view/chatView';
+import { buildChatPanelOptions } from '../../src/view/chatView';
+import { renderShell, type ChatShellOptions } from '../../src/view/chatShared';
 import type { ReviewButtonConfig } from '../../src/view/chatScript';
 
 /**

@@ -4,11 +4,8 @@ import type { Logger } from '../../src/log';
 import type { FileSystemPort } from '../../src/session/ports';
 import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMentions';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
-import {
-  ChatViewManager,
-  STATE_POST_INTERVAL_MS,
-  type ChatActivity,
-} from '../../src/view/chatView';
+import { ChatViewManager } from '../../src/view/chatView';
+import { STATE_POST_INTERVAL_MS, type ChatActivity } from '../../src/view/chatShared';
 import { RECAP_INSTRUCTION } from '../../src/appserver/chatSession';
 import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
 import { __mock, ViewColumn, window as fakeWindow } from '../mocks/vscode';
@@ -386,6 +383,68 @@ describe('ChatViewManager', () => {
 
       expect(handlerA).toHaveBeenCalledTimes(1);
       expect(handlerB).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('接続断で保留中の承認を解放する（issue #354）', () => {
+    it('thread/start応答待ち（pendingStarts）に出た承認カードも、接続断で解放される', async () => {
+      const { manager, connection } = createManager();
+
+      // thread/startがまだ応答していない間はpanelsではなくpendingStartsに居る
+      // （design.md §16.10の3）。この状態で届いた承認要求も、接続断で解放されなければ
+      // ならない（レビュー指摘: handleConnectionLostがpanelsだけを見ていた問題の回帰防止）
+      const p1 = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+
+      const responded = connection.serverRequest(1, 'item/commandExecution/requestApproval', {
+        threadId: 'thread-A',
+        itemId: 'i1',
+        command: 'ls',
+        cwd: '/workspace/root/task-a',
+      });
+
+      connection.simulateDisconnect();
+
+      // 承認された扱いにならず、拒否側の値（decide(id, 'cancel')と同じ）で解決される
+      await expect(responded).resolves.toEqual({ decision: 'cancel' });
+
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p1;
+    });
+  });
+
+  describe('接続断でbusyが戻らない問題を直す（issue #420）', () => {
+    it('turn/start応答待ち中に接続が切れると、busyがfalse・turnFailedがtrueに戻る', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      const task = await p;
+
+      const states: { busy: boolean; turnFailed: boolean }[] = [];
+      task.onStateChanged((s) => states.push({ busy: s.busy, turnFailed: s.turnFailed }));
+
+      // send()はturn/startの応答が届く前にbusy: trueへ更新する。fakeConnectionは
+      // 明示的にresolveFirstするまで応答を保留するため、以降の状態はまだ
+      // 「応答待ち」のまま止まる
+      task.send('こんにちは');
+      await tick();
+      expect(states[states.length - 1]).toEqual({ busy: true, turnFailed: false });
+
+      // ここでapp-serverが落ちたとする。turn/startは二度と応答しないため、
+      // handleConnectionLostがreleasePendingApprovalsと並べて呼ぶmarkTurnFailed()が
+      // 無いと、busy: trueのまま画面が固まる（修正前の再現）
+      connection.simulateDisconnect();
+
+      expect(states[states.length - 1]).toEqual({ busy: false, turnFailed: true });
     });
   });
 

@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import * as vscode from 'vscode';
-import { isApprovalDecision, type ApprovalDecision } from '../appserver/approvals';
+import { isApprovalDecision } from '../appserver/approvals';
 import {
   isOpenableSearchUrl,
+  type ChatItem,
   type ChatState,
   type ChatUsage,
-  type PendingApproval,
 } from '../appserver/chatState';
 import { debugLogCandidates } from '../claude/cliLocator';
 import type { ClaudeSessionStore } from '../claude/sessionStore';
@@ -19,7 +19,6 @@ import {
   readChatRenderMarkdownConfig,
   readChatSendOnConfig,
   readClaudeConfig,
-  readNotificationsConfig,
   workspaceFolderPaths,
 } from '../config';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
@@ -34,7 +33,6 @@ import { AttachmentBox } from '../provider/attachments';
 import { MESSAGING_MCP_SERVER_NAME } from '../orchestrator/messaging';
 import type {
   ApprovalHandler,
-  ApprovalOutcome,
   TaskSession,
   TaskSessionHost,
   TaskSessionInput,
@@ -60,14 +58,10 @@ import {
   renderShell,
   reportTurnResult,
   runExportTranscript,
-} from './chatView';
+  STATE_POST_INTERVAL_MS,
+} from './chatShared';
 import type { FileMentionCatalog } from '../provider/fileMentions';
-import {
-  decoratePanelTitle,
-  deriveSessionActivityState,
-  sanitizeForNotification,
-  type SessionActivityState,
-} from './sessionActivity';
+import { decoratePanelTitle, deriveSessionActivityState } from './sessionActivity';
 import {
   appendMemoryLine,
   buildProjectMemoryCandidates,
@@ -82,7 +76,8 @@ import {
   type MemoryModeMemento,
 } from '../provider/inputModes';
 import { readPersistedThreadId } from './panelState';
-import { stripHostOnlyItems } from './stateDelta';
+import { buildItemsDelta, stripHostOnlyItems } from './stateDelta';
+import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import { CLAUDE_PERMISSION_MODES } from '../claude/types';
 import {
   APPROVAL_LEVEL_CYCLE,
@@ -90,25 +85,22 @@ import {
   isApprovalLevel,
 } from '../provider/approvalLevel';
 import type { ClaudeConfig } from '../claude/types';
-import type { ClaudeEditableKey, SettingsProvider } from './settingsProvider';
-import type { ChatActivity } from './chatView';
-import { nextActivePanelSequence, type ActiveComposerTarget } from './activePanelSequence';
+import type {
+  ClaudeEditableKey,
+  ClaudeSettingsSnapshot,
+  SettingsProvider,
+} from './settingsProvider';
+import type { ChatActivity } from './chatShared';
 
-interface ClaudePanel {
-  /** タブが今開いているか。`undefined` は閉じている状態（design.md §16.10の4）。 */
-  panel: vscode.WebviewPanel | undefined;
+interface ClaudePanel extends BaseChatPanel {
+  // `panel` / `loop` / `disposed` / `title` / `taskManaged` / `postTimer` /
+  // `approvalResolvedListeners` / `notifiedApprovalRequestIds` は`BaseChatPanel`
+  // （chatManagerBase.ts）が定義済み（issue #420、#410のフォローアップ）。ここでは
+  // 基底の`ChatSessionLike`より狭い`ClaudeStreamSession`へ絞るため`session`だけ再宣言する
   session: ClaudeStreamSession;
-  /** この画面で走らせているループ。走っていなければ待機状態のまま。 */
-  loop: LoopController;
   cwd: string;
   /** 送信前の添付画像。送るまでここに溜める。 */
   attachments: AttachmentBox;
-  /** 破棄済みか。破棄済みのWebviewへ送るとVSCodeが例外を投げるため見張る。 */
-  disposed: boolean;
-  /** パネルの見出し。タブが閉じている間もタイトルを見失わないよう別に保持する。 */
-  title: string;
-  /** タスク（オーケストレータ）管理下のセッションか（design.md §16.10の4）。 */
-  taskManaged: boolean;
   /**
    * タスク単位の設定。`ClaudeStreamSession` は起動時の引数で固定されるため、
    * Codexと違い送信のたびに読み直す必要は無いが、Plan modeを抜けるときの
@@ -130,13 +122,45 @@ interface ClaudePanel {
   stateListeners: Array<(state: ChatState) => void>;
   /** `TaskSession.onFinished` のリスナー。 */
   finishedListeners: Array<(reason: LoopStopReason, state: ChatState) => void>;
-  /** `TaskSession.onApprovalResolved` のリスナー。 */
-  approvalResolvedListeners: Array<(outcome: ApprovalOutcome) => void>;
-  /**
-   * 通知を出した承認要求の`requestId`（issue #286）。`chatView.ts`の`ChatPanel`と同じ
-   * 役割・同じ判定方針（`notifyNewApprovals`のJSDoc参照）。
-   */
-  notifiedApprovalRequestIds: Set<string>;
+  /** 直近に`flushState`が送信した時刻（`STATE_POST_INTERVAL_MS`の間引き判定に使う）。 */
+  lastPostAt?: number | undefined;
+  /** 直近に送った会話項目。`buildItemsDelta`が次回との差分を取るための基準。 */
+  sentItems?: readonly ChatItem[] | undefined;
+}
+
+/**
+ * 画面下の設定行へ送る形（`ClaudeChatViewManager.buildSettingsPayload()`の戻り値、
+ * issue #420レビュー指摘）。
+ *
+ * 以前は`Record<string, unknown>`を返しており、webview側（`chatScript.ts`）が読む
+ * キー名の打ち間違いを型検査で拾えなかった。描画はCodex画面と同じスクリプトを使うが、
+ * `ClaudeSettingsSnapshot`とはキー名が異なる（`effort`→`reasoningEffort`、
+ * `permissionMode`→`approvalMode`）ため`SettingsSnapshot`とも一致しない、
+ * Claude Code専用の形として定義する。
+ */
+interface ChatSettingsPayload {
+  models: ClaudeSettingsSnapshot['models'];
+  efforts: ClaudeSettingsSnapshot['efforts'];
+  agents: ClaudeSettingsSnapshot['agents'];
+  model: string;
+  reasoningEffort: string;
+  approvalMode: string;
+  approvalLevel: string;
+  agent: string;
+  defaults: {
+    /** `ClaudeDefaults`と同じく、settings.jsonに指定が無ければ`undefined`。 */
+    model: string | undefined;
+    reasoningEffort: string | undefined;
+    approvalMode: string | undefined;
+    /** Claude CodeにはCodexの`sandbox`に対応する設定が無いため常に`undefined`。 */
+    sandbox: undefined;
+    /**
+     * エージェントの既定値はsettings.jsonから読んでいない（表示のみの用途に対して
+     * 追跡コストが見合わないため）。「既定 (CLI側に指定なし)」とだけ出す
+     */
+    agent: undefined;
+  };
+  profile: string;
 }
 
 const VIEW_TYPE = 'claude.chat';
@@ -208,24 +232,15 @@ function toClaudeConfig(input: TaskSessionInput): ClaudeConfig {
  * オーケストレータ（`runner.ts`。次の依頼）がプロバイダを見ずにタスクを扱えるようにする
  * （design.md §16.10）。
  */
-export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost {
-  private readonly panels = new Map<string, ClaudePanel>();
+export class ClaudeChatViewManager
+  extends BaseChatViewManager<ClaudePanel>
+  implements TaskSessionHost
+{
   private approvalWarned = false;
 
   private readonly catalog: CommandCatalog;
   private readonly usageProbe: ClaudeUsageProbe;
   private commands: SlashCommand[] | undefined;
-  /**
-   * フォーカスが当たっているタブ（`chatView.ts` の `this.active` と同じ役割。issue #199）。
-   * エディタ右上の「セッション名を変更」はこれを対象にする。
-   */
-  private active: ClaudePanel | undefined;
-  /**
-   * `active` が（再）設定されるたびに進む採番（issue #292）。Codex側
-   * （`chatView.ts`）と比べて、エディタの選択範囲をどちらへ挿すか決めるのに使う
-   * （`getActiveComposerTarget` 参照）。
-   */
-  private activeSequence = 0;
 
   constructor(
     private readonly claudePath: () => string,
@@ -267,6 +282,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
      */
     private readonly resolveSpawn: () => ClaudeSpawnPort | undefined = () => undefined,
   ) {
+    super();
     this.catalog = new CommandCatalog(fs);
     this.usageProbe = new ClaudeUsageProbe(claudePath, log);
   }
@@ -304,16 +320,60 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
   }
 
   /**
-   * 画面下の設定行へ現在値と選択肢を送る。
+   * 画面下の設定行に出す現在値と選択肢を組み立てる（戻り値の形は`ChatSettingsPayload`参照）。
    *
-   * 描画はCodex画面と同じスクリプトなので、Codex側のスナップショットと同じ形に整えて渡す。
+   * 描画はCodex画面と同じスクリプトなので、Codex側のスナップショットと同じ形に整えて返す。
    * モデルの一覧は `initialize` の応答から取ったもの（取れなければエイリアス）。
+   * `refreshSettings`・`flushState`の両方から呼ぶ（issue #420: 揃える前は`refreshSettings`
+   * だけがこれを組み立てて送っており、`flushState`経由の更新には設定が乗らなかった）。
+   */
+  private buildSettingsPayload(): ChatSettingsPayload {
+    const snapshot = this.settings.claudeSnapshot();
+    return {
+      models: snapshot.models,
+      efforts: snapshot.efforts,
+      agents: snapshot.agents,
+      model: snapshot.model,
+      reasoningEffort: snapshot.effort,
+      approvalMode: snapshot.permissionMode,
+      approvalLevel: snapshot.approvalLevel,
+      agent: snapshot.agent,
+      defaults: {
+        model: snapshot.defaults.model,
+        reasoningEffort: snapshot.defaults.effort,
+        approvalMode: snapshot.defaults.permissionMode,
+        sandbox: undefined,
+        // エージェントの既定値はsettings.jsonから読んでいない（表示のみの用途に対して
+        // 追跡コストが見合わないため）。「既定 (CLI側に指定なし)」とだけ出す
+        agent: undefined,
+      },
+      profile: '',
+    };
+  }
+
+  /**
+   * 画面下の設定行へ現在値と選択肢を送る。設定パネルでの変更など、人の操作へ即座に
+   * 反映したい場面でだけ呼ぶ（`postState`の間引きを待たせない）。
+   *
+   * 会話項目は全量を送るが、`items`キーは付けない（`flushState`と違い、この経路は
+   * 差し分ではなく全量なので不要）。そのため webview 側（`chatScript.ts`の
+   * `window.addEventListener('message', ...)`）は`!data.items`の枝へ入り、
+   * `apply(data.state)`だけを呼んで`mergedItems`（差し分の積み先）には触れない。
+   * つまりここで送った内容はwebview側の差し分の基準には反映されない。
+   *
+   * **`entry.sentItems`をここで更新してはならない**（issue #420レビュー指摘、HIGH）。
+   * 一度`entry.sentItems = state.items`と書いたところ、webview側は上記の理由で
+   * 追随していないのに、ホスト側の基準だけが進んでしまい、次の`flushState`が
+   * 送る差分を`mergeItems`（`chatScript.ts`側）が`total`の不一致で`undefined`と
+   * 判定 → `stateFull`要求 → 全量再送、という往復を毎回生んだ（`ready`直後に
+   * `entry.sentItems = undefined`へリセットした効果も、続けて呼ばれる
+   * `refreshSettings`が誤って埋め戻すことで無効化されていた）。`entry.sentItems`は
+   * 従来通り`flushState`だけが更新する。
    */
   private refreshSettings(entry: ClaudePanel): void {
     if (entry.disposed || entry.panel === undefined) {
       return;
     }
-    const snapshot = this.settings.claudeSnapshot();
     const state = entry.session.getState();
     void entry.panel.webview.postMessage({
       type: 'state',
@@ -328,26 +388,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         // 権威ある判定はホスト側（handleOpenDiffFile等）が行うため、ここは
         // ボタン表示のヒントに過ぎない
         workspaceRoots: workspaceFolderPaths(),
-        settings: {
-          models: snapshot.models,
-          efforts: snapshot.efforts,
-          agents: snapshot.agents,
-          model: snapshot.model,
-          reasoningEffort: snapshot.effort,
-          approvalMode: snapshot.permissionMode,
-          approvalLevel: snapshot.approvalLevel,
-          agent: snapshot.agent,
-          defaults: {
-            model: snapshot.defaults.model,
-            reasoningEffort: snapshot.defaults.effort,
-            approvalMode: snapshot.defaults.permissionMode,
-            sandbox: undefined,
-            // エージェントの既定値はsettings.jsonから読んでいない（表示のみの用途に対して
-            // 追跡コストが見合わないため）。「既定 (CLI側に指定なし)」とだけ出す
-            agent: undefined,
-          },
-          profile: '',
-        },
+        settings: this.buildSettingsPayload(),
       },
     });
   }
@@ -356,22 +397,60 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
    * 画面へ現在の状態だけを送る（設定は含めない）。ストリーミング中の細かい更新は
    * こちらを使い、設定込みの完全な状態は `refreshSettings` が担う
    * （既存の挙動をそのまま踏襲。webview側は届かないキーを前回の値のまま保つ）。
+   *
+   * 呼び出し元の`onSessionChange`はNDJSONイベント1件ごとに同期的に発火する
+   * （`ClaudeStreamSession.receive`）。以前は間引きが無く、`state.items`全量を
+   * イベントの頻度のまま構造化クローンで直列化していた（issue #356）。
+   * `chatView.ts`の`postState`/`flushState`と同じ流儀で、最初の1件はすぐ送り、
+   * 以降は`STATE_POST_INTERVAL_MS`ごとにまとめる。まとめた分は必ず最後に1回
+   * 送る（送り漏らして古い画面が残らないようにする）。
    */
   private postState(entry: ClaudePanel): void {
+    if (entry.disposed || entry.panel === undefined || entry.postTimer !== undefined) {
+      return;
+    }
+    const since = Date.now() - (entry.lastPostAt ?? 0);
+    if (since >= STATE_POST_INTERVAL_MS) {
+      this.flushState(entry);
+      return;
+    }
+    entry.postTimer = setTimeout(() => {
+      entry.postTimer = undefined;
+      this.flushState(entry);
+    }, STATE_POST_INTERVAL_MS - since);
+  }
+
+  /**
+   * 会話項目は差し分だけを`items`へ載せ、`state.items`は空で送る（issue #356、
+   * `chatView.ts`の`flushState`と同じ流儀。`stripHostOnlyItems`相当の除去は
+   * `buildItemsDelta`が内部で行う）。webview側は`chatScript.ts`の`mergeItems`
+   * （実装は`stateDelta.ts`の`MERGE_ITEMS_SOURCE`）で積み直す。
+   *
+   * `settings`も`chatView.ts`の`flushState`と同じく毎回載せる（issue #420）。以前は
+   * ここで設定を送らず、`onLoopStatus`が間引きを迂回する`refreshSettings`を別途呼ぶ
+   * ことで設定の反映を担っていた。`onLoopStatus`をCodexと同じ`postState`（間引き済みの
+   * このメソッド）呼び出しへ揃えたため、設定もここに乗せないとループ実行中の設定反映が
+   * 抜け落ちる。
+   */
+  private flushState(entry: ClaudePanel): void {
     if (entry.disposed || entry.panel === undefined) {
       return;
     }
+    entry.lastPostAt = Date.now();
     const state = entry.session.getState();
+    const items = buildItemsDelta(entry.sentItems, state.items);
+    entry.sentItems = state.items;
     void entry.panel.webview.postMessage({
       type: 'state',
       state: {
         ...state,
-        // 描画に使わない項目を落としてから送る（issue #320）
-        items: stripHostOnlyItems(state.items),
+        items: [],
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),
         workspaceRoots: workspaceFolderPaths(),
+        settings: this.buildSettingsPayload(),
       },
+      items,
     });
   }
 
@@ -399,18 +478,6 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       throw new Error(`webviewへメッセージを送れませんでした（画面が見つからない）: ${sessionId}`);
     }
     this.handleMessage(entry, message);
-  }
-
-  /**
-   * そのセッションの活動状態（issue #286、design.md §14.55）。
-   *
-   * `chatView.ts`の`ChatViewManager.getActivityState`と同じ判定方針。開いていなければ
-   * `undefined`（`panels`にエントリがあるかどうかで判定。タスク管理下のセッションは
-   * タブを閉じても`panels`に残り続ける）。
-   */
-  getActivityState(sessionId: string): SessionActivityState | undefined {
-    const entry = this.panels.get(sessionId);
-    return entry === undefined ? undefined : deriveSessionActivityState(entry.session.getState());
   }
 
   /** 新しい会話を開く。idは起動前に決まるため、開いた時点で履歴と紐づく。 */
@@ -695,31 +762,6 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     await this.openNew(cwd);
   }
 
-  /**
-   * エディタの選択範囲（issue #292）を送る先。最後にアクティブだったClaude Code画面を返す
-   * （`this.active`。名前変更・クリアと同じ対象）。開いているタブが無ければ`undefined`。
-   *
-   * Codex側（`chatView.ts`の同名メソッド）と`activeSequence`を比べて、呼び出し側
-   * （`extension.ts`）がどちらへ挿すかを決める。ここではプロバイダ内の判定だけを行い、
-   * 実際の送り先の決定・パスの組み立て・0件時の新規会話は行わない。
-   */
-  getActiveComposerTarget(): ActiveComposerTarget | undefined {
-    const entry = this.active;
-    if (entry === undefined || entry.panel === undefined) {
-      return undefined;
-    }
-    return {
-      activeSequence: this.activeSequence,
-      insert: (text: string) => {
-        if (entry.panel === undefined) {
-          return;
-        }
-        void entry.panel.webview.postMessage({ type: 'insertComposerText', text });
-        this.showPanel(entry, false);
-      },
-    };
-  }
-
   /** セッションとループだけを組み立てる。パネルはまだ作らない。 */
   private buildEntry(
     cwd: string,
@@ -771,43 +813,21 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     return entry;
   }
 
-  /**
-   * パネルを表に出す。既にタブがあれば `reveal`、閉じていれば作り直す
-   * （design.md §16.10の4）。会話の再描画はwebview起動時の `ready` 通知への応答に任せる。
-   */
-  private showPanel(entry: ClaudePanel, preserveFocus: boolean): void {
-    if (entry.disposed) {
-      return;
-    }
-    if (entry.panel !== undefined) {
-      entry.panel.reveal(undefined, preserveFocus);
-      if (!preserveFocus) {
-        this.active = entry;
-        this.activeSequence = nextActivePanelSequence();
-      }
-      return;
-    }
-    const panel = vscode.window.createWebviewPanel(
+  /** `BaseChatViewManager.showPanel`（基底クラス）が新規作成時に呼ぶ、Claude Code用のパネル生成。 */
+  protected override createWebviewPanel(
+    entry: ClaudePanel,
+    preserveFocus: boolean,
+  ): vscode.WebviewPanel {
+    return vscode.window.createWebviewPanel(
       VIEW_TYPE,
       entry.title,
       { viewColumn: vscode.ViewColumn.Active, preserveFocus },
       buildClaudeChatPanelOptions(),
     );
-    this.attachPanel(entry, panel);
   }
 
-  /**
-   * `panel.webview.options`（`enableScripts`等）はここで入れ直すが、`enableFindWidget`
-   * （design.md §14.48、issue #287）は`WebviewPanel.options`側の値で読み取り専用のため、
-   * ここから再設定する手段が無い。`restorePanel`経由（タブ復元）で渡ってくるパネルは
-   * VSCode本体が新規に構築したもので、`enableFindWidget`を含む`WebviewPanelOptions`は
-   * 生成時にしか指定できない。
-   */
-  private attachPanel(entry: ClaudePanel, panel: vscode.WebviewPanel): void {
-    entry.panel = panel;
-    panel.title = entry.title;
-    // 復元されたパネルはスクリプトの許可が落ちているため、ここで入れ直す
-    panel.webview.options = { enableScripts: true };
+  /** `BaseChatViewManager.attachPanel`（基底クラス）が呼ぶ、Claude Code用のwebview HTML組み立て。 */
+  protected override renderPanelHtml(entry: ClaudePanel, panel: vscode.WebviewPanel): string {
     // 入力欄アイコン列の表に出すボタン（設定 agent.chat.composerButtons、issue #296）。
     // chatView.ts（Codex）と同じ配線。検証・既定への丸めはreadChatComposerButtonsConfig
     // 側（normalizeComposerButtons）が行うため、ここは警告が有ればログへ出すだけ
@@ -815,7 +835,7 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     if (composerButtonsConfig.warning !== undefined) {
       this.log.warn(composerButtonsConfig.warning);
     }
-    panel.webview.html = renderShell(panel.webview, {
+    return renderShell(panel.webview, {
       agentLabel: LABEL,
       provider: 'claude',
       approvalModes: CLAUDE_PERMISSION_MODES,
@@ -849,30 +869,11 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
       // 送信キー（issue #288、設定 agent.chat.sendOn）。chatView.ts（Codex）と同じ配線
       sendOn: readChatSendOnConfig(),
     });
-    panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(entry, message));
-    panel.onDidChangeViewState(() => {
-      if (panel.active) {
-        this.active = entry;
-        this.activeSequence = nextActivePanelSequence();
-      }
-    });
-    panel.onDidDispose(() => {
-      entry.panel = undefined;
-      if (!entry.taskManaged) {
-        // 人が手で開いた画面は、これまで通りタブを閉じたらセッションも終わる
-        this.teardown(entry);
-        return;
-      }
-      if (this.active === entry) {
-        this.active = undefined;
-      }
-    });
-    // 新規作成時にフォーカスが当たっていれば、ここでも捕まえる（chatView.tsのattachPanelと同じ理由。
-    // タスク管理下のパネルは常にpreserveFocus: trueで背面に開くため、無条件にactiveを奪わない）
-    if (panel.active) {
-      this.active = entry;
-      this.activeSequence = nextActivePanelSequence();
-    }
+  }
+
+  /** `BaseChatViewManager.attachPanel`（基底クラス）が配線する、webviewからのメッセージの実処理。 */
+  protected override dispatchMessage(entry: ClaudePanel, message: unknown): void {
+    this.handleMessage(entry, message);
   }
 
   /**
@@ -925,45 +926,6 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     };
   }
 
-  /**
-   * 承認要求を決定する。webviewの承認カードとワークフローViewの「承認」操作
-   * （`TaskSession.decideApproval`）の共通経路（design.md §16.8）。`chatView.ts`と同じ理由で
-   * 分けてある。
-   */
-  private resolveApproval(
-    entry: ClaudePanel,
-    requestId: number | string,
-    decision: ApprovalDecision,
-  ): void {
-    entry.session.decide(requestId, decision);
-    for (const listener of entry.approvalResolvedListeners) {
-      listener({ requestId, decision });
-    }
-  }
-
-  /**
-   * エントリを完全に破棄する。二重に呼んでも安全（`disposed` で早期return）。
-   * タブを閉じたことによる破棄と、明示的な `dispose()` 呼び出しの両方から通る。
-   */
-  private teardown(entry: ClaudePanel): void {
-    if (entry.disposed) {
-      return;
-    }
-    entry.disposed = true;
-    entry.loop.stop('manual');
-    entry.session.dispose();
-    entry.panel?.dispose();
-    entry.panel = undefined;
-    if (this.active === entry) {
-      this.active = undefined;
-    }
-    for (const [id, value] of this.panels) {
-      if (value === entry) {
-        this.panels.delete(id);
-      }
-    }
-  }
-
   private onSessionChange(entry: ClaudePanel, state: ChatState): void {
     if (entry.disposed) {
       return;
@@ -1003,62 +965,17 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
   }
 
   /**
-   * 承認待ちの通知（issue #286、design.md §14.55）。`chatView.ts`の
-   * `notifyNewApprovals`と同じ判定方針（JSDoc参照）。
+   * ループの状態変化。停止（running: true→false）を検知して `onFinished` を1度だけ呼ぶ。
+   *
+   * 反復のたびに呼ばれるため、`refreshSettings`（間引き・差分を通さない全量送信）ではなく
+   * `postState`（Codex側の`onLoopStatus`と同じ、`STATE_POST_INTERVAL_MS`の間引きに乗る
+   * 経路）を呼ぶ（issue #420）。設定は`flushState`が毎回`settings`を載せるようにしたため、
+   * この経路でも反映は途切れない。
    */
-  private notifyNewApprovals(entry: ClaudePanel, state: ChatState): void {
-    for (const approval of state.approvals) {
-      const key = String(approval.requestId);
-      if (entry.notifiedApprovalRequestIds.has(key)) {
-        continue;
-      }
-      entry.notifiedApprovalRequestIds.add(key);
-      this.notifyApprovalPending(entry, approval);
-    }
-  }
-
-  /** `chatView.ts`の`notifyApprovalPending`と同じ判定方針（JSDoc参照）。 */
-  private notifyApprovalPending(entry: ClaudePanel, approval: PendingApproval): void {
-    if (!readNotificationsConfig().approvalPending) {
-      return;
-    }
-    if (entry.panel !== undefined && entry.panel.visible) {
-      return;
-    }
-    const sessionLabel = sanitizeForNotification(entry.title);
-    const approvalLabel = sanitizeForNotification(approval.title);
-    void vscode.window
-      .showInformationMessage(`${sessionLabel} が承認待ちです（${approvalLabel}）`, '開く')
-      .then((choice) => {
-        if (choice === '開く') {
-          this.showPanel(entry, false);
-        }
-      });
-  }
-
-  /** `chatView.ts`の`notifyTurnComplete`と同じ判定方針（JSDoc参照）。既定オフ。 */
-  private notifyTurnComplete(entry: ClaudePanel): void {
-    if (!readNotificationsConfig().turnComplete) {
-      return;
-    }
-    if (entry.panel !== undefined && entry.panel.visible) {
-      return;
-    }
-    const sessionLabel = sanitizeForNotification(entry.title);
-    void vscode.window
-      .showInformationMessage(`${sessionLabel} の応答が終わりました`, '開く')
-      .then((choice) => {
-        if (choice === '開く') {
-          this.showPanel(entry, false);
-        }
-      });
-  }
-
-  /** ループの状態変化。停止（running: true→false）を検知して `onFinished` を1度だけ呼ぶ。 */
   private onLoopStatus(entry: ClaudePanel, status: LoopStatus): void {
     const stopped = entry.wasLoopRunning && !status.running;
     entry.wasLoopRunning = status.running;
-    this.refreshSettings(entry);
+    this.postState(entry);
     if (stopped && status.stopReason !== undefined) {
       const state = entry.session.getState();
       for (const listener of entry.finishedListeners) {
@@ -1407,7 +1324,18 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
         entry.loop.stop('manual');
         return;
       }
+      if (type === 'stateFull') {
+        // webview側が会話の取りこぼしに気付いたときの作り直し要求（issue #262、
+        // `chatView.ts`の同名分岐と同じ理由）。間引きに巻き込むと戻りが遅れるため、
+        // その場で送る
+        entry.sentItems = undefined;
+        this.flushState(entry);
+        return;
+      }
       if (type === 'ready') {
+        // webviewを作り直した直後は会話項目の積み直し状態（`mergedItems`）が空に戻る。
+        // 差し分ではなく全量から送り直す（issue #262、#356）
+        entry.sentItems = undefined;
         this.refreshSettings(entry);
         void this.postCommands(entry);
         return;
@@ -1848,12 +1776,6 @@ export class ClaudeChatViewManager implements vscode.Disposable, TaskSessionHost
     return choice === '実行する';
   }
 
-  dispose(): void {
-    for (const entry of this.panels.values()) {
-      this.teardown(entry);
-    }
-    this.panels.clear();
-  }
 }
 
 /**

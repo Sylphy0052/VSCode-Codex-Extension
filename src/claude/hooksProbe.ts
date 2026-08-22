@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { killWithEscalation } from '../process/childProcess';
 import type { Logger } from '../log';
 import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
 import type { HooksSnapshot } from '../provider/hooks';
@@ -78,7 +79,9 @@ export class ClaudeHooksProbe {
         }
         settled = true;
         clearTimeout(timer);
-        proc.kill();
+        // SIGTERMに応答しないハングしたプロセスも回収できるよう、SIGKILLへの
+        // エスカレーションを共通処理へ寄せる（issue #402、2点目のLOW対応）。
+        killWithEscalation(proc);
         resolve(value);
       };
 

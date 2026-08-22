@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { killWithEscalation } from '../process/childProcess';
 import type { ChatUsage } from '../appserver/chatState';
 import type { Logger } from '../log';
 import { parseUsageReport } from './usageText';
@@ -52,7 +53,9 @@ export class ClaudeUsageProbe {
       let out = '';
       const finish = (value: string | undefined): void => {
         clearTimeout(timer);
-        proc.kill();
+        // SIGTERMに応答しないハングしたプロセスも回収できるよう、SIGKILLへの
+        // エスカレーションを共通処理へ寄せる（issue #402、2点目のLOW対応）。
+        killWithEscalation(proc);
         resolve(value);
       };
       const timer = setTimeout(() => finish(undefined), TIMEOUT_MS);

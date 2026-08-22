@@ -673,8 +673,16 @@ export class ChatSession {
     this.update(removePrompt(this.state, requestId));
   }
 
-  /** 画面を閉じるときなど。保留中の要求を全て拒否して解放する。 */
-  dispose(): void {
+  /**
+   * 接続断（app-serverのクラッシュ等）で保留中の承認・問い合わせを解放する（issue #354）。
+   *
+   * `AppServerConnection`は全スレッドで共有される単一プロセスのため、app-serverが落ちると
+   * `waiting` / `waitingPrompts` は二度と解決されない応答を待ち続け、承認カード・問い合わせ
+   * フォームが永久にハングする。画面やセッション状態そのものは残し、次の発言で
+   * `ensureStarted()`が再接続を試みられるようにする（`dispose()`と違い、ここでは
+   * `deniedReviews`には触れない。まだ有効な自動レビューの覆し履歴のため）。
+   */
+  releasePendingApprovals(): void {
     for (const [requestId] of this.waiting) {
       this.decide(requestId, 'cancel');
     }
@@ -682,6 +690,36 @@ export class ChatSession {
     for (const [requestId] of this.waitingPrompts) {
       this.answerPrompt(requestId, { action: 'cancel', values: {} });
     }
+  }
+
+  /**
+   * 接続断で`busy`が戻らなくなっている場合に、ターン失敗として状態を戻す（issue #420）。
+   *
+   * `send()`・`compact()`・`startReview()`（inline）は`turn/start`等を待つ前に
+   * `busy: true`にするが、待っている最中に接続が切れると要求は永遠にresolve/rejectされず、
+   * `busy: true`のまま画面がスピナーと停止ボタンを出し続けて固まる。Claude側
+   * （`ClaudeStreamSession`の`exit`/`error`ハンドラ）は接続が切れた時点で
+   * `busy: false, turnFailed: true`まで戻しており、`releasePendingApprovals()`と並べて
+   * `handleConnectionLost()`から呼び、Codex側も同じ状態・同じ文言（`turnFailed`）に揃える。
+   *
+   * 応答待ちでない（`busy: false`）セッションには何もしない（issue #420レビュー指摘）。
+   * `handleConnectionLost()`は開いている全パネルへ無条件に呼ぶため、ガード無しだと
+   * ターンを送っていないセッションにまで`turnFailed: true`が立ち、`update()`経由で
+   * 全パネルに不要な`postState`が撒かれてしまう。
+   */
+  markTurnFailed(): void {
+    if (!this.state.busy) {
+      return;
+    }
+    this.update({ ...this.state, busy: false, turnFailed: true });
+  }
+
+  /** 画面を閉じるときなど。保留中の要求を全て拒否して解放し、覚えていた状態も破棄する。 */
+  dispose(): void {
+    this.releasePendingApprovals();
+    // 自動レビューが拒否した操作の覚え書き（issue #354）。画面を閉じた後に
+    // `approveDeniedReview`を呼べても意味が無いため、他の保留と同様にここで解放する
+    this.deniedReviews.clear();
   }
 }
 

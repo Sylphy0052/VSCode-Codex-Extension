@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { noDefaults } from '../../src/codex/configToml';
 import { noClaudeDefaults } from '../../src/claude/settingsJson';
 import type { Logger } from '../../src/log';
+import { chatCsp } from '../../src/view/chatCsp';
 import { ControlPanelViewProvider } from '../../src/view/controlPanelView';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 
@@ -12,12 +13,14 @@ import type { SettingsProvider } from '../../src/view/settingsProvider';
  * （`test/mocks/vscode.ts` の `FakeWebview` はexportされていないため、ここで最小限を組む）。
  */
 function fakeWebviewView(): {
-  view: { webview: Record<string, unknown> };
+  view: { webview: Record<string, unknown>; onDidDispose: (listener: () => void) => { dispose: () => void } };
   sent: unknown[];
   simulateMessage: (message: unknown) => Promise<void>;
+  simulateDispose: () => void;
 } {
   const sent: unknown[] = [];
   let handler: ((message: unknown) => void) | undefined;
+  let disposeListener: (() => void) | undefined;
   const webview = {
     options: {},
     html: '',
@@ -32,7 +35,15 @@ function fakeWebviewView(): {
     },
   };
   return {
-    view: { webview },
+    view: {
+      webview,
+      // `vscode.WebviewView.onDidDispose`の最小フェイク。破棄をテストから起こせるように
+      // 登録されたlistenerを`simulateDispose`から呼べるようにしておく
+      onDidDispose: (listener: () => void) => {
+        disposeListener = listener;
+        return { dispose: () => undefined };
+      },
+    },
     sent,
     // handleMessageは非同期なので、送出したメッセージへの反応を待ちたいテスト側は
     // このヘルパーの返すPromiseを待つ
@@ -40,6 +51,9 @@ function fakeWebviewView(): {
       handler?.(message);
       await Promise.resolve();
       await Promise.resolve();
+    },
+    simulateDispose: () => {
+      disposeListener?.();
     },
   };
 }
@@ -220,5 +234,61 @@ describe('ControlPanelViewProvider.revealSection（issue #227、ホスト→webv
     const provider = new ControlPanelViewProvider(settings, logger);
 
     expect(() => provider.revealSection('codexImport')).not.toThrow();
+  });
+});
+
+describe('ControlPanelViewProvider（issue #358、パネル破棄時の参照クリア）', () => {
+  it('viewが破棄されると参照をクリアし、以後のrevealSection/refreshは何もしない（例外を投げない）', async () => {
+    const { settings } = fakeSettingsProvider();
+    const { logger } = fakeLogger();
+    const provider = new ControlPanelViewProvider(settings, logger);
+    const { view, sent, simulateDispose } = fakeWebviewView();
+    provider.resolveWebviewView(view as never);
+    await Promise.resolve();
+    await Promise.resolve();
+    sent.length = 0;
+
+    simulateDispose();
+
+    expect(() => provider.revealSection('codexImport')).not.toThrow();
+    await expect(provider.refresh()).resolves.toBeUndefined();
+    // 破棄後は送り先（this.view）が無いので何も送られない
+    expect(sent).toEqual([]);
+  });
+});
+
+describe('CSPを`chatCsp()`へ集約する（issue #420）', () => {
+  it('生成されるCSP文字列は、集約前に手組みしていたものとバイト単位で変わらない', async () => {
+    const { settings } = fakeSettingsProvider();
+    const { logger } = fakeLogger();
+    const provider = new ControlPanelViewProvider(settings, logger);
+    const { view } = fakeWebviewView();
+
+    provider.resolveWebviewView(view as never);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const html = (view.webview as { html: string }).html;
+    const match = html.match(/<meta http-equiv="Content-Security-Policy" content="([^"]*)">/);
+    expect(match).not.toBeNull();
+    const actualCsp = match?.[1] ?? '';
+
+    // nonceは`render()`のたびに乱数で変わるため、実際に埋め込まれたnonceを抜き出して
+    // 期待値の組み立てに使う（値そのものの一致ではなく、組み立て方が変わっていないことを見る）
+    const nonceMatch = actualCsp.match(/script-src 'nonce-([^']+)'/);
+    expect(nonceMatch).not.toBeNull();
+    const nonce = nonceMatch?.[1] ?? '';
+
+    // 集約前にこのファイルへ直接手組みしていたディレクティブ列
+    // （`"default-src 'none'"`, `style-src ${cspSource} 'unsafe-inline'`,
+    // `script-src 'nonce-${nonce}'`を`; `で結合）と同一の値になることを確かめる。
+    // この画面は画像を扱わないため`includeImgData: false`（既定はtrueで`img-src data:`が付く）
+    const expectedCsp = chatCsp('https://fake-webview.test', nonce, { includeImgData: false });
+
+    expect(actualCsp).toBe(expectedCsp);
+    expect(actualCsp).toBe(
+      "default-src 'none'; style-src https://fake-webview.test 'unsafe-inline'; " +
+        `script-src 'nonce-${nonce}'`,
+    );
   });
 });

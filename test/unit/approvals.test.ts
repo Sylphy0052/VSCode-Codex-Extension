@@ -83,6 +83,25 @@ describe('buildApprovalResponse', () => {
       buildApprovalResponse('permissions', 'decline', { permissions: { network: true } }),
     ).toEqual({ permissions: {}, scope: 'turn' });
   });
+
+  /**
+   * issue #354のレビュー指摘（4点目）: `command` / `fileChange`はdecisionをそのまま
+   * 返すため、`cancel`（画面を閉じるとき・接続断で使う値）もそのまま`{ decision: 'cancel' }`
+   * として送られる。design.mdはこの経路の応答語彙を`accept` / `acceptForSession` /
+   * `decline`の3値と書いており、`cancel`は文書上未定義の値。
+   *
+   * ただし`dispose()`が保留中の要求を`cancel`で解放する挙動自体は design.md
+   * 「画面を閉じるときは保留中の要求を全て`cancel`で解放する」に明記された、今回の
+   * issue #354より前からの既存仕様（`releasePendingApprovals()`は`dispose()`の
+   * 中身を切り出しただけで、この値自体は変えていない）。実際のapp-serverが
+   * `cancel`をどう扱うかは実機でしか確認できず、ここを直すのはこのissueの
+   * スコープ外と判断し、現状の値を固定するテストだけ残す（`applyPatch`/`execCommand`
+   * は`reviewDecision()`経由で`abort`に変換され、この問題を持たない）。
+   */
+  it('cancelは文書上未定義の値のままcommand/fileChangeへ渡る（既知の課題、現状を固定）', () => {
+    expect(buildApprovalResponse('command', 'cancel', {})).toEqual({ decision: 'cancel' });
+    expect(buildApprovalResponse('fileChange', 'cancel', {})).toEqual({ decision: 'cancel' });
+  });
 });
 
 describe('defaultDenyResponse', () => {

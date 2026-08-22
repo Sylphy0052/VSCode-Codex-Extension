@@ -30,6 +30,18 @@ npm run check     # lint + typecheck + test
 
 `scripts/check.sh` はcommit前に全緑であることを必須とする。緑にするためにテストを弱めたりskipしたりしない。`test:integration`は実VSCodeのダウンロード・起動が要り重いため`check.sh`には含めていない。必要なときに明示的に呼ぶ。
 
+## CI
+
+mainへのpushとPRのたびに、GitHub Actions（`.github/workflows/ci.yml`）で `npm run lint` / `npm run typecheck` / `npm test` が自動実行される。`scripts/check.sh` と同じ3つで、Node.js 20系で `npm ci` してから走る。
+
+統合テスト（`npm run test:integration`）はCIで回らない。実VSCodeのダウンロードとxvfbが要るため対象外にしてある。実VSCodeが要る範囲は引き続き手元で確認する。
+
+カバレッジもCIでは計測していない。計測の仕組み自体が未導入で、導入手順と閾値の決め方は `docs/repository-hygiene.md` にまとめてある。
+
+現時点ではブランチ保護の必須チェック（required status checks）に設定していない。CIが赤くてもマージはブロックされない（可視化のみ）。
+
+検証範囲の拡張と必須チェック化の判断は #386 で追跡している。
+
 ## デバッグ実行
 
 F5（`Run Extension`）で拡張機能ホストが起動する。`preLaunchTask` でビルドが走るため、事前の `npm run build` は不要。
@@ -74,11 +86,10 @@ CLI固有の事情（ファイル配置・引数・セッションIDの決まり
 
 1. `locate()` — 実行ファイルと設定ディレクトリの解決
 2. `listSessions()` — セッション一覧の構築（純粋なパーサとして書き、I/Oはポート経由）
-3. `buildLaunch()` — 引数・環境変数・起動前に決まるセッションid
-4. `capabilities` — fork / forkFromTurn / archive / delete / rename の可否。UIのメニュー出し分けに使われる
-5. `tabTitle()` — タブと一覧の表示名
+3. `capabilities` — fork / forkFromTurn / archive / delete / rename の可否。UIのメニュー出し分けに使われる
+4. `tabTitle()` — タブと一覧の表示名
 
-セッションidを起動前に決められないCLI（Codexがそう）は `buildLaunch()` で `sessionId: undefined` を返し、起動タグによる事後照合に委ねる。詳細は設計書 §9.1。
+引数組み立てとセッションidの決め方は `AgentProvider` のインターフェースには無く、チャット画面側（`src/claude/streamSession.ts` の `buildClaudeStreamArgs` / `src/appserver/chatSession.ts` の `thread/start`）が担う。セッションidを起動前に決められるCLI（Claude Codeがそう）は、webview側で`randomUUID()`（`src/view/claudeChatView.ts`の`randomSessionId()`）により事前に生成し `--session-id` として渡す。起動前に決められないCLI（Codexがそう）は `thread/start` のレスポンスから `threadId` を受け取る事後照合になる。詳細は設計書 §9.1 / §14。
 
 ## コーディング規約
 

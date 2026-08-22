@@ -13,6 +13,7 @@ import {
 import type { LaunchTarget } from '../codex/types';
 import type { Logger } from '../log';
 import type { ApprovalHandlerResult } from '../orchestrator/taskSession';
+import { killWithEscalation, MAX_LINE_BUFFER_BYTES } from '../process/childProcess';
 import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
 import { consumeNdjson } from '../util/ndjson';
 import { buildClaudeStreamArgs } from './argvBuilder';
@@ -187,6 +188,18 @@ export class ClaudeStreamSession {
 
   /** プロセスを起動する。発言はこの後 `send` で流す。 */
   start(options: ClaudeStreamOptions): void {
+    // 現状の`claudeChatView.ts`（`openNew`/`openTaskSession`/resume/fork/restore）は
+    // いずれも`buildEntry()`で`new ClaudeStreamSession(...)`した直後のインスタンスへ
+    // 一度だけ`start()`を呼ぶ経路で、同一インスタンスへ再度`start()`が呼ばれる経路は
+    // 現状無い。ただしそれは呼び出し側の運用に依存した前提であり、`ClaudeStreamSession`
+    // 自身が「一度きりの前提」を強制してもいない。将来同一インスタンスを使い回す変更が
+    // 入った場合や、クラッシュ後の再起動が同一インスタンスへ`start()`し直す形に変わった
+    // 場合に備え、前回分の応答待ちを積み残さないよう新しいプロセスを起こす前に必ず
+    // 解放しておく。現状の呼び出し方では各Mapは常に空のため、この呼び出しは実質no-op
+    // （issue #355のレビュー指摘: 断定していた「複数回呼ばれる」根拠が誤りだったため
+    // 訂正）。
+    this.releasePendingWaiters();
+
     const { args, warnings } = buildClaudeStreamArgs({
       target: options.target,
       sessionId: options.sessionId,
@@ -214,28 +227,62 @@ export class ClaudeStreamSession {
     // 飛ぶEPIPE等はここで捕まえないとNodeの未捕捉例外になる（issue #155、design.md
     // §14.31）。常駐セッションなので、既存のexit/errorハンドラと同じ「ターン失敗」の
     // 経路へ寄せる。
+    //
+    // 以下の5ハンドラは、この`start()`呼び出しでクロージャに捕まえた`proc`（この世代の
+    // プロセス）を対象とする。overflow等で`this.proc`を`undefined`へ戻した後、次の
+    // `start()`が新しいプロセスを起こし終えてから、古い世代の`exit`/`error`/`stdin`
+    // エラーやstdout/stderrの出力が遅れて届くことがある（issue #419、`connection.ts`の
+    // CRITICALと同種）。その時点で`this.proc`は既に新しいプロセスを指しているため、
+    // 素通りで`this.proc = undefined`にすると新しいターンを巻き込んで壊す。
+    // `this.proc !== proc`で世代のずれを検出し、古い世代からの通知は捨てる。
     guardStdinErrors(proc, (e) => {
+      if (this.proc !== proc) {
+        return;
+      }
       this.log.error(`claudeへの書き込みに失敗しました: ${e.message}`);
       this.proc = undefined;
+      // exit/errorハンドラと同じ「ターン失敗」の経路なので、承認待ち・各種応答待ちも
+      // 同じく解放する。放置するとawaitしている側が永遠に待つ（issue #355）
+      this.releasePendingWaiters();
       this.update({ ...this.state, busy: false, turnFailed: true });
     });
 
-    proc.stdout.on('data', (chunk: Buffer) => this.receive(chunk.toString('utf8')));
+    proc.stdout.on('data', (chunk: Buffer) => {
+      if (this.proc !== proc) {
+        return;
+      }
+      this.receive(chunk.toString('utf8'));
+    });
     proc.stderr.on('data', (chunk: Buffer) => {
+      if (this.proc !== proc) {
+        return;
+      }
       const line = chunk.toString('utf8').trim();
       if (line !== '') {
         this.log.info(`[claude] ${line.slice(0, 300)}`);
       }
     });
     proc.on('exit', (code) => {
+      if (this.proc !== proc) {
+        return;
+      }
       this.log.info(`claudeが終了しました (code ${code ?? 'unknown'})`);
       this.proc = undefined;
+      // 承認待ち（waiting）・rewind_files/mcp_status/reload_skillsの応答待ちを解放する。
+      // 放置するとCLIの異常終了時にawaitしている側が永遠に待つ（issue #355、dispose()と
+      // 同じ解放処理を共有）
+      this.releasePendingWaiters();
       // 会話の途中でプロセスが消えた形なので、続きは送れない
       this.update({ ...this.state, busy: false, turnFailed: true });
     });
     proc.on('error', (e) => {
+      if (this.proc !== proc) {
+        return;
+      }
       this.log.error(`claudeを起動できません: ${e.message}`);
       this.proc = undefined;
+      // 起動直後にCLIが異常終了した場合も、exitハンドラと同様に解放する（issue #355）
+      this.releasePendingWaiters();
       this.update({ ...this.state, busy: false, turnFailed: true });
     });
 
@@ -790,37 +837,68 @@ export class ClaudeStreamSession {
    */
   receive(chunk: string): void {
     this.buffer += chunk;
-    const { values, rest } = consumeNdjson(this.buffer);
+    const { values, rest, overflow } = consumeNdjson(this.buffer);
     this.buffer = rest;
 
-    for (const event of values) {
-      // コマンドの増減。CLIは差分ではなく一覧を押し付けてくるので入れ替える
-      const changed = readCommandsChanged(event);
-      if (changed !== undefined) {
-        this.setCommands(changed);
-      }
+    try {
+      // 完成した行（values）は、上限超過の判定より先に処理する（レビュー指摘・MEDIUM）。
+      // overflowを先に見て早期returnすると、同じチャンクの中に「正常に完成したイベント」と
+      // 「上限超過の未完成行」が同居していた場合、正常に届いていたイベントまで握りつぶして
+      // しまう（後続の一括解放で待機自体は解けるが、本来成功していたターンが失敗扱いへ
+      // すり替わってしまう）。
+      for (const event of values) {
+        // コマンドの増減。CLIは差分ではなく一覧を押し付けてくるので入れ替える
+        const changed = readCommandsChanged(event);
+        if (changed !== undefined) {
+          this.setCommands(changed);
+        }
 
-      const request = readControlRequest(event);
-      if (request !== undefined) {
-        this.handleControlRequest(request);
-        continue;
-      }
+        const request = readControlRequest(event);
+        if (request !== undefined) {
+          this.handleControlRequest(request);
+          continue;
+        }
 
-      const response = readControlResponse(event);
-      if (response !== undefined) {
-        this.handleControlResponse(response);
-        continue;
-      }
+        const response = readControlResponse(event);
+        if (response !== undefined) {
+          this.handleControlResponse(response);
+          continue;
+        }
 
-      const wasBusy = this.state.busy;
-      const next = applyStreamEvent(this.state, event);
-      if (next !== this.state) {
-        this.update(next);
+        const wasBusy = this.state.busy;
+        const next = applyStreamEvent(this.state, event);
+        if (next !== this.state) {
+          this.update(next);
+        }
+        // ターンが終わるたびに読み直す。圧縮の効果もここで表示へ反映される
+        if (wasBusy && !next.busy) {
+          this.refreshContext();
+          this.refreshSessionCost();
+        }
       }
-      // ターンが終わるたびに読み直す。圧縮の効果もここで表示へ反映される
-      if (wasBusy && !next.busy) {
-        this.refreshContext();
-        this.refreshSessionCost();
+    } finally {
+      // `finally`へ置くのは、forループ中のハンドラ（`setCommands`/`update`等、
+      // 呼び出し側が渡すコールバックを経由する）が同期的に例外を投げた場合でも、
+      // overflow時の後始末（プロセスの打ち切り）を必ず実行するため（レビュー指摘・LOW）。
+      // ループを先に処理する形へ入れ替えた際、例外で`if (overflow)`まで到達しない
+      // 経路ができていた
+      if (overflow) {
+        // 改行を含まない出力（診断ログの乱れ・バイナリ混入等）が上限を超えて溜まり続けた
+        // （issue #402、1点目）。このまま連結し続けると無制限にメモリを消費するため、
+        // プロセスを回収して打ち切る。exit/errorハンドラと同じ「ターン失敗」の経路
+        // （`releasePendingWaiters()` + `turnFailed: true`）へ寄せ、続きは送らせない。
+        // `this.buffer`を`''`へ戻すため、上のforループで処理済みの`values`とは別に、
+        // 上限超過分の`rest`がバッファに残り続けることはない
+        this.log.error(
+          `claudeからの出力が上限（${MAX_LINE_BUFFER_BYTES}バイト）を超えて改行なしで届いたため、セッションを打ち切ります`,
+        );
+        if (this.proc !== undefined) {
+          killWithEscalation(this.proc);
+        }
+        this.proc = undefined;
+        this.buffer = '';
+        this.releasePendingWaiters();
+        this.update({ ...this.state, busy: false, turnFailed: true });
       }
     }
   }
@@ -1000,7 +1078,25 @@ export class ClaudeStreamSession {
     return this.sawApprovalRequest;
   }
 
-  dispose(): void {
+  /**
+   * 承認待ち（waiting）・rewind_files/mcp_status/reload_skillsの応答待ちを解放する
+   * （issue #355）。
+   *
+   * `dispose()`（利用者が明示的に会話を閉じる経路）と、`start()`内の`proc.on('exit')` /
+   * `proc.on('error')` / `guardStdinErrors`（CLIが自分で終了・クラッシュする経路）の
+   * どちらからも呼ばれる共通処理。放置するとこれらの応答をawaitしている側
+   * （`requestRewindFiles()` / `checkMcpStatus()` / `reloadSkills()`の呼び出し元）が
+   * 永遠に待ち続ける。
+   *
+   * プロセスの後始末（kill・stdinのend）はここに含めない。異常終了ハンドラが呼ばれる
+   * 時点では既にプロセスは終了しており、killし直す意味が無いため、`dispose()`側だけが
+   * 担う（「待機の解放」と「プロセスの後始末」を分ける）。
+   *
+   * 二重呼び出しでも安全: 各Mapは解放後に`clear()`するため、既に空のMapに対して
+   * ループしても何もしない。`decide()`も存在しない`requestId`には何もしないため、
+   * `waiting`が空になった後の再呼び出しも安全。
+   */
+  private releasePendingWaiters(): void {
     // 保留中の承認は拒否側で解放する。放置するとCLIが待ち続ける
     for (const [requestId] of this.waiting) {
       this.decide(requestId, 'cancel');
@@ -1027,8 +1123,14 @@ export class ClaudeStreamSession {
     }
     this.skillsWaiting.clear();
     this.outgoing.clear();
+  }
+
+  dispose(): void {
+    this.releasePendingWaiters();
     this.proc?.stdin.end();
-    this.proc?.kill();
+    if (this.proc !== undefined) {
+      killWithEscalation(this.proc);
+    }
     this.proc = undefined;
     this.buffer = '';
   }

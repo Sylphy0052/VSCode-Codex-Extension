@@ -436,9 +436,15 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       await vscode.commands.executeCommand('codex.controlPanel.focus');
       panel.revealSection('codexImport');
     },
-    (onNotification, onServerRequest) => {
+    (onNotification, onServerRequest, onDisconnect) => {
       chatConnectionHandlers = { onNotification, onServerRequest };
-      const real = new AppServerConnection(codexPath, log, onNotification, onServerRequest);
+      const real = new AppServerConnection(
+        codexPath,
+        log,
+        onNotification,
+        onServerRequest,
+        onDisconnect,
+      );
       return {
         ensureStarted: () => (chatConnectionOverride.port ?? real).ensureStarted(),
         request: (method, params) => (chatConnectionOverride.port ?? real).request(method, params),
