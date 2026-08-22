@@ -196,8 +196,20 @@ describe('serializeManifest / deserializeManifest', () => {
     expect(deserializeManifest(json)).toEqual(manifest);
   });
 
-  it('壊れたJSONは空のマニフェストとして扱う（安全側）', () => {
-    expect(deserializeManifest('not json')).toEqual(new Map());
+  /**
+   * Issue #440: 以前は壊れたJSONを黙って空のマニフェストへ倒していた（fail-open）。
+   * これは`loadPersistedManifest`（Issue #380）が「復元できなかった」ことを呼び出し側へ
+   * 伝えるfail-closedと正反対の方針であり、#380が問題視した「黙って0件成功にすると
+   * 統合済みだった成果が消えたことに気づけない」動きそのものだったため、例外を投げる
+   * fail-closedへ揃えた。`[]`・`null`は「対象がオブジェクトでない」だけで内容が
+   * 壊れているわけではないため、こちらは従来どおり空のマニフェスト（`ok: true`）として
+   * 扱われる（`manifestFromParsedJson`の分岐を参照）。
+   */
+  it('壊れたJSON（解析できない文字列）は例外を投げる（fail-closed、Issue #440）', () => {
+    expect(() => deserializeManifest('not json')).toThrow(/復元できません/);
+  });
+
+  it('配列・nullはオブジェクトではないため空のマニフェストとして扱う（壊れているわけではない）', () => {
     expect(deserializeManifest('[]')).toEqual(new Map());
     expect(deserializeManifest('null')).toEqual(new Map());
   });
@@ -209,7 +221,10 @@ describe('マニフェストのキー検証（レビュー指摘: high、パス�
    * キー（＝ワークスペースへ反映する相対パス）も検証する。このキーは
    * `reflectIntegrationToWorkspace`で`path.join(workspaceRoot, ...segments)`へそのまま
    * 渡るため、`..`を含む・絶対パス・バックスラッシュ区切りのキーは`workspaceRoot`の外を
-   * 指しうる。ここでは`deserializeManifest`（安全側へ倒す公開関数）を通してその破棄を確認する。
+   * 指しうる。ここでは`deserializeManifest`（Issue #440でfail-closedへ揃えた公開関数）を
+   * 通して、不正なキーが1件でもあれば復元全体が失敗することを確認する（他の正当な
+   * キーが道連れで失われても、`loadPersistedManifest`と同じく「部分的に復元できた」
+   * ことにはしない）。
    */
   it.each([
     ['../../../../home/user/.bashrc', '相対パスの..セグメントによるトラバーサル'],
@@ -219,14 +234,12 @@ describe('マニフェストのキー検証（レビュー指摘: high、パス�
     ['a\\..\\..\\evil', 'バックスラッシュ区切りの相対トラバーサル'],
     ['', '空文字'],
     ['a/./b', '.セグメントを含む'],
-  ])('不正なキー（%s: %s）を含むエントリは破棄される', (badKey) => {
+  ])('不正なキー（%s: %s）を含むと復元全体が失敗する（fail-closed、Issue #440）', (badKey) => {
     const json = JSON.stringify({
       [badKey]: { taskId: 'T1', kind: 'modified' },
       'ok.txt': { taskId: 'T1', kind: 'added' },
     });
-    const manifest = deserializeManifest(json);
-    expect(manifest.has(badKey)).toBe(false);
-    expect(manifest.get('ok.txt')).toEqual({ taskId: 'T1', kind: 'added' });
+    expect(() => deserializeManifest(json)).toThrow(/復元できません/);
   });
 
   it('妥当なキー（通常の相対パス）は破棄されない', () => {

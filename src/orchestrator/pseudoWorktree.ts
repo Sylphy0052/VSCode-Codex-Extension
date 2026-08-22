@@ -205,16 +205,18 @@ interface ManifestParseResult {
 }
 
 /**
- * `JSON.parse`済みの値からマニフェストを組み立てる純粋関数。`deserializeManifest`（壊れた
- * JSONを安全側の空マニフェストへ倒す）と、復元の成否を呼び出し側へ伝える必要がある
+ * `JSON.parse`済みの値からマニフェストを組み立てる純粋関数。`deserializeManifest`と
  * `loadPersistedManifest`（壊れたJSONを「復元できなかった」ことが分かる形で返す。
- * Issue #380）の両方から共有する。
+ * Issue #380）の両方から共有する。どちらも壊れた入力を`ok: false`でfail-closedに扱う
+ * 方針は揃えてある（Issue #440。以前は`deserializeManifest`だけが`ok`を捨てて安全側の
+ * 空マニフェストへ倒すfail-openだったが、これは#380が「黙って0件成功にすると
+ * 統合済みだった成果が消えたことに気づけない」と断じたのと同じ挙動であり、2つの
+ * 呼び出し元が正反対の方針を持ったまま共存するのは将来の呼び出し側を誤らせる）。
  *
  * キーが不正（`isValidManifestKey`が偽）なエントリは破棄し、`ok: false`で報告する
- * （レビュー指摘: high。`deserializeManifest`は従来どおり安全側へ倒すため`ok`を捨てるが、
- * `loadPersistedManifest`はこれを見て「復元できなかった」として反映を止める）。
- * 値の形が不正なエントリ（`taskId`/`kind`が期待の型でない）は、キーの妥当性とは
- * 別問題（パストラバーサルの脅威ではない）のため、従来どおり黙って読み飛ばすだけに留める。
+ * （レビュー指摘: high）。値の形が不正なエントリ（`taskId`/`kind`が期待の型でない）は、
+ * キーの妥当性とは別問題（パストラバーサルの脅威ではない）のため、従来どおり黙って
+ * 読み飛ばすだけに留める。
  */
 function manifestFromParsedJson(parsed: unknown): ManifestParseResult {
   if (typeof parsed !== 'object' || parsed === null) {
@@ -246,13 +248,31 @@ function manifestFromParsedJson(parsed: unknown): ManifestParseResult {
   return { manifest: result, ok };
 }
 
-/** `serializeManifest` の逆変換。壊れたJSON・不正なエントリは空のマニフェストとして扱う（安全側）。 */
+/**
+ * `serializeManifest` の逆変換。Issue #440: 壊れたJSON・不正なキーを含むエントリは
+ * `loadPersistedManifest`と同じ基準（`manifestFromParsedJson`の`ok`）でfail-closedに扱い、
+ * 例外を投げる。以前はここが黙って空のマニフェストへ倒すfail-openだったため、
+ * `deserializeManifest`と`loadPersistedManifest`という同じ入力を扱う2関数が
+ * 正反対の方針を持ったまま共存していた（本番の呼び出し元は#380で`loadPersistedManifest`へ
+ * 統一済みだが、`deserializeManifest`はexportされたテスト専用関数として残っており、
+ * 将来ここを誤って掴む呼び出し側が現れると#380の事象が再発しうる）。
+ */
 export function deserializeManifest(json: string): IntegrationManifest {
+  let parsed: unknown;
   try {
-    return manifestFromParsedJson(JSON.parse(json)).manifest;
+    parsed = JSON.parse(json);
   } catch {
-    return new Map();
+    throw new Error(
+      '疑似worktreeの統合マニフェストの直列化データを復元できませんでした（内容を解析できません）',
+    );
   }
+  const { manifest, ok } = manifestFromParsedJson(parsed);
+  if (!ok) {
+    throw new Error(
+      '疑似worktreeの統合マニフェストの直列化データを復元できませんでした（不正なエントリ、またはエントリ数が上限を超えています）',
+    );
+  }
+  return manifest;
 }
 
 /**
@@ -280,8 +300,9 @@ export type LoadManifestResult =
  * ではなく「復元すべきものがまだ無い」正常系のため、空のマニフェストで`ok: true`を返す。
  * ファイルはあるが内容を解析できない場合（破損）、不正なキー（パストラバーサルの疑いが
  * あるエントリ）を含む場合、エントリ数が上限を超える場合は`ok: false`にする。ここを
- * `deserializeManifest`のように黙って空マニフェストへ倒すと、統合済みだった成果が
- * あったことに呼び出し側が気づけない（「0件で成功」に見えてしまう。Issueの本題）。
+ * 黙って空マニフェストへ倒すと、統合済みだった成果があったことに呼び出し側が
+ * 気づけない（「0件で成功」に見えてしまう。Issueの本題。`deserializeManifest`も
+ * Issue #440で同じ基準のfail-closedへ揃えてある）。
  *
  * 読み込みの前に、`integrationManifestPath`が指す経路にシンボリックリンクが含まれて
  * いないかを確かめる（レビュー指摘: medium）。`.agents/worktrees/<runId>`の親のいずれかが
