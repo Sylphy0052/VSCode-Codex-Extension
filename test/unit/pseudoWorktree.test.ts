@@ -1389,6 +1389,68 @@ describe('実ファイルシステムでの統合テスト', () => {
         }
       },
     );
+
+    /**
+     * Issue #529: 上のEACCESテストは`removeEmptyDir`というメソッド名をモックしているだけ
+     * のため、旧実装（`readdir`による空判定＋`removeDirRecursive`）へ戻すと
+     * `removeEmptyDir`自体が呼ばれなくなり、モックが素通りして黙って成功して落ちる
+     * （TOCTOU窓の再現ではなく、配線がズレただけの検出になってしまう）。
+     *
+     * ここでは`readdir`の呼び出しに、判定結果を返す直前に同じ`runDir`配下へ実際に
+     * ファイルを1件書き込む副作用を仕込み、判定と削除の間に他プロセスが書き込む
+     * 状況を再現する。非再帰の`removeEmptyDir`（実体は`fsPromises.rmdir`）は削除実行
+     * 時点の実ディレクトリの中身を見るため、後から書き込まれたこのファイルを
+     * 巻き込まずに残す（`ENOTEMPTY`で削除自体を諦める）が、`readdir`で「空」と
+     * 判定してから`removeDirRecursive`で消す二段構えだと、判定時点の古い「空」を
+     * 信じてこのファイルごと消してしまう。
+     */
+    it(
+      'runIdディレクトリの空判定の直後に他プロセスがファイルを書き込んでも、' +
+        'そのファイルを巻き込んで消さない（TOCTOU対策、Issue #529）',
+      async () => {
+        const integration = await ensureIntegrationDir(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
+        expect(integration.ok).toBe(true);
+        if (!integration.ok) return;
+
+        const runDir = path.join(pseudoWorktreesRootDir(workspace), RUN_ID);
+        const raceFilePath = path.join(runDir, 'concurrent-write.txt');
+        let raceInjected = false;
+
+        // 空判定（readdir）が完了した直後、削除（removeDirRecursive/removeEmptyDir）が
+        // 実行されるより前に、他プロセスが同じrunDir配下へ書き込む状況を再現する副作用
+        const hookedReaddir: PseudoWorktreeFileSystemPort['readdir'] = async (target) => {
+          const entries = await nodePseudoWorktreeFileSystem.readdir(target);
+          if (target === runDir && !raceInjected) {
+            raceInjected = true;
+            await writeFile(raceFilePath, 'race');
+          }
+          return entries;
+        };
+
+        const fs: PseudoWorktreeFileSystemPort = {
+          ...nodePseudoWorktreeFileSystem,
+          readdir: hookedReaddir,
+          // 非再帰削除（本番の`removeEmptyDir`）も、削除の実行直前に同じ判定を経由
+          // させる。これにより本番実装（`removeEmptyDir`一発）と、検証用に戻す旧実装
+          // （`readdir`→`removeDirRecursive`）のどちらであっても、同じタイミングで
+          // 他プロセスの書き込みに晒される状況をそろえる
+          removeEmptyDir: async (target: string) => {
+            await hookedReaddir(target);
+            return nodePseudoWorktreeFileSystem.removeEmptyDir(target);
+          },
+        };
+
+        const result = await removePseudoIntegration(workspace, RUN_ID, fs);
+
+        expect(result.ok).toBe(true);
+        // 判定の直後に書き込まれたファイルを巻き込んで消していない
+        await expect(readFile(raceFilePath, 'utf8')).resolves.toBe('race');
+      },
+    );
   });
 
   describe('removePseudoWorktreeAttempts（全試行分の撤去、Issue #396）', () => {

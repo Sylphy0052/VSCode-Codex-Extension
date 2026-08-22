@@ -1536,6 +1536,15 @@ tasks:
         orchestrator.sentTexts.filter((t) => t.includes('人がこの実行全体を停止しました')).length;
       expect(countHaltedNotices()).toBe(1);
 
+      // `notifyOrchestrator`は`orchestrator.busy`の間`pending`へ積むだけで送らない
+      // （`flushOrchestrator`は`!busy`のときだけ送信）。1回目の`stop()`が送った通知で
+      // `busy`はtrueのままなので、2回目の`stop()`が「重複を送らない」ことを確かめる
+      // ためには、まずターンを1回終わらせて`busy`をfalseへ戻し、2回目の通知が実際に
+      // flushされる状態を作る必要がある（そうしないと2回目の通知は重複排除の有無に
+      // 関わらずpendingに積まれたままとなり、このテストは重複防止が無くても通る）
+      orchestrator.emitState({ ...initialChatState, busy: true });
+      orchestrator.emitState({ ...initialChatState, busy: false });
+
       // 既にhaltedByUserのrunへ`stop()`を重ねて呼んでも（Webviewのstop_allハンドラは
       // haltedByUserの現在値を見ずに毎回呼ぶ）、通知が積み増されない
       runner.stop(runId);
@@ -4762,6 +4771,50 @@ tasks:
       expect(warning).toBeDefined();
       expect(warning?.message).toContain('node_modules/x.js');
       expect(warning?.message).toContain('除外設定');
+    },
+  );
+
+  it(
+    '`rename`を提供しないファイルシステムポートへフォールバックすると、' +
+      'ワークスペースへの反映後に運用者へ知らせる警告ログを出す（Issue #528）',
+    async () => {
+      const git = fakeGit({ notGitRepo: true });
+      // FakePseudoFsは`rename`メソッドを持たないため、`reflectIntegrationToWorkspace`は
+      // TOCTOU対策の無い旧来の直接コピー経路（`usedLegacyCopyFallback: true`）へ
+      // フォールバックする
+      const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+      const warnCalls: string[] = [];
+      const log: Logger = {
+        ...fakeLogger,
+        warn: (message: string) => void warnCalls.push(message),
+      };
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        pseudoWorktree: { fs, exclude: [] },
+        log,
+      });
+      const result = await runner.start(
+        '/repo/.agents/workflows/pseudo-reflect-legacy-fallback.yaml',
+        '/repo',
+      );
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      const cloneDir = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+      fs.setFile(path.join(cloneDir, 'a.txt'), { size: 20, mtimeMs: 200 });
+
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // 反映そのものは成功する（フォールバック経路でも反映自体は行われる）
+      expect(fs.files.get('/repo/a.txt')).toEqual({ size: 20, mtimeMs: 200 });
+      // `rename`を提供しないポートへ落ちたことを運用者が気づけるよう、警告ログを出す
+      expect(
+        warnCalls.some(
+          (message) => message.includes('`rename`') && message.includes('フォールバック'),
+        ),
+      ).toBe(true);
     },
   );
 
