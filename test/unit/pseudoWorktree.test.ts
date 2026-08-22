@@ -2051,6 +2051,11 @@ describe('実ファイルシステムでの統合テスト', () => {
           if (!result.ok) return;
           // 既に無い削除対象はエラーにならず処理が続き、後続のエントリも適用される
           expect(result.appliedPaths).toEqual(['kept.txt']);
+          // `skippedPaths`は`exclude`に一致したパスを人へ見せるためのものであり、
+          // 「削除対象が既に存在しない」はそれとは意味が違うため増えない
+          // （`runnerWorkingDirectory.ts`側の警告文言は「除外設定に一致した」前提で
+          // 固定されており、ここへ載せると文言と事実が食い違う）
+          expect(result.skippedPaths).toEqual([]);
         },
       );
 

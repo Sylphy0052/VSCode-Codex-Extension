@@ -1400,19 +1400,18 @@ export async function reflectIntegrationToWorkspace(
           // 親ディレクトリが無い＝削除対象も存在しない正常系（`realpath`はENOENTを
           // 含むあらゆる失敗でundefinedを返す。書き込み側の`realTargetDir`確認とは
           // 異なり、こちらは新規作成の前提が無いため「無ければ何もしない」でよい）。
-          // ここで throw すると「削除対象が既に無い」という正常なケースまで
-          // エラー化してしまう。`isExcludedPath`と同じ「対象外なのでskip」の扱いで
-          // `skippedPaths`へ記録し、次のエントリへ進む。
-          skippedPaths.push(relPath);
+          // `removeFile`は「存在しなくてもエラーにしない」規約（下の`PseudoWorktreeFileSystemPort`
+          // のJSDoc参照）なので、対象が無いときに何もしないのは修正前と同じ挙動である。
+          // `skippedPaths`は`exclude`に一致したパスを人へ見せるためのもので意味が違うため
+          // ここでは使わない（`runnerWorkingDirectory.ts`側の警告文言は「除外設定に一致した」
+          // 前提で固定されており、事実と食い違う）。それでも`removeFile`を呼ばずに`continue`
+          // するのは、`realpath`が失敗したまま`removeFile`へ進むフェイルオープンを避けるため。
           continue;
         }
         const realTarget = await fs.realpath(target);
         if (realTarget === undefined) {
           // 削除対象が既に存在しない（`kind: 'deleted'`のエントリでは正常系）。
-          // `removeFile`を呼ぶ必要が無いのでスキップする。ここを throw にすると
-          // 正常系が壊れる一方、素通りして`removeFile`へ進むとフェイルオープンに
-          // なるため、いずれでもなく「次のエントリへ進む」を選ぶ。
-          skippedPaths.push(relPath);
+          // 上と同じ理由で`skippedPaths`は使わず、`removeFile`を呼ばずに次のエントリへ進む。
           continue;
         }
         const expectedTarget = path.join(realTargetDir, path.basename(target));
