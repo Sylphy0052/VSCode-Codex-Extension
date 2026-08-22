@@ -1385,10 +1385,40 @@ export async function reflectIntegrationToWorkspace(
         // 二次防御。削除は取り消せない（`persistManifest`のように「書いた後に撤去する」
         // 形にできない）ため、実パスの確認も削除の**前**に行う。`removePseudoWorktree`が
         // `removeDirRecursive`の前に`realpath`で確かめているのと同じ形。
+        //
+        // Issue #484（監査指摘、書き込み側と同じ穴が削除側にも残っていた）:
+        // 「境界内か」ではなく「親ディレクトリの`realpath`確認時点で想定していた場所
+        // そのものか」を厳密一致で確かめる。`isPathWithinRoot`だけだと、`target`の
+        // 親ディレクトリ（`relPath`の親、例: `sub`）がTOCTOU窓の間にワークスペース内の
+        // 別ディレクトリ（典型的には`.git/hooks`）を指すシンボリックリンクへ差し替え
+        // られた場合に「境界内」として素通りしてしまい、`hasGitSegment`（Issue #406の
+        // `.git`無条件拒否）は`relPath`の文字列しか見ていないためこの経路は迂回できて
+        // しまう。書き込み側（下の`realTargetDir`/`expectedTemp`比較）と同じ形へ揃える。
+        const targetDir = path.dirname(target);
+        const realTargetDir = await fs.realpath(targetDir);
+        if (realTargetDir === undefined) {
+          // 親ディレクトリが無い＝削除対象も存在しない正常系（`realpath`はENOENTを
+          // 含むあらゆる失敗でundefinedを返す。書き込み側の`realTargetDir`確認とは
+          // 異なり、こちらは新規作成の前提が無いため「無ければ何もしない」でよい）。
+          // ここで throw すると「削除対象が既に無い」という正常なケースまで
+          // エラー化してしまう。`isExcludedPath`と同じ「対象外なのでskip」の扱いで
+          // `skippedPaths`へ記録し、次のエントリへ進む。
+          skippedPaths.push(relPath);
+          continue;
+        }
         const realTarget = await fs.realpath(target);
-        if (realTarget !== undefined && !isPathWithinRoot(realTarget, realRoot)) {
+        if (realTarget === undefined) {
+          // 削除対象が既に存在しない（`kind: 'deleted'`のエントリでは正常系）。
+          // `removeFile`を呼ぶ必要が無いのでスキップする。ここを throw にすると
+          // 正常系が壊れる一方、素通りして`removeFile`へ進むとフェイルオープンに
+          // なるため、いずれでもなく「次のエントリへ進む」を選ぶ。
+          skippedPaths.push(relPath);
+          continue;
+        }
+        const expectedTarget = path.join(realTargetDir, path.basename(target));
+        if (realTarget !== expectedTarget) {
           throw new Error(
-            `削除対象が実際にはワークスペースの外を指しています（${safeRelPath}）: ${sanitizeForLog(realTarget)}`,
+            `削除対象が実際には想定した場所以外を指しています（${safeRelPath}）: ${sanitizeForLog(realTarget)}`,
           );
         }
         await fs.removeFile(target);

@@ -1948,6 +1948,113 @@ describe('実ファイルシステムでの統合テスト', () => {
       );
 
       it(
+        '削除対象の親ディレクトリがワークスペース内の`.git/hooks`へ差し替えられても、' +
+          '既存のフックを削除せずに失敗する（削除経路の境界内リダイレクト、Issue #484）',
+        async () => {
+          // 書き込み側と同じ穴（Issue #484）が`kind: 'deleted'`の削除分岐にも
+          // 残っていないことの回帰テスト。`relPath`自体に`.git`を含まない経路
+          // （`sub/pre-commit`）で`target`の親ディレクトリ（`workspace/sub`）を
+          // `.git/hooks`へ誘導すれば、事後確認が「境界内か」しか見ていない旧実装では
+          // 素通りして既存フックが無警告で削除されてしまう。
+          const hooksDir = path.join(workspace, '.git', 'hooks');
+          await mkdir(hooksDir, { recursive: true });
+          await writeFile(path.join(hooksDir, 'pre-commit'), 'original-hook\n');
+
+          const targetDir = path.join(workspace, 'sub');
+          await mkdir(targetDir, { recursive: true });
+          await writeFile(path.join(targetDir, 'pre-commit'), 'to-be-deleted\n');
+
+          const integration = await ensureIntegrationDir(
+            workspace,
+            RUN_ID,
+            nodePseudoWorktreeFileSystem,
+          );
+          expect(integration.ok).toBe(true);
+          if (!integration.ok) return;
+
+          const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+          const manifest: IntegrationManifest = new Map([
+            ['sub/pre-commit', { taskId: 'T1', kind: 'deleted' }],
+          ]);
+
+          let swapped = false;
+          // `targetDir`の`realpath`確認（削除分岐の`realTargetDir`取得）直後に、
+          // `targetDir`自体を`.git/hooks`へのシンボリックリンクへ差し替える
+          // （TOCTOU窓の再現。書き込み側の同種テストと同じ形）
+          const raceFs: typeof nodePseudoWorktreeFileSystem = {
+            ...nodePseudoWorktreeFileSystem,
+            realpath: async (target) => {
+              const result = await nodePseudoWorktreeFileSystem.realpath(target);
+              if (!swapped && target === targetDir) {
+                swapped = true;
+                await rm(targetDir, { recursive: true, force: true });
+                await symlink(hooksDir, targetDir);
+              }
+              return result;
+            },
+          };
+
+          const result = await reflectIntegrationToWorkspace(
+            workspace,
+            integration.dir,
+            workspaceBaseline,
+            manifest,
+            [],
+            raceFs,
+          );
+
+          expect(result.ok).toBe(false);
+          if (result.ok) return;
+          expect(result.reason).toBe('partialApply');
+
+          // 既存のフックは削除されていない
+          await expect(readFile(path.join(hooksDir, 'pre-commit'), 'utf8')).resolves.toBe(
+            'original-hook\n',
+          );
+          const hooksEntries = await readdir(hooksDir);
+          expect(hooksEntries).toEqual(['pre-commit']);
+        },
+      );
+
+      it(
+        '削除対象が既に存在しない場合、エラーにならず正常に処理が続く（`realpath`がundefinedを' +
+          '返す正常系。throwにすると壊れる回帰の防止）',
+        async () => {
+          const integration = await ensureIntegrationDir(
+            workspace,
+            RUN_ID,
+            nodePseudoWorktreeFileSystem,
+          );
+          expect(integration.ok).toBe(true);
+          if (!integration.ok) return;
+          await writeFile(path.join(integration.dir, 'kept.txt'), 'kept\n');
+          await writeFile(path.join(workspace, 'kept.txt'), 'kept\n');
+
+          const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+          // `already-gone.txt`はワークスペース上に存在しない。削除エントリの対象が
+          // 既に無い正常系を再現する
+          const manifest: IntegrationManifest = new Map([
+            ['already-gone.txt', { taskId: 'T1', kind: 'deleted' }],
+            ['kept.txt', { taskId: 'T2', kind: 'modified' }],
+          ]);
+
+          const result = await reflectIntegrationToWorkspace(
+            workspace,
+            integration.dir,
+            workspaceBaseline,
+            manifest,
+            [],
+            nodePseudoWorktreeFileSystem,
+          );
+
+          expect(result.ok).toBe(true);
+          if (!result.ok) return;
+          // 既に無い削除対象はエラーにならず処理が続き、後続のエントリも適用される
+          expect(result.appliedPaths).toEqual(['kept.txt']);
+        },
+      );
+
+      it(
         '`rename`を持たないポートでは従来の直接コピー経路へフォールバックし、' +
           '`usedLegacyCopyFallback`をtrueで返す（対応漏れ検知用の警告ログの元）',
         async () => {
