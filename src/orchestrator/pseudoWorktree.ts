@@ -1,13 +1,14 @@
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { isPathWithinRoot } from './escalation';
+import { hasGitSegment, isPathWithinRoot } from './escalation';
 import {
   assertValidIdentifiers,
   findSymlinkedAncestor,
   identifierError,
   runIdError,
 } from './fsGuards';
+import { sanitizeForLog } from './sanitize';
 import { SerialQueue } from './serialQueue';
 
 /**
@@ -148,30 +149,251 @@ export function serializeManifest(manifest: IntegrationManifest): string {
   return JSON.stringify(Object.fromEntries(manifest), null, 2);
 }
 
-/** `serializeManifest` の逆変換。壊れたJSONは空のマニフェストとして扱う（安全側）。 */
-export function deserializeManifest(json: string): IntegrationManifest {
-  try {
-    const parsed: unknown = JSON.parse(json);
-    if (typeof parsed !== 'object' || parsed === null) {
-      return new Map();
+/**
+ * マニフェストへ持ち込めるエントリ数の上限。これを超えるJSONは壊れているか異常な
+ * ものとして扱い、パース失敗と同等に倒す（レビュー指摘: risk、Issue #380の追加指摘）。
+ *
+ * 根拠: 統合先（`_integration`）は差分（追加・変更されたファイル）だけを持つ疎な構成
+ * のため、1回のrunで複数タスクが変更するファイル数は通常でも数百〜数千件程度に収まる。
+ * 極端に大規模なモノレポでの全面書き換えを想定しても数万件が現実的な上限であり、
+ * 10万件はその数倍にあたる安全側の値（かつ`Map`構築のメモリ・CPUコストが実用上
+ * 無視できる範囲に収まる規模）として選んだ。
+ */
+const MAX_MANIFEST_ENTRIES = 100_000;
+
+/**
+ * マニフェストのファイル本体として許容する最大サイズ（バイト）。`MAX_MANIFEST_ENTRIES`の
+ * チェックは`JSON.parse`が成功した後にしか効かず、`JSON.parse`自体は入力サイズに比例した
+ * メモリを確保するため、キー数は少なくても値が巨大な文字列・深いネスト等の入力では
+ * 上限チェックへ到達する前にメモリを圧迫しうる（レビュー指摘: medium、Issue #380の
+ * 追加指摘）。`MAX_MANIFEST_ENTRIES`（10万件）×1エントリあたり数百バイト程度を見込んでも
+ * 数十MBに収まるため、安全マージンを掛けた50MiBをパース前の足切りとして設ける。
+ */
+const MAX_MANIFEST_FILE_BYTES = 50 * 1024 * 1024;
+
+/**
+ * マニフェストのキー（ワークスペースへ反映する際の相対パス）として妥当かどうかを
+ * 検証する（レビュー指摘: high、パストラバーサル。Issue #380の追加指摘）。
+ *
+ * このキーは`reflectIntegrationToWorkspace`で`relPath.split('/')`された後
+ * `path.join(workspaceRoot, ...segments)`へそのまま渡り、ワークスペースへの
+ * 反映先を決める。`manifest.json`はワークスペース内のファイルとして読み戻す
+ * （Issue #380）ため、細工されたファイルを事前に置かれると外部入力がこの経路へ
+ * 流れうる。空文字・絶対パス（POSIX/Windowsドライブレター双方）・バックスラッシュ
+ * 区切り・`..`/`.`セグメントを含むキーは、いずれも`workspaceRoot`の外を指す
+ * 余地を作るため拒否する。
+ */
+function isValidManifestKey(key: string): boolean {
+  if (key === '' || key.includes('\\') || path.isAbsolute(key)) {
+    return false;
+  }
+  // WindowsのドライブレターはPOSIX上の`path.isAbsolute`では絶対パスと判定されない
+  // （例: `C:/x`）ため、別途弾く。
+  if (/^[a-zA-Z]:/.test(key)) {
+    return false;
+  }
+  const segments = key.split('/');
+  return segments.every((segment) => segment !== '' && segment !== '.' && segment !== '..');
+}
+
+/** `manifestFromParsedJson` の結果。`ok: false` は不正なキーを含む・エントリ数が上限を超える等、破棄が起きたことを表す。 */
+interface ManifestParseResult {
+  manifest: IntegrationManifest;
+  ok: boolean;
+}
+
+/**
+ * `JSON.parse`済みの値からマニフェストを組み立てる純粋関数。`deserializeManifest`（壊れた
+ * JSONを安全側の空マニフェストへ倒す）と、復元の成否を呼び出し側へ伝える必要がある
+ * `loadPersistedManifest`（壊れたJSONを「復元できなかった」ことが分かる形で返す。
+ * Issue #380）の両方から共有する。
+ *
+ * キーが不正（`isValidManifestKey`が偽）なエントリは破棄し、`ok: false`で報告する
+ * （レビュー指摘: high。`deserializeManifest`は従来どおり安全側へ倒すため`ok`を捨てるが、
+ * `loadPersistedManifest`はこれを見て「復元できなかった」として反映を止める）。
+ * 値の形が不正なエントリ（`taskId`/`kind`が期待の型でない）は、キーの妥当性とは
+ * 別問題（パストラバーサルの脅威ではない）のため、従来どおり黙って読み飛ばすだけに留める。
+ */
+function manifestFromParsedJson(parsed: unknown): ManifestParseResult {
+  if (typeof parsed !== 'object' || parsed === null) {
+    return { manifest: new Map(), ok: true };
+  }
+  const rawEntries = Object.entries(parsed as Record<string, unknown>);
+  if (rawEntries.length > MAX_MANIFEST_ENTRIES) {
+    return { manifest: new Map(), ok: false };
+  }
+  const result = new Map<string, IntegrationManifestEntry>();
+  let ok = true;
+  for (const [key, value] of rawEntries) {
+    if (!isValidManifestKey(key)) {
+      ok = false;
+      continue;
     }
-    const result = new Map<string, IntegrationManifestEntry>();
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (
-        typeof value === 'object' &&
-        value !== null &&
-        typeof (value as { taskId?: unknown }).taskId === 'string' &&
-        typeof (value as { kind?: unknown }).kind === 'string'
-      ) {
-        const kind = (value as { kind: string }).kind;
-        if (kind === 'added' || kind === 'modified' || kind === 'deleted') {
-          result.set(key, { taskId: (value as { taskId: string }).taskId, kind });
-        }
+    if (
+      typeof value === 'object' &&
+      value !== null &&
+      typeof (value as { taskId?: unknown }).taskId === 'string' &&
+      typeof (value as { kind?: unknown }).kind === 'string'
+    ) {
+      const kind = (value as { kind: string }).kind;
+      if (kind === 'added' || kind === 'modified' || kind === 'deleted') {
+        result.set(key, { taskId: (value as { taskId: string }).taskId, kind });
       }
     }
-    return result;
+  }
+  return { manifest: result, ok };
+}
+
+/** `serializeManifest` の逆変換。壊れたJSON・不正なエントリは空のマニフェストとして扱う（安全側）。 */
+export function deserializeManifest(json: string): IntegrationManifest {
+  try {
+    return manifestFromParsedJson(JSON.parse(json)).manifest;
   } catch {
     return new Map();
+  }
+}
+
+/**
+ * マニフェストの永続化先（`<runId>/manifest.json`。`_integration`と同じ`<runId>`配下、
+ * かつ`.agents/worktrees`配下のため常にスナップショット走査（`listFiles`）の除外対象に
+ * 入る。ワークスペースへの反映（`reflectIntegrationToWorkspace`）がこのファイル自身を
+ * 誤って拾うことはない）。Issue #380。
+ */
+export function integrationManifestPath(workspaceRoot: string, runId: string): string {
+  const message = runIdError(runId);
+  if (message !== undefined) {
+    throw new Error(message);
+  }
+  return path.join(pseudoWorktreesRootDir(workspaceRoot), runId, 'manifest.json');
+}
+
+export type LoadManifestResult =
+  | { ok: true; manifest: IntegrationManifest }
+  | { ok: false; message: string };
+
+/**
+ * 永続化されたマニフェストを読み戻す（design.md §16.11の対象。Issue #380）。
+ *
+ * ファイルが無い場合（初回実行、またはまだ1件も統合していない実行）は「復元できない」
+ * ではなく「復元すべきものがまだ無い」正常系のため、空のマニフェストで`ok: true`を返す。
+ * ファイルはあるが内容を解析できない場合（破損）、不正なキー（パストラバーサルの疑いが
+ * あるエントリ）を含む場合、エントリ数が上限を超える場合は`ok: false`にする。ここを
+ * `deserializeManifest`のように黙って空マニフェストへ倒すと、統合済みだった成果が
+ * あったことに呼び出し側が気づけない（「0件で成功」に見えてしまう。Issueの本題）。
+ *
+ * 読み込みの前に、`integrationManifestPath`が指す経路にシンボリックリンクが含まれて
+ * いないかを確かめる（レビュー指摘: medium）。`.agents/worktrees/<runId>`の親のいずれかが
+ * シンボリックリンクだと境界外のファイルを読んでしまう。`ensureIntegrationDir`等と同じ
+ * `findSymlinkedAncestor`による一次防御をI/Oの前に通す。
+ *
+ * 一次防御（事前のシンボリックリンク検知）と実際の読み込みの間には短いが実在する
+ * ウィンドウがあり、その間に経路がシンボリックリンクへ差し替えられるとすり抜ける
+ * （TOCTOU、レビュー指摘: medium）。`cloneWorkspace`/`ensureIntegrationDir`が「作成後に
+ * `realpath`で実パスを確認し、境界外なら撤去する」二次防御を対にしているのと同じ考え方で、
+ * 読み込んだファイルの実パスを事後に`realpath`で確認し、`workspaceRoot`の外を指して
+ * いれば読んだ内容を破棄して「復元できなかった」として扱う（撤去ではなく破棄で足りる
+ * のは、読み込みは書き込みと違って対象への副作用を残さないため）。
+ *
+ * ファイルサイズの上限（`MAX_MANIFEST_FILE_BYTES`）による足切りも`JSON.parse`の前に行う
+ * （レビュー指摘: medium、Issue #380の追加指摘。`MAX_MANIFEST_ENTRIES`の項のコメント参照）。
+ */
+export async function loadPersistedManifest(
+  workspaceRoot: string,
+  runId: string,
+  fs: PseudoWorktreeFileSystemPort,
+): Promise<LoadManifestResult> {
+  const filePath = integrationManifestPath(workspaceRoot, runId);
+
+  const symlinkedAncestor = await findSymlinkedAncestor(workspaceRoot, filePath, fs);
+  if (symlinkedAncestor !== undefined) {
+    return {
+      ok: false,
+      message: `疑似worktreeの統合マニフェストの読み込み元の経路にシンボリックリンクが含まれています。読み込みを中止しました: ${sanitizeForLog(symlinkedAncestor)}`,
+    };
+  }
+
+  const stat = await fs.statFile(filePath);
+  if (stat !== undefined && stat.size > MAX_MANIFEST_FILE_BYTES) {
+    return {
+      ok: false,
+      message: `疑似worktreeの統合マニフェストを復元できませんでした（ファイルサイズが上限を超えています）: ${sanitizeForLog(filePath)}`,
+    };
+  }
+
+  const content = await fs.readTextFile(filePath);
+  if (content === undefined) {
+    return { ok: true, manifest: new Map() };
+  }
+
+  const realFilePath = await fs.realpath(filePath);
+  const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
+  if (realFilePath === undefined || !isPathWithinRoot(realFilePath, realRoot)) {
+    return {
+      ok: false,
+      message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際にはワークスペースの外を指しています）: ${sanitizeForLog(filePath)}`,
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return {
+      ok: false,
+      message: `疑似worktreeの統合マニフェストを復元できませんでした（内容を解析できません）: ${sanitizeForLog(filePath)}`,
+    };
+  }
+  const { manifest, ok } = manifestFromParsedJson(parsed);
+  if (!ok) {
+    return {
+      ok: false,
+      message: `疑似worktreeの統合マニフェストを復元できませんでした（不正なエントリ、またはエントリ数が上限を超えています）: ${sanitizeForLog(filePath)}`,
+    };
+  }
+  return { ok: true, manifest };
+}
+
+/**
+ * マニフェストを永続化する（design.md §16.11の対象。Issue #380）。タスク1件分の統合
+ * （`IntegrationQueue.integrate`）が成功するたびに呼び出し側（`integratePseudoWorktree`）
+ * から呼ぶ。書き込み失敗（EACCES/ENOSPC等）はここでは吸収せず、他のポートメソッドと
+ * 同じく素通しでthrowする（呼び出し側が「統合自体は成立している」ことと区別して扱うため）。
+ *
+ * 書き込みの前に、`loadPersistedManifest`と同じくシンボリックリンクの経路検知を行う
+ * （レビュー指摘: medium）。
+ *
+ * さらに、`cloneWorkspace`/`ensureIntegrationDir`と同じ二段構えの二段目（書き込み後に
+ * `realpath`で実パスを確認し、境界外なら撤去する）も対にする（レビュー指摘: medium、
+ * TOCTOU）。ここは間に`fs.mkdir(path.dirname(filePath))`を挟むぶん一次防御から実I/Oまでの
+ * ウィンドウが他箇所より広く、非対称のまま放置すると一次防御をすり抜けられた場合に
+ * 唯一無防備になる。
+ */
+export async function persistManifest(
+  workspaceRoot: string,
+  runId: string,
+  manifest: IntegrationManifest,
+  fs: PseudoWorktreeFileSystemPort,
+): Promise<void> {
+  const filePath = integrationManifestPath(workspaceRoot, runId);
+
+  const symlinkedAncestor = await findSymlinkedAncestor(workspaceRoot, filePath, fs);
+  if (symlinkedAncestor !== undefined) {
+    throw new Error(
+      `疑似worktreeの統合マニフェストの永続化先の経路にシンボリックリンクが含まれています。書き込みを中止しました: ${sanitizeForLog(symlinkedAncestor)}`,
+    );
+  }
+
+  await fs.mkdir(path.dirname(filePath));
+  await fs.writeTextFile(filePath, serializeManifest(manifest));
+
+  const realFilePath = await fs.realpath(filePath);
+  const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
+  if (realFilePath === undefined || !isPathWithinRoot(realFilePath, realRoot)) {
+    await fs.removeFile(filePath);
+    throw new Error(
+      `疑似worktreeの統合マニフェストの永続化先が実際にはワークスペースの外を指していたため、` +
+        `書き込みを取り消しました: ${sanitizeForLog(realFilePath ?? filePath)}`,
+    );
   }
 }
 
@@ -283,6 +505,16 @@ export interface PseudoWorktreeFileSystemPort {
   /** ファイルを削除する。存在しなくてもエラーにしない。 */
   removeFile(target: string): Promise<void>;
   /**
+   * テキストファイルを読む。存在しない・読めない場合は undefined（他の読み取り系
+   * ポートメソッドと同じ規約）。マニフェストの永続化・復元（Issue #380）にだけ使う。
+   */
+  readTextFile(target: string): Promise<string | undefined>;
+  /**
+   * テキストファイルを書く（親ディレクトリは呼び出し側が事前に作る）。マニフェストの
+   * 永続化（Issue #380）にだけ使う。書き込み失敗は素通しでthrowする（`copyFile`等と同じ）。
+   */
+  writeTextFile(target: string, content: string): Promise<void>;
+  /**
    * ディレクトリを再帰的に削除する。存在しなくてもエラーにしない。境界逸脱時の後始末
    * （`cloneWorkspace` / `ensureIntegrationDir`が作成直後に自分の作った分だけを消す）と、
    * `removePseudoWorktree`による明示的な撤去（Issue #298）の両方から使う。
@@ -345,6 +577,16 @@ export const nodePseudoWorktreeFileSystem: PseudoWorktreeFileSystemPort = {
   },
   async removeFile(target: string): Promise<void> {
     await fsPromises.rm(target, { force: true });
+  },
+  async readTextFile(target: string): Promise<string | undefined> {
+    try {
+      return await fsPromises.readFile(target, 'utf8');
+    } catch {
+      return undefined;
+    }
+  },
+  async writeTextFile(target: string, content: string): Promise<void> {
+    await fsPromises.writeFile(target, content, 'utf8');
   },
   async removeDirRecursive(target: string): Promise<void> {
     await fsPromises.rm(target, { recursive: true, force: true });
@@ -449,7 +691,7 @@ export async function cloneWorkspace(
     return {
       ok: false,
       reason: 'symlinkDetected',
-      message: `複製先の経路にシンボリックリンクが含まれています。作成を中止しました: ${symlinkedAncestor}`,
+      message: `複製先の経路にシンボリックリンクが含まれています。作成を中止しました: ${sanitizeForLog(symlinkedAncestor)}`,
     };
   }
 
@@ -457,7 +699,7 @@ export async function cloneWorkspace(
     return {
       ok: false,
       reason: 'alreadyExists',
-      message: `複製先が既に存在します: ${target}`,
+      message: `複製先が既に存在します: ${sanitizeForLog(target)}`,
     };
   }
 
@@ -470,7 +712,7 @@ export async function cloneWorkspace(
     return {
       ok: false,
       reason: 'boundaryEscape',
-      message: `複製先がワークスペースの外に作られたため、撤去しました: ${realTarget ?? target}`,
+      message: `複製先がワークスペースの外に作られたため、撤去しました: ${sanitizeForLog(realTarget ?? target)}`,
     };
   }
 
@@ -531,7 +773,7 @@ export async function removePseudoWorktree(
     return {
       ok: false,
       reason: 'boundaryEscape',
-      message: `撤去対象が.agents/worktreesの外を指しているため撤去しませんでした: ${realTarget}`,
+      message: `撤去対象が.agents/worktreesの外を指しているため撤去しませんでした: ${sanitizeForLog(realTarget)}`,
     };
   }
 
@@ -569,7 +811,7 @@ export async function ensureIntegrationDir(
     return {
       ok: false,
       reason: 'symlinkDetected',
-      message: `統合先の経路にシンボリックリンクが含まれています。作成を中止しました: ${symlinkedAncestor}`,
+      message: `統合先の経路にシンボリックリンクが含まれています。作成を中止しました: ${sanitizeForLog(symlinkedAncestor)}`,
     };
   }
 
@@ -582,7 +824,7 @@ export async function ensureIntegrationDir(
     return {
       ok: false,
       reason: 'boundaryEscape',
-      message: `統合先がワークスペースの外に作られたため、撤去しました: ${realDir ?? dir}`,
+      message: `統合先がワークスペースの外に作られたため、撤去しました: ${sanitizeForLog(realDir ?? dir)}`,
     };
   }
 
@@ -631,9 +873,18 @@ export async function applyDiffToIntegration(
 export class IntegrationQueue {
   private readonly queue = new SerialQueue();
   private manifest: IntegrationManifest;
+  private readonly manifestRestoreError: string | undefined;
 
-  constructor(initialManifest: IntegrationManifest = new Map()) {
+  /**
+   * `manifestRestoreError`はリロード復元時（Issue #380）、永続化されたマニフェストが
+   * 壊れていて読み戻せなかった場合に呼び出し側（`resolvePseudoState`）が渡す。定義されて
+   * いれば、このrunの統合状態はもう分からない（空マニフェストのまま続行すると「復元済み
+   * だが実は何も統合していない」と区別が付かない）ため、`reflectPseudoWorktree`側が
+   * ワークスペースへの反映を「0件で成功」にせず明示的に止める判定材料として使う。
+   */
+  constructor(initialManifest: IntegrationManifest = new Map(), manifestRestoreError?: string) {
     this.manifest = initialManifest;
+    this.manifestRestoreError = manifestRestoreError;
   }
 
   /** 現在のマニフェスト（永続化・`reflectIntegrationToWorkspace` へ渡す用）。 */
@@ -641,18 +892,43 @@ export class IntegrationQueue {
     return this.manifest;
   }
 
-  /** タスク1件分の差分を統合先へ適用する（`planIntegration` + `applyDiffToIntegration` をキュー経由で呼ぶ）。 */
+  /** マニフェストの復元に失敗していればその理由。成功・初回実行時は undefined。 */
+  getManifestRestoreError(): string | undefined {
+    return this.manifestRestoreError;
+  }
+
+  /**
+   * タスク1件分の差分を統合先へ適用する（`planIntegration` + `applyDiffToIntegration` をキュー経由で呼ぶ）。
+   *
+   * `onIntegrated`（省略可）はマニフェスト更新後の永続化用のフック（レビュー指摘: risk、
+   * Issue #380の追加指摘）。`persistManifest`の呼び出しをこの`enqueue`の外で行うと、
+   * `integrate`自体は直列化されていても後段の書き込み同士には順序保証が無く、
+   * 先に完了したタスクの古いマニフェストが、後から完了した別タスクの新しい書き込みより
+   * 後にディスクへ着地しうる（Issueが防ごうとした事象の再発）。`enqueue`されたこの関数の
+   * 中で`await`することで、次のタスクの`integrate`（と、その`onIntegrated`）が始まる前に
+   * 必ず書き込みが完了している状態を保証する。
+   *
+   * 呼び出し側が渡す`onIntegrated`が例外を投げると、それがそのままこの`Promise`の
+   * rejectになり統合自体の失敗として扱われてしまう。永続化の失敗は統合の成否とは
+   * 別問題（`integratePseudoWorktree`が従来から独立したtry/catchで警告に留めている
+   * 判断はここでも変えない）のため、失敗を統合の成否に混ぜたくない呼び出し側は
+   * `onIntegrated`自身の内側でtry/catchすること。
+   */
   integrate(
     taskId: string,
     taskDir: string,
     integrationDir: string,
     diff: readonly DiffEntry[],
     fs: PseudoWorktreeFileSystemPort,
+    onIntegrated?: (manifest: IntegrationManifest) => Promise<void>,
   ): Promise<IntegrationPlan> {
     return this.enqueue(async () => {
       const plan = planIntegration(taskId, diff, this.manifest);
       await applyDiffToIntegration(taskDir, integrationDir, plan.toApply, fs);
       this.manifest = plan.manifest;
+      if (onIntegrated !== undefined) {
+        await onIntegrated(plan.manifest);
+      }
       return plan;
     });
   }
@@ -666,9 +942,32 @@ export class IntegrationQueue {
 // ワークスペースへの反映（run終了時）
 // ---------------------------------------------------------------------------
 
+/**
+ * 除外設定（`exclude`）に一致したためスキップしたパス。反映は中断せず次のエントリへ進むが、
+ * **黙って捨てない**（Issue #380が「黙って0件成功として扱うと、統合済みだった成果が
+ * 失われたことに気づけない」と断じたのと同じ穴になるため）。呼び出し側
+ * （`runnerWorkingDirectory.ts`の`reflectPseudoWorktree`）が警告として人に見せる。
+ *
+ * 成功時（`ok: true`）だけでなく`partialApply`にも持たせる。持たせないと
+ * 「`appliedPaths` + `failedPath` + `remainingPaths` で全エントリを覆う」という
+ * 呼び出し側の適用済み・未適用の勘定が崩れ、スキップされた分がどちらにも現れなくなる。
+ */
+type SkippedPaths = { skippedPaths: string[] };
+
 export type ReflectToWorkspaceResult =
-  | { ok: true; appliedPaths: string[] }
-  | { ok: false; reason: 'workspaceChanged'; message: string; changedPaths: string[] };
+  | ({ ok: true; appliedPaths: string[] } & SkippedPaths)
+  | { ok: false; reason: 'workspaceChanged'; message: string; changedPaths: string[] }
+  | ({
+      ok: false;
+      reason: 'partialApply';
+      message: string;
+      /** 反映済み（成功した）パス。 */
+      appliedPaths: string[];
+      /** 反映に失敗した1件（この後は試みていない）。 */
+      failedPath: string;
+      /** `failedPath`より後ろにあり、まだ試みていないパス。 */
+      remainingPaths: string[];
+    } & SkippedPaths);
 
 /**
  * runの終了時に、統合先の内容をワークスペースへ反映する（design.md §16.20）。
@@ -680,6 +979,25 @@ export type ReflectToWorkspaceResult =
  *
  * 変更が無ければ、マニフェストに記録された各パスをワークスペースへ適用する。
  * `kind: 'deleted'` はワークスペースから削除し、それ以外は統合先からコピーする。
+ *
+ * **1件ごとに、このファイルの他の経路（`cloneWorkspace` / `ensureIntegrationDir` /
+ * `loadPersistedManifest` / `persistManifest`）と同じ二段構えの境界確認を行う**
+ * （Issue #433）。一次防御として`findSymlinkedAncestor`でI/O前に経路のシンボリックリンクを
+ * 検知し、二次防御として`realpath`で実パスが境界（ワークスペース／統合先）の配下に
+ * あることを確かめる。`isPathWithinRoot`は字面の判定でシンボリックリンクを解決せず、
+ * マニフェストのキーは永続化ファイル（Issue #380）由来にもなりうるため、この経路だけ
+ * 字面の判定に頼ると「ワークスペース内に実在するシンボリックリンクを経由して外へ書く・
+ * 外を消す」キーを止められない。`listFiles`がシンボリックリンクを除外する結果、その手の
+ * キーは`workspaceChanged`の保護（人の編集の検知）にも現れない。
+ *
+ * 除外（`isExcludedPath`）と`.git`セグメントの拒否も同じ場所で行う（Issue #406）。
+ * ただし**扱いは対称にしない**。`isExcludedPath`はそのエントリだけスキップして先へ進み、
+ * `hasGitSegment`は従来どおり反映全体を中断する（理由はループ内のコメントを参照）。
+ * 非対称なので**判定順が意味を持つ**。`hasGitSegment`を先に評価し、`.git`セグメントを
+ * 含むキーは`exclude`との一致有無に関わらず必ず中断させる。
+ *
+ * 検証に失敗したエントリは、I/Oエラーと同じく`partialApply`（適用済み・失敗した1件・
+ * 未着手の残り）として返し、人が状況を追えるようにする。
  */
 export async function reflectIntegrationToWorkspace(
   workspaceRoot: string,
@@ -701,18 +1019,166 @@ export async function reflectIntegrationToWorkspace(
     };
   }
 
+  const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
+  const realIntegrationDir = (await fs.realpath(integrationDir)) ?? integrationDir;
+
+  const entries = [...manifest.entries()];
   const appliedPaths: string[] = [];
-  for (const [relPath, entry] of manifest) {
+  const skippedPaths: string[] = [];
+  for (let i = 0; i < entries.length; i += 1) {
+    const entry = entries[i];
+    if (entry === undefined) {
+      continue;
+    }
+    const [relPath, manifestEntry] = entry;
     const segments = relPath.split('/');
     const target = path.join(workspaceRoot, ...segments);
-    if (entry.kind === 'deleted') {
-      await fs.removeFile(target);
-    } else {
-      const source = path.join(integrationDir, ...segments);
-      await fs.mkdir(path.dirname(target));
-      await fs.copyFile(source, target);
+    const safeRelPath = sanitizeForLog(relPath);
+    try {
+      // マニフェストの出どころ（実行時に内部生成されたものか、永続化ファイルから
+      // 読み戻されたものか）に関わらず、反映処理自体が境界を守る（レビュー指摘: high、
+      // 多層防御の2段目）。`manifestFromParsedJson`のキー検証（1段目）をすり抜けた
+      // 場合でも、ここで`workspaceRoot`/`integrationDir`の外を指すエントリを弾く。
+      //
+      // `.git`セグメントは`exclude`の設定内容に関わらず無条件で拒否する。ワークスペースが
+      // 後からgitリポジトリになったとき、仕込まれた`.git/hooks/*`が永続的なコード実行経路に
+      // なるため（判定は`escalation.ts`の`hasGitSegment`を共有し、`.GIT`等の亜種も同じ扱い）。
+      // こちらは`isExcludedPath`（設定ドリフトで正当なキーが一致しうるためスキップ扱い）と
+      // 違い、**反映全体を中断する**。攻撃シナリオが明確で、かつ正当なマニフェストに
+      // `.git`セグメントが入る筋が無いため、1件でも現れたらマニフェスト全体を疑う。
+      //
+      // そのため`isExcludedPath`のスキップ判定より**前**に置く。順序が逆だと、
+      // `exclude`に一致するセグメントを併せ持つ`.git`キーがスキップへ吸われて無条件拒否が
+      // 効かなくなる（下の`isExcludedPath`のコメントも参照）。
+      if (hasGitSegment(relPath)) {
+        throw new Error(`反映対象から除外されるパスです（${safeRelPath}）`);
+      }
+      // 除外の判定は、スナップショット（`listFiles`）と同じ`isExcludedPath`をここでも
+      // 通す（Issue #406 / #433）。マニフェストのキーは永続化ファイル由来にもなりうる
+      // （Issue #380）ため、`listFiles`が除外したものと同じ範囲を反映側でも拒否しないと、
+      // 走査では一度も見ないパス（`node_modules`配下等）がワークスペースへ書き戻される。
+      //
+      // **ヒットしてもそのエントリをスキップするだけで、反映全体は中断しない**
+      // （レビュー指摘: medium）。`exclude`は起動時に固定される一方、
+      // `loadPersistedManifest`はディスク上のマニフェストを`exclude`と無関係に復元するため、
+      // 「前回実行時のexclude設定下で正当に作られたキーが、設定変更後の今回のexcludeに
+      // 一致する」設定ドリフトが構造的に起こりうる。中断すると、Mapの反復順で後ろにある
+      // 正当なエントリまで一律で未適用になってしまう。走査側の`listFiles`も同じ判定を
+      // `continue`で流しており、扱いを揃える。
+      //
+      // ただし黙って捨てず`skippedPaths`へ載せ、呼び出し側が警告として人に見せる。
+      //
+      // **この判定は必ず`hasGitSegment`より後に置くこと**（レビュー2巡目の指摘）。
+      // 先に置くと`node_modules/.git/hooks/pre-commit`のように「除外対象のディレクトリ名と
+      // `.git`セグメントを両方含むキー」がスキップへ倒れ、`.git`の無条件拒否へ到達しない。
+      // 既定の`exclude`のままで成立し、細工したマニフェストに除外ヒットするダミーを
+      // 混ぜるだけで`.git`混入の中断（Issue #406）が無効化される。
+      if (isExcludedPath(relPath, exclude)) {
+        skippedPaths.push(relPath);
+        continue;
+      }
+      if (!isPathWithinRoot(target, workspaceRoot)) {
+        throw new Error(`反映先がワークスペースの外を指しています（${safeRelPath}）`);
+      }
+      // 一次防御: 反映先の経路にシンボリックリンクが無いことをI/Oの前に確かめる
+      // （`cloneWorkspace` / `ensureIntegrationDir` / `persistManifest`と同じ二段構えの1段目。
+      // Issue #433）。`isPathWithinRoot`は字面の判定でシンボリックリンクを解決しないため、
+      // これ単体では「ワークスペース内に実在するシンボリックリンクを経由して外へ出る」
+      // キーを止められない。`listFiles`がシンボリックリンクを捨てる不変条件は、キーが
+      // 永続化ファイル由来になった時点（Issue #380）から反映側の前提にできない。
+      const targetSymlink = await findSymlinkedAncestor(workspaceRoot, target, fs);
+      if (targetSymlink !== undefined) {
+        throw new Error(
+          `反映先の経路にシンボリックリンクが含まれています（${safeRelPath}）: ${sanitizeForLog(targetSymlink)}`,
+        );
+      }
+      if (manifestEntry.kind === 'deleted') {
+        // 二次防御。削除は取り消せない（`persistManifest`のように「書いた後に撤去する」
+        // 形にできない）ため、実パスの確認も削除の**前**に行う。`removePseudoWorktree`が
+        // `removeDirRecursive`の前に`realpath`で確かめているのと同じ形。
+        const realTarget = await fs.realpath(target);
+        if (realTarget !== undefined && !isPathWithinRoot(realTarget, realRoot)) {
+          throw new Error(
+            `削除対象が実際にはワークスペースの外を指しています（${safeRelPath}）: ${sanitizeForLog(realTarget)}`,
+          );
+        }
+        await fs.removeFile(target);
+      } else {
+        const source = path.join(integrationDir, ...segments);
+        if (!isPathWithinRoot(source, integrationDir)) {
+          throw new Error(`反映元が統合先の外を指しています（${safeRelPath}）`);
+        }
+        const sourceSymlink = await findSymlinkedAncestor(integrationDir, source, fs);
+        if (sourceSymlink !== undefined) {
+          throw new Error(
+            `反映元の経路にシンボリックリンクが含まれています（${safeRelPath}）: ${sanitizeForLog(sourceSymlink)}`,
+          );
+        }
+        // 読み出しは`copyFile`の中で起きてしまうため、反映元の実パス確認は読み出しの前に
+        // 行う（`loadPersistedManifest`が読み込み後に確認して内容を破棄できるのは、
+        // 読んだ内容がその関数の中に留まるため。ここは読んだ内容がワークスペースへ
+        // そのまま書かれるので、事後の確認では統合先の外の内容を持ち込んだ後になる）。
+        const realSource = await fs.realpath(source);
+        if (realSource === undefined || !isPathWithinRoot(realSource, realIntegrationDir)) {
+          throw new Error(
+            `反映元が実際には統合先の外を指しています（${safeRelPath}）: ${sanitizeForLog(realSource ?? source)}`,
+          );
+        }
+        // 親ディレクトリを作った直後に実パスを確かめてからコピーする（`cloneWorkspace`が
+        // 「多数のファイルをコピーする前に、作ったディレクトリの実パスを確認する」のと
+        // 同じ順序。ここで確認しておけば、ファイル本体の書き込みが境界の外で起きない）。
+        const targetDir = path.dirname(target);
+        await fs.mkdir(targetDir);
+        const realTargetDir = await fs.realpath(targetDir);
+        // ここでは`cloneWorkspace` / `ensureIntegrationDir`と違い、
+        // **作ったディレクトリを`removeDirRecursive`で撤去しない**（レビュー指摘への裁定。
+        // 揃っていないのは意図的なので、将来のレビューで安易に揃えないこと）。
+        // 撤去対象は「`realpath`が境界外に解決されたディレクトリ」であり、その実体は
+        // シンボリックリンクの指す先＝既にユーザーのデータが入っている可能性のある場所。
+        // 空ディレクトリが1つ残る害と、境界外を再帰削除する害が釣り合わない。
+        // `cloneWorkspace`側が撤去できるのは、そこで作るのが自分専用の新規ディレクトリ
+        // （`<runId>/<taskId>`）だからで、前提が違う。
+        if (realTargetDir === undefined || !isPathWithinRoot(realTargetDir, realRoot)) {
+          throw new Error(
+            `反映先のディレクトリが実際にはワークスペースの外を指しています（${safeRelPath}）: ${sanitizeForLog(realTargetDir ?? targetDir)}`,
+          );
+        }
+        await fs.copyFile(source, target);
+        // 二次防御の仕上げ（TOCTOU）。`persistManifest`と同じく、書いた後に実パスを
+        // 確かめ、境界外なら書き込みを取り消して失敗として返す。
+        const realTarget = await fs.realpath(target);
+        if (realTarget === undefined || !isPathWithinRoot(realTarget, realRoot)) {
+          await fs.removeFile(target);
+          throw new Error(
+            `反映先が実際にはワークスペースの外を指していたため、書き込みを取り消しました` +
+              `（${safeRelPath}）: ${sanitizeForLog(realTarget ?? target)}`,
+          );
+        }
+      }
+    } catch (e) {
+      // 途中のI/Oエラーで中断した場合、それ以前のパスだけが適用済みの中途半端な状態に
+      // なる。ここで例外を投げ直すと、どこまで適用できたか・どこから先が未適用かの情報が
+      // 呼び出し側から失われる（Issue #380の追加指摘）。適用済み・失敗した1件・まだ
+      // 試みていない残りを、呼び出し側が警告として人に見せられる形で返す
+      const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+      return {
+        ok: false,
+        reason: 'partialApply',
+        message: `統合結果のワークスペースへの反映が${safeRelPath}で失敗し、途中で中断しました: ${message}`,
+        appliedPaths: [...appliedPaths].sort((a, b) => a.localeCompare(b)),
+        skippedPaths: [...skippedPaths].sort((a, b) => a.localeCompare(b)),
+        failedPath: relPath,
+        remainingPaths: entries
+          .slice(i + 1)
+          .map(([p]) => p)
+          .sort((a, b) => a.localeCompare(b)),
+      };
     }
     appliedPaths.push(relPath);
   }
-  return { ok: true, appliedPaths: appliedPaths.sort((a, b) => a.localeCompare(b)) };
+  return {
+    ok: true,
+    appliedPaths: appliedPaths.sort((a, b) => a.localeCompare(b)),
+    skippedPaths: skippedPaths.sort((a, b) => a.localeCompare(b)),
+  };
 }

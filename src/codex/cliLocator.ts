@@ -39,6 +39,37 @@ export function resolveCodexPath(configured: string, deps: LocatorDeps): LocateR
 }
 
 /**
+ * `PATHEXT`（Windowsのみ環境変数として設定される）を考慮した実行ファイル名の候補を返す。
+ *
+ * Windowsでは`gh` / `glab`のような実行ファイルが`gh.exe` / `glab.cmd`のように拡張子付きで
+ * 配置されるため、拡張子なしの名前をそのまま`fs.access`しても見つからない（Issue #404）。
+ * `PATHEXT`は`;`区切りの拡張子一覧（例: `.COM;.EXE;.BAT;.CMD`）。未設定・空（Windows以外の
+ * 通常の環境）では元の名前だけを候補にする。`name`が既にいずれかの拡張子で終わっている場合
+ * （設定で`gh.exe`のように明示された場合）は展開しない。
+ *
+ * `src/orchestrator/forge.ts`の`nodeCliAvailability.isOnPath`と共有する（重複実装にしない。
+ * Issue #404）。
+ */
+export function executableNameCandidates(name: string, env: NodeJS.ProcessEnv): string[] {
+  const pathext = env['PATHEXT'];
+  if (pathext === undefined || pathext.trim() === '') {
+    return [name];
+  }
+  const exts = pathext
+    .split(';')
+    .map((e) => e.trim())
+    .filter((e) => e !== '');
+  if (exts.length === 0) {
+    return [name];
+  }
+  const lowerName = name.toLowerCase();
+  if (exts.some((ext) => lowerName.endsWith(ext.toLowerCase()))) {
+    return [name];
+  }
+  return [name, ...exts.map((ext) => `${name}${ext}`)];
+}
+
+/**
  * PATH（またはパス指定）から実行ファイルを解決する。プロバイダ共通。
  *
  * `configured` は machine スコープ設定のため、ここでの値は信頼してよい。
@@ -51,19 +82,25 @@ export function resolveExecutable(
   const trimmed = configured.trim();
 
   // 明示指定がパスを含む場合は、それだけを見る。PATHへのフォールバックはしない
-  // （指定が誤っていることに気づけなくなるため）。
+  // （指定が誤っていることに気づけなくなるため）。拡張子省略（Windowsで`gh`のように
+  // 拡張子なしで設定された場合）にも`executableNameCandidates`で対応する。
   if (trimmed !== '' && trimmed.includes('/')) {
-    return deps.isExecutable(trimmed)
-      ? { ok: true, path: trimmed, source: 'setting' }
-      : { ok: false, reason: 'setting-not-executable', attempted: trimmed };
+    for (const candidate of executableNameCandidates(trimmed, deps.env)) {
+      if (deps.isExecutable(candidate)) {
+        return { ok: true, path: candidate, source: 'setting' };
+      }
+    }
+    return { ok: false, reason: 'setting-not-executable', attempted: trimmed };
   }
 
   const name = trimmed === '' ? defaultName : trimmed;
   const dirs = (deps.env['PATH'] ?? '').split(deps.delimiter).filter((d) => d !== '');
   for (const dir of dirs) {
-    const candidate = `${dir}/${name}`;
-    if (deps.isExecutable(candidate)) {
-      return { ok: true, path: candidate, source: 'path' };
+    for (const candidateName of executableNameCandidates(name, deps.env)) {
+      const candidate = `${dir}/${candidateName}`;
+      if (deps.isExecutable(candidate)) {
+        return { ok: true, path: candidate, source: 'path' };
+      }
     }
   }
 

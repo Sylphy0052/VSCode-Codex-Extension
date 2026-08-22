@@ -1,6 +1,7 @@
 import type { SessionSummary } from '../codex/types';
 import type { FileSystemPort } from '../session/ports';
 import { isWithinAny, type ListOptions, type ListResult } from '../session/sessionStore';
+import { basenameOf } from '../util/paths';
 import type { ClaudePaths } from './cliLocator';
 import { ClaudeSessionNameStore } from './sessionNames';
 import { parseTranscriptHead, sessionIdFromTranscriptName } from './transcript';
@@ -10,8 +11,6 @@ import { parseTranscriptHead, sessionIdFromTranscriptName } from './transcript';
  * `queue-operation` などが数行挟まるため1行では足りない。
  */
 const HEAD_LINES = 40;
-
-const basename = (p: string): string => p.slice(p.lastIndexOf('/') + 1);
 
 /**
  * Claude Code のセッション一覧。
@@ -85,7 +84,9 @@ export class ClaudeSessionStore {
   /** 会話ビューアなど、全文を読む用途のために場所を解決する。 */
   async resolveTranscriptPath(sessionId: string): Promise<string | undefined> {
     const found = await this.fs.listJsonl(this.paths.projects);
-    return found.find((filePath) => sessionIdFromTranscriptName(basename(filePath)) === sessionId);
+    return found.find(
+      (filePath) => sessionIdFromTranscriptName(basenameOf(filePath)) === sessionId,
+    );
   }
 
   /**
@@ -109,7 +110,7 @@ export class ClaudeSessionStore {
     const entries: Array<{ filePath: string; id: string; mtimeMs: number | undefined }> = [];
 
     for (const filePath of files) {
-      const id = sessionIdFromTranscriptName(basename(filePath));
+      const id = sessionIdFromTranscriptName(basenameOf(filePath));
       if (id === undefined) {
         continue;
       }

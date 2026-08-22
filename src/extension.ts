@@ -113,6 +113,7 @@ import { nodeFileSystem, nodeMemoryFileSystem } from './session/nodeFileSystem';
 import { nodeFileScan } from './session/nodeFileScan';
 import { FileMentionCatalog } from './provider/fileMentions';
 import { InMemoryMetaCache } from './session/ports';
+import { pruneMetaCacheOnStartup } from './session/pruneOnStartup';
 import { SessionStore } from './session/sessionStore';
 import { SessionActions, nodeCommandRunner, type SessionAction } from './session/sessionActions';
 import { SessionWatcher } from './session/sessionWatcher';
@@ -275,6 +276,17 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     context.globalState.get<Record<string, SessionMeta>>(META_CACHE_KEY) ?? {},
   );
   const store = new SessionStore(nodeFileSystem, paths, cache);
+  // 実体が消えたセッションのメタキャッシュを起動時に掃除する（issue #382）。activateを
+  // 妨げないよう非同期で投げっぱなしにし、失敗してもここで吸収する
+  // （`pruneMetaCacheOnStartup` 参照）
+  void pruneMetaCacheOnStartup(
+    store,
+    (removed) => {
+      log.info(`起動時にメタキャッシュを${removed}件掃除しました`);
+      return persistCache(context, cache);
+    },
+    log,
+  );
 
   const claudeHome = resolveClaudeHome(readClaudeConfig().configDir, nodeLocatorDeps);
   const claudeDirs = claudePaths(claudeHome);
@@ -540,6 +552,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // isTaskManagedThreadのクロージャが参照する箱を埋める。以降の`workflowRunner`
   // （コマンド登録などで使う）はこの束縛を指し、常にWorkflowRunnerとして扱える
   workflowRunnerRef.current = workflowRunner;
+  // 生成したDisposableは生成直後にcontext.subscriptionsへ登録する（規約）。
+  // `WorkflowRunner.dispose()`はオーケストレーターセッションを解放する契約（design.md
+  // §16.23「セッションの生成と寿命」）だが、ここで登録し忘れると拡張機能の終了時に
+  // 一度も呼ばれない（Issue #363）。`dispose()`は複数回呼ばれても安全
+  // （`disposeOrchestrator`が`live.orchestrator`をundefinedへ戻すため冪等）。
+  context.subscriptions.push({ dispose: () => workflowRunner.dispose() });
 
   // ワークフローView（#57）。`restoreRunsForView`がworkspaceStateのreconcileと
   // メモリ上への復元（design.md §16.11「リロード後の実行再開」）を両方行う

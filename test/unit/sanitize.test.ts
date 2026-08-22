@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  maskHomeDir,
   sanitizeForLog,
   stripControlChars,
   stripControlCharsPreservingNewlines,
@@ -43,6 +44,136 @@ describe('sanitizeForLog（design.md §16.7のsanitizeForReasonを共通化。�
     const result = sanitizeForLog(spoofed);
     expect(result).not.toContain(rtlOverride);
     expect(result).toBe('safegnp.exe');
+  });
+});
+
+describe('sanitizeForLog（ホームディレクトリ配下の絶対パスマスク。Issue #378）', () => {
+  it('ホームディレクトリ配下の絶対パス（POSIX）を含むエラーメッセージでユーザー名を露出しない', () => {
+    const raw = "EACCES: permission denied, open '/home/alice/project/src/index.ts'";
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    // パスの構造（どのファイルで失敗したか）は残る
+    expect(result).toContain('/home/***/project/src/index.ts');
+  });
+
+  it('macOS形式（/Users/<user>）の絶対パスでもユーザー名を露出しない', () => {
+    const raw = "ENOENT: no such file or directory, stat '/Users/bob/repo/foo.ts'";
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('bob');
+    expect(result).toContain('/Users/***/repo/foo.ts');
+  });
+
+  it('Windows形式（C:\\Users\\<user>）の絶対パスでもユーザー名を露出しない（受入基準）', () => {
+    const raw = "EACCES: permission denied, open 'C:\\Users\\carol\\project\\src\\index.ts'";
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('carol');
+    expect(result).toContain('C:\\Users\\***\\project\\src\\index.ts');
+  });
+
+  it('Windows形式でスラッシュ区切り（C:/Users/<user>）でもユーザー名を露出しない', () => {
+    const raw = "EACCES: permission denied, open 'C:/Users/dave/project/src/index.ts'";
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('dave');
+    expect(result).toContain('C:/Users/***/project/src/index.ts');
+  });
+
+  it('相対パスや通常の文字列は変えない（過剰マスク防止の自己レビュー）', () => {
+    expect(sanitizeForLog('src/orchestrator/sanitize.ts')).toBe('src/orchestrator/sanitize.ts');
+    expect(sanitizeForLog('ls -la ./repo/work')).toBe('ls -la ./repo/work');
+    // "Users" という名前のディレクトリを含む相対パスを誤検知しない
+    expect(sanitizeForLog('src/Users/foo.ts の型エラー')).toBe('src/Users/foo.ts の型エラー');
+  });
+
+  it('別ユーザーのホームディレクトリと前方一致するだけの無関係なパスは壊さない', () => {
+    // "/home/alice" は "/home/alice2" の部分文字列だが、別ユーザーのディレクトリなので
+    // 単純な前方一致では置換せず、後段の一般パターンでユーザー名だけがマスクされる
+    const raw = '/home/alice2/other/file.ts';
+    const result = maskHomeDir(raw, '/home/alice');
+    expect(result).not.toContain('alice2');
+    expect(result).toContain('/home/***/other/file.ts');
+  });
+});
+
+describe('sanitizeForLog（セキュリティ監査指摘: 否定先読みによるマスク回避。MEDIUM）', () => {
+  it('NixOS標準レイアウト（/var/home/<user>）でもユーザー名を露出しない', () => {
+    const raw = 'at /var/home/alice/project/index.ts';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('/var/home/***/project/index.ts');
+  });
+
+  it('BSD系レイアウト（/usr/home/<user>）でもユーザー名を露出しない', () => {
+    const raw = '/usr/home/alice/project';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('/usr/home/***/project');
+  });
+
+  it('Solaris/illumos系レイアウト（/export/home/<user>）でもユーザー名を露出しない', () => {
+    const raw = '/export/home/alice/project';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('/export/home/***/project');
+  });
+
+  it('file://形式のURI（file:///home/<user>）でもユーザー名を露出しない', () => {
+    const raw = 'file:///home/alice/project/index.ts';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('file:///home/***/project/index.ts');
+  });
+
+  it('大文字のHOMEディレクトリ（/HOME/<user>）でもユーザー名を露出しない', () => {
+    const raw = '/HOME/alice/project';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('/HOME/***/project');
+  });
+
+  it('小文字のdrive/usersパス（C:\\users\\<user>）でもユーザー名を露出しない', () => {
+    const raw = 'C:\\users\\alice\\project';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('C:\\users\\***\\project');
+  });
+});
+
+describe('sanitizeForLog（セキュリティ監査指摘: UNCパスが対象外。LOW）', () => {
+  it('UNC形式（\\\\fileserver\\Users\\<user>\\...）のローミングプロファイルでもユーザー名を露出しない', () => {
+    const raw = '\\\\fileserver\\Users\\alice\\project\\index.ts';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('\\\\fileserver\\Users\\***\\project\\index.ts');
+  });
+});
+
+describe('sanitizeForLog（iフラグ追加後も過剰マスクが起きないことの確認）', () => {
+  it('大文字小文字を区別しなくても相対パスの"Users"ディレクトリは誤検知しない', () => {
+    expect(sanitizeForLog('src/Users/foo.ts の型エラー')).toBe('src/Users/foo.ts の型エラー');
+    expect(sanitizeForLog('SRC/USERS/foo.ts の型エラー')).toBe('SRC/USERS/foo.ts の型エラー');
+  });
+
+  it('"home"や"users"を含むが該当パターンではない通常の単語は変えない', () => {
+    expect(sanitizeForLog('homework/alice/notes.md')).toBe('homework/alice/notes.md');
+    expect(sanitizeForLog('income/report.csv')).toBe('income/report.csv');
+  });
+});
+
+describe('maskHomeDir（Issue #378: ホームディレクトリ配下のユーザー名マスク、テスト容易性）', () => {
+  it('os.homedir()相当の値と完全一致する接頭辞を~へ置換する', () => {
+    expect(maskHomeDir('/home/kfuruhashi/repo/foo.ts', '/home/kfuruhashi')).toBe('~/repo/foo.ts');
+  });
+
+  it('慣習に沿わないホームディレクトリ（例: /root）でも完全一致すれば~へ置換する', () => {
+    expect(maskHomeDir('/root/repo/foo.ts', '/root')).toBe('~/repo/foo.ts');
+  });
+
+  it('homeDirが空文字の場合は完全一致置換をスキップし一般パターンのみ適用する', () => {
+    expect(maskHomeDir('/home/eve/repo/foo.ts', '')).toBe('/home/***/repo/foo.ts');
+  });
+
+  it('実行環境のos.homedir()に依存せず、明示的にhomeDirを渡してテストできる', () => {
+    expect(maskHomeDir('/home/zzz-test-user/x', '/home/zzz-test-user')).toBe('~/x');
   });
 });
 

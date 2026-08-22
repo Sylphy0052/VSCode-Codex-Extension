@@ -318,14 +318,27 @@ export interface WorkflowWarning {
     /** PR/MRの作成・push・最終マージのいずれかが失敗した（ワークフロー自体は止めない）。 */
     | 'forgeFailed'
     /**
+     * 統合worktreeに他タスクの未解決の衝突が残っていたため、このタスクのマージを
+     * 始められなかった（Issue #412）。人が統合worktreeを片付ければViewの「再マージ」で
+     * 先へ進めるため、`failed`ではなく`blocked`になる。
+     */
+    | 'mergeBusy'
+    /**
      * 疑似worktree（design.md §16.20）の統合が衝突した。3-way mergeができないため、
      * 同じファイルへの変更は全て衝突になる（このタスクは`blocked`になる）。
      */
     | 'pseudoWorktreeConflict'
     /**
-     * runの終了時、疑似worktreeの統合結果をワークスペースへ反映しようとしたが、
-     * 実行中にワークスペース側が変更されていたため反映せず中止した
-     * （design.md §16.20「人の編集を上書きしない」）。
+     * runの終了時、疑似worktreeの統合結果をワークスペースへ反映できなかった
+     * （全部・一部を問わない）。反映まわりで人が見るべき事象はこのkindへ集約する:
+     *
+     * - 実行中にワークスペース側が変更されていたため反映せず中止した
+     *   （design.md §16.20「人の編集を上書きしない」）
+     * - マニフェストを復元できず、反映そのものを行わなかった（Issue #380）
+     * - 途中で失敗し、一部だけが適用された（`partialApply`）
+     * - 除外設定（`exclude`）に一致したエントリをスキップした（Issue #433）。反映自体は
+     *   成功しているが、統合済みだった変更がワークスペースへ届いていない点は同じなので、
+     *   黙って捨てず人に見せる
      */
     | 'pseudoWorktreeReflectBlocked'
     /**
@@ -1258,6 +1271,18 @@ export class WorkflowRunner {
    * 対象はセッションが生きている未確定のタスクだけ。`merging` はループが既に終わっていて
    * 止める対象が無いため含めない（`isActiveTaskState` をそのまま使わないのはこのため）。
    * リロード直後で復元しただけの実行は `live.tasks` が空なので、何も呼ばずに抜ける。
+   *
+   * **衝突解決セッション（`live.mergeResolutions`、design.md §16.17「コンフリクト」5.）にも
+   * 同じく `stopLoop()` を送る。** 統合worktreeで開く衝突解決セッションは `live.tasks` の
+   * 管理下に無いため、ここへ含めないとissue #322が問題視した「停止ボタンを押しても指示が
+   * 送られ続ける」状態が衝突解決セッションについてだけ残ってしまう（issue #381）。
+   * `stopLoop()` は衝突解決セッションでも `LoopStopReason: 'taskStopped'` で
+   * `onFinished` を呼び、`runnerMerge.ts` の `onMergeResolutionFinished` へ合流する。
+   * そちらは `reason === 'done'` かつgit上も解決済みのときだけ `done` にする。
+   * **`'taskStopped'` ではマージを巻き戻さない**（issue #434）。人が統合worktreeで解いている
+   * 途中の未コミットの解決結果を `git merge --abort` が破棄してしまい、復旧手段が無いため。
+   * タブへの直接介入（`'manual'` / `'interrupted'`）と同じ非破壊の経路へ合流し、タスクは
+   * `merging` のまま統合worktreeの占有だけが解放される（issue #412と同じ論法）。
    */
   stop(runId: string): void {
     const live = this.runs.get(runId);
@@ -1277,6 +1302,12 @@ export class WorkflowRunner {
     });
     for (const [, liveTask] of targets) {
       liveTask.session.stopLoop();
+    }
+    // 衝突解決セッションは`live.tasks`に無い別枠の管理（`revealTask`と同じ扱い）のため、
+    // 上のフィルタには乗らない。生きているものへ全て送る（対象は`merging`のタスクだけの
+    // はずで、常に1件ずつしか無いが、複数あっても構わない形にしておく）
+    for (const mergeResolutionSession of live.mergeResolutions.values()) {
+      mergeResolutionSession.stopLoop();
     }
     this.notify(runId);
     void this.persist(runId);
@@ -1463,7 +1494,18 @@ export class WorkflowRunner {
   dispose(): void {
     for (const live of this.runs.values()) {
       disposeOrchestrator(live);
+      // 統合worktreeの占有待ちで止まっているマージを、起こす前に「即戻る」状態にしておく
+      // （Issue #412のレビュー指摘6）。`releaseAllLeases()`で起き上がった待機者は
+      // `attemptMerge`の続きへ進むため、この印が無いと`markMergeFailed`→`persist`/`notify`が
+      // 破棄済みのEventEmitter・workspaceStateへ書き込む。起き上がった側は
+      // `decideAfterLeaseWait`が「占有が失効している」ことを見て何もせず戻るが、
+      // `live.finished`は`pump()`が新しいタスクを開始しないための印としても要る
+      live.finished = true;
     }
+    // 統合worktreeの占有（Issue #412）の強制解放。通常は`runnerMerge.ts`側の`finally`が
+    // 解放するが、解放漏れが1つでもあると以後そのrunのマージが全て待ち続ける。破棄時に
+    // まとめて解放して待ち行列を空にする（待っていた側は失効したハンドルで失敗する）
+    this.integrationQueue.releaseAllLeases();
   }
 
   /**
@@ -1846,7 +1888,7 @@ export class WorkflowRunner {
     runId: string,
   ): Promise<TaskLaunchPreparation> {
     const taskRunState = live.runState.tasks.get(taskId);
-    const retry = retrySuffixOf(taskRunState?.retryCount, taskRunState?.manualRetryCount);
+    const retry = retrySuffixOf(taskRunState);
     const { cwd, branch, usedWorktree, usedPseudoWorktree, pseudoSnapshot, originCommit } =
       await resolveWorkingDirectory(this.internals, live, task, retry);
 
@@ -2326,7 +2368,9 @@ export class WorkflowRunner {
           if (!ready.ok) {
             // ready化の失敗はワークフローを止めない（design.md §16.18「5の失敗はワークフローを
             // 止めない」）。以降の最終マージはそのまま試みる
-            this.deps.log.warn(`[workflow ${runId}] 統合PR/MRのready化に失敗しました: ${ready.message}`);
+            this.deps.log.warn(
+              `[workflow ${runId}] 統合PR/MRのready化に失敗しました: ${ready.message}`,
+            );
             live.warnings.push({
               kind: 'forgeFailed',
               taskId: undefined,
@@ -2335,7 +2379,16 @@ export class WorkflowRunner {
           }
         }
       }
-      const merge = await runFinalMerge(forgeDeps.cli, forge.host, live.integration.cwd);
+      // design.md §16.18・Issue #404「番号を省略すると、マージ対象はcwdのカレント
+      // ブランチに紐づくPR/MRという暗黙の状態依存になる」ため、直前に取り出した統合PR/MRの
+      // 番号（`live.integrationPullRequest.number`）を明示的に渡す。番号が不明なとき
+      // （URLから取り出せなかった等）は`runFinalMerge`自体がCLIを呼ばず警告を返す
+      const merge = await runFinalMerge(
+        forgeDeps.cli,
+        forge.host,
+        live.integration.cwd,
+        live.integrationPullRequest?.number,
+      );
       if (!merge.ok) {
         this.deps.log.warn(`[workflow ${runId}] 最終マージに失敗しました: ${merge.message}`);
         live.warnings.push({
@@ -2573,48 +2626,69 @@ export class WorkflowRunner {
     if (live === undefined) {
       return;
     }
-    const outcome = getRunOutcome(live.runState);
-    await this.deps.store.update(runId, (current) => {
-      const tasks: Record<string, PersistedTaskState> = {};
-      for (const [id, s] of live.runState.tasks) {
-        const liveTask = live.tasks.get(id);
-        tasks[id] = {
-          state: s.state,
-          sessionId: s.sessionId,
-          cwd: s.cwd,
-          // liveTaskはこのウィンドウでまだセッションを開いていないタスク（リロード直後で
-          // 復元しただけの実行に多い）では undefined になる。その場合は前回persistした値を
-          // 引き継ぐ（`current`）。素通しで`undefined`を書くと、既にdone/failed/skipped
-          // 確定済みのタスクのbranchがリロード後の初回persistで失われてしまう
-          branch: liveTask?.branch ?? current?.tasks[id]?.branch,
-          submissionCount: s.submissionCount,
-          retryCount: s.retryCount,
-          manualRetryCount: s.manualRetryCount,
-          failure: s.failure,
-          // design.md §16.11「タスクごとの...PR/MRの番号」・Issue #118。branchと同じ理由で
-          // liveTaskが無ければ前回persistした値を引き継ぐ
-          pullRequestNumber: liveTask?.pullRequest?.number ?? current?.tasks[id]?.pullRequestNumber,
-          pullRequestUrl: liveTask?.pullRequest?.url ?? current?.tasks[id]?.pullRequestUrl,
+    try {
+      await this.deps.store.update(runId, (current) => {
+        // `outcome`はupdaterの中、`live.runState`を実際に読む直前で計算する（issue #381）。
+        // `store.update`は`WorkflowRunStore`内の`SerialQueue`を経由するため、この関数
+        // （updater）が実際に呼ばれるのは呼び出し時点ではなくキューが捌く時点になりうる。
+        // 呼び出し時点で`outcome`を計算して閉じ込めると、キューで順番待ちしている間に
+        // 別の`persist()`呼び出しが`live.runState`を書き換え、`tasks`（このupdater内で
+        // 都度読む最新の`live.runState`）と`outcome`（呼び出し時点のまま固定された古い値）
+        // が別時点の値になる（`finishedAt`に`undefined`が付く、または早すぎる
+        // `finishedAt`が`current?.finishedAt ?? ...`で上書き不能なまま固定される）
+        const outcome = getRunOutcome(live.runState);
+        const tasks: Record<string, PersistedTaskState> = {};
+        for (const [id, s] of live.runState.tasks) {
+          const liveTask = live.tasks.get(id);
+          tasks[id] = {
+            state: s.state,
+            sessionId: s.sessionId,
+            cwd: s.cwd,
+            // liveTaskはこのウィンドウでまだセッションを開いていないタスク（リロード直後で
+            // 復元しただけの実行に多い）では undefined になる。その場合は前回persistした値を
+            // 引き継ぐ（`current`）。素通しで`undefined`を書くと、既にdone/failed/skipped
+            // 確定済みのタスクのbranchがリロード後の初回persistで失われてしまう
+            branch: liveTask?.branch ?? current?.tasks[id]?.branch,
+            submissionCount: s.submissionCount,
+            retryCount: s.retryCount,
+            manualRetryCount: s.manualRetryCount,
+            failure: s.failure,
+            // design.md §16.11「タスクごとの...PR/MRの番号」・Issue #118。branchと同じ理由で
+            // liveTaskが無ければ前回persistした値を引き継ぐ
+            pullRequestNumber:
+              liveTask?.pullRequest?.number ?? current?.tasks[id]?.pullRequestNumber,
+            pullRequestUrl: liveTask?.pullRequest?.url ?? current?.tasks[id]?.pullRequestUrl,
+          };
+        }
+        return {
+          runId,
+          defPath: live.defPath,
+          workspaceRoot: live.repoRoot,
+          startedAt: current?.startedAt ?? live.startedAt,
+          finishedAt:
+            outcome === 'running' ? undefined : (current?.finishedAt ?? new Date().toISOString()),
+          tasks,
+          haltedByUser: live.runState.haltedByUser,
+          integrationBranch: live.integration?.branch ?? current?.integrationBranch ?? '',
+          // design.md §16.11「統合PR/MRの番号」・Issue #118。同じく前回persistした値を引き継ぐ
+          integrationPullRequestNumber:
+            live.integrationPullRequest?.number ?? current?.integrationPullRequestNumber,
+          integrationPullRequestUrl:
+            live.integrationPullRequest?.url ?? current?.integrationPullRequestUrl,
+          finalMergeOutcome: live.finalMergeOutcome ?? current?.finalMergeOutcome,
         };
-      }
-      return {
-        runId,
-        defPath: live.defPath,
-        workspaceRoot: live.repoRoot,
-        startedAt: current?.startedAt ?? live.startedAt,
-        finishedAt:
-          outcome === 'running' ? undefined : (current?.finishedAt ?? new Date().toISOString()),
-        tasks,
-        haltedByUser: live.runState.haltedByUser,
-        integrationBranch: live.integration?.branch ?? current?.integrationBranch ?? '',
-        // design.md §16.11「統合PR/MRの番号」・Issue #118。同じく前回persistした値を引き継ぐ
-        integrationPullRequestNumber:
-          live.integrationPullRequest?.number ?? current?.integrationPullRequestNumber,
-        integrationPullRequestUrl:
-          live.integrationPullRequest?.url ?? current?.integrationPullRequestUrl,
-        finalMergeOutcome: live.finalMergeOutcome ?? current?.finalMergeOutcome,
-      };
-    });
+      });
+    } catch (e) {
+      // `store.update`は`WorkflowRunStore`内の`SerialQueue`を経由する。`SerialQueue.enqueue`は
+      // `this.tail`を必ずresolved側へ戻すため、`memento.update`（`vscode.Memento.update`）が
+      // 失敗しても止まるのはその呼び出し自身が返すPromiseだけで、後続のenqueueは影響を
+      // 受けない。ただしその失敗したPromiseを呼び出し元（`void this.persist(runId)`。
+      // runner.ts内に多数）でcatchしていないと未ハンドルrejectになるため、ここで受け止める
+      // （Issue #364。実行状態の永続化に失敗しただけで、実行中のrun自体は継続できるため
+      // 状態遷移は変えない）
+      const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+      this.deps.log.error(`[workflow ${runId}] 実行状態の永続化に失敗しました: ${message}`);
+    }
   }
 }
 
@@ -2650,11 +2724,16 @@ export { parsePullRequestNumberFromUrl };
  * 1回目の再試行が `-retry0`）。1つずらして渡す必要がある
  * （レビュー指摘: high。テスト追加で発覚したオフバイワン）。`manualRetryCount` も
  * `retryTask` が次の試行を始める前に増やすため、同じ数え方に乗る。
+ *
+ * 引数は `retryCount` / `manualRetryCount` を個別に受け取らず、`TaskRunState`（の該当
+ * 2フィールド）をまとめて受け取る。以前は呼び出し側が2引数を別々に渡す形にしていたため、
+ * `runnerMerge.ts`側の撤去経路が`manualRetryCount`の受け渡しを忘れ、手動再実行後の
+ * 撤去対象パスが実際に使ったworktreeと食い違う不具合があった（issue #407）。1つの
+ * オブジェクトで渡す形にすることで、フィールドの渡し忘れ自体を型で防ぐ。
  */
 export function retrySuffixOf(
-  retryCount: number | undefined,
-  manualRetryCount?: number | undefined,
+  state: Pick<TaskRunState, 'retryCount' | 'manualRetryCount'> | undefined,
 ): number | undefined {
-  const total = (retryCount ?? 0) + (manualRetryCount ?? 0);
+  const total = (state?.retryCount ?? 0) + (state?.manualRetryCount ?? 0);
   return total > 0 ? total - 1 : undefined;
 }

@@ -491,8 +491,12 @@ function pathSegments(value: string): string[] {
  * macOS既定のAPFSはファイル名の大文字小文字を区別しないため、`.GIT` という表記でも
  * 実際には同じディレクトリを指しうる（実測で指摘された回避経路）。Linuxでは大文字小文字を
  * 区別する別ディレクトリになり実害は無いが、多層防御として区別しない側に倒す。
+ *
+ * `pseudoWorktree.ts` の `reflectIntegrationToWorkspace`（ワークスペースへの反映）からも
+ * 使うためexportする（Issue #406 / #433）。`.git` の判定ロジックを複製すると、片方だけが
+ * 亜種（`.GIT` 等）へ追随しなくなるため、判定は常にここへ集約する。
  */
-function hasGitSegment(value: string): boolean {
+export function hasGitSegment(value: string): boolean {
   return pathSegments(value).some((seg) => seg.toLowerCase() === '.git');
 }
 

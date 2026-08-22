@@ -11,10 +11,13 @@ import {
   deserializeManifest,
   diffSnapshots,
   ensureIntegrationDir,
+  integrationManifestPath,
   integrationPath,
   IntegrationQueue,
   isExcludedPath,
+  loadPersistedManifest,
   nodePseudoWorktreeFileSystem,
+  persistManifest,
   planIntegration,
   pseudoWorktreePath,
   pseudoWorktreesRootDir,
@@ -173,6 +176,43 @@ describe('serializeManifest / deserializeManifest', () => {
   });
 });
 
+describe('マニフェストのキー検証（レビュー指摘: high、パストラバーサル、Issue #380の追加指摘）', () => {
+  /**
+   * `manifestFromParsedJson`は`Object.entries(parsed)`の値（`taskId`/`kind`）だけでなく
+   * キー（＝ワークスペースへ反映する相対パス）も検証する。このキーは
+   * `reflectIntegrationToWorkspace`で`path.join(workspaceRoot, ...segments)`へそのまま
+   * 渡るため、`..`を含む・絶対パス・バックスラッシュ区切りのキーは`workspaceRoot`の外を
+   * 指しうる。ここでは`deserializeManifest`（安全側へ倒す公開関数）を通してその破棄を確認する。
+   */
+  it.each([
+    ['../../../../home/user/.bashrc', '相対パスの..セグメントによるトラバーサル'],
+    ['a/../../etc/passwd', '途中に..を含むトラバーサル'],
+    ['/etc/passwd', 'POSIX絶対パス'],
+    ['C:\\Windows\\System32\\evil', 'Windowsドライブレター+バックスラッシュ'],
+    ['a\\..\\..\\evil', 'バックスラッシュ区切りの相対トラバーサル'],
+    ['', '空文字'],
+    ['a/./b', '.セグメントを含む'],
+  ])('不正なキー（%s: %s）を含むエントリは破棄される', (badKey) => {
+    const json = JSON.stringify({
+      [badKey]: { taskId: 'T1', kind: 'modified' },
+      'ok.txt': { taskId: 'T1', kind: 'added' },
+    });
+    const manifest = deserializeManifest(json);
+    expect(manifest.has(badKey)).toBe(false);
+    expect(manifest.get('ok.txt')).toEqual({ taskId: 'T1', kind: 'added' });
+  });
+
+  it('妥当なキー（通常の相対パス）は破棄されない', () => {
+    const json = JSON.stringify({
+      'src/index.ts': { taskId: 'T1', kind: 'modified' },
+      'a/b/c.txt': { taskId: 'T2', kind: 'added' },
+    });
+    const manifest = deserializeManifest(json);
+    expect(manifest.get('src/index.ts')).toEqual({ taskId: 'T1', kind: 'modified' });
+    expect(manifest.get('a/b/c.txt')).toEqual({ taskId: 'T2', kind: 'added' });
+  });
+});
+
 describe('IntegrationQueue（直列化）', () => {
   it('integrateが直列化され、同時に複数要求してもマニフェスト更新が重ならない', async () => {
     let active = 0;
@@ -203,6 +243,78 @@ describe('IntegrationQueue（直列化）', () => {
     expect(maxActive).toBe(1);
     expect(results).toHaveLength(3);
   });
+
+  /**
+   * レビュー指摘: risk（Issue #380の追加指摘）。`persistManifest`の呼び出しを
+   * `queue.integrate`の`await`解決後・`SerialQueue`の外で行うと、`integrate`自体は
+   * 直列化されていても後段の書き込み同士には順序保証が無い。先に完了したタスク
+   * （enqueue順で先）の書き込みが遅延し、後から完了した別タスクの書き込みより後に
+   * ディスクへ着地すると、統合済みの成果がmanifest.json上から消える
+   * （Issue #380が防ごうとした事象の再発）。
+   *
+   * `IntegrationQueue.integrate`の`onIntegrated`フックへ永続化を渡すことで、
+   * 後段の書き込み自体も`SerialQueue`項目の中に収まり、順序が保証されることを確認する。
+   */
+  it(
+    '永続化（onIntegratedフック）が完了するまで次のタスクのintegrateが始まらないため、' +
+      '書き込みの順序が保証される',
+    async () => {
+      const queue = new IntegrationQueue();
+      const fs = nodePseudoWorktreeFileSystem;
+
+      let stored = '';
+      const writeOrder: string[] = [];
+      const persist = async (manifest: IntegrationManifest, delayMs: number): Promise<void> => {
+        if (delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+        stored = serializeManifest(manifest);
+        writeOrder.push(stored);
+      };
+
+      // T1（先にintegrateを呼ぶ）の永続化をわざと遅らせ、T2（後から呼ぶ）の永続化は
+      // 即座に終わるようにする。もし永続化がキューの外で行われていれば、T2の速い書き込みが
+      // T1の遅い書き込みより先に完了し、最後にT1の（T2を含まない）古い内容で上書きされうる
+      const t1 = queue.integrate(
+        'T1',
+        '/nowhere',
+        '/nowhere-int',
+        [{ path: 'a.txt', kind: 'deleted' }],
+        fs,
+        (manifest) => persist(manifest, 20),
+      );
+      const t2 = queue.integrate(
+        'T2',
+        '/nowhere',
+        '/nowhere-int',
+        [{ path: 'b.txt', kind: 'deleted' }],
+        fs,
+        (manifest) => persist(manifest, 0),
+      );
+
+      await Promise.all([t1, t2]);
+
+      // 直列化により、T1の（遅い）永続化がT2のintegrate開始より前に完了しているため、
+      // 書き込み順はT1→T2のまま入れ替わらない
+      expect(writeOrder).toHaveLength(2);
+      expect(deserializeManifest(writeOrder[0] ?? '')).toEqual(
+        new Map([['a.txt', { taskId: 'T1', kind: 'deleted' }]]),
+      );
+      expect(deserializeManifest(writeOrder[1] ?? '')).toEqual(
+        new Map([
+          ['a.txt', { taskId: 'T1', kind: 'deleted' }],
+          ['b.txt', { taskId: 'T2', kind: 'deleted' }],
+        ]),
+      );
+      // 最終的にディスク相当の内容（stored）には両方のタスクの記録が残る
+      expect(deserializeManifest(stored)).toEqual(
+        new Map([
+          ['a.txt', { taskId: 'T1', kind: 'deleted' }],
+          ['b.txt', { taskId: 'T2', kind: 'deleted' }],
+        ]),
+      );
+    },
+  );
 });
 
 describe('実ファイルシステムでの統合テスト', () => {
@@ -585,12 +697,740 @@ describe('実ファイルシステムでの統合テスト', () => {
     );
 
     expect(result).toMatchObject({ reason: 'workspaceChanged' });
-    if (result.ok) return;
+    if (result.ok || result.reason !== 'workspaceChanged') return;
     expect(result.changedPaths).toEqual(['a.txt']);
     // 反映されておらず、人の編集がそのまま残っている
     await expect(readFile(path.join(workspace, 'a.txt'), 'utf8')).resolves.toBe(
       'edited by a human during the run\n',
     );
+  });
+
+  it('マニフェストを永続化し、読み戻すと同じ内容が復元される（受入基準、Issue #380）', async () => {
+    const integration = await ensureIntegrationDir(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+    expect(integration.ok).toBe(true);
+    if (!integration.ok) return;
+
+    const manifest: IntegrationManifest = new Map([
+      ['a.txt', { taskId: 'T1', kind: 'modified' }],
+      ['b.txt', { taskId: 'T2', kind: 'added' }],
+    ]);
+    await persistManifest(workspace, RUN_ID, manifest, nodePseudoWorktreeFileSystem);
+
+    const loaded = await loadPersistedManifest(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+    expect(loaded).toEqual({ ok: true, manifest });
+
+    // 永続化先はrunId配下（_integrationと同じ階層）で、.agents/worktrees配下＝
+    // スナップショット走査から常に除外される場所にある
+    expect(integrationManifestPath(workspace, RUN_ID)).toBe(
+      path.join(pseudoWorktreesRootDir(workspace), RUN_ID, 'manifest.json'),
+    );
+  });
+
+  it(
+    'マニフェストがまだ永続化されていない場合（初回実行）は復元できないのではなく、' +
+      '空マニフェストで正常に扱う',
+    async () => {
+      const loaded = await loadPersistedManifest(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+      expect(loaded).toEqual({ ok: true, manifest: new Map() });
+    },
+  );
+
+  it(
+    '永続化されたマニフェストの内容が壊れている場合は「復元できない」ことが' +
+      '分かる形で返す（黙って空マニフェストへ倒さない。受入基準、Issue #380）',
+    async () => {
+      const filePath = integrationManifestPath(workspace, RUN_ID);
+      await mkdir(path.dirname(filePath), { recursive: true });
+      await writeFile(filePath, 'not valid json{{{');
+
+      const loaded = await loadPersistedManifest(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+      expect(loaded.ok).toBe(false);
+      if (loaded.ok) return;
+      expect(loaded.message).toContain('復元できません');
+    },
+  );
+
+  it(
+    '反映が途中で失敗すると、適用済み・未適用のパスの両方が結果に残る' +
+      '（受入基準・追加の指摘、Issue #380）',
+    async () => {
+      await writeWorkspaceFile('a.txt', 'original a\n');
+      await writeWorkspaceFile('b.txt', 'original b\n');
+      const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+
+      const t1 = await cloneWorkspace(workspace, RUN_ID, 'T1', [], nodePseudoWorktreeFileSystem);
+      expect(t1.ok).toBe(true);
+      if (!t1.ok) return;
+
+      await writeFile(path.join(t1.cwd, 'a.txt'), 'updated a, longer than before\n');
+      await writeFile(path.join(t1.cwd, 'b.txt'), 'updated b, longer than before\n');
+      const diff = diffSnapshots(
+        t1.snapshot,
+        await takeSnapshot(t1.cwd, [], nodePseudoWorktreeFileSystem),
+      );
+      const queue = new IntegrationQueue();
+      await queue.integrate('T1', t1.cwd, integration.dir, diff, nodePseudoWorktreeFileSystem);
+
+      // 2件目（b.txt）のワークスペースへの反映だけが失敗するフェイクへ差し替える
+      let copyCount = 0;
+      const failingFs: typeof nodePseudoWorktreeFileSystem = {
+        ...nodePseudoWorktreeFileSystem,
+        copyFile: async (from, to) => {
+          copyCount += 1;
+          if (copyCount >= 2) {
+            throw new Error('ENOSPC: no space left on device');
+          }
+          await nodePseudoWorktreeFileSystem.copyFile(from, to);
+        },
+      };
+
+      const result = await reflectIntegrationToWorkspace(
+        workspace,
+        integration.dir,
+        workspaceBaseline,
+        queue.getManifest(),
+        [],
+        failingFs,
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.reason).toBe('partialApply');
+      if (result.reason !== 'partialApply') return;
+      expect(result.appliedPaths).toEqual(['a.txt']);
+      expect(result.failedPath).toBe('b.txt');
+      expect(result.remainingPaths).toEqual([]);
+      // 失敗した1件より前は実際にワークスペースへ反映されている
+      await expect(readFile(path.join(workspace, 'a.txt'), 'utf8')).resolves.toBe(
+        'updated a, longer than before\n',
+      );
+      // 失敗した1件はワークスペース側に反映されていない
+      await expect(readFile(path.join(workspace, 'b.txt'), 'utf8')).resolves.toBe('original b\n');
+    },
+  );
+
+  it(
+    'マニフェストのキーが..を含んでいても、反映処理自体がワークスペースの外への' +
+      '書き込みを拒否する（レビュー指摘: high、多層防御の2段目。1段目のキー検証を' +
+      'すり抜けたケースを想定し、ここではmanifestFromParsedJsonを経由せず' +
+      'IntegrationManifestを直接組み立てて渡す）',
+    async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+
+      const escapeMarker = `evil-issue380-${RUN_ID}.txt`;
+      const maliciousManifest: IntegrationManifest = new Map([
+        [`../${escapeMarker}`, { taskId: 'T1', kind: 'modified' }],
+      ]);
+
+      const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+      const result = await reflectIntegrationToWorkspace(
+        workspace,
+        integration.dir,
+        workspaceBaseline,
+        maliciousManifest,
+        [],
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.reason).toBe('partialApply');
+
+      // ワークスペースの外（親ディレクトリ）に何も作られていない
+      const escapedPath = path.join(workspace, '..', escapeMarker);
+      try {
+        await expect(readFile(escapedPath)).rejects.toThrow();
+      } finally {
+        await rm(escapedPath, { force: true });
+      }
+    },
+  );
+
+  it(
+    '.agents/worktreesがシンボリックリンクだと、マニフェストの永続化・読み込みも' +
+      '拒否する（レビュー指摘: medium）',
+    async () => {
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-outside-'));
+      try {
+        await mkdir(path.join(workspace, '.agents'), { recursive: true });
+        await symlink(outsideDir, path.join(workspace, '.agents', 'worktrees'));
+
+        const manifest: IntegrationManifest = new Map([
+          ['a.txt', { taskId: 'T1', kind: 'added' }],
+        ]);
+        await expect(
+          persistManifest(workspace, RUN_ID, manifest, nodePseudoWorktreeFileSystem),
+        ).rejects.toThrow(/シンボリックリンク/);
+        // シンボリックリンクの先（実体）には何も書き込まれていない
+        await expect(readdir(outsideDir)).resolves.toEqual([]);
+
+        const loaded = await loadPersistedManifest(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+        expect(loaded.ok).toBe(false);
+        if (loaded.ok) return;
+        expect(loaded.message).toContain('シンボリックリンク');
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'マニフェストのエントリ数が上限を超える場合はパース失敗として扱う' +
+      '（レビュー指摘: risk、Issue #380の追加指摘）',
+    async () => {
+      const filePath = integrationManifestPath(workspace, RUN_ID);
+      await mkdir(path.dirname(filePath), { recursive: true });
+
+      const huge: Record<string, { taskId: string; kind: string }> = {};
+      for (let i = 0; i < 100_001; i += 1) {
+        huge[`f${i}.txt`] = { taskId: 'T1', kind: 'added' };
+      }
+      await writeFile(filePath, JSON.stringify(huge));
+
+      const loaded = await loadPersistedManifest(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+      expect(loaded.ok).toBe(false);
+      if (loaded.ok) return;
+      expect(loaded.message).toContain('復元できません');
+    },
+    20_000,
+  );
+
+  it(
+    'ファイルサイズが上限を超える場合は内容を解析する前に復元できなかったとして扱う' +
+      '（レビュー指摘: medium、Issue #380の追加指摘。エントリ数チェックはJSON.parse後にしか' +
+      '効かないため、パース前にファイルサイズで弾く二次防御を確かめる）',
+    async () => {
+      const filePath = integrationManifestPath(workspace, RUN_ID);
+      await mkdir(path.dirname(filePath), { recursive: true });
+      // 実際の内容は妥当な小さいJSONにしておき、statFileだけが巨大なサイズを返す
+      // ようにする。JSON.parseへ到達する前にstatFileの結果だけで弾かれることを確かめる
+      await writeFile(filePath, '{}');
+
+      const fakeFs: typeof nodePseudoWorktreeFileSystem = {
+        ...nodePseudoWorktreeFileSystem,
+        statFile: async (target) => {
+          if (target === filePath) {
+            return { size: 500 * 1024 * 1024, mtimeMs: 0 };
+          }
+          return nodePseudoWorktreeFileSystem.statFile(target);
+        },
+      };
+
+      const loaded = await loadPersistedManifest(workspace, RUN_ID, fakeFs);
+      expect(loaded.ok).toBe(false);
+      if (loaded.ok) return;
+      expect(loaded.message).toContain('サイズ');
+    },
+  );
+
+  it(
+    '書き込み直後にrealpathで境界外と判明した場合は撤去して失敗とする' +
+      '（レビュー指摘: medium、TOCTOU対策の二段目。cloneWorkspace/ensureIntegrationDirと' +
+      '同じ「作成後に実パス解決して境界確認、外れていれば撤去する」二段構えをpersistManifest' +
+      'にも対にする）',
+    async () => {
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-toctou-'));
+      try {
+        const filePath = integrationManifestPath(workspace, RUN_ID);
+        const manifest: IntegrationManifest = new Map([
+          ['a.txt', { taskId: 'T1', kind: 'added' }],
+        ]);
+
+        // シンボリックリンク検知（一次防御）は通過するが、書き込み直後のrealpathでは
+        // 境界外を指すよう差し替え、書き込みと実パス確認の間に経路が差し替えられた
+        // 状況（TOCTOU）を再現する
+        const fakeFs: typeof nodePseudoWorktreeFileSystem = {
+          ...nodePseudoWorktreeFileSystem,
+          realpath: async (target) => {
+            if (target === filePath) {
+              return path.join(outsideDir, 'manifest.json');
+            }
+            return nodePseudoWorktreeFileSystem.realpath(target);
+          },
+        };
+
+        await expect(persistManifest(workspace, RUN_ID, manifest, fakeFs)).rejects.toThrow(
+          /ワークスペースの外/,
+        );
+
+        // 撤去されており、実体としては残っていない
+        await expect(readFile(filePath)).rejects.toThrow();
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    '読み込み直後にrealpathで境界外と判明した場合は復元できなかったとして扱う' +
+      '（レビュー指摘: medium、TOCTOU対策の二段目）',
+    async () => {
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-toctou-read-'));
+      try {
+        const filePath = integrationManifestPath(workspace, RUN_ID);
+        await mkdir(path.dirname(filePath), { recursive: true });
+        const manifest: IntegrationManifest = new Map([
+          ['a.txt', { taskId: 'T1', kind: 'added' }],
+        ]);
+        await writeFile(filePath, serializeManifest(manifest));
+
+        // シンボリックリンク検知（一次防御）は通過するが、読み込み直後のrealpathでは
+        // 境界外を指すよう差し替える（一次防御と実I/Oの間に経路が差し替えられた想定）
+        const fakeFs: typeof nodePseudoWorktreeFileSystem = {
+          ...nodePseudoWorktreeFileSystem,
+          realpath: async (target) => {
+            if (target === filePath) {
+              return path.join(outsideDir, 'manifest.json');
+            }
+            return nodePseudoWorktreeFileSystem.realpath(target);
+          },
+        };
+
+        const loaded = await loadPersistedManifest(workspace, RUN_ID, fakeFs);
+        expect(loaded.ok).toBe(false);
+        if (loaded.ok) return;
+        expect(loaded.message).toContain('復元できません');
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  describe('反映処理の境界検証（Issue #433 / #406）', () => {
+    /**
+     * `reflectIntegrationToWorkspace`は他の4経路（`cloneWorkspace` /
+     * `ensureIntegrationDir` / `loadPersistedManifest` / `persistManifest`）と違い、
+     * 字面の判定（`isPathWithinRoot`）しか持っていなかった。マニフェストのキーが
+     * 永続化ファイル由来（＝外部入力）になった（Issue #380）ことで、ワークスペース内に
+     * 実在するシンボリックリンクを経由して境界外へ書き込む・境界外を削除するキーが
+     * 通りうる。`listFiles`がシンボリックリンクを除外するため、`workspaceChanged`の
+     * 保護もこの経路を検知できない。
+     */
+    it('シンボリックリンクのディレクトリを経由して境界外へ書き込まない（受入基準）', async () => {
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-outside-'));
+      try {
+        // ワークスペース内に、外部ディレクトリを指すシンボリックリンクが実在する状況
+        await symlink(outsideDir, path.join(workspace, 'linked-dir'));
+
+        const integration = await ensureIntegrationDir(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
+        expect(integration.ok).toBe(true);
+        if (!integration.ok) return;
+        await mkdir(path.join(integration.dir, 'linked-dir'), { recursive: true });
+        await writeFile(path.join(integration.dir, 'linked-dir', 'evil.txt'), 'evil\n');
+
+        // シンボリックリンクはスナップショットに現れないため、workspaceChangedでは止まらない
+        const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+        const maliciousManifest: IntegrationManifest = new Map([
+          ['linked-dir/evil.txt', { taskId: 'T1', kind: 'modified' }],
+        ]);
+
+        const result = await reflectIntegrationToWorkspace(
+          workspace,
+          integration.dir,
+          workspaceBaseline,
+          maliciousManifest,
+          [],
+          nodePseudoWorktreeFileSystem,
+        );
+
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.reason).toBe('partialApply');
+        if (result.reason !== 'partialApply') return;
+        expect(result.failedPath).toBe('linked-dir/evil.txt');
+        expect(result.appliedPaths).toEqual([]);
+        // リンク先（ワークスペースの外）には何も書かれていない
+        await expect(readdir(outsideDir)).resolves.toEqual([]);
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('シンボリックリンクを経由して境界外のファイルを削除しない（受入基準）', async () => {
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-outside-'));
+      try {
+        await writeFile(path.join(outsideDir, 'secret.txt'), 'secret\n');
+        await symlink(path.join(outsideDir, 'secret.txt'), path.join(workspace, 'link.txt'));
+
+        const integration = await ensureIntegrationDir(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
+        expect(integration.ok).toBe(true);
+        if (!integration.ok) return;
+
+        const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+        const maliciousManifest: IntegrationManifest = new Map([
+          ['link.txt', { taskId: 'T1', kind: 'deleted' }],
+        ]);
+
+        const result = await reflectIntegrationToWorkspace(
+          workspace,
+          integration.dir,
+          workspaceBaseline,
+          maliciousManifest,
+          [],
+          nodePseudoWorktreeFileSystem,
+        );
+
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.reason).toBe('partialApply');
+        // リンク先（ワークスペースの外）のファイルが消えていない
+        await expect(readFile(path.join(outsideDir, 'secret.txt'), 'utf8')).resolves.toBe(
+          'secret\n',
+        );
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('.gitセグメントを含むキーは反映しない（受入基準、Issue #406）', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+      await mkdir(path.join(integration.dir, '.git', 'hooks'), { recursive: true });
+      await writeFile(path.join(integration.dir, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\n');
+
+      const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+      const maliciousManifest: IntegrationManifest = new Map([
+        ['.git/hooks/pre-commit', { taskId: 'T1', kind: 'added' }],
+      ]);
+
+      const result = await reflectIntegrationToWorkspace(
+        workspace,
+        integration.dir,
+        workspaceBaseline,
+        maliciousManifest,
+        [],
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.reason).toBe('partialApply');
+      if (result.reason !== 'partialApply') return;
+      expect(result.failedPath).toBe('.git/hooks/pre-commit');
+      await expect(readFile(path.join(workspace, '.git', 'hooks', 'pre-commit'))).rejects.toThrow();
+    });
+
+    it('大文字小文字が違っても.gitセグメントとして拒否する（macOSのAPFS対策）', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+      // 実体を用意しておく（用意しないとコピー元が無いというだけで失敗し、
+      // 拒否できているのかどうかを検証できない）
+      await mkdir(path.join(integration.dir, '.GIT'), { recursive: true });
+      await writeFile(path.join(integration.dir, '.GIT', 'config'), '[core]\n');
+
+      const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+      const result = await reflectIntegrationToWorkspace(
+        workspace,
+        integration.dir,
+        workspaceBaseline,
+        new Map([['.GIT/config', { taskId: 'T1', kind: 'added' as const }]]),
+        [],
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result).toMatchObject({ ok: false, reason: 'partialApply' });
+      await expect(readFile(path.join(workspace, '.GIT', 'config'))).rejects.toThrow();
+    });
+
+    it('除外設定（node_modules等）に該当するキーは反映しない', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+      await mkdir(path.join(integration.dir, 'node_modules', 'pkg'), { recursive: true });
+      await writeFile(path.join(integration.dir, 'node_modules', 'pkg', 'index.js'), 'evil\n');
+
+      const exclude = [...DEFAULT_PSEUDO_WORKTREE_EXCLUDE];
+      const workspaceBaseline = await takeSnapshot(
+        workspace,
+        exclude,
+        nodePseudoWorktreeFileSystem,
+      );
+      const result = await reflectIntegrationToWorkspace(
+        workspace,
+        integration.dir,
+        workspaceBaseline,
+        new Map([['node_modules/pkg/index.js', { taskId: 'T1', kind: 'added' as const }]]),
+        exclude,
+        nodePseudoWorktreeFileSystem,
+      );
+
+      // 中断ではなくスキップ（レビュー指摘: medium、Issue #433）。反映自体は成功として
+      // 返し、スキップしたパスを`skippedPaths`で呼び出し側へ渡す
+      expect(result).toMatchObject({
+        ok: true,
+        appliedPaths: [],
+        skippedPaths: ['node_modules/pkg/index.js'],
+      });
+      await expect(
+        readFile(path.join(workspace, 'node_modules', 'pkg', 'index.js')),
+      ).rejects.toThrow();
+    });
+
+    /**
+     * `exclude`は起動時に固定される一方、`loadPersistedManifest`はディスク上のマニフェストを
+     * `exclude`と無関係に復元する。そのため「前回実行時のexclude設定下で正当に作られたキーが、
+     * 設定変更後の今回のexcludeに一致する」設定ドリフトが構造的に起こりうる。ここで反映全体を
+     * 中断すると、Mapの反復順で後ろにある正当なエントリまで一律で未適用になってしまう。
+     */
+    it('除外に該当するキーがあっても、後続の正当なエントリは反映される（受入基準、Issue #433）', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+      await mkdir(path.join(integration.dir, 'node_modules', 'pkg'), { recursive: true });
+      await writeFile(path.join(integration.dir, 'node_modules', 'pkg', 'index.js'), 'evil\n');
+      await mkdir(path.join(integration.dir, 'src'), { recursive: true });
+      await writeFile(path.join(integration.dir, 'src', 'after.ts'), 'export const after = 1;\n');
+
+      const exclude = [...DEFAULT_PSEUDO_WORKTREE_EXCLUDE];
+      const workspaceBaseline = await takeSnapshot(
+        workspace,
+        exclude,
+        nodePseudoWorktreeFileSystem,
+      );
+      // 除外に該当するキーを**先**に置き、その後ろに正当なキーを置く（Mapは挿入順に反復する）
+      const result = await reflectIntegrationToWorkspace(
+        workspace,
+        integration.dir,
+        workspaceBaseline,
+        new Map([
+          ['node_modules/pkg/index.js', { taskId: 'T1', kind: 'added' as const }],
+          ['src/after.ts', { taskId: 'T1', kind: 'added' as const }],
+        ]),
+        exclude,
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        appliedPaths: ['src/after.ts'],
+        skippedPaths: ['node_modules/pkg/index.js'],
+      });
+      await expect(readFile(path.join(workspace, 'src', 'after.ts'), 'utf8')).resolves.toBe(
+        'export const after = 1;\n',
+      );
+      await expect(
+        readFile(path.join(workspace, 'node_modules', 'pkg', 'index.js')),
+      ).rejects.toThrow();
+    });
+
+    /**
+     * `.git`セグメントは`isExcludedPath`と違い、攻撃シナリオが明確で正当なマニフェストに
+     * 入る筋が無いため、1件でも現れたらマニフェスト全体を疑って**反映を中断する**。
+     * スキップ扱いにしない（`isExcludedPath`との非対称は意図的）。
+     */
+    it('.gitセグメントは中断のまま。後続のエントリも適用しない（Issue #433）', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+      await mkdir(path.join(integration.dir, '.git', 'hooks'), { recursive: true });
+      await writeFile(path.join(integration.dir, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\n');
+      await mkdir(path.join(integration.dir, 'src'), { recursive: true });
+      await writeFile(path.join(integration.dir, 'src', 'after.ts'), 'export const after = 1;\n');
+
+      const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+      const result = await reflectIntegrationToWorkspace(
+        workspace,
+        integration.dir,
+        workspaceBaseline,
+        new Map([
+          ['.git/hooks/pre-commit', { taskId: 'T1', kind: 'added' as const }],
+          ['src/after.ts', { taskId: 'T1', kind: 'added' as const }],
+        ]),
+        [],
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result).toMatchObject({
+        ok: false,
+        reason: 'partialApply',
+        failedPath: '.git/hooks/pre-commit',
+        remainingPaths: ['src/after.ts'],
+      });
+      await expect(readFile(path.join(workspace, 'src', 'after.ts'))).rejects.toThrow();
+    });
+
+    /**
+     * `isExcludedPath`（スキップ）と`hasGitSegment`（中断）は扱いが非対称なので、
+     * **判定順が意味を持つ**。`isExcludedPath`を先に評価すると、除外対象のディレクトリ名と
+     * `.git`セグメントを両方含むキー（`node_modules/.git/hooks/pre-commit`等）がスキップへ
+     * 吸われ、`.git`の無条件拒否（Issue #406）へ到達しない。既定の`exclude`のままで成立し、
+     * 細工したマニフェストに除外ヒットするダミーを1件混ぜるだけで防御が無効化される。
+     */
+    describe('除外と.gitの判定順（レビュー2巡目の指摘）', () => {
+      const gitUnderExcludeCases = [
+        ['node_modules', 'node_modules/.git/hooks/pre-commit'],
+        ['dist', 'dist/.git/hooks/x'],
+      ] as const;
+
+      for (const [dirName, relKey] of gitUnderExcludeCases) {
+        it(`既定のexcludeでも${relKey}は中断側に倒れる`, async () => {
+          const integration = await ensureIntegrationDir(
+            workspace,
+            RUN_ID,
+            nodePseudoWorktreeFileSystem,
+          );
+          expect(integration.ok).toBe(true);
+          if (!integration.ok) return;
+          const keySegments = relKey.split('/');
+          await mkdir(path.join(integration.dir, ...keySegments.slice(0, -1)), { recursive: true });
+          await writeFile(path.join(integration.dir, ...keySegments), '#!/bin/sh\n');
+          await mkdir(path.join(integration.dir, 'src'), { recursive: true });
+          await writeFile(
+            path.join(integration.dir, 'src', 'after.ts'),
+            'export const after = 1;\n',
+          );
+
+          const exclude = [...DEFAULT_PSEUDO_WORKTREE_EXCLUDE];
+          expect(exclude).toContain(dirName);
+          const workspaceBaseline = await takeSnapshot(
+            workspace,
+            exclude,
+            nodePseudoWorktreeFileSystem,
+          );
+          const result = await reflectIntegrationToWorkspace(
+            workspace,
+            integration.dir,
+            workspaceBaseline,
+            new Map([
+              [relKey, { taskId: 'T1', kind: 'added' as const }],
+              ['src/after.ts', { taskId: 'T1', kind: 'added' as const }],
+            ]),
+            exclude,
+            nodePseudoWorktreeFileSystem,
+          );
+
+          // スキップ（`ok: true` + `skippedPaths`）ではなく中断であること
+          expect(result).toMatchObject({
+            ok: false,
+            reason: 'partialApply',
+            failedPath: relKey,
+            // 中断なので、後ろのエントリは未適用のまま残る
+            remainingPaths: ['src/after.ts'],
+          });
+          await expect(readFile(path.join(workspace, ...keySegments))).rejects.toThrow();
+          await expect(readFile(path.join(workspace, 'src', 'after.ts'))).rejects.toThrow();
+        });
+      }
+
+      /**
+       * `agent.workflows.pseudoWorktreeExclude`は`scope: machine-overridable`のユーザー設定で、
+       * `normalizePseudoWorktreeExclude`は`.git`を禁止していない。設定側から`.git`を入れても
+       * 無条件拒否が効き続けること。
+       */
+      it('excludeに.gitを明示的に含めた設定でも中断側に倒れる', async () => {
+        const integration = await ensureIntegrationDir(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
+        expect(integration.ok).toBe(true);
+        if (!integration.ok) return;
+        await mkdir(path.join(integration.dir, '.git', 'hooks'), { recursive: true });
+        await writeFile(path.join(integration.dir, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\n');
+        await mkdir(path.join(integration.dir, 'src'), { recursive: true });
+        await writeFile(path.join(integration.dir, 'src', 'after.ts'), 'export const after = 1;\n');
+
+        const exclude = [...DEFAULT_PSEUDO_WORKTREE_EXCLUDE, '.git'];
+        const workspaceBaseline = await takeSnapshot(
+          workspace,
+          exclude,
+          nodePseudoWorktreeFileSystem,
+        );
+        const result = await reflectIntegrationToWorkspace(
+          workspace,
+          integration.dir,
+          workspaceBaseline,
+          new Map([
+            ['.git/hooks/pre-commit', { taskId: 'T1', kind: 'added' as const }],
+            ['src/after.ts', { taskId: 'T1', kind: 'added' as const }],
+          ]),
+          exclude,
+          nodePseudoWorktreeFileSystem,
+        );
+
+        expect(result).toMatchObject({
+          ok: false,
+          reason: 'partialApply',
+          failedPath: '.git/hooks/pre-commit',
+          remainingPaths: ['src/after.ts'],
+        });
+        await expect(
+          readFile(path.join(workspace, '.git', 'hooks', 'pre-commit')),
+        ).rejects.toThrow();
+        await expect(readFile(path.join(workspace, 'src', 'after.ts'))).rejects.toThrow();
+      });
+    });
+
+    it('通常のキーは従来どおり反映される（既存の正常系を壊していないことの確認）', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+      await mkdir(path.join(integration.dir, 'src'), { recursive: true });
+      await writeFile(path.join(integration.dir, 'src', 'index.ts'), 'export {};\n');
+
+      const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+      const result = await reflectIntegrationToWorkspace(
+        workspace,
+        integration.dir,
+        workspaceBaseline,
+        new Map([['src/index.ts', { taskId: 'T1', kind: 'added' as const }]]),
+        [],
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result).toMatchObject({ ok: true, appliedPaths: ['src/index.ts'] });
+      await expect(readFile(path.join(workspace, 'src', 'index.ts'), 'utf8')).resolves.toBe(
+        'export {};\n',
+      );
+    });
   });
 });
 
@@ -612,6 +1452,8 @@ describe('applyDiffToIntegration', () => {
       removeFile: async (t) => {
         calls.push(`remove:${t}`);
       },
+      readTextFile: async () => undefined,
+      writeTextFile: async () => {},
       removeDirRecursive: async () => {},
     };
 

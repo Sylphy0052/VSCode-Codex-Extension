@@ -1,4 +1,5 @@
 import type { FileSystemPort } from '../session/ports';
+import { basenameOf } from '../util/paths';
 import { parseCommandFile, type SlashCommand } from './slashCommands';
 
 /**
@@ -16,7 +17,6 @@ import { parseCommandFile, type SlashCommand } from './slashCommands';
  * 判定の根拠は `docs/slash-commands.md`。
  */
 
-const basename = (p: string): string => p.slice(p.lastIndexOf('/') + 1);
 const dirname = (p: string): string => p.slice(0, Math.max(0, p.lastIndexOf('/')));
 
 /**
@@ -82,7 +82,7 @@ export class CommandCatalog {
 
 /** スキルの本体か。参照用に置かれた資料を弾く。 */
 function isSkillEntry(filePath: string): boolean {
-  return basename(filePath) === 'SKILL.md';
+  return basenameOf(filePath) === 'SKILL.md';
 }
 
 /** そのディレクトリの直下にあるか。入れ子の資料を弾く。 */
@@ -95,8 +95,8 @@ function directChild(dir: string): (filePath: string) => boolean {
  * スキルは `<name>/SKILL.md` に置かれるため、その場合は親ディレクトリ名を使う。
  */
 function defaultName(filePath: string): string {
-  const file = basename(filePath).replace(/\.md$/, '');
-  return file === 'SKILL' ? basename(dirname(filePath)) : file;
+  const file = basenameOf(filePath).replace(/\.md$/, '');
+  return file === 'SKILL' ? basenameOf(dirname(filePath)) : file;
 }
 
 /** 同じ名前は先に見つけたものを残す。組込とワークスペースの重複を吸収する。 */

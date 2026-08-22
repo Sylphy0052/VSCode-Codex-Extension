@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import * as fsPromises from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   buildIntegrationPullRequestBody,
@@ -12,6 +16,7 @@ import {
   forgeCliCommand,
   isRetryablePushError,
   markPullRequestReady,
+  nodeCliAvailability,
   normalizeFinalMergeConfig,
   normalizeForgeHostConfig,
   normalizePullRequestLayerConfig,
@@ -182,6 +187,59 @@ describe('normalize系（不正値は安全な既定へ丸める）', () => {
     expect(normalizeFinalMergeConfig('auto')).toBe('auto');
     expect(normalizeFinalMergeConfig('pr-only')).toBe('pr-only');
     expect(normalizeFinalMergeConfig('bogus')).toBe('auto');
+  });
+});
+
+describe('nodeCliAvailability.isOnPath（Windowsの拡張子解決。Issue #404）', () => {
+  let tempDir: string;
+  let originalPath: string | undefined;
+  let originalPathExt: string | undefined;
+
+  beforeEach(async () => {
+    tempDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'forge-isonpath-'));
+    originalPath = process.env['PATH'];
+    originalPathExt = process.env['PATHEXT'];
+  });
+
+  afterEach(async () => {
+    if (originalPath === undefined) {
+      delete process.env['PATH'];
+    } else {
+      process.env['PATH'] = originalPath;
+    }
+    if (originalPathExt === undefined) {
+      delete process.env['PATHEXT'];
+    } else {
+      process.env['PATHEXT'] = originalPathExt;
+    }
+    await fsPromises.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('PATHEXT設定下では拡張子付き（gh.CMD相当）の実行ファイルも見つかる', async () => {
+    const target = path.join(tempDir, 'gh.CMD');
+    await fsPromises.writeFile(target, '@echo off\n', { mode: 0o755 });
+
+    process.env['PATH'] = tempDir;
+    process.env['PATHEXT'] = '.COM;.EXE;.BAT;.CMD';
+
+    await expect(nodeCliAvailability.isOnPath('gh')).resolves.toBe(true);
+  });
+
+  it('拡張子付きファイルが無ければfalse', async () => {
+    process.env['PATH'] = tempDir;
+    process.env['PATHEXT'] = '.COM;.EXE;.BAT;.CMD';
+
+    await expect(nodeCliAvailability.isOnPath('gh')).resolves.toBe(false);
+  });
+
+  it('PATHEXT未設定（Linux相当）では拡張子なしの実行ファイルが見つかる', async () => {
+    const target = path.join(tempDir, 'gh');
+    await fsPromises.writeFile(target, '#!/bin/sh\n', { mode: 0o755 });
+
+    process.env['PATH'] = tempDir;
+    delete process.env['PATHEXT'];
+
+    await expect(nodeCliAvailability.isOnPath('gh')).resolves.toBe(true);
   });
 });
 
@@ -941,27 +999,27 @@ describe('createIntegrationPullRequest', () => {
   });
 });
 
-describe('runFinalMerge', () => {
-  it('GitHubは gh pr merge --merge を呼ぶ', async () => {
+describe('runFinalMerge（Issue #404: 番号を必ず含める）', () => {
+  it('GitHubは gh pr merge <number> --merge を呼ぶ（番号を含む）', async () => {
     const cli = new FakeCli();
     cli.respond('gh', ['pr', 'merge'], { code: 0, stdout: '', stderr: '' });
-    const result = await runFinalMerge(cli, 'github', '/repo/_integration');
+    const result = await runFinalMerge(cli, 'github', '/repo/_integration', 42);
     expect(result).toEqual({ ok: true });
     expect(cli.calls[0]).toEqual({
       command: 'gh',
-      args: ['pr', 'merge', '--merge'],
+      args: ['pr', 'merge', '42', '--merge'],
       cwd: '/repo/_integration',
     });
   });
 
-  it('GitLabは glab mr merge --remove-source-branch を呼ぶ', async () => {
+  it('GitLabは glab mr merge <number> --remove-source-branch を呼ぶ（番号を含む）', async () => {
     const cli = new FakeCli();
     cli.respond('glab', ['mr', 'merge'], { code: 0, stdout: '', stderr: '' });
-    const result = await runFinalMerge(cli, 'gitlab', '/repo/_integration');
+    const result = await runFinalMerge(cli, 'gitlab', '/repo/_integration', 42);
     expect(result).toEqual({ ok: true });
     expect(cli.calls[0]).toEqual({
       command: 'glab',
-      args: ['mr', 'merge', '--remove-source-branch'],
+      args: ['mr', 'merge', '42', '--remove-source-branch'],
       cwd: '/repo/_integration',
     });
   });
@@ -969,11 +1027,29 @@ describe('runFinalMerge', () => {
   it('失敗すればメッセージ付きで返す', async () => {
     const cli = new FakeCli();
     cli.respond('gh', ['pr', 'merge'], { code: 1, stdout: '', stderr: 'merge conflict' });
-    const result = await runFinalMerge(cli, 'github', '/repo/_integration');
+    const result = await runFinalMerge(cli, 'github', '/repo/_integration', 42);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.message).toContain('merge conflict');
     }
+  });
+
+  it('番号がundefinedのときはCLIを呼ばずマージを飛ばし、警告メッセージ付きで返す', async () => {
+    const cli = new FakeCli();
+    const result = await runFinalMerge(cli, 'github', '/repo/_integration', undefined);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain('番号が不明');
+    }
+    // カレントブランチ依存でのマージを避けるため、CLIそのものを起動しない
+    expect(cli.calls).toEqual([]);
+  });
+
+  it('番号が0や負の数など不正な値のときもCLIを呼ばずに失敗を返す', async () => {
+    const cli = new FakeCli();
+    const result = await runFinalMerge(cli, 'github', '/repo/_integration', 0);
+    expect(result.ok).toBe(false);
+    expect(cli.calls).toEqual([]);
   });
 });
 

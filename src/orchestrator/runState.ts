@@ -36,6 +36,11 @@ export type TaskState = (typeof TASK_STATES)[number];
  * `getRunOutcome` は「実行全体がまだ終わっていないか」という別の問い（この4状態に加えて
  * `pending` も含む）を判定しており、`isActiveTaskState` はその一部として使う
  * （`pending` は「枠を占める」の意味ではまだ何も始まっていないため、ここには含めない）。
+ *
+ * 「状態を1つ足すたびに揃えて直す」対象は、この関数が集約する3箇所に加えて`isUnsettled`
+ * （「外部からの確定通知を受け付けてよいか」）も含む。観点が別なので中身の状態集合は
+ * 一致しない（`isUnsettled`は`pending`を含み`merging`を含まない）が、新しい状態を
+ * 追加・変更するときは両方を見直す必要がある（Issue #362）。
  */
 export function isActiveTaskState(state: TaskState): boolean {
   return (
@@ -227,12 +232,32 @@ function setTask(run: RunState, taskId: string, next: TaskRunState): RunState {
 
 /**
  * まだ結果が確定していない状態。`markFailed` や `done` への遷移など、外部からの
- * 通知（`LoopStopReason` や承認拒否）を受け付けてよいのはこの3状態のときだけで、
+ * 通知（`LoopStopReason` や承認拒否）を受け付けてよいのはこの4状態のときだけで、
  * `done` / `failed` / `skipped` は一度確定したら通知を再度受けても動かさない
  * （二重配信・遅延到着で確定済みの結果が書き換わる事故を防ぐ）。
+ *
+ * `waitingReply`（返信待ち）も含む（Issue #362）。`loopController.ts`の`observe()`は
+ * pause中（＝`waitingReply`）でも`turnFailed`を見たら`stop('failed')`を呼ぶ（「返信待ちの
+ * まま実は失敗していた、を黙って握り潰さない」）。ここに含めていないと`applyLoopStopReason`
+ * が`markFailed`へ到達せず、セッションは`dispose`済みなのにタスクだけ`waitingReply`のまま
+ * 残り、`isActiveTaskState`が真であり続けて`maxParallel`の枠を永久に占有する。
+ *
+ * `isActiveTaskState`と同様、状態を1つ足すたびに揃えて直す必要がある集合の1つ
+ * （こちらは「外部からの確定通知を受け付けてよいか」という別の観点の集合）。
+ *
+ * `merging`はここに含めない。マージ中のタスクを閉じるのは`applyLoopStopReason`ではなく
+ * `markMergeSucceeded` / `markMergeBlocked` / `markMergeFailed`という専用の経路であり、
+ * マージ開始後に`LoopStopReason`（例: 別経路からの`failed`）が遅れて届いても、マージの
+ * 結果を待たずに横から`failed`へ確定させてはならないため（マージ中の停止理由の扱いは
+ * 別の設計判断であり、ここでは変えない）。
  */
 function isUnsettled(state: TaskState): boolean {
-  return state === 'pending' || state === 'running' || state === 'waitingApproval';
+  return (
+    state === 'pending' ||
+    state === 'running' ||
+    state === 'waitingApproval' ||
+    state === 'waitingReply'
+  );
 }
 
 /**
@@ -555,6 +580,14 @@ export function markMergeFailed(
  * 状態を戻すだけ。依存先の`skipped`（`mergeBlocked`）を戻す処理は、`retryTask`
  * （タスクそのものの再実行）と違い、まだブロック中の後続を勝手に再開させない意図で
  * 含めない（再マージが成功して`done`になった時点で、`nextTasksToStart`が改めて拾う）。
+ *
+ * **`haltedByUser`は解除しない**（Issue #412のレビュー指摘B）。「再マージ」は人の明示操作
+ * だが、解除すると`markMergeSucceeded`が依存先の`skipped`（`mergeBlocked`）を`pending`へ
+ * 戻した瞬間に`nextTasksToStart`の停止判定（`isRunHalted`）が外れ、ユーザーが停止したrunの
+ * 後続タスクが新しいセッションを開いて走り出す（「再マージ1件」の操作でワークフロー全体が
+ * 再開してしまう）。停止中でもそのタスクのマージ自体は走る。実行層（`runnerMerge.ts`の
+ * `decideAfterLeaseWait`）が見るのは「統合worktreeの順番待ちの**間に**停止へ変わったか」
+ * という差分だけで、`retryMerge`起点なら待つ前から停止中のため素通りするため。
  */
 export function retryMergeState(run: RunState, taskId: string): RunState {
   const current = run.tasks.get(taskId);

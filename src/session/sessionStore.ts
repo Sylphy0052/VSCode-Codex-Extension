@@ -7,9 +7,17 @@ import {
   sessionIdFromRolloutName,
 } from '../codex/sessionMeta';
 import type { SessionMeta, SessionSummary } from '../codex/types';
+import { mapWithLimit } from '../util/concurrency';
+import { basenameOf } from '../util/paths';
 import type { FileSystemPort, MetaCachePort, ThreadListPort } from './ports';
 
 export type HistoryScope = 'workspace' | 'all';
+
+/**
+ * `orderByRecency`で`fs.mtimeMs`を並列発火する上限。逐次との比較で十分な短縮効果が
+ * ある一方、件数分を無制限に同時発火しないための頭打ち値。
+ */
+const MTIME_CONCURRENCY_LIMIT = 32;
 
 /**
  * 表示名を作るために読む先頭行数。
@@ -43,8 +51,6 @@ interface RolloutLocation {
   filePath: string;
   archived: boolean;
 }
-
-const basename = (p: string): string => p.slice(p.lastIndexOf('/') + 1);
 
 /**
  * 与えられたパスがいずれかのワークスペースフォルダの配下か。
@@ -186,17 +192,17 @@ export class SessionStore {
     located: Array<[string, RolloutLocation]>,
     indexed: Map<string, { updatedAt: string }>,
   ): Promise<Array<{ id: string; location: RolloutLocation; updatedAt: string }>> {
-    const rows: Array<{ id: string; location: RolloutLocation; updatedAt: string }> = [];
-
-    for (const [id, location] of located) {
+    // indexに無いものだけmtimeが要る。件数分逐次待つと台数に比例して遅くなるため
+    // 並列化する（issue #382）。最終的に全件ソートするため呼び出し順は問わない。
+    // ただし件数分を無制限に同時発火しないよう上限を設ける（レビュー指摘）。
+    const rows = await mapWithLimit(located, MTIME_CONCURRENCY_LIMIT, async ([id, location]) => {
       const fromIndex = indexed.get(id)?.updatedAt;
       if (fromIndex !== undefined) {
-        rows.push({ id, location, updatedAt: fromIndex });
-        continue;
+        return { id, location, updatedAt: fromIndex };
       }
       const mtimeMs = await this.fs.mtimeMs(location.filePath);
-      rows.push({ id, location, updatedAt: new Date(mtimeMs ?? 0).toISOString() });
-    }
+      return { id, location, updatedAt: new Date(mtimeMs ?? 0).toISOString() };
+    });
 
     return rows.sort((a, b) =>
       a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0,
@@ -238,7 +244,7 @@ export class SessionStore {
 
     const active = await this.fs.listRollouts(this.paths.sessions);
     for (const filePath of active) {
-      const id = sessionIdFromRolloutName(basename(filePath));
+      const id = sessionIdFromRolloutName(basenameOf(filePath));
       if (id !== undefined) {
         map.set(id, { filePath, archived: false });
       }
@@ -246,7 +252,7 @@ export class SessionStore {
 
     const archived = await this.fs.listRollouts(this.paths.archivedSessions);
     for (const filePath of archived) {
-      const id = sessionIdFromRolloutName(basename(filePath));
+      const id = sessionIdFromRolloutName(basenameOf(filePath));
       if (id !== undefined) {
         map.set(id, { filePath, archived: true });
       }

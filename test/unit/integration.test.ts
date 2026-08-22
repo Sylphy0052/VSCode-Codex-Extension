@@ -11,6 +11,7 @@ import {
   IntegrationMergeQueue,
   isMergeResolutionComplete,
   isValidTaskBranch,
+  type IntegrationLease,
   mergeCommitMessage,
   reconcileMergingTaskOnReload,
   resolveTaskBranchOrigin,
@@ -34,12 +35,30 @@ class FakeGit implements GitCommandRunner {
   calls: Array<{ args: string[]; cwd: string }> = [];
   private readonly responses: Array<{ prefix: string[]; result: GitCommandResult }> = [];
 
+  private readonly sequences: Array<{ prefix: string[]; results: GitCommandResult[] }> = [];
+
   respond(prefix: string[], result: GitCommandResult): void {
     this.responses.push({ prefix, result });
   }
 
+  /**
+   * 同じコマンドの呼び出し回数ごとに違う応答を返す（最後の要素以降はそれを返し続ける）。
+   * マージ前の「進行中のマージが無いこと」の確認（Issue #412の多層防御）と、マージ後の
+   * 未解決パスの取得が同じ`git diff --diff-filter=U`である以上、1回目と2回目で
+   * 応答を変えないと実物の振る舞いを模せないため。
+   */
+  respondSequence(prefix: string[], results: GitCommandResult[]): void {
+    this.sequences.push({ prefix, results });
+  }
+
   async run(args: readonly string[], cwd: string): Promise<GitCommandResult> {
     this.calls.push({ args: [...args], cwd });
+    const sequence = this.sequences.find((r) => r.prefix.every((p, i) => args[i] === p));
+    if (sequence !== undefined) {
+      return sequence.results.length > 1
+        ? (sequence.results.shift() ?? { code: 0, stdout: '', stderr: '' })
+        : (sequence.results[0] ?? { code: 0, stdout: '', stderr: '' });
+    }
     const matched = this.responses.find((r) => r.prefix.every((p, i) => args[i] === p));
     return matched?.result ?? { code: 0, stdout: '', stderr: '' };
   }
@@ -70,6 +89,14 @@ class FakeFs implements WorktreeFileSystemPort {
 }
 
 const INTEGRATION_CWD = path.join('/repo', '.agents', 'worktrees', RUN_ID, '_integration');
+
+/**
+ * 統合worktreeの占有（Issue #412）を取る短縮形。`mergeTask` / `abortMerge` はこの
+ * ハンドルを要求する（他タスクのマージを巻き戻せないようにするため）。
+ */
+function lease(queue: IntegrationMergeQueue, taskId: string): Promise<IntegrationLease> {
+  return queue.acquireLease(INTEGRATION_CWD, taskId);
+}
 const INTEGRATION_BRANCH = `wf/${RUN_ID}/integration`;
 
 describe('integrationBranchName / integrationWorktreePath', () => {
@@ -422,7 +449,7 @@ describe('IntegrationMergeQueue.mergeTask', () => {
     git.respond(['merge', '--no-ff'], { code: 0, stdout: '', stderr: '' });
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
-    const result = await queue.mergeTask(INTEGRATION_CWD, RUN_ID, 'T2', TASK_BRANCH, git);
+    const result = await queue.mergeTask(await lease(queue, 'T2'), RUN_ID, 'T2', TASK_BRANCH, git);
 
     expect(result).toEqual({ kind: 'success', mergeCommit: HEAD_SHA });
     expect(git.calls.filter((c) => c.args[0] === 'merge')).toEqual([
@@ -437,10 +464,14 @@ describe('IntegrationMergeQueue.mergeTask', () => {
     const git = new FakeGit();
     git.respond(['rev-parse', 'HEAD'], { code: 0, stdout: `${HEAD_SHA}\n`, stderr: '' });
     git.respond(['merge', '--no-ff'], { code: 1, stdout: '', stderr: 'CONFLICT (content): Merge conflict in a.ts' });
-    git.respond(['diff', '--name-only'], { code: 0, stdout: 'a.ts\nb.ts\n', stderr: '' });
+    // 1回目はマージ前の確認（未解決なし）、2回目がマージ後の未解決パス
+    git.respondSequence(['diff', '--name-only'], [
+      { code: 0, stdout: '', stderr: '' },
+      { code: 0, stdout: 'a.ts\nb.ts\n', stderr: '' },
+    ]);
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
-    const result = await queue.mergeTask(INTEGRATION_CWD, RUN_ID, 'T2', TASK_BRANCH, git);
+    const result = await queue.mergeTask(await lease(queue, 'T2'), RUN_ID, 'T2', TASK_BRANCH, git);
 
     expect(result).toEqual({
       kind: 'conflict',
@@ -457,7 +488,7 @@ describe('IntegrationMergeQueue.mergeTask', () => {
     git.respond(['diff', '--name-only'], { code: 0, stdout: '', stderr: '' });
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
-    const result = await queue.mergeTask(INTEGRATION_CWD, RUN_ID, 'T2', TASK_BRANCH, git);
+    const result = await queue.mergeTask(await lease(queue, 'T2'), RUN_ID, 'T2', TASK_BRANCH, git);
 
     expect(result.kind).toBe('failure');
     if (result.kind !== 'failure') return;
@@ -468,11 +499,15 @@ describe('IntegrationMergeQueue.mergeTask', () => {
     const git = new FakeGit();
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
-    const badRunId = await queue.mergeTask(INTEGRATION_CWD, 'not-a-uuid', 'T2', TASK_BRANCH, git);
+    const runIdLease = await lease(queue, 'T2');
+    const badRunId = await queue.mergeTask(runIdLease, 'not-a-uuid', 'T2', TASK_BRANCH, git);
     expect(badRunId.kind).toBe('failure');
+    queue.releaseLease(runIdLease);
 
-    const badTaskId = await queue.mergeTask(INTEGRATION_CWD, RUN_ID, '../evil', TASK_BRANCH, git);
+    const taskIdLease = await lease(queue, '../evil');
+    const badTaskId = await queue.mergeTask(taskIdLease, RUN_ID, '../evil', TASK_BRANCH, git);
     expect(badTaskId.kind).toBe('failure');
+    queue.releaseLease(taskIdLease);
 
     expect(git.calls).toEqual([]);
   });
@@ -481,23 +516,27 @@ describe('IntegrationMergeQueue.mergeTask', () => {
     const git = new FakeGit();
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
+    const otherRunLease = await lease(queue, 'T2');
     const otherRun = await queue.mergeTask(
-      INTEGRATION_CWD,
+      otherRunLease,
       RUN_ID,
       'T2',
       'wf/22222222-2222-4222-8222-222222222222/T2',
       git,
     );
     expect(otherRun.kind).toBe('failure');
+    queue.releaseLease(otherRunLease);
 
+    const flagLease = await lease(queue, 'T2');
     const flagInjection = await queue.mergeTask(
-      INTEGRATION_CWD,
+      flagLease,
       RUN_ID,
       'T2',
       `wf/${RUN_ID}/--upload-pack=evil`,
       git,
     );
     expect(flagInjection.kind).toBe('failure');
+    queue.releaseLease(flagLease);
 
     expect(git.calls).toEqual([]);
   });
@@ -506,7 +545,7 @@ describe('IntegrationMergeQueue.mergeTask', () => {
     const git = new FakeGit();
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
-    const result = await queue.mergeTask(INTEGRATION_CWD, RUN_ID, 'T2', 'not-a-branch', git);
+    const result = await queue.mergeTask(await lease(queue, 'T2'), RUN_ID, 'T2', 'not-a-branch', git);
 
     expect(result.kind).toBe('failure');
     if (result.kind !== 'failure') return;
@@ -522,7 +561,7 @@ describe('IntegrationMergeQueue.mergeTask', () => {
     const conventionalBranch = `fix/42/t2-${RUN_ID.slice(0, 8)}`;
 
     const result = await queue.mergeTask(
-      INTEGRATION_CWD,
+      await lease(queue, 'T2'),
       RUN_ID,
       'T2',
       conventionalBranch,
@@ -536,7 +575,13 @@ describe('IntegrationMergeQueue.mergeTask', () => {
     const git = new FakeGit();
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
-    const result = await queue.mergeTask(INTEGRATION_CWD, RUN_ID, 'T2', 'fix/42/t2-99999999', git);
+    const result = await queue.mergeTask(
+      await lease(queue, 'T2'),
+      RUN_ID,
+      'T2',
+      'fix/42/t2-99999999',
+      git,
+    );
 
     expect(result.kind).toBe('failure');
     expect(git.calls).toEqual([]);
@@ -560,10 +605,12 @@ describe('IntegrationMergeQueue.mergeTask', () => {
     };
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
-    await Promise.all([
-      queue.mergeTask(INTEGRATION_CWD, RUN_ID, 'T2', `wf/${RUN_ID}/T2`, git),
-      queue.mergeTask(INTEGRATION_CWD, RUN_ID, 'T3', `wf/${RUN_ID}/T3`, git),
-    ]);
+    const t2Lease = await lease(queue, 'T2');
+    await queue.mergeTask(t2Lease, RUN_ID, 'T2', `wf/${RUN_ID}/T2`, git);
+    queue.releaseLease(t2Lease);
+    const t3Lease = await lease(queue, 'T3');
+    await queue.mergeTask(t3Lease, RUN_ID, 'T3', `wf/${RUN_ID}/T3`, git);
+    queue.releaseLease(t3Lease);
 
     // 直列化されていれば、あるコマンドのstart直後には必ずそのコマンドのendが来る
     // （2つ目のタスクのコマンドが割り込んでこない）
@@ -581,7 +628,7 @@ describe('IntegrationMergeQueue.abortMerge', () => {
     git.respond(['merge', '--abort'], { code: 0, stdout: '', stderr: '' });
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
-    const result = await queue.abortMerge(INTEGRATION_CWD, git);
+    const result = await queue.abortMerge(await lease(queue, 'T2'), git);
 
     expect(result).toEqual({ ok: true });
     expect(git.calls).toEqual([{ args: ['merge', '--abort'], cwd: INTEGRATION_CWD }]);
@@ -592,7 +639,7 @@ describe('IntegrationMergeQueue.abortMerge', () => {
     git.respond(['merge', '--abort'], { code: 1, stdout: '', stderr: 'fatal: no merge in progress' });
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
-    const result = await queue.abortMerge(INTEGRATION_CWD, git);
+    const result = await queue.abortMerge(await lease(queue, 'T2'), git);
 
     expect(result).toMatchObject({ ok: false, reason: 'gitError' });
   });
@@ -685,7 +732,13 @@ describe('未コミットの変更の自動コミット→マージの流れ（�
     expect(commitResult).toEqual({ ok: true, committed: true });
 
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
-    const mergeResult = await queue.mergeTask(INTEGRATION_CWD, RUN_ID, 'T2', `wf/${RUN_ID}/T2`, git);
+    const mergeResult = await queue.mergeTask(
+      await lease(queue, 'T2'),
+      RUN_ID,
+      'T2',
+      `wf/${RUN_ID}/T2`,
+      git,
+    );
     expect(mergeResult).toEqual({ kind: 'success', mergeCommit: HEAD_SHA });
 
     // 自動コミット→マージの順で行われている（マージがコミット済みの変更を取り込む前提）
@@ -868,5 +921,248 @@ describe('buildMergeResolutionPrompt', () => {
     );
     expect(prompt).toContain('a.ts');
     expect(prompt).toContain('T2');
+  });
+});
+
+/**
+ * 統合worktreeの占有（Issue #412）。`mergeTask` / `abortMerge` の入口で、
+ * 「自分がいま占有している統合worktreeか」を確かめる部分の単体テスト。
+ * `git merge --abort` は統合worktree全体を巻き戻すため、他タスクの衝突解決セッションが
+ * 編集中の内容ごと消してしまう事故を型と実行時の両方で塞ぐ。
+ */
+describe('IntegrationMergeQueue: 統合worktreeの占有（Issue #412）', () => {
+  it('占有は1件ずつしか渡らず、解放すると待っている次の取得へFIFOで渡る', async () => {
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+
+    const first = await queue.acquireLease(INTEGRATION_CWD, 'T1');
+    expect(queue.leaseHolderTaskId(INTEGRATION_CWD)).toBe('T1');
+
+    const order: string[] = [];
+    const second = queue.acquireLease(INTEGRATION_CWD, 'T2').then((l) => {
+      order.push('T2');
+      return l;
+    });
+    const third = queue.acquireLease(INTEGRATION_CWD, 'T3').then((l) => {
+      order.push('T3');
+      return l;
+    });
+    await Promise.resolve();
+    // T1が持っている間は誰にも渡らない
+    expect(order).toEqual([]);
+
+    queue.releaseLease(first);
+    const secondLease = await second;
+    expect(order).toEqual(['T2']);
+    expect(queue.leaseHolderTaskId(INTEGRATION_CWD)).toBe('T2');
+
+    queue.releaseLease(secondLease);
+    queue.releaseLease(await third);
+    expect(order).toEqual(['T2', 'T3']);
+    expect(queue.leaseHolderTaskId(INTEGRATION_CWD)).toBeUndefined();
+  });
+
+  it('別の統合worktree（別run）の占有は互いに待たない', async () => {
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    const otherCwd = path.join('/repo', '.agents', 'worktrees', 'other-run', '_integration');
+
+    await queue.acquireLease(INTEGRATION_CWD, 'T1');
+    const other = await queue.acquireLease(otherCwd, 'T1');
+
+    expect(other.integrationWorktreeCwd).toBe(otherCwd);
+    expect(queue.leaseHolderTaskId(otherCwd)).toBe('T1');
+  });
+
+  it('占有していないハンドルのabortMergeは拒否され、git merge --abortを呼ばない', async () => {
+    const git = new FakeGit();
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    await queue.acquireLease(INTEGRATION_CWD, 'T1');
+
+    // 他タスクが「自分は占有している」と偽って作ったハンドル
+    const forged: IntegrationLease = { integrationWorktreeCwd: INTEGRATION_CWD, taskId: 'T2' };
+    const result = await queue.abortMerge(forged, git);
+
+    expect(result).toMatchObject({ ok: false, reason: 'leaseNotHeld' });
+    expect(git.calls).toEqual([]);
+  });
+
+  it('解放済みのハンドルではもうabortMergeもmergeTaskもできない', async () => {
+    const git = new FakeGit();
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    const stale = await queue.acquireLease(INTEGRATION_CWD, 'T1');
+    queue.releaseLease(stale);
+
+    expect(await queue.abortMerge(stale, git)).toMatchObject({
+      ok: false,
+      reason: 'leaseNotHeld',
+    });
+    expect(await queue.mergeTask(stale, RUN_ID, 'T1', `wf/${RUN_ID}/T1`, git)).toMatchObject({
+      kind: 'failure',
+    });
+    expect(git.calls).toEqual([]);
+  });
+
+  it('占有者と異なるtaskIdのマージは拒否される（取り違え防止）', async () => {
+    const git = new FakeGit();
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    const held = await queue.acquireLease(INTEGRATION_CWD, 'T1');
+
+    const result = await queue.mergeTask(held, RUN_ID, 'T2', `wf/${RUN_ID}/T2`, git);
+
+    expect(result.kind).toBe('failure');
+    expect(git.calls).toEqual([]);
+  });
+
+  it('解放は冪等で、二重解放しても次の待ち行列を壊さない', async () => {
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    const first = await queue.acquireLease(INTEGRATION_CWD, 'T1');
+    const second = queue.acquireLease(INTEGRATION_CWD, 'T2');
+    const third = queue.acquireLease(INTEGRATION_CWD, 'T3');
+
+    queue.releaseLease(first);
+    queue.releaseLease(first);
+    await second;
+
+    expect(queue.leaseHolderTaskId(INTEGRATION_CWD)).toBe('T2');
+    queue.releaseLease(await second);
+    await third;
+    expect(queue.leaseHolderTaskId(INTEGRATION_CWD)).toBe('T3');
+  });
+
+  /**
+   * 占有待ちから起き上がった呼び出し側が「順番が回ってきたのか、強制解放で起こされたのか」を
+   * 区別するための判定（Issue #412のレビュー指摘9・11）。`runnerMerge.ts`の
+   * `decideAfterLeaseWait`が使う。
+   *
+   * **返すのは「強制解放された」という事実だけ**であることを固定する。以前の`isLeaseHeld`
+   * （`holdsLease`の別名）は「いま保持者か」を返し、呼び出し側がその`false`を「runが
+   * 破棄された」と読み替えていた。読み替えが成り立つのは`releaseAllLeases`の呼び出し元が
+   * `WorkflowRunner.dispose()`だけだからで、このクラスは何も保証していない。
+   */
+  it('wasLeaseRevokedは、releaseAllLeasesで強制解放されたハンドルにだけtrueを返す', async () => {
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    const held = await queue.acquireLease(INTEGRATION_CWD, 'T1');
+    expect(queue.wasLeaseRevoked(held)).toBe(false);
+
+    // 偽造したハンドルは「強制解放された」ではない（占有を持っていないことは
+    // `mergeTask`/`abortMerge`側が`leaseNotHeld`で弾く）
+    const forged: IntegrationLease = { integrationWorktreeCwd: INTEGRATION_CWD, taskId: 'T1' };
+    expect(queue.wasLeaseRevoked(forged)).toBe(false);
+
+    // 順番どおりに手放した側も、次に受け取った側も、強制解放はされていない
+    const waiting = queue.acquireLease(INTEGRATION_CWD, 'T2');
+    queue.releaseLease(held);
+    const next = await waiting;
+    expect(queue.wasLeaseRevoked(held)).toBe(false);
+    expect(queue.wasLeaseRevoked(next)).toBe(false);
+
+    // 強制解放されたときだけtrueになる
+    queue.releaseAllLeases();
+    expect(queue.wasLeaseRevoked(next)).toBe(true);
+  });
+
+  it('releaseAllLeasesは、待ち行列で起こしたハンドルにも強制解放の印を立てる', async () => {
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    await queue.acquireLease(INTEGRATION_CWD, 'T1');
+    const waiting = queue.acquireLease(INTEGRATION_CWD, 'T2');
+
+    queue.releaseAllLeases();
+
+    // 待っていた側は「順番が回ってきた」のではなく「強制解放で起こされた」と分かる
+    expect(queue.wasLeaseRevoked(await waiting)).toBe(true);
+  });
+
+  it('releaseAllLeasesは待っている取得を起こし、そのハンドルは失効している（run破棄時の強制解放）', async () => {
+    const git = new FakeGit();
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    await queue.acquireLease(INTEGRATION_CWD, 'T1');
+    const waiting = queue.acquireLease(INTEGRATION_CWD, 'T2');
+
+    queue.releaseAllLeases();
+
+    // 待ち続けて固まるのではなく、失効したハンドルとして起き上がる（fail-closed）
+    const woken = await waiting;
+    expect(await queue.mergeTask(woken, RUN_ID, 'T2', `wf/${RUN_ID}/T2`, git)).toMatchObject({
+      kind: 'failure',
+    });
+    expect(queue.leaseHolderTaskId(INTEGRATION_CWD)).toBeUndefined();
+    expect(git.calls).toEqual([]);
+  });
+
+  /**
+   * ハンドルの確認をキュー投入前にしか行わないと、キュー待ちの間に`releaseAllLeases()`
+   * （`WorkflowRunner.dispose()`）が走ったとき、失効済みのハンドルのままジョブ本体が
+   * 実行され、`git merge` / `git merge --abort`が実際に走ってしまう（レビュー指摘4）。
+   * ジョブ本体の先頭でも確認していることを、キューを先行ジョブで塞いで確かめる。
+   */
+  it('キュー待ちの間に占有が失効したら、ジョブが動いてもgitを触らない', async () => {
+    const git = new FakeGit();
+    const worktreeQueue = new WorktreeCreationQueue();
+    const queue = new IntegrationMergeQueue(worktreeQueue);
+    const held = await queue.acquireLease(INTEGRATION_CWD, 'T1');
+
+    // 先行ジョブでキューを塞ぎ、mergeTask / abortMerge を「投入済み・未実行」にする
+    let unblock: () => void = () => {};
+    const blocker = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    const blocked = worktreeQueue.enqueue(() => blocker);
+
+    const merging = queue.mergeTask(held, RUN_ID, 'T1', `wf/${RUN_ID}/T1`, git);
+    const aborting = queue.abortMerge(held, git);
+
+    // 投入時点では有効だったハンドルが、run破棄でここで失効する
+    queue.releaseAllLeases();
+    unblock();
+    await blocked;
+
+    expect(await merging).toMatchObject({ kind: 'failure' });
+    expect(await aborting).toMatchObject({ ok: false, reason: 'leaseNotHeld' });
+    expect(git.calls).toEqual([]);
+  });
+
+  it('MERGE_HEADが残っていればマージへ進まずbusy（回復可能）にする（占有の外から呼ばれた場合の多層防御）', async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], {
+      code: 0,
+      stdout: `${'a'.repeat(40)}\n`,
+      stderr: '',
+    });
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+
+    const result = await queue.mergeTask(
+      await lease(queue, 'T2'),
+      RUN_ID,
+      'T2',
+      `wf/${RUN_ID}/T2`,
+      git,
+    );
+
+    // `failure`ではなく`busy`。`failure`だと呼び出し側が`markMergeFailed`で`failed`を
+    // 確定させ、`retryMergeState`（`blocked`専用）でも戻せない行き止まりになる（指摘1）
+    expect(result.kind).toBe('busy');
+    // 他タスクの未解決パスを自分の衝突として拾う経路（`git merge`→`diff --diff-filter=U`）
+    // へそもそも入らない
+    expect(git.calls.some((c) => c.args[0] === 'merge')).toBe(false);
+  });
+
+  it('MERGE_HEADが無くても未解決パスが残っていればマージへ進まずbusy（回復可能）にする', async () => {
+    const git = new FakeGit();
+    git.respond(['diff', '--name-only', '--diff-filter=U'], {
+      code: 0,
+      stdout: 'a.ts\n',
+      stderr: '',
+    });
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+
+    const result = await queue.mergeTask(
+      await lease(queue, 'T2'),
+      RUN_ID,
+      'T2',
+      `wf/${RUN_ID}/T2`,
+      git,
+    );
+
+    expect(result.kind).toBe('busy');
+    expect(git.calls.some((c) => c.args[0] === 'merge')).toBe(false);
   });
 });

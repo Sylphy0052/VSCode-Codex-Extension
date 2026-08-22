@@ -25,8 +25,9 @@ import type {
   ForgeHostConfig,
   PullRequestLayerConfig,
 } from '../../src/orchestrator/forge';
-import { integrationPath } from '../../src/orchestrator/pseudoWorktree';
+import { deserializeManifest, integrationPath } from '../../src/orchestrator/pseudoWorktree';
 import type { RoadmapFileSystemPort } from '../../src/orchestrator/roadmap';
+import { formatPathList } from '../../src/orchestrator/runnerWorkingDirectory';
 import type {
   PseudoWorktreeDirEntry,
   PseudoWorktreeFileStat,
@@ -89,7 +90,14 @@ class FakeTaskSession implements TaskSession {
     this.sessionId = `session-${idSeed}`;
   }
 
+  /**
+   * テスト用。設定すると`runLoop()`が投げる（ループを走らせられなかった経路の再現）。
+   */
+  failRunLoop: Error | undefined;
   runLoop(plan: LoopPlan): void {
+    if (this.failRunLoop !== undefined) {
+      throw this.failRunLoop;
+    }
     this.runLoopCalls.push(plan);
   }
   /** `TaskSession.send`（design.md §16.23）。ループを介さない1回きりの送信。 */
@@ -141,9 +149,38 @@ class FakeTaskSession implements TaskSession {
   reveal(): void {
     this.revealCount += 1;
   }
-  open(): void {}
+  /** テスト用。設定すると`open()`が投げる（タブを開けなかった経路の再現）。 */
+  failOpen: Error | undefined;
+  /**
+   * テスト用。設定すると`open()`が`onFinished`を**同期的に**発火する（`open()`の中で
+   * ループを回し切ってしまうhost実装の再現。Issue #412のレビュー指摘12）。1回だけ発火する。
+   */
+  openFinishReason: LoopStopReason | undefined;
+  openCount = 0;
+  open(): void {
+    this.openCount += 1;
+    if (this.failOpen !== undefined) {
+      throw this.failOpen;
+    }
+    const reason = this.openFinishReason;
+    this.openFinishReason = undefined;
+    if (reason !== undefined) {
+      this.finish(reason, { ...initialChatState });
+    }
+  }
+  /**
+   * テスト用。設定すると`dispose()`が`onFinished`を**同期的に**発火する
+   * （`chatView.ts`の`teardown`が`entry.loop.stop('manual')`を呼ぶ実挙動の再現。
+   * Issue #412のレビュー指摘D）。1回だけ発火する。
+   */
+  disposeFinishReason: LoopStopReason | undefined;
   dispose(): void {
     this.disposed = true;
+    const reason = this.disposeFinishReason;
+    this.disposeFinishReason = undefined;
+    if (reason !== undefined) {
+      this.finish(reason, { ...initialChatState });
+    }
   }
 
   // ---- テスト用の操作 ----
@@ -197,6 +234,12 @@ class FakeHost implements TaskSessionHost {
     this.pendingRejection = error;
   }
 
+  /**
+   * 次に開くタスクセッションへ適用する設定（衝突解決セッションだけを壊すために使う）。
+   * 1回適用したら消える。
+   */
+  configureNext: ((session: FakeTaskSession) => void) | undefined;
+
   /** オーケストレーターセッション（design.md §16.23）の生成だけを失敗させる。 */
   rejectOrchestrator: Error | undefined;
 
@@ -215,6 +258,11 @@ class FakeHost implements TaskSessionHost {
     this.counter += 1;
     const session = new FakeTaskSession(input.cwd, this.counter);
     session.messagingToolVisible = this.defaultMessagingToolVisible;
+    if (this.configureNext !== undefined && input.role !== 'orchestrator') {
+      const configure = this.configureNext;
+      this.configureNext = undefined;
+      configure(session);
+    }
     if (input.role === 'orchestrator') {
       this.orchestratorSessions.push(session);
       return session;
@@ -268,6 +316,12 @@ function fakeGit(options?: {
   headBranch?: string;
   /** `git push` を常に失敗させる。 */
   failPush?: boolean;
+  /**
+   * `git merge --abort` を常に失敗させる（未解決の衝突は残ったまま）。停止・巻き戻しが
+   * 効かず統合worktreeに`MERGE_HEAD`が残ったまま次のタスクがマージへ来る状況の再現用
+   * （Issue #412のレビュー指摘1）。
+   */
+  failMergeAbort?: boolean;
   /** `git`の作業ツリーでないワークスペースを模す（design.md §16.20の疑似worktreeテスト用）。 */
   notGitRepo?: boolean;
 }): FakeGitHandle {
@@ -342,6 +396,10 @@ function fakeGit(options?: {
         return { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'merge' && args[1] === '--abort') {
+        if (options?.failMergeAbort) {
+          // 巻き戻しに失敗＝未解決の衝突は残り続ける
+          return { code: 1, stdout: '', stderr: 'fatal: fake merge --abort failure' };
+        }
         unresolvedConflict = false;
         return { code: 0, stdout: '', stderr: '' };
       }
@@ -459,6 +517,14 @@ const fakeForgeFs: ForgeFileSystemPort = {
 class FakePseudoFs implements PseudoWorktreeFileSystemPort {
   readonly files = new Map<string, PseudoWorktreeFileStat>();
   readonly dirs = new Set<string>();
+  /** マニフェストの永続化（Issue #380）用。テキストファイルはサイズ・更新時刻を持たないため別管理。 */
+  readonly textFiles = new Map<string, string>();
+  /**
+   * Issue #364の回帰テスト用。`nodePseudoWorktreeFileSystem`の`mkdir`/`copyFile`/`removeFile`は
+   * 他のポートメソッドと違いEACCES/ENOSPC等をそのままthrowする実装のため、そのふるまいを
+   * フェイクでも再現できるようにする（既定はthrowしない。既存テストへの影響を避けるため）。
+   */
+  failWith: Error | undefined;
 
   constructor(seedFiles: Record<string, PseudoWorktreeFileStat> = {}) {
     for (const [p, meta] of Object.entries(seedFiles)) {
@@ -508,23 +574,47 @@ class FakePseudoFs implements PseudoWorktreeFileSystemPort {
     return target;
   }
   async mkdir(target: string): Promise<void> {
+    if (this.failWith !== undefined) {
+      throw this.failWith;
+    }
     this.dirs.add(target);
     this.ensureDirsFor(target);
   }
   async copyFile(from: string, to: string): Promise<void> {
+    if (this.failWith !== undefined) {
+      throw this.failWith;
+    }
     const meta = this.files.get(from);
     if (meta !== undefined) {
       this.setFile(to, meta);
     }
   }
   async removeFile(target: string): Promise<void> {
+    if (this.failWith !== undefined) {
+      throw this.failWith;
+    }
     this.files.delete(target);
+  }
+  async readTextFile(target: string): Promise<string | undefined> {
+    return this.textFiles.get(target);
+  }
+  async writeTextFile(target: string, content: string): Promise<void> {
+    if (this.failWith !== undefined) {
+      throw this.failWith;
+    }
+    this.textFiles.set(target, content);
+    this.ensureDirsFor(target);
   }
   async removeDirRecursive(target: string): Promise<void> {
     const prefix = `${target}${path.sep}`;
     for (const p of [...this.files.keys()]) {
       if (p === target || p.startsWith(prefix)) {
         this.files.delete(p);
+      }
+    }
+    for (const p of [...this.textFiles.keys()]) {
+      if (p === target || p.startsWith(prefix)) {
+        this.textFiles.delete(p);
       }
     }
     for (const d of [...this.dirs]) {
@@ -613,6 +703,43 @@ function fakeMemento(): WorkflowRunMemento {
   };
 }
 
+/**
+ * `memento.update()`の実際の書き込みを、テストが1件ずつ手で解放できるように留め置く
+ * フェイク（issue #381「persistのoutcomeが別時点の値になる」の再現用）。`store.update`
+ * （`WorkflowRunStore`内の`SerialQueue`）は前の項目のPromiseが解決するまで次の項目の
+ * `updater`を呼ばないため、`releaseOne()`を呼ぶまで`updater`の実行そのものを止められる。
+ * これにより「`persist()`呼び出し時点」と「`updater`が実際に走る時点」の間へ、
+ * 好きなだけ他の状態変化（`live.runState`の書き換え）を割り込ませられる。
+ */
+function controllableMemento(): {
+  memento: WorkflowRunMemento;
+  pendingCount: () => number;
+  releaseOne: () => void;
+} {
+  const store = new Map<string, unknown>();
+  const pending: Array<() => void> = [];
+  return {
+    memento: {
+      get<T>(key: string, defaultValue: T): T {
+        return (store.has(key) ? store.get(key) : defaultValue) as T;
+      },
+      update(key: string, value: unknown): Thenable<void> {
+        return new Promise<void>((resolve) => {
+          pending.push(() => {
+            store.set(key, value);
+            resolve();
+          });
+        });
+      },
+    },
+    pendingCount: () => pending.length,
+    releaseOne: () => {
+      const next = pending.shift();
+      next?.();
+    },
+  };
+}
+
 function filePort(content: string): WorkflowFilePort {
   return {
     fileSize: async () => Buffer.byteLength(content, 'utf8'),
@@ -648,13 +775,14 @@ function createHarness(
     forge?: WorkflowRunnerForgeDeps;
     pseudoWorktree?: { fs: PseudoWorktreeFileSystemPort; exclude: readonly string[] };
     messaging?: WorkflowRunnerMessagingDeps;
+    memento?: WorkflowRunMemento;
     roadmap?: { fs: RoadmapFileSystemPort };
     log?: Logger;
   },
 ): Harness {
   const codexHost = new FakeHost();
   const claudeHost = new FakeHost();
-  const store = new WorkflowRunStore(fakeMemento());
+  const store = new WorkflowRunStore(options?.memento ?? fakeMemento());
   const hosts: Record<Provider, TaskSessionHost> = { codex: codexHost, claude: claudeHost };
   const git = options?.git ?? fakeGit();
   let seq = 0;
@@ -1267,6 +1395,99 @@ tasks:
   });
 });
 
+/**
+ * `persist()`はrunの永続化を`WorkflowRunStore`（`workspaceState`書き込みを1本の
+ * `SerialQueue`で直列化）へ委ねる。以前は`outcome`（`finishedAt`を確定するかどうかを
+ * 決める）を`persist()`の呼び出し時点、`updater`の外側で計算していた。`updater`
+ * （`store.update`に渡す関数）自体は`SerialQueue`が捌く時点まで実行が遅延されうるため、
+ * 同じ`runId`に対して短時間に複数回`persist()`が呼ばれる（`void this.persist(runId)`が
+ * `runner.ts`に多数ある）と、先に呼ばれた`persist()`の`outcome`が古いまま、`updater`が
+ * 実際に読む`live.runState.tasks`（同じ`live`を指す最新の値）だけ新しくなる
+ * ことがあった（issue #381）。
+ */
+describe('WorkflowRunner.persist: outcomeとtasksの時点整合性（issue #381）', () => {
+  it(
+    '先に呼ばれたpersistの書き込みが遅れて、その間に手動再実行でタスクが' +
+      'running へ戻っても、実際に書き込まれる時点のtasksに整合したfinishedAtになる' +
+      '（`outcome`をupdaterの外で計算する古い実装では、走り出している最中の実行に' +
+      '`finishedAt`が固定されてしまう）',
+    async () => {
+      const YAML_SINGLE = `
+version: 1
+name: persist-timing-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+      const { memento, pendingCount, releaseOne } = controllableMemento();
+      const { runner, codexHost, store } = createHarness(YAML_SINGLE, { memento });
+
+      // 積み残っているpersistを全て解放して書き込みを追いつかせる（テストの節目ごとに
+      // 呼ぶ。`start()`は「定義済みの`await this.persist(runId)`」の後にも`pump()`が
+      // 追加でpersistを積むため、1回の解放だけでは足りない）
+      const drainAll = async (): Promise<void> => {
+        while (pendingCount() > 0) {
+          releaseOne();
+          await flush();
+        }
+      };
+
+      const startPromise = runner.start('/repo/.agents/workflows/persist-timing.yaml', '/repo');
+      await flush();
+      await drainAll();
+      const result = await startPromise;
+      const runId = result.runId as string;
+      await flush();
+      await drainAll();
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+
+      const t1 = codexHost.byTaskId('T1');
+      // 回数切れ（`maxReached`）でfailedに確定させる。`onTaskFinished`は`persist()`を
+      // 2回呼ぶ（`onTaskFinished`自身と、その中で呼ぶ`pump()`）。1回目（X）の
+      // `updater`はキューが空なのでほぼ即座に走り、`tasks`（'failed'）と`outcome`
+      // （バグ有りの実装では呼び出し時点で固定、'failed'）を同じ時点で読むため
+      // 矛盾は起きない。2回目（Y）は`updater`本体の実行がXの`memento.update`が
+      // 解決するまで遅延される（`SerialQueue`が直列に繋ぐため）。これから、Xだけを
+      // 先に解放し、Yの`updater`本体はまだ走らせないまま「再実行」を割り込ませる
+      t1.finish('maxReached' as LoopStopReason, { ...initialChatState });
+      await flush();
+      expect(pendingCount()).toBe(1); // X（1件目）だけが`memento.update`待ちで残る
+
+      // Xを解放する。「解決した」ことがマイクロタスクとしてキューへ積まれるだけで、
+      // Yの`updater`本体はまだ走らない（`await`を挟むまで走らない）。ここで
+      // `await`せずに続けて`retryTask`を呼ぶことで、「Yのupdater本体が実際に走る
+      // 前に、人がワークフローViewから再実行した」状況を作る
+      releaseOne();
+
+      // ここで人が「再実行」する。`live.runState`はpendingを経てすぐrunningへ戻る
+      // （`retryTask`内の`pump()`がその場で次のタスクを開始する）。Yの`updater`は
+      // まだ走っていないため、この時点の`live.runState`の変化はYにまだ見えていない
+      const retried = runner.retryTask(runId, 'T1');
+      expect(retried.ok).toBe(true);
+
+      // ここで初めてYの`updater`本体が走る。`live.runState`（今はrunning）を実行時点で
+      // 読むため`tasks`は最新化されるが、`outcome`を呼び出し時点（まだ'failed'だった
+      // 頃）で固定する古い実装では'failed'のまま渡ってしまい、`finishedAt`に
+      // タイムスタンプが固定される（Xが既に`finishedAt`を確定させているため
+      // `current?.finishedAt ?? ...`では上書きできない）
+      await flush();
+      expect(pendingCount()).toBe(1); // Yがmemento.update待ちで残る
+
+      releaseOne();
+      await flush();
+
+      const run = store.find(runId) as PersistedRun;
+      // 再実行でrunningへ戻っている以上、`finishedAt`は付いていてはいけない
+      expect(run.tasks['T1']?.state).toBe('running');
+      expect(run.finishedAt).toBeUndefined();
+
+      // 残りのpersistも解放して後始末する（次のテストへ影響を残さない）
+      await drainAll();
+    },
+  );
+});
+
 describe('WorkflowRunner: 定義ファイルの検証', () => {
   it('サイズ上限を超える定義ファイルは実行を始めない', async () => {
     const huge = 'x'.repeat(MAX_WORKFLOW_FILE_BYTES + 1);
@@ -1477,6 +1698,49 @@ tasks:
   });
 });
 
+describe('WorkflowRunner: 手動再実行後のworktree撤去（issue #407）', () => {
+  const YAML = `
+version: 1
+name: manual-retry-cleanup-test
+defaults:
+  cleanup: remove
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+
+  it('手動再実行の後にdoneになったタスクは、実際に使ったretry付きworktreeを撤去する', async () => {
+    const git = fakeGit();
+    const { runner, codexHost } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/manual-retry-cleanup.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const attempt1 = codexHost.byTaskId('T1');
+    attempt1.finish('failed', { ...initialChatState, turnFailed: true });
+    await flush();
+
+    expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+    await flush();
+
+    const attempt2 = codexHost.sessions.find((s) => s.cwd.endsWith('/T1-retry0'));
+    expect(attempt2).toBeDefined();
+    // 手動再実行のみ（自動retryは未消費）: retryCount=0, manualRetryCount=1
+    expect(attempt2?.cwd).not.toBe(attempt1.cwd);
+
+    attempt2?.finish('done', doneState('ok'));
+    await flush();
+
+    // 撤去対象は実際にこの試行で使ったworktree（T1-retry0）であるべき。
+    // retrySuffixOfがmanualRetryCountを見落とすと、代わりに未使用のT1（初回分。
+    // 存在しないので撤去はできない）が対象になり、attempt2のworktreeが残ってしまう
+    const removeCall = git.calls.find((c) => c.args[0] === 'worktree' && c.args[1] === 'remove');
+    expect(removeCall).toBeDefined();
+    expect(removeCall?.args[2]).toBe(attempt2?.cwd);
+  });
+});
+
 describe('WorkflowRunner: retriesによる自動再試行（design.md §16.5、レビュー指摘: high）', () => {
   const YAML = `
 version: 1
@@ -1684,6 +1948,21 @@ tasks:
     const t1Snapshot = snapshot?.tasks.find((t) => t.id === 'T1');
     expect(t1Snapshot?.lastResponseSummary).toBe('作業中です');
     expect(t1Snapshot?.hasLiveSession).toBe(true);
+  });
+
+  it('getSnapshotはタスク数によらずストア読み出しが1回になる（Issue #366）', async () => {
+    const { runner, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const findSpy = vi.spyOn(store, 'find');
+    const snapshot = runner.getSnapshot(runId);
+
+    // YAMLはT1・T2の2タスク。以前は`buildTaskSnapshot`がタスクごとに`store.find`を
+    // 呼んでいたため、`getSnapshot`の`persisted`分と合わせてタスク数+1回になっていた
+    expect(snapshot?.tasks).toHaveLength(2);
+    expect(findSpy).toHaveBeenCalledTimes(1);
   });
 
   it('getSnapshotは統合ブランチ名を含む（design.md §16.17・Issue #104）', async () => {
@@ -2482,6 +2761,57 @@ tasks:
     expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
   });
 
+  /**
+   * 「全体の停止」は衝突解決セッションを止め対象から漏らしていた（issue #381。issue #322の
+   * 「停止ボタンを押しても指示が送られ続ける」が衝突解決セッションについてだけ残っていた）。
+   * `stop()`が`live.mergeResolutions`にも`stopLoop()`を送ること自体は#381のまま守る。
+   *
+   * ただし停止の後始末で`git merge --abort`はしない（issue #434）。統合worktreeで人が解いた
+   * 未コミットの解決結果を破棄してしまい、復旧手段が無いため。タブへの直接介入
+   * （`manual`/`interrupted`）と同じ非破壊の経路へ合流し、タスクは`merging`のまま統合
+   * worktreeの占有だけが解放されることを確かめる。
+   */
+  it('全体の停止は衝突解決セッションにもstopLoopを送るが、解決作業を巻き戻さない（issue #381・#434）', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // T1は衝突したのでまだmergingのまま、衝突解決セッションが開いている
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    const resolutionSession = codexHost.sessions.at(-1);
+    expect(resolutionSession).toBeDefined();
+
+    runner.stop(runId);
+    await flush();
+
+    // 修正前は`live.tasks`しか走査しないため0のまま（このテストがそれを検知する）
+    expect(resolutionSession?.stopLoopCount).toBe(1);
+    expect(store.find(runId)?.haltedByUser).toBe(true);
+
+    // `stopLoop()`は衝突解決セッションでも`LoopStopReason: 'taskStopped'`でonFinishedを呼ぶ。
+    // `onMergeResolutionFinished`は'taskStopped'を'manual'/'interrupted'と同じ非破壊の
+    // 経路として扱う（issue #434）
+    resolutionSession?.finish('taskStopped' as LoopStopReason, { ...initialChatState });
+    await flush();
+
+    // マージの巻き戻し（`git merge --abort`）は呼ばれない。統合worktreeは`MERGE_HEAD`と
+    // 未解決パスを抱えたまま残り、人が解いた内容が保たれる
+    const abortCall = git.calls.find((c) => c.args[0] === 'merge' && c.args[1] === '--abort');
+    expect(abortCall).toBeUndefined();
+    // タスク自身の状態は変えない（`manual`/`interrupted`と同じ。run全体だけが止まっている）
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    // 衝突解決セッションは片付けられ、統合worktreeの占有だけが解放されている
+    expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.mergeResolutionActive).toBe(
+      false,
+    );
+  });
+
   it(
     '衝突解決中はgetSnapshotのmergeResolutionActiveが立ち、revealTaskは衝突解決セッションを開く' +
       '（design.md §16.17「コンフリクト」5.・Issue #104）',
@@ -2635,6 +2965,60 @@ tasks:
     expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
     // mergeBlockedで止まっていたT2がpendingへ戻り、次に開始される
     expect(store.find(runId)?.tasks['T2']?.state).toBe('running');
+  });
+
+  /**
+   * 停止中の「再マージ」は、そのタスクのマージだけを走らせる（Issue #412のレビュー指摘B）。
+   *
+   * `retryMergeState`が`haltedByUser`を解除してしまうと、マージ成功→`markMergeSucceeded`が
+   * 依存先の`skipped`（`mergeBlocked`）を`pending`へ戻した瞬間に`nextTasksToStart`の停止判定が
+   * 外れ、ユーザーが停止したrunの後続タスクが新しいセッションを開いて走り出す（「再マージ
+   * 1件」の操作でワークフロー全体が再開してしまう）。解除しなくてもマージ自体は走ることを
+   * 同時に確かめる（`decideAfterLeaseWait`が見るのは順番待ちの**間の**差分だけのため）。
+   */
+  it('停止中の再マージはそのタスクのマージだけを走らせ、停止したrunの後続は再開しない', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    codexHost.sessions.at(-1)?.finish('maxReached', { ...initialChatState });
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('skipped');
+
+    // ユーザーが実行全体を停止する
+    runner.stop(runId);
+    await flush();
+    expect(store.find(runId)?.haltedByUser).toBe(true);
+    const sessionCountAtStop = codexHost.sessions.length;
+
+    // 人が統合worktreeを手で直してから「再マージ」を押す
+    git.resolveConflict();
+    expect(runner.retryMerge(runId, 'T1')).toBe(true);
+    await flush();
+
+    // 停止中でも、そのタスクのマージは走り切る
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(
+      git.calls.filter((c) => c.args[0] === 'merge' && c.args[1] === '--no-ff'),
+    ).toHaveLength(2);
+
+    // 停止は解除されないので、後続は新しいセッションを開かない
+    expect(store.find(runId)?.haltedByUser).toBe(true);
+    // ここで観測している`pending`は**現状の観測であって、望ましい仕様ではない**。
+    // `markMergeSucceeded`が`haltedByUser`を見ずに`mergeBlocked`の後続を`pending`へ戻すため、
+    // 停止中のrunでは誰にも開始されない`pending`が残り、`getRunOutcome`が`running`を返し
+    // 続けてrunが終了判定へ進めない（Issue #432。本PRが作った欠陥ではなく、`attemptMerge`に
+    // 停止チェックが無かった従来も同じ経路だった）。このテストの主題はあくまで
+    // 「停止が尊重されること」なので、袋小路そのもの（`finishedAt`が付くかどうか）は
+    // ここでは何も主張しない。Issue #432の対応時にこの期待値も見直すこと
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('pending');
+    expect(store.find(runId)?.tasks['T3']?.state).toBe('pending');
+    expect(codexHost.sessions).toHaveLength(sessionCountAtStop);
   });
 
   it('isolation: sharedのタスクはマージ対象のブランチを持たないため、mergingを経ずそのままdoneになる', async () => {
@@ -2882,6 +3266,58 @@ tasks:
     const snapshot = runner.getSnapshot(runId);
     expect(snapshot?.warnings.some((w) => w.kind === 'forgeSkipped')).toBe(false);
   });
+
+  it(
+    '最終マージには統合PR/MRの番号（live.integrationPullRequest.number）を明示的に渡す' +
+      '（design.md §16.18・Issue #404の回帰）',
+    async () => {
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      const cli = fakeForgeCli({ prUrl: 'https://github.com/acme/repo/pull/77' });
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { pullRequest: 'integration' }),
+      });
+      const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      const mergeCall = cli.calls.find((c) => c.args[0] === 'pr' && c.args[1] === 'merge');
+      expect(mergeCall?.args).toEqual(['pr', 'merge', '77', '--merge']);
+    },
+  );
+
+  it(
+    '統合PR/MRのURLから番号を取り出せなければ最終マージを飛ばし、' +
+      '「番号が不明」を含む警告を残す（design.md §16.18・Issue #404の回帰）',
+    async () => {
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      // 末尾が10進数にならないURLにして`parsePullRequestNumberFromUrl`が失敗する経路を通す
+      const cli = fakeForgeCli({ prUrl: 'https://github.com/acme/repo/pull/not-a-number' });
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { pullRequest: 'integration' }),
+      });
+      const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      // 番号が不明なので`runFinalMerge`自体がCLIを呼ばない
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+      const snapshot = runner.getSnapshot(runId);
+      const warning = snapshot?.warnings.find((w) => w.kind === 'forgeFailed');
+      expect(warning?.message).toContain('番号が不明');
+    },
+  );
 });
 
 describe('WorkflowRunner: タスクのtypeがコミットメッセージへ反映される（design.md §16.6）', () => {
@@ -3816,6 +4252,447 @@ tasks:
     await flush();
     expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
   });
+
+  it(
+    '疑似worktreeの統合先へのファイルシステム操作が失敗（EACCES等）しても未ハンドルrejectにならず、' +
+      'タスクをmergingのまま残さずfailedへ確定させる（Issue #364）',
+    async () => {
+      const rejectionListener = vi.fn();
+      process.on('unhandledRejection', rejectionListener);
+      try {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-integrate-fail.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const t1 = codexHost.byTaskId('T1');
+        const cloneDir = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+        // 統合先へコピーする対象を1件作っておく。統合（`applyDiffToIntegration`の
+        // `fs.mkdir`/`fs.copyFile`）がここでEACCES相当のエラーを投げるようにする
+        fs.setFile(path.join(cloneDir, 'b.txt'), { size: 5, mtimeMs: 50 });
+        fs.failWith = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+
+        t1.finish('done', doneState('ok'));
+        await flush();
+
+        // `merging`のまま残らず、`failed`として確定する
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+      } finally {
+        process.off('unhandledRejection', rejectionListener);
+      }
+      // `void integratePseudoWorktree(...)`（呼び出し元）から見て未ハンドルrejectが
+      // 発生していない
+      expect(rejectionListener).not.toHaveBeenCalled();
+    },
+  );
+
+  it(
+    'run終了時のワークスペースへの反映（reflectPseudoWorktree）がファイルシステムエラーで失敗しても、' +
+      '未ハンドルrejectにならず警告として記録する（Issue #364）',
+    async () => {
+      const rejectionListener = vi.fn();
+      process.on('unhandledRejection', rejectionListener);
+      try {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-reflect-fail.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const t1 = codexHost.byTaskId('T1');
+        const cloneDir = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+        fs.setFile(path.join(cloneDir, 'a.txt'), { size: 20, mtimeMs: 200 });
+
+        // 統合（integratePseudoWorktree）自体は正常に終わらせ、run終了時の反映
+        // （reflectPseudoWorktree → reflectIntegrationToWorkspace）だけを失敗させたいため、
+        // タスク完了直後（統合の直後・反映の直前）でfailWithを立てる
+        const originalCopyFile = fs.copyFile.bind(fs);
+        let copyCount = 0;
+        fs.copyFile = async (from: string, to: string): Promise<void> => {
+          copyCount += 1;
+          // 1回目は統合先（_integration）へのコピー（integratePseudoWorktree経由）、
+          // 2回目以降がワークスペースへの反映（reflectPseudoWorktree経由）
+          if (copyCount >= 2) {
+            throw Object.assign(new Error('ENOSPC: no space left on device'), {
+              code: 'ENOSPC',
+            });
+          }
+          await originalCopyFile(from, to);
+        };
+
+        t1.finish('done', doneState('ok'));
+        await flush();
+
+        // 統合（マージ）自体はdoneのまま確定する。失敗したのは反映だけ
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+        // ワークスペース側は反映されずに元のまま（反映がエラーで中断したため）
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 10, mtimeMs: 100 });
+        const snapshot = runner.getSnapshot(runId);
+        expect(
+          snapshot?.warnings.some((w) => w.kind === 'pseudoWorktreeReflectBlocked'),
+        ).toBe(true);
+      } finally {
+        process.off('unhandledRejection', rejectionListener);
+      }
+      expect(rejectionListener).not.toHaveBeenCalled();
+    },
+  );
+
+  it(
+    'run終了時の反映が失敗したときの警告はsanitizeForLogを通す' +
+      '（live.warningsはワークフローViewにも出るため、Issue #433）',
+    async () => {
+      const git = fakeGit({ notGitRepo: true });
+      const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        pseudoWorktree: { fs, exclude: [] },
+      });
+      const result = await runner.start(
+        '/repo/.agents/workflows/pseudo-reflect-sanitize.yaml',
+        '/repo',
+      );
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      const cloneDir = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+      fs.setFile(path.join(cloneDir, 'a.txt'), { size: 20, mtimeMs: 200 });
+
+      // 反映（2回目以降のcopyFile）だけを、OSユーザー名を含む絶対パスと双方向制御文字を
+      // 持つエラーで失敗させる（Node.jsのfsエラーはこの形でパスを埋め込む）
+      const originalCopyFile = fs.copyFile.bind(fs);
+      let copyCount = 0;
+      fs.copyFile = async (from: string, to: string): Promise<void> => {
+        copyCount += 1;
+        if (copyCount >= 2) {
+          throw new Error("EACCES: permission denied, open '/home/victim/repo/a.txt'\u202E");
+        }
+        await originalCopyFile(from, to);
+      };
+
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      const snapshot = runner.getSnapshot(runId);
+      const warning = snapshot?.warnings.find((w) => w.kind === 'pseudoWorktreeReflectBlocked');
+      expect(warning).toBeDefined();
+      expect(warning?.message).toContain('/home/***/repo/a.txt');
+      expect(warning?.message).not.toContain('victim');
+      expect(warning?.message).not.toContain('\u202E');
+    },
+  );
+
+  it(
+    '除外設定に一致して反映をスキップしたパスは、成功時でも警告として人に見せる' +
+      '（黙って捨てない、Issue #433）',
+    async () => {
+      const git = fakeGit({ notGitRepo: true });
+      const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+      // `exclude`は起動時に固定される一方、マニフェストは`exclude`と無関係に復元されうる
+      // （`loadPersistedManifest`。Issue #380）。その設定ドリフトを、同じ配列を実行中に
+      // 変えることで再現する（`live.pseudo.exclude`はこの配列と同一参照）
+      const exclude: string[] = [];
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        pseudoWorktree: { fs, exclude },
+      });
+      const result = await runner.start(
+        '/repo/.agents/workflows/pseudo-reflect-skip.yaml',
+        '/repo',
+      );
+      const runId = result.runId as string;
+      await flush();
+
+      // タスクがワークスペースに無いファイルを追加する（反映時に`added`として扱われる）
+      const cloneDir = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+      fs.setFile(path.join(cloneDir, 'node_modules', 'x.js'), { size: 5, mtimeMs: 200 });
+
+      // 統合先へのコピー（＝統合の完了）の直後、反映が始まる前に除外設定を変える
+      const originalCopyFile = fs.copyFile.bind(fs);
+      fs.copyFile = async (from: string, to: string): Promise<void> => {
+        await originalCopyFile(from, to);
+        if (to.includes('_integration') && !exclude.includes('node_modules')) {
+          exclude.push('node_modules');
+        }
+      };
+
+      codexHost.byTaskId('T1').finish('done', doneState('ok'));
+      await flush();
+
+      // 反映そのものは成功扱い（中断していない）
+      expect(fs.files.has(path.join('/repo', 'node_modules', 'x.js'))).toBe(false);
+      const snapshot = runner.getSnapshot(runId);
+      const warning = snapshot?.warnings.find((w) => w.kind === 'pseudoWorktreeReflectBlocked');
+      expect(warning).toBeDefined();
+      expect(warning?.message).toContain('node_modules/x.js');
+      expect(warning?.message).toContain('除外設定');
+    },
+  );
+
+  it('persist（実行状態の永続化）がmemento.updateの失敗時に未ハンドルrejectにならず、ログへ記録する（Issue #364）', async () => {
+    const rejectionListener = vi.fn();
+    process.on('unhandledRejection', rejectionListener);
+    const errorLog = vi.fn();
+    try {
+      const git = fakeGit({ notGitRepo: true });
+      const fs = new FakePseudoFs();
+      const failingMemento: WorkflowRunMemento = {
+        get<T>(key: string, defaultValue: T): T {
+          return defaultValue;
+        },
+        update(): Thenable<void> {
+          return Promise.reject(new Error('workspaceStateへの書き込みに失敗しました'));
+        },
+      };
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        pseudoWorktree: { fs, exclude: [] },
+        memento: failingMemento,
+        log: { ...fakeLogger, error: errorLog },
+      });
+      const result = await runner.start('/repo/.agents/workflows/persist-fail.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // runは（永続化に失敗しても）そのまま完了として扱われる。永続化の失敗はログへ落ちる
+      expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe('done');
+      expect(errorLog).toHaveBeenCalledWith(expect.stringContaining('実行状態の永続化に失敗しました'));
+    } finally {
+      process.off('unhandledRejection', rejectionListener);
+    }
+    expect(rejectionListener).not.toHaveBeenCalled();
+  });
+
+  it(
+    'マニフェストの永続化はintegrateと同じSerialQueue項目内で行われ、' +
+      '後段の書き込み同士の順序も保証される（レビュー指摘: risk、Issue #380の追加指摘）',
+    async () => {
+      const git = fakeGit({ notGitRepo: true });
+      const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+      const yaml = `
+version: 1
+name: pseudo-persist-order-test
+defaults:
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+      const { runner, codexHost, store } = createHarness(yaml, {
+        git,
+        pseudoWorktree: { fs, exclude: [] },
+      });
+      const result = await runner.start(
+        '/repo/.agents/workflows/pseudo-persist-order.yaml',
+        '/repo',
+      );
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      const t2 = codexHost.byTaskId('T2');
+      const cloneDir1 = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+      const cloneDir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T2');
+      fs.setFile(path.join(cloneDir1, 'x.txt'), { size: 1, mtimeMs: 1 });
+      fs.setFile(path.join(cloneDir2, 'y.txt'), { size: 2, mtimeMs: 2 });
+
+      // T1のマニフェスト永続化（manifest.jsonへのwriteTextFile）だけをわざと遅らせる。
+      // 永続化がqueue.integrateの外（直列化されない箇所）で行われていれば、後から完了する
+      // T2の速い書き込みがT1の遅い書き込みより先に完了し、最終的にT1の（T2を含まない）
+      // 内容で上書きされる（Issue #380が防ごうとした事象の再発）
+      const manifestPath = path.join('/repo', '.agents', 'worktrees', runId, 'manifest.json');
+      const originalWriteTextFile = fs.writeTextFile.bind(fs);
+      let delayedOnce = false;
+      fs.writeTextFile = async (target: string, content: string): Promise<void> => {
+        if (target === manifestPath && !delayedOnce) {
+          delayedOnce = true;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        await originalWriteTextFile(target, content);
+      };
+
+      t1.finish('done', doneState('ok'));
+      t2.finish('done', doneState('ok'));
+      // T1側の遅延（実時間）が解消されるまで待つ。flush()はマイクロタスクを消化するだけで
+      // 実時間の経過は待たないため、ここだけは実際の待機が要る
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+
+      // 直列化により、後（enqueue順で2番目）のT2の永続化はT1の永続化完了後にしか
+      // 始まらないため、最終的な内容にはT1・T2両方の記録が残る
+      const finalManifest = deserializeManifest(fs.textFiles.get(manifestPath) ?? '');
+      expect(finalManifest.get('x.txt')).toEqual({ taskId: 'T1', kind: 'added' });
+      expect(finalManifest.get('y.txt')).toEqual({ taskId: 'T2', kind: 'added' });
+    },
+  );
+
+  describe('リロード復元後のマニフェスト（Issue #380）', () => {
+    // T1は疑似worktree（統合が要る）、T2は明示cwd（統合を経由しない）にして、リロード後の
+    // 再実行（retryTask）が疑似worktreeの複製先の衝突（T2の再クローンが以前の複製と
+    // ぶつかる。Issue #380の範囲外の別の制約）を踏まないようにする
+    const TWO_TASK_YAML = `
+version: 1
+name: pseudo-reload-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    cwd: /repo/T2
+    prompt: p2
+    done: d2
+`;
+
+    it(
+      'リロード復元後も、復元前に統合済みだった成果がワークスペースへ届く' +
+        '（受入基準: マニフェストが永続化され復元される）',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-reload.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        // T1だけ先に完了・統合させる（統合先へのマニフェストがこの時点で永続化される）。
+        // T2はまだ`running`のまま（リロード＝プロセス再起動を、走行中のタスクがある
+        // 途中で迎えた状況を再現する）
+        const t1 = codexHost.byTaskId('T1');
+        const cloneDir1 = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+        fs.setFile(path.join(cloneDir1, 'a.txt'), { size: 20, mtimeMs: 200 });
+        t1.finish('done', doneState('ok'));
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+        // まだリロード前なので、runは終わっておらずワークスペースへの反映はまだ起きない
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 10, mtimeMs: 100 });
+
+        // 新しいプロセス（リロード後）を模す。同じstore・同じ疑似worktreeのfs
+        // （＝同じディスク）を使い回すが、ライブな状態（`IntegrationQueue`のインスタンス・
+        // メモリ上のマニフェスト）は失われる
+        const newCodexHost = new FakeHost();
+        const reloadedRunner = new WorkflowRunner({
+          hosts: { codex: newCodexHost, claude: newCodexHost },
+          worktreeQueue: new WorktreeCreationQueue(),
+          git: fakeGit({ notGitRepo: true }),
+          fs: identityFs,
+          filePort: filePort(TWO_TASK_YAML),
+          store,
+          pseudoWorktree: { fs, exclude: [] },
+          log: fakeLogger,
+          readBaseline: () => ({
+            codexSandbox: 'read-only',
+            codexApprovalMode: 'on-request',
+            claudePermissionMode: 'manual',
+            allowAutoApprove: true,
+            allowClaudeBypassPermissions: false,
+          }),
+        });
+        await reloadedRunner.restoreRunsForView();
+
+        // リロードで中断扱いになったT2を再実行し、runを最後まで進める
+        expect(reloadedRunner.retryTask(runId, 'T2')).toEqual({ ok: true });
+        await flush();
+        const t2 = newCodexHost.byTaskId('T2');
+        t2.finish('done', doneState('ok'));
+        await flush();
+
+        // T1（リロード前に統合済み）の成果がワークスペースへ届く。マニフェストが
+        // 復元されていなければ（空マニフェストのままなら）a.txtは反映されない
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 20, mtimeMs: 200 });
+        const snapshot = reloadedRunner.getSnapshot(runId);
+        expect(
+          snapshot?.warnings.some((w) => w.kind === 'pseudoWorktreeReflectBlocked'),
+        ).toBe(false);
+      },
+    );
+
+    it(
+      '永続化されたマニフェストが壊れていて復元できない場合、' +
+        '黙って0件成功にせず反映を止めて警告を出す（受入基準）',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start(
+          '/repo/.agents/workflows/pseudo-reload-corrupt.yaml',
+          '/repo',
+        );
+        const runId = result.runId as string;
+        await flush();
+
+        const t1 = codexHost.byTaskId('T1');
+        const cloneDir1 = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+        fs.setFile(path.join(cloneDir1, 'a.txt'), { size: 20, mtimeMs: 200 });
+        t1.finish('done', doneState('ok'));
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+
+        // 永続化されたマニフェストのファイルが壊れている状況を再現する（ディスク破損等）
+        const manifestPath = path.join('/repo', '.agents', 'worktrees', runId, 'manifest.json');
+        fs.textFiles.set(manifestPath, 'not valid json{{{');
+
+        const newCodexHost = new FakeHost();
+        const reloadedRunner = new WorkflowRunner({
+          hosts: { codex: newCodexHost, claude: newCodexHost },
+          worktreeQueue: new WorktreeCreationQueue(),
+          git: fakeGit({ notGitRepo: true }),
+          fs: identityFs,
+          filePort: filePort(TWO_TASK_YAML),
+          store,
+          pseudoWorktree: { fs, exclude: [] },
+          log: fakeLogger,
+          readBaseline: () => ({
+            codexSandbox: 'read-only',
+            codexApprovalMode: 'on-request',
+            claudePermissionMode: 'manual',
+            allowAutoApprove: true,
+            allowClaudeBypassPermissions: false,
+          }),
+        });
+        await reloadedRunner.restoreRunsForView();
+
+        expect(reloadedRunner.retryTask(runId, 'T2')).toEqual({ ok: true });
+        await flush();
+        const t2 = newCodexHost.byTaskId('T2');
+        t2.finish('done', doneState('ok'));
+        await flush();
+
+        // 反映が止まり、ワークスペース側はリロード前のまま（0件成功に見えていない）
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 10, mtimeMs: 100 });
+        const snapshot = reloadedRunner.getSnapshot(runId);
+        const warning = snapshot?.warnings.find((w) => w.kind === 'pseudoWorktreeReflectBlocked');
+        expect(warning).toBeDefined();
+        expect(warning?.message).toContain('復元できなかった');
+      },
+    );
+  });
 });
 
 describe('WorkflowRunner: タスク間メッセージング（design.md §16.21、Issue #105）', () => {
@@ -3982,6 +4859,35 @@ tasks:
       // 返信の本文は次の送信（setPromptTransform経由のcomposeNextPrompt）へ添えられる
       const composed = t1.promptTransform?.('続けてください') ?? '';
       expect(composed).toContain('順調です');
+    },
+  );
+
+  it(
+    'waitingReply中にターン失敗を観測するとfailedへ確定し、セッションも解放される' +
+      '（Issue #362。isUnsettledにwaitingReplyを含めないと、applyLoopStopReasonが' +
+      'markFailedへ到達せずタスクがwaitingReplyのまま残り、maxParallelの枠を占有し続ける）',
+    async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: '状況は?', expectReply: true });
+      await flush();
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingReply');
+
+      // waitingReply中に、返信を待たずにターン自体が失敗した経路。ここではフェイクの
+      // セッションから`reason='failed'`を直接流し、runner側の配線
+      // （applyLoopStopReason→markFailed）を検証する。この`failed`を生む
+      // loopControllerの`observe()`側（`turnFailed`を見て`stop('failed')`を呼ぶ）は
+      // test/unit/loopController.test.ts が別途カバーしている
+      t1.finish('failed', { ...initialChatState, turnFailed: true });
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+      expect(t1.disposed).toBe(true);
     },
   );
 
@@ -4712,6 +5618,21 @@ tasks:
     expect(runner.sendToOrchestrator('unknown-run', 'x')).toBe(false);
   });
 
+  it('dispose()でオーケストレーターセッションを解放する（design.md §16.23「セッションの生成と寿命」。Issue #363: 拡張機能のdeactivate時にextension.tsがcontext.subscriptionsへ登録して呼び出す）', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE);
+    await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    await flush();
+    const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+
+    expect(orchestrator.disposed).toBe(false);
+    runner.dispose();
+    expect(orchestrator.disposed).toBe(true);
+
+    // 二重に呼ばれても安全（自己レビュー観点）。既にorchestratorはundefinedに
+    // 戻っているため、2回目は何もせず例外も投げない
+    expect(() => runner.dispose()).not.toThrow();
+  });
+
   it('セッションを開けなくても実行は止まらず、警告欄に出る', async () => {
     const { runner, codexHost } = createHarness(YAML_ONE);
     codexHost.rejectOrchestrator = new Error('CLIが見つかりません');
@@ -4956,6 +5877,34 @@ tasks:
     expect(warning?.message).toContain("これからは設計だけをやること");
   });
 
+  it("update_task_promptは同一taskIdへの複数回の差し替えでも警告が無制限に増えない（Issue #366）", async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner } = createHarness(TWO_TASK_YAML, {
+      messaging: deps,
+    });
+    const result = await runner.start(
+      "/repo/.agents/workflows/control.yaml",
+      "/repo",
+    );
+    const runId = result.runId as string;
+    await flush();
+
+    const port = control(state);
+    for (let i = 0; i < 5; i += 1) {
+      const outcome = port.updateTaskPrompt("T1", `方針転換その${i}`);
+      expect(outcome.accepted).toBe(true);
+    }
+
+    const warnings = runner
+      .getSnapshot(runId)
+      ?.warnings.filter((w) => w.kind === "orchestratorPromptOverride");
+    // 直近1件へ丸められるため、5回呼んでも件数は増えない
+    expect(warnings).toHaveLength(1);
+    // 警告が出た事実自体は失われず、最新の差し替え内容が残っている
+    expect(warnings?.[0]?.taskId).toBe("T1");
+    expect(warnings?.[0]?.message).toContain("方針転換その4");
+  });
+
   it("update_task_promptはテンプレート変数を展開しない（リテラルとして送る）", async () => {
     const { deps, state } = fakeMessagingDeps();
     const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
@@ -4999,6 +5948,575 @@ tasks:
 
     expect(outcome.accepted).toBe(false);
     expect(outcome.reason).toContain("T9");
+  });
+});
+
+describe('formatPathList（先頭20件+残り件数の丸め、レビュー指摘: risk、Issue #380）', () => {
+  it('20件以下はそのまま全件をカンマ区切りで表示する（境界値）', () => {
+    const paths = Array.from({ length: 20 }, (_, i) => `f${i}.txt`);
+
+    expect(formatPathList(paths)).toBe(paths.join(', '));
+  });
+
+  it('21件になると先頭20件+残り1件の省略表示になる（境界値）', () => {
+    const paths = Array.from({ length: 21 }, (_, i) => `f${i}.txt`);
+
+    const result = formatPathList(paths);
+
+    expect(result).toBe(`${paths.slice(0, 20).join(', ')}, ...ほか1件`);
+  });
+
+  it('0件は「なし」を返す', () => {
+    expect(formatPathList([])).toBe('なし');
+  });
+
+  it(
+    '1件ずつsanitizeForLogを通す（パスに混ざった制御文字・ユーザー名を' +
+      'ワークフローViewへ出さない、Issue #433）',
+    () => {
+      const result = formatPathList(['/home/victim/repo/a.txt', 'b\u202E.txt']);
+
+      expect(result).toContain('/home/***/repo/a.txt');
+      expect(result).not.toContain('victim');
+      expect(result).not.toContain('\u202E');
+    },
+  );
+
+});
+
+/**
+ * 統合worktreeの占有（Issue #412）。衝突解決セッションはLLMの複数ターンぶんの時間
+ * （数分〜数十分）走るのに、以前は「gitコマンド1回」しか直列化されていなかったため、
+ * その間に別タスクのマージが割り込めた。割り込むと、
+ *
+ * - 割り込んだ側の`git merge`が「未解決ファイルがある」で失敗し、
+ *   `git diff --diff-filter=U`が**他タスクの**未解決パスを返すため`conflict`と誤判定される
+ * - 解決セッションが`git add`済みの瞬間なら未解決パスが空になり`failure`（マージ失敗）で確定する
+ * - 解決コミット直後なら「未解決なし」を自分の解決とみなして`done`で確定する（実際には
+ *   1コミットも統合ブランチへ入っていない）
+ *
+ * という3通りの壊れ方をした。占有を「マージ1件の全区間」へ広げたことを、割り込み側が
+ * 順番待ちになることで確かめる。
+ */
+describe('WorkflowRunner: 統合worktreeの占有（Issue #412）', () => {
+  /** 依存の無い2タスクが同時に走り、同時に完了しうる定義。 */
+  const PARALLEL_YAML = `
+version: 1
+name: lease-test
+defaults:
+  provider: codex
+  maxParallel: 3
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+
+  function mergeCalls(git: FakeGitHandle): Array<{ args: string[]; cwd: string }> {
+    return git.calls.filter((c) => c.args[0] === 'merge' && c.args[1] === '--no-ff');
+  }
+
+  it('衝突解決中は別タスクのマージが順番待ちになり、他タスクの未解決パスを拾って誤判定しない', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/lease.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // T1が衝突し、衝突解決セッションが開いた（統合worktreeはT1が占有したまま）
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    const resolution = codexHost.sessions.at(-1);
+    expect(resolution).toBeDefined();
+    expect(mergeCalls(git)).toHaveLength(1);
+
+    // その最中にT2が完了しても、T2のマージは始まらない（占有待ち）
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    expect(mergeCalls(git)).toHaveLength(1);
+    // 修正前はここでT2がconflict/failure/doneのいずれかへ誤って確定していた
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('merging');
+    expect(store.find(runId)?.tasks['T2']?.failure).toBeUndefined();
+
+    // T1の解決が終わって占有が解けると、T2のマージが順番どおり走る
+    git.resolveConflict();
+    resolution?.finish('done', doneState('衝突を解決しました'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+    const merges = mergeCalls(git);
+    expect(merges).toHaveLength(2);
+    expect(merges[1]?.args).toContain(`wf/${runId}/T2`);
+  });
+
+  /**
+   * 停止・巻き戻しが効かず、統合worktreeに`MERGE_HEAD`と未解決パスが残ったまま占有だけが
+   * 解放される経路がある（衝突解決セッションを人が止めた場合や、`git merge --abort`自体が
+   * 失敗した場合）。そこへ次のタスクのマージが来たとき、多層防御のゲート
+   * （`findMergeInProgress`）が`failure`を返すと`markMergeFailed`で`failed`が確定し、
+   * `retryMergeState`は`blocked`からしか戻せないためViewの「再マージ」でも復帰できない
+   * 行き止まりになる（レビュー指摘1）。回復可能な`blocked`へ倒すことを確かめる。
+   */
+  it('他タスクの未解決の衝突が残った統合worktreeへぶつかったタスクは、failedではなくblockedになり再マージで復帰できる', async () => {
+    // 巻き戻しに失敗させ、`MERGE_HEAD`が残ったまま占有が解放される状況を作る
+    const git = fakeGit({ conflictOnce: true, failMergeAbort: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/lease.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    const resolution = codexHost.sessions.at(-1);
+    expect(resolution).toBeDefined();
+
+    // 解決セッションはdoneを宣言するがgit上は未解決のまま。巻き戻しにも失敗するため、
+    // 統合worktreeは`MERGE_HEAD`を抱えたまま占有だけが解放される
+    resolution?.finish('done', doneState('解決したつもり'));
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+
+    // そこへT2のマージが来る
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+
+    // 修正前はここで`failure`→`failed`が確定し、以後どうやっても戻せなかった
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('blocked');
+    expect(store.find(runId)?.tasks['T2']?.failure).toBeUndefined();
+    // 他タスクの未解決パスを自分の衝突として拾わない（解決セッションも開かない）
+    expect(codexHost.sessions).toHaveLength(3);
+    expect(
+      runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'mergeBusy' && w.taskId === 'T2'),
+    ).toBe(true);
+
+    // 人が統合worktreeを片付けてからViewの「再マージ」を押せば、そのまま先へ進める
+    git.resolveConflict();
+    expect(runner.retryMerge(runId, 'T2')).toBe(true);
+    await flush();
+
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+    expect(mergeCalls(git)).toHaveLength(2);
+  });
+
+  /**
+   * `acquireLease`は無期限で待ち、`stop()`は`haltedByUser`を立てるだけで待機中の取得を
+   * 起こさない。そのため、他タスクの衝突解決が長引いている間に人が停止しても、占有が
+   * 解けた瞬間に`git merge --no-ff`が走り、衝突すれば新しい解決セッションまで開いてしまう
+   * （レビュー指摘2）。取得直後の再確認でこれを止める。
+   *
+   * **止めたタスクは`merging`のまま残さず`blocked`で確定させる**（レビュー指摘A）。
+   * `merging`は`getRunOutcome`では`running`扱いのため、放置するとrunの終了判定が永久に
+   * 立たず（`finishedAt`が付かない）、停止操作が完了せず、終了時の後始末も走らない。
+   * Viewも`merging`には操作ボタンを出さないため復帰手段が無くなる。
+   */
+  it('占有の順番待ちの間に停止されたら、マージを始めずblockedで確定させる', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/lease.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    const resolution = codexHost.sessions.at(-1);
+
+    // T2は占有待ちで止まっている
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    expect(mergeCalls(git)).toHaveLength(1);
+
+    // 待っている最中にユーザーが停止する
+    runner.stop(runId);
+    await flush();
+    const sessionCountAtStop = codexHost.sessions.length;
+
+    // T1の解決が終わって占有が解ける
+    git.resolveConflict();
+    resolution?.finish('done', doneState('衝突を解決しました'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    // 修正前はここでT2の`git merge --no-ff`が走っていた
+    expect(mergeCalls(git)).toHaveLength(1);
+    // 新しい衝突解決セッションも開かない
+    expect(codexHost.sessions).toHaveLength(sessionCountAtStop);
+
+    // マージは始めないが、`merging`のまま固着させない（人が理由を追える警告も残る）
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('blocked');
+    expect(store.find(runId)?.tasks['T2']?.failure).toBeUndefined();
+    expect(
+      runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'mergeBusy' && w.taskId === 'T2'),
+    ).toBe(true);
+    // runの終了判定まで進む（`merging`のままだと`running`扱いで永久に終わらない）
+    expect(store.find(runId)?.finishedAt).toBeDefined();
+
+    // 停止したあとでも、人が「再マージ」を押せばそのタスクは先へ進められる
+    expect(runner.retryMerge(runId, 'T2')).toBe(true);
+    await flush();
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+    expect(mergeCalls(git)).toHaveLength(2);
+  });
+
+  it('衝突解決セッションを開けなかった（例外）経路でも占有は解放され、次のタスクのマージが進む', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/lease.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // 衝突解決セッションの生成だけを失敗させる（タスクのセッションは開き終わっている）
+    codexHost.rejectNext(new Error('app-serverが落ちている'));
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    // 例外経路は`abortAndBlock`（自分の占有ハンドルで巻き戻す）を通ってblockedになる
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+    expect(git.calls.some((c) => c.args[0] === 'merge' && c.args[1] === '--abort')).toBe(true);
+
+    // 占有が解放されていなければ、ここでT2のマージが永久に詰まる（デッドロック）
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+    expect(mergeCalls(git)).toHaveLength(2);
+  });
+
+  /**
+   * 引き継ぎ（`handover.done`）を`onFinished`の登録まで遅らせると、`session.open()`と
+   * `buildMergeResolutionPrompt()`が投げる窓が残る（レビュー指摘C）。この窓で投げると、
+   * 統合worktreeで生きているセッションを抱えたまま`attemptMerge`の`finally`が占有を解放し、
+   * 次タスクの`git merge`が解決作業へ割り込む。さらに`session.open()`が投げた場合は
+   * `live.mergeResolutions.set`の前なので、そのセッションは誰にもdisposeされず残る。
+   * `openTaskSession`が解決した直後に引き継ぎを確定させ、以降をこの関数の`catch`で
+   * 始末することを確かめる。
+   */
+  it('衝突解決セッションのopen()が投げても、セッションを畳んで巻き戻しblockedで確定する', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/lease.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // 衝突解決セッションのタブ表示だけを失敗させる（セッション自体は手に入っている）
+    codexHost.configureNext = (session) => {
+      session.failOpen = new Error('タブを開けませんでした');
+    };
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    // 修正前は例外がそのまま抜け、T1は`merging`のまま・セッションは開きっぱなしだった
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+    const resolution = codexHost.sessions.at(-1);
+    expect(resolution?.openCount).toBe(1);
+    expect(resolution?.disposed).toBe(true);
+    expect(git.calls.some((c) => c.args[0] === 'merge' && c.args[1] === '--abort')).toBe(true);
+    // 占有も手放されているので、次のタスクのマージは進む
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+  });
+
+  /**
+   * `onFinished`の登録が`session.open()`より後にあると、`open()`が同期的にループを回し切る
+   * host実装では、登録前に発火した終了を取りこぼす（レビュー指摘12）。取りこぼすと、
+   * 引き継ぎ（`handover.done`）が既に立っているぶん`attemptMerge`の`finally`も解放しないため、
+   * 統合worktreeの占有を誰も手放さないまま`runLoop()`が**正常return**する（`catch`にも
+   * 入らないので気づけない）。以後そのrunのマージは全て順番待ちで詰まる。
+   */
+  it('衝突解決セッションのopen()が同期的に終了を発火しても、決着まで進み占有も解放される', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/lease.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // 衝突解決セッションだけ、`open()`の中でループを回し切って終了まで発火する実装にする
+    codexHost.configureNext = (session) => {
+      session.openFinishReason = 'maxReached';
+    };
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    // 修正前はこの終了を誰も受け取らず、T1は`merging`のまま・占有も握られたままだった
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+    const resolution = codexHost.sessions.at(-1);
+    // 終わったセッションへループをかけ直さず、その場で畳む
+    expect(resolution?.runLoopCalls).toHaveLength(0);
+    expect(resolution?.disposed).toBe(true);
+
+    // 占有が解放されているので、次のタスクのマージは順番どおり進む
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+    expect(mergeCalls(git)).toHaveLength(2);
+  });
+
+  /**
+   * 占有の失効を「runが破棄された」と読み替えて何もせず戻ると、将来`releaseAllLeases()`を
+   * 破棄以外（停止時など）からも呼ぶようにした瞬間、順番待ちだったタスクが`merging`のまま
+   * 固着してrunが永久に終わらなくなる（`getRunOutcome`は`merging`を`running`扱いするため。
+   * 本PRのAで潰した壊れ方がそのまま復活する）。`IntegrationMergeQueue`は呼び出し元が
+   * `dispose()`だけであることを何も保証していないので、`decideAfterLeaseWait`は
+   * 「強制解放された」という事実と「このrunが破棄されたか（`live.finished`）」を別々に見て、
+   * 生きているrunなら`blocked`へ倒す（レビュー指摘11）。
+   *
+   * `dispose()`を経由せずキューだけを強制解放するため、ここだけ内部のキューへ直接触る
+   * （将来`releaseAllLeases()`の呼び出し箇所が増えた状況の先取り）。
+   */
+  it('runが生きているまま占有が強制解放されたら、mergingで固着させずblockedで確定させる', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/lease.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // T1が衝突解決中、T2はその占有待ち
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    expect(mergeCalls(git)).toHaveLength(1);
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('merging');
+
+    // run破棄（`dispose()`）ではなく、キューの強制解放だけが起きた状況
+    (
+      runner as unknown as { integrationQueue: { releaseAllLeases: () => void } }
+    ).integrationQueue.releaseAllLeases();
+    await flush();
+
+    // 権利を失っているのでマージはしない。ただし`merging`のままにもしない
+    expect(mergeCalls(git)).toHaveLength(1);
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('blocked');
+    expect(store.find(runId)?.tasks['T2']?.failure).toBeUndefined();
+    expect(
+      runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'mergeBusy' && w.taskId === 'T2'),
+    ).toBe(true);
+
+    // `blocked`なので人が「再マージ」で復帰できる（統合worktreeにはT1の未解決の衝突が
+    // 残ったままなので、人が片付けてから押す）
+    git.resolveConflict();
+    expect(runner.retryMerge(runId, 'T2')).toBe(true);
+    await flush();
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+    expect(mergeCalls(git)).toHaveLength(2);
+  });
+
+  /**
+   * `catch`の`session.dispose()`は`onFinished`を同期的に発火しうる（`chatView.ts`の
+   * `teardown`→`entry.loop.stop('manual')`）。そのまま`onMergeResolutionFinished`へ
+   * 再入すると、`applyLoopStopReason('manual')`が**run全体を停止して未開始の`pending`を
+   * `skipped`にし**、さらに占有解放が先に走るぶん`abortAndBlock`の`git merge --abort`が
+   * `leaseNotHeld`で拒否されて`MERGE_HEAD`が残る（レビュー指摘D）。`dispose`の前に
+   * 後始末済みの印を立て、リスナーを黙らせることを確かめる。
+   */
+  it('後始末のdisposeがonFinishedを再入させても、run全体は止まらず巻き戻しも走る', async () => {
+    // maxParallel: 1 なので、T1が走っている間T2は`pending`のまま残る
+    const serialYaml = `
+version: 1
+name: lease-dispose
+defaults:
+  provider: codex
+  maxParallel: 1
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(serialYaml, { git });
+    const result = await runner.start('/repo/.agents/workflows/lease.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // 衝突解決セッションはループを走らせられず、その後始末のdisposeがonFinishedを発火する
+    codexHost.configureNext = (session) => {
+      session.failRunLoop = new Error('ループを開始できませんでした');
+      session.disposeFinishReason = 'manual';
+    };
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+    // 修正前は`leaseNotHeld`で拒否され、`git merge --abort`が走らなかった
+    expect(git.calls.some((c) => c.args[0] === 'merge' && c.args[1] === '--abort')).toBe(true);
+    // 修正前はrun全体が停止し、未開始のT2が`skipped`（runHalted）で終わっていた
+    expect(store.find(runId)?.haltedByUser).toBe(false);
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('running');
+  });
+
+  /**
+   * `merging`のまま残った2件を持つ永続化データと、それを復元するrunnerを用意する
+   * （リロード後のやり直しの検証用）。
+   */
+  async function restoreHarness(git: FakeGitHandle): Promise<{
+    runner: WorkflowRunner;
+    host: FakeHost;
+    store: WorkflowRunStore;
+    runId: string;
+  }> {
+    const store = new WorkflowRunStore(fakeMemento());
+    const runId = '00000000-0000-4000-8000-000000000412';
+    const persistedTask = (id: string) => ({
+      state: 'merging' as const,
+      sessionId: `session-${id}`,
+      cwd: `/repo/.agents/worktrees/${runId}/${id}`,
+      branch: `wf/${runId}/${id}`,
+      submissionCount: 1,
+      retryCount: 0,
+      manualRetryCount: 0,
+      failure: undefined,
+      pullRequestNumber: undefined,
+      pullRequestUrl: undefined,
+    });
+    await store.update(runId, () => ({
+      runId,
+      defPath: '/repo/.agents/workflows/lease.yaml',
+      workspaceRoot: '/repo',
+      startedAt: new Date().toISOString(),
+      finishedAt: undefined,
+      tasks: { T1: persistedTask('T1'), T2: persistedTask('T2') },
+      haltedByUser: false,
+      integrationBranch: `wf/${runId}/integration`,
+      integrationPullRequestNumber: undefined,
+      integrationPullRequestUrl: undefined,
+      finalMergeOutcome: undefined,
+    }));
+
+    const host = new FakeHost();
+    const runner = new WorkflowRunner({
+      hosts: { codex: host, claude: host },
+      worktreeQueue: new WorktreeCreationQueue(),
+      git,
+      fs: identityFs,
+      filePort: filePort(PARALLEL_YAML),
+      store,
+      log: fakeLogger,
+      readBaseline: () => ({
+        codexSandbox: 'read-only',
+        codexApprovalMode: 'on-request',
+        claudePermissionMode: 'manual',
+        allowAutoApprove: true,
+        allowClaudeBypassPermissions: false,
+      }),
+    });
+    return { runner, host, store, runId };
+  }
+
+  /**
+   * 復元のやり直しが**1件ずつ直列**であることを、占有の順番待ちに頼らずに確かめる。
+   *
+   * 衝突しないgitで2件を復元すると、1件目のマージは待たされないまま終わる。直列なら
+   * 「T1の全ての手順（未コミット回収→マージ）が終わってからT2の1回目のgitコマンドが出る」
+   * のに対し、一斉に`void`で投げると、T1がawaitへ入った隙にT2の未コミット回収
+   * （T2のworktreeでの`git status`）が始まり、T1のマージより前に現れる。
+   *
+   * 以前のテストは`conflictOnce`で1件目を衝突させていたため、`void`の一斉投入へ戻しても
+   * 2件目が占有待ちで止まって観測結果が変わらず、直列化そのものを区別できていなかった
+   * （レビュー指摘8）。
+   */
+  it('リロード後の復元は、衝突しない場合でもmergingタスクを1件ずつ順番に走らせる', async () => {
+    const git = fakeGit();
+    const { runner, store, runId } = await restoreHarness(git);
+
+    await runner.restoreRunsForView();
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+
+    const t1MergeIndex = git.calls.findIndex(
+      (c) => c.args[0] === 'merge' && c.args[1] === '--no-ff' && c.args.includes(`wf/${runId}/T1`),
+    );
+    const t2MergeIndex = git.calls.findIndex(
+      (c) => c.args[0] === 'merge' && c.args[1] === '--no-ff' && c.args.includes(`wf/${runId}/T2`),
+    );
+    expect(t1MergeIndex).toBeGreaterThanOrEqual(0);
+    expect(t2MergeIndex).toBeGreaterThan(t1MergeIndex);
+
+    // T2側のworktreeを触るgitコマンドは、T1のマージが終わるまで1つも出ない
+    const firstT2CallIndex = git.calls.findIndex((c) => c.cwd.endsWith('/T2'));
+    expect(firstT2CallIndex).toBeGreaterThan(t1MergeIndex);
+  });
+
+  /**
+   * `dispose()`の`releaseAllLeases()`で起き上がった待機者が、そのまま`markMergeFailed`→
+   * `persist`/`notify`まで進むと、破棄済みのEventEmitter・workspaceStateへ書き込む
+   * （レビュー指摘6）。起こす前に「即戻る」状態にしてあることを確かめる。
+   */
+  it('占有待ちの最中にdispose()されても、起き上がった側は破棄済みのrunへ書き戻さない', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/lease.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    expect(mergeCalls(git)).toHaveLength(1);
+
+    runner.dispose();
+    await flush();
+
+    // 失効したハンドルで起き上がっても、マージも状態の書き換えも行わない
+    expect(mergeCalls(git)).toHaveLength(1);
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('merging');
+    expect(store.find(runId)?.tasks['T2']?.failure).toBeUndefined();
+  });
+
+  /**
+   * 復元のやり直しを直列にしたぶん、1件目が例外を投げるとそこで打ち切られて2件目以降が
+   * 永久に`merging`のまま残る（レビュー指摘7）。1件ごとに拾って先へ進むことを確かめる。
+   */
+  it('リロード後の復元は、1件目が例外で落ちても2件目のやり直しを続ける', async () => {
+    const base = fakeGit();
+    const throwingGit: FakeGitHandle = {
+      calls: base.calls,
+      resolveConflict: () => base.resolveConflict(),
+      run: async (args, cwd) => {
+        if (cwd.endsWith('/T1')) {
+          throw new Error('gitの起動に失敗しました');
+        }
+        return base.run(args, cwd);
+      },
+    };
+    const { runner, store, runId } = await restoreHarness(throwingGit);
+
+    await runner.restoreRunsForView();
+    await flush();
+
+    // 1件目は例外で終わる（状態は動かない）が、2件目のやり直しは走り切る
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+  });
+
+  it('リロード後の復元は1件目が衝突しても2件目を割り込ませない', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, host, store, runId } = await restoreHarness(git);
+
+    await runner.restoreRunsForView();
+    await flush();
+
+    // 1件目（T1）が衝突して解決セッションを開いた時点で、2件目（T2）のマージは待たされる
+    expect(mergeCalls(git)).toHaveLength(1);
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('merging');
+
+    git.resolveConflict();
+    host.sessions.at(-1)?.finish('done', doneState('衝突を解決しました'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+    expect(mergeCalls(git)).toHaveLength(2);
   });
 });
 

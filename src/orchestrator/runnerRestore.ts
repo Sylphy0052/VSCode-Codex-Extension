@@ -4,6 +4,7 @@ import {
   reconcileMergingTaskOnReload,
 } from './integration';
 import { resolvePseudoState } from './runnerWorkingDirectory';
+import { sanitizeForLog } from './sanitize';
 import { startMerge } from './runnerMerge';
 import { markMergeBlocked, type RunState, type TaskRunState } from './runState';
 import type { PersistedRun } from './runStore';
@@ -52,10 +53,51 @@ export async function restoreRunsForView(self: WorkflowRunnerInternals): Promise
     // 残ったタスクは、マージが実行途中で切れていたと分かっているもの。ライブなセッションは
     // 無い（リロードで失われた）ため、永続化された`branch`/`cwd`だけを頼りにマージを
     // やり直す（design.md §16.11「`merging`からやり直す」）
-    for (const [taskId, s] of rebuilt.runState.tasks) {
-      if (s.state === 'merging') {
-        resumeMergeAfterReload(self, p.runId, taskId);
-      }
+    const merging = [...rebuilt.runState.tasks]
+      .filter(([, s]) => s.state === 'merging')
+      .map(([taskId]) => taskId);
+    if (merging.length > 0) {
+      // 複数件を一斉に投げない（Issue #412の指摘3）。1件目が衝突すると衝突解決セッションが
+      // 立ち、統合worktreeは未解決のまま長く占有される。2件目以降は`startMerge`が取る
+      // 占有（`IntegrationMergeQueue.acquireLease`）で順番待ちになるが、ここでも直列に
+      // 呼び出して「復元時のやり直しは1件ずつ」という意図をコードの形でも残す。
+      // `restoreRunsForView`自体は待たない（衝突解決は数分〜数十分かかりうるため、
+      // 復元の完了をそこまで引き延ばさない）
+      // rejectを回収する（Issue #412のレビュー指摘7）。`void`のままだと、1件目が投げた
+      // 時点でunhandled rejectionになり、2件目以降の復元も走らなくなる
+      const runId = p.runId;
+      void resumeMergesSequentially(self, runId, merging).catch((e: unknown) => {
+        self.deps.log.error(
+          `[workflow ${runId}] リロード後のマージのやり直しに失敗しました: ${sanitizeForLog(
+            e instanceof Error ? e.message : String(e),
+          )}`,
+        );
+      });
+    }
+  }
+}
+
+/**
+ * 復元後にやり直すマージを1件ずつ順番に走らせる（Issue #412）。`startMerge`は衝突した
+ * 場合でも「衝突解決セッションを開いたところ」で解決するため、この直列化はマージの
+ * git操作までの部分に効く。解決セッションが握り続ける占有は`acquireLease`側が守る。
+ */
+async function resumeMergesSequentially(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  taskIds: readonly string[],
+): Promise<void> {
+  for (const taskId of taskIds) {
+    // 1件が投げても残りのやり直しは続ける（Issue #412のレビュー指摘7）。ここで抜けると、
+    // 直列化したぶんだけ「1件目の失敗で2件目以降が永久に`merging`のまま」になる
+    try {
+      await resumeMergeAfterReload(self, runId, taskId);
+    } catch (e) {
+      self.deps.log.error(
+        `[workflow ${runId}/${taskId}] リロード後のマージのやり直しに失敗しました: ${sanitizeForLog(
+          e instanceof Error ? e.message : String(e),
+        )}`,
+      );
     }
   }
 }
@@ -66,11 +108,11 @@ export async function restoreRunsForView(self: WorkflowRunnerInternals): Promise
  * （`LiveTask`）は無いため、永続化された`branch`/`cwd`を直接使う。どちらか欠けている
  * （古い永続化形式・作成前に中断した等）場合は再開できないため、安全側で`blocked`にする。
  */
-function resumeMergeAfterReload(
+async function resumeMergeAfterReload(
   self: WorkflowRunnerInternals,
   runId: string,
   taskId: string,
-): void {
+): Promise<void> {
   const live = self.runs.get(runId);
   if (live === undefined || live.integration === undefined) {
     return;
@@ -88,7 +130,7 @@ function resumeMergeAfterReload(
     self.notify(runId);
     return;
   }
-  void startMerge(self, runId, taskId, task, cwd, branch, '');
+  await startMerge(self, runId, taskId, task, cwd, branch, '');
 }
 
 /**

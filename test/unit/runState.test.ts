@@ -158,6 +158,19 @@ describe('applyLoopStopReason', () => {
     expect(stateOf(run, 'T2').retryCount).toBe(0);
   });
 
+  it('waitingReply中のfailedはfailedに確定する（Issue #362。isUnsettledにwaitingReplyを含めないと素通りしてwaitingReplyのまま残る）', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T2');
+    run = markWaitingReply(run, 'T2');
+    expect(stateOf(run, 'T2').state).toBe('waitingReply');
+
+    run = applyLoopStopReason(run, tasks, 'T2', 'failed');
+    const t2 = stateOf(run, 'T2');
+    expect(t2.state).toBe('failed');
+    expect(t2.failure).toEqual({ kind: 'loopFailed' });
+  });
+
   it('manual/interruptedは実行全体を止めるが、そのタスク自身の状態は変えない', () => {
     const tasks = chainTasks();
     let run = createRunState(tasks);

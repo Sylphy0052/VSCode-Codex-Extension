@@ -4,14 +4,17 @@ import {
   cloneWorkspace,
   diffSnapshots,
   ensureIntegrationDir,
+  loadPersistedManifest,
+  persistManifest,
   reflectIntegrationToWorkspace,
   takeSnapshot,
   IntegrationQueue as PseudoWorktreeIntegrationQueue,
   type Snapshot,
 } from './pseudoWorktree';
-import { markMergeBlocked, markMergeSucceeded } from './runState';
+import { markMergeBlocked, markMergeFailed, markMergeSucceeded } from './runState';
 import { issue, type LiveRun, type LiveTask } from './runner';
 import type { WorkflowRunnerInternals } from './runnerInternals';
+import { sanitizeForLog } from './sanitize';
 import { buildTaskBoundary, decideWorkingDirectory } from './worktree';
 import type { WorkflowDefinition, WorkflowIssue, WorkflowTask } from './workflow';
 
@@ -190,31 +193,31 @@ async function resolveWorktreeWorkingDirectory(
   // 統合worktreeが無い（gitRepoでない）ケースは`decideWorkingDirectory`が`shared`/
   // `sharedFallback`/`error`のいずれかへ倒すため、ここへは来ない
   if (live.integration === undefined) {
-    throw new Error(
-      '内部矛盾: 統合worktreeが無い状態でworktree隔離のタスクを開始しようとしました',
-    );
+    throw new Error('内部矛盾: 統合worktreeが無い状態でworktree隔離のタスクを開始しようとしました');
   }
-  const originCommit = await resolveTaskBranchOrigin(live.repoRoot, live.runId, self.deps.git);
-  if (originCommit === undefined) {
-    throw new Error('統合ブランチのHEADコミットを解決できませんでした');
-  }
-
-  const result = await self.deps.worktreeQueue.create(
-    {
+  // HEAD読み取りとworktree作成を同一のキュー項目へまとめる（Issue #380）。分けて
+  // 呼ぶと、両者の間に他タスクのマージが割り込み、分岐元が1マージ分古くなりえる
+  // （`worktreeQueue`は`integration.ts`のマージ処理とも共有されているキューのため）
+  const result = await self.deps.worktreeQueue.createWithOrigin(
+    () => resolveTaskBranchOrigin(live.repoRoot, live.runId, self.deps.git),
+    (headCommit) => ({
       repoRoot: live.repoRoot,
       runId: live.runId,
       taskId: task.id,
-      headCommit: originCommit,
+      headCommit,
       retry,
       // ブランチの命名方式（design.md §16.6「ブランチの命名方式」）。`live.branchNaming`が
       // `wf`、または対応する`issue`が無いタスクは、`branchName`自身の判定により
       // 従来どおり`wf/<runId>/<taskId>`へ落ちる（`BranchNamingOptions`のJSDoc参照）
       branchNaming: { naming: live.branchNaming, type: task.type, issue: task.issue },
-    },
+    }),
     self.deps.git,
     self.deps.fs,
   );
   if (!result.ok) {
+    if (result.reason === 'headUnresolved') {
+      throw new Error(result.message);
+    }
     throw new Error(`worktreeの作成に失敗しました: ${result.message}`);
   }
   return {
@@ -223,7 +226,7 @@ async function resolveWorktreeWorkingDirectory(
     usedWorktree: true,
     usedPseudoWorktree: false,
     pseudoSnapshot: undefined,
-    originCommit,
+    originCommit: result.originCommit,
   };
 }
 
@@ -233,6 +236,12 @@ async function resolveWorktreeWorkingDirectory(
  * gitでないワークスペースでの統合先（`<runId>/_integration`）を用意する
  * （`integration.ts`のgit版と対称の役割）。`WorkflowRunnerDeps.pseudoWorktree`が
  * 渡されていなければ何もせず`state: undefined`を返す（後方互換。上のJSDoc参照）。
+ *
+ * 実行開始時・リロード復元時（`runnerRestore.ts`）の両方から呼ばれる。永続化された
+ * マニフェスト（`<runId>/manifest.json`。Issue #380）を必ず読み戻す。初回実行はまだ
+ * ファイルが無いため空のマニフェストになる（正常系）。ファイルはあるが壊れている場合
+ * だけ`queue`へ復元失敗の理由を持たせ、`reflectPseudoWorktree`側がワークスペースへの
+ * 反映を「0件で成功」にせず明示的に止める判定材料にする。
  */
 export async function resolvePseudoState(
   self: WorkflowRunnerInternals,
@@ -248,11 +257,18 @@ export async function resolvePseudoState(
     return { ok: false, message: ensured.message };
   }
   const baseline = await takeSnapshot(repoRoot, deps.exclude, deps.fs);
+  const loadedManifest = await loadPersistedManifest(repoRoot, runId, deps.fs);
+  if (!loadedManifest.ok) {
+    self.deps.log.warn(`[workflow ${runId}] ${sanitizeForLog(loadedManifest.message)}`);
+  }
+  const queue = loadedManifest.ok
+    ? new PseudoWorktreeIntegrationQueue(loadedManifest.manifest)
+    : new PseudoWorktreeIntegrationQueue(new Map(), loadedManifest.message);
   return {
     ok: true,
     state: {
       integrationDir: ensured.dir,
-      queue: new PseudoWorktreeIntegrationQueue(),
+      queue,
       baseline,
       exclude: deps.exclude,
     },
@@ -282,29 +298,62 @@ export async function integratePseudoWorktree(
   if (live === undefined || deps === undefined) {
     return;
   }
-  const currentSnapshot = await takeSnapshot(liveTask.cwd, pseudo.exclude, deps.fs);
-  const diff = diffSnapshots(liveTask.pseudoSnapshot ?? new Map(), currentSnapshot);
-  const plan = await pseudo.queue.integrate(
-    taskId,
-    liveTask.cwd,
-    pseudo.integrationDir,
-    diff,
-    deps.fs,
-  );
-
-  if (plan.conflicts.length > 0) {
-    const paths = plan.conflicts.map((c) => c.path).join(', ');
-    self.deps.log.warn(
-      `[workflow ${runId}/${taskId}] 疑似worktreeの統合が衝突しました（3-way mergeができないため）: ${paths}`,
-    );
-    live.warnings.push({
-      kind: 'pseudoWorktreeConflict',
+  try {
+    const currentSnapshot = await takeSnapshot(liveTask.cwd, pseudo.exclude, deps.fs);
+    const diff = diffSnapshots(liveTask.pseudoSnapshot ?? new Map(), currentSnapshot);
+    // マニフェストの永続化（design.md §16.11の対象。Issue #380）を`queue.integrate`と
+    // 同じ`SerialQueue`項目の中で行う（レビュー指摘: risk）。ここを`await queue.integrate`
+    // の外で呼ぶと、`integrate`自体は直列化されていても書き込み同士には順序保証が無く、
+    // 先に完了したタスクの古いマニフェストの書き込みが、後から完了した別タスクの新しい
+    // 書き込みより後にディスクへ着地して統合済みの成果が消えうる（Issueが防ごうとした
+    // 事象の再発）。書き込み自体の失敗は統合成立とは別の問題のため、独立したtry/catchで
+    // 警告に留め、統合そのものの成否には影響させない（`IntegrationQueue.integrate`の
+    // JSDoc参照）
+    const plan = await pseudo.queue.integrate(
       taskId,
-      message: `疑似worktreeの統合が衝突しました: ${paths}`,
-    });
-    live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
-  } else {
-    live.runState = markMergeSucceeded(live.runState, live.def.tasks, taskId);
+      liveTask.cwd,
+      pseudo.integrationDir,
+      diff,
+      deps.fs,
+      async (manifest) => {
+        try {
+          await persistManifest(live.repoRoot, runId, manifest, deps.fs);
+        } catch (persistError) {
+          const message = sanitizeForLog(
+            persistError instanceof Error ? persistError.message : String(persistError),
+          );
+          self.deps.log.warn(
+            `[workflow ${runId}/${taskId}] 疑似worktreeの統合マニフェストの永続化に失敗しました: ${message}`,
+          );
+        }
+      },
+    );
+
+    if (plan.conflicts.length > 0) {
+      const paths = plan.conflicts.map((c) => c.path).join(', ');
+      self.deps.log.warn(
+        `[workflow ${runId}/${taskId}] 疑似worktreeの統合が衝突しました（3-way mergeができないため）: ${paths}`,
+      );
+      live.warnings.push({
+        kind: 'pseudoWorktreeConflict',
+        taskId,
+        message: `疑似worktreeの統合が衝突しました: ${paths}`,
+      });
+      live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
+    } else {
+      live.runState = markMergeSucceeded(live.runState, live.def.tasks, taskId);
+    }
+  } catch (e) {
+    // `pseudoWorktree.ts`のポートメソッド（`fs.mkdir`/`fs.copyFile`等）はEACCES/ENOSPC等を
+    // 素通しでthrowする（他のポートメソッドと違いcatchしない実装）。ここで受け止めないと
+    // `void integratePseudoWorktree(...)`（呼び出し元）が未ハンドルrejectになり、タスクが
+    // `merging`のまま永久に枠を占有する（Issue #364）。gitの`attemptMerge`が
+    // その他の失敗を`markMergeFailed`に落とすのと同じ扱いにする
+    const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+    self.deps.log.error(
+      `[workflow ${runId}/${taskId}] 疑似worktreeの統合に失敗しました: ${message}`,
+    );
+    live.runState = markMergeFailed(live.runState, live.def.tasks, taskId);
   }
   void self.persist(runId);
   self.notify(runId);
@@ -320,34 +369,144 @@ export async function integratePseudoWorktree(
  *
  * 反映前にワークスペース側の変更を検知したら、反映せず警告を残す
  * （design.md「人の編集を上書きしない」。`reflectIntegrationToWorkspace`自身が判定する）。
+ *
+ * 永続化されたマニフェストの復元に失敗していた場合（Issue #380）、この時点の
+ * `queue`のマニフェストは実態を反映していない（空、または一部欠けている）可能性がある。
+ * そのまま反映すると「0件で成功」に見えてしまい、統合済みだった成果が黙って消える
+ * （Issueの本題）ため、反映そのものを行わず、その旨を明示的な警告として残す。
  */
-export async function reflectPseudoWorktree(self: WorkflowRunnerInternals, runId: string): Promise<void> {
+export async function reflectPseudoWorktree(
+  self: WorkflowRunnerInternals,
+  runId: string,
+): Promise<void> {
   const live = self.runs.get(runId);
   const deps = self.deps.pseudoWorktree;
   if (live === undefined || live.pseudo === undefined || deps === undefined) {
     return;
   }
-  const result = await reflectIntegrationToWorkspace(
-    live.repoRoot,
-    live.pseudo.integrationDir,
-    live.pseudo.baseline,
-    live.pseudo.queue.getManifest(),
-    live.pseudo.exclude,
-    deps.fs,
-  );
-  if (!result.ok) {
-    self.deps.log.warn(`[workflow ${runId}] ${result.message}`);
+  const manifestRestoreError = live.pseudo.queue.getManifestRestoreError();
+  if (manifestRestoreError !== undefined) {
+    const message =
+      `疑似worktreeの統合マニフェストを復元できなかったため、ワークスペースへの反映を行いません` +
+      `（黙って0件成功として扱うと、統合済みだった成果が失われたことに気づけないため）: ${sanitizeForLog(manifestRestoreError)}`;
+    self.deps.log.warn(`[workflow ${runId}] ${message}`);
+    live.warnings.push({ kind: 'pseudoWorktreeReflectBlocked', taskId: undefined, message });
+    self.notify(runId);
+    return;
+  }
+  try {
+    const result = await reflectIntegrationToWorkspace(
+      live.repoRoot,
+      live.pseudo.integrationDir,
+      live.pseudo.baseline,
+      live.pseudo.queue.getManifest(),
+      live.pseudo.exclude,
+      deps.fs,
+    );
+    if (!result.ok && result.reason === 'workspaceChanged') {
+      const changed = `${sanitizeForLog(result.message)}（変更されたパス: ${formatPathList(result.changedPaths)}）`;
+      self.deps.log.warn(`[workflow ${runId}] ${changed}`);
+      live.warnings.push({
+        kind: 'pseudoWorktreeReflectBlocked',
+        taskId: undefined,
+        message: changed,
+      });
+    } else if (!result.ok) {
+      // 'partialApply': 途中でI/Oエラーが起き、それ以前のパスだけが適用された状態
+      // （追加の指摘、Issue #380）。適用済み・未適用（失敗した1件＋まだ試みていない残り）の
+      // 双方をパスの持ち主（タスクid）付きで警告に残す。対象タスクの状態自体は`done`の
+      // まま据え置く（統合＝マージ自体は既に成立しているため）が、この警告により
+      // 「doneだが反映は一部しか行われていない」という不整合を人が把握できるようにする
+      const manifest = live.pseudo.queue.getManifest();
+      const describe = (p: string): string => {
+        const owner = manifest.get(p)?.taskId;
+        return owner !== undefined ? `${p}(${owner})` : p;
+      };
+      const unresolvedPaths = [result.failedPath, ...result.remainingPaths];
+      const detail =
+        `（適用済み: ${formatPathList(result.appliedPaths.map(describe))}` +
+        ` / 未適用: ${formatPathList(unresolvedPaths.map(describe))}` +
+        // 除外設定に一致してスキップした分も併記する。書かないと
+        // 「適用済み + 未適用 = 全エントリ」にならず、勘定の合わない差が黙って生まれる
+        ` / 除外によりスキップ: ${formatPathList(result.skippedPaths.map(describe))}）`;
+      const partial = `${sanitizeForLog(result.message)}${detail}`;
+      self.deps.log.warn(`[workflow ${runId}] ${partial}`);
+      live.warnings.push({
+        kind: 'pseudoWorktreeReflectBlocked',
+        taskId: undefined,
+        message: partial,
+      });
+    } else {
+      self.deps.log.info(
+        `[workflow ${runId}] 疑似worktreeの統合結果をワークスペースへ反映しました（${result.appliedPaths.length}件）`,
+      );
+      if (result.skippedPaths.length > 0) {
+        // 除外設定に一致したエントリは反映を中断せずスキップするが、**黙って捨てない**
+        // （Issue #380が「黙って0件成功として扱うと、統合済みだった成果が失われたことに
+        // 気づけない」と断じたのと同じ穴になるため）。反映そのものは成功しているので
+        // ログの`info`ではなく、他の反映まわりの事象と同じ`live.warnings`へ積んで
+        // ワークフローViewに出す。kindも`pseudoWorktreeReflectBlocked`を使い回す
+        // （反映まわりで人が見るべき事象はこのkindへ集約されており、
+        // 「一部が反映されなかった」という人の受け取り方はpartialApplyと同じため）。
+        const message =
+          `疑似worktreeの統合結果のうち、除外設定（exclude）に一致した${result.skippedPaths.length}件を` +
+          `ワークスペースへ反映しませんでした。統合済みだった変更がワークスペースへ届いていないため、` +
+          `必要なら除外設定を見直すか手で取り込んでください` +
+          `（スキップしたパス: ${formatPathList(result.skippedPaths)}）`;
+        self.deps.log.warn(`[workflow ${runId}] ${message}`);
+        live.warnings.push({
+          kind: 'pseudoWorktreeReflectBlocked',
+          taskId: undefined,
+          message,
+        });
+      }
+    }
+  } catch (e) {
+    // `reflectIntegrationToWorkspace`が呼ぶ`fs.copyFile`/`fs.removeFile`もEACCES/ENOSPC等を
+    // 素通しでthrowしうる。ここはrun終了処理の途中（`pump()`から呼ばれる）で、ここで
+    // 例外を投げ直すとその後の後始末が中断してしまうため、警告としてログ・`live.warnings`へ
+    // 記録するだけに留める（Issue #364）
+    const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+    self.deps.log.warn(
+      `[workflow ${runId}] 疑似worktreeの統合結果のワークスペースへの反映に失敗しました: ${message}`,
+    );
     live.warnings.push({
       kind: 'pseudoWorktreeReflectBlocked',
       taskId: undefined,
-      message: `${result.message}（変更されたパス: ${result.changedPaths.join(', ')}）`,
+      message: `疑似worktreeの統合結果のワークスペースへの反映に失敗しました: ${message}`,
     });
-  } else {
-    self.deps.log.info(
-      `[workflow ${runId}] 疑似worktreeの統合結果をワークスペースへ反映しました（${result.appliedPaths.length}件）`,
-    );
   }
   self.notify(runId);
+}
+
+/**
+ * 警告メッセージ内のパス一覧が無制限に肥大化しないよう、先頭N件と残り件数の省略表示へ
+ * 丸める（レビュー指摘: risk）。Issue #372で`orchestratorPromptOverride`を直近1件へ
+ * 丸めた判断、`workflow.ts`の`truncateByCodePoint`が文字列長で同種の問題に対処した
+ * 判断と同じ理由（エントリ数が多い実行で`live.warnings`とログ行が際限なく伸びるため）。
+ *
+ * 20件は経験値: 反映失敗で人が実際に見て把握したいのは典型的には数件〜十数件程度で、
+ * それを大きく超える表示はログの可読性を落とすだけになる。
+ */
+const MAX_LISTED_REFLECT_PATHS = 20;
+
+/** テスト（`test/unit/runner.test.ts`）のためだけにexportする（レビュー指摘: risk、Issue #380）。 */
+export function formatPathList(paths: readonly string[]): string {
+  if (paths.length === 0) {
+    return 'なし';
+  }
+  // 1件ずつ`sanitizeForLog`を通す（Issue #433）。ここへ来るパスはマニフェストのキー
+  // （永続化ファイル由来にもなりうる。Issue #380）とワークスペースの走査結果で、
+  // 制御文字・双方向制御文字を含みうる。`live.warnings`へ入る文字列はワークフローView
+  // にも出るため、表示の偽装を防ぐ必要がある。連結後ではなく連結前に通すのは、
+  // `sanitizeForLog`の長さ上限（200文字）が先頭N件の一覧そのものを削ってしまい、
+  // `MAX_LISTED_REFLECT_PATHS`件を見せるという意図を壊さないようにするため。
+  const sanitized = paths.map((p) => sanitizeForLog(p));
+  if (sanitized.length <= MAX_LISTED_REFLECT_PATHS) {
+    return sanitized.join(', ');
+  }
+  const shown = sanitized.slice(0, MAX_LISTED_REFLECT_PATHS).join(', ');
+  return `${shown}, ...ほか${sanitized.length - MAX_LISTED_REFLECT_PATHS}件`;
 }
 
 export async function buildBoundary(
