@@ -85,6 +85,21 @@ suite('PR/MRの作成順序と最終マージ（design.md §16.18）', () => {
     }
   }
 
+  /**
+   * 統合PR/MRのURL末尾から番号を取り出す（`RecordingCli` は作成順に採番したURLを返す）。
+   *
+   * 最終マージのコマンドには**この番号がそのまま位置引数として渡る**のが正しい姿
+   * （Issue #404、design.md §16.18「最終マージ」）。番号を省くとマージ対象が「cwdの
+   * カレントブランチに紐づくPR/MR」という暗黙の状態依存になるため、テスト側も番号を
+   * 決め打ちせず、実際に作られた統合PR/MRの番号と一致することを確かめる。
+   */
+  function integrationNumber(snapshot: WorkflowRunSnapshotLike): string {
+    const url = snapshot.integrationPullRequestUrl ?? '';
+    const matched = /\/(?<number>\d+)$/u.exec(url);
+    assert.ok(matched !== null, `統合PR/MRのURLから番号を取れない: ${url}`);
+    return matched.groups?.number ?? '';
+  }
+
   interface RunResult {
     runId: string;
     repo: ForgeRepo;
@@ -216,7 +231,7 @@ suite('PR/MRの作成順序と最終マージ（design.md §16.18）', () => {
     ]);
 
     const merge = run.cli.calls.find((c) => c.args[0] === 'pr' && c.args[1] === 'merge');
-    assert.deepEqual(merge?.args, ['pr', 'merge', '--merge']);
+    assert.deepEqual(merge?.args, ['pr', 'merge', integrationNumber(run.snapshot), '--merge']);
     assert.equal(run.snapshot.finalMergeOutcome, 'merged');
     assert.match(run.snapshot.integrationPullRequestUrl ?? '', /^https:\/\/github\.invalid\//u);
 
@@ -298,7 +313,12 @@ suite('PR/MRの作成順序と最終マージ（design.md §16.18）', () => {
     );
 
     const merge = run.cli.calls.find((c) => c.args[0] === 'mr' && c.args[1] === 'merge');
-    assert.deepEqual(merge?.args, ['mr', 'merge', '--remove-source-branch']);
+    assert.deepEqual(merge?.args, [
+      'mr',
+      'merge',
+      integrationNumber(run.snapshot),
+      '--remove-source-branch',
+    ]);
     assert.match(
       run.snapshot.integrationPullRequestUrl ?? '',
       /^https:\/\/gitlab\.invalid\//u,

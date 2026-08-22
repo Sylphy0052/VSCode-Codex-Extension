@@ -544,3 +544,17 @@ export function describeSnapshot(snapshot: WorkflowRunSnapshotLike | undefined):
   const warnings = (snapshot.warnings ?? []).map((w) => JSON.stringify(w)).join(' / ');
   return `outcome=${snapshot.outcome} ${tasks}${warnings === '' ? '' : ` warnings=[${warnings}]`}`;
 }
+
+/**
+ * 統合ブランチへのマージコミットの件名（`src/orchestrator/integration.ts` の
+ * `mergeCommitMessage` が組み立てる現行形）。
+ *
+ * design.md §16.17 のとおり `<type>(<taskId>): merge task (run <runId>)` で、`type` は
+ * タスクYAMLの `type:`（未指定・未知の値は `chore`）。統合テストのfixtureは `type:` を
+ * 書いていないため既定の `chore` になる。旧形式（`Merge task <taskId> (run <runId>)`）は
+ * 実行中のrunがアップグレードを跨いだ場合に**読む**側だけが受け付けるもので、拡張機能が
+ * 新たに書くことはない。ここは書かれる側の現行形だけを見る。
+ */
+export function mergeCommitSubject(taskId: string, runId: string, type = 'chore'): string {
+  return `${type}(${taskId}): merge task (run ${runId})`;
+}
