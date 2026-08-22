@@ -4488,7 +4488,7 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 - 依存する後続は `skipped`（理由: `mergeBlocked`）
 - **独立した枝は走り続ける。** 衝突は1タスクの統合の問題であって、他の枝の前提は崩れていない。`failed` のように実行全体を止めない
 - Viewから人が解決したうえで「再マージ」を指示できる
-- **停止中（`haltedByUser`）に「再マージ」が成功しても、`mergeBlocked` の後続を `pending` へは戻さない。** 通常はマージ成功時にその後続を `pending` へ戻し次の開始に備えるが（`markMergeSucceeded`）、停止中は `nextTasksToStart` が新規開始を一切しないため `pending` のまま誰にも拾われず残り、`getRunOutcome` が `running` を返し続けてrunが終わらなくなる（`failed` / `skipped` しか受け付けない「再実行」でも救えない）。停止中は `skipped`（理由: `runHalted`）へ倒しておく。こうすれば人が「再実行」で拾い直せ、`haltedByUser` も解除される（Issue #432-1）
+- **実行全体が停止している（`isRunHalted` = `haltedByUser` または `hasFailedTask`）間に「再マージ」が成功しても、`mergeBlocked` の後続を `pending` へは戻さない。** 通常はマージ成功時にその後続を `pending` へ戻し次の開始に備えるが（`markMergeSucceeded`）、`nextTasksToStart` の開始判定自体が `isRunHalted` を門にしているため、人が明示的に停止した場合（`haltedByUser`）だけでなく、**他の独立した枝が `failed` で確定しているだけ**（人は何も操作していない通常運用）でも新規開始は一切行われない。ここで `pending` へ戻すと誰にも拾われず残り、`getRunOutcome` が `running` を返し続けてrunが終わらなくなる（`failed` / `skipped` しか受け付けない「再実行」でも救えない）。`isRunHalted` が真の間は `skipped`（理由: `runHalted`）へ倒しておく。`haltedByUser` だけが原因なら、そのタスク自身への「再実行」で `haltedByUser` も解除されその場で拾い直せる。`hasFailedTask` が原因のときは、その `skipped` タスク自身の「再実行」だけでは復帰せず、原因になっている `failed` タスク自身を別途「再実行」（または「続ける」）で救う必要がある（Issue #432-1）
 
 解決用セッションは依存グラフのノードにはしない（ワークフローの定義に無いため）。Viewでは対象タスクのノードに「マージ解決中」として重ねて出す。
 
