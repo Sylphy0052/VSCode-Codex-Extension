@@ -174,7 +174,16 @@ class FakeTaskSession implements TaskSession {
    * Issue #412のレビュー指摘D）。1回だけ発火する。
    */
   disposeFinishReason: LoopStopReason | undefined;
+  /**
+   * テスト用。設定すると`dispose()`が投げる（タブの片付けに失敗するhost実装の再現。
+   * Issue #374「1つの解放が失敗しても残りを解放する」の検証用）。`disposed`は立てずに
+   * 投げるので、失敗したセッションと解放できたセッションを区別できる。
+   */
+  failDispose: Error | undefined;
   dispose(): void {
+    if (this.failDispose !== undefined) {
+      throw this.failDispose;
+    }
     this.disposed = true;
     const reason = this.disposeFinishReason;
     this.disposeFinishReason = undefined;
@@ -654,10 +663,12 @@ function fakeForgeDeps(
 /** `messaging.ts`の`startHttpMcpTransport`のフェイク。実HTTPは張らず、呼び出しだけ記録する。 */
 interface FakeMessagingState {
   hub: TaskMessagingHub | undefined;
-  handle: (HttpMcpTransportHandle & { registeredTasks: string[]; closed: boolean }) | undefined;
+  handle:
+    | (HttpMcpTransportHandle & { registeredTasks: string[]; closed: boolean; closeCount: number })
+    | undefined;
 }
 
-function fakeMessagingDeps(options?: { failStart?: boolean }): {
+function fakeMessagingDeps(options?: { failStart?: boolean; failClose?: boolean }): {
   deps: WorkflowRunnerMessagingDeps;
   state: FakeMessagingState;
 } {
@@ -669,17 +680,27 @@ function fakeMessagingDeps(options?: { failStart?: boolean }): {
         throw new Error('fake transport start failure');
       }
       const registeredTasks: string[] = [];
-      const handle: HttpMcpTransportHandle & { registeredTasks: string[]; closed: boolean } = {
+      const handle: HttpMcpTransportHandle & {
+        registeredTasks: string[];
+        closed: boolean;
+        closeCount: number;
+      } = {
         transport: { onConnection: () => undefined },
         baseUrl: 'http://127.0.0.1:0',
         registeredTasks,
         closed: false,
+        // 二重解放の検知用（Issue #374）。閉じた回数を数える
+        closeCount: 0,
         registerTask(taskId: string): string {
           registeredTasks.push(taskId);
           return `http://127.0.0.1:0/mcp/${taskId}`;
         },
         close(): Promise<void> {
           handle.closed = true;
+          handle.closeCount += 1;
+          if (options?.failClose === true) {
+            throw new Error('fake transport close failure');
+          }
           return Promise.resolve();
         },
       };
@@ -6645,5 +6666,149 @@ tasks:
       message.startsWith(`[workflow ${runId}] ロードマップの警告:`),
     );
     expect(roadmapWarnLogs).toEqual([]);
+  });
+});
+
+/**
+ * 実行中のrunを抱えたまま拡張機能がdeactivateされたとき（ウィンドウのリロード等）、
+ * `dispose()`がrunの資源をすべて解放することを確かめる（Issue #374）。
+ *
+ * `dispose()`は`live.orchestrator`と統合worktreeの占有しか解放しておらず、実行中のrunの
+ * タスクセッション（CLIの子プロセス）・MCPサーバ（listen中のソケット）・
+ * ポーリングタイマー（`setInterval`）・衝突解決セッションが残っていた。MCPサーバの後始末は
+ * `pump()`のrun終了分岐にしか無く、実行中のrunでは一度も通らないため、リロードのたびに
+ * ポートが積み上がる。
+ */
+describe('WorkflowRunner.dispose: 実行中のrunが抱える資源の解放（Issue #374）', () => {
+  const YAML = `
+version: 1
+name: dispose-test
+defaults:
+  provider: codex
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+
+  const ONE_TASK_YAML = `
+version: 1
+name: dispose-merge-test
+defaults:
+  provider: codex
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('実行中のrunのタスクセッション・MCPサーバ・ポーリングタイマーを解放する', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(YAML, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/dispose.yaml', '/repo');
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    const t2 = codexHost.byTaskId('T2');
+    expect(t1.disposed).toBe(false);
+    expect(t2.disposed).toBe(false);
+    expect(state.handle?.closed).toBe(false);
+
+    // 走行中のタイマーだけを数えるため、解放の直前からスパイする
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+    runner.dispose();
+
+    expect(t1.disposed).toBe(true);
+    expect(t2.disposed).toBe(true);
+    expect(state.handle?.closed).toBe(true);
+    expect(state.handle?.closeCount).toBe(1);
+    expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+
+    // 二重に呼ばれても安全（冪等）。もう1度閉じにいかない
+    expect(() => runner.dispose()).not.toThrow();
+    expect(state.handle?.closeCount).toBe(1);
+    expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('衝突解決セッション（live.mergeResolutions）も解放する', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(ONE_TASK_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/dispose.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    // 衝突したのでmergingのまま、統合worktreeで衝突解決セッションが開いている
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    const resolutionSession = codexHost.sessions.at(-1);
+    expect(resolutionSession?.cwd.endsWith('_integration')).toBe(true);
+    expect(resolutionSession?.disposed).toBe(false);
+
+    runner.dispose();
+
+    expect(resolutionSession?.disposed).toBe(true);
+    // 冪等（2度目は対象が消えているので何もしない）
+    expect(() => runner.dispose()).not.toThrow();
+  });
+
+  it('1つの解放が例外を投げても、残りの解放を続ける', async () => {
+    const warnCalls: string[] = [];
+    const log: Logger = { ...fakeLogger, warn: (message: string) => void warnCalls.push(message) };
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(YAML, { messaging: deps, log });
+    await runner.start('/repo/.agents/workflows/dispose.yaml', '/repo');
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    const t2 = codexHost.byTaskId('T2');
+    t1.failDispose = new Error('タブの片付けに失敗しました');
+
+    expect(() => runner.dispose()).not.toThrow();
+
+    // 失敗した1件（T1）に引きずられず、残りのセッションとMCPサーバは解放される
+    expect(t1.disposed).toBe(false);
+    expect(t2.disposed).toBe(true);
+    expect(state.handle?.closed).toBe(true);
+    expect(warnCalls.some((m) => m.includes('終了時の解放に失敗しました'))).toBe(true);
+  });
+
+  it('MCPサーバのcloseが投げても、ポーリングタイマーは解放される', async () => {
+    const { deps, state } = fakeMessagingDeps({ failClose: true });
+    const { runner } = createHarness(YAML, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/dispose.yaml', '/repo');
+    await flush();
+
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+    expect(() => runner.dispose()).not.toThrow();
+
+    expect(state.handle?.closeCount).toBe(1);
+    expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('run終了で閉じたあとにdispose()が来ても二重解放にならない', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(YAML, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/dispose.yaml', '/repo');
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    expect(state.handle?.closeCount).toBe(1);
+
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+    expect(() => runner.dispose()).not.toThrow();
+    expect(state.handle?.closeCount).toBe(1);
+    expect(clearIntervalSpy).not.toHaveBeenCalled();
   });
 });

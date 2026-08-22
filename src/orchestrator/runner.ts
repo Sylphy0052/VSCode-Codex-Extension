@@ -65,6 +65,7 @@ import {
   buildRunTaskSnapshots,
   checkMessagingVisibility,
   checkWaitingReplyStalls,
+  closeMessaging,
   onMessageAccepted,
 } from './runnerMessaging';
 import {
@@ -760,6 +761,10 @@ export interface LiveRun {
    * `waitingReplyPollTimer`は待ちぼうけ検出（`checkWaitingReplyStalls`）を定期的に
    * 走らせるタイマー。`messaging`と同時に作り、run終了時に一緒に止める
    * （`finishRun`参照）。`.unref()`しているためテスト・プロセス終了を妨げない。
+   *
+   * 解放は`closeMessaging`（`runnerMessaging.ts`）に一本化してある。run終了時と
+   * 拡張機能の終了時（`dispose()`）の両方から呼ばれ、閉じた時点でこのフィールドは
+   * `undefined`へ戻る（二重解放を防ぐ印を兼ねる。Issue #374）。
    */
   messaging:
     | {
@@ -828,6 +833,24 @@ class SimpleEmitter<T> {
     for (const listener of [...this.listeners]) {
       listener(value);
     }
+  }
+}
+
+/**
+ * `WorkflowRunner.dispose()`の解放を1件ずつ包む（Issue #374）。
+ *
+ * 拡張機能の終了時の後始末なので、1つの解放が投げてもそこで打ち切らず残りを続ける。
+ * 打ち切るとCLIの子プロセスやlisten中のソケットが取り残される。失敗はログに残すだけで
+ * 呼び出し側へは伝えない（`dispose()`の呼び出し元はVSCodeのdeactivateで、投げ返しても
+ * できることが無い）。
+ */
+function disposeQuietly(log: Logger, release: () => void, label?: string): void {
+  try {
+    release();
+  } catch (e) {
+    const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+    const where = label === undefined ? '' : `（${label}）`;
+    log.warn(`[workflow] 終了時の解放に失敗しました${where}: ${message}`);
   }
 }
 
@@ -1487,20 +1510,58 @@ export class WorkflowRunner {
   }
 
   /**
-   * 拡張機能の終了時にオーケストレーターセッションを解放する（design.md §16.23
-   * 「セッションの生成と寿命」の`dispose`）。runの終了では解放しない（run完了後も
-   * 会話を続けられるようにするため）。
+   * 拡張機能の終了時に、実行中のrunが抱えている資源をすべて解放する（Issue #374）。
+   *
+   * 解放するもの:
+   *
+   * - オーケストレーターセッション（design.md §16.23「セッションの生成と寿命」の
+   *   `dispose`）。runの終了では解放しない（run完了後も会話を続けられるようにするため）ので、
+   *   ここが唯一の解放点になる
+   * - 各タスクの`TaskSession`（CLIの子プロセス）と衝突解決セッション
+   *   （`live.mergeResolutions`。どちらもrunが走っている間は生きている）
+   * - タスク間メッセージングのMCPサーバとポーリングタイマー（`closeMessaging`）。
+   *   run終了時の後始末（`pump()`）と同じ関数を呼ぶ。実行中のrunでは`pump()`の終了分岐を
+   *   通らないため、ここで閉じないとlisten中のソケットと`setInterval`が残る
+   * - 統合worktreeの占有（`releaseAllLeases()`）
+   *
+   * **1つの解放が例外を投げても残りを続ける**（`disposeQuietly`）。片付けの途中で
+   * 抜けるとCLIのプロセスやソケットが取り残されるため。
+   *
+   * **冪等**。解放したものは`undefined`にするかMapから消すので、2度目の呼び出しは
+   * 何もしない。
+   *
+   * runの状態（`runState`）は書き換えないため、deactivate中に`persist`が要る変更は
+   * 起きない（`live.finished`はメモリ上の印で、永続化される値ではない）。
    */
   dispose(): void {
     for (const live of this.runs.values()) {
-      disposeOrchestrator(live);
-      // 統合worktreeの占有待ちで止まっているマージを、起こす前に「即戻る」状態にしておく
-      // （Issue #412のレビュー指摘6）。`releaseAllLeases()`で起き上がった待機者は
-      // `attemptMerge`の続きへ進むため、この印が無いと`markMergeFailed`→`persist`/`notify`が
-      // 破棄済みのEventEmitter・workspaceStateへ書き込む。起き上がった側は
-      // `decideAfterLeaseWait`が「占有が失効している」ことを見て何もせず戻るが、
-      // `live.finished`は`pump()`が新しいタスクを開始しないための印としても要る
+      // 解放より先に立てる。`session.dispose()`は`onFinished`を同期的に発火しうる
+      // （`chatView.ts`。テスト「catchのsession.dispose()」参照）ため、この印が無いと
+      // 片付けの最中に`pump()`が次のタスクを開始してしまう。
+      //
+      // 統合worktreeの占有待ちで止まっているマージを、起こす前に「即戻る」状態にする
+      // 役目も兼ねる（Issue #412のレビュー指摘6）。`releaseAllLeases()`で起き上がった
+      // 待機者は`attemptMerge`の続きへ進むため、この印が無いと`markMergeFailed`→
+      // `persist`/`notify`が破棄済みのEventEmitter・workspaceStateへ書き込む
       live.finished = true;
+      disposeQuietly(this.deps.log, () => disposeOrchestrator(live));
+      // 実行中のrunのタスクセッション（CLIの子プロセス）。run終了時に個別に解放される
+      // 経路（`onTaskFinished`）を通っていない、走行中のものと`maxReached`で残したもの
+      // （issue #284）がここへ来る。`dispose()`が`onFinished`経由で`live.tasks`を
+      // 書き換えうるので、対象を先に確定させてから解放する（`stop()`と同じ）
+      const taskEntries = [...live.tasks.entries()];
+      live.tasks.clear();
+      for (const [taskId, liveTask] of taskEntries) {
+        disposeQuietly(this.deps.log, () => liveTask.session.dispose(), `task ${taskId}`);
+      }
+      // 衝突解決セッション（design.md §16.17「コンフリクト」5.）は`live.tasks`の管理下に
+      // 無い別枠のため、個別に解放する（`stop()`と同じ扱い）
+      const mergeResolutionEntries = [...live.mergeResolutions.entries()];
+      live.mergeResolutions.clear();
+      for (const [taskId, session] of mergeResolutionEntries) {
+        disposeQuietly(this.deps.log, () => session.dispose(), `merge resolution ${taskId}`);
+      }
+      disposeQuietly(this.deps.log, () => closeMessaging(live), 'messaging');
     }
     // 統合worktreeの占有（Issue #412）の強制解放。通常は`runnerMerge.ts`側の`finally`が
     // 解放するが、解放漏れが1つでもあると以後そのrunのマージが全て待ち続ける。破棄時に
@@ -1870,10 +1931,9 @@ export class WorkflowRunner {
       // CLIへの本文送信なので順序に依存しないが、「以降ツールは使えない」を伝える文面と
       // 実際の閉鎖の順序を合わせておく）
       notifyOrchestratorRunFinished(this.internals, runId, outcome);
-      if (live.messaging !== undefined) {
-        void live.messaging.transport.close();
-        clearInterval(live.messaging.waitingReplyPollTimer);
-      }
+      // 後始末は`dispose()`と共通の関数へ寄せてある（Issue #374）。冪等なので、
+      // run終了の直後に`dispose()`が来ても二重解放にならない
+      closeMessaging(live);
     }
   }
 
