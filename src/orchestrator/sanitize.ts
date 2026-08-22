@@ -81,6 +81,25 @@ export function maskHomeDir(value: string, homeDir: string = os.homedir()): stri
 }
 
 /**
+ * ログ・理由文字列へ埋め込む値から、値そのものを削らずに秘匿情報だけを隠す。
+ * URL中のuserinfo（トークン付きURL）と、ホームディレクトリ配下のユーザー名の2種類。
+ *
+ * `sanitizeForLog` から制御文字の畳み込みと長さの切り詰めを除いた部分にあたる。
+ * 一般経路のログ（`src/log.ts` の `createLogger`）は、fsエラーやスタックトレースを
+ * そのまま流す使い方が前提で、改行を潰したり200文字で切ったりすると障害調査に
+ * 必要な情報が失われる。そのため一般経路にはこちらだけを掛ける（Issue #391）。
+ *
+ * 置換はいずれも冪等（`/home/***` の `***`・`https://***@` の `***` は再度同じ形に
+ * 置き換わるだけ、`~` はどちらのパターンにも一致しない）。よって既に `sanitizeForLog` を
+ * 通した文字列を `createLogger` が再度この関数へ通しても結果は変わらない。
+ *
+ * `homeDir` はテスト容易性のために受け取れるようにしてある（既定は `os.homedir()`）。
+ */
+export function maskForLog(value: string, homeDir?: string): string {
+  return maskHomeDir(maskUrlUserinfo(value), homeDir);
+}
+
+/**
  * 双方向制御文字（RTL override等）と、幅を持たない不可視文字。`textContent` で挿入する限り
  * XSSにはならないが（design.md §16.8のワークフローViewの前提）、表示上の文字の並びを
  * 反転・偽装したり、目視比較をすり抜けたりできてしまう。ワークフローViewの「承認」操作は
@@ -147,8 +166,7 @@ export function stripControlCharsPreservingNewlines(value: string): string {
  */
 export function sanitizeForLog(value: string, maxLen: number = SANITIZE_MAX_LEN): string {
   const normalized = stripControlChars(value);
-  const urlMasked = maskUrlUserinfo(normalized);
-  const masked = maskHomeDir(urlMasked);
+  const masked = maskForLog(normalized);
   const collapsed = masked.replace(/ {2,}/gu, ' ').trim();
   return collapsed.length > maxLen ? `${collapsed.slice(0, maxLen)}…` : collapsed;
 }
