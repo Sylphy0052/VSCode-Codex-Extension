@@ -11,10 +11,13 @@ on:
   pull_request:
 
 # 同一ブランチ・同一PRへの連続pushで複数のCI実行が並走しないようにする。
-# 古い実行を残しても結果を使わないため、新しいpushが来たら古い実行はキャンセルする。
+# PRへの連続pushでは、古い実行の結果を使わないためキャンセルする。
+# 一方、mainへのpushではキャンセルしない。mainはgithub.refが常に同じ値になるため、
+# 連続してマージすると後のpushが前のpushのCIを打ち切ってしまい、
+# 前のコミットが検証されないまま残ってしまう。
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # 必要最小限の権限のみ付与する（チェックアウトとログ閲覧のみで足りるためcontents: read）。
 permissions:
