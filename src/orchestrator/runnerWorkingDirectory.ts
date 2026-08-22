@@ -259,7 +259,7 @@ export async function resolvePseudoState(
   const baseline = await takeSnapshot(repoRoot, deps.exclude, deps.fs);
   const loadedManifest = await loadPersistedManifest(repoRoot, runId, deps.fs);
   if (!loadedManifest.ok) {
-    self.deps.log.warn(`[workflow ${runId}] ${loadedManifest.message}`);
+    self.deps.log.warn(`[workflow ${runId}] ${sanitizeForLog(loadedManifest.message)}`);
   }
   const queue = loadedManifest.ok
     ? new PseudoWorktreeIntegrationQueue(loadedManifest.manifest)
@@ -388,7 +388,7 @@ export async function reflectPseudoWorktree(
   if (manifestRestoreError !== undefined) {
     const message =
       `疑似worktreeの統合マニフェストを復元できなかったため、ワークスペースへの反映を行いません` +
-      `（黙って0件成功として扱うと、統合済みだった成果が失われたことに気づけないため）: ${manifestRestoreError}`;
+      `（黙って0件成功として扱うと、統合済みだった成果が失われたことに気づけないため）: ${sanitizeForLog(manifestRestoreError)}`;
     self.deps.log.warn(`[workflow ${runId}] ${message}`);
     live.warnings.push({ kind: 'pseudoWorktreeReflectBlocked', taskId: undefined, message });
     self.notify(runId);
@@ -404,11 +404,12 @@ export async function reflectPseudoWorktree(
       deps.fs,
     );
     if (!result.ok && result.reason === 'workspaceChanged') {
-      self.deps.log.warn(`[workflow ${runId}] ${result.message}`);
+      const changed = `${sanitizeForLog(result.message)}（変更されたパス: ${formatPathList(result.changedPaths)}）`;
+      self.deps.log.warn(`[workflow ${runId}] ${changed}`);
       live.warnings.push({
         kind: 'pseudoWorktreeReflectBlocked',
         taskId: undefined,
-        message: `${result.message}（変更されたパス: ${formatPathList(result.changedPaths)}）`,
+        message: changed,
       });
     } else if (!result.ok) {
       // 'partialApply': 途中でI/Oエラーが起き、それ以前のパスだけが適用された状態
@@ -425,11 +426,12 @@ export async function reflectPseudoWorktree(
       const detail =
         `（適用済み: ${formatPathList(result.appliedPaths.map(describe))}` +
         ` / 未適用: ${formatPathList(unresolvedPaths.map(describe))}）`;
-      self.deps.log.warn(`[workflow ${runId}] ${result.message}${detail}`);
+      const partial = `${sanitizeForLog(result.message)}${detail}`;
+      self.deps.log.warn(`[workflow ${runId}] ${partial}`);
       live.warnings.push({
         kind: 'pseudoWorktreeReflectBlocked',
         taskId: undefined,
-        message: `${result.message}${detail}`,
+        message: partial,
       });
     } else {
       self.deps.log.info(
@@ -470,11 +472,18 @@ export function formatPathList(paths: readonly string[]): string {
   if (paths.length === 0) {
     return 'なし';
   }
-  if (paths.length <= MAX_LISTED_REFLECT_PATHS) {
-    return paths.join(', ');
+  // 1件ずつ`sanitizeForLog`を通す（Issue #433）。ここへ来るパスはマニフェストのキー
+  // （永続化ファイル由来にもなりうる。Issue #380）とワークスペースの走査結果で、
+  // 制御文字・双方向制御文字を含みうる。`live.warnings`へ入る文字列はワークフローView
+  // にも出るため、表示の偽装を防ぐ必要がある。連結後ではなく連結前に通すのは、
+  // `sanitizeForLog`の長さ上限（200文字）が先頭N件の一覧そのものを削ってしまい、
+  // `MAX_LISTED_REFLECT_PATHS`件を見せるという意図を壊さないようにするため。
+  const sanitized = paths.map((p) => sanitizeForLog(p));
+  if (sanitized.length <= MAX_LISTED_REFLECT_PATHS) {
+    return sanitized.join(', ');
   }
-  const shown = paths.slice(0, MAX_LISTED_REFLECT_PATHS).join(', ');
-  return `${shown}, ...ほか${paths.length - MAX_LISTED_REFLECT_PATHS}件`;
+  const shown = sanitized.slice(0, MAX_LISTED_REFLECT_PATHS).join(', ');
+  return `${shown}, ...ほか${sanitized.length - MAX_LISTED_REFLECT_PATHS}件`;
 }
 
 export async function buildBoundary(

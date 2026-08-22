@@ -4335,6 +4335,51 @@ tasks:
     },
   );
 
+  it(
+    'run終了時の反映が失敗したときの警告はsanitizeForLogを通す' +
+      '（live.warningsはワークフローViewにも出るため、Issue #433）',
+    async () => {
+      const git = fakeGit({ notGitRepo: true });
+      const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        pseudoWorktree: { fs, exclude: [] },
+      });
+      const result = await runner.start(
+        '/repo/.agents/workflows/pseudo-reflect-sanitize.yaml',
+        '/repo',
+      );
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      const cloneDir = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+      fs.setFile(path.join(cloneDir, 'a.txt'), { size: 20, mtimeMs: 200 });
+
+      // 反映（2回目以降のcopyFile）だけを、OSユーザー名を含む絶対パスと双方向制御文字を
+      // 持つエラーで失敗させる（Node.jsのfsエラーはこの形でパスを埋め込む）
+      const originalCopyFile = fs.copyFile.bind(fs);
+      let copyCount = 0;
+      fs.copyFile = async (from: string, to: string): Promise<void> => {
+        copyCount += 1;
+        if (copyCount >= 2) {
+          throw new Error("EACCES: permission denied, open '/home/victim/repo/a.txt'\u202E");
+        }
+        await originalCopyFile(from, to);
+      };
+
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      const snapshot = runner.getSnapshot(runId);
+      const warning = snapshot?.warnings.find((w) => w.kind === 'pseudoWorktreeReflectBlocked');
+      expect(warning).toBeDefined();
+      expect(warning?.message).toContain('/home/***/repo/a.txt');
+      expect(warning?.message).not.toContain('victim');
+      expect(warning?.message).not.toContain('\u202E');
+    },
+  );
+
   it('persist（実行状態の永続化）がmemento.updateの失敗時に未ハンドルrejectにならず、ログへ記録する（Issue #364）', async () => {
     const rejectionListener = vi.fn();
     process.on('unhandledRejection', rejectionListener);
@@ -5865,6 +5910,19 @@ describe('formatPathList（先頭20件+残り件数の丸め、レビュー指�
   it('0件は「なし」を返す', () => {
     expect(formatPathList([])).toBe('なし');
   });
+
+  it(
+    '1件ずつsanitizeForLogを通す（パスに混ざった制御文字・ユーザー名を' +
+      'ワークフローViewへ出さない、Issue #433）',
+    () => {
+      const result = formatPathList(['/home/victim/repo/a.txt', 'b\u202E.txt']);
+
+      expect(result).toContain('/home/***/repo/a.txt');
+      expect(result).not.toContain('victim');
+      expect(result).not.toContain('\u202E');
+    },
+  );
+
 });
 
 /**
