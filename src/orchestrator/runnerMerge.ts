@@ -721,19 +721,28 @@ function scheduleApprovalTimeout(
  * `finishMergeResolution`の非破壊分岐（対象タスクだけを`blocked`にし、`git merge --abort`は
  * 呼ばない）へ合流させる。
  *
- * **停止中（`haltedByUser`）の扱い**: 判定時点で`haltedByUser`なら何もしない。
- * `WorkflowRunner.stop()`は`live.mergeResolutions`の全エントリへ`stopLoop()`を送ってから
- * `haltedByUser`を立てる（`stop()`のJSDoc参照）ため、run全体が停止済みならこの解決セッションの
- * エントリは既に`finishMergeResolution`で消えているはずで、下の`entry === undefined`チェックが
- * 先に弾く。それでも`haltedByUser`を明示的に確認するのは、この前提（「停止済みならエントリは
- * 必ず消える」）が将来の変更で崩れたときの多層防御と、意図の記録を兼ねる。
+ * **停止中（`haltedByUser`）でもタイムアウトさせる（Issue #539）。** かつては
+ * 「run全体が停止済みならこの解決セッションのエントリは`finishMergeResolution`で既に
+ * 消えているはず」という前提のもと`haltedByUser`なら何もせず戻っていたが、この前提は
+ * 成立しない。「再マージ」（`retryMerge`）は`haltedByUser`を解除しない設計（Issue #517/
+ * #525・design.md §16.17「再マージ」）のため、run全体が停止したままでも新しい衝突解決
+ * セッションが開くことがあり、そのセッションが承認待ちに入るとこの関数へ到達する。
+ * ここで何もせず戻ると、`scheduleApprovalTimeout`が張るタイマーは
+ * `waitingApprovalSinceMs`が変わらない限り一発物（`scheduleApprovalTimeout`のJSDoc参照）
+ * なので、以後そのセッションのタイムアウトは二度と発火せず、対象タスクが`merging`のまま
+ * 永久に残る（`getRunOutcome`が`running`を返し続け、runが終了確定しない）。
  *
- * **`haltedByUser`の間はタイマーの経過時間も数えない**という選択でもある。停止解除の瞬間に
- * 積み上がった経過時間で即タイムアウトする事故（人が止めている間の時間を数えると、解除した
- * 瞬間に「もう1時間経っている」と判定してしまう）を避けるため。停止中に新しい衝突解決
- * セッションが開くことは無い（`decideAfterLeaseWait`が`haltedByUser`を見て`block`へ倒す）ので、
- * 実際にこの分岐へ来るのは「停止直後、`stopLoop()`のonFinished経由の解放がまだ終わっていない
- * 一瞬」の間だけだが、その一瞬でも二重に`stopLoop()`を呼ばないようにする。
+ * 下の`markMergeBlocked`（`localOnlyStopKind === 'approvalTimeout'`分岐）は対象タスク
+ * だけを`blocked`にし、`live.runState.haltedByUser`には触れない。**run全体の停止状態は
+ * タイムアウトでは変えない**（人が明示的に止めた事実をタイムアウトが上書きしない）ため、
+ * ここで`haltedByUser`を無条件でタイムアウトさせても安全側に倒れる。
+ *
+ * なお、このガードを入れた当初（Issue #413 PR5）の理由は「停止中も計測を続けると
+ * halt解除直後に即タイムアウトする」という懸念だったが、`scheduleApprovalTimeout`は
+ * 経過時間を積算せず`setTimeout`を張るだけで、`haltedByUser`の変化ではタイマーに
+ * 触れない。そのため懸念した即発火は構造的に起こりえず、**このガードは懸念に対して
+ * 何も機能しないまま、上記の行き止まりだけを作っていた**（Issue #539）。同じ懸念から
+ * ここへガードを戻さないこと。
  *
  * `waitingApprovalSinceMs`は張った時点の値をそのまま比較する（承認待ちが一度解けて再び
  * 承認待ちへ戻っていれば値が変わっているため、古いタイマーの取りこぼしを検知できる。
@@ -757,11 +766,6 @@ function handleMergeApprovalTimeout(
   ) {
     // 既に承認待ちを抜けた、解決セッション自体が終わった、または新しい承認待ちへ
     // 張り替わった後（多層防御。上のJSDoc参照）
-    return;
-  }
-  if (live.runState.haltedByUser) {
-    // 上のJSDoc参照。実行が停止済みなら、このエントリは通常ここに残っていないはずだが
-    // 多層防御として確認する
     return;
   }
   self.deps.log.warn(
@@ -1096,8 +1100,15 @@ async function finishMergeResolution(
   // 2つのフラグは「run全体は止めず、このタスクだけを`blocked`にする」という**同じ結末**へ
   // 合流するため、`markMergeBlocked`の呼び出しと後始末（persist/notify/pump）は1箇所に
   // まとめる。ただし警告の文言と積む警告の`kind`は分ける。「タイムアウトで自動的に止まった」
-  // のか「オーケストレーターに明示的に止められた」のかは、人が次に取るべき行動
-  // （前者は放置を疑う、後者は`stop_task`を呼んだ側の意図を確認する）が違うため。
+  // のか「単体の停止操作で明示的に止められた」のかは、人が次に取るべき行動
+  // （前者は放置を疑う、後者は止めた側の意図を確認する）が違うため。
+  //
+  // **`stoppedByStopTask`はオーケストレーターの`stop_task`だけでなく、ワークフローView
+  // の「タスク停止」ボタン（`src/view/workflowScript.ts`）からも立つ**（`merging`タスクへの
+  // ボタン表示はIssue #514で意図的に追加された。`WorkflowRunner.stopTask()`は呼び出し元を
+  // 区別しない単一の入口）。そのため下の警告文言は片方の呼び出し元だけを名指ししない
+  // （Issue #539のレビューで、`stop_task`を一度も使っていない人へその名前を出す食い違いが
+  // 見つかった）。
   const localOnlyStopKind: 'approvalTimeout' | 'stopTask' | undefined =
     reason !== 'taskStopped'
       ? undefined
@@ -1124,7 +1135,7 @@ async function finishMergeResolution(
       pushMergeApprovalTimeoutWarning(live, taskId, message);
     } else {
       const message =
-        '衝突解決セッションがstop_task（このタスク単体の停止）で停止されました。統合worktreeは衝突した状態のまま残っています（Viewの「再マージ」で再開できます）';
+        '衝突解決セッションが単体の停止操作（Viewの「タスク停止」またはオーケストレーターのstop_task）で停止されました。統合worktreeは衝突した状態のまま残っています（Viewの「再マージ」で再開できます）';
       self.deps.log.warn(`[workflow ${runId}/${taskId}] ${message}`);
       pushMergeStopTaskStoppedWarning(live, taskId, message);
     }

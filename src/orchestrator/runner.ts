@@ -381,8 +381,9 @@ export interface WorkflowWarning {
      * なる（`markMergeBlocked`）ぶんの区別をこの警告で持たせる。
      *
      * **`taskStopped`はここでは`WorkflowRunner.stop()`（全体停止）経由のものだけを指す**
-     * （Issue #514）。オーケストレーターの`stop_task`（このタスク単体だけを止める意図）が
-     * 衝突解決セッションへ`stopLoop()`を送ったときは、run全体を止めないぶん
+     * （Issue #514）。`WorkflowRunner.stopTask()`（このタスク単体だけを止める意図。
+     * オーケストレーターの`stop_task`とワークフローViewの「タスク停止」ボタンの共通の
+     * 入口）が衝突解決セッションへ`stopLoop()`を送ったときは、run全体を止めないぶん
      * `mergeStopTaskStopped`へ分ける。両者は`LoopStopReason`としては同じ`'taskStopped'`
      * だが（`TaskSession.stopLoop()`は理由をこれ以上細かく伝えられない）、
      * `MergeResolutionEntry.stoppedByStopTask`で送り元を区別する
@@ -401,8 +402,11 @@ export interface WorkflowWarning {
      */
     | 'mergeApprovalTimeout'
     /**
-     * オーケストレーターの`stop_task`（design.md §16.23、Issue #514）が衝突解決
-     * セッションを止めたため、自動的に停止して`merging`を`blocked`へ確定させた。
+     * `WorkflowRunner.stopTask()`が衝突解決セッションを止めたため、自動的に停止して
+     * `merging`を`blocked`へ確定させた（design.md §16.23、Issue #514）。`stopTask()`は
+     * オーケストレーターの`stop_task`とワークフローViewの「タスク停止」ボタンの共通の
+     * 入口で、どちらから呼ばれたかはここでは区別しない（`MergeResolutionEntry.
+     * stoppedByStopTask`が呼び出し元を区別せず立てるため）。
      * `mergeApprovalTimeout`と同じく、止めたのはこのタスク単体への操作であり、runの
      * `haltedByUser`は変えない（このタスク以外の`pending`は通常どおり開始してよい）。
      * `mergeInterrupted`（`WorkflowRunner.stop()`＝全体停止の経路）との違いは「誰が・
@@ -849,19 +853,21 @@ export interface MergeResolutionEntry {
    */
   timedOutByApprovalTimeout: boolean;
   /**
-   * オーケストレーターの`stop_task`（design.md §16.23、Issue #514）が、このタスク単体を
-   * 狙って`stopLoop()`を呼んだ印。
+   * `WorkflowRunner.stopTask()`が、このタスク単体を狙って`stopLoop()`を呼んだ印。
    *
+   * `stopTask()`はオーケストレーターの`stop_task`（design.md §16.23、Issue #514）と
+   * ワークフローViewの「タスク停止」ボタン（`src/view/workflowScript.ts`。`merging`タスクへの
+   * 表示はIssue #514で意図的に追加された）の**共通の入口**で、呼び出し元は区別されない。
    * `timedOutByApprovalTimeout`と同じ理由で必要になる。`TaskSession.stopLoop()`は理由を
    * `'taskStopped'`としてしか`onFinished`へ伝えられないため、`runnerMerge.ts`の
    * `finishMergeResolution`は`reason === 'taskStopped'`だけでは「人が
-   * `WorkflowRunner.stop()`（全体停止）を押した」のか「オーケストレーターがこのタスク
-   * だけを`stop_task`で止めた」のかを区別できない。前者はrun全体を`haltedByUser`にする
+   * `WorkflowRunner.stop()`（全体停止）を押した」のか「`stopTask()`経由でこのタスク
+   * だけを止めた」のかを区別できない。前者はrun全体を`haltedByUser`にする
    * （`applyLoopStopReason`）。後者はこのタスク**だけ**を`blocked`にし、run全体は
    * 止めない（他の`pending`タスクは通常どおり開始してよい）。区別しないと、
-   * オーケストレーターが`merging`のタスクへ`stop_task`を呼んだだけで無関係な他タスクへの
-   * `retry_task`/`continue_task`/`decide_approval`まで「人が全体を停止した」という
-   * 偽の理由で拒否されてしまう（Issue #514）。
+   * `stop_task`または「タスク停止」ボタンが`merging`のタスクを止めただけで無関係な
+   * 他タスクへの`retry_task`/`continue_task`/`decide_approval`まで「人が全体を停止した」
+   * という偽の理由で拒否されてしまう（Issue #514）。
    *
    * `WorkflowRunner.stopTask`が`live.mergeResolutions`側へ`stopLoop()`を送る直前に立てる。
    * `WorkflowRunner.stop()`（全体停止）からの`stopLoop()`はこのフラグを立てない
@@ -1802,7 +1808,8 @@ export class WorkflowRunner {
     }
     if (found.kind === 'mergeResolution') {
       // `runnerMerge.ts`の`finishMergeResolution`がrun全体を止めずにこのタスクだけを
-      // `blocked`にできるよう、送り元が`stop_task`であることを先に印しておく（Issue #514。
+      // `blocked`にできるよう、`stopTask()`経由（`stop_task`／Viewの「タスク停止」の
+      // どちらでも同じ）であることを先に印しておく（Issue #514。
       // `MergeResolutionEntry.stoppedByStopTask`のJSDoc参照）。`stopLoop()`を呼んだ**後**に
       // 立てると、同期的に発火しうる`onFinished`（`finishMergeResolution`）に間に合わない
       // 場合があるため、必ず先に立てる

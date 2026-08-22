@@ -9545,4 +9545,72 @@ tasks:
     runner.dispose();
     expect(clearTimeoutSpy.mock.calls.length).toBeGreaterThan(callsBeforeDispose);
   });
+
+  /**
+   * Issue #539: 「再マージ」（`retryMerge`）は`haltedByUser`を解除しない（design.md
+   * §16.17「再マージ」・`markMergeRetried`のJSDoc参照）。そのため、実行全体が停止した
+   * 状態のまま新しい衝突解決セッションが開くことがある。そのセッションが承認待ちに
+   * 入ってタイムアウトしても、`merging`のまま放置されず対象タスクだけが`blocked`へ
+   * 確定すること（run全体の`haltedByUser`は変えない）を確認する。
+   */
+  it(
+    '実行全体が停止した状態で開いた衝突解決セッションでも、承認待ちタイムアウトで' +
+      '対象タスクがblockedへ確定する（Issue #539）',
+    async () => {
+      vi.useFakeTimers();
+      const git = fakeGit({ conflictOnce: true, conflictEveryMerge: true });
+      const { runner, codexHost, store } = createHarness(YAML, {
+        git,
+        readMergeApprovalTimeoutSec: () => 60,
+      });
+      const result = await runner.start(
+        '/repo/.agents/workflows/merge-approval-timeout-halted.yaml',
+        '/repo',
+      );
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      let resolutionSession = codexHost.sessions.at(-1);
+      resolutionSession?.emitState(APPROVAL_STATE);
+      await flush();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flush();
+      resolutionSession?.finish('taskStopped' as LoopStopReason, APPROVAL_STATE);
+      await flush();
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+
+      // 実行全体を停止する（`haltedByUser`が立つ）
+      runner.stop(runId);
+      await flush();
+      expect(store.find(runId)?.haltedByUser).toBe(true);
+
+      // 停止中に「再マージ」を行う（Issue #517/#525で正規化された経路。`retryMerge`は
+      // `haltedByUser`を解除しない）
+      git.resolveConflict();
+      expect(runner.retryMerge(runId, 'T1')).toBe(true);
+      await flush();
+      expect(store.find(runId)?.haltedByUser).toBe(true);
+
+      resolutionSession = codexHost.sessions.at(-1);
+      resolutionSession?.emitState(APPROVAL_STATE);
+      await flush();
+
+      // 停止中に開いた新しい衝突解決セッションでも、承認待ちタイムアウトが機能する
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flush();
+      expect(resolutionSession?.stopLoopCount).toBe(1);
+
+      resolutionSession?.finish('taskStopped' as LoopStopReason, APPROVAL_STATE);
+      await flush();
+
+      // `merging`のまま放置されない。run全体の`haltedByUser`（人が明示的に止めた事実）は
+      // タイムアウトでは変えない
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+      expect(store.find(runId)?.haltedByUser).toBe(true);
+    },
+  );
 });
