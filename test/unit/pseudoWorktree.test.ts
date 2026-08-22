@@ -1615,6 +1615,52 @@ describe('実ファイルシステムでの統合テスト', () => {
     await expect(readFile(path.join(workspace, 'to-delete.txt'))).rejects.toThrow();
   });
 
+  /**
+   * Issue #505（レビュー指摘、medium）: `workspaceRoot`自身の`realpath`が確認できない
+   * 場合、以前は`(await fs.realpath(workspaceRoot)) ?? workspaceRoot`という非正規化
+   * パスへのフォールバックがあったが、`workspaceRoot`はこのファイル内の全ての実パス
+   * 厳密一致における唯一のアンカーであるため、これをフェイルオープンのまま残すのは
+   * 筋が通らずフェイルクローズへ変更した。しかしこの変更自体を検証するテストが
+   * 存在しなかった（フェイルオープンへ戻しても既存テストが全て緑のまま通る状態だった）。
+   * `fs.realpath(workspaceRoot)`が`undefined`を返すフェイクFSで、`partialApply`として
+   * 拒否されることを確かめる。
+   */
+  it(
+    'workspaceRoot自身の実パスが確認できない場合、反映せず中止する' +
+      '（フェイルクローズの回帰テスト、Issue #505）',
+    async () => {
+      await writeWorkspaceFile('a.txt', 'original\n');
+      const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+
+      const integration = await ensureIntegrationDir(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+
+      const fakeFs: typeof nodePseudoWorktreeFileSystem = {
+        ...nodePseudoWorktreeFileSystem,
+        realpath: async (target) => {
+          if (target === workspace) {
+            return undefined;
+          }
+          return nodePseudoWorktreeFileSystem.realpath(target);
+        },
+      };
+
+      const result = await reflectIntegrationToWorkspace(
+        workspace,
+        integration.dir,
+        workspaceBaseline,
+        new Map(),
+        [],
+        fakeFs,
+      );
+
+      expect(result).toMatchObject({ ok: false, reason: 'partialApply' });
+      if (result.ok) return;
+      expect(result.message).toContain('実パスを確認できなかった');
+    },
+  );
+
   it('実行中にワークスペース側が変更された場合、反映せず警告が出る（受入基準）', async () => {
     await writeWorkspaceFile('a.txt', 'original\n');
     const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
@@ -2112,6 +2158,205 @@ describe('実ファイルシステムでの統合テスト', () => {
       } finally {
         await rm(outsideDir, { recursive: true, force: true });
       }
+    },
+  );
+
+  /**
+   * Issue #505（セキュリティ監査、high）: `loadPersistedManifest`の境界確認2箇所
+   * （読み込み前の1回目、読み込み後の2回目）が`isPathWithinRoot`のみで、他4箇所と同じ
+   * 厳密一致になっていなかった。`manifest.json`自体をワークスペース**内**の別の実体
+   * （`.git/hooks`配下の攻撃者作成JSON）へのシンボリックリンクへ差し替えると、
+   * `isPathWithinRoot`は「境界内」として素通りしてしまい、偽装マニフェストを正当な
+   * 内容として読み込んでしまう。この関数はrun実行開始時だけでなくVS Codeのウィンドウ
+   * 再読み込み時にも呼ばれるため、レースに勝つ必要が無く発火しうる。
+   *
+   * `findSymlinkedAncestor`（一次防御）は`filePath`自身も含めた経路上の各segmentを
+   * `isSymbolicLink`で確認するため、あらかじめ`filePath`をシンボリックリンクに
+   * しておくと一次防御自体で弾かれてしまう（別のエラーになり厳密一致の検知は
+   * 検証できない）。そのため、他のテストと同じ規律で、一次防御が`filePath`を
+   * 「まだシンボリックリンクでない」と判定した直後（`isSymbolicLink(filePath)`が
+   * `false`を返した直後）に、実際にシンボリックリンクへ差し替えるレースを再現する。
+   *
+   * このシナリオでは差し替えが一度きりで以後状態が変わらないため、1回目の確認だけを
+   * 壊しても2回目の確認（同じ状態を再度確認するだけ）が独立に検知してしまい、1回目
+   * 単体の効果を測れない。1回目の確認が無かった場合の退行を確認するため、RED実測は
+   * 1回目・2回目の両方を`isPathWithinRoot`のみへ戻した状態（このPR以前の状態そのもの）
+   * に対して行う。
+   */
+  it(
+    'manifest.json自体がワークスペース内の.git/hooks配下の偽装JSONへ差し替えられていても、' +
+      '想定した場所以外として復元を拒否する（境界内リダイレクト、1回目の確認、Issue #505）',
+    async () => {
+      const gitHooksDir = path.join(workspace, '.git', 'hooks');
+      await mkdir(gitHooksDir, { recursive: true });
+      const decoyPath = path.join(gitHooksDir, 'decoy-manifest.json');
+      // キーはpath traversal検証（`isValidManifestKey`）を通る正当な形にする。ここで
+      // `../`等の不正なキーを使うと、境界検知とは無関係な「不正なエントリ」判定で
+      // 拒否されてしまい、境界チェック自体の有効性を測れなくなる（この攻撃が本当に
+      // 危険なのは、まさに正当な形のキーで偽装できるため）。
+      const forgedManifest: IntegrationManifest = new Map([
+        ['forged-by-attacker.txt', { taskId: 'T1', kind: 'deleted' }],
+      ]);
+      await writeFile(decoyPath, serializeManifest(forgedManifest));
+
+      const filePath = integrationManifestPath(workspace, RUN_ID);
+      await mkdir(path.dirname(filePath), { recursive: true });
+
+      let swapped = false;
+      const raceFs: typeof nodePseudoWorktreeFileSystem = {
+        ...nodePseudoWorktreeFileSystem,
+        isSymbolicLink: async (t) => {
+          const result = await nodePseudoWorktreeFileSystem.isSymbolicLink(t);
+          if (!swapped && t === filePath) {
+            swapped = true;
+            await symlink(decoyPath, filePath);
+          }
+          return result;
+        },
+      };
+
+      const loaded = await loadPersistedManifest(workspace, RUN_ID, raceFs);
+
+      expect(loaded.ok).toBe(false);
+      if (loaded.ok) return;
+      expect(loaded.message).toContain('想定した場所以外');
+    },
+  );
+
+  /**
+   * Issue #505（セキュリティ監査、high）: 2回目の確認（読み込み後）が独立して機能して
+   * いることを、1回目の確認だけでは検知できない攻撃で確かめる。1回目の確認は正当な
+   * ファイル（`filePath`がまだ通常のファイルのまま）で通過させ、その後・`readTextFile`
+   * より前（`statFile`の直後）に`manifest.json`を`.git/hooks`配下の偽装JSONへの
+   * シンボリックリンクへ差し替える。これにより`readTextFile`は偽装済みの内容を読み、
+   * 2回目の確認だけがそれを検知できる状態になる。
+   *
+   * 1回目の確認は差し替え前の正当な状態を見ているだけなので、固定形（現在の
+   * `workspaceRoot`起点）のままにしても通過に影響しない。そのため、この攻撃について
+   * RED実測は2回目の確認だけを`isPathWithinRoot`のみへ戻した状態で行う（1回目の
+   * 確認とは独立に、2回目の確認自身が機能していることを示すため）。
+   */
+  it(
+    '読み込み直後にmanifest.jsonがワークスペース内の.git/hooks配下へ差し替えられていても、' +
+      '想定した場所以外として復元を拒否する（境界内リダイレクト、2回目の確認、Issue #505）',
+    async () => {
+      const gitHooksDir = path.join(workspace, '.git', 'hooks');
+      await mkdir(gitHooksDir, { recursive: true });
+      const decoyPath = path.join(gitHooksDir, 'decoy-manifest.json');
+      const forgedManifest: IntegrationManifest = new Map([
+        ['forged-by-attacker-second.txt', { taskId: 'T1', kind: 'deleted' }],
+      ]);
+      await writeFile(decoyPath, serializeManifest(forgedManifest));
+
+      const filePath = integrationManifestPath(workspace, RUN_ID);
+      await mkdir(path.dirname(filePath), { recursive: true });
+      const legitimateManifest: IntegrationManifest = new Map([
+        ['a.txt', { taskId: 'T1', kind: 'added' }],
+      ]);
+      await writeFile(filePath, serializeManifest(legitimateManifest));
+
+      let swapped = false;
+      const raceFs: typeof nodePseudoWorktreeFileSystem = {
+        ...nodePseudoWorktreeFileSystem,
+        statFile: async (target) => {
+          const result = await nodePseudoWorktreeFileSystem.statFile(target);
+          if (!swapped && target === filePath) {
+            swapped = true;
+            await rm(filePath, { force: true });
+            await symlink(decoyPath, filePath);
+          }
+          return result;
+        },
+      };
+
+      const loaded = await loadPersistedManifest(workspace, RUN_ID, raceFs);
+
+      expect(loaded.ok).toBe(false);
+      if (loaded.ok) return;
+      expect(loaded.message).toContain('想定した場所以外');
+    },
+  );
+
+  /**
+   * Issue #505（レビュー指摘、medium）: 1回目の確認（読み込み前）の`realRoot`
+   * （`workspaceRoot`自身の`realpath`）が確認できない場合、以前は非正規化パスへの
+   * フォールバックがあったが、フェイルクローズへ変更した。この変更を検証するテストが
+   * 存在しなかった（フェイルオープンへ戻しても既存テストが全て緑のまま通る状態だった）。
+   */
+  it(
+    '1回目の確認でworkspaceRoot自身の実パスが確認できない場合、復元できなかったとして扱う' +
+      '（フェイルクローズの回帰テスト、Issue #505）',
+    async () => {
+      const filePath = integrationManifestPath(workspace, RUN_ID);
+      await mkdir(path.dirname(filePath), { recursive: true });
+      const manifest: IntegrationManifest = new Map([
+        ['a.txt', { taskId: 'T1', kind: 'added' }],
+      ]);
+      await writeFile(filePath, serializeManifest(manifest));
+
+      // `workspaceRoot`の`realpath`は1回目の確認・2回目の確認の両方で呼ばれるため、
+      // 無条件に`undefined`を返すと2回目の確認（既にフェイルクローズ済み）が独立に
+      // 拒否してしまい、1回目の確認単体の効果を測れなくなる。1回目の呼び出しだけ
+      // `undefined`を返し、以降は正規の値を返すことで、1回目の確認だけを狙い撃つ。
+      let workspaceRealpathCallCount = 0;
+      const fakeFs: typeof nodePseudoWorktreeFileSystem = {
+        ...nodePseudoWorktreeFileSystem,
+        realpath: async (target) => {
+          if (target === workspace) {
+            workspaceRealpathCallCount += 1;
+            if (workspaceRealpathCallCount === 1) {
+              return undefined;
+            }
+          }
+          return nodePseudoWorktreeFileSystem.realpath(target);
+        },
+      };
+
+      const loaded = await loadPersistedManifest(workspace, RUN_ID, fakeFs);
+
+      expect(loaded.ok).toBe(false);
+      if (loaded.ok) return;
+      expect(loaded.message).toContain('復元できません');
+    },
+  );
+
+  /**
+   * Issue #505（レビュー指摘、medium）: 2回目の確認（読み込み後）についても同じく
+   * フェイルクローズの回帰テストを対にする。1回目の確認は正当なファイルで通過させ、
+   * `readTextFile`の直後（2回目の確認の直前）にだけ`workspaceRoot`の`realpath`が
+   * `undefined`を返すようにする。
+   */
+  it(
+    '2回目の確認でworkspaceRoot自身の実パスが確認できない場合、復元できなかったとして扱う' +
+      '（フェイルクローズの回帰テスト、Issue #505）',
+    async () => {
+      const filePath = integrationManifestPath(workspace, RUN_ID);
+      await mkdir(path.dirname(filePath), { recursive: true });
+      const manifest: IntegrationManifest = new Map([
+        ['a.txt', { taskId: 'T1', kind: 'added' }],
+      ]);
+      await writeFile(filePath, serializeManifest(manifest));
+
+      let readTextFileCalled = false;
+      const fakeFs: typeof nodePseudoWorktreeFileSystem = {
+        ...nodePseudoWorktreeFileSystem,
+        readTextFile: async (target) => {
+          readTextFileCalled = true;
+          return nodePseudoWorktreeFileSystem.readTextFile(target);
+        },
+        realpath: async (target) => {
+          if (target === workspace && readTextFileCalled) {
+            return undefined;
+          }
+          return nodePseudoWorktreeFileSystem.realpath(target);
+        },
+      };
+
+      const loaded = await loadPersistedManifest(workspace, RUN_ID, fakeFs);
+
+      expect(loaded.ok).toBe(false);
+      if (loaded.ok) return;
+      expect(loaded.message).toContain('復元できません');
     },
   );
 

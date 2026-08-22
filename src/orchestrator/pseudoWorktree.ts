@@ -313,8 +313,20 @@ export type LoadManifestResult =
  * ウィンドウがあり、その間に経路がシンボリックリンクへ差し替えられるとすり抜ける
  * （TOCTOU、レビュー指摘: medium）。`cloneWorkspace`/`ensureIntegrationDir`が「作成後に
  * `realpath`で実パスを確認し、境界外なら撤去する」二次防御を対にしているのと同じ考え方で、
- * `filePath`の実パスを`realpath`で確認し、`workspaceRoot`の外を指していれば「復元できな
- * かった」として扱う。
+ * `filePath`の実パスを`realpath`で確認する。
+ *
+ * **この確認は「境界内か」（`isPathWithinRoot`）ではなく「想定した場所そのものか」の
+ * 厳密一致にする（Issue #505、セキュリティ監査で発覚。high）。** `isPathWithinRoot`
+ * だけだと、`filePath`（`manifest.json`）がワークスペース**内**の別の実体（典型的には
+ * `.git/hooks`配下の攻撃者が置いたJSON）へのシンボリックリンクへ差し替えられていた
+ * 場合に「境界内」として素通りし、偽装されたマニフェストを正当な内容として読み込んで
+ * しまう。この関数はrun実行開始時だけでなくVS Codeのウィンドウ再読み込み（リロード
+ * 復元）時にも呼ばれるため、レースに勝つ必要が無く「実行中に差し替えを仕込み、後続の
+ * 通常のリロードを待つ」だけで発火しうる。他4箇所（`persistManifest`/`cloneWorkspace`/
+ * `resolveRealRemovalTarget`/`ensureIntegrationDir`）と同じく、`workspaceRoot`
+ * （呼び出し元から固定値で渡り、攻撃者が差し替えられない唯一のアンカー）の実パスと
+ * `path.relative(workspaceRoot, filePath)`から組み立てた「想定した場所」との厳密一致で
+ * 判定する。
  *
  * **この確認は`readTextFile`より前に行う（Issue #505、確認順序の非対称の解消）。**
  * 以前はここが読み込みの後にあり、「読み込んだ内容がこの関数の外へ出ないので事後確認で
@@ -358,13 +370,20 @@ export async function loadPersistedManifest(
   // ?? workspaceRoot`という、確認できない場合に非正規化パスへ黙ってフォールバックする
   // 形になっていたが、アンカーであるべき値が確認できないのにフェイルオープンするのは
   // 筋が通らないため、確認できない場合はフェイルクローズする。
+  //
+  // Issue #505（セキュリティ監査、high）: ここが`isPathWithinRoot`のみだと、`filePath`が
+  // ワークスペース内の別の実体（`.git/hooks`配下の攻撃者作成JSON等）へのシンボリック
+  // リンクへ差し替えられていた場合に境界内として素通りしてしまう。他4箇所と同じ
+  // `workspaceRoot`起点＋`path.relative`の厳密一致へ揃える。
   const realFilePath = await fs.realpath(filePath);
   if (realFilePath !== undefined) {
     const realRoot = await fs.realpath(workspaceRoot);
-    if (realRoot === undefined || !isPathWithinRoot(realFilePath, realRoot)) {
+    const expectedFilePath =
+      realRoot !== undefined ? path.join(realRoot, path.relative(workspaceRoot, filePath)) : undefined;
+    if (realRoot === undefined || expectedFilePath === undefined || realFilePath !== expectedFilePath) {
       return {
         ok: false,
-        message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際にはワークスペースの外を指しています）: ${sanitizeForLog(filePath)}`,
+        message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際には想定した場所以外を指しています）: ${sanitizeForLog(filePath)}`,
       };
     }
   }
@@ -393,14 +412,18 @@ export async function loadPersistedManifest(
   // 正常系ではなく、読み込みと確認の間で消えた・差し替えられた異常系として扱う。
   const realFilePath2 = await fs.realpath(filePath);
   const realRootForSecondCheck = await fs.realpath(workspaceRoot);
+  const expectedFilePath2 =
+    realRootForSecondCheck !== undefined
+      ? path.join(realRootForSecondCheck, path.relative(workspaceRoot, filePath))
+      : undefined;
   if (
     realFilePath2 === undefined ||
-    realRootForSecondCheck === undefined ||
-    !isPathWithinRoot(realFilePath2, realRootForSecondCheck)
+    expectedFilePath2 === undefined ||
+    realFilePath2 !== expectedFilePath2
   ) {
     return {
       ok: false,
-      message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際にはワークスペースの外を指しています）: ${sanitizeForLog(realFilePath2 ?? filePath)}`,
+      message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際には想定した場所以外を指しています）: ${sanitizeForLog(realFilePath2 ?? filePath)}`,
     };
   }
 
@@ -482,6 +505,8 @@ export async function persistManifest(
 
   await fs.mkdir(dirPath);
 
+  await fs.writeTextFile(filePath, serializeManifest(manifest));
+
   // Issue #505（再々監査で発覚）: `expected`の起点を`.agents/worktrees`
   // （`pseudoWorktreesRootDir(workspaceRoot)`）に置いていたが、これでもまだ低い。
   // `<ws>/.agents`自体が（`<ws>/.git`等）ワークスペース内の別ディレクトリへの
@@ -491,18 +516,24 @@ export async function persistManifest(
   // `resolveRealRemovalTarget`（Issue #493）も含め、このファイル内で`.agents/worktrees`
   // 起点にしていた箇所は全てこの穴を持っていた。攻撃者が動かせない唯一の起点は
   // 呼び出し元から固定値で渡る`workspaceRoot`自身であるため、ここへ揃える。
+  //
+  // Issue #505（レビュー指摘、low）: `realRoot`の取得は、他4箇所（`cloneWorkspace` /
+  // `ensureIntegrationDir` / `resolveRealRemovalTarget` / `reflectIntegrationToWorkspace`）と
+  // 同じく、比較対象の実パス（`realFilePath`）の取得と同じタイミング（比較の直前）に
+  // 揃える。以前は`realRoot`だけを`writeTextFile`より前に取得しており、「取得できなければ
+  // 書き込む前に打ち切る」という意図に見えたが、この関数は`realRoot`取得の前に既に
+  // `mkdir(dirPath)`で`dirPath`（`<runId>`ディレクトリ）を作成済みであり、「書き込みより
+  // 前に打ち切る」という性質はI/O全体では既に成立していない（ディレクトリの作成という
+  // 副作用は`realRoot`取得前から発生している）。`writeTextFile`もこの関数のI/Oの一部でしか
+  // ないため、その前に限って`realRoot`だけ先取りする理由は無く、揃えたほうが「4箇所は
+  // 同じ形」という主張に対して素直になる。`realRoot`が取得できない場合は、下の分岐で
+  // 書き込み済みの`filePath`を`removeFile`で取り消してから同じエラーとして報告する
+  // （既存の不一致検知と同じ後始末）。
   const realRoot = await fs.realpath(workspaceRoot);
-  if (realRoot === undefined) {
-    throw new Error(
-      `疑似worktreeの統合マニフェストの永続化先ルート（workspaceRoot）を確認できませんでした: ${sanitizeForLog(workspaceRoot)}`,
-    );
-  }
-
-  await fs.writeTextFile(filePath, serializeManifest(manifest));
-
   const realFilePath = await fs.realpath(filePath);
-  const expectedFilePath = path.join(realRoot, path.relative(workspaceRoot, filePath));
-  if (realFilePath === undefined || realFilePath !== expectedFilePath) {
+  const expectedFilePath =
+    realRoot !== undefined ? path.join(realRoot, path.relative(workspaceRoot, filePath)) : undefined;
+  if (realFilePath === undefined || expectedFilePath === undefined || realFilePath !== expectedFilePath) {
     await fs.removeFile(filePath);
     throw new Error(
       `疑似worktreeの統合マニフェストの永続化先が実際には想定した場所以外を指していたため、` +
