@@ -343,29 +343,57 @@
 
 | 項目 | Issue | ブランチ | design.md | manual-test.md |
 | --- | --- | --- | --- | --- |
-| W1 | #335 | `feat/335/final-merge-confirm` | §16.25 | W-F |
-| W2 | #336 | `feat/336/detect-stalled-loop` | §16.26 | W-G |
-| W3 | #337 | `feat/337/review-generated-plan` | §16.27 | W-H |
-| W4 | #338 | `feat/338/orchestrator-task-edit` | §16.28 | W-I |
-| W5 | #339 | `feat/339/import-review-comments` | §16.29 | W-J |
-| W6 | 未起票 | `feat/<IID>/task-issue-and-review` | §16.30 | W-K |
-| W7 | 未起票 | `feat/<IID>/ask-orchestrator` | §16.31 | W-L |
-| W8 | 未起票 | `feat/<IID>/ask-user` | §16.32 | W-M |
-| W9 | 未起票 | `refactor/<IID>/messaging-via-orchestrator` | §16.33 | W-N |
-| W10 | 未起票 | `feat/<IID>/auto-resume` | §16.34 | W-O |
-| W11 | 未起票 | `feat/<IID>/ci-wait-and-update-branch` | §16.35 | W-P |
-| W12 | 未起票 | `feat/<IID>/program-of-runs` | §16.36 | W-Q |
+| W1 | #335 | `feat/335/final-merge-confirm` | §16.26 | W-F |
+| W2 | #336 | `feat/336/detect-stalled-loop` | §16.27 | W-G |
+| W3 | #337 | `feat/337/review-generated-plan` | §16.28 | W-H |
+| W4 | #338 | `feat/338/orchestrator-task-edit` | §16.29 | W-I |
+| W5 | #339 | `feat/339/import-review-comments` | §16.30 | W-J |
+| W6 | 未起票 | `feat/<IID>/task-issue-and-review` | §16.31 | W-K |
+| W7 | 未起票 | `feat/<IID>/ask-orchestrator` | §16.32 | W-L |
+| W8 | 未起票 | `feat/<IID>/ask-user` | §16.33 | W-M |
+| W9 | 未起票 | `refactor/<IID>/messaging-via-orchestrator` | §16.34 | W-N |
+| W10 | 未起票 | `feat/<IID>/auto-resume` | §16.35 | W-O |
+| W11 | 未起票 | `feat/<IID>/ci-wait-and-update-branch` | §16.36 | W-P |
+| W12 | 未起票 | `feat/<IID>/program-of-runs` | §16.37 | W-Q |
 
 W6〜W12 は2026-08-22に追加した項目（Issue #497）。**W6 の内容は
 [review-and-feature-consolidation.md](review-and-feature-consolidation.md) の「W6」の節にあり、
 このファイルには番号の割り当てだけを置く**（定義を2か所に持たない）。W7〜W12 の定義は
 このファイルのフェーズ5〜7にある。
 
+### 着手前に必ず実測する
+
+**この表の番号は、書いた時点の写しでしかない。着手前に実測して、ずれていたら実装より先に表を直す**
+（実装後に気づくと採番のやり直しになる）。
+
+```
+grep -nE '^### 16\.[0-9]+' docs/design.md      # 16系の最大値と空きを見る
+grep -nE '^### W-' docs/manual-test.md          # W群の体系を見る
+```
+
+事前割り当ては「並列で作業しても採番が衝突しないこと」だけを保証する仕組みで、
+**その後に起きる採番や体系の変更には追随しない**。実際、この表は3回腐っている。
+
+- **2026-08-22（Issue #487）**: W1 へ割り当てた §16.24 を、WF-B の T10
+  （外部由来テキストの整形、`untrustedText.ts`）が先に使っていた
+- **2026-08-22（同）**: W1〜W5 へ割り当てた `manual-test.md` の W-22〜W-32 が、
+  Issue #186 の仕分けで W-A〜W-E の体系へ再編されて存在しなくなっていた
+- **2026-08-23（Issue #543）**: W1 へ割り当てた §16.25 を、PR #542（WF-A2統合）の
+  §16.25「無効なテストの一般則」が先に使った
+
+3回目の解消では **実物のほうを正とし、予約表を §16.26〜§16.37 へずらした**。
+PR #542 の時点で design.md の実在する最大は §16.24 で、その直後を §16.25 が取るのは自然であり、
+予約は実体のない紙の上の数字だからである。**表をずらしたときは、子Issue
+（#335〜#339）の本文に書かれた番号も同じPRで直す。** 表だけ直すと本文の数字が誤ったまま残り、
+次の担当が本文を先に読む（#487 でこれが起きた）。
+
+### 割り当ての由来
+
 この割り当ては2026-08-22に実在する空き番号へ直したもの（Issue #487）。当初は
-§16.24〜§16.28 と W-22〜W-32 を割り当てていたが、次の2点で使えなくなっていた。
+§16.24〜§16.28 と W-22〜W-32 を割り当てていた。
 
 - **§16.24 は WF-B の T10（外部由来テキストの整形、`untrustedText.ts`）が使用済み**
-  （[design.md](../design.md) の §16.24）。16系の最大は §16.24 なので、W1 は §16.25 から始める
+  （[design.md](../design.md) の §16.24）
 - **W-22 以降という番号は現行の [manual-test.md](../manual-test.md) に存在しない。**
   W群は Issue #186 の仕分けで W-01〜W-21 の数字体系から W-A〜W-E の観点別体系へ再編済みで、
   旧番号との対応表だけが残っている。新規ケースはその続きとして W-F 以降を充てる
