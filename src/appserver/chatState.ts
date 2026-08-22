@@ -1465,6 +1465,34 @@ export function appendNotice(state: ChatState, id: string, text: string): ChatSt
 }
 
 /**
+ * 脇道の質問（issue #334、design.md §14.62、Codex TUIの `/btw` 相当）を会話へ1項目として
+ * 残す/更新する。
+ *
+ * `appendNotice`と同じく「同じidで呼び直すと上書きする」形にする。送信中→（リトライ中）
+ * →完了/失敗、と状態が進むたびに同じ項目を書き換え、新しい項目を積み増さない。
+ * 表示の中身（`text`/`detail`/`status`）は`vscode`を持ち込まない純粋なロジック層
+ * （`src/claude/sideQuestion.ts`）が組み立てたものをそのまま入れる。
+ */
+export function appendSideQuestion(
+  state: ChatState,
+  id: string,
+  display: { status: string; text: string; detail: string },
+): ChatState {
+  return {
+    ...state,
+    items: upsertItem(state.items, {
+      id,
+      kind: 'sideQuestion',
+      text: display.text,
+      detail: display.detail,
+      status: display.status,
+      turnId: undefined,
+      diffs: NO_DIFFS,
+    }),
+  };
+}
+
+/**
  * 中断の注記のid（issue #258）。
  *
  * ターンごとに別のidにする。中断はターンを終わらせるので、1回の中断につき1行になり、

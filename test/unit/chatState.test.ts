@@ -6,6 +6,7 @@ import {
   OUTPUT_SOFT_CAP_CHARS,
   addApproval,
   appendNotice,
+  appendSideQuestion,
   applyEvent,
   buildContextUsage,
   capOutput,
@@ -877,6 +878,40 @@ describe('appendNotice', () => {
   it('別のidなら並べる', () => {
     const first = appendNotice(initialChatState, 'settings:1', 'モデル');
     expect(appendNotice(first, 'settings:2', '承認方法').items).toHaveLength(2);
+  });
+});
+
+describe('appendSideQuestion（issue #334、design.md §14.62）', () => {
+  it('sideQuestion種別の項目として残す', () => {
+    const state = appendSideQuestion(initialChatState, 'sideQuestion:1', {
+      status: 'inProgress',
+      text: '今何時？',
+      detail: '送信中…',
+    });
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]).toMatchObject({
+      id: 'sideQuestion:1',
+      kind: 'sideQuestion',
+      status: 'inProgress',
+      text: '今何時？',
+      detail: '送信中…',
+    });
+  });
+
+  it('同じidなら書き換える（送信中→完了、と進むたびに増やさない）', () => {
+    const pending = appendSideQuestion(initialChatState, 'sideQuestion:1', {
+      status: 'inProgress',
+      text: '今何時？',
+      detail: '送信中…',
+    });
+    const done = appendSideQuestion(pending, 'sideQuestion:1', {
+      status: 'completed',
+      text: '今何時？\n\n午後3時です',
+      detail: 'このタブだけの一時的なやり取りです',
+    });
+    expect(done.items).toHaveLength(1);
+    expect(done.items[0]?.status).toBe('completed');
+    expect(done.items[0]?.text).toBe('今何時？\n\n午後3時です');
   });
 });
 

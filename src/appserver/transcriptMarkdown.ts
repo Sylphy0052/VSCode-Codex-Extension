@@ -26,6 +26,7 @@ const KIND_TITLE: Record<string, string> = {
   imageGeneration: '画像の生成',
   enteredReviewMode: 'レビュー開始',
   exitedReviewMode: 'レビュー終了',
+  sideQuestion: '脇道の質問',
 };
 
 /** ファイル変更の種類ラベル。`chatScript.ts` の `createDiff` と同じ対応。 */
