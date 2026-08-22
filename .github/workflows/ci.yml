@@ -62,3 +62,56 @@ jobs:
       # 下限を機械的に強制するステップを別に持つより単純なため、testステップ自体を置き換える。
       - name: Test
         run: npm run test:coverage
+
+  # design.md §9.1が前提とする現行のセッション紐付け（thread/startの応答からthreadIdを
+  # 直接受け取る）が、実物のCodex CLIでAPIキーなしに成立し続けているかを検査する
+  # （issue #458）。上のcheckジョブとは別ジョブに分け、checkの内容・所要には影響しない。
+  # test/external-cli/はvitestのincludeに入っておらず（vitest.config.ts）npm testでは
+  # 走らないため、ここで明示的に実行する。
+  external-cli:
+    name: external-cli
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # バージョンを固定する。actions/cacheのキーをこの値に固定できることと、
+      # Codexのバージョンアップに気づけることを両立するため、上げるときは
+      # このワークフローの変更として明示的に行う（実測: #456。0.149.0でロールアウト
+      # 検出まで1674ms）。
+      CODEX_CLI_VERSION: "0.149.0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Codex CLIは本体のnode_modulesとは別のディレクトリへ、pinしたバージョンだけを
+      # 入れる（package.jsonのdevDependenciesには加えない。309MBあり、この検査以外の
+      # どのnpmスクリプトからも要らないため）。actions/cacheのキーをバージョン文字列に
+      # 固定することで、バージョンを上げない限りは再インストールしない。
+      - name: Cache Codex CLI
+        id: cache-codex-cli
+        uses: actions/cache@v4
+        with:
+          path: .codex-cli
+          key: codex-cli-${{ env.CODEX_CLI_VERSION }}
+
+      - name: Install Codex CLI
+        if: steps.cache-codex-cli.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .codex-cli
+          npm init -y --prefix .codex-cli
+          npm install --prefix .codex-cli "@openai/codex@${CODEX_CLI_VERSION}"
+
+      # test/external-cli/はNode.js組み込みのnode:testだけで書かれており、
+      # 本体のdevDependenciesを必要としない。軽量なジョブに保つため`npm ci`はしない。
+      # モックは使わない（issue #458注意点）。実物のcodex app-serverを起動し、
+      # thread/startがAPIキーなしでthreadIdを返すことを検査する
+      # （test/external-cli/threadStart.test.mjs）。VSCodeは不要で、
+      # test/integration/とは無関係（あちらは実CLIを絶対に呼ばせない方針）。
+      - name: Run external CLI test
+        run: npm run test:external-cli
+        env:
+          CODEX_BIN: ${{ github.workspace }}/.codex-cli/node_modules/.bin/codex
