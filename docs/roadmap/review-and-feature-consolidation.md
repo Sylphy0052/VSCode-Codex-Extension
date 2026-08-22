@@ -162,7 +162,7 @@
 
 ### 第3波 仕上げ
 
-- **WF-G 横断の仕上げ**（11項目）
+- **WF-G 横断の仕上げ**（12項目）
   - T26 eslintへ型情報を要するルールを導入し、未処理Promiseを機械的に検出できるようにする
   - [#491](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/491)
     終了したrunを `retry_task` で再開してもオーケストレーターの制御ツールが復活しない
@@ -194,6 +194,14 @@
     prettierの設定とコードが乖離している（121ファイル非準拠、lintが見ていない）。
     **T26と同じlint基盤の作業のため同じ回で扱う。** 一括 `prettier --write .` は開いているPRが
     無いときにしかできない（121ファイルへ同時に手を入れるため進行中のPRが全て衝突する）
+  - [#562](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/562)
+    権限昇格の検出（`messagingPermissionEscalation`）がW9以降 恒常的に不発火である。
+    **まず「復活させる」か「削除する」かを決める作業であり、復活を既定として着手しないこと。**
+    W9でメッセージングをオーケストレーター中継型にした結果 `from` が常に `-orchestrator-` になり、
+    `checkMessagingPermissionEscalation` は全反復で `continue` して警告を出さない。
+    型検査もlintもテストも通るため機械的には検出できず、**関数名と実装だけを読むと
+    動いている防御に見える**。復活させる場合の設計の本体は由来の追跡情報を足すことではなく、
+    **オーケストレーターが本文を書き換えられる以上、由来と本文の一致をどう保証するか**である
   - 全体レビュー（第1波・第2波の全変更を横断でレビューする）
   - 依存: 第1波・第2波の全完了
   - ファイル: `src` 全域（型情報ルールの導入は全ファイルへ波及する）
@@ -421,7 +429,7 @@ epic Issueは各ワークフローの開始時に起票し、採番できた時�
 | WF-D リポジトリ基盤 | 1 | 2 | [#353](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/353) | `wf/wf-d/integration` | 完了（PR [#394](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/394)、mainへマージ済み。統合ブランチは削除済み） |
 | WF-E ワークフローの自律性 | 2 | 12 | [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341) | `wf/wf-e/integration` | **着手可能**（WF-A2 が PR [#542](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/542) で完了し、`runner.ts` / `forge.ts` の交差が解けた）。第2波で残る唯一のワークフロー。**着手前に [workflow-autonomy.md](workflow-autonomy.md) の「着手前に必ず実測する」に従い、design.md の節番号を実測すること**（割り当ては Issue [#543](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/543) で §16.26〜§16.37 へ移動済み） |
 | WF-F チャットの会話操作と表示 | 2 | 3 | [#340](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/340) | `wf/wf-f/integration` | 完了（PR [#510](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/510)、mainへマージ済み。統合ブランチは削除済み） |
-| WF-G 横断の仕上げ | 3 | 11 | 未採番 | `wf/wf-g/integration` | 第2波の完了待ち |
+| WF-G 横断の仕上げ | 3 | 12 | 未採番 | `wf/wf-g/integration` | 第2波の完了待ち |
 
 W1〜W5とX1〜X3のIssue番号・ブランチ名・design.mdの節・manual-test.mdの番号は、
 [workflow-autonomy.md](workflow-autonomy.md) と [chat-conversation-parity.md](chat-conversation-parity.md) で
