@@ -1009,6 +1009,220 @@ describe('実ファイルシステムでの統合テスト', () => {
       }
     },
   );
+
+  describe('反映処理の境界検証（Issue #433 / #406）', () => {
+    /**
+     * `reflectIntegrationToWorkspace`は他の4経路（`cloneWorkspace` /
+     * `ensureIntegrationDir` / `loadPersistedManifest` / `persistManifest`）と違い、
+     * 字面の判定（`isPathWithinRoot`）しか持っていなかった。マニフェストのキーが
+     * 永続化ファイル由来（＝外部入力）になった（Issue #380）ことで、ワークスペース内に
+     * 実在するシンボリックリンクを経由して境界外へ書き込む・境界外を削除するキーが
+     * 通りうる。`listFiles`がシンボリックリンクを除外するため、`workspaceChanged`の
+     * 保護もこの経路を検知できない。
+     */
+    it('シンボリックリンクのディレクトリを経由して境界外へ書き込まない（受入基準）', async () => {
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-outside-'));
+      try {
+        // ワークスペース内に、外部ディレクトリを指すシンボリックリンクが実在する状況
+        await symlink(outsideDir, path.join(workspace, 'linked-dir'));
+
+        const integration = await ensureIntegrationDir(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
+        expect(integration.ok).toBe(true);
+        if (!integration.ok) return;
+        await mkdir(path.join(integration.dir, 'linked-dir'), { recursive: true });
+        await writeFile(path.join(integration.dir, 'linked-dir', 'evil.txt'), 'evil\n');
+
+        // シンボリックリンクはスナップショットに現れないため、workspaceChangedでは止まらない
+        const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+        const maliciousManifest: IntegrationManifest = new Map([
+          ['linked-dir/evil.txt', { taskId: 'T1', kind: 'modified' }],
+        ]);
+
+        const result = await reflectIntegrationToWorkspace(
+          workspace,
+          integration.dir,
+          workspaceBaseline,
+          maliciousManifest,
+          [],
+          nodePseudoWorktreeFileSystem,
+        );
+
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.reason).toBe('partialApply');
+        if (result.reason !== 'partialApply') return;
+        expect(result.failedPath).toBe('linked-dir/evil.txt');
+        expect(result.appliedPaths).toEqual([]);
+        // リンク先（ワークスペースの外）には何も書かれていない
+        await expect(readdir(outsideDir)).resolves.toEqual([]);
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('シンボリックリンクを経由して境界外のファイルを削除しない（受入基準）', async () => {
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-outside-'));
+      try {
+        await writeFile(path.join(outsideDir, 'secret.txt'), 'secret\n');
+        await symlink(path.join(outsideDir, 'secret.txt'), path.join(workspace, 'link.txt'));
+
+        const integration = await ensureIntegrationDir(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
+        expect(integration.ok).toBe(true);
+        if (!integration.ok) return;
+
+        const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+        const maliciousManifest: IntegrationManifest = new Map([
+          ['link.txt', { taskId: 'T1', kind: 'deleted' }],
+        ]);
+
+        const result = await reflectIntegrationToWorkspace(
+          workspace,
+          integration.dir,
+          workspaceBaseline,
+          maliciousManifest,
+          [],
+          nodePseudoWorktreeFileSystem,
+        );
+
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.reason).toBe('partialApply');
+        // リンク先（ワークスペースの外）のファイルが消えていない
+        await expect(readFile(path.join(outsideDir, 'secret.txt'), 'utf8')).resolves.toBe(
+          'secret\n',
+        );
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('.gitセグメントを含むキーは反映しない（受入基準、Issue #406）', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+      await mkdir(path.join(integration.dir, '.git', 'hooks'), { recursive: true });
+      await writeFile(path.join(integration.dir, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\n');
+
+      const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+      const maliciousManifest: IntegrationManifest = new Map([
+        ['.git/hooks/pre-commit', { taskId: 'T1', kind: 'added' }],
+      ]);
+
+      const result = await reflectIntegrationToWorkspace(
+        workspace,
+        integration.dir,
+        workspaceBaseline,
+        maliciousManifest,
+        [],
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.reason).toBe('partialApply');
+      if (result.reason !== 'partialApply') return;
+      expect(result.failedPath).toBe('.git/hooks/pre-commit');
+      await expect(readFile(path.join(workspace, '.git', 'hooks', 'pre-commit'))).rejects.toThrow();
+    });
+
+    it('大文字小文字が違っても.gitセグメントとして拒否する（macOSのAPFS対策）', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+      // 実体を用意しておく（用意しないとコピー元が無いというだけで失敗し、
+      // 拒否できているのかどうかを検証できない）
+      await mkdir(path.join(integration.dir, '.GIT'), { recursive: true });
+      await writeFile(path.join(integration.dir, '.GIT', 'config'), '[core]\n');
+
+      const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+      const result = await reflectIntegrationToWorkspace(
+        workspace,
+        integration.dir,
+        workspaceBaseline,
+        new Map([['.GIT/config', { taskId: 'T1', kind: 'added' as const }]]),
+        [],
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result).toMatchObject({ ok: false, reason: 'partialApply' });
+      await expect(readFile(path.join(workspace, '.GIT', 'config'))).rejects.toThrow();
+    });
+
+    it('除外設定（node_modules等）に該当するキーは反映しない', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+      await mkdir(path.join(integration.dir, 'node_modules', 'pkg'), { recursive: true });
+      await writeFile(path.join(integration.dir, 'node_modules', 'pkg', 'index.js'), 'evil\n');
+
+      const exclude = [...DEFAULT_PSEUDO_WORKTREE_EXCLUDE];
+      const workspaceBaseline = await takeSnapshot(
+        workspace,
+        exclude,
+        nodePseudoWorktreeFileSystem,
+      );
+      const result = await reflectIntegrationToWorkspace(
+        workspace,
+        integration.dir,
+        workspaceBaseline,
+        new Map([['node_modules/pkg/index.js', { taskId: 'T1', kind: 'added' as const }]]),
+        exclude,
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result).toMatchObject({ ok: false, reason: 'partialApply' });
+      await expect(
+        readFile(path.join(workspace, 'node_modules', 'pkg', 'index.js')),
+      ).rejects.toThrow();
+    });
+
+    it('通常のキーは従来どおり反映される（既存の正常系を壊していないことの確認）', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+      await mkdir(path.join(integration.dir, 'src'), { recursive: true });
+      await writeFile(path.join(integration.dir, 'src', 'index.ts'), 'export {};\n');
+
+      const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+      const result = await reflectIntegrationToWorkspace(
+        workspace,
+        integration.dir,
+        workspaceBaseline,
+        new Map([['src/index.ts', { taskId: 'T1', kind: 'added' as const }]]),
+        [],
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result).toMatchObject({ ok: true, appliedPaths: ['src/index.ts'] });
+      await expect(readFile(path.join(workspace, 'src', 'index.ts'), 'utf8')).resolves.toBe(
+        'export {};\n',
+      );
+    });
+  });
 });
 
 describe('applyDiffToIntegration', () => {
