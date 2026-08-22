@@ -566,6 +566,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // と同じくトップレベルへ配線し、`performFinalMerge`が呼ぶたびに現在値を読み直す
     readCiWaitTimeoutSec: () => readWorkflowsConfig().ciWaitTimeoutSec,
     readCiUpdateBranchMaxRetries: () => readWorkflowsConfig().ciUpdateBranchMaxRetries,
+    // ask_user（design.md §16.33、Issue #583）の呼び出し上限。他のreadXxxと同じく
+    // トップレベルへ配線し、`buildOrchestratorControlPort`が呼ぶたびに現在値を読み直す
+    readMaxAskUserPerRun: () => readWorkflowsConfig().maxAskUserPerRun,
   });
   // isTaskManagedThreadのクロージャが参照する箱を埋める。以降の`workflowRunner`
   // （コマンド登録などで使う）はこの束縛を指し、常にWorkflowRunnerとして扱える

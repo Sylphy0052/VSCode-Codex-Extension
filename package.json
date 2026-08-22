@@ -895,6 +895,14 @@
           "scope": "machine-overridable",
           "markdownDescription": "タスクのループが停滞したとみなすまでに必要な、同一の応答が連続する回数。直近の応答要約がこの回数だけ連続して同一になったら、送信回数の上限（`maxIterations`）を使い切る前にループを止め、失敗とは区別できる状態（停滞）でオーケストレーターへ通知する（設計書 §16.27）。既定値は誤検知しない側（大きめ）に振ってある。範囲外（2未満・50超過・非整数）の値は既定値（4）にフォールバックする。"
         },
+        "agent.workflows.maxAskUserPerRun": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 20,
+          "scope": "machine-overridable",
+          "markdownDescription": "オーケストレーターが `ask_user`（人へ確認する道具。設計書 §16.33）を1つの実行で呼べる回数の上限。担当領域をまたぐ変更・設計の前提を変える変更・受入基準を下げる判断・同じ失敗を3回繰り返して打つ手が尽きた場合に限って使う道具で、乱発を防ぐため設定ではなく既定の挙動として回数に上限を置く。上限に達した以降の呼び出しは拒否され、オーケストレーターは自分で判断するか `decide_final_merge` の `hold` で止めるよう促される。範囲外（1未満・20超過・非整数）の値は既定値（3回）にフォールバックする。"
+        },
         "claude.executablePath": {
           "type": "string",
           "default": "claude",

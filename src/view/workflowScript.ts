@@ -765,6 +765,43 @@ export function workflowScript(): string {
     unread.textContent = '未読 ' + orch.unreadCount;
   }
 
+  /**
+   * 「ask_user」（design.md §16.33）の回答待ちを描く。質問文・選択肢はエージェント
+   * （オーケストレーター）の出力に由来する文字列なので、必ずtextContentへ代入する
+   * （design.md §16.8「画面に出す動的な文字列は必ずテキストノードとして挿入する」）。
+   *
+   * リロード後（「hasLiveSession: false」）は永続化された問いの文言だけを表示し、
+   * 選択ボタンは無効にする（答える経路がまだ無い。design.md §16.33「永続化」）。
+   */
+  function renderAskUser(snapshot) {
+    const box = el('orchAskUser');
+    box.replaceChildren();
+    const pending = snapshot.pendingAskUser;
+    if (!pending) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    box.appendChild(text('div', 'orch-ask-user-question', pending.question));
+    if (!pending.hasLiveSession) {
+      box.appendChild(
+        text('div', 'hint', 'このセッションは復元できていないため、いまは回答できません。'),
+      );
+      return;
+    }
+    const choicesBox = el2('div', 'orch-ask-user-choices');
+    pending.choices.forEach((choice, index) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = choice;
+      btn.addEventListener('click', () => {
+        vscode.postMessage({ type: 'answerAskUser', choiceIndex: index });
+      });
+      choicesBox.appendChild(btn);
+    });
+    box.appendChild(choicesBox);
+  }
+
   /** 入力欄の内容を送って空にする。空白のみの入力は送らない（拡張機能側も弾く）。 */
   function sendOrchestratorInput() {
     const input = el('orchInput');
@@ -903,6 +940,7 @@ export function workflowScript(): string {
     el('empty').hidden = true;
     renderHeader(snapshot, progress);
     renderOrchestrator(snapshot);
+    renderAskUser(snapshot);
     renderGraph(snapshot, layout);
     renderTable(snapshot);
     renderWarnings(snapshot);
@@ -921,6 +959,7 @@ export function workflowScript(): string {
     el('openIntegrationPrBtn').disabled = true;
     // オーケストレーター欄は#header側にあり#contentのhiddenでは消えないため明示的に隠す
     el('orchestrator').hidden = true;
+    el('orchAskUser').hidden = true;
   }
 
   // ---- 経過時間: ローカルで毎秒更新する（拡張機能からは状態が変わったときだけ届く） ----

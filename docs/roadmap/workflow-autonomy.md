@@ -226,7 +226,7 @@
 
 - [ ] W8 オーケストレーターからユーザーへ確認する経路を作る
   - 依存: W7
-  - Issue: 未起票（着手時に起票する）
+  - Issue: #583
   - 現状: オーケストレーターが持つ8つのツールに、人へ問う道具が無い。`decide_approval` は
     **人の代わりにオーケストレーターが裁く**方向の道具で、向きが逆である
   - 変更: `ask_user` を足す。問いと選択肢（2〜4個）を取り、ワークフローViewへ出す。人が選ぶまで
@@ -350,7 +350,7 @@
 | W5 | #339 | `feat/339/import-review-comments` | §16.30 | W-J |
 | W6 | 未起票 | `feat/<IID>/task-issue-and-review` | §16.31 | W-K |
 | W7 | 未起票 | `feat/<IID>/ask-orchestrator` | §16.32 | W-L |
-| W8 | 未起票 | `feat/<IID>/ask-user` | §16.33 | W-M |
+| W8 | #583 | `feat/583/ask-user` | §16.33 | W-M |
 | W9 | 未起票 | `refactor/<IID>/messaging-via-orchestrator` | §16.34 | W-N |
 | W10 | 未起票 | `feat/<IID>/auto-resume` | §16.35 | W-O |
 | W11 | 未起票 | `feat/<IID>/ci-wait-and-update-branch` | §16.36 | W-P |

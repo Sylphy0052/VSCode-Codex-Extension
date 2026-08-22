@@ -1485,6 +1485,10 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
         calls.push(`decideFinalMerge:${decision}:${reason}`);
         return { accepted: true, reason: "ok" };
       },
+      askUser: (question, choices) => {
+        calls.push(`askUser:${question}:${choices.join(",")}`);
+        return { accepted: true, reason: "ok" };
+      },
     };
     return { port, calls };
   }
@@ -1544,6 +1548,7 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
       "decide_approval",
       "update_task_prompt",
       "decide_final_merge",
+      "ask_user",
     ]);
   });
 
@@ -1601,6 +1606,8 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
     });
     // design.md §16.26。taskIdを取らない制御ツール（他のtaskId系ツールと違う特別扱いの経路）
     callTool(conn, "decide_final_merge", { decision: "merge", reason: "CIが全緑のため" });
+    // design.md §16.33。decide_final_mergeと同じくtaskIdを取らない特別扱いの経路
+    callTool(conn, "ask_user", { question: "どちらにする？", choices: ["A案", "B案"] });
 
     expect(calls).toEqual([
       "getRunStatus",
@@ -1610,7 +1617,50 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
       "decideApproval:T1:accept",
       "updateTaskPrompt:T1:方針を変える",
       "decideFinalMerge:merge:CIが全緑のため",
+      "askUser:どちらにする？:A案,B案",
     ]);
+  });
+
+  it("ask_userの引数のうち文字列でないchoicesは除かれて実体へ渡る（design.md §16.33）", () => {
+    const { port, calls } = fakeControl();
+    const conn = wire(port)(ORCHESTRATOR_CONNECTION_ID);
+
+    callTool(conn, "ask_user", { question: "q", choices: ["A", 1, null, "B"] });
+
+    expect(calls).toEqual(["askUser:q:A,B"]);
+  });
+
+  it("ask_userはタスクの接続からは見えず、名指しで呼んでも拒否される", () => {
+    const { port, calls } = fakeControl();
+
+    const names = toolNames(wire(port)("T1"));
+    expect(names).not.toContain("ask_user");
+
+    const response = callTool(wire(port)("T1"), "ask_user", {
+      question: "q",
+      choices: ["A", "B"],
+    });
+    expect(response !== undefined && "error" in response).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  it("ask_userが拒否されるとisErrorになる（send_messageと同じ流儀）", () => {
+    const port: OrchestratorControlPort = {
+      ...fakeControl().port,
+      askUser: () => ({ accepted: false, reason: "既に回答待ちの質問があります。人が答えるまで新しい質問はできません。" }),
+    };
+
+    const response = callTool(wire(port)(ORCHESTRATOR_CONNECTION_ID), "ask_user", {
+      question: "q",
+      choices: ["A", "B"],
+    });
+
+    expect(response !== undefined && "result" in response).toBe(true);
+    if (response !== undefined && "result" in response) {
+      const result = response.result as { isError?: boolean; content: [{ text: string }] };
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("既に回答待ちの質問があります");
+    }
   });
 
   it("受け付けられなかった制御ツールの結果はisErrorになる（send_messageと同じ流儀）", () => {

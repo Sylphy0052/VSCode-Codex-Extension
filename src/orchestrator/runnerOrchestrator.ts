@@ -8,6 +8,7 @@ import {
 import {
   buildOrchestratorConfig,
   composeOrchestratorPrompt,
+  DEFAULT_MAX_ASK_USER_PER_RUN,
   MAX_ORCHESTRATOR_EVENTS_PER_RUN,
   ORCHESTRATOR_CONNECTION_ID,
   pickOrchestratorProvider,
@@ -52,6 +53,8 @@ function buildIntroBody(live: LiveRun): string {
       '届いた場合も、この send_message（to に問うたタスクのidを指定）で答える）',
     '- stop_task / retry_task / continue_task / decide_approval: タスクを止める・やり直す・続ける・承認する',
     '- update_task_prompt: 走行中のタスクの継続指示を差し替える（方針転換）',
+    '- ask_user: 担当領域をまたぐ変更・設計の前提を変える変更・受入基準を下げる判断・' +
+      '同じ失敗を3回繰り返した場合に限り、人へ確認する（それ以外は自分で判断する。呼べる回数に上限あり）',
     '',
     'あなた自身はファイルを書き換えられません（読み取り専用）。実際の作業は各タスクが行います。',
     '',
@@ -326,7 +329,99 @@ export function buildOrchestratorControlPort(
         ? ok(`最終マージの判断を ${decision} として確定しました。`)
         : no('最終マージの判断待ちが見つかりません（既に確定した可能性があります）。');
     },
+    askUser: (question, choices) => {
+      const finished = runFinishedReason(actions, runId);
+      if (finished !== undefined) {
+        return no(finished);
+      }
+      return beginAskUser(self, runId, question, choices);
+    },
   };
+}
+
+/**
+ * `ask_user`（design.md §16.33、Issue #583）を受け付ける。呼べる条件（担当領域をまたぐ・
+ * 設計の前提を変える・受入基準を下げる・同じ失敗を3回繰り返す）自体はツールの説明文で
+ * モデルへ伝えるだけで、ここで機械的に検証するのは形式（選択肢の個数・長さ）と回数上限
+ * だけである（design.md §16.33「呼べる条件を絞る」）。
+ */
+function beginAskUser(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  question: string,
+  choices: readonly string[],
+): OrchestratorControlResult {
+  const live = self.runs.get(runId);
+  const orchestrator = live?.orchestrator;
+  if (live === undefined || orchestrator === undefined) {
+    return no('オーケストレーターのセッションがありません。');
+  }
+  if (live.pendingAskUser !== undefined) {
+    return no('既に回答待ちの質問があります。人が答えるまで新しい質問はできません。');
+  }
+  if (question.trim() === '') {
+    return no('問いの本文が空です。');
+  }
+  if (question.length > MAX_MESSAGE_BODY_LENGTH) {
+    return no(`問いが長すぎます（上限${MAX_MESSAGE_BODY_LENGTH}文字）: ${question.length}文字`);
+  }
+  if (choices.length < 2 || choices.length > 4) {
+    return no(`choices は2〜4個で指定してください（${choices.length}個）。`);
+  }
+  const limit = self.deps.readMaxAskUserPerRun?.() ?? DEFAULT_MAX_ASK_USER_PER_RUN;
+  if (orchestrator.askUserCount >= limit) {
+    return no(
+      `ask_userの呼び出し上限（${limit}回/run）に達しました。以降は自分で判断するか、` +
+        '最終マージの判断であればdecide_final_mergeのholdで止めてください。',
+    );
+  }
+  orchestrator.askUserCount += 1;
+  live.pendingAskUser = {
+    question,
+    choices: [...choices],
+    since: (self.deps.now?.() ?? new Date()).getTime(),
+  };
+  void self.persist(runId);
+  self.notify(runId);
+  return ok('質問をワークフローViewへ出しました。人が選ぶまで待ちます。');
+}
+
+/**
+ * `ask_user`の回答（design.md §16.33）。ワークフローViewの選択ボタンから呼ぶ。
+ *
+ * 回答待ちが無い・`choiceIndex`が選択肢の範囲外・オーケストレーターのセッションが
+ * 無い（リロード後等）場合は`false`を返し、View側は何も起きなかったことにする
+ * （`sendToOrchestrator`と同じ「なにもしない」失敗の返し方）。
+ *
+ * 答えは`sendUserMessageToOrchestrator`と同じ経路（`session.send`）でオーケストレーターへ
+ * 渡す。**溜まっていたイベントもここで合流させる**（`pendingAskUser`が立っている間
+ * `notifyOrchestrator`は送信を止めていたため、`orchestrator.pending`に溜まっている場合が
+ * ある。§16.23「何が駆動するか」の合流と同じ流儀）。
+ */
+export function answerAskUser(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  choiceIndex: number,
+): boolean {
+  const live = self.runs.get(runId);
+  const orchestrator = live?.orchestrator;
+  const pending = live?.pendingAskUser;
+  if (live === undefined || orchestrator === undefined || pending === undefined) {
+    return false;
+  }
+  const choice = pending.choices[choiceIndex];
+  if (!Number.isInteger(choiceIndex) || choice === undefined) {
+    return false;
+  }
+  live.pendingAskUser = undefined;
+  void self.persist(runId);
+  const answerText = `人がask_userの質問に答えました: "${choice}"`;
+  const composed = composeOrchestratorPrompt(orchestrator.pending, answerText);
+  orchestrator.pending = [];
+  orchestrator.busy = true;
+  orchestrator.session.send(composed);
+  self.notify(runId);
+  return true;
 }
 
 /**
@@ -462,6 +557,7 @@ export async function setupOrchestratorForStart(
       eventsSent: 0,
       lastResponseSummary: '',
       unreadCount: 0,
+      askUserCount: 0,
     };
     live.orchestrator = orchestrator;
     session.onStateChanged((state) => onOrchestratorStateChanged(self, runId, state));
@@ -505,7 +601,10 @@ function onOrchestratorStateChanged(
   }
   const finishedTurn = orchestrator.busy && !state.busy;
   orchestrator.busy = state.busy;
-  if (finishedTurn) {
+  // ターンが終わっても`pendingAskUser`が立っている間はまだ答えを待つターン
+  // （ask_userを呼んだ返答が届いた直後等）なので、溜まったイベントは送らない
+  const live = self.runs.get(runId);
+  if (finishedTurn && live?.pendingAskUser === undefined) {
     flushOrchestrator(self, runId);
   }
   self.notify(runId);
@@ -522,8 +621,9 @@ export function notifyOrchestrator(
   runId: string,
   event: OrchestratorEvent,
 ): void {
-  const orchestrator = self.runs.get(runId)?.orchestrator;
-  if (orchestrator === undefined) {
+  const live = self.runs.get(runId);
+  const orchestrator = live?.orchestrator;
+  if (live === undefined || orchestrator === undefined) {
     return;
   }
   if (orchestrator.eventsSent >= MAX_ORCHESTRATOR_EVENTS_PER_RUN) {
@@ -531,7 +631,12 @@ export function notifyOrchestrator(
   }
   orchestrator.eventsSent += 1;
   orchestrator.pending.push(event);
-  if (!orchestrator.busy) {
+  // `ask_user`（design.md §16.33）の回答待ちの間は送らずに溜める。「人が選ぶまで
+  // オーケストレーターは待つ」をここで実現する——`ask_user`のツール呼び出し自体は
+  // 同期的にすぐ返る（HTTPレスポンスを保留しない。`messaging.ts`のASK_USER_TOOLの
+  // JSDoc参照）ため、待たせる仕組みはこの送信ゲートだけが担う。溜まったイベントは
+  // `answerAskUser`が答えを送るときに合流させる
+  if (!orchestrator.busy && live.pendingAskUser === undefined) {
     flushOrchestrator(self, runId);
   }
 }
@@ -562,8 +667,15 @@ export function sendUserMessageToOrchestrator(
   runId: string,
   text: string,
 ): boolean {
-  const orchestrator = self.runs.get(runId)?.orchestrator;
+  const live = self.runs.get(runId);
+  const orchestrator = live?.orchestrator;
   if (orchestrator === undefined || text.trim() === '') {
+    return false;
+  }
+  // `ask_user`（design.md §16.33）の回答待ちの間は、自由記述の発話を素通りさせない。
+  // 「選ぶまで待つ」対象を選択肢からの回答だけに絞る（`answerAskUser`）ことで、モデルが
+  // 自由記述の返信と選択肢からの回答のどちらを見ているかが常に一意に決まるようにする
+  if (live?.pendingAskUser !== undefined) {
     return false;
   }
   const composed = composeOrchestratorPrompt(orchestrator.pending, text);

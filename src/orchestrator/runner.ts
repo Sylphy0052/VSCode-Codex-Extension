@@ -89,6 +89,7 @@ import { getRunOutcome, nextTasksToStart, type RunOutcome } from './scheduler';
 import { WorkflowRunStore, type PersistedTaskState } from './runStore';
 import type { OrchestratorEvent } from './orchestratorSession';
 import {
+  answerAskUser as answerAskUserImpl,
   buildOrchestratorControlPort,
   disposeOrchestrator,
   markOrchestratorRead,
@@ -344,6 +345,12 @@ export interface WorkflowRunnerDeps {
    * （`readMergeApprovalTimeoutSec`と同じく、呼び出し側は毎回現在値を返す関数を渡すこと）。
    */
   readFinalMergeDecisionTimeoutSec?: () => number;
+  /**
+   * `agent.workflows.maxAskUserPerRun`の現在値（design.md §16.33、Issue #583）。省略時は
+   * `DEFAULT_MAX_ASK_USER_PER_RUN`（`orchestratorSession.ts`）を使う
+   * （`readFinalMergeDecisionTimeoutSec`と同じく、呼び出し側は毎回現在値を返す関数を渡すこと）。
+   */
+  readMaxAskUserPerRun?: () => number;
   /**
    * `agent.workflows.ciWaitTimeoutSec`の現在値（秒）。省略時は`DEFAULT_CI_WAIT_TIMEOUT_SEC`
    * （既定1800秒）を使う（design.md §16.36、Issue #556）。統合PR/MRをマージする前に
@@ -705,6 +712,14 @@ export interface WorkflowRunSnapshot {
    * runでは`available: false`（欄は「利用できません」になる）。
    */
   orchestrator?: OrchestratorSnapshot | undefined;
+  /**
+   * `ask_user`（design.md §16.33、Issue #583）の回答待ち。存在する間、ワークフローViewは
+   * 問いと選択肢を出し、人が選ぶボタンを描く。`live`に無ければ永続化された値
+   * （`PersistedRun.pendingAskUser`）へフォールバックする（`LiveRun.pendingAskUser`の
+   * JSDoc参照。リロード後は問いの文言だけが読める状態で、答える経路はまだ無い）。
+   * `hasLiveSession`が`false`のときはボタンを無効にする（`workflowScript.ts`）。
+   */
+  pendingAskUser?: { question: string; choices: readonly string[]; hasLiveSession: boolean } | undefined;
 }
 
 /**
@@ -897,6 +912,12 @@ export interface LiveOrchestrator {
   lastResponseSummary: string;
   /** 人が最後に会話を開いてから増えた応答の数。Viewの未読の印に使う。 */
   unreadCount: number;
+  /**
+   * `ask_user`（design.md §16.33、Issue #583）をこのrunで受け付けた（`accepted: true`を
+   * 返した）回数。`agent.workflows.maxAskUserPerRun`との比較に使う。拒否した呼び出しは
+   * 数えない（乱発ではなく実際に人を待たせた回数を数えるため）。
+   */
+  askUserCount: number;
 }
 
 /**
@@ -1121,6 +1142,23 @@ export interface LiveRun {
    * （GitHub/GitLab）で直接確認する必要がある（design.md §16.26「永続化」）。
    */
   finalMergeDecision: LiveFinalMergeDecision | undefined;
+  /**
+   * `ask_user`（design.md §16.33、Issue #583）の回答待ち。オーケストレーターが呼んでから、
+   * 人がワークフローViewで選ぶまでの間だけ存在する。`beginAskUser`（`runnerOrchestrator.ts`）が
+   * 立て、`answerAskUser`が答えの確定と同時に消す。
+   *
+   * **`finalMergeDecision`とは異なり、値そのもの（question/choices）を永続化する**
+   * （`WorkflowRunner.persist`・`PersistedRun.pendingAskUser`）。`finalMergeDecision`が
+   * 永続化しないのは、判断対象（統合PR/MR）をホスト側で直接確認できるからだが、`ask_user`の
+   * 問いにはそれに相当する外部記録が無い。ロードマップW10（中断からの自動再開、Issue未起票）が
+   * 「`ask_user`待ちで落ちた場合は再開時に問いを出し直す」ために必要な最小限のデータとして、
+   * この節（W8）で先に永続化しておく。**ただし`live.pendingAskUser`自体（実行時の値）は
+   * ウィンドウのリロードでは復元しない**（`orchestrator`セッション自体が復元できない以上、
+   * 答えを届ける先が無いため。`finalMergeDecision`と同じ「実行時のみ」の扱い）。永続化された
+   * 値は`WorkflowRunSnapshot.pendingAskUser`が`persisted`側からも読むため、リロード後も
+   * Viewには「問いが残っている」ことだけは表示できる（再度答える経路はW10が実装するまで無い）。
+   */
+  pendingAskUser: LiveAskUser | undefined;
 }
 
 /** `LiveRun.finalMergeDecision`（design.md §16.26）。判断が付くまでの間だけ存在する。 */
@@ -1136,6 +1174,18 @@ export interface LiveFinalMergeDecision {
    * （人はいつ確認するか分からないため、タイムアウトで自動`hold`にする理由が無い）。
    */
   timer?: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * `LiveRun.pendingAskUser`（design.md §16.33、Issue #583）。`ask_user`の回答待ちの間だけ
+ * 存在する。`choices`は呼び出し時の文言をそのまま保持する（テンプレート展開はしない。
+ * `update_task_prompt`と同じ「オーケストレーターの自由記述はリテラルのまま扱う」方針）。
+ */
+export interface LiveAskUser {
+  readonly question: string;
+  readonly choices: readonly string[];
+  /** 回答待ちに入った時刻（ms epoch）。 */
+  readonly since: number;
 }
 
 /**
@@ -1737,6 +1787,7 @@ export class WorkflowRunner {
       integrationPullRequest: undefined,
       finalMergeOutcome: undefined,
       finalMergeDecision: undefined,
+      pendingAskUser: undefined,
     };
     this.runs.set(runId, live);
 
@@ -2112,6 +2163,15 @@ export class WorkflowRunner {
     orchestrator.session.reveal();
     markOrchestratorRead(this.internals, runId);
     return true;
+  }
+
+  /**
+   * `ask_user`（design.md §16.33、Issue #583）への回答。ワークフローViewの選択ボタンから
+   * 呼ぶ。実体は`answerAskUser`（`runnerOrchestrator.ts`）。回答待ちが無い・選択肢の範囲外・
+   * セッションが無い場合は`false`を返す。
+   */
+  answerAskUser(runId: string, choiceIndex: number): boolean {
+    return answerAskUserImpl(this.internals, runId, choiceIndex);
   }
 
   /**
@@ -3691,6 +3751,19 @@ export class WorkflowRunner {
           integrationPullRequestUrl:
             live.integrationPullRequest?.url ?? current?.integrationPullRequestUrl,
           finalMergeOutcome: live.finalMergeOutcome ?? current?.finalMergeOutcome,
+          // `ask_user`の回答待ち（design.md §16.33）。`finalMergeDecision`と異なり、
+          // 問いの文言そのものを永続化する（`LiveRun.pendingAskUser`のJSDoc参照）。
+          // `live.pendingAskUser`が無い（回答待ちでない、または答えが確定した）場合は
+          // `current`も引き継がない——finalMergeOutcome等と違って「確定した値」ではなく
+          // 「いま宙に浮いている問い」なので、消えたらそのまま消す
+          pendingAskUser:
+            live.pendingAskUser === undefined
+              ? undefined
+              : {
+                  question: live.pendingAskUser.question,
+                  choices: [...live.pendingAskUser.choices],
+                  askedAt: new Date(live.pendingAskUser.since).toISOString(),
+                },
         };
       });
     } catch (e) {

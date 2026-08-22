@@ -79,6 +79,18 @@ export interface PersistedRun {
    * （design.md §16.26）。
    */
   finalMergeOutcome: 'merged' | 'failed' | 'held' | undefined;
+  /**
+   * `ask_user`（design.md §16.33、Issue #583）の回答待ちの問い。オーケストレーターが
+   * 呼んでから人が答えるまでの間だけ存在する。`finalMergeOutcome`等と違い「確定した結果」
+   * ではなく「宙に浮いている問い」なので、答えが確定した・run再開時にオーケストレーターが
+   * 新しく開き直した等で消えれば`undefined`に戻る（`WorkflowRunner.persist`参照）。
+   * ロードマップW10（中断からの自動再開、Issue未起票）が「再開時に問いを出し直す」ために
+   * 読む想定のデータで、この節（W8）では永続化するだけで自動的な出し直しはしない
+   * （オーケストレーターセッション自体がリロードで復元できないため。`LiveRun.pendingAskUser`
+   * のJSDoc参照）。既存の永続データ（このフィールドが無い形式）を読んでも`undefined`に
+   * なるだけで壊れない。
+   */
+  pendingAskUser: { question: string; choices: string[]; askedAt: string } | undefined;
 }
 
 /**

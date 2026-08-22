@@ -352,5 +352,10 @@ async function rebuildLiveRun(
     // 最終マージの判断待ち（design.md §16.26）も会話・警告と同じく実行時専用の状態で、
     // このプロセスでは復元しない（`LiveRun.finalMergeDecision`のJSDoc参照）
     finalMergeDecision: undefined,
+    // `ask_user`の回答待ち（design.md §16.33）も、答えを届ける先（オーケストレーター
+    // セッション）自体が復元できないため実行時は復元しない。永続化された問いの文言は
+    // `PersistedRun.pendingAskUser`に残り、`getSnapshot`が読む（`LiveRun.pendingAskUser`の
+    // JSDoc参照）
+    pendingAskUser: undefined,
   };
 }

@@ -36,6 +36,7 @@ function run(overrides: Partial<PersistedRun> = {}): PersistedRun {
     integrationPullRequestNumber: undefined,
     integrationPullRequestUrl: undefined,
     finalMergeOutcome: undefined,
+    pendingAskUser: undefined,
     ...overrides,
   };
 }

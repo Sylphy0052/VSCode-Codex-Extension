@@ -356,6 +356,16 @@ describe('workflowScript', () => {
     expect(source).toContain("el('orchUnread')");
   });
 
+  it('ask_userの回答待ちを描き、選択ボタンで答えを送る（design.md §16.33、Issue #583）', () => {
+    const source = workflowScript();
+    expect(source).toContain("el('orchAskUser')");
+    expect(source).toContain('snapshot.pendingAskUser');
+    expect(source).toContain("type: 'answerAskUser'");
+    expect(source).toContain('choiceIndex');
+    // 質問文は外部（エージェント）由来の文字列なので、この関数もinnerHTMLは使わない
+    expect(source).toContain("text('div', 'orch-ask-user-question', pending.question)");
+  });
+
   it('グラフの描画幅を拡張機能へ伝える（段の折り返し用）', () => {
     const source = workflowScript();
     expect(source).toContain("type: 'viewport'");

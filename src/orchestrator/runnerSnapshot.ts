@@ -81,7 +81,34 @@ export function getSnapshot(self: WorkflowRunnerInternals, runId: string): Workf
               live.integrationPullRequest?.url ?? persisted?.integrationPullRequestUrl,
           },
     orchestrator: buildOrchestratorSnapshot(live),
+    pendingAskUser: buildPendingAskUserSnapshot(live, persisted),
   };
+}
+
+/**
+ * `ask_user`の回答待ち（design.md §16.33）の表示用の値。`live`（回答可能）を優先し、
+ * 無ければ永続化された値（リロード後、答える経路はまだ無いが問いの文言だけは読める。
+ * `LiveRun.pendingAskUser`のJSDoc参照）へフォールバックする。
+ */
+function buildPendingAskUserSnapshot(
+  live: LiveRun,
+  persisted: PersistedRun | undefined,
+): { question: string; choices: readonly string[]; hasLiveSession: boolean } | undefined {
+  if (live.pendingAskUser !== undefined) {
+    return {
+      question: live.pendingAskUser.question,
+      choices: live.pendingAskUser.choices,
+      hasLiveSession: true,
+    };
+  }
+  if (persisted?.pendingAskUser !== undefined) {
+    return {
+      question: persisted.pendingAskUser.question,
+      choices: persisted.pendingAskUser.choices,
+      hasLiveSession: false,
+    };
+  }
+  return undefined;
 }
 
 /**

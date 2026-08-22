@@ -349,6 +349,32 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
     expect(readWorkflowsConfig().ciUpdateBranchMaxRetries).toBe(2);
   });
 
+  it('maxAskUserPerRunの既定は3回（design.md §16.33・DEFAULT_MAX_ASK_USER_PER_RUN、Issue #583）', () => {
+    expect(readWorkflowsConfig().maxAskUserPerRun).toBe(3);
+  });
+
+  it('maxAskUserPerRunは範囲内（1〜20）の指定値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.maxAskUserPerRun': 1 });
+    expect(readWorkflowsConfig().maxAskUserPerRun).toBe(1);
+
+    __mock.setConfig('agent', { 'workflows.maxAskUserPerRun': 20 });
+    expect(readWorkflowsConfig().maxAskUserPerRun).toBe(20);
+  });
+
+  it('maxAskUserPerRunが数値でない・1未満・20超過・非整数なら既定値（3）へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.maxAskUserPerRun': 'たくさん' });
+    expect(readWorkflowsConfig().maxAskUserPerRun).toBe(3);
+
+    __mock.setConfig('agent', { 'workflows.maxAskUserPerRun': 0 });
+    expect(readWorkflowsConfig().maxAskUserPerRun).toBe(3);
+
+    __mock.setConfig('agent', { 'workflows.maxAskUserPerRun': 21 });
+    expect(readWorkflowsConfig().maxAskUserPerRun).toBe(3);
+
+    __mock.setConfig('agent', { 'workflows.maxAskUserPerRun': 2.5 });
+    expect(readWorkflowsConfig().maxAskUserPerRun).toBe(3);
+  });
+
   it('branchNamingの既定はwf（GitLab運用規約形式は明示指定したときだけ有効になる）', () => {
     expect(readWorkflowsConfig().branchNaming).toBe('wf');
   });

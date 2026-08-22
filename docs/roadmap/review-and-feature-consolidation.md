@@ -110,7 +110,7 @@
   - W5 PR/MRのレビュー結果を取り込んでタスクへ反映する（[#339](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/339)）
   - W6 タスクごとにIssueを起票し、PRのレビューを経てマージする（後述。Issueは未起票）
   - W7 タスクからオーケストレーターへ判断を仰ぐ経路を作る（Issueは未起票）
-  - W8 オーケストレーターからユーザーへ確認する経路を作る（Issueは未起票）
+  - W8 オーケストレーターからユーザーへ確認する経路を作る（[#583](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/583)）
   - W9 タスク間の直接メッセージングを廃し、オーケストレーターの中継にする（Issueは未起票）
   - W10 中断からの自動再開（Issueは未起票）
   - W11 CIの完了待ちとブランチ保護への対応（Issueは未起票）

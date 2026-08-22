@@ -19,6 +19,11 @@ import {
   DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES,
 } from './orchestrator/forge';
 import { DEFAULT_STALL_REPEAT_COUNT, MIN_STALL_REPEAT_COUNT, MAX_STALL_REPEAT_COUNT } from './loop/stallDetector';
+import {
+  DEFAULT_MAX_ASK_USER_PER_RUN,
+  MIN_MAX_ASK_USER_PER_RUN,
+  MAX_MAX_ASK_USER_PER_RUN,
+} from './orchestrator/orchestratorSession';
 import { DEFAULT_PSEUDO_WORKTREE_EXCLUDE } from './orchestrator/pseudoWorktree';
 import { sanitizeForLog } from './orchestrator/sanitize';
 import { normalizeBranchNaming, type BranchNaming } from './orchestrator/worktree';
@@ -301,6 +306,14 @@ export interface WorkflowsConfig {
    */
   ciUpdateBranchMaxRetries: number;
   /**
+   * オーケストレーターが`ask_user`（design.md §16.33、Issue #583）を1つのrunで呼べる回数の
+   * 上限（`agent.workflows.maxAskUserPerRun`、既定3、`machine-overridable`）。方針1
+   * 「確認は最低限」を仕組みで担保する唯一の機械的な手段。上限に達した以降の`ask_user`は
+   * 拒否される（`OrchestratorControlPort.askUser`）。権限には関わらないため
+   * `forge`/`finalMerge`ほど強い制限は要らない。
+   */
+  maxAskUserPerRun: number;
+  /**
    * タスクブランチの命名方式（design.md §16.6「ブランチの命名方式」）。`machine-overridable`。
    * ブランチ名の形を決めるだけで、push先も権限も変えないため`forge`/`finalMerge`ほど
    * 強い制限は要らない。
@@ -502,6 +515,7 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     ciUpdateBranchMaxRetries: normalizeCiUpdateBranchMaxRetries(
       c.get<unknown>('workflows.ciUpdateBranchMaxRetries'),
     ),
+    maxAskUserPerRun: normalizeMaxAskUserPerRun(c.get<unknown>('workflows.maxAskUserPerRun')),
   };
 }
 
@@ -599,6 +613,21 @@ function normalizeStallRepeatCount(value: unknown): number {
     value <= MAX_STALL_REPEAT_COUNT
     ? value
     : DEFAULT_STALL_REPEAT_COUNT;
+}
+
+/**
+ * `agent.workflows.maxAskUserPerRun` の生値を安全な回数へ丸める（design.md §16.33、
+ * Issue #583）。`normalizeStallRepeatCount` と同じ「範囲外は既定へ」方針。整数でない・
+ * `MIN_MAX_ASK_USER_PER_RUN`未満・`MAX_MAX_ASK_USER_PER_RUN`超過はいずれも既定値
+ * （`DEFAULT_MAX_ASK_USER_PER_RUN`）へ丸める。
+ */
+function normalizeMaxAskUserPerRun(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= MIN_MAX_ASK_USER_PER_RUN &&
+    value <= MAX_MAX_ASK_USER_PER_RUN
+    ? value
+    : DEFAULT_MAX_ASK_USER_PER_RUN;
 }
 
 /** アクティブエディタが属するワークスペースフォルダ。無ければ先頭（設計書 §10）。 */

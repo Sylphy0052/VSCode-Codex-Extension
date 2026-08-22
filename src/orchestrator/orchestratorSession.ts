@@ -47,6 +47,23 @@ const ORCHESTRATOR_APPROVAL_MODE: Record<Provider, string> = {
 export const MAX_ORCHESTRATOR_EVENTS_PER_RUN = 500;
 
 /**
+ * `ask_user`（design.md §16.33、Issue #583）が1つのrunで呼べる回数の既定値。
+ *
+ * ロードマップの方針1「確認は最低限」を仕組みで担保する唯一の機械的な手段
+ * （呼べる条件の4つ自体はモデルの判断に委ねており、機械検証はしない）。
+ * `agent.workflows.maxAskUserPerRun`（`config.ts`）で変更できる。
+ */
+export const DEFAULT_MAX_ASK_USER_PER_RUN = 3;
+/** `agent.workflows.maxAskUserPerRun` の下限。0を許すと`ask_user`を封じる設定を配れて
+ * しまうが、それ自体は害が無いため0ではなく1にしてあるのは「最低1回は確認できる」を
+ * 既定の下限として保証するため（`stallRepeatCount`と同じ「範囲外は既定へ」方針）。 */
+export const MIN_MAX_ASK_USER_PER_RUN = 1;
+/** `agent.workflows.maxAskUserPerRun` の上限。乱発防止という目的から大きすぎる値は
+ * 意味が無いため、`stallRepeatCount`の上限（50）より小さい20に留める。 */
+export const MAX_MAX_ASK_USER_PER_RUN = 20;
+
+
+/**
  * 1回の送信本文の総量の上限。§16.4 の `MAX_EXPANDED_PROMPT_LENGTH` /
  * §16.21 の `MAX_COMPOSED_PROMPT_LENGTH` と同じ値・同じ動機（粗い安全弁）。
  */
