@@ -3882,13 +3882,24 @@ tasks:
     }
 
     it('finalMerge: autoでも、統合PR/MR作成の完了時点で既に「全体の停止」が押されていれば最終マージを試みない（旧: auto経路はperformFinalMergeの前にhaltedByUserを見ていなかった。兄弟の穴）', async () => {
+      // レビュー指摘（2026-08-23）: `pr view`/`pr merge`が呼ばれないことだけを見る形では、
+      // `performFinalMerge`入口のガード（`runner.ts`）と`runFinalMergeWithCiGate`へ渡す
+      // `isCancelled`（`forge.ts`）が同じ`haltedByUser`を見るため、入口のガード**だけ**を
+      // 消してもこのテストは通過したまま赤くならない（2重の防御の片方がもう片方をマスクする。
+      // design.md §16.25の確認事項6）。`isCancelled`はCIゲート（`runFinalMergeWithCiGate`）の
+      // 内側でしか働かないため、それより手前で起きる副作用を観測点にすれば入口ガードだけを
+      // 検証できる。`draftPullRequest: true`にすると、`performFinalMerge`は入口ガードの直後・
+      // `runFinalMergeWithCiGate`を呼ぶよりも前に統合PR/MRのready化（`gh pr ready <number>`）を
+      // 行う（design.md §16.18）。入口ガードが効いていれば`pr ready`は一度も呼ばれない。
+      // 入口ガードだけを消すと（`isCancelled`はまだ効かない箇所のため）`pr ready`が呼ばれて
+      // しまい、このテストが赤くなる
       const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
       const cli = fakeForgeCli({
         ciStatusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }],
       });
       const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
         git,
-        forge: fakeForgeDeps(cli),
+        forge: fakeForgeDeps(cli, { draftPullRequest: true }),
       });
       const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
       const runId = result.runId as string;
@@ -3903,6 +3914,13 @@ tasks:
       t1.finish('done', doneState('ok'));
       await flush();
 
+      // `pr ready`は、pullRequest: per-task（既定）のタスク層自身のPRready化
+      // （`runnerMerge.ts`の`buildMarkTaskPullRequestReady`。T1の統合ブランチへの取り込み時に
+      // 呼ばれ、`haltedByUser`とは無関係な既存の挙動）で1回はどうしても呼ばれてしまう。
+      // 入口ガードが効いていれば、統合PR/MRぶんの2回目の`pr ready`（`performFinalMerge`）は
+      // 呼ばれないため、合計はちょうど1回にとどまる。入口ガードだけを消すと2回になり赤くなる
+      const readyCalls = cli.calls.filter((c) => c.args[0] === 'pr' && c.args[1] === 'ready');
+      expect(readyCalls).toHaveLength(1);
       // CIの完了待ち・マージコマンドのいずれも一度も呼ばれない（統合PR/MRの作成自体は
       // `haltedByUser`と無関係に走る既存の仕様のため、ここでは確認しない）
       expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'view')).toBe(false);

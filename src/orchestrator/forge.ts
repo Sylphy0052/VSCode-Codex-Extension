@@ -1184,7 +1184,15 @@ export function parseGithubCiConclusion(stdout: string): CiConclusionResult {
     }
   }
   if (failed.length > 0) {
-    return { conclusion: 'failed', message: `失敗したチェックがあります: ${failed.join(', ')}` };
+    // 失敗したチェックの件数・名前に上限が無いと、チェックが数百あるリポジトリで
+    // このメッセージがそのまま`live.warnings`・ログへ入り巨大化する
+    // （レビュー指摘。2026-08-23）。他のCLI出力由来のメッセージと同じく`sanitizeForLog`
+    // で長さを切る（現状の値はGitHubのenum語彙なので制御文字等の実害は無いが、
+    // 「ここは通さなくてよい」と読ませない表記の一貫性のため）
+    return {
+      conclusion: 'failed',
+      message: sanitizeForLog(`失敗したチェックがあります: ${failed.join(', ')}`),
+    };
   }
   if (pending) {
     return { conclusion: 'pending' };
@@ -1237,7 +1245,11 @@ export function parseGitlabCiConclusion(stdout: string): CiConclusionResult {
   const status = (headPipeline as Record<string, unknown>)['status'];
   const normalized = typeof status === 'string' ? status.toLowerCase() : '';
   if (GITLAB_FAILURE_PIPELINE_STATUSES.has(normalized)) {
-    return { conclusion: 'failed', message: `パイプラインが失敗しました（status: ${normalized}）` };
+    // GitHub側と同じ理由で`sanitizeForLog`を通す（レビュー指摘。2026-08-23）
+    return {
+      conclusion: 'failed',
+      message: sanitizeForLog(`パイプラインが失敗しました（status: ${normalized}）`),
+    };
   }
   if (GITLAB_PASSED_PIPELINE_STATUSES.has(normalized)) {
     return { conclusion: 'passed' };
