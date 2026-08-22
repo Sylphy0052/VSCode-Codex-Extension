@@ -715,7 +715,7 @@ app-serverからの応答も同じstdoutから読むため、この2つで拡張
 
 Codex画面（`chatView.ts`）とClaude Code画面（`claudeChatView.ts`）が共通で使う実装は、次の2ファイルへ集約している。
 
-- `src/view/chatShared.ts`（issue #409）: 確認ダイアログ群（`confirmCompact` / `confirmRewindFiles` / `confirmStopBackgroundTask` / `confirmRunShellCommand` / `confirmMemoryAppend` / `confirmClaudeImport` / `confirmUsageCreditsRequest` / `confirmDebugCommand` / `confirmRevertDiff`）、diff操作（`handleOpenDiffFile` / `handleOpenDiffEditor` / `handleRevertDiff`）、`runExportTranscript`、`insertCodeIntoEditor` / `openCodeInNewFile`、画像・ファイル添付の投稿（`postImageData` / `postFileMentions`）、画面のHTML本体を組み立てる `ChatShellOptions` / `renderShell` など、プロバイダに依存しないヘルパーをまとめる。`chatView.ts` は後方互換のため移した関数を再輸出する
+- `src/view/chatShared.ts`（issue #409）: 確認ダイアログ群（`confirmCompact` / `confirmRewindFiles` / `confirmStopBackgroundTask` / `confirmRunShellCommand` / `confirmMemoryAppend` / `confirmClaudeImport` / `confirmUsageCreditsRequest` / `confirmDebugCommand` / `confirmRevertDiff`）、diff操作（`handleOpenDiffFile` / `handleOpenDiffEditor` / `handleRevertDiff`）、`runExportTranscript`、`insertCodeIntoEditor` / `openCodeInNewFile`、画像・ファイル添付の投稿（`postImageData` / `postFileMentions`）、画面のHTML本体を組み立てる `ChatShellOptions` / `renderShell` など、プロバイダに依存しないヘルパーをまとめる。`chatView.ts` / `claudeChatView.ts` はいずれもここから直接importする（`chatView.ts` による再輸出は無い。全体レビュー指摘への対応としてissue #420で再輸出ブロックを削除し、依存していたテストの輸入元も `chatShared.ts` へ付け替えた）
 - `src/view/chatManagerBase.ts`（issue #415。§16.10「実装の集約」参照）: `ChatViewManager` / `ClaudeChatViewManager` の重複を抽出した基底クラス `BaseChatViewManager` と、両者のパネルエントリが満たす最小集合 `BaseChatPanel`。パネルの表示・アタッチ・破棄、承認待ち・ターン完了の通知判定を持つ。`handleMessage` の分岐・`onSessionChange`・各種 `open*` メソッドはプロバイダごとの差が大きいため、引き続き各サブクラスに残る
 
 ### 9.7 応答中の指示（割り込みと待ち行列）
