@@ -112,6 +112,9 @@
   - 依存: W2←W1 / W4←W2 / W5←W4 / W6←W1
   - 前提: WF-AとWF-Bの完了（`runner.ts` / `forge.ts` / `planner.ts` / `roadmap.ts` を共有する）。
     両者とも完了済み（2026-08-22、WF-A: PR #447 / WF-B: PR #429）。着手可
+  - 事実: WF-A2（[#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466)）も
+    `runner.ts`（例: #374 `WorkflowRunner.dispose()`）を触るため、WF-Eとファイルの集合が交差する。
+    ワークフロー同士がファイルを共有しないという本ロードマップの並列規則に照らして判断すること
 
 - **WF-F チャット画面の会話操作と表示**（3項目、詳細は [chat-conversation-parity.md](chat-conversation-parity.md)）
   - X1 応答のMarkdown描画へ表・引用・ネストしたリストを足す（[#332](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/332)）
