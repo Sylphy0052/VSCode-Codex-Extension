@@ -127,6 +127,20 @@
     ワークフロー同士がファイルを共有しないという本ロードマップの並列規則に照らして判断すること
   - **決定: WF-EはWF-A2（#466）の完了を待つ**（2026-08-22）。上の交差があるため、
     並列規則に照らして順序を付けた。第2波はWF-Fのみ先に着手する
+  - **申し送り**（2026-08-22、WF-B の担当から。着手時の起動プロンプトへ含めること）
+    - **W6 が通すべき集約点の実体**。W6 は外部由来テキストの整形をT10の集約点へ通す前提であり、
+      新規に整形処理を書き起こすと集約が崩れる。モジュールは
+      [untrustedText.ts](../../src/orchestrator/untrustedText.ts)、仕様は
+      [design.md](../design.md) §16.24。公開関数は
+      `formatUntrusted(text, options)`（`options` は `{ id, field, maxLength, preserveNewlines?, nonce? }`。
+      nonce は省略時に `randomUUID()`。**1回の展開で複数フィールドを囲む場合は呼び出し側が
+      同じ nonce を明示的に渡す**）、`sanitizeInlineText(text, maxLength)`（一覧の要素向け）、
+      `truncateByCodePoint(...)`（サロゲートペアを割らない切り詰め）
+    - **使い分けは2系統ある。** プロンプトへ渡す経路は `formatUntrusted`、ログへ出す経路は
+      `sanitizeForLog`（Trojan Source / bidi制御文字対策）。取り違えないこと
+    - **`runner.ts` にロードマップ警告のログ出力6行がある。** WF-A のファイルだが、T16 の警告を
+      人へ見せる出口として必要だったため**ユーザーの承認を得た例外**として残してある（Issue #408）。
+      不審に見えても消さないこと。行番号は main が進んで当てにならないので識別子で探す
 
 - **WF-F チャット画面の会話操作と表示**（3項目、詳細は [chat-conversation-parity.md](chat-conversation-parity.md)）
   - X1 応答のMarkdown描画へ表・引用・ネストしたリストを足す（[#332](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/332)）
@@ -155,7 +169,15 @@
       正しい形が決まらない**
     - **`chatScript.ts`（2333行）はテンプレートリテラルのため型検査もlintも効かない。**
       WF-G は型情報を要するeslintルールを入れる回なので、この負債も同じ回で扱うのが筋
-      （WF-C の担当からの申し送り）
+      （型検査が効かないファイルが残っていると、型情報ルールの効果がそこだけ穴になる）。
+      `renderShell` の `chatShared.ts` への分離は WF-C で完了済みで、残るのはこの負債だけ。
+      解消に要ると見積もられているのは、webview JS の実ファイル化とビルド導入（esbuild等）・
+      CSP / nonce の見直し・エスケープ規約の全面的な書き換えの3点。
+      **WF-F が検分したうえで「X1〜X3 では分離しない」と判断している**（X1〜X3 が触るのは
+      `renderMarkdownInto` 付近と分岐・脇道質問のハンドラのみで局所的な一方、大規模移設は
+      CI落ちと回帰の両リスクが高く、カバレッジ下限の余裕も小さいため）
+    - **`chatScript.ts` のコメントにバッククォートを書かない。** テンプレートリテラルが切れて
+      `tsc` が壊れる
 
 ## W6 タスクごとにIssueを起票し、PRのレビューを経てマージする
 
