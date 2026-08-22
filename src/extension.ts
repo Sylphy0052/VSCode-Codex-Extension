@@ -90,6 +90,7 @@ import {
   planWorkflow,
   providerHintToProvider,
   resolveUniqueFileName,
+  reviewWorkflowPlan,
   slugifyGoal,
   validateSlugInput,
   locateSecurityWarningLine,
@@ -1532,7 +1533,7 @@ async function planWorkflowFromGoalCommand(
   );
 
   if (result.ok) {
-    await handlePlanSuccess(result, goal, workspaceRoot, view, log);
+    await handlePlanSuccess(result, goal, workspaceRoot, view, log, provider, host);
     return;
   }
   await handlePlanFailure(result, log);
@@ -1712,6 +1713,8 @@ async function planWorkflowFromRoadmapCommand(
       workspaceRoot,
       view,
       log,
+      provider,
+      host,
     );
   }
 
@@ -1818,6 +1821,28 @@ async function writeUniqueWorkflowFile(
  * Viewを開く（design.md §16.9手順4）。セキュリティ警告があれば、該当行へ移動したうえで
  * 強調して知らせる（design.md §16.9「多数のタスクに紛れた1件のallowを人が見落とすのを
  * 防ぐ」）。
+ *
+ * 保存の後、別の読み取り専用セッションでタスク分解の妥当性をレビューする
+ * （design.md §16.28、roadmap W3）。ゴール文からの生成（`planWorkflowFromGoalCommand`）と
+ * ロードマップからの生成（`planWorkflowFromRoadmapCommand`）の両方がこの関数を通るため、
+ * ここに置くことでどちらの起点で生成しても同じくレビューがかかる（片方だけ塞ぐ実装に
+ * しない）。
+ *
+ * **エディタとワークフローViewの表示は、レビューの完了を待たない。** レビューは
+ * `PLANNER_TURN_TIMEOUT_MS`（既定5分）までかかりうるため、表示までそれだけ人を待たせる
+ * と「保存は妨げない」という受入基準の実質を損なう。表示はまず`securityWarnings`だけで
+ * 出し、レビューはバックグラウンドで走らせて、指摘が見つかった時点で`previewDefinition`
+ * をもう一度呼んで警告欄へ追加し、`showWarningMessage`も別途出す（design.md §16.28）。
+ * このもう一度の呼び出しは無条件——ユーザーが既に別のrunの表示へ切り替えていた場合、
+ * その表示がレビュー結果の到着で差し替わりうる（フォーカスは奪わない。W3の受入基準の
+ * 対象外として許容している）。
+ *
+ * レビューを追いかける処理はバックグラウンドの`void`な即時実行関数（IIFE）の中にあり、
+ * この関数自体は先に`resolve`済みのため、IIFE内で投げた例外を受け取る呼び出し元が無い。
+ * `reviewWorkflowPlan`自体は例外を投げない設計だが、IIFE内の他の呼び出し
+ * （`withProgress`・`previewDefinition`・`showWarningMessage`）は投げうるため、
+ * **IIFE全体を`try/catch`で囲み、失敗しても`log.warn`に留めて表示済みの内容へは
+ * 波及させない。**
  */
 async function handlePlanSuccess(
   result: Extract<PlanWorkflowResult, { ok: true }>,
@@ -1825,6 +1850,8 @@ async function handlePlanSuccess(
   workspaceRoot: string,
   view: WorkflowViewManager,
   log: Logger,
+  provider: Provider,
+  host: TaskSessionHost,
 ): Promise<void> {
   const dirConfig = readWorkflowsConfig().dir;
   const dirAbs = path.join(workspaceRoot, dirConfig);
@@ -1842,8 +1869,10 @@ async function handlePlanSuccess(
   }
   const filePath = await writeUniqueWorkflowFile(dirAbs, fileName, existingBaseNames, result.yaml);
 
-  // エディタより先にViewを開く。エディタの`showTextDocument`が最後に呼ばれるほうへ
-  // フォーカスが残るようにするため（Viewのパネル作成自体はフォーカスを奪う作りのため）
+  // 生成直後の表示はレビューの完了を待たない（design.md §16.28「表示は保存直後に出す。
+  // レビューは後追いで警告欄へ足す」）。エディタより先にViewを開く。エディタの
+  // `showTextDocument`が最後に呼ばれるほうへフォーカスが残るようにするため（Viewの
+  // パネル作成自体はフォーカスを奪う作りのため）
   view.previewDefinition(
     filePath,
     result.definition,
@@ -1891,6 +1920,68 @@ async function handlePlanSuccess(
         (result.attempts > 1 ? '（検証エラーを踏まえて再生成しました）' : ''),
     );
   }
+
+  // タスク分解のレビュー（design.md §16.28）は表示の後を追いかけて走らせる。保存済み
+  // ファイル・既に開いたエディタ・上のトーストは待たない（await しない）。指摘があれば、
+  // 開いたままのプレビューへ後から追加する（`previewDefinition`は毎回スナップショットを
+  // 作り直すため、この2回目の呼び出しは1回目を上書きする。ただしユーザーが既に別のrunの
+  // 表示へ切り替えていた場合はその表示が差し替わりうる——design.md §16.28「限界」参照）。
+  //
+  // `reviewWorkflowPlan`自体は例外を投げない設計だが、この関数の外側は既に`resolve`済み
+  // （`handlePlanSuccess`の呼び出し元は待っていない）なので、IIFE内の他の呼び出し
+  // （`withProgress`・`previewDefinition`・`showWarningMessage`）が投げた場合に受け取る
+  // 呼び出し元がどこにも無く、未処理rejectになる。そのためIIFE全体を`try/catch`で囲み、
+  // catchでは`log.warn`に留める（レビューは警告を足すだけの機能なので、この経路の失敗で
+  // 保存済みの状態や既に開いた表示へ波及させてはならない）。
+  void (async () => {
+    try {
+      const review = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'ワークフローをレビューしています…',
+        },
+        () =>
+          reviewWorkflowPlan({
+            goal,
+            yaml: result.yaml,
+            provider,
+            host,
+            cwd: workspaceRoot,
+            log,
+          }),
+      );
+
+      if (review.findings.length === 0) {
+        return;
+      }
+
+      view.previewDefinition(filePath, result.definition, [
+        ...result.securityWarnings.map((w) => ({
+          kind: 'plannerSecurity' as const,
+          taskId: w.taskId,
+          message: w.message,
+        })),
+        ...review.findings.map((f) => ({
+          kind: 'plannerReview' as const,
+          taskId: f.taskIds[0],
+          message: f.taskIds.length > 0 ? `[${f.taskIds.join(', ')}] ${f.message}` : f.message,
+        })),
+      ]);
+
+      log.warn(
+        `[planner] タスク分解のレビューで指摘があります: ${review.findings
+          .map((f) => sanitizeForLog(f.message))
+          .join(' / ')}`,
+      );
+      void vscode.window.showWarningMessage(
+        `タスク分解のレビューで指摘があります（${review.findings.length}件）。` +
+          '内容を確認してください（自動では直していません。詳しくはログ）',
+      );
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      log.warn(`[planner] タスク分解のレビュー表示中にエラーが発生しました: ${sanitizeForLog(message)}`);
+    }
+  })();
 }
 
 /**
