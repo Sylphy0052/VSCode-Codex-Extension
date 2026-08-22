@@ -138,6 +138,48 @@ function fakeSession(startResult: unknown = START_RESULT): {
 const turnStarts = (sent: Sent[]): Record<string, unknown>[] =>
   sent.filter((s) => s.method === 'turn/start').map((s) => s.params);
 
+/**
+ * `start()`が想定外の応答を受けたときに投げることの確認（issue #460の穴1）。
+ *
+ * 同型の穴は`loadForkedThread`側では`chatSideQuestion.test.ts`「threadIdを読み取れない
+ * 応答は投げる」で既に塞がれている。`readThreadId()`は両者が共有する関数だが、
+ * `start()`側だけ確認が無い非対称だったため、`readThreadId()`が`undefined`を返す
+ * 4条件（thread無し・threadがオブジェクトでない・idが文字列でない・idが空文字）を
+ * 全て確認する。1条件だけでは「たまたま通った」可能性を消せず、`readThreadId()`の
+ * 実装（`src/appserver/chatSession.ts`）を変えたときに一部の分岐だけ壊れて見逃す
+ * おそれがあるため、コストが低い（`fakeSession`の応答を差し替えるだけ）ことも踏まえて
+ * 網羅する判断にした。
+ */
+describe('ChatSession.start の想定外応答', () => {
+  it('threadが無い応答は投げる', async () => {
+    const { session } = fakeSession({});
+    await expect(session.start('/w', emptyConfig)).rejects.toThrow(
+      /スレッドを開始できませんでした/u,
+    );
+  });
+
+  it('threadがオブジェクトでない応答は投げる', async () => {
+    const { session } = fakeSession({ thread: 'th-1' });
+    await expect(session.start('/w', emptyConfig)).rejects.toThrow(
+      /スレッドを開始できませんでした/u,
+    );
+  });
+
+  it('idが文字列でない応答は投げる', async () => {
+    const { session } = fakeSession({ thread: { id: 123 } });
+    await expect(session.start('/w', emptyConfig)).rejects.toThrow(
+      /スレッドを開始できませんでした/u,
+    );
+  });
+
+  it('idが空文字の応答は投げる', async () => {
+    const { session } = fakeSession({ thread: { id: '' } });
+    await expect(session.start('/w', emptyConfig)).rejects.toThrow(
+      /スレッドを開始できませんでした/u,
+    );
+  });
+});
+
 describe('ChatSession の計画モード', () => {
   it('普段はサンドボックスに触らない', async () => {
     const { session, sent } = fakeSession();
