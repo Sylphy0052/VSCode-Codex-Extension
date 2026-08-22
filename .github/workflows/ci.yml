@@ -1,7 +1,18 @@
-# mainへのpushとPRのたびにlint / typecheck / testを自動実行する。
+# mainへのpushとPRのたびに、checkジョブ（lint / typecheck / build / test:coverage）と
+# external-cliジョブを自動実行する。
 # 統合テスト（test:integration）はVSCodeのダウンロードとxvfbが必要なため対象外（Issue #360）。
 # ブランチ保護のrequired status checksはこのワークフローでは設定しない。
 # 必須化の手順・チェック名・判断のタイミングはdocs/repository-hygiene.mdを参照。
+#
+# 前提（セキュリティ監査、issue #463）:
+# - pull_request_targetは使わない（下記onはpull_request）。フォークPRのワークフローが
+#   読み取り専用トークンと分離されたキャッシュスコープで動くという保護は、この選択に
+#   依存している。pull_request_targetへ変えるとフォークPRからベースブランチの
+#   シークレットや書き込み権限トークンへ到達しうるため、変更時は影響を精査すること。
+# - .codex-cliはCODEX_CLI_VERSIONで固定したキーでのみ復元する（external-cliジョブの
+#   Cache Codex CLIステップ）。ここには外部から取得した実行可能ファイルが入り、
+#   後続ステップでそのまま実行されるため、キーの設計を緩めると外部から中身を
+#   汚染して実行させる余地が生まれうる。
 name: CI
 
 on:
@@ -38,7 +49,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: '20'
           cache: npm
 
       - name: Install dependencies
@@ -77,7 +88,7 @@ jobs:
       # Codexのバージョンアップに気づけることを両立するため、上げるときは
       # このワークフローの変更として明示的に行う（実測: #456。0.149.0でロールアウト
       # 検出まで1674ms）。
-      CODEX_CLI_VERSION: "0.149.0"
+      CODEX_CLI_VERSION: '0.149.0'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -85,7 +96,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: '20'
 
       # Codex CLIは本体のnode_modulesとは別のディレクトリへ、pinしたバージョンだけを
       # 入れる（package.jsonのdevDependenciesには加えない。309MBあり、この検査以外の

@@ -134,8 +134,62 @@ test('codex app-serverのthread/startがAPIキーなしでthreadIdを返す（de
     );
     assert.notEqual(threadId, '');
   } finally {
-    proc.kill('SIGTERM');
+    await terminateProcess(proc);
     rmSync(cwd, { recursive: true, force: true });
     rmSync(codexHome, { recursive: true, force: true });
   }
 });
+
+// proc.kill()はシグナルを送るだけで、実際にプロセスが終了したかは待たない。
+// codex app-serverがSIGTERMを無視するか終了に時間がかかる場合、`exit`/`close`を
+// 誰も購読していないと`node --test`が子プロセスの終了を待ち続け、CIのジョブの
+// timeout-minutes: 10まで無駄にハングしうる（issue #463）。
+// ここではSIGTERMを送った後、一定時間内に終了しなければSIGKILLへエスカレーションし、
+// それでも終了しない場合はエラーとして諦める（無限には待たない）。
+const TERMINATE_GRACE_MS = 5_000;
+const TERMINATE_KILL_MS = 5_000;
+
+function terminateProcess(proc) {
+  if (proc.exitCode !== null || proc.signalCode !== null) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let killTimer;
+
+    const onExit = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(graceTimer);
+      clearTimeout(killTimer);
+      resolve();
+    };
+
+    proc.once('exit', onExit);
+
+    const graceTimer = setTimeout(() => {
+      proc.kill('SIGKILL');
+      killTimer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        proc.removeListener('exit', onExit);
+        reject(
+          new Error(
+            `codex app-serverがSIGKILL後も${TERMINATE_KILL_MS}ms以内に終了しなかった`,
+          ),
+        );
+      }, TERMINATE_KILL_MS);
+      // このタイマーだけのためにプロセス終了を待たせない。
+      killTimer.unref();
+    }, TERMINATE_GRACE_MS);
+    // このタイマーだけのためにプロセス終了を待たせない。
+    graceTimer.unref();
+
+    proc.kill('SIGTERM');
+  });
+}
