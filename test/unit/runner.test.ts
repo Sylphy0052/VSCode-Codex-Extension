@@ -6475,14 +6475,19 @@ tasks:
 
   /**
    * 復元のやり直しを直列にしたぶん、1件目が例外を投げるとそこで打ち切られて2件目以降が
-   * 永久に`merging`のまま残る（レビュー指摘7）。1件ごとに拾って先へ進むことを確かめる。
-   *
-   * `startMerge`自体が例外を受け止めて`markMergeFailed`へ落とすようになった（Issue #437）
-   * ため、1件目は`merging`に留まらず`failed`で確定する。`resumeMergesSequentially`の
-   * `try/catch`（レビュー指摘7）は、その`markMergeFailed`より前の層で例外が起きた場合
-   * （`self.persist`等）に2件目以降の続行を守る最後の安全網として引き続き必要。
+   * 永久に`merging`のまま残る（レビュー指摘7）。1件ごとに拾って先へ進むことを確かめる…
+   * つもりだったが、`throwingGit`が投げる例外は`startMerge`（`runnerMerge.ts`）内の
+   * `commitUncommittedChangesIfNeeded`が最初に受け止めてしまう。`startMerge`自体が
+   * 例外を受け止めて`markMergeFailed`へ落とすようになった（Issue #437）ため、この
+   * テストで実際に検証できているのは`startMerge`内部の`try/catch`だけで、
+   * `resumeMergesSequentially`（`runnerRestore.ts`）の`try/catch`は1回も例外を
+   * 受け取っていない。守ろうとした性質（1件目の失敗で2件目以降を止めない）自体は
+   * 保たれているが、それを保証しているのが`startMerge`側なのか
+   * `resumeMergesSequentially`側なのかをこのテストは区別できない
+   * （`resumeMergesSequentially`の`try/catch`を消しても同じ結果で通る）。
+   * `resumeMergesSequentially`自身の`try/catch`は次のテストが受け持つ。
    */
-  it('リロード後の復元は、1件目が例外で落ちても2件目のやり直しを続ける', async () => {
+  it('リロード後の復元は、1件目が例外で落ちても2件目のやり直しを続ける（startMerge内で受け止める経路）', async () => {
     const base = fakeGit();
     const throwingGit: FakeGitHandle = {
       calls: base.calls,
@@ -6503,6 +6508,89 @@ tasks:
     // 2件目のやり直しは打ち切られず走り切る
     expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
     expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+  });
+
+  /**
+   * 前のテストと違い、`startMerge`を呼ぶより前の層（`resumeMergeAfterReload`が
+   * `self.deps.store.find(runId)`を読む箇所、`runnerRestore.ts`）で例外を起こし、
+   * `resumeMergesSequentially`の`try/catch`が実際に例外を受け止めて次のtaskIdへ
+   * 進むことを確かめる。ここで例外を起こすのは`store.find`が最初の1回だけ投げる
+   * フェイクにしたためで、`startMerge`自体は一度も呼ばれない
+   * （T1の状態は復元前の`merging`のまま固着する＝レビュー指摘が言う「1件目の失敗が
+   * 2件目を道連れにする」を防げているかどうかの純粋な検証になる）。
+   */
+  it('リロード後の復元は、store.findが例外を投げても2件目のやり直しを続ける（resumeMergesSequentially自身のtry/catch）', async () => {
+    class ThrowOnceStore extends WorkflowRunStore {
+      private calls = 0;
+      override find(runId: string): PersistedRun | undefined {
+        this.calls += 1;
+        if (this.calls === 1) {
+          throw new Error('storeの読み出しに失敗しました');
+        }
+        return super.find(runId);
+      }
+    }
+    const store = new ThrowOnceStore(fakeMemento());
+    const runId = '00000000-0000-4000-8000-000000000413';
+    const persistedTask = (id: string) => ({
+      state: 'merging' as const,
+      sessionId: `session-${id}`,
+      cwd: `/repo/.agents/worktrees/${runId}/${id}`,
+      branch: `wf/${runId}/${id}`,
+      submissionCount: 1,
+      retryCount: 0,
+      manualRetryCount: 0,
+      failure: undefined,
+      pullRequestNumber: undefined,
+      pullRequestUrl: undefined,
+    });
+    await store.update(runId, () => ({
+      runId,
+      defPath: '/repo/.agents/workflows/lease.yaml',
+      workspaceRoot: '/repo',
+      startedAt: new Date().toISOString(),
+      finishedAt: undefined,
+      tasks: { T1: persistedTask('T1'), T2: persistedTask('T2') },
+      haltedByUser: false,
+      integrationBranch: `wf/${runId}/integration`,
+      integrationPullRequestNumber: undefined,
+      integrationPullRequestUrl: undefined,
+      finalMergeOutcome: undefined,
+    }));
+
+    const errorLog = vi.fn();
+    const git = fakeGit();
+    const host = new FakeHost();
+    const runner = new WorkflowRunner({
+      hosts: { codex: host, claude: host },
+      worktreeQueue: new WorktreeCreationQueue(),
+      git,
+      fs: identityFs,
+      filePort: filePort(PARALLEL_YAML),
+      store,
+      log: { ...fakeLogger, error: errorLog },
+      readBaseline: () => ({
+        codexSandbox: 'read-only',
+        codexApprovalMode: 'on-request',
+        claudePermissionMode: 'manual',
+        allowAutoApprove: true,
+        allowClaudeBypassPermissions: false,
+      }),
+    });
+
+    await runner.restoreRunsForView();
+    await flush();
+
+    // T1は`store.find`が投げた時点で打ち切られ、復元前の`merging`のまま固着する
+    // （`startMerge`は一度も呼ばれていない）。それでもT2のやり直しは続いて完了する
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+    // catch節のログ文言（`runnerRestore.ts`）も検証する
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `[workflow ${runId}/T1] リロード後のマージのやり直しに失敗しました`,
+      ),
+    );
   });
 
   it('リロード後の復元は1件目が衝突しても2件目を割り込ませない', async () => {
