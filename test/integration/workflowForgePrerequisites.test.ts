@@ -7,6 +7,7 @@ import { readManifest } from './helpers/manifest';
 import {
   describeSnapshot,
   FakeTaskSessionHost,
+  mergeCommitSubject,
   RecordingCli,
   stateOf,
   taskOf,
@@ -187,7 +188,7 @@ suite('PR/MRの前提が欠けている場合（design.md §16.18）', () => {
 
     const log = git('log', '--oneline', `wf/${runId}/integration`);
     assert.ok(
-      log.includes(`Merge task T1 (run ${runId})`),
+      log.includes(mergeCommitSubject('T1', runId)),
       `統合ブランチへローカルのマージが入っていない: ${log}`,
     );
   });

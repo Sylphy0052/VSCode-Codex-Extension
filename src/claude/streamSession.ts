@@ -3,6 +3,7 @@ import type { ApprovalDecision } from '../appserver/approvals';
 import {
   addApproval,
   appendNotice,
+  appendSideQuestion,
   enqueue,
   removeApproval,
   removeQueued,
@@ -26,11 +27,13 @@ import {
   buildMcpStatusRequest,
   buildReloadSkillsRequest,
   buildRenameSessionRequest,
+  buildRewindConversationRequest,
   buildRewindFilesRequest,
   buildSessionCostRequest,
   buildSetEffortRequest,
   buildSetModelRequest,
   buildSetPermissionModeRequest,
+  buildSideQuestionRequest,
   buildStopTaskRequest,
   buildUserMessage,
   describeCanUseTool,
@@ -40,15 +43,23 @@ import {
   readContextUsage,
   readCurrentPermissionMode,
   readControlRequest,
+  readControlRequestProgress,
   readControlResponse,
   readExtraUsage,
   readMcpServersList,
+  readRewindConversationResult,
   readRewindFilesResult,
   readSessionCost,
+  readSideQuestionResult,
   type ControlResponse,
+  type ControlRequestProgress,
   type IncomingControlRequest,
+  type RewindConversationResult,
   type RewindFilesResult,
+  type SideQuestionHistoryEntry,
+  type SideQuestionResult,
 } from './control';
+import { forkFromTurn, type ForkFromTurnResult } from './forkFromTurn';
 import type { Attachment } from '../provider/attachments';
 import type { McpServerView } from '../provider/mcpServers';
 import type { SkillsSnapshot } from '../provider/skills';
@@ -113,6 +124,36 @@ export class ClaudeStreamSession {
   private commandList: SlashCommand[] = [];
   /** `rewind_files` の応答待ち。requestIdごとに解決関数を覚える（design.md「Claude Codeの巻き戻し」）。 */
   private readonly rewindWaiting = new Map<string, (result: RewindFilesResult) => void>();
+  /**
+   * `rewind_conversation` の応答待ち（issue #333、design.md §14.61）。
+   * `rewindWaiting` と同じ形（requestIdごとに解決関数を覚える）。
+   */
+  private readonly rewindConversationWaiting = new Map<
+    string,
+    (result: RewindConversationResult) => void
+  >();
+  /**
+   * `side_question` の応答待ち（issue #334、design.md §14.62）。
+   * `rewindConversationWaiting` と同じ形に、進捗通知（`control_request_progress`。
+   * `api_retry`時にユーザーへ「なぜ待たされているか」を伝えるために使う）を都度渡す
+   * `onProgress` を添える。
+   */
+  private readonly sideQuestionWaiting = new Map<
+    string,
+    {
+      resolve: (result: SideQuestionResult) => void;
+      onProgress: (progress: ControlRequestProgress) => void;
+    }
+  >();
+  /**
+   * このセッションが `--fork-session` で開いたものか（issue #333、design.md §14.61）。
+   *
+   * `rewind_conversation` はforkしていないセッション（`-r` のみのresume）へ送ると
+   * 元セッションのtranscriptを壊す（`control.ts` の `buildRewindConversationRequest`
+   * 参照）。`start()` の `target.kind` で確定し、以後このプロセスが生きている間ずっと
+   * 変わらない。
+   */
+  private isForkSession = false;
   /**
    * `mcp_status` の応答待ち（design.md §16.21「ツールの可視性の確認」）。
    * `rewindWaiting` と同じ形（requestIdごとに解決関数を覚える）。
@@ -186,6 +227,18 @@ export class ClaudeStreamSession {
     this.update(appendNotice(this.state, id, text));
   }
 
+  /**
+   * 脇道の質問（issue #334、design.md §14.62）を会話へ1項目として残す/更新する。
+   * `noteLocalEvent`と同じくCLIとのやり取り（transcript）には一切乗らない、
+   * この画面だけの表示。同じidで呼び直すと上書きする（`appendSideQuestion`参照）。
+   */
+  noteSideQuestion(
+    id: string,
+    display: { status: string; text: string; detail: string },
+  ): void {
+    this.update(appendSideQuestion(this.state, id, display));
+  }
+
   /** プロセスを起動する。発言はこの後 `send` で流す。 */
   start(options: ClaudeStreamOptions): void {
     // 現状の`claudeChatView.ts`（`openNew`/`openTaskSession`/resume/fork/restore）は
@@ -199,6 +252,7 @@ export class ClaudeStreamSession {
     // （issue #355のレビュー指摘: 断定していた「複数回呼ばれる」根拠が誤りだったため
     // 訂正）。
     this.releasePendingWaiters();
+    this.isForkSession = options.target.kind === 'fork';
 
     const { args, warnings } = buildClaudeStreamArgs({
       target: options.target,
@@ -734,6 +788,107 @@ export class ClaudeStreamSession {
     });
   }
 
+  /**
+   * 会話の途中のターンから分岐する（issue #333、design.md §14.61）。
+   *
+   * `--fork-session` で開いたセッションだけに限る。forkしていないセッションへ送ると
+   * 元セッションのtranscriptを壊す（`control.ts` の `buildRewindConversationRequest`
+   * 参照）ため、呼び出し側の確認を待たずここでガードする。
+   *
+   * @param userMessageUuids 会話中の全ユーザー発言uuid（古い順）
+   * @param targetUuid 分岐したい発言（この発言の手前まで戻す）
+   */
+  rewindConversationToTurn(
+    userMessageUuids: readonly string[],
+    targetUuid: string,
+  ): Promise<ForkFromTurnResult> {
+    if (!this.isForkSession) {
+      return Promise.resolve({
+        ok: false,
+        prefillText: undefined,
+        error: {
+          message: 'forkしていないセッションへは送れません（元セッションのtranscriptが壊れるため）',
+          origin: 'app',
+        },
+        succeededCount: 0,
+      });
+    }
+    if (this.proc === undefined) {
+      return Promise.resolve({
+        ok: false,
+        prefillText: undefined,
+        error: { message: 'セッションが起動していません', origin: 'app' },
+        succeededCount: 0,
+      });
+    }
+    return forkFromTurn(userMessageUuids, targetUuid, (uuid) =>
+      this.requestRewindConversation(uuid),
+    );
+  }
+
+  /**
+   * `rewind_conversation` を1件送る。`interrupt_if_running` は常にtrueで送る
+   * （issue #333の実装指示。走行中のターンがあれば中断してから戻す）。
+   */
+  private requestRewindConversation(targetUuid: string): Promise<RewindConversationResult> {
+    const requestId = this.claim('rewindConversation');
+    return new Promise((resolve) => {
+      this.rewindConversationWaiting.set(requestId, resolve);
+      this.write(buildRewindConversationRequest(requestId, targetUuid, true));
+    });
+  }
+
+  /**
+   * 脇道の質問を送る（issue #334、design.md §14.62、Codexの `/btw` 相当）。
+   *
+   * Codexの `/btw`（`chatView.ts` の `startSideQuestion`）は `thread/fork` で別スレッドを
+   * 作ってから聞くが、Claude Codeの `side_question` は**新しいセッションを作らない**。
+   * 今つながっている1本のCLIプロセスへ直接 `control_request` を送り、応答も1往復で返る
+   * （design.md §14.62）。そのため戻り値は新しいタブへの案内ではなく、聞いた結果そのもの。
+   *
+   * 走行中のターンがあっても送れる（実測、design.md §14.62）。`rewind_conversation`の
+   * ような「先に確認して弾く」ガードはここには無い（CLI側に制約が無いと分かっているため）。
+   *
+   * 空文字・空白のみの`question`はCLIへ送らずここで弾く（レビュー指摘・design.md §14.62）。
+   * 実測でCLIは`question`の型・空文字を検証せず、省略時は文字列`"undefined"`、オブジェクト
+   * なら`"[object Object]"`をそのまま質問文としてモデルへ渡してしまうことが分かっている。
+   * 呼び出し元（`claudeChatView.ts`の`runPseudoCommand`）でも`trimmedArgsOrUndefined`で
+   * 空文字を弾いているが、境界（`ClaudeStreamSession`の公開API）でも同じ検証を重ねる
+   * （呼び出し元の判定漏れや将来の別経路に備えた多層防御）。
+   *
+   * @param onProgress `control_request_progress`の都度呼ぶ。`api_retry`はモデル呼び出しの
+   * 再試行中で、何も出さないと固まって見える（design.md §14.62「600秒」の節参照）。
+   */
+  askSideQuestion(
+    question: string,
+    history: readonly SideQuestionHistoryEntry[],
+    onProgress: (progress: ControlRequestProgress) => void = () => undefined,
+  ): Promise<SideQuestionResult> {
+    if (question.trim() === '') {
+      return Promise.resolve({
+        ok: false,
+        response: undefined,
+        synthetic: undefined,
+        refusalFallback: undefined,
+        error: { message: '質問が空です', origin: 'app' },
+      });
+    }
+    if (this.proc === undefined) {
+      return Promise.resolve({
+        ok: false,
+        response: undefined,
+        synthetic: undefined,
+        refusalFallback: undefined,
+        error: { message: 'セッションが起動していません', origin: 'app' },
+      });
+    }
+    const requestId = this.claim('sideQuestion');
+    return new Promise((resolve) => {
+      this.sideQuestionWaiting.set(requestId, { resolve, onProgress });
+      this.write(buildSideQuestionRequest(requestId, question, history));
+    });
+  }
+
   private requestRewindFiles(userMessageId: string, dryRun: boolean): Promise<RewindFilesResult> {
     if (this.proc === undefined) {
       return Promise.resolve({
@@ -851,6 +1006,13 @@ export class ClaudeStreamSession {
         const changed = readCommandsChanged(event);
         if (changed !== undefined) {
           this.setCommands(changed);
+        }
+
+        // 脇道の質問の処理経過（issue #334、design.md §14.62）。`control_response`とは
+        // 別経路（`type:"system"`）で届くため、control_response読み取りの手前で拾う
+        const progress = readControlRequestProgress(event);
+        if (progress !== undefined) {
+          this.sideQuestionWaiting.get(progress.requestId)?.onProgress(progress);
         }
 
         const request = readControlRequest(event);
@@ -976,6 +1138,27 @@ export class ClaudeStreamSession {
     if (outgoing?.kind === 'rewindFiles') {
       this.rewindWaiting.get(response.requestId)?.(readRewindFilesResult(response));
       this.rewindWaiting.delete(response.requestId);
+      return;
+    }
+
+    if (outgoing?.kind === 'rewindConversation') {
+      this.rewindConversationWaiting.get(response.requestId)?.(readRewindConversationResult(response));
+      this.rewindConversationWaiting.delete(response.requestId);
+      return;
+    }
+
+    if (outgoing?.kind === 'sideQuestion') {
+      const result = readSideQuestionResult(response);
+      // CLI由来のエラー（origin:'cli'）は画面には汎用文言へ丸めて出す
+      // （`sideQuestion.ts`の`describeSideQuestionError`）が、丸めた元の文言はどこにも
+      // 残らないと、CLI側の予期しない構造エラーが多発したときに原因調査ができない
+      // （セキュリティ監査の指摘、issue #340横断レビュー）。開発者向けの内部ログにだけ
+      // 元の文言を残す
+      if (result.error?.origin === 'cli') {
+        this.log.warn(`side_questionがCLI側のエラーを返しました: ${result.error.message}`);
+      }
+      this.sideQuestionWaiting.get(response.requestId)?.resolve(result);
+      this.sideQuestionWaiting.delete(response.requestId);
       return;
     }
 
@@ -1112,6 +1295,28 @@ export class ClaudeStreamSession {
       });
     }
     this.rewindWaiting.clear();
+    // rewind_conversationの応答待ちも解放する。放置するとawaitしている側が永遠に待つ
+    for (const resolve of this.rewindConversationWaiting.values()) {
+      resolve({
+        rewound: false,
+        targetMessageUuid: undefined,
+        prefillText: undefined,
+        precedingAssistantUuid: undefined,
+        error: { message: 'セッションが終了しました', origin: 'app' },
+      });
+    }
+    this.rewindConversationWaiting.clear();
+    // side_questionの応答待ちも解放する。放置するとawaitしている側が永遠に待つ
+    for (const { resolve } of this.sideQuestionWaiting.values()) {
+      resolve({
+        ok: false,
+        response: undefined,
+        synthetic: undefined,
+        refusalFallback: undefined,
+        error: { message: 'セッションが終了しました', origin: 'app' },
+      });
+    }
+    this.sideQuestionWaiting.clear();
     // mcp_statusの応答待ちも解放する。放置するとawaitしている側が永遠に待つ
     for (const resolve of this.mcpStatusWaiting.values()) {
       resolve(undefined);
@@ -1143,6 +1348,8 @@ type OutgoingKind =
   | 'sessionCost'
   | 'settings'
   | 'rewindFiles'
+  | 'rewindConversation'
+  | 'sideQuestion'
   | 'mcpStatus'
   | 'reloadSkills';
 

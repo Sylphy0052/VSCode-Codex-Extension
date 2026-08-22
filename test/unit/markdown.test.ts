@@ -72,7 +72,10 @@ describe('parseMarkdown（ブロック）', () => {
       {
         type: 'list',
         ordered: false,
-        items: [[{ type: 'text', value: '1つ目' }], [{ type: 'text', value: '2つ目' }]],
+        items: [
+          { inline: [{ type: 'text', value: '1つ目' }], depth: 0 },
+          { inline: [{ type: 'text', value: '2つ目' }], depth: 0 },
+        ],
       },
     ]);
   });
@@ -83,7 +86,10 @@ describe('parseMarkdown（ブロック）', () => {
       {
         type: 'list',
         ordered: true,
-        items: [[{ type: 'text', value: '1つ目' }], [{ type: 'text', value: '2つ目' }]],
+        items: [
+          { inline: [{ type: 'text', value: '1つ目' }], depth: 0 },
+          { inline: [{ type: 'text', value: '2つ目' }], depth: 0 },
+        ],
       },
     ]);
   });
@@ -135,7 +141,11 @@ describe('parseMarkdown（ブロック）', () => {
       { type: 'heading', level: 1, inline: [{ type: 'text', value: 'タイトル' }] },
       { type: 'paragraph', lines: [[{ type: 'text', value: '本文です' }]] },
       { type: 'codeblock', lang: 'js', code: 'console.log(1)', closed: true },
-      { type: 'list', ordered: false, items: [[{ type: 'text', value: '箇条書き' }]] },
+      {
+        type: 'list',
+        ordered: false,
+        items: [{ inline: [{ type: 'text', value: '箇条書き' }], depth: 0 }],
+      },
     ]);
   });
 
@@ -151,6 +161,148 @@ describe('parseMarkdown（ブロック）', () => {
 
   it('空文字列は空のトークン列になる', () => {
     expect(parseMarkdown('')).toEqual([]);
+  });
+
+  it('GFMの表を寄せ指定込みで拾う（issue #332）', () => {
+    const md = '| 名前 | 値 | 備考 |\n| :-- | :-: | --: |\n| a | 1 | 右寄せ |\n| b | 2 | 右寄せ2 |';
+    expect(parseMarkdown(md)).toEqual([
+      {
+        type: 'table',
+        align: ['left', 'center', 'right'],
+        header: [
+          [{ type: 'text', value: '名前' }],
+          [{ type: 'text', value: '値' }],
+          [{ type: 'text', value: '備考' }],
+        ],
+        rows: [
+          [
+            [{ type: 'text', value: 'a' }],
+            [{ type: 'text', value: '1' }],
+            [{ type: 'text', value: '右寄せ' }],
+          ],
+          [
+            [{ type: 'text', value: 'b' }],
+            [{ type: 'text', value: '2' }],
+            [{ type: 'text', value: '右寄せ2' }],
+          ],
+        ],
+      },
+    ]);
+  });
+
+  it('寄せ指定の無い表はalignがundefinedのまま列数分並ぶ', () => {
+    const md = '| a | b |\n| --- | --- |\n| 1 | 2 |';
+    expect(parseMarkdown(md)).toEqual([
+      {
+        type: 'table',
+        align: [undefined, undefined],
+        header: [[{ type: 'text', value: 'a' }], [{ type: 'text', value: 'b' }]],
+        rows: [[[{ type: 'text', value: '1' }], [{ type: 'text', value: '2' }]]],
+      },
+    ]);
+  });
+
+  it('ネストした箇条書きがdepthを保つ', () => {
+    const md = '- 親1\n  - 子1\n  - 子2\n- 親2';
+    expect(parseMarkdown(md)).toEqual([
+      {
+        type: 'list',
+        ordered: false,
+        items: [
+          { inline: [{ type: 'text', value: '親1' }], depth: 0 },
+          { inline: [{ type: 'text', value: '子1' }], depth: 1 },
+          { inline: [{ type: 'text', value: '子2' }], depth: 1 },
+          { inline: [{ type: 'text', value: '親2' }], depth: 0 },
+        ],
+      },
+    ]);
+  });
+
+  it('インデントが2階層以上飛んでも直前より1段までしか深くならない', () => {
+    const md = '- 親\n        - 深すぎる子';
+    expect(parseMarkdown(md)).toEqual([
+      {
+        type: 'list',
+        ordered: false,
+        items: [
+          { inline: [{ type: 'text', value: '親' }], depth: 0 },
+          { inline: [{ type: 'text', value: '深すぎる子' }], depth: 1 },
+        ],
+      },
+    ]);
+  });
+
+  it('タスクリストをchecked付きで拾う', () => {
+    const md = '- [ ] 未完了\n- [x] 完了\n- [X] 完了大文字';
+    expect(parseMarkdown(md)).toEqual([
+      {
+        type: 'list',
+        ordered: false,
+        items: [
+          { inline: [{ type: 'text', value: '未完了' }], depth: 0, checked: false },
+          { inline: [{ type: 'text', value: '完了' }], depth: 0, checked: true },
+          { inline: [{ type: 'text', value: '完了大文字' }], depth: 0, checked: true },
+        ],
+      },
+    ]);
+  });
+
+  it('引用を複数行まとめてquoteトークンへ拾う', () => {
+    expect(parseMarkdown('> 1行目\n> 2行目')).toEqual([
+      {
+        type: 'quote',
+        lines: [[{ type: 'text', value: '1行目' }], [{ type: 'text', value: '2行目' }]],
+      },
+    ]);
+  });
+
+  it('水平線（---, ***, ___）をhrトークンへ拾う', () => {
+    expect(parseMarkdown('---')).toEqual([{ type: 'hr' }]);
+    expect(parseMarkdown('***')).toEqual([{ type: 'hr' }]);
+    expect(parseMarkdown('___')).toEqual([{ type: 'hr' }]);
+  });
+
+  it('打消し線（~~）をstrikeトークンへ拾う（inline側）', () => {
+    expect(parseInline('~~削除済み~~')).toEqual([{ type: 'strike', value: '削除済み' }]);
+  });
+
+  it('ストリーミング中の表（区切り行だけ届いてデータ行が無い）でも例外を投げずヘッダだけの表になる', () => {
+    expect(() => parseMarkdown('| a | b |\n| --- | --- |')).not.toThrow();
+    expect(parseMarkdown('| a | b |\n| --- | --- |')).toEqual([
+      {
+        type: 'table',
+        align: [undefined, undefined],
+        header: [[{ type: 'text', value: 'a' }], [{ type: 'text', value: 'b' }]],
+        rows: [],
+      },
+    ]);
+  });
+
+  it('ストリーミング中の表（ヘッダ行のみで区切り行が未着）は表と判定せず段落のまま壊れない', () => {
+    expect(() => parseMarkdown('| a | b |')).not.toThrow();
+    expect(parseMarkdown('| a | b |')).toEqual([
+      { type: 'paragraph', lines: [[{ type: 'text', value: '| a | b |' }]] },
+    ]);
+  });
+
+  it('ストリーミング中の引用（途中で入力が切れる）でも例外を投げず引用として拾う', () => {
+    expect(() => parseMarkdown('> 途中まで書いた引用')).not.toThrow();
+    expect(parseMarkdown('> 途中まで書いた引用')).toEqual([
+      { type: 'quote', lines: [[{ type: 'text', value: '途中まで書いた引用' }]] },
+    ]);
+  });
+
+  it('未閉じのコードフェンス中に表・引用らしき記法があってもコード扱いのまま壊れない', () => {
+    const md = '```\n| a | b |\n| --- | --- |\n> 引用ではない';
+    expect(() => parseMarkdown(md)).not.toThrow();
+    expect(parseMarkdown(md)).toEqual([
+      {
+        type: 'codeblock',
+        lang: '',
+        code: '| a | b |\n| --- | --- |\n> 引用ではない',
+        closed: false,
+      },
+    ]);
   });
 });
 
@@ -178,6 +330,16 @@ describe('MARKDOWN_PARSE_SOURCE（webview埋め込み用ソース）', () => {
     '```\n閉じていないフェンス',
     '<img src=x onerror="alert(1)">',
     '1. 番号1\n2. 番号2',
+    '| a | b |\n| :-- | --: |\n| 1 | 2 |\n| 3 | 4 |',
+    '| a | b |\n| --- | --- |',
+    '| a | b |',
+    '- 親1\n  - 子1\n    - 孫1\n  - 子2\n- 親2',
+    '- [ ] 未完了\n- [x] 完了',
+    '> 引用1行目\n> 引用2行目',
+    '> 途中まで書いた引用',
+    '---\n***\n___',
+    'これは~~取り消し線~~です',
+    '```\n| a | b |\n| --- | --- |\n> 引用ではない',
   ];
 
   for (const fixture of fixtures) {

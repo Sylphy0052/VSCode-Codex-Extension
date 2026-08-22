@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildInitInstructionText,
+  CLAUDE_PSEUDO_COMMANDS,
   CODEX_PSEUDO_COMMANDS,
   routePseudoCommand,
   trimmedArgsOrUndefined,
@@ -27,6 +28,17 @@ describe('CODEX_PSEUDO_COMMANDS', () => {
     const btw = CODEX_PSEUDO_COMMANDS.find((c) => c.name === 'btw');
     expect(btw?.action).toBe('sideQuestion');
     expect(btw?.argumentHint).not.toBe('');
+  });
+});
+
+describe('CLAUDE_PSEUDO_COMMANDS（issue #334、design.md §14.62）', () => {
+  it('/btw だけを持つ（/compact・/initはClaude Code側では別経路のため含めない）', () => {
+    expect(CLAUDE_PSEUDO_COMMANDS.map((c) => c.name)).toEqual(['btw']);
+  });
+
+  it('CODEX_PSEUDO_COMMANDSのbtwと同じ定義を共有する（Codex側の挙動を変えない）', () => {
+    const codexBtw = CODEX_PSEUDO_COMMANDS.find((c) => c.name === 'btw');
+    expect(CLAUDE_PSEUDO_COMMANDS[0]).toBe(codexBtw);
   });
 });
 

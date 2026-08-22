@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ClaudeSessionStore } from '../../src/claude/sessionStore';
 import { ClaudeStreamSession, type ClaudeStreamOptions } from '../../src/claude/streamSession';
+import type { SideQuestionHistoryEntry } from '../../src/claude/control';
+import { MAX_SIDE_QUESTION_HISTORY } from '../../src/claude/sideQuestion';
 import type { Logger } from '../../src/log';
 import type { FileSystemPort, MemoryFileSystemPort } from '../../src/session/ports';
 import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMentions';
@@ -575,6 +577,129 @@ describe('ClaudeChatViewManager', () => {
 
       expect(calls).toHaveLength(1);
       expect(__mock.lastCreatedPanel()).toBeDefined();
+    });
+  });
+
+  describe('会話の途中のターンから分岐（issue #333、design.md §14.61）', () => {
+    it('セッション全体のforkと同じ経路で新しいタブを開き、rewindConversationToTurnへ対象のuuidを渡す', async () => {
+      const startCalls = stubStart();
+      const rewind = vi
+        .spyOn(ClaudeStreamSession.prototype, 'rewindConversationToTurn')
+        .mockResolvedValue({ ok: true, prefillText: '元の発言', error: undefined, succeededCount: 3 });
+      const { manager } = createManager();
+
+      await manager.openForkFromTurn(
+        'origin-session-id',
+        '分岐',
+        '/workspace/root',
+        ['u1', 'u2', 'u3'],
+        'u1',
+      );
+
+      // セッション全体のfork（openFork）と同じtarget形（issue #218）
+      expect(startCalls).toHaveLength(1);
+      expect(startCalls[0]?.target).toEqual({ kind: 'fork', sessionId: 'origin-session-id' });
+      expect(startCalls[0]?.sessionId).toBeUndefined();
+      // ロジック層（forkFromTurn.ts）が組み立てる新しい順の送信は、streamSession側の
+      // rewindConversationToTurnにそのまま委ねる（呼び出し引数だけを確認する）
+      expect(rewind).toHaveBeenCalledWith(['u1', 'u2', 'u3'], 'u1');
+    });
+
+    it('戻し切れると prefillText を新しいタブの入力欄へ挿す（insertComposerTextを再利用）', async () => {
+      stubStart();
+      vi.spyOn(ClaudeStreamSession.prototype, 'rewindConversationToTurn').mockResolvedValue({
+        ok: true,
+        prefillText: '元の発言の本文',
+        error: undefined,
+        succeededCount: 1,
+      });
+      const { manager } = createManager();
+
+      await manager.openForkFromTurn('origin-session-id', '分岐', '/workspace/root', ['u1'], 'u1');
+
+      const panel = __mock.lastCreatedPanel();
+      expect(panel?.webview.sent).toContainEqual({
+        type: 'insertComposerText',
+        text: '元の発言の本文',
+      });
+    });
+
+    it('1件も戻せずに失敗した場合はエラーを表示し、開いたばかりの新しいタブを閉じる（issue #494のレビュー指摘）', async () => {
+      stubStart();
+      vi.spyOn(ClaudeStreamSession.prototype, 'rewindConversationToTurn').mockResolvedValue({
+        ok: false,
+        prefillText: undefined,
+        error: { message: 'stale target', origin: 'cli' },
+        succeededCount: 0,
+      });
+      const { manager } = createManager();
+
+      await manager.openForkFromTurn('origin-session-id', '分岐', '/workspace/root', ['u1'], 'u1');
+
+      // CLIの生の文言（'stale target'）は画面へ出さず、日本語へマッピングした文言を出す
+      expect(__mock.messages.errors.some((m) => m.includes('stale target'))).toBe(false);
+      expect(
+        __mock.messages.errors.some((m) => m.includes('会話がその後に進んでいる')),
+      ).toBe(true);
+      const panel = __mock.lastCreatedPanel();
+      expect(panel?.disposed).toBe(true);
+      expect(
+        panel?.webview.sent.some(
+          (m) =>
+            typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'insertComposerText',
+        ),
+      ).toBe(false);
+    });
+
+    it('途中まで戻ってから失敗した場合はタブを閉じず、不整合な状態であることを会話へ残す（issue #494のレビュー指摘）', async () => {
+      const { sessions } = stubStartCapturing();
+      vi.spyOn(ClaudeStreamSession.prototype, 'rewindConversationToTurn').mockResolvedValue({
+        ok: false,
+        prefillText: undefined,
+        error: { message: 'stale target', origin: 'cli' },
+        succeededCount: 2,
+      });
+      const { manager } = createManager();
+
+      await manager.openForkFromTurn(
+        'origin-session-id',
+        '分岐',
+        '/workspace/root',
+        ['u1', 'u2', 'u3'],
+        'u1',
+      );
+
+      const panel = __mock.lastCreatedPanel();
+      // 途中まで戻った不整合な状態のタブは、ユーザーがやり直せるよう残す（黙って閉じない）
+      expect(panel?.disposed).toBe(false);
+      expect(
+        __mock.messages.errors.some((m) => m.includes('不整合') && m.includes('会話がその後に進んでいる')),
+      ).toBe(true);
+      const session = sessions[0];
+      if (session === undefined) {
+        throw new Error('セッションが記録されていません');
+      }
+      const items = session.getState().items;
+      const warning = items.find((i) => i.id.startsWith('forkFromTurnFailed:'));
+      expect(warning).toBeDefined();
+      expect(warning?.detail).toContain('不整合');
+    });
+
+    it('元のセッションのstartは呼ばない（新しいタブだけを開く）', async () => {
+      const startCalls = stubStart();
+      vi.spyOn(ClaudeStreamSession.prototype, 'rewindConversationToTurn').mockResolvedValue({
+        ok: true,
+        prefillText: undefined,
+        error: undefined,
+        succeededCount: 1,
+      });
+      const { manager } = createManager();
+
+      await manager.openForkFromTurn('origin-session-id', '分岐', '/workspace/root', ['u1'], 'u1');
+
+      // 開いたのは新しいfork先のタブだけ。元のセッション（origin-session-id）に対する
+      // startは呼ばれない
+      expect(startCalls).toHaveLength(1);
     });
   });
 
@@ -2136,5 +2261,111 @@ describe('Claude側のpostState間引きと差分送信（issue #356）', () => 
       'item-a:text:0',
       'item-b:text:0',
     ]);
+  });
+});
+
+/**
+ * X3（脇道の質問、issue #334）のmanager層配線。
+ *
+ * X2（会話の途中のターンから分岐、issue #333）は`openForkFromTurn`の配線を上の
+ * 「会話の途中のターンから分岐」describeで5件固定しているが、X3は同層のテストが
+ * 0件だった（issue #340横断レビュー指摘）。`/btw`のルーティング・
+ * `sideQuestionHistory`の蓄積と`capSideQuestionHistory`の実適用・`postCommands`への
+ * `/btw`の追加の3点を固定する。
+ */
+describe('X3: 脇道の質問のmanager層配線（issue #334、issue #340横断レビュー指摘）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+    // 状態送信の間引き（issue #356）を確定的に進めるため
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function openPanel(): Promise<FakeWebviewPanel> {
+    stubStart();
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const panel = __mock.lastCreatedPanel();
+    if (panel === undefined) {
+      throw new Error('パネルが記録されていません');
+    }
+    return panel;
+  }
+
+  it('/btwはCLIへ送らず askSideQuestion を呼び、応答を会話へ1項目として残す（ルーティング）', async () => {
+    const askSideQuestion = vi
+      .spyOn(ClaudeStreamSession.prototype, 'askSideQuestion')
+      .mockResolvedValue({
+        ok: true,
+        response: '午後3時です',
+        synthetic: false,
+        refusalFallback: undefined,
+        error: undefined,
+      });
+    const panel = await openPanel();
+
+    panel.webview.simulateMessage({ type: 'send', text: '/btw 今何時？' });
+    await flush();
+
+    expect(askSideQuestion).toHaveBeenCalledTimes(1);
+    expect(askSideQuestion.mock.calls[0]?.[0]).toBe('今何時？');
+    const items = stateMessagesOf(panel).at(-1)?.state.items ?? [];
+    expect(items.some((i) => i.text?.includes('午後3時です'))).toBe(true);
+  });
+
+  it('sideQuestionHistoryは送るたびに蓄積し、capSideQuestionHistoryでMAX_SIDE_QUESTION_HISTORY件を超えない', async () => {
+    let callCount = 0;
+    const askSideQuestion = vi
+      .spyOn(ClaudeStreamSession.prototype, 'askSideQuestion')
+      .mockImplementation(async () => {
+        callCount += 1;
+        return {
+          ok: true,
+          response: `応答${callCount}`,
+          synthetic: false,
+          refusalFallback: undefined,
+          error: undefined,
+        };
+      });
+    const panel = await openPanel();
+
+    const total = MAX_SIDE_QUESTION_HISTORY + 3;
+    for (let i = 1; i <= total; i += 1) {
+      panel.webview.simulateMessage({ type: 'send', text: `/btw 質問${i}` });
+      await flush();
+    }
+
+    expect(askSideQuestion).toHaveBeenCalledTimes(total);
+    // 最後の呼び出しに渡ったhistoryは、直前まで（total-1件）の応答が
+    // capSideQuestionHistoryでMAX_SIDE_QUESTION_HISTORY件へ切り詰められている
+    const lastCallHistory = askSideQuestion.mock.calls[total - 1]?.[1] as
+      | readonly SideQuestionHistoryEntry[]
+      | undefined;
+    expect(lastCallHistory).toHaveLength(MAX_SIDE_QUESTION_HISTORY);
+    // 古いものから捨てられ（FIFO）、直近の質問だけが残る
+    expect(lastCallHistory?.[0]?.question).toBe(`質問${total - MAX_SIDE_QUESTION_HISTORY}`);
+    expect(lastCallHistory?.[lastCallHistory.length - 1]?.question).toBe(`質問${total - 1}`);
+  });
+
+  it('postCommandsが送る候補一覧に、CLIの一覧に無い/btwを足す', async () => {
+    const panel = await openPanel();
+    const sentBefore = panel.webview.sent.length;
+
+    panel.webview.simulateMessage({ type: 'ready' });
+    await flush();
+
+    const commandsMessage = panel.webview.sent
+      .slice(sentBefore)
+      .find(
+        (m): m is { type: string; commands: { name: string }[] } =>
+          typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'commands',
+      );
+    expect(commandsMessage).toBeDefined();
+    expect(commandsMessage?.commands.some((c) => c.name === 'btw')).toBe(true);
   });
 });
