@@ -425,7 +425,17 @@ export interface WorkflowWarning {
      * （design.md §16.23「道具」）。人がYAMLに書いた指示が実行中に別のものへ変わるのは
      * Viewを見ている人から最も気付きにくい変化なので、黙って行わず必ず警告欄へ出す。
      */
-    | 'orchestratorPromptOverride';
+    | 'orchestratorPromptOverride'
+    /**
+     * `persist()`（実行状態の永続化、`store.update`）が失敗した（design.md §16.11、
+     * Issue #364）。ログ（`deps.log.error`）だけでは拡張機能のログ出力チャンネルを
+     * 開かない限り気づけないため、`reflectPseudoWorktree`（`pseudoWorktreeReflectBlocked`）
+     * と同様に`live.warnings`へも積み、Viewから気づけるようにする（Issue #379）。
+     * `persist()`は実行中に何度も呼ばれるため、同一runIdにつき直近1件へ丸める
+     * （`taskId`は持たない警告なので`mergeBusy`・`orchestratorPromptOverride`の
+     * 「同一taskIdの直近1件」ではなく「このrunの直近1件」に読み替える）。
+     */
+    | 'persistFailed';
   /** ワークフロー全体に関わる警告（gitignoreなど）は undefined。 */
   taskId: string | undefined;
   message: string;
@@ -3027,6 +3037,21 @@ export class WorkflowRunner {
       // 状態遷移は変えない）
       const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
       this.deps.log.error(`[workflow ${runId}] 実行状態の永続化に失敗しました: ${message}`);
+      // ログだけでは拡張機能のログ出力チャンネルを開かない限り気づけないため、
+      // `live.warnings`へも積んでViewへ通知する（Issue #379）。`persist()`は実行中に
+      // 何度も呼ばれ、ディスク容量不足等の失敗は同じ理由で繰り返し起きうる。
+      // `orchestratorPromptOverride`（Issue #366）・`mergeBusy`（Issue #439）が
+      // 採った「直近1件へ丸める」規律に揃える（`reflectPseudoWorktree`は反映1回に
+      // つき1回しか警告を積まない設計で、`persist`のように高頻度で繰り返し失敗する
+      // ケースを想定していないため揃えない）。警告が出た事実自体は最新の1件として
+      // 残るので、丸めても「警告が出た事実が失われる」ことはない。
+      live.warnings = live.warnings.filter((w) => w.kind !== 'persistFailed');
+      live.warnings.push({
+        kind: 'persistFailed',
+        taskId: undefined,
+        message: `実行状態の永続化に失敗しました: ${message}`,
+      });
+      this.notify(runId);
     }
   }
 }
