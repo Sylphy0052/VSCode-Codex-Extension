@@ -398,6 +398,13 @@ describe('workflowScript', () => {
     expect(source).toContain('task.hasLiveSession === true');
   });
 
+  it('マージ解決中バッジは承認待ちとLLM作業中を区別する（Issue #413 PR4）', () => {
+    const source = workflowScript();
+    expect(source).toContain('task.mergeResolutionWaitingApproval');
+    expect(source).toContain('マージ解決中（承認待ち）');
+    expect(source).toContain("'マージ解決中'");
+  });
+
   it('動的な値をHTMLへ文字列結合しない（innerHTML/outerHTMLを使わない）', () => {
     // design.md §16.8「画面に出す動的な文字列は必ずテキストノードとして挿入する」。
     // innerHTML系のAPIを使わないことをここで機械的に固定しておく

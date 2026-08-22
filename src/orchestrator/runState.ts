@@ -28,8 +28,9 @@ export type TaskState = (typeof TASK_STATES)[number];
  * `running` はもちろん、`waitingApproval`（人待ちのセッションもプロセスとしては生きている）・
  * `waitingReply`（返信待ちのセッションも同様。§16.21）・`merging`（マージが終わるまで
  * そのタスクの成果は確定しない）も枠を占める。この4状態の集合は、`maxParallel` の空き数
- * 計算（`scheduler.ts` の `nextTasksToStart`）・待ちぼうけ検出（`runner.ts` の
- * `checkWaitingReplyStalls`）・実行全体の終了判定（`scheduler.ts` の `getRunOutcome`）の
+ * 計算（`scheduler.ts` の `nextTasksToStart`）・待ちぼうけ検出（`runnerMessaging.ts` の
+ * `checkWaitingReplyStalls`。Issue #147の分割で`runner.ts`から移った）・実行全体の
+ * 終了判定（`scheduler.ts` の `getRunOutcome`）の
  * 3箇所で同じ判定が必要になる（Issue #146）。状態を1つ足すたびに3箇所を揃えて直す必要が
  * あった重複を、ここへ集約する。
  *

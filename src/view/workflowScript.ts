@@ -112,6 +112,12 @@ export function workflowScript(): string {
     return label;
   }
 
+  // 衝突解決セッションのバッジ文言（Issue #413 PR4）。承認待ち
+  // （mergeResolutionWaitingApproval）かLLMが作業中かで出し分ける。
+  function mergeResolutionBadgeLabel(task) {
+    return task.mergeResolutionWaitingApproval ? 'マージ解決中（承認待ち）' : 'マージ解決中';
+  }
+
   // ---- 最上段: 全体の進捗 ----
   // 集計そのものは拡張機能側（workflowGraph.tsのaggregateProgress。純粋関数でテスト済み）が
   // 行い、ここではその結果（progress）を表示するだけにする。以前はここでも同じ集計を
@@ -255,7 +261,7 @@ export function workflowScript(): string {
         y: h / 2 - 6,
         'text-anchor': 'middle',
       });
-      badge.textContent = 'マージ解決中';
+      badge.textContent = mergeResolutionBadgeLabel(task);
       group.appendChild(badge);
     }
 
@@ -271,7 +277,7 @@ export function workflowScript(): string {
 
     const title = svgEl('title');
     title.textContent = task.id + ' ・ ' + (STATE_LABEL[task.state] || task.state) +
-      (task.mergeResolutionActive ? ' ・ マージ解決中' : '') +
+      (task.mergeResolutionActive ? ' ・ ' + mergeResolutionBadgeLabel(task) : '') +
       (task.lastResponseSummary ? ' ・ ' + task.lastResponseSummary : '');
     group.appendChild(title);
 
@@ -660,7 +666,7 @@ export function workflowScript(): string {
         stateCell.appendChild(text('span', 'hint', '（' + failureText + '）'));
       }
       if (task.mergeResolutionActive) {
-        stateCell.appendChild(text('span', 'hint', '（マージ解決中）'));
+        stateCell.appendChild(text('span', 'hint', '（' + mergeResolutionBadgeLabel(task) + '）'));
       }
       row.appendChild(stateCell);
 

@@ -3014,6 +3014,88 @@ tasks:
     },
   );
 
+  it('衝突解決セッションのタブ名は対象タスクのidを含む（Issue #413 PR4）', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost } = createHarness(YAML, { git });
+    await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // タブ名そのものはhost実装（chatView.ts/claudeChatView.ts）側の責務だが、そこへ渡す
+    // 入力（`mergeResolutionTaskId`）はrunner.ts側が組み立てる。従来は渡していなかった
+    // ため、タブ名が固定文字列（'Codex'/LABEL）になり見分けが付かなかった
+    const resolutionInput = codexHost.openInputs.at(-1);
+    expect(resolutionInput?.mergeResolutionTaskId).toBe('T1');
+  });
+
+  it('承認待ちの解決セッションはmaxParallelの枠から外れ、他の独立したタスクが開始できる（Issue #413 PR4）', async () => {
+    const APPROVAL_YAML = `
+version: 1
+name: merge-approval-test
+defaults:
+  provider: codex
+  maxParallel: 1
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(APPROVAL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge-approval.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // T1は衝突したのでmergingのまま。maxParallel:1の枠を占めるため、T2（独立タスク）は
+    // まだ開始できない
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('pending');
+    expect(
+      runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.mergeResolutionWaitingApproval,
+    ).toBe(false);
+
+    const resolutionSession = codexHost.sessions.at(-1);
+    expect(resolutionSession).toBeDefined();
+
+    // 承認カードが出て、解決セッションが人待ちになった
+    resolutionSession?.emitState({
+      ...initialChatState,
+      approvals: [{ requestId: 1, kind: 'command', title: '', detail: '', itemId: undefined }],
+    });
+    await flush();
+
+    expect(
+      runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.mergeResolutionWaitingApproval,
+    ).toBe(true);
+    // 枠が明け渡され、T2が開始できるようになる
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('running');
+    // getRunOutcomeの判定は変わらない（mergingは引き続き`running`扱いのまま。衝突解決中の
+    // runが「終了した」と誤判定されて統合PR/MRの作成が走ってしまわないことの確認）
+    expect(runner.getSnapshot(runId)?.outcome).toBe('running');
+
+    // 承認が解決した（承認カードが消えた）
+    resolutionSession?.emitState({ ...initialChatState, approvals: [] });
+    await flush();
+
+    expect(
+      runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.mergeResolutionWaitingApproval,
+    ).toBe(false);
+    // 除外集合から抜けて枠の勘定に戻る。T1自身は引き続きmergingのまま、T2は既に開始済み
+    // （途中で止めない）ため走り続ける
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('running');
+  });
+
   it(
     '衝突解決セッションがdoneを宣言してもgit上は未解決のままなら信用せずblockedにする' +
       '（design.md §16.17「宣言だけを信じずgit statusでも確かめる」）',

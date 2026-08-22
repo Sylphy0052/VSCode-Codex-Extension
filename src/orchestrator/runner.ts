@@ -535,6 +535,13 @@ export interface TaskSnapshot {
    */
   mergeResolutionActive: boolean;
   /**
+   * `mergeResolutionActive`が`true`のとき、その解決セッションがいま承認待ちか
+   * （Issue #413 PR4）。`mergeResolutionActive`が`false`のときは常に`false`。
+   * Viewはこれで「マージ解決中（承認待ち）」と「マージ解決中」（LLMが作業中）の
+   * バッジを出し分ける。
+   */
+  mergeResolutionWaitingApproval: boolean;
+  /**
    * このタスクのPR/MRの番号（design.md §16.11・§16.18、Issue #118）。作られていなければ
    * `undefined`（`pullRequestUrl`も`undefined`のとき、Viewはリンクの欄を出さない）。
    * リロード直後（`hasLiveSession: false`）でも、永続化された値（`PersistedTaskState`）が
@@ -786,6 +793,21 @@ export interface LiveOrchestrator {
   unreadCount: number;
 }
 
+/**
+ * `live.mergeResolutions`の値（Issue #413 PR4）。
+ *
+ * `waitingApprovalSinceMs`は、その解決セッションがいま承認待ちかどうかの印であり、
+ * 承認待ちで**ない**間は`undefined`。`runnerMerge.ts`の`startMergeResolution`が
+ * `session.onStateChanged`（`state.approvals.length > 0`）を見て更新する。名前に
+ * `SinceMs`と付けているのは将来PR5（承認待ちのアイドルタイムアウト）が経過時間の起点
+ * として使う想定のためで、PR4時点では「承認待ちかどうか」（`!== undefined`）としてしか
+ * 使わない。
+ */
+export interface MergeResolutionEntry {
+  session: TaskSession;
+  waitingApprovalSinceMs: number | undefined;
+}
+
 /** `LiveTask`と同じ理由（直前のコメント参照）で`export`する（Issue #147）。 */
 export interface LiveRun {
   runId: string;
@@ -900,8 +922,13 @@ export interface LiveRun {
    * 衝突解決セッション（design.md §16.17「コンフリクト」5.「解決用セッションは依存グラフの
    * ノードにはしない」）。`live.tasks`（グラフのノード＝通常のタスク）とは別に持つ。
    * taskIdをキーにする（1タスクにつき同時に1件のマージしか走らない）。
+   *
+   * 値は`TaskSession`単体ではなく`MergeResolutionEntry`（Issue #413 PR4）。承認待ちの
+   * 可視化（Viewのバッジ出し分け）と、`maxParallel`の枠から承認待ちの解決セッションを
+   * 除外する判定（`pump`→`nextTasksToStart`の`excludeFromActiveCount`）の両方に、
+   * 「いま承認待ちか」を持ち回る必要があるため。
    */
-  mergeResolutions: Map<string, TaskSession>;
+  mergeResolutions: Map<string, MergeResolutionEntry>;
   /**
    * オーケストレーターセッション（design.md §16.23）。runごとに1つ。開始に失敗した場合と、
    * リロード後に復元しただけの実行では`undefined`（会話は復元できないため。§16.11）。
@@ -1589,8 +1616,8 @@ export class WorkflowRunner {
     // 衝突解決セッションは`live.tasks`に無い別枠の管理（`revealTask`と同じ扱い）のため、
     // 上のフィルタには乗らない。生きているものへ全て送る（対象は`merging`のタスクだけの
     // はずで、常に1件ずつしか無いが、複数あっても構わない形にしておく）
-    for (const mergeResolutionSession of live.mergeResolutions.values()) {
-      mergeResolutionSession.stopLoop();
+    for (const entry of live.mergeResolutions.values()) {
+      entry.session.stopLoop();
     }
     // 停止直後は走行中タスクの`stopLoop()`がまだ確定していない（進行中のターンには
     // 割り込まない）ため、オーケストレーターの視点では通常の`taskFailed`しか届かず
@@ -1624,9 +1651,9 @@ export class WorkflowRunner {
     if (live === undefined) {
       return false;
     }
-    const mergeResolutionSession = live.mergeResolutions.get(taskId);
-    if (mergeResolutionSession !== undefined) {
-      mergeResolutionSession.reveal();
+    const mergeResolutionEntry = live.mergeResolutions.get(taskId);
+    if (mergeResolutionEntry !== undefined) {
+      mergeResolutionEntry.session.reveal();
       return true;
     }
     const liveTask = live.tasks.get(taskId);
@@ -1840,8 +1867,8 @@ export class WorkflowRunner {
       // 無い別枠のため、個別に解放する（`stop()`と同じ扱い）
       const mergeResolutionEntries = [...live.mergeResolutions.entries()];
       live.mergeResolutions.clear();
-      for (const [taskId, session] of mergeResolutionEntries) {
-        disposeQuietly(this.deps.log, () => session.dispose(), `merge resolution ${taskId}`);
+      for (const [taskId, entry] of mergeResolutionEntries) {
+        disposeQuietly(this.deps.log, () => entry.session.dispose(), `merge resolution ${taskId}`);
       }
       disposeQuietly(this.deps.log, () => closeMessaging(live), 'messaging');
       // `closeMessaging`自体は`messagingHub`をクリアしない（`closeMessaging`は`dispose()`
@@ -2203,13 +2230,25 @@ export class WorkflowRunner {
    * 状態が変わるたびに呼ぶ（design.md §16.3）。次に開始できるタスクを開始し、終了を判定する。
    * 分割後のファイル（Issue #147）から`self.pump(...)`として呼ぶ（公開範囲は
    * `WorkflowRunnerInternals`に閉じる）。
+   *
+   * **Issue #413 PR4: 承認待ちの解決セッションを`maxParallel`の枠から外す。** 承認待ち
+   * （`entry.waitingApprovalSinceMs !== undefined`）の`live.mergeResolutions`のtaskId
+   * 集合を`nextTasksToStart`の`excludeFromActiveCount`へ渡す。渡すのはここだけで、
+   * `getRunOutcome`・`checkWaitingReplyStalls`（`runnerMessaging.ts`）へは渡さない
+   * （design.md §16.3の例外の説明・`scheduler.ts`のJSDoc参照）。
    */
   private pump(runId: string): void {
     const live = this.runs.get(runId);
     if (live === undefined || live.finished) {
       return;
     }
-    const toStart = nextTasksToStart(live.def, live.runState);
+    const excludeFromActiveCount = new Set<string>();
+    for (const [taskId, entry] of live.mergeResolutions) {
+      if (entry.waitingApprovalSinceMs !== undefined) {
+        excludeFromActiveCount.add(taskId);
+      }
+    }
+    const toStart = nextTasksToStart(live.def, live.runState, excludeFromActiveCount);
     for (const taskId of toStart) {
       // 開始の意思決定と同時にrunningへ倒す。非同期のstartTaskが終わるまで待つと、
       // 同じタスクが次のpump呼び出しで二重にnextTasksToStartへ拾われてしまう

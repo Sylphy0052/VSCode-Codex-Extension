@@ -544,9 +544,15 @@ export class ClaudeChatViewManager
   async openTaskSession(input: TaskSessionInput): Promise<TaskSession> {
     const taskConfig = toClaudeConfig(input);
     const sessionId = randomSessionId();
-    // オーケストレーターセッション（design.md §16.23）はタスクと同じ経路で開くが、
-    // タブ名だけ分けて人が見分けられるようにする
-    const title = input.role === 'orchestrator' ? `${LABEL}: オーケストレーター` : LABEL;
+    // オーケストレーターセッション（design.md §16.23）・衝突解決セッション
+    // （Issue #413 PR4）はタスクと同じ経路で開くが、タブ名だけ分けて人が見分けられるように
+    // する
+    const title =
+      input.mergeResolutionTaskId !== undefined
+        ? `${LABEL}: 衝突解決 ${input.mergeResolutionTaskId}`
+        : input.role === 'orchestrator'
+          ? `${LABEL}: オーケストレーター`
+          : LABEL;
     const entry = this.buildEntry(input.cwd, title, true, taskConfig);
     this.panels.set(sessionId, entry);
     entry.session.start({

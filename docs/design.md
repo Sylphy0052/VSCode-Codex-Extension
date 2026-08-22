@@ -3669,6 +3669,13 @@ T4は「T2とT3のブランチをマージする」タスクではない。マ�
 - `merging` も並列の枠を占める。マージが終わるまでそのタスクの成果は確定しないため
 - `blocked` は実行全体を止めない。依存する後続だけが `skipped` になり、独立した枝は走り続ける（§16.17）
 
+**例外（Issue #413 PR4）: 承認待ちの衝突解決セッションは枠から外す。** 衝突解決セッション（§16.17「コンフリクト」5.）が承認カードで人待ちのまま止まると、対象タスクは `merging` のまま無期限に枠を1つ占め続け、他の独立したタスクが開始できなくなる。そこで `nextTasksToStart`（`scheduler.ts`）に `excludeFromActiveCount`（taskIdの集合、既定は空集合）を追加し、`runner.ts` の `pump` が「いま承認待ちの解決セッション」のidだけを渡す。`excludeFromActiveCount` に入っているタスクは `maxParallel` の空き数計算（`activeCount`）からだけ除外され、状態は引き続き `merging` のまま変えない。
+
+- **`isActiveTaskState` 本体（`runState.ts`）は変えない。** `getRunOutcome` が `merging` を `running` 扱いすることに依存しており、外すと衝突解決中の run が「終了した」と誤判定されて統合PR/MRの作成まで走ってしまう
+- **`excludeFromActiveCount` を渡すのは `nextTasksToStart` だけ。** `getRunOutcome`・待ちぼうけ検出（`runnerMessaging.ts` の `checkWaitingReplyStalls`）には渡さない
+- 対象タスクは引き続き `merging`（`done` ではない）なので、依存する後続の開始判定（`depsAllDone`）には影響しない。承認待ちが解消すれば `pump` が渡す集合から自然に外れ、通常どおり枠の勘定に戻る
+- 承認待ちの可視化そのものは `waitingApproval` 状態へは倒さない。`markWaitingApproval` は `running` からしか動かず、`merging` は `isUnsettled`（`runState.ts`）から意図的に外されているため、`live.mergeResolutions` のエントリ（`MergeResolutionEntry.waitingApprovalSinceMs`）へ承認待ちフラグを別に持たせる。ワークフローViewの「マージ解決中」バッジは、このフラグの有無で「マージ解決中（承認待ち）」と「マージ解決中」（LLMが作業中）を出し分ける
+
 ### 16.4 タスク間の引き継ぎ
 
 `prompt` と `continuePrompt` の中で `{{<id>.<field>}}` を書いたときだけ、その値を差し込む。依存タスクの応答を無条件に前置きすることはしない（長文でコンテキストを圧迫するため）。
@@ -4490,7 +4497,7 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 - Viewから人が解決したうえで「再マージ」を指示できる
 - **実行全体が停止している（`isRunHalted` = `haltedByUser` または `hasFailedTask`）間に「再マージ」が成功しても、`mergeBlocked` の後続を `pending` へは戻さない。** 通常はマージ成功時にその後続を `pending` へ戻し次の開始に備えるが（`markMergeSucceeded`）、`nextTasksToStart` の開始判定自体が `isRunHalted` を門にしているため、人が明示的に停止した場合（`haltedByUser`）だけでなく、**他の独立した枝が `failed` で確定しているだけ**（人は何も操作していない通常運用）でも新規開始は一切行われない。ここで `pending` へ戻すと誰にも拾われず残り、`getRunOutcome` が `running` を返し続けてrunが終わらなくなる（`failed` / `skipped` しか受け付けない「再実行」でも救えない）。`isRunHalted` が真の間は `skipped`（理由: `runHalted`）へ倒しておく。`haltedByUser` だけが原因なら、そのタスク自身への「再実行」で `haltedByUser` も解除されその場で拾い直せる。`hasFailedTask` が原因のときは、その `skipped` タスク自身の「再実行」だけでは復帰せず、原因になっている `failed` タスク自身を別途「再実行」（または「続ける」）で救う必要がある（Issue #432-1）
 
-解決用セッションは依存グラフのノードにはしない（ワークフローの定義に無いため）。Viewでは対象タスクのノードに「マージ解決中」として重ねて出す。
+解決用セッションは依存グラフのノードにはしない（ワークフローの定義に無いため）。Viewでは対象タスクのノードに「マージ解決中」として重ねて出す。**承認待ち（Issue #413 PR4）の間は「マージ解決中（承認待ち）」に出し分け、LLMが作業中との違いを見分けられるようにする**（承認判定自体は上の5.のとおり標準の承認カードへ委ねたまま変わらない。詳細は§16.3の例外の説明を参照）。タブ名も対象タスクのidを含む（`Codex: 衝突解決 <id>` 相当）ものにし、複数並んでもどのタスクの解決か見分けられるようにする。
 
 この一連の流れは`test/integration/workflowMerge.test.ts`（4件。Issue #170）が実VSCode上で確かめる。必要なのは**実gitの衝突を起こすこと**だけで外部CLIは要らない。テスト用ワークスペースの初期コミットに共有ファイルを1つ置き、2つの並列タスクのworktreeでその同じ行を書き換えてコミットすることで、後からマージする側に modify/modify の衝突を作る。解決用セッションもフェイクの`TaskSessionHost`が受けるため、渡るプロンプト（統合worktreeの`cwd`・未解決パス・突き合わせる2タスクの`prompt`と`done`）と`maxIterations`（5）、タスク側の承認ハンドラが差し込まれないこと（上の5.）まで確かめられる。解決・巻き戻し（`blocked`と後続の`skipped`、独立した枝の完走）・再マージの成功も同じファイルで見る。解決用セッションが実際に衝突を「解ける」かどうかはモデルの出力に依存するため、そこだけは[manual-test.md](manual-test.md)のW-Dに残る。
 

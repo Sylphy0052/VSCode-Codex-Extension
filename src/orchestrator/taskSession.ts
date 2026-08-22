@@ -69,6 +69,14 @@ export interface TaskSessionInput {
    * `buildOrchestratorConfig` が済ませた値が `config` / `sandbox` に入っている）。
    */
   role?: 'task' | 'orchestrator';
+  /**
+   * 衝突解決セッション（design.md §16.17「コンフリクト」・Issue #413 PR4）を開くときに、
+   * 対象タスクのidを渡す。`role`と同じく**タブ名を分ける用途だけに使う**（権限の決定には
+   * 使わない）。省略時（通常のタスク・オーケストレーターセッション）は従来どおりの
+   * タブ名になる。渡さないと、統合worktree上で開く衝突解決セッションのタブ名が固定文字列
+   * （`'Codex'`/`LABEL`）になり、複数並んだときにどのタスクの解決か見分けられない。
+   */
+  mergeResolutionTaskId?: string;
   /** タスクの作業ディレクトリ（worktreeまたは明示cwd）。 */
   cwd: string;
   config: TaskSessionConfig;
