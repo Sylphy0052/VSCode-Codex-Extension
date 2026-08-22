@@ -27,6 +27,7 @@ import {
   locateSecurityWarningLine,
   planWorkflow,
   resolveUniqueFileName,
+  reviewWorkflowPlan,
   sendSingleTurn,
   slugifyGoal,
   validateSlugInput,
@@ -455,14 +456,7 @@ describe('extractYamlFromResponse（design.md §16.9「剥がしてからパー�
     // 「言語タグなしフェンスのみ」の既存ケース（上の`言語指定の無いコードフェンスからも
     // 取り出せる`）と、bashフェンスが混じるケースが同じ挙動へ収束しないことを確かめる
     const withoutOtherLangFence = ['```', VALID_YAML, '```'].join('\n');
-    const withOtherLangFence = [
-      '```bash',
-      'echo hi',
-      '```',
-      '```',
-      VALID_YAML,
-      '```',
-    ].join('\n');
+    const withOtherLangFence = ['```bash', 'echo hi', '```', '```', VALID_YAML, '```'].join('\n');
     expect(extractYamlFromResponse(withoutOtherLangFence)).toBe(VALID_YAML);
     expect(extractYamlFromResponse(withOtherLangFence)).toBe(VALID_YAML);
   });
@@ -506,7 +500,9 @@ describe('extractYamlFromResponse（design.md §16.9「剥がしてからパー�
     // 上限を超える数の偽候補（tasksを持たない地の文）の後ろに本物のYAMLフェンスを置く。
     // 個数の上限で足切りされるため、本物までは辿り着けず先頭候補へフォールバックする
     const decoyCount = 24;
-    const decoys = Array.from({ length: decoyCount }, () => ['```', '地の文です。', '```'].join('\n'));
+    const decoys = Array.from({ length: decoyCount }, () =>
+      ['```', '地の文です。', '```'].join('\n'),
+    );
     const response = [...decoys, '```yaml', VALID_YAML, '```'].join('\n');
 
     const warnCalls: string[] = [];
@@ -1135,5 +1131,165 @@ describe('sendSingleTurn: タイムアウト（issue #389 根拠3）', () => {
     await expect(promise).resolves.toBe(VALID_YAML);
     expect(session?.interruptCalls).toBe(0);
     expect(session?.disposeCalls).toBe(1);
+  });
+});
+
+describe('reviewWorkflowPlan（design.md §16.28、roadmap W3、Issue #337）', () => {
+  const reviewBaseInput = {
+    goal: 'ゴール',
+    yaml: VALID_YAML,
+    provider: 'codex' as const,
+    cwd: '/repo',
+    log: fakeLogger,
+  };
+
+  it('指摘が無ければfindingsは空配列', async () => {
+    const host = new FakePlannerHost(['[]']);
+    const result = await reviewWorkflowPlan({ ...reviewBaseInput, host });
+    expect(result.findings).toEqual([]);
+    expect(result.error).toBeUndefined();
+  });
+
+  it('JSON配列の指摘をfindingsへ変換する', async () => {
+    const response = JSON.stringify([
+      {
+        aspect: 'serializedParallelizable',
+        taskIds: ['T1', 'T2'],
+        message: '並列にできるはずのタスクが直列になっています',
+      },
+    ]);
+    const host = new FakePlannerHost([response]);
+    const result = await reviewWorkflowPlan({ ...reviewBaseInput, host });
+    expect(result.findings).toEqual([
+      {
+        aspect: 'serializedParallelizable',
+        taskIds: ['T1', 'T2'],
+        message: '並列にできるはずのタスクが直列になっています',
+      },
+    ]);
+  });
+
+  it('コードフェンス（```json）付きの応答からでも取り出せる', async () => {
+    const fenced = [
+      '```json',
+      JSON.stringify([
+        { aspect: 'missingConvergence', taskIds: [], message: '合流タスクがありません' },
+      ]),
+      '```',
+    ].join('\n');
+    const host = new FakePlannerHost([fenced]);
+    const result = await reviewWorkflowPlan({ ...reviewBaseInput, host });
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]?.aspect).toBe('missingConvergence');
+  });
+
+  it('JSONとして解釈できない応答は、例外を投げず指摘なしとして扱う（保存を妨げない）', async () => {
+    const host = new FakePlannerHost(['これは指摘ではありません（自然文の応答）']);
+    const result = await reviewWorkflowPlan({ ...reviewBaseInput, host });
+    expect(result.findings).toEqual([]);
+    expect(result.error).toBeUndefined();
+  });
+
+  it('JSON配列でない応答（オブジェクト等）は指摘なしとして扱う', async () => {
+    const host = new FakePlannerHost([JSON.stringify({ aspect: 'goalMismatch' })]);
+    const result = await reviewWorkflowPlan({ ...reviewBaseInput, host });
+    expect(result.findings).toEqual([]);
+  });
+
+  it('未知のaspectを持つ項目は捨て、既知の項目だけ残す', async () => {
+    const response = JSON.stringify([
+      { aspect: 'unknownAspect', taskIds: [], message: '無視されるべき指摘' },
+      { aspect: 'doneNotObservable', taskIds: ['T1'], message: 'doneが主観的です' },
+    ]);
+    const host = new FakePlannerHost([response]);
+    const result = await reviewWorkflowPlan({ ...reviewBaseInput, host });
+    expect(result.findings).toEqual([
+      { aspect: 'doneNotObservable', taskIds: ['T1'], message: 'doneが主観的です' },
+    ]);
+  });
+
+  it('messageが空文字・欠落の項目は捨てる', async () => {
+    const response = JSON.stringify([
+      { aspect: 'goalMismatch', taskIds: [], message: '' },
+      { aspect: 'goalMismatch', taskIds: [] },
+    ]);
+    const host = new FakePlannerHost([response]);
+    const result = await reviewWorkflowPlan({ ...reviewBaseInput, host });
+    expect(result.findings).toEqual([]);
+  });
+
+  it('指摘の件数が上限を超えた分は捨てる', async () => {
+    const many = Array.from({ length: 40 }, (_, i) => ({
+      aspect: 'goalMismatch',
+      taskIds: [],
+      message: `指摘${i}`,
+    }));
+    const host = new FakePlannerHost([JSON.stringify(many)]);
+    const result = await reviewWorkflowPlan({ ...reviewBaseInput, host });
+    expect(result.findings).toHaveLength(30);
+  });
+
+  it('セッションの起動・応答待ちが失敗しても例外を投げず、findingsは空でerrorに理由を残す', async () => {
+    const failingHost: TaskSessionHost = {
+      async openTaskSession(): Promise<TaskSession> {
+        throw new Error('起動に失敗しました');
+      },
+    };
+    const result = await reviewWorkflowPlan({ ...reviewBaseInput, host: failingHost });
+    expect(result.findings).toEqual([]);
+    expect(result.error).toContain('起動に失敗しました');
+  });
+
+  it('分解セッションと同じくsandbox: read-only・approvalMode: neverで起動する（design.md §16.28「権限の与え方」）', async () => {
+    const host = new FakePlannerHost(['[]']);
+    await reviewWorkflowPlan({ ...reviewBaseInput, host, provider: 'codex' });
+    expect(host.openCalls[0]?.sandbox).toBe('read-only');
+    expect(host.openCalls[0]?.config.approvalMode).toBe('never');
+  });
+
+  it('ClaudeプロバイダはpermissionMode: manualで起動する', async () => {
+    const host = new FakePlannerHost(['[]']);
+    await reviewWorkflowPlan({ ...reviewBaseInput, host, provider: 'claude' });
+    expect(host.openCalls[0]?.config.approvalMode).toBe('manual');
+  });
+
+  it('承認要求は理由を問わず全て拒否する（レビューセッションが書き込み側の操作を要求しても通らない）', async () => {
+    const host = new FakePlannerHost(['[]']);
+    await reviewWorkflowPlan({ ...reviewBaseInput, host });
+    const session = host.sessions[0];
+    const decision = await session?.approvalHandler?.(fakeApproval, { command: 'git commit' });
+    expect(decision).toEqual({ kind: 'auto', decision: 'decline' });
+  });
+
+  it('レビューセッションは1ターンだけ送って閉じる（実行のループは回さない）', async () => {
+    const host = new FakePlannerHost(['[]']);
+    await reviewWorkflowPlan({ ...reviewBaseInput, host });
+    const session = host.sessions[0];
+    expect(session?.runLoopCalls).toHaveLength(1);
+    expect(session?.runLoopCalls[0]).toMatchObject({ maxIterations: 1, condition: '' });
+    expect(session?.disposed).toBe(true);
+  });
+
+  it('ゴールとYAMLの両方をformatUntrustedの囲いで送り、同じnonceを共有する', async () => {
+    const host = new FakePlannerHost(['[]']);
+    await reviewWorkflowPlan({ ...reviewBaseInput, host });
+    const prompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+    const nonces = [
+      ...prompt.matchAll(/----- \[([^\]]+)\] reviewer\.(goal|workflow)の出力（前のタスク/g),
+    ].map((m) => m[1]);
+    expect(nonces).toHaveLength(2);
+    expect(nonces[0]).toBe(nonces[1]);
+    expect(prompt).toContain('reviewer.goalの出力');
+    expect(prompt).toContain('reviewer.workflowの出力');
+  });
+
+  it('4つの観点だけをレビューの指示として書く', async () => {
+    const host = new FakePlannerHost(['[]']);
+    await reviewWorkflowPlan({ ...reviewBaseInput, host });
+    const prompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+    expect(prompt).toContain('serializedParallelizable');
+    expect(prompt).toContain('missingConvergence');
+    expect(prompt).toContain('doneNotObservable');
+    expect(prompt).toContain('goalMismatch');
   });
 });

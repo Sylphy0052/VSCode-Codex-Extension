@@ -90,6 +90,7 @@ import {
   planWorkflow,
   providerHintToProvider,
   resolveUniqueFileName,
+  reviewWorkflowPlan,
   slugifyGoal,
   validateSlugInput,
   locateSecurityWarningLine,
@@ -983,7 +984,10 @@ async function applyPresetChat(
   const effective = buildEffectivePresetConfig(preset, baseline);
   const warnings = [...effective.warnings];
 
-  const resolvedCwd = await resolveWorkingDirectory(preset.workingDirectory, workspaceFolderPaths());
+  const resolvedCwd = await resolveWorkingDirectory(
+    preset.workingDirectory,
+    workspaceFolderPaths(),
+  );
   if (resolvedCwd.warning !== undefined) {
     warnings.push(resolvedCwd.warning);
   }
@@ -1198,7 +1202,11 @@ async function sendEditorSelectionToChat(
     editor.selection.end.line,
     editor.selection.end.character,
   );
-  const payload = buildSelectionPayload(workspaceRelativeDisplayPath(editor.document.uri), range, text);
+  const payload = buildSelectionPayload(
+    workspaceRelativeDisplayPath(editor.document.uri),
+    range,
+    text,
+  );
 
   // 複数開いているときは直近にアクティブだったタブを使う（Codex/Claude Codeを横断して
   // `activeSequence`で比べる。`ChatViewManager.getActiveComposerTarget`のJSDoc参照）
@@ -1321,9 +1329,7 @@ export function formatRoadmapWarningsDetail(
  */
 export function formatCorrectedIssuesDetail(issues: readonly CorrectedIssue[]): string {
   return issues
-    .map(
-      (c) => `${sanitizeForLog(c.itemId)}: ${c.actual ?? 'なし'} → ${c.expected ?? 'なし'}`,
-    )
+    .map((c) => `${sanitizeForLog(c.itemId)}: ${c.actual ?? 'なし'} → ${c.expected ?? 'なし'}`)
     .join(', ');
 }
 
@@ -1331,9 +1337,7 @@ export function formatCorrectedIssuesDetail(issues: readonly CorrectedIssue[]): 
  * `droppedDependencies`をログ表示用の1行にまとめる（Issue #427）。
  * `formatCorrectedIssuesDetail`と同じ理由で要素ごとに`sanitizeForLog`を通す。
  */
-export function formatDroppedDependenciesDetail(
-  deps: readonly DroppedRoadmapDependency[],
-): string {
+export function formatDroppedDependenciesDetail(deps: readonly DroppedRoadmapDependency[]): string {
   return deps
     .map((d) => `${sanitizeForLog(d.itemId)} → ${sanitizeForLog(d.dependsOnId)}`)
     .join(', ');
@@ -1525,7 +1529,7 @@ async function planWorkflowFromGoalCommand(
   );
 
   if (result.ok) {
-    await handlePlanSuccess(result, goal, workspaceRoot, view, log);
+    await handlePlanSuccess(result, goal, workspaceRoot, view, log, provider, host);
     return;
   }
   await handlePlanFailure(result, log);
@@ -1705,6 +1709,8 @@ async function planWorkflowFromRoadmapCommand(
       workspaceRoot,
       view,
       log,
+      provider,
+      host,
     );
   }
 
@@ -1811,6 +1817,13 @@ async function writeUniqueWorkflowFile(
  * Viewを開く（design.md §16.9手順4）。セキュリティ警告があれば、該当行へ移動したうえで
  * 強調して知らせる（design.md §16.9「多数のタスクに紛れた1件のallowを人が見落とすのを
  * 防ぐ」）。
+ *
+ * 保存の直後、別の読み取り専用セッションでタスク分解の妥当性をレビューする
+ * （design.md §16.28、roadmap W3）。ゴール文からの生成（`planWorkflowFromGoalCommand`）と
+ * ロードマップからの生成（`planWorkflowFromRoadmapCommand`）の両方がこの関数を通るため、
+ * ここに置くことでどちらの起点で生成しても同じくレビューがかかる（片方だけ塞ぐ実装に
+ * しない）。レビューは**保存の後**に行い、レビューセッションの起動・応答待ちが失敗しても
+ * 保存済みのファイルには影響しない（`reviewWorkflowPlan`は例外を投げず`error`を返す）。
  */
 async function handlePlanSuccess(
   result: Extract<PlanWorkflowResult, { ok: true }>,
@@ -1818,6 +1831,8 @@ async function handlePlanSuccess(
   workspaceRoot: string,
   view: WorkflowViewManager,
   log: Logger,
+  provider: Provider,
+  host: TaskSessionHost,
 ): Promise<void> {
   const dirConfig = readWorkflowsConfig().dir;
   const dirAbs = path.join(workspaceRoot, dirConfig);
@@ -1833,24 +1848,37 @@ async function handlePlanSuccess(
     log.info('ワークフロー定義の保存を取り消しました');
     return;
   }
-  const filePath = await writeUniqueWorkflowFile(
-    dirAbs,
-    fileName,
-    existingBaseNames,
-    result.yaml,
+  const filePath = await writeUniqueWorkflowFile(dirAbs, fileName, existingBaseNames, result.yaml);
+
+  // ファイルへ保存した後にレビューする。レビューが失敗しても保存済みのファイルは
+  // そのまま残す（design.md §16.28「警告が出ても保存は妨げない」）
+  const review = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'ワークフローをレビューしています…' },
+    () =>
+      reviewWorkflowPlan({
+        goal,
+        yaml: result.yaml,
+        provider,
+        host,
+        cwd: workspaceRoot,
+        log,
+      }),
   );
 
   // エディタより先にViewを開く。エディタの`showTextDocument`が最後に呼ばれるほうへ
   // フォーカスが残るようにするため（Viewのパネル作成自体はフォーカスを奪う作りのため）
-  view.previewDefinition(
-    filePath,
-    result.definition,
-    result.securityWarnings.map((w) => ({
+  view.previewDefinition(filePath, result.definition, [
+    ...result.securityWarnings.map((w) => ({
       kind: 'plannerSecurity' as const,
       taskId: w.taskId,
       message: w.message,
     })),
-  );
+    ...review.findings.map((f) => ({
+      kind: 'plannerReview' as const,
+      taskId: f.taskIds[0],
+      message: f.taskIds.length > 0 ? `[${f.taskIds.join(', ')}] ${f.message}` : f.message,
+    })),
+  ]);
 
   const doc = await vscode.workspace.openTextDocument(filePath);
   const editor = await vscode.window.showTextDocument(doc, { preview: false });
@@ -1883,7 +1911,21 @@ async function handlePlanSuccess(
       `生成されたワークフローは既定の安全設定を上書きする指定を含んでいます（${result.securityWarnings.length}件）。` +
         '内容を確認してから実行してください。',
     );
-  } else {
+  }
+
+  if (review.findings.length > 0) {
+    log.warn(
+      `[planner] タスク分解のレビューで指摘があります: ${review.findings
+        .map((f) => f.message)
+        .join(' / ')}`,
+    );
+    void vscode.window.showWarningMessage(
+      `タスク分解のレビューで指摘があります（${review.findings.length}件）。` +
+        '内容を確認してください（自動では直していません。詳しくはログ）',
+    );
+  }
+
+  if (result.securityWarnings.length === 0 && review.findings.length === 0) {
     void vscode.window.showInformationMessage(
       `ワークフローを生成しました: ${path.relative(workspaceRoot, filePath)}` +
         (result.attempts > 1 ? '（検証エラーを踏まえて再生成しました）' : ''),
@@ -2056,16 +2098,18 @@ function createExecutablePathResolver(provider: AgentProvider, log: Logger): () 
     log.error(message);
 
     if (tracker.shouldNotify(located)) {
-      void vscode.window.showErrorMessage(message, 'インストール手順', '設定を開く').then((choice) => {
-        if (choice === 'インストール手順') {
-          void vscode.env.openExternal(vscode.Uri.parse(provider.installUrl));
-        } else if (choice === '設定を開く') {
-          void vscode.commands.executeCommand(
-            'workbench.action.openSettings',
-            provider.executableSettingKey,
-          );
-        }
-      });
+      void vscode.window
+        .showErrorMessage(message, 'インストール手順', '設定を開く')
+        .then((choice) => {
+          if (choice === 'インストール手順') {
+            void vscode.env.openExternal(vscode.Uri.parse(provider.installUrl));
+          } else if (choice === '設定を開く') {
+            void vscode.commands.executeCommand(
+              'workbench.action.openSettings',
+              provider.executableSettingKey,
+            );
+          }
+        });
     }
     return spawnPath;
   };

@@ -441,6 +441,16 @@ export interface WorkflowWarning {
      */
     | 'plannerSecurity'
     /**
+     * 生成したワークフロー（ゴール文からの生成・ロードマップからの生成のどちらも）の
+     * タスク分解が、レビューセッションの4つの観点（並列にできるタスクが直列に
+     * なっていないか／合流タスクがあるか／`done` が外から判定できるか／ゴールに対して
+     * 過不足がないか）に照らして妥当でない可能性がある（design.md §16.28、roadmap W3、
+     * Issue #337）。`planner.ts` の `reviewWorkflowPlan` が生成直後に検出し、
+     * `plannerSecurity` と同じく生成直後のプレビュー（`previewDefinition`）でも出す。
+     * **自動では直さない**（保存時の警告として出すだけ）。
+     */
+    | 'plannerReview'
+    /**
      * 上流タスクより緩い `sandbox` / `autoApprove` を持つ下流タスクが、上流の応答
      * （`{{T1.result}}` / `{{T1.summary}}`）をテンプレート変数で参照している
      * （design.md §16.4「タスク間の引き継ぎ」、Issue #67）。`workflow.ts` の
@@ -1861,7 +1871,10 @@ export class WorkflowRunner {
   private findStoppableSessionEntry(
     runId: string,
     taskId: string,
-  ): { kind: 'mergeResolution'; entry: MergeResolutionEntry } | { kind: 'task'; entry: LiveTask } | undefined {
+  ):
+    | { kind: 'mergeResolution'; entry: MergeResolutionEntry }
+    | { kind: 'task'; entry: LiveTask }
+    | undefined {
     const live = this.runs.get(runId);
     if (live === undefined) {
       return undefined;
