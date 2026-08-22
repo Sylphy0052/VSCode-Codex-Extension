@@ -2,6 +2,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { ClaudeConfig } from './claude/types';
 import type { CodexConfig } from './codex/types';
+import { hasGitSegment } from './orchestrator/escalation';
 import {
   normalizeFinalMergeConfig,
   normalizeForgeHostConfig,
@@ -12,6 +13,7 @@ import {
 } from './orchestrator/forge';
 import { DEFAULT_REPLY_TIMEOUT_SEC } from './orchestrator/messaging';
 import { DEFAULT_PSEUDO_WORKTREE_EXCLUDE } from './orchestrator/pseudoWorktree';
+import { sanitizeForLog } from './orchestrator/sanitize';
 import { normalizeBranchNaming, type BranchNaming } from './orchestrator/worktree';
 import type { HistoryScope } from './session/sessionStore';
 import { normalizeComposerButtons, type ComposerButtonsResult } from './view/composerButtons';
@@ -231,6 +233,13 @@ export interface WorkflowsConfig {
    */
   pseudoWorktreeExclude: readonly string[];
   /**
+   * `pseudoWorktreeExclude` の検証で既定値へ丸めた理由（Issue #446）。丸めた事実を黙って
+   * 落とさないための説明で、`readWorkflowsConfig` が警告通知も出す。呼び出し側が
+   * ログへ流したい場合に使う（`readSessionPresetsConfig` の `warnings` と同じ役割）。
+   * 問題が無ければ空配列。
+   */
+  pseudoWorktreeExcludeWarnings: readonly string[];
+  /**
    * ホスト連携（design.md §16.18）で使うCLIの選択。`machine`スコープ（§16.16「成果の統合
    * まわりの設定」）。実行するコマンド（`gh` / `glab`）の選択にあたるため、`.vscode/settings.json`
    * からは変えられない。
@@ -288,33 +297,146 @@ function isSafeRelativeDir(value: string): boolean {
   return !value.split(/[\\/]/u).includes('..');
 }
 
+/** 設定キーの表示名。警告文へそのまま埋める。 */
+const PSEUDO_WORKTREE_EXCLUDE_KEY = 'agent.workflows.pseudoWorktreeExclude';
+
+/**
+ * `pseudoWorktreeExclude` の要素として受け付けられない値なら、その理由を返す（Issue #446）。
+ *
+ * `isExcludedPath`（`pseudoWorktree.ts`）は「相対パスのどこかのセグメントが `exclude` の
+ * いずれかと一致すれば除外」で判定する。つまりここへ入れた名前は、複製・一覧・スナップショット
+ * （`cloneWorkspace` / `listFiles` / `takeSnapshot`）の全経路で「無かったこと」になる。
+ * このキーは `machine-overridable` でワークスペースの `.vscode/settings.json` から
+ * 上書きできるため、値の中身を検証しないと走査の対象範囲をリポジトリ側の設定から
+ * 静かに変えられる。
+ *
+ * 拒否するのは2種類。
+ *
+ * 1. `.git` をセグメントとして含む値。gitの実体を走査から外させないため。判定は
+ *    `escalation.ts` の `hasGitSegment` を共有し（`.GIT` 等の亜種も同じ扱い）、
+ *    `.git` 判定のロジックをここへ複製しない。
+ * 2. パス区切りを含む値・絶対パス。`isExcludedPath` はセグメント単位の完全一致なので、
+ *    区切りを含む値はそもそもどのセグメントとも一致しえない（＝設定として無意味）。
+ *    黙って効かないままにせず拒否して知らせる。
+ * 3. `..`・`.` 自体。`isSafeRelativeDir` が `..` セグメントを明示的に拒否しているのと
+ *    非対称にしないための姉妹ガード（`listFiles` が返すセグメントに現状 `..` / `.` は
+ *    現れないため実害は無いが、バリデーションとしての体裁は揃えておく）。
+ */
+function pseudoWorktreeExcludeRejection(entry: string): string | undefined {
+  if (hasGitSegment(entry)) {
+    return '`.git` を指す値は走査の対象範囲を変えるため';
+  }
+  if (path.isAbsolute(entry) || /[\\/]/u.test(entry)) {
+    return 'パス区切り・絶対パスを含む値はセグメント名と一致しえず設定として効かないため';
+  }
+  if (entry === '..' || entry === '.') {
+    return '`..`・`.` はディレクトリ名として意味を持たないため';
+  }
+  return undefined;
+}
+
+interface PseudoWorktreeExcludeResult {
+  exclude: readonly string[];
+  /** 既定値へ丸めた理由（丸めていなければ空配列）。 */
+  warnings: readonly string[];
+}
+
 /**
  * `agent.workflows.pseudoWorktreeExclude` の生値を安全な配列へ丸める。文字列の配列でない、
- * または空文字を含む要素があれば既定値（`DEFAULT_PSEUDO_WORKTREE_EXCLUDE`）へ丸ごと戻す
- * （`isSafeRelativeDir`と同じ「壊れた設定値は既定へ丸める」方針）。
+ * 空文字を含む要素がある、または `pseudoWorktreeExcludeRejection` が拒否する要素を1つでも
+ * 含むなら、既定値（`DEFAULT_PSEUDO_WORKTREE_EXCLUDE`）へ丸ごと戻す
+ * （`isSafeRelativeDir`と同じ「壊れた設定値は既定へ丸める」方針。一部の要素だけ落とすと
+ * 「半分だけ効いている」中途半端な状態になり、利用者が気づきにくいため）。
+ *
+ * 丸めたときは理由を `warnings` へ入れて返す。黙って落とすと設定が無視されたことに
+ * 気づけない（Issue #380 の「黙って0件成功にすると気づけない」と同じ教訓）。
  */
-function normalizePseudoWorktreeExclude(value: unknown): readonly string[] {
-  if (!Array.isArray(value)) {
-    return DEFAULT_PSEUDO_WORKTREE_EXCLUDE;
+function normalizePseudoWorktreeExclude(value: unknown): PseudoWorktreeExcludeResult {
+  const fallback = (warnings: readonly string[] = []): PseudoWorktreeExcludeResult => ({
+    exclude: DEFAULT_PSEUDO_WORKTREE_EXCLUDE,
+    warnings,
+  });
+  // 未設定（`package.json` の既定が引かれない経路。テストの設定モックなど）は
+  // 「壊れた設定」ではないため警告を出さずに既定値を使う
+  if (value === undefined || value === null) {
+    return fallback();
   }
-  const entries = value.filter((v): v is string => typeof v === 'string' && v.trim() !== '');
-  return entries.length === value.length && entries.length > 0
-    ? entries
-    : DEFAULT_PSEUDO_WORKTREE_EXCLUDE;
+  if (!Array.isArray(value)) {
+    return fallback([
+      `${PSEUDO_WORKTREE_EXCLUDE_KEY} が文字列の配列でないため既定値へ戻しました。`,
+    ]);
+  }
+  // 空判定だけでなく格納する値もトリムする。トリムせず生の値を残すと、前後に空白が
+  // 付いた値（例 " .git "）が `hasGitSegment` の完全一致にも区切り文字判定にも掛からず
+  // 素通りしてしまう（レビュー指摘: low）。
+  const entries = value
+    .filter((v): v is string => typeof v === 'string')
+    .map((v) => v.trim())
+    .filter((v) => v !== '');
+  if (entries.length !== value.length || entries.length === 0) {
+    return fallback([
+      `${PSEUDO_WORKTREE_EXCLUDE_KEY} に文字列でない要素・空文字が含まれる、または空配列のため既定値へ戻しました。`,
+    ]);
+  }
+  const warnings = entries.flatMap((entry) => {
+    const reason = pseudoWorktreeExcludeRejection(entry);
+    return reason === undefined
+      ? []
+      : [
+          `${PSEUDO_WORKTREE_EXCLUDE_KEY} の値 "${sanitizeForLog(entry)}" は使えないため、設定全体を既定値へ戻しました（${reason}）。`,
+        ];
+  });
+  return warnings.length > 0 ? fallback(warnings) : { exclude: entries, warnings: [] };
+}
+
+/**
+ * 直前に通知した `pseudoWorktreeExclude` の警告文。`readWorkflowsConfig` は設定を読むたびに
+ * 呼ばれるため、同じ内容の通知を繰り返さないための重複除け。設定を直せば `undefined` へ戻り、
+ * 再び壊れた値を入れれば改めて通知される。
+ */
+let lastPseudoWorktreeExcludeWarning: string | undefined;
+
+/**
+ * テスト専用: `lastPseudoWorktreeExcludeWarning` をリセットする。
+ *
+ * モジュールスコープの状態のためテストから直接書き換えられず、リセットしないと
+ * 「同じ不正値を検証するテストが2つあると、後勝ちの1つは重複除けで警告0件になる」
+ * という実行順依存が生まれる（レビュー指摘: medium）。`test/unit/config.test.ts` の
+ * `beforeEach` から呼ぶ。本体コードから呼んではならない。
+ */
+export function __resetPseudoWorktreeExcludeWarningForTestOnly(): void {
+  lastPseudoWorktreeExcludeWarning = undefined;
+}
+
+/** 検証で弾いた設定を人へ見せる（通知＝設定を書いた本人が気づける唯一の場所）。 */
+function notifyPseudoWorktreeExcludeWarnings(warnings: readonly string[]): void {
+  const message = warnings.join(' / ');
+  if (message === '') {
+    lastPseudoWorktreeExcludeWarning = undefined;
+    return;
+  }
+  if (message === lastPseudoWorktreeExcludeWarning) {
+    return;
+  }
+  lastPseudoWorktreeExcludeWarning = message;
+  void vscode.window.showWarningMessage(message);
 }
 
 export function readWorkflowsConfig(): WorkflowsConfig {
   const c = vscode.workspace.getConfiguration('agent');
   const rawDir = str(c, 'workflows.dir', DEFAULT_WORKFLOWS_DIR);
   const rawRoadmapDir = str(c, 'workflows.roadmapDir', DEFAULT_ROADMAP_DIR);
+  const pseudoWorktreeExclude = normalizePseudoWorktreeExclude(
+    c.get<unknown>('workflows.pseudoWorktreeExclude'),
+  );
+  notifyPseudoWorktreeExcludeWarnings(pseudoWorktreeExclude.warnings);
   return {
     dir: isSafeRelativeDir(rawDir) ? rawDir : DEFAULT_WORKFLOWS_DIR,
     allowAutoApprove: c.get<boolean>('workflows.allowAutoApprove') ?? false,
     allowClaudeBypassPermissions: c.get<boolean>('workflows.allowClaudeBypassPermissions') ?? false,
     roadmapDir: isSafeRelativeDir(rawRoadmapDir) ? rawRoadmapDir : DEFAULT_ROADMAP_DIR,
-    pseudoWorktreeExclude: normalizePseudoWorktreeExclude(
-      c.get<unknown>('workflows.pseudoWorktreeExclude'),
-    ),
+    pseudoWorktreeExclude: pseudoWorktreeExclude.exclude,
+    pseudoWorktreeExcludeWarnings: pseudoWorktreeExclude.warnings,
     forge: normalizeForgeHostConfig(str(c, 'workflows.forge', 'auto')),
     pullRequest: normalizePullRequestLayerConfig(str(c, 'workflows.pullRequest', 'per-task')),
     finalMerge: normalizeFinalMergeConfig(str(c, 'workflows.finalMerge', 'auto')),

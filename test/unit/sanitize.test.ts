@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  maskForLog,
   maskHomeDir,
   sanitizeForLog,
   stripControlChars,
@@ -174,6 +175,39 @@ describe('maskHomeDir（Issue #378: ホームディレクトリ配下のユー�
 
   it('実行環境のos.homedir()に依存せず、明示的にhomeDirを渡してテストできる', () => {
     expect(maskHomeDir('/home/zzz-test-user/x', '/home/zzz-test-user')).toBe('~/x');
+  });
+
+  it('homeDirが"/"の場合は単独の"/"を全置換せず一般パターンのみ適用する（コンテナのHOME=/対策）', () => {
+    // 修正前は exactHomeDirPattern が「後続が/\か文字列末尾」の単独"/"全てに一致し、
+    // 末尾の区切りごと"~"へ置き換えてパスを壊していた（例: '/tmp/' → '/tmp~'）。
+    expect(maskHomeDir('/tmp/', '/')).toBe('/tmp/');
+  });
+
+  it('homeDirが"/"でも/home配下のユーザー名マスク（maskHomeDirUsername）は従来通り効く', () => {
+    expect(maskHomeDir('/home/eve/repo/foo.ts', '/')).toBe('/home/***/repo/foo.ts');
+  });
+});
+
+describe('maskForLog（セキュリティ監査指摘: 対象範囲の明記。URLのuserinfoとホームディレクトリ配下のユーザー名のみを隠す）', () => {
+  it('URLのuserinfoとホームディレクトリのユーザー名が同時に出ても両方マスクする', () => {
+    const input =
+      "fatal: unable to access 'https://token123@github.com/org/repo': " +
+      "config read failed: open '/home/alice/.gitconfig'";
+    const result = maskForLog(input, '/home/alice');
+    expect(result).not.toContain('token123');
+    expect(result).not.toContain('alice');
+    expect(result).toContain('https://***@github.com/org/repo');
+    expect(result).toContain('~/.gitconfig');
+  });
+
+  it('Bearerトークンやghp_/sk-のようなAPIキー様の文字列はマスク対象外（Issue #474で別対応）', () => {
+    const input = 'Authorization: Bearer ghp_1234567890abcdefTOKEN sk-ABCDEFGHIJKLMNOP';
+    expect(maskForLog(input)).toBe(input);
+  });
+
+  it('マスク対象外の値は元の文字列を変更せず返す', () => {
+    const input = 'ls -la /repo/work';
+    expect(maskForLog(input)).toBe(input);
   });
 });
 

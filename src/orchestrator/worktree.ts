@@ -139,8 +139,12 @@ export const nodeWorktreeFileSystem: WorktreeFileSystemPort = {
  * `taskId` に再試行のサフィックスを付ける。`worktreePath` のディレクトリ名と
  * `branchName` のブランチ名の末尾セグメントとで同じ変換を共有する
  * （design.md §16.5「再試行時のブランチ名は `wf/<runId>/<taskId>-retry<n>`」）。
+ *
+ * `pseudoWorktree.ts`（gitの無いワークスペースでの隔離）も同じ変換を要る（Issue #396）。
+ * 疑似worktree側にも同じロジックを複製すると、この関数の変換規則が変わったときに
+ * 片方だけ追随し忘れる事故が起きるため、export してそちらから読む。
  */
-function withRetrySuffix(taskId: string, retry: number | undefined): string {
+export function withRetrySuffix(taskId: string, retry: number | undefined): string {
   return retry === undefined ? taskId : `${taskId}-retry${retry}`;
 }
 

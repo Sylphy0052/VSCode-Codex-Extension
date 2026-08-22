@@ -23,6 +23,7 @@ import {
   pseudoWorktreesRootDir,
   reflectIntegrationToWorkspace,
   removePseudoWorktree,
+  removePseudoWorktreeAttempts,
   serializeManifest,
   takeSnapshot,
   type DiffEntry,
@@ -63,6 +64,32 @@ describe('pseudoWorktreesRootDir / pseudoWorktreePath / integrationPath', () => 
     const t2 = pseudoWorktreePath('/ws', RUN_ID, 'T2');
     const t3 = pseudoWorktreePath('/ws', RUN_ID, 'T3');
     expect(t2).not.toBe(t3);
+  });
+
+  /**
+   * `worktree.ts`の`worktreePath`と対称にする（Issue #396）。`retry`を渡すと
+   * ディレクトリ名にも`-retry<n>`が付き、再試行のたびに別ディレクトリになる。
+   */
+  it('retryを渡すとディレクトリ名に-retry<n>が付く（worktree.tsのworktreePathと対称）', () => {
+    expect(pseudoWorktreePath('/ws', RUN_ID, 'T1', 0)).toBe(
+      path.join('/ws', '.agents', 'worktrees', RUN_ID, 'T1-retry0'),
+    );
+    expect(pseudoWorktreePath('/ws', RUN_ID, 'T1', 1)).toBe(
+      path.join('/ws', '.agents', 'worktrees', RUN_ID, 'T1-retry1'),
+    );
+    expect(pseudoWorktreePath('/ws', RUN_ID, 'T1', undefined)).toBe(
+      pseudoWorktreePath('/ws', RUN_ID, 'T1'),
+    );
+  });
+
+  /**
+   * `_integration`はタスクidとして予約済み（design.md §16.17）で、再試行という概念が
+   * 無い。誤って接尾辞が付くと`integrationPath`が指す場所とずれてしまう。
+   */
+  it('_integrationにretryを渡しても接尾辞は付かない（予約済みタスクidのため）', () => {
+    expect(pseudoWorktreePath('/ws', RUN_ID, '_integration', 3)).toBe(
+      integrationPath('/ws', RUN_ID),
+    );
   });
 });
 
@@ -384,6 +411,55 @@ describe('実ファイルシステムでの統合テスト', () => {
     expect(second).toMatchObject({ ok: false, reason: 'alreadyExists' });
   });
 
+  /**
+   * Issue #396: `failed`になったタスクを再試行すると、`retry`回数に応じた別ディレクトリへ
+   * 複製できる必要がある。`retry`を渡さずに前回の複製が残ったままだと`alreadyExists`で
+   * 必ず失敗していた（gitの`worktreePath`は既にretry対応済みで、疑似worktree側だけが
+   * 取り残されていた）。
+   */
+  it('retryを渡すと前回の複製が残っていても別ディレクトリへ複製できる（Issue #396）', async () => {
+    await writeWorkspaceFile('a.txt', 'a\n');
+    const first = await cloneWorkspace(workspace, RUN_ID, 'T1', [], nodePseudoWorktreeFileSystem);
+    expect(first.ok).toBe(true);
+
+    const retried = await cloneWorkspace(
+      workspace,
+      RUN_ID,
+      'T1',
+      [],
+      nodePseudoWorktreeFileSystem,
+      0,
+    );
+    expect(retried.ok).toBe(true);
+    if (!first.ok || !retried.ok) return;
+    expect(retried.cwd).not.toBe(first.cwd);
+    expect(retried.cwd).toBe(pseudoWorktreePath(workspace, RUN_ID, 'T1', 0));
+    await expect(readFile(path.join(retried.cwd, 'a.txt'), 'utf8')).resolves.toBe('a\n');
+  });
+
+  it('同じretry番号への2回目のcloneWorkspaceはalreadyExistsになる', async () => {
+    await writeWorkspaceFile('a.txt', 'a\n');
+    const first = await cloneWorkspace(
+      workspace,
+      RUN_ID,
+      'T1',
+      [],
+      nodePseudoWorktreeFileSystem,
+      0,
+    );
+    expect(first.ok).toBe(true);
+
+    const second = await cloneWorkspace(
+      workspace,
+      RUN_ID,
+      'T1',
+      [],
+      nodePseudoWorktreeFileSystem,
+      0,
+    );
+    expect(second).toMatchObject({ ok: false, reason: 'alreadyExists' });
+  });
+
   it('ワークスペース内のシンボリックリンクは複製・スナップショットの対象から除く', async () => {
     const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-outside-'));
     try {
@@ -504,6 +580,34 @@ describe('実ファイルシステムでの統合テスト', () => {
     });
 
     /**
+     * Issue #396: `retry`を渡すと、その番号の複製先だけを撤去できる
+     * （`cloneWorkspace`が`retry`ごとに別ディレクトリを作るのと対称）。
+     */
+    it('retryを渡すとその番号の複製先を撤去する', async () => {
+      const cloned = await cloneWorkspace(
+        workspace,
+        RUN_ID,
+        'T1',
+        [],
+        nodePseudoWorktreeFileSystem,
+        0,
+      );
+      expect(cloned.ok).toBe(true);
+      if (!cloned.ok) return;
+
+      const result = await removePseudoWorktree(
+        workspace,
+        RUN_ID,
+        'T1',
+        nodePseudoWorktreeFileSystem,
+        0,
+      );
+
+      expect(result).toEqual({ ok: true });
+      await expect(readdir(cloned.cwd)).rejects.toThrow();
+    });
+
+    /**
      * `<runId>`ディレクトリがシンボリックリンクへ差し替えられていると、素朴な文字列結合の
      * パスは`.agents/worktrees`の外（ここでは`outsideDir`）の実体を指す。実パス解決した
      * 結果が`.agents/worktrees`の配下に無ければ、`removeDirRecursive`を呼ばずに
@@ -529,6 +633,101 @@ describe('実ファイルシステムでの統合テスト', () => {
         await expect(readFile(path.join(outsideDir, 'T1', 'secret.txt'), 'utf8')).resolves.toBe(
           'secret\n',
         );
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('removePseudoWorktreeAttempts（全試行分の撤去、Issue #396）', () => {
+    /**
+     * `worktree.ts`の`removeGitTaskWorktree`（`runner.ts`）と対になる撤去。「retryなし
+     * （初回）」と`0..totalAttempts-1`のすべてを撤去対象にする。過去の試行分の複製が
+     * 残ったままだと、`.agents/worktrees`配下にワークスペース丸ごとの複製が試行回数分
+     * 積み上がってしまう。
+     */
+    it('初回と全retry分の複製をまとめて撤去する', async () => {
+      const initial = await cloneWorkspace(workspace, RUN_ID, 'T1', [], nodePseudoWorktreeFileSystem);
+      const retry0 = await cloneWorkspace(
+        workspace,
+        RUN_ID,
+        'T1',
+        [],
+        nodePseudoWorktreeFileSystem,
+        0,
+      );
+      const retry1 = await cloneWorkspace(
+        workspace,
+        RUN_ID,
+        'T1',
+        [],
+        nodePseudoWorktreeFileSystem,
+        1,
+      );
+      expect(initial.ok).toBe(true);
+      expect(retry0.ok).toBe(true);
+      expect(retry1.ok).toBe(true);
+      if (!initial.ok || !retry0.ok || !retry1.ok) return;
+
+      const result = await removePseudoWorktreeAttempts(
+        workspace,
+        RUN_ID,
+        'T1',
+        2,
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result).toEqual({ ok: true });
+      await expect(readdir(initial.cwd)).rejects.toThrow();
+      await expect(readdir(retry0.cwd)).rejects.toThrow();
+      await expect(readdir(retry1.cwd)).rejects.toThrow();
+    });
+
+    it('totalAttemptsが0なら初回分だけを撤去する', async () => {
+      const initial = await cloneWorkspace(workspace, RUN_ID, 'T1', [], nodePseudoWorktreeFileSystem);
+      expect(initial.ok).toBe(true);
+      if (!initial.ok) return;
+
+      const result = await removePseudoWorktreeAttempts(
+        workspace,
+        RUN_ID,
+        'T1',
+        0,
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result).toEqual({ ok: true });
+      await expect(readdir(initial.cwd)).rejects.toThrow();
+    });
+
+    it('存在しない試行分が含まれていても冪等に成功する', async () => {
+      const result = await removePseudoWorktreeAttempts(
+        workspace,
+        RUN_ID,
+        'T1',
+        3,
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result).toEqual({ ok: true });
+    });
+
+    it('いずれかの撤去が失敗すればok:falseで全メッセージをまとめて返す', async () => {
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-outside-'));
+      try {
+        await mkdir(path.join(outsideDir, 'T1-retry0'), { recursive: true });
+        await mkdir(pseudoWorktreesRootDir(workspace), { recursive: true });
+        await symlink(outsideDir, path.join(pseudoWorktreesRootDir(workspace), RUN_ID));
+
+        const result = await removePseudoWorktreeAttempts(
+          workspace,
+          RUN_ID,
+          'T1',
+          1,
+          nodePseudoWorktreeFileSystem,
+        );
+
+        expect(result.ok).toBe(false);
       } finally {
         await rm(outsideDir, { recursive: true, force: true });
       }

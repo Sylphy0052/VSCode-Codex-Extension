@@ -60,6 +60,18 @@ function maskHomeDirUsername(value: string): string {
 }
 
 /**
+ * `homeDir` がパス区切り文字だけで構成される（空文字 `''` を除く。例: `/` `\` `//`）場合に
+ * `true`。コンテナ環境で `HOME=/` になっているケースが実在する（`createLogger` が
+ * `os.homedir()` を生成時に一度だけ固定するため、この異常値は一度固定されると全ログ経路に
+ * 効き続ける）。この状態で `exactHomeDirPattern` をそのまま使うと、「後続が区切り文字か
+ * 文字列末尾」という条件だけを持つ単独の `/` が、パス中のあらゆる区切りにマッチしてしまい
+ * （例: `/tmp/` の末尾の `/` が `~` に化けて `/tmp~` になる）、パスの構造を壊してしまう。
+ */
+function isPathSeparatorOnly(homeDir: string): boolean {
+  return homeDir.length > 0 && /^[\\/]+$/u.test(homeDir);
+}
+
+/**
  * `os.homedir()` が返す実際のホームディレクトリ（`/home/<user>` `/Users/<user>` の慣習に
  * 沿わない値を含む。例: コンテナの `/root`）と厳密に一致する接頭辞を丸ごと `~` へ置換する。
  * 後続のパス区切り（`/` `\`）または文字列末尾が続く場合のみマッチさせ、
@@ -72,12 +84,47 @@ function maskHomeDirUsername(value: string): string {
  * 任意の`homeDir`を明示的に渡して検証できる。
  */
 export function maskHomeDir(value: string, homeDir: string = os.homedir()): string {
-  if (!homeDir) {
+  if (!homeDir || isPathSeparatorOnly(homeDir)) {
     return maskHomeDirUsername(value);
   }
   const escaped = homeDir.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
   const exactHomeDirPattern = new RegExp(`${escaped}(?=[\\\\/]|$)`, 'gu');
   return maskHomeDirUsername(value.replace(exactHomeDirPattern, '~'));
+}
+
+/**
+ * ログ・理由文字列へ埋め込む値から、値そのものを削らずに秘匿情報だけを隠す。
+ * URL中のuserinfo（トークン付きURL）と、ホームディレクトリ配下のユーザー名の2種類。
+ *
+ * `sanitizeForLog` から制御文字の畳み込みと長さの切り詰めを除いた部分にあたる。
+ * 一般経路のログ（`src/log.ts` の `createLogger`）は、fsエラーやスタックトレースを
+ * そのまま流す使い方が前提で、改行を潰したり200文字で切ったりすると障害調査に
+ * 必要な情報が失われる。そのため一般経路にはこちらだけを掛ける（Issue #391）。
+ *
+ * 置換はいずれも冪等（`/home/***` の `***`・`https://***@` の `***` は再度同じ形に
+ * 置き換わるだけ、`~` はどちらのパターンにも一致しない）。よって既に `sanitizeForLog` を
+ * 通した文字列を `createLogger` が再度この関数へ通しても結果は変わらない。
+ *
+ * `homeDir` はテスト容易性のために受け取れるようにしてある（既定は `os.homedir()`）。
+ *
+ * **限界（セキュリティ監査指摘）**: マスクするのはURLのuserinfoとホームディレクトリ配下の
+ * ユーザー名の2種類だけで、それ以外の秘密情報（APIキー・トークン・認証ヘッダ等。例:
+ * `Bearer <token>` `ghp_...` `sk-...`）は対象外のためそのまま素通りする。外部CLIの
+ * stderrをそのまま `log.warn` / `log.error` へ渡す経路（`src/view/settingsProvider.ts`・
+ * `src/extension.ts` 等）は、マスク済みのログでもこれらの文字列が含まれていれば漏れうる。
+ * 「マスク済みだから安全」と誤解してログを共有しないこと。この穴自体を塞ぐ対応は
+ * Issue #474で追跡する（ここでは限界の明記のみ）。
+ *
+ * 監査が実測で確認した既知のすり抜け例（いずれも対応の意図的な範囲外）:
+ * - パーセントエンコードされたURL（例: `https://token%40example.com@host/...` のように
+ *   `@` 自体がエンコードされている場合、`URL_USERINFO_PATTERN` は元の記法通りの
+ *   `user:pass@host` 形状しか見ないため一致しない）
+ * - `\\` にエスケープされたWindowsパス（例: JSON化されたエラーメッセージ中の
+ *   `C:\\\\Users\\\\alice\\\\...` は `HOME_DIR_USERNAME_PATTERN` が想定する
+ *   `C:\Users\alice` の形状と一致せず素通りする）
+ */
+export function maskForLog(value: string, homeDir?: string): string {
+  return maskHomeDir(maskUrlUserinfo(value), homeDir);
 }
 
 /**
@@ -147,8 +194,7 @@ export function stripControlCharsPreservingNewlines(value: string): string {
  */
 export function sanitizeForLog(value: string, maxLen: number = SANITIZE_MAX_LEN): string {
   const normalized = stripControlChars(value);
-  const urlMasked = maskUrlUserinfo(normalized);
-  const masked = maskHomeDir(urlMasked);
+  const masked = maskForLog(normalized);
   const collapsed = masked.replace(/ {2,}/gu, ' ').trim();
   return collapsed.length > maxLen ? `${collapsed.slice(0, maxLen)}…` : collapsed;
 }
