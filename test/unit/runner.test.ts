@@ -174,8 +174,18 @@ class FakeTaskSession implements TaskSession {
    * Issue #412のレビュー指摘D）。1回だけ発火する。
    */
   disposeFinishReason: LoopStopReason | undefined;
+  /**
+   * テスト用。設定すると`dispose()`が投げる（`stdin.end()`やプロセスkillが失敗する
+   * `streamSession.ts`の実装を想定した再現。Issue #434のレビュー指摘の検証用）。
+   */
+  failDispose: Error | undefined;
   dispose(): void {
     this.disposed = true;
+    if (this.failDispose !== undefined) {
+      const err = this.failDispose;
+      this.failDispose = undefined;
+      throw err;
+    }
     const reason = this.disposeFinishReason;
     this.disposeFinishReason = undefined;
     if (reason !== undefined) {
@@ -6353,6 +6363,51 @@ tasks:
   });
 
   /**
+   * `finishMergeResolution`の`session?.dispose()`は`reason`の判定より前に無条件で呼ばれる。
+   * `dispose()`（実体は`streamSession.ts`の`stdin.end()`やプロセスkill）が例外を投げると、
+   * `reason`が`manual`/`interrupted`/`taskStopped`（人が止めた経路）であっても
+   * `onMergeResolutionFinished`の`catch`が拾って`markMergeFailed`へ落としてしまい、
+   * 「人が止めたマージはタスク自身の状態を変えない」（Issue #434）という規律と衝突する。
+   * `dispose()`由来の例外は`reason`に関わらずログにだけ残し、`markMergeFailed`へ落とさない
+   * ことを確かめる。
+   */
+  it('人が衝突解決セッションを止めたとき、後始末のdisposeが例外を投げてもmarkMergeFailedへ落ちない（Issue #434）', async () => {
+    const soloYaml = `
+version: 1
+name: lease-manual-stop
+defaults:
+  provider: codex
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(soloYaml, { git });
+    const result = await runner.start('/repo/.agents/workflows/lease.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // T1が衝突し、衝突解決セッションが開いた
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    const resolution = codexHost.sessions.at(-1);
+    if (resolution === undefined) {
+      throw new Error('衝突解決セッションが開かれていません');
+    }
+
+    // 人がタブを閉じた（`manual`）。その後始末のdisposeがプロセスkillの失敗等で例外を投げる
+    resolution.failDispose = new Error('プロセスの終了に失敗しました');
+    resolution.finish('manual', { ...initialChatState });
+    await flush();
+
+    // Issue #434の規律どおり、タスク自身の状態は変わらない（`merging`のまま）。
+    // 修正前は`dispose()`の例外が`markMergeFailed`へ落ちて`failed`になっていた
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    expect(store.find(runId)?.haltedByUser).toBe(true);
+  });
+
+  /**
    * `merging`のまま残った2件を持つ永続化データと、それを復元するrunnerを用意する
    * （リロード後のやり直しの検証用）。
    */
@@ -6475,9 +6530,19 @@ tasks:
 
   /**
    * 復元のやり直しを直列にしたぶん、1件目が例外を投げるとそこで打ち切られて2件目以降が
-   * 永久に`merging`のまま残る（レビュー指摘7）。1件ごとに拾って先へ進むことを確かめる。
+   * 永久に`merging`のまま残る（レビュー指摘7）。1件ごとに拾って先へ進むことを確かめる…
+   * つもりだったが、`throwingGit`が投げる例外は`startMerge`（`runnerMerge.ts`）内の
+   * `commitUncommittedChangesIfNeeded`が最初に受け止めてしまう。`startMerge`自体が
+   * 例外を受け止めて`markMergeFailed`へ落とすようになった（Issue #437）ため、この
+   * テストで実際に検証できているのは`startMerge`内部の`try/catch`だけで、
+   * `resumeMergesSequentially`（`runnerRestore.ts`）の`try/catch`は1回も例外を
+   * 受け取っていない。守ろうとした性質（1件目の失敗で2件目以降を止めない）自体は
+   * 保たれているが、それを保証しているのが`startMerge`側なのか
+   * `resumeMergesSequentially`側なのかをこのテストは区別できない
+   * （`resumeMergesSequentially`の`try/catch`を消しても同じ結果で通る）。
+   * `resumeMergesSequentially`自身の`try/catch`は次のテストが受け持つ。
    */
-  it('リロード後の復元は、1件目が例外で落ちても2件目のやり直しを続ける', async () => {
+  it('リロード後の復元は、1件目が例外で落ちても2件目のやり直しを続ける（startMerge内で受け止める経路）', async () => {
     const base = fakeGit();
     const throwingGit: FakeGitHandle = {
       calls: base.calls,
@@ -6494,9 +6559,93 @@ tasks:
     await runner.restoreRunsForView();
     await flush();
 
-    // 1件目は例外で終わる（状態は動かない）が、2件目のやり直しは走り切る
+    // 1件目は例外を受けてfailedへ確定する（`merging`のまま固着しない）が、
+    // 2件目のやり直しは打ち切られず走り切る
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+  });
+
+  /**
+   * 前のテストと違い、`startMerge`を呼ぶより前の層（`resumeMergeAfterReload`が
+   * `self.deps.store.find(runId)`を読む箇所、`runnerRestore.ts`）で例外を起こし、
+   * `resumeMergesSequentially`の`try/catch`が実際に例外を受け止めて次のtaskIdへ
+   * 進むことを確かめる。ここで例外を起こすのは`store.find`が最初の1回だけ投げる
+   * フェイクにしたためで、`startMerge`自体は一度も呼ばれない
+   * （T1の状態は復元前の`merging`のまま固着する＝レビュー指摘が言う「1件目の失敗が
+   * 2件目を道連れにする」を防げているかどうかの純粋な検証になる）。
+   */
+  it('リロード後の復元は、store.findが例外を投げても2件目のやり直しを続ける（resumeMergesSequentially自身のtry/catch）', async () => {
+    class ThrowOnceStore extends WorkflowRunStore {
+      private calls = 0;
+      override find(runId: string): PersistedRun | undefined {
+        this.calls += 1;
+        if (this.calls === 1) {
+          throw new Error('storeの読み出しに失敗しました');
+        }
+        return super.find(runId);
+      }
+    }
+    const store = new ThrowOnceStore(fakeMemento());
+    const runId = '00000000-0000-4000-8000-000000000413';
+    const persistedTask = (id: string) => ({
+      state: 'merging' as const,
+      sessionId: `session-${id}`,
+      cwd: `/repo/.agents/worktrees/${runId}/${id}`,
+      branch: `wf/${runId}/${id}`,
+      submissionCount: 1,
+      retryCount: 0,
+      manualRetryCount: 0,
+      failure: undefined,
+      pullRequestNumber: undefined,
+      pullRequestUrl: undefined,
+    });
+    await store.update(runId, () => ({
+      runId,
+      defPath: '/repo/.agents/workflows/lease.yaml',
+      workspaceRoot: '/repo',
+      startedAt: new Date().toISOString(),
+      finishedAt: undefined,
+      tasks: { T1: persistedTask('T1'), T2: persistedTask('T2') },
+      haltedByUser: false,
+      integrationBranch: `wf/${runId}/integration`,
+      integrationPullRequestNumber: undefined,
+      integrationPullRequestUrl: undefined,
+      finalMergeOutcome: undefined,
+    }));
+
+    const errorLog = vi.fn();
+    const git = fakeGit();
+    const host = new FakeHost();
+    const runner = new WorkflowRunner({
+      hosts: { codex: host, claude: host },
+      worktreeQueue: new WorktreeCreationQueue(),
+      git,
+      fs: identityFs,
+      filePort: filePort(PARALLEL_YAML),
+      store,
+      log: { ...fakeLogger, error: errorLog },
+      readBaseline: () => ({
+        codexSandbox: 'read-only',
+        codexApprovalMode: 'on-request',
+        claudePermissionMode: 'manual',
+        allowAutoApprove: true,
+        allowClaudeBypassPermissions: false,
+      }),
+    });
+
+    await runner.restoreRunsForView();
+    await flush();
+
+    // T1は`store.find`が投げた時点で打ち切られ、復元前の`merging`のまま固着する
+    // （`startMerge`は一度も呼ばれていない）。それでもT2のやり直しは続いて完了する
     expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
     expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+    // catch節のログ文言（`runnerRestore.ts`）も検証する
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `[workflow ${runId}/T1] リロード後のマージのやり直しに失敗しました`,
+      ),
+    );
   });
 
   it('リロード後の復元は1件目が衝突しても2件目を割り込ませない', async () => {
@@ -6517,6 +6666,182 @@ tasks:
     expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
     expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
     expect(mergeCalls(git)).toHaveLength(2);
+  });
+});
+
+/**
+ * `void`で発火するマージ経路のうち、pseudo worktree側（Issue #376）と復元側（Issue #412）は
+ * rejectionを受け止めるようになったが、gitのメイン経路（`runner.ts`の`void startMerge(...)`・
+ * `runnerMerge.ts`の`retryMerge`内`void startMerge(...)`・`void onMergeResolutionFinished(...)`）
+ * は残っていた（Issue #437）。`nodeGitCommandRunner`は基本的にresolveしか返さないため実害は
+ * 起きにくいが、想定外の例外（ENOSPC等）が起きると`merging`のまま固着し、`getRunOutcome`が
+ * `merging`を`running`へマップするためrunが永久に終わらない。
+ */
+describe('WorkflowRunner: マージ経路のrejectionを受け止める（Issue #437）', () => {
+  const SOLO_YAML = `
+version: 1
+name: merge-rejection-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+  /** `git merge --no-ff`だけ例外を投げるgit（resolveしか返さない実装が想定外に投げた状況を模す）。 */
+  function throwOnMergeGit(base: FakeGitHandle): FakeGitHandle {
+    return {
+      calls: base.calls,
+      resolveConflict: () => base.resolveConflict(),
+      run: async (args, cwd) => {
+        if (args[0] === 'merge' && args[1] === '--no-ff') {
+          throw new Error('ENOSPC: fake disk full');
+        }
+        return base.run(args, cwd);
+      },
+    };
+  }
+
+  it('onTaskFinishedのvoid startMerge(...)がgitの例外で落ちても、mergingで固着せずfailedへ確定する', async () => {
+    const git = throwOnMergeGit(fakeGit());
+    const { runner, codexHost, store } = createHarness(SOLO_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge-rejection.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    // 修正前はここで`merging`のまま残り、runの終了判定（`getRunOutcome`）も
+    // `merging`を`running`扱いするため`finishedAt`が永久に付かなかった
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+    expect(store.find(runId)?.finishedAt).toBeDefined();
+  });
+
+  it('retryMerge内のvoid startMerge(...)がgitの例外で落ちても、mergingで固着せずfailedへ確定する', async () => {
+    const conflictGit = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(SOLO_YAML, { git: conflictGit });
+    const result = await runner.start('/repo/.agents/workflows/merge-rejection-retry.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    // 解決セッションはdoneを宣言するがgit上は未解決のまま（`resolveConflict()`を呼ばない）
+    // なので`abortAndBlock`経由で`blocked`になる。「再マージ」の起点を作る
+    codexHost.sessions.at(-1)?.finish('done', doneState('解決したつもり'));
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+
+    // 「再マージ」の内部で呼ばれるgitの`merge --no-ff`がここで例外を投げるよう差し替える
+    let mergeRetried = false;
+    conflictGit.run = async (args, cwd) => {
+      if (!mergeRetried && args[0] === 'merge' && args[1] === '--no-ff') {
+        mergeRetried = true;
+        throw new Error('ENOSPC: fake disk full');
+      }
+      return fakeGit().run(args, cwd);
+    };
+
+    expect(runner.retryMerge(runId, 'T1')).toBe(true);
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+    expect(store.find(runId)?.finishedAt).toBeDefined();
+  });
+
+  it('衝突解決後のvoid onMergeResolutionFinished(...)が例外で落ちても、mergingで固着せずfailedへ確定する', async () => {
+    const base = fakeGit({ conflictOnce: true });
+    // `git diff --diff-filter=U`は`findMergeInProgress`（衝突前の事前チェック）と
+    // `isMergeResolutionComplete`（解決後の確認）の両方が呼ぶため、1回目（衝突前）は
+    // 素通しし、2回目（`finishMergeResolution`からの呼び出し）だけ例外を投げさせる
+    let diffCallCount = 0;
+    const git: FakeGitHandle = {
+      calls: base.calls,
+      resolveConflict: () => base.resolveConflict(),
+      run: async (args, cwd) => {
+        if (args[0] === 'diff' && args.includes('--diff-filter=U')) {
+          diffCallCount += 1;
+          if (diffCallCount >= 2) {
+            throw new Error('ENOSPC: fake disk full');
+          }
+        }
+        return base.run(args, cwd);
+      },
+    };
+    const { runner, codexHost, store } = createHarness(SOLO_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge-resolution-throw.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    const resolution = codexHost.sessions.at(-1);
+
+    base.resolveConflict();
+    resolution?.finish('done', doneState('解決しました'));
+    await flush();
+
+    // 修正前はここで`onMergeResolutionFinished`の例外がunhandled rejectionとなり、
+    // `merging`のまま固着していた
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+    expect(store.find(runId)?.finishedAt).toBeDefined();
+  });
+});
+
+/**
+ * `mergeBusy`警告は「再マージ」（人が何度でも押せる操作）のたびに積まれる。Issue #383（T20）が
+ * `orchestratorPromptOverride`を同一taskIdの直近1件へ丸めた規律に、Issue #412が新設した
+ * `mergeBusy`（`runnerMerge.ts`2箇所）は乗っていなかった（Issue #439）。
+ */
+describe('WorkflowRunner: mergeBusy警告を直近1件へ丸める（Issue #439）', () => {
+  const PARALLEL_YAML = `
+version: 1
+name: merge-busy-cap-test
+defaults:
+  maxParallel: 3
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+
+  it('busy理由でblockedを繰り返しても、同一taskIdのmergeBusy警告は直近1件に丸められる', async () => {
+    // T1の解決セッションがdoneを宣言するがgit上は未解決のままで、巻き戻しにも失敗するため、
+    // 統合worktreeはMERGE_HEADを抱えたまま占有だけが解放される（既存の
+    // 「他タスクの未解決の衝突が残った統合worktreeへぶつかったタスクは」テストと同じ状況）
+    const git = fakeGit({ conflictOnce: true, failMergeAbort: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge-busy-cap.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    const resolution = codexHost.sessions.at(-1);
+    resolution?.finish('done', doneState('解決したつもり'));
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+
+    // T2のマージは、片付いていない統合worktreeにぶつかって busy → blocked になる
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('blocked');
+
+    // 統合worktreeを片付けないまま「再マージ」を複数回押す。押すたびに同じ理由のbusyへ
+    // ぶつかり、修正前はmergeBusy警告が押した回数だけ積み上がっていた
+    for (let i = 0; i < 3; i += 1) {
+      expect(runner.retryMerge(runId, 'T2')).toBe(true);
+      await flush();
+      expect(store.find(runId)?.tasks['T2']?.state).toBe('blocked');
+    }
+
+    const mergeBusyWarnings = (runner.getSnapshot(runId)?.warnings ?? []).filter(
+      (w) => w.kind === 'mergeBusy' && w.taskId === 'T2',
+    );
+    expect(mergeBusyWarnings).toHaveLength(1);
   });
 });
 
