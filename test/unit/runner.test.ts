@@ -609,6 +609,13 @@ class FakePseudoFs implements PseudoWorktreeFileSystemPort {
       throw this.failWith;
     }
     this.files.delete(target);
+    // マニフェスト等（`writeTextFile`で書いたもの）も同じ`target`パスに対する
+    // `removeFile`で消える想定（実ファイルシステムでは拡張子・書き込み手段を問わず
+    // 同じパスのファイルは1つ）。ここを漏らすと、`removeRunDirIfEmpty`が
+    // 非再帰の`removeEmptyDir`へ変わった後（Issue #438のレビュー指摘・medium2）に
+    // 「本来消えているはずのテキストファイルが残る」という、このフェイク固有の
+    // 見せかけの不整合が生まれる。
+    this.textFiles.delete(target);
   }
   async readTextFile(target: string): Promise<string | undefined> {
     return this.textFiles.get(target);
@@ -637,6 +644,18 @@ class FakePseudoFs implements PseudoWorktreeFileSystemPort {
         this.dirs.delete(d);
       }
     }
+  }
+  async removeEmptyDir(target: string): Promise<void> {
+    if (this.failWith !== undefined) {
+      throw this.failWith;
+    }
+    const hasChildren =
+      [...this.files.keys()].some((p) => path.dirname(p) === target) ||
+      [...this.dirs].some((d) => path.dirname(d) === target);
+    if (hasChildren) {
+      return;
+    }
+    this.dirs.delete(target);
   }
 }
 

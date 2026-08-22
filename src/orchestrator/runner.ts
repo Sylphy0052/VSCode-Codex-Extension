@@ -1917,6 +1917,13 @@ export class WorkflowRunner {
     reportProgress('統合worktree');
     this.notify(runId);
     if (result.ok) {
+      // `removePseudoIntegration`はrunIdディレクトリの片付けが境界逸脱で失敗しても
+      // `_integration`/`manifest.json`の撤去自体は成功していれば`ok:true`を返し、
+      // 詳細を`warning`に載せる（Issue #438のレビュー指摘）。gitの撤去経路には
+      // 対応する`warning`が無いため、'warning' inで疑似worktree側だけを拾う。
+      if ('warning' in result && result.warning !== undefined) {
+        this.deps.log.warn(`[workflow ${runId}] ${result.warning}`);
+      }
       return {
         tasksRemoved: taskResult.removed,
         tasksFailed: taskResult.failed,

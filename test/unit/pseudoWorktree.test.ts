@@ -29,6 +29,7 @@ import {
   takeSnapshot,
   type DiffEntry,
   type IntegrationManifest,
+  type PseudoWorktreeFileSystemPort,
   type Snapshot,
 } from '../../src/orchestrator/pseudoWorktree';
 
@@ -755,7 +756,7 @@ describe('実ファイルシステムでの統合テスト', () => {
     it('.agents/worktrees配下の外を指す実体は撤去せずboundaryEscapeを返す', async () => {
       const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-outside-'));
       try {
-        await mkdir(path.join(outsideDir, 'manifest.json'), { recursive: true });
+        await writeFile(path.join(outsideDir, 'manifest.json'), '{}');
         await mkdir(pseudoWorktreesRootDir(workspace), { recursive: true });
         await symlink(outsideDir, path.join(pseudoWorktreesRootDir(workspace), RUN_ID));
 
@@ -766,7 +767,117 @@ describe('実ファイルシステムでの統合テスト', () => {
         );
 
         expect(result).toMatchObject({ ok: false, reason: 'boundaryEscape' });
-        await expect(readdir(path.join(outsideDir, 'manifest.json'))).resolves.toEqual([]);
+        await expect(readFile(path.join(outsideDir, 'manifest.json'), 'utf8')).resolves.toBe('{}');
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    /**
+     * レビュー指摘（Issue #438のPRレビュー・medium1）: `_integration`単体がシンボリック
+     * リンクに差し替えられ`manifest.json`は正当なファイルのまま、というケース。
+     * 撤去順序が`_integration`→`manifest.json`のままだと`removePseudoWorktree`の
+     * `boundaryEscape`で打ち切られ、`manifest.json`が一度も撤去されない
+     * （Issue #438が塞ごうとした幽霊マニフェストの読み戻しが再現してしまう）。
+     * manifest優先の順序であれば、`_integration`側が境界逸脱でも`manifest.json`は
+     * 確実に撤去される。
+     */
+    it('_integrationだけがシンボリックリンク化されmanifest.jsonが正当なファイルの場合、manifest.jsonは確実に撤去される', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+
+      const manifest: IntegrationManifest = new Map([
+        ['a.txt', { kind: 'added' as const, taskId: 'T1' }],
+      ]);
+      await persistManifest(workspace, RUN_ID, manifest, nodePseudoWorktreeFileSystem);
+
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-outside-'));
+      try {
+        await rm(integration.dir, { recursive: true, force: true });
+        await symlink(outsideDir, integration.dir);
+
+        const result = await removePseudoIntegration(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
+
+        // _integration側は境界逸脱として撤去を拒否する
+        expect(result).toMatchObject({ ok: false, reason: 'boundaryEscape' });
+        // manifest.jsonは_integrationより先に撤去されているため、既に消えている
+        await expect(
+          readFile(integrationManifestPath(workspace, RUN_ID), 'utf8'),
+        ).rejects.toThrow();
+        const reloaded = await loadPersistedManifest(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+        expect(reloaded).toEqual({ ok: true, manifest: new Map() });
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('_integrationとmanifest.jsonの撤去後、runIdディレクトリが空なら消える', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+
+      const result = await removePseudoIntegration(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+
+      expect(result).toEqual({ ok: true });
+      const runDir = path.join(pseudoWorktreesRootDir(workspace), RUN_ID);
+      await expect(readdir(runDir)).rejects.toThrow();
+    });
+
+    /**
+     * レビュー指摘（medium2, low1）: `removeRunDirIfEmpty`はTOCTOU窓の無い非再帰
+     * `removeEmptyDir`（`rmdir`）で判定と削除を一体化するため、`<runId>`が境界逸脱と
+     * 判定された場合でも`manifest.json`/`_integration`の撤去は既に成功している。
+     * この場合は全体を`ok:false`にせず、`warning`として観測できることを確かめる。
+     */
+    it('runIdディレクトリ自体が境界逸脱と判定されても、manifest.jsonと_integrationの撤去成功はok:falseにならず警告として返る', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+      const manifest: IntegrationManifest = new Map([
+        ['a.txt', { kind: 'added' as const, taskId: 'T1' }],
+      ]);
+      await persistManifest(workspace, RUN_ID, manifest, nodePseudoWorktreeFileSystem);
+
+      const runDir = path.join(pseudoWorktreesRootDir(workspace), RUN_ID);
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-outside-'));
+      try {
+        const fs: PseudoWorktreeFileSystemPort = {
+          ...nodePseudoWorktreeFileSystem,
+          realpath: async (target: string) => {
+            if (target === runDir) {
+              return outsideDir;
+            }
+            return nodePseudoWorktreeFileSystem.realpath(target);
+          },
+        };
+
+        const result = await removePseudoIntegration(workspace, RUN_ID, fs);
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.warning).toBeDefined();
+        }
+        await expect(readdir(integration.dir)).rejects.toThrow();
+        await expect(
+          readFile(integrationManifestPath(workspace, RUN_ID), 'utf8'),
+        ).rejects.toThrow();
       } finally {
         await rm(outsideDir, { recursive: true, force: true });
       }
@@ -1990,6 +2101,7 @@ describe('applyDiffToIntegration', () => {
       readTextFile: async () => undefined,
       writeTextFile: async () => {},
       removeDirRecursive: async () => {},
+      removeEmptyDir: async () => {},
     };
 
     await applyDiffToIntegration(
