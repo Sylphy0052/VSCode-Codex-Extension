@@ -131,42 +131,91 @@ export function maskHomeDir(value: string, homeDir: string = os.homedir()): stri
 }
 
 /**
+ * `Bearer <token>` 形式の認証ヘッダ値を検出し、`Bearer` の直後の1トークンだけを
+ * `***` に置き換える（Issue #474 指摘3）。`Bearer` という単語だけが偶然出現する
+ * ケース（`Bearer` 単体で終わる等）は対象にならない（後ろに空白区切りの値が
+ * 必須のため）。
+ *
+ * 直前が英数字・アンダースコアの場合は対象外にしている（`(?<![A-Za-z0-9_])`）。
+ * これにより、`SomeBearer xyz` のような他の識別子の一部として現れた場合の
+ * 誤検出を避ける。
+ */
+const BEARER_TOKEN_PATTERN = /(?<![A-Za-z0-9_])(Bearer\s+)\S+/giu;
+
+/**
+ * GitHub発行のトークン形状（`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` = personal access token・
+ * OAuth・user-to-server・server-to-server・refresh token）を検出する（Issue #474 指摘3）。
+ * 接頭辞の直後に英数字20文字以上を要求することで、`gh_1234` のような短い偶然の一致
+ * （過剰マスク）を避けている。
+ */
+const GITHUB_TOKEN_PATTERN = /(?<![A-Za-z0-9_])gh[oprsu]_[A-Za-z0-9]{20,}/gu;
+
+/**
+ * OpenAI/Anthropic系でよく使われる `sk-` 接頭辞のAPIキー形状を検出する
+ * （Issue #474 指摘3）。接頭辞の直後にハイフンを含む英数字10文字以上を要求し、
+ * `sk-` で始まる短い一般語（過剰マスク）を避けている。
+ */
+const OPENAI_STYLE_KEY_PATTERN = /(?<![A-Za-z0-9_])sk-[A-Za-z0-9-]{10,}/gu;
+
+/**
+ * トークン様の文字列を代表的な3形状（`Bearer <token>` / GitHubトークン / `sk-`形式の
+ * APIキー）に絞ってマスクする（Issue #474 指摘3。監査が「一番実害に近い」とした穴）。
+ *
+ * 線引きの判断: 外部CLIのstderrをそのまま `log.warn` / `log.error` へ渡す経路が
+ * 複数あり（`src/view/settingsProvider.ts`・`src/extension.ts` 等）、「マスク済みの
+ * ログだから安全」という誤解を生む実害が最も大きい。一方でパターンを広げすぎると、
+ * 障害調査に要る情報（どのファイルで失敗したか・エラーの種類）まで潰しかねない
+ * （例: 汎用的すぎる正規表現は英数字の羅列であるファイルハッシュやIDまで拾う）。
+ * そこで対象は「接頭辞・書式が固定されており、かつ実際にこのプロジェクトが連携する
+ * 外部サービス（GitHub・OpenAI/Anthropic系）・標準的な認証ヘッダに由来する」3形状のみに
+ * 絞った。JWT（`eyJ...`）・AWSアクセスキー（`AKIA...`）・Slackトークン（`xox[bpsr]-...`）
+ * 等、他の形状は対象外のまま残る（意図的な限界。必要になったら同じ考え方で追加する）。
+ *
+ * 置換はいずれも冪等（`Bearer ***` の `***`・`***`単体はいずれも各パターンに
+ * 再度一致しない）。
+ */
+function maskTokenLike(value: string): string {
+  return value
+    .replace(BEARER_TOKEN_PATTERN, '$1***')
+    .replace(GITHUB_TOKEN_PATTERN, '***')
+    .replace(OPENAI_STYLE_KEY_PATTERN, '***');
+}
+
+/**
  * ログ・理由文字列へ埋め込む値から、値そのものを削らずに秘匿情報だけを隠す。
- * URL中のuserinfo（トークン付きURL）と、ホームディレクトリ配下のユーザー名の2種類。
+ * URL中のuserinfo（トークン付きURL）・ホームディレクトリ配下のユーザー名・
+ * トークン様文字列（`Bearer <token>` / GitHubトークン / `sk-`形式のAPIキー）の3種類。
  *
  * `sanitizeForLog` から制御文字の畳み込みと長さの切り詰めを除いた部分にあたる。
  * 一般経路のログ（`src/log.ts` の `createLogger`）は、fsエラーやスタックトレースを
  * そのまま流す使い方が前提で、改行を潰したり200文字で切ったりすると障害調査に
  * 必要な情報が失われる。そのため一般経路にはこちらだけを掛ける（Issue #391）。
  *
- * 置換はいずれも冪等（`/home/***` の `***`・`https://***@` の `***` は再度同じ形に
- * 置き換わるだけ、`~` はどちらのパターンにも一致しない）。よって既に `sanitizeForLog` を
- * 通した文字列を `createLogger` が再度この関数へ通しても結果は変わらない。
+ * 置換はいずれも冪等（`/home/***` の `***`・`https://***@` の `***`・
+ * `Bearer ***` の `***` はいずれも再度同じ形に置き換わるだけ、`~` はどのパターンにも
+ * 一致しない）。よって既に `sanitizeForLog` を通した文字列を `createLogger` が
+ * 再度この関数へ通しても結果は変わらない。
  *
  * `homeDir` はテスト容易性のために受け取れるようにしてある（既定は `os.homedir()`）。
  *
- * **限界（セキュリティ監査指摘、Issue #474で一部対応）**: マスクするのはURLのuserinfoと
- * ホームディレクトリ配下のユーザー名の2種類だけで、それ以外の秘密情報（APIキー・トークン・
- * 認証ヘッダ等。例: `Bearer <token>` `ghp_...` `sk-...`）は対象外のためそのまま素通りする。
- * 外部CLIのstderrをそのまま `log.warn` / `log.error` へ渡す経路
- * （`src/view/settingsProvider.ts`・`src/extension.ts` 等）は、マスク済みのログでも
- * これらの文字列が含まれていれば漏れうる。「マスク済みだから安全」と誤解してログを
- * 共有しないこと。この穴自体を塞ぐ対応は Issue #474 で追跡する（ここでは限界の明記のみ）。
+ * **限界（セキュリティ監査指摘、Issue #474で一部対応）**: マスクするのはURLの
+ * userinfo・ホームディレクトリ配下のユーザー名・代表的なトークン形状
+ * （`Bearer <token>` / `gh[oprsu]_...` / `sk-...`）のみ。JWT（`eyJ...`）・
+ * AWSアクセスキー（`AKIA...`）・Slackトークン（`xox[bpsr]-...`）等、他の形状の
+ * 秘密情報は対象外のためそのまま素通りする。外部CLIのstderrをそのまま
+ * `log.warn` / `log.error` へ渡す経路（`src/view/settingsProvider.ts`・
+ * `src/extension.ts` 等）は、マスク済みのログでもこれらの文字列が含まれていれば
+ * 漏れうる。「マスク済みだから安全」と誤解してログを共有しないこと。
  *
- * 監査が実測で確認した既知のすり抜け例（いずれも意図的な範囲外として残る、または
- * Issue #474 で対応済み）:
- * - （対応済み）パーセントエンコードされたURL（`https%3A%2F%2Ftoken%40evil.com` のように
- *   スキーム区切り・`@`が丸ごとエンコードされた形）は `ENCODED_URL_USERINFO_PATTERN`
- *   で検出するようにした。ただし二重エンコード等、この並びに一致しない変形は
- *   引き続き対象外（`maskUrlUserinfo` のJSDoc参照）
- * - （対応済み）`\\` にエスケープされたWindowsパス（`JSON.stringify(err)` 等を経由して
- *   `C:\\Users\\alice\\...`（実体は2連バックスラッシュ）になった形）は
- *   `HOME_DIR_USERNAME_PATTERN` の区切り文字を `\\+`（1つ以上）へ緩めて対応した
- *   （`maskHomeDirUsername` のJSDoc参照）。ただしURLエンコードされたバックスラッシュ
- *   （`%5C`）等、実体が`\`文字でない変形は引き続き対象外
+ * 監査が実測で確認した既知のすり抜け例（いずれも意図的な範囲外として残る）:
+ * - 二重エンコードされたURL（例: `%253A%252F%252F` のようにパーセント記号自体が
+ *   再エンコードされている場合、`ENCODED_URL_USERINFO_PATTERN` が見る
+ *   `%3A%2F%2F...%40` の形状と一致しない）
+ * - URLエンコードされたバックスラッシュ（`%5C`）でエスケープされたWindowsパスは
+ *   `HOME_DIR_USERNAME_PATTERN` が見る実体の `\` 文字と一致しない
  */
 export function maskForLog(value: string, homeDir?: string): string {
-  return maskHomeDir(maskUrlUserinfo(value), homeDir);
+  return maskHomeDir(maskUrlUserinfo(maskTokenLike(value)), homeDir);
 }
 
 /**
