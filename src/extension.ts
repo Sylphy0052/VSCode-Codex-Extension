@@ -1411,6 +1411,11 @@ async function runRoadmap(
   if (result.validation.warnings.length > 0) {
     const detail = formatRoadmapWarningsDetail(result.validation.warnings, '\n');
     log.warn(`生成されたロードマップに警告があります:\n${detail}`);
+    // Issue #427: この通知（showWarningMessage）を消すと、警告の握り潰しが再発する。
+    // 呼び出し側のこの配線は自動テストでは検出できない（純粋関数側はユニットテストで担保）。
+    void vscode.window.showWarningMessage(
+      `生成されたロードマップに警告が${result.validation.warnings.length}件あります。内容を確認してください（詳しくはログ）`,
+    );
   }
 
   const doc = await vscode.workspace.openTextDocument(result.path);
@@ -1580,6 +1585,11 @@ async function planWorkflowFromRoadmapCommand(
         validation.warnings,
         ' / ',
       )}`,
+    );
+    // Issue #427: この通知（showWarningMessage）を消すと、警告の握り潰しが再発する。
+    // 呼び出し側のこの配線は自動テストでは検出できない（純粋関数側はユニットテストで担保）。
+    void vscode.window.showWarningMessage(
+      `選択したロードマップに警告が${validation.warnings.length}件あります。内容を確認してください（詳しくはログ）`,
     );
   }
 
