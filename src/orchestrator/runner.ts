@@ -13,11 +13,13 @@ import {
   createIntegrationPullRequest,
   buildIntegrationPullRequestBody,
   buildIntegrationPullRequestTitle,
+  DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES,
+  DEFAULT_CI_WAIT_TIMEOUT_SEC,
   markPullRequestReady,
   needsFinalMergeDecision,
   parsePullRequestNumberFromUrl,
   resolveForgeHost,
-  runFinalMerge,
+  runFinalMergeWithCiGate,
   shouldCreateIntegrationPullRequest,
   shouldRunFinalMerge,
   type CliAvailabilityPort,
@@ -342,6 +344,19 @@ export interface WorkflowRunnerDeps {
    * （`readMergeApprovalTimeoutSec`と同じく、呼び出し側は毎回現在値を返す関数を渡すこと）。
    */
   readFinalMergeDecisionTimeoutSec?: () => number;
+  /**
+   * `agent.workflows.ciWaitTimeoutSec`の現在値（秒）。省略時は`DEFAULT_CI_WAIT_TIMEOUT_SEC`
+   * （既定1800秒）を使う（design.md §16.36、Issue #556）。統合PR/MRをマージする前に
+   * CIチェックの完了を待つ時間の上限で、超えたら赤（CI失敗）と同じ扱いにする
+   * （`readFinalMergeDecisionTimeoutSec`と同じく、呼び出し側は毎回現在値を返す関数を渡すこと）。
+   */
+  readCiWaitTimeoutSec?: () => number;
+  /**
+   * `agent.workflows.ciUpdateBranchMaxRetries`の現在値。省略時は
+   * `DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES`（既定2）を使う（design.md §16.36、Issue #556）。
+   * マージが「baseの最新でない」ことで拒否されたときの取り込み直しの最大リトライ回数。
+   */
+  readCiUpdateBranchMaxRetries?: () => number;
   /** テスト用の差し替え口。既定は `node:crypto` の `randomUUID`。 */
   randomId?: () => string;
   /** テスト用の差し替え口。既定は `Date.now`。 */
@@ -3157,6 +3172,25 @@ export class WorkflowRunner {
       // （`resolveForgeState`参照）ため到達しない想定だが、安全側でここでも確認する
       return;
     }
+    // セキュリティ監査の指摘（2026-08-23）: `finalMerge: auto`の経路（`finalizeForge`）は
+    // `decideFinalMerge`（`orchestrator`/`confirm`が通る、`haltedByUser`を見るガードが
+    // 既にある）を経由せずここへ直接来るため、W1（Issue #335）のガードが素通りする
+    // 兄弟の穴になっていた。この関数は`auto`/`orchestrator`/`confirm`のどちらの経路
+    // からも呼ばれる唯一の合流点（このJSDoc冒頭参照）なので、ここで確認すれば全経路を
+    // 一様に守れる。以降のCI待ち・取り込み直しループ中の停止は`runFinalMergeWithCiGate`
+    // へ渡す`isCancelled`コールバックが見る（design.md §16.36）
+    if (live.runState.haltedByUser) {
+      this.deps.log.warn(`[workflow ${runId}] 人が停止したため最終マージを中止しました`);
+      live.warnings.push({
+        kind: 'forgeFailed',
+        taskId: undefined,
+        message: '人が停止したため最終マージを中止しました',
+      });
+      live.finalMergeOutcome = 'failed';
+      void this.persist(runId);
+      this.notify(runId);
+      return;
+    }
     // design.md §16.18「統合層のPR/MRもDraftで作る。ただしこちらは最終マージの直前に
     // readyへ切り替える。Draftのままではマージできないため、タスク層とは順序が違う」。
     // タスク層（`runTaskPullRequestFlow`）はマージ後にreadyへ切り替えるが、統合層は
@@ -3198,12 +3232,21 @@ export class WorkflowRunner {
     // design.md §16.18・Issue #404「番号を省略すると、マージ対象はcwdのカレント
     // ブランチに紐づくPR/MRという暗黙の状態依存になる」ため、直前に取り出した統合PR/MRの
     // 番号（`live.integrationPullRequest.number`）を明示的に渡す。番号が不明なとき
-    // （URLから取り出せなかった等）は`runFinalMerge`自体がCLIを呼ばず警告を返す
-    const merge = await runFinalMerge(
+    // （URLから取り出せなかった等）は`runFinalMergeWithCiGate`自体がCLIを呼ばず警告を返す。
+    // design.md §16.36（Issue #556）: マージ前にCIチェックの完了を待ち、赤・タイムアウトなら
+    // マージせず失敗として確定する。「baseの最新でない」ことでの拒否は取り込み直して再試行する
+    const merge = await runFinalMergeWithCiGate(
       forgeDeps.cli,
       forge.host,
       live.integration.cwd,
       live.integrationPullRequest?.number,
+      {
+        ...this.readCiGateConfig(),
+        // CI待ちのポーリング・取り込み直しの再試行ループの各周回で、人が「全体の停止」を
+        // 押したか（`disposing`＝拡張機能終了中も含む）を確認するコールバック
+        // （design.md §16.36、セキュリティ監査の指摘。2026-08-23）
+        isCancelled: () => live.runState.haltedByUser || this.disposing,
+      },
     );
     if (!merge.ok) {
       this.deps.log.warn(`[workflow ${runId}] 最終マージに失敗しました: ${merge.message}`);
@@ -3274,6 +3317,14 @@ export class WorkflowRunner {
     return (
       this.deps.readFinalMergeDecisionTimeoutSec?.() ?? DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC
     );
+  }
+
+  /** `runFinalMergeWithCiGate`（`forge.ts`）へ渡す待ち時間・リトライ回数（design.md §16.36）。 */
+  private readCiGateConfig(): { waitTimeoutMs: number; maxUpdateBranchRetries: number } {
+    const waitTimeoutSec = this.deps.readCiWaitTimeoutSec?.() ?? DEFAULT_CI_WAIT_TIMEOUT_SEC;
+    const maxUpdateBranchRetries =
+      this.deps.readCiUpdateBranchMaxRetries?.() ?? DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES;
+    return { waitTimeoutMs: waitTimeoutSec * 1000, maxUpdateBranchRetries };
   }
 
   /**

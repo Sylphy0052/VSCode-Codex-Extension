@@ -14,6 +14,10 @@ import {
 import { DEFAULT_REPLY_TIMEOUT_SEC } from './orchestrator/messaging';
 import { DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerMerge';
 import { DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC } from './orchestrator/runner';
+import {
+  DEFAULT_CI_WAIT_TIMEOUT_SEC,
+  DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES,
+} from './orchestrator/forge';
 import { DEFAULT_PSEUDO_WORKTREE_EXCLUDE } from './orchestrator/pseudoWorktree';
 import { sanitizeForLog } from './orchestrator/sanitize';
 import { normalizeBranchNaming, type BranchNaming } from './orchestrator/worktree';
@@ -282,6 +286,20 @@ export interface WorkflowsConfig {
    */
   finalMergeDecisionTimeoutSec: number;
   /**
+   * CIチェックの完了を待つ時間の上限秒数（`agent.workflows.ciWaitTimeoutSec`、既定1800秒、
+   * `machine-overridable`、design.md §16.36）。統合PR/MRをマージする前にCIの完了を待ち、
+   * 超えたら赤（CI失敗）と同じ扱いでタスクを失敗として確定する。CIが1件も設定されていない
+   * リポジトリでは待たずに即マージする（チェックが0件なのと赤なのを取り違えない）。
+   */
+  ciWaitTimeoutSec: number;
+  /**
+   * マージが「baseの最新でない」ことで拒否されたときの取り込み直し（`gh pr update-branch` /
+   * `glab mr rebase`）の最大リトライ回数（`agent.workflows.ciUpdateBranchMaxRetries`、
+   * 既定2、`machine-overridable`、design.md §16.36）。取り込み直すたびにCIの完了を
+   * 待ち直してから再度マージを試みる。上限を超えたら失敗として確定する。
+   */
+  ciUpdateBranchMaxRetries: number;
+  /**
    * タスクブランチの命名方式（design.md §16.6「ブランチの命名方式」）。`machine-overridable`。
    * ブランチ名の形を決めるだけで、push先も権限も変えないため`forge`/`finalMerge`ほど
    * 強い制限は要らない。
@@ -469,6 +487,10 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     ),
     branchNaming: normalizeBranchNaming(str(c, 'workflows.branchNaming', 'wf')),
     draftPullRequest: c.get<boolean>('workflows.draftPullRequest') ?? false,
+    ciWaitTimeoutSec: normalizeCiWaitTimeoutSec(c.get<unknown>('workflows.ciWaitTimeoutSec')),
+    ciUpdateBranchMaxRetries: normalizeCiUpdateBranchMaxRetries(
+      c.get<unknown>('workflows.ciUpdateBranchMaxRetries'),
+    ),
   };
 }
 
@@ -525,6 +547,32 @@ function normalizeFinalMergeDecisionTimeoutSec(value: unknown): number {
     value <= MAX_TIMEOUT_SEC
     ? Math.floor(value)
     : DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC;
+}
+
+/**
+ * `agent.workflows.ciWaitTimeoutSec` の生値を安全な秒数へ丸める
+ * （`normalizeFinalMergeDecisionTimeoutSec` と同じ方針。design.md §16.36）。
+ */
+function normalizeCiWaitTimeoutSec(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= 1 &&
+    value <= MAX_TIMEOUT_SEC
+    ? Math.floor(value)
+    : DEFAULT_CI_WAIT_TIMEOUT_SEC;
+}
+
+/**
+ * `agent.workflows.ciUpdateBranchMaxRetries` の生値を安全な回数へ丸める。0以上の整数のみ
+ * 受け付ける（0は「取り込み直しをしない＝初回のマージ失敗を即座に失敗として確定する」の意で
+ * 有効な値。既定値へ丸めるのは非数値・負値・非整数のときだけ）。上限は`PUSH_BRANCH_MAX_ATTEMPTS`
+ * のような小さな回数を想定する処理系のため、際限なく大きい値でリトライが無限に近くなるのを
+ * 防ぐ目安として100を上限にする。
+ */
+function normalizeCiUpdateBranchMaxRetries(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 100
+    ? value
+    : DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES;
 }
 
 /** アクティブエディタが属するワークスペースフォルダ。無ければ先頭（設計書 §10）。 */

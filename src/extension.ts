@@ -562,6 +562,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // `decide_final_merge`で応答しない場合に自動的に`hold`へ倒すまでの秒数。`messaging`とは
     // 無関係に常に効かせるため、`readMergeApprovalTimeoutSec`と同じくトップレベルへ配線する
     readFinalMergeDecisionTimeoutSec: () => readWorkflowsConfig().finalMergeDecisionTimeoutSec,
+    // CIの完了待ち・baseの取り込み直し（design.md §16.36、Issue #556）。`readMergeApprovalTimeoutSec`
+    // と同じくトップレベルへ配線し、`performFinalMerge`が呼ぶたびに現在値を読み直す
+    readCiWaitTimeoutSec: () => readWorkflowsConfig().ciWaitTimeoutSec,
+    readCiUpdateBranchMaxRetries: () => readWorkflowsConfig().ciUpdateBranchMaxRetries,
   });
   // isTaskManagedThreadのクロージャが参照する箱を埋める。以降の`workflowRunner`
   // （コマンド登録などで使う）はこの束縛を指し、常にWorkflowRunnerとして扱える
