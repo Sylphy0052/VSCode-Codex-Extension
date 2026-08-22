@@ -27,6 +27,8 @@ export class FakeAppServerConnection implements AppServerConnectionPort {
   constructor(
     private readonly onNotification: NotificationHandler,
     private readonly onServerRequest: ServerRequestHandler,
+    /** 接続断コールバック（issue #354）。`simulateDisconnect()`から呼ぶためだけに持つ。 */
+    private readonly onDisconnect: () => void = () => undefined,
   ) {}
 
   ensureStarted(): Promise<void> {
@@ -79,6 +81,14 @@ export class FakeAppServerConnection implements AppServerConnectionPort {
   ): Promise<unknown> {
     return this.onServerRequest({ id, method, params });
   }
+
+  /**
+   * app-serverのクラッシュ等による接続断を模す（issue #354）。
+   * 実物の`AppServerConnection.reset()`が`onDisconnect`を呼ぶのと同じ経路。
+   */
+  simulateDisconnect(): void {
+    this.onDisconnect();
+  }
 }
 
 /** `ChatViewManager` のコンストラクタへ渡す `connectionFactory`。生成した接続を外へ持ち出す。 */
@@ -86,13 +96,14 @@ export function fakeConnectionFactory(): {
   factory: (
     onNotification: NotificationHandler,
     onServerRequest: ServerRequestHandler,
+    onDisconnect?: () => void,
   ) => FakeAppServerConnection;
   connection: () => FakeAppServerConnection;
 } {
   let created: FakeAppServerConnection | undefined;
   return {
-    factory: (onNotification, onServerRequest) => {
-      created = new FakeAppServerConnection(onNotification, onServerRequest);
+    factory: (onNotification, onServerRequest, onDisconnect) => {
+      created = new FakeAppServerConnection(onNotification, onServerRequest, onDisconnect);
       return created;
     },
     connection: () => {

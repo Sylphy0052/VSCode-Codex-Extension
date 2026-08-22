@@ -1,10 +1,8 @@
-import { randomUUID } from 'node:crypto';
 import { nodeLocatorDeps, type LocateResult } from '../codex/cliLocator';
 import type { SessionSummary } from '../codex/types';
 import { readClaudeConfig } from '../config';
-import type { AgentProvider, LaunchInput, LaunchSpec } from '../provider/types';
+import type { AgentProvider } from '../provider/types';
 import type { ListOptions, ListResult } from '../session/sessionStore';
-import { buildClaudeShellArgs } from './argvBuilder';
 import { resolveClaudePath } from './cliLocator';
 import type { ClaudeSessionStore } from './sessionStore';
 
@@ -38,26 +36,6 @@ export class ClaudeProvider implements AgentProvider {
 
   async listSessions(options: ListOptions): Promise<ListResult> {
     return this.store.list(options);
-  }
-
-  buildLaunch(input: LaunchInput): LaunchSpec {
-    // 新規セッションのidはこちらで決めて渡す。
-    // fork はCLIが新しいidを振り、こちらからは指定できないため、そのタブは
-    // 紐付け未確定のまま扱う（復元と作業記録の対象外になる）。
-    const sessionId = input.target.kind === 'new' ? randomUUID() : undefined;
-    const { args, warnings } = buildClaudeShellArgs({
-      target: input.target,
-      sessionId,
-      cwd: input.cwd,
-      config: readClaudeConfig().claude,
-    });
-
-    return {
-      args,
-      env: {},
-      sessionId: input.target.kind === 'resume' ? input.target.sessionId : sessionId,
-      warnings,
-    };
   }
 
   tabTitle(session: Pick<SessionSummary, 'id' | 'threadName'>): string {

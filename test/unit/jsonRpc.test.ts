@@ -1,10 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import {
-  consumeFrames,
-  encodeNotification,
-  encodeRequest,
-  readForkedThreadId,
-} from '../../src/codex/jsonRpc';
+import { consumeFrames, encodeNotification, encodeRequest, readForkedThreadId } from '../../src/codex/jsonRpc';
+import { MAX_LINE_BUFFER_BYTES } from '../../src/process/childProcess';
 
 describe('consumeFrames', () => {
   it('完成した行だけをメッセージにする', () => {
@@ -38,6 +34,25 @@ describe('consumeFrames', () => {
 
   it('空行を無視する', () => {
     expect(consumeFrames('\n\n{"id":1}\n').messages).toHaveLength(1);
+  });
+
+  it('restが上限以内ならoverflowは立たない', () => {
+    const { overflow } = consumeFrames('{"id":1}\n' + 'x'.repeat(1024));
+    expect(overflow).toBe(false);
+  });
+
+  it('改行を含まない出力が上限を超えるとoverflowが立つ（issue #402、1点目）', () => {
+    // 改行が一切無いため、既存メッセージには影響しない（messagesは空のまま）
+    const huge = 'x'.repeat(MAX_LINE_BUFFER_BYTES + 1);
+    const { messages, rest, overflow } = consumeFrames(huge);
+    expect(messages).toEqual([]);
+    expect(rest).toBe(huge);
+    expect(overflow).toBe(true);
+  });
+
+  it('上限ちょうどまではoverflowが立たない（境界値）', () => {
+    const atLimit = 'x'.repeat(MAX_LINE_BUFFER_BYTES);
+    expect(consumeFrames(atLimit).overflow).toBe(false);
   });
 });
 

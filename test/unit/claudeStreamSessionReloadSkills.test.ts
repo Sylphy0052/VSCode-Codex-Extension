@@ -165,10 +165,15 @@ describe('ClaudeStreamSession.reloadSkills（issue #202、design.md TP-90）', (
 
   it('dispose()すると応答待ちのreloadSkillsもundefinedで解放される（放置して待たせ続けない）', async () => {
     const { session } = createSessionWithFakeProc();
+    // `kill()`はSIGKILLエスカレーション（issue #402）で`once('exit', ...)`も呼ぶため
+    // 併せて用意する（実際の`ChildProcessWithoutNullStreams`はEventEmitterなので常に持つ）
     (
-      session as unknown as { proc: FakeProc & { stdin: { end: () => void }; kill: () => void } }
+      session as unknown as {
+        proc: FakeProc & { stdin: { end: () => void }; kill: () => void; once: () => void };
+      }
     ).proc.stdin.end = () => undefined;
     (session as unknown as { proc: { kill: () => void } }).proc.kill = () => undefined;
+    (session as unknown as { proc: { once: () => void } }).proc.once = () => undefined;
 
     const promise = session.reloadSkills();
     session.dispose();

@@ -86,11 +86,10 @@ CLI固有の事情（ファイル配置・引数・セッションIDの決まり
 
 1. `locate()` — 実行ファイルと設定ディレクトリの解決
 2. `listSessions()` — セッション一覧の構築（純粋なパーサとして書き、I/Oはポート経由）
-3. `buildLaunch()` — 引数・環境変数・起動前に決まるセッションid
-4. `capabilities` — fork / forkFromTurn / archive / delete / rename の可否。UIのメニュー出し分けに使われる
-5. `tabTitle()` — タブと一覧の表示名
+3. `capabilities` — fork / forkFromTurn / archive / delete / rename の可否。UIのメニュー出し分けに使われる
+4. `tabTitle()` — タブと一覧の表示名
 
-セッションidを起動前に決められないCLI（Codexがそう）は `buildLaunch()` で `sessionId: undefined` を返し、起動タグによる事後照合に委ねる。詳細は設計書 §9.1。
+引数組み立てとセッションidの決め方は `AgentProvider` のインターフェースには無く、チャット画面側（`src/claude/streamSession.ts` の `buildClaudeStreamArgs` / `src/appserver/chatSession.ts` の `thread/start`）が担う。セッションidを起動前に決められるCLI（Claude Codeがそう）は、webview側で`randomUUID()`（`src/view/claudeChatView.ts`の`randomSessionId()`）により事前に生成し `--session-id` として渡す。起動前に決められないCLI（Codexがそう）は `thread/start` のレスポンスから `threadId` を受け取る事後照合になる。詳細は設計書 §9.1 / §14。
 
 ## コーディング規約
 

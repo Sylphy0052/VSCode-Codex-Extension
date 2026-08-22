@@ -1,3 +1,5 @@
+import { MAX_LINE_BUFFER_BYTES } from '../process/childProcess';
+
 export interface JsonRpcMessage {
   id?: number | string;
   method?: string;
@@ -10,6 +12,14 @@ export interface FrameResult {
   messages: JsonRpcMessage[];
   /** 次のチャンクと連結するために残す、行として完成していない部分。 */
   rest: string;
+  /**
+   * `rest`が上限（{@link MAX_LINE_BUFFER_BYTES}）を超えたか（issue #402）。
+   *
+   * 立ったら呼び出し側は`rest`をそのまま使い続けず、接続を切って再起動すること。
+   * ここでは切断はしない（このモジュールは純粋なパース処理に留め、プロセスの
+   * 生死を扱わないため）。
+   */
+  overflow: boolean;
 }
 
 /**
@@ -36,7 +46,8 @@ export function consumeFrames(buffer: string): FrameResult {
     }
   }
 
-  return { messages, rest };
+  const overflow = Buffer.byteLength(rest, 'utf8') > MAX_LINE_BUFFER_BYTES;
+  return { messages, rest, overflow };
 }
 
 function parseMessage(line: string): JsonRpcMessage | undefined {
