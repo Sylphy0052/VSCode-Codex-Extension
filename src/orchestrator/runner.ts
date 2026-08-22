@@ -1799,34 +1799,30 @@ export class WorkflowRunner {
    * ループも停止済み）なので、`live.tasks`を先に見ると常に「見つかった」ことに
    * なってしまい、衝突解決セッション側へ本来届けるべき`stopLoop()`が届かなくなる。
    *
-   * **`merging`のタスク1件だけを狙って止めたはずが、`runnerMerge.ts`の
-   * `finishMergeResolution`側の既存分岐（`reason === 'taskStopped'`）により、
-   * 実行全体が停止（`haltedByUser`）する。** これは`stop()`（全体停止）が衝突解決
-   * セッションへ送る`stopLoop()`と同じ`'taskStopped'`を経由し、その合流点を意図的に
-   * 使い分けていない（issue #381・#434・#443の設計を壊さないための踏襲。issue #514の
-   * 受入基準）ためで、`stopTask`側の欠陥ではない。他のタスクを止めずに衝突解決だけを
-   * 終わらせたい場合の経路は現状無い。
+   * **この修正（issue #514）より前は、`merging`のタスク1件だけを狙って止めたはずが、
+   * `runnerMerge.ts`の`finishMergeResolution`側の既存分岐（`reason === 'taskStopped'`）
+   * により実行全体が停止（`haltedByUser`）していた。** `stop()`（全体停止）が衝突解決
+   * セッションへ送る`stopLoop()`と同じ`'taskStopped'`しか`onFinished`へ伝わらず、
+   * どちらが送ったのか区別できなかったためである。現在は下の`mergeResolutionEntry.
+   * stoppedByStopTask`を`stopLoop()`より先に立てて送り元を印し、
+   * `finishMergeResolution`側がそれを見て他のタスクを止めずにこのタスクだけを
+   * `blocked`にできるようにしている（`MergeResolutionEntry.stoppedByStopTask`の
+   * JSDoc参照）。
    */
   stopTask(runId: string, taskId: string): boolean {
-    const live = this.runs.get(runId);
-    if (live === undefined) {
+    const found = this.findStoppableSessionEntry(runId, taskId);
+    if (found === undefined) {
       return false;
     }
-    const mergeResolutionEntry = live.mergeResolutions.get(taskId);
-    if (mergeResolutionEntry !== undefined) {
+    if (found.kind === 'mergeResolution') {
       // `runnerMerge.ts`の`finishMergeResolution`がrun全体を止めずにこのタスクだけを
       // `blocked`にできるよう、送り元が`stop_task`であることを先に印しておく（Issue #514。
       // `MergeResolutionEntry.stoppedByStopTask`のJSDoc参照）。`stopLoop()`を呼んだ**後**に
       // 立てると、同期的に発火しうる`onFinished`（`finishMergeResolution`）に間に合わない
       // 場合があるため、必ず先に立てる
-      mergeResolutionEntry.stoppedByStopTask = true;
-      return mergeResolutionEntry.session.stopLoop();
+      found.entry.stoppedByStopTask = true;
     }
-    const liveTask = live.tasks.get(taskId);
-    if (liveTask === undefined) {
-      return false;
-    }
-    return liveTask.session.stopLoop();
+    return found.entry.session.stopLoop();
   }
 
   /**
@@ -1840,13 +1836,52 @@ export class WorkflowRunner {
    * `live.tasks`のエントリは`onTaskFinished`後も消えないため、ここでの`true`は
    * 「そのタスクへ送るセッションが存在する」ことしか意味しない（ループが走っているか
    * どうかは見ない）。
+   *
+   * `stopTask`と同じ`findStoppableSessionEntry`を呼ぶことで「対象taskIdに紐づく
+   * セッションの候補」を単一箇所に集約している。**将来3つ目の保管場所が増えたときは、
+   * この関数を直接書き換えず、必ず`findStoppableSessionEntry`側へ追加すること。**
+   * ここへ`live.mergeResolutions`/`live.tasks`の探索を書き戻すと、`stopTask`とこの
+   * 関数の一致がコンパイルにもテストにも頼らない口約束へ戻ってしまう
+   * （レビュー指摘: medium）。
    */
   hasStoppableSession(runId: string, taskId: string): boolean {
+    return this.findStoppableSessionEntry(runId, taskId) !== undefined;
+  }
+
+  /**
+   * `stopTask`と`hasStoppableSession`が共に参照する「対象taskIdに紐づく、止められる
+   * 可能性のあるセッションの候補」を単一箇所に集約する（レビュー指摘: medium。issue
+   * #514）。2つが別々に`live.mergeResolutions`/`live.tasks`を探索していると、将来
+   * 3つ目の保管場所が増えたときに片方の更新を忘れてもコンパイルエラーにもテスト
+   * 失敗にもならない非対称が生まれる。ここへ集約すれば、保管場所を1つ追加し忘れた
+   * 側が必ず古いままの`findStoppableSessionEntry`を呼び続け、両者が揃って古いか
+   * 揃って新しいかのどちらかにしかならない。
+   *
+   * **探索順は`live.mergeResolutions`を`live.tasks`より先に見る**（`revealTask`と同じ
+   * 順序。`stopTask`のJSDoc参照）。`merging`のタスクは`live.tasks`のエントリが
+   * `onTaskFinished`後も残ったまま（`dispose()`済み・ループも停止済み）なので、
+   * `live.tasks`を先に見ると常に「見つかった」ことになってしまい、衝突解決セッション
+   * 側へ本来届けるべき`stopLoop()`が届かなくなる。この順序を変えると
+   * `stopTask`は壊れるが、`hasStoppableSession`は（両方に無いか両方にあるかだけを
+   * 見るので）気づかない。**探索順のテストは`stopTask`側に置く**理由はこのため。
+   */
+  private findStoppableSessionEntry(
+    runId: string,
+    taskId: string,
+  ): { kind: 'mergeResolution'; entry: MergeResolutionEntry } | { kind: 'task'; entry: LiveTask } | undefined {
     const live = this.runs.get(runId);
     if (live === undefined) {
-      return false;
+      return undefined;
     }
-    return live.mergeResolutions.has(taskId) || live.tasks.has(taskId);
+    const mergeResolutionEntry = live.mergeResolutions.get(taskId);
+    if (mergeResolutionEntry !== undefined) {
+      return { kind: 'mergeResolution', entry: mergeResolutionEntry };
+    }
+    const liveTask = live.tasks.get(taskId);
+    if (liveTask === undefined) {
+      return undefined;
+    }
+    return { kind: 'task', entry: liveTask };
   }
 
   /**
