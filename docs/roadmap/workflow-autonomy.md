@@ -252,7 +252,10 @@
 ## フェーズ6 落ちても続くようにする
 
 - [ ] W10 中断からの自動再開
-  - 依存: なし
+  - 依存: W8（受入基準の「`ask_user` 待ちだったrunは問いを出し直す」を満たすため。
+    **初版はここを「なし」と書いていたが、同じ項目の補足と受入基準がW8を要求しており
+    矛盾していた**。Issue [#586](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/586)
+    で修正）
   - Issue: [#584](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/584)
   - 現状: リロード後の復元は実装済みで（[runnerRestore.ts](../../src/orchestrator/runnerRestore.ts)、
     design.md §16.11）、`workspaceState` に残ったrunをメモリへ戻し、`merging` で切れたものは
@@ -443,7 +446,8 @@ PR [#542](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/542) で完�
      W1 の中だけを見ていては見つからない形で、「同じクラスの穴が兄弟にもないか」を
      毎回確かめる運用がそのまま効いた
 2. 第2波（並列2）: W2（loopController・runState・runner）/ W7（messaging。W9の完了が前提）
-3. 第3波: W8（W7の完了が前提）/ W10（runnerRestore・runStore・scheduler）
+3. 第3波: W8（W7の完了が前提）→ W10（runnerRestore・runStore・scheduler。**W8の完了が前提**。
+   受入基準に `ask_user` 待ちからの再問いが含まれるため、この2つは並列にしない）
 4. 第4波: W4（messaging・runner・workflowView。W2とW8の完了が前提。最も大きい）
 5. 第5波: W5（W4の完了が前提）/ W6（W1の完了が前提）
 6. 第6波: W12（他の全項目の完了が前提）
