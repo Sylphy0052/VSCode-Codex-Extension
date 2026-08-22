@@ -1093,8 +1093,15 @@ async function finishMergeResolution(
   // 2つのフラグは「run全体は止めず、このタスクだけを`blocked`にする」という**同じ結末**へ
   // 合流するため、`markMergeBlocked`の呼び出しと後始末（persist/notify/pump）は1箇所に
   // まとめる。ただし警告の文言と積む警告の`kind`は分ける。「タイムアウトで自動的に止まった」
-  // のか「オーケストレーターに明示的に止められた」のかは、人が次に取るべき行動
-  // （前者は放置を疑う、後者は`stop_task`を呼んだ側の意図を確認する）が違うため。
+  // のか「単体の停止操作で明示的に止められた」のかは、人が次に取るべき行動
+  // （前者は放置を疑う、後者は止めた側の意図を確認する）が違うため。
+  //
+  // **`stoppedByStopTask`はオーケストレーターの`stop_task`だけでなく、ワークフローView
+  // の「タスク停止」ボタン（`src/view/workflowScript.ts`）からも立つ**（`merging`タスクへの
+  // ボタン表示はIssue #514で意図的に追加された。`WorkflowRunner.stopTask()`は呼び出し元を
+  // 区別しない単一の入口）。そのため下の警告文言は片方の呼び出し元だけを名指ししない
+  // （Issue #539のレビューで、`stop_task`を一度も使っていない人へその名前を出す食い違いが
+  // 見つかった）。
   const localOnlyStopKind: 'approvalTimeout' | 'stopTask' | undefined =
     reason !== 'taskStopped'
       ? undefined
@@ -1121,7 +1128,7 @@ async function finishMergeResolution(
       pushMergeApprovalTimeoutWarning(live, taskId, message);
     } else {
       const message =
-        '衝突解決セッションがstop_task（このタスク単体の停止）で停止されました。統合worktreeは衝突した状態のまま残っています（Viewの「再マージ」で再開できます）';
+        '衝突解決セッションが単体の停止操作（Viewの「タスク停止」またはオーケストレーターのstop_task）で停止されました。統合worktreeは衝突した状態のまま残っています（Viewの「再マージ」で再開できます）';
       self.deps.log.warn(`[workflow ${runId}/${taskId}] ${message}`);
       pushMergeStopTaskStoppedWarning(live, taskId, message);
     }
