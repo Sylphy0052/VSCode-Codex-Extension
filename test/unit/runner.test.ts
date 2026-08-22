@@ -26,6 +26,7 @@ import type {
   PullRequestLayerConfig,
 } from '../../src/orchestrator/forge';
 import { deserializeManifest, integrationPath } from '../../src/orchestrator/pseudoWorktree';
+import { ORCHESTRATOR_CONNECTION_ID } from '../../src/orchestrator/orchestratorSession';
 import type { RoadmapFileSystemPort } from '../../src/orchestrator/roadmap';
 import { formatPathList } from '../../src/orchestrator/runnerWorkingDirectory';
 import type {
@@ -5883,29 +5884,34 @@ tasks:
     },
   );
 
-  it('send_messageで受け付けたメッセージは、宛先タスクの次の送信の先頭へ添えられる', async () => {
-    const { deps, state } = fakeMessagingDeps();
-    const { runner, codexHost } = createHarness(TWO_TASK_YAML, { messaging: deps });
-    await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
-    await flush();
+  it(
+    'send_messageで受け付けたメッセージは、宛先タスクの次の送信の先頭へ添えられる' +
+      '（Issue #547: 宛先はオーケストレーターに固定されるため、実タスクへの配送は' +
+      'オーケストレーターからの送信で再現する）',
+    async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
+      await flush();
 
-    const t2 = codexHost.byTaskId('T2');
-    const result = state.hub?.sendMessage({
-      from: 'T1',
-      to: 'T2',
-      body: 'hi T2',
-      expectReply: false,
-    });
-    expect(result?.accepted).toBe(true);
+      const t2 = codexHost.byTaskId('T2');
+      const result = state.hub?.sendMessage({
+        from: ORCHESTRATOR_CONNECTION_ID,
+        to: 'T2',
+        body: 'hi T2',
+        expectReply: false,
+      });
+      expect(result?.accepted).toBe(true);
 
-    const composed = t2.promptTransform?.('続けてください') ?? '';
-    expect(composed).toContain('T1');
-    expect(composed).toContain('hi T2');
-    expect(composed).toContain('続けてください');
-    // 一度取り出したメッセージは再度は添えられない（配送済みとして消費される）
-    const secondSend = t2.promptTransform?.('もう一度') ?? '';
-    expect(secondSend).toBe('もう一度');
-  });
+      const composed = t2.promptTransform?.('続けてください') ?? '';
+      expect(composed).toContain(ORCHESTRATOR_CONNECTION_ID);
+      expect(composed).toContain('hi T2');
+      expect(composed).toContain('続けてください');
+      // 一度取り出したメッセージは再度は添えられない（配送済みとして消費される）
+      const secondSend = t2.promptTransform?.('もう一度') ?? '';
+      expect(secondSend).toBe('もう一度');
+    },
+  );
 
   it('MCPサーバの起動に失敗しても、通信なしでワークフローが最後まで走る（design.md「runは止めない」）', async () => {
     const { deps } = fakeMessagingDeps({ failStart: true });
@@ -5982,7 +5988,7 @@ tasks:
       const t1 = codexHost.byTaskId('T1');
       const before = state.hub?.sendMessage({
         from: 'T1',
-        to: 'T2',
+        to: ORCHESTRATOR_CONNECTION_ID,
         body: '状況はどうですか',
         expectReply: true,
       });
@@ -6005,11 +6011,22 @@ tasks:
       await flush();
 
       const t1 = codexHost.byTaskId('T1');
-      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: '状況は?', expectReply: true });
+      state.hub?.sendMessage({
+        from: 'T1',
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: '状況は?',
+        expectReply: true,
+      });
       await flush();
       expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingReply');
 
-      state.hub?.sendMessage({ from: 'T2', to: 'T1', body: '順調です', expectReply: false });
+      // 返信はオーケストレーターから届く（Issue #547: T2からT1への直接送信は無くなった）
+      state.hub?.sendMessage({
+        from: ORCHESTRATOR_CONNECTION_ID,
+        to: 'T1',
+        body: '順調です',
+        expectReply: false,
+      });
       await flush();
 
       expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
@@ -6032,7 +6049,12 @@ tasks:
       await flush();
 
       const t1 = codexHost.byTaskId('T1');
-      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: '状況は?', expectReply: true });
+      state.hub?.sendMessage({
+        from: 'T1',
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: '状況は?',
+        expectReply: true,
+      });
       await flush();
       expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingReply');
 
@@ -6139,10 +6161,11 @@ tasks:
         expect(rebuiltT1Input?.mcp?.url).toContain('/mcp/');
         expect(rebuiltT2Input?.mcp?.url).toContain('/mcp/');
 
-        // 実際にメッセージがやり取りできることを確かめる
+        // 実際にメッセージがやり取りできることを確かめる（Issue #547: 宛先はオーケストレーター
+        // に固定されるため、実タスクへの配送はオーケストレーターからの送信で再現する）
         const t2 = codexHost.byTaskId('T2');
         const sendResult = state.hub?.sendMessage({
-          from: 'T1',
+          from: ORCHESTRATOR_CONNECTION_ID,
           to: 'T2',
           body: '再開後のテストメッセージ',
           expectReply: false,
@@ -6162,9 +6185,20 @@ tasks:
         const runId = result.runId as string;
         await flush();
 
-        // 送受信できる状態で何件か送っておき、カウンタを進める
-        state.hub?.sendMessage({ from: 'T1', to: 'T2', body: 'a', expectReply: false });
-        state.hub?.sendMessage({ from: 'T2', to: 'T1', body: 'b', expectReply: false });
+        // 送受信できる状態で何件か送っておき、カウンタを進める（宛先はオーケストレーター固定。
+        // Issue #547）
+        state.hub?.sendMessage({
+          from: 'T1',
+          to: ORCHESTRATOR_CONNECTION_ID,
+          body: 'a',
+          expectReply: false,
+        });
+        state.hub?.sendMessage({
+          from: 'T2',
+          to: ORCHESTRATOR_CONNECTION_ID,
+          body: 'b',
+          expectReply: false,
+        });
         const totalBeforeClose = state.hub?.snapshotStore().totalSent;
         expect(totalBeforeClose).toBe(2);
 
@@ -6317,8 +6351,14 @@ tasks:
 
       const t1 = codexHost.byTaskId('T1');
       // T2は無反応のまま。T1だけがexpectReply:trueで待つ（経路1は未配送0件では成立しない
-      // ケース: T2は`running`のまま止まらないため、経路2（時間切れ）だけが解く）
-      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: 'a', expectReply: true });
+      // ケース: T2は`running`のまま止まらないため、経路2（時間切れ）だけが解く。宛先は
+      // オーケストレーター固定。Issue #547）
+      state.hub?.sendMessage({
+        from: 'T1',
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: 'a',
+        expectReply: true,
+      });
       await flush();
       expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingReply');
 
@@ -6332,10 +6372,13 @@ tasks:
     });
   });
 
-  describe('メッセージング経由の権限差の警告・実際の送信文面の表示（design.md §16.21、Issue #132）', () => {
-    // T1はsandbox: read-only、T2はsandbox: workspace-write。dependsOnで結ばない
-    // （メッセージは依存関係を問わず送れることを再現するため）
-    const SANDBOX_DIFF_YAML = `
+  describe(
+    'メッセージング経由の権限差の警告・実際の送信文面の表示' +
+      '（design.md §16.21・§16.34、Issue #132・Issue #547）',
+    () => {
+      // T1はsandbox: read-only、T2はsandbox: workspace-write。dependsOnで結ばない
+      // （メッセージは依存関係を問わず送れることを再現するため）
+      const SANDBOX_DIFF_YAML = `
 version: 1
 name: messaging-escalation-test
 defaults:
@@ -6351,139 +6394,282 @@ tasks:
     done: d2
 `;
 
-    it('送信元より緩い実効権限の宛先へ配送された時点でmessagingPermissionEscalationを積む（受付時点では出ない）', async () => {
-      const { deps, state } = fakeMessagingDeps();
-      const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, {
-        messaging: deps,
-        codexSandbox: 'workspace-write',
-      });
-      const result = await runner.start(
-        '/repo/.agents/workflows/messaging-escalation.yaml',
-        '/repo',
+      it(
+        'Issue #547後、messagingPermissionEscalationは実質発火しなくなる' +
+          '（`checkMessagingPermissionEscalation`は配送された`StoredMessage.from`を' +
+          '`live.def.tasks`から引き、送信元タスクの実効値と比較する。中継後は実タスクへ' +
+          '配送されるメッセージの`from`が常にオーケストレーター（`ORCHESTRATOR_CONNECTION_ID`）' +
+          'になり、`live.def.tasks`には見つからないため`senderTask === undefined`で' +
+          '素通りする。オーケストレーター自身の実効サンドボックスは常に`read-only`固定' +
+          '（`ORCHESTRATOR_SANDBOX`）なので、仮に比較対象にしても「宛先より緩い」は成立しない。' +
+          'この警告が拾っていた脅威（緩い送信元の自由記述が厳しい宛先で実行される）自体は' +
+          'オーケストレーターの中継判断へ移っただけで消えてはいないが、実行時警告としての' +
+          '検出経路は失われる。design.md §16.34「影響範囲」に明記し、既知の帰結として残す）',
+        async () => {
+          const { deps, state } = fakeMessagingDeps();
+          const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, {
+            messaging: deps,
+            codexSandbox: 'workspace-write',
+          });
+          const result = await runner.start(
+            '/repo/.agents/workflows/messaging-escalation.yaml',
+            '/repo',
+          );
+          const runId = result.runId as string;
+          await flush();
+
+          // 【このテストの趣旨】権限昇格の検出という防御を守るテストではない。W9（#547）で
+          // 宛先が固定された副作用として、この検出が構造上不発火になったこと自体を
+          // 固定するテスト。将来`from`の扱いが変わり検出が意図せず復活/再度死ぬような
+          // 変化が起きたときに気づけるようにするために存在する
+          // （`checkMessagingPermissionEscalation`のJSDoc・design.md §16.34「影響範囲」参照）
+          // T1（read-only）の情報をオーケストレーターがT2（workspace-write）へ中継する形
+          state.hub?.sendMessage({
+            from: 'T1',
+            to: ORCHESTRATOR_CONNECTION_ID,
+            body: '調査結果です',
+            expectReply: false,
+          });
+          const relayed = state.hub?.sendMessage({
+            from: ORCHESTRATOR_CONNECTION_ID,
+            to: 'T2',
+            body: '調査結果です',
+            expectReply: false,
+          });
+          expect(relayed?.accepted).toBe(true);
+
+          const t2 = codexHost.byTaskId('T2');
+          t2.promptTransform?.('続けてください');
+
+          const snapshot = runner.getSnapshot(runId);
+          expect(
+            snapshot?.warnings.some((w) => w.kind === 'messagingPermissionEscalation'),
+          ).toBe(false);
+          // #67経由の警告（permissionEscalation）とは元から別経路で、ここでも出ない
+          expect(snapshot?.warnings.some((w) => w.kind === 'permissionEscalation')).toBe(false);
+        },
       );
-      const runId = result.runId as string;
-      await flush();
 
-      const sendResult = state.hub?.sendMessage({
-        from: 'T1',
-        to: 'T2',
-        body: '調査結果です',
-        expectReply: false,
+      it('lastSentPromptは実際にCLIへ送った本文（メッセージの合成後）と一致する', async () => {
+        const { deps, state } = fakeMessagingDeps();
+        const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, { messaging: deps });
+        const result = await runner.start(
+          '/repo/.agents/workflows/messaging-last-sent.yaml',
+          '/repo',
+        );
+        const runId = result.runId as string;
+        await flush();
+
+        // メッセージが無い最初の送信では、実際に送った本文と展開後プロンプトが一致する
+        const t2 = codexHost.byTaskId('T2');
+        const firstSent = t2.promptTransform?.('p2') ?? '';
+        let snapshot = runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2');
+        expect(snapshot?.lastSentPrompt).toBe(firstSent);
+        expect(snapshot?.lastSentPrompt).toBe(snapshot?.expandedPrompt);
+
+        // メッセージが配送されると、expandedPromptは変わらないがlastSentPromptには
+        // メッセージの内容が現れる（design.md §16.21、Issue #132「4. 人が目視確認できる
+        // ようにする」。expandedPromptはcomposeNextPromptを経由しないため確認できなかった）。
+        // 宛先はオーケストレーター固定（Issue #547）なので、実タスクへの配送は
+        // オーケストレーターからの送信で再現する
+        state.hub?.sendMessage({
+          from: ORCHESTRATOR_CONNECTION_ID,
+          to: 'T2',
+          body: '追加の指示です',
+          expectReply: false,
+        });
+        const secondSent = t2.promptTransform?.('続けてください') ?? '';
+        snapshot = runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2');
+        expect(snapshot?.lastSentPrompt).toBe(secondSent);
+        expect(snapshot?.lastSentPrompt).toContain('追加の指示です');
+        expect(snapshot?.lastSentPrompt).toContain(`<task-message from="${ORCHESTRATOR_CONNECTION_ID}">`);
       });
-      expect(sendResult?.accepted).toBe(true);
-      // 受付時点（sendMessageの直後）ではまだ配送していないため警告は出ない
-      expect(
-        runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'messagingPermissionEscalation'),
-      ).toBe(false);
 
-      // 宛先（T2）の次の送信で実際に配送される（setPromptTransformがtakeDeliverableMessagesを
-      // 呼ぶ）。この時点で初めて警告が積まれる
-      const t2 = codexHost.byTaskId('T2');
-      t2.promptTransform?.('続けてください');
+      it(
+        'lastSentPromptは双方向制御文字を落とすが改行は保持する' +
+          '（表示専用の無害化、監査指摘#5と同じ扱い）',
+        async () => {
+          const rtlOverride = String.fromCodePoint(0x202e);
+          const { deps, state } = fakeMessagingDeps();
+          const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, { messaging: deps });
+          const result = await runner.start('/repo/.agents/workflows/messaging-rtl.yaml', '/repo');
+          const runId = result.runId as string;
+          await flush();
 
-      const snapshot = runner.getSnapshot(runId);
-      const warning = snapshot?.warnings.find((w) => w.kind === 'messagingPermissionEscalation');
-      expect(warning?.taskId).toBe('T2');
-      expect(warning?.message).toContain('T1');
-      expect(warning?.message).toContain('sandbox');
-      // #67経由の警告（permissionEscalation）とは別のkindで区別される
-      expect(snapshot?.warnings.some((w) => w.kind === 'permissionEscalation')).toBe(false);
-    });
+          const t2 = codexHost.byTaskId('T2');
+          state.hub?.sendMessage({
+            from: ORCHESTRATOR_CONNECTION_ID,
+            to: 'T2',
+            body: `1行目\n安全${rtlOverride}exe.悪意のある名前`,
+            expectReply: false,
+          });
+          t2.promptTransform?.('続けてください');
 
-    it('宛先の実効権限が送信元と同じか厳しければ警告は出ない', async () => {
-      const { deps, state } = fakeMessagingDeps();
-      const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, {
-        messaging: deps,
-        codexSandbox: 'workspace-write',
-      });
-      const result = await runner.start(
-        '/repo/.agents/workflows/messaging-no-escalation.yaml',
-        '/repo',
+          const snapshot = runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2');
+          expect(snapshot?.lastSentPrompt).not.toContain(rtlOverride);
+          expect(snapshot?.lastSentPrompt?.includes('\n')).toBe(true);
+        },
       );
-      const runId = result.runId as string;
-      await flush();
+    },
+  );
+});
 
-      // T2（workspace-write、緩い）からT1（read-only、厳しい）へ送る向き
-      state.hub?.sendMessage({ from: 'T2', to: 'T1', body: 'お願いします', expectReply: false });
-      const t1 = codexHost.byTaskId('T1');
-      t1.promptTransform?.('続けてください');
+/**
+ * design.md §16.34、Issue #547: タスク間の直接メッセージングを廃し、オーケストレーターの
+ * 中継にする。上の「タスク間メッセージング（design.md §16.21）」describeが積んできた
+ * 大半のケース（配送・waitingReply遷移・待ちぼうけ検出そのもの等）は変えていないので、
+ * ここでは変更点（宛先の固定・タスク→オーケストレーターの配送経路・その配送が
+ * `detectAllWaitingStalemate`を壊さないこと）だけを、実際の`hub.sendMessage`を通す
+ * 経路で確認する。
+ */
+describe('WorkflowRunner: 直接メッセージングを廃しオーケストレーター中継にする（design.md §16.34、Issue #547）', () => {
+  const TWO_TASK_YAML = `
+version: 1
+name: relay-test
+defaults:
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
 
-      expect(
-        runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'messagingPermissionEscalation'),
-      ).toBe(false);
+  it('タスクからタスクidを直接指定した送信は拒否され、理由にオーケストレーター宛の案内が入る', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/relay.yaml', '/repo');
+    await flush();
+
+    const result = state.hub?.sendMessage({ from: 'T1', to: 'T2', body: 'hi T2', expectReply: false });
+    expect(result?.accepted).toBe(false);
+    expect(result?.reason).toContain(ORCHESTRATOR_CONNECTION_ID);
+  });
+
+  it('タスクからオーケストレーター宛の送信は受け付けられ、通知が届く', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/relay.yaml', '/repo');
+    await flush();
+    const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+    // run開始の通知でターンが走っている。まず終わらせて次の通知がflushされる状態にする
+    orchestrator.emitState({ ...initialChatState, busy: true });
+    orchestrator.emitState({ ...initialChatState, busy: false });
+
+    const result = state.hub?.sendMessage({
+      from: 'T1',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: '状況を共有します',
+      expectReply: false,
     });
+    expect(result?.accepted).toBe(true);
+    await flush();
 
-    it('同じ警告文言は積み直さない（重複除去）', async () => {
+    // notifyOrchestratorはbusyの間pendingに積むだけなので、ここでも1回ターンを終わらせる
+    orchestrator.emitState({ ...initialChatState, busy: true });
+    orchestrator.emitState({ ...initialChatState, busy: false });
+    const last = orchestrator.sentTexts[orchestrator.sentTexts.length - 1] as string;
+    expect(last).toContain('T1');
+    expect(last).toContain('状況を共有します');
+  });
+
+  it(
+    'オーケストレーター宛の配送は、hub内部の未配送キューも同時に消費する' +
+      '（Issue #547でもっとも壊れやすい箇所。ここを消費し忘れると、以後' +
+      '`totalUndeliveredCount()`が0へ戻らず、待ちぼうけ検出の経路1' +
+      '「全員waitingReplyかつ未配送0件」が二度と成立しなくなる。design.md §16.25の' +
+      '「状態を実際に進めてから観測する」に沿い、pull用のキューが実際に空になった' +
+      'ことをhub側から直接観測する）',
+    async () => {
       const { deps, state } = fakeMessagingDeps();
-      const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, {
-        messaging: deps,
-        codexSandbox: 'workspace-write',
-      });
-      const result = await runner.start('/repo/.agents/workflows/messaging-dedup.yaml', '/repo');
-      const runId = result.runId as string;
+      const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      await runner.start('/repo/.agents/workflows/relay.yaml', '/repo');
       await flush();
 
-      const t2 = codexHost.byTaskId('T2');
-      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: '1回目', expectReply: false });
-      t2.promptTransform?.('続けて1');
-      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: '2回目', expectReply: false });
-      t2.promptTransform?.('続けて2');
-
-      const warnings = runner
-        .getSnapshot(runId)
-        ?.warnings.filter((w) => w.kind === 'messagingPermissionEscalation');
-      expect(warnings).toHaveLength(1);
-    });
-
-    it('lastSentPromptは実際にCLIへ送った本文（メッセージの合成後）と一致する', async () => {
-      const { deps, state } = fakeMessagingDeps();
-      const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, { messaging: deps });
-      const result = await runner.start(
-        '/repo/.agents/workflows/messaging-last-sent.yaml',
-        '/repo',
-      );
-      const runId = result.runId as string;
-      await flush();
-
-      // メッセージが無い最初の送信では、実際に送った本文と展開後プロンプトが一致する
-      const t2 = codexHost.byTaskId('T2');
-      const firstSent = t2.promptTransform?.('p2') ?? '';
-      let snapshot = runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2');
-      expect(snapshot?.lastSentPrompt).toBe(firstSent);
-      expect(snapshot?.lastSentPrompt).toBe(snapshot?.expandedPrompt);
-
-      // メッセージが配送されると、expandedPromptは変わらないがlastSentPromptには
-      // メッセージの内容が現れる（design.md §16.21、Issue #132「4. 人が目視確認できる
-      // ようにする」。expandedPromptはcomposeNextPromptを経由しないため確認できなかった）
-      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: '追加の指示です', expectReply: false });
-      const secondSent = t2.promptTransform?.('続けてください') ?? '';
-      snapshot = runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2');
-      expect(snapshot?.lastSentPrompt).toBe(secondSent);
-      expect(snapshot?.lastSentPrompt).toContain('追加の指示です');
-      expect(snapshot?.lastSentPrompt).toContain('<task-message from="T1">');
-    });
-
-    it('lastSentPromptは双方向制御文字を落とすが改行は保持する（表示専用の無害化、監査指摘#5と同じ扱い）', async () => {
-      const rtlOverride = String.fromCodePoint(0x202e);
-      const { deps, state } = fakeMessagingDeps();
-      const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, { messaging: deps });
-      const result = await runner.start('/repo/.agents/workflows/messaging-rtl.yaml', '/repo');
-      const runId = result.runId as string;
-      await flush();
-
-      const t2 = codexHost.byTaskId('T2');
       state.hub?.sendMessage({
         from: 'T1',
-        to: 'T2',
-        body: `1行目\n安全${rtlOverride}exe.悪意のある名前`,
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: '状況を共有します',
         expectReply: false,
       });
-      t2.promptTransform?.('続けてください');
+      await flush();
 
-      const snapshot = runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2');
-      expect(snapshot?.lastSentPrompt).not.toContain(rtlOverride);
-      expect(snapshot?.lastSentPrompt?.includes('\n')).toBe(true);
+      expect(state.hub?.totalUndeliveredCount()).toBe(0);
+    },
+  );
+
+  it(
+    'expectReply:trueでオーケストレーターへ送るとwaitingReplyへ遷移し、' +
+      'オーケストレーターからの送り返しで実際にループが再開する' +
+      '（中継を挟んでもwaitingReplyの仕組みは変わらない）',
+    async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/relay.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      const sendResult = state.hub?.sendMessage({
+        from: 'T1',
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: '状況はどうですか',
+        expectReply: true,
+      });
+      await flush();
+
+      expect(sendResult?.accepted).toBe(true);
+      expect(t1.pauseLoopCount).toBe(1);
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingReply');
+
+      // オーケストレーター自身の`send_message`（from: ORCHESTRATOR_CONNECTION_ID）は
+      // これまでどおり実タスクidを直接宛先にできる
+      const reply = state.hub?.sendMessage({
+        from: ORCHESTRATOR_CONNECTION_ID,
+        to: 'T1',
+        body: '順調です、続けてください',
+        expectReply: false,
+      });
+      await flush();
+
+      expect(reply?.accepted).toBe(true);
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+      expect(t1.resumeLoopCount).toBe(1);
+      const composed = t1.promptTransform?.('続けてください') ?? '';
+      expect(composed).toContain('順調です、続けてください');
+    },
+  );
+
+  it('オーケストレーターが自分自身へ送ろうとすると拒否される（自己送信の禁止は変わらない）', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/relay.yaml', '/repo');
+    await flush();
+
+    const result = state.hub?.sendMessage({
+      from: ORCHESTRATOR_CONNECTION_ID,
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: 'x',
+      expectReply: false,
     });
+    expect(result?.accepted).toBe(false);
+  });
+
+  it('オーケストレーターから同じrunに存在しない宛先への送信は拒否される（従来どおり）', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/relay.yaml', '/repo');
+    await flush();
+
+    const result = state.hub?.sendMessage({
+      from: ORCHESTRATOR_CONNECTION_ID,
+      to: 'T9',
+      body: 'x',
+      expectReply: false,
+    });
+    expect(result?.accepted).toBe(false);
   });
 });
 

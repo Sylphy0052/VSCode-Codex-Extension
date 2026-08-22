@@ -60,6 +60,19 @@ export type OrchestratorEventKind =
   | 'taskWaitingApproval'
   | 'taskBlocked'
   /**
+   * タスクが`send_message`でオーケストレーターへメッセージを送った（design.md §16.34、
+   * Issue #547）。タスク間の直接メッセージングを廃し、宛先をオーケストレーターへ固定した
+   * ことで新設した経路。`runnerMessaging.ts`の`onMessageAccepted`が、宛先が
+   * `ORCHESTRATOR_CONNECTION_ID`の`StoredMessage`を受け取るたびに送る。本文には送信元の
+   * タスクid・`expectReply`の有無・メッセージ本文をそのまま載せる（`wrapEvent`が
+   * `<workflow-event>`で囲んで無害化する。§16.21の`wrapTaskMessage`と同じ二重の囲いには
+   * しない。理由は`runnerMessaging.ts`の`buildTaskMessageEventBody`のJSDoc参照）。
+   * オーケストレーターは内容を見て、必要なら自分の`send_message`
+   * （`from === ORCHESTRATOR_CONNECTION_ID`。宛先にタスクidを取れる既存のツール）で
+   * 転送するかどうか・内容を変えるかどうかを決める。
+   */
+  | 'taskMessage'
+  /**
    * 統合PR/MRを作成した後、mainへ最終マージするかどうかの判断を求める
    * （design.md §16.26、`finalMerge: orchestrator`）。`decide_final_merge`ツールで
    * `merge` / `hold` を理由付きで答える。応答が無いまま`agent.workflows.

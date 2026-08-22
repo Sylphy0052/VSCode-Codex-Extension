@@ -6,6 +6,8 @@ import {
   type RunTaskSnapshot,
   type StoredMessage,
 } from './messaging';
+import { ORCHESTRATOR_CONNECTION_ID } from './orchestratorSession';
+import { notifyOrchestrator } from './runnerOrchestrator';
 import { isActiveTaskState, markWaitingReply, resumeFromWaitingReply, type TaskState } from './runState';
 import type { TaskSession } from './taskSession';
 import type { LiveRun } from './runner';
@@ -17,6 +19,14 @@ import type { WorkflowRunnerInternals } from './runnerInternals';
  *
  * `self: WorkflowRunnerInternals`を第一引数に取るのは、`WorkflowRunner`のメソッドから機械的に
  * 切り出したままの形を保ち、挙動を変えないため（最終報告に記載）。
+ *
+ * **タスク間の直接メッセージングは廃止した（design.md §16.34、Issue #547）。** `send_message`の
+ * 宛先はオーケストレーターに固定され（`messaging.ts`の`validateSendMessage`）、タスクから
+ * 届く`StoredMessage`の`to`は常に`ORCHESTRATOR_CONNECTION_ID`になる。`onMessageAccepted`は
+ * この宛先を見て、`TaskMessagingHub`のキューへ積むだけでなく`notifyOrchestrator`で即座に
+ * オーケストレーターのセッションへ届ける（プッシュ）。タスク宛のメッセージ（オーケストレーターが
+ * `send_message`で転送する側）は従来どおり、宛先タスクの次の送信（`setPromptTransform`の
+ * `takeDeliverableMessages`）で取り出すプルのままにする。
  */
 
 /** `TaskMessagingHub`の`list_tasks`が返す一覧を組み立てる（design.md §16.21）。 */
@@ -61,19 +71,78 @@ export function onMessageAccepted(self: WorkflowRunnerInternals, runId: string, 
     }
   }
 
-  const recipientTask = live.tasks.get(message.to);
-  const recipientState = live.runState.tasks.get(message.to);
-  if (recipientTask !== undefined && recipientState?.state === 'waitingReply') {
-    live.runState = resumeFromWaitingReply(live.runState, message.to);
-    recipientTask.waitingReplySinceMs = undefined;
-    recipientTask.session.resumeLoop();
-    changed = true;
+  if (message.to === ORCHESTRATOR_CONNECTION_ID) {
+    // タスクからオーケストレーターへの送信（design.md §16.34、Issue #547）。オーケストレーターは
+    // `setPromptTransform`のようなプル経路を持たないため、ここで即座にプッシュする
+    deliverTaskMessageToOrchestrator(self, runId, live, message);
+  } else {
+    const recipientTask = live.tasks.get(message.to);
+    const recipientState = live.runState.tasks.get(message.to);
+    if (recipientTask !== undefined && recipientState?.state === 'waitingReply') {
+      live.runState = resumeFromWaitingReply(live.runState, message.to);
+      recipientTask.waitingReplySinceMs = undefined;
+      recipientTask.session.resumeLoop();
+      changed = true;
+    }
   }
 
   if (changed) {
     self.notify(runId);
     void self.persist(runId);
   }
+}
+
+/**
+ * `<task-message from="...">...</task-message>`のように送信元・本文を明示して囲う
+ * （design.md §16.21「受信内容の扱い」と同じ流儀）。ただし`wrapTaskMessage`
+ * （`messaging.ts`）は使わない。`OrchestratorEvent.body`は`orchestratorSession.ts`の
+ * `wrapEvent`が`<workflow-event kind="taskMessage">`でもう一段囲み、その際
+ * `escapeAngleBrackets`を全体へ通す。先にここで角括弧を実体参照へ変換した文字列を渡すと、
+ * `wrapTaskMessage`自身が生成した`<task-message>`タグまで二重にエスケープされ、
+ * オーケストレーターから見て`&lt;task-message ...&gt;`という読みにくい文字列になる
+ * （安全性には影響しないが、単なる二度手間で見た目が壊れる）。ここでは無害化前の
+ * プレーンテキストを組み立てるだけにし、無害化は`wrapEvent`の1回に一本化する。
+ */
+function buildTaskMessageEventBody(message: StoredMessage): string {
+  const replyNote = message.expectReply ? 'あり（返信を待っています）' : 'なし';
+  return [
+    `タスク ${message.from} からメッセージが届きました（返信待ち: ${replyNote}）。`,
+    '本文:',
+    message.body,
+  ].join('\n');
+}
+
+/**
+ * タスクからオーケストレーターへのメッセージ（`to === ORCHESTRATOR_CONNECTION_ID`）を
+ * `notifyOrchestrator`でプッシュし、`TaskMessagingHub`のキューからも取り除く
+ * （design.md §16.34、Issue #547）。
+ *
+ * **キューから取り除くことが安全上・機能上どちらでも必要。** オーケストレーターは
+ * タスクのように`takeDeliverableMessages`を呼んで自分宛のキューを取りに行くプル経路を
+ * 持たない（`setupOrchestratorForStart`のJSDoc「書けないのに実行制御はできる」参照）。
+ * ここで取り除かずに`store.queued`へ残したままだと、`checkWaitingReplyStalls`の
+ * `detectAllWaitingStalemate`が見る`totalUndeliveredCount`が、オーケストレーター宛ての
+ * 1件を配送済みとして扱えないまま恒久的に0より大きくなる。その結果、いずれかのタスクが
+ * 一度でもオーケストレーターへメッセージを送ると、以後そのrunでは「走行中の全タスクが
+ * waitingReplyのまま誰も動けない」待ちぼうけ検出（design.md §16.21「待ちぼうけを検出する
+ * 経路」の経路1）が二度と成立しなくなる。design.md §16.34が名指しした「一番壊れやすい箇所」
+ * （`waitingReply`が中継を挟んでも成立すること）は、送信元タスクを`waitingReply`へ倒す
+ * 前段（上の`markWaitingReply`）が中継の有無に関わらず動くことに加え、この待ちぼうけ検出が
+ * 壊れないことも含む。
+ *
+ * オーケストレーターのセッションが（開始失敗などで）存在しない場合は`notifyOrchestrator`が
+ * 何もしないため、メッセージは黙って失われる。§16.21「MCPツールの可視性確認」・§16.23
+ * 「セッションの生成に失敗した場合、runは止めない」と同じ「見えなければ通信なしで走らせる」
+ * 方針を踏襲し、run自体は止めない。
+ */
+function deliverTaskMessageToOrchestrator(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  live: LiveRun,
+  message: StoredMessage,
+): void {
+  notifyOrchestrator(self, runId, { kind: 'taskMessage', body: buildTaskMessageEventBody(message) });
+  live.messaging?.hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID);
 }
 
 /**
