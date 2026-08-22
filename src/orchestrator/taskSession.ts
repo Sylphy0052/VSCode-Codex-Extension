@@ -191,8 +191,11 @@ export interface TaskSession {
    * `LoopStopReason: 'taskStopped'` で `onFinished` が呼ばれ、`runner.ts` はこれを
    * `manual`/`interrupted`（人がそのタスクの画面へ直接介入した状態。タスク自身は変えない）
    * とは別に扱い、そのタスクだけを `failed`（手動停止）に確定させる（design.md §16.5）。
+   *
+   * **戻り値は「実際にループを止められたか」（issue #514）。** 既に止まっている
+   * ループへ呼んでも`false`。`WorkflowRunner.stopTask`はこの戻り値だけを成功の根拠にする。
    */
-  stopLoop(): void;
+  stopLoop(): boolean;
   /**
    * `waitingApproval` の要求を、チャット画面のタブを開かずに直接解決する
    * （design.md §16.8「承認」操作用）。従来の承認カード（webview内の`approve`メッセージ）と

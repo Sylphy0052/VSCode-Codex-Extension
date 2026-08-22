@@ -379,6 +379,14 @@ export interface WorkflowWarning {
      * `mergeBusy`（他タスクの衝突で始められなかった＝まだ何も解決作業をしていない）とは
      * 「作業が中断された」という点で意味が違うため、`blocked`の`failure`が`undefined`に
      * なる（`markMergeBlocked`）ぶんの区別をこの警告で持たせる。
+     *
+     * **`taskStopped`はここでは`WorkflowRunner.stop()`（全体停止）経由のものだけを指す**
+     * （Issue #514）。オーケストレーターの`stop_task`（このタスク単体だけを止める意図）が
+     * 衝突解決セッションへ`stopLoop()`を送ったときは、run全体を止めないぶん
+     * `mergeStopTaskStopped`へ分ける。両者は`LoopStopReason`としては同じ`'taskStopped'`
+     * だが（`TaskSession.stopLoop()`は理由をこれ以上細かく伝えられない）、
+     * `MergeResolutionEntry.stoppedByStopTask`で送り元を区別する
+     * （`runnerMerge.ts`の`finishMergeResolution`参照）。
      */
     | 'mergeInterrupted'
     /**
@@ -392,6 +400,16 @@ export interface WorkflowWarning {
      * 統合worktreeは衝突した状態のまま（Viewの「再マージ」で再開できる）。
      */
     | 'mergeApprovalTimeout'
+    /**
+     * オーケストレーターの`stop_task`（design.md §16.23、Issue #514）が衝突解決
+     * セッションを止めたため、自動的に停止して`merging`を`blocked`へ確定させた。
+     * `mergeApprovalTimeout`と同じく、止めたのはこのタスク単体への操作であり、runの
+     * `haltedByUser`は変えない（このタスク以外の`pending`は通常どおり開始してよい）。
+     * `mergeInterrupted`（`WorkflowRunner.stop()`＝全体停止の経路）との違いは「誰が・
+     * どの範囲を止めようとしたか」であり、`git merge --abort`は呼んでいない点は共通
+     * （統合worktreeは衝突した状態のまま、Viewの「再マージ」で再開できる）。
+     */
+    | 'mergeStopTaskStopped'
     /**
      * 疑似worktree（design.md §16.20）の統合が衝突した。3-way mergeができないため、
      * 同じファイルへの変更は全て衝突になる（このタスクは`blocked`になる）。
@@ -853,6 +871,26 @@ export interface MergeResolutionEntry {
    * 通常どおり開始してよい）。この印を`finishMergeResolution`が読んで分岐を切り替える。
    */
   timedOutByApprovalTimeout: boolean;
+  /**
+   * オーケストレーターの`stop_task`（design.md §16.23、Issue #514）が、このタスク単体を
+   * 狙って`stopLoop()`を呼んだ印。
+   *
+   * `timedOutByApprovalTimeout`と同じ理由で必要になる。`TaskSession.stopLoop()`は理由を
+   * `'taskStopped'`としてしか`onFinished`へ伝えられないため、`runnerMerge.ts`の
+   * `finishMergeResolution`は`reason === 'taskStopped'`だけでは「人が
+   * `WorkflowRunner.stop()`（全体停止）を押した」のか「オーケストレーターがこのタスク
+   * だけを`stop_task`で止めた」のかを区別できない。前者はrun全体を`haltedByUser`にする
+   * （`applyLoopStopReason`）。後者はこのタスク**だけ**を`blocked`にし、run全体は
+   * 止めない（他の`pending`タスクは通常どおり開始してよい）。区別しないと、
+   * オーケストレーターが`merging`のタスクへ`stop_task`を呼んだだけで無関係な他タスクへの
+   * `retry_task`/`continue_task`/`decide_approval`まで「人が全体を停止した」という
+   * 偽の理由で拒否されてしまう（Issue #514）。
+   *
+   * `WorkflowRunner.stopTask`が`live.mergeResolutions`側へ`stopLoop()`を送る直前に立てる。
+   * `WorkflowRunner.stop()`（全体停止）からの`stopLoop()`はこのフラグを立てない
+   * （引き続き`false`のまま送るため、既存の`mergeInterrupted`分岐へ合流する）。
+   */
+  stoppedByStopTask: boolean;
 }
 
 /** `LiveTask`と同じ理由（直前のコメント参照）で`export`する（Issue #147）。 */
@@ -1731,13 +1769,119 @@ export class WorkflowRunner {
    * 通常の完了検知経路（`onFinished` → `onTaskFinished`）へ合流する。そちら側で
    * `applyLoopStopReason` が `manualStop` として確定し、セッションの解放とworktreeの
    * 撤去判定まで一貫して行われるため、ここでは呼び出すだけでよい。
+   *
+   * **戻り値は「送り先を見つけて`stopLoop()`を呼べたか」（issue #514）。**
+   * 見つからなければ`false`を返し、決して成功のふりをしない。理由は次のとおり。
+   *
+   * 以前は `live.tasks` しか見ておらず、衝突解決セッション（`live.mergeResolutions`。
+   * `runnerMerge.ts` の `startMergeResolution`）は対象外だった。しかも戻り値が`void`
+   * だったため、`runnerOrchestrator.ts` は届いたかどうかに関係なく無条件で「止めました」
+   * という成功応答をオーケストレーターへ返していた（issue #381で`stop()`だけが同じ穴を
+   * 塞がれ、`stopTask()`には非対称に手当てが漏れていた）。
+   *
+   * **一般則: 停止要求が実際にどのセッションへも届かなかった場合は必ず失敗を返す。**
+   * `live.mergeResolutions`を1つ足して届くようにするだけでは不十分で、将来また別の
+   * 保管場所へセッションが増えたとき同じ欠陥を再生産する。そのため「対象を保持する
+   * Mapにエントリがあるか」ではなく、**`TaskSession.stopLoop()`
+   * （実体は`LoopController.stop()`）が実際にループを止められたかの`boolean`**を
+   * 戻り値の根拠にする。`live.tasks`のエントリは`onTaskFinished`後も削除されない
+   * ため、存在チェックだけでは「セッションはまだ残っているが、ループは既に終わって
+   * いて何も起きなかった」呼び出しを成功と誤判定してしまう（`merging`のタスクが
+   * まさにこの形）。
+   *
+   * 嘘の成功応答は、人よりAIエージェント（オーケストレーター）に対して有害である。
+   * 人はワークフローViewを見て「止まっていない」に気づけるが、オーケストレーターは
+   * 制御ツールの応答（`accepted`）しか見ないため、一度成功を騙ると以後その経路を
+   * 二度と再試行しない。
+   *
+   * 送り先は`live.mergeResolutions`を先に見る（`revealTask`と同じ順序）。`merging`の
+   * タスクは`live.tasks`のエントリが残ったまま（`onTaskFinished`で`dispose()`済み・
+   * ループも停止済み）なので、`live.tasks`を先に見ると常に「見つかった」ことに
+   * なってしまい、衝突解決セッション側へ本来届けるべき`stopLoop()`が届かなくなる。
+   *
+   * **この修正（issue #514）より前は、`merging`のタスク1件だけを狙って止めたはずが、
+   * `runnerMerge.ts`の`finishMergeResolution`側の既存分岐（`reason === 'taskStopped'`）
+   * により実行全体が停止（`haltedByUser`）していた。** `stop()`（全体停止）が衝突解決
+   * セッションへ送る`stopLoop()`と同じ`'taskStopped'`しか`onFinished`へ伝わらず、
+   * どちらが送ったのか区別できなかったためである。現在は下の`mergeResolutionEntry.
+   * stoppedByStopTask`を`stopLoop()`より先に立てて送り元を印し、
+   * `finishMergeResolution`側がそれを見て他のタスクを止めずにこのタスクだけを
+   * `blocked`にできるようにしている（`MergeResolutionEntry.stoppedByStopTask`の
+   * JSDoc参照）。
    */
-  stopTask(runId: string, taskId: string): void {
-    const liveTask = this.runs.get(runId)?.tasks.get(taskId);
-    if (liveTask === undefined) {
-      return;
+  stopTask(runId: string, taskId: string): boolean {
+    const found = this.findStoppableSessionEntry(runId, taskId);
+    if (found === undefined) {
+      return false;
     }
-    liveTask.session.stopLoop();
+    if (found.kind === 'mergeResolution') {
+      // `runnerMerge.ts`の`finishMergeResolution`がrun全体を止めずにこのタスクだけを
+      // `blocked`にできるよう、送り元が`stop_task`であることを先に印しておく（Issue #514。
+      // `MergeResolutionEntry.stoppedByStopTask`のJSDoc参照）。`stopLoop()`を呼んだ**後**に
+      // 立てると、同期的に発火しうる`onFinished`（`finishMergeResolution`）に間に合わない
+      // 場合があるため、必ず先に立てる
+      found.entry.stoppedByStopTask = true;
+    }
+    return found.entry.session.stopLoop();
+  }
+
+  /**
+   * `stopTask`が実際に対象を見つけられたか（＝止められるループが元々あったか）だけを
+   * 返す（Issue #514）。`stopTask`の戻り値（`session.stopLoop()`の結果）は「見つからな
+   * かった」と「見つかったが既に終わっていた」を区別できない（`LoopController.stop`は
+   * 走っていないループへの呼び出しに`false`を返すため。`loopController.ts`参照）ため、
+   * `runnerOrchestrator.ts`の`stop_task`ツールが両者を別の文言で伝えるための補助として
+   * 別関数に切り出す。
+   *
+   * `live.tasks`のエントリは`onTaskFinished`後も消えないため、ここでの`true`は
+   * 「そのタスクへ送るセッションが存在する」ことしか意味しない（ループが走っているか
+   * どうかは見ない）。
+   *
+   * `stopTask`と同じ`findStoppableSessionEntry`を呼ぶことで「対象taskIdに紐づく
+   * セッションの候補」を単一箇所に集約している。**将来3つ目の保管場所が増えたときは、
+   * この関数を直接書き換えず、必ず`findStoppableSessionEntry`側へ追加すること。**
+   * ここへ`live.mergeResolutions`/`live.tasks`の探索を書き戻すと、`stopTask`とこの
+   * 関数の一致がコンパイルにもテストにも頼らない口約束へ戻ってしまう
+   * （レビュー指摘: medium）。
+   */
+  hasStoppableSession(runId: string, taskId: string): boolean {
+    return this.findStoppableSessionEntry(runId, taskId) !== undefined;
+  }
+
+  /**
+   * `stopTask`と`hasStoppableSession`が共に参照する「対象taskIdに紐づく、止められる
+   * 可能性のあるセッションの候補」を単一箇所に集約する（レビュー指摘: medium。issue
+   * #514）。2つが別々に`live.mergeResolutions`/`live.tasks`を探索していると、将来
+   * 3つ目の保管場所が増えたときに片方の更新を忘れてもコンパイルエラーにもテスト
+   * 失敗にもならない非対称が生まれる。ここへ集約すれば、保管場所を1つ追加し忘れた
+   * 側が必ず古いままの`findStoppableSessionEntry`を呼び続け、両者が揃って古いか
+   * 揃って新しいかのどちらかにしかならない。
+   *
+   * **探索順は`live.mergeResolutions`を`live.tasks`より先に見る**（`revealTask`と同じ
+   * 順序。`stopTask`のJSDoc参照）。`merging`のタスクは`live.tasks`のエントリが
+   * `onTaskFinished`後も残ったまま（`dispose()`済み・ループも停止済み）なので、
+   * `live.tasks`を先に見ると常に「見つかった」ことになってしまい、衝突解決セッション
+   * 側へ本来届けるべき`stopLoop()`が届かなくなる。この順序を変えると
+   * `stopTask`は壊れるが、`hasStoppableSession`は（両方に無いか両方にあるかだけを
+   * 見るので）気づかない。**探索順のテストは`stopTask`側に置く**理由はこのため。
+   */
+  private findStoppableSessionEntry(
+    runId: string,
+    taskId: string,
+  ): { kind: 'mergeResolution'; entry: MergeResolutionEntry } | { kind: 'task'; entry: LiveTask } | undefined {
+    const live = this.runs.get(runId);
+    if (live === undefined) {
+      return undefined;
+    }
+    const mergeResolutionEntry = live.mergeResolutions.get(taskId);
+    if (mergeResolutionEntry !== undefined) {
+      return { kind: 'mergeResolution', entry: mergeResolutionEntry };
+    }
+    const liveTask = live.tasks.get(taskId);
+    if (liveTask === undefined) {
+      return undefined;
+    }
+    return { kind: 'task', entry: liveTask };
   }
 
   /**

@@ -271,6 +271,19 @@ describe('LoopController', () => {
     expect(controller.getStatus().stopReason).toBe('manual');
   });
 
+  /**
+   * `stop()`の戻り値（issue #514）。`WorkflowRunner.stopTask`はこの`boolean`だけを
+   * 「実際に止められたか」の根拠にするため、走っているループを止めたときは`true`、
+   * 既に止まっているループへの呼び出しは（存在チェックではなく）`false`を返す必要がある。
+   */
+  it('stop()は走っているループを止められればtrue、既に止まっていればfalseを返す', () => {
+    const controller = new LoopController(() => undefined);
+    controller.start(plan());
+    expect(controller.stop('taskStopped')).toBe(true);
+    // 既に止まっている状態へもう一度呼んでも、何も起きておらずfalse
+    expect(controller.stop('taskStopped')).toBe(false);
+  });
+
   describe('pause/resume（design.md §16.21 waitingReplyへの遷移）', () => {
     it('一時停止中はターンが終わっても継続指示を送らない。runningのまま止まる', () => {
       const { sent, send } = spy();

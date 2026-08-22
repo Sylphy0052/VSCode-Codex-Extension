@@ -520,6 +520,18 @@ function pushMergeApprovalTimeoutWarning(live: LiveRun, taskId: string, message:
   live.warnings.push({ kind: 'mergeApprovalTimeout', taskId, message });
 }
 
+/**
+ * `mergeStopTaskStopped`警告を、他の`merge*`警告と同じ規律（同一taskIdの直近1件へ丸める）
+ * で積む（Issue #514）。「再マージ」でやり直したセッションが再び`stop_task`で止められた
+ * 場合に、同じ文面の警告が積み増されていくのを防ぐ。
+ */
+function pushMergeStopTaskStoppedWarning(live: LiveRun, taskId: string, message: string): void {
+  live.warnings = live.warnings.filter(
+    (w) => !(w.kind === 'mergeStopTaskStopped' && w.taskId === taskId),
+  );
+  live.warnings.push({ kind: 'mergeStopTaskStopped', taskId, message });
+}
+
 /** `blockMergeAfterLeaseWait`が人へ出す文面（理由ごと）。 */
 const LEASE_WAIT_BLOCK_MESSAGES: Record<LeaseWaitBlockReason, string> = {
   halted:
@@ -928,6 +940,7 @@ async function startMergeResolution(
         waitingApprovalSinceMs,
         approvalTimeoutTimer,
         timedOutByApprovalTimeout: false,
+        stoppedByStopTask: false,
       });
       self.notify(runId);
       // 承認待ちの開始/解消は`maxParallel`の枠の勘定（`excludeFromActiveCount`）を変える
@@ -952,6 +965,7 @@ async function startMergeResolution(
       waitingApprovalSinceMs,
       approvalTimeoutTimer,
       timedOutByApprovalTimeout: false,
+      stoppedByStopTask: false,
     });
 
     const prompt = buildMergeResolutionPrompt(
@@ -1072,26 +1086,48 @@ async function finishMergeResolution(
     );
   }
 
-  if (reason === 'taskStopped' && entry?.timedOutByApprovalTimeout === true) {
-    // 承認待ちタイムアウトによる自動停止（Issue #413 PR5）。`session.stopLoop()`は理由を
-    // `'taskStopped'`としてしか伝えられないため、ここで`entry.timedOutByApprovalTimeout`を
-    // 見て、下の「人が全体停止を押した」経路（`applyLoopStopReason`でrun全体を
-    // `haltedByUser`にする）とは別扱いにする。
-    //
-    // **run全体は止めない。** タイムアウトは「このタスクの衝突解決が承認待ちのまま
-    // 長時間放置された」だけを表す局所的な事象であり、他のタスクが動くのを妨げる理由には
-    // ならない。`applyLoopStopReason`を呼んで`haltedByUser`を立てると、まだ開始していない
+  // `reason === 'taskStopped'`のうち、run全体ではなく「このタスク単体」を狙った停止
+  // （承認待ちタイムアウト = Issue #413 PR5、`stop_task` = Issue #514）はここへ合流する。
+  // `session.stopLoop()`は理由を`'taskStopped'`としてしか`onFinished`へ伝えられないため、
+  // 送り元はエントリのフラグ（`entry.timedOutByApprovalTimeout` /
+  // `entry.stoppedByStopTask`）でしか区別できず、下の「人が全体停止を押した」経路
+  // （`applyLoopStopReason`でrun全体を`haltedByUser`にする）とは別扱いにする必要がある。
+  //
+  // 2つのフラグは「run全体は止めず、このタスクだけを`blocked`にする」という**同じ結末**へ
+  // 合流するため、`markMergeBlocked`の呼び出しと後始末（persist/notify/pump）は1箇所に
+  // まとめる。ただし警告の文言と積む警告の`kind`は分ける。「タイムアウトで自動的に止まった」
+  // のか「オーケストレーターに明示的に止められた」のかは、人が次に取るべき行動
+  // （前者は放置を疑う、後者は`stop_task`を呼んだ側の意図を確認する）が違うため。
+  const localOnlyStopKind: 'approvalTimeout' | 'stopTask' | undefined =
+    reason !== 'taskStopped'
+      ? undefined
+      : entry?.timedOutByApprovalTimeout === true
+        ? 'approvalTimeout'
+        : entry?.stoppedByStopTask === true
+          ? 'stopTask'
+          : undefined;
+  if (localOnlyStopKind !== undefined) {
+    // **run全体は止めない。** どちらも「このタスクの衝突解決だけが止まった」という
+    // 局所的な事象であり、他のタスクが動くのを妨げる理由にはならない。
+    // `applyLoopStopReason`を呼んで`haltedByUser`を立てると、まだ開始していない
     // `pending`が全て`skipped`（`runHalted`）へ倒れてしまい（`skipRemainingPending`）、
-    // 「対象は承認待ちの継続時間だけ」という前提が崩れる（design.md §16.17。最終報告参照）。
+    // 「対象はこのタスクだけ」という前提が崩れる（design.md §16.17。最終報告参照）。
     //
     // このタスク自身は下の`manual`/`interrupted`/`taskStopped`共通の経路と同じく
     // `markMergeBlocked`で`blocked`へ確定させ、`git merge --abort`は呼ばない（Issue #434と
     // 同じ理由。統合worktreeで進んでいた解決作業を巻き戻さない）。
     live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
-    const message =
-      '衝突解決セッションが承認待ちのままタイムアウトしたため停止しました。統合worktreeは衝突した状態のまま残っています（Viewの「再マージ」で再開できます）';
-    self.deps.log.warn(`[workflow ${runId}/${taskId}] ${message}`);
-    pushMergeApprovalTimeoutWarning(live, taskId, message);
+    if (localOnlyStopKind === 'approvalTimeout') {
+      const message =
+        '衝突解決セッションが承認待ちのままタイムアウトしたため停止しました。統合worktreeは衝突した状態のまま残っています（Viewの「再マージ」で再開できます）';
+      self.deps.log.warn(`[workflow ${runId}/${taskId}] ${message}`);
+      pushMergeApprovalTimeoutWarning(live, taskId, message);
+    } else {
+      const message =
+        '衝突解決セッションがstop_task（このタスク単体の停止）で停止されました。統合worktreeは衝突した状態のまま残っています（Viewの「再マージ」で再開できます）';
+      self.deps.log.warn(`[workflow ${runId}/${taskId}] ${message}`);
+      pushMergeStopTaskStoppedWarning(live, taskId, message);
+    }
     void self.persist(runId);
     self.notify(runId);
     self.pump(runId);

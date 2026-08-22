@@ -66,7 +66,17 @@ function buildIntroBody(live: LiveRun): string {
  */
 export interface OrchestratorControlActions {
   getSnapshot(runId: string): WorkflowRunSnapshot | undefined;
-  stopTask(runId: string, taskId: string): void;
+  /**
+   * `WorkflowRunner.stopTask`のjsdoc（issue #514）参照。戻り値は「送り先を見つけて
+   * `stopLoop()`を呼べたか」で、`false`のときは制御ツール側が`no(...)`を返す根拠になる。
+   */
+  stopTask(runId: string, taskId: string): boolean;
+  /**
+   * `stopTask`が`false`を返したときに、「そもそも送り先のセッションが無かった」のか
+   * 「送り先はあったが、ループは既に終わっていた」のかを見分けるための補助（Issue #514
+   * medium指摘）。`WorkflowRunner.hasStoppableSession`のJSDoc参照。
+   */
+  hasStoppableSession(runId: string, taskId: string): boolean;
   retryTask(runId: string, taskId: string, options?: { allowConfirmed?: boolean }): RetryTaskResult;
   continueTask(runId: string, taskId: string): boolean;
   decideApproval(runId: string, taskId: string, decision: ApprovalDecision): boolean;
@@ -114,7 +124,14 @@ function runFinishedReason(
  * この窓を塞げないので、これを別の層として並べる。
  *
  * `stop_task` はこの検査を通さない（止める方向は停止意図と矛盾しないため呼び出し側で
- * 除外する）。
+ * 除外する）。**この除外が成り立つのは、`stop_task` 自身が `haltedByUser` を立てない
+ * 場合に限る**（Issue #514）。`merging` のタスクへの `stop_task` は衝突解決セッションへ
+ * `stopLoop()` を送るが、`WorkflowRunner.stop()`（全体停止）からの同じ `stopLoop()` と
+ * 見分けが付かないと、`runnerMerge.ts` の `finishMergeResolution` が誤って
+ * `haltedByUser` を立ててしまい、この除外の前提（「`stop_task` は止める方向にしか
+ * 効かない」）が壊れる。`MergeResolutionEntry.stoppedByStopTask`（`runner.ts`）で
+ * 送り元を区別し、`stop_task` 経由では `haltedByUser` を立てないことで、この前提を
+ * 保っている。
  */
 function runHaltedByUserReason(
   actions: OrchestratorControlActions,
@@ -157,7 +174,27 @@ export function buildOrchestratorControlPort(
       if (state === undefined) {
         return no(`タスクが見つかりません: ${taskId}`);
       }
-      actions.stopTask(runId, taskId);
+      // 戻り値（`boolean`）を成功の根拠にする（issue #514）。`live.tasks` /
+      // `live.mergeResolutions` のどちらにも実際に止められるループが見つからなければ
+      // `false` が返るため、ここで無条件に成功を返さない。届いていないのに「止めました」
+      // と答えるとオーケストレーターは以後この経路を再試行しなくなるため、届かなかった
+      // ことをそのまま伝える
+      const stopped = actions.stopTask(runId, taskId);
+      if (!stopped) {
+        // `stopTask`の`false`は「送り先のセッションが無かった」（本当に見つからない）と
+        // 「送り先はあったが、ループは既に終わっていた」（`merging`のタスクなど、
+        // `onTaskFinished`後もエントリが残るケース。issue #514 medium指摘）の両方で
+        // 返るため、ここで別の判定（`hasStoppableSession`）を挟んで文言を分ける。
+        // どちらの場合も**失敗を返す動作自体は変えない**（安全側。「見つからない」と
+        // 誤診してオーケストレーターが的外れな対応をしないよう、実際には届いていた
+        // ことを伝える）
+        const hadSession = actions.hasStoppableSession(runId, taskId);
+        return no(
+          hadSession
+            ? `${taskId} は既に停止しています（状態: ${state}）。stop_taskは何もしていません。`
+            : `${taskId} を止められませんでした（対象のループが見つかりません。状態: ${state}）。`,
+        );
+      }
       return ok(`${taskId} のループを止めました（状態: ${state}）。`);
     },
     retryTask: (taskId) => {
