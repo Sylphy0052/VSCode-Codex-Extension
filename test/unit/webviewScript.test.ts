@@ -398,6 +398,29 @@ describe('workflowScript', () => {
     expect(source).toContain('task.hasLiveSession === true');
   });
 
+  it('マージ解決中バッジは承認待ちとLLM作業中を区別する（Issue #413 PR4）', () => {
+    const source = workflowScript();
+    // 出し分けの本体（mergeResolutionBadgeLabel）が承認待ちフラグを見ていること
+    expect(source).toContain('task.mergeResolutionWaitingApproval');
+    expect(source).toContain('マージ解決中（承認待ち）');
+    expect(source).toContain("'マージ解決中'");
+    // mergeResolutionBadgeLabel(task) の呼び出しは3箇所（SVGバッジ・タイトル属性・
+    // テーブルのhint）。関数定義を残したまま特定の呼び出し1箇所だけを固定文字列
+    // （'マージ解決中'）へ差し戻す退行は、関数名や文言だけをtoContainで見ていると
+    // 検出できない（レビュー指摘）。呼び出し文脈を含む断片で個別に固定する
+    expect(source).toContain('badge.textContent = mergeResolutionBadgeLabel(task);');
+    expect(source).toContain(
+      "(task.mergeResolutionActive ? ' ・ ' + mergeResolutionBadgeLabel(task) : '')",
+    );
+    expect(source).toContain(
+      "text('span', 'hint', '（' + mergeResolutionBadgeLabel(task) + '）')",
+    );
+    // 出現回数そのものも固定する（関数定義1箇所＋呼び出し3箇所＝4）。上の3つの断片が
+    // 同じ1箇所を重複して数えていないことの担保
+    const occurrenceCount = (source.match(/mergeResolutionBadgeLabel\(task\)/g) ?? []).length;
+    expect(occurrenceCount).toBe(4);
+  });
+
   it('動的な値をHTMLへ文字列結合しない（innerHTML/outerHTMLを使わない）', () => {
     // design.md §16.8「画面に出す動的な文字列は必ずテキストノードとして挿入する」。
     // innerHTML系のAPIを使わないことをここで機械的に固定しておく

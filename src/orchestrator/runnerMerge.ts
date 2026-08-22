@@ -719,6 +719,10 @@ async function startMergeResolution(
       cwd: integration.cwd,
       config: effective.config,
       sandbox: effective.sandbox,
+      // タブ名を`taskId`で分ける（Issue #413 PR4）。従来は固定文字列（`'Codex'`/`LABEL`）
+      // だったため、複数の衝突解決セッションが並ぶ場合にどのタスクの解決か見分けられ
+      // なかった
+      mergeResolutionTaskId: taskId,
     });
   } catch (e) {
     const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
@@ -744,6 +748,11 @@ async function startMergeResolution(
   // `open()`の最中に終了が発火したかどうか（下の`onFinished`が立てる）。読むのは`open()`が
   // 返った直後の1回だけなので、通常の（あとから来る）終了で立っても影響しない。
   const finishedWhileOpening = { done: false };
+  // 承認待ちの可視化（Issue #413 PR4）。`live.mergeResolutions`（`MergeResolutionEntry`）へ
+  // 反映する値。承認待ちで**ない**間は`undefined`。`live.mergeResolutions.set()`より前に
+  // `onStateChanged`が発火しうる（`open()`が同期的に状態を発火するhost実装）ため、
+  // まずローカル変数として持ち、`set()`する時点の値をそのまま渡す
+  let waitingApprovalSinceMs: number | undefined;
 
   try {
     // **`onFinished`の登録は`session.open()`より前に行う**（レビュー指摘12）。`open()`が
@@ -768,6 +777,35 @@ async function startMergeResolution(
       void onMergeResolutionFinished(self, runId, taskId, task, integration, reason, lease);
     });
 
+    // 承認待ちの可視化（Issue #413 PR4）。**`onFinished`と同じく`session.open()`より前に
+    // 登録する**（同期的に状態変化を発火するhost実装があるため取りこぼさない）。
+    // `waitingApproval`状態そのものへは倒さない（`markWaitingApproval`は`running`からしか
+    // 動かず、`merging`は`isUnsettled`から意図的に外されている。`runState.ts`参照）ため、
+    // ここでは`live.mergeResolutions`のエントリへ承認待ちフラグを足すだけに留める。
+    // `setApprovalHandler`は付けない（上のコメント・design.md §16.17「コンフリクト」5.）ため
+    // 承認要求は標準の承認カードへ委ねられたまま変わらない
+    session.onStateChanged((state) => {
+      if (abandoned.done) {
+        return;
+      }
+      const waiting = state.approvals.length > 0;
+      const nextSince = waiting ? (waitingApprovalSinceMs ?? Date.now()) : undefined;
+      if (nextSince === waitingApprovalSinceMs) {
+        return;
+      }
+      waitingApprovalSinceMs = nextSince;
+      if (!live.mergeResolutions.has(taskId)) {
+        // まだ`set()`前（`open()`の最中）。`set()`する側がこの時点の`waitingApprovalSinceMs`を
+        // 読むので、ここでは何もしなくてよい
+        return;
+      }
+      live.mergeResolutions.set(taskId, { session, waitingApprovalSinceMs });
+      self.notify(runId);
+      // 承認待ちの開始/解消は`maxParallel`の枠の勘定（`excludeFromActiveCount`）を変える
+      // ため、次に開始できるタスクを拾い直す
+      self.pump(runId);
+    });
+
     session.open({ preserveFocus: true });
     if (finishedWhileOpening.done) {
       // `open()`が同期的にループを回し切って終了まで発火した。決着と占有の解放は上の
@@ -779,7 +817,7 @@ async function startMergeResolution(
       self.notify(runId);
       return;
     }
-    live.mergeResolutions.set(taskId, session);
+    live.mergeResolutions.set(taskId, { session, waitingApprovalSinceMs });
 
     const prompt = buildMergeResolutionPrompt(
       { id: taskId, prompt: task.prompt, done: task.done },
@@ -876,10 +914,10 @@ async function finishMergeResolution(
   if (live === undefined) {
     return;
   }
-  const session = live.mergeResolutions.get(taskId);
+  const entry = live.mergeResolutions.get(taskId);
   live.mergeResolutions.delete(taskId);
   try {
-    session?.dispose();
+    entry?.session.dispose();
   } catch (e) {
     // ここで投げたまま呼び出し側（`onMergeResolutionFinished`）の`catch`へ流すと、
     // 下の`reason`判定を経由せず`markMergeFailed`へ落ちてしまう。`reason`が

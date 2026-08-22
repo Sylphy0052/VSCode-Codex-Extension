@@ -591,6 +591,7 @@ function buildPreviewSnapshot(
     expandedContinuePrompt: undefined,
     lastSentPrompt: undefined,
     mergeResolutionActive: false,
+    mergeResolutionWaitingApproval: false,
     pullRequestNumber: undefined,
     pullRequestUrl: undefined,
   }));

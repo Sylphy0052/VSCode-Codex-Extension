@@ -390,3 +390,45 @@ describe('merging/blockedとスケジューリングの関係（design.md §16.3
     expect(getRunOutcome(run)).toBe('running'); // T3・T5がまだrunningのため
   });
 });
+
+describe('nextTasksToStartのexcludeFromActiveCount（Issue #413 PR4）', () => {
+  it('承認待ちの解決セッションのtaskIdを渡すと、他の独立したタスクがmaxParallelの枠を使って開始できる', () => {
+    // T1がmergingのままでも、excludeFromActiveCountへ渡せばT5（独立）が開始できる
+    const tasks = [task('T1', []), task('T5', [])];
+    const d = def(tasks, 1);
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = applyLoopStopReason(run, tasks, 'T1', 'done'); // T1: merging
+    expect(run.tasks.get('T1')?.state).toBe('merging');
+
+    expect(nextTasksToStart(d, run, new Set(['T1']))).toEqual(new Set(['T5']));
+  });
+
+  it('除外集合を渡さなければ従来どおり枠を占め、T5は開始できない（回帰確認）', () => {
+    const tasks = [task('T1', []), task('T5', [])];
+    const d = def(tasks, 1);
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = applyLoopStopReason(run, tasks, 'T1', 'done'); // T1: merging
+
+    expect(nextTasksToStart(d, run)).toEqual(new Set());
+    expect(nextTasksToStart(d, run, new Set())).toEqual(new Set());
+  });
+
+  it('除外されても対象タスク自身の状態はmergingのままで、依存する後続はdoneになるまで開始されない', () => {
+    // T1がmergingのまま除外されても、T1に依存するT2・T3（diamondTasksの依存）は
+    // 「開始しないpending」にはならない。excludeFromActiveCountはactiveCountの計算
+    // にしか作用せず、depsAllDone（doneだけを依存の充足とみなす判定）には影響しない
+    const tasks = diamondTasks();
+    const d = def(tasks, 3);
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = applyLoopStopReason(run, tasks, 'T1', 'done'); // T1: merging
+
+    expect(nextTasksToStart(d, run, new Set(['T1']))).toEqual(new Set());
+
+    // 承認待ちが解消してマージが成功すれば、除外集合から自然に外れ、通常どおり開始される
+    run = markMergeSucceeded(run, tasks, 'T1');
+    expect(nextTasksToStart(d, run, new Set())).toEqual(new Set(['T2', 'T3']));
+  });
+});

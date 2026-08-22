@@ -22,16 +22,39 @@ import type { WorkflowDefinition } from './workflow';
  *   マージが終わるまでそのタスクの成果は確定しないため枠を占める。design.md §16.3）
  * - 実行全体が停止している（`failed` の確定、または人の割り込み）ときは何も返さない
  * - 同じ段で複数開始できるとき、`def.tasks` に書かれた順で埋める（再現性のため）
+ *
+ * **例外（Issue #413 PR4、design.md §16.3）: `excludeFromActiveCount`。** 衝突解決
+ * セッション（`live.mergeResolutions`）が承認待ちのまま止まっていると、そのタスクは
+ * `merging`のまま`maxParallel`の枠を無期限に占め続け、他の独立したタスクが開始できなく
+ * なる。`runner.ts`の`pump`は、承認待ちの解決セッションのtaskId集合をここへ渡すことで、
+ * その分だけ`activeCount`から除外し、他タスクへ枠を明け渡す。
+ *
+ * **状態そのものは`merging`のまま変えない。** `isActiveTaskState`本体（`runState.ts`）は
+ * 触らない。`getRunOutcome`（このファイル）は`merging`を`running`扱いすることに依存して
+ * おり、外すと衝突解決中のrunが「終了した」と誤判定されて統合PR/MRの作成まで走る
+ * （Issue #443・#412）。そのため`excludeFromActiveCount`はこの関数（`activeCount`の
+ * 計算）にだけ作用し、`getRunOutcome`・`checkWaitingReplyStalls`
+ * （`runnerMessaging.ts`）には渡さない。
+ *
+ * **依存の充足判定（`depsAllDone`）には影響しない。** 除外されても対象タスクの状態は
+ * 引き続き`merging`であり`done`ではないため、このタスクへ依存する後続は従来どおり
+ * 開始されない。したがって除外によって「`nextTasksToStart`が開始しない`pending`」
+ * （`runState.ts`の`markMergeSucceeded`の不変条件）が新たに生まれることはない。承認待ちが
+ * 解消すれば`pump`が渡す集合から自然に外れ、`activeCount`の計算に戻る。
  */
-export function nextTasksToStart(def: WorkflowDefinition, run: RunState): ReadonlySet<string> {
+export function nextTasksToStart(
+  def: WorkflowDefinition,
+  run: RunState,
+  excludeFromActiveCount: ReadonlySet<string> = new Set(),
+): ReadonlySet<string> {
   const result = new Set<string>();
   if (isRunHalted(run)) {
     return result;
   }
 
   let activeCount = 0;
-  for (const s of run.tasks.values()) {
-    if (isActiveTaskState(s.state)) {
+  for (const [taskId, s] of run.tasks) {
+    if (isActiveTaskState(s.state) && !excludeFromActiveCount.has(taskId)) {
       activeCount += 1;
     }
   }
