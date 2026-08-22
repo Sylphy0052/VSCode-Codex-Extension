@@ -1493,6 +1493,57 @@ tasks:
       expect(() => reloadedRunner.stop(runId)).not.toThrow();
     });
   });
+
+  /**
+   * `stop()`は走行中タスクへ`stopLoop()`を送るだけで確定は待つため、その間オーケスト
+   * レーターに届くのは通常の`taskFailed`だけになり「タスクが次々失敗している」ように
+   * しか見えない。`retry_task`を呼ぶのが自然な反応になってしまう構造的な穴（issue #401）
+   * を塞ぐため、`stop()`から明示のイベントを1本送る。
+   */
+  describe('人の停止をオーケストレーターへ通知する（issue #401）', () => {
+    it('stop()の直後にオーケストレーターへ「人が停止した」通知が届く', async () => {
+      const { runner, codexHost } = createHarness(YAML);
+      const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+      const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+      // run開始の通知でターンが走っている。走行中は割り込まないので、まず終わらせる
+      orchestrator.emitState({ ...initialChatState, busy: true });
+      orchestrator.emitState({ ...initialChatState, busy: false });
+
+      runner.stop(runId);
+      await flush();
+
+      const last = orchestrator.sentTexts[orchestrator.sentTexts.length - 1] as string;
+      expect(last).toContain('人がこの実行全体を停止しました');
+      expect(last).toContain('retry_task');
+      expect(last).toContain('stop_task');
+    });
+
+    it('stop()を2回呼んでも「人が停止した」通知は1件しか届かない（Webviewのstop_allが重ねて呼ぶため）', async () => {
+      const { runner, codexHost } = createHarness(YAML);
+      const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+      const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+      orchestrator.emitState({ ...initialChatState, busy: true });
+      orchestrator.emitState({ ...initialChatState, busy: false });
+
+      runner.stop(runId);
+      await flush();
+
+      const countHaltedNotices = () =>
+        orchestrator.sentTexts.filter((t) => t.includes('人がこの実行全体を停止しました')).length;
+      expect(countHaltedNotices()).toBe(1);
+
+      // 既にhaltedByUserのrunへ`stop()`を重ねて呼んでも（Webviewのstop_allハンドラは
+      // haltedByUserの現在値を見ずに毎回呼ぶ）、通知が積み増されない
+      runner.stop(runId);
+      await flush();
+
+      expect(countHaltedNotices()).toBe(1);
+    });
+  });
 });
 
 /**
@@ -6356,6 +6407,194 @@ tasks:
     expect(outcome.accepted).toBe(true);
     expect(t1.runLoopCalls.length).toBe(before + 1);
     expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe('running');
+  });
+
+  describe('人が「全体の停止」を押した後は再開できない（Issue #401）', () => {
+    const THREE_TASK_YAML = `
+version: 1
+name: control-halt-test
+defaults:
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+  - id: T3
+    prompt: p3
+    done: d3
+`;
+
+    it('retry_taskは停止直後（走行中タスクが残りoutcomeがrunningのまま）でもhaltedByUserを解除しない', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(THREE_TASK_YAML, {
+        messaging: deps,
+      });
+      const result = await runner.start('/repo/.agents/workflows/control.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      // maxParallel=2なのでT1・T2が走り出し、T3はpendingのまま
+      expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T3')?.state).toBe('pending');
+
+      runner.stop(runId);
+      await flush();
+
+      // T1・T2はまだ進行中のターンが終わっていないためrunningのまま残る
+      // （stop()は割り込まない）。この窓でoutcomeは'running'のまま
+      expect(runner.getSnapshot(runId)?.outcome).toBe('running');
+      expect(runner.getSnapshot(runId)?.haltedByUser).toBe(true);
+      expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T3')?.state).toBe('skipped');
+
+      const sessionsBefore = codexHost.sessions.length;
+      const outcome = control(state).retryTask('T3');
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('人がこの実行全体を停止しました');
+      // haltedByUserは解除されず、T3も再開されない（嘘の成功を返さない）
+      expect(runner.getSnapshot(runId)?.haltedByUser).toBe(true);
+      expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T3')?.state).toBe('skipped');
+      expect(codexHost.sessions.length).toBe(sessionsBefore);
+    });
+
+    it('continue_taskは停止直後でもhaltedByUserを解除せず、スケジューラを迂回して再開しない', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+        messaging: deps,
+      });
+      const result = await runner.start('/repo/.agents/workflows/control.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      // T1を回数切れ（maxReached）で先にfailedへ確定させる。T2は走行中のまま残す
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('maxReached', { ...initialChatState });
+      await flush();
+      expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe('failed');
+
+      runner.stop(runId);
+      await flush();
+
+      // T2はまだ進行中のターンが終わっていないためrunningのまま残り、outcomeは'running'
+      expect(runner.getSnapshot(runId)?.outcome).toBe('running');
+      expect(runner.getSnapshot(runId)?.haltedByUser).toBe(true);
+
+      const before = t1.runLoopCalls.length;
+      const outcome = control(state).continueTask('T1');
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('人がこの実行全体を停止しました');
+      // `continueTask`はスケジューラ（`nextTasksToStart`）を通らず直接runningへ倒すため、
+      // ここで拒否できていないと`isRunHalted`のガードも無関係に再開してしまう
+      expect(t1.runLoopCalls.length).toBe(before);
+      expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe('failed');
+      expect(runner.getSnapshot(runId)?.haltedByUser).toBe(true);
+    });
+
+    it('decide_approvalも停止直後は拒否する', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(THREE_TASK_YAML, {
+        messaging: deps,
+      });
+      const result = await runner.start('/repo/.agents/workflows/control.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      void t1.requestApproval({
+        requestId: 1,
+        kind: 'execCommand',
+        title: 'rm -rf',
+        detail: '',
+        itemId: 'item-1',
+      });
+      await flush();
+
+      runner.stop(runId);
+      await flush();
+
+      const outcome = control(state).decideApproval('T1', 'accept');
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('人がこの実行全体を停止しました');
+    });
+
+    it('update_task_promptも停止直後は拒否し、継続指示を差し替えない', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+        messaging: deps,
+      });
+      const result = await runner.start('/repo/.agents/workflows/control.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      runner.stop(runId);
+      await flush();
+
+      expect(runner.getSnapshot(runId)?.haltedByUser).toBe(true);
+
+      const t1 = codexHost.byTaskId('T1');
+      const outcome = control(state).updateTaskPrompt('T1', 'これからは設計だけをやること');
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('人がこの実行全体を停止しました');
+      // 差し替えは反映されない（`promptTransform`は通常どおりテンプレート展開のままで、
+      // 拒否した差し替え文へは置き換わらない）。警告欄にも積まれない
+      expect(t1.promptTransform?.('これは通常の継続文')).toBe('これは通常の継続文');
+      const warning = runner
+        .getSnapshot(runId)
+        ?.warnings.find((w) => w.kind === 'orchestratorPromptOverride');
+      expect(warning).toBeUndefined();
+    });
+
+    it('人がワークフローViewから押す再実行（WorkflowRunner.retryTaskの直接呼び出し）は停止後も引き続き機能する', async () => {
+      const { runner, codexHost, store } = createHarness(THREE_TASK_YAML);
+      const result = await runner.start('/repo/.agents/workflows/control-view.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      runner.stop(runId);
+      await flush();
+      expect(store.find(runId)?.tasks['T3']?.state).toBe('skipped');
+      expect(store.find(runId)?.haltedByUser).toBe(true);
+
+      // ガードは制御ポート層（オーケストレーター専用の接続）にだけ置かれているため、
+      // Viewのボタンが呼ぶ`WorkflowRunner.retryTask`の直接呼び出しは変わらず機能する
+      const outcome = runner.retryTask(runId, 'T3');
+      await flush();
+
+      expect(outcome).toEqual({ ok: true });
+      expect(store.find(runId)?.tasks['T3']?.state).toBe('pending');
+      expect(store.find(runId)?.haltedByUser).toBe(false);
+      void codexHost;
+    });
+
+    it('1件失敗しただけの通常運転（人の停止ではない）では、オーケストレーターのretry_taskは死なない（isRunHalted誤用への回帰防止）', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+        messaging: deps,
+      });
+      const result = await runner.start('/repo/.agents/workflows/control.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      // T1だけが通常の失敗で確定する（stop()は呼ばない）。T2は走行中のまま
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('failed', { ...initialChatState, turnFailed: true });
+      await flush();
+
+      // haltedByUserは立っていない（人は停止していない）が、`isRunHalted`は
+      // `hasFailedTask`により真になる。ガードは`haltedByUser`だけを見るべきで、
+      // `isRunHalted`を使うとここで誤って拒否してしまう
+      expect(runner.getSnapshot(runId)?.haltedByUser).toBe(false);
+
+      const outcome = control(state).retryTask('T1');
+
+      expect(outcome.accepted).toBe(true);
+      expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe('running');
+    });
   });
 
   it('decide_approvalはacceptとdeclineだけを受け付ける（セッション全体への承認は選べない）', async () => {
