@@ -6345,15 +6345,23 @@ tasks:
   });
 
   /**
-   * Issue #432-2のレビュー・監査で追加確認された指摘: `reflectPseudoWorktree`を
-   * `finishedNotified`で絞ったことで、2周目以降は反映自体を試みなくなった。だが
-   * `integratePseudoWorktree`（タスク完了ごとに呼ばれる）はrunの周回を問わず統合
-   * キューへ積むため、2周目に新たに`done`になったタスクの統合内容は実在し、それを
-   * 反映する経路は`reflectPseudoWorktree`しかない。反映を絞る判断自体は維持しつつ、
-   * 「反映されていない」という事実どおりの警告（`pseudoWorktreeReflectSkipped`）を
-   * 1件だけ残すことを検証する。
+   * Issue #511: `reflectIntegrationToWorkspace`が比較に使う`live.pseudo.baseline`は、
+   * 従来`resolvePseudoState`が実行開始時／復元時に一度取ったスナップショットのまま
+   * 固定で、1周目の反映後も更新されなかった。1周目の反映が1件でも成功していれば
+   * ワークスペースは`baseline`から意図的に変化しているため、2周目は必ず
+   * `workspaceChanged`の誤検知になり、再開後に新たに統合された内容がワークスペースへ
+   * 反映されなかった（PR #509はこの誤検知に対する暫定対応として2周目以降の反映自体を
+   * 行わないようにし、代わりに`pseudoWorktreeReflectSkipped`という警告だけを出す形に
+   * していたが、内容が失われること自体は直っていなかった）。
+   *
+   * この修正で`reflectPseudoWorktree`は反映に成功する（`partialApply`を含む）たびに
+   * `baseline`を反映後のワークスペースの実際の状態へ更新するため、`pseudoWorktreeReflectSkipped`
+   * とその送出分岐は不要になり削除した。以下の2テストは受入基準どおり、
+   * (1) 2周目に新たに`done`になったタスクの内容がワークスペースへ届くこと、
+   * (2) その間に人が編集した場合は、baselineの更新後も引き続き反映が拒否されること、
+   * を確かめる。
    */
-  describe('疑似worktree（design.md §16.20）の反映は絞るが、警告は事実どおりに残す', () => {
+  describe('疑似worktreeのbaseline更新（design.md §16.20、Issue #511）', () => {
     const PSEUDO_RETRY_YAML = `
 version: 1
 name: pseudo-retry-test
@@ -6367,30 +6375,9 @@ tasks:
     done: d2
 `;
 
-    it('1周目の終了ではpseudoWorktreeReflectSkippedは積まれない（誤検知防止）', async () => {
-      const git = fakeGit({ notGitRepo: true });
-      const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
-      const { runner, codexHost, store } = createHarness(PSEUDO_RETRY_YAML, {
-        git,
-        pseudoWorktree: { fs, exclude: [] },
-      });
-      const result = await runner.start('/repo/.agents/workflows/pseudo-retry.yaml', '/repo');
-      const runId = result.runId as string;
-      await flush();
-
-      codexHost.byTaskId('T1').finish('failed', { ...initialChatState, turnFailed: true });
-      await flush();
-
-      expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
-      const snapshot = runner.getSnapshot(runId);
-      expect(snapshot?.warnings.some((w) => w.kind === 'pseudoWorktreeReflectSkipped')).toBe(
-        false,
-      );
-    });
-
     it(
-      'retryTask経由で2周目に終了すると、reflectPseudoWorktreeは呼ばれず、' +
-        'pseudoWorktreeReflectSkippedが1件積まれる',
+      'retryTask経由で2周目に終了すると、2周目に新たにdoneになったタスクの' +
+        '統合内容もワークスペースへ届く',
       async () => {
         const git = fakeGit({ notGitRepo: true });
         const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
@@ -6422,65 +6409,78 @@ tasks:
         codexHost.byTaskId('T2').finish('done', doneState('ok'));
         await flush();
 
-        // 2周目: 今度はsucceededで終わる
+        // 2周目: succeededで終わる。今度は反映が実際に行われ、a.txtの内容が
+        // ワークスペースへ届く（修正前は`baseline`が固定のため`workspaceChanged`の
+        // 誤検知で届かなかった）
         expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
-        // 2周目の統合内容（a.txtの変更）はワークスペースへ反映されていない
-        // （reflectPseudoWorktreeが2周目は呼ばれないため）
-        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 10, mtimeMs: 100 });
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 999, mtimeMs: 999 });
         const snapshot = runner.getSnapshot(runId);
-        const warnings = snapshot?.warnings.filter(
-          (w) => w.kind === 'pseudoWorktreeReflectSkipped',
-        );
-        expect(warnings).toHaveLength(1);
-        expect(warnings?.[0]?.message).not.toContain('実行中にワークスペースが変更された');
+        expect(
+          snapshot?.warnings.some(
+            (w) => w.kind === 'pseudoWorktreeReflectBlocked' || w.kind === 'pseudoWorktreeConflict',
+          ),
+        ).toBe(false);
       },
     );
 
-    it('3回以上終了しても、pseudoWorktreeReflectSkippedは直近1件へ丸められる', async () => {
-      const YAML = `
-version: 1
-name: pseudo-retry-multi-test
-tasks:
-  - id: T1
-    prompt: p
-    continuePrompt: つづき
-    maxIterations: 5
-    done: d
-`;
-      const git = fakeGit({ notGitRepo: true });
-      const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
-      const { runner, codexHost, store } = createHarness(YAML, {
-        git,
-        pseudoWorktree: { fs, exclude: [] },
-      });
-      const result = await runner.start('/repo/.agents/workflows/pseudo-retry-multi.yaml', '/repo');
-      const runId = result.runId as string;
-      await flush();
+    it(
+      '1周目の反映成功でbaselineを更新しても、1周目の反映後から2周目の反映までの間に' +
+        '人が編集していれば、2周目の反映は引き続きworkspaceChangedとして拒否される',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, codexHost, store } = createHarness(PSEUDO_RETRY_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-retry.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
 
-      const t1 = codexHost.byTaskId('T1');
+        // 1周目: T1がa.txtを変更して成功し、T2は失敗してrunはfailedで終わる。
+        // run終了時の反映で、T1の変更（200/200）がワークスペースへ届き、
+        // baselineもその状態へ更新される
+        const cloneDir1 = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+        fs.setFile(path.join(cloneDir1, 'a.txt'), { size: 200, mtimeMs: 200 });
+        codexHost.byTaskId('T1').finish('done', doneState('ok'));
+        await flush();
+        codexHost.byTaskId('T2').finish('failed', { ...initialChatState, turnFailed: true });
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+        expect(store.find(runId)?.tasks['T2']?.state).toBe('failed');
+        // 1周目の反映が実際に成功し、a.txtがワークスペースへ届いていることを確認
+        // （このテストの前提: ここが揃っていないと2周目の拒否を検証したことにならない）
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 200, mtimeMs: 200 });
 
-      // 1周目: 回数切れでfailed（maxReached）
-      t1.finish('maxReached', { ...initialChatState });
-      await flush();
-      expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+        // 1周目の反映が終わった後、2周目の反映が終わるまでの間に人がワークスペースを
+        // 直接編集する（エージェントの複製先ではなく、ワークスペース本体を書き換える点が
+        // 「人の編集」の模擬として重要）
+        fs.setFile('/repo/a.txt', { size: 300, mtimeMs: 300 });
 
-      // 2周目: continueTaskで続け、また回数切れにする
-      expect(runner.continueTask(runId, 'T1')).toBe(true);
-      await flush();
-      t1.finish('maxReached', { ...initialChatState });
-      await flush();
+        // 人がT2を再実行する。T2の複製先でもファイルを変更し、統合キューへ新しい内容が
+        // 積まれるようにする
+        expect(runner.retryTask(runId, 'T2')).toEqual({ ok: true });
+        await flush();
+        const cloneDir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T2');
+        fs.setFile(path.join(cloneDir2, 'a.txt'), { size: 400, mtimeMs: 400 });
+        codexHost.byTaskId('T2').finish('done', doneState('ok'));
+        await flush();
 
-      // 3周目: さらにcontinueTaskで続け、今度はdoneにする
-      expect(runner.continueTask(runId, 'T1')).toBe(true);
-      await flush();
-      t1.finish('done', doneState('ok'));
-      await flush();
-
-      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
-      const snapshot = runner.getSnapshot(runId);
-      const warnings = snapshot?.warnings.filter((w) => w.kind === 'pseudoWorktreeReflectSkipped');
-      expect(warnings).toHaveLength(1);
-    });
+        // 2周目: succeededで終わる
+        expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+        // baselineの更新は「1周目の反映成功」に対してのみ行われ、2周目の反映が
+        // workspaceChangedで拒否された今回は human の編集（300/300）のまま据え置かれる。
+        // T2の統合内容（400/400）で上書きされていないこと＝人の編集を上書きしていないこと
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 300, mtimeMs: 300 });
+        const snapshot = runner.getSnapshot(runId);
+        const warnings = snapshot?.warnings.filter(
+          (w) => w.kind === 'pseudoWorktreeReflectBlocked',
+        );
+        expect(warnings).toHaveLength(1);
+        expect(warnings?.[0]?.message).toContain('実行中にワークスペースが変更された');
+        expect(warnings?.[0]?.message).toContain('a.txt');
+      },
+    );
   });
 });
 

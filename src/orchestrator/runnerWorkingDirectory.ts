@@ -409,6 +409,33 @@ export async function reflectPseudoWorktree(
       live.pseudo.exclude,
       deps.fs,
     );
+    // `baseline`を反映後のワークスペースの実際の状態へ更新する（Issue #511）。
+    //
+    // 更新するのは`ok: true`（全部適用）と`partialApply`（一部適用）の2分岐のみ。
+    // どちらも実際にディスクへ書き込みが起きているため、次回（`retryMerge`/
+    // `retryTask`/`continueTask`による再開後の2周目以降）の比較基準を「今まさに
+    // 自分で書いた状態」へ揃えないと、1周目の反映が1件でも成功した時点でワーク
+    // スペースは古い`baseline`から意図的に変化しており、2周目は必ず`workspaceChanged`
+    // の誤検知になる（Issueの本題）。
+    //
+    // `workspaceChanged`は書き込みを一切行っていない（人の編集を検知して反映を拒否した）
+    // ため、ここでは更新しない。**更新してしまうと、その場で拒否した人の編集を
+    // 「自分が書いた状態」として取り込んでしまい、次回以降その編集を検知できなくなる**
+    // （人の編集を検知する能力を落とさない、という受入基準に反する）。
+    //
+    // `partialApply`でも更新する設計判断: 反映は「全部成功するまで待つ」仕組みではなく、
+    // 途中で失敗した時点のディスクの実態（適用済みの分は書き変わり、未適用の分は
+    // 元のまま）をそのまま`baseline`として取り直す。未適用の分は`manifest`に
+    // 残ったままなので（`failedPath`・`remainingPaths`は統合キューから消えない）、
+    // 次回の反映で改めて適用が試みられる。ここで再取得したスナップショットが
+    // 「今のワークスペースの実態」と一致している限り、次回以降の`workspaceChanged`
+    // 判定（人の編集の検知）は適用済み・未適用のどちらのファイルについても
+    // 引き続き正しく働く。逆に`partialApply`のときだけ更新を見送ると、次回反映時に
+    // 既に適用済みのはずのパスまで「baselineとの差分」として誤検知されてしまう
+    // （適用済みのパスは統合先からのコピーでサイズ・更新時刻が変わっているため）。
+    if (result.ok || result.reason === 'partialApply') {
+      live.pseudo.baseline = await takeSnapshot(live.repoRoot, live.pseudo.exclude, deps.fs);
+    }
     // `usedLegacyCopyFallback`は`workspaceChanged`（コピーへ入る前に中断）以外の2分岐にだけ
     // 乗る。ここで1回だけ判定してログに出すことで、`reflectIntegrationToWorkspace`が
     // マニフェストのエントリ数だけ`usedLegacyCopyFallback`を立てても、警告は反映1回に
