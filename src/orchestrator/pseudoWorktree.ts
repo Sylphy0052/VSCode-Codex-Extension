@@ -446,18 +446,23 @@ export async function loadPersistedManifest(
  * しうる（`hasGitSegment`によるIssue #406の`.git`無条件拒否は`relPath`の文字列にしか
  * 掛からないため迂回される）。
  *
- * **「想定した場所」は`dirPath`自身から組み立ててはいけない（Issue #505、再監査で発覚
+ * **「想定した場所」は`dirPath`自身（あるいはその途中にある`.agents/worktrees`のような
+ * 中間ディレクトリ）から組み立ててはいけない（Issue #505、再監査・再々監査で2段階発覚
  * した循環）。** 当初の実装は`dirPath`（`<runId>`）自身の`realpath`を基準にしていたが、
  * `dirPath`自体が差し替えられている攻撃では、`dirPath`の`realpath`も書き込み後の
  * `filePath`の`realpath`もどちらも差し替え後の実体（例: `.git/hooks`・
  * `.git/hooks/manifest.json`）を指すため必ず一致してしまい、検査が自己無矛盾になって
  * 何も検知できない（`cloneWorkspace`の実装コメントで実測済み。同じクラスの欠陥）。
- * `resolveRealRemovalTarget`（Issue #493）・`cloneWorkspace`（同Issue）と同じく、
- * `dirPath`より1段上で攻撃者が動かせない`worktreesRoot`（`.agents/worktrees`）を基準に
- * する。`worktreesRoot`の`realpath`が`undefined`を返すのはここでは正常系ではなく異常
- * （TOCTOU窓の間に削除・差し替えされた）としてフェイルクローズする（`mkdir`が
- * `recursive: true`で必ず`dirPath`を作る以上、その1段上の`worktreesRoot`も通常は
- * 存在するはずのため）。
+ * 次に`resolveRealRemovalTarget`（Issue #493）の前例に倣い`worktreesRoot`
+ * （`.agents/worktrees`）へ起点を引き上げたが、**`<ws>/.agents`自体がワークスペース内の
+ * 別ディレクトリへ差し替えられると、`realpath(worktreesRoot)`と`realpath(filePath)`が
+ * どちらも差し替え後の同じ実体を指してしまい、まったく同じ循環が1段上で再現する
+ * （攻撃者は`.agents/worktrees`自体も動かせるため、これはアンカーとして成立しない）。**
+ * 攻撃者が動かせない唯一のアンカーは、呼び出し元から固定値で渡る`workspaceRoot`
+ * 自身であるため、ここまで起点を引き上げる。`workspaceRoot`の`realpath`が`undefined`を
+ * 返すのはここでは正常系ではなく異常（TOCTOU窓の間に削除・差し替えされた）として
+ * フェイルクローズする（`mkdir`が`recursive: true`で必ず`dirPath`を作る以上、
+ * `workspaceRoot`自体は通常存在するはずのため）。
  */
 export async function persistManifest(
   workspaceRoot: string,
@@ -830,10 +835,10 @@ export type CloneWorkspaceResult =
  * 2. 一次防御: 作成先までの経路にシンボリックリンクが無いかを確かめる
  * 3. 複製先が既に存在すればエラーにする（既存の作業を踏まない。gitの「同名ブランチ」と同じ意図）
  * 4. 複製先ディレクトリを作る
- * 5. 二次防御: 実際に作られた場所を実パス解決し、`.agents/worktrees`（`worktreesRoot`）の
- *    実パスを基準に組み立てた「想定した場所」と厳密一致することを確認する。ここで多数の
- *    ファイルをコピーする前に確認することで、境界を外れた場合の書き込みを最小限
- *    （空ディレクトリ1つ）に抑える
+ * 5. 二次防御: 実際に作られた場所を実パス解決し、呼び出し元から固定値で渡る
+ *    `workspaceRoot`（攻撃者が差し替えられない唯一のアンカー）の実パスを基準に組み立てた
+ *    「想定した場所」と厳密一致することを確認する。ここで多数のファイルをコピーする前に
+ *    確認することで、境界を外れた場合の書き込みを最小限（空ディレクトリ1つ）に抑える
  * 6. ワークスペースを複製し、複製先のスナップショットを返す
  *
  * `retry`は`worktree.ts`の`createWorktree`と同じ意味（Issue #396）。再試行のたびに
@@ -853,10 +858,14 @@ export type CloneWorkspaceResult =
  * 基準にしていたが、その親ディレクトリ自体が差し替えられている攻撃では、親の`realpath`も
  * `target`の`realpath`もどちらも差し替え後の実体を指すため必ず一致してしまい、検査が
  * 自己無矛盾になって何も検知できない（実測で確認済み。下の実装コメント参照）。
- * `resolveRealRemovalTarget`（Issue #493）と同じく、攻撃者が動かせない`worktreesRoot`
- * （`.agents/worktrees`。`<runId>`より1段上）を基準にする。`worktreesRoot`の`realpath`が
- * `undefined`を返すのはここでは正常系ではなく異常（TOCTOU窓の間に削除・差し替えされた）
- * としてフェイルクローズする。
+ * 次に`resolveRealRemovalTarget`（Issue #493）の前例に倣い`worktreesRoot`
+ * （`.agents/worktrees`。`<runId>`より1段上）へ起点を引き上げたが、**`<ws>/.agents`自体が
+ * ワークスペース内の別ディレクトリへ差し替えられると、`realpath(worktreesRoot)`と
+ * `realpath(target)`がどちらも差し替え後の同じ実体を指してしまい、まったく同じ循環が
+ * 1段上で再現する（`.agents/worktrees`はアンカーとして成立しない）。** 攻撃者が動かせない
+ * 唯一のアンカーは、呼び出し元から固定値で渡る`workspaceRoot`自身であるため、ここまで
+ * 起点を引き上げる。`workspaceRoot`の`realpath`が`undefined`を返すのはここでは正常系では
+ * なく異常（TOCTOU窓の間に削除・差し替えされた）としてフェイルクローズする。
  */
 export async function cloneWorkspace(
   workspaceRoot: string,
@@ -1007,14 +1016,23 @@ export type RemovePseudoIntegrationResult =
  * 横展開する）。
  *
  * 事後確認を「`.agents/worktrees`の境界内か」（`isPathWithinRoot`）ではなく
- * 「`.agents/worktrees`の実パス確認時点で想定していた場所そのものか」の厳密一致にする。
- * `isPathWithinRoot`だけだと、`target`の途中のディレクトリ（典型的には`<runId>`）が
- * `.agents/worktrees`配下の別ディレクトリ（他runの複製や統合先）を指すシンボリックリンクへ
- * 差し替えられていた場合に「境界内」として素通りしてしまい、撤去対象を取り違えたまま
- * 削除してしまう。`target`は`runId`/`taskId`（`identifierError`/`runIdError`で検証済み）
- * から組み立てる固定構造のパスであり、`.agents/worktrees`から見た相対位置
- * （`path.relative`）は途中のディレクトリが差し替えられても変わらない文字列計算のため、
- * これを実パス解決済みのルートへ再度連結した値を「想定した場所」として比較する。
+ * 「想定していた場所そのものか」の厳密一致にする。`isPathWithinRoot`だけだと、
+ * `target`の途中のディレクトリ（典型的には`<runId>`）が`.agents/worktrees`配下の別
+ * ディレクトリ（他runの複製や統合先）を指すシンボリックリンクへ差し替えられていた場合に
+ * 「境界内」として素通りしてしまい、撤去対象を取り違えたまま削除してしまう。`target`は
+ * `runId`/`taskId`（`identifierError`/`runIdError`で検証済み）から組み立てる固定構造の
+ * パスであり、`path.relative`は途中のディレクトリが差し替えられても変わらない文字列
+ * 計算のため、これを実パス解決済みのルートへ再度連結した値を「想定した場所」として
+ * 比較する。
+ *
+ * **この「実パス解決済みのルート」は`.agents/worktrees`（`worktreesRoot`）ではなく
+ * `workspaceRoot`にする（Issue #505、再々監査で発覚）。** この関数自身もかつては
+ * `worktreesRoot`を起点にしており「攻撃者が動かせないルート」の前例として他の3箇所へ
+ * 横展開されていたが、`<ws>/.agents`自体がワークスペース内の別ディレクトリへ差し替え
+ * られると、`realpath(worktreesRoot)`と`realpath(target)`がどちらも差し替え後の同じ実体を
+ * 指してしまい、`.agents/worktrees`を起点にする限り必ず一致してしまう（`<runId>`を差し
+ * 替える攻撃とまったく同じ循環構造）。攻撃者が動かせない唯一のアンカーは、呼び出し元
+ * から固定値で渡る`workspaceRoot`自身であるため、ここへ起点を引き上げる。
  *
  * 呼び出し側との役割分担: ここでは「何を削除してよいか」の確認だけを行い、実際の削除
  * （`removeDirRecursive`/`removeFile`/`removeEmptyDir`）とその失敗の扱いは呼び出し側に残す
@@ -1378,9 +1396,10 @@ export type EnsureIntegrationDirResult =
  * だけが取り残されていた。
  *
  * 他の3+1箇所（`persistManifest` / `cloneWorkspace` / `reflectIntegrationToWorkspace`の
- * 書き込み・削除経路）と同じ「攻撃者が動かせないルート（`.agents/worktrees`）＋
- * `path.relative`」の厳密一致へ揃え、不一致・境界外と判明した場合は撤去せず作成の
- * 中止のみに留める。
+ * 書き込み・削除経路）と同じ「攻撃者が動かせないルート（呼び出し元から固定値で渡る
+ * `workspaceRoot`自身。`.agents/worktrees`のような中間ディレクトリは、その中間ディレク
+ * トリ自体の差し替えで同じ循環が再現するため起点にならない）＋`path.relative`」の
+ * 厳密一致へ揃え、不一致・境界外と判明した場合は撤去せず作成の中止のみに留める。
  */
 export async function ensureIntegrationDir(
   workspaceRoot: string,
