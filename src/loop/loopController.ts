@@ -195,15 +195,28 @@ export class LoopController {
     this.dispatch(plan.initialPrompt === '' ? plan.continuePrompt : plan.initialPrompt);
   }
 
-  stop(reason: LoopStopReason): void {
+  /**
+   * ループを止める。**実際に走っていたループを止められたかを`boolean`で返す**（issue #514）。
+   *
+   * 既に止まっている（`!this.status.running`）ループへの呼び出しはno-opで、これまでどおり
+   * `false`を返す。呼び出し側（`TaskSession.stopLoop`経由で`WorkflowRunner.stopTask`）は、
+   * この戻り値だけを「止める先が実際にあったか」の根拠にする。**セッションや管理用のMapに
+   * エントリが残っているかどうか（存在チェック）では判定しない。** 完了済みタスクの
+   * エントリは`onTaskFinished`後も`live.tasks`から消えない（design.md参照）ため、存在チェック
+   * だけでは「past形として残っているだけの、実際には何も起きなかった呼び出し」を「成功」と
+   * 誤判定してしまう。人はViewを見て「止まっていない」に気づけるが、オーケストレーターは
+   * 戻り値の`accepted`しか見ないため、一度でも嘘の成功を返すとその経路を二度と再試行しない。
+   */
+  stop(reason: LoopStopReason): boolean {
     if (!this.status.running) {
-      return;
+      return false;
     }
     this.plan = undefined;
     this.sawBusy = false;
     this.paused = false;
     this.status = { ...this.status, running: false, stopReason: reason };
     this.onStatus(this.status);
+    return true;
   }
 
   /**

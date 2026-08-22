@@ -605,7 +605,9 @@ export const GET_RUN_STATUS_TOOL: McpToolDefinition = {
 
 export const STOP_TASK_TOOL: McpToolDefinition = {
   name: 'stop_task',
-  description: '走行中のタスクのループを止める（ワークフローViewの「タスク停止」と同じ）。',
+  description:
+    '走行中のタスクのループを止める（ワークフローViewの「タスク停止」と同じ）。' +
+    '衝突解決セッション（マージ中のタスク）も対象。届けられなかった場合は成功を返さない。',
   inputSchema: {
     type: 'object',
     properties: { taskId: TASK_ID_ARG },

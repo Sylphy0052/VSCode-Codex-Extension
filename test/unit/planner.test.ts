@@ -132,7 +132,9 @@ class FakePlannerSession implements TaskSession {
   async checkMessagingToolVisible(): Promise<boolean> {
     return true;
   }
-  stopLoop(): void {}
+  stopLoop(): boolean {
+    return true;
+  }
   decideApproval(): void {}
   reveal(): void {}
   open(options: { preserveFocus: boolean }): void {
@@ -175,7 +177,9 @@ class FakeHangingSession implements TaskSession {
   async checkMessagingToolVisible(): Promise<boolean> {
     return true;
   }
-  stopLoop(): void {}
+  stopLoop(): boolean {
+    return true;
+  }
   decideApproval(): void {}
   reveal(): void {}
   open(): void {}

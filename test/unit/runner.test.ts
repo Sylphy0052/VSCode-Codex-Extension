@@ -139,8 +139,9 @@ class FakeTaskSession implements TaskSession {
     return Promise.resolve(this.messagingToolVisible);
   }
   stopLoopCount = 0;
-  stopLoop(): void {
+  stopLoop(): boolean {
     this.stopLoopCount += 1;
+    return true;
   }
   decideApprovalCalls: Array<{ requestId: number | string; decision: ApprovalDecision }> = [];
   decideApproval(requestId: number | string, decision: ApprovalDecision): void {
@@ -3000,6 +3001,60 @@ tasks:
     expect(store.find(runId)?.tasks['T2']?.failure).toEqual({ kind: 'runHalted' });
     expect(store.find(runId)?.tasks['T3']?.failure).toEqual({ kind: 'runHalted' });
     expect(store.find(runId)?.tasks['T4']?.failure).toEqual({ kind: 'runHalted' });
+  });
+
+  /**
+   * `stopTask`（タスク単位の「タスク停止」。design.md §16.8）が衝突解決セッションへ届かない
+   * 欠陥の回帰テスト（issue #514）。issue #381は`stop()`（全体停止）側だけを直しており、
+   * `stopTask`には同じ手当てが漏れていた。
+   *
+   * 修正前の`stopTask`は`live.tasks`しか見ないため、`live.mergeResolutions`にしか
+   * 無い衝突解決セッションの`stopLoop()`は一度も呼ばれない。かつ戻り値が`void`だった
+   * ため、呼び出し元（`runnerOrchestrator.ts`）は無条件で成功を返していた。
+   */
+  it('stopTaskはmergingタスクの衝突解決セッションへstopLoopを届け、trueを返す（issue #514）', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // T1は衝突したのでまだmergingのまま、衝突解決セッションが開いている
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    const resolutionSession = codexHost.sessions.at(-1);
+    expect(resolutionSession).toBeDefined();
+
+    const stopped = runner.stopTask(runId, 'T1');
+
+    // `live.tasks`側のT1（既に`onTaskFinished`でdispose済み）ではなく、
+    // `live.mergeResolutions`側の解決セッションへ届いたことを確認する
+    expect(resolutionSession?.stopLoopCount).toBe(1);
+    expect(stopped).toBe(true);
+
+    resolutionSession?.finish('taskStopped' as LoopStopReason, { ...initialChatState });
+    await flush();
+
+    // `onMergeResolutionFinished`の`taskStopped`経路（issue #434・#443）へそのまま合流し、
+    // `git merge --abort`を呼ばず`blocked`へ確定する
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+  });
+
+  it('stopTaskは対象のセッションが見つからない場合falseを返す（issue #514）', async () => {
+    const { runner } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // T2はT1に依存しており、まだ`pending`。`live.tasks`にも`live.mergeResolutions`にも
+    // エントリが無いため、送り先が見つからずfalseを返す
+    expect(runner.stopTask(runId, 'T2')).toBe(false);
+    // 存在しないrunId・taskIdも同様にfalse（無条件successへ戻らないことの確認）
+    expect(runner.stopTask('存在しないrun', 'T1')).toBe(false);
+    expect(runner.stopTask(runId, '存在しないtask')).toBe(false);
   });
 
   it(
@@ -7050,6 +7105,45 @@ tasks:
     expect(codexHost.byTaskId('T1').stopLoopCount).toBe(1);
     expect(rejected.accepted).toBe(false);
     expect(rejected.reason).toContain('T9');
+  });
+
+  /**
+   * 対象タスクの状態は分かる（`runState.tasks`には居る）が、止める先のセッションが
+   * `live.tasks`にも`live.mergeResolutions`にも無い場合の回帰テスト（issue #514）。
+   *
+   * 修正前は`WorkflowRunner.stopTask`が`void`を返すため、`runnerOrchestrator.ts`は
+   * 「タスクが見つかりません」（未知のid）以外は無条件で成功（`ok(...)`）を返していた。
+   * 依存未達でまだ`pending`のタスクは、id自体は`runState`にあるためこの早期拒否には
+   * 引っかからず、旧実装なら誤って成功を返してしまうケースだった。
+   */
+  it('stop_taskは送り先のセッションが無いタスクにはno(...)を返す（issue #514）', async () => {
+    const DEPENDENT_YAML = `
+version: 1
+name: control-no-destination-test
+defaults:
+  maxParallel: 1
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    dependsOn: [T1]
+    prompt: p2
+    done: d2
+`;
+    const { deps, state } = fakeMessagingDeps();
+    const { runner } = createHarness(DEPENDENT_YAML, {
+      messaging: deps,
+    });
+    await runner.start('/repo/.agents/workflows/control-no-destination.yaml', '/repo');
+    await flush();
+
+    // T2はT1に依存しているためまだpending。runStateには居るが、live.tasks /
+    // live.mergeResolutionsのどちらにもセッションが無い
+    const rejected = control(state).stopTask('T2');
+
+    expect(rejected.accepted).toBe(false);
+    expect(rejected.reason).toContain('T2');
   });
 
   it('continue_taskは止まっているタスクを続きから走らせる', async () => {

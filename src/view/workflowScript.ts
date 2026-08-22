@@ -468,7 +468,15 @@ export function workflowScript(): string {
       });
       cell.appendChild(interruptBtn);
     }
-    if (task.state === 'running' || task.state === 'waitingApproval') {
+    // mergingは、衝突解決セッションが実際に生きている（task.mergeResolutionActive）
+    // ときだけ出す。タスク自身のループは既に終わっているが、統合worktreeで開く解決
+    // セッションはそちらのstopLoop()で止められる（issue #514）。生きていないmerging
+    // （解決セッションが無い状態）にはボタンを出しても届く先が無い
+    if (
+      task.state === 'running'
+      || task.state === 'waitingApproval'
+      || (task.state === 'merging' && task.mergeResolutionActive)
+    ) {
       const stopBtn = text('button', 'danger', 'タスク停止');
       stopBtn.type = 'button';
       stopBtn.addEventListener('click', (e) => {

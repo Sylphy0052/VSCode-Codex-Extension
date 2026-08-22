@@ -66,7 +66,11 @@ function buildIntroBody(live: LiveRun): string {
  */
 export interface OrchestratorControlActions {
   getSnapshot(runId: string): WorkflowRunSnapshot | undefined;
-  stopTask(runId: string, taskId: string): void;
+  /**
+   * `WorkflowRunner.stopTask`のjsdoc（issue #514）参照。戻り値は「送り先を見つけて
+   * `stopLoop()`を呼べたか」で、`false`のときは制御ツール側が`no(...)`を返す根拠になる。
+   */
+  stopTask(runId: string, taskId: string): boolean;
   retryTask(runId: string, taskId: string, options?: { allowConfirmed?: boolean }): RetryTaskResult;
   continueTask(runId: string, taskId: string): boolean;
   decideApproval(runId: string, taskId: string, decision: ApprovalDecision): boolean;
@@ -157,7 +161,17 @@ export function buildOrchestratorControlPort(
       if (state === undefined) {
         return no(`タスクが見つかりません: ${taskId}`);
       }
-      actions.stopTask(runId, taskId);
+      // 戻り値（`boolean`）を成功の根拠にする（issue #514）。`live.tasks` /
+      // `live.mergeResolutions` のどちらにも実際に止められるループが見つからなければ
+      // `false` が返るため、ここで無条件に成功を返さない。届いていないのに「止めました」
+      // と答えるとオーケストレーターは以後この経路を再試行しなくなるため、届かなかった
+      // ことをそのまま伝える
+      const stopped = actions.stopTask(runId, taskId);
+      if (!stopped) {
+        return no(
+          `${taskId} を止められませんでした（対象のループが見つかりません。状態: ${state}）。`,
+        );
+      }
       return ok(`${taskId} のループを止めました（状態: ${state}）。`);
     },
     retryTask: (taskId) => {

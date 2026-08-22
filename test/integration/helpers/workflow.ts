@@ -38,7 +38,7 @@ export interface TaskSessionLike {
   pauseLoop(): void;
   resumeLoop(): void;
   checkMessagingToolVisible(): Promise<boolean>;
-  stopLoop(): void;
+  stopLoop(): boolean;
   decideApproval(requestId: number | string, decision: string): void;
   reveal(): void;
   open(options: { preserveFocus: boolean }): void;
@@ -147,8 +147,9 @@ export class FakeTaskSession implements TaskSessionLike {
    * 「タスク停止」操作の実体。実物（`ChatViewManager`）はループを止め、
    * `LoopStopReason: 'taskStopped'` で `onFinished` を呼ぶ。ここでも同じ順序で伝える。
    */
-  stopLoop(): void {
+  stopLoop(): boolean {
     this.emitFinished('taskStopped', doneState(''));
+    return true;
   }
   decideApproval(): void {}
   reveal(): void {

@@ -81,7 +81,9 @@ class FakeRoadmapSession implements TaskSession {
   async checkMessagingToolVisible(): Promise<boolean> {
     return true;
   }
-  stopLoop(): void {}
+  stopLoop(): boolean {
+    return true;
+  }
   decideApproval(): void {}
   reveal(): void {}
   open(): void {}

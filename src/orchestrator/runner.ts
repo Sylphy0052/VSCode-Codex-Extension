@@ -1731,13 +1731,58 @@ export class WorkflowRunner {
    * 通常の完了検知経路（`onFinished` → `onTaskFinished`）へ合流する。そちら側で
    * `applyLoopStopReason` が `manualStop` として確定し、セッションの解放とworktreeの
    * 撤去判定まで一貫して行われるため、ここでは呼び出すだけでよい。
+   *
+   * **戻り値は「送り先を見つけて`stopLoop()`を呼べたか」（issue #514）。**
+   * 見つからなければ`false`を返し、決して成功のふりをしない。理由は次のとおり。
+   *
+   * 以前は `live.tasks` しか見ておらず、衝突解決セッション（`live.mergeResolutions`。
+   * `runnerMerge.ts` の `startMergeResolution`）は対象外だった。しかも戻り値が`void`
+   * だったため、`runnerOrchestrator.ts` は届いたかどうかに関係なく無条件で「止めました」
+   * という成功応答をオーケストレーターへ返していた（issue #381で`stop()`だけが同じ穴を
+   * 塞がれ、`stopTask()`には非対称に手当てが漏れていた）。
+   *
+   * **一般則: 停止要求が実際にどのセッションへも届かなかった場合は必ず失敗を返す。**
+   * `live.mergeResolutions`を1つ足して届くようにするだけでは不十分で、将来また別の
+   * 保管場所へセッションが増えたとき同じ欠陥を再生産する。そのため「対象を保持する
+   * Mapにエントリがあるか」ではなく、**`TaskSession.stopLoop()`
+   * （実体は`LoopController.stop()`）が実際にループを止められたかの`boolean`**を
+   * 戻り値の根拠にする。`live.tasks`のエントリは`onTaskFinished`後も削除されない
+   * ため、存在チェックだけでは「セッションはまだ残っているが、ループは既に終わって
+   * いて何も起きなかった」呼び出しを成功と誤判定してしまう（`merging`のタスクが
+   * まさにこの形）。
+   *
+   * 嘘の成功応答は、人よりAIエージェント（オーケストレーター）に対して有害である。
+   * 人はワークフローViewを見て「止まっていない」に気づけるが、オーケストレーターは
+   * 制御ツールの応答（`accepted`）しか見ないため、一度成功を騙ると以後その経路を
+   * 二度と再試行しない。
+   *
+   * 送り先は`live.mergeResolutions`を先に見る（`revealTask`と同じ順序）。`merging`の
+   * タスクは`live.tasks`のエントリが残ったまま（`onTaskFinished`で`dispose()`済み・
+   * ループも停止済み）なので、`live.tasks`を先に見ると常に「見つかった」ことに
+   * なってしまい、衝突解決セッション側へ本来届けるべき`stopLoop()`が届かなくなる。
+   *
+   * **`merging`のタスク1件だけを狙って止めたはずが、`runnerMerge.ts`の
+   * `finishMergeResolution`側の既存分岐（`reason === 'taskStopped'`）により、
+   * 実行全体が停止（`haltedByUser`）する。** これは`stop()`（全体停止）が衝突解決
+   * セッションへ送る`stopLoop()`と同じ`'taskStopped'`を経由し、その合流点を意図的に
+   * 使い分けていない（issue #381・#434・#443の設計を壊さないための踏襲。issue #514の
+   * 受入基準）ためで、`stopTask`側の欠陥ではない。他のタスクを止めずに衝突解決だけを
+   * 終わらせたい場合の経路は現状無い。
    */
-  stopTask(runId: string, taskId: string): void {
-    const liveTask = this.runs.get(runId)?.tasks.get(taskId);
-    if (liveTask === undefined) {
-      return;
+  stopTask(runId: string, taskId: string): boolean {
+    const live = this.runs.get(runId);
+    if (live === undefined) {
+      return false;
     }
-    liveTask.session.stopLoop();
+    const mergeResolutionEntry = live.mergeResolutions.get(taskId);
+    if (mergeResolutionEntry !== undefined) {
+      return mergeResolutionEntry.session.stopLoop();
+    }
+    const liveTask = live.tasks.get(taskId);
+    if (liveTask === undefined) {
+      return false;
+    }
+    return liveTask.session.stopLoop();
   }
 
   /**
