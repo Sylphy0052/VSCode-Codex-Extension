@@ -993,6 +993,8 @@ export type ReflectToWorkspaceResult =
  * 除外（`isExcludedPath`）と`.git`セグメントの拒否も同じ場所で行う（Issue #406）。
  * ただし**扱いは対称にしない**。`isExcludedPath`はそのエントリだけスキップして先へ進み、
  * `hasGitSegment`は従来どおり反映全体を中断する（理由はループ内のコメントを参照）。
+ * 非対称なので**判定順が意味を持つ**。`hasGitSegment`を先に評価し、`.git`セグメントを
+ * 含むキーは`exclude`との一致有無に関わらず必ず中断させる。
  *
  * 検証に失敗したエントリは、I/Oエラーと同じく`partialApply`（適用済み・失敗した1件・
  * 未着手の残り）として返し、人が状況を追えるようにする。
@@ -1032,24 +1034,6 @@ export async function reflectIntegrationToWorkspace(
     const segments = relPath.split('/');
     const target = path.join(workspaceRoot, ...segments);
     const safeRelPath = sanitizeForLog(relPath);
-    // 除外の判定は、スナップショット（`listFiles`）と同じ`isExcludedPath`をここでも
-    // 通す（Issue #406 / #433）。マニフェストのキーは永続化ファイル由来にもなりうる
-    // （Issue #380）ため、`listFiles`が除外したものと同じ範囲を反映側でも拒否しないと、
-    // 走査では一度も見ないパス（`node_modules`配下等）がワークスペースへ書き戻される。
-    //
-    // **ヒットしてもそのエントリをスキップするだけで、反映全体は中断しない**
-    // （レビュー指摘: medium）。`exclude`は起動時に固定される一方、
-    // `loadPersistedManifest`はディスク上のマニフェストを`exclude`と無関係に復元するため、
-    // 「前回実行時のexclude設定下で正当に作られたキーが、設定変更後の今回のexcludeに
-    // 一致する」設定ドリフトが構造的に起こりうる。中断すると、Mapの反復順で後ろにある
-    // 正当なエントリまで一律で未適用になってしまう。走査側の`listFiles`も同じ判定を
-    // `continue`で流しており、扱いを揃える。
-    //
-    // ただし黙って捨てず`skippedPaths`へ載せ、呼び出し側が警告として人に見せる。
-    if (isExcludedPath(relPath, exclude)) {
-      skippedPaths.push(relPath);
-      continue;
-    }
     try {
       // マニフェストの出どころ（実行時に内部生成されたものか、永続化ファイルから
       // 読み戻されたものか）に関わらず、反映処理自体が境界を守る（レビュー指摘: high、
@@ -1062,8 +1046,36 @@ export async function reflectIntegrationToWorkspace(
       // こちらは`isExcludedPath`（設定ドリフトで正当なキーが一致しうるためスキップ扱い）と
       // 違い、**反映全体を中断する**。攻撃シナリオが明確で、かつ正当なマニフェストに
       // `.git`セグメントが入る筋が無いため、1件でも現れたらマニフェスト全体を疑う。
+      //
+      // そのため`isExcludedPath`のスキップ判定より**前**に置く。順序が逆だと、
+      // `exclude`に一致するセグメントを併せ持つ`.git`キーがスキップへ吸われて無条件拒否が
+      // 効かなくなる（下の`isExcludedPath`のコメントも参照）。
       if (hasGitSegment(relPath)) {
         throw new Error(`反映対象から除外されるパスです（${safeRelPath}）`);
+      }
+      // 除外の判定は、スナップショット（`listFiles`）と同じ`isExcludedPath`をここでも
+      // 通す（Issue #406 / #433）。マニフェストのキーは永続化ファイル由来にもなりうる
+      // （Issue #380）ため、`listFiles`が除外したものと同じ範囲を反映側でも拒否しないと、
+      // 走査では一度も見ないパス（`node_modules`配下等）がワークスペースへ書き戻される。
+      //
+      // **ヒットしてもそのエントリをスキップするだけで、反映全体は中断しない**
+      // （レビュー指摘: medium）。`exclude`は起動時に固定される一方、
+      // `loadPersistedManifest`はディスク上のマニフェストを`exclude`と無関係に復元するため、
+      // 「前回実行時のexclude設定下で正当に作られたキーが、設定変更後の今回のexcludeに
+      // 一致する」設定ドリフトが構造的に起こりうる。中断すると、Mapの反復順で後ろにある
+      // 正当なエントリまで一律で未適用になってしまう。走査側の`listFiles`も同じ判定を
+      // `continue`で流しており、扱いを揃える。
+      //
+      // ただし黙って捨てず`skippedPaths`へ載せ、呼び出し側が警告として人に見せる。
+      //
+      // **この判定は必ず`hasGitSegment`より後に置くこと**（レビュー2巡目の指摘）。
+      // 先に置くと`node_modules/.git/hooks/pre-commit`のように「除外対象のディレクトリ名と
+      // `.git`セグメントを両方含むキー」がスキップへ倒れ、`.git`の無条件拒否へ到達しない。
+      // 既定の`exclude`のままで成立し、細工したマニフェストに除外ヒットするダミーを
+      // 混ぜるだけで`.git`混入の中断（Issue #406）が無効化される。
+      if (isExcludedPath(relPath, exclude)) {
+        skippedPaths.push(relPath);
+        continue;
       }
       if (!isPathWithinRoot(target, workspaceRoot)) {
         throw new Error(`反映先がワークスペースの外を指しています（${safeRelPath}）`);

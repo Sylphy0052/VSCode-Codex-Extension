@@ -1293,6 +1293,118 @@ describe('実ファイルシステムでの統合テスト', () => {
       await expect(readFile(path.join(workspace, 'src', 'after.ts'))).rejects.toThrow();
     });
 
+    /**
+     * `isExcludedPath`（スキップ）と`hasGitSegment`（中断）は扱いが非対称なので、
+     * **判定順が意味を持つ**。`isExcludedPath`を先に評価すると、除外対象のディレクトリ名と
+     * `.git`セグメントを両方含むキー（`node_modules/.git/hooks/pre-commit`等）がスキップへ
+     * 吸われ、`.git`の無条件拒否（Issue #406）へ到達しない。既定の`exclude`のままで成立し、
+     * 細工したマニフェストに除外ヒットするダミーを1件混ぜるだけで防御が無効化される。
+     */
+    describe('除外と.gitの判定順（レビュー2巡目の指摘）', () => {
+      const gitUnderExcludeCases = [
+        ['node_modules', 'node_modules/.git/hooks/pre-commit'],
+        ['dist', 'dist/.git/hooks/x'],
+      ] as const;
+
+      for (const [dirName, relKey] of gitUnderExcludeCases) {
+        it(`既定のexcludeでも${relKey}は中断側に倒れる`, async () => {
+          const integration = await ensureIntegrationDir(
+            workspace,
+            RUN_ID,
+            nodePseudoWorktreeFileSystem,
+          );
+          expect(integration.ok).toBe(true);
+          if (!integration.ok) return;
+          const keySegments = relKey.split('/');
+          await mkdir(path.join(integration.dir, ...keySegments.slice(0, -1)), { recursive: true });
+          await writeFile(path.join(integration.dir, ...keySegments), '#!/bin/sh\n');
+          await mkdir(path.join(integration.dir, 'src'), { recursive: true });
+          await writeFile(
+            path.join(integration.dir, 'src', 'after.ts'),
+            'export const after = 1;\n',
+          );
+
+          const exclude = [...DEFAULT_PSEUDO_WORKTREE_EXCLUDE];
+          expect(exclude).toContain(dirName);
+          const workspaceBaseline = await takeSnapshot(
+            workspace,
+            exclude,
+            nodePseudoWorktreeFileSystem,
+          );
+          const result = await reflectIntegrationToWorkspace(
+            workspace,
+            integration.dir,
+            workspaceBaseline,
+            new Map([
+              [relKey, { taskId: 'T1', kind: 'added' as const }],
+              ['src/after.ts', { taskId: 'T1', kind: 'added' as const }],
+            ]),
+            exclude,
+            nodePseudoWorktreeFileSystem,
+          );
+
+          // スキップ（`ok: true` + `skippedPaths`）ではなく中断であること
+          expect(result).toMatchObject({
+            ok: false,
+            reason: 'partialApply',
+            failedPath: relKey,
+            // 中断なので、後ろのエントリは未適用のまま残る
+            remainingPaths: ['src/after.ts'],
+          });
+          await expect(readFile(path.join(workspace, ...keySegments))).rejects.toThrow();
+          await expect(readFile(path.join(workspace, 'src', 'after.ts'))).rejects.toThrow();
+        });
+      }
+
+      /**
+       * `agent.workflows.pseudoWorktreeExclude`は`scope: machine-overridable`のユーザー設定で、
+       * `normalizePseudoWorktreeExclude`は`.git`を禁止していない。設定側から`.git`を入れても
+       * 無条件拒否が効き続けること。
+       */
+      it('excludeに.gitを明示的に含めた設定でも中断側に倒れる', async () => {
+        const integration = await ensureIntegrationDir(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
+        expect(integration.ok).toBe(true);
+        if (!integration.ok) return;
+        await mkdir(path.join(integration.dir, '.git', 'hooks'), { recursive: true });
+        await writeFile(path.join(integration.dir, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\n');
+        await mkdir(path.join(integration.dir, 'src'), { recursive: true });
+        await writeFile(path.join(integration.dir, 'src', 'after.ts'), 'export const after = 1;\n');
+
+        const exclude = [...DEFAULT_PSEUDO_WORKTREE_EXCLUDE, '.git'];
+        const workspaceBaseline = await takeSnapshot(
+          workspace,
+          exclude,
+          nodePseudoWorktreeFileSystem,
+        );
+        const result = await reflectIntegrationToWorkspace(
+          workspace,
+          integration.dir,
+          workspaceBaseline,
+          new Map([
+            ['.git/hooks/pre-commit', { taskId: 'T1', kind: 'added' as const }],
+            ['src/after.ts', { taskId: 'T1', kind: 'added' as const }],
+          ]),
+          exclude,
+          nodePseudoWorktreeFileSystem,
+        );
+
+        expect(result).toMatchObject({
+          ok: false,
+          reason: 'partialApply',
+          failedPath: '.git/hooks/pre-commit',
+          remainingPaths: ['src/after.ts'],
+        });
+        await expect(
+          readFile(path.join(workspace, '.git', 'hooks', 'pre-commit')),
+        ).rejects.toThrow();
+        await expect(readFile(path.join(workspace, 'src', 'after.ts'))).rejects.toThrow();
+      });
+    });
+
     it('通常のキーは従来どおり反映される（既存の正常系を壊していないことの確認）', async () => {
       const integration = await ensureIntegrationDir(
         workspace,
