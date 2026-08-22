@@ -886,10 +886,15 @@ export class WorkflowRunner {
    * `applyLoopStopReason('manual')`がrun全体を「人が手動停止した」ことにして
    * （未着手の`pending`は全て`skipped`）永続化してしまい、deactivateしただけの実行が
    * 次の起動で続きから進まなくなる。同じ理由で`runnerMerge.ts`の`finishMergeResolution`
-   * （衝突解決セッションの解放が呼び戻す）と`blockMergeAfterLeaseWait`（`releaseAllLeases()`が
-   * 起こす順番待ち）も黙らせる（`WorkflowRunnerInternals.isDisposing`）。**`persist()`の
-   * 入口で止める形は採らない**: キュー待ちのpersistには効かず、破棄直前に確定した値
-   * （PRのURL・マージ成功）まで落とすため（`persist()`のコメント参照）。
+   * （衝突解決セッションの解放が呼び戻す）も黙らせる（`WorkflowRunnerInternals.isDisposing`）。
+   * `blockMergeAfterLeaseWait`（`releaseAllLeases()`が起こす順番待ち）にも同じガードを
+   * 置いてあるが、こちらは実際には効いていない多層防御（レビュー3周目のmedium）:
+   * `dispose()`は`live.finished`を全runぶん立て終えてから`releaseAllLeases()`を1回呼び、
+   * 起こされた側の継続はマイクロタスクなので、破棄由来の待機起こしは`decideAfterLeaseWait`が
+   * `live.finished`を見て必ず`skip`へ倒す（`blockMergeAfterLeaseWait`のコメント参照）。
+   * それでも`blocked`確定が後戻りできない書き換えである以上、判定条件が将来変わったときの
+   * 保険として残してある。**`persist()`の入口で止める形は採らない**: キュー待ちのpersistには
+   * 効かず、破棄直前に確定した値（PRのURL・マージ成功）まで落とすため（`persist()`のコメント参照）。
    *
    * 一度立てたら下ろさない。`dispose()`の後にこのrunnerを使い続ける経路は無い
    * （VSCodeのdeactivate時にだけ呼ばれる）。再入を印で黙らせる形は、衝突解決セッションの
@@ -1552,10 +1557,13 @@ export class WorkflowRunner {
    * **冪等**。解放したものは`undefined`にするかMapから消すので、2度目の呼び出しは
    * 何もしない。
    *
-   * runの状態（`runState`）は書き換えない。解放が呼び戻す経路（`onTaskFinished`と、
-   * `runnerMerge.ts`の`finishMergeResolution`・`blockMergeAfterLeaseWait`）はどれも
-   * `disposing`が黙らせるため、メモリ上の`runState`が破棄中に汚れることが無い
-   * （`live.finished`・`disposing`はどちらもメモリ上の印で、永続化される値ではない）。
+   * runの状態（`runState`）は書き換えない。解放が呼び戻す経路（`onTaskFinished`と
+   * `runnerMerge.ts`の`finishMergeResolution`）は`disposing`が黙らせるため、メモリ上の
+   * `runState`が破棄中に汚れることが無い（`live.finished`・`disposing`はどちらもメモリ上の
+   * 印で、永続化される値ではない）。`blockMergeAfterLeaseWait`にも同じガードがあるが、
+   * 破棄由来の待機起こしは`live.finished`（このループで先に立てる）を見て`skip`へ倒される
+   * ため実際には呼ばれない多層防御（レビュー3周目のmedium、`blockMergeAfterLeaseWait`の
+   * コメント参照）。
    *
    * 一方で`persist()`自体は止めない。破棄より前に積まれたpersistはキュー待ちの間に
    * `disposing`が立っても走り、しかもupdaterは`live.runState`を実行時点で読み直すため、

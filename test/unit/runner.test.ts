@@ -7238,10 +7238,14 @@ tasks:
   });
 
   /**
-   * 占有待ちのマージを抱えたままの破棄（経路2）。`dispose()`末尾の`releaseAllLeases()`が
-   * 待機者を起こすため、`decideAfterLeaseWait`→`blockMergeAfterLeaseWait`が`merging`を
-   * `blocked`へ倒しうる。破棄しただけの実行は次の起動で`merging`から再判定
-   * （`resumeMergeAfterReload`）できなければならない。
+   * 占有待ちのマージを抱えたままの破棄（経路2）。このテストが実際に固定しているのは
+   * 「`dispose()`が`live.finished`を立ててから`releaseAllLeases()`を呼ぶことで、
+   * 起こされた`decideAfterLeaseWait`が`live.finished`を見て`skip`を返す」という性質
+   * （レビュー3周目のmedium）。`blockMergeAfterLeaseWait`冒頭の`isDisposing()`ガードは
+   * 多層防御であり、この経路には現状到達しないため、削除してもこのテストの結果は
+   * 変わらない（`decideAfterLeaseWait`が先に`skip`へ倒すため）。破棄しただけの実行は
+   * 次の起動で`merging`から再判定（`resumeMergeAfterReload`）できなければならない、
+   * という完了条件そのものは変わらない。
    */
   it('占有待ちのマージを抱えたままdispose()しても、mergingがblockedへ倒れない', async () => {
     const git = fakeGit({ conflictOnce: true });
@@ -7324,6 +7328,11 @@ tasks:
   /**
    * `disposing`は破棄経路だけの印であり、人が明示的に止める`stop()`には影響しない
    * （手動停止では従来どおり`haltedByUser`が立ち、未着手の`pending`は`skipped`になる）。
+   *
+   * このテスト自体は今回の修正（`dispose()`の全面片付け化）が触ったコードを経由しない
+   * （レビュー3周目のlow）。`stop()`は`disposing`を参照しないため回帰テストではなく、
+   * 「将来`stop()`が`disposing`を参照するようになったら落ちる」という性質を先んじて
+   * 固定しておくためのテスト
    */
   it('disposingはstop()に影響しない（手動停止は従来どおり確定する）', async () => {
     const { runner, codexHost, store } = createHarness(SERIAL_YAML);

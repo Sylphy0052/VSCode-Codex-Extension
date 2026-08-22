@@ -517,10 +517,18 @@ function blockMergeAfterLeaseWait(
   reason: LeaseWaitBlockReason,
 ): void {
   if (self.isDisposing()) {
-    // 拡張機能の終了時の`releaseAllLeases()`が起こした順番待ち。`decideAfterLeaseWait`が
-    // `live.finished`を見て`skip`へ倒すのが本筋だが、`blocked`確定は「人が再マージで直す」
-    // 前提の後戻りできない書き換えなので、破棄中は入口でも止める。破棄しただけの実行は
-    // `merging`のまま残し、次の起動の`resumeMergeAfterReload`に再判定させる
+    // 破棄経路からは現状ここに到達しない（レビュー3周目のmedium）。`dispose()`は
+    // for文で全runの`live.finished`を立て終えてからループの外で1度だけ
+    // `releaseAllLeases()`を呼ぶ。`releaseAllLeases()`が起こす`acquireLease`の継続
+    // （`decideAfterLeaseWait`の実行）はマイクロタスクなので、`dispose()`の同期フレームが
+    // 終わったあとにしか走らない。つまり破棄由来の待機起こしでは`live.finished`が必ず
+    // 既に真で、`decideAfterLeaseWait`は`skip`しか返さず、`block`を経てここへ来る経路が
+    // 無い（呼び出し元は`decision.kind === 'block'`のときだけ`attemptMerge`から呼ぶ）。
+    //
+    // それでもガードは残す。`blocked`確定は「人が再マージで直す」前提の後戻りできない
+    // 書き換えなので、`decideAfterLeaseWait`の条件が将来変わってここへ来るようになった
+    // ときの多層防御として置いておく。破棄しただけの実行は`merging`のまま残し、
+    // 次の起動の`resumeMergeAfterReload`に再判定させる
     return;
   }
   const live = self.runs.get(runId);
