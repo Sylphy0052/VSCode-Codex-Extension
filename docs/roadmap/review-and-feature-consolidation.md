@@ -185,6 +185,13 @@
 - 実VSCodeでしか確かめられない受入基準は [docs/manual-test.md](../manual-test.md) へ追記する
 - 権限や信頼境界に触れる変更は、[design.md](../design.md) §16.16（設定の信頼境界）の方針から
   外れないことを確かめてから入れる
+- **横断レビューの結果は epic Issue と、統合ブランチから main へ出すPRの本文へ残す。docs配下に
+  別の文書は作らない。** WF-A（epic #352 / PR #447）・WF-B（PR #429）・WF-C（PR #431）はいずれも
+  この形で残しており、docs配下にレビュー記録の文書は存在しない。
+  [.agents/workflows/](../../.agents/workflows/)（`review-fixes-core.yaml` の `Z01_core_review`、
+  `review-fixes-ui.yaml` の `Z02_ui_review`）の `done` にある「docs配下の文書に残る」という記述は、
+  この運用に置き換わっている。YAML自体は第1波の全タスクが終わった時点で歴史的な資料であり、
+  文言は直さない
 
 ### 担当セッションの動き方
 
@@ -209,7 +216,8 @@ epic Issueは各ワークフローの開始時に起票し、採番できた時�
 
 | ワークフロー | 波 | 項目数 | epic Issue | 統合ブランチ | 状態 |
 | --- | --- | --- | --- | --- | --- |
-| WF-A オーケストレーター実行系 | 1 | 11 | [#352](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/352) | `wf/wf-a/integration` | 完了（PR [#447](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/447)、mainへマージ済み。統合ブランチは削除済み）。追いIssue [#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466)（OPEN）が残っている |
+| WF-A オーケストレーター実行系 | 1 | 11 | [#352](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/352) | `wf/wf-a/integration` | 完了（PR [#447](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/447)、mainへマージ済み。統合ブランチは削除済み）。後続は下表のWF-A2行を参照 |
+| WF-A2 オーケストレーター実行系の追いIssue | 1 | 16 | [#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466) | `wf/wf-a2/integration` | 進行中（WF-Aの後続。実装過程とその後の横断レビューで分離した16件） |
 | WF-B 生成・安全系 | 1 | 4 | [#350](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/350) | `wf/wf-b/integration` | 完了（PR [#429](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/429)、mainへマージ済み。統合ブランチは削除済み） |
 | WF-C チャットUIの土台 | 1 | 9 | [#351](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/351) | `wf/wf-c/integration` | 完了（PR [#431](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/431)、mainへマージ済み。統合ブランチは削除済み） |
 | WF-D リポジトリ基盤 | 1 | 2 | [#353](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/353) | `wf/wf-d/integration` | 完了（PR [#394](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/394)、mainへマージ済み。統合ブランチは削除済み） |
@@ -277,8 +285,10 @@ WF-A / WF-B の根拠行はそのまま使える。WF-Cの根拠行を実測し�
 
 - 第1波の4ワークフローは同時に始めてよい。互いにファイルを共有しない
 - 第2波は第1波の全完了を待つ。**第1波は4本とも完了済み**（2026-08-22、WF-A: PR #447 / WF-B: PR #429 /
-  WF-C: PR #431 / WF-D: PR #394、いずれもmainへマージ済み。ただしWF-Aには追いIssue #466が残っている）。
-  第2波（WF-E / WF-F）は着手可。WF-E / WF-Fは互いに交差しないので並列に進める
+  WF-C: PR #431 / WF-D: PR #394、いずれもmainへマージ済み）。WF-Aの後続として、実装過程とその後の
+  横断レビューで分離した追いIssue epic [#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466)
+  （16件、統合ブランチ `wf/wf-a2/integration`）が進行中。第2波（WF-E / WF-F）は着手可。
+  WF-E / WF-Fは互いに交差しないので並列に進める
 - 第3波は第2波の完了後。型情報ルールの導入は全ファイルへ波及するため最後に置く
 - 各ワークフローの完了時に、READMEの該当箇所（機能の節・設定・既知の制約）を同じPRで更新する
 - 全実装の完了後、拡張のワークフロー機能そのものでこの運用を回せるか（ドッグフーディング）を
