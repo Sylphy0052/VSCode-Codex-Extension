@@ -37,6 +37,12 @@ export function chatScript(
   approvalLevelMetaJson = '{}',
   /** この画面のプロバイダ。レベルの実効値（Codexは2軸、Claudeは1軸）の出し分けに使う。 */
   approvalProvider: ProviderId = 'codex',
+  /**
+   * 「ここから分岐」ボタンの対象を、発言自身のid（Claude Code画面）にするか
+   * （issue #333、design.md §14.61）。falseの既定はCodex画面の従来どおり
+   * （対象は直前の発言のturnId）。`chatShared.ts` の `ChatShellOptions.showTurnFork` 参照。
+   */
+  showTurnFork = false,
 ): string {
   return `
   const vscode = acquireVsCodeApi();
@@ -112,6 +118,12 @@ export function chatScript(
    * （design.md「Claude Codeの巻き戻し」参照）。
    */
   const SHOW_REWIND = ${JSON.stringify(showRewind)};
+
+  /**
+   * 「ここから分岐」ボタンの対象を、発言自身のid（Claude Code画面）にするか
+   * （issue #333、design.md §14.61）。turnForkTarget 関数を参照。
+   */
+  const SHOW_TURN_FORK = ${JSON.stringify(showTurnFork)};
 
   /**
    * 入力欄の下に !/# 始まりの案内を出すか（Claude Code画面のみ、issue #5/#6、
@@ -829,6 +841,21 @@ export function chatScript(
     container.hidden = diffs.length === 0;
   }
 
+  // 「ここから分岐」ボタンの対象を決める（issue #333、design.md §14.61）。
+  //
+  // Codex画面（既定）: 対象は直前の発言のturnId（thread/forkのlastTurnIdは
+  // 「引き継ぐ最後のターン」を指すため）。最初の発言には手前が無いのでボタンを出さない。
+  //
+  // Claude Code画面（SHOW_TURN_FORK）: 対象は押した発言自身のid（rewind_conversationの
+  // target_message_uuidは「戻す対象＝分岐したい発言そのもの」を指すため、Codexとは
+  // 向きが違う）。Claude Codeの発言idは常に持っているため、最初の発言でもボタンを出す
+  // （CLIが対象にできない場合はエラー応答として画面に返る。design.md §14.61の
+  // 「未確認のリスク」参照）。
+  function turnForkTarget(item, previousTurnId) {
+    if (item.kind !== 'userMessage') return undefined;
+    return SHOW_TURN_FORK ? item.id : previousTurnId;
+  }
+
   function updateNode(node, item, forkTarget) {
     const bits = [KIND_LABEL[item.kind] || item.kind];
     if (item.detail) bits.push(item.detail);
@@ -896,7 +923,7 @@ export function chatScript(
         nodes.set(item.id, node);
         log.appendChild(node.wrap);
       }
-      updateNode(node, item, item.kind === 'userMessage' ? previousTurnId : undefined);
+      updateNode(node, item, turnForkTarget(item, previousTurnId));
       if (item.kind === 'userMessage' && item.turnId) previousTurnId = item.turnId;
     }
 

@@ -427,6 +427,80 @@ export function readRewindFilesResult(response: ControlResponse): RewindFilesRes
 }
 
 /**
+ * 会話を指定した発言の手前まで戻す要求（issue #333、design.md §14.61）。
+ *
+ * `rewind_files`（ファイルだけを戻す）とは別物で、会話（transcript上のやり取り）だけを
+ * 戻す。ファイルには一切触れない（実測、CLI 2.1.235。design.md §14.61参照）。
+ *
+ * パラメータはスネークケースの `target_message_uuid`（戻す対象の発言。transcript jsonlの
+ * `"type":"user"` 行のトップレベル `uuid`。`message.id` ではない）と
+ * `interrupt_if_running`（ターン走行中なら中断してから戻す。省略/falseで走行中だと
+ * `turn running` エラーになる）。
+ *
+ * **対象は実質「現在の最後のユーザー発言」しか指定できない**（対象より後ろに人間由来の
+ * ユーザー発言が残っていると `stale target` で拒否される）。途中のターンまで戻すには、
+ * 対象以降の発言を新しい順に1件ずつ逐次送る必要がある
+ * （`streamSession.ts` の `rewindConversationToTurn` 参照）。
+ *
+ * **`--fork-session` していないセッション（`-r` のみのresume）へ送ると、元セッションの
+ * transcriptが壊れる**（実測: `{"type":"last-prompt","rewound":true,...}` が追記され、
+ * 次回resume時に会話が切り捨てられる）。呼び出し側でforkしたセッションにだけ限ること。
+ */
+export function buildRewindConversationRequest(
+  requestId: string,
+  targetMessageUuid: string,
+  interruptIfRunning: boolean,
+): string {
+  return buildControlRequest(requestId, {
+    subtype: 'rewind_conversation',
+    target_message_uuid: targetMessageUuid,
+    interrupt_if_running: interruptIfRunning,
+  });
+}
+
+/** `rewind_conversation` の応答を読んだ結果。 */
+export interface RewindConversationResult {
+  rewound: boolean;
+  targetMessageUuid: string | undefined;
+  /** 戻した対象の発言本文。成功時のみ入る。入力欄への差し戻しに使う。 */
+  prefillText: string | undefined;
+  precedingAssistantUuid: string | undefined;
+  /** 戻せない理由。`turn running` / `stale target` / `target not found` など。 */
+  error: string | undefined;
+}
+
+/**
+ * `rewind_conversation` の応答を読む。
+ *
+ * **応答は失敗時も `subtype:"success"` の封筒で返る**（実測、CLI 2.1.235）。
+ * `readRewindFilesResult` のように `response.ok` で早期に成否を決めてはいけない
+ * （`ok` は封筒レベルの成否でしかなく、rewind自体が成功したかは別）。判定は必ず
+ * `payload.rewound` で行う。
+ *
+ * control protocol自体が失敗した場合（`response.ok` が false。応答が壊れている等）だけは
+ * rewind要求そのものが届いていないとみなし、`rewound:false` として扱う。
+ */
+export function readRewindConversationResult(response: ControlResponse): RewindConversationResult {
+  if (!response.ok) {
+    return {
+      rewound: false,
+      targetMessageUuid: undefined,
+      prefillText: undefined,
+      precedingAssistantUuid: undefined,
+      error: response.error ?? '不明なエラー',
+    };
+  }
+  const payload = response.payload;
+  return {
+    rewound: payload?.['rewound'] === true,
+    targetMessageUuid: strOrUndefined(payload?.['targetMessageUuid']),
+    prefillText: strOrUndefined(payload?.['prefillText']),
+    precedingAssistantUuid: strOrUndefined(payload?.['precedingAssistantUuid']),
+    error: strOrUndefined(payload?.['error']),
+  };
+}
+
+/**
  * セッションのコストを問い合わせる要求（issue #37、design.md TP-60）。
  *
  * `get_session_cost`（整形済みの英文テキストのみ）より `get_usage` のほうが情報量が多く

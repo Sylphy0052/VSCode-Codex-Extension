@@ -26,6 +26,7 @@ import {
   buildMcpStatusRequest,
   buildReloadSkillsRequest,
   buildRenameSessionRequest,
+  buildRewindConversationRequest,
   buildRewindFilesRequest,
   buildSessionCostRequest,
   buildSetEffortRequest,
@@ -43,12 +44,15 @@ import {
   readControlResponse,
   readExtraUsage,
   readMcpServersList,
+  readRewindConversationResult,
   readRewindFilesResult,
   readSessionCost,
   type ControlResponse,
   type IncomingControlRequest,
+  type RewindConversationResult,
   type RewindFilesResult,
 } from './control';
+import { forkFromTurn, type ForkFromTurnResult } from './forkFromTurn';
 import type { Attachment } from '../provider/attachments';
 import type { McpServerView } from '../provider/mcpServers';
 import type { SkillsSnapshot } from '../provider/skills';
@@ -113,6 +117,23 @@ export class ClaudeStreamSession {
   private commandList: SlashCommand[] = [];
   /** `rewind_files` の応答待ち。requestIdごとに解決関数を覚える（design.md「Claude Codeの巻き戻し」）。 */
   private readonly rewindWaiting = new Map<string, (result: RewindFilesResult) => void>();
+  /**
+   * `rewind_conversation` の応答待ち（issue #333、design.md §14.61）。
+   * `rewindWaiting` と同じ形（requestIdごとに解決関数を覚える）。
+   */
+  private readonly rewindConversationWaiting = new Map<
+    string,
+    (result: RewindConversationResult) => void
+  >();
+  /**
+   * このセッションが `--fork-session` で開いたものか（issue #333、design.md §14.61）。
+   *
+   * `rewind_conversation` はforkしていないセッション（`-r` のみのresume）へ送ると
+   * 元セッションのtranscriptを壊す（`control.ts` の `buildRewindConversationRequest`
+   * 参照）。`start()` の `target.kind` で確定し、以後このプロセスが生きている間ずっと
+   * 変わらない。
+   */
+  private isForkSession = false;
   /**
    * `mcp_status` の応答待ち（design.md §16.21「ツールの可視性の確認」）。
    * `rewindWaiting` と同じ形（requestIdごとに解決関数を覚える）。
@@ -199,6 +220,7 @@ export class ClaudeStreamSession {
     // （issue #355のレビュー指摘: 断定していた「複数回呼ばれる」根拠が誤りだったため
     // 訂正）。
     this.releasePendingWaiters();
+    this.isForkSession = options.target.kind === 'fork';
 
     const { args, warnings } = buildClaudeStreamArgs({
       target: options.target,
@@ -734,6 +756,53 @@ export class ClaudeStreamSession {
     });
   }
 
+  /**
+   * 会話の途中のターンから分岐する（issue #333、design.md §14.61）。
+   *
+   * `--fork-session` で開いたセッションだけに限る。forkしていないセッションへ送ると
+   * 元セッションのtranscriptを壊す（`control.ts` の `buildRewindConversationRequest`
+   * 参照）ため、呼び出し側の確認を待たずここでガードする。
+   *
+   * @param userMessageUuids 会話中の全ユーザー発言uuid（古い順）
+   * @param targetUuid 分岐したい発言（この発言の手前まで戻す）
+   */
+  rewindConversationToTurn(
+    userMessageUuids: readonly string[],
+    targetUuid: string,
+  ): Promise<ForkFromTurnResult> {
+    if (!this.isForkSession) {
+      return Promise.resolve({
+        ok: false,
+        prefillText: undefined,
+        error: 'forkしていないセッションへは送れません（元セッションのtranscriptが壊れるため）',
+        succeededCount: 0,
+      });
+    }
+    if (this.proc === undefined) {
+      return Promise.resolve({
+        ok: false,
+        prefillText: undefined,
+        error: 'セッションが起動していません',
+        succeededCount: 0,
+      });
+    }
+    return forkFromTurn(userMessageUuids, targetUuid, (uuid) =>
+      this.requestRewindConversation(uuid),
+    );
+  }
+
+  /**
+   * `rewind_conversation` を1件送る。`interrupt_if_running` は常にtrueで送る
+   * （issue #333の実装指示。走行中のターンがあれば中断してから戻す）。
+   */
+  private requestRewindConversation(targetUuid: string): Promise<RewindConversationResult> {
+    const requestId = this.claim('rewindConversation');
+    return new Promise((resolve) => {
+      this.rewindConversationWaiting.set(requestId, resolve);
+      this.write(buildRewindConversationRequest(requestId, targetUuid, true));
+    });
+  }
+
   private requestRewindFiles(userMessageId: string, dryRun: boolean): Promise<RewindFilesResult> {
     if (this.proc === undefined) {
       return Promise.resolve({
@@ -979,6 +1048,12 @@ export class ClaudeStreamSession {
       return;
     }
 
+    if (outgoing?.kind === 'rewindConversation') {
+      this.rewindConversationWaiting.get(response.requestId)?.(readRewindConversationResult(response));
+      this.rewindConversationWaiting.delete(response.requestId);
+      return;
+    }
+
     if (outgoing?.kind === 'mcpStatus') {
       this.mcpStatusWaiting
         .get(response.requestId)
@@ -1112,6 +1187,17 @@ export class ClaudeStreamSession {
       });
     }
     this.rewindWaiting.clear();
+    // rewind_conversationの応答待ちも解放する。放置するとawaitしている側が永遠に待つ
+    for (const resolve of this.rewindConversationWaiting.values()) {
+      resolve({
+        rewound: false,
+        targetMessageUuid: undefined,
+        prefillText: undefined,
+        precedingAssistantUuid: undefined,
+        error: 'セッションが終了しました',
+      });
+    }
+    this.rewindConversationWaiting.clear();
     // mcp_statusの応答待ちも解放する。放置するとawaitしている側が永遠に待つ
     for (const resolve of this.mcpStatusWaiting.values()) {
       resolve(undefined);
@@ -1143,6 +1229,7 @@ type OutgoingKind =
   | 'sessionCost'
   | 'settings'
   | 'rewindFiles'
+  | 'rewindConversation'
   | 'mcpStatus'
   | 'reloadSkills';
 
