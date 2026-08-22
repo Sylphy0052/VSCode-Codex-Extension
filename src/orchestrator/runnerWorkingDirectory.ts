@@ -425,7 +425,10 @@ export async function reflectPseudoWorktree(
       const unresolvedPaths = [result.failedPath, ...result.remainingPaths];
       const detail =
         `（適用済み: ${formatPathList(result.appliedPaths.map(describe))}` +
-        ` / 未適用: ${formatPathList(unresolvedPaths.map(describe))}）`;
+        ` / 未適用: ${formatPathList(unresolvedPaths.map(describe))}` +
+        // 除外設定に一致してスキップした分も併記する。書かないと
+        // 「適用済み + 未適用 = 全エントリ」にならず、勘定の合わない差が黙って生まれる
+        ` / 除外によりスキップ: ${formatPathList(result.skippedPaths.map(describe))}）`;
       const partial = `${sanitizeForLog(result.message)}${detail}`;
       self.deps.log.warn(`[workflow ${runId}] ${partial}`);
       live.warnings.push({
@@ -437,6 +440,26 @@ export async function reflectPseudoWorktree(
       self.deps.log.info(
         `[workflow ${runId}] 疑似worktreeの統合結果をワークスペースへ反映しました（${result.appliedPaths.length}件）`,
       );
+      if (result.skippedPaths.length > 0) {
+        // 除外設定に一致したエントリは反映を中断せずスキップするが、**黙って捨てない**
+        // （Issue #380が「黙って0件成功として扱うと、統合済みだった成果が失われたことに
+        // 気づけない」と断じたのと同じ穴になるため）。反映そのものは成功しているので
+        // ログの`info`ではなく、他の反映まわりの事象と同じ`live.warnings`へ積んで
+        // ワークフローViewに出す。kindも`pseudoWorktreeReflectBlocked`を使い回す
+        // （反映まわりで人が見るべき事象はこのkindへ集約されており、
+        // 「一部が反映されなかった」という人の受け取り方はpartialApplyと同じため）。
+        const message =
+          `疑似worktreeの統合結果のうち、除外設定（exclude）に一致した${result.skippedPaths.length}件を` +
+          `ワークスペースへ反映しませんでした。統合済みだった変更がワークスペースへ届いていないため、` +
+          `必要なら除外設定を見直すか手で取り込んでください` +
+          `（スキップしたパス: ${formatPathList(result.skippedPaths)}）`;
+        self.deps.log.warn(`[workflow ${runId}] ${message}`);
+        live.warnings.push({
+          kind: 'pseudoWorktreeReflectBlocked',
+          taskId: undefined,
+          message,
+        });
+      }
     }
   } catch (e) {
     // `reflectIntegrationToWorkspace`が呼ぶ`fs.copyFile`/`fs.removeFile`もEACCES/ENOSPC等を

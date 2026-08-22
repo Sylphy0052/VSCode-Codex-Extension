@@ -4380,6 +4380,53 @@ tasks:
     },
   );
 
+  it(
+    '除外設定に一致して反映をスキップしたパスは、成功時でも警告として人に見せる' +
+      '（黙って捨てない、Issue #433）',
+    async () => {
+      const git = fakeGit({ notGitRepo: true });
+      const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+      // `exclude`は起動時に固定される一方、マニフェストは`exclude`と無関係に復元されうる
+      // （`loadPersistedManifest`。Issue #380）。その設定ドリフトを、同じ配列を実行中に
+      // 変えることで再現する（`live.pseudo.exclude`はこの配列と同一参照）
+      const exclude: string[] = [];
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        pseudoWorktree: { fs, exclude },
+      });
+      const result = await runner.start(
+        '/repo/.agents/workflows/pseudo-reflect-skip.yaml',
+        '/repo',
+      );
+      const runId = result.runId as string;
+      await flush();
+
+      // タスクがワークスペースに無いファイルを追加する（反映時に`added`として扱われる）
+      const cloneDir = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+      fs.setFile(path.join(cloneDir, 'node_modules', 'x.js'), { size: 5, mtimeMs: 200 });
+
+      // 統合先へのコピー（＝統合の完了）の直後、反映が始まる前に除外設定を変える
+      const originalCopyFile = fs.copyFile.bind(fs);
+      fs.copyFile = async (from: string, to: string): Promise<void> => {
+        await originalCopyFile(from, to);
+        if (to.includes('_integration') && !exclude.includes('node_modules')) {
+          exclude.push('node_modules');
+        }
+      };
+
+      codexHost.byTaskId('T1').finish('done', doneState('ok'));
+      await flush();
+
+      // 反映そのものは成功扱い（中断していない）
+      expect(fs.files.has(path.join('/repo', 'node_modules', 'x.js'))).toBe(false);
+      const snapshot = runner.getSnapshot(runId);
+      const warning = snapshot?.warnings.find((w) => w.kind === 'pseudoWorktreeReflectBlocked');
+      expect(warning).toBeDefined();
+      expect(warning?.message).toContain('node_modules/x.js');
+      expect(warning?.message).toContain('除外設定');
+    },
+  );
+
   it('persist（実行状態の永続化）がmemento.updateの失敗時に未ハンドルrejectにならず、ログへ記録する（Issue #364）', async () => {
     const rejectionListener = vi.fn();
     process.on('unhandledRejection', rejectionListener);

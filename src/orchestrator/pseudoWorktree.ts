@@ -942,10 +942,22 @@ export class IntegrationQueue {
 // ワークスペースへの反映（run終了時）
 // ---------------------------------------------------------------------------
 
+/**
+ * 除外設定（`exclude`）に一致したためスキップしたパス。反映は中断せず次のエントリへ進むが、
+ * **黙って捨てない**（Issue #380が「黙って0件成功として扱うと、統合済みだった成果が
+ * 失われたことに気づけない」と断じたのと同じ穴になるため）。呼び出し側
+ * （`runnerWorkingDirectory.ts`の`reflectPseudoWorktree`）が警告として人に見せる。
+ *
+ * 成功時（`ok: true`）だけでなく`partialApply`にも持たせる。持たせないと
+ * 「`appliedPaths` + `failedPath` + `remainingPaths` で全エントリを覆う」という
+ * 呼び出し側の適用済み・未適用の勘定が崩れ、スキップされた分がどちらにも現れなくなる。
+ */
+type SkippedPaths = { skippedPaths: string[] };
+
 export type ReflectToWorkspaceResult =
-  | { ok: true; appliedPaths: string[] }
+  | ({ ok: true; appliedPaths: string[] } & SkippedPaths)
   | { ok: false; reason: 'workspaceChanged'; message: string; changedPaths: string[] }
-  | {
+  | ({
       ok: false;
       reason: 'partialApply';
       message: string;
@@ -955,7 +967,7 @@ export type ReflectToWorkspaceResult =
       failedPath: string;
       /** `failedPath`より後ろにあり、まだ試みていないパス。 */
       remainingPaths: string[];
-    };
+    } & SkippedPaths);
 
 /**
  * runの終了時に、統合先の内容をワークスペースへ反映する（design.md §16.20）。
@@ -979,6 +991,8 @@ export type ReflectToWorkspaceResult =
  * キーは`workspaceChanged`の保護（人の編集の検知）にも現れない。
  *
  * 除外（`isExcludedPath`）と`.git`セグメントの拒否も同じ場所で行う（Issue #406）。
+ * ただし**扱いは対称にしない**。`isExcludedPath`はそのエントリだけスキップして先へ進み、
+ * `hasGitSegment`は従来どおり反映全体を中断する（理由はループ内のコメントを参照）。
  *
  * 検証に失敗したエントリは、I/Oエラーと同じく`partialApply`（適用済み・失敗した1件・
  * 未着手の残り）として返し、人が状況を追えるようにする。
@@ -1008,6 +1022,7 @@ export async function reflectIntegrationToWorkspace(
 
   const entries = [...manifest.entries()];
   const appliedPaths: string[] = [];
+  const skippedPaths: string[] = [];
   for (let i = 0; i < entries.length; i += 1) {
     const entry = entries[i];
     if (entry === undefined) {
@@ -1017,20 +1032,37 @@ export async function reflectIntegrationToWorkspace(
     const segments = relPath.split('/');
     const target = path.join(workspaceRoot, ...segments);
     const safeRelPath = sanitizeForLog(relPath);
+    // 除外の判定は、スナップショット（`listFiles`）と同じ`isExcludedPath`をここでも
+    // 通す（Issue #406 / #433）。マニフェストのキーは永続化ファイル由来にもなりうる
+    // （Issue #380）ため、`listFiles`が除外したものと同じ範囲を反映側でも拒否しないと、
+    // 走査では一度も見ないパス（`node_modules`配下等）がワークスペースへ書き戻される。
+    //
+    // **ヒットしてもそのエントリをスキップするだけで、反映全体は中断しない**
+    // （レビュー指摘: medium）。`exclude`は起動時に固定される一方、
+    // `loadPersistedManifest`はディスク上のマニフェストを`exclude`と無関係に復元するため、
+    // 「前回実行時のexclude設定下で正当に作られたキーが、設定変更後の今回のexcludeに
+    // 一致する」設定ドリフトが構造的に起こりうる。中断すると、Mapの反復順で後ろにある
+    // 正当なエントリまで一律で未適用になってしまう。走査側の`listFiles`も同じ判定を
+    // `continue`で流しており、扱いを揃える。
+    //
+    // ただし黙って捨てず`skippedPaths`へ載せ、呼び出し側が警告として人に見せる。
+    if (isExcludedPath(relPath, exclude)) {
+      skippedPaths.push(relPath);
+      continue;
+    }
     try {
       // マニフェストの出どころ（実行時に内部生成されたものか、永続化ファイルから
       // 読み戻されたものか）に関わらず、反映処理自体が境界を守る（レビュー指摘: high、
       // 多層防御の2段目）。`manifestFromParsedJson`のキー検証（1段目）をすり抜けた
       // 場合でも、ここで`workspaceRoot`/`integrationDir`の外を指すエントリを弾く。
       //
-      // 除外の判定は、スナップショット（`listFiles`）と同じ`isExcludedPath`をここでも
-      // 通す（Issue #406 / #433）。マニフェストのキーは永続化ファイル由来にもなりうる
-      // （Issue #380）ため、`listFiles`が除外したものと同じ範囲を反映側でも拒否しないと、
-      // 走査では一度も見ないパス（`node_modules`配下等）がワークスペースへ書き戻される。
       // `.git`セグメントは`exclude`の設定内容に関わらず無条件で拒否する。ワークスペースが
       // 後からgitリポジトリになったとき、仕込まれた`.git/hooks/*`が永続的なコード実行経路に
       // なるため（判定は`escalation.ts`の`hasGitSegment`を共有し、`.GIT`等の亜種も同じ扱い）。
-      if (isExcludedPath(relPath, exclude) || hasGitSegment(relPath)) {
+      // こちらは`isExcludedPath`（設定ドリフトで正当なキーが一致しうるためスキップ扱い）と
+      // 違い、**反映全体を中断する**。攻撃シナリオが明確で、かつ正当なマニフェストに
+      // `.git`セグメントが入る筋が無いため、1件でも現れたらマニフェスト全体を疑う。
+      if (hasGitSegment(relPath)) {
         throw new Error(`反映対象から除外されるパスです（${safeRelPath}）`);
       }
       if (!isPathWithinRoot(target, workspaceRoot)) {
@@ -1122,6 +1154,7 @@ export async function reflectIntegrationToWorkspace(
         reason: 'partialApply',
         message: `統合結果のワークスペースへの反映が${safeRelPath}で失敗し、途中で中断しました: ${message}`,
         appliedPaths: [...appliedPaths].sort((a, b) => a.localeCompare(b)),
+        skippedPaths: [...skippedPaths].sort((a, b) => a.localeCompare(b)),
         failedPath: relPath,
         remainingPaths: entries
           .slice(i + 1)
@@ -1131,5 +1164,9 @@ export async function reflectIntegrationToWorkspace(
     }
     appliedPaths.push(relPath);
   }
-  return { ok: true, appliedPaths: appliedPaths.sort((a, b) => a.localeCompare(b)) };
+  return {
+    ok: true,
+    appliedPaths: appliedPaths.sort((a, b) => a.localeCompare(b)),
+    skippedPaths: skippedPaths.sort((a, b) => a.localeCompare(b)),
+  };
 }

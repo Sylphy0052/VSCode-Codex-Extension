@@ -1190,10 +1190,107 @@ describe('実ファイルシステムでの統合テスト', () => {
         nodePseudoWorktreeFileSystem,
       );
 
-      expect(result).toMatchObject({ ok: false, reason: 'partialApply' });
+      // 中断ではなくスキップ（レビュー指摘: medium、Issue #433）。反映自体は成功として
+      // 返し、スキップしたパスを`skippedPaths`で呼び出し側へ渡す
+      expect(result).toMatchObject({
+        ok: true,
+        appliedPaths: [],
+        skippedPaths: ['node_modules/pkg/index.js'],
+      });
       await expect(
         readFile(path.join(workspace, 'node_modules', 'pkg', 'index.js')),
       ).rejects.toThrow();
+    });
+
+    /**
+     * `exclude`は起動時に固定される一方、`loadPersistedManifest`はディスク上のマニフェストを
+     * `exclude`と無関係に復元する。そのため「前回実行時のexclude設定下で正当に作られたキーが、
+     * 設定変更後の今回のexcludeに一致する」設定ドリフトが構造的に起こりうる。ここで反映全体を
+     * 中断すると、Mapの反復順で後ろにある正当なエントリまで一律で未適用になってしまう。
+     */
+    it('除外に該当するキーがあっても、後続の正当なエントリは反映される（受入基準、Issue #433）', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+      await mkdir(path.join(integration.dir, 'node_modules', 'pkg'), { recursive: true });
+      await writeFile(path.join(integration.dir, 'node_modules', 'pkg', 'index.js'), 'evil\n');
+      await mkdir(path.join(integration.dir, 'src'), { recursive: true });
+      await writeFile(path.join(integration.dir, 'src', 'after.ts'), 'export const after = 1;\n');
+
+      const exclude = [...DEFAULT_PSEUDO_WORKTREE_EXCLUDE];
+      const workspaceBaseline = await takeSnapshot(
+        workspace,
+        exclude,
+        nodePseudoWorktreeFileSystem,
+      );
+      // 除外に該当するキーを**先**に置き、その後ろに正当なキーを置く（Mapは挿入順に反復する）
+      const result = await reflectIntegrationToWorkspace(
+        workspace,
+        integration.dir,
+        workspaceBaseline,
+        new Map([
+          ['node_modules/pkg/index.js', { taskId: 'T1', kind: 'added' as const }],
+          ['src/after.ts', { taskId: 'T1', kind: 'added' as const }],
+        ]),
+        exclude,
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        appliedPaths: ['src/after.ts'],
+        skippedPaths: ['node_modules/pkg/index.js'],
+      });
+      await expect(readFile(path.join(workspace, 'src', 'after.ts'), 'utf8')).resolves.toBe(
+        'export const after = 1;\n',
+      );
+      await expect(
+        readFile(path.join(workspace, 'node_modules', 'pkg', 'index.js')),
+      ).rejects.toThrow();
+    });
+
+    /**
+     * `.git`セグメントは`isExcludedPath`と違い、攻撃シナリオが明確で正当なマニフェストに
+     * 入る筋が無いため、1件でも現れたらマニフェスト全体を疑って**反映を中断する**。
+     * スキップ扱いにしない（`isExcludedPath`との非対称は意図的）。
+     */
+    it('.gitセグメントは中断のまま。後続のエントリも適用しない（Issue #433）', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+      await mkdir(path.join(integration.dir, '.git', 'hooks'), { recursive: true });
+      await writeFile(path.join(integration.dir, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\n');
+      await mkdir(path.join(integration.dir, 'src'), { recursive: true });
+      await writeFile(path.join(integration.dir, 'src', 'after.ts'), 'export const after = 1;\n');
+
+      const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+      const result = await reflectIntegrationToWorkspace(
+        workspace,
+        integration.dir,
+        workspaceBaseline,
+        new Map([
+          ['.git/hooks/pre-commit', { taskId: 'T1', kind: 'added' as const }],
+          ['src/after.ts', { taskId: 'T1', kind: 'added' as const }],
+        ]),
+        [],
+        nodePseudoWorktreeFileSystem,
+      );
+
+      expect(result).toMatchObject({
+        ok: false,
+        reason: 'partialApply',
+        failedPath: '.git/hooks/pre-commit',
+        remainingPaths: ['src/after.ts'],
+      });
+      await expect(readFile(path.join(workspace, 'src', 'after.ts'))).rejects.toThrow();
     });
 
     it('通常のキーは従来どおり反映される（既存の正常系を壊していないことの確認）', async () => {
