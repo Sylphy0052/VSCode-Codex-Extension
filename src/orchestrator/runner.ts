@@ -393,6 +393,11 @@ export interface WorkflowWarning {
      *
      * 暫定対応であり、真の修正（`baseline`を1周目の反映成功後に更新し、2周目以降も
      * 正しく反映できるようにすること）はIssue #511へ切り出し済み。
+     *
+     * **Issue #511が入ったら、この警告の送出箇所（`runner.ts`の`pump()`終了ブロック）と
+     * このkindの定義そのものを削除すること。** 真の修正が入れば2周目以降も正しく反映
+     * されるため、この警告は事実に反するものになる。Issue #511の受入基準にも同じことを
+     * 明記してある。
      */
     | 'pseudoWorktreeReflectSkipped'
     /**
@@ -2254,6 +2259,7 @@ export class WorkflowRunner {
         // （Issue #379）が採った「同一kindの直近1件へ丸める」規律に揃える。
         //
         // 暫定対応。真の修正（`baseline`を1周目の反映成功後に更新する）はIssue #511。
+        // **Issue #511が入ったら、この`else if`の分岐ごと削除すること。**
         live.warnings = live.warnings.filter((w) => w.kind !== 'pseudoWorktreeReflectSkipped');
         live.warnings.push({
           kind: 'pseudoWorktreeReflectSkipped',
