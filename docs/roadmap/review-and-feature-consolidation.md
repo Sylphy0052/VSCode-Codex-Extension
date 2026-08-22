@@ -115,6 +115,8 @@
   - 事実: WF-A2（[#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466)）も
     `runner.ts`（例: #374 `WorkflowRunner.dispose()`）を触るため、WF-Eとファイルの集合が交差する。
     ワークフロー同士がファイルを共有しないという本ロードマップの並列規則に照らして判断すること
+  - **決定: WF-EはWF-A2（#466）の完了を待つ**（2026-08-22）。上の交差があるため、
+    並列規則に照らして順序を付けた。第2波はWF-Fのみ先に着手する
 
 - **WF-F チャット画面の会話操作と表示**（3項目、詳細は [chat-conversation-parity.md](chat-conversation-parity.md)）
   - X1 応答のMarkdown描画へ表・引用・ネストしたリストを足す（[#332](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/332)）
@@ -224,8 +226,8 @@ epic Issueは各ワークフローの開始時に起票し、採番できた時�
 | WF-B 生成・安全系 | 1 | 4 | [#350](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/350) | `wf/wf-b/integration` | 完了（PR [#429](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/429)、mainへマージ済み。統合ブランチは削除済み） |
 | WF-C チャットUIの土台 | 1 | 9 | [#351](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/351) | `wf/wf-c/integration` | 完了（PR [#431](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/431)、mainへマージ済み。統合ブランチは削除済み） |
 | WF-D リポジトリ基盤 | 1 | 2 | [#353](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/353) | `wf/wf-d/integration` | 完了（PR [#394](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/394)、mainへマージ済み。統合ブランチは削除済み） |
-| WF-E ワークフローの自律性 | 2 | 6 | [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341) | `wf/wf-e/integration` | 着手可（第1波が全完了） |
-| WF-F チャットの会話操作と表示 | 2 | 3 | [#340](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/340) | `wf/wf-f/integration` | 着手可（第1波が全完了） |
+| WF-E ワークフローの自律性 | 2 | 6 | [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341) | `wf/wf-e/integration` | WF-A2（#466）の完了待ち（`runner.ts` / `forge.ts` が交差するため） |
+| WF-F チャットの会話操作と表示 | 2 | 3 | [#340](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/340) | `wf/wf-f/integration` | 着手（第1波が全完了。WF-A2とファイルが交差しない） |
 | WF-G 横断の仕上げ | 3 | 2 | 未採番 | `wf/wf-g/integration` | 第2波の完了待ち |
 
 W1〜W5とX1〜X3のIssue番号・ブランチ名・design.mdの節・manual-test.mdの番号は、
@@ -292,6 +294,8 @@ WF-A / WF-B の根拠行はそのまま使える。WF-Cの根拠行を実測し�
   横断レビューで分離した追いIssue epic [#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466)
   （16件、統合ブランチ `wf/wf-a2/integration`）が進行中。第2波（WF-E / WF-F）は着手可。
   WF-E / WF-Fは互いに交差しないので並列に進める
+  ただし**WF-EはWF-A2（#466）の完了を待つ**。`runner.ts` / `forge.ts` を共有するため。
+  **第2波はWF-Fのみ先に着手する**（2026-08-22の決定）
 - 第3波は第2波の完了後。型情報ルールの導入は全ファイルへ波及するため最後に置く
 - 各ワークフローの完了時に、READMEの該当箇所（機能の節・設定・既知の制約）を同じPRで更新する
 - 全実装の完了後、拡張のワークフロー機能そのものでこの運用を回せるか（ドッグフーディング）を
