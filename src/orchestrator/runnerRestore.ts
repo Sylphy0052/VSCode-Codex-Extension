@@ -6,7 +6,8 @@ import {
 import { resolvePseudoState } from './runnerWorkingDirectory';
 import { sanitizeForLog } from './sanitize';
 import { startMerge } from './runnerMerge';
-import { markMergeBlocked, type RunState, type TaskRunState } from './runState';
+import { setupOrchestratorForStart } from './runnerOrchestrator';
+import { applyAutoResume, markMergeBlocked, type RunState, type TaskRunState } from './runState';
 import type { PersistedRun } from './runStore';
 import { getRunOutcome } from './scheduler';
 import { isGitWorkingTree, resolveHeadCommit } from './worktree';
@@ -49,6 +50,18 @@ export async function restoreRunsForView(self: WorkflowRunnerInternals): Promise
       continue;
     }
     self.runs.set(p.runId, rebuilt);
+    // 自動再開（design.md §16.35、roadmap W10、Issue #584）。`reloadInterrupted`で
+    // `failed`になったタスクを`pending`へ戻し、オーケストレーターセッションも立て直す。
+    // マージのやり直し（下の`merging`分岐）とは無関係な経路のため、`await`せず並行に
+    // 走らせる（`restoreRunsForView`の完了をここでも引き延ばさない。上のマージ再開と
+    // 同じ方針）
+    void autoResumeIfEligible(self, p, rebuilt).catch((e: unknown) => {
+      self.deps.log.error(
+        `[workflow ${p.runId}] 自動再開に失敗しました: ${sanitizeForLog(
+          e instanceof Error ? e.message : String(e),
+        )}`,
+      );
+    });
     // `rebuildLiveRun`が統合ブランチの実際の状態から判定し直してもなお`merging`のまま
     // 残ったタスクは、マージが実行途中で切れていたと分かっているもの。ライブなセッションは
     // 無い（リロードで失われた）ため、永続化された`branch`/`cwd`だけを頼りにマージを
@@ -358,4 +371,94 @@ async function rebuildLiveRun(
     // JSDoc参照）
     pendingAskUser: undefined,
   };
+}
+
+/** `agent.workflows.autoResume`の既定値（design.md §16.35、roadmap W10、Issue #584）。 */
+export const DEFAULT_AUTO_RESUME = true;
+/** `agent.workflows.maxAutoResumeAttempts`の既定値。 */
+export const DEFAULT_MAX_AUTO_RESUME_ATTEMPTS = 3;
+export const MIN_MAX_AUTO_RESUME_ATTEMPTS = 1;
+export const MAX_MAX_AUTO_RESUME_ATTEMPTS = 20;
+
+/**
+ * リロード・WSL再起動等からの復元直後、条件を満たせば自動的に再開する
+ * （design.md §16.35、roadmap W10、Issue #584）。`restoreRunsForView`から、`self.runs`へ
+ * 登録した直後に呼ぶ。
+ *
+ * 条件（design.mdの受入基準）:
+ * 1. `agent.workflows.autoResume`が`false`でない
+ * 2. `haltedByUser`（人が「全体停止」で止めた）でない——人が意図して止めたrunを
+ *    黙って再開すると、その場に残っている理由（レビュー中・調査中等）を壊す
+ * 3. 再開できる状態がある（`applyAutoResume`。他の理由の`failed`が混ざっていれば
+ *    見送り、`allow`確認が要るタスクが混ざっていれば見送り——人が居ないその場で
+ *    確認を代行できないため）
+ * 4. `agent.workflows.maxAutoResumeAttempts`（既定3）に達していない——同じrunが
+ *    クラッシュと自動再開を繰り返し続けるのを止める
+ *
+ * 4つとも満たしたときだけ、`applyAutoResume`が戻した`RunState`を適用し、
+ * オーケストレーターセッションを`start()`と同じ手順（`ensureMessaging` →
+ * `setupOrchestratorForStart`）で立て直し、`pump()`でスケジューリングを起こす。
+ *
+ * 条件2・3で見送った場合は何もしない（`live.warnings`へ積まない）。理由は既に
+ * `failed`/`skipped`としてViewに見えており、対応する専用の警告を新たに増やすと
+ * 表示が二重になる（W10の最終報告に明記する判断）。条件4（上限超過）だけは
+ * `autoResumeLimitExceeded`警告を積む——これは既存のどの表示にも現れない
+ * 「自動では二度と再開しない」という新しい事実そのものであり、Viewから見える形に
+ * 残す必要がある（design.md §16.35の受入基準「回数上限を超えたら理由が見える」）。
+ */
+async function autoResumeIfEligible(
+  self: WorkflowRunnerInternals,
+  p: PersistedRun,
+  rebuilt: LiveRun,
+): Promise<void> {
+  const autoResume = self.deps.readAutoResume?.() ?? DEFAULT_AUTO_RESUME;
+  if (!autoResume) {
+    return;
+  }
+  if (rebuilt.runState.haltedByUser) {
+    return;
+  }
+  const outcome = applyAutoResume(rebuilt.runState, rebuilt.def.tasks);
+  if (outcome.kind !== 'resumed') {
+    return;
+  }
+
+  const maxAttempts = self.deps.readMaxAutoResumeAttempts?.() ?? DEFAULT_MAX_AUTO_RESUME_ATTEMPTS;
+  const attemptsSoFar = p.autoResumeAttempts ?? 0;
+  if (attemptsSoFar >= maxAttempts) {
+    rebuilt.warnings = rebuilt.warnings.filter((w) => w.kind !== 'autoResumeLimitExceeded');
+    rebuilt.warnings.push({
+      kind: 'autoResumeLimitExceeded',
+      taskId: undefined,
+      message: `自動再開の上限（${maxAttempts}回）に達したため、これ以上は自動的に再開しません。Viewから手動で再実行してください。`,
+    });
+    self.notify(p.runId);
+    return;
+  }
+
+  rebuilt.runState = outcome.run;
+  rebuilt.finished = getRunOutcome(rebuilt.runState) !== 'running';
+  rebuilt.warnings = rebuilt.warnings.filter((w) => w.kind !== 'autoResume');
+  rebuilt.warnings.push({
+    kind: 'autoResume',
+    taskId: undefined,
+    message: `中断からの自動再開により、次のタスクをpendingへ戻しました: ${outcome.resumedTaskIds.join(', ')}`,
+  });
+  // `current`が無い（このrunがどこかで消えた等）ことは通常起きないが、`update`の
+  // updaterはPersistedRunを必ず返す必要があるため、その場合は`p`（このrunがまだ
+  // 存在した時点の値）へ書き戻すことで型を満たしつつ実害の無い形にする
+  await self.deps.store.update(p.runId, (current) => ({
+    ...(current ?? p),
+    autoResumeAttempts: attemptsSoFar + 1,
+  }));
+
+  await self.ensureMessaging(p.runId, rebuilt);
+  // `exactOptionalPropertyTypes`のため、答え待ちが無ければキー自体を渡さない
+  void setupOrchestratorForStart(
+    self,
+    p.runId,
+    rebuilt,
+    p.pendingAskUser === undefined ? {} : { pendingAskUser: p.pendingAskUser },
+  );
+  self.pump(p.runId);
 }

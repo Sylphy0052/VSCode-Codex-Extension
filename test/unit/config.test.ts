@@ -375,6 +375,41 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
     expect(readWorkflowsConfig().maxAskUserPerRun).toBe(3);
   });
 
+  it('autoResumeの既定はtrue（design.md §16.35、roadmap W10、Issue #584）', () => {
+    expect(readWorkflowsConfig().autoResume).toBe(true);
+  });
+
+  it('autoResumeはfalseを明示指定するとfalseになる', () => {
+    __mock.setConfig('agent', { 'workflows.autoResume': false });
+    expect(readWorkflowsConfig().autoResume).toBe(false);
+  });
+
+  it('maxAutoResumeAttemptsの既定は3回（design.md §16.35、roadmap W10、Issue #584）', () => {
+    expect(readWorkflowsConfig().maxAutoResumeAttempts).toBe(3);
+  });
+
+  it('maxAutoResumeAttemptsは範囲内（1〜20）の指定値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.maxAutoResumeAttempts': 1 });
+    expect(readWorkflowsConfig().maxAutoResumeAttempts).toBe(1);
+
+    __mock.setConfig('agent', { 'workflows.maxAutoResumeAttempts': 20 });
+    expect(readWorkflowsConfig().maxAutoResumeAttempts).toBe(20);
+  });
+
+  it('maxAutoResumeAttemptsが数値でない・1未満・20超過・非整数なら既定値（3）へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.maxAutoResumeAttempts': 'たくさん' });
+    expect(readWorkflowsConfig().maxAutoResumeAttempts).toBe(3);
+
+    __mock.setConfig('agent', { 'workflows.maxAutoResumeAttempts': 0 });
+    expect(readWorkflowsConfig().maxAutoResumeAttempts).toBe(3);
+
+    __mock.setConfig('agent', { 'workflows.maxAutoResumeAttempts': 21 });
+    expect(readWorkflowsConfig().maxAutoResumeAttempts).toBe(3);
+
+    __mock.setConfig('agent', { 'workflows.maxAutoResumeAttempts': 2.5 });
+    expect(readWorkflowsConfig().maxAutoResumeAttempts).toBe(3);
+  });
+
   it('branchNamingの既定はwf（GitLab運用規約形式は明示指定したときだけ有効になる）', () => {
     expect(readWorkflowsConfig().branchNaming).toBe('wf');
   });

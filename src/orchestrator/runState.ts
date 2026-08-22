@@ -824,6 +824,111 @@ export function retryTask(run: RunState, tasks: readonly WorkflowTask[], taskId:
 }
 
 /**
+ * `WorkflowRunner.retryTask`/`WorkflowRunner.continueTask`が「人の明示操作」を起点に
+ * するのと対で、ウィンドウのリロード（design.md §16.11）で`reloadInterrupted`（環境側の理由に
+ * よる中断、`runStore.ts`の`reconcileRunOnReload`が付ける）へ倒れたタスクを、人の操作を
+ * 待たずに`pending`へ戻す（design.md §16.35、roadmap W10、Issue #584）。呼び出し元
+ * （`runnerRestore.ts`）が、run単位の事前条件（`haltedByUser`でない・再開試行回数が
+ * 上限内・定義ファイルが読める）を確認してから呼ぶ。この関数自身は次を判定する。
+ *
+ * **`reloadInterrupted`以外の理由で`failed`が1件でも残っていれば、run全体の自動再開を
+ * あきらめる（`blockedByOtherFailure`）。** `nextTasksToStart`（`scheduler.ts`）は
+ * `isRunHalted`（`haltedByUser || hasFailedTask`）が真の間いっさい新規開始しない。他の
+ * タスクが本物の理由（`loopFailed`等）で`failed`のまま残っていると、ここで`reloadInterrupted`
+ * のタスクだけ`pending`へ戻しても`nextTasksToStart`に一生拾われない「開始されない`pending`」
+ * を作ってしまう（`markMergeSucceeded`のJSDocが書く不変条件と同じ）。誰にも回収できない
+ * 状態を防ぐため、他に本物の`failed`が残っている run はまるごと自動再開の対象から外し、
+ * 人の操作（Viewの「再実行」）に委ねる。
+ *
+ * **`allow`（危険操作の実行前確認、design.md §16.7）を持つタスクが`reloadInterrupted`で
+ * 止まっていれば、run全体の自動再開をあきらめる（`blockedByAllowGate`）。** `start()`/
+ * `retryTask()`はどちらも`allow`が非空のタスクを`allowConfirmed: true`が来るまで開始しない。
+ * 自動再開には人が居らず確認を取れないため、そのタスクだけ`pending`へ戻さず`failed`のまま
+ * 残すことになるが、それでは上と同じ理由（残った`failed`が`isRunHalted`を真に保つ）で
+ * 他の`reloadInterrupted`タスクも道連れで拾われなくなる。したがって`allow`を持つタスクが
+ * 1件でも対象に含まれていれば、run全体をまるごと対象から外す。
+ *
+ * **`reloadInterrupted`のタスクを`pending`へ戻すとき、`retryCount`を1増やす。**
+ * `worktree.ts`の`createWorktree`はブランチ名が既存なら`branchExists`で拒否し、
+ * `git worktree add`自体を試みない（設計上、二重にworktreeを作ることはできない）。
+ * リロード前に中断したタスクは、多くの場合すでに自分のworktree・ブランチを作った後
+ * （`running`まで進んでいた）ため、`retryCount`/`manualRetryCount`を変えずに`pending`へ
+ * 戻すと`retrySuffixOf`が同じ試行番号を返し、`createWorktree`が古いworktreeとの
+ * `branchExists`衝突で失敗する（＝自動再開のたびに必ず失敗する）。`retryCount`を1進めて
+ * 新しい試行番号（新しいworktree・ブランチ名）を割り当てることで、この衝突を避ける
+ * （`applyLoopStopReason`の`'failed'`分岐が自動再試行のたびに`retryCount`を進めるのと
+ * 同じ規約。design.md §16.5「再試行は新しいスレッド・worktreeでやり直す」）。
+ *
+ * **reload起因で`skipped(runHalted)`になっていた後続も`pending`へ戻す。** 上の2つの
+ * ガード（他のfailedが無い・allowを持つ対象が無い）を通過した時点で、このrunに残る
+ * `skipped(runHalted)`は必ずこのリロードによって`pending`から倒された（`reconcileRunOnReload`）
+ * ものだけだと確定できる（`haltedByUser`は呼び出し元が事前に確認済み、他の`failed`も
+ * 無いことをここで確認済みのため、`runHalted`を作りうる経路がこのリロード以外に無い）。
+ * `markMergeSucceeded`が依存先の`skipped(mergeBlocked)`を戻すのと同じ考え方で、これらも
+ * まとめて`pending`へ戻し、スケジューラ（`nextTasksToStart`）の依存充足チェックに委ねる。
+ */
+export type AutoResumeOutcome =
+  | { readonly kind: 'nothingToResume' }
+  | { readonly kind: 'blockedByOtherFailure' }
+  | { readonly kind: 'blockedByAllowGate'; readonly taskIds: readonly string[] }
+  | { readonly kind: 'resumed'; readonly run: RunState; readonly resumedTaskIds: readonly string[] };
+
+export function applyAutoResume(
+  run: RunState,
+  tasks: readonly WorkflowTask[],
+): AutoResumeOutcome {
+  const reloadInterruptedIds: string[] = [];
+  let hasOtherFailure = false;
+  for (const [id, s] of run.tasks) {
+    if (s.state !== 'failed') {
+      continue;
+    }
+    if (s.failure?.kind === 'reloadInterrupted') {
+      reloadInterruptedIds.push(id);
+    } else {
+      hasOtherFailure = true;
+    }
+  }
+  if (hasOtherFailure) {
+    return { kind: 'blockedByOtherFailure' };
+  }
+  if (reloadInterruptedIds.length === 0) {
+    return { kind: 'nothingToResume' };
+  }
+  const allowGatedIds = reloadInterruptedIds.filter((id) => {
+    const task = tasks.find((t) => t.id === id);
+    return task !== undefined && task.allow.length > 0;
+  });
+  if (allowGatedIds.length > 0) {
+    return { kind: 'blockedByAllowGate', taskIds: allowGatedIds };
+  }
+
+  const nextTasks = new Map(run.tasks);
+  const resumedTaskIds: string[] = [];
+  for (const id of reloadInterruptedIds) {
+    const s = nextTasks.get(id);
+    if (s === undefined) {
+      continue;
+    }
+    nextTasks.set(id, {
+      ...s,
+      state: 'pending',
+      retryCount: s.retryCount + 1,
+      submissionCount: 0,
+      failure: undefined,
+    });
+    resumedTaskIds.push(id);
+  }
+  for (const [id, s] of nextTasks) {
+    if (s.state === 'skipped' && s.failure?.kind === 'runHalted') {
+      nextTasks.set(id, { ...s, state: 'pending', failure: undefined });
+      resumedTaskIds.push(id);
+    }
+  }
+  return { kind: 'resumed', run: { ...run, tasks: nextTasks }, resumedTaskIds };
+}
+
+/**
  * 回数切れ（`maxReached`）・停滞（`stalled`、design.md §16.27、Issue #336）で止まった
  * タスクを、同じセッションのまま `running` へ戻す（design.md §16.8「続ける」、issue #284）。
  *

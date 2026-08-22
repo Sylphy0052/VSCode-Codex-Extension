@@ -4262,7 +4262,7 @@ Codexは送信のたびに `readConfig().codex`（VSCodeのグローバル設定
 - キーは `codex.workflow.runs`。値はrunの配列で、各runが `runId`（UUID）・定義ファイルのパス・開始時刻・統合ブランチ名・統合PR/MRの番号・タスクごとの `{ 状態, sessionId, cwd, ブランチ名, 送信回数, 失敗理由, PR/MRの番号 }` を持つ
 - 統合ブランチ名とPR/MRの番号を持たせるのは、リロード後もViewから統合の状況を辿れるようにするため。どちらもホスト側にも残っている情報で、機微は含まない
 - **応答本文は保存しない。** `{{T.result}}` の元になるテキストは機微を含みうるため、暗号化されない `workspaceState` に平文で置かない。必要になったらセッションの `ChatState` から読み直す（リロードで失われた場合は、そのタスクは再実行の対象になる）
-- ウィンドウのリロードで走行中だったタスクは、いったん `failed`（理由: 中断）として扱う。人がViewから再実行できる。`waitingReply`（§16.21）も同じ扱いにする。未配送のメッセージは保存していないため、リロードをまたいで届くことはない
+- ウィンドウのリロードで走行中だったタスクは、いったん `failed`（理由: 中断）として扱う。`waitingReply`（§16.21）も同じ扱いにする。未配送のメッセージは保存していないため、リロードをまたいで届くことはない。この直後、条件を満たせば自動的に再開する（`agent.workflows.autoResume`、既定`true`。§16.35「中断からの自動再開」）。満たさない・`false`にしている場合は、従来どおり人がViewから再実行する
 - `merging` だったタスクは、マージが途中で切れている可能性がある。状態の記録ではなく**統合ブランチの実際の状態から判定し直す**（そのタスクのマージコミットが入っていれば `done`、入っていなければ `merging` からやり直す）。統合worktreeに未解決の衝突が残っていれば `blocked` として扱い、人へ回す
 - **`originCommit`（そのタスクを開始した時点の統合ブランチのHEAD、§16.17「タスクブランチの分岐元」）は永続化していない。** リロード後に `blocked` のタスクを「再マージ」すると、`originCommit` は空文字として扱われる。この値はコンフリクト解決セッション（§16.17）へ渡す「突き合わせる相手（自分の起点から見て、他にどのタスクが先にマージされたか）」の文脈を組み立てるのに使うため、空になった場合はその文脈が空のまま解決セッションが始まる（制約）
 - タスク管理下のセッションは、汎用のパネル復元（§16.10 の7）に任せない
@@ -5466,14 +5466,14 @@ hub.sendMessage({ from: taskId, to: ORCHESTRATOR_CONNECTION_ID, body: question, 
 
 `finalMergeDecision`（§16.26）は判断待ちの状態を**永続化しない**方針である。理由は「対象（統合PR/MR）がホスト側で直接確認できるため、リロード後は再構築ではなく現況確認で足りる」ため。`ask_user`の問いにはそのような外部記録が無い（問い自体がオーケストレーターの発話でしかない）。
 
-roadmap W10（未実装、§16.33のスコープ外）は「`ask_user`待ちで落ちた場合は、再開時に問いを出し直す。人の答えを永続化の対象に含める」ことを求めている。この要求に応えるため、`ask_user`は**`finalMergeDecision`の前例から意図的に外れ**、`PersistedRun.pendingAskUser`（`{question, choices, askedAt}`）として`WorkflowRunner.persist()`で永続化する。
+roadmap W10（design.md §16.35「中断からの自動再開」、Issue #584。この節（W8）の時点では未実装だった）は「`ask_user`待ちで落ちた場合は、再開時に問いを出し直す。人の答えを永続化の対象に含める」ことを求めていた。この要求に応えるため、`ask_user`は**`finalMergeDecision`の前例から意図的に外れ**、`PersistedRun.pendingAskUser`（`{question, choices, askedAt}`）として`WorkflowRunner.persist()`で永続化する。
 
 - `live.pendingAskUser`が設定される（`beginAskUser`）・解除される（`answerAskUser`）たびに`persist()`を呼ぶ
 - `persist()`は`current?.pendingAskUser`へのフォールバックを**行わない**（他のフィールドと異なる）。回答待ちは「いま宙に浮いている問い」であり、`live.pendingAskUser`が`undefined`になった時点で消えるべき値であって、直前の確定値を保持し続ける性質のもの（`finalMergeOutcome`等）ではないため
-- リロード後（`restoreRunsForView`/`rebuildLiveRun`）は`live.pendingAskUser`を**復元しない**（`undefined`のまま）。オーケストレーターセッション自体（答えを送る先）が復元できない以上、`live.pendingAskUser`を復元しても答える経路が無く、`answerAskUser`を呼べば`orchestrator === undefined`で必ず`false`になる
-- `WorkflowRunSnapshot.pendingAskUser`は`live.pendingAskUser`（あれば`hasLiveSession: true`）と、無ければ`persisted.pendingAskUser`（`hasLiveSession: false`）のどちらかを返す（`runnerSnapshot.ts`の`buildPendingAskUserSnapshot`）。ワークフローViewはリロード後も**問いの文言だけは見えるが、答えられない**（選択ボタンを出さず、「このセッションは復元できていないため、いまは回答できません」を表示する）ことで、Viewを見た人が「宙に浮いた問いがあった」ことに気付ける
+- リロード直後（`restoreRunsForView`/`rebuildLiveRun`）は`live.pendingAskUser`を**復元しない**（`undefined`のまま）。この時点ではオーケストレーターセッション自体（答えを送る先）が無いため、`live.pendingAskUser`を復元しても答える経路が無く、`answerAskUser`を呼べば`orchestrator === undefined`で必ず`false`になる
+- `WorkflowRunSnapshot.pendingAskUser`は`live.pendingAskUser`（あれば`hasLiveSession: true`）と、無ければ`persisted.pendingAskUser`（`hasLiveSession: false`）のどちらかを返す（`runnerSnapshot.ts`の`buildPendingAskUserSnapshot`）。自動再開が走らない・見送られた場合、ワークフローViewは**問いの文言だけは見えるが、答えられない**（選択ボタンを出さず、「このセッションは復元できていないため、いまは回答できません」を表示する）ことで、Viewを見た人が「宙に浮いた問いがあった」ことに気付ける
 
-**この節単体ではW10の「再開時に問いを出し直す」自体は実装していない。** `PersistedRun.pendingAskUser`は将来W10がその再質問の起点として使うためのデータで、この節ではリロード後の表示（現況の可視化）にしか使っていない。
+**「再開時に問いを出し直す」自体は§16.35（W10）で実装した。** この節（W8）では`PersistedRun.pendingAskUser`を永続化し、リロード後の表示（現況の可視化）にしか使っていなかった。§16.35の自動再開が走ると、`runnerRestore.ts`の`autoResumeIfEligible`が新しいオーケストレーターセッションを立てる際（`setupOrchestratorForStart`）に永続化された値から`live.pendingAskUser`を作り直し、`hasLiveSession: true`へ戻って人が再び答えられるようになる。詳細は§16.35を参照。
 
 #### `ask_user`は`buildIntroBody`（オーケストレーターへの案内）に1文追記した
 
@@ -5588,6 +5588,67 @@ roadmap W10（未実装、§16.33のスコープ外）は「`ask_user`待ちで�
 - `test/unit/runner.test.ts`（`describe('WorkflowRunner: 直接メッセージングを廃しオーケストレーター中継にする（design.md §16.34、Issue #547）')`）: タスクからタスクid宛の直接送信が拒否されること／タスク→オーケストレーターの`onMessageAccepted`が`notifyOrchestrator`を呼ぶこと・`takeDeliverableMessages`でキューを空にすること（`totalUndeliveredCount()`が0へ戻ることを直接観測）／`expectReply: true`での`waitingReply`遷移が中継後も成立すること（オーケストレーターからの送り返しで実際に`resumeLoop`されるところまで）／オーケストレーターの自己宛拒否・未知宛先拒否が変わらないこと（RED実測は`takeDeliverableMessages`呼び出し1行だけを戻して行う）
 - `test/unit/runner.test.ts`（既存の`describe('メッセージング経由の権限差の警告・実際の送信文面の表示...')`）: 上記の`messagingPermissionEscalation`不発火を明示のテストとして固定・`lastSentPrompt`（実送信文面の表示、Trojan Source対策の制御文字除去）は宛先をオーケストレーターへ差し替えて維持
 - `docs/manual-test.md` W-N: 実VSCode上でタスクからタスクへ直接届かないこと・オーケストレーターの転送が実際のCLIプロセスへ届くことを確認する
+### 16.35 中断からの自動再開（roadmap W10、Issue #584）
+
+#### 背景
+
+§16.11「永続化と復元」は、ウィンドウのリロード（あるいはWSLの停止・再起動でVSCode拡張機能ホストごと落ちる場合も含む）で走行中だったタスクを`failed`（理由: `reloadInterrupted`）へ倒し、runを`workspaceState`から復元してViewへ表示するところまでしか行っていなかった。それ以降は`isRunHalted`（`hasFailedTask`）の門に引っかかり、人がワークフローViewから「再実行」を押すまでrunは進まない。
+
+長時間・無人で走らせる運用（roadmapが目指す自律度）では、VSCodeのリロードやWSLの一時的な停止・再起動のたびに人が張り付いて「再実行」を押す前提は成立しない。そこで、条件を満たす場合は復元直後に自動的に再開する。
+
+#### 設計方針: 純粋な判定層と、副作用を起こす統合層を分ける
+
+`applyAutoResume`（`runState.ts`）に、`RunState`から`RunState`への変換（「再開すべきか」「どのタスクを`pending`へ戻すか」の判定）を全て寄せ、`vscode`にもファイルI/Oにも依存しない純粋関数にした。実際に副作用（オーケストレーターセッションを立てる・`persist()`する・`pump()`でスケジューリングを起こす）を行う`autoResumeIfEligible`（`runnerRestore.ts`）は、この純粋関数が返した判定をただ適用するだけにする。
+
+理由は`retryTask`/`continueTask`（人の手動操作、同じく`runState.ts`）と同じ構図で自動版を作りたかったため。手動の「再実行」がタスク単位の状態遷移として`runState.ts`に閉じているのに対し、自動再開はrun単位でまとめて判定する必要がある（後述「`allow`ゲート」参照）が、判定そのものを純粋関数に閉じ込める設計は変えない。テスト（`test/unit/runState.test.ts`）もVSCodeのモックなしに全パターンを踏める。
+
+#### 再開の条件（4つ）
+
+`autoResumeIfEligible`は`restoreRunsForView`が`rebuildLiveRun`の直後（`self.runs.set(p.runId, rebuilt)`の直後）に呼ぶ。以下の4つを順に満たさなければ、その場で何もしない（次のリロードまで`failed(reloadInterrupted)`のまま残る）。
+
+1. **`agent.workflows.autoResume`が`false`でない**（既定`true`、`machine-overridable`）。`false`にすれば§16.11単体の時代と同じ完全手動の挙動に戻る。
+2. **`haltedByUser`でない**。人が「全体停止」ボタンで明示的に止めたrunを、リロードのたびに黙って再開すると、その場に残していた理由（レビュー中・調査中等）を壊す。人の意図的な停止は、リロードを挟んでも人の意図的な再開（「再実行」）を待つ。
+3. **`applyAutoResume`が`resumed`を返す。** 内部で2つのゲートを持つ:
+   - **他の理由による`failed`が1件でも混ざっていれば、run全体の自動再開を見送る（`blockedByOtherFailure`）。** `nextTasksToStart`は`isRunHalted`（`haltedByUser || hasFailedTask`）の間は一切スケジュールしない（`markMergeSucceeded`のJSDocが説明する「孤立した`pending`」の不変条件、Issue #432・PR #517）。ここで`reloadInterrupted`のタスクだけを`pending`へ戻しても、他の`failed`が残っている限りスケジュールされず、Viewからも「再開したのに動いていない」ように見えて紛らわしい。
+   - **`allow`（危険な操作の確認）を要するタスクが`reloadInterrupted`に混ざっていれば、run全体の自動再開を見送る（`blockedByAllowGate`）。** 自動再開はその場に人がいない前提で走る。`allow`は人が明示的に確認して初めて実行してよい操作（§16.7）で、自動再開の中でその確認を代行することはできない。そのタスクだけを`failed`のまま残して他を`pending`へ戻すことも考えたが、それも「孤立した`pending`」の不変条件を壊す（残った`failed`が`hasFailedTask`を立て、結局run全体が動かない）ため、run全体を見送る一択にした。
+4. **`agent.workflows.maxAutoResumeAttempts`（既定3、`machine-overridable`）に達していない。** 定義ファイルが壊れている・依存先のCIが恒久的に落ちている等で、起動のたびにクラッシュ→自動再開→クラッシュ……を繰り返すrunを止めるための上限。`PersistedRun.autoResumeAttempts`（省略可能。無ければ`0`扱い）へ実際に再開した回数を記録し、`restoreRunsForView`が`store.update`で直接インクリメントする（`persist()`は`current?.autoResumeAttempts`をそのまま引き継ぐだけで、増減はここでしか起きない）。上限に達していれば再開せず、`autoResumeLimitExceeded`という新しい`WorkflowWarning`をこのrunの直近1件へ丸めて積む（`persistFailed`・`finalMergeDecision`と同じ規律）。人がViewから手動で「再実行」すれば、そのタスク自身の`retryTask`/`continueTask`が`autoResumeAttempts`を触らない（`PersistedRun`の他のフィールドと同じく`persist()`が前回値を引き継ぐだけ）ため、次回リロード時の自動再開判定にはそのまま影響し続ける（手動再実行を境に自動再開の権利がリセットされるわけではない。上限はあくまで「自動で」再開した回数だけを数える）。
+
+4つとも満たしたときだけ、`applyAutoResume`が返した`RunState`（`reloadInterrupted`のタスクを`pending`へ、それによって道連れで`skipped(runHalted)`になっていた後続も併せて`pending`へ戻したもの）を`rebuilt.runState`へ適用し、`autoResume`という`WorkflowWarning`（戻したタスクidを列挙。直近1件へ丸める）を積む。
+
+#### worktreeの二重作成を避ける
+
+`applyAutoResume`は`pending`へ戻すタスクの`retryCount`を1増やす（`manualRetryCount`ではなく）。`retrySuffixOf`（`runner.ts`）は`retryCount + manualRetryCount`からworktree・ブランチ名の接尾辞（`-retry0`、`-retry1`……）を決めるため、クラッシュした試行が既に作っていたworktree・ブランチ（接尾辞なし、または前の接尾辞）とは別名になる。`createWorktree`はブランチが既に存在すれば`branchExists`エラーで作成そのものを拒否する（git層での二重防止）ため、`retryCount`を増やし忘れると自動再開そのものが常に失敗する形で発覚する設計になっている。手動の「再実行」（`retryTask`）が`manualRetryCount`を増やすのと対称に、自動再開は`retryCount`を増やす——同じ「自動で使い切れる回数」の系列に属する値である点でも、`retries`（タスク定義のループ内自動リトライ回数）の消費と揃えている。
+
+#### オーケストレーターセッションの立て直しと`ask_user`の再質問
+
+自動再開が実際に走る場合、`ensureMessaging` → `setupOrchestratorForStart`（`start()`と同じ手順）でこのプロセス上に新しいオーケストレーターセッションを立てる（`rebuildLiveRun`は`orchestrator: undefined`のまま復元するだけで、セッションまでは作らない。§16.23「永続化と復元」参照）。
+
+このとき、`PersistedRun.pendingAskUser`（§16.33、Issue #583）に答え待ちの問いが残っていれば、`OrchestratorResumeContext`として`setupOrchestratorForStart`へ渡す:
+
+- `buildIntroBody`（run開始時の案内文）へ、「このセッションは自動再開で、前回のセッションで出した次の問いにまだ答えられていない」旨と、問い・選択肢の文言を1段落追記する（会話そのものは復元できないため、この文脈だけを引き継ぐ）。
+- `live.pendingAskUser`を永続化された問いから作り直す。これだけで`buildPendingAskUserSnapshot`（`runnerSnapshot.ts`）が`hasLiveSession: true`を返すようになり、ワークフローViewの選択ボタンが復活する（`runnerSnapshot.ts`側の変更は不要。`live`優先・`persisted`フォールバックという既存のロジックがそのまま効く）。
+- `askUserCount`（このrunでの`ask_user`呼び出し回数、`agent.workflows.maxAskUserPerRun`の上限判定に使う）は`0`ではなく`1`から始める。引き継いだ問いは既に1回分の`ask_user`を消費済みであり、`0`から始めるとリロードのたびに実質無料で上限をすり抜けられてしまう（§16.33「確認を絞る」の意図を守るための判断）。
+
+人が答えると、通常の`answerAskUser` → `deliverAskUserAnswer`の経路（§16.33）でそのまま配送される。`live.pendingAskUser`が`orchestrator.busy`かどうかに関わらず送信ゲートで止める設計（§16.33）のため、自動再開の`buildIntroBody`（イントロ本文）自体も答えが届くまでは新しいオーケストレーターへ送られず、答えと合流して初めて1通で届く。
+
+#### 実装ファイル
+
+- `runState.ts`: `applyAutoResume`・`AutoResumeOutcome`（純粋な判定層）
+- `runStore.ts`: `PersistedRun.autoResumeAttempts`（省略可能フィールド）
+- `runnerRestore.ts`: `autoResumeIfEligible`・`DEFAULT_AUTO_RESUME`・`DEFAULT_MAX_AUTO_RESUME_ATTEMPTS`・`MIN_MAX_AUTO_RESUME_ATTEMPTS`・`MAX_MAX_AUTO_RESUME_ATTEMPTS`
+- `runnerOrchestrator.ts`: `OrchestratorResumeContext`・`buildIntroBody`/`setupOrchestratorForStart`への配線
+- `runnerInternals.ts`・`runner.ts`: `WorkflowRunnerInternals.ensureMessaging`（分割モジュールへの公開）、`WorkflowRunnerDeps.readAutoResume`/`readMaxAutoResumeAttempts`、`WorkflowWarning`の`autoResume`/`autoResumeLimitExceeded`、`persist()`の`autoResumeAttempts`引き継ぎ
+- `config.ts`: `WorkflowsConfig.autoResume`/`maxAutoResumeAttempts`・`normalizeMaxAutoResumeAttempts`
+- `package.json`: `agent.workflows.autoResume`・`agent.workflows.maxAutoResumeAttempts`
+- `extension.ts`: 上記2つの`readXxx`の配線
+
+#### 確かめ方
+
+- `test/unit/runState.test.ts`（`describe('applyAutoResume（design.md §16.35、roadmap W10、Issue #584）')`）: `reloadInterrupted`の`pending`復帰・道連れの`skipped(runHalted)`復帰・`dependencyFailed`/`mergeBlocked`起因の`skipped`は戻さないこと・他の理由の`failed`混在での`blockedByOtherFailure`・対象なしでの`nothingToResume`・`allow`混在での`blockedByAllowGate`
+- `test/unit/runner.test.ts`（`describe('WorkflowRunner: 中断からの自動再開（design.md §16.35、roadmap W10、Issue #584）')`）: 既定（`autoResume: true`）での自動再開・`haltedByUser`での見送り・`autoResume: false`での従来どおりの手動待ち・上限超過での`autoResumeLimitExceeded`警告・`allow`混在での見送り・worktree/ブランチが別名で二重作成にならないこと・`ask_user`回答待ちの再質問（新しいオーケストレーターセッションへの問いの引き継ぎと配送）
+- `test/unit/config.test.ts`: `autoResume`/`maxAutoResumeAttempts`の既定値・範囲内の指定・範囲外/非数値/非整数のフォールバック
+- `docs/manual-test.md` W-O: 実VSCode上でのウィンドウのリロード・WSLの停止/再起動からの自動再開、worktreeが二重に作られないことの確認（追記のみ、実施はしない）
+
 ### 16.36 CIの完了待ちとブランチ保護への対応（roadmap W11、Issue #556）
 
 2026-08-22、mainにブランチ保護（PR必須・`checks`必須・**strict**）を入れた直後に、PR #481のマージでPR #482が「baseの最新でない」ことを理由にブロックされ詰まった。**strictなブランチ保護の下では、mainへ1本マージするたびに他の全てのopen PRが古くなる。** 統合ブランチからmainへ複数のPRを順に出す運用（§16.17）では必ず起きる。

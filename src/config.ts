@@ -24,6 +24,12 @@ import {
   MIN_MAX_ASK_USER_PER_RUN,
   MAX_MAX_ASK_USER_PER_RUN,
 } from './orchestrator/orchestratorSession';
+import {
+  DEFAULT_AUTO_RESUME,
+  DEFAULT_MAX_AUTO_RESUME_ATTEMPTS,
+  MIN_MAX_AUTO_RESUME_ATTEMPTS,
+  MAX_MAX_AUTO_RESUME_ATTEMPTS,
+} from './orchestrator/runnerRestore';
 import { DEFAULT_PSEUDO_WORKTREE_EXCLUDE } from './orchestrator/pseudoWorktree';
 import { sanitizeForLog } from './orchestrator/sanitize';
 import { normalizeBranchNaming, type BranchNaming } from './orchestrator/worktree';
@@ -314,6 +320,21 @@ export interface WorkflowsConfig {
    */
   maxAskUserPerRun: number;
   /**
+   * リロード・WSL再起動等からの復元後、条件を満たせば自動的に再開するか
+   * （`agent.workflows.autoResume`、既定`true`、`machine-overridable`、design.md §16.35、
+   * roadmap W10、Issue #584）。`false`にすると従来どおり人がViewから手動で再実行するまで
+   * 再開しない。権限には関わらず、既に人が承認済み・実行中だった作業を続けるだけの
+   * 挙動のため`forge`/`finalMerge`ほど強い制限は要らない。
+   */
+  autoResume: boolean;
+  /**
+   * 自動再開を試みる回数の上限（`agent.workflows.maxAutoResumeAttempts`、既定3、
+   * `machine-overridable`、design.md §16.35、roadmap W10、Issue #584）。同じrunが
+   * クラッシュと自動再開を繰り返し続けるのを止めるための値で、`maxAskUserPerRun`と
+   * 同じく権限には関わらない調整値のため強い制限は要らない。
+   */
+  maxAutoResumeAttempts: number;
+  /**
    * タスクブランチの命名方式（design.md §16.6「ブランチの命名方式」）。`machine-overridable`。
    * ブランチ名の形を決めるだけで、push先も権限も変えないため`forge`/`finalMerge`ほど
    * 強い制限は要らない。
@@ -516,6 +537,10 @@ export function readWorkflowsConfig(): WorkflowsConfig {
       c.get<unknown>('workflows.ciUpdateBranchMaxRetries'),
     ),
     maxAskUserPerRun: normalizeMaxAskUserPerRun(c.get<unknown>('workflows.maxAskUserPerRun')),
+    autoResume: c.get<boolean>('workflows.autoResume') ?? DEFAULT_AUTO_RESUME,
+    maxAutoResumeAttempts: normalizeMaxAutoResumeAttempts(
+      c.get<unknown>('workflows.maxAutoResumeAttempts'),
+    ),
   };
 }
 
@@ -628,6 +653,21 @@ function normalizeMaxAskUserPerRun(value: unknown): number {
     value <= MAX_MAX_ASK_USER_PER_RUN
     ? value
     : DEFAULT_MAX_ASK_USER_PER_RUN;
+}
+
+/**
+ * `agent.workflows.maxAutoResumeAttempts` の生値を安全な回数へ丸める（design.md §16.35、
+ * roadmap W10、Issue #584）。`normalizeMaxAskUserPerRun`と同じ「範囲外は既定へ」方針。
+ * 整数でない・`MIN_MAX_AUTO_RESUME_ATTEMPTS`未満・`MAX_MAX_AUTO_RESUME_ATTEMPTS`超過は
+ * いずれも既定値（`DEFAULT_MAX_AUTO_RESUME_ATTEMPTS`）へ丸める。
+ */
+function normalizeMaxAutoResumeAttempts(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= MIN_MAX_AUTO_RESUME_ATTEMPTS &&
+    value <= MAX_MAX_AUTO_RESUME_ATTEMPTS
+    ? value
+    : DEFAULT_MAX_AUTO_RESUME_ATTEMPTS;
 }
 
 /** アクティブエディタが属するワークスペースフォルダ。無ければ先頭（設計書 §10）。 */
