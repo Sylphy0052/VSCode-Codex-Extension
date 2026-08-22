@@ -540,35 +540,51 @@ describe('stripControlCharsPreservingNewlines（design.md §16.4、セキュリ�
 describe('sanitizeForLog（ReDoS対策: 約100万文字規模の敵対的入力でも線形時間で完了する）', () => {
   // しきい値は環境差を吸収しつつ「明らかな指数・多項式的悪化」だけを検出できる値に設定。
   // 線形であれば数十〜数百ms程度で完了する想定（実測はPR報告に記載）。
-  const REDOS_TIMEOUT_MS = 5000;
+  //
+  // REDOS_TIMEOUT_MSとこのdescribe配下6件のitタイムアウトについて（Issue #522）:
+  // このアサーションはperformance.now()差分による壁時計時間の測定であり、
+  // npm test（全体実行）では実質的に他テストとのCPU競合を測ってしまう。
+  // このリポジトリのサンドボックス環境で全体実行を4回繰り返し実測したところ、
+  // 6件とも0.4〜5.2秒の範囲で揺れた（単体実行では数百msで完了）。一方、この
+  // テストが検出したい{n,}量指定子由来の破局的バックトラッキングは、下の
+  // 「パーセントエンコードされたスキーム区切り」テストの回帰コメントの通り
+  // 90万文字規模で「20秒を超える」という、桁が異なる規模で現れる。つまり
+  // 5000msという値には「CPU競合による数秒の揺れ」と「本来検出したい規模の
+  // 劣化（20秒超）」を区別する余地が最初から無かった。実測最大値5.2秒に対し
+  // 2倍以上の余裕を持たせつつ、既知の劣化が現れる20秒台には遠く届かない
+  // 12000msへ引き上げる。これにより高負荷時の誤検知は無くなり、桁違いに
+  // 遅い本物の劣化への検出能力は維持される。個々のitタイムアウトも、この
+  // アサーションより先に打ち切られないよう15000msへ揃える。
+  const REDOS_TIMEOUT_MS = 12_000;
+  const IT_TIMEOUT_MS = 15_000;
 
   it('/home/ の10万回連続でも高速に完了する', () => {
     const input = '/home/'.repeat(100_000);
     const start = performance.now();
     sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
     expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  });
+  }, IT_TIMEOUT_MS);
 
   it('\\\\ + 20万文字 + \\Users\\ + 20万文字でも高速に完了する', () => {
     const input = '\\\\' + 'a'.repeat(200_000) + '\\Users\\' + 'b'.repeat(200_000);
     const start = performance.now();
     sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
     expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  });
+  }, IT_TIMEOUT_MS);
 
   it('scheme:// で終端しない50万+50万文字でも高速に完了する', () => {
     const input = 'https://' + 'a'.repeat(500_000) + 'b'.repeat(500_000);
     const start = performance.now();
     sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
     expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  });
+  }, IT_TIMEOUT_MS);
 
   it('スタックトレース行の5万回連続でも高速に完了する', () => {
     const input = '    at foo (/home/alice/a.ts:1:1)\n'.repeat(50_000);
     const start = performance.now();
     sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
     expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  });
+  }, IT_TIMEOUT_MS);
 
   it('パーセントエンコードされたスキーム区切りが%40なしで大量に連続しても高速に完了する（回帰確認）', () => {
     // 実装当初、末尾に%40が一切現れない大きな入力でO(n^2)のバックトラックが発生し
@@ -578,7 +594,7 @@ describe('sanitizeForLog（ReDoS対策: 約100万文字規模の敵対的入力�
     const start = performance.now();
     sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
     expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  });
+  }, IT_TIMEOUT_MS);
 
   it('Bearer/ghp_/sk-様の巨大なトークン様文字列でも高速に完了する', () => {
     const input =
@@ -591,7 +607,7 @@ describe('sanitizeForLog（ReDoS対策: 約100万文字規模の敵対的入力�
     const start = performance.now();
     sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
     expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  });
+  }, IT_TIMEOUT_MS);
 });
 
 describe('maskForLog（セキュリティ監査指摘: {n,}量指定子が約5.6MB超の単一トークンでV8をクラッシュさせる、high）', () => {
@@ -602,40 +618,81 @@ describe('maskForLog（セキュリティ監査指摘: {n,}量指定子が約5.6
   // （いずれも10MB）を上限とするgit/CLIのstderrを直接受けるため、この規模の
   // 入力は実際に到達しうる。クラッシュしないことと、上限を超えた分の残骸が
   // ログに残らないこと（部分マスクにならないこと）の両方を固定する。
-  const CRASH_TIMEOUT_MS = 5000;
+  //
+  // CRASH_TIMEOUT_MSとこのdescribe配下4件のitタイムアウトについて（Issue #522）:
+  // 約560万文字の単一トークンを正規表現へ通すコストは、npm test（全体実行）で
+  // 他のテストとCPUを奪い合うと単体実行時より大きく伸びる。このリポジトリの
+  // サンドボックス環境で全体実行を繰り返し実測したところ、この3件は
+  // 3.9〜13.6秒の範囲で揺れた（単体実行では1秒未満）。5000msのままでは
+  // 高負荷時に誤って失敗するため、実測の最大値に対して2倍以上の余裕を持たせ
+  // 30000msへ引き上げる。個々のitタイムアウト（vitestの既定20000ms）も
+  // このアサーションより先に打ち切られないよう35000msへ揃える。
+  // なお、この値を大きく超える停止（数十秒〜分オーダー）は、この判定が本来
+  // 検出したい{n,}量指定子由来の破局的バックトラッキングの再発を示唆する。
+  //
+  // なお、この時間しきい値はセーフティネットに過ぎない。旧実装の劣化は
+  // `RangeError: Maximum call stack size exceeded` として1.3秒未満で即座に
+  // 現れるため（PR #523のレビューで、正規表現を旧形へ戻して実測確認）、
+  // 劣化の検出自体はしきい値の大小に依存しない。
+  const CRASH_TIMEOUT_MS = 30_000;
+  const IT_TIMEOUT_MS = 35_000;
 
-  it('Bearerトークンが約560万文字でもクラッシュせずマスクする', () => {
-    const raw = 'Authorization: Bearer ' + 'A'.repeat(5_600_000);
-    const start = performance.now();
-    const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
-    expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
-    expect(result).toBe('Authorization: Bearer ***');
-  });
+  it(
+    'Bearerトークンが約560万文字でもクラッシュせずマスクする',
+    () => {
+      const raw = 'Authorization: Bearer ' + 'A'.repeat(5_600_000);
+      const start = performance.now();
+      const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
+      expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
+      expect(result).toBe('Authorization: Bearer ***');
+    },
+    IT_TIMEOUT_MS,
+  );
 
-  it('GitHubトークンが約560万文字でもクラッシュせずマスクする', () => {
-    const raw = 'token=gho_' + 'A'.repeat(5_600_000);
-    const start = performance.now();
-    const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
-    expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
-    expect(result).toBe('token=***');
-  });
+  it(
+    'GitHubトークンが約560万文字でもクラッシュせずマスクする',
+    () => {
+      const raw = 'token=gho_' + 'A'.repeat(5_600_000);
+      const start = performance.now();
+      const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
+      expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
+      expect(result).toBe('token=***');
+    },
+    IT_TIMEOUT_MS,
+  );
 
-  it('sk-形式のキーが約560万文字でもクラッシュせずマスクする', () => {
-    const raw = 'key=sk-' + 'A'.repeat(5_600_000);
-    const start = performance.now();
-    const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
-    expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
-    expect(result).toBe('key=***');
-  });
+  it(
+    'sk-形式のキーが約560万文字でもクラッシュせずマスクする',
+    () => {
+      const raw = 'key=sk-' + 'A'.repeat(5_600_000);
+      const start = performance.now();
+      const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
+      expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
+      expect(result).toBe('key=***');
+    },
+    IT_TIMEOUT_MS,
+  );
 
-  it('10MB規模（CLI_MAX_BUFFER_BYTES/GIT_MAX_BUFFER_BYTES相当）でもクラッシュせず、断片が残らない', () => {
-    // 単一トークンで10MB（各バッファ上限相当）とし、3トークン分を連結した約30MBの
-    // 入力で確認する。`stripControlChars`（本PRの変更対象外）の走査コストが
-    // 支配的で数秒かかりうるため、クラッシュ・部分マスクの有無のみを見る
-    // （速度自体は個別テストで別途確認済み）。
-    const raw =
-      'Bearer ' + 'A'.repeat(10_000_000) + ' gho_' + 'B'.repeat(10_000_000) + ' sk-' + 'C'.repeat(10_000_000);
-    const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
-    expect(result).toBe('Bearer *** *** ***');
-  }, 20_000);
+  it(
+    '10MB規模（CLI_MAX_BUFFER_BYTES/GIT_MAX_BUFFER_BYTES相当）でもクラッシュせず、断片が残らない',
+    () => {
+      // 単一トークンで10MB（各バッファ上限相当）とし、3トークン分を連結した約30MBの
+      // 入力で確認する。`stripControlChars`（本PRの変更対象外）の走査コストが
+      // 支配的で数秒かかりうるため、クラッシュ・部分マスクの有無のみを見る
+      // （速度自体は個別テストで別途確認済み）。
+      //
+      // itタイムアウトについて（Issue #522）: 約30MB規模の入力を正規表現へ
+      // 通すため、npm test（全体実行）では並列実行によるCPU競合でvitestの
+      // 既定20000msを超えてタイムアウトする（単体実行では10秒未満で終わる）。
+      // このリポジトリのサンドボックス環境で全体実行を繰り返し実測したところ
+      // 33〜34秒程度だった。既定の20000msのままでは高負荷時に安定して失敗する
+      // ため、実測値に対して余裕を持たせ90000msへ引き上げる
+      // （全体のtestTimeoutは変更しない。このテストにだけ個別に与える）。
+      const raw =
+        'Bearer ' + 'A'.repeat(10_000_000) + ' gho_' + 'B'.repeat(10_000_000) + ' sk-' + 'C'.repeat(10_000_000);
+      const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
+      expect(result).toBe('Bearer *** *** ***');
+    },
+    90_000,
+  );
 });
