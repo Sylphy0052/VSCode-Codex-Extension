@@ -1,4 +1,5 @@
 import type { Logger } from '../log';
+import { sanitizeForLog } from '../orchestrator/sanitize';
 import type { SessionStore } from './sessionStore';
 
 /**
@@ -29,6 +30,8 @@ export async function pruneMetaCacheOnStartup(
       await persistIfChanged(removed);
     }
   } catch (e) {
-    log.warn(`起動時のメタキャッシュ掃除に失敗しました: ${String(e)}`);
+    // 例外のメッセージにはNode.jsのfsエラーが埋め込む絶対パス（OSユーザー名を含む）や
+    // 制御文字が入りうるため、そのままログへ流さず`sanitizeForLog`を通す（Issue #433）。
+    log.warn(`起動時のメタキャッシュ掃除に失敗しました: ${sanitizeForLog(String(e))}`);
   }
 }

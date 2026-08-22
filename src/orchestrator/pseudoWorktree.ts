@@ -1,13 +1,14 @@
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { isPathWithinRoot } from './escalation';
+import { hasGitSegment, isPathWithinRoot } from './escalation';
 import {
   assertValidIdentifiers,
   findSymlinkedAncestor,
   identifierError,
   runIdError,
 } from './fsGuards';
+import { sanitizeForLog } from './sanitize';
 import { SerialQueue } from './serialQueue';
 
 /**
@@ -307,7 +308,7 @@ export async function loadPersistedManifest(
   if (symlinkedAncestor !== undefined) {
     return {
       ok: false,
-      message: `疑似worktreeの統合マニフェストの読み込み元の経路にシンボリックリンクが含まれています。読み込みを中止しました: ${symlinkedAncestor}`,
+      message: `疑似worktreeの統合マニフェストの読み込み元の経路にシンボリックリンクが含まれています。読み込みを中止しました: ${sanitizeForLog(symlinkedAncestor)}`,
     };
   }
 
@@ -315,7 +316,7 @@ export async function loadPersistedManifest(
   if (stat !== undefined && stat.size > MAX_MANIFEST_FILE_BYTES) {
     return {
       ok: false,
-      message: `疑似worktreeの統合マニフェストを復元できませんでした（ファイルサイズが上限を超えています）: ${filePath}`,
+      message: `疑似worktreeの統合マニフェストを復元できませんでした（ファイルサイズが上限を超えています）: ${sanitizeForLog(filePath)}`,
     };
   }
 
@@ -329,7 +330,7 @@ export async function loadPersistedManifest(
   if (realFilePath === undefined || !isPathWithinRoot(realFilePath, realRoot)) {
     return {
       ok: false,
-      message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際にはワークスペースの外を指しています）: ${filePath}`,
+      message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際にはワークスペースの外を指しています）: ${sanitizeForLog(filePath)}`,
     };
   }
 
@@ -339,14 +340,14 @@ export async function loadPersistedManifest(
   } catch {
     return {
       ok: false,
-      message: `疑似worktreeの統合マニフェストを復元できませんでした（内容を解析できません）: ${filePath}`,
+      message: `疑似worktreeの統合マニフェストを復元できませんでした（内容を解析できません）: ${sanitizeForLog(filePath)}`,
     };
   }
   const { manifest, ok } = manifestFromParsedJson(parsed);
   if (!ok) {
     return {
       ok: false,
-      message: `疑似worktreeの統合マニフェストを復元できませんでした（不正なエントリ、またはエントリ数が上限を超えています）: ${filePath}`,
+      message: `疑似worktreeの統合マニフェストを復元できませんでした（不正なエントリ、またはエントリ数が上限を超えています）: ${sanitizeForLog(filePath)}`,
     };
   }
   return { ok: true, manifest };
@@ -378,7 +379,7 @@ export async function persistManifest(
   const symlinkedAncestor = await findSymlinkedAncestor(workspaceRoot, filePath, fs);
   if (symlinkedAncestor !== undefined) {
     throw new Error(
-      `疑似worktreeの統合マニフェストの永続化先の経路にシンボリックリンクが含まれています。書き込みを中止しました: ${symlinkedAncestor}`,
+      `疑似worktreeの統合マニフェストの永続化先の経路にシンボリックリンクが含まれています。書き込みを中止しました: ${sanitizeForLog(symlinkedAncestor)}`,
     );
   }
 
@@ -391,7 +392,7 @@ export async function persistManifest(
     await fs.removeFile(filePath);
     throw new Error(
       `疑似worktreeの統合マニフェストの永続化先が実際にはワークスペースの外を指していたため、` +
-        `書き込みを取り消しました: ${realFilePath ?? filePath}`,
+        `書き込みを取り消しました: ${sanitizeForLog(realFilePath ?? filePath)}`,
     );
   }
 }
@@ -690,7 +691,7 @@ export async function cloneWorkspace(
     return {
       ok: false,
       reason: 'symlinkDetected',
-      message: `複製先の経路にシンボリックリンクが含まれています。作成を中止しました: ${symlinkedAncestor}`,
+      message: `複製先の経路にシンボリックリンクが含まれています。作成を中止しました: ${sanitizeForLog(symlinkedAncestor)}`,
     };
   }
 
@@ -698,7 +699,7 @@ export async function cloneWorkspace(
     return {
       ok: false,
       reason: 'alreadyExists',
-      message: `複製先が既に存在します: ${target}`,
+      message: `複製先が既に存在します: ${sanitizeForLog(target)}`,
     };
   }
 
@@ -711,7 +712,7 @@ export async function cloneWorkspace(
     return {
       ok: false,
       reason: 'boundaryEscape',
-      message: `複製先がワークスペースの外に作られたため、撤去しました: ${realTarget ?? target}`,
+      message: `複製先がワークスペースの外に作られたため、撤去しました: ${sanitizeForLog(realTarget ?? target)}`,
     };
   }
 
@@ -772,7 +773,7 @@ export async function removePseudoWorktree(
     return {
       ok: false,
       reason: 'boundaryEscape',
-      message: `撤去対象が.agents/worktreesの外を指しているため撤去しませんでした: ${realTarget}`,
+      message: `撤去対象が.agents/worktreesの外を指しているため撤去しませんでした: ${sanitizeForLog(realTarget)}`,
     };
   }
 
@@ -810,7 +811,7 @@ export async function ensureIntegrationDir(
     return {
       ok: false,
       reason: 'symlinkDetected',
-      message: `統合先の経路にシンボリックリンクが含まれています。作成を中止しました: ${symlinkedAncestor}`,
+      message: `統合先の経路にシンボリックリンクが含まれています。作成を中止しました: ${sanitizeForLog(symlinkedAncestor)}`,
     };
   }
 
@@ -823,7 +824,7 @@ export async function ensureIntegrationDir(
     return {
       ok: false,
       reason: 'boundaryEscape',
-      message: `統合先がワークスペースの外に作られたため、撤去しました: ${realDir ?? dir}`,
+      message: `統合先がワークスペースの外に作られたため、撤去しました: ${sanitizeForLog(realDir ?? dir)}`,
     };
   }
 
@@ -941,10 +942,22 @@ export class IntegrationQueue {
 // ワークスペースへの反映（run終了時）
 // ---------------------------------------------------------------------------
 
+/**
+ * 除外設定（`exclude`）に一致したためスキップしたパス。反映は中断せず次のエントリへ進むが、
+ * **黙って捨てない**（Issue #380が「黙って0件成功として扱うと、統合済みだった成果が
+ * 失われたことに気づけない」と断じたのと同じ穴になるため）。呼び出し側
+ * （`runnerWorkingDirectory.ts`の`reflectPseudoWorktree`）が警告として人に見せる。
+ *
+ * 成功時（`ok: true`）だけでなく`partialApply`にも持たせる。持たせないと
+ * 「`appliedPaths` + `failedPath` + `remainingPaths` で全エントリを覆う」という
+ * 呼び出し側の適用済み・未適用の勘定が崩れ、スキップされた分がどちらにも現れなくなる。
+ */
+type SkippedPaths = { skippedPaths: string[] };
+
 export type ReflectToWorkspaceResult =
-  | { ok: true; appliedPaths: string[] }
+  | ({ ok: true; appliedPaths: string[] } & SkippedPaths)
   | { ok: false; reason: 'workspaceChanged'; message: string; changedPaths: string[] }
-  | {
+  | ({
       ok: false;
       reason: 'partialApply';
       message: string;
@@ -954,7 +967,7 @@ export type ReflectToWorkspaceResult =
       failedPath: string;
       /** `failedPath`より後ろにあり、まだ試みていないパス。 */
       remainingPaths: string[];
-    };
+    } & SkippedPaths);
 
 /**
  * runの終了時に、統合先の内容をワークスペースへ反映する（design.md §16.20）。
@@ -966,6 +979,25 @@ export type ReflectToWorkspaceResult =
  *
  * 変更が無ければ、マニフェストに記録された各パスをワークスペースへ適用する。
  * `kind: 'deleted'` はワークスペースから削除し、それ以外は統合先からコピーする。
+ *
+ * **1件ごとに、このファイルの他の経路（`cloneWorkspace` / `ensureIntegrationDir` /
+ * `loadPersistedManifest` / `persistManifest`）と同じ二段構えの境界確認を行う**
+ * （Issue #433）。一次防御として`findSymlinkedAncestor`でI/O前に経路のシンボリックリンクを
+ * 検知し、二次防御として`realpath`で実パスが境界（ワークスペース／統合先）の配下に
+ * あることを確かめる。`isPathWithinRoot`は字面の判定でシンボリックリンクを解決せず、
+ * マニフェストのキーは永続化ファイル（Issue #380）由来にもなりうるため、この経路だけ
+ * 字面の判定に頼ると「ワークスペース内に実在するシンボリックリンクを経由して外へ書く・
+ * 外を消す」キーを止められない。`listFiles`がシンボリックリンクを除外する結果、その手の
+ * キーは`workspaceChanged`の保護（人の編集の検知）にも現れない。
+ *
+ * 除外（`isExcludedPath`）と`.git`セグメントの拒否も同じ場所で行う（Issue #406）。
+ * ただし**扱いは対称にしない**。`isExcludedPath`はそのエントリだけスキップして先へ進み、
+ * `hasGitSegment`は従来どおり反映全体を中断する（理由はループ内のコメントを参照）。
+ * 非対称なので**判定順が意味を持つ**。`hasGitSegment`を先に評価し、`.git`セグメントを
+ * 含むキーは`exclude`との一致有無に関わらず必ず中断させる。
+ *
+ * 検証に失敗したエントリは、I/Oエラーと同じく`partialApply`（適用済み・失敗した1件・
+ * 未着手の残り）として返し、人が状況を追えるようにする。
  */
 export async function reflectIntegrationToWorkspace(
   workspaceRoot: string,
@@ -987,8 +1019,12 @@ export async function reflectIntegrationToWorkspace(
     };
   }
 
+  const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
+  const realIntegrationDir = (await fs.realpath(integrationDir)) ?? integrationDir;
+
   const entries = [...manifest.entries()];
   const appliedPaths: string[] = [];
+  const skippedPaths: string[] = [];
   for (let i = 0; i < entries.length; i += 1) {
     const entry = entries[i];
     if (entry === undefined) {
@@ -997,35 +1033,140 @@ export async function reflectIntegrationToWorkspace(
     const [relPath, manifestEntry] = entry;
     const segments = relPath.split('/');
     const target = path.join(workspaceRoot, ...segments);
+    const safeRelPath = sanitizeForLog(relPath);
     try {
       // マニフェストの出どころ（実行時に内部生成されたものか、永続化ファイルから
       // 読み戻されたものか）に関わらず、反映処理自体が境界を守る（レビュー指摘: high、
       // 多層防御の2段目）。`manifestFromParsedJson`のキー検証（1段目）をすり抜けた
       // 場合でも、ここで`workspaceRoot`/`integrationDir`の外を指すエントリを弾く。
+      //
+      // `.git`セグメントは`exclude`の設定内容に関わらず無条件で拒否する。ワークスペースが
+      // 後からgitリポジトリになったとき、仕込まれた`.git/hooks/*`が永続的なコード実行経路に
+      // なるため（判定は`escalation.ts`の`hasGitSegment`を共有し、`.GIT`等の亜種も同じ扱い）。
+      // こちらは`isExcludedPath`（設定ドリフトで正当なキーが一致しうるためスキップ扱い）と
+      // 違い、**反映全体を中断する**。攻撃シナリオが明確で、かつ正当なマニフェストに
+      // `.git`セグメントが入る筋が無いため、1件でも現れたらマニフェスト全体を疑う。
+      //
+      // そのため`isExcludedPath`のスキップ判定より**前**に置く。順序が逆だと、
+      // `exclude`に一致するセグメントを併せ持つ`.git`キーがスキップへ吸われて無条件拒否が
+      // 効かなくなる（下の`isExcludedPath`のコメントも参照）。
+      if (hasGitSegment(relPath)) {
+        throw new Error(`反映対象から除外されるパスです（${safeRelPath}）`);
+      }
+      // 除外の判定は、スナップショット（`listFiles`）と同じ`isExcludedPath`をここでも
+      // 通す（Issue #406 / #433）。マニフェストのキーは永続化ファイル由来にもなりうる
+      // （Issue #380）ため、`listFiles`が除外したものと同じ範囲を反映側でも拒否しないと、
+      // 走査では一度も見ないパス（`node_modules`配下等）がワークスペースへ書き戻される。
+      //
+      // **ヒットしてもそのエントリをスキップするだけで、反映全体は中断しない**
+      // （レビュー指摘: medium）。`exclude`は起動時に固定される一方、
+      // `loadPersistedManifest`はディスク上のマニフェストを`exclude`と無関係に復元するため、
+      // 「前回実行時のexclude設定下で正当に作られたキーが、設定変更後の今回のexcludeに
+      // 一致する」設定ドリフトが構造的に起こりうる。中断すると、Mapの反復順で後ろにある
+      // 正当なエントリまで一律で未適用になってしまう。走査側の`listFiles`も同じ判定を
+      // `continue`で流しており、扱いを揃える。
+      //
+      // ただし黙って捨てず`skippedPaths`へ載せ、呼び出し側が警告として人に見せる。
+      //
+      // **この判定は必ず`hasGitSegment`より後に置くこと**（レビュー2巡目の指摘）。
+      // 先に置くと`node_modules/.git/hooks/pre-commit`のように「除外対象のディレクトリ名と
+      // `.git`セグメントを両方含むキー」がスキップへ倒れ、`.git`の無条件拒否へ到達しない。
+      // 既定の`exclude`のままで成立し、細工したマニフェストに除外ヒットするダミーを
+      // 混ぜるだけで`.git`混入の中断（Issue #406）が無効化される。
+      if (isExcludedPath(relPath, exclude)) {
+        skippedPaths.push(relPath);
+        continue;
+      }
       if (!isPathWithinRoot(target, workspaceRoot)) {
-        throw new Error(`反映先がワークスペースの外を指しています（${relPath}）`);
+        throw new Error(`反映先がワークスペースの外を指しています（${safeRelPath}）`);
+      }
+      // 一次防御: 反映先の経路にシンボリックリンクが無いことをI/Oの前に確かめる
+      // （`cloneWorkspace` / `ensureIntegrationDir` / `persistManifest`と同じ二段構えの1段目。
+      // Issue #433）。`isPathWithinRoot`は字面の判定でシンボリックリンクを解決しないため、
+      // これ単体では「ワークスペース内に実在するシンボリックリンクを経由して外へ出る」
+      // キーを止められない。`listFiles`がシンボリックリンクを捨てる不変条件は、キーが
+      // 永続化ファイル由来になった時点（Issue #380）から反映側の前提にできない。
+      const targetSymlink = await findSymlinkedAncestor(workspaceRoot, target, fs);
+      if (targetSymlink !== undefined) {
+        throw new Error(
+          `反映先の経路にシンボリックリンクが含まれています（${safeRelPath}）: ${sanitizeForLog(targetSymlink)}`,
+        );
       }
       if (manifestEntry.kind === 'deleted') {
+        // 二次防御。削除は取り消せない（`persistManifest`のように「書いた後に撤去する」
+        // 形にできない）ため、実パスの確認も削除の**前**に行う。`removePseudoWorktree`が
+        // `removeDirRecursive`の前に`realpath`で確かめているのと同じ形。
+        const realTarget = await fs.realpath(target);
+        if (realTarget !== undefined && !isPathWithinRoot(realTarget, realRoot)) {
+          throw new Error(
+            `削除対象が実際にはワークスペースの外を指しています（${safeRelPath}）: ${sanitizeForLog(realTarget)}`,
+          );
+        }
         await fs.removeFile(target);
       } else {
         const source = path.join(integrationDir, ...segments);
         if (!isPathWithinRoot(source, integrationDir)) {
-          throw new Error(`反映元が統合先の外を指しています（${relPath}）`);
+          throw new Error(`反映元が統合先の外を指しています（${safeRelPath}）`);
         }
-        await fs.mkdir(path.dirname(target));
+        const sourceSymlink = await findSymlinkedAncestor(integrationDir, source, fs);
+        if (sourceSymlink !== undefined) {
+          throw new Error(
+            `反映元の経路にシンボリックリンクが含まれています（${safeRelPath}）: ${sanitizeForLog(sourceSymlink)}`,
+          );
+        }
+        // 読み出しは`copyFile`の中で起きてしまうため、反映元の実パス確認は読み出しの前に
+        // 行う（`loadPersistedManifest`が読み込み後に確認して内容を破棄できるのは、
+        // 読んだ内容がその関数の中に留まるため。ここは読んだ内容がワークスペースへ
+        // そのまま書かれるので、事後の確認では統合先の外の内容を持ち込んだ後になる）。
+        const realSource = await fs.realpath(source);
+        if (realSource === undefined || !isPathWithinRoot(realSource, realIntegrationDir)) {
+          throw new Error(
+            `反映元が実際には統合先の外を指しています（${safeRelPath}）: ${sanitizeForLog(realSource ?? source)}`,
+          );
+        }
+        // 親ディレクトリを作った直後に実パスを確かめてからコピーする（`cloneWorkspace`が
+        // 「多数のファイルをコピーする前に、作ったディレクトリの実パスを確認する」のと
+        // 同じ順序。ここで確認しておけば、ファイル本体の書き込みが境界の外で起きない）。
+        const targetDir = path.dirname(target);
+        await fs.mkdir(targetDir);
+        const realTargetDir = await fs.realpath(targetDir);
+        // ここでは`cloneWorkspace` / `ensureIntegrationDir`と違い、
+        // **作ったディレクトリを`removeDirRecursive`で撤去しない**（レビュー指摘への裁定。
+        // 揃っていないのは意図的なので、将来のレビューで安易に揃えないこと）。
+        // 撤去対象は「`realpath`が境界外に解決されたディレクトリ」であり、その実体は
+        // シンボリックリンクの指す先＝既にユーザーのデータが入っている可能性のある場所。
+        // 空ディレクトリが1つ残る害と、境界外を再帰削除する害が釣り合わない。
+        // `cloneWorkspace`側が撤去できるのは、そこで作るのが自分専用の新規ディレクトリ
+        // （`<runId>/<taskId>`）だからで、前提が違う。
+        if (realTargetDir === undefined || !isPathWithinRoot(realTargetDir, realRoot)) {
+          throw new Error(
+            `反映先のディレクトリが実際にはワークスペースの外を指しています（${safeRelPath}）: ${sanitizeForLog(realTargetDir ?? targetDir)}`,
+          );
+        }
         await fs.copyFile(source, target);
+        // 二次防御の仕上げ（TOCTOU）。`persistManifest`と同じく、書いた後に実パスを
+        // 確かめ、境界外なら書き込みを取り消して失敗として返す。
+        const realTarget = await fs.realpath(target);
+        if (realTarget === undefined || !isPathWithinRoot(realTarget, realRoot)) {
+          await fs.removeFile(target);
+          throw new Error(
+            `反映先が実際にはワークスペースの外を指していたため、書き込みを取り消しました` +
+              `（${safeRelPath}）: ${sanitizeForLog(realTarget ?? target)}`,
+          );
+        }
       }
     } catch (e) {
       // 途中のI/Oエラーで中断した場合、それ以前のパスだけが適用済みの中途半端な状態に
       // なる。ここで例外を投げ直すと、どこまで適用できたか・どこから先が未適用かの情報が
       // 呼び出し側から失われる（Issue #380の追加指摘）。適用済み・失敗した1件・まだ
       // 試みていない残りを、呼び出し側が警告として人に見せられる形で返す
-      const message = e instanceof Error ? e.message : String(e);
+      const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
       return {
         ok: false,
         reason: 'partialApply',
-        message: `統合結果のワークスペースへの反映が${relPath}で失敗し、途中で中断しました: ${message}`,
+        message: `統合結果のワークスペースへの反映が${safeRelPath}で失敗し、途中で中断しました: ${message}`,
         appliedPaths: [...appliedPaths].sort((a, b) => a.localeCompare(b)),
+        skippedPaths: [...skippedPaths].sort((a, b) => a.localeCompare(b)),
         failedPath: relPath,
         remainingPaths: entries
           .slice(i + 1)
@@ -1035,5 +1176,9 @@ export async function reflectIntegrationToWorkspace(
     }
     appliedPaths.push(relPath);
   }
-  return { ok: true, appliedPaths: appliedPaths.sort((a, b) => a.localeCompare(b)) };
+  return {
+    ok: true,
+    appliedPaths: appliedPaths.sort((a, b) => a.localeCompare(b)),
+    skippedPaths: skippedPaths.sort((a, b) => a.localeCompare(b)),
+  };
 }

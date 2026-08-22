@@ -47,6 +47,27 @@ describe('pruneMetaCacheOnStartup', () => {
     expect(log.warn).toHaveBeenCalledTimes(1);
   });
 
+  it(
+    '警告ログはsanitizeForLogを通す（絶対パス中のユーザー名・制御文字を残さない、' + 'Issue #433）',
+    async () => {
+      const store: Pick<SessionStore, 'pruneCache'> = {
+        pruneCache: vi
+          .fn()
+          .mockRejectedValue(
+            new Error("EACCES: permission denied, open '/home/victim/.codex/meta.json'\u202E"),
+          ),
+      };
+      const log = fakeLogger();
+
+      await pruneMetaCacheOnStartup(store, vi.fn().mockResolvedValue(undefined), log);
+
+      const message = vi.mocked(log.warn).mock.calls[0]?.[0] ?? '';
+      expect(message).toContain('/home/***/.codex/meta.json');
+      expect(message).not.toContain('victim');
+      expect(message).not.toContain('\u202E');
+    },
+  );
+
   it('persistIfChangedが失敗しても例外を外へ出さない', async () => {
     const store: Pick<SessionStore, 'pruneCache'> = {
       pruneCache: vi.fn().mockResolvedValue(2),
