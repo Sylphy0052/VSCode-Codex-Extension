@@ -328,6 +328,7 @@ async function rebuildLiveRun(
     messaging: undefined,
     messagingHub: undefined,
     messagingSetupInFlight: undefined,
+    messagingStartupWarnCount: 0,
     mergeResolutions: new Map(),
     // 復元した実行にはオーケストレーターセッションを作り直さない（会話は復元できない。
     // design.md §16.23「永続化と復元」）

@@ -780,11 +780,31 @@ export interface TaskMessagingHubDeps {
  */
 export class TaskMessagingHub {
   private store: MessageStore = createMessageStore();
+  /**
+   * `MessagingMcpServer.logDispatchError`が呼ばれた件数（Issue #375、Issue #475/PR #495
+   * レビュー指摘: medium）。`MessagingMcpServer`ではなくここに置くのは、`MAX_MESSAGES_PER_RUN`
+   * のカウンタ（`store.totalSent`）と同じ理由: `WorkflowRunner`の`ensureMessaging`は
+   * `retryTask`/再マージ成功のたびにtransportと`MessagingMcpServer`を作り直すが、
+   * `TaskMessagingHub`自体は同じrunが生きている間ずっと同じインスタンスを使い続ける
+   * （`WorkflowRunner.messagingHub`のJSDoc参照）。カウンタを`MessagingMcpServer`側の
+   * インスタンス変数のままにすると、再構築のたびに0へ戻り「run全体で20件」という
+   * PR #488の上限が再開のたびに緩んでしまう。
+   */
+  private dispatchErrorLogCount = 0;
 
   constructor(private readonly deps: TaskMessagingHubDeps) {}
 
   listTasks(): ListTasksEntry[] {
     return buildListTasksResult(this.deps.listRunTasks());
+  }
+
+  /**
+   * dispatch例外ログの記録件数を1増やし、増加後の値を返す（`MessagingMcpServer.logDispatchError`
+   * から呼ぶ）。transportの再構築をまたいでも、同じhubインスタンスが生きている限り引き継がれる。
+   */
+  incrementDispatchErrorLogCount(): number {
+    this.dispatchErrorLogCount += 1;
+    return this.dispatchErrorLogCount;
   }
 
   /**
@@ -948,13 +968,6 @@ export const DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL = 100;
  * （design.md §16.21「ツールの引数でタスクidを名乗らせない」）。
  */
 export class MessagingMcpServer {
-  /**
-   * `logDispatchError`が呼ばれた件数（Issue #375）。runを跨がず、`MessagingMcpServer`
-   * インスタンス1つ（＝1run、複数タスクの接続を共有）だけで数える。上限到達後も
-   * 集計ログのために数え続ける（PR #488監査指摘）。
-   */
-  private dispatchErrorLogCount = 0;
-
   constructor(
     private readonly hub: TaskMessagingHub,
     transport: McpTransportPort,
@@ -1005,19 +1018,25 @@ export class MessagingMcpServer {
    * 抑制開始からの累計件数を集計ログとして1行出す（Issue #375、PR #488監査指摘:
    * medium。上限到達直後から始まる本命の攻撃が完全に不可視化されるのを防ぐ）。
    * ログ行自体は上限＋集計ログの頻度で頭打ちのまま、攻撃の規模・継続有無だけは追える。
+   *
+   * カウンタ自体は`this.hub.incrementDispatchErrorLogCount()`で数える（Issue #475/
+   * PR #495レビュー指摘: medium）。`this`（`MessagingMcpServer`インスタンス）は
+   * `ensureMessaging`の再構築のたびに作り直されるため、カウンタをここへ持たせると
+   * 再構築のたびに0へ戻り「run全体で20件」という上限が再開のたびに緩んでしまう
+   * （`TaskMessagingHub.dispatchErrorLogCount`のJSDoc参照）。
    */
   private logDispatchError(error: unknown): void {
     if (this.logPort === undefined) {
       return;
     }
-    this.dispatchErrorLogCount += 1;
-    if (this.dispatchErrorLogCount <= MAX_DISPATCH_ERROR_LOG_COUNT) {
+    const dispatchErrorLogCount = this.hub.incrementDispatchErrorLogCount();
+    if (dispatchErrorLogCount <= MAX_DISPATCH_ERROR_LOG_COUNT) {
       const typeName = error instanceof Error ? error.constructor.name : typeof error;
       const message = error instanceof Error ? error.message : String(error);
       this.logPort.error(
         `[task-messaging] dispatchで例外が発生しました: ${typeName}: ${sanitizeForLog(message)}`,
       );
-      if (this.dispatchErrorLogCount === MAX_DISPATCH_ERROR_LOG_COUNT) {
+      if (dispatchErrorLogCount === MAX_DISPATCH_ERROR_LOG_COUNT) {
         this.logPort.error(
           `[task-messaging] dispatch例外のログ記録が上限（${MAX_DISPATCH_ERROR_LOG_COUNT}件）に達したため、` +
             'このrun（複数タスクの接続を含む）ではこれ以降、個別の記録を抑制します',
@@ -1025,7 +1044,7 @@ export class MessagingMcpServer {
       }
       return;
     }
-    const suppressedCount = this.dispatchErrorLogCount - MAX_DISPATCH_ERROR_LOG_COUNT;
+    const suppressedCount = dispatchErrorLogCount - MAX_DISPATCH_ERROR_LOG_COUNT;
     if (suppressedCount % DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL === 0) {
       this.logPort.error(
         '[task-messaging] dispatch例外のログ記録は抑制中です' +

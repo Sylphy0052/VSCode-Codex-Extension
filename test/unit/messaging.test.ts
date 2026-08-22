@@ -909,6 +909,64 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
     },
   );
 
+  it(
+    'dispatch例外の記録件数はhub側で持ち、transportを作り直しても引き継がれる' +
+      '（Issue #475、PR #495レビュー指摘: medium。`WorkflowRunner.ensureMessaging`は' +
+      '`retryTask`/再マージ成功のたびにtransportと`MessagingMcpServer`を作り直すため、' +
+      'カウンタを`MessagingMcpServer`側に置くと再構築のたびに0へ戻り、' +
+      '「run全体で20件」という上限が再開のたびに緩んでしまう）',
+    () => {
+      const logs: string[] = [];
+      const logPort: DispatchErrorLogPort = { error: (m) => logs.push(m) };
+      const hub = new TaskMessagingHub({
+        listRunTasks: () => {
+          throw new Error('boom');
+        },
+      });
+
+      // 1本目のtransport（＝1回目のrun開始）で上限ぎりぎりまで例外を起こす
+      const transport1 = new FakeTransport();
+      new MessagingMcpServer(hub, transport1, logPort);
+      const conn1 = new FakeConnection('T1');
+      transport1.connect(conn1);
+      for (let i = 0; i < MAX_DISPATCH_ERROR_LOG_COUNT - 1; i += 1) {
+        conn1.fireRequest({
+          jsonrpc: '2.0',
+          id: i,
+          method: 'tools/call',
+          params: { name: 'list_tasks', arguments: {} },
+        });
+      }
+      expect(logs).toHaveLength(MAX_DISPATCH_ERROR_LOG_COUNT - 1);
+
+      // transportを作り直す（`ensureMessaging`が`retryTask`等の再開経路でtransportだけを
+      // 立て直す形を模す。hubは同じインスタンスを再利用する）
+      const transport2 = new FakeTransport();
+      new MessagingMcpServer(hub, transport2, logPort);
+      const conn2 = new FakeConnection('T1');
+      transport2.connect(conn2);
+
+      // カウンタが引き継がれていれば、あと2回で上限に達し「上限到達」の通知行が出る。
+      // 引き継がれていなければ（0から再スタートしていれば）ここではまだ上限に届かず
+      // この通知行は出ない
+      conn2.fireRequest({
+        jsonrpc: '2.0',
+        id: 100,
+        method: 'tools/call',
+        params: { name: 'list_tasks', arguments: {} },
+      });
+      conn2.fireRequest({
+        jsonrpc: '2.0',
+        id: 101,
+        method: 'tools/call',
+        params: { name: 'list_tasks', arguments: {} },
+      });
+
+      expect(logs).toHaveLength(MAX_DISPATCH_ERROR_LOG_COUNT + 1);
+      expect(logs[MAX_DISPATCH_ERROR_LOG_COUNT]).toContain(String(MAX_DISPATCH_ERROR_LOG_COUNT));
+    },
+  );
+
   it('logPortを渡さなくても例外時に落ちない（後方互換）', () => {
     const transport = new FakeTransport();
     const hub = new TaskMessagingHub({

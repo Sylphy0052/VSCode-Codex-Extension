@@ -153,6 +153,25 @@ export interface WorkflowFilePort {
  */
 export const WAITING_REPLY_POLL_INTERVAL_MS = 5_000;
 
+/**
+ * `startMessagingTransport`のMCPサーバ起動失敗警告を、1runにつき実際に記録する上限件数
+ * （Issue #475/PR #495レビュー指摘: low〜medium）。
+ *
+ * 本Issue以前は`setupMessagingForStart`がrun開始時に1回しか呼ばれなかったため、この警告も
+ * 1回しか出なかった。`ensureMessaging`は`live.messaging`が`undefined`である限りタスク起動の
+ * たびに再試行するため、MCPサーバが恒常的に起動できない環境（ポート払底等）では
+ * タスク数・retry回数に比例して同じ警告が無制限に増える。`messaging.ts`の
+ * `MAX_DISPATCH_ERROR_LOG_COUNT`（Issue #375、PR #488）と同じ規律に揃える。
+ */
+export const MAX_MESSAGING_STARTUP_WARN_COUNT = 20;
+
+/**
+ * 上限到達後の抑制中に、集計ログを何件おきに出すか。`messaging.ts`の
+ * `DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL`と同じ考え方（Issue #475/PR #495
+ * レビュー指摘: low〜medium）。
+ */
+export const MESSAGING_STARTUP_WARN_SUPPRESSION_INTERVAL = 100;
+
 export const nodeWorkflowFilePort: WorkflowFilePort = {
   async fileSize(path: string): Promise<number | undefined> {
     try {
@@ -817,6 +836,14 @@ export interface LiveRun {
    */
   messagingSetupInFlight: Promise<void> | undefined;
   /**
+   * `startMessagingTransport`がMCPサーバの起動に失敗して警告を出した回数（Issue #475/
+   * PR #495レビュー指摘: low〜medium）。`MAX_MESSAGING_STARTUP_WARN_COUNT`を超えたら
+   * 個別の警告ログを止める。`messaging.ts`の`dispatchErrorLogCount`と同じ理由で、
+   * runが生きている間ずっと引き継ぐ必要があるため`live`（`messagingHub`と同様、
+   * `ensureMessaging`の再構築をまたいで残るフィールド）へ持たせる。
+   */
+  messagingStartupWarnCount: number;
+  /**
    * 衝突解決セッション（design.md §16.17「コンフリクト」5.「解決用セッションは依存グラフの
    * ノードにはしない」）。`live.tasks`（グラフのノード＝通常のタスク）とは別に持つ。
    * taskIdをキーにする（1タスクにつき同時に1件のマージしか走らない）。
@@ -1212,6 +1239,17 @@ export class WorkflowRunner {
    * 後続の呼び出しはそれを待つだけにする。
    */
   private async ensureMessaging(runId: string, live: LiveRun): Promise<void> {
+    // 破棄中・破棄後は新規に立てない（Issue #475/PR #495レビュー指摘: high）。
+    // `dispose()`が完了した後に、それより前から`await`で止まっていた`startTask`の
+    // 継続（`resolveWorkingDirectory`等の`await`点）がここへ届くことがある。
+    // `this.runs`からrunを消す経路が無いため、`live`は`dispose()`後も解決できてしまい、
+    // 入口を守らないと生きたままの`live.messagingHub`を再利用しつつ新しいHTTPリスナーと
+    // タイマーを立ててしまう。`dispose()`は二度と呼ばれないため、この資源を閉じる経路が
+    // 無くなる（Issue #374が塞いだのと同じ形のリーク）。`onTaskFinished`
+    // （`this.disposing`のJSDoc参照）と同じ作法に揃える
+    if (this.disposing) {
+      return;
+    }
     const messaging = this.deps.messaging;
     if (messaging === undefined || live.messaging !== undefined) {
       return;
@@ -1250,6 +1288,19 @@ export class WorkflowRunner {
       // `messaging.ts`（VSCode非依存方針）へは直接渡さず最小限のportで包む
       const logPort: DispatchErrorLogPort = { error: (message) => this.deps.log.error(message) };
       const transport = await messaging.startTransport(hub, logPort);
+      // `await`の間に`dispose()`が走り抜ける窓がある（Issue #475/PR #495レビュー指摘:
+      // high）。ここで立て終えたtransportを`live.messaging`へ渡す前にもう一度確認し、
+      // 破棄済みなら誰にも参照させずその場で閉じる。渡してしまうと、二度と呼ばれない
+      // `dispose()`/`closeMessaging`に代わってこのHTTPリスナーとタイマーを閉じる経路が
+      // 無くなる
+      if (this.disposing) {
+        disposeQuietly(
+          this.deps.log,
+          () => void Promise.resolve(transport.close()).catch(() => undefined),
+          `messaging(disposed during startup) ${runId}`,
+        );
+        return;
+      }
       const waitingReplyPollTimer = setInterval(
         () => checkWaitingReplyStalls(this.internals, runId),
         WAITING_REPLY_POLL_INTERVAL_MS,
@@ -1257,9 +1308,39 @@ export class WorkflowRunner {
       waitingReplyPollTimer.unref?.();
       live.messaging = { hub, transport, waitingReplyPollTimer };
     } catch (e) {
+      this.warnMessagingStartupFailure(runId, live, e);
+    }
+  }
+
+  /**
+   * MCPサーバの起動失敗警告を、runにつき`MAX_MESSAGING_STARTUP_WARN_COUNT`件までに丸める
+   * （Issue #475/PR #495レビュー指摘: low〜medium）。`ensureMessaging`は`live.messaging`が
+   * `undefined`である限りタスク起動のたびに再試行するため、MCPサーバが恒常的に起動できない
+   * 環境では同じ警告がタスク数・retry回数に比例して無制限に増える。`messaging.ts`の
+   * `logDispatchError`（Issue #375、PR #488）と同じ規律（件数上限＋抑制中の集計ログ）に揃える。
+   * 再試行そのものは止めない（環境が回復すれば次の`ensureMessaging`呼び出しで普通に繋がる）。
+   */
+  private warnMessagingStartupFailure(runId: string, live: LiveRun, e: unknown): void {
+    live.messagingStartupWarnCount += 1;
+    const count = live.messagingStartupWarnCount;
+    if (count <= MAX_MESSAGING_STARTUP_WARN_COUNT) {
       const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
       this.deps.log.warn(
         `[workflow ${runId}] MCPサーバの起動に失敗したため、タスク間メッセージングなしで実行します: ${message}`,
+      );
+      if (count === MAX_MESSAGING_STARTUP_WARN_COUNT) {
+        this.deps.log.warn(
+          `[workflow ${runId}] MCPサーバ起動失敗の警告記録が上限（${MAX_MESSAGING_STARTUP_WARN_COUNT}件）に` +
+            '達したため、このrunではこれ以降、個別の記録を抑制します（再試行自体は続けます）',
+        );
+      }
+      return;
+    }
+    const suppressedCount = count - MAX_MESSAGING_STARTUP_WARN_COUNT;
+    if (suppressedCount % MESSAGING_STARTUP_WARN_SUPPRESSION_INTERVAL === 0) {
+      this.deps.log.warn(
+        `[workflow ${runId}] MCPサーバ起動失敗の警告記録は抑制中です（このrunで抑制開始以降 ` +
+          `${suppressedCount}件発生）`,
       );
     }
   }
@@ -1367,6 +1448,7 @@ export class WorkflowRunner {
       messaging: undefined,
       messagingHub: undefined,
       messagingSetupInFlight: undefined,
+      messagingStartupWarnCount: 0,
       mergeResolutions: new Map(),
       orchestrator: undefined,
       orchestratorSeenStates: new Map(),
@@ -1692,6 +1774,19 @@ export class WorkflowRunner {
         disposeQuietly(this.deps.log, () => session.dispose(), `merge resolution ${taskId}`);
       }
       disposeQuietly(this.deps.log, () => closeMessaging(live), 'messaging');
+      // `closeMessaging`自体は`messagingHub`をクリアしない（`closeMessaging`は`dispose()`
+      // だけでなく、run正常終了時の`pump()`からも呼ばれる共通関数のため。そちらでは
+      // `retryTask`による再開が`messagingHub`を再利用する前提＝Issue #475の案A「hubを
+      // 捨てずに再利用する」がここに依存している。`closeMessaging`側でクリアすると、
+      // 通常のrun終了後の再開のたびに新しいhubが作られ、`MAX_MESSAGES_PER_RUN`のカウンタと
+      // 未配送キューがリセットされてしまい、この修正が守ろうとしているものを自ら壊す）。
+      //
+      // `dispose()`はここが唯一の別枠: 拡張機能の終了であり、このrunが再開されることは
+      // 二度と無い（`this.runs`からrunを削除する経路が無いため`live`自体は残り続けるが、
+      // `this.disposing`により`ensureMessaging`の入口で以後の再構築は止まる）。それでも
+      // `messagingHub`を握ったままにしておく理由が無いため、ここで明示的に手放す
+      // （**この非対称は意図的**。あとから「揃える」形で`closeMessaging`側にも足さないこと）
+      live.messagingHub = undefined;
     }
     // 統合worktreeの占有（Issue #412）の強制解放。通常は`runnerMerge.ts`側の`finally`が
     // 解放するが、解放漏れが1つでもあると以後そのrunのマージが全て待ち続ける。破棄時に

@@ -5384,6 +5384,11 @@ tasks:
         expect(runner.retryTask(runId, 'T2')).toEqual({ ok: true });
         await flush();
 
+        // 再構築自体が起きていることを先に確かめる。ここを確認しないと、
+        // 「再開そのものがメッセージングを立て直さない」壊れ方（Issue #475の実害そのもの）
+        // でも`totalSent`が変わらないため見かけ上パスしてしまう
+        // （レビュー指摘: テストが弱い。修正前コードではここが1のままで落ちる）
+        expect(state.startCallCount).toBe(2);
         // hubを作り直していれば`totalSent`は0へ戻ってしまう。再利用していれば引き継がれる
         expect(state.hub?.snapshotStore().totalSent).toBe(totalBeforeClose);
       },
@@ -7879,5 +7884,80 @@ tasks:
     const run = store.find(runId) as PersistedRun;
     expect(run.haltedByUser).toBe(true);
     expect(run.tasks['T2']?.state).toBe('skipped');
+  });
+
+  describe('ensureMessagingはdisposing中・後の到達を防ぐ（Issue #475/PR #495レビュー指摘: high）', () => {
+    /**
+     * `dispose()`後にretryTaskで再開しても、`ensureMessaging`は`this.disposing`を見て
+     * 何もせず戻る。修正前は`retryTask`が`live.finished`を解除して`pump()`を呼び直すため、
+     * `startTask`→`prepareTaskLaunch`→`ensureMessaging`が`disposing`を見ずに新しい
+     * transportを立ててしまい、二度と閉じられないHTTPリスナーとポーリングタイマーが
+     * 残っていた（`this.runs`からrunを削除する経路が無いため`live`はdispose()後も
+     * 解決できる）。
+     */
+    it('dispose()後にretryTaskで再開してもMCPサーバ・タイマーを新たに立てない', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost, store } = createHarness(ONE_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/dispose.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+      expect(state.startCallCount).toBe(1);
+
+      // run終了（T1失敗）でMCPサーバは通常どおり閉じる
+      codexHost.byTaskId('T1').finish('failed', { ...initialChatState, turnFailed: true });
+      await flush();
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+      expect(state.handle?.closed).toBe(true);
+
+      // 拡張機能の終了。以後`this.disposing`はずっとtrueのまま（二度とfalseへ戻らない）
+      runner.dispose();
+
+      // 人の「再実行」操作と同じ経路（`live.finished`を解除して`pump()`を呼び直す）。
+      // `retryTask`自体は`this.disposing`を見ないため`{ ok: true }`を返すが、
+      // その先の`ensureMessaging`が入口で止まるべき
+      expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+      await flush();
+
+      // 新しいtransportは立たない。mcp接続URLも渡らない
+      expect(state.startCallCount).toBe(1);
+      const rebuiltInput = codexHost.openInputs.filter((i) => cwdEndsWithTask(i.cwd, 'T1')).at(-1);
+      expect(rebuiltInput?.mcp).toBeUndefined();
+    });
+
+    /**
+     * `startTransport`の`await`中に`dispose()`が完了する窓（入口のガードだけでは
+     * 塞げない）。この窓で立ち上がってしまったtransportを`live.messaging`へ渡さず、
+     * その場で閉じることを確認する。
+     */
+    it('startTransportの待機中にdispose()が完了すると、立ち上がったtransportは使われず閉じる', async () => {
+      const { deps, state } = fakeMessagingDeps({ blockStart: true });
+      const { runner, codexHost, store } = createHarness(ONE_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/dispose.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+      expect(state.startCallCount).toBe(1);
+
+      codexHost.byTaskId('T1').finish('failed', { ...initialChatState, turnFailed: true });
+      await flush();
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+      expect(state.handle?.closed).toBe(true);
+
+      // retryTaskで再開する。2回目の`startTransport`呼び出しなので`blockStart`により
+      // `releaseStart()`を呼ぶまで保留される
+      expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+      await flush();
+      expect(state.startCallCount).toBe(2);
+
+      // 保留中に拡張機能が終了する
+      runner.dispose();
+
+      // 保留していたstartTransportを解決させる。ここで初めてtransportのhandleが作られる
+      state.releaseStart();
+      await flush();
+
+      // 解決したtransportは`live.messaging`へ渡されず、その場で閉じられる
+      expect(state.handle?.closed).toBe(true);
+      expect(state.handle?.closeCount).toBe(1);
+    });
   });
 });
