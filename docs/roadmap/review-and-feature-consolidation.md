@@ -209,7 +209,7 @@ epic Issueは各ワークフローの開始時に起票し、採番できた時�
 | WF-A オーケストレーター実行系 | 1 | 11 | 未採番 | `wf/wf-a/integration` |
 | WF-B 生成・安全系 | 1 | 3 | [#350](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/350) | `wf/wf-b/integration` |
 | WF-C チャットUIの土台 | 1 | 9 | 未採番 | `wf/wf-c/integration` |
-| WF-D リポジトリ基盤 | 1 | 2 | 未採番 | `wf/wf-d/integration` |
+| WF-D リポジトリ基盤 | 1 | 2 | [#353](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/353) | `wf/wf-d/integration` |
 | WF-E ワークフローの自律性 | 2 | 6 | [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341) | `wf/wf-e/integration` |
 | WF-F チャットの会話操作と表示 | 2 | 3 | [#340](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/340) | `wf/wf-f/integration` |
 | WF-G 横断の仕上げ | 3 | 2 | 未採番 | `wf/wf-g/integration` |
