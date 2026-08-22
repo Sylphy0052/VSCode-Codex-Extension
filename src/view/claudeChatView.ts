@@ -9,6 +9,14 @@ import {
   type ChatUsage,
 } from '../appserver/chatState';
 import { debugLogCandidates } from '../claude/cliLocator';
+import { describeForkFromTurnError } from '../claude/forkFromTurn';
+import {
+  capSideQuestionHistory,
+  finishedSideQuestionDisplay,
+  pendingSideQuestionDisplay,
+  progressSideQuestionDisplay,
+} from '../claude/sideQuestion';
+import type { SideQuestionHistoryEntry } from '../claude/control';
 import type { ClaudeSessionStore } from '../claude/sessionStore';
 import { ClaudeStreamSession, type ClaudeSpawnPort } from '../claude/streamSession';
 import { transcriptItems } from '../claude/transcript';
@@ -28,6 +36,13 @@ import type { FileSystemPort, MemoryFileSystemPort, SymlinkResolution } from '..
 import { nodeMemoryFileSystem } from '../session/nodeFileSystem';
 import { ClaudeUsageProbe } from '../claude/usageProbe';
 import { CommandCatalog } from '../provider/commandCatalog';
+import {
+  CLAUDE_PSEUDO_COMMANDS,
+  routePseudoCommand,
+  trimmedArgsOrUndefined,
+  withPseudoCommands,
+  type PseudoCommandCall,
+} from '../provider/pseudoCommands';
 import type { SlashCommand } from '../provider/slashCommands';
 import { AttachmentBox } from '../provider/attachments';
 import { MESSAGING_MCP_SERVER_NAME } from '../orchestrator/messaging';
@@ -126,6 +141,13 @@ interface ClaudePanel extends BaseChatPanel {
   lastPostAt?: number | undefined;
   /** 直近に送った会話項目。`buildItemsDelta`が次回との差分を取るための基準。 */
   sentItems?: readonly ChatItem[] | undefined;
+  /**
+   * このタブで送った脇道の質問の履歴（issue #334、design.md §14.62）。
+   *
+   * `side_question` の `history` にそのまま渡す。本流の会話（`entry.session`の
+   * transcript）とは別物で、このタブを閉じれば消える（拡張機能側にも永続化しない）。
+   */
+  sideQuestionHistory: SideQuestionHistoryEntry[];
 }
 
 /**
@@ -316,7 +338,11 @@ export class ClaudeChatViewManager
       fromCli.length > 0
         ? fromCli
         : (this.commands ??= await this.catalog.forClaude(this.claudeHome, workspaceFolderPaths()));
-    void entry.panel.webview.postMessage({ type: 'commands', commands });
+    // `/btw`（脇道の質問、issue #334）はCLIの一覧に無いため、拡張機能側で先頭へ足す
+    void entry.panel.webview.postMessage({
+      type: 'commands',
+      commands: withPseudoCommands(CLAUDE_PSEUDO_COMMANDS, commands),
+    });
   }
 
   /**
@@ -610,6 +636,181 @@ export class ClaudeChatViewManager
   }
 
   /**
+   * 会話の途中のターンから分岐する（issue #333、design.md §14.61）。Codex画面の
+   * 「ここから分岐」（`chatView.ts`の`forkFrom`）に相当する、Claude Code版の入口。
+   *
+   * 対象は`chatScript.ts`の`turnForkTarget`（`SHOW_TURN_FORK`）が渡す、押した発言自身の
+   * uuid。`entry.session.threadId`が未確定（`system/init`をまだ受け取っていない、または
+   * CLIが異常終了した後）の間は分岐先を特定できないため実行しない。ボタンが押せているのに
+   * 無言で何も起きないと壊れているように見える（issue #340横断レビュー指摘）ため、
+   * その旨を通知する。
+   */
+  private async forkFromTurn(entry: ClaudePanel, targetUuid: string): Promise<void> {
+    const threadId = entry.session.threadId;
+    if (threadId === undefined) {
+      void vscode.window.showErrorMessage(
+        'セッションidが確定していないため分岐できません。応答が始まってからやり直してください。',
+      );
+      return;
+    }
+    const userMessageUuids = entry.session
+      .getState()
+      .items.filter((item) => item.kind === 'userMessage')
+      .map((item) => item.id);
+
+    await this.openForkFromTurn(threadId, '分岐', entry.cwd, userMessageUuids, targetUuid);
+  }
+
+  /**
+   * 指定したターンの手前までを引き継いだ新しいセッションを、新しいタブで開く
+   * （issue #333、design.md §14.61）。
+   *
+   * `openFork`（セッション全体の分岐）と同じ経路でまずforkし、開いた新しいセッションへ
+   * `rewind_conversation`を逐次送って対象の発言の手前まで戻す（`ClaudeStreamSession.
+   * rewindConversationToTurn`参照）。元のセッション（`sessionId`が指す会話）へは
+   * 一切送らない。ファイルは巻き戻らない（design.md §14.61）。
+   *
+   * 戻し切れると応答の`prefillText`（対象の発言本文）を入力欄へ挿す。既存の
+   * `insertComposerText`（issue #292、エディタの選択範囲を挿す機構）をそのまま流用する
+   * （新しいタブの入力欄は空のため、追記と設定は同じ結果になる）。
+   *
+   * 逐次rewindが途中で失敗した場合（issue #494のレビュー指摘）は
+   * `ForkFromTurnResult.succeededCount`で2通りに分ける。
+   * - 0件（1件も戻せていない）: fork側のCLIは何も削除していないため、開いたばかりの
+   *   新しいタブを黙って閉じる（`teardown`）。元のタブは無傷なので操作をやり直せる
+   * - 1件以上（途中まで戻ってから失敗）: fork側のCLIは既に一部のユーザー発言を削除済みで、
+   *   タブの会話状態は中途半端。タブは閉じずに残し、`noteLocalEvent`でタブ自身に
+   *   不整合な状態であることを明示し、そのまま入力を続けないよう促す
+   */
+  async openForkFromTurn(
+    sessionId: string,
+    title: string,
+    cwd: string | undefined,
+    userMessageUuids: readonly string[],
+    targetUuid: string,
+  ): Promise<void> {
+    const folder = cwd ?? currentWorkspaceFolder()?.uri.fsPath;
+    if (folder === undefined) {
+      void vscode.window.showErrorMessage('作業ディレクトリを特定できませんでした');
+      return;
+    }
+
+    const entry = this.buildEntry(folder, `${LABEL}: ${title}`, false, undefined);
+    this.showPanel(entry, false);
+    this.panels.set(`fork:${randomUUID()}`, entry);
+    entry.session.start({
+      cwd: folder,
+      target: { kind: 'fork', sessionId },
+      sessionId: undefined,
+      config: readClaudeConfig().claude,
+    });
+    entry.session.noteLocalEvent(
+      `forkNotice:${randomUUID()}`,
+      'このタブは元のセッションを分岐したものです。新しいセッションidはCLIが振るため拡張機能からは追跡できず、このタブはウィンドウ再読み込み後の復元と作業記録（日報・週報）の対象外になります。',
+    );
+
+    const result = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'この指示から分岐しています…' },
+      () => entry.session.rewindConversationToTurn(userMessageUuids, targetUuid),
+    );
+
+    if (!result.ok) {
+      const reason = describeForkFromTurnError(result.error);
+      if (result.succeededCount === 0) {
+        // 1件も戻せていない＝fork側のCLIは何も削除していない。新しいタブを黙って
+        // 閉じれば無害（元のタブは無傷）
+        this.teardown(entry);
+        void vscode.window.showErrorMessage(`この指示から分岐できませんでした: ${reason}`);
+        return;
+      }
+      // 途中まで戻ってから失敗＝fork側のCLIは既に一部のユーザー発言を削除済み。
+      // タブは閉じず、不整合な状態であることを画面上に明示する
+      const warning =
+        'この指示への分岐が途中で失敗しました。会話は一部だけ巻き戻った不整合な状態です。' +
+        `このタブへ入力を続けず、閉じてやり直してください（${reason}）`;
+      entry.session.noteLocalEvent(`forkFromTurnFailed:${randomUUID()}`, warning);
+      void vscode.window.showErrorMessage(warning);
+      return;
+    }
+    if (result.prefillText !== undefined && result.prefillText !== '') {
+      void entry.panel?.webview.postMessage({
+        type: 'insertComposerText',
+        text: result.prefillText,
+      });
+    }
+  }
+
+  /**
+   * 擬似コマンドを実行する。CLIへは何も送らない（`chatView.ts`の`runPseudoCommand`と
+   * 同じ考え方）。Claude Code画面は`CLAUDE_PSEUDO_COMMANDS`（`/btw`のみ）しか候補に
+   * 出さないため、ここへ来る要求は必ず`sideQuestion`になる。
+   */
+  private async runPseudoCommand(entry: ClaudePanel, call: PseudoCommandCall): Promise<void> {
+    if (call.action !== 'sideQuestion') {
+      // CLAUDE_PSEUDO_COMMANDSに無い動作がここへ来ることは無いが、将来増えたときに
+      // 黙って何も起きない状態を作らないよう、判る形で残す
+      this.log.warn(`Claude Code画面が扱わない擬似コマンドです: ${call.name}`);
+      return;
+    }
+    const question = trimmedArgsOrUndefined(call.args);
+    if (question === undefined) {
+      void vscode.window.showErrorMessage(
+        '脇道の質問を入力してください（例: /btw 今のタイムゾーンは？）',
+      );
+      return;
+    }
+    await this.startSideQuestion(entry, question);
+  }
+
+  /**
+   * 脇道の質問を送る（issue #334、design.md §14.62、Codexの `/btw` 相当）。
+   *
+   * Codex側（`chatView.ts`の`startSideQuestion`）は`thread/fork`で新しいタブを開き、
+   * そこへ普通の会話として質問と応答を差し込む。Claude Codeの`side_question`は
+   * 新しいセッションを作らない1往復の制御要求のため、同じタブの中に
+   * `kind:'sideQuestion'`の1項目として残す（`ClaudeStreamSession.noteSideQuestion`）。
+   * これは実際のCLIとのやり取り（transcript）には一切乗らない、拡張機能側だけの表示
+   * （design.md §14.62で実測済み）。
+   *
+   * このタブで過去に送った脇道の質問（`entry.sideQuestionHistory`）を`history`として
+   * 添え、`/btw`を連続で送ったときに前のやり取りを踏まえられるようにする
+   * （本流の会話そのものは踏まえない。`control.ts`の`buildSideQuestionRequest`参照）。
+   * `sideQuestionHistory`は無制限に伸びないよう`capSideQuestionHistory`で直近
+   * `MAX_SIDE_QUESTION_HISTORY`件へ収める（`sideQuestion.ts`参照）。
+   */
+  private async startSideQuestion(entry: ClaudePanel, question: string): Promise<void> {
+    const id = `sideQuestion:${randomUUID()}`;
+    entry.session.noteSideQuestion(id, pendingSideQuestionDisplay(question));
+
+    const result = await entry.session.askSideQuestion(
+      question,
+      entry.sideQuestionHistory,
+      (progress) => {
+        const display = progressSideQuestionDisplay(question, progress);
+        if (display !== undefined) {
+          entry.session.noteSideQuestion(id, display);
+        }
+      },
+    );
+
+    entry.session.noteSideQuestion(id, finishedSideQuestionDisplay(question, result));
+    if (result.ok && result.response !== undefined) {
+      const historyEntry: SideQuestionHistoryEntry = {
+        question,
+        response: result.response,
+        fallbackNotice:
+          result.refusalFallback === undefined
+            ? undefined
+            : `${result.refusalFallback.originalModel} が拒否したため ${result.refusalFallback.fallbackModel} が応答`,
+      };
+      entry.sideQuestionHistory = capSideQuestionHistory([
+        ...entry.sideQuestionHistory,
+        historyEntry,
+      ]);
+    }
+  }
+
+  /**
    * skillsを読み直す（issue #202、design.md TP-90）。設定パネルの「読み直す」ボタンから
    * `claude.reloadSkills` コマンド経由で呼ばれる（`newSession`と同じ、設定パネルの
    * webview→VS Codeコマンド→この画面の管理クラス、という橋渡し。設定パネルは
@@ -809,6 +1010,7 @@ export class ClaudeChatViewManager
       finishedListeners: [],
       approvalResolvedListeners: [],
       notifiedApprovalRequestIds: new Set(),
+      sideQuestionHistory: [],
     };
     return entry;
   }
@@ -850,6 +1052,9 @@ export class ClaudeChatViewManager
       review: { mode: 'command', commandName: 'code-review' },
       // ファイルの巻き戻し（design.md「Claude Codeの巻き戻し」）。Codexは分岐で代替する
       showRewind: true,
+      // 会話の途中のターンから分岐（issue #333、design.md §14.61）。Codex画面の
+      // 「ここから分岐」と同じボタンを、対象を発言自身のidへ切り替えて出す
+      showTurnFork: true,
       // 行頭の !/# の案内（issue #5/#6、design.md §14.29）。CodexのTUIに無い挙動
       showInputModeHints: true,
       // 他エージェントからの設定インポート（issue #200）。Codexは別のコントロールパネル
@@ -1159,6 +1364,13 @@ export class ClaudeChatViewManager
           void this.runInputMode(entry, inputMode);
           return;
         }
+        // `/btw`（脇道の質問、issue #334）はCLIへ送らず拡張機能側の機能として扱う。
+        // CLIへ送っても普通の発言として素通しされるだけ（`pseudoCommands.ts`参照）
+        const pseudo = routePseudoCommand(CLAUDE_PSEUDO_COMMANDS, text);
+        if (pseudo !== undefined) {
+          void this.runPseudoCommand(entry, pseudo);
+          return;
+        }
         this.dispatch(entry, text, true);
         this.refreshSettings(entry);
         return;
@@ -1285,6 +1497,12 @@ export class ClaudeChatViewManager
       if (type === 'rewind' && typeof m['messageId'] === 'string') {
         entry.loop.noteUserAction();
         void this.rewindFiles(entry, m['messageId']);
+        return;
+      }
+      if (type === 'fork' && typeof m['turnId'] === 'string') {
+        // 会話の途中のターンから分岐（issue #333、design.md §14.61）。新しいタブを
+        // 開くだけで、この会話（entry）そのものには何も送らない
+        void this.forkFromTurn(entry, m['turnId']);
         return;
       }
       if (type === 'planMode') {

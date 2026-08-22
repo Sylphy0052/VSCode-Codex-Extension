@@ -37,6 +37,12 @@ export function chatScript(
   approvalLevelMetaJson = '{}',
   /** この画面のプロバイダ。レベルの実効値（Codexは2軸、Claudeは1軸）の出し分けに使う。 */
   approvalProvider: ProviderId = 'codex',
+  /**
+   * 「ここから分岐」ボタンの対象を、発言自身のid（Claude Code画面）にするか
+   * （issue #333、design.md §14.61）。falseの既定はCodex画面の従来どおり
+   * （対象は直前の発言のturnId）。`chatShared.ts` の `ChatShellOptions.showTurnFork` 参照。
+   */
+  showTurnFork = false,
 ): string {
   return `
   const vscode = acquireVsCodeApi();
@@ -101,6 +107,7 @@ export function chatScript(
     subAgentActivity: 'サブエージェント',
     collabAgentToolCall: 'サブエージェント操作',
     autoApprovalReview: '自動承認レビュー',
+    sideQuestion: '脇道の質問',
   };
 
   /** ホスト側から渡されたレビューボタンの動作。 */
@@ -112,6 +119,12 @@ export function chatScript(
    * （design.md「Claude Codeの巻き戻し」参照）。
    */
   const SHOW_REWIND = ${JSON.stringify(showRewind)};
+
+  /**
+   * 「ここから分岐」ボタンの対象を、発言自身のid（Claude Code画面）にするか
+   * （issue #333、design.md §14.61）。turnForkTarget 関数を参照。
+   */
+  const SHOW_TURN_FORK = ${JSON.stringify(showTurnFork)};
 
   /**
    * 入力欄の下に !/# 始まりの案内を出すか（Claude Code画面のみ、issue #5/#6、
@@ -324,6 +337,12 @@ export function chatScript(
         parent.appendChild(code);
         continue;
       }
+      if (token.type === 'strike') {
+        const s = document.createElement('s');
+        s.textContent = token.value;
+        parent.appendChild(s);
+        continue;
+      }
       if (token.type === 'link') {
         const a = document.createElement('a');
         a.href = '#';
@@ -337,6 +356,104 @@ export function chatScript(
         parent.appendChild(a);
       }
     }
+  }
+
+  /**
+   * 表のセル配置（align）をクラス名へ変換する。undefinedは既定（左寄せ）のまま
+   * クラスを付けない。
+   */
+  function alignClass(align) {
+    if (align === 'center') return 'md-align-center';
+    if (align === 'right') return 'md-align-right';
+    if (align === 'left') return 'md-align-left';
+    return '';
+  }
+
+  /** 表1つ。列が多いと横に伸びるため、ラップ要素をoverflow-xさせる（chatStyles.ts側）。 */
+  function createTable(token) {
+    const wrap = document.createElement('div');
+    wrap.className = 'md-table-wrap';
+    const table = document.createElement('table');
+    table.className = 'md-table';
+
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    token.header.forEach((cellTokens, idx) => {
+      const th = document.createElement('th');
+      const cls = alignClass(token.align[idx]);
+      if (cls) th.className = cls;
+      appendInline(th, cellTokens);
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    token.rows.forEach((row) => {
+      const tr = document.createElement('tr');
+      row.forEach((cellTokens, idx) => {
+        const td = document.createElement('td');
+        const cls = alignClass(token.align[idx]);
+        if (cls) td.className = cls;
+        appendInline(td, cellTokens);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+
+    wrap.appendChild(table);
+    return wrap;
+  }
+
+  /** 引用1つ。複数行は段落と同じくbrで改行を保つ。 */
+  function createQuote(token) {
+    const bq = document.createElement('blockquote');
+    bq.className = 'md-quote';
+    token.lines.forEach((lineTokens, index) => {
+      if (index > 0) bq.appendChild(document.createElement('br'));
+      appendInline(bq, lineTokens);
+    });
+    return bq;
+  }
+
+  /**
+   * 箇条書き1つ。itemのdepthに沿って親liの中へul/olを入れ子にする。
+   * parseMarkdown側でdepthは1段ずつしか増えない前提（親のdepth+1を超えない）ため、
+   * 深さが増える側は常に直前のitemの下へ潜ればよい。減る側は該当階層まで戻す。
+   */
+  function createList(token) {
+    const tag = token.ordered ? 'ol' : 'ul';
+    const root = document.createElement(tag);
+    const stack = [{ depth: 0, list: root }];
+
+    for (const item of token.items) {
+      while (stack.length > 1 && stack[stack.length - 1].depth > item.depth) {
+        stack.pop();
+      }
+      let top = stack[stack.length - 1];
+      if (item.depth > top.depth) {
+        const parentLi = top.list.lastElementChild || document.createElement('li');
+        if (!parentLi.parentNode) top.list.appendChild(parentLi);
+        const nested = document.createElement(tag);
+        parentLi.appendChild(nested);
+        top = { depth: item.depth, list: nested };
+        stack.push(top);
+      }
+
+      const li = document.createElement('li');
+      if (item.checked !== undefined) {
+        li.className = 'md-task-item';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = item.checked;
+        checkbox.disabled = true;
+        li.appendChild(checkbox);
+      }
+      appendInline(li, item.inline);
+      top.list.appendChild(li);
+    }
+    return root;
   }
 
   /** コードブロック1つ。コピー・エディタへ挿入・新規ファイルで開くの3操作を付ける。 */
@@ -425,13 +542,19 @@ export function chatScript(
         continue;
       }
       if (token.type === 'list') {
-        const list = document.createElement(token.ordered ? 'ol' : 'ul');
-        for (const item of token.items) {
-          const li = document.createElement('li');
-          appendInline(li, item);
-          list.appendChild(li);
-        }
-        container.appendChild(list);
+        container.appendChild(createList(token));
+        continue;
+      }
+      if (token.type === 'table') {
+        container.appendChild(createTable(token));
+        continue;
+      }
+      if (token.type === 'quote') {
+        container.appendChild(createQuote(token));
+        continue;
+      }
+      if (token.type === 'hr') {
+        container.appendChild(document.createElement('hr'));
         continue;
       }
       if (token.type === 'codeblock') {
@@ -481,10 +604,13 @@ export function chatScript(
         ? lines.slice(lines.length - MAX_VISIBLE_LINES).join('\\n')
         : primary;
 
-    // Markdownとして解釈するのは通常の発言・応答（userMessage/agentMessage）だけ。
-    // commandExecution・reasoningは折りたたみ含め従来どおり生テキストのまま（issue #290）
+    // Markdownとして解釈するのは通常の発言・応答（userMessage/agentMessage）と
+    // 脇道の質問（sideQuestion、issue #334。質問と応答を1本文にまとめており、応答部分は
+    // 普通の発言と同じ体裁で見せたい）。commandExecution・reasoningは折りたたみ含め
+    // 従来どおり生テキストのまま（issue #290）
     const useMarkdown =
-      RENDER_MARKDOWN && (item.kind === 'userMessage' || item.kind === 'agentMessage');
+      RENDER_MARKDOWN &&
+      (item.kind === 'userMessage' || item.kind === 'agentMessage' || item.kind === 'sideQuestion');
     const bodyMode = useMarkdown ? 'markdown' : 'text';
     if (node.bodyMode !== bodyMode || node.bodyKey !== shown) {
       node.bodyMode = bodyMode;
@@ -719,6 +845,21 @@ export function chatScript(
     container.hidden = diffs.length === 0;
   }
 
+  // 「ここから分岐」ボタンの対象を決める（issue #333、design.md §14.61）。
+  //
+  // Codex画面（既定）: 対象は直前の発言のturnId（thread/forkのlastTurnIdは
+  // 「引き継ぐ最後のターン」を指すため）。最初の発言には手前が無いのでボタンを出さない。
+  //
+  // Claude Code画面（SHOW_TURN_FORK）: 対象は押した発言自身のid（rewind_conversationの
+  // target_message_uuidは「戻す対象＝分岐したい発言そのもの」を指すため、Codexとは
+  // 向きが違う）。Claude Codeの発言idは常に持っているため、最初の発言でもボタンを出す
+  // （CLIが対象にできない場合はエラー応答として画面に返る。design.md §14.61の
+  // 「未確認のリスク」参照）。
+  function turnForkTarget(item, previousTurnId) {
+    if (item.kind !== 'userMessage') return undefined;
+    return SHOW_TURN_FORK ? item.id : previousTurnId;
+  }
+
   function updateNode(node, item, forkTarget) {
     const bits = [KIND_LABEL[item.kind] || item.kind];
     if (item.detail) bits.push(item.detail);
@@ -786,7 +927,7 @@ export function chatScript(
         nodes.set(item.id, node);
         log.appendChild(node.wrap);
       }
-      updateNode(node, item, item.kind === 'userMessage' ? previousTurnId : undefined);
+      updateNode(node, item, turnForkTarget(item, previousTurnId));
       if (item.kind === 'userMessage' && item.turnId) previousTurnId = item.turnId;
     }
 

@@ -633,11 +633,39 @@ export function chatStyles(): string {
   .body h3 { font-size: 1.1em; }
   .body h4, .body h5, .body h6 { font-size: 1em; }
   .body ul, .body ol { margin: 4px 0 8px; padding-left: 1.4em; }
+  .body ul ul, .body ul ol, .body ol ul, .body ol ol { margin: 2px 0; }
   .body li { margin: 2px 0; }
   .body strong { font-weight: 600; }
   .body em { font-style: italic; }
+  .body s { color: var(--vscode-descriptionForeground); }
   .body a { color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: none; }
   .body a:hover { text-decoration: underline; }
+  .body hr {
+    margin: 10px 0;
+    border: none;
+    border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+  }
+  /* タスクリスト（issue #332）。チェックボックスは表示専用（クリック不可）で操作は伴わない */
+  .md-task-item { list-style: none; margin-left: -1.4em; }
+  .md-task-item input[type="checkbox"] { margin-right: 4px; vertical-align: middle; }
+  .body blockquote.md-quote {
+    margin: 6px 0 10px;
+    padding: 2px 10px;
+    border-left: 3px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    color: var(--vscode-descriptionForeground);
+  }
+  /* 表（issue #332）。列が多いと画面幅を超えるため、ラップ要素だけを横スクロールさせる */
+  .md-table-wrap { margin: 6px 0 10px; overflow-x: auto; }
+  .md-table { border-collapse: collapse; width: max-content; min-width: 100%; }
+  .md-table th, .md-table td {
+    padding: 4px 10px;
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    text-align: left;
+  }
+  .md-table th { background-color: var(--vscode-editorWidget-background); font-weight: 600; }
+  .md-table .md-align-left { text-align: left; }
+  .md-table .md-align-center { text-align: center; }
+  .md-table .md-align-right { text-align: right; }
   /* インラインコード。コードブロック内（.md-code pre code）は下で上書きする */
   .body code {
     padding: 1px 4px;

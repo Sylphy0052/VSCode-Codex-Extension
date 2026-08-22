@@ -28,6 +28,34 @@ export interface IncomingControlRequest {
   payload: Record<string, unknown>;
 }
 
+/**
+ * エラー文言の由来（issue #340横断レビュー指摘）。
+ *
+ * `rewind_conversation`・`side_question`はどちらも、拡張機能自身が組み立てた文言
+ * （セッション未起動・対象が見つからない等、既に利用者向けの日本語）と、CLI側から
+ * 読んだ文言（内部実装依存の生の例外文字列、または`turn running`等の列挙的な理由コード）
+ * の両方を同じ`error`フィールドで返しうる。呼び出し側の表示関数（`describeForkFromTurnError`
+ * `describeSideQuestionError`）がどちらかを判定できないと、非CLI由来の文言まで
+ * 汎用文言へ丸めてしまう（＝横断レビューで見つかったバグ）。呼び出し側に文字列パターンで
+ * 判定させる代わりに、生成側（`control.ts`・`streamSession.ts`・`forkFromTurn.ts`）が
+ * 型で由来を持たせる。
+ *
+ * - `'cli'`: CLIが返した文言。表示前に呼び出し側で必ず利用者向けの文言へ変換すること
+ *   （内部実装の露出を防ぐ）。**判断基準は「文言の値をどこから読んだか」であり、
+ *   `response.ok`や封筒の成功/失敗とは別軸**：`payload.error`のように成功封筒に乗って
+ *   きた値であっても、値そのものをCLIが組み立てているなら`'cli'`にする
+ *   （issue #340横断レビュー再発防止: 成功封筒だから安全＝`'app'`と誤認しないこと）
+ * - `'app'`: 拡張機能自身が文字列リテラルとして組み立てた、既に利用者向けの日本語文言。
+ *   そのまま表示してよい。CLI応答の値を一切経由しない文言だけがここに入る
+ */
+export type ErrorOrigin = 'cli' | 'app';
+
+/** 由来つきのエラー文言。 */
+export interface OriginatedError {
+  message: string;
+  origin: ErrorOrigin;
+}
+
 export interface ControlResponse {
   requestId: string;
   ok: boolean;
@@ -423,6 +451,280 @@ export function readRewindFilesResult(response: ControlResponse): RewindFilesRes
     insertions: num(payload['insertions']),
     deletions: num(payload['deletions']),
     error: undefined,
+  };
+}
+
+/**
+ * 会話を指定した発言の手前まで戻す要求（issue #333、design.md §14.61）。
+ *
+ * `rewind_files`（ファイルだけを戻す）とは別物で、会話（transcript上のやり取り）だけを
+ * 戻す。ファイルには一切触れない（実測、CLI 2.1.235。design.md §14.61参照）。
+ *
+ * パラメータはスネークケースの `target_message_uuid`（戻す対象の発言。transcript jsonlの
+ * `"type":"user"` 行のトップレベル `uuid`。`message.id` ではない）と
+ * `interrupt_if_running`（ターン走行中なら中断してから戻す。省略/falseで走行中だと
+ * `turn running` エラーになる）。
+ *
+ * **対象は実質「現在の最後のユーザー発言」しか指定できない**（対象より後ろに人間由来の
+ * ユーザー発言が残っていると `stale target` で拒否される）。途中のターンまで戻すには、
+ * 対象以降の発言を新しい順に1件ずつ逐次送る必要がある
+ * （`streamSession.ts` の `rewindConversationToTurn` 参照）。
+ *
+ * **`--fork-session` していないセッション（`-r` のみのresume）へ送ると、元セッションの
+ * transcriptが壊れる**（実測: `{"type":"last-prompt","rewound":true,...}` が追記され、
+ * 次回resume時に会話が切り捨てられる）。呼び出し側でforkしたセッションにだけ限ること。
+ */
+export function buildRewindConversationRequest(
+  requestId: string,
+  targetMessageUuid: string,
+  interruptIfRunning: boolean,
+): string {
+  return buildControlRequest(requestId, {
+    subtype: 'rewind_conversation',
+    target_message_uuid: targetMessageUuid,
+    interrupt_if_running: interruptIfRunning,
+  });
+}
+
+/** `rewind_conversation` の応答を読んだ結果。 */
+export interface RewindConversationResult {
+  rewound: boolean;
+  targetMessageUuid: string | undefined;
+  /** 戻した対象の発言本文。成功時のみ入る。入力欄への差し戻しに使う。 */
+  prefillText: string | undefined;
+  precedingAssistantUuid: string | undefined;
+  /**
+   * 戻せない理由。`turn running` / `stale target` / `target not found` など。
+   *
+   * ここに入るのは常にCLI由来（`origin:'cli'`。issue #340横断レビュー指摘）。
+   * `forkFromTurn.ts`・`streamSession.ts`が組み立てる非CLI由来のエラーは
+   * `ForkFromTurnResult.error`側で別に`origin:'app'`として持つ。
+   */
+  error: OriginatedError | undefined;
+}
+
+/**
+ * `rewind_conversation` の応答を読む。
+ *
+ * **応答は失敗時も `subtype:"success"` の封筒で返る**（実測、CLI 2.1.235）。
+ * `readRewindFilesResult` のように `response.ok` で早期に成否を決めてはいけない
+ * （`ok` は封筒レベルの成否でしかなく、rewind自体が成功したかは別）。判定は必ず
+ * `payload.rewound` で行う。
+ *
+ * control protocol自体が失敗した場合（`response.ok` が false。応答が壊れている等）だけは
+ * rewind要求そのものが届いていないとみなし、`rewound:false` として扱う。
+ */
+export function readRewindConversationResult(response: ControlResponse): RewindConversationResult {
+  if (!response.ok) {
+    return {
+      rewound: false,
+      targetMessageUuid: undefined,
+      prefillText: undefined,
+      precedingAssistantUuid: undefined,
+      error: { message: response.error ?? '不明なエラー', origin: 'cli' },
+    };
+  }
+  const payload = response.payload;
+  const errorMessage = strOrUndefined(payload?.['error']);
+  return {
+    rewound: payload?.['rewound'] === true,
+    targetMessageUuid: strOrUndefined(payload?.['targetMessageUuid']),
+    prefillText: strOrUndefined(payload?.['prefillText']),
+    precedingAssistantUuid: strOrUndefined(payload?.['precedingAssistantUuid']),
+    error: errorMessage === undefined ? undefined : { message: errorMessage, origin: 'cli' },
+  };
+}
+
+/**
+ * 過去に送った脇道の質問1件（issue #334、design.md §14.62）。
+ *
+ * `side_question` の `history` に載せる。スネークケースの `fallback_notice`（実測）。
+ */
+export interface SideQuestionHistoryEntry {
+  question: string;
+  response: string;
+  /** 別モデルへ切り替わった旨の注記。無ければ省略する。 */
+  fallbackNotice: string | undefined;
+}
+
+/**
+ * 脇道の質問を送る要求（issue #334、design.md §14.62、Codexの `/btw` 相当）。
+ *
+ * 実測（`/tmp`の実測記録、CLI 2.1.235）: `{subtype:"side_question", question, history?}`。
+ * `history` は任意で、省略すると質問単体として扱われる（過去のやり取りを踏まえない）。
+ * Codexの `thread/fork`（`ephemeral: true`）と違い、**新しいスレッド/セッションを
+ * 作らない**。現在つながっている1本のCLIプロセスへ直接 `control_request` を送るだけで、
+ * 応答も1往復で返る。
+ *
+ * **走行中のターンがあっても送れる**（実測: 長いターンを走らせたまま送り、ターンの
+ * 完了より先に応答が返ることを確認済み。design.md §14.62参照）。`rewind_conversation`の
+ * ような走行チェックは無い。
+ *
+ * **本流のtranscriptに一切痕跡が残らない**（実測: `side_question`だけを送ったセッションは
+ * transcriptファイル自体が作られない。実会話がある場合でも質問・応答の文字列は
+ * transcript中に一切現れない。design.md §14.62参照）。この要求はコード上の根拠
+ * （`skipTranscript:true`等）だけでなく実測でも裏付けが取れている、数少ない経路。
+ */
+export function buildSideQuestionRequest(
+  requestId: string,
+  question: string,
+  history: readonly SideQuestionHistoryEntry[] = [],
+): string {
+  return buildControlRequest(requestId, {
+    subtype: 'side_question',
+    question,
+    ...(history.length > 0
+      ? {
+          history: history.map((entry) => ({
+            question: entry.question,
+            response: entry.response,
+            ...(entry.fallbackNotice !== undefined
+              ? { fallback_notice: entry.fallbackNotice }
+              : {}),
+          })),
+        }
+      : {}),
+  });
+}
+
+/** モデルが拒否し、別モデルへ自動的に切り替わった旨の記録。 */
+export interface SideQuestionRefusalFallback {
+  originalModel: string;
+  fallbackModel: string;
+  /** 切替後のモデルが実際に返した本文。`response` と同じ値のことが多い。 */
+  content: string;
+}
+
+/** `side_question` の応答を読んだ結果。 */
+export interface SideQuestionResult {
+  ok: boolean;
+  response: string | undefined;
+  /**
+   * 実際にモデルへ問い合わせず合成された応答か。
+   *
+   * 実測（バイナリの`mZE()`関数解析、`/tmp`の実測記録・design.md §14.62参照）で意味が
+   * 確定した: `true`は「モデルが実際に文章で回答しなかった」ことを示し、そのときの
+   * `response`はCLIが生成した**英語固定のプレースホルダ文言**（ツール呼び出しを試みた場合
+   * ／APIエラー時）であり、モデルの回答ではない。`ok:true`（封筒レベルは成功）でも
+   * `synthetic:true`のときは呼び出し側でエラー相当として扱う必要がある
+   * （`sideQuestion.ts`の`finishedSideQuestionDisplay`参照）。
+   */
+  synthetic: boolean | undefined;
+  /** 元のモデルが拒否し、別モデルへ切り替わって答えたときだけ入る。 */
+  refusalFallback: SideQuestionRefusalFallback | undefined;
+  /**
+   * 失敗理由。由来つき（issue #340横断レビュー指摘）。
+   *
+   * `origin:'cli'`になるのは`response.ok === false`（control protocol自体の失敗。
+   * CLI内部のJS例外メッセージがそのまま入りうる）のときに加え、**成功封筒なのに応答本文が
+   * 読めず`payload.error`を理由として使う場合も同じ**（値そのものはCLIが封筒に乗せてきた
+   * ものであり、封筒の成功/失敗は無関係。issue #340確認レビュー再指摘）。それ以外
+   * （拡張機能側の固定文言、`streamSession.ts`のガード）だけが`origin:'app'`となり、
+   * 表示側（`describeSideQuestionError`）が汎用文言へ丸めずそのまま出す。
+   */
+  error: OriginatedError | undefined;
+}
+
+/**
+ * `side_question` の応答を読む。
+ *
+ * 実測した成功時の形: `{response:"...", synthetic:false}`。任意で
+ * `refusal_fallback:{original_model, fallback_model, content}` が付く。
+ *
+ * 失敗の返り方は実測（`/tmp`の実測記録、CLI 2.1.235。design.md §14.62参照）で二層ある
+ * ことが分かっている:
+ * - 構造エラー（`history`が配列でない等）は`subtype:"error"`の封筒で返り、`error`には
+ *   CLI内部のJS例外メッセージがそのまま入る（`readControlResponse`が拾う）。ここでは
+ *   `response.ok`をそのまま使い、`error`はそのまま保持する（画面へ出す際のマスキングは
+ *   呼び出し側＝`sideQuestion.ts`の`describeSideQuestionError`が担う。内部実装の露出を
+ *   防ぐのは表示層の責務にする）
+ * - モデル実行中の失敗（ツール呼び出し試行・APIエラー）は`subtype:"success"`の封筒に
+ *   `synthetic:true`で隠れる。ここでは読み取るだけに留め、失敗として扱うかどうかの判定は
+ *   `synthetic`をそのまま返して呼び出し側へ委ねる
+ *
+ * 成功の封筒なのに`response`本文が読み取れない（空文字・欠落）場合は、まず
+ * `payload.error`（あれば）を理由として使い、無ければ汎用文言にする（レビュー指摘:
+ * 空/欠落時に`payload?.['error']`を見ずに固定文言を返していた点の修正）。CLIが将来
+ * この応答の中身だけ形を変えても、黙って空応答を成功と誤判定しないための安全側。
+ */
+export function readSideQuestionResult(response: ControlResponse): SideQuestionResult {
+  if (!response.ok) {
+    return {
+      ok: false,
+      response: undefined,
+      synthetic: undefined,
+      refusalFallback: undefined,
+      error: { message: response.error ?? '不明なエラー', origin: 'cli' },
+    };
+  }
+  const payload = response.payload;
+  const text = strOrUndefined(payload?.['response']);
+  if (text === undefined) {
+    // 封筒は成功だが応答本文が読めない場合。`payload.error`が入っていればそれはCLIが
+    // 封筒に乗せてきた値なので`origin:'cli'`（封筒の成功/失敗ではなく値の由来で判定する。
+    // issue #340確認レビュー再指摘）。無ければ拡張機能側の固定文言で`origin:'app'`
+    const payloadError = strOrUndefined(payload?.['error']);
+    return {
+      ok: false,
+      response: undefined,
+      synthetic: undefined,
+      refusalFallback: undefined,
+      error:
+        payloadError === undefined
+          ? { message: '応答を読み取れませんでした', origin: 'app' }
+          : { message: payloadError, origin: 'cli' },
+    };
+  }
+  const syntheticRaw = payload?.['synthetic'];
+  const synthetic =
+    syntheticRaw === true ? true : syntheticRaw === false ? false : undefined;
+  const fallback = rec(payload?.['refusal_fallback']);
+  const refusalFallback =
+    fallback === undefined
+      ? undefined
+      : {
+          originalModel: str(fallback['original_model']),
+          fallbackModel: str(fallback['fallback_model']),
+          content: str(fallback['content']),
+        };
+  return { ok: true, response: text, synthetic, refusalFallback, error: undefined };
+}
+
+/**
+ * 脇道の質問の処理経過（`control_request_progress`。issue #334、design.md §14.62）。
+ *
+ * 実測: `{type:"system", subtype:"control_request_progress", request_id, status}`。
+ * `status` は `started` と `api_retry`（`attempt`/`max_retries`/`retry_delay_ms`/
+ * `error_status` を伴う）を確認済み。この通知は `side_question` 専用（実測メモより）。
+ * `control_response` とは別経路（`type:"system"`）で届くため、`readControlResponse` では
+ * 拾えない。未知の `status` 値もそのまま文字列で通す（呼び出し側が丸める）。
+ */
+export interface ControlRequestProgress {
+  requestId: string;
+  status: string;
+  attempt: number | undefined;
+  maxRetries: number | undefined;
+  retryDelayMs: number | undefined;
+  errorStatus: string | undefined;
+}
+
+export function readControlRequestProgress(
+  event: Record<string, unknown>,
+): ControlRequestProgress | undefined {
+  if (str(event['type']) !== 'system' || str(event['subtype']) !== 'control_request_progress') {
+    return undefined;
+  }
+  const requestId = str(event['request_id']);
+  if (requestId === '') {
+    return undefined;
+  }
+  return {
+    requestId,
+    status: str(event['status']),
+    attempt: num(event['attempt']),
+    maxRetries: num(event['max_retries']),
+    retryDelayMs: num(event['retry_delay_ms']),
+    errorStatus: strOrUndefined(event['error_status']),
   };
 }
 

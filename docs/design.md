@@ -1018,7 +1018,7 @@ TUIタブ（当時の`buildClaudeShellArgs`、§14.2）には付けない。CLI�
 | 新規 / resume / タブ復元                                                          | ○                                                                   | ○                                                                                        |
 | チャット画面（承認・中断込み）                                                    | ○                                                                   | ○                                                                                        |
 | fork（セッション全体、§14.40）                                                    | ○                                                                   | ○（idは未確定のまま）                                                                    |
-| 会話の途中のターンから分岐                                                        | ○                                                                   | ×（CLIに手段が無い）                                                                     |
+| 会話の途中のターンから分岐                                                        | ○                                                                   | ○（`rewind_conversation`。CLI 2.1.235で追加を確認。§14.61）                              |
 | 巻き戻し（[#21](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/21)） | ×（`thread/rollback` はdeprecatedかつファイルを戻さない。採らない） | ○（`rewind_files`。**ファイルだけ**戻す。会話には触れない）                              |
 | archive / unarchive / delete                                                      | ○                                                                   | ×（CLIに手段が無い。ファイルを直接消すことはしない）                                     |
 | セッション名の変更（§14.35）                                                      | ○（app-server側に永続化）                                           | ○（拡張機能ローカルの`ClaudeSessionNameStore`止まり。CLI側の`rename_session`は使わない） |
@@ -1041,6 +1041,8 @@ Codexの `forkFromTurn`（`thread/fork` に `lastTurnId` を渡す。§9.5「会
 バイナリ内の実装（`branch` 選択時に呼ばれる関数）を読むと、対象ターンまでのメッセージを新しいsessionIdへ複製しながら `content-replacement` / `relocated`（cwdの引き継ぎ）/ `sessionHistorySuppressed` などのレコードを合わせて書き出す処理になっており、単純なtranscriptの行コピーでは再現できない。加えてこれは公開ドキュメントの無いminifiedコードからの逆解析であり、CLIの更新で予告なく変わりうる。**この処理自体が非対話環境では実行できないよう作られている**ことは、同等の操作を拡張機能側で（transcriptを読んで新しいセッションを組み立てる形で）代替するのが安全でないことの傍証でもある。§8「会話本文を読まない・保存しない」とは別に、CLIの内部ストレージ形式に依存した複製は元のセッションを壊すリスクを避けられないため、この代替は採らない。
 
 以上から、**Claude Codeでは会話の途中のターンから分岐する手段が無いと結論する**。Codex側の `forkFromTurn` 実装（`src/view/chatView.ts` の `forkFrom` / `src/view/conversationView.ts`）と同じ導線は出さない。将来のCLI更新で `--print` 経路にも `branch` / `fork` が解放されれば再調査する。
+
+> **この結論はCLI 2.1.235で覆った（issue #333、§14.61）**。上記1〜4はCLI 2.1.227時点の実測として歴史的記録のまま残すが、`control_request`のsubtype総当たり（3）は当時14候補に `rewind_conversation` を含めておらず、その後のCLI更新で新設されたsubtypeを見落としていた（既存候補の再実測ではなく、未知の新設subtypeだったため見落とし自体は当時の実測手順の誤りではない）。詳細は§14.61を参照。
 
 #### 巻き戻し（Codex Esc Esc / Claude `/rewind` 相当、[#21](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/21)）
 
@@ -2931,9 +2933,9 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 残る制約:
 
-- テーブル・引用・水平線・ネストした強調は扱わない
+- 表・引用・水平線・打消し線・ネストした箇条書き・タスクリストは§14.60（issue #332）で追加した。ネストした強調（太字の中の斜体等）は引き続き扱わない
 - リンクURLは`([^)\s]+)`という簡易パターンで区切っており、URLに空白を含む記法や、閉じ括弧を含む一部のURLは正しく拾えない
-- webview側のDOM組み立て（`renderMarkdownInto`・`appendInline`・`createCodeBlock`）はvitestのnode環境では実行できない（jsdom/happy-domを導入していない）。自動化できているのは構文チェック（`new Function`）とMarkdownパース結果の一致テストまでで、実際のDOM描画・ボタンの動作確認は`docs/manual-test.md`のU群（U-08〜U-10）に委ねる
+- webview側のDOM組み立て（`renderMarkdownInto`・`appendInline`・`createCodeBlock`）はvitestのnode環境では実行できない（jsdom/happy-domを導入していない）。自動化できているのは構文チェック（`new Function`）とMarkdownパース結果の一致テストまでで、実際のDOM描画・ボタンの動作確認は`docs/manual-test.md`のU群（U-08〜U-10、表とネストは§14.60のU-26〜U-28）に委ねる
 
 ### 14.52 会話の差分からファイルとdiffを開く（issue #291）
 
@@ -3355,6 +3357,177 @@ Codex側・Claude側は同じ`createExecutablePathResolver(provider, log)`（`sr
 #### 副次効果として整合した点（統合テスト）
 
 `test/integration/fixtures/setup.mjs`は元々`codex.executablePath: '/nonexistent/codex-must-not-run'`という、存在しない絶対パスをfixtureに設定していた（実CLIを掴ませないための対策）。従来の実装はこの明示指定が解決に失敗しても`?? 'codex'`で裸の`'codex'`へ落としていたため、`.vscode-test.mjs`の`PATH`制限がVSCode Linux版のシェル環境解決で上書きされる開発機では、`spawn('codex', ...)`が実PATH上の本物のCLIを掴んでいた。本対応後は`resolveSpawnPath`が`/nonexistent/codex-must-not-run`をそのまま返すため、`spawn`はこの存在しないパスを文字通り試みて`ENOENT`になる。これは本Issueの主目的（明示指定の失敗を握りつぶさない）の直接の帰結であり、統合テスト救済のために設計を曲げたものではない。実際に`npm run test:integration:xvfb`を走らせての確認はしていない（重いため。issue #305のIssue本文にある通り、この検証は必須要件にはしていない）。
+
+### 14.60 応答のMarkdown描画へ表・引用・ネストしたリストを足す（issue #332）
+
+背景: §14.51で入れたMarkdown描画は見出し・箇条書き（フラット）・強調・インラインコード・コードフェンス・リンクのみで、表・引用・ネストしたリスト・水平線・打消し線・タスクリストは素のテキストとして流れていた。エージェントは比較や一覧を表で出すことが多く、影響が大きかった。
+
+対応する記法:
+
+- 表（GFM形式。`| a | b |` ヘッダ行 + `| --- | --- |` 区切り行 + データ行）。列ごとの寄せ指定（`:--`＝左、`:-:`＝中央、`--:`＝右、指定無しは既定の左寄せ）を`TableAlign`として保持する
+- 引用（`>`、複数行連続で1つの`quote`トークンにまとめる）
+- 水平線（`---` / `***` / `___`、3文字以上・空白混在も許容）
+- 打消し線（`~~text~~`、inlineトークンへ`strike`を追加）
+- ネストした箇条書き（半角スペース2個を1階層としてインデントを数える。`ListItem.depth`で階層を持つ。インデントが直前の項目のdepth+1を超えて飛んでも、直前より1段までしか深くしない。1つの`list`トークンの中で`ordered`は単一の値のみ持ち、ネストの内側で番号付き/箇条書きが混ざっても種別自体は親と同じ扱いにする軽量な割り切り。深さ0での種別切り替えだけは従来どおり別の`list`トークンに分ける）
+- タスクリスト（`- [ ]` / `- [x]` / `- [X]`）。`ListItem.checked`に真偽値を持つ（通常項目では省略する）
+
+対応しない記法（スコープ外）:
+
+- ネストした強調（太字の中の斜体等、§14.51からの既存の制約のまま）
+- 表セルのエスケープされたパイプ（`\|`）
+- 表・リストのネストした組み合わせ（表のセルの中に箇条書きを書く等）
+
+信用しない描画の方針（§14.51から継続）:
+
+- `parseMarkdown`/`parseInline`はHTML文字列を一切組み立てず、トークン列だけを返す。DOMへの差し込み（`chatScript.ts`の`createTable` / `createQuote` / `createList`）も`createElement`/`createTextNode`だけで組み、`innerHTML`等は使わない。エージェント出力に`<script>`やイベントハンドラ属性を含む文字列が来ても、地の文（テキストノード）としてそのまま表示されるだけでHTMLとして評価されることはない
+- タスクリストのチェックボックスは`disabled = true`の表示専用で、クリックしても状態は変わらない（双方向の状態同期は本Issueのスコープ外）
+- 未閉じの表（区切り行だけ届いてデータ行が無い、あるいはヘッダ行だけでまだ区切り行が届いていない）・未閉じの引用（継続行が来る前に入力が途切れる）は、ストリーミング中の未完な強調・未閉じコードフェンス（§14.51）と同じ考え方で例外を投げない。ヘッダ行だけでは表と判定せず段落として残し、区切り行まで揃った時点で初めて`table`トークンになる。引用は1行だけでも`quote`として成立する（Markdown的に自然）ため、行が増えるたびに描き直される
+
+実装:
+
+- `src/view/markdown.ts`の`BlockToken`へ`table` / `quote` / `hr`を追加し、`list`の`ListItem`へ`depth: number`・`checked?: boolean`を持たせた。`InlineToken`へ`strike`を追加した
+- TS実装（`parseMarkdown`/`parseInline`）とwebview埋め込み用の`MARKDOWN_PARSE_SOURCE`（同じロジックをJSソース文字列として二重管理する理由は§14.51参照）の両方を更新し、`test/unit/markdown.test.ts`の`MARKDOWN_PARSE_SOURCE`評価テストで両者が同じトークン列を返すことを確認する
+- `chatScript.ts`の`renderMarkdownInto`へ`table` / `quote` / `hr`の分岐を追加し、`list`は新設の`createList`（`ListItem.depth`に沿って親`li`の中へ`ul`/`ol`を入れ子にする。深さが増える側は直前の`li`の下へ潜り、減る側は該当階層まで`stack`を戻す）へ置き換えた。`appendInline`へ`strike`（`<s>`要素）を追加した
+- `chatStyles.ts`へ`.md-table-wrap`（`overflow-x: auto`で表だけを横スクロールさせる。ページ全体は横スクロールさせない）・`.md-table`・`.md-quote`・`.md-task-item`・`.body hr`のスタイルを追加した
+
+残る制約:
+
+- webview側のDOM組み立て（`createTable` / `createQuote` / `createList`）はvitestのnode環境では実行できない（§14.51と同じ制約）。実際の表の横スクロール・ネストしたリストの階層表示・ストリーミング中の描画崩れの有無は`docs/manual-test.md`のU-26〜U-28に委ねる
+
+### 14.61 会話の途中のターンから分岐（Claude Code、issue #333）
+
+背景: §14.6の「会話の途中のターンから分岐」はCLI 2.1.227時点で「手段が無い」と結論していた（上の`#### 会話の途中のターンから分岐（実測で不可と確定、[#22]...）`）。CLI 2.1.235で`control_request`の新しいsubtype `rewind_conversation` が使えることを確認し、この結論を覆す。以下はすべて実測（CLI 2.1.235、`--print --input-format stream-json`経路）に基づく。未測定の挙動は「未確認のリスク」として明記し、測定済みであるかのようには書かない。
+
+#### 実測した挙動
+
+1. **`target_message_uuid`は「戻す対象＝分岐したい発言そのもの」を指す**。Codexの`thread/fork`が`lastTurnId`（引き継ぐ最後のターン＝対象の一つ手前）を取るのとは向きが逆で、Claude側は押した発言自身のuuidをそのまま渡す。transcriptの`jsonl`の`"type":"user"`行のトップレベル`uuid`と一致する（`ChatItem.id`としてすでに保持済み。§9.5・上の`rewind_files`節と同じ経路、`src/claude/streamJson.ts`の`applyUser`）
+2. **後続の人の発言が残っていると「stale target」として拒否される**。1回の`rewind_conversation`は対象より後の人の発言をすべて消してから対象へ戻す想定の操作ではなく、直近の1件しか戻せない。複数ターン分岐るには**新しい順に1件ずつ逐次**送る必要がある（並列に投げると失敗する）
+3. **応答の封筒は常に`subtype:"success"`（`ControlResponse.ok`は常にtrue）で、成否は`payload.rewound`で判定する**。失敗時も`rewound:false`とエラー文言が同じ成功封筒の中に入って返ってくる。既存の`readRewindFilesResult`（`ok`で成否判定）とは判定方法をあえて分け、`readRewindConversationResult`を新設した（`src/claude/control.ts`）。`ok`だけを見て成功と誤判定しないことをテストで固定した
+4. **`prefillText`はCLIが返す値をそのまま使う**。戻した対象発言の本文がここに入って返ってくるとみられ（新しいタブの入力欄へ流し込む）、拡張機能側でtranscriptを読んで再構成することはしない
+5. **`--fork-session`必須**。fork指定なし（`resume`のみ、または`new`）のセッションへ`rewind_conversation`を送ると元セッションのtranscriptを書き換えてしまうリスクがあるため、forkしたセッション（`target.kind === 'fork'`）以外へは送らないガードを`ClaudeStreamSession.rewindConversationToTurn`自身に持たせた（呼び出し元の配線ミスでも壊れないよう、最下層で防ぐ）
+6. **ファイルは戻らない**（`rewind_files`とは独立の操作）。会話だけを戻す操作であり、ワークスペースのファイルには一切触れない。ファイルを戻したい場合は既存の`rewind_files`（§14.6の`巻き戻し`節）を別途使う
+
+#### 未確認のリスク（測定していない・保証しない）
+
+- **先頭の発言（直前にアシスタントの応答が無い発言）まで戻したときの挙動は未測定**。`RewindConversationResult.precedingAssistantUuid`が`undefined`になるケース自体は応答の型として持たせたが、実際にCLIがどう応答するか（成功して`prefillText`だけ返るのか、専用のエラーになるのか）は確認していない。Codexの`forkFromTurn`は先頭の発言にはボタン自体を出さない設計だが、Claude Code側はこの制約が未確認のため、あえてボタンを隠さずCLIの応答をそのままエラー表示に委ねる設計にした（要判断: 実機確認後、必要ならCodexと同様に先頭発言でボタンを隠す方針へ変更する）
+- **新しいセッションidの扱いは未確認**。forkで作られる新セッションのidを拡張機能側が特定・追跡する手段は今回調べておらず、`openForkFromTurn`は既存の`openFork`と同様にidを追跡しない前提（タブはウィンドウ再読み込み後の復元・作業記録の対象外）としている
+- **`rewind_conversation`も`rewind_files`と同様、非公開の内部プロトコルであり将来のCLI更新で無くなる・形が変わる可能性がある**。その場合は`readRewindConversationResult`が`rewound:false`側に倒れ、エラーメッセージとして画面に返るだけで、他の操作には影響しない
+
+#### 逐次rewindが途中で失敗したときの後始末（issue #494のレビュー指摘）
+
+逐次送信（上記2）は途中の1件が失敗する余地がある。失敗した時点で、fork側のCLIは**それより前に成功した件数だけ既にユーザー発言を削除している**（`wr.splice(ki)`）。この「1件も戻せていない（無害）」と「途中まで戻ってから失敗した（会話が不整合な状態）」を区別できないと、新しいタブを何もせず残した場合にユーザーが中途半端な状態のまま入力を続けてしまう。
+
+`ForkFromTurnResult`に`succeededCount`（逐次送信のうち成功した件数）を持たせ、`openForkFromTurn`（`src/view/claudeChatView.ts`）で次のように分ける。
+
+- `succeededCount === 0`（1件も戻せていない）: fork側のCLIは何も削除していないため、開いたばかりの新しいタブを`teardown`で閉じる。元のタブは無傷なのでユーザーは操作をやり直せる
+- `succeededCount > 0`（途中まで戻ってから失敗）: タブは閉じずに残す。`ClaudeStreamSession.noteLocalEvent`で「会話は一部だけ巻き戻った不整合な状態」であることを会話へ直接残し（`vscode.window.showErrorMessage`と両方に出す）、そのまま入力を続けないよう促す。会話へ残す形にしたのは、通知は閉じられて見落とされうるが、会話内の注記はタブを開き直しても残るため
+
+いずれの場合もユーザーへ表示する文言は変える（後者にだけ「不整合」「タブを閉じてやり直す」という誘導を含める）。
+
+#### CLIのエラー文言を画面へそのまま出さない（issue #494のレビュー指摘）
+
+`rewind_conversation`の`payload.error`（`stale target`等、実測値は上の「実測した挙動」参照）は非公開の内部プロトコルの文言であり、CLI側の実装変更で内部的な言い回しに変わる可能性がある。これをそのまま`vscode.window.showErrorMessage`へ流すと、その変更がそのままユーザーへ露出する。
+
+`src/claude/forkFromTurn.ts`（vscode非依存）に`describeForkFromTurnError`を追加し、既知のエラー値（`turn running` / `commands queued` / `target not found` / `stale target` / `no preceding assistant` / `failed to persist rewind anchor` / `state changed`）だけを日本語の説明へマッピングする。未知の値（自分たちが把握していない新しいCLIのエラー、または将来値が変わった場合）は汎用文言へ丸め、生のCLI文言を露出しない。`openForkFromTurn`はこの関数を通した文言だけを画面へ出す。
+
+#### 実装
+
+- `src/claude/control.ts`: `buildRewindConversationRequest`（要求の組み立て）、`readRewindConversationResult`（`rewound`で成否判定する専用リーダー）
+- `src/claude/forkFromTurn.ts`（新設、vscode非依存）: `buildRewindSequence`（対象以降を新しい順に並べる）、`forkFromTurn`（1件ずつawaitして逐次送信し、`rewound:false`で即座に打ち切る。成功件数`succeededCount`も返す）、`describeForkFromTurnError`（CLIの既知のエラー値を日本語へマッピングし、未知の値は汎用文言へ丸める）
+- `src/claude/streamSession.ts`: `ClaudeStreamSession.rewindConversationToTurn`（forkガード→`forkFromTurn`呼び出し）、`requestRewindConversation`（`interrupt_if_running:true`固定で送信）。プロセス終了時は`releasePendingWaiters`で待機中の要求を`rewound:false`として解放する
+- `src/view/chatShared.ts` / `src/view/chatScript.ts`: 既存のfork導線（Codexの`forkFromTurn`、§9.5）が使っていたボタンDOM・クリックハンドラをそのまま流用し、対象idの計算だけを`turnForkTarget()`で出し分ける（`SHOW_TURN_FORK`フラグ。Codexは`previousTurnId`、Claude Codeは`item.id`自身）
+- `src/view/claudeChatView.ts`: `openForkFromTurn`（新しいタブを開く→`rewindConversationToTurn`を新しい順に送る→成功なら`prefillText`を`insertComposerText`（issue #292）で入力欄へ流し込む。失敗なら`succeededCount`で「1件も戻せていない」（タブを閉じる）と「途中まで戻ってから失敗」（タブを残し会話へ不整合な状態を明示）を分け、`describeForkFromTurnError`で日本語化した文言だけを表示する）
+
+残る制約:
+
+- webview側のボタン表示・実際のタブ遷移・入力欄への反映は`docs/manual-test.md`のU-29〜U-31に委ねる（vitestのnode環境では実VSCode webviewの表示を確認できないため）
+
+### 14.62 Claude Codeでも脇道の質問を使えるようにする（issue #334）
+
+背景: Codex側には`/btw`（脇道の質問、issue #24、`src/codex/sideQuestion.ts`）がある。`thread/fork`に`ephemeral:true`を渡して使い捨てのスレッドを作り、本流を汚さずに1往復だけ聞く機能。Claude Codeにも`control_request`の`side_question` subtypeが実測（CLI 2.1.235、`/tmp`の実測記録）で分かっており、これを使ってClaude Code画面にも同じ導線を足す。
+
+X2（§14.61）と同じCLIバージョンでの実測を土台にする。以下、既に分かっていたこと（実装前の申し送り）と、この作業で追加に実測したことを分けて書く。
+
+#### 実装前から分かっていたこと（CLI 2.1.235、バンドルのstrings解析＋実測）
+
+- リクエスト: `{"subtype":"side_question","question":"<文字列>","history":[{"question":"...","response":"...","fallback_notice":"..."}]}`。`history`は任意（スネークケースの`fallback_notice`）
+- レスポンス: `{"response":"...","synthetic":false}`。任意で`refusal_fallback:{original_model,fallback_model,content}`が付く
+- 処理開始時に`{"type":"system","subtype":"control_request_progress","request_id":"...","status":"started"}`が届く。`status`は`started`と`api_retry`（`attempt`/`max_retries`/`retry_delay_ms`/`error_status`を伴う）を確認済み。この進捗通知は`side_question`専用
+- 本流に痕跡が残らない根拠（コード上）: `skipTranscript:true` / `skipCacheWrite:true` / `maxTurns:1`、`canUseTool`は常にdeny（ツール使用不可）
+- SDK側のタイムアウトは600秒（通常の75秒ではない）
+
+#### この作業で実測したこと
+
+実装前に確認が要る、と申し送られていた2点をこの作業の最初に実測した（`/tmp`配下の作業ディレクトリで、無害な短いプロンプトを使用。リポジトリの外）。
+
+1. **走行中のターンがあるときに`side_question`を送れるか**: **送れる**。長い応答を要求するユーザーターンを送った直後（応答を待たずに）`side_question`のcontrol_requestを送ったところ、元のターンが完了する遥か前（約20秒かかったターンに対し、送信から約2.5秒後）に`side_question`の応答が単独で返ってきた。`rewind_conversation`のような「走行中なら`turn running`エラーで拒否する」ガードは`side_question`には無い（実測で確認。バンドル読みからの推測だった「走行チェックが無さそう」を実測で裏付けた）
+2. **本当にtranscriptに痕跡が残らないか**: **残らない**。2通りの実測で確認した。
+   - `side_question`単体だけを送ったセッション（ユーザーターンを一切送らない）は、**transcriptファイル自体（`~/.claude/projects/**/*.jsonl`）が作られない**。プロジェクトディレクトリごと存在しない
+   - 通常のユーザーターンと`side_question`を同じセッションで両方送った場合、生成されたtranscriptを`grep`で確認したところ、`side_question`で送った質問文・返ってきた応答文のどちらも一切現れない（`"type":"attachment"`等の他の行タイプにも紛れ込んでいない）。`skipTranscript:true`はコード上の根拠だけでなく実測でも裏付けが取れた
+
+未確認のまま残した点（実測できていないことを実測したふうに書かない）:
+
+- **`side_question`が失敗した場合の応答封筒の形は未確認**。`rewind_conversation`は「失敗時も`subtype:"success"`の封筒で返る」という罠があったが、`side_question`について測れたのは成功応答1件のみで、意図的にエラーを起こす実測はしていない。実装は`response.ok`（封筒レベル、`subtype:"error"`かどうか）で成否判定する素直な作りにしたうえで、成功封筒なのに応答本文が読み取れない（想定外の形）場合だけ追加で失敗扱いにする安全側にしてある（`src/claude/control.ts`の`readSideQuestionResult`のコメント参照）
+- **`synthetic`フィールドの意味は未確認**。実測できたのは常に`false`の1パターンのみで、`true`になる条件・意味合いは分からない
+- **`side_question`が主会話の文脈（それまでの発言）を暗黙に踏まえるかは未確認**。`history`が明示的な質問/応答ペアの配列である設計から、暗黙の文脈共有は無い（完全に独立した1往復）と推測して実装したが、実測で確かめてはいない。このタブで過去に送った`/btw`同士の履歴だけを`history`として渡す実装にとどめ、本流の会話をここへ流し込むことはしていない（推測で組み立てると実際の挙動と食い違うリスクがあるため、確実に分かっている「過去の`/btw`のやり取り」の範囲に留めた）
+
+上記3点は、後続のレビュー対応（X3、下記「レビュー対応で追加に実測したこと」参照）で一部が実測により確定した。
+
+#### レビュー対応で追加に実測したこと（X3、CLI 2.1.235）
+
+レビュー指摘を受け、`/tmp`配下の作業ディレクトリ（リポジトリの外）で追加の実測を行った。**実測できたこと**と**依然として未確認のまま残ること**を分けて書く。
+
+実測で確定したこと:
+
+- **失敗の返り方は二層ある。**
+  - 層A（構造エラー）: `history`が配列でない、`history`の要素が文字列といった壊し方で再現できる。応答は`subtype:"error"`の封筒で返り、`error`には**CLI内部のJS例外メッセージがそのまま**入る（例: `"Bt.map is not a function..."`、`"undefined is not an object (evaluating 'e.message.content[0]')"`）。そのまま画面へ出すと内部実装が露出するため、拡張機能側は既知のエラー文字列カタログを持たず（安定した値ではないため作れない）、常に汎用文言へ丸める（`src/claude/sideQuestion.ts`の`describeSideQuestionError`）
+  - 層B（`question`の型不正）: `question`を省略・空文字・数値・null・オブジェクトにしてもCLIは検証しない。テンプレートリテラルへ直接埋め込まれ、省略時は文字列`"undefined"`、オブジェクトなら`"[object Object]"`がそのまま質問文としてモデルに渡り、モデルはそれに対して普通に回答してしまう（`subtype:"error"`にはならない）。CLI側では弾かれないため、**拡張機能側でのバリデーションが必須**と判断した（対応: `src/claude/streamSession.ts`の`askSideQuestion`が空文字・空白のみの`question`を送信前に弾く。`src/view/claudeChatView.ts`の`runPseudoCommand`が`/btw`単体（引数なし）を`trimmedArgsOrUndefined`で先に弾く経路と合わせ、境界を二重に持たせた）
+  - 層C（モデル実行中の失敗）: バイナリの`mZE(e)`関数（offset 312537721付近）の解析で存在を確認。モデルがツール呼び出しを試みた場合（`side_question`はツール使用不可のため常に失敗する）は`response`が`"(The model tried to call ${name} instead of answering directly. Try rephrasing or ask in the main conversation.)"`、APIエラー時は`"(API error: ${...})"`になり、いずれも`synthetic:true`が付く。**封筒は`subtype:"success"`のまま**（＝`response.ok`だけでは失敗を検知できない）
+- **`synthetic`フィールドの意味が確定した。** `synthetic:true`は「モデルが実際に文章で回答しなかった」ことを示し、そのときの`response`は**CLIが生成した英語固定のプレースホルダ文言**であり、モデルの回答ではない。`rewind_conversation`の`rewound`と同じく、封筒レベル（`response.ok`）だけでなく本体のフィールド（`synthetic`）まで見て判定する必要があると分かった。対応: `finishedSideQuestionDisplay`が`synthetic===true`のときエラー相当（`status:'failed'`）として表示する。CLIの文言は捨てず、既知の2パターン（ツール呼び出し試行／APIエラー）は日本語の説明を前に添えて残し、未知のパターンは汎用文言へ丸める（`describeSyntheticSideQuestionResponse`。`describeForkFromTurnError`と同じ「既知は個別マッピング、未知は汎用文言」の方針）
+- **主会話の文脈を暗黙に共有することが確定した。** 主会話で名前を伝えた後、`history`を付けずに`side_question`で聞いたところ、正しく答えた（`{"subtype":"success","response":{"response":"プリン。","synthetic":false}}`のように、`history`に含めていない情報に答える）。「`history`が明示的な質問/応答ペアの配列である設計から暗黙の文脈共有は無いと推測した」という実装前の推測は誤りだったと判明した。**利用者にとって意味が変わる情報**（脇道の質問はtranscriptに残らない一方で主会話の内容は見えている、という非対称）のため、`README.md`・`docs/slash-commands.md`にも追記した
+
+依然として未確認のまま残ること（実測できていないことを実測したふうに書かない）:
+
+- **層Cの2ケース（ツール呼び出し試行、APIエラー）の実発火と実際のJSON。** ソース（バイナリのstrings解析）を読んだだけで、実際にモデルにツール呼び出しを試みさせる・APIエラーを起こす条件を揃えての実測はしていない。`describeSyntheticSideQuestionResponse`の2パターンは推定される文言のプレフィックス一致でマッピングしており、実際の文言と一致しない可能性が残る（一致しなければ汎用文言側に丸められるだけで、実装が壊れることはない）
+- **ターン実行中に`side_question`を送った場合のシャットダウン挙動。** 今回実測できたのは「モデル実行前（`control_request_progress`の`started`受信後）にSIGTERMを送ると、制御応答が何も返らずパイプがクローズする（エラー封筒すら来ない）」という1パターンのみ
+- **主会話コンテキストを取り込む正確な内部経路。** ソース上は`threadHistory: o = !0`が既定で、明示`history`が無ければ`t.toolUseContext.session.btwHistory`（過去の`/btw`往復）を使うと読めるが、`btwHistory`だけでは主会話の内容を説明できないため、クエリエンジン呼び出し自体が`toolUseContext`経由で主会話コンテキストを継承しているとみられる。**挙動としての共有は実測で確定したが、内部の継承経路は未確定**
+
+#### Codexとの違い（新しいセッションを作らない）
+
+Codexの`/btw`は`thread/fork`で**新しいスレッド**を作ってから聞く（応答は新しいタブに普通の会話として差し込まれる）。Claude Codeの`side_question`は逆に、**今つながっている1本のCLIプロセスへ直接`control_request`を送るだけ**で、新しいセッション/タブは作らない。そのため画面側の作りもCodexとは異なる。
+
+- Codex: 新しいタブを開き、そこへ質問と応答を普通の`userMessage`/`agentMessage`として差し込む（`chatView.ts`の`startSideQuestion`）
+- Claude Code: 元のタブの中に`kind:'sideQuestion'`という専用の1項目として残す（`ClaudeStreamSession.noteSideQuestion`）。質問と応答は1つの本文（`"質問\n\n応答"`）にまとめ、送信中→（`api_retry`が来れば）リトライ中→完了/失敗、と同じidの項目を書き換えていく（新しい項目を積み増さない）。完了時は「このタブだけの一時的なやり取りです（本流の会話には送られません）」という固定の注記を添える（受入基準「本流の会話に痕跡が残らない（残る場合はその旨が画面から分かる）」に対し、実測で「残らない」と確認済みではあるが、CLIの将来の変更で挙動が変わっても気付けるよう、断定の代わりに「この画面だけの一時的なやり取り」であることを常に見せる設計にした）
+
+`refusal_fallback`（元のモデルが拒否し別モデルへ切り替わった）が付いたときは、注記へ「元のモデル（○○）が拒否したため、△△が代わりに応答しました」を足す。
+
+**「本流の会話に痕跡が残らない」はCLI側のtranscript限定の話であり、拡張機能自身の「会話を書き出す」機能（§14.23）には含まれる**（issue #340横断レビュー指摘）。`kind:'sideQuestion'`は`transcriptMarkdown.ts`の`KIND_TITLE`に「脇道の質問」として登録済みで、エクスポート（クリップボード・ファイル・生テキストの3経路）は`ChatState.items`をそのまま辿るため、`/btw`の質問と応答もMarkdownへそのまま出力される。実測で確認した「残らない」はあくまでCLI側の`~/.claude/projects/**/*.jsonl`についての話であり、拡張機能側で会話を書き出せば当然その中に残る。この非対称は`README.md`・`docs/slash-commands.md`にも明記した。
+
+600秒のタイムアウト（design.mdの「実装前から分かっていたこと」参照）については、既存の`ClaudeStreamSession`の他の`control_request`（`rewind_conversation`・`rewind_files`・`get_context_usage`等）もすべて拡張機能側で独自のタイムアウトを持たず、応答が届くかプロセスが終了するまで待つ作りになっている。`side_question`もこの流儀に合わせ、拡張機能側で追加のタイムアウトは実装しなかった。その代わり`control_request_progress`の`api_retry`を画面へ反映し（「リトライ中(2/5)・3秒後に再試行」等）、待たされている理由がユーザーに分かるようにした（`src/claude/sideQuestion.ts`の`describeSideQuestionProgress`）。長時間待ちたくない場合の代替手段は用意していない（要判断: 必要なら独自のタイムアウト・中断ボタンを別issueで足す）。
+
+#### 実装
+
+- `src/claude/control.ts`: `buildSideQuestionRequest`（`history`は空なら省略）、`readSideQuestionResult`（`response.ok`で成否判定し、成功封筒でも本文が読めなければ`payload.error`優先で理由を取り、無ければ失敗扱いにする安全側）、`readControlRequestProgress`（`control_request_progress`。`control_response`とは別経路の`type:"system"`イベントなので専用のリーダーにした）
+- `src/claude/sideQuestion.ts`（新設、vscode非依存）: `pendingSideQuestionDisplay` / `progressSideQuestionDisplay` / `describeSideQuestionProgress` / `finishedSideQuestionDisplay`。応答の生の形（`SideQuestionResult`）を画面へ残す表示用の形（`SideQuestionDisplay`）へ変換する、副作用の無い純粋関数群。X3のレビュー対応で`describeSideQuestionError`（層Aの構造エラーを汎用文言へ丸める）、`describeSyntheticSideQuestionResponse`（層Cの`synthetic:true`をエラー相当として日本語化する。既知は個別マッピング、未知は汎用文言）、`capSideQuestionHistory`（`sideQuestionHistory`の上限、下記参照）を追加
+- `src/claude/streamSession.ts`: `ClaudeStreamSession.askSideQuestion`（`side_question`を送り応答を待つ。`onProgress`コールバックで進捗を都度伝える。X3のレビュー対応で、空文字・空白のみの`question`は送信前に弾くよう変更）、`noteSideQuestion`（`noteLocalEvent`と同じ「拡張機能側だけで完結する出来事を会話へ残す」形）。プロセス終了時は`releasePendingWaiters`で待機中の要求を失敗として解放する
+- `src/appserver/chatState.ts`: `appendSideQuestion`（`appendNotice`と同じ「同じidなら上書きする」形の`upsertItem`呼び出し）
+- `src/provider/pseudoCommands.ts`: `CLAUDE_PSEUDO_COMMANDS`（`CODEX_PSEUDO_COMMANDS`から`/btw`だけを抜き出したもの。`/compact`・`/init`はClaude Code側では別経路で完結しているため含めない。同じ`PseudoCommand`オブジェクトを共有するため`/btw`の説明文もCodexと自動的に揃う）。`trimmedArgsOrUndefined`が`/btw`単体（引数なし・空白のみ）を`undefined`として弾き、`claudeChatView.ts`の`runPseudoCommand`がそれをエラーメッセージとして扱う（`askSideQuestion`側の弾き直しと合わせて多層防御）
+- `src/view/claudeChatView.ts`: `postCommands`で`withPseudoCommands(CLAUDE_PSEUDO_COMMANDS, commands)`を候補へ足す。`handleMessage`の`send`で`routePseudoCommand`により`/btw`をCLIへ送らず`runPseudoCommand`→`startSideQuestion`へ回す。タブごとに`sideQuestionHistory`（このタブで送った`/btw`同士の履歴）を持ち、`history`として渡す
+- `src/view/chatScript.ts` / `src/appserver/transcriptMarkdown.ts`: `KIND_LABEL` / `KIND_TITLE`へ`sideQuestion: '脇道の質問'`を追加。本文（質問+応答）はMarkdownとして描画する（`userMessage`/`agentMessage`と同じ扱い）
+
+#### `sideQuestionHistory`の上限（X3のレビュー対応）
+
+`sideQuestionHistory`は1タブ内で`/btw`を送るたびに追記していく実装のため、上限を設けないと質問・応答の全文が無制限に積み上がり、以後の全ての`side_question`リクエストのペイロードへ単調増加した状態で乗り続ける。
+
+- 上限は`MAX_SIDE_QUESTION_HISTORY`（`src/claude/sideQuestion.ts`）= **20件**
+- 上限に達したあとは**古いものから単純に捨てる（FIFO）**。「超えた分を1件の要約エントリへまとめる」方式（`roadmap.ts`の`MAX_ROADMAP_PARSE_WARNINGS`等、他のワークフローで採用している形）は**採らなかった**。`history`はCLIへそのまま渡りモデルが実際の質問・応答として読むため、そこへ「N件省略」のような拡張機能側のメタ情報を実際のQ/Aの形で混ぜ込むと、モデルが実在しないやり取りを実際の会話として解釈しかねないと判断したため
+- 実装は`capSideQuestionHistory`（純粋関数）。`claudeChatView.ts`の`startSideQuestion`が履歴を追記するたびに通す
+
+残る制約:
+
+- **「CLIのtranscriptに残らない」は拡張機能自身の書き出しには及ばない。** `transcriptMarkdown.ts`の`KIND_TITLE`へ`sideQuestion`を足したため、「会話を書き出す」（クリップボード・ファイル・生テキスト）には`/btw`の質問・応答が他の発言と同じく含まれる。画面には`kind:'sideQuestion'`の項目として残っている以上、書き出しから除外すると画面と食い違うため意図的にこうしている。利用者向けの説明はREADMEと`docs/slash-commands.md`にも同じ非対称を明記した（issue #340横断レビュー指摘）
+- webview側の候補表示・実際の送信・表示の更新は`docs/manual-test.md`のU-32・U-33に委ねる（vitestのnode環境では実VSCode webviewの表示を確認できないため）
+- 上記「依然として未確認のまま残ること」（X3節）は今回のスコープでは実測せず、コメントで明記するに留めた
 
 ## 15. 作業記録（日報・週報連携）
 

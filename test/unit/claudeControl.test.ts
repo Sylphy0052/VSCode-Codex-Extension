@@ -6,11 +6,13 @@ import {
   buildGetSettingsRequest,
   buildMcpStatusRequest,
   buildMcpToggleRequest,
+  buildRewindConversationRequest,
   buildRewindFilesRequest,
   buildSessionCostRequest,
   buildSetEffortRequest,
   buildSetModelRequest,
   buildSetPermissionModeRequest,
+  buildSideQuestionRequest,
   buildStopTaskRequest,
   buildUserMessage,
   describeCanUseTool,
@@ -21,12 +23,15 @@ import {
   readCommandsChanged,
   readContextUsage,
   readCurrentPermissionMode,
+  readControlRequestProgress,
   readExtraUsage,
   readFastModeState,
   readControlRequest,
   readControlResponse,
+  readRewindConversationResult,
   readRewindFilesResult,
   readSessionCost,
+  readSideQuestionResult,
 } from '../../src/claude/control';
 
 describe('buildUserMessage', () => {
@@ -809,5 +814,290 @@ describe('readAgentList', () => {
     expect(readAgentList({})).toBeUndefined();
     expect(readAgentList({ agents: 'なにか' })).toBeUndefined();
     expect(readAgentList({ agents: [] })).toEqual([]);
+  });
+});
+
+describe('buildRewindConversationRequest（issue #333、design.md §14.61）', () => {
+  it('target_message_uuid と interrupt_if_running を送る（実測: パラメータ名はスネークケース）', () => {
+    const line = buildRewindConversationRequest('req_1', 'uuid-1', true);
+    expect(JSON.parse(line.trim())).toEqual({
+      type: 'control_request',
+      request_id: 'req_1',
+      request: {
+        subtype: 'rewind_conversation',
+        target_message_uuid: 'uuid-1',
+        interrupt_if_running: true,
+      },
+    });
+  });
+
+  it('interrupt_if_running: false でも送れる', () => {
+    const line = buildRewindConversationRequest('req_2', 'uuid-2', false);
+    expect(JSON.parse(line.trim())).toMatchObject({
+      request: { interrupt_if_running: false },
+    });
+  });
+});
+
+describe('readRewindConversationResult（issue #333、design.md §14.61）', () => {
+  it('成功時は rewound:true と prefillText を読む', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_1',
+        response: {
+          rewound: true,
+          targetMessageUuid: 'uuid-1',
+          prefillText: '元の発言',
+          precedingAssistantUuid: 'uuid-0',
+        },
+      },
+    });
+    expect(readRewindConversationResult(response!)).toEqual({
+      rewound: true,
+      targetMessageUuid: 'uuid-1',
+      prefillText: '元の発言',
+      precedingAssistantUuid: 'uuid-0',
+      error: undefined,
+    });
+  });
+
+  it('失敗時も subtype:success の封筒で返る。okだけでは判定できず rewound で見る', () => {
+    // 実測（CLI 2.1.235）: stale target 等の失敗は control_response 自体は
+    // subtype:"success" のまま、payload の rewound が false になる
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_2',
+        response: {
+          rewound: false,
+          targetMessageUuid: null,
+          prefillText: null,
+          precedingAssistantUuid: null,
+          error: 'stale target',
+        },
+      },
+    });
+    expect(response!.ok).toBe(true);
+    expect(readRewindConversationResult(response!)).toEqual({
+      rewound: false,
+      targetMessageUuid: undefined,
+      prefillText: undefined,
+      precedingAssistantUuid: undefined,
+      error: { message: 'stale target', origin: 'cli' },
+    });
+  });
+
+  it('control protocol自体が失敗した場合（response.ok:false）も rewound:false として扱う', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: { subtype: 'error', request_id: 'req_3', error: 'Unsupported control request subtype' },
+    });
+    expect(readRewindConversationResult(response!)).toEqual({
+      rewound: false,
+      targetMessageUuid: undefined,
+      prefillText: undefined,
+      precedingAssistantUuid: undefined,
+      error: { message: 'Unsupported control request subtype', origin: 'cli' },
+    });
+  });
+});
+
+describe('buildSideQuestionRequest（issue #334、design.md §14.62）', () => {
+  it('question だけを送る（history省略時は request にhistoryを含めない）', () => {
+    const line = buildSideQuestionRequest('req_1', '今何時？');
+    expect(JSON.parse(line.trim())).toEqual({
+      type: 'control_request',
+      request_id: 'req_1',
+      request: { subtype: 'side_question', question: '今何時？' },
+    });
+  });
+
+  it('history を渡すとスネークケースの fallback_notice を含めて送る（実測どおりの形）', () => {
+    const line = buildSideQuestionRequest('req_2', '続きは？', [
+      { question: '前の質問', response: '前の応答', fallbackNotice: undefined },
+      { question: '2つ前', response: '2つ前の応答', fallbackNotice: '別モデルへ切替' },
+    ]);
+    expect(JSON.parse(line.trim())).toEqual({
+      type: 'control_request',
+      request_id: 'req_2',
+      request: {
+        subtype: 'side_question',
+        question: '続きは？',
+        history: [
+          { question: '前の質問', response: '前の応答' },
+          { question: '2つ前', response: '2つ前の応答', fallback_notice: '別モデルへ切替' },
+        ],
+      },
+    });
+  });
+});
+
+describe('readSideQuestionResult（issue #334、design.md §14.62）', () => {
+  it('実測どおりの成功応答（response, synthetic:false）を読む', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_1',
+        response: { response: '午後3時です', synthetic: false },
+      },
+    });
+    expect(readSideQuestionResult(response!)).toEqual({
+      ok: true,
+      response: '午後3時です',
+      synthetic: false,
+      refusalFallback: undefined,
+      error: undefined,
+    });
+  });
+
+  it('refusal_fallback が付いた応答（元モデルが拒否し別モデルへ切替）を読む', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_2',
+        response: {
+          response: '代わりに答えます',
+          synthetic: false,
+          refusal_fallback: {
+            original_model: 'claude-opus-5',
+            fallback_model: 'claude-sonnet-5',
+            content: '代わりに答えます',
+          },
+        },
+      },
+    });
+    expect(readSideQuestionResult(response!)).toEqual({
+      ok: true,
+      response: '代わりに答えます',
+      synthetic: false,
+      refusalFallback: {
+        originalModel: 'claude-opus-5',
+        fallbackModel: 'claude-sonnet-5',
+        content: '代わりに答えます',
+      },
+      error: undefined,
+    });
+  });
+
+  it('control protocol自体が失敗した場合（response.ok:false）は error を持ち、成功と誤判定しない', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: { subtype: 'error', request_id: 'req_3', error: 'Unsupported control request subtype' },
+    });
+    const result = readSideQuestionResult(response!);
+    expect(result.ok).toBe(false);
+    expect(result.response).toBeUndefined();
+    // control protocol自体の失敗はorigin:'cli'（issue #340横断レビュー指摘: 由来つきの型）
+    expect(result.error).toEqual({ message: 'Unsupported control request subtype', origin: 'cli' });
+  });
+
+  it('封筒は成功でも応答本文を読み取れない形は失敗として扱う（想定外の形への安全側）', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: { subtype: 'success', request_id: 'req_4', response: { synthetic: false } },
+    });
+    const result = readSideQuestionResult(response!);
+    expect(result.ok).toBe(false);
+    // 成功封筒からの読み取り失敗はCLI内部の生の例外文字列ではないため origin:'app'
+    expect(result.error).toEqual({ message: '応答を読み取れませんでした', origin: 'app' });
+  });
+
+  it('応答本文が読み取れなくてもpayload.errorがあればそれを理由にする（レビュー指摘）', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_5',
+        response: { error: 'no response generated' },
+      },
+    });
+    const result = readSideQuestionResult(response!);
+    expect(result.ok).toBe(false);
+    // payload.errorはCLIが封筒に乗せてきた値であり、封筒が成功でもorigin:'cli'
+    // （issue #340確認レビュー再指摘: 成功封筒だからという理由でorigin:'app'にしていたのは
+    // 誤り。readRewindConversationResultの同種のpayload.errorと扱いをそろえる）
+    expect(result.error).toEqual({ message: 'no response generated', origin: 'cli' });
+  });
+
+  it('synthetic:trueの応答を読む（実測、design.md §14.62: モデルが実際には回答しなかったことを示す）', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_6',
+        response: {
+          response: '(API error: rate limited)',
+          synthetic: true,
+        },
+      },
+    });
+    expect(readSideQuestionResult(response!)).toEqual({
+      ok: true,
+      response: '(API error: rate limited)',
+      synthetic: true,
+      refusalFallback: undefined,
+      error: undefined,
+    });
+  });
+});
+
+describe('readControlRequestProgress（issue #334、design.md §14.62）', () => {
+  it('started 通知を読む', () => {
+    const progress = readControlRequestProgress({
+      type: 'system',
+      subtype: 'control_request_progress',
+      request_id: 'req_1',
+      status: 'started',
+    });
+    expect(progress).toEqual({
+      requestId: 'req_1',
+      status: 'started',
+      attempt: undefined,
+      maxRetries: undefined,
+      retryDelayMs: undefined,
+      errorStatus: undefined,
+    });
+  });
+
+  it('api_retry 通知は attempt/max_retries/retry_delay_ms/error_status を伴う', () => {
+    const progress = readControlRequestProgress({
+      type: 'system',
+      subtype: 'control_request_progress',
+      request_id: 'req_2',
+      status: 'api_retry',
+      attempt: 2,
+      max_retries: 5,
+      retry_delay_ms: 3000,
+      error_status: 'overloaded',
+    });
+    expect(progress).toEqual({
+      requestId: 'req_2',
+      status: 'api_retry',
+      attempt: 2,
+      maxRetries: 5,
+      retryDelayMs: 3000,
+      errorStatus: 'overloaded',
+    });
+  });
+
+  it('control_request_progress以外のsystemイベントはundefinedを返す', () => {
+    expect(
+      readControlRequestProgress({ type: 'system', subtype: 'commands_changed' }),
+    ).toBeUndefined();
+  });
+
+  it('request_id が無ければundefinedを返す', () => {
+    expect(
+      readControlRequestProgress({
+        type: 'system',
+        subtype: 'control_request_progress',
+        status: 'started',
+      }),
+    ).toBeUndefined();
   });
 });
