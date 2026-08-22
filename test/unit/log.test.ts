@@ -73,6 +73,14 @@ describe('createLogger（Issue #391: 一般経路のログにもホームディ�
     expect(lines[0]).toContain("scandir '/home/***/.codex' https://***@github.com/org/repo ~/work");
   });
 
+  it('Bearerトークン等のトークン様文字列もマスクする（Issue #474）', () => {
+    const { channel, lines } = createFakeChannel();
+    const log = createLogger(channel, '/home/alice');
+    log.error('login failed: Authorization: Bearer ghp_1234567890abcdefTOKEN123');
+    expect(lines[0]).not.toContain('ghp_1234567890abcdefTOKEN123');
+    expect(lines[0]).toContain('Authorization: Bearer ***');
+  });
+
   it('パスを含まないメッセージは変えない', () => {
     const { channel, lines } = createFakeChannel();
     const log = createLogger(channel, '/home/alice');
