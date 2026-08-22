@@ -3442,6 +3442,61 @@ Codex側・Claude側は同じ`createExecutablePathResolver(provider, log)`（`sr
 
 - webview側のボタン表示・実際のタブ遷移・入力欄への反映は`docs/manual-test.md`のU-29〜U-31に委ねる（vitestのnode環境では実VSCode webviewの表示を確認できないため）
 
+### 14.62 Claude Codeでも脇道の質問を使えるようにする（issue #334）
+
+背景: Codex側には`/btw`（脇道の質問、issue #24、`src/codex/sideQuestion.ts`）がある。`thread/fork`に`ephemeral:true`を渡して使い捨てのスレッドを作り、本流を汚さずに1往復だけ聞く機能。Claude Codeにも`control_request`の`side_question` subtypeが実測（CLI 2.1.235、`/tmp`の実測記録）で分かっており、これを使ってClaude Code画面にも同じ導線を足す。
+
+X2（§14.61）と同じCLIバージョンでの実測を土台にする。以下、既に分かっていたこと（実装前の申し送り）と、この作業で追加に実測したことを分けて書く。
+
+#### 実装前から分かっていたこと（CLI 2.1.235、バンドルのstrings解析＋実測）
+
+- リクエスト: `{"subtype":"side_question","question":"<文字列>","history":[{"question":"...","response":"...","fallback_notice":"..."}]}`。`history`は任意（スネークケースの`fallback_notice`）
+- レスポンス: `{"response":"...","synthetic":false}`。任意で`refusal_fallback:{original_model,fallback_model,content}`が付く
+- 処理開始時に`{"type":"system","subtype":"control_request_progress","request_id":"...","status":"started"}`が届く。`status`は`started`と`api_retry`（`attempt`/`max_retries`/`retry_delay_ms`/`error_status`を伴う）を確認済み。この進捗通知は`side_question`専用
+- 本流に痕跡が残らない根拠（コード上）: `skipTranscript:true` / `skipCacheWrite:true` / `maxTurns:1`、`canUseTool`は常にdeny（ツール使用不可）
+- SDK側のタイムアウトは600秒（通常の75秒ではない）
+
+#### この作業で実測したこと
+
+実装前に確認が要る、と申し送られていた2点をこの作業の最初に実測した（`/tmp`配下の作業ディレクトリで、無害な短いプロンプトを使用。リポジトリの外）。
+
+1. **走行中のターンがあるときに`side_question`を送れるか**: **送れる**。長い応答を要求するユーザーターンを送った直後（応答を待たずに）`side_question`のcontrol_requestを送ったところ、元のターンが完了する遥か前（約20秒かかったターンに対し、送信から約2.5秒後）に`side_question`の応答が単独で返ってきた。`rewind_conversation`のような「走行中なら`turn running`エラーで拒否する」ガードは`side_question`には無い（実測で確認。バンドル読みからの推測だった「走行チェックが無さそう」を実測で裏付けた）
+2. **本当にtranscriptに痕跡が残らないか**: **残らない**。2通りの実測で確認した。
+   - `side_question`単体だけを送ったセッション（ユーザーターンを一切送らない）は、**transcriptファイル自体（`~/.claude/projects/**/*.jsonl`）が作られない**。プロジェクトディレクトリごと存在しない
+   - 通常のユーザーターンと`side_question`を同じセッションで両方送った場合、生成されたtranscriptを`grep`で確認したところ、`side_question`で送った質問文・返ってきた応答文のどちらも一切現れない（`"type":"attachment"`等の他の行タイプにも紛れ込んでいない）。`skipTranscript:true`はコード上の根拠だけでなく実測でも裏付けが取れた
+
+未確認のまま残した点（実測できていないことを実測したふうに書かない）:
+
+- **`side_question`が失敗した場合の応答封筒の形は未確認**。`rewind_conversation`は「失敗時も`subtype:"success"`の封筒で返る」という罠があったが、`side_question`について測れたのは成功応答1件のみで、意図的にエラーを起こす実測はしていない。実装は`response.ok`（封筒レベル、`subtype:"error"`かどうか）で成否判定する素直な作りにしたうえで、成功封筒なのに応答本文が読み取れない（想定外の形）場合だけ追加で失敗扱いにする安全側にしてある（`src/claude/control.ts`の`readSideQuestionResult`のコメント参照）
+- **`synthetic`フィールドの意味は未確認**。実測できたのは常に`false`の1パターンのみで、`true`になる条件・意味合いは分からない。応答型には持たせたが表示には使っていない
+- **`side_question`が主会話の文脈（それまでの発言）を暗黙に踏まえるかは未確認**。`history`が明示的な質問/応答ペアの配列である設計から、暗黙の文脈共有は無い（完全に独立した1往復）と推測して実装したが、実測で確かめてはいない。このタブで過去に送った`/btw`同士の履歴だけを`history`として渡す実装にとどめ、本流の会話をここへ流し込むことはしていない（推測で組み立てると実際の挙動と食い違うリスクがあるため、確実に分かっている「過去の`/btw`のやり取り」の範囲に留めた）
+
+#### Codexとの違い（新しいセッションを作らない）
+
+Codexの`/btw`は`thread/fork`で**新しいスレッド**を作ってから聞く（応答は新しいタブに普通の会話として差し込まれる）。Claude Codeの`side_question`は逆に、**今つながっている1本のCLIプロセスへ直接`control_request`を送るだけ**で、新しいセッション/タブは作らない。そのため画面側の作りもCodexとは異なる。
+
+- Codex: 新しいタブを開き、そこへ質問と応答を普通の`userMessage`/`agentMessage`として差し込む（`chatView.ts`の`startSideQuestion`）
+- Claude Code: 元のタブの中に`kind:'sideQuestion'`という専用の1項目として残す（`ClaudeStreamSession.noteSideQuestion`）。質問と応答は1つの本文（`"質問\n\n応答"`）にまとめ、送信中→（`api_retry`が来れば）リトライ中→完了/失敗、と同じidの項目を書き換えていく（新しい項目を積み増さない）。完了時は「このタブだけの一時的なやり取りです（本流の会話には送られません）」という固定の注記を添える（受入基準「本流の会話に痕跡が残らない（残る場合はその旨が画面から分かる）」に対し、実測で「残らない」と確認済みではあるが、CLIの将来の変更で挙動が変わっても気付けるよう、断定の代わりに「この画面だけの一時的なやり取り」であることを常に見せる設計にした）
+
+`refusal_fallback`（元のモデルが拒否し別モデルへ切り替わった）が付いたときは、注記へ「元のモデル（○○）が拒否したため、△△が代わりに応答しました」を足す。
+
+600秒のタイムアウト（design.mdの「実装前から分かっていたこと」参照）については、既存の`ClaudeStreamSession`の他の`control_request`（`rewind_conversation`・`rewind_files`・`get_context_usage`等）もすべて拡張機能側で独自のタイムアウトを持たず、応答が届くかプロセスが終了するまで待つ作りになっている。`side_question`もこの流儀に合わせ、拡張機能側で追加のタイムアウトは実装しなかった。その代わり`control_request_progress`の`api_retry`を画面へ反映し（「リトライ中(2/5)・3秒後に再試行」等）、待たされている理由がユーザーに分かるようにした（`src/claude/sideQuestion.ts`の`describeSideQuestionProgress`）。長時間待ちたくない場合の代替手段は用意していない（要判断: 必要なら独自のタイムアウト・中断ボタンを別issueで足す）。
+
+#### 実装
+
+- `src/claude/control.ts`: `buildSideQuestionRequest`（`history`は空なら省略）、`readSideQuestionResult`（`response.ok`で成否判定し、成功封筒でも本文が読めなければ失敗扱いにする安全側）、`readControlRequestProgress`（`control_request_progress`。`control_response`とは別経路の`type:"system"`イベントなので専用のリーダーにした）
+- `src/claude/sideQuestion.ts`（新設、vscode非依存）: `pendingSideQuestionDisplay` / `progressSideQuestionDisplay` / `describeSideQuestionProgress` / `finishedSideQuestionDisplay`。応答の生の形（`SideQuestionResult`）を画面へ残す表示用の形（`SideQuestionDisplay`）へ変換する、副作用の無い純粋関数群
+- `src/claude/streamSession.ts`: `ClaudeStreamSession.askSideQuestion`（`side_question`を送り応答を待つ。`onProgress`コールバックで進捗を都度伝える）、`noteSideQuestion`（`noteLocalEvent`と同じ「拡張機能側だけで完結する出来事を会話へ残す」形）。プロセス終了時は`releasePendingWaiters`で待機中の要求を失敗として解放する
+- `src/appserver/chatState.ts`: `appendSideQuestion`（`appendNotice`と同じ「同じidなら上書きする」形の`upsertItem`呼び出し）
+- `src/provider/pseudoCommands.ts`: `CLAUDE_PSEUDO_COMMANDS`（`CODEX_PSEUDO_COMMANDS`から`/btw`だけを抜き出したもの。`/compact`・`/init`はClaude Code側では別経路で完結しているため含めない。同じ`PseudoCommand`オブジェクトを共有するため`/btw`の説明文もCodexと自動的に揃う）
+- `src/view/claudeChatView.ts`: `postCommands`で`withPseudoCommands(CLAUDE_PSEUDO_COMMANDS, commands)`を候補へ足す。`handleMessage`の`send`で`routePseudoCommand`により`/btw`をCLIへ送らず`runPseudoCommand`→`startSideQuestion`へ回す。タブごとに`sideQuestionHistory`（このタブで送った`/btw`同士の履歴）を持ち、`history`として渡す
+- `src/view/chatScript.ts` / `src/appserver/transcriptMarkdown.ts`: `KIND_LABEL` / `KIND_TITLE`へ`sideQuestion: '脇道の質問'`を追加。本文（質問+応答）はMarkdownとして描画する（`userMessage`/`agentMessage`と同じ扱い）
+
+残る制約:
+
+- webview側の候補表示・実際の送信・表示の更新は`docs/manual-test.md`のU-32・U-33に委ねる（vitestのnode環境では実VSCode webviewの表示を確認できないため）
+- 上記「未確認のまま残した点」は今回のスコープでは実測せず、コメントで明記するに留めた
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）
