@@ -416,6 +416,27 @@ describe('maskForLog（Issue #474 レビュー指摘: BEARER_TOKEN_PATTERNの過
   });
 });
 
+describe('maskForLog（レビュー指摘: BEARER_TOKEN_PATTERNが標準Base64トークンを部分マスクする）', () => {
+  it('Bearerの直後がファイルパスの場合は誤マスクしない（先頭が`/`のため不一致のまま）', () => {
+    const raw = 'Bearer /repo/src/config/token.ts をご確認ください';
+    expect(maskForLog(raw)).toBe(raw);
+  });
+
+  it('Bearerの直後が短い一般語の場合は誤マスクしない（長さ閾値未満）', () => {
+    const raw = 'Bearer token';
+    expect(maskForLog(raw)).toBe(raw);
+  });
+
+  it('標準Base64（`/`と`+`と`=`を含む）のBearerトークンは断片を残さず全体をマスクする', () => {
+    const raw = 'Bearer abcd1234/xyz+abc==';
+    const result = maskForLog(raw);
+    expect(result).toBe('Bearer ***');
+    expect(result).not.toContain('abcd1234');
+    expect(result).not.toContain('xyz');
+    expect(result).not.toContain('abc==');
+  });
+});
+
 describe('stripControlChars（レビュー指摘: medium 3 / low）', () => {
   it('C0制御文字・DELを空白に畳む', () => {
     expect(stripControlChars('a\nb\tc\x00d\x7Fe')).toBe('a b c d e');

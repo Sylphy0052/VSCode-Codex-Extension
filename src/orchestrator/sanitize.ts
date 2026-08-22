@@ -198,8 +198,27 @@ export function maskHomeDir(value: string, homeDir: string = os.homedir()): stri
  *     `Bearer /repo/src/config/token.ts`（パス。`/`が文字クラス外）や
  *     `Bearer token`（`token`が5文字で閾値未満）のような、トークンではない
  *     後続語を誤ってマスクしなくなる。
+ *
+ * (c) 上記(b)の文字クラスは標準Base64（`/` `+` `=`を使う）のBearerトークンに対して
+ *     部分マスクしか掛からない不具合があった（レビュー指摘）。標準Base64のトークンが
+ *     `/`を含む場合、`/`が文字クラス外であるため一致がそこで途切れ、`Bearer abcd1234/xyz+abc==`
+ *     のような値は前半（`abcd1234`）だけが`***`に置き換わり、後半（`/xyz+abc==`）が
+ *     マスクされないままログに残っていた。「マスク済みに見えるが実は秘密の断片が
+ *     残っている」状態は、マスクしないより悪い誤解を招く。
+ *
+ *     一方で`/`を後続トークン全体の文字クラスへ単純に足すと、(b)で直したはずの
+ *     過剰マスク（`Bearer /repo/src/config/token.ts`が丸ごとマスクされる）が
+ *     再発する。そこで「先頭1文字は`/`を含まない現行の文字クラスのまま」
+ *     （パスのようにスラッシュで始まる語は対象にならない）にしつつ、
+ *     「2文字目以降は`/`と`=`を追加で許す」形に分けた。全体の長さ閾値（8文字以上、
+ *     先頭1文字＋残り7文字以上）は維持している。これにより:
+ *     - `Bearer /repo/...`: 先頭が`/`のため不一致のまま（過剰マスクは再発しない）
+ *     - `Bearer token`: 5文字で閾値未満のため不一致のまま
+ *     - `Bearer abcd1234/xyz+abc==`: 先頭`a`から始まり、残り全体が拡張後の文字クラスに
+ *       収まるため、トークン全体が一致し部分マスクにならない
  */
-const BEARER_TOKEN_PATTERN = /(?<![A-Za-z0-9_])(Bearer[ \t]+)[A-Za-z0-9_.~+-]{8,}/giu;
+const BEARER_TOKEN_PATTERN =
+  /(?<![A-Za-z0-9_])(Bearer[ \t]+)[A-Za-z0-9_.~+-][A-Za-z0-9_.~+/=-]{7,}/giu;
 
 /**
  * GitHub発行のトークン形状（`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` = personal access token・
@@ -285,6 +304,10 @@ function maskTokenLike(value: string): string {
  *   Issue #474 指摘4・5）
  * - JWT（`eyJ...`）・AWSアクセスキー（`AKIA...`）・Slackトークン（`xox[bpsr]-...`）等、
  *   `maskTokenLike` が対象とする3形状以外のトークン・APIキー形状
+ *
+ * このマスク処理は、`GIT_MAX_BUFFER_BYTES`（`worktree.ts`）・`CLI_MAX_BUFFER_BYTES`
+ * （`forge.ts`）がいずれも10MBであるため到達しうる規模の入力に対して、秒単位の
+ * コストがかかりうる（Issue #474監査実測）。
  */
 export function maskForLog(value: string, homeDir?: string): string {
   return maskHomeDir(maskUrlUserinfo(maskTokenLike(value)), homeDir);
