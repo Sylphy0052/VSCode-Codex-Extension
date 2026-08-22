@@ -34,6 +34,7 @@ import type {
   PseudoWorktreeFileSystemPort,
 } from '../../src/orchestrator/pseudoWorktree';
 import type {
+  DispatchErrorLogPort,
   HttpMcpTransportHandle,
   OrchestratorControlPort,
   TaskMessagingHub,
@@ -671,16 +672,19 @@ interface FakeMessagingState {
   handle:
     | (HttpMcpTransportHandle & { registeredTasks: string[]; closed: boolean; closeCount: number })
     | undefined;
+  /** `startTransport`へ実際に渡された`logPort`（Issue #375、配線の検証用）。 */
+  logPort: DispatchErrorLogPort | undefined;
 }
 
 function fakeMessagingDeps(options?: { failStart?: boolean; failClose?: boolean }): {
   deps: WorkflowRunnerMessagingDeps;
   state: FakeMessagingState;
 } {
-  const state: FakeMessagingState = { hub: undefined, handle: undefined };
+  const state: FakeMessagingState = { hub: undefined, handle: undefined, logPort: undefined };
   const deps: WorkflowRunnerMessagingDeps = {
-    startTransport: async (hub) => {
+    startTransport: async (hub, logPort) => {
       state.hub = hub;
+      state.logPort = logPort;
       if (options?.failStart) {
         throw new Error('fake transport start failure');
       }
@@ -4769,6 +4773,25 @@ tasks:
     expect(t2Input?.mcp?.url).toContain('/mcp/');
     expect(t1Input?.mcp?.url).not.toBe(t2Input?.mcp?.url);
   });
+
+  it(
+    'MCPサーバの起動時に、this.deps.logを包んだlogPortがstartTransportへ渡される' +
+      '（Issue #375。以前はこの配線自体が無く、dispatch例外が記録されなかった）',
+    async () => {
+      const errorLog = vi.fn();
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(TWO_TASK_YAML, {
+        messaging: deps,
+        log: { ...fakeLogger, error: errorLog },
+      });
+      await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
+      await flush();
+
+      expect(state.logPort).toBeDefined();
+      state.logPort?.error('dispatch経由のテストメッセージ');
+      expect(errorLog).toHaveBeenCalledWith('dispatch経由のテストメッセージ');
+    },
+  );
 
   it('send_messageで受け付けたメッセージは、宛先タスクの次の送信の先頭へ添えられる', async () => {
     const { deps, state } = fakeMessagingDeps();

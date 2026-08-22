@@ -35,7 +35,12 @@ import {
   type PseudoWorktreeFileSystemPort,
   type Snapshot,
 } from './pseudoWorktree';
-import { composeNextPrompt, TaskMessagingHub, type HttpMcpTransportHandle } from './messaging';
+import {
+  composeNextPrompt,
+  TaskMessagingHub,
+  type DispatchErrorLogPort,
+  type HttpMcpTransportHandle,
+} from './messaging';
 import {
   applyLoopStopReason,
   createRunState,
@@ -202,8 +207,17 @@ export interface WorkflowRunnerForgeDeps {
  * `WorkflowRunnerDeps.forge`/`.pseudoWorktree`と同じく省略可能（上のJSDoc参照）。
  */
 export interface WorkflowRunnerMessagingDeps {
-  /** runごとに1つ、MCPサーバを起動する（design.md §16.21「サーバはrunごとに立て」）。 */
-  startTransport: (hub: TaskMessagingHub) => Promise<HttpMcpTransportHandle>;
+  /**
+   * runごとに1つ、MCPサーバを起動する（design.md §16.21「サーバはrunごとに立て」）。
+   *
+   * `logPort`は`WorkflowRunner`が`this.deps.log`を包んで渡す（Issue #375）。dispatch例外を
+   * `MessagingMcpServer`が記録できるようにする最小限の口（`DispatchErrorLogPort`のJSDoc
+   * 参照）。
+   */
+  startTransport: (
+    hub: TaskMessagingHub,
+    logPort?: DispatchErrorLogPort,
+  ) => Promise<HttpMcpTransportHandle>;
   /**
    * `agent.workflows.replyTimeoutSec` の現在値（秒）。省略時は`DEFAULT_REPLY_TIMEOUT_SEC`
    * （既定300秒）を使う。待ちぼうけ検出の経路2（`detectTimedOutWaitingReplies`）で使う。
@@ -1160,7 +1174,10 @@ export class WorkflowRunner {
       orchestratorControl: buildOrchestratorControlPort(this.internals, this, runId),
     });
     try {
-      const transport = await messaging.startTransport(hub);
+      // dispatch例外の記録先（Issue #375）。`log.ts`はVSCode APIへ依存するため、
+      // `messaging.ts`（VSCode非依存方針）へは直接渡さず最小限のportで包む
+      const logPort: DispatchErrorLogPort = { error: (message) => this.deps.log.error(message) };
+      const transport = await messaging.startTransport(hub, logPort);
       const waitingReplyPollTimer = setInterval(
         () => checkWaitingReplyStalls(this.internals, runId),
         WAITING_REPLY_POLL_INTERVAL_MS,

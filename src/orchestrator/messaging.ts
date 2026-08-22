@@ -900,6 +900,26 @@ const SERVER_INFO_RESULT = {
 };
 
 /**
+ * `logDispatchError`が1つの`MessagingMcpServer`（＝1run）につき実際に記録する上限件数
+ * （Issue #375、PR #476レビュー指摘: medium）。
+ *
+ * このIssueの脅威モデルそのもの（同一runの他タスク、あるいは乗っ取られたCLIセッションが
+ * 意図的に例外を誘発する呼び出しを繰り返す）に対して、`safeDispatch`は例外1回につき
+ * 無条件で`logPort.error(...)`を呼ぶため、1接続内で任意回数呼べるJSON-RPCリクエストの
+ * たびにログ行が無制限に増える。
+ *
+ * 新しい流儀を作らず、リポジトリ既存の「件数上限」の規律に揃える
+ * （`runnerWorkingDirectory.ts`の`MAX_LISTED_REFLECT_PATHS`、`roadmap.ts`の
+ * `MAX_ROADMAP_PARSE_WARNINGS`と同じ形）。`runnerOrchestrator.ts`が
+ * `orchestratorPromptOverride`の警告を直近1件へ丸めた判断（#383）は採らない。
+ * あちらは`live.warnings`という参照可能な状態（ワークフローViewに出続ける）を持つため
+ * 「最新の1件だけ残る」が意味を持つが、ここは都度Output panelへ流れて消えるログ行であり、
+ * 「最新1件だけ」に丸めても以前の件数（＝攻撃の規模感）が失われるだけで閲覧性は上がらない。
+ * 件数を数え、上限を超えた分は記録しないという単純な上限のほうが素直に対応する。
+ */
+export const MAX_DISPATCH_ERROR_LOG_COUNT = 20;
+
+/**
  * `McpTransportPort` を通じて接続を受け取り、`list_tasks` / `send_message` の
  * ツール呼び出しを `TaskMessagingHub` へ橋渡しする。
  *
@@ -910,6 +930,9 @@ const SERVER_INFO_RESULT = {
  * （design.md §16.21「ツールの引数でタスクidを名乗らせない」）。
  */
 export class MessagingMcpServer {
+  /** `logDispatchError`が実際に記録した件数（Issue #375）。runを跨がず、この接続群だけで数える。 */
+  private dispatchErrorLogCount = 0;
+
   constructor(
     private readonly hub: TaskMessagingHub,
     transport: McpTransportPort,
@@ -951,16 +974,27 @@ export class MessagingMcpServer {
    * 意図的に一切読まない。スタックトレースにはこの拡張機能自身のソースファイルパスが
    * 含まれ、`-32603`のレスポンス本体を固定文言にしている理由（内部情報を漏らさない）と
    * 同じ配慮がログ経路にも要るため。
+   *
+   * `MAX_DISPATCH_ERROR_LOG_COUNT`件を超えたら記録を止める（Issue #375、PR #476レビュー
+   * 指摘: medium。丸めの流儀は定数のJSDoc参照）。上限に達した回にだけ、抑制を始めた旨の
+   * 1行を追加で記録する（以降は完全に無音になるのではなく、抑制が始まった事実自体は残す）。
    */
   private logDispatchError(error: unknown): void {
-    if (this.logPort === undefined) {
+    if (this.logPort === undefined || this.dispatchErrorLogCount >= MAX_DISPATCH_ERROR_LOG_COUNT) {
       return;
     }
+    this.dispatchErrorLogCount += 1;
     const typeName = error instanceof Error ? error.constructor.name : typeof error;
     const message = error instanceof Error ? error.message : String(error);
     this.logPort.error(
       `[task-messaging] dispatchで例外が発生しました: ${typeName}: ${sanitizeForLog(message)}`,
     );
+    if (this.dispatchErrorLogCount === MAX_DISPATCH_ERROR_LOG_COUNT) {
+      this.logPort.error(
+        `[task-messaging] dispatch例外のログ記録が上限（${MAX_DISPATCH_ERROR_LOG_COUNT}件）に達したため、` +
+          'この接続ではこれ以降記録しません',
+      );
+    }
   }
 
   private dispatch(taskId: string, request: JsonRpcRequest): JsonRpcResponse {

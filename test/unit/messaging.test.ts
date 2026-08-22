@@ -13,6 +13,7 @@ import {
   isDeliverableState,
   LIST_TASKS_TOOL,
   MAX_COMPOSED_PROMPT_LENGTH,
+  MAX_DISPATCH_ERROR_LOG_COUNT,
   MAX_MESSAGE_BODY_LENGTH,
   MAX_MESSAGES_PER_RUN,
   MessagingMcpServer,
@@ -816,6 +817,46 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
       // 実装がerror.stackを一切読んでいない場合のみ
       expect(logs[0]).not.toContain(' at ');
       expect(logs[0]).not.toContain(__filename);
+    },
+  );
+
+  it(
+    'dispatch例外の記録は上限（MAX_DISPATCH_ERROR_LOG_COUNT）件で頭打ちになる' +
+      '（Issue #375、PR #476レビュー指摘: medium。同一runの他タスクや乗っ取られたCLI' +
+      'セッションが例外を誘発する呼び出しを繰り返しても、ログ行が無制限には増えない）',
+    () => {
+      const logs: string[] = [];
+      const logPort: DispatchErrorLogPort = { error: (m) => logs.push(m) };
+      const transport = new FakeTransport();
+      const hub = new TaskMessagingHub({
+        listRunTasks: () => {
+          throw new Error('boom');
+        },
+      });
+      new MessagingMcpServer(hub, transport, logPort);
+      const conn = new FakeConnection('T1');
+      transport.connect(conn);
+
+      const attempts = MAX_DISPATCH_ERROR_LOG_COUNT + 5;
+      for (let i = 0; i < attempts; i += 1) {
+        conn.fireRequest({
+          jsonrpc: '2.0',
+          id: i,
+          method: 'tools/call',
+          params: { name: 'list_tasks', arguments: {} },
+        });
+      }
+
+      // 上限件数分の個別ログ + 上限到達を知らせる1行だけが記録され、それ以上は増えない
+      expect(logs).toHaveLength(MAX_DISPATCH_ERROR_LOG_COUNT + 1);
+      expect(logs.slice(0, MAX_DISPATCH_ERROR_LOG_COUNT).every((m) => m.includes('boom'))).toBe(
+        true,
+      );
+      expect(logs[MAX_DISPATCH_ERROR_LOG_COUNT]).toContain(String(MAX_DISPATCH_ERROR_LOG_COUNT));
+
+      // 記録が止まっても、レスポンス自体は引き続き固定文言の-32603で返る（応答は壊れない）
+      expect(conn.sent).toHaveLength(attempts);
+      expect(conn.sent.every((r) => 'error' in r && r.error.code === -32603)).toBe(true);
     },
   );
 
