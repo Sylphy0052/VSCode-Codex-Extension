@@ -636,8 +636,7 @@ export const RETRY_TASK_TOOL: McpToolDefinition = {
 
 export const CONTINUE_TASK_TOOL: McpToolDefinition = {
   name: 'continue_task',
-  description:
-    '止まっているタスクを同じセッションのまま続きから走らせる（Viewの「続ける」と同じ）。',
+  description: '止まっているタスクを同じセッションのまま続きから走らせる（Viewの「続ける」と同じ）。',
   inputSchema: {
     type: 'object',
     properties: { taskId: TASK_ID_ARG },

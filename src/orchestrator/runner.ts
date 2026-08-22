@@ -98,6 +98,8 @@ import {
   syncOrchestratorTaskEvents,
 } from './runnerOrchestrator';
 import { sanitizeForLog, stripControlChars, stripControlCharsPreservingNewlines } from './sanitize';
+import { sanitizeInlineText } from './untrustedText';
+import { MAX_MESSAGE_BODY_LENGTH } from './messaging';
 import {
   buildEffectiveTaskConfig,
   type EffectiveTaskConfig,
@@ -1959,10 +1961,7 @@ export class WorkflowRunner {
   private findStoppableSessionEntry(
     runId: string,
     taskId: string,
-  ):
-    | { kind: 'mergeResolution'; entry: MergeResolutionEntry }
-    | { kind: 'task'; entry: LiveTask }
-    | undefined {
+  ): { kind: 'mergeResolution'; entry: MergeResolutionEntry } | { kind: 'task'; entry: LiveTask } | undefined {
     const live = this.runs.get(runId);
     if (live === undefined) {
       return undefined;
@@ -3292,6 +3291,16 @@ export class WorkflowRunner {
    * `live.finalMergeDecision`が無い（判断待ちでない・runが無い）場合は`false`を返す。
    * 二重に呼ばれても（タイムアウトと同時に人が確認した等）2回目は`false`になるだけで、
    * 二重マージ・二重の警告は起きない。
+   *
+   * **`live.runState.haltedByUser`（人が「全体の停止」を押した）が立っている間は
+   * `decision: 'merge'`を拒否する。** ここは3経路（オーケストレーターの
+   * `decide_final_merge`ツール・ワークフローViewの確認ボタン・タイムアウト）すべてが
+   * 合流する根本であり、ここで守れば3経路とも一貫して守れる（`buildOrchestratorControlPort`
+   * 側にも同種のガードを重ねてあるが、それだけでは`confirm`モードのボタン経路
+   * （`workflowView.ts`から直接この関数を呼ぶ）を守れない。レビュー指摘）。
+   * `'hold'`は拒否しない——`hold`はPR/MRを残すだけの安全な方向で、かつタイムアウトの
+   * 自動`hold`呼び出しをここで止めると判断待ちが永久に解消されず、design.md §16.26の
+   * 「processを無期限に止めない」という前提が壊れる。
    */
   public decideFinalMerge(runId: string, decision: FinalMergeDecision, reason: string): boolean {
     const live = this.runs.get(runId);
@@ -3299,13 +3308,21 @@ export class WorkflowRunner {
     if (live === undefined || pending === undefined) {
       return false;
     }
+    if (decision === 'merge' && live.runState.haltedByUser) {
+      return false;
+    }
     clearTimeout(pending.timer);
     live.finalMergeDecision = undefined;
     const decisionLabel =
       decision === 'merge' ? 'merge（mainへマージする）' : 'hold（マージせずPR/MRを残す）';
+    // `reason`はオーケストレーター（LLM）が生成する自由記述であり、外部由来相当
+    // として扱う（design.md §16.24）。表示用の`sanitizeInlineText`で制御文字を落とし、
+    // 呼び出し元（MCPツール層）の上限チェックを経ずにここへ届く経路
+    // （ワークフローViewの確認ボタン・タイムアウトの`hold`）にも長さの上限を掛ける
+    const safeReason = sanitizeInlineText(reason, MAX_MESSAGE_BODY_LENGTH);
     pushFinalMergeWarning(
       live,
-      `最終マージの判断が確定しました: ${decisionLabel}。理由: ${reason === '' ? '（理由が示されませんでした）' : reason}`,
+      `最終マージの判断が確定しました: ${decisionLabel}。理由: ${safeReason === '' ? '（理由が示されませんでした）' : safeReason}`,
     );
     if (decision === 'merge') {
       void this.performFinalMerge(runId);

@@ -108,7 +108,10 @@ const no = (reason: string): OrchestratorControlResult => ({ accepted: false, re
  * 閉じるまでの隙間と、サーバの寿命に依存しない多層防御としてここでも止める。**`get_run_status`
  * は無効にしない**（走り終えた後に「なぜ失敗したのか」を聞く経路を残すため）。
  */
-function runFinishedReason(actions: OrchestratorControlActions, runId: string): string | undefined {
+function runFinishedReason(
+  actions: OrchestratorControlActions,
+  runId: string,
+): string | undefined {
   const outcome = actions.getSnapshot(runId)?.outcome;
   if (outcome === undefined) {
     return 'この実行はすでに破棄されているため、制御ツールは使えません。';
@@ -272,10 +275,20 @@ export function buildOrchestratorControlPort(
       // 全タスクが`done`になり`outcome`が既に`succeeded`（＝「終了している」）に
       // なった後で始まるため、`runFinishedReason`（`outcome === 'running'`でなければ
       // 拒否）を通すと常に拒否されてしまう。ここでは`finalMergeDecision`の有無だけを
-      // 判断待ちの根拠にする
+      // 判断待ちの根拠にする。
+      //
+      // ただし`runHaltedByUserReason`（人が「全体の停止」を押したかどうか）は他の判断系
+      // 制御ツール（`retryTask`/`continueTask`/`decideApproval`/`updateTaskPrompt`）と
+      // 同じく通す。停止後もこのツールが素通りだと、人が全体を止めた後にオーケストレーターが
+      // `decision: 'merge'`を呼んでmainへ実際にマージできてしまう（レビュー指摘。
+      // `runFinishedReason`をスキップする理由とは別に、こちらは他ツールと揃えるのが正しい）
       const snapshot = actions.getSnapshot(runId);
       if (snapshot === undefined) {
         return no('この実行はすでに破棄されているため、制御ツールは使えません。');
+      }
+      const halted = runHaltedByUserReason(actions, runId);
+      if (halted !== undefined) {
+        return no(halted);
       }
       const pending = snapshot.finalMergeDecision;
       if (pending === undefined) {
@@ -291,6 +304,13 @@ export function buildOrchestratorControlPort(
       }
       if (reason.trim() === '') {
         return no('reason は必須です（判断の理由を書いてください）。');
+      }
+      // `send_message`（`validateSendMessage`）・`update_task_prompt`と同じ上限を使う
+      // （design.md §16.23）。`reason`はLLMが生成する自由記述であり、上限が無いと
+      // 警告欄（`pushFinalMergeWarning`）を任意長の文字列で埋められる（レビュー指摘）。
+      // `send_message`に揃えて切り詰めではなく拒否にする
+      if (reason.length > MAX_MESSAGE_BODY_LENGTH) {
+        return no(`reason が長すぎます（上限${MAX_MESSAGE_BODY_LENGTH}文字）: ${reason.length}文字`);
       }
       return actions.decideFinalMerge(runId, decision, reason)
         ? ok(`最終マージの判断を ${decision} として確定しました。`)

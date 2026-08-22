@@ -4413,20 +4413,21 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 
 #### ワークフロー設定の一覧
 
-`agent.workflows.*` の全11項目。実際に登録している値（型・既定値・markdownDescription）は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている（§7と同じ原則）。
+`agent.workflows.*` の全13項目。実際に登録している値（型・既定値・markdownDescription）は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている（§7と同じ原則）。
 
 | 設定                                    | スコープ            | 用途・理由                                                                                                                                             |
 | --------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `agent.workflows.dir`                   | resource            | ワークフロー定義ファイルを探すディレクトリ（既定 `.agents/workflows`）。中身は§16.16のとおり信用しないので、置き場自体はワークスペースごとに変えてよい |
 | `agent.workflows.allowAutoApprove`      | machine             | YAMLの `autoApprove: true` を有効化できるかどうか（既定 `false`）。無効化してある間はYAMLの指定によらず全承認を人へ回す（前掲の表参照）                |
 | `agent.workflows.replyTimeoutSec`       | machine-overridable | タスク間メッセージング（§16.21）の返信待ちの上限秒数                                                                                                   |
-| `agent.workflows.finalMerge`            | machine             | mainを無人で書き換えるかどうかを決める。リポジトリの `.vscode/settings.json` から `auto` にされてはいけない                                            |
+| `agent.workflows.finalMerge`            | machine             | mainを無人で書き換えるかどうかを決める。リポジトリの `.vscode/settings.json` から `auto` や `orchestrator`（既定、§16.26）にされてはいけない           |
 | `agent.workflows.forge`                 | machine             | どのCLI（`gh` / `glab`）を起動するかを決める。実行するコマンドの選択にあたるので §8 と同じ扱いにする                                                   |
 | `agent.workflows.pullRequest`           | machine-overridable | 作るPR/MRの層。権限には関わらない                                                                                                                      |
 | `agent.workflows.roadmapDir`            | machine-overridable | ロードマップの出力先のパス。ワークスペースフォルダの配下に限る                                                                                         |
 | `agent.workflows.pseudoWorktreeExclude` | machine-overridable | 疑似worktreeで複製から外すディレクトリ名。増やしても安全側にしか働かない                                                                               |
 | `agent.workflows.branchNaming`          | machine-overridable | タスクブランチの命名方式（§16.6）。ブランチ名の形を決めるだけで、push先も権限も変えない                                                                |
 | `agent.workflows.draftPullRequest`      | machine-overridable | PR/MRをDraftで作るかどうか（§16.18）。有効にするほうが「人の確認を挟む」側へ倒れるため、強い制限は要らない                                             |
+| `agent.workflows.finalMergeDecisionTimeoutSec` | machine-overridable | `finalMerge: orchestrator` の最終マージ判断待ちの上限秒数（既定900秒、§16.26）。タイムアウトすると `hold` へ倒す                                 |
 
 push先のremoteをYAMLや設定から選ぶ手段は設けない。常に `origin` を使う。任意のURLへpushできると、リポジトリの中身を別の宛先へ出す経路になる。
 
@@ -4578,7 +4579,7 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 - GitLabのMR作成は `glab mr create` ではなく `glab api projects/:id/merge_requests` へのPOSTを使っている（「本文」参照）ため、Draft指定もAPIのフィールド（`draft`）で渡す。`glab mr create --draft` のようなフラグは経由しない
 - `--field=draft=true` は文字列 `"true"` ではなく、真にJSON booleanとして送られる。実測済み: `glab 1.112.0` の `glab api --help` に「The `--field` flag behaves like `--raw-field` but converts values based on their format: Literal values `true`, `false`, `null`, and integer numbers are converted to the matching JSON types.」とある（`--raw-field` を使った場合は文字列のまま送られ、GitLab APIのboolean検証に落ちる）
 - ready化には**PR/MRの番号が要る**（下の「PR/MRの番号」）。URLから番号を取り出せなかった場合はready化を飛ばし、警告を残す。Draftのまま残るほうが、誤った番号のPR/MRをreadyにするより害が小さい
-- 統合層のPR/MRもDraftで作る。ただしこちらは**最終マージ（`finalMerge: auto`）の直前**にreadyへ切り替える。Draftのままではマージできないため、タスク層とは順序が違う
+- 統合層のPR/MRもDraftで作る。ただしこちらは**最終マージの直前（`finalMerge` の値によらず `performFinalMerge` が担う）**にreadyへ切り替える。Draftのままではマージできないため、タスク層とは順序が違う
 - 既定を `false` にしているのは後方互換のため。Draftを前提としないリポジトリで、いきなり全てのPR/MRがDraftになると人手のレビュー導線が変わる
 
 #### 統合ブランチpushの直列化とリトライ（Issue #253）
@@ -4965,13 +4966,14 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 | `continue_task`      | `taskId`                      | `WorkflowRunner.continueTask`                        |
 | `decide_approval`    | `taskId` / `decision`         | `WorkflowRunner.decideApproval`                      |
 | `update_task_prompt` | `taskId` / `continuePrompt`   | 後述（新設）                                         |
+| `decide_final_merge` | `decision` / `reason`         | 後述（新設、§16.26）                                 |
 
 - 制御ツールは**既存のrunnerのメソッドをそのまま呼ぶ**。Viewのボタンが通るのと同じ経路にし、モデル用の別経路を作らない。状態遷移の正しさを1か所（`runState.ts`）に保つため
 - `stop_task` の対象は「走行中のタスク」に限らない。**衝突解決セッション（`live.mergeResolutions`。§16.17「コンフリクト」5.）も対象**（issue #514）。`merging` のタスク自身のループは既に終わっているが、統合worktreeで開く衝突解決セッションはまだ生きており、そちらへ `stopLoop()` を届ける。`WorkflowRunner.stopTask` は戻り値（`boolean`）を「送り先を見つけて `stopLoop()` を呼べたか」の根拠にし、見つからなければ `false` を返す。制御ツール側（`buildOrchestratorControlPort` の `stopTask`）はこれを見て `no(...)` を返し、届いていないのに「止めました」という成功を返さない。人はワークフローViewを見て「止まっていない」ことに気づけるが、オーケストレーターは応答（`accepted`）しか見ないため、一度嘘の成功を返すとその経路を二度と再試行しない
 - `no(...)` は「見つからない」と「届いたが既に終わっていた」を同じ文言で返してはならない（issue #514 medium指摘）。`live.tasks` のエントリは `onTaskFinished` 後も消えないため、`merging` のタスクのように「送り先はあったが、ループは既に終わっていた」場合にも `stopLoop()` は `false` を返す。これを「見つかりません」と伝えるとオーケストレーターが誤診する（実際には届いていたのに、届いていないと思って的外れな再試行をする）。`WorkflowRunner.hasStoppableSession` で送り先の有無だけを別に判定し、文言を「見つかりません」／「既に停止しています」に分ける
 - **`stop_task` はこのタスク単体だけを止め、run全体を止めない。** `merging` のタスクへの `stop_task` は衝突解決セッションへ `stopLoop()` を送るが、その結果（`LoopStopReason: 'taskStopped'`）を `WorkflowRunner.stop()`（全体停止）からの同じ `stopLoop()` と区別できないと、`runnerMerge.ts` の `finishMergeResolution` が誤って実行全体を `haltedByUser` にしてしまう（issue #514の本題）。`MergeResolutionEntry.stoppedByStopTask` を送り元の印にし、`stop_task` 経由なら他の `pending` タスクを `skipped` にせず、`retry_task` / `continue_task` / `decide_approval` も通常どおり使えるままにする。だからこそ次の一文が成り立つ: `stop_task` はこの検査（`runHaltedByUserReason`）を通さない（止める方向は停止意図と矛盾しないため呼び出し側で除外する）。もし `stop_task` 自身が `haltedByUser` を立ててしまうなら、この一文の前提が壊れる
 - `get_run_status` が返すのは進捗の件数・タスクの状態・直近の応答の1行要約・警告欄の内容・統合の状況まで。**応答本文そのものは返さない**（`LiveTask` が本文を持たないのと同じ。§16.11）
-- **run終了時にMCPサーバごと閉じる**（§16.21のとおり、runが終われば新しいタスクは開始されないため接続は要らない）。以降オーケストレーターからは制御ツールも `list_tasks` も見えなくなり、**会話だけが続けられる**。「制御ツールだけを無効にしてサーバは残す」形は採らない。runごとのHTTPサーバがウィンドウの寿命まで開いたままになるうえ、runが終わったあとに動かせる対象がもう無いため。run終了の通知（次項の表）に「以降ツールは使えない」ことを明記して、モデルが使えないツールを呼び続けないようにする
+- **run終了時にMCPサーバごと閉じる**（§16.21のとおり、runが終われば新しいタスクは開始されないため接続は要らない）。以降オーケストレーターからは制御ツールも `list_tasks` も見えなくなり、**会話だけが続けられる**。「制御ツールだけを無効にしてサーバは残す」形は採らない。runごとのHTTPサーバがウィンドウの寿命まで開いたままになるうえ、runが終わったあとに動かせる対象がもう無いため。run終了の通知（次項の表）に「以降ツールは使えない」ことを明記して、モデルが使えないツールを呼び続けないようにする。**例外: `finalMerge: orchestrator` の最終マージ判断待ちの間（§16.26）は、outcomeが`succeeded`（終了確定）になった後もサーバを閉じない。** `decide_final_merge`で判断を受ける以上、判断待ちの間にサーバが閉じていては判断そのものを受け付けられないため
 - `stop`（run全体の停止）はツールにしない。run全体を止めるのは人の判断に残す
 
 `update_task_prompt` が方針転換の実体になる。走行中のタスクへ「以降はこの方針でやれ」を届ける手段が、現状は `send_message`（次の指示の先頭へ添えるだけで、元の `continuePrompt` は残り続ける）しか無い。

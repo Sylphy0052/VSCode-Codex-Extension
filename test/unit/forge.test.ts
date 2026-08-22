@@ -259,11 +259,7 @@ describe('checkForgePrerequisites', () => {
     cli.respond('gh', ['auth', 'status'], { code: 0, stdout: '', stderr: '' });
     const availability = new FakeCliAvailability(new Set(['gh']));
 
-    const result = await checkForgePrerequisites(
-      { git, cli, cliAvailability: availability },
-      '/repo',
-      'github',
-    );
+    const result = await checkForgePrerequisites({ git, cli, cliAvailability: availability }, '/repo', 'github');
 
     expect(result).toEqual({
       host: 'github',
@@ -282,11 +278,7 @@ describe('checkForgePrerequisites', () => {
     cli.respond('gh', ['auth', 'status'], { code: 0, stdout: '', stderr: '' });
     const availability = new FakeCliAvailability(new Set(['gh']));
 
-    const result = await checkForgePrerequisites(
-      { git, cli, cliAvailability: availability },
-      '/repo',
-      'github',
-    );
+    const result = await checkForgePrerequisites({ git, cli, cliAvailability: availability }, '/repo', 'github');
 
     expect(result.hasOriginRemote).toBe(false);
     expect(result.ready).toBe(false);
@@ -303,11 +295,7 @@ describe('checkForgePrerequisites', () => {
     const cli = new FakeCli();
     const availability = new FakeCliAvailability(new Set());
 
-    const result = await checkForgePrerequisites(
-      { git, cli, cliAvailability: availability },
-      '/repo',
-      'github',
-    );
+    const result = await checkForgePrerequisites({ git, cli, cliAvailability: availability }, '/repo', 'github');
 
     expect(result.cliOnPath).toBe(false);
     expect(result.ready).toBe(false);
@@ -325,11 +313,7 @@ describe('checkForgePrerequisites', () => {
     cli.respond('glab', ['auth', 'status'], { code: 1, stdout: '', stderr: 'not logged in' });
     const availability = new FakeCliAvailability(new Set(['glab']));
 
-    const result = await checkForgePrerequisites(
-      { git, cli, cliAvailability: availability },
-      '/repo',
-      'gitlab',
-    );
+    const result = await checkForgePrerequisites({ git, cli, cliAvailability: availability }, '/repo', 'gitlab');
 
     expect(result.authenticated).toBe(false);
     expect(result.ready).toBe(false);
@@ -492,14 +476,9 @@ describe('pushBranch（競合系の一時的失敗のリトライ。Issue #253�
       { code: 0, stdout: '', stderr: '' },
     ]);
     const waits: number[] = [];
-    const result = await pushBranch(
-      git,
-      '/repo/integration',
-      INTEGRATION_BRANCH,
-      async (attempt) => {
-        waits.push(attempt);
-      },
-    );
+    const result = await pushBranch(git, '/repo/integration', INTEGRATION_BRANCH, async (attempt) => {
+      waits.push(attempt);
+    });
 
     expect(result).toEqual({ ok: true });
     expect(git.calls).toHaveLength(2);
@@ -512,14 +491,9 @@ describe('pushBranch（競合系の一時的失敗のリトライ。Issue #253�
       { code: 1, stdout: '', stderr: 'fatal: Authentication failed for https://example/repo.git' },
     ]);
     const waits: number[] = [];
-    const result = await pushBranch(
-      git,
-      '/repo/integration',
-      INTEGRATION_BRANCH,
-      async (attempt) => {
-        waits.push(attempt);
-      },
-    );
+    const result = await pushBranch(git, '/repo/integration', INTEGRATION_BRANCH, async (attempt) => {
+      waits.push(attempt);
+    });
 
     expect(result.ok).toBe(false);
     expect(git.calls).toHaveLength(1);
@@ -532,14 +506,9 @@ describe('pushBranch（競合系の一時的失敗のリトライ。Issue #253�
       Array.from({ length: PUSH_BRANCH_MAX_ATTEMPTS }, () => ({ ...failure })),
     );
     const waits: number[] = [];
-    const result = await pushBranch(
-      git,
-      '/repo/integration',
-      INTEGRATION_BRANCH,
-      async (attempt) => {
-        waits.push(attempt);
-      },
-    );
+    const result = await pushBranch(git, '/repo/integration', INTEGRATION_BRANCH, async (attempt) => {
+      waits.push(attempt);
+    });
 
     expect(result.ok).toBe(false);
     expect(git.calls).toHaveLength(PUSH_BRANCH_MAX_ATTEMPTS);
@@ -709,11 +678,7 @@ describe('createPullRequest', () => {
   describe('draft指定（「Draft PR/MRとして作成し、統合マージ後にreadyへ切り替える」フロー）', () => {
     it('GitHubはdraft=trueなら--draftを足す', async () => {
       const cli = new FakeCli();
-      cli.respond('gh', ['pr', 'create'], {
-        code: 0,
-        stdout: 'https://example/pr/1\n',
-        stderr: '',
-      });
+      cli.respond('gh', ['pr', 'create'], { code: 0, stdout: 'https://example/pr/1\n', stderr: '' });
       const fs = new FakeForgeFileSystem();
 
       await createPullRequest(
@@ -734,11 +699,7 @@ describe('createPullRequest', () => {
 
     it('GitHubはdraft=false（または省略）なら--draftを足さず既存と同じ引数列になる', async () => {
       const cli = new FakeCli();
-      cli.respond('gh', ['pr', 'create'], {
-        code: 0,
-        stdout: 'https://example/pr/1\n',
-        stderr: '',
-      });
+      cli.respond('gh', ['pr', 'create'], { code: 0, stdout: 'https://example/pr/1\n', stderr: '' });
       const fsWithDraftFalse = new FakeForgeFileSystem();
       const fsOmitted = new FakeForgeFileSystem();
 
@@ -788,9 +749,7 @@ describe('createPullRequest', () => {
       const cli = new FakeCli();
       cli.respond('glab', ['api'], {
         code: 0,
-        stdout: JSON.stringify({
-          web_url: 'https://gitlab.example.com/org/repo/-/merge_requests/1',
-        }),
+        stdout: JSON.stringify({ web_url: 'https://gitlab.example.com/org/repo/-/merge_requests/1' }),
         stderr: '',
       });
       const fs = new FakeForgeFileSystem();
@@ -815,9 +774,7 @@ describe('createPullRequest', () => {
       const cli = new FakeCli();
       cli.respond('glab', ['api'], {
         code: 0,
-        stdout: JSON.stringify({
-          web_url: 'https://gitlab.example.com/org/repo/-/merge_requests/1',
-        }),
+        stdout: JSON.stringify({ web_url: 'https://gitlab.example.com/org/repo/-/merge_requests/1' }),
         stderr: '',
       });
       const fs = new FakeForgeFileSystem();

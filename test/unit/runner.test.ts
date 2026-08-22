@@ -5040,7 +5040,9 @@ tasks:
         expect.stringContaining('実行状態の永続化に失敗しました'),
       );
       // Issue #379: ログだけでなく`live.warnings`（Viewの警告欄）へも記録される
-      const warning = runner.getSnapshot(runId)?.warnings.find((w) => w.kind === 'persistFailed');
+      const warning = runner
+        .getSnapshot(runId)
+        ?.warnings.find((w) => w.kind === 'persistFailed');
       expect(warning).toBeDefined();
       expect(warning?.taskId).toBeUndefined();
       expect(warning?.message).toContain('実行状態の永続化に失敗しました');
@@ -5063,9 +5065,7 @@ tasks:
         },
         update(): Thenable<void> {
           updateCount += 1;
-          return Promise.reject(
-            new Error(`workspaceStateへの書き込みに失敗しました(${updateCount})`),
-          );
+          return Promise.reject(new Error(`workspaceStateへの書き込みに失敗しました(${updateCount})`));
         },
       };
       const TWO_TASK_YAML = `
@@ -5085,10 +5085,7 @@ tasks:
         memento: failingMemento,
         log: fakeLogger,
       });
-      const result = await runner.start(
-        '/repo/.agents/workflows/persist-fail-repeat.yaml',
-        '/repo',
-      );
+      const result = await runner.start('/repo/.agents/workflows/persist-fail-repeat.yaml', '/repo');
       const runId = result.runId as string;
       await flush();
 
@@ -5234,10 +5231,12 @@ tasks:
       },
     );
 
-    it('自動再試行（retries: 1）でも、疑似worktreeが前回と別ディレクトリを使って成功する', async () => {
-      const git = fakeGit({ notGitRepo: true });
-      const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
-      const yaml = `
+    it(
+      '自動再試行（retries: 1）でも、疑似worktreeが前回と別ディレクトリを使って成功する',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const yaml = `
 version: 1
 name: pseudo-auto-retry-test
 tasks:
@@ -5246,30 +5245,31 @@ tasks:
     prompt: p1
     done: d1
 `;
-      const { runner, codexHost, store } = createHarness(yaml, {
-        git,
-        pseudoWorktree: { fs, exclude: [] },
-      });
-      const result = await runner.start('/repo/.agents/workflows/pseudo-auto-retry.yaml', '/repo');
-      const runId = result.runId as string;
-      await flush();
+        const { runner, codexHost, store } = createHarness(yaml, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-auto-retry.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
 
-      const attempt1 = codexHost.byTaskId('T1');
-      attempt1.finish('failed', { ...initialChatState, turnFailed: true });
-      await flush();
+        const attempt1 = codexHost.byTaskId('T1');
+        attempt1.finish('failed', { ...initialChatState, turnFailed: true });
+        await flush();
 
-      // 自動再試行が同じ経路で即死すると、retryCountだけが1に進み'loopFailed'で
-      // 確定してしまう（修正前の症状）。修正後は新しいディレクトリで実際にセッションが
-      // 開始される
-      expect(store.find(runId)?.tasks['T1']?.retryCount).toBe(1);
-      const cloneDir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T1-retry0');
-      const attempt2 = codexHost.sessions.find((s) => s.cwd === cloneDir2);
-      expect(attempt2).toBeDefined();
+        // 自動再試行が同じ経路で即死すると、retryCountだけが1に進み'loopFailed'で
+        // 確定してしまう（修正前の症状）。修正後は新しいディレクトリで実際にセッションが
+        // 開始される
+        expect(store.find(runId)?.tasks['T1']?.retryCount).toBe(1);
+        const cloneDir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T1-retry0');
+        const attempt2 = codexHost.sessions.find((s) => s.cwd === cloneDir2);
+        expect(attempt2).toBeDefined();
 
-      attempt2?.finish('done', doneState('ok'));
-      await flush();
-      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
-    });
+        attempt2?.finish('done', doneState('ok'));
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      },
+    );
 
     it(
       'removeWorktreesは疑似worktreeでも再試行したタスクの全試行分（初回+全retry）を撤去する' +
@@ -5878,34 +5878,37 @@ tasks:
       },
     );
 
-    it('run全体で500件のメッセージ数カウンタは、再開をまたいでも作り直されずリセットされない', async () => {
-      const { deps, state } = fakeMessagingDeps();
-      const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, { messaging: deps });
-      const result = await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
-      const runId = result.runId as string;
-      await flush();
+    it(
+      'run全体で500件のメッセージ数カウンタは、再開をまたいでも作り直されずリセットされない',
+      async () => {
+        const { deps, state } = fakeMessagingDeps();
+        const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, { messaging: deps });
+        const result = await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
 
-      // 送受信できる状態で何件か送っておき、カウンタを進める
-      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: 'a', expectReply: false });
-      state.hub?.sendMessage({ from: 'T2', to: 'T1', body: 'b', expectReply: false });
-      const totalBeforeClose = state.hub?.snapshotStore().totalSent;
-      expect(totalBeforeClose).toBe(2);
+        // 送受信できる状態で何件か送っておき、カウンタを進める
+        state.hub?.sendMessage({ from: 'T1', to: 'T2', body: 'a', expectReply: false });
+        state.hub?.sendMessage({ from: 'T2', to: 'T1', body: 'b', expectReply: false });
+        const totalBeforeClose = state.hub?.snapshotStore().totalSent;
+        expect(totalBeforeClose).toBe(2);
 
-      await failBothTasks(codexHost);
-      expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+        await failBothTasks(codexHost);
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
 
-      expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
-      expect(runner.retryTask(runId, 'T2')).toEqual({ ok: true });
-      await flush();
+        expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+        expect(runner.retryTask(runId, 'T2')).toEqual({ ok: true });
+        await flush();
 
-      // 再構築自体が起きていることを先に確かめる。ここを確認しないと、
-      // 「再開そのものがメッセージングを立て直さない」壊れ方（Issue #475の実害そのもの）
-      // でも`totalSent`が変わらないため見かけ上パスしてしまう
-      // （レビュー指摘: テストが弱い。修正前コードではここが1のままで落ちる）
-      expect(state.startCallCount).toBe(2);
-      // hubを作り直していれば`totalSent`は0へ戻ってしまう。再利用していれば引き継がれる
-      expect(state.hub?.snapshotStore().totalSent).toBe(totalBeforeClose);
-    });
+        // 再構築自体が起きていることを先に確かめる。ここを確認しないと、
+        // 「再開そのものがメッセージングを立て直さない」壊れ方（Issue #475の実害そのもの）
+        // でも`totalSent`が変わらないため見かけ上パスしてしまう
+        // （レビュー指摘: テストが弱い。修正前コードではここが1のままで落ちる）
+        expect(state.startCallCount).toBe(2);
+        // hubを作り直していれば`totalSent`は0へ戻ってしまう。再利用していれば引き継がれる
+        expect(state.hub?.snapshotStore().totalSent).toBe(totalBeforeClose);
+      },
+    );
 
     it('ensureMessagingは冪等で、既に生きているメッセージングを二重に立てない', async () => {
       const { deps, state } = fakeMessagingDeps();
@@ -6471,10 +6474,7 @@ tasks:
           git,
           pseudoWorktree: { fs, exclude: [] },
         });
-        const result = await runner.start(
-          '/repo/.agents/workflows/pseudo-retry-3round.yaml',
-          '/repo',
-        );
+        const result = await runner.start('/repo/.agents/workflows/pseudo-retry-3round.yaml', '/repo');
         const runId = result.runId as string;
         await flush();
 
@@ -7509,6 +7509,15 @@ tasks:
     done: d3
 `;
 
+    const SINGLE_TASK_HALT_YAML = `
+version: 1
+name: control-final-merge-halt-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
     it('retry_taskは停止直後（走行中タスクが残りoutcomeがrunningのまま）でもhaltedByUserを解除しない', async () => {
       const { deps, state } = fakeMessagingDeps();
       const { runner, codexHost } = createHarness(THREE_TASK_YAML, {
@@ -7677,6 +7686,48 @@ tasks:
       expect(outcome.accepted).toBe(true);
       expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe('running');
     });
+
+    it(
+      'decide_final_mergeも停止直後は拒否する（design.md §16.26、レビュー指摘。' +
+        '他の判断系制御ツールと同じくhaltedByUserを見る）',
+      async () => {
+        const git = fakeGit({
+          originRemoteUrl: 'git@github.com:acme/repo.git',
+          headBranch: 'main',
+        });
+        const cli = fakeForgeCli();
+        const { deps, state } = fakeMessagingDeps();
+        const { runner, codexHost } = createHarness(SINGLE_TASK_HALT_YAML, {
+          git,
+          forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+          messaging: deps,
+        });
+        const result = await runner.start(
+          '/repo/.agents/workflows/control-final-merge.yaml',
+          '/repo',
+        );
+        const runId = result.runId as string;
+        await flush();
+
+        codexHost.byTaskId('T1').finish('done', doneState('ok'));
+        await flush();
+        expect(runner.getSnapshot(runId)?.finalMergeDecision).toMatchObject({
+          mode: 'orchestrator',
+        });
+
+        runner.stop(runId);
+        await flush();
+        expect(runner.getSnapshot(runId)?.haltedByUser).toBe(true);
+
+        const outcome = control(state).decideFinalMerge('merge', 'stop後にマージを試みる');
+
+        expect(outcome.accepted).toBe(false);
+        expect(outcome.reason).toContain('人がこの実行全体を停止しました');
+        expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(
+          false,
+        );
+      },
+    );
   });
 
   it('decide_approvalはacceptとdeclineだけを受け付ける（セッション全体への承認は選べない）', async () => {
@@ -8514,7 +8565,9 @@ tasks:
     expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
     // catch節のログ文言（`runnerRestore.ts`）も検証する
     expect(errorLog).toHaveBeenCalledWith(
-      expect.stringContaining(`[workflow ${runId}/T1] リロード後のマージのやり直しに失敗しました`),
+      expect.stringContaining(
+        `[workflow ${runId}/T1] リロード後のマージのやり直しに失敗しました`,
+      ),
     );
   });
 
@@ -8590,10 +8643,7 @@ tasks:
   it('retryMerge内のvoid startMerge(...)がgitの例外で落ちても、mergingで固着せずfailedへ確定する', async () => {
     const conflictGit = fakeGit({ conflictOnce: true });
     const { runner, codexHost, store } = createHarness(SOLO_YAML, { git: conflictGit });
-    const result = await runner.start(
-      '/repo/.agents/workflows/merge-rejection-retry.yaml',
-      '/repo',
-    );
+    const result = await runner.start('/repo/.agents/workflows/merge-rejection-retry.yaml', '/repo');
     const runId = result.runId as string;
     await flush();
 
@@ -8642,10 +8692,7 @@ tasks:
       },
     };
     const { runner, codexHost, store } = createHarness(SOLO_YAML, { git });
-    const result = await runner.start(
-      '/repo/.agents/workflows/merge-resolution-throw.yaml',
-      '/repo',
-    );
+    const result = await runner.start('/repo/.agents/workflows/merge-resolution-throw.yaml', '/repo');
     const runId = result.runId as string;
     await flush();
 
@@ -9127,7 +9174,9 @@ tasks:
 
     const snapshot = runner.getSnapshot(runId);
     expect(snapshot?.tasks.find((t) => t.id === 'T2')?.state).toBe('merging');
-    expect(snapshot?.warnings.some((w) => w.kind === 'mergeBusy' && w.taskId === 'T2')).toBe(false);
+    expect(
+      snapshot?.warnings.some((w) => w.kind === 'mergeBusy' && w.taskId === 'T2'),
+    ).toBe(false);
     expect(JSON.stringify(store.find(runId))).toBe(persistedBefore);
   });
 
@@ -9334,10 +9383,7 @@ tasks:
         git,
         readMergeApprovalTimeoutSec: () => 60,
       });
-      const result = await runner.start(
-        '/repo/.agents/workflows/merge-approval-timeout.yaml',
-        '/repo',
-      );
+      const result = await runner.start('/repo/.agents/workflows/merge-approval-timeout.yaml', '/repo');
       const runId = result.runId as string;
       await flush();
 
@@ -9401,10 +9447,7 @@ tasks:
       git,
       readMergeApprovalTimeoutSec: () => 60,
     });
-    const result = await runner.start(
-      '/repo/.agents/workflows/merge-approval-timeout-2.yaml',
-      '/repo',
-    );
+    const result = await runner.start('/repo/.agents/workflows/merge-approval-timeout-2.yaml', '/repo');
     const runId = result.runId as string;
     await flush();
 
@@ -9496,10 +9539,7 @@ tasks:
       git,
       readMergeApprovalTimeoutSec: () => 60,
     });
-    const result = await runner.start(
-      '/repo/.agents/workflows/merge-approval-timeout-5.yaml',
-      '/repo',
-    );
+    const result = await runner.start('/repo/.agents/workflows/merge-approval-timeout-5.yaml', '/repo');
     const runId = result.runId as string;
     await flush();
 
@@ -9629,6 +9669,7 @@ tasks:
     },
   );
 });
+
 
 /**
  * design.md §16.26（最終マージの判断、Issue #335）。
@@ -9816,6 +9857,53 @@ tasks:
       expect(snapshot?.finalMergeDecision).toBeUndefined();
       expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
       expect(snapshot?.warnings.some((w) => w.kind === 'finalMergeDecision')).toBe(true);
+    },
+  );
+
+  it(
+    '人が「全体の停止」を押した後は、オーケストレーターがdecide_final_merge相当（' +
+      'decideFinalMerge）でdecision: \'merge\'を呼んでもmainへマージされない（' +
+      'レビュー指摘。他の判断系制御ツールと同じくhaltedByUserを見る）',
+    async () => {
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      const cli = fakeForgeCli();
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+      });
+      const result = await runner.start('/repo/.agents/workflows/final-merge-halt.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      codexHost.byTaskId('T1').finish('done', doneState('ok'));
+      await flush();
+
+      expect(runner.getSnapshot(runId)?.finalMergeDecision).toMatchObject({ mode: 'orchestrator' });
+
+      // 全タスクが既に完了しているため、stop()はhaltedByUserを立てるだけでoutcomeは
+      // succeededのまま変わらない（getRunOutcomeはpending/runningの残りが無い限りskip扱いに
+      // しない）。判断待ちの状態で「全体の停止」が押されるケースそのものが再現できる
+      runner.stop(runId);
+      await flush();
+      expect(runner.getSnapshot(runId)?.outcome).toBe('succeeded');
+
+      const accepted = runner.decideFinalMerge(runId, 'merge', '停止後に無理やりマージを試みる');
+      await flush();
+
+      expect(accepted).toBe(false);
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+      const snapshot = runner.getSnapshot(runId);
+      expect(snapshot?.finalMergeOutcome).toBeUndefined();
+      // 判断待ちの状態自体は解除されない（拒否しただけで、タイムアウトによる自動holdは
+      // 引き続き効く。holdは安全側なので拒否しない）
+      expect(snapshot?.finalMergeDecision).toMatchObject({ mode: 'orchestrator' });
+
+      // holdは拒否しない（安全側。タイムアウトの自動hold呼び出しも同じ経路を通るため、
+      // ここを塞ぐと判断待ちが無期限に解消されなくなる）
+      const heldAccepted = runner.decideFinalMerge(runId, 'hold', '停止後なのでholdにする');
+      await flush();
+      expect(heldAccepted).toBe(true);
+      expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBe('held');
     },
   );
 
