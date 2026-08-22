@@ -1,8 +1,13 @@
 # ワークフローの自律性と安全な統制
 
-ワークフローが「走らせたあとは人が見ているだけ」になっている状態を直し、状況に応じて計画を
-直せるようにする5項目のロードマップ。
+ワークフローが「走らせたあとは人が見ているだけ」になっている状態を直し、オーケストレーターが
+状況に応じて判断・進行できるようにする12項目のロードマップ。
 進捗の追跡は epic Issue [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341) に集める。
+
+**2026-08-22にW6〜W12を追加し、W1・W4の方針を転換した**（Issue #497）。同日、この拡張の
+ワークフロー機能を使わずに人手で7ワークフローを回した実運用から要求が出たため。当初の
+「自律性を上げる分だけ人の承認を必ず挟む」という方針は、「判断するのはオーケストレーターで
+あって人ではない。人へ確認するのは最低限」へ置き換わっている。詳しくは下の「方針」を見ること。
 
 ## きっかけ
 
@@ -18,6 +23,20 @@
 - **mainへのマージが人の目を通らない**。`agent.workflows.finalMerge` の既定が `auto`
 - **PR/MRのレビュー結果を取り込む経路が無い**
 
+2026-08-22に人手で7ワークフローを回した実運用から、さらに次の不足が分かった（W6〜W12）。
+
+- **タスク同士が直接メッセージを送り合う**（メッシュ型）。オーケストレーターは中継に関与せず、
+  誰が何を伝えたかを知らない
+- **タスクからオーケストレーターへ判断を仰ぐ経路が無い**。行き詰まったタスクは
+  `maxIterations` を消費するか、`done` を満たさないまま終わるしかない
+- **オーケストレーターからユーザーへ確認する経路が無い**
+- **中断から自動で再開しない**。リロード後の復元はあるが、続きを走らせるには人が
+  「再実行」を押す必要がある
+- **CIの結果を見ずにマージする**。`pr update-branch` 相当も無いため、strictなブランチ保護の
+  下では2本目以降のPRが必ず詰まる
+- **runをまたぐ統括が無い**。1 run = 1ワークフローで、複数ワークフローを波に分ける進め方を
+  表現できない
+
 一方で、次の2つは既に実装済みだった（新しく作る必要はない）。
 
 - 一時ブランチ（統合ブランチ `wf/<runId>/integration`）を作り、そこからタスクのworktreeを
@@ -25,20 +44,29 @@
 - タスク間メッセージング。Codexは `thread/start` の `config.mcp_servers`、Claude Codeは
   `--mcp-config` で、**両方とも実装済み**（[messaging.ts](../../src/orchestrator/messaging.ts)）
 
-方針は次の3つ。
+方針は次の5つ。**1と2は2026-08-22に人手で7ワークフローを回した実運用から出た要求で、
+当初の「人の承認を必ず挟む」という方針を置き換えている。**
 
-1. **自律性を上げる分だけ、人の承認を必ず挟む。** 計画の変更もmainへのマージも、エージェントの
-   判断だけでは通さない
-2. **エージェントの判断は見えるところに残す。** 適用した変更はワークフローViewの警告欄へ常時出す
-   （`update_task_prompt` と同じ扱い）
-3. **外から入るテキストは指示ではなくデータとして扱う。** レビューコメントもタスクの応答も同じ
+1. **判断するのはオーケストレーターであって人ではない。** mainへのマージも計画の変更も
+   オーケストレーターが決める。**人へ確認するのは最低限**に留め、方針が変わるとき
+   （担当領域をまたぐ・設計の前提を変える・受入基準を下げる）だけ上げる
+2. **やりとりは必ずオーケストレーターを通す。** タスク同士は直接つながらない。
+   人 ←→ オーケストレーター ←→ タスク の3層に固定する（スター型）
+3. **エージェントの判断は見えるところに残す。** 適用した変更はワークフローViewの警告欄へ常時出す
+   （`update_task_prompt` と同じ扱い）。承認を挟まない分、記録が唯一の追跡手段になる
+4. **外から入るテキストは指示ではなくデータとして扱う。** レビューコメントもタスクの応答も同じ
+5. **providerを問わない。** ここで足す道具はすべてMCPサーバのツールとして実装し、Codexと
+   Claude Codeの双方へ同じ形で配る。[design.md](../design.md) §16.22 のとおり、Codexは
+   `thread/start` の `config.mcp_servers`、Claude Codeは `--mcp-config` で渡せることが
+   実測で確認済み（Issue #123）。**Claude Codeのセッション間メッセージングのような
+   provider固有の機能には依存しない**（Codexで再現できないため）
 
 各項目の `依存` はロードマップのパーサ（[roadmap.ts](../../src/orchestrator/roadmap.ts)）が読む
 形式に合わせてある。
 
 ## フェーズ1 止めどころを作る
 
-- [ ] W1 mainへの最終マージに人の承認を必須にする
+- [ ] W1 mainへの最終マージをオーケストレーターが判断する
   - 依存: なし
   - Issue: #335
   - 現状: `FinalMergeConfig` は `'auto' | 'pr-only'`（[forge.ts](../../src/orchestrator/forge.ts)）で
@@ -46,17 +74,25 @@
     `gh pr merge` / `glab mr merge` まで進む。人の目を通さずmainが進む。
     既存の `pr-only` はPR/MRを作った時点で**runを終える**設定で、そのあと人がマージしたかどうかを
     拡張側は追わない（承認を待つ状態が無い）
-  - 変更: `FinalMergeConfig` へ `confirm` を足して**新しい既定にする**。統合PR/MRを作ったあと人の
-    承認を待ち、承認されたときだけマージする。承認の導線はワークフローViewへ置き、PR/MRのURLを
-    添える。`auto` は明示指定したときだけ残す。タスクブランチ→統合ブランチのマージは従来どおり自動。
-    **`pr-only` は消さずに残す。** 3つの使い分けは次のとおりで、READMEと設定の説明にもこの形で書く。
+  - 変更: `FinalMergeConfig` へ `orchestrator` を足して**新しい既定にする**。統合PR/MRを作った
+    あと、マージするかどうかをオーケストレーターへ問う。オーケストレーターは差分・CIの結果・
+    残った警告を見て `merge` か `hold` を返す。`hold` を返した場合はPR/MRを残してrunを終え、
+    理由をワークフローViewへ出す。**人の承認は挟まない**（方針1）。判断の内容と理由は
+    警告欄へ必ず残す（方針3）。タスクブランチ→統合ブランチのマージは従来どおり自動。
+    **`auto` と `pr-only` は消さずに残す。** 4つの使い分けは次のとおりで、READMEと設定の
+    説明にもこの形で書く。
     - `auto` — PR/MRを作ってそのままマージする（従来の既定）
-    - `confirm` — PR/MRを作って承認を待ち、承認されたら**拡張がマージする**（新しい既定）
+    - `orchestrator` — PR/MRを作り、オーケストレーターの判断でマージする（新しい既定）
+    - `confirm` — PR/MRを作って人の承認を待ち、承認されたときだけマージする
     - `pr-only` — PR/MRを作った時点でrunを終える。マージは拡張の外（GitHub/GitLab上）で行う
-  - 受入基準: 設定を書いていないワークフローで統合PR/MRが作られたあと承認待ちになる／承認すると
-    マージされ拒否するとPR/MRが残る／`auto` を明示したときは従来どおり／`pr-only` を明示したときも
-    従来どおり（承認待ちにならずrunが終わる）／前提チェックが通らず
-    PR/MRを作れなかった場合は従来どおりmainへマージしない
+  - 補足: `confirm` も同時に実装して残す。人が必ず見る運用を選べる余地は要る（この設定を
+    既定にしないだけで、選択肢としては消さない）
+  - 受入基準: 設定を書いていないワークフローで統合PR/MRが作られたあとオーケストレーターへ
+    判断が渡る／`merge` を返すとマージされる／`hold` を返すとPR/MRが残りrunが終わる／
+    どちらの判断も理由つきで警告欄に残る／`auto` `confirm` `pr-only` を明示したときは
+    それぞれの挙動になる／前提チェックが通らずPR/MRを作れなかった場合は従来どおり
+    mainへマージしない／**オーケストレーターが応答しない場合は `hold` として扱う**
+    （判断を待って無限に止まらない）
   - 影響: [forge.ts](../../src/orchestrator/forge.ts) / [config.ts](../../src/config.ts) /
     [runner.ts](../../src/orchestrator/runner.ts) / [workflowView.ts](../../src/view/workflowView.ts) /
     package.json / README.md
@@ -100,20 +136,24 @@
 ## フェーズ3 計画を直せるようにする
 
 - [ ] W4 オーケストレーターがタスクを追加・削除・依存変更できるようにする
-  - 依存: W2
+  - 依存: W2, W8
   - Issue: #338
   - 現状: オーケストレーターが持つのは `list_tasks` / `get_run_status` / `send_message` /
     `stop_task` / `retry_task` / `continue_task` / `decide_approval` / `update_task_prompt` の8ツール。
     タスクの追加・削除・依存の変更はできない
-  - 変更: `add_task` / `remove_task` / `update_task_dependencies` を足す。**いずれも人の承認を必須に
-    する**。承認されるまでツールは待ち（`send_message` の返信待ちと同じ形）、変更内容は全文出す。
-    承認された変更は実行中の定義にのみ適用し、**YAMLファイルは書き換えない**。追加するタスクにも
-    既存の検証をそのまま通し、権限の緩和はオーケストレーターからは指定できない。削除はまだ
-    始まっていないタスクに限る
-  - 受入基準: `add_task` を呼ぶと承認待ちになり承認するまでタスクが増えない／承認するとタスクが
-    増え依存グラフとタスク一覧に反映される／拒否すると理由がオーケストレーターへ返る／循環依存や
-    上限超過は承認を出す前に拒否される／権限を緩める追加が拒否される／走行中のタスクは削除できない／
-    適用した変更が警告欄に残る／YAMLファイルが書き換わらない
+  - 変更: `add_task` / `remove_task` / `update_task_dependencies` を足す。**人の承認は挟まず、
+    オーケストレーターの判断で適用する**（方針1）。ただし次の3つは変わらない。
+    - 適用先は実行中の定義だけで、**YAMLファイルは書き換えない**
+    - 追加するタスクにも既存の検証をそのまま通す。**権限の緩和はオーケストレーターからは
+      指定できない**（ここだけは判断に委ねない。緩和は必ず人が書いた定義から来る）
+    - 削除はまだ始まっていないタスクに限る
+
+    適用した変更は**全文を警告欄へ残す**（方針3）。承認を挟まない以上、記録が唯一の追跡手段になる。
+    **方針が変わる変更だけはユーザーへ上げる**（W8の `ask_user` を使う。担当領域をまたぐ・
+    設計の前提を変える・受入基準を下げる場合が該当する）
+  - 受入基準: `add_task` でタスクが増え依存グラフとタスク一覧に反映される／循環依存や上限超過は
+    適用前に拒否され理由がオーケストレーターへ返る／権限を緩める追加が拒否される／走行中の
+    タスクは削除できない／適用した変更が全文で警告欄に残る／YAMLファイルが書き換わらない
   - 影響: [messaging.ts](../../src/orchestrator/messaging.ts) /
     [runnerOrchestrator.ts](../../src/orchestrator/runnerOrchestrator.ts) /
     [runner.ts](../../src/orchestrator/runner.ts) / [runState.ts](../../src/orchestrator/runState.ts) /
@@ -138,6 +178,156 @@
     [runnerOrchestrator.ts](../../src/orchestrator/runnerOrchestrator.ts) /
     [runner.ts](../../src/orchestrator/runner.ts) / [config.ts](../../src/config.ts)
 
+## フェーズ5 やりとりをオーケストレーターへ集約する
+
+2026-08-22の実運用で出た要求（方針1・2）を満たすための3項目。**現行のタスク間メッセージングは
+タスク同士が直接つながるメッシュ型で、方針2に反している。** ここを作り替える。
+
+- [ ] W9 タスク間の直接メッセージングを廃し、オーケストレーターの中継にする
+  - 依存: なし
+  - Issue: 未起票（着手時に起票する）
+  - 現状: `send_message` の宛先は「同じrunのタスク」に限られ（[messaging.ts](../../src/orchestrator/messaging.ts)
+    の `knownTaskIds` 判定）、タスクからタスクへ直接届く。オーケストレーターは中継に関与せず、
+    どのタスクが何を伝えたのかを知らない。タスクが n 個あれば経路は n×(n-1) 本になる
+  - 変更: タスクが持つ `send_message` の宛先を**オーケストレーターに固定する**。タスク宛の指定は
+    受け付けない。オーケストレーターは受け取った内容を見て、必要なら自分の `send_message`
+    （宛先にタスクidを取れる既存のもの）で転送する。**転送するかどうか、内容を変えるかどうかは
+    オーケストレーターが決める**。中継した内容は往復ともワークフローViewへ残す
+  - 補足: これは機能の削減ではなく経路の集約である。タスクAがタスクBへ伝えたい情報は、
+    オーケストレーターを経由して届く。かわりに、オーケストレーターが全ての伝達内容を見られる
+  - 受入基準: タスクからタスクへ直接メッセージが届かない／タスクが宛先にタスクidを書くと拒否され
+    理由が返る／オーケストレーターが転送するとタスクへ届く／往復の内容がViewへ残る／
+    `expectReply` の返信待ち（`waitingReply`）が中継を挟んでも成立する／自己宛の拒否は従来どおり
+  - 影響: [messaging.ts](../../src/orchestrator/messaging.ts) /
+    [runnerMessaging.ts](../../src/orchestrator/runnerMessaging.ts) /
+    [runner.ts](../../src/orchestrator/runner.ts) / [workflowView.ts](../../src/view/workflowView.ts) /
+    [design.md](../design.md) §16.21
+
+- [ ] W7 タスクからオーケストレーターへ判断を仰ぐ経路を作る
+  - 依存: W9
+  - Issue: 未起票（着手時に起票する）
+  - 現状: タスクがオーケストレーターへ能動的に判断を仰ぐ道具が無い。`decide_approval` は
+    **承認要求（コマンド実行やファイル変更）に対してオーケストレーターが裁く**ための道具であって、
+    タスクが「この方針でよいか」と問う経路ではない。いまタスクにできるのは、行き詰まったまま
+    `maxIterations` を消費するか、`done` を満たさないまま終わるかのどちらか
+  - 変更: タスク側のツールとして `ask_orchestrator` を足す。問い（本文）と、答えが来るまで
+    待つかどうか（`blocking`）を取る。`blocking: true` ならタスクは `waitingReply` へ入り、
+    答えが来たら次のターンのプロンプトへ差し込まれる（`composeNextPrompt` と同じ形）。
+    オーケストレーター側には問いが通知として届き、既存の `send_message` で答える。
+    **答えられない問いはW8でユーザーへ上げる**
+  - 受入基準: `ask_orchestrator` を呼ぶとオーケストレーターへ届く／`blocking: true` のタスクが
+    `waitingReply` になり答えが来ると再開する／`blocking: false` なら待たずに進む／問いと答えの
+    両方がViewへ残る／答えが来ないまま `maxIterations` に達した場合はタスクが失敗として確定する
+    （返事待ちで枠を占有し続けない）／問いの本文は外部由来テキストとして扱われる
+  - 影響: [messaging.ts](../../src/orchestrator/messaging.ts) /
+    [runnerMessaging.ts](../../src/orchestrator/runnerMessaging.ts) /
+    [runState.ts](../../src/orchestrator/runState.ts) /
+    [runner.ts](../../src/orchestrator/runner.ts) / [workflowView.ts](../../src/view/workflowView.ts)
+
+- [ ] W8 オーケストレーターからユーザーへ確認する経路を作る
+  - 依存: W7
+  - Issue: 未起票（着手時に起票する）
+  - 現状: オーケストレーターが持つ8つのツールに、人へ問う道具が無い。`decide_approval` は
+    **人の代わりにオーケストレーターが裁く**方向の道具で、向きが逆である
+  - 変更: `ask_user` を足す。問いと選択肢（2〜4個）を取り、ワークフローViewへ出す。人が選ぶまで
+    オーケストレーターは待つ。**呼べる条件を絞る**（方針1「確認は最低限」）。使ってよいのは
+    次の場合に限り、それ以外で呼んだら拒否して理由を返す。
+    - 担当領域をまたぐ変更（他のワークフローへ影響する）
+    - 設計の前提を変える変更
+    - 受入基準を下げる判断
+    - 同じ失敗を3回繰り返して打つ手が尽きた場合
+  - 補足: 「最低限」を仕組みで担保する。**1つのrunで呼べる回数に上限を設ける**（既定3回、設定で
+    変更可）。上限に達したあとの `ask_user` は拒否し、オーケストレーターへ「自分で判断するか
+    `hold` で止めよ」と返す。乱発を設定ではなく既定の挙動で抑える
+  - 受入基準: `ask_user` を呼ぶとViewへ問いと選択肢が出る／人が選ぶまでオーケストレーターが待つ／
+    選んだ結果がオーケストレーターへ返る／上限を超えた呼び出しが拒否される／人が答えないまま
+    runを閉じた場合もrunの状態が壊れない（永続化して再開時に問い直す。W10と組み合わせる）／
+    問いの本文は外部由来テキストとして扱われる
+  - 影響: [messaging.ts](../../src/orchestrator/messaging.ts) /
+    [runnerOrchestrator.ts](../../src/orchestrator/runnerOrchestrator.ts) /
+    [runState.ts](../../src/orchestrator/runState.ts) /
+    [runStore.ts](../../src/orchestrator/runStore.ts) /
+    [workflowView.ts](../../src/view/workflowView.ts) / [config.ts](../../src/config.ts)
+
+## フェーズ6 落ちても続くようにする
+
+- [ ] W10 中断からの自動再開
+  - 依存: なし
+  - Issue: 未起票（着手時に起票する）
+  - 現状: リロード後の復元は実装済みで（[runnerRestore.ts](../../src/orchestrator/runnerRestore.ts)、
+    design.md §16.11）、`workspaceState` に残ったrunをメモリへ戻し、`merging` で切れたものは
+    マージからやり直す。**ただし復元したrunは自動では進まない。** 走行中だったタスクは中断扱いへ
+    倒され、そこから先は人がワークフローViewで「再実行」を押す必要がある。VSCodeのリロードは
+    もちろん、WSLごと止めた場合も同じ
+  - 変更: 復元したrunを**自動で続きから走らせる**。中断扱いになったタスクを `pending` へ戻して
+    スケジューラへ載せ直す。オーケストレーターセッションも復元して立て直す。
+    **無条件には再開しない。** 次を満たすときだけ自動で進める。
+    - runが人の手で止められていない（`haltedByUser` が立っていない）
+    - 再開の試行回数が上限内（同じrunが起動のたびに再開を繰り返して壊れ続けるのを防ぐ）
+    - 定義ファイルが読めて検証を通る（従来どおり。通らなければ復元だけして止める）
+    自動再開したことと、どのタスクを `pending` へ戻したかはViewへ残す。設定
+    `agent.workflows.autoResume`（既定 `true`）で切れるようにする
+  - 補足: **W8の `ask_user` 待ちで落ちた場合は、再開時に問いを出し直す。** 人の答えを永続化の
+    対象に含める
+  - 受入基準: VSCodeをリロードするとrunが自動で続きから進む／WSLを止めて起動し直しても同じ／
+    人が止めたrunは自動再開しない／`autoResume: false` で従来どおり手動再開になる／
+    再開の試行が上限を超えたrunは止まったままになり理由がViewへ出る／再開したタスクが
+    worktreeを二重に作らない／`ask_user` 待ちだったrunは問いを出し直す
+  - 影響: [runnerRestore.ts](../../src/orchestrator/runnerRestore.ts) /
+    [runStore.ts](../../src/orchestrator/runStore.ts) /
+    [runState.ts](../../src/orchestrator/runState.ts) /
+    [runner.ts](../../src/orchestrator/runner.ts) /
+    [scheduler.ts](../../src/orchestrator/scheduler.ts) / [config.ts](../../src/config.ts) /
+    [design.md](../design.md) §16.11
+
+- [ ] W11 CIの完了待ちとブランチ保護への対応
+  - 依存: なし
+  - Issue: 未起票（着手時に起票する）
+  - 現状: [forge.ts](../../src/orchestrator/forge.ts) が呼ぶGitHub/GitLabの操作は
+    `pr create` / `pr merge` / `pr ready` の3つだけ。**CIの結果を見ずにマージする。**
+    また `pr update-branch` 相当が無い
+  - 変更: 2つ足す。
+    - **CIの完了を待つ。** PRを作ったあと `gh pr view --json statusCheckRollup` 相当で
+      チェックの完了を待ち、赤ならマージせずタスクを失敗として確定する（理由つき）。
+      待ち時間の上限を設定で持ち、超えたら赤と同じ扱いにする
+    - **baseの取り込み直しに対応する。** マージが「baseの最新でない」ことで拒否された場合、
+      `gh pr update-branch` 相当を実行してCIの再実行を待ち、もう一度マージする。
+      リトライ回数の上限を持つ
+  - 根拠: 2026-08-22、mainにブランチ保護（PR必須・`checks` 必須・**strict**）を入れた直後に、
+    PR #481 のマージで PR #482 が `not up to date with the base branch` になり詰まった。
+    **strictなブランチ保護の下では、mainへ1本マージするたびに他の全てのopen PRが古くなる。**
+    統合ブランチからmainへ複数のPRを順に出す運用では必ず起きる
+  - 受入基準: CIが緑になるまでマージしない／赤ならマージせずタスクが失敗で確定する／
+    待ち時間の上限を超えたら赤と同じ扱いになる／`not up to date` で拒否されたら取り込み直して
+    再試行する／再試行の上限を超えたら失敗として確定する／CIが設定されていないリポジトリでは
+    従来どおり即マージする（チェックが0件なのと赤なのを取り違えない）
+  - 影響: [forge.ts](../../src/orchestrator/forge.ts) /
+    [runnerMerge.ts](../../src/orchestrator/runnerMerge.ts) /
+    [config.ts](../../src/config.ts) / README.md
+
+## フェーズ7 複数のワークフローを束ねる
+
+- [ ] W12 runをまたぐ統括
+  - 依存: W1, W7, W8, W9, W10
+  - Issue: 未起票（着手時に起票する）
+  - 現状: **1 run = 1ワークフロー**で、runの上に層が無い。ロードマップからの生成も
+    「選べるのはフェーズ単位のみ」（design.md §16.19）。複数のワークフローを波に分けて、
+    波の内側は並列・波をまたぐと逐次、という進め方を拡張機能では表現できない
+  - 変更: runの上に**プログラム**（複数runの束）を置く。プログラムは次を持つ。
+    - run の一覧と、run 同士の依存（「WF-Eは WF-A2 の完了を待つ」）
+    - 波の概念（依存の無いrunを同時に走らせ、依存があるものは前段の完了を待つ）
+    - プログラム全体の状態と、その永続化（W10の自動再開の対象に含める）
+    上位のオーケストレーター（プログラムのオーケストレーター）は置かない。**各runの
+    オーケストレーターが自分のrunだけを見る構成のまま、runの起動順をプログラムが決める**
+  - 補足: これは2026-08-22に人手で回した7ワークフロー・3波の運用そのものにあたる。
+    **他の項目より大きく、他の項目が無いと意味を成さない**ため最後に置く。着手時に
+    分割し直すことを見込んでおく
+  - 受入基準: 複数のrunを1つのプログラムとして定義できる／依存の無いrunが同時に走る／
+    依存のあるrunが前段の完了を待つ／前段が失敗したとき後段が走らない／プログラムの状態が
+    永続化され、リロードやWSLの停止をまたいでも続きから進む／プログラムを人の手で止められる
+  - 影響: `src/orchestrator/` 全域 / [workflowView.ts](../../src/view/workflowView.ts) /
+    [config.ts](../../src/config.ts) / [design.md](../design.md)
+
 ## 進め方
 
 - 1項目1 Issue・1ブランチ・1 PRとする
@@ -153,17 +343,51 @@
 
 | 項目 | Issue | ブランチ | design.md | manual-test.md |
 | --- | --- | --- | --- | --- |
-| W1 | #335 | `feat/335/final-merge-confirm` | §16.24 | W-22, W-23 |
-| W2 | #336 | `feat/336/detect-stalled-loop` | §16.25 | W-24, W-25 |
-| W3 | #337 | `feat/337/review-generated-plan` | §16.26 | W-26 |
-| W4 | #338 | `feat/338/orchestrator-task-edit` | §16.27 | W-27〜W-30 |
-| W5 | #339 | `feat/339/import-review-comments` | §16.28 | W-31, W-32 |
+| W1 | #335 | `feat/335/final-merge-confirm` | §16.25 | W-F |
+| W2 | #336 | `feat/336/detect-stalled-loop` | §16.26 | W-G |
+| W3 | #337 | `feat/337/review-generated-plan` | §16.27 | W-H |
+| W4 | #338 | `feat/338/orchestrator-task-edit` | §16.28 | W-I |
+| W5 | #339 | `feat/339/import-review-comments` | §16.29 | W-J |
+| W6 | 未起票 | `feat/<IID>/task-issue-and-review` | §16.30 | W-K |
+| W7 | 未起票 | `feat/<IID>/ask-orchestrator` | §16.31 | W-L |
+| W8 | 未起票 | `feat/<IID>/ask-user` | §16.32 | W-M |
+| W9 | 未起票 | `refactor/<IID>/messaging-via-orchestrator` | §16.33 | W-N |
+| W10 | 未起票 | `feat/<IID>/auto-resume` | §16.34 | W-O |
+| W11 | 未起票 | `feat/<IID>/ci-wait-and-update-branch` | §16.35 | W-P |
+| W12 | 未起票 | `feat/<IID>/program-of-runs` | §16.36 | W-Q |
+
+W6〜W12 は2026-08-22に追加した項目（Issue #497）。**W6 の内容は
+[review-and-feature-consolidation.md](review-and-feature-consolidation.md) の「W6」の節にあり、
+このファイルには番号の割り当てだけを置く**（定義を2か所に持たない）。W7〜W12 の定義は
+このファイルのフェーズ5〜7にある。
+
+この割り当ては2026-08-22に実在する空き番号へ直したもの（Issue #487）。当初は
+§16.24〜§16.28 と W-22〜W-32 を割り当てていたが、次の2点で使えなくなっていた。
+
+- **§16.24 は WF-B の T10（外部由来テキストの整形、`untrustedText.ts`）が使用済み**
+  （[design.md](../design.md) の §16.24）。16系の最大は §16.24 なので、W1 は §16.25 から始める
+- **W-22 以降という番号は現行の [manual-test.md](../manual-test.md) に存在しない。**
+  W群は Issue #186 の仕分けで W-01〜W-21 の数字体系から W-A〜W-E の観点別体系へ再編済みで、
+  旧番号との対応表だけが残っている。新規ケースはその続きとして W-F 以降を充てる
+
+1項目に複数のケースが要る場合は `W-F-1` `W-F-2` のように枝番を付ける。観点が既存の
+W-A〜W-E のいずれかに収まるなら、新しい記号を起こさずそちらへ手順を足してもよい。
 
 ## 並列の順序
 
-`runner.ts` を複数の項目が触るため、次の波に分けて進める。
+**着手そのものが WF-A2（epic [#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466)）の
+完了待ちである**（2026-08-22の決定）。WF-A2 も `runner.ts` / `forge.ts` を触るため、
+このロードマップの全項目とファイルの集合が交差する。詳細は
+[review-and-feature-consolidation.md](review-and-feature-consolidation.md) の WF-E の項を見ること。
 
-1. 第1波（並列2）: W1（forge・config）/ W3（planner・roadmap）
-2. 第2波: W2（loopController・runState・runner）
-3. 第3波: W4（messaging・runner・workflowView。最も大きい）
-4. 第4波: W5（W4の完了が前提）
+着手後の順序は次のとおり。`runner.ts` と `messaging.ts` を複数の項目が触るため、波に分けて進める。
+
+1. 第1波（並列4）: W1（forge・config）/ W3（planner・roadmap）/ W9（messaging）/ W11（forge）
+   - W1 と W11 はどちらも `forge.ts` を触るため、この2つだけは逐次にする（W1 → W11）
+2. 第2波（並列2）: W2（loopController・runState・runner）/ W7（messaging。W9の完了が前提）
+3. 第3波: W8（W7の完了が前提）/ W10（runnerRestore・runStore・scheduler）
+4. 第4波: W4（messaging・runner・workflowView。W2とW8の完了が前提。最も大きい）
+5. 第5波: W5（W4の完了が前提）/ W6（W1の完了が前提）
+6. 第6波: W12（他の全項目の完了が前提）
+
+**W12 は他の項目が揃わないと意味を成さない**ため、着手時に改めて分割し直すことを見込んでおく。
