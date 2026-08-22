@@ -71,8 +71,20 @@ function maskHomeDirUsername(value: string): string {
  * ホームディレクトリが自動的に使われる。テストは実ホームディレクトリに依存せず、
  * 任意の`homeDir`を明示的に渡して検証できる。
  */
+/**
+ * `homeDir` がパス区切り文字だけで構成される（空文字 `''` を除く。例: `/` `\` `//`）場合に
+ * `true`。コンテナ環境で `HOME=/` になっているケースが実在する（`createLogger` が
+ * `os.homedir()` を生成時に一度だけ固定するため、この異常値は一度固定されると全ログ経路に
+ * 効き続ける）。この状態で `exactHomeDirPattern` をそのまま使うと、「後続が区切り文字か
+ * 文字列末尾」という条件だけを持つ単独の `/` が、パス中のあらゆる区切りにマッチしてしまい
+ * （例: `/tmp/` の末尾の `/` が `~` に化けて `/tmp~` になる）、パスの構造を壊してしまう。
+ */
+function isPathSeparatorOnly(homeDir: string): boolean {
+  return homeDir.length > 0 && /^[\\/]+$/u.test(homeDir);
+}
+
 export function maskHomeDir(value: string, homeDir: string = os.homedir()): string {
-  if (!homeDir) {
+  if (!homeDir || isPathSeparatorOnly(homeDir)) {
     return maskHomeDirUsername(value);
   }
   const escaped = homeDir.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
