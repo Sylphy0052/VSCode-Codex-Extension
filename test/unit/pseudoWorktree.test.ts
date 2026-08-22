@@ -652,6 +652,66 @@ describe('実ファイルシステムでの統合テスト', () => {
         await rm(outsideDir, { recursive: true, force: true });
       }
     });
+
+    /**
+     * Issue #493（Issue #484 / PR #504の規律の横展開）: `<runId>`ディレクトリが
+     * `.agents/worktrees`**配下の**別ディレクトリ（他タスクの複製等）を指すシンボリック
+     * リンクへ差し替えられているケース。差し替え先も`.agents/worktrees`配下のため、
+     * 「境界内か」（`isPathWithinRoot`）だけを見る旧実装では素通りしてしまい、
+     * `removeDirRecursive`が`target`（文字列）を辿って差し替え先の実体を丸ごと
+     * 削除してしまう。「実パス確認時点で想定していた場所そのものか」の厳密一致で
+     * 検知し、差し替え先の実体には触れずに拒否する。
+     */
+    it(
+      'runIdディレクトリが.agents/worktrees配下の別ディレクトリを指すシンボリックリンクに' +
+        '差し替えられていても、境界内リダイレクトとして撤去せず差し替え先の実体も消さない' +
+        '（Issue #493）',
+      async () => {
+        const decoyDir = path.join(pseudoWorktreesRootDir(workspace), '_decoy');
+        await mkdir(path.join(decoyDir, 'T1'), { recursive: true });
+        await writeFile(path.join(decoyDir, 'T1', 'secret.txt'), 'must-not-be-deleted\n');
+        await symlink(decoyDir, path.join(pseudoWorktreesRootDir(workspace), RUN_ID));
+
+        const result = await removePseudoWorktree(
+          workspace,
+          RUN_ID,
+          'T1',
+          nodePseudoWorktreeFileSystem,
+        );
+
+        expect(result).toMatchObject({ ok: false, reason: 'boundaryEscape' });
+        // 差し替え先（他タスクの複製に見立てたディレクトリ）の実体は消えず残っている
+        await expect(
+          readFile(path.join(decoyDir, 'T1', 'secret.txt'), 'utf8'),
+        ).resolves.toBe('must-not-be-deleted\n');
+      },
+    );
+
+    /**
+     * Issue #493の2点目: `fsPromises.rm`は`ENOENT`を握りつぶすが`EACCES`/`EPERM`等は
+     * 投げる。呼び出し側に`try/catch`が無いと、この例外が`removePseudoWorktree`を
+     * 越えて伝播してしまう（`removePseudoIntegration`、さらに`runner.ts`の
+     * `cleanupIntegration`まで巻き込みうる）。削除失敗を例外にせず`Result`型として
+     * 返すことを確かめる。
+     */
+    it('削除自体がEACCES等で失敗しても、例外を投げずに失敗の結果として返す（Issue #493）', async () => {
+      const cloned = await cloneWorkspace(workspace, RUN_ID, 'T1', [], nodePseudoWorktreeFileSystem);
+      expect(cloned.ok).toBe(true);
+      if (!cloned.ok) return;
+
+      const fs: PseudoWorktreeFileSystemPort = {
+        ...nodePseudoWorktreeFileSystem,
+        removeDirRecursive: async () => {
+          const error = new Error('permission denied') as NodeJS.ErrnoException;
+          error.code = 'EACCES';
+          throw error;
+        },
+      };
+
+      const result = await removePseudoWorktree(workspace, RUN_ID, 'T1', fs);
+
+      expect(result).toMatchObject({ ok: false, reason: 'removalFailed' });
+    });
   });
 
   describe('removePseudoIntegration（統合worktreeとmanifest.jsonをまとめて撤去、Issue #438）', () => {
@@ -882,6 +942,140 @@ describe('実ファイルシステムでの統合テスト', () => {
         await rm(outsideDir, { recursive: true, force: true });
       }
     });
+
+    /**
+     * Issue #493: `removeManifestFile`（非exportのため`removePseudoIntegration`経由で
+     * 検証する）も`removePseudoWorktree`と同じ穴を持つ。`<runId>`が`.agents/worktrees`
+     * **配下の**別ディレクトリを指すシンボリックリンクに差し替えられていると、
+     * 「境界内か」だけを見る旧実装ではmanifest.jsonの撤去が素通りし、差し替え先の
+     * manifest.jsonを誤って削除してしまう。
+     */
+    it(
+      'runIdディレクトリが.agents/worktrees配下の別ディレクトリを指すシンボリックリンクに' +
+        '差し替えられていても、manifest.jsonの撤去も境界内リダイレクトとして拒否し、' +
+        '差し替え先のmanifest.jsonは消さない（Issue #493）',
+      async () => {
+        const decoyDir = path.join(pseudoWorktreesRootDir(workspace), '_decoy');
+        await mkdir(decoyDir, { recursive: true });
+        await writeFile(path.join(decoyDir, 'manifest.json'), '{"important":true}');
+        await symlink(decoyDir, path.join(pseudoWorktreesRootDir(workspace), RUN_ID));
+
+        const result = await removePseudoIntegration(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
+
+        expect(result).toMatchObject({ ok: false, reason: 'boundaryEscape' });
+        await expect(readFile(path.join(decoyDir, 'manifest.json'), 'utf8')).resolves.toBe(
+          '{"important":true}',
+        );
+      },
+    );
+
+    /**
+     * Issue #493: `removeRunDirIfEmpty`（非exportのため同じく`removePseudoIntegration`
+     * 経由で検証する）にも同じ穴がある。`<runId>`ディレクトリ自体が`.agents/worktrees`
+     * 配下の別の空ディレクトリを指すシンボリックリンクに差し替えられていると、
+     * 「境界内か」だけを見る旧実装では`removeEmptyDir`が差し替え先を辿って消してしまう
+     * （空だからこそ`ENOTEMPTY`で弾かれず実際に消える）。`removeRunDirIfEmpty`の境界逸脱は
+     * `removePseudoIntegration`が致命的失敗として扱わない既存設計（PR #492）のため、
+     * ここでは`ok:true`かつ`warning`付きで返ることを確認する（既存設計は壊さない）。
+     */
+    it(
+      'runIdディレクトリ自体が.agents/worktrees配下の別の空ディレクトリを指す' +
+        'シンボリックリンクに差し替えられていても、差し替え先は消さない（Issue #493）',
+      async () => {
+        const decoyDir = path.join(pseudoWorktreesRootDir(workspace), '_decoy');
+        await mkdir(decoyDir, { recursive: true });
+        await symlink(decoyDir, path.join(pseudoWorktreesRootDir(workspace), RUN_ID));
+
+        const result = await removePseudoIntegration(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.warning).toBeDefined();
+        }
+        // 差し替え先（別runの入れ物に見立てた空ディレクトリ）自体は消えず残っている
+        await expect(lstat(decoyDir)).resolves.toBeDefined();
+      },
+    );
+
+    /**
+     * Issue #493の2点目: manifest.jsonの撤去（`removeFile`）が`EACCES`等で失敗しても、
+     * 例外を投げずに`removePseudoIntegration`から失敗の結果として返る（呼び出し元の
+     * `runner.ts`の`cleanupIntegration`を巻き込まない）ことを確かめる。
+     */
+    it(
+      'manifest.jsonの撤去がEACCES等で失敗しても、例外を投げずに失敗の結果として返す' +
+        '（Issue #493）',
+      async () => {
+        const integration = await ensureIntegrationDir(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
+        expect(integration.ok).toBe(true);
+        if (!integration.ok) return;
+        const manifest: IntegrationManifest = new Map([
+          ['a.txt', { kind: 'added' as const, taskId: 'T1' }],
+        ]);
+        await persistManifest(workspace, RUN_ID, manifest, nodePseudoWorktreeFileSystem);
+
+        const fs: PseudoWorktreeFileSystemPort = {
+          ...nodePseudoWorktreeFileSystem,
+          removeFile: async () => {
+            const error = new Error('permission denied') as NodeJS.ErrnoException;
+            error.code = 'EACCES';
+            throw error;
+          },
+        };
+
+        await expect(removePseudoIntegration(workspace, RUN_ID, fs)).resolves.toMatchObject({
+          ok: false,
+          reason: 'removalFailed',
+        });
+      },
+    );
+
+    /**
+     * Issue #493の2点目: `removeRunDirIfEmpty`側（`removeEmptyDir`）の失敗は、
+     * `manifest.json`/`_integration`の撤去が既に成功していれば致命的失敗にせず
+     * `warning`として返す既存の設計（PR #492）を壊さないことを確かめる。
+     */
+    it(
+      'runIdディレクトリの撤去(rmdir)がEACCES等で失敗しても、例外を投げず' +
+        'warningとして返す（Issue #493）',
+      async () => {
+        const integration = await ensureIntegrationDir(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
+        expect(integration.ok).toBe(true);
+        if (!integration.ok) return;
+
+        const fs: PseudoWorktreeFileSystemPort = {
+          ...nodePseudoWorktreeFileSystem,
+          removeEmptyDir: async () => {
+            const error = new Error('permission denied') as NodeJS.ErrnoException;
+            error.code = 'EACCES';
+            throw error;
+          },
+        };
+
+        const result = await removePseudoIntegration(workspace, RUN_ID, fs);
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.warning).toBeDefined();
+        }
+      },
+    );
   });
 
   describe('removePseudoWorktreeAttempts（全試行分の撤去、Issue #396）', () => {
