@@ -6143,6 +6143,11 @@ tasks:
           const runId = result.runId as string;
           await flush();
 
+          // 【このテストの趣旨】権限昇格の検出という防御を守るテストではない。W9（#547）で
+          // 宛先が固定された副作用として、この検出が構造上不発火になったこと自体を
+          // 固定するテスト。将来`from`の扱いが変わり検出が意図せず復活/再度死ぬような
+          // 変化が起きたときに気づけるようにするために存在する
+          // （`checkMessagingPermissionEscalation`のJSDoc・design.md §16.34「影響範囲」参照）
           // T1（read-only）の情報をオーケストレーターがT2（workspace-write）へ中継する形
           state.hub?.sendMessage({
             from: 'T1',

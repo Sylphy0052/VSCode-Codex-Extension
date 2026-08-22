@@ -267,6 +267,20 @@ export function checkEffectivePermissionEscalation(
  * `autoApprove`（`checkEffectivePermissionEscalation`と同じ値）を使う。`send_message`は
  * 呼び出し元のセッションが生きていないと成立しない（MCPツールの呼び出しのため）ので、
  * 送信元の`LiveTask`は通常必ず見つかるが、内部矛盾で見つからない場合は判定を諦める。
+ *
+ * **【現在この関数は実質的に死んでいる】W9（roadmap、Issue #547）以降、`send_message`の
+ * 宛先はオーケストレーターに固定され、タスク同士が直接メッセージを送り合うことはできなく
+ * なった（design.md §16.34）。実タスクへ配送されるメッセージの`from`は常に
+ * `ORCHESTRATOR_CONNECTION_ID`（値`-orchestrator-`）になるが、この値は`live.def.tasks`
+ * （実タスクの定義一覧）には存在しない。下のループの`senderTask === undefined`判定が
+ * 毎回成立し、`continue`して警告を一度も積まずに終わる——関数もこのファイルの実装も、
+ * 意図的に変えていない（変える必要が無い）。実装だけを読むと「権限差を検出する防御が
+ * ここで働いている」ように見えるが、実際には常に素通りする。**この検出を復活させるか、
+ * 死んだコードとして削除するかは Issue #562 で決める**（まだどちらとも決まっていない。
+ * 復活させる場合は、配送されたメッセージの元の送信元を`StoredMessage`とは別に追跡する
+ * 仕組みが要る——現状の`StoredMessage`には由来の追跡情報（元はどのタスクが書いたか）が
+ * 無いため、この構造のままでは復活させられない）。詳細と経緯はdesign.md §16.34
+ * 「影響範囲」を参照。
  */
 export function checkMessagingPermissionEscalation(
   self: WorkflowRunnerInternals,

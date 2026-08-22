@@ -12,11 +12,17 @@
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
-/** `ChatState` のうち `runner.ts` が `onFinished` で読む項目だけを写したもの。 */
+/**
+ * `ChatState` のうち `runner.ts` が読む項目だけを写したもの。
+ * `busy` は `onFinished` では使わないが、`onStateChanged`
+ * （`runnerOrchestrator.ts` の `onOrchestratorStateChanged`）がターンの区切り
+ * （`busy: true → false`）を見るために使う（design.md §16.34、Issue #547）。
+ */
 export interface ChatStateLike {
   turnResultText: string;
   turnEditedFiles: readonly string[];
   items: readonly unknown[];
+  busy?: boolean;
 }
 
 /** 完了時に渡す `ChatState` 相当を組み立てる。 */
@@ -183,6 +189,19 @@ export class FakeTaskSession implements TaskSessionLike {
     this.emitFinished(reason, doneState(''));
   }
 
+  /**
+   * `onStateChanged` の購読者へ状態を配る（design.md §16.34、Issue #547）。
+   * オーケストレーターへの通知（`notifyOrchestrator`）はターン中は`pending`に溜まり、
+   * ターンが終わって（`busy: true → false`）初めて`session.send`へ渡る
+   * （`runnerOrchestrator.ts`の`onOrchestratorStateChanged`）。統合テストでは実CLIが
+   * ターンの区切りを作らないため、テスト側からこれを呼んで明示的に区切りを作る。
+   */
+  emitState(state: ChatStateLike): void {
+    for (const listener of this.stateListeners) {
+      listener(state);
+    }
+  }
+
   private emitFinished(reason: string, state: ChatStateLike): void {
     if (this.finished) {
       return;
@@ -221,6 +240,22 @@ export class FakeTaskSessionHost implements TaskSessionHostLike {
     if (found === undefined) {
       const opened = this.sessions.map((s) => s.cwd).join(', ');
       throw new Error(`taskId=${taskId}のセッションが見つからない（開いたcwd: ${opened}）`);
+    }
+    return found;
+  }
+
+  /**
+   * オーケストレーター自身のセッションを引く（design.md §16.34、Issue #547）。
+   * オーケストレーターのcwdはworktreeを切らずワークスペース直下（`live.repoRoot`）を
+   * そのまま使う（`runnerOrchestrator.ts`の`setupOrchestratorForStart`）ため、
+   * タスクのように末尾セグメントでは引けない。呼び出し側が知っている
+   * `workspaceFolder`との完全一致で引く。
+   */
+  orchestrator(workspaceFolder: string): FakeTaskSession {
+    const found = this.sessions.find((s) => s.cwd === workspaceFolder);
+    if (found === undefined) {
+      const opened = this.sessions.map((s) => s.cwd).join(', ');
+      throw new Error(`オーケストレーターのセッションが見つからない（開いたcwd: ${opened}）`);
     }
     return found;
   }

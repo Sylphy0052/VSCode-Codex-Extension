@@ -192,16 +192,20 @@ export function validateSendMessage(
 ): SendMessageValidationResult {
   const fromIsOrchestrator = input.from === ORCHESTRATOR_CONNECTION_ID;
   if (fromIsOrchestrator) {
-    if (!input.knownTaskIds.has(input.to)) {
-      return {
-        accepted: false,
-        reason: `宛先が見つかりません（同じrunのタスクではありません）: ${input.to}`,
-      };
-    }
+    // 自己宛チェックはknownTaskIdsの判定より先に置く（Issue #547のレビュー指摘）。
+    // ORCHESTRATOR_CONNECTION_IDはTASK_ID_PATTERNの制約上knownTaskIdsに現れないため、
+    // 後段の「宛先が見つかりません」判定は自己宛のケースを含め常に先に成立してしまい、
+    // この順序でなければ自己宛の専用メッセージ（Issue #365）へ到達できない
     if (input.to === input.from) {
       return {
         accepted: false,
         reason: `自分自身へは送信できません: ${input.to}`,
+      };
+    }
+    if (!input.knownTaskIds.has(input.to)) {
+      return {
+        accepted: false,
+        reason: `宛先が見つかりません（同じrunのタスクではありません）: ${input.to}`,
       };
     }
   } else if (input.to !== ORCHESTRATOR_CONNECTION_ID) {
