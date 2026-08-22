@@ -17,13 +17,16 @@
 別々に進めると統合ブランチでのマージ衝突が後段へ集中するため、34項目を統合して分割し直した。
 あわせて、後述の運用規約から導かれる項目をW6として1件追加した（計35項目）。
 
-## docs/roadmap/ の4本の関係
+## docs/roadmap/ の5本の関係
 
 - [ux-improvements.md](ux-improvements.md) — R1〜R11。**全項目完了済み**（epic #297 もクローズ）。
   記録として残してある
 - [workflow-autonomy.md](workflow-autonomy.md) — W1〜W12。本ロードマップの WF-E が担当する
 - [chat-conversation-parity.md](chat-conversation-parity.md) — X1〜X3。WF-F が担当する
-- 本ドキュメント — 上の8項目と全体レビューの26指摘を統合した、7ワークフローの分割と運用規約
+- [orchestration-accuracy.md](orchestration-accuracy.md) — H1〜H7。WF-H が担当する。
+  **他の3本と出所が違う**: レビュー指摘や機能要求ではなく、2026-08-21〜23に人手で
+  同じ構造（オーケストレーター起点の並列実行）を回した実運用の観測から起こしたもの
+- 本ドキュメント — 上の8項目と全体レビューの26指摘を統合した、8ワークフローの分割と運用規約
 
 ## 方針
 
@@ -304,6 +307,26 @@
       それ以降のグループ番号が全部ずれた。正規表現へ何かを足すときは、**番号で分岐している箇所を
       全部見ること**
 
+### 第4波 実行の精度
+
+- **WF-H オーケストレーション実行の精度**（7項目）
+  - H1 タスクの完了報告を検算する
+  - H2 実行中のファイル交差を実測し、並列度を下げる
+  - H3 指示への応答に「解消されなかった残り」を持たせる
+  - H4 タスク粒度を実行中に測り、再分割の起動条件を定義する
+  - H5 オーケストレーター自身の生存確認と引き継ぎ
+  - H6 runをまたいで教訓を蓄積する
+  - H7 runが生んだ残件の行き先を一元化する
+  - 依存: H1〜H3は独立して着手できる。H4はW4、H5はW10・W12、H6・H7はW12の完了が前提
+  - 詳細は [orchestration-accuracy.md](orchestration-accuracy.md)
+  - **この波だけ出所が違う。** W1〜W12が「ワークフローに何ができるか」を埋めるのに対し、
+    WF-Hが扱うのは**実行の結果が正しいことを機械で確かめる層**である。人手で回したときは
+    全体オーケストレーターが検算・数え直し・実測でこの層を担っていた。拡張機能の
+    オーケストレーターは受け取った報告をそのまま次へ渡す
+  - **W2との関係で、割当表に無い依存が1つ見つかっている。** W2（ループ・停滞の検知）は
+    W11が実装したCI待ちの状態を知っている必要がある。知らないとCI待ちを停滞と誤判定して
+    止める。H5の項目に記録してある
+
 ## W6 タスクごとにIssueを起票し、PRのレビューを経てマージする
 
 - 依存: W1
@@ -477,6 +500,7 @@ Issue
 | WF-E ワークフローの自律性 | 2 | 12 | [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341) | `wf/wf-e/integration` | **進行中**。第1波（W1 [#335](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/335) / W3 [#337](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/337) / W9 [#547](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/547) / W11 [#556](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/556)）が統合ブランチへ着地済み（2026-08-23）。次は第2波（W2 [#336](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/336) / W7 未起票）。**節番号は着手のたびに、[workflow-autonomy.md](workflow-autonomy.md) の「着手前に必ず実測する」に従って実測すること**（割り当ては Issue [#543](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/543) で §16.26〜§16.37 へ移動済み）。追いIssue [#562](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/562) を WF-G へ送った |
 | WF-F チャットの会話操作と表示 | 2 | 3 | [#340](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/340) | `wf/wf-f/integration` | 完了（PR [#510](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/510)、mainへマージ済み。統合ブランチは削除済み） |
 | WF-G 横断の仕上げ | 3 | 12 | 未採番 | `wf/wf-g/integration` | 第2波の完了待ち |
+| WF-H オーケストレーション実行の精度 | 4 | 7 | 未採番 | `wf/wf-h/integration` | 第3波の完了待ち。**節番号とケース記号は事前予約しない**（波をまたぐ予約は Issue [#487](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/487) と同じ形で腐るため）。詳細は [orchestration-accuracy.md](orchestration-accuracy.md) |
 
 W1〜W5とX1〜X3のIssue番号・ブランチ名・design.mdの節・manual-test.mdの番号は、
 [workflow-autonomy.md](workflow-autonomy.md) と [chat-conversation-parity.md](chat-conversation-parity.md) で
