@@ -6,9 +6,10 @@ import { SANDBOX_MODES, type ApprovalMode } from '../codex/types';
 import { LOOP_ITERATION_LIMIT } from '../loop/loopController';
 import type { Logger } from '../log';
 import { DANGER_PATTERN_IDS } from './escalation';
-import { stripControlChars } from './sanitize';
+import { sanitizeForLog, stripControlChars } from './sanitize';
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { TaskSessionHost, TaskSessionInput } from './taskSession';
+import { formatUntrusted, sanitizeInlineText } from './untrustedText';
 import {
   clampClaudePermissionMode,
   clampCodexApprovalMode,
@@ -77,14 +78,14 @@ const MAX_ENTRY_NAME_LENGTH = 100;
  * ファイル名は`runner.ts`の`handleApproval`や`sanitizeForLog`が扱うCLI・エージェント
  * 由来の文字列と同じく信用しない（design.md §16.9セキュリティ監査 medium 1）。
  * ファイル名には改行を含められるため、無害化せずにプロンプトへ結合すると、偽の見出しや
- * 偽YAMLをファイル名に仕込んでプロンプトの構造を偽装できてしまう。`stripControlChars`
- * （改行・タブを含む制御文字を空白へ畳む）を通し、長さも切り詰める。
+ * 偽YAMLをファイル名に仕込んでプロンプトの構造を偽装できてしまう。
+ *
+ * 実体は`untrustedText.ts`の`sanitizeInlineText`に委譲する（design.md §16.24、
+ * Issue #369。ここに残していた独自実装は`roadmap.ts`側の同種の一覧（Issueタイトル・
+ * workspaceSummary）から再利用できず、`buildRoadmapPrompt`が無防備なままになっていた）。
  */
 function sanitizeEntryName(name: string): string {
-  const stripped = stripControlChars(name);
-  return stripped.length > MAX_ENTRY_NAME_LENGTH
-    ? `${stripped.slice(0, MAX_ENTRY_NAME_LENGTH)}…`
-    : stripped;
+  return sanitizeInlineText(name, MAX_ENTRY_NAME_LENGTH);
 }
 
 export async function buildWorkspaceSummary(
@@ -264,12 +265,22 @@ const OUTPUT_FORMAT_INSTRUCTION =
   '一切含めないこと';
 
 /**
+ * ゴール文の展開に設ける長さ上限。人が直接入力する値だが、ロードマップの生成セッション
+ * （LLM）が組み立てた`buildRoadmapPlanGoal`の返値がここへ渡ることもあり、由来を問わず
+ * 一律に上限を設ける（design.md §16.24、Issue #369）。
+ */
+const MAX_GOAL_LENGTH = 8000;
+
+/**
  * ゴール文からタスク分解のYAMLを作らせるための最初のプロンプト（design.md §16.9）。
  *
  * このセッションは`sandbox: read-only`相当・承認は全拒否で起動する（`planWorkflow`側の
  * 設定）。「タスクを実行しないでください」という指示はここにも書くが、それは補助であって、
  * 実際に実行できない設定になっていることが本来の防御である（design.md §16.9「プロンプトで
  * 頼むだけでは足りない」）。
+ *
+ * `input.goal`は`untrustedText.ts`の`formatUntrusted`で囲う（design.md §16.24、
+ * Issue #369）。以前は無加工・上限なしで連結していた。
  */
 export function buildPlannerPrompt(input: BuildPlannerPromptInput): string {
   const parts = [
@@ -277,7 +288,7 @@ export function buildPlannerPrompt(input: BuildPlannerPromptInput): string {
       'タスクへ分解し、下記スキーマに従うYAML定義だけを出力してください。',
     '実際にタスクを実行することはしないでください（読み取りと提案のみ）。',
     '',
-    `## ゴール\n${input.goal}`,
+    `## ゴール\n${formatUntrusted(input.goal, { id: 'planner', field: 'goal', maxLength: MAX_GOAL_LENGTH, preserveNewlines: true })}`,
     '',
   ];
   if (input.roadmapMaterial !== undefined && input.roadmapMaterial !== '') {
@@ -302,7 +313,15 @@ export function buildPlannerPrompt(input: BuildPlannerPromptInput): string {
   return parts.join('\n');
 }
 
-/** 検証に落ちたときの再生成プロンプト（design.md §16.9「もう1度だけ投げ直す」）。 */
+/**
+ * 検証に落ちたときの再生成プロンプト（design.md §16.9「もう1度だけ投げ直す」）。
+ *
+ * `previousYaml`（直前のLLM応答）は`formatUntrusted`等の囲いを通さず、そのまま埋め込む。
+ * 同一セッションへの折り返し（分解セッション自身の直前の応答を、同じセッションへ
+ * 再度渡すだけ）であり、信頼境界を跨がないため。将来この値を別のセッション（別の
+ * 権限・別の指示文脈を持つセッション）へ渡す変更を加える場合は、`untrustedText.ts`の
+ * `formatUntrusted`を通すこと。
+ */
 export function buildRetryPrompt(previousYaml: string, errors: readonly WorkflowIssue[]): string {
   const errorLines = errors
     .map((e) => `- ${e.taskIds.length > 0 ? `[${e.taskIds.join(', ')}] ` : ''}${e.message}`)
@@ -323,24 +342,115 @@ export function buildRetryPrompt(previousYaml: string, errors: readonly Workflow
 
 // ---- 応答からのYAML抽出 ----
 
-/** ```yaml ... ``` / ``` ... ``` の最初のコードフェンスを拾う。 */
-const FENCE_PATTERN = /```(?:ya?ml)?\r?\n([\s\S]*?)```/i;
+/**
+ * 応答中の全コードフェンスを、言語タグと中身の組として拾う（`g`付き、順に`exec`で走査する）。
+ *
+ * 言語タグ部分は`[A-Za-z0-9_+-]*`（空文字も可）にしてある。以前は`(?:ya?ml)?`だけを
+ * 許していたため、`bash`のような他言語タグを持つ開きフェンスを開始位置として認識できず、
+ * 正規表現エンジンがその**閉じ**フェンス（言語タグなし+改行の形に一致する）を開始位置として
+ * 誤って拾ってしまっていた（issue #389 根拠1、node実測で確認）。あらゆる言語タグを開始位置
+ * として認識できるようにし、閉じ位置の誤認識を無くす。
+ */
+const FENCE_BLOCK_PATTERN = /```([A-Za-z0-9_+-]*)\r?\n([\s\S]*?)```/g;
 /** コードフェンスが無いとき、YAMLのルートキーが現れる行を本文の開始とみなす。 */
 const ROOT_KEY_PATTERN = /^(version|name|defaults|tasks)\s*:/m;
+
+/**
+ * `looksLikeWorkflowYaml`によるフル解析（YAMLパース）にかける候補フェンスの個数の上限
+ * （#400コードレビュー指摘 medium 1）。
+ *
+ * 候補ごとのサイズは`MAX_WORKFLOW_FILE_BYTES`で足切りしているが、候補の**個数**には
+ * 上限が無かった。`candidates.find(looksLikeWorkflowYaml)`は成功する候補が見つかるまで
+ * 先頭から順に`parseWorkflowYaml`を呼ぶため、大量の偽フェンス（例: 数千個）を含む応答では
+ * 拡張機能ホスト（シングルスレッド）のメインスレッドを一時的に占有しうる。
+ *
+ * 「フルパースの前に軽量な文字列チェックを挟む」案ではなく、候補の個数そのものに
+ * 上限を設ける案を選んだ。軽量チェック（例: `tasks:`行の有無）は悪意ある応答が
+ * 各偽フェンスへ`tasks:`という文字列を混ぜるだけで素通りしてしまい、処理量の上限を
+ * 保証できない。個数の上限は応答の中身に関わらず処理量を頭打ちにできる。
+ *
+ * 20件という値は、実際の分解セッションの応答が持つフェンス数（通常1、検証エラーを
+ * 添えた再生成の説明を含めてもせいぜい数個）に対して十分な余裕を残しつつ、
+ * 悪意ある大量偽フェンスによる処理コストを頭打ちにする値として、監査の推奨に合わせた。
+ */
+const MAX_YAML_FENCE_CANDIDATES = 20;
+
+interface FenceBlock {
+  lang: string;
+  content: string;
+}
+
+function extractFenceBlocks(response: string): FenceBlock[] {
+  const pattern = new RegExp(FENCE_BLOCK_PATTERN);
+  const blocks: FenceBlock[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(response)) !== null) {
+    blocks.push({ lang: (match[1] ?? '').toLowerCase(), content: match[2] ?? '' });
+  }
+  return blocks;
+}
+
+/**
+ * フェンスの中身がYAMLのワークフロー定義らしいかを判定する。`parseWorkflowYaml`は
+ * スキーマ違反があっても例外を投げず既定値で埋める作りのため、単に例外が無いことだけでは
+ * 「地の文（自然文）を拾っただけ」と区別できない。`tasks`が1件以上あることまで確認する
+ * （地の文は`tasks:`キーを持たないため、`parseWorkflowYaml`の既定値である空配列のままになる）。
+ *
+ * `tryParseAndValidate`と同じく、パース前に`MAX_WORKFLOW_FILE_BYTES`で足切りする
+ * （#58セキュリティ監査 medium 2の再発防止。ここは複数フェンス候補の中から選ぶだけの
+ * 判定であり、巨大な候補を無検査で`yaml`パッケージの`parse`へ渡してよい理由にはならない）。
+ * 足切りされた候補は「YAMLらしくない」として扱う（`extractYamlFromResponse`が最終的に
+ * この候補を選んでも、実際のサイズ超過エラーは`tryParseAndValidate`側で改めて報告される）。
+ */
+function looksLikeWorkflowYaml(content: string): boolean {
+  const trimmed = content.trim();
+  if (Buffer.byteLength(trimmed, 'utf8') > MAX_WORKFLOW_FILE_BYTES) {
+    return false;
+  }
+  try {
+    return parseWorkflowYaml(trimmed).tasks.length > 0;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * 分解セッションの応答からYAML本文を取り出す（design.md §16.9「コードフェンスで囲まれて
  * 返ることが多いので、剥がしてからパーサへ渡す」）。
  *
- * 優先順位: 1) 最初のコードフェンスの中身 2) フェンスが無ければ、ルートキー
- * （version/name/defaults/tasks）が最初に現れる行から末尾まで 3) それも無ければ応答全体。
- * 3)はほぼ確実にparseWorkflowYamlが例外を投げ、通常の再試行経路に合流する。
+ * 優先順位:
+ * 1. 応答中の全コードフェンスのうち、言語タグが`yaml`/`yml`または無指定のものを候補にする
+ *    （`bash`等の他言語タグを持つフェンスは候補から除く。issue #389 根拠1）
+ * 2. 候補が1つならそれを使う。複数あれば、先頭`MAX_YAML_FENCE_CANDIDATES`件のうち
+ *    `looksLikeWorkflowYaml`でパースに成功した最初の候補を使う（全滅なら先頭の候補に
+ *    フォールバックし、後続の検証エラーとして扱う）
+ * 3. フェンスの候補が無ければ、ルートキー（version/name/defaults/tasks）が最初に現れる
+ *    行から末尾まで
+ * 4. それも無ければ応答全体。4)はほぼ確実にparseWorkflowYamlが例外を投げ、通常の
+ *    再試行経路に合流する。
+ *
+ * `log`を渡すと、候補数が`MAX_YAML_FENCE_CANDIDATES`を超えて切り捨てた場合に警告を残す
+ * （黙って切り捨てない）。
  */
-export function extractYamlFromResponse(response: string): string {
-  const fenceMatch = FENCE_PATTERN.exec(response);
-  const fenced = fenceMatch?.[1];
-  if (fenced !== undefined) {
-    return fenced.trim();
+export function extractYamlFromResponse(response: string, log?: Logger): string {
+  const blocks = extractFenceBlocks(response);
+  const candidates = blocks.filter(
+    (b) => b.lang === '' || b.lang === 'yaml' || b.lang === 'yml',
+  );
+  if (candidates.length === 1) {
+    return (candidates[0]?.content ?? '').trim();
+  }
+  if (candidates.length > 1) {
+    const searchCandidates = candidates.slice(0, MAX_YAML_FENCE_CANDIDATES);
+    if (searchCandidates.length < candidates.length) {
+      log?.warn(
+        `[planner] 応答中のYAMLフェンス候補が${candidates.length}件あり、上限` +
+          `${MAX_YAML_FENCE_CANDIDATES}件を超えたため${candidates.length - searchCandidates.length}件を切り捨てました`,
+      );
+    }
+    const best =
+      searchCandidates.find((b) => looksLikeWorkflowYaml(b.content)) ?? searchCandidates[0];
+    return (best?.content ?? '').trim();
   }
   const rootKeyMatch = ROOT_KEY_PATTERN.exec(response);
   if (rootKeyMatch !== null) {
@@ -488,6 +598,35 @@ const PATH_LIKE_TOKEN = /(?:[A-Za-z0-9._-]+[\\/])+([A-Za-z0-9._-]+)\.[A-Za-z0-9]
 const WINDOWS_RESERVED_FILENAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 const SLUG_MAX_LENGTH = 40;
 /**
+ * `PATH_LIKE_TOKEN` を実行する対象の先頭からの文字数上限（issue #416）。
+ *
+ * `(?:[A-Za-z0-9._-]+[\\/])+` はネストした可変長量指定子の繰り返しになっており、
+ * 拡張子（末尾の `\.[A-Za-z0-9]{1,8}`）にマッチしない入力を与えると、区切りの
+ * 分け方をすべて試すバックトラッキングが発生して入力長に対し二次以上の時間が
+ * かかる（実測: `'a/'.repeat(n) + 'a'` でn=20000＝入力長約40000のときこの環境で
+ * 約2.9秒）。そこで正規表現の実行範囲を先頭からこの文字数までに絞り、残りは
+ * パス縮小を行わずそのまま繋ぐ。
+ *
+ * **これは意図的なトレードオフを伴う。** 上限を超える入力では、1000文字目
+ * 以降にあるパスらしき断片は縮小されずそのまま残るため、issue #328が本来
+ * 意図した「パスを読みやすい名前へ縮める」効果がその部分では働かない
+ * （例: 先頭1000文字が空白・記号主体で`slugifyGoal`の空白畳み込みにより
+ * ほぼ消え、境界の直後にパス断片が続く入力）。これを許容できるのは、
+ * 実害が生成される既定ファイル名の意味が一部落ちることに留まり、かつこの
+ * 既定値は利用者が入力欄（`validateSlugInput`）で編集できるため。例外は
+ * 投げず、パス区切り文字（`/` `\`）はこの後段で`UNSAFE_FILENAME_CHARS`が
+ * 全文に対して確実に潰すため、パストラバーサルにはつながらない
+ * （`roadmap.ts`の`resolveRoadmapOutputPath`が行う`isPathWithinRoot`検証も
+ * 別途効いている）。この劣化が起きるのは「1000文字を超え、かつ先頭1000
+ * 文字が空白・記号でほぼ埋まり、かつ境界付近にパスらしき断片がある」という
+ * 形の入力に限られ、実際のゴール文ではまず起こらない。
+ *
+ * 値は`SLUG_MAX_LENGTH`（40）に対して十分な余裕（25倍）を持たせつつ、この
+ * 上限ちょうどの長さの最悪ケース入力でも数ミリ秒に収まるよう選んだ
+ * （実測: 長さ1000文字の最悪ケースで約2ms）。
+ */
+const PATH_LIKE_TOKEN_SCAN_LIMIT = 1000;
+/**
  * 人が入力欄で付けられる名前の上限（`validateSlugInput`）。自動生成の `SLUG_MAX_LENGTH`
  * より緩い。機械的に切り詰めた既定値と違い、人が意図して付けた名前は途中で切りたくない。
  */
@@ -508,9 +647,21 @@ const SLUG_INPUT_MAX_LENGTH = 80;
  * `slugifyGoal` の前処理。`roadmap.ts` 側の `slugifyGoal` も同じ前処理を通すため、
  * 実装はここ1つに置いて共有する（`roadmap.ts` は `planner.ts` を参照しているので、
  * この向きの依存なら循環しない）。
+ *
+ * `PATH_LIKE_TOKEN_SCAN_LIMIT` を超えた末尾部分は無検査（パス縮小もパス区切りの
+ * 除去も行わず）そのまま連結する。それが安全なのは、この関数の呼び出し元
+ * `slugifyGoal` が結果全体に `UNSAFE_FILENAME_CHARS` を適用してパス区切り文字を
+ * 潰し、さらに `roadmap.ts` の `resolveRoadmapOutputPath` が `isPathWithinRoot` で
+ * 出力先を検証しているため。どちらか一方でも変更・削除する場合はこの前提が
+ * 崩れないか確認すること。
  */
 export function stripPathLikeTokens(goal: string): string {
-  return goal.replace(PATH_LIKE_TOKEN, (_match, base: string) => base);
+  if (goal.length <= PATH_LIKE_TOKEN_SCAN_LIMIT) {
+    return goal.replace(PATH_LIKE_TOKEN, (_match, base: string) => base);
+  }
+  const head = goal.slice(0, PATH_LIKE_TOKEN_SCAN_LIMIT);
+  const tail = goal.slice(PATH_LIKE_TOKEN_SCAN_LIMIT);
+  return head.replace(PATH_LIKE_TOKEN, (_match, base: string) => base) + tail;
 }
 
 /**
@@ -773,6 +924,25 @@ function assertPlannerSessionIsSafe(provider: Provider, input: TaskSessionInput)
 }
 
 /**
+ * `sendSingleTurn`の既定タイムアウト（issue #389 根拠3）。
+ *
+ * リポジトリ内に単発LLMターンの待ち時間の既存の目安値は無かった（`planner.ts`/`roadmap.ts`に
+ * `CancellationToken`/`AbortController`/`AbortSignal`/`setTimeout`が1件も無いことをgrepで
+ * 確認済み）。近い性質を持つ既存の値としては、Codex CLIのインポート完了通知を待つ
+ * `appServerClient.ts`の`IMPORT_COMPLETE_TIMEOUT_MS`（5分）が最も長く、それ以外の
+ * `TIMEOUT_MS`系（15〜20秒）はプロービング等の軽い単発リクエストで、ワークスペースを
+ * 読みに行くツール呼び出しを挟まない。
+ *
+ * 分解セッションは「YAMLのみ出力せよ」という指示の下でも、ワークスペースの走査（1つ以上の
+ * read系ツール呼び出し）と数十〜百行規模のYAML生成を1ターンの中でこなす必要があり、
+ * 単純なチャット応答より長くかかることが普通にありうる。短すぎるタイムアウトは正常な生成を
+ * 打ち切ってしまう（design.mdに明記の失敗モード）。`IMPORT_COMPLETE_TIMEOUT_MS`と同じ
+ * 5分を既定にし、正常系を打ち切らない側に倒す。ハングしたセッションを検知して解放する
+ * ことが目的であり、遅いだけの正常系を犠牲にしてまで短くする理由は無い。
+ */
+export const PLANNER_TURN_TIMEOUT_MS = 5 * 60_000;
+
+/**
  * 分解専用のセッションを1つ開き、1ターンだけ送って応答を受け取り、閉じる。
  *
  * `TaskSession.runLoop`（`LoopController`）を`maxIterations: 1, condition: ''`で使う。
@@ -783,6 +953,19 @@ function assertPlannerSessionIsSafe(provider: Provider, input: TaskSessionInput)
  * 承認要求は理由を問わず全て拒否する（design.md §16.9「承認要求は全て拒否する」）。
  * `escalation.ts`の危険判定は経由しない。分解セッションに「妥当な危険操作」という
  * カテゴリは無く、判定するまでもなく拒否してよいため。
+ *
+ * `timeoutMs`（既定`PLANNER_TURN_TIMEOUT_MS`）以内に`onFinished`が呼ばれなければ、
+ * ハングしたとみなして打ち切る（issue #389 根拠3。CLIプロセスのハング・イベントの
+ * 取りこぼしで`onFinished`が一度も呼ばれないと、以前は`Promise`が永久に解決せず
+ * `finally`の`session.dispose()`にも到達しなかった）。
+ *
+ * 打ち切り時は`session.interrupt()`を呼び、進行中のターン・CLIプロセス側も止める
+ * （`interrupt()`自体がハングする可能性もあるため、その完了を待たずにタイムアウトの
+ * `reject`を確定させる。`interrupt()`は結果を問わず投げっぱなしにする）。`settled`で
+ * 「最初に決着した経路」だけを採用し、後から本来の`onFinished`が遅れて呼ばれても
+ * 二重にresolve/rejectしない（`Promise`はそもそも2度目以降の決着を無視するが、
+ * ここでは`clearTimeout`忘れやログの二重出力も避ける）。`session.dispose()`は
+ * 経路によらず`finally`で1回だけ呼ぶ。
  */
 /** `roadmap.ts`からも使う（`buildPlannerSessionInput`と同じ理由でexportする）。 */
 export async function sendSingleTurn(
@@ -790,6 +973,8 @@ export async function sendSingleTurn(
   provider: Provider,
   input: TaskSessionInput,
   prompt: string,
+  timeoutMs: number = PLANNER_TURN_TIMEOUT_MS,
+  log?: Logger,
 ): Promise<string> {
   assertPlannerSessionIsSafe(provider, input);
   const session = await host.openTaskSession(input);
@@ -797,7 +982,33 @@ export async function sendSingleTurn(
   session.open({ preserveFocus: true });
   try {
     return await new Promise<string>((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        // 完了・失敗を待たず投げっぱなしにする（interrupt自体がハングしても、
+        // このタイムアウトが打ち切りとして確定することを妨げない）。ただし、
+        // interrupt()自体が失敗した場合はCLIプロセスが残り続けている可能性があるため、
+        // 内部情報（スタックトレース・絶対パス・プロンプト全文）を含まない形で
+        // ログには残す（#400コードレビュー指摘 low 2。完全に握り潰さない）
+        void session.interrupt().catch((e: unknown) => {
+          const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+          log?.warn(`[planner] タイムアウト後のinterrupt()に失敗しました: ${message}`);
+        });
+        reject(
+          new Error(
+            `分解セッションのターンが${timeoutMs}ミリ秒以内に完了しなかったため打ち切りました`,
+          ),
+        );
+      }, timeoutMs);
       session.onFinished((reason, state) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
         if (reason === 'failed') {
           reject(new Error('分解セッションのターンが失敗しました'));
           return;
@@ -829,8 +1040,9 @@ export async function sendSingleTurn(
 function extractAndRepair(
   response: string,
   provider: Provider,
+  log?: Logger,
 ): { yaml: string; dropped: DroppedTemplateRef[] } {
-  const extracted = extractYamlFromResponse(response);
+  const extracted = extractYamlFromResponse(response, log);
   const repaired = dropUndeclaredTemplateRefs(extracted);
   // 分解に使ったエージェントを実行にも引き継ぐ（issue #321）。プロンプトで指示しても
   // 書かれないことがあるため、検証にかける前に補う。明示されていれば上書きしない
@@ -864,8 +1076,15 @@ export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkfl
     // 分解に使ったエージェントを、そのまま実行にも使う（issue #321）
     provider: input.provider,
   });
-  const firstResponse = await sendSingleTurn(input.host, input.provider, sessionInput, firstPrompt);
-  const first = extractAndRepair(firstResponse, input.provider);
+  const firstResponse = await sendSingleTurn(
+    input.host,
+    input.provider,
+    sessionInput,
+    firstPrompt,
+    PLANNER_TURN_TIMEOUT_MS,
+    input.log,
+  );
+  const first = extractAndRepair(firstResponse, input.provider, input.log);
   const firstYaml = first.yaml;
   const firstAttempt = tryParseAndValidate(firstYaml);
   if (firstAttempt.ok && firstAttempt.definition !== undefined) {
@@ -890,8 +1109,10 @@ export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkfl
     input.provider,
     sessionInput,
     retryPrompt,
+    PLANNER_TURN_TIMEOUT_MS,
+    input.log,
   );
-  const second = extractAndRepair(secondResponse, input.provider);
+  const second = extractAndRepair(secondResponse, input.provider, input.log);
   const secondYaml = second.yaml;
   const secondAttempt = tryParseAndValidate(secondYaml);
   if (secondAttempt.ok && secondAttempt.definition !== undefined) {

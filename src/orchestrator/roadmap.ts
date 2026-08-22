@@ -10,14 +10,16 @@ import {
   buildPlannerSessionInput,
   planWorkflow,
   sendSingleTurn,
-  stripPathLikeTokens,
+  slugifyGoal,
   type PlanWorkflowFailure,
   type PlanWorkflowInput,
   type PlanWorkflowSuccess,
   type WorkspaceSummary,
 } from './planner';
+import { sanitizeForLog } from './sanitize';
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { TaskSessionHost } from './taskSession';
+import { formatUntrusted, sanitizeInlineText } from './untrustedText';
 import type { GitCommandRunner } from './worktree';
 import {
   findCycleGroups,
@@ -55,6 +57,13 @@ export interface RoadmapItem {
   text: string;
   dependsOn: string[];
   issue: number | undefined;
+  /**
+   * `Issue:` 行自体は存在したが、番号として読み取れなかった場合に `true`（Issue #408 根拠1）。
+   * `issue === undefined` だけでは「そもそもIssue行が無い」場合と区別できず、
+   * `alignRoadmapIssues` がどちらも同じに扱うと、後者（読み取れなかっただけ）でも
+   * 生成YAML側の`issue`を誤って削ってしまう。両者を区別するためのフィールド。
+   */
+  issueUnparseable: boolean;
   line: number;
 }
 
@@ -66,16 +75,76 @@ export interface RoadmapPhase {
 export interface ParsedRoadmap {
   title: string;
   phases: RoadmapPhase[];
+  /**
+   * パース時に読み飛ばした・警告に倒した内容（Issue #408）。`validateRoadmap`が
+   * 自身の`warnings`へ引き継ぐ（design.md §16.19の警告の器へ乗せる）。
+   */
+  warnings: RoadmapIssueEntry[];
 }
 
 const TITLE_PATTERN = /^#\s+(.*)$/;
 const PHASE_HEADING_PATTERN = /^##\s+(.*)$/;
-/** `- [ ] R1 認証方式を決めて設計を書く` / `- [x] R1 ...`（大文字Xも許す）。 */
-const CHECKBOX_ITEM_PATTERN = /^- \[([ xX])\]\s+(\S+)\s*(.*)$/;
+/**
+ * `- [ ] R1 認証方式を決めて設計を書く` / `- [x] R1 ...`（大文字Xも許す）。
+ *
+ * 先頭のインデントと `-` / `*` / `+` のマーカーの揺れを許容する（Issue #408 根拠2。
+ * 実測で `  - [ ] R1 foo` も `* [ ] R1 foo` も旧パターンでは不一致だった）。
+ */
+const CHECKBOX_ITEM_PATTERN = /^\s*[-*+]\s*\[([ xX])\]\s+(\S+)\s*(.*)$/u;
+/**
+ * チェックボックスらしき行のうち、`CHECKBOX_ITEM_PATTERN`に一致しなかったものを検出する
+ * ための緩いパターン（Issue #408）。`[]`の中身を短く限定し、`(`が直後に続く場合
+ * （Markdownリンク `- [text](url)`）を除外することで、自由記述のロードマップに実在する
+ * リンクの箇条書き（例: `docs/roadmap/review-and-feature-consolidation.md:22`）を
+ * 誤検出しないようにしてある。
+ *
+ * **`[]`の中身は0〜3文字までしか警告対象にしない（4文字以上は無音で読み飛ばす）。**
+ * 上限を設けず`[^\]]*`にすると、Markdownリンクの箇条書き（`- [ux-improvements.md](...)`
+ * や `- [text](url)`）の`[]`部分まで拾ってしまい、正当なリンク行を誤って
+ * 「チェックボックスらしき行」として警告してしまう（実測: `[ux-improvements.md]`は
+ * 18文字あり、桁数で区別しないと`(`の直後除外だけでは弾けない場合がある）。
+ * 実在のロードマップのチェックボックス記号（` `/`x`/`X`程度、たまに`z`等の誤字1文字）は
+ * 3文字以内に収まるため、境界を3文字に置き、4文字以上は「チェックボックスではなく
+ * 自由記述のリンク等だろう」と判断して無視する（レビュー指摘: minor 5）。
+ */
+const CHECKBOX_LIKE_PATTERN = /^\s*[-*+]\s*\[[^\]]{0,3}\](?!\()/u;
 const DEPENDS_LINE_PATTERN = /^\s*-\s*依存:\s*(.*)$/;
-const ISSUE_LINE_PATTERN = /^\s*-\s*Issue:\s*#?(\d+)\s*$/;
+/**
+ * `- Issue: #12` / `- Issue: 12` に加え、番号の直後の余剰テキストも許容する
+ * （Issue #408 根拠1。実測で `- Issue: #12（既存）` は旧パターンでは不一致だった）。
+ *
+ * 末尾の`(?!\d)`は付けていない。`\d+`は貪欲マッチのため、数字が続く限り呑み込んでから
+ * バックトラックする形にしかならず、この否定先読みは常に真になる（＝no-op。実測で
+ * 削除前後の挙動に差が無いことを確認済み。レビュー指摘: minor 6）。「`#123`のうち
+ * `12`だけを拾ってしまう」ような誤読は、`\d+`が貪欲である時点で起きない。
+ */
+const ISSUE_LINE_PATTERN = /^\s*-\s*Issue:\s*#?(\d+).*$/u;
+/**
+ * `Issue:` 行そのものの検出用（数字が読めるかは問わない）。`ISSUE_LINE_PATTERN`が不一致でも
+ * この緩いパターンが一致すれば「Issue行のつもりだが数値として読めなかった」と判定できる
+ * （Issue #408。`- Issue: 未起票（着手時に起票する）`のような実例が
+ * `docs/roadmap/review-and-feature-consolidation.md:132`にある）。
+ */
+const ISSUE_LINE_CANDIDATE_PATTERN = /^\s*-\s*Issue:\s*(.*)$/u;
 /** `依存: なし` のような「無い」ことを表す値。 */
 const NO_DEPENDENCY_TOKENS = new Set(['なし', 'none', '']);
+
+/**
+ * GitHub/GitLabのIssue番号として現実的とみなす最大桁数（レビュー指摘: medium 2）。
+ * 両サービスとも実際のissue/iidが10桁（100億件超）に達することはまず無いため、
+ * これを超える桁数は「数字らしき文字列ではあるが番号としては扱わない」判断に使う。
+ * `Number.isSafeInteger`だけでは、10桁でも安全整数の範囲に収まる値（例:
+ * `9999999999`は10桁で安全整数）を弾けないため、別途この桁数チェックを設けてある。
+ */
+const MAX_ISSUE_NUMBER_DIGITS = 10;
+
+/**
+ * 1回のパース（`parseRoadmapMarkdown`）で積む警告件数の上限（レビュー指摘: low 4）。
+ * 壊れたロードマップMarkdownは「チェックボックスらしき行」が大量に一致しうるため、
+ * 無制限に積むとOutput panelが警告で埋まる。上限を超えた分は個別の警告を積まず、
+ * 末尾に「他N件」の警告を1件だけ積む。
+ */
+const MAX_ROADMAP_PARSE_WARNINGS = 20;
 
 function parseDependsValue(raw: string): string[] {
   return raw
@@ -95,6 +164,16 @@ export function parseRoadmapMarkdown(markdown: string): ParsedRoadmap {
   let title = '';
   const phases: RoadmapPhase[] = [];
   let currentPhase: RoadmapPhase | undefined;
+  const warnings: RoadmapIssueEntry[] = [];
+  // 上限（`MAX_ROADMAP_PARSE_WARNINGS`）を超えた分はここで数えるだけにし、個別には積まない
+  let suppressedWarningCount = 0;
+  const addWarning = (entry: RoadmapIssueEntry): void => {
+    if (warnings.length < MAX_ROADMAP_PARSE_WARNINGS) {
+      warnings.push(entry);
+    } else {
+      suppressedWarningCount += 1;
+    }
+  };
 
   const ensurePhase = (): RoadmapPhase => {
     if (currentPhase === undefined) {
@@ -134,6 +213,7 @@ export function parseRoadmapMarkdown(markdown: string): ParsedRoadmap {
         text,
         dependsOn: [],
         issue: undefined,
+        issueUnparseable: false,
         line: i,
       };
       i += 1;
@@ -148,8 +228,46 @@ export function parseRoadmapMarkdown(markdown: string): ParsedRoadmap {
         }
         const issueMatch = ISSUE_LINE_PATTERN.exec(sub);
         if (issueMatch !== null) {
-          const n = Number.parseInt(issueMatch[1] ?? '', 10);
-          item.issue = Number.isFinite(n) ? n : undefined;
+          const rawNumber = issueMatch[1] ?? '';
+          const n = Number.parseInt(rawNumber, 10);
+          // `Number.parseInt`は桁溢れした数字列（例: 20桁の`9`並び）を`Infinity`として
+          // 返す。`Number.isFinite`だけで弾いても、`Infinity`にならない程度の桁溢れ
+          // （安全整数の範囲を超えるが有限）は`Number.isSafeInteger`でないと弾けず、
+          // さらに安全整数の範囲に収まる10桁超の値（現実には存在しない桁数のIssue番号）
+          // は桁数チェックでないと弾けない。3つとも満たさなければ「番号として読めなかった」
+          // 扱いにする（レビュー指摘: medium 2。以前は`Number.isFinite`だけを見ており、
+          // 桁溢れで`Infinity`になった場合に`issueUnparseable`が立たず、`ISSUE_LINE_PATTERN`
+          // に一致した時点で`continue`するため後段の`ISSUE_LINE_CANDIDATE_PATTERN`
+          // フォールバックへも到達せず、「Issue行が無い」場合と誤って同一視されていた）
+          const isValidIssueNumber =
+            Number.isFinite(n) &&
+            Number.isSafeInteger(n) &&
+            rawNumber.length <= MAX_ISSUE_NUMBER_DIGITS;
+          if (isValidIssueNumber) {
+            item.issue = n;
+          } else {
+            item.issueUnparseable = true;
+            addWarning({
+              itemIds: [item.id],
+              message:
+                `${sanitizeForLog(item.id)}: Issue番号が大きすぎて読み取れませんでした: ` +
+                `"${sanitizeForLog(rawNumber)}"`,
+            });
+          }
+          i += 1;
+          continue;
+        }
+        const issueCandidateMatch = ISSUE_LINE_CANDIDATE_PATTERN.exec(sub);
+        if (issueCandidateMatch !== null) {
+          // Issue行のつもりだが数値として読めなかった（例: 「未起票」）。削除ではなく
+          // 警告に倒し、「そもそもIssue行が無い」場合と区別する（Issue #408 根拠1）
+          item.issueUnparseable = true;
+          addWarning({
+            itemIds: [item.id],
+            message:
+              `${sanitizeForLog(item.id)}: Issue行を番号として読み取れませんでした: ` +
+              `"${sanitizeForLog((issueCandidateMatch[1] ?? '').trim())}"`,
+          });
           i += 1;
           continue;
         }
@@ -159,10 +277,29 @@ export function parseRoadmapMarkdown(markdown: string): ParsedRoadmap {
       continue;
     }
 
+    const checkboxLikeMatch = CHECKBOX_LIKE_PATTERN.exec(line);
+    if (checkboxLikeMatch !== null) {
+      addWarning({
+        itemIds: [],
+        message:
+          `チェックボックスらしき行を認識できませんでした（行 ${i + 1}）: ` +
+          `"${sanitizeForLog(line.trim())}"`,
+      });
+      i += 1;
+      continue;
+    }
+
     i += 1;
   }
 
-  return { title, phases };
+  if (suppressedWarningCount > 0) {
+    warnings.push({
+      itemIds: [],
+      message: `他${suppressedWarningCount}件の警告は上限のため省略しました`,
+    });
+  }
+
+  return { title, phases, warnings };
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -193,7 +330,8 @@ function allItems(parsed: ParsedRoadmap): RoadmapItem[] {
  */
 export function validateRoadmap(parsed: ParsedRoadmap): RoadmapValidationResult {
   const errors: RoadmapIssueEntry[] = [];
-  const warnings: RoadmapIssueEntry[] = [];
+  // パース時点の警告（読み飛ばした行・パース不能なIssue行）を引き継ぐ（Issue #408）
+  const warnings: RoadmapIssueEntry[] = [...parsed.warnings];
   const items = allItems(parsed);
 
   if (items.length === 0) {
@@ -206,13 +344,13 @@ export function validateRoadmap(parsed: ParsedRoadmap): RoadmapValidationResult 
     if (!TASK_ID_PATTERN.test(item.id)) {
       errors.push({
         itemIds: [item.id],
-        message: `id の形式が不正です（半角英数字・_・-のみ、1〜50文字にしてください）: "${item.id}"`,
+        message: `id の形式が不正です（半角英数字・_・-のみ、1〜50文字にしてください）: "${sanitizeForLog(item.id)}"`,
       });
     }
   }
   for (const [id, count] of idCounts) {
     if (count > 1) {
-      errors.push({ itemIds: [id], message: `id が重複しています: ${id}` });
+      errors.push({ itemIds: [id], message: `id が重複しています: ${sanitizeForLog(id)}` });
     }
   }
 
@@ -222,14 +360,17 @@ export function validateRoadmap(parsed: ParsedRoadmap): RoadmapValidationResult 
       if (!idSet.has(dep)) {
         errors.push({
           itemIds: [item.id],
-          message: `依存が未定義の項目を参照しています: ${dep}`,
+          message: `依存が未定義の項目を参照しています: ${sanitizeForLog(dep)}`,
         });
       }
     }
   }
 
   for (const group of findCycleGroups(items)) {
-    errors.push({ itemIds: group, message: `依存が循環しています: ${group.join(', ')}` });
+    errors.push({
+      itemIds: group,
+      message: `依存が循環しています: ${group.map((id) => sanitizeForLog(id)).join(', ')}`,
+    });
   }
 
   return { errors, warnings };
@@ -248,6 +389,11 @@ export interface RoadmapMaterialItem {
   text: string;
   dependsOn: readonly string[];
   issue: number | undefined;
+  /**
+   * `RoadmapItem.issueUnparseable`と同じ（Issue #408）。省略時は`false`扱い
+   * （テストで直接組み立てる既存の呼び出しを壊さないため、任意項目にしてある）。
+   */
+  issueUnparseable?: boolean;
 }
 
 /**
@@ -267,6 +413,7 @@ export function selectRoadmapPhaseItems(phase: RoadmapPhase): RoadmapMaterialIte
     text: item.text,
     dependsOn: item.dependsOn,
     issue: item.issue,
+    issueUnparseable: item.issueUnparseable,
   }));
 }
 
@@ -374,6 +521,13 @@ export function splitRoadmapPhasesIntoChunks(
  * 確認し、`issue`については`alignRoadmapIssues`が実際に直す）。**この指示だけでは防げない
  * ことは実測済み**で、Issue番号を持つ項目の隣にある無関係な項目へ同じ番号が並んだ。
  */
+/**
+ * ロードマップ項目の本文（`item.text`）に設ける長さ上限。前段のLLM生成セッションが
+ * 出力したロードマップMarkdown由来の自由記述であり、上限が無いと下流のプロンプトを
+ * 圧迫する（design.md §16.24、Issue #369）。
+ */
+const ROADMAP_ITEM_TEXT_MAX_LENGTH = 2000;
+
 export function formatRoadmapMaterial(items: readonly RoadmapMaterialItem[]): string {
   const lines: string[] = [];
   lines.push('## ロードマップの材料');
@@ -389,22 +543,48 @@ export function formatRoadmapMaterial(items: readonly RoadmapMaterialItem[]): st
   lines.push('');
   for (const item of items) {
     const depends = item.dependsOn.length > 0 ? item.dependsOn.join(', ') : 'なし';
-    const issueText = item.issue !== undefined ? `#${item.issue}` : 'なし';
+    const issueText =
+      item.issue !== undefined
+        ? `#${item.issue}`
+        : item.issueUnparseable === true
+          ? '不明（元のロードマップのIssue行を読み取れませんでした）'
+          : 'なし';
+    // `item.text`は前段のLLM生成セッションが出力したロードマップMarkdown由来の自由記述
+    // （外部由来テキスト）のため、`formatUntrusted`で囲う（design.md §16.24、Issue #369）
+    const safeText = formatUntrusted(item.text, {
+      id: item.id,
+      field: 'text',
+      maxLength: ROADMAP_ITEM_TEXT_MAX_LENGTH,
+      preserveNewlines: true,
+    });
     lines.push(`- id: ${item.id}`);
-    lines.push(`  内容: ${item.text}`);
+    lines.push(`  内容: ${safeText}`);
     lines.push(`  依存: ${depends}`);
     lines.push(`  Issue: ${issueText}`);
   }
   return lines.join('\n');
 }
 
+/** `buildRoadmapPlanGoal`が受け取るタイトル・フェーズ名の1要素あたりの表示上限。 */
+const ROADMAP_TITLE_MAX_LENGTH = 200;
+const PHASE_NAME_MAX_LENGTH = 100;
+
 /**
  * `planWorkflowFromRoadmapPhases`が使う既定のゴール文。ロードマップのタイトルと
  * フェーズ名から組み立てる。複数フェーズをまとめてYAML化する場合は全ての名前を並べる。
+ *
+ * `roadmapTitle` / `phaseNames`はロードマップ生成セッション（LLM）が出力したMarkdownの
+ * 見出しであり、外部由来テキストである。ここでは一覧の要素として`sanitizeInlineText`で
+ * 1行に均すだけにする（`formatUntrusted`の囲いは付けない）。組み立てた返値はこのあと
+ * `buildPlannerPrompt`の`goal`としてそのまま渡り、そちらで改めて`formatUntrusted`により
+ * 囲われるため、ここで囲うと二重になる（design.md §16.24、Issue #369）。
  */
 export function buildRoadmapPlanGoal(roadmapTitle: string, phaseNames: readonly string[]): string {
-  const names = phaseNames.map((name) => `「${name}」`).join('');
-  return `${roadmapTitle}のうち${names}を実行できるワークフローに分解する`;
+  const safeTitle = sanitizeInlineText(roadmapTitle, ROADMAP_TITLE_MAX_LENGTH);
+  const names = phaseNames
+    .map((name) => `「${sanitizeInlineText(name, PHASE_NAME_MAX_LENGTH)}」`)
+    .join('');
+  return `${safeTitle}のうち${names}を実行できるワークフローに分解する`;
 }
 
 /** `detectRoadmapMaterialMismatches`が返す1件。 */
@@ -437,7 +617,7 @@ export function detectRoadmapMaterialMismatches(
       mismatches.push({
         itemId: item.id,
         kind: 'missing',
-        message: `ロードマップの項目 ${item.id} に対応するタスクが生成されていません`,
+        message: `ロードマップの項目 ${sanitizeForLog(item.id)} に対応するタスクが生成されていません`,
       });
       continue;
     }
@@ -447,13 +627,15 @@ export function detectRoadmapMaterialMismatches(
     const dependsOnMatches =
       expectedDeps.size === actualDeps.size && [...expectedDeps].every((d) => actualDeps.has(d));
     if (!dependsOnMatches) {
+      const expectedText =
+        [...expectedDeps].map((d) => sanitizeForLog(d)).join(', ') || 'なし';
+      const actualText = [...actualDeps].map((d) => sanitizeForLog(d)).join(', ') || 'なし';
       mismatches.push({
         itemId: item.id,
         kind: 'dependsOnMismatch',
         message:
-          `${item.id}: dependsOnがロードマップの依存と一致しません` +
-          `（期待: ${[...expectedDeps].join(', ') || 'なし'}, ` +
-          `実際: ${[...actualDeps].join(', ') || 'なし'}）`,
+          `${sanitizeForLog(item.id)}: dependsOnがロードマップの依存と一致しません` +
+          `（期待: ${expectedText}, 実際: ${actualText}）`,
       });
     }
 
@@ -462,7 +644,7 @@ export function detectRoadmapMaterialMismatches(
         itemId: item.id,
         kind: 'issueMismatch',
         message:
-          `${item.id}: issueがロードマップと一致しません` +
+          `${sanitizeForLog(item.id)}: issueがロードマップと一致しません` +
           `（期待: ${item.issue ?? 'なし'}, 実際: ${task.issue ?? 'なし'}）`,
       });
     }
@@ -504,7 +686,16 @@ export function alignRoadmapIssues(
   material: readonly RoadmapMaterialItem[],
 ): { yaml: string; corrected: CorrectedIssue[] } {
   const corrected: CorrectedIssue[] = [];
-  const expectedById = new Map(material.map((item) => [item.id, item.issue] as const));
+  // パース不能なIssue行を持つ項目（`issueUnparseable`）は、材料に含めない。
+  // 「そもそもIssue行が無い」（issue: undefined）場合と区別せずに扱うと、
+  // 読み取れなかっただけの項目についても生成YAML側の`issue`を誤って削ってしまう
+  // （Issue #408 根拠1）。材料に無い扱いにすることで、以降の`!expectedById.has(rawId)`の
+  // 分岐（何もしない）へ自然に合流させる
+  const expectedById = new Map(
+    material
+      .filter((item) => item.issueUnparseable !== true)
+      .map((item) => [item.id, item.issue] as const),
+  );
 
   let doc;
   try {
@@ -652,9 +843,31 @@ export interface RunCompletionResult {
    * （design.md §16.19「対応が取れない項目には何もしない。ログに残す」）。
    */
   unmatchedTaskIds: string[];
+  /**
+   * パース時の警告、および重複idを検出して書き戻しを中止した場合の警告（Issue #408）。
+   * 重複idを検出した場合、`markdown`は入力をそのまま返し（`updatedItemIds`は空）、
+   * 呼び出し側はこの配列を見て人へ知らせる。
+   */
+  warnings: RoadmapIssueEntry[];
 }
 
 const CHECKBOX_PREFIX_PATTERN = /^(\s*-\s*)\[[ xX]\]/;
+
+/**
+ * 元のMarkdownで使われている改行コードを検出する（Issue #408 根拠3）。
+ *
+ * 最初に現れた改行の種別をファイル全体の慣習とみなす。改行コードが混在するファイルでも、
+ * 書き戻し後は検出した1種類へ揃える（行ごとの改行種別までは保持しない。書き換えるのは
+ * 特定の行のチェックボックス記号だけであり、そのために全行を分解・再結合する以上、
+ * 「どの行が元々どちらだったか」を保持し続ける複雑さに見合う実害が無いための単純化）。
+ */
+function detectLineEnding(markdown: string): '\n' | '\r\n' {
+  const index = markdown.indexOf('\n');
+  if (index > 0 && markdown[index - 1] === '\r') {
+    return '\r\n';
+  }
+  return '\n';
+}
 
 /**
  * runが終わったら、`done` になったタスクに対応する項目のチェックボックスの記号だけを書き換える。
@@ -663,13 +876,45 @@ const CHECKBOX_PREFIX_PATTERN = /^(\s*-\s*)\[[ xX]\]/;
  *
  * チェックは一方向にしか動かさない（`done` 以外の状態で既にチェック済みの項目を戻すことはしない）。
  * 人が書いた文を機械が書き換えないという方針（design.md）に、チェックの意味も含めて従う。
+ *
+ * 書き戻し前に項目idの重複を検出する（Issue #408 根拠4）。`validateRoadmap`
+ * （循環依存の検出等、重い検証を含む）は経由しない設計を保ったまま、軽量な重複チェックだけを
+ * ここで行う。重複が見つかった場合は何も書き換えず、警告を返す（`itemsById`をMapで作ると
+ * 同一idで後勝ちになり、誤った項目へチェックが書き込まれかねないため）。
  */
 export function applyRunCompletion(
   markdown: string,
   taskStates: RunTaskStates,
 ): RunCompletionResult {
   const parsed = parseRoadmapMarkdown(markdown);
-  const itemsById = new Map(allItems(parsed).map((it) => [it.id, it] as const));
+  const items = allItems(parsed);
+
+  const idCounts = new Map<string, number>();
+  for (const item of items) {
+    idCounts.set(item.id, (idCounts.get(item.id) ?? 0) + 1);
+  }
+  const duplicateIds = [...idCounts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([id]) => id);
+  if (duplicateIds.length > 0) {
+    return {
+      markdown,
+      updatedItemIds: [],
+      unmatchedTaskIds: [],
+      warnings: [
+        ...parsed.warnings,
+        {
+          itemIds: duplicateIds,
+          // idは`CHECKBOX_ITEM_PATTERN`の`\S+`由来で任意の非空白文字を許すため、
+          // 双方向制御文字等を含みうる。ログへ埋め込む前に無害化する（レビュー指摘: medium 3）
+          message: `項目idが重複しているため書き戻しを中止しました: ${duplicateIds.map((id) => sanitizeForLog(id)).join(', ')}`,
+        },
+      ],
+    };
+  }
+
+  const itemsById = new Map(items.map((it) => [it.id, it] as const));
+  const lineEnding = detectLineEnding(markdown);
   const lines = markdown.split(/\r?\n/u);
 
   const updatedItemIds: string[] = [];
@@ -692,7 +937,12 @@ export function applyRunCompletion(
     }
   }
 
-  return { markdown: lines.join('\n'), updatedItemIds, unmatchedTaskIds };
+  return {
+    markdown: lines.join(lineEnding),
+    updatedItemIds,
+    unmatchedTaskIds,
+    warnings: parsed.warnings,
+  };
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -708,6 +958,22 @@ export interface RoadmapPromptInput {
   /** 取得できなければ `undefined`（design.md §16.19「取れなければ飛ばす」）。 */
   existingIssues: readonly RoadmapIssueSummary[] | undefined;
 }
+
+/**
+ * `buildRoadmapPrompt`が一覧として並べるworkspaceSummaryの1要素・既存Issueタイトルの
+ * 表示上限（design.md §16.24、Issue #369）。`planner.ts`の`MAX_ENTRY_NAME_LENGTH`と
+ * 揃え、`extension.ts`の`listWorkspaceSummary`・`planner.ts`の`buildWorkspaceSummary`
+ * のどちらを経由しても同じ扱いになるようにする。
+ */
+const WORKSPACE_ENTRY_MAX_LENGTH = 100;
+const ISSUE_TITLE_MAX_LENGTH = 200;
+
+/**
+ * `buildRoadmapPrompt`が展開するgoal文の長さ上限（design.md §16.24、Issue #369）。
+ * `planner.ts`の`buildPlannerPrompt`が`input.goal`に設ける`MAX_GOAL_LENGTH`と同じ値・
+ * 同じ理由（人が直接入力する値だが、由来を問わず一律に上限を設ける）。
+ */
+const ROADMAP_GOAL_MAX_LENGTH = 8000;
 
 const ROADMAP_FORMAT_EXAMPLE = `# <ゴール>
 
@@ -728,6 +994,10 @@ const ROADMAP_FORMAT_EXAMPLE = `# <ゴール>
  * `workflow.ts` の分解セッション（§16.9）と同じく、返答はMarkdownのみとするよう指示する。
  * 既存のIssueと重複する項目を作らせないため、および項目にIssue番号を紐づけるために
  * `existingIssues` を材料へ含める。
+ *
+ * `input.goal`は`untrustedText.ts`の`formatUntrusted`で囲う（design.md §16.24、
+ * Issue #369）。以前は無加工・上限なしで連結していた（`planner.ts`の`buildPlannerPrompt`が
+ * `input.goal`に対して行った対応と同じ）。
  */
 export function buildRoadmapPrompt(input: RoadmapPromptInput): string {
   const lines: string[] = [];
@@ -735,15 +1005,26 @@ export function buildRoadmapPrompt(input: RoadmapPromptInput): string {
   lines.push('');
   lines.push('## ゴール');
   lines.push('');
-  lines.push(input.goal);
+  lines.push(
+    formatUntrusted(input.goal, {
+      id: 'roadmap',
+      field: 'goal',
+      maxLength: ROADMAP_GOAL_MAX_LENGTH,
+      preserveNewlines: true,
+    }),
+  );
   lines.push('');
   lines.push('## ワークスペースの構成（直下）');
   lines.push('');
   if (input.workspaceSummary.length === 0) {
     lines.push('（取得できませんでした）');
   } else {
+    // ファイル名には改行を含められるため、`sanitizeInlineText`で1行に均す
+    // （`planner.ts`の`buildWorkspaceSummary`経由の場合は既に通っているが、
+    // このパス（`extension.ts`の`listWorkspaceSummary`経由）は通っていないため、
+    // 呼び出し元を問わずsink側で防御する。design.md §16.24、Issue #369）
     for (const entry of input.workspaceSummary) {
-      lines.push(`- ${entry}`);
+      lines.push(`- ${sanitizeInlineText(entry, WORKSPACE_ENTRY_MAX_LENGTH)}`);
     }
   }
   lines.push('');
@@ -761,8 +1042,10 @@ export function buildRoadmapPrompt(input: RoadmapPromptInput): string {
   } else if (input.existingIssues.length === 0) {
     lines.push('（既存のIssueはありません）');
   } else {
+    // Issueタイトルは`gh issue list` / `glab issue list`の出力をJSON.parseしただけの
+    // 値で、無害化を一切通っていない（design.md §16.24、Issue #369）
     for (const issue of input.existingIssues) {
-      lines.push(`- #${issue.number} ${issue.title}`);
+      lines.push(`- #${issue.number} ${sanitizeInlineText(issue.title, ISSUE_TITLE_MAX_LENGTH)}`);
     }
   }
   lines.push('');
@@ -877,35 +1160,16 @@ export function createCliIssueListPort(
 /* 出力先の決定・検証                                                                            */
 /* -------------------------------------------------------------------------------------------- */
 
-/** Windowsではファイル名として使えない予約デバイス名（大文字小文字を問わない完全一致）。 */
-const WINDOWS_RESERVED_NAME_PATTERN = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
-/** ファイル名・パスの区切りとして使えない文字、および空白類。 */
-const SLUG_INVALID_CHARS_PATTERN = /[\\/:*?"<>|\s]+/gu;
-const SLUG_MAX_LENGTH = 60;
-
-
-/**
- * ゴールの文からファイル名（拡張子なし）を作る。Windowsでも使えないパス区切り文字・
- * 予約デバイス名は避けるが、日本語の文字自体は残す（一般的なファイルシステムはUnicode
- * ファイル名を扱えるため、無理に英数字へ変換しない）。
- *
- * ゴールにファイルパスが含まれる場合は、そのファイル名（拡張子なし）へ縮めてから繋ぐ
- * （`stripPathLikeTokens`）。ここは機械的な既定値の生成であって最終的な名前ではなく、
- * 利用者は保存前に名前を確認・編集できる（`extension.ts` の入力欄）。
- */
-export function slugifyGoal(goal: string): string {
-  const withoutPaths = stripPathLikeTokens(goal);
-  const collapsed = withoutPaths
-    .trim()
-    .replace(SLUG_INVALID_CHARS_PATTERN, '-')
-    .replace(/-+/gu, '-')
-    .replace(/^-|-$/gu, '');
-  const truncated = collapsed.slice(0, SLUG_MAX_LENGTH).replace(/-$/u, '');
-  if (truncated === '' || WINDOWS_RESERVED_NAME_PATTERN.test(truncated)) {
-    return 'roadmap';
-  }
-  return truncated;
-}
+// ゴールの文からファイル名（拡張子なし）を作る `slugifyGoal` は、以前はここに独自実装を
+// 持っていたが、`planner.ts` の `slugifyGoal` と重複していた（`stripControlChars` を
+// 通す・通さない、上限が60/40、予約語のときの既定値が`roadmap`/`workflow`等の細かい差異は
+// あったが、目的も入出力の形も同じ）。循環importにはならない（`roadmap.ts` は既に
+// `planner.ts` から複数の関数をimportしており、逆方向のimportは無い）ため、`planner.ts`
+// 側（上のimport文で取り込み済み）へ一本化し、こちらの独自実装は削除した（Issue #408）。
+//
+// 一本化の副作用として、`generateRoadmap`（下）が作る既定のファイル名の上限は60文字から
+// 40文字（`planner.ts` の `SLUG_MAX_LENGTH`）へ短くなる。利用者は保存前に名前を確認・編集
+// できる（`extension.ts` の入力欄）ため、既定値が短くなること自体は実害が無い判断とした。
 
 export type RoadmapPathResult = { ok: true; path: string } | { ok: false; message: string };
 
@@ -1125,7 +1389,13 @@ export interface ApplyRunCompletionDeps {
 }
 
 export type ApplyRunCompletionOutcome =
-  | { ok: true; updatedItemIds: string[]; unmatchedTaskIds: string[] }
+  | {
+      ok: true;
+      updatedItemIds: string[];
+      unmatchedTaskIds: string[];
+      /** `applyRunCompletion`の`warnings`をそのまま引き継ぐ（Issue #408）。 */
+      warnings: RoadmapIssueEntry[];
+    }
   | { ok: false; reason: 'readFailed'; message: string };
 
 /**
@@ -1153,5 +1423,6 @@ export async function applyRunCompletionToFile(
     ok: true,
     updatedItemIds: result.updatedItemIds,
     unmatchedTaskIds: result.unmatchedTaskIds,
+    warnings: result.warnings,
   };
 }

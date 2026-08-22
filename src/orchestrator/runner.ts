@@ -2221,6 +2221,12 @@ export class WorkflowRunner {
         `[workflow ${runId}] ロードマップに対応する項目が無いタスク: ${result.unmatchedTaskIds.join(', ')}`,
       );
     }
+    // ロードマップのパース・書き戻しで見つかった警告（読み飛ばした行・パース不能な
+    // Issue行・重複idによる書き戻し中止等）を人へ届ける（Issue #408。`extension.ts` /
+    // `messaging.ts` は変更できないため、既存のログ経路（Output panelへ出る`Logger`）に乗せる）
+    for (const warning of result.warnings) {
+      this.deps.log.warn(`[workflow ${runId}] ロードマップの警告: ${warning.message}`);
+    }
   }
 
   private async finalizeForge(runId: string): Promise<void> {
