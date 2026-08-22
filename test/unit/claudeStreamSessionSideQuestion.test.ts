@@ -168,7 +168,8 @@ describe('ClaudeStreamSession の脇道の質問（side_question。issue #334、
       response: undefined,
       synthetic: undefined,
       refusalFallback: undefined,
-      error: 'Unsupported control request subtype',
+      // control protocol自体の失敗はorigin:'cli'（issue #340横断レビュー指摘）
+      error: { message: 'Unsupported control request subtype', origin: 'cli' },
     });
   });
 
@@ -184,7 +185,8 @@ describe('ClaudeStreamSession の脇道の質問（side_question。issue #334、
       response: undefined,
       synthetic: undefined,
       refusalFallback: undefined,
-      error: '質問が空です',
+      // 拡張機能自身のガードが返す非CLI由来のエラーはorigin:'app'
+      error: { message: '質問が空です', origin: 'app' },
     });
     expect(blank.ok).toBe(false);
   });
@@ -197,7 +199,7 @@ describe('ClaudeStreamSession の脇道の質問（side_question。issue #334、
     );
     const result = await session.askSideQuestion('質問', []);
     expect(result.ok).toBe(false);
-    expect(result.error).toBe('セッションが起動していません');
+    expect(result.error).toEqual({ message: 'セッションが起動していません', origin: 'app' });
   });
 
   it('複数の要求を並行して出しても取り違えない（requestIdで対応付ける）', async () => {

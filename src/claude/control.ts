@@ -28,6 +28,30 @@ export interface IncomingControlRequest {
   payload: Record<string, unknown>;
 }
 
+/**
+ * エラー文言の由来（issue #340横断レビュー指摘）。
+ *
+ * `rewind_conversation`・`side_question`はどちらも、拡張機能自身が組み立てた文言
+ * （セッション未起動・対象が見つからない等、既に利用者向けの日本語）と、CLI側から
+ * 読んだ文言（内部実装依存の生の例外文字列、または`turn running`等の列挙的な理由コード）
+ * の両方を同じ`error`フィールドで返しうる。呼び出し側の表示関数（`describeForkFromTurnError`
+ * `describeSideQuestionError`）がどちらかを判定できないと、非CLI由来の文言まで
+ * 汎用文言へ丸めてしまう（＝横断レビューで見つかったバグ）。呼び出し側に文字列パターンで
+ * 判定させる代わりに、生成側（`control.ts`・`streamSession.ts`・`forkFromTurn.ts`）が
+ * 型で由来を持たせる。
+ *
+ * - `'cli'`: CLIが返した文言。表示前に呼び出し側で必ず利用者向けの文言へ変換すること
+ *   （内部実装の露出を防ぐ）
+ * - `'app'`: 拡張機能自身が組み立てた、既に利用者向けの日本語文言。そのまま表示してよい
+ */
+export type ErrorOrigin = 'cli' | 'app';
+
+/** 由来つきのエラー文言。 */
+export interface OriginatedError {
+  message: string;
+  origin: ErrorOrigin;
+}
+
 export interface ControlResponse {
   requestId: string;
   ok: boolean;
@@ -465,8 +489,14 @@ export interface RewindConversationResult {
   /** 戻した対象の発言本文。成功時のみ入る。入力欄への差し戻しに使う。 */
   prefillText: string | undefined;
   precedingAssistantUuid: string | undefined;
-  /** 戻せない理由。`turn running` / `stale target` / `target not found` など。 */
-  error: string | undefined;
+  /**
+   * 戻せない理由。`turn running` / `stale target` / `target not found` など。
+   *
+   * ここに入るのは常にCLI由来（`origin:'cli'`。issue #340横断レビュー指摘）。
+   * `forkFromTurn.ts`・`streamSession.ts`が組み立てる非CLI由来のエラーは
+   * `ForkFromTurnResult.error`側で別に`origin:'app'`として持つ。
+   */
+  error: OriginatedError | undefined;
 }
 
 /**
@@ -487,16 +517,17 @@ export function readRewindConversationResult(response: ControlResponse): RewindC
       targetMessageUuid: undefined,
       prefillText: undefined,
       precedingAssistantUuid: undefined,
-      error: response.error ?? '不明なエラー',
+      error: { message: response.error ?? '不明なエラー', origin: 'cli' },
     };
   }
   const payload = response.payload;
+  const errorMessage = strOrUndefined(payload?.['error']);
   return {
     rewound: payload?.['rewound'] === true,
     targetMessageUuid: strOrUndefined(payload?.['targetMessageUuid']),
     prefillText: strOrUndefined(payload?.['prefillText']),
     precedingAssistantUuid: strOrUndefined(payload?.['precedingAssistantUuid']),
-    error: strOrUndefined(payload?.['error']),
+    error: errorMessage === undefined ? undefined : { message: errorMessage, origin: 'cli' },
   };
 }
 
@@ -577,7 +608,16 @@ export interface SideQuestionResult {
   synthetic: boolean | undefined;
   /** 元のモデルが拒否し、別モデルへ切り替わって答えたときだけ入る。 */
   refusalFallback: SideQuestionRefusalFallback | undefined;
-  error: string | undefined;
+  /**
+   * 失敗理由。由来つき（issue #340横断レビュー指摘）。
+   *
+   * `origin:'cli'`になるのは`response.ok === false`（control protocol自体の失敗。
+   * CLI内部のJS例外メッセージがそのまま入りうる）のときだけ。それ以外
+   * （成功封筒なのに応答本文が読めない場合の`payload.error`・拡張機能側の固定文言、
+   * `streamSession.ts`のガード）は`origin:'app'`とし、表示側（`describeSideQuestionError`）
+   * が汎用文言へ丸めずそのまま出す。
+   */
+  error: OriginatedError | undefined;
 }
 
 /**
@@ -609,18 +649,21 @@ export function readSideQuestionResult(response: ControlResponse): SideQuestionR
       response: undefined,
       synthetic: undefined,
       refusalFallback: undefined,
-      error: response.error ?? '不明なエラー',
+      error: { message: response.error ?? '不明なエラー', origin: 'cli' },
     };
   }
   const payload = response.payload;
   const text = strOrUndefined(payload?.['response']);
   if (text === undefined) {
+    // 封筒は成功（=CLI由来の生の例外文字列は乗らない）だが応答本文が読めない場合。
+    // `payload.error`か拡張機能側の固定文言のどちらかであり、`origin:'cli'`の丸め対象
+    // ではない（issue #340横断レビュー指摘）
     return {
       ok: false,
       response: undefined,
       synthetic: undefined,
       refusalFallback: undefined,
-      error: strOrUndefined(payload?.['error']) ?? '応答を読み取れませんでした',
+      error: { message: strOrUndefined(payload?.['error']) ?? '応答を読み取れませんでした', origin: 'app' },
     };
   }
   const syntheticRaw = payload?.['synthetic'];

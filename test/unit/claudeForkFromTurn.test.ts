@@ -23,7 +23,7 @@ function failure(error: string): RewindConversationResult {
     targetMessageUuid: undefined,
     prefillText: undefined,
     precedingAssistantUuid: undefined,
-    error,
+    error: { message: error, origin: 'cli' },
   };
 }
 
@@ -115,7 +115,7 @@ describe('forkFromTurn（issue #333、design.md §14.61）', () => {
     expect(result).toEqual({
       ok: false,
       prefillText: undefined,
-      error: 'stale target',
+      error: { message: 'stale target', origin: 'cli' },
       // u3の1件だけ成功済み。呼び出し側（claudeChatView.ts）はこれを見て
       // 「途中まで戻ってから失敗した」と判定する
       succeededCount: 1,
@@ -131,7 +131,7 @@ describe('forkFromTurn（issue #333、design.md §14.61）', () => {
     expect(result).toEqual({
       ok: false,
       prefillText: undefined,
-      error: 'turn running',
+      error: { message: 'turn running', origin: 'cli' },
       succeededCount: 0,
     });
   });
@@ -171,7 +171,7 @@ describe('forkFromTurn（issue #333、design.md §14.61）', () => {
   });
 });
 
-describe('describeForkFromTurnError（issue #494のレビュー指摘、vscode非依存の層でCLIの生文言を日本語へマッピングする）', () => {
+describe('describeForkFromTurnError（issue #494のレビュー指摘、issue #340横断レビュー指摘で由来つきの型へ変更。vscode非依存の層でCLIの生文言を日本語へマッピングする）', () => {
   it.each([
     'turn running',
     'commands queued',
@@ -181,21 +181,34 @@ describe('describeForkFromTurnError（issue #494のレビュー指摘、vscode�
     'failed to persist rewind anchor',
     'state changed',
   ])('既知のCLIエラー値 %s は日本語の説明を返し、生の英語文言を含まない', (error) => {
-    const message = describeForkFromTurnError(error);
+    const message = describeForkFromTurnError({ message: error, origin: 'cli' });
     expect(message).not.toBe(error);
     expect(message.length).toBeGreaterThan(0);
     // 英字だけの生文言（'turn running'等）がそのまま漏れていないことを確かめる
     expect(message).not.toMatch(/^[a-z ]+$/);
   });
 
-  it('forkFromTurn自身が返す非CLI由来のエラー（既に日本語）はそのまま通す', () => {
-    expect(describeForkFromTurnError('対象の発言が見つかりません')).toBe(
-      '対象の発言が見つかりません',
-    );
+  it('forkFromTurn自身・streamSession.tsのガードが返す非CLI由来のエラー（origin:app）はカタログを通さずそのまま出す', () => {
+    expect(
+      describeForkFromTurnError({ message: '対象の発言が見つかりません', origin: 'app' }),
+    ).toBe('対象の発言が見つかりません');
+    // カタログに登録が無い非CLI由来の文言でも、originがappならそのまま出る
+    // （issue #340横断レビュー指摘: 以前はforkFromTurn.ts自身の2文言しか登録がなく、
+    // streamSession.tsが返す非CLI由来のエラーがファイルをまたいだ時点で汎用文言に
+    // 丸まっていた）
+    expect(
+      describeForkFromTurnError({
+        message: 'forkしていないセッションへは送れません（元セッションのtranscriptが壊れるため）',
+        origin: 'app',
+      }),
+    ).toBe('forkしていないセッションへは送れません（元セッションのtranscriptが壊れるため）');
   });
 
-  it('未知のエラー値は汎用文言へ丸める（CLIの内部文言をそのまま露出しない）', () => {
-    const message = describeForkFromTurnError('some future internal reason from the CLI');
+  it('未知のCLIエラー値（origin:cli）は汎用文言へ丸める（CLIの内部文言をそのまま露出しない）', () => {
+    const message = describeForkFromTurnError({
+      message: 'some future internal reason from the CLI',
+      origin: 'cli',
+    });
     expect(message).not.toContain('some future internal reason');
     expect(message.length).toBeGreaterThan(0);
   });
@@ -206,8 +219,8 @@ describe('describeForkFromTurnError（issue #494のレビュー指摘、vscode�
   });
 
   it('同じ既知の値は常に同じ文言を返す（安定した表示）', () => {
-    expect(describeForkFromTurnError('stale target')).toBe(
-      describeForkFromTurnError('stale target'),
+    expect(describeForkFromTurnError({ message: 'stale target', origin: 'cli' })).toBe(
+      describeForkFromTurnError({ message: 'stale target', origin: 'cli' }),
     );
   });
 });

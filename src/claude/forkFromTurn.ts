@@ -1,4 +1,4 @@
-import type { RewindConversationResult } from './control';
+import type { OriginatedError, RewindConversationResult } from './control';
 
 /**
  * 会話の途中のターンから分岐する処理（issue #333、design.md §14.61）。
@@ -15,7 +15,8 @@ export interface ForkFromTurnResult {
   ok: boolean;
   /** 対象の発言本文。成功時のみ入る。入力欄への差し戻しに使う。 */
   prefillText: string | undefined;
-  error: string | undefined;
+  /** 由来つき（issue #340横断レビュー指摘）。`describeForkFromTurnError`参照。 */
+  error: OriginatedError | undefined;
   /**
    * `rewind_conversation` の逐次送信のうち、成功した件数（issue #494のレビュー指摘）。
    *
@@ -74,7 +75,7 @@ export async function forkFromTurn(
     return {
       ok: false,
       prefillText: undefined,
-      error: '対象の発言が見つかりません',
+      error: { message: '対象の発言が見つかりません', origin: 'app' },
       succeededCount: 0,
     };
   }
@@ -87,7 +88,7 @@ export async function forkFromTurn(
       return {
         ok: false,
         prefillText: undefined,
-        error: last.error ?? '不明なエラー',
+        error: last.error ?? { message: '不明なエラー', origin: 'app' },
         succeededCount,
       };
     }
@@ -98,7 +99,7 @@ export async function forkFromTurn(
 
 /**
  * `rewind_conversation` が返す既知のエラー値を、日本語の説明へマッピングする
- * （issue #494のレビュー指摘）。
+ * （issue #494のレビュー指摘、issue #340横断レビュー指摘で由来つきの型へ変更）。
  *
  * CLIの応答文言（`payload.error`。実測、CLI 2.1.235。全量は`docs/design.md`§14.61と
  * `/tmp`の実測記録参照）を`vscode.window.showErrorMessage`へそのまま流すと、CLI側の
@@ -106,15 +107,21 @@ export async function forkFromTurn(
  * 日本語へ置き換え、未知の値（自分たちが把握していないCLIの新しいエラー、または将来値が
  * 変わった場合）は汎用文言へ丸める。
  *
- * `forkFromTurn`自身が返す非CLI由来のエラー（対象が見つからない等、既に日本語）もここへ
- * 通してよいよう、恒等マッピングとして含めている（呼び出し側でCLI由来かどうかを
- * 判定させないため）。
+ * `forkFromTurn`自身・`streamSession.ts`のガードが返す非CLI由来のエラー（対象が見つから
+ * ない、セッションが起動していない等、既に日本語）は`error.origin`で判定してカタログを
+ * 通さずそのまま返す。以前は文字列の恒等マッピングで対応していたが、`forkFromTurn.ts`
+ * 自身の2文言しか登録されておらず、`streamSession.ts`が返す非CLI由来のエラーが
+ * ファイルをまたいだ時点で汎用文言に丸まってしまっていた（issue #340横断レビュー指摘）。
+ * 型で由来を分ければ、非CLI由来のエラーを個別に列挙し続ける必要が無くなる。
  */
-export function describeForkFromTurnError(error: string | undefined): string {
+export function describeForkFromTurnError(error: OriginatedError | undefined): string {
   if (error === undefined) {
     return GENERIC_FORK_ERROR_MESSAGE;
   }
-  return KNOWN_FORK_ERROR_MESSAGES[error] ?? GENERIC_FORK_ERROR_MESSAGE;
+  if (error.origin === 'app') {
+    return error.message;
+  }
+  return KNOWN_FORK_ERROR_MESSAGES[error.message] ?? GENERIC_FORK_ERROR_MESSAGE;
 }
 
 const GENERIC_FORK_ERROR_MESSAGE = '分岐できませんでした（原因不明のエラーです）';
@@ -129,7 +136,4 @@ const KNOWN_FORK_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   'no preceding assistant': 'この発言より前に応答が無いため分岐できませんでした。',
   'failed to persist rewind anchor': '分岐した状態を保存できませんでした。',
   'state changed': '会話の状態が変わったため分岐できませんでした。',
-  // forkFromTurn自身が返す非CLI由来のエラー（既に日本語）。恒等マッピングとして含める
-  対象の発言が見つかりません: '対象の発言が見つかりません',
-  不明なエラー: GENERIC_FORK_ERROR_MESSAGE,
 };

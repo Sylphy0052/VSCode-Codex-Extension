@@ -806,7 +806,10 @@ export class ClaudeStreamSession {
       return Promise.resolve({
         ok: false,
         prefillText: undefined,
-        error: 'forkしていないセッションへは送れません（元セッションのtranscriptが壊れるため）',
+        error: {
+          message: 'forkしていないセッションへは送れません（元セッションのtranscriptが壊れるため）',
+          origin: 'app',
+        },
         succeededCount: 0,
       });
     }
@@ -814,7 +817,7 @@ export class ClaudeStreamSession {
       return Promise.resolve({
         ok: false,
         prefillText: undefined,
-        error: 'セッションが起動していません',
+        error: { message: 'セッションが起動していません', origin: 'app' },
         succeededCount: 0,
       });
     }
@@ -867,7 +870,7 @@ export class ClaudeStreamSession {
         response: undefined,
         synthetic: undefined,
         refusalFallback: undefined,
-        error: '質問が空です',
+        error: { message: '質問が空です', origin: 'app' },
       });
     }
     if (this.proc === undefined) {
@@ -876,7 +879,7 @@ export class ClaudeStreamSession {
         response: undefined,
         synthetic: undefined,
         refusalFallback: undefined,
-        error: 'セッションが起動していません',
+        error: { message: 'セッションが起動していません', origin: 'app' },
       });
     }
     const requestId = this.claim('sideQuestion');
@@ -1145,7 +1148,16 @@ export class ClaudeStreamSession {
     }
 
     if (outgoing?.kind === 'sideQuestion') {
-      this.sideQuestionWaiting.get(response.requestId)?.resolve(readSideQuestionResult(response));
+      const result = readSideQuestionResult(response);
+      // CLI由来のエラー（origin:'cli'）は画面には汎用文言へ丸めて出す
+      // （`sideQuestion.ts`の`describeSideQuestionError`）が、丸めた元の文言はどこにも
+      // 残らないと、CLI側の予期しない構造エラーが多発したときに原因調査ができない
+      // （セキュリティ監査の指摘、issue #340横断レビュー）。開発者向けの内部ログにだけ
+      // 元の文言を残す
+      if (result.error?.origin === 'cli') {
+        this.log.warn(`side_questionがCLI側のエラーを返しました: ${result.error.message}`);
+      }
+      this.sideQuestionWaiting.get(response.requestId)?.resolve(result);
       this.sideQuestionWaiting.delete(response.requestId);
       return;
     }
@@ -1290,7 +1302,7 @@ export class ClaudeStreamSession {
         targetMessageUuid: undefined,
         prefillText: undefined,
         precedingAssistantUuid: undefined,
-        error: 'セッションが終了しました',
+        error: { message: 'セッションが終了しました', origin: 'app' },
       });
     }
     this.rewindConversationWaiting.clear();
@@ -1301,7 +1313,7 @@ export class ClaudeStreamSession {
         response: undefined,
         synthetic: undefined,
         refusalFallback: undefined,
-        error: 'セッションが終了しました',
+        error: { message: 'セッションが終了しました', origin: 'app' },
       });
     }
     this.sideQuestionWaiting.clear();
