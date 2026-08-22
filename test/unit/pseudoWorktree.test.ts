@@ -540,6 +540,117 @@ describe('実ファイルシステムでの統合テスト', () => {
   });
 
   /**
+   * Issue #526（監査指摘、攻撃A）: `ensureIntegrationDir`の事後確認はかつて
+   * `isPathWithinRoot`（境界内か）のみで、厳密一致を欠いていた。`<runId>`が一次防御
+   * （`findSymlinkedAncestor`）通過後に`.git/hooks`等ワークスペース**内**の別ディレクトリ
+   * へ差し替えられると、`mkdir`が`.git/hooks/_integration`を作ってしまっても
+   * `isPathWithinRoot`はtrueを返すため素通りしていた（Issue #484が結論づけた「境界内
+   * チェックでは不十分」の形そのもの）。
+   *
+   * `cloneWorkspace`の同種テストと同じ理由で、差し替えは一次防御通過直後・`mkdir`実行前
+   * （`isSymbolicLink(<runId>ディレクトリ)`が「まだシンボリックリンクではない」と正しく
+   * 判定した直後）に完了させる。
+   */
+  it(
+    '統合先の親ディレクトリ（`<runId>`）がワークスペース内の`.git/hooks`へ差し替えられても、' +
+      '想定した場所以外への作成として検知し中止する（境界内リダイレクト、Issue #526）',
+    async () => {
+      const hooksDir = path.join(workspace, '.git', 'hooks');
+      await mkdir(hooksDir, { recursive: true });
+      await writeFile(path.join(hooksDir, 'pre-commit'), 'original-hook\n');
+
+      const dir = integrationPath(workspace, RUN_ID);
+      const parentDir = path.dirname(dir);
+      let swapped = false;
+      const raceFs: typeof nodePseudoWorktreeFileSystem = {
+        ...nodePseudoWorktreeFileSystem,
+        isSymbolicLink: async (t) => {
+          const result = await nodePseudoWorktreeFileSystem.isSymbolicLink(t);
+          if (!swapped && t === parentDir) {
+            swapped = true;
+            await mkdir(path.dirname(parentDir), { recursive: true });
+            await rm(parentDir, { recursive: true, force: true });
+            await symlink(hooksDir, parentDir);
+          }
+          return result;
+        },
+      };
+
+      const result = await ensureIntegrationDir(workspace, RUN_ID, raceFs);
+
+      expect(result).toMatchObject({ ok: false, reason: 'boundaryEscape' });
+
+      // 既存のフックは書き換わっていない
+      await expect(readFile(path.join(hooksDir, 'pre-commit'), 'utf8')).resolves.toBe(
+        'original-hook\n',
+      );
+      // `mkdir(dir)`は検知前に実行されるため、`hooksDir`配下に空の`_integration`
+      // ディレクトリが1つ残る（`ensureIntegrationDir`は`cloneWorkspace`と同じ理由で
+      // これを撤去しない。設計どおりの残存で、後始末漏れではない）。ここで確認するのは
+      // 「その中身が空であること」（統合先へ何かが書き込まれていないこと）。
+      const hooksEntries = await readdir(hooksDir);
+      expect(hooksEntries.sort()).toEqual(['_integration', 'pre-commit']);
+      const leftoverIntegrationEntries = await readdir(path.join(hooksDir, '_integration'));
+      expect(leftoverIntegrationEntries).toEqual([]);
+    },
+  );
+
+  /**
+   * Issue #526（監査指摘、攻撃B。攻撃Aより重い）: 境界外と正しく検知できた分岐が
+   * 無条件に`fs.removeDirRecursive(dir)`を呼んでいたため、`<runId>`がワークスペース
+   * **外**の既存ディレクトリへのシンボリックリンクへ差し替えられていると、検知自体は
+   * 成功するものの、その後の撤去が差し替え先の実体（既存のファイルを含む）を丸ごと
+   * 再帰削除してしまっていた。これは`cloneWorkspace`が同じ理由で撤去をやめた操作
+   * そのもの（`cloneWorkspace`本体のコメント参照）。
+   *
+   * 撤去を取りやめたことで、差し替え先に事前に置いた被害者ファイルが削除されずに
+   * 残ることを確認する。
+   */
+  it(
+    '統合先の親ディレクトリ（`<runId>`）がワークスペース外の既存ディレクトリへ差し替えられても、' +
+      '既存の内容を再帰削除せずに作成を中止する（任意ディレクトリの再帰削除、Issue #526）',
+    async () => {
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-outside-victim-'));
+      try {
+        const victimIntegrationDir = path.join(outsideDir, '_integration');
+        await mkdir(victimIntegrationDir, { recursive: true });
+        await writeFile(
+          path.join(victimIntegrationDir, 'important-victim-file.txt'),
+          'do-not-delete\n',
+        );
+
+        const dir = integrationPath(workspace, RUN_ID);
+        const parentDir = path.dirname(dir);
+        let swapped = false;
+        const raceFs: typeof nodePseudoWorktreeFileSystem = {
+          ...nodePseudoWorktreeFileSystem,
+          isSymbolicLink: async (t) => {
+            const result = await nodePseudoWorktreeFileSystem.isSymbolicLink(t);
+            if (!swapped && t === parentDir) {
+              swapped = true;
+              await mkdir(path.dirname(parentDir), { recursive: true });
+              await rm(parentDir, { recursive: true, force: true });
+              await symlink(outsideDir, parentDir);
+            }
+            return result;
+          },
+        };
+
+        const result = await ensureIntegrationDir(workspace, RUN_ID, raceFs);
+
+        expect(result).toMatchObject({ ok: false, reason: 'boundaryEscape' });
+
+        // 差し替え先に事前に置いた被害者ファイルが削除されずに残っている
+        await expect(
+          readFile(path.join(victimIntegrationDir, 'important-victim-file.txt'), 'utf8'),
+        ).resolves.toBe('do-not-delete\n');
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  /**
    * Issue #505（監査指摘、再監査で発覚した循環バグの修正後の回帰テスト）:
    * `cloneWorkspace`の事後確認は当初、`target`の親ディレクトリ（`<runId>`）の
    * `realpath`から`expected`を組み立てていた。この形は、その親ディレクトリ自体が

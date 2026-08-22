@@ -1332,8 +1332,26 @@ export type EnsureIntegrationDirResult =
 
 /**
  * 統合先ディレクトリ（`<runId>/_integration`）を用意する。実行開始時に一度だけ呼ぶ想定
- * （gitの統合worktreeと同じ役割。design.md §16.17）。`cloneWorkspace` と同じ二段構えの
- * シンボリックリンク対策を行う。
+ * （gitの統合worktreeと同じ役割。design.md §16.17）。`cloneWorkspace`と同じ二段構えの
+ * シンボリックリンク対策（一次防御: `findSymlinkedAncestor`によるI/O前の事前検知、
+ * 二次防御: 事後の実パス厳密一致）を行う。
+ *
+ * Issue #505 / #526（監査指摘）: 事後確認はかつて`isPathWithinRoot`（境界内か）のみで、
+ * 厳密一致を欠いていた。`<runId>`が一次防御通過後に`.git/hooks`等ワークスペース**内**の
+ * 別ディレクトリへ差し替えられると（境界内リダイレクト）、`mkdir`が`.git/hooks/_integration`
+ * を作ってしまっても`isPathWithinRoot`はtrueを返すため素通りしていた（攻撃A）。
+ * 加えて、境界外と正しく検知できた場合でも無条件に`fs.removeDirRecursive(dir)`を呼んで
+ * いたため、`<runId>`がワークスペース**外**の既存ディレクトリへのシンボリックリンクへ
+ * 差し替えられていると、その差し替え先の実体（既存のファイルを含む）を丸ごと再帰削除
+ * してしまっていた（攻撃B。実測で検証先に置いたファイルが消えることを確認済み）。
+ * これは`cloneWorkspace`が同じ理由（`fs.promises`に`openat`相当が無く「自分が作った
+ * 空ディレクトリか」を安全に判別できない）で撤去をやめた操作そのものであり、この関数
+ * だけが取り残されていた。
+ *
+ * 他の3+1箇所（`persistManifest` / `cloneWorkspace` / `reflectIntegrationToWorkspace`の
+ * 書き込み・削除経路）と同じ「攻撃者が動かせないルート（`.agents/worktrees`）＋
+ * `path.relative`」の厳密一致へ揃え、不一致・境界外と判明した場合は撤去せず作成の
+ * 中止のみに留める。
  */
 export async function ensureIntegrationDir(
   workspaceRoot: string,
@@ -1358,14 +1376,25 @@ export async function ensureIntegrationDir(
 
   await fs.mkdir(dir);
 
+  const worktreesRoot = pseudoWorktreesRootDir(workspaceRoot);
+  const realWorktreesRoot = await fs.realpath(worktreesRoot);
   const realDir = await fs.realpath(dir);
-  const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
-  if (realDir === undefined || !isPathWithinRoot(realDir, realRoot)) {
-    await fs.removeDirRecursive(dir);
+  const expectedDir =
+    realWorktreesRoot !== undefined
+      ? path.join(realWorktreesRoot, path.relative(worktreesRoot, dir))
+      : undefined;
+  if (realDir === undefined || expectedDir === undefined || realDir !== expectedDir) {
+    // Issue #505 / #526（監査指摘）: ここで`fs.removeDirRecursive(dir)`は呼ばない。
+    // `<runId>`が差し替えられている攻撃では、`dir`は文字列上「自分がmkdirした空
+    // ディレクトリ」でも、実体は差し替え先の既存ディレクトリになっている可能性があり
+    // （`cloneWorkspace`の同種のコメント参照）、`target`が自分の作った空ディレクトリなのか
+    // 差し替え先の既存ディレクトリなのかを渡されたパス文字列だけでは区別できない
+    // （`openat`相当の欠如）。撤去せず作成を中止するだけに留め、残りうる空ディレクトリは
+    // `cloneWorkspace`と同じ経路（`removeWorktrees`等）での回収に委ねる。
     return {
       ok: false,
       reason: 'boundaryEscape',
-      message: `統合先がワークスペースの外に作られたため、撤去しました: ${sanitizeForLog(realDir ?? dir)}`,
+      message: `統合先が実際には想定した場所以外を指しているため、作成を中止しました: ${sanitizeForLog(realDir ?? dir)}`,
     };
   }
 
