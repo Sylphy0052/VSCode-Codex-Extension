@@ -229,6 +229,57 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
     expect(readWorkflowsConfig().replyTimeoutSec).toBe(60);
   });
 
+  it('replyTimeoutSecが上限（2147483秒）を超えたら既定値へ落とす（レビュー・監査指摘: setTimeoutの32bit丸めで即時発火する事故を防ぐ）', () => {
+    __mock.setConfig('agent', { 'workflows.replyTimeoutSec': 2147484 });
+    expect(readWorkflowsConfig().replyTimeoutSec).toBe(300);
+
+    __mock.setConfig('agent', { 'workflows.replyTimeoutSec': 999999999 });
+    expect(readWorkflowsConfig().replyTimeoutSec).toBe(300);
+  });
+
+  it('replyTimeoutSecは上限（2147483秒）ちょうどまでは指定値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.replyTimeoutSec': 2147483 });
+    expect(readWorkflowsConfig().replyTimeoutSec).toBe(2147483);
+  });
+
+  it('mergeApprovalTimeoutSecの既定は3600秒（design.md §16.17・DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC）', () => {
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(3600);
+  });
+
+  it('mergeApprovalTimeoutSecは指定値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.mergeApprovalTimeoutSec': 60 });
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(60);
+  });
+
+  it('mergeApprovalTimeoutSecが数値でない・1未満なら既定値へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.mergeApprovalTimeoutSec': 'たくさん' });
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(3600);
+
+    __mock.setConfig('agent', { 'workflows.mergeApprovalTimeoutSec': 0 });
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(3600);
+
+    __mock.setConfig('agent', { 'workflows.mergeApprovalTimeoutSec': -5 });
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(3600);
+  });
+
+  it('mergeApprovalTimeoutSecの小数は切り捨てる', () => {
+    __mock.setConfig('agent', { 'workflows.mergeApprovalTimeoutSec': 60.7 });
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(60);
+  });
+
+  it('mergeApprovalTimeoutSecが上限（2147483秒）を超えたら既定値へ落とす（レビュー・監査指摘: setTimeoutの32bit丸めで即時発火する事故を防ぐ）', () => {
+    __mock.setConfig('agent', { 'workflows.mergeApprovalTimeoutSec': 2147484 });
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(3600);
+
+    __mock.setConfig('agent', { 'workflows.mergeApprovalTimeoutSec': 999999999 });
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(3600);
+  });
+
+  it('mergeApprovalTimeoutSecは上限（2147483秒）ちょうどまでは指定値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.mergeApprovalTimeoutSec': 2147483 });
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(2147483);
+  });
+
   it('branchNamingの既定はwf（GitLab運用規約形式は明示指定したときだけ有効になる）', () => {
     expect(readWorkflowsConfig().branchNaming).toBe('wf');
   });

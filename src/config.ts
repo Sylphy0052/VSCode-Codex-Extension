@@ -458,24 +458,43 @@ export function readWorkflowsConfig(): WorkflowsConfig {
 }
 
 /**
+ * 秒単位のタイムアウト設定として許容する最大値。Node.jsの`setTimeout`は遅延が
+ * 32bit符号付き整数の上限（2147483647ms、約24.8日）を超えると1msへ丸めて
+ * 即座に発火する仕様のため、ms換算で32bit上限に収まる`2147483`秒
+ * （約24.8日）を上限とする。これを超える値を許すと「実質無効化したい」意図で
+ * 大きな値を設定した利用者が、承認待ち・返信待ちに入った直後に即時停止される
+ * という正反対の挙動になる（`package.json`の`maximum`と揃える）。
+ */
+const MAX_TIMEOUT_SEC = 2147483;
+
+/**
  * `agent.workflows.replyTimeoutSec` の生値を安全な秒数へ丸める。`package.json`の
- * `minimum: 1` を実行時にも守る（設定ファイルを直接書き換えた場合など、VSCode側の
- * バリデーションを経由しない値が渡りうるため）。数値でない、または1未満なら既定値
- * （`DEFAULT_REPLY_TIMEOUT_SEC`）へ丸める（`isSafeRelativeDir`と同じ「壊れた設定値は
- * 既定へ丸める」方針）。
+ * `minimum: 1` / `maximum: 2147483` を実行時にも守る（設定ファイルを直接書き換えた
+ * 場合など、VSCode側のバリデーションを経由しない値が渡りうるため）。数値でない、
+ * 1未満、または`MAX_TIMEOUT_SEC`を超える値は既定値（`DEFAULT_REPLY_TIMEOUT_SEC`）へ
+ * 丸める（`isSafeRelativeDir`と同じ「壊れた設定値は既定へ丸める」方針。上限超過も
+ * 下限割れと同じ「範囲外は既定へ」で揃え、`MAX_TIMEOUT_SEC`へのクランプはしない。
+ * クランプすると`setTimeout`の丸め挙動を知らない利用者には「指定値のまま動いている」
+ * ように見えてしまうため）。
  */
 function normalizeReplyTimeoutSec(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 1
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= 1 &&
+    value <= MAX_TIMEOUT_SEC
     ? Math.floor(value)
     : DEFAULT_REPLY_TIMEOUT_SEC;
 }
 
 /**
  * `agent.workflows.mergeApprovalTimeoutSec` の生値を安全な秒数へ丸める
- * （`normalizeReplyTimeoutSec` と同じ方針。Issue #413 PR5）。
+ * （`normalizeReplyTimeoutSec` と同じ方針。Issue #413 PR5・PR6）。
  */
 function normalizeMergeApprovalTimeoutSec(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 1
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= 1 &&
+    value <= MAX_TIMEOUT_SEC
     ? Math.floor(value)
     : DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC;
 }
