@@ -171,30 +171,39 @@ CLAUDE.mdが定める「Test coverage 80%以上」に対し、上記の実測値
 
 ## 4. ブランチ保護の必須チェック
 
-### 実測値（ブランチ保護）
+### 実測値（ブランチ保護、2026-08-22時点）
 
-- `gh api repos/Sylphy0052/VSCode-Codex-Extension/branches/main/protection` を実行すると `Branch not protected`（404）が返る。現在mainにはブランチ保護ルール自体が設定されておらず、必須チェック（required status checks）も未設定
-- 現状、CI（`ci.yml`）が赤くなってもマージはブロックされない。結果はPR上に可視化されるのみ
+`gh api repos/Sylphy0052/VSCode-Codex-Extension/branches/main/protection` の応答（要約）。
 
-### 必須にすべきチェック名
+```json
+{"admins":false,"approvals":0,"checks":["checks"],"deletions":false,"force_push":false,"pr_required":true,"strict":true}
+```
 
-`ci.yml` の `jobs.check.name` は `checks`（lint / typecheck / build / testの4ステップを実行する総称）、ワークフロー名は `CI` であるため、GitHub上のstatus check名は `CI / checks` の形になる。必須チェックとして設定する場合はこの名前を指定する。
+- 必須ステータスチェック: `checks` を必須化済み。`external-cli` は必須にしていない（実行はされるがマージをブロックしない）
+- strict: 有効。PRのブランチがmainの最新を取り込んでいないとマージできない
+- PR必須（mainへの直接pushを禁止）。必須承認数は0（自己マージ可）
+- 管理者は保護対象外（`enforce_admins: false`）
+- force push とブランチ削除は禁止
+
+`external-cli` を必須にしなかった理由: 外部依存（Codex CLIの仕様変更、npmレジストリの障害）でmainへの全マージが止まりうるため。自分たちのコードに非が無い原因でブロックされる事態を避ける。赤くなればPR上で見えるので、気づきは失われない。
+
+### 必須にしたチェック名
+
+`ci.yml` の `jobs.check.name` は `checks`（lint / typecheck / build / testの4ステップを実行する総称）、ワークフロー名は `CI` であるため、GitHub上のPRのチェック一覧では `CI / checks` の形で表示される。
+
+ただし branch protection APIの `required_status_checks.contexts` に渡す値はジョブ名そのものの `checks` であり、表示名の `CI / checks` ではない。実際に `contexts: ["checks"]` で設定が通り、応答も `"checks":["checks"]` を返している。次に設定を触る人がつまずきやすい箇所なので明記する。
 
 ジョブ名をステップの列挙（例: `lint / typecheck / build / test`）にせず総称にしたのは、ステップが増減するたびにジョブ名と本節の記述の両方を直す必要が生じるのを避けるため（Issue #450のレビュー指摘対応）。各ステップの実行内容はPRのチェック詳細を開けば確認できる。
 
 ### 設定場所
 
-リポジトリの Settings > Branches > Branch protection rules。
+リポジトリの Settings > Branches > Branch protection rules。または `gh api` での確認・変更（変更はPUT、確認はGET）。
 
-### いま設定しない理由
+### 設定した経緯
 
-第1波の4ワークフロー（WF-A / WF-B / WF-C / WF-D）が同時進行中であり、必須化すると進行中のPRが即座にブロックされる。
+第1波の4ワークフロー（WF-A / WF-B / WF-C / WF-D）が同時進行中だった間は必須化を見送っていたが（#386）、それらが完了した後、人の明示的な指示により2026-08-22に設定した。
 
-### 判断のタイミング
-
-第1波の全ワークフロー完了後に人が判断する（#386 で追跡）。
-
-本節も他の節と同じく調査結果と提案の提示に留まる。ここに書かれた内容は設定変更を自動で実行してよいという意味ではなく、実行するかどうかとその実行自体は人が判断する。
+本節は実測値の記録であり、設定変更自体を自動で実行してよいという意味ではない。AIエージェントが自律判断で保護設定を変更することはなく、変更するかどうかとその実行は常に人が判断する。今回の設定も人の明示的な指示に基づいて実行したものである。
 
 ## まとめ
 
@@ -203,6 +212,6 @@ CLAUDE.mdが定める「Test coverage 80%以上」に対し、上記の実測値
 | リポジトリサイズ（`docs/design.md` の履歴肥大） | size-pack 48.54 MiB、design.mdが199版で上位blobを独占 | 分割（選択肢A）を推奨。履歴書き換え（選択肢B）は非推奨 |
 | 不要ブランチ `feat/327/...` | 既に削除済みで残存していない | 対応不要（解消済み） |
 | カバレッジ計測の下限（#455） | 導入済み。閾値statements70/branches68/functions70/lines70でCIが自動チェック | 対応不要（導入済み）。80%への引き上げは未着手で、段階的に別Issueで行う |
-| ブランチ保護の必須チェック | 未設定（`Branch not protected`） | 第1波の全ワークフロー完了後に人が判断（#386） |
+| ブランチ保護の必須チェック | 設定済み。`checks` を必須化、strict有効、PR必須（承認数0） | 対応不要（設定済み、2026-08-22、#386） |
 
 カバレッジ計測の下限（#455）は本文書の提案どおりに実行済み。それ以外の項目は本文書が調査と選択肢の提示のみを行っており、実行判断は人に委ねる。
