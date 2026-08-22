@@ -610,6 +610,84 @@ export class ClaudeChatViewManager
   }
 
   /**
+   * 会話の途中のターンから分岐する（issue #333、design.md §14.61）。Codex画面の
+   * 「ここから分岐」（`chatView.ts`の`forkFrom`）に相当する、Claude Code版の入口。
+   *
+   * 対象は`chatScript.ts`の`turnForkTarget`（`SHOW_TURN_FORK`）が渡す、押した発言自身の
+   * uuid。`entry.session.threadId`が未確定（`system/init`をまだ受け取っていない）間は
+   * 分岐先を特定できないため何もしない。
+   */
+  private async forkFromTurn(entry: ClaudePanel, targetUuid: string): Promise<void> {
+    const threadId = entry.session.threadId;
+    if (threadId === undefined) {
+      return;
+    }
+    const userMessageUuids = entry.session
+      .getState()
+      .items.filter((item) => item.kind === 'userMessage')
+      .map((item) => item.id);
+
+    await this.openForkFromTurn(threadId, '分岐', entry.cwd, userMessageUuids, targetUuid);
+  }
+
+  /**
+   * 指定したターンの手前までを引き継いだ新しいセッションを、新しいタブで開く
+   * （issue #333、design.md §14.61）。
+   *
+   * `openFork`（セッション全体の分岐）と同じ経路でまずforkし、開いた新しいセッションへ
+   * `rewind_conversation`を逐次送って対象の発言の手前まで戻す（`ClaudeStreamSession.
+   * rewindConversationToTurn`参照）。元のセッション（`sessionId`が指す会話）へは
+   * 一切送らない。ファイルは巻き戻らない（design.md §14.61）。
+   *
+   * 戻し切れると応答の`prefillText`（対象の発言本文）を入力欄へ挿す。既存の
+   * `insertComposerText`（issue #292、エディタの選択範囲を挿す機構）をそのまま流用する
+   * （新しいタブの入力欄は空のため、追記と設定は同じ結果になる）。
+   */
+  async openForkFromTurn(
+    sessionId: string,
+    title: string,
+    cwd: string | undefined,
+    userMessageUuids: readonly string[],
+    targetUuid: string,
+  ): Promise<void> {
+    const folder = cwd ?? currentWorkspaceFolder()?.uri.fsPath;
+    if (folder === undefined) {
+      void vscode.window.showErrorMessage('作業ディレクトリを特定できませんでした');
+      return;
+    }
+
+    const entry = this.buildEntry(folder, `${LABEL}: ${title}`, false, undefined);
+    this.showPanel(entry, false);
+    this.panels.set(`fork:${randomUUID()}`, entry);
+    entry.session.start({
+      cwd: folder,
+      target: { kind: 'fork', sessionId },
+      sessionId: undefined,
+      config: readClaudeConfig().claude,
+    });
+    entry.session.noteLocalEvent(
+      `forkNotice:${randomUUID()}`,
+      'このタブは元のセッションを分岐したものです。新しいセッションidはCLIが振るため拡張機能からは追跡できず、このタブはウィンドウ再読み込み後の復元と作業記録（日報・週報）の対象外になります。',
+    );
+
+    const result = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'この指示から分岐しています…' },
+      () => entry.session.rewindConversationToTurn(userMessageUuids, targetUuid),
+    );
+
+    if (!result.ok) {
+      void vscode.window.showErrorMessage(`この指示から分岐できませんでした: ${result.error}`);
+      return;
+    }
+    if (result.prefillText !== undefined && result.prefillText !== '') {
+      void entry.panel?.webview.postMessage({
+        type: 'insertComposerText',
+        text: result.prefillText,
+      });
+    }
+  }
+
+  /**
    * skillsを読み直す（issue #202、design.md TP-90）。設定パネルの「読み直す」ボタンから
    * `claude.reloadSkills` コマンド経由で呼ばれる（`newSession`と同じ、設定パネルの
    * webview→VS Codeコマンド→この画面の管理クラス、という橋渡し。設定パネルは
@@ -850,6 +928,9 @@ export class ClaudeChatViewManager
       review: { mode: 'command', commandName: 'code-review' },
       // ファイルの巻き戻し（design.md「Claude Codeの巻き戻し」）。Codexは分岐で代替する
       showRewind: true,
+      // 会話の途中のターンから分岐（issue #333、design.md §14.61）。Codex画面の
+      // 「ここから分岐」と同じボタンを、対象を発言自身のidへ切り替えて出す
+      showTurnFork: true,
       // 行頭の !/# の案内（issue #5/#6、design.md §14.29）。CodexのTUIに無い挙動
       showInputModeHints: true,
       // 他エージェントからの設定インポート（issue #200）。Codexは別のコントロールパネル
@@ -1285,6 +1366,12 @@ export class ClaudeChatViewManager
       if (type === 'rewind' && typeof m['messageId'] === 'string') {
         entry.loop.noteUserAction();
         void this.rewindFiles(entry, m['messageId']);
+        return;
+      }
+      if (type === 'fork' && typeof m['turnId'] === 'string') {
+        // 会話の途中のターンから分岐（issue #333、design.md §14.61）。新しいタブを
+        // 開くだけで、この会話（entry）そのものには何も送らない
+        void this.forkFromTurn(entry, m['turnId']);
         return;
       }
       if (type === 'planMode') {

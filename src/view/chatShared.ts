@@ -819,6 +819,17 @@ export interface ChatShellOptions {
    */
   showRewind?: boolean;
   /**
+   * 発言ごとに「ここから分岐」ボタンを出すか（issue #333、design.md §14.61）。
+   *
+   * Codex画面は常にtrue相当（`showTurnFork`を渡さなくても、対象は「直前の発言の
+   * `turnId`」として既定で計算される）。Claude Code画面はこれをtrueにして渡し、対象を
+   * 「発言自身のuuid（`item.id`）」に切り替える。`rewind_conversation`（会話の途中の
+   * ターンから分岐）はfork対象の発言自身を戻り先として指定する仕様のため、Codexの
+   * `thread/fork`（対象は「引き継ぐ最後のターン」＝直前の発言）とは向きが違う
+   * （`chatScript.ts` の `turnForkTarget` 参照）。
+   */
+  showTurnFork?: boolean;
+  /**
    * 入力欄の下に `!`/`#` 始まりの案内を出すか（Claude Code画面のみ、issue #5/#6、
    * design.md §14.29）。CodexのTUIにこの挙動は無い。
    */
@@ -1233,7 +1244,7 @@ ${chatStyles()}
   </details>
 
 <script nonce="${nonce}">
-${chatScript(options.agentLabel, options.review, options.showRewind === true, options.approvalCycle ?? [], options.showInputModeHints === true, options.renderMarkdown !== false, sendOn, JSON.stringify(approvalLevelMeta()), options.provider)}
+${chatScript(options.agentLabel, options.review, options.showRewind === true, options.approvalCycle ?? [], options.showInputModeHints === true, options.renderMarkdown !== false, sendOn, JSON.stringify(approvalLevelMeta()), options.provider, options.showTurnFork === true)}
 </script>
 </body>
 </html>`;
