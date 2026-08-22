@@ -1,6 +1,7 @@
 import type { SessionSummary } from '../codex/types';
 import type { FileSystemPort } from '../session/ports';
 import { isWithinAny, type ListOptions, type ListResult } from '../session/sessionStore';
+import { mapWithLimit } from '../util/concurrency';
 import { basenameOf } from '../util/paths';
 import type { ClaudePaths } from './cliLocator';
 import { ClaudeSessionNameStore } from './sessionNames';
@@ -11,6 +12,13 @@ import { parseTranscriptHead, sessionIdFromTranscriptName } from './transcript';
  * `queue-operation` などが数行挟まるため1行では足りない。
  */
 const HEAD_LINES = 40;
+
+/**
+ * `orderedTranscripts`で`fs.mtimeMs`を並列発火する上限。
+ * Codex側（`src/session/sessionStore.ts`の`MTIME_CONCURRENCY_LIMIT`）と同じ値を使う
+ * （issue #436）。件数分を無制限に同時発火しないための頭打ち値。
+ */
+const MTIME_CONCURRENCY_LIMIT = 32;
 
 /**
  * Claude Code のセッション一覧。
@@ -107,15 +115,20 @@ export class ClaudeSessionStore {
     Array<{ filePath: string; id: string; mtimeMs: number | undefined }>
   > {
     const files = await this.fs.listJsonl(this.paths.projects);
-    const entries: Array<{ filePath: string; id: string; mtimeMs: number | undefined }> = [];
+    const named = files
+      .map((filePath) => ({ filePath, id: sessionIdFromTranscriptName(basenameOf(filePath)) }))
+      .filter(
+        (entry): entry is { filePath: string; id: string } => entry.id !== undefined,
+      );
 
-    for (const filePath of files) {
-      const id = sessionIdFromTranscriptName(basenameOf(filePath));
-      if (id === undefined) {
-        continue;
-      }
-      entries.push({ filePath, id, mtimeMs: await this.fs.mtimeMs(filePath) });
-    }
+    // 件数分の`mtimeMs`取得を逐次待つと台数に比例して遅くなるため並列化する
+    // （issue #436、Codex側の`orderByRecency`と同じ形）。最終的に全件ソートするため
+    // 呼び出し順は問わない。ただし件数分を無制限に同時発火しないよう上限を設ける。
+    const entries = await mapWithLimit(named, MTIME_CONCURRENCY_LIMIT, async ({ filePath, id }) => ({
+      filePath,
+      id,
+      mtimeMs: await this.fs.mtimeMs(filePath),
+    }));
 
     return entries.sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0));
   }
