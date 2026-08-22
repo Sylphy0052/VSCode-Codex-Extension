@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -204,16 +205,18 @@ interface ManifestParseResult {
 }
 
 /**
- * `JSON.parse`済みの値からマニフェストを組み立てる純粋関数。`deserializeManifest`（壊れた
- * JSONを安全側の空マニフェストへ倒す）と、復元の成否を呼び出し側へ伝える必要がある
+ * `JSON.parse`済みの値からマニフェストを組み立てる純粋関数。`deserializeManifest`と
  * `loadPersistedManifest`（壊れたJSONを「復元できなかった」ことが分かる形で返す。
- * Issue #380）の両方から共有する。
+ * Issue #380）の両方から共有する。どちらも壊れた入力を`ok: false`でfail-closedに扱う
+ * 方針は揃えてある（Issue #440。以前は`deserializeManifest`だけが`ok`を捨てて安全側の
+ * 空マニフェストへ倒すfail-openだったが、これは#380が「黙って0件成功にすると
+ * 統合済みだった成果が消えたことに気づけない」と断じたのと同じ挙動であり、2つの
+ * 呼び出し元が正反対の方針を持ったまま共存するのは将来の呼び出し側を誤らせる）。
  *
  * キーが不正（`isValidManifestKey`が偽）なエントリは破棄し、`ok: false`で報告する
- * （レビュー指摘: high。`deserializeManifest`は従来どおり安全側へ倒すため`ok`を捨てるが、
- * `loadPersistedManifest`はこれを見て「復元できなかった」として反映を止める）。
- * 値の形が不正なエントリ（`taskId`/`kind`が期待の型でない）は、キーの妥当性とは
- * 別問題（パストラバーサルの脅威ではない）のため、従来どおり黙って読み飛ばすだけに留める。
+ * （レビュー指摘: high）。値の形が不正なエントリ（`taskId`/`kind`が期待の型でない）は、
+ * キーの妥当性とは別問題（パストラバーサルの脅威ではない）のため、従来どおり黙って
+ * 読み飛ばすだけに留める。
  */
 function manifestFromParsedJson(parsed: unknown): ManifestParseResult {
   if (typeof parsed !== 'object' || parsed === null) {
@@ -245,13 +248,31 @@ function manifestFromParsedJson(parsed: unknown): ManifestParseResult {
   return { manifest: result, ok };
 }
 
-/** `serializeManifest` の逆変換。壊れたJSON・不正なエントリは空のマニフェストとして扱う（安全側）。 */
+/**
+ * `serializeManifest` の逆変換。Issue #440: 壊れたJSON・不正なキーを含むエントリは
+ * `loadPersistedManifest`と同じ基準（`manifestFromParsedJson`の`ok`）でfail-closedに扱い、
+ * 例外を投げる。以前はここが黙って空のマニフェストへ倒すfail-openだったため、
+ * `deserializeManifest`と`loadPersistedManifest`という同じ入力を扱う2関数が
+ * 正反対の方針を持ったまま共存していた（本番の呼び出し元は#380で`loadPersistedManifest`へ
+ * 統一済みだが、`deserializeManifest`はexportされたテスト専用関数として残っており、
+ * 将来ここを誤って掴む呼び出し側が現れると#380の事象が再発しうる）。
+ */
 export function deserializeManifest(json: string): IntegrationManifest {
+  let parsed: unknown;
   try {
-    return manifestFromParsedJson(JSON.parse(json)).manifest;
+    parsed = JSON.parse(json);
   } catch {
-    return new Map();
+    throw new Error(
+      '疑似worktreeの統合マニフェストの直列化データを復元できませんでした（内容を解析できません）',
+    );
   }
+  const { manifest, ok } = manifestFromParsedJson(parsed);
+  if (!ok) {
+    throw new Error(
+      '疑似worktreeの統合マニフェストの直列化データを復元できませんでした（不正なエントリ、またはエントリ数が上限を超えています）',
+    );
+  }
+  return manifest;
 }
 
 /**
@@ -279,8 +300,9 @@ export type LoadManifestResult =
  * ではなく「復元すべきものがまだ無い」正常系のため、空のマニフェストで`ok: true`を返す。
  * ファイルはあるが内容を解析できない場合（破損）、不正なキー（パストラバーサルの疑いが
  * あるエントリ）を含む場合、エントリ数が上限を超える場合は`ok: false`にする。ここを
- * `deserializeManifest`のように黙って空マニフェストへ倒すと、統合済みだった成果が
- * あったことに呼び出し側が気づけない（「0件で成功」に見えてしまう。Issueの本題）。
+ * 黙って空マニフェストへ倒すと、統合済みだった成果があったことに呼び出し側が
+ * 気づけない（「0件で成功」に見えてしまう。Issueの本題。`deserializeManifest`も
+ * Issue #440で同じ基準のfail-closedへ揃えてある）。
  *
  * 読み込みの前に、`integrationManifestPath`が指す経路にシンボリックリンクが含まれて
  * いないかを確かめる（レビュー指摘: medium）。`.agents/worktrees/<runId>`の親のいずれかが
@@ -524,6 +546,17 @@ export interface PseudoWorktreeFileSystemPort {
   /** ファイルを削除する。存在しなくてもエラーにしない。 */
   removeFile(target: string): Promise<void>;
   /**
+   * ファイルを改名（同一ディレクトリ内での置き換え）する。`to`が既存のファイル・
+   * シンボリックリンクを指していても、その実体を辿らずディレクトリエントリそのものを
+   * 置き換える（POSIXの`rename(2)`の性質）。`reflectIntegrationToWorkspace`が
+   * コピー先へのTOCTOU（Issue #445）を塞ぐために「一時ファイルへ書いてからrenameで
+   * 確定させる」用途にだけ使う。オプショナルにしているのは、この関数を持たない
+   * 既存のポート実装（テスト用フェイク等）に影響を与えないため。持たないポートを
+   * 渡した場合は`reflectIntegrationToWorkspace`側が従来どおりの直接コピー経路へ
+   * フォールバックする。
+   */
+  rename?(from: string, to: string): Promise<void>;
+  /**
    * テキストファイルを読む。存在しない・読めない場合は undefined（他の読み取り系
    * ポートメソッドと同じ規約）。マニフェストの永続化・復元（Issue #380）にだけ使う。
    */
@@ -596,6 +629,9 @@ export const nodePseudoWorktreeFileSystem: PseudoWorktreeFileSystemPort = {
   },
   async removeFile(target: string): Promise<void> {
     await fsPromises.rm(target, { force: true });
+  },
+  async rename(from: string, to: string): Promise<void> {
+    await fsPromises.rename(from, to);
   },
   async readTextFile(target: string): Promise<string | undefined> {
     try {
@@ -1026,8 +1062,17 @@ export class IntegrationQueue {
  */
 type SkippedPaths = { skippedPaths: string[] };
 
+/**
+ * 反映の途中で、`rename`を持たないポート実装向けの後方互換経路（TOCTOU対策の無い
+ * 直接コピー、Issue #445のフォールバック）へ1回でも落ちたか。1エントリごとではなく
+ * 反映全体（1回の`reflectIntegrationToWorkspace`呼び出し）で1個のフラグにする。
+ * 呼び出し側（`runnerWorkingDirectory.ts`の`reflectPseudoWorktree`）はこれを見て、
+ * 反映1回につき1回だけ警告ログを出す（ファイル単位で出すとログが溢れるため）。
+ */
+type LegacyCopyFallbackUsed = { usedLegacyCopyFallback: boolean };
+
 export type ReflectToWorkspaceResult =
-  | ({ ok: true; appliedPaths: string[] } & SkippedPaths)
+  | ({ ok: true; appliedPaths: string[] } & SkippedPaths & LegacyCopyFallbackUsed)
   | { ok: false; reason: 'workspaceChanged'; message: string; changedPaths: string[] }
   | ({
       ok: false;
@@ -1039,7 +1084,8 @@ export type ReflectToWorkspaceResult =
       failedPath: string;
       /** `failedPath`より後ろにあり、まだ試みていないパス。 */
       remainingPaths: string[];
-    } & SkippedPaths);
+    } & SkippedPaths &
+      LegacyCopyFallbackUsed);
 
 /**
  * runの終了時に、統合先の内容をワークスペースへ反映する（design.md §16.20）。
@@ -1097,6 +1143,7 @@ export async function reflectIntegrationToWorkspace(
   const entries = [...manifest.entries()];
   const appliedPaths: string[] = [];
   const skippedPaths: string[] = [];
+  let usedLegacyCopyFallback = false;
   for (let i = 0; i < entries.length; i += 1) {
     const entry = entries[i];
     if (entry === undefined) {
@@ -1215,16 +1262,71 @@ export async function reflectIntegrationToWorkspace(
             `反映先のディレクトリが実際にはワークスペースの外を指しています（${safeRelPath}）: ${sanitizeForLog(realTargetDir ?? targetDir)}`,
           );
         }
-        await fs.copyFile(source, target);
-        // 二次防御の仕上げ（TOCTOU）。`persistManifest`と同じく、書いた後に実パスを
-        // 確かめ、境界外なら書き込みを取り消して失敗として返す。
-        const realTarget = await fs.realpath(target);
-        if (realTarget === undefined || !isPathWithinRoot(realTarget, realRoot)) {
-          await fs.removeFile(target);
-          throw new Error(
-            `反映先が実際にはワークスペースの外を指していたため、書き込みを取り消しました` +
-              `（${safeRelPath}）: ${sanitizeForLog(realTarget ?? target)}`,
-          );
+        if (fs.rename !== undefined) {
+          // Issue #445: 上の`realTargetDir`確認と、実際にワークスペースへ書き込む瞬間
+          // （旧実装では`fs.copyFile(source, target)`）の間には、なお短いTOCTOU窓が残る。
+          // `fs.copyFile`はシンボリックリンクを解決して書き込むため、この窓の間に`target`
+          // が外部を指すシンボリックリンクへ差し替えられると、書き込みが境界外（リンク先）
+          // で起きてしまう。
+          //
+          // 一時ファイル+`rename`で塞げるのは、この窓のうち「`target`という名前そのものが
+          // シンボリックリンクへ差し替えられる」攻撃だけである。`rename`は対象パスの終端が
+          // シンボリックリンクであってもそれを解決せず、ディレクトリエントリそのものを
+          // 置き換える（POSIXの`rename(2)`の性質）ため、`target`がその時点でリンクへ
+          // 差し替えられていても、置き換え先（リンク先）を書き換えることは原理的にない。
+          //
+          // **親ディレクトリ`targetDir`側の窓は、この変更の前後で閉じていない**
+          // （監査指摘）。`realTargetDir`確認から`fs.copyFile(source, tempTarget)`までの間に
+          // `targetDir`自体がシンボリックリンクへ差し替えられると、`tempTarget`は
+          // `path.join(targetDir, ...)`という文字列結合で作った名前にすぎず、`copyFile`は
+          // その途中のディレクトリ部分のリンクを解決して書き込むため、境界外へ書かれうる。
+          // ロールバックの`fs.removeFile(tempTarget)`も同じ差し替え済みパスを辿るため防御に
+          // ならない。窓の長さ自体もこの変更で変わっていない。この残存窓の解消はIssue #484
+          // へ切り出し済み（このコミットでは対応しない）。
+          //
+          // 一時ファイルは`targetDir`と同一ディレクトリに置く。別ディレクトリ（別ファイル
+          // システム）だと`rename`がクロスデバイスで`EXDEV`になり失敗しうるため。
+          // ファイル名は`crypto.randomBytes`による推測不能な接尾辞を持たせる。予測可能な
+          // 名前だと、そこへ先回りしてシンボリックリンクを仕込まれる別の攻撃面になる。
+          const tempTarget = path.join(targetDir, `.pwt-reflect-${randomBytes(16).toString('hex')}.tmp`);
+          try {
+            await fs.copyFile(source, tempTarget);
+            // 二次防御の仕上げ（TOCTOU）。`persistManifest`と同じく、書いた後に実パスを
+            // 確かめる。ここは`target`ではなく一時ファイルに対して行う点が異なる。
+            // `rename`前に確認することで、境界外へ書かれた内容が`target`の名前で
+            // 一瞬でも見える窓自体を作らない。
+            const realTemp = await fs.realpath(tempTarget);
+            if (realTemp === undefined || !isPathWithinRoot(realTemp, realRoot)) {
+              throw new Error(
+                `反映先が実際にはワークスペースの外に書き込まれたため、書き込みを取り消しました` +
+                  `（${safeRelPath}）: ${sanitizeForLog(realTemp ?? tempTarget)}`,
+              );
+            }
+            await fs.rename(tempTarget, target);
+          } catch (e) {
+            // 例外の理由を問わず（上のthrowだけでなく`copyFile`自体の失敗も含む）、
+            // 一時ファイルを残置しない。プロセスが途中で落ちた場合まではこれで防げないが、
+            // 通常の失敗経路では残らないようにする。
+            await fs.removeFile(tempTarget);
+            throw e;
+          }
+        } else {
+          // 後方互換の経路（レビュー指摘への裁定）。`rename`を提供しないポート実装
+          // （テスト用フェイク等）向けに、従来どおり直接コピー+事後確認+ロールバックを行う。
+          // Issue #445のTOCTOU閉塞は`rename`を持つポート（`nodePseudoWorktreeFileSystem`。
+          // 本番はここだけを使う）でのみ効く。ここへ落ちたことは
+          // `usedLegacyCopyFallback`で呼び出し側へ伝え、反映1回につき1回だけ警告させる
+          // （1件ごとに出すとログが溢れるため）。
+          usedLegacyCopyFallback = true;
+          await fs.copyFile(source, target);
+          const realTarget = await fs.realpath(target);
+          if (realTarget === undefined || !isPathWithinRoot(realTarget, realRoot)) {
+            await fs.removeFile(target);
+            throw new Error(
+              `反映先が実際にはワークスペースの外を指していたため、書き込みを取り消しました` +
+                `（${safeRelPath}）: ${sanitizeForLog(realTarget ?? target)}`,
+            );
+          }
         }
       }
     } catch (e) {
@@ -1244,6 +1346,7 @@ export async function reflectIntegrationToWorkspace(
           .slice(i + 1)
           .map(([p]) => p)
           .sort((a, b) => a.localeCompare(b)),
+        usedLegacyCopyFallback,
       };
     }
     appliedPaths.push(relPath);
@@ -1252,5 +1355,6 @@ export async function reflectIntegrationToWorkspace(
     ok: true,
     appliedPaths: appliedPaths.sort((a, b) => a.localeCompare(b)),
     skippedPaths: skippedPaths.sort((a, b) => a.localeCompare(b)),
+    usedLegacyCopyFallback,
   };
 }
