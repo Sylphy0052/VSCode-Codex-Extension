@@ -1062,8 +1062,17 @@ export class IntegrationQueue {
  */
 type SkippedPaths = { skippedPaths: string[] };
 
+/**
+ * 反映の途中で、`rename`を持たないポート実装向けの後方互換経路（TOCTOU対策の無い
+ * 直接コピー、Issue #445のフォールバック）へ1回でも落ちたか。1エントリごとではなく
+ * 反映全体（1回の`reflectIntegrationToWorkspace`呼び出し）で1個のフラグにする。
+ * 呼び出し側（`runnerWorkingDirectory.ts`の`reflectPseudoWorktree`）はこれを見て、
+ * 反映1回につき1回だけ警告ログを出す（ファイル単位で出すとログが溢れるため）。
+ */
+type LegacyCopyFallbackUsed = { usedLegacyCopyFallback: boolean };
+
 export type ReflectToWorkspaceResult =
-  | ({ ok: true; appliedPaths: string[] } & SkippedPaths)
+  | ({ ok: true; appliedPaths: string[] } & SkippedPaths & LegacyCopyFallbackUsed)
   | { ok: false; reason: 'workspaceChanged'; message: string; changedPaths: string[] }
   | ({
       ok: false;
@@ -1075,7 +1084,8 @@ export type ReflectToWorkspaceResult =
       failedPath: string;
       /** `failedPath`より後ろにあり、まだ試みていないパス。 */
       remainingPaths: string[];
-    } & SkippedPaths);
+    } & SkippedPaths &
+      LegacyCopyFallbackUsed);
 
 /**
  * runの終了時に、統合先の内容をワークスペースへ反映する（design.md §16.20）。
@@ -1133,6 +1143,7 @@ export async function reflectIntegrationToWorkspace(
   const entries = [...manifest.entries()];
   const appliedPaths: string[] = [];
   const skippedPaths: string[] = [];
+  let usedLegacyCopyFallback = false;
   for (let i = 0; i < entries.length; i += 1) {
     const entry = entries[i];
     if (entry === undefined) {
@@ -1258,11 +1269,20 @@ export async function reflectIntegrationToWorkspace(
           // が外部を指すシンボリックリンクへ差し替えられると、書き込みが境界外（リンク先）
           // で起きてしまう。
           //
-          // これを塞ぐため、`target`と同じディレクトリ内の一時ファイルへコピーしてから
-          // `rename`で`target`の名前へ確定させる。`rename`は対象パスの終端が
+          // 一時ファイル+`rename`で塞げるのは、この窓のうち「`target`という名前そのものが
+          // シンボリックリンクへ差し替えられる」攻撃だけである。`rename`は対象パスの終端が
           // シンボリックリンクであってもそれを解決せず、ディレクトリエントリそのものを
           // 置き換える（POSIXの`rename(2)`の性質）ため、`target`がその時点でリンクへ
-          // 差し替えられていても、置き換え先（リンク先）を書き換えることが原理的にない。
+          // 差し替えられていても、置き換え先（リンク先）を書き換えることは原理的にない。
+          //
+          // **親ディレクトリ`targetDir`側の窓は、この変更の前後で閉じていない**
+          // （監査指摘）。`realTargetDir`確認から`fs.copyFile(source, tempTarget)`までの間に
+          // `targetDir`自体がシンボリックリンクへ差し替えられると、`tempTarget`は
+          // `path.join(targetDir, ...)`という文字列結合で作った名前にすぎず、`copyFile`は
+          // その途中のディレクトリ部分のリンクを解決して書き込むため、境界外へ書かれうる。
+          // ロールバックの`fs.removeFile(tempTarget)`も同じ差し替え済みパスを辿るため防御に
+          // ならない。窓の長さ自体もこの変更で変わっていない。この残存窓の解消はIssue #484
+          // へ切り出し済み（このコミットでは対応しない）。
           //
           // 一時ファイルは`targetDir`と同一ディレクトリに置く。別ディレクトリ（別ファイル
           // システム）だと`rename`がクロスデバイスで`EXDEV`になり失敗しうるため。
@@ -1294,7 +1314,10 @@ export async function reflectIntegrationToWorkspace(
           // 後方互換の経路（レビュー指摘への裁定）。`rename`を提供しないポート実装
           // （テスト用フェイク等）向けに、従来どおり直接コピー+事後確認+ロールバックを行う。
           // Issue #445のTOCTOU閉塞は`rename`を持つポート（`nodePseudoWorktreeFileSystem`。
-          // 本番はここだけを使う）でのみ効く。
+          // 本番はここだけを使う）でのみ効く。ここへ落ちたことは
+          // `usedLegacyCopyFallback`で呼び出し側へ伝え、反映1回につき1回だけ警告させる
+          // （1件ごとに出すとログが溢れるため）。
+          usedLegacyCopyFallback = true;
           await fs.copyFile(source, target);
           const realTarget = await fs.realpath(target);
           if (realTarget === undefined || !isPathWithinRoot(realTarget, realRoot)) {
@@ -1323,6 +1346,7 @@ export async function reflectIntegrationToWorkspace(
           .slice(i + 1)
           .map(([p]) => p)
           .sort((a, b) => a.localeCompare(b)),
+        usedLegacyCopyFallback,
       };
     }
     appliedPaths.push(relPath);
@@ -1331,5 +1355,6 @@ export async function reflectIntegrationToWorkspace(
     ok: true,
     appliedPaths: appliedPaths.sort((a, b) => a.localeCompare(b)),
     skippedPaths: skippedPaths.sort((a, b) => a.localeCompare(b)),
+    usedLegacyCopyFallback,
   };
 }

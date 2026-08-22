@@ -1645,6 +1645,73 @@ describe('実ファイルシステムでの統合テスト', () => {
           }
         },
       );
+
+      it(
+        '`rename`を持たないポートでは従来の直接コピー経路へフォールバックし、' +
+          '`usedLegacyCopyFallback`をtrueで返す（対応漏れ検知用の警告ログの元）',
+        async () => {
+          const integration = await ensureIntegrationDir(
+            workspace,
+            RUN_ID,
+            nodePseudoWorktreeFileSystem,
+          );
+          expect(integration.ok).toBe(true);
+          if (!integration.ok) return;
+          await writeFile(path.join(integration.dir, 'a.txt'), 'integrated content\n');
+
+          const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+          const manifest: IntegrationManifest = new Map([
+            ['a.txt', { taskId: 'T1', kind: 'modified' }],
+          ]);
+
+          // `rename`を持たないポート実装（`FakePseudoFs`相当）を模して、従来の
+          // 直接コピー経路へ意図的にフォールバックさせる。`exactOptionalPropertyTypes`の
+          // もとでは`rename: undefined`を代入できないため、プロパティ自体を取り除く
+          const noRenameFs: typeof nodePseudoWorktreeFileSystem = {
+            ...nodePseudoWorktreeFileSystem,
+          };
+          delete noRenameFs.rename;
+
+          const result = await reflectIntegrationToWorkspace(
+            workspace,
+            integration.dir,
+            workspaceBaseline,
+            manifest,
+            [],
+            noRenameFs,
+          );
+
+          expect(result.ok).toBe(true);
+          if (!result.ok) return;
+          expect(result.usedLegacyCopyFallback).toBe(true);
+          await expect(readFile(path.join(workspace, 'a.txt'), 'utf8')).resolves.toBe(
+            'integrated content\n',
+          );
+        },
+      );
+
+      it('`rename`を持つポート（本番経路）では`usedLegacyCopyFallback`がfalseのまま反映される', async () => {
+        const integration = await ensureIntegrationDir(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+        expect(integration.ok).toBe(true);
+        if (!integration.ok) return;
+        await writeFile(path.join(integration.dir, 'a.txt'), 'integrated content\n');
+
+        const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+        const manifest: IntegrationManifest = new Map([['a.txt', { taskId: 'T1', kind: 'modified' }]]);
+
+        const result = await reflectIntegrationToWorkspace(
+          workspace,
+          integration.dir,
+          workspaceBaseline,
+          manifest,
+          [],
+          nodePseudoWorktreeFileSystem,
+        );
+
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.usedLegacyCopyFallback).toBe(false);
+      });
     });
 
     describe('除外と.gitの判定順（レビュー2巡目の指摘）', () => {

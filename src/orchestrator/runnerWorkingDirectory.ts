@@ -403,6 +403,18 @@ export async function reflectPseudoWorktree(
       live.pseudo.exclude,
       deps.fs,
     );
+    // `usedLegacyCopyFallback`は`workspaceChanged`（コピーへ入る前に中断）以外の2分岐にだけ
+    // 乗る。ここで1回だけ判定してログに出すことで、`reflectIntegrationToWorkspace`が
+    // マニフェストのエントリ数だけ`usedLegacyCopyFallback`を立てても、警告は反映1回に
+    // つき1回に抑えられる（1件ごとに出すとログが溢れるため）。
+    if ('usedLegacyCopyFallback' in result && result.usedLegacyCopyFallback) {
+      self.deps.log.warn(
+        `[workflow ${runId}] 疑似worktreeの反映で\`rename\`を提供しないファイルシステムポートへ` +
+          'フォールバックしたため、TOCTOU対策の無い旧来の直接コピー経路（Issue #445以前の挙動）で' +
+          '反映しました。本番経路（`nodePseudoWorktreeFileSystem`）はこの分岐へ入らないため、' +
+          'このログが出た場合はポート実装の変更を疑ってください。',
+      );
+    }
     if (!result.ok && result.reason === 'workspaceChanged') {
       const changed = `${sanitizeForLog(result.message)}（変更されたパス: ${formatPathList(result.changedPaths)}）`;
       self.deps.log.warn(`[workflow ${runId}] ${changed}`);
