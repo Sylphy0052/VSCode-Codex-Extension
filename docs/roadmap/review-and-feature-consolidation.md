@@ -148,7 +148,17 @@
   - X3 Claude Codeでも脇道の質問を使えるようにする（[#334](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/334)）
   - 依存: X1 → X2 → X3（逐次。3項目とも `chatScript.ts` かcontrol protocol層を触る）
   - 前提: WF-Cの完了（`chatScript.ts` / `claudeChatView.ts` / `streamSession.ts` を共有する）。
-    完了済み（2026-08-22、PR #431）。着手可
+    完了済み（2026-08-22、PR #431）
+  - **完了**（2026-08-22、PR [#510](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/510)）。
+    着手時の想定と違った点が4つあり、いずれも実測して [design.md](../design.md) §14.61 / §14.62 へ残した
+    - `rewind_conversation` は1回では戻れない。対象ターンとそれ以降のユーザー発言を新しい順に逐次送る（N往復）
+    - `rewind_conversation` は失敗時も封筒が `subtype:"success"` で返る。本体の `rewound:false` でしか失敗が分からない
+    - `side_question` も同型で、`synthetic:true` が失敗を意味する。`response` はCLI生成の英語プレースホルダで
+      モデルの回答ではない。**当初の `response.ok` 判定はエラーを正常な回答として画面に出していた**
+    - 脇道の質問は本流の会話の文脈を暗黙に共有する。また拡張のtranscriptエクスポートには `/btw` が残るため、
+      「痕跡が残らない」は不正確。design.md §14.62 / README.md / docs/slash-commands.md の3か所へ明記した
+    - `--fork-session` でないセッションへ `rewind_conversation` を送るとユーザーのtranscriptが壊れるため、
+      最下層（`streamSession.ts`）に `isForkSession` ガードを入れている
 
 ### 第3波 仕上げ
 
@@ -274,7 +284,7 @@ epic Issueは各ワークフローの開始時に起票し、採番できた時�
 | WF-C チャットUIの土台 | 1 | 9 | [#351](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/351) | `wf/wf-c/integration` | 完了（PR [#431](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/431)、mainへマージ済み。統合ブランチは削除済み） |
 | WF-D リポジトリ基盤 | 1 | 2 | [#353](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/353) | `wf/wf-d/integration` | 完了（PR [#394](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/394)、mainへマージ済み。統合ブランチは削除済み） |
 | WF-E ワークフローの自律性 | 2 | 12 | [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341) | `wf/wf-e/integration` | WF-A2（#466）の完了待ち（`runner.ts` / `forge.ts` が交差するため） |
-| WF-F チャットの会話操作と表示 | 2 | 3 | [#340](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/340) | `wf/wf-f/integration` | 着手（第1波が全完了。WF-A2とファイルが交差しない） |
+| WF-F チャットの会話操作と表示 | 2 | 3 | [#340](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/340) | `wf/wf-f/integration` | 完了（PR [#510](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/510)、mainへマージ済み。統合ブランチは削除済み） |
 | WF-G 横断の仕上げ | 3 | 3 | 未採番 | `wf/wf-g/integration` | 第2波の完了待ち |
 
 W1〜W5とX1〜X3のIssue番号・ブランチ名・design.mdの節・manual-test.mdの番号は、
@@ -339,9 +349,10 @@ WF-A / WF-B の根拠行はそのまま使える。WF-Cの根拠行を実測し�
   WF-C: PR #431 / WF-D: PR #394、いずれもmainへマージ済み）。WF-Aの後続として、実装過程とその後の
   横断レビューで分離した追いIssue epic [#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466)
   （16件、統合ブランチ `wf/wf-a2/integration`）が進行中。**第2波はWF-Fのみ先に着手する**
-  （2026-08-22の決定）。**WF-EはWF-A2（#466）の完了を待つ**。`runner.ts` / `forge.ts` を
-  共有し、ファイルの集合が交差するため。WF-EとWF-Fは互いに交差しないので、
-  WF-A2の完了後は並列に進めてよい
+  （2026-08-22の決定）。**WF-FはPR #510 で完了した**（2026-08-22）。
+  **WF-EはWF-A2（#466）の完了を待つ**。`runner.ts` / `forge.ts` を共有し、ファイルの集合が
+  交差するため。WF-EとWF-Fは互いに交差しないので先にWF-Fだけを流した。
+  第2波の残りはWF-Eのみ
 - 第3波は第2波の完了後。型情報ルールの導入は全ファイルへ波及するため最後に置く
 - 各ワークフローの完了時に、READMEの該当箇所（機能の節・設定・既知の制約）を同じPRで更新する
 - 全実装の完了後、拡張のワークフロー機能そのものでこの運用を回せるか（ドッグフーディング）を
