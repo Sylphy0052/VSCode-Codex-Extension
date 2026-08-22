@@ -9,6 +9,7 @@ import {
   pendingSideQuestionDisplay,
   progressSideQuestionDisplay,
 } from '../../src/claude/sideQuestion';
+import { readControlResponse, readSideQuestionResult } from '../../src/claude/control';
 import type {
   ControlRequestProgress,
   SideQuestionHistoryEntry,
@@ -145,14 +146,32 @@ describe('finishedSideQuestionDisplay', () => {
       response: undefined,
       synthetic: undefined,
       refusalFallback: undefined,
-      error: 'Bt.map is not a function. (In \'Bt.map(...)\', \'Bt.map\' is undefined)',
+      error: {
+        message: "Bt.map is not a function. (In 'Bt.map(...)', 'Bt.map' is undefined)",
+        origin: 'cli',
+      },
     };
     const display = finishedSideQuestionDisplay('質問', result);
     expect(display.status).toBe('failed');
     expect(display.text).toBe('質問');
     // CLI内部のJS例外メッセージをそのまま露出しない（実測、design.md §14.62）
     expect(display.detail).not.toContain('Bt.map');
-    expect(display.detail).toBe(describeSideQuestionError(result.error));
+    // リテラルで固定する（issue #340横断レビュー指摘: describeSideQuestionErrorとの
+    // 比較は被テスト実装同士の比較になり、文言を変えても落ちない恒真テストだった）
+    expect(display.detail).toBe('脇道の質問を送れませんでした（CLI側でエラーが発生しました）');
+  });
+
+  it('拡張機能自身のエラー（origin:app）は元の文言をそのまま表示する（issue #340横断レビュー指摘。CLI由来のエラーとして誤表示しない）', () => {
+    const result: SideQuestionResult = {
+      ok: false,
+      response: undefined,
+      synthetic: undefined,
+      refusalFallback: undefined,
+      error: { message: 'セッションが起動していません', origin: 'app' },
+    };
+    const display = finishedSideQuestionDisplay('質問', result);
+    expect(display.status).toBe('failed');
+    expect(display.detail).toBe('セッションが起動していません');
   });
 
   it('ok:trueでもresponseが無い（想定外の形）場合はfailed扱いにする', () => {
@@ -194,14 +213,45 @@ describe('finishedSideQuestionDisplay', () => {
   });
 });
 
-describe('describeSideQuestionError', () => {
-  it('CLI内部の例外メッセージをそのまま出さず、常に汎用文言へ丸める（既知カタログを持たない）', () => {
-    expect(describeSideQuestionError('Bt.map is not a function. ...')).toBe(
+describe('describeSideQuestionError（issue #340横断レビュー指摘: origin付きの型で由来を判定する）', () => {
+  it('origin:cli（response.ok===false起因）はCLI内部の例外メッセージをそのまま出さず、常に汎用文言へ丸める（既知カタログを持たない）', () => {
+    expect(describeSideQuestionError({ message: 'Bt.map is not a function. ...', origin: 'cli' })).toBe(
       '脇道の質問を送れませんでした（CLI側でエラーが発生しました）',
     );
+  });
+
+  it('undefinedも汎用文言へ丸める', () => {
     expect(describeSideQuestionError(undefined)).toBe(
       '脇道の質問を送れませんでした（CLI側でエラーが発生しました）',
     );
+  });
+
+  it('origin:app（拡張機能自身が組み立てた文言）は丸めずそのまま出す', () => {
+    expect(
+      describeSideQuestionError({ message: 'セッションが終了しました', origin: 'app' }),
+    ).toBe('セッションが終了しました');
+    expect(
+      describeSideQuestionError({ message: '応答を読み取れませんでした', origin: 'app' }),
+    ).toBe('応答を読み取れませんでした');
+  });
+
+  it('成功封筒に乗ったpayload.errorはCLI由来の値なのでorigin:cliとなり、内部の生文言を出さず汎用文言へ丸める（issue #340確認レビュー再指摘）', () => {
+    // readSideQuestionResultから通しで確認する: 封筒レベルは成功（subtype:'success'）でも
+    // payload.errorの値自体はCLIが組み立てたものなので、封筒の成功/失敗ではなく値の由来で
+    // origin:'cli'と判定されるべきで、以前はここが誤ってorigin:'app'になっていた
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_origin_regression',
+        response: { error: 'no response generated' },
+      },
+    });
+    const result = readSideQuestionResult(response!);
+    expect(result.error?.origin).toBe('cli');
+    const displayed = describeSideQuestionError(result.error);
+    expect(displayed).toBe('脇道の質問を送れませんでした（CLI側でエラーが発生しました）');
+    expect(displayed).not.toContain('no response generated');
   });
 });
 

@@ -97,7 +97,9 @@ describe('ClaudeStreamSession の会話フォーク（rewind_conversation、issu
     const result = await session.rewindConversationToTurn(['u1', 'u2'], 'u1');
 
     expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/fork/);
+    expect(result.error?.message).toMatch(/fork/);
+    // streamSession.ts自身のガードが返す非CLI由来のエラー（issue #340横断レビュー指摘）
+    expect(result.error?.origin).toBe('app');
     expect(rewindRequestsWritten(written)).toEqual([]);
   });
 
@@ -175,7 +177,7 @@ describe('ClaudeStreamSession の会話フォーク（rewind_conversation、issu
     await expect(promise).resolves.toEqual({
       ok: false,
       prefillText: undefined,
-      error: 'stale target',
+      error: { message: 'stale target', origin: 'cli' },
       // 最初（u3）で失敗したため1件も成功していない
       succeededCount: 0,
     });
@@ -238,7 +240,7 @@ describe('ClaudeStreamSession の会話フォーク（rewind_conversation、issu
     await expect(promise).resolves.toEqual({
       ok: false,
       prefillText: undefined,
-      error: 'no preceding assistant',
+      error: { message: 'no preceding assistant', origin: 'cli' },
       succeededCount: 0,
     });
   });

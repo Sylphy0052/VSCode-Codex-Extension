@@ -640,12 +640,17 @@ export class ClaudeChatViewManager
    * 「ここから分岐」（`chatView.ts`の`forkFrom`）に相当する、Claude Code版の入口。
    *
    * 対象は`chatScript.ts`の`turnForkTarget`（`SHOW_TURN_FORK`）が渡す、押した発言自身の
-   * uuid。`entry.session.threadId`が未確定（`system/init`をまだ受け取っていない）間は
-   * 分岐先を特定できないため何もしない。
+   * uuid。`entry.session.threadId`が未確定（`system/init`をまだ受け取っていない、または
+   * CLIが異常終了した後）の間は分岐先を特定できないため実行しない。ボタンが押せているのに
+   * 無言で何も起きないと壊れているように見える（issue #340横断レビュー指摘）ため、
+   * その旨を通知する。
    */
   private async forkFromTurn(entry: ClaudePanel, targetUuid: string): Promise<void> {
     const threadId = entry.session.threadId;
     if (threadId === undefined) {
+      void vscode.window.showErrorMessage(
+        'セッションidが確定していないため分岐できません。応答が始まってからやり直してください。',
+      );
       return;
     }
     const userMessageUuids = entry.session

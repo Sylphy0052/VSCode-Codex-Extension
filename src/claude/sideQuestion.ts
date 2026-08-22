@@ -1,5 +1,6 @@
 import type {
   ControlRequestProgress,
+  OriginatedError,
   SideQuestionHistoryEntry,
   SideQuestionResult,
 } from './control';
@@ -117,6 +118,9 @@ export function finishedSideQuestionDisplay(
   };
 }
 
+/** CLI由来のエラーを丸めたときに画面へ出す固定文言。 */
+const GENERIC_SIDE_QUESTION_ERROR_MESSAGE = '脇道の質問を送れませんでした（CLI側でエラーが発生しました）';
+
 /**
  * 制御応答の封筒レベルの失敗（`response.ok === false`）を、利用者向けの文言へ変換する。
  *
@@ -126,10 +130,26 @@ export function finishedSideQuestionDisplay(
  * `describeForkFromTurnError`（issue #494）のような既知のエラー文字列カタログは作れない
  * ——rewind_conversationの`turn running`等と違い、この文言は安定したエラーコードではなく
  * 実行時ごとに変わりうる内部実装依存の例外テキストだからである。そのため個別マッピングは
- * せず、常に汎用文言へ丸める（そのまま画面へ出すと内部実装が露出する）。
+ * せず、`origin:'cli'`（＝`response.ok === false`起因）のときだけ常に汎用文言へ丸める
+ * （そのまま画面へ出すと内部実装が露出する）。
+ *
+ * `origin:'app'`（`streamSession.ts`のガードや、成功封筒なのに応答本文が読めず
+ * `payload.error`も無いときの拡張機能側の固定文言）は既に利用者向けの文言のため、
+ * 丸めずそのまま返す（issue #340横断レビュー指摘。以前は引数を無視して常に汎用文言を
+ * 返しており、拡張機能自身が作ったエラーまでCLI由来として誤表示していた）。逆に
+ * `payload.error`が入っている場合はCLIが封筒に乗せてきた値なので`origin:'cli'`となり、
+ * ここで汎用文言へ丸められる（issue #340確認レビュー再指摘: 成功封筒だからという理由で
+ * `'app'`にしていたのは誤りだった）。丸めた元の文言は
+ * 画面には出さないが、開発者向けの内部ログには残す（`streamSession.ts`が`receive`で
+ * `result.error?.origin === 'cli'`を見て`this.log.warn`へ残す。セキュリティ監査の指摘:
+ * 汎用文言へ丸めた元のエラーがどこにも残らず、CLI側の予期しない構造エラーが多発した
+ * ときに原因調査ができない）。
  */
-export function describeSideQuestionError(_error: string | undefined): string {
-  return '脇道の質問を送れませんでした（CLI側でエラーが発生しました）';
+export function describeSideQuestionError(error: OriginatedError | undefined): string {
+  if (error === undefined || error.origin === 'cli') {
+    return GENERIC_SIDE_QUESTION_ERROR_MESSAGE;
+  }
+  return error.message;
 }
 
 /**

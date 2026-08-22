@@ -886,7 +886,7 @@ describe('readRewindConversationResult（issue #333、design.md §14.61）', () 
       targetMessageUuid: undefined,
       prefillText: undefined,
       precedingAssistantUuid: undefined,
-      error: 'stale target',
+      error: { message: 'stale target', origin: 'cli' },
     });
   });
 
@@ -900,7 +900,7 @@ describe('readRewindConversationResult（issue #333、design.md §14.61）', () 
       targetMessageUuid: undefined,
       prefillText: undefined,
       precedingAssistantUuid: undefined,
-      error: 'Unsupported control request subtype',
+      error: { message: 'Unsupported control request subtype', origin: 'cli' },
     });
   });
 });
@@ -992,7 +992,8 @@ describe('readSideQuestionResult（issue #334、design.md §14.62）', () => {
     const result = readSideQuestionResult(response!);
     expect(result.ok).toBe(false);
     expect(result.response).toBeUndefined();
-    expect(result.error).toBe('Unsupported control request subtype');
+    // control protocol自体の失敗はorigin:'cli'（issue #340横断レビュー指摘: 由来つきの型）
+    expect(result.error).toEqual({ message: 'Unsupported control request subtype', origin: 'cli' });
   });
 
   it('封筒は成功でも応答本文を読み取れない形は失敗として扱う（想定外の形への安全側）', () => {
@@ -1002,7 +1003,8 @@ describe('readSideQuestionResult（issue #334、design.md §14.62）', () => {
     });
     const result = readSideQuestionResult(response!);
     expect(result.ok).toBe(false);
-    expect(result.error).toBe('応答を読み取れませんでした');
+    // 成功封筒からの読み取り失敗はCLI内部の生の例外文字列ではないため origin:'app'
+    expect(result.error).toEqual({ message: '応答を読み取れませんでした', origin: 'app' });
   });
 
   it('応答本文が読み取れなくてもpayload.errorがあればそれを理由にする（レビュー指摘）', () => {
@@ -1016,7 +1018,10 @@ describe('readSideQuestionResult（issue #334、design.md §14.62）', () => {
     });
     const result = readSideQuestionResult(response!);
     expect(result.ok).toBe(false);
-    expect(result.error).toBe('no response generated');
+    // payload.errorはCLIが封筒に乗せてきた値であり、封筒が成功でもorigin:'cli'
+    // （issue #340確認レビュー再指摘: 成功封筒だからという理由でorigin:'app'にしていたのは
+    // 誤り。readRewindConversationResultの同種のpayload.errorと扱いをそろえる）
+    expect(result.error).toEqual({ message: 'no response generated', origin: 'cli' });
   });
 
   it('synthetic:trueの応答を読む（実測、design.md §14.62: モデルが実際には回答しなかったことを示す）', () => {
