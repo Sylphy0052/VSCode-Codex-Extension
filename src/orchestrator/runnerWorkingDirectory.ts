@@ -8,6 +8,7 @@ import {
   persistManifest,
   reflectIntegrationToWorkspace,
   takeSnapshot,
+  updateSnapshotForAppliedPaths,
   IntegrationQueue as PseudoWorktreeIntegrationQueue,
   type Snapshot,
 } from './pseudoWorktree';
@@ -108,7 +109,7 @@ export async function resolveWorkingDirectory(
     };
   }
   if (decision.kind === 'sharedFallback') {
-    return resolveSharedFallbackWorkingDirectory(self, live, task, decision.warning);
+    return resolveSharedFallbackWorkingDirectory(self, live, task, decision.warning, retry);
   }
   if (decision.kind === 'error') {
     throw new Error(decision.message);
@@ -147,18 +148,24 @@ async function resolveSharedFallbackWorkingDirectory(
   live: LiveRun,
   task: WorkflowTask,
   warning: string,
+  retry: number | undefined,
 ): Promise<WorkingDirectoryResolution> {
   self.deps.log.warn(`[workflow ${live.runId}/${task.id}] ${warning}`);
   live.warnings.push({ kind: 'gitFallback', taskId: task.id, message: warning });
   // 疑似worktree（design.md §16.20、Issue #105）。`WorkflowRunnerDeps.pseudoWorktree`が
   // 渡されていない場合は、従来どおりワークスペース直下を共有する（後方互換）
   if (live.pseudo !== undefined && self.deps.pseudoWorktree !== undefined) {
+    // `retry`はgit側の`resolveWorktreeWorkingDirectory`と同じ値（呼び出し元の
+    // `prepareTaskLaunch`が`retrySuffixOf(taskRunState)`で算出したもの）を共有する
+    // （Issue #396）。以前はここへ流さず、再試行のたびに`cloneWorkspace`が前回と同じ
+    // パスへ複製しようとして`alreadyExists`で必ず失敗していた
     const cloned = await cloneWorkspace(
       live.repoRoot,
       live.runId,
       task.id,
       live.pseudo.exclude,
       self.deps.pseudoWorktree.fs,
+      retry,
     );
     if (!cloned.ok) {
       throw new Error(`疑似worktreeの作成に失敗しました: ${cloned.message}`);
@@ -395,14 +402,75 @@ export async function reflectPseudoWorktree(
     return;
   }
   try {
+    // 反映と、その後の`baseline`更新（下記）で同一のマニフェストを使う。呼び出しの間で
+    // 別タスクの統合により`manifest`が更新されうるため、ここで1回だけ取得して固定する
+    // （反映していないエントリまで後続の`updateSnapshotForAppliedPaths`が誤って参照しない
+    // ようにするため）。
+    const manifest = live.pseudo.queue.getManifest();
     const result = await reflectIntegrationToWorkspace(
       live.repoRoot,
       live.pseudo.integrationDir,
       live.pseudo.baseline,
-      live.pseudo.queue.getManifest(),
+      manifest,
       live.pseudo.exclude,
       deps.fs,
     );
+    // `baseline`を反映後のワークスペースの実際の状態へ更新する（Issue #511）。
+    //
+    // 更新するのは`ok: true`（全部適用）と`partialApply`（一部適用）の2分岐のみ。
+    // どちらも実際にディスクへ書き込みが起きているため、次回（`retryMerge`/
+    // `retryTask`/`continueTask`による再開後の2周目以降）の比較基準を「今まさに
+    // 自分で書いた状態」へ揃えないと、1周目の反映が1件でも成功した時点でワーク
+    // スペースは古い`baseline`から意図的に変化しており、2周目は必ず`workspaceChanged`
+    // の誤検知になる（Issueの本題）。
+    //
+    // `workspaceChanged`は書き込みを一切行っていない（人の編集を検知して反映を拒否した）
+    // ため、ここでは更新しない。**更新してしまうと、その場で拒否した人の編集を
+    // 「自分が書いた状態」として取り込んでしまい、次回以降その編集を検知できなくなる**
+    // （人の編集を検知する能力を落とさない、という受入基準に反する）。
+    //
+    // `partialApply`でも更新する設計判断: 反映は「全部成功するまで待つ」仕組みではなく、
+    // 途中で失敗した時点のディスクの実態（適用済みの分は書き変わり、未適用の分は
+    // 元のまま）をそのまま`baseline`として取り直す。未適用の分は`manifest`に
+    // 残ったままなので（`failedPath`・`remainingPaths`は統合キューから消えない）、
+    // 次回の反映で改めて適用が試みられる。
+    //
+    // **更新方式（レビュー・監査指摘、再発防止）**: 以前はここで`takeSnapshot`を使って
+    // ワークスペース全体を再スキャンし`baseline`を丸ごと差し替えていたが、その方式には
+    // 「反映（実I/Oのコピー/削除ループ）の最中に人が反映対象**ではない**別ファイルを
+    // 編集すると、その編集が全体再スキャンに紛れ込んで新しい`baseline`へ恒久的に
+    // 吸収されてしまい、以後その編集を`workspaceChanged`で検知できなくなる」という窓が
+    // あった。この機構は人の手による編集を守るためのものであり、この窓を「攻撃者は
+    // 直接改ざんもできる」という理由で許容するのは筋が違う。
+    //
+    // そこで`reflectIntegrationToWorkspace`が実際に適用した`appliedPaths`だけを
+    // `baseline`へ個別に反映し（`updateSnapshotForAppliedPaths`）、それ以外のエントリは
+    // 元の`baseline`の値のまま据え置く。この形なら、反映の窓の間に起きた他ファイルの
+    // 編集は`baseline`に触れないまま残り、次回の反映開始時の初期比較で正しく検知される。
+    // 逆に既に適用済みのパスを据え置くと、統合先からのコピーでサイズ・更新時刻が
+    // 変わっているため、次回反映時に「baselineとの差分」として誤検知されてしまう
+    // （`partialApply`のときも同様の理由で、実際に適用できた分だけを反映する）。
+    if (result.ok || result.reason === 'partialApply') {
+      live.pseudo.baseline = await updateSnapshotForAppliedPaths(
+        live.pseudo.baseline,
+        result.appliedPaths,
+        manifest,
+        live.repoRoot,
+        deps.fs,
+      );
+    }
+    // `usedLegacyCopyFallback`は`workspaceChanged`（コピーへ入る前に中断）以外の2分岐にだけ
+    // 乗る。ここで1回だけ判定してログに出すことで、`reflectIntegrationToWorkspace`が
+    // マニフェストのエントリ数だけ`usedLegacyCopyFallback`を立てても、警告は反映1回に
+    // つき1回に抑えられる（1件ごとに出すとログが溢れるため）。
+    if ('usedLegacyCopyFallback' in result && result.usedLegacyCopyFallback) {
+      self.deps.log.warn(
+        `[workflow ${runId}] 疑似worktreeの反映で\`rename\`を提供しないファイルシステムポートへ` +
+          'フォールバックしたため、TOCTOU対策の無い旧来の直接コピー経路（Issue #445以前の挙動）で' +
+          '反映しました。本番経路（`nodePseudoWorktreeFileSystem`）はこの分岐へ入らないため、' +
+          'このログが出た場合はポート実装の変更を疑ってください。',
+      );
+    }
     if (!result.ok && result.reason === 'workspaceChanged') {
       const changed = `${sanitizeForLog(result.message)}（変更されたパス: ${formatPathList(result.changedPaths)}）`;
       self.deps.log.warn(`[workflow ${runId}] ${changed}`);

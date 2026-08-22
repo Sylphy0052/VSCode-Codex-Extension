@@ -31,11 +31,17 @@ import { INTEGRATION_DIR_NAME, IntegrationMergeQueue } from './integration';
 import { applyRunCompletionToFile, type RoadmapFileSystemPort } from './roadmap';
 import {
   IntegrationQueue as PseudoWorktreeIntegrationQueue,
-  removePseudoWorktree,
+  removePseudoIntegration,
+  removePseudoWorktreeAttempts,
   type PseudoWorktreeFileSystemPort,
   type Snapshot,
 } from './pseudoWorktree';
-import { composeNextPrompt, TaskMessagingHub, type HttpMcpTransportHandle } from './messaging';
+import {
+  composeNextPrompt,
+  TaskMessagingHub,
+  type DispatchErrorLogPort,
+  type HttpMcpTransportHandle,
+} from './messaging';
 import {
   applyLoopStopReason,
   createRunState,
@@ -65,6 +71,7 @@ import {
   buildRunTaskSnapshots,
   checkMessagingVisibility,
   checkWaitingReplyStalls,
+  closeMessaging,
   onMessageAccepted,
 } from './runnerMessaging';
 import {
@@ -83,6 +90,7 @@ import {
   disposeOrchestrator,
   markOrchestratorRead,
   notifyOrchestratorRunFinished,
+  notifyOrchestratorRunHalted,
   sendUserMessageToOrchestrator,
   setupOrchestratorForStart,
   syncOrchestratorTaskEvents,
@@ -146,6 +154,25 @@ export interface WorkflowFilePort {
  */
 export const WAITING_REPLY_POLL_INTERVAL_MS = 5_000;
 
+/**
+ * `startMessagingTransport`のMCPサーバ起動失敗警告を、1runにつき実際に記録する上限件数
+ * （Issue #475/PR #495レビュー指摘: low〜medium）。
+ *
+ * 本Issue以前は`setupMessagingForStart`がrun開始時に1回しか呼ばれなかったため、この警告も
+ * 1回しか出なかった。`ensureMessaging`は`live.messaging`が`undefined`である限りタスク起動の
+ * たびに再試行するため、MCPサーバが恒常的に起動できない環境（ポート払底等）では
+ * タスク数・retry回数に比例して同じ警告が無制限に増える。`messaging.ts`の
+ * `MAX_DISPATCH_ERROR_LOG_COUNT`（Issue #375、PR #488）と同じ規律に揃える。
+ */
+export const MAX_MESSAGING_STARTUP_WARN_COUNT = 20;
+
+/**
+ * 上限到達後の抑制中に、集計ログを何件おきに出すか。`messaging.ts`の
+ * `DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL`と同じ考え方（Issue #475/PR #495
+ * レビュー指摘: low〜medium）。
+ */
+export const MESSAGING_STARTUP_WARN_SUPPRESSION_INTERVAL = 100;
+
 export const nodeWorkflowFilePort: WorkflowFilePort = {
   async fileSize(path: string): Promise<number | undefined> {
     try {
@@ -201,8 +228,17 @@ export interface WorkflowRunnerForgeDeps {
  * `WorkflowRunnerDeps.forge`/`.pseudoWorktree`と同じく省略可能（上のJSDoc参照）。
  */
 export interface WorkflowRunnerMessagingDeps {
-  /** runごとに1つ、MCPサーバを起動する（design.md §16.21「サーバはrunごとに立て」）。 */
-  startTransport: (hub: TaskMessagingHub) => Promise<HttpMcpTransportHandle>;
+  /**
+   * runごとに1つ、MCPサーバを起動する（design.md §16.21「サーバはrunごとに立て」）。
+   *
+   * `logPort`は`WorkflowRunner`が`this.deps.log`を包んで渡す（Issue #375）。dispatch例外を
+   * `MessagingMcpServer`が記録できるようにする最小限の口（`DispatchErrorLogPort`のJSDoc
+   * 参照）。
+   */
+  startTransport: (
+    hub: TaskMessagingHub,
+    logPort?: DispatchErrorLogPort,
+  ) => Promise<HttpMcpTransportHandle>;
   /**
    * `agent.workflows.replyTimeoutSec` の現在値（秒）。省略時は`DEFAULT_REPLY_TIMEOUT_SEC`
    * （既定300秒）を使う。待ちぼうけ検出の経路2（`detectTimedOutWaitingReplies`）で使う。
@@ -265,6 +301,18 @@ export interface WorkflowRunnerDeps {
    * `claudeChatView.ts`側で実装済み（Issue #123）。
    */
   messaging?: WorkflowRunnerMessagingDeps;
+  /**
+   * `agent.workflows.mergeApprovalTimeoutSec`の現在値（秒）。省略時は
+   * `DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC`（既定1時間）を使う（Issue #413 PR5）。
+   * 衝突解決セッションが承認待ちのままこの秒数を超えたら自動的に停止する
+   * （`runnerMerge.ts`の`scheduleApprovalTimeout`）。`messaging.readReplyTimeoutSec`と
+   * 同じく、呼び出し側は使い捨てのオブジェクトではなく毎回現在値を返す関数を渡すこと。
+   *
+   * `messaging`（省略可能な機能）の配下ではなくトップレベルに置く。衝突解決は
+   * タスク間メッセージングの有無と無関係に起こるため（`messaging`が無い実行でも
+   * このタイムアウトは効かせる必要がある）。
+   */
+  readMergeApprovalTimeoutSec?: () => number;
   /** テスト用の差し替え口。既定は `node:crypto` の `randomUUID`。 */
   randomId?: () => string;
   /** テスト用の差し替え口。既定は `Date.now`。 */
@@ -323,6 +371,49 @@ export interface WorkflowWarning {
      * 先へ進めるため、`failed`ではなく`blocked`になる。
      */
     | 'mergeBusy'
+    /**
+     * 人が衝突解決セッションを止めた（タブへの直接介入 = `manual`/`interrupted`、
+     * ワークフローViewの「全体停止」 = `taskStopped`）ため、`merging`を`blocked`へ
+     * 確定させた（Issue #443、design.md §16.17「コンフリクト」7.）。`git merge --abort`は
+     * 呼んでいない。統合worktreeは衝突した状態のまま（`MERGE_HEAD`・未解決パスが残る）で、
+     * `mergeBusy`（他タスクの衝突で始められなかった＝まだ何も解決作業をしていない）とは
+     * 「作業が中断された」という点で意味が違うため、`blocked`の`failure`が`undefined`に
+     * なる（`markMergeBlocked`）ぶんの区別をこの警告で持たせる。
+     *
+     * **`taskStopped`はここでは`WorkflowRunner.stop()`（全体停止）経由のものだけを指す**
+     * （Issue #514）。`WorkflowRunner.stopTask()`（このタスク単体だけを止める意図。
+     * オーケストレーターの`stop_task`とワークフローViewの「タスク停止」ボタンの共通の
+     * 入口）が衝突解決セッションへ`stopLoop()`を送ったときは、run全体を止めないぶん
+     * `mergeStopTaskStopped`へ分ける。両者は`LoopStopReason`としては同じ`'taskStopped'`
+     * だが（`TaskSession.stopLoop()`は理由をこれ以上細かく伝えられない）、
+     * `MergeResolutionEntry.stoppedByStopTask`で送り元を区別する
+     * （`runnerMerge.ts`の`finishMergeResolution`参照）。
+     */
+    | 'mergeInterrupted'
+    /**
+     * 衝突解決セッションが承認待ちのまま`agent.workflows.mergeApprovalTimeoutSec`
+     * （既定1時間）を超えたため、自動的に停止して`merging`を`blocked`へ確定させた
+     * （Issue #413 PR5）。`mergeInterrupted`と似ているが、止めたのは人ではなく
+     * タイムアウトである点が違う。この警告のあいだ、runの`haltedByUser`は変えない
+     * （このタスク以外の`pending`は通常どおり開始してよい。`mergeInterrupted`が
+     * 対応する`manual`/`interrupted`/`taskStopped`はタブ・View経由の人の操作で、
+     * run全体の停止を伴うのと対照的）。`git merge --abort`は呼んでいないため、
+     * 統合worktreeは衝突した状態のまま（Viewの「再マージ」で再開できる）。
+     */
+    | 'mergeApprovalTimeout'
+    /**
+     * `WorkflowRunner.stopTask()`が衝突解決セッションを止めたため、自動的に停止して
+     * `merging`を`blocked`へ確定させた（design.md §16.23、Issue #514）。`stopTask()`は
+     * オーケストレーターの`stop_task`とワークフローViewの「タスク停止」ボタンの共通の
+     * 入口で、どちらから呼ばれたかはここでは区別しない（`MergeResolutionEntry.
+     * stoppedByStopTask`が呼び出し元を区別せず立てるため）。
+     * `mergeApprovalTimeout`と同じく、止めたのはこのタスク単体への操作であり、runの
+     * `haltedByUser`は変えない（このタスク以外の`pending`は通常どおり開始してよい）。
+     * `mergeInterrupted`（`WorkflowRunner.stop()`＝全体停止の経路）との違いは「誰が・
+     * どの範囲を止めようとしたか」であり、`git merge --abort`は呼んでいない点は共通
+     * （統合worktreeは衝突した状態のまま、Viewの「再マージ」で再開できる）。
+     */
+    | 'mergeStopTaskStopped'
     /**
      * 疑似worktree（design.md §16.20）の統合が衝突した。3-way mergeができないため、
      * 同じファイルへの変更は全て衝突になる（このタスクは`blocked`になる）。
@@ -389,7 +480,17 @@ export interface WorkflowWarning {
      * （design.md §16.23「道具」）。人がYAMLに書いた指示が実行中に別のものへ変わるのは
      * Viewを見ている人から最も気付きにくい変化なので、黙って行わず必ず警告欄へ出す。
      */
-    | 'orchestratorPromptOverride';
+    | 'orchestratorPromptOverride'
+    /**
+     * `persist()`（実行状態の永続化、`store.update`）が失敗した（design.md §16.11、
+     * Issue #364）。ログ（`deps.log.error`）だけでは拡張機能のログ出力チャンネルを
+     * 開かない限り気づけないため、`reflectPseudoWorktree`（`pseudoWorktreeReflectBlocked`）
+     * と同様に`live.warnings`へも積み、Viewから気づけるようにする（Issue #379）。
+     * `persist()`は実行中に何度も呼ばれるため、同一runIdにつき直近1件へ丸める
+     * （`taskId`は持たない警告なので`mergeBusy`・`orchestratorPromptOverride`の
+     * 「同一taskIdの直近1件」ではなく「このrunの直近1件」に読み替える）。
+     */
+    | 'persistFailed';
   /** ワークフロー全体に関わる警告（gitignoreなど）は undefined。 */
   taskId: string | undefined;
   message: string;
@@ -455,6 +556,13 @@ export interface TaskSnapshot {
    * `true`の間、`revealTask`はこのタスク自身のセッションではなく衝突解決セッションを開く。
    */
   mergeResolutionActive: boolean;
+  /**
+   * `mergeResolutionActive`が`true`のとき、その解決セッションがいま承認待ちか
+   * （Issue #413 PR4）。`mergeResolutionActive`が`false`のときは常に`false`。
+   * Viewはこれで「マージ解決中（承認待ち）」と「マージ解決中」（LLMが作業中）の
+   * バッジを出し分ける。
+   */
+  mergeResolutionWaitingApproval: boolean;
   /**
    * このタスクのPR/MRの番号（design.md §16.11・§16.18、Issue #118）。作られていなければ
    * `undefined`（`pullRequestUrl`も`undefined`のとき、Viewはリンクの欄を出さない）。
@@ -707,6 +815,67 @@ export interface LiveOrchestrator {
   unreadCount: number;
 }
 
+/**
+ * `live.mergeResolutions`の値（Issue #413 PR4・PR5）。
+ *
+ * `waitingApprovalSinceMs`は、その解決セッションがいま承認待ちかどうかの印であり、
+ * 承認待ちで**ない**間は`undefined`。`runnerMerge.ts`の`startMergeResolution`が
+ * `session.onStateChanged`（`state.approvals.length > 0`）を見て更新する。PR4時点では
+ * 「承認待ちかどうか」（`!== undefined`）としてしか使っていなかったが、PR5からは
+ * `approvalTimeoutTimer`の起点（経過時間の計算）としても使う。
+ */
+export interface MergeResolutionEntry {
+  session: TaskSession;
+  waitingApprovalSinceMs: number | undefined;
+  /**
+   * 承認待ちのアイドルタイムアウト（`agent.workflows.mergeApprovalTimeoutSec`、
+   * Issue #413 PR5）用に張った`setTimeout`のハンドル。`waitingApprovalSinceMs`が変わる
+   * （承認待ちに入る・抜ける）たびに`runnerMerge.ts`が張り直す。承認待ちで**ない**間、
+   * または解決セッションそのものが終わった後は`undefined`。
+   *
+   * ポーリング（`setInterval`。`runnerMessaging.ts`の`waitingReplyPollTimer`と同じ形）
+   * ではなくエントリごとの`setTimeout`にしてあるのは、衝突解決セッションが
+   * `live.messaging`（タスク間メッセージング。省略可能）とは無関係に発生するため
+   * （design.md §16.21のポーリングタイマーへ相乗りすると、メッセージングを使わない実行で
+   * タイムアウトが一切効かなくなる）。
+   */
+  approvalTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * このセッションが承認待ちタイムアウトで自動停止されたかどうかの印（Issue #413 PR5）。
+   *
+   * `TaskSession.stopLoop()`は理由を`'taskStopped'`としてしか`onFinished`へ伝えられない
+   * ため、`runnerMerge.ts`の`finishMergeResolution`は`reason === 'taskStopped'`だけでは
+   * 「人が`WorkflowRunner.stop()`（全体停止）を押した」のか「このセッションだけが承認待ち
+   * タイムアウトで自動的に止まった」のかを区別できない。両者は扱いが異なる:
+   * 前者は既存の非破壊分岐（Issue #443）どおりrun全体を`haltedByUser`にする。後者は
+   * このタスク**だけ**を`blocked`にし、run全体は止めない（他の`pending`タスクは
+   * 通常どおり開始してよい）。この印を`finishMergeResolution`が読んで分岐を切り替える。
+   */
+  timedOutByApprovalTimeout: boolean;
+  /**
+   * `WorkflowRunner.stopTask()`が、このタスク単体を狙って`stopLoop()`を呼んだ印。
+   *
+   * `stopTask()`はオーケストレーターの`stop_task`（design.md §16.23、Issue #514）と
+   * ワークフローViewの「タスク停止」ボタン（`src/view/workflowScript.ts`。`merging`タスクへの
+   * 表示はIssue #514で意図的に追加された）の**共通の入口**で、呼び出し元は区別されない。
+   * `timedOutByApprovalTimeout`と同じ理由で必要になる。`TaskSession.stopLoop()`は理由を
+   * `'taskStopped'`としてしか`onFinished`へ伝えられないため、`runnerMerge.ts`の
+   * `finishMergeResolution`は`reason === 'taskStopped'`だけでは「人が
+   * `WorkflowRunner.stop()`（全体停止）を押した」のか「`stopTask()`経由でこのタスク
+   * だけを止めた」のかを区別できない。前者はrun全体を`haltedByUser`にする
+   * （`applyLoopStopReason`）。後者はこのタスク**だけ**を`blocked`にし、run全体は
+   * 止めない（他の`pending`タスクは通常どおり開始してよい）。区別しないと、
+   * `stop_task`または「タスク停止」ボタンが`merging`のタスクを止めただけで無関係な
+   * 他タスクへの`retry_task`/`continue_task`/`decide_approval`まで「人が全体を停止した」
+   * という偽の理由で拒否されてしまう（Issue #514）。
+   *
+   * `WorkflowRunner.stopTask`が`live.mergeResolutions`側へ`stopLoop()`を送る直前に立てる。
+   * `WorkflowRunner.stop()`（全体停止）からの`stopLoop()`はこのフラグを立てない
+   * （引き続き`false`のまま送るため、既存の`mergeInterrupted`分岐へ合流する）。
+   */
+  stoppedByStopTask: boolean;
+}
+
 /** `LiveTask`と同じ理由（直前のコメント参照）で`export`する（Issue #147）。 */
 export interface LiveRun {
   runId: string;
@@ -719,6 +888,15 @@ export interface LiveRun {
   runState: RunState;
   tasks: Map<string, LiveTask>;
   finished: boolean;
+  /**
+   * run終了時の後始末（`pump()`の終了ブロック）を実行済みかどうか（design.md §16.5、Issue #432-2）。
+   *
+   * `finished`は`retryMerge`/`retryTask`/`continueTask`が再開の起点として`false`へ戻すため、
+   * run全体が再び終了状態へ確定すると終了ブロックの2周目が走りうる。`finishedNotified`は
+   * それとは別に**一度立てたら戻さない**（再開そのものは正当な操作であり、後始末を1度に
+   * 絞りたいだけなので、`finished`と違って再開時にリセットしない）。
+   */
+  finishedNotified: boolean;
   /** design.md §16.8「警告欄」。発生した順に積む（`maxReached` はスナップショット生成時に動的に足す）。 */
   warnings: WorkflowWarning[];
   /**
@@ -749,6 +927,15 @@ export interface LiveRun {
     | {
         integrationDir: string;
         queue: PseudoWorktreeIntegrationQueue;
+        /**
+         * ワークスペースの直近の既知の状態。`resolvePseudoState`が実行開始時／復元時に
+         * 一度取ったスナップショットで初期化されるが、その後は固定ではない。
+         * `reflectPseudoWorktree`がワークスペースへの反映に成功する（一部適用を含む）
+         * たびに、反映後の実際の状態へ更新する（Issue #511）。反映を拒否した
+         * （`workspaceChanged`）場合は更新しない。書き込みが起きていないため、
+         * 拒否した人の編集を「自分が書いた状態」として取り込むと、以後その編集を
+         * 検知できなくなってしまう。
+         */
         baseline: Snapshot;
         exclude: readonly string[];
       }
@@ -760,6 +947,10 @@ export interface LiveRun {
    * `waitingReplyPollTimer`は待ちぼうけ検出（`checkWaitingReplyStalls`）を定期的に
    * 走らせるタイマー。`messaging`と同時に作り、run終了時に一緒に止める
    * （`finishRun`参照）。`.unref()`しているためテスト・プロセス終了を妨げない。
+   *
+   * 解放は`closeMessaging`（`runnerMessaging.ts`）に一本化してある。run終了時と
+   * 拡張機能の終了時（`dispose()`）の両方から呼ばれ、閉じた時点でこのフィールドは
+   * `undefined`へ戻る（二重解放を防ぐ印を兼ねる。Issue #374）。
    */
   messaging:
     | {
@@ -769,11 +960,52 @@ export interface LiveRun {
       }
     | undefined;
   /**
+   * `messaging.hub`と同じインスタンスを、`messaging`が`closeMessaging`で`undefined`へ
+   * 戻った後も持ち続けるための参照（Issue #475）。
+   *
+   * `ensureMessaging`（`retryTask` / `retryMerge`成功後の`pending`再開が通る
+   * `prepareTaskLaunch`の単一チョークポイント）が、run終了後にメッセージングを
+   * 立て直すとき、ここに残っている`hub`があればそれを再利用し、無ければ新規に作る。
+   * hubを作り直すと`MAX_MESSAGES_PER_RUN`（500件）のカウンタと未配送キューが
+   * リセットされ、「run全体で500件」という上限が再開のたびに緩んでしまうため、
+   * transport・タイマーだけを`closeMessaging`/`ensureMessaging`で開け閉めし、
+   * hub自体は同じrunが`this.runs`に残っている間ずっと生かす。
+   *
+   * ウィンドウのリロード後に復元した実行（`rebuildLiveRun`）では`undefined`のまま
+   * 始まる。復元はこのプロセスでまだhubを作っていないため再利用のしようがなく、
+   * `ensureMessaging`が最初の`retryTask`等で新規に作る（`messaging: undefined`と
+   * 同じ「無くても実行は止めない」設計）。
+   */
+  messagingHub: TaskMessagingHub | undefined;
+  /**
+   * `ensureMessaging`の多重起動を防ぐための進行中Promise（Issue #475）。
+   *
+   * 再マージ成功で複数の`pending`タスクが一斉に`pump()`される経路（`markMergeSucceeded`が
+   * 後続を`pending`へ戻す）では、`prepareTaskLaunch`が同じtickで複数回呼ばれうる。
+   * `ensureMessaging`は`await`を挟むため、進行中のセットアップを待たずに後続の呼び出しが
+   * 素通りすると、MCPサーバ（`startTransport`）とポーリングタイマーが二重に立ってしまう。
+   * ここへ進行中のPromiseを積み、後続の呼び出しはそれを待つだけにする。
+   */
+  messagingSetupInFlight: Promise<void> | undefined;
+  /**
+   * `startMessagingTransport`がMCPサーバの起動に失敗して警告を出した回数（Issue #475/
+   * PR #495レビュー指摘: low〜medium）。`MAX_MESSAGING_STARTUP_WARN_COUNT`を超えたら
+   * 個別の警告ログを止める。`messaging.ts`の`dispatchErrorLogCount`と同じ理由で、
+   * runが生きている間ずっと引き継ぐ必要があるため`live`（`messagingHub`と同様、
+   * `ensureMessaging`の再構築をまたいで残るフィールド）へ持たせる。
+   */
+  messagingStartupWarnCount: number;
+  /**
    * 衝突解決セッション（design.md §16.17「コンフリクト」5.「解決用セッションは依存グラフの
    * ノードにはしない」）。`live.tasks`（グラフのノード＝通常のタスク）とは別に持つ。
    * taskIdをキーにする（1タスクにつき同時に1件のマージしか走らない）。
+   *
+   * 値は`TaskSession`単体ではなく`MergeResolutionEntry`（Issue #413 PR4）。承認待ちの
+   * 可視化（Viewのバッジ出し分け）と、`maxParallel`の枠から承認待ちの解決セッションを
+   * 除外する判定（`pump`→`nextTasksToStart`の`excludeFromActiveCount`）の両方に、
+   * 「いま承認待ちか」を持ち回る必要があるため。
    */
-  mergeResolutions: Map<string, TaskSession>;
+  mergeResolutions: Map<string, MergeResolutionEntry>;
   /**
    * オーケストレーターセッション（design.md §16.23）。runごとに1つ。開始に失敗した場合と、
    * リロード後に復元しただけの実行では`undefined`（会話は復元できないため。§16.11）。
@@ -831,6 +1063,24 @@ class SimpleEmitter<T> {
   }
 }
 
+/**
+ * `WorkflowRunner.dispose()`の解放を1件ずつ包む（Issue #374）。
+ *
+ * 拡張機能の終了時の後始末なので、1つの解放が投げてもそこで打ち切らず残りを続ける。
+ * 打ち切るとCLIの子プロセスやlisten中のソケットが取り残される。失敗はログに残すだけで
+ * 呼び出し側へは伝えない（`dispose()`の呼び出し元はVSCodeのdeactivateで、投げ返しても
+ * できることが無い）。
+ */
+function disposeQuietly(log: Logger, release: () => void, label?: string): void {
+  try {
+    release();
+  } catch (e) {
+    const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+    const where = label === undefined ? '' : `（${label}）`;
+    log.warn(`[workflow] 終了時の解放に失敗しました${where}: ${message}`);
+  }
+}
+
 export class WorkflowRunner {
   /**
    * 分割後のファイル（`runnerSnapshot.ts`等、Issue #147）からは`self.runs`として読むが、
@@ -854,6 +1104,32 @@ export class WorkflowRunner {
   private readonly integrationQueue: IntegrationMergeQueue;
 
   /**
+   * `dispose()`が始まった印（Issue #374のレビュー指摘high）。
+   *
+   * `TaskSession.dispose()`は実装（`chatManagerBase.ts`の`teardown()`）が
+   * `loop.stop('manual')`を先に呼ぶため、走行中のタスクを解放すると`onFinished`が
+   * `manual`で**同期的に**発火する。`live.finished`は`pump()`が次のタスクを始めないための
+   * 印でしかなく、`onTaskFinished`自体の再入は止められない。素通しすると
+   * `applyLoopStopReason('manual')`がrun全体を「人が手動停止した」ことにして
+   * （未着手の`pending`は全て`skipped`）永続化してしまい、deactivateしただけの実行が
+   * 次の起動で続きから進まなくなる。同じ理由で`runnerMerge.ts`の`finishMergeResolution`
+   * （衝突解決セッションの解放が呼び戻す）も黙らせる（`WorkflowRunnerInternals.isDisposing`）。
+   * `blockMergeAfterLeaseWait`（`releaseAllLeases()`が起こす順番待ち）にも同じガードを
+   * 置いてあるが、こちらは実際には効いていない多層防御（レビュー3周目のmedium）:
+   * `dispose()`は`live.finished`を全runぶん立て終えてから`releaseAllLeases()`を1回呼び、
+   * 起こされた側の継続はマイクロタスクなので、破棄由来の待機起こしは`decideAfterLeaseWait`が
+   * `live.finished`を見て必ず`skip`へ倒す（`blockMergeAfterLeaseWait`のコメント参照）。
+   * それでも`blocked`確定が後戻りできない書き換えである以上、判定条件が将来変わったときの
+   * 保険として残してある。**`persist()`の入口で止める形は採らない**: キュー待ちのpersistには
+   * 効かず、破棄直前に確定した値（PRのURL・マージ成功）まで落とすため（`persist()`のコメント参照）。
+   *
+   * 一度立てたら下ろさない。`dispose()`の後にこのrunnerを使い続ける経路は無い
+   * （VSCodeのdeactivate時にだけ呼ばれる）。再入を印で黙らせる形は、衝突解決セッションの
+   * `abandoned`（`runnerMerge.ts`、Issue #412のレビュー指摘D）と同じ考え方。
+   */
+  private disposing = false;
+
+  /**
    * 分割後のファイル（`runnerSnapshot.ts`等、Issue #147）へ渡す内部の口
    * （`runnerInternals.ts`のJSDoc参照）。
    *
@@ -875,6 +1151,7 @@ export class WorkflowRunner {
       deps: this.deps,
       runs: this.runs,
       integrationQueue: this.integrationQueue,
+      isDisposing: () => this.disposing,
       notify: (runId) => this.notify(runId),
       pump: (runId) => this.pump(runId),
       persist: (runId) => this.persist(runId),
@@ -1094,23 +1371,93 @@ export class WorkflowRunner {
   }
 
   /**
-   * タスク間メッセージング（design.md §16.21）。省略可能（`WorkflowRunnerDeps.messaging`
-   * のJSDoc参照）。MCPサーバの起動に失敗しても実行は止めない。
+   * タスク間メッセージング（design.md §16.21）を、生きていなければ立てる（Issue #475）。
+   * 省略可能（`WorkflowRunnerDeps.messaging`のJSDoc参照）。MCPサーバの起動に失敗しても
+   * 実行は止めない。
+   *
+   * **冪等**: `live.messaging`が既に生きていれば何もしない。
+   *
+   * **`prepareTaskLaunch`の`registerTask`直前という単一のチョークポイントから呼ぶ**
+   * （`start()`からも呼ぶが、これは最初のタスクが`prepareTaskLaunch`へ届くより前に
+   * オーケストレーターセッション（`setupOrchestratorForStart`）が接続用URLを要求するため。
+   * `live.messaging`が既に生きていれば以降は何もしないので二重には立たない）。
+   * `retryTask` / `continueTask` / `retryMerge`へ個別に呼び出しを足さない。新しい
+   * セッションを開く経路は必ず`prepareTaskLaunch`を通るため、呼び出し漏れが構造的に
+   * 起きない。`continueTask`（生きているセッションへ`runLoop`を掛け直すだけ）は
+   * `prepareTaskLaunch`を経由しないため対象外（design.md「MCP URLは差し替えられない」、
+   * Issue #475の調査コメント参照）。
+   *
+   * **hubは捨てず、`live.messagingHub`にあれば再利用する。** transportとタイマーだけを
+   * 立て直す。作り直すと`MAX_MESSAGES_PER_RUN`（500件）のカウンタと未配送キューが
+   * リセットされ、「run全体で500件」という上限が再開のたびに緩む。
+   *
+   * **同時に複数タスクが起動する経路（再マージ成功で複数の`pending`が一斉に`pump()`
+   * される）でも二重に立てない。** `live.messagingSetupInFlight`へ進行中のPromiseを積み、
+   * 後続の呼び出しはそれを待つだけにする。
    */
-  private async setupMessagingForStart(
+  private async ensureMessaging(runId: string, live: LiveRun): Promise<void> {
+    // 破棄中・破棄後は新規に立てない（Issue #475/PR #495レビュー指摘: high）。
+    // `dispose()`が完了した後に、それより前から`await`で止まっていた`startTask`の
+    // 継続（`resolveWorkingDirectory`等の`await`点）がここへ届くことがある。
+    // `this.runs`からrunを消す経路が無いため、`live`は`dispose()`後も解決できてしまい、
+    // 入口を守らないと生きたままの`live.messagingHub`を再利用しつつ新しいHTTPリスナーと
+    // タイマーを立ててしまう。`dispose()`は二度と呼ばれないため、この資源を閉じる経路が
+    // 無くなる（Issue #374が塞いだのと同じ形のリーク）。`onTaskFinished`
+    // （`this.disposing`のJSDoc参照）と同じ作法に揃える
+    if (this.disposing) {
+      return;
+    }
+    const messaging = this.deps.messaging;
+    if (messaging === undefined || live.messaging !== undefined) {
+      return;
+    }
+    if (live.messagingSetupInFlight !== undefined) {
+      await live.messagingSetupInFlight;
+      return;
+    }
+    const setup = this.startMessagingTransport(runId, live, messaging);
+    live.messagingSetupInFlight = setup;
+    try {
+      await setup;
+    } finally {
+      live.messagingSetupInFlight = undefined;
+    }
+  }
+
+  /** `ensureMessaging`の実処理。hubの再利用・transport/タイマーの起動・失敗時の警告ログを行う。 */
+  private async startMessagingTransport(
     runId: string,
     live: LiveRun,
     messaging: WorkflowRunnerMessagingDeps,
   ): Promise<void> {
-    const hub = new TaskMessagingHub({
-      listRunTasks: () => buildRunTaskSnapshots(this.internals, runId),
-      onAccepted: (message) => onMessageAccepted(this.internals, runId, message),
-      // オーケストレーター専用の接続にだけ見せる制御ツール（design.md §16.23）。
-      // Viewのボタンと同じ公開メソッド（`this`）を通す
-      orchestratorControl: buildOrchestratorControlPort(this.internals, this, runId),
-    });
+    const hub =
+      live.messagingHub ??
+      new TaskMessagingHub({
+        listRunTasks: () => buildRunTaskSnapshots(this.internals, runId),
+        onAccepted: (message) => onMessageAccepted(this.internals, runId, message),
+        // オーケストレーター専用の接続にだけ見せる制御ツール（design.md §16.23）。
+        // Viewのボタンと同じ公開メソッド（`this`）を通す
+        orchestratorControl: buildOrchestratorControlPort(this.internals, this, runId),
+      });
+    live.messagingHub = hub;
     try {
-      const transport = await messaging.startTransport(hub);
+      // dispatch例外の記録先（Issue #375）。`log.ts`はVSCode APIへ依存するため、
+      // `messaging.ts`（VSCode非依存方針）へは直接渡さず最小限のportで包む
+      const logPort: DispatchErrorLogPort = { error: (message) => this.deps.log.error(message) };
+      const transport = await messaging.startTransport(hub, logPort);
+      // `await`の間に`dispose()`が走り抜ける窓がある（Issue #475/PR #495レビュー指摘:
+      // high）。ここで立て終えたtransportを`live.messaging`へ渡す前にもう一度確認し、
+      // 破棄済みなら誰にも参照させずその場で閉じる。渡してしまうと、二度と呼ばれない
+      // `dispose()`/`closeMessaging`に代わってこのHTTPリスナーとタイマーを閉じる経路が
+      // 無くなる
+      if (this.disposing) {
+        disposeQuietly(
+          this.deps.log,
+          () => void Promise.resolve(transport.close()).catch(() => undefined),
+          `messaging(disposed during startup) ${runId}`,
+        );
+        return;
+      }
       const waitingReplyPollTimer = setInterval(
         () => checkWaitingReplyStalls(this.internals, runId),
         WAITING_REPLY_POLL_INTERVAL_MS,
@@ -1118,9 +1465,39 @@ export class WorkflowRunner {
       waitingReplyPollTimer.unref?.();
       live.messaging = { hub, transport, waitingReplyPollTimer };
     } catch (e) {
+      this.warnMessagingStartupFailure(runId, live, e);
+    }
+  }
+
+  /**
+   * MCPサーバの起動失敗警告を、runにつき`MAX_MESSAGING_STARTUP_WARN_COUNT`件までに丸める
+   * （Issue #475/PR #495レビュー指摘: low〜medium）。`ensureMessaging`は`live.messaging`が
+   * `undefined`である限りタスク起動のたびに再試行するため、MCPサーバが恒常的に起動できない
+   * 環境では同じ警告がタスク数・retry回数に比例して無制限に増える。`messaging.ts`の
+   * `logDispatchError`（Issue #375、PR #488）と同じ規律（件数上限＋抑制中の集計ログ）に揃える。
+   * 再試行そのものは止めない（環境が回復すれば次の`ensureMessaging`呼び出しで普通に繋がる）。
+   */
+  private warnMessagingStartupFailure(runId: string, live: LiveRun, e: unknown): void {
+    live.messagingStartupWarnCount += 1;
+    const count = live.messagingStartupWarnCount;
+    if (count <= MAX_MESSAGING_STARTUP_WARN_COUNT) {
       const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
       this.deps.log.warn(
         `[workflow ${runId}] MCPサーバの起動に失敗したため、タスク間メッセージングなしで実行します: ${message}`,
+      );
+      if (count === MAX_MESSAGING_STARTUP_WARN_COUNT) {
+        this.deps.log.warn(
+          `[workflow ${runId}] MCPサーバ起動失敗の警告記録が上限（${MAX_MESSAGING_STARTUP_WARN_COUNT}件）に` +
+            '達したため、このrunではこれ以降、個別の記録を抑制します（再試行自体は続けます）',
+        );
+      }
+      return;
+    }
+    const suppressedCount = count - MAX_MESSAGING_STARTUP_WARN_COUNT;
+    if (suppressedCount % MESSAGING_STARTUP_WARN_SUPPRESSION_INTERVAL === 0) {
+      this.deps.log.warn(
+        `[workflow ${runId}] MCPサーバ起動失敗の警告記録は抑制中です（このrunで抑制開始以降 ` +
+          `${suppressedCount}件発生）`,
       );
     }
   }
@@ -1219,6 +1596,7 @@ export class WorkflowRunner {
       runState: createRunState(def.tasks),
       tasks: new Map(),
       finished: false,
+      finishedNotified: false,
       warnings,
       integration,
       forge,
@@ -1226,6 +1604,9 @@ export class WorkflowRunner {
       draftPullRequest,
       pseudo,
       messaging: undefined,
+      messagingHub: undefined,
+      messagingSetupInFlight: undefined,
+      messagingStartupWarnCount: 0,
       mergeResolutions: new Map(),
       orchestrator: undefined,
       orchestratorSeenStates: new Map(),
@@ -1234,11 +1615,9 @@ export class WorkflowRunner {
     };
     this.runs.set(runId, live);
 
-    if (this.deps.messaging !== undefined) {
-      await this.setupMessagingForStart(runId, live, this.deps.messaging);
-    }
+    await this.ensureMessaging(runId, live);
     // オーケストレーターセッション（design.md §16.23）。MCPサーバ（上の
-    // `setupMessagingForStart`）の後に開くのは、制御ツール用の接続URLをそこから
+    // `ensureMessaging`）の後に開くのは、制御ツール用の接続URLをそこから
     // 発行するため。失敗しても実行は止めない。
     //
     // **`await`しない。** CLIの起動を待つあいだタスクの開始が止まってしまい、
@@ -1281,8 +1660,12 @@ export class WorkflowRunner {
    * そちらは `reason === 'done'` かつgit上も解決済みのときだけ `done` にする。
    * **`'taskStopped'` ではマージを巻き戻さない**（issue #434）。人が統合worktreeで解いている
    * 途中の未コミットの解決結果を `git merge --abort` が破棄してしまい、復旧手段が無いため。
-   * タブへの直接介入（`'manual'` / `'interrupted'`）と同じ非破壊の経路へ合流し、タスクは
-   * `merging` のまま統合worktreeの占有だけが解放される（issue #412と同じ論法）。
+   * タブへの直接介入（`'manual'` / `'interrupted'`）と同じ非破壊の経路へ合流するが、タスクを
+   * `merging` のまま残しはしない。**`blocked` へ確定させ、統合worktreeの占有だけを解放する**
+   * （issue #443・案A）。`merging` のまま残すと `getRunOutcome` が `running` を返し続け、
+   * run が終了確定せず「再マージ」（`blocked` からしか動かない）の対象にもならない行き止まりに
+   * なるため。`git merge --abort` は呼ばないため、巻き戻していない事実は `mergeInterrupted`
+   * 警告（`live.warnings`）で伝える。
    */
   stop(runId: string): void {
     const live = this.runs.get(runId);
@@ -1292,6 +1675,10 @@ export class WorkflowRunner {
     // `manual` / `interrupted` の遷移はtaskIdを使わない（実装上の事実。runState.ts参照）ため
     // 空文字で十分だが、意図を示すため定数として明示しておく
     const NO_SPECIFIC_TASK = '';
+    // `applyLoopStopReason`で書き換える前の値を見ておく。`stop()`は複数回呼ばれ得る
+    // （Webviewの`stopAll`は`haltedByUser`の現在値を見ずに毎回呼ぶ）ため、既に停止済みの
+    // runへ何度呼んでも通知イベントが積み増されないよう、false→trueへ遷移した回だけ通知する
+    const wasHaltedByUser = live.runState.haltedByUser;
     live.runState = applyLoopStopReason(live.runState, live.def.tasks, NO_SPECIFIC_TASK, 'manual');
     // `stopLoop()` は完了検知経路（`onFinished` → `onTaskFinished`）へ合流し、その中で
     // `live.runState` と `live.tasks` が書き換わる。走らせながら絞り込むと取りこぼすため、
@@ -1306,8 +1693,16 @@ export class WorkflowRunner {
     // 衝突解決セッションは`live.tasks`に無い別枠の管理（`revealTask`と同じ扱い）のため、
     // 上のフィルタには乗らない。生きているものへ全て送る（対象は`merging`のタスクだけの
     // はずで、常に1件ずつしか無いが、複数あっても構わない形にしておく）
-    for (const mergeResolutionSession of live.mergeResolutions.values()) {
-      mergeResolutionSession.stopLoop();
+    for (const entry of live.mergeResolutions.values()) {
+      entry.session.stopLoop();
+    }
+    // 停止直後は走行中タスクの`stopLoop()`がまだ確定していない（進行中のターンには
+    // 割り込まない）ため、オーケストレーターの視点では通常の`taskFailed`しか届かず
+    // 「人が止めた」と分からない（issue #401）。制御ツール側の拒否とは別に、ここで
+    // 明示のイベントを送る。ただし既に`haltedByUser`だったrunへ`stop()`が重ねて呼ばれても
+    // 同じ通知を積み増さない（`MAX_ORCHESTRATOR_EVENTS_PER_RUN`の浪費と同一文言の重複を防ぐ）
+    if (!wasHaltedByUser && live.runState.haltedByUser) {
+      notifyOrchestratorRunHalted(this.internals, runId);
     }
     this.notify(runId);
     void this.persist(runId);
@@ -1333,9 +1728,9 @@ export class WorkflowRunner {
     if (live === undefined) {
       return false;
     }
-    const mergeResolutionSession = live.mergeResolutions.get(taskId);
-    if (mergeResolutionSession !== undefined) {
-      mergeResolutionSession.reveal();
+    const mergeResolutionEntry = live.mergeResolutions.get(taskId);
+    if (mergeResolutionEntry !== undefined) {
+      mergeResolutionEntry.session.reveal();
       return true;
     }
     const liveTask = live.tasks.get(taskId);
@@ -1366,13 +1761,120 @@ export class WorkflowRunner {
    * 通常の完了検知経路（`onFinished` → `onTaskFinished`）へ合流する。そちら側で
    * `applyLoopStopReason` が `manualStop` として確定し、セッションの解放とworktreeの
    * 撤去判定まで一貫して行われるため、ここでは呼び出すだけでよい。
+   *
+   * **戻り値は「送り先を見つけて`stopLoop()`を呼べたか」（issue #514）。**
+   * 見つからなければ`false`を返し、決して成功のふりをしない。理由は次のとおり。
+   *
+   * 以前は `live.tasks` しか見ておらず、衝突解決セッション（`live.mergeResolutions`。
+   * `runnerMerge.ts` の `startMergeResolution`）は対象外だった。しかも戻り値が`void`
+   * だったため、`runnerOrchestrator.ts` は届いたかどうかに関係なく無条件で「止めました」
+   * という成功応答をオーケストレーターへ返していた（issue #381で`stop()`だけが同じ穴を
+   * 塞がれ、`stopTask()`には非対称に手当てが漏れていた）。
+   *
+   * **一般則: 停止要求が実際にどのセッションへも届かなかった場合は必ず失敗を返す。**
+   * `live.mergeResolutions`を1つ足して届くようにするだけでは不十分で、将来また別の
+   * 保管場所へセッションが増えたとき同じ欠陥を再生産する。そのため「対象を保持する
+   * Mapにエントリがあるか」ではなく、**`TaskSession.stopLoop()`
+   * （実体は`LoopController.stop()`）が実際にループを止められたかの`boolean`**を
+   * 戻り値の根拠にする。`live.tasks`のエントリは`onTaskFinished`後も削除されない
+   * ため、存在チェックだけでは「セッションはまだ残っているが、ループは既に終わって
+   * いて何も起きなかった」呼び出しを成功と誤判定してしまう（`merging`のタスクが
+   * まさにこの形）。
+   *
+   * 嘘の成功応答は、人よりAIエージェント（オーケストレーター）に対して有害である。
+   * 人はワークフローViewを見て「止まっていない」に気づけるが、オーケストレーターは
+   * 制御ツールの応答（`accepted`）しか見ないため、一度成功を騙ると以後その経路を
+   * 二度と再試行しない。
+   *
+   * 送り先は`live.mergeResolutions`を先に見る（`revealTask`と同じ順序）。`merging`の
+   * タスクは`live.tasks`のエントリが残ったまま（`onTaskFinished`で`dispose()`済み・
+   * ループも停止済み）なので、`live.tasks`を先に見ると常に「見つかった」ことに
+   * なってしまい、衝突解決セッション側へ本来届けるべき`stopLoop()`が届かなくなる。
+   *
+   * **この修正（issue #514）より前は、`merging`のタスク1件だけを狙って止めたはずが、
+   * `runnerMerge.ts`の`finishMergeResolution`側の既存分岐（`reason === 'taskStopped'`）
+   * により実行全体が停止（`haltedByUser`）していた。** `stop()`（全体停止）が衝突解決
+   * セッションへ送る`stopLoop()`と同じ`'taskStopped'`しか`onFinished`へ伝わらず、
+   * どちらが送ったのか区別できなかったためである。現在は下の`mergeResolutionEntry.
+   * stoppedByStopTask`を`stopLoop()`より先に立てて送り元を印し、
+   * `finishMergeResolution`側がそれを見て他のタスクを止めずにこのタスクだけを
+   * `blocked`にできるようにしている（`MergeResolutionEntry.stoppedByStopTask`の
+   * JSDoc参照）。
    */
-  stopTask(runId: string, taskId: string): void {
-    const liveTask = this.runs.get(runId)?.tasks.get(taskId);
-    if (liveTask === undefined) {
-      return;
+  stopTask(runId: string, taskId: string): boolean {
+    const found = this.findStoppableSessionEntry(runId, taskId);
+    if (found === undefined) {
+      return false;
     }
-    liveTask.session.stopLoop();
+    if (found.kind === 'mergeResolution') {
+      // `runnerMerge.ts`の`finishMergeResolution`がrun全体を止めずにこのタスクだけを
+      // `blocked`にできるよう、`stopTask()`経由（`stop_task`／Viewの「タスク停止」の
+      // どちらでも同じ）であることを先に印しておく（Issue #514。
+      // `MergeResolutionEntry.stoppedByStopTask`のJSDoc参照）。`stopLoop()`を呼んだ**後**に
+      // 立てると、同期的に発火しうる`onFinished`（`finishMergeResolution`）に間に合わない
+      // 場合があるため、必ず先に立てる
+      found.entry.stoppedByStopTask = true;
+    }
+    return found.entry.session.stopLoop();
+  }
+
+  /**
+   * `stopTask`が実際に対象を見つけられたか（＝止められるループが元々あったか）だけを
+   * 返す（Issue #514）。`stopTask`の戻り値（`session.stopLoop()`の結果）は「見つからな
+   * かった」と「見つかったが既に終わっていた」を区別できない（`LoopController.stop`は
+   * 走っていないループへの呼び出しに`false`を返すため。`loopController.ts`参照）ため、
+   * `runnerOrchestrator.ts`の`stop_task`ツールが両者を別の文言で伝えるための補助として
+   * 別関数に切り出す。
+   *
+   * `live.tasks`のエントリは`onTaskFinished`後も消えないため、ここでの`true`は
+   * 「そのタスクへ送るセッションが存在する」ことしか意味しない（ループが走っているか
+   * どうかは見ない）。
+   *
+   * `stopTask`と同じ`findStoppableSessionEntry`を呼ぶことで「対象taskIdに紐づく
+   * セッションの候補」を単一箇所に集約している。**将来3つ目の保管場所が増えたときは、
+   * この関数を直接書き換えず、必ず`findStoppableSessionEntry`側へ追加すること。**
+   * ここへ`live.mergeResolutions`/`live.tasks`の探索を書き戻すと、`stopTask`とこの
+   * 関数の一致がコンパイルにもテストにも頼らない口約束へ戻ってしまう
+   * （レビュー指摘: medium）。
+   */
+  hasStoppableSession(runId: string, taskId: string): boolean {
+    return this.findStoppableSessionEntry(runId, taskId) !== undefined;
+  }
+
+  /**
+   * `stopTask`と`hasStoppableSession`が共に参照する「対象taskIdに紐づく、止められる
+   * 可能性のあるセッションの候補」を単一箇所に集約する（レビュー指摘: medium。issue
+   * #514）。2つが別々に`live.mergeResolutions`/`live.tasks`を探索していると、将来
+   * 3つ目の保管場所が増えたときに片方の更新を忘れてもコンパイルエラーにもテスト
+   * 失敗にもならない非対称が生まれる。ここへ集約すれば、保管場所を1つ追加し忘れた
+   * 側が必ず古いままの`findStoppableSessionEntry`を呼び続け、両者が揃って古いか
+   * 揃って新しいかのどちらかにしかならない。
+   *
+   * **探索順は`live.mergeResolutions`を`live.tasks`より先に見る**（`revealTask`と同じ
+   * 順序。`stopTask`のJSDoc参照）。`merging`のタスクは`live.tasks`のエントリが
+   * `onTaskFinished`後も残ったまま（`dispose()`済み・ループも停止済み）なので、
+   * `live.tasks`を先に見ると常に「見つかった」ことになってしまい、衝突解決セッション
+   * 側へ本来届けるべき`stopLoop()`が届かなくなる。この順序を変えると
+   * `stopTask`は壊れるが、`hasStoppableSession`は（両方に無いか両方にあるかだけを
+   * 見るので）気づかない。**探索順のテストは`stopTask`側に置く**理由はこのため。
+   */
+  private findStoppableSessionEntry(
+    runId: string,
+    taskId: string,
+  ): { kind: 'mergeResolution'; entry: MergeResolutionEntry } | { kind: 'task'; entry: LiveTask } | undefined {
+    const live = this.runs.get(runId);
+    if (live === undefined) {
+      return undefined;
+    }
+    const mergeResolutionEntry = live.mergeResolutions.get(taskId);
+    if (mergeResolutionEntry !== undefined) {
+      return { kind: 'mergeResolution', entry: mergeResolutionEntry };
+    }
+    const liveTask = live.tasks.get(taskId);
+    if (liveTask === undefined) {
+      return undefined;
+    }
+    return { kind: 'task', entry: liveTask };
   }
 
   /**
@@ -1487,20 +1989,89 @@ export class WorkflowRunner {
   }
 
   /**
-   * 拡張機能の終了時にオーケストレーターセッションを解放する（design.md §16.23
-   * 「セッションの生成と寿命」の`dispose`）。runの終了では解放しない（run完了後も
-   * 会話を続けられるようにするため）。
+   * 拡張機能の終了時に、実行中のrunが抱えている資源をすべて解放する（Issue #374）。
+   *
+   * 解放するもの:
+   *
+   * - オーケストレーターセッション（design.md §16.23「セッションの生成と寿命」の
+   *   `dispose`）。runの終了では解放しない（run完了後も会話を続けられるようにするため）ので、
+   *   ここが唯一の解放点になる
+   * - 各タスクの`TaskSession`（CLIの子プロセス）と衝突解決セッション
+   *   （`live.mergeResolutions`。どちらもrunが走っている間は生きている）
+   * - タスク間メッセージングのMCPサーバとポーリングタイマー（`closeMessaging`）。
+   *   run終了時の後始末（`pump()`）と同じ関数を呼ぶ。実行中のrunでは`pump()`の終了分岐を
+   *   通らないため、ここで閉じないとlisten中のソケットと`setInterval`が残る
+   * - 統合worktreeの占有（`releaseAllLeases()`）
+   *
+   * **1つの解放が例外を投げても残りを続ける**（`disposeQuietly`）。片付けの途中で
+   * 抜けるとCLIのプロセスやソケットが取り残されるため。
+   *
+   * **冪等**。解放したものは`undefined`にするかMapから消すので、2度目の呼び出しは
+   * 何もしない。
+   *
+   * runの状態（`runState`）は書き換えない。解放が呼び戻す経路（`onTaskFinished`と
+   * `runnerMerge.ts`の`finishMergeResolution`）は`disposing`が黙らせるため、メモリ上の
+   * `runState`が破棄中に汚れることが無い（`live.finished`・`disposing`はどちらもメモリ上の
+   * 印で、永続化される値ではない）。`blockMergeAfterLeaseWait`にも同じガードがあるが、
+   * 破棄由来の待機起こしは`live.finished`（このループで先に立てる）を見て`skip`へ倒される
+   * ため実際には呼ばれない多層防御（レビュー3周目のmedium、`blockMergeAfterLeaseWait`の
+   * コメント参照）。
+   *
+   * 一方で`persist()`自体は止めない。破棄より前に積まれたpersistはキュー待ちの間に
+   * `disposing`が立っても走り、しかもupdaterは`live.runState`を実行時点で読み直すため、
+   * 入口で止めても素通りされる（`persist()`のコメント参照）。汚染を止めるのは書き換え側の
+   * 責務で、その前提が立てば残りのpersistは「破棄の直前に確定した値」を正しく書き切る。
    */
   dispose(): void {
+    // 解放より先に立てる。走行中のセッションの解放が`onFinished`→`onTaskFinished`を
+    // 同期的に呼び戻すため、この印が無いとrun全体が手動停止として永続化される
+    // （フィールドのJSDoc参照）
+    this.disposing = true;
     for (const live of this.runs.values()) {
-      disposeOrchestrator(live);
-      // 統合worktreeの占有待ちで止まっているマージを、起こす前に「即戻る」状態にしておく
-      // （Issue #412のレビュー指摘6）。`releaseAllLeases()`で起き上がった待機者は
-      // `attemptMerge`の続きへ進むため、この印が無いと`markMergeFailed`→`persist`/`notify`が
-      // 破棄済みのEventEmitter・workspaceStateへ書き込む。起き上がった側は
-      // `decideAfterLeaseWait`が「占有が失効している」ことを見て何もせず戻るが、
-      // `live.finished`は`pump()`が新しいタスクを開始しないための印としても要る
+      // 解放より先に立てる。`session.dispose()`は`onFinished`を同期的に発火しうる
+      // （`chatView.ts`。テスト「catchのsession.dispose()」参照）ため、この印が無いと
+      // 片付けの最中に`pump()`が次のタスクを開始してしまう。
+      //
+      // 統合worktreeの占有待ちで止まっているマージを、起こす前に「即戻る」状態にする
+      // 役目も兼ねる（Issue #412のレビュー指摘6）。`releaseAllLeases()`で起き上がった
+      // 待機者は`attemptMerge`の続きへ進むため、この印が無いと`markMergeFailed`→
+      // `persist`/`notify`が破棄済みのEventEmitter・workspaceStateへ書き込む
       live.finished = true;
+      disposeQuietly(this.deps.log, () => disposeOrchestrator(live));
+      // 実行中のrunのタスクセッション（CLIの子プロセス）。run終了時に個別に解放される
+      // 経路（`onTaskFinished`）を通っていない、走行中のものと`maxReached`で残したもの
+      // （issue #284）がここへ来る。`dispose()`が`onFinished`経由で`live.tasks`を
+      // 書き換えうるので、対象を先に確定させてから解放する（`stop()`と同じ）
+      const taskEntries = [...live.tasks.entries()];
+      live.tasks.clear();
+      for (const [taskId, liveTask] of taskEntries) {
+        disposeQuietly(this.deps.log, () => liveTask.session.dispose(), `task ${taskId}`);
+      }
+      // 衝突解決セッション（design.md §16.17「コンフリクト」5.）は`live.tasks`の管理下に
+      // 無い別枠のため、個別に解放する（`stop()`と同じ扱い）
+      const mergeResolutionEntries = [...live.mergeResolutions.entries()];
+      live.mergeResolutions.clear();
+      for (const [taskId, entry] of mergeResolutionEntries) {
+        // 承認待ちタイムアウトのタイマー（Issue #413 PR5）。`entry.session.dispose()`が
+        // 例外を投げても解放されるよう、セッションの解放より先に・別のtry/catchで行う
+        // （`clearTimeout`自体が投げることは無いが、`disposeQuietly`の対象を1つに絞る）
+        clearTimeout(entry.approvalTimeoutTimer);
+        disposeQuietly(this.deps.log, () => entry.session.dispose(), `merge resolution ${taskId}`);
+      }
+      disposeQuietly(this.deps.log, () => closeMessaging(live), 'messaging');
+      // `closeMessaging`自体は`messagingHub`をクリアしない（`closeMessaging`は`dispose()`
+      // だけでなく、run正常終了時の`pump()`からも呼ばれる共通関数のため。そちらでは
+      // `retryTask`による再開が`messagingHub`を再利用する前提＝Issue #475の案A「hubを
+      // 捨てずに再利用する」がここに依存している。`closeMessaging`側でクリアすると、
+      // 通常のrun終了後の再開のたびに新しいhubが作られ、`MAX_MESSAGES_PER_RUN`のカウンタと
+      // 未配送キューがリセットされてしまい、この修正が守ろうとしているものを自ら壊す）。
+      //
+      // `dispose()`はここが唯一の別枠: 拡張機能の終了であり、このrunが再開されることは
+      // 二度と無い（`this.runs`からrunを削除する経路が無いため`live`自体は残り続けるが、
+      // `this.disposing`により`ensureMessaging`の入口で以後の再構築は止まる）。それでも
+      // `messagingHub`を握ったままにしておく理由が無いため、ここで明示的に手放す
+      // （**この非対称は意図的**。あとから「揃える」形で`closeMessaging`側にも足さないこと）
+      live.messagingHub = undefined;
     }
     // 統合worktreeの占有（Issue #412）の強制解放。通常は`runnerMerge.ts`側の`finally`が
     // 解放するが、解放漏れが1つでもあると以後そのrunのマージが全て待ち続ける。破棄時に
@@ -1627,13 +2198,18 @@ export class WorkflowRunner {
   }
 
   /**
-   * gitでないワークスペース（疑似worktree、design.md §16.20）の1タスク分の複製を撤去する
-   * （Issue #298「疑似worktreeが撤去対象にならない」）。
+   * gitでないワークスペース（疑似worktree、design.md §16.20）の1タスク分の複製を、
+   * すべての試行分撤去する（Issue #298「疑似worktreeが撤去対象にならない」、Issue #396）。
    *
    * **`blocked`のタスクの複製は残す。** gitならタスクブランチが残るため撤去しても
    * 中身を後から辿れるが、疑似worktreeにはブランチが無く、複製を消すと未統合の差分
    * （3-way mergeができず衝突として弾かれた分。design.md §16.20）を復元する手段が
    * 無くなってしまう。
+   *
+   * `totalAttempts`はgit側の`removeGitTaskWorktree`と同じ`state.retryCount +
+   * state.manualRetryCount`（Issue #396）。以前は`removePseudoWorktree`を`retry`無しで
+   * 1回呼ぶだけで、再試行のたびに`cloneWorkspace`が作った`-retry<n>`付きの複製が
+   * 撤去されずに残っていた。
    */
   private async removePseudoTaskWorktree(
     live: LiveRun,
@@ -1658,7 +2234,14 @@ export class WorkflowRunner {
     if (!usedPseudoWorktree) {
       return;
     }
-    const result = await removePseudoWorktree(live.repoRoot, runId, task.id, pseudoWorktreeDeps.fs);
+    const totalAttempts = state.retryCount + state.manualRetryCount;
+    const result = await removePseudoWorktreeAttempts(
+      live.repoRoot,
+      runId,
+      task.id,
+      totalAttempts,
+      pseudoWorktreeDeps.fs,
+    );
     if (result.ok) {
       removed.push(task.id);
     } else {
@@ -1693,9 +2276,13 @@ export class WorkflowRunner {
    * design.md §16.17「ブランチは消さない。PR/MRから辿れる必要がある」）。
    *
    * 疑似worktree（gitリポジトリでないワークスペース、design.md §16.20）では
-   * `live.pseudo`の統合先（`_integration`、`integrationPath`と同じ場所）を
-   * `removePseudoWorktree`で撤去する。gitと違い履歴が無いため「ブランチを残す」概念は
-   * 無いが、実体をまとめて消すという意味では同じ操作になる。
+   * `live.pseudo`の統合先（`_integration`、`integrationPath`と同じ場所）と、その
+   * 永続化マニフェスト（`manifest.json`、Issue #380）を`removePseudoIntegration`で
+   * まとめて撤去する。`_integration`だけを消してマニフェストを残すと、撤去後の
+   * リロードで`resolvePseudoState`が実体の無い`_integration`を指す古いマニフェストを
+   * 読み戻し、そのrunで再実行した際にワークスペース側のファイルを誤って再削除する
+   * （Issue #438）。gitと違い履歴が無いため「ブランチを残す」概念は無いが、実体を
+   * まとめて消すという意味では同じ操作になる。
    *
    * `onProgress`はタスク1件・統合先1件（対象がある場合）を処理するたびに呼ぶ
    * （Viewの`vscode.window.withProgress`から使う想定。Issue #298「進捗が分からない」。
@@ -1777,15 +2364,17 @@ export class WorkflowRunner {
             this.deps.git,
             this.deps.fs,
           )
-        : await removePseudoWorktree(
-            live.repoRoot,
-            runId,
-            INTEGRATION_DIR_NAME,
-            integrationTarget.fs,
-          );
+        : await removePseudoIntegration(live.repoRoot, runId, integrationTarget.fs);
     reportProgress('統合worktree');
     this.notify(runId);
     if (result.ok) {
+      // `removePseudoIntegration`はrunIdディレクトリの片付けが境界逸脱で失敗しても
+      // `_integration`/`manifest.json`の撤去自体は成功していれば`ok:true`を返し、
+      // 詳細を`warning`に載せる（Issue #438のレビュー指摘）。gitの撤去経路には
+      // 対応する`warning`が無いため、'warning' inで疑似worktree側だけを拾う。
+      if ('warning' in result && result.warning !== undefined) {
+        this.deps.log.warn(`[workflow ${runId}] ${result.warning}`);
+      }
       return {
         tasksRemoved: taskResult.removed,
         tasksFailed: taskResult.failed,
@@ -1829,13 +2418,25 @@ export class WorkflowRunner {
    * 状態が変わるたびに呼ぶ（design.md §16.3）。次に開始できるタスクを開始し、終了を判定する。
    * 分割後のファイル（Issue #147）から`self.pump(...)`として呼ぶ（公開範囲は
    * `WorkflowRunnerInternals`に閉じる）。
+   *
+   * **Issue #413 PR4: 承認待ちの解決セッションを`maxParallel`の枠から外す。** 承認待ち
+   * （`entry.waitingApprovalSinceMs !== undefined`）の`live.mergeResolutions`のtaskId
+   * 集合を`nextTasksToStart`の`excludeFromActiveCount`へ渡す。渡すのはここだけで、
+   * `getRunOutcome`・`checkWaitingReplyStalls`（`runnerMessaging.ts`）へは渡さない
+   * （design.md §16.3の例外の説明・`scheduler.ts`のJSDoc参照）。
    */
   private pump(runId: string): void {
     const live = this.runs.get(runId);
     if (live === undefined || live.finished) {
       return;
     }
-    const toStart = nextTasksToStart(live.def, live.runState);
+    const excludeFromActiveCount = new Set<string>();
+    for (const [taskId, entry] of live.mergeResolutions) {
+      if (entry.waitingApprovalSinceMs !== undefined) {
+        excludeFromActiveCount.add(taskId);
+      }
+    }
+    const toStart = nextTasksToStart(live.def, live.runState, excludeFromActiveCount);
     for (const taskId of toStart) {
       // 開始の意思決定と同時にrunningへ倒す。非同期のstartTaskが終わるまで待つと、
       // 同じタスクが次のpump呼び出しで二重にnextTasksToStartへ拾われてしまう
@@ -1849,18 +2450,43 @@ export class WorkflowRunner {
     if (outcome !== 'running' && !live.finished) {
       live.finished = true;
       this.deps.log.info(`[workflow ${runId}] 実行が終了しました: ${outcome}`);
-      // 全タスクがdoneになったときだけ統合→mainのPR/MRを作る（design.md §16.18）
+      // 全タスクがdoneになったときだけ統合→mainのPR/MRを作る（design.md §16.18）。
+      //
+      // ここは`finishedNotified`で絞らない。2周目がここへ到達する（＝`outcome ===
+      // 'succeeded'`）には、1周目の時点で`retryMerge`/`retryTask`/`continueTask`の
+      // いずれかが起きている必要があるが、その3経路はいずれも1周目の対象タスクが
+      // `blocked`（`retryMergeState`）/`failed`または`skipped`（`retryTask`）/
+      // `failed(maxReached)`（`continueTask`）であることを前提にしており、これらは
+      // どれも`getRunOutcome`を`succeeded`以外へ倒す（`anyFailed`/`anyBlocked`が立つ）。
+      // つまり1周目が`succeeded`だった run は、この3経路のどれも呼べる状態にならない。
+      // したがって2周目の`succeeded`到達（＝`finalizeForge`の2回目の呼び出し）は
+      // 現状のコードでは起こらない（Issue #432-2）
       if (outcome === 'succeeded') {
         void this.finalizeForge(runId);
       }
       // ロードマップの更新（design.md §16.19）もrunの結果を問わず行う。`done`になった
       // タスクの分だけチェックを入れる処理なので、runが途中で失敗していても、終わった分は
-      // ロードマップへ反映されているのが人の期待に近い
+      // ロードマップへ反映されているのが人の期待に近い。
+      //
+      // ここも`finishedNotified`で絞らない。`applyRunCompletionToFile`
+      // （`roadmap.ts`）は現在のロードマップファイルとの差分（`updatedItemIds`）を
+      // 計算し、変更が無ければ書き戻さないため2周目に再実行しても無害（冪等）。
+      // むしろ2周目で新たに`done`になったタスクのチェックを反映する必要があるため、
+      // 絞らない方が正しい（Issue #432-2）
       if (live.def.roadmap !== undefined) {
         void this.applyRoadmapCompletion(runId);
       }
       // 疑似worktree（design.md §16.20）はrunの結果を問わず反映する（forgeとは異なり
-      // `succeeded`限定にしない。`reflectPseudoWorktree`自身のJSDoc参照）
+      // `succeeded`限定にしない。`reflectPseudoWorktree`自身のJSDoc参照）。
+      //
+      // `retryMerge`/`retryTask`/`continueTask`による再開後の2周目以降もここで絞らない
+      // （Issue #511。従来はここを`finishedNotified`で絞り、2周目以降は反映自体を
+      // 行わないようにしていたが、`reflectPseudoWorktree`が反映成功後に
+      // `live.pseudo.baseline`を反映後のワークスペース状態へ更新するようになった
+      // （`reflectIntegrationToWorkspace`のJSDoc参照）ため、2周目以降も1周目と同じ
+      // 経路で正しく比較・反映できる。絞る理由自体が無くなったため、
+      // `pseudoWorktreeReflectSkipped`という「反映していない」事実を伝えるためだけの
+      // 暫定警告も廃止した）
       if (live.pseudo !== undefined) {
         void reflectPseudoWorktree(this.internals, runId);
       }
@@ -1868,12 +2494,20 @@ export class WorkflowRunner {
       // 以降新しいタスクは開始されない（`live.finished`）ため、これ以上の接続は要らない
       // オーケストレーターへの最後の通知は、MCPサーバを閉じる前に積む（送信そのものは
       // CLIへの本文送信なので順序に依存しないが、「以降ツールは使えない」を伝える文面と
-      // 実際の閉鎖の順序を合わせておく）
-      notifyOrchestratorRunFinished(this.internals, runId, outcome);
-      if (live.messaging !== undefined) {
-        void live.messaging.transport.close();
-        clearInterval(live.messaging.waitingReplyPollTimer);
+      // 実際の閉鎖の順序を合わせておく）。
+      //
+      // `notifyOrchestratorRunFinished`はrunにつき1度だけ送る（Issue #432-2）。
+      // `retryMerge`/`retryTask`/`continueTask`は再開の起点として`live.finished`を
+      // `false`へ戻すため、この終了ブロックは再開後にもう一周走りうる。`notifyOrchestrator`
+      // （`runnerOrchestrator.ts`）は件数上限しか持たず重複排除しないため、絞らないと
+      // 「実行が終了しました」がオーケストレーターへ二重に届く
+      if (!live.finishedNotified) {
+        notifyOrchestratorRunFinished(this.internals, runId, outcome);
+        live.finishedNotified = true;
       }
+      // `closeMessaging`自体は`live.messaging === undefined`なら即returnする既に冪等な
+      // 実装なので、`finishedNotified`では絞らない（絞ると意味が重複するだけ）
+      closeMessaging(live);
     }
   }
 
@@ -1931,10 +2565,15 @@ export class WorkflowRunner {
       );
     }
 
-    // タスク間メッセージング（design.md §16.21）。runにMCPサーバが立っていれば、
-    // このタスク専用の接続用URLを1つ発行する。実際にCLIの起動へ渡す配線
-    // （`TaskSessionInput.mcp`を読む側）はsrc/view/の変更が要るため、このIssueの範囲外
-    // （`WorkflowRunnerMessagingDeps`のJSDoc参照）。ここでは値を渡すところまで
+    // タスク間メッセージング（design.md §16.21）。`registerTask`の直前で`ensureMessaging`を
+    // 呼ぶ（Issue #475の単一チョークポイント）。run終了後の`retryTask` / 再マージ成功で
+    // `pending`へ戻った後続タスクなど、`live.messaging`が閉じた状態で新しいセッションを
+    // 開こうとする経路はすべてここを通るため、再構築の呼び出し漏れが構造的に起きない。
+    // 既に生きていれば`ensureMessaging`は何もしない（冪等）
+    await this.ensureMessaging(runId, live);
+    // runにMCPサーバが立っていれば、このタスク専用の接続用URLを1つ発行する。実際にCLIの
+    // 起動へ渡す配線（`TaskSessionInput.mcp`を読む側）はsrc/view/の変更が要るため、この
+    // Issueの範囲外（`WorkflowRunnerMessagingDeps`のJSDoc参照）。ここでは値を渡すところまで
     const messagingUrl = live.messaging?.transport.registerTask(taskId);
     const input: TaskSessionInput = {
       cwd,
@@ -2521,6 +3160,12 @@ export class WorkflowRunner {
     reason: LoopStopReason,
     state: ChatState,
   ): void {
+    if (this.disposing) {
+      // 拡張機能の終了時の解放が呼び戻した終了（`reason`は`manual`）。ここから先は
+      // `runState`の書き換え・`persist`・マージの開始まで一式が走るため、印を見て黙る
+      // （`disposing`のJSDoc参照）。片付けの続きは`dispose()`が受け持つ
+      return;
+    }
     const live = this.runs.get(runId);
     if (live === undefined) {
       return;
@@ -2622,6 +3267,18 @@ export class WorkflowRunner {
 
   /** 分割後のファイル（Issue #147）から`self.persist(...)`として呼ぶ（公開範囲は`WorkflowRunnerInternals`に閉じる）。 */
   private async persist(runId: string): Promise<void> {
+    // ここに`disposing`の全面停止ガードは置かない（Issue #374のレビュー2周目）。
+    //
+    // 止めても足りない: `store.update`は`SerialQueue`越しで、updaterが走るのはキューが
+    // 捌く時点、しかもupdaterは`live.runState`を実行時点で読み直す（issue #381）。破棄より
+    // 前に積まれたpersistは入口のガードを素通りするため、汚染を防ぐには`runState`を書き換える
+    // 側（`onTaskFinished`・`finishMergeResolution`・`blockMergeAfterLeaseWait`）で止めるしかない。
+    //
+    // 止めると害がある: `liveTask.pullRequest`・`markMergeSucceeded`・`finalMergeOutcome`は
+    // `live`にしか無く、ここを通してしか永続化されない。PR作成直後や`git merge`成功直後に
+    // deactivateが挟まると、確定済みの値（PRのURL・番号、マージ済み）を落としてしまい、
+    // 次の起動でPRの情報が失われたり、マージ済みのタスクが`merging`のまま復元されて
+    // `resumeMergeAfterReload`がやり直したりする
     const live = this.runs.get(runId);
     if (live === undefined) {
       return;
@@ -2688,6 +3345,21 @@ export class WorkflowRunner {
       // 状態遷移は変えない）
       const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
       this.deps.log.error(`[workflow ${runId}] 実行状態の永続化に失敗しました: ${message}`);
+      // ログだけでは拡張機能のログ出力チャンネルを開かない限り気づけないため、
+      // `live.warnings`へも積んでViewへ通知する（Issue #379）。`persist()`は実行中に
+      // 何度も呼ばれ、ディスク容量不足等の失敗は同じ理由で繰り返し起きうる。
+      // `orchestratorPromptOverride`（Issue #366）・`mergeBusy`（Issue #439）が
+      // 採った「直近1件へ丸める」規律に揃える（`reflectPseudoWorktree`は反映1回に
+      // つき1回しか警告を積まない設計で、`persist`のように高頻度で繰り返し失敗する
+      // ケースを想定していないため揃えない）。警告が出た事実自体は最新の1件として
+      // 残るので、丸めても「警告が出た事実が失われる」ことはない。
+      live.warnings = live.warnings.filter((w) => w.kind !== 'persistFailed');
+      live.warnings.push({
+        kind: 'persistFailed',
+        taskId: undefined,
+        message: `実行状態の永続化に失敗しました: ${message}`,
+      });
+      this.notify(runId);
     }
   }
 }

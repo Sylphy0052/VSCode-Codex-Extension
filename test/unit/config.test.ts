@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  __resetPseudoWorktreeExcludeWarningForTestOnly,
   readChatComposerButtonsConfig,
   readChatSendOnConfig,
   readClaudeConfig,
@@ -12,6 +13,10 @@ import { __mock } from '../mocks/vscode';
 describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
   beforeEach(() => {
     __mock.reset();
+    // lastPseudoWorktreeExcludeWarningはモジュールスコープのため__mock.reset()では
+    // リセットされない。放置すると同じ不正値を検証するテスト同士が実行順に依存する
+    // （レビュー指摘1）。
+    __resetPseudoWorktreeExcludeWarningForTestOnly();
   });
 
   it('既定値は .agents/workflows', () => {
@@ -73,6 +78,69 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
     expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(['build', 'coverage']);
   });
 
+  const DEFAULT_EXCLUDE = ['node_modules', '.venv', 'dist', 'out'];
+
+  it('pseudoWorktreeExcludeに.gitを含む値があれば設定全体を既定値へ落とす（Issue #446）', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['node_modules', '.git'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+  });
+
+  it('pseudoWorktreeExcludeの.GIT等の亜種も拒否する（大文字小文字を区別しない）', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['.GIT'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['.Git'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+  });
+
+  it('pseudoWorktreeExcludeはパス区切りを含む値・絶対パスを拒否する', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['packages/build'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['packages\\build'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['/etc'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+  });
+
+  it('pseudoWorktreeExcludeを拒否したことは警告として人に見える形で出す（Issue #380の教訓）', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['.git'] });
+    const config = readWorkflowsConfig();
+    expect(config.pseudoWorktreeExcludeWarnings).toHaveLength(1);
+    expect(config.pseudoWorktreeExcludeWarnings[0]).toContain('.git');
+    expect(config.pseudoWorktreeExcludeWarnings[0]).toContain(
+      'agent.workflows.pseudoWorktreeExclude',
+    );
+    expect(__mock.messages.warnings).toHaveLength(1);
+    expect(__mock.messages.warnings[0]).toContain('.git');
+  });
+
+  it('pseudoWorktreeExcludeの警告は同じ値を読み直しても重ねて通知しない', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['dup-check/.git'] });
+    readWorkflowsConfig();
+    readWorkflowsConfig();
+    expect(__mock.messages.warnings).toHaveLength(1);
+  });
+
+  it('pseudoWorktreeExcludeの既定値・正当な値は警告なしで通る', () => {
+    expect(readWorkflowsConfig().pseudoWorktreeExcludeWarnings).toEqual([]);
+
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': DEFAULT_EXCLUDE });
+    expect(readWorkflowsConfig().pseudoWorktreeExcludeWarnings).toEqual([]);
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+
+    __mock.setConfig('agent', {
+      'workflows.pseudoWorktreeExclude': ['build', 'coverage', '.mypy_cache'],
+    });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual([
+      'build',
+      'coverage',
+      '.mypy_cache',
+    ]);
+    expect(__mock.messages.warnings).toEqual([]);
+  });
+
   it('pseudoWorktreeExcludeが配列でない・空文字要素を含む・空配列なら既定値へ落とす', () => {
     __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': 'not-an-array' });
     expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual([
@@ -99,6 +167,43 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
     ]);
   });
 
+  // レビュー指摘1: 重複除け用のモジュール状態（lastPseudoWorktreeExcludeWarning）が
+  // テスト間でリセットされないと、同じ不正値を検証する2つ目のテストで警告が0件になり
+  // 落ちる。この2件を連続で並べて実行順に依存しないことを確認する。
+  it('pseudoWorktreeExcludeの警告は同じ不正値を検証する別テスト1件目でも出る（レビュー指摘1・順序依存の再現）', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['.git'] });
+    readWorkflowsConfig();
+    expect(__mock.messages.warnings).toHaveLength(1);
+  });
+
+  it('pseudoWorktreeExcludeの警告は同じ不正値を検証する別テスト2件目でも出る（レビュー指摘1・順序依存の再現）', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['.git'] });
+    readWorkflowsConfig();
+    expect(__mock.messages.warnings).toHaveLength(1);
+  });
+
+  // レビュー指摘2: 空判定にはtrimを使うのに、配列へ残すのはトリムしない生の値だった。
+  // トリムしてから空判定・拒否判定・格納まで一貫させる。
+  it('pseudoWorktreeExcludeは前後の空白をトリムしてから格納する（レビュー指摘2）', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': [' build ', 'coverage'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(['build', 'coverage']);
+  });
+
+  it('pseudoWorktreeExcludeは前後に空白が付いた.gitも拒否する（レビュー指摘2）', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': [' .git '] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+  });
+
+  // レビュー指摘3: isSafeRelativeDirは`..`セグメントを明示的に拒否するのに、
+  // pseudoWorktreeExcludeRejectionには同じガードが無い（姉妹バリデーションの非対称）。
+  it('pseudoWorktreeExcludeは..・.を拒否する（レビュー指摘3）', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['..'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['.'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+  });
+
   it('replyTimeoutSecの既定は300秒（design.md §16.21・DEFAULT_REPLY_TIMEOUT_SEC）', () => {
     expect(readWorkflowsConfig().replyTimeoutSec).toBe(300);
   });
@@ -122,6 +227,57 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
   it('replyTimeoutSecの小数は切り捨てる', () => {
     __mock.setConfig('agent', { 'workflows.replyTimeoutSec': 60.7 });
     expect(readWorkflowsConfig().replyTimeoutSec).toBe(60);
+  });
+
+  it('replyTimeoutSecが上限（2147483秒）を超えたら既定値へ落とす（レビュー・監査指摘: setTimeoutの32bit丸めで即時発火する事故を防ぐ）', () => {
+    __mock.setConfig('agent', { 'workflows.replyTimeoutSec': 2147484 });
+    expect(readWorkflowsConfig().replyTimeoutSec).toBe(300);
+
+    __mock.setConfig('agent', { 'workflows.replyTimeoutSec': 999999999 });
+    expect(readWorkflowsConfig().replyTimeoutSec).toBe(300);
+  });
+
+  it('replyTimeoutSecは上限（2147483秒）ちょうどまでは指定値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.replyTimeoutSec': 2147483 });
+    expect(readWorkflowsConfig().replyTimeoutSec).toBe(2147483);
+  });
+
+  it('mergeApprovalTimeoutSecの既定は3600秒（design.md §16.17・DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC）', () => {
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(3600);
+  });
+
+  it('mergeApprovalTimeoutSecは指定値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.mergeApprovalTimeoutSec': 60 });
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(60);
+  });
+
+  it('mergeApprovalTimeoutSecが数値でない・1未満なら既定値へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.mergeApprovalTimeoutSec': 'たくさん' });
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(3600);
+
+    __mock.setConfig('agent', { 'workflows.mergeApprovalTimeoutSec': 0 });
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(3600);
+
+    __mock.setConfig('agent', { 'workflows.mergeApprovalTimeoutSec': -5 });
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(3600);
+  });
+
+  it('mergeApprovalTimeoutSecの小数は切り捨てる', () => {
+    __mock.setConfig('agent', { 'workflows.mergeApprovalTimeoutSec': 60.7 });
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(60);
+  });
+
+  it('mergeApprovalTimeoutSecが上限（2147483秒）を超えたら既定値へ落とす（レビュー・監査指摘: setTimeoutの32bit丸めで即時発火する事故を防ぐ）', () => {
+    __mock.setConfig('agent', { 'workflows.mergeApprovalTimeoutSec': 2147484 });
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(3600);
+
+    __mock.setConfig('agent', { 'workflows.mergeApprovalTimeoutSec': 999999999 });
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(3600);
+  });
+
+  it('mergeApprovalTimeoutSecは上限（2147483秒）ちょうどまでは指定値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.mergeApprovalTimeoutSec': 2147483 });
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(2147483);
   });
 
   it('branchNamingの既定はwf（GitLab運用規約形式は明示指定したときだけ有効になる）', () => {

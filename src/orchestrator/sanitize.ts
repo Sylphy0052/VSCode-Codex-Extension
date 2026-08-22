@@ -20,8 +20,68 @@ export const SANITIZE_MAX_LEN = 200;
  */
 const URL_USERINFO_PATTERN = /(\b[a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^\s/@]+@/gu;
 
+/**
+ * パーセントエンコードされたURL（スキーム区切り`://`が`%3A%2F%2F`、userinfoの`@`が
+ * `%40`になっている形）を検出する（Issue #474 指摘1）。
+ *
+ * `URL_USERINFO_PATTERN` は素の`user:pass@`表記しか見ないため、リダイレクトURLの
+ * クエリ引数に別URLを丸ごとエンコードして埋め込む形（例:
+ * `redirect?url=https%3A%2F%2Ftoken%40evil.com%2Fpath`）には一致しない。
+ *
+ * 対応方針として、パーセントデコードしてから一律にマスクを掛ける方式は採らなかった。
+ * デコードは`&`区切りや他の`%XX`を含むクエリ文字列の構造を壊さずに行う必要があり、
+ * 実装を誤ると正当なクエリ文字列（例: `?next=%2Fdashboard`）まで書き換えてしまう
+ * 懸念がある。代わりに、監査指摘の形状そのもの（パーセントエンコードされたスキーム
+ * 区切り`%3A%2F%2F`の直後にパーセントエンコードされた`@`である`%40`が続く）だけを
+ * 狭く検出する。この並びが偶然クエリ文字列に現れる可能性は低く、過剰マスクの
+ * リスクを抑えられる。
+ *
+ * userinfo本体の文字クラスは `%` `\s` `&` に加え、ホスト・パスの区切りとなりうる
+ * `/` `?` `#` も除外している（Issue #474 指摘3で追加。監査が実測で確認した過剰
+ * マスク: `https%3A%2F%2Fexample.com/search?q=...%40notasecret.com` のような
+ * 「スキームの直後はホスト名で、クエリ引数にメールアドレスが別途含まれる」形では、
+ * 除外前の文字クラスがホスト名・パス（`example.com/search?q=`）まで一致に含めてしまい、
+ * 実際のリダイレクト先ホストがログから読めなくなっていた。userinfoは仕様上これらの
+ * 区切り文字を生のまま含まないため、除外してもuserinfo自体の検出は妨げない。
+ *
+ * それでも対象外のまま残る形（意図的な限界）: 二重エンコード（`%253A%252F%252F`）や、
+ * 上限（`{0,256}`）を超える長さのuserinfoはこの並びに一致しないため素通りする。
+ *
+ * スキーム名・userinfo本体の量指定子はいずれも上限を設けている（`{0,63}` `{0,256}`）。
+ * 上限なしの `*` のまま `%3A%2F%2F` という固定リテラルへ繋ぐと、リテラルが一切
+ * 現れない巨大な英数字の連続（ログに実際に出現しうる、CLI出力中の長いbase64文字列等）
+ * に対して、各開始位置で末尾まで走査してからバックトラックする動作がO(n²)に達する
+ * （ReDoS。約90万文字で20秒超を実測して確認、`{0,63}`へ上限を設けて数十msへ改善した）。
+ * スキーム名・userinfoが実際にこの長さを超えることは想定していない。上限は当初`{0,2048}`
+ * だったが、10MB規模の敵対的入力での処理コストが他パターンに比べ突出して高いことが
+ * 実測で判明したため（Issue #474 指摘4）、現実的なuserinfoの長さに絞って`{0,256}`へ
+ * 縮小した（1回のバックトラック走査の上限が下がり、線形コストの傾きが下がる）。
+ */
+const ENCODED_URL_USERINFO_PATTERN =
+  /([a-zA-Z][a-zA-Z0-9+.-]{0,63}%3A%2F%2F)[^%\s&/?#]{0,256}?%40/giu;
+
+/**
+ * スキーム区切りは生のまま（`://`）で、userinfoの`@`だけがパーセントエンコードされた
+ * 混在形（`https://token%40evil.com/path`）を検出する（Issue #474 指摘5）。
+ *
+ * `URL_USERINFO_PATTERN`は生の`@`を要求し、`ENCODED_URL_USERINFO_PATTERN`は
+ * `%3A%2F%2F`（スキームもエンコード済み）を要求するため、「スキームは生・`@`だけ
+ * エンコード」の中間形はどちらにも一致せず素通りしていた。監査からの指摘を受けて
+ * 検出対象に追加した。
+ *
+ * userinfo本体の文字クラスは`ENCODED_URL_USERINFO_PATTERN`と同じ考え方で
+ * `/` `?` `#` を除外している。これにより、`https://cdn.example.com/logo%40copy.png`
+ * のように`%40`がパスの奥（ファイル名等）に現れるだけで、実際にはuserinfoではない形を
+ * 誤ってマスクしない（`://`の直後から`/`に達するまでの間に`%40`が無ければ不一致）。
+ */
+const PARTIAL_ENCODED_URL_USERINFO_PATTERN =
+  /(\b[a-zA-Z][a-zA-Z0-9+.-]{0,63}:\/\/)[^%\s&/?#]{0,256}?%40/gu;
+
 function maskUrlUserinfo(value: string): string {
-  return value.replace(URL_USERINFO_PATTERN, '$1***@');
+  return value
+    .replace(URL_USERINFO_PATTERN, '$1***@')
+    .replace(ENCODED_URL_USERINFO_PATTERN, '$1***%40')
+    .replace(PARTIAL_ENCODED_URL_USERINFO_PATTERN, '$1***%40');
 }
 
 /**
@@ -51,12 +111,59 @@ function maskUrlUserinfo(value: string): string {
  * `i`フラグにより大文字小文字を区別しない（`/HOME/` `C:\users\` 等）。過剰マスクの
  * 懸念（`homework/` `income/` 等）は、いずれも`/home/`直後に区切り文字が続かないため
  * 該当しない（`sanitize.test.ts` で回帰確認済み）。
+ *
+ * Windows系の区切り文字（`\`）は単発ではなく1つ以上（`\\+`）に一致させている
+ * （Issue #474 指摘2）。`JSON.stringify(err)` を経由したエラーメッセージは
+ * バックスラッシュが2連（`\\`）にエスケープされるため、単発の `\` にしか一致しない
+ * 旧パターンでは `C:\\Users\\alice\\...`（実体は2連バックスラッシュ）のような形を
+ * 素通りしていた。`\\+` へ緩めることで単発（元のパス）・2連（1回JSON化）のどちらも
+ * 同じパターンで拾える。UNC区切りの先頭も同様に `\\{2,}`（2つ以上）へ緩めている。
+ *
+ * この緩和が退行を生んだため、否定先読みに `:` を追加していた（Issue #474 指摘2の
+ * レビューで発覚）。UNC分岐 `\\{2,}[^\\\s]+\\+Users\\+` は「2連以上のバックスラッシュ →
+ * 任意の非バックスラッシュ文字列 → 1連以上のバックスラッシュ → Users」という並びしか
+ * 見ないため、ドライブレター直後の `C:\\Backup\\Users\\Shared\\...`（JSON化された
+ * 通常のWindowsパス。`Backup`はユーザー名ではなくただのフォルダ名）でも、`C:`の直後の
+ * 2連バックスラッシュを起点にUNC分岐がマッチを開始し、`Shared`をユーザー名として
+ * 誤ってマスクしてしまっていた。この退行の直接の原因は否定先読みが`:`を除外対象に
+ * 含めておらず、ドライブレターの`:`直後からの開始を防げていなかったことにある。
+ *
+ * ただし単純に `:` を除外対象へ丸ごと加えると（`(?<![A-Za-z0-9_/\\:])`）、
+ * ドライブレター以外の「ラベル＋コロン」形（`file:` `error:` 等）の直後まで
+ * 一律に除外されてしまい、`file:/home/alice`（単一スラッシュの`file:`）や
+ * `error:/Users/bob/...` のような、本来マスクすべき形が素通りする退行を
+ * 新たに生んでいた（セキュリティ監査指摘、medium）。
+ *
+ * 対策として `:` は除外対象から外し、代わりに「単独のドライブレター（英字1文字）＋
+ * コロン」の直後だけをピンポイントで除外する否定先読みを別途追加した
+ * （`(?<!(?:^|[^A-Za-z0-9_])[A-Za-z]:)`）。この先読みは「コロン直前の1文字が
+ * 英字で、さらにその前が単語構成文字ではない（＝先頭か区切り文字）」場合のみ
+ * 不成立にする。`file:` `error:` はコロン直前が複数文字からなる単語の一部
+ * （`e`の前に`l`が続く等）なので対象にならず、`C:` は先頭直後の単独の英字＋
+ * コロンなので対象になる。これにより:
+ * - `C:\\Backup\\Users\\Shared\\...`: 引き続きマスクしない（過剰マスクの回帰無し）
+ * - `C:\\Users\\alice\\...`: 引き続きマスクする（ドライブレター分岐は否定先読みの
+ *   外側、ドライブレターより前の位置に適用されるため影響を受けない）
+ * - `file:/home/alice` `error:/Users/bob/...` `file:///home/alice`: いずれも
+ *   マスクする（`sanitize.test.ts`で全ケースを回帰確認済み）
  */
 const HOME_DIR_USERNAME_PATTERN =
-  /(?<![A-Za-z0-9_/\\])((?:file:\/\/)?(?:\/(?:var|usr|export))?\/home\/|(?:file:\/\/)?\/Users\/|[A-Za-z]:[\\/]Users[\\/]|\\\\[^\\\s]+\\Users\\)([^/\\\s'"]+)/giu;
+  /(?<![A-Za-z0-9_/\\])(?<!(?:^|[^A-Za-z0-9_])[A-Za-z]:)((?:file:\/\/)?(?:\/(?:var|usr|export))?\/home\/|(?:file:\/\/)?\/Users\/|[A-Za-z]:(?:\\+|\/)Users(?:\\+|\/)|\\{2,}[^\\\s]+\\+Users\\+)([^/\\\s'"]+)/giu;
 
 function maskHomeDirUsername(value: string): string {
   return value.replace(HOME_DIR_USERNAME_PATTERN, (_match, prefix: string) => `${prefix}***`);
+}
+
+/**
+ * `homeDir` がパス区切り文字だけで構成される（空文字 `''` を除く。例: `/` `\` `//`）場合に
+ * `true`。コンテナ環境で `HOME=/` になっているケースが実在する（`createLogger` が
+ * `os.homedir()` を生成時に一度だけ固定するため、この異常値は一度固定されると全ログ経路に
+ * 効き続ける）。この状態で `exactHomeDirPattern` をそのまま使うと、「後続が区切り文字か
+ * 文字列末尾」という条件だけを持つ単独の `/` が、パス中のあらゆる区切りにマッチしてしまい
+ * （例: `/tmp/` の末尾の `/` が `~` に化けて `/tmp~` になる）、パスの構造を壊してしまう。
+ */
+function isPathSeparatorOnly(homeDir: string): boolean {
+  return homeDir.length > 0 && /^[\\/]+$/u.test(homeDir);
 }
 
 /**
@@ -72,12 +179,203 @@ function maskHomeDirUsername(value: string): string {
  * 任意の`homeDir`を明示的に渡して検証できる。
  */
 export function maskHomeDir(value: string, homeDir: string = os.homedir()): string {
-  if (!homeDir) {
+  if (!homeDir || isPathSeparatorOnly(homeDir)) {
     return maskHomeDirUsername(value);
   }
   const escaped = homeDir.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
   const exactHomeDirPattern = new RegExp(`${escaped}(?=[\\\\/]|$)`, 'gu');
   return maskHomeDirUsername(value.replace(exactHomeDirPattern, '~'));
+}
+
+/**
+ * トークン本体の量指定子に用いる上限（セキュリティ監査指摘、high）。
+ *
+ * `BEARER_TOKEN_PATTERN` / `GITHUB_TOKEN_PATTERN` / `OPENAI_STYLE_KEY_PATTERN` は
+ * いずれも旧実装で「下限のみ・上限なし」の量指定子（`{n,}`）を使っていたが、これが
+ * V8で約5.6MB〜約5.6MB超（実測5,566,406〜5,593,750文字）の単一トークン文字列に対して
+ * `RangeError: Maximum call stack size exceeded` を投げることが判明した（Node v24.19.0で
+ * 再現）。同じ意味の `+`（`{1,}`相当）に書き換えるとクラッシュしないため、V8内部で
+ * `{n,}` 形式の量指定子だけがこの規模の反復回数で特別な処理経路を通ることが原因と見られる。
+ * `sanitizeForLog` は `GIT_MAX_BUFFER_BYTES` / `CLI_MAX_BUFFER_BYTES`（いずれも10MB）を
+ * 上限とするgit/CLIのstderrを直接受けるため、この規模の入力は想定範囲内。
+ *
+ * 対策として「下限,上限」の有限量指定子（`{n,MAX}`）へ書き換えた上で、その直後に
+ * 同じ文字クラスの `*`（上限なしだが`+`と同じ安全な処理経路を通る）を続けて残りを
+ * 貪欲に食い切る形にしている。上限だけを付けて`*`を省くと、上限を超える長さの
+ * トークンに対して「上限までは`***`に置き換わるが、残りの文字がマスクされずログに
+ * 残る」部分マスクが起きうる（このパターン自身の旧・標準Base64問題と同種の失敗）。
+ * `*`で残りを吸収することでこの部分マスクを防ぐ（実測: 10MB入力でも数十ms・
+ * クラッシュ無し・残骸無しを`sanitize.test.ts`で固定化）。
+ *
+ * `MAX`自体の値は「現実的なトークン長を確実に覆う」ことだけが目的で、実運用の
+ * トークン（GitHub PATは最長でも数百文字、Bearer/sk-系も同程度）はこの値に到達しない。
+ * 到達するのは巨大な偽トークン様文字列（攻撃/バグ由来）の場合のみで、その際は
+ * 直後の`*`が残りを吸収するため実害は無い。
+ */
+const TOKEN_LENGTH_CAP = 4096;
+
+/**
+ * `Bearer <token>` 形式の認証ヘッダ値を検出し、`Bearer` の直後の1トークンだけを
+ * `***` に置き換える（Issue #474 指摘3）。`Bearer` という単語だけが偶然出現する
+ * ケース（`Bearer` 単体で終わる等）は対象にならない（後ろに区切り文字とトークン様の
+ * 値が必須のため）。
+ *
+ * 直前が英数字・アンダースコアの場合は対象外にしている（`(?<![A-Za-z0-9_])`）。
+ * これにより、`SomeBearer xyz` のような他の識別子の一部として現れた場合の
+ * 誤検出を避ける。
+ *
+ * レビュー指摘（過剰マスク2件、Issue #474）を受けて、`GITHUB_TOKEN_PATTERN` /
+ * `OPENAI_STYLE_KEY_PATTERN` と同じ「接頭辞＋長さ閾値＋トークンらしい文字種」の
+ * 規律に揃えた:
+ *
+ * (a) `Bearer`直後の区切りを、改行を含む`\s+`ではなく改行を含まない`[ \t]+`にした。
+ *     `\s`は改行にも一致するため、`Bearer`が行末で値を伴わずに終わる場合
+ *     （例: `"...near Bearer\n    at Object.<anonymous> (...)"`）、旧パターンは
+ *     次の行の先頭語（`at`ではなく実際には`Object.<anonymous>`のような識別子）まで
+ *     食ってスタックトレースを破壊していた。`[ \t]+`にすることで、`Bearer`の後に
+ *     同一行内の空白＋値が続かない限りマッチしない。
+ * (b) `\S+`（空白以外なら何でも1文字以上）だった後続トークンの文字クラスを、
+ *     Base64url相当（`[A-Za-z0-9_.~+-]`）＋最低8文字に絞った。これにより
+ *     `Bearer /repo/src/config/token.ts`（パス。`/`が文字クラス外）や
+ *     `Bearer token`（`token`が5文字で閾値未満）のような、トークンではない
+ *     後続語を誤ってマスクしなくなる。
+ *
+ * (c) 上記(b)の文字クラスは標準Base64（`/` `+` `=`を使う）のBearerトークンに対して
+ *     部分マスクしか掛からない不具合があった（レビュー指摘）。標準Base64のトークンが
+ *     `/`を含む場合、`/`が文字クラス外であるため一致がそこで途切れ、`Bearer abcd1234/xyz+abc==`
+ *     のような値は前半（`abcd1234`）だけが`***`に置き換わり、後半（`/xyz+abc==`）が
+ *     マスクされないままログに残っていた。「マスク済みに見えるが実は秘密の断片が
+ *     残っている」状態は、マスクしないより悪い誤解を招く。
+ *
+ *     一方で`/`を後続トークン全体の文字クラスへ単純に足すと、(b)で直したはずの
+ *     過剰マスク（`Bearer /repo/src/config/token.ts`が丸ごとマスクされる）が
+ *     再発する。そこで「先頭1文字は`/`を含まない現行の文字クラスのまま」
+ *     （パスのようにスラッシュで始まる語は対象にならない）にしつつ、
+ *     「2文字目以降は`/`と`=`を追加で許す」形に分けた。全体の長さ閾値（8文字以上、
+ *     先頭1文字＋残り7文字以上）は維持している。これにより:
+ *     - `Bearer /repo/...`: 先頭が`/`のため不一致のまま（過剰マスクは再発しない）
+ *     - `Bearer token`: 5文字で閾値未満のため不一致のまま
+ *     - `Bearer abcd1234/xyz+abc==`: 先頭`a`から始まり、残り全体が拡張後の文字クラスに
+ *       収まるため、トークン全体が一致し部分マスクにならない
+ *
+ * (d) 後続トークンの量指定子を`{7,}`（上限なし）から`{7,${TOKEN_LENGTH_CAP}}`＋
+ *     同じ文字クラスの`*`へ変更した（セキュリティ監査指摘、high）。理由は
+ *     `TOKEN_LENGTH_CAP`のコメントを参照。
+ */
+const BEARER_TOKEN_PATTERN = new RegExp(
+  `(?<![A-Za-z0-9_])(Bearer[ \\t]+)[A-Za-z0-9_.~+-][A-Za-z0-9_.~+/=-]{7,${TOKEN_LENGTH_CAP}}[A-Za-z0-9_.~+/=-]*`,
+  'giu',
+);
+
+/**
+ * GitHub発行のトークン形状（`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` = personal access token・
+ * OAuth・user-to-server・server-to-server・refresh token）を検出する（Issue #474 指摘3）。
+ * 接頭辞の直後に英数字20文字以上を要求することで、`gh_1234` のような短い偶然の一致
+ * （過剰マスク）を避けている。
+ *
+ * 意図的に`i`フラグを付けていない（レビュー指摘、Issue #474 指摘7）。GitHubが実際に
+ * 発行するトークンの接頭辞は常に小文字（`ghp_`等）であり、`GHP_...`のような大文字形は
+ * 実在しない。他パターン（`BEARER_TOKEN_PATTERN`等）が`i`フラグ付きなのは、`Bearer`が
+ * HTTPヘッダの慣習として大文字小文字表記に揺れがあるため。本パターンにその事情は
+ * 無いので、`i`フラグを付けない方が「トークン形状として妥当な文字列だけを対象にする」
+ * という設計意図に合う。
+ *
+ * 後続トークンの量指定子を`{20,}`（上限なし）から`{20,${TOKEN_LENGTH_CAP}}`＋
+ * 同じ文字クラスの`*`へ変更した（セキュリティ監査指摘、high）。理由は
+ * `TOKEN_LENGTH_CAP`のコメントを参照。
+ */
+const GITHUB_TOKEN_PATTERN = new RegExp(
+  `(?<![A-Za-z0-9_])gh[oprsu]_[A-Za-z0-9]{20,${TOKEN_LENGTH_CAP}}[A-Za-z0-9]*`,
+  'gu',
+);
+
+/**
+ * OpenAI/Anthropic系でよく使われる `sk-` 接頭辞のAPIキー形状を検出する
+ * （Issue #474 指摘3）。接頭辞の直後にハイフンを含む英数字10文字以上を要求し、
+ * `sk-` で始まる短い一般語（過剰マスク）を避けている。
+ *
+ * 後続トークンの量指定子を`{10,}`（上限なし）から`{10,${TOKEN_LENGTH_CAP}}`＋
+ * 同じ文字クラスの`*`へ変更した（セキュリティ監査指摘、high）。理由は
+ * `TOKEN_LENGTH_CAP`のコメントを参照。
+ */
+const OPENAI_STYLE_KEY_PATTERN = new RegExp(
+  `(?<![A-Za-z0-9_])sk-[A-Za-z0-9-]{10,${TOKEN_LENGTH_CAP}}[A-Za-z0-9-]*`,
+  'gu',
+);
+
+/**
+ * トークン様の文字列を代表的な3形状（`Bearer <token>` / GitHubトークン / `sk-`形式の
+ * APIキー）に絞ってマスクする（Issue #474 指摘3。監査が「一番実害に近い」とした穴）。
+ *
+ * 線引きの判断: 外部CLIのstderrをそのまま `log.warn` / `log.error` へ渡す経路が
+ * 複数あり（`src/view/settingsProvider.ts`・`src/extension.ts` 等）、「マスク済みの
+ * ログだから安全」という誤解を生む実害が最も大きい。一方でパターンを広げすぎると、
+ * 障害調査に要る情報（どのファイルで失敗したか・エラーの種類）まで潰しかねない
+ * （例: 汎用的すぎる正規表現は英数字の羅列であるファイルハッシュやIDまで拾う）。
+ * そこで対象は「接頭辞・書式が固定されており、かつ実際にこのプロジェクトが連携する
+ * 外部サービス（GitHub・OpenAI/Anthropic系）・標準的な認証ヘッダに由来する」3形状のみに
+ * 絞った。`Bearer`を伴わない裸のJWT（`eyJ...`）・AWSアクセスキー（`AKIA...`）・
+ * Slackトークン（`xox[bpsr]-...`）等、他の形状は対象外のまま残る（意図的な限界。
+ * 必要になったら同じ考え方で追加する）。なお`Bearer <JWT>`の形は`BEARER_TOKEN_PATTERN`の
+ * 文字クラスがJWTのBase64url＋`.`区切りを満たすため既にマスク対象。
+ *
+ * 置換はいずれも冪等（`Bearer ***` の `***`・`***`単体はいずれも各パターンに
+ * 再度一致しない）。
+ */
+function maskTokenLike(value: string): string {
+  return value
+    .replace(BEARER_TOKEN_PATTERN, '$1***')
+    .replace(GITHUB_TOKEN_PATTERN, '***')
+    .replace(OPENAI_STYLE_KEY_PATTERN, '***');
+}
+
+/**
+ * ログ・理由文字列へ埋め込む値から、値そのものを削らずに秘匿情報だけを隠す。
+ * URL中のuserinfo（トークン付きURL）・ホームディレクトリ配下のユーザー名・
+ * トークン様文字列（`Bearer <token>` / GitHubトークン / `sk-`形式のAPIキー）の3種類。
+ *
+ * `sanitizeForLog` から制御文字の畳み込みと長さの切り詰めを除いた部分にあたる。
+ * 一般経路のログ（`src/log.ts` の `createLogger`）は、fsエラーやスタックトレースを
+ * そのまま流す使い方が前提で、改行を潰したり200文字で切ったりすると障害調査に
+ * 必要な情報が失われる。そのため一般経路にはこちらだけを掛ける（Issue #391）。
+ *
+ * 置換はいずれも冪等（`/home/***` の `***`・`https://***@` の `***`・
+ * `Bearer ***` の `***` はいずれも再度同じ形に置き換わるだけ、`~` はどのパターンにも
+ * 一致しない）。よって既に `sanitizeForLog` を通した文字列を `createLogger` が
+ * 再度この関数へ通しても結果は変わらない。
+ *
+ * `homeDir` はテスト容易性のために受け取れるようにしてある（既定は `os.homedir()`）。
+ *
+ * **限界（セキュリティ監査指摘、Issue #474で一部対応）**: マスクするのはURLの
+ * userinfo・ホームディレクトリ配下のユーザー名・代表的なトークン形状
+ * （`Bearer <token>` / `gh[oprsu]_...` / `sk-...`）のみ。`Bearer`を伴わない
+ * 裸のJWT（`eyJ...`）・AWSアクセスキー（`AKIA...`）・Slackトークン（`xox[bpsr]-...`）
+ * 等、他の形状の秘密情報は対象外のためそのまま素通りする（`Bearer <JWT>`の形は
+ * `BEARER_TOKEN_PATTERN`が既にマスクする）。外部CLIのstderrをそのまま
+ * `log.warn` / `log.error` へ渡す経路（`src/view/settingsProvider.ts`・
+ * `src/extension.ts` 等）は、マスク済みのログでもこれらの文字列が含まれていれば
+ * 漏れうる。「マスク済みだから安全」と誤解してログを共有しないこと。
+ *
+ * 監査が実測で確認した既知のすり抜け例（**以下は既知のものを列挙したものであり、
+ * 網羅的な一覧ではない**。「これで全部」と読まないこと）:
+ * - 二重エンコードされたURL（例: `%253A%252F%252F` のようにパーセント記号自体が
+ *   再エンコードされている場合、`ENCODED_URL_USERINFO_PATTERN` が見る
+ *   `%3A%2F%2F...%40` の形状と一致しない）
+ * - URLエンコードされたバックスラッシュ（`%5C`）でエスケープされたWindowsパスは
+ *   `HOME_DIR_USERNAME_PATTERN` が見る実体の `\` 文字と一致しない
+ * - `ENCODED_URL_USERINFO_PATTERN` / `PARTIAL_ENCODED_URL_USERINFO_PATTERN` の
+ *   上限（`{0,256}`）を超える長さのuserinfoは黙って素通りする（ReDoS対策の副作用。
+ *   Issue #474 指摘4・5）
+ * - `Bearer`を伴わない裸のJWT（`eyJ...`）・AWSアクセスキー（`AKIA...`）・
+ *   Slackトークン（`xox[bpsr]-...`）等、`maskTokenLike` が対象とする3形状以外の
+ *   トークン・APIキー形状（`Bearer <JWT>`の形は対象内）
+ *
+ * このマスク処理は、`GIT_MAX_BUFFER_BYTES`（`worktree.ts`）・`CLI_MAX_BUFFER_BYTES`
+ * （`forge.ts`）がいずれも10MBであるため到達しうる規模の入力に対して、秒単位の
+ * コストがかかりうる（Issue #474監査実測）。
+ */
+export function maskForLog(value: string, homeDir?: string): string {
+  return maskHomeDir(maskUrlUserinfo(maskTokenLike(value)), homeDir);
 }
 
 /**
@@ -147,8 +445,7 @@ export function stripControlCharsPreservingNewlines(value: string): string {
  */
 export function sanitizeForLog(value: string, maxLen: number = SANITIZE_MAX_LEN): string {
   const normalized = stripControlChars(value);
-  const urlMasked = maskUrlUserinfo(normalized);
-  const masked = maskHomeDir(urlMasked);
+  const masked = maskForLog(normalized);
   const collapsed = masked.replace(/ {2,}/gu, ' ').trim();
   return collapsed.length > maxLen ? `${collapsed.slice(0, maxLen)}…` : collapsed;
 }

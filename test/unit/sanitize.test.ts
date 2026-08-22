@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  maskForLog,
   maskHomeDir,
   sanitizeForLog,
   stripControlChars,
@@ -44,6 +45,73 @@ describe('sanitizeForLog（design.md §16.7のsanitizeForReasonを共通化。�
     const result = sanitizeForLog(spoofed);
     expect(result).not.toContain(rtlOverride);
     expect(result).toBe('safegnp.exe');
+  });
+});
+
+describe('sanitizeForLog（Issue #474 指摘1: パーセントエンコードされたURLのuserinfo）', () => {
+  it('スキームとuserinfoが丸ごとパーセントエンコードされたURLでもuserinfoをマスクする', () => {
+    const raw = 'redirect?url=https%3A%2F%2Ftoken%40evil.com%2Fpath';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('token%40');
+    expect(result).toContain('https%3A%2F%2F***%40evil.com%2Fpath');
+  });
+
+  it('大文字小文字が混在したパーセントエンコード（%3a%2f%2f等）でもマスクする', () => {
+    const raw = 'https%3a%2f%2fsecret%40evil.com';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('secret%40');
+    expect(result).toContain('https%3a%2f%2f***%40evil.com');
+  });
+
+  it('パーセントエンコードされたスキーム区切りを伴わない%40は誤マスクしない（過剰マスク防止）', () => {
+    // クエリ文字列中の正当な%40（例: メールアドレスのエンコード）は対象外
+    const raw = 'redirect?next=%2Fdashboard%3Femail%3Duser%40example.com';
+    expect(sanitizeForLog(raw)).toBe(raw);
+  });
+
+  it('2回適用しても結果が変わらない（冪等性）', () => {
+    const raw = 'https%3A%2F%2Ftoken%40evil.com%2Fpath';
+    const once = sanitizeForLog(raw);
+    const twice = sanitizeForLog(once);
+    expect(twice).toBe(once);
+  });
+});
+
+describe('sanitizeForLog（Issue #474 レビュー指摘: ENCODED_URL_USERINFO_PATTERNがuserinfo以外まで潰す、medium）', () => {
+  it('スキーム直後がホスト名で、クエリ引数に別途メールアドレスが入る形は誤マスクしない', () => {
+    // リダイレクト系ログでよくある形。スキーム直後はuserinfoではなくホスト名なので
+    // %40はuserinfoの区切りではない。ホスト（example.com/search?q=...）が
+    // ログから読めなくなるのを防ぐ
+    const raw = 'https%3A%2F%2Fexample.com/search?q=xxxxx%40notasecret.com';
+    expect(sanitizeForLog(raw)).toBe(raw);
+  });
+
+  it('スキーム直後が実際にuserinfoの場合は引き続きマスクする（回帰確認）', () => {
+    const raw = 'https%3A%2F%2Ftoken%40evil.com%2Fpath';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('token%40');
+    expect(result).toContain('https%3A%2F%2F***%40evil.com%2Fpath');
+  });
+});
+
+describe('sanitizeForLog（Issue #474 指摘5: 部分エンコードされたURL userinfoの追加検出）', () => {
+  it('スキームは生・@だけパーセントエンコードされた中間形もマスクする', () => {
+    const raw = 'see https://token%40evil.com/path for details';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('token%40');
+    expect(result).toContain('https://***%40evil.com/path');
+  });
+
+  it('%40がホスト・パスの奥（userinfoではない位置）に現れるだけの場合は誤マスクしない', () => {
+    const raw = 'see https://cdn.example.com/logo%40copy.png for the asset';
+    expect(sanitizeForLog(raw)).toBe(raw);
+  });
+
+  it('2回適用しても結果が変わらない（冪等性）', () => {
+    const raw = 'see https://token%40evil.com/path for details';
+    const once = sanitizeForLog(raw);
+    const twice = sanitizeForLog(once);
+    expect(twice).toBe(once);
   });
 });
 
@@ -138,6 +206,103 @@ describe('sanitizeForLog（セキュリティ監査指摘: 否定先読みによ
   });
 });
 
+describe('sanitizeForLog（Issue #474 レビュー指摘: HOME_DIR_USERNAME_PATTERNのUNC分岐緩和が退行を生む、medium）', () => {
+  it('JSON化された通常のWindowsパス（C:\\Users\\alice\\...）はマスクされる（ドライブレター分岐）', () => {
+    const raw = 'backup path: C:\\\\Users\\\\alice\\\\file.txt';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('C:\\\\Users\\\\***\\\\file.txt');
+  });
+
+  it('JSON化されたUNCパス（\\\\fileserver\\Users\\alice\\...）はマスクされる（UNC分岐）', () => {
+    const raw = 'backup path: \\\\\\\\fileserver\\\\Users\\\\alice\\\\file.txt';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('\\\\\\\\fileserver\\\\Users\\\\***\\\\file.txt');
+  });
+
+  it('ドライブレター直後にUsers以外のフォルダを挟む場合はマスクしない（過剰マスク防止の回帰確認）', () => {
+    // JSON.stringify経由の2連バックスラッシュ。Sharedはユーザー名でも
+    // UNCのサーバー名でもない、ただのフォルダ名
+    const raw = 'backup path: C:\\\\Backup\\\\Users\\\\Shared\\\\file.txt';
+    expect(sanitizeForLog(raw)).toBe(raw);
+  });
+
+  it('単一バックスラッシュの同形（C:\\Backup\\Users\\Shared\\...）もマスクしない', () => {
+    const raw = 'backup path: C:\\Backup\\Users\\Shared\\file.txt';
+    expect(sanitizeForLog(raw)).toBe(raw);
+  });
+});
+
+describe('sanitizeForLog（セキュリティ監査指摘: HOME_DIR_USERNAME_PATTERNの否定先読みへの:追加でコロン直後のパスが素通りする、medium）', () => {
+  it('ドライブレター直後のUsers以外のフォルダは引き続きマスクしない（回帰確認）', () => {
+    const raw = 'C:\\Backup\\Users\\Shared\\file.txt';
+    expect(sanitizeForLog(raw)).toBe(raw);
+  });
+
+  it('ドライブレター直下のUsersは引き続きマスクする（回帰確認）', () => {
+    const raw = 'C:\\Users\\alice\\file.txt';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('C:\\Users\\***\\file.txt');
+  });
+
+  it('単一スラッシュのfile:直後の/home/はマスクする', () => {
+    const raw = 'at file:/home/alice/project/index.js:10:5';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('file:/home/***/project/index.js');
+  });
+
+  it('error:直後の/Users/はマスクする', () => {
+    const raw = 'error:/Users/bob/secret/config.json';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('bob');
+    expect(result).toContain('error:/Users/***/secret/config.json');
+  });
+
+  it('三連スラッシュのfile:///home/はマスクする（回帰確認）', () => {
+    const raw = 'file:///home/alice/project';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('file:///home/***/project');
+  });
+});
+
+describe('sanitizeForLog（Issue #474 指摘2: バックスラッシュがエスケープされたWindowsパス）', () => {
+  it('JSON.stringify経由で2連バックスラッシュになったWindowsパスでもユーザー名を隠す', () => {
+    // 実際のランタイム文字列は C:\\Users\\carol\\project\\file.ts
+    // （バックスラッシュはそれぞれ2連。JSON.stringify(err.message) 等を経由した形を想定）
+    const raw = 'C:\\\\Users\\\\carol\\\\project\\\\file.ts';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('carol');
+    expect(result).toContain('C:\\\\Users\\\\***\\\\project\\\\file.ts');
+  });
+
+  it('UNC形式でも2連バックスラッシュになった形でユーザー名を隠す', () => {
+    // 実際のランタイム文字列は \\fileserver\Users\alice\project\index.ts が
+    // JSON化されて \\\\fileserver\\Users\\alice\\project\\index.ts になった形
+    const raw = '\\\\\\\\fileserver\\\\Users\\\\alice\\\\project\\\\index.ts';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('\\\\\\\\fileserver\\\\Users\\\\***\\\\project\\\\index.ts');
+  });
+
+  it('単一バックスラッシュの通常形式は引き続き従来通りマスクする（回帰確認）', () => {
+    const raw = "EACCES: permission denied, open 'C:\\Users\\carol\\project\\src\\index.ts'";
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('carol');
+    expect(result).toContain('C:\\Users\\***\\project\\src\\index.ts');
+  });
+
+  it('2回適用しても結果が変わらない（冪等性）', () => {
+    const raw = 'C:\\\\Users\\\\carol\\\\project\\\\file.ts';
+    const once = sanitizeForLog(raw);
+    const twice = sanitizeForLog(once);
+    expect(twice).toBe(once);
+  });
+});
+
 describe('sanitizeForLog（セキュリティ監査指摘: UNCパスが対象外。LOW）', () => {
   it('UNC形式（\\\\fileserver\\Users\\<user>\\...）のローミングプロファイルでもユーザー名を露出しない', () => {
     const raw = '\\\\fileserver\\Users\\alice\\project\\index.ts';
@@ -174,6 +339,136 @@ describe('maskHomeDir（Issue #378: ホームディレクトリ配下のユー�
 
   it('実行環境のos.homedir()に依存せず、明示的にhomeDirを渡してテストできる', () => {
     expect(maskHomeDir('/home/zzz-test-user/x', '/home/zzz-test-user')).toBe('~/x');
+  });
+
+  it('homeDirが"/"の場合は単独の"/"を全置換せず一般パターンのみ適用する（コンテナのHOME=/対策）', () => {
+    // 修正前は exactHomeDirPattern が「後続が/\か文字列末尾」の単独"/"全てに一致し、
+    // 末尾の区切りごと"~"へ置き換えてパスを壊していた（例: '/tmp/' → '/tmp~'）。
+    expect(maskHomeDir('/tmp/', '/')).toBe('/tmp/');
+  });
+
+  it('homeDirが"/"でも/home配下のユーザー名マスク（maskHomeDirUsername）は従来通り効く', () => {
+    expect(maskHomeDir('/home/eve/repo/foo.ts', '/')).toBe('/home/***/repo/foo.ts');
+  });
+});
+
+describe('maskForLog（セキュリティ監査指摘: 対象範囲の明記。URL・ホームディレクトリ・トークン様文字列を隠す）', () => {
+  it('URLのuserinfoとホームディレクトリのユーザー名が同時に出ても両方マスクする', () => {
+    const input =
+      "fatal: unable to access 'https://token123@github.com/org/repo': " +
+      "config read failed: open '/home/alice/.gitconfig'";
+    const result = maskForLog(input, '/home/alice');
+    expect(result).not.toContain('token123');
+    expect(result).not.toContain('alice');
+    expect(result).toContain('https://***@github.com/org/repo');
+    expect(result).toContain('~/.gitconfig');
+  });
+
+  it('マスク対象外の値は元の文字列を変更せず返す', () => {
+    const input = 'ls -la /repo/work';
+    expect(maskForLog(input)).toBe(input);
+  });
+});
+
+describe('maskForLog（Issue #474 指摘3: トークン様文字列のマスク）', () => {
+  it('Bearerトークンをマスクする', () => {
+    const input = 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abc.def';
+    const result = maskForLog(input);
+    expect(result).not.toContain('eyJhbGciOiJIUzI1NiJ9');
+    expect(result).toBe('Authorization: Bearer ***');
+  });
+
+  it('GitHubトークン形状（ghp_/gho_/ghu_/ghs_/ghr_）をマスクする', () => {
+    const input = 'token=ghp_1234567890abcdefTOKEN123 でログインに失敗しました';
+    const result = maskForLog(input);
+    expect(result).not.toContain('1234567890abcdefTOKEN123');
+    expect(result).toBe('token=*** でログインに失敗しました');
+  });
+
+  it('OpenAI/Anthropic系のsk-形式のキーをマスクする', () => {
+    const input = 'key=sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 is invalid';
+    const result = maskForLog(input);
+    expect(result).not.toContain('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789');
+    expect(result).toBe('key=*** is invalid');
+  });
+
+  it('3種のトークンが同一メッセージに混在してもすべてマスクする', () => {
+    const input = 'Authorization: Bearer ghp_1234567890abcdefTOKEN sk-ABCDEFGHIJKLMNOP';
+    const result = maskForLog(input);
+    expect(result).not.toContain('ghp_1234567890abcdefTOKEN');
+    expect(result).not.toContain('sk-ABCDEFGHIJKLMNOP');
+    // Bearerの直後の1トークン（ghp_...）と、後続のsk-...がそれぞれ***へ置き換わる
+    expect(result).toBe('Authorization: Bearer *** ***');
+  });
+
+  it('短すぎるgh[oprsu]_/sk-接頭辞は誤マスクしない（過剰マスク防止）', () => {
+    // 長さ閾値未満なのでトークンとはみなさない
+    expect(maskForLog('gh_1234 sk-short')).toBe('gh_1234 sk-short');
+  });
+
+  it('トークンをマスクしても障害調査に必要なファイル名・エラー種別は残る', () => {
+    const input =
+      "TypeError: Cannot read property 'foo' of undefined at /repo/src/index.ts:10:5, " +
+      'header was Authorization: Bearer ghp_1234567890abcdefTOKEN123';
+    const result = maskForLog(input);
+    expect(result).toContain('TypeError');
+    expect(result).toContain('/repo/src/index.ts:10:5');
+    expect(result).not.toContain('ghp_1234567890abcdefTOKEN123');
+  });
+
+  it('2回適用しても結果が変わらない（冪等性）', () => {
+    const input = 'Authorization: Bearer ghp_1234567890abcdefTOKEN sk-ABCDEFGHIJKLMNOP';
+    const once = maskForLog(input);
+    const twice = maskForLog(once);
+    expect(twice).toBe(once);
+  });
+});
+
+describe('maskForLog（Issue #474 レビュー指摘: BEARER_TOKEN_PATTERNの過剰マスク、medium 2件統合）', () => {
+  it('Bearerが値を伴わず行末で終わる場合、次行のスタックトレースを潰さない', () => {
+    // \s+ が改行を含むため、Bearerが値を伴わない行末では次行の先頭語まで
+    // 誤って食っていた（stack traceの `at Object.<anonymous>` が破壊される）
+    const raw =
+      'Authorization failed near Bearer\n    at Object.<anonymous> (/app/index.js:10:5)';
+    expect(maskForLog(raw)).toBe(raw);
+  });
+
+  it('Bearerの直後がファイルパスの場合は誤マスクしない（トークンらしい文字種ではない）', () => {
+    const raw = 'Bearer /repo/src/config/token.ts をご確認ください';
+    expect(maskForLog(raw)).toBe(raw);
+  });
+
+  it('Bearerの直後が短い一般語の場合は誤マスクしない（長さ閾値未満）', () => {
+    const raw = 'must be a Bearer token in the Authorization header';
+    expect(maskForLog(raw)).toBe(raw);
+  });
+
+  it('同一行内でBearerの後にタブ区切りでトークンが続く場合は引き続きマスクする（回帰確認）', () => {
+    const raw = 'Authorization:\tBearer\tghp_1234567890abcdefTOKEN123';
+    const result = maskForLog(raw);
+    expect(result).not.toContain('ghp_1234567890abcdefTOKEN123');
+    expect(result).toBe('Authorization:\tBearer\t***');
+  });
+});
+
+describe('maskForLog（レビュー指摘: BEARER_TOKEN_PATTERNが標準Base64トークンを部分マスクする）', () => {
+  it('Bearerの直後がファイルパスの場合は誤マスクしない（先頭が`/`のため不一致のまま）', () => {
+    const raw = 'Bearer /repo/src/config/token.ts をご確認ください';
+    expect(maskForLog(raw)).toBe(raw);
+  });
+
+  it('Bearerの直後が短い一般語の場合は誤マスクしない（長さ閾値未満）', () => {
+    const raw = 'Bearer token';
+    expect(maskForLog(raw)).toBe(raw);
+  });
+
+  it('標準Base64（`/`と`+`と`=`を含む）のBearerトークンは断片を残さず全体をマスクする', () => {
+    const raw = 'Bearer abcd1234/xyz+abc==';
+    const result = maskForLog(raw);
+    expect(result).toBe('Bearer ***');
+    expect(result).not.toContain('abcd1234');
+    expect(result).not.toContain('xyz');
+    expect(result).not.toContain('abc==');
   });
 });
 
@@ -240,4 +535,164 @@ describe('stripControlCharsPreservingNewlines（design.md §16.4、セキュリ�
     const example = '1行目のプロンプト\n\n----- 区切り -----\n本文\n----- ここまで -----';
     expect(stripControlCharsPreservingNewlines(example)).toBe(example);
   });
+});
+
+describe('sanitizeForLog（ReDoS対策: 約100万文字規模の敵対的入力でも線形時間で完了する）', () => {
+  // しきい値は環境差を吸収しつつ「明らかな指数・多項式的悪化」だけを検出できる値に設定。
+  // 線形であれば数十〜数百ms程度で完了する想定（実測はPR報告に記載）。
+  //
+  // REDOS_TIMEOUT_MSとこのdescribe配下6件のitタイムアウトについて（Issue #522）:
+  // このアサーションはperformance.now()差分による壁時計時間の測定であり、
+  // npm test（全体実行）では実質的に他テストとのCPU競合を測ってしまう。
+  // このリポジトリのサンドボックス環境で全体実行を4回繰り返し実測したところ、
+  // 6件とも0.4〜5.2秒の範囲で揺れた（単体実行では数百msで完了）。一方、この
+  // テストが検出したい{n,}量指定子由来の破局的バックトラッキングは、下の
+  // 「パーセントエンコードされたスキーム区切り」テストの回帰コメントの通り
+  // 90万文字規模で「20秒を超える」という、桁が異なる規模で現れる。つまり
+  // 5000msという値には「CPU競合による数秒の揺れ」と「本来検出したい規模の
+  // 劣化（20秒超）」を区別する余地が最初から無かった。実測最大値5.2秒に対し
+  // 2倍以上の余裕を持たせつつ、既知の劣化が現れる20秒台には遠く届かない
+  // 12000msへ引き上げる。これにより高負荷時の誤検知は無くなり、桁違いに
+  // 遅い本物の劣化への検出能力は維持される。個々のitタイムアウトも、この
+  // アサーションより先に打ち切られないよう15000msへ揃える。
+  const REDOS_TIMEOUT_MS = 12_000;
+  const IT_TIMEOUT_MS = 15_000;
+
+  it('/home/ の10万回連続でも高速に完了する', () => {
+    const input = '/home/'.repeat(100_000);
+    const start = performance.now();
+    sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
+    expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
+  }, IT_TIMEOUT_MS);
+
+  it('\\\\ + 20万文字 + \\Users\\ + 20万文字でも高速に完了する', () => {
+    const input = '\\\\' + 'a'.repeat(200_000) + '\\Users\\' + 'b'.repeat(200_000);
+    const start = performance.now();
+    sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
+    expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
+  }, IT_TIMEOUT_MS);
+
+  it('scheme:// で終端しない50万+50万文字でも高速に完了する', () => {
+    const input = 'https://' + 'a'.repeat(500_000) + 'b'.repeat(500_000);
+    const start = performance.now();
+    sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
+    expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
+  }, IT_TIMEOUT_MS);
+
+  it('スタックトレース行の5万回連続でも高速に完了する', () => {
+    const input = '    at foo (/home/alice/a.ts:1:1)\n'.repeat(50_000);
+    const start = performance.now();
+    sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
+    expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
+  }, IT_TIMEOUT_MS);
+
+  it('パーセントエンコードされたスキーム区切りが%40なしで大量に連続しても高速に完了する（回帰確認）', () => {
+    // 実装当初、末尾に%40が一切現れない大きな入力でO(n^2)のバックトラックが発生し
+    // 90万文字規模で20秒を超えていた（スキーム名の量指定子に上限が無かったため）。
+    // {0,63}へ上限を設けて解消したことをここで固定する。
+    const input = 'https%3A%2F%2F'.repeat(50_000) + 'a'.repeat(200_000);
+    const start = performance.now();
+    sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
+    expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
+  }, IT_TIMEOUT_MS);
+
+  it('Bearer/ghp_/sk-様の巨大なトークン様文字列でも高速に完了する', () => {
+    const input =
+      'Bearer ' +
+      'a'.repeat(1_000_000) +
+      ' ghp_' +
+      'b'.repeat(1_000_000) +
+      ' sk-' +
+      'c'.repeat(1_000_000);
+    const start = performance.now();
+    sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
+    expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
+  }, IT_TIMEOUT_MS);
+});
+
+describe('maskForLog（セキュリティ監査指摘: {n,}量指定子が約5.6MB超の単一トークンでV8をクラッシュさせる、high）', () => {
+  // 旧実装（`{7,}` 等、上限なしの下限のみ量指定子）はNode v24.19.0で
+  // 5,566,406〜5,593,750文字規模の単一トークンに対して
+  // `RangeError: Maximum call stack size exceeded` を投げていた。
+  // `sanitizeForLog` は `GIT_MAX_BUFFER_BYTES` / `CLI_MAX_BUFFER_BYTES`
+  // （いずれも10MB）を上限とするgit/CLIのstderrを直接受けるため、この規模の
+  // 入力は実際に到達しうる。クラッシュしないことと、上限を超えた分の残骸が
+  // ログに残らないこと（部分マスクにならないこと）の両方を固定する。
+  //
+  // CRASH_TIMEOUT_MSとこのdescribe配下4件のitタイムアウトについて（Issue #522）:
+  // 約560万文字の単一トークンを正規表現へ通すコストは、npm test（全体実行）で
+  // 他のテストとCPUを奪い合うと単体実行時より大きく伸びる。このリポジトリの
+  // サンドボックス環境で全体実行を繰り返し実測したところ、この3件は
+  // 3.9〜13.6秒の範囲で揺れた（単体実行では1秒未満）。5000msのままでは
+  // 高負荷時に誤って失敗するため、実測の最大値に対して2倍以上の余裕を持たせ
+  // 30000msへ引き上げる。個々のitタイムアウト（vitestの既定20000ms）も
+  // このアサーションより先に打ち切られないよう35000msへ揃える。
+  // なお、この値を大きく超える停止（数十秒〜分オーダー）は、この判定が本来
+  // 検出したい{n,}量指定子由来の破局的バックトラッキングの再発を示唆する。
+  //
+  // なお、この時間しきい値はセーフティネットに過ぎない。旧実装の劣化は
+  // `RangeError: Maximum call stack size exceeded` として1.3秒未満で即座に
+  // 現れるため（PR #523のレビューで、正規表現を旧形へ戻して実測確認）、
+  // 劣化の検出自体はしきい値の大小に依存しない。
+  const CRASH_TIMEOUT_MS = 30_000;
+  const IT_TIMEOUT_MS = 35_000;
+
+  it(
+    'Bearerトークンが約560万文字でもクラッシュせずマスクする',
+    () => {
+      const raw = 'Authorization: Bearer ' + 'A'.repeat(5_600_000);
+      const start = performance.now();
+      const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
+      expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
+      expect(result).toBe('Authorization: Bearer ***');
+    },
+    IT_TIMEOUT_MS,
+  );
+
+  it(
+    'GitHubトークンが約560万文字でもクラッシュせずマスクする',
+    () => {
+      const raw = 'token=gho_' + 'A'.repeat(5_600_000);
+      const start = performance.now();
+      const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
+      expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
+      expect(result).toBe('token=***');
+    },
+    IT_TIMEOUT_MS,
+  );
+
+  it(
+    'sk-形式のキーが約560万文字でもクラッシュせずマスクする',
+    () => {
+      const raw = 'key=sk-' + 'A'.repeat(5_600_000);
+      const start = performance.now();
+      const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
+      expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
+      expect(result).toBe('key=***');
+    },
+    IT_TIMEOUT_MS,
+  );
+
+  it(
+    '10MB規模（CLI_MAX_BUFFER_BYTES/GIT_MAX_BUFFER_BYTES相当）でもクラッシュせず、断片が残らない',
+    () => {
+      // 単一トークンで10MB（各バッファ上限相当）とし、3トークン分を連結した約30MBの
+      // 入力で確認する。`stripControlChars`（本PRの変更対象外）の走査コストが
+      // 支配的で数秒かかりうるため、クラッシュ・部分マスクの有無のみを見る
+      // （速度自体は個別テストで別途確認済み）。
+      //
+      // itタイムアウトについて（Issue #522）: 約30MB規模の入力を正規表現へ
+      // 通すため、npm test（全体実行）では並列実行によるCPU競合でvitestの
+      // 既定20000msを超えてタイムアウトする（単体実行では10秒未満で終わる）。
+      // このリポジトリのサンドボックス環境で全体実行を繰り返し実測したところ
+      // 33〜34秒程度だった。既定の20000msのままでは高負荷時に安定して失敗する
+      // ため、実測値に対して余裕を持たせ90000msへ引き上げる
+      // （全体のtestTimeoutは変更しない。このテストにだけ個別に与える）。
+      const raw =
+        'Bearer ' + 'A'.repeat(10_000_000) + ' gho_' + 'B'.repeat(10_000_000) + ' sk-' + 'C'.repeat(10_000_000);
+      const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
+      expect(result).toBe('Bearer *** *** ***');
+    },
+    90_000,
+  );
 });

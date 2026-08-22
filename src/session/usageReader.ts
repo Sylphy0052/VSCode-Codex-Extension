@@ -2,15 +2,10 @@ import type { CodexPaths } from '../codex/cliLocator';
 import { findLastTokenCount, type UsageSnapshot } from '../codex/usage';
 import { mapWithLimit } from '../util/concurrency';
 import type { FileSystemPort } from './ports';
+import { MTIME_CONCURRENCY_LIMIT } from './sessionStore';
 
 /** 末尾から読む量。token_countイベントは数百バイト程度なので十分な余裕がある。 */
 const TAIL_BYTES = 64 * 1024;
-
-/**
- * `newestRollout`で`fs.mtimeMs`を並列発火する上限。逐次との比較で十分な短縮効果が
- * ある一方、件数分を無制限に同時発火しないための頭打ち値。
- */
-const MTIME_CONCURRENCY_LIMIT = 32;
 
 /**
  * 現在のレート制限使用量を読む。

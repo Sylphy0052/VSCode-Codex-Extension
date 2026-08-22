@@ -8,11 +8,13 @@ import {
   DEFAULT_REPLY_TIMEOUT_SEC,
   detectAllWaitingStalemate,
   detectTimedOutWaitingReplies,
+  DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL,
   enqueueMessage,
   hasQueuedMessages,
   isDeliverableState,
   LIST_TASKS_TOOL,
   MAX_COMPOSED_PROMPT_LENGTH,
+  MAX_DISPATCH_ERROR_LOG_COUNT,
   MAX_MESSAGE_BODY_LENGTH,
   MAX_MESSAGES_PER_RUN,
   MessagingMcpServer,
@@ -25,6 +27,7 @@ import {
   totalUndeliveredCount,
   validateSendMessage,
   wrapTaskMessage,
+  type DispatchErrorLogPort,
   type HttpMcpTransportHandle,
   type JsonRpcRequest,
   type JsonRpcResponse,
@@ -756,6 +759,235 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
       }
     },
   );
+
+  it(
+    'dispatchが例外を投げたとき、型名とメッセージがlogPortへ記録される' +
+      '（Issue #375: 例外が起きた事実がどこにも記録されない）',
+    () => {
+      const logs: string[] = [];
+      const logPort: DispatchErrorLogPort = { error: (m) => logs.push(m) };
+      const transport = new FakeTransport();
+      const hub = new TaskMessagingHub({
+        listRunTasks: () => {
+          throw new RangeError('boom');
+        },
+      });
+      new MessagingMcpServer(hub, transport, logPort);
+      const conn = new FakeConnection('T1');
+      transport.connect(conn);
+
+      conn.fireRequest({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'list_tasks', arguments: {} },
+      });
+
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toContain('RangeError');
+      expect(logs[0]).toContain('boom');
+    },
+  );
+
+  it(
+    'ログにはスタックトレースとファイルパスを含めない' +
+      '（Issue #375: レスポンス本体だけでなくログ側も内部情報を漏らさない）',
+    () => {
+      const logs: string[] = [];
+      const logPort: DispatchErrorLogPort = { error: (m) => logs.push(m) };
+      const transport = new FakeTransport();
+      const hub = new TaskMessagingHub({
+        listRunTasks: () => {
+          throw new Error('boom');
+        },
+      });
+      new MessagingMcpServer(hub, transport, logPort);
+      const conn = new FakeConnection('T1');
+      transport.connect(conn);
+
+      conn.fireRequest({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'list_tasks', arguments: {} },
+      });
+
+      expect(logs).toHaveLength(1);
+      // スタックトレースの行形式（"    at ..."）もこのテストファイル自身のパスも
+      // 含まれないこと。実際のError.stackには両方が含まれるため、これが通るのは
+      // 実装がerror.stackを一切読んでいない場合のみ
+      expect(logs[0]).not.toContain(' at ');
+      expect(logs[0]).not.toContain(__filename);
+    },
+  );
+
+  it(
+    'dispatch例外の記録は上限（MAX_DISPATCH_ERROR_LOG_COUNT）件で頭打ちになる' +
+      '（Issue #375、PR #476レビュー指摘: medium。同一runの他タスクや乗っ取られたCLI' +
+      'セッションが例外を誘発する呼び出しを繰り返しても、ログ行が無制限には増えない）',
+    () => {
+      const logs: string[] = [];
+      const logPort: DispatchErrorLogPort = { error: (m) => logs.push(m) };
+      const transport = new FakeTransport();
+      const hub = new TaskMessagingHub({
+        listRunTasks: () => {
+          throw new Error('boom');
+        },
+      });
+      new MessagingMcpServer(hub, transport, logPort);
+      const conn = new FakeConnection('T1');
+      transport.connect(conn);
+
+      const attempts = MAX_DISPATCH_ERROR_LOG_COUNT + 5;
+      for (let i = 0; i < attempts; i += 1) {
+        conn.fireRequest({
+          jsonrpc: '2.0',
+          id: i,
+          method: 'tools/call',
+          params: { name: 'list_tasks', arguments: {} },
+        });
+      }
+
+      // 上限件数分の個別ログ + 上限到達を知らせる1行だけが記録され、それ以上は増えない。
+      // 注: この試行回数（+5）はDISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL未満なので、
+      // ここでは集計ログはまだ出ない（集計ログの検証は別テストで行う）。
+      expect(logs).toHaveLength(MAX_DISPATCH_ERROR_LOG_COUNT + 1);
+      expect(logs.slice(0, MAX_DISPATCH_ERROR_LOG_COUNT).every((m) => m.includes('boom'))).toBe(
+        true,
+      );
+      expect(logs[MAX_DISPATCH_ERROR_LOG_COUNT]).toContain(String(MAX_DISPATCH_ERROR_LOG_COUNT));
+
+      // 記録が止まっても、レスポンス自体は引き続き固定文言の-32603で返る（応答は壊れない）
+      expect(conn.sent).toHaveLength(attempts);
+      expect(conn.sent.every((r) => 'error' in r && r.error.code === -32603)).toBe(true);
+    },
+  );
+
+  it(
+    '上限到達後も抑制中の件数を数え続け、' +
+      'DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL件おきに集計ログを1行出す' +
+      '（Issue #375、PR #488監査指摘: medium。正当な例外で上限を先に使い切られても、' +
+      'その後の攻撃の規模・継続有無を集計ログだけで追えるようにする）',
+    () => {
+      const logs: string[] = [];
+      const logPort: DispatchErrorLogPort = { error: (m) => logs.push(m) };
+      const transport = new FakeTransport();
+      const hub = new TaskMessagingHub({
+        listRunTasks: () => {
+          throw new Error('boom');
+        },
+      });
+      new MessagingMcpServer(hub, transport, logPort);
+      const conn = new FakeConnection('T1');
+      transport.connect(conn);
+
+      // 上限到達 + 集計ログがちょうど2回出る回数まで試行する
+      const attempts = MAX_DISPATCH_ERROR_LOG_COUNT + DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL * 2;
+      for (let i = 0; i < attempts; i += 1) {
+        conn.fireRequest({
+          jsonrpc: '2.0',
+          id: i,
+          method: 'tools/call',
+          params: { name: 'list_tasks', arguments: {} },
+        });
+      }
+
+      // 個別ログ(上限件数) + 上限到達通知1行 + 集計ログ2行 = 上限件数+3
+      expect(logs).toHaveLength(MAX_DISPATCH_ERROR_LOG_COUNT + 3);
+
+      const firstSummary = logs[MAX_DISPATCH_ERROR_LOG_COUNT + 1];
+      const secondSummary = logs[MAX_DISPATCH_ERROR_LOG_COUNT + 2];
+      expect(firstSummary).toContain(String(DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL));
+      expect(secondSummary).toContain(String(DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL * 2));
+      // 集計ログの主語がrun単位（複数タスクの接続を含む）であることを明示している
+      expect(firstSummary).toContain('run');
+      expect(secondSummary).toContain('run');
+
+      // ログ行数自体は増え続けず、応答は引き続き固定文言の-32603で返る
+      expect(conn.sent).toHaveLength(attempts);
+      expect(conn.sent.every((r) => 'error' in r && r.error.code === -32603)).toBe(true);
+    },
+  );
+
+  it(
+    'dispatch例外の記録件数はhub側で持ち、transportを作り直しても引き継がれる' +
+      '（Issue #475、PR #495レビュー指摘: medium。`WorkflowRunner.ensureMessaging`は' +
+      '`retryTask`/再マージ成功のたびにtransportと`MessagingMcpServer`を作り直すため、' +
+      'カウンタを`MessagingMcpServer`側に置くと再構築のたびに0へ戻り、' +
+      '「run全体で20件」という上限が再開のたびに緩んでしまう）',
+    () => {
+      const logs: string[] = [];
+      const logPort: DispatchErrorLogPort = { error: (m) => logs.push(m) };
+      const hub = new TaskMessagingHub({
+        listRunTasks: () => {
+          throw new Error('boom');
+        },
+      });
+
+      // 1本目のtransport（＝1回目のrun開始）で上限ぎりぎりまで例外を起こす
+      const transport1 = new FakeTransport();
+      new MessagingMcpServer(hub, transport1, logPort);
+      const conn1 = new FakeConnection('T1');
+      transport1.connect(conn1);
+      for (let i = 0; i < MAX_DISPATCH_ERROR_LOG_COUNT - 1; i += 1) {
+        conn1.fireRequest({
+          jsonrpc: '2.0',
+          id: i,
+          method: 'tools/call',
+          params: { name: 'list_tasks', arguments: {} },
+        });
+      }
+      expect(logs).toHaveLength(MAX_DISPATCH_ERROR_LOG_COUNT - 1);
+
+      // transportを作り直す（`ensureMessaging`が`retryTask`等の再開経路でtransportだけを
+      // 立て直す形を模す。hubは同じインスタンスを再利用する）
+      const transport2 = new FakeTransport();
+      new MessagingMcpServer(hub, transport2, logPort);
+      const conn2 = new FakeConnection('T1');
+      transport2.connect(conn2);
+
+      // カウンタが引き継がれていれば、あと2回で上限に達し「上限到達」の通知行が出る。
+      // 引き継がれていなければ（0から再スタートしていれば）ここではまだ上限に届かず
+      // この通知行は出ない
+      conn2.fireRequest({
+        jsonrpc: '2.0',
+        id: 100,
+        method: 'tools/call',
+        params: { name: 'list_tasks', arguments: {} },
+      });
+      conn2.fireRequest({
+        jsonrpc: '2.0',
+        id: 101,
+        method: 'tools/call',
+        params: { name: 'list_tasks', arguments: {} },
+      });
+
+      expect(logs).toHaveLength(MAX_DISPATCH_ERROR_LOG_COUNT + 1);
+      expect(logs[MAX_DISPATCH_ERROR_LOG_COUNT]).toContain(String(MAX_DISPATCH_ERROR_LOG_COUNT));
+    },
+  );
+
+  it('logPortを渡さなくても例外時に落ちない（後方互換）', () => {
+    const transport = new FakeTransport();
+    const hub = new TaskMessagingHub({
+      listRunTasks: () => {
+        throw new Error('boom');
+      },
+    });
+    new MessagingMcpServer(hub, transport);
+    const conn = new FakeConnection('T1');
+    transport.connect(conn);
+
+    expect(() =>
+      conn.fireRequest({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'list_tasks', arguments: {} },
+      }),
+    ).not.toThrow();
+    expect(conn.sent).toHaveLength(1);
+  });
 });
 
 describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタスク」、Issue #105）', () => {
@@ -963,6 +1195,38 @@ describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタ�
     expect(url1.startsWith(handle.baseUrl)).toBe(true);
     expect(url2.startsWith(handle.baseUrl)).toBe(true);
   });
+
+  it(
+    '渡したlogPortへdispatchの例外が記録される（Issue #375）' +
+      '（`MessagingMcpServer`への配線が`startHttpMcpTransport`経由でも保たれることの確認）',
+    async () => {
+      const logs: string[] = [];
+      const logPort: DispatchErrorLogPort = { error: (m) => logs.push(m) };
+      const hub = new TaskMessagingHub({
+        listRunTasks: () => {
+          throw new Error('boom');
+        },
+      });
+      handle = await startHttpMcpTransport(hub, logPort);
+      const url = handle.registerTask('T1');
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'list_tasks', arguments: {} },
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toContain('Error');
+      expect(logs[0]).toContain('boom');
+    },
+  );
 });
 describe("オーケストレーター専用の制御ツール（design.md §16.23「道具」）", () => {
   /** 呼ばれた制御ツールを記録するだけのフェイク。 */

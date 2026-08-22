@@ -267,6 +267,14 @@ function finalizeTaskPullRequestFlow(
  * タスクが`merging`になった直後に呼ぶ。未コミットの変更を回収してからマージを試みる。
  * `onTaskFinished`（通常経路）と`resumeMergeAfterReload`（リロード後の再開）の両方から
  * 呼ばれるため、`LiveTask`ではなくcwd/branch/originCommitを直接受け取る。
+ *
+ * **この関数はrejectしない。** `runner.ts`の`onTaskFinished`と`retryMerge`（本ファイル）は
+ * この関数を`void`で発火するため、内部で投げると呼び出し元が未ハンドルrejectになり、
+ * タスクが`merging`のまま統合worktreeの枠を永久に占有する（`getRunOutcome`は`merging`を
+ * `running`扱いするため、runの終了判定も進まない）。疑似worktree側（`integratePseudoWorktree`。
+ * Issue #376）が全体をtry/catchで包んで`markMergeFailed`へ落としているのと同じ形に揃える
+ * （Issue #437）。`nodeGitCommandRunner`/`nodeCliCommandRunner`は基本的にresolveしか返さない
+ * ため実害は起きにくいが、ENOSPC等の想定外の例外が起きたときの安全網として必要
  */
 export async function startMerge(
   self: WorkflowRunnerInternals,
@@ -292,20 +300,31 @@ export async function startMerge(
     return;
   }
 
-  // design.md §16.17「タスク完了時のコミット」2.〜4.
-  const commitResult = await commitUncommittedChangesIfNeeded(taskCwd, taskId, self.deps.git, task.type);
-  if (!commitResult.ok) {
-    self.deps.log.error(
-      `[workflow ${runId}/${taskId}] 未コミットの変更の回収に失敗しました: ${commitResult.message}`,
-    );
+  try {
+    // design.md §16.17「タスク完了時のコミット」2.〜4.
+    const commitResult = await commitUncommittedChangesIfNeeded(taskCwd, taskId, self.deps.git, task.type);
+    if (!commitResult.ok) {
+      self.deps.log.error(
+        `[workflow ${runId}/${taskId}] 未コミットの変更の回収に失敗しました: ${commitResult.message}`,
+      );
+      live.runState = markMergeFailed(live.runState, live.def.tasks, taskId);
+      void self.persist(runId);
+      self.notify(runId);
+      self.pump(runId);
+      return;
+    }
+
+    await attemptMerge(self, runId, taskId, task, live.integration, taskCwd, taskBranch, originCommit);
+  } catch (e) {
+    // gitのメイン経路で想定外の例外が起きた場合の安全網（Issue #437）。他の失敗を
+    // `markMergeFailed`に落とすのと同じ扱いにする
+    const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+    self.deps.log.error(`[workflow ${runId}/${taskId}] マージ中に例外が発生しました: ${message}`);
     live.runState = markMergeFailed(live.runState, live.def.tasks, taskId);
     void self.persist(runId);
     self.notify(runId);
     self.pump(runId);
-    return;
   }
-
-  await attemptMerge(self, runId, taskId, task, live.integration, taskCwd, taskBranch, originCommit);
 }
 
 /**
@@ -464,6 +483,55 @@ function decideAfterLeaseWait(
   return { kind: 'proceed' };
 }
 
+/**
+ * `mergeBusy`警告を、同一taskIdの直近1件へ丸めて積む（Issue #439）。「再マージ」は人が
+ * 何度でも押せる操作で、統合worktreeが塞がっている間は押すたびに同じ文面の警告が積まれて
+ * いくため、`orchestratorPromptOverride`（Issue #383・`runnerOrchestrator.ts`）が
+ * `taskId`ごと直近1件へ丸めたのと同じ規律に乗せる。警告が出た事実自体は最新の1件として
+ * 残るので「警告が出た事実が失われる」ことはない。
+ */
+function pushMergeBusyWarning(live: LiveRun, taskId: string, message: string): void {
+  live.warnings = live.warnings.filter((w) => !(w.kind === 'mergeBusy' && w.taskId === taskId));
+  live.warnings.push({ kind: 'mergeBusy', taskId, message });
+}
+
+/**
+ * `mergeInterrupted`警告を、`mergeBusy`と同じ規律（同一taskIdの直近1件へ丸める）で積む
+ * （Issue #443）。`markMergeBlocked`は対象タスクの`failure`を`undefined`にするため、
+ * 「巻き戻し済みの`blocked`」と「人が止めて中断した`blocked`」の区別を状態側には持たせず、
+ * この警告だけが持つ。
+ */
+function pushMergeInterruptedWarning(live: LiveRun, taskId: string, message: string): void {
+  live.warnings = live.warnings.filter(
+    (w) => !(w.kind === 'mergeInterrupted' && w.taskId === taskId),
+  );
+  live.warnings.push({ kind: 'mergeInterrupted', taskId, message });
+}
+
+/**
+ * `mergeApprovalTimeout`警告を、`mergeBusy`/`mergeInterrupted`と同じ規律（同一taskIdの
+ * 直近1件へ丸める）で積む（Issue #413 PR5）。「再マージ」でやり直したセッションが再び
+ * タイムアウトした場合に、同じ文面の警告が積み増されていくのを防ぐ。
+ */
+function pushMergeApprovalTimeoutWarning(live: LiveRun, taskId: string, message: string): void {
+  live.warnings = live.warnings.filter(
+    (w) => !(w.kind === 'mergeApprovalTimeout' && w.taskId === taskId),
+  );
+  live.warnings.push({ kind: 'mergeApprovalTimeout', taskId, message });
+}
+
+/**
+ * `mergeStopTaskStopped`警告を、他の`merge*`警告と同じ規律（同一taskIdの直近1件へ丸める）
+ * で積む（Issue #514）。「再マージ」でやり直したセッションが再び`stop_task`で止められた
+ * 場合に、同じ文面の警告が積み増されていくのを防ぐ。
+ */
+function pushMergeStopTaskStoppedWarning(live: LiveRun, taskId: string, message: string): void {
+  live.warnings = live.warnings.filter(
+    (w) => !(w.kind === 'mergeStopTaskStopped' && w.taskId === taskId),
+  );
+  live.warnings.push({ kind: 'mergeStopTaskStopped', taskId, message });
+}
+
 /** `blockMergeAfterLeaseWait`が人へ出す文面（理由ごと）。 */
 const LEASE_WAIT_BLOCK_MESSAGES: Record<LeaseWaitBlockReason, string> = {
   halted:
@@ -485,13 +553,28 @@ function blockMergeAfterLeaseWait(
   taskId: string,
   reason: LeaseWaitBlockReason,
 ): void {
+  if (self.isDisposing()) {
+    // 破棄経路からは現状ここに到達しない（レビュー3周目のmedium）。`dispose()`は
+    // for文で全runの`live.finished`を立て終えてからループの外で1度だけ
+    // `releaseAllLeases()`を呼ぶ。`releaseAllLeases()`が起こす`acquireLease`の継続
+    // （`decideAfterLeaseWait`の実行）はマイクロタスクなので、`dispose()`の同期フレームが
+    // 終わったあとにしか走らない。つまり破棄由来の待機起こしでは`live.finished`が必ず
+    // 既に真で、`decideAfterLeaseWait`は`skip`しか返さず、`block`を経てここへ来る経路が
+    // 無い（呼び出し元は`decision.kind === 'block'`のときだけ`attemptMerge`から呼ぶ）。
+    //
+    // それでもガードは残す。`blocked`確定は「人が再マージで直す」前提の後戻りできない
+    // 書き換えなので、`decideAfterLeaseWait`の条件が将来変わってここへ来るようになった
+    // ときの多層防御として置いておく。破棄しただけの実行は`merging`のまま残し、
+    // 次の起動の`resumeMergeAfterReload`に再判定させる
+    return;
+  }
   const live = self.runs.get(runId);
   if (live === undefined) {
     return;
   }
   const message = LEASE_WAIT_BLOCK_MESSAGES[reason];
   self.deps.log.warn(`[workflow ${runId}/${taskId}] ${message}`);
-  live.warnings.push({ kind: 'mergeBusy', taskId, message });
+  pushMergeBusyWarning(live, taskId, message);
   live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
   void self.persist(runId);
   self.notify(runId);
@@ -558,11 +641,7 @@ async function mergeWithLease(
     // 以後そのrunのマージが全て同じ理由で`failed`になる行き止まりを作るため
     // （レビュー指摘1）。`blocked`ならViewの「再マージ」で復帰できる
     self.deps.log.warn(`[workflow ${runId}/${taskId}] マージを見送りました: ${merge.message}`);
-    live.warnings.push({
-      kind: 'mergeBusy',
-      taskId,
-      message: merge.message,
-    });
+    pushMergeBusyWarning(live, taskId, merge.message);
     live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
     void self.persist(runId);
     self.notify(runId);
@@ -591,6 +670,111 @@ async function mergeWithLease(
     lease,
     handover,
   );
+}
+
+/**
+ * `agent.workflows.mergeApprovalTimeoutSec`の既定値（Issue #413 PR5、design.md §16.17
+ * 「承認待ちのアイドルタイムアウト」）。既定1時間。LLMが作業中（承認待ちで**ない**）の
+ * 時間はこの計測に含まれない（`waitingApprovalSinceMs`が`undefined`の間はタイマーを
+ * 張らない）。
+ */
+export const DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC = 3600;
+
+/**
+ * `waitingApprovalSinceMs`が変わるたび（承認待ちに入る／抜ける）に呼ぶ。既存のタイマーを
+ * 必ず先に消してから、承認待ちに入った場合だけ新しいタイマーを張り直す
+ * （`agent.workflows.mergeApprovalTimeoutSec`秒後に`handleMergeApprovalTimeout`を呼ぶ）。
+ *
+ * `setInterval`によるポーリングではなく、承認待ちに入った時点で`setTimeout`を張る方式を
+ * 選んだ（`MergeResolutionEntry.approvalTimeoutTimer`のJSDoc参照）。エントリの寿命に
+ * 対して1本のタイマーだけを持ち回るため、解放漏れの検査対象も1箇所（`clearTimeout`）に
+ * 絞れる。
+ */
+function scheduleApprovalTimeout(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  taskId: string,
+  previous: ReturnType<typeof setTimeout> | undefined,
+  waitingApprovalSinceMs: number | undefined,
+): ReturnType<typeof setTimeout> | undefined {
+  if (previous !== undefined) {
+    clearTimeout(previous);
+  }
+  if (waitingApprovalSinceMs === undefined) {
+    return undefined;
+  }
+  const timeoutSec =
+    self.deps.readMergeApprovalTimeoutSec?.() ?? DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC;
+  const timer = setTimeout(
+    () => handleMergeApprovalTimeout(self, runId, taskId, waitingApprovalSinceMs),
+    timeoutSec * 1000,
+  );
+  // `waitingReplyPollTimer`（`runnerMessaging.ts`）と同じく、テスト・プロセス終了を
+  // 妨げないようにする
+  timer.unref?.();
+  return timer;
+}
+
+/**
+ * 承認待ちタイムアウトの本体（Issue #413 PR5）。衝突解決セッションが承認待ちのまま
+ * `agent.workflows.mergeApprovalTimeoutSec`を超えたら`session.stopLoop()`を呼び、
+ * `finishMergeResolution`の非破壊分岐（対象タスクだけを`blocked`にし、`git merge --abort`は
+ * 呼ばない）へ合流させる。
+ *
+ * **停止中（`haltedByUser`）でもタイムアウトさせる（Issue #539）。** かつては
+ * 「run全体が停止済みならこの解決セッションのエントリは`finishMergeResolution`で既に
+ * 消えているはず」という前提のもと`haltedByUser`なら何もせず戻っていたが、この前提は
+ * 成立しない。「再マージ」（`retryMerge`）は`haltedByUser`を解除しない設計（Issue #517/
+ * #525・design.md §16.17「再マージ」）のため、run全体が停止したままでも新しい衝突解決
+ * セッションが開くことがあり、そのセッションが承認待ちに入るとこの関数へ到達する。
+ * ここで何もせず戻ると、`scheduleApprovalTimeout`が張るタイマーは
+ * `waitingApprovalSinceMs`が変わらない限り一発物（`scheduleApprovalTimeout`のJSDoc参照）
+ * なので、以後そのセッションのタイムアウトは二度と発火せず、対象タスクが`merging`のまま
+ * 永久に残る（`getRunOutcome`が`running`を返し続け、runが終了確定しない）。
+ *
+ * 下の`markMergeBlocked`（`localOnlyStopKind === 'approvalTimeout'`分岐）は対象タスク
+ * だけを`blocked`にし、`live.runState.haltedByUser`には触れない。**run全体の停止状態は
+ * タイムアウトでは変えない**（人が明示的に止めた事実をタイムアウトが上書きしない）ため、
+ * ここで`haltedByUser`を無条件でタイムアウトさせても安全側に倒れる。
+ *
+ * なお、このガードを入れた当初（Issue #413 PR5）の理由は「停止中も計測を続けると
+ * halt解除直後に即タイムアウトする」という懸念だったが、`scheduleApprovalTimeout`は
+ * 経過時間を積算せず`setTimeout`を張るだけで、`haltedByUser`の変化ではタイマーに
+ * 触れない。そのため懸念した即発火は構造的に起こりえず、**このガードは懸念に対して
+ * 何も機能しないまま、上記の行き止まりだけを作っていた**（Issue #539）。同じ懸念から
+ * ここへガードを戻さないこと。
+ *
+ * `waitingApprovalSinceMs`は張った時点の値をそのまま比較する（承認待ちが一度解けて再び
+ * 承認待ちへ戻っていれば値が変わっているため、古いタイマーの取りこぼしを検知できる。
+ * `scheduleApprovalTimeout`は張り直す前に必ず`clearTimeout`するので通常は起こらないが、
+ * 多層防御として残す）。
+ */
+function handleMergeApprovalTimeout(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  taskId: string,
+  scheduledForWaitingApprovalSinceMs: number,
+): void {
+  const live = self.runs.get(runId);
+  if (live === undefined) {
+    return;
+  }
+  const entry = live.mergeResolutions.get(taskId);
+  if (
+    entry === undefined ||
+    entry.waitingApprovalSinceMs !== scheduledForWaitingApprovalSinceMs
+  ) {
+    // 既に承認待ちを抜けた、解決セッション自体が終わった、または新しい承認待ちへ
+    // 張り替わった後（多層防御。上のJSDoc参照）
+    return;
+  }
+  self.deps.log.warn(
+    `[workflow ${runId}/${taskId}] 承認待ちがタイムアウト（${
+      self.deps.readMergeApprovalTimeoutSec?.() ?? DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC
+    }秒）を超えたため、衝突解決セッションを停止します`,
+  );
+  entry.timedOutByApprovalTimeout = true;
+  entry.session.stopLoop();
 }
 
 /**
@@ -664,6 +848,10 @@ async function startMergeResolution(
       cwd: integration.cwd,
       config: effective.config,
       sandbox: effective.sandbox,
+      // タブ名を`taskId`で分ける（Issue #413 PR4）。従来は固定文字列（`'Codex'`/`LABEL`）
+      // だったため、複数の衝突解決セッションが並ぶ場合にどのタスクの解決か見分けられ
+      // なかった
+      mergeResolutionTaskId: taskId,
     });
   } catch (e) {
     const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
@@ -689,6 +877,15 @@ async function startMergeResolution(
   // `open()`の最中に終了が発火したかどうか（下の`onFinished`が立てる）。読むのは`open()`が
   // 返った直後の1回だけなので、通常の（あとから来る）終了で立っても影響しない。
   const finishedWhileOpening = { done: false };
+  // 承認待ちの可視化（Issue #413 PR4）。`live.mergeResolutions`（`MergeResolutionEntry`）へ
+  // 反映する値。承認待ちで**ない**間は`undefined`。`live.mergeResolutions.set()`より前に
+  // `onStateChanged`が発火しうる（`open()`が同期的に状態を発火するhost実装）ため、
+  // まずローカル変数として持ち、`set()`する時点の値をそのまま渡す
+  let waitingApprovalSinceMs: number | undefined;
+  // 承認待ちタイムアウト（Issue #413 PR5）。エントリの寿命に対して1本だけ持ち回る
+  // タイマーのハンドル。`waitingApprovalSinceMs`と同じくローカル変数で持ち、`try`の外
+  // （`catch`からも参照できる位置）で宣言する
+  let approvalTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
 
   try {
     // **`onFinished`の登録は`session.open()`より前に行う**（レビュー指摘12）。`open()`が
@@ -713,18 +910,67 @@ async function startMergeResolution(
       void onMergeResolutionFinished(self, runId, taskId, task, integration, reason, lease);
     });
 
+    // 承認待ちの可視化（Issue #413 PR4）。**`onFinished`と同じく`session.open()`より前に
+    // 登録する**（同期的に状態変化を発火するhost実装があるため取りこぼさない）。
+    // `waitingApproval`状態そのものへは倒さない（`markWaitingApproval`は`running`からしか
+    // 動かず、`merging`は`isUnsettled`から意図的に外されている。`runState.ts`参照）ため、
+    // ここでは`live.mergeResolutions`のエントリへ承認待ちフラグを足すだけに留める。
+    // `setApprovalHandler`は付けない（上のコメント・design.md §16.17「コンフリクト」5.）ため
+    // 承認要求は標準の承認カードへ委ねられたまま変わらない
+    session.onStateChanged((state) => {
+      if (abandoned.done) {
+        return;
+      }
+      const waiting = state.approvals.length > 0;
+      const nextSince = waiting ? (waitingApprovalSinceMs ?? Date.now()) : undefined;
+      if (nextSince === waitingApprovalSinceMs) {
+        return;
+      }
+      waitingApprovalSinceMs = nextSince;
+      approvalTimeoutTimer = scheduleApprovalTimeout(
+        self,
+        runId,
+        taskId,
+        approvalTimeoutTimer,
+        waitingApprovalSinceMs,
+      );
+      if (!live.mergeResolutions.has(taskId)) {
+        // まだ`set()`前（`open()`の最中）。`set()`する側がこの時点の`waitingApprovalSinceMs`を
+        // 読むので、ここでは何もしなくてよい
+        return;
+      }
+      live.mergeResolutions.set(taskId, {
+        session,
+        waitingApprovalSinceMs,
+        approvalTimeoutTimer,
+        timedOutByApprovalTimeout: false,
+        stoppedByStopTask: false,
+      });
+      self.notify(runId);
+      // 承認待ちの開始/解消は`maxParallel`の枠の勘定（`excludeFromActiveCount`）を変える
+      // ため、次に開始できるタスクを拾い直す
+      self.pump(runId);
+    });
+
     session.open({ preserveFocus: true });
     if (finishedWhileOpening.done) {
       // `open()`が同期的にループを回し切って終了まで発火した。決着と占有の解放は上の
       // リスナーが済ませているので、ここでは終わったセッションを畳むだけにする
       // （`live.mergeResolutions`へは入れない・`runLoop`もかけ直さない）
       abandoned.done = true;
+      clearTimeout(approvalTimeoutTimer);
       live.mergeResolutions.delete(taskId);
       session.dispose();
       self.notify(runId);
       return;
     }
-    live.mergeResolutions.set(taskId, session);
+    live.mergeResolutions.set(taskId, {
+      session,
+      waitingApprovalSinceMs,
+      approvalTimeoutTimer,
+      timedOutByApprovalTimeout: false,
+      stoppedByStopTask: false,
+    });
 
     const prompt = buildMergeResolutionPrompt(
       { id: taskId, prompt: task.prompt, done: task.done },
@@ -748,6 +994,7 @@ async function startMergeResolution(
     );
     try {
       abandoned.done = true;
+      clearTimeout(approvalTimeoutTimer);
       live.mergeResolutions.delete(taskId);
       session.dispose();
       await abortAndBlock(self, runId, taskId, integration, lease);
@@ -765,6 +1012,11 @@ async function startMergeResolution(
  * 必ず解放する**（`finally`。Issue #412。解放漏れは以後そのrunのマージが全て詰まる
  * デッドロックになる）。`abortAndBlock`が先に解放していても、解放は冪等なので二重解放に
  * ならない。
+ *
+ * **この関数はrejectしない。** `startMergeResolution`の`session.onFinished`はこの関数を
+ * `void`で発火するため、`finishMergeResolution`が投げると呼び出し元が未ハンドルrejectに
+ * なり、タスクが`merging`のまま統合worktreeの枠を永久に占有する（Issue #437）。gitの
+ * メイン経路の他の失敗を`markMergeFailed`に落とすのと同じ扱いにする
  */
 async function onMergeResolutionFinished(
   self: WorkflowRunnerInternals,
@@ -777,6 +1029,18 @@ async function onMergeResolutionFinished(
 ): Promise<void> {
   try {
     await finishMergeResolution(self, runId, taskId, task, integration, reason, lease);
+  } catch (e) {
+    const live = self.runs.get(runId);
+    if (live !== undefined) {
+      const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+      self.deps.log.error(
+        `[workflow ${runId}/${taskId}] 衝突解決の後始末で例外が発生しました: ${message}`,
+      );
+      live.runState = markMergeFailed(live.runState, live.def.tasks, taskId);
+      void self.persist(runId);
+      self.notify(runId);
+      self.pump(runId);
+    }
   } finally {
     self.integrationQueue.releaseLease(lease);
   }
@@ -792,26 +1056,111 @@ async function finishMergeResolution(
   reason: LoopStopReason,
   lease: IntegrationLease,
 ): Promise<void> {
+  if (self.isDisposing()) {
+    // `WorkflowRunner.dispose()`が`live.mergeResolutions`のセッションを解放したときの
+    // 呼び戻し（`reason`は`manual`）。下の`manual`分岐は`applyLoopStopReason`でrun全体を
+    // 手動停止にし、未着手の`pending`まで`skipped`にするため、deactivateしただけの実行が
+    // 次の起動で続きから進まなくなる。セッションの解放は`dispose()`が済ませているので、
+    // ここは何もせず戻る（`WorkflowRunnerInternals.isDisposing`のJSDoc参照）
+    return;
+  }
   const live = self.runs.get(runId);
   if (live === undefined) {
     return;
   }
-  const session = live.mergeResolutions.get(taskId);
+  const entry = live.mergeResolutions.get(taskId);
   live.mergeResolutions.delete(taskId);
-  session?.dispose();
+  // 承認待ちタイムアウトのタイマー（Issue #413 PR5）。この関数はどの`reason`でも
+  // 必ず1度は通る（`session.onFinished`の唯一の合流点）ため、ここで解放すれば
+  // `done`/`manual`/`interrupted`/`taskStopped`の全経路を洗える
+  clearTimeout(entry?.approvalTimeoutTimer);
+  try {
+    entry?.session.dispose();
+  } catch (e) {
+    // ここで投げたまま呼び出し側（`onMergeResolutionFinished`）の`catch`へ流すと、
+    // 下の`reason`判定を経由せず`markMergeFailed`へ落ちてしまう。`reason`が
+    // `manual`/`interrupted`/`taskStopped`（人が止めた経路）だったときは「タスク自身の
+    // 状態は変えない」（Issue #434）はずが、disposeの失敗という無関係な理由で破られる。
+    // 他のdispose()呼び出し箇所（`runner.ts`のセッション差し替え・終了処理）と同じく、
+    // 後始末の失敗はログにだけ残して先へ進む
+    self.deps.log.warn(
+      `[workflow ${runId}/${taskId}] 衝突解決セッションの後始末（dispose）に失敗しました: ${sanitizeForLog(
+        e instanceof Error ? e.message : String(e),
+      )}`,
+    );
+  }
+
+  // `reason === 'taskStopped'`のうち、run全体ではなく「このタスク単体」を狙った停止
+  // （承認待ちタイムアウト = Issue #413 PR5、`stop_task` = Issue #514）はここへ合流する。
+  // `session.stopLoop()`は理由を`'taskStopped'`としてしか`onFinished`へ伝えられないため、
+  // 送り元はエントリのフラグ（`entry.timedOutByApprovalTimeout` /
+  // `entry.stoppedByStopTask`）でしか区別できず、下の「人が全体停止を押した」経路
+  // （`applyLoopStopReason`でrun全体を`haltedByUser`にする）とは別扱いにする必要がある。
+  //
+  // 2つのフラグは「run全体は止めず、このタスクだけを`blocked`にする」という**同じ結末**へ
+  // 合流するため、`markMergeBlocked`の呼び出しと後始末（persist/notify/pump）は1箇所に
+  // まとめる。ただし警告の文言と積む警告の`kind`は分ける。「タイムアウトで自動的に止まった」
+  // のか「単体の停止操作で明示的に止められた」のかは、人が次に取るべき行動
+  // （前者は放置を疑う、後者は止めた側の意図を確認する）が違うため。
+  //
+  // **`stoppedByStopTask`はオーケストレーターの`stop_task`だけでなく、ワークフローView
+  // の「タスク停止」ボタン（`src/view/workflowScript.ts`）からも立つ**（`merging`タスクへの
+  // ボタン表示はIssue #514で意図的に追加された。`WorkflowRunner.stopTask()`は呼び出し元を
+  // 区別しない単一の入口）。そのため下の警告文言は片方の呼び出し元だけを名指ししない
+  // （Issue #539のレビューで、`stop_task`を一度も使っていない人へその名前を出す食い違いが
+  // 見つかった）。
+  const localOnlyStopKind: 'approvalTimeout' | 'stopTask' | undefined =
+    reason !== 'taskStopped'
+      ? undefined
+      : entry?.timedOutByApprovalTimeout === true
+        ? 'approvalTimeout'
+        : entry?.stoppedByStopTask === true
+          ? 'stopTask'
+          : undefined;
+  if (localOnlyStopKind !== undefined) {
+    // **run全体は止めない。** どちらも「このタスクの衝突解決だけが止まった」という
+    // 局所的な事象であり、他のタスクが動くのを妨げる理由にはならない。
+    // `applyLoopStopReason`を呼んで`haltedByUser`を立てると、まだ開始していない
+    // `pending`が全て`skipped`（`runHalted`）へ倒れてしまい（`skipRemainingPending`）、
+    // 「対象はこのタスクだけ」という前提が崩れる（design.md §16.17。最終報告参照）。
+    //
+    // このタスク自身は下の`manual`/`interrupted`/`taskStopped`共通の経路と同じく
+    // `markMergeBlocked`で`blocked`へ確定させ、`git merge --abort`は呼ばない（Issue #434と
+    // 同じ理由。統合worktreeで進んでいた解決作業を巻き戻さない）。
+    live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
+    if (localOnlyStopKind === 'approvalTimeout') {
+      const message =
+        '衝突解決セッションが承認待ちのままタイムアウトしたため停止しました。統合worktreeは衝突した状態のまま残っています（Viewの「再マージ」で再開できます）';
+      self.deps.log.warn(`[workflow ${runId}/${taskId}] ${message}`);
+      pushMergeApprovalTimeoutWarning(live, taskId, message);
+    } else {
+      const message =
+        '衝突解決セッションが単体の停止操作（Viewの「タスク停止」またはオーケストレーターのstop_task）で停止されました。統合worktreeは衝突した状態のまま残っています（Viewの「再マージ」で再開できます）';
+      self.deps.log.warn(`[workflow ${runId}/${taskId}] ${message}`);
+      pushMergeStopTaskStoppedWarning(live, taskId, message);
+    }
+    void self.persist(runId);
+    self.notify(runId);
+    self.pump(runId);
+    return;
+  }
 
   if (reason === 'manual' || reason === 'interrupted' || reason === 'taskStopped') {
     // 人が止めた経路。タブへの直接介入（`manual` / `interrupted`）に加えて、ワークフローView
     // の「全体停止」（`WorkflowRunner.stop()`が衝突解決セッションへ送る`stopLoop()` →
-    // `taskStopped`。issue #381で止め対象に加えた）もここへ合流する。通常のタスクと同じく、
-    // このタスク自身の状態は変えず実行全体だけを止める設計を踏襲する（design.md §16.5）。
+    // `taskStopped`。issue #381で止め対象に加えた）もここへ合流する。通常のタスク
+    // （`applyLoopStopReason`の`manual`/`interrupted`分岐）は対象タスク自身の状態を変えず
+    // 実行全体だけを止めるが（design.md §16.5）、衝突解決セッションはここに限り
+    // `markMergeBlocked`で対象タスク自身も`blocked`へ確定させる（下のコメント、Issue #443・
+    // 案A）。`merging`のまま実行全体だけを止めると、`getRunOutcome`が`running`を返し続けて
+    // runが終了確定しない行き止まりになるため。
     //
     // **ここで`git merge --abort`はしない**（Issue #412のレビュー指摘1・Issue #434）。人が
     // 統合worktreeで直接手を動かしている経路であり、巻き戻すとその解決作業を破棄してしまう
     // （design.md §16.17が「衝突した状態のままにしておく」としているのと同じ理由）。
     // 「全体停止」も、人が統合worktreeで解いている途中の未コミットの解決結果を巻き上げる点は
     // 同じで、破棄すると復旧手段が無い（「再マージ」してもゼロからやり直しになる）。
-    // 結果として統合worktreeは`MERGE_HEAD`と未解決パスを抱えたまま占有だけが解放されるが、
+    // 結果として統合worktreeは`MERGE_HEAD`と未解決パスを抱えたまま占有だけが解放される。
     // 次にマージへ来たタスクは`mergeTaskBranch`のゲートで`busy`を受け、`failed`ではなく
     // `blocked`（Viewの「再マージ」で復帰できる）になる。
     //
@@ -821,6 +1170,31 @@ async function finishMergeResolution(
     // taskIdを渡さないこの呼び出しでは何も起きない、という分かりにくい形になる。
     const haltReason: LoopStopReason = reason === 'taskStopped' ? 'manual' : reason;
     live.runState = applyLoopStopReason(live.runState, live.def.tasks, '', haltReason);
+
+    // 案A（Issue #443）: `merging`は必ず閉じる。ここで`markMergeBlocked`を呼び、
+    // このタスク自身を`blocked`へ確定させる。`git merge --abort`は呼ばない
+    // （上のコメントの通り、巻き戻すと未コミットの解決結果を破棄してしまうため）。
+    // `blocked`は「作業は終わったが統合ブランチに入っていない」という意味に広げて使う
+    // （design.md §16.17）。「巻き戻し済みの`blocked`」との違いは状態には持たせず、
+    // 下の警告だけが持つ（`markMergeBlocked`は`failure`を`undefined`にするため）。
+    //
+    // **呼び出し順序に意味がある。** 必ず`applyLoopStopReason`の**後**に呼ぶこと。
+    // `applyLoopStopReason('manual' | 'interrupted')`は内部で`skipRemainingPending`を
+    // 呼び、このタスクに依存する後続のうちまだ`pending`のものを先に
+    // `skipped`（理由: `runHalted`）へ倒す。その後で`markMergeBlocked`を呼んでも、対象の
+    // 後続は既に`pending`ではないため、その状態遷移ループは`appendCascadeTaskId`経由で
+    // 何もしない（`current.failure?.kind`が`'mergeBlocked'`ではなく`'runHalted'`なので
+    // 一致せず素通りする）。結果として後続は`runHalted`のまま残り、`mergeBlocked`と
+    // 二重の意味を持たない。逆順で呼ぶと、後続が先に`mergeBlocked`で`skipped`になった後
+    // `skipRemainingPending`は`pending`だけを見るため触らずに済んでしまうが、それでは
+    // 「実行全体が停止したから開始しなかった」という本来の理由（`runHalted`）が
+    // 「依存先の衝突で止まった」（`mergeBlocked`）にすり替わってしまう。
+    live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
+    pushMergeInterruptedWarning(
+      live,
+      taskId,
+      '衝突解決が停止のため中断されました。統合worktreeは衝突した状態のまま残っています（Viewの「再マージ」で再開できます）',
+    );
     void self.persist(runId);
     self.notify(runId);
     self.pump(runId);

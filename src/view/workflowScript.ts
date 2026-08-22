@@ -112,6 +112,12 @@ export function workflowScript(): string {
     return label;
   }
 
+  // 衝突解決セッションのバッジ文言（Issue #413 PR4）。承認待ち
+  // （mergeResolutionWaitingApproval）かLLMが作業中かで出し分ける。
+  function mergeResolutionBadgeLabel(task) {
+    return task.mergeResolutionWaitingApproval ? 'マージ解決中（承認待ち）' : 'マージ解決中';
+  }
+
   // ---- 最上段: 全体の進捗 ----
   // 集計そのものは拡張機能側（workflowGraph.tsのaggregateProgress。純粋関数でテスト済み）が
   // 行い、ここではその結果（progress）を表示するだけにする。以前はここでも同じ集計を
@@ -255,7 +261,7 @@ export function workflowScript(): string {
         y: h / 2 - 6,
         'text-anchor': 'middle',
       });
-      badge.textContent = 'マージ解決中';
+      badge.textContent = mergeResolutionBadgeLabel(task);
       group.appendChild(badge);
     }
 
@@ -271,7 +277,7 @@ export function workflowScript(): string {
 
     const title = svgEl('title');
     title.textContent = task.id + ' ・ ' + (STATE_LABEL[task.state] || task.state) +
-      (task.mergeResolutionActive ? ' ・ マージ解決中' : '') +
+      (task.mergeResolutionActive ? ' ・ ' + mergeResolutionBadgeLabel(task) : '') +
       (task.lastResponseSummary ? ' ・ ' + task.lastResponseSummary : '');
     group.appendChild(title);
 
@@ -462,7 +468,15 @@ export function workflowScript(): string {
       });
       cell.appendChild(interruptBtn);
     }
-    if (task.state === 'running' || task.state === 'waitingApproval') {
+    // mergingは、衝突解決セッションが実際に生きている（task.mergeResolutionActive）
+    // ときだけ出す。タスク自身のループは既に終わっているが、統合worktreeで開く解決
+    // セッションはそちらのstopLoop()で止められる（issue #514）。生きていないmerging
+    // （解決セッションが無い状態）にはボタンを出しても届く先が無い
+    if (
+      task.state === 'running'
+      || task.state === 'waitingApproval'
+      || (task.state === 'merging' && task.mergeResolutionActive)
+    ) {
       const stopBtn = text('button', 'danger', 'タスク停止');
       stopBtn.type = 'button';
       stopBtn.addEventListener('click', (e) => {
@@ -660,7 +674,7 @@ export function workflowScript(): string {
         stateCell.appendChild(text('span', 'hint', '（' + failureText + '）'));
       }
       if (task.mergeResolutionActive) {
-        stateCell.appendChild(text('span', 'hint', '（マージ解決中）'));
+        stateCell.appendChild(text('span', 'hint', '（' + mergeResolutionBadgeLabel(task) + '）'));
       }
       row.appendChild(stateCell);
 

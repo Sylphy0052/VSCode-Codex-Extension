@@ -426,9 +426,15 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    */
   async openTaskSession(input: TaskSessionInput): Promise<TaskSession> {
     const taskConfig = toCodexConfig(input);
-    // オーケストレーターセッション（design.md §16.23）はタスクと同じ経路で開くが、
-    // タブ名だけ分けて人が見分けられるようにする
-    const title = input.role === 'orchestrator' ? 'Codex: オーケストレーター' : 'Codex';
+    // オーケストレーターセッション（design.md §16.23）・衝突解決セッション
+    // （Issue #413 PR4）はタスクと同じ経路で開くが、タブ名だけ分けて人が見分けられるように
+    // する
+    const title =
+      input.mergeResolutionTaskId !== undefined
+        ? `Codex: 衝突解決 ${input.mergeResolutionTaskId}`
+        : input.role === 'orchestrator'
+          ? 'Codex: オーケストレーター'
+          : 'Codex';
     const entry = this.buildEntry(input.cwd, title, true, taskConfig);
     const pendingKey = this.pendingStarts.begin(entry);
     // タスク間メッセージング（design.md §16.21）。`input.mcp`が渡されていれば、

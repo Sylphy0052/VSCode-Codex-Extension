@@ -66,7 +66,17 @@ function buildIntroBody(live: LiveRun): string {
  */
 export interface OrchestratorControlActions {
   getSnapshot(runId: string): WorkflowRunSnapshot | undefined;
-  stopTask(runId: string, taskId: string): void;
+  /**
+   * `WorkflowRunner.stopTask`のjsdoc（issue #514）参照。戻り値は「送り先を見つけて
+   * `stopLoop()`を呼べたか」で、`false`のときは制御ツール側が`no(...)`を返す根拠になる。
+   */
+  stopTask(runId: string, taskId: string): boolean;
+  /**
+   * `stopTask`が`false`を返したときに、「そもそも送り先のセッションが無かった」のか
+   * 「送り先はあったが、ループは既に終わっていた」のかを見分けるための補助（Issue #514
+   * medium指摘）。`WorkflowRunner.hasStoppableSession`のJSDoc参照。
+   */
+  hasStoppableSession(runId: string, taskId: string): boolean;
   retryTask(runId: string, taskId: string, options?: { allowConfirmed?: boolean }): RetryTaskResult;
   continueTask(runId: string, taskId: string): boolean;
   decideApproval(runId: string, taskId: string, decision: ApprovalDecision): boolean;
@@ -101,6 +111,48 @@ function runFinishedReason(
 }
 
 /**
+ * 人が「全体の停止」を押しているなら理由を返す（design.md §16.23、Issue #401）。
+ * 立っていなければ `undefined`。
+ *
+ * **必ず `snapshot.haltedByUser` だけを見る。`isRunHalted`（`runState.ts`）を使っては
+ * ならない。** `isRunHalted` は `hasFailedTask` も真にするため、1件失敗しただけの通常運転
+ * （`haltedByUser` は立っていない）でもここに混ぜると `retry_task` が丸ごと死ぬ。それは
+ * design.md §16.23の目的（失敗の後始末をAIに見させる）を壊す。
+ *
+ * 停止の直後は、走行中タスクの`stopLoop()`がまだ確定していない（進行中のターンには
+ * 割り込まない）ため `outcome` は `running` のまま残り得る。`runFinishedReason` だけでは
+ * この窓を塞げないので、これを別の層として並べる。
+ *
+ * `stop_task` はこの検査を通さない（止める方向は停止意図と矛盾しないため呼び出し側で
+ * 除外する）。**この除外が成り立つのは、`stop_task` 自身が `haltedByUser` を立てない
+ * 場合に限る**（Issue #514）。`merging` のタスクへの `stop_task` は衝突解決セッションへ
+ * `stopLoop()` を送るが、`WorkflowRunner.stop()`（全体停止）からの同じ `stopLoop()` と
+ * 見分けが付かないと、`runnerMerge.ts` の `finishMergeResolution` が誤って
+ * `haltedByUser` を立ててしまい、この除外の前提（「`stop_task` は止める方向にしか
+ * 効かない」）が壊れる。`MergeResolutionEntry.stoppedByStopTask`（`runner.ts`）で
+ * 送り元を区別し、`stop_task` 経由では `haltedByUser` を立てないことで、この前提を
+ * 保っている。
+ */
+function runHaltedByUserReason(
+  actions: OrchestratorControlActions,
+  runId: string,
+): string | undefined {
+  const snapshot = actions.getSnapshot(runId);
+  if (snapshot === undefined) {
+    // `getSnapshot`が`undefined`を返す状況（実行が既に破棄されている等）を「停止していない」
+    // とみなすとフェイルオープンになる。既存の呼び出し箇所は全て先に`runFinishedReason`を
+    // 通しており、そちらが`undefined`をフェイルクローズで拾うため実際にここへ来る場面は無いが、
+    // 将来この関数が単独で再利用されたり順序が入れ替わったりしたときの防御として拒否する。
+    // 新しい呼び出し箇所を足すときは、先に`runFinishedReason`を通しているかを確認すること。
+    // 通していない場合、この分岐へ到達しうる
+    return 'この実行の状態を取得できませんでした。この制御ツールは使えません。';
+  }
+  return snapshot.haltedByUser === true
+    ? '人がこの実行全体を停止しました。再開できるのは人だけです。この制御ツールは使えません。'
+    : undefined;
+}
+
+/**
  * オーケストレーター専用の接続に見せる制御ツールの実体を組み立てる（design.md §16.23）。
  *
  * runを1本に固定した口を返す。オーケストレーターは自分のrun以外を指定できない
@@ -122,13 +174,37 @@ export function buildOrchestratorControlPort(
       if (state === undefined) {
         return no(`タスクが見つかりません: ${taskId}`);
       }
-      actions.stopTask(runId, taskId);
+      // 戻り値（`boolean`）を成功の根拠にする（issue #514）。`live.tasks` /
+      // `live.mergeResolutions` のどちらにも実際に止められるループが見つからなければ
+      // `false` が返るため、ここで無条件に成功を返さない。届いていないのに「止めました」
+      // と答えるとオーケストレーターは以後この経路を再試行しなくなるため、届かなかった
+      // ことをそのまま伝える
+      const stopped = actions.stopTask(runId, taskId);
+      if (!stopped) {
+        // `stopTask`の`false`は「送り先のセッションが無かった」（本当に見つからない）と
+        // 「送り先はあったが、ループは既に終わっていた」（`merging`のタスクなど、
+        // `onTaskFinished`後もエントリが残るケース。issue #514 medium指摘）の両方で
+        // 返るため、ここで別の判定（`hasStoppableSession`）を挟んで文言を分ける。
+        // どちらの場合も**失敗を返す動作自体は変えない**（安全側。「見つからない」と
+        // 誤診してオーケストレーターが的外れな対応をしないよう、実際には届いていた
+        // ことを伝える）
+        const hadSession = actions.hasStoppableSession(runId, taskId);
+        return no(
+          hadSession
+            ? `${taskId} は既に停止しています（状態: ${state}）。stop_taskは何もしていません。`
+            : `${taskId} を止められませんでした（対象のループが見つかりません。状態: ${state}）。`,
+        );
+      }
       return ok(`${taskId} のループを止めました（状態: ${state}）。`);
     },
     retryTask: (taskId) => {
       const finished = runFinishedReason(actions, runId);
       if (finished !== undefined) {
         return no(finished);
+      }
+      const halted = runHaltedByUserReason(actions, runId);
+      if (halted !== undefined) {
+        return no(halted);
       }
       // `allow`（design.md §16.7）を含むタスクの再実行は人の確認が要る。オーケストレーターに
       // `allowConfirmed: true` を名乗らせない（確認の意味が無くなるため）
@@ -147,6 +223,10 @@ export function buildOrchestratorControlPort(
       if (finished !== undefined) {
         return no(finished);
       }
+      const halted = runHaltedByUserReason(actions, runId);
+      if (halted !== undefined) {
+        return no(halted);
+      }
       return actions.continueTask(runId, taskId)
         ? ok(`${taskId} を続きから走らせています。`)
         : no(`${taskId} は続きから走らせられる状態ではありません。`);
@@ -155,6 +235,10 @@ export function buildOrchestratorControlPort(
       const finished = runFinishedReason(actions, runId);
       if (finished !== undefined) {
         return no(finished);
+      }
+      const halted = runHaltedByUserReason(actions, runId);
+      if (halted !== undefined) {
+        return no(halted);
       }
       // 承認をセッション全体へ広げる `acceptForSession` は選ばせない（1件ずつの判断に限る）
       if (decision !== 'accept' && decision !== 'decline') {
@@ -166,9 +250,14 @@ export function buildOrchestratorControlPort(
     },
     updateTaskPrompt: (taskId, continuePrompt) => {
       const finished = runFinishedReason(actions, runId);
-      return finished !== undefined
-        ? no(finished)
-        : updateTaskPrompt(self, runId, taskId, continuePrompt);
+      if (finished !== undefined) {
+        return no(finished);
+      }
+      const halted = runHaltedByUserReason(actions, runId);
+      if (halted !== undefined) {
+        return no(halted);
+      }
+      return updateTaskPrompt(self, runId, taskId, continuePrompt);
     },
   };
 }
@@ -503,6 +592,26 @@ export function notifyOrchestratorRunFinished(
       `ワークフローの実行が終了しました（結果: ${outcome}）。`,
       'この時点でMCPサーバは閉じるため、list_tasks や制御ツールはもう使えません。',
       '会話は続けられます。結果について質問されたら、これまでの通知の内容から答えてください。',
+    ].join('\n'),
+  });
+}
+
+/**
+ * 人が実行全体を停止したことを知らせる（design.md §16.23、Issue #401）。
+ *
+ * `stop()`は走行中タスクへ`stopLoop()`を送るだけで、確定（`failed`への遷移）は進行中の
+ * ターンが終わるまで待つ。その間オーケストレーターに届くのは通常の`taskFailed`だけなので、
+ * 「タスクが次々失敗している」ようにしか見えず、`retry_task`を呼ぶのがむしろ自然な反応に
+ * なってしまう（本Issueの調査で判明した構造的な誘発）。ここで明示のイベントを1本送り、
+ * 「人が止めた」と分かるようにする。制御ツール側の拒否理由と合わせた多層防御。
+ */
+export function notifyOrchestratorRunHalted(self: WorkflowRunnerInternals, runId: string): void {
+  notifyOrchestrator(self, runId, {
+    kind: 'runHaltedByUser',
+    body: [
+      '人がこの実行全体を停止しました。',
+      '再開できるのは人だけです。retry_task / continue_task / decide_approval / update_task_prompt は使えません（stop_task は引き続き使えます）。',
+      '会話は続けられます。',
     ].join('\n'),
   });
 }

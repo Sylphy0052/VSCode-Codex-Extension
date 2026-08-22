@@ -22,6 +22,7 @@ import {
   type TaskRunState,
 } from '../../src/orchestrator/runState';
 import type { WorkflowTask } from '../../src/orchestrator/workflow';
+import { getRunOutcome } from '../../src/orchestrator/scheduler';
 
 /** テストで頻出する最小構成のタスク。dependsOn以外は固定値でよい。 */
 const task = (id: string, dependsOn: string[] = [], retries = 0): WorkflowTask => ({
@@ -642,6 +643,84 @@ describe('マージの結果に応じた遷移（design.md §16.17）', () => {
       expect(stateOf(run, 'T4').state).toBe('pending');
       expect(stateOf(run, 'T4').failure).toBeUndefined();
     });
+
+    /**
+     * Issue #432-1: 停止中（`haltedByUser: true`）に再マージが成功しても、
+     * `mergeBlocked`でskippedになっていた依存先を`pending`へ戻してはならない。
+     *
+     * `nextTasksToStart`は停止中のrunで新規開始を一切しないため、`pending`へ戻すと
+     * 誰にも開始されない`pending`が残り、`getRunOutcome`が`running`を返し続けて
+     * runが永久に終わらない（`retryTask`/`continueTask`は`pending`を受理しないため
+     * 人も救えない）。`skipped`（`runHalted`）のままにしておけば、人が`retryTask`で
+     * 拾い直せる（`retryTask`は`skipped`なら理由を問わず受理し`haltedByUser`も解除する）。
+     */
+    it('停止中に再マージが成功しても、mergeBlockedのskippedをpendingへ戻さずrunHaltedへ倒す', () => {
+      const tasks = chainTasks();
+      let run = toMerging(tasks, 'T1');
+      run = markMergeSucceeded(run, tasks, 'T1');
+      run = markRunning(run, 'T2');
+      run = applyLoopStopReason(run, tasks, 'T2', 'done'); // T2: merging
+      run = markMergeBlocked(run, tasks, 'T2'); // T2: blocked, T4: skipped(mergeBlocked)
+      expect(stateOf(run, 'T4').failure).toEqual({ kind: 'mergeBlocked', blockedTaskIds: ['T2'] });
+
+      // ユーザーが実行全体を停止する
+      run = { ...run, haltedByUser: true };
+
+      // 停止中でも「再マージ」自体は走る（Issue #412のレビュー指摘B。retryMergeStateは
+      // haltedByUserを解除しない）
+      run = retryMergeState(run, 'T2');
+      expect(stateOf(run, 'T2').state).toBe('merging');
+
+      run = markMergeSucceeded(run, tasks, 'T2');
+      expect(stateOf(run, 'T2').state).toBe('done');
+      expect(run.haltedByUser).toBe(true);
+      // pendingへ戻さず、skipped(runHalted)のままにする
+      expect(stateOf(run, 'T4').state).toBe('skipped');
+      expect(stateOf(run, 'T4').failure).toEqual({ kind: 'runHalted' });
+    });
+
+    /**
+     * Issue #432-1（セキュリティ監査の追加指摘）: `haltedByUser: false` でも、
+     * 他のタスクが`failed`で確定していれば（`hasFailedTask`）`nextTasksToStart`の門
+     * （`isRunHalted = haltedByUser || hasFailedTask`）は同じく閉じる。
+     * `markMergeSucceeded`が`run.haltedByUser`だけを見て`isRunHalted`を見ていないと、
+     * 人が停止していない通常運用（独立した枝の1つが失敗して`failed`確定、別の枝が
+     * マージ衝突→人が解決→再マージ成功）でも、この再マージ成功時に依存先を`pending`
+     * へ戻してしまい、`nextTasksToStart`には拾われないまま`getRunOutcome`が`running`を
+     * 返し続ける同じ袋小路が起きる。
+     *
+     * 停止中と同じく`skipped`（`runHalted`）へ倒せば、`getRunOutcome`は`pending`も
+     * `merging`等の活性状態も残らない時点で`anyFailed`を見て`'failed'`を返し、runが
+     * 終端に達する。
+     */
+    it('haltedByUserがfalseでもhasFailedTaskがtrueなら、mergeBlockedのskippedをpendingへ戻さない', () => {
+      const tasks = [task('T1', []), task('T2', ['T1']), task('T5', [])];
+      let run = createRunState(tasks);
+      run = toMerging(tasks, 'T1', run); // T1: merging
+      run = markMergeBlocked(run, tasks, 'T1'); // T1: blocked, T2: skipped(mergeBlocked)
+      expect(stateOf(run, 'T2').failure).toEqual({ kind: 'mergeBlocked', blockedTaskIds: ['T1'] });
+
+      // 独立した枝T5が回数切れで確定失敗する（人の停止操作は無い）
+      run = markRunning(run, 'T5');
+      run = applyLoopStopReason(run, tasks, 'T5', 'maxReached');
+      expect(stateOf(run, 'T5').state).toBe('failed');
+      expect(run.haltedByUser).toBe(false);
+      expect(hasFailedTask(run)).toBe(true);
+      expect(isRunHalted(run)).toBe(true);
+
+      // 人がT1の衝突を手元で解決し、再マージを指示する
+      run = retryMergeState(run, 'T1');
+      expect(stateOf(run, 'T1').state).toBe('merging');
+      run = markMergeSucceeded(run, tasks, 'T1');
+      expect(stateOf(run, 'T1').state).toBe('done');
+
+      // pendingへ戻さず、skipped(runHalted)のままにする
+      expect(stateOf(run, 'T2').state).toBe('skipped');
+      expect(stateOf(run, 'T2').failure).toEqual({ kind: 'runHalted' });
+
+      // getRunOutcomeが`running`のまま固着せず、`failed`として終端に達する
+      expect(getRunOutcome(run)).toBe('failed');
+    });
   });
 
   describe('markMergeBlocked', () => {
@@ -693,6 +772,72 @@ describe('マージの結果に応じた遷移（design.md §16.17）', () => {
       const tasks = chainTasks();
       const run = createRunState(tasks); // T1はpending
       expect(markMergeBlocked(run, tasks, 'T1')).toBe(run);
+    });
+  });
+
+  /**
+   * Issue #443（案A）: 人が衝突解決セッションを止めたとき（`manual`/`interrupted`/
+   * `taskStopped`）、実行層（`runnerMerge.ts`の`finishMergeResolution`）は
+   * `applyLoopStopReason(run, tasks, '', haltReason)`の**後**に`markMergeBlocked`を呼ぶ。
+   * この2関数の組み合わせが実際にどう状態を変えるかを、純粋ロジック側で確かめる
+   * （実行層のテストは`runner.test.ts`側の統合テストが担う）。
+   */
+  describe('人が止めた衝突解決の後始末（applyLoopStopReasonの後にmarkMergeBlocked、Issue #443）', () => {
+    it('mergingのタスクをblockedにし、runは終了状態へ確定する（git merge --abort相当は呼ばない）', () => {
+      const tasks = chainTasks();
+      let run = createRunState(tasks);
+      run = finishDone(run, tasks, 'T1'); // T1: done
+      run = toMerging(tasks, 'T2', run); // T2: merging
+
+      run = applyLoopStopReason(run, tasks, '', 'manual');
+      run = markMergeBlocked(run, tasks, 'T2');
+
+      expect(stateOf(run, 'T2').state).toBe('blocked');
+      expect(stateOf(run, 'T2').failure).toBeUndefined();
+      expect(run.haltedByUser).toBe(true);
+      // `merging`が無くなったので`getRunOutcome`は`running`を返し続けない
+      expect(getRunOutcome(run)).not.toBe('running');
+      // `blocked`になった以上「再マージ」の対象にできる
+      expect(stateOf(retryMergeState(run, 'T2'), 'T2').state).toBe('merging');
+    });
+
+    it('順序どおりなら、依存する後続はrunHaltedのままでmergeBlockedに上書きされない', () => {
+      const tasks = chainTasks();
+      let run = createRunState(tasks);
+      run = finishDone(run, tasks, 'T1'); // T1: done
+      run = toMerging(tasks, 'T2', run); // T2: merging。T3・T4はまだpending
+
+      // 1. 先にapplyLoopStopReasonが`pending`のT3・T4をskipped(runHalted)にする
+      run = applyLoopStopReason(run, tasks, '', 'manual');
+      expect(stateOf(run, 'T3').state).toBe('skipped');
+      expect(stateOf(run, 'T3').failure).toEqual({ kind: 'runHalted' });
+      expect(stateOf(run, 'T4').state).toBe('skipped');
+      expect(stateOf(run, 'T4').failure).toEqual({ kind: 'runHalted' });
+
+      // 2. 後からmarkMergeBlockedを呼んでも、T3・T4は既に`pending`ではないため
+      //    `appendCascadeTaskId`はkind不一致（'runHalted' !== 'mergeBlocked'）で何もしない
+      run = markMergeBlocked(run, tasks, 'T2');
+      expect(stateOf(run, 'T3').state).toBe('skipped');
+      expect(stateOf(run, 'T3').failure).toEqual({ kind: 'runHalted' });
+      expect(stateOf(run, 'T4').state).toBe('skipped');
+      expect(stateOf(run, 'T4').failure).toEqual({ kind: 'runHalted' });
+    });
+
+    it('逆順（markMergeBlockedを先に呼ぶ）だと、後続はmergeBlockedとして記録されてしまう（順序に意味がある証拠）', () => {
+      const tasks = chainTasks();
+      let run = createRunState(tasks);
+      run = finishDone(run, tasks, 'T1');
+      run = toMerging(tasks, 'T2', run);
+
+      // 逆順: markMergeBlockedを先に呼ぶと、pendingのT3・T4はmergeBlockedとして
+      // skippedになる
+      run = markMergeBlocked(run, tasks, 'T2');
+      expect(stateOf(run, 'T3').failure).toEqual({ kind: 'mergeBlocked', blockedTaskIds: ['T2'] });
+
+      // 後からapplyLoopStopReasonのskipRemainingPendingを呼んでも、対象は`pending`
+      // だけなので、既に`skipped`のT3・T4には触れない（`runHalted`へは倒れない）
+      run = applyLoopStopReason(run, tasks, '', 'manual');
+      expect(stateOf(run, 'T3').failure).toEqual({ kind: 'mergeBlocked', blockedTaskIds: ['T2'] });
     });
   });
 

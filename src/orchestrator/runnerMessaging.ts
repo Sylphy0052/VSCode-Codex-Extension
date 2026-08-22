@@ -179,3 +179,31 @@ export async function checkMessagingVisibility(
   self.notify(runId);
   void self.persist(runId);
 }
+
+/**
+ * タスク間メッセージング（design.md §16.21）のMCPサーバとポーリングタイマーを閉じる。
+ *
+ * run終了時（`pump()`）と拡張機能の終了時（`WorkflowRunner.dispose()`）の両方から呼ぶ
+ * 共通の後始末（Issue #374）。同じ解放処理を2箇所へ複製すると、片方だけ直される事故が
+ * 起きるため1本へ寄せてある。
+ *
+ * **冪等**。先に`live.messaging`を`undefined`へ戻してから閉じるので、run終了直後に
+ * `dispose()`が来ても2度目は何もしない。`transport.close()`が投げても
+ * `clearInterval`は必ず行う（1つの失敗でタイマーが残らないようにする）。
+ */
+export function closeMessaging(live: LiveRun): void {
+  const messaging = live.messaging;
+  if (messaging === undefined) {
+    return;
+  }
+  live.messaging = undefined;
+  try {
+    // `close()`が拒否しても未処理のPromise拒否にしない（deactivate中はサーバが既に
+    // 落ちていることがある）。同期で投げる実装もありうるのでtry/catchで囲む
+    void Promise.resolve(messaging.transport.close()).catch(() => undefined);
+  } catch {
+    // 閉じられなくてもタイマーの解放は続ける
+  } finally {
+    clearInterval(messaging.waitingReplyPollTimer);
+  }
+}

@@ -69,6 +69,14 @@ export interface TaskSessionInput {
    * `buildOrchestratorConfig` が済ませた値が `config` / `sandbox` に入っている）。
    */
   role?: 'task' | 'orchestrator';
+  /**
+   * 衝突解決セッション（design.md §16.17「コンフリクト」・Issue #413 PR4）を開くときに、
+   * 対象タスクのidを渡す。`role`と同じく**タブ名を分ける用途だけに使う**（権限の決定には
+   * 使わない）。省略時（通常のタスク・オーケストレーターセッション）は従来どおりの
+   * タブ名になる。渡さないと、統合worktree上で開く衝突解決セッションのタブ名が固定文字列
+   * （`'Codex'`/`LABEL`）になり、複数並んだときにどのタスクの解決か見分けられない。
+   */
+  mergeResolutionTaskId?: string;
   /** タスクの作業ディレクトリ（worktreeまたは明示cwd）。 */
   cwd: string;
   config: TaskSessionConfig;
@@ -183,8 +191,11 @@ export interface TaskSession {
    * `LoopStopReason: 'taskStopped'` で `onFinished` が呼ばれ、`runner.ts` はこれを
    * `manual`/`interrupted`（人がそのタスクの画面へ直接介入した状態。タスク自身は変えない）
    * とは別に扱い、そのタスクだけを `failed`（手動停止）に確定させる（design.md §16.5）。
+   *
+   * **戻り値は「実際にループを止められたか」（issue #514）。** 既に止まっている
+   * ループへ呼んでも`false`。`WorkflowRunner.stopTask`はこの戻り値だけを成功の根拠にする。
    */
-  stopLoop(): void;
+  stopLoop(): boolean;
   /**
    * `waitingApproval` の要求を、チャット画面のタブを開かずに直接解決する
    * （design.md §16.8「承認」操作用）。従来の承認カード（webview内の`approve`メッセージ）と

@@ -129,6 +129,8 @@ function buildTaskSnapshot(
     expandedContinuePrompt: liveTask?.expandedContinuePrompt,
     lastSentPrompt: liveTask?.lastSentPrompt,
     mergeResolutionActive: live.mergeResolutions.has(task.id),
+    mergeResolutionWaitingApproval:
+      live.mergeResolutions.get(task.id)?.waitingApprovalSinceMs !== undefined,
     pullRequestNumber: liveTask?.pullRequest?.number ?? persistedTask?.pullRequestNumber,
     pullRequestUrl: liveTask?.pullRequest?.url ?? persistedTask?.pullRequestUrl,
   };

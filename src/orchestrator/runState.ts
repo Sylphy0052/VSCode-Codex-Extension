@@ -28,8 +28,9 @@ export type TaskState = (typeof TASK_STATES)[number];
  * `running` はもちろん、`waitingApproval`（人待ちのセッションもプロセスとしては生きている）・
  * `waitingReply`（返信待ちのセッションも同様。§16.21）・`merging`（マージが終わるまで
  * そのタスクの成果は確定しない）も枠を占める。この4状態の集合は、`maxParallel` の空き数
- * 計算（`scheduler.ts` の `nextTasksToStart`）・待ちぼうけ検出（`runner.ts` の
- * `checkWaitingReplyStalls`）・実行全体の終了判定（`scheduler.ts` の `getRunOutcome`）の
+ * 計算（`scheduler.ts` の `nextTasksToStart`）・待ちぼうけ検出（`runnerMessaging.ts` の
+ * `checkWaitingReplyStalls`。Issue #147の分割で`runner.ts`から移った）・実行全体の
+ * 終了判定（`scheduler.ts` の `getRunOutcome`）の
  * 3箇所で同じ判定が必要になる（Issue #146）。状態を1つ足すたびに3箇所を揃えて直す必要が
  * あった重複を、ここへ集約する。
  *
@@ -493,6 +494,55 @@ export function markApprovalRejected(
  * （`retryTask`が`dependencyFailed`のskippedを戻すのと同じ考え方）。複数の親から
  * ブロックされていた場合でも、`nextTasksToStart`の依存充足チェック（`dependsOn`が
  * 全て`done`）が残りの親を待つため、ここでは無条件に戻してよい。
+ *
+ * ただし**実行全体が停止している（`isRunHalted(run)`）間は`pending`へ戻さない**
+ * （Issue #432-1）。
+ *
+ * **不変条件: `nextTasksToStart`が開始しない`pending`を作ってはならない。** 作った瞬間
+ * `getRunOutcome`が`running`を返し続け、`retryTask`/`continueTask`のどちらも`pending`
+ * を受理しないため、誰にも回収できない状態になる。`nextTasksToStart`自身の門が
+ * `isRunHalted`（`run.haltedByUser || hasFailedTask(run)`）である以上、ここで戻すかどうかの
+ * 判定もそれと揃える必要がある。`run.haltedByUser`だけを見ていると、人が停止していない
+ * 通常運用（独立した枝の1つが`failed`で確定し、別の枝がマージ衝突→人が解決→再マージ
+ * 成功）でも同じ袋小路が起きる（`hasFailedTask`が真の間`nextTasksToStart`は新規開始しない
+ * ため）。
+ *
+ * **この穴は2回目である。** Issue #432では`haltedByUser`の門で見つかり、今回（PR #517の
+ * セキュリティ監査）は`hasFailedTask`の門で再発した。個別の門を1つずつ揃えても、次に
+ * 別の門が足されれば3回目が起きる。だから「どの門を見るか」ではなく「開始されない
+ * `pending`を作らない」という不変条件の形で書いてある。
+ *
+ * **これは`runnerOrchestrator.ts`の`runHaltedByUserReason`のJSDoc（PR #503、107-108行付近）
+ * が「必ず`snapshot.haltedByUser`だけを見る。`isRunHalted`を使ってはならない」と書いて
+ * いるのと矛盾しない。** あちらが答えるべき問いは
+ * 「**人が**停止したか」（オーケストレーター制御ツールの停止判定）
+ * であり`haltedByUser`を直接見る必要があるのに対し、ここで答えるべき問いは
+ * 「**スケジューラはこのタスクを開始するのか**」であって、スケジューラ自身の門
+ * （`nextTasksToStart`の`isRunHalted`）と同じ判定に揃えるのが正しい。
+ *
+ * 停止中（広義。`haltedByUser`または`hasFailedTask`のいずれか）は`skipped`
+ * （`runHalted`）のままにしておく。`skipRemainingPending`が失敗起因の停止に対しても
+ * 同じ`runHalted`を使っている（コメント「区別のため`runHalted`にする」）のと意味を揃えた。
+ *
+ * **回復について。** `retryTask`は`skipped`を理由を問わず受理し`haltedByUser`を解除する
+ * ため、`haltedByUser`だけが原因（`hasFailedTask`は偽）なら、その`skipped`（`runHalted`）
+ * タスク自身へ`retryTask`を呼ぶだけで拾い直せ、即座に`nextTasksToStart`が拾える。
+ * **一方`hasFailedTask`が原因（他タスクが`failed`で確定している）のときは、この
+ * `skipped`タスク自身への`retryTask`だけでは復帰しない。** `retryTask`はその失敗タスク
+ * 自身を`pending`へ戻すだけで`haltedByUser`をfalseにするが、`hasFailedTask`は依然として
+ * 真（当該の`failed`タスクがまだ`failed`のまま）なので`isRunHalted`は真のまま残り、
+ * `nextTasksToStart`はまだ開始しない。**回復には、その`failed`タスク自身を`retryTask`
+ * （または`continueTask`）で救う操作が別途要る。** 重要なのは、`skipped`のままなら
+ * `getRunOutcome`が`pending`を見ずに`anyFailed`を見て`'failed'`（終端）を返せること
+ * であって、`skipped`にした時点で即座に自動再開できることではない。この2つを混同しない。
+ *
+ * 副作用として、複数の親からブロックされていたタスクは自動復帰しなくなる。`failure.kind`
+ * を`runHalted`へ書き換えると、下のフィルタ（`s.failure?.kind !== 'mergeBlocked'`）に
+ * 掛からなくなるため、停止が別経路（他タスクの`retryTask`）で解除された後にもう一方の親の
+ * マージが成功しても、このタスクは`pending`へ戻らない。その場合は対象タスク自身へ
+ * `retryTask`を呼べば救えるので詰みではないが、「両親のマージ完了で自動復帰」ではなく
+ * 「手動の再実行が要る」に変わる。停止という人の明示操作（または他タスクの失敗確定）が
+ * 挟まった後は、どの後続を再開するかを人に選ばせるほうが安全と判断してこの形にした。
  */
 export function markMergeSucceeded(
   run: RunState,
@@ -513,6 +563,10 @@ export function markMergeSucceeded(
     if (s === undefined || s.state !== 'skipped' || s.failure?.kind !== 'mergeBlocked') {
       continue;
     }
+    if (isRunHalted(run)) {
+      nextTasks.set(id, { ...s, failure: { kind: 'runHalted' } });
+      continue;
+    }
     nextTasks.set(id, { ...s, state: 'pending', failure: undefined });
   }
   return { ...run, tasks: nextTasks };
@@ -527,6 +581,22 @@ export function markMergeSucceeded(
  * 自体は終わったが、統合できていない」状態で、独立した枝は走り続ける
  * （design.md §16.3「`blocked`は実行全体を止めない」）。そのため`skipRemainingPending`
  * は呼ばない。
+ *
+ * **呼び出し元は、`git merge --abort`で巻き戻した後（衝突が自動解決できなかった通常経路）
+ * だけでなく、巻き戻さずに`blocked`へ倒す経路（`runnerMerge.ts`の`finishMergeResolution`
+ * の`manual`/`interrupted`/`taskStopped`分岐、Issue #443・案A。`mergeBusy`・
+ * `blockMergeAfterLeaseWait`も同様）からも呼ぶ。** この関数自身は`failure`を`undefined`に
+ * するため、両者を状態からは区別できない。
+ *
+ * **中断由来の`blocked`（巻き戻していないもの）が統合worktreeの誤撤去から守られているのは、
+ * `blocked`という状態そのものではなく、`removeWorktree`（`worktree.ts`）の
+ * `git status --porcelain`が未コミット差分（`MERGE_HEAD`・未解決パス）を検知して撤去を
+ * 拒否するという、別の安全網に依存しているからである。** `cleanupIntegration`
+ * （`runner.ts`）の`getRunOutcome(...) === 'running'`ガードは、この関数が呼ばれた時点で
+ * 素通りしうる（`blocked`はrunを終了確定させうるため）。将来、**差分を伴わない**
+ * `blocked`を作る経路（例: 何も変更していない状態で衝突解決セッションを中断する）を
+ * 追加するときは、`git status`が空になり得るためこの安全網が効かず、
+ * `cleanupIntegration`の撤去ガードが素通りしてしまうことを確認すること。
  */
 export function markMergeBlocked(
   run: RunState,

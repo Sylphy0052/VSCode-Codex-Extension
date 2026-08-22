@@ -3,7 +3,11 @@ import * as http from 'node:http';
 
 import { ORCHESTRATOR_CONNECTION_ID } from './orchestratorSession';
 import type { TaskState } from './runState';
-import { escapeAngleBrackets, stripControlCharsPreservingNewlines } from './sanitize';
+import {
+  escapeAngleBrackets,
+  sanitizeForLog,
+  stripControlCharsPreservingNewlines,
+} from './sanitize';
 import { truncateByCodePoint } from './workflow';
 
 /**
@@ -601,7 +605,9 @@ export const GET_RUN_STATUS_TOOL: McpToolDefinition = {
 
 export const STOP_TASK_TOOL: McpToolDefinition = {
   name: 'stop_task',
-  description: '走行中のタスクのループを止める（ワークフローViewの「タスク停止」と同じ）。',
+  description:
+    '走行中のタスクのループを止める（ワークフローViewの「タスク停止」と同じ）。' +
+    '衝突解決セッション（マージ中のタスク）も対象。届けられなかった場合は成功を返さない。',
   inputSchema: {
     type: 'object',
     properties: { taskId: TASK_ID_ARG },
@@ -776,11 +782,31 @@ export interface TaskMessagingHubDeps {
  */
 export class TaskMessagingHub {
   private store: MessageStore = createMessageStore();
+  /**
+   * `MessagingMcpServer.logDispatchError`が呼ばれた件数（Issue #375、Issue #475/PR #495
+   * レビュー指摘: medium）。`MessagingMcpServer`ではなくここに置くのは、`MAX_MESSAGES_PER_RUN`
+   * のカウンタ（`store.totalSent`）と同じ理由: `WorkflowRunner`の`ensureMessaging`は
+   * `retryTask`/再マージ成功のたびにtransportと`MessagingMcpServer`を作り直すが、
+   * `TaskMessagingHub`自体は同じrunが生きている間ずっと同じインスタンスを使い続ける
+   * （`WorkflowRunner.messagingHub`のJSDoc参照）。カウンタを`MessagingMcpServer`側の
+   * インスタンス変数のままにすると、再構築のたびに0へ戻り「run全体で20件」という
+   * PR #488の上限が再開のたびに緩んでしまう。
+   */
+  private dispatchErrorLogCount = 0;
 
   constructor(private readonly deps: TaskMessagingHubDeps) {}
 
   listTasks(): ListTasksEntry[] {
     return buildListTasksResult(this.deps.listRunTasks());
+  }
+
+  /**
+   * dispatch例外ログの記録件数を1増やし、増加後の値を返す（`MessagingMcpServer.logDispatchError`
+   * から呼ぶ）。transportの再構築をまたいでも、同じhubインスタンスが生きている限り引き継がれる。
+   */
+  incrementDispatchErrorLogCount(): number {
+    this.dispatchErrorLogCount += 1;
+    return this.dispatchErrorLogCount;
   }
 
   /**
@@ -874,11 +900,64 @@ export interface McpTransportPort {
   onConnection(handler: (connection: McpConnection) => void): void;
 }
 
+/**
+ * `safeDispatch`が捕捉した例外を記録するための最小限の出力口（Issue #375）。
+ *
+ * `log.ts`の`Logger`をそのまま要求せず専用の最小interfaceにするのは、本ファイル冒頭の
+ * JSDocが述べる「VSCode APIには一切依存しない」という方針を保つため（`log.ts`は`vscode`
+ * モジュールへ依存する）。`McpTransportPort`と同じ「外部依存はportの向こうに置く」流儀。
+ *
+ * 呼び出し側（`runner.ts`）が`Logger`を持つ場合は`{ error: (m) => log.error(m) }`のように
+ * 包んで渡せば足りる。渡さなければ`MessagingMcpServer`は記録せず、従来どおり黙って
+ * `-32603`を返すだけになる（後方互換）。
+ */
+export interface DispatchErrorLogPort {
+  error(message: string): void;
+}
+
 const SERVER_INFO_RESULT = {
   protocolVersion: '2024-11-05',
   serverInfo: { name: 'vscode-codex-extension-messaging', version: '1' },
   capabilities: { tools: {} },
 };
+
+/**
+ * `logDispatchError`が1つの`MessagingMcpServer`（＝1run）につき実際に記録する上限件数
+ * （Issue #375、PR #476レビュー指摘: medium）。
+ *
+ * このIssueの脅威モデルそのもの（同一runの他タスク、あるいは乗っ取られたCLIセッションが
+ * 意図的に例外を誘発する呼び出しを繰り返す）に対して、`safeDispatch`は例外1回につき
+ * 無条件で`logPort.error(...)`を呼ぶため、1接続内で任意回数呼べるJSON-RPCリクエストの
+ * たびにログ行が無制限に増える。
+ *
+ * 新しい流儀を作らず、リポジトリ既存の「件数上限」の規律に揃える
+ * （`runnerWorkingDirectory.ts`の`MAX_LISTED_REFLECT_PATHS`、`roadmap.ts`の
+ * `MAX_ROADMAP_PARSE_WARNINGS`と同じ形）。`runnerOrchestrator.ts`が
+ * `orchestratorPromptOverride`の警告を直近1件へ丸めた判断（#383）は採らない。
+ * あちらは`live.warnings`という参照可能な状態（ワークフローViewに出続ける）を持つため
+ * 「最新の1件だけ残る」が意味を持つが、ここは都度Output panelへ流れて消えるログ行であり、
+ * 「最新1件だけ」に丸めても以前の件数（＝攻撃の規模感）が失われるだけで閲覧性は上がらない。
+ * 件数を数え、上限を超えた分は記録しないという単純な上限のほうが素直に対応する。
+ *
+ * **トレードオフ（PR #488監査指摘）**: この上限は累積カウンタであり、run単位でリセット
+ * されない。正当な例外（バグや一時的な障害）が先にこの件数を使い切ると、その直後から
+ * 始まる意図的な攻撃は個別ログとしては一切残らない。上限到達以降は
+ * `DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL`件おきの集計ログ（`logDispatchError`参照）
+ * だけが検知手段になる。これは運用者が把握した上でのリスク受容であり、時間窓によるリセット
+ * や個別ログの無制限化ではなく、既存の「件数上限」の規律を保ったまま集計ログで補う設計を
+ * 選んでいる。
+ */
+export const MAX_DISPATCH_ERROR_LOG_COUNT = 20;
+
+/**
+ * 上限到達後の抑制中に、集計ログを何件おきに出すか（Issue #375、PR #488監査指摘: medium）。
+ *
+ * `MAX_DISPATCH_ERROR_LOG_COUNT`到達後は個別ログを止めるが、それ以降も無音のままだと、
+ * 攻撃者がまず正当な例外や無害な例外で上限を使い切ってから本命の攻撃を無制限に行っても
+ * 一切気づけない。ログ行そのものは上限で頭打ちにしたまま、抑制開始からの累計件数を
+ * この間隔ごとに1行出すことで、攻撃の規模と継続の有無だけは追えるようにする。
+ */
+export const DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL = 100;
 
 /**
  * `McpTransportPort` を通じて接続を受け取り、`list_tasks` / `send_message` の
@@ -894,6 +973,7 @@ export class MessagingMcpServer {
   constructor(
     private readonly hub: TaskMessagingHub,
     transport: McpTransportPort,
+    private readonly logPort?: DispatchErrorLogPort,
   ) {
     transport.onConnection((connection) => this.handleConnection(connection));
   }
@@ -912,12 +992,66 @@ export class MessagingMcpServer {
    *
    * 返すエラーメッセージには`error`の内容（スタックトレース・パスを含みうる）を一切含めない。
    * JSON-RPCの`-32603`（Internal error）として固定の文言だけを返す。
+   *
+   * 例外が起きた事実自体は`logPort`（渡されていれば）へ記録する（Issue #375）。以前は
+   * ここで完全に握り潰しており、同一runの他タスクが意図的に例外を誘発する呼び出しを
+   * 繰り返しても事後調査ができなかった。
    */
   private safeDispatch(taskId: string, request: JsonRpcRequest): JsonRpcResponse {
     try {
       return this.dispatch(taskId, request);
-    } catch {
+    } catch (error) {
+      this.logDispatchError(error);
       return failure(request.id, -32603, '内部エラーが発生しました');
+    }
+  }
+
+  /**
+   * 例外の型名とメッセージだけを`logPort`へ記録する（Issue #375）。`error.stack`は
+   * 意図的に一切読まない。スタックトレースにはこの拡張機能自身のソースファイルパスが
+   * 含まれ、`-32603`のレスポンス本体を固定文言にしている理由（内部情報を漏らさない）と
+   * 同じ配慮がログ経路にも要るため。
+   *
+   * `MAX_DISPATCH_ERROR_LOG_COUNT`件を超えたら個別の記録を止める（Issue #375、PR #476
+   * レビュー指摘: medium。丸めの流儀は定数のJSDoc参照）。上限に達した回にだけ、抑制を
+   * 始めた旨の1行を追加で記録する。
+   *
+   * 抑制中も件数は数え続け、`DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL`件おきに
+   * 抑制開始からの累計件数を集計ログとして1行出す（Issue #375、PR #488監査指摘:
+   * medium。上限到達直後から始まる本命の攻撃が完全に不可視化されるのを防ぐ）。
+   * ログ行自体は上限＋集計ログの頻度で頭打ちのまま、攻撃の規模・継続有無だけは追える。
+   *
+   * カウンタ自体は`this.hub.incrementDispatchErrorLogCount()`で数える（Issue #475/
+   * PR #495レビュー指摘: medium）。`this`（`MessagingMcpServer`インスタンス）は
+   * `ensureMessaging`の再構築のたびに作り直されるため、カウンタをここへ持たせると
+   * 再構築のたびに0へ戻り「run全体で20件」という上限が再開のたびに緩んでしまう
+   * （`TaskMessagingHub.dispatchErrorLogCount`のJSDoc参照）。
+   */
+  private logDispatchError(error: unknown): void {
+    if (this.logPort === undefined) {
+      return;
+    }
+    const dispatchErrorLogCount = this.hub.incrementDispatchErrorLogCount();
+    if (dispatchErrorLogCount <= MAX_DISPATCH_ERROR_LOG_COUNT) {
+      const typeName = error instanceof Error ? error.constructor.name : typeof error;
+      const message = error instanceof Error ? error.message : String(error);
+      this.logPort.error(
+        `[task-messaging] dispatchで例外が発生しました: ${typeName}: ${sanitizeForLog(message)}`,
+      );
+      if (dispatchErrorLogCount === MAX_DISPATCH_ERROR_LOG_COUNT) {
+        this.logPort.error(
+          `[task-messaging] dispatch例外のログ記録が上限（${MAX_DISPATCH_ERROR_LOG_COUNT}件）に達したため、` +
+            'このrun（複数タスクの接続を含む）ではこれ以降、個別の記録を抑制します',
+        );
+      }
+      return;
+    }
+    const suppressedCount = dispatchErrorLogCount - MAX_DISPATCH_ERROR_LOG_COUNT;
+    if (suppressedCount % DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL === 0) {
+      this.logPort.error(
+        '[task-messaging] dispatch例外のログ記録は抑制中です' +
+          `（このrunで抑制開始以降 ${suppressedCount}件発生）`,
+      );
     }
   }
 
@@ -1082,8 +1216,14 @@ const MAX_MCP_REQUEST_BODY_BYTES = 64 * 1024;
  *   形で問題なく満たせるため、`MessagingMcpServer`側のロジックを変えずに使える
  * - サーバは `127.0.0.1` のエフェメラルポート（OSが割り当てる空きポート）で待ち受ける。
  *   ワークスペースの外・他プロセスから推測されうる固定ポートを避けるため
+ *
+ * `logPort`は`MessagingMcpServer`へそのまま橋渡しするだけ（Issue #375）。省略時の挙動は
+ * 変わらない（後方互換）。
  */
-export function startHttpMcpTransport(hub: TaskMessagingHub): Promise<HttpMcpTransportHandle> {
+export function startHttpMcpTransport(
+  hub: TaskMessagingHub,
+  logPort?: DispatchErrorLogPort,
+): Promise<HttpMcpTransportHandle> {
   const tokenToTaskId = new Map<string, string>();
   let connectionHandler: ((connection: McpConnection) => void) | undefined;
 
@@ -1092,7 +1232,7 @@ export function startHttpMcpTransport(hub: TaskMessagingHub): Promise<HttpMcpTra
       connectionHandler = handler;
     },
   };
-  const mcpServer = new MessagingMcpServer(hub, transport);
+  const mcpServer = new MessagingMcpServer(hub, transport, logPort);
   void mcpServer; // 生成することで`transport.onConnection`にハンドラを登録させる
 
   const server = http.createServer((req, res) => {

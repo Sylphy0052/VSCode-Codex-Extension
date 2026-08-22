@@ -309,6 +309,17 @@ async function rebuildLiveRun(
     // Viewへ出る（design.md §16.11。再実行すればstartTask()が新しく作る）
     tasks: new Map(),
     finished: getRunOutcome(runState) !== 'running',
+    // `finished`とは違い、常に`false`から始める（Issue #432-2）。復元直後に`finished`が
+    // `true`になるのは「前のプロセスで終了ブロックが実行済み」だからとは限らない。
+    // 中断されていたタスクがここでの再構成（`reconcileRestoredTaskStates`）によって
+    // `failed`へ倒れ、その結果`getRunOutcome`が初めて`running`以外を返すようになる
+    // ケースがあり（クラッシュ・強制終了で走行中に終わった場合）、この場合は終了ブロックは
+    // このプロセスではまだ一度も走っていない。`finishedNotified`を`true`で始めると、
+    // その後`retryTask`等で再開して初めて迎える終了で`reflectPseudoWorktree`等が
+    // 誤って抑止される。`false`から始めても安全なのは、`pump()`が`live.finished`を
+    // 見て早期returnするため、既に終了済みの run はこのプロセスで再開されない限り
+    // 終了ブロックへ再入しないから
+    finishedNotified: false,
     warnings: [],
     integration,
     forge,
@@ -320,7 +331,15 @@ async function rebuildLiveRun(
     // 改めてタスクが動き出すが、メッセージングはrunそのものに紐づく短命なサーバのため、
     // 復元だけでは作り直さない。`WorkflowRunnerDeps.messaging`が省略可能なのと同じ
     // 「無くても実行は止めない」設計に揃える）
+    //
+    // 実害が出るのは復元そのものではなく、そのあと`retryTask`等で再開したとき
+    // （Issue #475）。`ensureMessaging`（`prepareTaskLaunch`の単一チョークポイント）が
+    // このプロセスで初めてhubを作る。復元はプロセスをまたぐため再利用できるhubが
+    // そもそも無く、`messagingHub`も`undefined`から始める
     messaging: undefined,
+    messagingHub: undefined,
+    messagingSetupInFlight: undefined,
+    messagingStartupWarnCount: 0,
     mergeResolutions: new Map(),
     // 復元した実行にはオーケストレーターセッションを作り直さない（会話は復元できない。
     // design.md §16.23「永続化と復元」）
