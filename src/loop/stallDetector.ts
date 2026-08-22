@@ -1,4 +1,4 @@
-import { lastNonEmptyAgentMessageText, type ChatState } from '../appserver/chatState';
+import type { ChatState } from '../appserver/chatState';
 
 /**
  * ループの停滞判定（design.md §16.27、Issue #336）。
@@ -20,18 +20,24 @@ export const MAX_STALL_REPEAT_COUNT = 50;
 /**
  * ターン完了時点の `ChatState` から、停滞判定に使う比較用テキストを取り出す。
  *
- * `orchestrator/taskSummary.ts` の `buildResponseSummary`（表示用の1行要約）と起点は
- * 同じ（`turnResultText` を優先し、無ければ直近の `agentMessage`）だが、こちらは
- * **表示や通知へ直接載せない**（比較にしか使わない）値のため、切り詰め・制御文字の
- * 除去は行わない。外部由来テキストを画面・ログへ出す際の無害化（`sanitizeForLog` /
- * `escapeAngleBrackets` 等の一本化された適用地点）は、このモジュールの外
- * （`taskSummary.ts` が作る `lastResponseSummary` の経路）にすでにあり、ここへ重ねて
- * 適用すると「どちらが最終防御か」が曖昧になる（design.md §16.24 参照）。
+ * **`state.turnResultText` だけを見る。`state.items` 全体へフォールバックしない。**
+ * `orchestrator/taskSummary.ts` の `buildResponseSummary`（表示用の1行要約）は
+ * `turnResultText` が空のとき `lastNonEmptyAgentMessageText(state.items)` で直近の
+ * 発言まで遡るが、これは「表示用に何かしら見せたい」要件であって、こちらの
+ * 「このターンで進んだかどうかを比較したい」要件とは違う。`items` 全体へ遡ると、
+ * ツール呼び出しだけで本文を返さないターンが続いたときに**古いターンの発言テキストを
+ * 使い回して比較してしまい**、編集内容が毎回違っても同じ署名が返り続けて誤検知する
+ * （design.md §16.27）。`turnResultText`（`summarizeTurn` がそのターンの `turnId` に
+ * 属する `agentMessage` だけを連結した値）が空のときは、そのターンは
+ * **比較不能として扱い空文字を返す**——`detectStalledLoop` は空文字の反復を停滞と
+ * 見なさないため、この空文字が連続しても誤検知しない。表示用の値へは重ねない
+ * （`taskSummary.ts` 側の役割のまま）ため、このモジュールは切り詰め・制御文字の
+ * 除去も行わない（比較にしか使わず、画面・ログへ直接出さないため。無害化の
+ * 一本化された適用地点は`taskSummary.ts`が作る`lastResponseSummary`の経路。
+ * design.md §16.24 参照）。
  */
 export function extractTurnSignature(state: ChatState): string {
-  const source =
-    state.turnResultText !== '' ? state.turnResultText : lastNonEmptyAgentMessageText(state.items);
-  return source.trim();
+  return state.turnResultText.trim();
 }
 
 /**

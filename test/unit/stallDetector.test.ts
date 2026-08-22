@@ -26,12 +26,19 @@ describe('extractTurnSignature', () => {
     expect(extractTurnSignature(state({ turnResultText: '完了しました' }))).toBe('完了しました');
   });
 
-  it('turnResultTextが空なら直近の空でないagentMessageを使う', () => {
+  it('turnResultTextが空なら空文字を返す（itemsへはフォールバックしない）', () => {
+    expect(extractTurnSignature(state({ turnResultText: '' }))).toBe('');
+  });
+
+  it('itemsに過去の非空発言が残っていても、turnResultTextが空なら使い回さない（design.md §16.27、Issue #336のblocking指摘）', () => {
+    // ツール呼び出しだけで本文を返さないターンが続くケース。
+    // items全体へフォールバックすると古い発言テキストを毎回拾ってしまい、
+    // 編集内容が違っても同じ署名が返り続けて停滞と誤検知する
     expect(
       extractTurnSignature(
-        state({ items: [agentMessage(''), agentMessage('調査中です')] }),
+        state({ turnResultText: '', items: [agentMessage('前のターンの発言')] }),
       ),
-    ).toBe('調査中です');
+    ).toBe('');
   });
 
   it('どちらも無ければ空文字', () => {

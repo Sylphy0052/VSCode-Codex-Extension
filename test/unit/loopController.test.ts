@@ -432,4 +432,33 @@ describe('LoopController: 停滞検知（design.md §16.27、Issue #336）', () 
     runTurn(controller, state({ turnResultText: '同じ内容' }));
     expect(controller.running).toBe(true);
   });
+
+  it('本文を出さずツールだけを動かすターンが続いても停滞と誤検知しない（design.md §16.27、Issue #336のblocking指摘）', () => {
+    // turnResultTextが空でも、items（過去のターンの発言）には非空の古い発言が残っている状態。
+    // ここでitems全体へフォールバックすると、編集内容が毎回違っても同じ署名を拾い続けて
+    // 誤検知する。turnResultTextだけを見て「比較不能（空文字）」として扱えば誤検知しない
+    const { sent, send } = spy();
+    const controller = new LoopController(send, undefined, 2);
+    controller.start(plan({ maxIterations: 5 }));
+    const oldMessage = agentMessage('最初のターンで出た発言');
+    runTurn(controller, state({ turnResultText: '', items: [oldMessage] }));
+    runTurn(controller, state({ turnResultText: '', items: [oldMessage] }));
+    runTurn(controller, state({ turnResultText: '', items: [oldMessage] }));
+    expect(controller.running).toBe(true);
+    expect(controller.getStatus().stopReason).toBeUndefined();
+    expect(sent).toHaveLength(4);
+  });
+
+  it('maxIterations到達と同じターンで停滞条件も満たすときはstalledを優先する（design.md §16.27、Issue #336のshould-fix指摘）', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send, undefined, 3);
+    // しきい値3とmaxIterations3を一致させ、最終ターンで両条件が同時に成立する状態を作る
+    controller.start(plan({ maxIterations: 3 }));
+    runTurn(controller, state({ turnResultText: '同じ内容の応答です' }));
+    runTurn(controller, state({ turnResultText: '同じ内容の応答です' }));
+    runTurn(controller, state({ turnResultText: '同じ内容の応答です' }));
+    expect(sent).toHaveLength(3);
+    expect(controller.running).toBe(false);
+    expect(controller.getStatus().stopReason).toBe('stalled');
+  });
 });
