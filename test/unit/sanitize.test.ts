@@ -48,6 +48,35 @@ describe('sanitizeForLog（design.md §16.7のsanitizeForReasonを共通化。�
   });
 });
 
+describe('sanitizeForLog（Issue #474 指摘1: パーセントエンコードされたURLのuserinfo）', () => {
+  it('スキームとuserinfoが丸ごとパーセントエンコードされたURLでもuserinfoをマスクする', () => {
+    const raw = 'redirect?url=https%3A%2F%2Ftoken%40evil.com%2Fpath';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('token%40');
+    expect(result).toContain('https%3A%2F%2F***%40evil.com%2Fpath');
+  });
+
+  it('大文字小文字が混在したパーセントエンコード（%3a%2f%2f等）でもマスクする', () => {
+    const raw = 'https%3a%2f%2fsecret%40evil.com';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('secret%40');
+    expect(result).toContain('https%3a%2f%2f***%40evil.com');
+  });
+
+  it('パーセントエンコードされたスキーム区切りを伴わない%40は誤マスクしない（過剰マスク防止）', () => {
+    // クエリ文字列中の正当な%40（例: メールアドレスのエンコード）は対象外
+    const raw = 'redirect?next=%2Fdashboard%3Femail%3Duser%40example.com';
+    expect(sanitizeForLog(raw)).toBe(raw);
+  });
+
+  it('2回適用しても結果が変わらない（冪等性）', () => {
+    const raw = 'https%3A%2F%2Ftoken%40evil.com%2Fpath';
+    const once = sanitizeForLog(raw);
+    const twice = sanitizeForLog(once);
+    expect(twice).toBe(once);
+  });
+});
+
 describe('sanitizeForLog（ホームディレクトリ配下の絶対パスマスク。Issue #378）', () => {
   it('ホームディレクトリ配下の絶対パス（POSIX）を含むエラーメッセージでユーザー名を露出しない', () => {
     const raw = "EACCES: permission denied, open '/home/alice/project/src/index.ts'";

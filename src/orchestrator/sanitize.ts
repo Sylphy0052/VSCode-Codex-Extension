@@ -20,8 +20,39 @@ export const SANITIZE_MAX_LEN = 200;
  */
 const URL_USERINFO_PATTERN = /(\b[a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^\s/@]+@/gu;
 
+/**
+ * パーセントエンコードされたURL（スキーム区切り`://`が`%3A%2F%2F`、userinfoの`@`が
+ * `%40`になっている形）を検出する（Issue #474 指摘1）。
+ *
+ * `URL_USERINFO_PATTERN` は素の`user:pass@`表記しか見ないため、リダイレクトURLの
+ * クエリ引数に別URLを丸ごとエンコードして埋め込む形（例:
+ * `redirect?url=https%3A%2F%2Ftoken%40evil.com%2Fpath`）には一致しない。
+ *
+ * 対応方針として、パーセントデコードしてから一律にマスクを掛ける方式は採らなかった。
+ * デコードは`&`区切りや他の`%XX`を含むクエリ文字列の構造を壊さずに行う必要があり、
+ * 実装を誤ると正当なクエリ文字列（例: `?next=%2Fdashboard`）まで書き換えてしまう
+ * 懸念がある。代わりに、監査指摘の形状そのもの（パーセントエンコードされたスキーム
+ * 区切り`%3A%2F%2F`の直後にパーセントエンコードされた`@`である`%40`が続く）だけを
+ * 狭く検出する。この並びが偶然クエリ文字列に現れる可能性は低く、過剰マスクの
+ * リスクを抑えられる。
+ *
+ * それでも対象外のまま残る形（意図的な限界）: 二重エンコード（`%253A%252F%252F`）や、
+ * スキーム区切りだけデコード済み・`@`だけエンコード済みのような混在形はこの並びに
+ * 一致しないため素通りする。
+ *
+ * スキーム名・userinfo本体の量指定子はいずれも上限を設けている（`{0,63}` `{0,2048}`）。
+ * 上限なしの `*` のまま `%3A%2F%2F` という固定リテラルへ繋ぐと、リテラルが一切
+ * 現れない巨大な英数字の連続（ログに実際に出現しうる、CLI出力中の長いbase64文字列等）
+ * に対して、各開始位置で末尾まで走査してからバックトラックする動作がO(n²)に達する
+ * （ReDoS。約90万文字で20秒超を実測して確認、`{0,63}`へ上限を設けて数十msへ改善した）。
+ * スキーム名・userinfoが実際にこの長さを超えることは想定していない。
+ */
+const ENCODED_URL_USERINFO_PATTERN = /([a-zA-Z][a-zA-Z0-9+.-]{0,63}%3A%2F%2F)[^%\s&]{0,2048}?%40/giu;
+
 function maskUrlUserinfo(value: string): string {
-  return value.replace(URL_USERINFO_PATTERN, '$1***@');
+  return value
+    .replace(URL_USERINFO_PATTERN, '$1***@')
+    .replace(ENCODED_URL_USERINFO_PATTERN, '$1***%40');
 }
 
 /**
@@ -107,18 +138,20 @@ export function maskHomeDir(value: string, homeDir: string = os.homedir()): stri
  *
  * `homeDir` はテスト容易性のために受け取れるようにしてある（既定は `os.homedir()`）。
  *
- * **限界（セキュリティ監査指摘）**: マスクするのはURLのuserinfoとホームディレクトリ配下の
- * ユーザー名の2種類だけで、それ以外の秘密情報（APIキー・トークン・認証ヘッダ等。例:
- * `Bearer <token>` `ghp_...` `sk-...`）は対象外のためそのまま素通りする。外部CLIの
- * stderrをそのまま `log.warn` / `log.error` へ渡す経路（`src/view/settingsProvider.ts`・
- * `src/extension.ts` 等）は、マスク済みのログでもこれらの文字列が含まれていれば漏れうる。
- * 「マスク済みだから安全」と誤解してログを共有しないこと。この穴自体を塞ぐ対応は
- * Issue #474で追跡する（ここでは限界の明記のみ）。
+ * **限界（セキュリティ監査指摘、Issue #474で一部対応）**: マスクするのはURLのuserinfoと
+ * ホームディレクトリ配下のユーザー名の2種類だけで、それ以外の秘密情報（APIキー・トークン・
+ * 認証ヘッダ等。例: `Bearer <token>` `ghp_...` `sk-...`）は対象外のためそのまま素通りする。
+ * 外部CLIのstderrをそのまま `log.warn` / `log.error` へ渡す経路
+ * （`src/view/settingsProvider.ts`・`src/extension.ts` 等）は、マスク済みのログでも
+ * これらの文字列が含まれていれば漏れうる。「マスク済みだから安全」と誤解してログを
+ * 共有しないこと。この穴自体を塞ぐ対応は Issue #474 で追跡する（ここでは限界の明記のみ）。
  *
- * 監査が実測で確認した既知のすり抜け例（いずれも対応の意図的な範囲外）:
- * - パーセントエンコードされたURL（例: `https://token%40example.com@host/...` のように
- *   `@` 自体がエンコードされている場合、`URL_USERINFO_PATTERN` は元の記法通りの
- *   `user:pass@host` 形状しか見ないため一致しない）
+ * 監査が実測で確認した既知のすり抜け例（いずれも意図的な範囲外として残る、または
+ * Issue #474 で対応済み）:
+ * - （対応済み）パーセントエンコードされたURL（`https%3A%2F%2Ftoken%40evil.com` のように
+ *   スキーム区切り・`@`が丸ごとエンコードされた形）は `ENCODED_URL_USERINFO_PATTERN`
+ *   で検出するようにした。ただし二重エンコード等、この並びに一致しない変形は
+ *   引き続き対象外（`maskUrlUserinfo` のJSDoc参照）
  * - `\\` にエスケープされたWindowsパス（例: JSON化されたエラーメッセージ中の
  *   `C:\\\\Users\\\\alice\\\\...` は `HOME_DIR_USERNAME_PATTERN` が想定する
  *   `C:\Users\alice` の形状と一致せず素通りする）
