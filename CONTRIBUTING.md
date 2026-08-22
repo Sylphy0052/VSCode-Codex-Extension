@@ -15,19 +15,20 @@ npm run check     # lint + typecheck + test
 
 ## npmスクリプト
 
-| コマンド                        | 内容                                                                |
-| ------------------------------- | ------------------------------------------------------------------- |
-| `npm run build`                 | esbuildで `dist/extension.js` にバンドルする                        |
-| `npm run watch`                 | sourcemap付きで監視ビルドする                                       |
-| `npm run typecheck`             | `tsc --noEmit`                                                      |
-| `npm run lint`                  | `eslint .`                                                          |
-| `npm run format`                | Prettierで整形する                                                  |
-| `npm test`                      | `vitest run`（`test/unit/**`）                                      |
-| `npm run test:coverage`         | 上記にカバレッジ計測を付けて実行する。下限を下回ると失敗する        |
-| `npm run test:integration`      | 実VSCode上の統合テスト（`test/integration/**`）。ディスプレイが要る |
-| `npm run test:integration:xvfb` | 同上。ヘッドレスLinux/WSLでxvfb-run経由で実行する                   |
-| `npm run check`                 | lint / typecheck / testをまとめて実行する（integrationは含まない）  |
-| `npm run package`               | ビルドしてvsixを生成する                                            |
+| コマンド                        | 内容                                                                                                                            |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run build`                 | esbuildで `dist/extension.js` にバンドルする                                                                                    |
+| `npm run watch`                 | sourcemap付きで監視ビルドする                                                                                                   |
+| `npm run typecheck`             | `tsc --noEmit`                                                                                                                  |
+| `npm run lint`                  | `eslint .`                                                                                                                      |
+| `npm run format`                | Prettierで整形する                                                                                                              |
+| `npm test`                      | `vitest run`（`test/unit/**`）                                                                                                  |
+| `npm run test:coverage`         | 上記にカバレッジ計測を付けて実行する。下限を下回ると失敗する                                                                    |
+| `npm run test:integration`      | 実VSCode上の統合テスト（`test/integration/**`）。ディスプレイが要る                                                             |
+| `npm run test:integration:xvfb` | 同上。ヘッドレスLinux/WSLでxvfb-run経由で実行する                                                                               |
+| `npm run test:external-cli`     | 実CLI（`codex app-server`）を起動する検査（`test/external-cli/**`）。CODEX_BIN環境変数でパスを指定する（既定はPATH上の`codex`） |
+| `npm run check`                 | lint / typecheck / testをまとめて実行する（integration・external-cliは含まない）                                                |
+| `npm run package`               | ビルドしてvsixを生成する                                                                                                        |
 
 `scripts/check.sh` はcommit前に全緑であることを必須とする。緑にするためにテストを弱めたりskipしたりしない。`test:integration`は実VSCodeのダウンロード・起動が要り重いため`check.sh`には含めていない。必要なときに明示的に呼ぶ。
 
@@ -44,6 +45,8 @@ mainへのpushとPRのたびに、GitHub Actions（`.github/workflows/ci.yml`）
 現時点ではブランチ保護の必須チェック（required status checks）に設定していない。CIが赤くてもマージはブロックされない（可視化のみ）。
 
 検証範囲の拡張と必須チェック化の判断は #386 で追跡している。
+
+`checks`ジョブとは別に`external-cli`ジョブがある。design.md §9.1が前提とする現行のセッション紐付け（`thread/start`の応答から`threadId`を直接受け取る方式）が、実物のCodex CLIでAPIキーなしに成立し続けているかを検査する（`test/external-cli/`、issue #458）。モックではなく実CLI（`@openai/codex`、バージョン固定でインストール）を`codex app-server`として起動するため、Codexのバージョンアップで応答の形が変わればここで気づける。VSCodeは使わず、`test/integration/`（実CLIを絶対に呼ばせない方針）とは独立している。
 
 ## デバッグ実行
 
