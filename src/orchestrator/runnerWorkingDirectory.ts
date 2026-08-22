@@ -8,6 +8,7 @@ import {
   persistManifest,
   reflectIntegrationToWorkspace,
   takeSnapshot,
+  updateSnapshotForAppliedPaths,
   IntegrationQueue as PseudoWorktreeIntegrationQueue,
   type Snapshot,
 } from './pseudoWorktree';
@@ -401,11 +402,16 @@ export async function reflectPseudoWorktree(
     return;
   }
   try {
+    // 反映と、その後の`baseline`更新（下記）で同一のマニフェストを使う。呼び出しの間で
+    // 別タスクの統合により`manifest`が更新されうるため、ここで1回だけ取得して固定する
+    // （反映していないエントリまで後続の`updateSnapshotForAppliedPaths`が誤って参照しない
+    // ようにするため）。
+    const manifest = live.pseudo.queue.getManifest();
     const result = await reflectIntegrationToWorkspace(
       live.repoRoot,
       live.pseudo.integrationDir,
       live.pseudo.baseline,
-      live.pseudo.queue.getManifest(),
+      manifest,
       live.pseudo.exclude,
       deps.fs,
     );
@@ -427,14 +433,31 @@ export async function reflectPseudoWorktree(
     // 途中で失敗した時点のディスクの実態（適用済みの分は書き変わり、未適用の分は
     // 元のまま）をそのまま`baseline`として取り直す。未適用の分は`manifest`に
     // 残ったままなので（`failedPath`・`remainingPaths`は統合キューから消えない）、
-    // 次回の反映で改めて適用が試みられる。ここで再取得したスナップショットが
-    // 「今のワークスペースの実態」と一致している限り、次回以降の`workspaceChanged`
-    // 判定（人の編集の検知）は適用済み・未適用のどちらのファイルについても
-    // 引き続き正しく働く。逆に`partialApply`のときだけ更新を見送ると、次回反映時に
-    // 既に適用済みのはずのパスまで「baselineとの差分」として誤検知されてしまう
-    // （適用済みのパスは統合先からのコピーでサイズ・更新時刻が変わっているため）。
+    // 次回の反映で改めて適用が試みられる。
+    //
+    // **更新方式（レビュー・監査指摘、再発防止）**: 以前はここで`takeSnapshot`を使って
+    // ワークスペース全体を再スキャンし`baseline`を丸ごと差し替えていたが、その方式には
+    // 「反映（実I/Oのコピー/削除ループ）の最中に人が反映対象**ではない**別ファイルを
+    // 編集すると、その編集が全体再スキャンに紛れ込んで新しい`baseline`へ恒久的に
+    // 吸収されてしまい、以後その編集を`workspaceChanged`で検知できなくなる」という窓が
+    // あった。この機構は人の手による編集を守るためのものであり、この窓を「攻撃者は
+    // 直接改ざんもできる」という理由で許容するのは筋が違う。
+    //
+    // そこで`reflectIntegrationToWorkspace`が実際に適用した`appliedPaths`だけを
+    // `baseline`へ個別に反映し（`updateSnapshotForAppliedPaths`）、それ以外のエントリは
+    // 元の`baseline`の値のまま据え置く。この形なら、反映の窓の間に起きた他ファイルの
+    // 編集は`baseline`に触れないまま残り、次回の反映開始時の初期比較で正しく検知される。
+    // 逆に既に適用済みのパスを据え置くと、統合先からのコピーでサイズ・更新時刻が
+    // 変わっているため、次回反映時に「baselineとの差分」として誤検知されてしまう
+    // （`partialApply`のときも同様の理由で、実際に適用できた分だけを反映する）。
     if (result.ok || result.reason === 'partialApply') {
-      live.pseudo.baseline = await takeSnapshot(live.repoRoot, live.pseudo.exclude, deps.fs);
+      live.pseudo.baseline = await updateSnapshotForAppliedPaths(
+        live.pseudo.baseline,
+        result.appliedPaths,
+        manifest,
+        live.repoRoot,
+        deps.fs,
+      );
     }
     // `usedLegacyCopyFallback`は`workspaceChanged`（コピーへ入る前に中断）以外の2分岐にだけ
     // 乗る。ここで1回だけ判定してログに出すことで、`reflectIntegrationToWorkspace`が

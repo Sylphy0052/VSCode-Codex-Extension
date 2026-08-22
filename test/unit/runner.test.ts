@@ -6357,9 +6357,17 @@ tasks:
    * この修正で`reflectPseudoWorktree`は反映に成功する（`partialApply`を含む）たびに
    * `baseline`を反映後のワークスペースの実際の状態へ更新するため、`pseudoWorktreeReflectSkipped`
    * とその送出分岐は不要になり削除した。以下の2テストは受入基準どおり、
-   * (1) 2周目に新たに`done`になったタスクの内容がワークスペースへ届くこと、
-   * (2) その間に人が編集した場合は、baselineの更新後も引き続き反映が拒否されること、
-   * を確かめる。
+   * (1) 1周目の反映成功（実際のディスクの変化を伴う）で古いままの`baseline`に
+   * 取り残されず、2周目に新たに`done`になったタスクの内容もワークスペースへ届くこと、
+   * (2) 1周目の反映成功後から2周目の反映までの間に人が編集した場合、その編集は
+   * 3周目以降も一貫して検知され続けること（＝拒否時に`baseline`が人の編集で
+   * 上書きされていないこと）、を確かめる。
+   *
+   * **両テストとも、`runnerWorkingDirectory.ts`の`baseline`更新1行
+   * （`live.pseudo.baseline = await updateSnapshotForAppliedPaths(...)`）を
+   * 無効化した場合と、workspaceChangedで拒否したときも含めて常に更新するよう変えた
+   * 場合の両方でREDになることを実測済み（PR本文参照。docs/design.md §16.25の
+   * 確認事項参照）。**
    */
   describe('疑似worktreeのbaseline更新（design.md §16.20、Issue #511）', () => {
     const PSEUDO_RETRY_YAML = `
@@ -6376,8 +6384,8 @@ tasks:
 `;
 
     it(
-      'retryTask経由で2周目に終了すると、2周目に新たにdoneになったタスクの' +
-        '統合内容もワークスペースへ届く',
+      '1周目の反映成功（実ファイル変更あり）でbaselineを更新し、' +
+        '2周目に新たにdoneになったタスクの統合内容もワークスペースへ届く',
       async () => {
         const git = fakeGit({ notGitRepo: true });
         const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
@@ -6389,31 +6397,44 @@ tasks:
         const runId = result.runId as string;
         await flush();
 
-        // 1周目: T1が失敗し、T2はskippedになってrunはfailedで終わる
-        // （疑似worktreeのbaseline取得のみ。T1の複製先には変更を加えない）
-        codexHost.byTaskId('T1').finish('failed', { ...initialChatState, turnFailed: true });
-        await flush();
-        expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
-        expect(store.find(runId)?.tasks['T2']?.state).toBe('skipped');
-
-        // 人がT1を再実行し、依存先T2も含めて最後まで走らせる
-        expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
-        await flush();
+        // 1周目: T1がa.txtを変更して成功し（実際にディスクへ書き込みが起きる）、
+        // T2は失敗してrunはfailedで終わる。run終了時の反映でT1の変更（200/200）が
+        // ワークスペースへ届く。この時点でbaselineが更新されていないと、2周目は
+        // ワークスペースが「意図的に変化した」ことを人の編集と誤検知してしまう
+        // （このPRが直している本題）
+        const cloneDir1 = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+        fs.setFile(path.join(cloneDir1, 'a.txt'), { size: 200, mtimeMs: 200 });
         codexHost.byTaskId('T1').finish('done', doneState('ok'));
         await flush();
+        codexHost.byTaskId('T2').finish('failed', { ...initialChatState, turnFailed: true });
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+        expect(store.find(runId)?.tasks['T2']?.state).toBe('failed');
+        // 1周目の反映が実際に成功し、a.txtがワークスペースへ届いていることを確認
+        // （このテストの前提。ここが揃っていないと2周目の検証が成立しない）
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 200, mtimeMs: 200 });
 
-        // T2の複製先でファイルを変更する。統合（integratePseudoWorktree）自体は
-        // runの周回を問わず呼ばれるため、この変更は統合キューへ積まれるはず
-        const cloneDir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T2');
-        fs.setFile(path.join(cloneDir2, 'a.txt'), { size: 999, mtimeMs: 999 });
+        // 人がT2を再実行し、最後まで走らせる（ワークスペースは1周目の反映後から
+        // 一切人の手で編集しない＝2周目が拒否されてはいけないケース）。T2は
+        // b.txt（T1が触っていない別ファイル）を新規作成する。同じa.txtを触ると
+        // 「別タスクが既に統合済みのパスへ書く」という別の正当な衝突判定
+        // （`planIntegration`、3-way mergeをしないための仕様）に当たってしまい、
+        // baseline更新の検証にならないため
+        expect(runner.retryTask(runId, 'T2')).toEqual({ ok: true });
+        await flush();
+        // 再実行後の複製先は`T2`ではなく`T2-retry0`（`retrySuffixOf`。design.md §16.5）
+        const cloneDir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T2-retry0');
+        fs.setFile(path.join(cloneDir2, 'b.txt'), { size: 999, mtimeMs: 999 });
         codexHost.byTaskId('T2').finish('done', doneState('ok'));
         await flush();
 
-        // 2周目: succeededで終わる。今度は反映が実際に行われ、a.txtの内容が
-        // ワークスペースへ届く（修正前は`baseline`が固定のため`workspaceChanged`の
-        // 誤検知で届かなかった）
+        // 2周目: succeededで終わる。今度も反映が実際に行われ、b.txtの内容が
+        // ワークスペースへ届く。baselineが1周目の反映成功後に更新されていないと
+        // （＝1周目の`a.txt`の変更`200/200`が古いままの初期値`10/100`と比較されると）、
+        // 2周目の比較は必ず`workspaceChanged`の誤検知になり、この反映は届かない
         expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
-        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 999, mtimeMs: 999 });
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 200, mtimeMs: 200 });
+        expect(fs.files.get('/repo/b.txt')).toEqual({ size: 999, mtimeMs: 999 });
         const snapshot = runner.getSnapshot(runId);
         expect(
           snapshot?.warnings.some(
@@ -6424,20 +6445,36 @@ tasks:
     );
 
     it(
-      '1周目の反映成功でbaselineを更新しても、1周目の反映後から2周目の反映までの間に' +
-        '人が編集していれば、2周目の反映は引き続きworkspaceChangedとして拒否される',
+      '1周目の反映成功後から2周目の反映までの間に人が編集した場合、その編集は' +
+        '3周目以降も一貫して検知され続ける（拒否時にbaselineが人の編集で上書きされない）',
       async () => {
+        const YAML = `
+version: 1
+name: pseudo-retry-3round-test
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+  - id: T2
+    dependsOn: [T1]
+    prompt: p2
+    done: d2
+  - id: T3
+    dependsOn: [T2]
+    prompt: p3
+    done: d3
+`;
         const git = fakeGit({ notGitRepo: true });
         const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
-        const { runner, codexHost, store } = createHarness(PSEUDO_RETRY_YAML, {
+        const { runner, codexHost, store } = createHarness(YAML, {
           git,
           pseudoWorktree: { fs, exclude: [] },
         });
-        const result = await runner.start('/repo/.agents/workflows/pseudo-retry.yaml', '/repo');
+        const result = await runner.start('/repo/.agents/workflows/pseudo-retry-3round.yaml', '/repo');
         const runId = result.runId as string;
         await flush();
 
-        // 1周目: T1がa.txtを変更して成功し、T2は失敗してrunはfailedで終わる。
+        // 1周目: T1がa.txtを変更して成功し、T2は失敗する（T3は依存未達でskipped）。
         // run終了時の反映で、T1の変更（200/200）がワークスペースへ届き、
         // baselineもその状態へ更新される
         const cloneDir1 = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
@@ -6448,37 +6485,166 @@ tasks:
         await flush();
         expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
         expect(store.find(runId)?.tasks['T2']?.state).toBe('failed');
+        expect(store.find(runId)?.tasks['T3']?.state).toBe('skipped');
         // 1周目の反映が実際に成功し、a.txtがワークスペースへ届いていることを確認
-        // （このテストの前提: ここが揃っていないと2周目の拒否を検証したことにならない）
+        // （このテストの前提。ここが揃っていないと以降の検証が成立しない）
         expect(fs.files.get('/repo/a.txt')).toEqual({ size: 200, mtimeMs: 200 });
 
-        // 1周目の反映が終わった後、2周目の反映が終わるまでの間に人がワークスペースを
-        // 直接編集する（エージェントの複製先ではなく、ワークスペース本体を書き換える点が
-        // 「人の編集」の模擬として重要）
+        // 1周目の反映が終わった後、人がワークスペースを直接編集する（エージェントの
+        // 複製先ではなく、ワークスペース本体を書き換える点が「人の編集」の模擬として
+        // 重要）。以降このテストでは、この編集をもう二度と`fs.setFile`で上書きしない
         fs.setFile('/repo/a.txt', { size: 300, mtimeMs: 300 });
 
-        // 人がT2を再実行する。T2の複製先でもファイルを変更し、統合キューへ新しい内容が
-        // 積まれるようにする
+        // 2周目: 人がT2を再実行する（T3もskippedからpendingへ復元される）。T2は
+        // b.txt（T1が触っていない別ファイル）を新規作成し、統合キューへ新しい内容が
+        // 積まれるようにする。T1と同じa.txtを触ると「別タスクが既に統合済みのパスへ
+        // 書く」という別の正当な衝突判定（`planIntegration`、3-way mergeをしないための
+        // 仕様）に当たってしまい、baseline更新の検証にならないため。
+        // T3を失敗させて2周目もrunをfailedで終える（3周目でさらにT3を再実行するため）
         expect(runner.retryTask(runId, 'T2')).toEqual({ ok: true });
         await flush();
-        const cloneDir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T2');
-        fs.setFile(path.join(cloneDir2, 'a.txt'), { size: 400, mtimeMs: 400 });
+        // 再実行後の複製先は`T2`ではなく`T2-retry0`（`retrySuffixOf`。design.md §16.5）
+        const cloneDir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T2-retry0');
+        fs.setFile(path.join(cloneDir2, 'b.txt'), { size: 400, mtimeMs: 400 });
+        codexHost.byTaskId('T2').finish('done', doneState('ok'));
+        await flush();
+        codexHost.byTaskId('T3').finish('failed', { ...initialChatState, turnFailed: true });
+        await flush();
+
+        // 2周目: T2はdone、T3はfailedで終わる。人の編集（300/300）はbaseline
+        // （200/200）と食い違うため、2周目の反映はworkspaceChangedとして拒否され、
+        // T2の統合内容（b.txt）はワークスペースへ届かない
+        expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+        expect(store.find(runId)?.tasks['T3']?.state).toBe('failed');
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 300, mtimeMs: 300 });
+        expect(fs.files.has('/repo/b.txt')).toBe(false);
+        const afterRound2 = runner.getSnapshot(runId);
+        const blockedAfterRound2 = afterRound2?.warnings.filter(
+          (w) => w.kind === 'pseudoWorktreeReflectBlocked',
+        );
+        expect(blockedAfterRound2).toHaveLength(1);
+        expect(blockedAfterRound2?.[0]?.message).toContain('実行中にワークスペースが変更された');
+        expect(blockedAfterRound2?.[0]?.message).toContain('a.txt');
+
+        // 3周目: 人がT3を再実行する。ワークスペースは2周目の拒否から一切変更していない
+        // （＝人の編集300/300がそのまま残っている）。もし2周目の拒否時にbaselineが
+        // （誤って）人の編集へ更新されてしまっていたら、3周目の比較は「変化なし」と
+        // 誤判定し、a.txt（T1が統合済みの版）・b.txt・c.txtがそのまま人の編集を
+        // 上書きしてしまう。T3もc.txt（別ファイル）を新規作成する
+        expect(runner.retryTask(runId, 'T3')).toEqual({ ok: true });
+        await flush();
+        // 再実行後の複製先は`T3`ではなく`T3-retry0`（`retrySuffixOf`。design.md §16.5）
+        const cloneDir3 = path.join('/repo', '.agents', 'worktrees', runId, 'T3-retry0');
+        fs.setFile(path.join(cloneDir3, 'c.txt'), { size: 500, mtimeMs: 500 });
+        codexHost.byTaskId('T3').finish('done', doneState('ok'));
+        await flush();
+
+        // 3周目もsucceededで終わる。人の編集（300/300）はbaselineが2周目の拒否で
+        // 上書きされていない限り、baseline（200/200）とのままの比較で今も検知され、
+        // 反映は3周目も引き続きworkspaceChangedとして拒否される
+        expect(store.find(runId)?.tasks['T3']?.state).toBe('done');
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 300, mtimeMs: 300 });
+        expect(fs.files.has('/repo/b.txt')).toBe(false);
+        expect(fs.files.has('/repo/c.txt')).toBe(false);
+        const afterRound3 = runner.getSnapshot(runId);
+        const blockedAfterRound3 = afterRound3?.warnings.filter(
+          (w) => w.kind === 'pseudoWorktreeReflectBlocked',
+        );
+        expect(blockedAfterRound3).toHaveLength(2);
+        expect(blockedAfterRound3?.[1]?.message).toContain('実行中にワークスペースが変更された');
+        expect(blockedAfterRound3?.[1]?.message).toContain('a.txt');
+      },
+    );
+
+    it(
+      '反映が一部だけ成功（partialApply）したとき、適用できたパスだけbaselineが更新され、' +
+        '2周目の反映がその分を誤ってworkspaceChangedと判定しない（監査指摘、runnerレベル）',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, codexHost, store } = createHarness(PSEUDO_RETRY_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start(
+          '/repo/.agents/workflows/pseudo-partial-apply.yaml',
+          '/repo',
+        );
+        const runId = result.runId as string;
+        await flush();
+
+        // T1がa.txt（既存ファイルの変更）とb.txt（新規ファイル）の2件を統合する。
+        // 統合（integratePseudoWorktree、_integrationへのコピー）は2件とも正常に
+        // 終わらせ、run終了時の反映（ワークスペース本体へのコピー）だけa.txtは成功・
+        // b.txtは失敗させる。反映先のパス（ワークスペース直下の`/repo/b.txt`）そのもので
+        // 判定する。統合先（`_integration`）へのコピーやT1完了直後にクローンされる
+        // T2の複製先へのコピー（`cloneWorkspace`）など、他のコピー呼び出し回数に
+        // 依存しないため、それらの回数が変わっても壊れない
+        const cloneDir1 = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+        fs.setFile(path.join(cloneDir1, 'a.txt'), { size: 20, mtimeMs: 200 });
+        fs.setFile(path.join(cloneDir1, 'b.txt'), { size: 30, mtimeMs: 300 });
+        const originalCopyFile = fs.copyFile.bind(fs);
+        let injectFailure = true;
+        fs.copyFile = async (from: string, to: string): Promise<void> => {
+          if (injectFailure && to === '/repo/b.txt') {
+            throw Object.assign(new Error('ENOSPC: no space left on device'), {
+              code: 'ENOSPC',
+            });
+          }
+          await originalCopyFile(from, to);
+        };
+
+        codexHost.byTaskId('T1').finish('done', doneState('ok'));
+        await flush();
+        codexHost.byTaskId('T2').finish('failed', { ...initialChatState, turnFailed: true });
+        await flush();
+
+        // マージ（統合）自体はdoneのまま確定する。失敗したのは反映（ワークスペースへの
+        // コピー）の一部だけ
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+        expect(store.find(runId)?.tasks['T2']?.state).toBe('failed');
+        // a.txtは反映に成功し、b.txtは反映に失敗して元のまま（存在しない）
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 20, mtimeMs: 200 });
+        expect(fs.files.has('/repo/b.txt')).toBe(false);
+        const afterRound1 = runner.getSnapshot(runId);
+        const blockedAfterRound1 = afterRound1?.warnings.filter(
+          (w) => w.kind === 'pseudoWorktreeReflectBlocked',
+        );
+        expect(blockedAfterRound1).toHaveLength(1);
+        expect(blockedAfterRound1?.[0]?.message).toContain('適用済み');
+        expect(blockedAfterRound1?.[0]?.message).toContain('a.txt');
+        expect(blockedAfterRound1?.[0]?.message).toContain('未適用');
+        expect(blockedAfterRound1?.[0]?.message).toContain('b.txt');
+
+        // 以降の反映は正常に成功させたいので、注入した失敗を止める
+        injectFailure = false;
+
+        // 2周目: 人がT2を再実行する。T2はc.txt（別ファイル）を新規作成する。
+        // このとき1周目でpartialApplyとして適用済みだったa.txtのbaselineが
+        // `updateSnapshotForAppliedPaths`で正しく更新されていれば、2周目の反映開始時の
+        // 比較でa.txt（既に20/200で書き込み済み）は「変化なし」と判定され
+        // workspaceChangedにはならない。もしbaseline更新が働いていなければ、
+        // a.txtは古いbaseline（10/100）との差分として誤検知され、2周目の反映全体が
+        // 拒否されてb.txt・c.txtとも届かない
+        expect(runner.retryTask(runId, 'T2')).toEqual({ ok: true });
+        await flush();
+        const cloneDir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T2-retry0');
+        fs.setFile(path.join(cloneDir2, 'c.txt'), { size: 999, mtimeMs: 999 });
         codexHost.byTaskId('T2').finish('done', doneState('ok'));
         await flush();
 
-        // 2周目: succeededで終わる
+        // 2周目は成功し、1周目に取りこぼしたb.txtも改めて適用され、T2のc.txtも届く
         expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
-        // baselineの更新は「1周目の反映成功」に対してのみ行われ、2周目の反映が
-        // workspaceChangedで拒否された今回は human の編集（300/300）のまま据え置かれる。
-        // T2の統合内容（400/400）で上書きされていないこと＝人の編集を上書きしていないこと
-        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 300, mtimeMs: 300 });
-        const snapshot = runner.getSnapshot(runId);
-        const warnings = snapshot?.warnings.filter(
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 20, mtimeMs: 200 });
+        expect(fs.files.get('/repo/b.txt')).toEqual({ size: 30, mtimeMs: 300 });
+        expect(fs.files.get('/repo/c.txt')).toEqual({ size: 999, mtimeMs: 999 });
+        const afterRound2 = runner.getSnapshot(runId);
+        const blockedAfterRound2 = afterRound2?.warnings.filter(
           (w) => w.kind === 'pseudoWorktreeReflectBlocked',
         );
-        expect(warnings).toHaveLength(1);
-        expect(warnings?.[0]?.message).toContain('実行中にワークスペースが変更された');
-        expect(warnings?.[0]?.message).toContain('a.txt');
+        // 2周目で新たな`pseudoWorktreeReflectBlocked`は増えない
+        // （1周目のpartialApply分1件のみ）
+        expect(blockedAfterRound2).toHaveLength(1);
       },
     );
   });

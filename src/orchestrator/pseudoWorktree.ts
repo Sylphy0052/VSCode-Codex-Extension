@@ -2015,3 +2015,51 @@ export async function reflectIntegrationToWorkspace(
     usedLegacyCopyFallback,
   };
 }
+
+/**
+ * `reflectIntegrationToWorkspace`が実際に適用した（コピーまたは削除した）パスだけを
+ * `baseline`へ反映し、それ以外のエントリは元の値のまま据え置く（Issue #511の再発防止、
+ * レビュー・監査指摘）。
+ *
+ * 以前は反映後に`takeSnapshot`でワークスペース全体を再スキャンして`baseline`を丸ごと
+ * 差し替えていたが、その方式には窓があった。`reflectIntegrationToWorkspace`は
+ * 「反映前にワークスペースの変更が無いか確認 → 実I/Oを伴うコピー/削除ループ →
+ * （呼び出し側が）全体を再スキャン」という順で進むため、コピー/削除ループの最中に人が
+ * 反映対象**ではない**別ファイルを編集すると、その編集は全体再スキャンに紛れ込んで
+ * 新しい`baseline`へそのまま取り込まれてしまう。以後その編集は「自分が書いた結果」として
+ * 扱われ、次回以降`workspaceChanged`で検知できなくなる（design.md「人の編集を上書きしない」
+ * という目的に反する。攻撃者対策ではなく、人の手による編集を守るための機構であるため、
+ * 「権限を持つ攻撃者は直接改ざんもできる」という理由でこの窓を許容する筋ではない）。
+ *
+ * 適用済みパスだけを個別に反映すれば、この窓の間に起きた**他ファイル**の編集は
+ * `baseline`に触れないまま残るため、次回の反映開始時（`workspaceChanged`の初期比較）で
+ * 正しく検知される。
+ *
+ * `partialApply`（一部だけ適用できた）のときも、この関数へは実際に適用できた分の
+ * `appliedPaths`だけを渡す設計にする（呼び出し側との整合）。
+ */
+export async function updateSnapshotForAppliedPaths(
+  baseline: Snapshot,
+  appliedPaths: readonly string[],
+  manifest: IntegrationManifest,
+  workspaceRoot: string,
+  fs: PseudoWorktreeFileSystemPort,
+): Promise<Snapshot> {
+  const next = new Map(baseline);
+  for (const relPath of appliedPaths) {
+    const manifestEntry = manifest.get(relPath);
+    if (manifestEntry?.kind === 'deleted') {
+      next.delete(relPath);
+      continue;
+    }
+    const stat = await fs.statFile(path.join(workspaceRoot, ...relPath.split('/')));
+    if (stat === undefined) {
+      // 反映直後に消えている（何らかの理由で既に無い）場合、baselineへ残すと
+      // 次回の比較で「存在しないファイルの変更」という不整合になるため取り除く。
+      next.delete(relPath);
+      continue;
+    }
+    next.set(relPath, stat);
+  }
+  return next;
+}
