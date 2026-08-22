@@ -540,21 +540,30 @@ describe('実ファイルシステムでの統合テスト', () => {
   });
 
   /**
-   * Issue #505（監査指摘）: `cloneWorkspace`の事後確認は、`mkdir(target)`直後に
-   * `isPathWithinRoot`（境界内か）しか見ていなかった。`target`の親ディレクトリ
-   * （`<runId>`）が、この確認と大量のファイルコピーの間にワークスペース内の別ディレクトリ
-   * （典型的には`.git/hooks`）を指すシンボリックリンクへ差し替えられると、そこに既に
-   * 同名（`taskId`）のディレクトリさえあれば「境界内」として素通りし、コピーループが
-   * `.git/hooks`配下の既存ディレクトリへワークスペースの内容を書き込んでしまう
-   * （`hasGitSegment`によるIssue #406の`.git`無条件拒否は`relPath`の文字列にしか
-   * 掛からないため迂回される）。
+   * Issue #505（監査指摘、再監査で発覚した循環バグの修正後の回帰テスト）:
+   * `cloneWorkspace`の事後確認は当初、`target`の親ディレクトリ（`<runId>`）の
+   * `realpath`から`expected`を組み立てていた。この形は、その親ディレクトリ自体が
+   * `.git/hooks`等へ差し替えられている攻撃では、`realpath(parent)`も`realpath(target)`も
+   * どちらも差し替え後の同じ実体を指すため必ず一致してしまい、検査として機能しない
+   * （自己無矛盾。詳細は`cloneWorkspace`本体のコメント参照）。
    *
-   * `reflectIntegrationToWorkspace`の書き込み経路（PR #504）と同じ「確認時点で想定して
-   * いた場所そのものか」の厳密一致にすることで、この差し替えを確実に検知できることを
-   * 確認する。
+   * 現在の実装は`.agents/worktrees`ルート（`<runId>`より1段上、攻撃者が動かせない）
+   * から`path.relative`で`expected`を組み立てるため、`realpath(<runId>)`という
+   * 呼び出し自体がもう存在しない。したがって「その呼び出しの直後に差し替える」という
+   * 従来のレース手法はもはや実装のどの呼び出しにも対応しないため無意味になった。
+   *
+   * このテストは、より広く・より発生しやすい窓を再現する: `findSymlinkedAncestor`に
+   * よる一次防御（`<runId>`がまだシンボリックリンクでないと確認できた直後）が終わった
+   * あと、`directoryExists(target)`確認（`mkdir(target)`の直前の最後の読み取り）を
+   * フックし、その戻り値（差し替え前の「まだ存在しない」判定）を返しつつ、副作用として
+   * `<runId>`を`.git/hooks`へのシンボリックリンクへ差し替える。この結果、`mkdir(target)`
+   * が実行される時点では既に差し替えが完了しており（`mkdir(..., {recursive:true})`は
+   * 既存の`.git/hooks/T1`をエラーにせず素通りする）、`mkdir`より前に差し替えが完了して
+   * いるケースを再現する。
    */
   it(
-    '複製先の親ディレクトリがワークスペース内の`.git/hooks`へ差し替えられても、' +
+    '複製先の祖先ディレクトリ（`<runId>`）が`mkdir`実行より前に' +
+      'ワークスペース内の`.git/hooks`へ差し替えられていても、' +
       '想定した場所以外への複製として検知し撤去する（境界内リダイレクト、Issue #505）',
     async () => {
       await writeWorkspaceFile('secret.txt', 'top-secret\n');
@@ -567,18 +576,17 @@ describe('実ファイルシステムでの統合テスト', () => {
 
       const parentDir = path.dirname(target);
       let swapped = false;
-      // `parentDir`（`<runId>`ディレクトリ）の実パス確認（`mkdir(target)`直後の1回目の
-      // 呼び出し）が正しい値を返した直後に、`parentDir`自体を`.git/hooks`への
-      // シンボリックリンクへ差し替える（TOCTOU窓の再現。`reflectIntegrationToWorkspace`の
-      // 同種テストと同じ形）。`victimDir`を`.git/hooks`配下に`taskId`と同じ名前で
-      // 事前に用意しているため、差し替え後も`target`の実パス解決自体は成功する
-      // （`realpath`が`undefined`を返す弱い検知では捕まえられないケースを再現する）。
       const raceFs: typeof nodePseudoWorktreeFileSystem = {
         ...nodePseudoWorktreeFileSystem,
-        realpath: async (t) => {
-          const result = await nodePseudoWorktreeFileSystem.realpath(t);
-          if (!swapped && t === parentDir) {
+        directoryExists: async (t) => {
+          const result = await nodePseudoWorktreeFileSystem.directoryExists(t);
+          if (!swapped && t === target) {
             swapped = true;
+            // `parentDir`（`<runId>`）はこの時点でまだ`mkdir`されておらず存在しない
+            // （`cloneWorkspace`はここでの`directoryExists`確認の後に初めて`mkdir`する）。
+            // `symlink`は対象のパスの親ディレクトリが実在することを要求するため、
+            // まず`parentDir`の親（`.agents/worktrees`）だけを作ってから差し替える。
+            await mkdir(path.dirname(parentDir), { recursive: true });
             await rm(parentDir, { recursive: true, force: true });
             await symlink(hooksDir, parentDir);
           }
@@ -1675,15 +1683,20 @@ describe('実ファイルシステムでの統合テスト', () => {
   );
 
   /**
-   * Issue #505（監査指摘）: 上のテストは`filePath`のrealpathを直接偽装して「ワークスペースの
-   * 外」を再現するものだったが、実際の脅威（Issue #484と同種）は「境界の外」ではなく
-   * 「境界内の別ディレクトリ」（典型的には`.git/hooks`）への差し替えだった。旧実装の
-   * 事後確認は`isPathWithinRoot`（境界内か）しか見ていなかったため、`dirPath`が
-   * ワークスペース内の`.git/hooks`へ差し替えられても素通りしてしまう。
+   * Issue #505（監査指摘、再監査で発覚した循環バグの修正後の回帰テスト）:
+   * `persistManifest`の事後確認は当初、`dirPath`（`<runId>`ディレクトリ）自身の`realpath`
+   * から`expected`を組み立てていた。この形は`dirPath`自体が`.git/hooks`等へ差し替えられて
+   * いる攻撃では、`realpath(dirPath)`も`realpath(filePath)`もどちらも差し替え後の同じ実体を
+   * 指すため必ず一致してしまい、検査として機能しない（自己無矛盾。詳細は`persistManifest`
+   * 本体のコメント参照）。
    *
-   * `reflectIntegrationToWorkspace`の書き込み経路（PR #504）と同じ「`mkdir`直後に確認した
-   * `dirPath`の実パスそのものか」の厳密一致にすることで、この差し替えを確実に検知できる
-   * ことを確認する。
+   * 現在の実装は`.agents/worktrees`ルート（`<runId>`より1段上、攻撃者が動かせない）から
+   * `path.relative`で`expected`を組み立てるため、`realpath(dirPath)`という呼び出し自体が
+   * もう存在しない。したがって、`realpath(worktreesRoot)`確認（`mkdir(dirPath)`の直後、
+   * `writeTextFile`より前の最後の読み取り）をフックし、その戻り値（`worktreesRoot`自体は
+   * 差し替えられていないので正しい値）を返しつつ、副作用として`dirPath`を`.git/hooks`への
+   * シンボリックリンクへ差し替える。これにより、以降の`writeTextFile`は実際には
+   * `.git/hooks/manifest.json`へ書き込まれる。
    */
   it(
     '永続化先ディレクトリがワークスペース内の`.git/hooks`へ差し替えられても、' +
@@ -1694,20 +1707,17 @@ describe('実ファイルシステムでの統合テスト', () => {
 
       const filePath = integrationManifestPath(workspace, RUN_ID);
       const dirPath = path.dirname(filePath);
+      const worktreesRoot = pseudoWorktreesRootDir(workspace);
       const manifest: IntegrationManifest = new Map([
         ['a.txt', { taskId: 'T1', kind: 'added' }],
       ]);
 
       let swapped = false;
-      // `dirPath`（`<runId>`ディレクトリ）の実パス確認（`mkdir(dirPath)`直後の1回目の
-      // 呼び出し）が正しい値を返した直後に、`dirPath`自体を`.git/hooks`への
-      // シンボリックリンクへ差し替える（TOCTOU窓の再現）。以降の`writeTextFile`は
-      // 実際には`.git/hooks/manifest.json`へ書き込まれる
       const raceFs: typeof nodePseudoWorktreeFileSystem = {
         ...nodePseudoWorktreeFileSystem,
         realpath: async (target) => {
           const result = await nodePseudoWorktreeFileSystem.realpath(target);
-          if (!swapped && target === dirPath) {
+          if (!swapped && target === worktreesRoot) {
             swapped = true;
             await rm(dirPath, { recursive: true, force: true });
             await symlink(hooksDir, dirPath);
@@ -2258,15 +2268,26 @@ describe('実ファイルシステムでの統合テスト', () => {
 
           const targetDir = path.join(workspace, 'sub');
           let swapped = false;
-          // `mkdir(targetDir)`直後、`realTargetDir`確認（`fs.realpath(targetDir)`）が
-          // まだ差し替え前の実パスを返した直後に、`targetDir`自体を`.git/hooks`への
-          // シンボリックリンクへ差し替える（`realTargetDir`確認と一時ファイル書き込みの
-          // 間のTOCTOU窓を再現する）
+          // Issue #505（再監査で発覚した循環バグの回帰テスト）: 従来のこのテストは
+          // `fs.realpath(targetDir)`確認（`realTargetDir`を捕まえる、まさにその呼び出し）の
+          // 「戻り値を返した直後」に差し替えていたため、`realTargetDir`には差し替え前の
+          // 正しい値が入ったままになる。これは修正前・修正後どちらの実装でも検知できて
+          // しまい（`realTargetDir`が既に正しい値で確定しているため）、循環バグそのものは
+          // 再現できていなかった。
+          //
+          // 真の循環バグを再現するには、`targetDir`が`realTargetDir`を読む**前**に
+          // 既に差し替え済みである必要がある。ただし一次防御（`findSymlinkedAncestor`）は
+          // `realpath`より前に`isSymbolicLink`で`targetDir`自体を確認しているため、
+          // 呼び出し前に差し替え済みにすると一次防御に捕まってしまう。そこで
+          // `isSymbolicLink(targetDir)`が「まだシンボリックリンクではない」と正しく
+          // 判定した直後（一次防御を通過した直後）、`fs.realpath(targetDir)`が呼ばれる前に
+          // 差し替える。こうすると`realTargetDir`は差し替え後の実体（`.git/hooks`）を
+          // 指した状態で確定する。
           const raceFs: typeof nodePseudoWorktreeFileSystem = {
             ...nodePseudoWorktreeFileSystem,
-            realpath: async (target) => {
-              const result = await nodePseudoWorktreeFileSystem.realpath(target);
-              if (!swapped && target === targetDir) {
+            isSymbolicLink: async (t) => {
+              const result = await nodePseudoWorktreeFileSystem.isSymbolicLink(t);
+              if (!swapped && t === targetDir) {
                 swapped = true;
                 await rm(targetDir, { recursive: true, force: true });
                 await symlink(hooksDir, targetDir);
@@ -2329,14 +2350,21 @@ describe('実ファイルシステムでの統合テスト', () => {
           ]);
 
           let swapped = false;
-          // `targetDir`の`realpath`確認（削除分岐の`realTargetDir`取得）直後に、
-          // `targetDir`自体を`.git/hooks`へのシンボリックリンクへ差し替える
-          // （TOCTOU窓の再現。書き込み側の同種テストと同じ形）
+          // Issue #505（再監査で発覚した循環バグの回帰テスト）: 従来は`fs.realpath(targetDir)`
+          // （削除分岐の`realTargetDir`取得、その呼び出し自身）の戻り値を返した直後に
+          // 差し替えていたため、`realTargetDir`は常に差し替え前の正しい値になり、循環バグは
+          // 再現できていなかった（`realTargetDir`が既に確定した後の差し替えは、修正前の
+          // 実装でも実際には検知できてしまう）。
+          //
+          // 真の循環（`realTargetDir`自体が差し替え後の実体を指す）を再現するため、
+          // 一次防御（`findSymlinkedAncestor`）の`isSymbolicLink(targetDir)`確認が
+          // 「まだシンボリックリンクではない」と正しく判定した直後、`fs.realpath(targetDir)`
+          // が呼ばれる前に差し替える（書き込み側の同種テストと同じ形）。
           const raceFs: typeof nodePseudoWorktreeFileSystem = {
             ...nodePseudoWorktreeFileSystem,
-            realpath: async (target) => {
-              const result = await nodePseudoWorktreeFileSystem.realpath(target);
-              if (!swapped && target === targetDir) {
+            isSymbolicLink: async (t) => {
+              const result = await nodePseudoWorktreeFileSystem.isSymbolicLink(t);
+              if (!swapped && t === targetDir) {
                 swapped = true;
                 await rm(targetDir, { recursive: true, force: true });
                 await symlink(hooksDir, targetDir);
