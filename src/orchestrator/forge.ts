@@ -1077,3 +1077,398 @@ export async function markPullRequestReady(
   }
   return { ok: true };
 }
+
+/* -------------------------------------------------------------------------------------------- */
+/* CIの完了待ちとbaseの取り込み直し（design.md §16.36、Issue #556）                              */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * CIチェックの集約結果（design.md §16.36）。
+ *
+ * - `none`: チェックが1件も設定されていない（CI未設定リポジトリ）。この場合は待たずに
+ *   即座にマージへ進む（受入基準「CIが設定されていないリポジトリでは従来どおり即マージする」。
+ *   チェックが0件なのと赤なのを取り違えない）
+ * - `pending`: 1件でも完了していないチェックがある
+ * - `passed`: 全て完了し、失敗が無い
+ * - `failed`: 完了したチェックの中に失敗がある（CLI呼び出し自体の失敗もここに含める。
+ *   認証切れ等で状態を取得できない異常状態を`pending`のまま無期限に待たせないため）
+ */
+export type CiConclusion = 'none' | 'pending' | 'passed' | 'failed';
+
+export interface CiConclusionResult {
+  conclusion: CiConclusion;
+  /** `failed`のとき、失敗した理由を人が読める形にしたもの。 */
+  message?: string;
+}
+
+/** `gh pr view <number> --json=statusCheckRollup` が返す1件分の型（必要な項目だけ）。 */
+interface GithubStatusCheckRollupEntry {
+  status?: unknown;
+  state?: unknown;
+  conclusion?: unknown;
+}
+
+/**
+ * GitHubの`conclusion`のうち失敗として扱う値。`NEUTRAL` / `SUCCESS` / `SKIPPED`はここに
+ * 含めない（`SKIPPED`は必須チェックでなければブロックしない、の意）。
+ */
+const GITHUB_FAILURE_CONCLUSIONS = new Set([
+  'FAILURE',
+  'CANCELLED',
+  'TIMED_OUT',
+  'ACTION_REQUIRED',
+  'STARTUP_FAILURE',
+]);
+
+/**
+ * `gh pr view <number> --json=statusCheckRollup` の標準出力を解釈する（純粋関数）。
+ *
+ * `statusCheckRollup`の要素はCheckRun（`status`/`conclusion`を持つ）とStatusContext
+ * （レガシーAPI由来。`state`だけを持つ）が混在しうる（GitHub GraphQLの仕様）。両方を見る。
+ */
+export function parseGithubCiConclusion(stdout: string): CiConclusionResult {
+  let data: unknown;
+  try {
+    data = JSON.parse(stdout);
+  } catch {
+    return { conclusion: 'failed', message: 'statusCheckRollupの出力を解釈できませんでした' };
+  }
+  const rollup =
+    typeof data === 'object' && data !== null && 'statusCheckRollup' in data
+      ? (data as { statusCheckRollup: unknown }).statusCheckRollup
+      : undefined;
+  if (!Array.isArray(rollup) || rollup.length === 0) {
+    return { conclusion: 'none' };
+  }
+  const entries = rollup as GithubStatusCheckRollupEntry[];
+  const failed: string[] = [];
+  let pending = false;
+  for (const entry of entries) {
+    if (typeof entry.state === 'string') {
+      // StatusContext（レガシーAPI由来）
+      const state = entry.state.toUpperCase();
+      if (state === 'PENDING') {
+        pending = true;
+      } else if (state === 'ERROR' || state === 'FAILURE') {
+        failed.push(state);
+      }
+      continue;
+    }
+    const status = typeof entry.status === 'string' ? entry.status.toUpperCase() : '';
+    if (status !== 'COMPLETED') {
+      pending = true;
+      continue;
+    }
+    const conclusion = typeof entry.conclusion === 'string' ? entry.conclusion.toUpperCase() : '';
+    if (GITHUB_FAILURE_CONCLUSIONS.has(conclusion)) {
+      failed.push(conclusion);
+    }
+  }
+  if (failed.length > 0) {
+    return { conclusion: 'failed', message: `失敗したチェックがあります: ${failed.join(', ')}` };
+  }
+  if (pending) {
+    return { conclusion: 'pending' };
+  }
+  return { conclusion: 'passed' };
+}
+
+/**
+ * GitLabの`head_pipeline.status`のうち失敗として扱う値。
+ */
+const GITLAB_FAILURE_PIPELINE_STATUSES = new Set(['failed', 'canceled', 'cancelled']);
+/** GitLabの`head_pipeline.status`のうち成功として扱う値（`skipped`は必須でなければブロックしない）。 */
+const GITLAB_PASSED_PIPELINE_STATUSES = new Set(['success', 'skipped']);
+
+/**
+ * `glab api projects/:id/merge_requests/<iid>` の標準出力を解釈する（純粋関数）。
+ *
+ * `glab ci status`はテキスト向けの対話コマンドでJSON出力が無く、しかも対象を「ブランチ」で
+ * 指定する（実機の`--help`で確認済み。`glab` 1.112.0。`docs.gitlab.com/cli/ci/status/`も
+ * 同様）ため、`createPullRequest`と同じく構造化データを得やすい`glab api`へ寄せた
+ * （Issue #556。「同じ形で用意する」はコマンド名の一致ではなく、CIの完了待ち・失敗判定という
+ * 挙動の一致を指す）。GitLabのMR単体取得レスポンスは`head_pipeline`フィールドにそのMRの
+ * 先頭コミットのパイプライン状態を持つ（`docs.gitlab.com/api/merge_requests/`）。
+ * `head_pipeline`が無い（`null`）ならパイプライン自体が無い＝CI未設定として扱う。
+ */
+export function parseGitlabCiConclusion(stdout: string): CiConclusionResult {
+  let data: unknown;
+  try {
+    data = JSON.parse(stdout);
+  } catch {
+    return { conclusion: 'failed', message: 'マージリクエストの応答を解釈できませんでした' };
+  }
+  if (typeof data !== 'object' || data === null) {
+    return { conclusion: 'failed', message: 'マージリクエストの応答を解釈できませんでした' };
+  }
+  const headPipeline = (data as Record<string, unknown>)['head_pipeline'];
+  if (headPipeline === null || headPipeline === undefined || typeof headPipeline !== 'object') {
+    return { conclusion: 'none' };
+  }
+  const status = (headPipeline as Record<string, unknown>)['status'];
+  const normalized = typeof status === 'string' ? status.toLowerCase() : '';
+  if (GITLAB_FAILURE_PIPELINE_STATUSES.has(normalized)) {
+    return { conclusion: 'failed', message: `パイプラインが失敗しました（status: ${normalized}）` };
+  }
+  if (GITLAB_PASSED_PIPELINE_STATUSES.has(normalized)) {
+    return { conclusion: 'passed' };
+  }
+  // running / pending / created / waiting_for_resource / preparing / scheduled / manual等
+  return { conclusion: 'pending' };
+}
+
+/** ホストごとのCI状態取得コマンド（design.md §16.36）。 */
+function buildCiStatusArgs(host: ForgeHost, number: number): { command: 'gh' | 'glab'; args: string[] } {
+  if (host === 'github') {
+    return { command: 'gh', args: ['pr', 'view', String(number), '--json=statusCheckRollup'] };
+  }
+  return { command: 'glab', args: ['api', `projects/:id/merge_requests/${String(number)}`] };
+}
+
+/**
+ * PR/MRのCI状態を1回だけ取得する。ポーリングそのものは`waitForCiChecks`が担う。
+ *
+ * CLI呼び出し自体が失敗した場合（認証切れ・番号不正など）は`failed`として扱う。
+ * `pending`のまま返すと、状態を取得できない異常状態がタイムアウトまで気づかれない。
+ */
+export async function fetchCiConclusion(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  number: number,
+): Promise<CiConclusionResult> {
+  const { command, args } = buildCiStatusArgs(host, number);
+  const result = await cli.run(command, args, cwd);
+  if (result.code !== 0) {
+    return {
+      conclusion: 'failed',
+      message:
+        result.stderr.trim() !== ''
+          ? sanitizeForLog(result.stderr)
+          : `${command} ${args.join(' ')} に失敗しました（終了コード ${result.code}）`,
+    };
+  }
+  return host === 'github' ? parseGithubCiConclusion(result.stdout) : parseGitlabCiConclusion(result.stdout);
+}
+
+/** `waitForCiChecks`のポーリング間隔をテストから注入するための型（`PushBranchWait`と同じ方針）。 */
+export type CiWait = () => Promise<void>;
+
+/** ポーリング間隔（ミリ秒）。 */
+const CI_POLL_INTERVAL_MS = 15_000;
+
+const defaultCiWait: CiWait = () =>
+  new Promise((resolve) => {
+    setTimeout(resolve, CI_POLL_INTERVAL_MS);
+  });
+
+export type CiWaitOutcome =
+  | { kind: 'none' }
+  | { kind: 'passed' }
+  | { kind: 'failed'; message: string }
+  | { kind: 'timeout'; message: string };
+
+/**
+ * CIチェックの完了を待つ（design.md §16.36「CIの完了を待つ」）。`pending`の間は
+ * `wait`（既定は`CI_POLL_INTERVAL_MS`間隔の実待ち）を挟んでポーリングし、`timeoutMs`を
+ * 超えたら赤（`failed`）と同じ扱いの`timeout`を返す（受入基準「待ち時間の上限を超えたら
+ * 赤と同じ扱いになる」）。`now`/`wait`はテストから注入できる（`pushBranch`と同じ流儀。
+ * テストは実時間で待たない）。
+ */
+export async function waitForCiChecks(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  number: number,
+  timeoutMs: number,
+  now: () => number = Date.now,
+  wait: CiWait = defaultCiWait,
+): Promise<CiWaitOutcome> {
+  const deadline = now() + timeoutMs;
+  for (;;) {
+    const result = await fetchCiConclusion(cli, host, cwd, number);
+    if (result.conclusion === 'none') {
+      return { kind: 'none' };
+    }
+    if (result.conclusion === 'passed') {
+      return { kind: 'passed' };
+    }
+    if (result.conclusion === 'failed') {
+      return { kind: 'failed', message: result.message ?? 'CIチェックが失敗しました' };
+    }
+    if (now() >= deadline) {
+      return {
+        kind: 'timeout',
+        message: `CIチェックの完了を待つ時間の上限を超えました（${Math.floor(timeoutMs / 1000)}秒）`,
+      };
+    }
+    await wait();
+  }
+}
+
+/** ホストごとの取り込み直しコマンド（design.md §16.36）。 */
+function buildUpdateBranchArgs(
+  host: ForgeHost,
+  number: number,
+): { ok: true; command: 'gh' | 'glab'; args: string[] } | { ok: false; message: string } {
+  if (!Number.isInteger(number) || number <= 0) {
+    return { ok: false, message: `不正なPR/MR番号（正の整数ではありません）: ${number}` };
+  }
+  if (host === 'github') {
+    return { ok: true, command: 'gh', args: ['pr', 'update-branch', String(number)] };
+  }
+  return { ok: true, command: 'glab', args: ['mr', 'rebase', String(number)] };
+}
+
+export type UpdatePullRequestBranchResult = { ok: true } | { ok: false; message: string };
+
+/**
+ * PR/MRのbaseを取り込み直す（`gh pr update-branch <number>` / `glab mr rebase <number>`。
+ * design.md §16.36「baseの取り込み直し」）。strictなブランチ保護の下でマージが
+ * 「baseの最新でない」ことで拒否されたときに呼ぶ。
+ */
+export async function updatePullRequestBranch(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  number: number,
+): Promise<UpdatePullRequestBranchResult> {
+  const built = buildUpdateBranchArgs(host, number);
+  if (!built.ok) {
+    return { ok: false, message: built.message };
+  }
+  const { command, args } = built;
+  const result = await cli.run(command, args, cwd);
+  if (result.code !== 0) {
+    return {
+      ok: false,
+      message:
+        result.stderr.trim() !== ''
+          ? sanitizeForLog(result.stderr)
+          : `${command} ${args.join(' ')} に失敗しました（終了コード ${result.code}）`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * マージ失敗のメッセージが「baseの最新でない」ことを理由にした拒否かどうか（`isRetryablePushError`
+ * と同じ、stderrのテキストパターン照合による判定。design.md §16.36）。
+ *
+ * GitHub・GitLabいずれも「これに一致すれば必ずbase遅れ」という単一の構造化フィールドを
+ * CLIの標準エラーからは得られない（`gh pr merge`はGraphQLエラー文字列を、`glab mr merge`は
+ * REST APIのエラーメッセージをそのままstderrへ出す）ため、既知の文言をパターンで拾う。
+ * 一致しなければ「baseの最新でない」以外の失敗（コンフリクト・権限不足等）として扱い、
+ * 取り込み直しは試みない（取り込み直しても解決しない失敗を再試行で浪費しないため）。
+ */
+const NOT_UP_TO_DATE_PATTERN =
+  /not up.to.date|out.of.date with the base|base branch was modified|head branch was modified|is behind the (base|target) branch|needs? (a )?rebase/iu;
+
+export function isBranchNotUpToDateError(message: string): boolean {
+  return NOT_UP_TO_DATE_PATTERN.test(message);
+}
+
+/**
+ * CIチェックの完了を待つ時間の上限（秒）の既定値（`agent.workflows.ciWaitTimeoutSec`、
+ * design.md §16.36）。CIの実行時間はリポジトリごとに大きく異なるため長めに取る。
+ */
+export const DEFAULT_CI_WAIT_TIMEOUT_SEC = 1800;
+
+/**
+ * 「baseの最新でない」拒否からの取り込み直しの最大リトライ回数の既定値
+ * （`agent.workflows.ciUpdateBranchMaxRetries`、design.md §16.36）。
+ */
+export const DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES = 2;
+
+/** `runFinalMergeWithCiGate`が読む待ち時間・リトライ回数の設定。 */
+export interface CiGateConfig {
+  /** CIチェックの完了を待つ時間の上限（ミリ秒）。design.md §16.36・`agent.workflows.ciWaitTimeoutSec`。 */
+  waitTimeoutMs: number;
+  /**
+   * 「baseの最新でない」拒否からの取り込み直しの最大リトライ回数（初回のマージ試行を
+   * 含まない）。design.md §16.36・`agent.workflows.ciUpdateBranchMaxRetries`。
+   */
+  maxUpdateBranchRetries: number;
+  now?: () => number;
+  wait?: CiWait;
+}
+
+export type RunFinalMergeWithCiGateResult =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: 'ciFailed' | 'ciTimeout' | 'updateBranchFailed' | 'mergeFailed';
+      message: string;
+      /** 「baseの最新でない」ことによる取り込み直しを実際に試みた回数。 */
+      updateBranchAttempts: number;
+    };
+
+/**
+ * 統合PR/MRをCIの完了待ち・baseの取り込み直しを挟んだうえでマージする（design.md §16.36、
+ * Issue #556）。`performFinalMerge`（`runner.ts`）が`runFinalMerge`の代わりに呼ぶ、
+ * このモジュールでの唯一の最終マージの入口になる。
+ *
+ * 手順:
+ * 1. CIチェックの完了を待つ（`waitForCiChecks`）。`none`（CI未設定）・`passed`ならマージへ
+ *    進む。`failed`・`timeout`はマージせず、理由付きで失敗を返す（受入基準）
+ * 2. マージを試みる（`runFinalMerge`）。成功すれば完了
+ * 3. 失敗理由が「baseの最新でない」（`isBranchNotUpToDateError`）で、かつ取り込み直しの
+ *    残り回数があれば、`updatePullRequestBranch`を実行し、1へ戻ってCIの完了を待ち直してから
+ *    再度マージを試みる（取り込み直しはbaseの内容を変えるため、直前のCI結果を使い回さず
+ *    再取得する）
+ * 4. 「baseの最新でない」以外の失敗、または取り込み直しの上限を超えたら、理由付きで失敗を返す
+ *
+ * `number`が`undefined`のとき（統合PR/MRの番号が不明）はCI状態を取得しようがないため、
+ * 待たずに`runFinalMerge`（番号不明時は自身がCLIを呼ばず`{ ok: false }`を返す）へそのまま
+ * 委ねる。
+ */
+export async function runFinalMergeWithCiGate(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  number: number | undefined,
+  config: CiGateConfig,
+): Promise<RunFinalMergeWithCiGateResult> {
+  if (number === undefined) {
+    const merge = await runFinalMerge(cli, host, cwd, number);
+    return merge.ok
+      ? { ok: true }
+      : { ok: false, reason: 'mergeFailed', message: merge.message, updateBranchAttempts: 0 };
+  }
+
+  for (let attempt = 0; attempt <= config.maxUpdateBranchRetries; attempt += 1) {
+    const ci = await waitForCiChecks(cli, host, cwd, number, config.waitTimeoutMs, config.now, config.wait);
+    if (ci.kind === 'failed') {
+      return { ok: false, reason: 'ciFailed', message: ci.message, updateBranchAttempts: attempt };
+    }
+    if (ci.kind === 'timeout') {
+      return { ok: false, reason: 'ciTimeout', message: ci.message, updateBranchAttempts: attempt };
+    }
+    // 'none' か 'passed'（CI未設定リポジトリは待たずにここへ来る。受入基準）
+    const merge = await runFinalMerge(cli, host, cwd, number);
+    if (merge.ok) {
+      return { ok: true };
+    }
+    const isLastAttempt = attempt === config.maxUpdateBranchRetries;
+    if (isLastAttempt || !isBranchNotUpToDateError(merge.message)) {
+      return { ok: false, reason: 'mergeFailed', message: merge.message, updateBranchAttempts: attempt };
+    }
+    const updated = await updatePullRequestBranch(cli, host, cwd, number);
+    if (!updated.ok) {
+      return {
+        ok: false,
+        reason: 'updateBranchFailed',
+        message: updated.message,
+        updateBranchAttempts: attempt + 1,
+      };
+    }
+    // 取り込み直したので、ループの先頭でCIの完了を待ち直してから再度マージを試みる
+  }
+  // 上のループは必ずreturnで終わる（TypeScriptの制御フロー解析のためのフォールバック）
+  return {
+    ok: false,
+    reason: 'mergeFailed',
+    message: '最終マージに失敗しました（取り込み直しの上限に達しました）',
+    updateBranchAttempts: config.maxUpdateBranchRetries,
+  };
+}

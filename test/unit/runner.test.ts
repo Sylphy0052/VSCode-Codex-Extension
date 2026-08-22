@@ -472,6 +472,20 @@ function fakeForgeCli(options?: {
   failMerge?: boolean;
   failReady?: boolean;
   prUrl?: string;
+  /** `waitForCiChecks`のCLI呼び出し自体を失敗させる（design.md §16.36、Issue #556）。 */
+  failCiStatus?: boolean;
+  /** GitHubのCI状態フェイク応答（`statusCheckRollup`の中身）。既定は空配列（CI未設定）。 */
+  ciStatusCheckRollup?: unknown[];
+  /** GitLabのCI状態フェイク応答（`head_pipeline`の中身）。既定は`null`（CI未設定）。 */
+  ciHeadPipeline?: unknown;
+  /** `updatePullRequestBranch`のCLI呼び出しを失敗させる。 */
+  failUpdateBranch?: boolean;
+  /**
+   * design.md §16.36（Issue #556）の回帰テスト用。最初の`pr merge`/`mr merge`だけ
+   * 「baseの最新でない」を示すエラーで失敗させ、`updatePullRequestBranch`を挟んだ
+   * 再試行では成功させる。
+   */
+  failMergeNotUpToDateOnce?: boolean;
 }): FakeForgeCli {
   const calls: Array<{ command: string; args: string[]; cwd: string }> = [];
   return {
@@ -493,6 +507,22 @@ function fakeForgeCli(options?: {
             };
       }
       if (args[0] === 'pr' && args[1] === 'merge') {
+        // design.md §16.36（Issue #556）: 「baseの最新でない」拒否からの取り込み直しの
+        // 回帰テスト用。1回目のマージだけ拒否し、`updatePullRequestBranch`を挟んだ
+        // 2回目の再試行では成功させる
+        if (options?.failMergeNotUpToDateOnce === true) {
+          const priorMergeCalls = calls.filter(
+            (c) => c.args[0] === 'pr' && c.args[1] === 'merge',
+          ).length;
+          if (priorMergeCalls <= 1) {
+            return {
+              code: 1,
+              stdout: '',
+              stderr:
+                'GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)',
+            };
+          }
+        }
         return options?.failMerge
           ? { code: 1, stdout: '', stderr: 'fake pr merge failure' }
           : { code: 0, stdout: '', stderr: '' };
@@ -527,6 +557,48 @@ function fakeForgeCli(options?: {
       if (args[0] === 'mr' && args[1] === 'merge') {
         return options?.failMerge
           ? { code: 1, stdout: '', stderr: 'fake mr merge failure' }
+          : { code: 0, stdout: '', stderr: '' };
+      }
+      // `waitForCiChecks`（GitHub）が呼ぶ`gh pr view <number> --json=statusCheckRollup`の
+      // フェイク応答（design.md §16.36、Issue #556）。既定はCI未設定（`statusCheckRollup: []`）
+      // として即マージへ進ませ、既存のfinalMerge系テストの前提（CIを待たず即マージする）を
+      // 崩さない。CIの完了待ちそのものを確かめるテストは`ciConclusion`オプションで上書きする
+      if (args[0] === 'pr' && args[1] === 'view') {
+        return options?.failCiStatus
+          ? { code: 1, stdout: '', stderr: 'fake pr view failure' }
+          : {
+              code: 0,
+              stdout: JSON.stringify({ statusCheckRollup: options?.ciStatusCheckRollup ?? [] }),
+              stderr: '',
+            };
+      }
+      // `updatePullRequestBranch`（GitHub）が呼ぶ`gh pr update-branch <number>`のフェイク応答
+      if (args[0] === 'pr' && args[1] === 'update-branch') {
+        return options?.failUpdateBranch
+          ? { code: 1, stdout: '', stderr: 'fake pr update-branch failure' }
+          : { code: 0, stdout: '', stderr: '' };
+      }
+      // `waitForCiChecks`（GitLab）が呼ぶ`glab api projects/:id/merge_requests/<iid>`の
+      // フェイク応答。MR作成（`projects/:id/merge_requests`、末尾に番号が付かない）とは
+      // パスの形で区別する
+      if (
+        args[0] === 'api' &&
+        args[1] !== undefined &&
+        args[1] !== 'projects/:id/merge_requests' &&
+        args[1].startsWith('projects/:id/merge_requests/')
+      ) {
+        return options?.failCiStatus
+          ? { code: 1, stdout: '', stderr: 'fake mr view failure' }
+          : {
+              code: 0,
+              stdout: JSON.stringify({ head_pipeline: options?.ciHeadPipeline ?? null }),
+              stderr: '',
+            };
+      }
+      // `updatePullRequestBranch`（GitLab）が呼ぶ`glab mr rebase <iid>`のフェイク応答
+      if (args[0] === 'mr' && args[1] === 'rebase') {
+        return options?.failUpdateBranch
+          ? { code: 1, stdout: '', stderr: 'fake mr rebase failure' }
           : { code: 0, stdout: '', stderr: '' };
       }
       return { code: 1, stdout: '', stderr: `unhandled: ${command} ${args.join(' ')}` };
@@ -897,6 +969,8 @@ function createHarness(
     log?: Logger;
     readMergeApprovalTimeoutSec?: () => number;
     readFinalMergeDecisionTimeoutSec?: () => number;
+    readCiWaitTimeoutSec?: () => number;
+    readCiUpdateBranchMaxRetries?: () => number;
   },
 ): Harness {
   const codexHost = new FakeHost();
@@ -929,6 +1003,12 @@ function createHarness(
       : {}),
     ...(options?.readFinalMergeDecisionTimeoutSec !== undefined
       ? { readFinalMergeDecisionTimeoutSec: options.readFinalMergeDecisionTimeoutSec }
+      : {}),
+    ...(options?.readCiWaitTimeoutSec !== undefined
+      ? { readCiWaitTimeoutSec: options.readCiWaitTimeoutSec }
+      : {}),
+    ...(options?.readCiUpdateBranchMaxRetries !== undefined
+      ? { readCiUpdateBranchMaxRetries: options.readCiUpdateBranchMaxRetries }
       : {}),
     randomId: () => `00000000-0000-4000-8000-${String((seq += 1)).padStart(12, '0')}`,
   });
@@ -3700,6 +3780,84 @@ tasks:
     // finalMerge: auto（既定）なので最終マージまで実行する
     expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(true);
     void result;
+  });
+
+  it('CIチェックの完了を待ってから最終マージする（design.md §16.36、Issue #556）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli({
+      ciStatusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }],
+    });
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // `gh pr view <統合PR番号> --json=statusCheckRollup`（CI確認）が
+    // `gh pr merge`より前に呼ばれている
+    const viewIndex = cli.calls.findIndex((c) => c.args[0] === 'pr' && c.args[1] === 'view');
+    const mergeIndex = cli.calls.findIndex((c) => c.args[0] === 'pr' && c.args[1] === 'merge');
+    expect(viewIndex).toBeGreaterThanOrEqual(0);
+    expect(mergeIndex).toBeGreaterThan(viewIndex);
+  });
+
+  it('CIが赤ならmainへマージせず、理由付きの警告を残してfinalMergeOutcomeがfailedになる（design.md §16.36）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli({
+      ciStatusCheckRollup: [{ status: 'COMPLETED', conclusion: 'FAILURE' }],
+    });
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // CIが赤のためマージコマンド自体を呼ばない
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.finalMergeOutcome).toBe('failed');
+    expect(snapshot?.warnings.some((w) => w.message.includes('最終マージに失敗しました'))).toBe(
+      true,
+    );
+  });
+
+  it('マージが「baseの最新でない」ことで拒否されたら取り込み直して再試行し、成功すればmergedになる（design.md §16.36）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli({
+      ciStatusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }],
+      failMergeNotUpToDateOnce: true,
+    });
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const mergeCalls = cli.calls.filter((c) => c.args[0] === 'pr' && c.args[1] === 'merge');
+    const updateBranchCalls = cli.calls.filter(
+      (c) => c.args[0] === 'pr' && c.args[1] === 'update-branch',
+    );
+    expect(mergeCalls.length).toBe(2);
+    expect(updateBranchCalls.length).toBe(1);
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.finalMergeOutcome).toBe('merged');
   });
 
   it('finalMerge: pr-onlyなら統合PR/MRは作るがmainへはマージしない', async () => {

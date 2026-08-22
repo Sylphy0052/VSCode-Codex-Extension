@@ -282,7 +282,7 @@
 
 - [ ] W11 CIの完了待ちとブランチ保護への対応
   - 依存: なし
-  - Issue: 未起票（着手時に起票する）
+  - Issue: #556
   - 現状: [forge.ts](../../src/orchestrator/forge.ts) が呼ぶGitHub/GitLabの操作は
     `pr create` / `pr merge` / `pr ready` の3つだけ。**CIの結果を見ずにマージする。**
     また `pr update-branch` 相当が無い
@@ -353,7 +353,7 @@
 | W8 | 未起票 | `feat/<IID>/ask-user` | §16.33 | W-M |
 | W9 | 未起票 | `refactor/<IID>/messaging-via-orchestrator` | §16.34 | W-N |
 | W10 | 未起票 | `feat/<IID>/auto-resume` | §16.35 | W-O |
-| W11 | 未起票 | `feat/<IID>/ci-wait-and-update-branch` | §16.36 | W-P |
+| W11 | #556 | `feat/556/ci-wait-and-update-branch` | §16.36 | W-P |
 | W12 | 未起票 | `feat/<IID>/program-of-runs` | §16.37 | W-Q |
 
 W6〜W12 は2026-08-22に追加した項目（Issue #497）。**W6 の内容は
