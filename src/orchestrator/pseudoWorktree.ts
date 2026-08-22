@@ -572,6 +572,17 @@ export interface PseudoWorktreeFileSystemPort {
    * `removePseudoWorktree`による明示的な撤去（Issue #298）の両方から使う。
    */
   removeDirRecursive(target: string): Promise<void>;
+  /**
+   * 空のディレクトリだけを非再帰的に削除する。対象が空でなければ削除しない
+   * （中身を巻き込まない）。存在しない場合も削除しなかったものとして扱う。
+   *
+   * `removeRunDirIfEmpty`（Issue #438のレビュー指摘）が「readdirで空と判定してから
+   * `removeDirRecursive`で消す」という二段構えをやめ、判定と削除をOSレベルで一体化する
+   * ために使う。`fsPromises.rmdir`は対象が空でなければ`ENOTEMPTY`を投げる性質があり、
+   * それをそのまま「消さなかった」の合図として使うことで、判定と削除の間に他プロセスが
+   * ファイルを置く余地（TOCTOU）が構造的に無くなる。
+   */
+  removeEmptyDir(target: string): Promise<void>;
 }
 
 export const nodePseudoWorktreeFileSystem: PseudoWorktreeFileSystemPort = {
@@ -645,6 +656,17 @@ export const nodePseudoWorktreeFileSystem: PseudoWorktreeFileSystemPort = {
   },
   async removeDirRecursive(target: string): Promise<void> {
     await fsPromises.rm(target, { recursive: true, force: true });
+  },
+  async removeEmptyDir(target: string): Promise<void> {
+    try {
+      await fsPromises.rmdir(target);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOTEMPTY' || code === 'ENOENT' || code === 'EEXIST') {
+        return;
+      }
+      throw error;
+    }
   },
 };
 
@@ -843,6 +865,154 @@ export async function removePseudoWorktree(
   }
 
   await fs.removeDirRecursive(target);
+  return { ok: true };
+}
+
+export type RemovePseudoIntegrationResult =
+  | { ok: true; warning?: string }
+  | { ok: false; reason: 'invalidIdentifier' | 'boundaryEscape'; message: string };
+
+/**
+ * `<runId>/manifest.json`（`integrationManifestPath`、Issue #380）を撤去する。
+ * `removePseudoWorktree`と同じ規律（消す前に実パス解決し`.agents/worktrees`配下に
+ * あることを確かめる）を、ディレクトリではなくファイル1つに対して行う。
+ */
+async function removeManifestFile(
+  workspaceRoot: string,
+  runId: string,
+  fs: PseudoWorktreeFileSystemPort,
+): Promise<RemovePseudoIntegrationResult> {
+  const identifierMessage = runIdError(runId);
+  if (identifierMessage !== undefined) {
+    return { ok: false, reason: 'invalidIdentifier', message: identifierMessage };
+  }
+  const target = integrationManifestPath(workspaceRoot, runId);
+
+  const realTarget = await fs.realpath(target);
+  if (realTarget === undefined) {
+    return { ok: true };
+  }
+  const realWorktreesRoot = await fs.realpath(pseudoWorktreesRootDir(workspaceRoot));
+  if (realWorktreesRoot === undefined || !isPathWithinRoot(realTarget, realWorktreesRoot)) {
+    return {
+      ok: false,
+      reason: 'boundaryEscape',
+      message: `撤去対象が.agents/worktreesの外を指しているため撤去しませんでした: ${sanitizeForLog(realTarget)}`,
+    };
+  }
+
+  await fs.removeFile(target);
+  return { ok: true };
+}
+
+/**
+ * `_integration`と`manifest.json`をどちらも撤去し終えた後、`<runId>`ディレクトリ自体が
+ * 空になっていれば片付ける。空でなければ（他タスクの複製がまだ残っている、あるいは
+ * `removeWorktrees`が先に走らず未撤去のタスクがある等）そのディレクトリには触れず、
+ * 中身を温存する。`<runId>`という入れ物自体には情報が無い（`_integration`と
+ * `manifest.json`が無くなればもう意味を持たない）ため、空なら消してよいと判断した。
+ *
+ * 「空かどうかを`readdir`で判定してから`removeDirRecursive`で消す」という二段構えだと、
+ * 判定と削除の間（TOCTOU窓）に`retryMergeTask`のマージ継続や`cloneWorkspace`の再複製が
+ * 同じ`<runId>`配下へ書き込みを始めた場合、そのファイルごと丸ごと消してしまう。
+ * `removePseudoWorktree`（`<runId>/<taskId>`粒度）と違い、ここは兄弟ディレクトリを
+ * 巻き込みうる`<runId>`粒度の再帰削除であり、この種のレースを許容できない。そのため
+ * `removeEmptyDir`（非再帰の`rmdir`。対象が空でなければOS側が`ENOTEMPTY`で拒否する）を使い、
+ * 「空だと判定すること」と「削除すること」を1回のシステムコールへ一体化する。空でなければ
+ * 削除自体が起きないため、レースが窓として成立しない。
+ *
+ * 境界逸脱（`<runId>`が実際には`.agents/worktrees`の外を指す）を検知した場合は`ok:false`を
+ * 返すが、`removePseudoIntegration`はこれを致命的失敗としては扱わない（`_integration`と
+ * `manifest.json`の撤去は既に完了しているため、Issue #438が塞ごうとした「幽霊マニフェストの
+ * 読み戻し」は起きない。入れ物が片付かなかっただけ）。呼び出し側で警告として観測できれば足りる。
+ */
+async function removeRunDirIfEmpty(
+  workspaceRoot: string,
+  runId: string,
+  fs: PseudoWorktreeFileSystemPort,
+): Promise<RemovePseudoIntegrationResult> {
+  const runDir = path.join(pseudoWorktreesRootDir(workspaceRoot), runId);
+
+  const realTarget = await fs.realpath(runDir);
+  if (realTarget === undefined) {
+    return { ok: true };
+  }
+  const realWorktreesRoot = await fs.realpath(pseudoWorktreesRootDir(workspaceRoot));
+  if (realWorktreesRoot === undefined || !isPathWithinRoot(realTarget, realWorktreesRoot)) {
+    return {
+      ok: false,
+      reason: 'boundaryEscape',
+      message: `runIdディレクトリが.agents/worktreesの外を指しているため撤去しませんでした: ${sanitizeForLog(realTarget)}`,
+    };
+  }
+
+  await fs.removeEmptyDir(runDir);
+  return { ok: true };
+}
+
+/**
+ * 統合worktree（`_integration`）と、その永続化マニフェスト（`manifest.json`、Issue #380）を
+ * まとめて撤去する（Issue #438）。
+ *
+ * 生成側（`integrationManifestPath`）は`manifest.json`を`_integration`と同じ`<runId>`配下に
+ * 置くが、撤去側は従来`removePseudoWorktree(..., '_integration', ...)`しか呼んでおらず、
+ * 兄弟の`manifest.json`が残り続けていた。残ったマニフェストを`resolvePseudoState`が
+ * 読み戻すと、実体の無い`_integration`を指す古いエントリで`IntegrationQueue`が
+ * 再構築され、再実行時の`reflectPseudoWorktree`が「消えたsourceからの`copyFile`」の
+ * 警告や、`kind:'deleted'`のエントリによる「ワークスペース側ファイルの再削除」を
+ * 引き起こす（Issueの実害）。
+ *
+ * 撤去順序: 1) `manifest.json` 2) `_integration`本体（`removePseudoWorktree`をそのまま使う）
+ * 3) `<runId>`ディレクトリ自体が空になっていれば、その入れ物も消す。1か2が失敗すれば
+ * そこで打ち切り、部分的な状態のまま3へは進まない。
+ *
+ * **なぜmanifest優先か（レビュー指摘・Issue #438の再発防止）。** 素朴には`_integration`を
+ * 先に消したくなる（生成順の逆）が、それだと非対称な穴が残る。`<runId>/_integration`
+ * だけがシンボリックリンクに差し替えられ`manifest.json`は正当なファイルのまま、という
+ * 状況で`_integration`を先に撤去しようとすると`removePseudoWorktree`が`boundaryEscape`で
+ * 打ち切り、`manifest.json`が一度も撤去されない。残ったマニフェストを次回`resolvePseudoState`
+ * が読み戻すと、Issue #438がまさに塞ごうとした「実体の無い`_integration`を指す古い
+ * マニフェストの読み戻し」が再現する。
+ *
+ * 逆に`manifest.json`を先に消せば、対称の穴（`manifest.json`だけがシンボリックリンク化され
+ * `_integration`は残る）は生じるが、その場合は**マニフェストが既に無いので幽霊読み戻し
+ * 自体が発生しない**。実害（幽霊マニフェストの読み戻し）に対して二つの順序は非対称であり、
+ * manifest優先のほうが安全側に倒れる。なお`<runId>`ディレクトリ全体がシンボリックリンク化
+ * されるケースは、順序に関わらず`manifest.json`側の実パス解決も同じく境界外へ解決される
+ * ため両方`boundaryEscape`になり、この変更で退行しない。
+ *
+ * 消す前に実パス解決して`.agents/worktrees`配下にあることを確認する規律は
+ * `removePseudoWorktree`と同じ（PR #444のシンボリックリンク対策への退行を避ける）。
+ * 削除対象は常に当該`runId`配下のみで、他runの`manifest.json`や複製には触れない。
+ */
+export async function removePseudoIntegration(
+  workspaceRoot: string,
+  runId: string,
+  fs: PseudoWorktreeFileSystemPort,
+): Promise<RemovePseudoIntegrationResult> {
+  const manifestResult = await removeManifestFile(workspaceRoot, runId, fs);
+  if (!manifestResult.ok) {
+    return manifestResult;
+  }
+
+  const integrationResult = await removePseudoWorktree(
+    workspaceRoot,
+    runId,
+    INTEGRATION_DIR_NAME,
+    fs,
+  );
+  if (!integrationResult.ok) {
+    return integrationResult;
+  }
+
+  const runDirResult = await removeRunDirIfEmpty(workspaceRoot, runId, fs);
+  if (!runDirResult.ok) {
+    // `<runId>`の入れ物が片付かなかっただけで、`manifest.json`と`_integration`の撤去は
+    // 既に成功している（Issue #438の実害はここでは起きない）。呼び出し側
+    // （`runner.ts`の`cleanupIntegration`）が警告として観測できれば足りるため、
+    // 全体をok:falseにはせず`warning`へ委ねる。
+    return { ok: true, warning: runDirResult.message };
+  }
   return { ok: true };
 }
 
