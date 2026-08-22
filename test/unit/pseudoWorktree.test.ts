@@ -1879,6 +1879,75 @@ describe('実ファイルシステムでの統合テスト', () => {
       );
 
       it(
+        '親ディレクトリがワークスペース内の`.git/hooks`へ差し替えられても、' +
+          '既存のフックを上書きせずに失敗する（境界内リダイレクト、Issue #484）',
+        async () => {
+          // `hasGitSegment`（Issue #406）は`relPath`にしか掛からないため、
+          // `relPath`自体に`.git`を含まない経路（`sub/pre-commit`）で`targetDir`
+          // （`workspace/sub`）を`.git/hooks`へ誘導すれば、事後確認が「境界内か」しか
+          // 見ていない旧実装では素通りしてしまう。
+          const hooksDir = path.join(workspace, '.git', 'hooks');
+          await mkdir(hooksDir, { recursive: true });
+          await writeFile(path.join(hooksDir, 'pre-commit'), 'original-hook\n');
+
+          const integration = await ensureIntegrationDir(
+            workspace,
+            RUN_ID,
+            nodePseudoWorktreeFileSystem,
+          );
+          expect(integration.ok).toBe(true);
+          if (!integration.ok) return;
+          await mkdir(path.join(integration.dir, 'sub'), { recursive: true });
+          await writeFile(path.join(integration.dir, 'sub', 'pre-commit'), 'PWNED-PAYLOAD\n');
+
+          const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+          const manifest: IntegrationManifest = new Map([
+            ['sub/pre-commit', { taskId: 'T1', kind: 'added' }],
+          ]);
+
+          const targetDir = path.join(workspace, 'sub');
+          let swapped = false;
+          // `mkdir(targetDir)`直後、`realTargetDir`確認（`fs.realpath(targetDir)`）が
+          // まだ差し替え前の実パスを返した直後に、`targetDir`自体を`.git/hooks`への
+          // シンボリックリンクへ差し替える（`realTargetDir`確認と一時ファイル書き込みの
+          // 間のTOCTOU窓を再現する）
+          const raceFs: typeof nodePseudoWorktreeFileSystem = {
+            ...nodePseudoWorktreeFileSystem,
+            realpath: async (target) => {
+              const result = await nodePseudoWorktreeFileSystem.realpath(target);
+              if (!swapped && target === targetDir) {
+                swapped = true;
+                await rm(targetDir, { recursive: true, force: true });
+                await symlink(hooksDir, targetDir);
+              }
+              return result;
+            },
+          };
+
+          const result = await reflectIntegrationToWorkspace(
+            workspace,
+            integration.dir,
+            workspaceBaseline,
+            manifest,
+            [],
+            raceFs,
+          );
+
+          expect(result.ok).toBe(false);
+          if (result.ok) return;
+          expect(result.reason).toBe('partialApply');
+
+          // 既存のフックは書き換わっていない
+          await expect(readFile(path.join(hooksDir, 'pre-commit'), 'utf8')).resolves.toBe(
+            'original-hook\n',
+          );
+          // `.git/hooks`配下に一時ファイルも残っていない
+          const hooksEntries = await readdir(hooksDir);
+          expect(hooksEntries).toEqual(['pre-commit']);
+        },
+      );
+
+      it(
         '`rename`を持たないポートでは従来の直接コピー経路へフォールバックし、' +
           '`usedLegacyCopyFallback`をtrueで返す（対応漏れ検知用の警告ログの元）',
         async () => {

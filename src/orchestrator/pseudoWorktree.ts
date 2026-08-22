@@ -1451,8 +1451,29 @@ export async function reflectIntegrationToWorkspace(
           // `path.join(targetDir, ...)`という文字列結合で作った名前にすぎず、`copyFile`は
           // その途中のディレクトリ部分のリンクを解決して書き込むため、境界外へ書かれうる。
           // ロールバックの`fs.removeFile(tempTarget)`も同じ差し替え済みパスを辿るため防御に
-          // ならない。窓の長さ自体もこの変更で変わっていない。この残存窓の解消はIssue #484
-          // へ切り出し済み（このコミットでは対応しない）。
+          // ならない。窓の長さ自体もこの変更で変わっていない。
+          //
+          // Issue #484: 上記の窓自体は、Nodeの標準API（`fs.promises`）だけでは移植可能な
+          // 形で閉じられないと判明した。`openat`/`mkdirat`/`renameat`相当が`FileHandle`に
+          // 存在せず、唯一の代替であるLinuxの`/proc/self/fd`経由のマジックリンクは
+          // Linux専用でWindowsに相当物が無い。ディレクトリの`realpath`確認直後に
+          // セグメントを自前で降りる案も、最終的に`copyFile`へ渡すのが文字列パスである以上
+          // 窓が縮まらない。`O_NOFOLLOW`相当も終端コンポーネントにしか効かず親には無力
+          // （いずれも実測で確認済み）。
+          //
+          // そこで、窓の存在は残存リスクとして受け入れたうえで、下の事後確認を
+          // 「`realTemp`が境界内か」ではなく「`realTargetDir`確認時点で想定していた場所
+          // そのものか」へ厳格化する。境界内チェックだけだと、`targetDir`がワークスペース
+          // 内の別ディレクトリ（典型的には`.git/hooks`）を指すシンボリックリンクへ
+          // 差し替えられた場合に「境界内」として素通りしてしまう。`hasGitSegment`
+          // （Issue #406の`.git`無条件拒否）は`relPath`にしか掛からないため、この経路は
+          // 迂回できてしまい、実測でも`.git/hooks/pre-commit`が無警告で書き換わることを
+          // 確認している。厳格化後は、`targetDir`確認からこの一時ファイル書き込みまでの
+          // 間に差し替えが起きた場合、書き込み先の実パスが確認時点の`realTargetDir`直下と
+          // 一致しなくなるため確実に検知できる（プラットフォーム差のある`openat`/
+          // `O_NOFOLLOW`系の防御ではなく、純粋なパス文字列比較にしたのは、既存の
+          // 「一次防御＋二次防御」の二段構えと一貫させ、かつWindowsでも同じロジックで
+          // 一様に効かせるため）。
           //
           // 一時ファイルは`targetDir`と同一ディレクトリに置く。別ディレクトリ（別ファイル
           // システム）だと`rename`がクロスデバイスで`EXDEV`になり失敗しうるため。
@@ -1465,10 +1486,19 @@ export async function reflectIntegrationToWorkspace(
             // 確かめる。ここは`target`ではなく一時ファイルに対して行う点が異なる。
             // `rename`前に確認することで、境界外へ書かれた内容が`target`の名前で
             // 一瞬でも見える窓自体を作らない。
+            //
+            // Issue #484: 「境界内か」ではなく「`realTargetDir`確認時点で想定していた
+            // 場所そのものか」を確かめる。`isPathWithinRoot`だけだと、`targetDir`が
+            // ワークスペース内の別ディレクトリ（典型的には`.git/hooks`）を指すリンクへ
+            // 差し替えられた場合に「境界内」として通過してしまい、`hasGitSegment`
+            // による`.git`の無条件拒否（Issue #406）が`relPath`しか見ていないため
+            // 迂回される（実測済み）。`realTargetDir`は上のスコープで確定済みなので
+            // 追加のI/Oは不要。
             const realTemp = await fs.realpath(tempTarget);
-            if (realTemp === undefined || !isPathWithinRoot(realTemp, realRoot)) {
+            const expectedTemp = path.join(realTargetDir, path.basename(tempTarget));
+            if (realTemp === undefined || realTemp !== expectedTemp) {
               throw new Error(
-                `反映先が実際にはワークスペースの外に書き込まれたため、書き込みを取り消しました` +
+                `反映先が実際には想定した場所以外へ書き込まれたため、書き込みを取り消しました` +
                   `（${safeRelPath}）: ${sanitizeForLog(realTemp ?? tempTarget)}`,
               );
             }
@@ -1487,6 +1517,12 @@ export async function reflectIntegrationToWorkspace(
           // 本番はここだけを使う）でのみ効く。ここへ落ちたことは
           // `usedLegacyCopyFallback`で呼び出し側へ伝え、反映1回につき1回だけ警告させる
           // （1件ごとに出すとログが溢れるため）。
+          //
+          // Issue #484: この経路は一時ファイルを使わないため、書き込み先の名前が
+          // `relPath`から予測可能で、境界外の既存ファイルを上書きし、失敗時のロールバック
+          // （下の`removeFile(target)`）がその既存ファイルを削除しうる（任意ファイル破壊）。
+          // 本番で実際に使われるポート（`nodePseudoWorktreeFileSystem`）は`rename`を持つため
+          // この経路には落ちず、上の一時ファイル+`rename`経路のみが通る。
           usedLegacyCopyFallback = true;
           await fs.copyFile(source, target);
           const realTarget = await fs.realpath(target);
