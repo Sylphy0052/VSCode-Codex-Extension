@@ -324,6 +324,12 @@ export function chatScript(
         parent.appendChild(code);
         continue;
       }
+      if (token.type === 'strike') {
+        const s = document.createElement('s');
+        s.textContent = token.value;
+        parent.appendChild(s);
+        continue;
+      }
       if (token.type === 'link') {
         const a = document.createElement('a');
         a.href = '#';
@@ -337,6 +343,104 @@ export function chatScript(
         parent.appendChild(a);
       }
     }
+  }
+
+  /**
+   * 表のセル配置（align）をクラス名へ変換する。undefinedは既定（左寄せ）のまま
+   * クラスを付けない。
+   */
+  function alignClass(align) {
+    if (align === 'center') return 'md-align-center';
+    if (align === 'right') return 'md-align-right';
+    if (align === 'left') return 'md-align-left';
+    return '';
+  }
+
+  /** 表1つ。列が多いと横に伸びるため、ラップ要素をoverflow-xさせる（chatStyles.ts側）。 */
+  function createTable(token) {
+    const wrap = document.createElement('div');
+    wrap.className = 'md-table-wrap';
+    const table = document.createElement('table');
+    table.className = 'md-table';
+
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    token.header.forEach((cellTokens, idx) => {
+      const th = document.createElement('th');
+      const cls = alignClass(token.align[idx]);
+      if (cls) th.className = cls;
+      appendInline(th, cellTokens);
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    token.rows.forEach((row) => {
+      const tr = document.createElement('tr');
+      row.forEach((cellTokens, idx) => {
+        const td = document.createElement('td');
+        const cls = alignClass(token.align[idx]);
+        if (cls) td.className = cls;
+        appendInline(td, cellTokens);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+
+    wrap.appendChild(table);
+    return wrap;
+  }
+
+  /** 引用1つ。複数行は段落と同じくbrで改行を保つ。 */
+  function createQuote(token) {
+    const bq = document.createElement('blockquote');
+    bq.className = 'md-quote';
+    token.lines.forEach((lineTokens, index) => {
+      if (index > 0) bq.appendChild(document.createElement('br'));
+      appendInline(bq, lineTokens);
+    });
+    return bq;
+  }
+
+  /**
+   * 箇条書き1つ。itemのdepthに沿って親liの中へul/olを入れ子にする。
+   * parseMarkdown側でdepthは1段ずつしか増えない前提（親のdepth+1を超えない）ため、
+   * 深さが増える側は常に直前のitemの下へ潜ればよい。減る側は該当階層まで戻す。
+   */
+  function createList(token) {
+    const tag = token.ordered ? 'ol' : 'ul';
+    const root = document.createElement(tag);
+    const stack = [{ depth: 0, list: root }];
+
+    for (const item of token.items) {
+      while (stack.length > 1 && stack[stack.length - 1].depth > item.depth) {
+        stack.pop();
+      }
+      let top = stack[stack.length - 1];
+      if (item.depth > top.depth) {
+        const parentLi = top.list.lastElementChild || document.createElement('li');
+        if (!parentLi.parentNode) top.list.appendChild(parentLi);
+        const nested = document.createElement(tag);
+        parentLi.appendChild(nested);
+        top = { depth: item.depth, list: nested };
+        stack.push(top);
+      }
+
+      const li = document.createElement('li');
+      if (item.checked !== undefined) {
+        li.className = 'md-task-item';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = item.checked;
+        checkbox.disabled = true;
+        li.appendChild(checkbox);
+      }
+      appendInline(li, item.inline);
+      top.list.appendChild(li);
+    }
+    return root;
   }
 
   /** コードブロック1つ。コピー・エディタへ挿入・新規ファイルで開くの3操作を付ける。 */
@@ -425,13 +529,19 @@ export function chatScript(
         continue;
       }
       if (token.type === 'list') {
-        const list = document.createElement(token.ordered ? 'ol' : 'ul');
-        for (const item of token.items) {
-          const li = document.createElement('li');
-          appendInline(li, item);
-          list.appendChild(li);
-        }
-        container.appendChild(list);
+        container.appendChild(createList(token));
+        continue;
+      }
+      if (token.type === 'table') {
+        container.appendChild(createTable(token));
+        continue;
+      }
+      if (token.type === 'quote') {
+        container.appendChild(createQuote(token));
+        continue;
+      }
+      if (token.type === 'hr') {
+        container.appendChild(document.createElement('hr'));
         continue;
       }
       if (token.type === 'codeblock') {
