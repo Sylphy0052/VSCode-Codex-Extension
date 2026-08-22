@@ -691,7 +691,7 @@ export async function cloneWorkspace(
     return {
       ok: false,
       reason: 'symlinkDetected',
-      message: `複製先の経路にシンボリックリンクが含まれています。作成を中止しました: ${symlinkedAncestor}`,
+      message: `複製先の経路にシンボリックリンクが含まれています。作成を中止しました: ${sanitizeForLog(symlinkedAncestor)}`,
     };
   }
 
@@ -699,7 +699,7 @@ export async function cloneWorkspace(
     return {
       ok: false,
       reason: 'alreadyExists',
-      message: `複製先が既に存在します: ${target}`,
+      message: `複製先が既に存在します: ${sanitizeForLog(target)}`,
     };
   }
 
@@ -712,7 +712,7 @@ export async function cloneWorkspace(
     return {
       ok: false,
       reason: 'boundaryEscape',
-      message: `複製先がワークスペースの外に作られたため、撤去しました: ${realTarget ?? target}`,
+      message: `複製先がワークスペースの外に作られたため、撤去しました: ${sanitizeForLog(realTarget ?? target)}`,
     };
   }
 
@@ -773,7 +773,7 @@ export async function removePseudoWorktree(
     return {
       ok: false,
       reason: 'boundaryEscape',
-      message: `撤去対象が.agents/worktreesの外を指しているため撤去しませんでした: ${realTarget}`,
+      message: `撤去対象が.agents/worktreesの外を指しているため撤去しませんでした: ${sanitizeForLog(realTarget)}`,
     };
   }
 
@@ -811,7 +811,7 @@ export async function ensureIntegrationDir(
     return {
       ok: false,
       reason: 'symlinkDetected',
-      message: `統合先の経路にシンボリックリンクが含まれています。作成を中止しました: ${symlinkedAncestor}`,
+      message: `統合先の経路にシンボリックリンクが含まれています。作成を中止しました: ${sanitizeForLog(symlinkedAncestor)}`,
     };
   }
 
@@ -824,7 +824,7 @@ export async function ensureIntegrationDir(
     return {
       ok: false,
       reason: 'boundaryEscape',
-      message: `統合先がワークスペースの外に作られたため、撤去しました: ${realDir ?? dir}`,
+      message: `統合先がワークスペースの外に作られたため、撤去しました: ${sanitizeForLog(realDir ?? dir)}`,
     };
   }
 
