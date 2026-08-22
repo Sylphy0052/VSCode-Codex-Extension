@@ -602,40 +602,76 @@ describe('maskForLog（セキュリティ監査指摘: {n,}量指定子が約5.6
   // （いずれも10MB）を上限とするgit/CLIのstderrを直接受けるため、この規模の
   // 入力は実際に到達しうる。クラッシュしないことと、上限を超えた分の残骸が
   // ログに残らないこと（部分マスクにならないこと）の両方を固定する。
-  const CRASH_TIMEOUT_MS = 5000;
+  //
+  // CRASH_TIMEOUT_MSとこのdescribe配下4件のitタイムアウトについて（Issue #522）:
+  // 約560万文字の単一トークンを正規表現へ通すコストは、npm test（全体実行）で
+  // 他のテストとCPUを奪い合うと単体実行時より大きく伸びる。このリポジトリの
+  // サンドボックス環境で全体実行を繰り返し実測したところ、この3件は
+  // 3.9〜13.6秒の範囲で揺れた（単体実行では1秒未満）。5000msのままでは
+  // 高負荷時に誤って失敗するため、実測の最大値に対して2倍以上の余裕を持たせ
+  // 30000msへ引き上げる。個々のitタイムアウト（vitestの既定20000ms）も
+  // このアサーションより先に打ち切られないよう35000msへ揃える。
+  // なお、この値を大きく超える停止（数十秒〜分オーダー）は、この判定が本来
+  // 検出したい{n,}量指定子由来の破局的バックトラッキングの再発を示唆する。
+  const CRASH_TIMEOUT_MS = 30_000;
+  const IT_TIMEOUT_MS = 35_000;
 
-  it('Bearerトークンが約560万文字でもクラッシュせずマスクする', () => {
-    const raw = 'Authorization: Bearer ' + 'A'.repeat(5_600_000);
-    const start = performance.now();
-    const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
-    expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
-    expect(result).toBe('Authorization: Bearer ***');
-  });
+  it(
+    'Bearerトークンが約560万文字でもクラッシュせずマスクする',
+    () => {
+      const raw = 'Authorization: Bearer ' + 'A'.repeat(5_600_000);
+      const start = performance.now();
+      const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
+      expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
+      expect(result).toBe('Authorization: Bearer ***');
+    },
+    IT_TIMEOUT_MS,
+  );
 
-  it('GitHubトークンが約560万文字でもクラッシュせずマスクする', () => {
-    const raw = 'token=gho_' + 'A'.repeat(5_600_000);
-    const start = performance.now();
-    const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
-    expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
-    expect(result).toBe('token=***');
-  });
+  it(
+    'GitHubトークンが約560万文字でもクラッシュせずマスクする',
+    () => {
+      const raw = 'token=gho_' + 'A'.repeat(5_600_000);
+      const start = performance.now();
+      const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
+      expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
+      expect(result).toBe('token=***');
+    },
+    IT_TIMEOUT_MS,
+  );
 
-  it('sk-形式のキーが約560万文字でもクラッシュせずマスクする', () => {
-    const raw = 'key=sk-' + 'A'.repeat(5_600_000);
-    const start = performance.now();
-    const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
-    expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
-    expect(result).toBe('key=***');
-  });
+  it(
+    'sk-形式のキーが約560万文字でもクラッシュせずマスクする',
+    () => {
+      const raw = 'key=sk-' + 'A'.repeat(5_600_000);
+      const start = performance.now();
+      const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
+      expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
+      expect(result).toBe('key=***');
+    },
+    IT_TIMEOUT_MS,
+  );
 
-  it('10MB規模（CLI_MAX_BUFFER_BYTES/GIT_MAX_BUFFER_BYTES相当）でもクラッシュせず、断片が残らない', () => {
-    // 単一トークンで10MB（各バッファ上限相当）とし、3トークン分を連結した約30MBの
-    // 入力で確認する。`stripControlChars`（本PRの変更対象外）の走査コストが
-    // 支配的で数秒かかりうるため、クラッシュ・部分マスクの有無のみを見る
-    // （速度自体は個別テストで別途確認済み）。
-    const raw =
-      'Bearer ' + 'A'.repeat(10_000_000) + ' gho_' + 'B'.repeat(10_000_000) + ' sk-' + 'C'.repeat(10_000_000);
-    const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
-    expect(result).toBe('Bearer *** *** ***');
-  }, 20_000);
+  it(
+    '10MB規模（CLI_MAX_BUFFER_BYTES/GIT_MAX_BUFFER_BYTES相当）でもクラッシュせず、断片が残らない',
+    () => {
+      // 単一トークンで10MB（各バッファ上限相当）とし、3トークン分を連結した約30MBの
+      // 入力で確認する。`stripControlChars`（本PRの変更対象外）の走査コストが
+      // 支配的で数秒かかりうるため、クラッシュ・部分マスクの有無のみを見る
+      // （速度自体は個別テストで別途確認済み）。
+      //
+      // itタイムアウトについて（Issue #522）: 約30MB規模の入力を正規表現へ
+      // 通すため、npm test（全体実行）では並列実行によるCPU競合でvitestの
+      // 既定20000msを超えてタイムアウトする（単体実行では10秒未満で終わる）。
+      // このリポジトリのサンドボックス環境で全体実行を繰り返し実測したところ
+      // 33〜34秒程度だった。既定の20000msのままでは高負荷時に安定して失敗する
+      // ため、実測値に対して余裕を持たせ90000msへ引き上げる
+      // （全体のtestTimeoutは変更しない。このテストにだけ個別に与える）。
+      const raw =
+        'Bearer ' + 'A'.repeat(10_000_000) + ' gho_' + 'B'.repeat(10_000_000) + ' sk-' + 'C'.repeat(10_000_000);
+      const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
+      expect(result).toBe('Bearer *** *** ***');
+    },
+    90_000,
+  );
 });
