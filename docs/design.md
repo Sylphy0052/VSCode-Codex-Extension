@@ -4764,9 +4764,14 @@ Claude Codeには、別々に走っているセッションが互いに名前で
 | ツール         | 引数                                            | 返り値                                       |
 | -------------- | ----------------------------------------------- | -------------------------------------------- |
 | `list_tasks`   | なし                                            | 同じrunのタスクid・状態・直近の応答の1行要約 |
-| `send_message` | `to`（タスクid）・`body`・`expectReply`（真偽） | 受け付けたかどうかと、その理由               |
+| `send_message` | `to`（宛先）・`body`・`expectReply`（真偽）     | 受け付けたかどうかと、その理由                |
 
 `wait_reply` のような、返事が来るまでツールの中で待つものは置かない。互いに待つとデッドロックする。
+
+**`send_message`の宛先は、送信元によって意味が変わる（§16.34、Issue #547でタスク間の直接
+メッセージングを廃した）。** タスクからの呼び出しでは`to`は常にオーケストレーターに固定され、
+他タスクのidを書いても拒否される。オーケストレーターからの呼び出しでは`to`に同じrunの
+タスクidを指定できる（従来どおり）。詳細は§16.34を見ること。
 
 トランスポート（`startHttpMcpTransport`、HTTP実装）は、JSONをパースする前のHTTPリクエストボディの受信バイト数にも上限（`MAX_MCP_REQUEST_BODY_BYTES`、64KiB）を設ける（Issue #132 PRレビューでのセキュリティ監査、Info）。`MAX_MESSAGE_BODY_LENGTH` はJSONをパースし終えた後の `validateSendMessage` で効くため、パース前の受信量そのものには効かない。ローカルループバック（`127.0.0.1`）+ 128bitトークン付きURLでしか到達できず外部からの悪用は考えにくいが、そのタスクのCLIプロセス自身が巨大なボディを送る経路は残るため、受信を打ち切る上限を別に設けた。上限を超えたら413で打ち切る。
 
@@ -4791,6 +4796,7 @@ Claude Codeには、別々に走っているセッションが互いに名前で
 
 - 受け取ったメッセージは、そのタスクの**次の指示の先頭へ添える**。走行中のターンへ割り込まない。ターンの途中で文脈が変わるのを避けるため
 - 宛先が `pending` なら、そのタスクの開始時の最初の指示へ添える
+- 上の「`pending`なら…」「`done`/`failed`/…なら配送できない」は、宛先が実在タスクである場合（オーケストレーターからタスクへの送信）にだけ当てはまる。タスクからオーケストレーターへの送信は宛先が固定（§16.34）で、オーケストレーターはrunが生きている間ずっと存在するため、この意味での配送不能状態を持たない
 - 宛先が `done` / `failed` / `blocked` / `skipped` なら配送できない。`send_message` はその旨を返す
 - 1件あたりの長さの上限は独立した定数 `MAX_MESSAGE_BODY_LENGTH`（4000文字）を持つ（Issue #132）。以前は `MAX_PROMPT_LENGTH`（20000文字。YAMLに書く `prompt` 自体の上限）を流用していたが、性質が異なる値の流用だった。メッセージの本文はエージェントが実行時に自由に生成し、`dependsOn` を問わず任意の（送信元より緩い権限を持ちうる）宛先へ届く。これは §16.4 の `{{T1.result}}`（`MAX_TEMPLATE_RESULT_LENGTH`、4000文字）と同じ脅威クラス（上流の自由記述がより緩い権限の下流へそのまま渡る経路）にあたるため、値もそちらへ揃えた。上限を超えた場合、`validateSendMessage` は `{{T1.result}}` 側（黙って切り詰める）と違い**受付自体を拒否する**。`send_message` はモデルが明示的に呼ぶツール呼び出しであり拒否理由がその場でモデルへ返るため、モデル自身が本文を短くして送り直せる。一方 `{{T1.result}}` の展開はテンプレート変数を差し込むオーケストレータ側の自動処理で、その時点でモデルの判断が介在する余地が無い（差し込む先の `prompt` はワークフロー開始前に固定されている）ため、黙って切り詰めることだけが唯一実行可能な安全策になる、という違いによる
 - run全体で配送できる総数にも上限を置く（`MAX_MESSAGES_PER_RUN` = 500。タスク総数の上限 `MAX_TASK_COUNT`（50）の10倍を採った）。無制限だと互いに送り合ってコンテキストとレート制限を食い潰す
@@ -4800,7 +4806,7 @@ Claude Codeには、別々に走っているセッションが互いに名前で
 
 #### 宛先の範囲
 
-同じrunのタスクにだけ送れる。依存関係の有無は問わない。**並列で走っているタスク同士の問い合わせがこの機能の主目的**なので、`dependsOn` で絞ると使えなくなる。
+**タスクからの送信は、宛先を問わずオーケストレーターに固定される（§16.34、Issue #547）。**タスク同士が直接つながる経路は無い。オーケストレーターからの送信は、同じrunの実在タスクへ依存関係の有無を問わず送れる（従来どおり。並列で走っているタスク同士の状況をオーケストレーター経由で橋渡しするのがこの経路の主目的なので、`dependsOn` では絞らない）。
 
 runをまたぐ通信と、ワークフローの外のセッションへの送信はできない。
 
@@ -5229,3 +5235,73 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 #### 既存の検証・再生成との関係
 
 `validateWorkflow`（構文的な検証）と`planWorkflow`の再生成ループ（検証エラーを踏まえた1度だけの投げ直し、§16.9）は変えていない。レビューは検証が通った後、**保存が確定してから**動く独立した工程であり、レビューの結果によって再生成が走ることも、検証の合否が変わることも無い。`plannerSecurity`（§16.9の安全設定の上書き検出）と`plannerReview`（本節）は別の`WorkflowWarning.kind`として区別し、`WorkflowViewManager.previewDefinition`の警告一覧に両方を並べて表示する。
+
+### 16.34 タスク間の直接メッセージングを廃し、オーケストレーターの中継にする（roadmap W9、Issue #547）
+
+§16.21のタスク間メッセージングは、`send_message`の宛先を「同じrunのタスク」に限っていた（`knownTaskIds`判定）。これはタスクからタスクへ直接届くメッシュ型で、WF-Eの方針2「やりとりは必ずオーケストレーターを通す。人 ←→ オーケストレーター ←→ タスク の3層に固定する（スター型）」に反していた。タスクがn個あれば経路はn×(n-1)本になり、オーケストレーターはどのタスクが何を伝えたのかを一切知らないままだった。
+
+これは機能の削減ではなく経路の集約である。タスクAがタスクBへ伝えたい情報は、オーケストレーターを経由して届く。かわりに、オーケストレーターが全ての伝達内容を見られる。
+
+#### 宛先の固定（`messaging.ts`）
+
+`validateSendMessage`（§16.21）の検証を、送信元がタスクかオーケストレーターかで分岐させた。
+
+- **`from`がタスク**（接続の`taskId`が`ORCHESTRATOR_CONNECTION_ID`と異なる）: `to`は**必ず`ORCHESTRATOR_CONNECTION_ID`でなければならない**。それ以外（実在するタスクid・存在しないid・自分自身のidを問わず）は「宛先はオーケストレーターに固定されています」という同じ理由で拒否する
+- **`from`が`ORCHESTRATOR_CONNECTION_ID`**（オーケストレーターからの送信）: 従来どおり「宛先の存在」→「自己宛」の順で検証し、`to`には`knownTaskIds`に含まれる実在タスクidを指定できる
+
+`ORCHESTRATOR_CONNECTION_ID`（`orchestratorSession.ts`、値は`-orchestrator-`）をそのままタスク側の予約宛先として再利用した。`TASK_ID_PATTERN`が先頭の`-`を許さないため、これと衝突するタスクidは定義できない（新しい予約語をワークフロー検証（`workflow.ts`）へ追加する必要が無い）。
+
+`SEND_MESSAGE_TOOL`の説明文（モデルへ見せる`description`）も、接続によって`to`の意味が変わることを明記するよう書き直した。同じツール定義をタスク・オーケストレーターの両方が見る（`visibleTools`は`send_message`をどちらの接続にも常に含める）ため、1つの説明文の中で両方の振る舞いを説明する形にしてある。
+
+自己宛の拒否（Issue #365、`to === from`）はオーケストレーター分岐に残した。タスク分岐では「宛先固定」の拒否がタスク宛（自分自身のidを含む）を包括的に弾くため、この分岐は実運用では到達しない（オーケストレーターの接続idは`knownTaskIds`に現れないため、オーケストレーター自身が自分を宛先にすることも構造的に起きない）。それでも純粋関数の不変条件として明示し、`from`の生成元が将来変わっても壊れないようにした（`test/unit/messaging.test.ts`で直接叩いて確認する）。
+
+#### タスクからオーケストレーターへの配送（`runnerMessaging.ts`）
+
+タスク間メッセージング（§16.21）の配送は、宛先タスクの次の送信（`setPromptTransform`）が`takeDeliverableMessages`を呼ぶ**プル**型だった。オーケストレーターはこの仕組みを持たない（走行中のタスクのように繰り返しターンを送るループではなく、イベント駆動で`notifyOrchestrator`が**プッシュ**する。§16.23「何が駆動するか」）。
+
+`onMessageAccepted`（`TaskMessagingHub.sendMessage`が受け付けた直後に同期的に呼ばれるフック）を、宛先で分岐させた。
+
+- `message.to === ORCHESTRATOR_CONNECTION_ID`（タスク→オーケストレーター）: 新設した`deliverTaskMessageToOrchestrator`を呼ぶ。`notifyOrchestrator`で新しいイベント種別`taskMessage`（`orchestratorSession.ts`の`OrchestratorEventKind`）としてオーケストレーターへ即座にプッシュし、**同時に`hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID)`でキューからも取り除く**
+- それ以外（オーケストレーター→タスク）: 従来どおり。宛先タスクが`waitingReply`なら`resumeFromWaitingReply`で再開する（変更なし）
+
+**キューから取り除く一手が無いと、待ちぼうけ検出（§16.21「待ちぼうけを検出する経路」の経路1、`detectAllWaitingStalemate`）が恒久的に壊れる。** オーケストレーターは`takeDeliverableMessages`を自分から呼ぶ経路を持たないため、プッシュだけで済ませて`store.queued`へ残したままにすると、その1件は`totalUndeliveredCount`に数えられ続ける。経路1は「走行中の全タスクが`waitingReply`で、未配送のメッセージが1件も無ければ」を条件にしており、いずれかのタスクが一度でもオーケストレーターへメッセージを送った時点でこの条件が二度と満たせなくなる——runの残り全体で「全員待ち」からの自動復帰が機能しなくなる、という壊れ方をする。design.md執筆時点でこの機序に気づけたのは§16.25の確認事項4（「途中にバッファ・キュー・busyゲート・デバウンスがある場合、そこを通過させるところまで状態を進めているか」）を踏まえて設計段階で見直したため。テスト（`test/unit/runner.test.ts`。この機能を専用に切り出したファイルは無く、既存の慣例どおりタスク間メッセージング関連のテストは`runner.test.ts`側に置く）は、タスクがオーケストレーターへメッセージを送った**直後**に`hub.totalUndeliveredCount()`が0へ戻ることを直接確かめる形にしてある（経路1「全員`waitingReply`かつ未配送0件」が壊れないための必要条件を、hub側から直接観測する。RED実測は`deliverTaskMessageToOrchestrator`の`takeDeliverableMessages`呼び出し1行だけを戻して行い、実際にこの1テストだけが失敗することを確認済み。§16.25確認事項8）。
+
+送信元タスクを`waitingReply`へ倒す処理（`expectReply: true`のときの`markWaitingReply` + `pauseLoop()`）は宛先を見ない既存のロジックのままで、変更していない。**`waitingReply`が中継を挟んでも成立する**というIssue #547の受入基準は、次の3つが揃って成り立つ。
+
+1. タスクが`expectReply: true`で送ると、宛先に関わらず送信元は`waitingReply`へ入る（変更なし）
+2. オーケストレーターが`send_message`（`to`に元の送信元のタスクidを指定）で返信すると、`onMessageAccepted`のオーケストレーター→タスク分岐が`resumeFromWaitingReply`を呼び、送信元は`running`へ戻る（変更なし。オーケストレーターは元の送信元と同じ相手へ返す必要はなく、別のタスクへ転送してもよい。ただし`expectReply`で待っている送信元を再開させたいなら、その送信元id宛てに送る）
+3. オーケストレーターが応答しないまま`waitingReply`が続いた場合も、待ちぼうけの経路1・経路2（§16.21）はどちらも壊れず機能する（経路1は上の対処、経路2＝タイムアウトはこの変更の影響を受けない）
+
+オーケストレーターのセッションが存在しない（起動失敗等、§16.23「セッションの生成に失敗した場合」）場合、`notifyOrchestrator`は何もせず、メッセージは黙って失われる。§16.21「MCPツールの可視性確認」・§16.23「オーケストレーターが利用できません」と同じ「見えなければ通信なしで走らせる。runは止めない」方針を踏襲した。
+
+#### 往復の内容をワークフローViewへ残す
+
+新しい永続ログや専用UIは追加していない。既存の2つの経路がそのまま満たす。
+
+- **タスク→オーケストレーター**: `taskMessage`イベントは`notifyOrchestrator`経由でオーケストレーターのセッションへ実際に送信される（§16.23「何が駆動するか」の合流・送信と同じ経路）。チャットタブ（§16.23「会話のUI」）は送った内容・応答の両方を通常の会話として表示するため、「会話を開く」から見える
+- **オーケストレーター→タスク**: `send_message`で転送された内容は、宛先タスクの次の送信で`composeNextPrompt`により合成され、`LiveTask.lastSentPrompt`（§16.21「人が目視確認できるようにする」）へそのまま反映される。ワークフローViewの「プロンプトを見る」から実際に送った文面として確認できる
+
+どちらも§16.21・§16.23が既に持っていた「実際に送った文面をそのまま見せる」仕組みに乗せてあるため、中継固有の追加コードは無い。
+
+#### 変わらないもの
+
+- 自己宛の拒否（オーケストレーター分岐で継続）
+- 1件あたりの本文の長さ上限（`MAX_MESSAGE_BODY_LENGTH`）・run全体の総数上限（`MAX_MESSAGES_PER_RUN`）・`composeNextPrompt`の合成後の総量上限（`MAX_COMPOSED_PROMPT_LENGTH`）
+- `wrapTaskMessage`による囲い（オーケストレーター→タスクの配送）・`wrapEvent`による囲い（タスク→オーケストレーターの通知）は、どちらも既存の無害化（`escapeAngleBrackets` + `stripControlCharsPreservingNewlines`）をそのまま使う
+- MCPサーバの起動・接続の判別（`ORCHESTRATOR_CONNECTION_ID`による接続単位の識別）・`list_tasks`
+
+#### 影響範囲
+
+- `messaging.ts`: `validateSendMessage`の宛先固定・`SEND_MESSAGE_TOOL`の説明文
+- `orchestratorSession.ts`: `OrchestratorEventKind`へ`taskMessage`を追加
+- `runnerMessaging.ts`: `onMessageAccepted`の分岐・`deliverTaskMessageToOrchestrator`・`buildTaskMessageEventBody`
+- `docs/manual-test.md` W-N: 実VSCodeでしか確かめられない受入基準（追記のみ、実施はしない）
+
+**副作用として`messagingPermissionEscalation`（前項「メッセージング経由の権限越境」・Issue #132）が実質発火しなくなる。** `checkMessagingPermissionEscalation`（`runnerSnapshot.ts`）は配送された`StoredMessage.from`を`live.def.tasks`から引き、送信元タスクの実効値と宛先タスクの実効値を比較する実装のまま変えていない。中継後は実タスクへ配送されるメッセージの`from`が常にオーケストレーター（`ORCHESTRATOR_CONNECTION_ID`）になるため、`live.def.tasks`に見つからず`senderTask === undefined`で毎回素通りする。仮に`ORCHESTRATOR_CONNECTION_ID`を`live.def.tasks`相当の比較対象に含めたとしても、オーケストレーターの実効`sandbox`は常に`read-only`固定（`ORCHESTRATOR_SANDBOX`、§16.23）のため「宛先より緩い」は成立しない。この警告が拾っていた脅威（緩い送信元の自由記述が厳しい宛先で実行される）自体は消えていない——中継を挟んでも、オーケストレーターが転送する自由記述に仕込まれた指示文は依然として宛先タスク自身の権限で実行されうる。オーケストレーターの`read-only`はオーケストレーター自身が直接何をできるかの制約であり、宛先タスクの実行権限とは無関係だからである。ただし脅威の一次防御は変わらず宛先タスク自身の権限設定（`sandbox`/`approvalMode`/`autoApprove`）であり、今回失われるのはその見える化（実行時警告）の経路だけである。この経路をオーケストレーター中継後も保つには「配送されたメッセージの元の送信元」を`StoredMessage`とは別に追跡する仕組みが要るが、オーケストレーターが内容を要約・改変しうる設計（本節冒頭）と相性が悪く、本Issueのスコープ外として見送った。実行時警告としての検出は失われるが、既存の受信内容の無害化（`<task-message>`によるデータ扱い化、前項「受信内容の扱い」）は経路を問わず変わらず効く。フォローアップの要否は別途判断する
+
+#### 確かめ方
+
+- `test/unit/messaging.test.ts`: タスクが実在タスクidを`to`に書くと拒否され理由が返ること／`ORCHESTRATOR_CONNECTION_ID`宛なら受け付けること／オーケストレーターからは従来どおりタスクidを`to`にできること／自己宛の拒否（オーケストレーター分岐）／`MessagingMcpServer`・`startHttpMcpTransport`経由の既存テスト（送信元のなりすまし防止等）は宛先をオーケストレーターへ差し替えて維持
+- `test/unit/runner.test.ts`（`describe('WorkflowRunner: 直接メッセージングを廃しオーケストレーター中継にする（design.md §16.34、Issue #547）')`）: タスクからタスクid宛の直接送信が拒否されること／タスク→オーケストレーターの`onMessageAccepted`が`notifyOrchestrator`を呼ぶこと・`takeDeliverableMessages`でキューを空にすること（`totalUndeliveredCount()`が0へ戻ることを直接観測）／`expectReply: true`での`waitingReply`遷移が中継後も成立すること（オーケストレーターからの送り返しで実際に`resumeLoop`されるところまで）／オーケストレーターの自己宛拒否・未知宛先拒否が変わらないこと（RED実測は`takeDeliverableMessages`呼び出し1行だけを戻して行う）
+- `test/unit/runner.test.ts`（既存の`describe('メッセージング経由の権限差の警告・実際の送信文面の表示...')`）: 上記の`messagingPermissionEscalation`不発火を明示のテストとして固定・`lastSentPrompt`（実送信文面の表示、Trojan Source対策の制御文字除去）は宛先をオーケストレーターへ差し替えて維持
+- `docs/manual-test.md` W-N: 実VSCode上でタスクからタスクへ直接届かないこと・オーケストレーターの転送が実際のCLIプロセスへ届くことを確認する

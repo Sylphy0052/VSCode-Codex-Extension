@@ -144,7 +144,13 @@ export interface SendMessageValidationInput {
   from: string;
   to: string;
   body: string;
-  /** 同じrunに存在するタスクidの集合。宛先の存在確認に使う。 */
+  /**
+   * 同じrunに存在するタスクidの集合。宛先の存在確認に使う。
+   *
+   * **`from`がタスク（`ORCHESTRATOR_CONNECTION_ID`以外）のときは参照しない**（Issue #547）。
+   * タスクからの送信は宛先をオーケストレーターに固定するため、実在タスクの集合との
+   * 突き合わせが要るのはオーケストレーターからタスクへ送る場合だけになった。
+   */
   knownTaskIds: ReadonlySet<string>;
   /** 宛先タスクの現在の状態。`knownTaskIds` に含まれないidの場合は無視される。 */
   recipientState: TaskState | undefined;
@@ -159,29 +165,51 @@ export interface SendMessageValidationResult {
 }
 
 /**
- * 宛先の存在・自己宛かどうか・本文の長さ・run全体の総数上限・宛先の状態を検証する
- * （design.md §16.21）。純粋関数。呼び出し順は「宛先の存在」→「自己宛」→「本文の長さ」→
- * 「総数上限」→「宛先の状態」で、1件見つかった時点で返す（複数該当してもどれか1つの理由を
- * 返せば十分なため、`validateWorkflow` のように全件集めることはしない）。
+ * 宛先の固定・本文の長さ・run全体の総数上限・宛先の状態を検証する（design.md §16.21・
+ * §16.34、Issue #547）。純粋関数。1件見つかった時点で返す（複数該当してもどれか1つの
+ * 理由を返せば十分なため、`validateWorkflow` のように全件集めることはしない）。
  *
- * 自己宛（`to === from`）は拒否する（Issue #365）。`runnerMessaging.ts`の`onMessageAccepted`は
+ * **タスク間の直接メッセージングは廃止した（Issue #547）。** `from`がタスク（接続の
+ * `taskId`が`ORCHESTRATOR_CONNECTION_ID`と異なる）なら、`to`は必ず
+ * `ORCHESTRATOR_CONNECTION_ID`でなければならない。タスクidを含むそれ以外の値
+ * （宛先が存在するタスクidであっても、自分自身のidであっても）は「宛先が固定されている」
+ * という同じ理由で拒否する。オーケストレーターがこの内容を見て、必要なら自分の
+ * `send_message`（`from === ORCHESTRATOR_CONNECTION_ID`。宛先にタスクidを取れる）で
+ * 転送するかどうかを決める（design.md §16.34「宛先の集約」）。
+ *
+ * `from === ORCHESTRATOR_CONNECTION_ID`（オーケストレーターからの送信）のときだけ、
+ * 従来どおり「宛先の存在」→「自己宛」の順で検証する。自己宛（`to === from`）を拒否する
+ * 理由（Issue #365）は変わらない: `runnerMessaging.ts`の`onMessageAccepted`は
  * `expectReply: true`で送信元を`waitingReply`へ倒した直後、同じメッセージの宛先が送信元と
  * 同じなら`waitingReply`から即座に戻す（＝自分自身が宛先でもある）ため、自己宛を通すと
- * 「一時停止して即再開する」という意味のない往復が起きる。
+ * 「一時停止して即再開する」という意味のない往復が起きる。オーケストレーターの接続idは
+ * `TASK_ID_PATTERN`に反する（先頭が`-`）ため`knownTaskIds`には実質現れず、この分岐は
+ * 現在の呼び出し経路では到達しない。それでも純粋関数としての不変条件（自己宛の拒否）を
+ * 明示しておく（`from`の生成元が将来変わっても壊れないようにするための多層防御）。
  */
 export function validateSendMessage(
   input: SendMessageValidationInput,
 ): SendMessageValidationResult {
-  if (!input.knownTaskIds.has(input.to)) {
+  const fromIsOrchestrator = input.from === ORCHESTRATOR_CONNECTION_ID;
+  if (fromIsOrchestrator) {
+    if (!input.knownTaskIds.has(input.to)) {
+      return {
+        accepted: false,
+        reason: `宛先が見つかりません（同じrunのタスクではありません）: ${input.to}`,
+      };
+    }
+    if (input.to === input.from) {
+      return {
+        accepted: false,
+        reason: `自分自身へは送信できません: ${input.to}`,
+      };
+    }
+  } else if (input.to !== ORCHESTRATOR_CONNECTION_ID) {
     return {
       accepted: false,
-      reason: `宛先が見つかりません（同じrunのタスクではありません）: ${input.to}`,
-    };
-  }
-  if (input.to === input.from) {
-    return {
-      accepted: false,
-      reason: `自分自身へは送信できません: ${input.to}`,
+      reason:
+        `宛先はオーケストレーターに固定されています。タスク宛には直接送信できません` +
+        `（"${ORCHESTRATOR_CONNECTION_ID}" 宛にしてください）: ${input.to}`,
     };
   }
   const bodyLength = codePointLength(input.body, MAX_MESSAGE_BODY_LENGTH);
@@ -551,12 +579,20 @@ export const LIST_TASKS_TOOL: McpToolDefinition = {
 export const SEND_MESSAGE_TOOL: McpToolDefinition = {
   name: 'send_message',
   description:
-    '同じrunの他タスクへメッセージを送る。送信元はサーバー側が接続から判別するため、' +
-    '引数には含めない（含めても無視される）。',
+    'メッセージを送る。タスクからの呼び出しでは宛先は常にオーケストレーターに固定される' +
+    `（toには固定文字列 "${ORCHESTRATOR_CONNECTION_ID}" を指定すること。他タスクのidを` +
+    '指定すると拒否され、理由が返る。タスク同士が直接やり取りすることはできない）。' +
+    'オーケストレーターからの呼び出しでは、toに同じrunのタスクidを指定して転送できる。' +
+    '送信元はサーバー側が接続から判別するため、引数には含めない（含めても無視される）。',
   inputSchema: {
     type: 'object',
     properties: {
-      to: { type: 'string', description: '宛先タスクのid' },
+      to: {
+        type: 'string',
+        description:
+          `宛先。タスクから呼ぶ場合は固定文字列 "${ORCHESTRATOR_CONNECTION_ID}"。` +
+          'オーケストレーターから呼ぶ場合は宛先タスクのid。',
+      },
       body: { type: 'string', description: 'メッセージの本文' },
       expectReply: { type: 'boolean', description: '返信を待つ場合はtrue' },
     },
