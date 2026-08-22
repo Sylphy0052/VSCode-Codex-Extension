@@ -4887,6 +4887,89 @@ tasks:
         expect(warning?.message).toContain('復元できなかった');
       },
     );
+
+    /**
+     * Issue #438の回帰テスト。統合worktree撤去（`cleanupIntegration`）が`_integration`しか
+     * 消さず`manifest.json`を残すと、撤去後のリロードで`resolvePseudoState`が実体の無い
+     * `_integration`を指す古いマニフェストを読み戻し、そのrunを再実行した際の
+     * `reflectPseudoWorktree`が`kind:'deleted'`のエントリを使ってワークスペース側の
+     * ファイルを再び削除してしまう（撤去後にユーザーが復元したファイルまで消える）。
+     *
+     * `removePseudoIntegration`（`_integration`と`manifest.json`をまとめて撤去）に
+     * 直したことで、撤去後の再実行では空のマニフェストしか読み戻らず、この経路が
+     * 塞がれていることを確かめる。
+     */
+    it(
+      '統合worktree撤去後にリロードして再実行しても、幽霊マニフェストでワークスペースの' +
+        'ファイルが再削除されない（受入基準、Issue #438）',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-ghost.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        // T1: 複製先のa.txtを削除した状態で完了させる（統合先への差分がkind:'deleted'になる）
+        const t1 = codexHost.byTaskId('T1');
+        const cloneDir1 = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+        fs.files.delete(path.join(cloneDir1, 'a.txt'));
+        t1.finish('done', doneState('ok'));
+        await flush();
+
+        // T2は明示cwdで失敗させ、runを終わらせる（reflectPseudoWorktreeが1回走る。
+        // 疑似worktreeの反映はrunの結果を問わず行われる）
+        const t2 = codexHost.byTaskId('T2');
+        t2.finish('failed', { ...initialChatState, turnFailed: true });
+        await flush();
+
+        // 1回目の反映（正当な削除）。ここでa.txtが消えるのは、T1が実際に消した結果を
+        // 反映しているだけで、Issue #438が問題にしている経路ではない
+        expect(fs.files.has('/repo/a.txt')).toBe(false);
+
+        // ユーザーが統合worktreeを撤去する
+        const cleanup = await runner.cleanupIntegration(runId);
+        expect(cleanup.integrationRemoved).toBe(true);
+
+        // 撤去後、ユーザーが手動でa.txtを復元した（例: 別の作業・バックアップからの復旧）
+        fs.setFile('/repo/a.txt', { size: 10, mtimeMs: 100 });
+
+        // リロード（新しいプロセスを模す。同じstore・同じディスクを使い回す）
+        const newCodexHost = new FakeHost();
+        const reloadedRunner = new WorkflowRunner({
+          hosts: { codex: newCodexHost, claude: newCodexHost },
+          worktreeQueue: new WorktreeCreationQueue(),
+          git: fakeGit({ notGitRepo: true }),
+          fs: identityFs,
+          filePort: filePort(TWO_TASK_YAML),
+          store,
+          pseudoWorktree: { fs, exclude: [] },
+          log: fakeLogger,
+          readBaseline: () => ({
+            codexSandbox: 'read-only',
+            codexApprovalMode: 'on-request',
+            claudePermissionMode: 'manual',
+            allowAutoApprove: true,
+            allowClaudeBypassPermissions: false,
+          }),
+        });
+        await reloadedRunner.restoreRunsForView();
+
+        // そのrunで再実行する（失敗していたT2をretry）
+        expect(reloadedRunner.retryTask(runId, 'T2')).toEqual({ ok: true });
+        await flush();
+        const t2b = newCodexHost.byTaskId('T2');
+        t2b.finish('done', doneState('ok'));
+        await flush();
+
+        // 幽霊マニフェスト（撤去し忘れたmanifest.json）が読み戻されていれば、ここで
+        // 復元したa.txtが再び削除される。修正後は消えていないことを確認する
+        expect(fs.files.has('/repo/a.txt')).toBe(true);
+      },
+    );
   });
 });
 

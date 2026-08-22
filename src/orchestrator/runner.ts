@@ -31,7 +31,7 @@ import { INTEGRATION_DIR_NAME, IntegrationMergeQueue } from './integration';
 import { applyRunCompletionToFile, type RoadmapFileSystemPort } from './roadmap';
 import {
   IntegrationQueue as PseudoWorktreeIntegrationQueue,
-  removePseudoWorktree,
+  removePseudoIntegration,
   removePseudoWorktreeAttempts,
   type PseudoWorktreeFileSystemPort,
   type Snapshot,
@@ -1825,9 +1825,13 @@ export class WorkflowRunner {
    * design.md §16.17「ブランチは消さない。PR/MRから辿れる必要がある」）。
    *
    * 疑似worktree（gitリポジトリでないワークスペース、design.md §16.20）では
-   * `live.pseudo`の統合先（`_integration`、`integrationPath`と同じ場所）を
-   * `removePseudoWorktree`で撤去する。gitと違い履歴が無いため「ブランチを残す」概念は
-   * 無いが、実体をまとめて消すという意味では同じ操作になる。
+   * `live.pseudo`の統合先（`_integration`、`integrationPath`と同じ場所）と、その
+   * 永続化マニフェスト（`manifest.json`、Issue #380）を`removePseudoIntegration`で
+   * まとめて撤去する。`_integration`だけを消してマニフェストを残すと、撤去後の
+   * リロードで`resolvePseudoState`が実体の無い`_integration`を指す古いマニフェストを
+   * 読み戻し、そのrunで再実行した際にワークスペース側のファイルを誤って再削除する
+   * （Issue #438）。gitと違い履歴が無いため「ブランチを残す」概念は無いが、実体を
+   * まとめて消すという意味では同じ操作になる。
    *
    * `onProgress`はタスク1件・統合先1件（対象がある場合）を処理するたびに呼ぶ
    * （Viewの`vscode.window.withProgress`から使う想定。Issue #298「進捗が分からない」。
@@ -1909,12 +1913,7 @@ export class WorkflowRunner {
             this.deps.git,
             this.deps.fs,
           )
-        : await removePseudoWorktree(
-            live.repoRoot,
-            runId,
-            INTEGRATION_DIR_NAME,
-            integrationTarget.fs,
-          );
+        : await removePseudoIntegration(live.repoRoot, runId, integrationTarget.fs);
     reportProgress('統合worktree');
     this.notify(runId);
     if (result.ok) {
