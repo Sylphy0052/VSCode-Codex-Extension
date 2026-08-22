@@ -162,10 +162,26 @@
 
 ### 第3波 仕上げ
 
-- **WF-G 横断の仕上げ**（3項目）
+- **WF-G 横断の仕上げ**（9項目）
   - T26 eslintへ型情報を要するルールを導入し、未処理Promiseを機械的に検出できるようにする
   - [#491](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/491)
     終了したrunを `retry_task` で再開してもオーケストレーターの制御ツールが復活しない
+  - [#502](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/502)
+    dispose()後に宙に浮いたstartTaskの継続がCLIセッションを起動しうる。
+    **未検証の指摘であり、まず再現を確認し、成立しなければ根拠を記録してクローズする。**
+    `pump()` が `void this.startTask(...)` を await せずに呼び、`startTask` は複数の `await` 点を
+    経て `prepareTaskLaunch` に到達する。`WorkflowRunner.dispose()` は同期関数のため、
+    その間に dispose が走ると、既に dispose 済みの状態でCLIセッションが起動しうる
+  - [#485](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/485)
+    疑似worktree反映: renameの必須化と一時ファイルの掃除
+  - [#490](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/490)
+    worktree撤去の試行回数に上限が無い（git側・疑似worktree側の両方）
+  - [#524](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/524)
+    警告ポップアップの「詳しくはログ」に出力チャネルを開く導線が無い
+  - [#527](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/527)
+    複数の親からブロックされた後続が、停止解除後に自動復帰しない
+  - [#533](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/533)
+    セッションのタブ名の組み立てがユニットテストで検証されていない
   - 全体レビュー（第1波・第2波の全変更を横断でレビューする）
   - 依存: 第1波・第2波の全完了
   - ファイル: `src` 全域（型情報ルールの導入は全ファイルへ波及する）
@@ -190,6 +206,55 @@
       CI落ちと回帰の両リスクが高く、カバレッジ下限の余裕も小さいため）
     - **`chatScript.ts` のコメントにバッククォートを書かない。** テンプレートリテラルが切れて
       `tsc` が壊れる
+  - **WF-A2から統合PR前に線引きした5件を送る**（2026-08-22、WF-A2 の担当から）
+    - WF-A2の成果を統合ブランチへ置き去りにするのが最悪の結果であり、それに比べれば
+      残件がWF-Gへ送られるのは小さい問題だと判断した。線引きの基準は、実害のある欠陥
+      （データが届かない・runが終わらない）と誤った記録を残すもの（無効なテスト）は必ず入れる。
+      テストの不足そのもの・可視化や導線・回避手段のある振る舞いの後退は送る、というもの
+    - [#485](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/485)
+      疑似worktree反映: renameの必須化と一時ファイルの掃除。`rename` を提供しないポート向けの
+      後方互換経路（一時ファイルを使わない直接コピー）は、書き込み先の名前が `relPath` から
+      予測可能なままのため、境界外の既存ファイルを上書きし、ロールバックがそれを削除しうる
+      （任意ファイル破壊）性質を残している。
+      **送る理由**: 本番で実際に使われるポート（`nodePseudoWorktreeFileSystem`）は `rename` を
+      持つためこの経路には落ちない。残存リスクとして [design.md](../design.md) §16.20 に
+      **正直に記述済み**であり、「守られている」という誤った記録にはなっていない
+    - [#490](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/490)
+      worktree撤去の試行回数に上限が無い（git側・疑似worktree側の両方）。
+      `retryCount + manualRetryCount` に上限が無く、撤去時の処理コスト（`realpath` +
+      ブロッキングI/O）が線形に増加する。
+      **送る理由**: 実害は処理コストのみ。データ消失も境界越えも無い（各撤去は個別に境界
+      チェックを通る）。PR #477 / #483 / #488 の監査で3回lowとして挙がり、いずれも
+      「既存のパターン」として据え置かれてきた。**git側と疑似worktree側の両方をまとめて
+      直す必要がある**（片方だけだと対称性が崩れる）
+    - [#524](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/524)
+      警告ポップアップの「詳しくはログ」に出力チャネルを開く導線が無い。
+      **送る理由**: 可視化・導線の改善であり、振る舞いの欠陥ではない。
+      `（詳しくはログ）` という文言は既存の6箇所で同じ形で使われており、**この1箇所だけ
+      直すと不揃いになる。** 6箇所まとめて扱うべきで、それはWF-A2の追いIssueの範囲を超える
+    - [#527](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/527)
+      複数の親からブロックされた後続が、停止解除後に自動復帰しない。PR #517（Issue #432）の
+      副作用。`markMergeSucceeded` の復帰対象フィルタが `s.failure?.kind === 'mergeBlocked'` を
+      要求するが、停止中に `runHalted` へ書き換わったタスクは以降このフィルタに掛からない。
+      **送る理由**: 詰みではない（当該タスク自身へ `retryTask` を呼べば救える）。修正前の
+      全体挙動は「停止が解除されれば自動復帰するが、解除されなければ回収できない `pending` が
+      生まれる」というより悪いもので、PR #517はそれを解いた。**この後退を直すには、停止中の
+      `failure.kind` の扱いを設計から見直す必要がある**ため、局所修正では戻せない
+    - [#533](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/533)
+      セッションのタブ名の組み立てがユニットテストで検証されていない。`chatView.ts` /
+      `claudeChatView.ts` のパネルタイトル組み立てを直接検証するテストが無い。PR #532の
+      可視化効果（タブ名にtaskIdを含める）はユニットテストのレベルでは未検証。
+      **送る理由**: テストが**無い**のであって、あるのに何も検証していない（誤った記録が
+      残る）わけではない。既存の `role === 'orchestrator'` 分岐にも同じ欠落があり、PR #532が
+      持ち込んだものではない。直すにはタイトル組み立てを純粋関数として切り出す必要があり、
+      3分岐まとめて扱うのが筋
+    - **WF-A2が統合PRへ必ず含める分**（送る5件と対比するため記録する）
+      - #528 / #529 / #530 無効なテストの修正、#531 テストの書き方の規約
+      - Issue #413のPR5（承認待ちのアイドルタイムアウト）
+      - #514 `stop_task` が衝突解決セッションへ届かず、届いていないのに成功を返す
+      - #511 疑似worktree: baselineが更新されないため、再開後の2周目の統合内容が
+        ワークスペースへ届かない。**#511を送らずに入れる理由**: runは成功して終わるのに
+        成果物がワークスペースへ届かないため、実質的に「誤った記録」と同じ性質を持つ
   - **`chatScript.ts` の実ファイル化に着手する前に読むこと**（2026-08-22、WF-F の担当から。
     X1〜X3 で `renderMarkdownInto` 付近と Claude Code の control protocol 層を実際に触った結果）
     - **分割の本丸はビルド手順とCSPであって、行数ではない。** `chatScript.ts` は
@@ -318,7 +383,7 @@ epic Issueは各ワークフローの開始時に起票し、採番できた時�
 | WF-D リポジトリ基盤 | 1 | 2 | [#353](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/353) | `wf/wf-d/integration` | 完了（PR [#394](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/394)、mainへマージ済み。統合ブランチは削除済み） |
 | WF-E ワークフローの自律性 | 2 | 12 | [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341) | `wf/wf-e/integration` | WF-A2（#466）の完了待ち（`runner.ts` / `forge.ts` が交差するため） |
 | WF-F チャットの会話操作と表示 | 2 | 3 | [#340](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/340) | `wf/wf-f/integration` | 完了（PR [#510](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/510)、mainへマージ済み。統合ブランチは削除済み） |
-| WF-G 横断の仕上げ | 3 | 3 | 未採番 | `wf/wf-g/integration` | 第2波の完了待ち |
+| WF-G 横断の仕上げ | 3 | 9 | 未採番 | `wf/wf-g/integration` | 第2波の完了待ち |
 
 W1〜W5とX1〜X3のIssue番号・ブランチ名・design.mdの節・manual-test.mdの番号は、
 [workflow-autonomy.md](workflow-autonomy.md) と [chat-conversation-parity.md](chat-conversation-parity.md) で
