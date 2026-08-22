@@ -501,6 +501,164 @@ export function readRewindConversationResult(response: ControlResponse): RewindC
 }
 
 /**
+ * 過去に送った脇道の質問1件（issue #334、design.md §14.62）。
+ *
+ * `side_question` の `history` に載せる。スネークケースの `fallback_notice`（実測）。
+ */
+export interface SideQuestionHistoryEntry {
+  question: string;
+  response: string;
+  /** 別モデルへ切り替わった旨の注記。無ければ省略する。 */
+  fallbackNotice: string | undefined;
+}
+
+/**
+ * 脇道の質問を送る要求（issue #334、design.md §14.62、Codexの `/btw` 相当）。
+ *
+ * 実測（`/tmp`の実測記録、CLI 2.1.235）: `{subtype:"side_question", question, history?}`。
+ * `history` は任意で、省略すると質問単体として扱われる（過去のやり取りを踏まえない）。
+ * Codexの `thread/fork`（`ephemeral: true`）と違い、**新しいスレッド/セッションを
+ * 作らない**。現在つながっている1本のCLIプロセスへ直接 `control_request` を送るだけで、
+ * 応答も1往復で返る。
+ *
+ * **走行中のターンがあっても送れる**（実測: 長いターンを走らせたまま送り、ターンの
+ * 完了より先に応答が返ることを確認済み。design.md §14.62参照）。`rewind_conversation`の
+ * ような走行チェックは無い。
+ *
+ * **本流のtranscriptに一切痕跡が残らない**（実測: `side_question`だけを送ったセッションは
+ * transcriptファイル自体が作られない。実会話がある場合でも質問・応答の文字列は
+ * transcript中に一切現れない。design.md §14.62参照）。この要求はコード上の根拠
+ * （`skipTranscript:true`等）だけでなく実測でも裏付けが取れている、数少ない経路。
+ */
+export function buildSideQuestionRequest(
+  requestId: string,
+  question: string,
+  history: readonly SideQuestionHistoryEntry[] = [],
+): string {
+  return buildControlRequest(requestId, {
+    subtype: 'side_question',
+    question,
+    ...(history.length > 0
+      ? {
+          history: history.map((entry) => ({
+            question: entry.question,
+            response: entry.response,
+            ...(entry.fallbackNotice !== undefined
+              ? { fallback_notice: entry.fallbackNotice }
+              : {}),
+          })),
+        }
+      : {}),
+  });
+}
+
+/** モデルが拒否し、別モデルへ自動的に切り替わった旨の記録。 */
+export interface SideQuestionRefusalFallback {
+  originalModel: string;
+  fallbackModel: string;
+  /** 切替後のモデルが実際に返した本文。`response` と同じ値のことが多い。 */
+  content: string;
+}
+
+/** `side_question` の応答を読んだ結果。 */
+export interface SideQuestionResult {
+  ok: boolean;
+  response: string | undefined;
+  /** 実際にモデルへ問い合わせず合成された応答か（実測で存在を確認したフィールド。意味は未確認）。 */
+  synthetic: boolean | undefined;
+  /** 元のモデルが拒否し、別モデルへ切り替わって答えたときだけ入る。 */
+  refusalFallback: SideQuestionRefusalFallback | undefined;
+  error: string | undefined;
+}
+
+/**
+ * `side_question` の応答を読む。
+ *
+ * 実測した成功時の形: `{response:"...", synthetic:false}`。任意で
+ * `refusal_fallback:{original_model, fallback_model, content}` が付く。
+ *
+ * `rewind_conversation` と違い、**失敗が `subtype:"success"` の封筒に包まれて返る事例は
+ * 実測できていない**（測ったのは成功応答1件のみ。design.md §14.62「未確認」参照）。
+ * そのため成否は素直に `response.ok`（封筒レベル。`subtype:"error"` かどうか）で判定し、
+ * 成功の封筒なのに `response` 本文が読み取れない（空文字・欠落）場合だけ、想定外の形として
+ * 追加で失敗扱いにする（CLIが将来この応答の中身だけ形を変えても、黙って空応答を成功と
+ * 誤判定しないための安全側）。
+ */
+export function readSideQuestionResult(response: ControlResponse): SideQuestionResult {
+  if (!response.ok) {
+    return {
+      ok: false,
+      response: undefined,
+      synthetic: undefined,
+      refusalFallback: undefined,
+      error: response.error ?? '不明なエラー',
+    };
+  }
+  const payload = response.payload;
+  const text = strOrUndefined(payload?.['response']);
+  if (text === undefined) {
+    return {
+      ok: false,
+      response: undefined,
+      synthetic: undefined,
+      refusalFallback: undefined,
+      error: '応答を読み取れませんでした',
+    };
+  }
+  const syntheticRaw = payload?.['synthetic'];
+  const synthetic =
+    syntheticRaw === true ? true : syntheticRaw === false ? false : undefined;
+  const fallback = rec(payload?.['refusal_fallback']);
+  const refusalFallback =
+    fallback === undefined
+      ? undefined
+      : {
+          originalModel: str(fallback['original_model']),
+          fallbackModel: str(fallback['fallback_model']),
+          content: str(fallback['content']),
+        };
+  return { ok: true, response: text, synthetic, refusalFallback, error: undefined };
+}
+
+/**
+ * 脇道の質問の処理経過（`control_request_progress`。issue #334、design.md §14.62）。
+ *
+ * 実測: `{type:"system", subtype:"control_request_progress", request_id, status}`。
+ * `status` は `started` と `api_retry`（`attempt`/`max_retries`/`retry_delay_ms`/
+ * `error_status` を伴う）を確認済み。この通知は `side_question` 専用（実測メモより）。
+ * `control_response` とは別経路（`type:"system"`）で届くため、`readControlResponse` では
+ * 拾えない。未知の `status` 値もそのまま文字列で通す（呼び出し側が丸める）。
+ */
+export interface ControlRequestProgress {
+  requestId: string;
+  status: string;
+  attempt: number | undefined;
+  maxRetries: number | undefined;
+  retryDelayMs: number | undefined;
+  errorStatus: string | undefined;
+}
+
+export function readControlRequestProgress(
+  event: Record<string, unknown>,
+): ControlRequestProgress | undefined {
+  if (str(event['type']) !== 'system' || str(event['subtype']) !== 'control_request_progress') {
+    return undefined;
+  }
+  const requestId = str(event['request_id']);
+  if (requestId === '') {
+    return undefined;
+  }
+  return {
+    requestId,
+    status: str(event['status']),
+    attempt: num(event['attempt']),
+    maxRetries: num(event['max_retries']),
+    retryDelayMs: num(event['retry_delay_ms']),
+    errorStatus: strOrUndefined(event['error_status']),
+  };
+}
+
+/**
  * セッションのコストを問い合わせる要求（issue #37、design.md TP-60）。
  *
  * `get_session_cost`（整形済みの英文テキストのみ）より `get_usage` のほうが情報量が多く
