@@ -3,6 +3,12 @@
 CodexとClaude Codeの会話操作の差を埋め、応答を読みやすくする3項目のロードマップ。
 進捗の追跡は epic Issue [#340](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/340) に集める。
 
+> **このロードマップは X1〜X3 すべて完了済み。** 統合ブランチ `wf/wf-f/integration` から
+> PR [#510](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/510) で main へ入り、
+> epic Issue #340 もクローズしてある。統合ブランチは削除済み。
+> 以降は着手時の記録として残してあるだけで、新しく着手する項目は無い。
+> 現在動いているロードマップは [review-and-feature-consolidation.md](review-and-feature-consolidation.md) を見ること。
+
 ## きっかけ
 
 Claude Code CLI 2.1.235 で、これまで「CLIに手段が無い」として見送っていた2つの操作が使える
@@ -32,7 +38,7 @@ Markdown描画が最小限（表・引用・ネストしたリストが未対応
 
 ## フェーズ1 表示（読みやすさ）
 
-- [ ] X1 応答のMarkdown描画へ表・引用・ネストしたリストを足す
+- [x] X1 応答のMarkdown描画へ表・引用・ネストしたリストを足す（完了、PR [#489](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/489)）
   - 依存: なし
   - Issue: #332
   - 現状: [markdown.ts](../../src/view/markdown.ts) が扱うのは見出し・箇条書き・番号付きリスト・
@@ -53,7 +59,7 @@ Markdown描画が最小限（表・引用・ネストしたリストが未対応
 
 ## フェーズ2 会話操作（CodexとClaude Codeの差を埋める）
 
-- [ ] X2 Claude Codeでも会話の途中のターンから分岐できるようにする
+- [x] X2 Claude Codeでも会話の途中のターンから分岐できるようにする（完了、PR [#494](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/494)）
   - 依存: X1
   - Issue: #333
   - 現状: Codexは各発言の「ここから分岐」で、その指示の手前までを引き継いだ新しいタブを開ける
@@ -70,7 +76,7 @@ Markdown描画が最小限（表・引用・ネストしたリストが未対応
   - 影響: [control.ts](../../src/claude/control.ts) / [streamSession.ts](../../src/claude/streamSession.ts) /
     [claudeChatView.ts](../../src/view/claudeChatView.ts) / [chatScript.ts](../../src/view/chatScript.ts)
 
-- [ ] X3 Claude Codeでも脇道の質問を使えるようにする
+- [x] X3 Claude Codeでも脇道の質問を使えるようにする（完了、PR [#501](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/501)）
   - 依存: X2
   - Issue: #334
   - 現状: Codexのみ対応（[sideQuestion.ts](../../src/codex/sideQuestion.ts)）。Claude Codeは
