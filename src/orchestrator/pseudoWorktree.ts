@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -524,6 +525,17 @@ export interface PseudoWorktreeFileSystemPort {
   /** ファイルを削除する。存在しなくてもエラーにしない。 */
   removeFile(target: string): Promise<void>;
   /**
+   * ファイルを改名（同一ディレクトリ内での置き換え）する。`to`が既存のファイル・
+   * シンボリックリンクを指していても、その実体を辿らずディレクトリエントリそのものを
+   * 置き換える（POSIXの`rename(2)`の性質）。`reflectIntegrationToWorkspace`が
+   * コピー先へのTOCTOU（Issue #445）を塞ぐために「一時ファイルへ書いてからrenameで
+   * 確定させる」用途にだけ使う。オプショナルにしているのは、この関数を持たない
+   * 既存のポート実装（テスト用フェイク等）に影響を与えないため。持たないポートを
+   * 渡した場合は`reflectIntegrationToWorkspace`側が従来どおりの直接コピー経路へ
+   * フォールバックする。
+   */
+  rename?(from: string, to: string): Promise<void>;
+  /**
    * テキストファイルを読む。存在しない・読めない場合は undefined（他の読み取り系
    * ポートメソッドと同じ規約）。マニフェストの永続化・復元（Issue #380）にだけ使う。
    */
@@ -596,6 +608,9 @@ export const nodePseudoWorktreeFileSystem: PseudoWorktreeFileSystemPort = {
   },
   async removeFile(target: string): Promise<void> {
     await fsPromises.rm(target, { force: true });
+  },
+  async rename(from: string, to: string): Promise<void> {
+    await fsPromises.rename(from, to);
   },
   async readTextFile(target: string): Promise<string | undefined> {
     try {
@@ -1215,16 +1230,59 @@ export async function reflectIntegrationToWorkspace(
             `反映先のディレクトリが実際にはワークスペースの外を指しています（${safeRelPath}）: ${sanitizeForLog(realTargetDir ?? targetDir)}`,
           );
         }
-        await fs.copyFile(source, target);
-        // 二次防御の仕上げ（TOCTOU）。`persistManifest`と同じく、書いた後に実パスを
-        // 確かめ、境界外なら書き込みを取り消して失敗として返す。
-        const realTarget = await fs.realpath(target);
-        if (realTarget === undefined || !isPathWithinRoot(realTarget, realRoot)) {
-          await fs.removeFile(target);
-          throw new Error(
-            `反映先が実際にはワークスペースの外を指していたため、書き込みを取り消しました` +
-              `（${safeRelPath}）: ${sanitizeForLog(realTarget ?? target)}`,
-          );
+        if (fs.rename !== undefined) {
+          // Issue #445: 上の`realTargetDir`確認と、実際にワークスペースへ書き込む瞬間
+          // （旧実装では`fs.copyFile(source, target)`）の間には、なお短いTOCTOU窓が残る。
+          // `fs.copyFile`はシンボリックリンクを解決して書き込むため、この窓の間に`target`
+          // が外部を指すシンボリックリンクへ差し替えられると、書き込みが境界外（リンク先）
+          // で起きてしまう。
+          //
+          // これを塞ぐため、`target`と同じディレクトリ内の一時ファイルへコピーしてから
+          // `rename`で`target`の名前へ確定させる。`rename`は対象パスの終端が
+          // シンボリックリンクであってもそれを解決せず、ディレクトリエントリそのものを
+          // 置き換える（POSIXの`rename(2)`の性質）ため、`target`がその時点でリンクへ
+          // 差し替えられていても、置き換え先（リンク先）を書き換えることが原理的にない。
+          //
+          // 一時ファイルは`targetDir`と同一ディレクトリに置く。別ディレクトリ（別ファイル
+          // システム）だと`rename`がクロスデバイスで`EXDEV`になり失敗しうるため。
+          // ファイル名は`crypto.randomBytes`による推測不能な接尾辞を持たせる。予測可能な
+          // 名前だと、そこへ先回りしてシンボリックリンクを仕込まれる別の攻撃面になる。
+          const tempTarget = path.join(targetDir, `.pwt-reflect-${randomBytes(16).toString('hex')}.tmp`);
+          try {
+            await fs.copyFile(source, tempTarget);
+            // 二次防御の仕上げ（TOCTOU）。`persistManifest`と同じく、書いた後に実パスを
+            // 確かめる。ここは`target`ではなく一時ファイルに対して行う点が異なる。
+            // `rename`前に確認することで、境界外へ書かれた内容が`target`の名前で
+            // 一瞬でも見える窓自体を作らない。
+            const realTemp = await fs.realpath(tempTarget);
+            if (realTemp === undefined || !isPathWithinRoot(realTemp, realRoot)) {
+              throw new Error(
+                `反映先が実際にはワークスペースの外に書き込まれたため、書き込みを取り消しました` +
+                  `（${safeRelPath}）: ${sanitizeForLog(realTemp ?? tempTarget)}`,
+              );
+            }
+            await fs.rename(tempTarget, target);
+          } catch (e) {
+            // 例外の理由を問わず（上のthrowだけでなく`copyFile`自体の失敗も含む）、
+            // 一時ファイルを残置しない。プロセスが途中で落ちた場合まではこれで防げないが、
+            // 通常の失敗経路では残らないようにする。
+            await fs.removeFile(tempTarget);
+            throw e;
+          }
+        } else {
+          // 後方互換の経路（レビュー指摘への裁定）。`rename`を提供しないポート実装
+          // （テスト用フェイク等）向けに、従来どおり直接コピー+事後確認+ロールバックを行う。
+          // Issue #445のTOCTOU閉塞は`rename`を持つポート（`nodePseudoWorktreeFileSystem`。
+          // 本番はここだけを使う）でのみ効く。
+          await fs.copyFile(source, target);
+          const realTarget = await fs.realpath(target);
+          if (realTarget === undefined || !isPathWithinRoot(realTarget, realRoot)) {
+            await fs.removeFile(target);
+            throw new Error(
+              `反映先が実際にはワークスペースの外を指していたため、書き込みを取り消しました` +
+                `（${safeRelPath}）: ${sanitizeForLog(realTarget ?? target)}`,
+            );
+          }
         }
       }
     } catch (e) {

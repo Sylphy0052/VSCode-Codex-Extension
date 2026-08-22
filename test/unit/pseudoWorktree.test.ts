@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
@@ -1499,6 +1499,141 @@ describe('実ファイルシステムでの統合テスト', () => {
      * 吸われ、`.git`の無条件拒否（Issue #406）へ到達しない。既定の`exclude`のままで成立し、
      * 細工したマニフェストに除外ヒットするダミーを1件混ぜるだけで防御が無効化される。
      */
+    /**
+     * Issue #445: `realpath`による境界確認と実際の`copyFile`の間にTOCTOU窓があった。
+     * `fs.copyFile`はシンボリックリンクを解決して書き込むため、確認直後に反映先
+     * （`target`）が外部を指すシンボリックリンクへ差し替えられると、書き込みが
+     * 境界外（リンク先）で起きてしまう。一時ファイル+`rename`にすることで、この窓を
+     * 実質ゼロにする（`rename`は対象パスの終端がシンボリックリンクであっても解決せず、
+     * リンクのエントリそのものを置き換えるため）。
+     */
+    describe('コピー経路のTOCTOU対策（一時ファイル+rename、Issue #445）', () => {
+      it(
+        '反映先がコピー直前にシンボリックリンクへ差し替えられても、' +
+          'リンク先（ワークスペースの外）を書き換えずに反映が完了する（受入基準）',
+        async () => {
+          const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-toctou-target-'));
+          try {
+            await writeFile(path.join(outsideDir, 'secret.txt'), 'original secret\n');
+
+            const integration = await ensureIntegrationDir(
+              workspace,
+              RUN_ID,
+              nodePseudoWorktreeFileSystem,
+            );
+            expect(integration.ok).toBe(true);
+            if (!integration.ok) return;
+            await writeFile(path.join(integration.dir, 'a.txt'), 'integrated content\n');
+
+            const workspaceBaseline = await takeSnapshot(
+              workspace,
+              [],
+              nodePseudoWorktreeFileSystem,
+            );
+            const manifest: IntegrationManifest = new Map([
+              ['a.txt', { taskId: 'T1', kind: 'modified' }],
+            ]);
+
+            const targetPath = path.join(workspace, 'a.txt');
+            let swapped = false;
+            // 一次防御（`mkdir`直後の`realTargetDir`確認）を通過した直後、実際の書き込みの
+            // 直前に`target`が外部を指すシンボリックリンクへ差し替えられた状況を再現する
+            const raceFs: typeof nodePseudoWorktreeFileSystem = {
+              ...nodePseudoWorktreeFileSystem,
+              mkdir: async (dir) => {
+                await nodePseudoWorktreeFileSystem.mkdir(dir);
+                if (!swapped && dir === path.dirname(targetPath)) {
+                  swapped = true;
+                  await symlink(path.join(outsideDir, 'secret.txt'), targetPath);
+                }
+              },
+            };
+
+            const result = await reflectIntegrationToWorkspace(
+              workspace,
+              integration.dir,
+              workspaceBaseline,
+              manifest,
+              [],
+              raceFs,
+            );
+
+            expect(result.ok).toBe(true);
+            // リンク先（ワークスペースの外）の内容は書き換えられていない
+            await expect(readFile(path.join(outsideDir, 'secret.txt'), 'utf8')).resolves.toBe(
+              'original secret\n',
+            );
+            // ワークスペース側はシンボリックリンクではなく実体に置き換わっている
+            const stat = await lstat(targetPath);
+            expect(stat.isSymbolicLink()).toBe(false);
+            await expect(readFile(targetPath, 'utf8')).resolves.toBe('integrated content\n');
+          } finally {
+            await rm(outsideDir, { recursive: true, force: true });
+          }
+        },
+      );
+
+      it(
+        '一時ファイルの書き込み後にrealpathで境界外と判明した場合、' +
+          '一時ファイルを残さず取り消す（クリーンアップの確認）',
+        async () => {
+          const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-toctou-temp-'));
+          try {
+            const integration = await ensureIntegrationDir(
+              workspace,
+              RUN_ID,
+              nodePseudoWorktreeFileSystem,
+            );
+            expect(integration.ok).toBe(true);
+            if (!integration.ok) return;
+            await writeFile(path.join(integration.dir, 'new.txt'), 'integrated content\n');
+
+            const workspaceBaseline = await takeSnapshot(
+              workspace,
+              [],
+              nodePseudoWorktreeFileSystem,
+            );
+            const manifest: IntegrationManifest = new Map([
+              ['new.txt', { taskId: 'T1', kind: 'added' }],
+            ]);
+
+            // 一時ファイルの実パス確認だけを境界外に見せかけ、TOCTOU二段目の
+            // ロールバックを強制的に踏ませる
+            const raceFs: typeof nodePseudoWorktreeFileSystem = {
+              ...nodePseudoWorktreeFileSystem,
+              realpath: async (p) => {
+                if (p.includes('.pwt-reflect-')) {
+                  return path.join(outsideDir, 'escaped');
+                }
+                return nodePseudoWorktreeFileSystem.realpath(p);
+              },
+            };
+
+            const result = await reflectIntegrationToWorkspace(
+              workspace,
+              integration.dir,
+              workspaceBaseline,
+              manifest,
+              [],
+              raceFs,
+            );
+
+            expect(result.ok).toBe(false);
+            if (result.ok) return;
+            expect(result.reason).toBe('partialApply');
+
+            // 一時ファイルが残っていない（クリーンアップ済み）
+            const entries = await readdir(workspace);
+            expect(entries.some((e) => e.includes('.pwt-reflect-'))).toBe(false);
+            // 反映先にも実体は作られていない
+            await expect(readFile(path.join(workspace, 'new.txt'))).rejects.toThrow();
+          } finally {
+            await rm(outsideDir, { recursive: true, force: true });
+          }
+        },
+      );
+    });
+
     describe('除外と.gitの判定順（レビュー2巡目の指摘）', () => {
       const gitUnderExcludeCases = [
         ['node_modules', 'node_modules/.git/hooks/pre-commit'],
