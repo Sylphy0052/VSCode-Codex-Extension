@@ -846,6 +846,13 @@ export class ClaudeStreamSession {
    * 走行中のターンがあっても送れる（実測、design.md §14.62）。`rewind_conversation`の
    * ような「先に確認して弾く」ガードはここには無い（CLI側に制約が無いと分かっているため）。
    *
+   * 空文字・空白のみの`question`はCLIへ送らずここで弾く（レビュー指摘・design.md §14.62）。
+   * 実測でCLIは`question`の型・空文字を検証せず、省略時は文字列`"undefined"`、オブジェクト
+   * なら`"[object Object]"`をそのまま質問文としてモデルへ渡してしまうことが分かっている。
+   * 呼び出し元（`claudeChatView.ts`の`runPseudoCommand`）でも`trimmedArgsOrUndefined`で
+   * 空文字を弾いているが、境界（`ClaudeStreamSession`の公開API）でも同じ検証を重ねる
+   * （呼び出し元の判定漏れや将来の別経路に備えた多層防御）。
+   *
    * @param onProgress `control_request_progress`の都度呼ぶ。`api_retry`はモデル呼び出しの
    * 再試行中で、何も出さないと固まって見える（design.md §14.62「600秒」の節参照）。
    */
@@ -854,6 +861,15 @@ export class ClaudeStreamSession {
     history: readonly SideQuestionHistoryEntry[],
     onProgress: (progress: ControlRequestProgress) => void = () => undefined,
   ): Promise<SideQuestionResult> {
+    if (question.trim() === '') {
+      return Promise.resolve({
+        ok: false,
+        response: undefined,
+        synthetic: undefined,
+        refusalFallback: undefined,
+        error: '質問が空です',
+      });
+    }
     if (this.proc === undefined) {
       return Promise.resolve({
         ok: false,

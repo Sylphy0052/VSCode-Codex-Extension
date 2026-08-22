@@ -1004,6 +1004,41 @@ describe('readSideQuestionResult（issue #334、design.md §14.62）', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toBe('応答を読み取れませんでした');
   });
+
+  it('応答本文が読み取れなくてもpayload.errorがあればそれを理由にする（レビュー指摘）', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_5',
+        response: { error: 'no response generated' },
+      },
+    });
+    const result = readSideQuestionResult(response!);
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe('no response generated');
+  });
+
+  it('synthetic:trueの応答を読む（実測、design.md §14.62: モデルが実際には回答しなかったことを示す）', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_6',
+        response: {
+          response: '(API error: rate limited)',
+          synthetic: true,
+        },
+      },
+    });
+    expect(readSideQuestionResult(response!)).toEqual({
+      ok: true,
+      response: '(API error: rate limited)',
+      synthetic: true,
+      refusalFallback: undefined,
+      error: undefined,
+    });
+  });
 });
 
 describe('readControlRequestProgress（issue #334、design.md §14.62）', () => {

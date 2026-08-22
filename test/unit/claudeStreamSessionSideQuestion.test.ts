@@ -172,6 +172,23 @@ describe('ClaudeStreamSession の脇道の質問（side_question。issue #334、
     });
   });
 
+  it('空文字・空白のみのquestionは送らず即座に失敗を返す（レビュー指摘: CLIは検証しない）', async () => {
+    const { session, written } = createSessionWithFakeProc();
+
+    const empty = await session.askSideQuestion('', []);
+    const blank = await session.askSideQuestion('   ', []);
+
+    expect(written).toHaveLength(0);
+    expect(empty).toEqual({
+      ok: false,
+      response: undefined,
+      synthetic: undefined,
+      refusalFallback: undefined,
+      error: '質問が空です',
+    });
+    expect(blank.ok).toBe(false);
+  });
+
   it('セッションが起動していない場合は要求を送らず即座に失敗を返す', async () => {
     const session = new ClaudeStreamSession(
       () => 'claude',

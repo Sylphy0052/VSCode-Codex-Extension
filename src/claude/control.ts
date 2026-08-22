@@ -564,7 +564,16 @@ export interface SideQuestionRefusalFallback {
 export interface SideQuestionResult {
   ok: boolean;
   response: string | undefined;
-  /** 実際にモデルへ問い合わせず合成された応答か（実測で存在を確認したフィールド。意味は未確認）。 */
+  /**
+   * 実際にモデルへ問い合わせず合成された応答か。
+   *
+   * 実測（バイナリの`mZE()`関数解析、`/tmp`の実測記録・design.md §14.62参照）で意味が
+   * 確定した: `true`は「モデルが実際に文章で回答しなかった」ことを示し、そのときの
+   * `response`はCLIが生成した**英語固定のプレースホルダ文言**（ツール呼び出しを試みた場合
+   * ／APIエラー時）であり、モデルの回答ではない。`ok:true`（封筒レベルは成功）でも
+   * `synthetic:true`のときは呼び出し側でエラー相当として扱う必要がある
+   * （`sideQuestion.ts`の`finishedSideQuestionDisplay`参照）。
+   */
   synthetic: boolean | undefined;
   /** 元のモデルが拒否し、別モデルへ切り替わって答えたときだけ入る。 */
   refusalFallback: SideQuestionRefusalFallback | undefined;
@@ -577,12 +586,21 @@ export interface SideQuestionResult {
  * 実測した成功時の形: `{response:"...", synthetic:false}`。任意で
  * `refusal_fallback:{original_model, fallback_model, content}` が付く。
  *
- * `rewind_conversation` と違い、**失敗が `subtype:"success"` の封筒に包まれて返る事例は
- * 実測できていない**（測ったのは成功応答1件のみ。design.md §14.62「未確認」参照）。
- * そのため成否は素直に `response.ok`（封筒レベル。`subtype:"error"` かどうか）で判定し、
- * 成功の封筒なのに `response` 本文が読み取れない（空文字・欠落）場合だけ、想定外の形として
- * 追加で失敗扱いにする（CLIが将来この応答の中身だけ形を変えても、黙って空応答を成功と
- * 誤判定しないための安全側）。
+ * 失敗の返り方は実測（`/tmp`の実測記録、CLI 2.1.235。design.md §14.62参照）で二層ある
+ * ことが分かっている:
+ * - 構造エラー（`history`が配列でない等）は`subtype:"error"`の封筒で返り、`error`には
+ *   CLI内部のJS例外メッセージがそのまま入る（`readControlResponse`が拾う）。ここでは
+ *   `response.ok`をそのまま使い、`error`はそのまま保持する（画面へ出す際のマスキングは
+ *   呼び出し側＝`sideQuestion.ts`の`describeSideQuestionError`が担う。内部実装の露出を
+ *   防ぐのは表示層の責務にする）
+ * - モデル実行中の失敗（ツール呼び出し試行・APIエラー）は`subtype:"success"`の封筒に
+ *   `synthetic:true`で隠れる。ここでは読み取るだけに留め、失敗として扱うかどうかの判定は
+ *   `synthetic`をそのまま返して呼び出し側へ委ねる
+ *
+ * 成功の封筒なのに`response`本文が読み取れない（空文字・欠落）場合は、まず
+ * `payload.error`（あれば）を理由として使い、無ければ汎用文言にする（レビュー指摘:
+ * 空/欠落時に`payload?.['error']`を見ずに固定文言を返していた点の修正）。CLIが将来
+ * この応答の中身だけ形を変えても、黙って空応答を成功と誤判定しないための安全側。
  */
 export function readSideQuestionResult(response: ControlResponse): SideQuestionResult {
   if (!response.ok) {
@@ -602,7 +620,7 @@ export function readSideQuestionResult(response: ControlResponse): SideQuestionR
       response: undefined,
       synthetic: undefined,
       refusalFallback: undefined,
-      error: '応答を読み取れませんでした',
+      error: strOrUndefined(payload?.['error']) ?? '応答を読み取れませんでした',
     };
   }
   const syntheticRaw = payload?.['synthetic'];

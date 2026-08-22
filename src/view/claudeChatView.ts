@@ -11,6 +11,7 @@ import {
 import { debugLogCandidates } from '../claude/cliLocator';
 import { describeForkFromTurnError } from '../claude/forkFromTurn';
 import {
+  capSideQuestionHistory,
   finishedSideQuestionDisplay,
   pendingSideQuestionDisplay,
   progressSideQuestionDisplay,
@@ -769,6 +770,8 @@ export class ClaudeChatViewManager
    * このタブで過去に送った脇道の質問（`entry.sideQuestionHistory`）を`history`として
    * 添え、`/btw`を連続で送ったときに前のやり取りを踏まえられるようにする
    * （本流の会話そのものは踏まえない。`control.ts`の`buildSideQuestionRequest`参照）。
+   * `sideQuestionHistory`は無制限に伸びないよう`capSideQuestionHistory`で直近
+   * `MAX_SIDE_QUESTION_HISTORY`件へ収める（`sideQuestion.ts`参照）。
    */
   private async startSideQuestion(entry: ClaudePanel, question: string): Promise<void> {
     const id = `sideQuestion:${randomUUID()}`;
@@ -795,7 +798,10 @@ export class ClaudeChatViewManager
             ? undefined
             : `${result.refusalFallback.originalModel} が拒否したため ${result.refusalFallback.fallbackModel} が応答`,
       };
-      entry.sideQuestionHistory = [...entry.sideQuestionHistory, historyEntry];
+      entry.sideQuestionHistory = capSideQuestionHistory([
+        ...entry.sideQuestionHistory,
+        historyEntry,
+      ]);
     }
   }
 

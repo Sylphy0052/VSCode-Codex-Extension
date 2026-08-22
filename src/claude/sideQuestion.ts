@@ -1,4 +1,8 @@
-import type { ControlRequestProgress, SideQuestionResult } from './control';
+import type {
+  ControlRequestProgress,
+  SideQuestionHistoryEntry,
+  SideQuestionResult,
+} from './control';
 
 /**
  * 脇道の質問（issue #334、design.md §14.62、Codex TUIの `/btw` 相当）の見せ方。
@@ -75,6 +79,10 @@ export function progressSideQuestionDisplay(
  * 作らず1項目に収めるため、見た目を揃えるにはQ/Aを1つの本文の中で明示する必要がある）。
  * `refusalFallback` が付いていれば（元のモデルが拒否し別モデルへ切り替わった）、
  * その旨を注記へ足す。
+ *
+ * `result.synthetic === true`（モデルが実際には文章で回答しなかった。design.md §14.62）の
+ * ときは、封筒レベルは成功（`ok:true`）でもエラー相当として扱う（`rewind_conversation`の
+ * `rewound`と同じく、封筒の外側だけでなく本体のフィールドまで見て判定する必要がある）。
  */
 export function finishedSideQuestionDisplay(
   question: string,
@@ -84,7 +92,14 @@ export function finishedSideQuestionDisplay(
     return {
       status: 'failed',
       text: question,
-      detail: `脇道の質問を送れませんでした: ${result.error ?? '不明なエラー'}`,
+      detail: describeSideQuestionError(result.error),
+    };
+  }
+  if (result.synthetic === true) {
+    return {
+      status: 'failed',
+      text: question,
+      detail: describeSyntheticSideQuestionResponse(result.response),
     };
   }
   const fallbackNote =
@@ -100,4 +115,71 @@ export function finishedSideQuestionDisplay(
     text: `${question}\n\n${result.response}`,
     detail,
   };
+}
+
+/**
+ * 制御応答の封筒レベルの失敗（`response.ok === false`）を、利用者向けの文言へ変換する。
+ *
+ * 実測（design.md §14.62、`/tmp`の実測記録）で分かったのは、この経路（構造エラー。
+ * `history`が配列でない等）は`subtype:"error"`の封筒で返り、`error`には**CLI内部のJS
+ * 例外メッセージがそのまま**入る（例: `Bt.map is not a function...`）ということ。
+ * `describeForkFromTurnError`（issue #494）のような既知のエラー文字列カタログは作れない
+ * ——rewind_conversationの`turn running`等と違い、この文言は安定したエラーコードではなく
+ * 実行時ごとに変わりうる内部実装依存の例外テキストだからである。そのため個別マッピングは
+ * せず、常に汎用文言へ丸める（そのまま画面へ出すと内部実装が露出する）。
+ */
+export function describeSideQuestionError(_error: string | undefined): string {
+  return '脇道の質問を送れませんでした（CLI側でエラーが発生しました）';
+}
+
+/**
+ * `synthetic:true`（モデルが実際には文章で回答しなかった）の応答本文を、利用者向けの
+ * 説明へ変換する。
+ *
+ * `response`にはCLIが生成した英語固定のプレースホルダ文言が入る（実測、バイナリの
+ * `mZE()`関数解析。design.md §14.62参照）。`describeForkFromTurnError`と同じ考え方で、
+ * 既知の2パターン（モデルがツール呼び出しを試みた場合／APIエラー時）は日本語の説明を
+ * 前に添えて残し、未知のパターンは汎用文言へ丸める。**この2パターンはソース読みのみで
+ * 実発火は未確認**（design.md §14.62「未確認」参照）だが、プレースホルダ文言そのものは
+ * 捨てずに残すため、パターンを外しても利用者が読める情報は失われない。
+ */
+export function describeSyntheticSideQuestionResponse(response: string): string {
+  if (/^\(The model tried to call /.test(response)) {
+    return (
+      'モデルがツール呼び出しを試みたため、直接の回答は得られませんでした。' +
+      `質問を言い換えるか、主会話で聞いてください（CLIの応答: ${response}）`
+    );
+  }
+  if (/^\(API error:/.test(response)) {
+    return `APIエラーのため応答を生成できませんでした（CLIの応答: ${response}）`;
+  }
+  return `モデルは実際には回答しませんでした（CLIの応答: ${response}）`;
+}
+
+/**
+ * このタブで送った脇道の質問の履歴（`history`としてCLIへ渡す）に持たせる上限件数
+ * （issue #334のレビュー指摘）。
+ *
+ * `/btw`を送るたびに`sideQuestionHistory`へ追記していく実装のままだと、質問・応答の
+ * 全文が1タブ内で無制限に積み上がり、以後の全ての`side_question`リクエストの
+ * ペイロードへ単調増加した状態で乗り続ける。
+ */
+export const MAX_SIDE_QUESTION_HISTORY = 20;
+
+/**
+ * `sideQuestionHistory`を上限件数へ収める。
+ *
+ * 「超えた分を1件の要約エントリへまとめる」方式（`roadmap.ts`の
+ * `MAX_ROADMAP_PARSE_WARNINGS`等、他のワークフローで採用している形）は採らない。
+ * `history`はCLIへそのまま渡りモデルが実際の質問・応答として読むため、そこへ「N件省略」
+ * のような拡張機能側のメタ情報を実際のQ/Aの形で混ぜ込むと、モデルが実在しないやり取りを
+ * 実際の会話として解釈しかねない。そのため方式は**古いものから単純に捨てる（FIFO）**に
+ * 統一し、直近`MAX_SIDE_QUESTION_HISTORY`件だけを残す（design.md §14.62参照）。
+ */
+export function capSideQuestionHistory(
+  history: readonly SideQuestionHistoryEntry[],
+): SideQuestionHistoryEntry[] {
+  return history.length <= MAX_SIDE_QUESTION_HISTORY
+    ? [...history]
+    : history.slice(history.length - MAX_SIDE_QUESTION_HISTORY);
 }
