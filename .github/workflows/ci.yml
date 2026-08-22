@@ -50,5 +50,12 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # tsc --noEmitは型のみを検査し、esbuildによるバンドルが成功するかは確認しない。
+      # 動的import、モジュール解決の差、--externalの指定漏れなどは型検査を通っても
+      # バンドル時に失敗しうるため、配布物（dist/extension.js）が組み立てられることを
+      # ここで検証する。
+      - name: Build
+        run: npm run build
+
       - name: Test
         run: npm test
