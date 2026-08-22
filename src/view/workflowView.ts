@@ -411,6 +411,13 @@ export class WorkflowViewManager implements vscode.Disposable {
       }
       return;
     }
+    if (type === 'answerAskUser' && typeof m['choiceIndex'] === 'number') {
+      // design.md §16.33。Webviewは信頼境界の外側なので、回答待ちが実際に存在するかは
+      // `WorkflowRunner.answerAskUser`側（`runnerOrchestrator.ts`の`answerAskUser`）が
+      // 都度確かめる。ここでは型だけ絞って渡す
+      this.runner.answerAskUser(runId, m['choiceIndex']);
+      return;
+    }
 
     const taskId = m['taskId'];
     if (typeof taskId !== 'string') {
@@ -546,6 +553,7 @@ ${workflowStyles()}
         <button id="orchSendBtn" type="button">送る</button>
         <button id="orchOpenBtn" type="button" class="secondary">会話を開く</button>
       </div>
+      <div id="orchAskUser" class="orch-ask-user" hidden></div>
     </div>
   </div>
 

@@ -673,6 +673,14 @@ export interface OrchestratorControlPort {
   decideApproval(taskId: string, decision: string): OrchestratorControlResult;
   updateTaskPrompt(taskId: string, continuePrompt: string): OrchestratorControlResult;
   /**
+   * 人へ問う（design.md §16.33、Issue #583）。問いの本文と選択肢（2〜4個）を受け取り、
+   * ワークフローViewへ出す。人が選ぶまでオーケストレーターは待つ（`live.pendingAskUser`が
+   * 立っている間、`notifyOrchestrator`/`sendUserMessageToOrchestrator`は送信を止める。
+   * `runnerOrchestrator.ts`参照）。1つのrunで呼べる回数には上限があり
+   * （`agent.workflows.maxAskUserPerRun`、既定3）、超えたら拒否する。
+   */
+  askUser(question: string, choices: readonly string[]): OrchestratorControlResult;
+  /**
    * 最終マージ（design.md §16.26、`finalMerge: orchestrator`）をmainへ進めるか
    * （`decision: 'merge'`）、PR/MRを残して保留するか（`decision: 'hold'`）を答える。
    * `reason`（理由）は必須。runId・対象taskIdを引数に取らない（run全体で1つの判断で、
@@ -766,6 +774,49 @@ export const UPDATE_TASK_PROMPT_TOOL: McpToolDefinition = {
   },
 };
 
+/**
+ * `ask_user`ツール（design.md §16.33、Issue #583）。オーケストレーター専用の制御ツール。
+ *
+ * §16.23が当初「専用のask_userツールは置かない（返事があるまでツールの中で待つ形は
+ * デッドロックを持ち込む）」としていた判断を、この節で覆した。ここでのツール呼び出しは
+ * **HTTPレスポンスを保留しない**（同期的に`accepted`を返してすぐ終わる）。「人が選ぶまで
+ * 待つ」は、MCPのレスポンスを止める形ではなく、`live.pendingAskUser`が立っている間
+ * オーケストレーターへの以降の送信（新しいイベント通知・人の発話）を止める形で実現する
+ * （`runnerOrchestrator.ts`の`notifyOrchestrator`/`sendUserMessageToOrchestrator`参照）。
+ * トランスポート層のリクエストを保留する形は採らなかった——保留中の接続にタイムアウトが
+ * 無ければ、人が答えないまま放置したときにHTTPコネクションが無期限に残ってしまう。
+ *
+ * 呼べる条件（担当領域をまたぐ変更・設計の前提を変える変更・受入基準を下げる判断・
+ * 同じ失敗を3回繰り返して打つ手が尽きた場合）はモデルへの指示（description）でしか
+ * 伝えられない。機械的に強制するのは呼べる回数の上限（`agent.workflows.maxAskUserPerRun`）
+ * だけである（design.md §16.33「呼べる条件を絞る」）。
+ */
+export const ASK_USER_TOOL: McpToolDefinition = {
+  name: 'ask_user',
+  description:
+    '人（実行しているユーザー）へ確認する。次の場合に限って使うこと: 担当領域をまたぐ変更' +
+    '（他のワークフローへ影響する）／設計の前提を変える変更／受入基準を下げる判断／' +
+    '同じ失敗を3回繰り返して打つ手が尽きた場合。それ以外の判断は自分で行うこと。' +
+    'ワークフローViewへ問いと選択肢を出し、人が選ぶまで応答は止まる（このツール自体は' +
+    'すぐ受付結果を返す）。1つのrunで呼べる回数には上限があり、超えると拒否され、' +
+    '自分で判断するかdecide_final_mergeのholdで止めるよう促される。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      question: { type: 'string', description: '問いの本文' },
+      choices: {
+        type: 'array',
+        items: { type: 'string' },
+        minItems: 2,
+        maxItems: 4,
+        description: '選択肢（2〜4個）',
+      },
+    },
+    required: ['question', 'choices'],
+    additionalProperties: false,
+  },
+};
+
 export const DECIDE_FINAL_MERGE_TOOL: McpToolDefinition = {
   name: 'decide_final_merge',
   description:
@@ -798,6 +849,7 @@ export const ORCHESTRATOR_CONTROL_TOOLS: readonly McpToolDefinition[] = [
   DECIDE_APPROVAL_TOOL,
   UPDATE_TASK_PROMPT_TOOL,
   DECIDE_FINAL_MERGE_TOOL,
+  ASK_USER_TOOL,
 ];
 
 const ORCHESTRATOR_CONTROL_TOOL_NAMES: ReadonlySet<string> = new Set(
@@ -1284,6 +1336,16 @@ export class MessagingMcpServer {
     // 他の制御ツールと違って`taskId`を取らない。`target`（`taskId`）を読む前に分岐する
     if (name === DECIDE_FINAL_MERGE_TOOL.name) {
       const result = control.decideFinalMerge(str(args['decision']), str(args['reason']));
+      return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
+    }
+    // `ask_user`（design.md §16.33）も`taskId`を取らない（decide_final_mergeと同じ理由で
+    // `target`を読む前に分岐する）
+    if (name === ASK_USER_TOOL.name) {
+      const rawChoices = args['choices'];
+      const choices = Array.isArray(rawChoices)
+        ? rawChoices.filter((c): c is string => typeof c === 'string')
+        : [];
+      const result = control.askUser(str(args['question']), choices);
       return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
     }
 

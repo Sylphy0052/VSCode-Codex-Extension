@@ -4982,6 +4982,7 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 | `decide_approval`    | `taskId` / `decision`         | `WorkflowRunner.decideApproval`                      |
 | `update_task_prompt` | `taskId` / `continuePrompt`   | 後述（新設）                                         |
 | `decide_final_merge` | `decision` / `reason`         | 後述（新設、§16.26）                                 |
+| `ask_user`           | `question` / `choices`        | 後述（新設、§16.33、Issue #583）                     |
 
 - 制御ツールは**既存のrunnerのメソッドをそのまま呼ぶ**。Viewのボタンが通るのと同じ経路にし、モデル用の別経路を作らない。状態遷移の正しさを1か所（`runState.ts`）に保つため
 - `stop_task` の対象は「走行中のタスク」に限らない。**衝突解決セッション（`live.mergeResolutions`。§16.17「コンフリクト」5.）も対象**（issue #514）。`merging` のタスク自身のループは既に終わっているが、統合worktreeで開く衝突解決セッションはまだ生きており、そちらへ `stopLoop()` を届ける。`WorkflowRunner.stopTask` は戻り値（`boolean`）を「送り先を見つけて `stopLoop()` を呼べたか」の根拠にし、見つからなければ `false` を返す。制御ツール側（`buildOrchestratorControlPort` の `stopTask`）はこれを見て `no(...)` を返し、届いていないのに「止めました」という成功を返さない。人はワークフローViewを見て「止まっていない」ことに気づけるが、オーケストレーターは応答（`accepted`）しか見ないため、一度嘘の成功を返すとその経路を二度と再試行しない
@@ -5008,7 +5009,8 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 - **チャットタブ**: 全文・思考の折りたたみ・承認カード・Markdown描画は通常のチャット画面がすでに持っている。オーケストレーター用に作り直さず、`会話を開く`（またはオーケストレーター欄の要約の押下）で同じ画面を前面に出す（`reveal`）
 - webview → ホスト: `{type: 'orchestratorSend', text}` / `{type: 'orchestratorReveal'}`（`workflowScript.ts` → `workflowView.ts` の `handleMessage`）
 - ホスト → webview: 既存の `state` メッセージへ `orchestrator: {available, busy, lastSummary}` を足す（差分のみ送る既存の流儀に乗せる）
-- **人が最後に見てから応答が増えていれば、オーケストレーター欄に未読の印を出す。** 疑問点の確認（オーケストレーターから人への質問）はこの経路で気付かせる。専用の `ask_user` ツールは置かない。質問は普通の応答として出せば足り、ツールにすると「返事があるまでツールの中で待つ」形になって§16.21が避けたデッドロックを持ち込む
+- **人が最後に見てから応答が増えていれば、オーケストレーター欄に未読の印を出す。** オーケストレーターが自発的に報告するだけの疑問点はこの経路で気付かせれば足りる。
+- **人へ確認を絞って求める場合は`ask_user`ツールを使う（W8、Issue #583、§16.33）。** 当初はこの§16.23だけで「ツールにすると返事があるまでツールの中で待つ形になり、§16.21が避けたデッドロックを持ち込む」との理由で専用ツールを置かない方針だったが、§16.33ではツール呼び出し自体は同期的にすぐ返し（HTTPレスポンスを保留しない）、「人が選ぶまで待つ」は送信ゲート（`notifyOrchestrator`等がイベント送信を止めて溜める）だけで実現しているため、デッドロックは持ち込まない
 - 入力欄へ入れた文字列は人の入力であり、タスクの出力ではない。`wrapTaskMessage` の囲いは付けない。逆に、イベント通知に含まれるタスク由来の文字列（応答の1行要約・失敗理由）は**エージェントの出力なので囲う**（`wrapTaskMessage` / `TASK_MESSAGE_GUIDANCE` を再利用し、`stripControlCharsPreservingNewlines` を通す）
 
 #### 信頼境界
@@ -5395,6 +5397,125 @@ hub.sendMessage({ from: taskId, to: ORCHESTRATOR_CONNECTION_ID, body: question, 
 - `test/unit/messaging.test.ts`（`describe('ask_orchestrator（design.md §16.32、Issue #571）')`）: `tools/call`経由で`ask_orchestrator`を呼ぶと`send_message`と同じ経路でオーケストレーター宛に積まれ`kind: 'question'`が付くこと、`blocking: true`が`expectReply: true`として伝わること、送信元は接続から判別され引数のなりすましが効かないこと、オーケストレーター自身の接続には見えず名指しでも拒否されること、`MAX_MESSAGE_BODY_LENGTH`を共有すること
 - `test/unit/runner.test.ts`（`describe('WorkflowRunner: ask_orchestrator（design.md §16.32、Issue #571）')`）: 問いが`taskQuestion`として（`taskMessage`ではなく）届くこと、`blocking: true`で`waitingReply`へ入り既存の`send_message`の返信で再開すること、答えが来ないまま`replyTimeoutSec`を超えても既存の待ちぼうけ検出で解放されること、解放後も答えが来ないまま`maxIterations`を使い切ると`failed`へ確定すること（RED実測は`runnerMessaging.ts`の`deliverTaskMessageToOrchestrator`のkind分岐1行のみを潰して行い、「taskQuestionとして届く」テスト1件だけが失敗することを確認済み）
 - `docs/manual-test.md` W-L: 実VSCode上でask_orchestratorが実際にオーケストレーターへ届くこと・blockingの実際の待ち・問いと答えがチャットタブに残ることを確認する
+
+### 16.33 オーケストレーターから人へ確認する経路（`ask_user`、roadmap W8、Issue #583）
+
+§16.23はオーケストレーター専用の制御ツール群（`list_tasks`/`send_message`/`get_run_status`/`stop_task`/`retry_task`/`continue_task`/`decide_approval`/`update_task_prompt`/`decide_final_merge`）を置く一方、「人へ確認する」経路は「オーケストレーター欄の未読の印に気付かせる」だけで、**人が選ぶまでオーケストレーターを止める**手段が無かった。W4（roadmap）が「担当領域をまたぐ変更」「設計の前提を変える変更」の判断をオーケストレーター自身へ委ねる以上、委ねきれない・委ねてはいけない一部の判断（後述の4条件）だけは人へ戻す経路が要る。これがこの節が足す`ask_user`ツールである。
+
+#### なぜ§16.23の元の判断（「専用ツールは置かない」）を覆したか
+
+§16.23は当初、「ツールにすると『返事があるまでツールの中で待つ』形になって§16.21が避けたデッドロックを持ち込む」という理由で専用ツールを避けていた。§16.21が避けたデッドロックとは、MCPのHTTPレスポンスを長時間保留する（=接続を占有し続ける）ことで、他の正当なMCP呼び出しがブロックされる形を指す。
+
+`ask_user`はこの前提を崩さない。**ツール呼び出し自体は他の制御ツールと同じく同期的にすぐ返る**（`accepted: true/false`を返すだけで、HTTPレスポンスを保留しない）。「人が選ぶまで待つ」は、レスポンスの保留ではなく、**オーケストレーターへのイベント送信を止めて溜める送信ゲート**として実装した（次項)。したがってHTTPレスポンスを保留する経路は一切増えておらず、§16.21が避けたかったデッドロックは持ち込んでいない。
+
+#### `ask_user`ツール（`messaging.ts`）
+
+`decide_final_merge`と同じく、オーケストレーター専用の接続にだけ見せる（タスク側の接続には現れず、名指しで呼んでも「未知のツール」として拒否する）。`decide_final_merge`と同じ理由で`taskId`を取らないため、`handleControlToolCall`では`taskId`抽出より前の特別扱いの分岐で処理する。
+
+| 引数 | 型 | 意味 |
+| --- | --- | --- |
+| `question` | string | 問いの本文 |
+| `choices` | string[]（2〜4個） | 選択肢 |
+
+ツールの説明文（`description`）へ、**呼べる条件を絞る文言**を書いた: 担当領域をまたぐ変更（他のワークフローへ影響する）・設計の前提を変える変更・受入基準を下げる判断・同じ失敗を3回繰り返して打つ手が尽きた場合、の4つに限る。この絞り込みは**説明文だけで実現し、機械的には検証しない**（モデルへの指示であり、コード側で「本当に担当領域をまたいでいるか」を判定する手段が無いため）。機械的に強制するのは次項の呼び出し回数上限だけである。
+
+引数の形式検証（`beginAskUser`、`runnerOrchestrator.ts`）は次のとおり:
+
+- `question`が空文字（trim後）なら拒否
+- `question`が`MAX_MESSAGE_BODY_LENGTH`（4000文字、`send_message`/`update_task_prompt`と共有）を超えたら拒否
+- `choices`が2〜4個の範囲外なら拒否
+- 既に回答待ちの質問がある（`live.pendingAskUser !== undefined`）間は次の`ask_user`を拒否する（**1runにつき同時に1問だけ**。人が答えを選ぶまで次の問いを出せない）
+
+#### 呼び出し回数の上限（「確認を絞る」の機械的な強制）
+
+呼べる条件（4つ）自体は説明文でしか強制できないため、代わりに**1runあたりの呼び出し回数**を機械的に絞る。既定は3回（`DEFAULT_MAX_ASK_USER_PER_RUN`、`orchestratorSession.ts`）。`agent.workflows.maxAskUserPerRun`（1〜20、既定3。範囲外・非数値・非整数は既定へ落とす。`config.ts`の`normalizeMaxAskUserPerRun`）で変更できる。
+
+上限を超えた呼び出しは受付自体を拒否し（`send_message`と同じ流儀）、理由に**自分で判断するか、`decide_final_merge`の`hold`で止めるよう**明記する。「確認したいことがまだあるが上限に達した」場合の代替手段を用意しておかないと、オーケストレーターが行き詰まったまま`maxIterations`を消費するだけになりかねないため、既存の停止手段（`decide_final_merge`の`hold`）を案内する。
+
+`LiveOrchestrator.askUserCount`はrunの開始時に0で初期化し（`setupOrchestratorForStart`）、`beginAskUser`が受け付けるたびに1加算する。カウンタはrun単位で、`decide_final_merge`の判断待ちのような特別な扱いは無い。
+
+#### 「人が選ぶまで待つ」の実装（送信ゲート。新しいタスク状態は増やしていない）
+
+`LiveRun.pendingAskUser`（`{question, choices, since}` | `undefined`）を「いま回答待ちの質問があるかどうか」の唯一の状態として持つ。これが`undefined`でない間、次の3箇所がオーケストレーターへの送信を止める:
+
+1. `notifyOrchestrator`（イベント通知の自動flush）: `!orchestrator.busy && live.pendingAskUser === undefined`のときだけ`flushOrchestrator`を呼ぶ。回答待ちの間に届いたイベント（タスク完了・失敗等）は`orchestrator.pending`に溜まったまま送られない
+2. `onOrchestratorStateChanged`（ターン終了時のflush）: `finishedTurn && live.pendingAskUser === undefined`のときだけ`flushOrchestrator`を呼ぶ。`ask_user`を呼んだターン自体が終わっても、回答が来るまで次のターンは開かない
+3. `sendUserMessageToOrchestrator`（人の自由記述の発話。ワークフローViewの入力欄）: `live.pendingAskUser !== undefined`なら`false`を返して送らせない。回答の経路を選択ボタン（`answerAskUser`）だけに絞り、モデルが「自由記述の返信」と「選択肢からの回答」のどちらを見ているかが常に一意に決まるようにする
+
+**新しいタスク状態（`TaskState`）は増やしていない。** `pendingAskUser`はrun全体に1つ持つ`LiveRun`のフィールドであり、オーケストレーター自身のセッションは`busy`のままで構わない（実際には送信ゲートで止まっているため、次のターンが開始されない形で待つ）。`waitingReply`/`waitingApproval`のような`TaskState`の追加やタイムアウト・待ちぼうけ検出の新設は行っていない（次項「兄弟の穴の確認」参照）。
+
+#### `answerAskUser`（回答の合流。busy中の回答を失わない）
+
+ワークフローViewの選択ボタンから`WorkflowRunner.answerAskUser(runId, choiceIndex)`を呼ぶ。`live.pendingAskUser`が無い・`orchestrator`セッションが無い（リロード後等）・`choiceIndex`が選択肢の範囲外・既に答え済み（配送待ちの間の二重回答）、のいずれかであれば`false`を返し何もしない（`sendToOrchestrator`と同じ「なにもしない」失敗の返し方）。
+
+**`ask_user`のツール呼び出しはオーケストレーターのターンの最中に届く。** つまり`beginAskUser`が走る時点で`orchestrator.busy`は`true`であり、`self.notify(runId)`で選択ボタンはその瞬間からViewに出る。人がそこですぐ押すと、`answerAskUser`が呼ばれる時点でもまだ`orchestrator.busy === true`のことがある。ここで`orchestrator.session.send`を素通しで呼んでしまうと、走行中のターンへ割り込む送信になり、`chatView.ts`の`sendOnce`は送信の失敗を投げ直さず`reportError`するだけであるため、失敗すれば**答えが届かないまま`pendingAskUser`だけが消えてボタンも無くなり、`ask_user`は待ちぼうけ検出を持たないため人は答え直せずrunが無期限に止まる**（レビュー指摘、実装直後に発見・修正）。
+
+これを避けるため、答えは`live.pendingAskUser.answeredChoice`（`string | undefined`）へ保持するだけにとどめ、実際の送信は`busy`でなくなってから行う:
+
+1. `answerAskUser`は`live.pendingAskUser`を`{...pending, answeredChoice: choice}`へ更新するだけ（**まだ送らない**）。`orchestrator.busy`が`false`ならこの場で`deliverAskUserAnswer`を呼んで即座に送る
+2. `orchestrator.busy`が`true`のままなら送らずに終わる。ターンが終わったとき（`onOrchestratorStateChanged`の`finishedTurn`の枝）に`live.pendingAskUser?.answeredChoice !== undefined`を見て、そこで`deliverAskUserAnswer`を呼ぶ（既存の`flushOrchestrator`の「ターンが終わってからまとめて送る」流儀と揃える）
+3. `deliverAskUserAnswer`が実際の送信を行う: `live.pendingAskUser`を`undefined`に戻す（次の`ask_user`が呼べるようになる）→ 回答待ちの間に送信ゲートで止めていた`orchestrator.pending`のイベントを、`composeOrchestratorPrompt(orchestrator.pending, answerText)`で答えの文言と**合流**させ、1回の送信にまとめる（答えだけを送って溜まっていたイベントを後回しにする形は採らない。§16.23「何が駆動するか」の合流と同じ流儀）→ `orchestrator.session.send(composed)`で送る（`sendUserMessageToOrchestrator`と同じ経路）
+
+**二重回答は`pending.answeredChoice !== undefined`で防ぐ。** 配送待ち（答え済みだがまだ送っていない）の間に選択ボタンが再度押されても（Viewは`answered: true`の間ボタンを出さないが、多層防御として`WorkflowRunner`側でも弾く）、`answerAskUser`は`false`を返し二重送信にならない。
+
+答えの文言はサーバ側が組み立てる固定文（`人がask_userの質問に答えました: "<選択肢の文字列>"`）で、人が選んだ選択肢の文字列をそのまま埋め込む。選択肢自体はオーケストレーター（エージェント）が`ask_user`の引数として出した文字列であり、次項の無害化の対象になる。
+
+`WorkflowRunSnapshot.pendingAskUser`には`answered: boolean`を持たせ（`live.pendingAskUser.answeredChoice !== undefined`をそのまま反映）、ワークフローViewは`answered: true`の間、選択ボタンの代わりに「答えました。オーケストレーターへ届くまでお待ちください。」を表示する（`workflowScript.ts`の`renderAskUser`）。
+
+#### 永続化（`finalMergeDecision`との違い、roadmap W10との関係）
+
+`finalMergeDecision`（§16.26）は判断待ちの状態を**永続化しない**方針である。理由は「対象（統合PR/MR）がホスト側で直接確認できるため、リロード後は再構築ではなく現況確認で足りる」ため。`ask_user`の問いにはそのような外部記録が無い（問い自体がオーケストレーターの発話でしかない）。
+
+roadmap W10（未実装、§16.33のスコープ外）は「`ask_user`待ちで落ちた場合は、再開時に問いを出し直す。人の答えを永続化の対象に含める」ことを求めている。この要求に応えるため、`ask_user`は**`finalMergeDecision`の前例から意図的に外れ**、`PersistedRun.pendingAskUser`（`{question, choices, askedAt}`）として`WorkflowRunner.persist()`で永続化する。
+
+- `live.pendingAskUser`が設定される（`beginAskUser`）・解除される（`answerAskUser`）たびに`persist()`を呼ぶ
+- `persist()`は`current?.pendingAskUser`へのフォールバックを**行わない**（他のフィールドと異なる）。回答待ちは「いま宙に浮いている問い」であり、`live.pendingAskUser`が`undefined`になった時点で消えるべき値であって、直前の確定値を保持し続ける性質のもの（`finalMergeOutcome`等）ではないため
+- リロード後（`restoreRunsForView`/`rebuildLiveRun`）は`live.pendingAskUser`を**復元しない**（`undefined`のまま）。オーケストレーターセッション自体（答えを送る先）が復元できない以上、`live.pendingAskUser`を復元しても答える経路が無く、`answerAskUser`を呼べば`orchestrator === undefined`で必ず`false`になる
+- `WorkflowRunSnapshot.pendingAskUser`は`live.pendingAskUser`（あれば`hasLiveSession: true`）と、無ければ`persisted.pendingAskUser`（`hasLiveSession: false`）のどちらかを返す（`runnerSnapshot.ts`の`buildPendingAskUserSnapshot`）。ワークフローViewはリロード後も**問いの文言だけは見えるが、答えられない**（選択ボタンを出さず、「このセッションは復元できていないため、いまは回答できません」を表示する）ことで、Viewを見た人が「宙に浮いた問いがあった」ことに気付ける
+
+**この節単体ではW10の「再開時に問いを出し直す」自体は実装していない。** `PersistedRun.pendingAskUser`は将来W10がその再質問の起点として使うためのデータで、この節ではリロード後の表示（現況の可視化）にしか使っていない。
+
+#### `ask_user`は`buildIntroBody`（オーケストレーターへの案内）に1文追記した
+
+`runnerOrchestrator.ts`の`buildIntroBody`（run開始時にオーケストレーターへ送る道具の説明）へ、`ask_user`の呼べる条件（4つ）と回数上限がある旨を1行追記した。**このとき、既存の`decide_final_merge`が同じ説明文に含まれていないことに気付いた**（§16.26で追加された際に案内文への追記が漏れていた、この節より前からある既存の穴）。この節のスコープ（`ask_user`）ではないため`decide_final_merge`側は直していないが、ここに記録しておく。
+
+#### 兄弟の穴の確認
+
+- **`ask_orchestrator`（§16.32、タスク→オーケストレーター）**: 逆方向（オーケストレーター→人）であり、送信ゲートではなく`waitingReply` + 待ちぼうけ検出という別の仕組みで「答えが来ないまま`maxIterations`に達したら失敗」を保証している。`ask_user`には`maxIterations`に相当する消費資源が無い（オーケストレーターはループを回さず、単発の送信ゲートで止まるだけ）ため、待ちぼうけ検出に相当する自動解放の仕組みは無い。**これは意図的な非対称**であり、代わりに呼び出し回数の上限（既定3回）と`decide_final_merge`の`hold`への案内が「行き詰まったまま無限に待つ」ことへの対処になる。回数上限が「機械的に絞る」役割を担うのは`ask_orchestrator`には無い性質で、`ask_user`が人に確認を求める側（乱用されるとView上の対応コストが人に乗る）だからこそ必要になる非対称でもある
+- **`decide_approval`/`waitingApproval`**: `ask_user`はタスクの`sandbox`/`approvalMode`/`autoApprove`を一切変更せず、承認要求そのものも発生させない。両者は経路として交わらない。`ask_user`の回答待ちの間にタスク側で承認要求（`waitingApproval`）が発生しても、`decide_approval`制御ツールは`pendingAskUser`を見ずに通常どおり動く（承認判断とask_userの回答待ちは独立した状態のため、互いをブロックしない）
+- **`finalMergeDecision`（§16.26）との相互作用**: `ask_user`の回答待ちの間に最終マージの判断待ちが同時に発生し得るが（両方とも`live`の別フィールド）、`decide_final_merge`は`pendingAskUser`を見ない・`ask_user`は`finalMergeDecision`を見ない、互いに独立している。**ただし両方が同時に立つと、人はワークフローViewで両方に答える必要があり、UI上の見え方の整理（両方の欄を同時に出す）は本実装の範囲内で対応済み**（`WorkflowRunSnapshot`は両フィールドを独立に持つ。表示側の排他制御は行っていない＝両方同時に出しても壊れない設計）
+
+#### 本文の無害化は§16.34の1箇所に一本化されたまま
+
+`ask_user`が扱う文字列（`question`・`choices`）はいずれもオーケストレーター（エージェント）の出力であり、外部/未信頼のテキストとして扱う。この節では**新しい無害化の呼び出しを追加していない**。
+
+- ワークフローViewの描画（`workflowScript.ts`の`renderAskUser`）は、`pending.question`・`choices`の各文字列を`textContent`（`text()`ヘルパー）へ代入するだけで、`innerHTML`は使わない。DOM挿入時点での無害化（HTMLエスケープ相当）はブラウザのtextContent代入そのものが担う
+- `answerAskUser`が組み立てる答えの文言（`人がask_userの質問に答えました: "<選択肢>"`）はサーバ側の固定文＋選択肢の埋め込みで、`orchestrator.session.send`経由でオーケストレーターへ渡る。この経路は`sendUserMessageToOrchestrator`（人の発話）と同じであり、§16.23のとおり人の入力として扱い`wrapEvent`の囲いは付けない（人の発話は元からタスク由来の文字列を偽装する経路ではないため）
+- `question`/`choices`自体をオーケストレーターへ送り返す経路（=オーケストレーター自身が出した文字列をオーケストレーターへ送り返す）は無い（`ask_user`は人向けの表示にしか使わない）ため、§16.34が定めた「タスク由来の文字列は`wrapEvent`で1回だけ無害化する」対象にも当たらない
+
+#### 影響範囲
+
+- `orchestratorSession.ts`: `DEFAULT_MAX_ASK_USER_PER_RUN`/`MIN_MAX_ASK_USER_PER_RUN`/`MAX_MAX_ASK_USER_PER_RUN`の追加
+- `config.ts`: `WorkflowsConfig.maxAskUserPerRun`・`normalizeMaxAskUserPerRun`の追加
+- `package.json`: `agent.workflows.maxAskUserPerRun`設定項目の追加
+- `messaging.ts`: `ASK_USER_TOOL`の追加・`OrchestratorControlPort.askUser`・`handleControlToolCall`への配線
+- `runner.ts`: `LiveOrchestrator.askUserCount`・`LiveRun.pendingAskUser`・`LiveAskUser`・`WorkflowRunSnapshot.pendingAskUser`・`WorkflowRunnerDeps.readMaxAskUserPerRun`・`WorkflowRunner.answerAskUser`の追加。`persist()`への`pendingAskUser`の書き出し
+- `runStore.ts`: `PersistedRun.pendingAskUser`の追加
+- `runnerRestore.ts`: 復元時は`live.pendingAskUser`を`undefined`のまま保つ
+- `runnerOrchestrator.ts`: `beginAskUser`/`answerAskUser`の新設。`notifyOrchestrator`/`onOrchestratorStateChanged`/`sendUserMessageToOrchestrator`への送信ゲートの追加。`buildIntroBody`への1文追記
+- `runnerSnapshot.ts`: `buildPendingAskUserSnapshot`の新設
+- `extension.ts`: `readMaxAskUserPerRun`の配線
+- `workflowView.ts`: `answerAskUser`メッセージの受信・HTML（`#orchAskUser`）の追加
+- `workflowScript.ts`: `renderAskUser`の新設（`applyState`/`applyNoRun`から呼ぶ）
+- `docs/manual-test.md` W-M: 実VSCodeでしか確かめられない受入基準（追記のみ、実施はしない）
+
+#### 確かめ方
+
+- `test/unit/messaging.test.ts`（`describe('オーケストレーター専用の制御ツール（design.md §16.23「道具」）')`内）: `ask_user`がオーケストレーター専用の接続にだけ現れ、タスク側の接続からは見えず名指しでも拒否されること、`tools/call`経由で引数どおり`OrchestratorControlPort.askUser`が呼ばれること、文字列でない`choices`の要素は除かれて渡ること、拒否されると`isError: true`になること
+- `test/unit/runner.test.ts`（`describe('WorkflowRunner: ask_user（design.md §16.33、Issue #583）')`）: 受け付けるとスナップショットへ問いが載ること、回答待ちの間は次の`ask_user`を拒否すること、`question`が空・`choices`が2〜4個の範囲外なら拒否すること、既定3回で上限に達し4回目を拒否しその理由が自己判断/`decide_final_merge`の`hold`を促すこと、`agent.workflows.maxAskUserPerRun`（`readMaxAskUserPerRun`）で上限を変えられること、`answerAskUser`が選んだ答えをオーケストレーターへ送り回答待ちを消すこと、範囲外の`choiceIndex`・回答待ちが無い場合は`false`を返し何も変えないこと、回答待ちの間はタスク完了通知の送信を止めて溜め`answerAskUser`が答えと合流させて送ること、回答待ちの間は人の自由記述の発話（`sendToOrchestrator`）を送らせないこと、リロード後は永続化された問いの文言だけ復元し`hasLiveSession: false`で答えられないこと、**`answerAskUser`はターンの最中（`orchestrator.busy: true`）に答えても送信を保留し、ターンが終わってからまとめて送ること（busy中の割り込み送信で答えが失われる穴の回帰テスト。レビュー指摘で発見・修正）**、配送待ちの間の二重回答は`false`を返し二重送信にならないこと。RED実測は上限判定（`orchestrator.askUserCount >= limit`）・送信ゲート2箇所（`notifyOrchestrator`/`sendUserMessageToOrchestrator`）・`answerAskUser`のbusyガード（`!orchestrator.busy`）・二重回答ガード（`pending.answeredChoice !== undefined`）・ターン終了時の配送分岐（`onOrchestratorStateChanged`の`deliverAskUserAnswer`呼び出し）のそれぞれ1行のみを潰して行い、対応するテストだけが正しい理由で失敗することを確認済み
+- `test/unit/config.test.ts`: `maxAskUserPerRun`の既定値（3）・範囲内の指定値・範囲外/非数値/非整数での既定値へのフォールバックを確認
+- `test/unit/webviewScript.test.ts`（`describe('workflowScript')`内）: `renderAskUser`が生成されること（`el('orchAskUser')`/`snapshot.pendingAskUser`/`answerAskUser`メッセージ型/`choiceIndex`を含むこと）、質問文が`textContent`相当（`text()`ヘルパー）で挿入されること。RED実測は`workflowScript.ts`側の送信メッセージ型の文字列1箇所を潰して行った
+- `docs/manual-test.md` W-M: 実VSCode上でask_userが実際にワークフローViewへ問いと選択肢を出すこと・選ぶまでオーケストレーターが止まって見えること・選ぶと答えが反映されること・上限に達すると拒否されること・リロード後に問いの文言だけ残り回答できないことを確認する
 
 ### 16.34 タスク間の直接メッセージングを廃し、オーケストレーターの中継にする（roadmap W9、Issue #547）
 
