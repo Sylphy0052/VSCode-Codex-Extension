@@ -502,6 +502,14 @@ export function markApprovalRejected(
  * 受理しないため人も救えない）。停止中は`skipped`（`runHalted`）のままにしておけば、
  * `retryTask`が理由を問わず`skipped`を受理して`haltedByUser`も解除するため、
  * 人が「再実行」で拾い直せる。
+ *
+ * 副作用として、複数の親からブロックされていたタスクは自動復帰しなくなる。`failure.kind`
+ * を`runHalted`へ書き換えると、下のフィルタ（`s.failure?.kind !== 'mergeBlocked'`）に
+ * 掛からなくなるため、停止が別経路（他タスクの`retryTask`）で解除された後にもう一方の親の
+ * マージが成功しても、このタスクは`pending`へ戻らない。その場合は対象タスク自身へ
+ * `retryTask`を呼べば救えるので詰みではないが、「両親のマージ完了で自動復帰」ではなく
+ * 「手動の再実行が要る」に変わる。停止という人の明示操作が挟まった後は、どの後続を再開
+ * するかを人に選ばせるほうが安全と判断してこの形にした。
  */
 export function markMergeSucceeded(
   run: RunState,
