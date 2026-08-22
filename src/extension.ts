@@ -552,6 +552,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       startTransport: startHttpMcpTransport,
       readReplyTimeoutSec: () => readWorkflowsConfig().replyTimeoutSec,
     },
+    // 衝突解決セッションの承認待ちアイドルタイムアウト（design.md §16.17「承認待ちの
+    // アイドルタイムアウト」、Issue #413 PR5）。`messaging`（省略可能な機能）とは無関係に
+    // 常に効かせるため、トップレベルへ配線する（`WorkflowRunnerDeps.readMergeApprovalTimeoutSec`
+    // のJSDoc参照）
+    readMergeApprovalTimeoutSec: () => readWorkflowsConfig().mergeApprovalTimeoutSec,
   });
   // isTaskManagedThreadのクロージャが参照する箱を埋める。以降の`workflowRunner`
   // （コマンド登録などで使う）はこの束縛を指し、常にWorkflowRunnerとして扱える

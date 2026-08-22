@@ -780,8 +780,17 @@
           "type": "number",
           "default": 300,
           "minimum": 1,
+          "maximum": 2147483,
           "scope": "machine-overridable",
-          "markdownDescription": "タスク間のメッセージング（`send_message` の `expectReply: true`）で、返信を待つ時間の上限（秒）。超えたタスクは返信を待たずに再開する（設計書 §16.21）。"
+          "markdownDescription": "タスク間のメッセージング（`send_message` の `expectReply: true`）で、返信を待つ時間の上限（秒）。超えたタスクは返信を待たずに再開する（設計書 §16.21）。上限は`2147483`秒（約24.8日、`setTimeout`の32bit上限）。範囲外（1未満・上限超過・非数値）の値は既定値（300秒）にフォールバックする。"
+        },
+        "agent.workflows.mergeApprovalTimeoutSec": {
+          "type": "number",
+          "default": 3600,
+          "minimum": 1,
+          "maximum": 2147483,
+          "scope": "machine-overridable",
+          "markdownDescription": "衝突解決セッション（設計書 §16.17「コンフリクト」）が承認待ちのまま止まってよい時間の上限（秒）。超えたら自動的にセッションを停止し、対象タスクを`blocked`にする（`git merge --abort`は呼ばない。統合worktreeは衝突した状態のまま残り、Viewの「再マージ」で再開できる）。承認待ちで**ない**（LLMが作業中の）時間は計測に含まれない。権限には関わらないため`forge`/`finalMerge`ほど強い制限は要らない。上限は`2147483`秒（約24.8日、`setTimeout`の32bit上限）。範囲外（1未満・上限超過・非数値）の値は既定値（3600秒）にフォールバックする。"
         },
         "agent.workflows.roadmapDir": {
           "type": "string",

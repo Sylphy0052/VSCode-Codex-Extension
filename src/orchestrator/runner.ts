@@ -301,6 +301,18 @@ export interface WorkflowRunnerDeps {
    * `claudeChatView.ts`側で実装済み（Issue #123）。
    */
   messaging?: WorkflowRunnerMessagingDeps;
+  /**
+   * `agent.workflows.mergeApprovalTimeoutSec`の現在値（秒）。省略時は
+   * `DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC`（既定1時間）を使う（Issue #413 PR5）。
+   * 衝突解決セッションが承認待ちのままこの秒数を超えたら自動的に停止する
+   * （`runnerMerge.ts`の`scheduleApprovalTimeout`）。`messaging.readReplyTimeoutSec`と
+   * 同じく、呼び出し側は使い捨てのオブジェクトではなく毎回現在値を返す関数を渡すこと。
+   *
+   * `messaging`（省略可能な機能）の配下ではなくトップレベルに置く。衝突解決は
+   * タスク間メッセージングの有無と無関係に起こるため（`messaging`が無い実行でも
+   * このタイムアウトは効かせる必要がある）。
+   */
+  readMergeApprovalTimeoutSec?: () => number;
   /** テスト用の差し替え口。既定は `node:crypto` の `randomUUID`。 */
   randomId?: () => string;
   /** テスト用の差し替え口。既定は `Date.now`。 */
@@ -369,6 +381,17 @@ export interface WorkflowWarning {
      * なる（`markMergeBlocked`）ぶんの区別をこの警告で持たせる。
      */
     | 'mergeInterrupted'
+    /**
+     * 衝突解決セッションが承認待ちのまま`agent.workflows.mergeApprovalTimeoutSec`
+     * （既定1時間）を超えたため、自動的に停止して`merging`を`blocked`へ確定させた
+     * （Issue #413 PR5）。`mergeInterrupted`と似ているが、止めたのは人ではなく
+     * タイムアウトである点が違う。この警告のあいだ、runの`haltedByUser`は変えない
+     * （このタスク以外の`pending`は通常どおり開始してよい。`mergeInterrupted`が
+     * 対応する`manual`/`interrupted`/`taskStopped`はタブ・View経由の人の操作で、
+     * run全体の停止を伴うのと対照的）。`git merge --abort`は呼んでいないため、
+     * 統合worktreeは衝突した状態のまま（Viewの「再マージ」で再開できる）。
+     */
+    | 'mergeApprovalTimeout'
     /**
      * 疑似worktree（design.md §16.20）の統合が衝突した。3-way mergeができないため、
      * 同じファイルへの変更は全て衝突になる（このタスクは`blocked`になる）。
@@ -794,18 +817,42 @@ export interface LiveOrchestrator {
 }
 
 /**
- * `live.mergeResolutions`の値（Issue #413 PR4）。
+ * `live.mergeResolutions`の値（Issue #413 PR4・PR5）。
  *
  * `waitingApprovalSinceMs`は、その解決セッションがいま承認待ちかどうかの印であり、
  * 承認待ちで**ない**間は`undefined`。`runnerMerge.ts`の`startMergeResolution`が
- * `session.onStateChanged`（`state.approvals.length > 0`）を見て更新する。名前に
- * `SinceMs`と付けているのは将来PR5（承認待ちのアイドルタイムアウト）が経過時間の起点
- * として使う想定のためで、PR4時点では「承認待ちかどうか」（`!== undefined`）としてしか
- * 使わない。
+ * `session.onStateChanged`（`state.approvals.length > 0`）を見て更新する。PR4時点では
+ * 「承認待ちかどうか」（`!== undefined`）としてしか使っていなかったが、PR5からは
+ * `approvalTimeoutTimer`の起点（経過時間の計算）としても使う。
  */
 export interface MergeResolutionEntry {
   session: TaskSession;
   waitingApprovalSinceMs: number | undefined;
+  /**
+   * 承認待ちのアイドルタイムアウト（`agent.workflows.mergeApprovalTimeoutSec`、
+   * Issue #413 PR5）用に張った`setTimeout`のハンドル。`waitingApprovalSinceMs`が変わる
+   * （承認待ちに入る・抜ける）たびに`runnerMerge.ts`が張り直す。承認待ちで**ない**間、
+   * または解決セッションそのものが終わった後は`undefined`。
+   *
+   * ポーリング（`setInterval`。`runnerMessaging.ts`の`waitingReplyPollTimer`と同じ形）
+   * ではなくエントリごとの`setTimeout`にしてあるのは、衝突解決セッションが
+   * `live.messaging`（タスク間メッセージング。省略可能）とは無関係に発生するため
+   * （design.md §16.21のポーリングタイマーへ相乗りすると、メッセージングを使わない実行で
+   * タイムアウトが一切効かなくなる）。
+   */
+  approvalTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * このセッションが承認待ちタイムアウトで自動停止されたかどうかの印（Issue #413 PR5）。
+   *
+   * `TaskSession.stopLoop()`は理由を`'taskStopped'`としてしか`onFinished`へ伝えられない
+   * ため、`runnerMerge.ts`の`finishMergeResolution`は`reason === 'taskStopped'`だけでは
+   * 「人が`WorkflowRunner.stop()`（全体停止）を押した」のか「このセッションだけが承認待ち
+   * タイムアウトで自動的に止まった」のかを区別できない。両者は扱いが異なる:
+   * 前者は既存の非破壊分岐（Issue #443）どおりrun全体を`haltedByUser`にする。後者は
+   * このタスク**だけ**を`blocked`にし、run全体は止めない（他の`pending`タスクは
+   * 通常どおり開始してよい）。この印を`finishMergeResolution`が読んで分岐を切り替える。
+   */
+  timedOutByApprovalTimeout: boolean;
 }
 
 /** `LiveTask`と同じ理由（直前のコメント参照）で`export`する（Issue #147）。 */
@@ -1868,6 +1915,10 @@ export class WorkflowRunner {
       const mergeResolutionEntries = [...live.mergeResolutions.entries()];
       live.mergeResolutions.clear();
       for (const [taskId, entry] of mergeResolutionEntries) {
+        // 承認待ちタイムアウトのタイマー（Issue #413 PR5）。`entry.session.dispose()`が
+        // 例外を投げても解放されるよう、セッションの解放より先に・別のtry/catchで行う
+        // （`clearTimeout`自体が投げることは無いが、`disposeQuietly`の対象を1つに絞る）
+        clearTimeout(entry.approvalTimeoutTimer);
         disposeQuietly(this.deps.log, () => entry.session.dispose(), `merge resolution ${taskId}`);
       }
       disposeQuietly(this.deps.log, () => closeMessaging(live), 'messaging');
