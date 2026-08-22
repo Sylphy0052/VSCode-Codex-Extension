@@ -234,6 +234,41 @@ describe('sanitizeForLog（Issue #474 レビュー指摘: HOME_DIR_USERNAME_PATT
   });
 });
 
+describe('sanitizeForLog（セキュリティ監査指摘: HOME_DIR_USERNAME_PATTERNの否定先読みへの:追加でコロン直後のパスが素通りする、medium）', () => {
+  it('ドライブレター直後のUsers以外のフォルダは引き続きマスクしない（回帰確認）', () => {
+    const raw = 'C:\\Backup\\Users\\Shared\\file.txt';
+    expect(sanitizeForLog(raw)).toBe(raw);
+  });
+
+  it('ドライブレター直下のUsersは引き続きマスクする（回帰確認）', () => {
+    const raw = 'C:\\Users\\alice\\file.txt';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('C:\\Users\\***\\file.txt');
+  });
+
+  it('単一スラッシュのfile:直後の/home/はマスクする', () => {
+    const raw = 'at file:/home/alice/project/index.js:10:5';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('file:/home/***/project/index.js');
+  });
+
+  it('error:直後の/Users/はマスクする', () => {
+    const raw = 'error:/Users/bob/secret/config.json';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('bob');
+    expect(result).toContain('error:/Users/***/secret/config.json');
+  });
+
+  it('三連スラッシュのfile:///home/はマスクする（回帰確認）', () => {
+    const raw = 'file:///home/alice/project';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('file:///home/***/project');
+  });
+});
+
 describe('sanitizeForLog（Issue #474 指摘2: バックスラッシュがエスケープされたWindowsパス）', () => {
   it('JSON.stringify経由で2連バックスラッシュになったWindowsパスでもユーザー名を隠す', () => {
     // 実際のランタイム文字列は C:\\Users\\carol\\project\\file.ts
@@ -557,4 +592,50 @@ describe('sanitizeForLog（ReDoS対策: 約100万文字規模の敵対的入力�
     sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
     expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
   });
+});
+
+describe('maskForLog（セキュリティ監査指摘: {n,}量指定子が約5.6MB超の単一トークンでV8をクラッシュさせる、high）', () => {
+  // 旧実装（`{7,}` 等、上限なしの下限のみ量指定子）はNode v24.19.0で
+  // 5,566,406〜5,593,750文字規模の単一トークンに対して
+  // `RangeError: Maximum call stack size exceeded` を投げていた。
+  // `sanitizeForLog` は `GIT_MAX_BUFFER_BYTES` / `CLI_MAX_BUFFER_BYTES`
+  // （いずれも10MB）を上限とするgit/CLIのstderrを直接受けるため、この規模の
+  // 入力は実際に到達しうる。クラッシュしないことと、上限を超えた分の残骸が
+  // ログに残らないこと（部分マスクにならないこと）の両方を固定する。
+  const CRASH_TIMEOUT_MS = 5000;
+
+  it('Bearerトークンが約560万文字でもクラッシュせずマスクする', () => {
+    const raw = 'Authorization: Bearer ' + 'A'.repeat(5_600_000);
+    const start = performance.now();
+    const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
+    expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
+    expect(result).toBe('Authorization: Bearer ***');
+  });
+
+  it('GitHubトークンが約560万文字でもクラッシュせずマスクする', () => {
+    const raw = 'token=gho_' + 'A'.repeat(5_600_000);
+    const start = performance.now();
+    const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
+    expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
+    expect(result).toBe('token=***');
+  });
+
+  it('sk-形式のキーが約560万文字でもクラッシュせずマスクする', () => {
+    const raw = 'key=sk-' + 'A'.repeat(5_600_000);
+    const start = performance.now();
+    const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
+    expect(performance.now() - start).toBeLessThan(CRASH_TIMEOUT_MS);
+    expect(result).toBe('key=***');
+  });
+
+  it('10MB規模（CLI_MAX_BUFFER_BYTES/GIT_MAX_BUFFER_BYTES相当）でもクラッシュせず、断片が残らない', () => {
+    // 単一トークンで10MB（各バッファ上限相当）とし、3トークン分を連結した約30MBの
+    // 入力で確認する。`stripControlChars`（本PRの変更対象外）の走査コストが
+    // 支配的で数秒かかりうるため、クラッシュ・部分マスクの有無のみを見る
+    // （速度自体は個別テストで別途確認済み）。
+    const raw =
+      'Bearer ' + 'A'.repeat(10_000_000) + ' gho_' + 'B'.repeat(10_000_000) + ' sk-' + 'C'.repeat(10_000_000);
+    const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
+    expect(result).toBe('Bearer *** *** ***');
+  }, 20_000);
 });
