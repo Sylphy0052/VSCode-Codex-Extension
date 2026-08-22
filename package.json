@@ -955,7 +955,7 @@
     "build:integration": "npm run build && npm run compile:integration",
     "test:integration": "npm run build:integration && vscode-test",
     "test:integration:xvfb": "npm run build:integration && bash scripts/xvfb-vscode-test.sh",
-    "test:external-cli": "node --test \"test/external-cli/*.test.mjs\"",
+    "test:external-cli": "node --test test/external-cli/*.test.mjs",
     "check": "bash scripts/check.sh",
     "package": "npm run build && vsce package --no-dependencies"
   },
