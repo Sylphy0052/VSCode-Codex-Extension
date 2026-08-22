@@ -3172,6 +3172,25 @@ export class WorkflowRunner {
       // （`resolveForgeState`参照）ため到達しない想定だが、安全側でここでも確認する
       return;
     }
+    // セキュリティ監査の指摘（2026-08-23）: `finalMerge: auto`の経路（`finalizeForge`）は
+    // `decideFinalMerge`（`orchestrator`/`confirm`が通る、`haltedByUser`を見るガードが
+    // 既にある）を経由せずここへ直接来るため、W1（Issue #335）のガードが素通りする
+    // 兄弟の穴になっていた。この関数は`auto`/`orchestrator`/`confirm`のどちらの経路
+    // からも呼ばれる唯一の合流点（このJSDoc冒頭参照）なので、ここで確認すれば全経路を
+    // 一様に守れる。以降のCI待ち・取り込み直しループ中の停止は`runFinalMergeWithCiGate`
+    // へ渡す`isCancelled`コールバックが見る（design.md §16.36）
+    if (live.runState.haltedByUser) {
+      this.deps.log.warn(`[workflow ${runId}] 人が停止したため最終マージを中止しました`);
+      live.warnings.push({
+        kind: 'forgeFailed',
+        taskId: undefined,
+        message: '人が停止したため最終マージを中止しました',
+      });
+      live.finalMergeOutcome = 'failed';
+      void this.persist(runId);
+      this.notify(runId);
+      return;
+    }
     // design.md §16.18「統合層のPR/MRもDraftで作る。ただしこちらは最終マージの直前に
     // readyへ切り替える。Draftのままではマージできないため、タスク層とは順序が違う」。
     // タスク層（`runTaskPullRequestFlow`）はマージ後にreadyへ切り替えるが、統合層は
@@ -3221,7 +3240,13 @@ export class WorkflowRunner {
       forge.host,
       live.integration.cwd,
       live.integrationPullRequest?.number,
-      this.readCiGateConfig(),
+      {
+        ...this.readCiGateConfig(),
+        // CI待ちのポーリング・取り込み直しの再試行ループの各周回で、人が「全体の停止」を
+        // 押したか（`disposing`＝拡張機能終了中も含む）を確認するコールバック
+        // （design.md §16.36、セキュリティ監査の指摘。2026-08-23）
+        isCancelled: () => live.runState.haltedByUser || this.disposing,
+      },
     );
     if (!merge.ok) {
       this.deps.log.warn(`[workflow ${runId}] 最終マージに失敗しました: ${merge.message}`);

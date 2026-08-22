@@ -1086,12 +1086,18 @@ export async function markPullRequestReady(
  * CIチェックの集約結果（design.md §16.36）。
  *
  * - `none`: チェックが1件も設定されていない（CI未設定リポジトリ）。この場合は待たずに
- *   即座にマージへ進む（受入基準「CIが設定されていないリポジトリでは従来どおり即マージする」。
- *   チェックが0件なのと赤なのを取り違えない）
+ *   即座にマージへ進む（受入基準「CIが設定されていないリポジトリでは従来どおり即マージする」）。
+ *   **`none`はリポジトリ側が意味を持って返す明示的な形（`statusCheckRollup: []` /
+ *   `head_pipeline: null`）に限る。** JSONの解析自体には成功したが期待するキーが
+ *   無い・型が違う（`gh`/`glab`のバージョン差やAPIのスキーマ変更を想定）場合は
+ *   `none`ではなく`failed`へ倒す（セキュリティ監査の指摘。2026-08-23。「チェックが
+ *   0件」と「応答の形が想定外」を型のレベルで区別し、後者を空配列と取り違えて
+ *   fail-openにしない）
  * - `pending`: 1件でも完了していないチェックがある
  * - `passed`: 全て完了し、失敗が無い
- * - `failed`: 完了したチェックの中に失敗がある（CLI呼び出し自体の失敗もここに含める。
- *   認証切れ等で状態を取得できない異常状態を`pending`のまま無期限に待たせないため）
+ * - `failed`: 完了したチェックの中に失敗がある（CLI呼び出し自体の失敗、および上記の
+ *   応答形が想定外な場合もここに含める。認証切れ等で状態を取得できない異常状態を
+ *   `pending`のまま無期限に待たせないため）
  */
 export type CiConclusion = 'none' | 'pending' | 'passed' | 'failed';
 
@@ -1109,16 +1115,18 @@ interface GithubStatusCheckRollupEntry {
 }
 
 /**
- * GitHubの`conclusion`のうち失敗として扱う値。`NEUTRAL` / `SUCCESS` / `SKIPPED`はここに
- * 含めない（`SKIPPED`は必須チェックでなければブロックしない、の意）。
+ * GitHubの`conclusion`のうち成功として扱う値。`SKIPPED`は必須チェックでなければ
+ * ブロックしない、の意。
+ *
+ * セキュリティ監査の指摘（2026-08-23）を受けて「失敗値のホワイトリスト」から
+ * 「成功値のホワイトリスト」へ反転した。失敗値のホワイトリストは、ここに載って
+ * いない未知の値（例: baseが進んだ後の再実行待ちを示す`STALE`）を素通しして成功
+ * 寄りに扱ってしまう構造的なfail-openになる。この機能はmainへの実マージを左右
+ * するため、知らない`conclusion`が来たときは待つ・失敗させる側（fail-closed）へ
+ * 倒すほうが安全（`STALE`はこの反転により自動的に失敗側へ回る。個別に列挙する
+ * 必要が無い）。
  */
-const GITHUB_FAILURE_CONCLUSIONS = new Set([
-  'FAILURE',
-  'CANCELLED',
-  'TIMED_OUT',
-  'ACTION_REQUIRED',
-  'STARTUP_FAILURE',
-]);
+const GITHUB_SUCCESS_CONCLUSIONS = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
 
 /**
  * `gh pr view <number> --json=statusCheckRollup` の標準出力を解釈する（純粋関数）。
@@ -1133,11 +1141,20 @@ export function parseGithubCiConclusion(stdout: string): CiConclusionResult {
   } catch {
     return { conclusion: 'failed', message: 'statusCheckRollupの出力を解釈できませんでした' };
   }
-  const rollup =
-    typeof data === 'object' && data !== null && 'statusCheckRollup' in data
-      ? (data as { statusCheckRollup: unknown }).statusCheckRollup
-      : undefined;
-  if (!Array.isArray(rollup) || rollup.length === 0) {
+  // パースはできたがオブジェクトでない・`statusCheckRollup`キーが無い・配列でない場合は
+  // 「チェックが0件（`none`）」ではなく想定外の応答形（`failed`）として扱う。空配列
+  // （キーがあり、明示的に0件）とは型のレベルで区別する（セキュリティ監査の指摘）
+  if (typeof data !== 'object' || data === null) {
+    return { conclusion: 'failed', message: 'statusCheckRollupの出力を解釈できませんでした（想定外の応答形）' };
+  }
+  if (!('statusCheckRollup' in data)) {
+    return { conclusion: 'failed', message: 'statusCheckRollupキーが応答に含まれていません（想定外の応答形）' };
+  }
+  const rollup = (data as { statusCheckRollup: unknown }).statusCheckRollup;
+  if (!Array.isArray(rollup)) {
+    return { conclusion: 'failed', message: 'statusCheckRollupが配列ではありません（想定外の応答形）' };
+  }
+  if (rollup.length === 0) {
     return { conclusion: 'none' };
   }
   const entries = rollup as GithubStatusCheckRollupEntry[];
@@ -1159,9 +1176,11 @@ export function parseGithubCiConclusion(stdout: string): CiConclusionResult {
       pending = true;
       continue;
     }
+    // 成功値のホワイトリストに無い値は全て失敗として扱う（`STALE`等の未知の値を
+    // 含む。`GITHUB_SUCCESS_CONCLUSIONS`のコメント参照）
     const conclusion = typeof entry.conclusion === 'string' ? entry.conclusion.toUpperCase() : '';
-    if (GITHUB_FAILURE_CONCLUSIONS.has(conclusion)) {
-      failed.push(conclusion);
+    if (!GITHUB_SUCCESS_CONCLUSIONS.has(conclusion)) {
+      failed.push(conclusion === '' ? '(不明)' : conclusion);
     }
   }
   if (failed.length > 0) {
@@ -1199,11 +1218,21 @@ export function parseGitlabCiConclusion(stdout: string): CiConclusionResult {
     return { conclusion: 'failed', message: 'マージリクエストの応答を解釈できませんでした' };
   }
   if (typeof data !== 'object' || data === null) {
-    return { conclusion: 'failed', message: 'マージリクエストの応答を解釈できませんでした' };
+    return { conclusion: 'failed', message: 'マージリクエストの応答を解釈できませんでした（想定外の応答形）' };
+  }
+  // `head_pipeline`キーが無い・`null`以外の想定外の型は「パイプライン無し（`none`）」
+  // ではなく想定外の応答形（`failed`）として扱う。GitLabが「パイプライン自体が無い」
+  // ことを表す明示的な形は`null`のみ（`docs.gitlab.com/api/merge_requests/`）。
+  // キーが無いのはAPIのスキーマ変更等を想定した異常系（セキュリティ監査の指摘）
+  if (!('head_pipeline' in data)) {
+    return { conclusion: 'failed', message: 'head_pipelineキーが応答に含まれていません（想定外の応答形）' };
   }
   const headPipeline = (data as Record<string, unknown>)['head_pipeline'];
-  if (headPipeline === null || headPipeline === undefined || typeof headPipeline !== 'object') {
+  if (headPipeline === null) {
     return { conclusion: 'none' };
+  }
+  if (typeof headPipeline !== 'object') {
+    return { conclusion: 'failed', message: 'head_pipelineの形が想定外です' };
   }
   const status = (headPipeline as Record<string, unknown>)['status'];
   const normalized = typeof status === 'string' ? status.toLowerCase() : '';
@@ -1259,14 +1288,25 @@ const CI_POLL_INTERVAL_MS = 15_000;
 
 const defaultCiWait: CiWait = () =>
   new Promise((resolve) => {
-    setTimeout(resolve, CI_POLL_INTERVAL_MS);
+    const timer = setTimeout(resolve, CI_POLL_INTERVAL_MS);
+    // `runner.ts`の最終マージ判断タイムアウト（`beginFinalMergeDecision`）と同じく、
+    // このタイマーだけでテスト・プロセス終了を妨げないようにする
+    // （レビュー指摘。2026-08-23。以前は`.unref()`が無く扱いが不揃いだった）
+    timer.unref?.();
   });
 
 export type CiWaitOutcome =
   | { kind: 'none' }
   | { kind: 'passed' }
   | { kind: 'failed'; message: string }
-  | { kind: 'timeout'; message: string };
+  | { kind: 'timeout'; message: string }
+  /**
+   * 人が「全体の停止」を押した（`isCancelled`が`true`を返した）ため、CIの完了を
+   * 待たずに切り上げた（セキュリティ監査の指摘。2026-08-23。W1（Issue #335）が
+   * 「判断が確定する瞬間」を守ったのに対し、W11（Issue #556）が新設したCI待ちの
+   * 長い区間（既定で最大約90分）を守る）。
+   */
+  | { kind: 'cancelled' };
 
 /**
  * CIチェックの完了を待つ（design.md §16.36「CIの完了を待つ」）。`pending`の間は
@@ -1283,9 +1323,16 @@ export async function waitForCiChecks(
   timeoutMs: number,
   now: () => number = Date.now,
   wait: CiWait = defaultCiWait,
+  isCancelled: () => boolean = () => false,
 ): Promise<CiWaitOutcome> {
   const deadline = now() + timeoutMs;
   for (;;) {
+    // ループの先頭で毎周確認する。これは「これから行う`fetchCiConclusion`の直前」で
+    // あると同時に、初回以外は「直前の`wait()`の直後」でもある（`wait()`の前後の
+    // 両方を見る、というセキュリティ監査の要求を1箇所の確認で満たす）
+    if (isCancelled()) {
+      return { kind: 'cancelled' };
+    }
     const result = await fetchCiConclusion(cli, host, cwd, number);
     if (result.conclusion === 'none') {
       return { kind: 'none' };
@@ -1360,6 +1407,13 @@ export async function updatePullRequestBranch(
  * REST APIのエラーメッセージをそのままstderrへ出す）ため、既知の文言をパターンで拾う。
  * 一致しなければ「baseの最新でない」以外の失敗（コンフリクト・権限不足等）として扱い、
  * 取り込み直しは試みない（取り込み直しても解決しない失敗を再試行で浪費しないため）。
+ *
+ * **逆に、実際は「baseの最新でない」以外の失敗（コンフリクト解消の案内文等）でも
+ * このパターンに一致してしまう場合がありうる**（テキストパターン照合の限界。特に
+ * `needs? (a )?rebase`は緩め）。誤って一致したときは`updatePullRequestBranch`を無駄に
+ * 1回試みるだけで、それでも解決しなければ次の`runFinalMerge`が同じ理由（コンフリクト等）
+ * で再び失敗し、`maxUpdateBranchRetries`の上限で必ず止まる（無限リトライにはならない。
+ * レビュー指摘。2026-08-23）。
  */
 const NOT_UP_TO_DATE_PATTERN =
   /not up.to.date|out.of.date with the base|base branch was modified|head branch was modified|is behind the (base|target) branch|needs? (a )?rebase/iu;
@@ -1391,13 +1445,22 @@ export interface CiGateConfig {
   maxUpdateBranchRetries: number;
   now?: () => number;
   wait?: CiWait;
+  /**
+   * 人が「全体の停止」を押したかどうかを問い合わせるコールバック（`config.now` /
+   * `config.wait`と同じ、テストから注入できる流儀）。`forge.ts`はロジック層で
+   * `LiveRun`を直接見られないため、`runner.ts`側が`live.runState.haltedByUser`
+   * （必要なら`dispose()`中かどうかも合わせて）を見る関数を渡す。省略時は常に
+   * `false`（＝停止していない）として扱う。セキュリティ監査の指摘（2026-08-23）:
+   * CI待ちのポーリング・取り込み直しの再試行ループの各周回で確認する
+   */
+  isCancelled?: () => boolean;
 }
 
 export type RunFinalMergeWithCiGateResult =
   | { ok: true }
   | {
       ok: false;
-      reason: 'ciFailed' | 'ciTimeout' | 'updateBranchFailed' | 'mergeFailed';
+      reason: 'ciFailed' | 'ciTimeout' | 'updateBranchFailed' | 'mergeFailed' | 'cancelled';
       message: string;
       /** 「baseの最新でない」ことによる取り込み直しを実際に試みた回数。 */
       updateBranchAttempts: number;
@@ -1421,6 +1484,15 @@ export type RunFinalMergeWithCiGateResult =
  * `number`が`undefined`のとき（統合PR/MRの番号が不明）はCI状態を取得しようがないため、
  * 待たずに`runFinalMerge`（番号不明時は自身がCLIを呼ばず`{ ok: false }`を返す）へそのまま
  * 委ねる。
+ *
+ * **`config.isCancelled`が`true`を返す間はマージへ進まない。** CI待ちのポーリングの各周回
+ * （`waitForCiChecks`の内部）、`waitForCiChecks`から制御が戻った直後（`none`/`passed`で
+ * 即座に返った場合を含む）、`updatePullRequestBranch`を呼ぶ直前の3箇所で確認する
+ * （セキュリティ監査の指摘。2026-08-23）。W1（Issue #335）が「最終マージの判断が確定する
+ * 瞬間」を`decideFinalMerge`のガードで守ったのに対し、W11（Issue #556）はその判断の後に
+ * 新設したCI待ち・取り込み直しの長い区間（既定で最大`waitTimeoutMs` ×
+ * (`maxUpdateBranchRetries` + 1）秒、既定値では約90分）を守る必要がある。瞬間だけを守る
+ * ガードは、この待ちが伸びた分をカバーしないため。
  */
 export async function runFinalMergeWithCiGate(
   cli: CliCommandRunner,
@@ -1429,6 +1501,14 @@ export async function runFinalMergeWithCiGate(
   number: number | undefined,
   config: CiGateConfig,
 ): Promise<RunFinalMergeWithCiGateResult> {
+  const isCancelled = config.isCancelled ?? (() => false);
+  const cancelledResult: RunFinalMergeWithCiGateResult = {
+    ok: false,
+    reason: 'cancelled',
+    message: '人が停止したため最終マージを中止しました',
+    updateBranchAttempts: 0,
+  };
+
   if (number === undefined) {
     const merge = await runFinalMerge(cli, host, cwd, number);
     return merge.ok
@@ -1437,14 +1517,32 @@ export async function runFinalMergeWithCiGate(
   }
 
   for (let attempt = 0; attempt <= config.maxUpdateBranchRetries; attempt += 1) {
-    const ci = await waitForCiChecks(cli, host, cwd, number, config.waitTimeoutMs, config.now, config.wait);
+    const ci = await waitForCiChecks(
+      cli,
+      host,
+      cwd,
+      number,
+      config.waitTimeoutMs,
+      config.now,
+      config.wait,
+      isCancelled,
+    );
+    if (ci.kind === 'cancelled') {
+      return { ...cancelledResult, updateBranchAttempts: attempt };
+    }
     if (ci.kind === 'failed') {
       return { ok: false, reason: 'ciFailed', message: ci.message, updateBranchAttempts: attempt };
     }
     if (ci.kind === 'timeout') {
       return { ok: false, reason: 'ciTimeout', message: ci.message, updateBranchAttempts: attempt };
     }
-    // 'none' か 'passed'（CI未設定リポジトリは待たずにここへ来る。受入基準）
+    // 'none' か 'passed'（CI未設定リポジトリは待たずにここへ来る。受入基準）。
+    // CIの完了を待っている間に停止された可能性があるため、実マージを呼ぶ直前でも
+    // 改めて確認する（セキュリティ監査の指摘。`waitForCiChecks`の`isCancelled`は
+    // ポーリングの各周回だけを見ており、`none`/`passed`で即座に返った直後は通らない）
+    if (isCancelled()) {
+      return { ...cancelledResult, updateBranchAttempts: attempt };
+    }
     const merge = await runFinalMerge(cli, host, cwd, number);
     if (merge.ok) {
       return { ok: true };
@@ -1452,6 +1550,10 @@ export async function runFinalMergeWithCiGate(
     const isLastAttempt = attempt === config.maxUpdateBranchRetries;
     if (isLastAttempt || !isBranchNotUpToDateError(merge.message)) {
       return { ok: false, reason: 'mergeFailed', message: merge.message, updateBranchAttempts: attempt };
+    }
+    // 取り込み直し（baseへ実際に変更を及ぼす操作）を呼ぶ直前でも確認する
+    if (isCancelled()) {
+      return { ...cancelledResult, updateBranchAttempts: attempt };
     }
     const updated = await updatePullRequestBranch(cli, host, cwd, number);
     if (!updated.ok) {

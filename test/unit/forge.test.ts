@@ -1217,6 +1217,25 @@ describe('parseGithubCiConclusion', () => {
   it('壊れたJSONはfailedとして扱う（pendingのまま無期限に待たせない）', () => {
     expect(parseGithubCiConclusion('not json').conclusion).toBe('failed');
   });
+
+  it('statusCheckRollupキー自体が無い応答はnone（0件）ではなくfailed（想定外の応答形。セキュリティ監査の指摘）', () => {
+    const result = parseGithubCiConclusion(JSON.stringify({ someOtherField: 1 }));
+    expect(result.conclusion).toBe('failed');
+  });
+
+  it('statusCheckRollupが配列でない応答もfailed（想定外の応答形）', () => {
+    const result = parseGithubCiConclusion(JSON.stringify({ statusCheckRollup: 'not-an-array' }));
+    expect(result.conclusion).toBe('failed');
+  });
+
+  it('conclusionが成功値ホワイトリストに無い未知の値（STALE等）はfailed（fail-closed。成功値のホワイトリスト方式）', () => {
+    const stdout = JSON.stringify({
+      statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'STALE' }],
+    });
+    const result = parseGithubCiConclusion(stdout);
+    expect(result.conclusion).toBe('failed');
+    expect(result.message).toContain('STALE');
+  });
 });
 
 describe('parseGitlabCiConclusion', () => {
@@ -1246,6 +1265,16 @@ describe('parseGitlabCiConclusion', () => {
 
   it('壊れたJSONはfailedとして扱う', () => {
     expect(parseGitlabCiConclusion('not json').conclusion).toBe('failed');
+  });
+
+  it('head_pipelineキー自体が無い応答はnone（パイプライン無し）ではなくfailed（想定外の応答形。セキュリティ監査の指摘）', () => {
+    const result = parseGitlabCiConclusion(JSON.stringify({ someOtherField: 1 }));
+    expect(result.conclusion).toBe('failed');
+  });
+
+  it('head_pipelineがオブジェクトでも配列でもない（例: 文字列）応答もfailed', () => {
+    const result = parseGitlabCiConclusion(JSON.stringify({ head_pipeline: 'unexpected' }));
+    expect(result.conclusion).toBe('failed');
   });
 });
 
@@ -1381,6 +1410,45 @@ describe('waitForCiChecks', () => {
       },
     );
     expect(result.kind).toBe('timeout');
+  });
+
+  it('isCancelledがtrueなら、CI状態の確認すら行わずcancelledを返す（セキュリティ監査の指摘。2026-08-23）', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], githubPassed);
+    const result = await waitForCiChecks(
+      cli,
+      'github',
+      '/repo/_integration',
+      42,
+      60_000,
+      () => 0,
+      undefined,
+      () => true,
+    );
+    expect(result).toEqual({ kind: 'cancelled' });
+    // CI状態の取得自体を行わない（停止していれば何も問い合わせない）
+    expect(cli.calls).toEqual([]);
+  });
+
+  it('ポーリングの途中でisCancelledがtrueへ変わればcancelledで打ち切る（wait()を跨いだ次の周回で確認する）', async () => {
+    const cli = new SequencedCli([githubPending, githubPassed]);
+    let cancelled = false;
+    const result = await waitForCiChecks(
+      cli,
+      'github',
+      '/repo/_integration',
+      42,
+      60_000,
+      () => 0,
+      async () => {
+        // 1回目のwait()の最中に人が停止した、という状況を模す
+        cancelled = true;
+      },
+      () => cancelled,
+    );
+    expect(result).toEqual({ kind: 'cancelled' });
+    // 1回目のCI確認（pending）はするが、2回目（passedのはず）はCI状態を見る前に打ち切る
+    expect(cli.calls).toHaveLength(1);
   });
 });
 
@@ -1570,5 +1638,82 @@ describe('runFinalMergeWithCiGate（design.md §16.36、Issue #556）', () => {
       expect(result.message).toContain('番号が不明');
     }
     expect(cli.calls).toEqual([]);
+  });
+
+  describe('停止（isCancelled）', () => {
+    it('停止を立ててからCI待ちに入ると、その後CIが緑になってもpr mergeは一度も呼ばれない（セキュリティ監査の指摘。2026-08-23）', async () => {
+      // pendingが1回続いた後に緑（githubPassed）へ変わる状況を用意する。isCancelled()は
+      // 「その1回目のwait()の最中に人が停止した」を模して、1回目の呼び出し以降ずっとtrueを
+      // 返す。cli.callsに'pr merge'が一度も現れないことで、CIが後から緑になってもマージへ
+      // 進まないことを確かめる（cli.callsで確認する、というレビュー指摘の形そのもの）
+      const cli = new SequencedCli([githubPending, githubPassed]);
+      let cancelCalls = 0;
+      const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, {
+        waitTimeoutMs: 60_000,
+        maxUpdateBranchRetries: 2,
+        now: () => 0,
+        wait: async () => {
+          // ポーリングの待ち時間中に人が停止した、という状況を模す
+        },
+        isCancelled: () => {
+          cancelCalls += 1;
+          return cancelCalls > 1;
+        },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe('cancelled');
+      }
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+      // 1回目のCI確認（pending）はするが、2回目（passedのはず）は確認する前に打ち切る
+      expect(cli.calls).toHaveLength(1);
+    });
+
+    it('CIが緑になった直後（マージを呼ぶ直前）に停止していればマージを呼ばずcancelledを返す', async () => {
+      // waitForCiChecksが'none'/'passed'で即座に返った直後、runFinalMergeを呼ぶ前にも
+      // isCancelledを確認する（waitForCiChecksのポーリングを1回も経ないため、その内部の
+      // 確認だけでは捕まえられない抜けを塞ぐ）。1回目（waitForCiChecksのループ先頭）は
+      // falseを返して実際にCI状態を取得させ、2回目（runFinalMergeWithCiGate側の、
+      // マージ直前の確認）でtrueへ変える
+      const cli = new SequencedCli([githubPassed]);
+      let calls = 0;
+      const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, {
+        ...gateConfig,
+        isCancelled: () => {
+          calls += 1;
+          return calls > 1;
+        },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe('cancelled');
+      }
+      expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([['pr', 'view']]);
+    });
+
+    it('「baseの最新でない」で拒否された後、取り込み直しを呼ぶ直前に停止していれば取り込み直さずcancelledを返す', async () => {
+      const notUpToDate = { code: 1, stdout: '', stderr: 'base branch was modified' };
+      const cli = new SequencedCli([githubPassed, notUpToDate]);
+      let calls = 0;
+      const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, {
+        ...gateConfig,
+        isCancelled: () => {
+          calls += 1;
+          // 1回目（waitForCiChecksのループ先頭）・2回目（マージ直前）は通して、実際に
+          // マージが「baseの最新でない」で失敗するところまで進める。3回目
+          // （update-branch直前）で停止を検知させる
+          return calls > 2;
+        },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe('cancelled');
+      }
+      // update-branchは呼ばれない
+      expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([
+        ['pr', 'view'],
+        ['pr', 'merge'],
+      ]);
+    });
   });
 });

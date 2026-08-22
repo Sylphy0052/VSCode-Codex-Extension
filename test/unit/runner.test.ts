@@ -3860,6 +3860,105 @@ tasks:
     expect(snapshot?.finalMergeOutcome).toBe('merged');
   });
 
+  describe('全体の停止（haltedByUser）はCI待ちの区間も守る（design.md §16.36、セキュリティ監査の指摘。2026-08-23）', () => {
+    /**
+     * `FakeForgeCli`の呼び出しに副作用（`onCall`）を差し込むための薄いラッパー。
+     * `waitForCiChecks`がCI状態を実際に取得している最中に人が「全体の停止」を押した、
+     * という状況を`runner.stop()`の呼び出しとして模すために使う。`calls`は元のフェイクの
+     * ものをそのまま共有する（ラッパー自身は呼び出しを記録しない）。
+     */
+    function wrapCliWithSideEffect(
+      base: FakeForgeCli,
+      onCall: (command: string, args: readonly string[]) => void,
+    ): FakeForgeCli {
+      return {
+        calls: base.calls,
+        async run(command, args, cwd) {
+          const result = await base.run(command, args, cwd);
+          onCall(command, args);
+          return result;
+        },
+      };
+    }
+
+    it('finalMerge: autoでも、統合PR/MR作成の完了時点で既に「全体の停止」が押されていれば最終マージを試みない（旧: auto経路はperformFinalMergeの前にhaltedByUserを見ていなかった。兄弟の穴）', async () => {
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      const cli = fakeForgeCli({
+        ciStatusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }],
+      });
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli),
+      });
+      const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      // T1が終わってfinalizeForge（`finalMerge: auto`の経路）が走る前に、人が
+      // 「全体の停止」を押した、という状況を模す
+      runner.stop(runId);
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // CIの完了待ち・マージコマンドのいずれも一度も呼ばれない（統合PR/MRの作成自体は
+      // `haltedByUser`と無関係に走る既存の仕様のため、ここでは確認しない）
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'view')).toBe(false);
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+      const snapshot = runner.getSnapshot(runId);
+      expect(snapshot?.finalMergeOutcome).toBe('failed');
+      expect(
+        snapshot?.warnings.some((w) => w.message.includes('人が停止したため最終マージを中止しました')),
+      ).toBe(true);
+    });
+
+    it('CI待ちの最中に「全体の停止」を押すと、その後CIが緑だと分かってもpr mergeは一度も呼ばれない', async () => {
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      const baseCli = fakeForgeCli({
+        ciStatusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }],
+      });
+      const ref: { runner?: WorkflowRunner; runId?: string } = {};
+      const cli = wrapCliWithSideEffect(baseCli, (command, args) => {
+        if (
+          command === 'gh' &&
+          args[0] === 'pr' &&
+          args[1] === 'view' &&
+          ref.runner !== undefined &&
+          ref.runId !== undefined
+        ) {
+          // CI状態（`gh pr view --json=statusCheckRollup`）を実際に取得している最中に
+          // 人が「全体の停止」を押した、という状況を模す
+          ref.runner.stop(ref.runId);
+        }
+      });
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli),
+      });
+      const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+      ref.runner = runner;
+      ref.runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // CI状態そのものは取得している（`isCancelled`は`pr view`を呼ぶ前に確認するため、
+      // 呼び出しの直後に停止しても取得自体は妨げない）。CIが緑と分かった直後の
+      // 停止確認（マージ直前のチェックポイント）でマージへ進まない、という点を確かめる
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'view')).toBe(true);
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+      const snapshot = runner.getSnapshot(ref.runId as string);
+      expect(snapshot?.finalMergeOutcome).toBe('failed');
+      expect(
+        snapshot?.warnings.some((w) => w.message.includes('人が停止したため最終マージを中止しました')),
+      ).toBe(true);
+    });
+  });
+
   it('finalMerge: pr-onlyなら統合PR/MRは作るがmainへはマージしない', async () => {
     const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
     const cli = fakeForgeCli();
