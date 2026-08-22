@@ -1,7 +1,18 @@
-# mainへのpushとPRのたびにlint / typecheck / testを自動実行する。
+# mainへのpushとPRのたびに、checkジョブ（lint / typecheck / build / test:coverage）と
+# external-cliジョブを自動実行する。
 # 統合テスト（test:integration）はVSCodeのダウンロードとxvfbが必要なため対象外（Issue #360）。
 # ブランチ保護のrequired status checksはこのワークフローでは設定しない。
 # 必須化の手順・チェック名・判断のタイミングはdocs/repository-hygiene.mdを参照。
+#
+# 前提（セキュリティ監査、issue #463）:
+# - pull_request_targetは使わない（下記onはpull_request）。フォークPRのワークフローが
+#   読み取り専用トークンと分離されたキャッシュスコープで動くという保護は、この選択に
+#   依存している。pull_request_targetへ変えるとフォークPRからベースブランチの
+#   シークレットや書き込み権限トークンへ到達しうるため、変更時は影響を精査すること。
+# - .codex-cliはCODEX_CLI_VERSIONで固定したキーでのみ復元する（external-cliジョブの
+#   Cache Codex CLIステップ）。ここには外部から取得した実行可能ファイルが入り、
+#   後続ステップでそのまま実行されるため、キーの設計を緩めると外部から中身を
+#   汚染して実行させる余地が生まれうる。
 name: CI
 
 on:
@@ -25,7 +36,7 @@ permissions:
 
 jobs:
   check:
-    name: lint / typecheck / test
+    name: checks
     runs-on: ubuntu-latest
     # 既定の360分は長すぎるため妥当な値に短縮する。
     # ローカルでのscripts/check.sh全体の所要は30秒強であり、依存インストール（npm ci）を
@@ -38,7 +49,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: '20'
           cache: npm
 
       - name: Install dependencies
@@ -50,5 +61,68 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # tsc --noEmitは型のみを検査し、esbuildによるバンドルが成功するかは確認しない。
+      # 動的import、モジュール解決の差、--externalの指定漏れなどは型検査を通っても
+      # バンドル時に失敗しうるため、配布物（dist/extension.js）が組み立てられることを
+      # ここで検証する。
+      - name: Build
+        run: npm run build
+
+      # カバレッジ計測付きで実行し、vitest.config.tsのthresholdsを下回ったら失敗させる
+      # （#455）。npm testより速度は落ちる（ローカル実測で約+23秒）が、
+      # 下限を機械的に強制するステップを別に持つより単純なため、testステップ自体を置き換える。
       - name: Test
-        run: npm test
+        run: npm run test:coverage
+
+  # design.md §9.1が前提とする現行のセッション紐付け（thread/startの応答からthreadIdを
+  # 直接受け取る）が、実物のCodex CLIでAPIキーなしに成立し続けているかを検査する
+  # （issue #458）。上のcheckジョブとは別ジョブに分け、checkの内容・所要には影響しない。
+  # test/external-cli/はvitestのincludeに入っておらず（vitest.config.ts）npm testでは
+  # 走らないため、ここで明示的に実行する。
+  external-cli:
+    name: external-cli
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # バージョンを固定する。actions/cacheのキーをこの値に固定できることと、
+      # Codexのバージョンアップに気づけることを両立するため、上げるときは
+      # このワークフローの変更として明示的に行う（実測: #456。0.149.0でロールアウト
+      # 検出まで1674ms）。
+      CODEX_CLI_VERSION: '0.149.0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Codex CLIは本体のnode_modulesとは別のディレクトリへ、pinしたバージョンだけを
+      # 入れる（package.jsonのdevDependenciesには加えない。309MBあり、この検査以外の
+      # どのnpmスクリプトからも要らないため）。actions/cacheのキーをバージョン文字列に
+      # 固定することで、バージョンを上げない限りは再インストールしない。
+      - name: Cache Codex CLI
+        id: cache-codex-cli
+        uses: actions/cache@v4
+        with:
+          path: .codex-cli
+          key: codex-cli-${{ env.CODEX_CLI_VERSION }}
+
+      - name: Install Codex CLI
+        if: steps.cache-codex-cli.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .codex-cli
+          npm init -y --prefix .codex-cli
+          npm install --prefix .codex-cli "@openai/codex@${CODEX_CLI_VERSION}"
+
+      # test/external-cli/はNode.js組み込みのnode:testだけで書かれており、
+      # 本体のdevDependenciesを必要としない。軽量なジョブに保つため`npm ci`はしない。
+      # モックは使わない（issue #458注意点）。実物のcodex app-serverを起動し、
+      # thread/startがAPIキーなしでthreadIdを返すことを検査する
+      # （test/external-cli/threadStart.test.mjs）。VSCodeは不要で、
+      # test/integration/とは無関係（あちらは実CLIを絶対に呼ばせない方針）。
+      - name: Run external CLI test
+        run: npm run test:external-cli
+        env:
+          CODEX_BIN: ${{ github.workspace }}/.codex-cli/node_modules/.bin/codex

@@ -15,32 +15,38 @@ npm run check     # lint + typecheck + test
 
 ## npmスクリプト
 
-| コマンド                        | 内容                                                                |
-| ------------------------------- | ------------------------------------------------------------------- |
-| `npm run build`                 | esbuildで `dist/extension.js` にバンドルする                        |
-| `npm run watch`                 | sourcemap付きで監視ビルドする                                       |
-| `npm run typecheck`             | `tsc --noEmit`                                                      |
-| `npm run lint`                  | `eslint .`                                                          |
-| `npm run format`                | Prettierで整形する                                                  |
-| `npm test`                      | `vitest run`（`test/unit/**`）                                      |
-| `npm run test:integration`      | 実VSCode上の統合テスト（`test/integration/**`）。ディスプレイが要る |
-| `npm run test:integration:xvfb` | 同上。ヘッドレスLinux/WSLでxvfb-run経由で実行する                   |
-| `npm run check`                 | lint / typecheck / testをまとめて実行する（integrationは含まない）  |
-| `npm run package`               | ビルドしてvsixを生成する                                            |
+| コマンド                        | 内容                                                                                                                            |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run build`                 | esbuildで `dist/extension.js` にバンドルする                                                                                    |
+| `npm run watch`                 | sourcemap付きで監視ビルドする                                                                                                   |
+| `npm run typecheck`             | `tsc --noEmit`                                                                                                                  |
+| `npm run lint`                  | `eslint .`                                                                                                                      |
+| `npm run format`                | Prettierで整形する                                                                                                              |
+| `npm test`                      | `vitest run`（`test/unit/**`）                                                                                                  |
+| `npm run test:coverage`         | 上記にカバレッジ計測を付けて実行する。下限を下回ると失敗する                                                                    |
+| `npm run test:integration`      | 実VSCode上の統合テスト（`test/integration/**`）。ディスプレイが要る                                                             |
+| `npm run test:integration:xvfb` | 同上。ヘッドレスLinux/WSLでxvfb-run経由で実行する                                                                               |
+| `npm run test:external-cli`     | 実CLI（`codex app-server`）を起動する検査（`test/external-cli/**`）。CODEX_BIN環境変数でパスを指定する（既定はPATH上の`codex`） |
+| `npm run check`                 | lint / typecheck / testをまとめて実行する（integration・external-cliは含まない）                                                |
+| `npm run package`               | ビルドしてvsixを生成する                                                                                                        |
 
 `scripts/check.sh` はcommit前に全緑であることを必須とする。緑にするためにテストを弱めたりskipしたりしない。`test:integration`は実VSCodeのダウンロード・起動が要り重いため`check.sh`には含めていない。必要なときに明示的に呼ぶ。
 
 ## CI
 
-mainへのpushとPRのたびに、GitHub Actions（`.github/workflows/ci.yml`）で `npm run lint` / `npm run typecheck` / `npm test` が自動実行される。`scripts/check.sh` と同じ3つで、Node.js 20系で `npm ci` してから走る。
+mainへのpushとPRのたびに、GitHub Actions（`.github/workflows/ci.yml`）で `npm run lint` / `npm run typecheck` / `npm run build` / `npm run test:coverage` が自動実行される。Node.js 20系で `npm ci` してから走る。
+
+`scripts/check.sh`（`npm run lint` / `npm run typecheck` / `npm test` の3つ）とは一致しない。CIは`npm run build`の分だけ検証範囲が広く、tsc --noEmitでは検出できないバンドル失敗（動的import、モジュール解決の差、--externalの指定漏れなど）を拾う。`scripts/check.sh` 自体は変更していないため、手元で全緑にしてもCIのbuildステップは別途確認が必要。
 
 統合テスト（`npm run test:integration`）はCIで回らない。実VSCodeのダウンロードとxvfbが要るため対象外にしてある。実VSCodeが要る範囲は引き続き手元で確認する。
 
-カバレッジもCIでは計測していない。計測の仕組み自体が未導入で、導入手順と閾値の決め方は `docs/repository-hygiene.md` にまとめてある。
+カバレッジはCIで計測しており、下限（statements 70% / branches 68% / functions 70% / lines 70%）を下回るとCIが失敗する。この下限は実測値（導入時点でstatements 74.92% / branches 72.33% / functions 74.93% / lines 74.82%）をわずかに下回る値であり、当面は低下防止のみを目的とする。CLAUDE.mdが定める80%への引き上げは未着手。導入の経緯と既知の注意点（`src/extension.ts`が計測対象外であることなど）は `docs/repository-hygiene.md` にまとめてある。
 
 現時点ではブランチ保護の必須チェック（required status checks）に設定していない。CIが赤くてもマージはブロックされない（可視化のみ）。
 
 検証範囲の拡張と必須チェック化の判断は #386 で追跡している。
+
+`checks`ジョブとは別に`external-cli`ジョブがある。design.md §9.1が前提とする現行のセッション紐付け（`thread/start`の応答から`threadId`を直接受け取る方式）が、実物のCodex CLIでAPIキーなしに成立し続けているかを検査する（`test/external-cli/`、issue #458）。モックではなく実CLI（`@openai/codex`、バージョン固定でインストール）を`codex app-server`として起動するため、Codexのバージョンアップで応答の形が変わればここで気づける。VSCodeは使わず、`test/integration/`（実CLIを絶対に呼ばせない方針）とは独立している。
 
 ## デバッグ実行
 
