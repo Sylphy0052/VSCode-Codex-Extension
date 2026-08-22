@@ -6140,6 +6140,56 @@ tasks:
   });
 
   /**
+   * 占有の失効を「runが破棄された」と読み替えて何もせず戻ると、将来`releaseAllLeases()`を
+   * 破棄以外（停止時など）からも呼ぶようにした瞬間、順番待ちだったタスクが`merging`のまま
+   * 固着してrunが永久に終わらなくなる（`getRunOutcome`は`merging`を`running`扱いするため。
+   * 本PRのAで潰した壊れ方がそのまま復活する）。`IntegrationMergeQueue`は呼び出し元が
+   * `dispose()`だけであることを何も保証していないので、`decideAfterLeaseWait`は
+   * 「強制解放された」という事実と「このrunが破棄されたか（`live.finished`）」を別々に見て、
+   * 生きているrunなら`blocked`へ倒す（レビュー指摘11）。
+   *
+   * `dispose()`を経由せずキューだけを強制解放するため、ここだけ内部のキューへ直接触る
+   * （将来`releaseAllLeases()`の呼び出し箇所が増えた状況の先取り）。
+   */
+  it('runが生きているまま占有が強制解放されたら、mergingで固着させずblockedで確定させる', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/lease.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // T1が衝突解決中、T2はその占有待ち
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    expect(mergeCalls(git)).toHaveLength(1);
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('merging');
+
+    // run破棄（`dispose()`）ではなく、キューの強制解放だけが起きた状況
+    (
+      runner as unknown as { integrationQueue: { releaseAllLeases: () => void } }
+    ).integrationQueue.releaseAllLeases();
+    await flush();
+
+    // 権利を失っているのでマージはしない。ただし`merging`のままにもしない
+    expect(mergeCalls(git)).toHaveLength(1);
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('blocked');
+    expect(store.find(runId)?.tasks['T2']?.failure).toBeUndefined();
+    expect(
+      runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'mergeBusy' && w.taskId === 'T2'),
+    ).toBe(true);
+
+    // `blocked`なので人が「再マージ」で復帰できる（統合worktreeにはT1の未解決の衝突が
+    // 残ったままなので、人が片付けてから押す）
+    git.resolveConflict();
+    expect(runner.retryMerge(runId, 'T2')).toBe(true);
+    await flush();
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+    expect(mergeCalls(git)).toHaveLength(2);
+  });
+
+  /**
    * `catch`の`session.dispose()`は`onFinished`を同期的に発火しうる（`chatView.ts`の
    * `teardown`→`entry.loop.stop('manual')`）。そのまま`onMergeResolutionFinished`へ
    * 再入すると、`applyLoopStopReason('manual')`が**run全体を停止して未開始の`pending`を

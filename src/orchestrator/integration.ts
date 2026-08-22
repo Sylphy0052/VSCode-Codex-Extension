@@ -564,6 +564,12 @@ const LEASE_NOT_HELD_ABORT =
  */
 class IntegrationLeaseHandle implements IntegrationLease {
   released = false;
+  /**
+   * `releaseAllLeases()`（強制解放）で失効させられた印。通常の`releaseLease`では立たない。
+   * 「順番が回ってきて起きた」のか「強制解放で起こされた」のかを、待っていた側が
+   * 区別できるようにするためだけに持つ（`wasLeaseRevoked`）。
+   */
+  revoked = false;
 
   constructor(
     readonly owner: IntegrationMergeQueue,
@@ -675,22 +681,34 @@ export class IntegrationMergeQueue {
     this.leaseWaiters.clear();
     for (const handle of holders) {
       handle.released = true;
+      handle.revoked = true;
     }
     for (const waiter of waiters) {
       waiter.handle.released = true;
+      waiter.handle.revoked = true;
       waiter.resolve();
     }
   }
 
   /**
-   * そのハンドルがいまも有効な占有かどうか（`releaseAllLeases`で失効していないか）。
+   * そのハンドルが`releaseAllLeases()`（強制解放）で失効させられたかどうか。
    *
-   * 占有待ちから起き上がった呼び出し側が「自分はまだ統合worktreeを触ってよいか」を
-   * 確かめるために使う（Issue #412のレビュー指摘9）。`releaseAllLeases`（run破棄）で
-   * 起こされた場合は`false`になるので、破棄済みのrunへ状態を書き戻さずに戻れる。
+   * 占有待ちから起き上がった呼び出し側が「順番が回ってきたのか、強制解放で起こされたのか」
+   * を区別するために使う（Issue #412のレビュー指摘9・11）。`acquireLease`はこのどちらかに
+   * なるまでresolveしないため、待っていた側にとってこの2つは排他になる。
+   *
+   * **返すのは「強制解放された」という事実だけで、その理由は含まない。** 以前は
+   * `holdsLease`の公開別名（`isLeaseHeld`）で、呼び出し側がその`false`を「runが破棄された」と
+   * 読み替えて何もせず戻っていた。その読み替えが成り立つのは`releaseAllLeases`の呼び出し元が
+   * `WorkflowRunner.dispose()`だけだからで、このクラスは何もそれを保証していない。将来
+   * `releaseAllLeases`を停止時などにも呼ぶようにすると、読み替えた側は「破棄されたので戻る」と
+   * 判断し、そのタスクは`merging`のまま固着してrunが永久に終わらなくなる（`getRunOutcome`が
+   * `merging`を`running`扱いするため）。意味づけは呼び出し側が自分の状態と突き合わせて決める
+   * （`runnerMerge.ts`の`decideAfterLeaseWait`。破棄済みなら何もせず戻り、生きているrunなら
+   * `blocked`へ倒して「再マージ」で復帰できるようにする）。
    */
-  isLeaseHeld(lease: IntegrationLease): boolean {
-    return this.holdsLease(lease);
+  wasLeaseRevoked(lease: IntegrationLease): boolean {
+    return lease instanceof IntegrationLeaseHandle && lease.owner === this && lease.revoked;
   }
 
   /** テスト・診断用。いま占有されている統合worktreeのcwdなら占有者のtaskIdを返す。 */

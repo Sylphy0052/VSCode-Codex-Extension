@@ -323,7 +323,7 @@ export async function startMerge(
  *   `onMergeResolutionFinished` / `abortAndBlock`）へ引き継ぐ（`handover.done`）。
  *   セッションを立てられなかった経路は引き継ぎが立たないため、この関数の`finally`が解放する
  *
- * **占有を取ったあとで停止・終了を再確認する**（`decideAfterLeaseWait`）。`acquireLease`は
+ * **占有を取ったあとで停止・破棄を再確認する**（`decideAfterLeaseWait`）。`acquireLease`は
  * 無期限で待つのに対し、`stop()`は`haltedByUser`を立てるだけで待機中の取得を起こさないため、
  * 他タスクの衝突解決が長引いている間にユーザーが停止すると、解放と同時にこのタスクの
  * `git merge --no-ff`が走り、新しい衝突解決セッションまで開いてしまう（レビュー指摘2）。
@@ -346,8 +346,8 @@ async function attemptMerge(
   // 順番待ちの**前**の停止状態を控えておく（`decideAfterLeaseWait`の判定に使う）。
   // 「もともと停止中だったrunの、走り切ったタスクのマージ」は従来どおり行う
   // （design.md §16.5「`running`のものは走らせ切る」。`interrupted`の既存テスト参照）ので、
-  // 見るのは「待っている間に停止・終了へ変わったかどうか」だけにする
-  const haltedBefore = { halted: before.runState.haltedByUser, finished: before.finished };
+  // 見るのは「待っている間に停止へ変わったかどうか」だけにする
+  const haltedBefore = before.runState.haltedByUser;
   const lease = await self.integrationQueue.acquireLease(integration.cwd, taskId);
   // 衝突解決セッションへ占有を引き継いだかどうかを、`startMergeResolution`の**途中から**
   // 共有するための箱（Issue #412のレビュー指摘5）。戻り値で受け取る形だと、引き継ぎの確定が
@@ -356,9 +356,9 @@ async function attemptMerge(
   const handover = { done: false };
   try {
     const decision = decideAfterLeaseWait(self, runId, taskId, lease, haltedBefore);
-    if (decision !== 'proceed') {
-      if (decision === 'block') {
-        blockMergeAfterLeaseWait(self, runId, taskId);
+    if (decision.kind !== 'proceed') {
+      if (decision.kind === 'block') {
+        blockMergeAfterLeaseWait(self, runId, taskId, decision.reason);
       }
       return;
     }
@@ -382,68 +382,98 @@ async function attemptMerge(
 }
 
 /**
+ * 順番待ちの間にマージを始められなくなった理由。`blockMergeAfterLeaseWait`が人へ出す文面を
+ * 分ける（到達しうる理由と文面が食い違わないようにするため。レビュー指摘10）。
+ */
+type LeaseWaitBlockReason = 'halted' | 'leaseRevoked';
+
+/** `decideAfterLeaseWait`の判定結果。 */
+type LeaseWaitDecision =
+  | { kind: 'proceed' }
+  | { kind: 'block'; reason: LeaseWaitBlockReason }
+  | { kind: 'skip' };
+
+/**
  * 占有を取った直後に、いまマージを始めてよいかを判定する（Issue #412のレビュー指摘2）。
  *
  * - `proceed`: そのままマージへ進む
- * - `block`: 順番待ちの間に実行が停止した。マージはせず`blocked`へ確定させる
- *   （`blockMergeAfterLeaseWait`）
- * - `skip`: 何もしない（run破棄で占有が失効した、または誰かが既にこのタスクのマージを
- *   決着させている）
+ * - `block`: マージはせず`blocked`へ確定させる（`blockMergeAfterLeaseWait`）
+ * - `skip`: 何もしない（runが破棄された、または誰かが既にこのタスクのマージを決着させている）
  *
  * `acquireLease`は他タスクの衝突解決が終わるまで無期限で待つ。その待ち時間の間に
- * 実行が停止（`stop()`）・終了・破棄されていることがあるため、待つ前の判断のまま
+ * 実行が停止（`stop()`）・破棄されていることがあるため、待つ前の判断のまま
  * `git merge`へ進んではいけない。
  *
- * **停止で見送るときに`merging`のまま残してはいけない**（レビュー指摘A）。`merging`は
+ * **見送るときに`merging`のまま残してはいけない**（レビュー指摘A）。`merging`は
  * `getRunOutcome`では`running`扱いなので、放置するとrunの終了判定（`pump`の
  * `live.finished`）が永久に立たず、停止操作が完了せず、終了時の後始末
  * （オーケストレーターへの通知・MCPサーバの停止・`waitingReply`のポーリング停止）も
  * 走らないままリークする。Viewも`merging`には操作ボタンを出さないため、セッション内の
  * 復帰手段が無くなる。`blocked`へ倒せばrunの終了判定が進み、「再マージ」で復帰できる
- * （統合worktreeが塞がっていた`busy`経路と扱いも揃う）。
+ * （統合worktreeが塞がっていた`busy`経路と扱いも揃う）。`skip`を返してよいのは、その
+ * 「終わらないrun」を誰も見られない場合（run破棄）と、既に誰かが決着させている場合だけ。
  *
- * 停止・終了は**待つ前と比べて変わった場合だけ**見る。もともと停止中のrunでも、既に
- * 走っていたタスクは走らせ切ってマージまで進める設計（design.md §16.5）なので、
- * 現在値だけで弾くと`interrupted`後に完走したタスクがマージされなくなる。この差分方式は
- * 「再マージ」（`retryMerge`）で停止中のrunのマージをやり直す経路も同時に守っている
+ * 停止は**待つ前と比べて変わった場合だけ**見る。もともと停止中のrunでも、既に走っていた
+ * タスクは走らせ切ってマージまで進める設計（design.md §16.5）なので、現在値だけで弾くと
+ * `interrupted`後に完走したタスクがマージされなくなる。この差分方式は「再マージ」
+ * （`retryMerge`）で停止中のrunのマージをやり直す経路も同時に守っている
  * （`retryMergeState`が`haltedByUser`を解除しなくても、待つ前から停止中なら通る）。
  * 一方「まだ`merging`かどうか」は待つ前と比べる必要がない（`merging`でなくなっていれば、
  * 誰かが既にこのタスクのマージを決着させている）。
+ *
+ * **`live.finished`は「待っている間に終わったか」ではなく「runが破棄されたか」の印として
+ * 見る**（レビュー指摘10）。`merging`のタスクがある間`getRunOutcome`は`running`を返すので、
+ * `pump`がこのタスクの順番待ち中に`live.finished`を立てることはない。立てられるのは
+ * `WorkflowRunner.dispose()`だけで、そこは直後に`releaseAllLeases()`を呼ぶ。つまり
+ * 「強制解放された」かつ「`live.finished`」の組み合わせが破棄の印になる。
  */
 function decideAfterLeaseWait(
   self: WorkflowRunnerInternals,
   runId: string,
   taskId: string,
   lease: IntegrationLease,
-  before: { halted: boolean; finished: boolean },
-): 'proceed' | 'block' | 'skip' {
+  haltedBefore: boolean,
+): LeaseWaitDecision {
   const live = self.runs.get(runId);
   if (live === undefined) {
-    return 'skip';
-  }
-  if (!self.integrationQueue.isLeaseHeld(lease)) {
-    // `WorkflowRunner.dispose()`の`releaseAllLeases()`で、失効したハンドルのまま起こされた。
-    // 破棄済みのrunへは状態を書き戻さない（レビュー指摘6。`persist`/`notify`が破棄済みの
-    // EventEmitter・workspaceStateを触ってしまう）
-    self.deps.log.info(
-      `[workflow ${runId}/${taskId}] 統合worktreeの占有が失効しているため、マージを始めません`,
-    );
-    return 'skip';
+    return { kind: 'skip' };
   }
   if (live.runState.tasks.get(taskId)?.state !== 'merging') {
     self.deps.log.info(
       `[workflow ${runId}/${taskId}] 統合worktreeの順番待ちの間にmerging以外へ変わったため、マージを始めません`,
     );
-    return 'skip';
+    return { kind: 'skip' };
   }
-  if ((live.finished && !before.finished) || (live.runState.haltedByUser && !before.halted)) {
-    return 'block';
+  if (self.integrationQueue.wasLeaseRevoked(lease)) {
+    // 順番が回ってきたのではなく、`releaseAllLeases()`で強制解放されて起こされた。
+    // 統合worktreeを触る権利は無いので、どちらにせよマージはしない
+    if (live.finished) {
+      // `WorkflowRunner.dispose()`。破棄済みのrunへは状態を書き戻さない（レビュー指摘6。
+      // `persist`/`notify`が破棄済みのEventEmitter・workspaceStateを触ってしまう）
+      self.deps.log.info(`[workflow ${runId}/${taskId}] 実行が破棄されたため、マージを始めません`);
+      return { kind: 'skip' };
+    }
+    // 破棄以外の理由で強制解放された（いまの呼び出し元は`dispose()`だけだが、
+    // `IntegrationMergeQueue`はそれを保証していない）。生きているrunなので`merging`のまま
+    // 放置できない
+    return { kind: 'block', reason: 'leaseRevoked' };
   }
-  return 'proceed';
+  if (live.runState.haltedByUser && !haltedBefore) {
+    return { kind: 'block', reason: 'halted' };
+  }
+  return { kind: 'proceed' };
 }
 
+/** `blockMergeAfterLeaseWait`が人へ出す文面（理由ごと）。 */
+const LEASE_WAIT_BLOCK_MESSAGES: Record<LeaseWaitBlockReason, string> = {
+  halted:
+    '統合worktreeの順番待ちの間に実行が停止したため、マージを見送りました（Viewの「再マージ」でやり直せます）',
+  leaseRevoked:
+    '統合worktreeの占有が強制解放されたため、マージを見送りました（Viewの「再マージ」でやり直せます）',
+};
+
 /**
- * 順番待ちの間に停止されたタスクを`blocked`で確定させる（レビュー指摘A）。
+ * 順番待ちの間にマージを始められなくなったタスクを`blocked`で確定させる（レビュー指摘A）。
  *
  * マージ自体は行わない（統合worktreeには触っていない）。人が「なぜ止まったのか」を
  * 追えるよう、ログと警告の両方に理由を残す。`markMergeBlocked`は`merging`のときだけ
@@ -453,13 +483,13 @@ function blockMergeAfterLeaseWait(
   self: WorkflowRunnerInternals,
   runId: string,
   taskId: string,
+  reason: LeaseWaitBlockReason,
 ): void {
   const live = self.runs.get(runId);
   if (live === undefined) {
     return;
   }
-  const message =
-    '統合worktreeの順番待ちの間に実行が停止したため、マージを見送りました（Viewの「再マージ」でやり直せます）';
+  const message = LEASE_WAIT_BLOCK_MESSAGES[reason];
   self.deps.log.warn(`[workflow ${runId}/${taskId}] ${message}`);
   live.warnings.push({ kind: 'mergeBusy', taskId, message });
   live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);

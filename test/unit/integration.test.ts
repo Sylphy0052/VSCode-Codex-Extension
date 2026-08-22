@@ -1029,29 +1029,46 @@ describe('IntegrationMergeQueue: 統合worktreeの占有（Issue #412）', () =>
   });
 
   /**
-   * 占有待ちから起き上がった呼び出し側が「自分はまだ統合worktreeを触ってよいか」を確かめる
-   * ための判定（Issue #412のレビュー指摘9）。`runnerMerge.ts`の`decideAfterLeaseWait`が、
-   * run破棄で起こされた場合に破棄済みのrunへ状態を書き戻さないために使う。
+   * 占有待ちから起き上がった呼び出し側が「順番が回ってきたのか、強制解放で起こされたのか」を
+   * 区別するための判定（Issue #412のレビュー指摘9・11）。`runnerMerge.ts`の
+   * `decideAfterLeaseWait`が使う。
+   *
+   * **返すのは「強制解放された」という事実だけ**であることを固定する。以前の`isLeaseHeld`
+   * （`holdsLease`の別名）は「いま保持者か」を返し、呼び出し側がその`false`を「runが
+   * 破棄された」と読み替えていた。読み替えが成り立つのは`releaseAllLeases`の呼び出し元が
+   * `WorkflowRunner.dispose()`だけだからで、このクラスは何も保証していない。
    */
-  it('isLeaseHeldは、いま有効な占有ハンドルのときだけtrueを返す', async () => {
+  it('wasLeaseRevokedは、releaseAllLeasesで強制解放されたハンドルにだけtrueを返す', async () => {
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
     const held = await queue.acquireLease(INTEGRATION_CWD, 'T1');
-    expect(queue.isLeaseHeld(held)).toBe(true);
+    expect(queue.wasLeaseRevoked(held)).toBe(false);
 
-    // 偽造したハンドルは通らない
+    // 偽造したハンドルは「強制解放された」ではない（占有を持っていないことは
+    // `mergeTask`/`abortMerge`側が`leaseNotHeld`で弾く）
     const forged: IntegrationLease = { integrationWorktreeCwd: INTEGRATION_CWD, taskId: 'T1' };
-    expect(queue.isLeaseHeld(forged)).toBe(false);
+    expect(queue.wasLeaseRevoked(forged)).toBe(false);
 
-    // 待ち行列の次へ渡ったハンドルは有効、手放した側は無効
+    // 順番どおりに手放した側も、次に受け取った側も、強制解放はされていない
     const waiting = queue.acquireLease(INTEGRATION_CWD, 'T2');
     queue.releaseLease(held);
     const next = await waiting;
-    expect(queue.isLeaseHeld(held)).toBe(false);
-    expect(queue.isLeaseHeld(next)).toBe(true);
+    expect(queue.wasLeaseRevoked(held)).toBe(false);
+    expect(queue.wasLeaseRevoked(next)).toBe(false);
 
-    // run破棄（強制解放）でも無効になる
+    // 強制解放されたときだけtrueになる
     queue.releaseAllLeases();
-    expect(queue.isLeaseHeld(next)).toBe(false);
+    expect(queue.wasLeaseRevoked(next)).toBe(true);
+  });
+
+  it('releaseAllLeasesは、待ち行列で起こしたハンドルにも強制解放の印を立てる', async () => {
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    await queue.acquireLease(INTEGRATION_CWD, 'T1');
+    const waiting = queue.acquireLease(INTEGRATION_CWD, 'T2');
+
+    queue.releaseAllLeases();
+
+    // 待っていた側は「順番が回ってきた」のではなく「強制解放で起こされた」と分かる
+    expect(queue.wasLeaseRevoked(await waiting)).toBe(true);
   });
 
   it('releaseAllLeasesは待っている取得を起こし、そのハンドルは失効している（run破棄時の強制解放）', async () => {
