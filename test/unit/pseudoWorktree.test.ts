@@ -651,6 +651,47 @@ describe('実ファイルシステムでの統合テスト', () => {
   );
 
   /**
+   * Issue #505（再々監査で発覚。上の攻撃A・攻撃Bとは攻撃者が差し替える階層が異なるため
+   * 独立したケースとして追加する）: `<ws>/.agents`自体をワークスペース内の別ディレクトリ
+   * （`.git`）へ差し替える攻撃。`.agents/worktrees`起点だった旧実装ではこの階層の差し替え
+   * を検知できなかった。`workspaceRoot`起点の現在の実装であれば、`.agents`自体が
+   * 差し替えられても`realpath(workspaceRoot)`は影響を受けないため検知できる。
+   */
+  it(
+    '`.agents`自体がワークスペース内の`.git`へ差し替えられても、' +
+      '想定した場所以外への作成として検知し中止する（境界内リダイレクト、Issue #505）',
+    async () => {
+      const gitDir = path.join(workspace, '.git');
+      await mkdir(gitDir, { recursive: true });
+      await writeFile(path.join(gitDir, 'HEAD'), 'ref: refs/heads/main\n');
+
+      const agentsDir = path.join(workspace, '.agents');
+      let swapped = false;
+      const raceFs: typeof nodePseudoWorktreeFileSystem = {
+        ...nodePseudoWorktreeFileSystem,
+        isSymbolicLink: async (t) => {
+          const result = await nodePseudoWorktreeFileSystem.isSymbolicLink(t);
+          if (!swapped && t === agentsDir) {
+            swapped = true;
+            await rm(agentsDir, { recursive: true, force: true });
+            await symlink(gitDir, agentsDir);
+          }
+          return result;
+        },
+      };
+
+      const result = await ensureIntegrationDir(workspace, RUN_ID, raceFs);
+
+      expect(result).toMatchObject({ ok: false, reason: 'boundaryEscape' });
+
+      // `.git`配下に既存のHEADは書き換わっていない
+      await expect(readFile(path.join(gitDir, 'HEAD'), 'utf8')).resolves.toBe(
+        'ref: refs/heads/main\n',
+      );
+    },
+  );
+
+  /**
    * Issue #505（監査指摘、再監査で発覚した循環バグの修正後の回帰テスト）:
    * `cloneWorkspace`の事後確認は当初、`target`の親ディレクトリ（`<runId>`）の
    * `realpath`から`expected`を組み立てていた。この形は、その親ディレクトリ自体が
@@ -716,6 +757,56 @@ describe('実ファイルシステムでの統合テスト', () => {
       // ワークスペースの内容が`.git/hooks`配下へ漏れ出ていない
       const victimEntries = await readdir(victimDir);
       expect(victimEntries).toEqual(['pre-commit']);
+    },
+  );
+
+  /**
+   * Issue #505（再々監査で発覚。上のテストとは攻撃者が差し替える階層が異なるため
+   * 独立したケースとして追加する）: `<ws>/.agents`自体をワークスペース内の別ディレクトリ
+   * （`.git`）へ差し替える攻撃。`.agents/worktrees`起点だった旧実装ではこの階層の差し替え
+   * を検知できなかった（`realpath(worktreesRoot)`と`realpath(target)`がどちらも`.git`配下を
+   * 指すため一致してしまう）。`workspaceRoot`起点の現在の実装であれば、`.agents`自体が
+   * 差し替えられても`realpath(workspaceRoot)`は影響を受けないため検知できる。
+   *
+   * 差し替えのタイミングは、一次防御（`findSymlinkedAncestor`）通過後・`mkdir(target)`の
+   * 前に置く（`cloneWorkspace`の同種テストと同じ規律）。
+   */
+  it(
+    '`.agents`自体がワークスペース内の`.git`へ差し替えられても、' +
+      '想定した場所以外への複製として検知し撤去する（境界内リダイレクト、Issue #505）',
+    async () => {
+      await writeWorkspaceFile('secret.txt', 'top-secret\n');
+
+      const gitDir = path.join(workspace, '.git');
+      await mkdir(gitDir, { recursive: true });
+      await writeFile(path.join(gitDir, 'HEAD'), 'ref: refs/heads/main\n');
+
+      const agentsDir = path.join(workspace, '.agents');
+      let swapped = false;
+      const raceFs: typeof nodePseudoWorktreeFileSystem = {
+        ...nodePseudoWorktreeFileSystem,
+        isSymbolicLink: async (t) => {
+          const result = await nodePseudoWorktreeFileSystem.isSymbolicLink(t);
+          if (!swapped && t === agentsDir) {
+            swapped = true;
+            await rm(agentsDir, { recursive: true, force: true });
+            await symlink(gitDir, agentsDir);
+          }
+          return result;
+        },
+      };
+
+      const result = await cloneWorkspace(workspace, RUN_ID, 'T1', [], raceFs);
+
+      expect(result).toMatchObject({ ok: false, reason: 'boundaryEscape' });
+
+      // `.git`配下に既存のHEADは書き換わっていない
+      await expect(readFile(path.join(gitDir, 'HEAD'), 'utf8')).resolves.toBe(
+        'ref: refs/heads/main\n',
+      );
+      // ワークスペースの内容（`secret.txt`）が`.git`配下へ漏れ出ていない
+      const leakedSecretPath = path.join(gitDir, 'worktrees', RUN_ID, 'T1', 'secret.txt');
+      await expect(readFile(leakedSecretPath)).rejects.toThrow();
     },
   );
 
@@ -863,6 +954,48 @@ describe('実ファイルシステムでの統合テスト', () => {
         // 差し替え先（他タスクの複製に見立てたディレクトリ）の実体は消えず残っている
         await expect(
           readFile(path.join(decoyDir, 'T1', 'secret.txt'), 'utf8'),
+        ).resolves.toBe('must-not-be-deleted\n');
+      },
+    );
+
+    /**
+     * Issue #505（再々監査で発覚。`resolveRealRemovalTarget`自身がIssue #493の前例として
+     * 全員に「正解」として扱われていたが、`.agents/worktrees`起点だったため同じ循環を
+     * 持っていた）: `<ws>/.agents`自体をワークスペース内の別ディレクトリ（`.git`）へ
+     * 差し替える攻撃。`removePseudoWorktree`は呼び出し前に`findSymlinkedAncestor`のような
+     * 一次防御を経由しないため、`.agents`を呼び出しより前に差し替えておくだけで再現できる。
+     *
+     * 旧実装（`.agents/worktrees`起点）では、`realpath(worktreesRoot)`と`realpath(target)`が
+     * どちらも`.git`配下（差し替え後の実体）を指すため一致してしまい、「想定した場所
+     * そのもの」と誤認して`.git/worktrees/<runId>/T1`を実際に削除してしまっていた。
+     * `workspaceRoot`起点の現在の実装であれば、`.agents`自体が差し替えられても
+     * `realpath(workspaceRoot)`は影響を受けないため検知できる。
+     */
+    it(
+      '.agents自体がワークスペース内の.gitへ差し替えられていても、想定した場所以外として' +
+        '撤去を拒否する（境界内リダイレクト、Issue #505）',
+      async () => {
+        const gitDir = path.join(workspace, '.git');
+        const decoyTaskDir = path.join(gitDir, 'worktrees', RUN_ID, 'T1');
+        await mkdir(decoyTaskDir, { recursive: true });
+        await writeFile(
+          path.join(decoyTaskDir, 'must-not-be-deleted.txt'),
+          'must-not-be-deleted\n',
+        );
+
+        await symlink(gitDir, path.join(workspace, '.agents'));
+
+        const result = await removePseudoWorktree(
+          workspace,
+          RUN_ID,
+          'T1',
+          nodePseudoWorktreeFileSystem,
+        );
+
+        expect(result).toMatchObject({ ok: false, reason: 'boundaryEscape' });
+        // `.git`配下の実体（攻撃者の差し替え先）は消えず残っている
+        await expect(
+          readFile(path.join(decoyTaskDir, 'must-not-be-deleted.txt'), 'utf8'),
         ).resolves.toBe('must-not-be-deleted\n');
       },
     );
@@ -1794,20 +1927,21 @@ describe('実ファイルシステムでの統合テスト', () => {
   );
 
   /**
-   * Issue #505（監査指摘、再監査で発覚した循環バグの修正後の回帰テスト）:
-   * `persistManifest`の事後確認は当初、`dirPath`（`<runId>`ディレクトリ）自身の`realpath`
-   * から`expected`を組み立てていた。この形は`dirPath`自体が`.git/hooks`等へ差し替えられて
-   * いる攻撃では、`realpath(dirPath)`も`realpath(filePath)`もどちらも差し替え後の同じ実体を
-   * 指すため必ず一致してしまい、検査として機能しない（自己無矛盾。詳細は`persistManifest`
-   * 本体のコメント参照）。
+   * Issue #505（監査指摘、再監査→再々監査で2段階発覚した循環バグの修正後の回帰テスト）:
+   * `persistManifest`の事後確認は当初`dirPath`（`<runId>`ディレクトリ）自身の`realpath`
+   * から`expected`を組み立てていた（1段目の循環）。これを`.agents/worktrees`
+   * （`worktreesRoot`）起点へ直したが、`<ws>/.agents`自体が差し替えられると同じ循環が
+   * 再現することが再々監査で発覚した（2段目の循環）。詳細は`persistManifest`本体の
+   * コメント参照。
    *
-   * 現在の実装は`.agents/worktrees`ルート（`<runId>`より1段上、攻撃者が動かせない）から
-   * `path.relative`で`expected`を組み立てるため、`realpath(dirPath)`という呼び出し自体が
-   * もう存在しない。したがって、`realpath(worktreesRoot)`確認（`mkdir(dirPath)`の直後、
-   * `writeTextFile`より前の最後の読み取り）をフックし、その戻り値（`worktreesRoot`自体は
-   * 差し替えられていないので正しい値）を返しつつ、副作用として`dirPath`を`.git/hooks`への
-   * シンボリックリンクへ差し替える。これにより、以降の`writeTextFile`は実際には
-   * `.git/hooks/manifest.json`へ書き込まれる。
+   * 現在の実装は`workspaceRoot`自身（呼び出し元から固定値で渡る、攻撃者が動かせない
+   * 唯一のアンカー）から`path.relative`で`expected`を組み立てるため、`realpath(dirPath)`
+   * も`realpath(worktreesRoot)`という呼び出し自体ももう存在しない。したがって、
+   * `realpath(workspaceRoot)`確認（`mkdir(dirPath)`の直後、`writeTextFile`より前の
+   * 最後の読み取り）をフックし、その戻り値（`workspaceRoot`自体は差し替えられていない
+   * ので正しい値）を返しつつ、副作用として`dirPath`（`<runId>`ディレクトリ）を
+   * `.git/hooks`へのシンボリックリンクへ差し替える。これにより、以降の`writeTextFile`は
+   * 実際には`.git/hooks/manifest.json`へ書き込まれる。
    */
   it(
     '永続化先ディレクトリがワークスペース内の`.git/hooks`へ差し替えられても、' +
@@ -1818,7 +1952,6 @@ describe('実ファイルシステムでの統合テスト', () => {
 
       const filePath = integrationManifestPath(workspace, RUN_ID);
       const dirPath = path.dirname(filePath);
-      const worktreesRoot = pseudoWorktreesRootDir(workspace);
       const manifest: IntegrationManifest = new Map([
         ['a.txt', { taskId: 'T1', kind: 'added' }],
       ]);
@@ -1828,7 +1961,7 @@ describe('実ファイルシステムでの統合テスト', () => {
         ...nodePseudoWorktreeFileSystem,
         realpath: async (target) => {
           const result = await nodePseudoWorktreeFileSystem.realpath(target);
-          if (!swapped && target === worktreesRoot) {
+          if (!swapped && target === workspace) {
             swapped = true;
             await rm(dirPath, { recursive: true, force: true });
             await symlink(hooksDir, dirPath);
@@ -1844,6 +1977,62 @@ describe('実ファイルシステムでの統合テスト', () => {
       // `.git/hooks`配下にマニフェストの内容が漏れ出て残っていない
       const hooksEntries = await readdir(hooksDir);
       expect(hooksEntries).toEqual([]);
+    },
+  );
+
+  /**
+   * Issue #505（再々監査で発覚。上のテストとは攻撃者が差し替える階層が異なるため独立
+   * したケースとして追加する）: `<ws>/.agents`自体をワークスペース内の別ディレクトリ
+   * （`.git`）へ差し替える攻撃。`worktreesRoot`起点だった旧実装ではこの階層の差し替えを
+   * 検知できなかった（`realpath(worktreesRoot)`と`realpath(filePath)`がどちらも
+   * `.git`配下を指すため一致してしまう）。`workspaceRoot`起点の現在の実装であれば、
+   * `.agents`自体が差し替えられても`realpath(workspaceRoot)`は影響を受けないため検知できる。
+   *
+   * 差し替えのタイミングは、一次防御（`findSymlinkedAncestor`）通過後・`mkdir(dirPath)`の
+   * 前に置く（`.agents`自体が差し替えられた状態で`mkdir(dirPath, {recursive:true})`が
+   * `.git/worktrees/<runId>`を作ってしまうケースを再現する）。
+   */
+  it(
+    '`.agents`自体がワークスペース内の`.git`へ差し替えられても、' +
+      '想定した場所以外への書き込みとして検知し取り消す（境界内リダイレクト、Issue #505）',
+    async () => {
+      const gitDir = path.join(workspace, '.git');
+      await mkdir(gitDir, { recursive: true });
+      await writeFile(path.join(gitDir, 'HEAD'), 'ref: refs/heads/main\n');
+
+      const agentsDir = path.join(workspace, '.agents');
+      const manifest: IntegrationManifest = new Map([
+        ['a.txt', { taskId: 'T1', kind: 'added' }],
+      ]);
+
+      let swapped = false;
+      const raceFs: typeof nodePseudoWorktreeFileSystem = {
+        ...nodePseudoWorktreeFileSystem,
+        isSymbolicLink: async (t) => {
+          const result = await nodePseudoWorktreeFileSystem.isSymbolicLink(t);
+          if (!swapped && t === agentsDir) {
+            swapped = true;
+            await rm(agentsDir, { recursive: true, force: true });
+            await symlink(gitDir, agentsDir);
+          }
+          return result;
+        },
+      };
+
+      await expect(persistManifest(workspace, RUN_ID, manifest, raceFs)).rejects.toThrow(
+        /想定した場所以外/,
+      );
+
+      // `mkdir(dirPath)`は検知前に実行されるため、`.git`配下に空の
+      // `worktrees/<runId>`ディレクトリが残る（`persistManifest`はマニフェスト
+      // ファイル自体は`removeFile`で取り消すが、`cloneWorkspace`と同じ理由で
+      // ディレクトリツリーの再帰削除は行わない。設計どおりの残存で後始末漏れではない）。
+      // ここで確認するのは、マニフェストの内容（`manifest.json`）が`.git`配下へ
+      // 漏れ出て書き込まれていないこと。
+      const gitEntries = await readdir(gitDir);
+      expect(gitEntries.sort()).toEqual(['HEAD', 'worktrees']);
+      const leakedManifestPath = path.join(gitDir, 'worktrees', RUN_ID, 'manifest.json');
+      await expect(readFile(leakedManifestPath)).rejects.toThrow();
     },
   );
 

@@ -351,13 +351,22 @@ export async function loadPersistedManifest(
   // ファイルがまだ存在しない（初回実行、統合未実施）場合の`realpath`の`undefined`は
   // ここでは正常系（後段の`readTextFile`も`undefined`を返し、空マニフェストとして
   // `ok: true`になる）のため、境界確認は`realFilePath !== undefined`のときだけ行う。
+  //
+  // Issue #505（再々監査で発覚）: `realRoot`（`workspaceRoot`自身の`realpath`）は
+  // このファイル内の全ての実パス厳密一致・境界確認における唯一のアンカーであり、
+  // 攻撃者が動かせない前提そのもの。以前はここが`(await fs.realpath(workspaceRoot))
+  // ?? workspaceRoot`という、確認できない場合に非正規化パスへ黙ってフォールバックする
+  // 形になっていたが、アンカーであるべき値が確認できないのにフェイルオープンするのは
+  // 筋が通らないため、確認できない場合はフェイルクローズする。
   const realFilePath = await fs.realpath(filePath);
-  const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
-  if (realFilePath !== undefined && !isPathWithinRoot(realFilePath, realRoot)) {
-    return {
-      ok: false,
-      message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際にはワークスペースの外を指しています）: ${sanitizeForLog(filePath)}`,
-    };
+  if (realFilePath !== undefined) {
+    const realRoot = await fs.realpath(workspaceRoot);
+    if (realRoot === undefined || !isPathWithinRoot(realFilePath, realRoot)) {
+      return {
+        ok: false,
+        message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際にはワークスペースの外を指しています）: ${sanitizeForLog(filePath)}`,
+      };
+    }
   }
 
   const stat = await fs.statFile(filePath);
@@ -383,7 +392,12 @@ export async function loadPersistedManifest(
   // 成立済み＝`filePath`は実在する。したがってここでの`realFilePath2`の`undefined`は
   // 正常系ではなく、読み込みと確認の間で消えた・差し替えられた異常系として扱う。
   const realFilePath2 = await fs.realpath(filePath);
-  if (realFilePath2 === undefined || !isPathWithinRoot(realFilePath2, realRoot)) {
+  const realRootForSecondCheck = await fs.realpath(workspaceRoot);
+  if (
+    realFilePath2 === undefined ||
+    realRootForSecondCheck === undefined ||
+    !isPathWithinRoot(realFilePath2, realRootForSecondCheck)
+  ) {
     return {
       ok: false,
       message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際にはワークスペースの外を指しています）: ${sanitizeForLog(realFilePath2 ?? filePath)}`,
@@ -453,7 +467,6 @@ export async function persistManifest(
 ): Promise<void> {
   const filePath = integrationManifestPath(workspaceRoot, runId);
   const dirPath = path.dirname(filePath);
-  const worktreesRoot = pseudoWorktreesRootDir(workspaceRoot);
 
   const symlinkedAncestor = await findSymlinkedAncestor(workspaceRoot, filePath, fs);
   if (symlinkedAncestor !== undefined) {
@@ -464,17 +477,26 @@ export async function persistManifest(
 
   await fs.mkdir(dirPath);
 
-  const realWorktreesRoot = await fs.realpath(worktreesRoot);
-  if (realWorktreesRoot === undefined) {
+  // Issue #505（再々監査で発覚）: `expected`の起点を`.agents/worktrees`
+  // （`pseudoWorktreesRootDir(workspaceRoot)`）に置いていたが、これでもまだ低い。
+  // `<ws>/.agents`自体が（`<ws>/.git`等）ワークスペース内の別ディレクトリへの
+  // シンボリックリンクへ差し替えられると、`realpath(worktreesRoot)`と`realpath(filePath)`は
+  // どちらも差し替え後の実体を指し、両者は必ず一致してしまう（`<runId>`を差し替える
+  // 循環とまったく同じ構造で、起点が1段上がっただけでは解消しない）。
+  // `resolveRealRemovalTarget`（Issue #493）も含め、このファイル内で`.agents/worktrees`
+  // 起点にしていた箇所は全てこの穴を持っていた。攻撃者が動かせない唯一の起点は
+  // 呼び出し元から固定値で渡る`workspaceRoot`自身であるため、ここへ揃える。
+  const realRoot = await fs.realpath(workspaceRoot);
+  if (realRoot === undefined) {
     throw new Error(
-      `疑似worktreeの統合マニフェストの永続化先ルート（.agents/worktrees）を確認できませんでした（作成直後に削除・差し替えされた可能性があります）: ${sanitizeForLog(worktreesRoot)}`,
+      `疑似worktreeの統合マニフェストの永続化先ルート（workspaceRoot）を確認できませんでした: ${sanitizeForLog(workspaceRoot)}`,
     );
   }
 
   await fs.writeTextFile(filePath, serializeManifest(manifest));
 
   const realFilePath = await fs.realpath(filePath);
-  const expectedFilePath = path.join(realWorktreesRoot, path.relative(worktreesRoot, filePath));
+  const expectedFilePath = path.join(realRoot, path.relative(workspaceRoot, filePath));
   if (realFilePath === undefined || realFilePath !== expectedFilePath) {
     await fs.removeFile(filePath);
     throw new Error(
@@ -870,8 +892,8 @@ export async function cloneWorkspace(
 
   await fs.mkdir(target);
 
-  // Issue #505（監査指摘、再監査で発覚）: 事後確認の`expected`は、`target`の**親から**
-  // 組み立ててはいけない。当初の実装は`realParentDir = await fs.realpath(parentDir)`
+  // Issue #505（監査指摘、再監査でさらに発覚）: 事後確認の`expected`は、`target`の
+  // **親から**組み立ててはいけない。当初の実装は`realParentDir = await fs.realpath(parentDir)`
   // （`parentDir = path.dirname(target)`）から`expectedTarget`を組み立てていたが、
   // `parentDir`自体が`.git/hooks`等へ差し替えられている攻撃では、`realpath(parentDir)`も
   // `realpath(target)`もどちらも差し替え後の実体（`.git/hooks`・`.git/hooks/T1`）を指す
@@ -880,18 +902,18 @@ export async function cloneWorkspace(
   // `mkdir(target, {recursive:true})`は例外を投げずに`.git/hooks/T1`を作ってしまい、
   // このチェックを素通りすることを確認済み。
   //
-  // 正しくは、攻撃者が差し替えられない**ワークスペースルートに近い側**から`expected`を
-  // 組み立てる。`resolveRealRemovalTarget`（Issue #493、下の撤去系ヘルパー）が既に
-  // 同じ形で行っている前例（`realWorktreesRoot`＋`path.relative(worktreesRoot, target)`）
-  // へ揃える。`worktreesRoot`（`.agents/worktrees`）は`<runId>`より1段上であり、
-  // `<runId>`側の差し替えでは動かない。
-  const worktreesRoot = pseudoWorktreesRootDir(workspaceRoot);
-  const realWorktreesRoot = await fs.realpath(worktreesRoot);
+  // **`.agents/worktrees`（`worktreesRoot`）を起点にしても同じ穴が残る。** 一度目の
+  // 修正ではここを`resolveRealRemovalTarget`（Issue #493）の前例に倣い`worktreesRoot`
+  // 起点へ直したが、`<ws>/.agents`自体が（`<ws>/.git`等）ワークスペース内の別ディレクトリ
+  // へ差し替えられると、`realpath(worktreesRoot)`と`realpath(target)`はどちらも差し替え
+  // 後の実体を指し、やはり必ず一致してしまう。起点をどれだけ`target`から遠ざけても、
+  // その起点自体が攻撃者の書き込み可能な範囲にある限り同じ循環が再現する。
+  // 攻撃者が動かせない唯一のアンカーは、呼び出し元から固定値で渡る`workspaceRoot`
+  // 自身であるため、ここまで起点を引き上げる。
+  const realRoot = await fs.realpath(workspaceRoot);
   const realTarget = await fs.realpath(target);
   const expectedTarget =
-    realWorktreesRoot !== undefined
-      ? path.join(realWorktreesRoot, path.relative(worktreesRoot, target))
-      : undefined;
+    realRoot !== undefined ? path.join(realRoot, path.relative(workspaceRoot, target)) : undefined;
   if (realTarget === undefined || expectedTarget === undefined || realTarget !== expectedTarget) {
     // Issue #505（監査指摘）: ここで`fs.removeDirRecursive(target)`を呼ぶと、`target`の
     // 祖先ディレクトリ（`<runId>`）が`.git/hooks`等の既存ディレクトリへ差し替えられていた場合、`target`は文字列上は
@@ -1014,23 +1036,30 @@ async function resolveRealRemovalTarget(
     // JSDoc参照）ため、ここは正常系として扱う。
     return { status: 'absent' };
   }
-  const worktreesRoot = pseudoWorktreesRootDir(workspaceRoot);
-  const realWorktreesRoot = await fs.realpath(worktreesRoot);
-  if (realWorktreesRoot === undefined) {
+  // 規範: `expected`は、攻撃者が差し替えられない起点から組み立てること。**差し替え
+  // られうる中間ノード（`target`自身の親、あるいは`.agents/worktrees`のような中間
+  // ディレクトリ）の`realpath`から組み立ててはいけない。** 差し替えられうるノードを
+  // 起点にすると、そのノード自体がシンボリックリンクへ差し替えられていた場合、起点の
+  // `realpath`も`target`の`realpath`もどちらも差し替え後の同じ実体を指すため比較が
+  // 常に一致してしまい、検査が自己無矛盾になって何も検知できなくなる（Issue #484の
+  // 書き込み経路・削除経路、Issue #505で再発を確認した`cloneWorkspace`/`persistManifest`
+  // いずれも、`target`の直接の親から`expected`を組み立てていたためにこの欠陥を持って
+  // いた。レビュー・監査を2巡通過してマージされた実装でも再発したため、次に実パス
+  // 厳密一致の検査を書く際はこの関数の形へ揃えること。新しい起点の選び方を発明しない
+  // こと）。
+  //
+  // **この関数自身もかつて`.agents/worktrees`（`pseudoWorktreesRootDir(workspaceRoot)`）を
+  // 起点にしており、同じ循環を持っていた（Issue #505、再々監査で発覚）。** `<ws>/.agents`
+  // 自体がワークスペース内の別ディレクトリへ差し替えられると、`realpath(worktreesRoot)`と
+  // `realpath(target)`はどちらも差し替え後の実体を指し、やはり必ず一致してしまう。
+  // 起点をどれだけ`target`から遠ざけても、その起点自体が攻撃者の書き込み可能な範囲に
+  // ある限り同じ穴が再現するため、攻撃者が動かせない唯一のアンカー＝呼び出し元から
+  // 固定値で渡る`workspaceRoot`自身まで起点を引き上げてある。
+  const realRoot = await fs.realpath(workspaceRoot);
+  if (realRoot === undefined) {
     return { status: 'mismatch', realTarget };
   }
-  // 規範: `expected`は、攻撃者が差し替えられない起点（ここでは`worktreesRoot`。
-  // `target`より上位で、この関数の呼び出し元がそれぞれ独自に検証済みの固定パス）から
-  // 組み立てること。**差し替えられうる中間ノード（`target`自身の親等）の`realpath`から
-  // 組み立ててはいけない。** 差し替えられうるノードを起点にすると、そのノード自体が
-  // シンボリックリンクへ差し替えられていた場合、起点の`realpath`も`target`の`realpath`も
-  // どちらも差し替え後の同じ実体を指すため比較が常に一致してしまい、検査が自己無矛盾に
-  // なって何も検知できなくなる（Issue #484の書き込み経路・削除経路、Issue #505で
-  // 再発を確認した`cloneWorkspace`/`persistManifest`いずれも、`target`の直接の親から
-  // `expected`を組み立てていたためにこの欠陥を持っていた。レビュー・監査を2巡通過して
-  // マージされた実装でも再発したため、次に実パス厳密一致の検査を書く際はこの関数の形へ
-  // 揃えること。新しい起点の選び方を発明しないこと）。
-  const expectedTarget = path.join(realWorktreesRoot, path.relative(worktreesRoot, target));
+  const expectedTarget = path.join(realRoot, path.relative(workspaceRoot, target));
   if (realTarget !== expectedTarget) {
     return { status: 'mismatch', realTarget };
   }
@@ -1376,13 +1405,17 @@ export async function ensureIntegrationDir(
 
   await fs.mkdir(dir);
 
-  const worktreesRoot = pseudoWorktreesRootDir(workspaceRoot);
-  const realWorktreesRoot = await fs.realpath(worktreesRoot);
+  // Issue #505 / #526（再々監査で発覚）: `expected`の起点を`.agents/worktrees`
+  // （`pseudoWorktreesRootDir(workspaceRoot)`）に置いていたが、これでもまだ攻撃者の
+  // 手が届く。`<ws>/.agents`自体がワークスペース内の別ディレクトリへ差し替えられると、
+  // `realpath(worktreesRoot)`と`realpath(dir)`はどちらも差し替え後の実体を指し、
+  // 必ず一致してしまう（`<runId>`を差し替える攻撃とまったく同じ構造で、起点が1段
+  // 上がっただけでは解消しない）。攻撃者が動かせない唯一のアンカーは呼び出し元から
+  // 固定値で渡る`workspaceRoot`自身であるため、ここへ揃える。
+  const realRoot = await fs.realpath(workspaceRoot);
   const realDir = await fs.realpath(dir);
   const expectedDir =
-    realWorktreesRoot !== undefined
-      ? path.join(realWorktreesRoot, path.relative(worktreesRoot, dir))
-      : undefined;
+    realRoot !== undefined ? path.join(realRoot, path.relative(workspaceRoot, dir)) : undefined;
   if (realDir === undefined || expectedDir === undefined || realDir !== expectedDir) {
     // Issue #505 / #526（監査指摘）: ここで`fs.removeDirRecursive(dir)`は呼ばない。
     // `<runId>`が差し替えられている攻撃では、`dir`は文字列上「自分がmkdirした空
@@ -1599,7 +1632,26 @@ export async function reflectIntegrationToWorkspace(
     };
   }
 
-  const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
+  // Issue #505（再々監査で発覚）: `realRoot`（`workspaceRoot`自身の`realpath`）は
+  // このファイル内の実パス厳密一致における唯一のアンカーであり、攻撃者が動かせない
+  // 前提そのもの。以前はここが`(await fs.realpath(workspaceRoot)) ?? workspaceRoot`
+  // という、確認できない場合に非正規化パスへ黙ってフォールバックする形になっていたが、
+  // アンカーであるべき値が確認できないのにフェイルオープンするのは筋が通らないため、
+  // 確認できない場合はフェイルクローズする（`partialApply`。まだ1件も反映していない
+  // ため`appliedPaths`は空、全エントリを`remainingPaths`として返す）。
+  const realRoot = await fs.realpath(workspaceRoot);
+  if (realRoot === undefined) {
+    return {
+      ok: false,
+      reason: 'partialApply',
+      message: `ワークスペースルート自身の実パスを確認できなかったため、反映を中止しました: ${sanitizeForLog(workspaceRoot)}`,
+      appliedPaths: [],
+      failedPath: workspaceRoot,
+      remainingPaths: [...manifest.keys()],
+      skippedPaths: [],
+      usedLegacyCopyFallback: false,
+    };
+  }
   const realIntegrationDir = (await fs.realpath(integrationDir)) ?? integrationDir;
 
   const entries = [...manifest.entries()];
