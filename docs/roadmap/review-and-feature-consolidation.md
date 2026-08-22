@@ -438,6 +438,13 @@
   「不発火が意図的であること」と再実装のIssue番号を書き、[manual-test.md](../manual-test.md)
   にも「出ないのが現在の仕様」と書く（実機確認する人はコードを読まない）。
   現物は Issue [#562](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/562)
+- **委譲先が完了記録を残さず消えることがある。完了は報告ではなく作業ツリーの実測で
+  確認する。** 2026-08-23、W2とW7の実装セッションがプロセスの入れ替わりで同時に停止し、
+  完了記録を残さなかった。**作業は未コミットで両worktreeに残っており**、`git status` /
+  `git diff --stat` を見るまで存在が分からない。**「報告が無い」を「作業が無い」と読むと
+  全部捨てる。** 再開させるときは、途中まで書かれたものを信用せず現状を測ってから続けさせる
+  （このときは `docs/design.md` と `docs/manual-test.md` が未着手だったことから、
+  実装の途中で止まったと判定できた）
 - **統合テストは `XDG_RUNTIME_DIR` の実在が要る。** 未設定だと mocha の出力が一切ないまま止まる。
   `XDG_RUNTIME_DIR=/run/user/$(id -u) npm run test:integration:xvfb` の形で回す
 - **エディタが出す診断は、撤去した worktree を指す古いバッファのことがある。** 実体が無いのに
