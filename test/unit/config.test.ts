@@ -194,6 +194,16 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
     expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
   });
 
+  // レビュー指摘3: isSafeRelativeDirは`..`セグメントを明示的に拒否するのに、
+  // pseudoWorktreeExcludeRejectionには同じガードが無い（姉妹バリデーションの非対称）。
+  it('pseudoWorktreeExcludeは..・.を拒否する（レビュー指摘3）', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['..'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['.'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+  });
+
   it('replyTimeoutSecの既定は300秒（design.md §16.21・DEFAULT_REPLY_TIMEOUT_SEC）', () => {
     expect(readWorkflowsConfig().replyTimeoutSec).toBe(300);
   });

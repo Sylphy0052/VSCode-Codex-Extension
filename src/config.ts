@@ -318,6 +318,9 @@ const PSEUDO_WORKTREE_EXCLUDE_KEY = 'agent.workflows.pseudoWorktreeExclude';
  * 2. パス区切りを含む値・絶対パス。`isExcludedPath` はセグメント単位の完全一致なので、
  *    区切りを含む値はそもそもどのセグメントとも一致しえない（＝設定として無意味）。
  *    黙って効かないままにせず拒否して知らせる。
+ * 3. `..`・`.` 自体。`isSafeRelativeDir` が `..` セグメントを明示的に拒否しているのと
+ *    非対称にしないための姉妹ガード（`listFiles` が返すセグメントに現状 `..` / `.` は
+ *    現れないため実害は無いが、バリデーションとしての体裁は揃えておく）。
  */
 function pseudoWorktreeExcludeRejection(entry: string): string | undefined {
   if (hasGitSegment(entry)) {
@@ -325,6 +328,9 @@ function pseudoWorktreeExcludeRejection(entry: string): string | undefined {
   }
   if (path.isAbsolute(entry) || /[\\/]/u.test(entry)) {
     return 'パス区切り・絶対パスを含む値はセグメント名と一致しえず設定として効かないため';
+  }
+  if (entry === '..' || entry === '.') {
+    return '`..`・`.` はディレクトリ名として意味を持たないため';
   }
   return undefined;
 }
