@@ -200,18 +200,26 @@ describe('isDeliverableState / validateSendMessage（design.md §16.21「配送�
     expect(result.accepted).toBe(true);
   });
 
-  it('オーケストレーターが自分自身宛だと拒否する（Issue #365由来の自己宛拒否はオーケストレーター側で維持）', () => {
-    const result = validateSendMessage({
-      from: ORCHESTRATOR_CONNECTION_ID,
-      to: ORCHESTRATOR_CONNECTION_ID,
-      body: 'hi',
-      knownTaskIds: new Set(['T1', 'T2']),
-      recipientState: undefined,
-      totalMessagesInRun: 0,
-    });
-    expect(result.accepted).toBe(false);
-    expect(result.reason).toContain(ORCHESTRATOR_CONNECTION_ID);
-  });
+  it(
+    'オーケストレーターが自分自身宛だと拒否する（Issue #365由来の自己宛拒否はオーケストレーター側で維持。' +
+      'レビュー指摘: knownTaskIdsの「宛先が見つかりません」判定は`to`にORCHESTRATOR_CONNECTION_ID' +
+      'を渡しても偶然`toContain(ORCHESTRATOR_CONNECTION_ID)`を満たしてしまうため、専用の自己宛' +
+      '拒否（`to === from`）が本当に先に評価されているかは理由の文言そのもので確認しないと' +
+      '固定できない。この順序を`messaging.ts`側だけ元（knownTaskIds判定が先）へ戻すと、この' +
+      'アサーションが赤くなることをレビューで実測済み）',
+    () => {
+      const result = validateSendMessage({
+        from: ORCHESTRATOR_CONNECTION_ID,
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: 'hi',
+        knownTaskIds: new Set(['T1', 'T2']),
+        recipientState: undefined,
+        totalMessagesInRun: 0,
+      });
+      expect(result.accepted).toBe(false);
+      expect(result.reason).toBe(`自分自身へは送信できません: ${ORCHESTRATOR_CONNECTION_ID}`);
+    },
+  );
 
   it('サロゲートペア（絵文字）を含む本文はコードポイント単位で数える（タスク→オーケストレーター宛。Issue #365: UTF-16長ではなく文字数で判定する）', () => {
     // 1絵文字はUTF-16では2コード単位。MAX_MESSAGE_BODY_LENGTHちょうどの絵文字数なら

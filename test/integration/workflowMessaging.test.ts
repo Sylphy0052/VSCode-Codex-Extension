@@ -272,6 +272,81 @@ suite('タスク間メッセージング（design.md §16.21）', () => {
     );
   });
 
+  test(
+    'オーケストレーターからの中継がまだプルされていない間は、全員待ちでも待ちぼうけの検出が' +
+      '働かない（design.md §16.21「待ちぼうけを検出する経路」経路1、レビュー指摘。' +
+      'タスク宛のメッセージ（オーケストレーターが中継する側）は中継後も従来どおりプル型のまま' +
+      'なので、宛先タスクが次の指示を要求する（`setPromptTransform`経由で取り出す）までは' +
+      'hub内部の未配送キューに残り続ける。経路1（`detectAllWaitingStalemate`）は' +
+      '「走行中の全タスクがwaitingReplyかつ未配送0件」を条件にするため、この未配送が残る限り' +
+      '全員がwaitingReplyになっても解けてはならない）',
+    async function () {
+      this.timeout(TEST_TIMEOUT_MS);
+      const runId = await start();
+      const t1 = host.get('T1');
+      const t2 = host.get('T2');
+      const t3 = host.get('T3');
+      const orchestrator = host.orchestrator(workspaceFolder);
+
+      // オーケストレーターがT3へ中継を送る。T3はまだ次の指示を要求していない
+      // （`transformPrompt`を呼んでいない）ため、hubの未配送キューに残ったままになる。
+      await sendMessage(mcpUrlOf(orchestrator), {
+        to: 'T3',
+        body: '中継: T2の進捗はこちらです',
+        expectReply: false,
+      });
+
+      // T1〜T3が揃ってオーケストレーターへ返信待ちで送る。中継の受け取り待ちとは別の経路
+      // （タスク→オーケストレーター）なので、T3自身がwaitingReplyになることと、T3宛に
+      // 未配送の中継が残っていることは両立する。
+      await sendMessage(mcpUrlOf(t1), {
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: 'T1の状況を共有します',
+        expectReply: true,
+      });
+      await sendMessage(mcpUrlOf(t2), {
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: 'T2の状況を共有します',
+        expectReply: true,
+      });
+      await sendMessage(mcpUrlOf(t3), {
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: 'T3の状況を共有します',
+        expectReply: true,
+      });
+
+      const allWaiting = await waitForSnapshot(
+        runId,
+        (s) =>
+          stateOf(s, 'T1') === 'waitingReply' &&
+          stateOf(s, 'T2') === 'waitingReply' &&
+          stateOf(s, 'T3') === 'waitingReply',
+        '全タスクがwaitingReplyになる',
+      );
+      assert.equal(stateOf(allWaiting, 'T1'), 'waitingReply');
+      assert.equal(stateOf(allWaiting, 'T2'), 'waitingReply');
+      assert.equal(stateOf(allWaiting, 'T3'), 'waitingReply');
+
+      // 経路1の定期チェック（`WAITING_REPLY_POLL_INTERVAL_MS` = 5秒）を複数周またいで待つ。
+      // `replyTimeoutSec`の既定（300秒）には遠く届かないので、ここで解けるとすれば経路1しかない。
+      await new Promise((resolve) => setTimeout(resolve, 12_000));
+
+      const stillWaiting = workflow.runner.getSnapshot(runId);
+      assert.equal(
+        stateOf(stillWaiting, 'T1'),
+        'waitingReply',
+        `未配送が残っているのに経路1で解けてしまった: ${describeSnapshot(stillWaiting)}`,
+      );
+      assert.equal(stateOf(stillWaiting, 'T2'), 'waitingReply');
+      assert.equal(stateOf(stillWaiting, 'T3'), 'waitingReply');
+      const warningsSoFar = warningsOfKind(stillWaiting, 'messagingStalled');
+      assert.ok(
+        !warningsSoFar.some((w) => w.message.includes('誰も動けなくなった')),
+        `未配送が残っているのに全員待ちの警告が出てしまった: ${describeSnapshot(stillWaiting)}`,
+      );
+    },
+  );
+
   test('replyTimeoutSec を超えると、待たずに再開して警告が残る', async function () {
     this.timeout(TEST_TIMEOUT_MS);
     // 実時間で300秒待たないよう、上限を最小値（1秒）へ落とす。
