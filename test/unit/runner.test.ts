@@ -150,11 +150,21 @@ class FakeTaskSession implements TaskSession {
   }
   /** テスト用。設定すると`open()`が投げる（タブを開けなかった経路の再現）。 */
   failOpen: Error | undefined;
+  /**
+   * テスト用。設定すると`open()`が`onFinished`を**同期的に**発火する（`open()`の中で
+   * ループを回し切ってしまうhost実装の再現。Issue #412のレビュー指摘12）。1回だけ発火する。
+   */
+  openFinishReason: LoopStopReason | undefined;
   openCount = 0;
   open(): void {
     this.openCount += 1;
     if (this.failOpen !== undefined) {
       throw this.failOpen;
+    }
+    const reason = this.openFinishReason;
+    this.openFinishReason = undefined;
+    if (reason !== undefined) {
+      this.finish(reason, { ...initialChatState });
     }
   }
   /**
@@ -6092,6 +6102,41 @@ tasks:
     codexHost.byTaskId('T2').finish('done', doneState('ok'));
     await flush();
     expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+  });
+
+  /**
+   * `onFinished`の登録が`session.open()`より後にあると、`open()`が同期的にループを回し切る
+   * host実装では、登録前に発火した終了を取りこぼす（レビュー指摘12）。取りこぼすと、
+   * 引き継ぎ（`handover.done`）が既に立っているぶん`attemptMerge`の`finally`も解放しないため、
+   * 統合worktreeの占有を誰も手放さないまま`runLoop()`が**正常return**する（`catch`にも
+   * 入らないので気づけない）。以後そのrunのマージは全て順番待ちで詰まる。
+   */
+  it('衝突解決セッションのopen()が同期的に終了を発火しても、決着まで進み占有も解放される', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/lease.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // 衝突解決セッションだけ、`open()`の中でループを回し切って終了まで発火する実装にする
+    codexHost.configureNext = (session) => {
+      session.openFinishReason = 'maxReached';
+    };
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    // 修正前はこの終了を誰も受け取らず、T1は`merging`のまま・占有も握られたままだった
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+    const resolution = codexHost.sessions.at(-1);
+    // 終わったセッションへループをかけ直さず、その場で畳む
+    expect(resolution?.runLoopCalls).toHaveLength(0);
+    expect(resolution?.disposed).toBe(true);
+
+    // 占有が解放されているので、次のタスクのマージは順番どおり進む
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+    expect(mergeCalls(git)).toHaveLength(2);
   });
 
   /**

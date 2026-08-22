@@ -656,17 +656,17 @@ async function startMergeResolution(
   // さらに`finally`の解放が先に走るぶん`abortAndBlock`の`git merge --abort`が`leaseNotHeld`で
   // 拒否されて`MERGE_HEAD`が残る（レビュー指摘D）。印を先に立てて再入を黙らせる
   const abandoned = { done: false };
+  // `open()`の最中に終了が発火したかどうか（下の`onFinished`が立てる）。読むのは`open()`が
+  // 返った直後の1回だけなので、通常の（あとから来る）終了で立っても影響しない。
+  const finishedWhileOpening = { done: false };
 
   try {
-    session.open({ preserveFocus: true });
-    live.mergeResolutions.set(taskId, session);
-
-    const prompt = buildMergeResolutionPrompt(
-      { id: taskId, prompt: task.prompt, done: task.done },
-      others,
-      conflict.unresolvedPaths,
-    );
-
+    // **`onFinished`の登録は`session.open()`より前に行う**（レビュー指摘12）。`open()`が
+    // 同期的にループを回し始めるhost実装だと、登録が後では`open()`中に発火した終了を
+    // 取りこぼす。取りこぼすと`handover.done`が既に立っているぶん`attemptMerge`の`finally`も
+    // 解放しないため、統合worktreeの占有を誰も手放さないまま`runLoop()`が正常returnし、
+    // 以後そのrunのマージが全て詰まる（`catch`にも入らないので気づけない）
+    //
     // 衝突解決セッションの承認は、通常のタスクの`escalation.ts`（境界・allow/escalate）
     // ではなく、標準の承認カード（`setApprovalHandler`を設定しない既定挙動）へ委ねる。
     // タスク境界（`TaskBoundary`）は本来そのタスクのworktree用に作られたもので、統合
@@ -679,8 +679,28 @@ async function startMergeResolution(
       if (abandoned.done) {
         return;
       }
+      finishedWhileOpening.done = true;
       void onMergeResolutionFinished(self, runId, taskId, task, integration, reason, lease);
     });
+
+    session.open({ preserveFocus: true });
+    if (finishedWhileOpening.done) {
+      // `open()`が同期的にループを回し切って終了まで発火した。決着と占有の解放は上の
+      // リスナーが済ませているので、ここでは終わったセッションを畳むだけにする
+      // （`live.mergeResolutions`へは入れない・`runLoop`もかけ直さない）
+      abandoned.done = true;
+      live.mergeResolutions.delete(taskId);
+      session.dispose();
+      self.notify(runId);
+      return;
+    }
+    live.mergeResolutions.set(taskId, session);
+
+    const prompt = buildMergeResolutionPrompt(
+      { id: taskId, prompt: task.prompt, done: task.done },
+      others,
+      conflict.unresolvedPaths,
+    );
 
     session.runLoop({
       initialPrompt: prompt,
