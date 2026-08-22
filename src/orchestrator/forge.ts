@@ -78,9 +78,7 @@ export function normalizeForgeHostConfig(value: string): ForgeHostConfig {
 }
 
 export type ResolveForgeHostResult =
-  | { kind: 'host'; host: ForgeHost }
-  | { kind: 'none' }
-  | { kind: 'undetermined'; message: string };
+  { kind: 'host'; host: ForgeHost } | { kind: 'none' } | { kind: 'undetermined'; message: string };
 
 /**
  * ホストを最終的に決定する。設定 `agent.workflows.forge` が `github` / `gitlab` を明示
@@ -290,16 +288,29 @@ export function shouldCreateIntegrationPullRequest(config: PullRequestLayerConfi
   return config === 'integration' || config === 'per-task';
 }
 
-/** 設定 `agent.workflows.finalMerge`（machineスコープ。design.md §16.16・§16.18）。 */
-export type FinalMergeConfig = 'auto' | 'pr-only';
+/**
+ * 設定 `agent.workflows.finalMerge`（machineスコープ。design.md §16.16・§16.18・§16.26）。
+ *
+ * - `auto`: PR/MRを作ってそのままマージする（従来の既定）
+ * - `orchestrator`: PR/MRを作り、オーケストレーターの判断でマージする（**新しい既定**）
+ * - `confirm`: PR/MRを作って人の承認を待ち、承認されたときだけマージする
+ * - `pr-only`: PR/MRを作った時点でrunを終える。マージは拡張の外（GitHub/GitLab上）で行う
+ */
+export type FinalMergeConfig = 'auto' | 'orchestrator' | 'confirm' | 'pr-only';
 
-/** `agent.workflows.finalMerge` の生値を安全な既定（`auto`）へ丸める。 */
+/** `agent.workflows.finalMerge` の生値を安全な既定（`orchestrator`、design.md §16.26）へ丸める。 */
 export function normalizeFinalMergeConfig(value: string): FinalMergeConfig {
-  return value === 'pr-only' ? 'pr-only' : 'auto';
+  return value === 'auto' || value === 'orchestrator' || value === 'confirm' || value === 'pr-only'
+    ? value
+    : 'orchestrator';
 }
 
 /**
- * 最終マージ（`gh pr merge` / `glab mr merge`）を実行してよいか。
+ * 最終マージ（`gh pr merge` / `glab mr merge`）を**即座に**実行してよいか。
+ *
+ * `auto` のときだけ `true`。`orchestrator` / `confirm` はPR/MR作成の直後にはマージせず、
+ * 判断が付いてから（`needsFinalMergeDecision`が`true`を返した後の`decide_final_merge`／
+ * 人の承認）マージする（design.md §16.26）。
  *
  * **前提チェックが通らずPR/MRを作れなかった場合、`finalMerge: auto` であってもmainへは
  * マージしない**（design.md §16.18「この場合、finalMerge: autoであってもmainへのマージは
@@ -311,6 +322,20 @@ export function shouldRunFinalMerge(
   pullRequestCreated: boolean,
 ): boolean {
   return config === 'auto' && pullRequestCreated;
+}
+
+/**
+ * マージするかどうかの判断を待つ必要があるか（design.md §16.26）。
+ *
+ * `orchestrator`（オーケストレーターへ判断を問う）と `confirm`（人の承認を待つ）が対象。
+ * `shouldRunFinalMerge`と同じく、PR/MRを作れていなければ（`pullRequestCreated: false`）
+ * 判断を待つ意味が無いため常に `false`。
+ */
+export function needsFinalMergeDecision(
+  config: FinalMergeConfig,
+  pullRequestCreated: boolean,
+): boolean {
+  return (config === 'orchestrator' || config === 'confirm') && pullRequestCreated;
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -386,7 +411,9 @@ export interface IntegrationPullRequestContentInput {
   taskIds: readonly string[];
 }
 
-export function buildIntegrationPullRequestTitle(input: IntegrationPullRequestContentInput): string {
+export function buildIntegrationPullRequestTitle(
+  input: IntegrationPullRequestContentInput,
+): string {
   return `run ${input.runId} の統合`;
 }
 

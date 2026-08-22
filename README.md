@@ -500,7 +500,13 @@ Codexがサブエージェントを起動したとき、その活動を会話の
 - **Claude Codeの `bypassPermissions` はワークフローでは使われない**（`agent.workflows.allowClaudeBypassPermissions` で明示的に許可した場合を除く）**。** この設定では承認要求そのものが発行されず、上の危険判定が丸ごと働かない。`claude.permissionMode` を `bypassPermissions` にしている場合、ワークフローのタスクは `acceptEdits` へ読み替えて実行し、その旨を警告に出す（チャットの設定はそのまま。ワークフロー実行時だけの読み替え）。**確認を挟まずに走らせたい場合は、`bypassPermissions` ではなく `autoApprove` を使う**（[後述](#確認を挟まずに走らせたい場合)）
 - **タスクの `allow` を書くと、そのタスクに関する限り危険判定そのものが効かなくなる。** `allow` は「既定の停止条件から外すパターン」を追加するフィールドで、書いた分だけそのタスクは自動承認の対象が広がる（`.git` 配下への書き込みなど一部は `allow` でも解除できない）。使っているワークフローは実行前に確認が出て、ワークフローViewの警告欄に常時表示される
 - **`autoApprove: true` はYAMLに書くだけでは効かない。** machineスコープの設定 `agent.workflows.allowAutoApprove`（既定 `false`）が有効なときだけ意味を持つ。無効のままなら、YAMLに何と書かれていても全ての承認要求を人へ回して走る（設定は[後述](#設定)）
-- **`agent.workflows.finalMerge` の既定は `auto`。** 全タスクが `done` になると、統合ブランチからmainへのPR/MRを作ったうえで、そのままmainへマージする（`gh pr merge` / `glab mr merge`）。**人の目を通さずmainが進む。** MRの自己マージを禁じる運用規約がある場合は、machineスコープの設定で `agent.workflows.finalMerge` を `pr-only` にする。PR/MRを作って止め、mainへの書き込みは人が行う
+- **`agent.workflows.finalMerge` は4つから選べる（既定 `orchestrator`）。** 全タスクが `done` になると、統合ブランチからmainへのPR/MRを作る。そのあと実際にマージするかどうかは値ごとに違う。
+  - `auto` — PR/MRを作ってそのままマージする（従来の既定。`gh pr merge` / `glab mr merge`。**人の目を通さずmainが進む**）
+  - `orchestrator` — PR/MRを作り、オーケストレーターの判断でマージする（**新しい既定**）。判断の内容と理由は必ずワークフローViewの警告欄に残る。オーケストレーターが `agent.workflows.finalMergeDecisionTimeoutSec`（既定900秒）以内に応答しなければ、判断を待って無限に止まらないよう自動的に `hold`（マージせずPR/MRを残す）として扱う
+  - `confirm` — PR/MRを作って人の承認を待ち、承認されたときだけマージする
+  - `pr-only` — PR/MRを作った時点でrunを終える。mainへの書き込みは人が行う
+
+  MRの自己マージを禁じる運用規約がある場合は、machineスコープの設定で `agent.workflows.finalMerge` を `pr-only` にする
 
 ### 最小のYAML
 
@@ -740,7 +746,8 @@ tasks:
 | `agent.workflows.pseudoWorktreeExclude` | `[node_modules,.venv,dist,out]` | machine-overridable | 疑似worktree（gitでないフォルダでの複製ベースの隔離）で複製から除外するディレクトリ名                                                |
 | `agent.workflows.forge`                 | `auto`                          | machine             | PR/MR作成に使うホスト（`auto` / `github` / `gitlab` / `none`）                                                                       |
 | `agent.workflows.pullRequest`           | `per-task`                      | machine-overridable | 作るPR/MRの層（`none` / `integration` / `per-task`）                                                                                 |
-| `agent.workflows.finalMerge`            | `auto`                          | machine             | 統合ブランチ→mainのPR/MRを無人でマージするか（`auto` / `pr-only`。[無人実行についての注意](#無人実行についての注意)参照）            |
+| `agent.workflows.finalMerge`            | `orchestrator`                  | machine             | 統合ブランチ→mainのPR/MRをマージするかどうかをどう決めるか（`auto` / `orchestrator` / `confirm` / `pr-only`。[無人実行についての注意](#無人実行についての注意)参照）           |
+| `agent.workflows.finalMergeDecisionTimeoutSec` | `900`                     | machine-overridable | `finalMerge: orchestrator` で、オーケストレーターが `decide_final_merge` に応答するのを待つ上限秒数。超えたら自動的に `hold` にする |
 | `agent.workflows.branchNaming`          | `wf`                            | machine-overridable | タスクブランチの命名方式（`wf` = `wf/<runId>/<taskId>` / `conventional` = `<type>/<IID>/<slug>`）                                    |
 | `agent.workflows.draftPullRequest`      | `false`                         | machine-overridable | PR/MRをDraftで作り、統合ブランチへのマージ後にreadyへ切り替えるか                                                                    |
 

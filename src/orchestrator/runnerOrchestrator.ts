@@ -16,7 +16,13 @@ import {
 import { sanitizeForLog, stripControlChars } from './sanitize';
 import { buildResponseSummary } from './taskSummary';
 import type { TaskState } from './runState';
-import type { LiveOrchestrator, LiveRun, RetryTaskResult, WorkflowRunSnapshot } from './runner';
+import type {
+  FinalMergeDecision,
+  LiveOrchestrator,
+  LiveRun,
+  RetryTaskResult,
+  WorkflowRunSnapshot,
+} from './runner';
 import type { WorkflowRunnerInternals } from './runnerInternals';
 import { truncateByCodePoint } from './workflow';
 
@@ -80,6 +86,11 @@ export interface OrchestratorControlActions {
   retryTask(runId: string, taskId: string, options?: { allowConfirmed?: boolean }): RetryTaskResult;
   continueTask(runId: string, taskId: string): boolean;
   decideApproval(runId: string, taskId: string, decision: ApprovalDecision): boolean;
+  /**
+   * 最終マージの判断を確定する（design.md §16.26）。`WorkflowRunner.decideFinalMerge`の
+   * JSDoc参照。判断待ちが無ければ`false`。
+   */
+  decideFinalMerge(runId: string, decision: FinalMergeDecision, reason: string): boolean;
 }
 
 /** 差し替えた継続指示のうち、警告欄へ出す先頭部分の長さ。 */
@@ -97,10 +108,7 @@ const no = (reason: string): OrchestratorControlResult => ({ accepted: false, re
  * 閉じるまでの隙間と、サーバの寿命に依存しない多層防御としてここでも止める。**`get_run_status`
  * は無効にしない**（走り終えた後に「なぜ失敗したのか」を聞く経路を残すため）。
  */
-function runFinishedReason(
-  actions: OrchestratorControlActions,
-  runId: string,
-): string | undefined {
+function runFinishedReason(actions: OrchestratorControlActions, runId: string): string | undefined {
   const outcome = actions.getSnapshot(runId)?.outcome;
   if (outcome === undefined) {
     return 'この実行はすでに破棄されているため、制御ツールは使えません。';
@@ -259,6 +267,35 @@ export function buildOrchestratorControlPort(
       }
       return updateTaskPrompt(self, runId, taskId, continuePrompt);
     },
+    decideFinalMerge: (decision, reason) => {
+      // `runFinishedReason`は使わない。最終マージの判断待ち（design.md §16.26）は
+      // 全タスクが`done`になり`outcome`が既に`succeeded`（＝「終了している」）に
+      // なった後で始まるため、`runFinishedReason`（`outcome === 'running'`でなければ
+      // 拒否）を通すと常に拒否されてしまう。ここでは`finalMergeDecision`の有無だけを
+      // 判断待ちの根拠にする
+      const snapshot = actions.getSnapshot(runId);
+      if (snapshot === undefined) {
+        return no('この実行はすでに破棄されているため、制御ツールは使えません。');
+      }
+      const pending = snapshot.finalMergeDecision;
+      if (pending === undefined) {
+        return no('最終マージの判断待ちはありません。');
+      }
+      if (pending.mode !== 'orchestrator') {
+        return no(
+          'この実行の agent.workflows.finalMerge は confirm です。マージするかどうかは人が判断します。',
+        );
+      }
+      if (decision !== 'merge' && decision !== 'hold') {
+        return no(`decision は 'merge' か 'hold' のどちらかです: ${decision}`);
+      }
+      if (reason.trim() === '') {
+        return no('reason は必須です（判断の理由を書いてください）。');
+      }
+      return actions.decideFinalMerge(runId, decision, reason)
+        ? ok(`最終マージの判断を ${decision} として確定しました。`)
+        : no('最終マージの判断待ちが見つかりません（既に確定した可能性があります）。');
+    },
   };
 }
 
@@ -302,6 +339,9 @@ function buildRunStatus(actions: OrchestratorControlActions, runId: string): unk
       pullRequestNumber: snapshot.integrationPullRequestNumber,
       pullRequestUrl: snapshot.integrationPullRequestUrl,
       finalMergeOutcome: snapshot.finalMergeOutcome,
+      // design.md §16.26。判断待ちの間`decide_final_merge`を呼ぶべきかをオーケストレーター
+      // 自身が`get_run_status`から確認できるようにする
+      finalMergeDecision: snapshot.finalMergeDecision,
     },
   };
 }

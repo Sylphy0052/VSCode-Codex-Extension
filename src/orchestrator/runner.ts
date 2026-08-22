@@ -14,6 +14,7 @@ import {
   buildIntegrationPullRequestBody,
   buildIntegrationPullRequestTitle,
   markPullRequestReady,
+  needsFinalMergeDecision,
   parsePullRequestNumberFromUrl,
   resolveForgeHost,
   runFinalMerge,
@@ -89,6 +90,7 @@ import {
   buildOrchestratorControlPort,
   disposeOrchestrator,
   markOrchestratorRead,
+  notifyOrchestrator,
   notifyOrchestratorRunFinished,
   notifyOrchestratorRunHalted,
   sendUserMessageToOrchestrator,
@@ -248,6 +250,23 @@ export interface WorkflowRunnerMessagingDeps {
   readReplyTimeoutSec?: () => number;
 }
 
+/**
+ * 最終マージの判断待ち（design.md §16.26、`finalMerge: orchestrator` / `confirm`）の
+ * 既定タイムアウト秒数。**`orchestrator`にだけ効く**（`confirm`は人がいつ確認するか
+ * 分からないため、待ち時間の上限を切って自動`hold`にする理由が無い）。
+ *
+ * 衝突解決セッションの承認待ち（`DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC`、既定3600秒＝1時間）
+ * より短くしてある。衝突解決は人・AIが何度もやり取りしうる多ターンのセッションだが、
+ * 最終マージの判断は「差分・警告欄・CIの結果を見て`merge`か`hold`かを1回のツール呼び出しで
+ * 答える」だけの単発の判断で、長時間の作業を待つ必要が無いため。オーケストレーターが
+ * 応答できない状態（セッションが壊れている等）で統合PR/MRを長時間放置するより、
+ * 早めに`hold`へ倒して人が気付けるようにする（design.md §16.26）。
+ */
+export const DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC = 900;
+
+/** 最終マージの判断（design.md §16.26）。`merge`はmainへ進める、`hold`はPR/MRを残して確定する。 */
+export type FinalMergeDecision = 'merge' | 'hold';
+
 export interface WorkflowRunnerDeps {
   /** provider別の `TaskSessionHost`。`runner.ts` はプロバイダを見ずにこの口だけを使う。 */
   hosts: Record<Provider, TaskSessionHost>;
@@ -313,6 +332,14 @@ export interface WorkflowRunnerDeps {
    * このタイムアウトは効かせる必要がある）。
    */
   readMergeApprovalTimeoutSec?: () => number;
+  /**
+   * `agent.workflows.finalMergeDecisionTimeoutSec`の現在値（秒）。省略時は
+   * `DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC`（既定900秒）を使う（design.md §16.26）。
+   * `finalMerge: orchestrator`で統合PR/MRを作った後、オーケストレーターが
+   * `decide_final_merge`で応答しないままこの秒数を超えたら自動的に`hold`へ倒す
+   * （`readMergeApprovalTimeoutSec`と同じく、呼び出し側は毎回現在値を返す関数を渡すこと）。
+   */
+  readFinalMergeDecisionTimeoutSec?: () => number;
   /** テスト用の差し替え口。既定は `node:crypto` の `randomUUID`。 */
   randomId?: () => string;
   /** テスト用の差し替え口。既定は `Date.now`。 */
@@ -490,7 +517,16 @@ export interface WorkflowWarning {
      * （`taskId`は持たない警告なので`mergeBusy`・`orchestratorPromptOverride`の
      * 「同一taskIdの直近1件」ではなく「このrunの直近1件」に読み替える）。
      */
-    | 'persistFailed';
+    | 'persistFailed'
+    /**
+     * 最終マージ（design.md §16.18「最終マージ」・§16.26、`finalMerge: orchestrator` /
+     * `confirm`）の判断待ち・判断の確定を伝える。人の承認を挟まない（`orchestrator`）以上、
+     * この警告が唯一の追跡手段になるため、判断待ちに入ったこと・確定した判断（`merge` /
+     * `hold`）とその理由を必ずここへ残す（design.md §16.26の受入基準）。同一runにつき
+     * 直近1件へ丸める（`orchestratorPromptOverride`と同じ規律。taskIdを持たない警告なので
+     * `persistFailed`と同じく「このrunの直近1件」の意味になる）。
+     */
+    | 'finalMergeDecision';
   /** ワークフロー全体に関わる警告（gitignoreなど）は undefined。 */
   taskId: string | undefined;
   message: string;
@@ -611,10 +647,21 @@ export interface WorkflowRunSnapshot {
   /** 統合PR/MRのURL。 */
   integrationPullRequestUrl?: string | undefined;
   /**
-   * 統合→mainの最終マージ（design.md §16.18「最終マージ」）の成否。試みていなければ
-   * `undefined`（`finalMerge: pr-only`、統合PR/MRの作成に失敗、runがまだ終わっていない等）。
+   * 統合→mainの最終マージ（design.md §16.18「最終マージ」・§16.26）の結果。試みていなければ
+   * `undefined`（`finalMerge: pr-only`、統合PR/MRの作成に失敗、runがまだ終わっていない、
+   * 最終マージの判断待ちの間、等）。`held`は`finalMerge: orchestrator`/`confirm`で
+   * `hold`（マージしない）と判断が確定したことを表す（`undefined`＝「まだ何も試みていない」
+   * とは区別する）。
    */
-  finalMergeOutcome?: 'merged' | 'failed' | undefined;
+  finalMergeOutcome?: 'merged' | 'failed' | 'held' | undefined;
+  /**
+   * 最終マージの判断待ち（design.md §16.26、`finalMerge: orchestrator` / `confirm`）。
+   * 統合PR/MRを作った後、マージするかどうかの判断が付くまでの間だけ存在する。
+   * ウィンドウのリロードでは復元しない（`LiveRun.finalMergeDecision`のJSDoc参照。
+   * `continuePromptOverride`と同じ「実行時のみの状態」）。
+   */
+  finalMergeDecision?:
+    { mode: 'orchestrator' | 'confirm'; pullRequestUrl: string | undefined } | undefined;
   /**
    * オーケストレーターセッション（design.md §16.23「会話のUI」）の状態。ワークフローView
    * の「オーケストレーター」欄がこれを描く。セッションを開けなかったrun・リロードで復元した
@@ -1022,10 +1069,36 @@ export interface LiveRun {
    */
   integrationPullRequest: PullRequestResult | undefined;
   /**
-   * 統合→mainの最終マージ（design.md §16.18「最終マージ」）の成否。`finalizeForge`で
-   * 書き込む。試みていなければ`undefined`。
+   * 統合→mainの最終マージ（design.md §16.18「最終マージ」・§16.26）の結果。`finalizeForge`
+   * （`auto`）・`decideFinalMerge`（`orchestrator`/`confirm`）で書き込む。試みていなければ
+   * `undefined`。`held`は`hold`（マージしない）と判断が確定したことを表す。
    */
-  finalMergeOutcome: 'merged' | 'failed' | undefined;
+  finalMergeOutcome: 'merged' | 'failed' | 'held' | undefined;
+  /**
+   * 最終マージの判断待ち（design.md §16.26、`finalMerge: orchestrator` / `confirm`）。
+   * `beginFinalMergeDecision`が立て、`decideFinalMerge`が判断の確定と同時に消す。
+   *
+   * **ウィンドウのリロードでは復元しない**（`rebuildLiveRun`は常に`undefined`で始める）。
+   * `LiveRun`の他の実行時専用の値（`continuePromptOverride`・`live.warnings`自体も
+   * 永続化されない）と同じ扱いで、リロード後に判断待ちだったPR/MRは人がホスト側
+   * （GitHub/GitLab）で直接確認する必要がある（design.md §16.26「永続化」）。
+   */
+  finalMergeDecision: LiveFinalMergeDecision | undefined;
+}
+
+/** `LiveRun.finalMergeDecision`（design.md §16.26）。判断が付くまでの間だけ存在する。 */
+export interface LiveFinalMergeDecision {
+  /** どちらが判断するか。`orchestrator`だけがタイムアウトを持つ（`timer`参照）。 */
+  readonly mode: 'orchestrator' | 'confirm';
+  /** 判断待ちに入った時刻（ms epoch）。デバッグ・将来の表示用に持つ（現状はUIへ出さない）。 */
+  readonly since: number;
+  /**
+   * `mode: 'orchestrator'`のときだけ張るタイムアウトタイマー
+   * （`agent.workflows.finalMergeDecisionTimeoutSec`秒後に自動`hold`）。`decideFinalMerge`が
+   * 判断の確定時に必ず`clearTimeout`する。`mode: 'confirm'`では張らない
+   * （人はいつ確認するか分からないため、タイムアウトで自動`hold`にする理由が無い）。
+   */
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 /**
@@ -1079,6 +1152,20 @@ function disposeQuietly(log: Logger, release: () => void, label?: string): void 
     const where = label === undefined ? '' : `（${label}）`;
     log.warn(`[workflow] 終了時の解放に失敗しました${where}: ${message}`);
   }
+}
+
+/**
+ * 最終マージの判断待ち・判断確定を伝える警告を積む（design.md §16.26）。
+ *
+ * `orchestratorPromptOverride`と同じく、同一runにつき直近1件へ丸める（`finalMergeDecision`
+ * 警告の呼び出し回数だけ際限なく積まれるのを防ぐ。taskIdを持たない警告なので
+ * `persistFailed`と同じ「このrunの直近1件」の意味になる）。「判断待ちに入った」→
+ * 「判断が確定した」の2回積まれるが、丸め込みにより最終的に残るのは確定後の1件で、
+ * 判断の内容と理由（受入基準）は必ず最後に残る。
+ */
+function pushFinalMergeWarning(live: LiveRun, message: string): void {
+  live.warnings = live.warnings.filter((w) => w.kind !== 'finalMergeDecision');
+  live.warnings.push({ kind: 'finalMergeDecision', taskId: undefined, message });
 }
 
 export class WorkflowRunner {
@@ -1612,6 +1699,7 @@ export class WorkflowRunner {
       orchestratorSeenStates: new Map(),
       integrationPullRequest: undefined,
       finalMergeOutcome: undefined,
+      finalMergeDecision: undefined,
     };
     this.runs.set(runId, live);
 
@@ -1861,7 +1949,10 @@ export class WorkflowRunner {
   private findStoppableSessionEntry(
     runId: string,
     taskId: string,
-  ): { kind: 'mergeResolution'; entry: MergeResolutionEntry } | { kind: 'task'; entry: LiveTask } | undefined {
+  ):
+    | { kind: 'mergeResolution'; entry: MergeResolutionEntry }
+    | { kind: 'task'; entry: LiveTask }
+    | undefined {
     const live = this.runs.get(runId);
     if (live === undefined) {
       return undefined;
@@ -2461,8 +2552,27 @@ export class WorkflowRunner {
       // つまり1周目が`succeeded`だった run は、この3経路のどれも呼べる状態にならない。
       // したがって2周目の`succeeded`到達（＝`finalizeForge`の2回目の呼び出し）は
       // 現状のコードでは起こらない（Issue #432-2）
+      //
+      // `finalMerge: orchestrator`（design.md §16.26）は`finalizeForge`の中から
+      // `decide_final_merge`（MCPツール）の応答を待ちうる。下のメッセージング終了処理
+      // （MCPサーバを閉じる）をこの判断が付くまで遅らせる必要があるため、ここで先に
+      // 判定しておく。`confirm`はMCPを使わない（人がViewのボタンを押すだけ）ため対象外。
+      // `live.forge.finalMerge`は実行開始時に一度だけ決まる値で、`finalizeForge`が
+      // 実際にPR/MRを作れるかどうかとは無関係に判定できる（作れなければ`finalizeForge`が
+      // 早期returnし、`live.finalMergeDecision`は`undefined`のまま残るので下の
+      // `closeMessagingIfFinalMergeSettled`が即座に閉じる）
+      const mayAwaitFinalMergeDecision =
+        outcome === 'succeeded' &&
+        live.forge.kind === 'active' &&
+        live.forge.finalMerge === 'orchestrator';
       if (outcome === 'succeeded') {
-        void this.finalizeForge(runId);
+        if (mayAwaitFinalMergeDecision) {
+          void this.finalizeForge(runId).then(() =>
+            this.closeMessagingIfFinalMergeSettled(runId, outcome),
+          );
+        } else {
+          void this.finalizeForge(runId);
+        }
       }
       // ロードマップの更新（design.md §16.19）もrunの結果を問わず行う。`done`になった
       // タスクの分だけチェックを入れる処理なので、runが途中で失敗していても、終わった分は
@@ -2496,19 +2606,43 @@ export class WorkflowRunner {
       // CLIへの本文送信なので順序に依存しないが、「以降ツールは使えない」を伝える文面と
       // 実際の閉鎖の順序を合わせておく）。
       //
-      // `notifyOrchestratorRunFinished`はrunにつき1度だけ送る（Issue #432-2）。
-      // `retryMerge`/`retryTask`/`continueTask`は再開の起点として`live.finished`を
-      // `false`へ戻すため、この終了ブロックは再開後にもう一周走りうる。`notifyOrchestrator`
-      // （`runnerOrchestrator.ts`）は件数上限しか持たず重複排除しないため、絞らないと
-      // 「実行が終了しました」がオーケストレーターへ二重に届く
-      if (!live.finishedNotified) {
-        notifyOrchestratorRunFinished(this.internals, runId, outcome);
-        live.finishedNotified = true;
+      // `finalMerge: orchestrator`でPR/MRを作れた場合（`mayAwaitFinalMergeDecision`）は、
+      // `decide_final_merge`の応答を待つ必要があるためここでは閉じない。
+      // `closeMessagingIfFinalMergeSettled`（`finalizeForge`完了後・`decideFinalMerge`
+      // 確定後の両方から呼ばれる）が、判断待ちが無いことを確認してから閉じる
+      if (!mayAwaitFinalMergeDecision) {
+        this.closeMessagingIfFinalMergeSettled(runId, outcome);
       }
-      // `closeMessaging`自体は`live.messaging === undefined`なら即returnする既に冪等な
-      // 実装なので、`finishedNotified`では絞らない（絞ると意味が重複するだけ）
-      closeMessaging(live);
     }
+  }
+
+  /**
+   * オーケストレーターへの終了通知（`notifyOrchestratorRunFinished`）とMCPサーバの
+   * 解放（`closeMessaging`）をまとめて行う（design.md §16.23・§16.26）。
+   *
+   * **`live.finalMergeDecision`が判断待ちの間は何もしない。** `finalMerge: orchestrator`は
+   * `decide_final_merge`ツールでこの判断を受けるため、判断が付く前にMCPサーバを閉じると
+   * ツールごと消えてしまう。`pump()`の終了ブロック（PR/MRを作れなかった／判断待ちに
+   * ならなかった経路）と、`decideFinalMerge`（判断が確定した経路）の両方から呼ばれる
+   * 合流点にしてあるのはこのため。
+   */
+  private closeMessagingIfFinalMergeSettled(runId: string, outcome: string): void {
+    const live = this.runs.get(runId);
+    if (live === undefined || live.finalMergeDecision !== undefined) {
+      return;
+    }
+    // `notifyOrchestratorRunFinished`はrunにつき1度だけ送る（Issue #432-2）。
+    // `retryMerge`/`retryTask`/`continueTask`は再開の起点として`live.finished`を
+    // `false`へ戻すため、この終了ブロックは再開後にもう一周走りうる。`notifyOrchestrator`
+    // （`runnerOrchestrator.ts`）は件数上限しか持たず重複排除しないため、絞らないと
+    // 「実行が終了しました」がオーケストレーターへ二重に届く
+    if (!live.finishedNotified) {
+      notifyOrchestratorRunFinished(this.internals, runId, outcome);
+      live.finishedNotified = true;
+    }
+    // `closeMessaging`自体は`live.messaging === undefined`なら即returnする既に冪等な
+    // 実装なので、`finishedNotified`では絞らない（絞ると意味が重複するだけ）
+    closeMessaging(live);
   }
 
   /**
@@ -2977,72 +3111,205 @@ export class WorkflowRunner {
     }
 
     // design.md §16.18「この場合、finalMerge: autoであってもmainへのマージは行わない」。
-    // `shouldRunFinalMerge`が`created`（PR/MRを作れたか）を見て判定するため、ここでは
-    // ガードを重ねず素直に結果へ従う
+    // `shouldRunFinalMerge`/`needsFinalMergeDecision`が`created`（PR/MRを作れたか）を
+    // 見て判定するため、ここではガードを重ねず素直に結果へ従う
     if (shouldRunFinalMerge(forge.finalMerge, created)) {
-      // design.md §16.18「統合層のPR/MRもDraftで作る。ただしこちらは最終マージの直前に
-      // readyへ切り替える。Draftのままではマージできないため、タスク層とは順序が違う」。
-      // タスク層（`runTaskPullRequestFlow`）はマージ後にreadyへ切り替えるが、統合層は
-      // 逆に「readyへ切り替えてからマージする」順序になる
-      if (live.draftPullRequest && live.integrationPullRequest !== undefined) {
-        const number = live.integrationPullRequest.number;
-        if (number === undefined) {
-          // design.md §16.18「URLから番号を取り出せなかった場合はready化を飛ばし、警告を
-          // 残す。Draftのまま残るほうが、誤った番号のPR/MRをreadyにするより害が小さい」
+      // `auto`: 従来どおりPR/MR作成の直後に即マージする（design.md §16.18）
+      await this.performFinalMerge(runId);
+    } else if (needsFinalMergeDecision(forge.finalMerge, created)) {
+      // `orchestrator` / `confirm`（design.md §16.26）: マージするかどうかの判断が
+      // 付くまで待つ。判断が`merge`になったら`decideFinalMerge`が`performFinalMerge`を呼ぶ
+      this.beginFinalMergeDecision(runId, forge.finalMerge as 'orchestrator' | 'confirm');
+    }
+    void this.persist(runId);
+    this.notify(runId);
+  }
+
+  /**
+   * 統合PR/MRを実際にmainへマージする（design.md §16.18「最終マージ」・§16.26）。
+   *
+   * `finalMerge: auto`では統合PR/MR作成の直後に`finalizeForge`から、`orchestrator`/
+   * `confirm`では判断が`merge`になった時点で`decideFinalMerge`から呼ばれる。どちらの
+   * 経路でも「ready化してからマージする」処理そのものは同じ（design.md §16.18の順序は
+   * `finalMerge`の値と無関係に決まる）ため、ここへ集約してある。
+   *
+   * 呼び出し元が`notify`/`persist`を行うため、ここでは行わない
+   * （`finalizeForge`は末尾で1回、`decideFinalMerge`は判断確定の警告と合わせて1回）。
+   */
+  private async performFinalMerge(runId: string): Promise<void> {
+    const live = this.runs.get(runId);
+    if (live === undefined || live.forge.kind !== 'active' || live.integration === undefined) {
+      return;
+    }
+    const forge = live.forge;
+    const forgeDeps = this.deps.forge;
+    if (forgeDeps === undefined) {
+      // 型上`forge.kind === 'active'`は`forgeDeps`が存在するときにしか作られない
+      // （`resolveForgeState`参照）ため到達しない想定だが、安全側でここでも確認する
+      return;
+    }
+    // design.md §16.18「統合層のPR/MRもDraftで作る。ただしこちらは最終マージの直前に
+    // readyへ切り替える。Draftのままではマージできないため、タスク層とは順序が違う」。
+    // タスク層（`runTaskPullRequestFlow`）はマージ後にreadyへ切り替えるが、統合層は
+    // 逆に「readyへ切り替えてからマージする」順序になる
+    if (live.draftPullRequest && live.integrationPullRequest !== undefined) {
+      const number = live.integrationPullRequest.number;
+      if (number === undefined) {
+        // design.md §16.18「URLから番号を取り出せなかった場合はready化を飛ばし、警告を
+        // 残す。Draftのまま残るほうが、誤った番号のPR/MRをreadyにするより害が小さい」
+        this.deps.log.warn(
+          `[workflow ${runId}] 統合PR/MRの番号をURLから取り出せなかったため、ready化を飛ばします`,
+        );
+        live.warnings.push({
+          kind: 'forgeFailed',
+          taskId: undefined,
+          message: '統合PR/MRの番号をURLから取り出せなかったため、ready化を飛ばしました',
+        });
+      } else {
+        const ready = await markPullRequestReady(
+          forgeDeps.cli,
+          forge.host,
+          live.integration.cwd,
+          number,
+        );
+        if (!ready.ok) {
+          // ready化の失敗はワークフローを止めない（design.md §16.18「5の失敗はワークフローを
+          // 止めない」）。以降の最終マージはそのまま試みる
           this.deps.log.warn(
-            `[workflow ${runId}] 統合PR/MRの番号をURLから取り出せなかったため、ready化を飛ばします`,
+            `[workflow ${runId}] 統合PR/MRのready化に失敗しました: ${ready.message}`,
           );
           live.warnings.push({
             kind: 'forgeFailed',
             taskId: undefined,
-            message: '統合PR/MRの番号をURLから取り出せなかったため、ready化を飛ばしました',
+            message: `統合PR/MRのready化に失敗しました: ${ready.message}`,
           });
-        } else {
-          const ready = await markPullRequestReady(
-            forgeDeps.cli,
-            forge.host,
-            live.integration.cwd,
-            number,
-          );
-          if (!ready.ok) {
-            // ready化の失敗はワークフローを止めない（design.md §16.18「5の失敗はワークフローを
-            // 止めない」）。以降の最終マージはそのまま試みる
-            this.deps.log.warn(
-              `[workflow ${runId}] 統合PR/MRのready化に失敗しました: ${ready.message}`,
-            );
-            live.warnings.push({
-              kind: 'forgeFailed',
-              taskId: undefined,
-              message: `統合PR/MRのready化に失敗しました: ${ready.message}`,
-            });
-          }
         }
       }
-      // design.md §16.18・Issue #404「番号を省略すると、マージ対象はcwdのカレント
-      // ブランチに紐づくPR/MRという暗黙の状態依存になる」ため、直前に取り出した統合PR/MRの
-      // 番号（`live.integrationPullRequest.number`）を明示的に渡す。番号が不明なとき
-      // （URLから取り出せなかった等）は`runFinalMerge`自体がCLIを呼ばず警告を返す
-      const merge = await runFinalMerge(
-        forgeDeps.cli,
-        forge.host,
-        live.integration.cwd,
-        live.integrationPullRequest?.number,
-      );
-      if (!merge.ok) {
-        this.deps.log.warn(`[workflow ${runId}] 最終マージに失敗しました: ${merge.message}`);
-        live.warnings.push({
-          kind: 'forgeFailed',
-          taskId: undefined,
-          message: `最終マージに失敗しました: ${merge.message}`,
-        });
-        live.finalMergeOutcome = 'failed';
-      } else {
-        this.deps.log.info(`[workflow ${runId}] mainへの最終マージが完了しました`);
-        live.finalMergeOutcome = 'merged';
-      }
+    }
+    // design.md §16.18・Issue #404「番号を省略すると、マージ対象はcwdのカレント
+    // ブランチに紐づくPR/MRという暗黙の状態依存になる」ため、直前に取り出した統合PR/MRの
+    // 番号（`live.integrationPullRequest.number`）を明示的に渡す。番号が不明なとき
+    // （URLから取り出せなかった等）は`runFinalMerge`自体がCLIを呼ばず警告を返す
+    const merge = await runFinalMerge(
+      forgeDeps.cli,
+      forge.host,
+      live.integration.cwd,
+      live.integrationPullRequest?.number,
+    );
+    if (!merge.ok) {
+      this.deps.log.warn(`[workflow ${runId}] 最終マージに失敗しました: ${merge.message}`);
+      live.warnings.push({
+        kind: 'forgeFailed',
+        taskId: undefined,
+        message: `最終マージに失敗しました: ${merge.message}`,
+      });
+      live.finalMergeOutcome = 'failed';
+    } else {
+      this.deps.log.info(`[workflow ${runId}] mainへの最終マージが完了しました`);
+      live.finalMergeOutcome = 'merged';
     }
     void this.persist(runId);
     this.notify(runId);
+  }
+
+  /**
+   * 最終マージの判断待ちに入る（design.md §16.26、`finalMerge: orchestrator` / `confirm`）。
+   *
+   * `mode: 'orchestrator'`のときだけ、判断を促す通知をオーケストレーターへ送り、
+   * タイムアウトタイマーを張る（応答が無ければ`decideFinalMerge`で自動的に`hold`にする）。
+   * `mode: 'confirm'`は通知もタイマーも張らない。ワークフローViewの確認ボタン
+   * （`confirmFinalMerge`/`holdFinalMerge`。`workflowView.ts`）から`decideFinalMerge`が
+   * 直接呼ばれるのを待つだけになる。
+   */
+  private beginFinalMergeDecision(runId: string, mode: 'orchestrator' | 'confirm'): void {
+    const live = this.runs.get(runId);
+    if (live === undefined) {
+      return;
+    }
+    const url = live.integrationPullRequest?.url;
+    live.finalMergeDecision = { mode, since: (this.deps.now?.() ?? new Date()).getTime() };
+    const waiterLabel = mode === 'orchestrator' ? 'オーケストレーターの判断' : '人の承認';
+    pushFinalMergeWarning(
+      live,
+      `統合PR/MR${url !== undefined ? `（${url}）` : ''}を作成しました。mainへの最終マージは${waiterLabel}を待っています。`,
+    );
+
+    if (mode === 'orchestrator') {
+      const timeoutSec = this.readFinalMergeDecisionTimeoutSec();
+      notifyOrchestrator(this.internals, runId, {
+        kind: 'finalMergeDecision',
+        body: [
+          `統合PR/MR${url !== undefined ? `（${url}）` : ''}を作成しました。`,
+          'mainへ最終マージするかどうかを判断してください。',
+          'get_run_statusで差分・警告欄・統合の状況を確認したうえで、decide_final_mergeツールを',
+          "decision: 'merge'（mainへマージする） または decision: 'hold'（マージせずPR/MRを残す）、",
+          'reason（判断の理由。必須）を添えて呼んでください。',
+          `${timeoutSec}秒以内に応答が無い場合は、判断を待って無限に止まらないよう自動的にholdとして扱います。`,
+        ].join('\n'),
+      });
+      const timer = setTimeout(() => {
+        this.decideFinalMerge(
+          runId,
+          'hold',
+          `オーケストレーターの応答が${timeoutSec}秒以内に無かったため、自動的にholdとしました。`,
+        );
+      }, timeoutSec * 1000);
+      // `scheduleApprovalTimeout`（`runnerMerge.ts`）と同じく、テスト・プロセス終了を
+      // 妨げないようにする
+      timer.unref?.();
+      live.finalMergeDecision.timer = timer;
+    }
+  }
+
+  private readFinalMergeDecisionTimeoutSec(): number {
+    return (
+      this.deps.readFinalMergeDecisionTimeoutSec?.() ?? DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC
+    );
+  }
+
+  /**
+   * 最終マージの判断を確定する（design.md §16.26）。3つの経路から呼ばれる:
+   * オーケストレーターの`decide_final_merge`ツール（`buildOrchestratorControlPort`）・
+   * ワークフローViewの確認ボタン（`workflowView.ts`）・応答が無いままのタイムアウト
+   * （`beginFinalMergeDecision`が張るタイマー）。
+   *
+   * `decision: 'merge'`は実際のマージを`performFinalMerge`で進める（非同期。呼び出し元は
+   * 完了を待たない。`finalizeForge`が`auto`の結果を待たずに`notify`するのと同じ扱い）。
+   * `'hold'`はPR/MRを残したまま`finalMergeOutcome`を`held`に確定する。**どちらも判断の
+   * 内容と理由を必ず警告欄へ残す**（design.md §16.26の受入基準。人の承認を挟まない
+   * `orchestrator`ではこの記録が唯一の追跡手段になる）。
+   *
+   * `live.finalMergeDecision`が無い（判断待ちでない・runが無い）場合は`false`を返す。
+   * 二重に呼ばれても（タイムアウトと同時に人が確認した等）2回目は`false`になるだけで、
+   * 二重マージ・二重の警告は起きない。
+   */
+  public decideFinalMerge(runId: string, decision: FinalMergeDecision, reason: string): boolean {
+    const live = this.runs.get(runId);
+    const pending = live?.finalMergeDecision;
+    if (live === undefined || pending === undefined) {
+      return false;
+    }
+    clearTimeout(pending.timer);
+    live.finalMergeDecision = undefined;
+    const decisionLabel =
+      decision === 'merge' ? 'merge（mainへマージする）' : 'hold（マージせずPR/MRを残す）';
+    pushFinalMergeWarning(
+      live,
+      `最終マージの判断が確定しました: ${decisionLabel}。理由: ${reason === '' ? '（理由が示されませんでした）' : reason}`,
+    );
+    if (decision === 'merge') {
+      void this.performFinalMerge(runId);
+    } else {
+      live.finalMergeOutcome = 'held';
+      void this.persist(runId);
+    }
+    // 判断が確定したので、MCPサーバを閉じられるなら閉じる（`live.finalMergeDecision`は
+    // 上で既に`undefined`へ戻してあるので、判断待ちの再チェックは通る）。
+    // `performFinalMerge`は`forgeDeps.cli`（gitホストCLI）しか使わず、MCPには依存しない
+    // ため、その完了を待たずに閉じてよい
+    this.closeMessagingIfFinalMergeSettled(runId, getRunOutcome(live.runState));
+    this.notify(runId);
+    return true;
   }
 
   // ---- 承認 ----

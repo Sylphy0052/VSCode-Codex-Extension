@@ -35,7 +35,10 @@ import type { WorkflowRunnerInternals } from './runnerInternals';
  * Viewが描画する現在の状態のスナップショット（design.md §16.8）。
  * 応答本文そのものではなく `LiveTask.lastResponseSummary`（1行要約）だけを渡す。
  */
-export function getSnapshot(self: WorkflowRunnerInternals, runId: string): WorkflowRunSnapshot | undefined {
+export function getSnapshot(
+  self: WorkflowRunnerInternals,
+  runId: string,
+): WorkflowRunSnapshot | undefined {
   const live = self.runs.get(runId);
   if (live === undefined) {
     return undefined;
@@ -69,6 +72,16 @@ export function getSnapshot(self: WorkflowRunnerInternals, runId: string): Workf
     integrationPullRequestUrl:
       live.integrationPullRequest?.url ?? persisted?.integrationPullRequestUrl,
     finalMergeOutcome: live.finalMergeOutcome ?? persisted?.finalMergeOutcome,
+    // design.md §16.26。ウィンドウのリロードでは復元しない（`LiveRun.finalMergeDecision`の
+    // JSDoc参照）ため、`persisted`へのフォールバックは無い（`live`にしか存在しえない）
+    finalMergeDecision:
+      live.finalMergeDecision === undefined
+        ? undefined
+        : {
+            mode: live.finalMergeDecision.mode,
+            pullRequestUrl:
+              live.integrationPullRequest?.url ?? persisted?.integrationPullRequestUrl,
+          },
     orchestrator: buildOrchestratorSnapshot(live),
   };
 }

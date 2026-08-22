@@ -196,6 +196,7 @@ export class WorkflowViewManager implements vscode.Disposable {
       number: snapshot.integrationPullRequestNumber,
       url: snapshot.integrationPullRequestUrl,
       finalMergeOutcome: snapshot.finalMergeOutcome,
+      finalMergeDecision: snapshot.finalMergeDecision,
     });
     void this.panel.webview.postMessage({ type: 'state', snapshot, layout, progress, integration });
   }
@@ -374,6 +375,17 @@ export class WorkflowViewManager implements vscode.Disposable {
       // 同じセッションのチャットタブを前面に出す（`reveal`）。オーケストレーター用の
       // チャット画面は作らず、既存の画面をそのまま使う。開いた時点で未読の印が消える
       this.runner.revealOrchestrator(runId);
+      return;
+    }
+    if (
+      type === 'decideFinalMerge' &&
+      (m['decision'] === 'merge' || m['decision'] === 'hold') &&
+      typeof m['reason'] === 'string'
+    ) {
+      // design.md §16.26。`finalMerge: confirm`の人の判断。`orchestrator`モードの
+      // オーケストレーターからの判断はMCPツール（`decide_final_merge`）経由で、Webviewの
+      // このメッセージは通らない。空文字の理由は`workflowScript.ts`側で送信前に弾いている
+      this.runner.decideFinalMerge(runId, m['decision'], m['reason']);
       return;
     }
 

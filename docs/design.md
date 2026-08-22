@@ -4614,12 +4614,14 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 
 #### 最終マージ
 
-設定 `agent.workflows.finalMerge`（`auto` / `pr-only`、既定 `auto`）。
+設定 `agent.workflows.finalMerge`（`auto` / `orchestrator` / `confirm` / `pr-only`、既定 `orchestrator`）。
 
 - `auto`: 統合→mainのPR/MRを作ったうえで、`gh pr merge --merge` / `glab mr merge --remove-source-branch` まで実行する
+- `orchestrator`: PR/MRを作ったうえで、mainへマージするかどうかをオーケストレーターの判断へ委ねる（**新しい既定**。判断の仕組みは§16.26）
+- `confirm`: PR/MRを作ったうえで、人の承認を待つ。承認されたときだけマージする（判断の仕組みは§16.26）
 - `pr-only`: PR/MRを作って止める。mainへの書き込みは人が行う
 
-この設定はmainを書き換えるかどうかを決めるので、**machineスコープに固定する**（§16.16）。リポジトリの `.vscode/settings.json` から `auto` へ変えられてはいけない。MRの自己マージを禁じる運用規約を持つ組織のリポジトリでは、利用者がmachine設定で `pr-only` にする。
+この設定はmainを書き換えるかどうかを決めるので、**machineスコープに固定する**（§16.16）。リポジトリの `.vscode/settings.json` から緩められてはいけない。MRの自己マージを禁じる運用規約を持つ組織のリポジトリでは、利用者がmachine設定で `pr-only` にする。
 
 mainへマージした後も統合ブランチは残す。片付けはViewの操作から行う。
 
@@ -5115,3 +5117,56 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 6. 同じ性質を複数箇所で確認している場合、**片方だけ戻すともう片方がマスクする**ことがある。片方を戻すともう一方が代わりに検知して見かけ上REDになる（正しく検出できているように見える）が、それは戻した側の欠陥を見ているのではなく、別の防御が別の理由でREDにしているだけの場合がある。同じ性質を複数箇所で確認しているときは、その全てを戻した状態でも測ること
 7. 仕込んだ攻撃入力が、**検査地点まで実際に届いているか**。Issue #505のRED実測では、偽装したマニフェストのキー `../evil-...` が境界検査より手前の `isValidManifestKey` で弾かれており、テストは境界検査について何も測っていなかった。手前に別の検証がある場合、そこを通過する入力でなければ、目的の検査地点には到達しない
 8. RED実測は、**その修正の核となる一箇所だけを戻して**測る。`git stash` 等で差分全体を戻すと、同じPRに含まれる別の変更（無関係な配線変更・ゲート除去等）が代わりにREDを出し、核心そのものは何も検証されていないのに「REDを実測した」という誤った記録が残る。実例（Issue #511）: `runnerWorkingDirectory.ts` の `baseline` 更新1行を含むPRで、`git stash` により差分全体を旧実装へ戻してRED実測としたが、実際にREDを出していたのは同じPR内の別変更（`runner.ts` の `finishedNotified` ゲート除去）であり、baseline更新ロジック自体はその1行を無効化しても・常に更新するよう変えても2件とも緑のままだった（後日の再監査で発覚）
+
+### 16.26 最終マージの判断（Issue #335、ロードマップW1）
+
+統合→mainの最終マージ（§16.18「最終マージ」）を実行するかどうかを、誰がどう決めるかの設定。設定は `agent.workflows.finalMerge` で、4つの値を持つ。**`auto` と `pr-only` は既存の値のまま消さない。**
+
+- `auto` — PR/MRを作ってそのままマージする（従来の既定）
+- `orchestrator` — PR/MRを作り、オーケストレーターの判断でマージする（**新しい既定**）
+- `confirm` — PR/MRを作って人の承認を待ち、承認されたときだけマージする
+- `pr-only` — PR/MRを作った時点でrunを終える
+
+`auto` と `pr-only` の挙動そのものは§16.18に書いたとおりで変わらない。以下は `orchestrator` / `confirm` が追加で必要とする「判断待ち」の仕組みを扱う。
+
+#### 判断待ちに入る条件
+
+`shouldRunFinalMerge`（`auto`かつPR/MRが作れた）が`false`で、かつ`needsFinalMergeDecision`（`orchestrator` または `confirm`かつPR/MRが作れた）が`true`のとき、`WorkflowRunner.beginFinalMergeDecision` が判断待ちへ入る（`forge.ts`）。PR/MRの作成に失敗していれば、`auto`と同じく最終マージ自体を試みない（判断待ちにも入らない）。
+
+判断待ちの状態は `LiveRun.finalMergeDecision`（`{ mode: 'orchestrator' | 'confirm', since, timer? }`）が持つ。`continuePromptOverride`・`live.warnings` 自体と同じく**永続化しない**（`runStore.ts`のスキーマへは載せない）。VSCodeのリロードで判断待ちの状態は失われ、人がホスト（GitHub/GitLab）側でPR/MRの状態を見て判断する形に戻る。これは既存の非永続状態と同じ設計判断であり、見落としではない。
+
+#### 判断の確定経路
+
+判断は3つの経路のいずれかから届き、すべて `WorkflowRunner.decideFinalMerge(runId, decision, reason)` へ合流する（`decision: 'merge' | 'hold'`、`reason`は必須）。**確定した判断とその理由は、経路によらず必ずワークフローViewの警告欄（`WorkflowWarning.kind: 'finalMergeDecision'`）へ記録する。** `orchestrator`モードは人の承認を挟まないため、この警告欄の記録が唯一の追跡手段になる。
+
+1. **`decide_final_merge` MCPツール**（`orchestrator`モードのみ）。オーケストレーター専用の制御ツール群（§16.23「道具」）に追加した。`decision` / `reason` を引数に取り、`taskId` を取らない点が他の制御ツールと異なるため、`messaging.ts`の`handleControlToolCall`では`taskId`抽出より前の特別扱いの分岐で処理する。判断待ちが無い・`confirm`モードである・`decision`が不正・`reason`が空文字、のいずれかであれば理由付きで拒否する
+2. **ワークフローViewのボタン**（`confirm`モードのみ）。`workflowScript.ts`が「mainへマージする」/「マージしない」ボタンと理由入力欄を出し、`decideFinalMerge`メッセージを`workflowView.ts`経由で`WorkflowRunner.decideFinalMerge`へ渡す
+3. **タイムアウト**（`orchestrator`モードのみ）。次項
+
+`confirm`モードには2のボタン経路のみで、MCPツールもタイムアウトも働かない。人の応答時間は予測できないため、自動的に判断を確定させる仕組みを持たせない。
+
+#### タイムアウト（`agent.workflows.finalMergeDecisionTimeoutSec`、既定900秒）
+
+`orchestrator`モードだけ、判断待ちに入ると同時にタイマーを張る（`beginFinalMergeDecision`）。既定は900秒（15分）で、`setTimeout` + `.unref()`（`scheduleApprovalTimeout`と同じ流儀。テスト・プロセス終了を妨げない）。応答が無いまま閾値を超えると、`decideFinalMerge(runId, 'hold', <タイムアウトである旨の理由>)`を自動的に呼ぶ。**応答が無い場合は`hold`（マージしない）へ倒す。** マージしない方向へ倒すことで、判断が確定しないままprocessが無期限に止まる事態を避けつつ、誤ってmainを書き換える事故を防ぐ（`hold`はPR/MRを残すだけで取り消せるが、誤マージは取り消しにくい）。
+
+既定値900秒は、`agent.workflows.mergeApprovalTimeoutSec`（既定3600秒、衝突解決の承認待ち）より短い。衝突解決の承認待ちは人が複数ターンかけて対話しうるのに対し、最終マージの判断はオーケストレーターが`get_run_status`で差分・警告欄・CI結果を確認したうえで単発のツール呼び出しに答えるだけの判断であり、長時間の往復を前提としないため。
+
+#### MCPサーバの寿命との整合
+
+既存の`pump()`終了処理は、runの結果が確定した時点でタスク間メッセージングのMCPサーバを同期的に閉じ、オーケストレーターへ「実行が終了しました」の通知を送っていた（§16.23）。この処理は`finalizeForge`（統合PR/MR作成・最終マージを行う非同期処理）を`void`で fire-and-forget 起動するのと同じティックで走るため、`finalizeForge`が`await`で中断する前に先に完了してしまう。**`finalMerge: orchestrator`でPR/MRを作れた場合にこの経路をそのまま使うと、`decide_final_merge`ツールが生えるより先にMCPサーバが閉じ、判断そのものを一切受け付けられなくなる。**（実装前の設計段階で気づいた欠陥で、テストのRED/GREENで見つけたものではない）
+
+これを避けるため、`pump()`は`mayAwaitFinalMergeDecision`（outcomeがsucceeded、forgeが有効、`finalMerge: orchestrator`）を判定し、真であれば`finalizeForge`の完了を待ってから閉鎖処理（`closeMessagingIfFinalMergeSettled`）を呼ぶ。`closeMessagingIfFinalMergeSettled`は`live.finalMergeDecision`が`undefined`（判断待ちが無い）ことを確認したうえでのみ実際に閉じるため、次の3箇所いずれから呼ばれても安全に収束する。
+
+- `pump()`の終了処理（`mayAwaitFinalMergeDecision`が偽の通常経路。PR/MRを作れなかった場合や`auto`/`confirm`/`pr-only`）
+- `finalizeForge`完了後のコールバック（`orchestrator`でPR/MRを作れなかった場合。判断待ちに入らないため即座に閉じる）
+- `decideFinalMerge`確定後（`orchestrator`で判断が確定した場合。ここで初めて閉じる）
+
+`confirm`モードはMCPサーバの寿命に影響しない。`confirm`の判断はワークフローViewのボタン（Webview⇔拡張機能間のメッセージ）経由であり、タスク間メッセージングのMCPサーバとは別経路のため、判断待ちの間もサーバをすぐ閉じてよい。
+
+#### `held`という結果
+
+`finalMergeOutcome`（スナップショット・永続化とも）に`held`を追加した（従来は`'merged' | 'failed' | undefined`）。`hold`判断が確定した場合（タイムアウト経由を含む）にこの値になる。`merged`/`failed`と異なり試み自体は行わない（マージコマンドを呼ばない）ため、失敗とは区別する。
+
+#### 検証
+
+`test/unit/forge.test.ts`が`needsFinalMergeDecision`を、`test/unit/runner.test.ts`の「WorkflowRunner: 最終マージの判断」ブロックが判断待ちへ入ること・MCPサーバがそれまで閉じないこと・`decide_final_merge`相当の確定経路（`decideFinalMerge`）が`merge`/`hold`それぞれで正しい結果と警告を残すこと・タイムアウトで自動的に`hold`へ倒れること・`confirm`はタイムアウトしないことを確かめる。実ホストでのMCPツール呼び出し・ワークフローViewのボタンの見た目・実際のオーケストレーターモデルの判断挙動は[manual-test.md](manual-test.md)のW-Fに残す。

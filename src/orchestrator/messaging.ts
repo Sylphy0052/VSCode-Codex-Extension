@@ -585,6 +585,13 @@ export interface OrchestratorControlPort {
   continueTask(taskId: string): OrchestratorControlResult;
   decideApproval(taskId: string, decision: string): OrchestratorControlResult;
   updateTaskPrompt(taskId: string, continuePrompt: string): OrchestratorControlResult;
+  /**
+   * 最終マージ（design.md §16.26、`finalMerge: orchestrator`）をmainへ進めるか
+   * （`decision: 'merge'`）、PR/MRを残して保留するか（`decision: 'hold'`）を答える。
+   * `reason`（理由）は必須。runId・対象taskIdを引数に取らない（run全体で1つの判断で、
+   * 統合PR/MRという1つの対象しか無いため）。
+   */
+  decideFinalMerge(decision: string, reason: string): OrchestratorControlResult;
 }
 
 /** 制御ツールの結果。`send_message` と同じく「受け付けたかどうかと、その理由」を返す。 */
@@ -629,7 +636,8 @@ export const RETRY_TASK_TOOL: McpToolDefinition = {
 
 export const CONTINUE_TASK_TOOL: McpToolDefinition = {
   name: 'continue_task',
-  description: '止まっているタスクを同じセッションのまま続きから走らせる（Viewの「続ける」と同じ）。',
+  description:
+    '止まっているタスクを同じセッションのまま続きから走らせる（Viewの「続ける」と同じ）。',
   inputSchema: {
     type: 'object',
     properties: { taskId: TASK_ID_ARG },
@@ -672,6 +680,26 @@ export const UPDATE_TASK_PROMPT_TOOL: McpToolDefinition = {
   },
 };
 
+export const DECIDE_FINAL_MERGE_TOOL: McpToolDefinition = {
+  name: 'decide_final_merge',
+  description:
+    '統合PR/MRの作成後、mainへ最終マージするかどうかを判断する（design.md §16.26、' +
+    '`finalMerge: orchestrator`）。get_run_statusで差分・警告欄・統合の状況を確認したうえで' +
+    '呼ぶこと。判断待ちが無い場合は失敗する。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      decision: {
+        type: 'string',
+        description: "mainへマージするなら 'merge'、マージせずPR/MRを残すなら 'hold'",
+      },
+      reason: { type: 'string', description: '判断の理由（必須。警告欄へそのまま残る）' },
+    },
+    required: ['decision', 'reason'],
+    additionalProperties: false,
+  },
+};
+
 /**
  * オーケストレーター用の接続にだけ見せるツール（design.md §16.23）。
  * タスク用の接続の `tools/list` には現れず、呼んでも「未知のツール」として拒否される。
@@ -683,6 +711,7 @@ export const ORCHESTRATOR_CONTROL_TOOLS: readonly McpToolDefinition[] = [
   CONTINUE_TASK_TOOL,
   DECIDE_APPROVAL_TOOL,
   UPDATE_TASK_PROMPT_TOOL,
+  DECIDE_FINAL_MERGE_TOOL,
 ];
 
 const ORCHESTRATOR_CONTROL_TOOL_NAMES: ReadonlySet<string> = new Set(
@@ -1132,6 +1161,12 @@ export class MessagingMcpServer {
 
     if (name === GET_RUN_STATUS_TOOL.name) {
       return success(request.id, toolTextResult(JSON.stringify(control.getRunStatus())));
+    }
+    // `decide_final_merge`はrun全体で1つの判断（統合PR/MRという1つの対象）にしか使えず、
+    // 他の制御ツールと違って`taskId`を取らない。`target`（`taskId`）を読む前に分岐する
+    if (name === DECIDE_FINAL_MERGE_TOOL.name) {
+      const result = control.decideFinalMerge(str(args['decision']), str(args['reason']));
+      return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
     }
 
     const target = str(args['taskId']);

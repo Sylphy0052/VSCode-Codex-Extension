@@ -557,6 +557,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // 常に効かせるため、トップレベルへ配線する（`WorkflowRunnerDeps.readMergeApprovalTimeoutSec`
     // のJSDoc参照）
     readMergeApprovalTimeoutSec: () => readWorkflowsConfig().mergeApprovalTimeoutSec,
+    // 最終マージの判断待ち（design.md §16.26、`finalMerge: orchestrator`）。オーケストレーターが
+    // `decide_final_merge`で応答しない場合に自動的に`hold`へ倒すまでの秒数。`messaging`とは
+    // 無関係に常に効かせるため、`readMergeApprovalTimeoutSec`と同じくトップレベルへ配線する
+    readFinalMergeDecisionTimeoutSec: () => readWorkflowsConfig().finalMergeDecisionTimeoutSec,
   });
   // isTaskManagedThreadのクロージャが参照する箱を埋める。以降の`workflowRunner`
   // （コマンド登録などで使う）はこの束縛を指し、常にWorkflowRunnerとして扱える
@@ -983,7 +987,10 @@ async function applyPresetChat(
   const effective = buildEffectivePresetConfig(preset, baseline);
   const warnings = [...effective.warnings];
 
-  const resolvedCwd = await resolveWorkingDirectory(preset.workingDirectory, workspaceFolderPaths());
+  const resolvedCwd = await resolveWorkingDirectory(
+    preset.workingDirectory,
+    workspaceFolderPaths(),
+  );
   if (resolvedCwd.warning !== undefined) {
     warnings.push(resolvedCwd.warning);
   }
@@ -1198,7 +1205,11 @@ async function sendEditorSelectionToChat(
     editor.selection.end.line,
     editor.selection.end.character,
   );
-  const payload = buildSelectionPayload(workspaceRelativeDisplayPath(editor.document.uri), range, text);
+  const payload = buildSelectionPayload(
+    workspaceRelativeDisplayPath(editor.document.uri),
+    range,
+    text,
+  );
 
   // 複数開いているときは直近にアクティブだったタブを使う（Codex/Claude Codeを横断して
   // `activeSequence`で比べる。`ChatViewManager.getActiveComposerTarget`のJSDoc参照）
@@ -1321,9 +1332,7 @@ export function formatRoadmapWarningsDetail(
  */
 export function formatCorrectedIssuesDetail(issues: readonly CorrectedIssue[]): string {
   return issues
-    .map(
-      (c) => `${sanitizeForLog(c.itemId)}: ${c.actual ?? 'なし'} → ${c.expected ?? 'なし'}`,
-    )
+    .map((c) => `${sanitizeForLog(c.itemId)}: ${c.actual ?? 'なし'} → ${c.expected ?? 'なし'}`)
     .join(', ');
 }
 
@@ -1331,9 +1340,7 @@ export function formatCorrectedIssuesDetail(issues: readonly CorrectedIssue[]): 
  * `droppedDependencies`をログ表示用の1行にまとめる（Issue #427）。
  * `formatCorrectedIssuesDetail`と同じ理由で要素ごとに`sanitizeForLog`を通す。
  */
-export function formatDroppedDependenciesDetail(
-  deps: readonly DroppedRoadmapDependency[],
-): string {
+export function formatDroppedDependenciesDetail(deps: readonly DroppedRoadmapDependency[]): string {
   return deps
     .map((d) => `${sanitizeForLog(d.itemId)} → ${sanitizeForLog(d.dependsOnId)}`)
     .join(', ');
@@ -1833,12 +1840,7 @@ async function handlePlanSuccess(
     log.info('ワークフロー定義の保存を取り消しました');
     return;
   }
-  const filePath = await writeUniqueWorkflowFile(
-    dirAbs,
-    fileName,
-    existingBaseNames,
-    result.yaml,
-  );
+  const filePath = await writeUniqueWorkflowFile(dirAbs, fileName, existingBaseNames, result.yaml);
 
   // エディタより先にViewを開く。エディタの`showTextDocument`が最後に呼ばれるほうへ
   // フォーカスが残るようにするため（Viewのパネル作成自体はフォーカスを奪う作りのため）
@@ -2056,16 +2058,18 @@ function createExecutablePathResolver(provider: AgentProvider, log: Logger): () 
     log.error(message);
 
     if (tracker.shouldNotify(located)) {
-      void vscode.window.showErrorMessage(message, 'インストール手順', '設定を開く').then((choice) => {
-        if (choice === 'インストール手順') {
-          void vscode.env.openExternal(vscode.Uri.parse(provider.installUrl));
-        } else if (choice === '設定を開く') {
-          void vscode.commands.executeCommand(
-            'workbench.action.openSettings',
-            provider.executableSettingKey,
-          );
-        }
-      });
+      void vscode.window
+        .showErrorMessage(message, 'インストール手順', '設定を開く')
+        .then((choice) => {
+          if (choice === 'インストール手順') {
+            void vscode.env.openExternal(vscode.Uri.parse(provider.installUrl));
+          } else if (choice === '設定を開く') {
+            void vscode.commands.executeCommand(
+              'workbench.action.openSettings',
+              provider.executableSettingKey,
+            );
+          }
+        });
     }
     return spawnPath;
   };

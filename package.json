@@ -792,6 +792,14 @@
           "scope": "machine-overridable",
           "markdownDescription": "衝突解決セッション（設計書 §16.17「コンフリクト」）が承認待ちのまま止まってよい時間の上限（秒）。超えたら自動的にセッションを停止し、対象タスクを`blocked`にする（`git merge --abort`は呼ばない。統合worktreeは衝突した状態のまま残り、Viewの「再マージ」で再開できる）。承認待ちで**ない**（LLMが作業中の）時間は計測に含まれない。権限には関わらないため`forge`/`finalMerge`ほど強い制限は要らない。上限は`2147483`秒（約24.8日、`setTimeout`の32bit上限）。範囲外（1未満・上限超過・非数値）の値は既定値（3600秒）にフォールバックする。"
         },
+        "agent.workflows.finalMergeDecisionTimeoutSec": {
+          "type": "number",
+          "default": 900,
+          "minimum": 1,
+          "maximum": 2147483,
+          "scope": "machine-overridable",
+          "markdownDescription": "`agent.workflows.finalMerge` が `orchestrator` のとき、統合PR/MRの作成後にオーケストレーターが `decide_final_merge` で応答するのを待つ時間の上限（秒）。超えたら応答が無かったものとして自動的に `hold`（マージせずPR/MRを残す）へ倒す（判断を待って無限に止まらないため。設計書 §16.26）。`confirm`（人の承認待ち）には効かない。権限には関わらないため`forge`/`finalMerge`ほど強い制限は要らない。上限は`2147483`秒（約24.8日、`setTimeout`の32bit上限）。範囲外（1未満・上限超過・非数値）の値は既定値（900秒）にフォールバックする。"
+        },
         "agent.workflows.roadmapDir": {
           "type": "string",
           "default": "docs/roadmap",
@@ -839,11 +847,13 @@
           "type": "string",
           "enum": [
             "auto",
+            "orchestrator",
+            "confirm",
             "pr-only"
           ],
-          "default": "auto",
+          "default": "orchestrator",
           "scope": "machine",
-          "markdownDescription": "統合ブランチ→mainのPR/MRを無人でマージするか。`auto` は `gh pr merge --merge` / `glab mr merge --remove-source-branch` まで実行する。`pr-only` はPR/MRを作って止め、mainへの書き込みは人が行う。mainを無人で書き換えるかどうかを決めるため、machineスコープに固定している。リポジトリの `.vscode/settings.json` から `auto` へは変えられない。MRの自己マージを禁じる運用規約を持つ組織では `pr-only` にする（設計書 §16.16・§16.18）。"
+          "markdownDescription": "統合ブランチ→mainのPR/MRを作った後、マージするかどうかをどう決めるか。`auto` はPR/MRを作ってそのままマージする（従来の既定）。`orchestrator` はPR/MRを作り、オーケストレーターの判断でマージする（**新しい既定**。判断とその理由は必ずワークフローViewの警告欄に残り、`agent.workflows.finalMergeDecisionTimeoutSec` 秒応答が無ければ自動的に `hold` として扱う）。`confirm` はPR/MRを作って人の承認を待ち、承認されたときだけマージする。`pr-only` はPR/MRを作った時点でrunを終え、mainへの書き込みは人が行う。いずれもマージ（`gh pr merge --merge` / `glab mr merge --remove-source-branch`）を実行するかどうかを決めるため、machineスコープに固定している。リポジトリの `.vscode/settings.json` から緩めることはできない。MRの自己マージを禁じる運用規約を持つ組織では `pr-only` にする（設計書 §16.16・§16.18・§16.26）。"
         },
         "agent.workflows.branchNaming": {
           "type": "string",

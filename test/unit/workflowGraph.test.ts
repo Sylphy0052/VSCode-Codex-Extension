@@ -307,6 +307,7 @@ describe('summarizeIntegration（design.md §16.8「そのほか」・§16.17。
           number: 7,
           url: 'https://github.com/acme/repo/pull/7',
           finalMergeOutcome: 'merged',
+          finalMergeDecision: undefined,
         },
       );
       expect(summary).toEqual({
@@ -315,6 +316,7 @@ describe('summarizeIntegration（design.md §16.8「そのほか」・§16.17。
         pullRequestNumber: 7,
         pullRequestUrl: 'https://github.com/acme/repo/pull/7',
         finalMergeOutcome: 'merged',
+        finalMergeDecision: undefined,
       });
     },
   );
@@ -329,6 +331,7 @@ describe('summarizeIntegration（design.md §16.8「そのほか」・§16.17。
       number: undefined,
       url: undefined,
       finalMergeOutcome: undefined,
+      finalMergeDecision: undefined,
     });
     expect(withUndefinedFields?.pullRequestNumber).toBeUndefined();
     expect(withUndefinedFields?.pullRequestUrl).toBeUndefined();

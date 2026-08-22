@@ -349,5 +349,8 @@ async function rebuildLiveRun(
     // （design.md §16.11。Viewは`getSnapshot`が読む永続化された値へフォールバックする）
     integrationPullRequest: undefined,
     finalMergeOutcome: undefined,
+    // 最終マージの判断待ち（design.md §16.26）も会話・警告と同じく実行時専用の状態で、
+    // このプロセスでは復元しない（`LiveRun.finalMergeDecision`のJSDoc参照）
+    finalMergeDecision: undefined,
   };
 }
