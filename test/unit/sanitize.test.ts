@@ -77,6 +77,44 @@ describe('sanitizeForLog（Issue #474 指摘1: パーセントエンコードさ
   });
 });
 
+describe('sanitizeForLog（Issue #474 レビュー指摘: ENCODED_URL_USERINFO_PATTERNがuserinfo以外まで潰す、medium）', () => {
+  it('スキーム直後がホスト名で、クエリ引数に別途メールアドレスが入る形は誤マスクしない', () => {
+    // リダイレクト系ログでよくある形。スキーム直後はuserinfoではなくホスト名なので
+    // %40はuserinfoの区切りではない。ホスト（example.com/search?q=...）が
+    // ログから読めなくなるのを防ぐ
+    const raw = 'https%3A%2F%2Fexample.com/search?q=xxxxx%40notasecret.com';
+    expect(sanitizeForLog(raw)).toBe(raw);
+  });
+
+  it('スキーム直後が実際にuserinfoの場合は引き続きマスクする（回帰確認）', () => {
+    const raw = 'https%3A%2F%2Ftoken%40evil.com%2Fpath';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('token%40');
+    expect(result).toContain('https%3A%2F%2F***%40evil.com%2Fpath');
+  });
+});
+
+describe('sanitizeForLog（Issue #474 指摘5: 部分エンコードされたURL userinfoの追加検出）', () => {
+  it('スキームは生・@だけパーセントエンコードされた中間形もマスクする', () => {
+    const raw = 'see https://token%40evil.com/path for details';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('token%40');
+    expect(result).toContain('https://***%40evil.com/path');
+  });
+
+  it('%40がホスト・パスの奥（userinfoではない位置）に現れるだけの場合は誤マスクしない', () => {
+    const raw = 'see https://cdn.example.com/logo%40copy.png for the asset';
+    expect(sanitizeForLog(raw)).toBe(raw);
+  });
+
+  it('2回適用しても結果が変わらない（冪等性）', () => {
+    const raw = 'see https://token%40evil.com/path for details';
+    const once = sanitizeForLog(raw);
+    const twice = sanitizeForLog(once);
+    expect(twice).toBe(once);
+  });
+});
+
 describe('sanitizeForLog（ホームディレクトリ配下の絶対パスマスク。Issue #378）', () => {
   it('ホームディレクトリ配下の絶対パス（POSIX）を含むエラーメッセージでユーザー名を露出しない', () => {
     const raw = "EACCES: permission denied, open '/home/alice/project/src/index.ts'";
@@ -165,6 +203,34 @@ describe('sanitizeForLog（セキュリティ監査指摘: 否定先読みによ
     const result = sanitizeForLog(raw);
     expect(result).not.toContain('alice');
     expect(result).toContain('C:\\users\\***\\project');
+  });
+});
+
+describe('sanitizeForLog（Issue #474 レビュー指摘: HOME_DIR_USERNAME_PATTERNのUNC分岐緩和が退行を生む、medium）', () => {
+  it('JSON化された通常のWindowsパス（C:\\Users\\alice\\...）はマスクされる（ドライブレター分岐）', () => {
+    const raw = 'backup path: C:\\\\Users\\\\alice\\\\file.txt';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('C:\\\\Users\\\\***\\\\file.txt');
+  });
+
+  it('JSON化されたUNCパス（\\\\fileserver\\Users\\alice\\...）はマスクされる（UNC分岐）', () => {
+    const raw = 'backup path: \\\\\\\\fileserver\\\\Users\\\\alice\\\\file.txt';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('\\\\\\\\fileserver\\\\Users\\\\***\\\\file.txt');
+  });
+
+  it('ドライブレター直後にUsers以外のフォルダを挟む場合はマスクしない（過剰マスク防止の回帰確認）', () => {
+    // JSON.stringify経由の2連バックスラッシュ。Sharedはユーザー名でも
+    // UNCのサーバー名でもない、ただのフォルダ名
+    const raw = 'backup path: C:\\\\Backup\\\\Users\\\\Shared\\\\file.txt';
+    expect(sanitizeForLog(raw)).toBe(raw);
+  });
+
+  it('単一バックスラッシュの同形（C:\\Backup\\Users\\Shared\\...）もマスクしない', () => {
+    const raw = 'backup path: C:\\Backup\\Users\\Shared\\file.txt';
+    expect(sanitizeForLog(raw)).toBe(raw);
   });
 });
 
@@ -320,6 +386,33 @@ describe('maskForLog（Issue #474 指摘3: トークン様文字列のマスク�
     const once = maskForLog(input);
     const twice = maskForLog(once);
     expect(twice).toBe(once);
+  });
+});
+
+describe('maskForLog（Issue #474 レビュー指摘: BEARER_TOKEN_PATTERNの過剰マスク、medium 2件統合）', () => {
+  it('Bearerが値を伴わず行末で終わる場合、次行のスタックトレースを潰さない', () => {
+    // \s+ が改行を含むため、Bearerが値を伴わない行末では次行の先頭語まで
+    // 誤って食っていた（stack traceの `at Object.<anonymous>` が破壊される）
+    const raw =
+      'Authorization failed near Bearer\n    at Object.<anonymous> (/app/index.js:10:5)';
+    expect(maskForLog(raw)).toBe(raw);
+  });
+
+  it('Bearerの直後がファイルパスの場合は誤マスクしない（トークンらしい文字種ではない）', () => {
+    const raw = 'Bearer /repo/src/config/token.ts をご確認ください';
+    expect(maskForLog(raw)).toBe(raw);
+  });
+
+  it('Bearerの直後が短い一般語の場合は誤マスクしない（長さ閾値未満）', () => {
+    const raw = 'must be a Bearer token in the Authorization header';
+    expect(maskForLog(raw)).toBe(raw);
+  });
+
+  it('同一行内でBearerの後にタブ区切りでトークンが続く場合は引き続きマスクする（回帰確認）', () => {
+    const raw = 'Authorization:\tBearer\tghp_1234567890abcdefTOKEN123';
+    const result = maskForLog(raw);
+    expect(result).not.toContain('ghp_1234567890abcdefTOKEN123');
+    expect(result).toBe('Authorization:\tBearer\t***');
   });
 });
 

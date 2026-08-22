@@ -30,14 +30,16 @@ export interface Logger {
  * `homeDir` はLogger生成時に一度だけ解決する（1行ごとに `os.homedir()` を呼ばないため）。
  * テストから明示的に渡せるようにもしてある。
  *
- * **限界（セキュリティ監査指摘）**: ここで一律に掛かる `maskForLog` が隠すのはURLの
- * userinfoとホームディレクトリ配下のユーザー名の2種類だけ。`Bearer <token>` `ghp_...`
- * `sk-...` のようなAPIキー・トークン・認証ヘッダ等は対象外でそのままログへ出る。
- * 外部CLIのstderrをそのまま `log.warn` / `log.error` へ渡す既存の呼び出し（例:
- * `src/view/settingsProvider.ts`、`src/extension.ts`）はこの経路を通るため、この
- * Loggerを経由していても「トークンが漏れない」ことは保証されない。この穴自体を塞ぐ
- * 対応はIssue #474で追跡する（ここでは限界の明記のみ）。詳細は `maskForLog`
- * （`src/orchestrator/sanitize.ts`）のJSDocを参照。
+ * **限界（セキュリティ監査指摘、Issue #474で一部対応）**: ここで一律に掛かる
+ * `maskForLog` が隠すのはURLのuserinfo・ホームディレクトリ配下のユーザー名に加え、
+ * `Bearer <token>` / `gh[oprsu]_...`（GitHubトークン）/ `sk-...`（OpenAI/Anthropic系
+ * APIキー）の代表的な3形状。JWT（`eyJ...`）・AWSアクセスキー（`AKIA...`）・
+ * Slackトークン（`xox[bpsr]-...`）等、他の形状のAPIキー・トークンは対象外でそのまま
+ * ログへ出る。外部CLIのstderrをそのまま `log.warn` / `log.error` へ渡す既存の呼び出し
+ * （例: `src/view/settingsProvider.ts`、`src/extension.ts`）はこの経路を通るため、
+ * この3形状以外のトークンが含まれていれば漏れうる。「マスク済みだから安全」と
+ * 誤解してログを共有しないこと。詳細は `maskForLog`（`src/orchestrator/sanitize.ts`）
+ * のJSDocを参照。
  */
 export function createLogger(
   channel: vscode.OutputChannel,
