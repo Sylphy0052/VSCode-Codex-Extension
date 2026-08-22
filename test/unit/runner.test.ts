@@ -324,6 +324,14 @@ function fakeGit(options?: {
   failWorktreeAddFromCall?: number;
   failMerge?: boolean;
   conflictOnce?: boolean;
+  /**
+   * `true`なら`conflictOnce`が消費されず（`conflictPending`を戻さず）、`resolveConflict()`で
+   * 未解決状態だけ晴らせば次の`merge --no-ff`でも再び衝突する（Issue #413 PR5の
+   * 「再マージ後にもう一度タイムアウトする」シナリオの再現用。同一taskIdの警告が
+   * 直近1件へ丸められることを確かめるには、同じタスクで衝突→承認待ちタイムアウトを
+   * 2回起こせる必要がある）。
+   */
+  conflictEveryMerge?: boolean;
   /** `git remote get-url origin` の応答（design.md §16.18のforgeテスト用）。未指定ならremote無し。 */
   originRemoteUrl?: string;
   /** `git rev-parse --abbrev-ref HEAD` の応答。既定は `main`。 */
@@ -400,7 +408,9 @@ function fakeGit(options?: {
       }
       if (args[0] === 'merge' && args[1] === '--no-ff') {
         if (conflictPending) {
-          conflictPending = false;
+          if (options?.conflictEveryMerge !== true) {
+            conflictPending = false;
+          }
           unresolvedConflict = true;
           return { code: 1, stdout: '', stderr: 'CONFLICT (content): fake conflict' };
         }
@@ -878,6 +888,7 @@ function createHarness(
     memento?: WorkflowRunMemento;
     roadmap?: { fs: RoadmapFileSystemPort };
     log?: Logger;
+    readMergeApprovalTimeoutSec?: () => number;
   },
 ): Harness {
   const codexHost = new FakeHost();
@@ -905,6 +916,9 @@ function createHarness(
     ...(options?.pseudoWorktree !== undefined ? { pseudoWorktree: options.pseudoWorktree } : {}),
     ...(options?.messaging !== undefined ? { messaging: options.messaging } : {}),
     ...(options?.roadmap !== undefined ? { roadmap: options.roadmap } : {}),
+    ...(options?.readMergeApprovalTimeoutSec !== undefined
+      ? { readMergeApprovalTimeoutSec: options.readMergeApprovalTimeoutSec }
+      : {}),
     randomId: () => `00000000-0000-4000-8000-${String((seq += 1)).padStart(12, '0')}`,
   });
   return { runner, codexHost, claudeHost, store, git };
@@ -8798,5 +8812,272 @@ tasks:
       expect(state.handle?.closed).toBe(true);
       expect(state.handle?.closeCount).toBe(1);
     });
+  });
+});
+
+/**
+ * 衝突解決セッションの承認待ちアイドルタイムアウト（design.md §16.17「承認待ちの
+ * アイドルタイムアウト」、Issue #413 PR5）。
+ *
+ * PR4（Issue #413）は`live.mergeResolutions`（`MergeResolutionEntry.waitingApprovalSinceMs`）で
+ * 承認待ちの可視化だけを行った。このPRはその値を経過時間の起点として使い、
+ * `agent.workflows.mergeApprovalTimeoutSec`（既定3600秒）を超えたら自動的に
+ * `session.stopLoop()`を呼び、対象タスクだけを`blocked`にする。
+ *
+ * 並行作業（Issue #528〜531）との衝突を避けるため、既存の`describe`ブロックへは
+ * 差し込まず、ファイル末尾に新しいブロックとして追加する（申し送り事項参照）。
+ */
+describe('WorkflowRunner: 衝突解決セッションの承認待ちアイドルタイムアウト（design.md §16.17、Issue #413 PR5）', () => {
+  const YAML = `
+version: 1
+name: merge-approval-timeout-test
+defaults:
+  provider: codex
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  const APPROVAL_STATE: ChatState = {
+    ...initialChatState,
+    approvals: [{ requestId: 1, kind: 'command', title: '', detail: '', itemId: undefined }],
+  };
+
+  it(
+    '承認待ちがmergeApprovalTimeoutSecを超えると衝突解決セッションを停止し、' +
+      '対象タスクだけをblockedにする（run全体は停止せず、独立タスクは開始できる）',
+    async () => {
+      vi.useFakeTimers();
+      const git = fakeGit({ conflictOnce: true });
+      const { runner, codexHost, store } = createHarness(YAML, {
+        git,
+        readMergeApprovalTimeoutSec: () => 60,
+      });
+      const result = await runner.start('/repo/.agents/workflows/merge-approval-timeout.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // T1は衝突したのでmergingのまま。maxParallel:2の枠を占めるが、T2（独立タスク）は
+      // 通常どおりすぐ開始できる（衝突・承認待ちとは無関係）
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+      expect(store.find(runId)?.tasks['T2']?.state).toBe('running');
+
+      const resolutionSession = codexHost.sessions.at(-1);
+      expect(resolutionSession).toBeDefined();
+
+      // 承認カードが出て、解決セッションが人待ちになった（PR4の可視化と同じ発火点）
+      resolutionSession?.emitState(APPROVAL_STATE);
+      await flush();
+      expect(
+        runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.mergeResolutionWaitingApproval,
+      ).toBe(true);
+
+      // 閾値の直前ではまだ止めない（経過時間の閾値そのものを検証する）
+      await vi.advanceTimersByTimeAsync(59_000);
+      await flush();
+      expect(resolutionSession?.stopLoopCount).toBe(0);
+
+      // 閾値を超えたら自動的にstopLoopを呼ぶ
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+      expect(resolutionSession?.stopLoopCount).toBe(1);
+
+      // `TaskSession.stopLoop()`は`LoopStopReason: 'taskStopped'`でonFinishedを呼ぶ
+      // （フェイクはカウントだけなので、既存テストと同じく`finish()`で模擬する）
+      resolutionSession?.finish('taskStopped' as LoopStopReason, APPROVAL_STATE);
+      await flush();
+
+      // マージの巻き戻し（`git merge --abort`）は呼ばれない（Issue #434と同じ非破壊分岐）
+      const abortCall = git.calls.find((c) => c.args[0] === 'merge' && c.args[1] === '--abort');
+      expect(abortCall).toBeUndefined();
+
+      // 対象タスクだけがblockedになる
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+      const warnings = runner.getSnapshot(runId)?.warnings ?? [];
+      expect(warnings.some((w) => w.kind === 'mergeApprovalTimeout' && w.taskId === 'T1')).toBe(
+        true,
+      );
+
+      // **run全体は停止しない。** `haltedByUser`が立たず、既に開始済みのT2は
+      // 通常どおり走り続ける（`applyLoopStopReason`の全体停止分岐へ合流していないことの確認。
+      // 合流していれば`haltedByUser`がtrueになり、以後の新規タスク開始が止まる）
+      expect(store.find(runId)?.haltedByUser).toBe(false);
+      expect(store.find(runId)?.tasks['T2']?.state).toBe('running');
+    },
+  );
+
+  it('承認待ちで無い間（LLMが作業中）は計測しない', async () => {
+    vi.useFakeTimers();
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(YAML, {
+      git,
+      readMergeApprovalTimeoutSec: () => 60,
+    });
+    const result = await runner.start('/repo/.agents/workflows/merge-approval-timeout-2.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const resolutionSession = codexHost.sessions.at(-1);
+    // 承認カードを一度も出さない（LLMが作業中のまま）。閾値を大きく超えて進めても
+    // 停止してはいけない
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    await flush();
+
+    expect(resolutionSession?.stopLoopCount).toBe(0);
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+  });
+
+  it('一度承認待ちを抜けると計測がリセットされる（再び承認待ちになったら1から数え直す）', async () => {
+    vi.useFakeTimers();
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost } = createHarness(YAML, {
+      git,
+      readMergeApprovalTimeoutSec: () => 60,
+    });
+    await runner.start('/repo/.agents/workflows/merge-approval-timeout-3.yaml', '/repo');
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const resolutionSession = codexHost.sessions.at(-1);
+    resolutionSession?.emitState(APPROVAL_STATE);
+    await flush();
+
+    // 閾値の途中で承認が解消された（LLMの作業が再開した）
+    await vi.advanceTimersByTimeAsync(50_000);
+    resolutionSession?.emitState({ ...initialChatState, approvals: [] });
+    await flush();
+
+    // 元の閾値（60秒）を超えて進めても、計測はリセットされているので停止しない
+    await vi.advanceTimersByTimeAsync(20_000);
+    await flush();
+    expect(resolutionSession?.stopLoopCount).toBe(0);
+
+    // 再び承認待ちに入ってから60秒経てば、そこから数え直して停止する
+    resolutionSession?.emitState(APPROVAL_STATE);
+    await flush();
+    await vi.advanceTimersByTimeAsync(59_000);
+    await flush();
+    expect(resolutionSession?.stopLoopCount).toBe(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+    expect(resolutionSession?.stopLoopCount).toBe(1);
+  });
+
+  it('設定を渡さない場合は既定の1時間（3600秒）が使われる', async () => {
+    vi.useFakeTimers();
+    const git = fakeGit({ conflictOnce: true });
+    // readMergeApprovalTimeoutSecを渡さない
+    const { runner, codexHost } = createHarness(YAML, { git });
+    await runner.start('/repo/.agents/workflows/merge-approval-timeout-4.yaml', '/repo');
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const resolutionSession = codexHost.sessions.at(-1);
+    resolutionSession?.emitState(APPROVAL_STATE);
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(3600 * 1000 - 1_000);
+    await flush();
+    expect(resolutionSession?.stopLoopCount).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+    expect(resolutionSession?.stopLoopCount).toBe(1);
+  });
+
+  it('同一taskIdの直近1件へ丸める（再マージ後に再びタイムアウトしても警告は積み増さない）', async () => {
+    vi.useFakeTimers();
+    // `conflictEveryMerge`: 「再マージ」しても再び衝突させ、承認待ちタイムアウトを
+    // 同じタスクで2回起こせるようにする（Issue #439の`mergeBusy`と同じ「人が何度でも
+    // 押せる操作」の丸め込みを確かめる）
+    const git = fakeGit({ conflictOnce: true, conflictEveryMerge: true });
+    const { runner, codexHost, store } = createHarness(YAML, {
+      git,
+      readMergeApprovalTimeoutSec: () => 60,
+    });
+    const result = await runner.start('/repo/.agents/workflows/merge-approval-timeout-5.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    let resolutionSession = codexHost.sessions.at(-1);
+    resolutionSession?.emitState(APPROVAL_STATE);
+    await flush();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flush();
+    resolutionSession?.finish('taskStopped' as LoopStopReason, APPROVAL_STATE);
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+
+    // 「再マージ」でやり直す。未解決の統合worktree（MERGE_HEAD）を人が片付けた体で
+    // `resolveConflict()`を呼んでから再マージする（片付けないと`mergeTaskBranch`の
+    // busyゲートに引っかかり、新しい衝突解決セッションがそもそも開かない）
+    git.resolveConflict();
+    expect(runner.retryMerge(runId, 'T1')).toBe(true);
+    await flush();
+
+    resolutionSession = codexHost.sessions.at(-1);
+    resolutionSession?.emitState(APPROVAL_STATE);
+    await flush();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flush();
+    resolutionSession?.finish('taskStopped' as LoopStopReason, APPROVAL_STATE);
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+
+    const warnings =
+      runner.getSnapshot(runId)?.warnings.filter((w) => w.kind === 'mergeApprovalTimeout') ?? [];
+    expect(warnings).toHaveLength(1);
+  });
+
+  it('WorkflowRunner.dispose()は承認待ちタイムアウトのタイマーも解放する', async () => {
+    vi.useFakeTimers();
+    const clearTimeoutSpy = vi.spyOn(global, 'clearTimeout');
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost } = createHarness(YAML, {
+      git,
+      readMergeApprovalTimeoutSec: () => 60,
+    });
+    await runner.start('/repo/.agents/workflows/merge-approval-timeout-6.yaml', '/repo');
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const resolutionSession = codexHost.sessions.at(-1);
+    resolutionSession?.emitState(APPROVAL_STATE);
+    await flush();
+
+    const callsBeforeDispose = clearTimeoutSpy.mock.calls.length;
+    runner.dispose();
+    expect(clearTimeoutSpy.mock.calls.length).toBeGreaterThan(callsBeforeDispose);
   });
 });

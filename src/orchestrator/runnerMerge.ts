@@ -508,6 +508,18 @@ function pushMergeInterruptedWarning(live: LiveRun, taskId: string, message: str
   live.warnings.push({ kind: 'mergeInterrupted', taskId, message });
 }
 
+/**
+ * `mergeApprovalTimeout`警告を、`mergeBusy`/`mergeInterrupted`と同じ規律（同一taskIdの
+ * 直近1件へ丸める）で積む（Issue #413 PR5）。「再マージ」でやり直したセッションが再び
+ * タイムアウトした場合に、同じ文面の警告が積み増されていくのを防ぐ。
+ */
+function pushMergeApprovalTimeoutWarning(live: LiveRun, taskId: string, message: string): void {
+  live.warnings = live.warnings.filter(
+    (w) => !(w.kind === 'mergeApprovalTimeout' && w.taskId === taskId),
+  );
+  live.warnings.push({ kind: 'mergeApprovalTimeout', taskId, message });
+}
+
 /** `blockMergeAfterLeaseWait`が人へ出す文面（理由ごと）。 */
 const LEASE_WAIT_BLOCK_MESSAGES: Record<LeaseWaitBlockReason, string> = {
   halted:
@@ -649,6 +661,107 @@ async function mergeWithLease(
 }
 
 /**
+ * `agent.workflows.mergeApprovalTimeoutSec`の既定値（Issue #413 PR5、design.md §16.17
+ * 「承認待ちのアイドルタイムアウト」）。既定1時間。LLMが作業中（承認待ちで**ない**）の
+ * 時間はこの計測に含まれない（`waitingApprovalSinceMs`が`undefined`の間はタイマーを
+ * 張らない）。
+ */
+export const DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC = 3600;
+
+/**
+ * `waitingApprovalSinceMs`が変わるたび（承認待ちに入る／抜ける）に呼ぶ。既存のタイマーを
+ * 必ず先に消してから、承認待ちに入った場合だけ新しいタイマーを張り直す
+ * （`agent.workflows.mergeApprovalTimeoutSec`秒後に`handleMergeApprovalTimeout`を呼ぶ）。
+ *
+ * `setInterval`によるポーリングではなく、承認待ちに入った時点で`setTimeout`を張る方式を
+ * 選んだ（`MergeResolutionEntry.approvalTimeoutTimer`のJSDoc参照）。エントリの寿命に
+ * 対して1本のタイマーだけを持ち回るため、解放漏れの検査対象も1箇所（`clearTimeout`）に
+ * 絞れる。
+ */
+function scheduleApprovalTimeout(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  taskId: string,
+  previous: ReturnType<typeof setTimeout> | undefined,
+  waitingApprovalSinceMs: number | undefined,
+): ReturnType<typeof setTimeout> | undefined {
+  if (previous !== undefined) {
+    clearTimeout(previous);
+  }
+  if (waitingApprovalSinceMs === undefined) {
+    return undefined;
+  }
+  const timeoutSec =
+    self.deps.readMergeApprovalTimeoutSec?.() ?? DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC;
+  const timer = setTimeout(
+    () => handleMergeApprovalTimeout(self, runId, taskId, waitingApprovalSinceMs),
+    timeoutSec * 1000,
+  );
+  // `waitingReplyPollTimer`（`runnerMessaging.ts`）と同じく、テスト・プロセス終了を
+  // 妨げないようにする
+  timer.unref?.();
+  return timer;
+}
+
+/**
+ * 承認待ちタイムアウトの本体（Issue #413 PR5）。衝突解決セッションが承認待ちのまま
+ * `agent.workflows.mergeApprovalTimeoutSec`を超えたら`session.stopLoop()`を呼び、
+ * `finishMergeResolution`の非破壊分岐（対象タスクだけを`blocked`にし、`git merge --abort`は
+ * 呼ばない）へ合流させる。
+ *
+ * **停止中（`haltedByUser`）の扱い**: 判定時点で`haltedByUser`なら何もしない。
+ * `WorkflowRunner.stop()`は`live.mergeResolutions`の全エントリへ`stopLoop()`を送ってから
+ * `haltedByUser`を立てる（`stop()`のJSDoc参照）ため、run全体が停止済みならこの解決セッションの
+ * エントリは既に`finishMergeResolution`で消えているはずで、下の`entry === undefined`チェックが
+ * 先に弾く。それでも`haltedByUser`を明示的に確認するのは、この前提（「停止済みならエントリは
+ * 必ず消える」）が将来の変更で崩れたときの多層防御と、意図の記録を兼ねる。
+ *
+ * **`haltedByUser`の間はタイマーの経過時間も数えない**という選択でもある。停止解除の瞬間に
+ * 積み上がった経過時間で即タイムアウトする事故（人が止めている間の時間を数えると、解除した
+ * 瞬間に「もう1時間経っている」と判定してしまう）を避けるため。停止中に新しい衝突解決
+ * セッションが開くことは無い（`decideAfterLeaseWait`が`haltedByUser`を見て`block`へ倒す）ので、
+ * 実際にこの分岐へ来るのは「停止直後、`stopLoop()`のonFinished経由の解放がまだ終わっていない
+ * 一瞬」の間だけだが、その一瞬でも二重に`stopLoop()`を呼ばないようにする。
+ *
+ * `waitingApprovalSinceMs`は張った時点の値をそのまま比較する（承認待ちが一度解けて再び
+ * 承認待ちへ戻っていれば値が変わっているため、古いタイマーの取りこぼしを検知できる。
+ * `scheduleApprovalTimeout`は張り直す前に必ず`clearTimeout`するので通常は起こらないが、
+ * 多層防御として残す）。
+ */
+function handleMergeApprovalTimeout(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  taskId: string,
+  scheduledForWaitingApprovalSinceMs: number,
+): void {
+  const live = self.runs.get(runId);
+  if (live === undefined) {
+    return;
+  }
+  const entry = live.mergeResolutions.get(taskId);
+  if (
+    entry === undefined ||
+    entry.waitingApprovalSinceMs !== scheduledForWaitingApprovalSinceMs
+  ) {
+    // 既に承認待ちを抜けた、解決セッション自体が終わった、または新しい承認待ちへ
+    // 張り替わった後（多層防御。上のJSDoc参照）
+    return;
+  }
+  if (live.runState.haltedByUser) {
+    // 上のJSDoc参照。実行が停止済みなら、このエントリは通常ここに残っていないはずだが
+    // 多層防御として確認する
+    return;
+  }
+  self.deps.log.warn(
+    `[workflow ${runId}/${taskId}] 承認待ちがタイムアウト（${
+      self.deps.readMergeApprovalTimeoutSec?.() ?? DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC
+    }秒）を超えたため、衝突解決セッションを停止します`,
+  );
+  entry.timedOutByApprovalTimeout = true;
+  entry.session.stopLoop();
+}
+
+/**
  * 衝突解決セッションを開く（design.md §16.17「コンフリクト」3.）。衝突した状態の
  * 統合worktreeを`cwd`にし、未解決パスの一覧と、突き合わせる相手のタスクの`prompt`/`done`
  * をプロンプトに渡す。解決用セッションは依存グラフのノードにはしない（design.md
@@ -753,6 +866,10 @@ async function startMergeResolution(
   // `onStateChanged`が発火しうる（`open()`が同期的に状態を発火するhost実装）ため、
   // まずローカル変数として持ち、`set()`する時点の値をそのまま渡す
   let waitingApprovalSinceMs: number | undefined;
+  // 承認待ちタイムアウト（Issue #413 PR5）。エントリの寿命に対して1本だけ持ち回る
+  // タイマーのハンドル。`waitingApprovalSinceMs`と同じくローカル変数で持ち、`try`の外
+  // （`catch`からも参照できる位置）で宣言する
+  let approvalTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
 
   try {
     // **`onFinished`の登録は`session.open()`より前に行う**（レビュー指摘12）。`open()`が
@@ -794,12 +911,24 @@ async function startMergeResolution(
         return;
       }
       waitingApprovalSinceMs = nextSince;
+      approvalTimeoutTimer = scheduleApprovalTimeout(
+        self,
+        runId,
+        taskId,
+        approvalTimeoutTimer,
+        waitingApprovalSinceMs,
+      );
       if (!live.mergeResolutions.has(taskId)) {
         // まだ`set()`前（`open()`の最中）。`set()`する側がこの時点の`waitingApprovalSinceMs`を
         // 読むので、ここでは何もしなくてよい
         return;
       }
-      live.mergeResolutions.set(taskId, { session, waitingApprovalSinceMs });
+      live.mergeResolutions.set(taskId, {
+        session,
+        waitingApprovalSinceMs,
+        approvalTimeoutTimer,
+        timedOutByApprovalTimeout: false,
+      });
       self.notify(runId);
       // 承認待ちの開始/解消は`maxParallel`の枠の勘定（`excludeFromActiveCount`）を変える
       // ため、次に開始できるタスクを拾い直す
@@ -812,12 +941,18 @@ async function startMergeResolution(
       // リスナーが済ませているので、ここでは終わったセッションを畳むだけにする
       // （`live.mergeResolutions`へは入れない・`runLoop`もかけ直さない）
       abandoned.done = true;
+      clearTimeout(approvalTimeoutTimer);
       live.mergeResolutions.delete(taskId);
       session.dispose();
       self.notify(runId);
       return;
     }
-    live.mergeResolutions.set(taskId, { session, waitingApprovalSinceMs });
+    live.mergeResolutions.set(taskId, {
+      session,
+      waitingApprovalSinceMs,
+      approvalTimeoutTimer,
+      timedOutByApprovalTimeout: false,
+    });
 
     const prompt = buildMergeResolutionPrompt(
       { id: taskId, prompt: task.prompt, done: task.done },
@@ -841,6 +976,7 @@ async function startMergeResolution(
     );
     try {
       abandoned.done = true;
+      clearTimeout(approvalTimeoutTimer);
       live.mergeResolutions.delete(taskId);
       session.dispose();
       await abortAndBlock(self, runId, taskId, integration, lease);
@@ -916,6 +1052,10 @@ async function finishMergeResolution(
   }
   const entry = live.mergeResolutions.get(taskId);
   live.mergeResolutions.delete(taskId);
+  // 承認待ちタイムアウトのタイマー（Issue #413 PR5）。この関数はどの`reason`でも
+  // 必ず1度は通る（`session.onFinished`の唯一の合流点）ため、ここで解放すれば
+  // `done`/`manual`/`interrupted`/`taskStopped`の全経路を洗える
+  clearTimeout(entry?.approvalTimeoutTimer);
   try {
     entry?.session.dispose();
   } catch (e) {
@@ -930,6 +1070,32 @@ async function finishMergeResolution(
         e instanceof Error ? e.message : String(e),
       )}`,
     );
+  }
+
+  if (reason === 'taskStopped' && entry?.timedOutByApprovalTimeout === true) {
+    // 承認待ちタイムアウトによる自動停止（Issue #413 PR5）。`session.stopLoop()`は理由を
+    // `'taskStopped'`としてしか伝えられないため、ここで`entry.timedOutByApprovalTimeout`を
+    // 見て、下の「人が全体停止を押した」経路（`applyLoopStopReason`でrun全体を
+    // `haltedByUser`にする）とは別扱いにする。
+    //
+    // **run全体は止めない。** タイムアウトは「このタスクの衝突解決が承認待ちのまま
+    // 長時間放置された」だけを表す局所的な事象であり、他のタスクが動くのを妨げる理由には
+    // ならない。`applyLoopStopReason`を呼んで`haltedByUser`を立てると、まだ開始していない
+    // `pending`が全て`skipped`（`runHalted`）へ倒れてしまい（`skipRemainingPending`）、
+    // 「対象は承認待ちの継続時間だけ」という前提が崩れる（design.md §16.17。最終報告参照）。
+    //
+    // このタスク自身は下の`manual`/`interrupted`/`taskStopped`共通の経路と同じく
+    // `markMergeBlocked`で`blocked`へ確定させ、`git merge --abort`は呼ばない（Issue #434と
+    // 同じ理由。統合worktreeで進んでいた解決作業を巻き戻さない）。
+    live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
+    const message =
+      '衝突解決セッションが承認待ちのままタイムアウトしたため停止しました。統合worktreeは衝突した状態のまま残っています（Viewの「再マージ」で再開できます）';
+    self.deps.log.warn(`[workflow ${runId}/${taskId}] ${message}`);
+    pushMergeApprovalTimeoutWarning(live, taskId, message);
+    void self.persist(runId);
+    self.notify(runId);
+    self.pump(runId);
+    return;
   }
 
   if (reason === 'manual' || reason === 'interrupted' || reason === 'taskStopped') {

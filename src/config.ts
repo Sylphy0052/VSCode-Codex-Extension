@@ -12,6 +12,7 @@ import {
   type PullRequestLayerConfig,
 } from './orchestrator/forge';
 import { DEFAULT_REPLY_TIMEOUT_SEC } from './orchestrator/messaging';
+import { DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerMerge';
 import { DEFAULT_PSEUDO_WORKTREE_EXCLUDE } from './orchestrator/pseudoWorktree';
 import { sanitizeForLog } from './orchestrator/sanitize';
 import { normalizeBranchNaming, type BranchNaming } from './orchestrator/worktree';
@@ -262,6 +263,13 @@ export interface WorkflowsConfig {
    */
   replyTimeoutSec: number;
   /**
+   * 衝突解決セッション（design.md §16.17「コンフリクト」）が承認待ちのまま止まってよい
+   * 時間の上限秒数（`agent.workflows.mergeApprovalTimeoutSec`、既定3600秒、
+   * `machine-overridable`、Issue #413 PR5）。権限には関わらないため`forge`/`finalMerge`
+   * ほど強い制限は要らない。
+   */
+  mergeApprovalTimeoutSec: number;
+  /**
    * タスクブランチの命名方式（design.md §16.6「ブランチの命名方式」）。`machine-overridable`。
    * ブランチ名の形を決めるだけで、push先も権限も変えないため`forge`/`finalMerge`ほど
    * 強い制限は要らない。
@@ -441,6 +449,9 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     pullRequest: normalizePullRequestLayerConfig(str(c, 'workflows.pullRequest', 'per-task')),
     finalMerge: normalizeFinalMergeConfig(str(c, 'workflows.finalMerge', 'auto')),
     replyTimeoutSec: normalizeReplyTimeoutSec(c.get<unknown>('workflows.replyTimeoutSec')),
+    mergeApprovalTimeoutSec: normalizeMergeApprovalTimeoutSec(
+      c.get<unknown>('workflows.mergeApprovalTimeoutSec'),
+    ),
     branchNaming: normalizeBranchNaming(str(c, 'workflows.branchNaming', 'wf')),
     draftPullRequest: c.get<boolean>('workflows.draftPullRequest') ?? false,
   };
@@ -457,6 +468,16 @@ function normalizeReplyTimeoutSec(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 1
     ? Math.floor(value)
     : DEFAULT_REPLY_TIMEOUT_SEC;
+}
+
+/**
+ * `agent.workflows.mergeApprovalTimeoutSec` の生値を安全な秒数へ丸める
+ * （`normalizeReplyTimeoutSec` と同じ方針。Issue #413 PR5）。
+ */
+function normalizeMergeApprovalTimeoutSec(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1
+    ? Math.floor(value)
+    : DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC;
 }
 
 /** アクティブエディタが属するワークスペースフォルダ。無ければ先頭（設計書 §10）。 */
