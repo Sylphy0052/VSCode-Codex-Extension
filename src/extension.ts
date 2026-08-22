@@ -1818,12 +1818,19 @@ async function writeUniqueWorkflowFile(
  * 強調して知らせる（design.md §16.9「多数のタスクに紛れた1件のallowを人が見落とすのを
  * 防ぐ」）。
  *
- * 保存の直後、別の読み取り専用セッションでタスク分解の妥当性をレビューする
+ * 保存の後、別の読み取り専用セッションでタスク分解の妥当性をレビューする
  * （design.md §16.28、roadmap W3）。ゴール文からの生成（`planWorkflowFromGoalCommand`）と
  * ロードマップからの生成（`planWorkflowFromRoadmapCommand`）の両方がこの関数を通るため、
  * ここに置くことでどちらの起点で生成しても同じくレビューがかかる（片方だけ塞ぐ実装に
- * しない）。レビューは**保存の後**に行い、レビューセッションの起動・応答待ちが失敗しても
- * 保存済みのファイルには影響しない（`reviewWorkflowPlan`は例外を投げず`error`を返す）。
+ * しない）。
+ *
+ * **エディタとワークフローViewの表示は、レビューの完了を待たない。** レビューは
+ * `PLANNER_TURN_TIMEOUT_MS`（既定5分）までかかりうるため、表示までそれだけ人を待たせる
+ * と「保存は妨げない」という受入基準の実質を損なう。表示はまず`securityWarnings`だけで
+ * 出し、レビューはバックグラウンドで走らせて、指摘が見つかった時点で`previewDefinition`
+ * をもう一度呼んで警告欄へ追加し、`showWarningMessage`も別途出す（design.md §16.28）。
+ * レビューセッションの起動・応答待ちが失敗・タイムアウトしても表示済みの内容には影響
+ * しない（`reviewWorkflowPlan`は例外を投げず`error`を返す）。
  */
 async function handlePlanSuccess(
   result: Extract<PlanWorkflowResult, { ok: true }>,
@@ -1850,35 +1857,19 @@ async function handlePlanSuccess(
   }
   const filePath = await writeUniqueWorkflowFile(dirAbs, fileName, existingBaseNames, result.yaml);
 
-  // ファイルへ保存した後にレビューする。レビューが失敗しても保存済みのファイルは
-  // そのまま残す（design.md §16.28「警告が出ても保存は妨げない」）
-  const review = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: 'ワークフローをレビューしています…' },
-    () =>
-      reviewWorkflowPlan({
-        goal,
-        yaml: result.yaml,
-        provider,
-        host,
-        cwd: workspaceRoot,
-        log,
-      }),
-  );
-
-  // エディタより先にViewを開く。エディタの`showTextDocument`が最後に呼ばれるほうへ
-  // フォーカスが残るようにするため（Viewのパネル作成自体はフォーカスを奪う作りのため）
-  view.previewDefinition(filePath, result.definition, [
-    ...result.securityWarnings.map((w) => ({
+  // 生成直後の表示はレビューの完了を待たない（design.md §16.28「表示は保存直後に出す。
+  // レビューは後追いで警告欄へ足す」）。エディタより先にViewを開く。エディタの
+  // `showTextDocument`が最後に呼ばれるほうへフォーカスが残るようにするため（Viewの
+  // パネル作成自体はフォーカスを奪う作りのため）
+  view.previewDefinition(
+    filePath,
+    result.definition,
+    result.securityWarnings.map((w) => ({
       kind: 'plannerSecurity' as const,
       taskId: w.taskId,
       message: w.message,
     })),
-    ...review.findings.map((f) => ({
-      kind: 'plannerReview' as const,
-      taskId: f.taskIds[0],
-      message: f.taskIds.length > 0 ? `[${f.taskIds.join(', ')}] ${f.message}` : f.message,
-    })),
-  ]);
+  );
 
   const doc = await vscode.workspace.openTextDocument(filePath);
   const editor = await vscode.window.showTextDocument(doc, { preview: false });
@@ -1911,26 +1902,63 @@ async function handlePlanSuccess(
       `生成されたワークフローは既定の安全設定を上書きする指定を含んでいます（${result.securityWarnings.length}件）。` +
         '内容を確認してから実行してください。',
     );
+  } else {
+    void vscode.window.showInformationMessage(
+      `ワークフローを生成しました: ${path.relative(workspaceRoot, filePath)}` +
+        (result.attempts > 1 ? '（検証エラーを踏まえて再生成しました）' : ''),
+    );
   }
 
-  if (review.findings.length > 0) {
+  // タスク分解のレビュー（design.md §16.28）は表示の後を追いかけて走らせる。保存済み
+  // ファイル・既に開いたエディタ・上のトーストは待たない（await しない）。レビューが
+  // 失敗・タイムアウトしても`reviewWorkflowPlan`は例外を投げないため、表示済みの内容は
+  // 壊れない。指摘があれば、開いたままのプレビューへ後から追加する
+  // （`previewDefinition`は毎回スナップショットを作り直すため、この2回目の呼び出しは
+  // 1回目を安全に上書きする）
+  void (async () => {
+    const review = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'ワークフローをレビューしています…',
+      },
+      () =>
+        reviewWorkflowPlan({
+          goal,
+          yaml: result.yaml,
+          provider,
+          host,
+          cwd: workspaceRoot,
+          log,
+        }),
+    );
+
+    if (review.findings.length === 0) {
+      return;
+    }
+
+    view.previewDefinition(filePath, result.definition, [
+      ...result.securityWarnings.map((w) => ({
+        kind: 'plannerSecurity' as const,
+        taskId: w.taskId,
+        message: w.message,
+      })),
+      ...review.findings.map((f) => ({
+        kind: 'plannerReview' as const,
+        taskId: f.taskIds[0],
+        message: f.taskIds.length > 0 ? `[${f.taskIds.join(', ')}] ${f.message}` : f.message,
+      })),
+    ]);
+
     log.warn(
       `[planner] タスク分解のレビューで指摘があります: ${review.findings
-        .map((f) => f.message)
+        .map((f) => sanitizeForLog(f.message))
         .join(' / ')}`,
     );
     void vscode.window.showWarningMessage(
       `タスク分解のレビューで指摘があります（${review.findings.length}件）。` +
         '内容を確認してください（自動では直していません。詳しくはログ）',
     );
-  }
-
-  if (result.securityWarnings.length === 0 && review.findings.length === 0) {
-    void vscode.window.showInformationMessage(
-      `ワークフローを生成しました: ${path.relative(workspaceRoot, filePath)}` +
-        (result.attempts > 1 ? '（検証エラーを踏まえて再生成しました）' : ''),
-    );
-  }
+  })();
 }
 
 /**

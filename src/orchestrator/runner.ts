@@ -1871,10 +1871,7 @@ export class WorkflowRunner {
   private findStoppableSessionEntry(
     runId: string,
     taskId: string,
-  ):
-    | { kind: 'mergeResolution'; entry: MergeResolutionEntry }
-    | { kind: 'task'; entry: LiveTask }
-    | undefined {
+  ): { kind: 'mergeResolution'; entry: MergeResolutionEntry } | { kind: 'task'; entry: LiveTask } | undefined {
     const live = this.runs.get(runId);
     if (live === undefined) {
       return undefined;

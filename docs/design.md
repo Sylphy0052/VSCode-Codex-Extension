@@ -5138,10 +5138,13 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 順序は次のとおり。
 
 1. `handlePlanSuccess`が`writeUniqueWorkflowFile`でYAMLをファイルへ書き込む（**保存が先**）
-2. 書き込んだYAMLとゴール文で`reviewWorkflowPlan`を呼ぶ（`vscode.window.withProgress`で「ワークフローをレビューしています…」の進捗を出す。§16.9の生成そのものと同じ流儀）
-3. レビュー結果（`securityWarnings`と合わせて）を`WorkflowViewManager.previewDefinition`の警告一覧へ渡し、`vscode.window.showWarningMessage`でも知らせる
+2. 保存直後、`securityWarnings`だけを渡して`WorkflowViewManager.previewDefinition`を呼び、エディタも開く（**レビューの完了を待たない**）
+3. その後を追いかけて（`await`せず）`reviewWorkflowPlan`を呼ぶ（`vscode.window.withProgress`で「ワークフローをレビューしています…」の進捗を出す。§16.9の生成そのものと同じ流儀）
+4. 指摘が見つかった時点で、`securityWarnings`と`review.findings`の両方を渡して`previewDefinition`をもう一度呼び（同じ`defPath`へのスナップショット差し替えなので安全に上書きされる）、`vscode.window.showWarningMessage`でも知らせる。指摘が0件ならこの手順は何もしない
 
-2.のレビューセッションの起動・応答待ちが失敗しても（タイムアウト等）、1.で保存したファイルはそのまま残る。`reviewWorkflowPlan`は例外を投げず、`findings: []`と`error`にエラー理由を返す設計にしてあるため、`handlePlanSuccess`側で保存後の処理を`try/catch`で包む必要が無い（design.md §16.25 確認事項3の裏返しで、保存という「本番の効果」が先に確定してから、失敗しうるレビューを後に置く順序そのものが安全側になる）。
+2.と3.の間に`await`を挟まない設計にした理由は、レビューが`PLANNER_TURN_TIMEOUT_MS`（既定5分）までかかりうるため、完了を待ってから表示すると「保存は妨げない」という受入基準の実質（人がすぐ結果を見られる）を損なうため。3.のレビューセッションの起動・応答待ちが失敗しても（タイムアウト等）、1.で保存したファイル・2.で表示済みの内容はそのまま残る。`reviewWorkflowPlan`は例外を投げず、`findings: []`と`error`にエラー理由を返す設計にしてあるため、`handlePlanSuccess`側でこの後続処理を`try/catch`で包む必要が無い（design.md §16.25 確認事項3の裏返しで、保存という「本番の効果」が先に確定してから、失敗しうるレビューを後に置く順序そのものが安全側になる）。
+
+なお、指摘到着時に呼び直す`previewDefinition`はViewパネルの現在の表示（`activeRunId`）を無条件にプレビューへ戻す。ユーザーがレビュー完了前に別のrunの表示へ切り替えていた場合、その表示がレビュー到着で差し替わりうる（フォーカスは奪わない）。この取り回しはW3の受入基準の対象外として許容している。
 
 #### 権限の与え方（読み取り専用であることの担保）
 
