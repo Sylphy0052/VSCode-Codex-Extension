@@ -60,18 +60,6 @@ function maskHomeDirUsername(value: string): string {
 }
 
 /**
- * `os.homedir()` が返す実際のホームディレクトリ（`/home/<user>` `/Users/<user>` の慣習に
- * 沿わない値を含む。例: コンテナの `/root`）と厳密に一致する接頭辞を丸ごと `~` へ置換する。
- * 後続のパス区切り（`/` `\`）または文字列末尾が続く場合のみマッチさせ、
- * `/home/kfuruhashi2/...` のような「別ユーザーの、たまたま前方一致するパス」を
- * 誤ってマスクしないようにする。
- *
- * テスト容易性のため `homeDir` を第2引数として受け取れるようにしてある（既定は
- * `os.homedir()`）。本番の呼び出し（`sanitizeForLog`）は既定値のまま呼ぶため、実行環境の
- * ホームディレクトリが自動的に使われる。テストは実ホームディレクトリに依存せず、
- * 任意の`homeDir`を明示的に渡して検証できる。
- */
-/**
  * `homeDir` がパス区切り文字だけで構成される（空文字 `''` を除く。例: `/` `\` `//`）場合に
  * `true`。コンテナ環境で `HOME=/` になっているケースが実在する（`createLogger` が
  * `os.homedir()` を生成時に一度だけ固定するため、この異常値は一度固定されると全ログ経路に
@@ -83,6 +71,18 @@ function isPathSeparatorOnly(homeDir: string): boolean {
   return homeDir.length > 0 && /^[\\/]+$/u.test(homeDir);
 }
 
+/**
+ * `os.homedir()` が返す実際のホームディレクトリ（`/home/<user>` `/Users/<user>` の慣習に
+ * 沿わない値を含む。例: コンテナの `/root`）と厳密に一致する接頭辞を丸ごと `~` へ置換する。
+ * 後続のパス区切り（`/` `\`）または文字列末尾が続く場合のみマッチさせ、
+ * `/home/kfuruhashi2/...` のような「別ユーザーの、たまたま前方一致するパス」を
+ * 誤ってマスクしないようにする。
+ *
+ * テスト容易性のため `homeDir` を第2引数として受け取れるようにしてある（既定は
+ * `os.homedir()`）。本番の呼び出し（`sanitizeForLog`）は既定値のまま呼ぶため、実行環境の
+ * ホームディレクトリが自動的に使われる。テストは実ホームディレクトリに依存せず、
+ * 任意の`homeDir`を明示的に渡して検証できる。
+ */
 export function maskHomeDir(value: string, homeDir: string = os.homedir()): string {
   if (!homeDir || isPathSeparatorOnly(homeDir)) {
     return maskHomeDirUsername(value);
