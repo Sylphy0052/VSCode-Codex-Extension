@@ -1556,8 +1556,12 @@ export class WorkflowRunner {
    * そちらは `reason === 'done'` かつgit上も解決済みのときだけ `done` にする。
    * **`'taskStopped'` ではマージを巻き戻さない**（issue #434）。人が統合worktreeで解いている
    * 途中の未コミットの解決結果を `git merge --abort` が破棄してしまい、復旧手段が無いため。
-   * タブへの直接介入（`'manual'` / `'interrupted'`）と同じ非破壊の経路へ合流し、タスクは
-   * `merging` のまま統合worktreeの占有だけが解放される（issue #412と同じ論法）。
+   * タブへの直接介入（`'manual'` / `'interrupted'`）と同じ非破壊の経路へ合流するが、タスクを
+   * `merging` のまま残しはしない。**`blocked` へ確定させ、統合worktreeの占有だけを解放する**
+   * （issue #443・案A）。`merging` のまま残すと `getRunOutcome` が `running` を返し続け、
+   * run が終了確定せず「再マージ」（`blocked` からしか動かない）の対象にもならない行き止まりに
+   * なるため。`git merge --abort` は呼ばないため、巻き戻していない事実は `mergeInterrupted`
+   * 警告（`live.warnings`）で伝える。
    */
   stop(runId: string): void {
     const live = this.runs.get(runId);

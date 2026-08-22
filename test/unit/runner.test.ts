@@ -2969,6 +2969,14 @@ tasks:
     // `blocked`になった以上、runは`running`を返し続けない（他タスクはT1がmergingでは
     // 開始できないため`pending`のまま`skipped`に倒れており、run全体は`blocked`で終了確定する）
     expect(runner.getSnapshot(runId)?.outcome).toBe('blocked');
+    // 依存する後続（T2・T3・T4）は`runHalted`のまま、`mergeBlocked`には上書きされない
+    // （`runner.stop()`が`haltedByUser`を先に立てているため`skipRemainingPending`は
+    // このシナリオでは既に`stop()`側で走っており、この特定のテストは呼び出し順序を
+    // 区別できない。順序依存そのものの検証は下の「stop()を経由しない直接介入」テストが
+    // 担う。ここでは単に、`taskStopped`経路でも最終的な状態が正しいことを確かめる）
+    expect(store.find(runId)?.tasks['T2']?.failure).toEqual({ kind: 'runHalted' });
+    expect(store.find(runId)?.tasks['T3']?.failure).toEqual({ kind: 'runHalted' });
+    expect(store.find(runId)?.tasks['T4']?.failure).toEqual({ kind: 'runHalted' });
   });
 
   it(
@@ -6477,6 +6485,83 @@ tasks:
       expect(runner.retryMerge(runId, 'T1')).toBe(true);
       await flush();
       expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    },
+  );
+
+  /**
+   * **順序依存の担保（Issue #443レビュー指摘）。** `finishMergeResolution`は
+   * `applyLoopStopReason`の**後**に`markMergeBlocked`を呼ぶ設計だが、上のSOLO_MERGE_YAML
+   * のテスト（T1に依存タスクが無い）はこの順序を検知できない。依存する後続の`failure`が
+   * `runHalted`か`mergeBlocked`かは、`runner.stop()`を経由せず直接`manual`/`interrupted`が
+   * 届く経路（`haltedByUser`がまだ`false`の状態でこの呼び出しが初めてそれを立てる経路）
+   * でしか区別できない。`taskStopped`は`stop()`が事前に`haltedByUser`を立てているため
+   * `applyLoopStopReason`が早期returnし、この順序に依らず`runHalted`のまま残る
+   * （このテストの対象外）。
+   *
+   * 逆順（`markMergeBlocked`を先に呼ぶ）にすると、まだ`pending`のT2・T3・T4が先に
+   * `skipped(mergeBlocked)`へ倒れ、後から呼ばれる`skipRemainingPending`は`pending`だけを
+   * 見るため上書きできず、この後続の`failure`が`mergeBlocked`のまま残ってしまう
+   * （このテストがRED化する）。
+   */
+  it.each(['manual', 'interrupted'] as const)(
+    '衝突解決セッションが%sで終わったとき（stop()を経由しない直接介入）、依存する後続はrunHaltedのままでmergeBlockedに上書きされない',
+    async (reason) => {
+      const DEPENDENT_MERGE_YAML = `
+version: 1
+name: dependent-merge-test
+defaults:
+  provider: codex
+  maxParallel: 3
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    dependsOn: [T1]
+    prompt: p2
+    done: d2
+  - id: T3
+    dependsOn: [T1]
+    prompt: p3
+    done: d3
+  - id: T4
+    dependsOn: [T2, T3]
+    prompt: p4
+    done: d4
+`;
+      const git = fakeGit({ conflictOnce: true });
+      const { runner, codexHost, store } = createHarness(DEPENDENT_MERGE_YAML, { git });
+      const result = await runner.start('/repo/.agents/workflows/dependent-merge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // T1は衝突したのでmergingのまま。T2・T3はT1がmergingの間は開始できずpendingのまま
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+      expect(store.find(runId)?.tasks['T2']?.state).toBe('pending');
+      expect(store.find(runId)?.tasks['T3']?.state).toBe('pending');
+      expect(store.find(runId)?.tasks['T4']?.state).toBe('pending');
+      // `runner.stop()`は呼ばない。haltedByUserはまだfalseのはず
+      expect(runner.getSnapshot(runId)?.haltedByUser).toBe(false);
+
+      const resolutionSession = codexHost.sessions.at(-1);
+      expect(resolutionSession).toBeDefined();
+
+      resolutionSession?.finish(reason as LoopStopReason, { ...initialChatState });
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+      const abortCall = git.calls.find((c) => c.args[0] === 'merge' && c.args[1] === '--abort');
+      expect(abortCall).toBeUndefined();
+      expect(runner.getSnapshot(runId)?.haltedByUser).toBe(true);
+
+      // 順序依存の本体: 依存する後続はrunHaltedのまま（mergeBlockedに上書きされない）
+      expect(store.find(runId)?.tasks['T2']?.failure).toEqual({ kind: 'runHalted' });
+      expect(store.find(runId)?.tasks['T3']?.failure).toEqual({ kind: 'runHalted' });
+      expect(store.find(runId)?.tasks['T4']?.failure).toEqual({ kind: 'runHalted' });
     },
   );
 });

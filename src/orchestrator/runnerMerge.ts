@@ -897,15 +897,19 @@ async function finishMergeResolution(
   if (reason === 'manual' || reason === 'interrupted' || reason === 'taskStopped') {
     // 人が止めた経路。タブへの直接介入（`manual` / `interrupted`）に加えて、ワークフローView
     // の「全体停止」（`WorkflowRunner.stop()`が衝突解決セッションへ送る`stopLoop()` →
-    // `taskStopped`。issue #381で止め対象に加えた）もここへ合流する。通常のタスクと同じく、
-    // このタスク自身の状態は変えず実行全体だけを止める設計を踏襲する（design.md §16.5）。
+    // `taskStopped`。issue #381で止め対象に加えた）もここへ合流する。通常のタスク
+    // （`applyLoopStopReason`の`manual`/`interrupted`分岐）は対象タスク自身の状態を変えず
+    // 実行全体だけを止めるが（design.md §16.5）、衝突解決セッションはここに限り
+    // `markMergeBlocked`で対象タスク自身も`blocked`へ確定させる（下のコメント、Issue #443・
+    // 案A）。`merging`のまま実行全体だけを止めると、`getRunOutcome`が`running`を返し続けて
+    // runが終了確定しない行き止まりになるため。
     //
     // **ここで`git merge --abort`はしない**（Issue #412のレビュー指摘1・Issue #434）。人が
     // 統合worktreeで直接手を動かしている経路であり、巻き戻すとその解決作業を破棄してしまう
     // （design.md §16.17が「衝突した状態のままにしておく」としているのと同じ理由）。
     // 「全体停止」も、人が統合worktreeで解いている途中の未コミットの解決結果を巻き上げる点は
     // 同じで、破棄すると復旧手段が無い（「再マージ」してもゼロからやり直しになる）。
-    // 結果として統合worktreeは`MERGE_HEAD`と未解決パスを抱えたまま占有だけが解放されるが、
+    // 結果として統合worktreeは`MERGE_HEAD`と未解決パスを抱えたまま占有だけが解放される。
     // 次にマージへ来たタスクは`mergeTaskBranch`のゲートで`busy`を受け、`failed`ではなく
     // `blocked`（Viewの「再マージ」で復帰できる）になる。
     //
