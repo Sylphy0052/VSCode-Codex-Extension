@@ -153,15 +153,32 @@
 
 | 項目 | Issue | ブランチ | design.md | manual-test.md |
 | --- | --- | --- | --- | --- |
-| W1 | #335 | `feat/335/final-merge-confirm` | §16.24 | W-22, W-23 |
-| W2 | #336 | `feat/336/detect-stalled-loop` | §16.25 | W-24, W-25 |
-| W3 | #337 | `feat/337/review-generated-plan` | §16.26 | W-26 |
-| W4 | #338 | `feat/338/orchestrator-task-edit` | §16.27 | W-27〜W-30 |
-| W5 | #339 | `feat/339/import-review-comments` | §16.28 | W-31, W-32 |
+| W1 | #335 | `feat/335/final-merge-confirm` | §16.25 | W-F |
+| W2 | #336 | `feat/336/detect-stalled-loop` | §16.26 | W-G |
+| W3 | #337 | `feat/337/review-generated-plan` | §16.27 | W-H |
+| W4 | #338 | `feat/338/orchestrator-task-edit` | §16.28 | W-I |
+| W5 | #339 | `feat/339/import-review-comments` | §16.29 | W-J |
+
+この割り当ては2026-08-22に実在する空き番号へ直したもの（Issue #487）。当初は
+§16.24〜§16.28 と W-22〜W-32 を割り当てていたが、次の2点で使えなくなっていた。
+
+- **§16.24 は WF-B の T10（外部由来テキストの整形、`untrustedText.ts`）が使用済み**
+  （[design.md](../design.md) の §16.24）。16系の最大は §16.24 なので、W1 は §16.25 から始める
+- **W-22 以降という番号は現行の [manual-test.md](../manual-test.md) に存在しない。**
+  W群は Issue #186 の仕分けで W-01〜W-21 の数字体系から W-A〜W-E の観点別体系へ再編済みで、
+  旧番号との対応表だけが残っている。新規ケースはその続きとして W-F 以降を充てる
+
+1項目に複数のケースが要る場合は `W-F-1` `W-F-2` のように枝番を付ける。観点が既存の
+W-A〜W-E のいずれかに収まるなら、新しい記号を起こさずそちらへ手順を足してもよい。
 
 ## 並列の順序
 
-`runner.ts` を複数の項目が触るため、次の波に分けて進める。
+**着手そのものが WF-A2（epic [#466](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/466)）の
+完了待ちである**（2026-08-22の決定）。WF-A2 も `runner.ts` / `forge.ts` を触るため、
+このロードマップの全項目とファイルの集合が交差する。詳細は
+[review-and-feature-consolidation.md](review-and-feature-consolidation.md) の WF-E の項を見ること。
+
+着手後の順序は次のとおり。`runner.ts` を複数の項目が触るため、波に分けて進める。
 
 1. 第1波（並列2）: W1（forge・config）/ W3（planner・roadmap）
 2. 第2波: W2（loopController・runState・runner）
