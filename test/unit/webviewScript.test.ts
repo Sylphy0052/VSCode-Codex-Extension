@@ -66,6 +66,50 @@ describe('chatScript', () => {
     expect(source).toContain("type: 'rewind'");
   });
 
+  it('showTurnForkを省略すると既定でfalseが埋め込まれる（issue #333、design.md §14.61）', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+    expect(source).toContain('SHOW_TURN_FORK = false');
+  });
+
+  it('showTurnForkを立ててもスクリプトが構文として成立している', () => {
+    expect(() =>
+      parses(
+        chatScript(
+          'Claude Code',
+          { mode: 'command', commandName: 'code-review' },
+          true,
+          [],
+          false,
+          true,
+          'ctrlEnter',
+          '{}',
+          'claude',
+          true,
+        ),
+      ),
+    ).not.toThrow();
+  });
+
+  it('showTurnForkを立てるとその値が埋め込まれ、分岐ボタンの対象が発言自身のidになる', () => {
+    const source = chatScript(
+      'Claude Code',
+      { mode: 'command', commandName: 'code-review' },
+      true,
+      [],
+      false,
+      true,
+      'ctrlEnter',
+      '{}',
+      'claude',
+      true,
+    );
+    expect(source).toContain('SHOW_TURN_FORK = true');
+    // Codex画面は「直前の発言」を対象にするが、Claude Code画面は「押した発言自身」を
+    // 対象にする（`rewind_conversation`の向きがCodexの`thread/fork`と逆のため）
+    expect(source).toContain('return SHOW_TURN_FORK ? item.id : previousTurnId');
+    expect(source).toContain("type: 'fork', turnId: node.forkTarget");
+  });
+
   it('ワークフローのボタンがメッセージを送る（issue #250）', () => {
     const source = chatScript('Codex', { mode: 'quickPick' });
 

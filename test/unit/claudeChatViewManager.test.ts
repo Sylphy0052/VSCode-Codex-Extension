@@ -578,6 +578,86 @@ describe('ClaudeChatViewManager', () => {
     });
   });
 
+  describe('会話の途中のターンから分岐（issue #333、design.md §14.61）', () => {
+    it('セッション全体のforkと同じ経路で新しいタブを開き、rewindConversationToTurnへ対象のuuidを渡す', async () => {
+      const startCalls = stubStart();
+      const rewind = vi
+        .spyOn(ClaudeStreamSession.prototype, 'rewindConversationToTurn')
+        .mockResolvedValue({ ok: true, prefillText: '元の発言', error: undefined });
+      const { manager } = createManager();
+
+      await manager.openForkFromTurn(
+        'origin-session-id',
+        '分岐',
+        '/workspace/root',
+        ['u1', 'u2', 'u3'],
+        'u1',
+      );
+
+      // セッション全体のfork（openFork）と同じtarget形（issue #218）
+      expect(startCalls).toHaveLength(1);
+      expect(startCalls[0]?.target).toEqual({ kind: 'fork', sessionId: 'origin-session-id' });
+      expect(startCalls[0]?.sessionId).toBeUndefined();
+      // ロジック層（forkFromTurn.ts）が組み立てる新しい順の送信は、streamSession側の
+      // rewindConversationToTurnにそのまま委ねる（呼び出し引数だけを確認する）
+      expect(rewind).toHaveBeenCalledWith(['u1', 'u2', 'u3'], 'u1');
+    });
+
+    it('戻し切れると prefillText を新しいタブの入力欄へ挿す（insertComposerTextを再利用）', async () => {
+      stubStart();
+      vi.spyOn(ClaudeStreamSession.prototype, 'rewindConversationToTurn').mockResolvedValue({
+        ok: true,
+        prefillText: '元の発言の本文',
+        error: undefined,
+      });
+      const { manager } = createManager();
+
+      await manager.openForkFromTurn('origin-session-id', '分岐', '/workspace/root', ['u1'], 'u1');
+
+      const panel = __mock.lastCreatedPanel();
+      expect(panel?.webview.sent).toContainEqual({
+        type: 'insertComposerText',
+        text: '元の発言の本文',
+      });
+    });
+
+    it('分岐できなかった場合はエラーを表示し、入力欄には何も送らない', async () => {
+      stubStart();
+      vi.spyOn(ClaudeStreamSession.prototype, 'rewindConversationToTurn').mockResolvedValue({
+        ok: false,
+        prefillText: undefined,
+        error: 'stale target',
+      });
+      const { manager } = createManager();
+
+      await manager.openForkFromTurn('origin-session-id', '分岐', '/workspace/root', ['u1'], 'u1');
+
+      expect(__mock.messages.errors.some((m) => m.includes('stale target'))).toBe(true);
+      const panel = __mock.lastCreatedPanel();
+      expect(
+        panel?.webview.sent.some(
+          (m) => typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'insertComposerText',
+        ),
+      ).toBe(false);
+    });
+
+    it('元のセッションのstartは呼ばない（新しいタブだけを開く）', async () => {
+      const startCalls = stubStart();
+      vi.spyOn(ClaudeStreamSession.prototype, 'rewindConversationToTurn').mockResolvedValue({
+        ok: true,
+        prefillText: undefined,
+        error: undefined,
+      });
+      const { manager } = createManager();
+
+      await manager.openForkFromTurn('origin-session-id', '分岐', '/workspace/root', ['u1'], 'u1');
+
+      // 開いたのは新しいfork先のタブだけ。元のセッション（origin-session-id）に対する
+      // startは呼ばれない
+      expect(startCalls).toHaveLength(1);
+    });
+  });
+
   describe('reloadSkillsForOpenSessions（issue #202、design.md TP-90）', () => {
     it('開いている会話それぞれのreloadSkillsを呼び、結果を会話に1行残す', async () => {
       const { calls, sessions } = stubStartCapturing();

@@ -6,6 +6,7 @@ import {
   buildGetSettingsRequest,
   buildMcpStatusRequest,
   buildMcpToggleRequest,
+  buildRewindConversationRequest,
   buildRewindFilesRequest,
   buildSessionCostRequest,
   buildSetEffortRequest,
@@ -25,6 +26,7 @@ import {
   readFastModeState,
   readControlRequest,
   readControlResponse,
+  readRewindConversationResult,
   readRewindFilesResult,
   readSessionCost,
 } from '../../src/claude/control';
@@ -809,5 +811,93 @@ describe('readAgentList', () => {
     expect(readAgentList({})).toBeUndefined();
     expect(readAgentList({ agents: 'なにか' })).toBeUndefined();
     expect(readAgentList({ agents: [] })).toEqual([]);
+  });
+});
+
+describe('buildRewindConversationRequest（issue #333、design.md §14.61）', () => {
+  it('target_message_uuid と interrupt_if_running を送る（実測: パラメータ名はスネークケース）', () => {
+    const line = buildRewindConversationRequest('req_1', 'uuid-1', true);
+    expect(JSON.parse(line.trim())).toEqual({
+      type: 'control_request',
+      request_id: 'req_1',
+      request: {
+        subtype: 'rewind_conversation',
+        target_message_uuid: 'uuid-1',
+        interrupt_if_running: true,
+      },
+    });
+  });
+
+  it('interrupt_if_running: false でも送れる', () => {
+    const line = buildRewindConversationRequest('req_2', 'uuid-2', false);
+    expect(JSON.parse(line.trim())).toMatchObject({
+      request: { interrupt_if_running: false },
+    });
+  });
+});
+
+describe('readRewindConversationResult（issue #333、design.md §14.61）', () => {
+  it('成功時は rewound:true と prefillText を読む', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_1',
+        response: {
+          rewound: true,
+          targetMessageUuid: 'uuid-1',
+          prefillText: '元の発言',
+          precedingAssistantUuid: 'uuid-0',
+        },
+      },
+    });
+    expect(readRewindConversationResult(response!)).toEqual({
+      rewound: true,
+      targetMessageUuid: 'uuid-1',
+      prefillText: '元の発言',
+      precedingAssistantUuid: 'uuid-0',
+      error: undefined,
+    });
+  });
+
+  it('失敗時も subtype:success の封筒で返る。okだけでは判定できず rewound で見る', () => {
+    // 実測（CLI 2.1.235）: stale target 等の失敗は control_response 自体は
+    // subtype:"success" のまま、payload の rewound が false になる
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_2',
+        response: {
+          rewound: false,
+          targetMessageUuid: null,
+          prefillText: null,
+          precedingAssistantUuid: null,
+          error: 'stale target',
+        },
+      },
+    });
+    expect(response!.ok).toBe(true);
+    expect(readRewindConversationResult(response!)).toEqual({
+      rewound: false,
+      targetMessageUuid: undefined,
+      prefillText: undefined,
+      precedingAssistantUuid: undefined,
+      error: 'stale target',
+    });
+  });
+
+  it('control protocol自体が失敗した場合（response.ok:false）も rewound:false として扱う', () => {
+    const response = readControlResponse({
+      type: 'control_response',
+      response: { subtype: 'error', request_id: 'req_3', error: 'Unsupported control request subtype' },
+    });
+    expect(readRewindConversationResult(response!)).toEqual({
+      rewound: false,
+      targetMessageUuid: undefined,
+      prefillText: undefined,
+      precedingAssistantUuid: undefined,
+      error: 'Unsupported control request subtype',
+    });
   });
 });
