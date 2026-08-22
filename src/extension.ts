@@ -69,13 +69,17 @@ import {
   parseRoadmapMarkdown,
   planWorkflowFromRoadmapPhases,
   splitRoadmapPhasesIntoChunks,
+  type CorrectedIssue,
+  type DroppedRoadmapDependency,
   type ParsedRoadmap,
+  type RoadmapIssueEntry,
   type RoadmapPhase,
   withRoadmapReference,
   selectNextRoadmapPhase,
   validateRoadmap,
   type IssueListPort,
 } from './orchestrator/roadmap';
+import { sanitizeForLog } from './orchestrator/sanitize';
 import { WorkflowRunStore } from './orchestrator/runStore';
 import { WorkflowRunner, nodeWorkflowFilePort } from './orchestrator/runner';
 import type { ExtensionSafetyBaseline } from './orchestrator/taskConfig';
@@ -1289,6 +1293,48 @@ async function fileExists(folder: vscode.WorkspaceFolder, name: string): Promise
 }
 
 /**
+ * ロードマップ検証の警告（`RoadmapValidationResult.warnings`）をログ表示用の1行にまとめる
+ * （Issue #427）。`errors`の組み立て方（メッセージを`separator`でつなげるだけ）に揃える。
+ *
+ * `RoadmapIssueEntry.message`は`roadmap.ts`側で組み立てる時点で既にid等を`sanitizeForLog`
+ * 済み（#424）のため、ここでの再無害化は不要。
+ */
+export function formatRoadmapWarningsDetail(
+  warnings: readonly RoadmapIssueEntry[],
+  separator: string,
+): string {
+  return warnings.map((w) => w.message).join(separator);
+}
+
+/**
+ * `correctedIssues`をログ表示用の1行にまとめる（Issue #427）。`itemId`はロードマップ
+ * Markdown・LLM生成YAML由来で、双方向制御文字等を含みうるため`sanitizeForLog`を通す。
+ *
+ * 要素ごとに無害化してから連結する（`roadmap.ts`の配列連結箇所と同じ流儀）。文字列へ
+ * まとめてから1回だけ`sanitizeForLog`を通すと、`SANITIZE_MAX_LEN`（200文字）で切り詰め
+ * られたとき件数が多い場合に後続の要素が丸ごと失われるため、この順序は選ばない。
+ */
+export function formatCorrectedIssuesDetail(issues: readonly CorrectedIssue[]): string {
+  return issues
+    .map(
+      (c) => `${sanitizeForLog(c.itemId)}: ${c.actual ?? 'なし'} → ${c.expected ?? 'なし'}`,
+    )
+    .join(', ');
+}
+
+/**
+ * `droppedDependencies`をログ表示用の1行にまとめる（Issue #427）。
+ * `formatCorrectedIssuesDetail`と同じ理由で要素ごとに`sanitizeForLog`を通す。
+ */
+export function formatDroppedDependenciesDetail(
+  deps: readonly DroppedRoadmapDependency[],
+): string {
+  return deps
+    .map((d) => `${sanitizeForLog(d.itemId)} → ${sanitizeForLog(d.dependsOnId)}`)
+    .join(', ');
+}
+
+/**
  * ゴールの文からロードマップを生成する（design.md §16.19、#95・配線はIssue #105）。
  *
  * 生成セッションの起動は `roadmap.ts` の `createTaskSessionRoadmapGenerationPort` に委ねる。
@@ -1359,6 +1405,16 @@ async function runRoadmap(
     log.error(`生成されたロードマップに問題があります:\n${detail}`);
     void vscode.window.showWarningMessage(
       '生成されたロードマップに問題があります。内容を確認してください（詳しくはログ）',
+    );
+  }
+
+  if (result.validation.warnings.length > 0) {
+    const detail = formatRoadmapWarningsDetail(result.validation.warnings, '\n');
+    log.warn(`生成されたロードマップに警告があります:\n${detail}`);
+    // Issue #427: この通知（showWarningMessage）を消すと、警告の握り潰しが再発する。
+    // 呼び出し側のこの配線は自動テストでは検出できない（純粋関数側はユニットテストで担保）。
+    void vscode.window.showWarningMessage(
+      `生成されたロードマップに警告が${result.validation.warnings.length}件あります。内容を確認してください（詳しくはログ）`,
     );
   }
 
@@ -1523,6 +1579,20 @@ async function planWorkflowFromRoadmapCommand(
     );
   }
 
+  if (validation.warnings.length > 0) {
+    log.warn(
+      `[planner] 選択したロードマップに警告があります: ${formatRoadmapWarningsDetail(
+        validation.warnings,
+        ' / ',
+      )}`,
+    );
+    // Issue #427: この通知（showWarningMessage）を消すと、警告の握り潰しが再発する。
+    // 呼び出し側のこの配線は自動テストでは検出できない（純粋関数側はユニットテストで担保）。
+    void vscode.window.showWarningMessage(
+      `選択したロードマップに警告が${validation.warnings.length}件あります。内容を確認してください（詳しくはログ）`,
+    );
+  }
+
   const pickedPhases = await pickRoadmapPhases(parsed);
   if (pickedPhases === undefined) {
     return;
@@ -1585,9 +1655,7 @@ async function planWorkflowFromRoadmapCommand(
     };
 
     if (result.correctedIssues.length > 0) {
-      const detail = result.correctedIssues
-        .map((c) => `${c.itemId}: ${c.actual ?? 'なし'} → ${c.expected ?? 'なし'}`)
-        .join(', ');
+      const detail = formatCorrectedIssuesDetail(result.correctedIssues);
       log.warn(`[planner] issueをロードマップの値へ直しました: ${detail}`);
       void vscode.window.showWarningMessage(
         `生成されたワークフローのissueがロードマップと違っていたため、${result.correctedIssues.length}件を` +
@@ -1608,9 +1676,7 @@ async function planWorkflowFromRoadmapCommand(
     }
 
     if (result.droppedDependencies.length > 0) {
-      const detail = result.droppedDependencies
-        .map((d) => `${d.itemId} → ${d.dependsOnId}`)
-        .join(', ');
+      const detail = formatDroppedDependenciesDetail(result.droppedDependencies);
       log.warn(`[planner] 分割によりYAMLをまたぐ依存を落としました: ${detail}`);
       void vscode.window.showWarningMessage(
         `分割したため、このワークフローでは表現できない依存を${result.droppedDependencies.length}件` +
