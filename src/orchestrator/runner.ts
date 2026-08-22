@@ -379,6 +379,14 @@ export interface WorkflowWarning {
      * `mergeBusy`（他タスクの衝突で始められなかった＝まだ何も解決作業をしていない）とは
      * 「作業が中断された」という点で意味が違うため、`blocked`の`failure`が`undefined`に
      * なる（`markMergeBlocked`）ぶんの区別をこの警告で持たせる。
+     *
+     * **`taskStopped`はここでは`WorkflowRunner.stop()`（全体停止）経由のものだけを指す**
+     * （Issue #514）。オーケストレーターの`stop_task`（このタスク単体だけを止める意図）が
+     * 衝突解決セッションへ`stopLoop()`を送ったときは、run全体を止めないぶん
+     * `mergeStopTaskStopped`へ分ける。両者は`LoopStopReason`としては同じ`'taskStopped'`
+     * だが（`TaskSession.stopLoop()`は理由をこれ以上細かく伝えられない）、
+     * `MergeResolutionEntry.stoppedByStopTask`で送り元を区別する
+     * （`runnerMerge.ts`の`finishMergeResolution`参照）。
      */
     | 'mergeInterrupted'
     /**
@@ -392,6 +400,16 @@ export interface WorkflowWarning {
      * 統合worktreeは衝突した状態のまま（Viewの「再マージ」で再開できる）。
      */
     | 'mergeApprovalTimeout'
+    /**
+     * オーケストレーターの`stop_task`（design.md §16.23、Issue #514）が衝突解決
+     * セッションを止めたため、自動的に停止して`merging`を`blocked`へ確定させた。
+     * `mergeApprovalTimeout`と同じく、止めたのはこのタスク単体への操作であり、runの
+     * `haltedByUser`は変えない（このタスク以外の`pending`は通常どおり開始してよい）。
+     * `mergeInterrupted`（`WorkflowRunner.stop()`＝全体停止の経路）との違いは「誰が・
+     * どの範囲を止めようとしたか」であり、`git merge --abort`は呼んでいない点は共通
+     * （統合worktreeは衝突した状態のまま、Viewの「再マージ」で再開できる）。
+     */
+    | 'mergeStopTaskStopped'
     /**
      * 疑似worktree（design.md §16.20）の統合が衝突した。3-way mergeができないため、
      * 同じファイルへの変更は全て衝突になる（このタスクは`blocked`になる）。
@@ -853,6 +871,26 @@ export interface MergeResolutionEntry {
    * 通常どおり開始してよい）。この印を`finishMergeResolution`が読んで分岐を切り替える。
    */
   timedOutByApprovalTimeout: boolean;
+  /**
+   * オーケストレーターの`stop_task`（design.md §16.23、Issue #514）が、このタスク単体を
+   * 狙って`stopLoop()`を呼んだ印。
+   *
+   * `timedOutByApprovalTimeout`と同じ理由で必要になる。`TaskSession.stopLoop()`は理由を
+   * `'taskStopped'`としてしか`onFinished`へ伝えられないため、`runnerMerge.ts`の
+   * `finishMergeResolution`は`reason === 'taskStopped'`だけでは「人が
+   * `WorkflowRunner.stop()`（全体停止）を押した」のか「オーケストレーターがこのタスク
+   * だけを`stop_task`で止めた」のかを区別できない。前者はrun全体を`haltedByUser`にする
+   * （`applyLoopStopReason`）。後者はこのタスク**だけ**を`blocked`にし、run全体は
+   * 止めない（他の`pending`タスクは通常どおり開始してよい）。区別しないと、
+   * オーケストレーターが`merging`のタスクへ`stop_task`を呼んだだけで無関係な他タスクへの
+   * `retry_task`/`continue_task`/`decide_approval`まで「人が全体を停止した」という
+   * 偽の理由で拒否されてしまう（Issue #514）。
+   *
+   * `WorkflowRunner.stopTask`が`live.mergeResolutions`側へ`stopLoop()`を送る直前に立てる。
+   * `WorkflowRunner.stop()`（全体停止）からの`stopLoop()`はこのフラグを立てない
+   * （引き続き`false`のまま送るため、既存の`mergeInterrupted`分岐へ合流する）。
+   */
+  stoppedByStopTask: boolean;
 }
 
 /** `LiveTask`と同じ理由（直前のコメント参照）で`export`する（Issue #147）。 */
@@ -1776,6 +1814,12 @@ export class WorkflowRunner {
     }
     const mergeResolutionEntry = live.mergeResolutions.get(taskId);
     if (mergeResolutionEntry !== undefined) {
+      // `runnerMerge.ts`の`finishMergeResolution`がrun全体を止めずにこのタスクだけを
+      // `blocked`にできるよう、送り元が`stop_task`であることを先に印しておく（Issue #514。
+      // `MergeResolutionEntry.stoppedByStopTask`のJSDoc参照）。`stopLoop()`を呼んだ**後**に
+      // 立てると、同期的に発火しうる`onFinished`（`finishMergeResolution`）に間に合わない
+      // 場合があるため、必ず先に立てる
+      mergeResolutionEntry.stoppedByStopTask = true;
       return mergeResolutionEntry.session.stopLoop();
     }
     const liveTask = live.tasks.get(taskId);
@@ -1783,6 +1827,26 @@ export class WorkflowRunner {
       return false;
     }
     return liveTask.session.stopLoop();
+  }
+
+  /**
+   * `stopTask`が実際に対象を見つけられたか（＝止められるループが元々あったか）だけを
+   * 返す（Issue #514）。`stopTask`の戻り値（`session.stopLoop()`の結果）は「見つからな
+   * かった」と「見つかったが既に終わっていた」を区別できない（`LoopController.stop`は
+   * 走っていないループへの呼び出しに`false`を返すため。`loopController.ts`参照）ため、
+   * `runnerOrchestrator.ts`の`stop_task`ツールが両者を別の文言で伝えるための補助として
+   * 別関数に切り出す。
+   *
+   * `live.tasks`のエントリは`onTaskFinished`後も消えないため、ここでの`true`は
+   * 「そのタスクへ送るセッションが存在する」ことしか意味しない（ループが走っているか
+   * どうかは見ない）。
+   */
+  hasStoppableSession(runId: string, taskId: string): boolean {
+    const live = this.runs.get(runId);
+    if (live === undefined) {
+      return false;
+    }
+    return live.mergeResolutions.has(taskId) || live.tasks.has(taskId);
   }
 
   /**
