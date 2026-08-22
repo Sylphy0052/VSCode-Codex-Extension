@@ -205,7 +205,7 @@
 
 - [ ] W7 タスクからオーケストレーターへ判断を仰ぐ経路を作る
   - 依存: W9
-  - Issue: 未起票（着手時に起票する）
+  - Issue: [#571](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/571)
   - 現状: タスクがオーケストレーターへ能動的に判断を仰ぐ道具が無い。`decide_approval` は
     **承認要求（コマンド実行やファイル変更）に対してオーケストレーターが裁く**ための道具であって、
     タスクが「この方針でよいか」と問う経路ではない。いまタスクにできるのは、行き詰まったまま
@@ -349,7 +349,7 @@
 | W4 | #338 | `feat/338/orchestrator-task-edit` | §16.29 | W-I |
 | W5 | #339 | `feat/339/import-review-comments` | §16.30 | W-J |
 | W6 | 未起票 | `feat/<IID>/task-issue-and-review` | §16.31 | W-K |
-| W7 | 未起票 | `feat/<IID>/ask-orchestrator` | §16.32 | W-L |
+| W7 | [#571](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/571) | `feat/571/ask-orchestrator` | §16.32 | W-L |
 | W8 | 未起票 | `feat/<IID>/ask-user` | §16.33 | W-M |
 | W9 | [#547](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/547) | `refactor/547/messaging-via-orchestrator` | §16.34 | W-N |
 | W10 | 未起票 | `feat/<IID>/auto-resume` | §16.35 | W-O |
