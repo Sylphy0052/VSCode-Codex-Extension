@@ -65,6 +65,7 @@ import {
   buildRunTaskSnapshots,
   checkMessagingVisibility,
   checkWaitingReplyStalls,
+  closeMessaging,
   onMessageAccepted,
 } from './runnerMessaging';
 import {
@@ -760,6 +761,10 @@ export interface LiveRun {
    * `waitingReplyPollTimer`は待ちぼうけ検出（`checkWaitingReplyStalls`）を定期的に
    * 走らせるタイマー。`messaging`と同時に作り、run終了時に一緒に止める
    * （`finishRun`参照）。`.unref()`しているためテスト・プロセス終了を妨げない。
+   *
+   * 解放は`closeMessaging`（`runnerMessaging.ts`）に一本化してある。run終了時と
+   * 拡張機能の終了時（`dispose()`）の両方から呼ばれ、閉じた時点でこのフィールドは
+   * `undefined`へ戻る（二重解放を防ぐ印を兼ねる。Issue #374）。
    */
   messaging:
     | {
@@ -831,6 +836,24 @@ class SimpleEmitter<T> {
   }
 }
 
+/**
+ * `WorkflowRunner.dispose()`の解放を1件ずつ包む（Issue #374）。
+ *
+ * 拡張機能の終了時の後始末なので、1つの解放が投げてもそこで打ち切らず残りを続ける。
+ * 打ち切るとCLIの子プロセスやlisten中のソケットが取り残される。失敗はログに残すだけで
+ * 呼び出し側へは伝えない（`dispose()`の呼び出し元はVSCodeのdeactivateで、投げ返しても
+ * できることが無い）。
+ */
+function disposeQuietly(log: Logger, release: () => void, label?: string): void {
+  try {
+    release();
+  } catch (e) {
+    const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+    const where = label === undefined ? '' : `（${label}）`;
+    log.warn(`[workflow] 終了時の解放に失敗しました${where}: ${message}`);
+  }
+}
+
 export class WorkflowRunner {
   /**
    * 分割後のファイル（`runnerSnapshot.ts`等、Issue #147）からは`self.runs`として読むが、
@@ -854,6 +877,32 @@ export class WorkflowRunner {
   private readonly integrationQueue: IntegrationMergeQueue;
 
   /**
+   * `dispose()`が始まった印（Issue #374のレビュー指摘high）。
+   *
+   * `TaskSession.dispose()`は実装（`chatManagerBase.ts`の`teardown()`）が
+   * `loop.stop('manual')`を先に呼ぶため、走行中のタスクを解放すると`onFinished`が
+   * `manual`で**同期的に**発火する。`live.finished`は`pump()`が次のタスクを始めないための
+   * 印でしかなく、`onTaskFinished`自体の再入は止められない。素通しすると
+   * `applyLoopStopReason('manual')`がrun全体を「人が手動停止した」ことにして
+   * （未着手の`pending`は全て`skipped`）永続化してしまい、deactivateしただけの実行が
+   * 次の起動で続きから進まなくなる。同じ理由で`runnerMerge.ts`の`finishMergeResolution`
+   * （衝突解決セッションの解放が呼び戻す）も黙らせる（`WorkflowRunnerInternals.isDisposing`）。
+   * `blockMergeAfterLeaseWait`（`releaseAllLeases()`が起こす順番待ち）にも同じガードを
+   * 置いてあるが、こちらは実際には効いていない多層防御（レビュー3周目のmedium）:
+   * `dispose()`は`live.finished`を全runぶん立て終えてから`releaseAllLeases()`を1回呼び、
+   * 起こされた側の継続はマイクロタスクなので、破棄由来の待機起こしは`decideAfterLeaseWait`が
+   * `live.finished`を見て必ず`skip`へ倒す（`blockMergeAfterLeaseWait`のコメント参照）。
+   * それでも`blocked`確定が後戻りできない書き換えである以上、判定条件が将来変わったときの
+   * 保険として残してある。**`persist()`の入口で止める形は採らない**: キュー待ちのpersistには
+   * 効かず、破棄直前に確定した値（PRのURL・マージ成功）まで落とすため（`persist()`のコメント参照）。
+   *
+   * 一度立てたら下ろさない。`dispose()`の後にこのrunnerを使い続ける経路は無い
+   * （VSCodeのdeactivate時にだけ呼ばれる）。再入を印で黙らせる形は、衝突解決セッションの
+   * `abandoned`（`runnerMerge.ts`、Issue #412のレビュー指摘D）と同じ考え方。
+   */
+  private disposing = false;
+
+  /**
    * 分割後のファイル（`runnerSnapshot.ts`等、Issue #147）へ渡す内部の口
    * （`runnerInternals.ts`のJSDoc参照）。
    *
@@ -875,6 +924,7 @@ export class WorkflowRunner {
       deps: this.deps,
       runs: this.runs,
       integrationQueue: this.integrationQueue,
+      isDisposing: () => this.disposing,
       notify: (runId) => this.notify(runId),
       pump: (runId) => this.pump(runId),
       persist: (runId) => this.persist(runId),
@@ -1487,20 +1537,72 @@ export class WorkflowRunner {
   }
 
   /**
-   * 拡張機能の終了時にオーケストレーターセッションを解放する（design.md §16.23
-   * 「セッションの生成と寿命」の`dispose`）。runの終了では解放しない（run完了後も
-   * 会話を続けられるようにするため）。
+   * 拡張機能の終了時に、実行中のrunが抱えている資源をすべて解放する（Issue #374）。
+   *
+   * 解放するもの:
+   *
+   * - オーケストレーターセッション（design.md §16.23「セッションの生成と寿命」の
+   *   `dispose`）。runの終了では解放しない（run完了後も会話を続けられるようにするため）ので、
+   *   ここが唯一の解放点になる
+   * - 各タスクの`TaskSession`（CLIの子プロセス）と衝突解決セッション
+   *   （`live.mergeResolutions`。どちらもrunが走っている間は生きている）
+   * - タスク間メッセージングのMCPサーバとポーリングタイマー（`closeMessaging`）。
+   *   run終了時の後始末（`pump()`）と同じ関数を呼ぶ。実行中のrunでは`pump()`の終了分岐を
+   *   通らないため、ここで閉じないとlisten中のソケットと`setInterval`が残る
+   * - 統合worktreeの占有（`releaseAllLeases()`）
+   *
+   * **1つの解放が例外を投げても残りを続ける**（`disposeQuietly`）。片付けの途中で
+   * 抜けるとCLIのプロセスやソケットが取り残されるため。
+   *
+   * **冪等**。解放したものは`undefined`にするかMapから消すので、2度目の呼び出しは
+   * 何もしない。
+   *
+   * runの状態（`runState`）は書き換えない。解放が呼び戻す経路（`onTaskFinished`と
+   * `runnerMerge.ts`の`finishMergeResolution`）は`disposing`が黙らせるため、メモリ上の
+   * `runState`が破棄中に汚れることが無い（`live.finished`・`disposing`はどちらもメモリ上の
+   * 印で、永続化される値ではない）。`blockMergeAfterLeaseWait`にも同じガードがあるが、
+   * 破棄由来の待機起こしは`live.finished`（このループで先に立てる）を見て`skip`へ倒される
+   * ため実際には呼ばれない多層防御（レビュー3周目のmedium、`blockMergeAfterLeaseWait`の
+   * コメント参照）。
+   *
+   * 一方で`persist()`自体は止めない。破棄より前に積まれたpersistはキュー待ちの間に
+   * `disposing`が立っても走り、しかもupdaterは`live.runState`を実行時点で読み直すため、
+   * 入口で止めても素通りされる（`persist()`のコメント参照）。汚染を止めるのは書き換え側の
+   * 責務で、その前提が立てば残りのpersistは「破棄の直前に確定した値」を正しく書き切る。
    */
   dispose(): void {
+    // 解放より先に立てる。走行中のセッションの解放が`onFinished`→`onTaskFinished`を
+    // 同期的に呼び戻すため、この印が無いとrun全体が手動停止として永続化される
+    // （フィールドのJSDoc参照）
+    this.disposing = true;
     for (const live of this.runs.values()) {
-      disposeOrchestrator(live);
-      // 統合worktreeの占有待ちで止まっているマージを、起こす前に「即戻る」状態にしておく
-      // （Issue #412のレビュー指摘6）。`releaseAllLeases()`で起き上がった待機者は
-      // `attemptMerge`の続きへ進むため、この印が無いと`markMergeFailed`→`persist`/`notify`が
-      // 破棄済みのEventEmitter・workspaceStateへ書き込む。起き上がった側は
-      // `decideAfterLeaseWait`が「占有が失効している」ことを見て何もせず戻るが、
-      // `live.finished`は`pump()`が新しいタスクを開始しないための印としても要る
+      // 解放より先に立てる。`session.dispose()`は`onFinished`を同期的に発火しうる
+      // （`chatView.ts`。テスト「catchのsession.dispose()」参照）ため、この印が無いと
+      // 片付けの最中に`pump()`が次のタスクを開始してしまう。
+      //
+      // 統合worktreeの占有待ちで止まっているマージを、起こす前に「即戻る」状態にする
+      // 役目も兼ねる（Issue #412のレビュー指摘6）。`releaseAllLeases()`で起き上がった
+      // 待機者は`attemptMerge`の続きへ進むため、この印が無いと`markMergeFailed`→
+      // `persist`/`notify`が破棄済みのEventEmitter・workspaceStateへ書き込む
       live.finished = true;
+      disposeQuietly(this.deps.log, () => disposeOrchestrator(live));
+      // 実行中のrunのタスクセッション（CLIの子プロセス）。run終了時に個別に解放される
+      // 経路（`onTaskFinished`）を通っていない、走行中のものと`maxReached`で残したもの
+      // （issue #284）がここへ来る。`dispose()`が`onFinished`経由で`live.tasks`を
+      // 書き換えうるので、対象を先に確定させてから解放する（`stop()`と同じ）
+      const taskEntries = [...live.tasks.entries()];
+      live.tasks.clear();
+      for (const [taskId, liveTask] of taskEntries) {
+        disposeQuietly(this.deps.log, () => liveTask.session.dispose(), `task ${taskId}`);
+      }
+      // 衝突解決セッション（design.md §16.17「コンフリクト」5.）は`live.tasks`の管理下に
+      // 無い別枠のため、個別に解放する（`stop()`と同じ扱い）
+      const mergeResolutionEntries = [...live.mergeResolutions.entries()];
+      live.mergeResolutions.clear();
+      for (const [taskId, session] of mergeResolutionEntries) {
+        disposeQuietly(this.deps.log, () => session.dispose(), `merge resolution ${taskId}`);
+      }
+      disposeQuietly(this.deps.log, () => closeMessaging(live), 'messaging');
     }
     // 統合worktreeの占有（Issue #412）の強制解放。通常は`runnerMerge.ts`側の`finally`が
     // 解放するが、解放漏れが1つでもあると以後そのrunのマージが全て待ち続ける。破棄時に
@@ -1870,10 +1972,9 @@ export class WorkflowRunner {
       // CLIへの本文送信なので順序に依存しないが、「以降ツールは使えない」を伝える文面と
       // 実際の閉鎖の順序を合わせておく）
       notifyOrchestratorRunFinished(this.internals, runId, outcome);
-      if (live.messaging !== undefined) {
-        void live.messaging.transport.close();
-        clearInterval(live.messaging.waitingReplyPollTimer);
-      }
+      // 後始末は`dispose()`と共通の関数へ寄せてある（Issue #374）。冪等なので、
+      // run終了の直後に`dispose()`が来ても二重解放にならない
+      closeMessaging(live);
     }
   }
 
@@ -2521,6 +2622,12 @@ export class WorkflowRunner {
     reason: LoopStopReason,
     state: ChatState,
   ): void {
+    if (this.disposing) {
+      // 拡張機能の終了時の解放が呼び戻した終了（`reason`は`manual`）。ここから先は
+      // `runState`の書き換え・`persist`・マージの開始まで一式が走るため、印を見て黙る
+      // （`disposing`のJSDoc参照）。片付けの続きは`dispose()`が受け持つ
+      return;
+    }
     const live = this.runs.get(runId);
     if (live === undefined) {
       return;
@@ -2622,6 +2729,18 @@ export class WorkflowRunner {
 
   /** 分割後のファイル（Issue #147）から`self.persist(...)`として呼ぶ（公開範囲は`WorkflowRunnerInternals`に閉じる）。 */
   private async persist(runId: string): Promise<void> {
+    // ここに`disposing`の全面停止ガードは置かない（Issue #374のレビュー2周目）。
+    //
+    // 止めても足りない: `store.update`は`SerialQueue`越しで、updaterが走るのはキューが
+    // 捌く時点、しかもupdaterは`live.runState`を実行時点で読み直す（issue #381）。破棄より
+    // 前に積まれたpersistは入口のガードを素通りするため、汚染を防ぐには`runState`を書き換える
+    // 側（`onTaskFinished`・`finishMergeResolution`・`blockMergeAfterLeaseWait`）で止めるしかない。
+    //
+    // 止めると害がある: `liveTask.pullRequest`・`markMergeSucceeded`・`finalMergeOutcome`は
+    // `live`にしか無く、ここを通してしか永続化されない。PR作成直後や`git merge`成功直後に
+    // deactivateが挟まると、確定済みの値（PRのURL・番号、マージ済み）を落としてしまい、
+    // 次の起動でPRの情報が失われたり、マージ済みのタスクが`merging`のまま復元されて
+    // `resumeMergeAfterReload`がやり直したりする
     const live = this.runs.get(runId);
     if (live === undefined) {
       return;

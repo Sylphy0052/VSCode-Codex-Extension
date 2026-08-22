@@ -30,6 +30,22 @@ export interface WorkflowRunnerInternals {
   readonly deps: WorkflowRunnerDeps;
   readonly runs: Map<string, LiveRun>;
   readonly integrationQueue: IntegrationMergeQueue;
+  /**
+   * `WorkflowRunner.dispose()`が始まっているか（Issue #374のレビュー2周目のmedium）。
+   *
+   * 破棄中に`live.runState`を書き換える経路を黙らせるために読む。実際に効いているのは
+   * `onTaskFinished`と`runnerMerge.ts`の`finishMergeResolution`の2つ。
+   * `blockMergeAfterLeaseWait`にも同じガードがあるが、破棄由来の待機起こしは
+   * `decideAfterLeaseWait`が`live.finished`を見て必ず`skip`へ倒すため、現状は
+   * 到達しない多層防御（レビュー3周目のmedium、`blockMergeAfterLeaseWait`のコメント参照）。
+   *
+   * **`persist()`の入口で止めるのでは足りない**: `WorkflowRunStore.update`は
+   * `SerialQueue`越しで、updaterが実際に走るのはキューが捌く時点、しかもupdaterは
+   * `live.runState`を実行時点で読み直す（issue #381）。破棄より前に積まれたpersistは
+   * 入口のガードを素通りし、汚染された`runState`を書く。したがって「汚染されたものを
+   * 書かせない」ではなく「汚染そのものを起こさせない」で塞ぐ。
+   */
+  isDisposing(): boolean;
   notify(runId: string): void;
   pump(runId: string): void;
   persist(runId: string): Promise<void>;
