@@ -66,7 +66,7 @@
 
 ## フェーズ1 止めどころを作る
 
-- [ ] W1 mainへの最終マージをオーケストレーターが判断する
+- [x] W1 mainへの最終マージをオーケストレーターが判断する
   - 依存: なし
   - Issue: #335
   - 現状: `FinalMergeConfig` は `'auto' | 'pr-only'`（[forge.ts](../../src/orchestrator/forge.ts)）で
@@ -97,7 +97,7 @@
     [runner.ts](../../src/orchestrator/runner.ts) / [workflowView.ts](../../src/view/workflowView.ts) /
     package.json / README.md
 
-- [ ] W3 生成したワークフローの分解が妥当かをレビューする段を足す
+- [x] W3 生成したワークフローの分解が妥当かをレビューする段を足す
   - 依存: なし
   - Issue: #337
   - 現状: [validateWorkflow](../../src/orchestrator/workflow.ts) が見るのは構文的な妥当性だけ
@@ -183,7 +183,7 @@
 2026-08-22の実運用で出た要求（方針1・2）を満たすための3項目。**現行のタスク間メッセージングは
 タスク同士が直接つながるメッシュ型で、方針2に反している。** ここを作り替える。
 
-- [ ] W9 タスク間の直接メッセージングを廃し、オーケストレーターの中継にする（Issue [#547](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/547)）
+- [x] W9 タスク間の直接メッセージングを廃し、オーケストレーターの中継にする（Issue [#547](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/547)）
   - 依存: なし
   - Issue: [#547](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/547)
   - 現状: `send_message` の宛先は「同じrunのタスク」に限られ（[messaging.ts](../../src/orchestrator/messaging.ts)
@@ -280,7 +280,7 @@
     [scheduler.ts](../../src/orchestrator/scheduler.ts) / [config.ts](../../src/config.ts) /
     [design.md](../design.md) §16.11
 
-- [ ] W11 CIの完了待ちとブランチ保護への対応
+- [x] W11 CIの完了待ちとブランチ保護への対応
   - 依存: なし
   - Issue: [#556](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/556)
   - 現状: [forge.ts](../../src/orchestrator/forge.ts) が呼ぶGitHub/GitLabの操作は
@@ -353,7 +353,7 @@
 | W8 | 未起票 | `feat/<IID>/ask-user` | §16.33 | W-M |
 | W9 | [#547](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/547) | `refactor/547/messaging-via-orchestrator` | §16.34 | W-N |
 | W10 | 未起票 | `feat/<IID>/auto-resume` | §16.35 | W-O |
-| W11 | [#556](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/556) | `feat/<IID>/ci-wait-and-update-branch` | §16.36 | W-P |
+| W11 | [#556](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/556) | `feat/556/ci-wait-and-update-branch` | §16.36 | W-P |
 | W12 | 未起票 | `feat/<IID>/program-of-runs` | §16.37 | W-Q |
 
 W6〜W12 は2026-08-22に追加した項目（Issue #497）。**W6 の内容は
@@ -432,8 +432,16 @@ PR [#542](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/542) で完�
 
 着手後の順序は次のとおり。`runner.ts` と `messaging.ts` を複数の項目が触るため、波に分けて進める。
 
-1. 第1波（並列4）: W1（forge・config）/ W3（planner・roadmap）/ W9（messaging）/ W11（forge）
-   - W1 と W11 はどちらも `forge.ts` を触るため、この2つだけは逐次にする（W1 → W11）
+1. **第1波（並列4）: 完了**（2026-08-23）。W1（forge・config）/ W3（planner・roadmap）/ W9（messaging）/ W11（forge）
+   - W1 と W11 はどちらも `forge.ts` を触るため、この2つだけは逐次にした（W1 → W11）
+   - **交差は着手して初めて分かった。** W1 と W3 は影響欄に無い `extension.ts` を両方が触り、
+     W9 と W11 はどちらも `test/integration/helpers/workflow.ts` を触った。
+     後者は統合ブランチ上で衝突し、同じ位置に別の節を挿す形（design.md §16.34/§16.36、
+     manual-test.md W-N/W-P）だったため両方残して解決している
+   - **W11 の担当が、W1 のガードが `finalMerge: auto` の経路を取り逃していたこと**
+     （`decideFinalMerge` を経由せず `performFinalMerge` へ直行する）**を見つけて塞いだ。**
+     W1 の中だけを見ていては見つからない形で、「同じクラスの穴が兄弟にもないか」を
+     毎回確かめる運用がそのまま効いた
 2. 第2波（並列2）: W2（loopController・runState・runner）/ W7（messaging。W9の完了が前提）
 3. 第3波: W8（W7の完了が前提）/ W10（runnerRestore・runStore・scheduler）
 4. 第4波: W4（messaging・runner・workflowView。W2とW8の完了が前提。最も大きい）
