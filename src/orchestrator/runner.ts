@@ -32,10 +32,16 @@ import { applyRunCompletionToFile, type RoadmapFileSystemPort } from './roadmap'
 import {
   IntegrationQueue as PseudoWorktreeIntegrationQueue,
   removePseudoWorktree,
+  removePseudoWorktreeAttempts,
   type PseudoWorktreeFileSystemPort,
   type Snapshot,
 } from './pseudoWorktree';
-import { composeNextPrompt, TaskMessagingHub, type HttpMcpTransportHandle } from './messaging';
+import {
+  composeNextPrompt,
+  TaskMessagingHub,
+  type DispatchErrorLogPort,
+  type HttpMcpTransportHandle,
+} from './messaging';
 import {
   applyLoopStopReason,
   createRunState,
@@ -202,8 +208,17 @@ export interface WorkflowRunnerForgeDeps {
  * `WorkflowRunnerDeps.forge`/`.pseudoWorktree`と同じく省略可能（上のJSDoc参照）。
  */
 export interface WorkflowRunnerMessagingDeps {
-  /** runごとに1つ、MCPサーバを起動する（design.md §16.21「サーバはrunごとに立て」）。 */
-  startTransport: (hub: TaskMessagingHub) => Promise<HttpMcpTransportHandle>;
+  /**
+   * runごとに1つ、MCPサーバを起動する（design.md §16.21「サーバはrunごとに立て」）。
+   *
+   * `logPort`は`WorkflowRunner`が`this.deps.log`を包んで渡す（Issue #375）。dispatch例外を
+   * `MessagingMcpServer`が記録できるようにする最小限の口（`DispatchErrorLogPort`のJSDoc
+   * 参照）。
+   */
+  startTransport: (
+    hub: TaskMessagingHub,
+    logPort?: DispatchErrorLogPort,
+  ) => Promise<HttpMcpTransportHandle>;
   /**
    * `agent.workflows.replyTimeoutSec` の現在値（秒）。省略時は`DEFAULT_REPLY_TIMEOUT_SEC`
    * （既定300秒）を使う。待ちぼうけ検出の経路2（`detectTimedOutWaitingReplies`）で使う。
@@ -1160,7 +1175,10 @@ export class WorkflowRunner {
       orchestratorControl: buildOrchestratorControlPort(this.internals, this, runId),
     });
     try {
-      const transport = await messaging.startTransport(hub);
+      // dispatch例外の記録先（Issue #375）。`log.ts`はVSCode APIへ依存するため、
+      // `messaging.ts`（VSCode非依存方針）へは直接渡さず最小限のportで包む
+      const logPort: DispatchErrorLogPort = { error: (message) => this.deps.log.error(message) };
+      const transport = await messaging.startTransport(hub, logPort);
       const waitingReplyPollTimer = setInterval(
         () => checkWaitingReplyStalls(this.internals, runId),
         WAITING_REPLY_POLL_INTERVAL_MS,
@@ -1729,13 +1747,18 @@ export class WorkflowRunner {
   }
 
   /**
-   * gitでないワークスペース（疑似worktree、design.md §16.20）の1タスク分の複製を撤去する
-   * （Issue #298「疑似worktreeが撤去対象にならない」）。
+   * gitでないワークスペース（疑似worktree、design.md §16.20）の1タスク分の複製を、
+   * すべての試行分撤去する（Issue #298「疑似worktreeが撤去対象にならない」、Issue #396）。
    *
    * **`blocked`のタスクの複製は残す。** gitならタスクブランチが残るため撤去しても
    * 中身を後から辿れるが、疑似worktreeにはブランチが無く、複製を消すと未統合の差分
    * （3-way mergeができず衝突として弾かれた分。design.md §16.20）を復元する手段が
    * 無くなってしまう。
+   *
+   * `totalAttempts`はgit側の`removeGitTaskWorktree`と同じ`state.retryCount +
+   * state.manualRetryCount`（Issue #396）。以前は`removePseudoWorktree`を`retry`無しで
+   * 1回呼ぶだけで、再試行のたびに`cloneWorkspace`が作った`-retry<n>`付きの複製が
+   * 撤去されずに残っていた。
    */
   private async removePseudoTaskWorktree(
     live: LiveRun,
@@ -1760,7 +1783,14 @@ export class WorkflowRunner {
     if (!usedPseudoWorktree) {
       return;
     }
-    const result = await removePseudoWorktree(live.repoRoot, runId, task.id, pseudoWorktreeDeps.fs);
+    const totalAttempts = state.retryCount + state.manualRetryCount;
+    const result = await removePseudoWorktreeAttempts(
+      live.repoRoot,
+      runId,
+      task.id,
+      totalAttempts,
+      pseudoWorktreeDeps.fs,
+    );
     if (result.ok) {
       removed.push(task.id);
     } else {

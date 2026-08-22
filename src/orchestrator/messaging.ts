@@ -900,6 +900,44 @@ const SERVER_INFO_RESULT = {
 };
 
 /**
+ * `logDispatchError`が1つの`MessagingMcpServer`（＝1run）につき実際に記録する上限件数
+ * （Issue #375、PR #476レビュー指摘: medium）。
+ *
+ * このIssueの脅威モデルそのもの（同一runの他タスク、あるいは乗っ取られたCLIセッションが
+ * 意図的に例外を誘発する呼び出しを繰り返す）に対して、`safeDispatch`は例外1回につき
+ * 無条件で`logPort.error(...)`を呼ぶため、1接続内で任意回数呼べるJSON-RPCリクエストの
+ * たびにログ行が無制限に増える。
+ *
+ * 新しい流儀を作らず、リポジトリ既存の「件数上限」の規律に揃える
+ * （`runnerWorkingDirectory.ts`の`MAX_LISTED_REFLECT_PATHS`、`roadmap.ts`の
+ * `MAX_ROADMAP_PARSE_WARNINGS`と同じ形）。`runnerOrchestrator.ts`が
+ * `orchestratorPromptOverride`の警告を直近1件へ丸めた判断（#383）は採らない。
+ * あちらは`live.warnings`という参照可能な状態（ワークフローViewに出続ける）を持つため
+ * 「最新の1件だけ残る」が意味を持つが、ここは都度Output panelへ流れて消えるログ行であり、
+ * 「最新1件だけ」に丸めても以前の件数（＝攻撃の規模感）が失われるだけで閲覧性は上がらない。
+ * 件数を数え、上限を超えた分は記録しないという単純な上限のほうが素直に対応する。
+ *
+ * **トレードオフ（PR #488監査指摘）**: この上限は累積カウンタであり、run単位でリセット
+ * されない。正当な例外（バグや一時的な障害）が先にこの件数を使い切ると、その直後から
+ * 始まる意図的な攻撃は個別ログとしては一切残らない。上限到達以降は
+ * `DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL`件おきの集計ログ（`logDispatchError`参照）
+ * だけが検知手段になる。これは運用者が把握した上でのリスク受容であり、時間窓によるリセット
+ * や個別ログの無制限化ではなく、既存の「件数上限」の規律を保ったまま集計ログで補う設計を
+ * 選んでいる。
+ */
+export const MAX_DISPATCH_ERROR_LOG_COUNT = 20;
+
+/**
+ * 上限到達後の抑制中に、集計ログを何件おきに出すか（Issue #375、PR #488監査指摘: medium）。
+ *
+ * `MAX_DISPATCH_ERROR_LOG_COUNT`到達後は個別ログを止めるが、それ以降も無音のままだと、
+ * 攻撃者がまず正当な例外や無害な例外で上限を使い切ってから本命の攻撃を無制限に行っても
+ * 一切気づけない。ログ行そのものは上限で頭打ちにしたまま、抑制開始からの累計件数を
+ * この間隔ごとに1行出すことで、攻撃の規模と継続の有無だけは追えるようにする。
+ */
+export const DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL = 100;
+
+/**
  * `McpTransportPort` を通じて接続を受け取り、`list_tasks` / `send_message` の
  * ツール呼び出しを `TaskMessagingHub` へ橋渡しする。
  *
@@ -910,6 +948,13 @@ const SERVER_INFO_RESULT = {
  * （design.md §16.21「ツールの引数でタスクidを名乗らせない」）。
  */
 export class MessagingMcpServer {
+  /**
+   * `logDispatchError`が呼ばれた件数（Issue #375）。runを跨がず、`MessagingMcpServer`
+   * インスタンス1つ（＝1run、複数タスクの接続を共有）だけで数える。上限到達後も
+   * 集計ログのために数え続ける（PR #488監査指摘）。
+   */
+  private dispatchErrorLogCount = 0;
+
   constructor(
     private readonly hub: TaskMessagingHub,
     transport: McpTransportPort,
@@ -951,16 +996,42 @@ export class MessagingMcpServer {
    * 意図的に一切読まない。スタックトレースにはこの拡張機能自身のソースファイルパスが
    * 含まれ、`-32603`のレスポンス本体を固定文言にしている理由（内部情報を漏らさない）と
    * 同じ配慮がログ経路にも要るため。
+   *
+   * `MAX_DISPATCH_ERROR_LOG_COUNT`件を超えたら個別の記録を止める（Issue #375、PR #476
+   * レビュー指摘: medium。丸めの流儀は定数のJSDoc参照）。上限に達した回にだけ、抑制を
+   * 始めた旨の1行を追加で記録する。
+   *
+   * 抑制中も件数は数え続け、`DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL`件おきに
+   * 抑制開始からの累計件数を集計ログとして1行出す（Issue #375、PR #488監査指摘:
+   * medium。上限到達直後から始まる本命の攻撃が完全に不可視化されるのを防ぐ）。
+   * ログ行自体は上限＋集計ログの頻度で頭打ちのまま、攻撃の規模・継続有無だけは追える。
    */
   private logDispatchError(error: unknown): void {
     if (this.logPort === undefined) {
       return;
     }
-    const typeName = error instanceof Error ? error.constructor.name : typeof error;
-    const message = error instanceof Error ? error.message : String(error);
-    this.logPort.error(
-      `[task-messaging] dispatchで例外が発生しました: ${typeName}: ${sanitizeForLog(message)}`,
-    );
+    this.dispatchErrorLogCount += 1;
+    if (this.dispatchErrorLogCount <= MAX_DISPATCH_ERROR_LOG_COUNT) {
+      const typeName = error instanceof Error ? error.constructor.name : typeof error;
+      const message = error instanceof Error ? error.message : String(error);
+      this.logPort.error(
+        `[task-messaging] dispatchで例外が発生しました: ${typeName}: ${sanitizeForLog(message)}`,
+      );
+      if (this.dispatchErrorLogCount === MAX_DISPATCH_ERROR_LOG_COUNT) {
+        this.logPort.error(
+          `[task-messaging] dispatch例外のログ記録が上限（${MAX_DISPATCH_ERROR_LOG_COUNT}件）に達したため、` +
+            'このrun（複数タスクの接続を含む）ではこれ以降、個別の記録を抑制します',
+        );
+      }
+      return;
+    }
+    const suppressedCount = this.dispatchErrorLogCount - MAX_DISPATCH_ERROR_LOG_COUNT;
+    if (suppressedCount % DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL === 0) {
+      this.logPort.error(
+        '[task-messaging] dispatch例外のログ記録は抑制中です' +
+          `（このrunで抑制開始以降 ${suppressedCount}件発生）`,
+      );
+    }
   }
 
   private dispatch(taskId: string, request: JsonRpcRequest): JsonRpcResponse {
