@@ -9694,6 +9694,19 @@ tasks:
     done: d1
 `;
 
+  /**
+   * 制御ツールの実体（オーケストレーター専用接続に見せているもの）を取り出す。
+   * 「WorkflowRunner: オーケストレーターの制御ツール」describeのローカルヘルパーと
+   * 同じ実装（このdescribeのスコープからは参照できないため複製）。
+   */
+  function control(state: FakeMessagingState): OrchestratorControlPort {
+    const port = state.hub?.orchestratorControl;
+    if (port === undefined) {
+      throw new Error('制御ツールが配線されていません');
+    }
+    return port;
+  }
+
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
@@ -9820,6 +9833,33 @@ tasks:
 
     expect(runner.decideFinalMerge(runId, 'merge', 'x')).toBe(false);
     expect(runner.decideFinalMerge('unknown-run', 'merge', 'x')).toBe(false);
+  });
+
+  it('decide_final_mergeは上限超過のreasonを受付自体で拒否する（update_task_promptと同じ流儀）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli();
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+      messaging: deps,
+    });
+    const result = await runner.start('/repo/.agents/workflows/final-merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    const tooLong = control(state).decideFinalMerge('merge', 'x'.repeat(4001));
+
+    expect(tooLong.accepted).toBe(false);
+    expect(tooLong.reason).toContain('4000');
+    // 拒否されたので判断待ちは解消されず、マージも実行されない
+    expect(runner.getSnapshot(runId)?.finalMergeDecision).toMatchObject({
+      mode: 'orchestrator',
+    });
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
   });
 
   it(

@@ -397,7 +397,18 @@ export class WorkflowViewManager implements vscode.Disposable {
       // design.md §16.26。`finalMerge: confirm`の人の判断。`orchestrator`モードの
       // オーケストレーターからの判断はMCPツール（`decide_final_merge`）経由で、Webviewの
       // このメッセージは通らない。空文字の理由は`workflowScript.ts`側で送信前に弾いている
-      this.runner.decideFinalMerge(runId, m['decision'], m['reason']);
+      //
+      // `WorkflowRunner.decideFinalMerge`はhaltedByUserしか見ておらず、呼び出し元の
+      // モードまでは区別しない（MCP経由=`orchestrator`専用・Webview経由=`confirm`専用、と
+      // 要件が逆向きのため、合流点である本体には置けない）。`workflowScript.ts`側で
+      // ボタンの表示を`confirm`のときだけに絞っているが、それはUIの見た目でしかなく、
+      // 受信側であるここが素通しだと、webviewの再読み込みで古い状態が残った場合や、
+      // 将来この画面へ外部由来の内容を描くようになった場合に、`orchestrator`モードの
+      // 判断を人の操作として確定させられてしまう（レビュー指摘）。ここで`mode`を
+      // 確かめてから呼ぶ
+      if (this.runner.getSnapshot(runId)?.finalMergeDecision?.mode === 'confirm') {
+        this.runner.decideFinalMerge(runId, m['decision'], m['reason']);
+      }
       return;
     }
 

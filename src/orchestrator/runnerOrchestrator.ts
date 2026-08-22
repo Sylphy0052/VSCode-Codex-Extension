@@ -276,19 +276,9 @@ export function buildOrchestratorControlPort(
       // なった後で始まるため、`runFinishedReason`（`outcome === 'running'`でなければ
       // 拒否）を通すと常に拒否されてしまう。ここでは`finalMergeDecision`の有無だけを
       // 判断待ちの根拠にする。
-      //
-      // ただし`runHaltedByUserReason`（人が「全体の停止」を押したかどうか）は他の判断系
-      // 制御ツール（`retryTask`/`continueTask`/`decideApproval`/`updateTaskPrompt`）と
-      // 同じく通す。停止後もこのツールが素通りだと、人が全体を止めた後にオーケストレーターが
-      // `decision: 'merge'`を呼んでmainへ実際にマージできてしまう（レビュー指摘。
-      // `runFinishedReason`をスキップする理由とは別に、こちらは他ツールと揃えるのが正しい）
       const snapshot = actions.getSnapshot(runId);
       if (snapshot === undefined) {
         return no('この実行はすでに破棄されているため、制御ツールは使えません。');
-      }
-      const halted = runHaltedByUserReason(actions, runId);
-      if (halted !== undefined) {
-        return no(halted);
       }
       const pending = snapshot.finalMergeDecision;
       if (pending === undefined) {
@@ -302,13 +292,32 @@ export function buildOrchestratorControlPort(
       if (decision !== 'merge' && decision !== 'hold') {
         return no(`decision は 'merge' か 'hold' のどちらかです: ${decision}`);
       }
+      // `runHaltedByUserReason`（人が「全体の停止」を押したかどうか）は`decision: 'merge'`
+      // のときだけ見る。`WorkflowRunner.decideFinalMerge`本体（`runner.ts`）と同じ判断で
+      // 揃える: `hold`はPR/MRを残すだけの安全な方向で、ここを塞ぐとオーケストレーターが
+      // 停止後に自分で片付けられず、既定900秒のタイムアウトを待つしかなくなる
+      // （タイムアウトの自動`hold`はこのMCP層を経由せず本体を直接呼ぶため、無限停止には
+      // ならないが、それまで判断待ちが解消できない）。他の判断系制御ツール
+      // （`retryTask`/`continueTask`/`decideApproval`/`updateTaskPrompt`）が`decision`の
+      // 種類によらず一律拒否するのとは事情が違う点に注意（レビュー指摘）
+      if (decision === 'merge') {
+        const halted = runHaltedByUserReason(actions, runId);
+        if (halted !== undefined) {
+          return no(halted);
+        }
+      }
       if (reason.trim() === '') {
         return no('reason は必須です（判断の理由を書いてください）。');
       }
-      // `send_message`（`validateSendMessage`）・`update_task_prompt`と同じ上限を使う
-      // （design.md §16.23）。`reason`はLLMが生成する自由記述であり、上限が無いと
-      // 警告欄（`pushFinalMergeWarning`）を任意長の文字列で埋められる（レビュー指摘）。
-      // `send_message`に揃えて切り詰めではなく拒否にする
+      // `MAX_MESSAGE_BODY_LENGTH`（design.md §16.23）で上限を切る。`reason`はLLMが
+      // 生成する自由記述であり、上限が無いと警告欄（`pushFinalMergeWarning`）を
+      // 任意長の文字列で埋められる（レビュー指摘）。切り詰めではなく拒否にする
+      //
+      // 数え方は`update_task_prompt`（`continuePrompt.length`、UTF-16単位）と同じ
+      // `.length`を使う。`send_message`だけが`codePointLength`（`messaging.ts`の
+      // 非export関数、コードポイント単位）で数えており、3者で数え方が揃っていないのは
+      // 既存の不整合（レビュー指摘）。サロゲートペアを2文字と数える分だけ拒否側に
+      // 厳しくなる（安全側）ため、挙動はこのままにする
       if (reason.length > MAX_MESSAGE_BODY_LENGTH) {
         return no(`reason が長すぎます（上限${MAX_MESSAGE_BODY_LENGTH}文字）: ${reason.length}文字`);
       }

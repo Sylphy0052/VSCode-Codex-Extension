@@ -4419,6 +4419,7 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 | --------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `agent.workflows.dir`                   | resource            | ワークフロー定義ファイルを探すディレクトリ（既定 `.agents/workflows`）。中身は§16.16のとおり信用しないので、置き場自体はワークスペースごとに変えてよい |
 | `agent.workflows.allowAutoApprove`      | machine             | YAMLの `autoApprove: true` を有効化できるかどうか（既定 `false`）。無効化してある間はYAMLの指定によらず全承認を人へ回す（前掲の表参照）                |
+| `agent.workflows.allowClaudeBypassPermissions` | machine      | `claude.permissionMode` が `bypassPermissions` のとき、ワークフローのClaudeタスクもそのまま無人で走らせるかどうか（既定 `false`）。有効にすると§16.7の危険判定が全て無効になる                |
 | `agent.workflows.replyTimeoutSec`       | machine-overridable | タスク間メッセージング（§16.21）の返信待ちの上限秒数                                                                                                   |
 | `agent.workflows.finalMerge`            | machine             | mainを無人で書き換えるかどうかを決める。リポジトリの `.vscode/settings.json` から `auto` や `orchestrator`（既定、§16.26）にされてはいけない           |
 | `agent.workflows.forge`                 | machine             | どのCLI（`gh` / `glab`）を起動するかを決める。実行するコマンドの選択にあたるので §8 と同じ扱いにする                                                   |
@@ -4427,6 +4428,7 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 | `agent.workflows.pseudoWorktreeExclude` | machine-overridable | 疑似worktreeで複製から外すディレクトリ名。増やしても安全側にしか働かない                                                                               |
 | `agent.workflows.branchNaming`          | machine-overridable | タスクブランチの命名方式（§16.6）。ブランチ名の形を決めるだけで、push先も権限も変えない                                                                |
 | `agent.workflows.draftPullRequest`      | machine-overridable | PR/MRをDraftで作るかどうか（§16.18）。有効にするほうが「人の確認を挟む」側へ倒れるため、強い制限は要らない                                             |
+| `agent.workflows.mergeApprovalTimeoutSec` | machine-overridable | 衝突解決セッション（§16.17「コンフリクト」）が承認待ちのまま止まってよい上限秒数（既定3600秒）。超えたら自動でセッションを止め`blocked`にする。権限には関わらない                |
 | `agent.workflows.finalMergeDecisionTimeoutSec` | machine-overridable | `finalMerge: orchestrator` の最終マージ判断待ちの上限秒数（既定900秒、§16.26）。タイムアウトすると `hold` へ倒す                                 |
 
 push先のremoteをYAMLや設定から選ぶ手段は設けない。常に `origin` を使う。任意のURLへpushできると、リポジトリの中身を別の宛先へ出す経路になる。
