@@ -90,6 +90,7 @@ import {
   disposeOrchestrator,
   markOrchestratorRead,
   notifyOrchestratorRunFinished,
+  notifyOrchestratorRunHalted,
   sendUserMessageToOrchestrator,
   setupOrchestratorForStart,
   syncOrchestratorTaskEvents,
@@ -1530,6 +1531,11 @@ export class WorkflowRunner {
     for (const mergeResolutionSession of live.mergeResolutions.values()) {
       mergeResolutionSession.stopLoop();
     }
+    // 停止直後は走行中タスクの`stopLoop()`がまだ確定していない（進行中のターンには
+    // 割り込まない）ため、オーケストレーターの視点では通常の`taskFailed`しか届かず
+    // 「人が止めた」と分からない（issue #401）。制御ツール側の拒否とは別に、ここで
+    // 明示のイベントを送る
+    notifyOrchestratorRunHalted(this.internals, runId);
     this.notify(runId);
     void this.persist(runId);
   }

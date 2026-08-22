@@ -54,7 +54,16 @@ export const MAX_ORCHESTRATOR_PROMPT_LENGTH = 60000;
 
 /** イベント通知の種類（design.md §16.23「何が駆動するか」の表）。 */
 export type OrchestratorEventKind =
-  'runStarted' | 'taskDone' | 'taskFailed' | 'taskWaitingApproval' | 'taskBlocked' | 'runFinished';
+  | 'runStarted'
+  | 'taskDone'
+  | 'taskFailed'
+  | 'taskWaitingApproval'
+  | 'taskBlocked'
+  | 'runFinished'
+  // 人が「全体の停止」を押したことを知らせる（Issue #401）。走行中タスクの`stopLoop()`は
+  // ターンの終わりを待ってから確定するため、確定前は`taskFailed`しか届かず「タスクが
+  // 次々失敗している」ように見え、`retry_task`を呼ぶのが自然な反応になってしまう
+  | 'runHaltedByUser';
 
 /** オーケストレーターへ届ける1件のイベント。 */
 export interface OrchestratorEvent {
