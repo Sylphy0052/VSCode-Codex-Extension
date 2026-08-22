@@ -360,7 +360,13 @@ function normalizePseudoWorktreeExclude(value: unknown): PseudoWorktreeExcludeRe
       `${PSEUDO_WORKTREE_EXCLUDE_KEY} が文字列の配列でないため既定値へ戻しました。`,
     ]);
   }
-  const entries = value.filter((v): v is string => typeof v === 'string' && v.trim() !== '');
+  // 空判定だけでなく格納する値もトリムする。トリムせず生の値を残すと、前後に空白が
+  // 付いた値（例 " .git "）が `hasGitSegment` の完全一致にも区切り文字判定にも掛からず
+  // 素通りしてしまう（レビュー指摘: low）。
+  const entries = value
+    .filter((v): v is string => typeof v === 'string')
+    .map((v) => v.trim())
+    .filter((v) => v !== '');
   if (entries.length !== value.length || entries.length === 0) {
     return fallback([
       `${PSEUDO_WORKTREE_EXCLUDE_KEY} に文字列でない要素・空文字が含まれる、または空配列のため既定値へ戻しました。`,

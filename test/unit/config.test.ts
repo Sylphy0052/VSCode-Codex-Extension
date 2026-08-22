@@ -182,6 +182,18 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
     expect(__mock.messages.warnings).toHaveLength(1);
   });
 
+  // レビュー指摘2: 空判定にはtrimを使うのに、配列へ残すのはトリムしない生の値だった。
+  // トリムしてから空判定・拒否判定・格納まで一貫させる。
+  it('pseudoWorktreeExcludeは前後の空白をトリムしてから格納する（レビュー指摘2）', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': [' build ', 'coverage'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(['build', 'coverage']);
+  });
+
+  it('pseudoWorktreeExcludeは前後に空白が付いた.gitも拒否する（レビュー指摘2）', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': [' .git '] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+  });
+
   it('replyTimeoutSecの既定は300秒（design.md §16.21・DEFAULT_REPLY_TIMEOUT_SEC）', () => {
     expect(readWorkflowsConfig().replyTimeoutSec).toBe(300);
   });
