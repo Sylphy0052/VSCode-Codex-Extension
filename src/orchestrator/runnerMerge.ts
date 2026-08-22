@@ -483,6 +483,18 @@ function decideAfterLeaseWait(
   return { kind: 'proceed' };
 }
 
+/**
+ * `mergeBusy`警告を、同一taskIdの直近1件へ丸めて積む（Issue #439）。「再マージ」は人が
+ * 何度でも押せる操作で、統合worktreeが塞がっている間は押すたびに同じ文面の警告が積まれて
+ * いくため、`orchestratorPromptOverride`（Issue #383・`runnerOrchestrator.ts`）が
+ * `taskId`ごと直近1件へ丸めたのと同じ規律に乗せる。警告が出た事実自体は最新の1件として
+ * 残るので「警告が出た事実が失われる」ことはない。
+ */
+function pushMergeBusyWarning(live: LiveRun, taskId: string, message: string): void {
+  live.warnings = live.warnings.filter((w) => !(w.kind === 'mergeBusy' && w.taskId === taskId));
+  live.warnings.push({ kind: 'mergeBusy', taskId, message });
+}
+
 /** `blockMergeAfterLeaseWait`が人へ出す文面（理由ごと）。 */
 const LEASE_WAIT_BLOCK_MESSAGES: Record<LeaseWaitBlockReason, string> = {
   halted:
@@ -510,7 +522,7 @@ function blockMergeAfterLeaseWait(
   }
   const message = LEASE_WAIT_BLOCK_MESSAGES[reason];
   self.deps.log.warn(`[workflow ${runId}/${taskId}] ${message}`);
-  live.warnings.push({ kind: 'mergeBusy', taskId, message });
+  pushMergeBusyWarning(live, taskId, message);
   live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
   void self.persist(runId);
   self.notify(runId);
@@ -577,11 +589,7 @@ async function mergeWithLease(
     // 以後そのrunのマージが全て同じ理由で`failed`になる行き止まりを作るため
     // （レビュー指摘1）。`blocked`ならViewの「再マージ」で復帰できる
     self.deps.log.warn(`[workflow ${runId}/${taskId}] マージを見送りました: ${merge.message}`);
-    live.warnings.push({
-      kind: 'mergeBusy',
-      taskId,
-      message: merge.message,
-    });
+    pushMergeBusyWarning(live, taskId, merge.message);
     live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
     void self.persist(runId);
     self.notify(runId);

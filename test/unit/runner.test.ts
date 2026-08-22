@@ -6645,6 +6645,63 @@ tasks:
   });
 });
 
+/**
+ * `mergeBusy`警告は「再マージ」（人が何度でも押せる操作）のたびに積まれる。Issue #383（T20）が
+ * `orchestratorPromptOverride`を同一taskIdの直近1件へ丸めた規律に、Issue #412が新設した
+ * `mergeBusy`（`runnerMerge.ts`2箇所）は乗っていなかった（Issue #439）。
+ */
+describe('WorkflowRunner: mergeBusy警告を直近1件へ丸める（Issue #439）', () => {
+  const PARALLEL_YAML = `
+version: 1
+name: merge-busy-cap-test
+defaults:
+  maxParallel: 3
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+
+  it('busy理由でblockedを繰り返しても、同一taskIdのmergeBusy警告は直近1件に丸められる', async () => {
+    // T1の解決セッションがdoneを宣言するがgit上は未解決のままで、巻き戻しにも失敗するため、
+    // 統合worktreeはMERGE_HEADを抱えたまま占有だけが解放される（既存の
+    // 「他タスクの未解決の衝突が残った統合worktreeへぶつかったタスクは」テストと同じ状況）
+    const git = fakeGit({ conflictOnce: true, failMergeAbort: true });
+    const { runner, codexHost, store } = createHarness(PARALLEL_YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge-busy-cap.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    const resolution = codexHost.sessions.at(-1);
+    resolution?.finish('done', doneState('解決したつもり'));
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
+
+    // T2のマージは、片付いていない統合worktreeにぶつかって busy → blocked になる
+    codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('blocked');
+
+    // 統合worktreeを片付けないまま「再マージ」を複数回押す。押すたびに同じ理由のbusyへ
+    // ぶつかり、修正前はmergeBusy警告が押した回数だけ積み上がっていた
+    for (let i = 0; i < 3; i += 1) {
+      expect(runner.retryMerge(runId, 'T2')).toBe(true);
+      await flush();
+      expect(store.find(runId)?.tasks['T2']?.state).toBe('blocked');
+    }
+
+    const mergeBusyWarnings = (runner.getSnapshot(runId)?.warnings ?? []).filter(
+      (w) => w.kind === 'mergeBusy' && w.taskId === 'T2',
+    );
+    expect(mergeBusyWarnings).toHaveLength(1);
+  });
+});
+
 describe('WorkflowRunner: ロードマップの警告をログへ届ける（design.md §16.19、Issue #408）', () => {
   const ROADMAP_YAML = `
 version: 1
