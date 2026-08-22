@@ -817,7 +817,103 @@ export async function cloneWorkspace(
 
 export type RemovePseudoWorktreeResult =
   | { ok: true }
-  | { ok: false; reason: 'invalidIdentifier' | 'boundaryEscape'; message: string };
+  | {
+      ok: false;
+      reason: 'invalidIdentifier' | 'boundaryEscape' | 'removalFailed';
+      message: string;
+    };
+
+export type RemovePseudoIntegrationResult =
+  | { ok: true; warning?: string }
+  | {
+      ok: false;
+      reason: 'invalidIdentifier' | 'boundaryEscape' | 'removalFailed';
+      message: string;
+    };
+
+/**
+ * 撤去3関数（`removePseudoWorktree` / `removeManifestFile` / `removeRunDirIfEmpty`）に
+ * 共通する、消す前の実パス確認（Issue #493。Issue #484 / PR #504が
+ * `reflectIntegrationToWorkspace`の書き込み・削除経路に適用した規律を、撤去系3関数へも
+ * 横展開する）。
+ *
+ * 事後確認を「`.agents/worktrees`の境界内か」（`isPathWithinRoot`）ではなく
+ * 「`.agents/worktrees`の実パス確認時点で想定していた場所そのものか」の厳密一致にする。
+ * `isPathWithinRoot`だけだと、`target`の途中のディレクトリ（典型的には`<runId>`）が
+ * `.agents/worktrees`配下の別ディレクトリ（他runの複製や統合先）を指すシンボリックリンクへ
+ * 差し替えられていた場合に「境界内」として素通りしてしまい、撤去対象を取り違えたまま
+ * 削除してしまう。`target`は`runId`/`taskId`（`identifierError`/`runIdError`で検証済み）
+ * から組み立てる固定構造のパスであり、`.agents/worktrees`から見た相対位置
+ * （`path.relative`）は途中のディレクトリが差し替えられても変わらない文字列計算のため、
+ * これを実パス解決済みのルートへ再度連結した値を「想定した場所」として比較する。
+ *
+ * 呼び出し側との役割分担: ここでは「何を削除してよいか」の確認だけを行い、実際の削除
+ * （`removeDirRecursive`/`removeFile`/`removeEmptyDir`）とその失敗の扱いは呼び出し側に残す
+ * （関数によって削除方法が異なるため）。
+ */
+async function resolveRealRemovalTarget(
+  workspaceRoot: string,
+  target: string,
+  fs: PseudoWorktreeFileSystemPort,
+): Promise<
+  | { status: 'absent' }
+  | { status: 'ok'; realTarget: string }
+  | { status: 'mismatch'; realTarget: string | undefined }
+> {
+  const realTarget = await fs.realpath(target);
+  if (realTarget === undefined) {
+    // 対象が既に存在しない（既に撤去済み、または元々作られなかった）。`realpath`は
+    // ENOENTを含むあらゆる失敗でundefinedを返す（`PseudoWorktreeFileSystemPort`の
+    // JSDoc参照）ため、ここは正常系として扱う。
+    return { status: 'absent' };
+  }
+  const worktreesRoot = pseudoWorktreesRootDir(workspaceRoot);
+  const realWorktreesRoot = await fs.realpath(worktreesRoot);
+  if (realWorktreesRoot === undefined) {
+    return { status: 'mismatch', realTarget };
+  }
+  const expectedTarget = path.join(realWorktreesRoot, path.relative(worktreesRoot, target));
+  if (realTarget !== expectedTarget) {
+    return { status: 'mismatch', realTarget };
+  }
+  return { status: 'ok', realTarget };
+}
+
+/**
+ * 削除操作の実行をラップし、失敗を`Result`型へ正規化する（Issue #493）。
+ *
+ * `fs.removeDirRecursive`/`removeFile`/`removeEmptyDir`はいずれも「対象が既に無い」
+ * （`ENOENT`等）は自前で握りつぶす規約だが、`EACCES`/`EPERM`等の権限エラーは素通りで
+ * throwする。呼び出し側（`removePseudoWorktree`等）に`try/catch`が無いと、この例外が
+ * `removePseudoIntegration`を越えて`runner.ts`の`cleanupIntegration`まで伝播しうる
+ * （Issue #438が問題視した「削除失敗が握り潰される」の逆方向で、失敗が例外化されて
+ * 上位を巻き込む）。ここでcatchし、他の失敗（`boundaryEscape`等）と同じ`Result`型へ
+ * 正規化することで、呼び出し側は常に戻り値だけを見ればよい状態を保つ。
+ *
+ * **権限エラーだけの話ではない。** 上の「境界内リダイレクト」と同一のシナリオで実際に
+ * 連鎖する。`<runId>`ディレクトリがファイルや他ディレクトリへのシンボリックリンクへ
+ * 差し替えられていると、`removeRunDirIfEmpty`の`rmdir`は「ディレクトリではないもの」に
+ * 対する呼び出しになり`ENOTDIR`を投げる。従来はこれが未捕捉のまま上位を巻き込んでいた
+ * （Issue #493のRED確認で実際に観測した）。つまりここでcatchするのは、`EACCES`のような
+ * 環境要因への保険ではなく、**差し替え攻撃そのものが例外の形で現れる経路を塞ぐため**でも
+ * ある。この`try/catch`を「握り潰し」と見て外さないこと。
+ */
+async function tryRemove(
+  operation: () => Promise<void>,
+  target: string,
+): Promise<{ ok: true } | { ok: false; reason: 'removalFailed'; message: string }> {
+  try {
+    await operation();
+    return { ok: true };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      reason: 'removalFailed',
+      message: `撤去に失敗しました（${sanitizeForLog(target)}）: ${sanitizeForLog(detail)}`,
+    };
+  }
+}
 
 /**
  * 疑似worktree（`<workspace>/.agents/worktrees/<runId>/<taskId>`）を1件撤去する。
@@ -828,9 +924,11 @@ export type RemovePseudoWorktreeResult =
  * 安全弁が無く、`removeDirRecursive`でディレクトリを直接消す必要がある。`cloneWorkspace`が
  * 作成時に行う二段構え（一次防御: 祖先ディレクトリのシンボリックリンク検知、二次防御:
  * 作成後の実パス解決による境界確認）のうち、ここでは後段だけを撤去向けに行う。
- * **消す前に対象を実パス解決し、その実体が`.agents/worktrees`の配下にあることを確かめる。**
- * ここで確かめずに`removeDirRecursive`へ渡すと、`.agents/worktrees`自体がシンボリックリンクに
- * 差し替えられていた場合にリンク先（ワークスペースの外）を再帰削除してしまう。
+ * **消す前に対象を実パス解決し、その実体が想定した場所（`resolveRealRemovalTarget`）と
+ * 厳密に一致することを確かめる。** ここで確かめずに`removeDirRecursive`へ渡すと、
+ * `.agents/worktrees`自体や`<runId>`ディレクトリがシンボリックリンクに差し替えられていた
+ * 場合にリンク先（ワークスペースの外、または`.agents/worktrees`配下の別の実体）を
+ * 再帰削除してしまう。
  *
  * 対象が実在しなければ（既に撤去済み）、`worktree.ts`の`removeWorktree`と同じく成功として返す。
  *
@@ -851,31 +949,34 @@ export async function removePseudoWorktree(
   }
   const target = pseudoWorktreePath(workspaceRoot, runId, taskId, retry);
 
-  const realTarget = await fs.realpath(target);
-  if (realTarget === undefined) {
+  const check = await resolveRealRemovalTarget(workspaceRoot, target, fs);
+  if (check.status === 'absent') {
     return { ok: true };
   }
-  const realWorktreesRoot = await fs.realpath(pseudoWorktreesRootDir(workspaceRoot));
-  if (realWorktreesRoot === undefined || !isPathWithinRoot(realTarget, realWorktreesRoot)) {
+  if (check.status === 'mismatch') {
     return {
       ok: false,
       reason: 'boundaryEscape',
-      message: `撤去対象が.agents/worktreesの外を指しているため撤去しませんでした: ${sanitizeForLog(realTarget)}`,
+      message:
+        `撤去対象が実際には想定した場所以外を指しているため撤去しませんでした: ` +
+        `${sanitizeForLog(check.realTarget ?? target)}`,
     };
   }
 
-  await fs.removeDirRecursive(target);
-  return { ok: true };
+  // 削除操作自体は、確認済みの実パス（`check.realTarget`）に対して行う（Issue #493の
+  // 対応候補1）。これは「一次防御＋二次防御」の二段構えの後段であり、確認から削除まで
+  // 一切のI/Oを挟まない（残存する僅かな窓——確認後・削除前に`realTarget`自身の祖先が
+  // 差し替えられる場合——はNode標準API（`fs.promises`）だけでは閉じ切れない。
+  // `openat`/`O_NOFOLLOW`相当が`FileHandle`に無く、移植可能な形での解消は不可能と
+  // Issue #484で判明済み。過剰な作り込みはせず、規律の統一と将来の退行防止に留める）。
+  return tryRemove(() => fs.removeDirRecursive(check.realTarget), check.realTarget);
 }
-
-export type RemovePseudoIntegrationResult =
-  | { ok: true; warning?: string }
-  | { ok: false; reason: 'invalidIdentifier' | 'boundaryEscape'; message: string };
 
 /**
  * `<runId>/manifest.json`（`integrationManifestPath`、Issue #380）を撤去する。
- * `removePseudoWorktree`と同じ規律（消す前に実パス解決し`.agents/worktrees`配下に
- * あることを確かめる）を、ディレクトリではなくファイル1つに対して行う。
+ * `removePseudoWorktree`と同じ規律（消す前に実パス解決し、想定した場所と厳密に一致する
+ * ことを確かめる。削除自体も確認済みの実パスに対して行う）を、ディレクトリではなく
+ * ファイル1つに対して行う。
  */
 async function removeManifestFile(
   workspaceRoot: string,
@@ -888,21 +989,21 @@ async function removeManifestFile(
   }
   const target = integrationManifestPath(workspaceRoot, runId);
 
-  const realTarget = await fs.realpath(target);
-  if (realTarget === undefined) {
+  const check = await resolveRealRemovalTarget(workspaceRoot, target, fs);
+  if (check.status === 'absent') {
     return { ok: true };
   }
-  const realWorktreesRoot = await fs.realpath(pseudoWorktreesRootDir(workspaceRoot));
-  if (realWorktreesRoot === undefined || !isPathWithinRoot(realTarget, realWorktreesRoot)) {
+  if (check.status === 'mismatch') {
     return {
       ok: false,
       reason: 'boundaryEscape',
-      message: `撤去対象が.agents/worktreesの外を指しているため撤去しませんでした: ${sanitizeForLog(realTarget)}`,
+      message:
+        `撤去対象が実際には想定した場所以外を指しているため撤去しませんでした: ` +
+        `${sanitizeForLog(check.realTarget ?? target)}`,
     };
   }
 
-  await fs.removeFile(target);
-  return { ok: true };
+  return tryRemove(() => fs.removeFile(check.realTarget), check.realTarget);
 }
 
 /**
@@ -921,10 +1022,14 @@ async function removeManifestFile(
  * 「空だと判定すること」と「削除すること」を1回のシステムコールへ一体化する。空でなければ
  * 削除自体が起きないため、レースが窓として成立しない。
  *
- * 境界逸脱（`<runId>`が実際には`.agents/worktrees`の外を指す）を検知した場合は`ok:false`を
- * 返すが、`removePseudoIntegration`はこれを致命的失敗としては扱わない（`_integration`と
- * `manifest.json`の撤去は既に完了しているため、Issue #438が塞ごうとした「幽霊マニフェストの
- * 読み戻し」は起きない。入れ物が片付かなかっただけ）。呼び出し側で警告として観測できれば足りる。
+ * 境界逸脱（`<runId>`が実際には想定した場所以外を指す）を検知した場合、または削除自体が
+ * 失敗した場合は`ok:false`を返すが、`removePseudoIntegration`はこれを致命的失敗としては
+ * 扱わない（`_integration`と`manifest.json`の撤去は既に完了しているため、Issue #438が
+ * 塞ごうとした「幽霊マニフェストの読み戻し」は起きない。入れ物が片付かなかっただけ）。
+ * 呼び出し側で警告として観測できれば足りる。
+ *
+ * 消す前に実パス解決し想定した場所と厳密に一致することを確かめ、削除自体も確認済みの
+ * 実パスに対して行う規律（Issue #493）は`removePseudoWorktree`/`removeManifestFile`と同じ。
  */
 async function removeRunDirIfEmpty(
   workspaceRoot: string,
@@ -933,21 +1038,21 @@ async function removeRunDirIfEmpty(
 ): Promise<RemovePseudoIntegrationResult> {
   const runDir = path.join(pseudoWorktreesRootDir(workspaceRoot), runId);
 
-  const realTarget = await fs.realpath(runDir);
-  if (realTarget === undefined) {
+  const check = await resolveRealRemovalTarget(workspaceRoot, runDir, fs);
+  if (check.status === 'absent') {
     return { ok: true };
   }
-  const realWorktreesRoot = await fs.realpath(pseudoWorktreesRootDir(workspaceRoot));
-  if (realWorktreesRoot === undefined || !isPathWithinRoot(realTarget, realWorktreesRoot)) {
+  if (check.status === 'mismatch') {
     return {
       ok: false,
       reason: 'boundaryEscape',
-      message: `runIdディレクトリが.agents/worktreesの外を指しているため撤去しませんでした: ${sanitizeForLog(realTarget)}`,
+      message:
+        `runIdディレクトリが実際には想定した場所以外を指しているため撤去しませんでした: ` +
+        `${sanitizeForLog(check.realTarget ?? runDir)}`,
     };
   }
 
-  await fs.removeEmptyDir(runDir);
-  return { ok: true };
+  return tryRemove(() => fs.removeEmptyDir(check.realTarget), check.realTarget);
 }
 
 /**
