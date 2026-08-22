@@ -313,9 +313,28 @@ export type LoadManifestResult =
  * ウィンドウがあり、その間に経路がシンボリックリンクへ差し替えられるとすり抜ける
  * （TOCTOU、レビュー指摘: medium）。`cloneWorkspace`/`ensureIntegrationDir`が「作成後に
  * `realpath`で実パスを確認し、境界外なら撤去する」二次防御を対にしているのと同じ考え方で、
- * 読み込んだファイルの実パスを事後に`realpath`で確認し、`workspaceRoot`の外を指して
- * いれば読んだ内容を破棄して「復元できなかった」として扱う（撤去ではなく破棄で足りる
- * のは、読み込みは書き込みと違って対象への副作用を残さないため）。
+ * `filePath`の実パスを`realpath`で確認する。
+ *
+ * **この確認は「境界内か」（`isPathWithinRoot`）ではなく「想定した場所そのものか」の
+ * 厳密一致にする（Issue #505、セキュリティ監査で発覚。high）。** `isPathWithinRoot`
+ * だけだと、`filePath`（`manifest.json`）がワークスペース**内**の別の実体（典型的には
+ * `.git/hooks`配下の攻撃者が置いたJSON）へのシンボリックリンクへ差し替えられていた
+ * 場合に「境界内」として素通りし、偽装されたマニフェストを正当な内容として読み込んで
+ * しまう。この関数はrun実行開始時だけでなくVS Codeのウィンドウ再読み込み（リロード
+ * 復元）時にも呼ばれるため、レースに勝つ必要が無く「実行中に差し替えを仕込み、後続の
+ * 通常のリロードを待つ」だけで発火しうる。他4箇所（`persistManifest`/`cloneWorkspace`/
+ * `resolveRealRemovalTarget`/`ensureIntegrationDir`）と同じく、`workspaceRoot`
+ * （呼び出し元から固定値で渡り、攻撃者が差し替えられない唯一のアンカー）の実パスと
+ * `path.relative(workspaceRoot, filePath)`から組み立てた「想定した場所」との厳密一致で
+ * 判定する。
+ *
+ * **この確認は`readTextFile`より前に行う（Issue #505、確認順序の非対称の解消）。**
+ * 以前はここが読み込みの後にあり、「読み込んだ内容がこの関数の外へ出ないので事後確認で
+ * 足りる」という理由で許容していたが、他の読み出し箇所（`reflectIntegrationToWorkspace`の
+ * 反映元コピー）が「読み出しの前に確認する」方針を明言しているのと非対称だった。ファイルが
+ * まだ存在しない（初回実行等）場合の`realpath`の`undefined`はここでは正常系（後段の
+ * `readTextFile`も`undefined`を返し、空マニフェストとして扱われる）のため、
+ * `realFilePath !== undefined`のときだけ境界を確認し、フェイルクローズしない。
  *
  * ファイルサイズの上限（`MAX_MANIFEST_FILE_BYTES`）による足切りも`JSON.parse`の前に行う
  * （レビュー指摘: medium、Issue #380の追加指摘。`MAX_MANIFEST_ENTRIES`の項のコメント参照）。
@@ -335,6 +354,40 @@ export async function loadPersistedManifest(
     };
   }
 
+  // Issue #505（監査指摘、確認順序の非対称）: 事後の境界確認（realpathによる
+  // isPathWithinRoot判定）を`readTextFile`より前に動かす。従来はこの確認が読み出しの
+  // 後にあり、「読み込んだ内容がこの関数の外へ出ないので事後確認で足りる」という理由
+  // （`reflectIntegrationToWorkspace`の反映元コピー側のコメント参照）で許容していたが、
+  // その反映元コピーが「読み出しの前に確認する」方針を明言しているのと非対称だった。
+  //
+  // ファイルがまだ存在しない（初回実行、統合未実施）場合の`realpath`の`undefined`は
+  // ここでは正常系（後段の`readTextFile`も`undefined`を返し、空マニフェストとして
+  // `ok: true`になる）のため、境界確認は`realFilePath !== undefined`のときだけ行う。
+  //
+  // Issue #505（再々監査で発覚）: `realRoot`（`workspaceRoot`自身の`realpath`）は
+  // このファイル内の全ての実パス厳密一致・境界確認における唯一のアンカーであり、
+  // 攻撃者が動かせない前提そのもの。以前はここが`(await fs.realpath(workspaceRoot))
+  // ?? workspaceRoot`という、確認できない場合に非正規化パスへ黙ってフォールバックする
+  // 形になっていたが、アンカーであるべき値が確認できないのにフェイルオープンするのは
+  // 筋が通らないため、確認できない場合はフェイルクローズする。
+  //
+  // Issue #505（セキュリティ監査、high）: ここが`isPathWithinRoot`のみだと、`filePath`が
+  // ワークスペース内の別の実体（`.git/hooks`配下の攻撃者作成JSON等）へのシンボリック
+  // リンクへ差し替えられていた場合に境界内として素通りしてしまう。他4箇所と同じ
+  // `workspaceRoot`起点＋`path.relative`の厳密一致へ揃える。
+  const realFilePath = await fs.realpath(filePath);
+  if (realFilePath !== undefined) {
+    const realRoot = await fs.realpath(workspaceRoot);
+    const expectedFilePath =
+      realRoot !== undefined ? path.join(realRoot, path.relative(workspaceRoot, filePath)) : undefined;
+    if (realRoot === undefined || expectedFilePath === undefined || realFilePath !== expectedFilePath) {
+      return {
+        ok: false,
+        message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際には想定した場所以外を指しています）: ${sanitizeForLog(filePath)}`,
+      };
+    }
+  }
+
   const stat = await fs.statFile(filePath);
   if (stat !== undefined && stat.size > MAX_MANIFEST_FILE_BYTES) {
     return {
@@ -348,12 +401,29 @@ export async function loadPersistedManifest(
     return { ok: true, manifest: new Map() };
   }
 
-  const realFilePath = await fs.realpath(filePath);
-  const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
-  if (realFilePath === undefined || !isPathWithinRoot(realFilePath, realRoot)) {
+  // Issue #505（監査指摘、二段構え）: 上の事前確認だけでは、確認した瞬間だけ
+  // `realpath`が`undefined`（一時的な失敗も含む。ENOENTと区別できない）だった場合に、
+  // 以降このcallで境界確認が一度も行われないまま内容を採用してしまう回帰が生じる
+  // （旧実装は読み込み成功後に無条件で確認していたため、読み込みが成立した時点で
+  // 必ず1回は確認が走っていた。この保証を後退させないため、読み込みが実際に成立した
+  // ここでもう一度確認する）。「ファイルが元々無い」場合は直前の`content === undefined`
+  // 分岐で既に空マニフェストとして返しているため、ここへ到達する時点で読み込みは
+  // 成立済み＝`filePath`は実在する。したがってここでの`realFilePath2`の`undefined`は
+  // 正常系ではなく、読み込みと確認の間で消えた・差し替えられた異常系として扱う。
+  const realFilePath2 = await fs.realpath(filePath);
+  const realRootForSecondCheck = await fs.realpath(workspaceRoot);
+  const expectedFilePath2 =
+    realRootForSecondCheck !== undefined
+      ? path.join(realRootForSecondCheck, path.relative(workspaceRoot, filePath))
+      : undefined;
+  if (
+    realFilePath2 === undefined ||
+    expectedFilePath2 === undefined ||
+    realFilePath2 !== expectedFilePath2
+  ) {
     return {
       ok: false,
-      message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際にはワークスペースの外を指しています）: ${sanitizeForLog(filePath)}`,
+      message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際には想定した場所以外を指しています）: ${sanitizeForLog(realFilePath2 ?? filePath)}`,
     };
   }
 
@@ -385,11 +455,37 @@ export async function loadPersistedManifest(
  * 書き込みの前に、`loadPersistedManifest`と同じくシンボリックリンクの経路検知を行う
  * （レビュー指摘: medium）。
  *
- * さらに、`cloneWorkspace`/`ensureIntegrationDir`と同じ二段構えの二段目（書き込み後に
- * `realpath`で実パスを確認し、境界外なら撤去する）も対にする（レビュー指摘: medium、
- * TOCTOU）。ここは間に`fs.mkdir(path.dirname(filePath))`を挟むぶん一次防御から実I/Oまでの
- * ウィンドウが他箇所より広く、非対称のまま放置すると一次防御をすり抜けられた場合に
- * 唯一無防備になる。
+ * さらに、`reflectIntegrationToWorkspace`の書き込み経路（PR #504）と同じ二段構えの
+ * 二段目（書き込み後に実パスを確認し、境界外なら撤去する）も対にする（レビュー指摘:
+ * medium、TOCTOU）。ここは間に`fs.mkdir(path.dirname(filePath))`を挟むぶん一次防御から
+ * 実I/Oまでのウィンドウが他箇所より広く、非対称のまま放置すると一次防御をすり抜けられた
+ * 場合に唯一無防備になる。
+ *
+ * **事後確認は「境界内か」（`isPathWithinRoot`）ではなく「想定した場所そのものか」の
+ * 厳密一致にする（Issue #505、監査指摘）。** `isPathWithinRoot`だけだと、`dirPath`
+ * （`<runId>`ディレクトリ）が`mkdir`から`writeTextFile`までの間にワークスペース内の
+ * 別ディレクトリ（典型的には`.git/hooks`）を指すシンボリックリンクへ差し替えられた場合に
+ * 「境界内」として素通りしてしまい、`manifest.json`という名前の既存ファイルを上書き
+ * しうる（`hasGitSegment`によるIssue #406の`.git`無条件拒否は`relPath`の文字列にしか
+ * 掛からないため迂回される）。
+ *
+ * **「想定した場所」は`dirPath`自身（あるいはその途中にある`.agents/worktrees`のような
+ * 中間ディレクトリ）から組み立ててはいけない（Issue #505、再監査・再々監査で2段階発覚
+ * した循環）。** 当初の実装は`dirPath`（`<runId>`）自身の`realpath`を基準にしていたが、
+ * `dirPath`自体が差し替えられている攻撃では、`dirPath`の`realpath`も書き込み後の
+ * `filePath`の`realpath`もどちらも差し替え後の実体（例: `.git/hooks`・
+ * `.git/hooks/manifest.json`）を指すため必ず一致してしまい、検査が自己無矛盾になって
+ * 何も検知できない（`cloneWorkspace`の実装コメントで実測済み。同じクラスの欠陥）。
+ * 次に`resolveRealRemovalTarget`（Issue #493）の前例に倣い`worktreesRoot`
+ * （`.agents/worktrees`）へ起点を引き上げたが、**`<ws>/.agents`自体がワークスペース内の
+ * 別ディレクトリへ差し替えられると、`realpath(worktreesRoot)`と`realpath(filePath)`が
+ * どちらも差し替え後の同じ実体を指してしまい、まったく同じ循環が1段上で再現する
+ * （攻撃者は`.agents/worktrees`自体も動かせるため、これはアンカーとして成立しない）。**
+ * 攻撃者が動かせない唯一のアンカーは、呼び出し元から固定値で渡る`workspaceRoot`
+ * 自身であるため、ここまで起点を引き上げる。`workspaceRoot`の`realpath`が`undefined`を
+ * 返すのはここでは正常系ではなく異常（TOCTOU窓の間に削除・差し替えされた）として
+ * フェイルクローズする（`mkdir`が`recursive: true`で必ず`dirPath`を作る以上、
+ * `workspaceRoot`自体は通常存在するはずのため）。
  */
 export async function persistManifest(
   workspaceRoot: string,
@@ -398,6 +494,7 @@ export async function persistManifest(
   fs: PseudoWorktreeFileSystemPort,
 ): Promise<void> {
   const filePath = integrationManifestPath(workspaceRoot, runId);
+  const dirPath = path.dirname(filePath);
 
   const symlinkedAncestor = await findSymlinkedAncestor(workspaceRoot, filePath, fs);
   if (symlinkedAncestor !== undefined) {
@@ -406,15 +503,40 @@ export async function persistManifest(
     );
   }
 
-  await fs.mkdir(path.dirname(filePath));
+  await fs.mkdir(dirPath);
+
   await fs.writeTextFile(filePath, serializeManifest(manifest));
 
+  // Issue #505（再々監査で発覚）: `expected`の起点を`.agents/worktrees`
+  // （`pseudoWorktreesRootDir(workspaceRoot)`）に置いていたが、これでもまだ低い。
+  // `<ws>/.agents`自体が（`<ws>/.git`等）ワークスペース内の別ディレクトリへの
+  // シンボリックリンクへ差し替えられると、`realpath(worktreesRoot)`と`realpath(filePath)`は
+  // どちらも差し替え後の実体を指し、両者は必ず一致してしまう（`<runId>`を差し替える
+  // 循環とまったく同じ構造で、起点が1段上がっただけでは解消しない）。
+  // `resolveRealRemovalTarget`（Issue #493）も含め、このファイル内で`.agents/worktrees`
+  // 起点にしていた箇所は全てこの穴を持っていた。攻撃者が動かせない唯一の起点は
+  // 呼び出し元から固定値で渡る`workspaceRoot`自身であるため、ここへ揃える。
+  //
+  // Issue #505（レビュー指摘、low）: `realRoot`の取得は、他4箇所（`cloneWorkspace` /
+  // `ensureIntegrationDir` / `resolveRealRemovalTarget` / `reflectIntegrationToWorkspace`）と
+  // 同じく、比較対象の実パス（`realFilePath`）の取得と同じタイミング（比較の直前）に
+  // 揃える。以前は`realRoot`だけを`writeTextFile`より前に取得しており、「取得できなければ
+  // 書き込む前に打ち切る」という意図に見えたが、この関数は`realRoot`取得の前に既に
+  // `mkdir(dirPath)`で`dirPath`（`<runId>`ディレクトリ）を作成済みであり、「書き込みより
+  // 前に打ち切る」という性質はI/O全体では既に成立していない（ディレクトリの作成という
+  // 副作用は`realRoot`取得前から発生している）。`writeTextFile`もこの関数のI/Oの一部でしか
+  // ないため、その前に限って`realRoot`だけ先取りする理由は無く、揃えたほうが「4箇所は
+  // 同じ形」という主張に対して素直になる。`realRoot`が取得できない場合は、下の分岐で
+  // 書き込み済みの`filePath`を`removeFile`で取り消してから同じエラーとして報告する
+  // （既存の不一致検知と同じ後始末）。
+  const realRoot = await fs.realpath(workspaceRoot);
   const realFilePath = await fs.realpath(filePath);
-  const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
-  if (realFilePath === undefined || !isPathWithinRoot(realFilePath, realRoot)) {
+  const expectedFilePath =
+    realRoot !== undefined ? path.join(realRoot, path.relative(workspaceRoot, filePath)) : undefined;
+  if (realFilePath === undefined || expectedFilePath === undefined || realFilePath !== expectedFilePath) {
     await fs.removeFile(filePath);
     throw new Error(
-      `疑似worktreeの統合マニフェストの永続化先が実際にはワークスペースの外を指していたため、` +
+      `疑似worktreeの統合マニフェストの永続化先が実際には想定した場所以外を指していたため、` +
         `書き込みを取り消しました: ${sanitizeForLog(realFilePath ?? filePath)}`,
     );
   }
@@ -744,14 +866,37 @@ export type CloneWorkspaceResult =
  * 2. 一次防御: 作成先までの経路にシンボリックリンクが無いかを確かめる
  * 3. 複製先が既に存在すればエラーにする（既存の作業を踏まない。gitの「同名ブランチ」と同じ意図）
  * 4. 複製先ディレクトリを作る
- * 5. 二次防御: 実際に作られた場所を実パス解決し、`workspaceRoot` の配下にあることを確認する。
- *    ここで多数のファイルをコピーする前に確認することで、境界を外れた場合の書き込みを
- *    最小限（空ディレクトリ1つ）に抑える
+ * 5. 二次防御: 実際に作られた場所を実パス解決し、呼び出し元から固定値で渡る
+ *    `workspaceRoot`（攻撃者が差し替えられない唯一のアンカー）の実パスを基準に組み立てた
+ *    「想定した場所」と厳密一致することを確認する。ここで多数のファイルをコピーする前に
+ *    確認することで、境界を外れた場合の書き込みを最小限（空ディレクトリ1つ）に抑える
  * 6. ワークスペースを複製し、複製先のスナップショットを返す
  *
  * `retry`は`worktree.ts`の`createWorktree`と同じ意味（Issue #396）。再試行のたびに
  * 呼び出し側（`runnerWorkingDirectory.ts`）が異なる`retry`を渡すことで、`pseudoWorktreePath`が
  * 別ディレクトリを指すようになり、前回の複製が残っていても`alreadyExists`にならない。
+ *
+ * **5.の事後確認は「境界内か」（`isPathWithinRoot`）ではなく「想定した場所そのものか」の
+ * 厳密一致にする（Issue #505、監査指摘）。** `isPathWithinRoot`だけだと、`target`自身が
+ * `mkdir`から実パス確認までの間にワークスペース内の別ディレクトリ（典型的には
+ * `.git/hooks`）を指すシンボリックリンクへ差し替えられた場合に「境界内」として素通り
+ * してしまい、後続のコピーループが`.git/hooks`配下へワークスペースの内容を書き込みうる
+ * （`hasGitSegment`によるIssue #406の`.git`無条件拒否は`relPath`の文字列にしか掛からない
+ * ため迂回される）。
+ *
+ * **「想定した場所」は`target`の直接の親から組み立ててはいけない（Issue #505、再監査で
+ * 発覚した循環）。** 当初の実装は`target`の親ディレクトリ（`<runId>`）自身の`realpath`を
+ * 基準にしていたが、その親ディレクトリ自体が差し替えられている攻撃では、親の`realpath`も
+ * `target`の`realpath`もどちらも差し替え後の実体を指すため必ず一致してしまい、検査が
+ * 自己無矛盾になって何も検知できない（実測で確認済み。下の実装コメント参照）。
+ * 次に`resolveRealRemovalTarget`（Issue #493）の前例に倣い`worktreesRoot`
+ * （`.agents/worktrees`。`<runId>`より1段上）へ起点を引き上げたが、**`<ws>/.agents`自体が
+ * ワークスペース内の別ディレクトリへ差し替えられると、`realpath(worktreesRoot)`と
+ * `realpath(target)`がどちらも差し替え後の同じ実体を指してしまい、まったく同じ循環が
+ * 1段上で再現する（`.agents/worktrees`はアンカーとして成立しない）。** 攻撃者が動かせない
+ * 唯一のアンカーは、呼び出し元から固定値で渡る`workspaceRoot`自身であるため、ここまで
+ * 起点を引き上げる。`workspaceRoot`の`realpath`が`undefined`を返すのはここでは正常系では
+ * なく異常（TOCTOU窓の間に削除・差し替えされた）としてフェイルクローズする。
  */
 export async function cloneWorkspace(
   workspaceRoot: string,
@@ -787,14 +932,78 @@ export async function cloneWorkspace(
 
   await fs.mkdir(target);
 
+  // Issue #505（監査指摘、再監査でさらに発覚）: 事後確認の`expected`は、`target`の
+  // **親から**組み立ててはいけない。当初の実装は`realParentDir = await fs.realpath(parentDir)`
+  // （`parentDir = path.dirname(target)`）から`expectedTarget`を組み立てていたが、
+  // `parentDir`自体が`.git/hooks`等へ差し替えられている攻撃では、`realpath(parentDir)`も
+  // `realpath(target)`もどちらも差し替え後の実体（`.git/hooks`・`.git/hooks/T1`）を指す
+  // ため、両者は必ず一致してしまい、検査が自己無矛盾（攻撃者に汚染された値どうしを
+  // 比較しているだけ）になって何も検知できない。実測でも
+  // `mkdir(target, {recursive:true})`は例外を投げずに`.git/hooks/T1`を作ってしまい、
+  // このチェックを素通りすることを確認済み。
+  //
+  // **`.agents/worktrees`（`worktreesRoot`）を起点にしても同じ穴が残る。** 一度目の
+  // 修正ではここを`resolveRealRemovalTarget`（Issue #493）の前例に倣い`worktreesRoot`
+  // 起点へ直したが、`<ws>/.agents`自体が（`<ws>/.git`等）ワークスペース内の別ディレクトリ
+  // へ差し替えられると、`realpath(worktreesRoot)`と`realpath(target)`はどちらも差し替え
+  // 後の実体を指し、やはり必ず一致してしまう。起点をどれだけ`target`から遠ざけても、
+  // その起点自体が攻撃者の書き込み可能な範囲にある限り同じ循環が再現する。
+  // 攻撃者が動かせない唯一のアンカーは、呼び出し元から固定値で渡る`workspaceRoot`
+  // 自身であるため、ここまで起点を引き上げる。
+  const realRoot = await fs.realpath(workspaceRoot);
   const realTarget = await fs.realpath(target);
-  const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
-  if (realTarget === undefined || !isPathWithinRoot(realTarget, realRoot)) {
-    await fs.removeDirRecursive(target);
+  const expectedTarget =
+    realRoot !== undefined ? path.join(realRoot, path.relative(workspaceRoot, target)) : undefined;
+  if (realTarget === undefined || expectedTarget === undefined || realTarget !== expectedTarget) {
+    // Issue #505（監査指摘）: ここで`fs.removeDirRecursive(target)`を呼ぶと、`target`の
+    // 祖先ディレクトリ（`<runId>`）が`.git/hooks`等の既存ディレクトリへ差し替えられていた場合、`target`は文字列上は
+    // 「自分がmkdirした空ディレクトリ」でも、実体はそのシンボリックリンクを辿った先の
+    // 既存ディレクトリ（`.git/hooks/<taskId>`等）になっている。この状態で再帰削除すると、
+    // 攻撃者の差し替え先にあった既存の内容ごと消してしまい、境界外へのコピーより悪い
+    // 結果（任意ディレクトリの再帰削除）になる。`target`が本当に自分の作った空ディレクトリ
+    // なのか、差し替えられた先の既存ディレクトリなのかを、渡されたパス文字列だけでは
+    // 区別できない（`fs.promises`にはこれを安全に見分ける`openat`相当が無い。design.mdの
+    // 同種の残存TOCTOU窓の記述を参照）ため、ここでは削除を試みず、複製自体を打ち切る
+    // だけに留める（残りうるのは、境界の外・想定と異なる場所に作られた空ディレクトリ1つ
+    // であり、書き込み・削除のどちらよりも被害が小さい）。
+    //
+    // **削除しないと決めた後に残る「空ディレクトリ」がどうなるか（Issue #505フォローアップ、
+    // ここを「後始末漏れ」と見て`removeDirRecursive`を復活させないこと）。**
+    //
+    // 実際に`<runId>`ディレクトリが差し替えられた攻撃のケースでは、シンボリックリンクは
+    // 既存のディレクトリを同名で置き換えることでしか作れない（`symlink`は対象名が既に存在すると
+    // 失敗する）ため、攻撃者が`<runId>`を差し替える操作それ自体が、直前に`mkdir(target)`で
+    // 作った実体を道連れに消す。つまりこの経路では「自分が作った空ディレクトリ」はそもそも
+    // 残らない（攻撃者の差し替え後の実体は攻撃者自身の`.git/hooks`であり、我々の後始末の
+    // 対象ではない）。
+    //
+    // 残りうるのは、差し替えが起きていない良性のfail-close（一時的なI/O障害等で
+    // `realpath`が想定外の値を返した場合）で、この場合`target`は差し替えられておらず、
+    // 想定どおりの場所（`.agents/worktrees/<runId>/<taskId>`、`retry`ありなら
+    // `-retry<n>`付き）に空ディレクトリとして残る。これは**回収される**。
+    // `removeWorktrees`（`runner.ts:1875`、UIの「統合ブランチと残ったworktreeをまとめて
+    // 片付ける」操作＝`cleanupIntegration`から呼ばれる）が、`state`が`done`/`failed`/
+    // `blocked`/`skipped`のいずれかになった全タスクに対して`removePseudoTaskWorktree`
+    // （`runner.ts:1985`）を呼び、`removePseudoWorktreeAttempts`（`pseudoWorktree.ts:1201`。
+    // `retry`なし＋`0..totalAttempts-1`の全試行分）経由で`removePseudoWorktree`を呼ぶ。
+    // `cloneWorkspace`の失敗は`prepareTaskLaunch`の例外として`startTask`（`runner.ts`）の
+    // catchで捕捉され`applyLoopStopReason(..., 'failed')`によりタスクは`failed`になる
+    // ため、この対象に含まれる（実装を`git grep`で追って確認済み）。`removePseudoWorktree`
+    // 自身も呼び出し前に`resolveRealRemovalTarget`（Issue #493）で「`.agents/worktrees`
+    // 配下の想定した場所そのものか」を厳密一致で確かめてから消すため、通常の
+    // worktree撤去と同じ安全性で回収される。
+    //
+    // 回収は`cleanupIntegration`という利用者操作を経由するため即時ではないが、これは
+    // 疑似worktreeの通常の後始末モデルと同じである。`removePseudoWorktreeAttempts`自身の
+    // JSDocが明言するとおり、過去の`retry`試行分の複製も同じ経路でしか回収されない
+    // （run実行中に自動では消えない）設計であり、この失敗ケースだけが特別に放置される
+    // わけではない。また、直後に同じ`retry`値で再度`cloneWorkspace`を呼んでも、冒頭の
+    // `directoryExists(target)`チェックが引っかかって`alreadyExists`になるだけで、
+    // 黙って上書き・混在することはない（この判定自体は本Issueより前から存在する）。
     return {
       ok: false,
       reason: 'boundaryEscape',
-      message: `複製先がワークスペースの外に作られたため、撤去しました: ${sanitizeForLog(realTarget ?? target)}`,
+      message: `複製先が実際には想定した場所以外を指しているため、複製を中止しました: ${sanitizeForLog(realTarget ?? target)}`,
     };
   }
 
@@ -838,14 +1047,23 @@ export type RemovePseudoIntegrationResult =
  * 横展開する）。
  *
  * 事後確認を「`.agents/worktrees`の境界内か」（`isPathWithinRoot`）ではなく
- * 「`.agents/worktrees`の実パス確認時点で想定していた場所そのものか」の厳密一致にする。
- * `isPathWithinRoot`だけだと、`target`の途中のディレクトリ（典型的には`<runId>`）が
- * `.agents/worktrees`配下の別ディレクトリ（他runの複製や統合先）を指すシンボリックリンクへ
- * 差し替えられていた場合に「境界内」として素通りしてしまい、撤去対象を取り違えたまま
- * 削除してしまう。`target`は`runId`/`taskId`（`identifierError`/`runIdError`で検証済み）
- * から組み立てる固定構造のパスであり、`.agents/worktrees`から見た相対位置
- * （`path.relative`）は途中のディレクトリが差し替えられても変わらない文字列計算のため、
- * これを実パス解決済みのルートへ再度連結した値を「想定した場所」として比較する。
+ * 「想定していた場所そのものか」の厳密一致にする。`isPathWithinRoot`だけだと、
+ * `target`の途中のディレクトリ（典型的には`<runId>`）が`.agents/worktrees`配下の別
+ * ディレクトリ（他runの複製や統合先）を指すシンボリックリンクへ差し替えられていた場合に
+ * 「境界内」として素通りしてしまい、撤去対象を取り違えたまま削除してしまう。`target`は
+ * `runId`/`taskId`（`identifierError`/`runIdError`で検証済み）から組み立てる固定構造の
+ * パスであり、`path.relative`は途中のディレクトリが差し替えられても変わらない文字列
+ * 計算のため、これを実パス解決済みのルートへ再度連結した値を「想定した場所」として
+ * 比較する。
+ *
+ * **この「実パス解決済みのルート」は`.agents/worktrees`（`worktreesRoot`）ではなく
+ * `workspaceRoot`にする（Issue #505、再々監査で発覚）。** この関数自身もかつては
+ * `worktreesRoot`を起点にしており「攻撃者が動かせないルート」の前例として他の3箇所へ
+ * 横展開されていたが、`<ws>/.agents`自体がワークスペース内の別ディレクトリへ差し替え
+ * られると、`realpath(worktreesRoot)`と`realpath(target)`がどちらも差し替え後の同じ実体を
+ * 指してしまい、`.agents/worktrees`を起点にする限り必ず一致してしまう（`<runId>`を差し
+ * 替える攻撃とまったく同じ循環構造）。攻撃者が動かせない唯一のアンカーは、呼び出し元
+ * から固定値で渡る`workspaceRoot`自身であるため、ここへ起点を引き上げる。
  *
  * 呼び出し側との役割分担: ここでは「何を削除してよいか」の確認だけを行い、実際の削除
  * （`removeDirRecursive`/`removeFile`/`removeEmptyDir`）とその失敗の扱いは呼び出し側に残す
@@ -867,12 +1085,30 @@ async function resolveRealRemovalTarget(
     // JSDoc参照）ため、ここは正常系として扱う。
     return { status: 'absent' };
   }
-  const worktreesRoot = pseudoWorktreesRootDir(workspaceRoot);
-  const realWorktreesRoot = await fs.realpath(worktreesRoot);
-  if (realWorktreesRoot === undefined) {
+  // 規範: `expected`は、攻撃者が差し替えられない起点から組み立てること。**差し替え
+  // られうる中間ノード（`target`自身の親、あるいは`.agents/worktrees`のような中間
+  // ディレクトリ）の`realpath`から組み立ててはいけない。** 差し替えられうるノードを
+  // 起点にすると、そのノード自体がシンボリックリンクへ差し替えられていた場合、起点の
+  // `realpath`も`target`の`realpath`もどちらも差し替え後の同じ実体を指すため比較が
+  // 常に一致してしまい、検査が自己無矛盾になって何も検知できなくなる（Issue #484の
+  // 書き込み経路・削除経路、Issue #505で再発を確認した`cloneWorkspace`/`persistManifest`
+  // いずれも、`target`の直接の親から`expected`を組み立てていたためにこの欠陥を持って
+  // いた。レビュー・監査を2巡通過してマージされた実装でも再発したため、次に実パス
+  // 厳密一致の検査を書く際はこの関数の形へ揃えること。新しい起点の選び方を発明しない
+  // こと）。
+  //
+  // **この関数自身もかつて`.agents/worktrees`（`pseudoWorktreesRootDir(workspaceRoot)`）を
+  // 起点にしており、同じ循環を持っていた（Issue #505、再々監査で発覚）。** `<ws>/.agents`
+  // 自体がワークスペース内の別ディレクトリへ差し替えられると、`realpath(worktreesRoot)`と
+  // `realpath(target)`はどちらも差し替え後の実体を指し、やはり必ず一致してしまう。
+  // 起点をどれだけ`target`から遠ざけても、その起点自体が攻撃者の書き込み可能な範囲に
+  // ある限り同じ穴が再現するため、攻撃者が動かせない唯一のアンカー＝呼び出し元から
+  // 固定値で渡る`workspaceRoot`自身まで起点を引き上げてある。
+  const realRoot = await fs.realpath(workspaceRoot);
+  if (realRoot === undefined) {
     return { status: 'mismatch', realTarget };
   }
-  const expectedTarget = path.join(realWorktreesRoot, path.relative(worktreesRoot, target));
+  const expectedTarget = path.join(realRoot, path.relative(workspaceRoot, target));
   if (realTarget !== expectedTarget) {
     return { status: 'mismatch', realTarget };
   }
@@ -1174,8 +1410,27 @@ export type EnsureIntegrationDirResult =
 
 /**
  * 統合先ディレクトリ（`<runId>/_integration`）を用意する。実行開始時に一度だけ呼ぶ想定
- * （gitの統合worktreeと同じ役割。design.md §16.17）。`cloneWorkspace` と同じ二段構えの
- * シンボリックリンク対策を行う。
+ * （gitの統合worktreeと同じ役割。design.md §16.17）。`cloneWorkspace`と同じ二段構えの
+ * シンボリックリンク対策（一次防御: `findSymlinkedAncestor`によるI/O前の事前検知、
+ * 二次防御: 事後の実パス厳密一致）を行う。
+ *
+ * Issue #505 / #526（監査指摘）: 事後確認はかつて`isPathWithinRoot`（境界内か）のみで、
+ * 厳密一致を欠いていた。`<runId>`が一次防御通過後に`.git/hooks`等ワークスペース**内**の
+ * 別ディレクトリへ差し替えられると（境界内リダイレクト）、`mkdir`が`.git/hooks/_integration`
+ * を作ってしまっても`isPathWithinRoot`はtrueを返すため素通りしていた（攻撃A）。
+ * 加えて、境界外と正しく検知できた場合でも無条件に`fs.removeDirRecursive(dir)`を呼んで
+ * いたため、`<runId>`がワークスペース**外**の既存ディレクトリへのシンボリックリンクへ
+ * 差し替えられていると、その差し替え先の実体（既存のファイルを含む）を丸ごと再帰削除
+ * してしまっていた（攻撃B。実測で検証先に置いたファイルが消えることを確認済み）。
+ * これは`cloneWorkspace`が同じ理由（`fs.promises`に`openat`相当が無く「自分が作った
+ * 空ディレクトリか」を安全に判別できない）で撤去をやめた操作そのものであり、この関数
+ * だけが取り残されていた。
+ *
+ * 他の3+1箇所（`persistManifest` / `cloneWorkspace` / `reflectIntegrationToWorkspace`の
+ * 書き込み・削除経路）と同じ「攻撃者が動かせないルート（呼び出し元から固定値で渡る
+ * `workspaceRoot`自身。`.agents/worktrees`のような中間ディレクトリは、その中間ディレク
+ * トリ自体の差し替えで同じ循環が再現するため起点にならない）＋`path.relative`」の
+ * 厳密一致へ揃え、不一致・境界外と判明した場合は撤去せず作成の中止のみに留める。
  */
 export async function ensureIntegrationDir(
   workspaceRoot: string,
@@ -1200,14 +1455,29 @@ export async function ensureIntegrationDir(
 
   await fs.mkdir(dir);
 
+  // Issue #505 / #526（再々監査で発覚）: `expected`の起点を`.agents/worktrees`
+  // （`pseudoWorktreesRootDir(workspaceRoot)`）に置いていたが、これでもまだ攻撃者の
+  // 手が届く。`<ws>/.agents`自体がワークスペース内の別ディレクトリへ差し替えられると、
+  // `realpath(worktreesRoot)`と`realpath(dir)`はどちらも差し替え後の実体を指し、
+  // 必ず一致してしまう（`<runId>`を差し替える攻撃とまったく同じ構造で、起点が1段
+  // 上がっただけでは解消しない）。攻撃者が動かせない唯一のアンカーは呼び出し元から
+  // 固定値で渡る`workspaceRoot`自身であるため、ここへ揃える。
+  const realRoot = await fs.realpath(workspaceRoot);
   const realDir = await fs.realpath(dir);
-  const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
-  if (realDir === undefined || !isPathWithinRoot(realDir, realRoot)) {
-    await fs.removeDirRecursive(dir);
+  const expectedDir =
+    realRoot !== undefined ? path.join(realRoot, path.relative(workspaceRoot, dir)) : undefined;
+  if (realDir === undefined || expectedDir === undefined || realDir !== expectedDir) {
+    // Issue #505 / #526（監査指摘）: ここで`fs.removeDirRecursive(dir)`は呼ばない。
+    // `<runId>`が差し替えられている攻撃では、`dir`は文字列上「自分がmkdirした空
+    // ディレクトリ」でも、実体は差し替え先の既存ディレクトリになっている可能性があり
+    // （`cloneWorkspace`の同種のコメント参照）、`target`が自分の作った空ディレクトリなのか
+    // 差し替え先の既存ディレクトリなのかを渡されたパス文字列だけでは区別できない
+    // （`openat`相当の欠如）。撤去せず作成を中止するだけに留め、残りうる空ディレクトリは
+    // `cloneWorkspace`と同じ経路（`removeWorktrees`等）での回収に委ねる。
     return {
       ok: false,
       reason: 'boundaryEscape',
-      message: `統合先がワークスペースの外に作られたため、撤去しました: ${sanitizeForLog(realDir ?? dir)}`,
+      message: `統合先が実際には想定した場所以外を指しているため、作成を中止しました: ${sanitizeForLog(realDir ?? dir)}`,
     };
   }
 
@@ -1412,7 +1682,26 @@ export async function reflectIntegrationToWorkspace(
     };
   }
 
-  const realRoot = (await fs.realpath(workspaceRoot)) ?? workspaceRoot;
+  // Issue #505（再々監査で発覚）: `realRoot`（`workspaceRoot`自身の`realpath`）は
+  // このファイル内の実パス厳密一致における唯一のアンカーであり、攻撃者が動かせない
+  // 前提そのもの。以前はここが`(await fs.realpath(workspaceRoot)) ?? workspaceRoot`
+  // という、確認できない場合に非正規化パスへ黙ってフォールバックする形になっていたが、
+  // アンカーであるべき値が確認できないのにフェイルオープンするのは筋が通らないため、
+  // 確認できない場合はフェイルクローズする（`partialApply`。まだ1件も反映していない
+  // ため`appliedPaths`は空、全エントリを`remainingPaths`として返す）。
+  const realRoot = await fs.realpath(workspaceRoot);
+  if (realRoot === undefined) {
+    return {
+      ok: false,
+      reason: 'partialApply',
+      message: `ワークスペースルート自身の実パスを確認できなかったため、反映を中止しました: ${sanitizeForLog(workspaceRoot)}`,
+      appliedPaths: [],
+      failedPath: workspaceRoot,
+      remainingPaths: [...manifest.keys()],
+      skippedPaths: [],
+      usedLegacyCopyFallback: false,
+    };
+  }
   const realIntegrationDir = (await fs.realpath(integrationDir)) ?? integrationDir;
 
   const entries = [...manifest.entries()];
@@ -1492,13 +1781,22 @@ export async function reflectIntegrationToWorkspace(
         // `removeDirRecursive`の前に`realpath`で確かめているのと同じ形。
         //
         // Issue #484（監査指摘、書き込み側と同じ穴が削除側にも残っていた）:
-        // 「境界内か」ではなく「親ディレクトリの`realpath`確認時点で想定していた場所
-        // そのものか」を厳密一致で確かめる。`isPathWithinRoot`だけだと、`target`の
-        // 親ディレクトリ（`relPath`の親、例: `sub`）がTOCTOU窓の間にワークスペース内の
-        // 別ディレクトリ（典型的には`.git/hooks`）を指すシンボリックリンクへ差し替え
-        // られた場合に「境界内」として素通りしてしまい、`hasGitSegment`（Issue #406の
-        // `.git`無条件拒否）は`relPath`の文字列しか見ていないためこの経路は迂回できて
-        // しまう。書き込み側（下の`realTargetDir`/`expectedTemp`比較）と同じ形へ揃える。
+        // 「境界内か」ではなく「想定していた場所そのものか」を厳密一致で確かめる。
+        // `isPathWithinRoot`だけだと、`target`の親ディレクトリ（`relPath`の親、例: `sub`）
+        // がTOCTOU窓の間にワークスペース内の別ディレクトリ（典型的には`.git/hooks`）を
+        // 指すシンボリックリンクへ差し替えられた場合に「境界内」として素通りしてしまい、
+        // `hasGitSegment`（Issue #406の`.git`無条件拒否）は`relPath`の文字列しか見ていない
+        // ためこの経路は迂回できてしまう。
+        //
+        // **「想定した場所」は`target`の親（`targetDir`）自身から組み立ててはいけない
+        // （Issue #505、再監査で発覚した循環。マージ済みのPR #504で入った実装に残っていた
+        // 欠陥）。** `targetDir`自体が差し替えられている攻撃では、`targetDir`の`realpath`も
+        // `target`の`realpath`もどちらも差し替え後の実体を指すため必ず一致してしまい、
+        // 検査が自己無矛盾になって何も検知できない（`cloneWorkspace`の実装コメントで
+        // 実測済み。同じクラスの欠陥）。ここでは関数冒頭で確定済みの`realRoot`
+        // （`workspaceRoot`自身の`realpath`。攻撃者はこの経路の`relPath`ループの外にいる
+        // ため動かせない）を基準に、`path.relative(workspaceRoot, target)`という文字列
+        // 計算（差し替えの影響を受けない）を再度連結して「想定した場所」を組み立てる。
         const targetDir = path.dirname(target);
         const realTargetDir = await fs.realpath(targetDir);
         if (realTargetDir === undefined) {
@@ -1519,7 +1817,7 @@ export async function reflectIntegrationToWorkspace(
           // 上と同じ理由で`skippedPaths`は使わず、`removeFile`を呼ばずに次のエントリへ進む。
           continue;
         }
-        const expectedTarget = path.join(realTargetDir, path.basename(target));
+        const expectedTarget = path.join(realRoot, path.relative(workspaceRoot, target));
         if (realTarget !== expectedTarget) {
           throw new Error(
             `削除対象が実際には想定した場所以外を指しています（${safeRelPath}）: ${sanitizeForLog(realTarget)}`,
@@ -1553,14 +1851,19 @@ export async function reflectIntegrationToWorkspace(
         const targetDir = path.dirname(target);
         await fs.mkdir(targetDir);
         const realTargetDir = await fs.realpath(targetDir);
-        // ここでは`cloneWorkspace` / `ensureIntegrationDir`と違い、
-        // **作ったディレクトリを`removeDirRecursive`で撤去しない**（レビュー指摘への裁定。
-        // 揃っていないのは意図的なので、将来のレビューで安易に揃えないこと）。
-        // 撤去対象は「`realpath`が境界外に解決されたディレクトリ」であり、その実体は
-        // シンボリックリンクの指す先＝既にユーザーのデータが入っている可能性のある場所。
-        // 空ディレクトリが1つ残る害と、境界外を再帰削除する害が釣り合わない。
-        // `cloneWorkspace`側が撤去できるのは、そこで作るのが自分専用の新規ディレクトリ
-        // （`<runId>/<taskId>`）だからで、前提が違う。
+        // ここでは**作ったディレクトリを`removeDirRecursive`で撤去しない**
+        // （レビュー指摘への裁定。将来のレビューで安易に「揃える」と称して撤去を
+        // 追加しないこと）。撤去対象は「`realpath`が境界外に解決されたディレクトリ」
+        // であり、その実体はシンボリックリンクの指す先＝既にユーザーのデータが
+        // 入っている可能性のある場所。空ディレクトリが1つ残る害と、境界外を
+        // 再帰削除する害が釣り合わない。
+        // 補足（Issue #505）: 以前は`cloneWorkspace`側は「自分専用の新規ディレクトリ
+        // （`<runId>/<taskId>`）だから撤去してよい」という前提で`removeDirRecursive`を
+        // 呼んでいたが、その前提自体が誤りだった（祖先ディレクトリが差し替えられていると
+        // `target`は既存の実ディレクトリへ解決され、撤去は任意ディレクトリの再帰削除になる）。
+        // 現在は`cloneWorkspace`側もこの箇所と同様に撤去しない実装へ揃えたため、
+        // 「撤去できる/できない前提が違う」という対比はもう成立しない。両者とも
+        // 同じ理由（安全に撤去できるか判別できない）で撤去しない、という点で一致している。
         if (realTargetDir === undefined || !isPathWithinRoot(realTargetDir, realRoot)) {
           throw new Error(
             `反映先のディレクトリが実際にはワークスペースの外を指しています（${safeRelPath}）: ${sanitizeForLog(realTargetDir ?? targetDir)}`,
@@ -1596,18 +1899,30 @@ export async function reflectIntegrationToWorkspace(
           // （いずれも実測で確認済み）。
           //
           // そこで、窓の存在は残存リスクとして受け入れたうえで、下の事後確認を
-          // 「`realTemp`が境界内か」ではなく「`realTargetDir`確認時点で想定していた場所
-          // そのものか」へ厳格化する。境界内チェックだけだと、`targetDir`がワークスペース
-          // 内の別ディレクトリ（典型的には`.git/hooks`）を指すシンボリックリンクへ
-          // 差し替えられた場合に「境界内」として素通りしてしまう。`hasGitSegment`
-          // （Issue #406の`.git`無条件拒否）は`relPath`にしか掛からないため、この経路は
-          // 迂回できてしまい、実測でも`.git/hooks/pre-commit`が無警告で書き換わることを
-          // 確認している。厳格化後は、`targetDir`確認からこの一時ファイル書き込みまでの
-          // 間に差し替えが起きた場合、書き込み先の実パスが確認時点の`realTargetDir`直下と
-          // 一致しなくなるため確実に検知できる（プラットフォーム差のある`openat`/
-          // `O_NOFOLLOW`系の防御ではなく、純粋なパス文字列比較にしたのは、既存の
-          // 「一次防御＋二次防御」の二段構えと一貫させ、かつWindowsでも同じロジックで
-          // 一様に効かせるため）。
+          // 「`realTemp`が境界内か」ではなく「想定していた場所そのものか」へ厳格化する。
+          // 境界内チェックだけだと、`targetDir`がワークスペース内の別ディレクトリ
+          // （典型的には`.git/hooks`）を指すシンボリックリンクへ差し替えられた場合に
+          // 「境界内」として素通りしてしまう。`hasGitSegment`（Issue #406の`.git`無条件
+          // 拒否）は`relPath`にしか掛からないため、この経路は迂回できてしまい、実測でも
+          // `.git/hooks/pre-commit`が無警告で書き換わることを確認している。
+          //
+          // **「想定していた場所」は`targetDir`自身の`realpath`（`realTargetDir`）から
+          // 組み立ててはいけない（Issue #505、再監査で発覚した循環。当初のこの実装
+          // 自体がこの欠陥を持ったままマージされていた）。** `targetDir`自体が差し替え
+          // られている攻撃では、`targetDir`の`realpath`も一時ファイルの`realpath`も
+          // どちらも差し替え後の実体（`.git/hooks`・`.git/hooks/<一時ファイル名>`）を
+          // 指すため必ず一致してしまい、検査が自己無矛盾になって何も検知できない
+          // （`cloneWorkspace`の実装コメントで実測済み。同じクラスの欠陥）。
+          // 攻撃者が動かせない`realRoot`（`workspaceRoot`自身の`realpath`。関数冒頭で
+          // 確定済み）を基準に、`path.relative(workspaceRoot, tempTarget)`という文字列
+          // 計算（差し替えの影響を受けない）を再度連結して「想定した場所」を組み立てる
+          // ことで、`targetDir`確認からこの一時ファイル書き込みまでの間に差し替えが
+          // 起きた場合を検知できる（プラットフォーム差のある`openat`/`O_NOFOLLOW`系の
+          // 防御ではなく、純粋なパス文字列比較にしたのは、既存の「一次防御＋二次防御」の
+          // 二段構えと一貫させ、かつWindowsでも同じロジックで一様に効かせるため）。
+          // ただし`fs.promises`に`openat`相当が無い以上、この窓自体を完全に閉じることは
+          // できない。ここで検知できるのは「確認時点の想定と異なる実パスへ書かれたこと」
+          // であり、確認そのものより後の差し替え（別のTOCTOU）まで防げるわけではない。
           //
           // 一時ファイルは`targetDir`と同一ディレクトリに置く。別ディレクトリ（別ファイル
           // システム）だと`rename`がクロスデバイスで`EXDEV`になり失敗しうるため。
@@ -1621,15 +1936,12 @@ export async function reflectIntegrationToWorkspace(
             // `rename`前に確認することで、境界外へ書かれた内容が`target`の名前で
             // 一瞬でも見える窓自体を作らない。
             //
-            // Issue #484: 「境界内か」ではなく「`realTargetDir`確認時点で想定していた
-            // 場所そのものか」を確かめる。`isPathWithinRoot`だけだと、`targetDir`が
-            // ワークスペース内の別ディレクトリ（典型的には`.git/hooks`）を指すリンクへ
-            // 差し替えられた場合に「境界内」として通過してしまい、`hasGitSegment`
-            // による`.git`の無条件拒否（Issue #406）が`relPath`しか見ていないため
-            // 迂回される（実測済み）。`realTargetDir`は上のスコープで確定済みなので
-            // 追加のI/Oは不要。
+            // Issue #505: `expectedTemp`は`realTargetDir`（`targetDir`自身の`realpath`）
+            // からではなく、関数冒頭で確定済みの`realRoot`から組み立てる（上の大きな
+            // コメント参照。`realTargetDir`起点だと`targetDir`自体が差し替えられた場合に
+            // 自己無矛盾になり検知できない）。
             const realTemp = await fs.realpath(tempTarget);
-            const expectedTemp = path.join(realTargetDir, path.basename(tempTarget));
+            const expectedTemp = path.join(realRoot, path.relative(workspaceRoot, tempTarget));
             if (realTemp === undefined || realTemp !== expectedTemp) {
               throw new Error(
                 `反映先が実際には想定した場所以外へ書き込まれたため、書き込みを取り消しました` +
