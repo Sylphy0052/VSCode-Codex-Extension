@@ -1018,7 +1018,7 @@ TUIタブ（当時の`buildClaudeShellArgs`、§14.2）には付けない。CLI�
 | 新規 / resume / タブ復元                                                          | ○                                                                   | ○                                                                                        |
 | チャット画面（承認・中断込み）                                                    | ○                                                                   | ○                                                                                        |
 | fork（セッション全体、§14.40）                                                    | ○                                                                   | ○（idは未確定のまま）                                                                    |
-| 会話の途中のターンから分岐                                                        | ○                                                                   | ×（CLIに手段が無い）                                                                     |
+| 会話の途中のターンから分岐                                                        | ○                                                                   | ○（`rewind_conversation`。CLI 2.1.235で追加を確認。§14.61）                              |
 | 巻き戻し（[#21](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/21)） | ×（`thread/rollback` はdeprecatedかつファイルを戻さない。採らない） | ○（`rewind_files`。**ファイルだけ**戻す。会話には触れない）                              |
 | archive / unarchive / delete                                                      | ○                                                                   | ×（CLIに手段が無い。ファイルを直接消すことはしない）                                     |
 | セッション名の変更（§14.35）                                                      | ○（app-server側に永続化）                                           | ○（拡張機能ローカルの`ClaudeSessionNameStore`止まり。CLI側の`rename_session`は使わない） |
@@ -1041,6 +1041,8 @@ Codexの `forkFromTurn`（`thread/fork` に `lastTurnId` を渡す。§9.5「会
 バイナリ内の実装（`branch` 選択時に呼ばれる関数）を読むと、対象ターンまでのメッセージを新しいsessionIdへ複製しながら `content-replacement` / `relocated`（cwdの引き継ぎ）/ `sessionHistorySuppressed` などのレコードを合わせて書き出す処理になっており、単純なtranscriptの行コピーでは再現できない。加えてこれは公開ドキュメントの無いminifiedコードからの逆解析であり、CLIの更新で予告なく変わりうる。**この処理自体が非対話環境では実行できないよう作られている**ことは、同等の操作を拡張機能側で（transcriptを読んで新しいセッションを組み立てる形で）代替するのが安全でないことの傍証でもある。§8「会話本文を読まない・保存しない」とは別に、CLIの内部ストレージ形式に依存した複製は元のセッションを壊すリスクを避けられないため、この代替は採らない。
 
 以上から、**Claude Codeでは会話の途中のターンから分岐する手段が無いと結論する**。Codex側の `forkFromTurn` 実装（`src/view/chatView.ts` の `forkFrom` / `src/view/conversationView.ts`）と同じ導線は出さない。将来のCLI更新で `--print` 経路にも `branch` / `fork` が解放されれば再調査する。
+
+> **この結論はCLI 2.1.235で覆った（issue #333、§14.61）**。上記1〜4はCLI 2.1.227時点の実測として歴史的記録のまま残すが、`control_request`のsubtype総当たり（3）は当時14候補に `rewind_conversation` を含めておらず、その後のCLI更新で新設されたsubtypeを見落としていた（既存候補の再実測ではなく、未知の新設subtypeだったため見落とし自体は当時の実測手順の誤りではない）。詳細は§14.61を参照。
 
 #### 巻き戻し（Codex Esc Esc / Claude `/rewind` 相当、[#21](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/21)）
 
@@ -3391,6 +3393,37 @@ Codex側・Claude側は同じ`createExecutablePathResolver(provider, log)`（`sr
 残る制約:
 
 - webview側のDOM組み立て（`createTable` / `createQuote` / `createList`）はvitestのnode環境では実行できない（§14.51と同じ制約）。実際の表の横スクロール・ネストしたリストの階層表示・ストリーミング中の描画崩れの有無は`docs/manual-test.md`のU-26〜U-28に委ねる
+
+### 14.61 会話の途中のターンから分岐（Claude Code、issue #333）
+
+背景: §14.6の「会話の途中のターンから分岐」はCLI 2.1.227時点で「手段が無い」と結論していた（上の`#### 会話の途中のターンから分岐（実測で不可と確定、[#22]...）`）。CLI 2.1.235で`control_request`の新しいsubtype `rewind_conversation` が使えることを確認し、この結論を覆す。以下はすべて実測（CLI 2.1.235、`--print --input-format stream-json`経路）に基づく。未測定の挙動は「未確認のリスク」として明記し、測定済みであるかのようには書かない。
+
+#### 実測した挙動
+
+1. **`target_message_uuid`は「戻す対象＝分岐したい発言そのもの」を指す**。Codexの`thread/fork`が`lastTurnId`（引き継ぐ最後のターン＝対象の一つ手前）を取るのとは向きが逆で、Claude側は押した発言自身のuuidをそのまま渡す。transcriptの`jsonl`の`"type":"user"`行のトップレベル`uuid`と一致する（`ChatItem.id`としてすでに保持済み。§9.5・上の`rewind_files`節と同じ経路、`src/claude/streamJson.ts`の`applyUser`）
+2. **後続の人の発言が残っていると「stale target」として拒否される**。1回の`rewind_conversation`は対象より後の人の発言をすべて消してから対象へ戻す想定の操作ではなく、直近の1件しか戻せない。複数ターン分岐るには**新しい順に1件ずつ逐次**送る必要がある（並列に投げると失敗する）
+3. **応答の封筒は常に`subtype:"success"`（`ControlResponse.ok`は常にtrue）で、成否は`payload.rewound`で判定する**。失敗時も`rewound:false`とエラー文言が同じ成功封筒の中に入って返ってくる。既存の`readRewindFilesResult`（`ok`で成否判定）とは判定方法をあえて分け、`readRewindConversationResult`を新設した（`src/claude/control.ts`）。`ok`だけを見て成功と誤判定しないことをテストで固定した
+4. **`prefillText`はCLIが返す値をそのまま使う**。戻した対象発言の本文がここに入って返ってくるとみられ（新しいタブの入力欄へ流し込む）、拡張機能側でtranscriptを読んで再構成することはしない
+5. **`--fork-session`必須**。fork指定なし（`resume`のみ、または`new`）のセッションへ`rewind_conversation`を送ると元セッションのtranscriptを書き換えてしまうリスクがあるため、forkしたセッション（`target.kind === 'fork'`）以外へは送らないガードを`ClaudeStreamSession.rewindConversationToTurn`自身に持たせた（呼び出し元の配線ミスでも壊れないよう、最下層で防ぐ）
+6. **ファイルは戻らない**（`rewind_files`とは独立の操作）。会話だけを戻す操作であり、ワークスペースのファイルには一切触れない。ファイルを戻したい場合は既存の`rewind_files`（§14.6の`巻き戻し`節）を別途使う
+
+#### 未確認のリスク（測定していない・保証しない）
+
+- **先頭の発言（直前にアシスタントの応答が無い発言）まで戻したときの挙動は未測定**。`RewindConversationResult.precedingAssistantUuid`が`undefined`になるケース自体は応答の型として持たせたが、実際にCLIがどう応答するか（成功して`prefillText`だけ返るのか、専用のエラーになるのか）は確認していない。Codexの`forkFromTurn`は先頭の発言にはボタン自体を出さない設計だが、Claude Code側はこの制約が未確認のため、あえてボタンを隠さずCLIの応答をそのままエラー表示に委ねる設計にした（要判断: 実機確認後、必要ならCodexと同様に先頭発言でボタンを隠す方針へ変更する）
+- **新しいセッションidの扱いは未確認**。forkで作られる新セッションのidを拡張機能側が特定・追跡する手段は今回調べておらず、`openForkFromTurn`は既存の`openFork`と同様にidを追跡しない前提（タブはウィンドウ再読み込み後の復元・作業記録の対象外）としている
+- **`rewind_conversation`も`rewind_files`と同様、非公開の内部プロトコルであり将来のCLI更新で無くなる・形が変わる可能性がある**。その場合は`readRewindConversationResult`が`rewound:false`側に倒れ、エラーメッセージとして画面に返るだけで、他の操作には影響しない
+
+#### 実装
+
+- `src/claude/control.ts`: `buildRewindConversationRequest`（要求の組み立て）、`readRewindConversationResult`（`rewound`で成否判定する専用リーダー）
+- `src/claude/forkFromTurn.ts`（新設、vscode非依存）: `buildRewindSequence`（対象以降を新しい順に並べる）、`forkFromTurn`（1件ずつawaitして逐次送信し、`rewound:false`で即座に打ち切る）
+- `src/claude/streamSession.ts`: `ClaudeStreamSession.rewindConversationToTurn`（forkガード→`forkFromTurn`呼び出し）、`requestRewindConversation`（`interrupt_if_running:true`固定で送信）。プロセス終了時は`releasePendingWaiters`で待機中の要求を`rewound:false`として解放する
+- `src/view/chatShared.ts` / `src/view/chatScript.ts`: 既存のfork導線（Codexの`forkFromTurn`、§9.5）が使っていたボタンDOM・クリックハンドラをそのまま流用し、対象idの計算だけを`turnForkTarget()`で出し分ける（`SHOW_TURN_FORK`フラグ。Codexは`previousTurnId`、Claude Codeは`item.id`自身）
+- `src/view/claudeChatView.ts`: `openForkFromTurn`（新しいタブを開く→`rewindConversationToTurn`を新しい順に送る→成功なら`prefillText`を`insertComposerText`（issue #292）で入力欄へ流し込む。失敗ならエラー表示のみで元のタブには何もしない）
+
+残る制約:
+
+- webview側のボタン表示・実際のタブ遷移・入力欄への反映は`docs/manual-test.md`のU-29〜U-31に委ねる（vitestのnode環境では実VSCode webviewの表示を確認できないため）
 
 ## 15. 作業記録（日報・週報連携）
 
