@@ -73,6 +73,69 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
     expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(['build', 'coverage']);
   });
 
+  const DEFAULT_EXCLUDE = ['node_modules', '.venv', 'dist', 'out'];
+
+  it('pseudoWorktreeExcludeに.gitを含む値があれば設定全体を既定値へ落とす（Issue #446）', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['node_modules', '.git'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+  });
+
+  it('pseudoWorktreeExcludeの.GIT等の亜種も拒否する（大文字小文字を区別しない）', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['.GIT'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['.Git'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+  });
+
+  it('pseudoWorktreeExcludeはパス区切りを含む値・絶対パスを拒否する', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['packages/build'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['packages\\build'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['/etc'] });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+  });
+
+  it('pseudoWorktreeExcludeを拒否したことは警告として人に見える形で出す（Issue #380の教訓）', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['.git'] });
+    const config = readWorkflowsConfig();
+    expect(config.pseudoWorktreeExcludeWarnings).toHaveLength(1);
+    expect(config.pseudoWorktreeExcludeWarnings[0]).toContain('.git');
+    expect(config.pseudoWorktreeExcludeWarnings[0]).toContain(
+      'agent.workflows.pseudoWorktreeExclude',
+    );
+    expect(__mock.messages.warnings).toHaveLength(1);
+    expect(__mock.messages.warnings[0]).toContain('.git');
+  });
+
+  it('pseudoWorktreeExcludeの警告は同じ値を読み直しても重ねて通知しない', () => {
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': ['dup-check/.git'] });
+    readWorkflowsConfig();
+    readWorkflowsConfig();
+    expect(__mock.messages.warnings).toHaveLength(1);
+  });
+
+  it('pseudoWorktreeExcludeの既定値・正当な値は警告なしで通る', () => {
+    expect(readWorkflowsConfig().pseudoWorktreeExcludeWarnings).toEqual([]);
+
+    __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': DEFAULT_EXCLUDE });
+    expect(readWorkflowsConfig().pseudoWorktreeExcludeWarnings).toEqual([]);
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual(DEFAULT_EXCLUDE);
+
+    __mock.setConfig('agent', {
+      'workflows.pseudoWorktreeExclude': ['build', 'coverage', '.mypy_cache'],
+    });
+    expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual([
+      'build',
+      'coverage',
+      '.mypy_cache',
+    ]);
+    expect(__mock.messages.warnings).toEqual([]);
+  });
+
   it('pseudoWorktreeExcludeが配列でない・空文字要素を含む・空配列なら既定値へ落とす', () => {
     __mock.setConfig('agent', { 'workflows.pseudoWorktreeExclude': 'not-an-array' });
     expect(readWorkflowsConfig().pseudoWorktreeExclude).toEqual([
