@@ -93,12 +93,16 @@ export function getSnapshot(self: WorkflowRunnerInternals, runId: string): Workf
 function buildPendingAskUserSnapshot(
   live: LiveRun,
   persisted: PersistedRun | undefined,
-): { question: string; choices: readonly string[]; hasLiveSession: boolean } | undefined {
+): { question: string; choices: readonly string[]; hasLiveSession: boolean; answered: boolean } | undefined {
   if (live.pendingAskUser !== undefined) {
     return {
       question: live.pendingAskUser.question,
       choices: live.pendingAskUser.choices,
       hasLiveSession: true,
+      // `true`の間は答え済み・配送待ち（`orchestrator.busy`中に答えたため、ターンが
+      // 終わるまで送信を保留している。`LiveAskUser.answeredChoice`のJSDoc参照）。
+      // 二重回答を防ぐため、Viewはこの間ボタンを押せなくする
+      answered: live.pendingAskUser.answeredChoice !== undefined,
     };
   }
   if (persisted?.pendingAskUser !== undefined) {
@@ -106,6 +110,7 @@ function buildPendingAskUserSnapshot(
       question: persisted.pendingAskUser.question,
       choices: persisted.pendingAskUser.choices,
       hasLiveSession: false,
+      answered: false,
     };
   }
   return undefined;

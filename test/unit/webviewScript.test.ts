@@ -366,6 +366,15 @@ describe('workflowScript', () => {
     expect(source).toContain("text('div', 'orch-ask-user-question', pending.question)");
   });
 
+  it(
+    'ask_userの答え済み・配送待ちの間はボタンを出さない（二重回答の防止。design.md §16.33、' +
+      'レビュー指摘: busy中の回答が失われる穴の修正）',
+    () => {
+      const source = workflowScript();
+      expect(source).toContain('pending.answered');
+    },
+  );
+
   it('グラフの描画幅を拡張機能へ伝える（段の折り返し用）', () => {
     const source = workflowScript();
     expect(source).toContain("type: 'viewport'");

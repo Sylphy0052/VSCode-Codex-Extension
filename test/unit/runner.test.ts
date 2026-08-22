@@ -8686,13 +8686,15 @@ tasks:
     return port;
   }
 
-  it('ask_userを呼ぶと問いをスナップショットへ載せ、受け付ける', async () => {
+  it('ask_userを呼ぶと問いをスナップショットへ載せ、受け付ける（本番と同じくrun開始の通知でbusyのまま呼ぶ）', async () => {
     const { deps, state } = fakeMessagingDeps();
-    const { runner, codexHost } = createHarness(YAML_ONE, { messaging: deps });
+    const { runner } = createHarness(YAML_ONE, { messaging: deps });
     const result = await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
     const runId = result.runId as string;
     await flush();
-    codexHost.orchestratorSessions[0]?.emitState({ ...initialChatState, busy: false });
+    // ask_userはオーケストレーターのターンの最中に呼ばれる。run開始の通知（flushOrchestrator）で
+    // 既にbusy: trueのはずで、ここでは明示的にbusyを崩さない
+    expect(runner.getSnapshot(runId)?.orchestrator?.busy).toBe(true);
 
     const outcome = control(state).askUser('どちらへ進める？', ['A案', 'B案']);
 
@@ -8740,16 +8742,19 @@ tasks:
       '自己判断かdecide_final_mergeのholdを促す（design.md §16.33「確認を絞る」）',
     async () => {
       const { deps, state } = fakeMessagingDeps();
-      const { runner } = createHarness(YAML_ONE, { messaging: deps });
+      const { runner, codexHost } = createHarness(YAML_ONE, { messaging: deps });
       const result = await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
       const runId = result.runId as string;
       await flush();
+      const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
 
       const outcomes: OrchestratorControlResult[] = [];
       for (let i = 0; i < DEFAULT_MAX_ASK_USER_PER_RUN; i += 1) {
         outcomes.push(control(state).askUser(`問${i}`, ['A', 'B']));
-        // 次のask_userを呼べるように、直前の質問へ都度答えておく（1回に1問だけの制約）
+        // 次のask_userを呼べるように、直前の質問へ都度答えておく（1回に1問だけの制約）。
+        // answerAskUserはbusy中は送信を保留するため、ターンが終わったことにして配送させる
         runner.answerAskUser(runId, 0);
+        orchestrator.emitState({ ...initialChatState, busy: false });
       }
       const overLimit = control(state).askUser('もう1問', ['A', 'B']);
 
@@ -8762,17 +8767,20 @@ tasks:
 
   it('readMaxAskUserPerRunで上限を変えられる（config.tsのworkflows.maxAskUserPerRun経由）', async () => {
     const { deps, state } = fakeMessagingDeps();
-    const { runner } = createHarness(YAML_ONE, {
+    const { runner, codexHost } = createHarness(YAML_ONE, {
       messaging: deps,
       readMaxAskUserPerRun: () => 1,
     });
     const result = await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
     const runId = result.runId as string;
     await flush();
+    const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
 
     const first = control(state).askUser('問1', ['A', 'B']);
     expect(first.accepted).toBe(true);
     expect(runner.answerAskUser(runId, 0)).toBe(true);
+    // answerAskUserはbusy中は送信を保留する。ターンが終わったことにして配送させる
+    orchestrator.emitState({ ...initialChatState, busy: false });
 
     const second = control(state).askUser('問2', ['C', 'D']);
     expect(second.accepted).toBe(false);
@@ -8780,25 +8788,64 @@ tasks:
     expect(second.reason).toContain('decide_final_merge');
   });
 
-  it('answerAskUserは選んだ答えをオーケストレーターへ送り、回答待ちを消す', async () => {
+  it(
+    'answerAskUserはbusy中に答えても失わず、ターンが終わってからまとめて送る' +
+      '（レビュー指摘: ask_userはオーケストレーターのターンの最中に呼ばれるため、答えた時点で' +
+      'busyがtrueのことがある。割り込んで送ると送信が失われrunが無期限に止まるため、' +
+      'busy中は保留し、ターンが終わってから送る）',
+    async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(YAML_ONE, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+      const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+      // run開始の通知でターンが走っている（本番と同じくbusy: trueのまま）
+      expect(runner.getSnapshot(runId)?.orchestrator?.busy).toBe(true);
+
+      // ask_userもそのターンの最中に呼ばれる
+      control(state).askUser('どちらへ進める？', ['A案', 'B案']);
+      expect(runner.getSnapshot(runId)?.pendingAskUser).toMatchObject({ answered: false });
+
+      const sentBefore = orchestrator.sentTexts.length;
+      const accepted = runner.answerAskUser(runId, 1);
+
+      // busy中はまだ送らない（走行中のターンへ割り込むと送信が失われかねないため）
+      expect(accepted).toBe(true);
+      expect(orchestrator.sentTexts.length).toBe(sentBefore);
+      expect(runner.getSnapshot(runId)?.pendingAskUser).toMatchObject({ answered: true });
+
+      // ターンが終わって初めて送る
+      orchestrator.emitState({ ...initialChatState, busy: false });
+
+      expect(runner.getSnapshot(runId)?.pendingAskUser).toBeUndefined();
+      const last = orchestrator.sentTexts[orchestrator.sentTexts.length - 1] as string;
+      expect(last).toContain('B案');
+    },
+  );
+
+  it('答え済み・配送待ちの間にもう一度答えても二重送信にならない', async () => {
     const { deps, state } = fakeMessagingDeps();
     const { runner, codexHost } = createHarness(YAML_ONE, { messaging: deps });
     const result = await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
     const runId = result.runId as string;
     await flush();
     const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
-    orchestrator.emitState({ ...initialChatState, busy: true });
-    orchestrator.emitState({ ...initialChatState, busy: false });
 
     control(state).askUser('どちらへ進める？', ['A案', 'B案']);
-    expect(runner.getSnapshot(runId)?.pendingAskUser).toBeDefined();
+    const first = runner.answerAskUser(runId, 0);
+    const sentBefore = orchestrator.sentTexts.length;
+    const second = runner.answerAskUser(runId, 1);
 
-    const accepted = runner.answerAskUser(runId, 1);
+    expect(first).toBe(true);
+    expect(second).toBe(false);
+    expect(orchestrator.sentTexts.length).toBe(sentBefore);
 
-    expect(accepted).toBe(true);
-    expect(runner.getSnapshot(runId)?.pendingAskUser).toBeUndefined();
-    const last = orchestrator.sentTexts[orchestrator.sentTexts.length - 1] as string;
-    expect(last).toContain('B案');
+    orchestrator.emitState({ ...initialChatState, busy: false });
+
+    const sent = orchestrator.sentTexts.join('\n');
+    expect(sent).toContain('A案');
+    expect(sent).not.toContain('B案');
   });
 
   it('answerAskUserは範囲外のindex・回答待ちが無いときはfalseを返し、何も変えない', async () => {
@@ -8902,6 +8949,7 @@ tasks:
         question: 'どちらへ進める？',
         choices: ['A案', 'B案'],
         hasLiveSession: false,
+        answered: false,
       });
       // 答える経路自体が無い（セッションが無いのでfalseで何もしない）
       expect(reloadedRunner.answerAskUser(runId, 0)).toBe(false);

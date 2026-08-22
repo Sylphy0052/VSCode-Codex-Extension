@@ -789,6 +789,12 @@ export function workflowScript(): string {
       );
       return;
     }
+    if (pending.answered) {
+      // 答え済み・配送待ち（オーケストレーターのターン終了待ち）。二重回答を防ぐため
+      // ボタンは出さず、待っていることだけ示す
+      box.appendChild(text('div', 'hint', '答えました。オーケストレーターへ届くまでお待ちください。'));
+      return;
+    }
     const choicesBox = el2('div', 'orch-ask-user-choices');
     pending.choices.forEach((choice, index) => {
       const btn = document.createElement('button');

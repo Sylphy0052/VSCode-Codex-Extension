@@ -390,13 +390,21 @@ function beginAskUser(
  * `ask_user`の回答（design.md §16.33）。ワークフローViewの選択ボタンから呼ぶ。
  *
  * 回答待ちが無い・`choiceIndex`が選択肢の範囲外・オーケストレーターのセッションが
- * 無い（リロード後等）場合は`false`を返し、View側は何も起きなかったことにする
- * （`sendToOrchestrator`と同じ「なにもしない」失敗の返し方）。
+ * 無い（リロード後等）・既に答え済み（配送待ちの二重回答）の場合は`false`を返し、
+ * View側は何も起きなかったことにする（`sendToOrchestrator`と同じ「なにもしない」
+ * 失敗の返し方）。
  *
- * 答えは`sendUserMessageToOrchestrator`と同じ経路（`session.send`）でオーケストレーターへ
- * 渡す。**溜まっていたイベントもここで合流させる**（`pendingAskUser`が立っている間
- * `notifyOrchestrator`は送信を止めていたため、`orchestrator.pending`に溜まっている場合が
- * ある。§16.23「何が駆動するか」の合流と同じ流儀）。
+ * **`ask_user`のツール呼び出しはオーケストレーターのターンの最中に届く。** つまり
+ * ここが呼ばれた時点で`orchestrator.busy`がまだ`true`のことがある（人が問いを見て
+ * すぐ選ぶ場合はほぼ確実にそう）。走行中のターンへ割り込んで`session.send`すると、
+ * `sendOnce`（`chatView.ts`）は送信の失敗を投げ直さずに`reportError`するだけなので、
+ * 答えが失われたまま`pendingAskUser`だけが消えてボタンも無くなり、`ask_user`は
+ * 待ちぼうけ検出を持たないため人は答え直せず**runが無期限に止まる**（レビュー指摘）。
+ *
+ * これを避けるため、`busy`中は答えを`live.pendingAskUser.answeredChoice`へ保持するだけに
+ * とどめ、実際の送信（合流・`session.send`）は`deliverAskUserAnswer`へ切り出して、
+ * `busy`でなければここで即座に、`busy`ならターンが終わってから`onOrchestratorStateChanged`
+ * が呼ぶ（既存の`flushOrchestrator`の「ターンが終わってからまとめて送る」流儀と揃える）。
  */
 export function answerAskUser(
   self: WorkflowRunnerInternals,
@@ -409,19 +417,47 @@ export function answerAskUser(
   if (live === undefined || orchestrator === undefined || pending === undefined) {
     return false;
   }
+  if (pending.answeredChoice !== undefined) {
+    // 配送待ちの間にもう一度押されても、二重送信にしない
+    return false;
+  }
   const choice = pending.choices[choiceIndex];
   if (!Number.isInteger(choiceIndex) || choice === undefined) {
     return false;
   }
+  live.pendingAskUser = { ...pending, answeredChoice: choice };
+  void self.persist(runId);
+  self.notify(runId);
+  if (!orchestrator.busy) {
+    deliverAskUserAnswer(self, runId);
+  }
+  return true;
+}
+
+/**
+ * `answerAskUser`が保持した答え（`live.pendingAskUser.answeredChoice`）を実際に送る。
+ *
+ * `busy`でない時点で呼ばれる（`answerAskUser`から直接、またはターンが終わった時点で
+ * `onOrchestratorStateChanged`から）。溜まっていたイベントもここで合流させる
+ * （`pendingAskUser`が立っている間`notifyOrchestrator`は送信を止めていたため、
+ * `orchestrator.pending`に溜まっている場合がある。§16.23「何が駆動するか」の合流と
+ * 同じ流儀）。
+ */
+function deliverAskUserAnswer(self: WorkflowRunnerInternals, runId: string): void {
+  const live = self.runs.get(runId);
+  const orchestrator = live?.orchestrator;
+  const pending = live?.pendingAskUser;
+  if (live === undefined || orchestrator === undefined || pending?.answeredChoice === undefined) {
+    return;
+  }
   live.pendingAskUser = undefined;
   void self.persist(runId);
-  const answerText = `人がask_userの質問に答えました: "${choice}"`;
+  const answerText = `人がask_userの質問に答えました: "${pending.answeredChoice}"`;
   const composed = composeOrchestratorPrompt(orchestrator.pending, answerText);
   orchestrator.pending = [];
   orchestrator.busy = true;
   orchestrator.session.send(composed);
   self.notify(runId);
-  return true;
 }
 
 /**
@@ -601,11 +637,17 @@ function onOrchestratorStateChanged(
   }
   const finishedTurn = orchestrator.busy && !state.busy;
   orchestrator.busy = state.busy;
-  // ターンが終わっても`pendingAskUser`が立っている間はまだ答えを待つターン
-  // （ask_userを呼んだ返答が届いた直後等）なので、溜まったイベントは送らない
   const live = self.runs.get(runId);
-  if (finishedTurn && live?.pendingAskUser === undefined) {
-    flushOrchestrator(self, runId);
+  if (finishedTurn) {
+    if (live?.pendingAskUser?.answeredChoice !== undefined) {
+      // ターンの最中に人が答えていた場合（`answerAskUser`がbusy中だったため送信を
+      // 保留していた）は、ターンが終わった今まとめて送る
+      deliverAskUserAnswer(self, runId);
+    } else if (live?.pendingAskUser === undefined) {
+      // `pendingAskUser`が立っている（まだ答えていない）間は、まだ答えを待つターン
+      // （ask_userを呼んだ返答が届いた直後等）なので、溜まったイベントは送らない
+      flushOrchestrator(self, runId);
+    }
   }
   self.notify(runId);
 }

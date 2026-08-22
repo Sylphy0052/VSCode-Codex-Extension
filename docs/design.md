@@ -5444,17 +5444,23 @@ hub.sendMessage({ from: taskId, to: ORCHESTRATOR_CONNECTION_ID, body: question, 
 
 **新しいタスク状態（`TaskState`）は増やしていない。** `pendingAskUser`はrun全体に1つ持つ`LiveRun`のフィールドであり、オーケストレーター自身のセッションは`busy`のままで構わない（実際には送信ゲートで止まっているため、次のターンが開始されない形で待つ）。`waitingReply`/`waitingApproval`のような`TaskState`の追加やタイムアウト・待ちぼうけ検出の新設は行っていない（次項「兄弟の穴の確認」参照）。
 
-#### `answerAskUser`（回答の合流）
+#### `answerAskUser`（回答の合流。busy中の回答を失わない）
 
-ワークフローViewの選択ボタンから`WorkflowRunner.answerAskUser(runId, choiceIndex)`を呼ぶ。`live.pendingAskUser`が無い・`orchestrator`セッションが無い（リロード後等）・`choiceIndex`が選択肢の範囲外、のいずれかであれば`false`を返し何もしない（`sendToOrchestrator`と同じ「なにもしない」失敗の返し方）。
+ワークフローViewの選択ボタンから`WorkflowRunner.answerAskUser(runId, choiceIndex)`を呼ぶ。`live.pendingAskUser`が無い・`orchestrator`セッションが無い（リロード後等）・`choiceIndex`が選択肢の範囲外・既に答え済み（配送待ちの間の二重回答）、のいずれかであれば`false`を返し何もしない（`sendToOrchestrator`と同じ「なにもしない」失敗の返し方）。
 
-受け付けると:
+**`ask_user`のツール呼び出しはオーケストレーターのターンの最中に届く。** つまり`beginAskUser`が走る時点で`orchestrator.busy`は`true`であり、`self.notify(runId)`で選択ボタンはその瞬間からViewに出る。人がそこですぐ押すと、`answerAskUser`が呼ばれる時点でもまだ`orchestrator.busy === true`のことがある。ここで`orchestrator.session.send`を素通しで呼んでしまうと、走行中のターンへ割り込む送信になり、`chatView.ts`の`sendOnce`は送信の失敗を投げ直さず`reportError`するだけであるため、失敗すれば**答えが届かないまま`pendingAskUser`だけが消えてボタンも無くなり、`ask_user`は待ちぼうけ検出を持たないため人は答え直せずrunが無期限に止まる**（レビュー指摘、実装直後に発見・修正）。
 
-1. `live.pendingAskUser`を`undefined`に戻す（次の`ask_user`が呼べるようになる）
-2. 回答待ちの間に送信ゲートで止めていた`orchestrator.pending`のイベントを、`composeOrchestratorPrompt(orchestrator.pending, answerText)`で答えの文言と**合流**させ、1回の送信にまとめる。答えだけを送って溜まっていたイベントを後回しにする形は採らない（§16.23「何が駆動するか」の合流と同じ流儀）
-3. `orchestrator.session.send(composed)`で送る（`sendUserMessageToOrchestrator`と同じ経路）
+これを避けるため、答えは`live.pendingAskUser.answeredChoice`（`string | undefined`）へ保持するだけにとどめ、実際の送信は`busy`でなくなってから行う:
+
+1. `answerAskUser`は`live.pendingAskUser`を`{...pending, answeredChoice: choice}`へ更新するだけ（**まだ送らない**）。`orchestrator.busy`が`false`ならこの場で`deliverAskUserAnswer`を呼んで即座に送る
+2. `orchestrator.busy`が`true`のままなら送らずに終わる。ターンが終わったとき（`onOrchestratorStateChanged`の`finishedTurn`の枝）に`live.pendingAskUser?.answeredChoice !== undefined`を見て、そこで`deliverAskUserAnswer`を呼ぶ（既存の`flushOrchestrator`の「ターンが終わってからまとめて送る」流儀と揃える）
+3. `deliverAskUserAnswer`が実際の送信を行う: `live.pendingAskUser`を`undefined`に戻す（次の`ask_user`が呼べるようになる）→ 回答待ちの間に送信ゲートで止めていた`orchestrator.pending`のイベントを、`composeOrchestratorPrompt(orchestrator.pending, answerText)`で答えの文言と**合流**させ、1回の送信にまとめる（答えだけを送って溜まっていたイベントを後回しにする形は採らない。§16.23「何が駆動するか」の合流と同じ流儀）→ `orchestrator.session.send(composed)`で送る（`sendUserMessageToOrchestrator`と同じ経路）
+
+**二重回答は`pending.answeredChoice !== undefined`で防ぐ。** 配送待ち（答え済みだがまだ送っていない）の間に選択ボタンが再度押されても（Viewは`answered: true`の間ボタンを出さないが、多層防御として`WorkflowRunner`側でも弾く）、`answerAskUser`は`false`を返し二重送信にならない。
 
 答えの文言はサーバ側が組み立てる固定文（`人がask_userの質問に答えました: "<選択肢の文字列>"`）で、人が選んだ選択肢の文字列をそのまま埋め込む。選択肢自体はオーケストレーター（エージェント）が`ask_user`の引数として出した文字列であり、次項の無害化の対象になる。
+
+`WorkflowRunSnapshot.pendingAskUser`には`answered: boolean`を持たせ（`live.pendingAskUser.answeredChoice !== undefined`をそのまま反映）、ワークフローViewは`answered: true`の間、選択ボタンの代わりに「答えました。オーケストレーターへ届くまでお待ちください。」を表示する（`workflowScript.ts`の`renderAskUser`）。
 
 #### 永続化（`finalMergeDecision`との違い、roadmap W10との関係）
 
@@ -5506,7 +5512,7 @@ roadmap W10（未実装、§16.33のスコープ外）は「`ask_user`待ちで�
 #### 確かめ方
 
 - `test/unit/messaging.test.ts`（`describe('オーケストレーター専用の制御ツール（design.md §16.23「道具」）')`内）: `ask_user`がオーケストレーター専用の接続にだけ現れ、タスク側の接続からは見えず名指しでも拒否されること、`tools/call`経由で引数どおり`OrchestratorControlPort.askUser`が呼ばれること、文字列でない`choices`の要素は除かれて渡ること、拒否されると`isError: true`になること
-- `test/unit/runner.test.ts`（`describe('WorkflowRunner: ask_user（design.md §16.33、Issue #583）')`）: 受け付けるとスナップショットへ問いが載ること、回答待ちの間は次の`ask_user`を拒否すること、`question`が空・`choices`が2〜4個の範囲外なら拒否すること、既定3回で上限に達し4回目を拒否しその理由が自己判断/`decide_final_merge`の`hold`を促すこと、`agent.workflows.maxAskUserPerRun`（`readMaxAskUserPerRun`）で上限を変えられること、`answerAskUser`が選んだ答えをオーケストレーターへ送り回答待ちを消すこと、範囲外の`choiceIndex`・回答待ちが無い場合は`false`を返し何も変えないこと、回答待ちの間はタスク完了通知の送信を止めて溜め`answerAskUser`が答えと合流させて送ること、回答待ちの間は人の自由記述の発話（`sendToOrchestrator`）を送らせないこと、リロード後は永続化された問いの文言だけ復元し`hasLiveSession: false`で答えられないこと。RED実測は上限判定（`orchestrator.askUserCount >= limit`）・送信ゲート2箇所（`notifyOrchestrator`/`sendUserMessageToOrchestrator`）のそれぞれ1行のみを潰して行い、対応するテストだけが正しい理由で失敗することを確認済み
+- `test/unit/runner.test.ts`（`describe('WorkflowRunner: ask_user（design.md §16.33、Issue #583）')`）: 受け付けるとスナップショットへ問いが載ること、回答待ちの間は次の`ask_user`を拒否すること、`question`が空・`choices`が2〜4個の範囲外なら拒否すること、既定3回で上限に達し4回目を拒否しその理由が自己判断/`decide_final_merge`の`hold`を促すこと、`agent.workflows.maxAskUserPerRun`（`readMaxAskUserPerRun`）で上限を変えられること、`answerAskUser`が選んだ答えをオーケストレーターへ送り回答待ちを消すこと、範囲外の`choiceIndex`・回答待ちが無い場合は`false`を返し何も変えないこと、回答待ちの間はタスク完了通知の送信を止めて溜め`answerAskUser`が答えと合流させて送ること、回答待ちの間は人の自由記述の発話（`sendToOrchestrator`）を送らせないこと、リロード後は永続化された問いの文言だけ復元し`hasLiveSession: false`で答えられないこと、**`answerAskUser`はターンの最中（`orchestrator.busy: true`）に答えても送信を保留し、ターンが終わってからまとめて送ること（busy中の割り込み送信で答えが失われる穴の回帰テスト。レビュー指摘で発見・修正）**、配送待ちの間の二重回答は`false`を返し二重送信にならないこと。RED実測は上限判定（`orchestrator.askUserCount >= limit`）・送信ゲート2箇所（`notifyOrchestrator`/`sendUserMessageToOrchestrator`）・`answerAskUser`のbusyガード（`!orchestrator.busy`）・二重回答ガード（`pending.answeredChoice !== undefined`）・ターン終了時の配送分岐（`onOrchestratorStateChanged`の`deliverAskUserAnswer`呼び出し）のそれぞれ1行のみを潰して行い、対応するテストだけが正しい理由で失敗することを確認済み
 - `test/unit/config.test.ts`: `maxAskUserPerRun`の既定値（3）・範囲内の指定値・範囲外/非数値/非整数での既定値へのフォールバックを確認
 - `test/unit/webviewScript.test.ts`（`describe('workflowScript')`内）: `renderAskUser`が生成されること（`el('orchAskUser')`/`snapshot.pendingAskUser`/`answerAskUser`メッセージ型/`choiceIndex`を含むこと）、質問文が`textContent`相当（`text()`ヘルパー）で挿入されること。RED実測は`workflowScript.ts`側の送信メッセージ型の文字列1箇所を潰して行った
 - `docs/manual-test.md` W-M: 実VSCode上でask_userが実際にワークフローViewへ問いと選択肢を出すこと・選ぶまでオーケストレーターが止まって見えること・選ぶと答えが反映されること・上限に達すると拒否されること・リロード後に問いの文言だけ残り回答できないことを確認する

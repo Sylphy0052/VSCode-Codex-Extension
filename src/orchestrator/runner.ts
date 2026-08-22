@@ -719,7 +719,9 @@ export interface WorkflowRunSnapshot {
    * JSDoc参照。リロード後は問いの文言だけが読める状態で、答える経路はまだ無い）。
    * `hasLiveSession`が`false`のときはボタンを無効にする（`workflowScript.ts`）。
    */
-  pendingAskUser?: { question: string; choices: readonly string[]; hasLiveSession: boolean } | undefined;
+  pendingAskUser?:
+    | { question: string; choices: readonly string[]; hasLiveSession: boolean; answered: boolean }
+    | undefined;
 }
 
 /**
@@ -1186,6 +1188,15 @@ export interface LiveAskUser {
   readonly choices: readonly string[];
   /** 回答待ちに入った時刻（ms epoch）。 */
   readonly since: number;
+  /**
+   * 人が選んだ答え（`answerAskUser`が設定する）。**まだオーケストレーターへは送っていない。**
+   * `ask_user`のツール呼び出しはオーケストレーターのターンの最中に届くため、`answerAskUser`が
+   * 呼ばれた時点で`orchestrator.busy`がまだ`true`のことがある。走行中のターンへ割り込んで
+   * `session.send`すると送信が失われかねない（`sendOnce`は送信失敗を投げ直さない）ため、
+   * ここへ保持しておき、ターンが終わってから`deliverAskUserAnswer`（`runnerOrchestrator.ts`）が
+   * まとめて送る。`undefined`は「まだ答えていない」、値ありは「答えた・配送待ち」を表す
+   */
+  answeredChoice?: string;
 }
 
 /**
