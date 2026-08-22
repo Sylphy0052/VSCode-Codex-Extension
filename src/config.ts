@@ -13,6 +13,7 @@ import {
 } from './orchestrator/forge';
 import { DEFAULT_REPLY_TIMEOUT_SEC } from './orchestrator/messaging';
 import { DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerMerge';
+import { DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC } from './orchestrator/runner';
 import { DEFAULT_PSEUDO_WORKTREE_EXCLUDE } from './orchestrator/pseudoWorktree';
 import { sanitizeForLog } from './orchestrator/sanitize';
 import { normalizeBranchNaming, type BranchNaming } from './orchestrator/worktree';
@@ -252,8 +253,9 @@ export interface WorkflowsConfig {
    */
   pullRequest: PullRequestLayerConfig;
   /**
-   * 統合→mainのPR/MRを無人でマージするか（design.md §16.18）。`machine`スコープ。mainを
-   * 無人で書き換えるかどうかを決めるため、`.vscode/settings.json`からは変えられない。
+   * 統合→mainのPR/MRを無人でマージするか（design.md §16.18・§16.26）。`machine`スコープ。
+   * mainを書き換えるかどうかを決めるため、`.vscode/settings.json`からは変えられない。
+   * 既定は`orchestrator`（統合PR/MR作成後、マージするかどうかをオーケストレーターへ問う）。
    */
   finalMerge: FinalMergeConfig;
   /**
@@ -269,6 +271,16 @@ export interface WorkflowsConfig {
    * ほど強い制限は要らない。
    */
   mergeApprovalTimeoutSec: number;
+  /**
+   * 最終マージ（`finalMerge: orchestrator`）で、統合PR/MR作成後にオーケストレーターが
+   * `decide_final_merge`で応答するのを待つ時間の上限秒数（`agent.workflows.
+   * finalMergeDecisionTimeoutSec`、既定900秒、`machine-overridable`、design.md §16.26）。
+   * 超えたら応答が無かったものとして自動的に`hold`へ倒す（判断を待って無限に止まらない。
+   * design.md §16.26の受入基準）。`finalMerge: confirm`（人の承認待ち）には効かない
+   * （人はいつ確認するか分からないため、待ち時間の上限を切って自動`hold`にする理由が無い）。
+   * 権限には関わらないため`forge`/`finalMerge`ほど強い制限は要らない。
+   */
+  finalMergeDecisionTimeoutSec: number;
   /**
    * タスクブランチの命名方式（design.md §16.6「ブランチの命名方式」）。`machine-overridable`。
    * ブランチ名の形を決めるだけで、push先も権限も変えないため`forge`/`finalMerge`ほど
@@ -447,10 +459,13 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     pseudoWorktreeExcludeWarnings: pseudoWorktreeExclude.warnings,
     forge: normalizeForgeHostConfig(str(c, 'workflows.forge', 'auto')),
     pullRequest: normalizePullRequestLayerConfig(str(c, 'workflows.pullRequest', 'per-task')),
-    finalMerge: normalizeFinalMergeConfig(str(c, 'workflows.finalMerge', 'auto')),
+    finalMerge: normalizeFinalMergeConfig(str(c, 'workflows.finalMerge', 'orchestrator')),
     replyTimeoutSec: normalizeReplyTimeoutSec(c.get<unknown>('workflows.replyTimeoutSec')),
     mergeApprovalTimeoutSec: normalizeMergeApprovalTimeoutSec(
       c.get<unknown>('workflows.mergeApprovalTimeoutSec'),
+    ),
+    finalMergeDecisionTimeoutSec: normalizeFinalMergeDecisionTimeoutSec(
+      c.get<unknown>('workflows.finalMergeDecisionTimeoutSec'),
     ),
     branchNaming: normalizeBranchNaming(str(c, 'workflows.branchNaming', 'wf')),
     draftPullRequest: c.get<boolean>('workflows.draftPullRequest') ?? false,
@@ -497,6 +512,19 @@ function normalizeMergeApprovalTimeoutSec(value: unknown): number {
     value <= MAX_TIMEOUT_SEC
     ? Math.floor(value)
     : DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC;
+}
+
+/**
+ * `agent.workflows.finalMergeDecisionTimeoutSec` の生値を安全な秒数へ丸める
+ * （`normalizeMergeApprovalTimeoutSec` と同じ方針。design.md §16.26）。
+ */
+function normalizeFinalMergeDecisionTimeoutSec(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= 1 &&
+    value <= MAX_TIMEOUT_SEC
+    ? Math.floor(value)
+    : DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC;
 }
 
 /** アクティブエディタが属するワークスペースフォルダ。無ければ先頭（設計書 §10）。 */

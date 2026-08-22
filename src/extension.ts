@@ -558,6 +558,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // 常に効かせるため、トップレベルへ配線する（`WorkflowRunnerDeps.readMergeApprovalTimeoutSec`
     // のJSDoc参照）
     readMergeApprovalTimeoutSec: () => readWorkflowsConfig().mergeApprovalTimeoutSec,
+    // 最終マージの判断待ち（design.md §16.26、`finalMerge: orchestrator`）。オーケストレーターが
+    // `decide_final_merge`で応答しない場合に自動的に`hold`へ倒すまでの秒数。`messaging`とは
+    // 無関係に常に効かせるため、`readMergeApprovalTimeoutSec`と同じくトップレベルへ配線する
+    readFinalMergeDecisionTimeoutSec: () => readWorkflowsConfig().finalMergeDecisionTimeoutSec,
   });
   // isTaskManagedThreadのクロージャが参照する箱を埋める。以降の`workflowRunner`
   // （コマンド登録などで使う）はこの束縛を指し、常にWorkflowRunnerとして扱える

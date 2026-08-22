@@ -1257,6 +1257,10 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
         calls.push(`updateTaskPrompt:${taskId}:${continuePrompt}`);
         return { accepted: false, reason: "長すぎます" };
       },
+      decideFinalMerge: (decision, reason) => {
+        calls.push(`decideFinalMerge:${decision}:${reason}`);
+        return { accepted: true, reason: "ok" };
+      },
     };
     return { port, calls };
   }
@@ -1315,6 +1319,7 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
       "continue_task",
       "decide_approval",
       "update_task_prompt",
+      "decide_final_merge",
     ]);
   });
 
@@ -1370,6 +1375,8 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
       taskId: "T1",
       continuePrompt: "方針を変える",
     });
+    // design.md §16.26。taskIdを取らない制御ツール（他のtaskId系ツールと違う特別扱いの経路）
+    callTool(conn, "decide_final_merge", { decision: "merge", reason: "CIが全緑のため" });
 
     expect(calls).toEqual([
       "getRunStatus",
@@ -1378,6 +1385,7 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
       "continueTask:T1",
       "decideApproval:T1:accept",
       "updateTaskPrompt:T1:方針を変える",
+      "decideFinalMerge:merge:CIが全緑のため",
     ]);
   });
 

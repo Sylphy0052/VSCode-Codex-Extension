@@ -69,6 +69,16 @@ export function getSnapshot(self: WorkflowRunnerInternals, runId: string): Workf
     integrationPullRequestUrl:
       live.integrationPullRequest?.url ?? persisted?.integrationPullRequestUrl,
     finalMergeOutcome: live.finalMergeOutcome ?? persisted?.finalMergeOutcome,
+    // design.md §16.26。ウィンドウのリロードでは復元しない（`LiveRun.finalMergeDecision`の
+    // JSDoc参照）ため、`persisted`へのフォールバックは無い（`live`にしか存在しえない）
+    finalMergeDecision:
+      live.finalMergeDecision === undefined
+        ? undefined
+        : {
+            mode: live.finalMergeDecision.mode,
+            pullRequestUrl:
+              live.integrationPullRequest?.url ?? persisted?.integrationPullRequestUrl,
+          },
     orchestrator: buildOrchestratorSnapshot(live),
   };
 }

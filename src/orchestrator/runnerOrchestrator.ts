@@ -16,7 +16,13 @@ import {
 import { sanitizeForLog, stripControlChars } from './sanitize';
 import { buildResponseSummary } from './taskSummary';
 import type { TaskState } from './runState';
-import type { LiveOrchestrator, LiveRun, RetryTaskResult, WorkflowRunSnapshot } from './runner';
+import type {
+  FinalMergeDecision,
+  LiveOrchestrator,
+  LiveRun,
+  RetryTaskResult,
+  WorkflowRunSnapshot,
+} from './runner';
 import type { WorkflowRunnerInternals } from './runnerInternals';
 import { truncateByCodePoint } from './workflow';
 
@@ -80,6 +86,11 @@ export interface OrchestratorControlActions {
   retryTask(runId: string, taskId: string, options?: { allowConfirmed?: boolean }): RetryTaskResult;
   continueTask(runId: string, taskId: string): boolean;
   decideApproval(runId: string, taskId: string, decision: ApprovalDecision): boolean;
+  /**
+   * 最終マージの判断を確定する（design.md §16.26）。`WorkflowRunner.decideFinalMerge`の
+   * JSDoc参照。判断待ちが無ければ`false`。
+   */
+  decideFinalMerge(runId: string, decision: FinalMergeDecision, reason: string): boolean;
 }
 
 /** 差し替えた継続指示のうち、警告欄へ出す先頭部分の長さ。 */
@@ -259,6 +270,61 @@ export function buildOrchestratorControlPort(
       }
       return updateTaskPrompt(self, runId, taskId, continuePrompt);
     },
+    decideFinalMerge: (decision, reason) => {
+      // `runFinishedReason`は使わない。最終マージの判断待ち（design.md §16.26）は
+      // 全タスクが`done`になり`outcome`が既に`succeeded`（＝「終了している」）に
+      // なった後で始まるため、`runFinishedReason`（`outcome === 'running'`でなければ
+      // 拒否）を通すと常に拒否されてしまう。ここでは`finalMergeDecision`の有無だけを
+      // 判断待ちの根拠にする。
+      const snapshot = actions.getSnapshot(runId);
+      if (snapshot === undefined) {
+        return no('この実行はすでに破棄されているため、制御ツールは使えません。');
+      }
+      const pending = snapshot.finalMergeDecision;
+      if (pending === undefined) {
+        return no('最終マージの判断待ちはありません。');
+      }
+      if (pending.mode !== 'orchestrator') {
+        return no(
+          'この実行の agent.workflows.finalMerge は confirm です。マージするかどうかは人が判断します。',
+        );
+      }
+      if (decision !== 'merge' && decision !== 'hold') {
+        return no(`decision は 'merge' か 'hold' のどちらかです: ${decision}`);
+      }
+      // `runHaltedByUserReason`（人が「全体の停止」を押したかどうか）は`decision: 'merge'`
+      // のときだけ見る。`WorkflowRunner.decideFinalMerge`本体（`runner.ts`）と同じ判断で
+      // 揃える: `hold`はPR/MRを残すだけの安全な方向で、ここを塞ぐとオーケストレーターが
+      // 停止後に自分で片付けられず、既定900秒のタイムアウトを待つしかなくなる
+      // （タイムアウトの自動`hold`はこのMCP層を経由せず本体を直接呼ぶため、無限停止には
+      // ならないが、それまで判断待ちが解消できない）。他の判断系制御ツール
+      // （`retryTask`/`continueTask`/`decideApproval`/`updateTaskPrompt`）が`decision`の
+      // 種類によらず一律拒否するのとは事情が違う点に注意（レビュー指摘）
+      if (decision === 'merge') {
+        const halted = runHaltedByUserReason(actions, runId);
+        if (halted !== undefined) {
+          return no(halted);
+        }
+      }
+      if (reason.trim() === '') {
+        return no('reason は必須です（判断の理由を書いてください）。');
+      }
+      // `MAX_MESSAGE_BODY_LENGTH`（design.md §16.23）で上限を切る。`reason`はLLMが
+      // 生成する自由記述であり、上限が無いと警告欄（`pushFinalMergeWarning`）を
+      // 任意長の文字列で埋められる（レビュー指摘）。切り詰めではなく拒否にする
+      //
+      // 数え方は`update_task_prompt`（`continuePrompt.length`、UTF-16単位）と同じ
+      // `.length`を使う。`send_message`だけが`codePointLength`（`messaging.ts`の
+      // 非export関数、コードポイント単位）で数えており、3者で数え方が揃っていないのは
+      // 既存の不整合（レビュー指摘）。サロゲートペアを2文字と数える分だけ拒否側に
+      // 厳しくなる（安全側）ため、挙動はこのままにする
+      if (reason.length > MAX_MESSAGE_BODY_LENGTH) {
+        return no(`reason が長すぎます（上限${MAX_MESSAGE_BODY_LENGTH}文字）: ${reason.length}文字`);
+      }
+      return actions.decideFinalMerge(runId, decision, reason)
+        ? ok(`最終マージの判断を ${decision} として確定しました。`)
+        : no('最終マージの判断待ちが見つかりません（既に確定した可能性があります）。');
+    },
   };
 }
 
@@ -302,6 +368,9 @@ function buildRunStatus(actions: OrchestratorControlActions, runId: string): unk
       pullRequestNumber: snapshot.integrationPullRequestNumber,
       pullRequestUrl: snapshot.integrationPullRequestUrl,
       finalMergeOutcome: snapshot.finalMergeOutcome,
+      // design.md §16.26。判断待ちの間`decide_final_merge`を呼ぶべきかをオーケストレーター
+      // 自身が`get_run_status`から確認できるようにする
+      finalMergeDecision: snapshot.finalMergeDecision,
     },
   };
 }

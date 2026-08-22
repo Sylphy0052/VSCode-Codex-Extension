@@ -59,6 +59,13 @@ export type OrchestratorEventKind =
   | 'taskFailed'
   | 'taskWaitingApproval'
   | 'taskBlocked'
+  /**
+   * 統合PR/MRを作成した後、mainへ最終マージするかどうかの判断を求める
+   * （design.md §16.26、`finalMerge: orchestrator`）。`decide_final_merge`ツールで
+   * `merge` / `hold` を理由付きで答える。応答が無いまま`agent.workflows.
+   * finalMergeDecisionTimeoutSec`を超えると、自動的に`hold`として扱う。
+   */
+  | 'finalMergeDecision'
   | 'runFinished'
   // 人が「全体の停止」を押したことを知らせる（Issue #401）。走行中タスクの`stopLoop()`は
   // ターンの終わりを待ってから確定するため、確定前は`taskFailed`しか届かず「タスクが

@@ -819,6 +819,41 @@ export function workflowScript(): string {
       box.appendChild(text('div', '', 'mainへの最終マージ: 完了'));
     } else if (integration.finalMergeOutcome === 'failed') {
       box.appendChild(text('div', 'hint', 'mainへの最終マージ: 失敗'));
+    } else if (integration.finalMergeOutcome === 'held') {
+      // design.md §16.26。finalMerge: orchestrator/confirmで「マージしない」と
+      // 判断された（またはタイムアウトでholdへ倒れた）状態。理由はsnapshot.warnings
+      // （finalMergeDecision種別）に記録済みで、警告欄側に表示される
+      box.appendChild(text('div', 'hint', 'mainへの最終マージ: 保留（マージしない）'));
+    } else if (integration.finalMergeDecision !== undefined) {
+      // design.md §16.26。判断待ち。confirmモードは人がここで応答する
+      // （decideFinalMergeメッセージ→workflowView.ts→WorkflowRunner.decideFinalMerge）。
+      // サンドボックス化されたwebviewではwindow.promptが使えない場合があるため、
+      // orchInput（オーケストレーターへの発話欄）と同じ「テキスト欄+ボタン」の形にする
+      box.appendChild(text('div', 'hint', 'mainへの最終マージ: 判断待ち'));
+      if (integration.finalMergeDecision.mode === 'confirm') {
+        const reasonInput = document.createElement('input');
+        reasonInput.type = 'text';
+        reasonInput.placeholder = '判断の理由（必須）';
+        const mergeBtn = document.createElement('button');
+        mergeBtn.type = 'button';
+        mergeBtn.textContent = 'mainへマージする';
+        mergeBtn.addEventListener('click', () => {
+          const reason = reasonInput.value;
+          if (!reason.trim()) return;
+          vscode.postMessage({ type: 'decideFinalMerge', decision: 'merge', reason: reason });
+        });
+        const holdBtn = document.createElement('button');
+        holdBtn.type = 'button';
+        holdBtn.textContent = 'マージしない';
+        holdBtn.addEventListener('click', () => {
+          const reason = reasonInput.value;
+          if (!reason.trim()) return;
+          vscode.postMessage({ type: 'decideFinalMerge', decision: 'hold', reason: reason });
+        });
+        box.appendChild(reasonInput);
+        box.appendChild(mergeBtn);
+        box.appendChild(holdBtn);
+      }
     }
   }
 

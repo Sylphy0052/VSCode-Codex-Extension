@@ -29,6 +29,7 @@ import {
   shouldCreateIntegrationPullRequest,
   shouldCreateTaskPullRequest,
   shouldRunFinalMerge,
+  needsFinalMergeDecision,
   type CliAvailabilityPort,
   type CliCommandResult,
   type CliCommandRunner,
@@ -185,8 +186,11 @@ describe('normalize系（不正値は安全な既定へ丸める）', () => {
 
   it('normalizeFinalMergeConfig', () => {
     expect(normalizeFinalMergeConfig('auto')).toBe('auto');
+    expect(normalizeFinalMergeConfig('orchestrator')).toBe('orchestrator');
+    expect(normalizeFinalMergeConfig('confirm')).toBe('confirm');
     expect(normalizeFinalMergeConfig('pr-only')).toBe('pr-only');
-    expect(normalizeFinalMergeConfig('bogus')).toBe('auto');
+    // design.md §16.26。不正値は新しい既定（orchestrator）へ丸める
+    expect(normalizeFinalMergeConfig('bogus')).toBe('orchestrator');
   });
 });
 
@@ -332,8 +336,19 @@ describe('PR/MR層の判定', () => {
   it('shouldRunFinalMergeはconfig=autoかつPR/MRが作れたときだけtrue', () => {
     expect(shouldRunFinalMerge('auto', true)).toBe(true);
     expect(shouldRunFinalMerge('auto', false)).toBe(false);
+    expect(shouldRunFinalMerge('orchestrator', true)).toBe(false);
+    expect(shouldRunFinalMerge('confirm', true)).toBe(false);
     expect(shouldRunFinalMerge('pr-only', true)).toBe(false);
     expect(shouldRunFinalMerge('pr-only', false)).toBe(false);
+  });
+
+  it('needsFinalMergeDecisionはconfig=orchestrator/confirmかつPR/MRが作れたときだけtrue（design.md §16.26）', () => {
+    expect(needsFinalMergeDecision('orchestrator', true)).toBe(true);
+    expect(needsFinalMergeDecision('orchestrator', false)).toBe(false);
+    expect(needsFinalMergeDecision('confirm', true)).toBe(true);
+    expect(needsFinalMergeDecision('confirm', false)).toBe(false);
+    expect(needsFinalMergeDecision('auto', true)).toBe(false);
+    expect(needsFinalMergeDecision('pr-only', true)).toBe(false);
   });
 });
 

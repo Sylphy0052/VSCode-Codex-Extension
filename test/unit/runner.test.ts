@@ -896,6 +896,7 @@ function createHarness(
     roadmap?: { fs: RoadmapFileSystemPort };
     log?: Logger;
     readMergeApprovalTimeoutSec?: () => number;
+    readFinalMergeDecisionTimeoutSec?: () => number;
   },
 ): Harness {
   const codexHost = new FakeHost();
@@ -925,6 +926,9 @@ function createHarness(
     ...(options?.roadmap !== undefined ? { roadmap: options.roadmap } : {}),
     ...(options?.readMergeApprovalTimeoutSec !== undefined
       ? { readMergeApprovalTimeoutSec: options.readMergeApprovalTimeoutSec }
+      : {}),
+    ...(options?.readFinalMergeDecisionTimeoutSec !== undefined
+      ? { readFinalMergeDecisionTimeoutSec: options.readFinalMergeDecisionTimeoutSec }
       : {}),
     randomId: () => `00000000-0000-4000-8000-${String((seq += 1)).padStart(12, '0')}`,
   });
@@ -7505,6 +7509,15 @@ tasks:
     done: d3
 `;
 
+    const SINGLE_TASK_HALT_YAML = `
+version: 1
+name: control-final-merge-halt-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
     it('retry_taskは停止直後（走行中タスクが残りoutcomeがrunningのまま）でもhaltedByUserを解除しない', async () => {
       const { deps, state } = fakeMessagingDeps();
       const { runner, codexHost } = createHarness(THREE_TASK_YAML, {
@@ -7673,6 +7686,48 @@ tasks:
       expect(outcome.accepted).toBe(true);
       expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe('running');
     });
+
+    it(
+      'decide_final_mergeも停止直後は拒否する（design.md §16.26、レビュー指摘。' +
+        '他の判断系制御ツールと同じくhaltedByUserを見る）',
+      async () => {
+        const git = fakeGit({
+          originRemoteUrl: 'git@github.com:acme/repo.git',
+          headBranch: 'main',
+        });
+        const cli = fakeForgeCli();
+        const { deps, state } = fakeMessagingDeps();
+        const { runner, codexHost } = createHarness(SINGLE_TASK_HALT_YAML, {
+          git,
+          forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+          messaging: deps,
+        });
+        const result = await runner.start(
+          '/repo/.agents/workflows/control-final-merge.yaml',
+          '/repo',
+        );
+        const runId = result.runId as string;
+        await flush();
+
+        codexHost.byTaskId('T1').finish('done', doneState('ok'));
+        await flush();
+        expect(runner.getSnapshot(runId)?.finalMergeDecision).toMatchObject({
+          mode: 'orchestrator',
+        });
+
+        runner.stop(runId);
+        await flush();
+        expect(runner.getSnapshot(runId)?.haltedByUser).toBe(true);
+
+        const outcome = control(state).decideFinalMerge('merge', 'stop後にマージを試みる');
+
+        expect(outcome.accepted).toBe(false);
+        expect(outcome.reason).toContain('人がこの実行全体を停止しました');
+        expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(
+          false,
+        );
+      },
+    );
   });
 
   it('decide_approvalはacceptとdeclineだけを受け付ける（セッション全体への承認は選べない）', async () => {
@@ -9613,4 +9668,314 @@ tasks:
       expect(store.find(runId)?.haltedByUser).toBe(true);
     },
   );
+});
+
+
+/**
+ * design.md §16.26（最終マージの判断、Issue #335）。
+ *
+ * `finalMerge: orchestrator | confirm` は統合PR/MR作成後にmainへ即マージせず、判断待ちの
+ * 状態へ入る。判断は`decide_final_merge`（MCP、orchestratorモードのみ）／Webviewの
+ * ボタン（confirmモードのみ）／タイムアウト（orchestratorモードのみ）のいずれかで確定し、
+ * どの経路でも`WorkflowRunner.decideFinalMerge(runId, decision, reason)`へ合流する。
+ *
+ * 判断待ちの間はMCPサーバー（`state.handle`）を閉じない（`decide_final_merge`を呼べる
+ * 状態を保つため）。決着後に閉じる。この開閉のタイミングそのものが今回の実装で見つけた
+ * 既存の欠陥（`pump()`がfinalizeForgeの完了を待たずに閉じていた）の修正対象であり、
+ * `state.handle?.closed`で直接検証する。
+ */
+describe('WorkflowRunner: 最終マージの判断（design.md §16.26、Issue #335）', () => {
+  const SINGLE_TASK_YAML = `
+version: 1
+name: final-merge-decision-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+  /**
+   * 制御ツールの実体（オーケストレーター専用接続に見せているもの）を取り出す。
+   * 「WorkflowRunner: オーケストレーターの制御ツール」describeのローカルヘルパーと
+   * 同じ実装（このdescribeのスコープからは参照できないため複製）。
+   */
+  function control(state: FakeMessagingState): OrchestratorControlPort {
+    const port = state.hub?.orchestratorControl;
+    if (port === undefined) {
+      throw new Error('制御ツールが配線されていません');
+    }
+    return port;
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it(
+    'finalMerge: orchestratorはPR/MR作成後、即マージせず判断待ちを警告欄へ記録し、' +
+      'MCPサーバーを開けたままにする',
+    async () => {
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      const cli = fakeForgeCli();
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+        messaging: deps,
+      });
+      const result = await runner.start('/repo/.agents/workflows/final-merge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // 統合PR/MRは作られているが、mainへのマージはまだ呼ばれていない
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'create')).toBe(true);
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+
+      const snapshot = runner.getSnapshot(runId);
+      expect(snapshot?.finalMergeOutcome).toBeUndefined();
+      expect(snapshot?.finalMergeDecision).toMatchObject({ mode: 'orchestrator' });
+      expect(
+        snapshot?.warnings.some(
+          (w) => w.kind === 'finalMergeDecision' && w.message.includes('待っています'),
+        ),
+      ).toBe(true);
+
+      // decide_final_mergeを呼べる状態を保つため、MCPサーバーはまだ閉じない
+      expect(state.handle?.closed).toBe(false);
+    },
+  );
+
+  it('decideFinalMerge(merge)は最終マージを実行し、決定と理由を警告欄へ記録してMCPサーバーを閉じる', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli();
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+      messaging: deps,
+    });
+    const result = await runner.start('/repo/.agents/workflows/final-merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const accepted = runner.decideFinalMerge(runId, 'merge', 'CIが全緑のため');
+    await flush();
+
+    expect(accepted).toBe(true);
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(true);
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.finalMergeOutcome).toBe('merged');
+    expect(snapshot?.finalMergeDecision).toBeUndefined();
+    expect(
+      snapshot?.warnings.some(
+        (w) =>
+          w.kind === 'finalMergeDecision' &&
+          w.message.includes('merge') &&
+          w.message.includes('CIが全緑のため'),
+      ),
+    ).toBe(true);
+    // 判断が確定したので、遅らせていたMCPサーバーの解放が進む
+    expect(state.handle?.closed).toBe(true);
+  });
+
+  it('decideFinalMerge(hold)はマージせずheldとして扱い、理由を警告欄へ記録する', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/final-merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const accepted = runner.decideFinalMerge(runId, 'hold', 'レビュー未完了のため');
+    await flush();
+
+    expect(accepted).toBe(true);
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.finalMergeOutcome).toBe('held');
+    expect(store.find(runId)?.finalMergeOutcome).toBe('held');
+    expect(
+      snapshot?.warnings.some(
+        (w) => w.kind === 'finalMergeDecision' && w.message.includes('レビュー未完了のため'),
+      ),
+    ).toBe(true);
+  });
+
+  it('判断待ちが無い状態でdecideFinalMergeを呼んでもfalseを返し、何も変えない（二重確定・不明runId対策）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      // finalMerge: auto。判断待ちが発生しない
+      forge: fakeForgeDeps(cli, { finalMerge: 'auto' }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/final-merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    expect(runner.decideFinalMerge(runId, 'merge', 'x')).toBe(false);
+    expect(runner.decideFinalMerge('unknown-run', 'merge', 'x')).toBe(false);
+  });
+
+  it('decide_final_mergeは上限超過のreasonを受付自体で拒否する（update_task_promptと同じ流儀）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli();
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+      messaging: deps,
+    });
+    const result = await runner.start('/repo/.agents/workflows/final-merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    const tooLong = control(state).decideFinalMerge('merge', 'x'.repeat(4001));
+
+    expect(tooLong.accepted).toBe(false);
+    expect(tooLong.reason).toContain('4000');
+    // 拒否されたので判断待ちは解消されず、マージも実行されない
+    expect(runner.getSnapshot(runId)?.finalMergeDecision).toMatchObject({
+      mode: 'orchestrator',
+    });
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+  });
+
+  it(
+    'finalMerge: orchestratorは応答が無いままagent.workflows.finalMergeDecisionTimeoutSecを' +
+      '超えると自動的にholdへ倒す（design.md §16.26。processを無期限に止めないための保険）',
+    async () => {
+      vi.useFakeTimers();
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      const cli = fakeForgeCli();
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+        readFinalMergeDecisionTimeoutSec: () => 60,
+      });
+      const result = await runner.start('/repo/.agents/workflows/final-merge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      codexHost.byTaskId('T1').finish('done', doneState('ok'));
+      await flush();
+
+      expect(runner.getSnapshot(runId)?.finalMergeDecision).toMatchObject({ mode: 'orchestrator' });
+
+      // 閾値の直前ではまだ倒さない
+      await vi.advanceTimersByTimeAsync(59_000);
+      await flush();
+      expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBeUndefined();
+
+      // 閾値を超えたら自動的にholdへ倒す
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+
+      const snapshot = runner.getSnapshot(runId);
+      expect(snapshot?.finalMergeOutcome).toBe('held');
+      expect(snapshot?.finalMergeDecision).toBeUndefined();
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+      expect(snapshot?.warnings.some((w) => w.kind === 'finalMergeDecision')).toBe(true);
+    },
+  );
+
+  it(
+    '人が「全体の停止」を押した後は、オーケストレーターがdecide_final_merge相当（' +
+      'decideFinalMerge）でdecision: \'merge\'を呼んでもmainへマージされない（' +
+      'レビュー指摘。他の判断系制御ツールと同じくhaltedByUserを見る）',
+    async () => {
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      const cli = fakeForgeCli();
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+      });
+      const result = await runner.start('/repo/.agents/workflows/final-merge-halt.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      codexHost.byTaskId('T1').finish('done', doneState('ok'));
+      await flush();
+
+      expect(runner.getSnapshot(runId)?.finalMergeDecision).toMatchObject({ mode: 'orchestrator' });
+
+      // 全タスクが既に完了しているため、stop()はhaltedByUserを立てるだけでoutcomeは
+      // succeededのまま変わらない（getRunOutcomeはpending/runningの残りが無い限りskip扱いに
+      // しない）。判断待ちの状態で「全体の停止」が押されるケースそのものが再現できる
+      runner.stop(runId);
+      await flush();
+      expect(runner.getSnapshot(runId)?.outcome).toBe('succeeded');
+
+      const accepted = runner.decideFinalMerge(runId, 'merge', '停止後に無理やりマージを試みる');
+      await flush();
+
+      expect(accepted).toBe(false);
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+      const snapshot = runner.getSnapshot(runId);
+      expect(snapshot?.finalMergeOutcome).toBeUndefined();
+      // 判断待ちの状態自体は解除されない（拒否しただけで、タイムアウトによる自動holdは
+      // 引き続き効く。holdは安全側なので拒否しない）
+      expect(snapshot?.finalMergeDecision).toMatchObject({ mode: 'orchestrator' });
+
+      // holdは拒否しない（安全側。タイムアウトの自動hold呼び出しも同じ経路を通るため、
+      // ここを塞ぐと判断待ちが無期限に解消されなくなる）
+      const heldAccepted = runner.decideFinalMerge(runId, 'hold', '停止後なのでholdにする');
+      await flush();
+      expect(heldAccepted).toBe(true);
+      expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBe('held');
+    },
+  );
+
+  it('finalMerge: confirmはタイムアウトしない（人の応答時間は予測できないため）', async () => {
+    vi.useFakeTimers();
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { finalMerge: 'confirm' }),
+      readFinalMergeDecisionTimeoutSec: () => 60,
+    });
+    const result = await runner.start('/repo/.agents/workflows/final-merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    expect(runner.getSnapshot(runId)?.finalMergeDecision).toMatchObject({ mode: 'confirm' });
+
+    // 閾値を大きく超えて進めても倒れない（confirmにはタイムアウトが効かない）
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    await flush();
+
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.finalMergeOutcome).toBeUndefined();
+    expect(snapshot?.finalMergeDecision).toMatchObject({ mode: 'confirm' });
+
+    // 人が判断すれば通常どおり確定する
+    expect(runner.decideFinalMerge(runId, 'merge', '人が確認済み')).toBe(true);
+    await flush();
+    expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBe('merged');
+  });
 });

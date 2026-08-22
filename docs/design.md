@@ -4413,20 +4413,23 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 
 #### ワークフロー設定の一覧
 
-`agent.workflows.*` の全11項目。実際に登録している値（型・既定値・markdownDescription）は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている（§7と同じ原則）。
+`agent.workflows.*` の全13項目。実際に登録している値（型・既定値・markdownDescription）は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている（§7と同じ原則）。
 
 | 設定                                    | スコープ            | 用途・理由                                                                                                                                             |
 | --------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `agent.workflows.dir`                   | resource            | ワークフロー定義ファイルを探すディレクトリ（既定 `.agents/workflows`）。中身は§16.16のとおり信用しないので、置き場自体はワークスペースごとに変えてよい |
 | `agent.workflows.allowAutoApprove`      | machine             | YAMLの `autoApprove: true` を有効化できるかどうか（既定 `false`）。無効化してある間はYAMLの指定によらず全承認を人へ回す（前掲の表参照）                |
+| `agent.workflows.allowClaudeBypassPermissions` | machine      | `claude.permissionMode` が `bypassPermissions` のとき、ワークフローのClaudeタスクもそのまま無人で走らせるかどうか（既定 `false`）。有効にすると§16.7の危険判定が全て無効になる                |
 | `agent.workflows.replyTimeoutSec`       | machine-overridable | タスク間メッセージング（§16.21）の返信待ちの上限秒数                                                                                                   |
-| `agent.workflows.finalMerge`            | machine             | mainを無人で書き換えるかどうかを決める。リポジトリの `.vscode/settings.json` から `auto` にされてはいけない                                            |
+| `agent.workflows.finalMerge`            | machine             | mainを無人で書き換えるかどうかを決める。リポジトリの `.vscode/settings.json` から `auto` や `orchestrator`（既定、§16.26）にされてはいけない           |
 | `agent.workflows.forge`                 | machine             | どのCLI（`gh` / `glab`）を起動するかを決める。実行するコマンドの選択にあたるので §8 と同じ扱いにする                                                   |
 | `agent.workflows.pullRequest`           | machine-overridable | 作るPR/MRの層。権限には関わらない                                                                                                                      |
 | `agent.workflows.roadmapDir`            | machine-overridable | ロードマップの出力先のパス。ワークスペースフォルダの配下に限る                                                                                         |
 | `agent.workflows.pseudoWorktreeExclude` | machine-overridable | 疑似worktreeで複製から外すディレクトリ名。増やしても安全側にしか働かない                                                                               |
 | `agent.workflows.branchNaming`          | machine-overridable | タスクブランチの命名方式（§16.6）。ブランチ名の形を決めるだけで、push先も権限も変えない                                                                |
 | `agent.workflows.draftPullRequest`      | machine-overridable | PR/MRをDraftで作るかどうか（§16.18）。有効にするほうが「人の確認を挟む」側へ倒れるため、強い制限は要らない                                             |
+| `agent.workflows.mergeApprovalTimeoutSec` | machine-overridable | 衝突解決セッション（§16.17「コンフリクト」）が承認待ちのまま止まってよい上限秒数（既定3600秒）。超えたら自動でセッションを止め`blocked`にする。権限には関わらない                |
+| `agent.workflows.finalMergeDecisionTimeoutSec` | machine-overridable | `finalMerge: orchestrator` の最終マージ判断待ちの上限秒数（既定900秒、§16.26）。タイムアウトすると `hold` へ倒す                                 |
 
 push先のremoteをYAMLや設定から選ぶ手段は設けない。常に `origin` を使う。任意のURLへpushできると、リポジトリの中身を別の宛先へ出す経路になる。
 
@@ -4578,7 +4581,7 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 - GitLabのMR作成は `glab mr create` ではなく `glab api projects/:id/merge_requests` へのPOSTを使っている（「本文」参照）ため、Draft指定もAPIのフィールド（`draft`）で渡す。`glab mr create --draft` のようなフラグは経由しない
 - `--field=draft=true` は文字列 `"true"` ではなく、真にJSON booleanとして送られる。実測済み: `glab 1.112.0` の `glab api --help` に「The `--field` flag behaves like `--raw-field` but converts values based on their format: Literal values `true`, `false`, `null`, and integer numbers are converted to the matching JSON types.」とある（`--raw-field` を使った場合は文字列のまま送られ、GitLab APIのboolean検証に落ちる）
 - ready化には**PR/MRの番号が要る**（下の「PR/MRの番号」）。URLから番号を取り出せなかった場合はready化を飛ばし、警告を残す。Draftのまま残るほうが、誤った番号のPR/MRをreadyにするより害が小さい
-- 統合層のPR/MRもDraftで作る。ただしこちらは**最終マージ（`finalMerge: auto`）の直前**にreadyへ切り替える。Draftのままではマージできないため、タスク層とは順序が違う
+- 統合層のPR/MRもDraftで作る。ただしこちらは**最終マージの直前（`finalMerge` の値によらず `performFinalMerge` が担う）**にreadyへ切り替える。Draftのままではマージできないため、タスク層とは順序が違う
 - 既定を `false` にしているのは後方互換のため。Draftを前提としないリポジトリで、いきなり全てのPR/MRがDraftになると人手のレビュー導線が変わる
 
 #### 統合ブランチpushの直列化とリトライ（Issue #253）
@@ -4616,12 +4619,14 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 
 #### 最終マージ
 
-設定 `agent.workflows.finalMerge`（`auto` / `pr-only`、既定 `auto`）。
+設定 `agent.workflows.finalMerge`（`auto` / `orchestrator` / `confirm` / `pr-only`、既定 `orchestrator`）。
 
 - `auto`: 統合→mainのPR/MRを作ったうえで、`gh pr merge --merge` / `glab mr merge --remove-source-branch` まで実行する
+- `orchestrator`: PR/MRを作ったうえで、mainへマージするかどうかをオーケストレーターの判断へ委ねる（**新しい既定**。判断の仕組みは§16.26）
+- `confirm`: PR/MRを作ったうえで、人の承認を待つ。承認されたときだけマージする（判断の仕組みは§16.26）
 - `pr-only`: PR/MRを作って止める。mainへの書き込みは人が行う
 
-この設定はmainを書き換えるかどうかを決めるので、**machineスコープに固定する**（§16.16）。リポジトリの `.vscode/settings.json` から `auto` へ変えられてはいけない。MRの自己マージを禁じる運用規約を持つ組織のリポジトリでは、利用者がmachine設定で `pr-only` にする。
+この設定はmainを書き換えるかどうかを決めるので、**machineスコープに固定する**（§16.16）。リポジトリの `.vscode/settings.json` から緩められてはいけない。MRの自己マージを禁じる運用規約を持つ組織のリポジトリでは、利用者がmachine設定で `pr-only` にする。
 
 mainへマージした後も統合ブランチは残す。片付けはViewの操作から行う。
 
@@ -4963,13 +4968,14 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 | `continue_task`      | `taskId`                      | `WorkflowRunner.continueTask`                        |
 | `decide_approval`    | `taskId` / `decision`         | `WorkflowRunner.decideApproval`                      |
 | `update_task_prompt` | `taskId` / `continuePrompt`   | 後述（新設）                                         |
+| `decide_final_merge` | `decision` / `reason`         | 後述（新設、§16.26）                                 |
 
 - 制御ツールは**既存のrunnerのメソッドをそのまま呼ぶ**。Viewのボタンが通るのと同じ経路にし、モデル用の別経路を作らない。状態遷移の正しさを1か所（`runState.ts`）に保つため
 - `stop_task` の対象は「走行中のタスク」に限らない。**衝突解決セッション（`live.mergeResolutions`。§16.17「コンフリクト」5.）も対象**（issue #514）。`merging` のタスク自身のループは既に終わっているが、統合worktreeで開く衝突解決セッションはまだ生きており、そちらへ `stopLoop()` を届ける。`WorkflowRunner.stopTask` は戻り値（`boolean`）を「送り先を見つけて `stopLoop()` を呼べたか」の根拠にし、見つからなければ `false` を返す。制御ツール側（`buildOrchestratorControlPort` の `stopTask`）はこれを見て `no(...)` を返し、届いていないのに「止めました」という成功を返さない。人はワークフローViewを見て「止まっていない」ことに気づけるが、オーケストレーターは応答（`accepted`）しか見ないため、一度嘘の成功を返すとその経路を二度と再試行しない
 - `no(...)` は「見つからない」と「届いたが既に終わっていた」を同じ文言で返してはならない（issue #514 medium指摘）。`live.tasks` のエントリは `onTaskFinished` 後も消えないため、`merging` のタスクのように「送り先はあったが、ループは既に終わっていた」場合にも `stopLoop()` は `false` を返す。これを「見つかりません」と伝えるとオーケストレーターが誤診する（実際には届いていたのに、届いていないと思って的外れな再試行をする）。`WorkflowRunner.hasStoppableSession` で送り先の有無だけを別に判定し、文言を「見つかりません」／「既に停止しています」に分ける
 - **`stop_task` はこのタスク単体だけを止め、run全体を止めない。** `merging` のタスクへの `stop_task` は衝突解決セッションへ `stopLoop()` を送るが、その結果（`LoopStopReason: 'taskStopped'`）を `WorkflowRunner.stop()`（全体停止）からの同じ `stopLoop()` と区別できないと、`runnerMerge.ts` の `finishMergeResolution` が誤って実行全体を `haltedByUser` にしてしまう（issue #514の本題）。`MergeResolutionEntry.stoppedByStopTask` を送り元の印にし、`stop_task` 経由なら他の `pending` タスクを `skipped` にせず、`retry_task` / `continue_task` / `decide_approval` も通常どおり使えるままにする。だからこそ次の一文が成り立つ: `stop_task` はこの検査（`runHaltedByUserReason`）を通さない（止める方向は停止意図と矛盾しないため呼び出し側で除外する）。もし `stop_task` 自身が `haltedByUser` を立ててしまうなら、この一文の前提が壊れる
 - `get_run_status` が返すのは進捗の件数・タスクの状態・直近の応答の1行要約・警告欄の内容・統合の状況まで。**応答本文そのものは返さない**（`LiveTask` が本文を持たないのと同じ。§16.11）
-- **run終了時にMCPサーバごと閉じる**（§16.21のとおり、runが終われば新しいタスクは開始されないため接続は要らない）。以降オーケストレーターからは制御ツールも `list_tasks` も見えなくなり、**会話だけが続けられる**。「制御ツールだけを無効にしてサーバは残す」形は採らない。runごとのHTTPサーバがウィンドウの寿命まで開いたままになるうえ、runが終わったあとに動かせる対象がもう無いため。run終了の通知（次項の表）に「以降ツールは使えない」ことを明記して、モデルが使えないツールを呼び続けないようにする
+- **run終了時にMCPサーバごと閉じる**（§16.21のとおり、runが終われば新しいタスクは開始されないため接続は要らない）。以降オーケストレーターからは制御ツールも `list_tasks` も見えなくなり、**会話だけが続けられる**。「制御ツールだけを無効にしてサーバは残す」形は採らない。runごとのHTTPサーバがウィンドウの寿命まで開いたままになるうえ、runが終わったあとに動かせる対象がもう無いため。run終了の通知（次項の表）に「以降ツールは使えない」ことを明記して、モデルが使えないツールを呼び続けないようにする。**例外: `finalMerge: orchestrator` の最終マージ判断待ちの間（§16.26）は、outcomeが`succeeded`（終了確定）になった後もサーバを閉じない。** `decide_final_merge`で判断を受ける以上、判断待ちの間にサーバが閉じていては判断そのものを受け付けられないため
 - `stop`（run全体の停止）はツールにしない。run全体を止めるのは人の判断に残す
 
 `update_task_prompt` が方針転換の実体になる。走行中のタスクへ「以降はこの方針でやれ」を届ける手段が、現状は `send_message`（次の指示の先頭へ添えるだけで、元の `continuePrompt` は残り続ける）しか無い。
@@ -5118,6 +5124,58 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 7. 仕込んだ攻撃入力が、**検査地点まで実際に届いているか**。Issue #505のRED実測では、偽装したマニフェストのキー `../evil-...` が境界検査より手前の `isValidManifestKey` で弾かれており、テストは境界検査について何も測っていなかった。手前に別の検証がある場合、そこを通過する入力でなければ、目的の検査地点には到達しない
 8. RED実測は、**その修正の核となる一箇所だけを戻して**測る。`git stash` 等で差分全体を戻すと、同じPRに含まれる別の変更（無関係な配線変更・ゲート除去等）が代わりにREDを出し、核心そのものは何も検証されていないのに「REDを実測した」という誤った記録が残る。実例（Issue #511）: `runnerWorkingDirectory.ts` の `baseline` 更新1行を含むPRで、`git stash` により差分全体を旧実装へ戻してRED実測としたが、実際にREDを出していたのは同じPR内の別変更（`runner.ts` の `finishedNotified` ゲート除去）であり、baseline更新ロジック自体はその1行を無効化しても・常に更新するよう変えても2件とも緑のままだった（後日の再監査で発覚）
 
+### 16.26 最終マージの判断（Issue #335、ロードマップW1）
+
+統合→mainの最終マージ（§16.18「最終マージ」）を実行するかどうかを、誰がどう決めるかの設定。設定は `agent.workflows.finalMerge` で、4つの値を持つ。**`auto` と `pr-only` は既存の値のまま消さない。**
+
+- `auto` — PR/MRを作ってそのままマージする（従来の既定）
+- `orchestrator` — PR/MRを作り、オーケストレーターの判断でマージする（**新しい既定**）
+- `confirm` — PR/MRを作って人の承認を待ち、承認されたときだけマージする
+- `pr-only` — PR/MRを作った時点でrunを終える
+
+`auto` と `pr-only` の挙動そのものは§16.18に書いたとおりで変わらない。以下は `orchestrator` / `confirm` が追加で必要とする「判断待ち」の仕組みを扱う。
+
+#### 判断待ちに入る条件
+
+`shouldRunFinalMerge`（`auto`かつPR/MRが作れた）が`false`で、かつ`needsFinalMergeDecision`（`orchestrator` または `confirm`かつPR/MRが作れた）が`true`のとき、`WorkflowRunner.beginFinalMergeDecision` が判断待ちへ入る（`forge.ts`）。PR/MRの作成に失敗していれば、`auto`と同じく最終マージ自体を試みない（判断待ちにも入らない）。
+
+判断待ちの状態は `LiveRun.finalMergeDecision`（`{ mode: 'orchestrator' | 'confirm', since, timer? }`）が持つ。`continuePromptOverride`・`live.warnings` 自体と同じく**永続化しない**（`runStore.ts`のスキーマへは載せない）。VSCodeのリロードで判断待ちの状態は失われ、人がホスト（GitHub/GitLab）側でPR/MRの状態を見て判断する形に戻る。これは既存の非永続状態と同じ設計判断であり、見落としではない。
+
+#### 判断の確定経路
+
+判断は3つの経路のいずれかから届き、すべて `WorkflowRunner.decideFinalMerge(runId, decision, reason)` へ合流する（`decision: 'merge' | 'hold'`、`reason`は必須）。**確定した判断とその理由は、経路によらず必ずワークフローViewの警告欄（`WorkflowWarning.kind: 'finalMergeDecision'`）へ記録する。** `orchestrator`モードは人の承認を挟まないため、この警告欄の記録が唯一の追跡手段になる。
+
+1. **`decide_final_merge` MCPツール**（`orchestrator`モードのみ）。オーケストレーター専用の制御ツール群（§16.23「道具」）に追加した。`decision` / `reason` を引数に取り、`taskId` を取らない点が他の制御ツールと異なるため、`messaging.ts`の`handleControlToolCall`では`taskId`抽出より前の特別扱いの分岐で処理する。判断待ちが無い・`confirm`モードである・`decision`が不正・`reason`が空文字、のいずれかであれば理由付きで拒否する
+2. **ワークフローViewのボタン**（`confirm`モードのみ）。`workflowScript.ts`が「mainへマージする」/「マージしない」ボタンと理由入力欄を出し、`decideFinalMerge`メッセージを`workflowView.ts`経由で`WorkflowRunner.decideFinalMerge`へ渡す
+3. **タイムアウト**（`orchestrator`モードのみ）。次項
+
+`confirm`モードには2のボタン経路のみで、MCPツールもタイムアウトも働かない。人の応答時間は予測できないため、自動的に判断を確定させる仕組みを持たせない。
+
+#### タイムアウト（`agent.workflows.finalMergeDecisionTimeoutSec`、既定900秒）
+
+`orchestrator`モードだけ、判断待ちに入ると同時にタイマーを張る（`beginFinalMergeDecision`）。既定は900秒（15分）で、`setTimeout` + `.unref()`（`scheduleApprovalTimeout`と同じ流儀。テスト・プロセス終了を妨げない）。応答が無いまま閾値を超えると、`decideFinalMerge(runId, 'hold', <タイムアウトである旨の理由>)`を自動的に呼ぶ。**応答が無い場合は`hold`（マージしない）へ倒す。** マージしない方向へ倒すことで、判断が確定しないままprocessが無期限に止まる事態を避けつつ、誤ってmainを書き換える事故を防ぐ（`hold`はPR/MRを残すだけで取り消せるが、誤マージは取り消しにくい）。
+
+既定値900秒は、`agent.workflows.mergeApprovalTimeoutSec`（既定3600秒、衝突解決の承認待ち）より短い。衝突解決の承認待ちは人が複数ターンかけて対話しうるのに対し、最終マージの判断はオーケストレーターが`get_run_status`で差分・警告欄・CI結果を確認したうえで単発のツール呼び出しに答えるだけの判断であり、長時間の往復を前提としないため。
+
+#### MCPサーバの寿命との整合
+
+既存の`pump()`終了処理は、runの結果が確定した時点でタスク間メッセージングのMCPサーバを同期的に閉じ、オーケストレーターへ「実行が終了しました」の通知を送っていた（§16.23）。この処理は`finalizeForge`（統合PR/MR作成・最終マージを行う非同期処理）を`void`で fire-and-forget 起動するのと同じティックで走るため、`finalizeForge`が`await`で中断する前に先に完了してしまう。**`finalMerge: orchestrator`でPR/MRを作れた場合にこの経路をそのまま使うと、`decide_final_merge`ツールが生えるより先にMCPサーバが閉じ、判断そのものを一切受け付けられなくなる。**（実装前の設計段階で気づいた欠陥で、テストのRED/GREENで見つけたものではない）
+
+これを避けるため、`pump()`は`mayAwaitFinalMergeDecision`（outcomeがsucceeded、forgeが有効、`finalMerge: orchestrator`）を判定し、真であれば`finalizeForge`の完了を待ってから閉鎖処理（`closeMessagingIfFinalMergeSettled`）を呼ぶ。`closeMessagingIfFinalMergeSettled`は`live.finalMergeDecision`が`undefined`（判断待ちが無い）ことを確認したうえでのみ実際に閉じるため、次の3箇所いずれから呼ばれても安全に収束する。
+
+- `pump()`の終了処理（`mayAwaitFinalMergeDecision`が偽の通常経路。PR/MRを作れなかった場合や`auto`/`confirm`/`pr-only`）
+- `finalizeForge`完了後のコールバック（`orchestrator`でPR/MRを作れなかった場合。判断待ちに入らないため即座に閉じる）
+- `decideFinalMerge`確定後（`orchestrator`で判断が確定した場合。ここで初めて閉じる）
+
+`confirm`モードはMCPサーバの寿命に影響しない。`confirm`の判断はワークフローViewのボタン（Webview⇔拡張機能間のメッセージ）経由であり、タスク間メッセージングのMCPサーバとは別経路のため、判断待ちの間もサーバをすぐ閉じてよい。
+
+#### `held`という結果
+
+`finalMergeOutcome`（スナップショット・永続化とも）に`held`を追加した（従来は`'merged' | 'failed' | undefined`）。`hold`判断が確定した場合（タイムアウト経由を含む）にこの値になる。`merged`/`failed`と異なり試み自体は行わない（マージコマンドを呼ばない）ため、失敗とは区別する。
+
+#### 検証
+
+`test/unit/forge.test.ts`が`needsFinalMergeDecision`を、`test/unit/runner.test.ts`の「WorkflowRunner: 最終マージの判断」ブロックが判断待ちへ入ること・MCPサーバがそれまで閉じないこと・`decide_final_merge`相当の確定経路（`decideFinalMerge`）が`merge`/`hold`それぞれで正しい結果と警告を残すこと・タイムアウトで自動的に`hold`へ倒れること・`confirm`はタイムアウトしないことを確かめる。実ホストでのMCPツール呼び出し・ワークフローViewのボタンの見た目・実際のオーケストレーターモデルの判断挙動は[manual-test.md](manual-test.md)のW-Fに残す。
 ### 16.28 生成したワークフローの分解レビュー（`reviewWorkflowPlan`、roadmap W3、Issue #337）
 
 §16.9の分解セッションへ渡す生成プロンプトは「並列にできるタスクを直列にしない」「合流タスクを置く」「外から判定できる`done`を書く」という指針を含むが、生成したYAMLが実際にこの指針へ従っているかどうかは検証していなかった。`validateWorkflow`（§16.2）が見るのはタスク数・id形式・循環依存・未定義参照・プロンプト長・権限の緩和といった構文的な妥当性だけで、分解そのものの質は見ない。
