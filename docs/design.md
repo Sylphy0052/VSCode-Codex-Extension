@@ -2931,9 +2931,9 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 残る制約:
 
-- テーブル・引用・水平線・ネストした強調は扱わない
+- 表・引用・水平線・打消し線・ネストした箇条書き・タスクリストは§14.60（issue #332）で追加した。ネストした強調（太字の中の斜体等）は引き続き扱わない
 - リンクURLは`([^)\s]+)`という簡易パターンで区切っており、URLに空白を含む記法や、閉じ括弧を含む一部のURLは正しく拾えない
-- webview側のDOM組み立て（`renderMarkdownInto`・`appendInline`・`createCodeBlock`）はvitestのnode環境では実行できない（jsdom/happy-domを導入していない）。自動化できているのは構文チェック（`new Function`）とMarkdownパース結果の一致テストまでで、実際のDOM描画・ボタンの動作確認は`docs/manual-test.md`のU群（U-08〜U-10）に委ねる
+- webview側のDOM組み立て（`renderMarkdownInto`・`appendInline`・`createCodeBlock`）はvitestのnode環境では実行できない（jsdom/happy-domを導入していない）。自動化できているのは構文チェック（`new Function`）とMarkdownパース結果の一致テストまでで、実際のDOM描画・ボタンの動作確認は`docs/manual-test.md`のU群（U-08〜U-10、表とネストは§14.60のU-26〜U-28）に委ねる
 
 ### 14.52 会話の差分からファイルとdiffを開く（issue #291）
 
@@ -3355,6 +3355,42 @@ Codex側・Claude側は同じ`createExecutablePathResolver(provider, log)`（`sr
 #### 副次効果として整合した点（統合テスト）
 
 `test/integration/fixtures/setup.mjs`は元々`codex.executablePath: '/nonexistent/codex-must-not-run'`という、存在しない絶対パスをfixtureに設定していた（実CLIを掴ませないための対策）。従来の実装はこの明示指定が解決に失敗しても`?? 'codex'`で裸の`'codex'`へ落としていたため、`.vscode-test.mjs`の`PATH`制限がVSCode Linux版のシェル環境解決で上書きされる開発機では、`spawn('codex', ...)`が実PATH上の本物のCLIを掴んでいた。本対応後は`resolveSpawnPath`が`/nonexistent/codex-must-not-run`をそのまま返すため、`spawn`はこの存在しないパスを文字通り試みて`ENOENT`になる。これは本Issueの主目的（明示指定の失敗を握りつぶさない）の直接の帰結であり、統合テスト救済のために設計を曲げたものではない。実際に`npm run test:integration:xvfb`を走らせての確認はしていない（重いため。issue #305のIssue本文にある通り、この検証は必須要件にはしていない）。
+
+### 14.60 応答のMarkdown描画へ表・引用・ネストしたリストを足す（issue #332）
+
+背景: §14.51で入れたMarkdown描画は見出し・箇条書き（フラット）・強調・インラインコード・コードフェンス・リンクのみで、表・引用・ネストしたリスト・水平線・打消し線・タスクリストは素のテキストとして流れていた。エージェントは比較や一覧を表で出すことが多く、影響が大きかった。
+
+対応する記法:
+
+- 表（GFM形式。`| a | b |` ヘッダ行 + `| --- | --- |` 区切り行 + データ行）。列ごとの寄せ指定（`:--`＝左、`:-:`＝中央、`--:`＝右、指定無しは既定の左寄せ）を`TableAlign`として保持する
+- 引用（`>`、複数行連続で1つの`quote`トークンにまとめる）
+- 水平線（`---` / `***` / `___`、3文字以上・空白混在も許容）
+- 打消し線（`~~text~~`、inlineトークンへ`strike`を追加）
+- ネストした箇条書き（半角スペース2個を1階層としてインデントを数える。`ListItem.depth`で階層を持つ。インデントが直前の項目のdepth+1を超えて飛んでも、直前より1段までしか深くしない。1つの`list`トークンの中で`ordered`は単一の値のみ持ち、ネストの内側で番号付き/箇条書きが混ざっても種別自体は親と同じ扱いにする軽量な割り切り。深さ0での種別切り替えだけは従来どおり別の`list`トークンに分ける）
+- タスクリスト（`- [ ]` / `- [x]` / `- [X]`）。`ListItem.checked`に真偽値を持つ（通常項目では省略する）
+
+対応しない記法（スコープ外）:
+
+- ネストした強調（太字の中の斜体等、§14.51からの既存の制約のまま）
+- 表セルのエスケープされたパイプ（`\|`）
+- 表・リストのネストした組み合わせ（表のセルの中に箇条書きを書く等）
+
+信用しない描画の方針（§14.51から継続）:
+
+- `parseMarkdown`/`parseInline`はHTML文字列を一切組み立てず、トークン列だけを返す。DOMへの差し込み（`chatScript.ts`の`createTable` / `createQuote` / `createList`）も`createElement`/`createTextNode`だけで組み、`innerHTML`等は使わない。エージェント出力に`<script>`やイベントハンドラ属性を含む文字列が来ても、地の文（テキストノード）としてそのまま表示されるだけでHTMLとして評価されることはない
+- タスクリストのチェックボックスは`disabled = true`の表示専用で、クリックしても状態は変わらない（双方向の状態同期は本Issueのスコープ外）
+- 未閉じの表（区切り行だけ届いてデータ行が無い、あるいはヘッダ行だけでまだ区切り行が届いていない）・未閉じの引用（継続行が来る前に入力が途切れる）は、ストリーミング中の未完な強調・未閉じコードフェンス（§14.51）と同じ考え方で例外を投げない。ヘッダ行だけでは表と判定せず段落として残し、区切り行まで揃った時点で初めて`table`トークンになる。引用は1行だけでも`quote`として成立する（Markdown的に自然）ため、行が増えるたびに描き直される
+
+実装:
+
+- `src/view/markdown.ts`の`BlockToken`へ`table` / `quote` / `hr`を追加し、`list`の`ListItem`へ`depth: number`・`checked?: boolean`を持たせた。`InlineToken`へ`strike`を追加した
+- TS実装（`parseMarkdown`/`parseInline`）とwebview埋め込み用の`MARKDOWN_PARSE_SOURCE`（同じロジックをJSソース文字列として二重管理する理由は§14.51参照）の両方を更新し、`test/unit/markdown.test.ts`の`MARKDOWN_PARSE_SOURCE`評価テストで両者が同じトークン列を返すことを確認する
+- `chatScript.ts`の`renderMarkdownInto`へ`table` / `quote` / `hr`の分岐を追加し、`list`は新設の`createList`（`ListItem.depth`に沿って親`li`の中へ`ul`/`ol`を入れ子にする。深さが増える側は直前の`li`の下へ潜り、減る側は該当階層まで`stack`を戻す）へ置き換えた。`appendInline`へ`strike`（`<s>`要素）を追加した
+- `chatStyles.ts`へ`.md-table-wrap`（`overflow-x: auto`で表だけを横スクロールさせる。ページ全体は横スクロールさせない）・`.md-table`・`.md-quote`・`.md-task-item`・`.body hr`のスタイルを追加した
+
+残る制約:
+
+- webview側のDOM組み立て（`createTable` / `createQuote` / `createList`）はvitestのnode環境では実行できない（§14.51と同じ制約）。実際の表の横スクロール・ネストしたリストの階層表示・ストリーミング中の描画崩れの有無は`docs/manual-test.md`のU-26〜U-28に委ねる
 
 ## 15. 作業記録（日報・週報連携）
 
