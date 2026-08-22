@@ -82,9 +82,16 @@ function maskUrlUserinfo(value: string): string {
  * `i`フラグにより大文字小文字を区別しない（`/HOME/` `C:\users\` 等）。過剰マスクの
  * 懸念（`homework/` `income/` 等）は、いずれも`/home/`直後に区切り文字が続かないため
  * 該当しない（`sanitize.test.ts` で回帰確認済み）。
+ *
+ * Windows系の区切り文字（`\`）は単発ではなく1つ以上（`\\+`）に一致させている
+ * （Issue #474 指摘2）。`JSON.stringify(err)` を経由したエラーメッセージは
+ * バックスラッシュが2連（`\\`）にエスケープされるため、単発の `\` にしか一致しない
+ * 旧パターンでは `C:\\Users\\alice\\...`（実体は2連バックスラッシュ）のような形を
+ * 素通りしていた。`\\+` へ緩めることで単発（元のパス）・2連（1回JSON化）のどちらも
+ * 同じパターンで拾える。UNC区切りの先頭も同様に `\\{2,}`（2つ以上）へ緩めている。
  */
 const HOME_DIR_USERNAME_PATTERN =
-  /(?<![A-Za-z0-9_/\\])((?:file:\/\/)?(?:\/(?:var|usr|export))?\/home\/|(?:file:\/\/)?\/Users\/|[A-Za-z]:[\\/]Users[\\/]|\\\\[^\\\s]+\\Users\\)([^/\\\s'"]+)/giu;
+  /(?<![A-Za-z0-9_/\\])((?:file:\/\/)?(?:\/(?:var|usr|export))?\/home\/|(?:file:\/\/)?\/Users\/|[A-Za-z]:(?:\\+|\/)Users(?:\\+|\/)|\\{2,}[^\\\s]+\\+Users\\+)([^/\\\s'"]+)/giu;
 
 function maskHomeDirUsername(value: string): string {
   return value.replace(HOME_DIR_USERNAME_PATTERN, (_match, prefix: string) => `${prefix}***`);
@@ -152,9 +159,11 @@ export function maskHomeDir(value: string, homeDir: string = os.homedir()): stri
  *   スキーム区切り・`@`が丸ごとエンコードされた形）は `ENCODED_URL_USERINFO_PATTERN`
  *   で検出するようにした。ただし二重エンコード等、この並びに一致しない変形は
  *   引き続き対象外（`maskUrlUserinfo` のJSDoc参照）
- * - `\\` にエスケープされたWindowsパス（例: JSON化されたエラーメッセージ中の
- *   `C:\\\\Users\\\\alice\\\\...` は `HOME_DIR_USERNAME_PATTERN` が想定する
- *   `C:\Users\alice` の形状と一致せず素通りする）
+ * - （対応済み）`\\` にエスケープされたWindowsパス（`JSON.stringify(err)` 等を経由して
+ *   `C:\\Users\\alice\\...`（実体は2連バックスラッシュ）になった形）は
+ *   `HOME_DIR_USERNAME_PATTERN` の区切り文字を `\\+`（1つ以上）へ緩めて対応した
+ *   （`maskHomeDirUsername` のJSDoc参照）。ただしURLエンコードされたバックスラッシュ
+ *   （`%5C`）等、実体が`\`文字でない変形は引き続き対象外
  */
 export function maskForLog(value: string, homeDir?: string): string {
   return maskHomeDir(maskUrlUserinfo(value), homeDir);

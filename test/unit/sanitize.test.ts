@@ -168,6 +168,40 @@ describe('sanitizeForLog（セキュリティ監査指摘: 否定先読みによ
   });
 });
 
+describe('sanitizeForLog（Issue #474 指摘2: バックスラッシュがエスケープされたWindowsパス）', () => {
+  it('JSON.stringify経由で2連バックスラッシュになったWindowsパスでもユーザー名を隠す', () => {
+    // 実際のランタイム文字列は C:\\Users\\carol\\project\\file.ts
+    // （バックスラッシュはそれぞれ2連。JSON.stringify(err.message) 等を経由した形を想定）
+    const raw = 'C:\\\\Users\\\\carol\\\\project\\\\file.ts';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('carol');
+    expect(result).toContain('C:\\\\Users\\\\***\\\\project\\\\file.ts');
+  });
+
+  it('UNC形式でも2連バックスラッシュになった形でユーザー名を隠す', () => {
+    // 実際のランタイム文字列は \\fileserver\Users\alice\project\index.ts が
+    // JSON化されて \\\\fileserver\\Users\\alice\\project\\index.ts になった形
+    const raw = '\\\\\\\\fileserver\\\\Users\\\\alice\\\\project\\\\index.ts';
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('alice');
+    expect(result).toContain('\\\\\\\\fileserver\\\\Users\\\\***\\\\project\\\\index.ts');
+  });
+
+  it('単一バックスラッシュの通常形式は引き続き従来通りマスクする（回帰確認）', () => {
+    const raw = "EACCES: permission denied, open 'C:\\Users\\carol\\project\\src\\index.ts'";
+    const result = sanitizeForLog(raw);
+    expect(result).not.toContain('carol');
+    expect(result).toContain('C:\\Users\\***\\project\\src\\index.ts');
+  });
+
+  it('2回適用しても結果が変わらない（冪等性）', () => {
+    const raw = 'C:\\\\Users\\\\carol\\\\project\\\\file.ts';
+    const once = sanitizeForLog(raw);
+    const twice = sanitizeForLog(once);
+    expect(twice).toBe(once);
+  });
+});
+
 describe('sanitizeForLog（セキュリティ監査指摘: UNCパスが対象外。LOW）', () => {
   it('UNC形式（\\\\fileserver\\Users\\<user>\\...）のローミングプロファイルでもユーザー名を露出しない', () => {
     const raw = '\\\\fileserver\\Users\\alice\\project\\index.ts';
