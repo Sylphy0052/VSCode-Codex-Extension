@@ -580,6 +580,22 @@ export function markMergeSucceeded(
  * 自体は終わったが、統合できていない」状態で、独立した枝は走り続ける
  * （design.md §16.3「`blocked`は実行全体を止めない」）。そのため`skipRemainingPending`
  * は呼ばない。
+ *
+ * **呼び出し元は、`git merge --abort`で巻き戻した後（衝突が自動解決できなかった通常経路）
+ * だけでなく、巻き戻さずに`blocked`へ倒す経路（`runnerMerge.ts`の`finishMergeResolution`
+ * の`manual`/`interrupted`/`taskStopped`分岐、Issue #443・案A。`mergeBusy`・
+ * `blockMergeAfterLeaseWait`も同様）からも呼ぶ。** この関数自身は`failure`を`undefined`に
+ * するため、両者を状態からは区別できない。
+ *
+ * **中断由来の`blocked`（巻き戻していないもの）が統合worktreeの誤撤去から守られているのは、
+ * `blocked`という状態そのものではなく、`removeWorktree`（`worktree.ts`）の
+ * `git status --porcelain`が未コミット差分（`MERGE_HEAD`・未解決パス）を検知して撤去を
+ * 拒否するという、別の安全網に依存しているからである。** `cleanupIntegration`
+ * （`runner.ts`）の`getRunOutcome(...) === 'running'`ガードは、この関数が呼ばれた時点で
+ * 素通りしうる（`blocked`はrunを終了確定させうるため）。将来、**差分を伴わない**
+ * `blocked`を作る経路（例: 何も変更していない状態で衝突解決セッションを中断する）を
+ * 追加するときは、`git status`が空になり得るためこの安全網が効かず、
+ * `cleanupIntegration`の撤去ガードが素通りしてしまうことを確認すること。
  */
 export function markMergeBlocked(
   run: RunState,

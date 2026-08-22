@@ -495,6 +495,19 @@ function pushMergeBusyWarning(live: LiveRun, taskId: string, message: string): v
   live.warnings.push({ kind: 'mergeBusy', taskId, message });
 }
 
+/**
+ * `mergeInterrupted`警告を、`mergeBusy`と同じ規律（同一taskIdの直近1件へ丸める）で積む
+ * （Issue #443）。`markMergeBlocked`は対象タスクの`failure`を`undefined`にするため、
+ * 「巻き戻し済みの`blocked`」と「人が止めて中断した`blocked`」の区別を状態側には持たせず、
+ * この警告だけが持つ。
+ */
+function pushMergeInterruptedWarning(live: LiveRun, taskId: string, message: string): void {
+  live.warnings = live.warnings.filter(
+    (w) => !(w.kind === 'mergeInterrupted' && w.taskId === taskId),
+  );
+  live.warnings.push({ kind: 'mergeInterrupted', taskId, message });
+}
+
 /** `blockMergeAfterLeaseWait`が人へ出す文面（理由ごと）。 */
 const LEASE_WAIT_BLOCK_MESSAGES: Record<LeaseWaitBlockReason, string> = {
   halted:
@@ -884,15 +897,19 @@ async function finishMergeResolution(
   if (reason === 'manual' || reason === 'interrupted' || reason === 'taskStopped') {
     // 人が止めた経路。タブへの直接介入（`manual` / `interrupted`）に加えて、ワークフローView
     // の「全体停止」（`WorkflowRunner.stop()`が衝突解決セッションへ送る`stopLoop()` →
-    // `taskStopped`。issue #381で止め対象に加えた）もここへ合流する。通常のタスクと同じく、
-    // このタスク自身の状態は変えず実行全体だけを止める設計を踏襲する（design.md §16.5）。
+    // `taskStopped`。issue #381で止め対象に加えた）もここへ合流する。通常のタスク
+    // （`applyLoopStopReason`の`manual`/`interrupted`分岐）は対象タスク自身の状態を変えず
+    // 実行全体だけを止めるが（design.md §16.5）、衝突解決セッションはここに限り
+    // `markMergeBlocked`で対象タスク自身も`blocked`へ確定させる（下のコメント、Issue #443・
+    // 案A）。`merging`のまま実行全体だけを止めると、`getRunOutcome`が`running`を返し続けて
+    // runが終了確定しない行き止まりになるため。
     //
     // **ここで`git merge --abort`はしない**（Issue #412のレビュー指摘1・Issue #434）。人が
     // 統合worktreeで直接手を動かしている経路であり、巻き戻すとその解決作業を破棄してしまう
     // （design.md §16.17が「衝突した状態のままにしておく」としているのと同じ理由）。
     // 「全体停止」も、人が統合worktreeで解いている途中の未コミットの解決結果を巻き上げる点は
     // 同じで、破棄すると復旧手段が無い（「再マージ」してもゼロからやり直しになる）。
-    // 結果として統合worktreeは`MERGE_HEAD`と未解決パスを抱えたまま占有だけが解放されるが、
+    // 結果として統合worktreeは`MERGE_HEAD`と未解決パスを抱えたまま占有だけが解放される。
     // 次にマージへ来たタスクは`mergeTaskBranch`のゲートで`busy`を受け、`failed`ではなく
     // `blocked`（Viewの「再マージ」で復帰できる）になる。
     //
@@ -902,6 +919,31 @@ async function finishMergeResolution(
     // taskIdを渡さないこの呼び出しでは何も起きない、という分かりにくい形になる。
     const haltReason: LoopStopReason = reason === 'taskStopped' ? 'manual' : reason;
     live.runState = applyLoopStopReason(live.runState, live.def.tasks, '', haltReason);
+
+    // 案A（Issue #443）: `merging`は必ず閉じる。ここで`markMergeBlocked`を呼び、
+    // このタスク自身を`blocked`へ確定させる。`git merge --abort`は呼ばない
+    // （上のコメントの通り、巻き戻すと未コミットの解決結果を破棄してしまうため）。
+    // `blocked`は「作業は終わったが統合ブランチに入っていない」という意味に広げて使う
+    // （design.md §16.17）。「巻き戻し済みの`blocked`」との違いは状態には持たせず、
+    // 下の警告だけが持つ（`markMergeBlocked`は`failure`を`undefined`にするため）。
+    //
+    // **呼び出し順序に意味がある。** 必ず`applyLoopStopReason`の**後**に呼ぶこと。
+    // `applyLoopStopReason('manual' | 'interrupted')`は内部で`skipRemainingPending`を
+    // 呼び、このタスクに依存する後続のうちまだ`pending`のものを先に
+    // `skipped`（理由: `runHalted`）へ倒す。その後で`markMergeBlocked`を呼んでも、対象の
+    // 後続は既に`pending`ではないため、その状態遷移ループは`appendCascadeTaskId`経由で
+    // 何もしない（`current.failure?.kind`が`'mergeBlocked'`ではなく`'runHalted'`なので
+    // 一致せず素通りする）。結果として後続は`runHalted`のまま残り、`mergeBlocked`と
+    // 二重の意味を持たない。逆順で呼ぶと、後続が先に`mergeBlocked`で`skipped`になった後
+    // `skipRemainingPending`は`pending`だけを見るため触らずに済んでしまうが、それでは
+    // 「実行全体が停止したから開始しなかった」という本来の理由（`runHalted`）が
+    // 「依存先の衝突で止まった」（`mergeBlocked`）にすり替わってしまう。
+    live.runState = markMergeBlocked(live.runState, live.def.tasks, taskId);
+    pushMergeInterruptedWarning(
+      live,
+      taskId,
+      '衝突解決が停止のため中断されました。統合worktreeは衝突した状態のまま残っています（Viewの「再マージ」で再開できます）',
+    );
     void self.persist(runId);
     self.notify(runId);
     self.pump(runId);
