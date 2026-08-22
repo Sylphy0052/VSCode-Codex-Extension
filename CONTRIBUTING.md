@@ -32,7 +32,9 @@ npm run check     # lint + typecheck + test
 
 ## CI
 
-mainへのpushとPRのたびに、GitHub Actions（`.github/workflows/ci.yml`）で `npm run lint` / `npm run typecheck` / `npm test` が自動実行される。`scripts/check.sh` と同じ3つで、Node.js 20系で `npm ci` してから走る。
+mainへのpushとPRのたびに、GitHub Actions（`.github/workflows/ci.yml`）で `npm run lint` / `npm run typecheck` / `npm run build` / `npm test` が自動実行される。Node.js 20系で `npm ci` してから走る。
+
+`scripts/check.sh`（`npm run lint` / `npm run typecheck` / `npm test` の3つ）とは一致しない。CIは`npm run build`の分だけ検証範囲が広く、tsc --noEmitでは検出できないバンドル失敗（動的import、モジュール解決の差、--externalの指定漏れなど）を拾う。`scripts/check.sh` 自体は変更していないため、手元で全緑にしてもCIのbuildステップは別途確認が必要。
 
 統合テスト（`npm run test:integration`）はCIで回らない。実VSCodeのダウンロードとxvfbが要るため対象外にしてある。実VSCodeが要る範囲は引き続き手元で確認する。
 

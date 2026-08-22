@@ -25,7 +25,7 @@ permissions:
 
 jobs:
   check:
-    name: lint / typecheck / test
+    name: checks
     runs-on: ubuntu-latest
     # 既定の360分は長すぎるため妥当な値に短縮する。
     # ローカルでのscripts/check.sh全体の所要は30秒強であり、依存インストール（npm ci）を
@@ -49,6 +49,13 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
+
+      # tsc --noEmitは型のみを検査し、esbuildによるバンドルが成功するかは確認しない。
+      # 動的import、モジュール解決の差、--externalの指定漏れなどは型検査を通っても
+      # バンドル時に失敗しうるため、配布物（dist/extension.js）が組み立てられることを
+      # ここで検証する。
+      - name: Build
+        run: npm run build
 
       - name: Test
         run: npm test

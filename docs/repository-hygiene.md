@@ -178,7 +178,9 @@ CLAUDE.mdの「Test coverage 80%以上」は、これらの状況により**機�
 
 ### 必須にすべきチェック名
 
-`ci.yml` の `jobs.check.name` は `lint / typecheck / test`、ワークフロー名は `CI` であるため、GitHub上のstatus check名は `CI / lint / typecheck / test` の形になる。必須チェックとして設定する場合はこの名前を指定する。
+`ci.yml` の `jobs.check.name` は `checks`（lint / typecheck / build / testの4ステップを実行する総称）、ワークフロー名は `CI` であるため、GitHub上のstatus check名は `CI / checks` の形になる。必須チェックとして設定する場合はこの名前を指定する。
+
+ジョブ名をステップの列挙（例: `lint / typecheck / build / test`）にせず総称にしたのは、ステップが増減するたびにジョブ名と本節の記述の両方を直す必要が生じるのを避けるため（Issue #450のレビュー指摘対応）。各ステップの実行内容はPRのチェック詳細を開けば確認できる。
 
 ### 設定場所
 
