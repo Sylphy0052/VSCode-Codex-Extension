@@ -1018,7 +1018,10 @@ describe('readSideQuestionResult（issue #334、design.md §14.62）', () => {
     });
     const result = readSideQuestionResult(response!);
     expect(result.ok).toBe(false);
-    expect(result.error).toEqual({ message: 'no response generated', origin: 'app' });
+    // payload.errorはCLIが封筒に乗せてきた値であり、封筒が成功でもorigin:'cli'
+    // （issue #340確認レビュー再指摘: 成功封筒だからという理由でorigin:'app'にしていたのは
+    // 誤り。readRewindConversationResultの同種のpayload.errorと扱いをそろえる）
+    expect(result.error).toEqual({ message: 'no response generated', origin: 'cli' });
   });
 
   it('synthetic:trueの応答を読む（実測、design.md §14.62: モデルが実際には回答しなかったことを示す）', () => {

@@ -9,6 +9,7 @@ import {
   pendingSideQuestionDisplay,
   progressSideQuestionDisplay,
 } from '../../src/claude/sideQuestion';
+import { readControlResponse, readSideQuestionResult } from '../../src/claude/control';
 import type {
   ControlRequestProgress,
   SideQuestionHistoryEntry,
@@ -232,6 +233,25 @@ describe('describeSideQuestionError（issue #340横断レビュー指摘: origin
     expect(
       describeSideQuestionError({ message: '応答を読み取れませんでした', origin: 'app' }),
     ).toBe('応答を読み取れませんでした');
+  });
+
+  it('成功封筒に乗ったpayload.errorはCLI由来の値なのでorigin:cliとなり、内部の生文言を出さず汎用文言へ丸める（issue #340確認レビュー再指摘）', () => {
+    // readSideQuestionResultから通しで確認する: 封筒レベルは成功（subtype:'success'）でも
+    // payload.errorの値自体はCLIが組み立てたものなので、封筒の成功/失敗ではなく値の由来で
+    // origin:'cli'と判定されるべきで、以前はここが誤ってorigin:'app'になっていた
+    const response = readControlResponse({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req_origin_regression',
+        response: { error: 'no response generated' },
+      },
+    });
+    const result = readSideQuestionResult(response!);
+    expect(result.error?.origin).toBe('cli');
+    const displayed = describeSideQuestionError(result.error);
+    expect(displayed).toBe('脇道の質問を送れませんでした（CLI側でエラーが発生しました）');
+    expect(displayed).not.toContain('no response generated');
   });
 });
 

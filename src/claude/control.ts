@@ -41,8 +41,12 @@ export interface IncomingControlRequest {
  * 型で由来を持たせる。
  *
  * - `'cli'`: CLIが返した文言。表示前に呼び出し側で必ず利用者向けの文言へ変換すること
- *   （内部実装の露出を防ぐ）
- * - `'app'`: 拡張機能自身が組み立てた、既に利用者向けの日本語文言。そのまま表示してよい
+ *   （内部実装の露出を防ぐ）。**判断基準は「文言の値をどこから読んだか」であり、
+ *   `response.ok`や封筒の成功/失敗とは別軸**：`payload.error`のように成功封筒に乗って
+ *   きた値であっても、値そのものをCLIが組み立てているなら`'cli'`にする
+ *   （issue #340横断レビュー再発防止: 成功封筒だから安全＝`'app'`と誤認しないこと）
+ * - `'app'`: 拡張機能自身が文字列リテラルとして組み立てた、既に利用者向けの日本語文言。
+ *   そのまま表示してよい。CLI応答の値を一切経由しない文言だけがここに入る
  */
 export type ErrorOrigin = 'cli' | 'app';
 
@@ -612,10 +616,11 @@ export interface SideQuestionResult {
    * 失敗理由。由来つき（issue #340横断レビュー指摘）。
    *
    * `origin:'cli'`になるのは`response.ok === false`（control protocol自体の失敗。
-   * CLI内部のJS例外メッセージがそのまま入りうる）のときだけ。それ以外
-   * （成功封筒なのに応答本文が読めない場合の`payload.error`・拡張機能側の固定文言、
-   * `streamSession.ts`のガード）は`origin:'app'`とし、表示側（`describeSideQuestionError`）
-   * が汎用文言へ丸めずそのまま出す。
+   * CLI内部のJS例外メッセージがそのまま入りうる）のときに加え、**成功封筒なのに応答本文が
+   * 読めず`payload.error`を理由として使う場合も同じ**（値そのものはCLIが封筒に乗せてきた
+   * ものであり、封筒の成功/失敗は無関係。issue #340確認レビュー再指摘）。それ以外
+   * （拡張機能側の固定文言、`streamSession.ts`のガード）だけが`origin:'app'`となり、
+   * 表示側（`describeSideQuestionError`）が汎用文言へ丸めずそのまま出す。
    */
   error: OriginatedError | undefined;
 }
@@ -655,15 +660,19 @@ export function readSideQuestionResult(response: ControlResponse): SideQuestionR
   const payload = response.payload;
   const text = strOrUndefined(payload?.['response']);
   if (text === undefined) {
-    // 封筒は成功（=CLI由来の生の例外文字列は乗らない）だが応答本文が読めない場合。
-    // `payload.error`か拡張機能側の固定文言のどちらかであり、`origin:'cli'`の丸め対象
-    // ではない（issue #340横断レビュー指摘）
+    // 封筒は成功だが応答本文が読めない場合。`payload.error`が入っていればそれはCLIが
+    // 封筒に乗せてきた値なので`origin:'cli'`（封筒の成功/失敗ではなく値の由来で判定する。
+    // issue #340確認レビュー再指摘）。無ければ拡張機能側の固定文言で`origin:'app'`
+    const payloadError = strOrUndefined(payload?.['error']);
     return {
       ok: false,
       response: undefined,
       synthetic: undefined,
       refusalFallback: undefined,
-      error: { message: strOrUndefined(payload?.['error']) ?? '応答を読み取れませんでした', origin: 'app' },
+      error:
+        payloadError === undefined
+          ? { message: '応答を読み取れませんでした', origin: 'app' }
+          : { message: payloadError, origin: 'cli' },
     };
   }
   const syntheticRaw = payload?.['synthetic'];
