@@ -1514,6 +1514,10 @@ export class WorkflowRunner {
     // `manual` / `interrupted` の遷移はtaskIdを使わない（実装上の事実。runState.ts参照）ため
     // 空文字で十分だが、意図を示すため定数として明示しておく
     const NO_SPECIFIC_TASK = '';
+    // `applyLoopStopReason`で書き換える前の値を見ておく。`stop()`は複数回呼ばれ得る
+    // （Webviewの`stopAll`は`haltedByUser`の現在値を見ずに毎回呼ぶ）ため、既に停止済みの
+    // runへ何度呼んでも通知イベントが積み増されないよう、false→trueへ遷移した回だけ通知する
+    const wasHaltedByUser = live.runState.haltedByUser;
     live.runState = applyLoopStopReason(live.runState, live.def.tasks, NO_SPECIFIC_TASK, 'manual');
     // `stopLoop()` は完了検知経路（`onFinished` → `onTaskFinished`）へ合流し、その中で
     // `live.runState` と `live.tasks` が書き換わる。走らせながら絞り込むと取りこぼすため、
@@ -1534,8 +1538,11 @@ export class WorkflowRunner {
     // 停止直後は走行中タスクの`stopLoop()`がまだ確定していない（進行中のターンには
     // 割り込まない）ため、オーケストレーターの視点では通常の`taskFailed`しか届かず
     // 「人が止めた」と分からない（issue #401）。制御ツール側の拒否とは別に、ここで
-    // 明示のイベントを送る
-    notifyOrchestratorRunHalted(this.internals, runId);
+    // 明示のイベントを送る。ただし既に`haltedByUser`だったrunへ`stop()`が重ねて呼ばれても
+    // 同じ通知を積み増さない（`MAX_ORCHESTRATOR_EVENTS_PER_RUN`の浪費と同一文言の重複を防ぐ）
+    if (!wasHaltedByUser && live.runState.haltedByUser) {
+      notifyOrchestratorRunHalted(this.internals, runId);
+    }
     this.notify(runId);
     void this.persist(runId);
   }

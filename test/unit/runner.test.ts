@@ -1519,6 +1519,30 @@ tasks:
       expect(last).toContain('retry_task');
       expect(last).toContain('stop_task');
     });
+
+    it('stop()を2回呼んでも「人が停止した」通知は1件しか届かない（Webviewのstop_allが重ねて呼ぶため）', async () => {
+      const { runner, codexHost } = createHarness(YAML);
+      const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+      const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+      orchestrator.emitState({ ...initialChatState, busy: true });
+      orchestrator.emitState({ ...initialChatState, busy: false });
+
+      runner.stop(runId);
+      await flush();
+
+      const countHaltedNotices = () =>
+        orchestrator.sentTexts.filter((t) => t.includes('人がこの実行全体を停止しました')).length;
+      expect(countHaltedNotices()).toBe(1);
+
+      // 既にhaltedByUserのrunへ`stop()`を重ねて呼んでも（Webviewのstop_allハンドラは
+      // haltedByUserの現在値を見ずに毎回呼ぶ）、通知が積み増されない
+      runner.stop(runId);
+      await flush();
+
+      expect(countHaltedNotices()).toBe(1);
+    });
   });
 });
 
@@ -6495,6 +6519,34 @@ tasks:
 
       expect(outcome.accepted).toBe(false);
       expect(outcome.reason).toContain('人がこの実行全体を停止しました');
+    });
+
+    it('update_task_promptも停止直後は拒否し、継続指示を差し替えない', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(TWO_TASK_YAML, {
+        messaging: deps,
+      });
+      const result = await runner.start('/repo/.agents/workflows/control.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      runner.stop(runId);
+      await flush();
+
+      expect(runner.getSnapshot(runId)?.haltedByUser).toBe(true);
+
+      const t1 = codexHost.byTaskId('T1');
+      const outcome = control(state).updateTaskPrompt('T1', 'これからは設計だけをやること');
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('人がこの実行全体を停止しました');
+      // 差し替えは反映されない（`promptTransform`は通常どおりテンプレート展開のままで、
+      // 拒否した差し替え文へは置き換わらない）。警告欄にも積まれない
+      expect(t1.promptTransform?.('これは通常の継続文')).toBe('これは通常の継続文');
+      const warning = runner
+        .getSnapshot(runId)
+        ?.warnings.find((w) => w.kind === 'orchestratorPromptOverride');
+      expect(warning).toBeUndefined();
     });
 
     it('人がワークフローViewから押す再実行（WorkflowRunner.retryTaskの直接呼び出し）は停止後も引き続き機能する', async () => {

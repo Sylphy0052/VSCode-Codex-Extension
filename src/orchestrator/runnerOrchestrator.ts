@@ -120,8 +120,15 @@ function runHaltedByUserReason(
   actions: OrchestratorControlActions,
   runId: string,
 ): string | undefined {
-  const haltedByUser = actions.getSnapshot(runId)?.haltedByUser === true;
-  return haltedByUser
+  const snapshot = actions.getSnapshot(runId);
+  if (snapshot === undefined) {
+    // `getSnapshot`が`undefined`を返す状況（実行が既に破棄されている等）を「停止していない」
+    // とみなすとフェイルオープンになる。既存の呼び出し箇所は全て先に`runFinishedReason`を
+    // 通しており、そちらが`undefined`をフェイルクローズで拾うため実際にここへ来る場面は無いが、
+    // 将来この関数が単独で再利用されたり順序が入れ替わったりしたときの防御として拒否する
+    return 'この実行の状態を取得できませんでした。この制御ツールは使えません。';
+  }
+  return snapshot.haltedByUser === true
     ? '人がこの実行全体を停止しました。再開できるのは人だけです。この制御ツールは使えません。'
     : undefined;
 }
