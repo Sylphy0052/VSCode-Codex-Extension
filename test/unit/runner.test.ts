@@ -174,8 +174,18 @@ class FakeTaskSession implements TaskSession {
    * Issue #412のレビュー指摘D）。1回だけ発火する。
    */
   disposeFinishReason: LoopStopReason | undefined;
+  /**
+   * テスト用。設定すると`dispose()`が投げる（`stdin.end()`やプロセスkillが失敗する
+   * `streamSession.ts`の実装を想定した再現。Issue #434のレビュー指摘の検証用）。
+   */
+  failDispose: Error | undefined;
   dispose(): void {
     this.disposed = true;
+    if (this.failDispose !== undefined) {
+      const err = this.failDispose;
+      this.failDispose = undefined;
+      throw err;
+    }
     const reason = this.disposeFinishReason;
     this.disposeFinishReason = undefined;
     if (reason !== undefined) {
@@ -6350,6 +6360,51 @@ tasks:
     // 修正前はrun全体が停止し、未開始のT2が`skipped`（runHalted）で終わっていた
     expect(store.find(runId)?.haltedByUser).toBe(false);
     expect(store.find(runId)?.tasks['T2']?.state).toBe('running');
+  });
+
+  /**
+   * `finishMergeResolution`の`session?.dispose()`は`reason`の判定より前に無条件で呼ばれる。
+   * `dispose()`（実体は`streamSession.ts`の`stdin.end()`やプロセスkill）が例外を投げると、
+   * `reason`が`manual`/`interrupted`/`taskStopped`（人が止めた経路）であっても
+   * `onMergeResolutionFinished`の`catch`が拾って`markMergeFailed`へ落としてしまい、
+   * 「人が止めたマージはタスク自身の状態を変えない」（Issue #434）という規律と衝突する。
+   * `dispose()`由来の例外は`reason`に関わらずログにだけ残し、`markMergeFailed`へ落とさない
+   * ことを確かめる。
+   */
+  it('人が衝突解決セッションを止めたとき、後始末のdisposeが例外を投げてもmarkMergeFailedへ落ちない（Issue #434）', async () => {
+    const soloYaml = `
+version: 1
+name: lease-manual-stop
+defaults:
+  provider: codex
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(soloYaml, { git });
+    const result = await runner.start('/repo/.agents/workflows/lease.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // T1が衝突し、衝突解決セッションが開いた
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    const resolution = codexHost.sessions.at(-1);
+    if (resolution === undefined) {
+      throw new Error('衝突解決セッションが開かれていません');
+    }
+
+    // 人がタブを閉じた（`manual`）。その後始末のdisposeがプロセスkillの失敗等で例外を投げる
+    resolution.failDispose = new Error('プロセスの終了に失敗しました');
+    resolution.finish('manual', { ...initialChatState });
+    await flush();
+
+    // Issue #434の規律どおり、タスク自身の状態は変わらない（`merging`のまま）。
+    // 修正前は`dispose()`の例外が`markMergeFailed`へ落ちて`failed`になっていた
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+    expect(store.find(runId)?.haltedByUser).toBe(true);
   });
 
   /**

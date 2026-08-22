@@ -842,7 +842,21 @@ async function finishMergeResolution(
   }
   const session = live.mergeResolutions.get(taskId);
   live.mergeResolutions.delete(taskId);
-  session?.dispose();
+  try {
+    session?.dispose();
+  } catch (e) {
+    // ここで投げたまま呼び出し側（`onMergeResolutionFinished`）の`catch`へ流すと、
+    // 下の`reason`判定を経由せず`markMergeFailed`へ落ちてしまう。`reason`が
+    // `manual`/`interrupted`/`taskStopped`（人が止めた経路）だったときは「タスク自身の
+    // 状態は変えない」（Issue #434）はずが、disposeの失敗という無関係な理由で破られる。
+    // 他のdispose()呼び出し箇所（`runner.ts`のセッション差し替え・終了処理）と同じく、
+    // 後始末の失敗はログにだけ残して先へ進む
+    self.deps.log.warn(
+      `[workflow ${runId}/${taskId}] 衝突解決セッションの後始末（dispose）に失敗しました: ${sanitizeForLog(
+        e instanceof Error ? e.message : String(e),
+      )}`,
+    );
+  }
 
   if (reason === 'manual' || reason === 'interrupted' || reason === 'taskStopped') {
     // 人が止めた経路。タブへの直接介入（`manual` / `interrupted`）に加えて、ワークフローView
