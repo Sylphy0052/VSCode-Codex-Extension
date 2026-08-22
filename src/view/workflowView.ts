@@ -95,14 +95,26 @@ export class WorkflowViewManager implements vscode.Disposable {
    * 「実行」操作（design.md §16.8）を人が選ぶ必要がある（design.md §16.13「生成した
    * まま自動で実行しない」をView側でも徹底する。実際、`retry`/`stopTask`等の操作は
    * `activeRunId`が無いと何もしない実装になっている）。
+   *
+   * `warnings`には`plannerSecurity`（安全設定の上書き）と`plannerReview`（タスク分解の
+   * レビュー指摘、design.md §16.28）が混在しうる。呼び出し側（`extension.ts`の
+   * `handlePlanSuccess`）は、レビュー結果が出るより先にこのメソッドを呼んで表示を先出し
+   * し、レビューが完了した時点でもう一度この同じメソッドを呼んで`warnings`だけを
+   * 差し替える（スナップショットは毎回作り直すため、2回目の呼び出しは1回目を上書きする）。
+   *
+   * **この上書きは無条件**——`activeRunId`を問わず、パネルの現在の表示をこのプレビュー
+   * へ戻す。レビュー完了前にユーザーが別のrunの表示へ切り替えていた場合、その表示が
+   * レビュー結果の到着で差し替わりうる（フォーカスは奪わない。`reveal`の第2引数
+   * `preserveFocus: true`のため）。この取り回しはW3の受入基準の対象外として許容して
+   * いる（design.md §16.28）。
    */
   previewDefinition(
     defPath: string,
     def: WorkflowDefinition,
-    securityWarnings: readonly WorkflowWarning[],
+    warnings: readonly WorkflowWarning[],
   ): void {
     this.activeRunId = undefined;
-    this.previewSnapshot = buildPreviewSnapshot(defPath, def, securityWarnings);
+    this.previewSnapshot = buildPreviewSnapshot(defPath, def, warnings);
     this.ensurePanel().reveal(vscode.ViewColumn.Beside, true);
     this.postAll();
   }
