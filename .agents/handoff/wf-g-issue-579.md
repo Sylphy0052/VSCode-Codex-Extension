@@ -142,3 +142,25 @@ AssertionError: expected 'waitingApproval' not to be 'waitingApproval' // Object
 3. `gh pr create` で `main` 宛てPRを作成（マージはしない）
 4. `gh pr diff <番号> | grep "^diff --git"` で意図しないファイルが混ざっていないか確認
 5. 上記5-5の2件を含め、実測結果一式をコーディネーターへ報告
+
+## 7. 差し戻し対応（コーディネーターレビュー、PR #644への追いcommit）
+
+### 7-1. 差し戻しの経緯（次に同じ判断をする人向けの記録）
+
+上の5-5で報告した2件は、両方とも「このPRで直す」という判断が返ってきた。うち1件は自分の推測が誤りだった。
+
+- **`docs/manual-test.md`の要否判断が誤り。** 「3600秒待つのは非現実的だからケース不要」と推測したが、既存のタイムアウト系ケース（`finalMergeDecisionTimeoutSec`・`replyTimeoutSec`・`ciWaitTimeoutSec`、`docs/manual-test.md`の該当行）は**いずれも設定値を短くして手動検証する**という確立した手法を使っていた。待ち時間の長さを理由に「不要」と推測する前に、**同じ種類の既存ケースがどう検証しているかを先に見に行くべきだった**（grepで`短い値`を検索すれば3件すぐ見つかる）。ケース番号は`W-R`（コーディネーターが`docs/manual-test.md`の`### W-`見出しを`grep`し直し、既存最大の`W-Q`から採番）
+- **`workflowScript.ts`の`FAILURE_LABEL`は担当範囲を理由に見送ったが、範囲そのものが狭すぎた。** `TaskFailureReason`のkind数（11）と`FAILURE_LABEL`のラベル数（当初10）をコーディネーターが実測して差分を特定した。「kindを足したらラベルも足す」対が過去に何度も分断されてきた経緯があり、担当ファイルの外でも対で閉じることが求められた
+
+### 7-2. 追加で直した内容
+
+- `src/view/workflowScript.ts`: `FAILURE_LABEL`に`taskApprovalTimedOut: '承認待ちの時間切れ'`を追加（コメントにバッククォートを使わない既存の書き方に揃えた。テンプレートリテラル全体を壊す事故を避けるため）
+- `test/unit/webviewScript.test.ts`: `FAILURE_LABEL`が`TaskFailureReason`の全kindを網羅していることを機械的に固定する回帰テストを新規追加（`runState.ts`の全11kindをテスト側にハードコードし、`workflowScript()`が返すソースの`FAILURE_LABEL`ブロックと突き合わせる）。次にkindを追加する人がラベルを足し忘れると、このテストが落ちて即座に気づける。**この1ファイルはコーディネーターの想定ファイル一覧（`workflowScript.ts`と`manual-test.md`の2つ）には無かった追加**（「対で閉じる」指示を機械的な回帰へ落とし込むための判断。報告で明示する）
+- `docs/manual-test.md`: `### W-R 通常タスクの承認待ちの時間切れ`をW-Q節の直後（U群見出しの前）に新設。時間切れで`failed`になること（`blocked`にならないこと）・日本語ラベルが出ること（生の`taskApprovalTimedOut`が出ないこと）・案Bの副次効果（`waitingApproval`が1件あっても別タスクの`waitingReply`が`replyTimeoutSec`超過で解放されること）の3点を確認する手順を書いた
+
+### 7-3. 実測結果（差し戻し対応後）
+
+- `npx tsc --noEmit`: 0エラー
+- `npm run lint`: 0警告
+- `npm test`: `Test Files 175 passed (175)` / `Tests 3814 passed (3814)`（差し戻し対応前の3813から回帰テスト1件増）
+- 統合テストは未再実行（コーディネーター指示どおり。`src/view/`と`docs/`のみの変更のため不要と判断。`src/orchestrator/`は触っていない）

@@ -326,6 +326,39 @@ describe('workflowScript', () => {
     expect(/\$\{/.test(source)).toBe(false);
   });
 
+  it(
+    'FAILURE_LABELはTaskFailureReasonの全kindを網羅している' +
+      '（Issue #579横断レビュー指摘: kindを足してラベルを足し忘れると、Viewに生の英語のkindが' +
+      '出るまで気づけない。この一覧は`src/orchestrator/runState.ts`の`TaskFailureReason`と' +
+      '手で同期させる。kindを追加したら、このテストの配列とworkflowScript.tsのFAILURE_LABEL' +
+      'を対で更新すること）',
+    () => {
+      // src/orchestrator/runState.tsのTaskFailureReasonユニオンの全kind（design.md §16.39時点で11種）
+      const allFailureKinds = [
+        'maxReached',
+        'loopFailed',
+        'approvalRejected',
+        'manualStop',
+        'stalled',
+        'dependencyFailed',
+        'mergeBlocked',
+        'mergeFailed',
+        'runHalted',
+        'reloadInterrupted',
+        'taskApprovalTimedOut',
+      ];
+      const source = workflowScript();
+      const failureLabelMatch = source.match(/const FAILURE_LABEL = \{([\s\S]*?)\n {2}\};/);
+      expect(failureLabelMatch).not.toBeNull();
+      const body = failureLabelMatch?.[1] ?? '';
+      for (const kind of allFailureKinds) {
+        expect(body).toMatch(new RegExp(`\\b${kind}:\\s*'`));
+      }
+      const labelKeys = [...body.matchAll(/^\s*(\w+):/gm)].map((m) => m[1]);
+      expect(new Set(labelKeys)).toEqual(new Set(allFailureKinds));
+    },
+  );
+
   it('オーケストレーター欄が1行の指示を送り、会話を開く導線を持つ（design.md §16.23、Issue #326）', () => {
     const source = workflowScript();
     expect(source).toContain("type: 'orchestratorSend'");
