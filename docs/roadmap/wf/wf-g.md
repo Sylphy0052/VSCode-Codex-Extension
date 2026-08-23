@@ -9,11 +9,54 @@
 
 書き手: **WF-Gの担当セッションだけが書く。**
 
+## 回の構成
+
+**2026-08-24に組み直した。**#551 と T26 の前半が第7回を待たずに着地したため、
+当初の「7) #551 + T26 / 8) 全体レビュー」は成立しなくなった。
+
+- **第1回**（完了）
+- **第2回**（完了）: #589 / #502 / #579 / #527
+- **第3回**（完了）: #533。#599 は同じ回に置いていたが未着手のまま残った
+- **回の外で着地した分**: #551（PR #648）、T26の前半（PR #650）、#624（PR #635）、#630（PR #634）。
+  **#551 と T26 は「未マージPRがゼロ」を着手条件にしていたため、条件が満たされた時点で
+  回の順番より先に消化された。**回の構成は消化の順序を決めるものであって、
+  着手条件を上書きするものではない
+- **第4回**: #485 + #490。どちらも疑似worktreeの同じ層で、**#490 はgit側と疑似worktree側の
+  両方をまとめて直す必要がある**
+- **第5回**: #599 + #524。#599 は `design.md` §16.42 と `manual-test.md` W-T を使う
+  （**2026-08-24時点で両方とも空きであることを確認済み。着手時にもう一度確かめること**）。
+  #524 は6箇所まとめて直す
+- **第6回**: #541 + #562。**どちらも調査が先で、直さずに閉じる結論があり得る。**
+  #541 は再現から入り、#562 は「復活させるか消すか」を決めるところから
+- **第7回**: T26の後半（ラベル表）。**Issue #649 はこの分が残っているためOPENのままである。**
+  #636 はここまでに溜まった規約の候補を渡す
+- **第8回**: 全体レビュー
+
+**第4回と第5回は並行できる**（触るファイルが交差しない）。第6回は調査の結論が出るまで
+後続を積まない。
+
 - **WF-G 横断の仕上げ**（18項目）
   - T26 eslintへ型情報を要するルールを導入し、未処理Promiseを機械的に検出できるようにする
-    **当初の前提は `chatScript.ts` 1ファイルだったが、実測は3ファイル4739行である**
+    **前半だけ完了。PR #650（Issue #649）が2026-08-23にmainへsquashで入った
+    （`3a83ed23`）。**`no-floating-promises` / `no-misused-promises` /
+    `await-thenable` をerrorにし、parserへ `tsconfig.json` と
+    `tsconfig.integration.json` の両方を渡した（片方だけだと渡していない側の
+    全ファイルがParsing errorになる）。`test/unit/eslintConfig.test.ts` を新設し、
+    **実効設定にルール名が載っていることを見るのではなく、違反するコードを置いて
+    実際に検出されることを見る**形にした——`parserOptions.project` の指定が外れても
+    ルールの指定は残り、エラーにもならず、ただ何も検出しなくなるため。
+    `require-await` は採らなかった（違反が大量に出て、その大半はPromiseを返す約束を
+    守っている実装のため）。
+    **導入時点の違反は0件で、いま違反を見つけるための変更ではなく、これから入る違反を
+    止めるための変更である。**
+    **後半のラベル表は手つかずである。**PR #650 が触ったのは `eslint.config.mjs` /
+    `test/unit/eslintConfig.test.ts` / `ci.yml` / `CONTRIBUTING.md` / `design.md` の
+    5ファイルで、`chatScript.ts` / `controlPanelScript.ts` / `workflowScript.ts` の
+    いずれにも触っていない（実測）。**Issue #649 がOPENのまま残っているのは整合していて、
+    閉じてはいけない。**以下のラベル表に関する記述は残件としてそのまま生きている
+    **当初の前提は `chatScript.ts` 1ファイルだったが、実測は3ファイル4743行である**
     （2026-08-23、第2回の途中で測り直した）。`chatScript.ts` 2476 /
-    `controlPanelScript.ts` 1141 / `workflowScript.ts` 1122。
+    `controlPanelScript.ts` 1141 / `workflowScript.ts` 1126。
     **前提の出どころはWF-Fの見積りで、チャット画面という担当領域の内側で数えたため
     1ファイルになった。**T26は「テンプレートリテラルで型検査が効かない場所」という
     横断の条件で切るもので、担当領域で切ると `workflowScript.ts` と
@@ -24,9 +67,16 @@
     ヘッダでその一文が折り返し、「型検査もlintも」と「効かない」が別の行にあるため
     **取りこぼす**。
     **ラベル表は25あり、3階層に分かれる。直し方が違う**（以下は #646 時点の観測。
-    **着手時に測り直すこと**——#645 のマージで `FAILURE_LABEL` の件数が11→12へ動いた。
+    **着手時に測り直すこと**——#645 のマージで `FAILURE_LABEL` の**エントリ数**が
+    11→12へ動いた（実測で現在12件）。**この11は、下の階層(3)の11とは別の母数である。**
+    階層(3)の11は**表の数**で、`FAILURE_LABEL` の11は**1つの表の中のエントリ数**。
+    **同じ11が2つあるため、片方を直すつもりでもう片方を動かす事故が起きる。**
+    数字を読むときは、それが表の数かエントリ数かを先に確かめること。
     さらにこの表自体、**最初に書いた時点で3階層とも件数が間違っており**、#646 のレビューで
     直った。数字を残しているのは変化の幅を伝えるためで、そのまま使うためではない）。
+    **この節の行番号は2026-08-24に引き直した**（PR #648 の一括整形で全体がずれ、
+    Issue #579（PR #645）のマージで `FAILURE_LABEL` にキーが1つ増えたため）。**行番号は指し先であって
+    件数ではないが、同じように腐る。着手時に引き直すこと。**
     **数える基準を読む前に、引き方を先に読むこと。**基準を2回書いて2回とも外した
     （1回目は (1) を丸ごと除外、2回目は (3) を3件取りこぼした）。**実際に効いたのは
     基準ではなく、命名に依存しない引き方だった:**
@@ -57,22 +107,22 @@
     **この軸は3階層の分け方とほぼ一致するが、意味が違う。**階層は「型がどう書かれているか」、
     フォールバックは「足し忘れが検出されるか」。**T26で直すべき理由は後者である。**
     (1) **`Record<UnionType, string>` — tscが網羅を強制する。6件。何もしなくてよい**
-    （`src/extension.ts:2232` `ACTION_LABELS` / `orchestrator/orchestratorSession.ts:38`
+    （`src/extension.ts:2240` `ACTION_LABELS` / `orchestrator/orchestratorSession.ts:38`
     `ORCHESTRATOR_APPROVAL_MODE` / `provider/approvalLevel.ts:26`・`33`
     `APPROVAL_LEVEL_LABELS`・`APPROVAL_LEVEL_DESCRIPTIONS` /
-    `orchestrator/runnerMerge.ts:625` `LEASE_WAIT_BLOCK_MESSAGES` /
-    `provider/import.ts:110` `ITEM_TYPE_LABEL`）。値を足してラベルを足し忘れると
+    `orchestrator/runnerMerge.ts:638` `LEASE_WAIT_BLOCK_MESSAGES` /
+    `provider/import.ts:115` `ITEM_TYPE_LABEL`）。値を足してラベルを足し忘れると
     コンパイルが落ちる。**`(typeof X)[number]` もunionなので網羅強制は効く**
     （`Provider` / `ApprovalLevel` がこの形）。**`LeaseWaitBlockReason` は非exportなので
     `export type` のgrepでは出ない。**
     **「確認して、何もしなくてよいと分かった」を書き残すこと**——書かないと次の人が
     同じ確認をやり直す。
     (2) **`Record<string, string>` — 型は付いているが開いている。8件**
-    （`appserver/autoApprovalReview.ts:23` / `appserver/chatState.ts:569` /
-    `appserver/chatState.ts:578` / `appserver/chatState.ts:881` /
+    （`appserver/autoApprovalReview.ts:23` / `appserver/chatState.ts:567` /
+    `appserver/chatState.ts:576` / `appserver/chatState.ts:879` /
     `appserver/transcriptMarkdown.ts:15` / `appserver/transcriptMarkdown.ts:33` /
     `view/settingsProvider.ts:1048` / `claude/streamJson.ts:478` `limitLabelOf` 内の
-    `known`）。**列挙は省略記法（`:569`・`578`）を使わずファイル名を毎回書く**——
+    `known`）。**列挙は省略記法（`:567`・`576`）を使わずファイル名を毎回書く**——
     省略すると `grep -oE '\.ts:[0-9]+' | wc -l` のような検算が実際の件数より少なく出る。
     **直し方はテストではない。キーのunion型を作って `Record<UnionType, string>` に変える**
     ——(1)の形にすればtscが守る。T26（型情報ルールの導入）の本題そのもの。
@@ -127,7 +177,9 @@
     同じ理由で `controlPanelScript.ts:1069` `SECTION_CONTAINERS` と
     `workflowScript.ts:361` `ARROW_IDS` も外した（どちらもキー→要素IDで、
     型の値が増えても連動しない）。
-    **着手時にこの判断ごと見直してよい。**入れるなら (3) は12、合計26。
+    **着手時にこの判断ごと見直してよい。ただし見直した結果を数字で書き残さないこと。**
+    この表の件数は一度も安定していない——3階層とも最初の記載が誤っており、#645 のマージでも
+    動いた。**残すのは引き方と、1件ずつの判断の理由だけにする。**
     **追いIssueに「6回繰り返すだけ」と書かないこと**——着手した人が最初の1つで止まる
   - [#491](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/491)
     終了したrunを `retry_task` で再開してもオーケストレーターの制御ツールが復活しない
@@ -263,9 +315,13 @@
     厳しくしない。**2つとも再現しなければ、2つとも再現しなかったと
     報告して閉じてよい
   - [#551](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/551)
-    prettierの設定とコードが乖離している（121ファイル非準拠、lintが見ていない）。
-    **T26と同じlint基盤の作業のため同じ回で扱う。** 一括 `prettier --write .` は開いているPRが
-    無いときにしかできない（121ファイルへ同時に手を入れるため進行中のPRが全て衝突する）
+    prettierの設定とコードが乖離している（lintが見ていない）。
+    **完了。PR #648が2026-08-23にmainへマージ済み（`e32a9a2f`）。**リポジトリ全体を
+    prettier準拠にし、`check.sh` とCIへ `format:check` を入れて機械で固定した。
+    `.prettierignore` は `docs/roadmap/` を除外している——**棚とWF-Gの文書は人が
+    書いており、整形差分と内容の差分が同じPRに混ざると読めなくなるため。**
+    着手条件だった「開いているPRがゼロ」は満たしたうえで実行した（一括整形は
+    進行中のPRを全て衝突させるため、この条件は外せない）
   - [#562](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/562)
     権限昇格の検出（`messagingPermissionEscalation`）がW9以降 恒常的に不発火である。
     **まず「復活させる」か「削除する」かを決める作業であり、復活を既定として着手しないこと。**
@@ -342,7 +398,16 @@
     W2〜W6・W8・W10・W12の8項目にまたがり、**どの項目の受入基準にも入っていなかった**ため、
     WF-Eの完了条件には含めない（epic #341のクローズ条件からも外してある）。
     着手はWF-Eの統合PRがmainへ入った後。**未リリースの機能をREADMEへ書いても実機で
-    確かめられない**ため
+    確かめられない**ため。
+    **完了。PR #635（`e1b5d7ce`）で解消済み。**未記載としていた設定8件
+    （`mergeApprovalTimeoutSec` / `reviewCommentPollIntervalSec` / `createTaskIssue` /
+    `reviewTaskPullRequest` / `stallRepeatCount` / `maxAskUserPerRun` / `autoResume` /
+    `maxAutoResumeAttempts`）とコマンド3件（`menu` / `runProgram` / `stopProgram`）が
+    READMEに載っていることを直接確認した。
+    **この記録は2026-08-24まで棚に無かった。**Issueは2026-08-23にクローズされているが
+    クローズ時のコメントが無く、修正commitも `#624` を引用していないため、
+    `git log --grep=624` では棚へ載せたcommitしか出ない。**Issueのstateだけで完了を
+    確かめると、棚の側の欠落に気付けない。**
   - [#630](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/630)
     `docs/manual-test.md` のC群・L群の内訳3行（機械 / 一部機械 / 実機）が排他でなく、
     どの行にも出てこない見出しが16件あった。**PR #634 で解消済み**（3行を排他の分割へ作り直し、
