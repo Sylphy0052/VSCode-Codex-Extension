@@ -27,10 +27,20 @@
     **着手時に測り直すこと**——#645 のマージで `FAILURE_LABEL` の件数が11→12へ動いた。
     さらにこの表自体、**最初に書いた時点で3階層とも件数が間違っており**、#646 のレビューで
     直った。数字を残しているのは変化の幅を伝えるためで、そのまま使うためではない）。
-    **数える基準**: キーから表示文字列を引く定数の辞書で、**未知のキーにフォールバックする**
-    形（`?? key` / `|| kind` / `Record<string, string>` の索引）。空のアキュムレータ
+    **数える基準**: キーから表示文字列を引く**定数**の辞書（リテラルで全キーが書かれて
+    いるもの）。**除外**は、空で初期化して後から詰めるアキュムレータだけ
     （`const result: Record<string, string> = {}`。`codex/configToml.ts:23` と
-    `provider/slashCommands.ts:68`）は含めない。
+    `provider/slashCommands.ts:68`）。
+    **「未知のキーにフォールバックするか」は数える基準ではなく、危険度の指標として使う。**
+    最初この一文を基準の側に書いたが、それだと (1) の6件が全部落ちて 8+8=16 になる
+    （tscが網羅を強制するのでフォールバックを書く理由が無い）——**基準が3階層のうち1つを
+    丸ごと除外していた。**指標としての読み方は次のとおり:
+    **フォールバックがある = 足し忘れても緑のまま、画面に生の識別子が出る**（(2)(3) の16件。
+    `?? key` / `|| kind` の形。実測で16件すべてが該当）。
+    **フォールバックが無い = 足し忘れるとコンパイルが落ちる**（(1) の6件。
+    `ACTION_LABELS[action]` のように素で索く）。
+    **この軸は3階層の分け方とほぼ一致するが、意味が違う。**階層は「型がどう書かれているか」、
+    フォールバックは「足し忘れが検出されるか」。**T26で直すべき理由は後者である。**
     (1) **`Record<UnionType, string>` — tscが網羅を強制する。6件。何もしなくてよい**
     （`src/extension.ts:2232` `ACTION_LABELS` / `orchestrator/orchestratorSession.ts:38`
     `ORCHESTRATOR_APPROVAL_MODE` / `provider/approvalLevel.ts:26`・`33`
@@ -43,12 +53,15 @@
     **「確認して、何もしなくてよいと分かった」を書き残すこと**——書かないと次の人が
     同じ確認をやり直す。
     (2) **`Record<string, string>` — 型は付いているが開いている。8件**
-    （`appserver/autoApprovalReview.ts:23` / `appserver/chatState.ts:569`・`578`・`881` /
-    `appserver/transcriptMarkdown.ts:15`・`33` / `view/settingsProvider.ts:1048` /
-    `claude/streamJson.ts:478` `limitLabelOf` 内の `known`）。
+    （`appserver/autoApprovalReview.ts:23` / `appserver/chatState.ts:569` /
+    `appserver/chatState.ts:578` / `appserver/chatState.ts:881` /
+    `appserver/transcriptMarkdown.ts:15` / `appserver/transcriptMarkdown.ts:33` /
+    `view/settingsProvider.ts:1048` / `claude/streamJson.ts:478` `limitLabelOf` 内の
+    `known`）。**列挙は省略記法（`:569`・`578`）を使わずファイル名を毎回書く**——
+    省略すると `grep -oE '\.ts:[0-9]+' | wc -l` のような検算が実際の件数より少なく出る。
     **直し方はテストではない。キーのunion型を作って `Record<UnionType, string>` に変える**
     ——(1)の形にすればtscが守る。T26（型情報ルールの導入）の本題そのもの。
-    **ただし `streamJson.ts:478` はCLI由来の語彙（`five_hour` / `seven_day` / `weekly`）を
+    **ただし `claude/streamJson.ts:478` はCLI由来の語彙（`five_hour` / `seven_day` / `weekly`）を
     受けているので、閉じた型を作れるかは着手時に確かめること**（(3)の
     `EXTRA_USAGE_DISABLED_REASON_LABEL` と同じ性質）。**命名規則を持たない
     （`known` という変数名）ため、`_LABEL` / `_TITLE` のような命名で引くと出ない。**
