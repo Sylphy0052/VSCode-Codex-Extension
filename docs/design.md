@@ -4152,14 +4152,15 @@ src/
     messaging.ts    タスク間メッセージングのMCPサーバと配送（§16.21。*）
     taskSession.ts  `TaskSessionHost` / `TaskSession` のインターフェース（チャット画面側の口）
     runner.ts       `WorkflowRunner`本体（薄いファサード）。セッションの生成・指示の送信・
-                     完了検知・状態遷移の接続（VSCode層）。関心事ごとの実体は下記5ファイルへ
+                     完了検知・状態遷移の接続（VSCode層）。関心事ごとの実体は下記6ファイルへ
                      切り出し済み（Issue #147）
     runnerSnapshot.ts   ワークフローViewのスナップショット構築（`getSnapshot`等。読み取り専用）
     runnerRestore.ts    ウィンドウのリロード後の実行再開（`rebuildLiveRun`等。§16.11）
     runnerWorkingDirectory.ts 作業ディレクトリの解決と疑似worktree統合（§16.6・§16.20）
     runnerMerge.ts      マージと衝突解決、タスク層のPR/MR作成（§16.17・§16.18）
     runnerMessaging.ts  タスク間メッセージング（§16.21）
-    runnerInternals.ts  上記5ファイルだけが触る`WorkflowRunner`の内部の口
+    runnerReviewComments.ts 統合PR/MRのレビューコメントのポーリング取得と通知（§16.30）
+    runnerInternals.ts  上記6ファイルだけが触る`WorkflowRunner`の内部の口
                      （`WorkflowRunnerInternals`。クラス外へは公開しない）
     planner.ts      ゴール文からYAMLを生成する（§16.9）
     roadmap.ts      ロードマップの生成・YAML化・完了の書き戻し（§16.19。*）
@@ -4170,7 +4171,7 @@ src/
 
 `*` を付けた4ファイルも、`runner.ts` / `extension.ts` からの配線を含めて実装済みで、実行に反映される（§16.13）。
 
-`runnerSnapshot.ts` / `runnerRestore.ts` / `runnerWorkingDirectory.ts` / `runnerMerge.ts` / `runnerMessaging.ts` の5ファイルは、`WorkflowRunner`のメソッドを機能単位で切り出したもので、`self: WorkflowRunnerInternals`を第一引数に取る関数の集まりとして実装している（Issue #147）。`runner.ts`側のクラスメソッドはこれらへ委譲する薄いラッパーとして残す（`getSnapshot` / `restoreRunsForView` / `retryMerge` のように公開APIとして呼ばれ続けるものは、シグネチャを変えずメソッドのまま残す）。`WorktreeCreationQueue`を1つだけ使い回す不変条件（§16.6・§16.17）は、`WorkflowRunner`のコンストラクタで組み立てたインスタンスを`self.integrationQueue`（`IntegrationMergeQueue`経由）として共有し続けることで変えていない。
+`runnerSnapshot.ts` / `runnerRestore.ts` / `runnerWorkingDirectory.ts` / `runnerMerge.ts` / `runnerMessaging.ts` / `runnerReviewComments.ts` の6ファイルは、`WorkflowRunner`のメソッドを機能単位で切り出したもので、`self: WorkflowRunnerInternals`を第一引数に取る関数の集まりとして実装している（Issue #147）。`runner.ts`側のクラスメソッドはこれらへ委譲する薄いラッパーとして残す（`getSnapshot` / `restoreRunsForView` / `retryMerge` のように公開APIとして呼ばれ続けるものは、シグネチャを変えずメソッドのまま残す）。`WorktreeCreationQueue`を1つだけ使い回す不変条件（§16.6・§16.17）は、`WorkflowRunner`のコンストラクタで組み立てたインスタンスを`self.integrationQueue`（`IntegrationMergeQueue`経由）として共有し続けることで変えていない。
 
 分割にあたって渡す`self`の型は`WorkflowRunnerInternals`（`runnerInternals.ts`）に閉じる。`runs`・`integrationQueue`・`deps`・`notify`・`pump`・`persist`・`resolveForgeState`は`WorkflowRunner`側では`private`のままにし、分割ファイルへは、コンストラクタで組み立てた`internals`（`WorkflowRunnerInternals`型のオブジェクト）だけを渡す。`this as unknown as WorkflowRunnerInternals`のキャストにはしない。キャストは構造的部分型の検査ごと無効にするため、クラス側とインターフェースがずれても`tsc`が検出できず（`pump`をリネームしても型検査は通る）、実行時に`self.pump is not a function`で初めて表面化する。メソッドはアロー関数で包み、`prototype`側の実装を都度引かせる（テストが`WorkflowRunner.prototype`へ張ったスパイを効かせるため）。分割のために`private`を外すと、`src/view/`や`extension.ts`から`runner.runs.get(id)!.runState = ...`や`runner.pump(id)`を直接書いても型検査が止められず、`persist()`・`notify()`を経ない書き換えで永続化した値とメモリ上の`LiveRun`が食い違うため（PR #157のレビュー指摘）。
 
@@ -4957,13 +4958,14 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 | `waitingApproval` へ | id・要求の1行要約（`TaskPendingApprovalSnapshot`） |
 | `blocked` へ         | id・衝突して統合できていない旨                     |
 | タスクからメッセージを受信（`taskMessage`。§16.34、roadmap W9、Issue #547） | 送信元id・本文・返信待ちかどうか |
+| 統合PR/MRに新しいレビューコメントが付く（`reviewComment`。§16.30、roadmap W5、Issue #339） | 投稿者・本文 |
 | run終了              | 全体の結果・統合とPR/MRの結果                      |
 
 - 送信は走行中のターンへ割り込まない。ターン実行中に起きたイベントは溜めておき、**次の送信へまとめて添える**。§16.21の `composeNextPrompt` と同じ流儀にする（合流させないと、並列で3タスクが同時に終わった瞬間に3ターン連続で走る）
 - 人の発話とイベント通知が同時に溜まった場合、**人の発話を基準の本文とし、イベントはその前に添える**。§16.21の対処（`basePrompt` は常に全量温存し、削るのはメッセージ側だけ）と同じ理由で、人の指示が押し出されてはならない
 - run全体で送るイベント通知の総数に上限を置く（`MAX_ORCHESTRATOR_EVENTS_PER_RUN`。`MAX_MESSAGES_PER_RUN` と同じ500）。超えた分は落とし、落としたことを次の通知に添える
 
-定期ポーリング（N秒ごとに現状を見せて報告させる）は採らない。変化が無い間もターンを消費し続けるうえ、イベント通知があれば「変化した瞬間」に必ず届くため、ポーリングで拾える追加の情報が無い。
+定期ポーリング（N秒ごとに現状を見せて報告させる）は採らない。変化が無い間もターンを消費し続けるうえ、イベント通知があれば「変化した瞬間」に必ず届くため、ポーリングで拾える追加の情報が無い。**これはオーケストレーターのターンを駆動する頻度についての話であり、外部（ホスト側）の状態をCLIで取りに行く頻度とは別の話。** レビューコメントの取得（`reviewComment`、§16.30）はCLIをポーリングするが、変化（新しいコメント）を見つけた回だけ通知するため、この節の「定期ポーリングは採らない」（＝変化が無くてもターンを消費させない）という原則自体は破っていない。
 
 #### 道具（MCPツール）
 
@@ -5337,6 +5339,87 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 この3ツールは計画の実行方法（タスクの追加・削除・依存の組み替え）に関する判断であり、人の承認を要さない。一方で、チームの範囲を越える・設計前提を変える・受入基準を緩めるといった**方針そのものに関わる変更**は、この3ツールでは適用せず、既存の`ask_user`（§16.33）で人に確認を仰ぐよう、オーケストレーターへのシステムプロンプト（`buildIntroBody`）で明示している。
 
 また、§16.27の`taskStalled`（停滞検知）通知を受け取った際の振る舞いとして、`buildIntroBody`に「停滞したタスクに対しては、`update_task_prompt`での言い回し変更に加えて、必要なら`add_task`/`remove_task`/`update_task_dependencies`で計画自体の組み替えを検討する」旨の案内を追加した。
+
+### 16.30 PR/MRのレビュー結果を取り込んでタスクへ反映する（roadmap W5、Issue #339）
+
+統合PR/MR（§16.18）を作った後、人がレビューコメントを付けても、これまでのワークフローにはそれを拾う経路が無かった。オーケストレーターはレビューが付いたことに気づけず、コメントへの対応は完全に人の手作業（ワークフローの外）に委ねられていた。本節は、統合PR/MRに新しく付いたレビューコメントを`fetchReviewComments`（`forge.ts`）でポーリング取得し、オーケストレーターへの通知（既存の`notifyOrchestrator`経路）として届ける機能を足す。
+
+#### 承認ゲートを置かない（Issue #497の方針転換）
+
+Issue #341（epic）の方針転換により、「判断するのはオーケストレーターであって人ではない」。したがって、取り込んだレビューコメントに対して何らかの調整（`add_task`/`update_task_prompt`/`send_message`等、§16.29・既存経路）をオーケストレーターが行う際、本機能自体は人の承認ゲートを一切挟まない。唯一の追跡手段として、取り込んだコメントの全文を`WorkflowWarning`（`kind: 'reviewCommentImported'`）としてワークフローViewの警告欄へ記録する。§16.29の「監査ログ（承認ゲートが無い代わりの説明責任）」と同じ考え方で、`message`は`textContent`として描画される（§16.8・§16.34）ため、レビューコメントの本文（人が書いた任意の文字列）をそのまま渡してもHTMLとしては解釈されない。
+
+#### いつ・何を取得するか
+
+1. **統合PR/MRを作れた実行だけが対象。** `finalizeForge`（`runner.ts`）が統合PR/MRの作成に成功し、URLから番号を取り出せた直後に`startReviewCommentPoll`（`runnerReviewComments.ts`）を1度だけ呼ぶ。番号を取り出せなかった場合はログだけ残して飛ばす（`fetchReviewComments`が番号を要求するため）。`pullRequest: 'none'`（統合PR/MRを作らない設定）や、統合PR/MRの作成自体が失敗した実行は対象にならない——`shouldCreateIntegrationPullRequest`による既存のゲート（§16.18）をそのまま通っているため、レビューコメント側に別のゲートを重ねて実装する必要は無い
+2. **取得コマンドは既存のCI状態取得（§16.36）と同じ形。** GitHubは`gh pr view <number> --json=reviews,comments`（`reviews`＝レビュー本体に添えたコメント、`comments`＝PRへのissueコメントの両方が対象。個別レビューコメント——GitHubの「review comments」API相当——はこのコマンドの出力に含まれないため対象外。今回はここまでとし、コード行への行コメントの取り込みはスコープ外とする）、GitLabは`glab api projects/:id/merge_requests/<iid>/notes`（`system: true`のシステム通知は除外）。両方とも`CliCommandRunner`（`forge.ts`）を経由し、新しい実行経路は作らない
+3. **取得の間隔は設定で決める。** `agent.workflows.reviewCommentPollIntervalSec`（既定600秒＝10分、`machine-overridable`、範囲は0〜2147483秒）。「取得のタイミングと頻度は設定で決める。APIを叩き続けない」（Issue #339）を受け、CIの完了待ちポーリング（§16.36、既定15秒固定）よりずっと長い値を既定にした。0にすると取得しない（無効化できる）。範囲外・非整数の値は既定値へフォールバックする（`normalizeReviewCommentPollIntervalSec`、`config.ts`。他の`agent.workflows.*`設定と同じ「範囲外はVSCode側のJSON schema検証を通り抜けてもランタイムで丸める」流儀、§16.16）
+4. **タイマーは`messaging.waitingReplyPollTimer`（§16.21）と同じ後始末の流儀。** `setInterval`で立て`.unref()`する（プロセス・テストの終了を妨げない）。最終マージ・判断が確定してこれ以上PR/MRの状態を追う必要が無くなった時点（`closeMessagingIfFinalMergeSettled`）と、拡張機能の終了時（`dispose()`）の両方から`closeReviewCommentPoll`（冪等）を呼ぶ
+5. **新しく見つかったコメントだけを届ける。** `id`（GitHubは`review:<databaseId>` / `comment:<databaseId>`、GitLabは`note:<id>`の形でホスト・種別ごとに前置詞を付ける）ごとに`seenCommentIds`（`Set`、run単位）で重複排除する。2周目以降のポーリングでは、前回までに届けた分は再通知しない
+
+#### 届け方（サニタイズは1度だけ、§16.24・§16.34）
+
+`buildReviewCommentBody`（`runnerReviewComments.ts`）は`runnerMessaging.ts`の`buildTaskMessageEventBody`/`buildTaskQuestionEventBody`と同じ規約に従う——**ここではサニタイズしない、プレーンテキストの本文を組み立てるだけ**。無害化は`orchestratorSession.ts`の`wrapEvent`が`<workflow-event kind="reviewComment">`で囲むときに`escapeAngleBrackets(stripControlCharsPreservingNewlines(...))`で一度だけ行う。本文はレビューコメントという外部由来・未検証のテキストであり、指示ではなくデータとして扱う（§16.24）。本文の長さは`MAX_MESSAGE_BODY_LENGTH`（`messaging.ts`、`send_message`等と同じ上限）でコードポイント単位に切り詰める。切り詰め無しに載せると、コメント1件の長さに`live.warnings`・オーケストレーターへの通知本文の量が際限なく引きずられるため
+
+`pollReviewComments`は、新しいコメントが1件見つかるたびに`notifyOrchestrator`（`kind: 'reviewComment'`）と`live.warnings.push({ kind: 'reviewCommentImported', ... })`の両方を呼ぶ。前者がオーケストレーターへの配送、後者が人向けの監査ログで、経路も届け先も別（§16.29と同じ二本立て）
+
+#### 前提が欠けている場合は警告だけ、runは止めない
+
+統合PR/MRを作れた時点でCLIの有無・認証は一度通っているはずだが、認証切れ・CLIの更新等で後から失われる場合がある。`fetchReviewComments`がCLI呼び出しの失敗（`code !== 0`）を`{ ok: false, message }`として返した場合、`pollReviewComments`はログへ警告を残すだけで次の周回を待つ（§16.18「前提が欠けている場合」・タスク間メッセージングの「無くても実行は止めない」設計と同じ方針）。runの成否・スケジューリングには一切影響しない
+
+#### `startReviewCommentPoll`の呼び出しと`live.finished`の競合（実装時に踏んだ穴）
+
+`pump()`（`runner.ts`）は、全タスクが`done`等で実行が終わったと判定した時点で`live.finished = true`を立ててから`finalizeForge`を呼ぶ。つまり`startReviewCommentPoll`（`finalizeForge`の内側から呼ばれる）が動く時点では、run自体は既に「終了」扱いになっている。`pollReviewComments`の実装当初、ガードに`live.finished`を含めていたため、統合PR/MR作成直後の1回目の取得（起動直後に必ず1回走る分）が毎回無条件で早期returnし、レビューコメントが1件も届かないという事故があった。「実行が終わっている＝もう何もしない」という直感に反して、統合PR/MRの作成・CIの完了待ち・最終マージ・そして本機能のポーリングは、いずれも`live.finished`が立った**後**に進む処理であり、`live.finished`を汚染源として使ってはいけない。停止判定は`live.reviewCommentPoll`の有無（`startReviewCommentPoll`/`closeReviewCommentPoll`が管理）だけで行う
+
+さらに、`fetchReviewComments`の`await`中に最終マージが確定して`closeReviewCommentPoll`が`live.reviewCommentPoll`を先にundefinedへ戻すことがある（両者は非同期に競合しうる）。この場合でも、既に取得できているコメントを「ポーリングが閉じられたから」という理由で握りつぶさない——`await`前に取り出しておいた`poll`（`host`/`cwd`/`number`/`seenCommentIds`）への参照を使い続け、`await`後に再確認するのは「runそのものが破棄されていないか」（`self.runs.get(runId)`の存否）だけに留める
+
+#### 届いた後に手を打てる状態にする（レビューblocking指摘への対応、2026-08-23）
+
+初版の実装は、レビューコメントの通知が届くところまでしか届けていなかった。`pump()`（`runner.ts`）は`getRunOutcome`が`'running'`でなくなった時点で`live.finished`を立ててから`finalizeForge`を呼ぶため、`finalizeForge`の中で立ち上がる本機能のポーリングが最初のコメントを届ける時点で、runは必ず`outcome !== 'running'`になっている。一方`runFinishedReason`（`runnerOrchestrator.ts`）は`outcome !== 'running'`なら`add_task`等の制御ツールを一律拒否するため、オーケストレーターは通知を受けても§16.29のツールで対応する手段が無かった（レビューblocking指摘）。Issue #339の受入基準「コメントを受けたタスク調整がW4と同じ経路を通り、適用した内容が警告欄へ全文で残る」を満たすには、届いた後に実際に手を打てる必要がある。
+
+レビューで提示された3案（A: 計画変更ツールをポーリング中は許可する／B: レビュー待ちの間runを終了扱いにしない／C: 受入基準を下げる）のうち、**Aを採った**。Bは`getRunOutcome`・`live.finished`の意味自体を変え、W1（最終マージ判断）・W11（CI待ち）と影響範囲が重なるため見送った。Cは受入基準を下げる判断であり、そもそも採る選択肢ではない。
+
+1. **`planChangeFinishedReason`（`runnerOrchestrator.ts`）を新設し、`update_task_prompt`/`add_task`/`remove_task`/`update_task_dependencies`の4ツールだけに適用する。** 通常の`runFinishedReason`と同じ判定に加え、`live.reviewCommentPoll !== undefined`（レビューコメントのポーリングが生きている）間だけ許可する例外を1つ足した。**例外はこの4ツールに限る。** `stop_task`/`retry_task`/`continue_task`/`decide_approval`/`ask_user`等は引き続き`runFinishedReason`をそのまま使う——これらは「終わったタスクの実行そのものへ手を加える」経路であり、「まだ始まっていないタスクへの追加・変更」に閉じる計画変更ツールとは性質が違う。ここまで開けると「終わったはずのrunを人の意図しないタイミングで動かし直せる」範囲が広がりすぎる（レビュー指摘の確認事項3）
+2. **`live.finished`を戻す必要があるか（レビュー指摘の確認事項1）: ある。** `pump()`は`live.finished`が立っていると即座に早期returnするため、`add_task`が`live.runState`へ`pending`タスクを加えても、`live.finished`を戻さない限りスケジューラは一切それを拾わない。`resumeIfFinishedForPlanChange`（`runnerOrchestrator.ts`）を新設し、`add_task`/`remove_task`/`update_task_dependencies`の3つ（`self.pump(runId)`を呼ぶ関数）だけが、`self.pump(runId)`の直前でこれを呼ぶ。`update_task_prompt`は`pump()`を呼ばないため対象外
+3. **戻した場合に`finalizeForge`が二度走らないか（レビュー指摘の確認事項2）: 「二度走ることはある。ただし2度目は統合PR/MRを作り直さない」。** `pump()`のJSDoc（Issue #432-2）は「1周目が`succeeded`だったrunで2周目の`succeeded`到達は現状のコードでは起こらない」としていたが、本節の変更でこの前提が崩れる——`add_task`で加えた`pending`タスクが後になって完了し、runが再び終了条件を満たすと、2周目としてpump()の終了ブロックへ到達し`finalizeForge`が2回目として呼ばれうる（`getRunOutcome`は`pending`が1件でもあれば無条件で`'running'`を返すため、`resumeIfFinishedForPlanChange`を呼んだ同一の`pump()`呼び出しの中で即座に2回目が呼ばれることは無い。新しいタスクが完了して初めて起こる）。この2回目の呼び出しに備えて、`finalizeForge`（`runner.ts`）の先頭に冪等ガードを足した: `live.integrationPullRequest !== undefined`なら、統合PR/MRを作り直さず即returnする。`pump()`側のJSDoc（Issue #432-2の箇所）も、この新しい経路と冪等ガードの存在を明記するよう更新した
+
+**この変更の効果として、レビューコメントを受けて`add_task`したタスクが完了した後は、そのタスクの成果が既存の統合ブランチへ取り込まれる（§16.17、通常のタスク完了と同じ経路）ものの、統合PR/MRを2回目として作り直したり、mainへの最終マージをやり直したりはしない。** 既に作成・マージ済みの統合PR/MR自体を更新したい場合（例: 追加タスクの成果を含めてもう一度マージする）は、本Issueのスコープ外とし、人がワークフローViewから統合ブランチの状態を見て判断する（既存の「再マージ」ボタン等の経路が使える場面かどうかは別途確認が要る想定。フォローアップ課題）。
+
+#### レビューを取り込めるのは最終マージ確定までである（2度目のレビューblocking指摘への対応、2026-08-23）
+
+上記1〜3だけでは、`reviewCommentPoll`が生きている＝まだ手を打てる、という前提が崩れる場面が残っていた。`finalMerge: auto`では、統合PR/MRの作成直後に`startReviewCommentPoll`が走り、その直後に`performFinalMerge`でmainへ実際にマージされる。ところが`closeMessagingIfFinalMergeSettled`（MCPサーバーとレビューコメントのポーリングを両方閉じる関数）は、`pump()`が`finalizeForge`をfire-and-forgetで呼ぶのと同じ同期経路で先に1度呼ばれてしまい、その時点ではまだ`live.reviewCommentPoll`が`undefined`のため閉じ損なっていた。結果として、mainへのマージが**既に完了した後**もレビューコメントのポーリングだけが開いたまま残り続け、その状態で届いたコメントを受けて`add_task`すると、`planChangeFinishedReason`の例外（`live.reviewCommentPoll !== undefined`のみを見る）が素通しして受理してしまう。追加したタスクの成果は統合ブランチには積まれるが、統合PR/MRは既にクローズ済み（マージ済み）で二重作成もしない設計（上記3）のため、**mainへは永久に届かない。** しかもオーケストレーターへはそれが伝わらず、Viewにも出ない。**さらに実害として、`finalMergeOutcome`確定後もレビューコメント取得CLI（`gh pr view --json reviews,comments`等）が既定600秒ごとに永久に叩かれ続ける（VSCodeを閉じるまで止まらない）ことを、タイマーを複数周期進めて実測で確認した。**Issue #339の「取得の頻度は設定で控えめに置き、APIを叩き続けない」という前提に反していた。
+
+レビューで提示された3案（A: 2周目に統合PR/MRを作り直す／B: レビューを取り込めるのは最終マージ確定までに限る／C: 現状のまま限界だけ文書化する）のうち、**Bを採った。** Aは`live.integrationPullRequest`の意味づけ（1runにつき1件を前提にした型・警告・Viewの表示）・PR番号の持ち方・W11のCI待ちまで波及し、W5の範囲としては重い。Cは`add_task`が受理されたのに成果がmainへ届かないという乖離を黙って残す形になり、受入基準を下げるのと実質同じ結果になるため採らない。
+
+4. **`planChangeFinishedReason`（`runnerOrchestrator.ts`）に、`live.finalMergeOutcome !== undefined`（最終マージの判断が`'merged'`/`'failed'`/`'held'`のいずれかで確定済み）なら`live.reviewCommentPoll`の生死に関わらず拒否する分岐を足した。** 拒否時は「最終マージの判断が確定しているため、これ以降は計画を変更できない」旨の理由をオーケストレーターへ返す（黙って乖離させない。会話は続けられる）。**この分岐は、下記「レビューコメントのポーリングを最終マージ確定の1点で閉じる」の修正が入る前は`finalMerge: auto`で実際に効いていたが、その修正でポーリング自体が最終マージ確定と同時に閉じるようになった後は、多層防御（ポーリングを閉じ損なう経路が将来また出ても計画変更そのものを拒否できる保険）としての意味合いが主になる。** `finalMerge: orchestrator`/`confirm`（判断待ち）では、決定時に`closeMessagingIfFinalMergeSettled`がMCPサーバーとレビューコメントのポーリングを同時に閉じるため、この分岐は元々ここでは効かない。**この結果、「まだ手を打てる」ウィンドウは実質「最終マージがまだ確定していない間」に一致する**——`finalMerge: orchestrator`/`confirm`の判断待ちの間（`live.finalMergeDecision !== undefined`）はレビューコメントを受けた`add_task`が引き続き通り、その後の最終マージ確定（`decideFinalMerge`）でT2等の追加タスクの成果を含めてmainへ1回だけ正しくマージされる。`finalMerge: auto`で既にマージが確定した後は拒否される
+
+**MCPサーバーが既に閉じられている場合に`add_task`を呼べてしまわないか（レビューの非blocking確認事項）を合わせて確認した。** `closeMessagingIfFinalMergeSettled`は`closeMessaging`（MCPサーバーのtransportを閉じる）と`closeReviewCommentPoll`を常に同時に呼ぶ実装になっている。`finalMerge: orchestrator`/`confirm`の判断待ちの間は、`live.finalMergeDecision !== undefined`のガードでこの関数自体が早期returnするため、MCPサーバーとレビューコメントのポーリングは常に同じタイミングで開いたまま/閉じたままになり、両者がずれることはない。`finalMerge: auto`では`closeMessaging`が`finalizeForge`の完了を待たずに先に走る——つまりレビューコメントのポーリングが開く時点で、MCPサーバーは既に閉じられている。したがって本番の呼び出し経路では、この状態で`add_task`のMCPツール呼び出しがオーケストレーター（LLM）からサーバーへ届くこと自体が無い（transportが閉じているため接続できない）。`live.finalMergeOutcome`ベースの拒否は、この状態でも将来の実装変更（MCPを閉じるタイミングの変更等）に対する多層防御として機能する
+
+**`live.finishedNotified`が2周目で二重に飛ばないかも確認した。** `closeMessagingIfFinalMergeSettled`は`if (!live.finishedNotified) { notifyOrchestratorRunFinished(...); live.finishedNotified = true; }`という既存のガードを持っており、この関数自体が最終マージ確定後にしか本体を実行しない（`live.finalMergeDecision !== undefined`の間は早期return）ため、2周目で再度この関数へ到達しても、既に`finishedNotified`が立っていれば通知は送られない。追加の変更は不要
+
+#### レビューコメントのポーリングを最終マージ確定の1点で閉じる（3度目のレビューblocking指摘への対応、2026-08-23）
+
+4の分岐は「add_taskを拒否する」対策であって、レビューコメント取得CLIが永久に叩かれ続ける問題自体は直っていなかった。**`performFinalMerge`（`runner.ts`）が`live.finalMergeOutcome`を確定させる各分岐（`haltedByUser`による中止・マージ失敗・マージ成功）の直後で、`closeReviewCommentPoll(live)`を直接呼ぶよう修正した。** これにより、`finalMerge: auto`でも最終マージが確定した瞬間にポーリングのタイマーが止まる（実測: 修正前は最終マージ確定後にタイマーを600秒×10周期進めると取得CLIの呼び出しが1回から11回まで増え続けていたが、修正後は増えない）。
+
+**「MCPを閉じるのとポーリングを閉じるのを`closeMessagingIfFinalMergeSettled`の同じ順序制約に乗せるか、最終マージ確定の1点で別途閉じるか」は、後者（別途閉じる）を採った。** 理由は次の2点。
+
+- `finalMerge: auto`が`closeMessagingIfFinalMergeSettled`を`finalizeForge`の完了を待たず同期的に呼ぶのは、判断待ちが無い`auto`ではMCPを判断待ちなしで即座に閉じてよいという意図的な設計であり、この呼び出し順序自体を変える（`finalizeForge`の完了を待ってから閉じるよう遅らせる）と、`auto`でMCPが開いたままになる期間が新たに生まれ、影響範囲が本Issueの外まで広がる
+- `live.finalMergeOutcome`は「最終マージの判断が確定した」ことそのものを表す状態であり、レビューコメントのポーリングという「その判断が付くまでは有用」な機能の寿命を、この状態の確定点へ直接結びつける方が素直（`orchestrator`/`confirm`の`merge`/`hold`決定は、引き続き`closeMessagingIfFinalMergeSettled`（`decideFinalMerge`末尾）がMCP・ポーリングの両方をまとめて閉じる。こちらは`live.finalMergeDecision`を判断確定の同期処理内で先に`undefined`へ戻すため、`auto`のような競合は起きず、直す必要が無い）
+
+`closeReviewCommentPoll`自身は`live.reviewCommentPoll === undefined`なら何もしない冪等な実装（`runnerReviewComments.ts`）なので、複数の呼び出し経路（`performFinalMerge`・`closeMessagingIfFinalMergeSettled`の両方）から重ねて呼ばれても安全。
+
+**`finalMergeOutcome`を確定させる4箇所（`runner.ts`の`'failed'`×2・`'merged'`・`'held'`）すべてで閉じ漏れが無いことを確認した。** `haltedByUser`による中止と`performFinalMerge`末尾のマージ成功/失敗の3箇所は、本節の修正で`closeReviewCommentPoll(live)`を直接呼ぶ。残る`'held'`（`decideFinalMerge`の`hold`決定、および`finalMergeDecisionTimeoutSec`超過による自動`hold`。どちらも同じ`decideFinalMerge`を通る）は、`live.finalMergeOutcome = 'held'`を設定した直後に`closeMessagingIfFinalMergeSettled`が同期的に呼ばれ、そちらがポーリングを閉じる。
+
+#### `finalMerge: 'pr-only'`（マージを人に委ねる設定）ではポーリングを閉じない（意図の確認、2026-08-23）
+
+`finalMerge: 'pr-only'`は`shouldRunFinalMerge`・`needsFinalMergeDecision`のどちらも`false`を返すため、`finalizeForge`は統合PR/MRを作った時点で何もせず戻り、`performFinalMerge`（＝上記の閉じ口）を一切通らない。`live.finalMergeOutcome`はrunが終わった後も`undefined`のまま残り、`live.reviewCommentPoll`は開いたまま、runが`succeeded`で終わった後もレビューコメント取得CLIが既定間隔（600秒）ごとに呼ばれ続ける（実測で確認済み）。
+
+**これは意図的な挙動として扱う（不具合ではない）。** `pr-only`は「統合PR/MRを作るところまでで、mainへのマージは人が別途行う」設定であり、その統合PR/MRが（人の手で閉じられるまで）開いている間はレビューを取り込み続けるのが設定の趣旨に沿う。実際、`planChangeFinishedReason`も`live.finalMergeOutcome === undefined`のままなので計画変更を通し続け、レビューを受けて追加したタスクの成果は開いたままの統合PRへ通常のタスク完了と同じ経路で載る——`auto`で問題になっていた「成果がmainへ届かない」という乖離は`pr-only`では起こらない（マージ自体を人が握っているため、届ける先が無くなることが無い）。
+
+**寿命の上限（例: 一定時間で強制的にポーリングを止める）は、今回は設けない。** 統合PR/MRが実際にクローズ・マージされたかを検知する仕組みが無いと、「開いている間だけ取り込む」という上記の趣旨を保ったまま安全に止めることができず、それを作るのはW5（Issue #339）の範囲を超える（統合PR/MR自体の状態をポーリングで確認する別機能が要る）。runを何本も`pr-only`で回すと、終わったrunのぶんだけタイマーが積み上がる点は限界として残る——ただし各runの`live`は`dispose()`（拡張機能の終了・ウィンドウのリロード等）で`closeReviewCommentPoll`が呼ばれ確実に閉じるため（`dispose()`内の呼び出し参照）、無制限に積み上がるのはそのセッション（VSCodeを閉じるまで）の間に限られる。統合PR/MRのクローズ検知によるポーリングの自動停止は、本Issueのスコープ外のフォローアップ課題とする。
+
+#### 検証
+
+`test/unit/forge.test.ts`が`parseGithubReviewComments`/`parseGitlabReviewComments`（レビュー本体とissueコメントの混在・空本文の除外・GitLabのシステム通知除外・壊れたJSON応答の扱い）・`fetchReviewComments`（ホストごとのCLI引数組み立て、CLI呼び出し失敗時に`ok: false`になること）を確かめる。`test/unit/config.test.ts`が`reviewCommentPollIntervalSec`の丸め（既定値・範囲内の値の通過・範囲外の値のフォールバック）を確かめる。`test/unit/runner.test.ts`が、本番の呼び出し経路（`finalizeForge` → `startReviewCommentPoll` → `setInterval`の発火 → `pollReviewComments`）を通して、統合PR/MRにレビューコメントが付くと警告欄へ全文で記録されオーケストレーターへも`<workflow-event kind="reviewComment">`として通知されること・同じコメントは2周目のポーリングで重複して取り込まないこと（idでの重複排除）・`reviewCommentPollIntervalSec: 0`はポーリングを行わないこと・レビューコメント取得のCLI呼び出しが失敗してもrunは止まらないことを確かめる。**さらに、レビューコメントが届いた後に`add_task`が実際に通り、追加したタスクが本番の呼び出し経路（`pump()`の再起動）で実際にスケジュールされて完走すること・その間`finalizeForge`が統合PR/MRを二重に作らないこと（`live.integrationPullRequest`ベースの冪等ガードで確かめる）を、`planChangeFinishedReason`の例外を`if (false)`へ戻すと実測どおり失敗することを確認済みの回帰テストで確かめる（前掲「届いた後に手を打てる状態にする」参照）。**さらに、`finalMerge: auto`で最終マージが既に確定した後にレビューコメントが届いた場合はadd_taskが理由付きで拒否されること（mainへ成果が届かず終わる乖離を防ぐ回帰）と、`finalMerge: orchestrator`で最終マージの判断待ちの間にadd_taskしたタスクが実際に完走し、その後の`decideFinalMerge(merge)`でT1・T2両方の成果を含めてmainへ1回だけマージされること（「gateの先」＝成果が実際にmainへ届くところまでの検証）を、`live.finalMergeOutcome !== undefined`の分岐を`if (false)`へ戻すと実測どおり失敗することを確認済みの回帰テストで確かめる（前掲「レビューを取り込めるのは最終マージ確定までである」参照）。**さらに、`finalMerge: auto`で最終マージが確定した後、既定間隔（600秒）×10周期ぶんタイマーを進めてもレビューコメント取得CLI（`--json=reviews,comments`）の呼び出し回数が増えないこと（コーディネーターの実測で確認された「11回目まで呼ばれ続ける」漏れの回帰）を、`performFinalMerge`末尾の`closeReviewCommentPoll(live)`呼び出しを外すと実測どおり失敗する（11回まで増える）ことを確認済みの回帰テストで確かめる（前掲「レビューコメントのポーリングを最終マージ確定の1点で閉じる」参照）。**さらに、`finalMerge: 'pr-only'`ではrunが`succeeded`で終わった後もレビューコメント取得CLIの呼び出し回数がタイマーを進めるほど増え続けること（＝ポーリングが意図的に生きたままであること）を、断言する形の回帰テストで固定する（前掲「`finalMerge: 'pr-only'`ではポーリングを閉じない」参照）。これにより、将来`pr-only`でも閉じる方向へ実装が変わった場合にテストが検知する。**実ホストでのレビューコメント取得コマンドが実引数として受理されるかは[manual-test.md](manual-test.md)のW-Jに残す。
 
 ### 16.32 タスクからオーケストレーターへ判断を仰ぐ経路（`ask_orchestrator`、roadmap W7、Issue #571）
 

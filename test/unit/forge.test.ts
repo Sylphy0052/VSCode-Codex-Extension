@@ -14,6 +14,7 @@ import {
   createPullRequest,
   detectForgeHost,
   fetchCiConclusion,
+  fetchReviewComments,
   forgeCliCommand,
   isBranchNotUpToDateError,
   isRetryablePushError,
@@ -23,7 +24,9 @@ import {
   normalizeForgeHostConfig,
   normalizePullRequestLayerConfig,
   parseGithubCiConclusion,
+  parseGithubReviewComments,
   parseGitlabCiConclusion,
+  parseGitlabReviewComments,
   parsePullRequestNumberFromUrl,
   PUSH_BRANCH_MAX_ATTEMPTS,
   pushBranch,
@@ -1312,6 +1315,112 @@ describe('fetchCiConclusion', () => {
     cli.respond('gh', ['pr', 'view'], { code: 1, stdout: '', stderr: 'authentication failed' });
     const result = await fetchCiConclusion(cli, 'github', '/repo/_integration', 42);
     expect(result.conclusion).toBe('failed');
+    expect(result.message).toContain('authentication failed');
+  });
+});
+
+describe('parseGithubReviewComments（design.md §16.30、Issue #339）', () => {
+  it('reviewsとcommentsの両方から本文の有るものだけを取り込む', () => {
+    const stdout = JSON.stringify({
+      reviews: [
+        { databaseId: 1, author: { login: 'alice' }, body: 'ここを直してください', submittedAt: '2026-08-23T00:00:00Z' },
+        { databaseId: 2, author: { login: 'bob' }, body: '', submittedAt: '2026-08-23T00:00:00Z' },
+      ],
+      comments: [
+        { databaseId: 10, author: { login: 'carol' }, body: 'LGTM追記', createdAt: '2026-08-23T01:00:00Z' },
+      ],
+    });
+    const result = parseGithubReviewComments(stdout);
+    expect(result.ok).toBe(true);
+    expect(result.comments).toEqual([
+      { id: 'review:1', author: 'alice', body: 'ここを直してください', createdAt: '2026-08-23T00:00:00Z' },
+      { id: 'comment:10', author: 'carol', body: 'LGTM追記', createdAt: '2026-08-23T01:00:00Z' },
+    ]);
+  });
+
+  it('本文が空のレビュー（承認のみ等）は除外する', () => {
+    const stdout = JSON.stringify({
+      reviews: [{ databaseId: 1, author: { login: 'alice' }, body: '   ' }],
+      comments: [],
+    });
+    expect(parseGithubReviewComments(stdout).comments).toEqual([]);
+  });
+
+  it('壊れたJSONはok: falseとして扱う', () => {
+    const result = parseGithubReviewComments('not json');
+    expect(result.ok).toBe(false);
+    expect(result.comments).toEqual([]);
+  });
+
+  it('reviews/commentsキーが無い応答は空配列として扱う（想定外の型でも例外を投げない）', () => {
+    const result = parseGithubReviewComments(JSON.stringify({ someOtherField: 1 }));
+    expect(result.ok).toBe(true);
+    expect(result.comments).toEqual([]);
+  });
+});
+
+describe('parseGitlabReviewComments（design.md §16.30、Issue #339）', () => {
+  it('system: trueのnote（自動生成）を除外し、人が書いたnoteだけを取り込む', () => {
+    const stdout = JSON.stringify([
+      { id: 100, author: { username: 'alice' }, body: 'ここを直してください', created_at: '2026-08-23T00:00:00Z', system: false },
+      { id: 101, author: { username: 'ci-bot' }, body: 'ラベルを変更しました', created_at: '2026-08-23T00:00:00Z', system: true },
+    ]);
+    const result = parseGitlabReviewComments(stdout);
+    expect(result.ok).toBe(true);
+    expect(result.comments).toEqual([
+      { id: 'note:100', author: 'alice', body: 'ここを直してください', createdAt: '2026-08-23T00:00:00Z' },
+    ]);
+  });
+
+  it('壊れたJSON・配列でない応答はok: falseとして扱う', () => {
+    expect(parseGitlabReviewComments('not json').ok).toBe(false);
+    expect(parseGitlabReviewComments(JSON.stringify({ notAnArray: true })).ok).toBe(false);
+  });
+});
+
+describe('fetchReviewComments（design.md §16.30、Issue #339）', () => {
+  it('GitHubは gh pr view <number> --json=reviews,comments を呼ぶ', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], {
+      code: 0,
+      stdout: JSON.stringify({
+        reviews: [],
+        comments: [{ databaseId: 1, author: { login: 'alice' }, body: 'hi', createdAt: '2026-08-23T00:00:00Z' }],
+      }),
+      stderr: '',
+    });
+    const result = await fetchReviewComments(cli, 'github', '/repo/_integration', 42);
+    expect(result.ok).toBe(true);
+    expect(result.comments).toHaveLength(1);
+    expect(cli.calls[0]).toEqual({
+      command: 'gh',
+      args: ['pr', 'view', '42', '--json=reviews,comments'],
+      cwd: '/repo/_integration',
+    });
+  });
+
+  it('GitLabは glab api projects/:id/merge_requests/<number>/notes を呼ぶ', async () => {
+    const cli = new FakeCli();
+    cli.respond('glab', ['api'], {
+      code: 0,
+      stdout: JSON.stringify([{ id: 1, author: { username: 'alice' }, body: 'hi', system: false }]),
+      stderr: '',
+    });
+    const result = await fetchReviewComments(cli, 'gitlab', '/repo/_integration', 7);
+    expect(result.ok).toBe(true);
+    expect(result.comments).toHaveLength(1);
+    expect(cli.calls[0]).toEqual({
+      command: 'glab',
+      args: ['api', 'projects/:id/merge_requests/7/notes'],
+      cwd: '/repo/_integration',
+    });
+  });
+
+  it('CLI呼び出し自体が失敗（終了コード非0）すればok: falseとして扱う（認証切れ等でもrunを止めない前提の材料）', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], { code: 1, stdout: '', stderr: 'authentication failed' });
+    const result = await fetchReviewComments(cli, 'github', '/repo/_integration', 42);
+    expect(result.ok).toBe(false);
     expect(result.message).toContain('authentication failed');
   });
 });

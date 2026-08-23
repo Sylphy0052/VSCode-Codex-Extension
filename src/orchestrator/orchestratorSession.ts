@@ -108,6 +108,19 @@ export type OrchestratorEventKind =
    */
   | 'taskQuestion'
   /**
+   * 統合PR/MRにレビューコメントが付いた（design.md §16.30、roadmap W5、Issue #339）。
+   * `runnerReviewComments.ts`の`pollReviewComments`が、設定 `agent.workflows.
+   * reviewCommentPollIntervalSec` の間隔で統合PR/MRのレビューコメントを取得し、前回までに
+   * 見ていないコメントを1件ずつこの種別で送る。本文には投稿者・本文をそのまま載せる
+   * （外部由来のテキストであり、指示ではなくデータとして扱う。`wrapEvent`が
+   * `<workflow-event>`で囲んで無害化する。`taskMessage`/`taskQuestion`と同じ「本文の
+   * 組み立て側ではサニタイズしない」規約）。オーケストレーターは`add_task`/
+   * `update_task_prompt`等（design.md §16.29）で対応するタスクを組み、人の承認は
+   * 挟まない（Issue #497の方針転換）。適用した内容は`reviewCommentImported`警告として
+   * ワークフローViewの警告欄へ全文で残す。
+   */
+  | 'reviewComment'
+  /**
    * 統合PR/MRを作成した後、mainへ最終マージするかどうかの判断を求める
    * （design.md §16.26、`finalMerge: orchestrator`）。`decide_final_merge`ツールで
    * `merge` / `hold` を理由付きで答える。応答が無いまま`agent.workflows.

@@ -566,6 +566,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // と同じくトップレベルへ配線し、`performFinalMerge`が呼ぶたびに現在値を読み直す
     readCiWaitTimeoutSec: () => readWorkflowsConfig().ciWaitTimeoutSec,
     readCiUpdateBranchMaxRetries: () => readWorkflowsConfig().ciUpdateBranchMaxRetries,
+    // レビューコメントの取得間隔（design.md §16.30、roadmap W5、Issue #339）。他のreadXxxと
+    // 同じくトップレベルへ配線し、`finalizeForge`が呼ぶたびに現在値を読み直す
+    readReviewCommentPollIntervalSec: () => readWorkflowsConfig().reviewCommentPollIntervalSec,
     // ask_user（design.md §16.33、Issue #583）の呼び出し上限。他のreadXxxと同じく
     // トップレベルへ配線し、`buildOrchestratorControlPort`が呼ぶたびに現在値を読み直す
     readMaxAskUserPerRun: () => readWorkflowsConfig().maxAskUserPerRun,

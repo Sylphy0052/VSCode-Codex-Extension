@@ -436,6 +436,10 @@ async function rebuildLiveRun(
     messagingHub: undefined,
     messagingSetupInFlight: undefined,
     messagingStartupWarnCount: 0,
+    // レビューコメントのポーリング（design.md §16.30）もmessagingと同じくこのプロセスで
+    // 新たに始める実行にだけ立てる（復元では作らない。`finalizeForge`が統合PR/MR作成後に
+    // 改めて開始する）
+    reviewCommentPoll: undefined,
     mergeResolutions: new Map(),
     // 復元した実行にはオーケストレーターセッションを作り直さない（会話は復元できない。
     // design.md §16.23「永続化と復元」）

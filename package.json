@@ -816,6 +816,14 @@
           "scope": "machine-overridable",
           "markdownDescription": "統合PR/MRのマージが「baseの最新でない」ことで拒否されたときに、`gh pr update-branch` / `glab mr rebase` で取り込み直してから再試行する最大回数（初回のマージ試行は含まない）。取り込み直すたびにCIの完了を待ち直す。上限を超えたら失敗として確定する（設計書 §16.36）。0にすると取り込み直しをせず初回の失敗をそのまま確定する。範囲外（0未満・100超過・非整数）の値は既定値（2回）にフォールバックする。"
         },
+        "agent.workflows.reviewCommentPollIntervalSec": {
+          "type": "number",
+          "default": 600,
+          "minimum": 0,
+          "maximum": 2147483,
+          "scope": "machine-overridable",
+          "markdownDescription": "統合PR/MRのレビューコメントを取得する間隔（秒）。統合PR/MRを作成できた実行だけが対象で、新しく見つかったコメントはオーケストレーターへ通知され（設計書 §16.30・§16.23）、対応するタスクの調整（`add_task`等）に人の承認は挟まない。適用した内容はワークフローViewの警告欄へ全文で残る。0にすると取得しない（既定は控えめに置き、APIを叩き続けない設計判断）。範囲外（0未満・上限超過・非整数）の値は既定値（600秒）にフォールバックする。"
+        },
         "agent.workflows.roadmapDir": {
           "type": "string",
           "default": "docs/roadmap",

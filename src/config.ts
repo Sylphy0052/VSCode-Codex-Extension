@@ -17,6 +17,7 @@ import { DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC } from './orchestrator/runner'
 import {
   DEFAULT_CI_WAIT_TIMEOUT_SEC,
   DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES,
+  DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC,
 } from './orchestrator/forge';
 import { DEFAULT_STALL_REPEAT_COUNT, MIN_STALL_REPEAT_COUNT, MAX_STALL_REPEAT_COUNT } from './loop/stallDetector';
 import {
@@ -312,6 +313,14 @@ export interface WorkflowsConfig {
    */
   ciUpdateBranchMaxRetries: number;
   /**
+   * 統合PR/MRのレビューコメントを取得する間隔（秒）（`agent.workflows.
+   * reviewCommentPollIntervalSec`、既定600秒、`machine-overridable`、design.md §16.30、
+   * roadmap W5、Issue #339）。統合PR/MRを作成できた実行だけが対象。0にすると取得しない
+   * （既定は控えめに置き、APIを叩き続けない設計判断。Issue #339）。権限には関わらないため
+   * `forge`/`finalMerge`ほど強い制限は要らない。
+   */
+  reviewCommentPollIntervalSec: number;
+  /**
    * オーケストレーターが`ask_user`（design.md §16.33、Issue #583）を1つのrunで呼べる回数の
    * 上限（`agent.workflows.maxAskUserPerRun`、既定3、`machine-overridable`）。方針1
    * 「確認は最低限」を仕組みで担保する唯一の機械的な手段。上限に達した以降の`ask_user`は
@@ -536,6 +545,9 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     ciUpdateBranchMaxRetries: normalizeCiUpdateBranchMaxRetries(
       c.get<unknown>('workflows.ciUpdateBranchMaxRetries'),
     ),
+    reviewCommentPollIntervalSec: normalizeReviewCommentPollIntervalSec(
+      c.get<unknown>('workflows.reviewCommentPollIntervalSec'),
+    ),
     maxAskUserPerRun: normalizeMaxAskUserPerRun(c.get<unknown>('workflows.maxAskUserPerRun')),
     autoResume: c.get<boolean>('workflows.autoResume') ?? DEFAULT_AUTO_RESUME,
     maxAutoResumeAttempts: normalizeMaxAutoResumeAttempts(
@@ -623,6 +635,23 @@ function normalizeCiUpdateBranchMaxRetries(value: unknown): number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 100
     ? value
     : DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES;
+}
+
+/**
+ * `agent.workflows.reviewCommentPollIntervalSec` の生値を安全な秒数へ丸める（design.md
+ * §16.30、Issue #339）。`normalizeCiUpdateBranchMaxRetries`と同じく0を有効な値として許す
+ * （0は「取得しない」の意）。`normalizeCiWaitTimeoutSec`等と異なり下限を1にしないのは、
+ * 0が「無効化」という積極的な意味を持つ値のため（`ciUpdateBranchMaxRetries`と同じ理由）。
+ * 非数値・非整数・負値・`MAX_TIMEOUT_SEC`超過はいずれも既定値
+ * （`DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC`）へ丸める。
+ */
+function normalizeReviewCommentPollIntervalSec(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_TIMEOUT_SEC
+    ? value
+    : DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC;
 }
 
 /**

@@ -170,6 +170,106 @@ function runFinishedReason(
 }
 
 /**
+ * 計画変更ツール（`update_task_prompt`/`add_task`/`remove_task`/`update_task_dependencies`）
+ * だけに適用する終了判定（design.md §16.30、Issue #339 blocking指摘）。
+ *
+ * 通常は`runFinishedReason`と同じ（`outcome !== 'running'`なら拒否）だが、**統合PR/MRの
+ * レビューコメントのポーリングが生きている間（`live.reviewCommentPoll !== undefined`）
+ * かつ最終マージがまだ確定していない間（`live.finalMergeOutcome === undefined`）**だけ
+ * 例外的に許可する。`finalizeForge`（統合PR/MR作成）は`pump()`が`live.finished`を
+ * 立てた**後**に走るため、レビューコメントが届く時点でrunは必ず`outcome !== 'running'`
+ * になっている。この例外が無いと、レビューコメントは通知されるだけでオーケストレーターが
+ * `add_task`等で対応する手段が無く、Issue #339の受入基準（W4と同じ経路でタスク調整でき、
+ * 適用内容が警告欄へ残る）を満たせない。
+ *
+ * **`live.finalMergeOutcome`の確認が必要な理由（2度目のレビューblocking指摘）。**
+ * 当初は`reviewCommentPoll`の生死だけを見ていた。`finalMerge: auto`では統合PR/MRの
+ * 作成直後に`startReviewCommentPoll`が走り、その後`performFinalMerge`でmainへ実際に
+ * マージされる。以前は、この`performFinalMerge`完了後もポーリング自体が開いたまま
+ * 残り続けるバグがあった（`closeMessagingIfFinalMergeSettled`は`finalizeForge`を
+ * fire-and-forgetで呼ぶ側の同期経路で先に1度走ってしまい、その時点ではまだ
+ * `live.reviewCommentPoll`が`undefined`のため閉じ損なっていた）。**このバグは
+ * `performFinalMerge`自身が`live.finalMergeOutcome`を確定させる1点で`closeReview
+ * CommentPoll`を直接呼ぶよう修正済み（`runner.ts`の`performFinalMerge`末尾のJSDoc
+ * 参照）。** そのため実運用では`reviewCommentPoll`が生きている間は`finalMergeOutcome`
+ * も未確定のはずだが、**この判定はそれでも多層防御として残す。** ポーリングを閉じ損なう
+ * 経路が将来また出ても（例えば新しい呼び出し経路が`closeReviewCommentPoll`を呼び忘れる
+ * 等）、`finalMergeOutcome`が確定していれば計画変更そのものを拒否できるため、
+ * 「add_taskが受理されたのに成果がmainへ届かない」という実害には至らない。既に
+ * mainへマージ済み（`live.finalMergeOutcome === 'merged'`）の統合PR/MRは再オープン
+ * できず、その状態で`add_task`を許すと、追加したタスクの成果が統合ブランチには
+ * 積まれるのにmainへは二度と届かない（`finalizeForge`の冪等ガードが2回目のPR/MR
+ * 作り直しを止めるため）。`finalMergeOutcome`が`'merged'`/`'failed'`/`'held'`のいずれか
+ * （＝最終マージの判断が確定済み）になったら、`reviewCommentPoll`の生死に関わらず拒否し、
+ * 理由をオーケストレーターへ返す（黙って乖離させない）。
+ *
+ * レビューで提示された3案（A: 2周目に統合PR/MRを作り直す／B: レビューを取り込めるのは
+ * 最終マージ確定までに限る／C: 現状のまま限界だけ文書化する）のうち、**Bを採った**。
+ * Aは`live.integrationPullRequest`の意味づけ（1runにつき1件前提）・PR番号の持ち方・
+ * W11のCI待ちまで波及し、W5の範囲としては重い。Cは`add_task`が受理されたのに成果が
+ * mainへ届かないという乖離を黙って残す形になり、採らない。
+ *
+ * **例外はこの4ツールに限る。** `stop_task`/`retry_task`/`continue_task`/`decide_approval`/
+ * `ask_user`等、他の制御ツールは引き続き`runFinishedReason`をそのまま使い、この例外の
+ * 対象外とする（レビュー指摘: 例外を計画変更ツールだけに絞ること）。理由は、計画変更
+ * ツールは「まだ始まっていないタスクへの追加・変更」に閉じており（`add_task`は新規追加、
+ * `remove_task`/`update_task_dependencies`は`pending`限定、`update_task_prompt`は既存の
+ * `LiveTask`エントリへの上書き）、既に終わったタスクの実行そのものへ手を加える経路
+ * （`retry_task`等）とは性質が違うため。後者まで開けると「終わったはずのrunを人の
+ * 意図しないタイミングで動かし直せる」範囲が広がりすぎる。
+ */
+/**
+ * 計画変更ツールが`planChangeFinishedReason`の例外（レビューコメントのポーリング中）を
+ * 通って呼ばれたとき、`live.finished`が立ったままだと直後の`self.pump(runId)`が
+ * 何もせず即座に早期returnし、追加・変更したタスクが一切スケジューリングされない。
+ * `pump()`を呼ぶ直前にここで戻す（`add_task`/`remove_task`/`update_task_dependencies`の
+ * 3つだけが対象。`update_task_prompt`は`pump()`を呼ばないため対象外）。既に`false`
+ * （通常の実行中に呼ばれた場合）なら何もしない（冪等）。
+ *
+ * **ここで戻して`finalizeForge`の二重呼び出しにならないか（レビュー指摘の確認事項）。**
+ * `pump()`は戻り値のこの同一呼び出しの中で`outcome`を再計算する。`add_task`で加えた
+ * タスクは`pending`であり、`getRunOutcome`は`pending`が1件でもあれば無条件で`'running'`
+ * を返す（`scheduler.ts`）。`remove_task`/`update_task_dependencies`は対象が`pending`
+ * 限定のため、呼び出し時点で既に`pending`のタスクが最低1件残っている。したがって、
+ * `pump()`のこの呼び出しの中で再び`live.finished = true`が立ち`finalizeForge`が
+ * 即座に2回目として呼ばれることは無い。新しく増えた/残った`pending`タスクが後になって
+ * 完了し、runが再び終了条件を満たしたときに初めて2回目の`succeeded`到達（＝
+ * `finalizeForge`の2回目の呼び出し）が起こりうる——これは`pump()`のJSDoc（Issue #432-2）
+ * が「現状のコードでは起こらない」としていた前提を崩す。2回目の呼び出しでも統合PR/MRを
+ * 二重に作らないよう、`finalizeForge`自身に冪等ガードを足した（下記参照。design.md §16.30）
+ */
+function resumeIfFinishedForPlanChange(live: LiveRun): void {
+  if (live.finished) {
+    live.finished = false;
+  }
+}
+
+function planChangeFinishedReason(
+  self: WorkflowRunnerInternals,
+  actions: OrchestratorControlActions,
+  runId: string,
+): string | undefined {
+  const base = runFinishedReason(actions, runId);
+  if (base === undefined) {
+    return undefined;
+  }
+  const live = self.runs.get(runId);
+  if (live?.reviewCommentPoll === undefined) {
+    return base;
+  }
+  // 最終マージが確定済み（`'merged'`/`'failed'`/`'held'`のいずれか）なら、
+  // レビューコメントのポーリングがまだ生きていても計画変更は許さない（上のJSDoc
+  // 「2度目のレビューblocking指摘」参照）。理由を明示して返し、乖離を黙って残さない
+  if (live.finalMergeOutcome !== undefined) {
+    return (
+      `この実行の統合PR/MRは最終マージの判断が確定しています（${live.finalMergeOutcome}）。` +
+      'これ以降は計画を変更できません。会話は続けられます。'
+    );
+  }
+  return undefined;
+}
+
+/**
  * 人が「全体の停止」を押しているなら理由を返す（design.md §16.23、Issue #401）。
  * 立っていなければ `undefined`。
  *
@@ -308,7 +408,7 @@ export function buildOrchestratorControlPort(
         : no(`${taskId} に承認待ちの要求はありません。`);
     },
     updateTaskPrompt: (taskId, continuePrompt) => {
-      const finished = runFinishedReason(actions, runId);
+      const finished = planChangeFinishedReason(self, actions, runId);
       if (finished !== undefined) {
         return no(finished);
       }
@@ -381,7 +481,7 @@ export function buildOrchestratorControlPort(
       return beginAskUser(self, runId, question, choices);
     },
     addTask: (input) => {
-      const finished = runFinishedReason(actions, runId);
+      const finished = planChangeFinishedReason(self, actions, runId);
       if (finished !== undefined) {
         return no(finished);
       }
@@ -392,7 +492,7 @@ export function buildOrchestratorControlPort(
       return addTask(self, runId, input);
     },
     removeTask: (taskId) => {
-      const finished = runFinishedReason(actions, runId);
+      const finished = planChangeFinishedReason(self, actions, runId);
       if (finished !== undefined) {
         return no(finished);
       }
@@ -403,7 +503,7 @@ export function buildOrchestratorControlPort(
       return removeTask(self, runId, taskId);
     },
     updateTaskDependencies: (taskId, dependsOn) => {
-      const finished = runFinishedReason(actions, runId);
+      const finished = planChangeFinishedReason(self, actions, runId);
       if (finished !== undefined) {
         return no(finished);
       }
@@ -676,6 +776,7 @@ function addTask(
       `done: ${task.done}\n` +
       `dependsOn: ${task.dependsOn.length > 0 ? task.dependsOn.join(', ') : '(なし)'}`,
   });
+  resumeIfFinishedForPlanChange(live);
   self.notify(runId);
   self.pump(runId);
   return ok(`タスク ${task.id} を追加しました。`);
@@ -733,6 +834,7 @@ function removeTask(
         ? ` このタスクへ依存していたタスクのdependsOnからも取り除きました: ${strippedFrom.join(', ')}`
         : ''),
   });
+  resumeIfFinishedForPlanChange(live);
   self.notify(runId);
   self.pump(runId);
   return ok(`タスク ${taskId} を取り除きました。`);
@@ -790,6 +892,7 @@ function updateTaskDependencies(
       `変更前: ${before.length > 0 ? before.join(', ') : '(なし)'} → ` +
       `変更後: ${nextDependsOn.length > 0 ? nextDependsOn.join(', ') : '(なし)'}`,
   });
+  resumeIfFinishedForPlanChange(live);
   self.notify(runId);
   self.pump(runId);
   return ok(`${taskId} のdependsOnを変更しました。`);
