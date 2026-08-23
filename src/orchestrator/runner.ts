@@ -2777,9 +2777,18 @@ export class WorkflowRunner {
       // `blocked`（`retryMergeState`）/`failed`または`skipped`（`retryTask`）/
       // `failed(maxReached)`（`continueTask`）であることを前提にしており、これらは
       // どれも`getRunOutcome`を`succeeded`以外へ倒す（`anyFailed`/`anyBlocked`が立つ）。
-      // つまり1周目が`succeeded`だった run は、この3経路のどれも呼べる状態にならない。
-      // したがって2周目の`succeeded`到達（＝`finalizeForge`の2回目の呼び出し）は
-      // 現状のコードでは起こらない（Issue #432-2）
+      // つまり1周目が`succeeded`だった run は、この3経路のどれも呼べる状態にならない
+      // （Issue #432-2）。
+      //
+      // **ただしdesign.md §16.30（roadmap W5、Issue #339）以降、これとは別の経路で
+      // 2周目の`succeeded`到達が起こりうる。** 統合PR/MRのレビューコメントのポーリング中
+      // （`live.reviewCommentPoll`が生きている間）に限り、オーケストレーターは
+      // `add_task`等の計画変更ツールを使える（`runnerOrchestrator.ts`の
+      // `planChangeFinishedReason`）。これで加わった/変更した`pending`タスクが`pump()`
+      // 経由で走行・完了し、runが再び終了条件を満たすと、2周目としてここへ到達する。
+      // `finalizeForge`はこの2回目の呼び出しに対して冪等（`live.integrationPullRequest`
+      // が既にあれば統合PR/MRを作り直さず即returnする）ため、Issue #432-2が防いでいた
+      // 「統合PR/MRの二重作成」は起きない
       //
       // `finalMerge: orchestrator`（design.md §16.26）は`finalizeForge`の中から
       // `decide_final_merge`（MCPツール）の応答を待ちうる。下のメッセージング終了処理
@@ -3278,6 +3287,20 @@ export class WorkflowRunner {
   private async finalizeForge(runId: string): Promise<void> {
     const live = this.runs.get(runId);
     if (live === undefined || live.integration === undefined) {
+      return;
+    }
+    // 冪等ガード（design.md §16.30、Issue #339 blocking指摘）: `add_task`等の計画変更
+    // ツールが、レビューコメントのポーリング中（統合PR/MR作成後）に呼ばれると、新しく
+    // 加わった/残った`pending`タスクの完了によって`pump()`の終了ブロックへ再度到達し、
+    // `finalizeForge`が2回目として呼ばれうる（`runnerOrchestrator.ts`の
+    // `resumeIfFinishedForPlanChange`のJSDoc参照）。統合PR/MRは既に作成済みのため、
+    // 二重に作り直さない。`live.integrationPullRequest`は初回の作成成功時にしか
+    // セットされない（このメソッドの下の方、作成成功の分岐）ため、これを唯一の
+    // 判定材料にする
+    if (live.integrationPullRequest !== undefined) {
+      this.deps.log.info(
+        `[workflow ${runId}] 統合PR/MRは既に作成済みのため、finalizeForgeの再実行を飛ばします（レビューコメントを受けた計画変更で新しいタスクが完了した後の2周目）`,
+      );
       return;
     }
     const forge = live.forge;

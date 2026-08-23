@@ -4360,6 +4360,84 @@ tasks:
       expect(snapshot?.warnings.some((w) => w.kind === 'reviewCommentImported')).toBe(false);
     },
   );
+
+  it(
+    'レビューコメントが届いた後もadd_taskでタスク調整でき（design.md §16.29と同じ経路・' +
+      'validateWorkflowでの検証を通る）、追加したタスクは実際にスケジュールされて完走する' +
+      '（Issue #339 blocking指摘の回帰: 通知が届くだけでオーケストレーターが手を打てない' +
+      '状態を防ぐ。本番の呼び出し経路: finalizeForge完了後もplanChangeFinishedReasonの' +
+      '例外でadd_taskが通り、resumeIfFinishedForPlanChangeがpump()を再度動かす）',
+    async () => {
+      vi.useFakeTimers();
+      const { deps: messaging, state } = fakeMessagingDeps();
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+      const cli = fakeForgeCli({
+        reviewComments: {
+          github: {
+            comments: [
+              { databaseId: 1, author: { login: 'reviewer1' }, body: '追加対応してください' },
+            ],
+          },
+        },
+      });
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli),
+        messaging,
+        readReviewCommentPollIntervalSec: () => 60,
+      });
+      const result = await runner.start('/repo/.agents/workflows/review.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // runは既に終了扱い（統合PR/MR作成・最終マージまで完了）だが、レビューコメントが
+      // 届いてポーリングは生きている
+      expect(runner.getSnapshot(runId)?.outcome).toBe('succeeded');
+      expect(
+        runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'reviewCommentImported'),
+      ).toBe(true);
+
+      const port = state.hub?.orchestratorControl;
+      if (port === undefined) {
+        throw new Error('制御ツールが配線されていません');
+      }
+      const addResult = port.addTask({ id: 'T2', prompt: 'p2', done: 'd2', dependsOn: [] });
+      expect(addResult.accepted).toBe(true);
+
+      // 追加直後、runは走行中へ戻る（`getRunOutcome`はpendingが1件でもあれば'running'を
+      // 返す。design.md §16.30「レビューコメントを受けた計画変更」）
+      expect(runner.getSnapshot(runId)?.outcome).toBe('running');
+
+      await flush();
+      const t2 = codexHost.byTaskId('T2');
+      t2.finish('done', doneState('ok2'));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+      expect(runner.getSnapshot(runId)?.outcome).toBe('succeeded');
+
+      // 統合PR/MRは1回しか作られていない（`finalizeForge`の冪等ガード。design.md §16.30
+      // 「`finalizeForge`の二重呼び出しにならないか」）。タスク層（`--base=wf/.../integration`）
+      // のPR作成はT1・T2それぞれで1回ずつ起きるため区別する
+      const integrationCreateCalls = cli.calls.filter(
+        (c) =>
+          c.args[0] === 'pr' &&
+          c.args[1] === 'create' &&
+          c.args.some((a) => a.startsWith('--base=main')),
+      );
+      expect(integrationCreateCalls).toHaveLength(1);
+
+      // 適用した内容が警告欄へ全文で残る（W4と同じ経路、design.md §16.29）
+      const added = runner
+        .getSnapshot(runId)
+        ?.warnings.find((w) => w.kind === 'orchestratorTaskAdded');
+      expect(added?.message).toContain('T2');
+    },
+  );
 });
 
 describe('WorkflowRunner: タスクのtypeがコミットメッセージへ反映される（design.md §16.6）', () => {

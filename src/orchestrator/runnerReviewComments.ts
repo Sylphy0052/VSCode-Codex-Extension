@@ -91,11 +91,12 @@ export async function pollReviewComments(self: WorkflowRunnerInternals, runId: s
       continue;
     }
     poll.seenCommentIds.add(comment.id);
-    notifyOrchestrator(self, runId, { kind: 'reviewComment', body: buildReviewCommentBody(comment) });
+    const body = buildReviewCommentBody(comment);
+    notifyOrchestrator(self, runId, { kind: 'reviewComment', body });
     current.warnings.push({
       kind: 'reviewCommentImported',
       taskId: undefined,
-      message: buildReviewCommentBody(comment),
+      message: body,
     });
     changed = true;
   }
