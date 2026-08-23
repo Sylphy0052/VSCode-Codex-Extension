@@ -101,7 +101,10 @@ export function nextProgramRunsToStart(
  * 参照比較で判定できるようにする。`reconcileProgramStateOnReload`と同じ方針）。
  * 純粋関数。
  */
-export function propagateProgramFailures(def: ProgramDefinition, state: ProgramState): ProgramState {
+export function propagateProgramFailures(
+  def: ProgramDefinition,
+  state: ProgramState,
+): ProgramState {
   let current = state;
   let progressed = true;
   while (progressed) {

@@ -71,8 +71,7 @@ export interface HookView {
  * (design.mdの「黙って何も起きない状態を作らない」に反する)。
  */
 export type HooksSnapshot =
-  | { ok: true; hooks: HookView[]; warnings: string[] }
-  | { ok: false; reason: string };
+  { ok: true; hooks: HookView[]; warnings: string[] } | { ok: false; reason: string };
 
 /**
  * hookの key の形は実機で1件も観測できていない(この環境にはhookが1件も設定されていない

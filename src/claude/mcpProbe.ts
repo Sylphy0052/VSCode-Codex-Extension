@@ -51,7 +51,10 @@ export class ClaudeMcpProbe {
   }
 
   /** MCPサーバーの有効/無効を切り替える。 */
-  async toggle(name: string, enabled: boolean): Promise<{ ok: true } | { ok: false; error: string }> {
+  async toggle(
+    name: string,
+    enabled: boolean,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
     if (!isValidMcpServerName(name)) {
       return { ok: false, error: '不正なサーバー名です' };
     }

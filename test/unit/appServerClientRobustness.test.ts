@@ -144,15 +144,19 @@ describe('AppServerClient: finish()後のpending解放（issue #402、3点目）
 
     const seen: string[] = [];
     const call = (client as unknown as { call: CallMethod }).call;
-    const outer = call.call(client, async (request) => {
-      await request('probe/first', {});
-      seen.push('first-resolved');
-      // 修正前は、finish()が先に確定してもここが永久にハングしていた
-      // （`pending`に残ったままの`request()`が誰にも解決されないため）
-      const second = await request('probe/second', {});
-      seen.push('second-resolved');
-      return { ok: true, value: second.error?.message ?? 'no-error' };
-    }, 20);
+    const outer = call.call(
+      client,
+      async (request) => {
+        await request('probe/first', {});
+        seen.push('first-resolved');
+        // 修正前は、finish()が先に確定してもここが永久にハングしていた
+        // （`pending`に残ったままの`request()`が誰にも解決されないため）
+        const second = await request('probe/second', {});
+        seen.push('second-resolved');
+        return { ok: true, value: second.error?.message ?? 'no-error' };
+      },
+      20,
+    );
 
     // `initialize`に応答して起動シーケンスを終わらせる
     fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));

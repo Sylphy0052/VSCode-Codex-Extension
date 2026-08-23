@@ -99,7 +99,9 @@ describe('applyStreamEvent', () => {
         type: 'assistant',
         message: {
           id: 'm1',
-          content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'cat big.log' } }],
+          content: [
+            { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'cat big.log' } },
+          ],
         },
       },
       {
@@ -192,7 +194,8 @@ describe('applyStreamEvent', () => {
             {
               type: 'tool_result',
               tool_use_id: 't1',
-              content: 'Web search results for query: "q"\n\nLinks: [{"title":"A","url":"https://a.example"}]',
+              content:
+                'Web search results for query: "q"\n\nLinks: [{"title":"A","url":"https://a.example"}]',
               is_error: false,
             },
           ],
@@ -226,9 +229,7 @@ describe('applyStreamEvent', () => {
       {
         type: 'user',
         message: {
-          content: [
-            { type: 'tool_result', tool_use_id: 't1', content: '# 本文', is_error: false },
-          ],
+          content: [{ type: 'tool_result', tool_use_id: 't1', content: '# 本文', is_error: false }],
         },
         tool_use_result: {
           bytes: 100,
@@ -550,7 +551,11 @@ describe('バックグラウンドタスク一覧（issue #33、design.md §14.2
         type: 'system',
         subtype: 'background_tasks_changed',
         tasks: [
-          { task_id: 'b1xre2r80', task_type: 'local_bash', description: 'Sleep 24.37 seconds in background' },
+          {
+            task_id: 'b1xre2r80',
+            task_type: 'local_bash',
+            description: 'Sleep 24.37 seconds in background',
+          },
         ],
       },
     ]);

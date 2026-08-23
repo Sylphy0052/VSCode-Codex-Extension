@@ -159,10 +159,7 @@ const no = (reason: string): OrchestratorControlResult => ({ accepted: false, re
  * 閉じるまでの隙間と、サーバの寿命に依存しない多層防御としてここでも止める。**`get_run_status`
  * は無効にしない**（走り終えた後に「なぜ失敗したのか」を聞く経路を残すため）。
  */
-function runFinishedReason(
-  actions: OrchestratorControlActions,
-  runId: string,
-): string | undefined {
+function runFinishedReason(actions: OrchestratorControlActions, runId: string): string | undefined {
   const outcome = actions.getSnapshot(runId)?.outcome;
   if (outcome === undefined) {
     return 'この実行はすでに破棄されているため、制御ツールは使えません。';
@@ -470,7 +467,9 @@ export function buildOrchestratorControlPort(
       // 既存の不整合（レビュー指摘）。サロゲートペアを2文字と数える分だけ拒否側に
       // 厳しくなる（安全側）ため、挙動はこのままにする
       if (reason.length > MAX_MESSAGE_BODY_LENGTH) {
-        return no(`reason が長すぎます（上限${MAX_MESSAGE_BODY_LENGTH}文字）: ${reason.length}文字`);
+        return no(
+          `reason が長すぎます（上限${MAX_MESSAGE_BODY_LENGTH}文字）: ${reason.length}文字`,
+        );
       }
       return actions.decideFinalMerge(runId, decision, reason)
         ? ok(`最終マージの判断を ${decision} として確定しました。`)

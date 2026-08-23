@@ -5,7 +5,11 @@ import type { ProviderRegistry } from '../../src/provider/registry';
 import type { MementoLike } from '../../src/util/memento';
 import { PinnedSessionStore } from '../../src/util/pinnedSessions';
 import { __mock } from '../mocks/vscode';
-import { SessionTreeProvider, type SessionGroupNode, type TreeElement } from '../../src/view/sessionTreeProvider';
+import {
+  SessionTreeProvider,
+  type SessionGroupNode,
+  type TreeElement,
+} from '../../src/view/sessionTreeProvider';
 import type { SessionActivityState } from '../../src/view/sessionActivity';
 
 /**
@@ -16,7 +20,8 @@ import type { SessionActivityState } from '../../src/view/sessionActivity';
 function fakeMemento(): MementoLike {
   const data = new Map<string, unknown>();
   return {
-    get: <T>(key: string, defaultValue: T): T => (data.has(key) ? (data.get(key) as T) : defaultValue),
+    get: <T>(key: string, defaultValue: T): T =>
+      data.has(key) ? (data.get(key) as T) : defaultValue,
     update: (key: string, value: unknown): Promise<void> => {
       data.set(key, value);
       return Promise.resolve();
@@ -51,7 +56,10 @@ interface ListSessionsCall {
   maxEntries: number;
 }
 
-function fakeProviders(sessions: SessionSummary[], calls: ListSessionsCall[] = []): ProviderRegistry {
+function fakeProviders(
+  sessions: SessionSummary[],
+  calls: ListSessionsCall[] = [],
+): ProviderRegistry {
   const labels: Record<string, string> = { codex: 'Codex', claude: 'Claude Code' };
   return {
     get: (id: string) => (labels[id] === undefined ? undefined : { label: labels[id] }),
@@ -68,7 +76,12 @@ function makeProvider(
   calls: ListSessionsCall[] = [],
   getActivity: (session: SessionSummary) => SessionActivityState | undefined = () => undefined,
 ): SessionTreeProvider {
-  return new SessionTreeProvider(fakeProviders(sessions, calls), getActivity, fakeLogger(), pinnedStore);
+  return new SessionTreeProvider(
+    fakeProviders(sessions, calls),
+    getActivity,
+    fakeLogger(),
+    pinnedStore,
+  );
 }
 
 function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
@@ -84,7 +97,11 @@ function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
 }
 
 function isGroup(element: TreeElement): element is SessionGroupNode {
-  return typeof element === 'object' && element !== null && (element as { kind?: unknown }).kind === 'group';
+  return (
+    typeof element === 'object' &&
+    element !== null &&
+    (element as { kind?: unknown }).kind === 'group'
+  );
 }
 
 beforeEach(() => {
@@ -228,10 +245,7 @@ describe('SessionTreeProvider.getChildren のグループ化（issue #293、既�
 
   it('groupBy: folder では作業ディレクトリ別にグループ化する', async () => {
     __mock.setConfig('codex', { 'history.groupBy': 'folder' });
-    const sessions = [
-      session({ id: 's1', cwd: '/repo/a' }),
-      session({ id: 's2', cwd: '/repo/b' }),
-    ];
+    const sessions = [session({ id: 's1', cwd: '/repo/a' }), session({ id: 's2', cwd: '/repo/b' })];
     const provider = makeProvider(sessions);
 
     const children = await provider.getChildren();

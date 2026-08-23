@@ -230,11 +230,7 @@ suite('ロードマップの更新と片付け（design.md §16.19・§16.17）'
     await waitForSnapshot(runId, (s) => taskOf(s, 'R2')?.hasLiveSession === true, 'R2が開始される');
     const r2Cwd = taskOf(workflow.runner.getSnapshot(runId), 'R2')?.cwd;
     host.get('R2').finishDone('R2の結果');
-    await waitForSnapshot(
-      runId,
-      (s) => s !== undefined && s.outcome !== 'running',
-      'runが終わる',
-    );
+    await waitForSnapshot(runId, (s) => s !== undefined && s.outcome !== 'running', 'runが終わる');
 
     const integrationCwd = path.join(
       workspaceFolder,
@@ -246,7 +242,11 @@ suite('ロードマップの更新と片付け（design.md §16.19・§16.17）'
     assert.ok(fs.existsSync(integrationCwd), '統合worktreeが作られていない');
 
     const result = await workflow.runner.cleanupIntegration(runId);
-    assert.equal(result.integrationRemoved, true, `統合worktreeが撤去されない: ${JSON.stringify(result)}`);
+    assert.equal(
+      result.integrationRemoved,
+      true,
+      `統合worktreeが撤去されない: ${JSON.stringify(result)}`,
+    );
     assert.equal(fs.existsSync(integrationCwd), false, '統合worktreeのディレクトリが残っている');
     for (const cwd of [r1Cwd, r2Cwd]) {
       assert.ok(cwd !== undefined);

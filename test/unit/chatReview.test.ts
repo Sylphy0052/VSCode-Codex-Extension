@@ -81,17 +81,17 @@ describe('ChatSession.startReview', () => {
 
   it('スレッド未開始では投げる', async () => {
     const { session } = fakeSession({ reviewThreadId: 'th-1', turn: {} });
-    await expect(
-      session.startReview({ type: 'uncommittedChanges' }, 'inline'),
-    ).rejects.toThrow(/スレッドが開始されていません/u);
+    await expect(session.startReview({ type: 'uncommittedChanges' }, 'inline')).rejects.toThrow(
+      /スレッドが開始されていません/u,
+    );
   });
 
   it('reviewThreadIdを読み取れなければ投げ、inlineのbusyを戻す', async () => {
     const { session } = fakeSession({ turn: {} });
     await session.start('/w', emptyConfig);
-    await expect(
-      session.startReview({ type: 'uncommittedChanges' }, 'inline'),
-    ).rejects.toThrow(/reviewThreadId/u);
+    await expect(session.startReview({ type: 'uncommittedChanges' }, 'inline')).rejects.toThrow(
+      /reviewThreadId/u,
+    );
     expect(session.getState().busy).toBe(false);
   });
 });

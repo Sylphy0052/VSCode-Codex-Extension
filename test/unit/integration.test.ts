@@ -156,9 +156,9 @@ describe('isValidTaskBranch（wf形式・conventional形式の両方をrunId込�
   });
 
   it('wf/<runId>/<taskId>形式でも別のrunIdならfalse（他runのブランチの取り違え防止）', () => {
-    expect(
-      isValidTaskBranch(`wf/${RUN_ID}/T1`, '22222222-2222-4222-8222-222222222222'),
-    ).toBe(false);
+    expect(isValidTaskBranch(`wf/${RUN_ID}/T1`, '22222222-2222-4222-8222-222222222222')).toBe(
+      false,
+    );
   });
 
   it('conventional形式（<type>/<issue>/<slug>）は、slugの末尾がこのrunIdの先頭8文字ならtrue', () => {
@@ -221,7 +221,10 @@ describe('IntegrationMergeQueue.createIntegrationWorktree', () => {
         args: ['rev-parse', '--verify', '--quiet', `refs/heads/${INTEGRATION_BRANCH}`],
         cwd: '/repo',
       },
-      { args: ['worktree', 'add', '-b', INTEGRATION_BRANCH, INTEGRATION_CWD, HEAD_SHA], cwd: '/repo' },
+      {
+        args: ['worktree', 'add', '-b', INTEGRATION_BRANCH, INTEGRATION_CWD, HEAD_SHA],
+        cwd: '/repo',
+      },
     ]);
   });
 
@@ -338,7 +341,10 @@ describe('IntegrationMergeQueue.createIntegrationWorktree', () => {
     const fs = new FakeFs();
     fs.realpaths.set('/repo', '/repo');
     fs.realpaths.set(INTEGRATION_CWD, INTEGRATION_CWD);
-    fs.realpaths.set(path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2'), path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2'));
+    fs.realpaths.set(
+      path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2'),
+      path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2'),
+    );
 
     const worktreeQueue = new WorktreeCreationQueue();
     const integrationQueue = new IntegrationMergeQueue(worktreeQueue);
@@ -346,13 +352,27 @@ describe('IntegrationMergeQueue.createIntegrationWorktree', () => {
     const order: string[] = [];
     const [taskResult, integrationResult] = await Promise.all([
       worktreeQueue
-        .create({ repoRoot: '/repo', runId: RUN_ID, taskId: 'T2', headCommit: HEAD_SHA, retry: undefined }, git, fs)
+        .create(
+          {
+            repoRoot: '/repo',
+            runId: RUN_ID,
+            taskId: 'T2',
+            headCommit: HEAD_SHA,
+            retry: undefined,
+          },
+          git,
+          fs,
+        )
         .then((r) => {
           order.push('task');
           return r;
         }),
       integrationQueue
-        .createIntegrationWorktree({ repoRoot: '/repo', runId: RUN_ID, headCommit: HEAD_SHA }, git, fs)
+        .createIntegrationWorktree(
+          { repoRoot: '/repo', runId: RUN_ID, headCommit: HEAD_SHA },
+          git,
+          fs,
+        )
         .then((r) => {
           order.push('integration');
           return r;
@@ -463,12 +483,19 @@ describe('IntegrationMergeQueue.mergeTask', () => {
   it('マージが未解決パスを残して失敗すればconflictを返し、未解決パスとマージ前のHEAD（巻き戻し先）を含む。git merge --abortは呼ばない', async () => {
     const git = new FakeGit();
     git.respond(['rev-parse', 'HEAD'], { code: 0, stdout: `${HEAD_SHA}\n`, stderr: '' });
-    git.respond(['merge', '--no-ff'], { code: 1, stdout: '', stderr: 'CONFLICT (content): Merge conflict in a.ts' });
+    git.respond(['merge', '--no-ff'], {
+      code: 1,
+      stdout: '',
+      stderr: 'CONFLICT (content): Merge conflict in a.ts',
+    });
     // 1回目はマージ前の確認（未解決なし）、2回目がマージ後の未解決パス
-    git.respondSequence(['diff', '--name-only'], [
-      { code: 0, stdout: '', stderr: '' },
-      { code: 0, stdout: 'a.ts\nb.ts\n', stderr: '' },
-    ]);
+    git.respondSequence(
+      ['diff', '--name-only'],
+      [
+        { code: 0, stdout: '', stderr: '' },
+        { code: 0, stdout: 'a.ts\nb.ts\n', stderr: '' },
+      ],
+    );
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
     const result = await queue.mergeTask(await lease(queue, 'T2'), RUN_ID, 'T2', TASK_BRANCH, git);
@@ -484,7 +511,11 @@ describe('IntegrationMergeQueue.mergeTask', () => {
   it('マージが衝突以外の理由で失敗すればfailureを返す（未解決パスが無い）', async () => {
     const git = new FakeGit();
     git.respond(['rev-parse', 'HEAD'], { code: 0, stdout: `${HEAD_SHA}\n`, stderr: '' });
-    git.respond(['merge', '--no-ff'], { code: 128, stdout: '', stderr: 'fatal: not something we can merge' });
+    git.respond(['merge', '--no-ff'], {
+      code: 128,
+      stdout: '',
+      stderr: 'fatal: not something we can merge',
+    });
     git.respond(['diff', '--name-only'], { code: 0, stdout: '', stderr: '' });
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
@@ -545,7 +576,13 @@ describe('IntegrationMergeQueue.mergeTask', () => {
     const git = new FakeGit();
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
-    const result = await queue.mergeTask(await lease(queue, 'T2'), RUN_ID, 'T2', 'not-a-branch', git);
+    const result = await queue.mergeTask(
+      await lease(queue, 'T2'),
+      RUN_ID,
+      'T2',
+      'not-a-branch',
+      git,
+    );
 
     expect(result.kind).toBe('failure');
     if (result.kind !== 'failure') return;
@@ -636,7 +673,11 @@ describe('IntegrationMergeQueue.abortMerge', () => {
 
   it('git merge --abortが失敗すればgitErrorを返す', async () => {
     const git = new FakeGit();
-    git.respond(['merge', '--abort'], { code: 1, stdout: '', stderr: 'fatal: no merge in progress' });
+    git.respond(['merge', '--abort'], {
+      code: 1,
+      stdout: '',
+      stderr: 'fatal: no merge in progress',
+    });
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
     const result = await queue.abortMerge(await lease(queue, 'T2'), git);
@@ -701,7 +742,11 @@ describe('IntegrationMergeQueue.pushIntegrationBranch（design.md §16.18・Issu
     const order: string[] = [];
     const [createResult, pushResult] = await Promise.all([
       queue
-        .createIntegrationWorktree({ repoRoot: '/repo', runId: RUN_ID, headCommit: HEAD_SHA }, git, fs)
+        .createIntegrationWorktree(
+          { repoRoot: '/repo', runId: RUN_ID, headCommit: HEAD_SHA },
+          git,
+          fs,
+        )
         .then((r) => {
           order.push('create');
           return r;
@@ -778,7 +823,11 @@ describe('reconcileMergingTaskOnReload（design.md §16.11）', () => {
     git.respond(['diff', '--name-only', '--diff-filter=U'], { code: 0, stdout: '', stderr: '' });
     // マージ時は`feat`だったが、リロード時に定義ファイルの`type`が`chore`へ変わっていても
     // （§16.2「typeを実行中に書き換えてからリロード」の事故経路）doneと判定できること
-    git.respond(['log'], { code: 0, stdout: `${mergeCommitMessage('T1', RUN_ID, 'feat')}\n`, stderr: '' });
+    git.respond(['log'], {
+      code: 0,
+      stdout: `${mergeCommitMessage('T1', RUN_ID, 'feat')}\n`,
+      stderr: '',
+    });
     const result = await reconcileMergingTaskOnReload(INTEGRATION_CWD, RUN_ID, 'T1', git);
     expect(result).toBe('done');
   });
@@ -914,11 +963,7 @@ describe('buildMergeResolutionPrompt', () => {
   });
 
   it('othersが空でも組み立てられる', () => {
-    const prompt = buildMergeResolutionPrompt(
-      { id: 'T2', prompt: 'p', done: 'd' },
-      [],
-      ['a.ts'],
-    );
+    const prompt = buildMergeResolutionPrompt({ id: 'T2', prompt: 'p', done: 'd' }, [], ['a.ts']);
     expect(prompt).toContain('a.ts');
     expect(prompt).toContain('T2');
   });

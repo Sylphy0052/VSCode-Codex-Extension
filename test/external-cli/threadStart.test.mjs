@@ -179,9 +179,7 @@ function terminateProcess(proc) {
         settled = true;
         proc.removeListener('exit', onExit);
         reject(
-          new Error(
-            `codex app-serverがSIGKILL後も${TERMINATE_KILL_MS}ms以内に終了しなかった`,
-          ),
+          new Error(`codex app-serverがSIGKILL後も${TERMINATE_KILL_MS}ms以内に終了しなかった`),
         );
       }, TERMINATE_KILL_MS);
       // このタイマーだけのためにプロセス終了を待たせない。

@@ -756,7 +756,10 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
     const response = conn.sent[0];
     expect(response && 'result' in response).toBe(true);
     if (response && 'result' in response) {
-      const result = response.result as { content: [{ type: 'text'; text: string }]; isError?: boolean };
+      const result = response.result as {
+        content: [{ type: 'text'; text: string }];
+        isError?: boolean;
+      };
       expect(result.isError).toBe(true);
       const parsed = JSON.parse(result.content[0].text) as { accepted: boolean; reason: string };
       expect(parsed.accepted).toBe(false);
@@ -951,7 +954,8 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
       transport.connect(conn);
 
       // 上限到達 + 集計ログがちょうど2回出る回数まで試行する
-      const attempts = MAX_DISPATCH_ERROR_LOG_COUNT + DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL * 2;
+      const attempts =
+        MAX_DISPATCH_ERROR_LOG_COUNT + DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL * 2;
       for (let i = 0; i < attempts; i += 1) {
         conn.fireRequest({
           jsonrpc: '2.0',
@@ -1186,7 +1190,10 @@ describe('ask_orchestrator（design.md §16.32、Issue #571）', () => {
     const response = conn.sent[0];
     expect(response && 'result' in response).toBe(true);
     if (response && 'result' in response) {
-      const result = response.result as { content: [{ type: 'text'; text: string }]; isError?: boolean };
+      const result = response.result as {
+        content: [{ type: 'text'; text: string }];
+        isError?: boolean;
+      };
       expect(result.isError).toBe(true);
       const parsed = JSON.parse(result.content[0].text) as { accepted: boolean; reason: string };
       expect(parsed.accepted).toBe(false);
@@ -1452,65 +1459,63 @@ describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタ�
     },
   );
 });
-describe("オーケストレーター専用の制御ツール（design.md §16.23「道具」）", () => {
+describe('オーケストレーター専用の制御ツール（design.md §16.23「道具」）', () => {
   /** 呼ばれた制御ツールを記録するだけのフェイク。 */
   function fakeControl(): { port: OrchestratorControlPort; calls: string[] } {
     const calls: string[] = [];
     const port: OrchestratorControlPort = {
       getRunStatus: () => {
-        calls.push("getRunStatus");
-        return { runId: "r1", tasks: [] };
+        calls.push('getRunStatus');
+        return { runId: 'r1', tasks: [] };
       },
       stopTask: (taskId) => {
         calls.push(`stopTask:${taskId}`);
-        return { accepted: true, reason: "ok" };
+        return { accepted: true, reason: 'ok' };
       },
       retryTask: (taskId) => {
         calls.push(`retryTask:${taskId}`);
-        return { accepted: true, reason: "ok" };
+        return { accepted: true, reason: 'ok' };
       },
       continueTask: (taskId) => {
         calls.push(`continueTask:${taskId}`);
-        return { accepted: true, reason: "ok" };
+        return { accepted: true, reason: 'ok' };
       },
       decideApproval: (taskId, decision) => {
         calls.push(`decideApproval:${taskId}:${decision}`);
-        return { accepted: true, reason: "ok" };
+        return { accepted: true, reason: 'ok' };
       },
       updateTaskPrompt: (taskId, continuePrompt) => {
         calls.push(`updateTaskPrompt:${taskId}:${continuePrompt}`);
-        return { accepted: false, reason: "長すぎます" };
+        return { accepted: false, reason: '長すぎます' };
       },
       decideFinalMerge: (decision, reason) => {
         calls.push(`decideFinalMerge:${decision}:${reason}`);
-        return { accepted: true, reason: "ok" };
+        return { accepted: true, reason: 'ok' };
       },
       askUser: (question, choices) => {
-        calls.push(`askUser:${question}:${choices.join(",")}`);
-        return { accepted: true, reason: "ok" };
+        calls.push(`askUser:${question}:${choices.join(',')}`);
+        return { accepted: true, reason: 'ok' };
       },
       addTask: (input) => {
         calls.push(`addTask:${JSON.stringify(input)}`);
-        return { accepted: true, reason: "ok" };
+        return { accepted: true, reason: 'ok' };
       },
       removeTask: (taskId) => {
         calls.push(`removeTask:${taskId}`);
-        return { accepted: true, reason: "ok" };
+        return { accepted: true, reason: 'ok' };
       },
       updateTaskDependencies: (taskId, dependsOn) => {
-        calls.push(`updateTaskDependencies:${taskId}:${dependsOn.join(",")}`);
-        return { accepted: true, reason: "ok" };
+        calls.push(`updateTaskDependencies:${taskId}:${dependsOn.join(',')}`);
+        return { accepted: true, reason: 'ok' };
       },
     };
     return { port, calls };
   }
 
-  function wire(
-    control?: OrchestratorControlPort,
-  ): (taskId: string) => FakeConnection {
+  function wire(control?: OrchestratorControlPort): (taskId: string) => FakeConnection {
     const transport = new FakeTransport();
     const hub = new TaskMessagingHub({
-      listRunTasks: () => [{ id: "T1", state: "running", summary: "" }],
+      listRunTasks: () => [{ id: 'T1', state: 'running', summary: '' }],
       ...(control === undefined ? {} : { orchestratorControl: control }),
     });
     new MessagingMcpServer(hub, transport);
@@ -1522,9 +1527,9 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
   }
 
   function toolNames(conn: FakeConnection): string[] {
-    conn.fireRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    conn.fireRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
     const response = conn.sent[conn.sent.length - 1];
-    if (response === undefined || !("result" in response)) {
+    if (response === undefined || !('result' in response)) {
       return [];
     }
     const result = response.result as { tools: { name: string }[] };
@@ -1537,182 +1542,182 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
     args: Record<string, unknown>,
   ): JsonRpcResponse | undefined {
     conn.fireRequest({
-      jsonrpc: "2.0",
+      jsonrpc: '2.0',
       id: 2,
-      method: "tools/call",
+      method: 'tools/call',
       params: { name, arguments: args },
     });
     return conn.sent[conn.sent.length - 1];
   }
 
-  it("オーケストレーターの接続には制御ツールが見える", () => {
+  it('オーケストレーターの接続には制御ツールが見える', () => {
     const { port } = fakeControl();
 
     const names = toolNames(wire(port)(ORCHESTRATOR_CONNECTION_ID));
 
     expect(names).toEqual([
-      "list_tasks",
-      "send_message",
-      "get_run_status",
-      "stop_task",
-      "retry_task",
-      "continue_task",
-      "decide_approval",
-      "update_task_prompt",
-      "decide_final_merge",
-      "ask_user",
-      "add_task",
-      "remove_task",
-      "update_task_dependencies",
+      'list_tasks',
+      'send_message',
+      'get_run_status',
+      'stop_task',
+      'retry_task',
+      'continue_task',
+      'decide_approval',
+      'update_task_prompt',
+      'decide_final_merge',
+      'ask_user',
+      'add_task',
+      'remove_task',
+      'update_task_dependencies',
     ]);
   });
 
-  it("タスクの接続のtools/listには制御ツールが現れない（ask_orchestratorは現れる）", () => {
+  it('タスクの接続のtools/listには制御ツールが現れない（ask_orchestratorは現れる）', () => {
     const { port } = fakeControl();
 
-    const names = toolNames(wire(port)("T1"));
+    const names = toolNames(wire(port)('T1'));
 
-    expect(names).toEqual(["list_tasks", "send_message", "ask_orchestrator"]);
+    expect(names).toEqual(['list_tasks', 'send_message', 'ask_orchestrator']);
   });
 
-  it("タスクの接続から制御ツールを名指しで呼んでも拒否される", () => {
+  it('タスクの接続から制御ツールを名指しで呼んでも拒否される', () => {
     const { port, calls } = fakeControl();
 
-    const response = callTool(wire(port)("T1"), "stop_task", { taskId: "T1" });
+    const response = callTool(wire(port)('T1'), 'stop_task', { taskId: 'T1' });
 
-    expect(response !== undefined && "error" in response).toBe(true);
-    if (response !== undefined && "error" in response) {
-      expect(response.error.message).toContain("未知のツール");
+    expect(response !== undefined && 'error' in response).toBe(true);
+    if (response !== undefined && 'error' in response) {
+      expect(response.error.message).toContain('未知のツール');
     }
     expect(calls).toEqual([]);
   });
 
-  it("引数でオーケストレーターを名乗っても、接続がタスクなら拒否される", () => {
+  it('引数でオーケストレーターを名乗っても、接続がタスクなら拒否される', () => {
     const { port, calls } = fakeControl();
 
-    const response = callTool(wire(port)("T1"), "stop_task", {
-      taskId: "T1",
+    const response = callTool(wire(port)('T1'), 'stop_task', {
+      taskId: 'T1',
       from: ORCHESTRATOR_CONNECTION_ID,
       connectionId: ORCHESTRATOR_CONNECTION_ID,
     });
 
-    expect(response !== undefined && "error" in response).toBe(true);
+    expect(response !== undefined && 'error' in response).toBe(true);
     expect(calls).toEqual([]);
   });
 
-  it("制御ツールの実体が無ければ、オーケストレーターの接続でも見えない（§16.21だけで動く）", () => {
+  it('制御ツールの実体が無ければ、オーケストレーターの接続でも見えない（§16.21だけで動く）', () => {
     const names = toolNames(wire()(ORCHESTRATOR_CONNECTION_ID));
 
-    expect(names).toEqual(["list_tasks", "send_message"]);
+    expect(names).toEqual(['list_tasks', 'send_message']);
   });
 
-  it("各制御ツールが引数どおりに実体を呼ぶ", () => {
+  it('各制御ツールが引数どおりに実体を呼ぶ', () => {
     const { port, calls } = fakeControl();
     const conn = wire(port)(ORCHESTRATOR_CONNECTION_ID);
 
-    callTool(conn, "get_run_status", {});
-    callTool(conn, "stop_task", { taskId: "T1" });
-    callTool(conn, "retry_task", { taskId: "T1" });
-    callTool(conn, "continue_task", { taskId: "T1" });
-    callTool(conn, "decide_approval", { taskId: "T1", decision: "accept" });
-    callTool(conn, "update_task_prompt", {
-      taskId: "T1",
-      continuePrompt: "方針を変える",
+    callTool(conn, 'get_run_status', {});
+    callTool(conn, 'stop_task', { taskId: 'T1' });
+    callTool(conn, 'retry_task', { taskId: 'T1' });
+    callTool(conn, 'continue_task', { taskId: 'T1' });
+    callTool(conn, 'decide_approval', { taskId: 'T1', decision: 'accept' });
+    callTool(conn, 'update_task_prompt', {
+      taskId: 'T1',
+      continuePrompt: '方針を変える',
     });
     // design.md §16.26。taskIdを取らない制御ツール（他のtaskId系ツールと違う特別扱いの経路）
-    callTool(conn, "decide_final_merge", { decision: "merge", reason: "CIが全緑のため" });
+    callTool(conn, 'decide_final_merge', { decision: 'merge', reason: 'CIが全緑のため' });
     // design.md §16.33。decide_final_mergeと同じくtaskIdを取らない特別扱いの経路
-    callTool(conn, "ask_user", { question: "どちらにする？", choices: ["A案", "B案"] });
+    callTool(conn, 'ask_user', { question: 'どちらにする？', choices: ['A案', 'B案'] });
     // design.md §16.29。add_taskもtaskIdではなくidを持つため、decide_final_merge/ask_userと
     // 同じくtaskId抽出より前の特別扱いの経路で処理する
-    callTool(conn, "add_task", { id: "T3", prompt: "p3", done: "d3", dependsOn: ["T1"] });
-    callTool(conn, "remove_task", { taskId: "T3" });
-    callTool(conn, "update_task_dependencies", { taskId: "T2", dependsOn: ["T1"] });
+    callTool(conn, 'add_task', { id: 'T3', prompt: 'p3', done: 'd3', dependsOn: ['T1'] });
+    callTool(conn, 'remove_task', { taskId: 'T3' });
+    callTool(conn, 'update_task_dependencies', { taskId: 'T2', dependsOn: ['T1'] });
 
     expect(calls).toEqual([
-      "getRunStatus",
-      "stopTask:T1",
-      "retryTask:T1",
-      "continueTask:T1",
-      "decideApproval:T1:accept",
-      "updateTaskPrompt:T1:方針を変える",
-      "decideFinalMerge:merge:CIが全緑のため",
-      "askUser:どちらにする？:A案,B案",
+      'getRunStatus',
+      'stopTask:T1',
+      'retryTask:T1',
+      'continueTask:T1',
+      'decideApproval:T1:accept',
+      'updateTaskPrompt:T1:方針を変える',
+      'decideFinalMerge:merge:CIが全緑のため',
+      'askUser:どちらにする？:A案,B案',
       'addTask:{"id":"T3","prompt":"p3","done":"d3","dependsOn":["T1"]}',
-      "removeTask:T3",
-      "updateTaskDependencies:T2:T1",
+      'removeTask:T3',
+      'updateTaskDependencies:T2:T1',
     ]);
   });
 
-  it("add_task/remove_task/update_task_dependenciesはタスクの接続からは見えず、名指しでも拒否される（design.md §16.29）", () => {
+  it('add_task/remove_task/update_task_dependenciesはタスクの接続からは見えず、名指しでも拒否される（design.md §16.29）', () => {
     const { port, calls } = fakeControl();
 
-    const names = toolNames(wire(port)("T1"));
-    expect(names).not.toContain("add_task");
-    expect(names).not.toContain("remove_task");
-    expect(names).not.toContain("update_task_dependencies");
+    const names = toolNames(wire(port)('T1'));
+    expect(names).not.toContain('add_task');
+    expect(names).not.toContain('remove_task');
+    expect(names).not.toContain('update_task_dependencies');
 
-    const addResponse = callTool(wire(port)("T1"), "add_task", {
-      id: "T9",
-      prompt: "p",
-      done: "d",
+    const addResponse = callTool(wire(port)('T1'), 'add_task', {
+      id: 'T9',
+      prompt: 'p',
+      done: 'd',
       dependsOn: [],
     });
-    const removeResponse = callTool(wire(port)("T1"), "remove_task", { taskId: "T1" });
-    const updateDepsResponse = callTool(wire(port)("T1"), "update_task_dependencies", {
-      taskId: "T1",
+    const removeResponse = callTool(wire(port)('T1'), 'remove_task', { taskId: 'T1' });
+    const updateDepsResponse = callTool(wire(port)('T1'), 'update_task_dependencies', {
+      taskId: 'T1',
       dependsOn: [],
     });
 
     for (const response of [addResponse, removeResponse, updateDepsResponse]) {
-      expect(response !== undefined && "error" in response).toBe(true);
-      if (response !== undefined && "error" in response) {
-        expect(response.error.message).toContain("未知のツール");
+      expect(response !== undefined && 'error' in response).toBe(true);
+      if (response !== undefined && 'error' in response) {
+        expect(response.error.message).toContain('未知のツール');
       }
     }
     expect(calls).toEqual([]);
   });
 
-  it("update_task_dependenciesの引数のうち文字列でないdependsOn要素は除かれて実体へ渡る（design.md §16.29）", () => {
+  it('update_task_dependenciesの引数のうち文字列でないdependsOn要素は除かれて実体へ渡る（design.md §16.29）', () => {
     const { port, calls } = fakeControl();
     const conn = wire(port)(ORCHESTRATOR_CONNECTION_ID);
 
-    callTool(conn, "update_task_dependencies", {
-      taskId: "T2",
-      dependsOn: ["T1", 1, null, "T3"],
+    callTool(conn, 'update_task_dependencies', {
+      taskId: 'T2',
+      dependsOn: ['T1', 1, null, 'T3'],
     });
 
-    expect(calls).toEqual(["updateTaskDependencies:T2:T1,T3"]);
+    expect(calls).toEqual(['updateTaskDependencies:T2:T1,T3']);
   });
 
-  it("add_task/remove_task/update_task_dependenciesが拒否されるとisErrorになる（send_messageと同じ流儀）", () => {
+  it('add_task/remove_task/update_task_dependenciesが拒否されるとisErrorになる（send_messageと同じ流儀）', () => {
     const port: OrchestratorControlPort = {
       ...fakeControl().port,
-      addTask: () => ({ accepted: false, reason: "autoApprove はadd_taskから指定できません" }),
-      removeTask: () => ({ accepted: false, reason: "走行中のタスクは削除できません" }),
-      updateTaskDependencies: () => ({ accepted: false, reason: "循環しています" }),
+      addTask: () => ({ accepted: false, reason: 'autoApprove はadd_taskから指定できません' }),
+      removeTask: () => ({ accepted: false, reason: '走行中のタスクは削除できません' }),
+      updateTaskDependencies: () => ({ accepted: false, reason: '循環しています' }),
     };
     const conn = wire(port)(ORCHESTRATOR_CONNECTION_ID);
 
-    const addResponse = callTool(conn, "add_task", {
-      id: "T9",
-      prompt: "p",
-      done: "d",
+    const addResponse = callTool(conn, 'add_task', {
+      id: 'T9',
+      prompt: 'p',
+      done: 'd',
       dependsOn: [],
     });
-    const removeResponse = callTool(conn, "remove_task", { taskId: "T1" });
-    const updateDepsResponse = callTool(conn, "update_task_dependencies", {
-      taskId: "T1",
+    const removeResponse = callTool(conn, 'remove_task', { taskId: 'T1' });
+    const updateDepsResponse = callTool(conn, 'update_task_dependencies', {
+      taskId: 'T1',
       dependsOn: [],
     });
 
     for (const [response, expectedText] of [
-      [addResponse, "autoApprove"],
-      [removeResponse, "走行中"],
-      [updateDepsResponse, "循環"],
+      [addResponse, 'autoApprove'],
+      [removeResponse, '走行中'],
+      [updateDepsResponse, '循環'],
     ] as const) {
-      expect(response !== undefined && "result" in response).toBe(true);
-      if (response !== undefined && "result" in response) {
+      expect(response !== undefined && 'result' in response).toBe(true);
+      if (response !== undefined && 'result' in response) {
         const result = response.result as { isError?: boolean; content: [{ text: string }] };
         expect(result.isError).toBe(true);
         expect(result.content[0].text).toContain(expectedText);
@@ -1720,78 +1725,77 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
     }
   });
 
-  it("ask_userの引数のうち文字列でないchoicesは除かれて実体へ渡る（design.md §16.33）", () => {
+  it('ask_userの引数のうち文字列でないchoicesは除かれて実体へ渡る（design.md §16.33）', () => {
     const { port, calls } = fakeControl();
     const conn = wire(port)(ORCHESTRATOR_CONNECTION_ID);
 
-    callTool(conn, "ask_user", { question: "q", choices: ["A", 1, null, "B"] });
+    callTool(conn, 'ask_user', { question: 'q', choices: ['A', 1, null, 'B'] });
 
-    expect(calls).toEqual(["askUser:q:A,B"]);
+    expect(calls).toEqual(['askUser:q:A,B']);
   });
 
-  it("ask_userはタスクの接続からは見えず、名指しで呼んでも拒否される", () => {
+  it('ask_userはタスクの接続からは見えず、名指しで呼んでも拒否される', () => {
     const { port, calls } = fakeControl();
 
-    const names = toolNames(wire(port)("T1"));
-    expect(names).not.toContain("ask_user");
+    const names = toolNames(wire(port)('T1'));
+    expect(names).not.toContain('ask_user');
 
-    const response = callTool(wire(port)("T1"), "ask_user", {
-      question: "q",
-      choices: ["A", "B"],
+    const response = callTool(wire(port)('T1'), 'ask_user', {
+      question: 'q',
+      choices: ['A', 'B'],
     });
-    expect(response !== undefined && "error" in response).toBe(true);
+    expect(response !== undefined && 'error' in response).toBe(true);
     expect(calls).toEqual([]);
   });
 
-  it("ask_userが拒否されるとisErrorになる（send_messageと同じ流儀）", () => {
+  it('ask_userが拒否されるとisErrorになる（send_messageと同じ流儀）', () => {
     const port: OrchestratorControlPort = {
       ...fakeControl().port,
-      askUser: () => ({ accepted: false, reason: "既に回答待ちの質問があります。人が答えるまで新しい質問はできません。" }),
+      askUser: () => ({
+        accepted: false,
+        reason: '既に回答待ちの質問があります。人が答えるまで新しい質問はできません。',
+      }),
     };
 
-    const response = callTool(wire(port)(ORCHESTRATOR_CONNECTION_ID), "ask_user", {
-      question: "q",
-      choices: ["A", "B"],
+    const response = callTool(wire(port)(ORCHESTRATOR_CONNECTION_ID), 'ask_user', {
+      question: 'q',
+      choices: ['A', 'B'],
     });
 
-    expect(response !== undefined && "result" in response).toBe(true);
-    if (response !== undefined && "result" in response) {
+    expect(response !== undefined && 'result' in response).toBe(true);
+    if (response !== undefined && 'result' in response) {
       const result = response.result as { isError?: boolean; content: [{ text: string }] };
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("既に回答待ちの質問があります");
+      expect(result.content[0].text).toContain('既に回答待ちの質問があります');
     }
   });
 
-  it("受け付けられなかった制御ツールの結果はisErrorになる（send_messageと同じ流儀）", () => {
+  it('受け付けられなかった制御ツールの結果はisErrorになる（send_messageと同じ流儀）', () => {
     const { port } = fakeControl();
 
-    const response = callTool(
-      wire(port)(ORCHESTRATOR_CONNECTION_ID),
-      "update_task_prompt",
-      {
-        taskId: "T1",
-        continuePrompt: "x",
-      },
-    );
+    const response = callTool(wire(port)(ORCHESTRATOR_CONNECTION_ID), 'update_task_prompt', {
+      taskId: 'T1',
+      continuePrompt: 'x',
+    });
 
-    expect(response !== undefined && "result" in response).toBe(true);
-    if (response !== undefined && "result" in response) {
+    expect(response !== undefined && 'result' in response).toBe(true);
+    if (response !== undefined && 'result' in response) {
       const result = response.result as {
         isError?: boolean;
         content: [{ text: string }];
       };
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("長すぎます");
+      expect(result.content[0].text).toContain('長すぎます');
     }
   });
 
-  it("オーケストレーターはsend_messageの送信元として接続の識別子を使う", () => {
+  it('オーケストレーターはsend_messageの送信元として接続の識別子を使う', () => {
     const transport = new FakeTransport();
     const accepted: StoredMessage[] = [];
     const hub = new TaskMessagingHub({
-      listRunTasks: () => [{ id: "T1", state: "running", summary: "" }],
+      listRunTasks: () => [{ id: 'T1', state: 'running', summary: '' }],
       now: () => 0,
-      randomId: () => "m1",
+      randomId: () => 'm1',
       onAccepted: (m) => accepted.push(m),
     });
     new MessagingMcpServer(hub, transport);
@@ -1799,12 +1803,12 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
     transport.connect(conn);
 
     conn.fireRequest({
-      jsonrpc: "2.0",
+      jsonrpc: '2.0',
       id: 3,
-      method: "tools/call",
+      method: 'tools/call',
       params: {
-        name: "send_message",
-        arguments: { to: "T1", body: "hi", expectReply: false },
+        name: 'send_message',
+        arguments: { to: 'T1', body: 'hi', expectReply: false },
       },
     });
 

@@ -80,7 +80,13 @@ export function mergeMcpServers(
   for (const name of names) {
     const enabled = enabledMap.get(name) ?? true;
     if (!enabled) {
-      servers.push({ name, state: 'disabled', toolCount: 0, version: undefined, reason: undefined });
+      servers.push({
+        name,
+        state: 'disabled',
+        toolCount: 0,
+        version: undefined,
+        reason: undefined,
+      });
       continue;
     }
 
@@ -97,7 +103,13 @@ export function mergeMcpServers(
     }
 
     // 有効なのに接続できていない。理由はこの経路では取れない（上のコメント参照）
-    servers.push({ name, state: 'unavailable', toolCount: 0, version: undefined, reason: undefined });
+    servers.push({
+      name,
+      state: 'unavailable',
+      toolCount: 0,
+      version: undefined,
+      reason: undefined,
+    });
   }
 
   return servers.sort((a, b) => a.name.localeCompare(b.name));

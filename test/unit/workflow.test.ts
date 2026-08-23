@@ -847,76 +847,73 @@ tasks:
   });
 });
 
-describe(
-  'buildOrchestratorTask（design.md §16.29、roadmap W4、Issue #338、オーケストレーターのadd_task）',
-  () => {
-    it('autoApprove/allow/sandbox/approvalModeを指定すると拒否する（値によらず）', () => {
-      const autoApprove = buildOrchestratorTask({
-        id: 'T1',
-        prompt: 'p',
-        done: 'd',
-        dependsOn: [],
-        autoApprove: false,
-      });
-      const allow = buildOrchestratorTask({
-        id: 'T1',
-        prompt: 'p',
-        done: 'd',
-        dependsOn: [],
-        allow: [],
-      });
-      const sandbox = buildOrchestratorTask({
-        id: 'T1',
-        prompt: 'p',
-        done: 'd',
-        dependsOn: [],
-        sandbox: 'workspace-write',
-      });
-      const approvalMode = buildOrchestratorTask({
-        id: 'T1',
-        prompt: 'p',
-        done: 'd',
-        dependsOn: [],
-        approvalMode: 'never',
-      });
-
-      for (const result of [autoApprove, allow, sandbox, approvalMode]) {
-        expect('error' in result).toBe(true);
-      }
+describe('buildOrchestratorTask（design.md §16.29、roadmap W4、Issue #338、オーケストレーターのadd_task）', () => {
+  it('autoApprove/allow/sandbox/approvalModeを指定すると拒否する（値によらず）', () => {
+    const autoApprove = buildOrchestratorTask({
+      id: 'T1',
+      prompt: 'p',
+      done: 'd',
+      dependsOn: [],
+      autoApprove: false,
+    });
+    const allow = buildOrchestratorTask({
+      id: 'T1',
+      prompt: 'p',
+      done: 'd',
+      dependsOn: [],
+      allow: [],
+    });
+    const sandbox = buildOrchestratorTask({
+      id: 'T1',
+      prompt: 'p',
+      done: 'd',
+      dependsOn: [],
+      sandbox: 'workspace-write',
+    });
+    const approvalMode = buildOrchestratorTask({
+      id: 'T1',
+      prompt: 'p',
+      done: 'd',
+      dependsOn: [],
+      approvalMode: 'never',
     });
 
-    it('id/prompt/done/dependsOnをそのまま持つタスクを組み立てる', () => {
-      const result = buildOrchestratorTask({
-        id: 'T3',
-        prompt: '設計する',
-        done: '設計書ができている',
-        dependsOn: ['T1', 'T2'],
-      });
+    for (const result of [autoApprove, allow, sandbox, approvalMode]) {
+      expect('error' in result).toBe(true);
+    }
+  });
 
-      expect('task' in result).toBe(true);
-      if ('task' in result) {
-        expect(result.task.id).toBe('T3');
-        expect(result.task.prompt).toBe('設計する');
-        expect(result.task.done).toBe('設計書ができている');
-        expect(result.task.dependsOn).toEqual(['T1', 'T2']);
-        // 権限フィールドは常に安全側の既定値
-        expect(result.task.autoApprove).toBe(false);
-        expect(result.task.allow).toEqual([]);
-        expect(result.task.sandbox).toBeUndefined();
-        expect(result.task.approvalMode).toBeUndefined();
-      }
+  it('id/prompt/done/dependsOnをそのまま持つタスクを組み立てる', () => {
+    const result = buildOrchestratorTask({
+      id: 'T3',
+      prompt: '設計する',
+      done: '設計書ができている',
+      dependsOn: ['T1', 'T2'],
     });
 
-    it('未指定のdependsOnは空配列になる', () => {
-      const result = buildOrchestratorTask({ id: 'T3', prompt: 'p', done: 'd' });
+    expect('task' in result).toBe(true);
+    if ('task' in result) {
+      expect(result.task.id).toBe('T3');
+      expect(result.task.prompt).toBe('設計する');
+      expect(result.task.done).toBe('設計書ができている');
+      expect(result.task.dependsOn).toEqual(['T1', 'T2']);
+      // 権限フィールドは常に安全側の既定値
+      expect(result.task.autoApprove).toBe(false);
+      expect(result.task.allow).toEqual([]);
+      expect(result.task.sandbox).toBeUndefined();
+      expect(result.task.approvalMode).toBeUndefined();
+    }
+  });
 
-      expect('task' in result).toBe(true);
-      if ('task' in result) {
-        expect(result.task.dependsOn).toEqual([]);
-      }
-    });
-  },
-);
+  it('未指定のdependsOnは空配列になる', () => {
+    const result = buildOrchestratorTask({ id: 'T3', prompt: 'p', done: 'd' });
+
+    expect('task' in result).toBe(true);
+    if ('task' in result) {
+      expect(result.task.dependsOn).toEqual([]);
+    }
+  });
+});
 
 describe('findPermissionEscalationWarnings（design.md §16.4 案2「警告する」、Issue #67）', () => {
   it('上流よりsandboxが緩い下流がresultを参照していると警告になる', () => {

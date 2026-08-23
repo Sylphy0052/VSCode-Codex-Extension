@@ -70,8 +70,6 @@ describe('debugLogCandidates（issue #205）', () => {
   });
 
   it('threadIdが空白だけの場合もセッション専用の候補は作らない', () => {
-    expect(debugLogCandidates('/home/u/.claude', '   ')).toEqual([
-      '/home/u/.claude/debug/latest',
-    ]);
+    expect(debugLogCandidates('/home/u/.claude', '   ')).toEqual(['/home/u/.claude/debug/latest']);
   });
 });

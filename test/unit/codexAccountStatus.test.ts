@@ -17,7 +17,12 @@ describe('parseAccountRead', () => {
 
   it('APIキーでログイン済みの応答を読む（スキーマ根拠: Account定義のapiKeyバリアント）', () => {
     const view = parseAccountRead({ account: { type: 'apiKey' }, requiresOpenaiAuth: false });
-    expect(view).toEqual({ loggedIn: true, method: 'APIキー', identity: undefined, plan: undefined });
+    expect(view).toEqual({
+      loggedIn: true,
+      method: 'APIキー',
+      identity: undefined,
+      plan: undefined,
+    });
   });
 
   it('Amazon Bedrockでログイン済みの応答を読む（スキーマ根拠）', () => {
@@ -35,12 +40,22 @@ describe('parseAccountRead', () => {
 
   it('account が null なら未ログイン扱いにする（スキーマ根拠: GetAccountResponse.account は nullable）', () => {
     const view = parseAccountRead({ account: null, requiresOpenaiAuth: true });
-    expect(view).toEqual({ loggedIn: false, method: undefined, identity: undefined, plan: undefined });
+    expect(view).toEqual({
+      loggedIn: false,
+      method: undefined,
+      identity: undefined,
+      plan: undefined,
+    });
   });
 
   it('account フィールドが無い応答も未ログイン扱いにする', () => {
     const view = parseAccountRead({ requiresOpenaiAuth: true });
-    expect(view).toEqual({ loggedIn: false, method: undefined, identity: undefined, plan: undefined });
+    expect(view).toEqual({
+      loggedIn: false,
+      method: undefined,
+      identity: undefined,
+      plan: undefined,
+    });
   });
 
   it('emailがnullでも壊れない（Account.email は nullable）', () => {
@@ -58,7 +73,12 @@ describe('parseAccountRead', () => {
 
   it('未知のtypeでもログイン済みとして扱い、typeをそのまま説明にする', () => {
     const view = parseAccountRead({ account: { type: 'future' }, requiresOpenaiAuth: false });
-    expect(view).toEqual({ loggedIn: true, method: 'future', identity: undefined, plan: undefined });
+    expect(view).toEqual({
+      loggedIn: true,
+      method: 'future',
+      identity: undefined,
+      plan: undefined,
+    });
   });
 
   it('壊れた形の応答では未ログイン扱いにする（例外を投げない）', () => {

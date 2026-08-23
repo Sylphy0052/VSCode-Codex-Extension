@@ -215,9 +215,9 @@ describe('finishedSideQuestionDisplay', () => {
 
 describe('describeSideQuestionError（issue #340横断レビュー指摘: origin付きの型で由来を判定する）', () => {
   it('origin:cli（response.ok===false起因）はCLI内部の例外メッセージをそのまま出さず、常に汎用文言へ丸める（既知カタログを持たない）', () => {
-    expect(describeSideQuestionError({ message: 'Bt.map is not a function. ...', origin: 'cli' })).toBe(
-      '脇道の質問を送れませんでした（CLI側でエラーが発生しました）',
-    );
+    expect(
+      describeSideQuestionError({ message: 'Bt.map is not a function. ...', origin: 'cli' }),
+    ).toBe('脇道の質問を送れませんでした（CLI側でエラーが発生しました）');
   });
 
   it('undefinedも汎用文言へ丸める', () => {
@@ -227,9 +227,9 @@ describe('describeSideQuestionError（issue #340横断レビュー指摘: origin
   });
 
   it('origin:app（拡張機能自身が組み立てた文言）は丸めずそのまま出す', () => {
-    expect(
-      describeSideQuestionError({ message: 'セッションが終了しました', origin: 'app' }),
-    ).toBe('セッションが終了しました');
+    expect(describeSideQuestionError({ message: 'セッションが終了しました', origin: 'app' })).toBe(
+      'セッションが終了しました',
+    );
     expect(
       describeSideQuestionError({ message: '応答を読み取れませんでした', origin: 'app' }),
     ).toBe('応答を読み取れませんでした');

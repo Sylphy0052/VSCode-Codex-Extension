@@ -1,8 +1,4 @@
-import {
-  fetchReviewComments,
-  type ForgeHost,
-  type ReviewComment,
-} from './forge';
+import { fetchReviewComments, type ForgeHost, type ReviewComment } from './forge';
 import { truncateByCodePoint } from './untrustedText';
 import { MAX_MESSAGE_BODY_LENGTH } from './messaging';
 import { notifyOrchestrator } from './runnerOrchestrator';
@@ -42,12 +38,12 @@ import type { LiveRun } from './runner';
 function buildReviewCommentBody(comment: ReviewComment): string {
   const author = comment.author.trim() !== '' ? comment.author : '(不明)';
   const truncated = truncateByCodePoint(comment.body, MAX_MESSAGE_BODY_LENGTH);
-  const bodyText = truncated.truncated ? `${truncated.text}…（長さの上限のため切り詰めました）` : truncated.text;
-  return [
-    `統合PR/MRにレビューコメントが付きました（投稿者: ${author}）。`,
-    '本文:',
-    bodyText,
-  ].join('\n');
+  const bodyText = truncated.truncated
+    ? `${truncated.text}…（長さの上限のため切り詰めました）`
+    : truncated.text;
+  return [`統合PR/MRにレビューコメントが付きました（投稿者: ${author}）。`, '本文:', bodyText].join(
+    '\n',
+  );
 }
 
 /**
@@ -57,7 +53,10 @@ function buildReviewCommentBody(comment: ReviewComment): string {
  * 直接呼べる（本番の呼び出し経路そのものであり、タイマーは単にこの関数を定期実行する
  * だけの薄い配線のため、直接呼んでも本番の呼び出し経路を迂回したことにはならない）。
  */
-export async function pollReviewComments(self: WorkflowRunnerInternals, runId: string): Promise<void> {
+export async function pollReviewComments(
+  self: WorkflowRunnerInternals,
+  runId: string,
+): Promise<void> {
   const live = self.runs.get(runId);
   const poll = live?.reviewCommentPoll;
   const forgeDeps = self.deps.forge;

@@ -114,9 +114,9 @@ CLI側がコマンドとして処理し、APIを呼ばずに合成応答を返�
 
 Claude Code側は原則「CLIが返す一覧をそのまま送ればよい」だが、`/btw`（脇道の質問）だけは例外。CLIの90件の一覧に`btw`は含まれておらず、`control_request`の`side_question` subtypeという別経路でしか呼べない（実測、CLI 2.1.235）。Codexの`/btw`（`CODEX_PSEUDO_COMMANDS`）と同じ仕組みで、拡張機能側が候補へ足す擬似コマンドとして実装した（`src/provider/pseudoCommands.ts`の`CLAUDE_PSEUDO_COMMANDS`）。
 
-| コマンド | 呼ぶもの        | 状態          |
-| -------- | --------------- | ------------- |
-| `/btw`   | `side_question` | 実装済（#334）|
+| コマンド | 呼ぶもの        | 状態           |
+| -------- | --------------- | -------------- |
+| `/btw`   | `side_question` | 実装済（#334） |
 
 `/compact`・`/init`はClaude Code側では擬似コマンドにしない（`/compact`はCLI組込コマンドとして素直に効くうえ画面のボタンとも二重化している。`/init`もCLI組込一覧に実在し、そのまま送れば効く。上の「一覧はCLIが持っている」参照）。
 

@@ -6,9 +6,7 @@ import * as path from 'node:path';
  * `ok: false` の `error` は、そのままユーザー向けの通知（`vscode.window.showWarningMessage`
  * 等）に渡せる日本語文にしてある。
  */
-export type DiffPathResolution =
-  | { ok: true; absolutePath: string }
-  | { ok: false; error: string };
+export type DiffPathResolution = { ok: true; absolutePath: string } | { ok: false; error: string };
 
 /**
  * 文字列だけでの境界判定（issue #291）。

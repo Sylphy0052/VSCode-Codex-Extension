@@ -49,8 +49,7 @@ export interface SkillView {
  * （design.md の「黙って何も起きない状態を作らない」に反する）。
  */
 export type SkillsSnapshot =
-  | { ok: true; skills: SkillView[]; warnings: string[] }
-  | { ok: false; reason: string };
+  { ok: true; skills: SkillView[]; warnings: string[] } | { ok: false; reason: string };
 
 /**
  * Codexの `skills/config/write` へ渡すpath選択子として妥当か。

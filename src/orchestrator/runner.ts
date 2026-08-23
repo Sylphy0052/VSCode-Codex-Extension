@@ -2266,7 +2266,10 @@ export class WorkflowRunner {
   private findStoppableSessionEntry(
     runId: string,
     taskId: string,
-  ): { kind: 'mergeResolution'; entry: MergeResolutionEntry } | { kind: 'task'; entry: LiveTask } | undefined {
+  ):
+    | { kind: 'mergeResolution'; entry: MergeResolutionEntry }
+    | { kind: 'task'; entry: LiveTask }
+    | undefined {
     const live = this.runs.get(runId);
     if (live === undefined) {
       return undefined;
@@ -2474,11 +2477,7 @@ export class WorkflowRunner {
         disposeQuietly(this.deps.log, () => entry.session.dispose(), `merge resolution ${taskId}`);
       }
       disposeQuietly(this.deps.log, () => closeMessaging(live), 'messaging');
-      disposeQuietly(
-        this.deps.log,
-        () => closeReviewCommentPoll(live),
-        'reviewCommentPoll',
-      );
+      disposeQuietly(this.deps.log, () => closeReviewCommentPoll(live), 'reviewCommentPoll');
       // `closeMessaging`自体は`messagingHub`をクリアしない（`closeMessaging`は`dispose()`
       // だけでなく、run正常終了時の`pump()`からも呼ばれる共通関数のため。そちらでは
       // `retryTask`による再開が`messagingHub`を再利用する前提＝Issue #475の案A「hubを
@@ -3055,7 +3054,9 @@ export class WorkflowRunner {
         },
       );
       if (!outcome.ok) {
-        this.deps.log.warn(`[workflow ${runId}/${taskId}] Issueの起票に失敗しました: ${outcome.message}`);
+        this.deps.log.warn(
+          `[workflow ${runId}/${taskId}] Issueの起票に失敗しました: ${outcome.message}`,
+        );
         live.warnings.push({
           kind: 'taskIssueFailed',
           taskId,
@@ -3063,7 +3064,8 @@ export class WorkflowRunner {
         });
         return;
       }
-      const number = outcome.url !== undefined ? parsePullRequestNumberFromUrl(outcome.url) : undefined;
+      const number =
+        outcome.url !== undefined ? parsePullRequestNumberFromUrl(outcome.url) : undefined;
       if (number === undefined) {
         this.deps.log.warn(
           `[workflow ${runId}/${taskId}] Issueは起票できましたが、URLから番号を取り出せませんでした`,
@@ -3071,14 +3073,17 @@ export class WorkflowRunner {
         live.warnings.push({
           kind: 'taskIssueFailed',
           taskId,
-          message: 'Issueは起票できましたが、URLから番号を取り出せなかったため、PR本文からの参照を省略します',
+          message:
+            'Issueは起票できましたが、URLから番号を取り出せなかったため、PR本文からの参照を省略します',
         });
         return;
       }
       live.createdTaskIssues.set(taskId, number);
     } catch (e) {
       const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
-      this.deps.log.warn(`[workflow ${runId}/${taskId}] Issueの起票中にエラーが発生しました: ${message}`);
+      this.deps.log.warn(
+        `[workflow ${runId}/${taskId}] Issueの起票中にエラーが発生しました: ${message}`,
+      );
       live.warnings.push({
         kind: 'taskIssueFailed',
         taskId,
@@ -3598,8 +3603,16 @@ export class WorkflowRunner {
         );
       } else {
         const intervalSec =
-          this.deps.readReviewCommentPollIntervalSec?.() ?? DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC;
-        startReviewCommentPoll(this.internals, runId, forge.host, live.integration.cwd, number, intervalSec);
+          this.deps.readReviewCommentPollIntervalSec?.() ??
+          DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC;
+        startReviewCommentPoll(
+          this.internals,
+          runId,
+          forge.host,
+          live.integration.cwd,
+          number,
+          intervalSec,
+        );
       }
     }
 

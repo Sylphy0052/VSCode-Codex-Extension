@@ -37,8 +37,7 @@ export interface McpServerView {
  * （design.md の「黙って何も起きない状態を作らない」に反する）。
  */
 export type McpServersSnapshot =
-  | { ok: true; servers: McpServerView[] }
-  | { ok: false; reason: string };
+  { ok: true; servers: McpServerView[] } | { ok: false; reason: string };
 
 /** CLIの実際のサーバー名だけを許すごく単純な形。既存名を配線するだけなので緩め。 */
 const MCP_SERVER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;

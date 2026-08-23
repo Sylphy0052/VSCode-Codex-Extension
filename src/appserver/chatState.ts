@@ -554,9 +554,7 @@ function readStringArray(value: unknown): string {
   if (!Array.isArray(value)) {
     return '';
   }
-  return value
-    .filter((v): v is string => typeof v === 'string' && v !== '')
-    .join('\n\n');
+  return value.filter((v): v is string => typeof v === 'string' && v !== '').join('\n\n');
 }
 
 /**
@@ -983,7 +981,9 @@ export function deriveReviewing(items: readonly ChatItem[]): boolean {
  * を実際のprocessIdに対して呼び、「no active command/exec for process id」で拒否されることを
  * 実測で確認した）。
  */
-export function deriveCodexBackgroundTerminals(items: readonly ChatItem[]): BackgroundTerminalItem[] {
+export function deriveCodexBackgroundTerminals(
+  items: readonly ChatItem[],
+): BackgroundTerminalItem[] {
   const result: BackgroundTerminalItem[] = [];
   for (const item of items) {
     if (item.kind !== 'commandExecution' || item.status !== 'inProgress') {
@@ -1535,9 +1535,7 @@ export function interruptedCommandsNoticeId(turnId: string | undefined): string 
  * 別のidにする（伝える内容が逆であり、上書きし合うと最後に起きたことしか残らない）。
  */
 export function interruptFailedNoticeId(turnId: string | undefined): string {
-  return turnId === undefined || turnId === ''
-    ? 'interruptFailed'
-    : `interruptFailed:${turnId}`;
+  return turnId === undefined || turnId === '' ? 'interruptFailed' : `interruptFailed:${turnId}`;
 }
 
 /** 中断の対象になりうる（実行中の）コマンドか。CodexはinProgress、Claude Codeはrunning。 */

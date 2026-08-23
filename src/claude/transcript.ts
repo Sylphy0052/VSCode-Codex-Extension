@@ -281,9 +281,7 @@ function fileChange(
     kind: 'fileChange',
     detail: path,
     diffs:
-      path === '' || diff === ''
-        ? []
-        : [{ path, kind, movePath: undefined, diff, editReplace }],
+      path === '' || diff === '' ? [] : [{ path, kind, movePath: undefined, diff, editReplace }],
   };
 }
 

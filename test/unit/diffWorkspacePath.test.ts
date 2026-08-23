@@ -36,10 +36,7 @@ describe('resolveWithinWorkspace', () => {
   });
 
   it('複数ワークスペースのうちどれかの内側なら受け入れる', () => {
-    const result = resolveWithinWorkspace('/work/second/file.ts', [
-      '/work/first',
-      '/work/second',
-    ]);
+    const result = resolveWithinWorkspace('/work/second/file.ts', ['/work/first', '/work/second']);
     expect(result).toEqual({ ok: true, absolutePath: '/work/second/file.ts' });
   });
 
@@ -57,7 +54,11 @@ describe('resolveWithinWorkspace', () => {
 describe('verifyRealPathWithinWorkspace', () => {
   it('実在するファイルがワークスペース配下ならそのまま受け入れる', async () => {
     const realpath = async (p: string): Promise<string> => p;
-    const result = await verifyRealPathWithinWorkspace('/work/repo/src/foo.ts', ['/work/repo'], realpath);
+    const result = await verifyRealPathWithinWorkspace(
+      '/work/repo/src/foo.ts',
+      ['/work/repo'],
+      realpath,
+    );
     expect(result).toEqual({ ok: true, absolutePath: '/work/repo/src/foo.ts' });
   });
 
@@ -109,7 +110,11 @@ describe('verifyRealPathWithinWorkspace', () => {
     const realpath = async (): Promise<string> => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     };
-    const result = await verifyRealPathWithinWorkspace('/work/repo/src/foo.ts', ['/work/repo'], realpath);
+    const result = await verifyRealPathWithinWorkspace(
+      '/work/repo/src/foo.ts',
+      ['/work/repo'],
+      realpath,
+    );
     expect(result.ok).toBe(false);
   });
 });

@@ -107,7 +107,11 @@ function summarize(text: string): string {
  * 応答要約と編集ファイル一覧を合わせて200字に収める。編集ファイル一覧のほうが
  * 情報価値が高いため、超過分は応答要約側から先に削る。
  */
-function buildResultText(responseText: string, editedFiles: readonly string[], cwd: string): string {
+function buildResultText(
+  responseText: string,
+  editedFiles: readonly string[],
+  cwd: string,
+): string {
   const suffix = formatEditedFilesSuffix(editedFiles, cwd);
   const collapsed = collapseWhitespace(responseText);
   if (collapsed === '' && suffix === '') {

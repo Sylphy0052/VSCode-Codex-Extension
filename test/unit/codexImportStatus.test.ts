@@ -70,7 +70,11 @@ const detectResult = {
         plugins: [],
         skills: [],
         sessions: [
-          { path: '/home/user/.claude/projects/a/1.jsonl', cwd: '/workspace/repo', title: 'Issue対応' },
+          {
+            path: '/home/user/.claude/projects/a/1.jsonl',
+            cwd: '/workspace/repo',
+            title: 'Issue対応',
+          },
           { path: '/home/user/.claude/projects/a/2.jsonl', cwd: '/workspace/repo', title: null },
         ],
         mcpServers: [],
@@ -117,7 +121,9 @@ describe('parseDetectResponse', () => {
 
   it('itemType:cwdをキーにする', () => {
     const { items } = parseDetectResponse(detectResult);
-    expect(items.find((i) => i.itemType === 'CONFIG')?.key).toBe(buildImportItemKey('CONFIG', null));
+    expect(items.find((i) => i.itemType === 'CONFIG')?.key).toBe(
+      buildImportItemKey('CONFIG', null),
+    );
     expect(items.find((i) => i.itemType === 'MEMORY')?.key).toBe(
       buildImportItemKey('MEMORY', '/workspace/repo'),
     );
@@ -244,7 +250,13 @@ describe('parseImportNotification', () => {
     const parsed = parseImportNotification(completedNotification);
     expect(parsed?.importId).toBe('imp-1');
     expect(parsed?.results).toEqual([
-      { itemType: 'SKILLS', label: 'skills', successCount: 1, failureCount: 0, failureMessages: [] },
+      {
+        itemType: 'SKILLS',
+        label: 'skills',
+        successCount: 1,
+        failureCount: 0,
+        failureMessages: [],
+      },
       {
         itemType: 'HOOKS',
         label: 'hooks',
@@ -295,7 +307,13 @@ describe('parseReadHistoriesResponse', () => {
     const entries = parseReadHistoriesResponse(readHistoriesResult);
     const old = entries.find((e) => e.importId === 'imp-old');
     expect(old?.results).toEqual([
-      { itemType: 'SKILLS', label: 'skills', successCount: 2, failureCount: 0, failureMessages: [] },
+      {
+        itemType: 'SKILLS',
+        label: 'skills',
+        successCount: 2,
+        failureCount: 0,
+        failureMessages: [],
+      },
       {
         itemType: 'HOOKS',
         label: 'hooks',

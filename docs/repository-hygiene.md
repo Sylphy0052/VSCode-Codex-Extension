@@ -190,7 +190,15 @@ CLAUDE.mdが定める「Test coverage 80%以上」に対し、上記の実測値
 `gh api repos/Sylphy0052/VSCode-Codex-Extension/branches/main/protection` の応答（要約）。
 
 ```json
-{"admins":false,"approvals":0,"checks":["checks"],"deletions":false,"force_push":false,"pr_required":true,"strict":true}
+{
+  "admins": false,
+  "approvals": 0,
+  "checks": ["checks"],
+  "deletions": false,
+  "force_push": false,
+  "pr_required": true,
+  "strict": true
+}
 ```
 
 - 必須ステータスチェック: `checks` を必須化済み。`external-cli` は必須にしていない（実行はされるがマージをブロックしない）
@@ -221,11 +229,11 @@ CLAUDE.mdが定める「Test coverage 80%以上」に対し、上記の実測値
 
 ## まとめ
 
-| 項目 | 状態 | 対応要否 |
-| --- | --- | --- |
-| リポジトリサイズ（`docs/design.md` の履歴肥大） | size-pack 48.54 MiB、design.mdが199版で上位blobを独占 | 分割（選択肢A）を推奨。履歴書き換え（選択肢B）は非推奨 |
-| 不要ブランチ `feat/327/...` | 既に削除済みで残存していない | 対応不要（解消済み） |
-| カバレッジ計測の下限（#455） | 導入済み。閾値statements70/branches68/functions70/lines70でCIが自動チェック | 対応不要（導入済み）。80%への引き上げは未着手で、段階的に別Issueで行う |
-| ブランチ保護の必須チェック | 設定済み。`checks` を必須化、strict有効、PR必須（承認数0） | 対応不要（設定済み、2026-08-22、#386） |
+| 項目                                            | 状態                                                                        | 対応要否                                                               |
+| ----------------------------------------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| リポジトリサイズ（`docs/design.md` の履歴肥大） | size-pack 48.54 MiB、design.mdが199版で上位blobを独占                       | 分割（選択肢A）を推奨。履歴書き換え（選択肢B）は非推奨                 |
+| 不要ブランチ `feat/327/...`                     | 既に削除済みで残存していない                                                | 対応不要（解消済み）                                                   |
+| カバレッジ計測の下限（#455）                    | 導入済み。閾値statements70/branches68/functions70/lines70でCIが自動チェック | 対応不要（導入済み）。80%への引き上げは未着手で、段階的に別Issueで行う |
+| ブランチ保護の必須チェック                      | 設定済み。`checks` を必須化、strict有効、PR必須（承認数0）                  | 対応不要（設定済み、2026-08-22、#386）                                 |
 
 カバレッジ計測の下限（#455）とブランチ保護の必須チェック（#467）は実行済み。リポジトリサイズと不要ブランチの2項目は本文書が調査と選択肢の提示のみを行っており、実行判断は人に委ねる。

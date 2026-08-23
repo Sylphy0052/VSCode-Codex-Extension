@@ -1,0 +1,12 @@
+# ビルド成果物と外部から取得したもの。eslint.config.mjs の ignores と揃える
+dist/
+out/
+coverage/
+node_modules/
+.vscode-test/
+.claude/
+
+# ロードマップは全体オーケストレーターが main 側で継続的に更新しているため、整形の差分が
+# 進行中の更新と衝突する。WF-G の進行中は対象外にし、扱いは WF-G の完了後に決める。
+# 経緯は Issue #551
+docs/roadmap/

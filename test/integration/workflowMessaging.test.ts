@@ -152,7 +152,11 @@ suite('タスク間メッセージング（design.md §16.21）', () => {
       body: 'T2の進捗を教えて',
       expectReply: true,
     });
-    await waitForSnapshot(runId, (s) => stateOf(s, 'T1') === 'waitingReply', 'T1がwaitingReplyになる');
+    await waitForSnapshot(
+      runId,
+      (s) => stateOf(s, 'T1') === 'waitingReply',
+      'T1がwaitingReplyになる',
+    );
 
     // オーケストレーター自身の`send_message`（`from: ORCHESTRATOR_CONNECTION_ID`）は
     // これまでどおり実タスクidを直接宛先にできる（design.md §16.34、Issue #547）。
@@ -362,7 +366,11 @@ suite('タスク間メッセージング（design.md §16.21）', () => {
       body: '返事が来ない相手へ送る',
       expectReply: true,
     });
-    await waitForSnapshot(runId, (s) => stateOf(s, 'T1') === 'waitingReply', 'T1がwaitingReplyになる');
+    await waitForSnapshot(
+      runId,
+      (s) => stateOf(s, 'T1') === 'waitingReply',
+      'T1がwaitingReplyになる',
+    );
 
     // 返信は送らない。上限を超えた時点で、定期チェックが待ちを解く。
     const released = await waitForSnapshot(
@@ -405,6 +413,10 @@ suite('タスク間メッセージング（design.md §16.21）', () => {
       (s) => s !== undefined && s.outcome !== 'running',
       'runが終わる',
     );
-    assert.equal(finished.outcome, 'succeeded', `runが完走していない: ${describeSnapshot(finished)}`);
+    assert.equal(
+      finished.outcome,
+      'succeeded',
+      `runが完走していない: ${describeSnapshot(finished)}`,
+    );
   });
 });

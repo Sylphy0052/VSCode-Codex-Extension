@@ -62,7 +62,6 @@ export const MIN_MAX_ASK_USER_PER_RUN = 1;
  * 意味が無いため、`stallRepeatCount`の上限（50）より小さい20に留める。 */
 export const MAX_MAX_ASK_USER_PER_RUN = 20;
 
-
 /**
  * 1回の送信本文の総量の上限。§16.4 の `MAX_EXPANDED_PROMPT_LENGTH` /
  * §16.21 の `MAX_COMPOSED_PROMPT_LENGTH` と同じ値・同じ動機（粗い安全弁）。

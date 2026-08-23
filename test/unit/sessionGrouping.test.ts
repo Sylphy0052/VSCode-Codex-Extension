@@ -69,10 +69,9 @@ describe('buildFolderGroups（issue #293）', () => {
 
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.key === '/home/user/project-a')?.label).toBe('project-a');
-    expect(groups.find((g) => g.key === '/home/user/project-a')?.sessions.map((s) => s.id)).toEqual([
-      'a',
-      'c',
-    ]);
+    expect(groups.find((g) => g.key === '/home/user/project-a')?.sessions.map((s) => s.id)).toEqual(
+      ['a', 'c'],
+    );
   });
 
   it('グループの並びは初出（＝入力が更新時刻降順なら最新順）を保つ', () => {

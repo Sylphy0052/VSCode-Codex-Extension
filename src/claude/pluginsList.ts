@@ -72,7 +72,14 @@ export function parsePluginListJson(text: string): PluginView[] | undefined {
 }
 
 function describeOrigin(marketplace: string | undefined, scope: string | undefined): string {
-  const scopeLabel = scope === 'user' ? 'ユーザー' : scope === 'project' ? 'プロジェクト' : scope === 'local' ? 'ローカル' : undefined;
+  const scopeLabel =
+    scope === 'user'
+      ? 'ユーザー'
+      : scope === 'project'
+        ? 'プロジェクト'
+        : scope === 'local'
+          ? 'ローカル'
+          : undefined;
   const parts: string[] = [];
   if (marketplace !== undefined) {
     parts.push(marketplace);

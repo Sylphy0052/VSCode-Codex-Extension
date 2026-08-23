@@ -113,9 +113,9 @@ describe('ResolutionNotificationTracker', () => {
   it('一度成功すると、以後同じ失敗でもあらためて通知する', () => {
     const tracker = new ResolutionNotificationTracker();
     expect(tracker.shouldNotify(settingNotExecutable('/nonexistent/codex'))).toBe(true);
-    expect(
-      tracker.shouldNotify({ ok: true, path: '/nonexistent/codex', source: 'setting' }),
-    ).toBe(false);
+    expect(tracker.shouldNotify({ ok: true, path: '/nonexistent/codex', source: 'setting' })).toBe(
+      false,
+    );
     expect(tracker.shouldNotify(settingNotExecutable('/nonexistent/codex'))).toBe(true);
   });
 });

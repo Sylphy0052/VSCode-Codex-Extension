@@ -60,7 +60,9 @@ describe('buildTranscriptMarkdown', () => {
       detail: 'ls -la',
       status: 'exit 0',
     });
-    expect(buildTranscriptMarkdown([item], 'Codex')).toBe('## コマンド ・ ls -la ・ exit 0\n\ntotal 0');
+    expect(buildTranscriptMarkdown([item], 'Codex')).toBe(
+      '## コマンド ・ ls -la ・ exit 0\n\ntotal 0',
+    );
   });
 
   it('先頭を捨てた(truncated)コマンド出力には注記が付く', () => {

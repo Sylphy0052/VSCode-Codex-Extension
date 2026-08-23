@@ -91,9 +91,7 @@ export interface AppView {
 }
 
 /** appsは閲覧のみ（Codexのみ。有効/無効・インストール操作の確定した経路が無い。§14.20参照）。 */
-export type AppsSnapshot =
-  | { ok: true; apps: AppView[] }
-  | { ok: false; reason: string };
+export type AppsSnapshot = { ok: true; apps: AppView[] } | { ok: false; reason: string };
 
 /**
  * Codexの `plugin/uninstall` / `plugin/install` の `pluginName` へそのまま埋め込む前の防御。

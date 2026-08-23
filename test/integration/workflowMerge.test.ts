@@ -153,8 +153,7 @@ suite('統合の衝突と自動解決（design.md §16.17）', () => {
     );
 
     const plan = resolution.runLoopCalls[0] as
-      | { initialPrompt?: string; maxIterations?: number; condition?: string }
-      | undefined;
+      { initialPrompt?: string; maxIterations?: number; condition?: string } | undefined;
     const prompt = plan?.initialPrompt ?? '';
     assert.ok(prompt.includes(SHARED_FILE), `未解決パスがプロンプトに無い: ${prompt}`);
     assert.ok(prompt.includes('T1のプロンプト'), `相手タスクのpromptがプロンプトに無い: ${prompt}`);
@@ -190,7 +189,11 @@ suite('統合の衝突と自動解決（design.md §16.17）', () => {
     git(resolution.cwd, 'commit', '--no-verify', '--no-edit');
     resolution.finishDone('解決した');
 
-    const snapshot = await waitForSnapshot(runId, (s) => stateOf(s, 'T2') === 'done', 'T2がdoneになる');
+    const snapshot = await waitForSnapshot(
+      runId,
+      (s) => stateOf(s, 'T2') === 'done',
+      'T2がdoneになる',
+    );
     assert.equal(stateOf(snapshot, 'T2'), 'done');
 
     const log = git(resolution.cwd, 'log', '--oneline', '--format=%s');
@@ -200,11 +203,7 @@ suite('統合の衝突と自動解決（design.md §16.17）', () => {
     );
 
     // T2に依存するT3は、T2がdoneになったので開始される。
-    await waitForSnapshot(
-      runId,
-      (s) => taskOf(s, 'T3')?.hasLiveSession === true,
-      'T3が開始される',
-    );
+    await waitForSnapshot(runId, (s) => taskOf(s, 'T3')?.hasLiveSession === true, 'T3が開始される');
   });
 
   test('解決できないままセッションが終わるとマージが巻き戻り、blockedと後続のskippedになる', async function () {

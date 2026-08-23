@@ -82,7 +82,8 @@ suite('Claude Code画面: 設定変更・コマンド・入力欄モードの配
 
   /** 確認モーダルを常に取り消す（何も選ばず閉じた扱い）。 */
   function cancelWarnings(): void {
-    vscode.window.showWarningMessage = (async () => undefined) as typeof vscode.window.showWarningMessage;
+    vscode.window.showWarningMessage = (async () =>
+      undefined) as typeof vscode.window.showWarningMessage;
   }
 
   function lastUserMessageContent(proc: FakeClaudeProcess): unknown {
@@ -109,7 +110,9 @@ suite('Claude Code画面: 設定変更・コマンド・入力欄モードの配
         proc
           .writtenLines()
           .find(
-            (l) => l['type'] === 'control_request' && (l['request'] as { subtype?: string } | undefined)?.subtype === 'get_context_usage',
+            (l) =>
+              l['type'] === 'control_request' &&
+              (l['request'] as { subtype?: string } | undefined)?.subtype === 'get_context_usage',
           ),
       (line) => line !== undefined,
       WAIT_OPTIONS,
@@ -165,25 +168,40 @@ suite('Claude Code画面: 設定変更・コマンド・入力欄モードの配
     const originalWarning = vscode.window.showWarningMessage;
     try {
       // モデルの変更 → set_model
-      await chat.simulateClaudeWebviewMessage(sessionId, { type: 'config', key: 'model', value: 'sonnet' });
+      await chat.simulateClaudeWebviewMessage(sessionId, {
+        type: 'config',
+        key: 'model',
+        value: 'sonnet',
+      });
       const modelReq = await waitFor(
         () =>
           proc
             .writtenLines()
-            .find((l) => l['type'] === 'control_request' && (l['request'] as { subtype?: string } | undefined)?.subtype === 'set_model'),
+            .find(
+              (l) =>
+                l['type'] === 'control_request' &&
+                (l['request'] as { subtype?: string } | undefined)?.subtype === 'set_model',
+            ),
         (line) => line !== undefined,
         WAIT_OPTIONS,
       );
       assert.equal((modelReq?.['request'] as { model?: string } | undefined)?.model, 'sonnet');
 
       // 承認方法の変更 → set_permission_mode
-      await chat.simulateClaudeWebviewMessage(sessionId, { type: 'config', key: 'approvalMode', value: 'plan' });
+      await chat.simulateClaudeWebviewMessage(sessionId, {
+        type: 'config',
+        key: 'approvalMode',
+        value: 'plan',
+      });
       const modeReq = await waitFor(
         () =>
           proc
             .writtenLines()
             .find(
-              (l) => l['type'] === 'control_request' && (l['request'] as { subtype?: string } | undefined)?.subtype === 'set_permission_mode',
+              (l) =>
+                l['type'] === 'control_request' &&
+                (l['request'] as { subtype?: string } | undefined)?.subtype ===
+                  'set_permission_mode',
             ),
         (line) => line !== undefined,
         WAIT_OPTIONS,
@@ -199,11 +217,19 @@ suite('Claude Code画面: 設定変更・コマンド・入力欄モードの配
         value: 'bypassPermissions',
       });
       await new Promise((resolve) => setTimeout(resolve, 300));
-      assert.equal(proc.writtenLines().length, beforeBypass, '確認を取り消したのに要求が増えている');
+      assert.equal(
+        proc.writtenLines().length,
+        beforeBypass,
+        '確認を取り消したのに要求が増えている',
+      );
 
       // 「既定」（空文字）へ戻す操作はCLI側に戻す手段が無いため何も送らない
       const beforeDefault = proc.writtenLines().length;
-      await chat.simulateClaudeWebviewMessage(sessionId, { type: 'config', key: 'model', value: '' });
+      await chat.simulateClaudeWebviewMessage(sessionId, {
+        type: 'config',
+        key: 'model',
+        value: '',
+      });
       await new Promise((resolve) => setTimeout(resolve, 300));
       assert.equal(proc.writtenLines().length, beforeDefault, '既定へ戻したのに要求が増えている');
     } finally {
@@ -233,7 +259,9 @@ suite('Claude Code画面: 設定変更・コマンド・入力欄モードの配
         proc
           .writtenLines()
           .filter(
-            (l) => l['type'] === 'control_request' && (l['request'] as { subtype?: string } | undefined)?.subtype === 'set_permission_mode',
+            (l) =>
+              l['type'] === 'control_request' &&
+              (l['request'] as { subtype?: string } | undefined)?.subtype === 'set_permission_mode',
           ),
       (lines) => lines.length >= 1,
       WAIT_OPTIONS,
@@ -246,13 +274,18 @@ suite('Claude Code画面: 設定変更・コマンド・入力欄モードの配
         proc
           .writtenLines()
           .filter(
-            (l) => l['type'] === 'control_request' && (l['request'] as { subtype?: string } | undefined)?.subtype === 'set_permission_mode',
+            (l) =>
+              l['type'] === 'control_request' &&
+              (l['request'] as { subtype?: string } | undefined)?.subtype === 'set_permission_mode',
           ),
       (lines) => lines.length >= 2,
       WAIT_OPTIONS,
     );
     // claude.permissionModeが既定（空文字）のときはmanualへ戻る（`setPlanMode`のフォールバック）
-    assert.equal((requestsAfterExit[1]?.['request'] as { mode?: string } | undefined)?.mode, 'manual');
+    assert.equal(
+      (requestsAfterExit[1]?.['request'] as { mode?: string } | undefined)?.mode,
+      'manual',
+    );
   });
 
   test('L-24: レビューは専用の要求を持たず、/code-reviewをそのまま発言として送るだけ', async function () {
@@ -309,12 +342,19 @@ suite('Claude Code画面: 設定変更・コマンド・入力欄モードの配
         return Promise.resolve(undefined);
       }) as typeof vscode.window.showWarningMessage;
 
-      await chat.simulateClaudeWebviewMessage(sessionId, { type: 'rewind', messageId: 'user-msg-1' });
+      await chat.simulateClaudeWebviewMessage(sessionId, {
+        type: 'rewind',
+        messageId: 'user-msg-1',
+      });
       const previewReq = await waitFor(
         () =>
           proc
             .writtenLines()
-            .find((l) => l['type'] === 'control_request' && (l['request'] as { subtype?: string } | undefined)?.subtype === 'rewind_files'),
+            .find(
+              (l) =>
+                l['type'] === 'control_request' &&
+                (l['request'] as { subtype?: string } | undefined)?.subtype === 'rewind_files',
+            ),
         (line) => line !== undefined,
         WAIT_OPTIONS,
       );
@@ -340,7 +380,10 @@ suite('Claude Code画面: 設定変更・コマンド・入力欄モードの配
 
       // 2) 対象ファイルがある場合は、確認 → 適用の順にdry_run:true/falseで送る
       acceptWarnings();
-      await chat.simulateClaudeWebviewMessage(sessionId, { type: 'rewind', messageId: 'user-msg-2' });
+      await chat.simulateClaudeWebviewMessage(sessionId, {
+        type: 'rewind',
+        messageId: 'user-msg-2',
+      });
       const preview2 = await waitFor(
         () =>
           proc
@@ -349,7 +392,8 @@ suite('Claude Code画面: 設定変更・コマンド・入力欄モードの配
               (l) =>
                 l['type'] === 'control_request' &&
                 (l['request'] as { subtype?: string } | undefined)?.subtype === 'rewind_files' &&
-                (l['request'] as { user_message_id?: string } | undefined)?.user_message_id === 'user-msg-2',
+                (l['request'] as { user_message_id?: string } | undefined)?.user_message_id ===
+                  'user-msg-2',
             ),
         (lines) => lines.length >= 1,
         WAIT_OPTIONS,
@@ -376,7 +420,8 @@ suite('Claude Code画面: 設定変更・コマンド・入力欄モードの配
               (l) =>
                 l['type'] === 'control_request' &&
                 (l['request'] as { subtype?: string } | undefined)?.subtype === 'rewind_files' &&
-                (l['request'] as { user_message_id?: string } | undefined)?.user_message_id === 'user-msg-2' &&
+                (l['request'] as { user_message_id?: string } | undefined)?.user_message_id ===
+                  'user-msg-2' &&
                 (l['request'] as { dry_run?: boolean } | undefined)?.dry_run === false,
             ),
         (lines) => lines.length >= 1,
@@ -420,13 +465,19 @@ suite('Claude Code画面: 設定変更・コマンド・入力欄モードの配
     }
     // 確認して入力した後もCLIへは一切送られていない（トークンを消費しない）
     await new Promise((resolve) => setTimeout(resolve, 300));
-    assert.equal(proc.writtenLines().length, before, 'CLIへ送られている（!echo helloが発言として届いている）');
+    assert.equal(
+      proc.writtenLines().length,
+      before,
+      'CLIへ送られている（!echo helloが発言として届いている）',
+    );
     assert.equal(
       proc.writtenLines().some((l) => l['type'] === 'user'),
       false,
     );
 
-    const terminalsBefore = vscode.window.terminals.filter((t) => t.name === SHELL_TERMINAL_NAME).length;
+    const terminalsBefore = vscode.window.terminals.filter(
+      (t) => t.name === SHELL_TERMINAL_NAME,
+    ).length;
     try {
       acceptWarnings();
       await chat.simulateClaudeWebviewMessage(sessionId, { type: 'send', text: '!ls' });
@@ -470,7 +521,10 @@ suite('Claude Code画面: 設定変更・コマンド・入力欄モードの配
           return resolved[0];
         }) as typeof vscode.window.showQuickPick;
         acceptWarnings();
-        await chat.simulateClaudeWebviewMessage(sessionId, { type: 'send', text: '#常にpnpmを使う' });
+        await chat.simulateClaudeWebviewMessage(sessionId, {
+          type: 'send',
+          text: '#常にpnpmを使う',
+        });
         await waitFor(
           () => fs.existsSync(claudeMdPath),
           (exists) => exists,
@@ -482,7 +536,11 @@ suite('Claude Code画面: 設定変更・コマンド・入力欄モードの配
       }
 
       // CLIへは一切送られていない（control_requestに専用の経路が無いため拡張機能側で完結する）
-      assert.equal(proc.writtenLines().length, before, 'CLIへ送られている（#常にpnpmを使うが発言として届いている）');
+      assert.equal(
+        proc.writtenLines().length,
+        before,
+        'CLIへ送られている（#常にpnpmを使うが発言として届いている）',
+      );
       const content = fs.readFileSync(claudeMdPath, 'utf8');
       assert.match(content, /- 常にpnpmを使う/);
     } finally {

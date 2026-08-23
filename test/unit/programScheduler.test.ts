@@ -29,10 +29,10 @@ const entry = (
   skipReason?: ProgramRunEntry['skipReason'],
 ): ProgramRunEntry => ({ state, runId, skipReason });
 
-const state = (
-  runs: Record<string, ProgramRunEntry>,
-  haltedByUser = false,
-): ProgramState => ({ runs, haltedByUser });
+const state = (runs: Record<string, ProgramRunEntry>, haltedByUser = false): ProgramState => ({
+  runs,
+  haltedByUser,
+});
 
 /** T1 -> (T2 || T3) -> T4。scheduler.test.tsのdiamondTasksと同じ形。 */
 const diamondRuns = (): ProgramRunRef[] => [

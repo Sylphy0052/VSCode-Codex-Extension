@@ -214,9 +214,7 @@ export function buildSessionPresetQuickPickLabel(
   const effective = buildEffectivePresetConfig(preset, baseline);
   return {
     label: preset.name,
-    description: [preset.provider, preset.model, preset.effort]
-      .filter((v) => v !== '')
-      .join(' / '),
+    description: [preset.provider, preset.model, preset.effort].filter((v) => v !== '').join(' / '),
     detail: [
       effective.approvalMode !== '' ? `承認: ${effective.approvalMode}` : undefined,
       preset.provider === 'codex' && effective.sandbox !== ''

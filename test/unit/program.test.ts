@@ -135,9 +135,9 @@ describe('validateProgram（受入基準: 複数runの定義・循環依存と�
 
   it('id の字種が不正なら拒否する', () => {
     const def = program({ runs: [runRef({ id: '../evil' })] });
-    expect(
-      validateProgram(def).errors.some((e) => e.message.includes('id の形式が不正です')),
-    ).toBe(true);
+    expect(validateProgram(def).errors.some((e) => e.message.includes('id の形式が不正です'))).toBe(
+      true,
+    );
   });
 
   it('プロトタイプ汚染を招くrun id（危険キー）を、文字種チェックを通っても拒否する（横断レビュー実測、Issue #606）', () => {
@@ -151,9 +151,7 @@ describe('validateProgram（受入基準: 複数runの定義・循環依存と�
     });
     const result = validateProgram(def);
     expect(result.errors.some((e) => e.runIds.includes(dangerousId))).toBe(true);
-    expect(
-      result.errors.some((e) => e.message.includes('プロトタイプ汚染')),
-    ).toBe(true);
+    expect(result.errors.some((e) => e.message.includes('プロトタイプ汚染'))).toBe(true);
   });
 
   it('name未指定を拒否する', () => {

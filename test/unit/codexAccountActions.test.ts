@@ -19,7 +19,9 @@ describe('CodexAccountActions', () => {
     const result = await new CodexAccountActions(runner, () => '/usr/bin/codex').logout();
 
     expect(result.code).toBe(0);
-    expect(runner.calls).toEqual([{ executable: '/usr/bin/codex', args: ['logout'], stdin: undefined }]);
+    expect(runner.calls).toEqual([
+      { executable: '/usr/bin/codex', args: ['logout'], stdin: undefined },
+    ]);
   });
 
   it('logout の失敗は終了コードとstderrをそのまま返す', async () => {
@@ -32,7 +34,9 @@ describe('CodexAccountActions', () => {
 
   it('loginWithApiKey は `codex login --with-api-key` を実行し、キーを標準入力に渡す（引数には載せない）', async () => {
     const runner = new FakeRunner();
-    const result = await new CodexAccountActions(runner, () => 'codex').loginWithApiKey('sk-test-key');
+    const result = await new CodexAccountActions(runner, () => 'codex').loginWithApiKey(
+      'sk-test-key',
+    );
 
     expect(result.code).toBe(0);
     expect(runner.calls).toEqual([

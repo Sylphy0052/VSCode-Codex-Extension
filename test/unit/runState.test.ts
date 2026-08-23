@@ -1243,7 +1243,10 @@ describe('applyAutoResume（design.md §16.35、roadmap W10、Issue #584）', ()
     () => {
       const tasks = chainTasks();
       let run = createRunState(tasks);
-      run = withTaskState(run, 'T1', { state: 'failed', failure: { kind: 'taskApprovalTimedOut' } });
+      run = withTaskState(run, 'T1', {
+        state: 'failed',
+        failure: { kind: 'taskApprovalTimedOut' },
+      });
       run = withTaskState(run, 'T2', { state: 'failed', failure: { kind: 'reloadInterrupted' } });
 
       const outcome = applyAutoResume(run, tasks);
@@ -1264,10 +1267,7 @@ describe('applyAutoResume（design.md §16.35、roadmap W10、Issue #584）', ()
     'allowを持つタスクがreloadInterruptedで止まっていれば、run全体の自動再開をあきらめる' +
       '（人が居ないため危険操作の実行前確認ができない。start()/retryTaskと同じ規約）',
     () => {
-      const tasksWithAllow = [
-        { ...task('T1', []), allow: ['npm test'] },
-        task('T2', ['T1']),
-      ];
+      const tasksWithAllow = [{ ...task('T1', []), allow: ['npm test'] }, task('T2', ['T1'])];
       let run = createRunState(tasksWithAllow);
       run = withTaskState(run, 'T1', { state: 'failed', failure: { kind: 'reloadInterrupted' } });
 

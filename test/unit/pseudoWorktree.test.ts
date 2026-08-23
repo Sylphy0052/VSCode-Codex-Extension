@@ -952,9 +952,9 @@ describe('実ファイルシステムでの統合テスト', () => {
 
         expect(result).toMatchObject({ ok: false, reason: 'boundaryEscape' });
         // 差し替え先（他タスクの複製に見立てたディレクトリ）の実体は消えず残っている
-        await expect(
-          readFile(path.join(decoyDir, 'T1', 'secret.txt'), 'utf8'),
-        ).resolves.toBe('must-not-be-deleted\n');
+        await expect(readFile(path.join(decoyDir, 'T1', 'secret.txt'), 'utf8')).resolves.toBe(
+          'must-not-be-deleted\n',
+        );
       },
     );
 
@@ -1008,7 +1008,13 @@ describe('実ファイルシステムでの統合テスト', () => {
      * 返すことを確かめる。
      */
     it('削除自体がEACCES等で失敗しても、例外を投げずに失敗の結果として返す（Issue #493）', async () => {
-      const cloned = await cloneWorkspace(workspace, RUN_ID, 'T1', [], nodePseudoWorktreeFileSystem);
+      const cloned = await cloneWorkspace(
+        workspace,
+        RUN_ID,
+        'T1',
+        [],
+        nodePseudoWorktreeFileSystem,
+      );
       expect(cloned.ok).toBe(true);
       if (!cloned.ok) return;
 
@@ -1041,9 +1047,9 @@ describe('実ファイルシステムでの統合テスト', () => {
         ['a.txt', { kind: 'added' as const, taskId: 'T1' }],
       ]);
       await persistManifest(workspace, RUN_ID, manifest, nodePseudoWorktreeFileSystem);
-      expect(
-        await readFile(integrationManifestPath(workspace, RUN_ID), 'utf8'),
-      ).not.toHaveLength(0);
+      expect(await readFile(integrationManifestPath(workspace, RUN_ID), 'utf8')).not.toHaveLength(
+        0,
+      );
 
       const result = await removePseudoIntegration(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
 
@@ -1186,7 +1192,11 @@ describe('実ファイルシステムでの統合テスト', () => {
         await expect(
           readFile(integrationManifestPath(workspace, RUN_ID), 'utf8'),
         ).rejects.toThrow();
-        const reloaded = await loadPersistedManifest(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+        const reloaded = await loadPersistedManifest(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
         expect(reloaded).toEqual({ ok: true, manifest: new Map() });
       } finally {
         await rm(outsideDir, { recursive: true, force: true });
@@ -1461,7 +1471,13 @@ describe('実ファイルシステムでの統合テスト', () => {
      * 積み上がってしまう。
      */
     it('初回と全retry分の複製をまとめて撤去する', async () => {
-      const initial = await cloneWorkspace(workspace, RUN_ID, 'T1', [], nodePseudoWorktreeFileSystem);
+      const initial = await cloneWorkspace(
+        workspace,
+        RUN_ID,
+        'T1',
+        [],
+        nodePseudoWorktreeFileSystem,
+      );
       const retry0 = await cloneWorkspace(
         workspace,
         RUN_ID,
@@ -1498,7 +1514,13 @@ describe('実ファイルシステムでの統合テスト', () => {
     });
 
     it('totalAttemptsが0なら初回分だけを撤去する', async () => {
-      const initial = await cloneWorkspace(workspace, RUN_ID, 'T1', [], nodePseudoWorktreeFileSystem);
+      const initial = await cloneWorkspace(
+        workspace,
+        RUN_ID,
+        'T1',
+        [],
+        nodePseudoWorktreeFileSystem,
+      );
       expect(initial.ok).toBe(true);
       if (!initial.ok) return;
 
@@ -1694,7 +1716,11 @@ describe('実ファイルシステムでの統合テスト', () => {
       await writeWorkspaceFile('a.txt', 'original\n');
       const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
 
-      const integration = await ensureIntegrationDir(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
       expect(integration.ok).toBe(true);
       if (!integration.ok) return;
 
@@ -1928,9 +1954,7 @@ describe('実ファイルシステムでの統合テスト', () => {
         await mkdir(path.join(workspace, '.agents'), { recursive: true });
         await symlink(outsideDir, path.join(workspace, '.agents', 'worktrees'));
 
-        const manifest: IntegrationManifest = new Map([
-          ['a.txt', { taskId: 'T1', kind: 'added' }],
-        ]);
+        const manifest: IntegrationManifest = new Map([['a.txt', { taskId: 'T1', kind: 'added' }]]);
         await expect(
           persistManifest(workspace, RUN_ID, manifest, nodePseudoWorktreeFileSystem),
         ).rejects.toThrow(/シンボリックリンク/);
@@ -2005,9 +2029,7 @@ describe('実ファイルシステムでの統合テスト', () => {
       const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-toctou-'));
       try {
         const filePath = integrationManifestPath(workspace, RUN_ID);
-        const manifest: IntegrationManifest = new Map([
-          ['a.txt', { taskId: 'T1', kind: 'added' }],
-        ]);
+        const manifest: IntegrationManifest = new Map([['a.txt', { taskId: 'T1', kind: 'added' }]]);
 
         // シンボリックリンク検知（一次防御）は通過するが、書き込み直後のrealpathでは
         // 境界外を指すよう差し替え、書き込みと実パス確認の間に経路が差し替えられた
@@ -2060,9 +2082,7 @@ describe('実ファイルシステムでの統合テスト', () => {
 
       const filePath = integrationManifestPath(workspace, RUN_ID);
       const dirPath = path.dirname(filePath);
-      const manifest: IntegrationManifest = new Map([
-        ['a.txt', { taskId: 'T1', kind: 'added' }],
-      ]);
+      const manifest: IntegrationManifest = new Map([['a.txt', { taskId: 'T1', kind: 'added' }]]);
 
       let swapped = false;
       const raceFs: typeof nodePseudoWorktreeFileSystem = {
@@ -2109,9 +2129,7 @@ describe('実ファイルシステムでの統合テスト', () => {
       await writeFile(path.join(gitDir, 'HEAD'), 'ref: refs/heads/main\n');
 
       const agentsDir = path.join(workspace, '.agents');
-      const manifest: IntegrationManifest = new Map([
-        ['a.txt', { taskId: 'T1', kind: 'added' }],
-      ]);
+      const manifest: IntegrationManifest = new Map([['a.txt', { taskId: 'T1', kind: 'added' }]]);
 
       let swapped = false;
       const raceFs: typeof nodePseudoWorktreeFileSystem = {
@@ -2152,9 +2170,7 @@ describe('実ファイルシステムでの統合テスト', () => {
       try {
         const filePath = integrationManifestPath(workspace, RUN_ID);
         await mkdir(path.dirname(filePath), { recursive: true });
-        const manifest: IntegrationManifest = new Map([
-          ['a.txt', { taskId: 'T1', kind: 'added' }],
-        ]);
+        const manifest: IntegrationManifest = new Map([['a.txt', { taskId: 'T1', kind: 'added' }]]);
         await writeFile(filePath, serializeManifest(manifest));
 
         // シンボリックリンク検知（一次防御）は通過するが、読み込み直後のrealpathでは
@@ -2194,9 +2210,7 @@ describe('実ファイルシステムでの統合テスト', () => {
       try {
         const filePath = integrationManifestPath(workspace, RUN_ID);
         await mkdir(path.dirname(filePath), { recursive: true });
-        const manifest: IntegrationManifest = new Map([
-          ['a.txt', { taskId: 'T1', kind: 'added' }],
-        ]);
+        const manifest: IntegrationManifest = new Map([['a.txt', { taskId: 'T1', kind: 'added' }]]);
         await writeFile(filePath, serializeManifest(manifest));
 
         let readTextFileCalled = false;
@@ -2351,9 +2365,7 @@ describe('実ファイルシステムでの統合テスト', () => {
     async () => {
       const filePath = integrationManifestPath(workspace, RUN_ID);
       await mkdir(path.dirname(filePath), { recursive: true });
-      const manifest: IntegrationManifest = new Map([
-        ['a.txt', { taskId: 'T1', kind: 'added' }],
-      ]);
+      const manifest: IntegrationManifest = new Map([['a.txt', { taskId: 'T1', kind: 'added' }]]);
       await writeFile(filePath, serializeManifest(manifest));
 
       // `workspaceRoot`の`realpath`は1回目の確認・2回目の確認の両方で呼ばれるため、
@@ -2394,9 +2406,7 @@ describe('実ファイルシステムでの統合テスト', () => {
     async () => {
       const filePath = integrationManifestPath(workspace, RUN_ID);
       await mkdir(path.dirname(filePath), { recursive: true });
-      const manifest: IntegrationManifest = new Map([
-        ['a.txt', { taskId: 'T1', kind: 'added' }],
-      ]);
+      const manifest: IntegrationManifest = new Map([['a.txt', { taskId: 'T1', kind: 'added' }]]);
       await writeFile(filePath, serializeManifest(manifest));
 
       let readTextFileCalled = false;
@@ -3090,13 +3100,19 @@ describe('実ファイルシステムでの統合テスト', () => {
       );
 
       it('`rename`を持つポート（本番経路）では`usedLegacyCopyFallback`がfalseのまま反映される', async () => {
-        const integration = await ensureIntegrationDir(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+        const integration = await ensureIntegrationDir(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
         expect(integration.ok).toBe(true);
         if (!integration.ok) return;
         await writeFile(path.join(integration.dir, 'a.txt'), 'integrated content\n');
 
         const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
-        const manifest: IntegrationManifest = new Map([['a.txt', { taskId: 'T1', kind: 'modified' }]]);
+        const manifest: IntegrationManifest = new Map([
+          ['a.txt', { taskId: 'T1', kind: 'modified' }],
+        ]);
 
         const result = await reflectIntegrationToWorkspace(
           workspace,

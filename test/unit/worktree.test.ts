@@ -127,9 +127,9 @@ describe('branchName（options: BranchNamingOptions。GitLab運用規約形式�
   });
 
   it('naming: wfを明示した場合もwf形式のまま', () => {
-    expect(
-      branchName(RUN_ID, 'T2', undefined, { naming: 'wf', type: 'feat', issue: 42 }),
-    ).toBe(`wf/${RUN_ID}/T2`);
+    expect(branchName(RUN_ID, 'T2', undefined, { naming: 'wf', type: 'feat', issue: 42 })).toBe(
+      `wf/${RUN_ID}/T2`,
+    );
   });
 
   it('naming: conventionalかつissueありでGitLab運用規約形式<type>/<issue>/<slug>になる', () => {

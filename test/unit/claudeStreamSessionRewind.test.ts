@@ -135,12 +135,8 @@ describe('ClaudeStreamSession のファイル巻き戻し（rewind_files）', ()
     const secondId = (JSON.parse(written[1]!.trim()) as { request_id: string }).request_id;
 
     // 後から出した要求の応答を先に返す
-    session.receive(
-      controlResponseLine(secondId, { canRewind: true, filesChanged: ['/w/b.txt'] }),
-    );
-    session.receive(
-      controlResponseLine(firstId, { canRewind: true, filesChanged: ['/w/a.txt'] }),
-    );
+    session.receive(controlResponseLine(secondId, { canRewind: true, filesChanged: ['/w/b.txt'] }));
+    session.receive(controlResponseLine(firstId, { canRewind: true, filesChanged: ['/w/a.txt'] }));
 
     await expect(first).resolves.toMatchObject({ filesChanged: ['/w/a.txt'] });
     await expect(second).resolves.toMatchObject({ filesChanged: ['/w/b.txt'] });

@@ -4,9 +4,24 @@ import { mergeApps, parseAppsInstalled, parseAppsRead } from '../../src/codex/ap
 /** 実測（codex-cli 0.147.0。この環境で実際に導入済みのappを読んだ。設定は変更していない）。 */
 const appsInstalledResult = {
   apps: [
-    { id: 'connector_76869538009648d5b282a4bb21c3d157', runtimeName: 'GitHub', enabled: true, callable: true },
-    { id: 'connector_openai_plugin_management', runtimeName: 'Plugin Management', enabled: true, callable: true },
-    { id: 'connector_disabled_example', runtimeName: 'Disabled Example', enabled: false, callable: false },
+    {
+      id: 'connector_76869538009648d5b282a4bb21c3d157',
+      runtimeName: 'GitHub',
+      enabled: true,
+      callable: true,
+    },
+    {
+      id: 'connector_openai_plugin_management',
+      runtimeName: 'Plugin Management',
+      enabled: true,
+      callable: true,
+    },
+    {
+      id: 'connector_disabled_example',
+      runtimeName: 'Disabled Example',
+      enabled: false,
+      callable: false,
+    },
   ],
 };
 

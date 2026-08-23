@@ -40,11 +40,9 @@ describe('matchesSessionQuery（issue #293）', () => {
   });
 
   it('threadName・cwdが無いセッションでも例外にならない', () => {
-    expect(
-      matchesSessionQuery(session({ threadName: undefined, cwd: undefined }), 'query'),
-    ).toBe(false);
-    expect(
-      matchesSessionQuery(session({ threadName: undefined, cwd: undefined }), ''),
-    ).toBe(true);
+    expect(matchesSessionQuery(session({ threadName: undefined, cwd: undefined }), 'query')).toBe(
+      false,
+    );
+    expect(matchesSessionQuery(session({ threadName: undefined, cwd: undefined }), '')).toBe(true);
   });
 });

@@ -72,7 +72,10 @@ function handleTaskApprovalTimeout(
     return;
   }
   const liveTask = live.tasks.get(taskId);
-  if (liveTask === undefined || liveTask.waitingApprovalSinceMs !== scheduledForWaitingApprovalSinceMs) {
+  if (
+    liveTask === undefined ||
+    liveTask.waitingApprovalSinceMs !== scheduledForWaitingApprovalSinceMs
+  ) {
     // 既に承認待ちを抜けた、または新しい承認待ちへ張り替わった後（多層防御。上のJSDoc参照）
     return;
   }

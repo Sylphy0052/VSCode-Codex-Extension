@@ -676,8 +676,7 @@ export function readSideQuestionResult(response: ControlResponse): SideQuestionR
     };
   }
   const syntheticRaw = payload?.['synthetic'];
-  const synthetic =
-    syntheticRaw === true ? true : syntheticRaw === false ? false : undefined;
+  const synthetic = syntheticRaw === true ? true : syntheticRaw === false ? false : undefined;
   const fallback = rec(payload?.['refusal_fallback']);
   const refusalFallback =
     fallback === undefined

@@ -45,7 +45,11 @@ describe('reconcileProgramStateOnReload（design.md §16.35「中断からの自
     };
     const reconciled = reconcileProgramStateOnReload(state);
     expect(reconciled.runs.R1).toEqual({ state: 'failed', runId: 'run-1', skipReason: undefined });
-    expect(reconciled.runs.R2).toEqual({ state: 'pending', runId: undefined, skipReason: undefined });
+    expect(reconciled.runs.R2).toEqual({
+      state: 'pending',
+      runId: undefined,
+      skipReason: undefined,
+    });
   });
 
   it('doneとfailedはそのまま変えない', () => {

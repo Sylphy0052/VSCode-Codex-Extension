@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { consumeFrames, encodeNotification, encodeRequest, readForkedThreadId } from '../../src/codex/jsonRpc';
+import {
+  consumeFrames,
+  encodeNotification,
+  encodeRequest,
+  readForkedThreadId,
+} from '../../src/codex/jsonRpc';
 import { MAX_LINE_BUFFER_BYTES } from '../../src/process/childProcess';
 
 describe('consumeFrames', () => {

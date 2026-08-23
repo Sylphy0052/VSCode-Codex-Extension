@@ -428,8 +428,7 @@ describe('maskForLog（Issue #474 レビュー指摘: BEARER_TOKEN_PATTERNの過
   it('Bearerが値を伴わず行末で終わる場合、次行のスタックトレースを潰さない', () => {
     // \s+ が改行を含むため、Bearerが値を伴わない行末では次行の先頭語まで
     // 誤って食っていた（stack traceの `at Object.<anonymous>` が破壊される）
-    const raw =
-      'Authorization failed near Bearer\n    at Object.<anonymous> (/app/index.js:10:5)';
+    const raw = 'Authorization failed near Bearer\n    at Object.<anonymous> (/app/index.js:10:5)';
     expect(maskForLog(raw)).toBe(raw);
   });
 
@@ -558,56 +557,80 @@ describe('sanitizeForLog（ReDoS対策: 約100万文字規模の敵対的入力�
   const REDOS_TIMEOUT_MS = 12_000;
   const IT_TIMEOUT_MS = 15_000;
 
-  it('/home/ の10万回連続でも高速に完了する', () => {
-    const input = '/home/'.repeat(100_000);
-    const start = performance.now();
-    sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
-    expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  }, IT_TIMEOUT_MS);
+  it(
+    '/home/ の10万回連続でも高速に完了する',
+    () => {
+      const input = '/home/'.repeat(100_000);
+      const start = performance.now();
+      sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
+      expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
+    },
+    IT_TIMEOUT_MS,
+  );
 
-  it('\\\\ + 20万文字 + \\Users\\ + 20万文字でも高速に完了する', () => {
-    const input = '\\\\' + 'a'.repeat(200_000) + '\\Users\\' + 'b'.repeat(200_000);
-    const start = performance.now();
-    sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
-    expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  }, IT_TIMEOUT_MS);
+  it(
+    '\\\\ + 20万文字 + \\Users\\ + 20万文字でも高速に完了する',
+    () => {
+      const input = '\\\\' + 'a'.repeat(200_000) + '\\Users\\' + 'b'.repeat(200_000);
+      const start = performance.now();
+      sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
+      expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
+    },
+    IT_TIMEOUT_MS,
+  );
 
-  it('scheme:// で終端しない50万+50万文字でも高速に完了する', () => {
-    const input = 'https://' + 'a'.repeat(500_000) + 'b'.repeat(500_000);
-    const start = performance.now();
-    sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
-    expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  }, IT_TIMEOUT_MS);
+  it(
+    'scheme:// で終端しない50万+50万文字でも高速に完了する',
+    () => {
+      const input = 'https://' + 'a'.repeat(500_000) + 'b'.repeat(500_000);
+      const start = performance.now();
+      sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
+      expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
+    },
+    IT_TIMEOUT_MS,
+  );
 
-  it('スタックトレース行の5万回連続でも高速に完了する', () => {
-    const input = '    at foo (/home/alice/a.ts:1:1)\n'.repeat(50_000);
-    const start = performance.now();
-    sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
-    expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  }, IT_TIMEOUT_MS);
+  it(
+    'スタックトレース行の5万回連続でも高速に完了する',
+    () => {
+      const input = '    at foo (/home/alice/a.ts:1:1)\n'.repeat(50_000);
+      const start = performance.now();
+      sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
+      expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
+    },
+    IT_TIMEOUT_MS,
+  );
 
-  it('パーセントエンコードされたスキーム区切りが%40なしで大量に連続しても高速に完了する（回帰確認）', () => {
-    // 実装当初、末尾に%40が一切現れない大きな入力でO(n^2)のバックトラックが発生し
-    // 90万文字規模で20秒を超えていた（スキーム名の量指定子に上限が無かったため）。
-    // {0,63}へ上限を設けて解消したことをここで固定する。
-    const input = 'https%3A%2F%2F'.repeat(50_000) + 'a'.repeat(200_000);
-    const start = performance.now();
-    sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
-    expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  }, IT_TIMEOUT_MS);
+  it(
+    'パーセントエンコードされたスキーム区切りが%40なしで大量に連続しても高速に完了する（回帰確認）',
+    () => {
+      // 実装当初、末尾に%40が一切現れない大きな入力でO(n^2)のバックトラックが発生し
+      // 90万文字規模で20秒を超えていた（スキーム名の量指定子に上限が無かったため）。
+      // {0,63}へ上限を設けて解消したことをここで固定する。
+      const input = 'https%3A%2F%2F'.repeat(50_000) + 'a'.repeat(200_000);
+      const start = performance.now();
+      sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
+      expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
+    },
+    IT_TIMEOUT_MS,
+  );
 
-  it('Bearer/ghp_/sk-様の巨大なトークン様文字列でも高速に完了する', () => {
-    const input =
-      'Bearer ' +
-      'a'.repeat(1_000_000) +
-      ' ghp_' +
-      'b'.repeat(1_000_000) +
-      ' sk-' +
-      'c'.repeat(1_000_000);
-    const start = performance.now();
-    sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
-    expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
-  }, IT_TIMEOUT_MS);
+  it(
+    'Bearer/ghp_/sk-様の巨大なトークン様文字列でも高速に完了する',
+    () => {
+      const input =
+        'Bearer ' +
+        'a'.repeat(1_000_000) +
+        ' ghp_' +
+        'b'.repeat(1_000_000) +
+        ' sk-' +
+        'c'.repeat(1_000_000);
+      const start = performance.now();
+      sanitizeForLog(input, Number.MAX_SAFE_INTEGER);
+      expect(performance.now() - start).toBeLessThan(REDOS_TIMEOUT_MS);
+    },
+    IT_TIMEOUT_MS,
+  );
 });
 
 describe('maskForLog（セキュリティ監査指摘: {n,}量指定子が約5.6MB超の単一トークンでV8をクラッシュさせる、high）', () => {
@@ -673,26 +696,27 @@ describe('maskForLog（セキュリティ監査指摘: {n,}量指定子が約5.6
     IT_TIMEOUT_MS,
   );
 
-  it(
-    '10MB規模（CLI_MAX_BUFFER_BYTES/GIT_MAX_BUFFER_BYTES相当）でもクラッシュせず、断片が残らない',
-    () => {
-      // 単一トークンで10MB（各バッファ上限相当）とし、3トークン分を連結した約30MBの
-      // 入力で確認する。`stripControlChars`（本PRの変更対象外）の走査コストが
-      // 支配的で数秒かかりうるため、クラッシュ・部分マスクの有無のみを見る
-      // （速度自体は個別テストで別途確認済み）。
-      //
-      // itタイムアウトについて（Issue #522）: 約30MB規模の入力を正規表現へ
-      // 通すため、npm test（全体実行）では並列実行によるCPU競合でvitestの
-      // 既定20000msを超えてタイムアウトする（単体実行では10秒未満で終わる）。
-      // このリポジトリのサンドボックス環境で全体実行を繰り返し実測したところ
-      // 33〜34秒程度だった。既定の20000msのままでは高負荷時に安定して失敗する
-      // ため、実測値に対して余裕を持たせ90000msへ引き上げる
-      // （全体のtestTimeoutは変更しない。このテストにだけ個別に与える）。
-      const raw =
-        'Bearer ' + 'A'.repeat(10_000_000) + ' gho_' + 'B'.repeat(10_000_000) + ' sk-' + 'C'.repeat(10_000_000);
-      const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
-      expect(result).toBe('Bearer *** *** ***');
-    },
-    90_000,
-  );
+  it('10MB規模（CLI_MAX_BUFFER_BYTES/GIT_MAX_BUFFER_BYTES相当）でもクラッシュせず、断片が残らない', () => {
+    // 単一トークンで10MB（各バッファ上限相当）とし、3トークン分を連結した約30MBの
+    // 入力で確認する。`stripControlChars`（本PRの変更対象外）の走査コストが
+    // 支配的で数秒かかりうるため、クラッシュ・部分マスクの有無のみを見る
+    // （速度自体は個別テストで別途確認済み）。
+    //
+    // itタイムアウトについて（Issue #522）: 約30MB規模の入力を正規表現へ
+    // 通すため、npm test（全体実行）では並列実行によるCPU競合でvitestの
+    // 既定20000msを超えてタイムアウトする（単体実行では10秒未満で終わる）。
+    // このリポジトリのサンドボックス環境で全体実行を繰り返し実測したところ
+    // 33〜34秒程度だった。既定の20000msのままでは高負荷時に安定して失敗する
+    // ため、実測値に対して余裕を持たせ90000msへ引き上げる
+    // （全体のtestTimeoutは変更しない。このテストにだけ個別に与える）。
+    const raw =
+      'Bearer ' +
+      'A'.repeat(10_000_000) +
+      ' gho_' +
+      'B'.repeat(10_000_000) +
+      ' sk-' +
+      'C'.repeat(10_000_000);
+    const result = sanitizeForLog(raw, Number.MAX_SAFE_INTEGER);
+    expect(result).toBe('Bearer *** *** ***');
+  }, 90_000);
 });

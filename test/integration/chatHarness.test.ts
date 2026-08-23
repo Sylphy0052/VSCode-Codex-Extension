@@ -105,7 +105,11 @@ suite('チャット画面の統合テストの土台（Issue #186）', () => {
       WAIT_OPTIONS,
     );
     const first = proc.writtenLines()[0];
-    assert.equal(first?.['type'], 'control_request', `control_requestで始まっていない: ${JSON.stringify(first)}`);
+    assert.equal(
+      first?.['type'],
+      'control_request',
+      `control_requestで始まっていない: ${JSON.stringify(first)}`,
+    );
     const request = first?.['request'] as { subtype?: string } | undefined;
     assert.equal(request?.subtype, 'initialize');
   });

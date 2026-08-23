@@ -92,7 +92,11 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement>
 
   async setFilter(query: string): Promise<void> {
     this.filterText = query;
-    await vscode.commands.executeCommand('setContext', 'codex.sessionFilterActive', this.filterActive);
+    await vscode.commands.executeCommand(
+      'setContext',
+      'codex.sessionFilterActive',
+      this.filterActive,
+    );
     this.refresh();
   }
 
@@ -163,11 +167,19 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement>
 
     const groups: SessionGroupNode[] = [];
     if (pinned.length > 0) {
-      groups.push({ kind: 'group', groupKind: 'pinned', id: 'group:pinned', label: 'ピン留め', sessions: pinned });
+      groups.push({
+        kind: 'group',
+        groupKind: 'pinned',
+        id: 'group:pinned',
+        label: 'ピン留め',
+        sessions: pinned,
+      });
     }
 
     const contentGroups: SessionGroup[] =
-      config.historyGroupBy === 'folder' ? buildFolderGroups(rest) : buildDateGroups(rest, Date.now());
+      config.historyGroupBy === 'folder'
+        ? buildFolderGroups(rest)
+        : buildDateGroups(rest, Date.now());
     for (const g of contentGroups) {
       groups.push({
         kind: 'group',
@@ -182,7 +194,9 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement>
   }
 
   getTreeItem(element: TreeElement): vscode.TreeItem {
-    return isGroupNode(element) ? this.buildGroupTreeItem(element) : this.buildSessionTreeItem(element);
+    return isGroupNode(element)
+      ? this.buildGroupTreeItem(element)
+      : this.buildSessionTreeItem(element);
   }
 
   private buildGroupTreeItem(group: SessionGroupNode): vscode.TreeItem {

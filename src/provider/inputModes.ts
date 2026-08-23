@@ -17,8 +17,7 @@ import type { SymlinkResolution } from '../session/ports';
 import type { MementoLike } from '../util/memento';
 
 export type InputModeCall =
-  | { kind: 'shell'; command: string }
-  | { kind: 'memory'; content: string };
+  { kind: 'shell'; command: string } | { kind: 'memory'; content: string };
 
 /**
  * 送信テキストが `!`/`#` 始まりの特別扱いにあたるか調べる。

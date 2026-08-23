@@ -51,7 +51,9 @@ function createSettingsProvider(options: CreateSettingsProviderOptions = {}): {
 
   const listCodexMcpServers = async (): Promise<{ ok: false; reason: string }> => {
     count('listCodexMcpServers');
-    return options.listCodexMcpServers ? options.listCodexMcpServers() : { ok: false, reason: 'fake' };
+    return options.listCodexMcpServers
+      ? options.listCodexMcpServers()
+      : { ok: false, reason: 'fake' };
   };
 
   const settings = new SettingsProvider(
