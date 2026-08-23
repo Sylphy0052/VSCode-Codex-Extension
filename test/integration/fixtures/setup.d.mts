@@ -10,6 +10,13 @@ export function assertOutsideThisRepository(label: string, dir: string): void;
  */
 export function assertIsolatedGitRepo(label: string, dir: string): void;
 
+/**
+ * フィクスチャ一式を作る根をプロセスごとにユニークに用意する（Issue #608）。呼ぶたびに
+ * 異なるパスを返す。`<repoRoot>/.vscode-test/` の直下に作り、返った時点でディレクトリは
+ * 実在する。
+ */
+export function createFixturesRoot(): string;
+
 /** 使い捨てのVSCodeプロファイル・履歴データ一式を作る。`.vscode-test.mjs` から呼ばれる。 */
 export function prepareFixtures(): {
   workspaceFolder: string;

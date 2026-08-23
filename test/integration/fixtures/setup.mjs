@@ -1,9 +1,10 @@
 // 統合テスト（@vscode/test-electron）が使うVSCodeプロファイル・履歴データの下ごしらえ。
 //
-// `.vscode-test.mjs` から一度だけ呼ばれ、`.vscode-test/fixtures/` 配下に使い捨ての
-// ディレクトリ一式を作る。ユーザーの実環境（~/.codex・~/.claude・実際のVSCodeユーザー設定）
-// には一切触れない。`codex.codexHome` / `claude.configDir` をここで作った一時ディレクトリへ
-// 向けることで、拡張機能本体には手を入れずに履歴データを差し替える。
+// `.vscode-test.mjs` から一度だけ呼ばれ、`.vscode-test/fixtures-XXXXXX/`
+// （`createFixturesRoot()` がプロセスごとに`mkdtempSync`で作る使い捨ての根。Issue #608）
+// 配下に使い捨てのディレクトリ一式を作る。ユーザーの実環境（~/.codex・~/.claude・実際の
+// VSCodeユーザー設定）には一切触れない。`codex.codexHome` / `claude.configDir` をここで
+// 作った一時ディレクトリへ向けることで、拡張機能本体には手を入れずに履歴データを差し替える。
 //
 // 生成した内容（セッションid・cwdなど）はテスト側からも要るため、ワークスペース直下に
 // `.fixture-manifest.json` として書き出す。テストは `vscode.workspace.workspaceFolders`
@@ -19,7 +20,6 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, '..', '..', '..');
-const fixturesRoot = join(repoRoot, '.vscode-test', 'fixtures');
 
 /**
  * このリポジトリ（拡張機能自身）の作業ツリーの根。シンボリックリンクを解決した実体で持つ。
@@ -82,7 +82,8 @@ export function assertOutsideThisRepository(label, dir) {
  * テスト用ワークスペースが、このリポジトリとは無関係な独立したgitリポジトリであり、かつ
  * pushする先を持たないことを確かめる（Issue #178）。
  *
- * `workspaceFolder` は `.vscode-test/fixtures/` の下（＝このリポジトリの作業ツリーの中）に
+ * `workspaceFolder` は `.vscode-test/fixtures-XXXXXX/`（プロセスごとにユニークな根。
+ * `createFixturesRoot()`、Issue #608）の下（＝このリポジトリの作業ツリーの中）に
  * あるが、`initGitRepo` で自分自身を根とするリポジトリにしてある。`git rev-parse` は最も近い
  * `.git` を見つけるため、この初期化が済んでいれば親のこのリポジトリまでは遡らない。初期化の
  * 失敗や順序の入れ替わりでこの前提が崩れたときに気づけるよう、実行前に確かめる。
@@ -166,6 +167,35 @@ function createNonGitRoot() {
 function createForgeRoot() {
   const root = mkdtempSync(join(tmpdir(), 'agent-forge-'));
   assertOutsideThisRepository('PR/MR検証用の起点', root);
+  process.on('exit', () => {
+    rmSync(root, { recursive: true, force: true });
+  });
+  return root;
+}
+
+/**
+ * フィクスチャ一式（VSCodeプロファイル・履歴データ）を作る根を用意する（Issue #608）。
+ *
+ * 以前は `<repoRoot>/.vscode-test/fixtures` に固定していたが、`prepareFixtures()` の
+ * 冒頭でこのパスを `rmSync` してから作り直していたため、同じworktreeで統合テストを
+ * 2プロセス同時に走らせると、後から来たプロセスが先行プロセスの使用中ディレクトリを
+ * 消してしまい、先行プロセスが `before each` フックでENOENTになって落ちていた。
+ *
+ * `mkdtempSync` でプロセスごとにユニークな根を作ることで、この衝突を避ける
+ * （2回呼べば別のパスが返る。ユニットテストは `test/unit/integrationFixturesRoot.test.ts`）。
+ * 固定パスの`rmSync`による「前回分の後始末」が不要になった分、`createRuntimeDir` /
+ * `createNonGitRoot` / `createForgeRoot` と同じ流儀で、プロセス終了時に**自分が作った根
+ * だけ**を消す（他プロセスの分や `.vscode-test/` 配下のVSCode本体ダウンロードキャッシュには
+ * 触れない）。
+ *
+ * 置き場を `os.tmpdir()` ではなく `<repoRoot>/.vscode-test/` の下に置き続けているのは、
+ * `assertIsolatedGitRepo` が想定する「このリポジトリの作業ツリーの中にある」前提と、
+ * `.gitignore` 済みであることを保つため。
+ */
+export function createFixturesRoot() {
+  const parent = join(repoRoot, '.vscode-test');
+  mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(join(parent, 'fixtures-'));
   process.on('exit', () => {
     rmSync(root, { recursive: true, force: true });
   });
@@ -384,8 +414,9 @@ function initGitRepo(dir) {
 }
 
 export function prepareFixtures() {
-  // 前回の実行分を消してから作り直す（idempotent）。
-  rmSync(fixturesRoot, { recursive: true, force: true });
+  // プロセスごとにユニークな根を作る（Issue #608）。同じworktreeで統合テストを2プロセス
+  // 同時に走らせても、互いの根を踏まない。
+  const fixturesRoot = createFixturesRoot();
 
   const workspaceFolder = join(fixturesRoot, 'workspace');
   const outsideWorkspace = join(fixturesRoot, 'outside-workspace');

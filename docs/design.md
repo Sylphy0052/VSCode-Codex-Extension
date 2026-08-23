@@ -2178,7 +2178,7 @@ WSL2ではsystemd-logindのユーザーセッションが終わると`/run/user/
 
 対策として`test/integration/fixtures/setup.mjs`の`createRuntimeDir()`で使い捨てのディレクトリを毎回作り、`.vscode-test.mjs`の`env`から渡す。ユーザーの`/run/user/<uid>`には触らない。
 
-置き場所を`.vscode-test/`配下ではなく`os.tmpdir()`の直下にしているのは、UNIXドメインソケットのパス長制限（107文字）に収めるため。リポジトリが深い場所にあると`<repo>/.vscode-test/fixtures/.../vscode-xxxxxxxx-1.13-main.sock`が上限を超え、`listen EINVAL`で起動に失敗する。
+置き場所を`.vscode-test/`配下ではなく`os.tmpdir()`の直下にしているのは、UNIXドメインソケットのパス長制限（107文字）に収めるため。リポジトリが深い場所にあると`<repo>/.vscode-test/fixtures-XXXXXX/.../vscode-xxxxxxxx-1.13-main.sock`が上限を超え、`listen EINVAL`で起動に失敗する（根がプロセスごとにユニークになった§14.63以降は、固定パスだった頃よりさらに長い）。
 
 切り分けで無関係と分かったもの: VSCodeのバージョン（1.132.0に固定しても再現）、コードの変更（#155を含まないコミットでも再現）、残留プロセス、ディスク・メモリの空き。
 
@@ -3528,6 +3528,18 @@ Codexの`/btw`は`thread/fork`で**新しいスレッド**を作ってから聞�
 - **「CLIのtranscriptに残らない」は拡張機能自身の書き出しには及ばない。** `transcriptMarkdown.ts`の`KIND_TITLE`へ`sideQuestion`を足したため、「会話を書き出す」（クリップボード・ファイル・生テキスト）には`/btw`の質問・応答が他の発言と同じく含まれる。画面には`kind:'sideQuestion'`の項目として残っている以上、書き出しから除外すると画面と食い違うため意図的にこうしている。利用者向けの説明はREADMEと`docs/slash-commands.md`にも同じ非対称を明記した（issue #340横断レビュー指摘）
 - webview側の候補表示・実際の送信・表示の更新は`docs/manual-test.md`のU-32・U-33に委ねる（vitestのnode環境では実VSCode webviewの表示を確認できないため）
 - 上記「依然として未確認のまま残ること」（X3節）は今回のスコープでは実測せず、コメントで明記するに留めた
+
+### 14.63 統合テストのフィクスチャの根をプロセスごとに分ける（issue #608）
+
+`test/integration/fixtures/setup.mjs`は`<repoRoot>/.vscode-test/fixtures`という固定パスへフィクスチャ一式を作り、`prepareFixtures()`の冒頭でそこを`rmSync`してから作り直していた。この関数は`.vscode-test.mjs`の読み込み時に走るため、**同じ作業ツリーで統合テストを2プロセス同時に走らせると、後から起動したほうが先行プロセスの使用中ディレクトリを消す**。先行プロセスは`before each`フックで`.fixture-manifest.json`のENOENTを出して落ち、しかも落ちるテスト名が毎回変わるため、製品側の間欠不具合と見分けがつかない。実行するセッション同士が実行の前後に合図を交換して排他する運用になっていた。
+
+`createFixturesRoot()`が`<repoRoot>/.vscode-test/`の下に`mkdtempSync`でプロセスごとの根を掘る形へ変えた。`workspaceFolder` / `outsideWorkspace` / `userDataDir` / `activityLogDir` / `codexHome` / `claudeHome`と、ワークスペース直下へ書く`.fixture-manifest.json`は、いずれもこの根にぶら下がっているだけなので、根が分かれれば全部分かれる。`runtimeDir`（§14.32）・疑似worktreeの起点（§16.20）・PR/MR検証用の起点（§14.33）は元から`os.tmpdir()`の下へ`mkdtempSync`で掘っており、こちらは変更していない。
+
+置き場を`os.tmpdir()`へ移さず`.vscode-test/`の下に残しているのは、`assertIsolatedGitRepo()`（§14.33）が前提にしている「テスト用ワークスペースはこのリポジトリの作業ツリーの中にあるが、`initGitRepo`で自分自身を根とする独立したgitリポジトリにしてある」という形と、`.gitignore`の`.vscode-test/`が新しい名前もそのまま覆うことを保つため。
+
+固定パスの`rmSync`が要らなくなった分、後始末は`createRuntimeDir()`と同じく`process.on('exit')`で**自分が作った根だけ**を消す。他プロセスの根や、`.vscode-test/`配下のVSCode本体のダウンロードキャッシュには触れない。残留した他プロセスの`fixtures-*`をまとめて掃除する処理は入れない（走行中のプロセスの根を消しうるため、同時実行を壊す構造が元に戻る）。SIGKILLで落とされた場合だけ残る。
+
+検証は`test/unit/integrationFixturesRoot.test.ts`（vitest、3件）。呼ぶたびに別のパスが返ること・`<repoRoot>/.vscode-test/`の直下であること・返った時点で実在することを見る。「自分が作った根だけを消す」ことは`process.on('exit')`に張ったフックの中身で、フックはプロセスが実際に終了するときにしか走らないためテストの実行中には観測できない。振る舞いのテストで書けない理由はテスト側のコメントに残してある。
 
 ## 15. 作業記録（日報・週報連携）
 

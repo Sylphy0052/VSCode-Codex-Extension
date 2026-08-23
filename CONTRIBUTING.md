@@ -21,7 +21,7 @@ npm run check     # lint + typecheck + test
 | `npm run watch`                 | sourcemap付きで監視ビルドする                                                                                                   |
 | `npm run typecheck`             | `tsc --noEmit`                                                                                                                  |
 | `npm run lint`                  | `eslint .`                                                                                                                      |
-| `npm run format`                | Prettierで整形する                                                                                                              |
+| `npm run format`                | Prettierで整形する。**走らせる前に下の警告を読むこと**                                                                          |
 | `npm test`                      | `vitest run`（`test/unit/**`）                                                                                                  |
 | `npm run test:coverage`         | 上記にカバレッジ計測を付けて実行する。下限を下回ると失敗する                                                                    |
 | `npm run test:integration`      | 実VSCode上の統合テスト（`test/integration/**`）。ディスプレイが要る                                                             |
@@ -31,6 +31,29 @@ npm run check     # lint + typecheck + test
 | `npm run package`               | ビルドしてvsixを生成する                                                                                                        |
 
 `scripts/check.sh` はcommit前に全緑であることを必須とする。緑にするためにテストを弱めたりskipしたりしない。`test:integration`は実VSCodeのダウンロード・起動が要り重いため`check.sh`には含めていない。必要なときに明示的に呼ぶ。
+
+### 警告: `npm run format` は触っていないファイルまで書き換える
+
+**mainのコードは121ファイル分 prettier に準拠していない。** `.prettierrc.json` と `format`
+スクリプトはあるが、`npm run lint`（eslint）が prettier を見ていないため、非準拠のままCIもlintも
+緑で通っている。実測は次のとおり。
+
+```
+$ npx prettier --check .
+Code style issues found in 121 files. Run Prettier with --write to fix.
+```
+
+そのため **`npm run format` を走らせると、自分が触っていない121ファイル分の整形差分が出る。**
+
+- **整形は自分が変更した行だけ手で行う。**
+- **並列でPRが走っているときは特に走らせない。** 衝突面積が無関係に広がる
+
+実際に、別々のworktreeで独立に動いていた2つの実装が `src/extension.ts` のまったく同じ5箇所へ
+同じ整形差分を出した（PR #548 / PR #549）。どちらも `npm run format` を走らせただけだった。
+
+この負債そのもの（prettier を eslint へ繋ぐ、または一括で `--write` をかけて揃える）は、
+lint基盤に手を入れる回でまとめて扱う。**一括の `--write` は、他に開いているPRが無いときにしか
+できない。**
 
 ## CI
 
