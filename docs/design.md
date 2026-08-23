@@ -6115,3 +6115,20 @@ export type ProgramRunSkipReason =
 - `test/unit/programRunner.test.ts`: 失敗の伝播（基本形・R1→R2→R3の連鎖）、`haltProgram`（生存中の子runへの`stop`呼び出し・`pending`の一括`skipped`化・`running`を即終端にしないこと・停止後にリロードをまたいでも再開しないこと）を追加。既存のW12-2の回帰確認テストは、`pending`のまま止め置かれる旧挙動から`skipped`（理由付き）へ倒れる新挙動へ、W12-3による意図した変化として期待値を更新した
 - `docs/manual-test.md` W-Q #### W12-3: 実VSCode上での確認項目（追記のみ、実施はしない）
 - `test/unit/workflowViewPrograms.test.ts`（レビュー指摘F1、Issue #606で新設）: 依存先の失敗によりR2が`skipped`へ倒れ、以後runの起動が無い終端ケースで、`ProgramRunner`（フェイクではなく実物）と`WorkflowViewManager`（実物）を本番と同じ配線でつなぎ、Webviewへ送られた`programs`メッセージにR2の`skipped`と`skipReason`が実際に届くことを確認する
+
+### 16.38 dispose()後に宙に浮いたstartTaskの継続を止める（Issue #502）
+
+`pump()`は`toStart`の各タスクに対し`void this.startTask(...)`を**await せず**に呼ぶ。`startTask`は`resolveWorkingDirectory`（`prepareTaskLaunch`内、`worktreeQueue.createWithOrigin`等の実`git worktree add`を含む）をはじめ複数の`await`点を経て`host.openTaskSession`（CLIセッションの起動）へ到達する。`WorkflowRunner.dispose()`は同期関数で、`this.disposing = true`→各runの解放→`closeMessaging(live)`を1ターンで完走するが、**`dispose()`が完了した後に、それより前から`await`で止まっていた`startTask`の継続が再開する**窓がある。`this.runs`からrunを削除する経路が無いため、`live`は`dispose()`後も解決できてしまう。
+
+Issue #475/PR #495は`ensureMessaging`の入口（`prepareTaskLaunch`内）と`startTransport`の`await`直後の2箇所へ`this.disposing`のガードを入れ、**MCPサーバ（HTTPリスナーと`setInterval`）が破棄後に立つ経路は塞いだ**。しかし`ensureMessaging`は早期returnするだけで、呼び出し元の`prepareTaskLaunch`はそのまま先へ進み、`startTask`は`host.openTaskSession`に到達してしまう。破棄後に起動されたCLIセッションは、それを`live.tasks`へ積む時点（`startTask`内、`dispose()`の解放処理より後）で`disposed=false`のまま登録されるため、**`dispose()`の解放対象を外れ、以後そのCLI子プロセスを閉じる経路が二度と無くなる**（Issue #374/#475が塞いだのと同じ形のリークが、CLIセッション自体に対しては未対応のまま残っていた）。
+
+**対応:** `startTask`内、`await this.prepareTaskLaunch(...)`から戻った直後・`host.openTaskSession(...)`呼び出しの直前へ`if (this.disposing) { return; }`を追加した。`openTaskSession`の呼び出し元はコードベース中ここ1箇所だけ（`git grep -n "openTaskSession("`で確認済み）のため、`prepareTaskLaunch`内のどのawait点で継続が止まっていたか（`resolveWorkingDirectory`・`ensureMessaging`・`buildBoundary`のいずれか）によらず、この1箇所で塞げる。ここで止めれば`live.tasks`へは何も積まれないため、解放対象を外れて閉じられなくなる問題も起きない。
+
+**`live.finished`は条件に使っていない。** `retryTask`が`live.finished`を`false`へ戻すため、これを条件に入れると通常の再開まで止まってしまう（`isDisposing()`のJSDoc参照）。`this.disposing`（`dispose()`が一度立てたら二度と`false`へ戻らない印）だけを見ている。
+
+**`retryTask`経由の再開も同じ窓を持っていた。** `dispose()`が完全に完了した**後**に人が明示的に`retryTask`を呼んだ場合も、`pump()`→`void startTask(...)`という同じ経路を通るため、継続が「dispose前から止まっていたもの」か「dispose後に新規に始まったもの」かをコード上区別する情報が無い。`this.disposing`による1箇所のガードは、この2つのケースを区別せずどちらも一律に止める。Issue #475当時の回帰テスト（`test/unit/runner.test.ts`の`describe('ensureMessagingはdisposing中・後の到達を防ぐ')`配下）は「`retryTask`後にCLIセッション自体は再度開いてよい（MCP接続URLだけが付かなければよい）」ことを暗黙の前提にしていたため、本Issueの修正に合わせて期待値・表題・JSDocを更新した（「新しいセッションは1つも開かない」への変更）。
+
+**確かめ方:**
+
+- `test/unit/runnerDispose.test.ts`（新設）: `git worktree add`の2回目呼び出し（＝タスク自身のworktree作成）をゲートで止め、`startTask`を`resolveWorkingDirectory`の`await`点に留めたまま`dispose()`を割り込ませ、その後ゲートを解放する形で再現する。dispose()後はCLIセッションが1つも開かないこと・対照（dispose()しなければ同じ経路でセッションが開くこと、ゲートの有効性の確認）・通常の再開（`retryTask`、dispose()を挟まない通常の失敗からの再実行）が引き続き機能することを確認する。RED実測は`startTask`のガード追加前の状態で行い、「起動しない」「起動してしまっても解放される」の2件が失敗し、対照テストと通常の再開テストは元から緑であることを確認済み
+- `test/unit/runner.test.ts`の`dispose()後にretryTaskで再開してもCLIセッション・MCPサーバ・タイマーを新たに立てない`（Issue #475当時の既存テストを本Issueに合わせて更新）: `retryTask`後もCLIセッションが1件も増えないこと（`codexHost.openInputs`・`codexHost.sessions`の件数が変わらないこと）をMCPサーバ・タイマー不再生の確認と合わせて検証する

@@ -1762,6 +1762,12 @@ export class WorkflowRunner {
     // タイマーを立ててしまう。`dispose()`は二度と呼ばれないため、この資源を閉じる経路が
     // 無くなる（Issue #374が塞いだのと同じ形のリーク）。`onTaskFinished`
     // （`this.disposing`のJSDoc参照）と同じ作法に揃える
+    //
+    // ここで早期returnしてもメッセージング資源が立たないだけで、`prepareTaskLaunch`は
+    // 呼び出し元（`startTask`）へそのまま戻り、CLIセッションの起動自体はここでは
+    // 止まらない（Issue #502）。その継続を止める番人は`startTask`側の
+    // `host.openTaskSession`直前に置いた（`this.disposing`のJSDoc・`startTask`内の
+    // コメント参照）。ここはあくまでメッセージング資源だけを守る
     if (this.disposing) {
       return;
     }
@@ -3289,6 +3295,19 @@ export class WorkflowRunner {
 
     try {
       const prepared = await this.prepareTaskLaunch(live, task, taskId, runId);
+
+      // dispose()後に宙に浮いていた継続の再開を止める（Issue #502）。`prepareTaskLaunch`の
+      // 内部（`resolveWorkingDirectory`等）で`await`している間に`dispose()`が完走すると、
+      // ここへ戻ってきた時点で`this.disposing`が`true`になっている。`live.finished`は
+      // `retryTask`が`false`へ戻すため条件に使えない（`isDisposing()`のJSDoc・
+      // `ensureMessaging`入口のコメント参照）。`openTaskSession`の呼び出し元はコードベース
+      // 中ここ1箇所だけ（`git grep -n "openTaskSession("`で確認済み）なので、
+      // `prepareTaskLaunch`内のどのawait点で止まっていたかによらず、CLIセッションを開く
+      // 直前のこの1箇所で塞げば足りる。ここで止めれば`live.tasks`へは何も積まれないため、
+      // `dispose()`の解放対象を外れて閉じられなくなる（本Issueが指摘したリーク）ことも無い
+      if (this.disposing) {
+        return;
+      }
 
       const host = this.deps.hosts[task.provider];
       const session = await host.openTaskSession(prepared.input);
