@@ -8720,6 +8720,317 @@ tasks:
   });
 });
 
+describe(
+  'WorkflowRunner: add_task / remove_task / update_task_dependencies' +
+    '（design.md §16.29、roadmap W4、Issue #338）',
+  () => {
+    const TWO_TASK_YAML = `
+version: 1
+name: task-edit-test
+defaults:
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    continuePrompt: c1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+
+    /** T1が走行中のまま、T2がT3へ依存し、T3は独立しているがmaxParallelの空きが無くpendingで残るYAML。 */
+    const PENDING_DEPENDENT_YAML = `
+version: 1
+name: task-edit-remove-test
+defaults:
+  maxParallel: 1
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    dependsOn: [T3]
+    prompt: p2
+    done: d2
+  - id: T3
+    prompt: p3
+    done: d3
+`;
+
+    /** 制御ツールの実体（オーケストレーター専用接続に見せているもの）を取り出す。 */
+    function control(state: FakeMessagingState): OrchestratorControlPort {
+      const port = state.hub?.orchestratorControl;
+      if (port === undefined) {
+        throw new Error('制御ツールが配線されていません');
+      }
+      return port;
+    }
+
+    it('add_taskでタスクが増え、依存グラフとタスク一覧に反映される', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const outcome = control(state).addTask({
+        id: 'T3',
+        prompt: 'p3',
+        done: 'd3',
+        dependsOn: ['T1'],
+      });
+
+      expect(outcome.accepted).toBe(true);
+      const snapshot = runner.getSnapshot(runId);
+      const t3 = snapshot?.tasks.find((t) => t.id === 'T3');
+      expect(t3).toBeDefined();
+      expect(t3?.dependsOn).toEqual(['T1']);
+      expect(t3?.state).toBe('pending');
+      expect(snapshot?.tasks.map((t) => t.id).sort()).toEqual(['T1', 'T2', 'T3']);
+    });
+
+    it('add_taskは実行中の定義（メモリ）だけへ適用し、永続化した定義には書き込まない', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, store } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      control(state).addTask({ id: 'T3', prompt: 'p3', done: 'd3', dependsOn: [] });
+
+      expect(store.find(runId)?.tasks['T3']).toBeUndefined();
+    });
+
+    it('add_taskは循環依存になる追加を適用前に拒否し、理由を返す', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const outcome = control(state).addTask({
+        id: 'T3',
+        prompt: 'p3',
+        done: 'd3',
+        dependsOn: ['T3'],
+      });
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('循環');
+      expect(runner.getSnapshot(runId)?.tasks.map((t) => t.id).sort()).toEqual(['T1', 'T2']);
+    });
+
+    it('add_taskは上限件数を超える追加を適用前に拒否する', async () => {
+      const manyTasks = Array.from(
+        { length: 50 },
+        (_, i) => `  - id: T${i + 1}\n    prompt: p\n    done: d\n`,
+      ).join('');
+      const FULL_YAML = `version: 1\nname: full-test\ndefaults:\n  maxParallel: 5\ntasks:\n${manyTasks}`;
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(FULL_YAML, { messaging: deps });
+      await runner.start('/repo/.agents/workflows/full.yaml', '/repo');
+      await flush();
+
+      const outcome = control(state).addTask({
+        id: 'T51',
+        prompt: 'p51',
+        done: 'd51',
+        dependsOn: [],
+      });
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('上限');
+    });
+
+    it('add_taskはautoApprove/allow/sandbox/approvalModeを指定できず、指定すると拒否される', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const autoApprove = control(state).addTask({
+        id: 'T3',
+        prompt: 'p3',
+        done: 'd3',
+        dependsOn: [],
+        autoApprove: true,
+      });
+      const allow = control(state).addTask({
+        id: 'T4',
+        prompt: 'p4',
+        done: 'd4',
+        dependsOn: [],
+        allow: ['危険なコマンド'],
+      });
+      const sandbox = control(state).addTask({
+        id: 'T5',
+        prompt: 'p5',
+        done: 'd5',
+        dependsOn: [],
+        sandbox: 'danger-full-access',
+      });
+      const approvalMode = control(state).addTask({
+        id: 'T6',
+        prompt: 'p6',
+        done: 'd6',
+        dependsOn: [],
+        approvalMode: 'never',
+      });
+
+      expect(autoApprove.accepted).toBe(false);
+      expect(autoApprove.reason).toContain('autoApprove');
+      expect(allow.accepted).toBe(false);
+      expect(allow.reason).toContain('allow');
+      expect(sandbox.accepted).toBe(false);
+      expect(sandbox.reason).toContain('sandbox');
+      expect(approvalMode.accepted).toBe(false);
+      expect(approvalMode.reason).toContain('approvalMode');
+      // どれも適用されていない
+      expect(runner.getSnapshot(runId)?.tasks.map((t) => t.id).sort()).toEqual(['T1', 'T2']);
+    });
+
+    it('add_taskは適用した内容を全文でワークフローViewの警告欄へ残す', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const longPrompt = 'この指示を実施してください。'.repeat(20);
+      control(state).addTask({
+        id: 'T3',
+        prompt: longPrompt,
+        done: 'テストが通ること',
+        dependsOn: ['T1', 'T2'],
+      });
+
+      const warning = runner
+        .getSnapshot(runId)
+        ?.warnings.find((w) => w.kind === 'orchestratorTaskAdded');
+      expect(warning?.taskId).toBe('T3');
+      expect(warning?.message).toContain(longPrompt);
+      expect(warning?.message).toContain('テストが通ること');
+      expect(warning?.message).toContain('T1, T2');
+    });
+
+    it('remove_taskは走行中のタスクを拒否する（stop_taskを使わせる）', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe('running');
+      const outcome = control(state).removeTask('T1');
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('stop_task');
+      expect(runner.getSnapshot(runId)?.tasks.map((t) => t.id).sort()).toEqual(['T1', 'T2']);
+    });
+
+    it(
+      'remove_taskはpendingのタスクを取り除き、依存していたタスクのdependsOnからも' +
+        '取り除いて孤立させない',
+      async () => {
+        const { deps, state } = fakeMessagingDeps();
+        const { runner } = createHarness(PENDING_DEPENDENT_YAML, { messaging: deps });
+        const result = await runner.start('/repo/.agents/workflows/pending.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const before = runner.getSnapshot(runId);
+        expect(before?.tasks.find((t) => t.id === 'T1')?.state).toBe('running');
+        expect(before?.tasks.find((t) => t.id === 'T3')?.state).toBe('pending');
+
+        const outcome = control(state).removeTask('T3');
+
+        expect(outcome.accepted).toBe(true);
+        const after = runner.getSnapshot(runId);
+        expect(after?.tasks.map((t) => t.id).sort()).toEqual(['T1', 'T2']);
+        const t2 = after?.tasks.find((t) => t.id === 'T2');
+        expect(t2?.dependsOn).toEqual([]);
+
+        const warning = after?.warnings.find((w) => w.kind === 'orchestratorTaskRemoved');
+        expect(warning?.taskId).toBe('T3');
+        expect(warning?.message).toContain('T2');
+      },
+    );
+
+    it('remove_taskは存在しないidを理由付きで拒否する', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+      await flush();
+
+      const outcome = control(state).removeTask('T9');
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('T9');
+    });
+
+    it('update_task_dependenciesはpendingでないタスクへの変更を拒否する', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(PENDING_DEPENDENT_YAML, { messaging: deps });
+      await runner.start('/repo/.agents/workflows/pending.yaml', '/repo');
+      await flush();
+
+      const outcome = control(state).updateTaskDependencies('T1', []);
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('running');
+    });
+
+    it('update_task_dependenciesは循環依存になる変更を適用前に拒否する', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(PENDING_DEPENDENT_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/pending.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      // T2はT3へ依存している。T3の依存へT2を足すと循環になる
+      const outcome = control(state).updateTaskDependencies('T3', ['T2']);
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('循環');
+      expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T3')?.dependsOn).toEqual([]);
+    });
+
+    it('update_task_dependenciesは依存を差し替え、警告欄へ変更前後を全文残す', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(PENDING_DEPENDENT_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/pending.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const outcome = control(state).updateTaskDependencies('T3', ['T1']);
+
+      expect(outcome.accepted).toBe(true);
+      const snapshot = runner.getSnapshot(runId);
+      expect(snapshot?.tasks.find((t) => t.id === 'T3')?.dependsOn).toEqual(['T1']);
+      const warning = snapshot?.warnings.find(
+        (w) => w.kind === 'orchestratorDependenciesChanged',
+      );
+      expect(warning?.taskId).toBe('T3');
+      expect(warning?.message).toContain('変更前: (なし)');
+      expect(warning?.message).toContain('変更後: T1');
+    });
+
+    it('update_task_dependenciesは未定義のidへの参照を適用前に拒否する', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(PENDING_DEPENDENT_YAML, { messaging: deps });
+      await runner.start('/repo/.agents/workflows/pending.yaml', '/repo');
+      await flush();
+
+      const outcome = control(state).updateTaskDependencies('T3', ['T9']);
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('T9');
+    });
+  },
+);
+
 describe('WorkflowRunner: ask_user（design.md §16.33、Issue #583）', () => {
   const YAML_ONE = `version: 1
 name: ask-user-test

@@ -516,6 +516,70 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
 }
 
 /**
+ * オーケストレーターの`add_task`（design.md §16.29、roadmap W4、Issue #338）が追加する
+ * タスクを組み立てる。`resolveTask`（YAMLの1タスク分の解決）とほぼ同じ考え方で未知の
+ * フィールドを読み飛ばすが、次の2点が異なる。
+ *
+ * - `autoApprove` / `allow` / `sandbox` / `approvalMode` は受け取らない。**指定されて
+ *   いれば（値によらず）拒否する。** 黙って既定値へ落とすと「指定したのに反映されな
+ *   かった」だけに見え、拒否されたことにモデルが気付けない（design.md §16.29「指定を
+ *   無視して黙って既定で作る形にはしない」）
+ * - `defaults`ブロック（YAMLの`defaults:`）は実行時には残っていない
+ *   （`WorkflowDefinition`は解決済みの`WorkflowTask[]`しか持たない）ため、拡張機能の
+ *   既定値（`DEFAULT_PROVIDER`等）を使う。人が書いた`defaults`より安全側に倒れることは
+ *   あっても緩い側には倒れない
+ *
+ * ここでは`id`/`prompt`/`done`が空でも構わない（`validateWorkflow`が候補となる
+ * `WorkflowDefinition`全体に対してまとめて検証する。呼び出し側の責務）。
+ */
+export function buildOrchestratorTask(
+  raw: Record<string, unknown>,
+): { task: WorkflowTask } | { error: string } {
+  for (const field of ['autoApprove', 'allow', 'sandbox', 'approvalMode'] as const) {
+    if (Object.prototype.hasOwnProperty.call(raw, field)) {
+      return {
+        error:
+          `${field} はadd_taskから指定できません（権限の緩和は人が書いたワークフロー` +
+          `定義からのみ許可されます）: ${field}`,
+      };
+    }
+  }
+  const provider = resolveEnum(raw['provider'], isProvider, DEFAULT_PROVIDER).value;
+  const isolation = resolveEnum(raw['isolation'], isIsolation, DEFAULT_ISOLATION).value;
+  const type = resolveEnum(raw['type'], isCommitType, DEFAULT_COMMIT_TYPE).value;
+  const dependsOnRaw = raw['dependsOn'];
+  const dependsOn = Array.isArray(dependsOnRaw) ? filterStringArray(dependsOnRaw).values : [];
+  const continuePromptRaw = str(raw['continuePrompt']);
+  const issueResult = resolveIssue(raw['issue']);
+  const task: WorkflowTask = {
+    id: str(raw['id']),
+    prompt: str(raw['prompt']),
+    done: str(raw['done']),
+    dependsOn,
+    continuePrompt: continuePromptRaw === '' ? DEFAULT_CONTINUE_PROMPT : continuePromptRaw,
+    maxIterations: num(raw['maxIterations'], DEFAULT_MAX_ITERATIONS),
+    provider,
+    isolation,
+    type,
+    cwd: undefined,
+    model: undefined,
+    effort: undefined,
+    approvalMode: undefined,
+    sandbox: undefined,
+    autoApprove: DEFAULT_AUTO_APPROVE,
+    escalate: [],
+    allow: [],
+    retries: Math.max(0, Math.trunc(num(raw['retries'], 0))),
+    issue: issueResult.error === undefined ? issueResult.value : undefined,
+    // cleanupはworktreeの後始末で、taskごとの上書きはスキーマに無い（resolveTaskと同じ）
+    cleanup: DEFAULT_CLEANUP,
+    parseErrors: issueResult.error !== undefined ? [issueResult.error] : [],
+    parseWarnings: [],
+  };
+  return { task };
+}
+
+/**
  * YAML文字列を内部表現へ変換する。
  *
  * ここではスキーマの検証はしない（`validateWorkflow` が別関数）。欠落や範囲外の値も

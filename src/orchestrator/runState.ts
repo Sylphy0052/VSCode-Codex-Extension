@@ -182,6 +182,25 @@ export function createRunState(tasks: readonly WorkflowTask[]): RunState {
   return { tasks: new Map(entries), haltedByUser: false };
 }
 
+/**
+ * オーケストレーターの`add_task`（design.md §16.29、roadmap W4、Issue #338）が新しいタスクを
+ * `pending`として加える。`createRunState`の初期値（`initialTaskRunState`）をそのまま使う。
+ */
+export function addTaskState(run: RunState, taskId: string): RunState {
+  return setTask(run, taskId, initialTaskRunState);
+}
+
+/**
+ * オーケストレーターの`remove_task`（design.md §16.29、roadmap W4、Issue #338）が`pending`の
+ * タスクを取り除く。呼び出し側（`runnerOrchestrator.ts`）が対象を`pending`に限定した後で
+ * 呼ぶ前提で、ここでは状態を見ずに無条件で削除する。
+ */
+export function removeTaskState(run: RunState, taskId: string): RunState {
+  const tasks = new Map(run.tasks);
+  tasks.delete(taskId);
+  return { ...run, tasks };
+}
+
 /** 1件でも `failed` が確定しているか。 */
 export function hasFailedTask(run: RunState): boolean {
   for (const s of run.tasks.values()) {

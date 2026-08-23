@@ -687,6 +687,26 @@ export interface OrchestratorControlPort {
    * 統合PR/MRという1つの対象しか無いため）。
    */
   decideFinalMerge(decision: string, reason: string): OrchestratorControlResult;
+  /**
+   * 実行中の定義へ新しいタスクを加える（design.md §16.29、roadmap W4、Issue #338）。
+   * 適用先は実行中の定義（`live.def`）だけで、YAMLファイルは書き換えない。追加する
+   * タスクにも既存の検証（id形式・循環依存・上限件数・プロンプト長）をそのまま通す。
+   * `autoApprove`/`allow`/`sandbox`/`approvalMode`は受け取らず、指定されていれば拒否する。
+   */
+  addTask(input: Record<string, unknown>): OrchestratorControlResult;
+  /**
+   * まだ開始していない（`pending`の）タスクを取り除く（design.md §16.29）。走行中の
+   * タスクは対象にできない（`stop_task`を使わせる）。
+   */
+  removeTask(taskId: string): OrchestratorControlResult;
+  /**
+   * まだ開始していない（`pending`の）タスクの`dependsOn`を差し替える（design.md §16.29）。
+   * 循環依存・未定義idへの参照になる変更は適用前に拒否する。
+   */
+  updateTaskDependencies(
+    taskId: string,
+    dependsOn: readonly string[],
+  ): OrchestratorControlResult;
 }
 
 /** 制御ツールの結果。`send_message` と同じく「受け付けたかどうかと、その理由」を返す。 */
@@ -838,6 +858,91 @@ export const DECIDE_FINAL_MERGE_TOOL: McpToolDefinition = {
 };
 
 /**
+ * `add_task`ツール（design.md §16.29、roadmap W4、Issue #338）。実行中の定義へ新しい
+ * タスクを加える。YAMLファイルは書き換えない。`autoApprove`/`allow`/`sandbox`/
+ * `approvalMode`はスキーマに含めていない。もし指定されていれば（値によらず）拒否する
+ * （`OrchestratorControlPort.addTask`実体側で検証する）。
+ */
+export const ADD_TASK_TOOL: McpToolDefinition = {
+  name: 'add_task',
+  description:
+    '実行中の定義へ新しいタスクを追加する（YAMLファイルは書き換えない）。id/prompt/done' +
+    'は必須。dependsOnは省略時[]。既存の検証（id形式・循環依存・上限件数・プロンプト長）を' +
+    'そのまま通し、違反すれば適用前に拒否され理由が返る。autoApprove/allow/sandbox/' +
+    'approvalModeは指定できない（指定すると拒否される。権限の緩和は人が書いた定義からのみ' +
+    '許可される）。担当領域をまたぐ・設計の前提を変える・受入基準を下げる追加は、先に' +
+    'ask_userで人に確認すること。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: '新しいタスクのid' },
+      prompt: { type: 'string', description: '指示文' },
+      done: { type: 'string', description: '完了条件' },
+      dependsOn: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '依存するタスクidの配列（省略時は[]）',
+      },
+      continuePrompt: { type: 'string', description: '継続時の指示（省略可）' },
+      maxIterations: { type: 'number', description: '送信回数の上限（省略可）' },
+      provider: { type: 'string', description: "'codex' | 'claude'（省略可）" },
+      isolation: { type: 'string', description: "'worktree' 等（省略可）" },
+      type: { type: 'string', description: 'コミットのtype（省略可）' },
+      retries: { type: 'number', description: '自動再試行回数の上限（省略可）' },
+      issue: { type: 'number', description: '対応するIssue番号（省略可）' },
+    },
+    required: ['id', 'prompt', 'done', 'dependsOn'],
+    additionalProperties: false,
+  },
+};
+
+/**
+ * `remove_task`ツール（design.md §16.29、roadmap W4、Issue #338）。まだ開始していない
+ * （`pending`の）タスクだけを対象にする。走行中のタスクは`stop_task`を使うこと。
+ */
+export const REMOVE_TASK_TOOL: McpToolDefinition = {
+  name: 'remove_task',
+  description:
+    'まだ開始していない（pendingの）タスクを実行中の定義から取り除く（YAMLファイルは' +
+    '書き換えない）。走行中・完了済み・失敗済みのタスクは対象にできない（走行中は' +
+    'stop_taskを使うこと）。他のタスクがこのタスクへdependsOnしていた場合、その依存は' +
+    '取り除いて孤立させない。',
+  inputSchema: {
+    type: 'object',
+    properties: { taskId: TASK_ID_ARG },
+    required: ['taskId'],
+    additionalProperties: false,
+  },
+};
+
+/**
+ * `update_task_dependencies`ツール（design.md §16.29、roadmap W4、Issue #338）。まだ
+ * 開始していない（`pending`の）タスクの`dependsOn`を丸ごと差し替える。循環依存・
+ * 未定義idへの参照になる変更は適用前に拒否する。
+ */
+export const UPDATE_TASK_DEPENDENCIES_TOOL: McpToolDefinition = {
+  name: 'update_task_dependencies',
+  description:
+    'まだ開始していない（pendingの）タスクのdependsOnを丸ごと差し替える（YAMLファイルは' +
+    '書き換えない）。循環依存になる・未定義のidを参照する変更は適用前に拒否され理由が' +
+    '返る。走行中・完了済みのタスクのdependsOnは変えられない（変えても以降のスケジューリングに' +
+    '影響しないため）。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      taskId: TASK_ID_ARG,
+      dependsOn: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '差し替え後の依存タスクidの配列（[]で依存なしにできる）',
+      },
+    },
+    required: ['taskId', 'dependsOn'],
+    additionalProperties: false,
+  },
+};
+
+/**
  * オーケストレーター用の接続にだけ見せるツール（design.md §16.23）。
  * タスク用の接続の `tools/list` には現れず、呼んでも「未知のツール」として拒否される。
  */
@@ -850,6 +955,9 @@ export const ORCHESTRATOR_CONTROL_TOOLS: readonly McpToolDefinition[] = [
   UPDATE_TASK_PROMPT_TOOL,
   DECIDE_FINAL_MERGE_TOOL,
   ASK_USER_TOOL,
+  ADD_TASK_TOOL,
+  REMOVE_TASK_TOOL,
+  UPDATE_TASK_DEPENDENCIES_TOOL,
 ];
 
 const ORCHESTRATOR_CONTROL_TOOL_NAMES: ReadonlySet<string> = new Set(
@@ -1349,6 +1457,13 @@ export class MessagingMcpServer {
       return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
     }
 
+    // `add_task`は`taskId`ではなく`id`を持つ（新しいタスクの識別子そのものが引数）ため、
+    // `decide_final_merge`/`ask_user`と同じく`target`を読む前に分岐する
+    if (name === ADD_TASK_TOOL.name) {
+      const result = control.addTask(args);
+      return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
+    }
+
     const target = str(args['taskId']);
     // `default`は「未知のツール」で閉じる。`ORCHESTRATOR_CONTROL_TOOLS`へツールを足したのに
     // ここへcaseを書き忘れたとき、いずれかの既存ツール（特に走行中タスクの継続指示を
@@ -1365,6 +1480,15 @@ export class MessagingMcpServer {
           return control.decideApproval(target, str(args['decision']));
         case UPDATE_TASK_PROMPT_TOOL.name:
           return control.updateTaskPrompt(target, str(args['continuePrompt']));
+        case REMOVE_TASK_TOOL.name:
+          return control.removeTask(target);
+        case UPDATE_TASK_DEPENDENCIES_TOOL.name: {
+          const rawDeps = args['dependsOn'];
+          const deps = Array.isArray(rawDeps)
+            ? rawDeps.filter((d): d is string => typeof d === 'string')
+            : [];
+          return control.updateTaskDependencies(target, deps);
+        }
         default:
           return undefined;
       }

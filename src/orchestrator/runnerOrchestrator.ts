@@ -16,6 +16,7 @@ import {
 } from './orchestratorSession';
 import { sanitizeForLog, stripControlChars } from './sanitize';
 import { buildResponseSummary } from './taskSummary';
+import { addTaskState, removeTaskState } from './runState';
 import type { TaskState } from './runState';
 import type {
   FinalMergeDecision,
@@ -25,7 +26,13 @@ import type {
   WorkflowRunSnapshot,
 } from './runner';
 import type { WorkflowRunnerInternals } from './runnerInternals';
-import { truncateByCodePoint } from './workflow';
+import {
+  buildOrchestratorTask,
+  truncateByCodePoint,
+  validateWorkflow,
+  type WorkflowDefinition,
+  type WorkflowTask,
+} from './workflow';
 
 /**
  * オーケストレーターセッション（design.md §16.23）の配線を集めたモジュール。
@@ -77,8 +84,20 @@ function buildIntroBody(live: LiveRun, resume?: OrchestratorResumeContext): stri
       '届いた場合も、この send_message（to に問うたタスクのidを指定）で答える）',
     '- stop_task / retry_task / continue_task / decide_approval: タスクを止める・やり直す・続ける・承認する',
     '- update_task_prompt: 走行中のタスクの継続指示を差し替える（方針転換）',
+    '- add_task / remove_task / update_task_dependencies: 計画そのものを直す' +
+      '（タスクの追加・pendingタスクの削除・pendingタスクの依存の変更）。人の承認は挟まず' +
+      'あなたの判断で適用され、適用した内容は全文が警告欄へ残ります。追加するタスクにも' +
+      '既存の検証（id形式・循環依存・上限件数・プロンプト長）が適用され、autoApprove/' +
+      'allow/sandbox/approvalModeは指定できません（指定すると拒否されます）。削除できるのは' +
+      'まだ開始していない（pendingの）タスクだけで、走行中のタスクはstop_taskを使ってください。' +
+      'タスクが停滞した（taskStalled）通知を受けたときは、update_task_promptで指示を' +
+      '調整するだけでなく、必要ならタスクを分割・統合するためにこれらのツールで計画自体を' +
+      '見直すことも検討してください',
     '- ask_user: 担当領域をまたぐ変更・設計の前提を変える変更・受入基準を下げる判断・' +
-      '同じ失敗を3回繰り返した場合に限り、人へ確認する（それ以外は自分で判断する。呼べる回数に上限あり）',
+      '同じ失敗を3回繰り返した場合に限り、人へ確認する（それ以外は自分で判断する。呼べる' +
+      '回数に上限あり）。add_task/remove_task/update_task_dependenciesで方針そのものが' +
+      '変わる場合（担当領域をまたぐ・設計の前提を変える・受入基準を下げる）は、適用する前に' +
+      'ask_userで人に確認すること',
     '',
     'あなた自身はファイルを書き換えられません（読み取り専用）。実際の作業は各タスクが行います。',
     '',
@@ -361,6 +380,39 @@ export function buildOrchestratorControlPort(
       }
       return beginAskUser(self, runId, question, choices);
     },
+    addTask: (input) => {
+      const finished = runFinishedReason(actions, runId);
+      if (finished !== undefined) {
+        return no(finished);
+      }
+      const halted = runHaltedByUserReason(actions, runId);
+      if (halted !== undefined) {
+        return no(halted);
+      }
+      return addTask(self, runId, input);
+    },
+    removeTask: (taskId) => {
+      const finished = runFinishedReason(actions, runId);
+      if (finished !== undefined) {
+        return no(finished);
+      }
+      const halted = runHaltedByUserReason(actions, runId);
+      if (halted !== undefined) {
+        return no(halted);
+      }
+      return removeTask(self, runId, taskId);
+    },
+    updateTaskDependencies: (taskId, dependsOn) => {
+      const finished = runFinishedReason(actions, runId);
+      if (finished !== undefined) {
+        return no(finished);
+      }
+      const halted = runHaltedByUserReason(actions, runId);
+      if (halted !== undefined) {
+        return no(halted);
+      }
+      return updateTaskDependencies(self, runId, taskId, dependsOn);
+    },
   };
 }
 
@@ -580,6 +632,167 @@ function updateTaskPrompt(
   });
   self.notify(runId);
   return ok(`${taskId} の継続指示を差し替えました。`);
+}
+
+/**
+ * `add_task`（design.md §16.29、roadmap W4、Issue #338）を受け付ける。適用先は実行中の
+ * 定義（`live.def`）だけで、YAMLファイルは書き換えない。追加するタスクは`buildOrchestratorTask`
+ * （`workflow.ts`。権限フィールドを拒否する）で組み立てたうえ、既存の全タスクと合わせた
+ * 候補定義を`validateWorkflow`にそのまま通す（id形式・循環依存・上限件数・プロンプト長を
+ * 人が書いたYAMLと同じ基準で検証する）。適用した内容は全文で警告欄へ残す（人の承認を
+ * 挟まない以上、これが唯一の追跡手段になるため）。
+ */
+function addTask(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  raw: Record<string, unknown>,
+): OrchestratorControlResult {
+  const live = self.runs.get(runId);
+  if (live === undefined) {
+    return no('実行が見つかりません。');
+  }
+  const built = buildOrchestratorTask(raw);
+  if ('error' in built) {
+    return no(built.error);
+  }
+  const task = built.task;
+  const candidateDef: WorkflowDefinition = {
+    ...live.def,
+    tasks: [...live.def.tasks, task],
+  };
+  const validation = validateWorkflow(candidateDef);
+  if (validation.errors.length > 0) {
+    return no(`タスクを追加できません: ${validation.errors.map((e) => e.message).join(' / ')}`);
+  }
+  live.def = candidateDef;
+  live.runState = addTaskState(live.runState, task.id);
+  live.warnings.push({
+    kind: 'orchestratorTaskAdded',
+    taskId: task.id,
+    message:
+      `オーケストレーターがタスク ${task.id} を追加しました（YAMLファイルは書き換えて` +
+      'いません。ウィンドウのリロード後は定義ファイルの内容に戻ります）。\n' +
+      `prompt: ${task.prompt}\n` +
+      `done: ${task.done}\n` +
+      `dependsOn: ${task.dependsOn.length > 0 ? task.dependsOn.join(', ') : '(なし)'}`,
+  });
+  self.notify(runId);
+  self.pump(runId);
+  return ok(`タスク ${task.id} を追加しました。`);
+}
+
+/**
+ * `remove_task`（design.md §16.29、roadmap W4、Issue #338）を受け付ける。対象は`pending`の
+ * タスクに限る（走行中のタスクは`stop_task`を使わせる。design.md §16.29「削除はまだ
+ * 始まっていないタスクに限る」）。まだ開始していないタスクを消す以上、削除対象へ依存して
+ * いるタスクも必ず`pending`（スケジューラは依存先が`done`でなければ開始しない、design.md
+ * §16.3）なので、依存を失っても孤立した`pending`（永久に開始できないタスク）を作らない
+ * よう、削除対象へ依存していたタスクの`dependsOn`からも取り除く。
+ */
+function removeTask(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  taskId: string,
+): OrchestratorControlResult {
+  const live = self.runs.get(runId);
+  if (live === undefined) {
+    return no('実行が見つかりません。');
+  }
+  const state = live.runState.tasks.get(taskId)?.state;
+  if (state === undefined) {
+    return no(`タスクが見つかりません: ${taskId}`);
+  }
+  if (state !== 'pending') {
+    return no(
+      `${taskId} はまだ開始していない（pendingの）タスクではありません（状態: ${state}）。` +
+        '走行中のタスクを止めるにはstop_taskを使ってください。',
+    );
+  }
+  const remainingTasks: WorkflowTask[] = [];
+  const strippedFrom: string[] = [];
+  for (const t of live.def.tasks) {
+    if (t.id === taskId) {
+      continue;
+    }
+    if (t.dependsOn.includes(taskId)) {
+      strippedFrom.push(t.id);
+      remainingTasks.push({ ...t, dependsOn: t.dependsOn.filter((d) => d !== taskId) });
+    } else {
+      remainingTasks.push(t);
+    }
+  }
+  live.def = { ...live.def, tasks: remainingTasks };
+  live.runState = removeTaskState(live.runState, taskId);
+  live.warnings.push({
+    kind: 'orchestratorTaskRemoved',
+    taskId,
+    message:
+      `オーケストレーターがタスク ${taskId} を取り除きました（YAMLファイルは書き換えて` +
+      'いません。ウィンドウのリロード後は定義ファイルの内容に戻ります）。' +
+      (strippedFrom.length > 0
+        ? ` このタスクへ依存していたタスクのdependsOnからも取り除きました: ${strippedFrom.join(', ')}`
+        : ''),
+  });
+  self.notify(runId);
+  self.pump(runId);
+  return ok(`タスク ${taskId} を取り除きました。`);
+}
+
+/**
+ * `update_task_dependencies`（design.md §16.29、roadmap W4、Issue #338）を受け付ける。
+ * 対象は`pending`のタスクに限る。**すでに`running`等になったタスクの`dependsOn`を変えても、
+ * スケジューラ（`scheduler.ts`の`nextTasksToStart`）は`state !== 'pending'`のタスクを
+ * 見ないため何も起きない。「変えたのに反映されない」を黙って許すと事故のもとになるため、
+ * 効果の無い変更はここで拒否する。** 差し替え後の依存グラフは`validateWorkflow`（循環依存・
+ * 未定義idへの参照）にそのまま通す。
+ */
+function updateTaskDependencies(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  taskId: string,
+  dependsOn: readonly string[],
+): OrchestratorControlResult {
+  const live = self.runs.get(runId);
+  if (live === undefined) {
+    return no('実行が見つかりません。');
+  }
+  const state = live.runState.tasks.get(taskId)?.state;
+  if (state === undefined) {
+    return no(`タスクが見つかりません: ${taskId}`);
+  }
+  if (state !== 'pending') {
+    return no(
+      `${taskId} はまだ開始していない（pendingの）タスクではありません（状態: ${state}）。` +
+        '依存を変えても以降のスケジューリングに影響しないため拒否します。',
+    );
+  }
+  const target = live.def.tasks.find((t) => t.id === taskId);
+  if (target === undefined) {
+    return no(`タスクが見つかりません: ${taskId}`);
+  }
+  const nextDependsOn = [...new Set(dependsOn)];
+  const candidateTasks = live.def.tasks.map((t) =>
+    t.id === taskId ? { ...t, dependsOn: nextDependsOn } : t,
+  );
+  const candidateDef: WorkflowDefinition = { ...live.def, tasks: candidateTasks };
+  const validation = validateWorkflow(candidateDef);
+  if (validation.errors.length > 0) {
+    return no(`依存を変更できません: ${validation.errors.map((e) => e.message).join(' / ')}`);
+  }
+  const before = target.dependsOn;
+  live.def = candidateDef;
+  live.warnings.push({
+    kind: 'orchestratorDependenciesChanged',
+    taskId,
+    message:
+      `オーケストレーターがタスク ${taskId} のdependsOnを変更しました（YAMLファイルは` +
+      '書き換えていません。ウィンドウのリロード後は定義ファイルの内容に戻ります）。' +
+      `変更前: ${before.length > 0 ? before.join(', ') : '(なし)'} → ` +
+      `変更後: ${nextDependsOn.length > 0 ? nextDependsOn.join(', ') : '(なし)'}`,
+  });
+  self.notify(runId);
+  self.pump(runId);
+  return ok(`${taskId} のdependsOnを変更しました。`);
 }
 
 /**
