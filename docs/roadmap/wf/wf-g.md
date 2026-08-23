@@ -36,12 +36,21 @@
     表題・JSDocを更新した。**再現テストは `test/unit/runnerDispose.test.ts`
     を新設。design.mdへ§16.38を新設。
     **第1回で `test/unit/runner.test.ts` を2つのPRが同時に触った**
-    （#641が8838行目付近へ追加、#642が12001行目付近の既存テストを
-    更新）。**衝突は出なかったが、衝突解決で片方の枝が黙って消えても
-    `tsc` もlintもテストも緑のまま通るため、マージ後に両方の枝が実在する
-    ことをgrepで確認した**（`grep -c ORCHESTRATOR_CONTROL_TOOLS
-    test/unit/runner.test.ts` が3、`test/unit/runnerDispose.test.ts` の
-    実在を確認）
+    （#641が8838行目付近へテストを追加、#642が12001行目付近の
+    既存テストを更新）。同じファイルの離れた場所だったため衝突は
+    出なかった。**衝突が出なくても、衝突解決で片方の枝が黙って消える
+    形は起こりうる。**その場合 `tsc --noEmit` もlintもテストも緑のまま
+    通るため、検査では捕まらない。したがって**マージ後に、各PRが
+    入れた枝を名指しでgrepして実在を確かめる**。確認は2つの層で
+    独立に行った（WF-G担当と全体オーケストレーターが別々のパターンで
+    引いた）。実例: `grep -c "ORCHESTRATOR_CONTROL_TOOLS"
+    test/unit/runner.test.ts` の出力は`3`（#589側の枝の実在確認）。
+    `grep -n "dispose()後にretryTaskで再開してもCLIセッション"
+    test/unit/runner.test.ts` の出力は`12041:    it('dispose()後に
+    retryTaskで再開してもCLIセッション・MCPサーバ・タイマーを新たに
+    立てない', async () => {`（#502側の枝の実在確認）。`ls
+    test/unit/runnerDispose.test.ts` は`test/unit/runnerDispose.test.ts`
+    を返し、新設ファイルの実在も確認した
   - [#485](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/485)
     疑似worktree反映: renameの必須化と一時ファイルの掃除
   - [#490](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/490)
