@@ -11,6 +11,7 @@ import {
   type TaskPullRequestFlowResult,
   type TaskPullRequestSteps,
 } from './forge';
+import { reviewTaskPullRequest } from './planner';
 import {
   buildMergeResolutionPrompt,
   commitUncommittedChangesIfNeeded,
@@ -153,11 +154,30 @@ function buildTaskPullRequestFlowCallbacks(
             done: task.done,
             runId,
             dependsOn: task.dependsOn,
-            issue: task.issue,
+            // `task.issue`（YAML・ロードマップ由来）を優先し、無ければタスク開始時に
+            // 起票したIssue（design.md §16.31、roadmap W6、Issue #596。
+            // `live.createdTaskIssues`、`runner.ts`の`maybeCreateTaskIssue`）を使う
+            issue: task.issue ?? live.createdTaskIssues.get(taskId),
           }),
           draft: live.draftPullRequest,
         },
       ),
+    // design.md §16.31「PRを作ったあと、ローカルマージの前にレビューを1段挟む」、
+    // roadmap W6、Issue #596。無効なコールバックを渡さない
+    // （`runTaskPullRequestFlow`はcallback自体がundefinedならレビューを試みない）
+    ...(forge.reviewTaskPullRequest
+      ? {
+          reviewPullRequest: buildTaskPullRequestReviewStep(
+            self,
+            live,
+            runId,
+            taskId,
+            task,
+            integration,
+            taskCwd,
+          ),
+        }
+      : {}),
     mergeAndPushIntegration: async () => {
       const merged = await self.integrationQueue.mergeTask(
         lease,
@@ -188,6 +208,75 @@ function buildTaskPullRequestFlowCallbacks(
     ...(live.draftPullRequest
       ? { markPullRequestReady: buildMarkTaskPullRequestReady(forgeDeps, forge, taskCwd) }
       : {}),
+  };
+}
+
+/**
+ * タスクのPR/MRを、別の読み取り専用セッションでレビューさせるコールバック
+ * （`runTaskPullRequestFlow`の`reviewPullRequest`）を組み立てる（design.md §16.31「PRを
+ * 作ったあと、ローカルマージの前にレビューを1段挟む」、roadmap W6、Issue #596）。
+ *
+ * レビュー対象のdiffは、タスクブランチ（`taskCwd`でチェックアウト済み）と統合ブランチの
+ * 間で`git diff`を取る（3点リーダ形式`<integration.branch>...HEAD`。マージベース以降の
+ * 変更だけを見る）。diffの取得自体に失敗しても空文字のまま続行し、レビューは止めない
+ * （diffが空でもレビューセッション自体は起動する。指摘0件で返るだけ）。
+ *
+ * 指摘・レビュー自体の失敗はどちらも`taskPullRequestReview`警告として`live.warnings`へ
+ * 積む。**この関数はマージをブロックしない**（常に`{ ok: true }`系の結果を返し、
+ * `runTaskPullRequestFlow`は結果を問わず`mergeAndPushIntegration`を呼ぶ。design.md
+ * §16.31「結果に関わらずマージは進める」）。
+ */
+function buildTaskPullRequestReviewStep(
+  self: WorkflowRunnerInternals,
+  live: LiveRun,
+  runId: string,
+  taskId: string,
+  task: WorkflowTask,
+  integration: { cwd: string; branch: string },
+  taskCwd: string,
+): (url: string | undefined) => Promise<ForgeStepOutcome> {
+  return async () => {
+    const diffResult = await self.deps.git.run(
+      ['diff', `${integration.branch}...HEAD`],
+      taskCwd,
+    );
+    const diff = diffResult.code === 0 ? diffResult.stdout : '';
+
+    const host = self.deps.hosts[task.provider];
+    const review = await reviewTaskPullRequest({
+      prompt: task.prompt,
+      done: task.done,
+      diff,
+      provider: task.provider,
+      host,
+      cwd: taskCwd,
+      log: self.deps.log,
+    });
+
+    if (review.error !== undefined) {
+      self.deps.log.warn(
+        `[workflow ${runId}/${taskId}] PR/MRのレビューに失敗しました: ${review.error}`,
+      );
+      live.warnings.push({
+        kind: 'taskPullRequestReview',
+        taskId,
+        message: `PR/MRのレビューに失敗しました: ${sanitizeForLog(review.error)}`,
+      });
+      return { ok: true };
+    }
+
+    if (review.findings.length > 0) {
+      const summary = review.findings.map((f) => `- ${f.message}`).join('\n');
+      self.deps.log.warn(
+        `[workflow ${runId}/${taskId}] PR/MRのレビューで${review.findings.length}件の指摘がありました`,
+      );
+      live.warnings.push({
+        kind: 'taskPullRequestReview',
+        taskId,
+        message: `PR/MRのレビューで指摘がありました:\n${summary}`,
+      });
+    }
+    return { ok: true };
   };
 }
 

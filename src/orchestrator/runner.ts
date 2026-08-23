@@ -9,8 +9,11 @@ import type { Logger } from '../log';
 import { buildEscalationRequest } from './approvalMapping';
 import { classifyApprovalRequest, type EscalationPolicy, type TaskBoundary } from './escalation';
 import {
+  buildTaskIssueBody,
+  buildTaskPullRequestTitle,
   checkForgePrerequisites,
   createIntegrationPullRequest,
+  createIssue,
   buildIntegrationPullRequestBody,
   buildIntegrationPullRequestTitle,
   DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES,
@@ -22,6 +25,7 @@ import {
   resolveForgeHost,
   runFinalMergeWithCiGate,
   shouldCreateIntegrationPullRequest,
+  shouldCreateTaskPullRequest,
   shouldRunFinalMerge,
   type CliAvailabilityPort,
   type CliCommandRunner,
@@ -215,13 +219,15 @@ export interface WorkflowRunnerForgeDeps {
   fs: ForgeFileSystemPort;
   /**
    * 設定 `agent.workflows.forge` / `.pullRequest` / `.finalMerge` / `.branchNaming` /
-   * `.draftPullRequest`。実行開始時に一度だけ読み直す（`readBaseline` と同じく使い捨ての
-   * オブジェクトではなく関数で渡す）。
+   * `.draftPullRequest` / `.createTaskIssue` / `.reviewTaskPullRequest`。実行開始時に
+   * 一度だけ読み直す（`readBaseline` と同じく使い捨てのオブジェクトではなく関数で渡す）。
    *
    * `branchNaming` / `draftPullRequest` はPR/MR作成そのものとは別の関心事（前者はブランチ名の
    * 形、後者はDraft/ready化）だが、設定を`runner.ts`まで運ぶ経路を新設せず、既存の
    * `host`/`pullRequest`/`finalMerge`と同じ「実行開始時に一度読む」経路（`resolveForgeState`・
-   * `resolveBranchNamingAndDraft`）へ相乗りさせてある。
+   * `resolveBranchNamingAndDraft`）へ相乗りさせてある。`createTaskIssue` /
+   * `reviewTaskPullRequest`（design.md §16.31、roadmap W6、Issue #596）も同じ理由で
+   * ここへ相乗りさせ、`resolveForgeState`が読む（`LiveRunForgeState`の`active`variant参照）。
    */
   readConfig: () => {
     host: ForgeHostConfig;
@@ -229,6 +235,8 @@ export interface WorkflowRunnerForgeDeps {
     finalMerge: FinalMergeConfig;
     branchNaming: BranchNaming;
     draftPullRequest: boolean;
+    createTaskIssue: boolean;
+    reviewTaskPullRequest: boolean;
   };
 }
 
@@ -660,7 +668,24 @@ export interface WorkflowWarning {
      * その適用内容自体は`orchestratorTaskAdded`等の既存の警告が別途記録する
      * （この警告は「取り込んだこと」だけを記録し、「どう対応したか」までは持たない）。
      */
-    | 'reviewCommentImported';
+    | 'reviewCommentImported'
+    /**
+     * タスクの開始時のIssue起票（design.md §16.31「タスクの開始時にIssueを起票し、PR本文
+     * から参照する」、roadmap W6、Issue #596）に失敗した。CLI・認証が無い環境でも起きうる
+     * （`agent.workflows.createTaskIssue`が有効でも、`checkForgePrerequisites`が通った後の
+     * 個別の`gh issue create`/`glab api`呼び出しが失敗することがある）。警告のみでrunは
+     * 止めない（`forgeFailed`と同じ方針）。
+     */
+    | 'taskIssueFailed'
+    /**
+     * PR/MRを作った後、ローカルマージの前に読み取り専用の別セッションでレビューさせた結果
+     * （design.md §16.31「PRを作ったあと、ローカルマージの前にレビューを1段挟む」、
+     * roadmap W6、Issue #596）。指摘が見つかった場合と、レビューセッション自体の実行に
+     * 失敗した場合の両方をこのkindへ集約する。`plannerReview`（design.md §16.28、ワークフロー
+     * 分解のレビュー）と同じく**自動では直さない**（保存済みのPR/MRはそのまま、警告として
+     * 出すだけ）。マージ自体はこの警告の有無に関わらず進む。
+     */
+    | 'taskPullRequestReview';
   /** ワークフロー全体に関わる警告（gitignoreなど）は undefined。 */
   taskId: string | undefined;
   message: string;
@@ -855,6 +880,23 @@ export type LiveRunForgeState =
        * 統合ブランチをbaseにするため影響しない）。
        */
       baseBranch: string | undefined;
+      /**
+       * タスクの開始時にIssueを起票し、PR本文から参照するか（design.md §16.31、
+       * roadmap W6、Issue #596）。`agent.workflows.createTaskIssue`。既定`false`
+       * （既存の`per-task`の挙動を変えないため）。`pullRequest !== 'per-task'`のときは
+       * PR/MR自体を作らないため、この設定が`true`でも起票しない（呼び出し側が
+       * `shouldCreateTaskPullRequest`と合わせて判定する）。
+       */
+      createTaskIssue: boolean;
+      /**
+       * PR/MRを作った後、ローカルマージの前に読み取り専用の別セッションでレビューさせるか
+       * （design.md §16.31、roadmap W6、Issue #596）。`agent.workflows.
+       * reviewTaskPullRequest`。既定`false`。forgeの「人のレビューを待つ」方式ではなく、
+       * `reviewWorkflowPlan`（design.md §16.28、roadmap W3）と同じ「別のエージェント
+       * セッションを立てて読み取り専用でレビューさせる」方式を採る。結果は警告として
+       * 記録するだけで、マージ自体はブロックしない。
+       */
+      reviewTaskPullRequest: boolean;
     };
 
 /**
@@ -1222,6 +1264,15 @@ export interface LiveRun {
    * 「いま承認待ちか」を持ち回る必要があるため。
    */
   mergeResolutions: Map<string, MergeResolutionEntry>;
+  /**
+   * タスクの開始時に起票したIssueの番号（design.md §16.31「タスクの開始時にIssueを起票し、
+   * PR本文から参照する」、roadmap W6、Issue #596）。taskIdをキーにする。`expandedPrompt`等
+   * と同じく表示・追跡専用でworkspaceStateへは永続化しない（`live`が生きている間だけ、
+   * 同じtaskIdへ二重に起票しないための記録。`retryTask`でも同じ番号を使い回す）。
+   * リロード後（`rebuildLiveRun`）は空のMapへ戻るため、リロードを挟んで`retryTask`すると
+   * 再度起票しうる（既知の制約。design.mdに記載）。
+   */
+  createdTaskIssues: Map<string, number>;
   /**
    * オーケストレーターセッション（design.md §16.23）。runごとに1つ。開始に失敗した場合と、
    * リロード後に復元しただけの実行では`undefined`（会話は復元できないため。§16.11）。
@@ -1910,6 +1961,7 @@ export class WorkflowRunner {
       messagingStartupWarnCount: 0,
       reviewCommentPoll: undefined,
       mergeResolutions: new Map(),
+      createdTaskIssues: new Map(),
       orchestrator: undefined,
       orchestratorSeenStates: new Map(),
       integrationPullRequest: undefined,
@@ -2889,6 +2941,84 @@ export class WorkflowRunner {
    * `startTask()`の前半。作業ディレクトリの解決・実効設定のクランプ・権限越境チェック・
    * bypassPermissionsの最終防御・`TaskSessionInput`の組み立てとタスク境界の解決までを担う。
    */
+  /**
+   * タスクの開始時にIssueを起票する（design.md §16.31「タスクの開始時にIssueを起票し、PR
+   * 本文から参照する」、roadmap W6、Issue #596）。`prepareTaskLaunch`から呼ぶ（起動そのもの
+   * より前に行う必要は無いが、PR/MR本文が参照する番号は起動直後には要らないため、ここで
+   * 決めておけば`mergeTaskWithForge`（`runnerMerge.ts`）が`live.createdTaskIssues`から
+   * 読むだけで済む）。
+   *
+   * **前提が欠けても`startTask`を止めない。** `live.forge.kind === 'active'`である以上
+   * `checkForgePrerequisites`（CLI・認証・originリモート）は既に通っているが、個別の
+   * `gh issue create`/`glab api`呼び出し自体が失敗することはありうる（レート制限・権限不足
+   * 等）。失敗しても警告を積むだけで例外は投げない（design.md §16.31の受入基準）。
+   *
+   * `task.issue`が既に指定されている（YAML・ロードマップ由来）ときは起票しない
+   * （既存のIssueを使い回す）。同じtaskIdへ二重に起票しないよう
+   * `live.createdTaskIssues`を先にチェックする（`retryTask`で同じ番号を使い回す）。
+   */
+  private async maybeCreateTaskIssue(
+    live: LiveRun,
+    task: WorkflowTask,
+    taskId: string,
+    runId: string,
+    cwd: string,
+  ): Promise<void> {
+    const forge = live.forge;
+    const forgeDeps = this.deps.forge;
+    if (
+      forge.kind !== 'active' ||
+      !forge.createTaskIssue ||
+      !shouldCreateTaskPullRequest(forge.pullRequest) ||
+      forgeDeps === undefined ||
+      task.issue !== undefined ||
+      live.createdTaskIssues.has(taskId)
+    ) {
+      return;
+    }
+    try {
+      const outcome = await createIssue(
+        { cli: forgeDeps.cli, fs: forgeDeps.fs },
+        {
+          host: forge.host,
+          cwd,
+          title: buildTaskPullRequestTitle(taskId, task.prompt),
+          body: buildTaskIssueBody({ prompt: task.prompt, done: task.done, runId, taskId }),
+        },
+      );
+      if (!outcome.ok) {
+        this.deps.log.warn(`[workflow ${runId}/${taskId}] Issueの起票に失敗しました: ${outcome.message}`);
+        live.warnings.push({
+          kind: 'taskIssueFailed',
+          taskId,
+          message: `Issueの起票に失敗しました: ${outcome.message}`,
+        });
+        return;
+      }
+      const number = outcome.url !== undefined ? parsePullRequestNumberFromUrl(outcome.url) : undefined;
+      if (number === undefined) {
+        this.deps.log.warn(
+          `[workflow ${runId}/${taskId}] Issueは起票できましたが、URLから番号を取り出せませんでした`,
+        );
+        live.warnings.push({
+          kind: 'taskIssueFailed',
+          taskId,
+          message: 'Issueは起票できましたが、URLから番号を取り出せなかったため、PR本文からの参照を省略します',
+        });
+        return;
+      }
+      live.createdTaskIssues.set(taskId, number);
+    } catch (e) {
+      const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+      this.deps.log.warn(`[workflow ${runId}/${taskId}] Issueの起票中にエラーが発生しました: ${message}`);
+      live.warnings.push({
+        kind: 'taskIssueFailed',
+        taskId,
+        message: `Issueの起票中にエラーが発生しました: ${message}`,
+      });
+    }
+  }
+
   private async prepareTaskLaunch(
     live: LiveRun,
     task: WorkflowTask,
@@ -2899,6 +3029,8 @@ export class WorkflowRunner {
     const retry = retrySuffixOf(taskRunState);
     const { cwd, branch, usedWorktree, usedPseudoWorktree, pseudoSnapshot, originCommit } =
       await resolveWorkingDirectory(this.internals, live, task, retry);
+
+    await this.maybeCreateTaskIssue(live, task, taskId, runId, cwd);
 
     const baseline = this.deps.readBaseline();
     // クランプはこの1関数だけを通す（design.md §16.16。#52セキュリティ監査指摘）
@@ -3224,6 +3356,8 @@ export class WorkflowRunner {
       pullRequest: config.pullRequest,
       finalMerge: config.finalMerge,
       baseBranch,
+      createTaskIssue: config.createTaskIssue,
+      reviewTaskPullRequest: config.reviewTaskPullRequest,
     };
   }
 

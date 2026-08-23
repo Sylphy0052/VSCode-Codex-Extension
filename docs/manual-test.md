@@ -1965,6 +1965,37 @@ YAMLとロードマップの**中身が使えるものになっているか**を
 - 操作: 最終マージが確定した後（GitHub/GitLab側でPR/MRがマージ済み・クローズ済みになっていることを確認できる状態）に届いたレビューコメントを踏まえ、同様に`add_task`での対応を依頼する（2度目のレビューblocking指摘の実機確認: 最終マージ確定後は成果がmainへ届かなくなるため、拒否されるべき場面）
 - 期待: `add_task`が拒否され、オーケストレーターのチャットタブに「最終マージの判断が確定しているため、これ以降は計画を変更できない」旨の理由が届く（新しいタスクはワークフローViewに現れない）。会話自体は継続できる
 
+### W-K タスクごとにIssueを起票し、PRのレビューを経てマージする（design.md §16.31、roadmap W6、Issue #596）
+
+起票する本文の組み立て・番号の受け渡し・レビューの呼び出し順序（create→review→merge）・非ブロッキング（レビューが失敗・指摘ありでもmergeへ進む）・前提が欠けても止まらないことはユニットテストで確かめてある（`test/unit/forge.test.ts`の`describe('createIssue（design.md §16.31 W6 Issue #596）')`/`describe('buildTaskIssueBody（design.md §16.31 W6 Issue #596）')`/`runTaskPullRequestFlow`のレビュー段関連ケース、`test/unit/planner.test.ts`の`describe('reviewTaskPullRequest（design.md §16.31、roadmap W6、Issue #596）')`、`test/unit/runner.test.ts`の`describe('WorkflowRunner: タスクのIssue起票（design.md §16.31、roadmap W6、Issue #596）')`/`describe('WorkflowRunner: タスクPR/MRのレビュー段（design.md §16.31、roadmap W6、Issue #596）')`）。ここで見るのは、実際のGitHub/GitLab上でIssueが起票されるか・別セッションのレビューが実際に走るかという、実ホストでしか確かめられない点。W-D・W-Jと同じ使い捨てリポジトリを流用してよい。両機能とも既定は無効のため、明示的に設定で有効化してから確認する。
+
+- 前提: `agent.workflows.createTaskIssue: true`にしたうえで、`pullRequest: per-task`（既定）・単一タスクの短いワークフローを用意する（`issue`フィールドは指定しない）
+- 操作: ワークフローを実行する
+- 期待: タスクの開始直後（セッションが立ち上がった前後）に、GitHub側へ新しいIssueが1件作られる（タイトルがPRと同じ`T1: <promptの先頭>`形式、本文にタスクの`prompt`/`done`が載っている）
+- 確認: タスク完了後に作られるPRの本文に、起票したIssue番号への参照（`Closes #<N>`）が含まれている
+- 操作: `agent.workflows.forge: gitlab`にして同じ手順を行う
+- 期待: GitLab側で同様にIssueが作られ（`glab api projects/:id/issues`経由）、MRの本文からも参照される
+- 前提: `agent.workflows.createTaskIssue`を既定（未設定/false）に戻す
+- 操作: 同じワークフローを実行する
+- 期待: Issueが作られない（GitHub/GitLab側のIssue一覧が増えない）。PR/MR作成自体は従来どおり進む
+- 前提: `agent.workflows.createTaskIssue: true`のまま、タスクのYAMLへ既存のIssue番号を`issue:`で明示する
+- 操作: ワークフローを実行する
+- 期待: 新しいIssueは作られない（YAML側で指定した番号がそのままPR本文の参照に使われる。二重に起票されない）
+- 前提: `agent.workflows.createTaskIssue: true`のまま、GitHubの認証を意図的に切れた状態にする（例: `gh auth logout`。ただしPR/MR作成自体の前提（origin remote等）は満たしておく）
+- 操作: ワークフローを実行する
+- 期待: Issueの起票には失敗するが、run自体は止まらずタスクの実行・完了まで進む。ワークフローViewの警告欄に起票失敗の旨（`taskIssueFailed`）が表示される
+- 前提: `agent.workflows.reviewTaskPullRequest: true`にしたうえで、`agent.workflows.createTaskIssue`は既定（false）に戻し、単一タスクの短いワークフローを用意する
+- 操作: ワークフローを実行し、タスクを完了させる
+- 期待: PR/MRが作られた後・ローカルマージが完了する前に、別のチャットタブ（またはログ）としてレビュー用の読み取り専用セッションが1つ追加で立ち上がるのが確認できる（タスク本体のセッションとは別に、短時間だけ動いて終わる）
+- 確認: レビューセッションがファイルを一切書き換えていない（作業ディレクトリに差分が増えていない。読み取り専用の起動設定が実機でも守られていることの確認）
+- 確認: レビューセッションの完了を待ってから（またはタイムアウトしてから）ローカルマージ・PRのマージが実際に進む（レビューが終わるまでrunが無期限に止まったままにならない）
+- 操作: レビュー対象のタスクへ、意図的に指示と食い違う変更（例: `done`に書いた条件を満たさない出力）をさせてから完了させる
+- 期待: レビューセッションが指摘を返した場合、ワークフローViewの警告欄に指摘内容（`taskPullRequestReview`）が表示される。**指摘があってもマージ自体は妨げられず、通常どおり完了する**（非ブロッキングであることの実機確認）
+- 前提: `agent.workflows.reviewTaskPullRequest`を既定（false）に戻す
+- 操作: 同じワークフローを実行する
+- 期待: レビュー用の追加セッションが立ち上がらない（タスク本体のセッション以外に新しいチャットタブ・ログが増えない）
+
+
 ### W-L タスクからオーケストレーターへ判断を仰ぐ経路（design.md §16.32、Issue #571）
 
 `ask_orchestrator`の宛先固定・`kind: 'question'`の意味づけ・待ちぼうけ検出との関係・`maxIterations`到達時の失敗確定はユニットテストで確かめてある（`test/unit/messaging.test.ts`の`describe('ask_orchestrator（design.md §16.32、Issue #571）')`・`test/unit/runner.test.ts`の`describe('WorkflowRunner: ask_orchestrator（design.md §16.32、Issue #571）')`）。ここで見るのは、実際のCLIプロセス（タスク）とオーケストレーターのCLIプロセスの間で、実物のMCP接続を通して`ask_orchestrator`が機能するか。

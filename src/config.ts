@@ -364,6 +364,25 @@ export interface WorkflowsConfig {
    * 「人の確認を挟む」側へ倒れるため、`forge`/`finalMerge`ほど強い制限は要らない。
    */
   draftPullRequest: boolean;
+  /**
+   * タスクの開始時にIssueを起票し、PR本文から参照するか（`agent.workflows.createTaskIssue`、
+   * design.md §16.31、roadmap W6、Issue #596）。既定`false`（既存の`per-task`の挙動を
+   * 変えないため）。`pullRequest`が`per-task`のときだけ効く（`none`/`integration`では
+   * タスクのPR/MR自体を作らないため起票もしない）。`machine-overridable`。起票に使う
+   * コマンド（`gh`/`glab`）自体の選択は`forge`（machine固定）が既に縛っているため、
+   * この設定自体はmachine固定にしなくてよい。
+   */
+  createTaskIssue: boolean;
+  /**
+   * タスクのPR/MRを作った後、ローカルマージの前に読み取り専用の別セッションでレビューさせ
+   * るか（`agent.workflows.reviewTaskPullRequest`、design.md §16.31、roadmap W6、
+   * Issue #596）。既定`false`。forgeの「人のレビューを待つ」方式ではなく、
+   * `reviewWorkflowPlan`（design.md §16.28）と同じ「別のエージェントセッションを立てて
+   * 読み取り専用でレビューさせる」方式を採る。結果は警告として記録するだけでマージは
+   * ブロックしない。`createTaskIssue`と同じく`pullRequest`が`per-task`のときだけ効く。
+   * `machine-overridable`。
+   */
+  reviewTaskPullRequest: boolean;
 }
 
 const DEFAULT_WORKFLOWS_DIR = '.agents/workflows';
@@ -540,6 +559,8 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     ),
     branchNaming: normalizeBranchNaming(str(c, 'workflows.branchNaming', 'wf')),
     draftPullRequest: c.get<boolean>('workflows.draftPullRequest') ?? false,
+    createTaskIssue: c.get<boolean>('workflows.createTaskIssue') ?? false,
+    reviewTaskPullRequest: c.get<boolean>('workflows.reviewTaskPullRequest') ?? false,
     stallRepeatCount: normalizeStallRepeatCount(c.get<unknown>('workflows.stallRepeatCount')),
     ciWaitTimeoutSec: normalizeCiWaitTimeoutSec(c.get<unknown>('workflows.ciWaitTimeoutSec')),
     ciUpdateBranchMaxRetries: normalizeCiUpdateBranchMaxRetries(

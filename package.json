@@ -895,6 +895,18 @@
           "scope": "machine-overridable",
           "markdownDescription": "PR/MRをDraftとして作り、統合ブランチへのマージが済んでからreadyへ切り替えるか。`gh pr create --draft` / `glab api --field=draft=true` で作り、`gh pr ready` / `glab mr update --ready` で外す（設計書 §16.18）。"
         },
+        "agent.workflows.createTaskIssue": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine-overridable",
+          "markdownDescription": "タスクの開始時にIssueを起票し、PR/MRの本文から参照するか。`pullRequest: per-task` のときだけ有効（`gh issue create` / `glab api projects/:id/issues`）。タスクのYAML側で既に `issue` が指定されている場合は起票しない（設計書 §16.31）。"
+        },
+        "agent.workflows.reviewTaskPullRequest": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine-overridable",
+          "markdownDescription": "PR/MRを作った後、ローカルマージの前に、拡張が別の読み取り専用セッションでレビューさせるか。forgeの「人のレビューを待つ」機構ではなく、分解レビュー（`reviewWorkflowPlan`）と同じ方式で、応答を待ち続けることはない。結果は警告として記録するだけでマージは止めない（設計書 §16.31）。"
+        },
         "agent.workflows.stallRepeatCount": {
           "type": "number",
           "default": 4,

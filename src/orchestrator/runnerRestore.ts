@@ -441,6 +441,7 @@ async function rebuildLiveRun(
     // 改めて開始する）
     reviewCommentPoll: undefined,
     mergeResolutions: new Map(),
+    createdTaskIssues: new Map(),
     // 復元した実行にはオーケストレーターセッションを作り直さない（会話は復元できない。
     // design.md §16.23「永続化と復元」）
     orchestrator: undefined,
