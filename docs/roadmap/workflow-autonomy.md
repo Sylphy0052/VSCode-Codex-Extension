@@ -253,7 +253,7 @@
 
 - [ ] W10 中断からの自動再開
   - 依存: なし
-  - Issue: #584
+  - Issue: 未起票（着手時に起票する）
   - 現状: リロード後の復元は実装済みで（[runnerRestore.ts](../../src/orchestrator/runnerRestore.ts)、
     design.md §16.11）、`workspaceState` に残ったrunをメモリへ戻し、`merging` で切れたものは
     マージからやり直す。**ただし復元したrunは自動では進まない。** 走行中だったタスクは中断扱いへ
@@ -352,7 +352,7 @@
 | W7 | 未起票 | `feat/<IID>/ask-orchestrator` | §16.32 | W-L |
 | W8 | #583 | `feat/583/ask-user` | §16.33 | W-M |
 | W9 | 未起票 | `refactor/<IID>/messaging-via-orchestrator` | §16.34 | W-N |
-| W10 | #584 | `feat/584/auto-resume` | §16.35 | W-O |
+| W10 | 未起票 | `feat/<IID>/auto-resume` | §16.35 | W-O |
 | W11 | 未起票 | `feat/<IID>/ci-wait-and-update-branch` | §16.36 | W-P |
 | W12 | 未起票 | `feat/<IID>/program-of-runs` | §16.37 | W-Q |
 

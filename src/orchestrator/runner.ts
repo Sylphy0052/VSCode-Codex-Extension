@@ -598,7 +598,18 @@ export interface WorkflowWarning {
      * 手動で再実行するまでこのrunは`failed`のまま止まる。`autoResume`と同じく直近1件へ
      * 丸める。
      */
-    | 'autoResumeLimitExceeded';
+    | 'autoResumeLimitExceeded'
+    /**
+     * 自動再開の対象（`reloadInterrupted`のタスク）はあったが、他の理由による`failed`が
+     * 混ざっている・`allow`確認が要るタスクが混ざっているため、run全体の自動再開を見送った
+     * （design.md §16.35、roadmap W10、Issue #584。`applyAutoResume`の`blockedByOtherFailure`
+     * / `blockedByAllowGate`）。`autoResumeLimitExceeded`と同じく、上限超過以外にも
+     * 「自動では再開されなかった」ケースがあることをViewから区別できるようにするための警告
+     * （レビュー指摘。2026-08-23。当初は既存のfailed/skipped表示で足りるとして省略していたが、
+     * 受入基準「再開の試行が上限を超えたrunは理由がViewへ出る」とそろえ、見送った理由も
+     * 同じ場所で分かるようにした）。直近1件へ丸める。
+     */
+    | 'autoResumeBlocked';
   /** ワークフロー全体に関わる警告（gitignoreなど）は undefined。 */
   taskId: string | undefined;
   message: string;

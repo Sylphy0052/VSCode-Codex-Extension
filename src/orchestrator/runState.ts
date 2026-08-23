@@ -121,10 +121,16 @@ export interface TaskRunState {
   /** これまでの自動再試行回数（0開始）。手動の再実行ではここを増やさない。 */
   readonly retryCount: number;
   /**
-   * ワークフローViewからの手動の再実行の回数（0開始）。`retries`の権利とは別に数える。
+   * `retries`の権利（`retryCount`）を消費しない再試行の回数（0開始）。ワークフローViewからの
+   * 手動の再実行（`retryTask`）に加えて、リロード・WSL再起動からの自動再開
+   * （`applyAutoResume`、design.md §16.35、roadmap W10、Issue #584）も、`reloadInterrupted`の
+   * タスクを`pending`へ戻すときにここを増やす。
    *
    * 分けて持つのは、`retryCount`が「自動再試行を何回使ったか」という**権利の消費**を
-   * 表しているからで、人の操作でそれを増やすと使える自動再試行が減ってしまう。
+   * 表しているからで、人の操作・自動再開のどちらでそれを増やしても使える自動再試行が
+   * 減ってしまう（特に自動再開は「タスクが中断されただけで、まだ何も本物の失敗をしていない」
+   * ケースを扱うため、`retryCount`を進めると後で本物の理由（`loopFailed`等）で失敗したときの
+   * 自動再試行の権利を黙って1回消費してしまう。レビュー指摘、2026-08-23）。
    * 一方でworktreeのディレクトリ名とブランチ名（`wf/<runId>/<taskId>-retry<n>`。§16.5）は
    * **試行が何回目か**で決まる必要がある。失敗した試行のworktreeとブランチは人が中身を
    * 見られるように残るため、同じ名前で作り直そうとすると`branchExists`で必ず失敗する
@@ -848,16 +854,26 @@ export function retryTask(run: RunState, tasks: readonly WorkflowTask[], taskId:
  * 他の`reloadInterrupted`タスクも道連れで拾われなくなる。したがって`allow`を持つタスクが
  * 1件でも対象に含まれていれば、run全体をまるごと対象から外す。
  *
- * **`reloadInterrupted`のタスクを`pending`へ戻すとき、`retryCount`を1増やす。**
- * `worktree.ts`の`createWorktree`はブランチ名が既存なら`branchExists`で拒否し、
- * `git worktree add`自体を試みない（設計上、二重にworktreeを作ることはできない）。
- * リロード前に中断したタスクは、多くの場合すでに自分のworktree・ブランチを作った後
- * （`running`まで進んでいた）ため、`retryCount`/`manualRetryCount`を変えずに`pending`へ
- * 戻すと`retrySuffixOf`が同じ試行番号を返し、`createWorktree`が古いworktreeとの
- * `branchExists`衝突で失敗する（＝自動再開のたびに必ず失敗する）。`retryCount`を1進めて
- * 新しい試行番号（新しいworktree・ブランチ名）を割り当てることで、この衝突を避ける
- * （`applyLoopStopReason`の`'failed'`分岐が自動再試行のたびに`retryCount`を進めるのと
- * 同じ規約。design.md §16.5「再試行は新しいスレッド・worktreeでやり直す」）。
+ * **`reloadInterrupted`のタスクを`pending`へ戻すとき、`manualRetryCount`を1増やす
+ * （`retryCount`ではない）。** `worktree.ts`の`createWorktree`はブランチ名が既存なら
+ * `branchExists`で拒否し、`git worktree add`自体を試みない（設計上、二重にworktreeを
+ * 作ることはできない）。リロード前に中断したタスクは、多くの場合すでに自分のworktree・
+ * ブランチを作った後（`running`まで進んでいた）ため、`retryCount`/`manualRetryCount`を
+ * 変えずに`pending`へ戻すと`retrySuffixOf`が同じ試行番号を返し、`createWorktree`が
+ * 古いworktreeとの`branchExists`衝突で失敗する（＝自動再開のたびに必ず失敗する）。
+ * 新しい試行番号（新しいworktree・ブランチ名）を割り当てて衝突を避ける必要がある点は
+ * `applyLoopStopReason`の`'failed'`分岐（自動再試行）と同じだが、**`retryCount`を進める
+ * 選択はしない**。`retryCount`は`task.retries`（design.md §16.5、タスク定義の自動再試行の
+ * 予算）と比較される消費カウンタそのもの（このファイルの`'failed'`分岐、
+ * `current.retryCount < task.retries`）で、リロードで中断されただけのタスクの`retryCount`を
+ * 進めると、そのタスクが後で本物の理由（`loopFailed`等）で失敗したとき自動再試行の予算を
+ * 1回黙って消費してしまう——受入基準にもdesign.mdにも無い副作用になる（レビュー指摘。
+ * 2026-08-23）。`retrySuffixOf`（`runner.ts`）はworktree/ブランチの接尾辞を
+ * `retryCount + manualRetryCount`の合計から決めるため、どちらを進めても衝突回避の
+ * 目的は等しく果たせる。`manualRetryCount`は`task.retries`と比較される箇所が無い
+ * （`grep`で確認済み。使うのは`totalAttempts`の算出と`retrySuffixOf`のみ）ため、
+ * こちらを進めて「人の明示操作または自動再開による試行回数（`retries`の予算を消費しない
+ * 試行）」という意味へ広げる（`TaskRunState.manualRetryCount`のJSDoc参照）。
  *
  * **reload起因で`skipped(runHalted)`になっていた後続も`pending`へ戻す。** 上の2つの
  * ガード（他のfailedが無い・allowを持つ対象が無い）を通過した時点で、このrunに残る
@@ -913,7 +929,9 @@ export function applyAutoResume(
     nextTasks.set(id, {
       ...s,
       state: 'pending',
-      retryCount: s.retryCount + 1,
+      // `retryCount`ではなく`manualRetryCount`を進める（`task.retries`の予算を消費させない
+      // ため。上のJSDoc参照）
+      manualRetryCount: s.manualRetryCount + 1,
       submissionCount: 0,
       failure: undefined,
     });

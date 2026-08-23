@@ -5611,13 +5611,16 @@ roadmap W10（design.md §16.35「中断からの自動再開」、Issue #584。
 3. **`applyAutoResume`が`resumed`を返す。** 内部で2つのゲートを持つ:
    - **他の理由による`failed`が1件でも混ざっていれば、run全体の自動再開を見送る（`blockedByOtherFailure`）。** `nextTasksToStart`は`isRunHalted`（`haltedByUser || hasFailedTask`）の間は一切スケジュールしない（`markMergeSucceeded`のJSDocが説明する「孤立した`pending`」の不変条件、Issue #432・PR #517）。ここで`reloadInterrupted`のタスクだけを`pending`へ戻しても、他の`failed`が残っている限りスケジュールされず、Viewからも「再開したのに動いていない」ように見えて紛らわしい。
    - **`allow`（危険な操作の確認）を要するタスクが`reloadInterrupted`に混ざっていれば、run全体の自動再開を見送る（`blockedByAllowGate`）。** 自動再開はその場に人がいない前提で走る。`allow`は人が明示的に確認して初めて実行してよい操作（§16.7）で、自動再開の中でその確認を代行することはできない。そのタスクだけを`failed`のまま残して他を`pending`へ戻すことも考えたが、それも「孤立した`pending`」の不変条件を壊す（残った`failed`が`hasFailedTask`を立て、結局run全体が動かない）ため、run全体を見送る一択にした。
+   - この2つで見送った場合も`autoResumeBlocked`という`WorkflowWarning`を積む（当初は「既存のfailed/skipped表示で理由が分かる」として無警告にしていたが、レビューで「条件4（上限超過）だけ理由がViewへ出て、条件3の見送りは出ないのは非対称」と指摘され改めた。受入基準「回数上限を超えたら理由が見える」を、上限超過以外の見送り理由にもそろえる）。
 4. **`agent.workflows.maxAutoResumeAttempts`（既定3、`machine-overridable`）に達していない。** 定義ファイルが壊れている・依存先のCIが恒久的に落ちている等で、起動のたびにクラッシュ→自動再開→クラッシュ……を繰り返すrunを止めるための上限。`PersistedRun.autoResumeAttempts`（省略可能。無ければ`0`扱い）へ実際に再開した回数を記録し、`restoreRunsForView`が`store.update`で直接インクリメントする（`persist()`は`current?.autoResumeAttempts`をそのまま引き継ぐだけで、増減はここでしか起きない）。上限に達していれば再開せず、`autoResumeLimitExceeded`という新しい`WorkflowWarning`をこのrunの直近1件へ丸めて積む（`persistFailed`・`finalMergeDecision`と同じ規律）。人がViewから手動で「再実行」すれば、そのタスク自身の`retryTask`/`continueTask`が`autoResumeAttempts`を触らない（`PersistedRun`の他のフィールドと同じく`persist()`が前回値を引き継ぐだけ）ため、次回リロード時の自動再開判定にはそのまま影響し続ける（手動再実行を境に自動再開の権利がリセットされるわけではない。上限はあくまで「自動で」再開した回数だけを数える）。
 
 4つとも満たしたときだけ、`applyAutoResume`が返した`RunState`（`reloadInterrupted`のタスクを`pending`へ、それによって道連れで`skipped(runHalted)`になっていた後続も併せて`pending`へ戻したもの）を`rebuilt.runState`へ適用し、`autoResume`という`WorkflowWarning`（戻したタスクidを列挙。直近1件へ丸める）を積む。
 
 #### worktreeの二重作成を避ける
 
-`applyAutoResume`は`pending`へ戻すタスクの`retryCount`を1増やす（`manualRetryCount`ではなく）。`retrySuffixOf`（`runner.ts`）は`retryCount + manualRetryCount`からworktree・ブランチ名の接尾辞（`-retry0`、`-retry1`……）を決めるため、クラッシュした試行が既に作っていたworktree・ブランチ（接尾辞なし、または前の接尾辞）とは別名になる。`createWorktree`はブランチが既に存在すれば`branchExists`エラーで作成そのものを拒否する（git層での二重防止）ため、`retryCount`を増やし忘れると自動再開そのものが常に失敗する形で発覚する設計になっている。手動の「再実行」（`retryTask`）が`manualRetryCount`を増やすのと対称に、自動再開は`retryCount`を増やす——同じ「自動で使い切れる回数」の系列に属する値である点でも、`retries`（タスク定義のループ内自動リトライ回数）の消費と揃えている。
+`applyAutoResume`は`pending`へ戻すタスクの`manualRetryCount`を1増やす（`retryCount`ではなく）。`retrySuffixOf`（`runner.ts`）は`retryCount + manualRetryCount`からworktree・ブランチ名の接尾辞（`-retry0`、`-retry1`……）を決めるため、クラッシュした試行が既に作っていたworktree・ブランチ（接尾辞なし、または前の接尾辞）とは別名になる。`createWorktree`はブランチが既に存在すれば`branchExists`エラーで作成そのものを拒否する（git層での二重防止）ため、どちらかのカウンタを増やし忘れると自動再開そのものが常に失敗する形で発覚する設計になっている。
+
+当初は手動の「再実行」（`retryTask`）が`manualRetryCount`を増やすのと対称に、自動再開は`retryCount`を増やす実装にしていたが、レビューで指摘を受け改めた。`retryCount`は`applyLoopStopReason`の`'failed'`分岐（`current.retryCount < task.retries`）で`task.retries`（タスク定義のループ内自動リトライ回数の予算）と直接比較される値であり、ここを自動再開で先に消費してしまうと、`retries: 1`のタスクがリロードで中断→自動再開したあと本物の理由で改めて失敗した場合に、まだ使っていないはずの自動リトライの権利が残っていないという、受入基準にもこのdesign.mdにも書かれていない振る舞いを生む。`manualRetryCount`は`totalAttempts`の表示と`retrySuffixOf`の接尾辞計算にしか使われておらず（grep済み）、`retries`との比較箇所を持たない。そのため「worktree名を変える」というここでの目的だけを、`retries`の予算を消費せずに達成できる`manualRetryCount`側を進めることにした（`manualRetryCount`のJSDocも「人の明示操作**または自動再開**による試行回数」へ意味を広げた）。
 
 #### オーケストレーターセッションの立て直しと`ask_user`の再質問
 
@@ -5637,15 +5640,15 @@ roadmap W10（design.md §16.35「中断からの自動再開」、Issue #584。
 - `runStore.ts`: `PersistedRun.autoResumeAttempts`（省略可能フィールド）
 - `runnerRestore.ts`: `autoResumeIfEligible`・`DEFAULT_AUTO_RESUME`・`DEFAULT_MAX_AUTO_RESUME_ATTEMPTS`・`MIN_MAX_AUTO_RESUME_ATTEMPTS`・`MAX_MAX_AUTO_RESUME_ATTEMPTS`
 - `runnerOrchestrator.ts`: `OrchestratorResumeContext`・`buildIntroBody`/`setupOrchestratorForStart`への配線
-- `runnerInternals.ts`・`runner.ts`: `WorkflowRunnerInternals.ensureMessaging`（分割モジュールへの公開）、`WorkflowRunnerDeps.readAutoResume`/`readMaxAutoResumeAttempts`、`WorkflowWarning`の`autoResume`/`autoResumeLimitExceeded`、`persist()`の`autoResumeAttempts`引き継ぎ
+- `runnerInternals.ts`・`runner.ts`: `WorkflowRunnerInternals.ensureMessaging`（分割モジュールへの公開）、`WorkflowRunnerDeps.readAutoResume`/`readMaxAutoResumeAttempts`、`WorkflowWarning`の`autoResume`/`autoResumeLimitExceeded`/`autoResumeBlocked`、`persist()`の`autoResumeAttempts`引き継ぎ
 - `config.ts`: `WorkflowsConfig.autoResume`/`maxAutoResumeAttempts`・`normalizeMaxAutoResumeAttempts`
 - `package.json`: `agent.workflows.autoResume`・`agent.workflows.maxAutoResumeAttempts`
 - `extension.ts`: 上記2つの`readXxx`の配線
 
 #### 確かめ方
 
-- `test/unit/runState.test.ts`（`describe('applyAutoResume（design.md §16.35、roadmap W10、Issue #584）')`）: `reloadInterrupted`の`pending`復帰・道連れの`skipped(runHalted)`復帰・`dependencyFailed`/`mergeBlocked`起因の`skipped`は戻さないこと・他の理由の`failed`混在での`blockedByOtherFailure`・対象なしでの`nothingToResume`・`allow`混在での`blockedByAllowGate`
-- `test/unit/runner.test.ts`（`describe('WorkflowRunner: 中断からの自動再開（design.md §16.35、roadmap W10、Issue #584）')`）: 既定（`autoResume: true`）での自動再開・`haltedByUser`での見送り・`autoResume: false`での従来どおりの手動待ち・上限超過での`autoResumeLimitExceeded`警告・`allow`混在での見送り・worktree/ブランチが別名で二重作成にならないこと・`ask_user`回答待ちの再質問（新しいオーケストレーターセッションへの問いの引き継ぎと配送）
+- `test/unit/runState.test.ts`（`describe('applyAutoResume（design.md §16.35、roadmap W10、Issue #584）')`）: `reloadInterrupted`の`pending`復帰（`manualRetryCount`を1増やし`retryCount`は増やさないこと）・道連れの`skipped(runHalted)`復帰・`dependencyFailed`/`mergeBlocked`起因の`skipped`は戻さないこと・他の理由の`failed`混在での`blockedByOtherFailure`・対象なしでの`nothingToResume`・`allow`混在での`blockedByAllowGate`・`retries`（自動リトライの予算）を自動再開が消費しないこと（`retries: 1`のタスクが自動再開後に本物の理由で失敗しても自動リトライが起きる回帰テスト）
+- `test/unit/runner.test.ts`（`describe('WorkflowRunner: 中断からの自動再開（design.md §16.35、roadmap W10、Issue #584）')`）: 既定（`autoResume: true`）での自動再開・`haltedByUser`での見送り・`autoResume: false`での従来どおりの手動待ち・上限超過での`autoResumeLimitExceeded`警告・`allow`混在での見送りと`autoResumeBlocked`警告・他の理由の`failed`混在での見送りと`autoResumeBlocked`警告・worktree/ブランチが別名で二重作成にならないこと（`manualRetryCount`側を進め`retryCount`は増やさないこと）・`ask_user`回答待ちの再質問（新しいオーケストレーターセッションへの問いの引き継ぎと配送）
 - `test/unit/config.test.ts`: `autoResume`/`maxAutoResumeAttempts`の既定値・範囲内の指定・範囲外/非数値/非整数のフォールバック
 - `docs/manual-test.md` W-O: 実VSCode上でのウィンドウのリロード・WSLの停止/再起動からの自動再開、worktreeが二重に作られないことの確認（追記のみ、実施はしない）
 

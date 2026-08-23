@@ -9196,12 +9196,78 @@ tasks:
     expect(snapshot?.tasks[0]?.failure).toEqual({ kind: 'reloadInterrupted' });
     expect(newCodexHost.sessions).toHaveLength(0);
     expect(snapshot?.warnings.some((w) => w.kind === 'autoResume')).toBe(false);
+    // 見送った理由自体はViewから見える（レビュー指摘。2026-08-23。上限超過だけ理由が
+    // 見えて他は見えないと人が区別できないため、autoResumeBlockedとしてrunへ積む）
+    const blockedWarning = snapshot?.warnings.find((w) => w.kind === 'autoResumeBlocked');
+    expect(blockedWarning).toBeDefined();
+    expect(blockedWarning?.message).toContain('allow');
     // 再実行にはallow確認が要る（従来どおり）
     expect(reloadedRunner.retryTask(runId, 'T1')).toEqual({
       ok: false,
       needsAllowConfirmation: true,
     });
   });
+
+  it(
+    '他の理由で失敗したタスクが混ざっているreloadInterruptedは、run全体の自動再開を見送り、' +
+      '理由をViewへ残す',
+    async () => {
+      const TWO_TASK_YAML = `
+version: 1
+name: auto-resume-other-failure-test
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+  - id: T2
+    prompt: p
+    done: d
+`;
+      const { runner, store } = createHarness(TWO_TASK_YAML);
+      const result = await runner.start(
+        '/repo/.agents/workflows/auto-resume-other-failure.yaml',
+        '/repo',
+      );
+      const runId = result.runId as string;
+      await flush();
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+      expect(store.find(runId)?.tasks['T2']?.state).toBe('running');
+
+      // T2は本物の理由（loopFailed）で先に失敗していたとする。T1はまだ走行中のまま
+      // リロードが来た（reconcileAfterReloadでreloadInterruptedになる）
+      const before = store.find(runId);
+      if (before === undefined) {
+        throw new Error('runが見つかりません');
+      }
+      await store.update(runId, () => ({
+        ...before,
+        tasks: {
+          ...before.tasks,
+          T2: {
+            ...before.tasks['T2']!,
+            state: 'failed',
+            failure: { kind: 'loopFailed', reason: 'stopped' },
+          },
+        },
+      }));
+
+      const { reloadedRunner, newCodexHost } = reloadWith(store, TWO_TASK_YAML, {
+        readAutoResume: () => true,
+      });
+      await reloadedRunner.restoreRunsForView();
+      await flush();
+
+      const snapshot = reloadedRunner.getSnapshot(runId);
+      // 孤立したpendingを作らないため、T1もreloadInterruptedのまま残す
+      const t1 = snapshot?.tasks.find((t) => t.id === 'T1');
+      expect(t1?.state).toBe('failed');
+      expect(t1?.failure).toEqual({ kind: 'reloadInterrupted' });
+      expect(newCodexHost.sessions).toHaveLength(0);
+      expect(snapshot?.warnings.some((w) => w.kind === 'autoResume')).toBe(false);
+      const blockedWarning = snapshot?.warnings.find((w) => w.kind === 'autoResumeBlocked');
+      expect(blockedWarning).toBeDefined();
+    },
+  );
 
   it('自動再開したタスクは前の試行と別のworktree・別のブランチで走り、二重作成にならない', async () => {
     const { runner, store } = createHarness(YAML);
@@ -9219,10 +9285,13 @@ tasks:
     await flush();
 
     // クラッシュした試行のworktree・ブランチ名（.../T1）とは別名（.../T1-retry0）で
-    // 作り直す。`applyAutoResume`がretryCountを1増やすため（`retrySuffixOf`と同じ計算）
+    // 作り直す。`applyAutoResume`がmanualRetryCountを1増やすため（`retrySuffixOf`と同じ計算）。
+    // retryCountは増やさない（自動再試行=`retries`の予算を消費させないため。レビュー指摘、
+    // 2026-08-23）
     const resumed = newCodexHost.sessions.find((s) => s.cwd.endsWith('/T1-retry0'));
     expect(resumed).toBeDefined();
-    expect(store.find(runId)?.tasks['T1']?.retryCount).toBe(1);
+    expect(store.find(runId)?.tasks['T1']?.retryCount).toBe(0);
+    expect(store.find(runId)?.tasks['T1']?.manualRetryCount).toBe(1);
   });
 
   it('ask_user回答待ちのまま中断した実行は、自動再開後に問いを出し直す', async () => {

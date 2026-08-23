@@ -399,12 +399,15 @@ export const MAX_MAX_AUTO_RESUME_ATTEMPTS = 20;
  * オーケストレーターセッションを`start()`と同じ手順（`ensureMessaging` →
  * `setupOrchestratorForStart`）で立て直し、`pump()`でスケジューリングを起こす。
  *
- * 条件2・3で見送った場合は何もしない（`live.warnings`へ積まない）。理由は既に
- * `failed`/`skipped`としてViewに見えており、対応する専用の警告を新たに増やすと
- * 表示が二重になる（W10の最終報告に明記する判断）。条件4（上限超過）だけは
- * `autoResumeLimitExceeded`警告を積む——これは既存のどの表示にも現れない
- * 「自動では二度と再開しない」という新しい事実そのものであり、Viewから見える形に
- * 残す必要がある（design.md §16.35の受入基準「回数上限を超えたら理由が見える」）。
+ * 条件3（`blockedByOtherFailure`/`blockedByAllowGate`）・条件4（上限超過）のどちらで
+ * 見送った場合も`autoResumeBlocked`/`autoResumeLimitExceeded`警告をrunへ積む。
+ * どちらも「自動では再開されなかった」という、Viewの既存のfailed/skipped表示だけでは
+ * 区別できない事実そのものであり、受入基準「回数上限を超えたら理由が見える」を、
+ * 上限超過以外の見送り理由にもそろえた（レビュー指摘。2026-08-23。当初は条件2・3を
+ * 完全に無警告としていたが、上限超過だけ理由が見えて他は見えないのは非対称という
+ * 指摘を受け改めた）。条件2（`haltedByUser`）だけは引き続き無警告のまま——人が
+ * 意図して止めたrunであり、`applyAutoResume`を呼ぶ前に確定しているため「見送った」
+ * という新情報が無い。
  */
 async function autoResumeIfEligible(
   self: WorkflowRunnerInternals,
@@ -419,7 +422,24 @@ async function autoResumeIfEligible(
     return;
   }
   const outcome = applyAutoResume(rebuilt.runState, rebuilt.def.tasks);
+  if (outcome.kind === 'nothingToResume') {
+    return;
+  }
   if (outcome.kind !== 'resumed') {
+    // `blockedByOtherFailure` / `blockedByAllowGate`。孤立した`pending`を作らないために
+    // 見送ったが、「なぜ再開されなかったか」はrunから見えるようにする
+    // （レビュー指摘。2026-08-23。上記JSDoc参照）
+    const reason =
+      outcome.kind === 'blockedByAllowGate'
+        ? `再開確認（allow）が必要なタスクがあるため（${outcome.taskIds.join(', ')}）`
+        : '他の理由で失敗したタスクが混ざっているため';
+    rebuilt.warnings = rebuilt.warnings.filter((w) => w.kind !== 'autoResumeBlocked');
+    rebuilt.warnings.push({
+      kind: 'autoResumeBlocked',
+      taskId: undefined,
+      message: `中断からの自動再開を見送りました: ${reason}。Viewから手動で再実行してください。`,
+    });
+    self.notify(p.runId);
     return;
   }
 

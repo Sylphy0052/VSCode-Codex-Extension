@@ -1015,8 +1015,8 @@ describe('applyAutoResume（design.md §16.35、roadmap W10、Issue #584）', ()
   };
 
   it(
-    'reloadInterrupted(failed)のタスクをpendingへ戻し、retryCountを1増やす' +
-      '（worktree名を変えてbranchExistsとの衝突を避けるため）',
+    'reloadInterrupted(failed)のタスクをpendingへ戻し、manualRetryCountを1増やす' +
+      '（worktree名を変えてbranchExistsとの衝突を避けるため。retryCountは増やさない）',
     () => {
       const tasks = chainTasks();
       let run = createRunState(tasks);
@@ -1034,8 +1034,40 @@ describe('applyAutoResume（design.md §16.35、roadmap W10、Issue #584）', ()
       expect(outcome.resumedTaskIds).toEqual(['T1']);
       expect(stateOf(outcome.run, 'T1').state).toBe('pending');
       expect(stateOf(outcome.run, 'T1').failure).toBeUndefined();
-      expect(stateOf(outcome.run, 'T1').retryCount).toBe(1);
+      expect(stateOf(outcome.run, 'T1').retryCount).toBe(0);
+      expect(stateOf(outcome.run, 'T1').manualRetryCount).toBe(1);
       expect(stateOf(outcome.run, 'T1').submissionCount).toBe(0);
+    },
+  );
+
+  it(
+    '自動再開はretries（自動再試行の予算）を消費しない: retries:1のタスクが' +
+      'リロードで中断→自動再開したあと、本物の理由(loopFailed)で失敗しても、' +
+      'まだ自動再試行の権利が残っているため`failed`ではなく`pending`へ戻る' +
+      '（レビュー指摘。2026-08-23。retryCountを進めていると自動再試行の予算を' +
+      'リロードが黙って1回消費してしまい、ここが`failed`のまま確定してしまう）',
+    () => {
+      const tasksWithRetry = [task('T1', [], 1)];
+      let run = createRunState(tasksWithRetry);
+      run = withTaskState(run, 'T1', {
+        state: 'failed',
+        failure: { kind: 'reloadInterrupted' },
+      });
+
+      const outcome = applyAutoResume(run, tasksWithRetry);
+      expect(outcome.kind).toBe('resumed');
+      if (outcome.kind !== 'resumed') {
+        throw new Error('unreachable');
+      }
+      // 自動再開の直後、retries自体はまだ1回も消費していない
+      expect(stateOf(outcome.run, 'T1').retryCount).toBe(0);
+
+      // 自動再開後、そのタスクが本物の理由(loopFailed)で失敗した
+      const afterFail = applyLoopStopReason(outcome.run, tasksWithRetry, 'T1', 'failed');
+
+      // retries:1の予算をまだ使い切っていないため、自動再試行でpendingへ戻る
+      expect(stateOf(afterFail, 'T1').state).toBe('pending');
+      expect(stateOf(afterFail, 'T1').retryCount).toBe(1);
     },
   );
 
