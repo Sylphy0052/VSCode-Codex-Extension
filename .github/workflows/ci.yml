@@ -40,7 +40,8 @@ jobs:
     name: checks
     runs-on: ubuntu-latest
     # 既定の360分は長すぎるため妥当な値に短縮する。
-    # ローカルでのscripts/check.sh全体の所要は30秒強であり、依存インストール（npm ci）を
+    # ローカルでのscripts/check.sh全体の所要は1分強であり（型情報ルールの導入でlintが
+    # 約7秒から約19秒へ延びた。Issue #649）、依存インストール（npm ci）を
     # 含めても10分あれば十分に足りるため、10分をタイムアウトとする。
     timeout-minutes: 10
     steps:

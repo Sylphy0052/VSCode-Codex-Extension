@@ -882,7 +882,7 @@ codex app-server generate-ts --out <DIR>            # TypeScript バインディ
 ## 11. 技術スタック
 
 - TypeScript / Node 20 / esbuild（バンドル）
-- eslint + prettier、`tsc --noEmit` で型チェック
+- eslint + prettier、`tsc --noEmit` で型チェック。eslintは型情報を要するルール（`no-floating-promises` ほか2件、Issue #649）も有効にしており、`tsconfig.json` と `tsconfig.integration.json` の両方をparserへ渡す
 - テスト
   - unit（vitest、`test/unit/`）: 引数組み立て・パーサ・一覧・状態遷移・承認・待ち行列・ループ・問い合わせの正規化など、VSCodeに依存しない層を全て。2026-08-11時点で101ファイル1890件
   - **VSCodeに依存する層（`view/**` など、`vscode` モジュールを直接触るファイル）はunitテストから扱わない**。`vscode` はunitテストのプロセス内でimportできないため、判断が要るロジックは純粋関数へ切り出してそちらを試す（例: `view/panelState.ts`）

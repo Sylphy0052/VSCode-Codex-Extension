@@ -124,6 +124,13 @@ CLI固有の事情（ファイル配置・引数・セッションIDの決まり
 
 - TypeScript strict。`tsconfig.json` では `noUncheckedIndexedAccess` `exactOptionalPropertyTypes` も有効
 - ESLintは `no-console: error` と `eqeqeq` を追加している。ログは `src/log.ts` のLoggerを使う
+- ESLintは**型情報を要するルール**も有効にしている（`@typescript-eslint/no-floating-promises` /
+  `no-misused-promises` / `await-thenable`。Issue #649）。`await` も `void` も付けずに投げっぱなしに
+  した Promise は lint が落とす。意図して投げっぱなしにするときは `void` を付ける。
+  型情報を使うため `eslint.config.mjs` が `tsconfig.json` と `tsconfig.integration.json` の両方を
+  parser へ渡しており、**片方を外すと渡していない側のルールが黙って無効になる**（エラーにはならず、
+  何も検出しなくなる）。`test/unit/eslintConfig.test.ts` がこれを検出する。
+  `@typescript-eslint/require-await` は採っていない（導入時点で350件出るため）
 - 整形はPrettier（printWidth 100 / シングルクォート / セミコロンあり / trailingComma all）。対象外は `.prettierignore`
 - 状態は書き換えず、新しい値を返す。会話状態（`ChatState`）の遷移は純粋関数として書き、Webview側は結果を描くだけにする
 - 未知の入力で壊さない。未知のイベント種別・壊れたJSON行は、状態を変えずに読み飛ばすか素通しする（CLIのプロトコル変更に耐えるための方針）
