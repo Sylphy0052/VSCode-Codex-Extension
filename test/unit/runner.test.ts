@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { initialChatState, type ChatState } from '../../src/appserver/chatState';
@@ -498,6 +499,10 @@ function fakeForgeCli(options?: {
   };
   /** レビューコメント取得のCLI呼び出し自体を失敗させる。 */
   failReviewComments?: boolean;
+  /** `createIssue`（design.md §16.31、roadmap W6、Issue #596）のCLI呼び出しを失敗させる。 */
+  failIssueCreate?: boolean;
+  /** `createIssue`が返すURL。既定は`https://github.com/acme/repo/issues/1`。 */
+  issueUrl?: string;
 }): FakeForgeCli {
   const calls: Array<{ command: string; args: string[]; cwd: string }> = [];
   return {
@@ -645,6 +650,29 @@ function fakeForgeCli(options?: {
         return options?.failUpdateBranch
           ? { code: 1, stdout: '', stderr: 'fake mr rebase failure' }
           : { code: 0, stdout: '', stderr: '' };
+      }
+      // `createIssue`（GitHub）が呼ぶ`gh issue create`のフェイク応答（design.md §16.31、
+      // roadmap W6、Issue #596）
+      if (args[0] === 'issue' && args[1] === 'create') {
+        return options?.failIssueCreate
+          ? { code: 1, stdout: '', stderr: 'fake issue create failure' }
+          : {
+              code: 0,
+              stdout: `${options?.issueUrl ?? 'https://github.com/acme/repo/issues/1'}\n`,
+              stderr: '',
+            };
+      }
+      // `createIssue`（GitLab）が呼ぶ`glab api projects/:id/issues`のフェイク応答
+      if (args[0] === 'api' && args[1] === 'projects/:id/issues') {
+        return options?.failIssueCreate
+          ? { code: 1, stdout: '', stderr: 'fake issue create failure' }
+          : {
+              code: 0,
+              stdout: `${JSON.stringify({
+                web_url: options?.issueUrl ?? 'https://gitlab.example.com/acme/repo/-/issues/1',
+              })}\n`,
+              stderr: '',
+            };
       }
       return { code: 1, stdout: '', stderr: `unhandled: ${command} ${args.join(' ')}` };
     },
@@ -801,6 +829,8 @@ function fakeForgeDeps(
     finalMerge?: FinalMergeConfig;
     branchNaming?: BranchNaming;
     draftPullRequest?: boolean;
+    createTaskIssue?: boolean;
+    reviewTaskPullRequest?: boolean;
   },
   cliAvailability: CliAvailabilityPort = fakeForgeCliAvailability,
 ): WorkflowRunnerForgeDeps {
@@ -815,6 +845,9 @@ function fakeForgeDeps(
       // 既定は`wf`/`false`。branchNaming・draftPullRequestを明示するテストだけ上書きする
       branchNaming: config?.branchNaming ?? DEFAULT_BRANCH_NAMING,
       draftPullRequest: config?.draftPullRequest ?? false,
+      // 既定は両方`false`（design.md §16.31、roadmap W6、Issue #596）。明示するテストだけ上書きする
+      createTaskIssue: config?.createTaskIssue ?? false,
+      reviewTaskPullRequest: config?.reviewTaskPullRequest ?? false,
     }),
   };
 }
@@ -5270,6 +5303,244 @@ tasks:
     expect(task?.hasLiveSession).toBe(false);
     expect(task?.pullRequestUrl).toBe('https://github.com/acme/repo/pull/9');
     expect(snapshot?.integrationPullRequestUrl).toBe('https://github.com/acme/repo/pull/9');
+  });
+});
+
+describe('WorkflowRunner: タスクのIssue起票（design.md §16.31、roadmap W6、Issue #596）', () => {
+  const SINGLE_TASK_YAML = `
+version: 1
+name: task-issue-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+  /**
+   * `fakeForgeDeps`の`fs`は本文を捨てるので、本文そのものを確かめたいときだけ差し替える
+   * （`WorkflowRunner: PR/MRの結果の保持...`describeの同名関数と同じ実装）。
+   */
+  function captureForgeBodies(deps: WorkflowRunnerForgeDeps): {
+    deps: WorkflowRunnerForgeDeps;
+    bodies: string[];
+  } {
+    const bodies: string[] = [];
+    return {
+      bodies,
+      deps: {
+        ...deps,
+        fs: {
+          async writeTempFile(content: string): Promise<string> {
+            bodies.push(content);
+            return '/tmp/fake-forge-body.md';
+          },
+          async removeTempFile(): Promise<void> {
+            return undefined;
+          },
+        },
+      },
+    };
+  }
+
+  it('既定（createTaskIssue: false）ではIssueを起票しない', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    await runner.start('/repo/.agents/workflows/task-issue.yaml', '/repo');
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    expect(cli.calls.some((c) => c.args[0] === 'issue' && c.args[1] === 'create')).toBe(false);
+  });
+
+  it('createTaskIssue: trueなら、タスク開始時にIssueを起票しPR本文から参照する', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli({ issueUrl: 'https://github.com/acme/repo/issues/99' });
+    const captured = captureForgeBodies(fakeForgeDeps(cli, { createTaskIssue: true }));
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: captured.deps,
+    });
+    await runner.start('/repo/.agents/workflows/task-issue.yaml', '/repo');
+    await flush();
+
+    // Issueの起票はタスク開始時（セッションを開く前後）に行われる。ここでは開始済み
+    // （セッションが立ち上がっている）ことをもって「タスク開始後」を確認する
+    expect(cli.calls.some((c) => c.args[0] === 'issue' && c.args[1] === 'create')).toBe(true);
+    const createCall = cli.calls.find((c) => c.args[0] === 'issue' && c.args[1] === 'create');
+    expect(createCall?.args.some((a) => a === '--title=T1: p1')).toBe(true);
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    // Issueの番号（URLから取り出した99）がPR本文から参照される
+    expect(captured.bodies.some((body) => body.includes('#99'))).toBe(true);
+  });
+
+  it('pullRequest: integration（per-task以外）ではcreateTaskIssue: trueでも起票しない', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { createTaskIssue: true, pullRequest: 'integration' }),
+    });
+    await runner.start('/repo/.agents/workflows/task-issue.yaml', '/repo');
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    expect(cli.calls.some((c) => c.args[0] === 'issue' && c.args[1] === 'create')).toBe(false);
+  });
+
+  it('YAML側で既にissueが指定されているタスクは、createTaskIssue: trueでも起票しない', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli();
+    const YAML_WITH_ISSUE = `
+version: 1
+name: task-issue-existing-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+    issue: 12
+`;
+    const { runner, codexHost } = createHarness(YAML_WITH_ISSUE, {
+      git,
+      forge: fakeForgeDeps(cli, { createTaskIssue: true }),
+    });
+    await runner.start('/repo/.agents/workflows/task-issue-existing.yaml', '/repo');
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    expect(cli.calls.some((c) => c.args[0] === 'issue' && c.args[1] === 'create')).toBe(false);
+  });
+
+  it('Issueの起票が失敗しても、runは止めず警告を出すだけでタスクは完了する', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli({ failIssueCreate: true });
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { createTaskIssue: true }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/task-issue.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.warnings.some((w) => w.kind === 'taskIssueFailed')).toBe(true);
+    // PR/MR自体は通常どおり作られる（Issueが起票できなくてもPR/MR作成は止めない）
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'create')).toBe(true);
+  });
+
+  /**
+   * `maybeCreateTaskIssue`の呼び出し位置は、`prepareTaskLaunch`内のbypassPermissions
+   * 最終防御（`if (task.provider === 'claude' && effective.config.approvalMode ===
+   * 'bypassPermissions' && !baseline.allowClaudeBypassPermissions) { throw ... }`）より
+   * **後**でなければならない（レビュー指摘）。先に呼ぶと、「危険判定が働かない設定なので
+   * 開始できません」と拒否したタスクについても、外部ホストへIssueだけが起票されたまま
+   * 残ってしまう。
+   *
+   * この不変条件は、実行時の呼び出し順序としては直接検証できない。`buildEffectiveTaskConfig`
+   * （唯一のクランプ入口、design.md §16.16）が`bypassPermissions`を必ず`acceptEdits`へ
+   * 読み替える（`baseline.allowClaudeBypassPermissions`が有効なときを除くが、その場合は
+   * throw自体の条件`!baseline.allowClaudeBypassPermissions`を満たさずthrowが起きない）ため、
+   * このthrow分岐は現在の唯一の正規経路（`buildEffectiveTaskConfig`経由）からは到達し得ない
+   * 多層防御であり、単体テストの中で実際にthrowを起こす前提を作れない
+   * （`taskConfig.ts`のコメント「通常この分岐へは入らない」のとおり）。
+   *
+   * そのため、ソースの並び順そのもの（`maybeCreateTaskIssue(`の呼び出しが、throwの本文
+   * （実効approvalModeがbypassPermissionsのため、のエラーメッセージ）より後に現れること）
+   * を機械的に固定する。呼び出し位置を元（`resolveWorkingDirectory`の直後）へ戻すと、
+   * このテストは失敗する（§16.25 #8で実測済み。最終報告に貼る）。
+   */
+  it('maybeCreateTaskIssueの呼び出しは、bypassPermissionsの最終防御より後のソース位置にある', () => {
+    const source = readFileSync(
+      path.resolve(__dirname, '../../src/orchestrator/runner.ts'),
+      'utf8',
+    );
+    const throwIndex = source.indexOf(
+      '実効approvalModeがbypassPermissionsのため、このタスクは開始できません',
+    );
+    const callIndex = source.indexOf('await this.maybeCreateTaskIssue(');
+    expect(throwIndex).toBeGreaterThan(0);
+    expect(callIndex).toBeGreaterThan(0);
+    expect(callIndex).toBeGreaterThan(throwIndex);
+  });
+});
+
+describe('WorkflowRunner: タスクPR/MRのレビュー段（design.md §16.31、roadmap W6、Issue #596）', () => {
+  const SINGLE_TASK_YAML = `
+version: 1
+name: task-review-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+  it('既定（reviewTaskPullRequest: false）ではレビューセッションを開かない', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    await runner.start('/repo/.agents/workflows/task-review.yaml', '/repo');
+    await flush();
+    // タスク本体のセッションが1つ開いた時点
+    const openCountBeforeFinish = codexHost.openInputs.length;
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    // タスク本体のセッション以外に、レビュー用の追加セッションは開かれない
+    expect(codexHost.openInputs.length).toBe(openCountBeforeFinish);
+  });
+
+  it('reviewTaskPullRequest: trueなら、PR/MR作成後・マージ前に読み取り専用セッションでレビューする', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { reviewTaskPullRequest: true }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/task-review.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    // タスク本体のセッションが1つ開いた時点
+    const openCountBeforeFinish = codexHost.openInputs.length;
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // レビュー用の読み取り専用セッションが1つ追加で開かれている
+    // （`buildPlannerSessionInput`と同じ形。design.md §16.28と同じ「起動設定で読み取り
+    // 専用を担保する」方式）
+    expect(codexHost.openInputs.length).toBe(openCountBeforeFinish + 1);
+    const reviewInput = codexHost.openInputs[codexHost.openInputs.length - 1];
+    expect(reviewInput?.sandbox).toBe('read-only');
+
+    // レビューセッションは`sendSingleTurn`で1ターンの応答を待っている状態なので、
+    // ここで応答を返して完了させる（指摘なし＝空配列）
+    const reviewSession = codexHost.sessions[codexHost.sessions.length - 1];
+    reviewSession?.finish('done', doneState('[]'));
+    await flush();
+
+    // レビューを挟んでもタスクは最終的に完了する（マージを止めない）
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
   });
 });
 

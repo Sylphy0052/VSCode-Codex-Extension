@@ -7,10 +7,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   buildIntegrationPullRequestBody,
   buildIntegrationPullRequestTitle,
+  buildTaskIssueBody,
   buildTaskPullRequestBody,
   buildTaskPullRequestTitle,
   checkForgePrerequisites,
   createIntegrationPullRequest,
+  createIssue,
   createPullRequest,
   detectForgeHost,
   fetchCiConclusion,
@@ -806,19 +808,152 @@ describe('createPullRequest', () => {
   });
 });
 
+describe('createIssue（design.md §16.31 W6 Issue #596）', () => {
+  it('GitHubは gh issue create --body-file=<一時ファイル> を呼び、URLをそのまま返す', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['issue', 'create'], {
+      code: 0,
+      stdout: 'https://github.com/org/repo/issues/42\n',
+      stderr: '',
+    });
+    const fs = new FakeForgeFileSystem();
+
+    const result = await createIssue(
+      { cli, fs },
+      {
+        host: 'github',
+        cwd: '/repo/task',
+        title: 'T1: 認証APIを実装する',
+        body: '本文',
+      },
+    );
+
+    expect(result).toEqual({ ok: true, url: 'https://github.com/org/repo/issues/42' });
+    const call = cli.calls[0];
+    expect(call?.command).toBe('gh');
+    expect(call?.args).toEqual([
+      'issue',
+      'create',
+      '--title=T1: 認証APIを実装する',
+      `--body-file=${fs.written[0]?.path}`,
+    ]);
+    expect(fs.written[0]?.content).toBe('本文');
+    expect(fs.removed).toEqual([fs.written[0]?.path]);
+  });
+
+  it('GitLabは glab api projects/:id/issues を --field=description=@<ファイル> で呼ぶ', async () => {
+    const cli = new FakeCli();
+    cli.respond('glab', ['api'], {
+      code: 0,
+      stdout: JSON.stringify({ web_url: 'https://gitlab.example.com/org/repo/-/issues/7' }),
+      stderr: '',
+    });
+    const fs = new FakeForgeFileSystem();
+
+    const result = await createIssue(
+      { cli, fs },
+      { host: 'gitlab', cwd: '/repo/task', title: 'T1: 認証APIを実装する', body: '本文' },
+    );
+
+    expect(result).toEqual({ ok: true, url: 'https://gitlab.example.com/org/repo/-/issues/7' });
+    const call = cli.calls[0];
+    expect(call?.command).toBe('glab');
+    expect(call?.args).toEqual([
+      'api',
+      'projects/:id/issues',
+      '--field=title=T1: 認証APIを実装する',
+      `--field=description=@${fs.written[0]?.path}`,
+    ]);
+  });
+
+  it('body/promptの中身は引数へ直接置かず、一時ファイルへ書く', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['issue', 'create'], { code: 0, stdout: 'https://example/issues/1\n', stderr: '' });
+    const fs = new FakeForgeFileSystem();
+    const dangerousBody = '改行を含む本文\n--dangerous-flag-looking-line\n-rf /';
+
+    await createIssue(
+      { cli, fs },
+      { host: 'github', cwd: '/repo', title: 't', body: dangerousBody },
+    );
+
+    const call = cli.calls[0];
+    expect(call?.args.some((a) => a.includes('--dangerous-flag-looking-line'))).toBe(false);
+    expect(fs.written[0]?.content).toBe(dangerousBody);
+  });
+
+  it('titleが空・改行を含む場合はCLIを呼ばずinvalidInputを返す', async () => {
+    const cli = new FakeCli();
+    const fs = new FakeForgeFileSystem();
+
+    const result = await createIssue(
+      { cli, fs },
+      { host: 'github', cwd: '/repo', title: '', body: 'b' },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'invalidInput',
+      message: expect.any(String),
+    });
+    expect(cli.calls).toEqual([]);
+  });
+
+  it('CLIが失敗コードを返せばcliErrorとして返し、一時ファイルは片付ける', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['issue', 'create'], { code: 1, stdout: '', stderr: 'authentication required' });
+    const fs = new FakeForgeFileSystem();
+
+    const result = await createIssue(
+      { cli, fs },
+      { host: 'github', cwd: '/repo', title: 't', body: 'b' },
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('cliError');
+      expect(result.message).toContain('authentication required');
+    }
+    expect(fs.removed).toEqual([fs.written[0]?.path]);
+  });
+});
+
+describe('buildTaskIssueBody（design.md §16.31 W6 Issue #596）', () => {
+  it('prompt / done / meta（runId・taskId）の3段構成にする', () => {
+    const body = buildTaskIssueBody({
+      prompt: 'プロンプト本文',
+      done: '完了条件本文',
+      runId: 'run-1',
+      taskId: 'T1',
+    });
+
+    expect(body).toContain('## prompt');
+    expect(body).toContain('プロンプト本文');
+    expect(body).toContain('## done');
+    expect(body).toContain('完了条件本文');
+    expect(body).toContain('## meta');
+    expect(body).toContain('- runId: run-1');
+    expect(body).toContain('- taskId: T1');
+  });
+});
+
 describe('runTaskPullRequestFlow（design.md §16.18の作る順序を型で固定する）', () => {
   function recordingSteps(overrides?: {
     pushTaskBranch?: ForgeStepOutcome;
     pushIntegrationBranch?: ForgeStepOutcome;
     createPullRequest?: Awaited<ReturnType<typeof createPullRequest>>;
+    reviewPullRequest?: ForgeStepOutcome;
     markPullRequestReady?: ForgeStepOutcome;
   }): {
     order: string[];
+    /** `reviewPullRequest`が呼ばれた際に渡されたurl引数（呼ばれなければ空配列）。 */
+    reviewPullRequestUrls: Array<string | undefined>;
     /** `markPullRequestReady`が呼ばれた際に渡されたurl引数（呼ばれなければ空配列）。 */
     markPullRequestReadyUrls: Array<string | undefined>;
     steps: Parameters<typeof runTaskPullRequestFlow<{ merged: boolean }>>[0];
   } {
     const order: string[] = [];
+    const reviewPullRequestUrls: Array<string | undefined> = [];
     const markPullRequestReadyUrls: Array<string | undefined> = [];
     const base = {
       pushTaskBranch: async (): Promise<ForgeStepOutcome> => {
@@ -838,20 +973,32 @@ describe('runTaskPullRequestFlow（design.md §16.18の作る順序を型で固�
         return { merged: true };
       },
     };
-    // `markPullRequestReady`はoptionalなプロパティ（`?:`）のため、指定されなかった場合は
-    // プロパティ自体を持たせない（`exactOptionalPropertyTypes`下で`undefined`を明示代入しない）
-    const steps =
-      overrides?.markPullRequestReady === undefined
+    // `reviewPullRequest` / `markPullRequestReady`はoptionalなプロパティ（`?:`）のため、
+    // 指定されなかった場合はプロパティ自体を持たせない
+    // （`exactOptionalPropertyTypes`下で`undefined`を明示代入しない）
+    const withReview =
+      overrides?.reviewPullRequest === undefined
         ? base
         : {
             ...base,
+            reviewPullRequest: async (url: string | undefined): Promise<ForgeStepOutcome> => {
+              order.push('reviewPullRequest');
+              reviewPullRequestUrls.push(url);
+              return overrides.reviewPullRequest as ForgeStepOutcome;
+            },
+          };
+    const steps =
+      overrides?.markPullRequestReady === undefined
+        ? withReview
+        : {
+            ...withReview,
             markPullRequestReady: async (url: string | undefined): Promise<ForgeStepOutcome> => {
               order.push('markPullRequestReady');
               markPullRequestReadyUrls.push(url);
               return overrides.markPullRequestReady as ForgeStepOutcome;
             },
           };
-    return { order, markPullRequestReadyUrls, steps };
+    return { order, reviewPullRequestUrls, markPullRequestReadyUrls, steps };
   }
 
   it('成功時は push task → push integration → create → merge の順に呼ぶ', async () => {
@@ -963,6 +1110,89 @@ describe('runTaskPullRequestFlow（design.md §16.18の作る順序を型で固�
     const result = await runTaskPullRequestFlow(steps);
 
     expect(result.markReady).toBeUndefined();
+  });
+
+  it('reviewPullRequestを渡すと、createPullRequestの後・mergeAndPushIntegrationの前に呼ばれる', async () => {
+    const { order, steps, reviewPullRequestUrls } = recordingSteps({
+      reviewPullRequest: { ok: true },
+    });
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(order).toEqual([
+      'pushTaskBranch',
+      'pushIntegrationBranch',
+      'createPullRequest',
+      'reviewPullRequest',
+      'mergeAndPushIntegration',
+    ]);
+    expect(reviewPullRequestUrls).toEqual(['https://example/pr/1']);
+    expect(result.review).toEqual({ ok: true });
+  });
+
+  it('createPullRequestが失敗したときはreviewPullRequestが呼ばれない', async () => {
+    const { order, reviewPullRequestUrls, steps } = recordingSteps({
+      createPullRequest: { ok: false, reason: 'cliError', message: '作成失敗' },
+      reviewPullRequest: { ok: true },
+    });
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(order).toEqual([
+      'pushTaskBranch',
+      'pushIntegrationBranch',
+      'createPullRequest',
+      'mergeAndPushIntegration',
+    ]);
+    expect(reviewPullRequestUrls).toEqual([]);
+    expect(result.review).toBeUndefined();
+  });
+
+  it('reviewPullRequestが失敗（指摘あり相当）してもmergeAndPushIntegrationは呼ぶ（マージを止めない）', async () => {
+    const { order, steps } = recordingSteps({
+      reviewPullRequest: { ok: false, message: 'レビューに失敗しました' },
+    });
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(order).toEqual([
+      'pushTaskBranch',
+      'pushIntegrationBranch',
+      'createPullRequest',
+      'reviewPullRequest',
+      'mergeAndPushIntegration',
+    ]);
+    expect(result.review).toEqual({ ok: false, message: 'レビューに失敗しました' });
+    expect(result.mergeOutcome).toEqual({ merged: true });
+  });
+
+  it('reviewPullRequestを渡さなければ結果のreviewはundefinedで、mergeの順序も変わらない', async () => {
+    const { order, steps } = recordingSteps();
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(order).toEqual([
+      'pushTaskBranch',
+      'pushIntegrationBranch',
+      'createPullRequest',
+      'mergeAndPushIntegration',
+    ]);
+    expect(result.review).toBeUndefined();
+  });
+
+  it('reviewPullRequestとmarkPullRequestReadyを両方渡すと review→merge→ready の順になる', async () => {
+    const { order, steps } = recordingSteps({
+      reviewPullRequest: { ok: true },
+      markPullRequestReady: { ok: true },
+    });
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(order).toEqual([
+      'pushTaskBranch',
+      'pushIntegrationBranch',
+      'createPullRequest',
+      'reviewPullRequest',
+      'mergeAndPushIntegration',
+      'markPullRequestReady',
+    ]);
+    expect(result.review).toEqual({ ok: true });
+    expect(result.markReady).toEqual({ ok: true });
   });
 });
 

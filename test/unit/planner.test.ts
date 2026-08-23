@@ -27,6 +27,7 @@ import {
   locateSecurityWarningLine,
   planWorkflow,
   resolveUniqueFileName,
+  reviewTaskPullRequest,
   reviewWorkflowPlan,
   sendSingleTurn,
   slugifyGoal,
@@ -1291,5 +1292,114 @@ describe('reviewWorkflowPlan（design.md §16.28、roadmap W3、Issue #337）', 
     expect(prompt).toContain('missingConvergence');
     expect(prompt).toContain('doneNotObservable');
     expect(prompt).toContain('goalMismatch');
+  });
+});
+
+describe('reviewTaskPullRequest（design.md §16.31、roadmap W6、Issue #596）', () => {
+  const taskReviewBaseInput = {
+    prompt: 'プロンプト本文',
+    done: '完了条件本文',
+    diff: 'diff --git a/x b/x\n+added line\n',
+    provider: 'codex' as const,
+    cwd: '/repo/task',
+    log: fakeLogger,
+  };
+
+  it('指摘が無ければfindingsは空配列でerrorはundefined', async () => {
+    const host = new FakePlannerHost(['[]']);
+    const result = await reviewTaskPullRequest({ ...taskReviewBaseInput, host });
+    expect(result.findings).toEqual([]);
+    expect(result.error).toBeUndefined();
+  });
+
+  it('JSON配列の指摘をfindingsへ変換する', async () => {
+    const response = JSON.stringify([{ message: 'エラーハンドリングが不足しています' }]);
+    const host = new FakePlannerHost([response]);
+    const result = await reviewTaskPullRequest({ ...taskReviewBaseInput, host });
+    expect(result.findings).toEqual([{ message: 'エラーハンドリングが不足しています' }]);
+  });
+
+  it('コードフェンス（```json）付きの応答からでも取り出せる', async () => {
+    const fenced = ['```json', JSON.stringify([{ message: '指摘A' }]), '```'].join('\n');
+    const host = new FakePlannerHost([fenced]);
+    const result = await reviewTaskPullRequest({ ...taskReviewBaseInput, host });
+    expect(result.findings).toEqual([{ message: '指摘A' }]);
+  });
+
+  it('JSONとして解釈できない応答は、例外を投げず指摘なしとして扱う', async () => {
+    const host = new FakePlannerHost(['これは指摘ではありません（自然文の応答）']);
+    const result = await reviewTaskPullRequest({ ...taskReviewBaseInput, host });
+    expect(result.findings).toEqual([]);
+    expect(result.error).toBeUndefined();
+  });
+
+  it('messageが空文字・欠落の項目は捨てる', async () => {
+    const response = JSON.stringify([{ message: '' }, {}]);
+    const host = new FakePlannerHost([response]);
+    const result = await reviewTaskPullRequest({ ...taskReviewBaseInput, host });
+    expect(result.findings).toEqual([]);
+  });
+
+  it('指摘の件数が上限（30件）を超えた分は捨てる', async () => {
+    const many = Array.from({ length: 40 }, (_, i) => ({ message: `指摘${i}` }));
+    const host = new FakePlannerHost([JSON.stringify(many)]);
+    const result = await reviewTaskPullRequest({ ...taskReviewBaseInput, host });
+    expect(result.findings).toHaveLength(30);
+  });
+
+  it('セッションの起動・応答待ちが失敗しても例外を投げず、findingsは空でerrorに理由を残す（マージは止めない）', async () => {
+    const failingHost: TaskSessionHost = {
+      async openTaskSession(): Promise<TaskSession> {
+        throw new Error('起動に失敗しました');
+      },
+    };
+    const result = await reviewTaskPullRequest({ ...taskReviewBaseInput, host: failingHost });
+    expect(result.findings).toEqual([]);
+    expect(result.error).toContain('起動に失敗しました');
+  });
+
+  it('分解レビューと同じくsandbox: read-only・approvalMode: neverで起動する', async () => {
+    const host = new FakePlannerHost(['[]']);
+    await reviewTaskPullRequest({ ...taskReviewBaseInput, host, provider: 'codex' });
+    expect(host.openCalls[0]?.sandbox).toBe('read-only');
+    expect(host.openCalls[0]?.config.approvalMode).toBe('never');
+  });
+
+  it('承認要求は理由を問わず全て拒否する', async () => {
+    const host = new FakePlannerHost(['[]']);
+    await reviewTaskPullRequest({ ...taskReviewBaseInput, host });
+    const session = host.sessions[0];
+    const decision = await session?.approvalHandler?.(fakeApproval, { command: 'git commit' });
+    expect(decision).toEqual({ kind: 'auto', decision: 'decline' });
+  });
+
+  it('レビューセッションは1ターンだけ送って閉じる（実行のループは回さない）', async () => {
+    const host = new FakePlannerHost(['[]']);
+    await reviewTaskPullRequest({ ...taskReviewBaseInput, host });
+    const session = host.sessions[0];
+    expect(session?.runLoopCalls).toHaveLength(1);
+    expect(session?.runLoopCalls[0]).toMatchObject({ maxIterations: 1, condition: '' });
+    expect(session?.disposed).toBe(true);
+  });
+
+  it('prompt/done/diffの3つをformatUntrustedの囲いで送り、同じnonceを共有する', async () => {
+    const host = new FakePlannerHost(['[]']);
+    await reviewTaskPullRequest({ ...taskReviewBaseInput, host });
+    const prompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+    const nonces = [
+      ...prompt.matchAll(/----- \[([^\]]+)\] taskReviewer\.(prompt|done|diff)の出力（前のタスク/g),
+    ].map((m) => m[1]);
+    expect(nonces).toHaveLength(3);
+    expect(nonces[0]).toBe(nonces[1]);
+    expect(nonces[1]).toBe(nonces[2]);
+  });
+
+  it('差分（diff）を指示・完了条件と一緒にプロンプトへ含める', async () => {
+    const host = new FakePlannerHost(['[]']);
+    await reviewTaskPullRequest({ ...taskReviewBaseInput, host });
+    const prompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+    expect(prompt).toContain('added line');
+    expect(prompt).toContain('プロンプト本文');
+    expect(prompt).toContain('完了条件本文');
   });
 });

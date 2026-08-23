@@ -1391,3 +1391,191 @@ export async function reviewWorkflowPlan(
     return { findings: [], error: message };
   }
 }
+
+/* -------------------------------------------------------------------------------------------- */
+/* タスクのPR/MRレビュー（design.md §16.31、roadmap W6、Issue #596）                              */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * タスクPR/MRレビューの1件の指摘。`WorkflowReviewFinding`（分解レビュー、design.md §16.28）
+ * と違い観点（`aspect`）の固定リストを持たない。コードの変更差分そのものに対する自由記述の
+ * レビューであり、`serializedParallelizable`のような分解固有の観点は当てはまらないため。
+ */
+export interface TaskPullRequestReviewFinding {
+  message: string;
+}
+
+export interface ReviewTaskPullRequestInput {
+  /** レビュー対象タスクの指示。 */
+  prompt: string;
+  /** レビュー対象タスクの完了条件。 */
+  done: string;
+  /** タスクブランチと統合ブランチの間の変更差分（`git diff`の出力）。 */
+  diff: string;
+  provider: Provider;
+  host: TaskSessionHost;
+  /** レビューセッションの作業ディレクトリ。読み取り専用なのでworktreeは作らない。 */
+  cwd: string;
+  log: Logger;
+}
+
+export interface ReviewTaskPullRequestResult {
+  findings: readonly TaskPullRequestReviewFinding[];
+  /**
+   * レビューセッション自体の実行（起動・応答待ち）に失敗した場合のエラーメッセージ。
+   * `undefined`なら正常に完了している（`findings`が空でも「指摘なし」を意味する）。
+   * 失敗してもマージは妨げない（design.md §16.31「結果に関わらずマージは進める」）。
+   */
+  error: string | undefined;
+}
+
+/**
+ * レビュー対象のdiffを埋め込む際の長さ上限。`reviewWorkflowPlan`の`MAX_REVIEW_YAML_LENGTH`
+ * と同じ「無制限に膨らむのを止める粗い安全弁」という動機で、同じ値（60000文字）を使う。
+ */
+const MAX_TASK_REVIEW_DIFF_LENGTH = 60_000;
+
+/** レビュー応答から受け付ける指摘の件数上限（`MAX_REVIEW_FINDINGS`と同じ動機）。 */
+const MAX_TASK_REVIEW_FINDINGS = 30;
+
+/** 指摘1件のメッセージの表示上限（`MAX_REVIEW_FINDING_MESSAGE_LENGTH`と同じ動機）。 */
+const MAX_TASK_REVIEW_FINDING_MESSAGE_LENGTH = 500;
+
+/**
+ * タスクPR/MRレビューセッションへ渡すプロンプト（design.md §16.31）。
+ *
+ * `prompt`/`done`/`diff`はいずれも外部由来テキストとして`formatUntrusted`で囲う
+ * （design.md §16.24）。`buildWorkflowReviewPrompt`と同じく、1回の展開で複数フィールドを
+ * 囲むため呼び出し側が1つの`nonce`を生成して使い回す。
+ *
+ * レビューセッションは`reviewWorkflowPlan`と同じ`buildPlannerSessionInput`
+ * （`sandbox: read-only`相当・承認全拒否）で起動する。**読み取り専用であることは
+ * プロンプトの指示ではなく起動設定で担保する**（design.md §16.28と同じ考え方）。
+ */
+function buildTaskPullRequestReviewPrompt(prompt: string, done: string, diff: string): string {
+  const nonce = randomUUID();
+  const parts = [
+    'あなたはPull Request/Merge Requestのレビュー担当です。次のタスクの指示・完了条件と、' +
+      '実際の変更差分（diff）を読み、変更が指示・完了条件に照らして妥当かをレビューして' +
+      'ください。',
+    'あなた自身はコードを書き換えません（読み取りとレビューのみ）。',
+    '',
+    `## タスクの指示\n${formatUntrusted(prompt, {
+      id: 'taskReviewer',
+      field: 'prompt',
+      maxLength: MAX_PROMPT_LENGTH,
+      preserveNewlines: true,
+      nonce,
+    })}`,
+    '',
+    `## 完了条件\n${formatUntrusted(done, {
+      id: 'taskReviewer',
+      field: 'done',
+      maxLength: MAX_PROMPT_LENGTH,
+      preserveNewlines: true,
+      nonce,
+    })}`,
+    '',
+    `## 変更差分（diff）\n${formatUntrusted(diff, {
+      id: 'taskReviewer',
+      field: 'diff',
+      maxLength: MAX_TASK_REVIEW_DIFF_LENGTH,
+      preserveNewlines: true,
+      nonce,
+    })}`,
+    '',
+    '## 出力形式（厳守）',
+    '指摘が無ければ空配列 `[]` だけを出力すること。指摘があれば、次の形のJSON配列だけを' +
+      '出力すること（前置き・説明文・コードフェンスなど、JSON以外の文字は一切含めない' +
+      'こと）:',
+    '[{"message": "指摘の内容（日本語で簡潔に）"}]',
+  ];
+  return parts.join('\n');
+}
+
+/**
+ * タスクPR/MRレビュー応答を`TaskPullRequestReviewFinding[]`へ変換する。`parseReviewFindings`
+ * と同じく、壊れた応答はエラーにせず指摘0件として扱う（design.md §16.31「結果に関わらず
+ * マージは進める」を、応答の形が崩れた場合にも一貫して適用する）。
+ */
+function parseTaskPullRequestReviewFindings(
+  response: string,
+  log?: Logger,
+): TaskPullRequestReviewFinding[] {
+  const jsonText = extractJsonArrayFromResponse(response);
+  if (Buffer.byteLength(jsonText, 'utf8') > MAX_WORKFLOW_FILE_BYTES) {
+    log?.warn('[planner] タスクPR/MRレビュー応答が大きすぎるため解析しませんでした');
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    log?.warn(
+      '[planner] タスクPR/MRレビュー応答をJSON配列として解釈できなかったため、指摘なしとして扱います',
+    );
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    log?.warn('[planner] タスクPR/MRレビュー応答がJSON配列ではなかったため、指摘なしとして扱います');
+    return [];
+  }
+
+  const findings: TaskPullRequestReviewFinding[] = [];
+  for (const item of parsed.slice(0, MAX_TASK_REVIEW_FINDINGS)) {
+    if (typeof item !== 'object' || item === null) {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.message !== 'string' || record.message.trim() === '') {
+      continue;
+    }
+    findings.push({
+      message: sanitizeInlineText(record.message, MAX_TASK_REVIEW_FINDING_MESSAGE_LENGTH),
+    });
+  }
+  if (parsed.length > MAX_TASK_REVIEW_FINDINGS) {
+    log?.warn(
+      `[planner] タスクPR/MRレビュー応答の指摘が${parsed.length}件あり、上限${MAX_TASK_REVIEW_FINDINGS}件を超えた分は捨てました`,
+    );
+  }
+  return findings;
+}
+
+/**
+ * タスクのPR/MRを、別の読み取り専用セッションでレビューさせる（design.md §16.31「PRを
+ * 作ったあと、ローカルマージの前にレビューを1段挟む」、roadmap W6、Issue #596）。
+ *
+ * `reviewWorkflowPlan`（design.md §16.28、roadmap W3）と同じ形（別の読み取り専用セッション
+ * を立てて1ターンだけ送る）を踏襲する。forgeの「人のレビューを待つ」方式（応答が無いまま
+ * 待ち続けうる）は採らない、という設計判断の帰結として、この関数もタイムアウト付きの
+ * 単発ターン（`sendSingleTurn`、既定`PLANNER_TURN_TIMEOUT_MS`）で完結し、応答を待ち続ける
+ * ことはない。
+ *
+ * **結果に関わらずマージは進める。** レビューセッションの起動・応答待ちが失敗しても
+ * （タイムアウト等）、ここで例外を投げずに`error`へ理由を残して`findings: []`を返す。
+ * 呼び出し側（`runnerMerge.ts`）は指摘の有無・レビューの成否を問わずマージを進めてよい。
+ */
+export async function reviewTaskPullRequest(
+  input: ReviewTaskPullRequestInput,
+): Promise<ReviewTaskPullRequestResult> {
+  const sessionInput = buildPlannerSessionInput(input.provider, input.cwd);
+  const prompt = buildTaskPullRequestReviewPrompt(input.prompt, input.done, input.diff);
+  try {
+    const response = await sendSingleTurn(
+      input.host,
+      input.provider,
+      sessionInput,
+      prompt,
+      PLANNER_TURN_TIMEOUT_MS,
+      input.log,
+    );
+    return { findings: parseTaskPullRequestReviewFindings(response, input.log), error: undefined };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    input.log.warn(
+      `[planner] タスクPR/MRのレビューに失敗したため、レビュー警告なしでマージを続けます: ${sanitizeForLog(message)}`,
+    );
+    return { findings: [], error: message };
+  }
+}

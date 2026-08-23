@@ -469,6 +469,34 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
     __mock.setConfig('agent', {});
     expect(readWorkflowsConfig().draftPullRequest).toBe(false);
   });
+
+  it('createTaskIssueの既定はfalse（design.md §16.31、roadmap W6、Issue #596）', () => {
+    expect(readWorkflowsConfig().createTaskIssue).toBe(false);
+  });
+
+  it('createTaskIssueはtrueを指定したとおりに使う', () => {
+    __mock.setConfig('agent', { 'workflows.createTaskIssue': true });
+    expect(readWorkflowsConfig().createTaskIssue).toBe(true);
+  });
+
+  it('createTaskIssueが未設定（undefined）なら既定値（false）へ落とす', () => {
+    __mock.setConfig('agent', {});
+    expect(readWorkflowsConfig().createTaskIssue).toBe(false);
+  });
+
+  it('reviewTaskPullRequestの既定はfalse（design.md §16.31、roadmap W6、Issue #596）', () => {
+    expect(readWorkflowsConfig().reviewTaskPullRequest).toBe(false);
+  });
+
+  it('reviewTaskPullRequestはtrueを指定したとおりに使う', () => {
+    __mock.setConfig('agent', { 'workflows.reviewTaskPullRequest': true });
+    expect(readWorkflowsConfig().reviewTaskPullRequest).toBe(true);
+  });
+
+  it('reviewTaskPullRequestが未設定（undefined）なら既定値（false）へ落とす', () => {
+    __mock.setConfig('agent', {});
+    expect(readWorkflowsConfig().reviewTaskPullRequest).toBe(false);
+  });
 });
 
 describe('readClaudeConfig', () => {

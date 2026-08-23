@@ -433,6 +433,40 @@ export function buildIntegrationPullRequestBody(input: IntegrationPullRequestCon
   return lines.join('\n');
 }
 
+/**
+ * タスクのIssue（design.md §16.31、roadmap W6、Issue #596）の本文に渡す入力。PR/MRの本文
+ * （`TaskPullRequestBodyInput`）と違い、`dependsOn` / `issue`（このIssue自身への自己参照は
+ * 意味を持たない）は持たない。
+ */
+export interface TaskIssueBodyInput {
+  prompt: string;
+  done: string;
+  runId: string;
+  taskId: string;
+}
+
+/**
+ * タスクのIssueの本文（design.md §16.31「タスクの開始時にIssueを起票し、PR本文から参照する」）。
+ * `buildTaskPullRequestBody`と同じ`prompt`/`done`の2段構成に、`runId`/`taskId`を`meta`として
+ * 添える。
+ */
+export function buildTaskIssueBody(input: TaskIssueBodyInput): string {
+  const lines: string[] = [];
+  lines.push('## prompt');
+  lines.push('');
+  lines.push(input.prompt);
+  lines.push('');
+  lines.push('## done');
+  lines.push('');
+  lines.push(input.done);
+  lines.push('');
+  lines.push('## meta');
+  lines.push('');
+  lines.push(`- runId: ${input.runId}`);
+  lines.push(`- taskId: ${input.taskId}`);
+  return lines.join('\n');
+}
+
 /* -------------------------------------------------------------------------------------------- */
 /* 本文を渡すための一時ファイル                                                                   */
 /* -------------------------------------------------------------------------------------------- */
@@ -744,6 +778,97 @@ export async function createPullRequest(
   }
 }
 
+/**
+ * ホストごとのIssue作成コマンドを組み立てる（design.md §16.31、roadmap W6、Issue #596）。
+ * `buildCreatePullRequestArgs`と同じ「全フラグを`--flag=value`の1トークン形式にする」防御を
+ * そのまま踏襲する。
+ *
+ * - GitHub: `gh issue create --title=<title> --body-file=<path>`
+ * - GitLab: `glab issue create`の`-d/--description`もPR/MRと同じくファイル読み込みに
+ *   対応していない（`buildCreatePullRequestArgs`のコメント参照）ため、同じく`glab api`で
+ *   `projects/:id/issues`へPOSTする
+ */
+function buildCreateIssueArgs(
+  host: ForgeHost,
+  params: { title: string; bodyFilePath: string },
+): { command: 'gh' | 'glab'; args: string[] } {
+  if (host === 'github') {
+    return {
+      command: 'gh',
+      args: ['issue', 'create', `--title=${params.title}`, `--body-file=${params.bodyFilePath}`],
+    };
+  }
+  return {
+    command: 'glab',
+    args: [
+      'api',
+      'projects/:id/issues',
+      `--field=title=${params.title}`,
+      `--field=description=@${params.bodyFilePath}`,
+    ],
+  };
+}
+
+/** `createPullRequest`と同じ戻り値の形（URLが取れれば返す。番号は呼び出し側が`parsePullRequestNumberFromUrl`で取り出す）。 */
+export type CreateIssueOutcome = CreatePullRequestOutcome;
+
+export interface CreateIssueRequest {
+  host: ForgeHost;
+  cwd: string;
+  title: string;
+  body: string;
+}
+
+/**
+ * タスクのIssueを1件作る（design.md §16.31「タスクの開始時にIssueを起票し、PR本文から
+ * 参照する」、roadmap W6、Issue #596）。`createPullRequest`と同じく本文は一時ファイル経由
+ * （`--body-file` / `glab api`の`--field description=@…`）で渡し、結果に関わらず必ず片付ける。
+ *
+ * **呼び出し側（`runner.ts`）が前提（CLI・認証）を確かめてから呼ぶ。** この関数自体は
+ * CLIの起動が失敗すれば`{ ok: false }`をそのまま返すだけで、呼び出し側はそれを警告として
+ * 記録し、Issueが起票できなくても`run`を止めない（design.md §16.31の受入基準）。
+ */
+export async function createIssue(
+  deps: CreatePullRequestDeps,
+  request: CreateIssueRequest,
+): Promise<CreateIssueOutcome> {
+  if (invalidCliArgumentValue(request.title)) {
+    return {
+      ok: false,
+      reason: 'invalidInput',
+      message: 'title が空、または改行を含んでいます',
+    };
+  }
+
+  const bodyFilePath = await deps.fs.writeTempFile(request.body);
+  try {
+    const { command, args } = buildCreateIssueArgs(request.host, {
+      title: stripControlChars(request.title),
+      bodyFilePath,
+    });
+    const result = await deps.cli.run(command, args, request.cwd);
+    if (result.code !== 0) {
+      return {
+        ok: false,
+        reason: 'cliError',
+        message:
+          result.stderr.trim() !== ''
+            ? sanitizeForLog(result.stderr)
+            : `${command} の実行に失敗しました（終了コード ${result.code}）`,
+      };
+    }
+    // 関数名はPR/MR限定に読めるが、URLの形は使い回してよい（GitHubの`gh issue create`も
+    // PR同様URLを1行だけ吐き、GitLabのissues APIも`web_url`を返す）ため、そのまま流用する
+    const url =
+      request.host === 'github'
+        ? extractGithubPullRequestUrl(result.stdout)
+        : extractGitlabMergeRequestUrl(result.stdout);
+    return { ok: true, url };
+  } finally {
+    await deps.fs.removeTempFile(bodyFilePath);
+  }
+}
+
 /* -------------------------------------------------------------------------------------------- */
 /* PR/MRの番号の取り出し                                                                         */
 /* -------------------------------------------------------------------------------------------- */
@@ -779,7 +904,9 @@ export function parsePullRequestNumberFromUrl(url: string): number | undefined {
 export type ForgeStepOutcome = { ok: true } | { ok: false; message: string };
 
 /**
- * タスク層のPR/MR作成フローの4手順。design.md §16.18「作る順序」がそのまま手順名になる。
+ * タスク層のPR/MR作成フローの手順（design.md §16.18「作る順序」がそのまま手順名になる。
+ * 元は4手順だったが、readyへの切り替え（5番目、`markPullRequestReady`）・レビュー
+ * （3.5番目、`reviewPullRequest`、roadmap W6）が任意手順として増え、現在は最大6手順）。
  *
  * 手順の実体（実際に `git push` / `gh pr create` / 統合worktreeでのマージを行う関数）は
  * 呼び出し側が組み立てて渡す。`mergeAndPushIntegration` の型を `TMerge` で汎用化している
@@ -791,6 +918,18 @@ export interface TaskPullRequestSteps<TMerge> {
   pushTaskBranch: () => Promise<ForgeStepOutcome>;
   pushIntegrationBranch: () => Promise<ForgeStepOutcome>;
   createPullRequest: () => Promise<CreatePullRequestOutcome>;
+  /**
+   * PR/MRを作った後、ローカルマージの前に読み取り専用の別セッションでレビューさせる
+   * （design.md §16.31「PRを作ったあと、ローカルマージの前にレビューを1段挟む」、
+   * roadmap W6、Issue #596）。PR/MRの作成に成功したときだけ、mergeAndPushIntegration の
+   * 前に呼ぶ。省略時は行わない（既定は無効。design.md「forge側の『人のレビューを待つ』
+   * 方式は採らない」）。
+   *
+   * **結果に関わらずマージは進める。** 指摘は呼び出し側が警告として記録するだけで、
+   * このフロー自体は指摘の有無でマージをブロックしない（forgeの「人のレビューを待つ」
+   * 方式のように、応答が無いまま待ち続ける構造を持ち込まないため。design.md §16.31）。
+   */
+  reviewPullRequest?: (url: string | undefined) => Promise<ForgeStepOutcome>;
   mergeAndPushIntegration: () => Promise<TMerge>;
   /**
    * Draftで作ったPR/MRをreadyへ切り替える。Draftを使わない設定なら undefined。
@@ -807,6 +946,8 @@ export interface TaskPullRequestFlowResult<TMerge> {
         stage: 'pushTaskBranch' | 'pushIntegrationBranch' | 'createPullRequest';
         message: string;
       };
+  /** レビューを試みた場合の結果。試みていなければ undefined。 */
+  review?: ForgeStepOutcome;
   mergeOutcome: TMerge;
   /** ready化を試みた場合の結果。試みていなければ undefined。 */
   markReady?: ForgeStepOutcome;
@@ -814,8 +955,9 @@ export interface TaskPullRequestFlowResult<TMerge> {
 
 /**
  * タスク層のPR/MR作成フローを、design.mdが定める順序（タスクブランチをpush→統合ブランチを
- * push→PR/MRを作る→マージして統合ブランチをpush→（あれば）Draftで作ったPR/MRをreadyへ
- * 切り替える）で実行する。**既存の4手順の順序は変えない。ready化は5番目として最後に足す。**
+ * push→PR/MRを作る→（あれば）レビューさせる→マージして統合ブランチをpush→（あれば）
+ * Draftで作ったPR/MRをreadyへ切り替える）で実行する。**既存の4手順の順序は変えない。
+ * レビューは3.5番目、ready化は5番目として足す。**
  *
  * **先にマージしてしまうと、baseとheadの間に差分が無くなりPR/MRの作成に失敗する**
  * （GitHubは"No commits between"を返す。design.md §16.18）ため、この順序を型で強制する
@@ -826,6 +968,11 @@ export interface TaskPullRequestFlowResult<TMerge> {
  * `mergeAndPushIntegration` は必ず最後に実行する。統合ブランチへのローカルのマージは
  * PR/MRの成否に関わらず進める必要がある（design.md §16.18「前提が欠けている場合」と
  * 同じ「ワークフロー自体は止めない」方針を、PR/MR作成の他の失敗要因にも一貫して適用する）。
+ *
+ * レビュー（`reviewPullRequest`、design.md §16.31、roadmap W6）はPR/MRが作れたときだけ
+ * `mergeAndPushIntegration` の前に呼ぶ。**結果（指摘の有無・レビュー自体の失敗）に関わらず
+ * `mergeAndPushIntegration` は必ず呼ぶ**（マージをブロックしない。ready化・pushの失敗と
+ * 同じ「ワークフロー自体は止めない」方針）。
  *
  * ready化（`markPullRequestReady`）は「統合ブランチへのマージが済んでからDraftを外す」ため
  * `mergeAndPushIntegration` の後に置く。PR/MRが作れていないとき（作成に失敗した、または
@@ -856,6 +1003,11 @@ export async function runTaskPullRequestFlow<TMerge>(
     }
   }
 
+  let review: ForgeStepOutcome | undefined;
+  if (pullRequest.created && steps.reviewPullRequest !== undefined) {
+    review = await steps.reviewPullRequest(pullRequest.url);
+  }
+
   const mergeOutcome = await steps.mergeAndPushIntegration();
 
   let markReady: ForgeStepOutcome | undefined;
@@ -863,9 +1015,12 @@ export async function runTaskPullRequestFlow<TMerge>(
     markReady = await steps.markPullRequestReady(pullRequest.url);
   }
 
-  return markReady === undefined
-    ? { pullRequest, mergeOutcome }
-    : { pullRequest, mergeOutcome, markReady };
+  return {
+    pullRequest,
+    ...(review === undefined ? {} : { review }),
+    mergeOutcome,
+    ...(markReady === undefined ? {} : { markReady }),
+  };
 }
 
 /* -------------------------------------------------------------------------------------------- */

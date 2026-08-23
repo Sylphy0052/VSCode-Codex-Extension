@@ -4565,10 +4565,15 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 1. タスクのコミットが揃った時点で、タスクブランチをpushする
 2. 統合ブランチが未pushならpushする。baseが存在しないとPR/MRを作れない
 3. PR/MRを作る（base=統合ブランチ、head=タスクブランチ）
+3.5. `agent.workflows.reviewTaskPullRequest` が有効なら、3で作ったPR/MRを別の読み取り専用
+     セッションでレビューする（§16.31）。指摘の有無・レビュー自体の失敗を問わず4へ進む
+     （マージをブロックしない）
 4. 統合worktreeでマージし、統合ブランチをpushする
 5. `draftPullRequest` が有効なら、3で作ったPR/MRをreadyへ切り替える
 
 先にマージしてしまうと、baseとheadの間に差分が無くなり作成に失敗する（GitHubは "No commits between" を返す）。4のpushによって、作ったPR/MRはホスト側でマージ済みとして扱われる。
+
+3.5は3と4の間に挟む段で、既定は無効。3が失敗していれば（PR/MRが作れていなければ）3.5は行わない。
 
 5を4の後に置くのは、「統合ブランチへ入るまではDraftのまま」という状態をホスト側でも読めるようにするため。3が失敗していれば5は行わない。5の失敗はワークフローを止めない（PR/MRまわりの失敗で実行全体を落とさない方針は「前提が欠けている場合」と同じ）。
 
@@ -5420,6 +5425,47 @@ Issue #341（epic）の方針転換により、「判断するのはオーケス
 #### 検証
 
 `test/unit/forge.test.ts`が`parseGithubReviewComments`/`parseGitlabReviewComments`（レビュー本体とissueコメントの混在・空本文の除外・GitLabのシステム通知除外・壊れたJSON応答の扱い）・`fetchReviewComments`（ホストごとのCLI引数組み立て、CLI呼び出し失敗時に`ok: false`になること）を確かめる。`test/unit/config.test.ts`が`reviewCommentPollIntervalSec`の丸め（既定値・範囲内の値の通過・範囲外の値のフォールバック）を確かめる。`test/unit/runner.test.ts`が、本番の呼び出し経路（`finalizeForge` → `startReviewCommentPoll` → `setInterval`の発火 → `pollReviewComments`）を通して、統合PR/MRにレビューコメントが付くと警告欄へ全文で記録されオーケストレーターへも`<workflow-event kind="reviewComment">`として通知されること・同じコメントは2周目のポーリングで重複して取り込まないこと（idでの重複排除）・`reviewCommentPollIntervalSec: 0`はポーリングを行わないこと・レビューコメント取得のCLI呼び出しが失敗してもrunは止まらないことを確かめる。**さらに、レビューコメントが届いた後に`add_task`が実際に通り、追加したタスクが本番の呼び出し経路（`pump()`の再起動）で実際にスケジュールされて完走すること・その間`finalizeForge`が統合PR/MRを二重に作らないこと（`live.integrationPullRequest`ベースの冪等ガードで確かめる）を、`planChangeFinishedReason`の例外を`if (false)`へ戻すと実測どおり失敗することを確認済みの回帰テストで確かめる（前掲「届いた後に手を打てる状態にする」参照）。**さらに、`finalMerge: auto`で最終マージが既に確定した後にレビューコメントが届いた場合はadd_taskが理由付きで拒否されること（mainへ成果が届かず終わる乖離を防ぐ回帰）と、`finalMerge: orchestrator`で最終マージの判断待ちの間にadd_taskしたタスクが実際に完走し、その後の`decideFinalMerge(merge)`でT1・T2両方の成果を含めてmainへ1回だけマージされること（「gateの先」＝成果が実際にmainへ届くところまでの検証）を、`live.finalMergeOutcome !== undefined`の分岐を`if (false)`へ戻すと実測どおり失敗することを確認済みの回帰テストで確かめる（前掲「レビューを取り込めるのは最終マージ確定までである」参照）。**さらに、`finalMerge: auto`で最終マージが確定した後、既定間隔（600秒）×10周期ぶんタイマーを進めてもレビューコメント取得CLI（`--json=reviews,comments`）の呼び出し回数が増えないこと（コーディネーターの実測で確認された「11回目まで呼ばれ続ける」漏れの回帰）を、`performFinalMerge`末尾の`closeReviewCommentPoll(live)`呼び出しを外すと実測どおり失敗する（11回まで増える）ことを確認済みの回帰テストで確かめる（前掲「レビューコメントのポーリングを最終マージ確定の1点で閉じる」参照）。**さらに、`finalMerge: 'pr-only'`ではrunが`succeeded`で終わった後もレビューコメント取得CLIの呼び出し回数がタイマーを進めるほど増え続けること（＝ポーリングが意図的に生きたままであること）を、断言する形の回帰テストで固定する（前掲「`finalMerge: 'pr-only'`ではポーリングを閉じない」参照）。これにより、将来`pr-only`でも閉じる方向へ実装が変わった場合にテストが検知する。**実ホストでのレビューコメント取得コマンドが実引数として受理されるかは[manual-test.md](manual-test.md)のW-Jに残す。
+
+### 16.31 タスクごとにIssueを起票し、PRのレビューを経てマージする（roadmap W6、Issue #596）
+
+`per-task`のPR/MR作成フロー（§16.18、`runTaskPullRequestFlow`）には、これまで「タスクの進捗を追跡するIssue」と「PR/MRの中身を確かめるレビュー」のどちらも無かった。本節は、この2つを既存のフロー（タスクブランチをpush→統合ブランチをpush→PR/MRを作る→マージして統合ブランチをpush→（あれば）Draftで作ったPR/MRをreadyへ切り替える）を作り直さずに追加する。**両方とも既定は無効**（`agent.workflows.createTaskIssue`/`agent.workflows.reviewTaskPullRequest`、いずれも`boolean`・既定`false`・`machine-overridable`）。有効化しても`per-task`以外（`none`/`integration`）の挙動は変えない——`shouldCreateTaskPullRequest(pullRequest)`が`false`を返す層では、そもそも起票・レビューの対象になるPR/MRが無いため、両機能とも自然に素通りする。
+
+#### (a) タスクの開始時にIssueを起票する
+
+`maybeCreateTaskIssue`（`runner.ts`）を`prepareTaskLaunch`の先頭（作業ディレクトリの解決直後）から呼ぶ。次の条件が**すべて**揃ったときだけ`createIssue`（`forge.ts`）を呼ぶ。
+
+- `live.forge.kind === 'active'`かつ`createTaskIssue: true`
+- `shouldCreateTaskPullRequest(live.forge.pullRequest)`が`true`（`per-task`のときだけ）
+- `task.issue`が未指定（YAML・ロードマップ由来のIssueが既にあるタスクは起票しない。既存のIssueを使い回す）
+- 同じtaskIdへまだ起票していない（`live.createdTaskIssues`に無い。後述）
+
+起票した本文は`buildTaskIssueBody`（`prompt`/`done`/`meta`（`runId`/`taskId`）の3段構成。§16.18の`buildTaskPullRequestBody`と同じ「タスクの指示・完了条件をそのまま載せる」流儀を踏襲し、Issue独自の項目は追加しない）。タイトルは`buildTaskPullRequestTitle`をPR/MRと共用する（`T1: <promptの先頭>`の形。同じタスクのPRとIssueが同じタイトルで並ぶ）。
+
+**起票した番号の受け渡しは`live.createdTaskIssues: Map<taskId, number>`を介す。** タスク開始時（`prepareTaskLaunch`）と、PR本文組み立て時（`mergeTaskWithForge`、`runnerMerge.ts`、タスク完了・マージ時）は別のタイミングで呼ばれ、`LiveTask`自体は再試行のたびに作り直される。そのため`LiveTask`ではなく`LiveRun`側の`Map`へ番号を持たせ、`buildTaskPullRequestFlowCallbacks`の`createPullRequest`ステップで`task.issue ?? live.createdTaskIssues.get(taskId)`として参照する（`task.issue`が明示されていればそちらを優先し、無ければ起票した番号にフォールバックする）。`retryTask`で同じtaskIdを再実行しても、既に`live.createdTaskIssues`にあれば二重に起票しない（同じ番号を使い回す）。**この`Map`はworkspaceStateへ永続化しない**（`rebuildLiveRun`、`runnerRestore.ts`では空の`Map`で再構築する）。リロード後に`retryTask`すると再度起票しうる——番号自体は永続化される`task.issue`側の対象外（起票由来の番号はYAML由来ではないため）であり、追跡専用の値をリロードのたびに増やしうるという既知の制約として文書化するに留める（`WorkflowRunnerForgeDeps`の他の実行中限定の値と同じ扱い）。
+
+**起票できなくてもrunは止めない。** `live.forge.kind === 'active'`である以上`checkForgePrerequisites`（CLI・認証・originリモート）は既に通っているが、`gh issue create`/`glab api`個別の呼び出し自体はレート制限・権限不足等で失敗しうる。失敗時（CLI呼び出しの失敗・URLから番号を取り出せない・例外のいずれも）は`live.warnings`へ`kind: 'taskIssueFailed'`の警告を積むだけで、タスクの実行そのもの・PR/MR作成は通常どおり進む（PR本文の`Closes #<N>`/参照はその回だけ出ない）。
+
+#### (b) PRを作った後、ローカルマージの前にレビューを1段挟む
+
+`TaskPullRequestSteps<TMerge>`（`forge.ts`）へ`reviewPullRequest?: (url) => Promise<ForgeStepOutcome>`を新設し、`runTaskPullRequestFlow`の中で**`createPullRequest`の後・`mergeAndPushIntegration`の前**に呼ぶ（既存の4手順の順序は変えない。レビューは3.5番目、ready化は5番目として足す）。PR/MRの作成に成功したときだけ呼び、**結果（指摘の有無・レビュー自体の失敗）に関わらず`mergeAndPushIntegration`は必ず呼ぶ**——forgeの「人のレビューを待つ」方式のように、応答が無いまま待ち続ける構造は持ち込まない（epicの方針、W8の`ask_user`で近い欠陥をほぼ持ち込みかけたのと同じ理由）。
+
+実施主体は**forge（人のレビューを待つ機構）ではなく、拡張自身が別のエージェントセッションを立てて読み取り専用でレビューさせる方式**を採る。§16.28の`reviewWorkflowPlan`（分解レビュー、roadmap W3）と同じ形をそのまま踏襲する。
+
+- `reviewTaskPullRequest`（`planner.ts`）は`buildPlannerSessionInput` + `sendSingleTurn`（既定`PLANNER_TURN_TIMEOUT_MS` = 5分）で1ターンだけ送って閉じる。§16.28と同じく`sandbox: read-only`（Codex）・`approvalMode: never`（Codex）/`permissionMode: manual`（Claude）で起動し、承認要求は理由を問わず全て拒否する。**読み取り専用であることはプロンプトの指示ではなく起動設定で担保する**
+- プロンプトへ渡すのは対象タスクの`prompt`/`done`と、タスクブランチ・統合ブランチ間の`git diff`（`runnerMerge.ts`の`buildTaskPullRequestReviewStep`が取得）。差分の取得自体が失敗した場合は空文字列にフォールバックする（差分無しでもレビュー自体は試みる。取得失敗を理由にレビュー全体を諦めない）
+- 応答はJSON配列（`[{"message": "..."}]`）を期待し、`TaskPullRequestReviewFinding`（`message`のみ。§16.28の`WorkflowReviewFinding`と違い`aspect`の固定リストは持たない——分解固有の観点はコード差分レビューには当てはまらないため）へ変換する。JSONとして解釈できない・配列でない応答は**例外にせず指摘0件として扱う**（`parseTaskPullRequestReviewFindings`、§16.28の`parseReviewFindings`と同じ流儀）。件数上限は30件（`MAX_TASK_REVIEW_FINDINGS`）、メッセージは500文字（`MAX_TASK_REVIEW_FINDING_MESSAGE_LENGTH`）で`sanitizeInlineText`を通す
+- レビューセッションの起動・応答待ちそのものが失敗した場合（タイムアウト等）も例外を投げず、`error`へ理由を残して`findings: []`を返す
+
+`buildTaskPullRequestReviewStep`（`runnerMerge.ts`）は、レビューの結果に関わらず`{ ok: true }`を返す（`ForgeStepOutcome`としてこのステップ自体を失敗扱いにしない）。エラーが出た場合・指摘が1件以上あった場合は、`live.warnings`へ`kind: 'taskPullRequestReview'`の警告を積み、レビュー結果を人が確認できるようにする——`markPullRequestReady`等と同じ「結果は警告として残すだけで、フローの成否には影響しない」設計。
+
+#### 外部由来テキストの扱い（サニタイズは1度だけ、§16.24）
+
+Issue本文（`buildTaskIssueBody`）・レビュープロンプト（`buildTaskPullRequestReviewPrompt`）のどちらも、既存の`buildTaskPullRequestBody`（§16.18）と同じく**本文・プロンプトを組み立てる側ではサニタイズしない**。レビュープロンプトは`prompt`/`done`/`diff`の3フィールドを`formatUntrusted`（§16.24）で囲み、1回のプロンプトの中で複数フィールドを囲む既存の流儀（§16.28の`goal`/`workflow`と同じ）に合わせ、呼び出し側が1つの`nonce`を生成して3つとも使い回す。Issue本文自体は`createIssue`が一時ファイル経由（`--body-file`/`glab api`の`--field description=@…`）で渡すだけで、`createPullRequest`と同じくCLIの引数へ直接展開しない（§16.18のコマンドインジェクション対策をそのまま踏襲）。レビュー応答の`message`は`sanitizeInlineText`を、警告欄への表示はワークフローViewの既存の`textContent`描画（§16.8）を、それぞれ1回だけ通る——集約点（`wrapEvent`相当）を二重に通さない、という既存の規約はどちらの経路でも崩していない。
+
+#### 検証
+
+`test/unit/forge.test.ts`が`buildTaskIssueBody`の構成・`createIssue`のホストごとのCLI引数組み立て（GitHub: `gh issue create --body-file=…`、GitLab: `glab api projects/:id/issues --field=description=@…`）・危険な文字列を含む本文が引数へ直接展開されないこと・invalidInput/cliErrorの扱い・一時ファイルの後始末を確かめる。同ファイルが`runTaskPullRequestFlow`に`reviewPullRequest`を渡した場合の呼び出し順序（create→review→merge）・PR/MR作成が失敗すればレビューを呼ばないこと・レビューが失敗（`ok: false`）してもmergeは進むことを確かめる。`test/unit/planner.test.ts`が`reviewTaskPullRequest`について、§16.28の`reviewWorkflowPlan`のテストと同じ観点（指摘の変換・上限・壊れた応答の扱い・起動設定・1ターンで閉じること・`formatUntrusted`のnonce共有）を確かめる。`test/unit/runner.test.ts`が、本番の呼び出し経路（`runner.start` → タスク完了 → `prepareTaskLaunch`/`mergeTaskWithForge`）を通して、`createTaskIssue`/`reviewTaskPullRequest`いずれも既定では動かないこと・有効化するとIssue起票・レビューセッションの起動が実際に起きること・`pullRequest: 'integration'`では起票しないこと・YAML側で`issue`が既に指定されていれば起票しないこと・起票が失敗してもrunは止まらずタスクが完了することを確かめる。実ホスト（GitHub/GitLab）でIssue起票・レビューコメントの内容が実引数として受理されるかは[manual-test.md](manual-test.md)のW-Kに残す。
+
 
 ### 16.32 タスクからオーケストレーターへ判断を仰ぐ経路（`ask_orchestrator`、roadmap W7、Issue #571）
 

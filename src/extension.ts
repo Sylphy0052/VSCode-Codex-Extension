@@ -251,6 +251,8 @@ export interface ForgeOverrides {
     finalMerge: FinalMergeConfig;
     branchNaming: BranchNaming;
     draftPullRequest: boolean;
+    createTaskIssue: boolean;
+    reviewTaskPullRequest: boolean;
   };
   /**
    * `WorkflowRunner` が使うgitコマンドの実行（`WorkflowRunnerDeps.git`）。forgeまわり
@@ -531,6 +533,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           finalMerge: c.finalMerge,
           branchNaming: c.branchNaming,
           draftPullRequest: c.draftPullRequest,
+          createTaskIssue: c.createTaskIssue,
+          reviewTaskPullRequest: c.reviewTaskPullRequest,
         };
         return forgeOverrides.readConfig?.() ?? actual;
       },
