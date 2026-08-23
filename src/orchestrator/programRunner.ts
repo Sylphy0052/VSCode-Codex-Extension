@@ -3,11 +3,16 @@ import path from 'node:path';
 
 import {
   createInitialProgramState,
+  markProgramHaltedByUser,
   markRunFinished,
   markRunStarted,
   reapplyLiveRunOutcome,
 } from './programState';
-import { isProgramSettled, nextProgramRunsToStart } from './programScheduler';
+import {
+  isProgramSettled,
+  nextProgramRunsToStart,
+  propagateProgramFailures,
+} from './programScheduler';
 import {
   parseProgramYaml,
   validateProgram,
@@ -21,13 +26,13 @@ import { MAX_WORKFLOW_FILE_BYTES } from './workflow';
 import type { Logger } from '../log';
 
 /**
- * プログラム（runの束）の実際の起動・進行（design.md §16.37.2、roadmap W12-2、
- * Issue #605）。`programScheduler.ts`（波の組み立て）・`programState.ts`（状態遷移）・
- * `programStore.ts`（永続化、W12-1）を束ね、`WorkflowRunner.start`を実際に呼んで
- * runを起動する層。
+ * プログラム（runの束）の実際の起動・進行・失敗の伝播・人による停止（design.md
+ * §16.37.2・§16.37.3、roadmap W12-2・W12-3、Issue #605・#606）。`programScheduler.ts`
+ * （波の組み立て・失敗の伝播の判断）・`programState.ts`（状態遷移）・`programStore.ts`
+ * （永続化、W12-1）を束ね、`WorkflowRunner.start`/`stop`を実際に呼んでrunを起動・停止する層。
  *
- * **上位のオーケストレーターは置かない。** ここは「どのrunをいつ起動するか」だけを
- * 決めて`WorkflowRunner.start`を呼ぶだけで、起動した各runのオーケストレーターは
+ * **上位のオーケストレーターは置かない。** ここは「どのrunをいつ起動・停止するか」だけを
+ * 決めて`WorkflowRunner.start`/`stop`を呼ぶだけで、起動した各runのオーケストレーターは
  * 引き続き自分のrunだけを見る（design.md §16.23。既存の単発run実行と同じ経路をそのまま
  * 通る）。
  *
@@ -41,6 +46,13 @@ export interface ProgramWorkflowPort {
   start(defPath: string, repoRoot: string): Promise<StartWorkflowResult>;
   listLive(): readonly LiveRunSummary[];
   onChanged(listener: (runId: string) => void): () => void;
+  /**
+   * 指定runIdの実行を停止する（design.md §16.37.3、roadmap W12-3、Issue #606）。
+   * `WorkflowRunner.stop`と同形（同期・戻り値なし）。走行中のタスクのループを止める
+   * だけで、そのrun自身の終了確定（`done`/`blocked`/`failed`）は既存の`onChanged`経路を
+   * 待つ（`haltProgram`のJSDoc参照）。
+   */
+  stop(runId: string): void;
 }
 
 export interface ProgramRunnerDeps {
@@ -128,6 +140,18 @@ export class ProgramRunner {
    * 次の波を計算し、開始できるrunを実際に起動する。リロード直後の再開（`reconcileAfterReload`
    * が全プログラムぶん呼ぶ）と、run完了検知（`onRunChanged`）の両方から呼ばれる冪等な操作。
    * 開始できるrunが無ければ何もしない。
+   *
+   * **失敗の伝播（design.md §16.37.3、roadmap W12-3、Issue #606）をここで先に確定させる。**
+   * `propagateProgramFailures`が、直前の`markRunFinished`等で`failed`が確定したことを
+   * 受けて、それに依存する`pending`を`skipped`へ倒す（1件でも倒れれば永続化してから
+   * `persisted.state`を更新後の値へ差し替える）。**この呼び出し順が「暫定`failed`と
+   * 確定`failed`の区別」の要。** `pumpProgram`は常に`ProgramStore`に永続化済みの
+   * `state`から読み直して動く一本の入口で、リロード直後の暫定`failed`（`reapplyLive
+   * RunOutcome`で訂正され得る）を先に確定させてから`propagateProgramFailures`を呼ぶ経路
+   * （`reconcileAfterReload`）と、実行中に実際へ`failed`が確定してから呼ぶ経路
+   * （`onRunChanged`）のどちらも、この関数へ来た時点の`persisted.state`は既に「その時点で
+   * 確定している`failed`」だけを反映している（訂正未了の暫定値の上で伝播を行うことは
+   * ない。詳細は`reconcileAfterReload`のJSDoc参照）。
    */
   async pumpProgram(programId: string): Promise<void> {
     const persisted = this.deps.programStore.find(programId);
@@ -143,10 +167,66 @@ export class ProgramRunner {
       return;
     }
     const { def } = parsed;
-    const toStart = nextProgramRunsToStart(def, persisted.state);
+    let state = persisted.state;
+    const propagated = propagateProgramFailures(def, state);
+    if (propagated !== state) {
+      await this.deps.programStore.update(programId, (current) => {
+        if (current === undefined) {
+          throw new Error(`[program ${programId}] 失敗の伝播の記録中にプログラムが消えました`);
+        }
+        return { ...current, state: propagated };
+      });
+      state = propagated;
+    }
+    const toStart = nextProgramRunsToStart(def, state);
     for (const runRefId of toStart) {
       await this.startOneRun(programId, persisted.workspaceRoot, def, runRefId);
     }
+    await this.maybeMarkFinished(programId);
+  }
+
+  /**
+   * プログラム全体を人の手で止める（design.md §16.37.3、roadmap W12-3、Issue #606の
+   * 受入基準「プログラムを人の手で止められる」「人が止めたプログラムが、リロード・
+   * WSLの停止をまたいでも自動再開しない」）。`runner.ts`の`WorkflowRunner.stop`
+   * （単発runの「全体の停止」）のプログラム版。
+   *
+   * 1. このプログラムが起動した`running`な子run（`trackedRuns`に記録済み）へ
+   *    `ProgramWorkflowPort.stop`を送る。`WorkflowRunner.stop`と同じく、走行中の
+   *    ループを止めるだけで、その場でrunを終了確定させない（進行中のターンには
+   *    割り込まない）。その子run自身の`haltedByUser`もこの時点で立つため
+   *    （`runner.ts`の`stop()`）、W10（`runnerRestore.ts`の`autoResumeIfEligible`）は
+   *    リロードをまたいでもその子runを再開しない——単発run側と全く同じ仕組みに
+   *    そのまま乗る（design.md §16.35「人が止めたrunは再開しない」と同じ扱い）
+   * 2. `programStore`の状態を`markProgramHaltedByUser`で更新する。まだ開始していない
+   *    `pending`は即座に`skipped`（理由`haltedByUser`）になり、`state.haltedByUser`が
+   *    立つ。`state.haltedByUser`は永続化される（`ProgramState`の一部）ため、リロード
+   *    後も残り、`nextProgramRunsToStart`が新規起動を止め続ける（`programScheduler.ts`
+   *    参照）。**`reconcileProgramStateOnReload`は`haltedByUser`を素通しする**（この
+   *    フラグ自体を`running`扱いへ巻き戻す理由が無いため）
+   * 3. `maybeMarkFinished`を呼ぶ。停止時点で`running`な子runが無ければ（全て`pending`
+   *    だった、または既に決着していた）、この時点で`finishedAt`が埋まる。`running`な
+   *    子runが残っていれば、それが実際に終了確定するまで`finishedAt`は埋まらない
+   *    （通常の`onRunChanged` → `pumpProgram`の経路で後から埋まる）
+   *
+   * programIdが存在しなければ何もしない（`pumpProgram`と同じ防御）。
+   */
+  async haltProgram(programId: string): Promise<void> {
+    const persisted = this.deps.programStore.find(programId);
+    if (persisted === undefined) {
+      return;
+    }
+    for (const [runId, tracked] of this.trackedRuns) {
+      if (tracked.programId === programId) {
+        this.deps.workflow.stop(runId);
+      }
+    }
+    await this.deps.programStore.update(programId, (current) => {
+      if (current === undefined) {
+        throw new Error(`[program ${programId}] 停止の記録中にプログラムが消えました`);
+      }
+      return { ...current, state: markProgramHaltedByUser(current.state) };
+    });
     await this.maybeMarkFinished(programId);
   }
 

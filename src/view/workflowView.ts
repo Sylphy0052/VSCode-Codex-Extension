@@ -8,11 +8,35 @@ import type {
   WorkflowRunSnapshot,
   WorkflowWarning,
 } from '../orchestrator/runner';
+import type { PersistedProgram } from '../orchestrator/programStore';
 import type { WorkflowDefinition } from '../orchestrator/workflow';
 import { chatCsp } from './chatCsp';
 import { aggregateProgress, layoutGraph, summarizeIntegration } from './workflowGraph';
 import { workflowScript } from './workflowScript';
 import { workflowStyles } from './workflowStyles';
+
+/**
+ * ワークフローViewから、失敗の伝播・人による停止の状態が読める最小限の口
+ * （design.md §16.37.3、roadmap W12-3、Issue #606の受入基準「失敗・停止の状態が
+ * ワークフローViewから読める」）。`WorkflowViewManager`は`ProgramRunner`本体には
+ * 依存せず、必要な操作（一覧・停止）だけをこの口として注入で受け取る
+ * （`WorkflowRunner`を直接持たず`WorkflowRunner`型として受け取っているのと近い方針だが、
+ * こちらは`ProgramRunner`が持つ操作のうちビューに要る分だけを切り出した専用の口にした。
+ * `ProgramRunner`自体を丸ごと持たせると、ビューが実行の起動判断まで呼べてしまい、
+ * 「どのrunをいつ起動するか」の判断はプログラム層に閉じるという既存の役割分担
+ * （design.md §16.37.2「上位のオーケストレーターは置かない」）を崩しかねないため）。
+ *
+ * **省略可能。** コンストラクタでこの口を渡さない場合（既存のテスト・W12-2までの
+ * `extension.ts`の配線）は、プログラムに関する表示・操作を一切行わない
+ * （`postPrograms`が何もせず戻る）。既存の単発run実行の挙動には一切影響しない
+ * （受入基準「既存の単発runの挙動が変わらない」）。
+ */
+export interface ProgramViewPort {
+  /** 永続化済みの全プログラムを新しい順に返す。`ProgramStore.list()`と同じ契約。 */
+  list(): readonly PersistedProgram[];
+  /** 指定プログラムを人の手で止める。`ProgramRunner.haltProgram`と同じ契約。 */
+  halt(programId: string): Promise<void>;
+}
 
 /**
  * ワークフローViewパネルの生成オプション（design.md §14.48、issue #287）。
@@ -56,6 +80,12 @@ export class WorkflowViewManager implements vscode.Disposable {
   constructor(
     private readonly runner: WorkflowRunner,
     private readonly log: Logger,
+    /**
+     * プログラムの一覧・停止（design.md §16.37.3、roadmap W12-3、Issue #606）。省略可能
+     * （`ProgramViewPort`のJSDoc参照）。`extension.ts`が`ProgramStore`/`ProgramRunner`から
+     * 組み立てて渡す。
+     */
+    private readonly programs?: ProgramViewPort,
   ) {
     this.unsubscribeChanged = runner.onChanged((runId) => this.onRunnerChanged(runId));
   }
@@ -151,11 +181,29 @@ export class WorkflowViewManager implements vscode.Disposable {
     if (runId === this.activeRunId) {
       this.postState();
     }
+    // このrunが何らかのプログラムに属していれば、失敗の伝播（依存する後続runのskipped化）
+    // や停止の反映がここで起きうる（`ProgramRunner.onRunChanged` → `pumpProgram`が
+    // 同期的にstoreを更新した後、`workflow.onChanged`の購読者としてこのハンドラも
+    // 呼ばれる）。属していない・`programs`が未注入なら`postPrograms`は何もしない
+    this.postPrograms();
   }
 
   private postAll(): void {
     this.postRunList();
     this.postState();
+    this.postPrograms();
+  }
+
+  /**
+   * 永続化済みの全プログラムの状態をWebviewへ送る（design.md §16.37.3、roadmap W12-3、
+   * Issue #606）。`programs`（`ProgramViewPort`）が注入されていなければ何もしない
+   * （省略可能。`ProgramViewPort`のJSDoc参照）。
+   */
+  private postPrograms(): void {
+    if (this.panel === undefined || this.programs === undefined) {
+      return;
+    }
+    void this.panel.webview.postMessage({ type: 'programs', programs: this.programs.list() });
   }
 
   private postRunList(): void {
@@ -255,6 +303,16 @@ export class WorkflowViewManager implements vscode.Disposable {
       // 使う既存の入口）に集約する。ここから同じコマンドを呼び直すだけにして、
       // ロジックの持ち場を1つに保つ
       await vscode.commands.executeCommand('agent.workflows.run');
+      return;
+    }
+    if (type === 'stopProgram' && typeof m['programId'] === 'string') {
+      // `activeRunId`の有無を問わない（プログラムのpendingなrun参照はそもそも
+      // `WorkflowRunner`側のrunIdを持たない。design.md §16.37.3、roadmap W12-3、
+      // Issue #606）。`programs`（`ProgramViewPort`）が未注入なら何もしない
+      if (this.programs !== undefined) {
+        await this.programs.halt(m['programId']);
+        this.postPrograms();
+      }
       return;
     }
 
@@ -555,6 +613,11 @@ ${workflowStyles()}
       </div>
       <div id="orchAskUser" class="orch-ask-user" hidden></div>
     </div>
+  </div>
+
+  <div id="programsSection" hidden>
+    <h2>プログラム</h2>
+    <div id="programs"></div>
   </div>
 
   <div id="content" hidden>

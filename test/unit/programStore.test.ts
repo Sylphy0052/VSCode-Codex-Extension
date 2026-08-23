@@ -9,8 +9,11 @@ import {
 } from '../../src/orchestrator/programStore';
 import type { ProgramState } from '../../src/orchestrator/programState';
 
-function state(overrides: Partial<ProgramState['runs']> = {}): ProgramState {
-  return { runs: { R1: { state: 'pending', runId: undefined }, ...overrides } };
+function state(overrides: Partial<ProgramState['runs']> = {}, haltedByUser = false): ProgramState {
+  return {
+    runs: { R1: { state: 'pending', runId: undefined, skipReason: undefined }, ...overrides },
+    haltedByUser,
+  };
 }
 
 function program(overrides: Partial<PersistedProgram> = {}): PersistedProgram {
@@ -40,15 +43,34 @@ function fakeMemento(initial: Record<string, unknown> = {}): ProgramMemento {
 
 describe('reconcileProgramOnReload（design.md §16.37「W10の自動再開の対象に含める」、Issue #604）', () => {
   it('runningなrun参照をfailedへ倒す', () => {
-    const before = program({ state: state({ R1: { state: 'running', runId: 'run-1' } }) });
+    const before = program({
+      state: state({ R1: { state: 'running', runId: 'run-1', skipReason: undefined } }),
+    });
     const after = reconcileProgramOnReload(before);
-    expect(after.state.runs['R1']).toEqual({ state: 'failed', runId: 'run-1' });
+    expect(after.state.runs['R1']).toEqual({
+      state: 'failed',
+      runId: 'run-1',
+      skipReason: undefined,
+    });
     expect(reconcileProgramOnReload(before)).not.toBe(before);
   });
 
   it('変化が無ければ同じ参照を返す', () => {
-    const before = program({ state: state({ R1: { state: 'done', runId: 'run-1' } }) });
+    const before = program({
+      state: state({ R1: { state: 'done', runId: 'run-1', skipReason: undefined } }),
+    });
     expect(reconcileProgramOnReload(before)).toBe(before);
+  });
+
+  it('haltedByUserはそのまま素通しする（人が止めたプログラムはリロード後も止まったまま）', () => {
+    const before = program({
+      state: state(
+        { R1: { state: 'running', runId: 'run-1', skipReason: undefined } },
+        true,
+      ),
+    });
+    const after = reconcileProgramOnReload(before);
+    expect(after.state.haltedByUser).toBe(true);
   });
 });
 
@@ -73,7 +95,7 @@ describe('ProgramStore（design.md §16.37、Issue #604）', () => {
     const attempts = Array.from({ length: 10 }, (_, i) =>
       store.update('prog-1', (current) => ({
         ...(current ?? program()),
-        state: state({ R1: { state: 'pending', runId: `attempt-${i}` } }),
+        state: state({ R1: { state: 'pending', runId: `attempt-${i}`, skipReason: undefined } }),
       })),
     );
     await Promise.all(attempts);
@@ -99,10 +121,16 @@ describe('ProgramStore（design.md §16.37、Issue #604）', () => {
     const memento = fakeMemento();
     const store = new ProgramStore(memento);
     await store.update('prog-running', () =>
-      program({ programId: 'prog-running', state: state({ R1: { state: 'running', runId: 'r' } }) }),
+      program({
+        programId: 'prog-running',
+        state: state({ R1: { state: 'running', runId: 'r', skipReason: undefined } }),
+      }),
     );
     await store.update('prog-done', () =>
-      program({ programId: 'prog-done', state: state({ R1: { state: 'done', runId: 'r' } }) }),
+      program({
+        programId: 'prog-done',
+        state: state({ R1: { state: 'done', runId: 'r', skipReason: undefined } }),
+      }),
     );
 
     const reconciled = await store.reconcileAfterReload();

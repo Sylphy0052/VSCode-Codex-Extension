@@ -270,6 +270,23 @@ export function workflowStyles(): string {
      errorForegroundとは別の色にして見分けをつける。 */
   .warning-item.plannerReview { border-left-color: var(--vscode-charts-blue); }
 
+  /* ---- プログラム欄（design.md §16.37.3、roadmap W12-3、Issue #606） ---- */
+  #programsSection { margin-top: 8px; }
+  #programs { display: flex; flex-direction: column; gap: 6px; }
+  .program-item {
+    padding: 6px 8px;
+    border: 1px solid var(--vscode-widget-border, transparent);
+    border-radius: 4px;
+    background-color: color-mix(in srgb, var(--vscode-charts-blue) 6%, transparent);
+  }
+  .program-head { display: flex; align-items: center; gap: 8px; }
+  .program-def { font-weight: 600; font-size: 0.9em; }
+  .program-status { font-size: 0.85em; color: var(--vscode-descriptionForeground); }
+  .program-status.program-halted { color: var(--vscode-errorForeground); }
+  .program-runs { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
+  .program-run { font-size: 0.85em; }
+  .program-stop-btn { margin-left: auto; }
+
   /* ---- オーケストレーター欄（design.md §16.23「会話のUI」） ---- */
   #orchestrator {
     margin-top: 8px;

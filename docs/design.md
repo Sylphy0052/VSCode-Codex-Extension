@@ -5936,7 +5936,7 @@ runs:
 
 ##### 前段が失敗した場合の挙動
 
-**この段では決め打ちしない。** あるrunが`failed`になったとき、それに依存する後続のrunをどう扱うか（起動しない・警告のうえ起動する・プログラム全体を止める等）は、失敗の伝播そのものを扱う(3)（roadmap W12-3、Issue #606）で決める。
+**この段では決め打ちしなかった。** あるrunが`failed`になったとき、それに依存する後続のrunをどう扱うか（起動しない・警告のうえ起動する・プログラム全体を止める等）は、失敗の伝播そのものを扱う(3)（roadmap W12-3、Issue #606）で決めた。**→ §16.37.3で、依存先が`failed`または`skipped`の`pending`runを`skipped`（理由付き）へ倒す`propagateProgramFailures`として実装した。**
 
 ##### 既存の単発runへの影響
 
@@ -5951,7 +5951,7 @@ runs:
 
 #### 16.37.2 波のスケジューリングとrun間の依存でrunを起動する（W12-2、Issue #605）
 
-**この段で作るのは、(1)が持つプログラムの定義・状態・永続化を使って、runを実際に起動する部分。** 波の組み立て（`programScheduler.ts`）・状態遷移（`programState.ts`への追加）・実際の起動（`programRunner.ts`、新規）の3つに分かれる。失敗の伝播・人による停止は引き続き決め打ちしない（(3)、roadmap W12-3、Issue #606の担当のまま）。
+**この段で作るのは、(1)が持つプログラムの定義・状態・永続化を使って、runを実際に起動する部分。** 波の組み立て（`programScheduler.ts`）・状態遷移（`programState.ts`への追加）・実際の起動（`programRunner.ts`、新規）の3つに分かれる。失敗の伝播・人による停止はこの段では引き続き決め打ちしなかった（(3)、roadmap W12-3、Issue #606で実装。**→ §16.37.3**）。
 
 ##### 波の組み立て（`programScheduler.ts`、新規）
 
@@ -5964,7 +5964,7 @@ runs:
 - `running`の総数が`def.maxParallel`未満であること
 - `def.runs`に書かれた順で埋める（`scheduler.ts`と同じく再現性のため）
 
-**失敗の伝播は決め打ちしない。** あるrunが`failed`になっても、それに依存する後続runは単に`dependsOn`の充足条件（`done`であること）を満たさないため開始されないままになるだけで、それ以上の処理（例えば`skipped`扱いにする等）はしない。それ以外の独立した`pending`（`failed`なrunに依存しない）は引き続き開始対象になる。
+**この段（W12-2）の時点では失敗の伝播を決め打ちしなかった。** あるrunが`failed`になっても、それに依存する後続runは単に`dependsOn`の充足条件（`done`であること）を満たさないため開始されないまま`pending`に留まるだけで、それ以上の処理（`skipped`扱いにする等）はしなかった。それ以外の独立した`pending`（`failed`なrunに依存しない）は引き続き開始対象のまま。**→ W12-3（§16.37.3）で、このまま`pending`に留まり続けていたrunを`skipped`（理由付き）へ倒す`propagateProgramFailures`を追加した。**
 
 ##### 同時実行数の上限（`maxParallel`）
 
@@ -6011,7 +6011,7 @@ W12-1の永続化（`ProgramStore`・`reconcileProgramStateOnReload`）と組み
 2. 現れなければ（定義ファイルが読めない等で復元自体に失敗した）、`reconcileProgramStateOnReload`が付けた`failed`をそのまま確定値として扱う（訂正しない）
 3. 現れれば、その最新の`outcome`（`scheduler.ts`の`RunOutcome`）へ`reapplyLiveRunOutcome`（`programState.ts`、新設）で合わせ直す。`running`ならプログラム状態を`running`へ戻したうえで追跡表（`trackedRuns`）へ再登録し、`running`以外（`succeeded`/`failed`/`blocked`/`aborted`）ならその場で`markRunFinished`相当の確定状態へ進める
 4. 最後に全プログラムぶん`pumpProgram`を呼び、訂正後の状態から続きの波を計算する。`nextProgramRunsToStart`が改めて依存関係を評価し、次のいずれかが起きる:
-   - W10で再開されず本当に`failed`のまま確定したrunに依存していた`pending`のrun: 依存が`done`ではなくなったため開始されない（自然に停止したまま。失敗の伝播そのものは(3)の担当）
+   - W10で再開されず本当に`failed`のまま確定したrunに依存していた`pending`のrun: 依存が`done`ではなくなったため開始されない（この時点では自然に停止したまま。W12-3で`propagateProgramFailures`が`skipped`へ倒すようになった。§16.37.3参照）
    - `failed`のrunに依存しない独立した`pending`のrun、または訂正によって依存先が`done`になった`pending`のrun: `maxParallel`の空きが生まれていれば起動される（「続きの波から進む」の実体）
 
 これにより、プログラム全体を最初からやり直すことも、失敗した箇所を勝手に再試行することもなく、進められるところまで自然に進む。
@@ -6029,3 +6029,75 @@ W12-1の永続化（`ProgramStore`・`reconcileProgramStateOnReload`）と組み
 - `test/unit/programRunner.test.ts`（新規）: `WorkflowRunner`をフェイクの`ProgramWorkflowPort`へ差し替え、`startProgram`/`pumpProgram`が本番と同じ経路（`programScheduler.ts` → `programState.ts` → `programStore.ts`）を通ることを確認。依存の無い同時起動・前段完了待ち・`maxParallel`の枠・起動失敗時の`failed`記録・依存先`failed`後も独立runは再開されること・**W10が同じrunIdを再開していれば依存する後続runも続きの波として起動されること（新規、Issue #605レビュー指摘F1のRED/GREEN確認を含む）**・**W10で再開されず本当に失われていれば暫定`failed`のまま据え置き後続runも起動しないこと（回帰確認）**
 - `test/unit/program.test.ts`: `maxParallel`のパース（既定値・指定値）・検証（範囲外・非整数）を追加
 - `docs/manual-test.md` W-Q: 実VSCode上での確認項目（追記のみ、実施はしない）
+
+#### 16.37.3 失敗の伝播と人による停止（W12-3、Issue #606）
+
+**この段で作るのは、(2)が起動したrunのうち失敗したものを、依存する後続runへ伝播させる処理と、プログラム全体を人の手で止める処理の2つ。** どちらも既存の単発run側（`runState.ts`のタスクの`skipped`道連れ、`WorkflowRunner.stop()`の`haltedByUser`）が持つ考え方を、run一段上のプログラム層へそのまま持ち上げたもの。
+
+##### 失敗の伝播（`programScheduler.ts`の`propagateProgramFailures`）
+
+`ProgramRunState`に`skipped`を追加した（`pending` / `running` / `done` / `failed` / `skipped`の5値）。`failed`は「起動し、実際に失敗した」run、`skipped`は「依存先の失敗または人による停止により、一度も起動されなかった」runで、意味が異なるため別の値にした（単発run側の`TaskState`が`failed`と`skipped`を別の値に持つのと同じ判断）。
+
+`propagateProgramFailures(def, state)`（`programScheduler.ts`、新規の純粋関数）が、`dependsOn`に`failed`または`skipped`のrunを含む`pending`のrunを`skipped`へ倒す。`skipReason`（`programState.ts`の新設の型）に、どの依存先が原因で止まったかを記録する。
+
+```ts
+export type ProgramRunSkipReason =
+  | { kind: 'failedDependency'; failedRunId: string }
+  | { kind: 'haltedByUser' };
+```
+
+**伝播は不動点まで繰り返す。** `def.runs`の記述順が依存元より依存先を先に書いている場合（例: R3→R2の順でR2がR3に依存）、1周の走査だけでは伝播を取りこぼす。1周で1件でも`skipped`にしたら`progressed`フラグで再走査し、変化が無くなるまで繰り返す。`MAX_PROGRAM_RUN_COUNT`（50）が上限のため、最悪でも50周で必ず止まる。
+
+**`skipReason.failedRunId`は直接の依存先（直近のブロッカー）を指し、根本原因まで遡らない。** R1が`failed`→R2が（R1に依存して）`skipped`→R3が（R2に依存して）`skipped`という連鎖の場合、R3の`skipReason.failedRunId`は`R2`であり`R1`ではない。根本原因までの追跡は表示上あった方が親切ではあるが、`propagateProgramFailures`を単純な不動点ループのまま保てる利点を優先し、この段では直接のブロッカーのみを記録する判断にした（`test/unit/programScheduler.test.ts`の連鎖伝播のテストで、この仕様どおりであることを確認している）。
+
+##### 「暫定`failed`」と「確定`failed`」の区別（この段で最も注意した点）
+
+**`propagateProgramFailures`は、確定した`failed`/`skipped`にしか反応してはならない。** §16.37.2「リロード・WSL停止をまたいでも続きの波から進む」で説明したとおり、リロード直後は`reconcileProgramStateOnReload`が`running`だったrun参照を無条件に`failed`へ倒す（暫定値）。この直後、`ProgramRunner.reconcileAfterReload()`が`workflow.listLive()`と突き合わせ、W10が実際に再開できていたrunを`reapplyLiveRunOutcome`で正しい`outcome`へ訂正する（確定値）。
+
+もし`propagateProgramFailures`をこの訂正より前、あるいは訂正と無関係なタイミングで呼んでしまうと、W10が実際には最後まで走らせて成功したrunを「暫定`failed`」のまま見て、それに依存する後続runを`skipped`へ倒してしまう。`skipped`は`markRunSkipped`のガード（対象が`pending`のときのみ遷移する）により、一度`skipped`になった後で依存先が訂正されても`pending`へは戻らない一方通行の終端状態のため、この誤判定は取り消せない事故になる（W10で本来なら続きから進められたはずのrunが、プログラム全体としては永久に止まったままになる）。
+
+**実装では、`propagateProgramFailures`の呼び出し箇所を`ProgramRunner.pumpProgram(programId)`の中の1箇所だけに絞ることで、この事故を構造的に防いだ。** `pumpProgram`は次の2つの経路からしか呼ばれない。
+
+1. リロード直後: `ProgramRunner.reconcileAfterReload()`の末尾（`for (const persisted of this.deps.programStore.list()) { await this.pumpProgram(persisted.programId); }`、W12-2で既にあった構造）。この時点では同じ`reconcileAfterReload()`内で、対象プログラムぶんの`reapplyLiveRunOutcome`による訂正が**先に完了し、`programStore`へ永続化済み**（`await`で直列に処理しているため、`pumpProgram`が読む`programStore.find(programId)`は必ず訂正後の状態を返す）
+2. 生存中のrunの変化: `attach()`が購読する`workflow.onChanged`ハンドラの中で、`markRunFinished`により状態を確定させたあと（W12-2で既にあった構造）
+
+**つまり`pumpProgram`が`propagateProgramFailures`を呼ぶ時点では、その関数が読む`ProgramState`は必ずどちらかの経路で既に確定済みであり、暫定`failed`をそのまま読むことは無い。** 新しい同期処理やロックを追加せずに済んだのは、W12-2が既に「訂正してから`pumpProgram`」という順序を守っていたため。`pumpProgram`内での呼び出し順序は次のとおり: `propagateProgramFailures`で伝播（変化があれば`programStore.update`で永続化）→ `nextProgramRunsToStart`で次の波を計算→ 起動。伝播を先に行うことで、直前に確定した`failed`/`skipped`が同じ`pumpProgram`呼び出し内で次の波の計算にも正しく反映される。
+
+この設計は`test/unit/programRunner.test.ts`の「リロード後、runIdがW10で再開されず本当に失われていれば、暫定`failed`のまま据え置き、依存する後続runはskippedとして走らせない（回帰確認、W12-3で挙動が変わった点を含む）」と、新設の「リロード後、W10が同じrunIdを再開していれば、それに依存する後続runも続きの波として起動される」の両方で確認している。前者は暫定値が確定値としてそのまま`skipped`へ伝播する正常系、後者は暫定値が訂正されて`skipped`化を免れる系で、どちらも`pumpProgram`一箇所からの呼び出しだけで正しく分岐する。
+
+##### 人による停止（`ProgramState.haltedByUser`、`ProgramRunner.haltProgram`）
+
+`ProgramState`に`haltedByUser: boolean`を追加した。単発run側の`RunState.haltedByUser`（design.md §16.35「人が止めたrunは再開しない」）と同じ役割・同じフィールド名を、プログラム層へそのまま持ち上げたもの。
+
+`markProgramHaltedByUser(state)`（`programState.ts`、新設の純粋関数）が、`haltedByUser`を立てたうえで、その時点で`pending`のrun全てを`skipped`（`skipReason: { kind: 'haltedByUser' }`）へ倒す。**`running`のrunは即座には終端状態にしない。** 単発run側の`WorkflowRunner.stop()`が「新規の開始を止める・現在のタスクのループを止めるが、実行中のタスクをその場で強制終了はしない」という非破壊的な停止を選んでいるのと同じ考え方（design.md §16.7「無人実行と停止条件」）。プログラム側は`running`のrunそれぞれに対し`workflow.stop(runId)`（`ProgramWorkflowPort`に新設）を呼ぶだけで、その先の停止処理は単発run側の既存の`stop()`実装にそのまま委ねる。
+
+`nextProgramRunsToStart`の先頭に`if (state.haltedByUser) { return new Set(); }`を追加した。以後どの経路（伝播による新たな`pending`化はそもそも起きないが、念のため）から呼ばれても新規のrun起動が一切発生しないことを、呼び出し側ごとに個別に確認する必要がないよう、この1箇所に集約した。
+
+`ProgramRunner.haltProgram(programId)`の処理順序:
+
+1. 追跡表（`trackedRuns`）から、対象プログラムに属し現在生存中のrunを洗い出し、それぞれへ`workflow.stop(runId)`を呼ぶ
+2. `programStore.update`で`markProgramHaltedByUser`を適用し、`haltedByUser`と`pending`の一括`skipped`化を永続化する
+3. `maybeMarkFinished(programId)`を呼び、その時点で全run済み（`done`/`failed`/`skipped`）ならば`finishedAt`を埋める（停止時点で`running`が無ければ、停止操作そのものでプログラムが完了扱いになる）
+
+**永続化した`haltedByUser`は、ウィンドウのリロードやWSLの再起動をまたいでも自動再開の対象にしない。** `reconcileProgramStateOnReload`が返す状態に`haltedByUser: state.haltedByUser`をそのまま含めるよう修正した（このフィールドを含め忘れると、`haltedByUser`が既存のプログラム定義の再読み込みのたびに`false`へ初期化されてしまい、人が止めたはずのプログラムがリロード後に再開してしまう。修正前はまさにこの不具合を含んでいた）。`reconcileAfterReload()`が呼ぶ`pumpProgram`は`nextProgramRunsToStart`の先頭ガードにより、`haltedByUser`なプログラムに対しては何もrunを起動しない。単発run側の`autoResumeIfEligible`が`rebuilt.runState.haltedByUser`を見て再開をスキップするのと同じ扱いを、プログラム層でも実現している。
+
+##### 既存の単発runへの影響
+
+`ProgramRunner.haltProgram`は`workflow.stop(runId)`（＝`WorkflowRunner.stop`）を呼ぶだけで、`stop`自体の実装や単発run側の`haltedByUser`の意味・保存形式には一切手を入れていない。プログラムを使わない既存の単発run実行・既存の`agent.workflows.stop`コマンドは、この変更の影響を受けない。`isProgramSettled`の判定に`skipped`を追加したことも、`skipped`を持たない既存の永続化済みプログラム（W12-1・W12-2時点で保存されたもの）に対しては、単に`skipped`のrunが存在しないため判定結果が変わらない。
+
+##### ワークフローViewでの表示
+
+**単発runと違い専用のビューはまだ持たない、としていたW12-2時点の判断を、この段で見直した。** 失敗・停止の状態がワークフローViewから読めることが受入基準（Issue #606）に含まれるため、既存のワークフローView（`workflowView.ts`）へプログラム一覧の表示を追加した。専用の新規パネルは作らず、既存パネルに「プログラム」欄を追加する形にとどめている（新規パネルを起こすほどの表示量ではなく、既存のワークフローViewから各runへも導線があるため）。
+
+- `WorkflowViewManager`のコンストラクタへ、任意（optional）の第3引数`ProgramViewPort`（`list()` / `halt(programId)`）を追加した。`ProgramStore` / `ProgramRunner`はこの口を構造的に満たすため、`extension.ts`側はアダプタを挟まず`{ list: () => programStore.list(), halt: (id) => programRunner.haltProgram(id) }`をそのまま渡す。省略可能にしたのは、`test/unit/workflowViewGraph.test.ts`の既存5箇所のインスタンス化を壊さないため
+- 表示更新は`postAll()`（画面初期表示・run切替時）と`onRunnerChanged(runId)`（何らかのrunが変化した時）の両方から`postPrograms()`を呼ぶ形にした。プログラムの状態変化は必ず配下のいずれかのrunの`onChanged`をきっかけに`ProgramRunner`側の`pumpProgram`が動いて起きるため、既存の`onRunnerChanged`にただ乗りするだけで、プログラム専用の変化検知は新設していない
+- 各プログラムの行に、`haltedByUser`が立っておらず`finishedAt`も無い（＝まだ止められる）ときだけ「停止」ボタンを出す。クリックで`vscode.postMessage({ type: 'stopProgram', programId })`を送り、`workflowView.ts`の`handleMessage`が受けて`this.programs.halt(programId)`→`postPrograms()`（即時再描画）を行う
+- 各runの行には、`ProgramRunState`（タスク側の`STATE_LABEL`をそのまま流用）に加え、`skipped`のときは`skipReason`の内容（`failedDependency`なら「Rxの失敗により未着手」、`haltedByUser`なら「人がプログラム全体を停止したため未着手」）を表示する
+- コマンド`agent.workflows.stopProgram`（QuickPickで未完了プログラムを選択し`programRunner.haltProgram`を呼ぶ）を追加した。`agent.workflows.stop`（単発run停止）と対になる形。既存の`agent.workflows.runProgram`のJSDocが「プログラム専用のビューはまだ持たない」としていた記述は、この段の実装に合わせて書き換えた
+
+##### 確かめ方
+
+- `test/unit/programState.test.ts`: `markRunSkipped`（`pending`のみ`skipped`へ遷移・他状態は不変・未知idは無視）、`markProgramHaltedByUser`（`pending`一括`skipped`化・`running`/`done`は不変・二重呼び出しの冪等性）、`reconcileProgramStateOnReload`が`haltedByUser`を素通しすることを追加
+- `test/unit/programScheduler.test.ts`: `propagateProgramFailures`（直接伝播とその理由・連鎖伝播で理由が直近のブロッカーを指すこと・独立runや`running`は不変・伝播対象が無ければ同一参照を返すこと）、`nextProgramRunsToStart`が`haltedByUser`のとき何も返さないこと・依存先が`skipped`のrunも起動しないこと、`isProgramSettled`の終端判定に`skipped`を追加したことを追加
+- `test/unit/programRunner.test.ts`: 失敗の伝播（基本形・R1→R2→R3の連鎖）、`haltProgram`（生存中の子runへの`stop`呼び出し・`pending`の一括`skipped`化・`running`を即終端にしないこと・停止後にリロードをまたいでも再開しないこと）を追加。既存のW12-2の回帰確認テストは、`pending`のまま止め置かれる旧挙動から`skipped`（理由付き）へ倒れる新挙動へ、W12-3による意図した変化として期待値を更新した
+- `docs/manual-test.md` W-Q #### W12-3: 実VSCode上での確認項目（追記のみ、実施はしない）
