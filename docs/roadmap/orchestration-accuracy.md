@@ -1,5 +1,10 @@
 # オーケストレーション実行の精度
 
+書き手: **WF-Hの担当セッションだけが書く。** この文書が WF-H の書き場である
+（[review-and-feature-consolidation.md](review-and-feature-consolidation.md) の
+「docs/roadmap/ の5本の関係」を参照）。運用規約は [ops-rules.md](ops-rules.md)、
+番号の割り当ては [numbering.md](numbering.md) にある。
+
 H1〜H7。
 [review-and-feature-consolidation.md](review-and-feature-consolidation.md)
 の **WF-H（第4波）** が担当する。
@@ -253,3 +258,20 @@ H4〜H7は道具（W4・W10・W12）の上に起動条件を載せる形にな�
 **そこで得た観測は本ドキュメントの項目を裏づけるか、あるいは否定する**。
 着手時には、その時点でドッグフーディングが済んでいるかを確かめ、済んでいれば
 実測を優先して項目を見直す。
+
+## ワークフローとしての実施記録（WF-H）
+
+この文書は項目の仕様を持つ。ここから下は、[review-and-feature-consolidation.md](review-and-feature-consolidation.md) 側で
+WF-H として運営したときの依存・前提・決定・申し送りである（Issue #613 で統合した）。
+
+- 依存: H1〜H3は独立して着手できる。H4はW4、H5はW10・W12、H6・H7はW12の完了が前提
+- 詳細は [orchestration-accuracy.md](orchestration-accuracy.md)
+- **この波だけ出所が違う。** W1〜W12が「ワークフローに何ができるか」を埋めるのに対し、
+  WF-Hが扱うのは**実行の結果が正しいことを機械で確かめる層**である。人手で回したときは
+  全体オーケストレーターが検算・数え直し・実測でこの層を担っていた。拡張機能の
+  オーケストレーターは受け取った報告をそのまま次へ渡す
+- **初版で「割当表に無い依存が1つ見つかった」と書いたが、実測で否定された。** W2（ループ・
+  停滞の検知）とW11のCI待ちは、現時点の実装では経路が繋がっていない（CI待ちは全タスクが
+  終わった後の最終マージ段にあり、その間タスクのターンは発生しない）。**ただしその独立を
+  固定するテストが無い**ため、H5のやることへ回帰テストとして残してある。訂正の経緯は
+  [orchestration-accuracy.md](orchestration-accuracy.md) のH5にある
