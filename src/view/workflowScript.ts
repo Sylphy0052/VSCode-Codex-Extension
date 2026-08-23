@@ -34,6 +34,7 @@ export function workflowScript(): string {
     approvalRejected: '承認拒否',
     dependencyFailed: '依存先の失敗',
     mergeBlocked: '依存先の統合ブロック',
+    mergeBlockedWhileHalted: '依存先の統合ブロック（停止中）',
     mergeFailed: 'マージ失敗',
     runHalted: '実行停止のため未着手',
     reloadInterrupted: 'リロードによる中断',
@@ -110,7 +111,10 @@ export function workflowScript(): string {
     if (task.failure.kind === 'dependencyFailed' && task.failure.failedTaskIds) {
       return label + '（' + task.failure.failedTaskIds.join(', ') + '）';
     }
-    if (task.failure.kind === 'mergeBlocked' && task.failure.blockedTaskIds) {
+    if (
+      (task.failure.kind === 'mergeBlocked' || task.failure.kind === 'mergeBlockedWhileHalted') &&
+      task.failure.blockedTaskIds
+    ) {
       return label + '（' + task.failure.blockedTaskIds.join(', ') + '）';
     }
     return label;

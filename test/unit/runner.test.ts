@@ -3715,13 +3715,20 @@ tasks:
     // 停止は解除されないので、後続は新しいセッションを開かない
     expect(store.find(runId)?.haltedByUser).toBe(true);
     // `markMergeSucceeded`は停止中（`haltedByUser`）を見て、`mergeBlocked`だった後続を
-    // `pending`へ戻さず`skipped`（`runHalted`）のままにする（Issue #432-1）。`pending`に
-    // 戻すと誰にも開始されず`getRunOutcome`が`running`を返し続けてrunが終わらなくなる。
-    // `skipped`のままなら`retryTask`が受理して人が拾い直せる。
+    // `pending`へ戻さず`skipped`（`mergeBlockedWhileHalted`。Issue #527で`runHalted`から
+    // 分離した）のままにする（Issue #432-1）。`pending`に戻すと誰にも開始されず
+    // `getRunOutcome`が`running`を返し続けてrunが終わらなくなる。`skipped`のままなら
+    // `retryTask`が受理して人が拾い直せる。
     expect(store.find(runId)?.tasks['T2']?.state).toBe('skipped');
-    expect(store.find(runId)?.tasks['T2']?.failure).toEqual({ kind: 'runHalted' });
+    expect(store.find(runId)?.tasks['T2']?.failure).toEqual({
+      kind: 'mergeBlockedWhileHalted',
+      blockedTaskIds: ['T1'],
+    });
     expect(store.find(runId)?.tasks['T3']?.state).toBe('skipped');
-    expect(store.find(runId)?.tasks['T3']?.failure).toEqual({ kind: 'runHalted' });
+    expect(store.find(runId)?.tasks['T3']?.failure).toEqual({
+      kind: 'mergeBlockedWhileHalted',
+      blockedTaskIds: ['T1'],
+    });
     expect(codexHost.sessions).toHaveLength(sessionCountAtStop);
   });
 

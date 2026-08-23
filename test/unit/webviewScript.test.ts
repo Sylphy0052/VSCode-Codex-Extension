@@ -343,8 +343,8 @@ describe('workflowScript', () => {
       // `TaskFailureReason`の定義範囲だけを切り出す。同じ`| { readonly kind: '...' }`という
       // 形は`AutoResumeOutcome`など他のdiscriminated unionにも登場するため、範囲を切らずに
       // ファイル全体からkindを拾うと母数が混ざる（コーディネーターが実測で踏みかけた罠。
-      // `grep -cE "^  \| \{ readonly kind: '"`をファイル全体に掛けると15件になり、内訳は
-      // TaskFailureReasonの11件 + AutoResumeOutcomeの4件（nothingToResume /
+      // `grep -cE "^  \| \{ readonly kind: '"`をファイル全体に掛けると16件になり、内訳は
+      // TaskFailureReasonの12件 + AutoResumeOutcomeの4件（nothingToResume /
       // blockedByOtherFailure / blockedByAllowGate / resumed）だった）。
       const typeStart = runStateSource.indexOf('export type TaskFailureReason =');
       expect(typeStart).toBeGreaterThan(0);
@@ -358,9 +358,9 @@ describe('workflowScript', () => {
 
       // 範囲の切り出しに失敗すると0件になりうる。0件だと後続の検査（forループ・空集合同士の
       // Set一致）が何も検査しないまま素通りしてしまうため、件数そのものを先に主張して固定する
-      // （design.md §16.39時点で11種）。kindを足すときはこの数字も11→12へ直すことになり、
+      // （design.md §16.40時点で12種）。kindを足すときはこの数字も直すことになり、
       // それは意図した変更として差分に出る。
-      expect(allFailureKinds).toHaveLength(11);
+      expect(allFailureKinds).toHaveLength(12);
       // 範囲を切らずに拾うとAutoResumeOutcomeの4件が混ざる。正規表現を緩めて範囲チェックが
       // 効かなくなったときに、この4件が入っていないことで検出する。
       const autoResumeOutcomeKinds = [
