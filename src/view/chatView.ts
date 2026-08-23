@@ -43,6 +43,7 @@ import type {
   TaskSessionInput,
 } from '../orchestrator/taskSession';
 import { decoratePanelTitle, deriveSessionActivityState } from './sessionActivity';
+import { buildSessionPanelTitle } from './sessionTitle';
 import { buildItemsDelta } from './stateDelta';
 import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import { APPROVAL_LEVEL_CYCLE, isApprovalLevel } from '../provider/approvalLevel';
@@ -429,13 +430,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const taskConfig = toCodexConfig(input);
     // オーケストレーターセッション（design.md §16.23）・衝突解決セッション
     // （Issue #413 PR4）はタスクと同じ経路で開くが、タブ名だけ分けて人が見分けられるように
-    // する
-    const title =
-      input.mergeResolutionTaskId !== undefined
-        ? `Codex: 衝突解決 ${input.mergeResolutionTaskId}`
-        : input.role === 'orchestrator'
-          ? 'Codex: オーケストレーター'
-          : 'Codex';
+    // する（組み立ては`sessionTitle.ts`。Issue #533）
+    const title = buildSessionPanelTitle(input, 'Codex');
     const entry = this.buildEntry(input.cwd, title, true, taskConfig);
     const pendingKey = this.pendingStarts.begin(entry);
     // タスク間メッセージング（design.md §16.21）。`input.mcp`が渡されていれば、
@@ -560,7 +556,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * 会話の再描画は、webview起動時の `ready` 通知への応答（`postState`）に任せる。
    */
   /** `BaseChatViewManager.showPanel`（基底クラス）が新規作成時に呼ぶ、Codex用のパネル生成。 */
-  protected override createWebviewPanel(entry: ChatPanel, preserveFocus: boolean): vscode.WebviewPanel {
+  protected override createWebviewPanel(
+    entry: ChatPanel,
+    preserveFocus: boolean,
+  ): vscode.WebviewPanel {
     return vscode.window.createWebviewPanel(
       VIEW_TYPE,
       entry.title,
@@ -1521,7 +1520,7 @@ export type { ChatState };
  * Codexが会話内容から付ける名前を優先するが、それが届くまでは最初の指示から作る。
  * 名前が付かないまま会話が進むと、どのタブが何の話か判らなくなるため。
  */
-function deriveTitle(state: ChatState): string | undefined {
+export function deriveTitle(state: ChatState): string | undefined {
   if (state.name !== undefined && state.name !== '') {
     return `Codex: ${state.name}`;
   }

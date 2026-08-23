@@ -4,7 +4,7 @@ import type { Logger } from '../../src/log';
 import type { FileSystemPort } from '../../src/session/ports';
 import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMentions';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
-import { ChatViewManager } from '../../src/view/chatView';
+import { ChatViewManager, deriveTitle } from '../../src/view/chatView';
 import { STATE_POST_INTERVAL_MS, type ChatActivity } from '../../src/view/chatShared';
 import { RECAP_INSTRUCTION } from '../../src/appserver/chatSession';
 import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
@@ -1540,5 +1540,46 @@ describe('ChatViewManager', () => {
       expect(__mock.messages.infos).toHaveLength(1);
       expect(__mock.messages.infos[0]).toContain('応答が終わりました');
     });
+  });
+});
+
+describe('deriveTitle（Issue #533、優先順位の固定）', () => {
+  const baseState = (
+    overrides: Partial<Parameters<typeof deriveTitle>[0]> = {},
+  ): Parameters<typeof deriveTitle>[0] =>
+    ({
+      items: [],
+      name: undefined,
+      ...overrides,
+    }) as Parameters<typeof deriveTitle>[0];
+
+  it('名前があれば最優先で使う', () => {
+    const state = baseState({
+      name: '人が付けた名前',
+      items: [{ kind: 'userMessage', id: '1', text: '最初の発言' } as never],
+    });
+    expect(deriveTitle(state)).toBe('Codex: 人が付けた名前');
+  });
+
+  it('名前が無ければ最初の発言から作る', () => {
+    const state = baseState({
+      items: [{ kind: 'userMessage', id: '1', text: '設計を見直したい' } as never],
+    });
+    expect(deriveTitle(state)).toBe('Codex: 設計を見直したい');
+  });
+
+  it('どちらも無ければundefined（タブ名は前の値のまま）', () => {
+    expect(deriveTitle(baseState())).toBeUndefined();
+  });
+
+  // chatView.ts側は state.name !== '' のみで、claudeChatView.ts側の .trim() !== '' と
+  // 挙動が違う（空白のみの名前の扱い）。この差が意図されたものかは未確認。
+  // Issue #533はテストを置く回であって挙動を変える回ではないため、現状をそのまま固定する。
+  it('空白のみの名前は空文字ではないため、そのまま使われる（claudeChatView.tsとの相違点）', () => {
+    const state = baseState({
+      name: '   ',
+      items: [{ kind: 'userMessage', id: '1', text: '最初の発言' } as never],
+    });
+    expect(deriveTitle(state)).toBe('Codex:    ');
   });
 });

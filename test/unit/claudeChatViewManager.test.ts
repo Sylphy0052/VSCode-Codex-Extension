@@ -585,7 +585,12 @@ describe('ClaudeChatViewManager', () => {
       const startCalls = stubStart();
       const rewind = vi
         .spyOn(ClaudeStreamSession.prototype, 'rewindConversationToTurn')
-        .mockResolvedValue({ ok: true, prefillText: '元の発言', error: undefined, succeededCount: 3 });
+        .mockResolvedValue({
+          ok: true,
+          prefillText: '元の発言',
+          error: undefined,
+          succeededCount: 3,
+        });
       const { manager } = createManager();
 
       await manager.openForkFromTurn(
@@ -638,15 +643,15 @@ describe('ClaudeChatViewManager', () => {
 
       // CLIの生の文言（'stale target'）は画面へ出さず、日本語へマッピングした文言を出す
       expect(__mock.messages.errors.some((m) => m.includes('stale target'))).toBe(false);
-      expect(
-        __mock.messages.errors.some((m) => m.includes('会話がその後に進んでいる')),
-      ).toBe(true);
+      expect(__mock.messages.errors.some((m) => m.includes('会話がその後に進んでいる'))).toBe(true);
       const panel = __mock.lastCreatedPanel();
       expect(panel?.disposed).toBe(true);
       expect(
         panel?.webview.sent.some(
           (m) =>
-            typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'insertComposerText',
+            typeof m === 'object' &&
+            m !== null &&
+            (m as { type?: unknown }).type === 'insertComposerText',
         ),
       ).toBe(false);
     });
@@ -673,7 +678,9 @@ describe('ClaudeChatViewManager', () => {
       // 途中まで戻った不整合な状態のタブは、ユーザーがやり直せるよう残す（黙って閉じない）
       expect(panel?.disposed).toBe(false);
       expect(
-        __mock.messages.errors.some((m) => m.includes('不整合') && m.includes('会話がその後に進んでいる')),
+        __mock.messages.errors.some(
+          (m) => m.includes('不整合') && m.includes('会話がその後に進んでいる'),
+        ),
       ).toBe(true);
       const session = sessions[0];
       if (session === undefined) {
@@ -1097,6 +1104,17 @@ describe('deriveTitle（issue #199の名前解決順）', () => {
   it('どちらも無ければ undefined（タブ名は前の値のまま）', () => {
     expect(deriveTitle(baseState())).toBeUndefined();
   });
+
+  // claudeChatView.ts側は .trim() !== '' で判定しており、chatView.ts側の state.name !== ''
+  // と挙動が違う（空白のみの名前の扱い）。この差が意図されたものかは未確認。
+  // Issue #533はテストを置く回であって挙動を変える回ではないため、現状をそのまま固定する。
+  it('空白のみの名前は空文字扱いとなり、最初の発言から作る（chatView.tsとの相違点）', () => {
+    const state = baseState({
+      name: '   ',
+      items: [{ kind: 'userMessage', id: '1', text: '最初の発言' } as never],
+    });
+    expect(deriveTitle(state)).toBe('Claude Code: 最初の発言');
+  });
 });
 
 /**
@@ -1162,9 +1180,7 @@ describe('ClaudeChatViewManagerのメモリ追記（issue #6/#144）', () => {
     const lastMessages = stateMessagesOf(panel);
     const lastItems = lastMessages[lastMessages.length - 1]?.state.items ?? [];
     expect(
-      lastItems.some(
-        (i) => i.detail === 'メモリへ追記しました: /workspace/root/CLAUDE.md',
-      ),
+      lastItems.some((i) => i.detail === 'メモリへ追記しました: /workspace/root/CLAUDE.md'),
     ).toBe(true);
   });
 
@@ -1186,9 +1202,7 @@ describe('ClaudeChatViewManagerのメモリ追記（issue #6/#144）', () => {
     const lastMessages = stateMessagesOf(panel);
     const lastItems = lastMessages[lastMessages.length - 1]?.state.items ?? [];
     expect(
-      lastItems.some((i) =>
-        i.detail?.includes('リンク先: /home/user/dotfiles/CLAUDE.md'),
-      ),
+      lastItems.some((i) => i.detail?.includes('リンク先: /home/user/dotfiles/CLAUDE.md')),
     ).toBe(true);
   });
 
@@ -1210,9 +1224,7 @@ describe('ClaudeChatViewManagerのメモリ追記（issue #6/#144）', () => {
     ]);
     const lastMessages = stateMessagesOf(panel);
     const lastItems = lastMessages[lastMessages.length - 1]?.state.items ?? [];
-    expect(
-      lastItems.some((i) => i.detail?.includes('実体のパスを特定できません')),
-    ).toBe(true);
+    expect(lastItems.some((i) => i.detail?.includes('実体のパスを特定できません'))).toBe(true);
   });
 
   it('確認時と書き込み直前でシンボリックリンクの解決結果が食い違えば、書き込まずエラーを出す（TOCTOU対策）', async () => {
@@ -2344,8 +2356,7 @@ describe('X3: 脇道の質問のmanager層配線（issue #334、issue #340横断
     // 最後の呼び出しに渡ったhistoryは、直前まで（total-1件）の応答が
     // capSideQuestionHistoryでMAX_SIDE_QUESTION_HISTORY件へ切り詰められている
     const lastCallHistory = askSideQuestion.mock.calls[total - 1]?.[1] as
-      | readonly SideQuestionHistoryEntry[]
-      | undefined;
+      readonly SideQuestionHistoryEntry[] | undefined;
     expect(lastCallHistory).toHaveLength(MAX_SIDE_QUESTION_HISTORY);
     // 古いものから捨てられ（FIFO）、直近の質問だけが残る
     expect(lastCallHistory?.[0]?.question).toBe(`質問${total - MAX_SIDE_QUESTION_HISTORY}`);

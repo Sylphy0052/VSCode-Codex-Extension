@@ -78,6 +78,7 @@ import {
 } from './chatShared';
 import type { FileMentionCatalog } from '../provider/fileMentions';
 import { decoratePanelTitle, deriveSessionActivityState } from './sessionActivity';
+import { buildSessionPanelTitle } from './sessionTitle';
 import {
   appendMemoryLine,
   buildProjectMemoryCandidates,
@@ -547,13 +548,8 @@ export class ClaudeChatViewManager
     const sessionId = randomSessionId();
     // オーケストレーターセッション（design.md §16.23）・衝突解決セッション
     // （Issue #413 PR4）はタスクと同じ経路で開くが、タブ名だけ分けて人が見分けられるように
-    // する
-    const title =
-      input.mergeResolutionTaskId !== undefined
-        ? `${LABEL}: 衝突解決 ${input.mergeResolutionTaskId}`
-        : input.role === 'orchestrator'
-          ? `${LABEL}: オーケストレーター`
-          : LABEL;
+    // する（組み立ては`sessionTitle.ts`。Issue #533）
+    const title = buildSessionPanelTitle(input, LABEL);
     const entry = this.buildEntry(input.cwd, title, true, taskConfig);
     this.panels.set(sessionId, entry);
     entry.session.start({
@@ -2003,7 +1999,6 @@ export class ClaudeChatViewManager
     );
     return choice === '実行する';
   }
-
 }
 
 /**
