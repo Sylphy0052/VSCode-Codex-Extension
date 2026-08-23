@@ -8818,7 +8818,12 @@ tasks:
 
       expect(outcome.accepted).toBe(false);
       expect(outcome.reason).toContain('循環');
-      expect(runner.getSnapshot(runId)?.tasks.map((t) => t.id).sort()).toEqual(['T1', 'T2']);
+      expect(
+        runner
+          .getSnapshot(runId)
+          ?.tasks.map((t) => t.id)
+          .sort(),
+      ).toEqual(['T1', 'T2']);
     });
 
     it('add_taskは上限件数を超える追加を適用前に拒否する', async () => {
@@ -8888,7 +8893,12 @@ tasks:
       expect(approvalMode.accepted).toBe(false);
       expect(approvalMode.reason).toContain('approvalMode');
       // どれも適用されていない
-      expect(runner.getSnapshot(runId)?.tasks.map((t) => t.id).sort()).toEqual(['T1', 'T2']);
+      expect(
+        runner
+          .getSnapshot(runId)
+          ?.tasks.map((t) => t.id)
+          .sort(),
+      ).toEqual(['T1', 'T2']);
     });
 
     it('add_taskは適用した内容を全文でワークフローViewの警告欄へ残す', async () => {
@@ -8927,7 +8937,12 @@ tasks:
 
       expect(outcome.accepted).toBe(false);
       expect(outcome.reason).toContain('stop_task');
-      expect(runner.getSnapshot(runId)?.tasks.map((t) => t.id).sort()).toEqual(['T1', 'T2']);
+      expect(
+        runner
+          .getSnapshot(runId)
+          ?.tasks.map((t) => t.id)
+          .sort(),
+      ).toEqual(['T1', 'T2']);
     });
 
     it(
@@ -9009,9 +9024,7 @@ tasks:
       expect(outcome.accepted).toBe(true);
       const snapshot = runner.getSnapshot(runId);
       expect(snapshot?.tasks.find((t) => t.id === 'T3')?.dependsOn).toEqual(['T1']);
-      const warning = snapshot?.warnings.find(
-        (w) => w.kind === 'orchestratorDependenciesChanged',
-      );
+      const warning = snapshot?.warnings.find((w) => w.kind === 'orchestratorDependenciesChanged');
       expect(warning?.taskId).toBe('T3');
       expect(warning?.message).toContain('変更前: (なし)');
       expect(warning?.message).toContain('変更後: T1');
@@ -9028,6 +9041,168 @@ tasks:
       expect(outcome.accepted).toBe(false);
       expect(outcome.reason).toContain('T9');
     });
+
+    it(
+      'リロード後、add_taskで足したタスクの永続状態は定義（YAML）に無ければ落とされ、' +
+        'runが完走できる（レビューblocking指摘、2026-08-23。§16.29「どの経路からもpersist' +
+        'を呼ばない」はlive.defには成り立つが、live.runStateは他の経路のpersistで永続化される）',
+      async () => {
+        const { deps, state } = fakeMessagingDeps();
+        const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, { messaging: deps });
+        const result = await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        control(state).addTask({ id: 'T3', prompt: 'p3', done: 'd3', dependsOn: [] });
+
+        // T1・T2・T3のいずれかが完了すると、その経路のpersist()がlive.runState.tasksを
+        // 丸ごと書き出す。add_task自身はpersistを呼ばないが、この持続化でT3のidが
+        // 永続データへ入る（レビュー指摘の核心）
+        // TWO_TASK_YAMLのmaxParallelは2で、T1・T2が既にその枠を使い切っているため、
+        // 追加したT3は空き枠が出るまでpendingのまま（`nextTasksToStart`のcapacity判定）。
+        // T1・T2を終わらせてpersist()させた後、T3がpendingのまま永続データへ入っていた
+        // 瞬間（capacityが空く直前）を模すため、T3の永続状態を直接差し込む
+        // （T3自身が実際に走り出すタイミングとは切り離し、「追加した直後にpersistが
+        // 走った」という事実だけを再現する）
+        const t1 = codexHost.byTaskId('T1');
+        t1.finish('done', doneState('T1の応答'));
+        const t2 = codexHost.byTaskId('T2');
+        t2.finish('done', doneState('T2の応答'));
+        await flush();
+
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+        expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+
+        await store.update(runId, (current) => {
+          if (current === undefined) {
+            throw new Error('persisted run not found');
+          }
+          const t1 = current.tasks['T1'];
+          if (t1 === undefined) {
+            throw new Error('T1 not found in persisted run');
+          }
+          return {
+            ...current,
+            tasks: {
+              ...current.tasks,
+              T3: {
+                ...t1,
+                state: 'pending',
+                submissionCount: 0,
+                retryCount: 0,
+                manualRetryCount: 0,
+                failure: undefined,
+                sessionId: undefined,
+                cwd: undefined,
+                branch: undefined,
+                pullRequestNumber: undefined,
+                pullRequestUrl: undefined,
+              },
+            },
+          };
+        });
+
+        expect(store.find(runId)?.tasks['T3']?.state).toBe('pending');
+
+        // 新しいプロセス（リロード後）を模す。定義ファイルは元のTWO_TASK_YAML
+        // （add_taskで足したT3を含まない）のまま
+        const reloadedRunner = new WorkflowRunner({
+          readAutoResume: () => false,
+          hosts: { codex: new FakeHost(), claude: new FakeHost() },
+          worktreeQueue: new WorktreeCreationQueue(),
+          git: fakeGit(),
+          fs: identityFs,
+          filePort: filePort(TWO_TASK_YAML),
+          store,
+          log: fakeLogger,
+          readBaseline: () => ({
+            codexSandbox: 'read-only',
+            codexApprovalMode: 'on-request',
+            claudePermissionMode: 'manual',
+            allowAutoApprove: true,
+            allowClaudeBypassPermissions: false,
+          }),
+        });
+        await reloadedRunner.restoreRunsForView();
+
+        const snapshot = reloadedRunner.getSnapshot(runId);
+        // 定義に無いT3はタスク一覧に出ない（YAML本来の2件だけに戻る）
+        expect(snapshot?.tasks.map((t) => t.id).sort()).toEqual(['T1', 'T2']);
+        // T1・T2はどちらもdoneのため、runは完走（succeeded）として扱えるはず
+        expect(snapshot?.outcome).toBe('succeeded');
+      },
+    );
+
+    it(
+      'リロード後、remove_taskで消したタスクが定義（YAML）に残っていれば、' +
+        'pendingとして復元され直す（レビューblocking指摘、2026-08-23。消したまま定義に残る' +
+        'タスクを黙って無視すると、一度も走っていないタスクがあるのにrunが完走扱いになりうる）',
+      async () => {
+        // maxParallel: 1にして、T1が走行中の間はT2がpendingのまま残るようにする
+        // （TWO_TASK_YAMLのmaxParallel: 2だと両方すぐ走り始め、pendingのタスクを
+        // 用意できない）
+        const ONE_AT_A_TIME_YAML = `
+version: 1
+name: task-edit-remove-reload-test
+defaults:
+  maxParallel: 1
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+        const { deps, state } = fakeMessagingDeps();
+        const { runner, codexHost, store } = createHarness(ONE_AT_A_TIME_YAML, {
+          messaging: deps,
+        });
+        const result = await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        // T2はpendingのまま（maxParallel: 1でT1が枠を使い切っているため）
+        expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2')?.state).toBe('pending');
+        const removeOutcome = control(state).removeTask('T2');
+        expect(removeOutcome.accepted).toBe(true);
+
+        const t1 = codexHost.byTaskId('T1');
+        t1.finish('done', doneState('T1の応答'));
+        await flush();
+
+        // 永続データにT2は無い（remove_task後にpersistされたため）
+        expect(store.find(runId)?.tasks['T2']).toBeUndefined();
+
+        // 新しいプロセス（リロード後）を模す。定義ファイルは元のONE_AT_A_TIME_YAML
+        // （remove_taskで消したT2を含む）のまま
+        const reloadedRunner = new WorkflowRunner({
+          readAutoResume: () => false,
+          hosts: { codex: new FakeHost(), claude: new FakeHost() },
+          worktreeQueue: new WorktreeCreationQueue(),
+          git: fakeGit(),
+          fs: identityFs,
+          filePort: filePort(ONE_AT_A_TIME_YAML),
+          store,
+          log: fakeLogger,
+          readBaseline: () => ({
+            codexSandbox: 'read-only',
+            codexApprovalMode: 'on-request',
+            claudePermissionMode: 'manual',
+            allowAutoApprove: true,
+            allowClaudeBypassPermissions: false,
+          }),
+        });
+        await reloadedRunner.restoreRunsForView();
+
+        const snapshot = reloadedRunner.getSnapshot(runId);
+        // T2が定義どおりタスク一覧に戻り、pendingとして数えられる（完走扱いにしない）
+        const t2Snapshot = snapshot?.tasks.find((t) => t.id === 'T2');
+        expect(t2Snapshot).toBeDefined();
+        expect(t2Snapshot?.state).toBe('pending');
+        expect(snapshot?.outcome).toBe('running');
+      },
+    );
   },
 );
 
@@ -9255,20 +9430,17 @@ tasks:
     },
   );
 
-  it(
-    '回答待ちの間は人の自由記述の発話を送らせない（design.md §16.33「回答の経路を一意にする」）',
-    async () => {
-      const { deps, state } = fakeMessagingDeps();
-      const { runner } = createHarness(YAML_ONE, { messaging: deps });
-      const result = await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
-      const runId = result.runId as string;
-      await flush();
+  it('回答待ちの間は人の自由記述の発話を送らせない（design.md §16.33「回答の経路を一意にする」）', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner } = createHarness(YAML_ONE, { messaging: deps });
+    const result = await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
 
-      control(state).askUser('どちらへ進める？', ['A案', 'B案']);
+    control(state).askUser('どちらへ進める？', ['A案', 'B案']);
 
-      expect(runner.sendToOrchestrator(runId, '横から一言')).toBe(false);
-    },
-  );
+    expect(runner.sendToOrchestrator(runId, '横から一言')).toBe(false);
+  });
 
   it(
     'リロード後は永続化された問いの文言だけ復元し、hasLiveSession: falseで答えられない' +
@@ -9352,9 +9524,7 @@ tasks:
   ): { reloadedRunner: WorkflowRunner; newCodexHost: FakeHost } {
     const newCodexHost = new FakeHost();
     const reloadedRunner = new WorkflowRunner({
-      ...(options?.readAutoResume !== undefined
-        ? { readAutoResume: options.readAutoResume }
-        : {}),
+      ...(options?.readAutoResume !== undefined ? { readAutoResume: options.readAutoResume } : {}),
       ...(options?.readMaxAutoResumeAttempts !== undefined
         ? { readMaxAutoResumeAttempts: options.readMaxAutoResumeAttempts }
         : {}),

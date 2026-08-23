@@ -166,7 +166,12 @@ export interface RunState {
   readonly haltedByUser: boolean;
 }
 
-const initialTaskRunState: TaskRunState = {
+/**
+ * `pending`タスクの初期値。`createRunState`のほか、`runnerRestore.ts`の復元時の突き合わせ
+ * （定義にはあるが永続データに無いタスクをpendingとして補う。design.md §16.29「リロード時の
+ * 突き合わせ」、レビューblocking指摘、2026-08-23）でも同じ初期値を使うため公開する。
+ */
+export const initialTaskRunState: TaskRunState = {
   state: 'pending',
   submissionCount: 0,
   retryCount: 0,

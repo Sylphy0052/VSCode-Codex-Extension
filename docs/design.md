@@ -5304,7 +5304,9 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 
 #### 変えないもの（Issue #338の非交渉事項）
 
-- **YAMLファイルは書き換えない。** 3つのツールはすべて実行中の定義（`LiveRun.def`、メモリ上のみ）を直接書き換え、`WorkflowRunner`のどの経路からも`persist`を呼ばない。ウィンドウを再読み込みすればYAML本来の内容へ戻る。既存の`update_task_prompt`（`continuePromptOverride`）と同じ「実行中だけの上書き」の流儀を踏襲した
+- **YAMLファイルは書き換えない。** 3つのツール自身は実行中の定義（`LiveRun.def`、メモリ上のみ）を直接書き換え、この3ツール自身の経路からは`persist`を呼ばない。既存の`update_task_prompt`（`continuePromptOverride`）と同じ「実行中だけの上書き」の流儀を踏襲した
+
+  **ただし`live.runState`（タスクの状態）は、この3ツール自身が呼ばなくても別の経路（他タスクの完了・`pump`など、`self.persist`を呼ぶ十数箇所）で結果的に永続化される（レビューblocking指摘、2026-08-23）。** `add_task`で加えたタスクのidが、後続の何らかのpersistでたまたま永続データに紛れ込むことがあり、`remove_task`で消したタスクのidは、後続のpersistで永続データから消える。ウィンドウを再読み込みすると、リロード後の復元（`runnerRestore.ts`の`reconcileRestoredTaskStates`）が、この永続データと再読み込みした定義ファイル（YAML本来の内容）を**突き合わせて**ずれを解消する：定義に無いタスクの永続状態は復元しない、永続データに無い定義側のタスクは`pending`として補う。突き合わせで実際に何かを落とす・補うと`reloadTaskDefMismatch`警告が出る。この突き合わせがあって初めて「ウィンドウを再読み込みすればYAML本来の内容へ戻る」が成り立つ（突き合わせ自体の詳細は`runnerRestore.ts`のJSDoc参照。人がrunの途中でYAMLを直接編集してからリロードしたときにも起こりうる、元からあった穴の恒久修正でもある）
 - **追加したタスクは既存の検証を必ず通る。** id形式・重複/大小無視の衝突・循環依存・タスク数上限（`MAX_TASK_COUNT`=50）・プロンプト長上限・未定義参照は`validateWorkflow`（§16.2）を候補定義に対してそのまま実行し、`errors`が1件でもあれば適用前に拒否して理由をオーケストレーターへ返す。新しい検証ロジックは作らず、既存の1箇所を再利用する
 - **オーケストレーターは権限を緩められない。** `add_task`の引数に`autoApprove`/`allow`/`sandbox`/`approvalMode`のいずれかが含まれていたら、値を問わず（`false`や`[]`のような無害に見える値でも）即座に拒否する。権限の緩和は人が書いたYAML定義からしか発生しない、という§16.16の信頼境界を、この新しい入口でも維持する
 - **実行中のタスクは消せない。** `remove_task`はタスクの状態が`pending`（まだ開始していない）の場合に限って許可する。動いているタスクを止めたい場合は既存の`stop_task`を使う経路へ誘導する

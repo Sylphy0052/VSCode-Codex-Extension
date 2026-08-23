@@ -629,7 +629,20 @@ export interface WorkflowWarning {
      * 差し替えた（design.md §16.29、roadmap W4、Issue #338）。変更前後の`dependsOn`を
      * 全文で残す。
      */
-    | 'orchestratorDependenciesChanged';
+    | 'orchestratorDependenciesChanged'
+    /**
+     * リロードで復元するとき、永続化されたタスク状態と定義（YAML）を突き合わせた結果、
+     * 一方にしか無いタスクがあった（design.md §16.29「リロード時の突き合わせ」、
+     * レビューblocking指摘、2026-08-23）。
+     *
+     * - 永続データにだけあるタスク（`add_task`で加えたがYAMLには無い）は状態を落とす
+     * - 定義にだけあるタスク（`remove_task`で消したがYAMLには残っている）は`pending`として補う
+     *
+     * どちらも黙って行うと「オーケストレーターが実行中に加えた・消したタスクは
+     * リロードでYAML本来の内容へ戻る」という§16.29の主張が実際に成り立ったのか
+     * Viewから確認できないため、突き合わせが実際に何かを変えたときだけ出す。
+     */
+    | 'reloadTaskDefMismatch';
   /** ワークフロー全体に関わる警告（gitignoreなど）は undefined。 */
   taskId: string | undefined;
   message: string;
