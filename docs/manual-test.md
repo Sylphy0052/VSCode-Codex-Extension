@@ -100,13 +100,13 @@ TreeItemの値までしか確かめられないため、各ケースの手順は
 C-13 / C-18 / C-19 / C-21（下の「機械」に残っている）。ケースを足したときは、見出しを足すのと
 同時に下の3行のいずれかへも足す。
 
-- **機械**（17件。うち16件を自動化済み。C-13b以外の16件のうち15件がIssue #187
-  （`chatCodexApprovals.test.ts` / `chatCodexThreadFlow.test.ts`）、C-13bはL群と合わせて
-  Issue #188）: C-03 / C-04 / C-05（承認カードの許可・拒否・セッション内許可がコマンド単位で
+- **機械**（17件。うち自動化済みは16件。Issue #187が15件
+  （`chatCodexApprovals.test.ts` / `chatCodexThreadFlow.test.ts`）、Issue #188がC-13bの
+  1件。残る1件はC-11のウィンドウリロード経路で、実機に残す）: C-03 / C-04 / C-05（承認カードの許可・拒否・セッション内許可がコマンド単位で
   あること）、C-06（閉じたときの `cancel`）、C-07（`turn/interrupt` にturnIdが乗る）、C-08
   （`thread/name/updated`）、C-09（`thread/name/set`）、C-10（`thread/fork` の引き継ぎ範囲）、
   C-11（`thread/resume`の呼び出しとスナップショット適用はC-12と共通処理として自動化済み。
-  ウィンドウリロードで実際にパネルが復元される経路は実機に残す＝17件中の残り1件）、C-12
+  ウィンドウリロードで実際にパネルが復元される経路は実機に残す）、C-12
   （二重に開かない）、C-13（`turn/steer` と待ち行列の分岐）、C-13b（Claude Code画面・
   stream-json側の挙動）、C-18 / C-19（問い合わせ・elicitationの往復と拒否・取り消しの扱い）、
   C-21（`serverRequest/resolved`）、C-41（`/init` が送る指示文）、C-42（`thread/fork` の
