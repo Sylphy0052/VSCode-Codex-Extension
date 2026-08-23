@@ -92,3 +92,53 @@ AssertionError: expected 'waitingApproval' not to be 'waitingApproval' // Object
 4. 設定キーを新設する場合は `docs/design.md` §16.16（設定一覧）とREADMEを更新。新設の節が要る場合は §16.39 を使う
 5. `docs/manual-test.md` へケースを足す必要が出たら、番号を自分で決めず報告する
 6. `gh pr create` で main宛てPR作成（マージはしない）
+
+## 5. 第2段階（実装）チェックポイント
+
+### 5-1. 方針（コーディネーター確定）
+
+- 案A-2 + 案B の両方（片方だけの半端な修正はしない）
+- A-2: 新設定キー `agent.workflows.taskApprovalTimeoutSec`（`mergeApprovalTimeoutSec`の使い回しはしない。§16.17/§16.5の記述が事実と食い違うため）
+- B: `checkWaitingReplyStalls`（`runnerMessaging.ts`）の`activeStates`から`waitingApproval`を除外し、経路1のwaitingReply解放をwaitingApprovalが1件でも塞ぐ副次効果を止める
+- 解放後の状態は`blocked`ではなく`failed`＋新しい`failure.kind`。新kind名は当初`approvalTimedOut`だったが、`runnerMerge.ts`の`localOnlyStopKind: 'approvalTimeout'`/`MergeResolutionEntry.approvalTimeoutTimer`（既存16箇所、マージ解決セッション専用・`blocked`行き）と1文字違いで衝突しやすいため、コーディネーターの指示で`taskApprovalTimedOut`へ訂正
+- 新kindの3性質: (1)`retries`の自動再試行対象にしない、(2)`approvalRejected`（人の拒否）とは区別、(3)`haltedByUser`には触れない
+- W10自動再開（`applyAutoResume`）のホワイトリストは無改修のまま、新kindは自動的に対象外（構造で担保、テストで固定）
+
+### 5-2. 実装した変更（ファイル別）
+
+- `src/orchestrator/runState.ts`: `TaskFailureReason`ユニオンの末尾（`reloadInterrupted`の後）に`{ readonly kind: 'taskApprovalTimedOut' }`を追加（JSDocで`approvalTimeout`との区別・3性質・auto-resume除外を明記）。`markApprovalRejected`の直後に`markTaskApprovalTimedOut(run, tasks, taskId)`を新設（構造は`markApprovalRejected`と同型）
+- `src/orchestrator/runnerApproval.ts`（新規）: `DEFAULT_TASK_APPROVAL_TIMEOUT_SEC = 3600`、`scheduleTaskApprovalTimeout`（公開）、`handleTaskApprovalTimeout`（非公開）。`runnerMerge.ts`の`scheduleApprovalTimeout`/`handleMergeApprovalTimeout`と同じ「毎回clearTimeoutしてから条件付きsetTimeout+unref」パターン。多層防御（`waitingApprovalSinceMs`の一致チェック＋現在の`state`再確認）も同型
+- `src/orchestrator/runner.ts`: `WorkflowRunnerDeps.readTaskApprovalTimeoutSec?`追加。`LiveTask`に`waitingApprovalSinceMs`/`taskApprovalTimeoutTimer`/`taskApprovalTimedOut`を追加。`handleApproval()`で`markWaitingApproval`直後にタイマー起動、`onApprovalResolved()`でタイマー解除、`onTaskFinished()`で`reason==='taskStopped' && liveTask?.taskApprovalTimedOut===true`のときだけ`markTaskApprovalTimedOut`へ分岐（それ以外は従来どおり`applyLoopStopReason`）
+- `src/orchestrator/runnerMessaging.ts`: `checkWaitingReplyStalls`の`activeStates`収集条件に`&& s.state !== 'waitingApproval'`を追加（案B）
+- `src/config.ts`: `taskApprovalTimeoutSec`フィールド・`normalizeTaskApprovalTimeoutSec`（`normalizeMergeApprovalTimeoutSec`と同型、`MAX_TIMEOUT_SEC=2147483`共有）
+- `src/extension.ts`: `readTaskApprovalTimeoutSec`の配線を追加
+- `package.json`: `contributes.configuration.properties`に`agent.workflows.taskApprovalTimeoutSec`を`mergeApprovalTimeoutSec`の直後へ追加（type number, default 3600, min 1, max 2147483）
+- `README.md`: ワークフロー設定表に行を追加（Bash/python3経由。Edit/Writeでの直接編集はしていない）
+- `docs/design.md`: §16.16の表に行を追加し「全15項目」→「全16項目」（実際に行数を数え直して修正）、§16.17に2つのタイムアウトキーが互いに独立している旨の補足段落を追加、新設 §16.39「通常タスクの承認待ちにも時間切れの解放を持たせる（Issue #579）」を末尾に追加（`approvalTimeout`（マージ、→`blocked`）と`taskApprovalTimedOut`（通常タスク、→`failed`）が別物である旨も明記）
+- `src/view/workflowScript.ts`: **意図的に未修正**。`FAILURE_LABEL[kind] || kind`のフォールバックがあるため新kindは生の英語文字列で表示されるだけでクラッシュはしない。担当範囲（`src/orchestrator/`）外のため、対応要否は保留し報告する
+
+### 5-3. 追加したテスト
+
+- `test/unit/runnerTaskApproval.test.ts`（新規、`runnerDispose.test.ts`と同じ「自己完結ハーネス複製」方針。理由をファイル冒頭JSDocに明記）: RED→GREEN本体、承認が先に来れば時間切れが起きないこと、拒否が先に来れば`approvalRejected`のままなこと（回帰）、`stopTask()`で止めた場合は`manualStop`のままなこと（回帰、タイマーの状態ガードの確認を兼ねる）、依存する後続の`dependencyFailed`/`skipped`カスケードが新kindでも変わらないこと、案Bの副次効果修正（waitingApprovalが1件あっても他タスクのwaitingReplyが経路1で解放されること）の6ケース
+- `test/unit/runState.test.ts`: `markTaskApprovalTimedOut`の状態ガード2ケース、`applyAutoResume`が新kindを「他の失敗」として扱いW10自動再開を諦めさせることの回帰1ケース
+- `test/unit/config.test.ts`: `taskApprovalTimeoutSec`の既定値・指定値・不正値フォールバック・上限、`mergeApprovalTimeoutSec`と互いに影響しないことの計4ケース
+
+### 5-4. 実測結果（すべて第2段階でコマンド実行して確認）
+
+- `npx tsc --noEmit`: 0エラー
+- `npm run lint`: 0警告
+- `npm test`: `Test Files 175 passed (175)` / `Tests 3813 passed (3813)`（基準174/3800を超過。新規テスト計13ケース分の増分と一致）
+- `XDG_RUNTIME_DIR=/run/user/1000 npm run test:integration:xvfb`（前景実行）: `81 passing (44s)`、`Exit code: 0`、failing 0件
+
+### 5-5. 未解決・報告事項（コーディネーターへの確認待ち）
+
+1. `docs/manual-test.md`: `mergeApprovalTimeoutSec`/`waitingApproval`/`承認待ち.*タイムアウト`でgrepしたが、時間切れ専用のケースは既存に無い（3600秒待つ手動テストは非現実的なため、そもそも要らない可能性が高いという推論）。ケース追加が必要かどうか、必要ならケース番号を指示してほしい（自分では採番しない）
+2. `src/view/workflowScript.ts`の`FAILURE_LABEL`マップに`taskApprovalTimedOut`の日本語ラベルが無い（フォールバックで生の英語文字列が出るだけでクラッシュはしない）。担当範囲外のため未着手。対応要否・担当を指示してほしい
+
+## 6. 次の一手（この引き継ぎ更新時点）
+
+1. `git add`で変更ファイルをステージし、Conventional Commits短形でコミット（`--no-verify`は使わない）
+2. `git diff --stat`で差分がスコープ内（上記ファイル一覧）に収まっていることを再確認
+3. `gh pr create` で `main` 宛てPRを作成（マージはしない）
+4. `gh pr diff <番号> | grep "^diff --git"` で意図しないファイルが混ざっていないか確認
+5. 上記5-5の2件を含め、実測結果一式をコーディネーターへ報告

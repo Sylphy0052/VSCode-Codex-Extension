@@ -184,7 +184,15 @@ export function checkWaitingReplyStalls(self: WorkflowRunnerInternals, runId: st
   const activeStates = new Map<string, TaskState>();
   const waitingSinceMsByTaskId = new Map<string, number>();
   for (const [taskId, s] of live.runState.tasks) {
-    if (isActiveTaskState(s.state)) {
+    // `waitingApproval`（人の承認待ち）は`activeStates`に含めない（Issue #579、
+    // design.md §16.39）。`detectAllWaitingStalemate`（経路1）は「走行中の全タスクが
+    // `waitingReply`」を条件にするため、承認待ちの解放とは無関係な`waitingApproval`が
+    // 1件混じっているだけで、他のタスクの返信待ち解放まで永久に止まってしまっていた
+    // （承認待ちには`agent.workflows.taskApprovalTimeoutSec`という別の解放経路がある。
+    // `runnerApproval.ts`参照）。除いても`isActiveTaskState`自体（`maxParallel`の空き数
+    // 計算・実行全体の終了判定）は変えない——ここはこの関数専用のローカルな`Map`
+    // 構築なので、影響は経路1の判定にだけ閉じる
+    if (isActiveTaskState(s.state) && s.state !== 'waitingApproval') {
       activeStates.set(taskId, s.state);
     }
     if (s.state === 'waitingReply') {

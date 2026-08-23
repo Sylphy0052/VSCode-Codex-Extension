@@ -11,6 +11,7 @@ import {
   markMergeFailed,
   markMergeSucceeded,
   markRunning,
+  markTaskApprovalTimedOut,
   markWaitingApproval,
   markWaitingReply,
   recordSubmissionCount,
@@ -376,6 +377,33 @@ describe('markApprovalRejected', () => {
 
     expect(markApprovalRejected(run, tasks, 'T1')).toBe(before); // runningには効かない
     expect(markApprovalRejected(run, tasks, 'unknown')).toBe(before); // 未知のidも無視する
+  });
+});
+
+describe('markTaskApprovalTimedOut（Issue #579、design.md §16.39）', () => {
+  it('waitingApprovalの時間切れは即failedとして確定し、retriesが残っていても再試行対象にしない', () => {
+    const tasks = chainTasks(3);
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T2');
+    run = markWaitingApproval(run, 'T2');
+
+    run = markTaskApprovalTimedOut(run, tasks, 'T2');
+
+    const t2 = stateOf(run, 'T2');
+    expect(t2.state).toBe('failed');
+    expect(t2.failure).toEqual({ kind: 'taskApprovalTimedOut' });
+    expect(t2.retryCount).toBe(0);
+    expect(stateOf(run, 'T4').state).toBe('skipped');
+  });
+
+  it('waitingApproval以外のタスク・未知のidには効かない', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    const before = run;
+
+    expect(markTaskApprovalTimedOut(run, tasks, 'T1')).toBe(before); // runningには効かない
+    expect(markTaskApprovalTimedOut(run, tasks, 'unknown')).toBe(before); // 未知のidも無視する
   });
 });
 
@@ -1119,6 +1147,22 @@ describe('applyAutoResume（design.md §16.35、roadmap W10、Issue #584）', ()
 
       const outcome = applyAutoResume(run, tasks);
       expect(outcome.kind).toBe('blockedByOtherFailure');
+      expect(stateOf(run, 'T2').state).toBe('failed');
+    },
+  );
+
+  it(
+    'taskApprovalTimedOutは他の理由と同様に自動再開をあきらめさせる' +
+      '（W10のスコープには含めない。design.md §16.39・applyAutoResumeのホワイトリストは無改修）',
+    () => {
+      const tasks = chainTasks();
+      let run = createRunState(tasks);
+      run = withTaskState(run, 'T1', { state: 'failed', failure: { kind: 'taskApprovalTimedOut' } });
+      run = withTaskState(run, 'T2', { state: 'failed', failure: { kind: 'reloadInterrupted' } });
+
+      const outcome = applyAutoResume(run, tasks);
+      expect(outcome.kind).toBe('blockedByOtherFailure');
+      expect(stateOf(run, 'T1').state).toBe('failed');
       expect(stateOf(run, 'T2').state).toBe('failed');
     },
   );

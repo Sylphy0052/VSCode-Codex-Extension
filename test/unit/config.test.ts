@@ -280,6 +280,35 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
     expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(2147483);
   });
 
+  it('taskApprovalTimeoutSecの既定は3600秒（design.md §16.39・DEFAULT_TASK_APPROVAL_TIMEOUT_SEC）', () => {
+    expect(readWorkflowsConfig().taskApprovalTimeoutSec).toBe(3600);
+  });
+
+  it('taskApprovalTimeoutSecは指定値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.taskApprovalTimeoutSec': 60 });
+    expect(readWorkflowsConfig().taskApprovalTimeoutSec).toBe(60);
+  });
+
+  it('taskApprovalTimeoutSecが数値でない・1未満・上限超過なら既定値へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.taskApprovalTimeoutSec': 'たくさん' });
+    expect(readWorkflowsConfig().taskApprovalTimeoutSec).toBe(3600);
+
+    __mock.setConfig('agent', { 'workflows.taskApprovalTimeoutSec': 0 });
+    expect(readWorkflowsConfig().taskApprovalTimeoutSec).toBe(3600);
+
+    __mock.setConfig('agent', { 'workflows.taskApprovalTimeoutSec': 2147484 });
+    expect(readWorkflowsConfig().taskApprovalTimeoutSec).toBe(3600);
+  });
+
+  it('mergeApprovalTimeoutSecとtaskApprovalTimeoutSecは互いに影響しない（design.md §16.17）', () => {
+    __mock.setConfig('agent', {
+      'workflows.mergeApprovalTimeoutSec': 60,
+      'workflows.taskApprovalTimeoutSec': 120,
+    });
+    expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(60);
+    expect(readWorkflowsConfig().taskApprovalTimeoutSec).toBe(120);
+  });
+
   it('stallRepeatCountの既定は4回（design.md §16.27・DEFAULT_STALL_REPEAT_COUNT、Issue #336）', () => {
     expect(readWorkflowsConfig().stallRepeatCount).toBe(4);
   });
