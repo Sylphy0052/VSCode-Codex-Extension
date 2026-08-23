@@ -18,8 +18,18 @@
   `- **WF-G 横断の仕上げ**（18項目）` と一致
 - 変更範囲: `git diff --stat -- src test` → 出力なし（`src/`・`test/`への変更ゼロ）
 - 整形混入なし: `git diff --stat` の追加行数（43行insert）が、足した行数（14+6+16+7=43）と一致
-- PRの差分ファイル: `gh pr diff 643 | grep "^diff --git"` →
-  `.agents/handoff/wf-g-issue-589.md`（削除）と`docs/roadmap/wf/wf-g.md`（更新）の2件のみ
+- PRの差分ファイル（コーディネーターからの追加指示を反映した後の最終確認）:
+  `gh pr diff 643 | grep "^diff --git"` → `.agents/handoff/wf-g-issue-589.md`（削除）、
+  `.agents/handoff/wf-g-shelf-round1.md`（新規、このファイル）、
+  `docs/roadmap/wf/wf-g.md`（更新）の3件のみ
+- 追加指示への対応: 「grepで確認した」という結果だけでなく、実際に打った
+  コマンドと出力そのものを#502の項目へ書き添えた（`grep -c "ORCHESTRATOR_CONTROL_TOOLS"
+  test/unit/runner.test.ts` → `3`、`grep -n "dispose()後にretryTaskで再開してもCLIセッション"
+  test/unit/runner.test.ts` → `12041:...`、`ls test/unit/runnerDispose.test.ts` →
+  ファイル実在、の3コマンド）。既存のwf-g.mdにコードブロック(```)の前例が無いことを
+  `grep -n '```' docs/roadmap/wf/wf-g.md` で確認した（ヒット無し）ため、コーディネーターの
+  指示どおり散文へ`` ` ``埋め込みの形で落とし、コマンド文字列は省略しなかった。
+  追加コミット後も棚の項目数は18のまま、`git diff --stat -- src test`は空を再確認した
 - Issue #636へのコメント投稿:
   `gh issue comment 636 -R Sylphy0052/VSCode-Codex-Extension -F <draft>` →
   `https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/636#issuecomment-5386106783`
