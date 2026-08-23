@@ -12018,20 +12018,37 @@ tasks:
 
   describe('ensureMessagingはdisposing中・後の到達を防ぐ（Issue #475/PR #495レビュー指摘: high）', () => {
     /**
-     * `dispose()`後にretryTaskで再開しても、`ensureMessaging`は`this.disposing`を見て
-     * 何もせず戻る。修正前は`retryTask`が`live.finished`を解除して`pump()`を呼び直すため、
-     * `startTask`→`prepareTaskLaunch`→`ensureMessaging`が`disposing`を見ずに新しい
-     * transportを立ててしまい、二度と閉じられないHTTPリスナーとポーリングタイマーが
-     * 残っていた（`this.runs`からrunを削除する経路が無いため`live`はdispose()後も
-     * 解決できる）。
+     * `dispose()`後にretryTaskで再開しても、CLIセッションそのものが再度開かない
+     * （Issue #502）。
+     *
+     * このテストはもともとIssue #475/PR #495の回帰確認として書かれ、「`ensureMessaging`が
+     * `this.disposing`を見てメッセージング資源（HTTPリスナー・ポーリングタイマー）だけは
+     * 新たに立てない」ことだけを検証していた。当時は`startTask`→`prepareTaskLaunch`の
+     * 先、`host.openTaskSession`の呼び出し自体は`disposing`を見ずに素通りしており、
+     * `retryTask`後にCLIセッションそのものは新しく開いてしまっていた（`mcp`接続URLだけが
+     * 付かない状態）。PR #495はこの挙動を「MCPサーバ（HTTPリスナーと`setInterval`）が
+     * 破棄後に立つ経路を塞いだ」に留め、CLIセッションが破棄後に開く経路は意図的に
+     * スコープ外とした（そのままだと、そのCLI子プロセスを所有する`WorkflowRunner`が
+     * 既に破棄済みのため、二度と閉じる経路が無いまま残り続ける）。
+     *
+     * Issue #502はこの窓を独立して扱い、`startTask`内・`host.openTaskSession`呼び出しの
+     * 直前へ`this.disposing`の番人を置いて塞いだ。`this.runs`からrunを削除する経路が無い
+     * ため`live`は`dispose()`後も解決でき、`retryTask`自体も`this.disposing`を見ないため
+     * `{ ok: true }`を返すが、その先でCLIセッションの起動自体が止まる。このテストは
+     * その結果として、`retryTask`後もCLIセッション・MCPサーバ・タイマーのいずれも
+     * 新たに立たないことを確認する
      */
-    it('dispose()後にretryTaskで再開してもMCPサーバ・タイマーを新たに立てない', async () => {
+    it('dispose()後にretryTaskで再開してもCLIセッション・MCPサーバ・タイマーを新たに立てない', async () => {
       const { deps, state } = fakeMessagingDeps();
       const { runner, codexHost, store } = createHarness(ONE_TASK_YAML, { messaging: deps });
       const result = await runner.start('/repo/.agents/workflows/dispose.yaml', '/repo');
       const runId = result.runId as string;
       await flush();
       expect(state.startCallCount).toBe(1);
+      const t1InputsBeforeDispose = codexHost.openInputs.filter((i) =>
+        cwdEndsWithTask(i.cwd, 'T1'),
+      );
+      expect(t1InputsBeforeDispose).toHaveLength(1);
 
       // run終了（T1失敗）でMCPサーバは通常どおり閉じる
       codexHost.byTaskId('T1').finish('failed', { ...initialChatState, turnFailed: true });
@@ -12044,14 +12061,18 @@ tasks:
 
       // 人の「再実行」操作と同じ経路（`live.finished`を解除して`pump()`を呼び直す）。
       // `retryTask`自体は`this.disposing`を見ないため`{ ok: true }`を返すが、
-      // その先の`ensureMessaging`が入口で止まるべき
+      // その先の`startTask`（`host.openTaskSession`直前のガード、Issue #502）で止まるべき
       expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
       await flush();
 
-      // 新しいtransportは立たない。mcp接続URLも渡らない
+      // 新しいtransportは立たない
       expect(state.startCallCount).toBe(1);
-      const rebuiltInput = codexHost.openInputs.filter((i) => cwdEndsWithTask(i.cwd, 'T1')).at(-1);
-      expect(rebuiltInput?.mcp).toBeUndefined();
+      // CLIセッションそのものも新しく開かない（dispose前の1件のまま増えない）
+      const t1InputsAfterRetry = codexHost.openInputs.filter((i) =>
+        cwdEndsWithTask(i.cwd, 'T1'),
+      );
+      expect(t1InputsAfterRetry).toHaveLength(1);
+      expect(codexHost.sessions).toHaveLength(1);
     });
 
     /**
