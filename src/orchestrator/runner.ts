@@ -2862,11 +2862,33 @@ export class WorkflowRunner {
         live.forge.finalMerge === 'orchestrator';
       if (outcome === 'succeeded') {
         if (mayAwaitFinalMergeDecision) {
-          void this.finalizeForge(runId).then(() =>
-            this.closeMessagingIfFinalMergeSettled(runId, outcome),
-          );
+          // `.catch`を`.then`より前に挟む（`.catch().then()`の順）ことが要。
+          // `finalizeForge`が例外で終わっても（WF-Eのレビュー指摘、横断レビューで実測）
+          // `.catch`がここで飲み込んで既に解決済みのPromiseへ変えるため、続く`.then`の
+          // `closeMessagingIfFinalMergeSettled`は例外の有無に関わらず必ず呼ばれる。
+          // ここを飛ばすと、成功時にPR/MRを作れて判断待ちへ入った場合以外の失敗経路で
+          // タスク間メッセージングのMCPサーバが最終マージ確定後も閉じられないまま残る
+          // （`closeMessagingIfFinalMergeSettled`の3つの呼び出し口の1つがここ。他の2つは
+          // design.md §16.26「MCPサーバの寿命との整合」参照）。兄弟の形は`runnerRestore.ts`
+          // の`autoResumeIfEligible`呼び出しと`programRunner.ts`の`attach()`内（どちらも
+          // `.catch`でログを出すだけで、フォローアップの呼び出しを持たない点だけがここと違う）
+          void this.finalizeForge(runId)
+            .catch((e: unknown) => {
+              this.deps.log.error(
+                `[workflow ${runId}] finalizeForgeに失敗しました（最終マージ判断待ちの経路）: ${sanitizeForLog(
+                  e instanceof Error ? e.message : String(e),
+                )}`,
+              );
+            })
+            .then(() => this.closeMessagingIfFinalMergeSettled(runId, outcome));
         } else {
-          void this.finalizeForge(runId);
+          void this.finalizeForge(runId).catch((e: unknown) => {
+            this.deps.log.error(
+              `[workflow ${runId}] finalizeForgeに失敗しました: ${sanitizeForLog(
+                e instanceof Error ? e.message : String(e),
+              )}`,
+            );
+          });
         }
       }
       // ロードマップの更新（design.md §16.19）もrunの結果を問わず行う。`done`になった

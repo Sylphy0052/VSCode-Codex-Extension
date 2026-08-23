@@ -140,6 +140,22 @@ describe('validateProgram（受入基準: 複数runの定義・循環依存と�
     ).toBe(true);
   });
 
+  it('プロトタイプ汚染を招くrun id（危険キー）を、文字種チェックを通っても拒否する（横断レビュー実測、Issue #606）', () => {
+    // テストのソースに危険キーをリテラルで書かず、組み立てて回避する
+    const dangerousId = ['__', 'proto', '__'].join('');
+    // PROGRAM_RUN_ID_PATTERN（半角英数字・_・-のみ）自体はこの文字列を通してしまう
+    // ことを確認したうえで、validateProgramが別のチェックで弾くことを検証する
+    expect(PROGRAM_RUN_ID_PATTERN.test(dangerousId)).toBe(true);
+    const def = program({
+      runs: [runRef({ id: dangerousId }), runRef({ id: 'R2', dependsOn: [] })],
+    });
+    const result = validateProgram(def);
+    expect(result.errors.some((e) => e.runIds.includes(dangerousId))).toBe(true);
+    expect(
+      result.errors.some((e) => e.message.includes('プロトタイプ汚染')),
+    ).toBe(true);
+  });
+
   it('name未指定を拒否する', () => {
     const def = program({ name: '' });
     expect(validateProgram(def).errors).toContainEqual({

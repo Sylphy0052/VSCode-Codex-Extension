@@ -217,6 +217,55 @@ runs:
     expect(persisted.state.runs.R2?.state).toBe('running');
   });
 
+  it('同一tick内で複数runが完了しても、pumpProgramの並行実行によって同じrunを二重起動しない（横断レビュー実測、Issue #606）', async () => {
+    const store = new ProgramStore(fakeMemento());
+    const filePort = fakeFilePort({
+      '/repo/program.yaml': `
+version: 1
+name: 排他テスト
+maxParallel: 2
+runs:
+  - id: A
+    defPath: .agents/workflows/a.yaml
+  - id: B
+    defPath: .agents/workflows/b.yaml
+  - id: C
+    defPath: .agents/workflows/c.yaml
+  - id: D
+    defPath: .agents/workflows/d.yaml
+`,
+    });
+    const workflow = fakeWorkflow();
+    const runner = new ProgramRunner({ programStore: store, filePort, workflow, log: quietLog });
+    runner.attach();
+
+    await runner.startProgram('/repo/program.yaml', '/repo');
+    // maxParallel:2なので、A・Bのみ起動、C・Dはpending
+    expect(workflow.startCalls).toHaveLength(2);
+
+    // run-1(A)・run-2(B)が同一tick内で完了する（awaitを挟まず連続で呼ぶ）。本番の呼び出し経路
+    // （`attach()`が登録する`void this.onRunChanged(runId).catch(...)`というfire-and-forgetの
+    // リスナ、`fakeWorkflow.finishRun`が同期的に呼ぶ）をそのまま通す。フェイクで経路を
+    // 迂回しない（design.md §16.25「無効なテスト」）
+    workflow.finishRun('run-1', 'succeeded');
+    workflow.finishRun('run-2', 'succeeded');
+
+    await vi.waitFor(() => {
+      expect(workflow.startCalls).toHaveLength(4);
+    });
+    // 非同期の余韻で遅れて5回目（同じrunの二重起動）が増えないことも確認する
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(workflow.startCalls).toHaveLength(4);
+    expect(workflow.startCalls.map((c) => c.defPath).sort()).toEqual([
+      '/repo/.agents/workflows/a.yaml',
+      '/repo/.agents/workflows/b.yaml',
+      '/repo/.agents/workflows/c.yaml',
+      '/repo/.agents/workflows/d.yaml',
+    ]);
+
+    runner.dispose();
+  });
+
   it('リロード後、W10が同じrunIdを再開していれば、それに依存する後続runも続きの波として起動される（Issue #605レビュー指摘F1）', async () => {
     const memento = fakeMemento();
     const filePort = fakeFilePort({ '/repo/program.yaml': programYaml() });

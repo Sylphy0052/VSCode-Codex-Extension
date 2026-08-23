@@ -5162,7 +5162,7 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 
 #### 判断待ちに入る条件
 
-`shouldRunFinalMerge`（`auto`かつPR/MRが作れた）が`false`で、かつ`needsFinalMergeDecision`（`orchestrator` または `confirm`かつPR/MRが作れた）が`true`のとき、`WorkflowRunner.beginFinalMergeDecision` が判断待ちへ入る（`forge.ts`）。PR/MRの作成に失敗していれば、`auto`と同じく最終マージ自体を試みない（判断待ちにも入らない）。
+`shouldRunFinalMerge`（`auto`かつPR/MRが作れた）が`false`で、かつ`needsFinalMergeDecision`（`orchestrator` または `confirm`かつPR/MRが作れた）が`true`のとき、`WorkflowRunner.beginFinalMergeDecision`（`src/orchestrator/runner.ts`のprivateメソッド。`forge.ts`には無い）が判断待ちへ入る。PR/MRの作成に失敗していれば、`auto`と同じく最終マージ自体を試みない（判断待ちにも入らない）。
 
 判断待ちの状態は `LiveRun.finalMergeDecision`（`{ mode: 'orchestrator' | 'confirm', since, timer? }`）が持つ。`continuePromptOverride`・`live.warnings` 自体と同じく**永続化しない**（`runStore.ts`のスキーマへは載せない）。VSCodeのリロードで判断待ちの状態は失われ、人がホスト（GitHub/GitLab）側でPR/MRの状態を見て判断する形に戻る。これは既存の非永続状態と同じ設計判断であり、見落としではない。
 
@@ -5222,7 +5222,7 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 
 `vscode`に依存しない純粋関数として実装した（`loop/`は`orchestrator/`より下位の層であり、`orchestrator/`に依存できない、§16.10）。
 
-- `extractTurnSignature(state: ChatState): string` — 比較用の文字列を1ターン分取り出す。`state.turnResultText`があればそれを優先し、無ければ`lastNonEmptyAgentMessageText`（`appserver/chatState.ts`に共有ヘルパーとして切り出した。元は`orchestrator/taskSummary.ts`の`buildResponseSummary`専用だったものを、`loop/`からも使えるよう最下層へ移した）で直近の空でないエージェント発言を拾う。この文字列は比較にしか使わず、通知やログへそのまま出すことは無いため、サニタイズ・切り詰めをしない
+- `extractTurnSignature(state: ChatState): string` — 比較用の文字列を1ターン分取り出す。**実装は`state.turnResultText.trim()`のみを返し、`lastNonEmptyAgentMessageText`へはフォールバックしない**（この記述はフォールバックする案の段階のまま実装確定前の内容が残っていた誤りで、`src/loop/stallDetector.ts`のJSDocに理由がある。`taskSummary.ts`の`buildResponseSummary`（表示用の1行要約）は`turnResultText`が空のとき`lastNonEmptyAgentMessageText`で直近の発言まで遡るが、これは「表示用に何かしら見せたい」要件であって、こちらの「このターンで進んだかどうかを比較したい」要件とは違う。`items`全体へ遡ると、ツール呼び出しだけで本文を返さないターンが続いたときに古いターンの発言テキストを使い回して比較してしまい、編集内容が毎回違っても同じ署名が返り続けて誤検知する。`turnResultText`が空のときは比較不能として空文字を返し、`detectStalledLoop`は空文字の反復を停滞と見なさないためこの空文字が連続しても誤検知しない
 - `pushTurnSignature(history, signature, threshold)` — 履歴へ1件追加し、`threshold`件（最低`MIN_STALL_REPEAT_COUNT=2`件）だけ末尾を残す。無制限に伸ばさない
 - `detectStalledLoop(history, threshold)` — 履歴の末尾`threshold`件がすべて同一かつ空文字列でないときだけ`true`。空文字列同士の一致は停滞と見なさない（応答要約が取れないケースの誤検知を避けるため）
 

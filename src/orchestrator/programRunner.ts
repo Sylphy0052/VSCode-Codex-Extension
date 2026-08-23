@@ -20,6 +20,7 @@ import {
   type ProgramIssue,
 } from './program';
 import type { ProgramStore } from './programStore';
+import { SerialQueue } from './serialQueue';
 import { sanitizeForLog } from './sanitize';
 import { SimpleEmitter, type StartWorkflowResult, type LiveRunSummary, type WorkflowFilePort } from './runner';
 import { MAX_WORKFLOW_FILE_BYTES } from './workflow';
@@ -104,6 +105,43 @@ export class ProgramRunner {
    */
   private readonly changeEmitter = new SimpleEmitter<string>();
 
+  /**
+   * `programId`ごとの排他キュー（Issue #606のレビュー指摘。横断レビューで実測、
+   * 「同一プログラム配下の複数runがほぼ同時に完了すると`pumpProgram(programId)`が
+   * 並行に走り、同じrunを二重起動する」を修正するために追加した）。
+   *
+   * `pumpProgram`は`programStore.find`（プレーンな同期読み取り）→（`await`を挟む）
+   * 判断 → `startOneRun`（`await`で外部の`workflow.start`を呼ぶ）→
+   * `programStore.update`という非アトミックな並びを持つ。`ProgramStore`が内部に持つ
+   * `SerialQueue`（`programStore.ts`）は個々の`update`呼び出しだけを直列化し、
+   * この一連の read→判断→実行→write 全体は守らない。`attach()`の購読が
+   * `void this.onRunChanged(runId).catch(...)`というfire-and-forgetのため、同一
+   * `programId`配下の複数runがawaitを挟まず同一tickで完了すると、2つの`pumpProgram`
+   * 呼び出しが互いの意図が見えないまま同じ`toStart`を計算し、同じrunを二重起動する
+   * （実測: `maxParallel:2`、依存無し4本で、2件を同一tick内で完了させると5回起動
+   * される。うち1本が重複）。
+   *
+   * `pumpProgram`・`haltProgram`の両方の本体を、`programId`ごとに1本ずつ持つこの
+   * キューへ通して直列化する（`runExclusive`）。**`haltProgram`も同じキューへ入れる。**
+   * `haltProgram`も同じ`programId`に対する read（`programStore.find`）→ 判断 →
+   * write（`programStore.update`）を持ち、`pumpProgram`と同じ穴を共有するため
+   * （例: `pumpProgram`が古い状態を基に新規runを起動する判断をしている最中に
+   * `haltProgram`が割り込むと、停止直後にもかかわらず新規runが起動し得る）。
+   *
+   * **デッドロックしない。** `pumpProgram`・`haltProgram`のどちらの本体からも、
+   * 自分自身や相手を（このキュー経由で）再帰的に呼ぶ経路は無い（`startOneRun`が
+   * 呼ぶ`programStore.update`は`ProgramStore`側の別の`SerialQueue`であり、この
+   * `programQueues`とは別物）。`onRunChanged`・`reconcileAfterReload`は`pumpProgram`
+   * を呼ぶだけで、いずれもこのキューへ自ら入ってはいない外側の呼び出し元。
+   *
+   * プログラムが終了確定（`finishedAt`が埋まる）した後は`runExclusive`が自分の
+   * エントリをこのMapから削除する。`programId`は起動のたびに`randomUUID()`で
+   * 新規発番されるため、削除しなければ拡張機能のプロセス寿命の間ずっと
+   * 増え続けるMapになってしまう（`trackedRuns`と異なり、こちらは終了後に
+   * 参照する理由が無い）。
+   */
+  private readonly programQueues = new Map<string, SerialQueue>();
+
   constructor(private readonly deps: ProgramRunnerDeps) {}
 
   /**
@@ -132,6 +170,35 @@ export class ProgramRunner {
   dispose(): void {
     this.unsubscribe?.();
     this.unsubscribe = undefined;
+  }
+
+  /**
+   * `programId`に対応する`SerialQueue`（無ければ新規作成）へ`task`を積み、完了を
+   * 待ってから、そのプログラムが終了確定していれば`programQueues`から自分の
+   * エントリを取り除く（`programQueues`のJSDoc参照。`randomUUID()`で発番される
+   * `programId`をキーに持ち続けるMapが際限なく増えないようにする掃除）。
+   *
+   * `task`実行後に一度`programStore.find`で`finishedAt`を確認するだけで、
+   * `runExclusive`自身は「終了確定した」ことを判断しない（`pumpProgramLocked`/
+   * `haltProgramLocked`が呼ぶ`maybeMarkFinished`の結果を読むだけ）。まだ`finishedAt`が
+   * 埋まっていなければ、次の呼び出しで同じキューを使い続ける（削除しない）。
+   */
+  private runExclusive<T>(programId: string, task: () => Promise<T>): Promise<T> {
+    let queue = this.programQueues.get(programId);
+    if (queue === undefined) {
+      queue = new SerialQueue();
+      this.programQueues.set(programId, queue);
+    }
+    return queue.enqueue(async () => {
+      try {
+        return await task();
+      } finally {
+        const persisted = this.deps.programStore.find(programId);
+        if (persisted === undefined || persisted.finishedAt !== undefined) {
+          this.programQueues.delete(programId);
+        }
+      }
+    });
   }
 
   /**
@@ -175,7 +242,13 @@ export class ProgramRunner {
    * 確定している`failed`」だけを反映している（訂正未了の暫定値の上で伝播を行うことは
    * ない。詳細は`reconcileAfterReload`のJSDoc参照）。
    */
-  async pumpProgram(programId: string): Promise<void> {
+  pumpProgram(programId: string): Promise<void> {
+    // 排他は`programQueues`のJSDoc参照。本体（read→判断→起動→write）はこのキューを
+    // 通してprogramIdごとに1本ずつしか同時に走らない
+    return this.runExclusive(programId, () => this.pumpProgramLocked(programId));
+  }
+
+  private async pumpProgramLocked(programId: string): Promise<void> {
     const persisted = this.deps.programStore.find(programId);
     if (persisted === undefined) {
       return;
@@ -235,7 +308,13 @@ export class ProgramRunner {
    *
    * programIdが存在しなければ何もしない（`pumpProgram`と同じ防御）。
    */
-  async haltProgram(programId: string): Promise<void> {
+  haltProgram(programId: string): Promise<void> {
+    // `pumpProgram`と同じキューを通す（`programQueues`のJSDoc参照。halt自身もこの
+    // programIdに対するread-modify-writeを持ち、`pumpProgram`と同じ穴を共有するため）
+    return this.runExclusive(programId, () => this.haltProgramLocked(programId));
+  }
+
+  private async haltProgramLocked(programId: string): Promise<void> {
     const persisted = this.deps.programStore.find(programId);
     if (persisted === undefined) {
       return;

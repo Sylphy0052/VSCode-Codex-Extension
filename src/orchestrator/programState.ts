@@ -56,7 +56,18 @@ export interface ProgramRunEntry {
 
 /** プログラム全体の実行状態（`runState.ts`の`RunState`に相当する層）。 */
 export interface ProgramState {
-  /** キーは`ProgramRunRef.id`（プログラム定義内のrun参照名）。 */
+  /**
+   * キーは`ProgramRunRef.id`（プログラム定義内のrun参照名）。
+   *
+   * **`Map`ではなく`Record`にしてある。** `runState.ts`の`RunState`は`Map<string,
+   * TaskRunState>`を使っており、構造的にプロトタイプ汚染キー（`__proto__`等）を
+   * 避けられる。こちらが`Record`のままなのは、`programStore.ts`の永続化が`memento.
+   * update`の前後で素の`JSON`（`JSON.stringify`/`JSON.parse`相当）を通るためで、
+   * `Map`にすると配列化などのシリアライズ変換が別途要る（移行コストが見合わない
+   * と判断し見送った。Issue #606のレビュー指摘）。危険キーの防御は`Map`化ではなく
+   * `validateProgram`（`program.ts`。`PROGRAM_RUN_ID_PATTERN`のチェックに加えて
+   * `DANGEROUS_KEYS`を直接弾く）側で行う
+   */
   runs: Record<string, ProgramRunEntry>;
   /**
    * 人がプログラム全体を止めたか（`runState.ts`の`RunState.haltedByUser`のプログラム版、

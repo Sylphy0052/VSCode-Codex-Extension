@@ -220,6 +220,20 @@ export function validateProgram(def: ProgramDefinition): ProgramValidationResult
         message: `id の形式が不正です（半角英数字・_・-のみ、1〜50文字にしてください）: "${r.id}"`,
       });
     }
+    // `PROGRAM_RUN_ID_PATTERN`（`TASK_ID_PATTERN`）は文字種しか見ないため、
+    // "__proto__" 等のプロトタイプ汚染キーもここまでは通り抜ける。
+    // `createInitialProgramState`（`programState.ts`）は`runs[r.id] = ...`と
+    // ブラケット代入で`Record<string, ProgramRunEntry>`へ組み立てるため、r.idが
+    // 危険キーだとプロパティ追加ではなくプロトタイプの書き換えになり、そのrunが
+    // `Object.keys`・`JSON.stringify`（`workspaceState`への永続化）から静かに消える
+    // （横断レビューで実測、Issue #606）。同じ危険キー集合を使う`rec()`（上記）と
+    // 同じ考え方でここでも弾く
+    if (DANGEROUS_KEYS.has(r.id)) {
+      errors.push({
+        runIds: [r.id],
+        message: `id にプロトタイプ汚染を招く名前は使えません: "${r.id}"`,
+      });
+    }
   }
   for (const [id, count] of idCounts) {
     if (count > 1) {
