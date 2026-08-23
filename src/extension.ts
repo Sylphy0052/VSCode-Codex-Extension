@@ -81,6 +81,7 @@ import {
 } from './orchestrator/roadmap';
 import { sanitizeForLog } from './orchestrator/sanitize';
 import { WorkflowRunStore } from './orchestrator/runStore';
+import { ProgramStore } from './orchestrator/programStore';
 import { WorkflowRunner, nodeWorkflowFilePort } from './orchestrator/runner';
 import type { ExtensionSafetyBaseline } from './orchestrator/taskConfig';
 import type { TaskSessionHost } from './orchestrator/taskSession';
@@ -485,6 +486,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   context.subscriptions.push(claudeChat);
 
   const workflowStore = new WorkflowRunStore(context.workspaceState);
+  // プログラム（複数runの束、design.md §16.37、roadmap W12-1、Issue #604）の永続化。
+  // この段ではrunのスケジューリングは持たないため、実際に読み書きするのは
+  // `reconcileAfterReload`（リロード直後の中断扱い）のみ
+  const programStore = new ProgramStore(context.workspaceState);
   // 統合テスト（Issue #158）だけがここへフェイクを入れる。空のままなら常に実物へ委譲
   // するため、本番の経路は差し替え口が無かったときと変わらない。
   const taskSessionHostOverrides: Partial<Record<Provider, TaskSessionHost>> = {};
@@ -603,6 +608,23 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       log.info(
         `リロードにより中断扱いにしたワークフロー実行: ${interrupted.map((r) => r.runId).join(', ')}`,
       );
+    }
+  });
+
+  // プログラム（design.md §16.37、roadmap W12-1、Issue #604）の永続化状態も、単発runと
+  // 同じタイミングでリロード直後の中断扱いへ書き換える（W10の自動再開の対象に含める。
+  // この段では実際にrunを再開する処理を持たないため、状態を書き戻すところまでを担う）
+  // reconcile前後でプログラムごとに実際に書き換わったか（`running`だったrunが
+  // `failed`へ倒れたか）を比較するため、先にrunごとの状態をスナップショットしておく
+  const runStatesBeforeReconcile = new Map(
+    programStore.list().map((p) => [p.programId, JSON.stringify(p.state)] as const),
+  );
+  void programStore.reconcileAfterReload().then((reconciled) => {
+    const interruptedProgramIds = reconciled
+      .filter((p) => runStatesBeforeReconcile.get(p.programId) !== JSON.stringify(p.state))
+      .map((p) => p.programId);
+    if (interruptedProgramIds.length > 0) {
+      log.info(`リロードにより中断扱いにしたプログラム: ${interruptedProgramIds.join(', ')}`);
     }
   });
 
