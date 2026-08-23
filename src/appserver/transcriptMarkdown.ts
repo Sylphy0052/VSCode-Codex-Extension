@@ -27,6 +27,10 @@ const KIND_TITLE: Record<string, string> = {
   enteredReviewMode: 'レビュー開始',
   exitedReviewMode: 'レビュー終了',
   sideQuestion: '脇道の質問',
+  subAgentActivity: 'サブエージェント',
+  collabAgentToolCall: 'サブエージェント操作',
+  autoApprovalReview: '自動承認レビュー',
+  fileRead: 'ファイル読み取り',
 };
 
 /** ファイル変更の種類ラベル。`chatScript.ts` の `createDiff` と同じ対応。 */
