@@ -1935,6 +1935,27 @@ YAMLとロードマップの**中身が使えるものになっているか**を
 - 確認: `remove_task`で消していたタスクが定義（YAML）に残っている場合、リロード後にそのタスクが`pending`として復元され、あらためて開始されうる（一度も走っていないタスクが黙って完走扱いにされない）
 - 確認: §16.27のタスク停滞通知（`taskStalled`）が届いた場面で、オーケストレーターが`update_task_prompt`だけでなく`add_task`/`remove_task`/`update_task_dependencies`も選択肢として検討する応答をすることがある（`buildIntroBody`の案内どおりの振る舞いになっているかの確認。強制はできないため「そうした提案が出ることがある」レベルの確認に留める）
 
+### W-J PR/MRのレビュー結果を取り込んでタスクへ反映する（design.md §16.30、roadmap W5、Issue #339）
+
+パース・ポーリング・重複排除・サニタイズ経路・設定の丸めはユニットテストで確かめてある（`test/unit/forge.test.ts`の`describe('parseGithubReviewComments')`/`describe('parseGitlabReviewComments')`/`describe('fetchReviewComments')`・`test/unit/config.test.ts`・`test/unit/runner.test.ts`の`describe('WorkflowRunner: レビューコメントの取り込み（design.md §16.30、roadmap W5、Issue #339）')`）。ここで見るのは、実際のGitHub/GitLab上でPRへレビューコメントを付け、ワークフローが実際にそれを拾えるかという、実ホストでしか確かめられない点。W-D・W-Pと同じ使い捨てリポジトリを流用してよい。
+
+- 前提: `agent.workflows.reviewCommentPollIntervalSec`を短い値（例: `10`）にしたうえで、`pullRequest: integration`（または既定）・単一タスクの短いワークフローを用意する
+- 操作: ワークフローを実行し、統合PR/MRが作られた直後（ワークフローViewに統合PR/MRのリンクが出た時点）に、GitHub側でそのPRへレビューコメントを1件付ける
+- 期待: 数十秒以内に、ワークフローViewの警告欄へ投稿者名とコメント本文が全文で表示される（人の承認操作を挟まずに反映される）
+- 確認: オーケストレーターのチャットタブに、同じ投稿者名・本文を含む発話が届いている（`<workflow-event kind="reviewComment">`として渡った内容がそのまま会話に現れているか。タグ自体は画面に生の文字列として出ない前提で、中身の投稿者名・本文だけが読めることを確認する）
+- 操作: 同じPRへ追加でレビューコメントをもう1件付ける
+- 期待: 新しいコメントだけが追記される形で警告欄・オーケストレーターへ届く（1件目が重複して再度届かない）
+- 操作: GitLab側（`agent.workflows.forge: gitlab`）でも同じ手順（統合MRの作成後にレビューコメント/ノートを付ける）を確認する
+- 期待: GitHubと同じ結果になる（`glab api projects/:id/merge_requests/<iid>/notes`で取得したコメントが警告欄・オーケストレーターへ届く。GitLab側でシステム通知（ラベル変更等の自動ノート）が紛れても、それは取り込み対象に含まれない）
+- 操作: レビューコメントを1件も付けないまま、ワークフローの実行を最後まで進める（最終マージまで到達させる）
+- 期待: レビューコメント関連の警告は1件も出ない。最終マージ・runの完走は従来どおり行われる（本機能の有無で既存の完走経路に影響が無いことの確認）
+- 操作: `agent.workflows.reviewCommentPollIntervalSec`を`0`にしたうえで、統合PR/MR作成後にレビューコメントを付ける
+- 期待: ポーリングが行われず、警告欄・オーケストレーターのいずれにもレビューコメントが反映されないまま（設定でこの機能自体を無効化できることの確認）
+- 操作: レビューコメントが極端に長い（`MAX_MESSAGE_BODY_LENGTH`を明らかに超える）文章を付ける
+- 期待: 警告欄・オーケストレーターへ届く本文が切り詰められ、末尾に切り詰めた旨が付く（全文がそのまま無制限に反映されないことの確認）
+- 操作: CLIの認証を意図的に切れた状態にしてから（例: `gh auth logout`）統合PR/MRを作らせ、レビューコメントのポーリングが走る状況を作る
+- 期待: レビューコメントの取得には失敗するが、run自体は止まらず既存の完走経路（最終マージ含む）はそのまま進む（前提が欠けても実行を止めない、という設計どおりの挙動になっているかの確認）
+
 ### W-L タスクからオーケストレーターへ判断を仰ぐ経路（design.md §16.32、Issue #571）
 
 `ask_orchestrator`の宛先固定・`kind: 'question'`の意味づけ・待ちぼうけ検出との関係・`maxIterations`到達時の失敗確定はユニットテストで確かめてある（`test/unit/messaging.test.ts`の`describe('ask_orchestrator（design.md §16.32、Issue #571）')`・`test/unit/runner.test.ts`の`describe('WorkflowRunner: ask_orchestrator（design.md §16.32、Issue #571）')`）。ここで見るのは、実際のCLIプロセス（タスク）とオーケストレーターのCLIプロセスの間で、実物のMCP接続を通して`ask_orchestrator`が機能するか。

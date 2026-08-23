@@ -491,6 +491,13 @@ function fakeForgeCli(options?: {
    * 再試行では成功させる。
    */
   failMergeNotUpToDateOnce?: boolean;
+  /** design.md §16.30（Issue #339）のレビューコメント取得フェイク応答。既定は0件。 */
+  reviewComments?: {
+    github?: { reviews?: unknown[]; comments?: unknown[] };
+    gitlabNotes?: unknown[];
+  };
+  /** レビューコメント取得のCLI呼び出し自体を失敗させる。 */
+  failReviewComments?: boolean;
 }): FakeForgeCli {
   const calls: Array<{ command: string; args: string[]; cwd: string }> = [];
   return {
@@ -568,6 +575,21 @@ function fakeForgeCli(options?: {
       // フェイク応答（design.md §16.36、Issue #556）。既定はCI未設定（`statusCheckRollup: []`）
       // として即マージへ進ませ、既存のfinalMerge系テストの前提（CIを待たず即マージする）を
       // 崩さない。CIの完了待ちそのものを確かめるテストは`ciConclusion`オプションで上書きする
+      // `fetchReviewComments`（GitHub）が呼ぶ`gh pr view <number> --json=reviews,comments`の
+      // フェイク応答（design.md §16.30、Issue #339）。CI状態取得（`--json=statusCheckRollup`）
+      // とは第3引数の`--json=`の中身で区別する
+      if (args[0] === 'pr' && args[1] === 'view' && args[3] === '--json=reviews,comments') {
+        return options?.failReviewComments
+          ? { code: 1, stdout: '', stderr: 'fake pr view (reviews) failure' }
+          : {
+              code: 0,
+              stdout: JSON.stringify({
+                reviews: options?.reviewComments?.github?.reviews ?? [],
+                comments: options?.reviewComments?.github?.comments ?? [],
+              }),
+              stderr: '',
+            };
+      }
       if (args[0] === 'pr' && args[1] === 'view') {
         return options?.failCiStatus
           ? { code: 1, stdout: '', stderr: 'fake pr view failure' }
@@ -583,14 +605,32 @@ function fakeForgeCli(options?: {
           ? { code: 1, stdout: '', stderr: 'fake pr update-branch failure' }
           : { code: 0, stdout: '', stderr: '' };
       }
+      // `fetchReviewComments`（GitLab）が呼ぶ
+      // `glab api projects/:id/merge_requests/<iid>/notes`のフェイク応答（design.md §16.30、
+      // Issue #339）。CI状態取得（末尾に`/notes`が付かない）とはパスの形で区別する
+      if (
+        args[0] === 'api' &&
+        args[1] !== undefined &&
+        args[1].startsWith('projects/:id/merge_requests/') &&
+        args[1].endsWith('/notes')
+      ) {
+        return options?.failReviewComments
+          ? { code: 1, stdout: '', stderr: 'fake mr notes failure' }
+          : {
+              code: 0,
+              stdout: JSON.stringify(options?.reviewComments?.gitlabNotes ?? []),
+              stderr: '',
+            };
+      }
       // `waitForCiChecks`（GitLab）が呼ぶ`glab api projects/:id/merge_requests/<iid>`の
-      // フェイク応答。MR作成（`projects/:id/merge_requests`、末尾に番号が付かない）とは
-      // パスの形で区別する
+      // フェイク応答。MR作成（`projects/:id/merge_requests`、末尾に番号が付かない）・
+      // レビューコメント取得（末尾に`/notes`が付く。上のブロック）とはパスの形で区別する
       if (
         args[0] === 'api' &&
         args[1] !== undefined &&
         args[1] !== 'projects/:id/merge_requests' &&
-        args[1].startsWith('projects/:id/merge_requests/')
+        args[1].startsWith('projects/:id/merge_requests/') &&
+        !args[1].endsWith('/notes')
       ) {
         return options?.failCiStatus
           ? { code: 1, stdout: '', stderr: 'fake mr view failure' }
@@ -979,6 +1019,7 @@ function createHarness(
     readMaxAskUserPerRun?: () => number;
     readAutoResume?: () => boolean;
     readMaxAutoResumeAttempts?: () => number;
+    readReviewCommentPollIntervalSec?: () => number;
   },
 ): Harness {
   const codexHost = new FakeHost();
@@ -1030,6 +1071,9 @@ function createHarness(
     readAutoResume: options?.readAutoResume ?? (() => false),
     ...(options?.readMaxAutoResumeAttempts !== undefined
       ? { readMaxAutoResumeAttempts: options.readMaxAutoResumeAttempts }
+      : {}),
+    ...(options?.readReviewCommentPollIntervalSec !== undefined
+      ? { readReviewCommentPollIntervalSec: options.readReviewCommentPollIntervalSec }
       : {}),
     randomId: () => `00000000-0000-4000-8000-${String((seq += 1)).padStart(12, '0')}`,
   });
@@ -3962,9 +4006,16 @@ tasks:
       // 呼ばれないため、合計はちょうど1回にとどまる。入口ガードだけを消すと2回になり赤くなる
       const readyCalls = cli.calls.filter((c) => c.args[0] === 'pr' && c.args[1] === 'ready');
       expect(readyCalls).toHaveLength(1);
-      // CIの完了待ち・マージコマンドのいずれも一度も呼ばれない（統合PR/MRの作成自体は
-      // `haltedByUser`と無関係に走る既存の仕様のため、ここでは確認しない）
-      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'view')).toBe(false);
+      // CIの完了待ち・マージコマンドのいずれも一度も呼ばれない（統合PR/MRの作成自体・
+      // レビューコメントのポーリング開始（design.md §16.30、Issue #339）は
+      // `haltedByUser`と無関係に走る既存/新規の仕様のため、ここでは確認しない。
+      // `--json=statusCheckRollup`（CI状態）を`--json=reviews,comments`
+      // （レビューコメント）と区別して、CI待ちだけを狙って確認する
+      expect(
+        cli.calls.some(
+          (c) => c.args[0] === 'pr' && c.args[1] === 'view' && c.args[3] === '--json=statusCheckRollup',
+        ),
+      ).toBe(false);
       expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
       const snapshot = runner.getSnapshot(runId);
       expect(snapshot?.finalMergeOutcome).toBe('failed');
@@ -4141,6 +4192,172 @@ tasks:
       const snapshot = runner.getSnapshot(runId);
       const warning = snapshot?.warnings.find((w) => w.kind === 'forgeFailed');
       expect(warning?.message).toContain('番号が不明');
+    },
+  );
+});
+
+describe('WorkflowRunner: レビューコメントの取り込み（design.md §16.30、roadmap W5、Issue #339）', () => {
+  const SINGLE_TASK_YAML = `
+version: 1
+name: review-comment-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it(
+    '統合PR/MRにレビューコメントが付くと、警告欄へ全文で記録され' +
+      'オーケストレーターへも通知される（本番の呼び出し経路: finalizeForge→' +
+      'startReviewCommentPoll→setIntervalの発火→pollReviewComments）',
+    async () => {
+      vi.useFakeTimers();
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+      const cli = fakeForgeCli({
+        reviewComments: {
+          github: {
+            comments: [
+              {
+                databaseId: 55,
+                author: { login: 'reviewer1' },
+                body: 'ここを直してください',
+                createdAt: '2026-08-23T00:00:00Z',
+              },
+            ],
+          },
+        },
+      });
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli),
+        readReviewCommentPollIntervalSec: () => 60,
+      });
+      const result = await runner.start('/repo/.agents/workflows/review.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      // `startReviewCommentPoll`は立てた直後にも1度取得する（次の周期まで待たせない）ため、
+      // タイマーを進めなくても最初の1件はここまでで届く
+      const snapshot = runner.getSnapshot(runId);
+      const warning = snapshot?.warnings.find((w) => w.kind === 'reviewCommentImported');
+      expect(warning?.message).toContain('reviewer1');
+      expect(warning?.message).toContain('ここを直してください');
+
+      // オーケストレーターへも`reviewComment`イベントとして届く（`taskMessage`/
+      // `taskQuestion`と同じ`<workflow-event>`の囲い。design.md §16.23・§16.24）
+      const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+      orchestrator.emitState({ ...initialChatState, busy: true });
+      orchestrator.emitState({ ...initialChatState, busy: false });
+      const last = orchestrator.sentTexts[orchestrator.sentTexts.length - 1] as string;
+      expect(last).toContain('kind="reviewComment"');
+      expect(last).toContain('reviewer1');
+      expect(last).toContain('ここを直してください');
+    },
+  );
+
+  it('同じコメントは2周目のポーリングで重複して取り込まない（idで重複排除）', async () => {
+    vi.useFakeTimers();
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli({
+      reviewComments: {
+        github: {
+          comments: [
+            { databaseId: 1, author: { login: 'reviewer1' }, body: '直して', createdAt: '2026-08-23T00:00:00Z' },
+          ],
+        },
+      },
+    });
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+      readReviewCommentPollIntervalSec: () => 60,
+    });
+    const result = await runner.start('/repo/.agents/workflows/review.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    expect(
+      runner.getSnapshot(runId)?.warnings.filter((w) => w.kind === 'reviewCommentImported'),
+    ).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flush();
+
+    // 同じコメント（同じid）は2周目でも増えない
+    expect(
+      runner.getSnapshot(runId)?.warnings.filter((w) => w.kind === 'reviewCommentImported'),
+    ).toHaveLength(1);
+  });
+
+  it('agent.workflows.reviewCommentPollIntervalSecが0ならレビューコメントを取得しない', async () => {
+    vi.useFakeTimers();
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli({
+      reviewComments: {
+        github: {
+          comments: [{ databaseId: 1, author: { login: 'reviewer1' }, body: '直して' }],
+        },
+      },
+    });
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+      readReviewCommentPollIntervalSec: () => 0,
+    });
+    const result = await runner.start('/repo/.agents/workflows/review.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(cli.calls.some((c) => c.args[3] === '--json=reviews,comments')).toBe(false);
+    expect(
+      runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'reviewCommentImported'),
+    ).toBe(false);
+  });
+
+  it(
+    'レビューコメント取得のCLI呼び出しが失敗しても、警告を出すだけでrunを止めない' +
+      '（design.md §16.18「前提が欠けている場合」と同じ、runを止めない方針）',
+    async () => {
+      vi.useFakeTimers();
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+      const cli = fakeForgeCli({ failReviewComments: true });
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli),
+        readReviewCommentPollIntervalSec: () => 60,
+      });
+      const result = await runner.start('/repo/.agents/workflows/review.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      const snapshot = runner.getSnapshot(runId);
+      expect(snapshot?.outcome).toBe('succeeded');
+      expect(snapshot?.warnings.some((w) => w.kind === 'reviewCommentImported')).toBe(false);
     },
   );
 });

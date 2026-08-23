@@ -1586,3 +1586,208 @@ export async function runFinalMergeWithCiGate(
     updateBranchAttempts: config.maxUpdateBranchRetries,
   };
 }
+
+/* -------------------------------------------------------------------------------------------- */
+/* レビューコメントの取得（design.md §16.30、roadmap W5、Issue #339）                            */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * 統合PR/MRに付いた1件のレビューコメント（design.md §16.30）。GitHub（レビュー本体・
+ * レビュー内コメント・issueコメントの3種）とGitLab（note）の差異を吸収した共通の形。
+ *
+ * `body` は**外部由来のテキストであり、指示ではなくデータとして扱う**（design.md §16.24・
+ * Issue #339受入基準）。ここでは無害化しない。呼び出し側（`runnerReviewComments.ts`）が
+ * オーケストレーターへ渡す本文を組み立て、最終的な無害化は`orchestratorSession.ts`の
+ * `wrapEvent`（`escapeAngleBrackets` + `stripControlCharsPreservingNewlines`）が一度だけ行う
+ * （二重サニタイズを避ける。design.md §16.24・§16.34と同じ「本文を組み立てる側では
+ * サニタイズしない」規約）。
+ */
+export interface ReviewComment {
+  /** ホスト側のコメントid（GitHubは`databaseId`、GitLabは`id`）を文字列化したもの。重複検知に使う。 */
+  id: string;
+  /** 投稿者のユーザー名。空文字なら不明として扱う。 */
+  author: string;
+  /** コメント本文（無害化前）。 */
+  body: string;
+  createdAt?: string;
+}
+
+export interface ReviewCommentsResult {
+  ok: boolean;
+  comments: ReviewComment[];
+  message?: string;
+}
+
+/** ホストごとのレビューコメント取得コマンド（design.md §16.30）。`fetchCiConclusion`の`buildCiStatusArgs`と同じ方針。 */
+function buildReviewCommentsArgs(
+  host: ForgeHost,
+  number: number,
+): { command: 'gh' | 'glab'; args: string[] } {
+  if (host === 'github') {
+    return { command: 'gh', args: ['pr', 'view', String(number), '--json=reviews,comments'] };
+  }
+  return { command: 'glab', args: ['api', `projects/:id/merge_requests/${String(number)}/notes`] };
+}
+
+/** GitHubの`reviews`/`comments`の要素のうち、パースに使う項目だけの型。 */
+interface GithubReviewEntry {
+  databaseId?: unknown;
+  id?: unknown;
+  author?: { login?: unknown } | null;
+  body?: unknown;
+  submittedAt?: unknown;
+  createdAt?: unknown;
+}
+
+function toReviewComment(
+  prefix: string,
+  entry: GithubReviewEntry,
+  fallbackIndex: number,
+): ReviewComment | undefined {
+  const body = typeof entry.body === 'string' ? entry.body : '';
+  if (body.trim() === '') {
+    // 本文の無いレビュー（APPROVEやコメント無しのRequest changes等）は取り込む対象が
+    // 無いため除外する。`state`（APPROVED等）自体は追う対象外（design.md §16.30は
+    // コメント本文の取り込みが目的で、承認状態の同期は範囲外）
+    return undefined;
+  }
+  const rawId = entry.databaseId ?? entry.id;
+  const id =
+    typeof rawId === 'string' || typeof rawId === 'number'
+      ? `${prefix}:${String(rawId)}`
+      : `${prefix}:${String(fallbackIndex)}`;
+  const author = typeof entry.author?.login === 'string' ? entry.author.login : '';
+  const createdAt =
+    typeof entry.submittedAt === 'string'
+      ? entry.submittedAt
+      : typeof entry.createdAt === 'string'
+        ? entry.createdAt
+        : undefined;
+  return createdAt === undefined
+    ? { id, author, body }
+    : { id, author, body, createdAt };
+}
+
+/**
+ * `gh pr view <number> --json=reviews,comments` の標準出力を解釈する（純粋関数）。
+ *
+ * `reviews`（レビュー本体。承認・変更要求等に添えたコメント）と`comments`（PRへの
+ * issueコメント）の両方を対象にする。レビュー内の個別コメント（review comments API相当）は
+ * `gh pr view`のJSON出力に含まれないため対象外（`gh api`での別経路の取得はIssue #339の
+ * スコープ外、design.md §16.30「今回は含めないもの」）。
+ */
+export function parseGithubReviewComments(stdout: string): ReviewCommentsResult {
+  let data: unknown;
+  try {
+    data = JSON.parse(stdout);
+  } catch {
+    return { ok: false, comments: [], message: 'reviews/commentsの出力を解釈できませんでした' };
+  }
+  if (typeof data !== 'object' || data === null) {
+    return {
+      ok: false,
+      comments: [],
+      message: 'reviews/commentsの出力を解釈できませんでした（想定外の応答形）',
+    };
+  }
+  const record = data as Record<string, unknown>;
+  const reviews = Array.isArray(record['reviews']) ? (record['reviews'] as GithubReviewEntry[]) : [];
+  const comments = Array.isArray(record['comments'])
+    ? (record['comments'] as GithubReviewEntry[])
+    : [];
+  const result: ReviewComment[] = [];
+  reviews.forEach((entry, index) => {
+    const comment = toReviewComment('review', entry, index);
+    if (comment !== undefined) {
+      result.push(comment);
+    }
+  });
+  comments.forEach((entry, index) => {
+    const comment = toReviewComment('comment', entry, index);
+    if (comment !== undefined) {
+      result.push(comment);
+    }
+  });
+  return { ok: true, comments: result };
+}
+
+/** GitLabの note の要素のうち、パースに使う項目だけの型。 */
+interface GitlabNoteEntry {
+  id?: unknown;
+  body?: unknown;
+  author?: { username?: unknown } | null;
+  created_at?: unknown;
+  system?: unknown;
+}
+
+/**
+ * `glab api projects/:id/merge_requests/<iid>/notes` の標準出力を解釈する（純粋関数）。
+ *
+ * `system: true`のnote（ラベル変更・承認等、GitLabが自動生成する記録）は人が書いた
+ * レビューコメントではないため除外する。
+ */
+export function parseGitlabReviewComments(stdout: string): ReviewCommentsResult {
+  let data: unknown;
+  try {
+    data = JSON.parse(stdout);
+  } catch {
+    return { ok: false, comments: [], message: 'notesの出力を解釈できませんでした' };
+  }
+  if (!Array.isArray(data)) {
+    return { ok: false, comments: [], message: 'notesの出力を解釈できませんでした（想定外の応答形）' };
+  }
+  const entries = data as GitlabNoteEntry[];
+  const result: ReviewComment[] = [];
+  entries.forEach((entry, index) => {
+    if (entry.system === true) {
+      return;
+    }
+    const body = typeof entry.body === 'string' ? entry.body : '';
+    if (body.trim() === '') {
+      return;
+    }
+    const id =
+      typeof entry.id === 'string' || typeof entry.id === 'number'
+        ? `note:${String(entry.id)}`
+        : `note:${String(index)}`;
+    const author = typeof entry.author?.username === 'string' ? entry.author.username : '';
+    const createdAt = typeof entry.created_at === 'string' ? entry.created_at : undefined;
+    result.push(createdAt === undefined ? { id, author, body } : { id, author, body, createdAt });
+  });
+  return { ok: true, comments: result };
+}
+
+/**
+ * PR/MRのレビューコメントを1回だけ取得する（design.md §16.30）。ポーリングそのものは
+ * `runnerReviewComments.ts`の`pollReviewComments`が担う（`fetchCiConclusion`と
+ * `waitForCiChecks`の分担と同じ形）。
+ *
+ * CLI呼び出し自体が失敗した場合（認証切れ・番号不正等）は`ok: false`を返す。
+ */
+export async function fetchReviewComments(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  number: number,
+): Promise<ReviewCommentsResult> {
+  const { command, args } = buildReviewCommentsArgs(host, number);
+  const result = await cli.run(command, args, cwd);
+  if (result.code !== 0) {
+    return {
+      ok: false,
+      comments: [],
+      message:
+        result.stderr.trim() !== ''
+          ? sanitizeForLog(result.stderr)
+          : `${command} ${args.join(' ')} に失敗しました（終了コード ${result.code}）`,
+    };
+  }
+  return host === 'github' ? parseGithubReviewComments(result.stdout) : parseGitlabReviewComments(result.stdout);
+}
+
+/**
+ * レビューコメントの取得間隔（秒）の既定値（`agent.workflows.reviewCommentPollIntervalSec`、
+ * design.md §16.30）。「既定は控えめに置く。APIを叩き続けない」（Issue #339）ため、
+ * CIの完了待ちポーリング（`CI_POLL_INTERVAL_MS`=15秒）よりずっと長い10分を既定にする。
+ */
+export const DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC = 600;

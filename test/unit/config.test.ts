@@ -349,6 +349,32 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
     expect(readWorkflowsConfig().ciUpdateBranchMaxRetries).toBe(2);
   });
 
+  it('reviewCommentPollIntervalSecの既定は600秒（design.md §16.30・DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC、Issue #339）', () => {
+    expect(readWorkflowsConfig().reviewCommentPollIntervalSec).toBe(600);
+  });
+
+  it('reviewCommentPollIntervalSecは指定値をそのまま使う（0も有効な値として扱う＝取得しない）', () => {
+    __mock.setConfig('agent', { 'workflows.reviewCommentPollIntervalSec': 120 });
+    expect(readWorkflowsConfig().reviewCommentPollIntervalSec).toBe(120);
+
+    __mock.setConfig('agent', { 'workflows.reviewCommentPollIntervalSec': 0 });
+    expect(readWorkflowsConfig().reviewCommentPollIntervalSec).toBe(0);
+  });
+
+  it('reviewCommentPollIntervalSecが数値でない・負値・非整数・上限超過なら既定値へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.reviewCommentPollIntervalSec': 'たくさん' });
+    expect(readWorkflowsConfig().reviewCommentPollIntervalSec).toBe(600);
+
+    __mock.setConfig('agent', { 'workflows.reviewCommentPollIntervalSec': -1 });
+    expect(readWorkflowsConfig().reviewCommentPollIntervalSec).toBe(600);
+
+    __mock.setConfig('agent', { 'workflows.reviewCommentPollIntervalSec': 1.5 });
+    expect(readWorkflowsConfig().reviewCommentPollIntervalSec).toBe(600);
+
+    __mock.setConfig('agent', { 'workflows.reviewCommentPollIntervalSec': 2147484 });
+    expect(readWorkflowsConfig().reviewCommentPollIntervalSec).toBe(600);
+  });
+
   it('maxAskUserPerRunの既定は3回（design.md §16.33・DEFAULT_MAX_ASK_USER_PER_RUN、Issue #583）', () => {
     expect(readWorkflowsConfig().maxAskUserPerRun).toBe(3);
   });

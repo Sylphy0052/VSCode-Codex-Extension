@@ -15,6 +15,7 @@ import {
   buildIntegrationPullRequestTitle,
   DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES,
   DEFAULT_CI_WAIT_TIMEOUT_SEC,
+  DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC,
   markPullRequestReady,
   needsFinalMergeDecision,
   parsePullRequestNumberFromUrl,
@@ -77,6 +78,7 @@ import {
   closeMessaging,
   onMessageAccepted,
 } from './runnerMessaging';
+import { closeReviewCommentPoll, startReviewCommentPoll } from './runnerReviewComments';
 import {
   buildBoundary,
   integratePseudoWorktree,
@@ -378,6 +380,13 @@ export interface WorkflowRunnerDeps {
    * マージが「baseの最新でない」ことで拒否されたときの取り込み直しの最大リトライ回数。
    */
   readCiUpdateBranchMaxRetries?: () => number;
+  /**
+   * `agent.workflows.reviewCommentPollIntervalSec`の現在値（秒）。省略時は
+   * `DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC`（既定600秒）を使う（design.md §16.30、
+   * roadmap W5、Issue #339）。統合PR/MRのレビューコメントを取得する間隔。0なら取得しない
+   * （`readCiWaitTimeoutSec`と同じく、呼び出し側は毎回現在値を返す関数を渡すこと）。
+   */
+  readReviewCommentPollIntervalSec?: () => number;
   /** テスト用の差し替え口。既定は `node:crypto` の `randomUUID`。 */
   randomId?: () => string;
   /** テスト用の差し替え口。既定は `Date.now`。 */
@@ -642,7 +651,16 @@ export interface WorkflowWarning {
      * リロードでYAML本来の内容へ戻る」という§16.29の主張が実際に成り立ったのか
      * Viewから確認できないため、突き合わせが実際に何かを変えたときだけ出す。
      */
-    | 'reloadTaskDefMismatch';
+    | 'reloadTaskDefMismatch'
+    /**
+     * 統合PR/MRにレビューコメントが付き、オーケストレーターへ通知した（design.md §16.30、
+     * roadmap W5、Issue #339）。人の承認を挟まない以上、この警告が唯一の追跡手段になる
+     * ため、投稿者・コメント本文を全文で残す（`orchestratorTaskAdded`と同じ流儀）。
+     * オーケストレーターがこの通知を受けて`add_task`等で計画を組み替えた場合は、
+     * その適用内容自体は`orchestratorTaskAdded`等の既存の警告が別途記録する
+     * （この警告は「取り込んだこと」だけを記録し、「どう対応したか」までは持たない）。
+     */
+    | 'reviewCommentImported';
   /** ワークフロー全体に関わる警告（gitignoreなど）は undefined。 */
   taskId: string | undefined;
   message: string;
@@ -1176,6 +1194,23 @@ export interface LiveRun {
    * `ensureMessaging`の再構築をまたいで残るフィールド）へ持たせる。
    */
   messagingStartupWarnCount: number;
+  /**
+   * 統合PR/MRのレビューコメント取得（design.md §16.30、roadmap W5、Issue #339）のポーリング
+   * タイマーと、既に通知した（重複通知を避けるための）コメントidの集合。統合PR/MRの作成に
+   * 成功し、かつ`agent.workflows.reviewCommentPollIntervalSec`が0でないときだけ`finalizeForge`が
+   * 作る。`messaging.waitingReplyPollTimer`と同じく`.unref()`しているためテスト・プロセス
+   * 終了を妨げない。最終マージ・判断が確定した時点（`closeMessagingIfFinalMergeSettled`）と
+   * `dispose()`の両方で閉じる（`messaging`と同じ「もう見なくてよくなったら閉じる」設計）。
+   */
+  reviewCommentPoll:
+    | {
+        timer: ReturnType<typeof setInterval>;
+        seenCommentIds: Set<string>;
+        host: ForgeHost;
+        cwd: string;
+        number: number;
+      }
+    | undefined;
   /**
    * 衝突解決セッション（design.md §16.17「コンフリクト」5.「解決用セッションは依存グラフの
    * ノードにはしない」）。`live.tasks`（グラフのノード＝通常のタスク）とは別に持つ。
@@ -1873,6 +1908,7 @@ export class WorkflowRunner {
       messagingHub: undefined,
       messagingSetupInFlight: undefined,
       messagingStartupWarnCount: 0,
+      reviewCommentPoll: undefined,
       mergeResolutions: new Map(),
       orchestrator: undefined,
       orchestratorSeenStates: new Map(),
@@ -2337,6 +2373,11 @@ export class WorkflowRunner {
         disposeQuietly(this.deps.log, () => entry.session.dispose(), `merge resolution ${taskId}`);
       }
       disposeQuietly(this.deps.log, () => closeMessaging(live), 'messaging');
+      disposeQuietly(
+        this.deps.log,
+        () => closeReviewCommentPoll(live),
+        'reviewCommentPoll',
+      );
       // `closeMessaging`自体は`messagingHub`をクリアしない（`closeMessaging`は`dispose()`
       // だけでなく、run正常終了時の`pump()`からも呼ばれる共通関数のため。そちらでは
       // `retryTask`による再開が`messagingHub`を再利用する前提＝Issue #475の案A「hubを
@@ -2830,6 +2871,9 @@ export class WorkflowRunner {
     // `closeMessaging`自体は`live.messaging === undefined`なら即returnする既に冪等な
     // 実装なので、`finishedNotified`では絞らない（絞ると意味が重複するだけ）
     closeMessaging(live);
+    // レビューコメントのポーリング（design.md §16.30）も、最終マージ・判断が確定して
+    // これ以上PR/MRの状態を追う必要が無くなった時点で一緒に閉じる
+    closeReviewCommentPoll(live);
   }
 
   /**
@@ -3291,10 +3335,21 @@ export class WorkflowRunner {
     } else if (result.pullRequest.url !== undefined) {
       this.deps.log.info(`[workflow ${runId}] 統合PR/MRを作成しました: ${result.pullRequest.url}`);
       // design.md §16.11「統合PR/MRの番号」・Issue #118。番号とURLだけを持ち帰る
-      live.integrationPullRequest = {
-        number: parsePullRequestNumberFromUrl(result.pullRequest.url),
-        url: result.pullRequest.url,
-      };
+      const number = parsePullRequestNumberFromUrl(result.pullRequest.url);
+      live.integrationPullRequest = { number, url: result.pullRequest.url };
+      // design.md §16.30（roadmap W5、Issue #339）: 統合PR/MRを作れたら、以後のレビュー
+      // コメントを拾うポーリングを始める。番号をURLから取り出せなかった場合は、
+      // `fetchReviewComments`が番号を要求するため、取得できないままログだけ残して飛ばす
+      // （ready化・最終マージと同じ「番号が不明なら該当機能だけ飛ばす」方針）
+      if (number === undefined) {
+        this.deps.log.warn(
+          `[workflow ${runId}] 統合PR/MRの番号をURLから取り出せなかったため、レビューコメントの取得を飛ばします`,
+        );
+      } else {
+        const intervalSec =
+          this.deps.readReviewCommentPollIntervalSec?.() ?? DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC;
+        startReviewCommentPoll(this.internals, runId, forge.host, live.integration.cwd, number, intervalSec);
+      }
     }
 
     // design.md §16.18「この場合、finalMerge: autoであってもmainへのマージは行わない」。

@@ -4152,14 +4152,15 @@ src/
     messaging.ts    タスク間メッセージングのMCPサーバと配送（§16.21。*）
     taskSession.ts  `TaskSessionHost` / `TaskSession` のインターフェース（チャット画面側の口）
     runner.ts       `WorkflowRunner`本体（薄いファサード）。セッションの生成・指示の送信・
-                     完了検知・状態遷移の接続（VSCode層）。関心事ごとの実体は下記5ファイルへ
+                     完了検知・状態遷移の接続（VSCode層）。関心事ごとの実体は下記6ファイルへ
                      切り出し済み（Issue #147）
     runnerSnapshot.ts   ワークフローViewのスナップショット構築（`getSnapshot`等。読み取り専用）
     runnerRestore.ts    ウィンドウのリロード後の実行再開（`rebuildLiveRun`等。§16.11）
     runnerWorkingDirectory.ts 作業ディレクトリの解決と疑似worktree統合（§16.6・§16.20）
     runnerMerge.ts      マージと衝突解決、タスク層のPR/MR作成（§16.17・§16.18）
     runnerMessaging.ts  タスク間メッセージング（§16.21）
-    runnerInternals.ts  上記5ファイルだけが触る`WorkflowRunner`の内部の口
+    runnerReviewComments.ts 統合PR/MRのレビューコメントのポーリング取得と通知（§16.30）
+    runnerInternals.ts  上記6ファイルだけが触る`WorkflowRunner`の内部の口
                      （`WorkflowRunnerInternals`。クラス外へは公開しない）
     planner.ts      ゴール文からYAMLを生成する（§16.9）
     roadmap.ts      ロードマップの生成・YAML化・完了の書き戻し（§16.19。*）
@@ -4170,7 +4171,7 @@ src/
 
 `*` を付けた4ファイルも、`runner.ts` / `extension.ts` からの配線を含めて実装済みで、実行に反映される（§16.13）。
 
-`runnerSnapshot.ts` / `runnerRestore.ts` / `runnerWorkingDirectory.ts` / `runnerMerge.ts` / `runnerMessaging.ts` の5ファイルは、`WorkflowRunner`のメソッドを機能単位で切り出したもので、`self: WorkflowRunnerInternals`を第一引数に取る関数の集まりとして実装している（Issue #147）。`runner.ts`側のクラスメソッドはこれらへ委譲する薄いラッパーとして残す（`getSnapshot` / `restoreRunsForView` / `retryMerge` のように公開APIとして呼ばれ続けるものは、シグネチャを変えずメソッドのまま残す）。`WorktreeCreationQueue`を1つだけ使い回す不変条件（§16.6・§16.17）は、`WorkflowRunner`のコンストラクタで組み立てたインスタンスを`self.integrationQueue`（`IntegrationMergeQueue`経由）として共有し続けることで変えていない。
+`runnerSnapshot.ts` / `runnerRestore.ts` / `runnerWorkingDirectory.ts` / `runnerMerge.ts` / `runnerMessaging.ts` / `runnerReviewComments.ts` の6ファイルは、`WorkflowRunner`のメソッドを機能単位で切り出したもので、`self: WorkflowRunnerInternals`を第一引数に取る関数の集まりとして実装している（Issue #147）。`runner.ts`側のクラスメソッドはこれらへ委譲する薄いラッパーとして残す（`getSnapshot` / `restoreRunsForView` / `retryMerge` のように公開APIとして呼ばれ続けるものは、シグネチャを変えずメソッドのまま残す）。`WorktreeCreationQueue`を1つだけ使い回す不変条件（§16.6・§16.17）は、`WorkflowRunner`のコンストラクタで組み立てたインスタンスを`self.integrationQueue`（`IntegrationMergeQueue`経由）として共有し続けることで変えていない。
 
 分割にあたって渡す`self`の型は`WorkflowRunnerInternals`（`runnerInternals.ts`）に閉じる。`runs`・`integrationQueue`・`deps`・`notify`・`pump`・`persist`・`resolveForgeState`は`WorkflowRunner`側では`private`のままにし、分割ファイルへは、コンストラクタで組み立てた`internals`（`WorkflowRunnerInternals`型のオブジェクト）だけを渡す。`this as unknown as WorkflowRunnerInternals`のキャストにはしない。キャストは構造的部分型の検査ごと無効にするため、クラス側とインターフェースがずれても`tsc`が検出できず（`pump`をリネームしても型検査は通る）、実行時に`self.pump is not a function`で初めて表面化する。メソッドはアロー関数で包み、`prototype`側の実装を都度引かせる（テストが`WorkflowRunner.prototype`へ張ったスパイを効かせるため）。分割のために`private`を外すと、`src/view/`や`extension.ts`から`runner.runs.get(id)!.runState = ...`や`runner.pump(id)`を直接書いても型検査が止められず、`persist()`・`notify()`を経ない書き換えで永続化した値とメモリ上の`LiveRun`が食い違うため（PR #157のレビュー指摘）。
 
@@ -4957,13 +4958,14 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 | `waitingApproval` へ | id・要求の1行要約（`TaskPendingApprovalSnapshot`） |
 | `blocked` へ         | id・衝突して統合できていない旨                     |
 | タスクからメッセージを受信（`taskMessage`。§16.34、roadmap W9、Issue #547） | 送信元id・本文・返信待ちかどうか |
+| 統合PR/MRに新しいレビューコメントが付く（`reviewComment`。§16.30、roadmap W5、Issue #339） | 投稿者・本文 |
 | run終了              | 全体の結果・統合とPR/MRの結果                      |
 
 - 送信は走行中のターンへ割り込まない。ターン実行中に起きたイベントは溜めておき、**次の送信へまとめて添える**。§16.21の `composeNextPrompt` と同じ流儀にする（合流させないと、並列で3タスクが同時に終わった瞬間に3ターン連続で走る）
 - 人の発話とイベント通知が同時に溜まった場合、**人の発話を基準の本文とし、イベントはその前に添える**。§16.21の対処（`basePrompt` は常に全量温存し、削るのはメッセージ側だけ）と同じ理由で、人の指示が押し出されてはならない
 - run全体で送るイベント通知の総数に上限を置く（`MAX_ORCHESTRATOR_EVENTS_PER_RUN`。`MAX_MESSAGES_PER_RUN` と同じ500）。超えた分は落とし、落としたことを次の通知に添える
 
-定期ポーリング（N秒ごとに現状を見せて報告させる）は採らない。変化が無い間もターンを消費し続けるうえ、イベント通知があれば「変化した瞬間」に必ず届くため、ポーリングで拾える追加の情報が無い。
+定期ポーリング（N秒ごとに現状を見せて報告させる）は採らない。変化が無い間もターンを消費し続けるうえ、イベント通知があれば「変化した瞬間」に必ず届くため、ポーリングで拾える追加の情報が無い。**これはオーケストレーターのターンを駆動する頻度についての話であり、外部（ホスト側）の状態をCLIで取りに行く頻度とは別の話。** レビューコメントの取得（`reviewComment`、§16.30）はCLIをポーリングするが、変化（新しいコメント）を見つけた回だけ通知するため、この節の「定期ポーリングは採らない」（＝変化が無くてもターンを消費させない）という原則自体は破っていない。
 
 #### 道具（MCPツール）
 
@@ -5337,6 +5339,42 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 この3ツールは計画の実行方法（タスクの追加・削除・依存の組み替え）に関する判断であり、人の承認を要さない。一方で、チームの範囲を越える・設計前提を変える・受入基準を緩めるといった**方針そのものに関わる変更**は、この3ツールでは適用せず、既存の`ask_user`（§16.33）で人に確認を仰ぐよう、オーケストレーターへのシステムプロンプト（`buildIntroBody`）で明示している。
 
 また、§16.27の`taskStalled`（停滞検知）通知を受け取った際の振る舞いとして、`buildIntroBody`に「停滞したタスクに対しては、`update_task_prompt`での言い回し変更に加えて、必要なら`add_task`/`remove_task`/`update_task_dependencies`で計画自体の組み替えを検討する」旨の案内を追加した。
+
+### 16.30 PR/MRのレビュー結果を取り込んでタスクへ反映する（roadmap W5、Issue #339）
+
+統合PR/MR（§16.18）を作った後、人がレビューコメントを付けても、これまでのワークフローにはそれを拾う経路が無かった。オーケストレーターはレビューが付いたことに気づけず、コメントへの対応は完全に人の手作業（ワークフローの外）に委ねられていた。本節は、統合PR/MRに新しく付いたレビューコメントを`fetchReviewComments`（`forge.ts`）でポーリング取得し、オーケストレーターへの通知（既存の`notifyOrchestrator`経路）として届ける機能を足す。
+
+#### 承認ゲートを置かない（Issue #497の方針転換）
+
+Issue #341（epic）の方針転換により、「判断するのはオーケストレーターであって人ではない」。したがって、取り込んだレビューコメントに対して何らかの調整（`add_task`/`update_task_prompt`/`send_message`等、§16.29・既存経路）をオーケストレーターが行う際、本機能自体は人の承認ゲートを一切挟まない。唯一の追跡手段として、取り込んだコメントの全文を`WorkflowWarning`（`kind: 'reviewCommentImported'`）としてワークフローViewの警告欄へ記録する。§16.29の「監査ログ（承認ゲートが無い代わりの説明責任）」と同じ考え方で、`message`は`textContent`として描画される（§16.8・§16.34）ため、レビューコメントの本文（人が書いた任意の文字列）をそのまま渡してもHTMLとしては解釈されない。
+
+#### いつ・何を取得するか
+
+1. **統合PR/MRを作れた実行だけが対象。** `finalizeForge`（`runner.ts`）が統合PR/MRの作成に成功し、URLから番号を取り出せた直後に`startReviewCommentPoll`（`runnerReviewComments.ts`）を1度だけ呼ぶ。番号を取り出せなかった場合はログだけ残して飛ばす（`fetchReviewComments`が番号を要求するため）。`pullRequest: 'none'`（統合PR/MRを作らない設定）や、統合PR/MRの作成自体が失敗した実行は対象にならない——`shouldCreateIntegrationPullRequest`による既存のゲート（§16.18）をそのまま通っているため、レビューコメント側に別のゲートを重ねて実装する必要は無い
+2. **取得コマンドは既存のCI状態取得（§16.36）と同じ形。** GitHubは`gh pr view <number> --json=reviews,comments`（`reviews`＝レビュー本体に添えたコメント、`comments`＝PRへのissueコメントの両方が対象。個別レビューコメント——GitHubの「review comments」API相当——はこのコマンドの出力に含まれないため対象外。今回はここまでとし、コード行への行コメントの取り込みはスコープ外とする）、GitLabは`glab api projects/:id/merge_requests/<iid>/notes`（`system: true`のシステム通知は除外）。両方とも`CliCommandRunner`（`forge.ts`）を経由し、新しい実行経路は作らない
+3. **取得の間隔は設定で決める。** `agent.workflows.reviewCommentPollIntervalSec`（既定600秒＝10分、`machine-overridable`、範囲は0〜2147483秒）。「取得のタイミングと頻度は設定で決める。APIを叩き続けない」（Issue #339）を受け、CIの完了待ちポーリング（§16.36、既定15秒固定）よりずっと長い値を既定にした。0にすると取得しない（無効化できる）。範囲外・非整数の値は既定値へフォールバックする（`normalizeReviewCommentPollIntervalSec`、`config.ts`。他の`agent.workflows.*`設定と同じ「範囲外はVSCode側のJSON schema検証を通り抜けてもランタイムで丸める」流儀、§16.16）
+4. **タイマーは`messaging.waitingReplyPollTimer`（§16.21）と同じ後始末の流儀。** `setInterval`で立て`.unref()`する（プロセス・テストの終了を妨げない）。最終マージ・判断が確定してこれ以上PR/MRの状態を追う必要が無くなった時点（`closeMessagingIfFinalMergeSettled`）と、拡張機能の終了時（`dispose()`）の両方から`closeReviewCommentPoll`（冪等）を呼ぶ
+5. **新しく見つかったコメントだけを届ける。** `id`（GitHubは`review:<databaseId>` / `comment:<databaseId>`、GitLabは`note:<id>`の形でホスト・種別ごとに前置詞を付ける）ごとに`seenCommentIds`（`Set`、run単位）で重複排除する。2周目以降のポーリングでは、前回までに届けた分は再通知しない
+
+#### 届け方（サニタイズは1度だけ、§16.24・§16.34）
+
+`buildReviewCommentBody`（`runnerReviewComments.ts`）は`runnerMessaging.ts`の`buildTaskMessageEventBody`/`buildTaskQuestionEventBody`と同じ規約に従う——**ここではサニタイズしない、プレーンテキストの本文を組み立てるだけ**。無害化は`orchestratorSession.ts`の`wrapEvent`が`<workflow-event kind="reviewComment">`で囲むときに`escapeAngleBrackets(stripControlCharsPreservingNewlines(...))`で一度だけ行う。本文はレビューコメントという外部由来・未検証のテキストであり、指示ではなくデータとして扱う（§16.24）。本文の長さは`MAX_MESSAGE_BODY_LENGTH`（`messaging.ts`、`send_message`等と同じ上限）でコードポイント単位に切り詰める。切り詰め無しに載せると、コメント1件の長さに`live.warnings`・オーケストレーターへの通知本文の量が際限なく引きずられるため
+
+`pollReviewComments`は、新しいコメントが1件見つかるたびに`notifyOrchestrator`（`kind: 'reviewComment'`）と`live.warnings.push({ kind: 'reviewCommentImported', ... })`の両方を呼ぶ。前者がオーケストレーターへの配送、後者が人向けの監査ログで、経路も届け先も別（§16.29と同じ二本立て）
+
+#### 前提が欠けている場合は警告だけ、runは止めない
+
+統合PR/MRを作れた時点でCLIの有無・認証は一度通っているはずだが、認証切れ・CLIの更新等で後から失われる場合がある。`fetchReviewComments`がCLI呼び出しの失敗（`code !== 0`）を`{ ok: false, message }`として返した場合、`pollReviewComments`はログへ警告を残すだけで次の周回を待つ（§16.18「前提が欠けている場合」・タスク間メッセージングの「無くても実行は止めない」設計と同じ方針）。runの成否・スケジューリングには一切影響しない
+
+#### `startReviewCommentPoll`の呼び出しと`live.finished`の競合（実装時に踏んだ穴）
+
+`pump()`（`runner.ts`）は、全タスクが`done`等で実行が終わったと判定した時点で`live.finished = true`を立ててから`finalizeForge`を呼ぶ。つまり`startReviewCommentPoll`（`finalizeForge`の内側から呼ばれる）が動く時点では、run自体は既に「終了」扱いになっている。`pollReviewComments`の実装当初、ガードに`live.finished`を含めていたため、統合PR/MR作成直後の1回目の取得（起動直後に必ず1回走る分）が毎回無条件で早期returnし、レビューコメントが1件も届かないという事故があった。「実行が終わっている＝もう何もしない」という直感に反して、統合PR/MRの作成・CIの完了待ち・最終マージ・そして本機能のポーリングは、いずれも`live.finished`が立った**後**に進む処理であり、`live.finished`を汚染源として使ってはいけない。停止判定は`live.reviewCommentPoll`の有無（`startReviewCommentPoll`/`closeReviewCommentPoll`が管理）だけで行う
+
+さらに、`fetchReviewComments`の`await`中に最終マージが確定して`closeReviewCommentPoll`が`live.reviewCommentPoll`を先にundefinedへ戻すことがある（両者は非同期に競合しうる）。この場合でも、既に取得できているコメントを「ポーリングが閉じられたから」という理由で握りつぶさない——`await`前に取り出しておいた`poll`（`host`/`cwd`/`number`/`seenCommentIds`）への参照を使い続け、`await`後に再確認するのは「runそのものが破棄されていないか」（`self.runs.get(runId)`の存否）だけに留める
+
+#### 検証
+
+`test/unit/forge.test.ts`が`parseGithubReviewComments`/`parseGitlabReviewComments`（レビュー本体とissueコメントの混在・空本文の除外・GitLabのシステム通知除外・壊れたJSON応答の扱い）・`fetchReviewComments`（ホストごとのCLI引数組み立て、CLI呼び出し失敗時に`ok: false`になること）を確かめる。`test/unit/config.test.ts`が`reviewCommentPollIntervalSec`の丸め（既定値・範囲内の値の通過・範囲外の値のフォールバック）を確かめる。`test/unit/runner.test.ts`が、本番の呼び出し経路（`finalizeForge` → `startReviewCommentPoll` → `setInterval`の発火 → `pollReviewComments`）を通して、統合PR/MRにレビューコメントが付くと警告欄へ全文で記録されオーケストレーターへも`<workflow-event kind="reviewComment">`として通知されること・同じコメントは2周目のポーリングで重複して取り込まないこと（idでの重複排除）・`reviewCommentPollIntervalSec: 0`はポーリングを行わないこと・レビューコメント取得のCLI呼び出しが失敗してもrunは止まらないことを確かめる。実ホストでのレビューコメント取得コマンドが実引数として受理されるかは[manual-test.md](manual-test.md)のW-Jに残す。
 
 ### 16.32 タスクからオーケストレーターへ判断を仰ぐ経路（`ask_orchestrator`、roadmap W7、Issue #571）
 
