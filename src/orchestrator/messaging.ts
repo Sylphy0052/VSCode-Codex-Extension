@@ -178,8 +178,9 @@ export interface SendMessageValidationResult {
  * 転送するかどうかを決める（design.md §16.34「宛先の集約」）。
  *
  * `from === ORCHESTRATOR_CONNECTION_ID`（オーケストレーターからの送信）のときだけ、
- * 従来どおり「宛先の存在」→「自己宛」の順で検証する。自己宛（`to === from`）を拒否する
- * 理由（Issue #365）は変わらない: `runnerMessaging.ts`の`onMessageAccepted`は
+ * 「自己宛」→「宛先の存在」の順で検証する（Issue #547のレビュー指摘。理由は実装側の
+ * インラインコメント参照）。自己宛（`to === from`）を拒否する理由（Issue #365）は変わらない:
+ * `runnerMessaging.ts`の`onMessageAccepted`は
  * `expectReply: true`で送信元を`waitingReply`へ倒した直後、同じメッセージの宛先が送信元と
  * 同じなら`waitingReply`から即座に戻す（＝自分自身が宛先でもある）ため、自己宛を通すと
  * 「一時停止して即再開する」という意味のない往復が起きる。オーケストレーターの接続idは
