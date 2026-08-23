@@ -460,6 +460,11 @@
         "category": "Agent"
       },
       {
+        "command": "agent.workflows.stopProgram",
+        "title": "プログラムを停止…",
+        "category": "Agent"
+      },
+      {
         "command": "agent.workflows.roadmap",
         "title": "ロードマップを生成…",
         "category": "Agent"

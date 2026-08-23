@@ -4,15 +4,16 @@ import { findCycleGroups, TASK_ID_PATTERN, type DependencyGraphNode } from './wo
 
 /**
  * プログラム定義（複数runの束）のYAMLスキーマと検証（design.md §16.37、roadmap W12、
- * Issue #604・#605）。
+ * Issue #604・#605・#606）。
  *
  * `workflow.ts` がタスクの束（1run）を扱うのに対し、こちらはrunの束（1プログラム）を
  * 扱う。ここに持つのはrunの一覧・run同士の依存の宣言・同時実行数の上限
  * （`maxParallel`）というスキーマと検証まで。**波のスケジューリング本体（依存の無い
- * runを同時に走らせる実際のアルゴリズム）は`programScheduler.ts`が持つ（roadmap
- * W12-2、Issue #605）。失敗の伝播・人による停止（roadmap W12-3、Issue #606）は
- * まだ未実装。** `workflow.ts`と同じくVSCode APIには一切依存しない純粋なロジックの
- * みを置く。
+ * runを同時に走らせる実際のアルゴリズム）・失敗の伝播（前段が`failed`のとき後段を
+ * `skipped`にする）・人による停止（`haltedByUser`）は`programScheduler.ts` /
+ * `programState.ts` / `programRunner.ts`が持つ（roadmap W12-2・W12-3、Issue #605・
+ * #606。着手時点では未実装だったが、両方とも着地済み）。** `workflow.ts`と同じく
+ * VSCode APIには一切依存しない純粋なロジックのみを置く。
  *
  * **上位のオーケストレーターは置かない。** プログラムが持つのは定義と状態
  * （`programState.ts`）だけで、各runのオーケストレーターは引き続き自分のrunだけを見る

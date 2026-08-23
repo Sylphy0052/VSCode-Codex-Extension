@@ -3,37 +3,69 @@ import type { RunOutcome } from './scheduler';
 
 /**
  * プログラム実行中のrun状態の型・初期状態の組み立て・状態遷移（design.md §16.37、
- * roadmap W12-1・W12-2、Issue #604・#605）。`runState.ts`がタスク状態（`TaskState`）を
- * 持つのに対し、こちらはrun状態を持つ。VSCode APIには一切依存しない純粋なロジックの
- * みを置く。
+ * roadmap W12-1・W12-2・W12-3、Issue #604・#605・#606）。`runState.ts`がタスク状態
+ * （`TaskState`）を持つのに対し、こちらはrun状態を持つ。VSCode APIには一切依存しない
+ * 純粋なロジックのみを置く。
  *
  * 「プログラム全体の状態」という入れ物の形・リロード直後の中断扱い
  * （`reconcileProgramStateOnReload`）に加えて、`pending`から`running`へ・`running`から
- * `done`/`failed`へ進める状態遷移（`markRunStarted` / `markRunFinished`）をここに持つ。
- * **次にどのrunを開始すべきかを選ぶ判断（波の組み立て）はここには無く
- * `programScheduler.ts`の担当。** ここにあるのは選ばれた後の状態の書き換えのみ
- * （`scheduler.ts`が`nextTasksToStart`を持ち、実際の状態遷移は`runState.ts`が持つのと
- * 同じ役割分担）。
+ * `done`/`failed`へ進める状態遷移（`markRunStarted` / `markRunFinished`）、`pending`を
+ * `skipped`へ進める状態遷移（`markRunSkipped` / `markProgramHaltedByUser`、W12-3）を
+ * ここに持つ。**次にどのrunを開始すべきか・どのrunを`skipped`にすべきかを選ぶ判断
+ * （波の組み立て・失敗の伝播）はここには無く`programScheduler.ts`の担当。** ここにあるのは
+ * 選ばれた後の状態の書き換えのみ（`scheduler.ts`が`nextTasksToStart`を持ち、実際の状態遷移は
+ * `runState.ts`が持つのと同じ役割分担）。
  */
 
-/** design.md 起票文の「未着手・実行中・完了・失敗」に対応する4値。 */
-export const PROGRAM_RUN_STATES = ['pending', 'running', 'done', 'failed'] as const;
+/**
+ * design.md起票文の「未着手・実行中・完了・失敗」の4値に、`skipped`（走らせなかった）を
+ * 加えた5値（W12-3、Issue #606）。**`skipped`は「これ以上そのrunを起動する見込みが無い」
+ * ことが確定した`pending`の成れの果てで、`failed`とは区別する。** `failed`は実際に
+ * `WorkflowRunner`側のrunが動いて（起動を試みて）失敗・停止したことを意味し`runId`を
+ * 持ちうるのに対し、`skipped`はそもそも起動していない（`runId`は常に`undefined`）。
+ * 起票文の受入基準「走らせなかったrunについて、理由が残る」を`ProgramRunEntry.skipReason`
+ * （このファイル）で表す。
+ */
+export const PROGRAM_RUN_STATES = ['pending', 'running', 'done', 'failed', 'skipped'] as const;
 export type ProgramRunState = (typeof PROGRAM_RUN_STATES)[number];
+
+/**
+ * `pending`のrunを`skipped`にした理由（design.md §16.37.3、Issue #606）。
+ *
+ * - `failedDependency`: 依存していたrun（`failedRunId`）が`failed`または`skipped`に
+ *   確定したため、`dependsOn`の`done`条件を満たす見込みが無くなった
+ *   （`programScheduler.ts`の`propagateProgramFailures`が確定させる）
+ * - `haltedByUser`: 人がプログラム全体を止めた（`markProgramHaltedByUser`）ため、
+ *   まだ開始していなかった
+ */
+export type ProgramRunSkipReason =
+  { kind: 'failedDependency'; failedRunId: string } | { kind: 'haltedByUser' };
 
 /** プログラムが束ねる個々のrunの状態。`runState.ts`の`PersistedRun.runId`と紐づく。 */
 export interface ProgramRunEntry {
   state: ProgramRunState;
   /**
    * このrunに対応する`WorkflowRunStore`側の`PersistedRun.runId`。まだ開始していなければ
-   * `undefined`（`pending`のときは常に`undefined`）。
+   * `undefined`（`pending`・`skipped`のときは常に`undefined`。`skipped`はそもそも
+   * 起動していないため）。
    */
   runId: string | undefined;
+  /** `state === 'skipped'`のときだけ意味を持つ（W12-3、Issue #606）。それ以外は`undefined`。 */
+  skipReason: ProgramRunSkipReason | undefined;
 }
 
 /** プログラム全体の実行状態（`runState.ts`の`RunState`に相当する層）。 */
 export interface ProgramState {
   /** キーは`ProgramRunRef.id`（プログラム定義内のrun参照名）。 */
   runs: Record<string, ProgramRunEntry>;
+  /**
+   * 人がプログラム全体を止めたか（`runState.ts`の`RunState.haltedByUser`のプログラム版、
+   * W12-3、Issue #606）。単発run側と同じく、`failed`の確定による停止（≒後述の失敗の伝播）
+   * とは別に持つ（二重に状態を持つと同期が崩れるため、判定できるものは判定に寄せる、と
+   * いう単発run側の方針をそのまま踏襲）。真の間、`programScheduler.ts`の
+   * `nextProgramRunsToStart`は新規のrun起動を一切止める。
+   */
+  haltedByUser: boolean;
 }
 
 /**
@@ -44,9 +76,9 @@ export interface ProgramState {
 export function createInitialProgramState(def: ProgramDefinition): ProgramState {
   const runs: Record<string, ProgramRunEntry> = {};
   for (const r of def.runs) {
-    runs[r.id] = { state: 'pending', runId: undefined };
+    runs[r.id] = { state: 'pending', runId: undefined, skipReason: undefined };
   }
-  return { runs };
+  return { runs, haltedByUser: false };
 }
 
 /**
@@ -58,16 +90,15 @@ export function createInitialProgramState(def: ProgramDefinition): ProgramState 
  * 確認してから呼ぶ前提（この関数自体は前提を検証しない。`runState.ts`の遷移関数群と
  * 同じ方針）。純粋関数。
  */
-export function markRunStarted(
-  state: ProgramState,
-  runRefId: string,
-  runId: string,
-): ProgramState {
+export function markRunStarted(state: ProgramState, runRefId: string, runId: string): ProgramState {
   const current = state.runs[runRefId];
   if (current === undefined) {
     return state;
   }
-  return { runs: { ...state.runs, [runRefId]: { state: 'running', runId } } };
+  return {
+    ...state,
+    runs: { ...state.runs, [runRefId]: { state: 'running', runId, skipReason: undefined } },
+  };
 }
 
 /**
@@ -77,11 +108,13 @@ export function markRunStarted(
  * Issue #605）。
  *
  * **`succeeded`以外は全て`failed`へ丸める。** プログラム層の`ProgramRunState`は
- * `pending`/`running`/`done`/`failed`の4値のみで（design.md起票文の4状態）、単発run側の
- * `blocked`（統合できなかった）・`aborted`（人の割り込み等）に対応する専用の値を
- * 持たない。プログラムの観点で意味を持つのは「後続runの依存を満たす`done`か否か」の
- * 一点のみで、`blocked`/`aborted`を`failed`と区別して扱う（例えば別の対応を取る）判断は
- * 失敗の伝播そのものであり、roadmap W12-3（Issue #606）の担当。
+ * `pending`/`running`/`done`/`failed`/`skipped`の5値のみで（design.md起票文の4状態に
+ * `skipped`を加えたもの。W12-3、Issue #606）、単発run側の`blocked`（統合できなかった）・
+ * `aborted`（人の割り込み等）に対応する専用の値を持たない。プログラムの観点で意味を
+ * 持つのは「後続runの依存を満たす`done`か否か」の一点のみで、`blocked`/`aborted`を
+ * `failed`と区別して**別の状態値へ**倒す判断はしない（後続runを止めるという意味での
+ * 「失敗の伝播」自体は行う。`programScheduler.ts`の`propagateProgramFailures`が
+ * `failed`（このrun自身）を見て後続の`pending`を`skipped`へ倒す）。
  *
  * 呼び出し側が`state.runs[runRefId]?.state === 'running'`を確認してから呼ぶ前提
  * （この関数自体は前提を検証しない）。純粋関数。
@@ -97,7 +130,11 @@ export function markRunFinished(
   }
   const nextState: ProgramRunState = outcome === 'succeeded' ? 'done' : 'failed';
   return {
-    runs: { ...state.runs, [runRefId]: { state: nextState, runId: current.runId } },
+    ...state,
+    runs: {
+      ...state.runs,
+      [runRefId]: { state: nextState, runId: current.runId, skipReason: undefined },
+    },
   };
 }
 
@@ -136,7 +173,10 @@ export function reapplyLiveRunOutcome(
   if (current.state === 'running' && current.runId === runId) {
     return state;
   }
-  return { runs: { ...state.runs, [runRefId]: { state: 'running', runId } } };
+  return {
+    ...state,
+    runs: { ...state.runs, [runRefId]: { state: 'running', runId, skipReason: undefined } },
+  };
 }
 
 /**
@@ -144,16 +184,16 @@ export function reapplyLiveRunOutcome(
  * `failed`として扱う（`runStore.ts`の`reconcileRunOnReload`とタスク単位の同じ扱いを
  * プログラム単位でも行う。design.md §16.11・§16.35）。
  *
- * **この関数は状態を戻すだけで、失敗の伝播（依存先runを道連れにする等）は行わない。**
- * それは失敗の伝播そのものを扱う後続Issue（roadmap W12-3、Issue #606）の担当。
- * `pending`のrunはそのまま`pending`に留める（まだ何も始めていないため、単発runの
- * `reconcileRunOnReload`が`pending`を`skipped`へ道連れにするのとは異なる）。
- * roadmap W12-2（`programScheduler.ts`）で波のスケジューリング自体は持つように
- * なったが、それでも道連れにしない判断は変わらない。`pending`のrunが依存先の
- * `failed`によって永久に開始されないのか、単に`maxParallel`の空きを待っているだけ
- * なのかをここで見分けて片方だけ`skipped`等へ倒すのは、失敗の伝播そのものの判断で
- * あり引き続きroadmap W12-3（Issue #606）の担当（`programScheduler.ts`の
- * `isProgramSettled`のコメントも参照）。
+ * **この関数は状態を戻すだけで、失敗の伝播（依存先runを道連れにする等）は行わない
+ * （W12-3、Issue #606で決着済み）。** `pending`のrunはそのまま`pending`に留める
+ * （まだ何も始めていないため、単発runの`reconcileRunOnReload`が`pending`を`skipped`へ
+ * 道連れにするのとは異なる）。**このファイルは`def`（run同士の`dependsOn`）を持たない
+ * ため、そもそも「どのpendingが道連れか」を判定できない。** 判定と実際の`skipped`への
+ * 遷移は`programScheduler.ts`の`propagateProgramFailures`（`def`と`state`の両方を受け取る）
+ * が担い、`programRunner.ts`の`pumpProgram`が、この関数（`reconcileProgramOnReload`経由）と
+ * `reapplyLiveRunOutcome`（W10の再開との整合）の**両方が確定した後**に呼ぶ
+ * （`reconcileAfterReload`の末尾で全プログラムぶん`pumpProgram`を呼ぶ既存の配線が
+ * そのままこの役割を兼ねる。design.md §16.37.3「暫定`failed`と確定`failed`の区別」参照）。
  *
  * 純粋関数。呼び出し側（`programStore.ts`の`ProgramStore.reconcileAfterReload`）が
  * 実際の読み書きを担う。**ここで`failed`へ倒した後、その`runId`が実際にはW10で再開
@@ -174,5 +214,67 @@ export function reconcileProgramStateOnReload(state: ProgramState): ProgramState
   if (!changed) {
     return state;
   }
-  return { runs };
+  return { runs, haltedByUser: state.haltedByUser };
+}
+
+/**
+ * `pending`のrunを`skipped`にする（design.md §16.37.3、roadmap W12-3、Issue #606）。
+ * 既に`pending`でなければ何もしない（`markRunStarted`と同じ、呼び出し側が前提を
+ * 満たしてから呼ぶ方針。ここでは`pending`以外への上書きを防ぐガードとして働く。
+ * `running`/`done`/`failed`を`skipped`で踏みつぶさないための多層防御）。
+ *
+ * 呼び出し元は2つ（`ProgramRunSkipReason`の2値に対応）:
+ * - `programScheduler.ts`の`propagateProgramFailures`（`failedDependency`。前段runの
+ *   `failed`/`skipped`確定を受けて、依存先の`pending`を道連れにする）
+ * - このファイルの`markProgramHaltedByUser`（`haltedByUser`。人が全体を止めたときに
+ *   未着手のものをまとめて止める）
+ *
+ * 純粋関数。
+ */
+export function markRunSkipped(
+  state: ProgramState,
+  runRefId: string,
+  reason: ProgramRunSkipReason,
+): ProgramState {
+  const current = state.runs[runRefId];
+  if (current === undefined || current.state !== 'pending') {
+    return state;
+  }
+  return {
+    ...state,
+    runs: {
+      ...state.runs,
+      [runRefId]: { state: 'skipped', runId: undefined, skipReason: reason },
+    },
+  };
+}
+
+/**
+ * 人がプログラム全体を止めた（design.md §16.37.3、roadmap W12-3、Issue #606）。
+ * `runState.ts`の`applyLoopStopReason`（`manual`/`interrupted`）がタスク単位で行うのと
+ * 同じ形をプログラム単位で行う: `haltedByUser`を立て、まだ開始していない`pending`を
+ * 全て`skipped`（理由`haltedByUser`）にする。**`running`のrunはここでは変えない**
+ * （そのrun自身の停止は`programRunner.ts`の`haltProgram`が`ProgramWorkflowPort.stop`
+ * 経由で`WorkflowRunner.stop`を呼ぶ別経路。単発run側の`stop()`が「走行中のタスクは
+ * 走らせ切る（ループだけ止める）」のと同じく、ここでは`running`の`ProgramRunEntry`を
+ * 即座に`failed`/`skipped`へは倒さない。実際の終了確定は、その子runが実際に停止・
+ * 完了して`onRunChanged`から`markRunFinished`が呼ばれるのを待つ）。
+ *
+ * 既に`haltedByUser`なら何もしない（同じ参照を返す。`stop()`が複数回呼ばれても安全に
+ * するため、`runState.ts`の`applyLoopStopReason`と同じ方針）。純粋関数。
+ */
+export function markProgramHaltedByUser(state: ProgramState): ProgramState {
+  if (state.haltedByUser) {
+    return state;
+  }
+  let runs = state.runs;
+  for (const [id, entry] of Object.entries(state.runs)) {
+    if (entry.state === 'pending') {
+      runs = {
+        ...runs,
+        [id]: { state: 'skipped', runId: undefined, skipReason: { kind: 'haltedByUser' } },
+      };
+    }
+  }
+  return { runs, haltedByUser: true };
 }

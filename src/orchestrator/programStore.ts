@@ -29,9 +29,12 @@ export interface PersistedProgram {
   startedAt: string;
   /**
    * 実行中は undefined。終了判定が付いた時点で埋める。`programRunner.ts`の
-   * `isProgramSettled`（全runが`done`または`failed`）が真になった時点で`ProgramRunner`が
-   * 埋める（roadmap W12-2、Issue #605）。`pending`が1件でも残っていれば埋まらない
-   * （失敗の伝播はIssue #606の担当のため、それまでは「実行中」のまま）。
+   * `isProgramSettled`（全runが`done`/`failed`/`skipped`のいずれか）が真になった時点で
+   * `ProgramRunner`が埋める（roadmap W12-2・W12-3、Issue #605・#606）。`pending`・
+   * `running`が1件でも残っていれば埋まらない。前段の`failed`に依存して未着手のまま
+   * だった`pending`は、失敗の伝播（`programScheduler.ts`の`propagateProgramFailures`）
+   * が`skipped`（終端状態）へ確定させるため、`pending`のまま無期限に「実行中」扱いが
+   * 残ることは無くなった（W12-2時点の挙動からの変更）。
    */
   finishedAt: string | undefined;
   state: ProgramState;
@@ -53,7 +56,11 @@ export function reconcileProgramOnReload(program: PersistedProgram): PersistedPr
     return program;
   }
   // finishedAtは変えない。あるrunがrunningからfailedへ倒れただけでプログラム全体が
-  // 終わったとは言えない（前段が失敗した場合の扱いは(3)、roadmap W12-3、Issue #606の担当）
+  // 終わったとは言えない。この関数（`reconcileProgramStateOnReload`）自身は失敗の伝播
+  // （前段の`failed`が確定した後続`pending`を`skipped`にする）を行わない
+  // （`programState.ts`の`reconcileProgramStateOnReload`のJSDoc参照）。伝播と
+  // `finishedAt`の確定は、この直後に呼ばれる`ProgramRunner.reconcileAfterReload`
+  // （`pumpProgram`経由、roadmap W12-3、Issue #606）が担う
   return { ...program, state };
 }
 

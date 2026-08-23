@@ -597,9 +597,37 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // （`disposeOrchestrator`が`live.orchestrator`をundefinedへ戻すため冪等）。
   context.subscriptions.push({ dispose: () => workflowRunner.dispose() });
 
+  // プログラム（design.md §16.37、roadmap W12-1・W12-2、Issue #604・#605）の永続化状態も、
+  // 単発runと同じタイミングでリロード直後の中断扱いへ書き換える（W10の自動再開の対象に
+  // 含める）。reconcile前後でプログラムごとに実際に書き換わったか（`running`だったrunが
+  // `failed`へ倒れたか）を比較するため、先にrunごとの状態をスナップショットしておく
+  const runStatesBeforeReconcile = new Map(
+    programStore.list().map((p) => [p.programId, JSON.stringify(p.state)] as const),
+  );
+  // 波のスケジューリング（design.md §16.37.2、roadmap W12-2、Issue #605）。`WorkflowRunner`は
+  // `ProgramWorkflowPort`（`start` / `listLive` / `onChanged`）を構造的に満たすため、
+  // アダプタを挟まずそのまま渡す。
+  //
+  // **`workflowView`（次のブロック）より先に作る。** `WorkflowViewManager`のコンストラクタが
+  // `programRunner.onChanged`を即座に購読するため（design.md §16.37.3のレビュー指摘F1、
+  // Issue #606）、この時点で`programRunner`が存在している必要がある
+  // （`halt`のようにクロージャ越しの遅延参照では済まない）
+  const programRunner = new ProgramRunner({
+    programStore,
+    filePort: nodeWorkflowFilePort,
+    workflow: workflowRunner,
+    log,
+  });
+  programRunner.attach();
+  context.subscriptions.push({ dispose: () => programRunner.dispose() });
+
   // ワークフローView（#57）。`restoreRunsForView`がworkspaceStateのreconcileと
   // メモリ上への復元（design.md §16.11「リロード後の実行再開」）を両方行う
-  const workflowView = new WorkflowViewManager(workflowRunner, log);
+  const workflowView = new WorkflowViewManager(workflowRunner, log, {
+    list: () => programStore.list(),
+    halt: (programId) => programRunner.haltProgram(programId),
+    onChanged: (listener) => programRunner.onChanged(listener),
+  });
   context.subscriptions.push(workflowView);
   const restoreRunsForViewDone = workflowRunner.restoreRunsForView().then(() => {
     const interrupted = workflowStore
@@ -612,24 +640,6 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     }
   });
 
-  // プログラム（design.md §16.37、roadmap W12-1・W12-2、Issue #604・#605）の永続化状態も、
-  // 単発runと同じタイミングでリロード直後の中断扱いへ書き換える（W10の自動再開の対象に
-  // 含める）。reconcile前後でプログラムごとに実際に書き換わったか（`running`だったrunが
-  // `failed`へ倒れたか）を比較するため、先にrunごとの状態をスナップショットしておく
-  const runStatesBeforeReconcile = new Map(
-    programStore.list().map((p) => [p.programId, JSON.stringify(p.state)] as const),
-  );
-  // 波のスケジューリング（design.md §16.37.2、roadmap W12-2、Issue #605）。`WorkflowRunner`は
-  // `ProgramWorkflowPort`（`start` / `listLive` / `onChanged`）を構造的に満たすため、
-  // アダプタを挟まずそのまま渡す
-  const programRunner = new ProgramRunner({
-    programStore,
-    filePort: nodeWorkflowFilePort,
-    workflow: workflowRunner,
-    log,
-  });
-  programRunner.attach();
-  context.subscriptions.push({ dispose: () => programRunner.dispose() });
   const reconcileProgramStoreDone = programStore.reconcileAfterReload().then((reconciled) => {
     const interruptedProgramIds = reconciled
       .filter((p) => runStatesBeforeReconcile.get(p.programId) !== JSON.stringify(p.state))
@@ -890,6 +900,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       runProgram(programRunner, log),
     ),
     vscode.commands.registerCommand('agent.workflows.stop', () => stopWorkflow(workflowRunner)),
+    vscode.commands.registerCommand('agent.workflows.stopProgram', () =>
+      stopProgram(programRunner, programStore),
+    ),
     vscode.commands.registerCommand('agent.workflows.view', () => workflowView.show()),
     vscode.commands.registerCommand('agent.workflows.plan', (providerHint?: unknown) =>
       planWorkflowCommand(chat, claudeChat, workflowView, log, providerHint),
@@ -1180,9 +1193,10 @@ async function runWorkflow(
  * 以前の記述はIssue #605のレビュー指摘F4により誤り。この`.agents/programs`という
  * 文字列自体はW12-1でこの機能のために新規に決めたもので、先行する慣例は無い）。
  *
- * **単発runと違い専用のビュー（ワークフローView相当）はまだ持たない。** 起動した各runは
- * 個別にワークフローViewから確認できる（`agent.workflows.view`）。プログラム専用の画面は
- * 受入基準に無く、この段では見送った（design.md §16.37.2参照）。
+ * ワークフローView（`agent.workflows.view`）は、起動した各runを個別に確認できることに加えて
+ * W12-3（design.md §16.37.3、Issue #606）でプログラム全体の状態（各runの進捗・失敗伝播による
+ * スキップ理由・人による停止の有無）も表示するようになった。停止は`agent.workflows.stopProgram`
+ * コマンド、またはワークフローView内の「プログラムを停止」ボタンから行える（`stopProgram`）。
  */
 async function runProgram(programRunner: ProgramRunner, log: Logger): Promise<void> {
   const folder = currentWorkspaceFolder();
@@ -1236,6 +1250,33 @@ async function stopWorkflow(runner: WorkflowRunner): Promise<void> {
     return;
   }
   runner.stop(picked.runId);
+}
+
+/**
+ * 実行中のプログラムを選んで人の手で止める（design.md §16.37.3、roadmap W12-3、Issue #606）。
+ *
+ * `stopWorkflow`と対になるコマンド。停止対象は`programStore.list()`のうち未完了
+ * （`finishedAt === undefined`）のものに絞る。実際の停止処理は`ProgramRunner.haltProgram`が
+ * 持つ（配下の生存中runへの`stop`呼び出し・`haltedByUser`の永続化・保留中runの一括skipped化）。
+ */
+async function stopProgram(programRunner: ProgramRunner, programStore: ProgramStore): Promise<void> {
+  const unfinished = programStore.list().filter((p) => p.finishedAt === undefined);
+  if (unfinished.length === 0) {
+    void vscode.window.showInformationMessage('実行中のプログラムはありません');
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(
+    unfinished.map((p) => ({
+      label: p.state.haltedByUser ? `${p.defPath}（停止処理中）` : p.defPath,
+      description: p.programId,
+      programId: p.programId,
+    })),
+    { placeHolder: '停止するプログラムを選択' },
+  );
+  if (picked === undefined) {
+    return;
+  }
+  await programRunner.haltProgram(picked.programId);
 }
 
 /**

@@ -968,6 +968,63 @@ export function workflowScript(): string {
     el('orchAskUser').hidden = true;
   }
 
+  // ---- プログラム（design.md §16.37.3、roadmap W12-3、Issue #606） ----
+
+  const PROGRAM_SKIP_REASON_LABEL = {
+    failedDependency: '前段runの失敗により未着手',
+    haltedByUser: '人がプログラム全体を停止したため未着手',
+  };
+
+  function formatProgramRunLine(runRefId, entry) {
+    // タスクのSTATE_LABEL（pending/running/done/failed/skipped）をそのまま流用する
+    // （design.md §16.37.3でProgramRunStateをタスク状態の一部と同じ語彙にそろえた）
+    let line = runRefId + '：' + (STATE_LABEL[entry.state] || entry.state);
+    if (entry.state === 'skipped' && entry.skipReason) {
+      const reason = entry.skipReason;
+      if (reason.kind === 'failedDependency') {
+        line += '（' + reason.failedRunId + 'の失敗により未着手）';
+      } else {
+        line += '（' + (PROGRAM_SKIP_REASON_LABEL[reason.kind] || reason.kind) + '）';
+      }
+    }
+    return line;
+  }
+
+  function applyPrograms(programs) {
+    const box = el('programs');
+    box.replaceChildren();
+    for (const p of programs) {
+      const item = el2('div', 'program-item');
+      const head = el2('div', 'program-head');
+      head.appendChild(text('span', 'program-def', p.defPath));
+      if (p.state.haltedByUser) {
+        head.appendChild(text('span', 'program-status program-halted', '人が停止'));
+      } else if (p.finishedAt) {
+        head.appendChild(text('span', 'program-status program-finished', '完了'));
+      } else {
+        head.appendChild(text('span', 'program-status program-running', '実行中'));
+      }
+      if (!p.state.haltedByUser && !p.finishedAt) {
+        const stopBtn = el2('button', 'secondary danger program-stop-btn');
+        stopBtn.type = 'button';
+        stopBtn.textContent = 'プログラムを停止';
+        stopBtn.addEventListener('click', () => {
+          vscode.postMessage({ type: 'stopProgram', programId: p.programId });
+        });
+        head.appendChild(stopBtn);
+      }
+      item.appendChild(head);
+
+      const runsBox = el2('div', 'program-runs');
+      for (const runRefId of Object.keys(p.state.runs)) {
+        runsBox.appendChild(text('div', 'program-run', formatProgramRunLine(runRefId, p.state.runs[runRefId])));
+      }
+      item.appendChild(runsBox);
+      box.appendChild(item);
+    }
+    el('programsSection').hidden = programs.length === 0;
+  }
+
   // ---- 経過時間: ローカルで毎秒更新する（拡張機能からは状態が変わったときだけ届く） ----
 
   setInterval(() => {
@@ -1053,6 +1110,8 @@ export function workflowScript(): string {
       applyState(msg.snapshot, msg.layout, msg.progress, msg.integration);
     } else if (msg.type === 'noRun') {
       applyNoRun();
+    } else if (msg.type === 'programs') {
+      applyPrograms(msg.programs);
     }
   });
 
