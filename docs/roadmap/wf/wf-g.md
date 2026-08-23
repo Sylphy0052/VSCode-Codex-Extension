@@ -23,20 +23,36 @@
     `grep -rln "型検査もlintも効かない" src/` は使わない——`workflowScript.ts` の
     ヘッダでその一文が折り返し、「型検査もlintも」と「効かない」が別の行にあるため
     **取りこぼす**。
-    **ラベル表は16あり、3階層に分かれる。直し方が違う**（以下は #527 時点の観測。
-    **着手時に測り直すこと**——#645 のマージで `FAILURE_LABEL` の件数が11→12へ動き、
-    この数字は書いた直後に既に古くなった）。
-    (1) **`Record<UnionType, string>` — tscが網羅を強制する。2件。何もしなくてよい**
-    （`src/extension.ts:2232` `ACTION_LABELS`、`src/provider/import.ts:110`
-    `ITEM_TYPE_LABEL`）。値を足してラベルを足し忘れるとコンパイルが落ちる。
+    **ラベル表は22あり、3階層に分かれる。直し方が違う**（以下は #646 時点の観測。
+    **着手時に測り直すこと**——#645 のマージで `FAILURE_LABEL` の件数が11→12へ動いた。
+    さらにこの表自体、**最初に書いた時点で3階層とも件数が間違っており**、#646 のレビューで
+    直った。数字を残しているのは変化の幅を伝えるためで、そのまま使うためではない）。
+    **数える基準**: キーから表示文字列を引く定数の辞書で、**未知のキーにフォールバックする**
+    形（`?? key` / `|| kind` / `Record<string, string>` の索引）。空のアキュムレータ
+    （`const result: Record<string, string> = {}`。`codex/configToml.ts:23` と
+    `provider/slashCommands.ts:68`）は含めない。
+    (1) **`Record<UnionType, string>` — tscが網羅を強制する。6件。何もしなくてよい**
+    （`src/extension.ts:2232` `ACTION_LABELS` / `orchestrator/orchestratorSession.ts:38`
+    `ORCHESTRATOR_APPROVAL_MODE` / `provider/approvalLevel.ts:26`・`33`
+    `APPROVAL_LEVEL_LABELS`・`APPROVAL_LEVEL_DESCRIPTIONS` /
+    `orchestrator/runnerMerge.ts:625` `LEASE_WAIT_BLOCK_MESSAGES` /
+    `provider/import.ts:110` `ITEM_TYPE_LABEL`）。値を足してラベルを足し忘れると
+    コンパイルが落ちる。**`(typeof X)[number]` もunionなので網羅強制は効く**
+    （`Provider` / `ApprovalLevel` がこの形）。**`LeaseWaitBlockReason` は非exportなので
+    `export type` のgrepでは出ない。**
     **「確認して、何もしなくてよいと分かった」を書き残すこと**——書かないと次の人が
     同じ確認をやり直す。
-    (2) **`Record<string, string>` — 型は付いているが開いている。7件**
+    (2) **`Record<string, string>` — 型は付いているが開いている。8件**
     （`appserver/autoApprovalReview.ts:23` / `appserver/chatState.ts:569`・`578`・`881` /
-    `appserver/transcriptMarkdown.ts:15`・`33` / `view/settingsProvider.ts:1048`）。
+    `appserver/transcriptMarkdown.ts:15`・`33` / `view/settingsProvider.ts:1048` /
+    `claude/streamJson.ts:478` `limitLabelOf` 内の `known`）。
     **直し方はテストではない。キーのunion型を作って `Record<UnionType, string>` に変える**
     ——(1)の形にすればtscが守る。T26（型情報ルールの導入）の本題そのもの。
-    (3) **テンプレートリテラルの中 — 型検査が届かない。7件**
+    **ただし `streamJson.ts:478` はCLI由来の語彙（`five_hour` / `seven_day` / `weekly`）を
+    受けているので、閉じた型を作れるかは着手時に確かめること**（(3)の
+    `EXTRA_USAGE_DISABLED_REASON_LABEL` と同じ性質）。**命名規則を持たない
+    （`known` という変数名）ため、`_LABEL` / `_TITLE` のような命名で引くと出ない。**
+    (3) **テンプレートリテラルの中 — 型検査が届かない。8件**
     （`chatScript.ts:92` `KIND_LABEL` / `:159` `STATUS_LABEL` / `:1338` `TODO_MARK` /
     `:1717` `EXTRA_USAGE_DISABLED_REASON_LABEL` / `:1805` `LOOP_STOP_LABEL` /
     `workflowScript.ts:19` `STATE_LABEL` / `:31` `FAILURE_LABEL` / `:975`
