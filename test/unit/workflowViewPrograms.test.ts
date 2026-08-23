@@ -146,9 +146,13 @@ describe('WorkflowViewManager: 失敗の伝播（skipped化）の通知（design
     expect(result.ok).toBe(true);
     const programId = result.programId as string;
 
-    // 起動直後の`programs`メッセージ: R1がrunning、R2はpending
+    // 起動直後の`programs`メッセージ: R1がrunning、R2はpending。
+    // `programs`が空配列のまま（＝`postPrograms`が未発火）だと後続の`programs[0]`アクセスが
+    // 無関係なTypeErrorになり、失敗の理由が読めなくなる（レビュー指摘F3、Issue #606）ため、
+    // 中身を読む前にまず「1件届いているか」自体を主張しておく
     const afterStart = lastProgramsMessage(panel.webview.sent);
     expect(afterStart).toBeDefined();
+    expect(afterStart!.programs).toHaveLength(1);
     const afterStartRuns = (
       afterStart!.programs[0] as { state: { runs: Record<string, { state: string }> } }
     ).state.runs;
@@ -168,6 +172,7 @@ describe('WorkflowViewManager: 失敗の伝播（skipped化）の通知（design
 
     const finalMessage = lastProgramsMessage(panel.webview.sent);
     expect(finalMessage).toBeDefined();
+    expect(finalMessage!.programs).toHaveLength(1);
     const finalRuns = (
       finalMessage!.programs[0] as {
         state: {

@@ -21,7 +21,7 @@ import {
 } from './program';
 import type { ProgramStore } from './programStore';
 import { sanitizeForLog } from './sanitize';
-import type { StartWorkflowResult, LiveRunSummary, WorkflowFilePort } from './runner';
+import { SimpleEmitter, type StartWorkflowResult, type LiveRunSummary, type WorkflowFilePort } from './runner';
 import { MAX_WORKFLOW_FILE_BYTES } from './workflow';
 import type { Logger } from '../log';
 
@@ -53,30 +53,6 @@ export interface ProgramWorkflowPort {
    * 待つ（`haltProgram`のJSDoc参照）。
    */
   stop(runId: string): void;
-}
-
-/**
- * `onChanged`の最小限のpub-sub（`runner.ts`の`SimpleEmitter`と同じ形。VSCodeの
- * `EventEmitter`には依存しない方針をここでも踏襲する。型ごと共有はしていない
- * ——`runner.ts`側は`export`しておらず、依存を増やすほどのものでもないため
- * 同じ形をこちらにも複製した）。
- */
-class SimpleEmitter<T> {
-  private readonly listeners: Array<(value: T) => void> = [];
-  on(listener: (value: T) => void): () => void {
-    this.listeners.push(listener);
-    return () => {
-      const i = this.listeners.indexOf(listener);
-      if (i !== -1) {
-        this.listeners.splice(i, 1);
-      }
-    };
-  }
-  fire(value: T): void {
-    for (const listener of [...this.listeners]) {
-      listener(value);
-    }
-  }
 }
 
 export interface ProgramRunnerDeps {

@@ -1381,8 +1381,14 @@ interface TaskLaunchPreparation {
   boundaryResult: { boundary: TaskBoundary; warning: string | undefined };
 }
 
-/** `onChanged` の最小限のpub-sub。VSCodeの `EventEmitter` には依存しない（design.mdの方針どおり）。 */
-class SimpleEmitter<T> {
+/**
+ * `onChanged` の最小限のpub-sub。VSCodeの `EventEmitter` には依存しない（design.mdの方針どおり）。
+ * **`fire` は登録された順序どおりに、同期でリスナを呼ぶ。** リスナ本体が非同期処理を`await`する場合、
+ * そのリスナより後に登録された別の購読者は、その非同期処理が完了する前の状態を読むことになる
+ * （`programRunner.ts`のJSDoc・design.md §16.37.3のレビュー指摘F1、Issue #606参照。#605のF1と
+ * 同じ機序が2回現れたため、この契約をここへ明記した）。
+ */
+export class SimpleEmitter<T> {
   private readonly listeners: Array<(value: T) => void> = [];
   on(listener: (value: T) => void): () => void {
     this.listeners.push(listener);

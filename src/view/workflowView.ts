@@ -104,7 +104,7 @@ export class WorkflowViewManager implements vscode.Disposable {
     this.unsubscribeChanged = runner.onChanged((runId) => this.onRunnerChanged(runId));
     // プログラム欄の再描画は、実行中のrunの変化（`runner.onChanged`）にはただ乗り
     // せず、`programs.onChanged`（`ProgramRunner`側で永続化が確定した後にだけ発火する
-    // 専用の通知）を別途購読する（`onRunnerChanged`のJSDoc参照）
+    // 専用の通知）を別途購読する（`onRunnerChanged`の実装コメント参照）
     this.unsubscribePrograms = this.programs?.onChanged(() => this.postPrograms());
   }
 
