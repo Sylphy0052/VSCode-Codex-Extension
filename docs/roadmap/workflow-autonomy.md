@@ -135,9 +135,9 @@
 
 ## フェーズ3 計画を直せるようにする
 
-- [ ] W4 オーケストレーターがタスクを追加・削除・依存変更できるようにする
+- [x] W4 オーケストレーターがタスクを追加・削除・依存変更できるようにする
   - 依存: W2, W8
-  - Issue: #338
+  - Issue: [#338](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/338)
   - 現状: オーケストレーターが持つのは `list_tasks` / `get_run_status` / `send_message` /
     `stop_task` / `retry_task` / `continue_task` / `decide_approval` / `update_task_prompt` の8ツール。
     タスクの追加・削除・依存の変更はできない
@@ -224,7 +224,7 @@
     [runState.ts](../../src/orchestrator/runState.ts) /
     [runner.ts](../../src/orchestrator/runner.ts) / [workflowView.ts](../../src/view/workflowView.ts)
 
-- [ ] W8 オーケストレーターからユーザーへ確認する経路を作る
+- [x] W8 オーケストレーターからユーザーへ確認する経路を作る
   - 依存: W7
   - Issue: [#583](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/583)
   - 現状: オーケストレーターが持つ8つのツールに、人へ問う道具が無い。`decide_approval` は
@@ -251,7 +251,7 @@
 
 ## フェーズ6 落ちても続くようにする
 
-- [ ] W10 中断からの自動再開
+- [x] W10 中断からの自動再開
   - 依存: W8（受入基準の「`ask_user` 待ちだったrunは問いを出し直す」を満たすため。
     **初版はここを「なし」と書いていたが、同じ項目の補足と受入基準がW8を要求しており
     矛盾していた**。Issue [#586](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/586)
