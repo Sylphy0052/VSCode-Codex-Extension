@@ -5,7 +5,7 @@
 - ブランチ: `fix/589/intro-body-control-tools`（`origin/main` の `2c73657c` から分岐）
 - worktree絶対パス: `/home/kfuruhashi/workspace/github/VSCode-Codex-Extension/.claude/worktrees/agent-adea22599c3f05363`
 - Issue: #589
-- PR: #641（main宛て、作成済み。CIは`pending`、まだマージしていない。マージ可否は呼び出し元の判断）
+- PR: #641（main宛て、作成済み。CIは`checks`/`external-cli`とも`pass`。まだマージしていない。マージ可否は呼び出し元の判断）
 
 `git status --short`:
 ```
@@ -46,8 +46,23 @@
 
 ## 4. 次の一手
 
-実装・PR作成・意図しないファイル混入の確認までは完了済み。残っているのは:
+実装・PR作成・強化レビュー対応・CI緑まで完了済み。残っているのは:
 
-1. PR #641のCI結果を待つ（作成直後は`checks`/`external-cli`とも`pending`。`gh pr checks 641`で再確認）
-2. CIが緑になったら呼び出し元（WF-Gオーケストレーター）へ報告し、マージ可否の判断を仰ぐ（自分ではマージしない）
-3. もしCIが落ちたら、原因を確認し必要な修正をこのブランチへ追いcommitする
+1. 呼び出し元（WF-Gオーケストレーター）へ完了報告し、マージ可否の判断を仰ぐ（自分ではマージしない）
+
+## 5. コーディネーターからの強化指摘（対応済み）
+
+初回PR検分で「`expect(introBody).toContain(tool.name)`は案内文のどこかにツール名が現れれば通ってしまい、
+散文（`ask_user`の拒否文がdecide_final_mergeに言及している等）だけでも満たせる」という指摘を受けた。
+対応として、`introBody`を`\n`で行分割し「`- `で始まる行」だけを道具の列挙とみなし、その中に
+`tool.name`が現れるかを検査する形へ変更した（`test/unit/runner.test.ts:8838`付近）。
+
+- 強化後のテストが、修正前の`buildIntroBody`（`decide_final_merge`の1行を除いた状態）に対して
+  改めてRED（`AssertionError: 道具の列挙行にdecide_final_mergeが無い`）になることを実測した
+  （一時的に該当行を除去してテスト→復元、`git diff`で復元後に差分ゼロを確認済み）
+- `npm test`: 173 files / 3796 tests、全pass（変わらず）
+- `npx tsc --noEmit`: エラー0件、`npm run lint`: 警告0件
+- 統合テストは対象範囲外（テストファイル内のみの変更）のため再実行していない（指示どおり）
+- 変更は`test/unit/runner.test.ts`の自分が追加したブロック（8838行目〜）のみ。Issue #502担当が
+  触るという12001行目付近には手を入れていない（`git diff`で確認済み）
+- 追いcommit `1c953e7d`をpush、PR #641のCIは`checks`/`external-cli`とも`pass`
