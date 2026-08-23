@@ -315,9 +315,19 @@
 
 ## フェーズ7 複数のワークフローを束ねる
 
-- [ ] W12 runをまたぐ統括
+- [x] W12 runをまたぐ統括
   - 依存: W1, W7, W8, W9, W10
-  - Issue: 未起票（着手時に起票する）
+  - Issue: **着手時に3件へ分割した。**
+    [#604](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/604)（W12-1 定義と永続化） /
+    [#605](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/605)（W12-2 波のスケジューリングと依存） /
+    [#606](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/606)（W12-3 失敗の伝播と人による停止）
+  - **分割の理由**（2026-08-23、WF-Eの担当）: この3つはそれぞれ別のデータ構造と別の失敗の
+    仕方を持ち、1つのPRにすると**片方のREDがもう片方の実装に依存する**形になる。とくに
+    W12-3は、リロード時に `reconcileProgramStateOnReload` が付ける**暫定的な `failed`** と、
+    W10の自動再開が訂正したあとの**確定した `failed`** を区別しないと、暫定値の上で伝播して
+    無関係なrunを `skipped` にしてしまう。この区別はW12-1・W12-2が入って初めてテストで
+    表現できるため、順に積む必要があった。下の「実施の波」に書いた
+    「**着手時に改めて分割し直すことを見込んでおく**」の予告どおりになった形である
   - 現状: **1 run = 1ワークフロー**で、runの上に層が無い。ロードマップからの生成も
     「選べるのはフェーズ単位のみ」（design.md §16.19）。複数のワークフローを波に分けて、
     波の内側は並列・波をまたぐと逐次、という進め方を拡張機能では表現できない
@@ -362,7 +372,9 @@
 | W9 | [#547](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/547) | `refactor/547/messaging-via-orchestrator` | §16.34 | W-N |
 | W10 | [#584](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/584) | `feat/584/auto-resume` | §16.35 | W-O |
 | W11 | [#556](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/556) | `feat/556/ci-wait-and-update-branch` | §16.36 | W-P |
-| W12 | 未起票 | `feat/<IID>/program-of-runs` | §16.37 | W-Q |
+| W12-1 | [#604](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/604) | `feat/604/program-of-runs-definition` | §16.37.1 | W-Q（W12-1） |
+| W12-2 | [#605](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/605) | `feat/605/program-scheduling` | §16.37.2 | W-Q（W12-2） |
+| W12-3 | [#606](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/606) | `feat/606/program-failure-and-halt` | §16.37.3 | W-Q（W12-3） |
 
 W6〜W12 は2026-08-22に追加した項目（Issue #497）。**W6 の定義もこのファイルの末尾へ
 移した**（Issue #613。もとは `review-and-feature-consolidation.md` の「W6」の節にあり、
@@ -391,9 +403,18 @@ Issueを起票したら、**同じ操作で4か所すべてへ番号を書き込
 
 書き漏らしは次で数えられる。**実際に未起票の項目だけが並ぶはずで、それ以外が出たら漏れである。**
 
+```text
+grep -nE '^\|.*未起票|^ *- Issue: 未起票' docs/roadmap/workflow-autonomy.md
 ```
-grep -n '未起票' docs/roadmap/workflow-autonomy.md
-```
+
+**素の `grep -n '未起票'` を使わないこと。** その形だと、この節の散文とコマンド行**自身**が
+常に3件マッチする。「未起票の項目だけが並ぶはず」と書いてあるのに恒常的な偽陽性が混ざるので、
+数えた人は毎回それを手で除くことになり、除き方を間違えれば本物の漏れも一緒に捨てる。
+上の形は行頭の構造（表の行、`- Issue:` 行）に錨を打つので散文を拾わず、
+コマンド行自身にもマッチしない。
+
+**4（epic #341 のチェックリスト）はGitHub上にあるので、このgrepの範囲外である。**
+`gh issue view 341` で別に見ること。
 
 片方だけ更新されると、もう片方を読んだ担当が「未起票」と判断して二重に起票する。
 **2026-08-23 に W9 で2回続けて起きた。** 1回目は Issue #547 が epic のチェックリストへは
