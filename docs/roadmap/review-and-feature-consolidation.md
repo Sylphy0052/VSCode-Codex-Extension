@@ -165,16 +165,23 @@
 
 ### 第3波 仕上げ
 
-- **WF-G 横断の仕上げ**（14項目）
+- **WF-G 横断の仕上げ**（15項目）
   - T26 eslintへ型情報を要するルールを導入し、未処理Promiseを機械的に検出できるようにする
   - [#491](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/491)
     終了したrunを `retry_task` で再開してもオーケストレーターの制御ツールが復活しない
   - [#502](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/502)
     dispose()後に宙に浮いたstartTaskの継続がCLIセッションを起動しうる。
-    **未検証の指摘であり、まず再現を確認し、成立しなければ根拠を記録してクローズする。**
+    **2026-08-23に再現を確認済み（RED実測つき、Issueのコメントに全文）。実害として直す。**
     `pump()` が `void this.startTask(...)` を await せずに呼び、`startTask` は複数の `await` 点を
     経て `prepareTaskLaunch` に到達する。`WorkflowRunner.dispose()` は同期関数のため、
-    その間に dispose が走ると、既に dispose 済みの状態でCLIセッションが起動しうる
+    その間に dispose が走ると、既に dispose 済みの状態でCLIセッションが起動しうる。
+    実測で分かったこと: **`disposing` を見ている箇所は5つあるが、`startTask` の継続を中断する
+    ものは1つも無い。** `ensureMessaging` の入口ガード（#475 / PR #495 由来）はメッセージング
+    資源だけを守って早期returnし、`prepareTaskLaunch` はそのまま先へ進む。**そのガードの
+    コメント自身がこの窓の存在を明記していた**（書かれていたのに拾われなかった）。
+    被害は「起動しうる」で止まらず、`dispose()` 後に到達したセッションは `disposed=false` の
+    まま `live.tasks` へ入るため、**dispose() の解放対象を外れて閉じる経路が二度と無い**。
+    直すときは、そのガードのコメントも一緒に更新すること
   - [#485](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/485)
     疑似worktree反映: renameの必須化と一時ファイルの掃除
   - [#490](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/490)
@@ -184,7 +191,21 @@
   - [#527](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/527)
     複数の親からブロックされた後続が、停止解除後に自動復帰しない
   - [#533](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/533)
-    セッションのタブ名の組み立てがユニットテストで検証されていない
+    セッションのタブ名の組み立てがユニットテストで検証されていない。
+    **#599 と同じ回で扱う**（テストの無い関数の優先順位を変えるため、先にテストを置く）
+  - [#599](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/599)
+    ワークフローが開くセッションのタブ名をオーケストレーターが指定し、上書きされないようにする。
+    `openTaskSession`は開くときにタブ名を渡しているが、**通常タスクは`Codex`/`Claude`だけで
+    taskIdが入らない**（衝突解決セッションには`衝突解決 <taskId>`が入る。PR #532）。
+    並列に開いた複数タスクのタブが全部同名になる。しかも**その初期タイトルは後から
+    `deriveTitle`に上書きされる**——`deriveTitle`の優先順位は`state.name`（app-serverの
+    `thread/name/updated`由来）→ 最初の発言の要約、の2段で、`openTaskSession`が渡した名前は
+    どこにも残らない。`pinnedName`を足して`deriveTitle`の最優先に置き、通常タスクにも
+    taskIdを含める。**#533 と同じ回で扱う**（#533の「タイトル組み立てを純粋関数として
+    切り出し3分岐まとめて扱う」と作業が重なる）。
+    動機は2026-08-23の実例——並列で動く5つのセッションが自動生成名だったため、
+    どれが何の担当か分からず**身元確認の往復が4回必要になった**。自動生成名は再開のたびに
+    変わるため識別子として使えない（Claude Code側は `claude -n <name>` で固定できる）
   - [#541](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/541)
     統合テスト C-42 が並列負荷下で間欠タイムアウトし、統合テスト全緑がEvidenceにならない。
     **再現は1回のみで成立未確認。着手する場合は修正から入らず再現条件の特定から始め、
@@ -206,14 +227,21 @@
     動いている防御に見える**。復活させる場合の設計の本体は由来の追跡情報を足すことではなく、
     **オーケストレーターが本文を書き換えられる以上、由来と本文の一致をどう保証するか**である
   - [#579](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/579)
-    `waitingApproval`のタスクが無期限に並列枠を占めないか確かめる。
-    **未検証の指摘であり、まず再現を確認し、成立しなければ根拠を記録してクローズする。**
-    返信待ち（`waitingReply`）には解放が2つある（`detectAllWaitingStalemate`と
-    `detectTimedOutWaitingReplies`）が、承認待ちに同等のものがあるかは追跡していない。
-    **`mergeApprovalTimeoutSec`があるので「解放はある」と早合点しないこと**——このタイムアウトは
-    `runnerMerge.ts`の`scheduleApprovalTimeout`から使われており、対象は衝突解決セッションに見える。
-    近いが別のIssueとして #413・#539（どちらも衝突解決セッションの承認待ち、クローズ済み）があり、
-    **同じ形の穴が通常のタスクの`waitingApproval`にもあるか**という問いになる。
+    `waitingApproval`のタスクが無期限に並列枠を占める。
+    **2026-08-23に再現を確認済み（RED実測つき、Issueのコメントに全文）。実害として直す。**
+    通常タスクの`waitingApproval`に**時間ベースの解放は無い**。抜ける経路は4つ（承認決定 /
+    `stopTask` / `stop` / セッション終了・リロード）で、すべて人か外部要因である。
+    `mergeApprovalTimeoutSec`は解放にならない——`scheduleApprovalTimeout`の呼び出し元は
+    `runnerMerge.ts:930`（`startMergeResolution`内）の**1箇所のみ**で衝突解決セッション限定、
+    `excludeFromActiveCount`も`live.mergeResolutions`しか集めない。
+    **実害と判定した決め手は副次効果である。** `waitingApproval`が1件あると
+    `detectAllWaitingStalemate`が成立せず、**他タスクの返信待ちの解放まで止まる**
+    （`{A:waitingApproval, B:waitingReply, C:waitingReply}` → `[]`、Aも`waitingReply`なら
+    `['A','B','C']`）。承認待ちに解放が無いだけなら「人が承認するのが仕様」で済むが、
+    **その状態が別の自動解放を無効化するなら解放機構の側の欠陥である**。W8（`ask_user`）・
+    W10（自動再開）で無人運転へ寄せている方向とも整合しない。
+    近いが別のIssueとして #413・#539（どちらも衝突解決セッションの承認待ち、クローズ済み）が
+    あるが、そこで入った除外もタイムアウトも通常タスクには適用されていない。
     出どころはW7（#571）のセキュリティ監査のlow指摘で、W7の範囲外として記録だけ残したもの
   - [#589](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/589)
     オーケストレーターへの案内文（`buildIntroBody`）に`decide_final_merge`だけが列挙されていない。
@@ -542,7 +570,7 @@ Issue
 | WF-D リポジトリ基盤 | 1 | 2 | [#353](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/353) | `wf/wf-d/integration` | 完了（PR [#394](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/394)、mainへマージ済み。統合ブランチは削除済み） |
 | WF-E ワークフローの自律性 | 2 | 12 | [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341) | `wf/wf-e/integration` | **進行中**。第1波（W1 [#335](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/335) / W3 [#337](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/337) / W9 [#547](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/547) / W11 [#556](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/556)）が統合ブランチへ着地済み（2026-08-23）。第2波（W2 [#336](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/336) / W7 [#571](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/571)）も着地済み（2026-08-23）。第3波は W8 [#583](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/583) → W10 [#584](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/584) の**直列**で進める（W10の受入基準に「`ask_user`待ちだったrunは問いを出し直す」が含まれ、W8が無いと満たせない。依存欄の食い違いは [#586](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/586) で修正）。**節番号は着手のたびに、[workflow-autonomy.md](workflow-autonomy.md) の「着手前に必ず実測する」に従って実測すること**（割り当ては Issue [#543](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/543) で §16.26〜§16.37 へ移動済み）。追いIssue [#562](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/562) を WF-G へ送った。第2波からは追いIssue [#579](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/579) を、第3波からは [#589](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/589) を WF-G へ送った |
 | WF-F チャットの会話操作と表示 | 2 | 3 | [#340](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/340) | `wf/wf-f/integration` | 完了（PR [#510](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/510)、mainへマージ済み。統合ブランチは削除済み） |
-| WF-G 横断の仕上げ | 3 | 14 | 未採番 | `wf/wf-g/integration` | 第2波の完了待ち |
+| WF-G 横断の仕上げ | 3 | 15 | 未採番 | `wf/wf-g/integration` | 第2波の完了待ち |
 | WF-H オーケストレーション実行の精度 | 4 | 7 | 未採番 | `wf/wf-h/integration` | 第3波の完了待ち。**節番号とケース記号は事前予約しない**（波をまたぐ予約は Issue [#487](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/487) と同じ形で腐るため）。詳細は [orchestration-accuracy.md](orchestration-accuracy.md) |
 
 W1〜W5とX1〜X3のIssue番号・ブランチ名・design.mdの節・manual-test.mdの番号は、
