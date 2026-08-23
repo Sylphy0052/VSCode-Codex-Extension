@@ -211,7 +211,7 @@ CLAUDE.mdが定める「Test coverage 80%以上」に対し、上記の実測値
 
 ### 必須にしたチェック名
 
-`ci.yml` の `jobs.check.name` は `checks`（lint / typecheck / build / testの4ステップを実行する総称）、ワークフロー名は `CI` であるため、GitHub上のPRのチェック一覧では `CI / checks` の形で表示される。
+`ci.yml` の `jobs.check.name` は `checks`（lint / format:check / typecheck / build / testの5ステップを実行する総称）、ワークフロー名は `CI` であるため、GitHub上のPRのチェック一覧では `CI / checks` の形で表示される。
 
 ただし branch protection APIの `required_status_checks.contexts` に渡す値はジョブ名そのものの `checks` であり、表示名の `CI / checks` ではない。実際に `contexts: ["checks"]` で設定が通り、応答も `"checks":["checks"]` を返している。次に設定を触る人がつまずきやすい箇所なので明記する。
 
