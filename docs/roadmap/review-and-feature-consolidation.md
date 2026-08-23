@@ -111,7 +111,7 @@
   - W3 生成したワークフローの分解が妥当かをレビューする段を足す（[#337](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/337)）
   - W4 オーケストレーターがタスクを追加・削除・依存変更できるようにする（[#338](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/338)）
   - W5 PR/MRのレビュー結果を取り込んでタスクへ反映する（[#339](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/339)）
-  - W6 タスクごとにIssueを起票し、PRのレビューを経てマージする（後述。Issueは未起票）
+  - W6 タスクごとにIssueを起票し、PRのレビューを経てマージする（後述。Issue [#596](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/596)）
   - W7 タスクからオーケストレーターへ判断を仰ぐ経路を作る（Issueは未起票）
   - W8 オーケストレーターからユーザーへ確認する経路を作る（Issueは未起票）
   - W9 タスク間の直接メッセージングを廃し、オーケストレーターの中継にする（Issueは未起票）
@@ -350,7 +350,7 @@
 ## W6 タスクごとにIssueを起票し、PRのレビューを経てマージする
 
 - 依存: W1
-- Issue: 未起票（着手時に起票する）
+- Issue: [#596](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/596)
 - 現状: **タスクごとのPR作成は既に実装されている。** `agent.workflows.pullRequest` の既定が
   `per-task` で（[config.ts](../../src/config.ts) の `normalizePullRequestLayerConfig`）、
   [runnerMerge.ts](../../src/orchestrator/runnerMerge.ts) が `shouldCreateTaskPullRequest` を見て
