@@ -597,11 +597,36 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // （`disposeOrchestrator`が`live.orchestrator`をundefinedへ戻すため冪等）。
   context.subscriptions.push({ dispose: () => workflowRunner.dispose() });
 
+  // プログラム（design.md §16.37、roadmap W12-1・W12-2、Issue #604・#605）の永続化状態も、
+  // 単発runと同じタイミングでリロード直後の中断扱いへ書き換える（W10の自動再開の対象に
+  // 含める）。reconcile前後でプログラムごとに実際に書き換わったか（`running`だったrunが
+  // `failed`へ倒れたか）を比較するため、先にrunごとの状態をスナップショットしておく
+  const runStatesBeforeReconcile = new Map(
+    programStore.list().map((p) => [p.programId, JSON.stringify(p.state)] as const),
+  );
+  // 波のスケジューリング（design.md §16.37.2、roadmap W12-2、Issue #605）。`WorkflowRunner`は
+  // `ProgramWorkflowPort`（`start` / `listLive` / `onChanged`）を構造的に満たすため、
+  // アダプタを挟まずそのまま渡す。
+  //
+  // **`workflowView`（次のブロック）より先に作る。** `WorkflowViewManager`のコンストラクタが
+  // `programRunner.onChanged`を即座に購読するため（design.md §16.37.3のレビュー指摘F1、
+  // Issue #606）、この時点で`programRunner`が存在している必要がある
+  // （`halt`のようにクロージャ越しの遅延参照では済まない）
+  const programRunner = new ProgramRunner({
+    programStore,
+    filePort: nodeWorkflowFilePort,
+    workflow: workflowRunner,
+    log,
+  });
+  programRunner.attach();
+  context.subscriptions.push({ dispose: () => programRunner.dispose() });
+
   // ワークフローView（#57）。`restoreRunsForView`がworkspaceStateのreconcileと
   // メモリ上への復元（design.md §16.11「リロード後の実行再開」）を両方行う
   const workflowView = new WorkflowViewManager(workflowRunner, log, {
     list: () => programStore.list(),
     halt: (programId) => programRunner.haltProgram(programId),
+    onChanged: (listener) => programRunner.onChanged(listener),
   });
   context.subscriptions.push(workflowView);
   const restoreRunsForViewDone = workflowRunner.restoreRunsForView().then(() => {
@@ -615,24 +640,6 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     }
   });
 
-  // プログラム（design.md §16.37、roadmap W12-1・W12-2、Issue #604・#605）の永続化状態も、
-  // 単発runと同じタイミングでリロード直後の中断扱いへ書き換える（W10の自動再開の対象に
-  // 含める）。reconcile前後でプログラムごとに実際に書き換わったか（`running`だったrunが
-  // `failed`へ倒れたか）を比較するため、先にrunごとの状態をスナップショットしておく
-  const runStatesBeforeReconcile = new Map(
-    programStore.list().map((p) => [p.programId, JSON.stringify(p.state)] as const),
-  );
-  // 波のスケジューリング（design.md §16.37.2、roadmap W12-2、Issue #605）。`WorkflowRunner`は
-  // `ProgramWorkflowPort`（`start` / `listLive` / `onChanged`）を構造的に満たすため、
-  // アダプタを挟まずそのまま渡す
-  const programRunner = new ProgramRunner({
-    programStore,
-    filePort: nodeWorkflowFilePort,
-    workflow: workflowRunner,
-    log,
-  });
-  programRunner.attach();
-  context.subscriptions.push({ dispose: () => programRunner.dispose() });
   const reconcileProgramStoreDone = programStore.reconcileAfterReload().then((reconciled) => {
     const interruptedProgramIds = reconciled
       .filter((p) => runStatesBeforeReconcile.get(p.programId) !== JSON.stringify(p.state))

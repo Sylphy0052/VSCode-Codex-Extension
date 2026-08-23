@@ -36,6 +36,15 @@ export interface ProgramViewPort {
   list(): readonly PersistedProgram[];
   /** 指定プログラムを人の手で止める。`ProgramRunner.haltProgram`と同じ契約。 */
   halt(programId: string): Promise<void>;
+  /**
+   * プログラムの状態が永続化された後に発火する。`ProgramRunner.onChanged`と同じ契約
+   * （design.md §16.37.3のレビュー指摘F1、Issue #606）。`runner.onChanged`（実行中の
+   * runの変化）とは別の通知で、失敗の伝播（`skipped`化）や`haltProgram`の結果を
+   * ビューへ届けるのはこちら側の役目——`runner.onChanged`のリスナである`ProgramRunner`
+   * 内部の処理（`pumpProgram`）が非同期のため、`runner.onChanged`にただ乗りするだけでは
+   * 永続化前の状態を読んでしまう（詳細は`onRunnerChanged`の実装コメント参照）。
+   */
+  onChanged(listener: (programId: string) => void): () => void;
 }
 
 /**
@@ -76,22 +85,32 @@ export class WorkflowViewManager implements vscode.Disposable {
    */
   private graphViewportWidth: number | undefined;
   private readonly unsubscribeChanged: () => void;
+  /**
+   * `programs`（`ProgramViewPort`）の変化通知の購読解除。`programs`が省略されていれば
+   * `undefined`のまま（`ProgramViewPort`のJSDoc参照）。
+   */
+  private readonly unsubscribePrograms: (() => void) | undefined;
 
   constructor(
     private readonly runner: WorkflowRunner,
     private readonly log: Logger,
     /**
-     * プログラムの一覧・停止（design.md §16.37.3、roadmap W12-3、Issue #606）。省略可能
-     * （`ProgramViewPort`のJSDoc参照）。`extension.ts`が`ProgramStore`/`ProgramRunner`から
-     * 組み立てて渡す。
+     * プログラムの一覧・停止・変化通知（design.md §16.37.3、roadmap W12-3、Issue #606）。
+     * 省略可能（`ProgramViewPort`のJSDoc参照）。`extension.ts`が`ProgramStore`/
+     * `ProgramRunner`から組み立てて渡す。
      */
     private readonly programs?: ProgramViewPort,
   ) {
     this.unsubscribeChanged = runner.onChanged((runId) => this.onRunnerChanged(runId));
+    // プログラム欄の再描画は、実行中のrunの変化（`runner.onChanged`）にはただ乗り
+    // せず、`programs.onChanged`（`ProgramRunner`側で永続化が確定した後にだけ発火する
+    // 専用の通知）を別途購読する（`onRunnerChanged`のJSDoc参照）
+    this.unsubscribePrograms = this.programs?.onChanged(() => this.postPrograms());
   }
 
   dispose(): void {
     this.unsubscribeChanged();
+    this.unsubscribePrograms?.();
     this.panel?.dispose();
   }
 
@@ -181,11 +200,15 @@ export class WorkflowViewManager implements vscode.Disposable {
     if (runId === this.activeRunId) {
       this.postState();
     }
-    // このrunが何らかのプログラムに属していれば、失敗の伝播（依存する後続runのskipped化）
-    // や停止の反映がここで起きうる（`ProgramRunner.onRunChanged` → `pumpProgram`が
-    // 同期的にstoreを更新した後、`workflow.onChanged`の購読者としてこのハンドラも
-    // 呼ばれる）。属していない・`programs`が未注入なら`postPrograms`は何もしない
-    this.postPrograms();
+    // プログラム欄はここでは更新しない。`runner.onChanged`（このメソッドの発火元）は
+    // `WorkflowRunner`側の`SimpleEmitter`が同期的にリスナを呼ぶが、そのリスナの1つで
+    // ある`ProgramRunner.attach()`の`onRunChanged`ハンドラ自体は非同期
+    // （`void this.onRunChanged(runId).catch(...)`。定義ファイルの再読込を`await`する
+    // `pumpProgram`を経る）。そのため、このメソッドが呼ばれた時点では`ProgramRunner`側の
+    // 永続化（失敗の伝播による`skipped`化を含む）がまだ終わっていない場合がある
+    // （design.md §16.37.3のレビュー指摘F1、Issue #606）。プログラム欄の再描画は、
+    // `ProgramRunner`が永続化を終えた後にだけ発火する専用の通知
+    // （`programs.onChanged`、コンストラクタで購読）に任せる
   }
 
   private postAll(): void {

@@ -55,6 +55,30 @@ export interface ProgramWorkflowPort {
   stop(runId: string): void;
 }
 
+/**
+ * `onChanged`の最小限のpub-sub（`runner.ts`の`SimpleEmitter`と同じ形。VSCodeの
+ * `EventEmitter`には依存しない方針をここでも踏襲する。型ごと共有はしていない
+ * ——`runner.ts`側は`export`しておらず、依存を増やすほどのものでもないため
+ * 同じ形をこちらにも複製した）。
+ */
+class SimpleEmitter<T> {
+  private readonly listeners: Array<(value: T) => void> = [];
+  on(listener: (value: T) => void): () => void {
+    this.listeners.push(listener);
+    return () => {
+      const i = this.listeners.indexOf(listener);
+      if (i !== -1) {
+        this.listeners.splice(i, 1);
+      }
+    };
+  }
+  fire(value: T): void {
+    for (const listener of [...this.listeners]) {
+      listener(value);
+    }
+  }
+}
+
 export interface ProgramRunnerDeps {
   programStore: ProgramStore;
   filePort: WorkflowFilePort;
@@ -91,8 +115,30 @@ export class ProgramRunner {
    */
   private readonly trackedRuns = new Map<string, { programId: string; runRefId: string }>();
   private unsubscribe: (() => void) | undefined;
+  /**
+   * プログラムの状態が永続化された後に発火する通知（design.md §16.37.3のレビュー
+   * 指摘F1、Issue #606）。`WorkflowViewManager`が持つ`workflow.onChanged`（`SimpleEmitter`、
+   * `runner.ts`）は同期的にリスナを呼ぶが、その配下のリスナ（`ProgramRunner.attach()`が
+   * 登録した`onRunChanged`）自体は非同期（ファイル読み込みを挟む`pumpProgram`を`await`
+   * する）。そのため`workflow.onChanged`の別の購読者（`WorkflowViewManager`）が
+   * それにただ乗りしてプログラムの状態を読んでも、`pumpProgram`の永続化が終わる前の
+   * 値を読んでしまう。プログラムの状態が実際に確定した後にだけ発火するこの専用の
+   * 通知を`pumpProgram` / `haltProgram`の末尾に置くことで、購読側が常に確定後の値を
+   * 読めるようにする。
+   */
+  private readonly changeEmitter = new SimpleEmitter<string>();
 
   constructor(private readonly deps: ProgramRunnerDeps) {}
+
+  /**
+   * プログラムの状態が変わるたびに呼ばれる（`programId`を渡す）。`pumpProgram` /
+   * `haltProgram`が、対象プログラムの状態を`programStore`へ永続化し終えた後にだけ
+   * 発火する（design.md §16.37.3のレビュー指摘F1）。`extension.ts`が`WorkflowViewManager`
+   * へこれを配線し、プログラム欄の再描画のきっかけにする。
+   */
+  onChanged(listener: (programId: string) => void): () => void {
+    return this.changeEmitter.on(listener);
+  }
 
   /** `extension.ts`から1回だけ呼ぶ。`workflow.onChanged`を購読し、runの終了を検知する。 */
   attach(): void {
@@ -183,6 +229,8 @@ export class ProgramRunner {
       await this.startOneRun(programId, persisted.workspaceRoot, def, runRefId);
     }
     await this.maybeMarkFinished(programId);
+    // 状態の永続化がここまで全て完了した後に発火する（`changeEmitter`のJSDoc参照）
+    this.changeEmitter.fire(programId);
   }
 
   /**
@@ -228,6 +276,8 @@ export class ProgramRunner {
       return { ...current, state: markProgramHaltedByUser(current.state) };
     });
     await this.maybeMarkFinished(programId);
+    // 状態の永続化がここまで全て完了した後に発火する（`changeEmitter`のJSDoc参照）
+    this.changeEmitter.fire(programId);
   }
 
   /**
