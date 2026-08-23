@@ -347,10 +347,13 @@ describe('workflowScript', () => {
       );
       // `TaskFailureReason`の定義範囲だけを切り出す。同じ`| { readonly kind: '...' }`という
       // 形は`AutoResumeOutcome`など他のdiscriminated unionにも登場するため、範囲を切らずに
-      // ファイル全体からkindを拾うと母数が混ざる（コーディネーターが実測で踏みかけた罠。
-      // `grep -cE "^  \| \{ readonly kind: '"`をファイル全体に掛けると16件になり、内訳は
-      // TaskFailureReasonの12件 + AutoResumeOutcomeの4件（nothingToResume /
-      // blockedByOtherFailure / blockedByAllowGate / resumed）だった）。
+      // ファイル全体からkindを拾うと母数が混ざる。
+      //
+      // **ここに母数の件数を書かない。**以前は「ファイル全体で何件、内訳はいくつといくつ」
+      // と書いてあったが、実測と合わなくなっていた（`AutoResumeOutcome`の`resumed`は
+      // この正規表現の形をしておらず、そもそも拾われない）。書き写した数字は、型に値が
+      // 足されたときにも正規表現が変わったときにも腐る。母数を知りたいときは、この
+      // 正規表現を実際にファイル全体へ流して数えること。
       const typeStart = runStateSource.indexOf('export type TaskFailureReason =');
       expect(typeStart).toBeGreaterThan(0);
       const typeEndOffset = runStateSource.indexOf('};', typeStart);
@@ -364,8 +367,10 @@ describe('workflowScript', () => {
       // （design.md §16.40時点で12種）。kindを足すときはこの数字も直すことになり、
       // それは意図した変更として差分に出る。
       expect(allFailureKinds).toHaveLength(12);
-      // 範囲を切らずに拾うとAutoResumeOutcomeの4件が混ざる。正規表現を緩めて範囲チェックが
-      // 効かなくなったときに、この4件が入っていないことで検出する。
+      // 範囲を切らずに拾うと`AutoResumeOutcome`のkindが混ざる。正規表現を緩めて範囲チェックが
+      // 効かなくなったときに、これらが入っていないことで検出する。`resumed`だけは現状の
+      // 正規表現では拾われない形（この行の一覧に残してあるのは、書き方が揃えられたときに
+      // 検査が効くようにするため）。
       const autoResumeOutcomeKinds = [
         'nothingToResume',
         'blockedByOtherFailure',
