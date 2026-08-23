@@ -6212,3 +6212,40 @@ W7（#571、`ask_orchestrator`）のセキュリティ監査が指摘した。**
 - PR #517の不変条件のテスト（`isRunHalted(run)`が真の間は`markMergeSucceeded`の後も対象が`skipped`のまま。停止中に`pending`が作られないこと）
 - `blockedTaskIds`が`mergeBlockedWhileHalted`へ引き継がれることのアサーション
 - `test/unit/webviewScript.test.ts`の「FAILURE_LABELはTaskFailureReasonの全kindを網羅している」（Issue #579）が、`mergeBlockedWhileHalted`を追加した分の件数（11→12）を機械的に検出することを確認する
+### 16.41 セッションのタブ名の組み立てをユニットテストで検証する（Issue #533）
+
+#### 背景
+
+`chatView.ts` / `claudeChatView.ts`の`openTaskSession`は、通常のタスク／オーケストレーターセッション（design.md §16.23）／衝突解決セッション（Issue #413 PR4）の3分岐でパネルタイトルを組み立てていたが、この組み立てを直接検証するテストが無かった。PR #532で「タブ名に対象タスクのidを含める」を入れたときのレビュー指摘（severity: low）で、`runner.test.ts`の既存テストは「`runnerMerge.ts`がhostへ渡す入力（`mergeResolutionTaskId`）に`taskId`が入っているか」までしか見ておらず、fake hostはこの入力を実際のタイトル文字列へ変換していないことが判明した。
+
+**`runner.test.ts`のfake hostへ足す案は採らなかった。** `TaskSessionInput`（`src/orchestrator/taskSession.ts`）に`title`というフィールドは無く、タイトル計算はホスト側（`ChatViewManager` / `ClaudeChatViewManager`）の実装に閉じている。fake hostは`title`という概念自体を持たないため、fake host経由のテストでは原理的にタイトル文字列を検証できない。次にこのIssueを見る人が同じ道を試みないよう、ここに明記する。
+
+#### 対応: タイトルの組み立てを純粋関数へ切り出す
+
+`chatView.ts`と`claudeChatView.ts`の3分岐（`mergeResolutionTaskId`優先、次に`role === 'orchestrator'`、それ以外は既定ラベル）は、CLIラベル（`'Codex'`/`'Claude Code'`）が違うだけで組み立てのロジック自体は同一だった。この重複を`src/view/sessionTitle.ts`（新設）の`buildSessionPanelTitle(input, label)`へ切り出し、両方の`openTaskSession`から呼ぶ形にした。出力される文字列は変えていない。
+
+**`sessionActivity.ts`へ相乗りさせなかった。** 同ファイルは「vscode非依存の純粋関数を`src/view/`直下に置く」という置き場所の前例としては参考にしたが、責務が違う（`sessionActivity.ts`は`ChatState`＝実行中の状態からタブ先頭の印を導く、`sessionTitle.ts`は`TaskSessionInput`＝起動時の入力からタブ名本体を組み立てる）。責務の異なる純粋関数を1ファイルへ混ぜると、あとで片方だけを読みに来た人がもう片方の変更差分に巻き込まれる。
+
+**「別関数のまま3分岐だけ揃える」案は採らなかった。** `chatView.ts`と`claudeChatView.ts`にそれぞれ同じ3分岐のロジックを残したまま文言だけ揃える案も検討したが、同じ3分岐を2箇所に置くと、あとで4つ目の分岐（Issue #599が予定している）を足すときに片方だけ直る形が作れてしまう。関数として1箇所に集約すれば、その種類の齟齬は構造として起こらない。
+
+#### なぜ間接テスト（`onSessionChange`のspyOn）ではなく切り出しを選んだか
+
+タイトルの組み立てを直接検証する代わりに、`onSessionChange`をspyOnして`entry.panel.title`の変化を観測する間接テストも書けた。しかしそれは「`onSessionChange`が呼ばれるか」「呼ばれた結果が`entry.panel.title`へ反映されるか」という状態遷移の配線に依存する。配線への依存は、Issue #529（`removeRunDirIfEmpty`のTOCTOU対策テストがモック配線しか見ていなかった件）と同型の失敗モードを持ち込む——本番コードを壊しても、配線がズレて期待した経路を通らなくなるだけでテストが落ち、「モックしたメソッドが呼ばれなくなった」という配線のズレと「検出したい性質が失われた」ことを区別できなくなる。
+
+`buildSessionPanelTitle`を純粋関数として直接呼ぶ形にすれば、モックを一切使わない。呼び出し元の配線（`openTaskSession`が実際にこの関数を呼んでいるか）とは独立に、関数そのものの入出力を検証できるため、この失敗モードは構造として成立しない。
+
+これは本Issueに限らない一般化できる考え方として書いておく。**「検査を足す」のではなく「検査が要らない形にする」——対象をモック無しで直接呼べる純粋関数として切り出せるなら、モック配線に依存するテストより先にその切り出しを検討する。** 切り出しが割に合わない（副作用そのものを検証したい、状態機械の遷移そのものが検証対象）場合にはじめて、配線への依存を受け入れた間接テストを選ぶ。
+
+#### `deriveTitle`は2つのまま残した
+
+`chatView.ts`の`deriveTitle`（非export）と`claudeChatView.ts`の`deriveTitle`（export）は統合しなかった。§16.10「実装の集約」が、`onSessionChange`を含む主要メソッドは「プロバイダごとの差が大きいため、引き続き各サブクラスに残る」と明記しており、`deriveTitle`はこの`onSessionChange`から直接呼ばれる名前解決ロジックである。
+
+実際に中身も違う。`chatView.ts`側は`state.name !== ''`のみで名前の有無を判定するのに対し、`claudeChatView.ts`側は`state.name.trim() !== ''`で判定する。空白のみの名前（例: `'   '`）を渡すと、`chatView.ts`はそれをそのまま「付いた名前」として使う（`Codex:    `）が、`claudeChatView.ts`は空文字扱いにして次の優先順位（最初の発言）へ落ちる。**この`.trim()`の差が意図されたものかは未確認。** Issue #533はテストを置く回であって挙動を変える回ではないため、現状の非対称のままそれぞれをテストで固定した（`test/unit/chatViewManager.test.ts` / `test/unit/claudeChatViewManager.test.ts`の`deriveTitle`系テスト）。統合すればこの非対称は自動的に解消するが、それは「テストの無い関数の挙動を変える」ことになり、#599（`deriveTitle`の優先順位を変える）のスコープと衝突する。
+
+`buildSessionPanelTitle`のように呼び出し元をまたいでロジックが完全一致している箇所は関数へ集約し、`deriveTitle`のように呼び出し元ごとに（未確認とはいえ）挙動が違う箇所はサブクラスへ残す、という使い分けは§16.10の方針をそのまま踏襲している。
+
+#### 確かめ方
+
+- `test/unit/sessionTitle.test.ts`（新設）: `buildSessionPanelTitle`の3分岐（通常のタスク／`role === 'orchestrator'`／`mergeResolutionTaskId`あり）を、`'Codex'`・`'Claude Code'`両ラベルについて検証する
+- `test/unit/chatViewManager.test.ts` / `test/unit/claudeChatViewManager.test.ts`: `deriveTitle`の優先順位（名前 → 最初の発言 → `undefined`）と、空白のみの名前についての両者の相違点をそれぞれ固定する
+- 実測: 各分岐の組み立てを一時的に固定文字列へ戻すと、対応するテストが期待文字列との不一致でRED（`AssertionError: expected 'Codex' to be 'Codex: オーケストレーター'`等）になることを確認した。モックを使っていないため、Issue #529のような「配線がズレて落ちる」失敗モードは成立しない
