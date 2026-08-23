@@ -4415,6 +4415,57 @@ tasks:
   );
 
   it(
+    'finalMerge: pr-onlyでrunがsucceededで終わった後も、レビューコメント取得CLIの' +
+      'ポーリングは意図的に生きたまま（`finalMergeOutcome`が確定しないため）で、' +
+      '呼び出し回数はタイマーを進めるほど増え続ける（design.md §16.30' +
+      '「finalMerge: \'pr-only\'ではポーリングを閉じない」の意図をテストで固定する。' +
+      'これが将来\'閉じる\'方向に変わったらこのテストが気づく）',
+    async () => {
+      vi.useFakeTimers();
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+      const cli = fakeForgeCli({
+        reviewComments: {
+          github: {
+            comments: [
+              { databaseId: 1, author: { login: 'reviewer1' }, body: '対応済みです' },
+            ],
+          },
+        },
+      });
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { finalMerge: 'pr-only' }),
+      });
+      const result = await runner.start('/repo/.agents/workflows/review.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // finalMerge: pr-onlyはperformFinalMergeを一切通らないため、runがsucceededで
+      // 終わった後もfinalMergeOutcomeは確定しない
+      expect(runner.getSnapshot(runId)?.outcome).toBe('succeeded');
+      expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBeUndefined();
+      const pollCall = (c: { args: readonly string[] }) => c.args[3] === '--json=reviews,comments';
+      const before = cli.calls.filter(pollCall).length;
+      expect(before).toBeGreaterThanOrEqual(1);
+
+      // 既定の間隔（600秒）× 10周期ぶんタイマーを進める
+      await vi.advanceTimersByTimeAsync(600_000 * 10);
+      await flush();
+
+      const after = cli.calls.filter(pollCall).length;
+      // finalMergeOutcomeが確定しないため閉じ口（performFinalMerge・
+      // closeMessagingIfFinalMergeSettled）のどれにも到達せず、ポーリングは開いたまま
+      // 呼び出し回数が増え続ける（意図的な挙動。design.md参照）
+      expect(after).toBeGreaterThan(before);
+      expect(store.find(runId)?.finalMergeOutcome).toBeUndefined();
+    },
+  );
+
+  it(
     '最終マージが確定済み（finalMerge: auto。既にmainへマージ済み）の後にレビューコメントが' +
       '届いても、add_taskは理由付きで拒否される（2度目のレビューblocking指摘の回帰:' +
       '追加したタスクの成果が統合ブランチには積まれるのにmainへは二度と届かない、という' +
