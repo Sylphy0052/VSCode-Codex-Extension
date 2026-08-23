@@ -56,6 +56,7 @@ import {
   markApprovalRejected,
   markMergeSucceeded,
   markRunning,
+  markTaskApprovalTimedOut,
   markWaitingApproval,
   recordSessionInfo,
   recordSubmissionCount,
@@ -73,6 +74,7 @@ import {
   getSnapshot,
 } from './runnerSnapshot';
 import type { WorkflowRunnerInternals } from './runnerInternals';
+import { scheduleTaskApprovalTimeout } from './runnerApproval';
 import { cleanupWorktreeIfNeeded, retryMerge, startMerge } from './runnerMerge';
 import { restoreRunsForView } from './runnerRestore';
 import {
@@ -347,6 +349,17 @@ export interface WorkflowRunnerDeps {
    * このタイムアウトは効かせる必要がある）。
    */
   readMergeApprovalTimeoutSec?: () => number;
+  /**
+   * `agent.workflows.taskApprovalTimeoutSec`の現在値（秒）。省略時は
+   * `DEFAULT_TASK_APPROVAL_TIMEOUT_SEC`（既定1時間）を使う（Issue #579、design.md §16.39）。
+   * **`readMergeApprovalTimeoutSec`とは別物。** こちらは通常タスク（`live.tasks`）の
+   * `waitingApproval`が対象で、超えたら`markTaskApprovalTimedOut`で`failed`へ倒す
+   * （`readMergeApprovalTimeoutSec`は衝突解決セッションが対象で`blocked`へ倒す。
+   * design.md §16.39「なぜ別のキーか」参照）。`runnerApproval.ts`の
+   * `scheduleTaskApprovalTimeout`が使う。`messaging`（省略可能な機能）とは無関係に
+   * 常に効かせるため、`readMergeApprovalTimeoutSec`と同じくトップレベルに置く。
+   */
+  readTaskApprovalTimeoutSec?: () => number;
   /**
    * `agent.workflows.finalMergeDecisionTimeoutSec`の現在値（秒）。省略時は
    * `DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC`（既定900秒）を使う（design.md §16.26）。
@@ -1022,6 +1035,30 @@ export interface LiveTask {
    * 入力に使う。
    */
   waitingReplySinceMs: number | undefined;
+  /**
+   * `waitingApproval`へ遷移した時刻（ms）。それ以外の状態では`undefined`（Issue #579、
+   * design.md §16.39）。`runnerApproval.ts`の`scheduleTaskApprovalTimeout`／
+   * `handleTaskApprovalTimeout`が使う。`MergeResolutionEntry.waitingApprovalSinceMs`
+   * （衝突解決セッション用）と同じ名前・同じ役割だが別物（対象が`live.tasks`か
+   * `live.mergeResolutions`かの違い）。
+   */
+  waitingApprovalSinceMs: number | undefined;
+  /**
+   * `waitingApprovalSinceMs`が変わるたび（承認待ちに入る・抜ける）に`runnerApproval.ts`の
+   * `scheduleTaskApprovalTimeout`が張り直す`setTimeout`のハンドル（`MergeResolutionEntry.
+   * approvalTimeoutTimer`と同じ形）。承認待ちで**ない**間、またはタイムアウト自体が
+   * 消費された後は`undefined`。
+   */
+  taskApprovalTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * このタスクが承認待ちタイムアウト（`agent.workflows.taskApprovalTimeoutSec`）で
+   * 自動停止されたかどうかの印（Issue #579、design.md §16.39）。`TaskSession.stopLoop()`は
+   * 理由を`'taskStopped'`としてしか`onFinished`へ伝えられないため、`onTaskFinished`は
+   * この印を見て`applyLoopStopReason(..., 'taskStopped')`（＝`manualStop`）ではなく
+   * `markTaskApprovalTimedOut`へ分岐する（`MergeResolutionEntry.timedOutByApprovalTimeout`
+   * と同じ理由・同じ形）。
+   */
+  taskApprovalTimedOut: boolean;
   /**
    * このタスクのPR/MRの結果（design.md §16.11・§16.18、Issue #118）。`attemptMerge`
    * （`mergeTaskWithForge`が返す`flow.pullRequest.created && url !== undefined`の分岐）で
@@ -3173,6 +3210,9 @@ export class WorkflowRunner {
       lastSentPrompt: undefined,
       continuePromptOverride: undefined,
       waitingReplySinceMs: undefined,
+      waitingApprovalSinceMs: undefined,
+      taskApprovalTimeoutTimer: undefined,
+      taskApprovalTimedOut: false,
       pullRequest: undefined,
     };
   }
@@ -3907,6 +3947,18 @@ export class WorkflowRunner {
       detail: stripControlChars(approval.detail),
     };
     live.runState = markWaitingApproval(live.runState, taskId);
+    // 承認待ちタイムアウト（Issue #579、design.md §16.39）。`runnerMerge.ts`の
+    // `startMergeResolution`が`onStateChanged`で承認待ちへ入るたびにタイマーを張るのと
+    // 同じ形で、`waitingApprovalSinceMs`を起点にタイマーを張る（抜けるときは
+    // `onApprovalResolved`が同じ関数で張り直す）
+    liveTask.waitingApprovalSinceMs = (this.deps.now?.() ?? new Date()).getTime();
+    liveTask.taskApprovalTimeoutTimer = scheduleTaskApprovalTimeout(
+      this.internals,
+      runId,
+      taskId,
+      liveTask.taskApprovalTimeoutTimer,
+      liveTask.waitingApprovalSinceMs,
+    );
     void this.persist(runId);
     this.notify(runId);
     this.pump(runId);
@@ -3921,6 +3973,17 @@ export class WorkflowRunner {
     const liveTask = live.tasks.get(taskId);
     if (liveTask !== undefined) {
       liveTask.pendingApproval = undefined;
+      // 承認待ちを抜けるので、張ってあったタイムアウトタイマーを消す（Issue #579、
+      // design.md §16.39）。`waitingApprovalSinceMs`を`undefined`にして渡すと
+      // `scheduleTaskApprovalTimeout`は新しいタイマーを張らずに`clearTimeout`だけ行う
+      liveTask.waitingApprovalSinceMs = undefined;
+      liveTask.taskApprovalTimeoutTimer = scheduleTaskApprovalTimeout(
+        this.internals,
+        runId,
+        taskId,
+        liveTask.taskApprovalTimeoutTimer,
+        undefined,
+      );
     }
     if (decision === 'accept' || decision === 'acceptForSession') {
       live.runState = resumeFromApproval(live.runState, taskId);
@@ -3993,7 +4056,18 @@ export class WorkflowRunner {
       };
     }
 
-    live.runState = applyLoopStopReason(live.runState, live.def.tasks, taskId, reason);
+    if (reason === 'taskStopped' && liveTask?.taskApprovalTimedOut === true) {
+      // 承認待ちタイムアウト（Issue #579、design.md §16.39）。`stopLoop()`は理由を
+      // `'taskStopped'`としてしか伝えられないため、`runnerApproval.ts`の
+      // `handleTaskApprovalTimeout`が`stopLoop()`の直前に立てた印を見て、通常の
+      // `'taskStopped'`（`manualStop`）とは別の`markTaskApprovalTimedOut`へ倒す
+      // （`runnerMerge.ts`の`timedOutByApprovalTimeout`分岐と同じ手口）
+      liveTask.taskApprovalTimedOut = false;
+      liveTask.waitingApprovalSinceMs = undefined;
+      live.runState = markTaskApprovalTimedOut(live.runState, live.def.tasks, taskId);
+    } else {
+      live.runState = applyLoopStopReason(live.runState, live.def.tasks, taskId, reason);
+    }
 
     if (reason !== 'manual' && reason !== 'interrupted') {
       // done / maxReached / stalled / failed。

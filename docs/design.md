@@ -4426,7 +4426,7 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 
 #### ワークフロー設定の一覧
 
-`agent.workflows.*` の全15項目。実際に登録している値（型・既定値・markdownDescription）は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている（§7と同じ原則）。
+`agent.workflows.*` の全16項目。実際に登録している値（型・既定値・markdownDescription）は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている（§7と同じ原則）。
 
 | 設定                                    | スコープ            | 用途・理由                                                                                                                                             |
 | --------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -4442,6 +4442,7 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 | `agent.workflows.branchNaming`          | machine-overridable | タスクブランチの命名方式（§16.6）。ブランチ名の形を決めるだけで、push先も権限も変えない                                                                |
 | `agent.workflows.draftPullRequest`      | machine-overridable | PR/MRをDraftで作るかどうか（§16.18）。有効にするほうが「人の確認を挟む」側へ倒れるため、強い制限は要らない                                             |
 | `agent.workflows.mergeApprovalTimeoutSec` | machine-overridable | 衝突解決セッション（§16.17「コンフリクト」）が承認待ちのまま止まってよい上限秒数（既定3600秒）。超えたら自動でセッションを止め`blocked`にする。権限には関わらない                |
+| `agent.workflows.taskApprovalTimeoutSec` | machine-overridable | 通常タスクの承認待ち（`waitingApproval`）が止まってよい上限秒数（既定3600秒、§16.39）。超えたら自動でタスクを止め`failed`（理由: `taskApprovalTimedOut`）にする。`mergeApprovalTimeoutSec`（衝突解決セッション専用）とは別のキー。権限には関わらない |
 | `agent.workflows.finalMergeDecisionTimeoutSec` | machine-overridable | `finalMerge: orchestrator` の最終マージ判断待ちの上限秒数（既定900秒、§16.26）。タイムアウトすると `hold` へ倒す                                 |
 | `agent.workflows.ciWaitTimeoutSec`      | machine-overridable | 統合PR/MRをマージする前にCIチェックの完了を待つ上限秒数（既定1800秒、§16.36）。超えたら赤と同じ扱いで失敗にする。権限には関わらない                   |
 | `agent.workflows.ciUpdateBranchMaxRetries` | machine-overridable | マージが「baseの最新でない」ことで拒否されたときの取り込み直しの最大リトライ回数（既定2、§16.36）。権限には関わらない                              |
@@ -4514,6 +4515,8 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 7. 解決できなければ、控えたコミットidへ `git merge --abort` で戻し、そのタスクを `blocked` にする。ただし**人が止めた場合（タブへの直接介入 = `manual`/`interrupted`、ワークフローViewの「全体の停止」 = `taskStopped`）は巻き戻さない**（Issue #412・#434）。人が統合worktreeで直接手を動かしている経路であり、巻き戻すと未コミットの解決結果を破棄してしまう（1.と同じ理由）。統合worktreeは衝突した状態のまま残り、占有だけが解放される。**そのタスクも`blocked`にする**（Issue #443、案A）。`merging`のまま残すと、`getRunOutcome`が`merging`を`running`扱いするためrunが終了確定せず、`retryMergeState`（`blocked`からしか動かない）の「再マージ」の対象にもならない行き止まりになるためで、`git merge --abort`は呼ばずに`markMergeBlocked`だけを呼ぶ。「巻き戻し済みの`blocked`」との違い（未コミットの解決結果が残っている）は状態には持たせず、警告欄（`mergeInterrupted`）で説明する
 
 8. **承認待ちが長時間続いたら、自動的に7.と同じ非破壊の`blocked`へ倒す（Issue #413 PR5）。** 解決用セッションが承認カードを出したまま（5.の標準承認カード）`agent.workflows.mergeApprovalTimeoutSec`（既定3600秒＝1時間）を超えて放置されたら、`session.stopLoop()`を呼んで止める。**LLMが作業中（承認待ちで無い間）の時間は計測に含めない**——計測は承認カードが出ている間だけ、状態が変わるたびに0から数え直す（1回のカードが直っても次のカードでは新しく数え直す）。7.の「人が止めた場合」と同様に**`git merge --abort`は呼ばない**（統合worktreeは衝突した状態のまま残り、未コミットの解決結果を破棄しない）。ただし7.は「人が明示的に停止を指示した」経路（`applyLoopStopReason`が`run.haltedByUser`を立てて残りの`pending`を`runHalted`で止める）を通るのに対し、**この自動タイムアウトは対象タスク1つだけを`blocked`にし、runの残りは止めない**——1つの衝突が長引いただけで独立した他の枝まで巻き込むのは望ましくないため。`stopLoop()`が返す`LoopStopReason`は`'taskStopped'`のままで人が止めた場合と区別が付かないため、`MergeResolutionEntry.timedOutByApprovalTimeout`フラグ（タイムアウト処理が`stopLoop()`を呼ぶ直前に立てる）で内部的に見分ける。
+
+   **この`agent.workflows.mergeApprovalTimeoutSec`は衝突解決セッション（`live.mergeResolutions`）専用であり、通常タスク（`live.tasks`）の`waitingApproval`には効かない。** 通常タスクには別のキー（`agent.workflows.taskApprovalTimeoutSec`、既定3600秒）と別の落とし先（`blocked`ではなく`failed`、理由`taskApprovalTimedOut`）を用意した（§16.39、Issue #579）。片方だけを読んで他方にも効くと誤読しないこと。
 
 **停止中（`haltedByUser`）でもタイムアウトさせる（Issue #539）。** かつては「実行が既に`haltedByUser`なら何もしない」としていたが、この前提（「run全体が停止済みならこの解決セッションのエントリは既に消えているはず」）は成立しない。「再マージ」（`retryMerge`）は`haltedByUser`を解除しない設計（Issue #517/#525。下の「実行全体が停止している…間に『再マージ』が成功しても」の箇条書き参照）のため、run全体が停止したままでも新しい衝突解決セッションが開くことがあり、そのセッションが承認待ちに入るとタイムアウトの判定に到達する。ここで何もせず戻ると、タイマーは`waitingApprovalSinceMs`が変わらない限り一発物のため、以後そのセッションのタイムアウトは二度と発火せず、対象タスクが`merging`のまま永久に残ってrunが終了確定しなくなる。上記のとおりこのタイムアウトは対象タスク1つだけを`blocked`にし`haltedByUser`には触れないため、停止中でも無条件に発火させて安全側に倒す。警告は`mergeApprovalTimeout`（同一taskIdの直近1件へ丸める。`mergeBusy`・`mergeInterrupted`と同じ丸め込み、Issue #439/#443）。
 
@@ -6134,3 +6137,43 @@ Issue #475/PR #495は`ensureMessaging`の入口（`prepareTaskLaunch`内）と`s
 
 - `test/unit/runnerDispose.test.ts`（新設）: `git worktree add`の2回目呼び出し（＝タスク自身のworktree作成）をゲートで止め、`startTask`を`resolveWorkingDirectory`の`await`点に留めたまま`dispose()`を割り込ませ、その後ゲートを解放する形で再現する。dispose()後はCLIセッションが1つも開かないこと・対照（dispose()しなければ同じ経路でセッションが開くこと、ゲートの有効性の確認）・通常の再開（`retryTask`、dispose()を挟まない通常の失敗からの再実行）が引き続き機能することを確認する。RED実測は`startTask`のガード追加前の状態で行い、「起動しない」「起動してしまっても解放される」の2件が失敗し、対照テストと通常の再開テストは元から緑であることを確認済み
 - `test/unit/runner.test.ts`の`dispose()後にretryTaskで再開してもCLIセッション・MCPサーバ・タイマーを新たに立てない`（Issue #475当時の既存テストを本Issueに合わせて更新）: `retryTask`後もCLIセッションが1件も増えないこと（`codexHost.openInputs`・`codexHost.sessions`の件数が変わらないこと）をMCPサーバ・タイマー不再生の確認と合わせて検証する
+
+### 16.39 通常タスクの承認待ちにも時間切れの解放を持たせる（Issue #579）
+
+W7（#571、`ask_orchestrator`）のセキュリティ監査が指摘した。**通常タスク**（`live.tasks`、状態`waitingApproval`）が承認待ちのまま誰も応答しないと、無期限に`maxParallel`の枠を占め続ける。§16.3で確認したとおり`isActiveTaskState`は`waitingApproval`を「枠を占める」4状態の1つに含めているが、そこから時間で自動的に抜ける経路が無かった。
+
+**`agent.workflows.mergeApprovalTimeoutSec`（§16.17「コンフリクト」8.）はこの問題を解決しない。** `scheduleApprovalTimeout`の呼び出し元は`runnerMerge.ts`の`startMergeResolution`内の1箇所だけで、対象は衝突解決セッション（`live.mergeResolutions`）に限られる。通常タスクの`markWaitingApproval`（`runState.ts`、呼び出し元は`runner.ts`の`handleApproval`の1箇所のみ）にはどのタイムアウトも配線されていなかった（grepで確認: `git grep -n "scheduleApprovalTimeout\|mergeApprovalTimeoutSec"`が`runnerMerge.ts`関連にしか当たらない）。
+
+**実害と判定した決め手は副次効果である。** `waitingApproval`が1件あると、待ちぼうけ検出の経路1（`detectAllWaitingStalemate`、§16.21）が「走行中の全タスクが`waitingReply`」を満たせなくなり、**他タスクの返信待ちの解放まで止まる**。`{A: waitingApproval, B: waitingReply, C: waitingReply}`は経路1では`[]`（誰も解放されない）だが、`{A: waitingReply, B: waitingReply, C: waitingReply}`なら`['A','B','C']`（全員解放）になる。承認待ちに解放が無いだけなら「人が承認するのが仕様」で済むが、その状態が別の自動解放（返信待ちの解放）まで無効化するのは解放機構側の欠陥である。
+
+#### 対応
+
+**本体と副次効果の両方を塞ぐ。** 片方だけを塞ぐPRがこのリポジトリで繰り返し出ている（`replyTimeoutSec`と`mergeApprovalTimeoutSec`が過去に同じ形の穴を両方持っていた実例がある）ため、ここで両方閉じる。
+
+1. **新しい設定キー`agent.workflows.taskApprovalTimeoutSec`（既定3600秒）を新設する。** `mergeApprovalTimeoutSec`を流用しない。流用すると、この節（§16.17「コンフリクト」8.）と§16.5がすでに`mergeApprovalTimeoutSec`を「衝突解決セッションの承認待ち」として記述しており、流用した瞬間にその既存の記述が黙って偽になる。`runnerApproval.ts`に`scheduleTaskApprovalTimeout` / `handleTaskApprovalTimeout`を新設し、`runnerMerge.ts`の`scheduleApprovalTimeout`（衝突解決セッション用）と同じ「エントリごとに`setTimeout`を張り直す」形にした。`live.tasks`のエントリ（`LiveTask`）に`waitingApprovalSinceMs` / `taskApprovalTimeoutTimer` / `taskApprovalTimedOut`の3フィールドを追加し、`MergeResolutionEntry`の同名・類似フィールドと同じ役割を持たせる（対象が`live.tasks`か`live.mergeResolutions`かの違いだけ）。`handleApproval`（`markWaitingApproval`の直後）でタイマーを張り、`onApprovalResolved`（承認・拒否のどちらでも）で張り直す（`waitingApprovalSinceMs: undefined`を渡すと`clearTimeout`だけが起こる）。
+2. **`checkWaitingReplyStalls`（`runnerMessaging.ts`）が組み立てる`activeStates`から`waitingApproval`を除く。** 経路1の判定対象は「走行中の全タスク」ではなく「メッセージングで待ち得るタスク」に絞る。`detectAllWaitingStalemate`自体（`messaging.ts`）は変更しない——`TaskState`と経過時間だけを見る純粋関数としての汎用性を保つため、除外はこの関数を呼ぶ側（`checkWaitingReplyStalls`）のローカルな`Map`構築だけに閉じる。`isActiveTaskState`自体（`maxParallel`の空き数計算・実行全体の終了判定）は変えない。
+
+#### なぜ`blocked`ではなく`failed`か
+
+**既存の`mergeApprovalTimeoutSec`は時間切れ後に対象タスクを`blocked`にする（§16.17「コンフリクト」8.）が、通常タスクの時間切れはそれに揃えない。** §16.3が定義する`blocked`は「タスクの作業自体は終わったが、統合できていない」状態で、実行全体を止めない（「`blocked`は実行全体を止めない。依存する後続だけが`skipped`になり、独立した枝は走り続ける」）。通常タスクが承認待ちで時間切れになった場合、**作業は終わっていない**（承認要求そのものが「これから危険な操作をしてよいか」という、作業の途中の問いである）。ここで`blocked`へ倒すと、状態の意味が壊れ、`markMergeSucceeded`の依存先復帰フィルタ（`s.failure?.kind !== 'mergeBlocked'`のときだけ`skipped`を戻さない）や`retryMergeState`（`blocked`専用の「再マージ」）など、マージ文脈の`blocked`を前提にしている経路に誤読させる。
+
+そこで新しい`failure.kind`（`taskApprovalTimedOut`、`runState.ts`の`TaskFailureReason`）を足し、`markTaskApprovalTimedOut`で`failed`へ倒す。3つの性質を持たせた。
+
+1. `retries`の自動再試行の対象にしない（`stalled` / `manualStop`と同じ理由。人・オーケストレーターの判断を挟まずに、同じ危険操作を勝手に再提示しない）
+2. `approvalRejected`（人が拒否した）とは区別する（`reloadInterrupted`が`approvalRejected`と区別されているのと同じ理由。時間切れは人が拒否したわけではない）
+3. run全体の`haltedByUser`には触れない（`handleMergeApprovalTimeout`の「run全体の停止状態はタイムアウトでは変えない」と同じ方針。`markFailed`＝`isUnsettled`からの通常の`failed`確定を経由するため、実装が自然に満たす）
+
+**`taskApprovalTimedOut`（通常タスク、`failed`へ倒す）は、`runnerMerge.ts`の`localOnlyStopKind === 'approvalTimeout'`（衝突解決セッション、`blocked`へ倒す）とは別物である。** 名前が近い（`approvalTimeout` / `taskApprovalTimedOut`）ため、取り違えると倒す先を間違える（`blocked`と`failed`は意味が違う。上記参照）。設定キーを`mergeApprovalTimeoutSec` / `taskApprovalTimeoutSec`で分けたのと同じ理由で、`failure.kind`側も接頭辞`task`で通常タスク側だと分かるようにしてある。
+
+**時間切れを「承認された」として扱わない。** 承認待ちは危険と判定された操作について人の判断を待っている状態であり、時間切れで黙って`running`へ進めると、待つことで得ていた安全性が時間経過で消える。`accept`相当の遷移は`onApprovalResolved`の`accept` / `acceptForSession`経由でしか起こらない。
+
+**無人運転で`run`が進まなくなる懸念は、いま解かない。** `applyAutoResume`（W10、§16.35）は`reloadInterrupted`だけを対象にするホワイトリスト方式のため、`taskApprovalTimedOut`は何もしなくても自動再開の対象外になる。この性質を将来変えたくなったとき（例: 無人運転でも承認待ちの時間切れから自動再開したい）に、既存の`reloadInterrupted`の意味を壊さずに独立して判断できる形にしておくこと自体が、`blocked`への合流ではなく専用の`failed`理由を新設した理由の1つでもある。
+
+自動再開とは別に、もっと直接的な帰結もある。`isRunHalted`（`run.haltedByUser || hasFailedTask(run)`）が真になると、`nextTasksToStart`（`scheduler.ts`）は新規開始をいっさいしない（Issue #527が同じ`nextTasksToStart`の門を指して整理している）。つまり時間切れで`failed`になると、そのタスクが占有していた`maxParallel`の枠は明け渡すが、それと引き換えにrun全体は新規開始を止め、人の操作（Viewの「再実行」）を待つ状態になる。これは既存の全ての`failed`（`stalled`・`loopFailed`等）と同じ挙動であり、`taskApprovalTimedOut`固有の後退ではない。枠の解放だけを目的とするなら過剰にも見えるが、`failed`の意味を変えずに枠だけ明け渡す経路は現状存在しないため、これも「いま解かない」対象に含まれる。
+
+#### 確かめ方
+
+- `test/unit/runnerTaskApproval.test.ts`（新設）: `waitingApproval`のタスクが`taskApprovalTimeoutSec`を超えても解放されないことをまずRED（フェイクタイマーで確認）で示し、実装後に`failed`（理由`taskApprovalTimedOut`）へ落ちることを確認する。承認・拒否が時間切れより先に届けばタイマーが解除されて時間切れが起きないこと、`stopTask`/`stop`（全体停止）が`waitingApproval`のタスクを止めた場合は従来どおり`manualStop`になり`taskApprovalTimedOut`に化けないこと、依存する後続が`dependencyFailed`で`skipped`になる通常のカスケードが新しいkindでも変わらないことを確認する
+- `test/unit/runnerMessaging.test.ts`相当（既存の待ちぼうけ検出テストへ追加）: `waitingApproval`が1件混ざっていても、残りの`waitingReply`タスクが経路1で解放されることを確認する（Issue #579の副次効果の回帰）
+- `test/unit/runState.test.ts`: `markTaskApprovalTimedOut`の遷移条件（`waitingApproval`のときだけ動く）、`applyAutoResume`が`taskApprovalTimedOut`を`reloadInterrupted`と同列の「他の失敗」として扱い、自動再開をブロックすることを確認する
+- 既存の`agent.workflows.mergeApprovalTimeoutSec`関連テスト（`test/unit/runner.test.ts`の衝突解決セッションのタイムアウト系）が引き続き緑であることを確認し、新しいキー・新しいkindが既存の衝突解決セッション側の挙動に影響していないことを確かめる

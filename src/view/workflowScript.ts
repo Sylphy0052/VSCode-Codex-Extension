@@ -40,6 +40,8 @@ export function workflowScript(): string {
     manualStop: '手動停止',
     // design.md §16.27、Issue #336。同じ応答が繰り返され進捗が無いまま停止した
     stalled: '停滞',
+    // design.md §16.39、Issue #579。承認待ちがtaskApprovalTimeoutSecを超えて時間切れになった
+    taskApprovalTimedOut: '承認待ちの時間切れ',
   };
 
   let currentRuns = [];

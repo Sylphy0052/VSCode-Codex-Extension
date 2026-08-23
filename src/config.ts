@@ -13,6 +13,7 @@ import {
 } from './orchestrator/forge';
 import { DEFAULT_REPLY_TIMEOUT_SEC } from './orchestrator/messaging';
 import { DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerMerge';
+import { DEFAULT_TASK_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerApproval';
 import { DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC } from './orchestrator/runner';
 import {
   DEFAULT_CI_WAIT_TIMEOUT_SEC,
@@ -289,6 +290,16 @@ export interface WorkflowsConfig {
    */
   mergeApprovalTimeoutSec: number;
   /**
+   * 通常タスク（`live.tasks`）の承認待ち（`waitingApproval`）が止まってよい時間の
+   * 上限秒数（`agent.workflows.taskApprovalTimeoutSec`、既定3600秒、
+   * `machine-overridable`、Issue #579、design.md §16.39）。**`mergeApprovalTimeoutSec`
+   * とは別のキー。** こちらは通常タスクが対象で、超えたら`failed`（理由:
+   * `taskApprovalTimedOut`）にする（`mergeApprovalTimeoutSec`は衝突解決セッションが
+   * 対象で`blocked`にする）。権限には関わらないため`forge`/`finalMerge`ほど強い
+   * 制限は要らない。
+   */
+  taskApprovalTimeoutSec: number;
+  /**
    * 最終マージ（`finalMerge: orchestrator`）で、統合PR/MR作成後にオーケストレーターが
    * `decide_final_merge`で応答するのを待つ時間の上限秒数（`agent.workflows.
    * finalMergeDecisionTimeoutSec`、既定900秒、`machine-overridable`、design.md §16.26）。
@@ -554,6 +565,9 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     mergeApprovalTimeoutSec: normalizeMergeApprovalTimeoutSec(
       c.get<unknown>('workflows.mergeApprovalTimeoutSec'),
     ),
+    taskApprovalTimeoutSec: normalizeTaskApprovalTimeoutSec(
+      c.get<unknown>('workflows.taskApprovalTimeoutSec'),
+    ),
     finalMergeDecisionTimeoutSec: normalizeFinalMergeDecisionTimeoutSec(
       c.get<unknown>('workflows.finalMergeDecisionTimeoutSec'),
     ),
@@ -617,6 +631,19 @@ function normalizeMergeApprovalTimeoutSec(value: unknown): number {
     value <= MAX_TIMEOUT_SEC
     ? Math.floor(value)
     : DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC;
+}
+
+/**
+ * `agent.workflows.taskApprovalTimeoutSec` の生値を安全な秒数へ丸める
+ * （`normalizeMergeApprovalTimeoutSec` と同じ方針。Issue #579、design.md §16.39）。
+ */
+function normalizeTaskApprovalTimeoutSec(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= 1 &&
+    value <= MAX_TIMEOUT_SEC
+    ? Math.floor(value)
+    : DEFAULT_TASK_APPROVAL_TIMEOUT_SEC;
 }
 
 /**

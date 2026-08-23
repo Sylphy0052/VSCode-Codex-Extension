@@ -111,7 +111,34 @@ export type TaskFailureReason =
    * 少なくとも「同じ危険操作を繰り返し提示しない」制約は無関係なので`approvalRejected`とは
    * 別に区別できるようにしておく）。
    */
-  | { readonly kind: 'reloadInterrupted' };
+  | { readonly kind: 'reloadInterrupted' }
+  /**
+   * 通常タスクの承認待ち（`waitingApproval`）が`agent.workflows.taskApprovalTimeoutSec`
+   * （既定値は`runnerApproval.ts`の`DEFAULT_TASK_APPROVAL_TIMEOUT_SEC`参照）を超えて
+   * 時間切れになった（design.md §16.39、Issue #579）。**衝突解決セッション専用の
+   * `'approvalTimeout'`（`runnerMerge.ts`の`localOnlyStopKind`、`blocked`へ倒す）とは
+   * 別物。** こちらは通常タスク（`live.tasks`）の`waitingApproval`が対象で、`blocked`
+   * ではなく`failed`へ倒す（design.md §16.39「なぜ`blocked`ではなく`failed`か」参照）。
+   *
+   * 次の3点は既存のkindのJSDocから引いた性質（design.mdは§16.39に理由をまとめる）。
+   *
+   * 1. `stalled` / `manualStop`と同じ理由（人・オーケストレーターの判断を挟まずに勝手に
+   *    やり直さない）で、`retries`の自動再試行の対象にしない。危険と判定された同じ操作を
+   *    時間切れのたびに勝手に再提示してはならない
+   * 2. `approvalRejected`とは区別する。`reloadInterrupted`のJSDocが「『同じ危険操作を
+   *    繰り返し提示しない』制約は無関係なので`approvalRejected`とは別に区別できるように
+   *    しておく」と書いているのと同じ理由。時間切れは人が拒否したわけではない
+   * 3. run全体の`haltedByUser`には触れない（`handleMergeApprovalTimeout`のJSDoc「run全体の
+   *    停止状態はタイムアウトでは変えない」と同じ方針）。`markFailed`経由（`isUnsettled`
+   *    からの通常の`failed`確定）のため、これは実装（`markTaskApprovalTimedOut`）が
+   *    自然に満たす
+   *
+   * 自動再開（`applyAutoResume`、design.md §16.35）は`reloadInterrupted`だけを対象にする
+   * ホワイトリスト方式のため、このkindは何もしなくても対象外になる（このkindを対象に
+   * 含めるかどうかは、いまは決めず将来独立に判断できるようにする、というのがこのkindを
+   * 新設する理由の1つでもある）。
+   */
+  | { readonly kind: 'taskApprovalTimedOut' };
 
 /** タスク1件の実行状態。 */
 export interface TaskRunState {
@@ -523,6 +550,26 @@ export function markApprovalRejected(
     return run;
   }
   return markFailed(run, tasks, taskId, { kind: 'approvalRejected' });
+}
+
+/**
+ * 通常タスクの承認待ちが時間切れになった（design.md §16.39、Issue #579）。
+ * `markApprovalRejected`と同じく`markFailed`（`retries`の自動再試行の経路に乗せない）を
+ * 直接呼ぶが、`kind`は`taskApprovalTimedOut`にして`approvalRejected`（人が拒否した）とは
+ * 区別する。呼び出し元（`runner.ts`の`onTaskFinished`、`runnerApproval.ts`の
+ * `handleTaskApprovalTimeout`が`session.stopLoop()`経由で合流させる）は実行層の責務。
+ * 対象タスクが`waitingApproval`のときだけ動く。
+ */
+export function markTaskApprovalTimedOut(
+  run: RunState,
+  tasks: readonly WorkflowTask[],
+  taskId: string,
+): RunState {
+  const current = run.tasks.get(taskId);
+  if (current === undefined || current.state !== 'waitingApproval') {
+    return run;
+  }
+  return markFailed(run, tasks, taskId, { kind: 'taskApprovalTimedOut' });
 }
 
 // ---------------------------------------------------------------------------
