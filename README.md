@@ -489,7 +489,7 @@ Codexがサブエージェントを起動したとき、その活動を会話の
 - ロードマップを生成…
 - ワークフローを停止…（実行中のものがあるときだけ出る）
 
-同じ操作はコマンドパレット（`Ctrl+Shift+P`）の `Agent:` からも実行できる。
+同じ操作はコマンドパレット（`Ctrl+Shift+P`）の `Agent:` からも実行できる。メニューそのものを開くコマンドは `Agent: ワークフロー…`（`agent.workflows.menu`）。**このメニューにプログラム（[後述](#プログラム複数のワークフローを波で束ねる)）の項目は無く**、プログラムの実行と停止はコマンドパレットから直接呼ぶ。
 
 ### 無人実行についての注意
 
@@ -635,6 +635,46 @@ providerは `defaults.provider` に従う。cwdはworktreeではなくメイン�
 
 runが終わると、そのrunで `done` になったタスクに対応するロードマップの項目にチェックが入る（人が書いた文は書き換えない）。
 
+### プログラム（複数のワークフローを波で束ねる）
+
+1 run = 1ワークフローの上に、**プログラム**（複数runの束）を置ける。「WF-EはWF-A2が終わってから始める」のようにrun同士の依存を書き、依存の無いrunを同じ波で並列に、波をまたぐと逐次に進める。**上位のオーケストレーターは置かない**（各runのオーケストレーターは自分のrunだけを見たままで、runの起動順だけをプログラムが決める）。設計の詳細は[docs/design.md](docs/design.md) §16.37.1〜§16.37.3。
+
+プログラム定義は `.agents/programs/` 配下の `.yaml` / `.yml` に置く。**この置き場所は固定で、変更する設定は無い**（ワークフロー定義の `agent.workflows.dir` に相当するものを持たない）。
+
+```yaml
+version: 1
+name: 7ワークフロー・3波の運用
+maxParallel: 3
+
+runs:
+  - id: R1
+    defPath: .agents/workflows/wf-a2.yaml
+  - id: R2
+    defPath: .agents/workflows/wf-e.yaml
+    dependsOn: [R1]
+```
+
+- `defPath` はワークスペース内の `.yaml` / `.yml` を指す相対パスのみ（絶対パスとワークスペース外は検証で弾く）
+- `id` はワークフローのタスクidと同じ字種（半角英数字・`_`・`-`の1〜50文字）。idの重複・`dependsOn` の未定義参照・循環依存は開始前の検証でまとめて返り、1件でも該当すれば実行を始めない
+- `maxParallel` は同時に走らせるrunの数（既定 `3`、範囲1〜10）。runは1つでworktree・統合ブランチ・オーケストレーターセッションを作るため、タスクより重い単位である
+- runは1プログラムあたり50件まで
+
+操作はコマンドパレットから行う。
+
+1. `Agent: プログラムを実行…`（`agent.workflows.runProgram`）。`.agents/programs` 配下のYAMLをQuickPickで選ぶ
+2. 進行は既存のワークフローView（`agent.workflows.view`）で見る。**プログラム専用のパネルは無く**、既存のパネルに「プログラム」欄が増える形。各runの状態（未着手・実行中・完了・失敗・スキップ）と、スキップになった理由が読める。個々のrunの中身は、これまでどおりrunごとのワークフローViewで見る
+3. 止めるには `Agent: プログラムを停止…`（`agent.workflows.stopProgram`）で未完了のプログラムを選ぶ。ワークフローViewのプログラム欄に出る「停止」ボタンも同じ処理を呼ぶ
+
+**前のrunが失敗すると、それに依存する後続のrunは「スキップ」になる。** どのrunの失敗で止まったかが理由として残り、ワークフローViewに出る。理由が指すのは直接の依存先（直近のブロッカー）で、連鎖した場合の根本原因までは遡らない。失敗したrunに依存していない独立したrunは、そのまま進む。
+
+**人が止めたときは、まだ始まっていないrunをスキップにし、走っているrunには単発runと同じ非破壊的な停止を掛ける。** 進行中のターンには割り込まず、そのターンが終わってから次の指示を送らずに止まる。人が止めたプログラムは、ウィンドウのリロードやWSLの再起動をまたいでも自動では再開しない。
+
+**リロードやWSLの停止をまたいでも、続きの波から進む。** 中断されたrunは単発runと同じ自動再開（`agent.workflows.autoResume`）の対象で、実際に再開できたrunは実行中として扱い直し、本当に失われたrunだけを失敗として確定してから次の波を計算する。プログラム全体を最初からやり直すことも、失敗した箇所を勝手に再試行することもしない。
+
+**`allow` を含むワークフローは、プログラムのrunとしては開始できない。** 実行前の確認を人へ回す経路が無いため、そのrunは失敗として記録される（単発の `Agent: ワークフローを実行…` から実行すれば、従来どおり確認ダイアログが出る）。
+
+**状態: 実装は完了しているが実機確認は未実施**（[既知の制約](#既知の制約)、[docs/manual-test.md](docs/manual-test.md) W-Q）。
+
 ### 確認を挟まずに走らせたい場合
 
 既定では `bypassPermissions` のまま走らせることはできない（上記のとおり読み替えられる）。承認要求そのものが発行されない設定では、危険なコマンドを止める仕組みが一切残らないため。人が席を外していても進むようにしたいなら、まず**危険判定を残したまま自動承認する** `autoApprove` を使う。
@@ -698,6 +738,8 @@ tasks:
 | `codex.sandboxWritableRoots` | `[]`    | machine             | `workspace-write` のときに書き込みを許す追加の場所。絶対パスのみ                             |
 | `codex.sandboxNetworkAccess` | `false` | machine             | `workspace-write` のときにネットワークへ出られるか                                           |
 | `codex.approvalMode`         | `""`    | machine             | `untrusted` / `on-request` / `never`                                                         |
+| `codex.approvalsReviewer`    | `""`    | machine             | 承認要求を誰へ回すか。`""`（Codex側の既定に委譲）/ `user`（画面のカードで人へ回す）/ `auto_review`（Codex内部のsubagentが自動で判定する。選ぶ前に確認ダイアログが出る） |
+| `codex.bypassApprovalsAndSandbox` | `false` | machine        | **危険**: 承認もサンドボックスも一切かけずに実行する（`--dangerously-bypass-approvals-and-sandbox`）。**有効にすると `codex.sandbox` / `codex.approvalMode` / `codex.approvalsReviewer` はCLIへ渡さない**（それらに何を設定していても効かない）。外側で隔離済みの環境（コンテナ・使い捨てVM）向け。会話を開くたびに確認ダイアログが出る |
 | `codex.model`                | `""`    | machine-overridable | 空なら `-m` を渡さない                                                                       |
 | `codex.reasoningEffort`      | `""`    | machine-overridable | `model_reasoning_effort`。選択肢はモデルごとに異なる                                         |
 | `codex.profile`              | `""`    | machine-overridable | `-p` に渡すプロファイル名                                                                    |
@@ -744,6 +786,7 @@ tasks:
 | `agent.workflows.allowAutoApprove`      | `false`                         | machine             | YAMLの `autoApprove: true` を有効化できるようにする。**これが `false` のままだと、YAMLに何と書かれていても全ての承認要求を人へ回す** |
 | `agent.workflows.allowClaudeBypassPermissions` | `false`                   | machine             | **危険**: `claude.permissionMode` が `bypassPermissions` のとき、ワークフローのClaudeタスクもその設定のまま実行する。有効にすると危険判定が全て無効になる（[承認要求そのものを出さずに走らせる](#承認要求そのものを出さずに走らせる非推奨)参照）                     |
 | `agent.workflows.replyTimeoutSec`       | `300`                           | machine-overridable | タスク間メッセージング（[後述](#ワークフロー並列オーケストレーション)）の返信待ちの上限秒数                                          |
+| `agent.workflows.mergeApprovalTimeoutSec` | `3600`                        | machine-overridable | マージが衝突したタスクの解決セッションが、承認待ちのまま止まってよい上限秒数。超えたらセッションを止めてそのタスクを `blocked` にする（衝突した状態のworktreeは残り、ワークフローViewの「再マージ」から再開できる）。承認待ちで**ない**時間は数えない |
 | `agent.workflows.roadmapDir`            | `docs/roadmap`                  | machine-overridable | ロードマップの出力先ディレクトリ                                                                                                     |
 | `agent.workflows.pseudoWorktreeExclude` | `[node_modules,.venv,dist,out]` | machine-overridable | 疑似worktree（gitでないフォルダでの複製ベースの隔離）で複製から除外するディレクトリ名                                                |
 | `agent.workflows.forge`                 | `auto`                          | machine             | PR/MR作成に使うホスト（`auto` / `github` / `gitlab` / `none`）                                                                       |
@@ -752,8 +795,15 @@ tasks:
 | `agent.workflows.finalMergeDecisionTimeoutSec` | `900`                     | machine-overridable | `finalMerge: orchestrator` で、オーケストレーターが `decide_final_merge` に応答するのを待つ上限秒数。超えたら自動的に `hold` にする |
 | `agent.workflows.ciWaitTimeoutSec`      | `1800`                          | machine-overridable | 最終マージの前にCIチェックの完了を待つ上限秒数。超えたらCIが赤扱いでマージせずタスクを失敗にする。CIが1件も設定されていないPR/MRは待たずに即マージする              |
 | `agent.workflows.ciUpdateBranchMaxRetries` | `2`                           | machine-overridable | マージが「baseの最新でない」ため拒否されたとき、`gh pr update-branch` / `glab mr rebase` で取り込み直してCI待ち・マージを再試行する回数の上限。超えたら失敗にする |
+| `agent.workflows.reviewCommentPollIntervalSec` | `600`                     | machine-overridable | 統合PR/MRのレビューコメントを取りに行く間隔（秒）。統合PR/MRを作れた実行だけが対象で、新しく見つかったコメントはオーケストレーターへ渡り、対応するタスクの調整に人の承認は挟まない（適用した内容はワークフローViewの警告欄に全文で残る）。`0` で取得しない |
 | `agent.workflows.branchNaming`          | `wf`                            | machine-overridable | タスクブランチの命名方式（`wf` = `wf/<runId>/<taskId>` / `conventional` = `<type>/<IID>/<slug>`）                                    |
 | `agent.workflows.draftPullRequest`      | `false`                         | machine-overridable | PR/MRをDraftで作り、統合ブランチへのマージ後にreadyへ切り替えるか                                                                    |
+| `agent.workflows.createTaskIssue`       | `false`                         | machine-overridable | タスクの開始時にIssueを起票し、PR/MRの本文から参照するか。`agent.workflows.pullRequest` が `per-task` のときだけ効く。YAML側に既に `issue` があるタスクは起票しない |
+| `agent.workflows.reviewTaskPullRequest` | `false`                         | machine-overridable | PR/MRを作った後、統合ブランチへのマージ前に、別の読み取り専用セッションでレビューさせるか。応答を待ち続けることはなく、結果は警告として残るだけでマージは止めない |
+| `agent.workflows.stallRepeatCount`      | `4`                             | machine-overridable | タスクのループが停滞したとみなすまでに、同じ応答が連続する回数。直近の応答要約がこの回数だけ同じなら、送信回数の上限（`maxIterations`）を使い切る前にループを止め、失敗と区別できる「停滞」としてオーケストレーターへ知らせる |
+| `agent.workflows.maxAskUserPerRun`      | `3`                             | machine-overridable | オーケストレーターが人へ確認する道具（`ask_user`）を1つのrunで呼べる回数の上限。上限に達した後の呼び出しは拒否され、自分で判断するか `decide_final_merge` の `hold` で止めるよう促される |
+| `agent.workflows.autoResume`            | `true`                          | machine-overridable | ウィンドウのリロードやWSLの停止・再起動で中断されたrunを、条件を満たせば自動で再開するか。人が「全体の停止」で止めたrun・他の理由で失敗したタスクを含むrun・`allow` の確認が要るタスクを含むrunは対象外で、従来どおり手動で再実行する |
+| `agent.workflows.maxAutoResumeAttempts` | `3`                             | machine-overridable | 自動再開を試みる回数の上限。上限に達した後はワークフローViewにその旨を出したまま自動再開をあきらめ、手動での再実行を待つ |
 
 **`allowAutoApprove` は既定 `false` の machine スコープ設定。** タスクのYAMLに `autoApprove: true` と書いても、この設定を有効にしない限り効かない（意図しない無人実行を、設定パネルを一度も開かないまま有効化させないための保護。[無人実行についての注意](#無人実行についての注意)参照）。
 
@@ -812,6 +862,8 @@ VSCodeが読むPATHはシェルの対話設定（`.bashrc` 等）を経ないこ
 - **CLIから直接archive/deleteした場合**: 履歴は追従するが、開いているタブは残る
 - **ワークフローは実装・配線ともに完了しているが実機確認は途上**: 統合ブランチからのPR/MR自動作成、`agent.workflows.roadmap` によるゴール→ロードマップ→YAMLの2段階生成、`blocked` タスクのワークフローViewからの「再マージ」、タスク間メッセージング（MCPツール `list_tasks` / `send_message` / `ask_orchestrator`。宛先はオーケストレーターに固定してあり、タスク同士が直接やり取りすることはできない。`ask_orchestrator`はタスクからオーケストレーターへ判断を仰ぐ経路で、答えは既存の`send_message`で返る。詳細はdesign.md §16.32）、gitリポジトリでないフォルダでの複製による隔離（疑似worktree）は、いずれも実行層（`runner.ts`）への配線を含めて実装済みで動く。ユニットテストとプロトコル上の実測までは済んでいるが、実VSCode上で通しで確認した記録はまだ無い。詳細は[docs/design.md](docs/design.md) §16.13を参照
 - **最終マージ前のCI完了待ちとブランチ保護への対応は実機未確認**: CIチェックの完了待ち・タイムアウト時の失敗確定・マージが「baseの最新でない」ため拒否されたときの `gh pr update-branch` / `glab mr rebase` による自動取り込み直しは、いずれもユニットテストのみで検証済み。実際のGitHub/GitLab上でstrictなブランチ保護・CIパイプラインと組み合わせた確認はまだ無い。詳細は[docs/design.md](docs/design.md) §16.36、[docs/manual-test.md](docs/manual-test.md) W-Pを参照
+- **複数のワークフローを束ねる「プログラム」は実機未確認**: [プログラム](#プログラム複数のワークフローを波で束ねる)の波のスケジューリング・run間の依存・失敗の伝播（後続runのスキップ化）・人による停止・リロードをまたいだ続行は、いずれもユニットテストのみで検証済み。実VSCode上で通しで動かした記録はまだ無い。詳細は[docs/design.md](docs/design.md) §16.37.1〜§16.37.3、[docs/manual-test.md](docs/manual-test.md) W-Qを参照
+- **ワークフローへ後から足した機能も実機未確認**: タスクのループの停滞検知（`agent.workflows.stallRepeatCount`）、生成したワークフローの分解レビュー、PR/MRのレビューコメントの取り込み（`agent.workflows.reviewCommentPollIntervalSec`）、タスクごとのIssue起票とPR/MRのレビュー（`agent.workflows.createTaskIssue` / `agent.workflows.reviewTaskPullRequest`）、オーケストレーターから人へ確認する経路（`agent.workflows.maxAskUserPerRun`）、中断からの自動再開（`agent.workflows.autoResume` / `agent.workflows.maxAutoResumeAttempts`）は、いずれもユニットテストまでで、実VSCode上での確認はまだ無い。確認項目は[docs/manual-test.md](docs/manual-test.md) W-G / W-H / W-J / W-K / W-M / W-Oを参照
 - **Codexの履歴取得はthread/list優先**: app-serverに繋がっていれば `thread/list` を使い、繋がらない・応答が空のときはファイル読みへ退避する。退避したときは出力チャネル（`Agent: ログを表示`）に理由が残る（詳細は設計書 §4.0）
 - **agent threadを切り替える経路が無い**: Codex app-serverのClientRequest 95メソッドを全数確認したが、「アクティブなagent threadを切り替える」に相当するものが無い（実測。詳細は設計書 §14.26）。サブエージェントの状況は会話内の項目として見えるが、そこへ「切り替える」操作は無い
 - **検索（Ctrl+F）は折り畳んだ部分を拾わない**: コマンド出力・思考の要約の折りたたみ、`<details>` の中はDOM上非表示のため検索対象にならない。畳んでいる箇所を検索したい場合は開いてから検索する（詳細は設計書 §14.48）
@@ -835,7 +887,7 @@ VSCodeが読むPATHはシェルの対話設定（`.bashrc` 等）を経ないこ
 | パッケージング（vsix生成）                                                                                                    | 完了                                                                                                                                                        |
 | hooksの一覧・信頼状態（Codexは信頼操作あり）                                                                                  | 実装完了。一覧の取得は実測、Codexの信頼書き込みはstrings調査のみで未検証、画面上は未確認                                                                    |
 | 課金額の表示（Claude Codeのみ）                                                                                               | 実装完了。`get_usage`は実測で確認済み、画面上は未確認                                                                                                       |
-| ワークフロー（並列実行・worktree隔離・危険操作の検知・View・成果の統合・PR/MR作成・ロードマップ生成・タスク間メッセージング） | 実装完了、実機確認は未実施（[既知の制約](#既知の制約)）                                                                                                     |
+| ワークフロー（並列実行・worktree隔離・危険操作の検知・View・成果の統合・PR/MR作成・ロードマップ生成・タスク間メッセージング・停滞検知・自動再開・複数runを束ねるプログラム） | 実装完了、実機確認は未実施（[既知の制約](#既知の制約)）                                                                                                     |
 | skillsの一覧・有効無効（Codexは切替あり）                                                                                     | 実装完了。一覧の取得は実測、Codexの`skills/config/write`はスキーマ根拠のみで未検証、画面上は未確認                                                          |
 | Web検索結果の表示（タイトル・URL、クリックで外部ブラウザ）                                                                    | 実装完了。CodexとClaude Codeともに実際にWeb検索を伴うターンを回して結果の形を確認済み、画面上は未確認                                                       |
 | pluginの一覧・install/uninstall・有効無効（appはCodexのみ閲覧）                                                               | 実装完了。一覧の取得は実測、Codexのinstall/uninstallと Claude Codeのenable/install/uninstallはスキーマ・`--help`根拠のみで未検証、画面上は未確認            |

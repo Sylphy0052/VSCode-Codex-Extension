@@ -1564,6 +1564,43 @@ describe('applyRunCompletionToFile', () => {
       }
     },
   );
+it(
+  '同じロードマップを指す2つのrunの書き戻しが同時に起きても、先に入ったチェックが消えない' +
+    '（Issue #620。read→writeの間に別のrunのwriteが差し込まれるlost update）',
+  async () => {
+    const stored = new Map<string, string>([['/repo/docs/roadmap/g.md', SAMPLE_ROADMAP]]);
+    // 実ファイルと同じく「読みも書きも即座には終わらない」形にして、readとwriteの間に
+    // 別のrunの書き込みが差し込まれる窓を作る
+    const tick = async (): Promise<void> => {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+    };
+    const fs: RoadmapFileSystemPort = {
+      writeTextFile: async (target, content) => {
+        await tick();
+        stored.set(target, content);
+      },
+      readTextFile: async (target) => {
+        await tick();
+        return stored.get(target);
+      },
+    };
+
+    // runAはR1を、runBはR2をdoneにする。maxParallel（既定3）の枠で走った2本が
+    // ほぼ同時に完了し、両方の書き戻しが重なった状況
+    const [outcomeA, outcomeB] = await Promise.all([
+      applyRunCompletionToFile({ fs }, '/repo/docs/roadmap/g.md', new Map([['R1', 'done']])),
+      applyRunCompletionToFile({ fs }, '/repo/docs/roadmap/g.md', new Map([['R2', 'done']])),
+    ]);
+
+    expect(outcomeA.ok).toBe(true);
+    expect(outcomeB.ok).toBe(true);
+    const parsed = parseRoadmapMarkdown(stored.get('/repo/docs/roadmap/g.md') ?? '');
+    expect(parsed.phases[0]?.items[0]?.checked).toBe(true);
+    expect(parsed.phases[0]?.items[1]?.checked).toBe(true);
+  },
+);
 });
 
 describe('createTaskSessionRoadmapGenerationPort', () => {
