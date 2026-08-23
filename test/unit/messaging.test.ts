@@ -1489,6 +1489,18 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
         calls.push(`askUser:${question}:${choices.join(",")}`);
         return { accepted: true, reason: "ok" };
       },
+      addTask: (input) => {
+        calls.push(`addTask:${JSON.stringify(input)}`);
+        return { accepted: true, reason: "ok" };
+      },
+      removeTask: (taskId) => {
+        calls.push(`removeTask:${taskId}`);
+        return { accepted: true, reason: "ok" };
+      },
+      updateTaskDependencies: (taskId, dependsOn) => {
+        calls.push(`updateTaskDependencies:${taskId}:${dependsOn.join(",")}`);
+        return { accepted: true, reason: "ok" };
+      },
     };
     return { port, calls };
   }
@@ -1549,6 +1561,9 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
       "update_task_prompt",
       "decide_final_merge",
       "ask_user",
+      "add_task",
+      "remove_task",
+      "update_task_dependencies",
     ]);
   });
 
@@ -1608,6 +1623,11 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
     callTool(conn, "decide_final_merge", { decision: "merge", reason: "CIが全緑のため" });
     // design.md §16.33。decide_final_mergeと同じくtaskIdを取らない特別扱いの経路
     callTool(conn, "ask_user", { question: "どちらにする？", choices: ["A案", "B案"] });
+    // design.md §16.29。add_taskもtaskIdではなくidを持つため、decide_final_merge/ask_userと
+    // 同じくtaskId抽出より前の特別扱いの経路で処理する
+    callTool(conn, "add_task", { id: "T3", prompt: "p3", done: "d3", dependsOn: ["T1"] });
+    callTool(conn, "remove_task", { taskId: "T3" });
+    callTool(conn, "update_task_dependencies", { taskId: "T2", dependsOn: ["T1"] });
 
     expect(calls).toEqual([
       "getRunStatus",
@@ -1618,7 +1638,86 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
       "updateTaskPrompt:T1:方針を変える",
       "decideFinalMerge:merge:CIが全緑のため",
       "askUser:どちらにする？:A案,B案",
+      'addTask:{"id":"T3","prompt":"p3","done":"d3","dependsOn":["T1"]}',
+      "removeTask:T3",
+      "updateTaskDependencies:T2:T1",
     ]);
+  });
+
+  it("add_task/remove_task/update_task_dependenciesはタスクの接続からは見えず、名指しでも拒否される（design.md §16.29）", () => {
+    const { port, calls } = fakeControl();
+
+    const names = toolNames(wire(port)("T1"));
+    expect(names).not.toContain("add_task");
+    expect(names).not.toContain("remove_task");
+    expect(names).not.toContain("update_task_dependencies");
+
+    const addResponse = callTool(wire(port)("T1"), "add_task", {
+      id: "T9",
+      prompt: "p",
+      done: "d",
+      dependsOn: [],
+    });
+    const removeResponse = callTool(wire(port)("T1"), "remove_task", { taskId: "T1" });
+    const updateDepsResponse = callTool(wire(port)("T1"), "update_task_dependencies", {
+      taskId: "T1",
+      dependsOn: [],
+    });
+
+    for (const response of [addResponse, removeResponse, updateDepsResponse]) {
+      expect(response !== undefined && "error" in response).toBe(true);
+      if (response !== undefined && "error" in response) {
+        expect(response.error.message).toContain("未知のツール");
+      }
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("update_task_dependenciesの引数のうち文字列でないdependsOn要素は除かれて実体へ渡る（design.md §16.29）", () => {
+    const { port, calls } = fakeControl();
+    const conn = wire(port)(ORCHESTRATOR_CONNECTION_ID);
+
+    callTool(conn, "update_task_dependencies", {
+      taskId: "T2",
+      dependsOn: ["T1", 1, null, "T3"],
+    });
+
+    expect(calls).toEqual(["updateTaskDependencies:T2:T1,T3"]);
+  });
+
+  it("add_task/remove_task/update_task_dependenciesが拒否されるとisErrorになる（send_messageと同じ流儀）", () => {
+    const port: OrchestratorControlPort = {
+      ...fakeControl().port,
+      addTask: () => ({ accepted: false, reason: "autoApprove はadd_taskから指定できません" }),
+      removeTask: () => ({ accepted: false, reason: "走行中のタスクは削除できません" }),
+      updateTaskDependencies: () => ({ accepted: false, reason: "循環しています" }),
+    };
+    const conn = wire(port)(ORCHESTRATOR_CONNECTION_ID);
+
+    const addResponse = callTool(conn, "add_task", {
+      id: "T9",
+      prompt: "p",
+      done: "d",
+      dependsOn: [],
+    });
+    const removeResponse = callTool(conn, "remove_task", { taskId: "T1" });
+    const updateDepsResponse = callTool(conn, "update_task_dependencies", {
+      taskId: "T1",
+      dependsOn: [],
+    });
+
+    for (const [response, expectedText] of [
+      [addResponse, "autoApprove"],
+      [removeResponse, "走行中"],
+      [updateDepsResponse, "循環"],
+    ] as const) {
+      expect(response !== undefined && "result" in response).toBe(true);
+      if (response !== undefined && "result" in response) {
+        const result = response.result as { isError?: boolean; content: [{ text: string }] };
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain(expectedText);
+      }
+    }
   });
 
   it("ask_userの引数のうち文字列でないchoicesは除かれて実体へ渡る（design.md §16.33）", () => {

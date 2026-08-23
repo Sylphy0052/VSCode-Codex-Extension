@@ -4983,6 +4983,9 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 | `update_task_prompt` | `taskId` / `continuePrompt`   | 後述（新設）                                         |
 | `decide_final_merge` | `decision` / `reason`         | 後述（新設、§16.26）                                 |
 | `ask_user`           | `question` / `choices`        | 後述（新設、§16.33、Issue #583）                     |
+| `add_task`           | `id` / `prompt` / `done` / `dependsOn` 等 | 後述（新設、§16.29、roadmap W4、Issue #338）        |
+| `remove_task`        | `taskId`                      | 後述（新設、§16.29、roadmap W4、Issue #338）         |
+| `update_task_dependencies` | `taskId` / `dependsOn`  | 後述（新設、§16.29、roadmap W4、Issue #338）         |
 
 - 制御ツールは**既存のrunnerのメソッドをそのまま呼ぶ**。Viewのボタンが通るのと同じ経路にし、モデル用の別経路を作らない。状態遷移の正しさを1か所（`runState.ts`）に保つため
 - `stop_task` の対象は「走行中のタスク」に限らない。**衝突解決セッション（`live.mergeResolutions`。§16.17「コンフリクト」5.）も対象**（issue #514）。`merging` のタスク自身のループは既に終わっているが、統合worktreeで開く衝突解決セッションはまだ生きており、そちらへ `stopLoop()` を届ける。`WorkflowRunner.stopTask` は戻り値（`boolean`）を「送り先を見つけて `stopLoop()` を呼べたか」の根拠にし、見つからなければ `false` を返す。制御ツール側（`buildOrchestratorControlPort` の `stopTask`）はこれを見て `no(...)` を返し、届いていないのに「止めました」という成功を返さない。人はワークフローViewを見て「止まっていない」ことに気づけるが、オーケストレーターは応答（`accepted`）しか見ないため、一度嘘の成功を返すとその経路を二度と再試行しない
@@ -5027,7 +5030,7 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 #### 制約
 
 - runごとに1つ。複数人が別々のオーケストレーターと話す形は考えない
-- オーケストレーター自身はワークフロー定義（YAML）を書き換えない。タスクの追加・依存の変更は行えず、方針転換は既存タスクの `continuePrompt` の差し替えと `send_message` の範囲に収まる。定義そのものを変えたい場合は、人が定義ファイルを直して再実行する（§16.9の経路）
+- オーケストレーター自身はワークフロー定義ファイル（YAML）を書き換えない。ただし実行中の定義（メモリ上の`live.def`）に対しては、`add_task` / `remove_task` / `update_task_dependencies`（§16.29、roadmap W4、Issue #338）でタスクの追加・削除・依存の変更ができる。人の承認を挟まずオーケストレーターの判断で適用され、適用した内容は全文が警告欄へ残る。方針転換は既存タスクの `continuePrompt` の差し替え（`update_task_prompt`）・`send_message`・この3ツールの範囲に収まる。YAMLファイルそのものを変えたい場合は、人が定義ファイルを直して再実行する（§16.9の経路）
 - run終了後の制御ツールは無効。過去のrunを後から動かす経路は作らない
 
 #### 実装順序（TDD）
@@ -5294,6 +5297,46 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 #### 既存の検証・再生成との関係
 
 `validateWorkflow`（構文的な検証）と`planWorkflow`の再生成ループ（検証エラーを踏まえた1度だけの投げ直し、§16.9）は変えていない。レビューは検証が通った後、**保存が確定してから**動く独立した工程であり、レビューの結果によって再生成が走ることも、検証の合否が変わることも無い。`plannerSecurity`（§16.9の安全設定の上書き検出）と`plannerReview`（本節）は別の`WorkflowWarning.kind`として区別し、`WorkflowViewManager.previewDefinition`の警告一覧に両方を並べて表示する。
+
+### 16.29 オーケストレーターが実行中の計画を書き換える（`add_task`/`remove_task`/`update_task_dependencies`、roadmap W4、Issue #338）
+
+これまでオーケストレーターは、実行中のワークフローに対して`update_task_prompt`（既存タスクの`continuePrompt`差し替え）と`send_message`（タスクへの伝言）でしか介入できず、タスクの追加・削除・依存関係の変更は一切できなかった（§16.23）。観測した状況（タスクの停滞、想定外の分岐、追加で必要になった作業）に応じて計画そのものを組み替えたい場合、既存タスクの言い回しを変えるだけでは足りない。この節は、その空白を埋める3つの制御ツール`add_task`/`remove_task`/`update_task_dependencies`を追加する。
+
+#### 変えないもの（Issue #338の非交渉事項）
+
+- **YAMLファイルは書き換えない。** 3つのツール自身は実行中の定義（`LiveRun.def`、メモリ上のみ）を直接書き換え、この3ツール自身の経路からは`persist`を呼ばない。既存の`update_task_prompt`（`continuePromptOverride`）と同じ「実行中だけの上書き」の流儀を踏襲した
+
+  **ただし`live.runState`（タスクの状態）は、この3ツール自身が呼ばなくても別の経路（他タスクの完了・`pump`など、`self.persist`を呼ぶ十数箇所）で結果的に永続化される（レビューblocking指摘、2026-08-23）。** `add_task`で加えたタスクのidが、後続の何らかのpersistでたまたま永続データに紛れ込むことがあり、`remove_task`で消したタスクのidは、後続のpersistで永続データから消える。ウィンドウを再読み込みすると、リロード後の復元（`runnerRestore.ts`の`reconcileRestoredTaskStates`）が、この永続データと再読み込みした定義ファイル（YAML本来の内容）を**突き合わせて**ずれを解消する：定義に無いタスクの永続状態は復元しない、永続データに無い定義側のタスクは`pending`として補う。突き合わせで実際に何かを落とす・補うと`reloadTaskDefMismatch`警告が出る。この突き合わせがあって初めて「ウィンドウを再読み込みすればYAML本来の内容へ戻る」が成り立つ（突き合わせ自体の詳細は`runnerRestore.ts`のJSDoc参照。人がrunの途中でYAMLを直接編集してからリロードしたときにも起こりうる、元からあった穴の恒久修正でもある）
+- **追加したタスクは既存の検証を必ず通る。** id形式・重複/大小無視の衝突・循環依存・タスク数上限（`MAX_TASK_COUNT`=50）・プロンプト長上限・未定義参照は`validateWorkflow`（§16.2）を候補定義に対してそのまま実行し、`errors`が1件でもあれば適用前に拒否して理由をオーケストレーターへ返す。新しい検証ロジックは作らず、既存の1箇所を再利用する
+- **オーケストレーターは権限を緩められない。** `add_task`の引数に`autoApprove`/`allow`/`sandbox`/`approvalMode`のいずれかが含まれていたら、値を問わず（`false`や`[]`のような無害に見える値でも）即座に拒否する。権限の緩和は人が書いたYAML定義からしか発生しない、という§16.16の信頼境界を、この新しい入口でも維持する
+- **実行中のタスクは消せない。** `remove_task`はタスクの状態が`pending`（まだ開始していない）の場合に限って許可する。動いているタスクを止めたい場合は既存の`stop_task`を使う経路へ誘導する
+
+#### 3つのツール
+
+| ツール | 引数 | 実体 |
+| --- | --- | --- |
+| `add_task` | `id`・`prompt`・`done`・`dependsOn`等（YAMLのタスク定義とほぼ同じ形） | `buildOrchestratorTask`（`workflow.ts`）で候補タスクを組み立て、`validateWorkflow`で検証してから`live.def.tasks`・`live.runState`へ反映 |
+| `remove_task` | `taskId` | `pending`のタスクに限り`live.def.tasks`・`live.runState`から取り除く |
+| `update_task_dependencies` | `taskId`・`dependsOn` | 対象タスクが`pending`の場合に限り`dependsOn`を差し替え、`validateWorkflow`で循環・未定義参照を検証してから反映 |
+
+いずれも成功時は`self.notify(runId)`でView側へ変更を伝え、`self.pump(runId)`でスケジューラを再評価させる。`add_task`で増えたタスクや、依存が外れて実行可能になったタスクは次のpumpで即座に拾われる。
+
+#### 設計判断（4点）
+
+1. **権限フィールドは黙って無視せず、理由付きで拒否する。** `buildOrchestratorTask`は`autoApprove`/`allow`/`sandbox`/`approvalMode`のいずれかが引数に含まれているかを`Object.prototype.hasOwnProperty`で判定し、含まれていれば該当フィールド名を名指しした`error`を返す。黙って無視すると、指示が握りつぶされたことにオーケストレーターが気づけないため、明示的な拒否を選んだ
+2. **稼働中タスクへの依存変更は拒否する。** `update_task_dependencies`は対象タスクが`pending`でなければ拒否する。`scheduler.ts`は`dependsOn`を`pending`のタスクに対してしか参照しないため、`pending`を外れたタスクへ依存を書き換えても以降のスケジューリングには何の効果も無い。効果の無い変更を黙って受理すると「変更が反映された」とオーケストレーターに誤解させるため、無効化ではなく拒否とした
+3. **`remove_task`は`pending`のタスクに限る。** Issue本文の「まだ始まっていないタスクに限る」を文字どおり`pending`のみに対応させた。`skipped`/`failed`/`done`のタスクは、既にworktree・ブランチ・実行履歴を持ち、他タスクが`{{T1.result}}`のようなテンプレート参照で結果を参照している可能性があるため、削除対象から除外した
+4. **`remove_task`は削除対象への依存を残さない。** 削除されるタスクを`dependsOn`に含む他タスクからは、同じ操作の中でそのidを取り除く（`strippedFrom`として警告文に列挙）。`remove_task`が`pending`のタスクのみを対象とする以上、それに依存している他タスクも必然的に`pending`のままである（依存先が`done`になっていない限りスケジューラは依存元を開始しないため）。したがって、この剥がし処理が既に進行・完了したタスクの依存関係を誤って書き換えることは構造的に起こり得ない
+
+#### 監査ログ（承認ゲートが無い代わりの説明責任）
+
+この3つのツールは人の承認を経ずに即座に適用される。唯一の追跡手段として、適用した変更は`WorkflowWarning`（`orchestratorTaskAdded`/`orchestratorTaskRemoved`/`orchestratorDependenciesChanged`）としてワークフロー Viewの警告欄へ全文を記録する。警告欄は`message`を`textContent`として描画するため（§16.8・§16.34）、オーケストレーターが生成した文字列（タスクid・プロンプトの要約・変更前後の依存一覧）をそのまま渡してもHTMLとしては解釈されない。
+
+#### `ask_user`（§16.33）との使い分け・`taskStalled`（§16.27）との連携
+
+この3ツールは計画の実行方法（タスクの追加・削除・依存の組み替え）に関する判断であり、人の承認を要さない。一方で、チームの範囲を越える・設計前提を変える・受入基準を緩めるといった**方針そのものに関わる変更**は、この3ツールでは適用せず、既存の`ask_user`（§16.33）で人に確認を仰ぐよう、オーケストレーターへのシステムプロンプト（`buildIntroBody`）で明示している。
+
+また、§16.27の`taskStalled`（停滞検知）通知を受け取った際の振る舞いとして、`buildIntroBody`に「停滞したタスクに対しては、`update_task_prompt`での言い回し変更に加えて、必要なら`add_task`/`remove_task`/`update_task_dependencies`で計画自体の組み替えを検討する」旨の案内を追加した。
 
 ### 16.32 タスクからオーケストレーターへ判断を仰ぐ経路（`ask_orchestrator`、roadmap W7、Issue #571）
 

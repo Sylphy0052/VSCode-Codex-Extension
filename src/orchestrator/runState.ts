@@ -166,7 +166,12 @@ export interface RunState {
   readonly haltedByUser: boolean;
 }
 
-const initialTaskRunState: TaskRunState = {
+/**
+ * `pending`タスクの初期値。`createRunState`のほか、`runnerRestore.ts`の復元時の突き合わせ
+ * （定義にはあるが永続データに無いタスクをpendingとして補う。design.md §16.29「リロード時の
+ * 突き合わせ」、レビューblocking指摘、2026-08-23）でも同じ初期値を使うため公開する。
+ */
+export const initialTaskRunState: TaskRunState = {
   state: 'pending',
   submissionCount: 0,
   retryCount: 0,
@@ -180,6 +185,25 @@ const initialTaskRunState: TaskRunState = {
 export function createRunState(tasks: readonly WorkflowTask[]): RunState {
   const entries = tasks.map((t) => [t.id, initialTaskRunState] as const);
   return { tasks: new Map(entries), haltedByUser: false };
+}
+
+/**
+ * オーケストレーターの`add_task`（design.md §16.29、roadmap W4、Issue #338）が新しいタスクを
+ * `pending`として加える。`createRunState`の初期値（`initialTaskRunState`）をそのまま使う。
+ */
+export function addTaskState(run: RunState, taskId: string): RunState {
+  return setTask(run, taskId, initialTaskRunState);
+}
+
+/**
+ * オーケストレーターの`remove_task`（design.md §16.29、roadmap W4、Issue #338）が`pending`の
+ * タスクを取り除く。呼び出し側（`runnerOrchestrator.ts`）が対象を`pending`に限定した後で
+ * 呼ぶ前提で、ここでは状態を見ずに無条件で削除する。
+ */
+export function removeTaskState(run: RunState, taskId: string): RunState {
+  const tasks = new Map(run.tasks);
+  tasks.delete(taskId);
+  return { ...run, tasks };
 }
 
 /** 1件でも `failed` が確定しているか。 */

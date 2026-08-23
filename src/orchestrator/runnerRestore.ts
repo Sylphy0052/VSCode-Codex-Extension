@@ -7,7 +7,13 @@ import { resolvePseudoState } from './runnerWorkingDirectory';
 import { sanitizeForLog } from './sanitize';
 import { startMerge } from './runnerMerge';
 import { setupOrchestratorForStart } from './runnerOrchestrator';
-import { applyAutoResume, markMergeBlocked, type RunState, type TaskRunState } from './runState';
+import {
+  applyAutoResume,
+  initialTaskRunState,
+  markMergeBlocked,
+  type RunState,
+  type TaskRunState,
+} from './runState';
 import type { PersistedRun } from './runStore';
 import { getRunOutcome } from './scheduler';
 import { isGitWorkingTree, resolveHeadCommit } from './worktree';
@@ -17,7 +23,12 @@ import {
   validateWorkflow,
   type WorkflowDefinition,
 } from './workflow';
-import { resolveBranchNamingAndDraft, type LiveRun, type LiveRunForgeState } from './runner';
+import {
+  resolveBranchNamingAndDraft,
+  type LiveRun,
+  type LiveRunForgeState,
+  type WorkflowWarning,
+} from './runner';
 import type { WorkflowRunnerInternals } from './runnerInternals';
 
 /**
@@ -200,15 +211,46 @@ async function loadPersistedWorkflowDefinition(
  * 経路で不一致が起き、マージ済みタスクを誤って`merging`（やり直し対象）と判定して二重
  * マージが走る事故になっていた。`reconcileMergingTaskOnReload`側が`type`を問わず
  * （`COMMIT_TYPES`のいずれでも）マージコミットを認識するよう改めたため、この関数は
- * `type`の配線を持たない（定義ファイル`def`も不要になった）。
+ * `type`の配線には`def`を必要としない。
+ *
+ * **ただし`def`自体は別の理由で改めて必要になった（design.md §16.29「リロード時の
+ * 突き合わせ」、レビューblocking指摘、2026-08-23）。** オーケストレーターの`add_task`/
+ * `remove_task`（§16.29）は`live.def`と`live.runState`だけを書き換えYAMLファイルは
+ * 書き換えないが、`live.runState`はこの2ツール自身がpersistしなくても、その後に
+ * 走る**別の経路**（他タスクの完了・`pump`など、`self.persist`を呼ぶ十数箇所）が
+ * `live.runState.tasks`を丸ごと永続化した瞬間に一緒に書き出されてしまう。結果、
+ * 永続データと定義ファイルが指すタスク集合がずれうる:
+ *
+ * - `add_task`で加えたタスクは、YAMLには無いのに永続データにだけ残る
+ * - `remove_task`で消したタスクは、YAMLにはあるのに永続データから消えている
+ *
+ * 前者を無視すると、定義に無いタスクの状態（`pending`は`reconcileRunOnReload`で
+ * `skipped`へ倒された後）がいつまでも`run.tasks`に居座り、`getRunOutcome`
+ * （`scheduler.ts`）がそれを理由に`succeeded`になるはずのrunを`aborted`と誤判定する。
+ * 後者を無視すると、消したはずのタスクが定義には残っているのに永続データには一度も
+ * 現れないため、`getRunOutcome`がそのタスクの存在自体に気づけず、一度も走っていない
+ * タスクがあるのにrunが完走扱いになりうる。
+ *
+ * これは人がrunの途中でYAMLを直接編集してからリロードしたときにも起こりうる、
+ * 元からあった穴でもある（`add_task`/`remove_task`が新たに踏みやすくしただけ）。
+ * 直す場所は1箇所（ここ）で足りる。突き合わせで何かを落とす・補う操作が実際に
+ * 起きたときだけ`reloadTaskDefMismatch`警告を返す（`rebuildLiveRun`が`live.warnings`へ積む）。
  */
 async function reconcileRestoredTaskStates(
   self: WorkflowRunnerInternals,
   p: PersistedRun,
   integration: { cwd: string; branch: string } | undefined,
-): Promise<Map<string, TaskRunState>> {
+  def: WorkflowDefinition,
+): Promise<{ tasks: Map<string, TaskRunState>; warnings: WorkflowWarning[] }> {
+  const defIds = new Set(def.tasks.map((t) => t.id));
   const tasks = new Map<string, TaskRunState>();
+  const droppedIds: string[] = [];
   for (const [id, t] of Object.entries(p.tasks)) {
+    if (!defIds.has(id)) {
+      // 定義に無いタスク（`add_task`で加えたがYAMLには無い）。復元しない
+      droppedIds.push(id);
+      continue;
+    }
     let state = t.state;
     let failure = t.failure;
     if (state === 'merging') {
@@ -251,7 +293,43 @@ async function reconcileRestoredTaskStates(
       cwd: t.cwd,
     });
   }
-  return tasks;
+
+  // 定義にはあるが永続データに無いタスク（`remove_task`で消したがYAMLには残っている）を
+  // `pending`として補う。黙って欠けたままにすると`getRunOutcome`がそのタスクの存在に
+  // 気づけず、一度も走っていないタスクがあるのにrunが完走扱いになりうる
+  const addedIds: string[] = [];
+  for (const task of def.tasks) {
+    if (!tasks.has(task.id)) {
+      tasks.set(task.id, initialTaskRunState);
+      addedIds.push(task.id);
+    }
+  }
+
+  const warnings: WorkflowWarning[] = [];
+  if (droppedIds.length > 0 || addedIds.length > 0) {
+    const parts: string[] = [];
+    if (droppedIds.length > 0) {
+      parts.push(
+        `定義（YAML）に無いため復元しなかったタスク: ${droppedIds.join(', ')}` +
+          '（オーケストレーターがadd_taskで加えていた可能性があります）',
+      );
+    }
+    if (addedIds.length > 0) {
+      parts.push(
+        `永続データに無かったため未着手として補ったタスク: ${addedIds.join(', ')}` +
+          '（オーケストレーターがremove_taskで消していた可能性があります）',
+      );
+    }
+    warnings.push({
+      kind: 'reloadTaskDefMismatch',
+      taskId: undefined,
+      message:
+        'リロード時、実行中に加減されたタスクを定義（YAML）本来の内容へ合わせました。' +
+        parts.join(' / '),
+    });
+  }
+
+  return { tasks, warnings };
 }
 
 /**
@@ -301,7 +379,12 @@ async function rebuildLiveRun(
     ? { cwd: integrationWorktreePath(p.workspaceRoot, p.runId), branch: integrationBranch }
     : undefined;
 
-  const tasks = await reconcileRestoredTaskStates(self, p, integration);
+  const { tasks, warnings: reconcileWarnings } = await reconcileRestoredTaskStates(
+    self,
+    p,
+    integration,
+    def,
+  );
   const runState: RunState = { tasks, haltedByUser: p.haltedByUser };
   const forge: LiveRunForgeState = gitRepo
     ? await self.resolveForgeState(p.workspaceRoot)
@@ -333,7 +416,7 @@ async function rebuildLiveRun(
     // 見て早期returnするため、既に終了済みの run はこのプロセスで再開されない限り
     // 終了ブロックへ再入しないから
     finishedNotified: false,
-    warnings: [],
+    warnings: reconcileWarnings,
     integration,
     forge,
     branchNaming,

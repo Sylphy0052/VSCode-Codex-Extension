@@ -609,7 +609,40 @@ export interface WorkflowWarning {
      * 受入基準「再開の試行が上限を超えたrunは理由がViewへ出る」とそろえ、見送った理由も
      * 同じ場所で分かるようにした）。直近1件へ丸める。
      */
-    | 'autoResumeBlocked';
+    | 'autoResumeBlocked'
+    /**
+     * オーケストレーターが`add_task`で実行中の定義へ新しいタスクを加えた（design.md §16.29、
+     * roadmap W4、Issue #338）。人の承認を挟まない以上、この警告が唯一の追跡手段になるため、
+     * 追加したタスクのid・prompt・done・dependsOnを全文で残す。ウィンドウのリロード後は
+     * 定義ファイル（YAML）から作り直されるため、追加したタスクは消える
+     * （`orchestratorPromptOverride`と同じ「実行中の定義だけに効く」扱い）。
+     */
+    | 'orchestratorTaskAdded'
+    /**
+     * オーケストレーターが`remove_task`で`pending`のタスクを実行中の定義から取り除いた
+     * （design.md §16.29、roadmap W4、Issue #338）。取り除いたタスクidと、依存を
+     * 失った（`dependsOn`から取り除かれた）タスクidを全文で残す。
+     */
+    | 'orchestratorTaskRemoved'
+    /**
+     * オーケストレーターが`update_task_dependencies`で`pending`のタスクの`dependsOn`を
+     * 差し替えた（design.md §16.29、roadmap W4、Issue #338）。変更前後の`dependsOn`を
+     * 全文で残す。
+     */
+    | 'orchestratorDependenciesChanged'
+    /**
+     * リロードで復元するとき、永続化されたタスク状態と定義（YAML）を突き合わせた結果、
+     * 一方にしか無いタスクがあった（design.md §16.29「リロード時の突き合わせ」、
+     * レビューblocking指摘、2026-08-23）。
+     *
+     * - 永続データにだけあるタスク（`add_task`で加えたがYAMLには無い）は状態を落とす
+     * - 定義にだけあるタスク（`remove_task`で消したがYAMLには残っている）は`pending`として補う
+     *
+     * どちらも黙って行うと「オーケストレーターが実行中に加えた・消したタスクは
+     * リロードでYAML本来の内容へ戻る」という§16.29の主張が実際に成り立ったのか
+     * Viewから確認できないため、突き合わせが実際に何かを変えたときだけ出す。
+     */
+    | 'reloadTaskDefMismatch';
   /** ワークフロー全体に関わる警告（gitignoreなど）は undefined。 */
   taskId: string | undefined;
   message: string;
