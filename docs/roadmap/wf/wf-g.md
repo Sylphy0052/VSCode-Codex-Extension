@@ -43,13 +43,17 @@
     通るため、検査では捕まらない。したがって**マージ後に、各PRが
     入れた枝を名指しでgrepして実在を確かめる**。確認は2つの層で
     独立に行った（WF-G担当と全体オーケストレーターが別々のパターンで
-    引いた）。実例: `grep -c "ORCHESTRATOR_CONTROL_TOOLS"
-    test/unit/runner.test.ts` の出力は`3`（**PR #641が追加した枝**）。
-    `grep -n "dispose()後にretryTaskで再開してもCLIセッション"
-    test/unit/runner.test.ts` の出力は`12041:    it('dispose()後に
-    retryTaskで再開してもCLIセッション・MCPサーバ・タイマーを新たに
-    立てない', async () => {`（**PR #642が更新した既存テストの枝。
-    2つのPRが同じファイルを触った場所はここ**）。`ls
+    引いた）。**確認は実装側とテスト側の両方で行った**——テスト側だけを
+    見ても、実装側の枝が消えていれば分からない。実例: `grep -c
+    "ORCHESTRATOR_CONTROL_TOOLS" test/unit/runner.test.ts` の出力は
+    `3`（**PR #641が追加した枝**）。`grep -n "dispose()後に
+    retryTaskで再開してもCLIセッション" test/unit/runner.test.ts` の
+    出力は`12041:    it('dispose()後にretryTaskで再開してもCLIセッ
+    ション・MCPサーバ・タイマーを新たに立てない', async () => {`
+    （**PR #642が更新した既存テストの枝。2つのPRが同じファイルを
+    触った場所はここ**）。`grep -c 'dispose()後に宙に浮いていた
+    継続の再開を止める' src/orchestrator/runner.ts` の出力は`1`
+    （**PR #642が実装側へ入れたガード本体**）。`ls
     test/unit/runnerDispose.test.ts` は`test/unit/runnerDispose.test.ts`
     を返し、**PR #642が新設したファイル**の実在も確認した
   - [#485](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/485)
