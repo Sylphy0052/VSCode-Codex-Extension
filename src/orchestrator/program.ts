@@ -3,15 +3,16 @@ import { parse } from 'yaml';
 import { findCycleGroups, TASK_ID_PATTERN, type DependencyGraphNode } from './workflow';
 
 /**
- * プログラム定義（複数runの束）のYAMLスキーマと検証（design.md §16.37、roadmap W12-1、
- * Issue #604）。
+ * プログラム定義（複数runの束）のYAMLスキーマと検証（design.md §16.37、roadmap W12、
+ * Issue #604・#605）。
  *
  * `workflow.ts` がタスクの束（1run）を扱うのに対し、こちらはrunの束（1プログラム）を
- * 扱う。**この段で持つのはrunの一覧とrun同士の依存の宣言だけで、波のスケジューリング
- * （依存の無いrunを同時に走らせる。roadmap W12-2、Issue #605）・失敗の伝播・人による
- * 停止（roadmap W12-3、Issue #606）はここには無い。** 起動順を決める・実際にrunを
- * 開始する処理は後続Issueに委ねる。`workflow.ts`と同じくVSCode APIには一切依存しない
- * 純粋なロジックのみを置く。
+ * 扱う。ここに持つのはrunの一覧・run同士の依存の宣言・同時実行数の上限
+ * （`maxParallel`）というスキーマと検証まで。**波のスケジューリング本体（依存の無い
+ * runを同時に走らせる実際のアルゴリズム）は`programScheduler.ts`が持つ（roadmap
+ * W12-2、Issue #605）。失敗の伝播・人による停止（roadmap W12-3、Issue #606）は
+ * まだ未実装。** `workflow.ts`と同じくVSCode APIには一切依存しない純粋なロジックの
+ * みを置く。
  *
  * **上位のオーケストレーターは置かない。** プログラムが持つのは定義と状態
  * （`programState.ts`）だけで、各runのオーケストレーターは引き続き自分のrunだけを見る
@@ -34,6 +35,8 @@ export interface ProgramRunRef {
 export interface ProgramDefinition {
   version: number;
   name: string;
+  /** 同時に走らせるrunの数の上限（design.md §16.37.2）。`workflow.ts`の`maxParallel`と同じ考え方。 */
+  maxParallel: number;
   runs: ProgramRunRef[];
 }
 
@@ -42,6 +45,21 @@ export const PROGRAM_RUN_ID_PATTERN = TASK_ID_PATTERN;
 
 /** プログラムに束ねられるrunの総数の上限。`workflow.ts`の`MAX_TASK_COUNT`と同じ考え方。 */
 export const MAX_PROGRAM_RUN_COUNT = 50;
+
+/**
+ * プログラム全体で同時に走らせるrunの数の下限・上限。`workflow.ts`の`MAX_PARALLEL_MIN` /
+ * `MAX_PARALLEL_MAX`と同じ値を採用する（design.md §16.37.2「同時実行数の上限」）。
+ */
+export const PROGRAM_MAX_PARALLEL_MIN = 1;
+export const PROGRAM_MAX_PARALLEL_MAX = 10;
+
+/**
+ * `maxParallel`未指定時の既定値。`workflow.ts`の`DEFAULT_MAX_PARALLEL`（タスク単位）と
+ * 同じ値を踏襲する（design.md §16.37.2「同時実行数の上限」の根拠参照。runはタスクより
+ * 重いことを承知のうえで、まずは既存の既定値から始め、`maxParallel`で運用実績に応じて
+ * 変えられるようにした）。
+ */
+export const DEFAULT_PROGRAM_MAX_PARALLEL = 3;
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 const num = (v: unknown, fallback: number): number => {
@@ -107,6 +125,7 @@ export function parseProgramYaml(source: string): ProgramDefinition {
   return {
     version: num(root['version'], 1),
     name: str(root['name']),
+    maxParallel: num(root['maxParallel'], DEFAULT_PROGRAM_MAX_PARALLEL),
     runs: runsRaw.map(resolveRunRef),
   };
 }
@@ -176,6 +195,18 @@ export function validateProgram(def: ProgramDefinition): ProgramValidationResult
     errors.push({
       runIds: [],
       message: `runの総数が上限(${MAX_PROGRAM_RUN_COUNT})を超えています: ${runs.length}`,
+    });
+  }
+
+  if (
+    !Number.isInteger(def.maxParallel) ||
+    def.maxParallel < PROGRAM_MAX_PARALLEL_MIN ||
+    def.maxParallel > PROGRAM_MAX_PARALLEL_MAX
+  ) {
+    errors.push({
+      runIds: [],
+      message:
+        `maxParallel は${PROGRAM_MAX_PARALLEL_MIN}〜${PROGRAM_MAX_PARALLEL_MAX}の範囲で指定してください: ${def.maxParallel}`,
     });
   }
 

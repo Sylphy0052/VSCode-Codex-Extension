@@ -82,6 +82,7 @@ import {
 import { sanitizeForLog } from './orchestrator/sanitize';
 import { WorkflowRunStore } from './orchestrator/runStore';
 import { ProgramStore } from './orchestrator/programStore';
+import { ProgramRunner } from './orchestrator/programRunner';
 import { WorkflowRunner, nodeWorkflowFilePort } from './orchestrator/runner';
 import type { ExtensionSafetyBaseline } from './orchestrator/taskConfig';
 import type { TaskSessionHost } from './orchestrator/taskSession';
@@ -611,20 +612,37 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     }
   });
 
-  // プログラム（design.md §16.37、roadmap W12-1、Issue #604）の永続化状態も、単発runと
-  // 同じタイミングでリロード直後の中断扱いへ書き換える（W10の自動再開の対象に含める。
-  // この段では実際にrunを再開する処理を持たないため、状態を書き戻すところまでを担う）
-  // reconcile前後でプログラムごとに実際に書き換わったか（`running`だったrunが
+  // プログラム（design.md §16.37、roadmap W12-1・W12-2、Issue #604・#605）の永続化状態も、
+  // 単発runと同じタイミングでリロード直後の中断扱いへ書き換える（W10の自動再開の対象に
+  // 含める）。reconcile前後でプログラムごとに実際に書き換わったか（`running`だったrunが
   // `failed`へ倒れたか）を比較するため、先にrunごとの状態をスナップショットしておく
   const runStatesBeforeReconcile = new Map(
     programStore.list().map((p) => [p.programId, JSON.stringify(p.state)] as const),
   );
+  // 波のスケジューリング（design.md §16.37.2、roadmap W12-2、Issue #605）。`WorkflowRunner`は
+  // `ProgramWorkflowPort`（`start` / `listLive` / `onChanged`）を構造的に満たすため、
+  // アダプタを挟まずそのまま渡す
+  const programRunner = new ProgramRunner({
+    programStore,
+    filePort: nodeWorkflowFilePort,
+    workflow: workflowRunner,
+    log,
+  });
+  programRunner.attach();
+  context.subscriptions.push({ dispose: () => programRunner.dispose() });
   void programStore.reconcileAfterReload().then((reconciled) => {
     const interruptedProgramIds = reconciled
       .filter((p) => runStatesBeforeReconcile.get(p.programId) !== JSON.stringify(p.state))
       .map((p) => p.programId);
     if (interruptedProgramIds.length > 0) {
       log.info(`リロードにより中断扱いにしたプログラム: ${interruptedProgramIds.join(', ')}`);
+    }
+    // リロード・WSL停止をまたいでも続きの波から進む（design.md §16.37.2「W12-1の永続化と
+    // 組み合わせて確かめる」）。`running`のまま倒れたrunは上のreconcileで`failed`済みのため、
+    // ここでの`pumpProgram`が再起動することはない（次に開始できるのは、それに依存しない
+    // 独立した`pending`のrun、または`maxParallel`の空きを待っていた`pending`のrunのみ）
+    for (const p of reconciled) {
+      void programRunner.pumpProgram(p.programId);
     }
   });
 
@@ -859,6 +877,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     ),
     vscode.commands.registerCommand('agent.workflows.run', () =>
       runWorkflow(workflowRunner, workflowView, log),
+    ),
+    vscode.commands.registerCommand('agent.workflows.runProgram', () =>
+      runProgram(programRunner, log),
     ),
     vscode.commands.registerCommand('agent.workflows.stop', () => stopWorkflow(workflowRunner)),
     vscode.commands.registerCommand('agent.workflows.view', () => workflowView.show()),
@@ -1139,6 +1160,51 @@ async function runWorkflow(
   }
   void vscode.window.showInformationMessage(`ワークフローを開始しました: ${picked.label}`);
   view.show(result.runId);
+}
+
+/**
+ * プログラム定義ファイルを選んで実行する（design.md §16.37.2、roadmap W12-2、Issue #605）。
+ *
+ * `runWorkflow`と同じ形のQuickPick選択にしてあるが、探索ディレクトリは`.agents/programs`
+ * 固定（`programStore.test.ts`のfixtureの慣例に合わせた。design.md §16.37.1のサンプルは
+ * runの`defPath`が指す側の場所であり、プログラム定義自体の置き場所は明記されていない
+ * ため、この段では設定項目を増やさず固定パスとした）。
+ *
+ * **単発runと違い専用のビュー（ワークフローView相当）はまだ持たない。** 起動した各runは
+ * 個別にワークフローViewから確認できる（`agent.workflows.view`）。プログラム専用の画面は
+ * 受入基準に無く、この段では見送った（design.md §16.37.2参照）。
+ */
+async function runProgram(programRunner: ProgramRunner, log: Logger): Promise<void> {
+  const folder = currentWorkspaceFolder();
+  if (folder === undefined) {
+    void vscode.window.showErrorMessage('プログラムを実行するにはフォルダを開いてください');
+    return;
+  }
+  const dir = '.agents/programs';
+  const pattern = new vscode.RelativePattern(folder, `${dir}/**/*.{yaml,yml}`);
+  const files = await vscode.workspace.findFiles(pattern, undefined, 200);
+  if (files.length === 0) {
+    void vscode.window.showInformationMessage(
+      `プログラム定義が見つかりません（${dir} 配下に .yaml / .yml を置いてください）`,
+    );
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(
+    files.map((f) => ({ label: vscode.workspace.asRelativePath(f), file: f })),
+    { placeHolder: '実行するプログラム定義を選択' },
+  );
+  if (picked === undefined) {
+    return;
+  }
+
+  const result = await programRunner.startProgram(picked.file.fsPath, folder.uri.fsPath);
+  if (!result.ok) {
+    const detail = (result.errors ?? []).map((e) => e.message).join('\n');
+    log.error(`プログラムを開始できません:\n${detail}`);
+    void vscode.window.showErrorMessage(`プログラムを開始できません: ${detail}`);
+    return;
+  }
+  void vscode.window.showInformationMessage(`プログラムを開始しました: ${picked.label}`);
 }
 
 /** 実行中のワークフローを選んで停止する。 */
