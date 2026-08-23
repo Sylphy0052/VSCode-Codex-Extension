@@ -470,7 +470,13 @@ function applyRateLimit(state: ChatState, event: Record<string, unknown>): ChatS
   };
 }
 
-/** 未知の種別はCLIの表記のまま出す。増えても表示が消えないようにするため。 */
+/**
+ * 未知の種別はCLIの表記のまま出す。増えても表示が消えないようにするため。
+ *
+ * キーをunionで閉じるかを検討し、閉じないと決めた（Issue #649）。`five_hour` /
+ * `seven_day` / `weekly` はこの関数の中にしか現れず、辞書の外にこの語彙で分岐する
+ * コードが無い。unionを足してもtscが守る対象が増えない。
+ */
 function limitLabelOf(rateLimitType: string): string | undefined {
   if (rateLimitType === '') {
     return undefined;
