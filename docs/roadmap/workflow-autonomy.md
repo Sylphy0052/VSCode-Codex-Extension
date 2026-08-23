@@ -162,9 +162,9 @@
 
 ## フェーズ4 レビューを取り込む
 
-- [ ] W5 PR/MRのレビュー結果を取り込んでタスクへ反映する
+- [x] W5 PR/MRのレビュー結果を取り込んでタスクへ反映する
   - 依存: W4
-  - Issue: #339
+  - Issue: [#339](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/339)
   - 現状: [forge.ts](../../src/orchestrator/forge.ts) はPR/MRの作成・マージと番号・URLの保持だけを
     扱い、レビューコメントを読む経路が無い
   - 変更: 統合PR/MRのレビューコメントを取得し（GitHubは `gh pr view --json reviews,comments`、
@@ -351,7 +351,7 @@
 | W3 | #337 | `feat/337/review-generated-plan` | §16.28 | W-H |
 | W4 | #338 | `feat/338/orchestrator-task-edit` | §16.29 | W-I |
 | W5 | #339 | `feat/339/import-review-comments` | §16.30 | W-J |
-| W6 | 未起票 | `feat/<IID>/task-issue-and-review` | §16.31 | W-K |
+| W6 | [#596](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/596) | `feat/596/task-issue-and-review` | §16.31 | W-K |
 | W7 | [#571](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/571) | `feat/571/ask-orchestrator` | §16.32 | W-L |
 | W8 | [#583](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/583) | `feat/583/ask-user` | §16.33 | W-M |
 | W9 | [#547](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/547) | `refactor/547/messaging-via-orchestrator` | §16.34 | W-N |
