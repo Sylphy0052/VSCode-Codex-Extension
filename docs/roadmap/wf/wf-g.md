@@ -44,13 +44,14 @@
     入れた枝を名指しでgrepして実在を確かめる**。確認は2つの層で
     独立に行った（WF-G担当と全体オーケストレーターが別々のパターンで
     引いた）。実例: `grep -c "ORCHESTRATOR_CONTROL_TOOLS"
-    test/unit/runner.test.ts` の出力は`3`（#589側の枝の実在確認）。
+    test/unit/runner.test.ts` の出力は`3`（**PR #641が追加した枝**）。
     `grep -n "dispose()後にretryTaskで再開してもCLIセッション"
     test/unit/runner.test.ts` の出力は`12041:    it('dispose()後に
     retryTaskで再開してもCLIセッション・MCPサーバ・タイマーを新たに
-    立てない', async () => {`（#502側の枝の実在確認）。`ls
+    立てない', async () => {`（**PR #642が更新した既存テストの枝。
+    2つのPRが同じファイルを触った場所はここ**）。`ls
     test/unit/runnerDispose.test.ts` は`test/unit/runnerDispose.test.ts`
-    を返し、新設ファイルの実在も確認した
+    を返し、**PR #642が新設したファイル**の実在も確認した
   - [#485](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/485)
     疑似worktree反映: renameの必須化と一時ファイルの掃除
   - [#490](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/490)
