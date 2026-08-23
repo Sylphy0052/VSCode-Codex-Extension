@@ -9,9 +9,22 @@ import type { ChatItem } from './chatState';
  * （書き出した内容が会話と一致することが受入基準のため）。
  */
 
-/** 見出しに使う項目種類ごとのラベル。`chatScript.ts` の `KIND_LABEL` と語彙を揃えてある。
+/**
+ * 見出しに使う項目種類ごとのラベル。`chatScript.ts` の `KIND_LABEL` と語彙を揃えてある。
  * `agentMessage` だけは呼び出し側が渡す `agentLabel`（Codex / Claude Code）で決まるため
- * ここには含めない。 */
+ * ここには含めない。
+ *
+ * キーをunionで閉じるかを検討し、閉じないと決めた（Issue #649）。`ChatItem.kind` は
+ * `string` で、未知の種類も捨てずに保持する方針である。加えて種類を作る場所が
+ * Codex経路（`chatState.ts` の `normalizeItem`）とClaude Code経路
+ * （`claude/transcript.ts` の `describeTool`）に分かれており、**unionを「正」として
+ * 維持する相手がいない。**
+ *
+ * 代わりに、この表と `KIND_LABEL` のキー集合が一致することを
+ * `test/unit/webviewScript.test.ts` で突き合わせる。**「語彙を揃えてある」と
+ * ここに書いてありながら実際にはずれており、Markdown書き出しの見出しが英語の
+ * 識別子になっていた**（`subAgentActivity` など4件）。文で約束する代わりに検査する。
+ */
 const KIND_TITLE: Record<string, string> = {
   userMessage: 'あなた',
   reasoning: '思考',
