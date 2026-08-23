@@ -41,12 +41,12 @@ const quietLog: Logger = {
  * `WorkflowRunner`のフェイク。`start`は呼ばれた順に`runId`を払い出し、outcomeは
  * テストから`finishRun`で明示的に変えるまで`running`のまま。
  */
-function fakeWorkflow(): ProgramWorkflowPort & {
+function fakeWorkflow(seed: Record<string, RunOutcome> = {}): ProgramWorkflowPort & {
   startCalls: { defPath: string; repoRoot: string }[];
   finishRun: (runId: string, outcome: RunOutcome) => void;
   failNextStart: (message: string) => void;
 } {
-  const outcomes = new Map<string, RunOutcome>();
+  const outcomes = new Map<string, RunOutcome>(Object.entries(seed));
   const startCalls: { defPath: string; repoRoot: string }[] = [];
   let nextId = 0;
   let listeners: ((runId: string) => void)[] = [];
@@ -208,50 +208,78 @@ runs:
     expect(persisted.state.runs.R2?.state).toBe('running');
   });
 
-  it('リロード後（新しいProgramRunnerインスタンス）でも、続きの波から進む', async () => {
+  it('リロード後、W10が同じrunIdを再開していれば、それに依存する後続runも続きの波として起動される（Issue #605レビュー指摘F1）', async () => {
     const memento = fakeMemento();
-    const filePort = fakeFilePort({
-      '/repo/program.yaml': `
-version: 1
-name: リロード確認
-runs:
-  - id: R1
-    defPath: .agents/workflows/a.yaml
-  - id: R2
-    defPath: .agents/workflows/b.yaml
-`,
+    const filePort = fakeFilePort({ '/repo/program.yaml': programYaml() });
+
+    // R1(依存なし)がrunningのまま「リロード」を模す（R1は完了させない）
+    const store1 = new ProgramStore(memento);
+    const workflow1 = fakeWorkflow();
+    const runner1 = new ProgramRunner({ programStore: store1, filePort, workflow: workflow1, log: quietLog });
+    const result = await runner1.startProgram('/repo/program.yaml', '/repo');
+    const programId = result.programId as string;
+    expect(workflow1.startCalls).toHaveLength(1); // R1のみ起動、R2はR1依存のため未起動
+    runner1.dispose();
+
+    // リロード直後の暫定失敗扱い（W12-1、`programStore.reconcileAfterReload`）を適用
+    const store2 = new ProgramStore(memento);
+    await store2.reconcileAfterReload();
+    const reconciled = store2.find(programId) as PersistedProgram;
+    expect(reconciled.state.runs.R1?.state).toBe('failed'); // 暫定値。ここではまだ正しいか未確定
+
+    // W10（`runnerRestore.ts`のautoResumeIfEligible）が同じrunId "run-1" を既に再開し、
+    // `WorkflowRunner.listLive()`側では生きたまま（'running'）に見えている状況を再現する
+    const workflow2 = fakeWorkflow({ 'run-1': 'running' });
+    const runner2 = new ProgramRunner({ programStore: store2, filePort, workflow: workflow2, log: quietLog });
+    runner2.attach();
+    await runner2.reconcileAfterReload();
+
+    // W10が生かしているrunIdについては、暫定failedを正しいrunningへ訂正する
+    const afterReconcile = store2.find(programId) as PersistedProgram;
+    expect(afterReconcile.state.runs.R1?.state).toBe('running');
+    expect(afterReconcile.state.runs.R1?.runId).toBe('run-1');
+    // この時点ではまだR1は完了していないため、R2（依存先）はpendingのまま
+    expect(afterReconcile.state.runs.R2?.state).toBe('pending');
+    expect(workflow2.startCalls).toHaveLength(0); // R1を再起動してはいけない（重複起動禁止）
+
+    // R1が実際に完了すると、依存していたR2が続きの波として起動される
+    workflow2.finishRun('run-1', 'succeeded');
+    await vi.waitFor(() => {
+      expect(workflow2.startCalls).toHaveLength(1);
     });
+    expect(workflow2.startCalls).toEqual([
+      { defPath: '/repo/.agents/workflows/b.yaml', repoRoot: '/repo' },
+    ]);
+    const finalState = store2.find(programId) as PersistedProgram;
+    expect(finalState.state.runs.R1?.state).toBe('done');
+    expect(finalState.state.runs.R2?.state).toBe('running');
+  });
+
+  it('リロード後、runIdがW10で再開されず本当に失われていれば、暫定failedのまま据え置き、依存する後続runは起動しない（回帰確認）', async () => {
+    const memento = fakeMemento();
+    const filePort = fakeFilePort({ '/repo/program.yaml': programYaml() });
 
     const store1 = new ProgramStore(memento);
     const workflow1 = fakeWorkflow();
     const runner1 = new ProgramRunner({ programStore: store1, filePort, workflow: workflow1, log: quietLog });
-    runner1.attach();
     const result = await runner1.startProgram('/repo/program.yaml', '/repo');
     const programId = result.programId as string;
-    // R1は完了、R2はまだ走っている状態で「リロード」を模す
-    workflow1.finishRun('run-1', 'succeeded');
-    await vi.waitFor(() => {
-      const p = store1.find(programId) as PersistedProgram;
-      expect(p.state.runs.R1?.state).toBe('done');
-    });
     runner1.dispose();
 
-    // リロード直後の中断扱い（W12-1、`programStore.reconcileAfterReload`）を適用してから
-    // 新しいProgramRunnerで続きを進める（`extension.ts`の実際の呼び出し順を模す）
     const store2 = new ProgramStore(memento);
     await store2.reconcileAfterReload();
-    const reconciled = store2.find(programId) as PersistedProgram;
-    expect(reconciled.state.runs.R1?.state).toBe('done'); // 完了済みはそのまま
-    expect(reconciled.state.runs.R2?.state).toBe('failed'); // runningだったR2は中断扱いへ倒れる
+    expect((store2.find(programId) as PersistedProgram).state.runs.R1?.state).toBe('failed');
 
+    // "run-1"はlistLive()に一切現れない（W10の対象外だった・復元自体に失敗した等で
+    // 本当に失われた）状況を再現する
     const workflow2 = fakeWorkflow();
     const runner2 = new ProgramRunner({ programStore: store2, filePort, workflow: workflow2, log: quietLog });
-    await runner2.pumpProgram(programId);
-    // R2は既にfailedのため再起動されない。R1もdoneのため対象外
-    expect(workflow2.startCalls).toHaveLength(0);
+    await runner2.reconcileAfterReload();
+
     const finalState = store2.find(programId) as PersistedProgram;
-    expect(finalState.state.runs.R1?.state).toBe('done');
-    expect(finalState.state.runs.R2?.state).toBe('failed');
+    expect(finalState.state.runs.R1?.state).toBe('failed'); // 訂正されない
+    expect(finalState.state.runs.R2?.state).toBe('pending'); // 依存先が無いため永久に開始されない
+    expect(workflow2.startCalls).toHaveLength(0);
   });
 
   it('リロード後、依存の無い独立したpending runは続きの波として起動される', async () => {

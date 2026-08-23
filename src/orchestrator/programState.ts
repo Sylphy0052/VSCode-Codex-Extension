@@ -1,4 +1,5 @@
 import type { ProgramDefinition } from './program';
+import type { RunOutcome } from './scheduler';
 
 /**
  * プログラム実行中のrun状態の型・初期状態の組み立て・状態遷移（design.md §16.37、
@@ -101,6 +102,44 @@ export function markRunFinished(
 }
 
 /**
+ * リロード直後、そのrunの実体（`WorkflowRunner`側の`runId`）が生きている（`listLive()`に
+ * まだ現れる）と分かったとき、その最新の`outcome`（`scheduler.ts`の`getRunOutcome`）へ
+ * 強制的に合わせ直す（design.md §16.37.2「リロードとW10の自動再開の整合」、
+ * Issue #605のレビュー指摘F1）。
+ *
+ * **`reconcileProgramStateOnReload`が`running`を`failed`へ倒すのは暫定的な扱いでしかない。**
+ * `runStore.ts`の`reconcileRunOnReload`が単発run側のタスクを`reloadInterrupted`扱いの
+ * `failed`へ倒すのと同じく、その直後にW10（`runnerRestore.ts`の`autoResumeIfEligible`）が
+ * 対象を再開しうる。単発run側は同じ`runId`のまま`pending`へ戻して続行する
+ * （`applyAutoResume`）ため、プログラム側もその事実に追随する必要がある。呼び出し側
+ * （`programRunner.ts`の`reconcileAfterReload`）が、`WorkflowRunner.restoreRunsForView()`
+ * 完了後に`listLive()`で該当`runId`の現在の`outcome`を引いてから呼ぶ想定。
+ *
+ * `markRunStarted`と異なり、現在の`state`が`pending`であることを前提にしない
+ * （`failed`からでも`running`・`done`へ戻せる）。`outcome === 'running'`なら`running`へ、
+ * それ以外は`markRunFinished`と同じ丸め方（`succeeded`のみ`done`、それ以外は`failed`）で
+ * 確定させる。変化が無ければ同じ参照を返す。純粋関数。
+ */
+export function reapplyLiveRunOutcome(
+  state: ProgramState,
+  runRefId: string,
+  runId: string,
+  outcome: RunOutcome,
+): ProgramState {
+  const current = state.runs[runRefId];
+  if (current === undefined) {
+    return state;
+  }
+  if (outcome !== 'running') {
+    return markRunFinished(state, runRefId, outcome);
+  }
+  if (current.state === 'running' && current.runId === runId) {
+    return state;
+  }
+  return { runs: { ...state.runs, [runRefId]: { state: 'running', runId } } };
+}
+
+/**
  * ウィンドウのリロード（あるいはWSLの停止・再起動）直後、`running`だったrun参照を
  * `failed`として扱う（`runStore.ts`の`reconcileRunOnReload`とタスク単位の同じ扱いを
  * プログラム単位でも行う。design.md §16.11・§16.35）。
@@ -117,7 +156,9 @@ export function markRunFinished(
  * `isProgramSettled`のコメントも参照）。
  *
  * 純粋関数。呼び出し側（`programStore.ts`の`ProgramStore.reconcileAfterReload`）が
- * 実際の読み書きを担う。
+ * 実際の読み書きを担う。**ここで`failed`へ倒した後、その`runId`が実際にはW10で再開
+ * されていた場合の訂正は`reapplyLiveRunOutcome`（このファイル）が担う。** この関数
+ * 自体はリロード直後の暫定値を作るだけで、W10の再開有無までは判定しない。
  */
 export function reconcileProgramStateOnReload(state: ProgramState): ProgramState {
   let changed = false;

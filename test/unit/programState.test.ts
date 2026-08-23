@@ -4,6 +4,7 @@ import {
   createInitialProgramState,
   markRunFinished,
   markRunStarted,
+  reapplyLiveRunOutcome,
   reconcileProgramStateOnReload,
   type ProgramState,
 } from '../../src/orchestrator/programState';
@@ -98,5 +99,38 @@ describe('markRunFinished（design.md §16.37.2、Issue #605）', () => {
   it('未定義のrunidを渡しても何もしない', () => {
     const state: ProgramState = { runs: {} };
     expect(markRunFinished(state, 'unknown', 'succeeded')).toBe(state);
+  });
+});
+
+describe('reapplyLiveRunOutcome（design.md §16.37.2「リロードとW10の自動再開の整合」、Issue #605のレビュー指摘F1）', () => {
+  it('outcomeがrunningなら、failedへ倒れていてもrunningへ戻す（W10による再開の反映）', () => {
+    const state: ProgramState = { runs: { R1: { state: 'failed', runId: 'run-1' } } };
+    const next = reapplyLiveRunOutcome(state, 'R1', 'run-1', 'running');
+    expect(next.runs.R1).toEqual({ state: 'running', runId: 'run-1' });
+  });
+
+  it('既にrunningかつ同じrunIdなら同じ参照を返す', () => {
+    const state: ProgramState = { runs: { R1: { state: 'running', runId: 'run-1' } } };
+    expect(reapplyLiveRunOutcome(state, 'R1', 'run-1', 'running')).toBe(state);
+  });
+
+  it('outcomeがsucceededならdoneへ確定させる', () => {
+    const state: ProgramState = { runs: { R1: { state: 'failed', runId: 'run-1' } } };
+    const next = reapplyLiveRunOutcome(state, 'R1', 'run-1', 'succeeded');
+    expect(next.runs.R1).toEqual({ state: 'done', runId: 'run-1' });
+  });
+
+  it.each(['failed', 'blocked', 'aborted'] as const)(
+    'outcomeが%sならfailedのまま確定させる',
+    (outcome) => {
+      const state: ProgramState = { runs: { R1: { state: 'failed', runId: 'run-1' } } };
+      const next = reapplyLiveRunOutcome(state, 'R1', 'run-1', outcome);
+      expect(next.runs.R1).toEqual({ state: 'failed', runId: 'run-1' });
+    },
+  );
+
+  it('未定義のrunidを渡しても何もしない', () => {
+    const state: ProgramState = { runs: {} };
+    expect(reapplyLiveRunOutcome(state, 'unknown', 'run-1', 'running')).toBe(state);
   });
 });

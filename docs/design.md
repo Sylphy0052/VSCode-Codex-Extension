@@ -5983,26 +5983,40 @@ runs:
 `ProgramRunner`が、`programScheduler.ts`（波の組み立て）・`programState.ts`（状態遷移）・`programStore.ts`（永続化、W12-1）を束ね、`WorkflowRunner.start`を実際に呼んでrunを起動する。`WorkflowRunner`本体には依存せず、必要な操作（`start` / `listLive` / `onChanged`）だけを`ProgramWorkflowPort`として注入で受け取る（`runner.ts`が`WorkflowRunnerDeps`で外部依存を注入で受け取るのと同じ方針）。`WorkflowRunner`は構造的にこの口を満たすため、`extension.ts`側はアダプタを挟まずそのまま渡す。
 
 - `startProgram(defPath, workspaceRoot)`: プログラム定義ファイルを読み込み・検証し、通れば`programStore`へ初期状態（全run`pending`）を永続化してから`pumpProgram`を呼ぶ。`runner.ts`の`WorkflowRunner.start`と対になる形（読み込み・検証・開始の役割分担も同じ）
-- `pumpProgram(programId)`: 永続化済みのプログラムを読み、定義ファイルを読み直し（プログラム自体の状態は永続化されているが定義は都度読み直す。`runner.ts`の`parseAndValidateWorkflow`と同じ方針）、`nextProgramRunsToStart`が返したrunを実際に`workflow.start(絶対パス化したdefPath, workspaceRoot)`で起動する。起動できたら`markRunStarted`で`running`へ進め、`runId`を追跡表（`trackedRuns`、メモリ上のみ）へ記録する。**起動そのものに失敗した場合（検証エラー・git前提の不足等）はそのrunを`failed`として記録する。** allowを含むワークフローがプログラムのrunに使われた場合の確認（`needsAllowConfirmation`）は人の判断を要するため、この段では確認を挟まず`failed`として扱う（allowを含むワークフローをプログラムのrunに使う場合の扱いは(3)以降で検討）
-- `attach()`: `workflow.onChanged`を購読し、追跡表にあるrunIdの状態変化を検知する。`listLive()`から該当runの`outcome`（`scheduler.ts`の`getRunOutcome`）を引き、`running`以外なら`markRunFinished`で状態を確定させたうえで、追跡表から外し`pumpProgram`を再度呼ぶ（次の波を進める）
+- `pumpProgram(programId)`: 永続化済みのプログラムを読み、定義ファイルを読み直し（プログラム自体の状態は永続化されているが定義は都度読み直す。`runner.ts`の`parseAndValidateWorkflow`と同じ方針）、`nextProgramRunsToStart`が返したrunを実際に`workflow.start(path.join(workspaceRoot, defPath), workspaceRoot)`で起動する。起動できたら`markRunStarted`で`running`へ進め、`runId`を追跡表（`trackedRuns`、メモリ上のみ）へ記録する。**起動そのものに失敗した場合（検証エラー・git前提の不足等）はそのrunを`failed`として記録する。** allowを含むワークフローがプログラムのrunに使われた場合の確認（`needsAllowConfirmation`）は人の判断を要するため、この段では確認を挟まず`failed`として扱う（allowを含むワークフローをプログラムのrunに使う場合の扱いは(3)以降で検討）。**（訂正、Issue #605レビュー指摘F3）** `defPath`は常に`path.join(workspaceRoot, ...)`で解決し、絶対パスをそのまま使う分岐は持たない。`validateProgram`の`isSafeDefPath`が絶対パスを検証時に既に拒否しているため通常この分岐へ絶対パスが渡ることは無いが、以前の実装は「絶対パスならそのまま使う」という、検証を経ていない値が来た場合にワークスペース外を指せてしまう向きの分岐を持っていた。到達しないことと、到達した場合に安全な向きへ書くことは別の問題であり、後者を安全側（絶対パスなら拒否して`failed`記録）へ直した
+- `attach()`: `workflow.onChanged`を購読し、追跡表にあるrunIdの状態変化を検知する。`listLive()`から該当runの`outcome`（`scheduler.ts`の`getRunOutcome`）を引き、`running`以外なら`markRunFinished`で状態を確定させたうえで、追跡表から外し`pumpProgram`を再度呼ぶ（次の波を進める）。**（訂正、Issue #605レビュー指摘F2）** `programStore.update`のupdater内での`throw`は`SerialQueue.enqueue`経由でそのまま呼び出し元のPromiseをreject させるため、`attach()`内の`void this.onRunChanged(runId)`と`extension.ts`側の呼び出しは、`runnerRestore.ts`の`autoResumeIfEligible`呼び出し（`.catch((e) => log.error(...))`）と同じ形で`.catch`を付け、ログへ落として握り潰す（未処理rejectionにしない）
 - `finishedAt`の記録: `isProgramSettled(def, state)`（全runが`done`または`failed`）が真になったとき、`finishedAt`を埋める。**`pending`が1件でも残っていれば`false`という保守的な判定に留める。** 依存先の`failed`によって永久に開始されないのか、単に`maxParallel`の空きを待っているだけなのかを積極的に見分けて後者だけ完了扱いにするのは失敗の伝播の判断そのものであり、(3)（Issue #606）が決めるまでの意図した保留（バグではない）
 
-**追跡表（`trackedRuns`）はリロードをまたいで保持しない。** `WorkflowRunner`本体の`runs`（メモリ上のLiveRunのMap）が`restoreRunsForView()`で明示的に復元される設計（design.md §16.11）と同じく、`ProgramRunner`側もリロード直後は空から始まる。リロード直後は`ProgramStore.reconcileAfterReload`が該当runを`failed`へ倒し済みのため、以降の`pumpProgram`は改めて`nextProgramRunsToStart`から続きの波を計算するだけで整合する（下記「リロード・WSL停止をまたいでも続きの波から進む」参照）。
+**追跡表（`trackedRuns`）はリロードそのものをまたいでは保持しないが、リロード直後に部分的に組み直す。** `WorkflowRunner`本体の`runs`（メモリ上のLiveRunのMap）が`restoreRunsForView()`で明示的に復元される設計（design.md §16.11）と同じく、`ProgramRunner`インスタンス自体はリロード直後は空の追跡表から始まる。ただし`reconcileAfterReload()`（後述「リロード・WSL停止をまたいでも続きの波から進む」）が、`ProgramRunEntry.runId`（W12-1で永続化済み）を種にして、まだ生きているrunぶんだけ追跡表を復元する。
 
 ##### `extension.ts`の配線
 
-`workflowRunner`の構築直後に`programRunner`を組み立て`attach()`する。`programStore.reconcileAfterReload()`の`.then`内（W12-1で既に「リロードにより中断扱いにしたプログラム」をログへ出していた箇所）で、reconcile後の全プログラムぶん`programRunner.pumpProgram(programId)`を呼ぶ。`running`のまま倒れたrunは直前のreconcileで`failed`済みのため再起動されず、次に開始できるのはそれに依存しない独立した`pending`のrun、または`maxParallel`の空きを待っていた`pending`のrunのみになる。
+`workflowRunner`の構築直後に`programRunner`を組み立て`attach()`する。`workflowRunner.restoreRunsForView()`（W10の自動再開そのもの）と`programStore.reconcileAfterReload()`（プログラム状態の暫定`failed`化）を`Promise.all`で両方待ってから、`programRunner.reconcileAfterReload()`を1回呼ぶ。**この順序は必須。** どちらか一方でも完了前に呼ぶと、まだ再開されていない・まだ暫定`failed`化されていない状態を見て誤った判断をする。`programRunner.reconcileAfterReload()`が内部で全プログラムぶんの整合と`pumpProgram`を行うため、以前あった「reconcile後にプログラムごと`pumpProgram`を呼ぶループ」は`ProgramRunner`側へ引き取った。
 
-コマンド`agent.workflows.runProgram`（`.agents/programs/**/*.{yaml,yml}`からQuickPickで選択）を追加し、`runWorkflow`と同じ形で`programRunner.startProgram`を呼ぶ。**プログラム専用のビュー（ワークフローView相当）はこの段では持たない。** 起動した各runは既存の`agent.workflows.view`（ワークフローView）から個別に確認できるため、受入基準にない専用画面の追加は見送った。プログラム定義ファイルの置き場所（`.agents/programs`）は新しい設定項目を増やさず固定パスにした（`programStore.test.ts`のfixtureが既に使っていた慣例に合わせた）。
+コマンド`agent.workflows.runProgram`（`.agents/programs/**/*.{yaml,yml}`からQuickPickで選択）を追加し、`runWorkflow`と同じ形で`programRunner.startProgram`を呼ぶ。**プログラム専用のビュー（ワークフローView相当）はこの段では持たない。** 起動した各runは既存の`agent.workflows.view`（ワークフローView）から個別に確認できるため、受入基準にない専用画面の追加は見送った。プログラム定義ファイルの置き場所（`.agents/programs`）は新しい設定項目を増やさず固定パスにした。**（訂正、Issue #605レビュー指摘F4）** 以前の記述は「`programStore.test.ts`のfixtureが既に使っていた慣例に合わせた」としていたが、その文字列自体がW12-1でこの機能のために新規に決めたもので、先行する慣例は存在しなかった。兄弟の`runWorkflow`は`readWorkflowsConfig().dir`で探索先を設定できる（`extension.ts`）が、プログラム側は設定項目を増やしたくないという判断だけを理由に固定パスにしている。
 
 ##### リロード・WSL停止をまたいでも続きの波から進む
 
-W12-1の永続化（`ProgramStore`・`reconcileProgramStateOnReload`）と組み合わせて実現する。リロード直後、`running`だったrunは`failed`へ倒れ、`pending`はそのまま残る。その状態で`pumpProgram`を呼ぶと、`nextProgramRunsToStart`が改めて依存関係を評価し、次のいずれかが起きる。
+W12-1の永続化（`ProgramStore`・`reconcileProgramStateOnReload`）と組み合わせて実現する。リロード直後、`running`だったrunは`failed`へ倒れ、`pending`はそのまま残る。ここまではW12-1で決めた挙動のまま変えていない。
 
-- 倒れた`failed`のrunに依存していた`pending`のrun: 依存が`done`ではなくなったため開始されない（自然に停止したまま。失敗の伝播そのものは(3)の担当）
-- 倒れた`failed`のrunに依存しない独立した`pending`のrun: `maxParallel`の空きが生まれていれば起動される（「続きの波から進む」の実体）
+**この`failed`は暫定値であり、W10の自動再開と突き合わせて訂正する（Issue #605レビュー指摘F1）。** レビューで指摘された懸念は次の通り: `runnerRestore.ts`の`restoreRunsForView()`は永続化されている**全run**に対して`autoResumeIfEligible`を呼び、既定（`DEFAULT_AUTO_RESUME = true`）では中断していたrunを同じ`runId`のまま自動再開する。一方`reconcileProgramStateOnReload`は`running`だったプログラムのrun参照を無条件に`failed`へ倒す。プログラム側の追跡表（`trackedRuns`）はメモリ上のみでリロード後は空になるため、この2つを何もせず組み合わせると、実際にはW10が最後まで走らせたrunを、プログラム側は永久に`failed`のまま持ち続け、それに依存する後続runが実際には依存先が成功しているのに永久に開始されなくなる。
+
+**実際に確かめた結果、この懸念は正しかった。** `test/unit/programRunner.test.ts`の「リロード後、W10が同じrunIdを再開していれば、それに依存する後続runも続きの波として起動される」で、訂正処理（`ProgramRunner.reconcileAfterReload()`）を一時的に無効化してから実行すると、`expected 'failed' to be 'running'`で具体的に落ちることを確認した（RED）。訂正処理を戻すと同じテストが通り（GREEN）、依存していた後続run（R2）も実際に起動されることを確認した。
+
+**訂正の仕組みにタイミング上の競合は無い。** `autoResumeIfEligible`（`runnerRestore.ts`）はrunを再開すると決めた場合、`LiveRun.runState`を最初の`await`より前で**同期的に**書き換える。JavaScriptの実行モデル上、`await workflowRunner.restoreRunsForView()`が解決した時点で、`workflowRunner.listLive()`は既にどのrunが再開されたかを正しく反映している。そのため`ProgramRunner.reconcileAfterReload()`は、`restoreRunsForView()`と`programStore.reconcileAfterReload()`の両方が完了した後に呼びさえすれば、追加のポーリングや待機なしに`listLive()`を信頼してよい。
+
+具体的な訂正手順（`ProgramRunner.reconcileAfterReload()`）:
+
+1. 永続化済みの全プログラムを走査し、`state`が`failed`かつ`runId`を持つrun参照ごとに、`workflow.listLive()`にその`runId`が現れるか調べる
+2. 現れなければ（定義ファイルが読めない等で復元自体に失敗した）、`reconcileProgramStateOnReload`が付けた`failed`をそのまま確定値として扱う（訂正しない）
+3. 現れれば、その最新の`outcome`（`scheduler.ts`の`RunOutcome`）へ`reapplyLiveRunOutcome`（`programState.ts`、新設）で合わせ直す。`running`ならプログラム状態を`running`へ戻したうえで追跡表（`trackedRuns`）へ再登録し、`running`以外（`succeeded`/`failed`/`blocked`/`aborted`）ならその場で`markRunFinished`相当の確定状態へ進める
+4. 最後に全プログラムぶん`pumpProgram`を呼び、訂正後の状態から続きの波を計算する。`nextProgramRunsToStart`が改めて依存関係を評価し、次のいずれかが起きる:
+   - W10で再開されず本当に`failed`のまま確定したrunに依存していた`pending`のrun: 依存が`done`ではなくなったため開始されない（自然に停止したまま。失敗の伝播そのものは(3)の担当）
+   - `failed`のrunに依存しない独立した`pending`のrun、または訂正によって依存先が`done`になった`pending`のrun: `maxParallel`の空きが生まれていれば起動される（「続きの波から進む」の実体）
 
 これにより、プログラム全体を最初からやり直すことも、失敗した箇所を勝手に再試行することもなく、進められるところまで自然に進む。
+
+**スコープ判断（コーディネーターの見立てに同意）。** この訂正は失敗の伝播（依存先が本当に失敗したときに後続runをどう扱うか、W12-3・Issue #606の担当）の話ではなく、W10が既に持っていた「リロードをまたいでも再開する」という事実に、プログラム層の状態を単純に追従させるだけの整合の話である。したがってIssue #605「リロードやWSLの停止をまたいでも、続きの波から進む」の範囲内として、この段（W12-2）で対応した。W12-3へ先送りする判断はしていない。
 
 ##### 既存の単発runへの影響
 
@@ -6012,6 +6026,6 @@ W12-1の永続化（`ProgramStore`・`reconcileProgramStateOnReload`）と組み
 
 - `test/unit/programScheduler.test.ts`（新規）: `nextProgramRunsToStart`（依存の無いrunの同時起動・前段完了待ち・`maxParallel`の枠・依存先`failed`による自然な停止・それに依存しない独立runは引き続き対象になること）、`isProgramSettled`（全`done`/`failed`でtrue・`pending`/`running`が残っていればfalse）
 - `test/unit/programState.test.ts`: `markRunStarted`（`pending`→`running`・`runId`の紐づけ）、`markRunFinished`（`succeeded`→`done`、`failed`/`blocked`/`aborted`→`failed`）を追加
-- `test/unit/programRunner.test.ts`（新規）: `WorkflowRunner`をフェイクの`ProgramWorkflowPort`へ差し替え、`startProgram`/`pumpProgram`が本番と同じ経路（`programScheduler.ts` → `programState.ts` → `programStore.ts`）を通ることを確認。依存の無い同時起動・前段完了待ち・`maxParallel`の枠・起動失敗時の`failed`記録・リロード後（新しい`ProgramRunner`インスタンス）でも続きの波から進むこと・依存先`failed`後も独立runは再開されること
+- `test/unit/programRunner.test.ts`（新規）: `WorkflowRunner`をフェイクの`ProgramWorkflowPort`へ差し替え、`startProgram`/`pumpProgram`が本番と同じ経路（`programScheduler.ts` → `programState.ts` → `programStore.ts`）を通ることを確認。依存の無い同時起動・前段完了待ち・`maxParallel`の枠・起動失敗時の`failed`記録・依存先`failed`後も独立runは再開されること・**W10が同じrunIdを再開していれば依存する後続runも続きの波として起動されること（新規、Issue #605レビュー指摘F1のRED/GREEN確認を含む）**・**W10で再開されず本当に失われていれば暫定`failed`のまま据え置き後続runも起動しないこと（回帰確認）**
 - `test/unit/program.test.ts`: `maxParallel`のパース（既定値・指定値）・検証（範囲外・非整数）を追加
 - `docs/manual-test.md` W-Q: 実VSCode上での確認項目（追記のみ、実施はしない）

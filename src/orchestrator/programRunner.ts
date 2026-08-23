@@ -5,6 +5,7 @@ import {
   createInitialProgramState,
   markRunFinished,
   markRunStarted,
+  reapplyLiveRunOutcome,
 } from './programState';
 import { isProgramSettled, nextProgramRunsToStart } from './programScheduler';
 import {
@@ -14,6 +15,7 @@ import {
   type ProgramIssue,
 } from './program';
 import type { ProgramStore } from './programStore';
+import { sanitizeForLog } from './sanitize';
 import type { StartWorkflowResult, LiveRunSummary, WorkflowFilePort } from './runner';
 import { MAX_WORKFLOW_FILE_BYTES } from './workflow';
 import type { Logger } from '../log';
@@ -67,10 +69,13 @@ export class ProgramRunner {
    * runだけを持つ（`WorkflowRunner.restoreRunsForView`が復元した単発runの`runId`は
    * ここには入らない。単発run側は`ProgramState`と紐づく理由が無いため）。
    *
-   * リロードをまたいで保持しない。リロード直後は`ProgramStore.reconcileAfterReload`が
-   * 該当runを`failed`へ倒し済みのため、以降の`pumpProgram`は改めて`nextProgramRunsToStart`
-   * から続きの波を計算する（design.md §16.37.2「リロード・WSL停止をまたいでも続きの
-   * 波から進む」）。
+   * **メモリ上のみで、リロードそのものをまたいでは保持しない。** リロード直後は
+   * `reconcileAfterReload()`（このクラス）が、`WorkflowRunner.listLive()`を見て
+   * まだ生きている（＝W10で再開された）`runId`ぶんだけをここへ組み直す
+   * （design.md §16.37.2「リロードとW10の自動再開の整合」、Issue #605のレビュー
+   * 指摘F1）。`ProgramStore`側の永続化（`runId`は`ProgramRunEntry.runId`として残る）を
+   * 種にして復元する形は、`WorkflowRunner`本体の`runs`（メモリ上のLiveRunのMap）を
+   * `restoreRunsForView()`が明示的に復元する設計（design.md §16.11）と同じ考え方。
    */
   private readonly trackedRuns = new Map<string, { programId: string; runRefId: string }>();
   private unsubscribe: (() => void) | undefined;
@@ -80,7 +85,13 @@ export class ProgramRunner {
   /** `extension.ts`から1回だけ呼ぶ。`workflow.onChanged`を購読し、runの終了を検知する。 */
   attach(): void {
     this.unsubscribe = this.deps.workflow.onChanged((runId) => {
-      void this.onRunChanged(runId);
+      void this.onRunChanged(runId).catch((e: unknown) => {
+        this.deps.log.error(
+          `[program] runId=${runId}の完了処理に失敗しました: ${sanitizeForLog(
+            e instanceof Error ? e.message : String(e),
+          )}`,
+        );
+      });
     });
   }
 
@@ -114,9 +125,9 @@ export class ProgramRunner {
   }
 
   /**
-   * 次の波を計算し、開始できるrunを実際に起動する。リロード直後の再開（`extension.ts`が
-   * `programStore.reconcileAfterReload()`の後に全プログラムぶん呼ぶ）と、run完了検知
-   * （`onRunChanged`）の両方から呼ばれる冪等な操作。開始できるrunが無ければ何もしない。
+   * 次の波を計算し、開始できるrunを実際に起動する。リロード直後の再開（`reconcileAfterReload`
+   * が全プログラムぶん呼ぶ）と、run完了検知（`onRunChanged`）の両方から呼ばれる冪等な操作。
+   * 開始できるrunが無ければ何もしない。
    */
   async pumpProgram(programId: string): Promise<void> {
     const persisted = this.deps.programStore.find(programId);
@@ -139,6 +150,57 @@ export class ProgramRunner {
     await this.maybeMarkFinished(programId);
   }
 
+  /**
+   * リロード（あるいはWSLの停止・再起動）直後に1回呼ぶ。`ProgramStore.reconcileAfterReload()`
+   * と`WorkflowRunner.restoreRunsForView()`の両方が完了した後に呼ぶ前提（`extension.ts`が
+   * 順序を保証する）。
+   *
+   * **`reconcileProgramStateOnReload`が`running`を`failed`へ倒すのは暫定値でしかない。**
+   * `runId`が`WorkflowRunner.listLive()`にまだ現れる場合、それはW10
+   * （`autoResumeIfEligible`）が同じ`runId`のまま再開した（または元から中断していな
+   * かった）ことを意味する。その最新の`outcome`へ`reapplyLiveRunOutcome`で合わせ直し、
+   * まだ`running`なら`trackedRuns`へ再登録して以後の`onRunChanged`で追跡を再開する
+   * （design.md §16.37.2「リロードとW10の自動再開の整合」、Issue #605のレビュー指摘F1）。
+   * `listLive()`に現れない（定義ファイルが読めない等で復元自体に失敗した）runIdは、
+   * `reconcileProgramStateOnReload`が付けた`failed`のまま変えない。
+   *
+   * 最後に全プログラムぶん`pumpProgram`を呼び、続きの波を進める。
+   */
+  async reconcileAfterReload(): Promise<void> {
+    for (const persisted of this.deps.programStore.list()) {
+      let nextState = persisted.state;
+      for (const [runRefId, entry] of Object.entries(persisted.state.runs)) {
+        if (entry.state !== 'failed' || entry.runId === undefined) {
+          continue;
+        }
+        const runId = entry.runId;
+        const live = this.deps.workflow.listLive().find((r) => r.runId === runId);
+        if (live === undefined) {
+          // 復元自体に失敗した（定義ファイルが読めない等）。reconcileProgramStateOnReload
+          // が付けたfailedのまま変えない
+          continue;
+        }
+        nextState = reapplyLiveRunOutcome(nextState, runRefId, runId, live.outcome);
+        if (live.outcome === 'running') {
+          this.trackedRuns.set(runId, { programId: persisted.programId, runRefId });
+        }
+      }
+      if (nextState === persisted.state) {
+        continue;
+      }
+      const programId = persisted.programId;
+      await this.deps.programStore.update(programId, (current) => {
+        if (current === undefined) {
+          throw new Error(`[program ${programId}] リロード後の整合中にプログラムが消えました`);
+        }
+        return { ...current, state: nextState };
+      });
+    }
+    for (const persisted of this.deps.programStore.list()) {
+      await this.pumpProgram(persisted.programId);
+    }
+  }
+
   private async startOneRun(
     programId: string,
     workspaceRoot: string,
@@ -149,9 +211,24 @@ export class ProgramRunner {
     if (runRef === undefined) {
       return;
     }
-    const absoluteDefPath = path.isAbsolute(runRef.defPath)
-      ? runRef.defPath
-      : path.join(workspaceRoot, runRef.defPath);
+    if (path.isAbsolute(runRef.defPath)) {
+      // `validateProgram`の`isSafeDefPath`が絶対パスを拒否するため、検証を通った定義
+      // からは本来ここへ到達しない。到達した場合に`workspaceRoot`外を指す経路を
+      // 開いてしまわないよう、素通しせず明示的に拒否する（Issue #605のレビュー
+      // 指摘F3。到達しないことと、到達した場合の向きの安全性は別の話）
+      this.deps.log.error(
+        `[program ${programId}] run"${runRefId}"のdefPathが絶対パスです（検証済みの定義には` +
+          `本来含まれません）: ${runRef.defPath}`,
+      );
+      await this.deps.programStore.update(programId, (current) => {
+        if (current === undefined) {
+          throw new Error(`[program ${programId}] run"${runRefId}"の起動拒否の記録中にプログラムが消えました`);
+        }
+        return { ...current, state: markRunFinished(current.state, runRefId, 'failed') };
+      });
+      return;
+    }
+    const absoluteDefPath = path.join(workspaceRoot, runRef.defPath);
     const result = await this.deps.workflow.start(absoluteDefPath, workspaceRoot);
     if (result.ok && result.runId !== undefined) {
       const runId = result.runId;

@@ -601,7 +601,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // メモリ上への復元（design.md §16.11「リロード後の実行再開」）を両方行う
   const workflowView = new WorkflowViewManager(workflowRunner, log);
   context.subscriptions.push(workflowView);
-  void workflowRunner.restoreRunsForView().then(() => {
+  const restoreRunsForViewDone = workflowRunner.restoreRunsForView().then(() => {
     const interrupted = workflowStore
       .list()
       .filter((r) => Object.values(r.tasks).some((t) => t.failure?.kind === 'reloadInterrupted'));
@@ -630,21 +630,29 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   });
   programRunner.attach();
   context.subscriptions.push({ dispose: () => programRunner.dispose() });
-  void programStore.reconcileAfterReload().then((reconciled) => {
+  const reconcileProgramStoreDone = programStore.reconcileAfterReload().then((reconciled) => {
     const interruptedProgramIds = reconciled
       .filter((p) => runStatesBeforeReconcile.get(p.programId) !== JSON.stringify(p.state))
       .map((p) => p.programId);
     if (interruptedProgramIds.length > 0) {
       log.info(`リロードにより中断扱いにしたプログラム: ${interruptedProgramIds.join(', ')}`);
     }
-    // リロード・WSL停止をまたいでも続きの波から進む（design.md §16.37.2「W12-1の永続化と
-    // 組み合わせて確かめる」）。`running`のまま倒れたrunは上のreconcileで`failed`済みのため、
-    // ここでの`pumpProgram`が再起動することはない（次に開始できるのは、それに依存しない
-    // 独立した`pending`のrun、または`maxParallel`の空きを待っていた`pending`のrunのみ）
-    for (const p of reconciled) {
-      void programRunner.pumpProgram(p.programId);
-    }
   });
+  // `programRunner.reconcileAfterReload()`は、`WorkflowRunner`側で生きている（＝W10が
+  // 再開した）runを`ProgramState`とtrackedRunsへ拾い直す（design.md §16.37.2「リロードと
+  // W10の自動再開の整合」、Issue #605のレビュー指摘F1）。そのため`workflowRunner.
+  // restoreRunsForView()`（W10の自動再開そのもの）と`programStore.reconcileAfterReload()`
+  // （`running`を暫定`failed`へ倒す側）の**両方が完了してから**呼ぶ必要がある。順序を
+  // 崩すと、まだ再開されていない・まだfailedへ倒されていない状態を見て誤った判断をする
+  void Promise.all([restoreRunsForViewDone, reconcileProgramStoreDone])
+    .then(() => programRunner.reconcileAfterReload())
+    .catch((e: unknown) => {
+      log.error(
+        `[program] リロード直後の整合に失敗しました: ${sanitizeForLog(
+          e instanceof Error ? e.message : String(e),
+        )}`,
+      );
+    });
 
   // ロードマップ（design.md §16.19、#95・配線はIssue #105）。既存Issueの取得は
   // `git remote` + `gh`/`glab` をポート越しに呼ぶだけなので、ここで実装を組み立てて渡す。
@@ -1166,9 +1174,11 @@ async function runWorkflow(
  * プログラム定義ファイルを選んで実行する（design.md §16.37.2、roadmap W12-2、Issue #605）。
  *
  * `runWorkflow`と同じ形のQuickPick選択にしてあるが、探索ディレクトリは`.agents/programs`
- * 固定（`programStore.test.ts`のfixtureの慣例に合わせた。design.md §16.37.1のサンプルは
- * runの`defPath`が指す側の場所であり、プログラム定義自体の置き場所は明記されていない
- * ため、この段では設定項目を増やさず固定パスとした）。
+ * 固定。兄弟の`runWorkflow`は`readWorkflowsConfig().dir`で探索先を設定できるが、
+ * プログラム側は現時点で設定項目を増やしたくないため、あえて固定パスにした
+ * （design.md §16.37.2「設定・固定パスの判断」。「既存の慣例」を根拠にしていた
+ * 以前の記述はIssue #605のレビュー指摘F4により誤り。この`.agents/programs`という
+ * 文字列自体はW12-1でこの機能のために新規に決めたもので、先行する慣例は無い）。
  *
  * **単発runと違い専用のビュー（ワークフローView相当）はまだ持たない。** 起動した各runは
  * 個別にワークフローViewから確認できる（`agent.workflows.view`）。プログラム専用の画面は
