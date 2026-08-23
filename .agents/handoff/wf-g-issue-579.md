@@ -198,3 +198,22 @@ AssertionError: expected 'waitingApproval' not to be 'waitingApproval' // Object
 コーディネーターから追加の補足があった。件数チェック自体は既に先頭に置いていたが、書き方を`expect(allFailureKinds.length).toBe(11)`から`expect(allFailureKinds).toHaveLength(11)`へ変更した。理由（コーディネーターの指摘）: 「全kindを網羅している」という主張は**kindが0個のときに真になる**（forループは空集合なら1度も回らず、`Set`同士の比較も両方空なら一致する）。件数の主張を先頭に置くことで、抽出失敗（0件）時にそこで即座に落ちる。11という数字はハードコード一覧とは意味が違い、「何があるか」の二重管理ではなく「抽出が効いているか」の検算であり、kindを足すときは11→12へ直すことになるが、それは意図した差分として現れる。
 
 実測: `npx tsc --noEmit` 0エラー、`npm run lint` 0警告、`npm test` Test Files 175 passed (175) / Tests 3814 passed (3814)（件数変化なし。既存アサーションの書き方を変えただけの差分のため）。
+
+## 9. 差し戻し対応（3回目、PR #644への追いcommit、docs/design.md §16.39への1文追加）
+
+### 9-1. 経緯
+
+Issue #527（同じ第2回のもう一方）を担当するコーディネーターが、その本文で`nextTasksToStart`（`scheduler.ts`）の門が`isRunHalted`（`haltedByUser || hasFailedTask`）であり、`haltedByUser`だけではないことを整理していた。#579が`failed`のkindを1種類増やしたため、この門に掛かる経路が増える。§16.39の「無人運転で`run`が進まなくなる懸念は、いま解かない」の段落は`applyAutoResume`（自動再開）の話しかしておらず、この`isRunHalted`経由のもっと直接的な帰結（時間切れで`failed`になると、そのタスク自身の枠は明け渡すが、run全体の新規開始はそこで止まる）が書かれていなかった。新kind固有の後退ではなく既存の全ての`failed`と同じ挙動だが、「いま解かない」と判断を記録した以上、その判断の帰結を書いておかないと次に読む人が判断を再検討できない、という指摘。
+
+### 9-2. 対応内容
+
+`docs/design.md` §16.39の該当段落の直後に1段落追加した（Bash/python3経由。Edit/Writeでの直接編集はしていない）。`isRunHalted`の定義（`run.haltedByUser || hasFailedTask(run)`）を引用し、`nextTasksToStart`が新規開始を止めること、既存の全ての`failed`（`stalled`・`loopFailed`等）と同じ挙動でありtaskApprovalTimedOut固有の後退ではないこと、「枠だけ明け渡す経路は現状存在しない」ため「いま解かない」対象に含まれることを書いた。
+
+回帰テスト側（`test/unit/webviewScript.test.ts`）は前回の差し戻し対応で既に`toHaveLength(11)`の形へ修正済みのため、今回の変更は無し。
+
+### 9-3. 実測結果
+
+- `npx tsc --noEmit`: 0エラー
+- `npm run lint`: 0警告
+- `npm test`: `Test Files 175 passed (175)` / `Tests 3814 passed (3814)`（`docs/design.md`のみの変更のため件数不変）
+- 統合テストは未再実行（`docs/`のみの変更のため。指示どおり）

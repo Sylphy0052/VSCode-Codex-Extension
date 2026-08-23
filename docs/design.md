@@ -6169,6 +6169,8 @@ W7（#571、`ask_orchestrator`）のセキュリティ監査が指摘した。**
 
 **無人運転で`run`が進まなくなる懸念は、いま解かない。** `applyAutoResume`（W10、§16.35）は`reloadInterrupted`だけを対象にするホワイトリスト方式のため、`taskApprovalTimedOut`は何もしなくても自動再開の対象外になる。この性質を将来変えたくなったとき（例: 無人運転でも承認待ちの時間切れから自動再開したい）に、既存の`reloadInterrupted`の意味を壊さずに独立して判断できる形にしておくこと自体が、`blocked`への合流ではなく専用の`failed`理由を新設した理由の1つでもある。
 
+自動再開とは別に、もっと直接的な帰結もある。`isRunHalted`（`run.haltedByUser || hasFailedTask(run)`）が真になると、`nextTasksToStart`（`scheduler.ts`）は新規開始をいっさいしない（Issue #527が同じ`nextTasksToStart`の門を指して整理している）。つまり時間切れで`failed`になると、そのタスクが占有していた`maxParallel`の枠は明け渡すが、それと引き換えにrun全体は新規開始を止め、人の操作（Viewの「再実行」）を待つ状態になる。これは既存の全ての`failed`（`stalled`・`loopFailed`等）と同じ挙動であり、`taskApprovalTimedOut`固有の後退ではない。枠の解放だけを目的とするなら過剰にも見えるが、`failed`の意味を変えずに枠だけ明け渡す経路は現状存在しないため、これも「いま解かない」対象に含まれる。
+
 #### 確かめ方
 
 - `test/unit/runnerTaskApproval.test.ts`（新設）: `waitingApproval`のタスクが`taskApprovalTimeoutSec`を超えても解放されないことをまずRED（フェイクタイマーで確認）で示し、実装後に`failed`（理由`taskApprovalTimedOut`）へ落ちることを確認する。承認・拒否が時間切れより先に届けばタイマーが解除されて時間切れが起きないこと、`stopTask`/`stop`（全体停止）が`waitingApproval`のタスクを止めた場合は従来どおり`manualStop`になり`taskApprovalTimedOut`に化けないこと、依存する後続が`dependencyFailed`で`skipped`になる通常のカスケードが新しいkindでも変わらないことを確認する
