@@ -868,26 +868,6 @@ export function recordSessionInfo(
 }
 
 /**
- * `failed` / `skipped` のタスクを1件だけ手動で `pending` に戻す（design.md §16.5「再実行」）。
- *
- * 依存が全て `done` でなければ戻せない。戻した時点で、そのタスクに依存する `skipped` も
- * 連鎖して `pending` へ戻す（`done` / `failed` / `running` 等はそのまま）。
- * 対象外（`done` / `running` / `waitingApproval` / 未知のid）は何もせず元の `run` を返す。
- *
- * `retryCount`（自動再試行の消費回数）は引き継いだままにする。手動の再実行は自動再試行とは
- * 別の経路であり、すでに使った自動再試行の権利を人の操作で復活させることはしない。
- * 代わりに`manualRetryCount`を増やす。worktreeのディレクトリ名とブランチ名は両者の合計から
- * 決まるため（`retrySuffixOf`）、前の試行が残したブランチと衝突しない
- * （増やさないと`branchExists`で再実行が必ず失敗する。issue #275）。
- *
- * **成功したときは `haltedByUser` を解除する。** 人の明示操作（手動の再実行）そのものを
- * 「再開の合図」として扱う（design.md §16.8のViewが「実行、全体の停止、失敗タスクの再実行」
- * を並べて操作させる設計である以上、停止後に人が再開できることが前提になっている）。
- * `failed` の確定による停止は `hasFailedTask` から導出されるため、他に `failed` が
- * 残っていれば `isRunHalted` は引き続き `true` のままになる（二重に状態を持たないので、
- * ここで個別に気にする必要が無い）。
- */
-/**
  * worktreeの撤去で試す再試行番号の上限（Issue #490）。
  *
  * 撤去は「初回（`retry`なし）＋ `0..合計試行数-1`」の全試行分を順に消す。合計試行数は
@@ -925,6 +905,26 @@ export function clampWorktreeRemovalAttempts(totalAttempts: number): number {
   return Math.floor(totalAttempts);
 }
 
+/**
+ * `failed` / `skipped` のタスクを1件だけ手動で `pending` に戻す（design.md §16.5「再実行」）。
+ *
+ * 依存が全て `done` でなければ戻せない。戻した時点で、そのタスクに依存する `skipped` も
+ * 連鎖して `pending` へ戻す（`done` / `failed` / `running` 等はそのまま）。
+ * 対象外（`done` / `running` / `waitingApproval` / 未知のid）は何もせず元の `run` を返す。
+ *
+ * `retryCount`（自動再試行の消費回数）は引き継いだままにする。手動の再実行は自動再試行とは
+ * 別の経路であり、すでに使った自動再試行の権利を人の操作で復活させることはしない。
+ * 代わりに`manualRetryCount`を増やす。worktreeのディレクトリ名とブランチ名は両者の合計から
+ * 決まるため（`retrySuffixOf`）、前の試行が残したブランチと衝突しない
+ * （増やさないと`branchExists`で再実行が必ず失敗する。issue #275）。
+ *
+ * **成功したときは `haltedByUser` を解除する。** 人の明示操作（手動の再実行）そのものを
+ * 「再開の合図」として扱う（design.md §16.8のViewが「実行、全体の停止、失敗タスクの再実行」
+ * を並べて操作させる設計である以上、停止後に人が再開できることが前提になっている）。
+ * `failed` の確定による停止は `hasFailedTask` から導出されるため、他に `failed` が
+ * 残っていれば `isRunHalted` は引き続き `true` のままになる（二重に状態を持たないので、
+ * ここで個別に気にする必要が無い）。
+ */
 export function retryTask(run: RunState, tasks: readonly WorkflowTask[], taskId: string): RunState {
   const current = run.tasks.get(taskId);
   const task = tasks.find((t) => t.id === taskId);
