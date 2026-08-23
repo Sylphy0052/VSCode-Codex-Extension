@@ -35,7 +35,10 @@ import type { WorkflowRunnerInternals } from './runnerInternals';
  * Viewが描画する現在の状態のスナップショット（design.md §16.8）。
  * 応答本文そのものではなく `LiveTask.lastResponseSummary`（1行要約）だけを渡す。
  */
-export function getSnapshot(self: WorkflowRunnerInternals, runId: string): WorkflowRunSnapshot | undefined {
+export function getSnapshot(
+  self: WorkflowRunnerInternals,
+  runId: string,
+): WorkflowRunSnapshot | undefined {
   const live = self.runs.get(runId);
   if (live === undefined) {
     return undefined;
@@ -94,7 +97,9 @@ export function getSnapshot(self: WorkflowRunnerInternals, runId: string): Workf
 function buildPendingAskUserSnapshot(
   live: LiveRun,
   persisted: PersistedRun | undefined,
-): { question: string; choices: readonly string[]; hasLiveSession: boolean; answered: boolean } | undefined {
+):
+  | { question: string; choices: readonly string[]; hasLiveSession: boolean; answered: boolean }
+  | undefined {
   if (live.pendingAskUser !== undefined) {
     return {
       question: live.pendingAskUser.question,

@@ -22,7 +22,12 @@ import {
 import type { ProgramStore } from './programStore';
 import { SerialQueue } from './serialQueue';
 import { sanitizeForLog } from './sanitize';
-import { SimpleEmitter, type StartWorkflowResult, type LiveRunSummary, type WorkflowFilePort } from './runner';
+import {
+  SimpleEmitter,
+  type StartWorkflowResult,
+  type LiveRunSummary,
+  type WorkflowFilePort,
+} from './runner';
 import { MAX_WORKFLOW_FILE_BYTES } from './workflow';
 import type { Logger } from '../log';
 
@@ -72,8 +77,7 @@ export interface StartProgramResult {
 }
 
 type ParsedProgram =
-  | { ok: true; def: ProgramDefinition }
-  | { ok: false; errors: readonly ProgramIssue[] };
+  { ok: true; def: ProgramDefinition } | { ok: false; errors: readonly ProgramIssue[] };
 
 export class ProgramRunner {
   /**
@@ -407,7 +411,9 @@ export class ProgramRunner {
       );
       await this.deps.programStore.update(programId, (current) => {
         if (current === undefined) {
-          throw new Error(`[program ${programId}] run"${runRefId}"の起動拒否の記録中にプログラムが消えました`);
+          throw new Error(
+            `[program ${programId}] run"${runRefId}"の起動拒否の記録中にプログラムが消えました`,
+          );
         }
         return { ...current, state: markRunFinished(current.state, runRefId, 'failed') };
       });
@@ -420,7 +426,9 @@ export class ProgramRunner {
       this.trackedRuns.set(runId, { programId, runRefId });
       await this.deps.programStore.update(programId, (current) => {
         if (current === undefined) {
-          throw new Error(`[program ${programId}] run"${runRefId}"の起動中にプログラムが消えました`);
+          throw new Error(
+            `[program ${programId}] run"${runRefId}"の起動中にプログラムが消えました`,
+          );
         }
         return { ...current, state: markRunStarted(current.state, runRefId, runId) };
       });
@@ -437,7 +445,9 @@ export class ProgramRunner {
     );
     await this.deps.programStore.update(programId, (current) => {
       if (current === undefined) {
-        throw new Error(`[program ${programId}] run"${runRefId}"の起動失敗の記録中にプログラムが消えました`);
+        throw new Error(
+          `[program ${programId}] run"${runRefId}"の起動失敗の記録中にプログラムが消えました`,
+        );
       }
       return { ...current, state: markRunFinished(current.state, runRefId, 'failed') };
     });
@@ -490,7 +500,10 @@ export class ProgramRunner {
   private async parseAndValidateProgram(defPath: string): Promise<ParsedProgram> {
     const size = await this.deps.filePort.fileSize(defPath);
     if (size === undefined) {
-      return { ok: false, errors: [{ runIds: [], message: `定義ファイルを読み込めません: ${defPath}` }] };
+      return {
+        ok: false,
+        errors: [{ runIds: [], message: `定義ファイルを読み込めません: ${defPath}` }],
+      };
     }
     if (size > MAX_WORKFLOW_FILE_BYTES) {
       return {
@@ -505,14 +518,20 @@ export class ProgramRunner {
     }
     const text = await this.deps.filePort.readTextFile(defPath);
     if (text === undefined) {
-      return { ok: false, errors: [{ runIds: [], message: `定義ファイルを読み込めません: ${defPath}` }] };
+      return {
+        ok: false,
+        errors: [{ runIds: [], message: `定義ファイルを読み込めません: ${defPath}` }],
+      };
     }
     let def: ProgramDefinition;
     try {
       def = parseProgramYaml(text);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      return { ok: false, errors: [{ runIds: [], message: `YAMLの解析に失敗しました: ${message}` }] };
+      return {
+        ok: false,
+        errors: [{ runIds: [], message: `YAMLの解析に失敗しました: ${message}` }],
+      };
     }
     const validation = validateProgram(def);
     for (const w of validation.warnings) {

@@ -205,8 +205,14 @@ suite('PR/MRの作成順序と最終マージ（design.md §16.18）', () => {
 
     // PR/MRのbaseは統合ブランチ、headはタスクブランチ。
     const create = run.cli.calls.find((c) => c.args[0] === 'pr' && c.args[1] === 'create');
-    assert.ok(create !== undefined, `gh pr create が呼ばれていない: ${JSON.stringify(run.cli.calls)}`);
-    assert.ok(create.args.includes(`--base=wf/${run.runId}/integration`), 'baseが統合ブランチでない');
+    assert.ok(
+      create !== undefined,
+      `gh pr create が呼ばれていない: ${JSON.stringify(run.cli.calls)}`,
+    );
+    assert.ok(
+      create.args.includes(`--base=wf/${run.runId}/integration`),
+      'baseが統合ブランチでない',
+    );
     assert.ok(create.args.includes(`--head=wf/${run.runId}/T1`), 'headがタスクブランチでない');
 
     // 実際にpushされた先はローカルのbareリポジトリ。
@@ -250,7 +256,11 @@ suite('PR/MRの作成順序と最終マージ（design.md §16.18）', () => {
 
   test('finalMerge: pr-only ではPR/MRは作られるがマージは実行されない', async function () {
     this.timeout(TEST_TIMEOUT_MS);
-    const run = await runOnce({ host: 'github', pullRequest: 'integration', finalMerge: 'pr-only' });
+    const run = await runOnce({
+      host: 'github',
+      pullRequest: 'integration',
+      finalMerge: 'pr-only',
+    });
 
     assert.ok(
       run.snapshot.integrationPullRequestUrl !== undefined,
@@ -306,7 +316,10 @@ suite('PR/MRの作成順序と最終マージ（design.md §16.18）', () => {
     );
     assert.ok(create !== undefined, `glab api が呼ばれていない: ${JSON.stringify(run.cli.calls)}`);
     const description = create.args.find((a) => a.startsWith('--field=description=@'));
-    assert.ok(description !== undefined, `本文がファイル経由で渡っていない: ${create.args.join(' ')}`);
+    assert.ok(
+      description !== undefined,
+      `本文がファイル経由で渡っていない: ${create.args.join(' ')}`,
+    );
     assert.ok(
       create.args.includes(`--field=source_branch=wf/${run.runId}/T1`),
       'source_branchがタスクブランチでない',

@@ -108,9 +108,9 @@ export function finishedSideQuestionDisplay(
       ? undefined
       : `元のモデル（${result.refusalFallback.originalModel}）が拒否したため、` +
         `${result.refusalFallback.fallbackModel} が代わりに応答しました`;
-  const detail = [EPHEMERAL_NOTE, fallbackNote].filter((v): v is string => v !== undefined).join(
-    ' ・ ',
-  );
+  const detail = [EPHEMERAL_NOTE, fallbackNote]
+    .filter((v): v is string => v !== undefined)
+    .join(' ・ ');
   return {
     status: 'completed',
     text: `${question}\n\n${result.response}`,
@@ -119,7 +119,8 @@ export function finishedSideQuestionDisplay(
 }
 
 /** CLI由来のエラーを丸めたときに画面へ出す固定文言。 */
-const GENERIC_SIDE_QUESTION_ERROR_MESSAGE = '脇道の質問を送れませんでした（CLI側でエラーが発生しました）';
+const GENERIC_SIDE_QUESTION_ERROR_MESSAGE =
+  '脇道の質問を送れませんでした（CLI側でエラーが発生しました）';
 
 /**
  * 制御応答の封筒レベルの失敗（`response.ok === false`）を、利用者向けの文言へ変換する。

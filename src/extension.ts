@@ -1075,7 +1075,10 @@ async function applyPresetChat(
   const effective = buildEffectivePresetConfig(preset, baseline);
   const warnings = [...effective.warnings];
 
-  const resolvedCwd = await resolveWorkingDirectory(preset.workingDirectory, workspaceFolderPaths());
+  const resolvedCwd = await resolveWorkingDirectory(
+    preset.workingDirectory,
+    workspaceFolderPaths(),
+  );
   if (resolvedCwd.warning !== undefined) {
     warnings.push(resolvedCwd.warning);
   }
@@ -1264,7 +1267,10 @@ async function stopWorkflow(runner: WorkflowRunner): Promise<void> {
  * （`finishedAt === undefined`）のものに絞る。実際の停止処理は`ProgramRunner.haltProgram`が
  * 持つ（配下の生存中runへの`stop`呼び出し・`haltedByUser`の永続化・保留中runの一括skipped化）。
  */
-async function stopProgram(programRunner: ProgramRunner, programStore: ProgramStore): Promise<void> {
+async function stopProgram(
+  programRunner: ProgramRunner,
+  programStore: ProgramStore,
+): Promise<void> {
   const unfinished = programStore.list().filter((p) => p.finishedAt === undefined);
   if (unfinished.length === 0) {
     void vscode.window.showInformationMessage('実行中のプログラムはありません');
@@ -1365,7 +1371,11 @@ async function sendEditorSelectionToChat(
     editor.selection.end.line,
     editor.selection.end.character,
   );
-  const payload = buildSelectionPayload(workspaceRelativeDisplayPath(editor.document.uri), range, text);
+  const payload = buildSelectionPayload(
+    workspaceRelativeDisplayPath(editor.document.uri),
+    range,
+    text,
+  );
 
   // 複数開いているときは直近にアクティブだったタブを使う（Codex/Claude Codeを横断して
   // `activeSequence`で比べる。`ChatViewManager.getActiveComposerTarget`のJSDoc参照）
@@ -1488,9 +1498,7 @@ export function formatRoadmapWarningsDetail(
  */
 export function formatCorrectedIssuesDetail(issues: readonly CorrectedIssue[]): string {
   return issues
-    .map(
-      (c) => `${sanitizeForLog(c.itemId)}: ${c.actual ?? 'なし'} → ${c.expected ?? 'なし'}`,
-    )
+    .map((c) => `${sanitizeForLog(c.itemId)}: ${c.actual ?? 'なし'} → ${c.expected ?? 'なし'}`)
     .join(', ');
 }
 
@@ -1498,9 +1506,7 @@ export function formatCorrectedIssuesDetail(issues: readonly CorrectedIssue[]): 
  * `droppedDependencies`をログ表示用の1行にまとめる（Issue #427）。
  * `formatCorrectedIssuesDetail`と同じ理由で要素ごとに`sanitizeForLog`を通す。
  */
-export function formatDroppedDependenciesDetail(
-  deps: readonly DroppedRoadmapDependency[],
-): string {
+export function formatDroppedDependenciesDetail(deps: readonly DroppedRoadmapDependency[]): string {
   return deps
     .map((d) => `${sanitizeForLog(d.itemId)} → ${sanitizeForLog(d.dependsOnId)}`)
     .join(', ');
@@ -2138,7 +2144,9 @@ async function handlePlanSuccess(
       );
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      log.warn(`[planner] タスク分解のレビュー表示中にエラーが発生しました: ${sanitizeForLog(message)}`);
+      log.warn(
+        `[planner] タスク分解のレビュー表示中にエラーが発生しました: ${sanitizeForLog(message)}`,
+      );
     }
   })();
 }
@@ -2308,16 +2316,18 @@ function createExecutablePathResolver(provider: AgentProvider, log: Logger): () 
     log.error(message);
 
     if (tracker.shouldNotify(located)) {
-      void vscode.window.showErrorMessage(message, 'インストール手順', '設定を開く').then((choice) => {
-        if (choice === 'インストール手順') {
-          void vscode.env.openExternal(vscode.Uri.parse(provider.installUrl));
-        } else if (choice === '設定を開く') {
-          void vscode.commands.executeCommand(
-            'workbench.action.openSettings',
-            provider.executableSettingKey,
-          );
-        }
-      });
+      void vscode.window
+        .showErrorMessage(message, 'インストール手順', '設定を開く')
+        .then((choice) => {
+          if (choice === 'インストール手順') {
+            void vscode.env.openExternal(vscode.Uri.parse(provider.installUrl));
+          } else if (choice === '設定を開く') {
+            void vscode.commands.executeCommand(
+              'workbench.action.openSettings',
+              provider.executableSettingKey,
+            );
+          }
+        });
     }
     return spawnPath;
   };

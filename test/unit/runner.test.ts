@@ -4054,7 +4054,8 @@ tasks:
       // （レビューコメント）と区別して、CI待ちだけを狙って確認する
       expect(
         cli.calls.some(
-          (c) => c.args[0] === 'pr' && c.args[1] === 'view' && c.args[3] === '--json=statusCheckRollup',
+          (c) =>
+            c.args[0] === 'pr' && c.args[1] === 'view' && c.args[3] === '--json=statusCheckRollup',
         ),
       ).toBe(false);
       expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
@@ -4312,7 +4313,12 @@ tasks:
       reviewComments: {
         github: {
           comments: [
-            { databaseId: 1, author: { login: 'reviewer1' }, body: '直して', createdAt: '2026-08-23T00:00:00Z' },
+            {
+              databaseId: 1,
+              author: { login: 'reviewer1' },
+              body: '直して',
+              createdAt: '2026-08-23T00:00:00Z',
+            },
           ],
         },
       },
@@ -4414,9 +4420,7 @@ tasks:
       const cli = fakeForgeCli({
         reviewComments: {
           github: {
-            comments: [
-              { databaseId: 1, author: { login: 'reviewer1' }, body: '対応済みです' },
-            ],
+            comments: [{ databaseId: 1, author: { login: 'reviewer1' }, body: '対応済みです' }],
           },
         },
       });
@@ -4459,17 +4463,15 @@ tasks:
     'finalMerge: pr-onlyでrunがsucceededで終わった後も、レビューコメント取得CLIの' +
       'ポーリングは意図的に生きたまま（`finalMergeOutcome`が確定しないため）で、' +
       '呼び出し回数はタイマーを進めるほど増え続ける（design.md §16.30' +
-      '「finalMerge: \'pr-only\'ではポーリングを閉じない」の意図をテストで固定する。' +
-      'これが将来\'閉じる\'方向に変わったらこのテストが気づく）',
+      "「finalMerge: 'pr-only'ではポーリングを閉じない」の意図をテストで固定する。" +
+      "これが将来'閉じる'方向に変わったらこのテストが気づく）",
     async () => {
       vi.useFakeTimers();
       const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
       const cli = fakeForgeCli({
         reviewComments: {
           github: {
-            comments: [
-              { databaseId: 1, author: { login: 'reviewer1' }, body: '対応済みです' },
-            ],
+            comments: [{ databaseId: 1, author: { login: 'reviewer1' }, body: '対応済みです' }],
           },
         },
       });
@@ -4580,9 +4582,7 @@ tasks:
           c.args.some((a) => a.startsWith('--base=main')),
       );
       expect(integrationCreateCalls).toHaveLength(1);
-      const finalMergeCalls = cli.calls.filter(
-        (c) => c.args[0] === 'pr' && c.args[1] === 'merge',
-      );
+      const finalMergeCalls = cli.calls.filter((c) => c.args[0] === 'pr' && c.args[1] === 'merge');
       expect(finalMergeCalls).toHaveLength(1);
     },
   );
@@ -4665,7 +4665,8 @@ tasks:
       // T1・T2それぞれの統合ブランチへの取り込み（タスク層マージ）が実際に走っている
       // ことを確認する。これがT2の成果が統合ブランチへ入っている証跡
       const taskMergeCalls = git.calls.filter(
-        (c) => c.args[0] === 'merge' && c.args.some((a) => typeof a === 'string' && a.includes('-m')),
+        (c) =>
+          c.args[0] === 'merge' && c.args.some((a) => typeof a === 'string' && a.includes('-m')),
       );
       const t1Merged = taskMergeCalls.some((c) =>
         c.args.some((a) => typeof a === 'string' && a.includes('T1')),
@@ -4683,9 +4684,7 @@ tasks:
 
       expect(accepted).toBe(true);
       expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBe('merged');
-      const finalMergeCalls = cli.calls.filter(
-        (c) => c.args[0] === 'pr' && c.args[1] === 'merge',
-      );
+      const finalMergeCalls = cli.calls.filter((c) => c.args[0] === 'pr' && c.args[1] === 'merge');
       expect(finalMergeCalls).toHaveLength(1);
 
       // 適用した内容が警告欄へ全文で残る（W4と同じ経路、design.md §16.29）
@@ -12075,9 +12074,7 @@ tasks:
       // 新しいtransportは立たない
       expect(state.startCallCount).toBe(1);
       // CLIセッションそのものも新しく開かない（dispose前の1件のまま増えない）
-      const t1InputsAfterRetry = codexHost.openInputs.filter((i) =>
-        cwdEndsWithTask(i.cwd, 'T1'),
-      );
+      const t1InputsAfterRetry = codexHost.openInputs.filter((i) => cwdEndsWithTask(i.cwd, 'T1'));
       expect(t1InputsAfterRetry).toHaveLength(1);
       expect(codexHost.sessions).toHaveLength(1);
     });

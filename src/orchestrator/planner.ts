@@ -1517,7 +1517,9 @@ function parseTaskPullRequestReviewFindings(
     return [];
   }
   if (!Array.isArray(parsed)) {
-    log?.warn('[planner] タスクPR/MRレビュー応答がJSON配列ではなかったため、指摘なしとして扱います');
+    log?.warn(
+      '[planner] タスクPR/MRレビュー応答がJSON配列ではなかったため、指摘なしとして扱います',
+    );
     return [];
   }
 

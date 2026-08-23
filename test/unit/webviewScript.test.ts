@@ -201,15 +201,7 @@ describe('chatScript', () => {
   });
 
   it('sendOnを指定するとその値が埋め込まれる（issue #288）', () => {
-    const source = chatScript(
-      'Codex',
-      { mode: 'quickPick' },
-      false,
-      [],
-      false,
-      true,
-      'enter',
-    );
+    const source = chatScript('Codex', { mode: 'quickPick' }, false, [], false, true, 'enter');
     expect(() => parses(source)).not.toThrow();
     expect(source).toContain('SEND_ON = "enter"');
   });
@@ -283,7 +275,15 @@ describe('workflowStyles', () => {
   // 色を足して図と一覧が食い違う事故を機械的に防ぐ
   it('状態ごとのバッジの色を定義している', () => {
     const styles = workflowStyles();
-    for (const state of ['running', 'waitingApproval', 'waitingReply', 'blocked', 'done', 'merging', 'failed']) {
+    for (const state of [
+      'running',
+      'waitingApproval',
+      'waitingReply',
+      'blocked',
+      'done',
+      'merging',
+      'failed',
+    ]) {
       expect(styles).toContain('.state-pill.state-' + state);
     }
     expect(styles).toContain('--wf-state-color');
@@ -305,7 +305,12 @@ describe('workflowStyles', () => {
 
   it('バッジの色にグラフのノード枠と同じ変数を使う', () => {
     const styles = workflowStyles();
-    for (const color of ['--vscode-charts-blue', '--vscode-charts-yellow', '--vscode-charts-green', '--vscode-errorForeground']) {
+    for (const color of [
+      '--vscode-charts-blue',
+      '--vscode-charts-yellow',
+      '--vscode-charts-green',
+      '--vscode-errorForeground',
+    ]) {
       expect(styles).toContain(color);
     }
   });
@@ -352,9 +357,7 @@ describe('workflowScript', () => {
       expect(typeEndOffset).toBeGreaterThan(typeStart);
       const typeBody = runStateSource.slice(typeStart, typeEndOffset);
 
-      const allFailureKinds = [
-        ...typeBody.matchAll(/\{ readonly kind: '(\w+)'/g),
-      ].map((m) => m[1]);
+      const allFailureKinds = [...typeBody.matchAll(/\{ readonly kind: '(\w+)'/g)].map((m) => m[1]);
 
       // 範囲の切り出しに失敗すると0件になりうる。0件だと後続の検査（forループ・空集合同士の
       // Set一致）が何も検査しないまま素通りしてしまうため、件数そのものを先に主張して固定する
@@ -490,9 +493,7 @@ describe('workflowScript', () => {
     expect(source).toContain(
       "(task.mergeResolutionActive ? ' ・ ' + mergeResolutionBadgeLabel(task) : '')",
     );
-    expect(source).toContain(
-      "text('span', 'hint', '（' + mergeResolutionBadgeLabel(task) + '）')",
-    );
+    expect(source).toContain("text('span', 'hint', '（' + mergeResolutionBadgeLabel(task) + '）')");
     // 出現回数そのものも固定する（関数定義1箇所＋呼び出し3箇所＝4）。上の3つの断片が
     // 同じ1箇所を重複して数えていないことの担保
     const occurrenceCount = (source.match(/mergeResolutionBadgeLabel\(task\)/g) ?? []).length;

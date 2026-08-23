@@ -26,7 +26,9 @@ import { SECTION_IDS, type SettingsProvider } from '../../src/view/settingsProvi
 function extractSectionContainerKeys(scriptSource: string): string[] {
   const match = scriptSource.match(/const SECTION_CONTAINERS = \{([\s\S]*?)\n {2}\};/);
   if (!match) {
-    throw new Error('controlPanelScript(JSON.stringify(approvalLevelMeta()))の出力からSECTION_CONTAINERSが見つかりません');
+    throw new Error(
+      'controlPanelScript(JSON.stringify(approvalLevelMeta()))の出力からSECTION_CONTAINERSが見つかりません',
+    );
   }
   const body = match[1] ?? '';
   const keys: string[] = [];
@@ -126,7 +128,9 @@ function renderedHtml(): string {
 
 describe('セクション識別子の整合性（issue #225 レビュー指摘3）', () => {
   it('SECTION_IDSとSECTION_CONTAINERSのキー集合が一致する', () => {
-    const containerKeys = extractSectionContainerKeys(controlPanelScript(JSON.stringify(approvalLevelMeta())));
+    const containerKeys = extractSectionContainerKeys(
+      controlPanelScript(JSON.stringify(approvalLevelMeta())),
+    );
     expect(new Set(containerKeys)).toEqual(new Set(SECTION_IDS));
     // 重複が紛れ込んでいないことも確認する
     expect(containerKeys.length).toBe(SECTION_IDS.length);
@@ -139,7 +143,9 @@ describe('セクション識別子の整合性（issue #225 レビュー指摘3�
   });
 
   it('SECTION_CONTAINERSのキー集合とHTMLのid="section-*"の集合が一致する', () => {
-    const containerKeys = extractSectionContainerKeys(controlPanelScript(JSON.stringify(approvalLevelMeta())));
+    const containerKeys = extractSectionContainerKeys(
+      controlPanelScript(JSON.stringify(approvalLevelMeta())),
+    );
     const htmlIds = extractSectionHtmlIds(renderedHtml());
     expect(new Set(containerKeys)).toEqual(new Set(htmlIds));
   });

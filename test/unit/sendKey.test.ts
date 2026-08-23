@@ -84,9 +84,7 @@ describe('decideSendKeyAction（enterモード。issue #288）', () => {
   });
 
   it('IME変換中はShift+Enterでも送信しない', () => {
-    expect(decideSendKeyAction(key({ isComposing: true, shiftKey: true }), sendOn)).toBe(
-      'ignore',
-    );
+    expect(decideSendKeyAction(key({ isComposing: true, shiftKey: true }), sendOn)).toBe('ignore');
   });
 });
 

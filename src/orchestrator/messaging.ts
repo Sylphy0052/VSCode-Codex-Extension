@@ -704,10 +704,7 @@ export interface OrchestratorControlPort {
    * まだ開始していない（`pending`の）タスクの`dependsOn`を差し替える（design.md §16.29）。
    * 循環依存・未定義idへの参照になる変更は適用前に拒否する。
    */
-  updateTaskDependencies(
-    taskId: string,
-    dependsOn: readonly string[],
-  ): OrchestratorControlResult;
+  updateTaskDependencies(taskId: string, dependsOn: readonly string[]): OrchestratorControlResult;
 }
 
 /** 制御ツールの結果。`send_message` と同じく「受け付けたかどうかと、その理由」を返す。 */
@@ -752,7 +749,8 @@ export const RETRY_TASK_TOOL: McpToolDefinition = {
 
 export const CONTINUE_TASK_TOOL: McpToolDefinition = {
   name: 'continue_task',
-  description: '止まっているタスクを同じセッションのまま続きから走らせる（Viewの「続ける」と同じ）。',
+  description:
+    '止まっているタスクを同じセッションのまま続きから走らせる（Viewの「続ける」と同じ）。',
   inputSchema: {
     type: 'object',
     properties: { taskId: TASK_ID_ARG },

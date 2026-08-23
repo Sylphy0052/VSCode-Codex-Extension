@@ -76,9 +76,7 @@ describe('parseSkillsList', () => {
 
   it('errorsをwarningsへまとめる', () => {
     const { warnings } = parseSkillsList(skillsListResult);
-    expect(warnings).toEqual([
-      'invalid frontmatter (/workspace/repo/.codex/skills/broken)',
-    ]);
+    expect(warnings).toEqual(['invalid frontmatter (/workspace/repo/.codex/skills/broken)']);
   });
 
   it('名前順に並べる', () => {

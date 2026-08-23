@@ -9,7 +9,8 @@ import type { MementoLike } from '../../src/util/memento';
 function fakeMemento(): MementoLike {
   const data = new Map<string, unknown>();
   return {
-    get: <T>(key: string, defaultValue: T): T => (data.has(key) ? (data.get(key) as T) : defaultValue),
+    get: <T>(key: string, defaultValue: T): T =>
+      data.has(key) ? (data.get(key) as T) : defaultValue,
     update: (key: string, value: unknown): Promise<void> => {
       data.set(key, value);
       return Promise.resolve();
@@ -242,14 +243,22 @@ describe('ClaudeSessionStore', () => {
 
     it('rename/getNameがMementoを介して読み書きできる（リロード後も保たれる想定）', async () => {
       const memento = fakeMemento();
-      const store = new ClaudeSessionStore(new FakeFs({}), paths, new ClaudeSessionNameStore(memento));
+      const store = new ClaudeSessionStore(
+        new FakeFs({}),
+        paths,
+        new ClaudeSessionNameStore(memento),
+      );
 
       expect(store.getName(ID_A)).toBeUndefined();
       await store.rename(ID_A, 'あたらしい名前');
       expect(store.getName(ID_A)).toBe('あたらしい名前');
 
       // 同じMementoから作り直した別インスタンス（ウィンドウのリロード相当）でも読める
-      const reloaded = new ClaudeSessionStore(new FakeFs({}), paths, new ClaudeSessionNameStore(memento));
+      const reloaded = new ClaudeSessionStore(
+        new FakeFs({}),
+        paths,
+        new ClaudeSessionNameStore(memento),
+      );
       expect(reloaded.getName(ID_A)).toBe('あたらしい名前');
     });
   });

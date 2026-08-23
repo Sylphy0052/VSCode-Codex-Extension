@@ -74,7 +74,9 @@ function startSession(targetKind: 'fork' | 'resume' | 'new'): {
 
 function rewindRequestsWritten(written: string[]): Array<{ request_id: string; request: unknown }> {
   return written
-    .map((line) => JSON.parse(line.trim()) as { type: string; request_id: string; request: unknown })
+    .map(
+      (line) => JSON.parse(line.trim()) as { type: string; request_id: string; request: unknown },
+    )
     .filter(
       (event) =>
         event.type === 'control_request' &&

@@ -60,7 +60,11 @@ describe('parseMcpServerStatusList', () => {
 
   it('serverInfoがnullのサーバーは未接続として読む', () => {
     const map = parseMcpServerStatusList(statusListResult);
-    expect(map.get('mcpprobe-fail')).toEqual({ connected: false, toolCount: 0, version: undefined });
+    expect(map.get('mcpprobe-fail')).toEqual({
+      connected: false,
+      toolCount: 0,
+      version: undefined,
+    });
   });
 
   it('想定外の形では空を返す', () => {
@@ -109,7 +113,13 @@ describe('mergeMcpServers', () => {
         version: undefined,
         reason: undefined,
       },
-      { name: 'playwright', state: 'disabled', toolCount: 0, version: undefined, reason: undefined },
+      {
+        name: 'playwright',
+        state: 'disabled',
+        toolCount: 0,
+        version: undefined,
+        reason: undefined,
+      },
     ]);
   });
 

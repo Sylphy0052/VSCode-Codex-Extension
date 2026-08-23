@@ -8,7 +8,7 @@
 git clone https://github.com/Sylphy0052/VSCode-Codex-Extension.git
 cd VSCode-Codex-Extension
 npm install
-npm run check     # lint + typecheck + test
+npm run check     # lint + format:check + typecheck + test
 ```
 
 必要なのは Node.js 20以降とVSCode 1.90以降。動作確認には Codex CLI か Claude Code のどちらかがPATH上にあるとよい（無くても大半のテストは通る）。
@@ -21,45 +21,45 @@ npm run check     # lint + typecheck + test
 | `npm run watch`                 | sourcemap付きで監視ビルドする                                                                                                   |
 | `npm run typecheck`             | `tsc --noEmit`                                                                                                                  |
 | `npm run lint`                  | `eslint .`                                                                                                                      |
-| `npm run format`                | Prettierで整形する。**走らせる前に下の警告を読むこと**                                                                          |
+| `npm run format`                | Prettierで整形する（`prettier --write .`）                                                                                      |
+| `npm run format:check`          | 整形が準拠しているかだけを検査する（`prettier --check .`）                                                                      |
 | `npm test`                      | `vitest run`（`test/unit/**`）                                                                                                  |
 | `npm run test:coverage`         | 上記にカバレッジ計測を付けて実行する。下限を下回ると失敗する                                                                    |
 | `npm run test:integration`      | 実VSCode上の統合テスト（`test/integration/**`）。ディスプレイが要る                                                             |
 | `npm run test:integration:xvfb` | 同上。ヘッドレスLinux/WSLでxvfb-run経由で実行する                                                                               |
 | `npm run test:external-cli`     | 実CLI（`codex app-server`）を起動する検査（`test/external-cli/**`）。CODEX_BIN環境変数でパスを指定する（既定はPATH上の`codex`） |
-| `npm run check`                 | lint / typecheck / testをまとめて実行する（integration・external-cliは含まない）                                                |
+| `npm run check`                 | lint / format:check / typecheck / testをまとめて実行する（integration・external-cliは含まない）                                 |
 | `npm run package`               | ビルドしてvsixを生成する                                                                                                        |
 
 `scripts/check.sh` はcommit前に全緑であることを必須とする。緑にするためにテストを弱めたりskipしたりしない。`test:integration`は実VSCodeのダウンロード・起動が要り重いため`check.sh`には含めていない。必要なときに明示的に呼ぶ。
 
-### 警告: `npm run format` は触っていないファイルまで書き換える
+### 整形（Prettier）
 
-**mainのコードは121ファイル分 prettier に準拠していない。** `.prettierrc.json` と `format`
-スクリプトはあるが、`npm run lint`（eslint）が prettier を見ていないため、非準拠のままCIもlintも
-緑で通っている。実測は次のとおり。
+**リポジトリ全体が prettier に準拠している。** `npm run format` を走らせても、自分が触った
+ファイル以外に差分は出ない。準拠しているかは `npm run format:check`（`prettier --check .`）で
+機械的に確かめられ、`scripts/check.sh` とCIの両方がこれを実行するため、非準拠のまま
+マージされることはない。
 
-```
-$ npx prettier --check .
-Code style issues found in 121 files. Run Prettier with --write to fix.
-```
+対象外にしているものは `.prettierignore` にある。ビルド成果物（`dist/` `out/` `coverage/`
+`.vscode-test/`）と `node_modules/` `.claude/` のほか、**`docs/roadmap/` を対象外にしている**。
+ロードマップは複数の作業が並行して書き換えるため、整形差分が進行中の更新と衝突するのを
+避けている（Issue #551。WF-Gの完了後に扱いを決め直す）。
 
-そのため **`npm run format` を走らせると、自分が触っていない121ファイル分の整形差分が出る。**
+以前は状況が逆で、mainが121ファイル分 prettier 非準拠のまま、`npm run lint`（eslint）が
+prettier を見ていないためCIもlintも緑で通っていた。`npm run format` を走らせると触っていない
+ファイルまで書き換わり、別々のworktreeで独立に動いていた2つの実装が `src/extension.ts` の
+まったく同じ5箇所へ同じ整形差分を出す事故が起きている（PR #548 / PR #549）。Issue #551 で
+一括 `prettier --write .` をかけて揃え、`format:check` を `check.sh` とCIへ足して固定した。
 
-- **整形は自分が変更した行だけ手で行う。**
-- **並列でPRが走っているときは特に走らせない。** 衝突面積が無関係に広がる
-
-実際に、別々のworktreeで独立に動いていた2つの実装が `src/extension.ts` のまったく同じ5箇所へ
-同じ整形差分を出した（PR #548 / PR #549）。どちらも `npm run format` を走らせただけだった。
-
-この負債そのもの（prettier を eslint へ繋ぐ、または一括で `--write` をかけて揃える）は、
-lint基盤に手を入れる回でまとめて扱う。**一括の `--write` は、他に開いているPRが無いときにしか
-できない。**
+**eslint 側には prettier を繋いでいない**（`eslint-plugin-prettier` を入れていない）。eslint は
+`.md` や `.yml` を検査対象にしないため、eslint 経由では docs 配下の非準拠を拾えず、
+結局 `prettier --check .` を別に持つことになるためである。
 
 ## CI
 
-mainへのpushとPRのたびに、GitHub Actions（`.github/workflows/ci.yml`）で `npm run lint` / `npm run typecheck` / `npm run build` / `npm run test:coverage` が自動実行される。Node.js 20系で `npm ci` してから走る。
+mainへのpushとPRのたびに、GitHub Actions（`.github/workflows/ci.yml`）で `npm run lint` / `npm run format:check` / `npm run typecheck` / `npm run build` / `npm run test:coverage` が自動実行される。Node.js 20系で `npm ci` してから走る。
 
-`scripts/check.sh`（`npm run lint` / `npm run typecheck` / `npm test` の3つ）とは一致しない。CIは`npm run build`の分だけ検証範囲が広く、tsc --noEmitでは検出できないバンドル失敗（動的import、モジュール解決の差、--externalの指定漏れなど）を拾う。`scripts/check.sh` 自体は変更していないため、手元で全緑にしてもCIのbuildステップは別途確認が必要。
+`scripts/check.sh`（`npm run lint` / `npm run format:check` / `npm run typecheck` / `npm test` の4つ）とは一致しない。CIは`npm run build`の分だけ検証範囲が広く、tsc --noEmitでは検出できないバンドル失敗（動的import、モジュール解決の差、--externalの指定漏れなど）を拾う。`scripts/check.sh` 自体は変更していないため、手元で全緑にしてもCIのbuildステップは別途確認が必要。
 
 統合テスト（`npm run test:integration`）はCIで回らない。実VSCodeのダウンロードとxvfbが要るため対象外にしてある。実VSCodeが要る範囲は引き続き手元で確認する。
 
@@ -124,7 +124,7 @@ CLI固有の事情（ファイル配置・引数・セッションIDの決まり
 
 - TypeScript strict。`tsconfig.json` では `noUncheckedIndexedAccess` `exactOptionalPropertyTypes` も有効
 - ESLintは `no-console: error` と `eqeqeq` を追加している。ログは `src/log.ts` のLoggerを使う
-- 整形はPrettier（printWidth 100 / シングルクォート / セミコロンあり / trailingComma all）
+- 整形はPrettier（printWidth 100 / シングルクォート / セミコロンあり / trailingComma all）。対象外は `.prettierignore`
 - 状態は書き換えず、新しい値を返す。会話状態（`ChatState`）の遷移は純粋関数として書き、Webview側は結果を描くだけにする
 - 未知の入力で壊さない。未知のイベント種別・壊れたJSON行は、状態を変えずに読み飛ばすか素通しする（CLIのプロトコル変更に耐えるための方針）
 

@@ -13,7 +13,10 @@ import type { SettingsProvider } from '../../src/view/settingsProvider';
  * （`test/mocks/vscode.ts` の `FakeWebview` はexportされていないため、ここで最小限を組む）。
  */
 function fakeWebviewView(): {
-  view: { webview: Record<string, unknown>; onDidDispose: (listener: () => void) => { dispose: () => void } };
+  view: {
+    webview: Record<string, unknown>;
+    onDidDispose: (listener: () => void) => { dispose: () => void };
+  };
   sent: unknown[];
   simulateMessage: (message: unknown) => Promise<void>;
   simulateDispose: () => void;

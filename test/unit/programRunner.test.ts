@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ProgramRunner, type ProgramWorkflowPort } from '../../src/orchestrator/programRunner';
-import { ProgramStore, type ProgramMemento, type PersistedProgram } from '../../src/orchestrator/programStore';
+import {
+  ProgramStore,
+  type ProgramMemento,
+  type PersistedProgram,
+} from '../../src/orchestrator/programStore';
 import type { WorkflowFilePort } from '../../src/orchestrator/runner';
 import type { RunOutcome } from '../../src/orchestrator/scheduler';
 import type { Logger } from '../../src/log';
@@ -273,7 +277,12 @@ runs:
     // R1(依存なし)がrunningのまま「リロード」を模す（R1は完了させない）
     const store1 = new ProgramStore(memento);
     const workflow1 = fakeWorkflow();
-    const runner1 = new ProgramRunner({ programStore: store1, filePort, workflow: workflow1, log: quietLog });
+    const runner1 = new ProgramRunner({
+      programStore: store1,
+      filePort,
+      workflow: workflow1,
+      log: quietLog,
+    });
     const result = await runner1.startProgram('/repo/program.yaml', '/repo');
     const programId = result.programId as string;
     expect(workflow1.startCalls).toHaveLength(1); // R1のみ起動、R2はR1依存のため未起動
@@ -288,7 +297,12 @@ runs:
     // W10（`runnerRestore.ts`のautoResumeIfEligible）が同じrunId "run-1" を既に再開し、
     // `WorkflowRunner.listLive()`側では生きたまま（'running'）に見えている状況を再現する
     const workflow2 = fakeWorkflow({ 'run-1': 'running' });
-    const runner2 = new ProgramRunner({ programStore: store2, filePort, workflow: workflow2, log: quietLog });
+    const runner2 = new ProgramRunner({
+      programStore: store2,
+      filePort,
+      workflow: workflow2,
+      log: quietLog,
+    });
     runner2.attach();
     await runner2.reconcileAfterReload();
 
@@ -319,7 +333,12 @@ runs:
 
     const store1 = new ProgramStore(memento);
     const workflow1 = fakeWorkflow();
-    const runner1 = new ProgramRunner({ programStore: store1, filePort, workflow: workflow1, log: quietLog });
+    const runner1 = new ProgramRunner({
+      programStore: store1,
+      filePort,
+      workflow: workflow1,
+      log: quietLog,
+    });
     const result = await runner1.startProgram('/repo/program.yaml', '/repo');
     const programId = result.programId as string;
     runner1.dispose();
@@ -331,7 +350,12 @@ runs:
     // "run-1"はlistLive()に一切現れない（W10の対象外だった・復元自体に失敗した等で
     // 本当に失われた）状況を再現する
     const workflow2 = fakeWorkflow();
-    const runner2 = new ProgramRunner({ programStore: store2, filePort, workflow: workflow2, log: quietLog });
+    const runner2 = new ProgramRunner({
+      programStore: store2,
+      filePort,
+      workflow: workflow2,
+      log: quietLog,
+    });
     await runner2.reconcileAfterReload();
 
     const finalState = store2.find(programId) as PersistedProgram;
@@ -364,7 +388,12 @@ runs:
 
     const store1 = new ProgramStore(memento);
     const workflow1 = fakeWorkflow();
-    const runner1 = new ProgramRunner({ programStore: store1, filePort, workflow: workflow1, log: quietLog });
+    const runner1 = new ProgramRunner({
+      programStore: store1,
+      filePort,
+      workflow: workflow1,
+      log: quietLog,
+    });
     const result = await runner1.startProgram('/repo/program.yaml', '/repo');
     const programId = result.programId as string;
     // maxParallel: 1のため、R1がrunningのままR2はpending。ここで「リロード」を模す
@@ -377,7 +406,12 @@ runs:
     expect(reconciled.state.runs.R2?.state).toBe('pending'); // 道連れにしない（W12-1）
 
     const workflow2 = fakeWorkflow();
-    const runner2 = new ProgramRunner({ programStore: store2, filePort, workflow: workflow2, log: quietLog });
+    const runner2 = new ProgramRunner({
+      programStore: store2,
+      filePort,
+      workflow: workflow2,
+      log: quietLog,
+    });
     await runner2.pumpProgram(programId);
     // R2はR1に依存していない独立したrunなので、続きの波として起動される
     expect(workflow2.startCalls).toHaveLength(1);
@@ -545,7 +579,12 @@ runs:
 
     const store1 = new ProgramStore(memento);
     const workflow1 = fakeWorkflow();
-    const runner1 = new ProgramRunner({ programStore: store1, filePort, workflow: workflow1, log: quietLog });
+    const runner1 = new ProgramRunner({
+      programStore: store1,
+      filePort,
+      workflow: workflow1,
+      log: quietLog,
+    });
     const result = await runner1.startProgram('/repo/program.yaml', '/repo');
     const programId = result.programId as string;
     await runner1.haltProgram(programId); // R1(running)へstopを送るが、R1自身はまだ終了していない
@@ -560,7 +599,12 @@ runs:
 
     // "run-1"はlistLive()に一切現れない（単発run側もhaltedByUserによりW10で再開しなかった状況）
     const workflow2 = fakeWorkflow();
-    const runner2 = new ProgramRunner({ programStore: store2, filePort, workflow: workflow2, log: quietLog });
+    const runner2 = new ProgramRunner({
+      programStore: store2,
+      filePort,
+      workflow: workflow2,
+      log: quietLog,
+    });
     await runner2.reconcileAfterReload();
 
     persisted = store2.find(programId) as PersistedProgram;

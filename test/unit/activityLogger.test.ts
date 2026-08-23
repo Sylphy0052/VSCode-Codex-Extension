@@ -65,7 +65,13 @@ describe('ActivityLogger', () => {
 
   it('別セッションは別行として記録する', async () => {
     const { logger, appended } = makeLogger();
-    await logger.record({ sessionId: 'a', source: 'codex', cwd: '/w/repo', kind: 'prompt', text: 'A' });
+    await logger.record({
+      sessionId: 'a',
+      source: 'codex',
+      cwd: '/w/repo',
+      kind: 'prompt',
+      text: 'A',
+    });
     await logger.record({
       sessionId: 'b',
       source: 'claude-code',
@@ -79,17 +85,35 @@ describe('ActivityLogger', () => {
   it('本文が空のセッションは記録しない', async () => {
     const { logger, appended } = makeLogger();
 
-    await logger.record({ sessionId: 'a', source: 'codex', cwd: '/w/repo', kind: 'prompt', text: '  ' });
+    await logger.record({
+      sessionId: 'a',
+      source: 'codex',
+      cwd: '/w/repo',
+      kind: 'prompt',
+      text: '  ',
+    });
     expect(appended).toHaveLength(0);
 
     // 後から本文が判ったら記録できる
-    await logger.record({ sessionId: 'a', source: 'codex', cwd: '/w/repo', kind: 'prompt', text: '要約' });
+    await logger.record({
+      sessionId: 'a',
+      source: 'codex',
+      cwd: '/w/repo',
+      kind: 'prompt',
+      text: '要約',
+    });
     expect(appended).toHaveLength(1);
   });
 
   it('設定で無効化されていれば何も書かない', async () => {
     const { logger, appended } = makeLogger({ enabled: false });
-    await logger.record({ sessionId: 'a', source: 'codex', cwd: '/w/repo', kind: 'prompt', text: 'x' });
+    await logger.record({
+      sessionId: 'a',
+      source: 'codex',
+      cwd: '/w/repo',
+      kind: 'prompt',
+      text: 'x',
+    });
     expect(appended).toHaveLength(0);
   });
 

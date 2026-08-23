@@ -37,7 +37,12 @@ export function parseAccountRead(raw: unknown): AccountView {
     return { loggedIn: true, method: 'Amazon Bedrock', identity: undefined, plan: undefined };
   }
   // 未知のtypeも「読み取れた」範囲でログイン済みとして扱う。typeをそのまま説明にする
-  return { loggedIn: true, method: type === '' ? undefined : type, identity: undefined, plan: undefined };
+  return {
+    loggedIn: true,
+    method: type === '' ? undefined : type,
+    identity: undefined,
+    plan: undefined,
+  };
 }
 
 const str = (value: unknown): string => (typeof value === 'string' ? value : '');

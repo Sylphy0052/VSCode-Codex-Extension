@@ -115,18 +115,20 @@ export class ClaudeSessionStore {
     const files = await this.fs.listJsonl(this.paths.projects);
     const named = files
       .map((filePath) => ({ filePath, id: sessionIdFromTranscriptName(basenameOf(filePath)) }))
-      .filter(
-        (entry): entry is { filePath: string; id: string } => entry.id !== undefined,
-      );
+      .filter((entry): entry is { filePath: string; id: string } => entry.id !== undefined);
 
     // 件数分の`mtimeMs`取得を逐次待つと台数に比例して遅くなるため並列化する
     // （issue #436、Codex側の`orderByRecency`と同じ形）。最終的に全件ソートするため
     // 呼び出し順は問わない。ただし件数分を無制限に同時発火しないよう上限を設ける。
-    const entries = await mapWithLimit(named, MTIME_CONCURRENCY_LIMIT, async ({ filePath, id }) => ({
-      filePath,
-      id,
-      mtimeMs: await this.fs.mtimeMs(filePath),
-    }));
+    const entries = await mapWithLimit(
+      named,
+      MTIME_CONCURRENCY_LIMIT,
+      async ({ filePath, id }) => ({
+        filePath,
+        id,
+        mtimeMs: await this.fs.mtimeMs(filePath),
+      }),
+    );
 
     return entries.sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0));
   }

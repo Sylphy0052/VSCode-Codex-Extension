@@ -36,12 +36,22 @@ describe('parseAuthStatusJson', () => {
 
   it('loggedIn が false なら未ログイン扱いにする（未実測。falseの実際の応答形は確認していない防御的な実装）', () => {
     const view = parseAuthStatusJson(JSON.stringify({ loggedIn: false }));
-    expect(view).toEqual({ loggedIn: false, method: undefined, identity: undefined, plan: undefined });
+    expect(view).toEqual({
+      loggedIn: false,
+      method: undefined,
+      identity: undefined,
+      plan: undefined,
+    });
   });
 
   it('loggedIn フィールドが無い応答は未ログイン扱いにする', () => {
     const view = parseAuthStatusJson(JSON.stringify({}));
-    expect(view).toEqual({ loggedIn: false, method: undefined, identity: undefined, plan: undefined });
+    expect(view).toEqual({
+      loggedIn: false,
+      method: undefined,
+      identity: undefined,
+      plan: undefined,
+    });
   });
 
   it('壊れたJSONでは undefined を返す（呼び出し側が取得失敗として扱う）', () => {

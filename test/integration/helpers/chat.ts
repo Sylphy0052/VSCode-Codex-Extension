@@ -101,7 +101,11 @@ export class FakeAppServerConnection implements AppServerConnectionPortLike {
       return Promise.reject(failer());
     }
     const build = this.responders.get(method);
-    return Promise.resolve({ jsonrpc: '2.0', id: this.calls.length, result: build?.(params) ?? {} });
+    return Promise.resolve({
+      jsonrpc: '2.0',
+      id: this.calls.length,
+      result: build?.(params) ?? {},
+    });
   }
 
   dispose(): void {

@@ -27,7 +27,15 @@ export type ImportItemType =
 
 /** 内訳（`MigrationDetails`）を項目種別ごとに数えた表示用の1グループ。 */
 export interface ImportItemDetailGroup {
-  kind: 'skills' | 'hooks' | 'mcpServers' | 'plugins' | 'subagents' | 'commands' | 'sessions' | 'memory';
+  kind:
+    | 'skills'
+    | 'hooks'
+    | 'mcpServers'
+    | 'plugins'
+    | 'subagents'
+    | 'commands'
+    | 'sessions'
+    | 'memory';
   count: number;
   /**
    * 代表的な名前。多い場合は先頭のみに絞る（`moreCount` に残りを出す）。
@@ -60,9 +68,7 @@ export interface ImportItemView {
  * といった状況で「インポートできるものはありません」と誤って出してしまう
  * （design.mdの「黙って何も起きない状態を作らない」に反する）。
  */
-export type ImportSnapshot =
-  | { ok: true; items: ImportItemView[] }
-  | { ok: false; reason: string };
+export type ImportSnapshot = { ok: true; items: ImportItemView[] } | { ok: false; reason: string };
 
 export interface ImportHistoryItemTypeResultView {
   itemType: ImportItemType | 'UNKNOWN';
@@ -82,8 +88,7 @@ export interface ImportHistoryEntryView {
 }
 
 export type ImportHistorySnapshot =
-  | { ok: true; entries: ImportHistoryEntryView[] }
-  | { ok: false; reason: string };
+  { ok: true; entries: ImportHistoryEntryView[] } | { ok: false; reason: string };
 
 export interface ImportRunItemResult {
   itemType: ImportItemType | 'UNKNOWN';

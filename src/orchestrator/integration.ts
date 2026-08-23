@@ -494,8 +494,7 @@ async function mergeTaskBranch(
 // ---------------------------------------------------------------------------
 
 export type AbortMergeResult =
-  | { ok: true }
-  | { ok: false; reason: 'gitError' | 'leaseNotHeld'; message: string };
+  { ok: true } | { ok: false; reason: 'gitError' | 'leaseNotHeld'; message: string };
 
 /**
  * 進行中のマージを取り消し、統合ブランチをマージ前の状態へ戻す（`git merge --abort`。
@@ -555,8 +554,7 @@ export interface IntegrationLease {
 const LEASE_NOT_HELD_MERGE = '統合worktreeの占有（リース）を持っていないためマージできません';
 
 /** 占有ハンドルが無効なときに`abortMerge`が返す文言。 */
-const LEASE_NOT_HELD_ABORT =
-  '統合worktreeの占有（リース）を持っていないためマージを巻き戻せません';
+const LEASE_NOT_HELD_ABORT = '統合worktreeの占有（リース）を持っていないためマージを巻き戻せません';
 
 /**
  * `IntegrationLease`の実体。**exportしない**（外から偽造したハンドルで`mergeTask` /
@@ -817,7 +815,9 @@ export class IntegrationMergeQueue {
     integrationWorktreeCwd: string,
     integrationBranch: string,
   ): Promise<PushBranchResult> {
-    return this.worktreeQueue.enqueue(() => pushBranch(git, integrationWorktreeCwd, integrationBranch));
+    return this.worktreeQueue.enqueue(() =>
+      pushBranch(git, integrationWorktreeCwd, integrationBranch),
+    );
   }
 }
 
@@ -925,7 +925,12 @@ export function buildMergeResolutionPrompt(
   for (const p of unresolvedPaths) {
     lines.push(`- ${p}`);
   }
-  lines.push('', `# タスク「${target.id}」（今回マージしようとしたタスク）`, `prompt: ${target.prompt}`, `done: ${target.done}`);
+  lines.push(
+    '',
+    `# タスク「${target.id}」（今回マージしようとしたタスク）`,
+    `prompt: ${target.prompt}`,
+    `done: ${target.done}`,
+  );
   for (const other of others) {
     lines.push(
       '',
@@ -1041,7 +1046,10 @@ export async function isMergeResolutionComplete(
   if (unresolved.code !== 0 || unresolved.stdout.trim() !== '') {
     return false;
   }
-  const mergeHead = await git.run(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], integrationWorktreeCwd);
+  const mergeHead = await git.run(
+    ['rev-parse', '-q', '--verify', 'MERGE_HEAD'],
+    integrationWorktreeCwd,
+  );
   // MERGE_HEADの解決に成功する（code 0）ということは、まだマージ進行中（未コミット）
   return mergeHead.code !== 0;
 }

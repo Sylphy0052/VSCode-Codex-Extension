@@ -139,7 +139,11 @@ function buildTaskPullRequestFlowCallbacks(
     // Issue #253。同じ統合worktreeの同じブランチへの並行pushをリモートが
     // `cannot lock ref` で弾く事故対策）。直接`pushBranch`を呼ばない
     pushIntegrationBranch: () =>
-      self.integrationQueue.pushIntegrationBranch(self.deps.git, integration.cwd, integration.branch),
+      self.integrationQueue.pushIntegrationBranch(
+        self.deps.git,
+        integration.cwd,
+        integration.branch,
+      ),
     createPullRequest: () =>
       createPullRequest(
         { cli: forgeDeps.cli, fs: forgeDeps.fs },
@@ -236,10 +240,7 @@ function buildTaskPullRequestReviewStep(
   taskCwd: string,
 ): (url: string | undefined) => Promise<ForgeStepOutcome> {
   return async () => {
-    const diffResult = await self.deps.git.run(
-      ['diff', `${integration.branch}...HEAD`],
-      taskCwd,
-    );
+    const diffResult = await self.deps.git.run(['diff', `${integration.branch}...HEAD`], taskCwd);
     const diff = diffResult.code === 0 ? diffResult.stdout : '';
 
     const host = self.deps.hosts[task.provider];
@@ -391,7 +392,12 @@ export async function startMerge(
 
   try {
     // design.md §16.17「タスク完了時のコミット」2.〜4.
-    const commitResult = await commitUncommittedChangesIfNeeded(taskCwd, taskId, self.deps.git, task.type);
+    const commitResult = await commitUncommittedChangesIfNeeded(
+      taskCwd,
+      taskId,
+      self.deps.git,
+      task.type,
+    );
     if (!commitResult.ok) {
       self.deps.log.error(
         `[workflow ${runId}/${taskId}] 未コミットの変更の回収に失敗しました: ${commitResult.message}`,
@@ -403,7 +409,16 @@ export async function startMerge(
       return;
     }
 
-    await attemptMerge(self, runId, taskId, task, live.integration, taskCwd, taskBranch, originCommit);
+    await attemptMerge(
+      self,
+      runId,
+      taskId,
+      task,
+      live.integration,
+      taskCwd,
+      taskBranch,
+      originCommit,
+    );
   } catch (e) {
     // gitのメイン経路で想定外の例外が起きた場合の安全網（Issue #437）。他の失敗を
     // `markMergeFailed`に落とすのと同じ扱いにする
@@ -497,9 +512,7 @@ type LeaseWaitBlockReason = 'halted' | 'leaseRevoked';
 
 /** `decideAfterLeaseWait`の判定結果。 */
 type LeaseWaitDecision =
-  | { kind: 'proceed' }
-  | { kind: 'block'; reason: LeaseWaitBlockReason }
-  | { kind: 'skip' };
+  { kind: 'proceed' } | { kind: 'block'; reason: LeaseWaitBlockReason } | { kind: 'skip' };
 
 /**
  * 占有を取った直後に、いまマージを始めてよいかを判定する（Issue #412のレビュー指摘2）。
@@ -849,10 +862,7 @@ function handleMergeApprovalTimeout(
     return;
   }
   const entry = live.mergeResolutions.get(taskId);
-  if (
-    entry === undefined ||
-    entry.waitingApprovalSinceMs !== scheduledForWaitingApprovalSinceMs
-  ) {
+  if (entry === undefined || entry.waitingApprovalSinceMs !== scheduledForWaitingApprovalSinceMs) {
     // 既に承認待ちを抜けた、解決セッション自体が終わった、または新しい承認待ちへ
     // 張り替わった後（多層防御。上のJSDoc参照）
     return;

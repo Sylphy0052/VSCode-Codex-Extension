@@ -84,7 +84,11 @@ suite('Claude Code画面: ハンドシェイクと承認の往復（Issue #188�
         WAIT_OPTIONS,
       )
     )[0];
-    assert.equal(first?.['type'], 'control_request', `control_requestで始まっていない: ${JSON.stringify(first)}`);
+    assert.equal(
+      first?.['type'],
+      'control_request',
+      `control_requestで始まっていない: ${JSON.stringify(first)}`,
+    );
     const request = first?.['request'] as { subtype?: string; hooks?: unknown } | undefined;
     assert.equal(request?.subtype, 'initialize');
     assert.deepEqual(request?.hooks, {});
@@ -105,7 +109,8 @@ suite('Claude Code画面: ハンドシェイクと承認の往復（Issue #188�
         () => proc.writtenLines(),
         (lines) =>
           lines.some(
-            (l) => (l['request'] as { subtype?: string } | undefined)?.subtype === 'get_context_usage',
+            (l) =>
+              (l['request'] as { subtype?: string } | undefined)?.subtype === 'get_context_usage',
           ),
         WAIT_OPTIONS,
       );
@@ -137,7 +142,11 @@ suite('Claude Code画面: ハンドシェイクと承認の往復（Issue #188�
     try {
       proc.emitLine({
         type: 'control_response',
-        response: { subtype: 'error', request_id: requestId, error: 'Unsupported control request subtype: initialize' },
+        response: {
+          subtype: 'error',
+          request_id: requestId,
+          error: 'Unsupported control request subtype: initialize',
+        },
       });
       await waitFor(
         () => warnings.length,
@@ -190,7 +199,11 @@ suite('Claude Code画面: ハンドシェイクと承認の往復（Issue #188�
     ): Promise<unknown> {
       const line = await waitFor(
         async () => {
-          await chat.simulateClaudeWebviewMessage(sessionId, { type: 'approve', requestId, decision });
+          await chat.simulateClaudeWebviewMessage(sessionId, {
+            type: 'approve',
+            requestId,
+            decision,
+          });
           return proc
             .writtenLines()
             .find(
@@ -258,7 +271,11 @@ suite('Claude Code画面: ハンドシェイクと承認の往復（Issue #188�
       '2件目の要求が明示的な決定なしに解決されている（クライアント側で勝手に許可した）',
     );
     // 後始末: 解決しないまま残さない
-    await chat.simulateClaudeWebviewMessage(sessionId, { type: 'approve', requestId: 'ask-4', decision: 'decline' });
+    await chat.simulateClaudeWebviewMessage(sessionId, {
+      type: 'approve',
+      requestId: 'ask-4',
+      decision: 'decline',
+    });
   });
 
   test('L-18: can_use_tool以外の制御要求は空応答を返すだけで、問い合わせカードの経路が無い', async function () {

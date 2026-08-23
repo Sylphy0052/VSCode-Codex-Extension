@@ -72,7 +72,11 @@ describe('parsePluginInstalled', () => {
   it('installed: trueのpluginだけを一覧にする', () => {
     const { plugins } = parsePluginInstalled(pluginInstalledResult);
     expect(plugins.map((p) => p.key).sort()).toEqual(
-      ['github@openai-curated-remote', 'my-plugin@local-repo', 'openai-templates@openai-curated-remote'].sort(),
+      [
+        'github@openai-curated-remote',
+        'my-plugin@local-repo',
+        'openai-templates@openai-curated-remote',
+      ].sort(),
     );
   });
 
@@ -109,7 +113,11 @@ describe('parsePluginInstalled', () => {
     const { marketplaces } = parsePluginInstalled(pluginInstalledResult);
     expect(marketplaces).toEqual([
       { name: 'openai-curated-remote', path: undefined, displayName: 'OpenAI Curated Remote' },
-      { name: 'local-repo', path: '/workspace/repo/.codex/plugins/marketplace.json', displayName: undefined },
+      {
+        name: 'local-repo',
+        path: '/workspace/repo/.codex/plugins/marketplace.json',
+        displayName: undefined,
+      },
     ]);
   });
 

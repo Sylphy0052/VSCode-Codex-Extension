@@ -4,11 +4,7 @@ import type { HooksSnapshot } from '../provider/hooks';
 import { isValidMcpServerName, type McpServersSnapshot } from '../provider/mcpServers';
 import type { AccountSnapshot } from '../provider/account';
 import { isValidSkillPath, type SkillsSnapshot } from '../provider/skills';
-import {
-  isValidPluginName,
-  type AppsSnapshot,
-  type PluginsSnapshot,
-} from '../provider/plugins';
+import { isValidPluginName, type AppsSnapshot, type PluginsSnapshot } from '../provider/plugins';
 import type {
   ImportHistorySnapshot,
   ImportRunItemResult,
@@ -646,56 +642,53 @@ export class AppServerClient {
     const result = await this.call<{
       importId: string;
       results: ImportRunItemResult[] | undefined;
-    }>(
-      async (request, notify) => {
-        let resolveCompletion: (results: ImportRunItemResult[]) => void = () => {};
-        const completion = new Promise<ImportRunItemResult[]>((resolve) => {
-          resolveCompletion = resolve;
-        });
-        const stop = notify.onEach((message) => {
-          if (message.method === 'externalAgentConfig/import/progress') {
-            const progress = parseImportNotification(message.params);
-            if (progress !== undefined) {
-              this.log.info(
-                `インポート進行中 (${progress.importId}): ${progress.results
-                  .map((r) => `${r.label} 成功${r.successCount}/失敗${r.failureCount}`)
-                  .join(' ・ ')}`,
-              );
-            }
-            return;
+    }>(async (request, notify) => {
+      let resolveCompletion: (results: ImportRunItemResult[]) => void = () => {};
+      const completion = new Promise<ImportRunItemResult[]>((resolve) => {
+        resolveCompletion = resolve;
+      });
+      const stop = notify.onEach((message) => {
+        if (message.method === 'externalAgentConfig/import/progress') {
+          const progress = parseImportNotification(message.params);
+          if (progress !== undefined) {
+            this.log.info(
+              `インポート進行中 (${progress.importId}): ${progress.results
+                .map((r) => `${r.label} 成功${r.successCount}/失敗${r.failureCount}`)
+                .join(' ・ ')}`,
+            );
           }
-          if (message.method === 'externalAgentConfig/import/completed') {
-            const completed = parseImportNotification(message.params);
-            if (completed !== undefined) {
-              resolveCompletion(completed.results);
-            }
+          return;
+        }
+        if (message.method === 'externalAgentConfig/import/completed') {
+          const completed = parseImportNotification(message.params);
+          if (completed !== undefined) {
+            resolveCompletion(completed.results);
           }
-        });
-
-        const response = await request('externalAgentConfig/import', { migrationItems });
-        if (response.error !== undefined) {
-          stop();
-          return { ok: false, error: response.error.message };
         }
-        const importId = parseImportResponse(response.result);
-        if (importId === undefined) {
-          stop();
-          return { ok: false, error: '応答からimportIdを読み取れませんでした' };
-        }
+      });
 
-        const results = await new Promise<ImportRunItemResult[] | undefined>((resolve) => {
-          const timer = setTimeout(() => resolve(undefined), IMPORT_COMPLETE_TIMEOUT_MS);
-          void completion.then((r) => {
-            clearTimeout(timer);
-            resolve(r);
-          });
-        });
+      const response = await request('externalAgentConfig/import', { migrationItems });
+      if (response.error !== undefined) {
         stop();
+        return { ok: false, error: response.error.message };
+      }
+      const importId = parseImportResponse(response.result);
+      if (importId === undefined) {
+        stop();
+        return { ok: false, error: '応答からimportIdを読み取れませんでした' };
+      }
 
-        return { ok: true, value: { importId, results } };
-      },
-      IMPORT_COMPLETE_TIMEOUT_MS,
-    );
+      const results = await new Promise<ImportRunItemResult[] | undefined>((resolve) => {
+        const timer = setTimeout(() => resolve(undefined), IMPORT_COMPLETE_TIMEOUT_MS);
+        void completion.then((r) => {
+          clearTimeout(timer);
+          resolve(r);
+        });
+      });
+      stop();
+
+      return { ok: true, value: { importId, results } };
+    }, IMPORT_COMPLETE_TIMEOUT_MS);
 
     if (!result.ok) {
       this.log.warn(`インポートを実行できませんでした: ${result.error}`);

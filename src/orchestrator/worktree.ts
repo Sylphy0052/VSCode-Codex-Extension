@@ -3,11 +3,7 @@ import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
 import { isPathWithinRoot, type TaskBoundary } from './escalation';
-import {
-  assertValidIdentifiers,
-  findSymlinkedAncestor,
-  identifierError,
-} from './fsGuards';
+import { assertValidIdentifiers, findSymlinkedAncestor, identifierError } from './fsGuards';
 import type { TaskState } from './runState';
 import { sanitizeForLog } from './sanitize';
 import { SerialQueue } from './serialQueue';
@@ -191,7 +187,9 @@ export const DEFAULT_BRANCH_NAMING: BranchNaming = 'wf';
  * `forge.ts`の正規化関数群と同じく定義の隣（このファイル）へ置き、`config.ts`からimportする。
  */
 export function normalizeBranchNaming(value: string): BranchNaming {
-  return (BRANCH_NAMINGS as readonly string[]).includes(value) ? (value as BranchNaming) : DEFAULT_BRANCH_NAMING;
+  return (BRANCH_NAMINGS as readonly string[]).includes(value)
+    ? (value as BranchNaming)
+    : DEFAULT_BRANCH_NAMING;
 }
 
 /** `branchName` の命名方式の指定。省略時は従来どおり `wf/<runId>/<taskId>`。 */
@@ -239,8 +237,7 @@ function buildConventionalSlug(taskId: string, runId: string, retry: number | un
   const base = kebabCase(taskId);
   // 末尾から削った結果が`-`で終わると`fixedSuffix`（`-`始まり）と繋がって`--`になるため、
   // 削ったあとの末尾の`-`も落とす
-  const trimmedBase =
-    maxBaseLength > 0 ? base.slice(0, maxBaseLength).replace(/-+$/u, '') : '';
+  const trimmedBase = maxBaseLength > 0 ? base.slice(0, maxBaseLength).replace(/-+$/u, '') : '';
   const finalBase = trimmedBase === '' ? 't' : trimmedBase;
 
   return `${finalBase}${fixedSuffix}`;

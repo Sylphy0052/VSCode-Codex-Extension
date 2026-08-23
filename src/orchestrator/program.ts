@@ -206,8 +206,7 @@ export function validateProgram(def: ProgramDefinition): ProgramValidationResult
   ) {
     errors.push({
       runIds: [],
-      message:
-        `maxParallel は${PROGRAM_MAX_PARALLEL_MIN}〜${PROGRAM_MAX_PARALLEL_MAX}の範囲で指定してください: ${def.maxParallel}`,
+      message: `maxParallel は${PROGRAM_MAX_PARALLEL_MIN}〜${PROGRAM_MAX_PARALLEL_MAX}の範囲で指定してください: ${def.maxParallel}`,
     });
   }
 

@@ -15,9 +15,19 @@ describe('deriveSessionActivityState（issue #286）', () => {
   });
 
   it('approvalsが1件以上あれば承認待ち（busyの値に関わらず優先する）', () => {
-    const approval = { requestId: 1, kind: 'command' as const, title: 't', detail: 'd', itemId: undefined };
-    expect(deriveSessionActivityState({ busy: true, approvals: [approval] })).toBe('approvalPending');
-    expect(deriveSessionActivityState({ busy: false, approvals: [approval] })).toBe('approvalPending');
+    const approval = {
+      requestId: 1,
+      kind: 'command' as const,
+      title: 't',
+      detail: 'd',
+      itemId: undefined,
+    };
+    expect(deriveSessionActivityState({ busy: true, approvals: [approval] })).toBe(
+      'approvalPending',
+    );
+    expect(deriveSessionActivityState({ busy: false, approvals: [approval] })).toBe(
+      'approvalPending',
+    );
   });
 });
 
@@ -37,7 +47,9 @@ describe('decoratePanelTitle（issue #286）', () => {
 
 describe('sanitizeForNotification（issue #286）', () => {
   it('改行・連続空白を1つの半角空白へ畳む', () => {
-    expect(sanitizeForNotification('コマンドを\n実行します\t\t今すぐ')).toBe('コマンドを 実行します 今すぐ');
+    expect(sanitizeForNotification('コマンドを\n実行します\t\t今すぐ')).toBe(
+      'コマンドを 実行します 今すぐ',
+    );
   });
 
   it('前後の空白を取り除く', () => {

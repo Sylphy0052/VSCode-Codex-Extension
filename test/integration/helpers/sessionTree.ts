@@ -1,4 +1,9 @@
-import type { SessionGroupNodeLike, SessionSummaryLike, SessionTreeElementLike, SessionTreeLike } from './extension';
+import type {
+  SessionGroupNodeLike,
+  SessionSummaryLike,
+  SessionTreeElementLike,
+  SessionTreeLike,
+} from './extension';
 
 /**
  * `getChildren()`の戻りがグループノードになりうる（issue #293、既定`codex.history.groupBy:
@@ -27,5 +32,7 @@ export async function flattenSessions(
 }
 
 export function isGroupNode(element: SessionTreeElementLike): element is SessionGroupNodeLike {
-  return typeof element === 'object' && element !== null && 'kind' in element && element.kind === 'group';
+  return (
+    typeof element === 'object' && element !== null && 'kind' in element && element.kind === 'group'
+  );
 }

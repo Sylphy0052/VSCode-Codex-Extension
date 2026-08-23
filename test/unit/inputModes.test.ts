@@ -24,7 +24,10 @@ describe('routeInputMode', () => {
   });
 
   it('先頭が # ならメモリ追記として読み取る', () => {
-    expect(routeInputMode('#常にpnpmを使う')).toEqual({ kind: 'memory', content: '常にpnpmを使う' });
+    expect(routeInputMode('#常にpnpmを使う')).toEqual({
+      kind: 'memory',
+      content: '常にpnpmを使う',
+    });
   });
 
   it('前後の空白は無視する', () => {

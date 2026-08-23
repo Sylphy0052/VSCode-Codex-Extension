@@ -628,8 +628,7 @@ export function detectRoadmapMaterialMismatches(
     const dependsOnMatches =
       expectedDeps.size === actualDeps.size && [...expectedDeps].every((d) => actualDeps.has(d));
     if (!dependsOnMatches) {
-      const expectedText =
-        [...expectedDeps].map((d) => sanitizeForLog(d)).join(', ') || 'なし';
+      const expectedText = [...expectedDeps].map((d) => sanitizeForLog(d)).join(', ') || 'なし';
       const actualText = [...actualDeps].map((d) => sanitizeForLog(d)).join(', ') || 'なし';
       mismatches.push({
         itemId: item.id,
@@ -894,9 +893,7 @@ export function applyRunCompletion(
   for (const item of items) {
     idCounts.set(item.id, (idCounts.get(item.id) ?? 0) + 1);
   }
-  const duplicateIds = [...idCounts.entries()]
-    .filter(([, count]) => count > 1)
-    .map(([id]) => id);
+  const duplicateIds = [...idCounts.entries()].filter(([, count]) => count > 1).map(([id]) => id);
   if (duplicateIds.length > 0) {
     return {
       markdown,

@@ -1300,14 +1300,23 @@ export function parseGithubCiConclusion(stdout: string): CiConclusionResult {
   // 「チェックが0件（`none`）」ではなく想定外の応答形（`failed`）として扱う。空配列
   // （キーがあり、明示的に0件）とは型のレベルで区別する（セキュリティ監査の指摘）
   if (typeof data !== 'object' || data === null) {
-    return { conclusion: 'failed', message: 'statusCheckRollupの出力を解釈できませんでした（想定外の応答形）' };
+    return {
+      conclusion: 'failed',
+      message: 'statusCheckRollupの出力を解釈できませんでした（想定外の応答形）',
+    };
   }
   if (!('statusCheckRollup' in data)) {
-    return { conclusion: 'failed', message: 'statusCheckRollupキーが応答に含まれていません（想定外の応答形）' };
+    return {
+      conclusion: 'failed',
+      message: 'statusCheckRollupキーが応答に含まれていません（想定外の応答形）',
+    };
   }
   const rollup = (data as { statusCheckRollup: unknown }).statusCheckRollup;
   if (!Array.isArray(rollup)) {
-    return { conclusion: 'failed', message: 'statusCheckRollupが配列ではありません（想定外の応答形）' };
+    return {
+      conclusion: 'failed',
+      message: 'statusCheckRollupが配列ではありません（想定外の応答形）',
+    };
   }
   if (rollup.length === 0) {
     return { conclusion: 'none' };
@@ -1381,14 +1390,20 @@ export function parseGitlabCiConclusion(stdout: string): CiConclusionResult {
     return { conclusion: 'failed', message: 'マージリクエストの応答を解釈できませんでした' };
   }
   if (typeof data !== 'object' || data === null) {
-    return { conclusion: 'failed', message: 'マージリクエストの応答を解釈できませんでした（想定外の応答形）' };
+    return {
+      conclusion: 'failed',
+      message: 'マージリクエストの応答を解釈できませんでした（想定外の応答形）',
+    };
   }
   // `head_pipeline`キーが無い・`null`以外の想定外の型は「パイプライン無し（`none`）」
   // ではなく想定外の応答形（`failed`）として扱う。GitLabが「パイプライン自体が無い」
   // ことを表す明示的な形は`null`のみ（`docs.gitlab.com/api/merge_requests/`）。
   // キーが無いのはAPIのスキーマ変更等を想定した異常系（セキュリティ監査の指摘）
   if (!('head_pipeline' in data)) {
-    return { conclusion: 'failed', message: 'head_pipelineキーが応答に含まれていません（想定外の応答形）' };
+    return {
+      conclusion: 'failed',
+      message: 'head_pipelineキーが応答に含まれていません（想定外の応答形）',
+    };
   }
   const headPipeline = (data as Record<string, unknown>)['head_pipeline'];
   if (headPipeline === null) {
@@ -1414,7 +1429,10 @@ export function parseGitlabCiConclusion(stdout: string): CiConclusionResult {
 }
 
 /** ホストごとのCI状態取得コマンド（design.md §16.36）。 */
-function buildCiStatusArgs(host: ForgeHost, number: number): { command: 'gh' | 'glab'; args: string[] } {
+function buildCiStatusArgs(
+  host: ForgeHost,
+  number: number,
+): { command: 'gh' | 'glab'; args: string[] } {
   if (host === 'github') {
     return { command: 'gh', args: ['pr', 'view', String(number), '--json=statusCheckRollup'] };
   }
@@ -1444,7 +1462,9 @@ export async function fetchCiConclusion(
           : `${command} ${args.join(' ')} に失敗しました（終了コード ${result.code}）`,
     };
   }
-  return host === 'github' ? parseGithubCiConclusion(result.stdout) : parseGitlabCiConclusion(result.stdout);
+  return host === 'github'
+    ? parseGithubCiConclusion(result.stdout)
+    : parseGitlabCiConclusion(result.stdout);
 }
 
 /** `waitForCiChecks`のポーリング間隔をテストから注入するための型（`PushBranchWait`と同じ方針）。 */
@@ -1716,7 +1736,12 @@ export async function runFinalMergeWithCiGate(
     }
     const isLastAttempt = attempt === config.maxUpdateBranchRetries;
     if (isLastAttempt || !isBranchNotUpToDateError(merge.message)) {
-      return { ok: false, reason: 'mergeFailed', message: merge.message, updateBranchAttempts: attempt };
+      return {
+        ok: false,
+        reason: 'mergeFailed',
+        message: merge.message,
+        updateBranchAttempts: attempt,
+      };
     }
     // 取り込み直し（baseへ実際に変更を及ぼす操作）を呼ぶ直前でも確認する
     if (isCancelled()) {
@@ -1818,9 +1843,7 @@ function toReviewComment(
       : typeof entry.createdAt === 'string'
         ? entry.createdAt
         : undefined;
-  return createdAt === undefined
-    ? { id, author, body }
-    : { id, author, body, createdAt };
+  return createdAt === undefined ? { id, author, body } : { id, author, body, createdAt };
 }
 
 /**
@@ -1846,7 +1869,9 @@ export function parseGithubReviewComments(stdout: string): ReviewCommentsResult 
     };
   }
   const record = data as Record<string, unknown>;
-  const reviews = Array.isArray(record['reviews']) ? (record['reviews'] as GithubReviewEntry[]) : [];
+  const reviews = Array.isArray(record['reviews'])
+    ? (record['reviews'] as GithubReviewEntry[])
+    : [];
   const comments = Array.isArray(record['comments'])
     ? (record['comments'] as GithubReviewEntry[])
     : [];
@@ -1889,7 +1914,11 @@ export function parseGitlabReviewComments(stdout: string): ReviewCommentsResult 
     return { ok: false, comments: [], message: 'notesの出力を解釈できませんでした' };
   }
   if (!Array.isArray(data)) {
-    return { ok: false, comments: [], message: 'notesの出力を解釈できませんでした（想定外の応答形）' };
+    return {
+      ok: false,
+      comments: [],
+      message: 'notesの出力を解釈できませんでした（想定外の応答形）',
+    };
   }
   const entries = data as GitlabNoteEntry[];
   const result: ReviewComment[] = [];
@@ -1937,7 +1966,9 @@ export async function fetchReviewComments(
           : `${command} ${args.join(' ')} に失敗しました（終了コード ${result.code}）`,
     };
   }
-  return host === 'github' ? parseGithubReviewComments(result.stdout) : parseGitlabReviewComments(result.stdout);
+  return host === 'github'
+    ? parseGithubReviewComments(result.stdout)
+    : parseGitlabReviewComments(result.stdout);
 }
 
 /**

@@ -888,7 +888,7 @@ codex app-server generate-ts --out <DIR>            # TypeScript バインディ
   - **VSCodeに依存する層（`view/**` など、`vscode` モジュールを直接触るファイル）はunitテストから扱わない**。`vscode` はunitテストのプロセス内でimportできないため、判断が要るロジックは純粋関数へ切り出してそちらを試す（例: `view/panelState.ts`）
   - integration（`@vscode/test-electron`、`test/integration/`）: 実VSCode（拡張機能ホスト）上で動く。WSL（xvfb-run経由）で実際に動作することを確認済み（issue #147）。自動化済みの範囲は、拡張機能の有効化・コマンド登録・設定の読み書き（`extension.test.ts` / `configuration.test.ts`、計7件）と、**ワークフローの並列実行**（`workflow.test.ts`、5件。Issue #158）、**履歴一覧**（`sessionHistory.test.ts`、5件。Issue #164）、**疑似worktree**（`workflowPseudoWorktree.test.ts`、5件。Issue #168）、**PR/MRの前提が欠けている場合**（`workflowForgePrerequisites.test.ts`、4件。Issue #169。§16.18）、**PR/MRの作成順序と最終マージ**（`workflowForgeOrder.test.ts`、5件。Issue #172。§16.18）、**統合の衝突と自動解決**（`workflowMerge.test.ts`、4件。Issue #170。§16.17）、**タスク間メッセージング**（`workflowMessaging.test.ts`、6件。Issue #171。§16.21）、**ロードマップの更新と片付け**（`workflowRoadmap.test.ts`、4件。Issue #173。§16.19・§16.17）、**チャット画面の統合テストの土台**（`chatHarness.test.ts`、3件。Issue #186）。ワークフローは`T1 → (T2 || T3) → T4`が依存順に進むこと・T2とT3が同時に走ること・両者が別のworktreeで動いて互いのファイルを踏まないこと・「タスク停止」がそのタスクだけを倒すこと・「中断」がターンだけを止めること・ノードから会話タブへの導線が生きていることを、実VSCode上で確かめる。CLIとの境界（`TaskSessionHost.openTaskSession`）だけを`ExtensionTestApi.workflow`経由でフェイクへ差し替え（`AGENT_SESSIONS_INTEGRATION_TEST=1`が立っているときだけ公開する口。立っていなければ差し替えの経路そのものが無い）、worktreeの作成・スケジューリング・状態遷移・workspaceStateへの保存は実物を通す。画面上の見え方（グラフの段組み・ノードの色・1行要約・タブの復元）と実CLIを伴う挙動は自動化できておらず、[manual-test.md](manual-test.md)のW群に残る。W群の手動手順は、機械で確かめられる範囲を除いた「画面の見え方・モデルの出力そのもの・実ホスト（GitHub / GitLab）が絡む部分」だけへ絞ってある（W-A〜W-E。旧番号W-01〜W-21との対応は同ファイルのW群冒頭）。W群の移送はIssue #167（子: #168〜#173）で完了しており、手動に残っているのは実機・実ホスト・モデルの出力に依存するものだけである。疑似worktree（§16.20）の統合テストは`WorkflowRunner.start(defPath, repoRoot)`の`repoRoot`へVSCodeが開いているワークスペース以外のパスを渡すことで、1回のVSCode起動に相乗りしている。**その起点は`os.tmpdir()`の下へ作る**。`isGitWorkingTree`は`git rev-parse`で親ディレクトリを遡って判定するため、`.vscode-test/`の下（＝このリポジトリの作業ツリーの中）に置くと`.gitignore`済みでも「gitリポジトリである」と判定され、疑似worktreeではなくgitのworktree経路へ流れてしまう（Issue #168で実測）。履歴一覧（TreeView）を狙った`sessionHistory.test.ts`は、`executablePath`を存在しないパスへ固定したまま（実CLIを一切呼ばせないまま）一覧が出ることを確かめる。当初は`ProviderRegistry.available()`が実行ファイルを解決できないプロバイダを一覧からまるごと除外していたため5件とも「一覧が空」で失敗していたが、一覧の構築はファイル読みだけで完結しCLIプロセスを要さないため、実行ファイルの解決可否で絞るのをやめた（Issue #164、§5）。`activate()`はテスト専用の最小限の内部参照（`ExtensionTestApi`）を返し、`SessionTreeProvider`の実インスタンスへテストからアクセスできるようにしてある。統合テストの実行がリモートへ到達しないことは、設定（`forge` / `pullRequest` / `finalMerge`）とフィクスチャ側のガードの二重で保証する（§14.33）。チャット画面（C群・L群）についても同じ「CLIとの境界だけを差し替える」方式が取れることを確かめてある（Issue #186）。境界はCodexが`app-server`との接続（`AppServerConnectionPort`。`ChatViewManager`が構築時に1つ作るため、`activate()`の後から差し替えられるよう間へ包みを1枚挟んでいる）、Claude Codeがプロセスの起動（`ClaudeSpawnPort`。stream-jsonの組み立てとcontrol protocolの往復は`ClaudeStreamSession`の実物を通るので、送っているJSONの中身と順序をそのまま観測できる）。どちらも`ExtensionTestApi.chat`（`AGENT_SESSIONS_INTEGRATION_TEST=1`のときだけ公開）から差し替え、渡さなければ実物へ委譲するため本番の経路は変わらない。C群44件・L群40件の「機械で確かめられる / 実機でしか確かめられない」の仕分けは[manual-test.md](manual-test.md)にあり、移送はIssue #187（Codex）・#188（Claude Code）で進める。Codex側（C群）は#187で、機械に仕分けた16件中15件を`chatCodexApprovals.test.ts`・`chatCodexThreadFlow.test.ts`（計15件）へ移した。webviewのボタン操作はレンダラー側（別プロセス）のJSが担うため拡張機能ホスト側のテストコードから直接クリックを再現できず、`ChatTestApi.simulateCodexWebviewMessage`（`AGENT_SESSIONS_INTEGRATION_TEST=1`限定）を新設し、`panel.webview.onDidReceiveMessage`が受け取るのと同じ形のメッセージを`ChatViewManager.handleMessage`へ直接渡すことで承認の決定・発言の送信・分岐などwebview発の操作を駆動している。タブ復元（`registerWebviewPanelSerializer`がウィンドウリロードで実際にパネルを復元する経路）だけは実VSCodeのライフサイクルが要るため対象外で、C-13b（Claude Codeが常に待ち行列に積まれる挙動）はL群側（#188）で自動化した。Claude Code側（L群）は#188で、機械に仕分けた15件中13件を`chatClaudeHandshake.test.ts`（L-02の成功/失敗2ケース・L-03・L-18、計4件）・`chatClaudeThreadFlow.test.ts`（L-05・L-06・L-08/L-09を1テストで両方確認・C-13b、計4件）・`chatClaudeSettings.test.ts`（L-12・L-14・L-15・L-24・L-29・L-39・L-40、計7件）へ移した（計15件）。Codex画面と同じ考え方で`ClaudeChatViewManager.simulateWebviewMessage`（`ChatViewManager`側と同じ`handleMessage`直呼びの入口）を新設し、`ChatTestApi.simulateClaudeWebviewMessage`（`AGENT_SESSIONS_INTEGRATION_TEST=1`限定）から駆動している。L群のうちL-07（履歴の表示名の作り方）はユニットテスト（`test/unit/claudeTranscript.test.ts`）と`sessionHistory.test.ts`のH-00/H-01が既に担保しておりL群専用fixtureを足す価値が薄いため対象外にした。L-10（forkでidが未確定になること）は、当時`ClaudeChatViewManager`が`fork`ターゲット（`-r <id> --fork-session`）で起動する経路を持たず`extension.ts`の`forkSession`がClaude Codeセッションを明示的に拒否する実装になっていて駆動する入口が無いため対象外にし、設計と実装のギャップとして別Issue（#218）へ切り出していた。Issue #218で`ClaudeChatViewManager.openFork`と`claude.forkSession`コマンドを新設して配線し（§14.40）、`chatClaudeThreadFlow.test.ts`へ1件追加してL群へ復帰させた（計16件。`-r <id> --fork-session`が起動引数に渡ることと元のタブが無傷で残ることを確かめ、`state.threadId`が確定しないままになることは`claudeChatViewManager.test.ts`側のユニットテストで補う）。既定の `npm run check` には含めない（実VSCodeのダウンロード・起動が要り重いため）。`npm run test:integration`（ディスプレイあり）/ `npm run test:integration:xvfb`（ヘッドレスLinux/WSL）で明示的に実行する。後者は`scripts/xvfb-vscode-test.sh`を経由する。`XDG_RUNTIME_DIR`が無い環境ではVSCodeがウィンドウを作る前に無言で止まりハングするため、使い捨てのディレクトリを用意して渡している（§14.32）
   - 実CLIプロセス・Webviewの中身・承認カードのような、実際のCodex/Claude Codeとの対話が要る範囲、および上記の理由で自動化に至らなかった範囲は、引き続き[manual-test.md](manual-test.md)のチェックリストと実施記録で担保する
-- `scripts/check.sh` に lint / typecheck / test を集約し、commit前に全緑を必須とする（integrationテストは含まない）
+- `scripts/check.sh` に lint / format:check / typecheck / test を集約し、commit前に全緑を必須とする（integrationテストは含まない）。`format:check`（`prettier --check .`）を独立したステップとして持つのは、eslintが整形を見ず、`.md` や `.yml` を検査対象にもしないため（Issue #551）
 - パッケージング: `@vscode/vsce`
 
 ## 12. 実装順序（TDD）
@@ -924,7 +924,7 @@ codex app-server generate-ts --out <DIR>            # TypeScript バインディ
 - ウィンドウリロード後、リロード前に開いていたセッションのタブが**同じ列・同じ並び順**で復元され、復元時にフォーカスを奪わない
 - `executablePath` / `additionalArgs` / `codexHome` / `sandbox` / `approvalMode` がワークスペース設定から上書きできないことを確認する
 - fork / archive / unarchive / delete が動作し、deleteは確認ダイアログを経る
-- `scripts/check.sh` が全緑（lint / typecheck / test）で、そのログを完了報告に添付する
+- `scripts/check.sh` が全緑（lint / format:check / typecheck / test）で、そのログを完了報告に添付する
 
 ## 14. プロバイダ抽象とClaude Code対応
 
@@ -3669,10 +3669,10 @@ T4は「T2とT3のブランチをマージする」タスクではない。マ�
 
 `merging` と `blocked` は成果の統合（§16.17）に対応する状態で、次の意味を持つ。
 
-| 状態      | 意味                                                                  |
-| --------- | --------------------------------------------------------------------- |
-| `merging` | ループは終わったが、統合ブランチへのマージがまだ終わっていない        |
-| `done`    | **統合ブランチへ入った。** ループが終わっただけでは `done` にならない |
+| 状態      | 意味                                                                                                                         |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `merging` | ループは終わったが、統合ブランチへのマージがまだ終わっていない                                                               |
+| `done`    | **統合ブランチへ入った。** ループが終わっただけでは `done` にならない                                                        |
 | `blocked` | 作業自体は終わったが、統合ブランチに入っていない（マージが衝突して自動解決にも失敗した、または人が衝突解決を止めて中断した） |
 
 `waitingReply` は他のタスクへ返信を求めて送った状態で、§16.21 に属する。返信が届くか、待ちの上限に達するまで次の指示を送らない。これも並列の枠を占める。
@@ -3763,12 +3763,12 @@ T1がリポジトリ内のファイル（README・コメント・テストデー
 
 ループの停止理由をタスクの結果へそのまま対応させる。
 
-| `LoopStopReason`         | タスクの結果                             |
-| ------------------------ | ---------------------------------------- |
-| `done`                   | `merging`（マージが済んで初めて `done`） |
-| `maxReached`             | `failed`（回数切れ。理由を記録する）     |
-| `failed`                 | `failed`（`retries` の範囲で再試行）     |
-| `manual` / `interrupted` | 実行全体を停止（人が割り込んだとみなす） |
+| `LoopStopReason`         | タスクの結果                                                                         |
+| ------------------------ | ------------------------------------------------------------------------------------ |
+| `done`                   | `merging`（マージが済んで初めて `done`）                                             |
+| `maxReached`             | `failed`（回数切れ。理由を記録する）                                                 |
+| `failed`                 | `failed`（`retries` の範囲で再試行）                                                 |
+| `manual` / `interrupted` | 実行全体を停止（人が割り込んだとみなす）                                             |
 | `taskStopped`            | `failed`（手動）。`merging`（衝突解決中）のタスクは`blocked`。そのタスクだけを止める |
 
 `taskStopped` はワークフローView（§16.8）の「タスク停止」から来る。加えて、オーケストレーターの`stop_task`（§16.23「道具」・Issue #514）と、衝突解決セッションの承認待ちアイドルタイムアウト（§16.17「コンフリクト」8.・Issue #413 PR5）も、それぞれ対象タスク1つだけを狙って`stopLoop()`を呼ぶため同じ`taskStopped`で来る。この3つの送り元はいずれも`WorkflowRunner.stopTask()`（View・`stop_task`の共通入口）または`MergeResolutionEntry`のフラグ（`timedOutByApprovalTimeout`）で区別され、対象タスク1つだけを結果へ落とし込む。**`merging`のタスクに限り、結果は`failed`ではなく`blocked`になる**（Issue #443・#413・#514。`git merge --abort`は呼ばず、統合worktreeは衝突した状態のまま残る。詳細は§16.17「コンフリクト」7.〜9.）。
@@ -4428,24 +4428,24 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 
 `agent.workflows.*` の全16項目。実際に登録している値（型・既定値・markdownDescription）は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている（§7と同じ原則）。
 
-| 設定                                    | スコープ            | 用途・理由                                                                                                                                             |
-| --------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `agent.workflows.dir`                   | resource            | ワークフロー定義ファイルを探すディレクトリ（既定 `.agents/workflows`）。中身は§16.16のとおり信用しないので、置き場自体はワークスペースごとに変えてよい |
-| `agent.workflows.allowAutoApprove`      | machine             | YAMLの `autoApprove: true` を有効化できるかどうか（既定 `false`）。無効化してある間はYAMLの指定によらず全承認を人へ回す（前掲の表参照）                |
-| `agent.workflows.allowClaudeBypassPermissions` | machine      | `claude.permissionMode` が `bypassPermissions` のとき、ワークフローのClaudeタスクもそのまま無人で走らせるかどうか（既定 `false`）。有効にすると§16.7の危険判定が全て無効になる                |
-| `agent.workflows.replyTimeoutSec`       | machine-overridable | タスク間メッセージング（§16.21）の返信待ちの上限秒数                                                                                                   |
-| `agent.workflows.finalMerge`            | machine             | mainを無人で書き換えるかどうかを決める。リポジトリの `.vscode/settings.json` から `auto` や `orchestrator`（既定、§16.26）にされてはいけない           |
-| `agent.workflows.forge`                 | machine             | どのCLI（`gh` / `glab`）を起動するかを決める。実行するコマンドの選択にあたるので §8 と同じ扱いにする                                                   |
-| `agent.workflows.pullRequest`           | machine-overridable | 作るPR/MRの層。権限には関わらない                                                                                                                      |
-| `agent.workflows.roadmapDir`            | machine-overridable | ロードマップの出力先のパス。ワークスペースフォルダの配下に限る                                                                                         |
-| `agent.workflows.pseudoWorktreeExclude` | machine-overridable | 疑似worktreeで複製から外すディレクトリ名。増やしても安全側にしか働かない                                                                               |
-| `agent.workflows.branchNaming`          | machine-overridable | タスクブランチの命名方式（§16.6）。ブランチ名の形を決めるだけで、push先も権限も変えない                                                                |
-| `agent.workflows.draftPullRequest`      | machine-overridable | PR/MRをDraftで作るかどうか（§16.18）。有効にするほうが「人の確認を挟む」側へ倒れるため、強い制限は要らない                                             |
-| `agent.workflows.mergeApprovalTimeoutSec` | machine-overridable | 衝突解決セッション（§16.17「コンフリクト」）が承認待ちのまま止まってよい上限秒数（既定3600秒）。超えたら自動でセッションを止め`blocked`にする。権限には関わらない                |
-| `agent.workflows.taskApprovalTimeoutSec` | machine-overridable | 通常タスクの承認待ち（`waitingApproval`）が止まってよい上限秒数（既定3600秒、§16.39）。超えたら自動でタスクを止め`failed`（理由: `taskApprovalTimedOut`）にする。`mergeApprovalTimeoutSec`（衝突解決セッション専用）とは別のキー。権限には関わらない |
-| `agent.workflows.finalMergeDecisionTimeoutSec` | machine-overridable | `finalMerge: orchestrator` の最終マージ判断待ちの上限秒数（既定900秒、§16.26）。タイムアウトすると `hold` へ倒す                                 |
-| `agent.workflows.ciWaitTimeoutSec`      | machine-overridable | 統合PR/MRをマージする前にCIチェックの完了を待つ上限秒数（既定1800秒、§16.36）。超えたら赤と同じ扱いで失敗にする。権限には関わらない                   |
-| `agent.workflows.ciUpdateBranchMaxRetries` | machine-overridable | マージが「baseの最新でない」ことで拒否されたときの取り込み直しの最大リトライ回数（既定2、§16.36）。権限には関わらない                              |
+| 設定                                           | スコープ            | 用途・理由                                                                                                                                                                                                                                           |
+| ---------------------------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agent.workflows.dir`                          | resource            | ワークフロー定義ファイルを探すディレクトリ（既定 `.agents/workflows`）。中身は§16.16のとおり信用しないので、置き場自体はワークスペースごとに変えてよい                                                                                               |
+| `agent.workflows.allowAutoApprove`             | machine             | YAMLの `autoApprove: true` を有効化できるかどうか（既定 `false`）。無効化してある間はYAMLの指定によらず全承認を人へ回す（前掲の表参照）                                                                                                              |
+| `agent.workflows.allowClaudeBypassPermissions` | machine             | `claude.permissionMode` が `bypassPermissions` のとき、ワークフローのClaudeタスクもそのまま無人で走らせるかどうか（既定 `false`）。有効にすると§16.7の危険判定が全て無効になる                                                                       |
+| `agent.workflows.replyTimeoutSec`              | machine-overridable | タスク間メッセージング（§16.21）の返信待ちの上限秒数                                                                                                                                                                                                 |
+| `agent.workflows.finalMerge`                   | machine             | mainを無人で書き換えるかどうかを決める。リポジトリの `.vscode/settings.json` から `auto` や `orchestrator`（既定、§16.26）にされてはいけない                                                                                                         |
+| `agent.workflows.forge`                        | machine             | どのCLI（`gh` / `glab`）を起動するかを決める。実行するコマンドの選択にあたるので §8 と同じ扱いにする                                                                                                                                                 |
+| `agent.workflows.pullRequest`                  | machine-overridable | 作るPR/MRの層。権限には関わらない                                                                                                                                                                                                                    |
+| `agent.workflows.roadmapDir`                   | machine-overridable | ロードマップの出力先のパス。ワークスペースフォルダの配下に限る                                                                                                                                                                                       |
+| `agent.workflows.pseudoWorktreeExclude`        | machine-overridable | 疑似worktreeで複製から外すディレクトリ名。増やしても安全側にしか働かない                                                                                                                                                                             |
+| `agent.workflows.branchNaming`                 | machine-overridable | タスクブランチの命名方式（§16.6）。ブランチ名の形を決めるだけで、push先も権限も変えない                                                                                                                                                              |
+| `agent.workflows.draftPullRequest`             | machine-overridable | PR/MRをDraftで作るかどうか（§16.18）。有効にするほうが「人の確認を挟む」側へ倒れるため、強い制限は要らない                                                                                                                                           |
+| `agent.workflows.mergeApprovalTimeoutSec`      | machine-overridable | 衝突解決セッション（§16.17「コンフリクト」）が承認待ちのまま止まってよい上限秒数（既定3600秒）。超えたら自動でセッションを止め`blocked`にする。権限には関わらない                                                                                    |
+| `agent.workflows.taskApprovalTimeoutSec`       | machine-overridable | 通常タスクの承認待ち（`waitingApproval`）が止まってよい上限秒数（既定3600秒、§16.39）。超えたら自動でタスクを止め`failed`（理由: `taskApprovalTimedOut`）にする。`mergeApprovalTimeoutSec`（衝突解決セッション専用）とは別のキー。権限には関わらない |
+| `agent.workflows.finalMergeDecisionTimeoutSec` | machine-overridable | `finalMerge: orchestrator` の最終マージ判断待ちの上限秒数（既定900秒、§16.26）。タイムアウトすると `hold` へ倒す                                                                                                                                     |
+| `agent.workflows.ciWaitTimeoutSec`             | machine-overridable | 統合PR/MRをマージする前にCIチェックの完了を待つ上限秒数（既定1800秒、§16.36）。超えたら赤と同じ扱いで失敗にする。権限には関わらない                                                                                                                  |
+| `agent.workflows.ciUpdateBranchMaxRetries`     | machine-overridable | マージが「baseの最新でない」ことで拒否されたときの取り込み直しの最大リトライ回数（既定2、§16.36）。権限には関わらない                                                                                                                                |
 
 push先のremoteをYAMLや設定から選ぶ手段は設けない。常に `origin` を使う。任意のURLへpushできると、リポジトリの中身を別の宛先へ出す経路になる。
 
@@ -4580,9 +4580,9 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 1. タスクのコミットが揃った時点で、タスクブランチをpushする
 2. 統合ブランチが未pushならpushする。baseが存在しないとPR/MRを作れない
 3. PR/MRを作る（base=統合ブランチ、head=タスクブランチ）
-3.5. `agent.workflows.reviewTaskPullRequest` が有効なら、3で作ったPR/MRを別の読み取り専用
-     セッションでレビューする（§16.31）。指摘の有無・レビュー自体の失敗を問わず4へ進む
-     （マージをブロックしない）
+   3.5. `agent.workflows.reviewTaskPullRequest` が有効なら、3で作ったPR/MRを別の読み取り専用
+   セッションでレビューする（§16.31）。指摘の有無・レビュー自体の失敗を問わず4へ進む
+   （マージをブロックしない）
 4. 統合worktreeでマージし、統合ブランチをpushする
 5. `draftPullRequest` が有効なら、3で作ったPR/MRをreadyへ切り替える
 
@@ -4787,11 +4787,11 @@ Claude Codeには、別々に走っているセッションが互いに名前で
 - サーバはrunごとに立て、タスクのセッションを開くときにMCPの設定として渡す
 - **送信元はサーバ側が接続で判別する。** ツールの引数でタスクidを名乗らせない。名乗らせると、あるタスクが別のタスクを騙って送れてしまう
 
-| ツール              | 引数                                            | 返り値                                       |
-| ------------------- | ----------------------------------------------- | -------------------------------------------- |
-| `list_tasks`        | なし                                            | 同じrunのタスクid・状態・直近の応答の1行要約 |
-| `send_message`      | `to`（宛先）・`body`・`expectReply`（真偽）     | 受け付けたかどうかと、その理由                |
-| `ask_orchestrator`  | `question`・`blocking`（真偽）                  | 受け付けたかどうかと、その理由（§16.32、Issue #571） |
+| ツール             | 引数                                        | 返り値                                               |
+| ------------------ | ------------------------------------------- | ---------------------------------------------------- |
+| `list_tasks`       | なし                                        | 同じrunのタスクid・状態・直近の応答の1行要約         |
+| `send_message`     | `to`（宛先）・`body`・`expectReply`（真偽） | 受け付けたかどうかと、その理由                       |
+| `ask_orchestrator` | `question`・`blocking`（真偽）              | 受け付けたかどうかと、その理由（§16.32、Issue #571） |
 
 `wait_reply` のような、返事が来るまでツールの中で待つものは置かない。互いに待つとデッドロックする。
 
@@ -4970,17 +4970,17 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 
 送るイベントは次に限る。走っているタスクの逐一の状態遷移を全部流すと、run 1本でターンが数十回積み上がり、レート制限とコンテキストを食い潰す。
 
-| 契機                 | 送る内容                                           |
-| -------------------- | -------------------------------------------------- |
-| run開始              | ゴール・タスクid一覧・依存関係・並列枠の要約       |
-| タスクが `done`      | id・所要・直近の応答の1行要約                      |
-| タスクが `failed`    | id・理由（回数切れ／ターン失敗／手動停止）         |
-| タスクが停滞して止まる（`stalled`。§16.27、Issue #336） | id・停滞した旨・`continue_task`/`retry_task`のどちらでも復帰できる旨（`taskStalled`） |
-| `waitingApproval` へ | id・要求の1行要約（`TaskPendingApprovalSnapshot`） |
-| `blocked` へ         | id・衝突して統合できていない旨                     |
-| タスクからメッセージを受信（`taskMessage`。§16.34、roadmap W9、Issue #547） | 送信元id・本文・返信待ちかどうか |
-| 統合PR/MRに新しいレビューコメントが付く（`reviewComment`。§16.30、roadmap W5、Issue #339） | 投稿者・本文 |
-| run終了              | 全体の結果・統合とPR/MRの結果                      |
+| 契機                                                                                       | 送る内容                                                                              |
+| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| run開始                                                                                    | ゴール・タスクid一覧・依存関係・並列枠の要約                                          |
+| タスクが `done`                                                                            | id・所要・直近の応答の1行要約                                                         |
+| タスクが `failed`                                                                          | id・理由（回数切れ／ターン失敗／手動停止）                                            |
+| タスクが停滞して止まる（`stalled`。§16.27、Issue #336）                                    | id・停滞した旨・`continue_task`/`retry_task`のどちらでも復帰できる旨（`taskStalled`） |
+| `waitingApproval` へ                                                                       | id・要求の1行要約（`TaskPendingApprovalSnapshot`）                                    |
+| `blocked` へ                                                                               | id・衝突して統合できていない旨                                                        |
+| タスクからメッセージを受信（`taskMessage`。§16.34、roadmap W9、Issue #547）                | 送信元id・本文・返信待ちかどうか                                                      |
+| 統合PR/MRに新しいレビューコメントが付く（`reviewComment`。§16.30、roadmap W5、Issue #339） | 投稿者・本文                                                                          |
+| run終了                                                                                    | 全体の結果・統合とPR/MRの結果                                                         |
 
 - 送信は走行中のターンへ割り込まない。ターン実行中に起きたイベントは溜めておき、**次の送信へまとめて添える**。§16.21の `composeNextPrompt` と同じ流儀にする（合流させないと、並列で3タスクが同時に終わった瞬間に3ターン連続で走る）
 - 人の発話とイベント通知が同時に溜まった場合、**人の発話を基準の本文とし、イベントはその前に添える**。§16.21の対処（`basePrompt` は常に全量温存し、削るのはメッセージ側だけ）と同じ理由で、人の指示が押し出されてはならない
@@ -4994,21 +4994,21 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 
 送信元の判別は既存の流儀どおり**接続で行う**（引数でタスクidを名乗らせない）。オーケストレーター用の接続にだけ、次の制御ツールを追加で見せる。タスク用の接続からは `tools/list` に現れない。**あるタスクがオーケストレーターを騙ってrunを操作することは、接続が違う以上できない。**
 
-| ツール               | 引数                          | 実体                                                 |
-| -------------------- | ----------------------------- | ---------------------------------------------------- |
-| `list_tasks`         | なし                          | 既存（`LIST_TASKS_TOOL`）                            |
-| `send_message`       | `to` / `body` / `expectReply` | 既存（`SEND_MESSAGE_TOOL`）。差出人は `orchestrator` |
-| `get_run_status`     | なし                          | `WorkflowRunner.getSnapshot` の要約                  |
-| `stop_task`          | `taskId`                      | `WorkflowRunner.stopTask`                            |
-| `retry_task`         | `taskId`                      | `WorkflowRunner.retryTask`                           |
-| `continue_task`      | `taskId`                      | `WorkflowRunner.continueTask`                        |
-| `decide_approval`    | `taskId` / `decision`         | `WorkflowRunner.decideApproval`                      |
-| `update_task_prompt` | `taskId` / `continuePrompt`   | 後述（新設）                                         |
-| `decide_final_merge` | `decision` / `reason`         | 後述（新設、§16.26）                                 |
-| `ask_user`           | `question` / `choices`        | 後述（新設、§16.33、Issue #583）                     |
-| `add_task`           | `id` / `prompt` / `done` / `dependsOn` 等 | 後述（新設、§16.29、roadmap W4、Issue #338）        |
-| `remove_task`        | `taskId`                      | 後述（新設、§16.29、roadmap W4、Issue #338）         |
-| `update_task_dependencies` | `taskId` / `dependsOn`  | 後述（新設、§16.29、roadmap W4、Issue #338）         |
+| ツール                     | 引数                                      | 実体                                                 |
+| -------------------------- | ----------------------------------------- | ---------------------------------------------------- |
+| `list_tasks`               | なし                                      | 既存（`LIST_TASKS_TOOL`）                            |
+| `send_message`             | `to` / `body` / `expectReply`             | 既存（`SEND_MESSAGE_TOOL`）。差出人は `orchestrator` |
+| `get_run_status`           | なし                                      | `WorkflowRunner.getSnapshot` の要約                  |
+| `stop_task`                | `taskId`                                  | `WorkflowRunner.stopTask`                            |
+| `retry_task`               | `taskId`                                  | `WorkflowRunner.retryTask`                           |
+| `continue_task`            | `taskId`                                  | `WorkflowRunner.continueTask`                        |
+| `decide_approval`          | `taskId` / `decision`                     | `WorkflowRunner.decideApproval`                      |
+| `update_task_prompt`       | `taskId` / `continuePrompt`               | 後述（新設）                                         |
+| `decide_final_merge`       | `decision` / `reason`                     | 後述（新設、§16.26）                                 |
+| `ask_user`                 | `question` / `choices`                    | 後述（新設、§16.33、Issue #583）                     |
+| `add_task`                 | `id` / `prompt` / `done` / `dependsOn` 等 | 後述（新設、§16.29、roadmap W4、Issue #338）         |
+| `remove_task`              | `taskId`                                  | 後述（新設、§16.29、roadmap W4、Issue #338）         |
+| `update_task_dependencies` | `taskId` / `dependsOn`                    | 後述（新設、§16.29、roadmap W4、Issue #338）         |
 
 - 制御ツールは**既存のrunnerのメソッドをそのまま呼ぶ**。Viewのボタンが通るのと同じ経路にし、モデル用の別経路を作らない。状態遷移の正しさを1か所（`runState.ts`）に保つため
 - `stop_task` の対象は「走行中のタスク」に限らない。**衝突解決セッション（`live.mergeResolutions`。§16.17「コンフリクト」5.）も対象**（issue #514）。`merging` のタスク自身のループは既に終わっているが、統合worktreeで開く衝突解決セッションはまだ生きており、そちらへ `stopLoop()` を届ける。`WorkflowRunner.stopTask` は戻り値（`boolean`）を「送り先を見つけて `stopLoop()` を呼べたか」の根拠にし、見つからなければ `false` を返す。制御ツール側（`buildOrchestratorControlPort` の `stopTask`）はこれを見て `no(...)` を返し、届いていないのに「止めました」という成功を返さない。人はワークフローViewを見て「止まっていない」ことに気づけるが、オーケストレーターは応答（`accepted`）しか見ないため、一度嘘の成功を返すとその経路を二度と再試行しない
@@ -5330,17 +5330,18 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 - **YAMLファイルは書き換えない。** 3つのツール自身は実行中の定義（`LiveRun.def`、メモリ上のみ）を直接書き換え、この3ツール自身の経路からは`persist`を呼ばない。既存の`update_task_prompt`（`continuePromptOverride`）と同じ「実行中だけの上書き」の流儀を踏襲した
 
   **ただし`live.runState`（タスクの状態）は、この3ツール自身が呼ばなくても別の経路（他タスクの完了・`pump`など、`self.persist`を呼ぶ十数箇所）で結果的に永続化される（レビューblocking指摘、2026-08-23）。** `add_task`で加えたタスクのidが、後続の何らかのpersistでたまたま永続データに紛れ込むことがあり、`remove_task`で消したタスクのidは、後続のpersistで永続データから消える。ウィンドウを再読み込みすると、リロード後の復元（`runnerRestore.ts`の`reconcileRestoredTaskStates`）が、この永続データと再読み込みした定義ファイル（YAML本来の内容）を**突き合わせて**ずれを解消する：定義に無いタスクの永続状態は復元しない、永続データに無い定義側のタスクは`pending`として補う。突き合わせで実際に何かを落とす・補うと`reloadTaskDefMismatch`警告が出る。この突き合わせがあって初めて「ウィンドウを再読み込みすればYAML本来の内容へ戻る」が成り立つ（突き合わせ自体の詳細は`runnerRestore.ts`のJSDoc参照。人がrunの途中でYAMLを直接編集してからリロードしたときにも起こりうる、元からあった穴の恒久修正でもある）
+
 - **追加したタスクは既存の検証を必ず通る。** id形式・重複/大小無視の衝突・循環依存・タスク数上限（`MAX_TASK_COUNT`=50）・プロンプト長上限・未定義参照は`validateWorkflow`（§16.2）を候補定義に対してそのまま実行し、`errors`が1件でもあれば適用前に拒否して理由をオーケストレーターへ返す。新しい検証ロジックは作らず、既存の1箇所を再利用する
 - **オーケストレーターは権限を緩められない。** `add_task`の引数に`autoApprove`/`allow`/`sandbox`/`approvalMode`のいずれかが含まれていたら、値を問わず（`false`や`[]`のような無害に見える値でも）即座に拒否する。権限の緩和は人が書いたYAML定義からしか発生しない、という§16.16の信頼境界を、この新しい入口でも維持する
 - **実行中のタスクは消せない。** `remove_task`はタスクの状態が`pending`（まだ開始していない）の場合に限って許可する。動いているタスクを止めたい場合は既存の`stop_task`を使う経路へ誘導する
 
 #### 3つのツール
 
-| ツール | 引数 | 実体 |
-| --- | --- | --- |
-| `add_task` | `id`・`prompt`・`done`・`dependsOn`等（YAMLのタスク定義とほぼ同じ形） | `buildOrchestratorTask`（`workflow.ts`）で候補タスクを組み立て、`validateWorkflow`で検証してから`live.def.tasks`・`live.runState`へ反映 |
-| `remove_task` | `taskId` | `pending`のタスクに限り`live.def.tasks`・`live.runState`から取り除く |
-| `update_task_dependencies` | `taskId`・`dependsOn` | 対象タスクが`pending`の場合に限り`dependsOn`を差し替え、`validateWorkflow`で循環・未定義参照を検証してから反映 |
+| ツール                     | 引数                                                                  | 実体                                                                                                                                    |
+| -------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `add_task`                 | `id`・`prompt`・`done`・`dependsOn`等（YAMLのタスク定義とほぼ同じ形） | `buildOrchestratorTask`（`workflow.ts`）で候補タスクを組み立て、`validateWorkflow`で検証してから`live.def.tasks`・`live.runState`へ反映 |
+| `remove_task`              | `taskId`                                                              | `pending`のタスクに限り`live.def.tasks`・`live.runState`から取り除く                                                                    |
+| `update_task_dependencies` | `taskId`・`dependsOn`                                                 | 対象タスクが`pending`の場合に限り`dependsOn`を差し替え、`validateWorkflow`で循環・未定義参照を検証してから反映                          |
 
 いずれも成功時は`self.notify(runId)`でView側へ変更を伝え、`self.pump(runId)`でスケジューラを再評価させる。`add_task`で増えたタスクや、依存が外れて実行可能になったタスクは次のpumpで即座に拾われる。
 
@@ -5482,7 +5483,6 @@ Issue本文（`buildTaskIssueBody`）・レビュープロンプト（`buildTask
 
 `test/unit/forge.test.ts`が`buildTaskIssueBody`の構成・`createIssue`のホストごとのCLI引数組み立て（GitHub: `gh issue create --body-file=…`、GitLab: `glab api projects/:id/issues --field=description=@…`）・危険な文字列を含む本文が引数へ直接展開されないこと・invalidInput/cliErrorの扱い・一時ファイルの後始末を確かめる。同ファイルが`runTaskPullRequestFlow`に`reviewPullRequest`を渡した場合の呼び出し順序（create→review→merge）・PR/MR作成が失敗すればレビューを呼ばないこと・レビューが失敗（`ok: false`）してもmergeは進むことを確かめる。`test/unit/planner.test.ts`が`reviewTaskPullRequest`について、§16.28の`reviewWorkflowPlan`のテストと同じ観点（指摘の変換・上限・壊れた応答の扱い・起動設定・1ターンで閉じること・`formatUntrusted`のnonce共有）を確かめる。`test/unit/runner.test.ts`が、本番の呼び出し経路（`runner.start` → タスク完了 → `prepareTaskLaunch`/`mergeTaskWithForge`）を通して、`createTaskIssue`/`reviewTaskPullRequest`いずれも既定では動かないこと・有効化するとIssue起票・レビューセッションの起動が実際に起きること・`pullRequest: 'integration'`では起票しないこと・YAML側で`issue`が既に指定されていれば起票しないこと・起票が失敗してもrunは止まらずタスクが完了することを確かめる。実ホスト（GitHub/GitLab）でIssue起票・レビューコメントの内容が実引数として受理されるかは[manual-test.md](manual-test.md)のW-Kに残す。
 
-
 ### 16.32 タスクからオーケストレーターへ判断を仰ぐ経路（`ask_orchestrator`、roadmap W7、Issue #571）
 
 §16.21・§16.34のとおり、`send_message`の宛先はタスクからは常にオーケストレーターに固定されている。しかしこれは「送れる」だけで、「判断を仰いでいる」という意味づけは無かった。タスクが行き詰まったとき、いまできるのは`maxIterations`を消費し尽くすか、`done`を満たさないまま終わるかのどちらかで、能動的にオーケストレーターへ「この方針でよいか」と問う経路が無かった。
@@ -5493,9 +5493,9 @@ Issue本文（`buildTaskIssueBody`）・レビュープロンプト（`buildTask
 
 タスク側の接続にだけ見せる（`list_tasks` / `send_message`と同じ基本ツールの並びに追加する）。**オーケストレーター自身の接続には見せない**（`MessagingMcpServer.visibleTools`）。タスクが判断を仰ぐための道具であり、オーケストレーターが自分自身へ問うことに意味が無いため。`tools/list`に出さないだけでなく、名前を推測して呼ばれた場合に備えて`handleToolCall`側でも同じ条件（`taskId === ORCHESTRATOR_CONNECTION_ID`）で「未知のツール」として拒否する（§16.23の制御ツールが採る多層防御と同じ流儀）。
 
-| 引数 | 型 | 意味 |
-| --- | --- | --- |
-| `question` | string | 問いの本文 |
+| 引数       | 型      | 意味                         |
+| ---------- | ------- | ---------------------------- |
+| `question` | string  | 問いの本文                   |
 | `blocking` | boolean | 答えが届くまで待つ場合はtrue |
 
 呼び出しの実体は、`from`を接続の`taskId`（既存の`send_message`と同じくサーバ側が判別。引数には含めない）、`to`を`ORCHESTRATOR_CONNECTION_ID`に固定した`TaskMessagingHub.sendMessage`の呼び出しに変換するだけである。`expectReply`には`blocking`をそのまま渡す。
@@ -5600,10 +5600,10 @@ hub.sendMessage({ from: taskId, to: ORCHESTRATOR_CONNECTION_ID, body: question, 
 
 `decide_final_merge`と同じく、オーケストレーター専用の接続にだけ見せる（タスク側の接続には現れず、名指しで呼んでも「未知のツール」として拒否する）。`decide_final_merge`と同じ理由で`taskId`を取らないため、`handleControlToolCall`では`taskId`抽出より前の特別扱いの分岐で処理する。
 
-| 引数 | 型 | 意味 |
-| --- | --- | --- |
-| `question` | string | 問いの本文 |
-| `choices` | string[]（2〜4個） | 選択肢 |
+| 引数       | 型                 | 意味       |
+| ---------- | ------------------ | ---------- |
+| `question` | string             | 問いの本文 |
+| `choices`  | string[]（2〜4個） | 選択肢     |
 
 ツールの説明文（`description`）へ、**呼べる条件を絞る文言**を書いた: 担当領域をまたぐ変更（他のワークフローへ影響する）・設計の前提を変える変更・受入基準を下げる判断・同じ失敗を3回繰り返して打つ手が尽きた場合、の4つに限る。この絞り込みは**説明文だけで実現し、機械的には検証しない**（モデルへの指示であり、コード側で「本当に担当領域をまたいでいるか」を判定する手段が無いため）。機械的に強制するのは次項の呼び出し回数上限だけである。
 
@@ -5778,6 +5778,7 @@ roadmap W10（design.md §16.35「中断からの自動再開」、Issue #584。
 - `test/unit/runner.test.ts`（`describe('WorkflowRunner: 直接メッセージングを廃しオーケストレーター中継にする（design.md §16.34、Issue #547）')`）: タスクからタスクid宛の直接送信が拒否されること／タスク→オーケストレーターの`onMessageAccepted`が`notifyOrchestrator`を呼ぶこと・`takeDeliverableMessages`でキューを空にすること（`totalUndeliveredCount()`が0へ戻ることを直接観測）／`expectReply: true`での`waitingReply`遷移が中継後も成立すること（オーケストレーターからの送り返しで実際に`resumeLoop`されるところまで）／オーケストレーターの自己宛拒否・未知宛先拒否が変わらないこと（RED実測は`takeDeliverableMessages`呼び出し1行だけを戻して行う）
 - `test/unit/runner.test.ts`（既存の`describe('メッセージング経由の権限差の警告・実際の送信文面の表示...')`）: 上記の`messagingPermissionEscalation`不発火を明示のテストとして固定・`lastSentPrompt`（実送信文面の表示、Trojan Source対策の制御文字除去）は宛先をオーケストレーターへ差し替えて維持
 - `docs/manual-test.md` W-N: 実VSCode上でタスクからタスクへ直接届かないこと・オーケストレーターの転送が実際のCLIプロセスへ届くことを確認する
+
 ### 16.35 中断からの自動再開（roadmap W10、Issue #584）
 
 #### 背景
@@ -6060,8 +6061,7 @@ W12-1の永続化（`ProgramStore`・`reconcileProgramStateOnReload`）と組み
 
 ```ts
 export type ProgramRunSkipReason =
-  | { kind: 'failedDependency'; failedRunId: string }
-  | { kind: 'haltedByUser' };
+  { kind: 'failedDependency'; failedRunId: string } | { kind: 'haltedByUser' };
 ```
 
 **伝播は不動点まで繰り返す。** `def.runs`の記述順が依存元より依存先を先に書いている場合（例: R3→R2の順でR2がR3に依存）、1周の走査だけでは伝播を取りこぼす。1周で1件でも`skipped`にしたら`progressed`フラグで再走査し、変化が無くなるまで繰り返す。`MAX_PROGRAM_RUN_COUNT`（50）が上限のため、最悪でも50周で必ず止まる。
@@ -6177,6 +6177,7 @@ W7（#571、`ask_orchestrator`）のセキュリティ監査が指摘した。**
 - `test/unit/runnerMessaging.test.ts`相当（既存の待ちぼうけ検出テストへ追加）: `waitingApproval`が1件混ざっていても、残りの`waitingReply`タスクが経路1で解放されることを確認する（Issue #579の副次効果の回帰）
 - `test/unit/runState.test.ts`: `markTaskApprovalTimedOut`の遷移条件（`waitingApproval`のときだけ動く）、`applyAutoResume`が`taskApprovalTimedOut`を`reloadInterrupted`と同列の「他の失敗」として扱い、自動再開をブロックすることを確認する
 - 既存の`agent.workflows.mergeApprovalTimeoutSec`関連テスト（`test/unit/runner.test.ts`の衝突解決セッションのタイムアウト系）が引き続き緑であることを確認し、新しいキー・新しいkindが既存の衝突解決セッション側の挙動に影響していないことを確かめる
+
 ### 16.40 mergeBlockedからの自動復帰が、停止を挟むと起きなくなる（Issue #527）
 
 #### 現象
@@ -6212,6 +6213,7 @@ W7（#571、`ask_orchestrator`）のセキュリティ監査が指摘した。**
 - PR #517の不変条件のテスト（`isRunHalted(run)`が真の間は`markMergeSucceeded`の後も対象が`skipped`のまま。停止中に`pending`が作られないこと）
 - `blockedTaskIds`が`mergeBlockedWhileHalted`へ引き継がれることのアサーション
 - `test/unit/webviewScript.test.ts`の「FAILURE_LABELはTaskFailureReasonの全kindを網羅している」（Issue #579）が、`mergeBlockedWhileHalted`を追加した分の件数（11→12）を機械的に検出することを確認する
+
 ### 16.41 セッションのタブ名の組み立てをユニットテストで検証する（Issue #533）
 
 #### 背景

@@ -46,7 +46,10 @@ export const KILL_ESCALATION_DELAY_MS = 3_000;
  */
 export interface KillableProcess {
   kill(signal?: NodeJS.Signals | number): boolean;
-  once(event: 'exit', listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
+  once(
+    event: 'exit',
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): unknown;
 }
 
 /**

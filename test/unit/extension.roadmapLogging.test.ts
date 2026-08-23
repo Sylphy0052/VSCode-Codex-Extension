@@ -4,7 +4,11 @@ import {
   formatDroppedDependenciesDetail,
   formatRoadmapWarningsDetail,
 } from '../../src/extension';
-import type { CorrectedIssue, DroppedRoadmapDependency, RoadmapIssueEntry } from '../../src/orchestrator/roadmap';
+import type {
+  CorrectedIssue,
+  DroppedRoadmapDependency,
+  RoadmapIssueEntry,
+} from '../../src/orchestrator/roadmap';
 
 /**
  * Issue #427 の受入基準:
@@ -29,9 +33,7 @@ describe('formatRoadmapWarningsDetail（ロードマップ検証の警告をロ�
 
 describe('formatCorrectedIssuesDetail（correctedIssuesのidを無害化してログ用にまとめる）', () => {
   it('制御文字を含むitemIdを無害化する', () => {
-    const issues: CorrectedIssue[] = [
-      { itemId: 'taskevil', actual: 10, expected: 20 },
-    ];
+    const issues: CorrectedIssue[] = [{ itemId: 'taskevil', actual: 10, expected: 20 }];
     const detail = formatCorrectedIssuesDetail(issues);
     expect(detail).not.toContain('');
     expect(detail).toContain('10');
@@ -51,9 +53,7 @@ describe('formatCorrectedIssuesDetail（correctedIssuesのidを無害化して�
 
 describe('formatDroppedDependenciesDetail（droppedDependenciesのidを無害化してログ用にまとめる）', () => {
   it('制御文字を含むidを無害化する', () => {
-    const deps: DroppedRoadmapDependency[] = [
-      { itemId: 'a', dependsOnId: 'b' },
-    ];
+    const deps: DroppedRoadmapDependency[] = [{ itemId: 'a', dependsOnId: 'b' }];
     const detail = formatDroppedDependenciesDetail(deps);
     expect(detail).not.toContain('');
   });

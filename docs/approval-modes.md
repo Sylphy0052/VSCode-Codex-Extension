@@ -32,23 +32,23 @@ CodexとClaude Codeでは承認の設計が違う。Codexは「承認方針(`app
 
 Codexは2軸なので、Claudeの1軸に対しては組み合わせが対応する。
 
-| Claudeの`permissionMode` | Codexで相当する組み合わせ | 備考 |
-| --- | --- | --- |
-| `plan` | `read-only` + `never` | `on-request`だと脱出承認へ化けるため`never`が必須 |
-| `manual` | 任意のサンドボックス + `untrusted` | 都度承認に寄せる |
-| `acceptEdits` / `auto` | `workspace-write` + `on-request` | 作業フォルダ内は無承認、外は承認要求 |
-| `dontAsk` | 完全に相当する値は無い | Codexの`never`は「聞かずに実行」ではなく「聞かずに失敗」 |
-| `bypassPermissions` | `danger-full-access` + `never` | 承認カードが一切出ない。両者とも起動前にモーダルで同意を取る |
+| Claudeの`permissionMode` | Codexで相当する組み合わせ          | 備考                                                         |
+| ------------------------ | ---------------------------------- | ------------------------------------------------------------ |
+| `plan`                   | `read-only` + `never`              | `on-request`だと脱出承認へ化けるため`never`が必須            |
+| `manual`                 | 任意のサンドボックス + `untrusted` | 都度承認に寄せる                                             |
+| `acceptEdits` / `auto`   | `workspace-write` + `on-request`   | 作業フォルダ内は無承認、外は承認要求                         |
+| `dontAsk`                | 完全に相当する値は無い             | Codexの`never`は「聞かずに実行」ではなく「聞かずに失敗」     |
+| `bypassPermissions`      | `danger-full-access` + `never`     | 承認カードが一切出ない。両者とも起動前にモーダルで同意を取る |
 
 ## 本拡張の承認レベル(3段階)
 
 上の対応表は「Codexの2軸をClaudeの1軸へどう読み替えるか」であり、画面に出す語彙としては使いにくい。設定パネルとチャット画面では、両者の上に**共通の3段階**を置き、選ばれた段階からプロバイダごとの値へ展開する（[src/provider/approvalLevel.ts](../src/provider/approvalLevel.ts)）。
 
-| 表示 | 意味 | Codexへの展開 | Claude Codeへの展開 |
-| --- | --- | --- | --- |
-| 全確認 | 読み取り以外は都度確認する | `untrusted` + `workspace-write` + `approvalsReviewer: user` | `manual` |
-| Auto | 承認の可否をエージェント自身が判定する | `on-request` + `workspace-write` + `approvalsReviewer: auto_review` | `auto` |
-| 全承認 | 確認を一切せず実行する | `never` + `danger-full-access` | `bypassPermissions` |
+| 表示   | 意味                                   | Codexへの展開                                                       | Claude Codeへの展開 |
+| ------ | -------------------------------------- | ------------------------------------------------------------------- | ------------------- |
+| 全確認 | 読み取り以外は都度確認する             | `untrusted` + `workspace-write` + `approvalsReviewer: user`         | `manual`            |
+| Auto   | 承認の可否をエージェント自身が判定する | `on-request` + `workspace-write` + `approvalsReviewer: auto_review` | `auto`              |
+| 全承認 | 確認を一切せず実行する                 | `never` + `danger-full-access`                                      | `bypassPermissions` |
 
 - 「全確認」のサンドボックスを`read-only`にしていないのは、承認しても書けない状態になり、Claudeの`manual`（読み取りは無承認、他は都度確認）と挙動がずれるため。読み取り専用にしたい場合はPlan modeを使う。
 - 「Auto」だけが`approvalsReviewer`を`auto_review`にする。承認要求そのものは飛ぶが、答えるのが人ではなくCodex内部の自動レビュー(Guardian)になる。Claudeの`auto`（内部のsafety checksが判定する）と判定主体が揃う。
@@ -67,14 +67,14 @@ TUIのスラッシュコマンドは`/permissions`（旧`/approvals`）。バイ
 
 `codex --help`(0.147.0)にある承認・サンドボックス関連のフラグは次の通り。
 
-| フラグ | 内容 | 本拡張の対応 |
-| --- | --- | --- |
-| `-a` / `--ask-for-approval` | 承認方針(`untrusted` / `on-request` / `never`) | 対応済み(`codex.approvalMode`) |
-| `-s` / `--sandbox` | サンドボックス(`read-only` / `workspace-write` / `danger-full-access`) | 対応済み(`codex.sandbox`) |
-| `--approve-for-me` | 承認要求を`workspace-write`サンドボックス上の自動レビュー(Guardian)へ回す | 対応済み(`codex.approvalsReviewer`。issue #222) |
-| `--dangerously-bypass-approvals-and-sandbox` | 確認を全て飛ばし、サンドボックスなしで実行する | 対応済み(`codex.bypassApprovalsAndSandbox`。issue #222) |
-| `--dangerously-bypass-hook-trust` | hookの信頼確認を省いて実行する | 未対応（承認方法ではなくhook側の話） |
-| `--full-auto` | 0.147.0には存在しない | 対応不要 |
+| フラグ                                       | 内容                                                                      | 本拡張の対応                                            |
+| -------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `-a` / `--ask-for-approval`                  | 承認方針(`untrusted` / `on-request` / `never`)                            | 対応済み(`codex.approvalMode`)                          |
+| `-s` / `--sandbox`                           | サンドボックス(`read-only` / `workspace-write` / `danger-full-access`)    | 対応済み(`codex.sandbox`)                               |
+| `--approve-for-me`                           | 承認要求を`workspace-write`サンドボックス上の自動レビュー(Guardian)へ回す | 対応済み(`codex.approvalsReviewer`。issue #222)         |
+| `--dangerously-bypass-approvals-and-sandbox` | 確認を全て飛ばし、サンドボックスなしで実行する                            | 対応済み(`codex.bypassApprovalsAndSandbox`。issue #222) |
+| `--dangerously-bypass-hook-trust`            | hookの信頼確認を省いて実行する                                            | 未対応（承認方法ではなくhook側の話）                    |
+| `--full-auto`                                | 0.147.0には存在しない                                                     | 対応不要                                                |
 
 ### `--approve-for-me`
 

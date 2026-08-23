@@ -62,9 +62,7 @@ export interface MemoryFileSystemPort {
  * `vscode.workspace.fs.writeFile` がリンクを追従して任意のパスへ書き込んでいた）。
  */
 export type SymlinkResolution =
-  | { kind: 'not-symlink' }
-  | { kind: 'resolved'; target: string }
-  | { kind: 'unresolved' };
+  { kind: 'not-symlink' } | { kind: 'resolved'; target: string } | { kind: 'unresolved' };
 
 /**
  * `thread/list` を叩く口。SessionStoreはこれを介してのみapp-serverを知る

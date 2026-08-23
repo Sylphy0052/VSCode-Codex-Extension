@@ -979,12 +979,13 @@ export type AutoResumeOutcome =
   | { readonly kind: 'nothingToResume' }
   | { readonly kind: 'blockedByOtherFailure' }
   | { readonly kind: 'blockedByAllowGate'; readonly taskIds: readonly string[] }
-  | { readonly kind: 'resumed'; readonly run: RunState; readonly resumedTaskIds: readonly string[] };
+  | {
+      readonly kind: 'resumed';
+      readonly run: RunState;
+      readonly resumedTaskIds: readonly string[];
+    };
 
-export function applyAutoResume(
-  run: RunState,
-  tasks: readonly WorkflowTask[],
-): AutoResumeOutcome {
+export function applyAutoResume(run: RunState, tasks: readonly WorkflowTask[]): AutoResumeOutcome {
   const reloadInterruptedIds: string[] = [];
   let hasOtherFailure = false;
   for (const [id, s] of run.tasks) {

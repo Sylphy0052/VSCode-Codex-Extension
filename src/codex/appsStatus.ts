@@ -46,7 +46,9 @@ export interface InstalledAppRef {
  * 実測: `{apps: [{id, name, description, ...}], missingAppIds: []}`。`app/installed` は
  * `runtimeName` しか持たないため（実測で確認）、人が読める説明はこちらで補う。
  */
-export function parseAppsRead(raw: unknown): Map<string, { name: string; description: string | undefined }> {
+export function parseAppsRead(
+  raw: unknown,
+): Map<string, { name: string; description: string | undefined }> {
   const result = new Map<string, { name: string; description: string | undefined }>();
   const apps = rec(raw)?.['apps'];
   if (!Array.isArray(apps)) {

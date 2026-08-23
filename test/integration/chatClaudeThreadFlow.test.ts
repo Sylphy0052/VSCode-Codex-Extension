@@ -79,7 +79,9 @@ suite('Claude Code画面: プロトコルの状態遷移と配線（Issue #188�
     await chat.simulateClaudeWebviewMessage(sessionId, { type: 'ready' });
 
     // 存在しないidでは「画面が見つからない」で拒否される（取り違えて別画面を操作しない）
-    await assert.rejects(() => chat.simulateClaudeWebviewMessage('not-a-real-session-id', { type: 'ready' }));
+    await assert.rejects(() =>
+      chat.simulateClaudeWebviewMessage('not-a-real-session-id', { type: 'ready' }),
+    );
   });
 
   test('L-05: 中断でinterrupt要求が飛ぶ', async function () {
@@ -107,7 +109,9 @@ suite('Claude Code画面: プロトコルの状態遷移と配線（Issue #188�
         proc
           .writtenLines()
           .some(
-            (l) => l['type'] === 'control_request' && (l['request'] as { subtype?: string } | undefined)?.subtype === 'interrupt',
+            (l) =>
+              l['type'] === 'control_request' &&
+              (l['request'] as { subtype?: string } | undefined)?.subtype === 'interrupt',
           ),
       (found) => found,
       WAIT_OPTIONS,
@@ -142,7 +146,11 @@ suite('Claude Code画面: プロトコルの状態遷移と配線（Issue #188�
     assert.ok(idx >= 0, `-r で起動していない: ${args.join(' ')}`);
     assert.equal(args[idx + 1], manifest.claude.inScope.id);
     assert.equal(args.includes('--session-id'), false, '--resumeなのに--session-idも渡している');
-    assert.equal(args.includes('--fork-session'), false, '--resumeなのに--fork-sessionを渡している');
+    assert.equal(
+      args.includes('--fork-session'),
+      false,
+      '--resumeなのに--fork-sessionを渡している',
+    );
 
     await waitFor(
       () => openTabLabels(),
@@ -154,7 +162,11 @@ suite('Claude Code画面: プロトコルの状態遷移と配線（Issue #188�
     // 前面に来るだけで、プロセスは再起動されずタブも増えない（`openThread` の既存判定）
     await vscode.commands.executeCommand('claude.openChat', session);
     await new Promise((resolve) => setTimeout(resolve, 300));
-    assert.equal(fake.processes.length, 1, 'claudeプロセスが再起動している（タブが二重に開いている）');
+    assert.equal(
+      fake.processes.length,
+      1,
+      'claudeプロセスが再起動している（タブが二重に開いている）',
+    );
     assert.equal(openTabLabels().length, 1, 'タブが二重に開いている');
   });
 
@@ -241,13 +253,19 @@ suite('Claude Code画面: プロトコルの状態遷移と配線（Issue #188�
         .filter((l) => l['type'] === 'user')
         .map((l) => {
           const content = (l['message'] as { content?: unknown } | undefined)?.content;
-          const first = Array.isArray(content) ? (content[0] as { text?: string } | undefined) : undefined;
+          const first = Array.isArray(content)
+            ? (content[0] as { text?: string } | undefined)
+            : undefined;
           return first?.text ?? '';
         });
     }
 
     await chat.simulateClaudeWebviewMessage(sessionId, { type: 'send', text: '最初の指示' });
-    await waitFor(() => userTexts().length, (n) => n === 1, WAIT_OPTIONS);
+    await waitFor(
+      () => userTexts().length,
+      (n) => n === 1,
+      WAIT_OPTIONS,
+    );
 
     // 応答中（busy）に送った指示は、Claude側に割り込みの手段が無いため待ち行列へ積まれる
     // （design.md §9.7「Claude Code: 割り込みに相当する制御が見つかっていない」）。
@@ -255,11 +273,19 @@ suite('Claude Code画面: プロトコルの状態遷移と配線（Issue #188�
     await chat.simulateClaudeWebviewMessage(sessionId, { type: 'send', text: '2件目' });
     await chat.simulateClaudeWebviewMessage(sessionId, { type: 'send', text: '3件目' });
     await new Promise((resolve) => setTimeout(resolve, 300));
-    assert.deepEqual(userTexts(), ['最初の指示'], '待ち行列に積まれるはずの指示がCLIへ送られている');
+    assert.deepEqual(
+      userTexts(),
+      ['最初の指示'],
+      '待ち行列に積まれるはずの指示がCLIへ送られている',
+    );
 
     // ターンが終わる（busyがtrue→falseに変わる）と、待ち行列の先頭から順に送られる
     proc.emitLine({ type: 'result', subtype: 'success', result: 'ok' });
-    await waitFor(() => userTexts().length, (n) => n === 2, WAIT_OPTIONS);
+    await waitFor(
+      () => userTexts().length,
+      (n) => n === 2,
+      WAIT_OPTIONS,
+    );
     assert.deepEqual(userTexts(), ['最初の指示', '2件目']);
 
     // 「今すぐ送る」はCodexの`turn/steer`と違い、応答を中断してから送る
@@ -270,20 +296,31 @@ suite('Claude Code画面: プロトコルの状態遷移と配線（Issue #188�
         proc
           .writtenLines()
           .some(
-            (l) => l['type'] === 'control_request' && (l['request'] as { subtype?: string } | undefined)?.subtype === 'interrupt',
+            (l) =>
+              l['type'] === 'control_request' &&
+              (l['request'] as { subtype?: string } | undefined)?.subtype === 'interrupt',
           ),
       (found) => found,
       WAIT_OPTIONS,
     );
-    await waitFor(() => userTexts().length, (n) => n === 3, WAIT_OPTIONS);
+    await waitFor(
+      () => userTexts().length,
+      (n) => n === 3,
+      WAIT_OPTIONS,
+    );
     assert.deepEqual(userTexts(), ['最初の指示', '2件目', '3件目']);
 
     // interruptが「3件目」の送信より前に書かれている（中断してから送る、の順序確認）
     const lines = proc.writtenLines();
     const interruptIndex = lines.findIndex(
-      (l) => l['type'] === 'control_request' && (l['request'] as { subtype?: string } | undefined)?.subtype === 'interrupt',
+      (l) =>
+        l['type'] === 'control_request' &&
+        (l['request'] as { subtype?: string } | undefined)?.subtype === 'interrupt',
     );
     const lastUserIndex = lines.map((l) => l['type']).lastIndexOf('user');
-    assert.ok(interruptIndex >= 0 && interruptIndex < lastUserIndex, 'interruptより先に3件目が送られている');
+    assert.ok(
+      interruptIndex >= 0 && interruptIndex < lastUserIndex,
+      'interruptより先に3件目が送られている',
+    );
   });
 });

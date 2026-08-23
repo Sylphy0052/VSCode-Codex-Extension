@@ -366,7 +366,7 @@ describe('AppServerConnection: 古い世代のプロセスからの通知を捨�
     return { connection, proc1, proc2 };
   }
 
-  it('古い世代のprocの\'error\'が遅れて届いても、onDisconnectは増えない（レビュー指摘・MEDIUM）', async () => {
+  it("古い世代のprocの'error'が遅れて届いても、onDisconnectは増えない（レビュー指摘・MEDIUM）", async () => {
     const onDisconnect = vi.fn();
     const { proc1 } = await startAndSwitchToProc2(onDisconnect);
     expect(onDisconnect).toHaveBeenCalledTimes(1);

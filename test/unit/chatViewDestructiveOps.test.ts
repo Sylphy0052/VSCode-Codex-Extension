@@ -73,11 +73,14 @@ writableMock.Position = FakePosition;
 writableMock.Selection = FakeSelection;
 writableMock.Range = FakeRange;
 writableMock.TextEditorRevealType = { InCenter: 2 };
-(vscodeMock.workspace.fs as unknown as { delete: (uri: { fsPath: string }, opts: { useTrash: boolean }) => Promise<void> }).delete =
-  (uri, opts) => {
-    deletedFiles.push({ path: uri.fsPath, useTrash: opts.useTrash });
-    return Promise.resolve();
-  };
+(
+  vscodeMock.workspace.fs as unknown as {
+    delete: (uri: { fsPath: string }, opts: { useTrash: boolean }) => Promise<void>;
+  }
+).delete = (uri, opts) => {
+  deletedFiles.push({ path: uri.fsPath, useTrash: opts.useTrash });
+  return Promise.resolve();
+};
 
 /**
  * 共有モックの `workspace.openTextDocument` は実ファイルパス（`Uri.file`）しか
@@ -122,12 +125,13 @@ function patchShowTextDocumentForEditorFake(): FakeTextEditor {
       });
     },
   };
-  (vscodeMock.window as unknown as { showTextDocument: (doc: unknown) => Promise<FakeTextEditor> }).showTextDocument =
-    (doc: unknown) => {
-      const fsPath = (doc as { uri: { fsPath: string } }).uri.fsPath;
-      __mock.openedTextDocumentPaths.push(fsPath);
-      return Promise.resolve(editor);
-    };
+  (
+    vscodeMock.window as unknown as { showTextDocument: (doc: unknown) => Promise<FakeTextEditor> }
+  ).showTextDocument = (doc: unknown) => {
+    const fsPath = (doc as { uri: { fsPath: string } }).uri.fsPath;
+    __mock.openedTextDocumentPaths.push(fsPath);
+    return Promise.resolve(editor);
+  };
   return editor;
 }
 
@@ -510,9 +514,19 @@ describe('handleOpenDiffEditor（issue #359: 差分見出しの「差分を開�
 });
 
 describe('postImageData（issue #359: 会話に出てきた画像だけを返す）', () => {
-  const panelStub = (): { webview: { postMessage: (m: unknown) => Promise<boolean>; sent: unknown[] } } => {
+  const panelStub = (): {
+    webview: { postMessage: (m: unknown) => Promise<boolean>; sent: unknown[] };
+  } => {
     const sent: unknown[] = [];
-    return { webview: { postMessage: (m: unknown) => { sent.push(m); return Promise.resolve(true); }, sent } };
+    return {
+      webview: {
+        postMessage: (m: unknown) => {
+          sent.push(m);
+          return Promise.resolve(true);
+        },
+        sent,
+      },
+    };
   };
 
   it('会話に出てきたパスなら画像データを返す', async () => {
@@ -537,7 +551,9 @@ describe('postImageData（issue #359: 会話に出てきた画像だけを返す
     const message = panel.webview.sent[0] as { type: string; path: string; dataUrl?: string };
     expect(message.type).toBe('imageData');
     expect(message.path).toBe('/tmp/shot.png');
-    expect(message.dataUrl).toBe(`data:image/png;base64,${Buffer.from('binarydata').toString('base64')}`);
+    expect(message.dataUrl).toBe(
+      `data:image/png;base64,${Buffer.from('binarydata').toString('base64')}`,
+    );
   });
 
   it('会話に出てきていないパスは何も送らない（Webviewが要求するパスを信用しない）', async () => {
@@ -563,9 +579,19 @@ describe('postImageData（issue #359: 会話に出てきた画像だけを返す
 });
 
 describe('postFileMentions（issue #359: `@`候補の絞り込み）', () => {
-  const panelStub = (): { webview: { postMessage: (m: unknown) => Promise<boolean>; sent: unknown[] } } => {
+  const panelStub = (): {
+    webview: { postMessage: (m: unknown) => Promise<boolean>; sent: unknown[] };
+  } => {
     const sent: unknown[] = [];
-    return { webview: { postMessage: (m: unknown) => { sent.push(m); return Promise.resolve(true); }, sent } };
+    return {
+      webview: {
+        postMessage: (m: unknown) => {
+          sent.push(m);
+          return Promise.resolve(true);
+        },
+        sent,
+      },
+    };
   };
 
   function fakeScan(files: string[]): FileScanPort {

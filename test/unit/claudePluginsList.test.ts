@@ -90,7 +90,12 @@ describe('parsePluginDetailsText', () => {
 
   it('Component inventoryが無ければprovidesは全項目undefinedのままにする', () => {
     const { provides, description } = parsePluginDetailsText('name 1.0.0\n  説明文のみ');
-    expect(provides).toEqual({ skills: undefined, agents: undefined, hooks: undefined, mcpServers: undefined });
+    expect(provides).toEqual({
+      skills: undefined,
+      agents: undefined,
+      hooks: undefined,
+      mcpServers: undefined,
+    });
     expect(description).toBe('説明文のみ');
   });
 

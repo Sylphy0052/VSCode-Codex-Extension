@@ -179,7 +179,10 @@ suite('Codex画面: プロトコルの状態遷移と配線（Issue #187）', ()
     // 分岐先は新しいスレッドとして`thread/resume`で開き直され、元のタブとは別に増える
     // （元のスレッドの状態には一切触れない）。
     await waitFor(
-      () => connection.callsFor('thread/resume').some((c) => (c.params as { threadId?: string }).threadId === 'thread-fork-dst'),
+      () =>
+        connection
+          .callsFor('thread/resume')
+          .some((c) => (c.params as { threadId?: string }).threadId === 'thread-fork-dst'),
       (found) => found,
       WAIT_OPTIONS,
     );
@@ -210,7 +213,9 @@ suite('Codex画面: プロトコルの状態遷移と配線（Issue #187）', ()
       WAIT_OPTIONS,
     );
     assert.equal(connection?.callsFor('thread/resume').length, 1);
-    assert.deepEqual(connection?.firstCall('thread/resume')?.params, { threadId: 'thread-history' });
+    assert.deepEqual(connection?.firstCall('thread/resume')?.params, {
+      threadId: 'thread-history',
+    });
     await waitFor(
       () => openTabLabels().length,
       (count) => count === 1,
@@ -241,7 +246,10 @@ suite('Codex画面: プロトコルの状態遷移と配線（Issue #187）', ()
 
     // turn/startedがまだ届いていない（turnId不明）間に送った指示は、割り込めないので
     // 待ち行列へ積まれる。turn/steerもturn/startも送らない。
-    await chat.simulateCodexWebviewMessage('thread-steer', { type: 'send', text: '割り込めない指示' });
+    await chat.simulateCodexWebviewMessage('thread-steer', {
+      type: 'send',
+      text: '割り込めない指示',
+    });
     assert.equal(connection.called('turn/steer'), false);
     assert.equal(connection.callsFor('turn/start').length, 1);
 
@@ -262,7 +270,10 @@ suite('Codex画面: プロトコルの状態遷移と配線（Issue #187）', ()
     // turn/steerがapp-server側の都合（ターンの入れ替わりなど）で失敗したときは、
     // 指示を失わず待ち行列へ積み直す（ログに「割り込めなかったため待ち行列へ積みます」）。
     connection.failNext('turn/steer', 'expectedTurnId mismatch');
-    await chat.simulateCodexWebviewMessage('thread-steer', { type: 'send', text: '積み直される指示' });
+    await chat.simulateCodexWebviewMessage('thread-steer', {
+      type: 'send',
+      text: '積み直される指示',
+    });
     assert.equal(connection.callsFor('turn/steer').length, 2, '失敗した割り込みが記録されていない');
 
     // ターンが終わると、待ち行列の先頭（「割り込めない指示」）から順に送られる
@@ -404,11 +415,17 @@ suite('Codex画面: プロトコルの状態遷移と配線（Issue #187）', ()
       { type: 'text', text: '今のタイムゾーンは？' },
     ]);
     assert.equal(
-      connection.callsFor('turn/start').some((c) => (c.params as { threadId?: string }).threadId === 'thread-btw-src'),
+      connection
+        .callsFor('turn/start')
+        .some((c) => (c.params as { threadId?: string }).threadId === 'thread-btw-src'),
       false,
       '本流のスレッドへも送られている',
     );
-    assert.equal(connection.called('thread/resume'), false, 'ephemeralスレッドをresumeで開き直している');
+    assert.equal(
+      connection.called('thread/resume'),
+      false,
+      'ephemeralスレッドをresumeで開き直している',
+    );
 
     await waitFor(
       () => openTabLabels(),

@@ -1,8 +1,4 @@
-import {
-  emptyPluginProvides,
-  type PluginProvides,
-  type PluginView,
-} from '../provider/plugins';
+import { emptyPluginProvides, type PluginProvides, type PluginView } from '../provider/plugins';
 
 /**
  * Codexの `plugin/installed` の応答からplugin一覧を組み立てる（issue #32、design.md §14.20）。

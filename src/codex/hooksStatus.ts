@@ -1,4 +1,9 @@
-import { isValidHookKey, type HookOrigin, type HookTrustState, type HookView } from '../provider/hooks';
+import {
+  isValidHookKey,
+  type HookOrigin,
+  type HookTrustState,
+  type HookView,
+} from '../provider/hooks';
 
 /**
  * Codexの `hooks/list` の応答からhooks一覧を組み立てる。
@@ -80,7 +85,12 @@ const KNOWN_ORIGINS: readonly HookOrigin[] = [
   'unknown',
 ];
 
-const KNOWN_TRUST_STATES: readonly HookTrustState[] = ['managed', 'untrusted', 'trusted', 'modified'];
+const KNOWN_TRUST_STATES: readonly HookTrustState[] = [
+  'managed',
+  'untrusted',
+  'trusted',
+  'modified',
+];
 
 function parseHookMetadata(rawHook: unknown): HookView | undefined {
   const hook = rec(rawHook);

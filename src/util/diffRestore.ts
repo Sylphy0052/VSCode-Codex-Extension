@@ -186,8 +186,7 @@ function locateUniqueOccurrence(
   if (newString === '') {
     return {
       ok: false,
-      error:
-        '追加後の文字列が空（削除だけの変更）のため、書き換え位置を一意に特定できません',
+      error: '追加後の文字列が空（削除だけの変更）のため、書き換え位置を一意に特定できません',
     };
   }
   const first = currentContent.indexOf(newString);

@@ -183,7 +183,11 @@ suite('PR/MRの前提が欠けている場合（design.md §16.18）', () => {
 
     // ワークフロー自体は止まらず、統合ブランチへのローカルのマージまで進む。
     commitAndFinish('T1', 't1.md');
-    const merged = await waitForSnapshot(runId, (s) => stateOf(s, 'T1') === 'done', 'T1がdoneになる');
+    const merged = await waitForSnapshot(
+      runId,
+      (s) => stateOf(s, 'T1') === 'done',
+      'T1がdoneになる',
+    );
     assert.equal(stateOf(merged, 'T1'), 'done');
 
     const log = git('log', '--oneline', `wf/${runId}/integration`);

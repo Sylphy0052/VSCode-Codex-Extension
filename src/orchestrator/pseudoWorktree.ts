@@ -290,8 +290,7 @@ export function integrationManifestPath(workspaceRoot: string, runId: string): s
 }
 
 export type LoadManifestResult =
-  | { ok: true; manifest: IntegrationManifest }
-  | { ok: false; message: string };
+  { ok: true; manifest: IntegrationManifest } | { ok: false; message: string };
 
 /**
  * 永続化されたマニフェストを読み戻す（design.md §16.11の対象。Issue #380）。
@@ -379,8 +378,14 @@ export async function loadPersistedManifest(
   if (realFilePath !== undefined) {
     const realRoot = await fs.realpath(workspaceRoot);
     const expectedFilePath =
-      realRoot !== undefined ? path.join(realRoot, path.relative(workspaceRoot, filePath)) : undefined;
-    if (realRoot === undefined || expectedFilePath === undefined || realFilePath !== expectedFilePath) {
+      realRoot !== undefined
+        ? path.join(realRoot, path.relative(workspaceRoot, filePath))
+        : undefined;
+    if (
+      realRoot === undefined ||
+      expectedFilePath === undefined ||
+      realFilePath !== expectedFilePath
+    ) {
       return {
         ok: false,
         message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際には想定した場所以外を指しています）: ${sanitizeForLog(filePath)}`,
@@ -532,8 +537,14 @@ export async function persistManifest(
   const realRoot = await fs.realpath(workspaceRoot);
   const realFilePath = await fs.realpath(filePath);
   const expectedFilePath =
-    realRoot !== undefined ? path.join(realRoot, path.relative(workspaceRoot, filePath)) : undefined;
-  if (realFilePath === undefined || expectedFilePath === undefined || realFilePath !== expectedFilePath) {
+    realRoot !== undefined
+      ? path.join(realRoot, path.relative(workspaceRoot, filePath))
+      : undefined;
+  if (
+    realFilePath === undefined ||
+    expectedFilePath === undefined ||
+    realFilePath !== expectedFilePath
+  ) {
     await fs.removeFile(filePath);
     throw new Error(
       `疑似worktreeの統合マニフェストの永続化先が実際には想定した場所以外を指していたため、` +
@@ -1933,7 +1944,10 @@ export async function reflectIntegrationToWorkspace(
           // システム）だと`rename`がクロスデバイスで`EXDEV`になり失敗しうるため。
           // ファイル名は`crypto.randomBytes`による推測不能な接尾辞を持たせる。予測可能な
           // 名前だと、そこへ先回りしてシンボリックリンクを仕込まれる別の攻撃面になる。
-          const tempTarget = path.join(targetDir, `.pwt-reflect-${randomBytes(16).toString('hex')}.tmp`);
+          const tempTarget = path.join(
+            targetDir,
+            `.pwt-reflect-${randomBytes(16).toString('hex')}.tmp`,
+          );
           try {
             await fs.copyFile(source, tempTarget);
             // 二次防御の仕上げ（TOCTOU）。`persistManifest`と同じく、書いた後に実パスを

@@ -167,7 +167,10 @@ export class ClaudeStreamSession {
    * `mcpStatusWaiting` と同じ形。プロセスが無ければ`undefined`で即解決する
    * （`checkMcpStatus`と同じ「見えない」側への倒し方）。
    */
-  private readonly skillsWaiting = new Map<string, (snapshot: SkillsSnapshot | undefined) => void>();
+  private readonly skillsWaiting = new Map<
+    string,
+    (snapshot: SkillsSnapshot | undefined) => void
+  >();
 
   constructor(
     private readonly claudePath: () => string,
@@ -232,10 +235,7 @@ export class ClaudeStreamSession {
    * `noteLocalEvent`と同じくCLIとのやり取り（transcript）には一切乗らない、
    * この画面だけの表示。同じidで呼び直すと上書きする（`appendSideQuestion`参照）。
    */
-  noteSideQuestion(
-    id: string,
-    display: { status: string; text: string; detail: string },
-  ): void {
+  noteSideQuestion(id: string, display: { status: string; text: string; detail: string }): void {
     this.update(appendSideQuestion(this.state, id, display));
   }
 
@@ -419,7 +419,11 @@ export class ClaudeStreamSession {
    * 切り替えの通知が来ないため、ここで持たないと画面が追従できない。
    */
   setFastMode(on: boolean): void {
-    if (this.proc === undefined || this.state.fastMode === undefined || this.state.fastMode === on) {
+    if (
+      this.proc === undefined ||
+      this.state.fastMode === undefined ||
+      this.state.fastMode === on
+    ) {
       return;
     }
     this.update({ ...this.state, busy: true, turnFailed: false, fastMode: on });
@@ -1142,7 +1146,9 @@ export class ClaudeStreamSession {
     }
 
     if (outgoing?.kind === 'rewindConversation') {
-      this.rewindConversationWaiting.get(response.requestId)?.(readRewindConversationResult(response));
+      this.rewindConversationWaiting.get(response.requestId)?.(
+        readRewindConversationResult(response),
+      );
       this.rewindConversationWaiting.delete(response.requestId);
       return;
     }
@@ -1163,9 +1169,9 @@ export class ClaudeStreamSession {
     }
 
     if (outgoing?.kind === 'mcpStatus') {
-      this.mcpStatusWaiting
-        .get(response.requestId)
-        ?.(response.ok ? readMcpServersList(response.payload) : undefined);
+      this.mcpStatusWaiting.get(response.requestId)?.(
+        response.ok ? readMcpServersList(response.payload) : undefined,
+      );
       this.mcpStatusWaiting.delete(response.requestId);
       return;
     }

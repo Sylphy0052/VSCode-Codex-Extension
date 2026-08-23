@@ -58,11 +58,19 @@ describe('trimmedArgsOrUndefined', () => {
 
 describe('routePseudoCommand', () => {
   it('コマンド行だけなら引き受ける', () => {
-    expect(routePseudoCommand(pseudo, '/compact')).toEqual({ name: 'compact', action: 'compact', args: '' });
+    expect(routePseudoCommand(pseudo, '/compact')).toEqual({
+      name: 'compact',
+      action: 'compact',
+      args: '',
+    });
   });
 
   it('前後の空白は無視する', () => {
-    expect(routePseudoCommand(pseudo, '  /compact  ')).toEqual({ name: 'compact', action: 'compact', args: '' });
+    expect(routePseudoCommand(pseudo, '  /compact  ')).toEqual({
+      name: 'compact',
+      action: 'compact',
+      args: '',
+    });
   });
 
   it('引数は取り出して渡す', () => {

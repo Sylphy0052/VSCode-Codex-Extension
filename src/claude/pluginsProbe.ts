@@ -63,7 +63,9 @@ export class ClaudePluginsProbe {
     };
   }
 
-  private run(args: string[]): Promise<{ ok: true; stdout: string } | { ok: false; error: string }> {
+  private run(
+    args: string[],
+  ): Promise<{ ok: true; stdout: string } | { ok: false; error: string }> {
     return new Promise((resolve) => {
       execFile(this.claudePath(), args, { timeout: this.timeoutMs }, (error, stdout, stderr) => {
         if (error !== null) {

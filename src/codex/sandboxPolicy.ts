@@ -39,7 +39,9 @@ export function sandboxPolicyFor(
     case 'workspace-write': {
       const policy: Record<string, unknown> = { type: 'workspaceWrite' };
       // 相対パスはapp-serverが受け付けない（AbsolutePathBuf）。黙って落とす
-      const roots = (options?.writableRoots ?? []).filter((root) => root !== '' && isAbsolute(root));
+      const roots = (options?.writableRoots ?? []).filter(
+        (root) => root !== '' && isAbsolute(root),
+      );
       if (roots.length > 0) {
         policy['writableRoots'] = [...roots];
       }

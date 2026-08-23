@@ -893,7 +893,11 @@ describe('readRewindConversationResult（issue #333、design.md §14.61）', () 
   it('control protocol自体が失敗した場合（response.ok:false）も rewound:false として扱う', () => {
     const response = readControlResponse({
       type: 'control_response',
-      response: { subtype: 'error', request_id: 'req_3', error: 'Unsupported control request subtype' },
+      response: {
+        subtype: 'error',
+        request_id: 'req_3',
+        error: 'Unsupported control request subtype',
+      },
     });
     expect(readRewindConversationResult(response!)).toEqual({
       rewound: false,
@@ -987,7 +991,11 @@ describe('readSideQuestionResult（issue #334、design.md §14.62）', () => {
   it('control protocol自体が失敗した場合（response.ok:false）は error を持ち、成功と誤判定しない', () => {
     const response = readControlResponse({
       type: 'control_response',
-      response: { subtype: 'error', request_id: 'req_3', error: 'Unsupported control request subtype' },
+      response: {
+        subtype: 'error',
+        request_id: 'req_3',
+        error: 'Unsupported control request subtype',
+      },
     });
     const result = readSideQuestionResult(response!);
     expect(result.ok).toBe(false);

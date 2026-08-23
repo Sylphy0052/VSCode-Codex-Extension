@@ -530,8 +530,18 @@ describe('waitingApprovalが混ざっていても他タスクのwaitingReply解�
     await flush();
     expect(store.find(runId)?.tasks['A']?.state).toBe('waitingApproval');
 
-    state.hub?.sendMessage({ from: 'B', to: ORCHESTRATOR_CONNECTION_ID, body: 'b', expectReply: true });
-    state.hub?.sendMessage({ from: 'C', to: ORCHESTRATOR_CONNECTION_ID, body: 'c', expectReply: true });
+    state.hub?.sendMessage({
+      from: 'B',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: 'b',
+      expectReply: true,
+    });
+    state.hub?.sendMessage({
+      from: 'C',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: 'c',
+      expectReply: true,
+    });
     await flush();
     expect(store.find(runId)?.tasks['B']?.state).toBe('waitingReply');
     expect(store.find(runId)?.tasks['C']?.state).toBe('waitingReply');

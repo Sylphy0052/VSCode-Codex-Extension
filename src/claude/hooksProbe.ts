@@ -60,10 +60,7 @@ export class ClaudeHooksProbe {
    * `claude` を起動し、`initialize` に続けて1件だけ制御要求を送って応答を待つ。
    * 対応する `request_id` の応答が届くか、タイムアウトするまで待つ。
    */
-  private send(
-    requestLine: string,
-    requestId: string,
-  ): Promise<ControlResponse | undefined> {
+  private send(requestLine: string, requestId: string): Promise<ControlResponse | undefined> {
     return new Promise((resolve) => {
       const proc = spawn(
         this.claudePath(),
@@ -125,10 +122,7 @@ export class ClaudeHooksProbe {
 }
 
 /** 出力の1行を読み、指定した `requestId` への応答であればそれだけ返す。 */
-function readResponseFromLine(
-  line: string,
-  requestId: string,
-): ControlResponse | undefined {
+function readResponseFromLine(line: string, requestId: string): ControlResponse | undefined {
   let event: unknown;
   try {
     event = JSON.parse(line);

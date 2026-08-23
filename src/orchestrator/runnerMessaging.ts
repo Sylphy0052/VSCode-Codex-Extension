@@ -8,7 +8,12 @@ import {
 } from './messaging';
 import { ORCHESTRATOR_CONNECTION_ID } from './orchestratorSession';
 import { notifyOrchestrator } from './runnerOrchestrator';
-import { isActiveTaskState, markWaitingReply, resumeFromWaitingReply, type TaskState } from './runState';
+import {
+  isActiveTaskState,
+  markWaitingReply,
+  resumeFromWaitingReply,
+  type TaskState,
+} from './runState';
 import type { TaskSession } from './taskSession';
 import type { LiveRun } from './runner';
 import type { WorkflowRunnerInternals } from './runnerInternals';
@@ -30,7 +35,10 @@ import type { WorkflowRunnerInternals } from './runnerInternals';
  */
 
 /** `TaskMessagingHub`の`list_tasks`が返す一覧を組み立てる（design.md §16.21）。 */
-export function buildRunTaskSnapshots(self: WorkflowRunnerInternals, runId: string): RunTaskSnapshot[] {
+export function buildRunTaskSnapshots(
+  self: WorkflowRunnerInternals,
+  runId: string,
+): RunTaskSnapshot[] {
   const live = self.runs.get(runId);
   if (live === undefined) {
     return [];
@@ -53,7 +61,11 @@ export function buildRunTaskSnapshots(self: WorkflowRunnerInternals, runId: stri
  *   （`resumeFromWaitingReply`）、ループを再開する（`session.resumeLoop()`。返信の本文自体は
  *   `setPromptTransform`の`composeNextPrompt`が次の送信へ添える）
  */
-export function onMessageAccepted(self: WorkflowRunnerInternals, runId: string, message: StoredMessage): void {
+export function onMessageAccepted(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  message: StoredMessage,
+): void {
   const live = self.runs.get(runId);
   if (live === undefined) {
     return;

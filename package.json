@@ -1052,6 +1052,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "compile:integration": "tsc -p tsconfig.integration.json",
