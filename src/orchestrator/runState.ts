@@ -91,10 +91,11 @@ export type TaskFailureReason =
   | { readonly kind: 'mergeBlocked'; readonly blockedTaskIds: readonly string[] }
   /**
    * `mergeBlocked`で`skipped`になっていたタスクが、run全体の停止中に
-   * `skipRemainingPending`の対象になった（Issue #527、design.md §16.40）。
-   * 停止解除後に`markMergeSucceeded`が復帰対象として拾えるよう、`mergeBlocked`と
-   * 区別して記録する（`runHalted`へ倒すと、`pending`から`runHalted`になった他の
-   * タスクと見分けがつかず、復帰条件で分離できなくなる）。`blockedTaskIds`は
+   * `markMergeSucceeded`の復帰処理を通り、停止中のため`pending`へ戻せなかった
+   * （Issue #527、design.md §16.40）。停止解除後に`markMergeSucceeded`が復帰対象として
+   * 拾えるよう、`mergeBlocked`と区別して記録する（`runHalted`へ倒すと、`pending`から
+   * `runHalted`になった他のタスク——`skipRemainingPending`・`reconcileRunOnReload`が
+   * 作るもの——と見分けがつかず、復帰条件で分離できなくなる）。`blockedTaskIds`は
    * 倒す前の`mergeBlocked`から引き継ぐ（`markMergeSucceeded`の括弧書き表示に使う）。
    */
   | { readonly kind: 'mergeBlockedWhileHalted'; readonly blockedTaskIds: readonly string[] }
