@@ -45,6 +45,7 @@ import type {
   OrchestratorControlResult,
   TaskMessagingHub,
 } from '../../src/orchestrator/messaging';
+import { ORCHESTRATOR_CONTROL_TOOLS } from '../../src/orchestrator/messaging';
 import {
   WorkflowRunStore,
   type PersistedRun,
@@ -8835,6 +8836,24 @@ tasks:
     // ループは使わない（1回きりの送信だけ）
     expect(session.runLoopCalls).toHaveLength(0);
   });
+
+  it(
+    'ORCHESTRATOR_CONTROL_TOOLSの各ツールが案内文に1つずつ現れる（Issue #589、' +
+      'decide_final_mergeだけが列挙から漏れていた。将来ツールを足したときに' +
+      '案内文の更新漏れを機械で検出する）',
+    async () => {
+      const { runner, codexHost } = createHarness(YAML_ONE);
+      await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+      await flush();
+
+      const session = codexHost.orchestratorSessions[0] as FakeTaskSession;
+      const introBody = session.sentTexts[0] as string;
+
+      for (const tool of ORCHESTRATOR_CONTROL_TOOLS) {
+        expect(introBody, `案内文に${tool.name}が列挙されていない`).toContain(tool.name);
+      }
+    },
+  );
 
   it('タスクが完了すると通知が届き、run終了ではセッションを解放しない', async () => {
     const { runner, codexHost } = createHarness(YAML_ONE);

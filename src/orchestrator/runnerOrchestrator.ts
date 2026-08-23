@@ -84,6 +84,9 @@ function buildIntroBody(live: LiveRun, resume?: OrchestratorResumeContext): stri
       '届いた場合も、この send_message（to に問うたタスクのidを指定）で答える）',
     '- stop_task / retry_task / continue_task / decide_approval: タスクを止める・やり直す・続ける・承認する',
     '- update_task_prompt: 走行中のタスクの継続指示を差し替える（方針転換）',
+    '- decide_final_merge: 統合PR/MRの作成後、mainへ最終マージするか（merge）・PR/MRを' +
+      '残すか（hold）を判断する（`finalMerge: orchestrator`のrunでのみ判断待ちが立つ）。' +
+      'get_run_statusで差分・警告欄・統合の状況を確認したうえで呼ぶこと',
     '- add_task / remove_task / update_task_dependencies: 計画そのものを直す' +
       '（タスクの追加・pendingタスクの削除・pendingタスクの依存の変更）。人の承認は挟まず' +
       'あなたの判断で適用され、適用した内容は全文が警告欄へ残ります。追加するタスクにも' +
