@@ -9,6 +9,7 @@ import {
   identifierError,
   runIdError,
 } from './fsGuards';
+import { clampWorktreeRemovalAttempts } from './runState';
 import { sanitizeForLog } from './sanitize';
 import { SerialQueue } from './serialQueue';
 import { withRetrySuffix } from './worktree';
@@ -1410,9 +1411,13 @@ export async function removePseudoWorktreeAttempts(
   totalAttempts: number,
   fs: PseudoWorktreeFileSystemPort,
 ): Promise<RemovePseudoWorktreeResult> {
+  // Issue #490: 呼び出し側（`runner.ts`）も丸めるが、ここでも丸める。この関数は
+  // exportされており、丸めていない`retryCount + manualRetryCount`をそのまま渡す
+  // 呼び出しが将来増えうるため。防御は呼ばれる側に置く
+  const attempts = clampWorktreeRemovalAttempts(totalAttempts);
   const retries: Array<number | undefined> = [
     undefined,
-    ...Array.from({ length: totalAttempts }, (_, i) => i),
+    ...Array.from({ length: attempts }, (_, i) => i),
   ];
   const messages: string[] = [];
   let firstFailureReason: Extract<RemovePseudoWorktreeResult, { ok: false }>['reason'] | undefined;

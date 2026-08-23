@@ -27,6 +27,7 @@ import type {
   PullRequestLayerConfig,
 } from '../../src/orchestrator/forge';
 import { deserializeManifest, integrationPath } from '../../src/orchestrator/pseudoWorktree';
+import { MAX_WORKTREE_REMOVAL_ATTEMPTS } from '../../src/orchestrator/runState';
 import {
   ORCHESTRATOR_CONNECTION_ID,
   DEFAULT_MAX_ASK_USER_PER_RUN,
@@ -12748,5 +12749,131 @@ tasks:
     expect(runner.decideFinalMerge(runId, 'merge', '人が確認済み')).toBe(true);
     await flush();
     expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBe('merged');
+  });
+});
+
+describe('worktree撤去の試行回数の上限（Issue #490）', () => {
+  const YAML = `
+version: 1
+name: removal-cap-test
+defaults:
+  cleanup: keep
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+
+  /**
+   * `manualRetryCount`を大きな値にしたrunを永続化してから復元する。
+   *
+   * `retryTask`を実際に何百回も呼ぶ代わりに復元経路を使う。**この上限は「人が
+   * ワークフローViewの再実行を押し続けた」ときに効くもので、押した回数そのものを
+   * 再現する必要は無い**——撤去側が見るのは`retryCount + manualRetryCount`の値だけで
+   * あり、その値がどう積み上がったかには依存しない。
+   */
+  async function reloadedRunWithRetries(
+    store: WorkflowRunStore,
+    runId: string,
+    manualRetryCount: number,
+  ): Promise<void> {
+    await store.update(runId, () => ({
+      runId,
+      defPath: '/repo/.agents/workflows/removal-cap.yaml',
+      workspaceRoot: '/repo',
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      tasks: {
+        T1: {
+          state: 'done',
+          sessionId: 'session-1',
+          cwd: `/repo/.agents/worktrees/${runId}/T1`,
+          branch: `wf/${runId}/T1`,
+          submissionCount: 1,
+          retryCount: 0,
+          manualRetryCount,
+          failure: undefined,
+          pullRequestNumber: undefined,
+          pullRequestUrl: undefined,
+        },
+      },
+      haltedByUser: false,
+      integrationBranch: `wf/${runId}/integration`,
+      integrationPullRequestNumber: undefined,
+      integrationPullRequestUrl: undefined,
+      finalMergeOutcome: undefined,
+      pendingAskUser: undefined,
+    }));
+  }
+
+  function makeRunner(
+    store: WorkflowRunStore,
+    git: FakeGitHandle,
+    warn: (message: string) => void,
+    pseudoFs?: FakePseudoFs,
+  ): WorkflowRunner {
+    return new WorkflowRunner({
+      hosts: { codex: new FakeHost(), claude: new FakeHost() },
+      worktreeQueue: new WorktreeCreationQueue(),
+      git,
+      fs: identityFs,
+      filePort: filePort(YAML),
+      store,
+      log: { ...fakeLogger, warn },
+      ...(pseudoFs === undefined ? {} : { pseudoWorktree: { fs: pseudoFs, exclude: [] } }),
+      readBaseline: () => ({
+        codexSandbox: 'read-only',
+        codexApprovalMode: 'on-request',
+        claudePermissionMode: 'manual',
+        allowAutoApprove: true,
+        allowClaudeBypassPermissions: false,
+      }),
+    });
+  }
+
+  it('git側: 上限を超える再試行があっても、撤去の試行は「初回＋上限回」で頭打ちになる', async () => {
+    const store = new WorkflowRunStore(fakeMemento());
+    const runId = '00000000-0000-4000-8000-000000000490';
+    await reloadedRunWithRetries(store, runId, MAX_WORKTREE_REMOVAL_ATTEMPTS + 250);
+
+    const git = fakeGit();
+    const warnings: string[] = [];
+    const runner = makeRunner(store, git, (m) => warnings.push(m));
+    await runner.restoreRunsForView();
+
+    await runner.removeWorktrees(runId);
+
+    const removeCalls = git.calls.filter((c) => c.args[0] === 'worktree' && c.args[1] === 'remove');
+    // 「初回（retryなし）＋ 0..上限-1」で上限+1回。上限が効いていなければ351回になる
+    expect(removeCalls).toHaveLength(MAX_WORKTREE_REMOVAL_ATTEMPTS + 1);
+    // 撤去されずに残る分があることを人へ知らせる（黙って諦めない）
+    expect(warnings.some((m) => m.includes('残ります'))).toBe(true);
+  });
+
+  it('疑似worktree側: git側と同じ上限が効く（片方だけだと対称性が崩れる）', async () => {
+    const store = new WorkflowRunStore(fakeMemento());
+    const runId = '00000000-0000-4000-8000-000000000491';
+    await reloadedRunWithRetries(store, runId, MAX_WORKTREE_REMOVAL_ATTEMPTS + 250);
+
+    const git = fakeGit({ notGitRepo: true });
+    const pseudoFs = new FakePseudoFs();
+    const realpathCalls: string[] = [];
+    const originalRealpath = pseudoFs.realpath.bind(pseudoFs);
+    pseudoFs.realpath = async (target: string): Promise<string | undefined> => {
+      realpathCalls.push(target);
+      return originalRealpath(target);
+    };
+    const warnings: string[] = [];
+    const runner = makeRunner(store, git, (m) => warnings.push(m), pseudoFs);
+    await runner.restoreRunsForView();
+
+    await runner.removeWorktrees(runId);
+
+    // 撤去対象のパスに対する`realpath`の回数で数える。撤去そのもの（`removeDirRecursive`）は
+    // 対象が存在しなければ呼ばれないため、**呼ばれないことが上限のせいなのか不在のせいなのかを
+    // 区別できない**。`realpath`は試行ごとに必ず1回通る
+    const t1Calls = realpathCalls.filter((p) => p.includes(`/${runId}/T1`));
+    expect(t1Calls).toHaveLength(MAX_WORKTREE_REMOVAL_ATTEMPTS + 1);
+    expect(warnings.some((m) => m.includes('残ります'))).toBe(true);
   });
 });
