@@ -11,6 +11,47 @@
 
 - **WF-G 横断の仕上げ**（18項目）
   - T26 eslintへ型情報を要するルールを導入し、未処理Promiseを機械的に検出できるようにする
+    **当初の前提は `chatScript.ts` 1ファイルだったが、実測は3ファイル4739行である**
+    （2026-08-23、第2回の途中で測り直した）。`chatScript.ts` 2476 /
+    `controlPanelScript.ts` 1141 / `workflowScript.ts` 1122。
+    **前提の出どころはWF-Fの見積りで、チャット画面という担当領域の内側で数えたため
+    1ファイルになった。**T26は「テンプレートリテラルで型検査が効かない場所」という
+    横断の条件で切るもので、担当領域で切ると `workflowScript.ts` と
+    `controlPanelScript.ts` が落ちる。
+    **検出は `grep -rln "acquireVsCodeApi" src/view/*.ts` で引くこと**
+    （`conversationView.ts` 224行も返るが、これはHTMLを組み立てる側なので除外）。
+    `grep -rln "型検査もlintも効かない" src/` は使わない——`workflowScript.ts` の
+    ヘッダでその一文が折り返し、「型検査もlintも」と「効かない」が別の行にあるため
+    **取りこぼす**。
+    **ラベル表は16あり、3階層に分かれる。直し方が違う**（以下は #527 時点の観測。
+    **着手時に測り直すこと**——#645 のマージで `FAILURE_LABEL` の件数が11→12へ動き、
+    この数字は書いた直後に既に古くなった）。
+    (1) **`Record<UnionType, string>` — tscが網羅を強制する。2件。何もしなくてよい**
+    （`src/extension.ts:2232` `ACTION_LABELS`、`src/provider/import.ts:110`
+    `ITEM_TYPE_LABEL`）。値を足してラベルを足し忘れるとコンパイルが落ちる。
+    **「確認して、何もしなくてよいと分かった」を書き残すこと**——書かないと次の人が
+    同じ確認をやり直す。
+    (2) **`Record<string, string>` — 型は付いているが開いている。7件**
+    （`appserver/autoApprovalReview.ts:23` / `appserver/chatState.ts:569`・`578`・`881` /
+    `appserver/transcriptMarkdown.ts:15`・`33` / `view/settingsProvider.ts:1048`）。
+    **直し方はテストではない。キーのunion型を作って `Record<UnionType, string>` に変える**
+    ——(1)の形にすればtscが守る。T26（型情報ルールの導入）の本題そのもの。
+    (3) **テンプレートリテラルの中 — 型検査が届かない。7件**
+    （`chatScript.ts:92` `KIND_LABEL` / `:159` `STATUS_LABEL` / `:1338` `TODO_MARK` /
+    `:1717` `EXTRA_USAGE_DISABLED_REASON_LABEL` / `:1805` `LOOP_STOP_LABEL` /
+    `workflowScript.ts:19` `STATE_LABEL` / `:31` `FAILURE_LABEL` / `:975`
+    `PROGRAM_SKIP_REASON_LABEL`）。型注釈を書く場所が無いので、
+    `test/unit/webviewScript.test.ts` が `FAILURE_LABEL` にやっている形
+    （対応する型定義をソースから抽出してキーを突き合わせる）しか手が無い。
+    **「同じテストを繰り返すだけ」ではない。抽出の形が4種以上ある**——
+    `FAILURE_LABEL` は `| { readonly kind: 'x' }` の複数行union、
+    `PROGRAM_SKIP_REASON_LABEL` は同じunionだが**1行書き**で範囲の切り出しが効かない、
+    `LOOP_STOP_LABEL` は `| 'maxReached'` のstring literal unionで正規表現が別物、
+    `STATE_LABEL` は `(typeof TASK_STATES)[number]` で配列リテラルからの抽出が要る。
+    そして **`EXTRA_USAGE_DISABLED_REASON_LABEL` は閉じた型が存在しない**
+    （CLIの語彙をそのまま受けている）ため、**網羅を主張する相手がおらず同じ検査は
+    原理的に書けない**。型を作るところからになる。
+    **追いIssueに「6回繰り返すだけ」と書かないこと**——着手した人が最初の1つで止まる
   - [#491](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/491)
     終了したrunを `retry_task` で再開してもオーケストレーターの制御ツールが復活しない
   - [#502](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/502)
@@ -64,6 +105,48 @@
     警告ポップアップの「詳しくはログ」に出力チャネルを開く導線が無い
   - [#527](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/527)
     複数の親からブロックされた後続が、停止解除後に自動復帰しない
+    **完了。PR #645が2026-08-23にmainへマージ済み（マージコミット
+    `1a5a11da`）。**`TaskFailureReason` へ `mergeBlockedWhileHalted` を新設し（11→12種）、
+    `markMergeSucceeded` が停止中に倒す先をそれに変え、復帰フィルタが
+    `mergeBlocked` と併せて2つを見るようにした。`blockedTaskIds` は倒す前から引き継ぐ。
+    design.mdへ§16.40を新設、manual-test.mdへW-Sを追加。
+    **担当が最初に立てた案（判断軸を「`dependsOn` が全て `done` か」へ置き換える）は
+    採らなかった。**採らなかった理由が§16.40に残っている——復帰条件を「マージブロック
+    だったか」から「依存が揃ったか」へ広げると、停止時にまだ `pending` だっただけの
+    子孫まで巻き込む。**原因は「区別が記録されていないこと」であり、区別を条件で
+    補おうとすると別の巻き込みを生む。だから区別そのものを状態へ記録した。**
+    **`runHalted` を書く経路は3つあり、そのうち1つだけが由来が違った**
+    （`skipRemainingPending` と `reconcileRunOnReload` は `pending` から、
+    `markMergeSucceeded` だけが `skipped(mergeBlocked)` から）。**1つの値が由来の違う
+    2種類を指していたのが原因そのもの。**
+    **`blockedTaskIds` は判定に使われていない**（読み手は `markMergeBlocked` の累積と
+    `workflowScript.ts` の括弧書き表示だけ）。だから「どの親でブロックされていたか」を
+    復元する必要は無く、`pending` へ戻して `nextTasksToStart` の依存充足チェックに
+    委ねられる。**停止を挟むと括弧書きが消えていた既存の欠落も、引き継ぎで直った。**
+    **第2回（#589 / #502 / #579 / #527、いずれも2026-08-23）の記録。**
+    **第1回で決めた「マージ後に各PRの枝を名指しでgrepする」は今回も実行した**が、
+    **確認対象に存在しないものを1つ混ぜてしまった。**全体オーケストレーターが
+    「#643の枝と#644の枝が両方あること」と書いたが、**#644 は棚を触っていないので
+    #644の枝は存在しない。**担当は実行前にこれを見つけられなかった。理由が本質で、
+    **検査は「見つからない」を返すだけで、それが「消えた」なのか「もともと無い」なのかを
+    区別しない。**今回は無害だったが、同じ形で「確認したが見つからなかった」を「消えた」と
+    読めば差し戻しの理由になる。**確認対象を並べるとき、各項目が「あるはず」なのか
+    「無いはず」なのかを先に書くこと。**書かないと0件がどちらの意味かを事後に決めることに
+    なり、そのとき都合のいいほうへ倒れる。
+    **`.agents/handoff/` の削除は #644 で守られず、#645 で守られた。**
+    PR #638 で「Issueをクローズするコミットで同じく削除する」と決めた直後の #644 が
+    `wf-g-issue-579.md` を残した（本PRで回収）。#645 は指示に「#644 で守られなかった」を
+    添えたら守られた。**規約は「書いてある」だけでは守られず、「直近で破られた」を
+    添えて初めて守られる。**
+    **前の回の申し送りは、効く範囲を測ってから渡すこと。**#527 の申し送り5件のうち
+    2件（`TaskFailureReason` は12種 / `toHaveLength(12)` がまた RED になる）は、
+    第3回の #533・#599 には効かなかった——どちらも `runState.ts` に触らないため。
+    効かない項目が混ざっても害は無いように見えるが、**受け取る側は「全部関係がある」と
+    読んで確認に時間を使う。**
+    **Issue本文のコード引用は、起票時点のスナップショットであって現在の実態ではない。**
+    #599 本文が両ファイル同じコードとして1つだけ引いていた箇所は、実測では片方が
+    `Codex:` の直書き、もう片方が `${LABEL}:` の変数だった。#533「純粋関数へ切り出す」の
+    設計が変わる差である
   - [#533](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/533)
     セッションのタブ名の組み立てがユニットテストで検証されていない。
     **#599 と同じ回で扱う**（テストの無い関数の優先順位を変えるため、先にテストを置く）
@@ -131,6 +214,29 @@
     近いが別のIssueとして #413・#539（どちらも衝突解決セッションの承認待ち、クローズ済み）が
     あるが、そこで入った除外もタイムアウトも通常タスクには適用されていない。
     出どころはW7（#571）のセキュリティ監査のlow指摘で、W7の範囲外として記録だけ残したもの
+    **完了。PR #644が2026-08-23にmainへマージ済み（マージコミット
+    `b2354234`）。**`taskApprovalTimeoutSec` を新設し、超過した通常タスクの
+    `waitingApproval` を `failed` + 新しい理由 `taskApprovalTimedOut` で解放する。
+    design.mdへ§16.39を新設（§16.16の件数も16へ再導出、§16.17を更新）、
+    manual-test.mdへW-Rを追加。
+    **`approvalTimedOut` ではなく `taskApprovalTimedOut` にした。**`approvalTimeout`
+    という語は既に衝突解決セッションの経路を16箇所で指しており、**倒す先が違う**
+    （あちらは `blocked`、こちらは `failed`）。**1つの語が2つの意味を持つと、
+    判定側で分離できなくなる**——これは #527 で `runHalted` が実際にそうなっていた形と
+    同じで、#527 の直し方（区別を状態へ記録する）もここから来ている。
+    **`FAILURE_LABEL` の網羅テストをこのPRで入れた**
+    （`test/unit/webviewScript.test.ts`）。`TaskFailureReason` の定義ブロックから
+    kindを抽出して件数を固定し、ラベル表と突き合わせる。
+    **件数を固定した理由がテスト自身のコメントに書いてある**——「範囲の切り出しに失敗すると
+    0件になりうる。0件だと後続の検査が何も検査しないまま素通りしてしまう」。
+    **抽出の正規表現を `TaskFailureReason` の定義ブロックに限らないと
+    `AutoResumeOutcome` の4件が混ざる**（担当と全体オーケストレーターがこの取り違えで
+    11と15に割れた）。その取り違えを `not.toContain` の主張に変換してテストへ入れてある。
+    **これが #527 で新kind名の衝突検査として実際に効いた。**
+    **取り違えを直すときは、同じ取り違えが次に起きたら機械が落ちる形にしてから閉じること。**
+    **そして、そうして入れた検査が後の変更で RED になっても、緩めたり削ったりしないこと**
+    ——変更した側から見れば「自分のせいで落ちたテスト」なので、最小の手当ては検査を
+    消すことになる。そこで検出力が消える。#527 の指示にはこの一文を明示的に入れ、守られた
   - [#589](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/589)
     オーケストレーターへの案内文（`buildIntroBody`）に`decide_final_merge`だけが列挙されていない。
     W1（#335）が道具を足したときの列挙漏れで、**W8より前からある既存の穴である**。
