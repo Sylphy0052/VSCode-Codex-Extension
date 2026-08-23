@@ -108,6 +108,9 @@ export function chatScript(
     collabAgentToolCall: 'サブエージェント操作',
     autoApprovalReview: '自動承認レビュー',
     sideQuestion: '脇道の質問',
+    // Claude CodeのReadツール。describeTool（claude/transcript.ts）が作る種類で、
+    // Codex側には対応する項目種別が無い
+    fileRead: 'ファイル読み取り',
   };
 
   /** ホスト側から渡されたレビューボタンの動作。 */
@@ -1810,6 +1813,9 @@ export function chatScript(
     interrupted: '手動の操作が入ったため止めました',
     // design.md §16.27、Issue #336。同じ応答が繰り返され進捗が無いまま停止した
     stalled: '同じ応答が繰り返されたため止めました',
+    // design.md §16.8。ワークフローViewの「タスク停止」による停止。manual（この画面の
+    // 停止ボタン）とは別の操作なので、LoopStopReason側で区別されている
+    taskStopped: 'ワークフローから停止されました',
   };
 
   function applyLoop(loop) {
