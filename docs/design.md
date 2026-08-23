@@ -6177,3 +6177,38 @@ W7（#571、`ask_orchestrator`）のセキュリティ監査が指摘した。**
 - `test/unit/runnerMessaging.test.ts`相当（既存の待ちぼうけ検出テストへ追加）: `waitingApproval`が1件混ざっていても、残りの`waitingReply`タスクが経路1で解放されることを確認する（Issue #579の副次効果の回帰）
 - `test/unit/runState.test.ts`: `markTaskApprovalTimedOut`の遷移条件（`waitingApproval`のときだけ動く）、`applyAutoResume`が`taskApprovalTimedOut`を`reloadInterrupted`と同列の「他の失敗」として扱い、自動再開をブロックすることを確認する
 - 既存の`agent.workflows.mergeApprovalTimeoutSec`関連テスト（`test/unit/runner.test.ts`の衝突解決セッションのタイムアウト系）が引き続き緑であることを確認し、新しいキー・新しいkindが既存の衝突解決セッション側の挙動に影響していないことを確かめる
+### 16.40 mergeBlockedからの自動復帰が、停止を挟むと起きなくなる（Issue #527）
+
+#### 現象
+
+2つ以上の親からマージブロック（`mergeBlocked`）でskippedになっている合流タスクは、run全体の停止（`haltedByUser`または`hasFailedTask`。`isRunHalted`）を挟むと、両方の親のマージが成功しても自動でpendingへ戻らなくなっていた。停止を挟まなければ`markMergeSucceeded`が`mergeBlocked`のskippedを拾ってpendingへ戻す（§16.17）が、停止中に一方の親が再マージ成功すると、この合流タスクの`failure.kind`が`mergeBlocked`から`runHalted`へ書き換わり（Issue #432-1、停止中は新規のpendingを作らないための措置）、その後停止が解除されてもう一方の親のマージが成功したとき、復帰フィルタが`s.failure?.kind !== 'mergeBlocked'`だけを見ているため、`runHalted`になったこのタスクを素通りしてしまう。
+
+#### 原因: `runHalted`が2つの由来を混ぜていた
+
+`skipped`状態へ`failure: { kind: 'runHalted' }`を書き込む経路は3つある。
+
+- `skipRemainingPending`（`runState.ts`）: `pending → skipped(runHalted)`（停止時にまだ何も始まっていなかったタスク）
+- `markMergeSucceeded`（`runState.ts`、`isRunHalted(run)`が真のときの分岐）: `skipped(mergeBlocked) → skipped(runHalted)`（停止前からすでにマージブロックされていたタスク）
+- `reconcileRunOnReload`（`runStore.ts`）: `pending → skipped(runHalted)`（リロードで中断されたタスクの後続）
+
+3つとも同じ`{ kind: 'runHalted' }`という値を書き込むが、**2つ目だけが由来が違う**。前者2つは「停止時にまだpendingだっただけ」で、状態としては単に開始を待っていたタスクである。2つ目は「マージブロックという、それ自体はマージ関連の理由による失敗が先にあり、そこへ停止が重なった」タスクである。1つの`runHalted`という値でこの2種類を表現していたため、`markMergeSucceeded`の復帰フィルタが「停止前は`mergeBlocked`だった」ことを条件にpendingへ戻そうとしても、両者を状態から区別できなかった。これが#527の直接の原因である。
+
+**判断軸を`dependsOn`が全て`done`かへ置き換える案は採らなかった。** 復帰条件を「マージブロックだったか」から「依存が揃ったか」へ広げると、停止時にまだ`pending`だっただけの子孫（`skipRemainingPending`・`reconcileRunOnReload`由来の`runHalted`）まで復帰対象に巻き込んでしまう。原因は「区別が記録されていないこと」であり、区別を条件で補おうとすると別の巻き込みを生む。だから区別そのものを状態へ記録する形にした。
+
+#### 対応
+
+`TaskFailureReason`（`runState.ts`）に`mergeBlockedWhileHalted`を新設し、`blockedTaskIds`（元の`mergeBlocked`から引き継ぐ）を持たせた。`markMergeSucceeded`が停止中に依存先を書き換える先を、`runHalted`から`mergeBlockedWhileHalted`へ変えた。`skipRemainingPending`・`reconcileRunOnReload`が作る`runHalted`はそのまま変えていない。
+
+**停止中の振る舞いは1ミリも変えていない。** `isRunHalted(run)`が真の間はpendingへ戻さず`skipped`のままにする、というPR #517の不変条件（「`nextTasksToStart`が開始しない`pending`を作ってはならない」）はそのまま維持した。変わるのは、停止が解除された後に復帰できるかどうかだけである。
+
+復帰フィルタ（`markMergeSucceeded`）は`mergeBlocked`と`mergeBlockedWhileHalted`の両方を「マージブロック由来のskipped」として拾い、pendingへ戻す。**復帰先はpendingであってrunningではない。** もう一方の親がまだ完了していない状態でpendingへ戻しても、スケジューラ（`scheduler.ts`の`nextTasksToStart`）の依存充足チェック（`dependsOn`が全て`done`）が開始を止めるため、開始されない`pending`を作ることにはならない。その親が後でマージ成功したとき、対象はすでに`pending`のため復帰フィルタの`state !== 'skipped'`で素通りし、そのまま`pending`で残る。依存が揃った時点で次のスケジューラのpumpが拾う。孤立しない。これは`applyAutoResume`のJSDocが「スケジューラの依存充足チェックに委ねる」と書いているのと同じ考え方で、`markMergeSucceeded`側で全親の完了を判定する必要が無い理由でもある。
+
+`blockedTaskIds`を`mergeBlockedWhileHalted`へ引き継ぐようにしたため、停止を挟んだタスクでもワークフローViewの括弧書き表示（`describeFailure`、`workflowScript.ts`）が消えなくなった。従来は`runHalted`へ倒れた時点でこの情報が失われ、停止を挟むと画面から元のブロック元タスクIDの表示が消えていた。これは今回の主目的（自動復帰）とは別だが、同じ原因（`runHalted`への書き換えで情報を捨てていたこと）が引き起こしていた既存の欠落の修復でもある。
+
+#### 確かめ方
+
+- `test/unit/runState.test.ts`の`markMergeSucceeded`配下: Issue #527の再現手順（2つの親からmergeBlocked→停止→片方のマージ成功→停止解除→もう片方のマージ成功→自動でpendingへ戻る。`nextTasksToStart`にも実際に拾われる）を確認する
+- 単一の親からmergeBlockedされた場合の既存の回帰テスト（新kindを足したことで従来の復帰が壊れていないか）
+- PR #517の不変条件のテスト（`isRunHalted(run)`が真の間は`markMergeSucceeded`の後も対象が`skipped`のまま。停止中に`pending`が作られないこと）
+- `blockedTaskIds`が`mergeBlockedWhileHalted`へ引き継がれることのアサーション
+- `test/unit/webviewScript.test.ts`の「FAILURE_LABELはTaskFailureReasonの全kindを網羅している」（Issue #579）が、`mergeBlockedWhileHalted`を追加した分の件数（11→12）を機械的に検出することを確認する

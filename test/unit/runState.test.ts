@@ -23,8 +23,8 @@ import {
   type RunState,
   type TaskRunState,
 } from '../../src/orchestrator/runState';
-import type { WorkflowTask } from '../../src/orchestrator/workflow';
-import { getRunOutcome } from '../../src/orchestrator/scheduler';
+import type { WorkflowDefinition, WorkflowTask } from '../../src/orchestrator/workflow';
+import { getRunOutcome, nextTasksToStart } from '../../src/orchestrator/scheduler';
 
 /** テストで頻出する最小構成のタスク。dependsOn以外は固定値でよい。 */
 const task = (id: string, dependsOn: string[] = [], retries = 0): WorkflowTask => ({
@@ -714,10 +714,11 @@ describe('マージの結果に応じた遷移（design.md §16.17）', () => {
      * `nextTasksToStart`は停止中のrunで新規開始を一切しないため、`pending`へ戻すと
      * 誰にも開始されない`pending`が残り、`getRunOutcome`が`running`を返し続けて
      * runが永久に終わらない（`retryTask`/`continueTask`は`pending`を受理しないため
-     * 人も救えない）。`skipped`（`runHalted`）のままにしておけば、人が`retryTask`で
-     * 拾い直せる（`retryTask`は`skipped`なら理由を問わず受理し`haltedByUser`も解除する）。
+     * 人も救えない）。`skipped`（`mergeBlockedWhileHalted`。Issue #527で`runHalted`から
+     * 分離した）のままにしておけば、人が`retryTask`で拾い直せる（`retryTask`は`skipped`
+     * なら理由を問わず受理し`haltedByUser`も解除する）。
      */
-    it('停止中に再マージが成功しても、mergeBlockedのskippedをpendingへ戻さずrunHaltedへ倒す', () => {
+    it('停止中に再マージが成功しても、mergeBlockedのskippedをpendingへ戻さずmergeBlockedWhileHaltedへ倒す', () => {
       const tasks = chainTasks();
       let run = toMerging(tasks, 'T1');
       run = markMergeSucceeded(run, tasks, 'T1');
@@ -737,9 +738,13 @@ describe('マージの結果に応じた遷移（design.md §16.17）', () => {
       run = markMergeSucceeded(run, tasks, 'T2');
       expect(stateOf(run, 'T2').state).toBe('done');
       expect(run.haltedByUser).toBe(true);
-      // pendingへ戻さず、skipped(runHalted)のままにする
+      // pendingへ戻さず、skipped(mergeBlockedWhileHalted)のままにする。blockedTaskIdsは
+      // 元のmergeBlockedから引き継ぐ
       expect(stateOf(run, 'T4').state).toBe('skipped');
-      expect(stateOf(run, 'T4').failure).toEqual({ kind: 'runHalted' });
+      expect(stateOf(run, 'T4').failure).toEqual({
+        kind: 'mergeBlockedWhileHalted',
+        blockedTaskIds: ['T2'],
+      });
     });
 
     /**
@@ -752,9 +757,9 @@ describe('マージの結果に応じた遷移（design.md §16.17）', () => {
      * へ戻してしまい、`nextTasksToStart`には拾われないまま`getRunOutcome`が`running`を
      * 返し続ける同じ袋小路が起きる。
      *
-     * 停止中と同じく`skipped`（`runHalted`）へ倒せば、`getRunOutcome`は`pending`も
-     * `merging`等の活性状態も残らない時点で`anyFailed`を見て`'failed'`を返し、runが
-     * 終端に達する。
+     * 停止中と同じく`skipped`（`mergeBlockedWhileHalted`）へ倒せば、`getRunOutcome`は
+     * `pending`も`merging`等の活性状態も残らない時点で`anyFailed`を見て`'failed'`を返し、
+     * runが終端に達する。
      */
     it('haltedByUserがfalseでもhasFailedTaskがtrueなら、mergeBlockedのskippedをpendingへ戻さない', () => {
       const tasks = [task('T1', []), task('T2', ['T1']), task('T5', [])];
@@ -777,12 +782,93 @@ describe('マージの結果に応じた遷移（design.md §16.17）', () => {
       run = markMergeSucceeded(run, tasks, 'T1');
       expect(stateOf(run, 'T1').state).toBe('done');
 
-      // pendingへ戻さず、skipped(runHalted)のままにする
+      // pendingへ戻さず、skipped(mergeBlockedWhileHalted)のままにする
       expect(stateOf(run, 'T2').state).toBe('skipped');
-      expect(stateOf(run, 'T2').failure).toEqual({ kind: 'runHalted' });
+      expect(stateOf(run, 'T2').failure).toEqual({
+        kind: 'mergeBlockedWhileHalted',
+        blockedTaskIds: ['T1'],
+      });
 
       // getRunOutcomeが`running`のまま固着せず、`failed`として終端に達する
       expect(getRunOutcome(run)).toBe('failed');
+    });
+
+    /**
+     * Issue #527: 複数の親からブロックされた後続が、停止解除後に自動復帰しない。
+     *
+     * Issue本文の再現手順5ステップをそのまま自動テストにしたもの（Issue自身の受入基準）。
+     * T4はT2・T6の2つの親に依存する合流タスク。T2の再マージ成功時点で、`isRunHalted`が
+     * 真のため`markMergeSucceeded`はT4の`failure.kind`を`mergeBlocked`から
+     * `mergeBlockedWhileHalted`へ書き換える（Issue #432-1の停止中の振る舞いは維持したまま、
+     * 由来を記録する）。その後、停止が別経路（T5への`retryTask`）で解除されてからT6の
+     * 再マージが成功すると、フィルタが`mergeBlocked`と`mergeBlockedWhileHalted`の両方を
+     * 拾うため、T4は`pending`へ戻る。
+     *
+     * 修正前のコード（`mergeBlockedWhileHalted`を持たず`runHalted`へ倒していた）では、
+     * T4の`failure.kind`が`mergeBlocked`ではなくなる（`runHalted`のまま）ことを理由に
+     * フィルタが素通りし、`pending`へ戻らなかった（RED）。
+     */
+    it('（Issue #527）2つの親からmergeBlockedされた後続が、停止解除後の再マージ成功で自動復帰する', () => {
+      const tasks: WorkflowTask[] = [
+        task('T1', []),
+        task('T2', ['T1']),
+        task('T6', ['T1']),
+        task('T4', ['T2', 'T6']),
+        // haltedByUser解除に使う、T4とは無関係な独立タスク（回数切れで確定失敗させる）
+        task('T5', []),
+      ];
+      const d: WorkflowDefinition = { version: 1, name: 'テスト', maxParallel: 3, tasks };
+
+      // 1. T4がT2・T6の両方のmergeBlockedでskippedになっている状態を作る
+      let run = createRunState(tasks);
+      run = toMerging(tasks, 'T1', run);
+      run = markMergeSucceeded(run, tasks, 'T1');
+      run = toMerging(tasks, 'T2', run);
+      run = toMerging(tasks, 'T6', run);
+      run = markMergeBlocked(run, tasks, 'T2');
+      run = markMergeBlocked(run, tasks, 'T6');
+      expect(stateOf(run, 'T4').state).toBe('skipped');
+      expect(stateOf(run, 'T4').failure).toEqual({
+        kind: 'mergeBlocked',
+        blockedTaskIds: ['T2', 'T6'],
+      });
+
+      // T5を回数切れで確定失敗させておく（後でretryTaskの対象にする）
+      run = markRunning(run, 'T5');
+      run = applyLoopStopReason(run, tasks, 'T5', 'maxReached');
+      expect(stateOf(run, 'T5').state).toBe('failed');
+
+      // 2. 停止（haltedByUser）中にT2を再マージして成功させる
+      run = { ...run, haltedByUser: true };
+      run = retryMergeState(run, 'T2');
+      run = markMergeSucceeded(run, tasks, 'T2');
+      expect(stateOf(run, 'T2').state).toBe('done');
+      // isRunHalted中なのでpendingへは戻らず、mergeBlockedWhileHaltedへ倒れる。
+      // blockedTaskIdsは元のmergeBlockedから引き継ぐ
+      expect(stateOf(run, 'T4').state).toBe('skipped');
+      expect(stateOf(run, 'T4').failure).toEqual({
+        kind: 'mergeBlockedWhileHalted',
+        blockedTaskIds: ['T2', 'T6'],
+      });
+
+      // 3. T4自身ではない別のタスク（T5）へretryTaskを呼び、haltedByUserを解除する
+      run = retryTask(run, tasks, 'T5');
+      expect(run.haltedByUser).toBe(false);
+      expect(hasFailedTask(run)).toBe(false);
+      expect(isRunHalted(run)).toBe(false);
+
+      // 4. T6のマージを成功させる
+      run = retryMergeState(run, 'T6');
+      run = markMergeSucceeded(run, tasks, 'T6');
+      expect(stateOf(run, 'T6').state).toBe('done');
+
+      // 5. T4は自動でpendingへ戻る（依存する親T2・T6が両方done）べきである
+      expect(stateOf(run, 'T4').state).toBe('pending');
+      expect(stateOf(run, 'T4').failure).toBeUndefined();
+
+      // 戻したpendingが孤立しない（PR #517の不変条件）：nextTasksToStartに実際に拾われる
+      expect(nextTasksToStart(d, run)).toContain('T4');
+      expect(getRunOutcome(run)).toBe('running');
     });
   });
 

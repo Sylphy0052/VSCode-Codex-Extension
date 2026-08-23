@@ -90,6 +90,16 @@ export type TaskFailureReason =
    */
   | { readonly kind: 'mergeBlocked'; readonly blockedTaskIds: readonly string[] }
   /**
+   * `mergeBlocked`で`skipped`になっていたタスクが、run全体の停止中に
+   * `markMergeSucceeded`の復帰処理を通り、停止中のため`pending`へ戻せなかった
+   * （Issue #527、design.md §16.40）。停止解除後に`markMergeSucceeded`が復帰対象として
+   * 拾えるよう、`mergeBlocked`と区別して記録する（`runHalted`へ倒すと、`pending`から
+   * `runHalted`になった他のタスク——`skipRemainingPending`・`reconcileRunOnReload`が
+   * 作るもの——と見分けがつかず、復帰条件で分離できなくなる）。`blockedTaskIds`は
+   * 倒す前の`mergeBlocked`から引き継ぐ（`markMergeSucceeded`の括弧書き表示に使う）。
+   */
+  | { readonly kind: 'mergeBlockedWhileHalted'; readonly blockedTaskIds: readonly string[] }
+  /**
    * マージが衝突以外の理由（gitエラー等）で失敗した（design.md §16.17「その他の失敗は
    * failed」）。`applyLoopStopReason` の `'failed'` 分岐（`retries` を消費してループを
    * 新しいworktreeでやり直す）とは別経路のため、`retries` は消費しない即時確定にする
@@ -616,8 +626,11 @@ export function markTaskApprovalTimedOut(
  * （`nextTasksToStart`の`isRunHalted`）と同じ判定に揃えるのが正しい。
  *
  * 停止中（広義。`haltedByUser`または`hasFailedTask`のいずれか）は`skipped`
- * （`runHalted`）のままにしておく。`skipRemainingPending`が失敗起因の停止に対しても
- * 同じ`runHalted`を使っている（コメント「区別のため`runHalted`にする」）のと意味を揃えた。
+ * （`mergeBlockedWhileHalted`）のままにしておく。停止中は再開させない、という意味では
+ * `skipRemainingPending`が使う`runHalted`と揃っているが、由来（`pending`から来たのか
+ * `skipped(mergeBlocked)`から来たのか）が違うため区別して記録する（Issue #527、
+ * design.md §16.40）。停止が解除された後にこのタスクだけを見分けて`pending`へ戻せる
+ * ようにするのが目的で、停止中の振る舞い自体は変えていない。
  *
  * **回復について。** `retryTask`は`skipped`を理由を問わず受理し`haltedByUser`を解除する
  * ため、`haltedByUser`だけが原因（`hasFailedTask`は偽）なら、その`skipped`（`runHalted`）
@@ -631,13 +644,15 @@ export function markTaskApprovalTimedOut(
  * `getRunOutcome`が`pending`を見ずに`anyFailed`を見て`'failed'`（終端）を返せること
  * であって、`skipped`にした時点で即座に自動再開できることではない。この2つを混同しない。
  *
- * 副作用として、複数の親からブロックされていたタスクは自動復帰しなくなる。`failure.kind`
- * を`runHalted`へ書き換えると、下のフィルタ（`s.failure?.kind !== 'mergeBlocked'`）に
- * 掛からなくなるため、停止が別経路（他タスクの`retryTask`）で解除された後にもう一方の親の
- * マージが成功しても、このタスクは`pending`へ戻らない。その場合は対象タスク自身へ
- * `retryTask`を呼べば救えるので詰みではないが、「両親のマージ完了で自動復帰」ではなく
- * 「手動の再実行が要る」に変わる。停止という人の明示操作（または他タスクの失敗確定）が
- * 挟まった後は、どの後続を再開するかを人に選ばせるほうが安全と判断してこの形にした。
+ * 停止中に`mergeBlockedWhileHalted`へ倒れたタスクは、停止が解除された後にもう一方の親の
+ * マージが成功すれば、下のフィルタが`mergeBlocked`と同じく拾って`pending`へ戻す
+ * （自動復帰する）。停止という人の明示操作（または他タスクの失敗確定）を挟んでいる間は
+ * 人に選ばせる（`pending`を作らない）という制約は維持したまま、解除後まで人の判断を
+ * 要求していた範囲だけを狭められた。狭められるようになったのは、停止中と停止解除後を
+ * `failure.kind`（`mergeBlocked` / `mergeBlockedWhileHalted`）で区別して記録できるように
+ * なったため（Issue #527）。復帰先は`pending`であって`running`ではないため、もう一方の親が
+ * まだ完了していなくても`nextTasksToStart`の依存充足チェック（`dependsOn`が全て`done`）が
+ * 開始を止める。孤立はしない。
  */
 export function markMergeSucceeded(
   run: RunState,
@@ -655,11 +670,17 @@ export function markMergeSucceeded(
   nextTasks.set(taskId, { ...current, state: 'done', failure: undefined });
   for (const id of toRestore) {
     const s = nextTasks.get(id);
-    if (s === undefined || s.state !== 'skipped' || s.failure?.kind !== 'mergeBlocked') {
+    if (s === undefined || s.state !== 'skipped') {
+      continue;
+    }
+    if (s.failure?.kind !== 'mergeBlocked' && s.failure?.kind !== 'mergeBlockedWhileHalted') {
       continue;
     }
     if (isRunHalted(run)) {
-      nextTasks.set(id, { ...s, failure: { kind: 'runHalted' } });
+      nextTasks.set(id, {
+        ...s,
+        failure: { kind: 'mergeBlockedWhileHalted', blockedTaskIds: s.failure.blockedTaskIds },
+      });
       continue;
     }
     nextTasks.set(id, { ...s, state: 'pending', failure: undefined });
