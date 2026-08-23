@@ -8838,7 +8838,7 @@ tasks:
   });
 
   it(
-    'ORCHESTRATOR_CONTROL_TOOLSの各ツールが案内文に1つずつ現れる（Issue #589、' +
+    'ORCHESTRATOR_CONTROL_TOOLSの各ツールが道具の列挙行に1つずつ現れる（Issue #589、' +
       'decide_final_mergeだけが列挙から漏れていた。将来ツールを足したときに' +
       '案内文の更新漏れを機械で検出する）',
     async () => {
@@ -8848,9 +8848,17 @@ tasks:
 
       const session = codexHost.orchestratorSessions[0] as FakeTaskSession;
       const introBody = session.sentTexts[0] as string;
+      // 「- 」で始まる行だけを道具の列挙とみなす。`introBody`全体への`toContain`だと、
+      // 拒否文等の散文でツール名に言及しているだけでも通ってしまい列挙漏れを見逃す
+      // （この Issue の発端そのものが、ask_userの拒否文（375行目付近）では
+      // decide_final_mergeに言及しているのに道具の列挙には無い、という食い違いだった）。
+      const toolLines = introBody.split('\n').filter((line) => line.startsWith('- '));
 
       for (const tool of ORCHESTRATOR_CONTROL_TOOLS) {
-        expect(introBody, `案内文に${tool.name}が列挙されていない`).toContain(tool.name);
+        expect(
+          toolLines.some((line) => line.includes(tool.name)),
+          `道具の列挙行に${tool.name}が無い`,
+        ).toBe(true);
       }
     },
   );
