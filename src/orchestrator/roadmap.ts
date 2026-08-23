@@ -17,6 +17,7 @@ import {
   type WorkspaceSummary,
 } from './planner';
 import { sanitizeForLog } from './sanitize';
+import { SerialQueue } from './serialQueue';
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { TaskSessionHost } from './taskSession';
 import { formatUntrusted, sanitizeInlineText } from './untrustedText';
@@ -1399,10 +1400,84 @@ export type ApplyRunCompletionOutcome =
   | { ok: false; reason: 'readFailed'; message: string };
 
 /**
+ * 書き戻し先のロードマップファイルごとの排他キュー（Issue #620）。
+ *
+ * `applyRunCompletionToFile` は read → 更新 → write という非アトミックな並びで、
+ * その間に別のrunの write が差し込まれると、後から書いた側が先に入ったチェックを
+ * 消す（lost update）。`src/orchestrator/runner.ts` の `pump()` は run の終了時に
+ * `void this.applyRoadmapCompletion(runId)` と fire-and-forget で呼ぶだけなので、
+ * 呼び出し側でも直列化されていない。同じロードマップを指す複数のrunが `maxParallel`
+ * （既定3）の枠で同時に走り同時に終わる構成は、W12以降は標準の使い方である
+ * （design.md §16.19・§16.37.2）。
+ *
+ * **キーはファイル単位。** ロードマップが違えば書き戻し先も違うので、待たせる理由が無い。
+ * 呼び出し側（`runner.ts`）は `path.resolve` 済みのパスを渡すが、ここでも `path.resolve`
+ * を通してからキーにする（同じファイルを別の綴りで渡されても同じキューに入るようにする）。
+ * `fs` へ渡すパスは加工しない（呼び出し側が意図した文字列のまま渡す）。
+ *
+ * **`workspaceState` 側と同じ道具立てを使う。** `WorkflowRunStore` / `ProgramStore` /
+ * `ProgramRunner` は同じ `SerialQueue` で read-modify-write を守っている
+ * （Issue #146・#625）。ファイルへの書き戻しだけがその扱いを受けていなかった。
+ *
+ * **プロセス内の排他しか与えない。** 別プロセス（別のVSCodeウィンドウ、人の手による編集）
+ * からの同時書き込みは防げない。ロックファイルを置く形なら防げるが、クラッシュ時の
+ * 残留ロックの後始末という別の問題を抱える。今回の対象は「拡張機能プロセス内で同時に
+ * 終わったrun同士」であり、そこはこれで閉じる。
+ */
+const roadmapWriteQueues = new Map<string, { queue: SerialQueue; pending: number }>();
+
+/**
+ * `roadmapPath` に対応する排他キューへ `task` を積み、完了を待つ。
+ *
+ * 待っている呼び出しが無くなった時点で `roadmapWriteQueues` から自分のエントリを
+ * 取り除く。ロードマップのパスは有限とはいえ、モジュールレベルのMapは拡張機能の
+ * プロセス寿命の間ずっと残るため、使い終わったものを残す理由が無い
+ * （`ProgramRunner.runExclusive` が `programQueues` に対して行っている掃除と同じ考え）。
+ */
+async function runExclusiveOnRoadmapFile<T>(
+  roadmapPath: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const key = path.resolve(roadmapPath);
+  let entry = roadmapWriteQueues.get(key);
+  if (entry === undefined) {
+    entry = { queue: new SerialQueue(), pending: 0 };
+    roadmapWriteQueues.set(key, entry);
+  }
+  entry.pending += 1;
+  try {
+    return await entry.queue.enqueue(task);
+  } finally {
+    entry.pending -= 1;
+    if (entry.pending === 0) {
+      roadmapWriteQueues.delete(key);
+    }
+  }
+}
+
+/**
  * ロードマップファイルを読み込み、runの結果で `done` になった項目のチェックだけを更新して
  * 書き戻す（design.md §16.19「ロードマップの更新」）。更新が1件も無ければファイルには触れない。
+ *
+ * 同じファイルに対する呼び出しは `runExclusiveOnRoadmapFile` で直列化する（Issue #620）。
+ * 直列化しないと、同時に終わった2つのrunの書き戻しが重なり、後から書いた側が先に入った
+ * チェックを消す。
  */
 export async function applyRunCompletionToFile(
+  deps: ApplyRunCompletionDeps,
+  roadmapPath: string,
+  taskStates: RunTaskStates,
+): Promise<ApplyRunCompletionOutcome> {
+  return runExclusiveOnRoadmapFile(roadmapPath, async () =>
+    applyRunCompletionToFileLocked(deps, roadmapPath, taskStates),
+  );
+}
+
+/**
+ * `applyRunCompletionToFile` の本体。呼び出し元で同じファイルに対する排他が取れている
+ * 前提で、read → 更新 → write を行う。
+ */
+async function applyRunCompletionToFileLocked(
   deps: ApplyRunCompletionDeps,
   roadmapPath: string,
   taskStates: RunTaskStates,
