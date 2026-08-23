@@ -5869,3 +5869,82 @@ W1（Issue #335）は「最終マージの判断が確定する瞬間」を`deci
 #### 検証
 
 `test/unit/forge.test.ts`が、GitHub/GitLabそれぞれのCI状態パース（`parseGithubCiConclusion` / `parseGitlabCiConclusion`。CheckRun/StatusContextの混在・`head_pipeline`が`null`の場合に加え、**キー自体が無い／型が違う想定外の応答形は`none`ではなく`failed`へ倒れること**・**GitHubの`conclusion`が成功値ホワイトリストに無い未知の値（`STALE`等）は`failed`になること**を含む）・`waitForCiChecks`のポーリングとタイムアウト（実時間では待たない）・**`isCancelled`が真になったときの打ち切り（ポーリング開始前・ポーリングの周回中の両方）**・`isBranchNotUpToDateError`の既知パターン一致/不一致・`updatePullRequestBranch`のホストごとのコマンド組み立て・`runFinalMergeWithCiGate`の一連の流れ（CI未設定は待たずに即マージ・赤はマージコマンドを呼ばずに失敗・タイムアウトも同様・「baseの最新でない」からの取り込み直し→再CI確認→再マージ・無関係な失敗は取り込み直しを試みない・リトライ上限超過・番号不明時は`runFinalMerge`と同じ振る舞い・**`isCancelled`の3箇所の確認点それぞれで`{ reason: 'cancelled' }`になりマージコマンドを呼ばないこと**）を確かめる。`test/unit/runner.test.ts`が`performFinalMerge`の配線（CI確認が`pr merge`より前に呼ばれること・CIが赤なら`finalMergeOutcome`が`failed`になり警告欄に残ること・「baseの最新でない」からの取り込み直しを経て`merged`になること・**`finalMerge: auto`の経路で統合PR/MR作成の完了時点で既に停止していればCI確認もマージも一切呼ばれないこと（旧: 兄弟の穴の回帰テスト。`isCancelled`が同じ`haltedByUser`を見るため`pr view`/`pr merge`が呼ばれないことだけを見ると入口ガードだけを消しても赤くならず2重の防御の片方がもう片方をマスクしてしまう。レビュー指摘。2026-08-23。`isCancelled`より手前で起きる副作用——タスク層自身のPRのready化とは別に、統合PR/MRぶんの`pr ready`が呼ばれないこと——を観測点にして入口ガード単体を検証する形にした。`runner.ts`の入口ガードの条件だけを`if (false)`へ戻して赤くなることを実測済み）**・**CI状態を実際に取得している最中に「全体の停止」が押されると、その後CIが緑だと分かってもマージコマンドが一度も呼ばれないこと（本番の呼び出し経路`performFinalMerge` → `runFinalMergeWithCiGate`を通し、`cli.calls`で確認する）**）を確かめる。`test/unit/config.test.ts`が`ciWaitTimeoutSec` / `ciUpdateBranchMaxRetries`の丸め（既定値・範囲外の値の扱い）を確かめる。**`test/integration/helpers/workflow.ts`の`RecordingCli`にもCI状態取得コマンド（`gh pr view` / `glab api .../merge_requests/<iid>`）への応答を足してあり（「チェックが1件あって緑」の形。空応答のままだと`fetchCiConclusion`のJSON解析が失敗して`failed`へ倒れ、マージが一度も呼ばれずに`workflowForgeOrder.test.ts`の既存2件が壊れていた。セキュリティ監査の指摘で判明。2026-08-23）、`npm run test:integration:xvfb`で実VSCode上でも確認済み。**実ホストでのCI状態取得・取り込み直しコマンドが実引数として受理されるかは[manual-test.md](manual-test.md)のW-Pに残す。
+
+### 16.37 runをまたぐ統括（プログラム、roadmap W12、epic #341）
+
+#### 背景
+
+1 run = 1ワークフローで、runの上に層が無い。ロードマップからの生成も「選べるのはフェーズ単位のみ」（§16.19）。複数のワークフローを波に分けて、波の内側は並列・波をまたぐと逐次、という進め方を拡張機能では表現できなかった。これは2026-08-22に人手で回した7ワークフロー・3波の運用そのものにあたる。
+
+runの上に**プログラム**（複数runの束）を置く。プログラムが持つのは、runの一覧とrun同士の依存（「WF-Eは WF-A2 の完了を待つ」）・波の概念・プログラム全体の状態とその永続化（W10の自動再開の対象に含める）。
+
+**上位のオーケストレーターは置かない。** 各runのオーケストレーターが自分のrunだけを見る構成のまま、runの起動順をプログラムが決める。
+
+roadmapが「他の項目より大きく、他の項目が無いと意味を成さない」と書いていたとおり、着手時に3件へ分割し直した。依存は一方向で、(1) → (2) → (3) の順に逐次進める。
+
+- **(1) プログラムの定義と永続化（roadmap W12-1、Issue #604）** — この小節
+- (2) 波のスケジューリングとrun間の依存（roadmap W12-2、Issue #605）
+- (3) 失敗の伝播と人による停止（roadmap W12-3、Issue #606）
+
+W12全体の依存はW1 / W7 / W8 / W9 / W10（すべて完了済み）。
+
+#### 16.37.1 プログラムの定義と永続化（W12-1、Issue #604）
+
+**この段で作るのは、プログラムの定義と、その状態の永続化だけ。** 波のスケジューリング（依存の無いrunを同時に起動する）・前段の完了待ち・失敗の伝播・人による停止は、いずれも(2)・(3)の受入基準であり、ここでは持たない。
+
+##### 定義（`program.ts`）
+
+`workflow.ts`がタスクの束（1run）を扱うのに対し、`program.ts`はrunの束（1プログラム）を扱う。読み込み（`parseProgramYaml`）・検証（`validateProgram`）の役割分担も`workflow.ts`の`parseWorkflowYaml` / `validateWorkflow`とそろえてある。
+
+```yaml
+version: 1
+name: 7ワークフロー・3波の運用
+
+runs:
+  - id: R1
+    defPath: .agents/workflows/wf-a2.yaml
+  - id: R2
+    defPath: .agents/workflows/wf-e.yaml
+    dependsOn: [R1]
+```
+
+`ProgramRunRef`（`id` / `defPath` / `dependsOn`）1件が、`WorkflowDefinition`（`workflow.ts`）を指す1つのrunに対応する。`defPath`はワークスペース内の`.yaml`/`.yml`を指す相対パスに限る（`workflow.ts`の`roadmap`フィールドが`.md`に限るのと同じ動機。パストラバーサル対策）。
+
+検証（`validateProgram`）が1件でも該当すれば実行を始めない。エラーは全件まとめて返す（`workflow.ts`と同じ方針）。
+
+- `id`の重複、`dependsOn`の未定義参照
+- 依存の循環。`workflow.ts`の`findCycleGroups`（Tarjanの強連結成分アルゴリズム。要素数2以上のSCC、または自己参照を1件のグループとして採用する）をそのまま再利用する。`ProgramRunRef`（`{ id, dependsOn }`）は`workflow.ts`の`DependencyGraphNode`と同じ形を持つため、Issue #146で汎用化済みのこの関数がそのまま使える（ロードマップの項目・ワークフローのタスクに続く3件目の利用箇所）
+- `id`の字種（`workflow.ts`の`TASK_ID_PATTERN`をそのまま`PROGRAM_RUN_ID_PATTERN`として再輸出。半角英数字・_・-のみ、1〜50文字）
+- `name`未指定、`version`が1以外、`runs`が0件（配列でない場合を含む）、runの総数が上限（`MAX_PROGRAM_RUN_COUNT` = 50）を超える
+- `defPath`がワークスペース外・`.yaml`/`.yml`以外を指している
+
+未知のフィールドは読み飛ばす（`workflow.ts`と同じ方針。CLIやスキーマの更新で壊れないようにする）。
+
+##### 状態（`programState.ts`）
+
+`runState.ts`がタスク状態（`TaskState`）を持つのに対し、`programState.ts`はrun状態（`ProgramRunState`）を持つ。値は`pending`（未着手）/ `running`（実行中）/ `done`（完了）/ `failed`（失敗）の4値で、design.mdの起票文が挙げた4状態にそのまま対応する。
+
+`createInitialProgramState`が、検証済みのプログラム定義から初期状態（全runを`pending`）を組み立てる。**この段では状態遷移そのもの（`pending`から`running`へ進める・依存の完了を見て次のrunを選ぶ等）は持たない。** それはrunを実際に起動する(2)の担当。
+
+##### 永続化（`programStore.ts`）
+
+`runStore.ts`の`WorkflowRunStore`と対になる、プログラム単位の同じ役割の層。`workspaceState`のキー`codex.workflow.programs`（既存の`codex.workflow.runs`とは別キー）へ、`PersistedProgram`（`programId` / `defPath` / `workspaceRoot` / `startedAt` / `finishedAt` / `state`）の配列として持つ。最新10件（`MAX_STORED_PROGRAMS`、`runStore.ts`の`MAX_STORED_RUNS`と同じ値）まで残し、古いものは開始時刻順に消す。`workspaceState`への読み書きは`SerialQueue`（`serialQueue.ts`）で直列化する（`WorkflowRunStore`と同じ理由、Issue #146）。
+
+**W10（中断からの自動再開、§16.35）の対象に含める。** `reconcileProgramStateOnReload`（`programState.ts`の純粋関数）が、ウィンドウのリロード直後に`running`のrun参照を`failed`へ倒す（`runStore.ts`の`reconcileRunOnReload`がタスク単位で行うのと同じ扱いをプログラム単位でも行う）。`pending`のrunはそのまま`pending`に留める。単発runの`reconcileRunOnReload`が`pending`を`skipped`へ道連れにするのとは異なり、道連れにする対象＝根拠が無い（プログラムはまだ上位のスケジューリングを持たないため）。
+
+`extension.ts`は、`workflowRunner.restoreRunsForView()`と同じタイミング（拡張機能の起動直後）で`programStore.reconcileAfterReload()`を呼ぶ。**この段では実際に自動でrunを再開する処理は持たない。** ここで行うのは永続化状態を中断扱いへ書き戻すところまでで、`autoResumeIfEligible`（`runnerRestore.ts`）のような実際の再開判定・オーケストレーターセッションの立て直しは、プログラムのスケジューリングを持つ(2)（Issue #605）が実装する。
+
+##### 前段が失敗した場合の挙動
+
+**この段では決め打ちしない。** あるrunが`failed`になったとき、それに依存する後続のrunをどう扱うか（起動しない・警告のうえ起動する・プログラム全体を止める等）は、失敗の伝播そのものを扱う(3)（roadmap W12-3、Issue #606）で決める。
+
+##### 既存の単発runへの影響
+
+`WorkflowRunner` / `runner.ts` / 既存の`workspaceState`キー（`codex.workflow.runs`）には一切触れていない。`ProgramStore`は別クラス・別キーで独立して動き、`extension.ts`側の配線も既存の`workflowRunner.restoreRunsForView()`の呼び出しに追記する形（既存の呼び出し自体は変更していない）。プログラムを使わない既存の単発run実行は、この変更の影響を受けない。
+
+##### 確かめ方
+
+- `test/unit/program.test.ts`: `parseProgramYaml`（正常系・未知フィールドの読み飛ばし・`dependsOn`が配列でない場合のparseErrors）、`validateProgram`（複数runの定義・循環依存とその理由・無関係な複数循環のグループ分け・未定義run参照・id重複/字種・`name`/`version`/`runs`件数・`defPath`の安全性）
+- `test/unit/programState.test.ts`: `createInitialProgramState`（全run`pending`初期化）、`reconcileProgramStateOnReload`（`running`→`failed`・`done`/`failed`は不変・`pending`を道連れにしないこと・無変化時は同一参照を返すこと）
+- `test/unit/programStore.test.ts`: `ProgramStore`のCRUD・並行`update`の直列化（lost updateが起きないこと）・最新`MAX_STORED_PROGRAMS`件までのトリミング・`reconcileAfterReload`が`running`を含むプログラムだけを書き換え変化の無いものは書き込まないこと・`clearAll`
+- `docs/manual-test.md` W-Q: 実VSCode上での確認項目（追記のみ、実施はしない）
