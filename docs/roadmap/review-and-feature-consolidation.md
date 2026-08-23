@@ -472,6 +472,22 @@
   worktree を撤去した直後に起きやすい。**診断を信じて直しにかからず、まず実際に作業している
   worktree で `npx tsc --noEmit` を回して確認する。**WF-F では作業中に何度も発生し、
   そのたびに実測ではエラー0件だった
+- **統合ブランチで作業するセッションに `docs/roadmap/` を編集させない。** ロードマップはmain側で
+  進むため、統合ブランチ側の写しは分岐した時点で止まっている。両側で同じ行を直すと、統合から
+  mainへのPRで**同じ行の両側変更**になり、「衝突解決で片方の枝が黙って消えても検査は全部緑」
+  という、この一覧の別項目が挙げている最悪の形を自分から作りに行くことになる。統合ブランチ側で
+  気付いた腐りは、担当がmain宛ての別PRで直す。2026-08-23、WF-E の W8 と W10 の担当がどちらも
+  統合ブランチ側の `workflow-autonomy.md` の「未起票」を直そうとした
+- **既存の規約に揃えたとき、その規約が持っていた意図まで一緒に持ってきていないかを確かめる。**
+  WF-E の W10（Issue [#584](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/584)）の
+  `applyAutoResume` は、中断したタスクを `pending` へ戻すとき `retryCount + 1` を置いていた。
+  理由は正当（worktreeのブランチ名が既存のままだと `createWorktree` が `branchExists` で失敗する）で、
+  JSDocにも「`applyLoopStopReason` の `failed` 分岐が `retryCount` を進めるのと同じ規約」と
+  **正しく**書かれていた。しかし `retryCount` は自動再試行の予算カウンタ（`runState.ts` の
+  `current.retryCount < task.retries`）であり、リロードによる中断がその予算を黙って食う。
+  人からは「なぜか1回もリトライされずに失敗した」としか見えない。**JSDocの説明が正しいことは、
+  その振る舞いが正しいことの証拠にならない。** 直した先は `manualRetryCount`（どの予算とも
+  突き合わされないカウンタ）である
 
 ### 担当セッションの動き方
 
