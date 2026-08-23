@@ -26,6 +26,22 @@
     被害は「起動しうる」で止まらず、`dispose()` 後に到達したセッションは `disposed=false` の
     まま `live.tasks` へ入るため、**dispose() の解放対象を外れて閉じる経路が二度と無い**。
     直すときは、そのガードのコメントも一緒に更新すること
+    **完了。PR #642が2026-08-23にmainへマージ済み（マージコミット
+    `2a59aec4`）。**`startTask` 内・`host.openTaskSession` 呼び出しの
+    直前へ `this.disposing` のガードを置いて窓を塞いだ。`live.finished`
+    は使っていない（`retryTask` が `false` へ戻すため）。`ensureMessaging`
+    の入口コメントも「ここはメッセージング資源だけを守る、継続の番人は
+    `startTask` 側」と書き分けた。既存テスト（`test/unit/runner.test.ts`、
+    Issue #475 / PR #495由来）は**古い挙動を前提にしていたため期待値・
+    表題・JSDocを更新した。**再現テストは `test/unit/runnerDispose.test.ts`
+    を新設。design.mdへ§16.38を新設。
+    **第1回で `test/unit/runner.test.ts` を2つのPRが同時に触った**
+    （#641が8838行目付近へ追加、#642が12001行目付近の既存テストを
+    更新）。**衝突は出なかったが、衝突解決で片方の枝が黙って消えても
+    `tsc` もlintもテストも緑のまま通るため、マージ後に両方の枝が実在する
+    ことをgrepで確認した**（`grep -c ORCHESTRATOR_CONTROL_TOOLS
+    test/unit/runner.test.ts` が3、`test/unit/runnerDispose.test.ts` の
+    実在を確認）
   - [#485](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/485)
     疑似worktree反映: renameの必須化と一時ファイルの掃除
   - [#490](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/490)
@@ -58,6 +74,20 @@
     C-42 に個別タイムアウトを与える対処は次に別のテストで同じことを起こす。
     Issue #522（PR #523で解消）と同じクラスで、**そこで実際に起きた害は
     「テストが落ちること」ではなく「実装者が失敗を無視する習慣をつけたこと」だった**
+    **L-40（`test/integration/chatClaudeSettings.test.ts:444`
+    「行頭#はCLIへ送らず、確認後にCLAUDE.mdへ直接追記する」）でも
+    同種の間欠失敗を1回観測した**（2026-08-23、WF-G第1回の統合テスト
+    実行時）。全体実行で1回失敗し、`--grep "L-40"` の単独実行では成功、
+    全体を再実行すると81 passing / 0 failingに戻った。
+    **L-40も`test/integration/helpers/waitFor.ts`を使っている**
+    （テスト本体の中で2回）。C-42（`test/integration/
+    chatCodexThreadFlow.test.ts:364`）と同じヘルパーである。実測で
+    確認済み。したがって**調査対象はC-42とL-40の両方**とし、
+    `waitFor.ts` を使う統合テストを網羅的に洗い出したうえで待ち方
+    そのものを見る。**ただしこれは観測であって、原因が順序依存だという
+    断定ではない。** **L-40を足したことで、この項目のクローズ条件を
+    厳しくしない。**2つとも再現しなければ、2つとも再現しなかったと
+    報告して閉じてよい
   - [#551](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/551)
     prettierの設定とコードが乖離している（121ファイル非準拠、lintが見ていない）。
     **T26と同じlint基盤の作業のため同じ回で扱う。** 一括 `prettier --write .` は開いているPRが
@@ -95,6 +125,13 @@
     直すのは1行だが、受入基準は**`ORCHESTRATOR_CONTROL_TOOLS`の全要素と案内文を突き合わせる
     テストを置くこと**まで含む（片方だけ足して他が漏れる形をここで終わらせる）。
     出どころはW8（#583）の実装中、`ask_user`を案内文へ足す作業の隣で見つかったもの
+    **完了。PR #641が2026-08-23にmainへマージ済み（マージコミット
+    `c9a376f6`）。**`buildIntroBody` へ `decide_final_merge` を足し、
+    `ORCHESTRATOR_CONTROL_TOOLS` の全要素が案内文の道具の列挙行に1つ
+    ずつ現れることを確かめるテストを `test/unit/runner.test.ts` へ置いた。
+    突き合わせの結果、**漏れていたのは `decide_final_merge` だけ
+    だった**（11要素を行で確認）。design.mdは新規節を作らず§16.33の
+    既存節を更新
   - [#624](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/624)
     READMEがWF-Eで入った設定・コマンド・プログラム機能を反映していない。
     実測（WF-E担当、2026-08-23）: 設定22件のうち**8件**が未記載
@@ -119,6 +156,12 @@
     `docs/roadmap/ops-rules.md` へ足す規約を溜める箱（#622の後継）。
     **単独PRを刻まず、溜まってから1本で出す。** 規約が1項目ずつ別PRで入ると、
     レビューする側が「この項目だけ見ればよい」と読み、一覧全体の重複や矛盾に気付けなくなる
+    **WF-Gは規約の候補を溜めて全体オーケストレーターへ渡すところまでを
+    担う。`ops-rules.md`へ実際に書くのは全体オーケストレーターである。**
+    理由: `ops-rules.md`は「全体オーケストレーターだけが書く」と定めて
+    おり、WF-Gの担当も書き手にすると同じ文書に複数の書き手ができる。
+    並行する書き場ができて二重管理になる事故（PR #612）を自分から
+    作りに行くことになる
   - 全体レビュー（第1波・第2波の全変更を横断でレビューする）
   - 依存: 第1波・第2波の全完了
   - ファイル: `src` 全域（型情報ルールの導入は全ファイルへ波及する）
