@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 import {
   applyAutoResume,
   applyLoopStopReason,
+  clampWorktreeRemovalAttempts,
   createRunState,
+  MAX_WORKTREE_REMOVAL_ATTEMPTS,
   hasFailedTask,
   isRunHalted,
   markApprovalRejected,
@@ -1279,4 +1281,35 @@ describe('applyAutoResume（design.md §16.35、roadmap W10、Issue #584）', ()
       expect(outcome.taskIds).toEqual(['T1']);
     },
   );
+});
+
+describe('clampWorktreeRemovalAttempts（worktree撤去の試行上限、Issue #490）', () => {
+  it('上限未満はそのまま通す', () => {
+    expect(clampWorktreeRemovalAttempts(0)).toBe(0);
+    expect(clampWorktreeRemovalAttempts(1)).toBe(1);
+    expect(clampWorktreeRemovalAttempts(MAX_WORKTREE_REMOVAL_ATTEMPTS)).toBe(
+      MAX_WORKTREE_REMOVAL_ATTEMPTS,
+    );
+  });
+
+  it('上限を超えた分は丸める', () => {
+    expect(clampWorktreeRemovalAttempts(MAX_WORKTREE_REMOVAL_ATTEMPTS + 1)).toBe(
+      MAX_WORKTREE_REMOVAL_ATTEMPTS,
+    );
+    expect(clampWorktreeRemovalAttempts(1_000_000)).toBe(MAX_WORKTREE_REMOVAL_ATTEMPTS);
+  });
+
+  it('壊れた値（負数・小数・NaN・Infinity）でも0以上の整数を返す', () => {
+    // `retryCount` / `manualRetryCount` は復元した実行状態から来るため、
+    // 壊れた値が入りうる。`Array.from({ length })` は負数・小数でも落ちないので、
+    // 落ちないこと自体は保証にならない——**返す値が使える形であること**を固定する
+    expect(clampWorktreeRemovalAttempts(-1)).toBe(0);
+    expect(clampWorktreeRemovalAttempts(-1_000_000)).toBe(0);
+    expect(clampWorktreeRemovalAttempts(2.7)).toBe(2);
+    expect(clampWorktreeRemovalAttempts(Number.NaN)).toBe(0);
+    expect(clampWorktreeRemovalAttempts(Number.POSITIVE_INFINITY)).toBe(
+      MAX_WORKTREE_REMOVAL_ATTEMPTS,
+    );
+    expect(clampWorktreeRemovalAttempts(Number.NEGATIVE_INFINITY)).toBe(0);
+  });
 });

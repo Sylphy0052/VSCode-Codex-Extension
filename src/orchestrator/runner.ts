@@ -52,7 +52,9 @@ import {
 } from './messaging';
 import {
   applyLoopStopReason,
+  clampWorktreeRemovalAttempts,
   createRunState,
+  MAX_WORKTREE_REMOVAL_ATTEMPTS,
   markApprovalRejected,
   markMergeSucceeded,
   markRunning,
@@ -2588,9 +2590,21 @@ export class WorkflowRunner {
       return;
     }
     const totalAttempts = state.retryCount + state.manualRetryCount;
+    const attempts = clampWorktreeRemovalAttempts(totalAttempts);
+    if (attempts < totalAttempts) {
+      // Issue #490: 上限を超える`retry`番号のworktreeは撤去されずに残る。黙って
+      // 諦めず、残った旨を人へ知らせる（何が起きるかは
+      // `MAX_WORKTREE_REMOVAL_ATTEMPTS`のJSDoc参照）。疑似worktree側
+      // （`removePseudoTaskWorktree`）と同じ扱いにする
+      this.deps.log.warn(
+        `[workflow ${runId}/${task.id}] 再試行が${totalAttempts}回あり、worktreeの撤去は` +
+          `${MAX_WORKTREE_REMOVAL_ATTEMPTS}回分までに留めました。` +
+          `これより後の試行のworktreeは残ります（手で消してください）。`,
+      );
+    }
     const retries: Array<number | undefined> = [
       undefined,
-      ...Array.from({ length: totalAttempts }, (_, i) => i),
+      ...Array.from({ length: attempts }, (_, i) => i),
     ];
     const messages: string[] = [];
     for (const retry of retries) {
@@ -2654,11 +2668,21 @@ export class WorkflowRunner {
       return;
     }
     const totalAttempts = state.retryCount + state.manualRetryCount;
+    const attempts = clampWorktreeRemovalAttempts(totalAttempts);
+    if (attempts < totalAttempts) {
+      // Issue #490: git側（`removeGitTaskWorktree`）と同じ。片方だけ上限を持たせると
+      // 対称性が崩れる
+      this.deps.log.warn(
+        `[workflow ${runId}/${task.id}] 再試行が${totalAttempts}回あり、疑似worktreeの撤去は` +
+          `${MAX_WORKTREE_REMOVAL_ATTEMPTS}回分までに留めました。` +
+          `これより後の試行の複製は残ります（手で消してください）。`,
+      );
+    }
     const result = await removePseudoWorktreeAttempts(
       live.repoRoot,
       runId,
       task.id,
-      totalAttempts,
+      attempts,
       pseudoWorktreeDeps.fs,
     );
     if (result.ok) {

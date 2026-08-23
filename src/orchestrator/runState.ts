@@ -887,6 +887,44 @@ export function recordSessionInfo(
  * 残っていれば `isRunHalted` は引き続き `true` のままになる（二重に状態を持たないので、
  * ここで個別に気にする必要が無い）。
  */
+/**
+ * worktreeの撤去で試す再試行番号の上限（Issue #490）。
+ *
+ * 撤去は「初回（`retry`なし）＋ `0..合計試行数-1`」の全試行分を順に消す。合計試行数は
+ * `retryCount + manualRetryCount` で、**`manualRetryCount`はワークフローViewからの
+ * 手動の再実行で人が押した回数だけ増えるため上限が無い。** その結果、撤去1回あたりの
+ * 処理コスト（`realpath` + ブロッキングI/O）が押した回数に比例して伸びる。
+ *
+ * **上限に達したとき何が起きるか。** 上限を超える`retry`番号の複製・worktreeは
+ * **撤去されずに残る。** 撤去する側が黙って諦めるのではなく、呼び出し側が残った旨を
+ * 警告として人へ知らせる（`removeGitTaskWorktree` / `removePseudoTaskWorktree`）。
+ * 撤去しそこねたディレクトリが1つ残る害より、撤去のループが青天井に伸びる害のほうが
+ * 大きいと判断した——前者は人が消せるが、後者はrun終了処理そのものを詰まらせる。
+ *
+ * 値の根拠は「1タスクを100回を超えて再実行するのは、再実行で直る類の失敗ではない」
+ * という運用上の判断であり、実装上の制約ではない。
+ */
+export const MAX_WORKTREE_REMOVAL_ATTEMPTS = 100;
+
+/**
+ * 撤去で試す試行回数を`MAX_WORKTREE_REMOVAL_ATTEMPTS`以下へ丸める（Issue #490）。
+ *
+ * 負数・小数・`NaN`も受ける（`retryCount`・`manualRetryCount`は復元した実行状態から
+ * 来るため、壊れた値が入りうる）。丸めた結果は必ず0以上の整数になる。
+ */
+export function clampWorktreeRemovalAttempts(totalAttempts: number): number {
+  // `NaN`は比較が全て false になるため、先に落とす。`Infinity`は「際限なく試す」の
+  // 意味なので0ではなく上限へ丸める（`!Number.isFinite`でまとめて0にすると、
+  // 最も多く試したい場合が最も試さない場合になって逆転する）
+  if (Number.isNaN(totalAttempts) || totalAttempts <= 0) {
+    return 0;
+  }
+  if (totalAttempts >= MAX_WORKTREE_REMOVAL_ATTEMPTS) {
+    return MAX_WORKTREE_REMOVAL_ATTEMPTS;
+  }
+  return Math.floor(totalAttempts);
+}
+
 export function retryTask(run: RunState, tasks: readonly WorkflowTask[], taskId: string): RunState {
   const current = run.tasks.get(taskId);
   const task = tasks.find((t) => t.id === taskId);
