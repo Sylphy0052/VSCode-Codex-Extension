@@ -3055,51 +3055,7 @@ describe('実ファイルシステムでの統合テスト', () => {
         },
       );
 
-      it(
-        '`rename`を持たないポートでは従来の直接コピー経路へフォールバックし、' +
-          '`usedLegacyCopyFallback`をtrueで返す（対応漏れ検知用の警告ログの元）',
-        async () => {
-          const integration = await ensureIntegrationDir(
-            workspace,
-            RUN_ID,
-            nodePseudoWorktreeFileSystem,
-          );
-          expect(integration.ok).toBe(true);
-          if (!integration.ok) return;
-          await writeFile(path.join(integration.dir, 'a.txt'), 'integrated content\n');
-
-          const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
-          const manifest: IntegrationManifest = new Map([
-            ['a.txt', { taskId: 'T1', kind: 'modified' }],
-          ]);
-
-          // `rename`を持たないポート実装（`FakePseudoFs`相当）を模して、従来の
-          // 直接コピー経路へ意図的にフォールバックさせる。`exactOptionalPropertyTypes`の
-          // もとでは`rename: undefined`を代入できないため、プロパティ自体を取り除く
-          const noRenameFs: typeof nodePseudoWorktreeFileSystem = {
-            ...nodePseudoWorktreeFileSystem,
-          };
-          delete noRenameFs.rename;
-
-          const result = await reflectIntegrationToWorkspace(
-            workspace,
-            integration.dir,
-            workspaceBaseline,
-            manifest,
-            [],
-            noRenameFs,
-          );
-
-          expect(result.ok).toBe(true);
-          if (!result.ok) return;
-          expect(result.usedLegacyCopyFallback).toBe(true);
-          await expect(readFile(path.join(workspace, 'a.txt'), 'utf8')).resolves.toBe(
-            'integrated content\n',
-          );
-        },
-      );
-
-      it('`rename`を持つポート（本番経路）では`usedLegacyCopyFallback`がfalseのまま反映される', async () => {
+      it('`rename`を持つポート（本番経路）で一時ファイルを経由して反映される', async () => {
         const integration = await ensureIntegrationDir(
           workspace,
           RUN_ID,
@@ -3125,7 +3081,102 @@ describe('実ファイルシステムでの統合テスト', () => {
 
         expect(result.ok).toBe(true);
         if (!result.ok) return;
-        expect(result.usedLegacyCopyFallback).toBe(false);
+        await expect(readFile(path.join(workspace, 'a.txt'), 'utf8')).resolves.toBe(
+          'integrated content\n',
+        );
+        // 一時ファイルは`rename`で確定するため残らない
+        const names = await readdir(workspace);
+        expect(names.filter((n) => n.startsWith('.pwt-reflect-'))).toEqual([]);
+      });
+
+      describe('孤立した一時ファイル（Issue #485）', () => {
+        // `.pwt-reflect-<16進32文字>.tmp` は`rename`の前にプロセスが落ちると残る。
+        // 名前は実装が作るものと同じ形にする（形が違うと、除外も掃除も対象にならない
+        // ——それ自体が仕様なので、下の「形が違うものは触らない」で別に固定する）。
+        const ORPHAN = `.pwt-reflect-${'0'.repeat(32)}.tmp`;
+
+        it('スナップショットに現れないため、次回の反映が`workspaceChanged`でブロックされない', async () => {
+          const integration = await ensureIntegrationDir(
+            workspace,
+            RUN_ID,
+            nodePseudoWorktreeFileSystem,
+          );
+          expect(integration.ok).toBe(true);
+          if (!integration.ok) return;
+          await writeFile(path.join(integration.dir, 'a.txt'), 'integrated content\n');
+
+          // baselineを取った**後**に孤立した一時ファイルが生まれた状況を作る。
+          // 除外が効いていなければ、これは「人が足したファイル」として検出される
+          const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+          await writeFile(path.join(workspace, ORPHAN), 'leftover\n');
+
+          const result = await reflectIntegrationToWorkspace(
+            workspace,
+            integration.dir,
+            workspaceBaseline,
+            new Map([['a.txt', { taskId: 'T1', kind: 'modified' }]]) as IntegrationManifest,
+            [],
+            nodePseudoWorktreeFileSystem,
+          );
+
+          expect(result.ok).toBe(true);
+        });
+
+        it('反映のときに掃除される', async () => {
+          const integration = await ensureIntegrationDir(
+            workspace,
+            RUN_ID,
+            nodePseudoWorktreeFileSystem,
+          );
+          expect(integration.ok).toBe(true);
+          if (!integration.ok) return;
+          await writeFile(path.join(integration.dir, 'a.txt'), 'integrated content\n');
+          await writeFile(path.join(workspace, ORPHAN), 'leftover\n');
+
+          const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+          const result = await reflectIntegrationToWorkspace(
+            workspace,
+            integration.dir,
+            workspaceBaseline,
+            new Map([['a.txt', { taskId: 'T1', kind: 'modified' }]]) as IntegrationManifest,
+            [],
+            nodePseudoWorktreeFileSystem,
+          );
+
+          expect(result.ok).toBe(true);
+          const names = await readdir(workspace);
+          expect(names).not.toContain(ORPHAN);
+        });
+
+        it('名前の形が違うものは、似ていても掃除しない', async () => {
+          const integration = await ensureIntegrationDir(
+            workspace,
+            RUN_ID,
+            nodePseudoWorktreeFileSystem,
+          );
+          expect(integration.ok).toBe(true);
+          if (!integration.ok) return;
+          await writeFile(path.join(integration.dir, 'a.txt'), 'integrated content\n');
+
+          // 接頭辞は同じだが16進32文字ではない。人が置いた紛らわしい名前を消さないため、
+          // 前方一致ではなく厳密一致で判定していることを固定する
+          const lookalike = '.pwt-reflect-notahex.tmp';
+          await writeFile(path.join(workspace, lookalike), 'mine\n');
+
+          const workspaceBaseline = await takeSnapshot(workspace, [], nodePseudoWorktreeFileSystem);
+          const result = await reflectIntegrationToWorkspace(
+            workspace,
+            integration.dir,
+            workspaceBaseline,
+            new Map([['a.txt', { taskId: 'T1', kind: 'modified' }]]) as IntegrationManifest,
+            [],
+            nodePseudoWorktreeFileSystem,
+          );
+
+          expect(result.ok).toBe(true);
+          const names = await readdir(workspace);
+          expect(names).toContain(lookalike);
+        });
       });
     });
 
@@ -3280,6 +3331,9 @@ describe('applyDiffToIntegration', () => {
       },
       removeFile: async (t) => {
         calls.push(`remove:${t}`);
+      },
+      rename: async (from, to) => {
+        calls.push(`rename:${from}->${to}`);
       },
       readTextFile: async () => undefined,
       writeTextFile: async () => {},

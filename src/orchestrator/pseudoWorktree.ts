@@ -683,12 +683,15 @@ export interface PseudoWorktreeFileSystemPort {
    * シンボリックリンクを指していても、その実体を辿らずディレクトリエントリそのものを
    * 置き換える（POSIXの`rename(2)`の性質）。`reflectIntegrationToWorkspace`が
    * コピー先へのTOCTOU（Issue #445）を塞ぐために「一時ファイルへ書いてからrenameで
-   * 確定させる」用途にだけ使う。オプショナルにしているのは、この関数を持たない
-   * 既存のポート実装（テスト用フェイク等）に影響を与えないため。持たないポートを
-   * 渡した場合は`reflectIntegrationToWorkspace`側が従来どおりの直接コピー経路へ
-   * フォールバックする。
+   * 確定させる」用途にだけ使う。
+   *
+   * **必須である（Issue #485）。** PR #483 で一度オプショナルにしたが、その理由は
+   * 当時テスト用フェイクを別作業が押さえていて触れなかったことだけで、技術的な理由は
+   * 無かった。オプショナルのままだと、この関数を持たないポート実装が新しく増えたときに
+   * **警告もなくTOCTOU対策の無い旧経路へ退行する**——型で強制されていないため、
+   * 退行はコンパイルでもテストでも検出されない。
    */
-  rename?(from: string, to: string): Promise<void>;
+  rename(from: string, to: string): Promise<void>;
   /**
    * テキストファイルを読む。存在しない・読めない場合は undefined（他の読み取り系
    * ポートメソッドと同じ規約）。マニフェストの永続化・復元（Issue #380）にだけ使う。
@@ -810,6 +813,22 @@ export const nodePseudoWorktreeFileSystem: PseudoWorktreeFileSystemPort = {
  * 一切扱わないことで、リンク先（ワークスペースの外）への書き込み・読み出しが発生する余地を
  * 構造的に無くす（`worktree.ts` の祖先ディレクトリ対策とは別に、ファイル単位でも同じ脅威に備える）。
  */
+/**
+ * 反映の一時ファイル（`reflectIntegrationToWorkspace`が`copyFile`+`rename`で使う）の
+ * 名前かどうか。接尾辞は`randomBytes(16).toString('hex')`なので16進32文字で固定である。
+ *
+ * **プロセスが`rename`の前に落ちると、この一時ファイルがワークスペース実パス配下に
+ * 残る（Issue #485）。**残ったまま次回の反映を迎えると`workspaceBaseline`との比較で
+ * 「人が編集した」と判定され、`workspaceChanged`で以降の反映がブロックされ続ける。
+ * 原因不明の「反映が止まる」として顕在化するため、スナップショットの対象から
+ * 無条件に外す。**`exclude`（呼び出し側が渡す設定）へは入れない**——設定次第で外れて
+ * よい性質のものではなく、この実装が作ったファイルをこの実装が知っているというだけの
+ * ものだから。
+ */
+function isReflectTempName(name: string): boolean {
+  return /^\.pwt-reflect-[0-9a-f]{32}\.tmp$/.test(name);
+}
+
 async function listFiles(
   root: string,
   exclude: readonly string[],
@@ -825,6 +844,9 @@ async function listFiles(
       continue;
     }
     if (entry.isSymbolicLink) {
+      continue;
+    }
+    if (!entry.isDirectory && isReflectTempName(entry.name)) {
       continue;
     }
     if (entry.isDirectory) {
@@ -1618,17 +1640,8 @@ export class IntegrationQueue {
  */
 type SkippedPaths = { skippedPaths: string[] };
 
-/**
- * 反映の途中で、`rename`を持たないポート実装向けの後方互換経路（TOCTOU対策の無い
- * 直接コピー、Issue #445のフォールバック）へ1回でも落ちたか。1エントリごとではなく
- * 反映全体（1回の`reflectIntegrationToWorkspace`呼び出し）で1個のフラグにする。
- * 呼び出し側（`runnerWorkingDirectory.ts`の`reflectPseudoWorktree`）はこれを見て、
- * 反映1回につき1回だけ警告ログを出す（ファイル単位で出すとログが溢れるため）。
- */
-type LegacyCopyFallbackUsed = { usedLegacyCopyFallback: boolean };
-
 export type ReflectToWorkspaceResult =
-  | ({ ok: true; appliedPaths: string[] } & SkippedPaths & LegacyCopyFallbackUsed)
+  | ({ ok: true; appliedPaths: string[] } & SkippedPaths)
   | { ok: false; reason: 'workspaceChanged'; message: string; changedPaths: string[] }
   | ({
       ok: false;
@@ -1640,8 +1653,7 @@ export type ReflectToWorkspaceResult =
       failedPath: string;
       /** `failedPath`より後ろにあり、まだ試みていないパス。 */
       remainingPaths: string[];
-    } & SkippedPaths &
-      LegacyCopyFallbackUsed);
+    } & SkippedPaths);
 
 /**
  * runの終了時に、統合先の内容をワークスペースへ反映する（design.md §16.20）。
@@ -1715,7 +1727,6 @@ export async function reflectIntegrationToWorkspace(
       failedPath: workspaceRoot,
       remainingPaths: [...manifest.keys()],
       skippedPaths: [],
-      usedLegacyCopyFallback: false,
     };
   }
   const realIntegrationDir = (await fs.realpath(integrationDir)) ?? integrationDir;
@@ -1723,7 +1734,8 @@ export async function reflectIntegrationToWorkspace(
   const entries = [...manifest.entries()];
   const appliedPaths: string[] = [];
   const skippedPaths: string[] = [];
-  let usedLegacyCopyFallback = false;
+  /** 孤立した一時ファイルの掃除（Issue #485）を済ませたディレクトリ。1反映につき1回で足りる。 */
+  const cleanedTempDirs = new Set<string>();
   for (let i = 0; i < entries.length; i += 1) {
     const entry = entries[i];
     if (entry === undefined) {
@@ -1885,119 +1897,119 @@ export async function reflectIntegrationToWorkspace(
             `反映先のディレクトリが実際にはワークスペースの外を指しています（${safeRelPath}）: ${sanitizeForLog(realTargetDir ?? targetDir)}`,
           );
         }
-        if (fs.rename !== undefined) {
-          // Issue #445: 上の`realTargetDir`確認と、実際にワークスペースへ書き込む瞬間
-          // （旧実装では`fs.copyFile(source, target)`）の間には、なお短いTOCTOU窓が残る。
-          // `fs.copyFile`はシンボリックリンクを解決して書き込むため、この窓の間に`target`
-          // が外部を指すシンボリックリンクへ差し替えられると、書き込みが境界外（リンク先）
-          // で起きてしまう。
-          //
-          // 一時ファイル+`rename`で塞げるのは、この窓のうち「`target`という名前そのものが
-          // シンボリックリンクへ差し替えられる」攻撃だけである。`rename`は対象パスの終端が
-          // シンボリックリンクであってもそれを解決せず、ディレクトリエントリそのものを
-          // 置き換える（POSIXの`rename(2)`の性質）ため、`target`がその時点でリンクへ
-          // 差し替えられていても、置き換え先（リンク先）を書き換えることは原理的にない。
-          //
-          // **親ディレクトリ`targetDir`側の窓は、この変更の前後で閉じていない**
-          // （監査指摘）。`realTargetDir`確認から`fs.copyFile(source, tempTarget)`までの間に
-          // `targetDir`自体がシンボリックリンクへ差し替えられると、`tempTarget`は
-          // `path.join(targetDir, ...)`という文字列結合で作った名前にすぎず、`copyFile`は
-          // その途中のディレクトリ部分のリンクを解決して書き込むため、境界外へ書かれうる。
-          // ロールバックの`fs.removeFile(tempTarget)`も同じ差し替え済みパスを辿るため防御に
-          // ならない。窓の長さ自体もこの変更で変わっていない。
-          //
-          // Issue #484: 上記の窓自体は、Nodeの標準API（`fs.promises`）だけでは移植可能な
-          // 形で閉じられないと判明した。`openat`/`mkdirat`/`renameat`相当が`FileHandle`に
-          // 存在せず、唯一の代替であるLinuxの`/proc/self/fd`経由のマジックリンクは
-          // Linux専用でWindowsに相当物が無い。ディレクトリの`realpath`確認直後に
-          // セグメントを自前で降りる案も、最終的に`copyFile`へ渡すのが文字列パスである以上
-          // 窓が縮まらない。`O_NOFOLLOW`相当も終端コンポーネントにしか効かず親には無力
-          // （いずれも実測で確認済み）。
-          //
-          // そこで、窓の存在は残存リスクとして受け入れたうえで、下の事後確認を
-          // 「`realTemp`が境界内か」ではなく「想定していた場所そのものか」へ厳格化する。
-          // 境界内チェックだけだと、`targetDir`がワークスペース内の別ディレクトリ
-          // （典型的には`.git/hooks`）を指すシンボリックリンクへ差し替えられた場合に
-          // 「境界内」として素通りしてしまう。`hasGitSegment`（Issue #406の`.git`無条件
-          // 拒否）は`relPath`にしか掛からないため、この経路は迂回できてしまい、実測でも
-          // `.git/hooks/pre-commit`が無警告で書き換わることを確認している。
-          //
-          // **「想定していた場所」は`targetDir`自身の`realpath`（`realTargetDir`）から
-          // 組み立ててはいけない（Issue #505、再監査で発覚した循環。当初のこの実装
-          // 自体がこの欠陥を持ったままマージされていた）。** `targetDir`自体が差し替え
-          // られている攻撃では、`targetDir`の`realpath`も一時ファイルの`realpath`も
-          // どちらも差し替え後の実体（`.git/hooks`・`.git/hooks/<一時ファイル名>`）を
-          // 指すため必ず一致してしまい、検査が自己無矛盾になって何も検知できない
-          // （`cloneWorkspace`の実装コメントで実測済み。同じクラスの欠陥）。
-          // 攻撃者が動かせない`realRoot`（`workspaceRoot`自身の`realpath`。関数冒頭で
-          // 確定済み）を基準に、`path.relative(workspaceRoot, tempTarget)`という文字列
-          // 計算（差し替えの影響を受けない）を再度連結して「想定した場所」を組み立てる
-          // ことで、`targetDir`確認からこの一時ファイル書き込みまでの間に差し替えが
-          // 起きた場合を検知できる（プラットフォーム差のある`openat`/`O_NOFOLLOW`系の
-          // 防御ではなく、純粋なパス文字列比較にしたのは、既存の「一次防御＋二次防御」の
-          // 二段構えと一貫させ、かつWindowsでも同じロジックで一様に効かせるため）。
-          // ただし`fs.promises`に`openat`相当が無い以上、この窓自体を完全に閉じることは
-          // できない。ここで検知できるのは「確認時点の想定と異なる実パスへ書かれたこと」
-          // であり、確認そのものより後の差し替え（別のTOCTOU）まで防げるわけではない。
-          //
-          // 一時ファイルは`targetDir`と同一ディレクトリに置く。別ディレクトリ（別ファイル
-          // システム）だと`rename`がクロスデバイスで`EXDEV`になり失敗しうるため。
-          // ファイル名は`crypto.randomBytes`による推測不能な接尾辞を持たせる。予測可能な
-          // 名前だと、そこへ先回りしてシンボリックリンクを仕込まれる別の攻撃面になる。
-          const tempTarget = path.join(
-            targetDir,
-            `.pwt-reflect-${randomBytes(16).toString('hex')}.tmp`,
-          );
+        // Issue #445: 上の`realTargetDir`確認と、実際にワークスペースへ書き込む瞬間
+        // （旧実装では`fs.copyFile(source, target)`）の間には、なお短いTOCTOU窓が残る。
+        // `fs.copyFile`はシンボリックリンクを解決して書き込むため、この窓の間に`target`
+        // が外部を指すシンボリックリンクへ差し替えられると、書き込みが境界外（リンク先）
+        // で起きてしまう。
+        //
+        // 一時ファイル+`rename`で塞げるのは、この窓のうち「`target`という名前そのものが
+        // シンボリックリンクへ差し替えられる」攻撃だけである。`rename`は対象パスの終端が
+        // シンボリックリンクであってもそれを解決せず、ディレクトリエントリそのものを
+        // 置き換える（POSIXの`rename(2)`の性質）ため、`target`がその時点でリンクへ
+        // 差し替えられていても、置き換え先（リンク先）を書き換えることは原理的にない。
+        //
+        // **親ディレクトリ`targetDir`側の窓は、この変更の前後で閉じていない**
+        // （監査指摘）。`realTargetDir`確認から`fs.copyFile(source, tempTarget)`までの間に
+        // `targetDir`自体がシンボリックリンクへ差し替えられると、`tempTarget`は
+        // `path.join(targetDir, ...)`という文字列結合で作った名前にすぎず、`copyFile`は
+        // その途中のディレクトリ部分のリンクを解決して書き込むため、境界外へ書かれうる。
+        // ロールバックの`fs.removeFile(tempTarget)`も同じ差し替え済みパスを辿るため防御に
+        // ならない。窓の長さ自体もこの変更で変わっていない。
+        //
+        // Issue #484: 上記の窓自体は、Nodeの標準API（`fs.promises`）だけでは移植可能な
+        // 形で閉じられないと判明した。`openat`/`mkdirat`/`renameat`相当が`FileHandle`に
+        // 存在せず、唯一の代替であるLinuxの`/proc/self/fd`経由のマジックリンクは
+        // Linux専用でWindowsに相当物が無い。ディレクトリの`realpath`確認直後に
+        // セグメントを自前で降りる案も、最終的に`copyFile`へ渡すのが文字列パスである以上
+        // 窓が縮まらない。`O_NOFOLLOW`相当も終端コンポーネントにしか効かず親には無力
+        // （いずれも実測で確認済み）。
+        //
+        // そこで、窓の存在は残存リスクとして受け入れたうえで、下の事後確認を
+        // 「`realTemp`が境界内か」ではなく「想定していた場所そのものか」へ厳格化する。
+        // 境界内チェックだけだと、`targetDir`がワークスペース内の別ディレクトリ
+        // （典型的には`.git/hooks`）を指すシンボリックリンクへ差し替えられた場合に
+        // 「境界内」として素通りしてしまう。`hasGitSegment`（Issue #406の`.git`無条件
+        // 拒否）は`relPath`にしか掛からないため、この経路は迂回できてしまい、実測でも
+        // `.git/hooks/pre-commit`が無警告で書き換わることを確認している。
+        //
+        // **「想定していた場所」は`targetDir`自身の`realpath`（`realTargetDir`）から
+        // 組み立ててはいけない（Issue #505、再監査で発覚した循環。当初のこの実装
+        // 自体がこの欠陥を持ったままマージされていた）。** `targetDir`自体が差し替え
+        // られている攻撃では、`targetDir`の`realpath`も一時ファイルの`realpath`も
+        // どちらも差し替え後の実体（`.git/hooks`・`.git/hooks/<一時ファイル名>`）を
+        // 指すため必ず一致してしまい、検査が自己無矛盾になって何も検知できない
+        // （`cloneWorkspace`の実装コメントで実測済み。同じクラスの欠陥）。
+        // 攻撃者が動かせない`realRoot`（`workspaceRoot`自身の`realpath`。関数冒頭で
+        // 確定済み）を基準に、`path.relative(workspaceRoot, tempTarget)`という文字列
+        // 計算（差し替えの影響を受けない）を再度連結して「想定した場所」を組み立てる
+        // ことで、`targetDir`確認からこの一時ファイル書き込みまでの間に差し替えが
+        // 起きた場合を検知できる（プラットフォーム差のある`openat`/`O_NOFOLLOW`系の
+        // 防御ではなく、純粋なパス文字列比較にしたのは、既存の「一次防御＋二次防御」の
+        // 二段構えと一貫させ、かつWindowsでも同じロジックで一様に効かせるため）。
+        // ただし`fs.promises`に`openat`相当が無い以上、この窓自体を完全に閉じることは
+        // できない。ここで検知できるのは「確認時点の想定と異なる実パスへ書かれたこと」
+        // であり、確認そのものより後の差し替え（別のTOCTOU）まで防げるわけではない。
+        //
+        // 一時ファイルは`targetDir`と同一ディレクトリに置く。別ディレクトリ（別ファイル
+        // システム）だと`rename`がクロスデバイスで`EXDEV`になり失敗しうるため。
+        // ファイル名は`crypto.randomBytes`による推測不能な接尾辞を持たせる。予測可能な
+        // 名前だと、そこへ先回りしてシンボリックリンクを仕込まれる別の攻撃面になる。
+        // Issue #485: これから一時ファイルを置くディレクトリに、前回以前の反映が
+        // 残した孤立した一時ファイルがあれば先に消す。スナップショットからは
+        // `isReflectTempName`で外してあるため反映はもう止まらないが、**外しただけだと
+        // ゴミが増え続ける**（プロセスが`rename`の前に落ちるたびに1つ残る）。
+        // 消すのは名前がその形へ厳密一致する通常ファイルだけで、ディレクトリと
+        // シンボリックリンクには触らない。**境界の確認が済んだ`targetDir`の直下だけ**を
+        // 見る（`readdir`は再帰しない）。掃除に失敗しても反映は続ける——ゴミが1つ
+        // 残ることより、反映そのものが止まるほうが害が大きい。
+        if (!cleanedTempDirs.has(targetDir)) {
+          cleanedTempDirs.add(targetDir);
           try {
-            await fs.copyFile(source, tempTarget);
-            // 二次防御の仕上げ（TOCTOU）。`persistManifest`と同じく、書いた後に実パスを
-            // 確かめる。ここは`target`ではなく一時ファイルに対して行う点が異なる。
-            // `rename`前に確認することで、境界外へ書かれた内容が`target`の名前で
-            // 一瞬でも見える窓自体を作らない。
-            //
-            // Issue #505: `expectedTemp`は`realTargetDir`（`targetDir`自身の`realpath`）
-            // からではなく、関数冒頭で確定済みの`realRoot`から組み立てる（上の大きな
-            // コメント参照。`realTargetDir`起点だと`targetDir`自体が差し替えられた場合に
-            // 自己無矛盾になり検知できない）。
-            const realTemp = await fs.realpath(tempTarget);
-            const expectedTemp = path.join(realRoot, path.relative(workspaceRoot, tempTarget));
-            if (realTemp === undefined || realTemp !== expectedTemp) {
-              throw new Error(
-                `反映先が実際には想定した場所以外へ書き込まれたため、書き込みを取り消しました` +
-                  `（${safeRelPath}）: ${sanitizeForLog(realTemp ?? tempTarget)}`,
-              );
+            for (const tempEntry of await fs.readdir(targetDir)) {
+              if (
+                tempEntry.isDirectory ||
+                tempEntry.isSymbolicLink ||
+                !isReflectTempName(tempEntry.name)
+              ) {
+                continue;
+              }
+              await fs.removeFile(path.join(targetDir, tempEntry.name));
             }
-            await fs.rename(tempTarget, target);
-          } catch (e) {
-            // 例外の理由を問わず（上のthrowだけでなく`copyFile`自体の失敗も含む）、
-            // 一時ファイルを残置しない。プロセスが途中で落ちた場合まではこれで防げないが、
-            // 通常の失敗経路では残らないようにする。
-            await fs.removeFile(tempTarget);
-            throw e;
+          } catch {
+            // 握りつぶす（上のコメントの理由）
           }
-        } else {
-          // 後方互換の経路（レビュー指摘への裁定）。`rename`を提供しないポート実装
-          // （テスト用フェイク等）向けに、従来どおり直接コピー+事後確認+ロールバックを行う。
-          // Issue #445のTOCTOU閉塞は`rename`を持つポート（`nodePseudoWorktreeFileSystem`。
-          // 本番はここだけを使う）でのみ効く。ここへ落ちたことは
-          // `usedLegacyCopyFallback`で呼び出し側へ伝え、反映1回につき1回だけ警告させる
-          // （1件ごとに出すとログが溢れるため）。
+        }
+        const tempTarget = path.join(
+          targetDir,
+          `.pwt-reflect-${randomBytes(16).toString('hex')}.tmp`,
+        );
+        try {
+          await fs.copyFile(source, tempTarget);
+          // 二次防御の仕上げ（TOCTOU）。`persistManifest`と同じく、書いた後に実パスを
+          // 確かめる。ここは`target`ではなく一時ファイルに対して行う点が異なる。
+          // `rename`前に確認することで、境界外へ書かれた内容が`target`の名前で
+          // 一瞬でも見える窓自体を作らない。
           //
-          // Issue #484: この経路は一時ファイルを使わないため、書き込み先の名前が
-          // `relPath`から予測可能で、境界外の既存ファイルを上書きし、失敗時のロールバック
-          // （下の`removeFile(target)`）がその既存ファイルを削除しうる（任意ファイル破壊）。
-          // 本番で実際に使われるポート（`nodePseudoWorktreeFileSystem`）は`rename`を持つため
-          // この経路には落ちず、上の一時ファイル+`rename`経路のみが通る。
-          usedLegacyCopyFallback = true;
-          await fs.copyFile(source, target);
-          const realTarget = await fs.realpath(target);
-          if (realTarget === undefined || !isPathWithinRoot(realTarget, realRoot)) {
-            await fs.removeFile(target);
+          // Issue #505: `expectedTemp`は`realTargetDir`（`targetDir`自身の`realpath`）
+          // からではなく、関数冒頭で確定済みの`realRoot`から組み立てる（上の大きな
+          // コメント参照。`realTargetDir`起点だと`targetDir`自体が差し替えられた場合に
+          // 自己無矛盾になり検知できない）。
+          const realTemp = await fs.realpath(tempTarget);
+          const expectedTemp = path.join(realRoot, path.relative(workspaceRoot, tempTarget));
+          if (realTemp === undefined || realTemp !== expectedTemp) {
             throw new Error(
-              `反映先が実際にはワークスペースの外を指していたため、書き込みを取り消しました` +
-                `（${safeRelPath}）: ${sanitizeForLog(realTarget ?? target)}`,
+              `反映先が実際には想定した場所以外へ書き込まれたため、書き込みを取り消しました` +
+                `（${safeRelPath}）: ${sanitizeForLog(realTemp ?? tempTarget)}`,
             );
           }
+          await fs.rename(tempTarget, target);
+        } catch (e) {
+          // 例外の理由を問わず（上のthrowだけでなく`copyFile`自体の失敗も含む）、
+          // 一時ファイルを残置しない。プロセスが途中で落ちた場合まではこれで防げないが、
+          // 通常の失敗経路では残らないようにする。
+          await fs.removeFile(tempTarget);
+          throw e;
         }
       }
     } catch (e) {
@@ -2017,7 +2029,6 @@ export async function reflectIntegrationToWorkspace(
           .slice(i + 1)
           .map(([p]) => p)
           .sort((a, b) => a.localeCompare(b)),
-        usedLegacyCopyFallback,
       };
     }
     appliedPaths.push(relPath);
@@ -2026,7 +2037,6 @@ export async function reflectIntegrationToWorkspace(
     ok: true,
     appliedPaths: appliedPaths.sort((a, b) => a.localeCompare(b)),
     skippedPaths: skippedPaths.sort((a, b) => a.localeCompare(b)),
-    usedLegacyCopyFallback,
   };
 }
 
