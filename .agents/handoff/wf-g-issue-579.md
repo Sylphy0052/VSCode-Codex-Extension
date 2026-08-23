@@ -164,3 +164,37 @@ AssertionError: expected 'waitingApproval' not to be 'waitingApproval' // Object
 - `npm run lint`: 0警告
 - `npm test`: `Test Files 175 passed (175)` / `Tests 3814 passed (3814)`（差し戻し対応前の3813から回帰テスト1件増）
 - 統合テストは未再実行（コーディネーター指示どおり。`src/view/`と`docs/`のみの変更のため不要と判断。`src/orchestrator/`は触っていない）
+
+## 8. 差し戻し対応（2回目、PR #644への追いcommit）
+
+### 8-1. 穴の経緯（次に同じ判断をする人向けの記録）
+
+1回目の差し戻しで追加した回帰テスト（`test/unit/webviewScript.test.ts`）には、まだ穴が残っていた。テストは`FAILURE_LABEL`のキー集合と、テスト内にハードコードした`allFailureKinds`配列の集合一致を確かめる形だった。これは「ラベルだけ足し忘れる」「ラベルだけ余分に足す」は捕まえるが、**`runState.ts`にkindを足すときに、ラベルとテストの配列を両方同時に忘れると、11 vs 11の集合一致のまま素通りする**。同期先が「ラベル表1つ」から「ラベル表＋テストの配列」の2つに増えただけで、機械的に守られる境界は増えていなかった。
+
+直し方は、ハードコード配列をやめて`runState.ts`を実際に読み、`TaskFailureReason`の定義から`kind`を抽出する形にすること（`workflowScript()`のソースを正規表現で解析する、このテストファイル既存の流儀と同じ）。
+
+**同じ形の記述が2つの型に属していて、「形」でgrepすると母数が混ざるという罠がある。** `TaskFailureReason`（`| { readonly kind: '...' }`という形の宣言、11件）と、直後に定義されている`AutoResumeOutcome`（`nothingToResume` / `blockedByOtherFailure` / `blockedByAllowGate` / `resumed`の4件）が**まったく同じ書き方**をしている。コーディネーター自身がレビュー中に`grep -cE "^  \| \{ readonly kind: '"`をファイル全体に掛けて実測したところ**15件**になり、私が報告した11件と食い違った。最初は「作業側（私）が間違っている」と思いかけたが、`grep -nE "^export type |^  \| \{ readonly kind: '"`で型宣言の境界と一緒に数え直すと、15件のうち11件が`TaskFailureReason`、残り4件が`AutoResumeOutcome`だと分かり、**母数を混ぜていたのはコーディネーター側の最初の測り方**だった（本人が実例として明記）。この教訓は、テストの抽出ロジックにもそのまま当てはまる。`kind: '...'`という**形**だけで正規表現を書くと、対象の型定義の範囲を切らない限り、無関係な型の要素まで拾ってしまう。
+
+### 8-2. 追加で直した内容
+
+`test/unit/webviewScript.test.ts`の該当テストを書き直した。
+
+1. `allFailureKinds`のハードコードを削除。`readFileSync`で`src/orchestrator/runState.ts`を読み、`export type TaskFailureReason =`から最初の`};`までの範囲を切り出してから`kind`を抽出する形にした（`test/unit/runner.test.ts`の既存の「ソースをreadFileSyncで読んで正規表現で確かめる」流儀を踏襲）
+2. 抽出件数が`11`であることを`expect(allFailureKinds).toHaveLength(11)`で確かめる一文を、**forループやSet比較より先に**置いた（コーディネーターの補足指摘: 抽出が失敗して空集合になると、`for (const kind of kinds)`は1度も回らず、`expect(new Set(labelKeys)).toEqual(new Set(kinds))`も両方空なら一致してしまう。「全kindを網羅している」という主張はkindが0個のときに真になるため、件数の主張を先頭に置いて空集合での素通りを防ぐ）
+3. 抽出結果が`AutoResumeOutcome`の4件（`nothingToResume` / `blockedByOtherFailure` / `blockedByAllowGate` / `resumed`）を含まないことを`expect(allFailureKinds).not.toContain(kind)`で明示的に確認する一文を追加。正規表現の範囲チェックが将来緩められたときに、この4件混入で検出できるようにした
+4. テストの説明文とコメントを書き直した。「手で同期させる」という前提が消えたため、「`runState.ts`を真として読み、そこにkindを足してラベルを足し忘れるとこのテストが落ちる」という趣旨に変更した
+
+**RED確認**: `runState.ts`の`TaskFailureReason`へ一時的に架空のkind（`newHypotheticalKind`）を追加し、ラベル・テスト側は何も変えずに実行したところ、`expect(allFailureKinds).toHaveLength(11)`で`12 !== 11`として確実に落ちることを確認した（=「kindを足してラベルも配列も両方忘れる」形の穴が塞がったことの実測）。確認後`git checkout`相当（バックアップからの復元）で`runState.ts`を元に戻し、差分ゼロを確認済み。
+
+### 8-3. 実測結果（2回目の差し戻し対応後）
+
+- `npx tsc --noEmit`: 0エラー
+- `npm run lint`: 0警告
+- `npm test`: `Test Files 175 passed (175)` / `Tests 3814 passed (3814)`（テスト件数は1回目の差し戻し対応時から変わらず。既存1件を強化した差分のため）
+- 統合テストは未再実行（`test/`のみの変更のため。指示どおり）
+
+### 8-4. 補足対応（同PRへの追いcommit、件数アサーションの順序）
+
+コーディネーターから追加の補足があった。件数チェック自体は既に先頭に置いていたが、書き方を`expect(allFailureKinds.length).toBe(11)`から`expect(allFailureKinds).toHaveLength(11)`へ変更した。理由（コーディネーターの指摘）: 「全kindを網羅している」という主張は**kindが0個のときに真になる**（forループは空集合なら1度も回らず、`Set`同士の比較も両方空なら一致する）。件数の主張を先頭に置くことで、抽出失敗（0件）時にそこで即座に落ちる。11という数字はハードコード一覧とは意味が違い、「何があるか」の二重管理ではなく「抽出が効いているか」の検算であり、kindを足すときは11→12へ直すことになるが、それは意図した差分として現れる。
+
+実測: `npx tsc --noEmit` 0エラー、`npm run lint` 0警告、`npm test` Test Files 175 passed (175) / Tests 3814 passed (3814)（件数変化なし。既存アサーションの書き方を変えただけの差分のため）。

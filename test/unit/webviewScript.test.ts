@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { chatScript } from '../../src/view/chatScript';
 import { approvalLevelMeta } from '../../src/provider/approvalLevel';
@@ -328,25 +330,49 @@ describe('workflowScript', () => {
 
   it(
     'FAILURE_LABELはTaskFailureReasonの全kindを網羅している' +
-      '（Issue #579横断レビュー指摘: kindを足してラベルを足し忘れると、Viewに生の英語のkindが' +
-      '出るまで気づけない。この一覧は`src/orchestrator/runState.ts`の`TaskFailureReason`と' +
-      '手で同期させる。kindを追加したら、このテストの配列とworkflowScript.tsのFAILURE_LABEL' +
-      'を対で更新すること）',
+      '（Issue #579横断レビュー指摘。`src/orchestrator/runState.ts`の`TaskFailureReason`を' +
+      '真として読み取り、そこにkindを足してworkflowScript.tsのFAILURE_LABELを足し忘れると' +
+      'このテストが落ちる。ハードコードの配列と付き合わせる形だと、kindを足す側で配列も' +
+      'ラベルも両方忘れたときにすり抜ける（コーディネーターレビュー指摘）ため、' +
+      '配列自体を持たずrunState.tsから毎回抽出する）',
     () => {
-      // src/orchestrator/runState.tsのTaskFailureReasonユニオンの全kind（design.md §16.39時点で11種）
+      const runStateSource = readFileSync(
+        path.resolve(__dirname, '../../src/orchestrator/runState.ts'),
+        'utf8',
+      );
+      // `TaskFailureReason`の定義範囲だけを切り出す。同じ`| { readonly kind: '...' }`という
+      // 形は`AutoResumeOutcome`など他のdiscriminated unionにも登場するため、範囲を切らずに
+      // ファイル全体からkindを拾うと母数が混ざる（コーディネーターが実測で踏みかけた罠。
+      // `grep -cE "^  \| \{ readonly kind: '"`をファイル全体に掛けると15件になり、内訳は
+      // TaskFailureReasonの11件 + AutoResumeOutcomeの4件（nothingToResume /
+      // blockedByOtherFailure / blockedByAllowGate / resumed）だった）。
+      const typeStart = runStateSource.indexOf('export type TaskFailureReason =');
+      expect(typeStart).toBeGreaterThan(0);
+      const typeEndOffset = runStateSource.indexOf('};', typeStart);
+      expect(typeEndOffset).toBeGreaterThan(typeStart);
+      const typeBody = runStateSource.slice(typeStart, typeEndOffset);
+
       const allFailureKinds = [
-        'maxReached',
-        'loopFailed',
-        'approvalRejected',
-        'manualStop',
-        'stalled',
-        'dependencyFailed',
-        'mergeBlocked',
-        'mergeFailed',
-        'runHalted',
-        'reloadInterrupted',
-        'taskApprovalTimedOut',
+        ...typeBody.matchAll(/\{ readonly kind: '(\w+)'/g),
+      ].map((m) => m[1]);
+
+      // 範囲の切り出しに失敗すると0件になりうる。0件だと後続の検査（forループ・空集合同士の
+      // Set一致）が何も検査しないまま素通りしてしまうため、件数そのものを先に主張して固定する
+      // （design.md §16.39時点で11種）。kindを足すときはこの数字も11→12へ直すことになり、
+      // それは意図した変更として差分に出る。
+      expect(allFailureKinds).toHaveLength(11);
+      // 範囲を切らずに拾うとAutoResumeOutcomeの4件が混ざる。正規表現を緩めて範囲チェックが
+      // 効かなくなったときに、この4件が入っていないことで検出する。
+      const autoResumeOutcomeKinds = [
+        'nothingToResume',
+        'blockedByOtherFailure',
+        'blockedByAllowGate',
+        'resumed',
       ];
+      for (const kind of autoResumeOutcomeKinds) {
+        expect(allFailureKinds).not.toContain(kind);
+      }
+
       const source = workflowScript();
       const failureLabelMatch = source.match(/const FAILURE_LABEL = \{([\s\S]*?)\n {2}\};/);
       expect(failureLabelMatch).not.toBeNull();
