@@ -767,6 +767,26 @@ class FakePseudoFs implements PseudoWorktreeFileSystemPort {
       this.setFile(to, meta);
     }
   }
+  async rename(from: string, to: string): Promise<void> {
+    if (this.failWith !== undefined) {
+      throw this.failWith;
+    }
+    // 実ファイルシステムの`rename(2)`と同じく、`to`が既存でも置き換える。
+    // Issue #485で`PseudoWorktreeFileSystemPort.rename`が必須になったため、
+    // このフェイクも持つ（オプショナルだった当時に実装しなかった理由は
+    // 「別作業がこのクラスを押さえていて触れなかった」だけで、技術的な理由は無い）
+    const meta = this.files.get(from);
+    if (meta !== undefined) {
+      this.files.delete(from);
+      this.setFile(to, meta);
+    }
+    const text = this.textFiles.get(from);
+    if (text !== undefined) {
+      this.textFiles.delete(from);
+      this.textFiles.set(to, text);
+      this.ensureDirsFor(to);
+    }
+  }
   async removeFile(target: string): Promise<void> {
     if (this.failWith !== undefined) {
       throw this.failWith;
@@ -6077,50 +6097,6 @@ tasks:
     },
   );
 
-  it(
-    '`rename`を提供しないファイルシステムポートへフォールバックすると、' +
-      'ワークスペースへの反映後に運用者へ知らせる警告ログを出す（Issue #528）',
-    async () => {
-      const git = fakeGit({ notGitRepo: true });
-      // FakePseudoFsは`rename`メソッドを持たないため、`reflectIntegrationToWorkspace`は
-      // TOCTOU対策の無い旧来の直接コピー経路（`usedLegacyCopyFallback: true`）へ
-      // フォールバックする
-      const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
-      const warnCalls: string[] = [];
-      const log: Logger = {
-        ...fakeLogger,
-        warn: (message: string) => void warnCalls.push(message),
-      };
-      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
-        git,
-        pseudoWorktree: { fs, exclude: [] },
-        log,
-      });
-      const result = await runner.start(
-        '/repo/.agents/workflows/pseudo-reflect-legacy-fallback.yaml',
-        '/repo',
-      );
-      const runId = result.runId as string;
-      await flush();
-
-      const t1 = codexHost.byTaskId('T1');
-      const cloneDir = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
-      fs.setFile(path.join(cloneDir, 'a.txt'), { size: 20, mtimeMs: 200 });
-
-      t1.finish('done', doneState('ok'));
-      await flush();
-
-      // 反映そのものは成功する（フォールバック経路でも反映自体は行われる）
-      expect(fs.files.get('/repo/a.txt')).toEqual({ size: 20, mtimeMs: 200 });
-      // `rename`を提供しないポートへ落ちたことを運用者が気づけるよう、警告ログを出す
-      expect(
-        warnCalls.some(
-          (message) => message.includes('`rename`') && message.includes('フォールバック'),
-        ),
-      ).toBe(true);
-    },
-  );
-
   it('persist（実行状態の永続化）がmemento.updateの失敗時に未ハンドルrejectにならず、ログへ記録する（Issue #364）', async () => {
     const rejectionListener = vi.fn();
     process.on('unhandledRejection', rejectionListener);
@@ -8104,15 +8080,20 @@ tasks:
         const cloneDir1 = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
         fs.setFile(path.join(cloneDir1, 'a.txt'), { size: 20, mtimeMs: 200 });
         fs.setFile(path.join(cloneDir1, 'b.txt'), { size: 30, mtimeMs: 300 });
-        const originalCopyFile = fs.copyFile.bind(fs);
+        // Issue #485で`rename`が必須になり、反映は「一時ファイルへ`copyFile`してから
+        // `rename`で確定」の一本になった。そのため`copyFile`の`to`は一時ファイル名
+        // （`.pwt-reflect-<hex>.tmp`）で、反映先のパスそのものではない。**反映先で
+        // 判定する**というこのテストの意図は`rename`側へ移す（`rename`の`to`が
+        // 確定後のパスである）
+        const originalRename = fs.rename.bind(fs);
         let injectFailure = true;
-        fs.copyFile = async (from: string, to: string): Promise<void> => {
+        fs.rename = async (from: string, to: string): Promise<void> => {
           if (injectFailure && to === '/repo/b.txt') {
             throw Object.assign(new Error('ENOSPC: no space left on device'), {
               code: 'ENOSPC',
             });
           }
-          await originalCopyFile(from, to);
+          await originalRename(from, to);
         };
 
         codexHost.byTaskId('T1').finish('done', doneState('ok'));
