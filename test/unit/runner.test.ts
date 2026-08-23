@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { initialChatState, type ChatState } from '../../src/appserver/chatState';
@@ -5441,6 +5442,41 @@ tasks:
     expect(snapshot?.warnings.some((w) => w.kind === 'taskIssueFailed')).toBe(true);
     // PR/MR自体は通常どおり作られる（Issueが起票できなくてもPR/MR作成は止めない）
     expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'create')).toBe(true);
+  });
+
+  /**
+   * `maybeCreateTaskIssue`の呼び出し位置は、`prepareTaskLaunch`内のbypassPermissions
+   * 最終防御（`if (task.provider === 'claude' && effective.config.approvalMode ===
+   * 'bypassPermissions' && !baseline.allowClaudeBypassPermissions) { throw ... }`）より
+   * **後**でなければならない（レビュー指摘）。先に呼ぶと、「危険判定が働かない設定なので
+   * 開始できません」と拒否したタスクについても、外部ホストへIssueだけが起票されたまま
+   * 残ってしまう。
+   *
+   * この不変条件は、実行時の呼び出し順序としては直接検証できない。`buildEffectiveTaskConfig`
+   * （唯一のクランプ入口、design.md §16.16）が`bypassPermissions`を必ず`acceptEdits`へ
+   * 読み替える（`baseline.allowClaudeBypassPermissions`が有効なときを除くが、その場合は
+   * throw自体の条件`!baseline.allowClaudeBypassPermissions`を満たさずthrowが起きない）ため、
+   * このthrow分岐は現在の唯一の正規経路（`buildEffectiveTaskConfig`経由）からは到達し得ない
+   * 多層防御であり、単体テストの中で実際にthrowを起こす前提を作れない
+   * （`taskConfig.ts`のコメント「通常この分岐へは入らない」のとおり）。
+   *
+   * そのため、ソースの並び順そのもの（`maybeCreateTaskIssue(`の呼び出しが、throwの本文
+   * （実効approvalModeがbypassPermissionsのため、のエラーメッセージ）より後に現れること）
+   * を機械的に固定する。呼び出し位置を元（`resolveWorkingDirectory`の直後）へ戻すと、
+   * このテストは失敗する（§16.25 #8で実測済み。最終報告に貼る）。
+   */
+  it('maybeCreateTaskIssueの呼び出しは、bypassPermissionsの最終防御より後のソース位置にある', () => {
+    const source = readFileSync(
+      path.resolve(__dirname, '../../src/orchestrator/runner.ts'),
+      'utf8',
+    );
+    const throwIndex = source.indexOf(
+      '実効approvalModeがbypassPermissionsのため、このタスクは開始できません',
+    );
+    const callIndex = source.indexOf('await this.maybeCreateTaskIssue(');
+    expect(throwIndex).toBeGreaterThan(0);
+    expect(callIndex).toBeGreaterThan(0);
+    expect(callIndex).toBeGreaterThan(throwIndex);
   });
 });
 

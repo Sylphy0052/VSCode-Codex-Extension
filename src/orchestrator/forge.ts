@@ -406,6 +406,33 @@ export function buildTaskPullRequestBody(input: TaskPullRequestBodyInput): strin
  * （実装判断。最終報告に記載）。タスク層と同じく、エージェントの応答を受け取る
  * フィールドは持たない。
  */
+export interface IntegrationPullRequestContentInput {
+  runId: string;
+  taskIds: readonly string[];
+}
+
+export function buildIntegrationPullRequestTitle(
+  input: IntegrationPullRequestContentInput,
+): string {
+  return `run ${input.runId} の統合`;
+}
+
+export function buildIntegrationPullRequestBody(input: IntegrationPullRequestContentInput): string {
+  const lines: string[] = [];
+  lines.push(`run ${input.runId} で完了したタスクを統合します。`);
+  lines.push('');
+  lines.push('## 完了したタスク');
+  lines.push('');
+  if (input.taskIds.length === 0) {
+    lines.push('（なし）');
+  } else {
+    for (const taskId of input.taskIds) {
+      lines.push(`- ${taskId}`);
+    }
+  }
+  return lines.join('\n');
+}
+
 /**
  * タスクのIssue（design.md §16.31、roadmap W6、Issue #596）の本文に渡す入力。PR/MRの本文
  * （`TaskPullRequestBodyInput`）と違い、`dependsOn` / `issue`（このIssue自身への自己参照は
@@ -437,33 +464,6 @@ export function buildTaskIssueBody(input: TaskIssueBodyInput): string {
   lines.push('');
   lines.push(`- runId: ${input.runId}`);
   lines.push(`- taskId: ${input.taskId}`);
-  return lines.join('\n');
-}
-
-export interface IntegrationPullRequestContentInput {
-  runId: string;
-  taskIds: readonly string[];
-}
-
-export function buildIntegrationPullRequestTitle(
-  input: IntegrationPullRequestContentInput,
-): string {
-  return `run ${input.runId} の統合`;
-}
-
-export function buildIntegrationPullRequestBody(input: IntegrationPullRequestContentInput): string {
-  const lines: string[] = [];
-  lines.push(`run ${input.runId} で完了したタスクを統合します。`);
-  lines.push('');
-  lines.push('## 完了したタスク');
-  lines.push('');
-  if (input.taskIds.length === 0) {
-    lines.push('（なし）');
-  } else {
-    for (const taskId of input.taskIds) {
-      lines.push(`- ${taskId}`);
-    }
-  }
   return lines.join('\n');
 }
 
@@ -857,6 +857,8 @@ export async function createIssue(
             : `${command} の実行に失敗しました（終了コード ${result.code}）`,
       };
     }
+    // 関数名はPR/MR限定に読めるが、URLの形は使い回してよい（GitHubの`gh issue create`も
+    // PR同様URLを1行だけ吐き、GitLabのissues APIも`web_url`を返す）ため、そのまま流用する
     const url =
       request.host === 'github'
         ? extractGithubPullRequestUrl(result.stdout)
@@ -902,7 +904,9 @@ export function parsePullRequestNumberFromUrl(url: string): number | undefined {
 export type ForgeStepOutcome = { ok: true } | { ok: false; message: string };
 
 /**
- * タスク層のPR/MR作成フローの4手順。design.md §16.18「作る順序」がそのまま手順名になる。
+ * タスク層のPR/MR作成フローの手順（design.md §16.18「作る順序」がそのまま手順名になる。
+ * 元は4手順だったが、readyへの切り替え（5番目、`markPullRequestReady`）・レビュー
+ * （3.5番目、`reviewPullRequest`、roadmap W6）が任意手順として増え、現在は最大6手順）。
  *
  * 手順の実体（実際に `git push` / `gh pr create` / 統合worktreeでのマージを行う関数）は
  * 呼び出し側が組み立てて渡す。`mergeAndPushIntegration` の型を `TMerge` で汎用化している

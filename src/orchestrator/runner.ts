@@ -2938,15 +2938,12 @@ export class WorkflowRunner {
   }
 
   /**
-   * `startTask()`の前半。作業ディレクトリの解決・実効設定のクランプ・権限越境チェック・
-   * bypassPermissionsの最終防御・`TaskSessionInput`の組み立てとタスク境界の解決までを担う。
-   */
-  /**
    * タスクの開始時にIssueを起票する（design.md §16.31「タスクの開始時にIssueを起票し、PR
-   * 本文から参照する」、roadmap W6、Issue #596）。`prepareTaskLaunch`から呼ぶ（起動そのもの
-   * より前に行う必要は無いが、PR/MR本文が参照する番号は起動直後には要らないため、ここで
-   * 決めておけば`mergeTaskWithForge`（`runnerMerge.ts`）が`live.createdTaskIssues`から
-   * 読むだけで済む）。
+   * 本文から参照する」、roadmap W6、Issue #596）。`prepareTaskLaunch`から、bypassPermissions
+   * の最終防御を通過した後に呼ぶ（起票は外部ホストへの副作用を伴うため、危険判定が働かない
+   * 設定として拒否するタスクではそもそも呼ばない。起動そのものより前に行う必要は無いが、
+   * PR/MR本文が参照する番号は起動直後には要らないため、ここで決めておけば
+   * `mergeTaskWithForge`（`runnerMerge.ts`）が`live.createdTaskIssues`から読むだけで済む）。
    *
    * **前提が欠けても`startTask`を止めない。** `live.forge.kind === 'active'`である以上
    * `checkForgePrerequisites`（CLI・認証・originリモート）は既に通っているが、個別の
@@ -3019,6 +3016,12 @@ export class WorkflowRunner {
     }
   }
 
+  /**
+   * `startTask()`の前半。作業ディレクトリの解決・実効設定のクランプ・権限越境チェック・
+   * bypassPermissionsの最終防御・タスクのIssue起票（design.md §16.31、roadmap W6、
+   * Issue #596。`maybeCreateTaskIssue`）・`TaskSessionInput`の組み立てとタスク境界の
+   * 解決までを担う。
+   */
   private async prepareTaskLaunch(
     live: LiveRun,
     task: WorkflowTask,
@@ -3029,8 +3032,6 @@ export class WorkflowRunner {
     const retry = retrySuffixOf(taskRunState);
     const { cwd, branch, usedWorktree, usedPseudoWorktree, pseudoSnapshot, originCommit } =
       await resolveWorkingDirectory(this.internals, live, task, retry);
-
-    await this.maybeCreateTaskIssue(live, task, taskId, runId, cwd);
 
     const baseline = this.deps.readBaseline();
     // クランプはこの1関数だけを通す（design.md §16.16。#52セキュリティ監査指摘）
@@ -3070,6 +3071,12 @@ export class WorkflowRunner {
           '（危険判定が働かない設定での無人実行はできません）',
       );
     }
+
+    // タスクのIssue起票（design.md §16.31、roadmap W6、Issue #596）は、外部ホストへの
+    // 副作用（`gh issue create`/`glab api`）を伴う。**bypassPermissionsの最終防御より後で
+    // 呼ぶこと。** 先に呼ぶと、「危険判定が働かない設定なので開始できません」と拒否した
+    // タスクについてもIssueだけが起票されたまま残ってしまう（レビュー指摘）
+    await this.maybeCreateTaskIssue(live, task, taskId, runId, cwd);
 
     // タスク間メッセージング（design.md §16.21）。`registerTask`の直前で`ensureMessaging`を
     // 呼ぶ（Issue #475の単一チョークポイント）。run終了後の`retryTask` / 再マージ成功で
