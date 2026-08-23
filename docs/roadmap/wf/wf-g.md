@@ -9,7 +9,7 @@
 
 書き手: **WF-Gの担当セッションだけが書く。**
 
-- **WF-G 横断の仕上げ**（15項目）
+- **WF-G 横断の仕上げ**（16項目）
   - T26 eslintへ型情報を要するルールを導入し、未処理Promiseを機械的に検出できるようにする
   - [#491](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/491)
     終了したrunを `retry_task` で再開してもオーケストレーターの制御ツールが復活しない
@@ -95,6 +95,20 @@
     直すのは1行だが、受入基準は**`ORCHESTRATOR_CONTROL_TOOLS`の全要素と案内文を突き合わせる
     テストを置くこと**まで含む（片方だけ足して他が漏れる形をここで終わらせる）。
     出どころはW8（#583）の実装中、`ask_user`を案内文へ足す作業の隣で見つかったもの
+  - [#624](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/624)
+    READMEがWF-Eで入った設定・コマンド・プログラム機能を反映していない。
+    実測（WF-E担当、2026-08-23）: 設定22件のうち**8件**が未記載
+    （`mergeApprovalTimeoutSec` / `reviewCommentPollIntervalSec` /
+    `createTaskIssue` / `reviewTaskPullRequest` / `stallRepeatCount` /
+    `maxAskUserPerRun` / `autoResume` / `maxAutoResumeAttempts`）、
+    コマンド8件のうち**3件**が未記載
+    （`menu` / `runProgram` / `stopProgram`）。W12の「プログラム」機能への言及は実質ゼロ
+    （ヒット1件はMCP elicitationの文脈で無関係）。
+    **WF-E本体ではなく後追いの文書作業としてここへ置く。**
+    W2〜W6・W8・W10・W12の8項目にまたがり、**どの項目の受入基準にも入っていなかった**ため、
+    WF-Eの完了条件には含めない（epic #341のクローズ条件からも外してある）。
+    着手はWF-Eの統合PRがmainへ入った後。**未リリースの機能をREADMEへ書いても実機で
+    確かめられない**ため
   - 全体レビュー（第1波・第2波の全変更を横断でレビューする）
   - 依存: 第1波・第2波の全完了
   - ファイル: `src` 全域（型情報ルールの導入は全ファイルへ波及する）
