@@ -44,6 +44,26 @@
 - PR作成: `gh pr create -R Sylphy0052/VSCode-Codex-Extension --base main ...` →
   `https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/643`
 
+## コーディネーターの差し戻しが誤りだった経緯（訂正済み）
+
+コーディネーターから「2本目のgrep（`grep -n "dispose()後にretryTaskで
+再開してもCLIセッション"`）が棚に無い」との差し戻しを受けたが、実際には
+その2つ前のコミット（`eb2c04d1`）で既に入っていた。コーディネーター自身が
+後に`git show <commit>:docs/roadmap/wf/wf-g.md | grep -c ...`で
+`ab34a5d1`から`7b1f09e3`まで4コミットを遡って確認し、`eb2c04d1`の時点で
+既出だったことを認め、差し戻しが誤りだったと訂正した。
+**教訓**: 差し戻す前に、自分が見ている差分が相手の最新pushを含んでいるかを
+確かめる手順が抜けていた。`gh pr diff <番号>`や`git show <commit>:<path> | grep`
+のように、コミット単位で実測してから指摘するのが正しい手順。このセッション側は
+「指摘をそのまま受け入れて二重に書き足す」のではなく、`git log`と`gh pr view
+--json headRefOid`でHEADの一致を確認したうえで反論した。これが功を奏し、
+同じgrepが棚に2回書かれる事態を防げた。
+
+一方でラベル表記（Issue番号→PR番号）は実質的な改善で、これは反映した。
+また、その後の全体オーケストレーターの独立確認で「実装側の枝を見るgrepが
+1本足りない」という**別の**正しい指摘があり、これは棚へ追加した
+（コミット`a540d807`）。
+
 ## 未確認・推論でしかないこと
 
 - PR #641・PR #642が`test/unit/runner.test.ts`を同時に触っていた行番号
