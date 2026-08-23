@@ -450,6 +450,11 @@
         "category": "Agent"
       },
       {
+        "command": "agent.workflows.runProgram",
+        "title": "プログラムを実行…",
+        "category": "Agent"
+      },
+      {
         "command": "agent.workflows.stop",
         "title": "ワークフローを停止…",
         "category": "Agent"

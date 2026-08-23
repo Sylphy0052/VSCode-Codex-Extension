@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_PROGRAM_MAX_PARALLEL,
   MAX_PROGRAM_RUN_COUNT,
   parseProgramYaml,
+  PROGRAM_MAX_PARALLEL_MAX,
+  PROGRAM_MAX_PARALLEL_MIN,
   PROGRAM_RUN_ID_PATTERN,
   validateProgram,
   type ProgramDefinition,
@@ -19,6 +22,7 @@ const runRef = (overrides: Partial<ProgramRunRef> = {}): ProgramRunRef => ({
 const program = (overrides: Partial<ProgramDefinition> = {}): ProgramDefinition => ({
   version: 1,
   name: 'テストプログラム',
+  maxParallel: 3,
   runs: [runRef()],
   ...overrides,
 });
@@ -182,5 +186,45 @@ describe('validateProgram（受入基準: 複数runの定義・循環依存と�
   it('PROGRAM_RUN_ID_PATTERNはworkflow.tsのTASK_ID_PATTERNと同じ字種を許す', () => {
     expect(PROGRAM_RUN_ID_PATTERN.test('R1')).toBe(true);
     expect(PROGRAM_RUN_ID_PATTERN.test('-R1')).toBe(false);
+  });
+
+  it('maxParallelが範囲外なら拒否する', () => {
+    const tooLow = program({ maxParallel: PROGRAM_MAX_PARALLEL_MIN - 1 });
+    const tooHigh = program({ maxParallel: PROGRAM_MAX_PARALLEL_MAX + 1 });
+    const notInteger = program({ maxParallel: 1.5 });
+    expect(validateProgram(tooLow).errors.some((e) => e.message.includes('maxParallel'))).toBe(
+      true,
+    );
+    expect(validateProgram(tooHigh).errors.some((e) => e.message.includes('maxParallel'))).toBe(
+      true,
+    );
+    expect(validateProgram(notInteger).errors.some((e) => e.message.includes('maxParallel'))).toBe(
+      true,
+    );
+  });
+});
+
+describe('maxParallelの読み込み（design.md §16.37.2、Issue #605）', () => {
+  it('未指定ならDEFAULT_PROGRAM_MAX_PARALLELを使う', () => {
+    const yaml = `
+version: 1
+name: テスト
+runs:
+  - id: R1
+    defPath: .agents/workflows/a.yaml
+`;
+    expect(parseProgramYaml(yaml).maxParallel).toBe(DEFAULT_PROGRAM_MAX_PARALLEL);
+  });
+
+  it('指定した値を読む', () => {
+    const yaml = `
+version: 1
+name: テスト
+maxParallel: 2
+runs:
+  - id: R1
+    defPath: .agents/workflows/a.yaml
+`;
+    expect(parseProgramYaml(yaml).maxParallel).toBe(2);
   });
 });

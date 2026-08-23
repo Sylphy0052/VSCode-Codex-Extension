@@ -27,7 +27,12 @@ export interface PersistedProgram {
   workspaceRoot: string;
   /** ISO8601。 */
   startedAt: string;
-  /** 実行中は undefined。終了判定が付いた時点で埋める（この段では何も埋めない。#605の担当）。 */
+  /**
+   * 実行中は undefined。終了判定が付いた時点で埋める。`programRunner.ts`の
+   * `isProgramSettled`（全runが`done`または`failed`）が真になった時点で`ProgramRunner`が
+   * 埋める（roadmap W12-2、Issue #605）。`pending`が1件でも残っていれば埋まらない
+   * （失敗の伝播はIssue #606の担当のため、それまでは「実行中」のまま）。
+   */
   finishedAt: string | undefined;
   state: ProgramState;
 }
@@ -93,9 +98,9 @@ export class ProgramStore {
    *
    * `WorkflowRunStore.reconcileAfterReload`と同じタイミングで呼ぶことで、プログラムの
    * 永続化状態を中断からの自動再開（design.md §16.35、roadmap W10）の対象に含める。
-   * この段（W12-1）では実際に自動でrunを再開する処理は持たないため、状態を書き戻す
-   * ところまでを担う（実際の再開はプログラムのスケジューリングを持つ後続Issue、
-   * roadmap W12-2、Issue #605の担当）。
+   * ここが担うのは状態を書き戻すところまで。実際の再開（続きの波の起動）は、この
+   * メソッドが返した`reconciled`を使って`extension.ts`が`ProgramRunner.pumpProgram`を
+   * 呼ぶ側の責務（`programRunner.ts`、roadmap W12-2、Issue #605）。
    */
   reconcileAfterReload(): Promise<readonly PersistedProgram[]> {
     return this.enqueue(async () => {
