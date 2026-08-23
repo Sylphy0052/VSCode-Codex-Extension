@@ -47,6 +47,23 @@ const ORCHESTRATOR_APPROVAL_MODE: Record<Provider, string> = {
 export const MAX_ORCHESTRATOR_EVENTS_PER_RUN = 500;
 
 /**
+ * `ask_user`（design.md §16.33、Issue #583）が1つのrunで呼べる回数の既定値。
+ *
+ * ロードマップの方針1「確認は最低限」を仕組みで担保する唯一の機械的な手段
+ * （呼べる条件の4つ自体はモデルの判断に委ねており、機械検証はしない）。
+ * `agent.workflows.maxAskUserPerRun`（`config.ts`）で変更できる。
+ */
+export const DEFAULT_MAX_ASK_USER_PER_RUN = 3;
+/** `agent.workflows.maxAskUserPerRun` の下限。0を許すと`ask_user`を封じる設定を配れて
+ * しまうが、それ自体は害が無いため0ではなく1にしてあるのは「最低1回は確認できる」を
+ * 既定の下限として保証するため（`stallRepeatCount`と同じ「範囲外は既定へ」方針）。 */
+export const MIN_MAX_ASK_USER_PER_RUN = 1;
+/** `agent.workflows.maxAskUserPerRun` の上限。乱発防止という目的から大きすぎる値は
+ * 意味が無いため、`stallRepeatCount`の上限（50）より小さい20に留める。 */
+export const MAX_MAX_ASK_USER_PER_RUN = 20;
+
+
+/**
  * 1回の送信本文の総量の上限。§16.4 の `MAX_EXPANDED_PROMPT_LENGTH` /
  * §16.21 の `MAX_COMPOSED_PROMPT_LENGTH` と同じ値・同じ動機（粗い安全弁）。
  */
@@ -59,6 +76,57 @@ export type OrchestratorEventKind =
   | 'taskFailed'
   | 'taskWaitingApproval'
   | 'taskBlocked'
+  /**
+   * タスクのループが停滞したと判定されて自動的に止まった（design.md §16.27、Issue #336）。
+   * `taskFailed`とは意図的に別種別にする——停滞はCLIやセッションが壊れたわけではなく
+   * 「同じ応答が繰り返されているだけ」であり、`retry_task`（新しいworktreeでの
+   * やり直し）だけでなく`continue_task`（同じ会話のまま続き）も選べることを
+   * オーケストレーターへ伝える必要があるため。
+   */
+  | 'taskStalled'
+  /**
+   * タスクが`send_message`でオーケストレーターへメッセージを送った（design.md §16.34、
+   * Issue #547）。タスク間の直接メッセージングを廃し、宛先をオーケストレーターへ固定した
+   * ことで新設した経路。`runnerMessaging.ts`の`onMessageAccepted`が、宛先が
+   * `ORCHESTRATOR_CONNECTION_ID`の`StoredMessage`を受け取るたびに送る。本文には送信元の
+   * タスクid・`expectReply`の有無・メッセージ本文をそのまま載せる（`wrapEvent`が
+   * `<workflow-event>`で囲んで無害化する。§16.21の`wrapTaskMessage`と同じ二重の囲いには
+   * しない。理由は`runnerMessaging.ts`の`buildTaskMessageEventBody`のJSDoc参照）。
+   * オーケストレーターは内容を見て、必要なら自分の`send_message`
+   * （`from === ORCHESTRATOR_CONNECTION_ID`。宛先にタスクidを取れる既存のツール）で
+   * 転送するかどうか・内容を変えるかどうかを決める。
+   */
+  | 'taskMessage'
+  /**
+   * タスクが`ask_orchestrator`でオーケストレーターへ判断を仰いだ（design.md §16.32、
+   * Issue #571）。`taskMessage`（上）と配送経路は完全に同じ（`runnerMessaging.ts`の
+   * `onMessageAccepted`→`deliverTaskMessageToOrchestrator`）で、`StoredMessage.kind`が
+   * `'question'`のときにこちらの種別を使う。「問い」という意味づけを`taskMessage`と
+   * 区別して伝えるための種別で、配送・待ちぼうけ検出・`blocking`（`expectReply`）の扱いは
+   * `taskMessage`と共通（新しい経路は増やしていない）。答えはこれまでどおり
+   * オーケストレーターの`send_message`で行う（専用の返信ツールは無い）。
+   */
+  | 'taskQuestion'
+  /**
+   * 統合PR/MRにレビューコメントが付いた（design.md §16.30、roadmap W5、Issue #339）。
+   * `runnerReviewComments.ts`の`pollReviewComments`が、設定 `agent.workflows.
+   * reviewCommentPollIntervalSec` の間隔で統合PR/MRのレビューコメントを取得し、前回までに
+   * 見ていないコメントを1件ずつこの種別で送る。本文には投稿者・本文をそのまま載せる
+   * （外部由来のテキストであり、指示ではなくデータとして扱う。`wrapEvent`が
+   * `<workflow-event>`で囲んで無害化する。`taskMessage`/`taskQuestion`と同じ「本文の
+   * 組み立て側ではサニタイズしない」規約）。オーケストレーターは`add_task`/
+   * `update_task_prompt`等（design.md §16.29）で対応するタスクを組み、人の承認は
+   * 挟まない（Issue #497の方針転換）。適用した内容は`reviewCommentImported`警告として
+   * ワークフローViewの警告欄へ全文で残す。
+   */
+  | 'reviewComment'
+  /**
+   * 統合PR/MRを作成した後、mainへ最終マージするかどうかの判断を求める
+   * （design.md §16.26、`finalMerge: orchestrator`）。`decide_final_merge`ツールで
+   * `merge` / `hold` を理由付きで答える。応答が無いまま`agent.workflows.
+   * finalMergeDecisionTimeoutSec`を超えると、自動的に`hold`として扱う。
+   */
+  | 'finalMergeDecision'
   | 'runFinished'
   // 人が「全体の停止」を押したことを知らせる（Issue #401）。走行中タスクの`stopLoop()`は
   // ターンの終わりを待ってから確定するため、確定前は`taskFailed`しか届かず「タスクが

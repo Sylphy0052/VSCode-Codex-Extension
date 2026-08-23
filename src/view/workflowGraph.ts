@@ -274,7 +274,13 @@ export interface IntegrationSummary {
    * 統合→mainの最終マージ（design.md §16.18「最終マージ」）の成否。試みていなければ
    * `undefined`。
    */
-  finalMergeOutcome: 'merged' | 'failed' | undefined;
+  finalMergeOutcome: 'merged' | 'failed' | 'held' | undefined;
+  /**
+   * mainへの最終マージの判断待ち（design.md §16.26）。判断待ちが無ければ`undefined`。
+   * `mode: 'confirm'`のときだけ、Viewが人の判断ボタンを出す。
+   */
+  finalMergeDecision:
+    { mode: 'orchestrator' | 'confirm'; pullRequestUrl: string | undefined } | undefined;
 }
 
 /** `summarizeIntegration` が集計対象とする最小限のタスク形。 */
@@ -301,7 +307,9 @@ export function summarizeIntegration(
   pullRequest?: {
     number: number | undefined;
     url: string | undefined;
-    finalMergeOutcome: 'merged' | 'failed' | undefined;
+    finalMergeOutcome: 'merged' | 'failed' | 'held' | undefined;
+    finalMergeDecision:
+      { mode: 'orchestrator' | 'confirm'; pullRequestUrl: string | undefined } | undefined;
   },
 ): IntegrationSummary | undefined {
   if (branch === undefined || branch === '') {
@@ -316,6 +324,7 @@ export function summarizeIntegration(
     pullRequestNumber: pullRequest?.number,
     pullRequestUrl: pullRequest?.url,
     finalMergeOutcome: pullRequest?.finalMergeOutcome,
+    finalMergeDecision: pullRequest?.finalMergeDecision,
   };
 }
 

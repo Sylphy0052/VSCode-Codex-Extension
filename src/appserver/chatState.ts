@@ -176,6 +176,25 @@ function capOutputDuringAppend(text: string): { text: string; truncated: boolean
 export const NO_DIFFS: FileDiff[] = [];
 
 /**
+ * 直近の空でない `agentMessage` の本文。無ければ空文字（design.md §16.27、Issue #336）。
+ *
+ * `orchestrator/taskSummary.ts` の `buildResponseSummary`（1行要約・表示用）と
+ * `loop/stallDetector.ts` の停滞判定の両方がここを起点にする。`loop/` は `orchestrator/`
+ * より下位の層（`orchestrator/taskSession.ts` が `loop/loopController.ts` を使う向き）
+ * のため、両者が依存してよい共通の置き場としてこの層（`appserver/chatState.ts`）に置く。
+ * vscode APIには依存しない。
+ */
+export function lastNonEmptyAgentMessageText(items: readonly ChatItem[]): string {
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const item = items[i];
+    if (item !== undefined && item.kind === 'agentMessage' && item.text.trim() !== '') {
+      return item.text;
+    }
+  }
+  return '';
+}
+
+/**
  * TODO一覧の1件。Claude Codeの `TodoWrite` ツールの入力から作る
  * （`src/claude/transcript.ts` の `normalizeTodos` を参照）。
  */

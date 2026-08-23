@@ -63,4 +63,10 @@ export interface WorkflowRunnerInternals {
     taskId: string,
     liveTask: LiveTask | undefined,
   ): void;
+  /**
+   * メッセージングトランスポート（MCPサーバ）を用意する（`runner.ts`の同名privateメソッドの
+   * ラッパー）。自動再開（design.md §16.35、Issue #584、`runnerRestore.ts`）が、`start()`と
+   * 同じ手順でオーケストレーターセッションを立て直すために外部へ公開する。
+   */
+  ensureMessaging(runId: string, live: LiveRun): Promise<void>;
 }

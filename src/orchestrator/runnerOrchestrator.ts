@@ -8,6 +8,7 @@ import {
 import {
   buildOrchestratorConfig,
   composeOrchestratorPrompt,
+  DEFAULT_MAX_ASK_USER_PER_RUN,
   MAX_ORCHESTRATOR_EVENTS_PER_RUN,
   ORCHESTRATOR_CONNECTION_ID,
   pickOrchestratorProvider,
@@ -15,10 +16,23 @@ import {
 } from './orchestratorSession';
 import { sanitizeForLog, stripControlChars } from './sanitize';
 import { buildResponseSummary } from './taskSummary';
+import { addTaskState, removeTaskState } from './runState';
 import type { TaskState } from './runState';
-import type { LiveOrchestrator, LiveRun, RetryTaskResult, WorkflowRunSnapshot } from './runner';
+import type {
+  FinalMergeDecision,
+  LiveOrchestrator,
+  LiveRun,
+  RetryTaskResult,
+  WorkflowRunSnapshot,
+} from './runner';
 import type { WorkflowRunnerInternals } from './runnerInternals';
-import { truncateByCodePoint } from './workflow';
+import {
+  buildOrchestratorTask,
+  truncateByCodePoint,
+  validateWorkflow,
+  type WorkflowDefinition,
+  type WorkflowTask,
+} from './workflow';
 
 /**
  * オーケストレーターセッション（design.md §16.23）の配線を集めたモジュール。
@@ -28,28 +42,68 @@ import { truncateByCodePoint } from './workflow';
  * ここが持つのはセッションの生成・寿命・イベントの発火だけ。
  */
 
+/**
+ * 自動再開（design.md §16.35、roadmap W10、Issue #584）で立て直したオーケストレーターへ
+ * 渡す文脈。中断前に`ask_user`の回答待ちのまま落ちた問いがあれば、新しいセッションは
+ * その会話を覚えていないため、intro文へ書き添えて出し直す（このオブジェクト自体は
+ * `PersistedRun.pendingAskUser`をそのまま渡す想定）。
+ */
+export interface OrchestratorResumeContext {
+  pendingAskUser?: { question: string; choices: readonly string[]; askedAt: string };
+}
+
 /** run開始時にオーケストレーターへ渡す、役割と道具の説明。 */
-function buildIntroBody(live: LiveRun): string {
+function buildIntroBody(live: LiveRun, resume?: OrchestratorResumeContext): string {
   const tasks = live.def.tasks
     .map((t) => {
       const deps = t.dependsOn.length > 0 ? `（依存: ${t.dependsOn.join(', ')}）` : '';
       return `- ${t.id}${deps}`;
     })
     .join('\n');
+  const pendingAskUser = resume?.pendingAskUser;
+  const resumeNote =
+    pendingAskUser === undefined
+      ? []
+      : [
+          '',
+          'このセッションは中断（ウィンドウのリロード等）からの自動再開です。前回のセッションで' +
+            '次の質問を出したまま、まだ回答されていません（会話そのものは復元できないため、' +
+            'この文脈だけを引き継いでいます）:',
+          `質問: "${pendingAskUser.question}"`,
+          `選択肢: ${pendingAskUser.choices.join(' / ')}`,
+          '人が選ぶと「人がask_userの質問に答えました: "<選択肢>"」という発話が届きます。それまで' +
+            '新しい ask_user は呼べません（回答待ちは1runにつき同時に1問だけ）。',
+        ];
   return [
     `ワークフロー「${live.def.name}」の実行を開始しました。あなたはこの実行のオーケストレーターです。`,
     '人からの質問に答え、進行の要点を報告し、頼まれたら方針の変更を実行してください。',
     '',
     'できること（MCPツール）:',
     '- list_tasks / get_run_status: 進行状況を読む',
-    '- send_message: 走行中のタスクへメッセージを送る',
+    '- send_message: 走行中のタスクへメッセージを送る（タスクからask_orchestratorで問いが' +
+      '届いた場合も、この send_message（to に問うたタスクのidを指定）で答える）',
     '- stop_task / retry_task / continue_task / decide_approval: タスクを止める・やり直す・続ける・承認する',
     '- update_task_prompt: 走行中のタスクの継続指示を差し替える（方針転換）',
+    '- add_task / remove_task / update_task_dependencies: 計画そのものを直す' +
+      '（タスクの追加・pendingタスクの削除・pendingタスクの依存の変更）。人の承認は挟まず' +
+      'あなたの判断で適用され、適用した内容は全文が警告欄へ残ります。追加するタスクにも' +
+      '既存の検証（id形式・循環依存・上限件数・プロンプト長）が適用され、autoApprove/' +
+      'allow/sandbox/approvalModeは指定できません（指定すると拒否されます）。削除できるのは' +
+      'まだ開始していない（pendingの）タスクだけで、走行中のタスクはstop_taskを使ってください。' +
+      'タスクが停滞した（taskStalled）通知を受けたときは、update_task_promptで指示を' +
+      '調整するだけでなく、必要ならタスクを分割・統合するためにこれらのツールで計画自体を' +
+      '見直すことも検討してください',
+    '- ask_user: 担当領域をまたぐ変更・設計の前提を変える変更・受入基準を下げる判断・' +
+      '同じ失敗を3回繰り返した場合に限り、人へ確認する（それ以外は自分で判断する。呼べる' +
+      '回数に上限あり）。add_task/remove_task/update_task_dependenciesで方針そのものが' +
+      '変わる場合（担当領域をまたぐ・設計の前提を変える・受入基準を下げる）は、適用する前に' +
+      'ask_userで人に確認すること',
     '',
     'あなた自身はファイルを書き換えられません（読み取り専用）。実際の作業は各タスクが行います。',
     '',
     `タスク（${live.def.tasks.length}件、並列上限 ${live.def.maxParallel}）:`,
     tasks,
+    ...resumeNote,
   ].join('\n');
 }
 
@@ -80,6 +134,11 @@ export interface OrchestratorControlActions {
   retryTask(runId: string, taskId: string, options?: { allowConfirmed?: boolean }): RetryTaskResult;
   continueTask(runId: string, taskId: string): boolean;
   decideApproval(runId: string, taskId: string, decision: ApprovalDecision): boolean;
+  /**
+   * 最終マージの判断を確定する（design.md §16.26）。`WorkflowRunner.decideFinalMerge`の
+   * JSDoc参照。判断待ちが無ければ`false`。
+   */
+  decideFinalMerge(runId: string, decision: FinalMergeDecision, reason: string): boolean;
 }
 
 /** 差し替えた継続指示のうち、警告欄へ出す先頭部分の長さ。 */
@@ -108,6 +167,106 @@ function runFinishedReason(
   return outcome === 'running'
     ? undefined
     : `この実行はすでに終了しています（${outcome}）。制御ツールは使えません。会話は続けられます。`;
+}
+
+/**
+ * 計画変更ツール（`update_task_prompt`/`add_task`/`remove_task`/`update_task_dependencies`）
+ * だけに適用する終了判定（design.md §16.30、Issue #339 blocking指摘）。
+ *
+ * 通常は`runFinishedReason`と同じ（`outcome !== 'running'`なら拒否）だが、**統合PR/MRの
+ * レビューコメントのポーリングが生きている間（`live.reviewCommentPoll !== undefined`）
+ * かつ最終マージがまだ確定していない間（`live.finalMergeOutcome === undefined`）**だけ
+ * 例外的に許可する。`finalizeForge`（統合PR/MR作成）は`pump()`が`live.finished`を
+ * 立てた**後**に走るため、レビューコメントが届く時点でrunは必ず`outcome !== 'running'`
+ * になっている。この例外が無いと、レビューコメントは通知されるだけでオーケストレーターが
+ * `add_task`等で対応する手段が無く、Issue #339の受入基準（W4と同じ経路でタスク調整でき、
+ * 適用内容が警告欄へ残る）を満たせない。
+ *
+ * **`live.finalMergeOutcome`の確認が必要な理由（2度目のレビューblocking指摘）。**
+ * 当初は`reviewCommentPoll`の生死だけを見ていた。`finalMerge: auto`では統合PR/MRの
+ * 作成直後に`startReviewCommentPoll`が走り、その後`performFinalMerge`でmainへ実際に
+ * マージされる。以前は、この`performFinalMerge`完了後もポーリング自体が開いたまま
+ * 残り続けるバグがあった（`closeMessagingIfFinalMergeSettled`は`finalizeForge`を
+ * fire-and-forgetで呼ぶ側の同期経路で先に1度走ってしまい、その時点ではまだ
+ * `live.reviewCommentPoll`が`undefined`のため閉じ損なっていた）。**このバグは
+ * `performFinalMerge`自身が`live.finalMergeOutcome`を確定させる1点で`closeReview
+ * CommentPoll`を直接呼ぶよう修正済み（`runner.ts`の`performFinalMerge`末尾のJSDoc
+ * 参照）。** そのため実運用では`reviewCommentPoll`が生きている間は`finalMergeOutcome`
+ * も未確定のはずだが、**この判定はそれでも多層防御として残す。** ポーリングを閉じ損なう
+ * 経路が将来また出ても（例えば新しい呼び出し経路が`closeReviewCommentPoll`を呼び忘れる
+ * 等）、`finalMergeOutcome`が確定していれば計画変更そのものを拒否できるため、
+ * 「add_taskが受理されたのに成果がmainへ届かない」という実害には至らない。既に
+ * mainへマージ済み（`live.finalMergeOutcome === 'merged'`）の統合PR/MRは再オープン
+ * できず、その状態で`add_task`を許すと、追加したタスクの成果が統合ブランチには
+ * 積まれるのにmainへは二度と届かない（`finalizeForge`の冪等ガードが2回目のPR/MR
+ * 作り直しを止めるため）。`finalMergeOutcome`が`'merged'`/`'failed'`/`'held'`のいずれか
+ * （＝最終マージの判断が確定済み）になったら、`reviewCommentPoll`の生死に関わらず拒否し、
+ * 理由をオーケストレーターへ返す（黙って乖離させない）。
+ *
+ * レビューで提示された3案（A: 2周目に統合PR/MRを作り直す／B: レビューを取り込めるのは
+ * 最終マージ確定までに限る／C: 現状のまま限界だけ文書化する）のうち、**Bを採った**。
+ * Aは`live.integrationPullRequest`の意味づけ（1runにつき1件前提）・PR番号の持ち方・
+ * W11のCI待ちまで波及し、W5の範囲としては重い。Cは`add_task`が受理されたのに成果が
+ * mainへ届かないという乖離を黙って残す形になり、採らない。
+ *
+ * **例外はこの4ツールに限る。** `stop_task`/`retry_task`/`continue_task`/`decide_approval`/
+ * `ask_user`等、他の制御ツールは引き続き`runFinishedReason`をそのまま使い、この例外の
+ * 対象外とする（レビュー指摘: 例外を計画変更ツールだけに絞ること）。理由は、計画変更
+ * ツールは「まだ始まっていないタスクへの追加・変更」に閉じており（`add_task`は新規追加、
+ * `remove_task`/`update_task_dependencies`は`pending`限定、`update_task_prompt`は既存の
+ * `LiveTask`エントリへの上書き）、既に終わったタスクの実行そのものへ手を加える経路
+ * （`retry_task`等）とは性質が違うため。後者まで開けると「終わったはずのrunを人の
+ * 意図しないタイミングで動かし直せる」範囲が広がりすぎる。
+ */
+/**
+ * 計画変更ツールが`planChangeFinishedReason`の例外（レビューコメントのポーリング中）を
+ * 通って呼ばれたとき、`live.finished`が立ったままだと直後の`self.pump(runId)`が
+ * 何もせず即座に早期returnし、追加・変更したタスクが一切スケジューリングされない。
+ * `pump()`を呼ぶ直前にここで戻す（`add_task`/`remove_task`/`update_task_dependencies`の
+ * 3つだけが対象。`update_task_prompt`は`pump()`を呼ばないため対象外）。既に`false`
+ * （通常の実行中に呼ばれた場合）なら何もしない（冪等）。
+ *
+ * **ここで戻して`finalizeForge`の二重呼び出しにならないか（レビュー指摘の確認事項）。**
+ * `pump()`は戻り値のこの同一呼び出しの中で`outcome`を再計算する。`add_task`で加えた
+ * タスクは`pending`であり、`getRunOutcome`は`pending`が1件でもあれば無条件で`'running'`
+ * を返す（`scheduler.ts`）。`remove_task`/`update_task_dependencies`は対象が`pending`
+ * 限定のため、呼び出し時点で既に`pending`のタスクが最低1件残っている。したがって、
+ * `pump()`のこの呼び出しの中で再び`live.finished = true`が立ち`finalizeForge`が
+ * 即座に2回目として呼ばれることは無い。新しく増えた/残った`pending`タスクが後になって
+ * 完了し、runが再び終了条件を満たしたときに初めて2回目の`succeeded`到達（＝
+ * `finalizeForge`の2回目の呼び出し）が起こりうる——これは`pump()`のJSDoc（Issue #432-2）
+ * が「現状のコードでは起こらない」としていた前提を崩す。2回目の呼び出しでも統合PR/MRを
+ * 二重に作らないよう、`finalizeForge`自身に冪等ガードを足した（下記参照。design.md §16.30）
+ */
+function resumeIfFinishedForPlanChange(live: LiveRun): void {
+  if (live.finished) {
+    live.finished = false;
+  }
+}
+
+function planChangeFinishedReason(
+  self: WorkflowRunnerInternals,
+  actions: OrchestratorControlActions,
+  runId: string,
+): string | undefined {
+  const base = runFinishedReason(actions, runId);
+  if (base === undefined) {
+    return undefined;
+  }
+  const live = self.runs.get(runId);
+  if (live?.reviewCommentPoll === undefined) {
+    return base;
+  }
+  // 最終マージが確定済み（`'merged'`/`'failed'`/`'held'`のいずれか）なら、
+  // レビューコメントのポーリングがまだ生きていても計画変更は許さない（上のJSDoc
+  // 「2度目のレビューblocking指摘」参照）。理由を明示して返し、乖離を黙って残さない
+  if (live.finalMergeOutcome !== undefined) {
+    return (
+      `この実行の統合PR/MRは最終マージの判断が確定しています（${live.finalMergeOutcome}）。` +
+      'これ以降は計画を変更できません。会話は続けられます。'
+    );
+  }
+  return undefined;
 }
 
 /**
@@ -249,7 +408,7 @@ export function buildOrchestratorControlPort(
         : no(`${taskId} に承認待ちの要求はありません。`);
     },
     updateTaskPrompt: (taskId, continuePrompt) => {
-      const finished = runFinishedReason(actions, runId);
+      const finished = planChangeFinishedReason(self, actions, runId);
       if (finished !== undefined) {
         return no(finished);
       }
@@ -259,7 +418,223 @@ export function buildOrchestratorControlPort(
       }
       return updateTaskPrompt(self, runId, taskId, continuePrompt);
     },
+    decideFinalMerge: (decision, reason) => {
+      // `runFinishedReason`は使わない。最終マージの判断待ち（design.md §16.26）は
+      // 全タスクが`done`になり`outcome`が既に`succeeded`（＝「終了している」）に
+      // なった後で始まるため、`runFinishedReason`（`outcome === 'running'`でなければ
+      // 拒否）を通すと常に拒否されてしまう。ここでは`finalMergeDecision`の有無だけを
+      // 判断待ちの根拠にする。
+      const snapshot = actions.getSnapshot(runId);
+      if (snapshot === undefined) {
+        return no('この実行はすでに破棄されているため、制御ツールは使えません。');
+      }
+      const pending = snapshot.finalMergeDecision;
+      if (pending === undefined) {
+        return no('最終マージの判断待ちはありません。');
+      }
+      if (pending.mode !== 'orchestrator') {
+        return no(
+          'この実行の agent.workflows.finalMerge は confirm です。マージするかどうかは人が判断します。',
+        );
+      }
+      if (decision !== 'merge' && decision !== 'hold') {
+        return no(`decision は 'merge' か 'hold' のどちらかです: ${decision}`);
+      }
+      // `runHaltedByUserReason`（人が「全体の停止」を押したかどうか）は`decision: 'merge'`
+      // のときだけ見る。`WorkflowRunner.decideFinalMerge`本体（`runner.ts`）と同じ判断で
+      // 揃える: `hold`はPR/MRを残すだけの安全な方向で、ここを塞ぐとオーケストレーターが
+      // 停止後に自分で片付けられず、既定900秒のタイムアウトを待つしかなくなる
+      // （タイムアウトの自動`hold`はこのMCP層を経由せず本体を直接呼ぶため、無限停止には
+      // ならないが、それまで判断待ちが解消できない）。他の判断系制御ツール
+      // （`retryTask`/`continueTask`/`decideApproval`/`updateTaskPrompt`）が`decision`の
+      // 種類によらず一律拒否するのとは事情が違う点に注意（レビュー指摘）
+      if (decision === 'merge') {
+        const halted = runHaltedByUserReason(actions, runId);
+        if (halted !== undefined) {
+          return no(halted);
+        }
+      }
+      if (reason.trim() === '') {
+        return no('reason は必須です（判断の理由を書いてください）。');
+      }
+      // `MAX_MESSAGE_BODY_LENGTH`（design.md §16.23）で上限を切る。`reason`はLLMが
+      // 生成する自由記述であり、上限が無いと警告欄（`pushFinalMergeWarning`）を
+      // 任意長の文字列で埋められる（レビュー指摘）。切り詰めではなく拒否にする
+      //
+      // 数え方は`update_task_prompt`（`continuePrompt.length`、UTF-16単位）と同じ
+      // `.length`を使う。`send_message`だけが`codePointLength`（`messaging.ts`の
+      // 非export関数、コードポイント単位）で数えており、3者で数え方が揃っていないのは
+      // 既存の不整合（レビュー指摘）。サロゲートペアを2文字と数える分だけ拒否側に
+      // 厳しくなる（安全側）ため、挙動はこのままにする
+      if (reason.length > MAX_MESSAGE_BODY_LENGTH) {
+        return no(`reason が長すぎます（上限${MAX_MESSAGE_BODY_LENGTH}文字）: ${reason.length}文字`);
+      }
+      return actions.decideFinalMerge(runId, decision, reason)
+        ? ok(`最終マージの判断を ${decision} として確定しました。`)
+        : no('最終マージの判断待ちが見つかりません（既に確定した可能性があります）。');
+    },
+    askUser: (question, choices) => {
+      const finished = runFinishedReason(actions, runId);
+      if (finished !== undefined) {
+        return no(finished);
+      }
+      return beginAskUser(self, runId, question, choices);
+    },
+    addTask: (input) => {
+      const finished = planChangeFinishedReason(self, actions, runId);
+      if (finished !== undefined) {
+        return no(finished);
+      }
+      const halted = runHaltedByUserReason(actions, runId);
+      if (halted !== undefined) {
+        return no(halted);
+      }
+      return addTask(self, runId, input);
+    },
+    removeTask: (taskId) => {
+      const finished = planChangeFinishedReason(self, actions, runId);
+      if (finished !== undefined) {
+        return no(finished);
+      }
+      const halted = runHaltedByUserReason(actions, runId);
+      if (halted !== undefined) {
+        return no(halted);
+      }
+      return removeTask(self, runId, taskId);
+    },
+    updateTaskDependencies: (taskId, dependsOn) => {
+      const finished = planChangeFinishedReason(self, actions, runId);
+      if (finished !== undefined) {
+        return no(finished);
+      }
+      const halted = runHaltedByUserReason(actions, runId);
+      if (halted !== undefined) {
+        return no(halted);
+      }
+      return updateTaskDependencies(self, runId, taskId, dependsOn);
+    },
   };
+}
+
+/**
+ * `ask_user`（design.md §16.33、Issue #583）を受け付ける。呼べる条件（担当領域をまたぐ・
+ * 設計の前提を変える・受入基準を下げる・同じ失敗を3回繰り返す）自体はツールの説明文で
+ * モデルへ伝えるだけで、ここで機械的に検証するのは形式（選択肢の個数・長さ）と回数上限
+ * だけである（design.md §16.33「呼べる条件を絞る」）。
+ */
+function beginAskUser(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  question: string,
+  choices: readonly string[],
+): OrchestratorControlResult {
+  const live = self.runs.get(runId);
+  const orchestrator = live?.orchestrator;
+  if (live === undefined || orchestrator === undefined) {
+    return no('オーケストレーターのセッションがありません。');
+  }
+  if (live.pendingAskUser !== undefined) {
+    return no('既に回答待ちの質問があります。人が答えるまで新しい質問はできません。');
+  }
+  if (question.trim() === '') {
+    return no('問いの本文が空です。');
+  }
+  if (question.length > MAX_MESSAGE_BODY_LENGTH) {
+    return no(`問いが長すぎます（上限${MAX_MESSAGE_BODY_LENGTH}文字）: ${question.length}文字`);
+  }
+  if (choices.length < 2 || choices.length > 4) {
+    return no(`choices は2〜4個で指定してください（${choices.length}個）。`);
+  }
+  const limit = self.deps.readMaxAskUserPerRun?.() ?? DEFAULT_MAX_ASK_USER_PER_RUN;
+  if (orchestrator.askUserCount >= limit) {
+    return no(
+      `ask_userの呼び出し上限（${limit}回/run）に達しました。以降は自分で判断するか、` +
+        '最終マージの判断であればdecide_final_mergeのholdで止めてください。',
+    );
+  }
+  orchestrator.askUserCount += 1;
+  live.pendingAskUser = {
+    question,
+    choices: [...choices],
+    since: (self.deps.now?.() ?? new Date()).getTime(),
+  };
+  void self.persist(runId);
+  self.notify(runId);
+  return ok('質問をワークフローViewへ出しました。人が選ぶまで待ちます。');
+}
+
+/**
+ * `ask_user`の回答（design.md §16.33）。ワークフローViewの選択ボタンから呼ぶ。
+ *
+ * 回答待ちが無い・`choiceIndex`が選択肢の範囲外・オーケストレーターのセッションが
+ * 無い（リロード後等）・既に答え済み（配送待ちの二重回答）の場合は`false`を返し、
+ * View側は何も起きなかったことにする（`sendToOrchestrator`と同じ「なにもしない」
+ * 失敗の返し方）。
+ *
+ * **`ask_user`のツール呼び出しはオーケストレーターのターンの最中に届く。** つまり
+ * ここが呼ばれた時点で`orchestrator.busy`がまだ`true`のことがある（人が問いを見て
+ * すぐ選ぶ場合はほぼ確実にそう）。走行中のターンへ割り込んで`session.send`すると、
+ * `sendOnce`（`chatView.ts`）は送信の失敗を投げ直さずに`reportError`するだけなので、
+ * 答えが失われたまま`pendingAskUser`だけが消えてボタンも無くなり、`ask_user`は
+ * 待ちぼうけ検出を持たないため人は答え直せず**runが無期限に止まる**（レビュー指摘）。
+ *
+ * これを避けるため、`busy`中は答えを`live.pendingAskUser.answeredChoice`へ保持するだけに
+ * とどめ、実際の送信（合流・`session.send`）は`deliverAskUserAnswer`へ切り出して、
+ * `busy`でなければここで即座に、`busy`ならターンが終わってから`onOrchestratorStateChanged`
+ * が呼ぶ（既存の`flushOrchestrator`の「ターンが終わってからまとめて送る」流儀と揃える）。
+ */
+export function answerAskUser(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  choiceIndex: number,
+): boolean {
+  const live = self.runs.get(runId);
+  const orchestrator = live?.orchestrator;
+  const pending = live?.pendingAskUser;
+  if (live === undefined || orchestrator === undefined || pending === undefined) {
+    return false;
+  }
+  if (pending.answeredChoice !== undefined) {
+    // 配送待ちの間にもう一度押されても、二重送信にしない
+    return false;
+  }
+  const choice = pending.choices[choiceIndex];
+  if (!Number.isInteger(choiceIndex) || choice === undefined) {
+    return false;
+  }
+  live.pendingAskUser = { ...pending, answeredChoice: choice };
+  void self.persist(runId);
+  self.notify(runId);
+  if (!orchestrator.busy) {
+    deliverAskUserAnswer(self, runId);
+  }
+  return true;
+}
+
+/**
+ * `answerAskUser`が保持した答え（`live.pendingAskUser.answeredChoice`）を実際に送る。
+ *
+ * `busy`でない時点で呼ばれる（`answerAskUser`から直接、またはターンが終わった時点で
+ * `onOrchestratorStateChanged`から）。溜まっていたイベントもここで合流させる
+ * （`pendingAskUser`が立っている間`notifyOrchestrator`は送信を止めていたため、
+ * `orchestrator.pending`に溜まっている場合がある。§16.23「何が駆動するか」の合流と
+ * 同じ流儀）。
+ */
+function deliverAskUserAnswer(self: WorkflowRunnerInternals, runId: string): void {
+  const live = self.runs.get(runId);
+  const orchestrator = live?.orchestrator;
+  const pending = live?.pendingAskUser;
+  if (live === undefined || orchestrator === undefined || pending?.answeredChoice === undefined) {
+    return;
+  }
+  live.pendingAskUser = undefined;
+  void self.persist(runId);
+  const answerText = `人がask_userの質問に答えました: "${pending.answeredChoice}"`;
+  const composed = composeOrchestratorPrompt(orchestrator.pending, answerText);
+  orchestrator.pending = [];
+  orchestrator.busy = true;
+  orchestrator.session.send(composed);
+  self.notify(runId);
 }
 
 /**
@@ -302,6 +677,9 @@ function buildRunStatus(actions: OrchestratorControlActions, runId: string): unk
       pullRequestNumber: snapshot.integrationPullRequestNumber,
       pullRequestUrl: snapshot.integrationPullRequestUrl,
       finalMergeOutcome: snapshot.finalMergeOutcome,
+      // design.md §16.26。判断待ちの間`decide_final_merge`を呼ぶべきかをオーケストレーター
+      // 自身が`get_run_status`から確認できるようにする
+      finalMergeDecision: snapshot.finalMergeDecision,
     },
   };
 }
@@ -357,6 +735,170 @@ function updateTaskPrompt(
 }
 
 /**
+ * `add_task`（design.md §16.29、roadmap W4、Issue #338）を受け付ける。適用先は実行中の
+ * 定義（`live.def`）だけで、YAMLファイルは書き換えない。追加するタスクは`buildOrchestratorTask`
+ * （`workflow.ts`。権限フィールドを拒否する）で組み立てたうえ、既存の全タスクと合わせた
+ * 候補定義を`validateWorkflow`にそのまま通す（id形式・循環依存・上限件数・プロンプト長を
+ * 人が書いたYAMLと同じ基準で検証する）。適用した内容は全文で警告欄へ残す（人の承認を
+ * 挟まない以上、これが唯一の追跡手段になるため）。
+ */
+function addTask(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  raw: Record<string, unknown>,
+): OrchestratorControlResult {
+  const live = self.runs.get(runId);
+  if (live === undefined) {
+    return no('実行が見つかりません。');
+  }
+  const built = buildOrchestratorTask(raw);
+  if ('error' in built) {
+    return no(built.error);
+  }
+  const task = built.task;
+  const candidateDef: WorkflowDefinition = {
+    ...live.def,
+    tasks: [...live.def.tasks, task],
+  };
+  const validation = validateWorkflow(candidateDef);
+  if (validation.errors.length > 0) {
+    return no(`タスクを追加できません: ${validation.errors.map((e) => e.message).join(' / ')}`);
+  }
+  live.def = candidateDef;
+  live.runState = addTaskState(live.runState, task.id);
+  live.warnings.push({
+    kind: 'orchestratorTaskAdded',
+    taskId: task.id,
+    message:
+      `オーケストレーターがタスク ${task.id} を追加しました（YAMLファイルは書き換えて` +
+      'いません。ウィンドウのリロード後は定義ファイルの内容に戻ります）。\n' +
+      `prompt: ${task.prompt}\n` +
+      `done: ${task.done}\n` +
+      `dependsOn: ${task.dependsOn.length > 0 ? task.dependsOn.join(', ') : '(なし)'}`,
+  });
+  resumeIfFinishedForPlanChange(live);
+  self.notify(runId);
+  self.pump(runId);
+  return ok(`タスク ${task.id} を追加しました。`);
+}
+
+/**
+ * `remove_task`（design.md §16.29、roadmap W4、Issue #338）を受け付ける。対象は`pending`の
+ * タスクに限る（走行中のタスクは`stop_task`を使わせる。design.md §16.29「削除はまだ
+ * 始まっていないタスクに限る」）。まだ開始していないタスクを消す以上、削除対象へ依存して
+ * いるタスクも必ず`pending`（スケジューラは依存先が`done`でなければ開始しない、design.md
+ * §16.3）なので、依存を失っても孤立した`pending`（永久に開始できないタスク）を作らない
+ * よう、削除対象へ依存していたタスクの`dependsOn`からも取り除く。
+ */
+function removeTask(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  taskId: string,
+): OrchestratorControlResult {
+  const live = self.runs.get(runId);
+  if (live === undefined) {
+    return no('実行が見つかりません。');
+  }
+  const state = live.runState.tasks.get(taskId)?.state;
+  if (state === undefined) {
+    return no(`タスクが見つかりません: ${taskId}`);
+  }
+  if (state !== 'pending') {
+    return no(
+      `${taskId} はまだ開始していない（pendingの）タスクではありません（状態: ${state}）。` +
+        '走行中のタスクを止めるにはstop_taskを使ってください。',
+    );
+  }
+  const remainingTasks: WorkflowTask[] = [];
+  const strippedFrom: string[] = [];
+  for (const t of live.def.tasks) {
+    if (t.id === taskId) {
+      continue;
+    }
+    if (t.dependsOn.includes(taskId)) {
+      strippedFrom.push(t.id);
+      remainingTasks.push({ ...t, dependsOn: t.dependsOn.filter((d) => d !== taskId) });
+    } else {
+      remainingTasks.push(t);
+    }
+  }
+  live.def = { ...live.def, tasks: remainingTasks };
+  live.runState = removeTaskState(live.runState, taskId);
+  live.warnings.push({
+    kind: 'orchestratorTaskRemoved',
+    taskId,
+    message:
+      `オーケストレーターがタスク ${taskId} を取り除きました（YAMLファイルは書き換えて` +
+      'いません。ウィンドウのリロード後は定義ファイルの内容に戻ります）。' +
+      (strippedFrom.length > 0
+        ? ` このタスクへ依存していたタスクのdependsOnからも取り除きました: ${strippedFrom.join(', ')}`
+        : ''),
+  });
+  resumeIfFinishedForPlanChange(live);
+  self.notify(runId);
+  self.pump(runId);
+  return ok(`タスク ${taskId} を取り除きました。`);
+}
+
+/**
+ * `update_task_dependencies`（design.md §16.29、roadmap W4、Issue #338）を受け付ける。
+ * 対象は`pending`のタスクに限る。**すでに`running`等になったタスクの`dependsOn`を変えても、
+ * スケジューラ（`scheduler.ts`の`nextTasksToStart`）は`state !== 'pending'`のタスクを
+ * 見ないため何も起きない。「変えたのに反映されない」を黙って許すと事故のもとになるため、
+ * 効果の無い変更はここで拒否する。** 差し替え後の依存グラフは`validateWorkflow`（循環依存・
+ * 未定義idへの参照）にそのまま通す。
+ */
+function updateTaskDependencies(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  taskId: string,
+  dependsOn: readonly string[],
+): OrchestratorControlResult {
+  const live = self.runs.get(runId);
+  if (live === undefined) {
+    return no('実行が見つかりません。');
+  }
+  const state = live.runState.tasks.get(taskId)?.state;
+  if (state === undefined) {
+    return no(`タスクが見つかりません: ${taskId}`);
+  }
+  if (state !== 'pending') {
+    return no(
+      `${taskId} はまだ開始していない（pendingの）タスクではありません（状態: ${state}）。` +
+        '依存を変えても以降のスケジューリングに影響しないため拒否します。',
+    );
+  }
+  const target = live.def.tasks.find((t) => t.id === taskId);
+  if (target === undefined) {
+    return no(`タスクが見つかりません: ${taskId}`);
+  }
+  const nextDependsOn = [...new Set(dependsOn)];
+  const candidateTasks = live.def.tasks.map((t) =>
+    t.id === taskId ? { ...t, dependsOn: nextDependsOn } : t,
+  );
+  const candidateDef: WorkflowDefinition = { ...live.def, tasks: candidateTasks };
+  const validation = validateWorkflow(candidateDef);
+  if (validation.errors.length > 0) {
+    return no(`依存を変更できません: ${validation.errors.map((e) => e.message).join(' / ')}`);
+  }
+  const before = target.dependsOn;
+  live.def = candidateDef;
+  live.warnings.push({
+    kind: 'orchestratorDependenciesChanged',
+    taskId,
+    message:
+      `オーケストレーターがタスク ${taskId} のdependsOnを変更しました（YAMLファイルは` +
+      '書き換えていません。ウィンドウのリロード後は定義ファイルの内容に戻ります）。' +
+      `変更前: ${before.length > 0 ? before.join(', ') : '(なし)'} → ` +
+      `変更後: ${nextDependsOn.length > 0 ? nextDependsOn.join(', ') : '(なし)'}`,
+  });
+  resumeIfFinishedForPlanChange(live);
+  self.notify(runId);
+  self.pump(runId);
+  return ok(`${taskId} のdependsOnを変更しました。`);
+}
+
+/**
  * オーケストレーターセッションを1つ開く（design.md §16.23「セッションの生成と寿命」）。
  *
  * 失敗しても実行は止めない。ワークフローViewの警告欄へ出して、オーケストレーター欄を
@@ -366,6 +908,7 @@ export async function setupOrchestratorForStart(
   self: WorkflowRunnerInternals,
   runId: string,
   live: LiveRun,
+  resume?: OrchestratorResumeContext,
 ): Promise<void> {
   const provider = pickOrchestratorProvider(live.def);
   const effective = buildOrchestratorConfig(provider, self.deps.readBaseline());
@@ -384,6 +927,7 @@ export async function setupOrchestratorForStart(
     });
     session.open({ preserveFocus: true });
 
+    const pendingAskUser = resume?.pendingAskUser;
     const orchestrator: LiveOrchestrator = {
       session,
       provider,
@@ -392,11 +936,24 @@ export async function setupOrchestratorForStart(
       eventsSent: 0,
       lastResponseSummary: '',
       unreadCount: 0,
+      // 自動再開で引き継いだ未回答の問い（あれば）は、すでに1回分の`ask_user`を
+      // 消費している。ここで0から始めると、リロードのたびに実質無料で上限を
+      // すり抜けられてしまう（design.md §16.33「呼び出し回数の上限」の意図が崩れる）
+      askUserCount: pendingAskUser !== undefined ? 1 : 0,
     };
     live.orchestrator = orchestrator;
+    if (pendingAskUser !== undefined) {
+      // 答えを届ける先（このオーケストレーターセッション）が立て直った以上、`hasLiveSession:
+      // true`として人が答えられる状態にする（`buildPendingAskUserSnapshot`のJSDoc参照）
+      live.pendingAskUser = {
+        question: pendingAskUser.question,
+        choices: pendingAskUser.choices,
+        since: Date.parse(pendingAskUser.askedAt) || (self.deps.now?.() ?? new Date()).getTime(),
+      };
+    }
     session.onStateChanged((state) => onOrchestratorStateChanged(self, runId, state));
 
-    notifyOrchestrator(self, runId, { kind: 'runStarted', body: buildIntroBody(live) });
+    notifyOrchestrator(self, runId, { kind: 'runStarted', body: buildIntroBody(live, resume) });
     self.notify(runId);
   } catch (e) {
     const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
@@ -435,8 +992,17 @@ function onOrchestratorStateChanged(
   }
   const finishedTurn = orchestrator.busy && !state.busy;
   orchestrator.busy = state.busy;
+  const live = self.runs.get(runId);
   if (finishedTurn) {
-    flushOrchestrator(self, runId);
+    if (live?.pendingAskUser?.answeredChoice !== undefined) {
+      // ターンの最中に人が答えていた場合（`answerAskUser`がbusy中だったため送信を
+      // 保留していた）は、ターンが終わった今まとめて送る
+      deliverAskUserAnswer(self, runId);
+    } else if (live?.pendingAskUser === undefined) {
+      // `pendingAskUser`が立っている（まだ答えていない）間は、まだ答えを待つターン
+      // （ask_userを呼んだ返答が届いた直後等）なので、溜まったイベントは送らない
+      flushOrchestrator(self, runId);
+    }
   }
   self.notify(runId);
 }
@@ -452,8 +1018,9 @@ export function notifyOrchestrator(
   runId: string,
   event: OrchestratorEvent,
 ): void {
-  const orchestrator = self.runs.get(runId)?.orchestrator;
-  if (orchestrator === undefined) {
+  const live = self.runs.get(runId);
+  const orchestrator = live?.orchestrator;
+  if (live === undefined || orchestrator === undefined) {
     return;
   }
   if (orchestrator.eventsSent >= MAX_ORCHESTRATOR_EVENTS_PER_RUN) {
@@ -461,7 +1028,12 @@ export function notifyOrchestrator(
   }
   orchestrator.eventsSent += 1;
   orchestrator.pending.push(event);
-  if (!orchestrator.busy) {
+  // `ask_user`（design.md §16.33）の回答待ちの間は送らずに溜める。「人が選ぶまで
+  // オーケストレーターは待つ」をここで実現する——`ask_user`のツール呼び出し自体は
+  // 同期的にすぐ返る（HTTPレスポンスを保留しない。`messaging.ts`のASK_USER_TOOLの
+  // JSDoc参照）ため、待たせる仕組みはこの送信ゲートだけが担う。溜まったイベントは
+  // `answerAskUser`が答えを送るときに合流させる
+  if (!orchestrator.busy && live.pendingAskUser === undefined) {
     flushOrchestrator(self, runId);
   }
 }
@@ -492,8 +1064,15 @@ export function sendUserMessageToOrchestrator(
   runId: string,
   text: string,
 ): boolean {
-  const orchestrator = self.runs.get(runId)?.orchestrator;
+  const live = self.runs.get(runId);
+  const orchestrator = live?.orchestrator;
   if (orchestrator === undefined || text.trim() === '') {
+    return false;
+  }
+  // `ask_user`（design.md §16.33）の回答待ちの間は、自由記述の発話を素通りさせない。
+  // 「選ぶまで待つ」対象を選択肢からの回答だけに絞る（`answerAskUser`）ことで、モデルが
+  // 自由記述の返信と選択肢からの回答のどちらを見ているかが常に一意に決まるようにする
+  if (live?.pendingAskUser !== undefined) {
     return false;
   }
   const composed = composeOrchestratorPrompt(orchestrator.pending, text);
@@ -557,8 +1136,24 @@ function buildTaskEvent(
   switch (state) {
     case 'done':
       return { kind: 'taskDone', body: withSummary(`タスク ${taskId} が完了しました。`) };
-    case 'failed':
+    case 'failed': {
+      // 停滞（design.md §16.27、Issue #336）は`failed`と同じ状態だが、通知は
+      // `taskFailed`とは別の`taskStalled`にする（Issue #336の受入基準
+      // 「オーケストレーターに通知が届く」がこの種別を明示的に求めている）。
+      // `failed`と一緒くたにすると、オーケストレーターは「壊れて失敗した」のか
+      // 「同じ内容を繰り返しているだけ」なのかを区別できない
+      const failure = live.runState.tasks.get(taskId)?.failure;
+      if (failure?.kind === 'stalled') {
+        return {
+          kind: 'taskStalled',
+          body: withSummary(
+            `タスク ${taskId} が停滞したため停止しました（同じ応答が繰り返されました）。` +
+              'continue_taskで指示を変えて続けるか、retry_taskで最初からやり直せます。',
+          ),
+        };
+      }
       return { kind: 'taskFailed', body: withSummary(`タスク ${taskId} が失敗しました。`) };
+    }
     case 'waitingApproval': {
       const approval = live.tasks.get(taskId)?.pendingApproval;
       const detail = approval === undefined ? '' : `\n要求: ${approval.title}`;

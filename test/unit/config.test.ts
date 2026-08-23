@@ -280,6 +280,162 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
     expect(readWorkflowsConfig().mergeApprovalTimeoutSec).toBe(2147483);
   });
 
+  it('stallRepeatCountの既定は4回（design.md §16.27・DEFAULT_STALL_REPEAT_COUNT、Issue #336）', () => {
+    expect(readWorkflowsConfig().stallRepeatCount).toBe(4);
+  });
+
+  it('stallRepeatCountは範囲内（2〜50）の指定値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.stallRepeatCount': 6 });
+    expect(readWorkflowsConfig().stallRepeatCount).toBe(6);
+  });
+
+  it('stallRepeatCountが数値でない・2未満・50超過・非整数なら既定値（4）へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.stallRepeatCount': 'たくさん' });
+    expect(readWorkflowsConfig().stallRepeatCount).toBe(4);
+
+    __mock.setConfig('agent', { 'workflows.stallRepeatCount': 1 });
+    expect(readWorkflowsConfig().stallRepeatCount).toBe(4);
+
+    __mock.setConfig('agent', { 'workflows.stallRepeatCount': 51 });
+    expect(readWorkflowsConfig().stallRepeatCount).toBe(4);
+
+    __mock.setConfig('agent', { 'workflows.stallRepeatCount': 3.5 });
+    expect(readWorkflowsConfig().stallRepeatCount).toBe(4);
+  });
+
+  it('ciWaitTimeoutSecの既定は1800秒（design.md §16.36・DEFAULT_CI_WAIT_TIMEOUT_SEC）', () => {
+    expect(readWorkflowsConfig().ciWaitTimeoutSec).toBe(1800);
+  });
+
+  it('ciWaitTimeoutSecは指定値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.ciWaitTimeoutSec': 60 });
+    expect(readWorkflowsConfig().ciWaitTimeoutSec).toBe(60);
+  });
+
+  it('ciWaitTimeoutSecが数値でない・1未満・上限超過なら既定値へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.ciWaitTimeoutSec': 'たくさん' });
+    expect(readWorkflowsConfig().ciWaitTimeoutSec).toBe(1800);
+
+    __mock.setConfig('agent', { 'workflows.ciWaitTimeoutSec': 0 });
+    expect(readWorkflowsConfig().ciWaitTimeoutSec).toBe(1800);
+
+    __mock.setConfig('agent', { 'workflows.ciWaitTimeoutSec': 2147484 });
+    expect(readWorkflowsConfig().ciWaitTimeoutSec).toBe(1800);
+  });
+
+  it('ciUpdateBranchMaxRetriesの既定は2回（design.md §16.36・DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES）', () => {
+    expect(readWorkflowsConfig().ciUpdateBranchMaxRetries).toBe(2);
+  });
+
+  it('ciUpdateBranchMaxRetriesは指定値をそのまま使う（0も有効な値として扱う）', () => {
+    __mock.setConfig('agent', { 'workflows.ciUpdateBranchMaxRetries': 5 });
+    expect(readWorkflowsConfig().ciUpdateBranchMaxRetries).toBe(5);
+
+    __mock.setConfig('agent', { 'workflows.ciUpdateBranchMaxRetries': 0 });
+    expect(readWorkflowsConfig().ciUpdateBranchMaxRetries).toBe(0);
+  });
+
+  it('ciUpdateBranchMaxRetriesが数値でない・負値・非整数・上限（100）超過なら既定値へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.ciUpdateBranchMaxRetries': 'たくさん' });
+    expect(readWorkflowsConfig().ciUpdateBranchMaxRetries).toBe(2);
+
+    __mock.setConfig('agent', { 'workflows.ciUpdateBranchMaxRetries': -1 });
+    expect(readWorkflowsConfig().ciUpdateBranchMaxRetries).toBe(2);
+
+    __mock.setConfig('agent', { 'workflows.ciUpdateBranchMaxRetries': 1.5 });
+    expect(readWorkflowsConfig().ciUpdateBranchMaxRetries).toBe(2);
+
+    __mock.setConfig('agent', { 'workflows.ciUpdateBranchMaxRetries': 101 });
+    expect(readWorkflowsConfig().ciUpdateBranchMaxRetries).toBe(2);
+  });
+
+  it('reviewCommentPollIntervalSecの既定は600秒（design.md §16.30・DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC、Issue #339）', () => {
+    expect(readWorkflowsConfig().reviewCommentPollIntervalSec).toBe(600);
+  });
+
+  it('reviewCommentPollIntervalSecは指定値をそのまま使う（0も有効な値として扱う＝取得しない）', () => {
+    __mock.setConfig('agent', { 'workflows.reviewCommentPollIntervalSec': 120 });
+    expect(readWorkflowsConfig().reviewCommentPollIntervalSec).toBe(120);
+
+    __mock.setConfig('agent', { 'workflows.reviewCommentPollIntervalSec': 0 });
+    expect(readWorkflowsConfig().reviewCommentPollIntervalSec).toBe(0);
+  });
+
+  it('reviewCommentPollIntervalSecが数値でない・負値・非整数・上限超過なら既定値へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.reviewCommentPollIntervalSec': 'たくさん' });
+    expect(readWorkflowsConfig().reviewCommentPollIntervalSec).toBe(600);
+
+    __mock.setConfig('agent', { 'workflows.reviewCommentPollIntervalSec': -1 });
+    expect(readWorkflowsConfig().reviewCommentPollIntervalSec).toBe(600);
+
+    __mock.setConfig('agent', { 'workflows.reviewCommentPollIntervalSec': 1.5 });
+    expect(readWorkflowsConfig().reviewCommentPollIntervalSec).toBe(600);
+
+    __mock.setConfig('agent', { 'workflows.reviewCommentPollIntervalSec': 2147484 });
+    expect(readWorkflowsConfig().reviewCommentPollIntervalSec).toBe(600);
+  });
+
+  it('maxAskUserPerRunの既定は3回（design.md §16.33・DEFAULT_MAX_ASK_USER_PER_RUN、Issue #583）', () => {
+    expect(readWorkflowsConfig().maxAskUserPerRun).toBe(3);
+  });
+
+  it('maxAskUserPerRunは範囲内（1〜20）の指定値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.maxAskUserPerRun': 1 });
+    expect(readWorkflowsConfig().maxAskUserPerRun).toBe(1);
+
+    __mock.setConfig('agent', { 'workflows.maxAskUserPerRun': 20 });
+    expect(readWorkflowsConfig().maxAskUserPerRun).toBe(20);
+  });
+
+  it('maxAskUserPerRunが数値でない・1未満・20超過・非整数なら既定値（3）へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.maxAskUserPerRun': 'たくさん' });
+    expect(readWorkflowsConfig().maxAskUserPerRun).toBe(3);
+
+    __mock.setConfig('agent', { 'workflows.maxAskUserPerRun': 0 });
+    expect(readWorkflowsConfig().maxAskUserPerRun).toBe(3);
+
+    __mock.setConfig('agent', { 'workflows.maxAskUserPerRun': 21 });
+    expect(readWorkflowsConfig().maxAskUserPerRun).toBe(3);
+
+    __mock.setConfig('agent', { 'workflows.maxAskUserPerRun': 2.5 });
+    expect(readWorkflowsConfig().maxAskUserPerRun).toBe(3);
+  });
+
+  it('autoResumeの既定はtrue（design.md §16.35、roadmap W10、Issue #584）', () => {
+    expect(readWorkflowsConfig().autoResume).toBe(true);
+  });
+
+  it('autoResumeはfalseを明示指定するとfalseになる', () => {
+    __mock.setConfig('agent', { 'workflows.autoResume': false });
+    expect(readWorkflowsConfig().autoResume).toBe(false);
+  });
+
+  it('maxAutoResumeAttemptsの既定は3回（design.md §16.35、roadmap W10、Issue #584）', () => {
+    expect(readWorkflowsConfig().maxAutoResumeAttempts).toBe(3);
+  });
+
+  it('maxAutoResumeAttemptsは範囲内（1〜20）の指定値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'workflows.maxAutoResumeAttempts': 1 });
+    expect(readWorkflowsConfig().maxAutoResumeAttempts).toBe(1);
+
+    __mock.setConfig('agent', { 'workflows.maxAutoResumeAttempts': 20 });
+    expect(readWorkflowsConfig().maxAutoResumeAttempts).toBe(20);
+  });
+
+  it('maxAutoResumeAttemptsが数値でない・1未満・20超過・非整数なら既定値（3）へ落とす', () => {
+    __mock.setConfig('agent', { 'workflows.maxAutoResumeAttempts': 'たくさん' });
+    expect(readWorkflowsConfig().maxAutoResumeAttempts).toBe(3);
+
+    __mock.setConfig('agent', { 'workflows.maxAutoResumeAttempts': 0 });
+    expect(readWorkflowsConfig().maxAutoResumeAttempts).toBe(3);
+
+    __mock.setConfig('agent', { 'workflows.maxAutoResumeAttempts': 21 });
+    expect(readWorkflowsConfig().maxAutoResumeAttempts).toBe(3);
+
+    __mock.setConfig('agent', { 'workflows.maxAutoResumeAttempts': 2.5 });
+    expect(readWorkflowsConfig().maxAutoResumeAttempts).toBe(3);
+  });
+
   it('branchNamingの既定はwf（GitLab運用規約形式は明示指定したときだけ有効になる）', () => {
     expect(readWorkflowsConfig().branchNaming).toBe('wf');
   });
@@ -312,6 +468,34 @@ describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
     // 担保する前提のため、ここでは「未設定→既定値」だけを見る
     __mock.setConfig('agent', {});
     expect(readWorkflowsConfig().draftPullRequest).toBe(false);
+  });
+
+  it('createTaskIssueの既定はfalse（design.md §16.31、roadmap W6、Issue #596）', () => {
+    expect(readWorkflowsConfig().createTaskIssue).toBe(false);
+  });
+
+  it('createTaskIssueはtrueを指定したとおりに使う', () => {
+    __mock.setConfig('agent', { 'workflows.createTaskIssue': true });
+    expect(readWorkflowsConfig().createTaskIssue).toBe(true);
+  });
+
+  it('createTaskIssueが未設定（undefined）なら既定値（false）へ落とす', () => {
+    __mock.setConfig('agent', {});
+    expect(readWorkflowsConfig().createTaskIssue).toBe(false);
+  });
+
+  it('reviewTaskPullRequestの既定はfalse（design.md §16.31、roadmap W6、Issue #596）', () => {
+    expect(readWorkflowsConfig().reviewTaskPullRequest).toBe(false);
+  });
+
+  it('reviewTaskPullRequestはtrueを指定したとおりに使う', () => {
+    __mock.setConfig('agent', { 'workflows.reviewTaskPullRequest': true });
+    expect(readWorkflowsConfig().reviewTaskPullRequest).toBe(true);
+  });
+
+  it('reviewTaskPullRequestが未設定（undefined）なら既定値（false）へ落とす', () => {
+    __mock.setConfig('agent', {});
+    expect(readWorkflowsConfig().reviewTaskPullRequest).toBe(false);
   });
 });
 

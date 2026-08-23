@@ -38,6 +38,8 @@ export function workflowScript(): string {
     runHalted: '実行停止のため未着手',
     reloadInterrupted: 'リロードによる中断',
     manualStop: '手動停止',
+    // design.md §16.27、Issue #336。同じ応答が繰り返され進捗が無いまま停止した
+    stalled: '停滞',
   };
 
   let currentRuns = [];
@@ -442,8 +444,12 @@ export function workflowScript(): string {
    * そのあとは「再実行」だけになる。
    */
   function canContinueTask(task) {
+    // 回数切れ（maxReached）に加え、停滞（stalled、design.md §16.27、Issue #336）も
+    // 同じ会話のまま続けられる。どちらもセッションは生きたまま止まっている
     return (
-      task.state === 'failed' && task.failure && task.failure.kind === 'maxReached'
+      task.state === 'failed'
+      && task.failure
+      && (task.failure.kind === 'maxReached' || task.failure.kind === 'stalled')
       && task.hasLiveSession === true
     );
   }
@@ -486,7 +492,8 @@ export function workflowScript(): string {
       cell.appendChild(stopBtn);
     }
     if (canContinueTask(task)) {
-      // 回数切れ（maxReached）で止まったタスクだけに出す（design.md §16.8、issue #284）。
+      // 回数切れ（maxReached）・停滞（stalled、design.md §16.27、Issue #336）で
+      // 止まったタスクだけに出す（design.md §16.8、issue #284）。
       // セッションが生きている間しか続きから走らせられないため、hasLiveSessionも見る
       const continueBtn = text('button', 'secondary', '続ける');
       continueBtn.type = 'button';
@@ -758,6 +765,49 @@ export function workflowScript(): string {
     unread.textContent = '未読 ' + orch.unreadCount;
   }
 
+  /**
+   * 「ask_user」（design.md §16.33）の回答待ちを描く。質問文・選択肢はエージェント
+   * （オーケストレーター）の出力に由来する文字列なので、必ずtextContentへ代入する
+   * （design.md §16.8「画面に出す動的な文字列は必ずテキストノードとして挿入する」）。
+   *
+   * リロード後（「hasLiveSession: false」）は永続化された問いの文言だけを表示し、
+   * 選択ボタンは無効にする（答える経路がまだ無い。design.md §16.33「永続化」）。
+   */
+  function renderAskUser(snapshot) {
+    const box = el('orchAskUser');
+    box.replaceChildren();
+    const pending = snapshot.pendingAskUser;
+    if (!pending) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    box.appendChild(text('div', 'orch-ask-user-question', pending.question));
+    if (!pending.hasLiveSession) {
+      box.appendChild(
+        text('div', 'hint', 'このセッションは復元できていないため、いまは回答できません。'),
+      );
+      return;
+    }
+    if (pending.answered) {
+      // 答え済み・配送待ち（オーケストレーターのターン終了待ち）。二重回答を防ぐため
+      // ボタンは出さず、待っていることだけ示す
+      box.appendChild(text('div', 'hint', '答えました。オーケストレーターへ届くまでお待ちください。'));
+      return;
+    }
+    const choicesBox = el2('div', 'orch-ask-user-choices');
+    pending.choices.forEach((choice, index) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = choice;
+      btn.addEventListener('click', () => {
+        vscode.postMessage({ type: 'answerAskUser', choiceIndex: index });
+      });
+      choicesBox.appendChild(btn);
+    });
+    box.appendChild(choicesBox);
+  }
+
   /** 入力欄の内容を送って空にする。空白のみの入力は送らない（拡張機能側も弾く）。 */
   function sendOrchestratorInput() {
     const input = el('orchInput');
@@ -819,6 +869,41 @@ export function workflowScript(): string {
       box.appendChild(text('div', '', 'mainへの最終マージ: 完了'));
     } else if (integration.finalMergeOutcome === 'failed') {
       box.appendChild(text('div', 'hint', 'mainへの最終マージ: 失敗'));
+    } else if (integration.finalMergeOutcome === 'held') {
+      // design.md §16.26。finalMerge: orchestrator/confirmで「マージしない」と
+      // 判断された（またはタイムアウトでholdへ倒れた）状態。理由はsnapshot.warnings
+      // （finalMergeDecision種別）に記録済みで、警告欄側に表示される
+      box.appendChild(text('div', 'hint', 'mainへの最終マージ: 保留（マージしない）'));
+    } else if (integration.finalMergeDecision !== undefined) {
+      // design.md §16.26。判断待ち。confirmモードは人がここで応答する
+      // （decideFinalMergeメッセージ→workflowView.ts→WorkflowRunner.decideFinalMerge）。
+      // サンドボックス化されたwebviewではwindow.promptが使えない場合があるため、
+      // orchInput（オーケストレーターへの発話欄）と同じ「テキスト欄+ボタン」の形にする
+      box.appendChild(text('div', 'hint', 'mainへの最終マージ: 判断待ち'));
+      if (integration.finalMergeDecision.mode === 'confirm') {
+        const reasonInput = document.createElement('input');
+        reasonInput.type = 'text';
+        reasonInput.placeholder = '判断の理由（必須）';
+        const mergeBtn = document.createElement('button');
+        mergeBtn.type = 'button';
+        mergeBtn.textContent = 'mainへマージする';
+        mergeBtn.addEventListener('click', () => {
+          const reason = reasonInput.value;
+          if (!reason.trim()) return;
+          vscode.postMessage({ type: 'decideFinalMerge', decision: 'merge', reason: reason });
+        });
+        const holdBtn = document.createElement('button');
+        holdBtn.type = 'button';
+        holdBtn.textContent = 'マージしない';
+        holdBtn.addEventListener('click', () => {
+          const reason = reasonInput.value;
+          if (!reason.trim()) return;
+          vscode.postMessage({ type: 'decideFinalMerge', decision: 'hold', reason: reason });
+        });
+        box.appendChild(reasonInput);
+        box.appendChild(mergeBtn);
+        box.appendChild(holdBtn);
+      }
     }
   }
 
@@ -861,6 +946,7 @@ export function workflowScript(): string {
     el('empty').hidden = true;
     renderHeader(snapshot, progress);
     renderOrchestrator(snapshot);
+    renderAskUser(snapshot);
     renderGraph(snapshot, layout);
     renderTable(snapshot);
     renderWarnings(snapshot);
@@ -879,6 +965,64 @@ export function workflowScript(): string {
     el('openIntegrationPrBtn').disabled = true;
     // オーケストレーター欄は#header側にあり#contentのhiddenでは消えないため明示的に隠す
     el('orchestrator').hidden = true;
+    el('orchAskUser').hidden = true;
+  }
+
+  // ---- プログラム（design.md §16.37.3、roadmap W12-3、Issue #606） ----
+
+  const PROGRAM_SKIP_REASON_LABEL = {
+    failedDependency: '前段runの失敗により未着手',
+    haltedByUser: '人がプログラム全体を停止したため未着手',
+  };
+
+  function formatProgramRunLine(runRefId, entry) {
+    // タスクのSTATE_LABEL（pending/running/done/failed/skipped）をそのまま流用する
+    // （design.md §16.37.3でProgramRunStateをタスク状態の一部と同じ語彙にそろえた）
+    let line = runRefId + '：' + (STATE_LABEL[entry.state] || entry.state);
+    if (entry.state === 'skipped' && entry.skipReason) {
+      const reason = entry.skipReason;
+      if (reason.kind === 'failedDependency') {
+        line += '（' + reason.failedRunId + 'の失敗により未着手）';
+      } else {
+        line += '（' + (PROGRAM_SKIP_REASON_LABEL[reason.kind] || reason.kind) + '）';
+      }
+    }
+    return line;
+  }
+
+  function applyPrograms(programs) {
+    const box = el('programs');
+    box.replaceChildren();
+    for (const p of programs) {
+      const item = el2('div', 'program-item');
+      const head = el2('div', 'program-head');
+      head.appendChild(text('span', 'program-def', p.defPath));
+      if (p.state.haltedByUser) {
+        head.appendChild(text('span', 'program-status program-halted', '人が停止'));
+      } else if (p.finishedAt) {
+        head.appendChild(text('span', 'program-status program-finished', '完了'));
+      } else {
+        head.appendChild(text('span', 'program-status program-running', '実行中'));
+      }
+      if (!p.state.haltedByUser && !p.finishedAt) {
+        const stopBtn = el2('button', 'secondary danger program-stop-btn');
+        stopBtn.type = 'button';
+        stopBtn.textContent = 'プログラムを停止';
+        stopBtn.addEventListener('click', () => {
+          vscode.postMessage({ type: 'stopProgram', programId: p.programId });
+        });
+        head.appendChild(stopBtn);
+      }
+      item.appendChild(head);
+
+      const runsBox = el2('div', 'program-runs');
+      for (const runRefId of Object.keys(p.state.runs)) {
+        runsBox.appendChild(text('div', 'program-run', formatProgramRunLine(runRefId, p.state.runs[runRefId])));
+      }
+      item.appendChild(runsBox);
+      box.appendChild(item);
+    }
+    el('programsSection').hidden = programs.length === 0;
   }
 
   // ---- 経過時間: ローカルで毎秒更新する（拡張機能からは状態が変わったときだけ届く） ----
@@ -966,6 +1110,8 @@ export function workflowScript(): string {
       applyState(msg.snapshot, msg.layout, msg.progress, msg.integration);
     } else if (msg.type === 'noRun') {
       applyNoRun();
+    } else if (msg.type === 'programs') {
+      applyPrograms(msg.programs);
     }
   });
 

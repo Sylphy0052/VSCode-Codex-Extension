@@ -144,7 +144,13 @@ export interface SendMessageValidationInput {
   from: string;
   to: string;
   body: string;
-  /** 同じrunに存在するタスクidの集合。宛先の存在確認に使う。 */
+  /**
+   * 同じrunに存在するタスクidの集合。宛先の存在確認に使う。
+   *
+   * **`from`がタスク（`ORCHESTRATOR_CONNECTION_ID`以外）のときは参照しない**（Issue #547）。
+   * タスクからの送信は宛先をオーケストレーターに固定するため、実在タスクの集合との
+   * 突き合わせが要るのはオーケストレーターからタスクへ送る場合だけになった。
+   */
   knownTaskIds: ReadonlySet<string>;
   /** 宛先タスクの現在の状態。`knownTaskIds` に含まれないidの場合は無視される。 */
   recipientState: TaskState | undefined;
@@ -159,29 +165,56 @@ export interface SendMessageValidationResult {
 }
 
 /**
- * 宛先の存在・自己宛かどうか・本文の長さ・run全体の総数上限・宛先の状態を検証する
- * （design.md §16.21）。純粋関数。呼び出し順は「宛先の存在」→「自己宛」→「本文の長さ」→
- * 「総数上限」→「宛先の状態」で、1件見つかった時点で返す（複数該当してもどれか1つの理由を
- * 返せば十分なため、`validateWorkflow` のように全件集めることはしない）。
+ * 宛先の固定・本文の長さ・run全体の総数上限・宛先の状態を検証する（design.md §16.21・
+ * §16.34、Issue #547）。純粋関数。1件見つかった時点で返す（複数該当してもどれか1つの
+ * 理由を返せば十分なため、`validateWorkflow` のように全件集めることはしない）。
  *
- * 自己宛（`to === from`）は拒否する（Issue #365）。`runnerMessaging.ts`の`onMessageAccepted`は
+ * **タスク間の直接メッセージングは廃止した（Issue #547）。** `from`がタスク（接続の
+ * `taskId`が`ORCHESTRATOR_CONNECTION_ID`と異なる）なら、`to`は必ず
+ * `ORCHESTRATOR_CONNECTION_ID`でなければならない。タスクidを含むそれ以外の値
+ * （宛先が存在するタスクidであっても、自分自身のidであっても）は「宛先が固定されている」
+ * という同じ理由で拒否する。オーケストレーターがこの内容を見て、必要なら自分の
+ * `send_message`（`from === ORCHESTRATOR_CONNECTION_ID`。宛先にタスクidを取れる）で
+ * 転送するかどうかを決める（design.md §16.34「宛先の集約」）。
+ *
+ * `from === ORCHESTRATOR_CONNECTION_ID`（オーケストレーターからの送信）のときだけ、
+ * 「自己宛」→「宛先の存在」の順で検証する（Issue #547のレビュー指摘。理由は実装側の
+ * インラインコメント参照）。自己宛（`to === from`）を拒否する理由（Issue #365）は変わらない:
+ * `runnerMessaging.ts`の`onMessageAccepted`は
  * `expectReply: true`で送信元を`waitingReply`へ倒した直後、同じメッセージの宛先が送信元と
  * 同じなら`waitingReply`から即座に戻す（＝自分自身が宛先でもある）ため、自己宛を通すと
- * 「一時停止して即再開する」という意味のない往復が起きる。
+ * 「一時停止して即再開する」という意味のない往復が起きる。オーケストレーターの接続idは
+ * `TASK_ID_PATTERN`に反する（先頭が`-`）ため`knownTaskIds`には実質現れず、この分岐は
+ * 現在の呼び出し経路では到達しない。それでも純粋関数としての不変条件（自己宛の拒否）を
+ * 明示しておく（`from`の生成元が将来変わっても壊れないようにするための多層防御）。
  */
 export function validateSendMessage(
   input: SendMessageValidationInput,
 ): SendMessageValidationResult {
-  if (!input.knownTaskIds.has(input.to)) {
+  const fromIsOrchestrator = input.from === ORCHESTRATOR_CONNECTION_ID;
+  if (fromIsOrchestrator) {
+    // 自己宛チェックはknownTaskIdsの判定より先に置く（Issue #547のレビュー指摘）。
+    // ORCHESTRATOR_CONNECTION_IDはTASK_ID_PATTERNの制約上knownTaskIdsに現れないため、
+    // 後段の「宛先が見つかりません」判定は自己宛のケースを含め常に先に成立してしまい、
+    // この順序でなければ自己宛の専用メッセージ（Issue #365）へ到達できない
+    if (input.to === input.from) {
+      return {
+        accepted: false,
+        reason: `自分自身へは送信できません: ${input.to}`,
+      };
+    }
+    if (!input.knownTaskIds.has(input.to)) {
+      return {
+        accepted: false,
+        reason: `宛先が見つかりません（同じrunのタスクではありません）: ${input.to}`,
+      };
+    }
+  } else if (input.to !== ORCHESTRATOR_CONNECTION_ID) {
     return {
       accepted: false,
-      reason: `宛先が見つかりません（同じrunのタスクではありません）: ${input.to}`,
-    };
-  }
-  if (input.to === input.from) {
-    return {
-      accepted: false,
-      reason: `自分自身へは送信できません: ${input.to}`,
+      reason:
+        `宛先はオーケストレーターに固定されています。タスク宛には直接送信できません` +
+        `（"${ORCHESTRATOR_CONNECTION_ID}" 宛にしてください）: ${input.to}`,
     };
   }
   const bodyLength = codePointLength(input.body, MAX_MESSAGE_BODY_LENGTH);
@@ -210,6 +243,18 @@ export function validateSendMessage(
  * メッセージの保管（純粋・不変な状態）
  * ------------------------------------------------------------------------ */
 
+/**
+ * メッセージの種類（design.md §16.32、Issue #571）。
+ *
+ * `'message'`は`send_message`が送った通常のメッセージ、`'question'`は`ask_orchestrator`が
+ * 送った「問い」。配送・検証（`validateSendMessage`）・待ちぼうけ検出は種類を区別せず
+ * 同じ経路をそのまま通る（design.md §16.32「既存の中継の上に載せる」）。区別が要るのは
+ * オーケストレーターへ届ける通知の意味づけ（`OrchestratorEventKind`を`taskMessage`と
+ * `taskQuestion`のどちらにするか）だけで、`runnerMessaging.ts`の
+ * `deliverTaskMessageToOrchestrator`がここを見て分岐する。
+ */
+export type MessageKind = 'message' | 'question';
+
 /** 1件のメッセージ。`id` / `createdAtMs` は呼び出し側（`TaskMessagingHub`）が生成して渡す。 */
 export interface StoredMessage {
   readonly id: string;
@@ -218,6 +263,8 @@ export interface StoredMessage {
   readonly body: string;
   readonly expectReply: boolean;
   readonly createdAtMs: number;
+  /** 省略時は`'message'`（`TaskMessagingHub.sendMessage`が既定する）。design.md §16.32。 */
+  readonly kind: MessageKind;
 }
 
 /**
@@ -551,16 +598,57 @@ export const LIST_TASKS_TOOL: McpToolDefinition = {
 export const SEND_MESSAGE_TOOL: McpToolDefinition = {
   name: 'send_message',
   description:
-    '同じrunの他タスクへメッセージを送る。送信元はサーバー側が接続から判別するため、' +
-    '引数には含めない（含めても無視される）。',
+    'メッセージを送る。タスクからの呼び出しでは宛先は常にオーケストレーターに固定される' +
+    `（toには固定文字列 "${ORCHESTRATOR_CONNECTION_ID}" を指定すること。他タスクのidを` +
+    '指定すると拒否され、理由が返る。タスク同士が直接やり取りすることはできない）。' +
+    'オーケストレーターからの呼び出しでは、toに同じrunのタスクidを指定して転送できる。' +
+    '送信元はサーバー側が接続から判別するため、引数には含めない（含めても無視される）。',
   inputSchema: {
     type: 'object',
     properties: {
-      to: { type: 'string', description: '宛先タスクのid' },
+      to: {
+        type: 'string',
+        description:
+          `宛先。タスクから呼ぶ場合は固定文字列 "${ORCHESTRATOR_CONNECTION_ID}"。` +
+          'オーケストレーターから呼ぶ場合は宛先タスクのid。',
+      },
       body: { type: 'string', description: 'メッセージの本文' },
       expectReply: { type: 'boolean', description: '返信を待つ場合はtrue' },
     },
     required: ['to', 'body', 'expectReply'],
+    additionalProperties: false,
+  },
+};
+
+/**
+ * `ask_orchestrator`ツール（design.md §16.32、Issue #571）。
+ *
+ * タスク側の道具。オーケストレーターへ判断を仰ぐ「問い」を送る。`decide_approval`
+ * （承認要求に対してオーケストレーターが裁く経路）とは別物で、こちらはタスクが能動的に
+ * 判断を仰ぐ経路。実体は`send_message`（宛先固定・`MAX_MESSAGE_BODY_LENGTH`・
+ * `MAX_MESSAGES_PER_RUN`を含む既存の検証）をそのまま通り、`kind: 'question'`だけが
+ * `send_message`と違う（`MessagingMcpServer.handleToolCall`参照）。答えるための専用の
+ * ツールは無く、オーケストレーターは既存の`send_message`（`to`に問うたタスクのidを
+ * 指定）で答える。
+ *
+ * **オーケストレーター自身の接続には見せない**（`MessagingMcpServer.visibleTools`）。
+ * タスクが判断を仰ぐための道具であり、オーケストレーターが自分自身へ問うことに意味が無い。
+ */
+export const ASK_ORCHESTRATOR_TOOL: McpToolDefinition = {
+  name: 'ask_orchestrator',
+  description:
+    'オーケストレーターへ判断を仰ぐ問いを送る。blocking: trueの場合、このタスクは' +
+    '答えが届くまで次のターンを送らない（waitingReplyへ入る）。答えが届かないまま' +
+    'このタスクのmaxIterationsを使い切った場合は、そのまま失敗として確定する' +
+    '（返事待ちのまま枠を占有し続けない）。blocking: falseなら待たずに次のターンへ進む。' +
+    'オーケストレーターは既存のsend_messageで答える（専用の返信ツールは無い）。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      question: { type: 'string', description: '問いの本文' },
+      blocking: { type: 'boolean', description: '答えが届くまで待つ場合はtrue' },
+    },
+    required: ['question', 'blocking'],
     additionalProperties: false,
   },
 };
@@ -585,6 +673,41 @@ export interface OrchestratorControlPort {
   continueTask(taskId: string): OrchestratorControlResult;
   decideApproval(taskId: string, decision: string): OrchestratorControlResult;
   updateTaskPrompt(taskId: string, continuePrompt: string): OrchestratorControlResult;
+  /**
+   * 人へ問う（design.md §16.33、Issue #583）。問いの本文と選択肢（2〜4個）を受け取り、
+   * ワークフローViewへ出す。人が選ぶまでオーケストレーターは待つ（`live.pendingAskUser`が
+   * 立っている間、`notifyOrchestrator`/`sendUserMessageToOrchestrator`は送信を止める。
+   * `runnerOrchestrator.ts`参照）。1つのrunで呼べる回数には上限があり
+   * （`agent.workflows.maxAskUserPerRun`、既定3）、超えたら拒否する。
+   */
+  askUser(question: string, choices: readonly string[]): OrchestratorControlResult;
+  /**
+   * 最終マージ（design.md §16.26、`finalMerge: orchestrator`）をmainへ進めるか
+   * （`decision: 'merge'`）、PR/MRを残して保留するか（`decision: 'hold'`）を答える。
+   * `reason`（理由）は必須。runId・対象taskIdを引数に取らない（run全体で1つの判断で、
+   * 統合PR/MRという1つの対象しか無いため）。
+   */
+  decideFinalMerge(decision: string, reason: string): OrchestratorControlResult;
+  /**
+   * 実行中の定義へ新しいタスクを加える（design.md §16.29、roadmap W4、Issue #338）。
+   * 適用先は実行中の定義（`live.def`）だけで、YAMLファイルは書き換えない。追加する
+   * タスクにも既存の検証（id形式・循環依存・上限件数・プロンプト長）をそのまま通す。
+   * `autoApprove`/`allow`/`sandbox`/`approvalMode`は受け取らず、指定されていれば拒否する。
+   */
+  addTask(input: Record<string, unknown>): OrchestratorControlResult;
+  /**
+   * まだ開始していない（`pending`の）タスクを取り除く（design.md §16.29）。走行中の
+   * タスクは対象にできない（`stop_task`を使わせる）。
+   */
+  removeTask(taskId: string): OrchestratorControlResult;
+  /**
+   * まだ開始していない（`pending`の）タスクの`dependsOn`を差し替える（design.md §16.29）。
+   * 循環依存・未定義idへの参照になる変更は適用前に拒否する。
+   */
+  updateTaskDependencies(
+    taskId: string,
+    dependsOn: readonly string[],
+  ): OrchestratorControlResult;
 }
 
 /** 制御ツールの結果。`send_message` と同じく「受け付けたかどうかと、その理由」を返す。 */
@@ -673,6 +796,154 @@ export const UPDATE_TASK_PROMPT_TOOL: McpToolDefinition = {
 };
 
 /**
+ * `ask_user`ツール（design.md §16.33、Issue #583）。オーケストレーター専用の制御ツール。
+ *
+ * §16.23が当初「専用のask_userツールは置かない（返事があるまでツールの中で待つ形は
+ * デッドロックを持ち込む）」としていた判断を、この節で覆した。ここでのツール呼び出しは
+ * **HTTPレスポンスを保留しない**（同期的に`accepted`を返してすぐ終わる）。「人が選ぶまで
+ * 待つ」は、MCPのレスポンスを止める形ではなく、`live.pendingAskUser`が立っている間
+ * オーケストレーターへの以降の送信（新しいイベント通知・人の発話）を止める形で実現する
+ * （`runnerOrchestrator.ts`の`notifyOrchestrator`/`sendUserMessageToOrchestrator`参照）。
+ * トランスポート層のリクエストを保留する形は採らなかった——保留中の接続にタイムアウトが
+ * 無ければ、人が答えないまま放置したときにHTTPコネクションが無期限に残ってしまう。
+ *
+ * 呼べる条件（担当領域をまたぐ変更・設計の前提を変える変更・受入基準を下げる判断・
+ * 同じ失敗を3回繰り返して打つ手が尽きた場合）はモデルへの指示（description）でしか
+ * 伝えられない。機械的に強制するのは呼べる回数の上限（`agent.workflows.maxAskUserPerRun`）
+ * だけである（design.md §16.33「呼べる条件を絞る」）。
+ */
+export const ASK_USER_TOOL: McpToolDefinition = {
+  name: 'ask_user',
+  description:
+    '人（実行しているユーザー）へ確認する。次の場合に限って使うこと: 担当領域をまたぐ変更' +
+    '（他のワークフローへ影響する）／設計の前提を変える変更／受入基準を下げる判断／' +
+    '同じ失敗を3回繰り返して打つ手が尽きた場合。それ以外の判断は自分で行うこと。' +
+    'ワークフローViewへ問いと選択肢を出し、人が選ぶまで応答は止まる（このツール自体は' +
+    'すぐ受付結果を返す）。1つのrunで呼べる回数には上限があり、超えると拒否され、' +
+    '自分で判断するかdecide_final_mergeのholdで止めるよう促される。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      question: { type: 'string', description: '問いの本文' },
+      choices: {
+        type: 'array',
+        items: { type: 'string' },
+        minItems: 2,
+        maxItems: 4,
+        description: '選択肢（2〜4個）',
+      },
+    },
+    required: ['question', 'choices'],
+    additionalProperties: false,
+  },
+};
+
+export const DECIDE_FINAL_MERGE_TOOL: McpToolDefinition = {
+  name: 'decide_final_merge',
+  description:
+    '統合PR/MRの作成後、mainへ最終マージするかどうかを判断する（design.md §16.26、' +
+    '`finalMerge: orchestrator`）。get_run_statusで差分・警告欄・統合の状況を確認したうえで' +
+    '呼ぶこと。判断待ちが無い場合は失敗する。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      decision: {
+        type: 'string',
+        description: "mainへマージするなら 'merge'、マージせずPR/MRを残すなら 'hold'",
+      },
+      reason: { type: 'string', description: '判断の理由（必須。警告欄へそのまま残る）' },
+    },
+    required: ['decision', 'reason'],
+    additionalProperties: false,
+  },
+};
+
+/**
+ * `add_task`ツール（design.md §16.29、roadmap W4、Issue #338）。実行中の定義へ新しい
+ * タスクを加える。YAMLファイルは書き換えない。`autoApprove`/`allow`/`sandbox`/
+ * `approvalMode`はスキーマに含めていない。もし指定されていれば（値によらず）拒否する
+ * （`OrchestratorControlPort.addTask`実体側で検証する）。
+ */
+export const ADD_TASK_TOOL: McpToolDefinition = {
+  name: 'add_task',
+  description:
+    '実行中の定義へ新しいタスクを追加する（YAMLファイルは書き換えない）。id/prompt/done' +
+    'は必須。dependsOnは省略時[]。既存の検証（id形式・循環依存・上限件数・プロンプト長）を' +
+    'そのまま通し、違反すれば適用前に拒否され理由が返る。autoApprove/allow/sandbox/' +
+    'approvalModeは指定できない（指定すると拒否される。権限の緩和は人が書いた定義からのみ' +
+    '許可される）。担当領域をまたぐ・設計の前提を変える・受入基準を下げる追加は、先に' +
+    'ask_userで人に確認すること。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: '新しいタスクのid' },
+      prompt: { type: 'string', description: '指示文' },
+      done: { type: 'string', description: '完了条件' },
+      dependsOn: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '依存するタスクidの配列（省略時は[]）',
+      },
+      continuePrompt: { type: 'string', description: '継続時の指示（省略可）' },
+      maxIterations: { type: 'number', description: '送信回数の上限（省略可）' },
+      provider: { type: 'string', description: "'codex' | 'claude'（省略可）" },
+      isolation: { type: 'string', description: "'worktree' 等（省略可）" },
+      type: { type: 'string', description: 'コミットのtype（省略可）' },
+      retries: { type: 'number', description: '自動再試行回数の上限（省略可）' },
+      issue: { type: 'number', description: '対応するIssue番号（省略可）' },
+    },
+    required: ['id', 'prompt', 'done', 'dependsOn'],
+    additionalProperties: false,
+  },
+};
+
+/**
+ * `remove_task`ツール（design.md §16.29、roadmap W4、Issue #338）。まだ開始していない
+ * （`pending`の）タスクだけを対象にする。走行中のタスクは`stop_task`を使うこと。
+ */
+export const REMOVE_TASK_TOOL: McpToolDefinition = {
+  name: 'remove_task',
+  description:
+    'まだ開始していない（pendingの）タスクを実行中の定義から取り除く（YAMLファイルは' +
+    '書き換えない）。走行中・完了済み・失敗済みのタスクは対象にできない（走行中は' +
+    'stop_taskを使うこと）。他のタスクがこのタスクへdependsOnしていた場合、その依存は' +
+    '取り除いて孤立させない。',
+  inputSchema: {
+    type: 'object',
+    properties: { taskId: TASK_ID_ARG },
+    required: ['taskId'],
+    additionalProperties: false,
+  },
+};
+
+/**
+ * `update_task_dependencies`ツール（design.md §16.29、roadmap W4、Issue #338）。まだ
+ * 開始していない（`pending`の）タスクの`dependsOn`を丸ごと差し替える。循環依存・
+ * 未定義idへの参照になる変更は適用前に拒否する。
+ */
+export const UPDATE_TASK_DEPENDENCIES_TOOL: McpToolDefinition = {
+  name: 'update_task_dependencies',
+  description:
+    'まだ開始していない（pendingの）タスクのdependsOnを丸ごと差し替える（YAMLファイルは' +
+    '書き換えない）。循環依存になる・未定義のidを参照する変更は適用前に拒否され理由が' +
+    '返る。走行中・完了済みのタスクのdependsOnは変えられない（変えても以降のスケジューリングに' +
+    '影響しないため）。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      taskId: TASK_ID_ARG,
+      dependsOn: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '差し替え後の依存タスクidの配列（[]で依存なしにできる）',
+      },
+    },
+    required: ['taskId', 'dependsOn'],
+    additionalProperties: false,
+  },
+};
+
+/**
  * オーケストレーター用の接続にだけ見せるツール（design.md §16.23）。
  * タスク用の接続の `tools/list` には現れず、呼んでも「未知のツール」として拒否される。
  */
@@ -683,6 +954,11 @@ export const ORCHESTRATOR_CONTROL_TOOLS: readonly McpToolDefinition[] = [
   CONTINUE_TASK_TOOL,
   DECIDE_APPROVAL_TOOL,
   UPDATE_TASK_PROMPT_TOOL,
+  DECIDE_FINAL_MERGE_TOOL,
+  ASK_USER_TOOL,
+  ADD_TASK_TOOL,
+  REMOVE_TASK_TOOL,
+  UPDATE_TASK_DEPENDENCIES_TOOL,
 ];
 
 const ORCHESTRATOR_CONTROL_TOOL_NAMES: ReadonlySet<string> = new Set(
@@ -826,6 +1102,8 @@ export class TaskMessagingHub {
     to: string;
     body: string;
     expectReply: boolean;
+    /** 省略時は`'message'`（design.md §16.32、Issue #571。`ask_orchestrator`は`'question'`を渡す）。 */
+    kind?: MessageKind;
   }): SendMessageValidationResult {
     const snapshot = this.deps.listRunTasks();
     const knownTaskIds = new Set(snapshot.map((t) => t.id));
@@ -850,6 +1128,7 @@ export class TaskMessagingHub {
       body: input.body,
       expectReply: input.expectReply,
       createdAtMs: this.deps.now?.() ?? Date.now(),
+      kind: input.kind ?? 'message',
     };
     this.store = enqueueMessage(this.store, message);
     this.deps.onAccepted?.(message);
@@ -1074,7 +1353,15 @@ export class MessagingMcpServer {
    */
   private visibleTools(taskId: string): McpToolDefinition[] {
     const base = [LIST_TASKS_TOOL, SEND_MESSAGE_TOOL];
-    return this.controlFor(taskId) === undefined ? base : [...base, ...ORCHESTRATOR_CONTROL_TOOLS];
+    // ask_orchestrator（design.md §16.32、Issue #571）はタスク側の道具で、
+    // オーケストレーター自身の接続には見せない（自分自身へ問う意味が無い）。
+    // 接続の種類はtaskId自体で判定する（`orchestratorControl`未設定のオーケストレーター
+    // 接続も「タスク扱い」にしないため。制御ツールの実体の有無とは独立に判定する）
+    if (taskId === ORCHESTRATOR_CONNECTION_ID) {
+      const control = this.controlFor(taskId);
+      return control === undefined ? base : [...base, ...ORCHESTRATOR_CONTROL_TOOLS];
+    }
+    return [...base, ASK_ORCHESTRATOR_TOOL];
   }
 
   /**
@@ -1107,6 +1394,27 @@ export class MessagingMcpServer {
       return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
     }
 
+    if (name === 'ask_orchestrator') {
+      // オーケストレーター自身の接続からは見せていない（visibleTools）が、名前を推測して
+      // 呼ばれる余地に備え、ここでも同じ条件で弾く（制御ツールと同じ多層防御の流儀）
+      if (taskId === ORCHESTRATOR_CONNECTION_ID) {
+        return failure(request.id, -32602, `未知のツールです: ${name}`);
+      }
+      const question = str(args['question']);
+      const blocking = args['blocking'] === true;
+      // 宛先はオーケストレーターに固定（send_messageのタスク分岐と同じ）。kind: 'question'
+      // だけが異なり、待ちぼうけ検出・配送・長さ上限などは既存のsend_messageの経路を
+      // そのまま通る（design.md §16.32「既存の中継の上に載せる」）
+      const result = this.hub.sendMessage({
+        from: taskId,
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: question,
+        expectReply: blocking,
+        kind: 'question',
+      });
+      return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
+    }
+
     if (ORCHESTRATOR_CONTROL_TOOL_NAMES.has(name)) {
       return this.handleControlToolCall(taskId, request, name, args);
     }
@@ -1133,6 +1441,29 @@ export class MessagingMcpServer {
     if (name === GET_RUN_STATUS_TOOL.name) {
       return success(request.id, toolTextResult(JSON.stringify(control.getRunStatus())));
     }
+    // `decide_final_merge`はrun全体で1つの判断（統合PR/MRという1つの対象）にしか使えず、
+    // 他の制御ツールと違って`taskId`を取らない。`target`（`taskId`）を読む前に分岐する
+    if (name === DECIDE_FINAL_MERGE_TOOL.name) {
+      const result = control.decideFinalMerge(str(args['decision']), str(args['reason']));
+      return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
+    }
+    // `ask_user`（design.md §16.33）も`taskId`を取らない（decide_final_mergeと同じ理由で
+    // `target`を読む前に分岐する）
+    if (name === ASK_USER_TOOL.name) {
+      const rawChoices = args['choices'];
+      const choices = Array.isArray(rawChoices)
+        ? rawChoices.filter((c): c is string => typeof c === 'string')
+        : [];
+      const result = control.askUser(str(args['question']), choices);
+      return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
+    }
+
+    // `add_task`は`taskId`ではなく`id`を持つ（新しいタスクの識別子そのものが引数）ため、
+    // `decide_final_merge`/`ask_user`と同じく`target`を読む前に分岐する
+    if (name === ADD_TASK_TOOL.name) {
+      const result = control.addTask(args);
+      return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
+    }
 
     const target = str(args['taskId']);
     // `default`は「未知のツール」で閉じる。`ORCHESTRATOR_CONTROL_TOOLS`へツールを足したのに
@@ -1150,6 +1481,15 @@ export class MessagingMcpServer {
           return control.decideApproval(target, str(args['decision']));
         case UPDATE_TASK_PROMPT_TOOL.name:
           return control.updateTaskPrompt(target, str(args['continuePrompt']));
+        case REMOVE_TASK_TOOL.name:
+          return control.removeTask(target);
+        case UPDATE_TASK_DEPENDENCIES_TOOL.name: {
+          const rawDeps = args['dependsOn'];
+          const deps = Array.isArray(rawDeps)
+            ? rawDeps.filter((d): d is string => typeof d === 'string')
+            : [];
+          return control.updateTaskDependencies(target, deps);
+        }
         default:
           return undefined;
       }

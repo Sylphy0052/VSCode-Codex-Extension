@@ -13,6 +13,24 @@ import {
 } from './orchestrator/forge';
 import { DEFAULT_REPLY_TIMEOUT_SEC } from './orchestrator/messaging';
 import { DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerMerge';
+import { DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC } from './orchestrator/runner';
+import {
+  DEFAULT_CI_WAIT_TIMEOUT_SEC,
+  DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES,
+  DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC,
+} from './orchestrator/forge';
+import { DEFAULT_STALL_REPEAT_COUNT, MIN_STALL_REPEAT_COUNT, MAX_STALL_REPEAT_COUNT } from './loop/stallDetector';
+import {
+  DEFAULT_MAX_ASK_USER_PER_RUN,
+  MIN_MAX_ASK_USER_PER_RUN,
+  MAX_MAX_ASK_USER_PER_RUN,
+} from './orchestrator/orchestratorSession';
+import {
+  DEFAULT_AUTO_RESUME,
+  DEFAULT_MAX_AUTO_RESUME_ATTEMPTS,
+  MIN_MAX_AUTO_RESUME_ATTEMPTS,
+  MAX_MAX_AUTO_RESUME_ATTEMPTS,
+} from './orchestrator/runnerRestore';
 import { DEFAULT_PSEUDO_WORKTREE_EXCLUDE } from './orchestrator/pseudoWorktree';
 import { sanitizeForLog } from './orchestrator/sanitize';
 import { normalizeBranchNaming, type BranchNaming } from './orchestrator/worktree';
@@ -252,8 +270,9 @@ export interface WorkflowsConfig {
    */
   pullRequest: PullRequestLayerConfig;
   /**
-   * 統合→mainのPR/MRを無人でマージするか（design.md §16.18）。`machine`スコープ。mainを
-   * 無人で書き換えるかどうかを決めるため、`.vscode/settings.json`からは変えられない。
+   * 統合→mainのPR/MRを無人でマージするか（design.md §16.18・§16.26）。`machine`スコープ。
+   * mainを書き換えるかどうかを決めるため、`.vscode/settings.json`からは変えられない。
+   * 既定は`orchestrator`（統合PR/MR作成後、マージするかどうかをオーケストレーターへ問う）。
    */
   finalMerge: FinalMergeConfig;
   /**
@@ -270,17 +289,100 @@ export interface WorkflowsConfig {
    */
   mergeApprovalTimeoutSec: number;
   /**
+   * 最終マージ（`finalMerge: orchestrator`）で、統合PR/MR作成後にオーケストレーターが
+   * `decide_final_merge`で応答するのを待つ時間の上限秒数（`agent.workflows.
+   * finalMergeDecisionTimeoutSec`、既定900秒、`machine-overridable`、design.md §16.26）。
+   * 超えたら応答が無かったものとして自動的に`hold`へ倒す（判断を待って無限に止まらない。
+   * design.md §16.26の受入基準）。`finalMerge: confirm`（人の承認待ち）には効かない
+   * （人はいつ確認するか分からないため、待ち時間の上限を切って自動`hold`にする理由が無い）。
+   * 権限には関わらないため`forge`/`finalMerge`ほど強い制限は要らない。
+   */
+  finalMergeDecisionTimeoutSec: number;
+  /**
+   * CIチェックの完了を待つ時間の上限秒数（`agent.workflows.ciWaitTimeoutSec`、既定1800秒、
+   * `machine-overridable`、design.md §16.36）。統合PR/MRをマージする前にCIの完了を待ち、
+   * 超えたら赤（CI失敗）と同じ扱いでタスクを失敗として確定する。CIが1件も設定されていない
+   * リポジトリでは待たずに即マージする（チェックが0件なのと赤なのを取り違えない）。
+   */
+  ciWaitTimeoutSec: number;
+  /**
+   * マージが「baseの最新でない」ことで拒否されたときの取り込み直し（`gh pr update-branch` /
+   * `glab mr rebase`）の最大リトライ回数（`agent.workflows.ciUpdateBranchMaxRetries`、
+   * 既定2、`machine-overridable`、design.md §16.36）。取り込み直すたびにCIの完了を
+   * 待ち直してから再度マージを試みる。上限を超えたら失敗として確定する。
+   */
+  ciUpdateBranchMaxRetries: number;
+  /**
+   * 統合PR/MRのレビューコメントを取得する間隔（秒）（`agent.workflows.
+   * reviewCommentPollIntervalSec`、既定600秒、`machine-overridable`、design.md §16.30、
+   * roadmap W5、Issue #339）。統合PR/MRを作成できた実行だけが対象。0にすると取得しない
+   * （既定は控えめに置き、APIを叩き続けない設計判断。Issue #339）。権限には関わらないため
+   * `forge`/`finalMerge`ほど強い制限は要らない。
+   */
+  reviewCommentPollIntervalSec: number;
+  /**
+   * オーケストレーターが`ask_user`（design.md §16.33、Issue #583）を1つのrunで呼べる回数の
+   * 上限（`agent.workflows.maxAskUserPerRun`、既定3、`machine-overridable`）。方針1
+   * 「確認は最低限」を仕組みで担保する唯一の機械的な手段。上限に達した以降の`ask_user`は
+   * 拒否される（`OrchestratorControlPort.askUser`）。権限には関わらないため
+   * `forge`/`finalMerge`ほど強い制限は要らない。
+   */
+  maxAskUserPerRun: number;
+  /**
+   * リロード・WSL再起動等からの復元後、条件を満たせば自動的に再開するか
+   * （`agent.workflows.autoResume`、既定`true`、`machine-overridable`、design.md §16.35、
+   * roadmap W10、Issue #584）。`false`にすると従来どおり人がViewから手動で再実行するまで
+   * 再開しない。権限には関わらず、既に人が承認済み・実行中だった作業を続けるだけの
+   * 挙動のため`forge`/`finalMerge`ほど強い制限は要らない。
+   */
+  autoResume: boolean;
+  /**
+   * 自動再開を試みる回数の上限（`agent.workflows.maxAutoResumeAttempts`、既定3、
+   * `machine-overridable`、design.md §16.35、roadmap W10、Issue #584）。同じrunが
+   * クラッシュと自動再開を繰り返し続けるのを止めるための値で、`maxAskUserPerRun`と
+   * 同じく権限には関わらない調整値のため強い制限は要らない。
+   */
+  maxAutoResumeAttempts: number;
+  /**
    * タスクブランチの命名方式（design.md §16.6「ブランチの命名方式」）。`machine-overridable`。
    * ブランチ名の形を決めるだけで、push先も権限も変えないため`forge`/`finalMerge`ほど
    * 強い制限は要らない。
    */
   branchNaming: BranchNaming;
   /**
+   * ループの停滞判定（design.md §16.27、Issue #336）で「同じ応答が連続したら停滞とみなす」
+   * しきい値（`agent.workflows.stallRepeatCount`、既定4、`machine-overridable`）。
+   * 権限には関わらず、大きくするほど検知が遅く（誤検知しにくく）なるだけの調整値のため
+   * `forge`/`finalMerge`ほど強い制限は要らない。`loop/loopController.ts`はvscodeに
+   * 依存しないため、この値は`LoopController`を組み立てる`view/chatView.ts` /
+   * `view/claudeChatView.ts`側で読み、コンストラクタへ渡す。
+   */
+  stallRepeatCount: number;
+  /**
    * PR/MRをDraftとして作り、統合ブランチへのマージが済んでからreadyへ切り替えるか
    * （design.md §16.18「Draftとして作る」）。`machine-overridable`。有効にするほうが
    * 「人の確認を挟む」側へ倒れるため、`forge`/`finalMerge`ほど強い制限は要らない。
    */
   draftPullRequest: boolean;
+  /**
+   * タスクの開始時にIssueを起票し、PR本文から参照するか（`agent.workflows.createTaskIssue`、
+   * design.md §16.31、roadmap W6、Issue #596）。既定`false`（既存の`per-task`の挙動を
+   * 変えないため）。`pullRequest`が`per-task`のときだけ効く（`none`/`integration`では
+   * タスクのPR/MR自体を作らないため起票もしない）。`machine-overridable`。起票に使う
+   * コマンド（`gh`/`glab`）自体の選択は`forge`（machine固定）が既に縛っているため、
+   * この設定自体はmachine固定にしなくてよい。
+   */
+  createTaskIssue: boolean;
+  /**
+   * タスクのPR/MRを作った後、ローカルマージの前に読み取り専用の別セッションでレビューさせ
+   * るか（`agent.workflows.reviewTaskPullRequest`、design.md §16.31、roadmap W6、
+   * Issue #596）。既定`false`。forgeの「人のレビューを待つ」方式ではなく、
+   * `reviewWorkflowPlan`（design.md §16.28）と同じ「別のエージェントセッションを立てて
+   * 読み取り専用でレビューさせる」方式を採る。結果は警告として記録するだけでマージは
+   * ブロックしない。`createTaskIssue`と同じく`pullRequest`が`per-task`のときだけ効く。
+   * `machine-overridable`。
+   */
+  reviewTaskPullRequest: boolean;
 }
 
 const DEFAULT_WORKFLOWS_DIR = '.agents/workflows';
@@ -447,13 +549,31 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     pseudoWorktreeExcludeWarnings: pseudoWorktreeExclude.warnings,
     forge: normalizeForgeHostConfig(str(c, 'workflows.forge', 'auto')),
     pullRequest: normalizePullRequestLayerConfig(str(c, 'workflows.pullRequest', 'per-task')),
-    finalMerge: normalizeFinalMergeConfig(str(c, 'workflows.finalMerge', 'auto')),
+    finalMerge: normalizeFinalMergeConfig(str(c, 'workflows.finalMerge', 'orchestrator')),
     replyTimeoutSec: normalizeReplyTimeoutSec(c.get<unknown>('workflows.replyTimeoutSec')),
     mergeApprovalTimeoutSec: normalizeMergeApprovalTimeoutSec(
       c.get<unknown>('workflows.mergeApprovalTimeoutSec'),
     ),
+    finalMergeDecisionTimeoutSec: normalizeFinalMergeDecisionTimeoutSec(
+      c.get<unknown>('workflows.finalMergeDecisionTimeoutSec'),
+    ),
     branchNaming: normalizeBranchNaming(str(c, 'workflows.branchNaming', 'wf')),
     draftPullRequest: c.get<boolean>('workflows.draftPullRequest') ?? false,
+    createTaskIssue: c.get<boolean>('workflows.createTaskIssue') ?? false,
+    reviewTaskPullRequest: c.get<boolean>('workflows.reviewTaskPullRequest') ?? false,
+    stallRepeatCount: normalizeStallRepeatCount(c.get<unknown>('workflows.stallRepeatCount')),
+    ciWaitTimeoutSec: normalizeCiWaitTimeoutSec(c.get<unknown>('workflows.ciWaitTimeoutSec')),
+    ciUpdateBranchMaxRetries: normalizeCiUpdateBranchMaxRetries(
+      c.get<unknown>('workflows.ciUpdateBranchMaxRetries'),
+    ),
+    reviewCommentPollIntervalSec: normalizeReviewCommentPollIntervalSec(
+      c.get<unknown>('workflows.reviewCommentPollIntervalSec'),
+    ),
+    maxAskUserPerRun: normalizeMaxAskUserPerRun(c.get<unknown>('workflows.maxAskUserPerRun')),
+    autoResume: c.get<boolean>('workflows.autoResume') ?? DEFAULT_AUTO_RESUME,
+    maxAutoResumeAttempts: normalizeMaxAutoResumeAttempts(
+      c.get<unknown>('workflows.maxAutoResumeAttempts'),
+    ),
   };
 }
 
@@ -497,6 +617,107 @@ function normalizeMergeApprovalTimeoutSec(value: unknown): number {
     value <= MAX_TIMEOUT_SEC
     ? Math.floor(value)
     : DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC;
+}
+
+/**
+ * `agent.workflows.finalMergeDecisionTimeoutSec` の生値を安全な秒数へ丸める
+ * （`normalizeMergeApprovalTimeoutSec` と同じ方針。design.md §16.26）。
+ */
+function normalizeFinalMergeDecisionTimeoutSec(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= 1 &&
+    value <= MAX_TIMEOUT_SEC
+    ? Math.floor(value)
+    : DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC;
+}
+
+/**
+ * `agent.workflows.ciWaitTimeoutSec` の生値を安全な秒数へ丸める
+ * （`normalizeFinalMergeDecisionTimeoutSec` と同じ方針。design.md §16.36）。
+ */
+function normalizeCiWaitTimeoutSec(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= 1 &&
+    value <= MAX_TIMEOUT_SEC
+    ? Math.floor(value)
+    : DEFAULT_CI_WAIT_TIMEOUT_SEC;
+}
+
+/**
+ * `agent.workflows.ciUpdateBranchMaxRetries` の生値を安全な回数へ丸める。0以上の整数のみ
+ * 受け付ける（0は「取り込み直しをしない＝初回のマージ失敗を即座に失敗として確定する」の意で
+ * 有効な値。既定値へ丸めるのは非数値・負値・非整数のときだけ）。上限は`PUSH_BRANCH_MAX_ATTEMPTS`
+ * のような小さな回数を想定する処理系のため、際限なく大きい値でリトライが無限に近くなるのを
+ * 防ぐ目安として100を上限にする。
+ */
+function normalizeCiUpdateBranchMaxRetries(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 100
+    ? value
+    : DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES;
+}
+
+/**
+ * `agent.workflows.reviewCommentPollIntervalSec` の生値を安全な秒数へ丸める（design.md
+ * §16.30、Issue #339）。`normalizeCiUpdateBranchMaxRetries`と同じく0を有効な値として許す
+ * （0は「取得しない」の意）。`normalizeCiWaitTimeoutSec`等と異なり下限を1にしないのは、
+ * 0が「無効化」という積極的な意味を持つ値のため（`ciUpdateBranchMaxRetries`と同じ理由）。
+ * 非数値・非整数・負値・`MAX_TIMEOUT_SEC`超過はいずれも既定値
+ * （`DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC`）へ丸める。
+ */
+function normalizeReviewCommentPollIntervalSec(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_TIMEOUT_SEC
+    ? value
+    : DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC;
+}
+
+/**
+ * `agent.workflows.stallRepeatCount` の生値を安全なしきい値へ丸める（design.md §16.27）。
+ * 整数でない・`MIN_STALL_REPEAT_COUNT`未満・`MAX_STALL_REPEAT_COUNT`超過はいずれも
+ * 既定値（`DEFAULT_STALL_REPEAT_COUNT`）へ丸める（`normalizeCiUpdateBranchMaxRetries`と
+ * 同じ「範囲外は既定へ」方針）。
+ */
+function normalizeStallRepeatCount(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= MIN_STALL_REPEAT_COUNT &&
+    value <= MAX_STALL_REPEAT_COUNT
+    ? value
+    : DEFAULT_STALL_REPEAT_COUNT;
+}
+
+/**
+ * `agent.workflows.maxAskUserPerRun` の生値を安全な回数へ丸める（design.md §16.33、
+ * Issue #583）。`normalizeStallRepeatCount` と同じ「範囲外は既定へ」方針。整数でない・
+ * `MIN_MAX_ASK_USER_PER_RUN`未満・`MAX_MAX_ASK_USER_PER_RUN`超過はいずれも既定値
+ * （`DEFAULT_MAX_ASK_USER_PER_RUN`）へ丸める。
+ */
+function normalizeMaxAskUserPerRun(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= MIN_MAX_ASK_USER_PER_RUN &&
+    value <= MAX_MAX_ASK_USER_PER_RUN
+    ? value
+    : DEFAULT_MAX_ASK_USER_PER_RUN;
+}
+
+/**
+ * `agent.workflows.maxAutoResumeAttempts` の生値を安全な回数へ丸める（design.md §16.35、
+ * roadmap W10、Issue #584）。`normalizeMaxAskUserPerRun`と同じ「範囲外は既定へ」方針。
+ * 整数でない・`MIN_MAX_AUTO_RESUME_ATTEMPTS`未満・`MAX_MAX_AUTO_RESUME_ATTEMPTS`超過は
+ * いずれも既定値（`DEFAULT_MAX_AUTO_RESUME_ATTEMPTS`）へ丸める。
+ */
+function normalizeMaxAutoResumeAttempts(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= MIN_MAX_AUTO_RESUME_ATTEMPTS &&
+    value <= MAX_MAX_AUTO_RESUME_ATTEMPTS
+    ? value
+    : DEFAULT_MAX_AUTO_RESUME_ATTEMPTS;
 }
 
 /** アクティブエディタが属するワークスペースフォルダ。無ければ先頭（設計書 §10）。 */

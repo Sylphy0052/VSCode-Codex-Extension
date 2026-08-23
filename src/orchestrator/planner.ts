@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -434,9 +435,7 @@ function looksLikeWorkflowYaml(content: string): boolean {
  */
 export function extractYamlFromResponse(response: string, log?: Logger): string {
   const blocks = extractFenceBlocks(response);
-  const candidates = blocks.filter(
-    (b) => b.lang === '' || b.lang === 'yaml' || b.lang === 'yml',
-  );
+  const candidates = blocks.filter((b) => b.lang === '' || b.lang === 'yaml' || b.lang === 'yml');
   if (candidates.length === 1) {
     return (candidates[0]?.content ?? '').trim();
   }
@@ -1137,4 +1136,446 @@ export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkfl
     attempts: 2,
     lastErrors: secondAttempt.errors,
   };
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* 生成したワークフローの分解レビュー（design.md §16.28、issue #337）                            */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * ワークフロー分解レビューの観点（design.md §16.28、roadmap W3）。ロードマップの
+ * `planner.ts`（生成プロンプト）が守らせようとしている指針のうち、従っているかを検証
+ * していなかった4つに対応する。
+ */
+export const WORKFLOW_REVIEW_ASPECTS = [
+  /** 並列にできるタスクが `dependsOn` で直列にされていないか。 */
+  'serializedParallelizable',
+  /** 並列タスクの結果を統合・レビューする合流タスクがあるか。 */
+  'missingConvergence',
+  /** `done` が外から（機械的に）判定できる条件か。 */
+  'doneNotObservable',
+  /** ゴールに対してタスクが過不足なく分解されているか。 */
+  'goalMismatch',
+] as const;
+
+export type WorkflowReviewAspect = (typeof WORKFLOW_REVIEW_ASPECTS)[number];
+
+export interface WorkflowReviewFinding {
+  aspect: WorkflowReviewAspect;
+  /** 該当するタスクid。特定のタスクに紐づかない指摘（ゴールとの過不足等）では空。 */
+  taskIds: readonly string[];
+  message: string;
+}
+
+export interface ReviewWorkflowPlanInput {
+  /** レビューセッションへ渡すゴール文（`planWorkflow`に渡したものと同じ）。 */
+  goal: string;
+  /** レビュー対象のYAML本文（保存直前の、テンプレート変数修復・issue補正後のもの）。 */
+  yaml: string;
+  provider: Provider;
+  host: TaskSessionHost;
+  /** レビューセッションの作業ディレクトリ。読み取り専用なのでworktreeは作らない。 */
+  cwd: string;
+  log: Logger;
+}
+
+export interface ReviewWorkflowPlanResult {
+  findings: readonly WorkflowReviewFinding[];
+  /**
+   * レビューセッション自体の実行（起動・応答待ち）に失敗した場合のエラーメッセージ。
+   * `undefined`なら正常に完了している（`findings`が空でも「指摘なし」を意味する）。
+   * 失敗してもワークフロー定義の保存は妨げない（design.md §16.28「保存は妨げない」）。
+   */
+  error: string | undefined;
+}
+
+/**
+ * レビュー対象のYAMLを埋め込む際の長さ上限。`messaging.ts`の`MAX_COMPOSED_PROMPT_LENGTH`
+ * （design.md §16.21）と同じ「無制限に膨らむのを止める粗い安全弁」という動機で、同じ値
+ * （60000文字）を流用する。`MAX_WORKFLOW_FILE_BYTES`（1MiB）をそのまま埋め込むと
+ * レビュープロンプト自体が肥大化するため、超える場合は`formatUntrusted`が末尾を
+ * 切り詰める（レビューが本文の一部しか見られなくなるだけで、切り詰め自体は安全側）。
+ */
+const MAX_REVIEW_YAML_LENGTH = 60_000;
+
+/** レビュー応答から受け付ける指摘の件数上限（暴走した応答で警告欄を埋めないため）。 */
+const MAX_REVIEW_FINDINGS = 30;
+
+/** 指摘1件のメッセージの表示上限（`SecurityWarning.message`と違い、レビューLLMの自由記述のため）。 */
+const MAX_REVIEW_FINDING_MESSAGE_LENGTH = 500;
+
+/**
+ * レビューセッションへ渡すプロンプト（design.md §16.28）。
+ *
+ * `goal`と`yaml`はどちらも外部由来テキストとして`formatUntrusted`で囲う
+ * （design.md §16.24）。同じプロンプトの中で2つのフィールドを囲むため、
+ * `expandTemplate`と同じ流儀で呼び出し側が1つの`nonce`を生成して両方へ渡す
+ * （`untrustedText.ts`のコメント「1回の展開で複数フィールドを囲む場合は、
+ * 呼び出し側が同じnonceを明示的に渡すこと」）。
+ *
+ * レビューセッションは`planWorkflow`の分解セッションと同じ`sandbox: read-only`相当・
+ * 承認全拒否で起動する（`buildPlannerSessionInput`をそのまま再利用。design.md
+ * §16.28「権限の与え方」）。ここでもプロンプトの指示（「書き換えない」）は補助でしかなく、
+ * 実体は起動設定そのもの（design.md §16.9と同じ考え方）。
+ */
+function buildWorkflowReviewPrompt(goal: string, yaml: string): string {
+  const nonce = randomUUID();
+  const parts = [
+    'あなたはワークフロー定義（YAML）のレビュー担当です。次のゴールと、既に生成された' +
+      'ワークフロー定義（YAML）を読み、タスクへの分解が妥当かを下記4つの観点だけで' +
+      '確認してください。',
+    'あなた自身はタスクを実行せず、ファイルを書き換えることもしません（読み取りと' +
+      'レビューのみ）。',
+    '',
+    `## ゴール\n${formatUntrusted(goal, {
+      id: 'reviewer',
+      field: 'goal',
+      maxLength: MAX_GOAL_LENGTH,
+      preserveNewlines: true,
+      nonce,
+    })}`,
+    '',
+    `## レビュー対象のワークフロー定義（YAML）\n${formatUntrusted(yaml, {
+      id: 'reviewer',
+      field: 'workflow',
+      maxLength: MAX_REVIEW_YAML_LENGTH,
+      preserveNewlines: true,
+      nonce,
+    })}`,
+    '',
+    '## レビューの観点（この4つだけを見ること。それ以外の指摘はしないこと）',
+    '- serializedParallelizable: 並列に進められるはずのタスクが、dependsOnで不要に直列に' +
+      'されていないか',
+    '- missingConvergence: 並列に走らせたタスクの結果を統合・レビューする合流タスクが' + 'あるか',
+    '- doneNotObservable: 各タスクのdoneが、外から（ファイルの有無・テストの合否等で）' +
+      '機械的に判定できる条件になっているか。「完了したと感じたら」のような主観的な' +
+      '表現になっていないか',
+    '- goalMismatch: ゴールに対してタスクが過不足なく分解されているか（ゴールの一部が' +
+      'どのタスクにも含まれていない、逆にゴールに無い作業が混ざっている等）',
+    '',
+    '## 出力形式（厳守）',
+    '指摘が無ければ空配列 `[]` だけを出力すること。指摘があれば、次の形のJSON配列だけを' +
+      '出力すること（前置き・説明文・コードフェンスなど、JSON以外の文字は一切含めない' +
+      'こと）:',
+    '[{"aspect": "serializedParallelizable" | "missingConvergence" | "doneNotObservable" | "goalMismatch", "taskIds": ["T1"], "message": "指摘の内容（日本語で簡潔に）"}]',
+  ];
+  return parts.join('\n');
+}
+
+/**
+ * レビュー応答からJSON本文を取り出す。`extractYamlFromResponse`と同じ「コードフェンスで
+ * 囲まれて返ることが多いので剥がす」動機だが、対象がYAMLではなくJSON配列である点が違う。
+ */
+function extractJsonArrayFromResponse(response: string): string {
+  const blocks = extractFenceBlocks(response);
+  const candidates = blocks.filter((b) => b.lang === '' || b.lang === 'json');
+  if (candidates.length > 0) {
+    const best = candidates.find((b) => b.content.trim().startsWith('[')) ?? candidates[0];
+    return (best?.content ?? '').trim();
+  }
+  const start = response.indexOf('[');
+  const end = response.lastIndexOf(']');
+  if (start !== -1 && end !== -1 && end > start) {
+    return response.slice(start, end + 1).trim();
+  }
+  return response.trim();
+}
+
+function isReviewAspect(value: unknown): value is WorkflowReviewAspect {
+  return (
+    typeof value === 'string' && (WORKFLOW_REVIEW_ASPECTS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * レビュー応答を`WorkflowReviewFinding[]`へ変換する。**壊れた応答（JSONとして読めない・
+ * 期待した形でない）はエラーにせず、指摘0件として扱う。** レビューは警告を足すだけの
+ * 機能であり（design.md §16.28「保存は妨げない」）、応答の形が崩れたことをもって
+ * ワークフロー定義の生成・保存そのものを失敗させてはならない。
+ *
+ * 応答は分解セッションと違い`sandbox: read-only`のレビューLLMが自由記述で生成した
+ * 文字列であり、`message`はそのままログ・警告欄へ表示する。`sanitizeInlineText`
+ * （design.md §16.24）を通してから使う。
+ */
+function parseReviewFindings(response: string, log?: Logger): WorkflowReviewFinding[] {
+  const jsonText = extractJsonArrayFromResponse(response);
+  if (Buffer.byteLength(jsonText, 'utf8') > MAX_WORKFLOW_FILE_BYTES) {
+    log?.warn('[planner] レビュー応答が大きすぎるため解析しませんでした');
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    log?.warn('[planner] レビュー応答をJSON配列として解釈できなかったため、指摘なしとして扱います');
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    log?.warn('[planner] レビュー応答がJSON配列ではなかったため、指摘なしとして扱います');
+    return [];
+  }
+
+  const findings: WorkflowReviewFinding[] = [];
+  for (const item of parsed.slice(0, MAX_REVIEW_FINDINGS)) {
+    if (typeof item !== 'object' || item === null) {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    if (!isReviewAspect(record.aspect)) {
+      continue;
+    }
+    if (typeof record.message !== 'string' || record.message.trim() === '') {
+      continue;
+    }
+    const taskIds = Array.isArray(record.taskIds)
+      ? record.taskIds
+          .filter((t): t is string => typeof t === 'string')
+          .map((t) => sanitizeInlineText(t, MAX_ENTRY_NAME_LENGTH))
+          .slice(0, MAX_TASK_COUNT)
+      : [];
+    findings.push({
+      aspect: record.aspect,
+      taskIds,
+      message: sanitizeInlineText(record.message, MAX_REVIEW_FINDING_MESSAGE_LENGTH),
+    });
+  }
+  if (parsed.length > MAX_REVIEW_FINDINGS) {
+    log?.warn(
+      `[planner] レビュー応答の指摘が${parsed.length}件あり、上限${MAX_REVIEW_FINDINGS}件を超えた分は捨てました`,
+    );
+  }
+  return findings;
+}
+
+/**
+ * 生成したワークフロー定義（YAML）を、別の読み取り専用セッションでレビューさせる
+ * （design.md §16.28、roadmap W3、Issue #337）。
+ *
+ * 観点は`WORKFLOW_REVIEW_ASPECTS`の4つ。結果は**保存時の警告**として呼び出し側
+ * （`extension.ts`）が表示するだけで、この関数自身もYAMLを書き換えない。
+ *
+ * **読み取り専用であることは、プロンプトの指示ではなく起動設定で担保する。**
+ * `buildPlannerSessionInput`（分解セッションと共通、design.md §16.9）がそのまま
+ * `sandbox: read-only`相当・承認要求は理由を問わず全て拒否する構成を組み立て、
+ * `sendSingleTurn`がそれを`assertPlannerSessionIsSafe`で起動直前に確認する。
+ * レビューセッション専用の権限経路は新設しない（既存の分解セッションの安全機構を
+ * そのまま再利用し、新しい抜け道を作らない）。
+ *
+ * `planWorkflow`（YAML生成そのもの）とは別の関数にしてあるのは、生成の成否と
+ * レビューの成否を独立に扱うため。レビューセッションの起動・応答待ちが失敗しても
+ * （タイムアウト等）、ここで例外を投げずに`error`へ理由を残して`findings: []`を返す。
+ * 呼び出し側は生成が成功していればレビュー結果を問わずファイルを保存してよい
+ * （design.md §16.28「警告が出ても保存は妨げない」を、レビューが失敗した場合にも
+ * 同じ扱いで及ぼす）。
+ */
+export async function reviewWorkflowPlan(
+  input: ReviewWorkflowPlanInput,
+): Promise<ReviewWorkflowPlanResult> {
+  const sessionInput = buildPlannerSessionInput(input.provider, input.cwd);
+  const prompt = buildWorkflowReviewPrompt(input.goal, input.yaml);
+  try {
+    const response = await sendSingleTurn(
+      input.host,
+      input.provider,
+      sessionInput,
+      prompt,
+      PLANNER_TURN_TIMEOUT_MS,
+      input.log,
+    );
+    return { findings: parseReviewFindings(response, input.log), error: undefined };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    input.log.warn(
+      `[planner] ワークフローのレビューに失敗したため、レビュー警告なしで保存を続けます: ${sanitizeForLog(message)}`,
+    );
+    return { findings: [], error: message };
+  }
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* タスクのPR/MRレビュー（design.md §16.31、roadmap W6、Issue #596）                              */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * タスクPR/MRレビューの1件の指摘。`WorkflowReviewFinding`（分解レビュー、design.md §16.28）
+ * と違い観点（`aspect`）の固定リストを持たない。コードの変更差分そのものに対する自由記述の
+ * レビューであり、`serializedParallelizable`のような分解固有の観点は当てはまらないため。
+ */
+export interface TaskPullRequestReviewFinding {
+  message: string;
+}
+
+export interface ReviewTaskPullRequestInput {
+  /** レビュー対象タスクの指示。 */
+  prompt: string;
+  /** レビュー対象タスクの完了条件。 */
+  done: string;
+  /** タスクブランチと統合ブランチの間の変更差分（`git diff`の出力）。 */
+  diff: string;
+  provider: Provider;
+  host: TaskSessionHost;
+  /** レビューセッションの作業ディレクトリ。読み取り専用なのでworktreeは作らない。 */
+  cwd: string;
+  log: Logger;
+}
+
+export interface ReviewTaskPullRequestResult {
+  findings: readonly TaskPullRequestReviewFinding[];
+  /**
+   * レビューセッション自体の実行（起動・応答待ち）に失敗した場合のエラーメッセージ。
+   * `undefined`なら正常に完了している（`findings`が空でも「指摘なし」を意味する）。
+   * 失敗してもマージは妨げない（design.md §16.31「結果に関わらずマージは進める」）。
+   */
+  error: string | undefined;
+}
+
+/**
+ * レビュー対象のdiffを埋め込む際の長さ上限。`reviewWorkflowPlan`の`MAX_REVIEW_YAML_LENGTH`
+ * と同じ「無制限に膨らむのを止める粗い安全弁」という動機で、同じ値（60000文字）を使う。
+ */
+const MAX_TASK_REVIEW_DIFF_LENGTH = 60_000;
+
+/** レビュー応答から受け付ける指摘の件数上限（`MAX_REVIEW_FINDINGS`と同じ動機）。 */
+const MAX_TASK_REVIEW_FINDINGS = 30;
+
+/** 指摘1件のメッセージの表示上限（`MAX_REVIEW_FINDING_MESSAGE_LENGTH`と同じ動機）。 */
+const MAX_TASK_REVIEW_FINDING_MESSAGE_LENGTH = 500;
+
+/**
+ * タスクPR/MRレビューセッションへ渡すプロンプト（design.md §16.31）。
+ *
+ * `prompt`/`done`/`diff`はいずれも外部由来テキストとして`formatUntrusted`で囲う
+ * （design.md §16.24）。`buildWorkflowReviewPrompt`と同じく、1回の展開で複数フィールドを
+ * 囲むため呼び出し側が1つの`nonce`を生成して使い回す。
+ *
+ * レビューセッションは`reviewWorkflowPlan`と同じ`buildPlannerSessionInput`
+ * （`sandbox: read-only`相当・承認全拒否）で起動する。**読み取り専用であることは
+ * プロンプトの指示ではなく起動設定で担保する**（design.md §16.28と同じ考え方）。
+ */
+function buildTaskPullRequestReviewPrompt(prompt: string, done: string, diff: string): string {
+  const nonce = randomUUID();
+  const parts = [
+    'あなたはPull Request/Merge Requestのレビュー担当です。次のタスクの指示・完了条件と、' +
+      '実際の変更差分（diff）を読み、変更が指示・完了条件に照らして妥当かをレビューして' +
+      'ください。',
+    'あなた自身はコードを書き換えません（読み取りとレビューのみ）。',
+    '',
+    `## タスクの指示\n${formatUntrusted(prompt, {
+      id: 'taskReviewer',
+      field: 'prompt',
+      maxLength: MAX_PROMPT_LENGTH,
+      preserveNewlines: true,
+      nonce,
+    })}`,
+    '',
+    `## 完了条件\n${formatUntrusted(done, {
+      id: 'taskReviewer',
+      field: 'done',
+      maxLength: MAX_PROMPT_LENGTH,
+      preserveNewlines: true,
+      nonce,
+    })}`,
+    '',
+    `## 変更差分（diff）\n${formatUntrusted(diff, {
+      id: 'taskReviewer',
+      field: 'diff',
+      maxLength: MAX_TASK_REVIEW_DIFF_LENGTH,
+      preserveNewlines: true,
+      nonce,
+    })}`,
+    '',
+    '## 出力形式（厳守）',
+    '指摘が無ければ空配列 `[]` だけを出力すること。指摘があれば、次の形のJSON配列だけを' +
+      '出力すること（前置き・説明文・コードフェンスなど、JSON以外の文字は一切含めない' +
+      'こと）:',
+    '[{"message": "指摘の内容（日本語で簡潔に）"}]',
+  ];
+  return parts.join('\n');
+}
+
+/**
+ * タスクPR/MRレビュー応答を`TaskPullRequestReviewFinding[]`へ変換する。`parseReviewFindings`
+ * と同じく、壊れた応答はエラーにせず指摘0件として扱う（design.md §16.31「結果に関わらず
+ * マージは進める」を、応答の形が崩れた場合にも一貫して適用する）。
+ */
+function parseTaskPullRequestReviewFindings(
+  response: string,
+  log?: Logger,
+): TaskPullRequestReviewFinding[] {
+  const jsonText = extractJsonArrayFromResponse(response);
+  if (Buffer.byteLength(jsonText, 'utf8') > MAX_WORKFLOW_FILE_BYTES) {
+    log?.warn('[planner] タスクPR/MRレビュー応答が大きすぎるため解析しませんでした');
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    log?.warn(
+      '[planner] タスクPR/MRレビュー応答をJSON配列として解釈できなかったため、指摘なしとして扱います',
+    );
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    log?.warn('[planner] タスクPR/MRレビュー応答がJSON配列ではなかったため、指摘なしとして扱います');
+    return [];
+  }
+
+  const findings: TaskPullRequestReviewFinding[] = [];
+  for (const item of parsed.slice(0, MAX_TASK_REVIEW_FINDINGS)) {
+    if (typeof item !== 'object' || item === null) {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.message !== 'string' || record.message.trim() === '') {
+      continue;
+    }
+    findings.push({
+      message: sanitizeInlineText(record.message, MAX_TASK_REVIEW_FINDING_MESSAGE_LENGTH),
+    });
+  }
+  if (parsed.length > MAX_TASK_REVIEW_FINDINGS) {
+    log?.warn(
+      `[planner] タスクPR/MRレビュー応答の指摘が${parsed.length}件あり、上限${MAX_TASK_REVIEW_FINDINGS}件を超えた分は捨てました`,
+    );
+  }
+  return findings;
+}
+
+/**
+ * タスクのPR/MRを、別の読み取り専用セッションでレビューさせる（design.md §16.31「PRを
+ * 作ったあと、ローカルマージの前にレビューを1段挟む」、roadmap W6、Issue #596）。
+ *
+ * `reviewWorkflowPlan`（design.md §16.28、roadmap W3）と同じ形（別の読み取り専用セッション
+ * を立てて1ターンだけ送る）を踏襲する。forgeの「人のレビューを待つ」方式（応答が無いまま
+ * 待ち続けうる）は採らない、という設計判断の帰結として、この関数もタイムアウト付きの
+ * 単発ターン（`sendSingleTurn`、既定`PLANNER_TURN_TIMEOUT_MS`）で完結し、応答を待ち続ける
+ * ことはない。
+ *
+ * **結果に関わらずマージは進める。** レビューセッションの起動・応答待ちが失敗しても
+ * （タイムアウト等）、ここで例外を投げずに`error`へ理由を残して`findings: []`を返す。
+ * 呼び出し側（`runnerMerge.ts`）は指摘の有無・レビューの成否を問わずマージを進めてよい。
+ */
+export async function reviewTaskPullRequest(
+  input: ReviewTaskPullRequestInput,
+): Promise<ReviewTaskPullRequestResult> {
+  const sessionInput = buildPlannerSessionInput(input.provider, input.cwd);
+  const prompt = buildTaskPullRequestReviewPrompt(input.prompt, input.done, input.diff);
+  try {
+    const response = await sendSingleTurn(
+      input.host,
+      input.provider,
+      sessionInput,
+      prompt,
+      PLANNER_TURN_TIMEOUT_MS,
+      input.log,
+    );
+    return { findings: parseTaskPullRequestReviewFindings(response, input.log), error: undefined };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    input.log.warn(
+      `[planner] タスクPR/MRのレビューに失敗したため、レビュー警告なしでマージを続けます: ${sanitizeForLog(message)}`,
+    );
+    return { findings: [], error: message };
+  }
 }

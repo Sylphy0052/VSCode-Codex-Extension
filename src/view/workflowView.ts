@@ -8,11 +8,44 @@ import type {
   WorkflowRunSnapshot,
   WorkflowWarning,
 } from '../orchestrator/runner';
+import type { PersistedProgram } from '../orchestrator/programStore';
 import type { WorkflowDefinition } from '../orchestrator/workflow';
 import { chatCsp } from './chatCsp';
 import { aggregateProgress, layoutGraph, summarizeIntegration } from './workflowGraph';
 import { workflowScript } from './workflowScript';
 import { workflowStyles } from './workflowStyles';
+
+/**
+ * ワークフローViewから、失敗の伝播・人による停止の状態が読める最小限の口
+ * （design.md §16.37.3、roadmap W12-3、Issue #606の受入基準「失敗・停止の状態が
+ * ワークフローViewから読める」）。`WorkflowViewManager`は`ProgramRunner`本体には
+ * 依存せず、必要な操作（一覧・停止）だけをこの口として注入で受け取る
+ * （`WorkflowRunner`を直接持たず`WorkflowRunner`型として受け取っているのと近い方針だが、
+ * こちらは`ProgramRunner`が持つ操作のうちビューに要る分だけを切り出した専用の口にした。
+ * `ProgramRunner`自体を丸ごと持たせると、ビューが実行の起動判断まで呼べてしまい、
+ * 「どのrunをいつ起動するか」の判断はプログラム層に閉じるという既存の役割分担
+ * （design.md §16.37.2「上位のオーケストレーターは置かない」）を崩しかねないため）。
+ *
+ * **省略可能。** コンストラクタでこの口を渡さない場合（既存のテスト・W12-2までの
+ * `extension.ts`の配線）は、プログラムに関する表示・操作を一切行わない
+ * （`postPrograms`が何もせず戻る）。既存の単発run実行の挙動には一切影響しない
+ * （受入基準「既存の単発runの挙動が変わらない」）。
+ */
+export interface ProgramViewPort {
+  /** 永続化済みの全プログラムを新しい順に返す。`ProgramStore.list()`と同じ契約。 */
+  list(): readonly PersistedProgram[];
+  /** 指定プログラムを人の手で止める。`ProgramRunner.haltProgram`と同じ契約。 */
+  halt(programId: string): Promise<void>;
+  /**
+   * プログラムの状態が永続化された後に発火する。`ProgramRunner.onChanged`と同じ契約
+   * （design.md §16.37.3のレビュー指摘F1、Issue #606）。`runner.onChanged`（実行中の
+   * runの変化）とは別の通知で、失敗の伝播（`skipped`化）や`haltProgram`の結果を
+   * ビューへ届けるのはこちら側の役目——`runner.onChanged`のリスナである`ProgramRunner`
+   * 内部の処理（`pumpProgram`）が非同期のため、`runner.onChanged`にただ乗りするだけでは
+   * 永続化前の状態を読んでしまう（詳細は`onRunnerChanged`の実装コメント参照）。
+   */
+  onChanged(listener: (programId: string) => void): () => void;
+}
 
 /**
  * ワークフローViewパネルの生成オプション（design.md §14.48、issue #287）。
@@ -52,16 +85,32 @@ export class WorkflowViewManager implements vscode.Disposable {
    */
   private graphViewportWidth: number | undefined;
   private readonly unsubscribeChanged: () => void;
+  /**
+   * `programs`（`ProgramViewPort`）の変化通知の購読解除。`programs`が省略されていれば
+   * `undefined`のまま（`ProgramViewPort`のJSDoc参照）。
+   */
+  private readonly unsubscribePrograms: (() => void) | undefined;
 
   constructor(
     private readonly runner: WorkflowRunner,
     private readonly log: Logger,
+    /**
+     * プログラムの一覧・停止・変化通知（design.md §16.37.3、roadmap W12-3、Issue #606）。
+     * 省略可能（`ProgramViewPort`のJSDoc参照）。`extension.ts`が`ProgramStore`/
+     * `ProgramRunner`から組み立てて渡す。
+     */
+    private readonly programs?: ProgramViewPort,
   ) {
     this.unsubscribeChanged = runner.onChanged((runId) => this.onRunnerChanged(runId));
+    // プログラム欄の再描画は、実行中のrunの変化（`runner.onChanged`）にはただ乗り
+    // せず、`programs.onChanged`（`ProgramRunner`側で永続化が確定した後にだけ発火する
+    // 専用の通知）を別途購読する（`onRunnerChanged`の実装コメント参照）
+    this.unsubscribePrograms = this.programs?.onChanged(() => this.postPrograms());
   }
 
   dispose(): void {
     this.unsubscribeChanged();
+    this.unsubscribePrograms?.();
     this.panel?.dispose();
   }
 
@@ -95,14 +144,26 @@ export class WorkflowViewManager implements vscode.Disposable {
    * 「実行」操作（design.md §16.8）を人が選ぶ必要がある（design.md §16.13「生成した
    * まま自動で実行しない」をView側でも徹底する。実際、`retry`/`stopTask`等の操作は
    * `activeRunId`が無いと何もしない実装になっている）。
+   *
+   * `warnings`には`plannerSecurity`（安全設定の上書き）と`plannerReview`（タスク分解の
+   * レビュー指摘、design.md §16.28）が混在しうる。呼び出し側（`extension.ts`の
+   * `handlePlanSuccess`）は、レビュー結果が出るより先にこのメソッドを呼んで表示を先出し
+   * し、レビューが完了した時点でもう一度この同じメソッドを呼んで`warnings`だけを
+   * 差し替える（スナップショットは毎回作り直すため、2回目の呼び出しは1回目を上書きする）。
+   *
+   * **この上書きは無条件**——`activeRunId`を問わず、パネルの現在の表示をこのプレビュー
+   * へ戻す。レビュー完了前にユーザーが別のrunの表示へ切り替えていた場合、その表示が
+   * レビュー結果の到着で差し替わりうる（フォーカスは奪わない。`reveal`の第2引数
+   * `preserveFocus: true`のため）。この取り回しはW3の受入基準の対象外として許容して
+   * いる（design.md §16.28）。
    */
   previewDefinition(
     defPath: string,
     def: WorkflowDefinition,
-    securityWarnings: readonly WorkflowWarning[],
+    warnings: readonly WorkflowWarning[],
   ): void {
     this.activeRunId = undefined;
-    this.previewSnapshot = buildPreviewSnapshot(defPath, def, securityWarnings);
+    this.previewSnapshot = buildPreviewSnapshot(defPath, def, warnings);
     this.ensurePanel().reveal(vscode.ViewColumn.Beside, true);
     this.postAll();
   }
@@ -139,11 +200,33 @@ export class WorkflowViewManager implements vscode.Disposable {
     if (runId === this.activeRunId) {
       this.postState();
     }
+    // プログラム欄はここでは更新しない。`runner.onChanged`（このメソッドの発火元）は
+    // `WorkflowRunner`側の`SimpleEmitter`が同期的にリスナを呼ぶが、そのリスナの1つで
+    // ある`ProgramRunner.attach()`の`onRunChanged`ハンドラ自体は非同期
+    // （`void this.onRunChanged(runId).catch(...)`。定義ファイルの再読込を`await`する
+    // `pumpProgram`を経る）。そのため、このメソッドが呼ばれた時点では`ProgramRunner`側の
+    // 永続化（失敗の伝播による`skipped`化を含む）がまだ終わっていない場合がある
+    // （design.md §16.37.3のレビュー指摘F1、Issue #606）。プログラム欄の再描画は、
+    // `ProgramRunner`が永続化を終えた後にだけ発火する専用の通知
+    // （`programs.onChanged`、コンストラクタで購読）に任せる
   }
 
   private postAll(): void {
     this.postRunList();
     this.postState();
+    this.postPrograms();
+  }
+
+  /**
+   * 永続化済みの全プログラムの状態をWebviewへ送る（design.md §16.37.3、roadmap W12-3、
+   * Issue #606）。`programs`（`ProgramViewPort`）が注入されていなければ何もしない
+   * （省略可能。`ProgramViewPort`のJSDoc参照）。
+   */
+  private postPrograms(): void {
+    if (this.panel === undefined || this.programs === undefined) {
+      return;
+    }
+    void this.panel.webview.postMessage({ type: 'programs', programs: this.programs.list() });
   }
 
   private postRunList(): void {
@@ -196,6 +279,7 @@ export class WorkflowViewManager implements vscode.Disposable {
       number: snapshot.integrationPullRequestNumber,
       url: snapshot.integrationPullRequestUrl,
       finalMergeOutcome: snapshot.finalMergeOutcome,
+      finalMergeDecision: snapshot.finalMergeDecision,
     });
     void this.panel.webview.postMessage({ type: 'state', snapshot, layout, progress, integration });
   }
@@ -242,6 +326,16 @@ export class WorkflowViewManager implements vscode.Disposable {
       // 使う既存の入口）に集約する。ここから同じコマンドを呼び直すだけにして、
       // ロジックの持ち場を1つに保つ
       await vscode.commands.executeCommand('agent.workflows.run');
+      return;
+    }
+    if (type === 'stopProgram' && typeof m['programId'] === 'string') {
+      // `activeRunId`の有無を問わない（プログラムのpendingなrun参照はそもそも
+      // `WorkflowRunner`側のrunIdを持たない。design.md §16.37.3、roadmap W12-3、
+      // Issue #606）。`programs`（`ProgramViewPort`）が未注入なら何もしない
+      if (this.programs !== undefined) {
+        await this.programs.halt(m['programId']);
+        this.postPrograms();
+      }
       return;
     }
 
@@ -374,6 +468,35 @@ export class WorkflowViewManager implements vscode.Disposable {
       // 同じセッションのチャットタブを前面に出す（`reveal`）。オーケストレーター用の
       // チャット画面は作らず、既存の画面をそのまま使う。開いた時点で未読の印が消える
       this.runner.revealOrchestrator(runId);
+      return;
+    }
+    if (
+      type === 'decideFinalMerge' &&
+      (m['decision'] === 'merge' || m['decision'] === 'hold') &&
+      typeof m['reason'] === 'string'
+    ) {
+      // design.md §16.26。`finalMerge: confirm`の人の判断。`orchestrator`モードの
+      // オーケストレーターからの判断はMCPツール（`decide_final_merge`）経由で、Webviewの
+      // このメッセージは通らない。空文字の理由は`workflowScript.ts`側で送信前に弾いている
+      //
+      // `WorkflowRunner.decideFinalMerge`はhaltedByUserしか見ておらず、呼び出し元の
+      // モードまでは区別しない（MCP経由=`orchestrator`専用・Webview経由=`confirm`専用、と
+      // 要件が逆向きのため、合流点である本体には置けない）。`workflowScript.ts`側で
+      // ボタンの表示を`confirm`のときだけに絞っているが、それはUIの見た目でしかなく、
+      // 受信側であるここが素通しだと、webviewの再読み込みで古い状態が残った場合や、
+      // 将来この画面へ外部由来の内容を描くようになった場合に、`orchestrator`モードの
+      // 判断を人の操作として確定させられてしまう（レビュー指摘）。ここで`mode`を
+      // 確かめてから呼ぶ
+      if (this.runner.getSnapshot(runId)?.finalMergeDecision?.mode === 'confirm') {
+        this.runner.decideFinalMerge(runId, m['decision'], m['reason']);
+      }
+      return;
+    }
+    if (type === 'answerAskUser' && typeof m['choiceIndex'] === 'number') {
+      // design.md §16.33。Webviewは信頼境界の外側なので、回答待ちが実際に存在するかは
+      // `WorkflowRunner.answerAskUser`側（`runnerOrchestrator.ts`の`answerAskUser`）が
+      // 都度確かめる。ここでは型だけ絞って渡す
+      this.runner.answerAskUser(runId, m['choiceIndex']);
       return;
     }
 
@@ -511,7 +634,13 @@ ${workflowStyles()}
         <button id="orchSendBtn" type="button">送る</button>
         <button id="orchOpenBtn" type="button" class="secondary">会話を開く</button>
       </div>
+      <div id="orchAskUser" class="orch-ask-user" hidden></div>
     </div>
+  </div>
+
+  <div id="programsSection" hidden>
+    <h2>プログラム</h2>
+    <div id="programs"></div>
   </div>
 
   <div id="content" hidden>

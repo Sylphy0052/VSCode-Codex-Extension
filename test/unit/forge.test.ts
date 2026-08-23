@@ -7,28 +7,41 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   buildIntegrationPullRequestBody,
   buildIntegrationPullRequestTitle,
+  buildTaskIssueBody,
   buildTaskPullRequestBody,
   buildTaskPullRequestTitle,
   checkForgePrerequisites,
   createIntegrationPullRequest,
+  createIssue,
   createPullRequest,
   detectForgeHost,
+  fetchCiConclusion,
+  fetchReviewComments,
   forgeCliCommand,
+  isBranchNotUpToDateError,
   isRetryablePushError,
   markPullRequestReady,
   nodeCliAvailability,
   normalizeFinalMergeConfig,
   normalizeForgeHostConfig,
   normalizePullRequestLayerConfig,
+  parseGithubCiConclusion,
+  parseGithubReviewComments,
+  parseGitlabCiConclusion,
+  parseGitlabReviewComments,
   parsePullRequestNumberFromUrl,
   PUSH_BRANCH_MAX_ATTEMPTS,
   pushBranch,
   resolveForgeHost,
   runFinalMerge,
+  runFinalMergeWithCiGate,
   runTaskPullRequestFlow,
   shouldCreateIntegrationPullRequest,
   shouldCreateTaskPullRequest,
   shouldRunFinalMerge,
+  needsFinalMergeDecision,
+  updatePullRequestBranch,
+  waitForCiChecks,
   type CliAvailabilityPort,
   type CliCommandResult,
   type CliCommandRunner,
@@ -185,8 +198,11 @@ describe('normalize系（不正値は安全な既定へ丸める）', () => {
 
   it('normalizeFinalMergeConfig', () => {
     expect(normalizeFinalMergeConfig('auto')).toBe('auto');
+    expect(normalizeFinalMergeConfig('orchestrator')).toBe('orchestrator');
+    expect(normalizeFinalMergeConfig('confirm')).toBe('confirm');
     expect(normalizeFinalMergeConfig('pr-only')).toBe('pr-only');
-    expect(normalizeFinalMergeConfig('bogus')).toBe('auto');
+    // design.md §16.26。不正値は新しい既定（orchestrator）へ丸める
+    expect(normalizeFinalMergeConfig('bogus')).toBe('orchestrator');
   });
 });
 
@@ -332,8 +348,19 @@ describe('PR/MR層の判定', () => {
   it('shouldRunFinalMergeはconfig=autoかつPR/MRが作れたときだけtrue', () => {
     expect(shouldRunFinalMerge('auto', true)).toBe(true);
     expect(shouldRunFinalMerge('auto', false)).toBe(false);
+    expect(shouldRunFinalMerge('orchestrator', true)).toBe(false);
+    expect(shouldRunFinalMerge('confirm', true)).toBe(false);
     expect(shouldRunFinalMerge('pr-only', true)).toBe(false);
     expect(shouldRunFinalMerge('pr-only', false)).toBe(false);
+  });
+
+  it('needsFinalMergeDecisionはconfig=orchestrator/confirmかつPR/MRが作れたときだけtrue（design.md §16.26）', () => {
+    expect(needsFinalMergeDecision('orchestrator', true)).toBe(true);
+    expect(needsFinalMergeDecision('orchestrator', false)).toBe(false);
+    expect(needsFinalMergeDecision('confirm', true)).toBe(true);
+    expect(needsFinalMergeDecision('confirm', false)).toBe(false);
+    expect(needsFinalMergeDecision('auto', true)).toBe(false);
+    expect(needsFinalMergeDecision('pr-only', true)).toBe(false);
   });
 });
 
@@ -781,19 +808,152 @@ describe('createPullRequest', () => {
   });
 });
 
+describe('createIssue（design.md §16.31 W6 Issue #596）', () => {
+  it('GitHubは gh issue create --body-file=<一時ファイル> を呼び、URLをそのまま返す', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['issue', 'create'], {
+      code: 0,
+      stdout: 'https://github.com/org/repo/issues/42\n',
+      stderr: '',
+    });
+    const fs = new FakeForgeFileSystem();
+
+    const result = await createIssue(
+      { cli, fs },
+      {
+        host: 'github',
+        cwd: '/repo/task',
+        title: 'T1: 認証APIを実装する',
+        body: '本文',
+      },
+    );
+
+    expect(result).toEqual({ ok: true, url: 'https://github.com/org/repo/issues/42' });
+    const call = cli.calls[0];
+    expect(call?.command).toBe('gh');
+    expect(call?.args).toEqual([
+      'issue',
+      'create',
+      '--title=T1: 認証APIを実装する',
+      `--body-file=${fs.written[0]?.path}`,
+    ]);
+    expect(fs.written[0]?.content).toBe('本文');
+    expect(fs.removed).toEqual([fs.written[0]?.path]);
+  });
+
+  it('GitLabは glab api projects/:id/issues を --field=description=@<ファイル> で呼ぶ', async () => {
+    const cli = new FakeCli();
+    cli.respond('glab', ['api'], {
+      code: 0,
+      stdout: JSON.stringify({ web_url: 'https://gitlab.example.com/org/repo/-/issues/7' }),
+      stderr: '',
+    });
+    const fs = new FakeForgeFileSystem();
+
+    const result = await createIssue(
+      { cli, fs },
+      { host: 'gitlab', cwd: '/repo/task', title: 'T1: 認証APIを実装する', body: '本文' },
+    );
+
+    expect(result).toEqual({ ok: true, url: 'https://gitlab.example.com/org/repo/-/issues/7' });
+    const call = cli.calls[0];
+    expect(call?.command).toBe('glab');
+    expect(call?.args).toEqual([
+      'api',
+      'projects/:id/issues',
+      '--field=title=T1: 認証APIを実装する',
+      `--field=description=@${fs.written[0]?.path}`,
+    ]);
+  });
+
+  it('body/promptの中身は引数へ直接置かず、一時ファイルへ書く', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['issue', 'create'], { code: 0, stdout: 'https://example/issues/1\n', stderr: '' });
+    const fs = new FakeForgeFileSystem();
+    const dangerousBody = '改行を含む本文\n--dangerous-flag-looking-line\n-rf /';
+
+    await createIssue(
+      { cli, fs },
+      { host: 'github', cwd: '/repo', title: 't', body: dangerousBody },
+    );
+
+    const call = cli.calls[0];
+    expect(call?.args.some((a) => a.includes('--dangerous-flag-looking-line'))).toBe(false);
+    expect(fs.written[0]?.content).toBe(dangerousBody);
+  });
+
+  it('titleが空・改行を含む場合はCLIを呼ばずinvalidInputを返す', async () => {
+    const cli = new FakeCli();
+    const fs = new FakeForgeFileSystem();
+
+    const result = await createIssue(
+      { cli, fs },
+      { host: 'github', cwd: '/repo', title: '', body: 'b' },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'invalidInput',
+      message: expect.any(String),
+    });
+    expect(cli.calls).toEqual([]);
+  });
+
+  it('CLIが失敗コードを返せばcliErrorとして返し、一時ファイルは片付ける', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['issue', 'create'], { code: 1, stdout: '', stderr: 'authentication required' });
+    const fs = new FakeForgeFileSystem();
+
+    const result = await createIssue(
+      { cli, fs },
+      { host: 'github', cwd: '/repo', title: 't', body: 'b' },
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('cliError');
+      expect(result.message).toContain('authentication required');
+    }
+    expect(fs.removed).toEqual([fs.written[0]?.path]);
+  });
+});
+
+describe('buildTaskIssueBody（design.md §16.31 W6 Issue #596）', () => {
+  it('prompt / done / meta（runId・taskId）の3段構成にする', () => {
+    const body = buildTaskIssueBody({
+      prompt: 'プロンプト本文',
+      done: '完了条件本文',
+      runId: 'run-1',
+      taskId: 'T1',
+    });
+
+    expect(body).toContain('## prompt');
+    expect(body).toContain('プロンプト本文');
+    expect(body).toContain('## done');
+    expect(body).toContain('完了条件本文');
+    expect(body).toContain('## meta');
+    expect(body).toContain('- runId: run-1');
+    expect(body).toContain('- taskId: T1');
+  });
+});
+
 describe('runTaskPullRequestFlow（design.md §16.18の作る順序を型で固定する）', () => {
   function recordingSteps(overrides?: {
     pushTaskBranch?: ForgeStepOutcome;
     pushIntegrationBranch?: ForgeStepOutcome;
     createPullRequest?: Awaited<ReturnType<typeof createPullRequest>>;
+    reviewPullRequest?: ForgeStepOutcome;
     markPullRequestReady?: ForgeStepOutcome;
   }): {
     order: string[];
+    /** `reviewPullRequest`が呼ばれた際に渡されたurl引数（呼ばれなければ空配列）。 */
+    reviewPullRequestUrls: Array<string | undefined>;
     /** `markPullRequestReady`が呼ばれた際に渡されたurl引数（呼ばれなければ空配列）。 */
     markPullRequestReadyUrls: Array<string | undefined>;
     steps: Parameters<typeof runTaskPullRequestFlow<{ merged: boolean }>>[0];
   } {
     const order: string[] = [];
+    const reviewPullRequestUrls: Array<string | undefined> = [];
     const markPullRequestReadyUrls: Array<string | undefined> = [];
     const base = {
       pushTaskBranch: async (): Promise<ForgeStepOutcome> => {
@@ -813,20 +973,32 @@ describe('runTaskPullRequestFlow（design.md §16.18の作る順序を型で固�
         return { merged: true };
       },
     };
-    // `markPullRequestReady`はoptionalなプロパティ（`?:`）のため、指定されなかった場合は
-    // プロパティ自体を持たせない（`exactOptionalPropertyTypes`下で`undefined`を明示代入しない）
-    const steps =
-      overrides?.markPullRequestReady === undefined
+    // `reviewPullRequest` / `markPullRequestReady`はoptionalなプロパティ（`?:`）のため、
+    // 指定されなかった場合はプロパティ自体を持たせない
+    // （`exactOptionalPropertyTypes`下で`undefined`を明示代入しない）
+    const withReview =
+      overrides?.reviewPullRequest === undefined
         ? base
         : {
             ...base,
+            reviewPullRequest: async (url: string | undefined): Promise<ForgeStepOutcome> => {
+              order.push('reviewPullRequest');
+              reviewPullRequestUrls.push(url);
+              return overrides.reviewPullRequest as ForgeStepOutcome;
+            },
+          };
+    const steps =
+      overrides?.markPullRequestReady === undefined
+        ? withReview
+        : {
+            ...withReview,
             markPullRequestReady: async (url: string | undefined): Promise<ForgeStepOutcome> => {
               order.push('markPullRequestReady');
               markPullRequestReadyUrls.push(url);
               return overrides.markPullRequestReady as ForgeStepOutcome;
             },
           };
-    return { order, markPullRequestReadyUrls, steps };
+    return { order, reviewPullRequestUrls, markPullRequestReadyUrls, steps };
   }
 
   it('成功時は push task → push integration → create → merge の順に呼ぶ', async () => {
@@ -938,6 +1110,89 @@ describe('runTaskPullRequestFlow（design.md §16.18の作る順序を型で固�
     const result = await runTaskPullRequestFlow(steps);
 
     expect(result.markReady).toBeUndefined();
+  });
+
+  it('reviewPullRequestを渡すと、createPullRequestの後・mergeAndPushIntegrationの前に呼ばれる', async () => {
+    const { order, steps, reviewPullRequestUrls } = recordingSteps({
+      reviewPullRequest: { ok: true },
+    });
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(order).toEqual([
+      'pushTaskBranch',
+      'pushIntegrationBranch',
+      'createPullRequest',
+      'reviewPullRequest',
+      'mergeAndPushIntegration',
+    ]);
+    expect(reviewPullRequestUrls).toEqual(['https://example/pr/1']);
+    expect(result.review).toEqual({ ok: true });
+  });
+
+  it('createPullRequestが失敗したときはreviewPullRequestが呼ばれない', async () => {
+    const { order, reviewPullRequestUrls, steps } = recordingSteps({
+      createPullRequest: { ok: false, reason: 'cliError', message: '作成失敗' },
+      reviewPullRequest: { ok: true },
+    });
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(order).toEqual([
+      'pushTaskBranch',
+      'pushIntegrationBranch',
+      'createPullRequest',
+      'mergeAndPushIntegration',
+    ]);
+    expect(reviewPullRequestUrls).toEqual([]);
+    expect(result.review).toBeUndefined();
+  });
+
+  it('reviewPullRequestが失敗（指摘あり相当）してもmergeAndPushIntegrationは呼ぶ（マージを止めない）', async () => {
+    const { order, steps } = recordingSteps({
+      reviewPullRequest: { ok: false, message: 'レビューに失敗しました' },
+    });
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(order).toEqual([
+      'pushTaskBranch',
+      'pushIntegrationBranch',
+      'createPullRequest',
+      'reviewPullRequest',
+      'mergeAndPushIntegration',
+    ]);
+    expect(result.review).toEqual({ ok: false, message: 'レビューに失敗しました' });
+    expect(result.mergeOutcome).toEqual({ merged: true });
+  });
+
+  it('reviewPullRequestを渡さなければ結果のreviewはundefinedで、mergeの順序も変わらない', async () => {
+    const { order, steps } = recordingSteps();
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(order).toEqual([
+      'pushTaskBranch',
+      'pushIntegrationBranch',
+      'createPullRequest',
+      'mergeAndPushIntegration',
+    ]);
+    expect(result.review).toBeUndefined();
+  });
+
+  it('reviewPullRequestとmarkPullRequestReadyを両方渡すと review→merge→ready の順になる', async () => {
+    const { order, steps } = recordingSteps({
+      reviewPullRequest: { ok: true },
+      markPullRequestReady: { ok: true },
+    });
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(order).toEqual([
+      'pushTaskBranch',
+      'pushIntegrationBranch',
+      'createPullRequest',
+      'reviewPullRequest',
+      'mergeAndPushIntegration',
+      'markPullRequestReady',
+    ]);
+    expect(result.review).toEqual({ ok: true });
+    expect(result.markReady).toEqual({ ok: true });
   });
 });
 
@@ -1120,5 +1375,684 @@ describe('parsePullRequestNumberFromUrl', () => {
 
   it('undefined相当の入力（空文字）はundefined', () => {
     expect(parsePullRequestNumberFromUrl('')).toBeUndefined();
+  });
+});
+
+/**
+ * `waitForCiChecks` / `runFinalMergeWithCiGate` の呼び出し順を確かめるための、呼び出し順に
+ * 応答を返すフェイク（`SequencedGit`と同じ方針）。`FakeCli`（プレフィックス一致で常に同じ
+ * 応答を返す）では「1回目はpendingを返し2回目でpassedになる」ような連続した呼び出しごとの
+ * 応答差し替えができないため、この専用フェイクを使う。
+ */
+class SequencedCli implements CliCommandRunner {
+  calls: Array<{ command: string; args: string[]; cwd: string }> = [];
+  constructor(private readonly results: CliCommandResult[]) {}
+
+  async run(command: string, args: readonly string[], cwd: string): Promise<CliCommandResult> {
+    this.calls.push({ command, args: [...args], cwd });
+    const next = this.results.shift();
+    return next ?? { code: 0, stdout: '', stderr: '' };
+  }
+}
+
+const githubNoChecks = { code: 0, stdout: JSON.stringify({ statusCheckRollup: [] }), stderr: '' };
+const githubPending = {
+  code: 0,
+  stdout: JSON.stringify({
+    statusCheckRollup: [{ status: 'IN_PROGRESS', conclusion: null }],
+  }),
+  stderr: '',
+};
+const githubPassed = {
+  code: 0,
+  stdout: JSON.stringify({
+    statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }],
+  }),
+  stderr: '',
+};
+const githubFailed = {
+  code: 0,
+  stdout: JSON.stringify({
+    statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'FAILURE' }],
+  }),
+  stderr: '',
+};
+
+describe('parseGithubCiConclusion', () => {
+  it('statusCheckRollupが空配列ならnone（CI未設定）', () => {
+    expect(parseGithubCiConclusion(githubNoChecks.stdout)).toEqual({ conclusion: 'none' });
+  });
+
+  it('全て完了かつ全てSUCCESSならpassed', () => {
+    expect(parseGithubCiConclusion(githubPassed.stdout)).toEqual({ conclusion: 'passed' });
+  });
+
+  it('1件でも未完了（status !== COMPLETED）ならpending', () => {
+    expect(parseGithubCiConclusion(githubPending.stdout)).toEqual({ conclusion: 'pending' });
+  });
+
+  it('完了したチェックにFAILUREがあればfailed（理由付き）', () => {
+    const result = parseGithubCiConclusion(githubFailed.stdout);
+    expect(result.conclusion).toBe('failed');
+    expect(result.message).toContain('FAILURE');
+  });
+
+  it('StatusContext形式（stateフィールドのみ）のPENDINGもpendingとして扱う', () => {
+    const stdout = JSON.stringify({ statusCheckRollup: [{ state: 'PENDING' }] });
+    expect(parseGithubCiConclusion(stdout)).toEqual({ conclusion: 'pending' });
+  });
+
+  it('StatusContext形式のERRORはfailed', () => {
+    const stdout = JSON.stringify({ statusCheckRollup: [{ state: 'ERROR' }] });
+    expect(parseGithubCiConclusion(stdout).conclusion).toBe('failed');
+  });
+
+  it('壊れたJSONはfailedとして扱う（pendingのまま無期限に待たせない）', () => {
+    expect(parseGithubCiConclusion('not json').conclusion).toBe('failed');
+  });
+
+  it('statusCheckRollupキー自体が無い応答はnone（0件）ではなくfailed（想定外の応答形。セキュリティ監査の指摘）', () => {
+    const result = parseGithubCiConclusion(JSON.stringify({ someOtherField: 1 }));
+    expect(result.conclusion).toBe('failed');
+  });
+
+  it('statusCheckRollupが配列でない応答もfailed（想定外の応答形）', () => {
+    const result = parseGithubCiConclusion(JSON.stringify({ statusCheckRollup: 'not-an-array' }));
+    expect(result.conclusion).toBe('failed');
+  });
+
+  it('conclusionが成功値ホワイトリストに無い未知の値（STALE等）はfailed（fail-closed。成功値のホワイトリスト方式）', () => {
+    const stdout = JSON.stringify({
+      statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'STALE' }],
+    });
+    const result = parseGithubCiConclusion(stdout);
+    expect(result.conclusion).toBe('failed');
+    expect(result.message).toContain('STALE');
+  });
+});
+
+describe('parseGitlabCiConclusion', () => {
+  it('head_pipelineがnullならnone（CI未設定）', () => {
+    expect(parseGitlabCiConclusion(JSON.stringify({ head_pipeline: null }))).toEqual({
+      conclusion: 'none',
+    });
+  });
+
+  it('status: successはpassed', () => {
+    expect(
+      parseGitlabCiConclusion(JSON.stringify({ head_pipeline: { status: 'success' } })),
+    ).toEqual({ conclusion: 'passed' });
+  });
+
+  it('status: failedはfailed（理由付き）', () => {
+    const result = parseGitlabCiConclusion(JSON.stringify({ head_pipeline: { status: 'failed' } }));
+    expect(result.conclusion).toBe('failed');
+    expect(result.message).toContain('failed');
+  });
+
+  it('status: runningはpending', () => {
+    expect(
+      parseGitlabCiConclusion(JSON.stringify({ head_pipeline: { status: 'running' } })),
+    ).toEqual({ conclusion: 'pending' });
+  });
+
+  it('壊れたJSONはfailedとして扱う', () => {
+    expect(parseGitlabCiConclusion('not json').conclusion).toBe('failed');
+  });
+
+  it('head_pipelineキー自体が無い応答はnone（パイプライン無し）ではなくfailed（想定外の応答形。セキュリティ監査の指摘）', () => {
+    const result = parseGitlabCiConclusion(JSON.stringify({ someOtherField: 1 }));
+    expect(result.conclusion).toBe('failed');
+  });
+
+  it('head_pipelineがオブジェクトでも配列でもない（例: 文字列）応答もfailed', () => {
+    const result = parseGitlabCiConclusion(JSON.stringify({ head_pipeline: 'unexpected' }));
+    expect(result.conclusion).toBe('failed');
+  });
+});
+
+describe('fetchCiConclusion', () => {
+  it('GitHubは gh pr view <number> --json=statusCheckRollup を呼ぶ', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], githubPassed);
+    const result = await fetchCiConclusion(cli, 'github', '/repo/_integration', 42);
+    expect(result).toEqual({ conclusion: 'passed' });
+    expect(cli.calls[0]).toEqual({
+      command: 'gh',
+      args: ['pr', 'view', '42', '--json=statusCheckRollup'],
+      cwd: '/repo/_integration',
+    });
+  });
+
+  it('GitLabは glab api projects/:id/merge_requests/<number> を呼ぶ', async () => {
+    const cli = new FakeCli();
+    cli.respond('glab', ['api'], {
+      code: 0,
+      stdout: JSON.stringify({ head_pipeline: { status: 'success' } }),
+      stderr: '',
+    });
+    const result = await fetchCiConclusion(cli, 'gitlab', '/repo/_integration', 7);
+    expect(result).toEqual({ conclusion: 'passed' });
+    expect(cli.calls[0]).toEqual({
+      command: 'glab',
+      args: ['api', 'projects/:id/merge_requests/7'],
+      cwd: '/repo/_integration',
+    });
+  });
+
+  it('CLI呼び出し自体が失敗（終了コード非0）すればfailedとして扱う', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], { code: 1, stdout: '', stderr: 'authentication failed' });
+    const result = await fetchCiConclusion(cli, 'github', '/repo/_integration', 42);
+    expect(result.conclusion).toBe('failed');
+    expect(result.message).toContain('authentication failed');
+  });
+});
+
+describe('parseGithubReviewComments（design.md §16.30、Issue #339）', () => {
+  it('reviewsとcommentsの両方から本文の有るものだけを取り込む', () => {
+    const stdout = JSON.stringify({
+      reviews: [
+        { databaseId: 1, author: { login: 'alice' }, body: 'ここを直してください', submittedAt: '2026-08-23T00:00:00Z' },
+        { databaseId: 2, author: { login: 'bob' }, body: '', submittedAt: '2026-08-23T00:00:00Z' },
+      ],
+      comments: [
+        { databaseId: 10, author: { login: 'carol' }, body: 'LGTM追記', createdAt: '2026-08-23T01:00:00Z' },
+      ],
+    });
+    const result = parseGithubReviewComments(stdout);
+    expect(result.ok).toBe(true);
+    expect(result.comments).toEqual([
+      { id: 'review:1', author: 'alice', body: 'ここを直してください', createdAt: '2026-08-23T00:00:00Z' },
+      { id: 'comment:10', author: 'carol', body: 'LGTM追記', createdAt: '2026-08-23T01:00:00Z' },
+    ]);
+  });
+
+  it('本文が空のレビュー（承認のみ等）は除外する', () => {
+    const stdout = JSON.stringify({
+      reviews: [{ databaseId: 1, author: { login: 'alice' }, body: '   ' }],
+      comments: [],
+    });
+    expect(parseGithubReviewComments(stdout).comments).toEqual([]);
+  });
+
+  it('壊れたJSONはok: falseとして扱う', () => {
+    const result = parseGithubReviewComments('not json');
+    expect(result.ok).toBe(false);
+    expect(result.comments).toEqual([]);
+  });
+
+  it('reviews/commentsキーが無い応答は空配列として扱う（想定外の型でも例外を投げない）', () => {
+    const result = parseGithubReviewComments(JSON.stringify({ someOtherField: 1 }));
+    expect(result.ok).toBe(true);
+    expect(result.comments).toEqual([]);
+  });
+});
+
+describe('parseGitlabReviewComments（design.md §16.30、Issue #339）', () => {
+  it('system: trueのnote（自動生成）を除外し、人が書いたnoteだけを取り込む', () => {
+    const stdout = JSON.stringify([
+      { id: 100, author: { username: 'alice' }, body: 'ここを直してください', created_at: '2026-08-23T00:00:00Z', system: false },
+      { id: 101, author: { username: 'ci-bot' }, body: 'ラベルを変更しました', created_at: '2026-08-23T00:00:00Z', system: true },
+    ]);
+    const result = parseGitlabReviewComments(stdout);
+    expect(result.ok).toBe(true);
+    expect(result.comments).toEqual([
+      { id: 'note:100', author: 'alice', body: 'ここを直してください', createdAt: '2026-08-23T00:00:00Z' },
+    ]);
+  });
+
+  it('壊れたJSON・配列でない応答はok: falseとして扱う', () => {
+    expect(parseGitlabReviewComments('not json').ok).toBe(false);
+    expect(parseGitlabReviewComments(JSON.stringify({ notAnArray: true })).ok).toBe(false);
+  });
+});
+
+describe('fetchReviewComments（design.md §16.30、Issue #339）', () => {
+  it('GitHubは gh pr view <number> --json=reviews,comments を呼ぶ', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], {
+      code: 0,
+      stdout: JSON.stringify({
+        reviews: [],
+        comments: [{ databaseId: 1, author: { login: 'alice' }, body: 'hi', createdAt: '2026-08-23T00:00:00Z' }],
+      }),
+      stderr: '',
+    });
+    const result = await fetchReviewComments(cli, 'github', '/repo/_integration', 42);
+    expect(result.ok).toBe(true);
+    expect(result.comments).toHaveLength(1);
+    expect(cli.calls[0]).toEqual({
+      command: 'gh',
+      args: ['pr', 'view', '42', '--json=reviews,comments'],
+      cwd: '/repo/_integration',
+    });
+  });
+
+  it('GitLabは glab api projects/:id/merge_requests/<number>/notes を呼ぶ', async () => {
+    const cli = new FakeCli();
+    cli.respond('glab', ['api'], {
+      code: 0,
+      stdout: JSON.stringify([{ id: 1, author: { username: 'alice' }, body: 'hi', system: false }]),
+      stderr: '',
+    });
+    const result = await fetchReviewComments(cli, 'gitlab', '/repo/_integration', 7);
+    expect(result.ok).toBe(true);
+    expect(result.comments).toHaveLength(1);
+    expect(cli.calls[0]).toEqual({
+      command: 'glab',
+      args: ['api', 'projects/:id/merge_requests/7/notes'],
+      cwd: '/repo/_integration',
+    });
+  });
+
+  it('CLI呼び出し自体が失敗（終了コード非0）すればok: falseとして扱う（認証切れ等でもrunを止めない前提の材料）', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], { code: 1, stdout: '', stderr: 'authentication failed' });
+    const result = await fetchReviewComments(cli, 'github', '/repo/_integration', 42);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('authentication failed');
+  });
+});
+
+describe('isBranchNotUpToDateError', () => {
+  it.each([
+    ['GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)'],
+    ['Pull Request is not up to date with the base branch'],
+    ['The head branch was modified. Review and try the merge again.'],
+    ['This branch is out of date with the base branch'],
+    ['Merge request needs a rebase before it can be merged'],
+  ])('baseの遅れを示すメッセージ「%s」はtrue', (message) => {
+    expect(isBranchNotUpToDateError(message)).toBe(true);
+  });
+
+  it.each([['merge conflict'], ['fatal: Authentication failed for https://example/repo.git'], ['']])(
+    'baseの遅れと無関係なメッセージ「%s」はfalse',
+    (message) => {
+      expect(isBranchNotUpToDateError(message)).toBe(false);
+    },
+  );
+});
+
+describe('waitForCiChecks', () => {
+  it('CI未設定（statusCheckRollupが空）なら待たずにnoneを返す', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], githubNoChecks);
+    const waits: number[] = [];
+    const result = await waitForCiChecks(
+      cli,
+      'github',
+      '/repo/_integration',
+      42,
+      60_000,
+      () => 0,
+      async () => {
+        waits.push(1);
+      },
+    );
+    expect(result).toEqual({ kind: 'none' });
+    expect(waits).toEqual([]);
+  });
+
+  it('すでに成功していれば待たずにpassedを返す', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], githubPassed);
+    const result = await waitForCiChecks(cli, 'github', '/repo/_integration', 42, 60_000, () => 0);
+    expect(result).toEqual({ kind: 'passed' });
+  });
+
+  it('赤なら待たずにfailedを返す', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], githubFailed);
+    const result = await waitForCiChecks(cli, 'github', '/repo/_integration', 42, 60_000, () => 0);
+    expect(result.kind).toBe('failed');
+  });
+
+  it('pendingが続いた後にpassedへ変われば、ポーリングを挟んでpassedを返す（実時間では待たない）', async () => {
+    const cli = new SequencedCli([githubPending, githubPending, githubPassed]);
+    const waits: number[] = [];
+    const result = await waitForCiChecks(
+      cli,
+      'github',
+      '/repo/_integration',
+      42,
+      60_000,
+      () => 0,
+      async () => {
+        waits.push(1);
+      },
+    );
+    expect(result).toEqual({ kind: 'passed' });
+    expect(cli.calls).toHaveLength(3);
+    // pending→pending→passedの間に2回だけ待っている
+    expect(waits).toEqual([1, 1]);
+  });
+
+  it('待ち時間の上限を超えてもpendingのままならtimeoutを返す（赤と同じ扱い）', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], githubPending);
+    // nowを1回目の呼び出しでdeadlineちょうど、2回目以降は超過させる
+    let now = 0;
+    const result = await waitForCiChecks(
+      cli,
+      'github',
+      '/repo/_integration',
+      42,
+      1000,
+      () => {
+        const current = now;
+        now += 2000;
+        return current;
+      },
+      async () => {
+        // 実時間では待たない
+      },
+    );
+    expect(result.kind).toBe('timeout');
+  });
+
+  it('isCancelledがtrueなら、CI状態の確認すら行わずcancelledを返す（セキュリティ監査の指摘。2026-08-23）', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'view'], githubPassed);
+    const result = await waitForCiChecks(
+      cli,
+      'github',
+      '/repo/_integration',
+      42,
+      60_000,
+      () => 0,
+      undefined,
+      () => true,
+    );
+    expect(result).toEqual({ kind: 'cancelled' });
+    // CI状態の取得自体を行わない（停止していれば何も問い合わせない）
+    expect(cli.calls).toEqual([]);
+  });
+
+  it('ポーリングの途中でisCancelledがtrueへ変わればcancelledで打ち切る（wait()を跨いだ次の周回で確認する）', async () => {
+    const cli = new SequencedCli([githubPending, githubPassed]);
+    let cancelled = false;
+    const result = await waitForCiChecks(
+      cli,
+      'github',
+      '/repo/_integration',
+      42,
+      60_000,
+      () => 0,
+      async () => {
+        // 1回目のwait()の最中に人が停止した、という状況を模す
+        cancelled = true;
+      },
+      () => cancelled,
+    );
+    expect(result).toEqual({ kind: 'cancelled' });
+    // 1回目のCI確認（pending）はするが、2回目（passedのはず）はCI状態を見る前に打ち切る
+    expect(cli.calls).toHaveLength(1);
+  });
+});
+
+describe('updatePullRequestBranch', () => {
+  it('GitHubは gh pr update-branch <number> を呼ぶ', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'update-branch'], { code: 0, stdout: '', stderr: '' });
+    const result = await updatePullRequestBranch(cli, 'github', '/repo/_integration', 42);
+    expect(result).toEqual({ ok: true });
+    expect(cli.calls[0]).toEqual({
+      command: 'gh',
+      args: ['pr', 'update-branch', '42'],
+      cwd: '/repo/_integration',
+    });
+  });
+
+  it('GitLabは glab mr rebase <number> を呼ぶ', async () => {
+    const cli = new FakeCli();
+    cli.respond('glab', ['mr', 'rebase'], { code: 0, stdout: '', stderr: '' });
+    const result = await updatePullRequestBranch(cli, 'gitlab', '/repo/_integration', 7);
+    expect(result).toEqual({ ok: true });
+    expect(cli.calls[0]).toEqual({
+      command: 'glab',
+      args: ['mr', 'rebase', '7'],
+      cwd: '/repo/_integration',
+    });
+  });
+
+  it('失敗すればメッセージ付きで返す', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['pr', 'update-branch'], { code: 1, stdout: '', stderr: 'cannot rebase' });
+    const result = await updatePullRequestBranch(cli, 'github', '/repo/_integration', 42);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain('cannot rebase');
+    }
+  });
+});
+
+describe('runFinalMergeWithCiGate（design.md §16.36、Issue #556）', () => {
+  const gateConfig = { waitTimeoutMs: 60_000, maxUpdateBranchRetries: 2, now: () => 0 };
+
+  it('CI未設定なら待たずに即マージする（従来どおり）', async () => {
+    const cli = new SequencedCli([githubNoChecks, { code: 0, stdout: '', stderr: '' }]);
+    const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, gateConfig);
+    expect(result).toEqual({ ok: true });
+    expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([
+      ['pr', 'view'],
+      ['pr', 'merge'],
+    ]);
+  });
+
+  it('CIが緑ならマージする', async () => {
+    const cli = new SequencedCli([githubPassed, { code: 0, stdout: '', stderr: '' }]);
+    const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, gateConfig);
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('CIが赤ならマージせず理由付きで失敗を返す（マージコマンドを呼ばない）', async () => {
+    const cli = new SequencedCli([githubFailed]);
+    const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, gateConfig);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('ciFailed');
+    }
+    expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([['pr', 'view']]);
+  });
+
+  it('待ち時間の上限を超えたら赤と同じ扱いで失敗を返す（マージコマンドを呼ばない）', async () => {
+    const cli = new SequencedCli([githubPending]);
+    let now = 0;
+    const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, {
+      waitTimeoutMs: 1000,
+      maxUpdateBranchRetries: 2,
+      now: () => {
+        const current = now;
+        now += 2000;
+        return current;
+      },
+      wait: async () => {},
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('ciTimeout');
+    }
+    expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([['pr', 'view']]);
+  });
+
+  it('「baseの最新でない」で拒否されたら取り込み直してから再度CIを待ち、マージを再試行する', async () => {
+    const notUpToDate = {
+      code: 1,
+      stdout: '',
+      stderr: 'GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)',
+    };
+    const cli = new SequencedCli([
+      githubPassed, // 1回目のCI確認
+      notUpToDate, // 1回目のマージ（失敗）
+      { code: 0, stdout: '', stderr: '' }, // update-branch
+      githubPassed, // 取り込み直し後のCI再確認
+      { code: 0, stdout: '', stderr: '' }, // 2回目のマージ（成功）
+    ]);
+    const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, gateConfig);
+    expect(result).toEqual({ ok: true });
+    expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([
+      ['pr', 'view'],
+      ['pr', 'merge'],
+      ['pr', 'update-branch'],
+      ['pr', 'view'],
+      ['pr', 'merge'],
+    ]);
+  });
+
+  it('「baseの最新でない」以外の失敗（コンフリクト等）は取り込み直しを試みず即座に失敗を返す', async () => {
+    const conflict = { code: 1, stdout: '', stderr: 'merge conflict' };
+    const cli = new SequencedCli([githubPassed, conflict]);
+    const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, gateConfig);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('mergeFailed');
+      expect(result.message).toContain('merge conflict');
+    }
+    // update-branchは呼ばれない
+    expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([
+      ['pr', 'view'],
+      ['pr', 'merge'],
+    ]);
+  });
+
+  it('取り込み直しが失敗すればそこで失敗を確定する', async () => {
+    const notUpToDate = { code: 1, stdout: '', stderr: 'base branch was modified' };
+    const updateBranchFailure = { code: 1, stdout: '', stderr: 'cannot rebase: conflict' };
+    const cli = new SequencedCli([githubPassed, notUpToDate, updateBranchFailure]);
+    const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, gateConfig);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('updateBranchFailed');
+    }
+  });
+
+  it('取り込み直しの上限回数を超えて「baseの最新でない」が続けば失敗として確定する', async () => {
+    const notUpToDate = { code: 1, stdout: '', stderr: 'base branch was modified' };
+    const updateOk = { code: 0, stdout: '', stderr: '' };
+    // maxUpdateBranchRetries: 2 → マージ試行は最大3回（初回+2リトライ）
+    const cli = new SequencedCli([
+      githubPassed,
+      notUpToDate,
+      updateOk,
+      githubPassed,
+      notUpToDate,
+      updateOk,
+      githubPassed,
+      notUpToDate,
+    ]);
+    const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, {
+      waitTimeoutMs: 60_000,
+      maxUpdateBranchRetries: 2,
+      now: () => 0,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('mergeFailed');
+      expect(result.updateBranchAttempts).toBe(2);
+    }
+    expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([
+      ['pr', 'view'],
+      ['pr', 'merge'],
+      ['pr', 'update-branch'],
+      ['pr', 'view'],
+      ['pr', 'merge'],
+      ['pr', 'update-branch'],
+      ['pr', 'view'],
+      ['pr', 'merge'],
+    ]);
+  });
+
+  it('番号がundefinedのときはCI確認をせずrunFinalMergeと同じ振る舞いになる（カレントブランチ依存を避ける）', async () => {
+    const cli = new FakeCli();
+    const result = await runFinalMergeWithCiGate(
+      cli,
+      'github',
+      '/repo/_integration',
+      undefined,
+      gateConfig,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain('番号が不明');
+    }
+    expect(cli.calls).toEqual([]);
+  });
+
+  describe('停止（isCancelled）', () => {
+    it('停止を立ててからCI待ちに入ると、その後CIが緑になってもpr mergeは一度も呼ばれない（セキュリティ監査の指摘。2026-08-23）', async () => {
+      // pendingが1回続いた後に緑（githubPassed）へ変わる状況を用意する。isCancelled()は
+      // 「その1回目のwait()の最中に人が停止した」を模して、1回目の呼び出し以降ずっとtrueを
+      // 返す。cli.callsに'pr merge'が一度も現れないことで、CIが後から緑になってもマージへ
+      // 進まないことを確かめる（cli.callsで確認する、というレビュー指摘の形そのもの）
+      const cli = new SequencedCli([githubPending, githubPassed]);
+      let cancelCalls = 0;
+      const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, {
+        waitTimeoutMs: 60_000,
+        maxUpdateBranchRetries: 2,
+        now: () => 0,
+        wait: async () => {
+          // ポーリングの待ち時間中に人が停止した、という状況を模す
+        },
+        isCancelled: () => {
+          cancelCalls += 1;
+          return cancelCalls > 1;
+        },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe('cancelled');
+      }
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+      // 1回目のCI確認（pending）はするが、2回目（passedのはず）は確認する前に打ち切る
+      expect(cli.calls).toHaveLength(1);
+    });
+
+    it('CIが緑になった直後（マージを呼ぶ直前）に停止していればマージを呼ばずcancelledを返す', async () => {
+      // waitForCiChecksが'none'/'passed'で即座に返った直後、runFinalMergeを呼ぶ前にも
+      // isCancelledを確認する（waitForCiChecksのポーリングを1回も経ないため、その内部の
+      // 確認だけでは捕まえられない抜けを塞ぐ）。1回目（waitForCiChecksのループ先頭）は
+      // falseを返して実際にCI状態を取得させ、2回目（runFinalMergeWithCiGate側の、
+      // マージ直前の確認）でtrueへ変える
+      const cli = new SequencedCli([githubPassed]);
+      let calls = 0;
+      const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, {
+        ...gateConfig,
+        isCancelled: () => {
+          calls += 1;
+          return calls > 1;
+        },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe('cancelled');
+      }
+      expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([['pr', 'view']]);
+    });
+
+    it('「baseの最新でない」で拒否された後、取り込み直しを呼ぶ直前に停止していれば取り込み直さずcancelledを返す', async () => {
+      const notUpToDate = { code: 1, stdout: '', stderr: 'base branch was modified' };
+      const cli = new SequencedCli([githubPassed, notUpToDate]);
+      let calls = 0;
+      const result = await runFinalMergeWithCiGate(cli, 'github', '/repo/_integration', 42, {
+        ...gateConfig,
+        isCancelled: () => {
+          calls += 1;
+          // 1回目（waitForCiChecksのループ先頭）・2回目（マージ直前）は通して、実際に
+          // マージが「baseの最新でない」で失敗するところまで進める。3回目
+          // （update-branch直前）で停止を検知させる
+          return calls > 2;
+        },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe('cancelled');
+      }
+      // update-branchは呼ばれない
+      expect(cli.calls.map((c) => c.args.slice(0, 2))).toEqual([
+        ['pr', 'view'],
+        ['pr', 'merge'],
+      ]);
+    });
   });
 });

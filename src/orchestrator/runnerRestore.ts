@@ -6,7 +6,14 @@ import {
 import { resolvePseudoState } from './runnerWorkingDirectory';
 import { sanitizeForLog } from './sanitize';
 import { startMerge } from './runnerMerge';
-import { markMergeBlocked, type RunState, type TaskRunState } from './runState';
+import { setupOrchestratorForStart } from './runnerOrchestrator';
+import {
+  applyAutoResume,
+  initialTaskRunState,
+  markMergeBlocked,
+  type RunState,
+  type TaskRunState,
+} from './runState';
 import type { PersistedRun } from './runStore';
 import { getRunOutcome } from './scheduler';
 import { isGitWorkingTree, resolveHeadCommit } from './worktree';
@@ -16,7 +23,12 @@ import {
   validateWorkflow,
   type WorkflowDefinition,
 } from './workflow';
-import { resolveBranchNamingAndDraft, type LiveRun, type LiveRunForgeState } from './runner';
+import {
+  resolveBranchNamingAndDraft,
+  type LiveRun,
+  type LiveRunForgeState,
+  type WorkflowWarning,
+} from './runner';
 import type { WorkflowRunnerInternals } from './runnerInternals';
 
 /**
@@ -49,6 +61,18 @@ export async function restoreRunsForView(self: WorkflowRunnerInternals): Promise
       continue;
     }
     self.runs.set(p.runId, rebuilt);
+    // 自動再開（design.md §16.35、roadmap W10、Issue #584）。`reloadInterrupted`で
+    // `failed`になったタスクを`pending`へ戻し、オーケストレーターセッションも立て直す。
+    // マージのやり直し（下の`merging`分岐）とは無関係な経路のため、`await`せず並行に
+    // 走らせる（`restoreRunsForView`の完了をここでも引き延ばさない。上のマージ再開と
+    // 同じ方針）
+    void autoResumeIfEligible(self, p, rebuilt).catch((e: unknown) => {
+      self.deps.log.error(
+        `[workflow ${p.runId}] 自動再開に失敗しました: ${sanitizeForLog(
+          e instanceof Error ? e.message : String(e),
+        )}`,
+      );
+    });
     // `rebuildLiveRun`が統合ブランチの実際の状態から判定し直してもなお`merging`のまま
     // 残ったタスクは、マージが実行途中で切れていたと分かっているもの。ライブなセッションは
     // 無い（リロードで失われた）ため、永続化された`branch`/`cwd`だけを頼りにマージを
@@ -187,15 +211,46 @@ async function loadPersistedWorkflowDefinition(
  * 経路で不一致が起き、マージ済みタスクを誤って`merging`（やり直し対象）と判定して二重
  * マージが走る事故になっていた。`reconcileMergingTaskOnReload`側が`type`を問わず
  * （`COMMIT_TYPES`のいずれでも）マージコミットを認識するよう改めたため、この関数は
- * `type`の配線を持たない（定義ファイル`def`も不要になった）。
+ * `type`の配線には`def`を必要としない。
+ *
+ * **ただし`def`自体は別の理由で改めて必要になった（design.md §16.29「リロード時の
+ * 突き合わせ」、レビューblocking指摘、2026-08-23）。** オーケストレーターの`add_task`/
+ * `remove_task`（§16.29）は`live.def`と`live.runState`だけを書き換えYAMLファイルは
+ * 書き換えないが、`live.runState`はこの2ツール自身がpersistしなくても、その後に
+ * 走る**別の経路**（他タスクの完了・`pump`など、`self.persist`を呼ぶ十数箇所）が
+ * `live.runState.tasks`を丸ごと永続化した瞬間に一緒に書き出されてしまう。結果、
+ * 永続データと定義ファイルが指すタスク集合がずれうる:
+ *
+ * - `add_task`で加えたタスクは、YAMLには無いのに永続データにだけ残る
+ * - `remove_task`で消したタスクは、YAMLにはあるのに永続データから消えている
+ *
+ * 前者を無視すると、定義に無いタスクの状態（`pending`は`reconcileRunOnReload`で
+ * `skipped`へ倒された後）がいつまでも`run.tasks`に居座り、`getRunOutcome`
+ * （`scheduler.ts`）がそれを理由に`succeeded`になるはずのrunを`aborted`と誤判定する。
+ * 後者を無視すると、消したはずのタスクが定義には残っているのに永続データには一度も
+ * 現れないため、`getRunOutcome`がそのタスクの存在自体に気づけず、一度も走っていない
+ * タスクがあるのにrunが完走扱いになりうる。
+ *
+ * これは人がrunの途中でYAMLを直接編集してからリロードしたときにも起こりうる、
+ * 元からあった穴でもある（`add_task`/`remove_task`が新たに踏みやすくしただけ）。
+ * 直す場所は1箇所（ここ）で足りる。突き合わせで何かを落とす・補う操作が実際に
+ * 起きたときだけ`reloadTaskDefMismatch`警告を返す（`rebuildLiveRun`が`live.warnings`へ積む）。
  */
 async function reconcileRestoredTaskStates(
   self: WorkflowRunnerInternals,
   p: PersistedRun,
   integration: { cwd: string; branch: string } | undefined,
-): Promise<Map<string, TaskRunState>> {
+  def: WorkflowDefinition,
+): Promise<{ tasks: Map<string, TaskRunState>; warnings: WorkflowWarning[] }> {
+  const defIds = new Set(def.tasks.map((t) => t.id));
   const tasks = new Map<string, TaskRunState>();
+  const droppedIds: string[] = [];
   for (const [id, t] of Object.entries(p.tasks)) {
+    if (!defIds.has(id)) {
+      // 定義に無いタスク（`add_task`で加えたがYAMLには無い）。復元しない
+      droppedIds.push(id);
+      continue;
+    }
     let state = t.state;
     let failure = t.failure;
     if (state === 'merging') {
@@ -238,7 +293,43 @@ async function reconcileRestoredTaskStates(
       cwd: t.cwd,
     });
   }
-  return tasks;
+
+  // 定義にはあるが永続データに無いタスク（`remove_task`で消したがYAMLには残っている）を
+  // `pending`として補う。黙って欠けたままにすると`getRunOutcome`がそのタスクの存在に
+  // 気づけず、一度も走っていないタスクがあるのにrunが完走扱いになりうる
+  const addedIds: string[] = [];
+  for (const task of def.tasks) {
+    if (!tasks.has(task.id)) {
+      tasks.set(task.id, initialTaskRunState);
+      addedIds.push(task.id);
+    }
+  }
+
+  const warnings: WorkflowWarning[] = [];
+  if (droppedIds.length > 0 || addedIds.length > 0) {
+    const parts: string[] = [];
+    if (droppedIds.length > 0) {
+      parts.push(
+        `定義（YAML）に無いため復元しなかったタスク: ${droppedIds.join(', ')}` +
+          '（オーケストレーターがadd_taskで加えていた可能性があります）',
+      );
+    }
+    if (addedIds.length > 0) {
+      parts.push(
+        `永続データに無かったため未着手として補ったタスク: ${addedIds.join(', ')}` +
+          '（オーケストレーターがremove_taskで消していた可能性があります）',
+      );
+    }
+    warnings.push({
+      kind: 'reloadTaskDefMismatch',
+      taskId: undefined,
+      message:
+        'リロード時、実行中に加減されたタスクを定義（YAML）本来の内容へ合わせました。' +
+        parts.join(' / '),
+    });
+  }
+
+  return { tasks, warnings };
 }
 
 /**
@@ -288,7 +379,12 @@ async function rebuildLiveRun(
     ? { cwd: integrationWorktreePath(p.workspaceRoot, p.runId), branch: integrationBranch }
     : undefined;
 
-  const tasks = await reconcileRestoredTaskStates(self, p, integration);
+  const { tasks, warnings: reconcileWarnings } = await reconcileRestoredTaskStates(
+    self,
+    p,
+    integration,
+    def,
+  );
   const runState: RunState = { tasks, haltedByUser: p.haltedByUser };
   const forge: LiveRunForgeState = gitRepo
     ? await self.resolveForgeState(p.workspaceRoot)
@@ -320,7 +416,7 @@ async function rebuildLiveRun(
     // 見て早期returnするため、既に終了済みの run はこのプロセスで再開されない限り
     // 終了ブロックへ再入しないから
     finishedNotified: false,
-    warnings: [],
+    warnings: reconcileWarnings,
     integration,
     forge,
     branchNaming,
@@ -340,7 +436,12 @@ async function rebuildLiveRun(
     messagingHub: undefined,
     messagingSetupInFlight: undefined,
     messagingStartupWarnCount: 0,
+    // レビューコメントのポーリング（design.md §16.30）もmessagingと同じくこのプロセスで
+    // 新たに始める実行にだけ立てる（復元では作らない。`finalizeForge`が統合PR/MR作成後に
+    // 改めて開始する）
+    reviewCommentPoll: undefined,
     mergeResolutions: new Map(),
+    createdTaskIssues: new Map(),
     // 復元した実行にはオーケストレーターセッションを作り直さない（会話は復元できない。
     // design.md §16.23「永続化と復元」）
     orchestrator: undefined,
@@ -349,5 +450,123 @@ async function rebuildLiveRun(
     // （design.md §16.11。Viewは`getSnapshot`が読む永続化された値へフォールバックする）
     integrationPullRequest: undefined,
     finalMergeOutcome: undefined,
+    // 最終マージの判断待ち（design.md §16.26）も会話・警告と同じく実行時専用の状態で、
+    // このプロセスでは復元しない（`LiveRun.finalMergeDecision`のJSDoc参照）
+    finalMergeDecision: undefined,
+    // `ask_user`の回答待ち（design.md §16.33）も、答えを届ける先（オーケストレーター
+    // セッション）自体が復元できないため実行時は復元しない。永続化された問いの文言は
+    // `PersistedRun.pendingAskUser`に残り、`getSnapshot`が読む（`LiveRun.pendingAskUser`の
+    // JSDoc参照）
+    pendingAskUser: undefined,
   };
+}
+
+/** `agent.workflows.autoResume`の既定値（design.md §16.35、roadmap W10、Issue #584）。 */
+export const DEFAULT_AUTO_RESUME = true;
+/** `agent.workflows.maxAutoResumeAttempts`の既定値。 */
+export const DEFAULT_MAX_AUTO_RESUME_ATTEMPTS = 3;
+export const MIN_MAX_AUTO_RESUME_ATTEMPTS = 1;
+export const MAX_MAX_AUTO_RESUME_ATTEMPTS = 20;
+
+/**
+ * リロード・WSL再起動等からの復元直後、条件を満たせば自動的に再開する
+ * （design.md §16.35、roadmap W10、Issue #584）。`restoreRunsForView`から、`self.runs`へ
+ * 登録した直後に呼ぶ。
+ *
+ * 条件（design.mdの受入基準）:
+ * 1. `agent.workflows.autoResume`が`false`でない
+ * 2. `haltedByUser`（人が「全体停止」で止めた）でない——人が意図して止めたrunを
+ *    黙って再開すると、その場に残っている理由（レビュー中・調査中等）を壊す
+ * 3. 再開できる状態がある（`applyAutoResume`。他の理由の`failed`が混ざっていれば
+ *    見送り、`allow`確認が要るタスクが混ざっていれば見送り——人が居ないその場で
+ *    確認を代行できないため）
+ * 4. `agent.workflows.maxAutoResumeAttempts`（既定3）に達していない——同じrunが
+ *    クラッシュと自動再開を繰り返し続けるのを止める
+ *
+ * 4つとも満たしたときだけ、`applyAutoResume`が戻した`RunState`を適用し、
+ * オーケストレーターセッションを`start()`と同じ手順（`ensureMessaging` →
+ * `setupOrchestratorForStart`）で立て直し、`pump()`でスケジューリングを起こす。
+ *
+ * 条件3（`blockedByOtherFailure`/`blockedByAllowGate`）・条件4（上限超過）のどちらで
+ * 見送った場合も`autoResumeBlocked`/`autoResumeLimitExceeded`警告をrunへ積む。
+ * どちらも「自動では再開されなかった」という、Viewの既存のfailed/skipped表示だけでは
+ * 区別できない事実そのものであり、受入基準「回数上限を超えたら理由が見える」を、
+ * 上限超過以外の見送り理由にもそろえた（レビュー指摘。2026-08-23。当初は条件2・3を
+ * 完全に無警告としていたが、上限超過だけ理由が見えて他は見えないのは非対称という
+ * 指摘を受け改めた）。条件2（`haltedByUser`）だけは引き続き無警告のまま——人が
+ * 意図して止めたrunであり、`applyAutoResume`を呼ぶ前に確定しているため「見送った」
+ * という新情報が無い。
+ */
+async function autoResumeIfEligible(
+  self: WorkflowRunnerInternals,
+  p: PersistedRun,
+  rebuilt: LiveRun,
+): Promise<void> {
+  const autoResume = self.deps.readAutoResume?.() ?? DEFAULT_AUTO_RESUME;
+  if (!autoResume) {
+    return;
+  }
+  if (rebuilt.runState.haltedByUser) {
+    return;
+  }
+  const outcome = applyAutoResume(rebuilt.runState, rebuilt.def.tasks);
+  if (outcome.kind === 'nothingToResume') {
+    return;
+  }
+  if (outcome.kind !== 'resumed') {
+    // `blockedByOtherFailure` / `blockedByAllowGate`。孤立した`pending`を作らないために
+    // 見送ったが、「なぜ再開されなかったか」はrunから見えるようにする
+    // （レビュー指摘。2026-08-23。上記JSDoc参照）
+    const reason =
+      outcome.kind === 'blockedByAllowGate'
+        ? `再開確認（allow）が必要なタスクがあるため（${outcome.taskIds.join(', ')}）`
+        : '他の理由で失敗したタスクが混ざっているため';
+    rebuilt.warnings = rebuilt.warnings.filter((w) => w.kind !== 'autoResumeBlocked');
+    rebuilt.warnings.push({
+      kind: 'autoResumeBlocked',
+      taskId: undefined,
+      message: `中断からの自動再開を見送りました: ${reason}。Viewから手動で再実行してください。`,
+    });
+    self.notify(p.runId);
+    return;
+  }
+
+  const maxAttempts = self.deps.readMaxAutoResumeAttempts?.() ?? DEFAULT_MAX_AUTO_RESUME_ATTEMPTS;
+  const attemptsSoFar = p.autoResumeAttempts ?? 0;
+  if (attemptsSoFar >= maxAttempts) {
+    rebuilt.warnings = rebuilt.warnings.filter((w) => w.kind !== 'autoResumeLimitExceeded');
+    rebuilt.warnings.push({
+      kind: 'autoResumeLimitExceeded',
+      taskId: undefined,
+      message: `自動再開の上限（${maxAttempts}回）に達したため、これ以上は自動的に再開しません。Viewから手動で再実行してください。`,
+    });
+    self.notify(p.runId);
+    return;
+  }
+
+  rebuilt.runState = outcome.run;
+  rebuilt.finished = getRunOutcome(rebuilt.runState) !== 'running';
+  rebuilt.warnings = rebuilt.warnings.filter((w) => w.kind !== 'autoResume');
+  rebuilt.warnings.push({
+    kind: 'autoResume',
+    taskId: undefined,
+    message: `中断からの自動再開により、次のタスクをpendingへ戻しました: ${outcome.resumedTaskIds.join(', ')}`,
+  });
+  // `current`が無い（このrunがどこかで消えた等）ことは通常起きないが、`update`の
+  // updaterはPersistedRunを必ず返す必要があるため、その場合は`p`（このrunがまだ
+  // 存在した時点の値）へ書き戻すことで型を満たしつつ実害の無い形にする
+  await self.deps.store.update(p.runId, (current) => ({
+    ...(current ?? p),
+    autoResumeAttempts: attemptsSoFar + 1,
+  }));
+
+  await self.ensureMessaging(p.runId, rebuilt);
+  // `exactOptionalPropertyTypes`のため、答え待ちが無ければキー自体を渡さない
+  void setupOrchestratorForStart(
+    self,
+    p.runId,
+    rebuilt,
+    p.pendingAskUser === undefined ? {} : { pendingAskUser: p.pendingAskUser },
+  );
+  self.pump(p.runId);
 }

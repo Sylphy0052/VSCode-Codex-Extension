@@ -75,8 +75,32 @@ export interface PersistedRun {
   /**
    * 統合→mainの最終マージ（design.md §16.18「最終マージ」）の成否。試みていなければ
    * `undefined`（`finalMerge: pr-only`、統合PR/MRの作成に失敗、runがまだ終わっていない等）。
+   * `held`は`finalMerge: orchestrator | confirm`で「マージしない」と判断された場合
+   * （design.md §16.26）。
    */
-  finalMergeOutcome: 'merged' | 'failed' | undefined;
+  finalMergeOutcome: 'merged' | 'failed' | 'held' | undefined;
+  /**
+   * `ask_user`（design.md §16.33、Issue #583）の回答待ちの問い。オーケストレーターが
+   * 呼んでから人が答えるまでの間だけ存在する。`finalMergeOutcome`等と違い「確定した結果」
+   * ではなく「宙に浮いている問い」なので、答えが確定した・run再開時にオーケストレーターが
+   * 新しく開き直した等で消えれば`undefined`に戻る（`WorkflowRunner.persist`参照）。
+   * ロードマップW10（中断からの自動再開、design.md §16.35、Issue #584）の
+   * `runnerRestore.ts`（`autoResumeIfEligible` → `setupOrchestratorForStart`）が、
+   * 自動再開のたびに「再開時に問いを出し直す」ためここを読む。既存の永続データ
+   * （このフィールドが無い形式）を読んでも`undefined`になるだけで壊れない。
+   */
+  pendingAskUser: { question: string; choices: string[]; askedAt: string } | undefined;
+  /**
+   * 自動再開（design.md §16.35、roadmap W10、Issue #584）を実際に行った回数。
+   * `runnerRestore.ts`が、`reloadInterrupted`のタスクを`pending`へ戻すたびに1増やす
+   * （戻す対象が無かった・他の失敗やallowで見送った場合は増やさない）。
+   * `agent.workflows.maxAutoResumeAttempts`（既定3）に達したら、それ以降のこのrunの
+   * 自動再開はあきらめる（同じrunが起動のたびに再開を繰り返して壊れ続けるのを防ぐ）。
+   * 省略可能な最適な理由: 既存の永続データ（このフィールドが無い形式）を読んでも
+   * `undefined`になるだけで壊れず（`0`として扱う）、既存の`PersistedRun`リテラルを
+   * 一括で書き換える必要が無い。
+   */
+  autoResumeAttempts?: number;
 }
 
 /**

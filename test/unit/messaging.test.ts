@@ -20,6 +20,7 @@ import {
   MessagingMcpServer,
   NO_REPLY_NOTICE,
   SEND_MESSAGE_TOOL,
+  ASK_ORCHESTRATOR_TOOL,
   startHttpMcpTransport,
   TASK_MESSAGE_GUIDANCE,
   TaskMessagingHub,
@@ -47,10 +48,11 @@ const message = (overrides: Partial<StoredMessage> = {}): StoredMessage => ({
   body: 'hello',
   expectReply: false,
   createdAtMs: 0,
+  kind: 'message',
   ...overrides,
 });
 
-describe('isDeliverableState / validateSendMessage（design.md §16.21「配送」）', () => {
+describe('isDeliverableState / validateSendMessage（design.md §16.21「配送」・§16.34「宛先の固定」、Issue #547）', () => {
   it('done/failed/blocked/skippedへは配送できない', () => {
     for (const state of ['done', 'failed', 'blocked', 'skipped'] as const) {
       expect(isDeliverableState(state)).toBe(false);
@@ -69,9 +71,87 @@ describe('isDeliverableState / validateSendMessage（design.md §16.21「配送�
     }
   });
 
-  it('宛先が同じrunに存在しなければ拒否する', () => {
+  it('タスクからタスクid宛の直接送信は、宛先が同じrunに存在するかどうかを問わず拒否する（Issue #547: 宛先はオーケストレーターに固定）', () => {
+    for (const to of ['T2', 'T9']) {
+      const result = validateSendMessage({
+        from: 'T1',
+        to,
+        body: 'hi',
+        knownTaskIds: new Set(['T1', 'T2']),
+        recipientState: to === 'T2' ? 'running' : undefined,
+        totalMessagesInRun: 0,
+      });
+      expect(result.accepted).toBe(false);
+      expect(result.reason).toContain(ORCHESTRATOR_CONNECTION_ID);
+    }
+  });
+
+  it('タスクから自分自身宛（実質タスク宛）も同じ理由で拒否する（Issue #365由来の自己宛拒否は、いまはオーケストレーター宛固定に吸収される）', () => {
     const result = validateSendMessage({
       from: 'T1',
+      to: 'T1',
+      body: 'hi',
+      knownTaskIds: new Set(['T1', 'T2']),
+      recipientState: 'running',
+      totalMessagesInRun: 0,
+    });
+    expect(result.accepted).toBe(false);
+    expect(result.reason).toContain(ORCHESTRATOR_CONNECTION_ID);
+  });
+
+  it('タスクからオーケストレーター宛の送信は受け付ける', () => {
+    const result = validateSendMessage({
+      from: 'T1',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: 'hi',
+      knownTaskIds: new Set(['T1', 'T2']),
+      recipientState: undefined,
+      totalMessagesInRun: 0,
+    });
+    expect(result.accepted).toBe(true);
+  });
+
+  it('本文がMAX_MESSAGE_BODY_LENGTHを超えると拒否する（タスク→オーケストレーター宛。Issue #132: MAX_PROMPT_LENGTHの流用をやめた独立の定数）', () => {
+    const result = validateSendMessage({
+      from: 'T1',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: 'a'.repeat(MAX_MESSAGE_BODY_LENGTH + 1),
+      knownTaskIds: new Set(['T1', 'T2']),
+      recipientState: undefined,
+      totalMessagesInRun: 0,
+    });
+    expect(result.accepted).toBe(false);
+    expect(result.reason).toContain(String(MAX_MESSAGE_BODY_LENGTH));
+  });
+
+  it('本文がMAX_MESSAGE_BODY_LENGTHちょうどなら受け付ける（タスク→オーケストレーター宛）', () => {
+    const result = validateSendMessage({
+      from: 'T1',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: 'a'.repeat(MAX_MESSAGE_BODY_LENGTH),
+      knownTaskIds: new Set(['T1', 'T2']),
+      recipientState: undefined,
+      totalMessagesInRun: 0,
+    });
+    expect(result.accepted).toBe(true);
+  });
+
+  it('run全体の総数が上限に達していると拒否する（タスク→オーケストレーター宛）', () => {
+    const result = validateSendMessage({
+      from: 'T1',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: 'hi',
+      knownTaskIds: new Set(['T1', 'T2']),
+      recipientState: undefined,
+      totalMessagesInRun: MAX_MESSAGES_PER_RUN,
+    });
+    expect(result.accepted).toBe(false);
+    expect(result.reason).toContain(String(MAX_MESSAGES_PER_RUN));
+  });
+
+  it('オーケストレーターから宛先が同じrunに存在しなければ拒否する', () => {
+    const result = validateSendMessage({
+      from: ORCHESTRATOR_CONNECTION_ID,
       to: 'T9',
       body: 'hi',
       knownTaskIds: new Set(['T1', 'T2']),
@@ -82,48 +162,10 @@ describe('isDeliverableState / validateSendMessage（design.md §16.21「配送�
     expect(result.reason).toContain('T9');
   });
 
-  it('本文がMAX_MESSAGE_BODY_LENGTHを超えると拒否する（Issue #132: MAX_PROMPT_LENGTHの流用をやめた独立の定数）', () => {
-    const result = validateSendMessage({
-      from: 'T1',
-      to: 'T2',
-      body: 'a'.repeat(MAX_MESSAGE_BODY_LENGTH + 1),
-      knownTaskIds: new Set(['T1', 'T2']),
-      recipientState: 'running',
-      totalMessagesInRun: 0,
-    });
-    expect(result.accepted).toBe(false);
-    expect(result.reason).toContain(String(MAX_MESSAGE_BODY_LENGTH));
-  });
-
-  it('本文がMAX_MESSAGE_BODY_LENGTHちょうどなら受け付ける', () => {
-    const result = validateSendMessage({
-      from: 'T1',
-      to: 'T2',
-      body: 'a'.repeat(MAX_MESSAGE_BODY_LENGTH),
-      knownTaskIds: new Set(['T1', 'T2']),
-      recipientState: 'running',
-      totalMessagesInRun: 0,
-    });
-    expect(result.accepted).toBe(true);
-  });
-
-  it('run全体の総数が上限に達していると拒否する', () => {
-    const result = validateSendMessage({
-      from: 'T1',
-      to: 'T2',
-      body: 'hi',
-      knownTaskIds: new Set(['T1', 'T2']),
-      recipientState: 'running',
-      totalMessagesInRun: MAX_MESSAGES_PER_RUN,
-    });
-    expect(result.accepted).toBe(false);
-    expect(result.reason).toContain(String(MAX_MESSAGES_PER_RUN));
-  });
-
-  it('宛先がdone/failed/blocked/skippedなら配送できない旨を返す', () => {
+  it('オーケストレーターから宛先がdone/failed/blocked/skippedなら配送できない旨を返す', () => {
     for (const state of ['done', 'failed', 'blocked', 'skipped'] as const) {
       const result = validateSendMessage({
-        from: 'T1',
+        from: ORCHESTRATOR_CONNECTION_ID,
         to: 'T2',
         body: 'hi',
         knownTaskIds: new Set(['T1', 'T2']),
@@ -135,9 +177,9 @@ describe('isDeliverableState / validateSendMessage（design.md §16.21「配送�
     }
   });
 
-  it('宛先がpendingなら受け付ける（開始時の最初の指示へ添える）', () => {
+  it('オーケストレーターから宛先がpendingなら受け付ける（開始時の最初の指示へ添える）', () => {
     const result = validateSendMessage({
-      from: 'T1',
+      from: ORCHESTRATOR_CONNECTION_ID,
       to: 'T2',
       body: 'hi',
       knownTaskIds: new Set(['T1', 'T2']),
@@ -147,10 +189,10 @@ describe('isDeliverableState / validateSendMessage（design.md §16.21「配送�
     expect(result.accepted).toBe(true);
   });
 
-  it('依存関係の有無を問わず、同じrunのタスクなら送れる', () => {
+  it('オーケストレーターからは依存関係の有無を問わず、同じrunのタスクなら送れる（変わらない）', () => {
     // dependsOnで絞られていない前提。knownTaskIdsに含まれていれば足りる。
     const result = validateSendMessage({
-      from: 'T1',
+      from: ORCHESTRATOR_CONNECTION_ID,
       to: 'T3',
       body: 'hi',
       knownTaskIds: new Set(['T1', 'T2', 'T3']),
@@ -160,42 +202,46 @@ describe('isDeliverableState / validateSendMessage（design.md §16.21「配送�
     expect(result.accepted).toBe(true);
   });
 
-  it('自分自身が宛先だと拒否する（Issue #365: 自己宛でaccepted: falseになる）', () => {
+  // 理由の文言そのものを確認する。`toContain(ORCHESTRATOR_CONNECTION_ID)`では、
+  // knownTaskIdsの「宛先が見つかりません: -orchestrator-」も同じ文字列を含むため
+  // 両方通ってしまい、専用の自己宛拒否が先に評価されているかを固定できない
+  // （`messaging.ts`の`to === from`の判定だけを潰すと赤くなることを実測済み）。
+  it('オーケストレーターが自分自身宛だと拒否する（Issue #365由来の自己宛拒否はオーケストレーター側で維持）', () => {
     const result = validateSendMessage({
-      from: 'T1',
-      to: 'T1',
+      from: ORCHESTRATOR_CONNECTION_ID,
+      to: ORCHESTRATOR_CONNECTION_ID,
       body: 'hi',
       knownTaskIds: new Set(['T1', 'T2']),
-      recipientState: 'running',
+      recipientState: undefined,
       totalMessagesInRun: 0,
     });
     expect(result.accepted).toBe(false);
-    expect(result.reason).toContain('T1');
+    expect(result.reason).toBe(`自分自身へは送信できません: ${ORCHESTRATOR_CONNECTION_ID}`);
   });
 
-  it('サロゲートペア（絵文字）を含む本文はコードポイント単位で数える（Issue #365: UTF-16長ではなく文字数で判定する）', () => {
+  it('サロゲートペア（絵文字）を含む本文はコードポイント単位で数える（タスク→オーケストレーター宛。Issue #365: UTF-16長ではなく文字数で判定する）', () => {
     // 1絵文字はUTF-16では2コード単位。MAX_MESSAGE_BODY_LENGTHちょうどの絵文字数なら
     // UTF-16長は上限の2倍になるが、コードポイント数としては上限ちょうどなので受け付ける。
     const body = '\u{1F600}'.repeat(MAX_MESSAGE_BODY_LENGTH);
     const result = validateSendMessage({
       from: 'T1',
-      to: 'T2',
+      to: ORCHESTRATOR_CONNECTION_ID,
       body,
       knownTaskIds: new Set(['T1', 'T2']),
-      recipientState: 'running',
+      recipientState: undefined,
       totalMessagesInRun: 0,
     });
     expect(result.accepted).toBe(true);
   });
 
-  it('サロゲートペア（絵文字）がコードポイント単位で上限を1つ超えると拒否する', () => {
+  it('サロゲートペア（絵文字）がコードポイント単位で上限を1つ超えると拒否する（タスク→オーケストレーター宛）', () => {
     const body = '\u{1F600}'.repeat(MAX_MESSAGE_BODY_LENGTH + 1);
     const result = validateSendMessage({
       from: 'T1',
-      to: 'T2',
+      to: ORCHESTRATOR_CONNECTION_ID,
       body,
       knownTaskIds: new Set(['T1', 'T2']),
-      recipientState: 'running',
+      recipientState: undefined,
       totalMessagesInRun: 0,
     });
     expect(result.accepted).toBe(false);
@@ -533,11 +579,24 @@ describe('TaskMessagingHubDeps.onAccepted（design.md §16.21「waitingReplyへ�
       onAccepted: (m) => accepted.push(m),
     });
 
-    const result = hub.sendMessage({ from: 'T1', to: 'T2', body: 'hi', expectReply: true });
+    const result = hub.sendMessage({
+      from: 'T1',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: 'hi',
+      expectReply: true,
+    });
 
     expect(result.accepted).toBe(true);
     expect(accepted).toEqual([
-      { id: 'msg-1', from: 'T1', to: 'T2', body: 'hi', expectReply: true, createdAtMs: 123 },
+      {
+        id: 'msg-1',
+        from: 'T1',
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: 'hi',
+        expectReply: true,
+        createdAtMs: 123,
+        kind: 'message',
+      },
     ]);
   });
 
@@ -548,7 +607,7 @@ describe('TaskMessagingHubDeps.onAccepted（design.md §16.21「waitingReplyへ�
       onAccepted: (m) => accepted.push(m),
     });
 
-    // 宛先が存在しない（同じrunのタスクではない）ため拒否される
+    // タスクからタスクid宛は、宛先が実在するかどうかを問わず拒否される（Issue #547: 宛先固定）
     const result = hub.sendMessage({ from: 'T1', to: 'ghost', body: 'hi', expectReply: false });
 
     expect(result.accepted).toBe(false);
@@ -569,7 +628,7 @@ describe('TaskMessagingHubDeps.onAccepted（design.md §16.21「waitingReplyへ�
 });
 
 describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側が接続で判別する」）', () => {
-  it('tools/listでlist_tasksとsend_messageの2つが見える', () => {
+  it('tools/listでlist_tasks・send_message・ask_orchestratorの3つが見える（design.md §16.32、Issue #571）', () => {
     const transport = new FakeTransport();
     const hub = buildHub([{ id: 'T1', state: 'running', summary: '' }]);
     new MessagingMcpServer(hub, transport);
@@ -581,7 +640,7 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
     expect(response && 'result' in response).toBe(true);
     if (response && 'result' in response) {
       const result = response.result as { tools: unknown[] };
-      expect(result.tools).toEqual([LIST_TASKS_TOOL, SEND_MESSAGE_TOOL]);
+      expect(result.tools).toEqual([LIST_TASKS_TOOL, SEND_MESSAGE_TOOL, ASK_ORCHESTRATOR_TOOL]);
     }
   });
 
@@ -600,10 +659,13 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/call',
-      params: { name: 'send_message', arguments: { to: 'T2', body: 'hi T2', expectReply: false } },
+      params: {
+        name: 'send_message',
+        arguments: { to: ORCHESTRATOR_CONNECTION_ID, body: 'hi T2', expectReply: false },
+      },
     });
 
-    const delivered = hub.takeDeliverableMessages('T2');
+    const delivered = hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID);
     expect(delivered).toHaveLength(1);
     expect(delivered[0]?.from).toBe('T1');
     expect(delivered[0]?.body).toBe('hi T2');
@@ -629,11 +691,17 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
       params: {
         name: 'send_message',
         // fromやtaskIdという名前の値を混入させても、スキーマに無いフィールドとして無視される
-        arguments: { to: 'T3', body: 'spoofed', expectReply: false, from: 'T2', taskId: 'T2' },
+        arguments: {
+          to: ORCHESTRATOR_CONNECTION_ID,
+          body: 'spoofed',
+          expectReply: false,
+          from: 'T2',
+          taskId: 'T2',
+        },
       },
     });
 
-    const delivered = hub.takeDeliverableMessages('T3');
+    const delivered = hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID);
     expect(delivered).toHaveLength(1);
     expect(delivered[0]?.from).toBe('T1');
     expect(delivered[0]?.from).not.toBe('T2');
@@ -666,7 +734,7 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
     }
   });
 
-  it('宛先がdoneのタスクへは配送できない旨がsend_messageの結果として返る', () => {
+  it('オーケストレーターから宛先がdoneのタスクへは配送できない旨がsend_messageの結果として返る（Issue #547: 宛先固定後もオーケストレーター発の配送可否判定は変わらない）', () => {
     const transport = new FakeTransport();
     const tasks: RunTaskSnapshot[] = [
       { id: 'T1', state: 'running', summary: '' },
@@ -674,7 +742,8 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
     ];
     const hub = buildHub(tasks);
     new MessagingMcpServer(hub, transport);
-    const conn = new FakeConnection('T1');
+    // オーケストレーター自身の接続（taskId === ORCHESTRATOR_CONNECTION_ID）からの送信を模す
+    const conn = new FakeConnection(ORCHESTRATOR_CONNECTION_ID);
     transport.connect(conn);
 
     conn.fireRequest({
@@ -990,6 +1059,143 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
   });
 });
 
+describe('ask_orchestrator（design.md §16.32、Issue #571）', () => {
+  it('tools/callでask_orchestratorを呼ぶと、send_messageと同じ経路でオーケストレーター宛に積まれる', () => {
+    const transport = new FakeTransport();
+    const tasks: RunTaskSnapshot[] = [{ id: 'T1', state: 'running', summary: '' }];
+    const hub = buildHub(tasks);
+    new MessagingMcpServer(hub, transport);
+    const conn = new FakeConnection('T1');
+    transport.connect(conn);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'ask_orchestrator',
+        arguments: { question: 'この方針でよいですか', blocking: false },
+      },
+    });
+
+    const response = conn.sent[0];
+    expect(response && 'result' in response).toBe(true);
+    if (response && 'result' in response) {
+      const result = response.result as { content: [{ type: 'text'; text: string }] };
+      const parsed = JSON.parse(result.content[0].text) as { accepted: boolean };
+      expect(parsed.accepted).toBe(true);
+    }
+    const delivered = hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.from).toBe('T1');
+    expect(delivered[0]?.body).toBe('この方針でよいですか');
+    expect(delivered[0]?.kind).toBe('question');
+  });
+
+  it('blocking: trueはexpectReply: trueとして扱われる', () => {
+    const transport = new FakeTransport();
+    const tasks: RunTaskSnapshot[] = [{ id: 'T1', state: 'running', summary: '' }];
+    const hub = buildHub(tasks);
+    new MessagingMcpServer(hub, transport);
+    const conn = new FakeConnection('T1');
+    transport.connect(conn);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'ask_orchestrator', arguments: { question: 'q', blocking: true } },
+    });
+
+    const delivered = hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID);
+    expect(delivered[0]?.expectReply).toBe(true);
+  });
+
+  it('引数に別のタスクidを混ぜても、送信元は接続から判別した側の値になる（なりすまし不可）', () => {
+    const transport = new FakeTransport();
+    const tasks: RunTaskSnapshot[] = [
+      { id: 'T1', state: 'running', summary: '' },
+      { id: 'T2', state: 'running', summary: '' },
+    ];
+    const hub = buildHub(tasks);
+    new MessagingMcpServer(hub, transport);
+    const conn = new FakeConnection('T1');
+    transport.connect(conn);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'ask_orchestrator',
+        arguments: { question: 'q', blocking: false, from: 'T2', taskId: 'T2' },
+      },
+    });
+
+    const delivered = hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID);
+    expect(delivered[0]?.from).toBe('T1');
+  });
+
+  it('オーケストレーター自身の接続のtools/listにはask_orchestratorが現れず、名指しで呼んでも拒否される', () => {
+    const transport = new FakeTransport();
+    const tasks: RunTaskSnapshot[] = [{ id: 'T1', state: 'running', summary: '' }];
+    const hub = buildHub(tasks);
+    new MessagingMcpServer(hub, transport);
+    const conn = new FakeConnection(ORCHESTRATOR_CONNECTION_ID);
+    transport.connect(conn);
+
+    conn.fireRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    const listResponse = conn.sent[0];
+    expect(listResponse && 'result' in listResponse).toBe(true);
+    if (listResponse && 'result' in listResponse) {
+      const result = listResponse.result as { tools: { name: string }[] };
+      expect(result.tools.map((t) => t.name)).not.toContain('ask_orchestrator');
+    }
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'ask_orchestrator', arguments: { question: 'q', blocking: false } },
+    });
+    const callResponse = conn.sent[1];
+    expect(callResponse && 'error' in callResponse).toBe(true);
+    if (callResponse && 'error' in callResponse) {
+      expect(callResponse.error.message).toContain('未知のツール');
+    }
+  });
+
+  it('send_messageと同じ本文の長さ上限を共有する（MAX_MESSAGE_BODY_LENGTH）', () => {
+    const transport = new FakeTransport();
+    const tasks: RunTaskSnapshot[] = [{ id: 'T1', state: 'running', summary: '' }];
+    const hub = buildHub(tasks);
+    new MessagingMcpServer(hub, transport);
+    const conn = new FakeConnection('T1');
+    transport.connect(conn);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'ask_orchestrator',
+        arguments: { question: 'x'.repeat(MAX_MESSAGE_BODY_LENGTH + 1), blocking: false },
+      },
+    });
+
+    const response = conn.sent[0];
+    expect(response && 'result' in response).toBe(true);
+    if (response && 'result' in response) {
+      const result = response.result as { content: [{ type: 'text'; text: string }]; isError?: boolean };
+      expect(result.isError).toBe(true);
+      const parsed = JSON.parse(result.content[0].text) as { accepted: boolean; reason: string };
+      expect(parsed.accepted).toBe(false);
+      expect(parsed.reason).toContain('長すぎます');
+    }
+    expect(hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID)).toEqual([]);
+  });
+});
+
 describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタスク」、Issue #105）', () => {
   let handle: HttpMcpTransportHandle | undefined;
 
@@ -1014,12 +1220,15 @@ describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタ�
         jsonrpc: '2.0',
         id: 1,
         method: 'tools/call',
-        params: { name: 'send_message', arguments: { to: 'T2', body: 'hi', expectReply: false } },
+        params: {
+          name: 'send_message',
+          arguments: { to: ORCHESTRATOR_CONNECTION_ID, body: 'hi', expectReply: false },
+        },
       }),
     });
     expect(response.status).toBe(200);
 
-    const delivered = hub.takeDeliverableMessages('T2');
+    const delivered = hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID);
     expect(delivered).toHaveLength(1);
     expect(delivered[0]?.from).toBe('T1');
   });
@@ -1045,12 +1254,18 @@ describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタ�
           method: 'tools/call',
           params: {
             name: 'send_message',
-            arguments: { to: 'T3', body: 'spoofed', expectReply: false, from: 'T2', taskId: 'T2' },
+            arguments: {
+              to: ORCHESTRATOR_CONNECTION_ID,
+              body: 'spoofed',
+              expectReply: false,
+              from: 'T2',
+              taskId: 'T2',
+            },
           },
         }),
       });
 
-      const delivered = hub.takeDeliverableMessages('T3');
+      const delivered = hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID);
       expect(delivered).toHaveLength(1);
       expect(delivered[0]?.from).toBe('T1');
     },
@@ -1137,11 +1352,14 @@ describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタ�
         jsonrpc: '2.0',
         id: 2,
         method: 'tools/call',
-        params: { name: 'send_message', arguments: { to: 'T2', body: 'hi', expectReply: false } },
+        params: {
+          name: 'send_message',
+          arguments: { to: ORCHESTRATOR_CONNECTION_ID, body: 'hi', expectReply: false },
+        },
       }),
     });
     expect(accepted.status).toBe(200);
-    expect(hub.takeDeliverableMessages('T2')).toHaveLength(1);
+    expect(hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID)).toHaveLength(1);
   });
 
   it('同じタスクへ再登録すると古いURLは無効になる（Issue #365: 古いトークンが失効しない）', async () => {
@@ -1161,11 +1379,14 @@ describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタ�
         jsonrpc: '2.0',
         id: 1,
         method: 'tools/call',
-        params: { name: 'send_message', arguments: { to: 'T2', body: 'via-old-url', expectReply: false } },
+        params: {
+          name: 'send_message',
+          arguments: { to: ORCHESTRATOR_CONNECTION_ID, body: 'via-old-url', expectReply: false },
+        },
       }),
     });
     expect(oldResponse.status).toBe(404);
-    expect(hub.takeDeliverableMessages('T2')).toHaveLength(0);
+    expect(hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID)).toHaveLength(0);
 
     const newResponse = await fetch(newUrl, {
       method: 'POST',
@@ -1174,11 +1395,14 @@ describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタ�
         jsonrpc: '2.0',
         id: 2,
         method: 'tools/call',
-        params: { name: 'send_message', arguments: { to: 'T2', body: 'via-new-url', expectReply: false } },
+        params: {
+          name: 'send_message',
+          arguments: { to: ORCHESTRATOR_CONNECTION_ID, body: 'via-new-url', expectReply: false },
+        },
       }),
     });
     expect(newResponse.status).toBe(200);
-    const delivered = hub.takeDeliverableMessages('T2');
+    const delivered = hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID);
     expect(delivered).toHaveLength(1);
     expect(delivered[0]?.body).toBe('via-new-url');
   });
@@ -1257,6 +1481,26 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
         calls.push(`updateTaskPrompt:${taskId}:${continuePrompt}`);
         return { accepted: false, reason: "長すぎます" };
       },
+      decideFinalMerge: (decision, reason) => {
+        calls.push(`decideFinalMerge:${decision}:${reason}`);
+        return { accepted: true, reason: "ok" };
+      },
+      askUser: (question, choices) => {
+        calls.push(`askUser:${question}:${choices.join(",")}`);
+        return { accepted: true, reason: "ok" };
+      },
+      addTask: (input) => {
+        calls.push(`addTask:${JSON.stringify(input)}`);
+        return { accepted: true, reason: "ok" };
+      },
+      removeTask: (taskId) => {
+        calls.push(`removeTask:${taskId}`);
+        return { accepted: true, reason: "ok" };
+      },
+      updateTaskDependencies: (taskId, dependsOn) => {
+        calls.push(`updateTaskDependencies:${taskId}:${dependsOn.join(",")}`);
+        return { accepted: true, reason: "ok" };
+      },
     };
     return { port, calls };
   }
@@ -1315,15 +1559,20 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
       "continue_task",
       "decide_approval",
       "update_task_prompt",
+      "decide_final_merge",
+      "ask_user",
+      "add_task",
+      "remove_task",
+      "update_task_dependencies",
     ]);
   });
 
-  it("タスクの接続のtools/listには制御ツールが現れない", () => {
+  it("タスクの接続のtools/listには制御ツールが現れない（ask_orchestratorは現れる）", () => {
     const { port } = fakeControl();
 
     const names = toolNames(wire(port)("T1"));
 
-    expect(names).toEqual(["list_tasks", "send_message"]);
+    expect(names).toEqual(["list_tasks", "send_message", "ask_orchestrator"]);
   });
 
   it("タスクの接続から制御ツールを名指しで呼んでも拒否される", () => {
@@ -1370,6 +1619,15 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
       taskId: "T1",
       continuePrompt: "方針を変える",
     });
+    // design.md §16.26。taskIdを取らない制御ツール（他のtaskId系ツールと違う特別扱いの経路）
+    callTool(conn, "decide_final_merge", { decision: "merge", reason: "CIが全緑のため" });
+    // design.md §16.33。decide_final_mergeと同じくtaskIdを取らない特別扱いの経路
+    callTool(conn, "ask_user", { question: "どちらにする？", choices: ["A案", "B案"] });
+    // design.md §16.29。add_taskもtaskIdではなくidを持つため、decide_final_merge/ask_userと
+    // 同じくtaskId抽出より前の特別扱いの経路で処理する
+    callTool(conn, "add_task", { id: "T3", prompt: "p3", done: "d3", dependsOn: ["T1"] });
+    callTool(conn, "remove_task", { taskId: "T3" });
+    callTool(conn, "update_task_dependencies", { taskId: "T2", dependsOn: ["T1"] });
 
     expect(calls).toEqual([
       "getRunStatus",
@@ -1378,7 +1636,130 @@ describe("オーケストレーター専用の制御ツール（design.md §16.2
       "continueTask:T1",
       "decideApproval:T1:accept",
       "updateTaskPrompt:T1:方針を変える",
+      "decideFinalMerge:merge:CIが全緑のため",
+      "askUser:どちらにする？:A案,B案",
+      'addTask:{"id":"T3","prompt":"p3","done":"d3","dependsOn":["T1"]}',
+      "removeTask:T3",
+      "updateTaskDependencies:T2:T1",
     ]);
+  });
+
+  it("add_task/remove_task/update_task_dependenciesはタスクの接続からは見えず、名指しでも拒否される（design.md §16.29）", () => {
+    const { port, calls } = fakeControl();
+
+    const names = toolNames(wire(port)("T1"));
+    expect(names).not.toContain("add_task");
+    expect(names).not.toContain("remove_task");
+    expect(names).not.toContain("update_task_dependencies");
+
+    const addResponse = callTool(wire(port)("T1"), "add_task", {
+      id: "T9",
+      prompt: "p",
+      done: "d",
+      dependsOn: [],
+    });
+    const removeResponse = callTool(wire(port)("T1"), "remove_task", { taskId: "T1" });
+    const updateDepsResponse = callTool(wire(port)("T1"), "update_task_dependencies", {
+      taskId: "T1",
+      dependsOn: [],
+    });
+
+    for (const response of [addResponse, removeResponse, updateDepsResponse]) {
+      expect(response !== undefined && "error" in response).toBe(true);
+      if (response !== undefined && "error" in response) {
+        expect(response.error.message).toContain("未知のツール");
+      }
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("update_task_dependenciesの引数のうち文字列でないdependsOn要素は除かれて実体へ渡る（design.md §16.29）", () => {
+    const { port, calls } = fakeControl();
+    const conn = wire(port)(ORCHESTRATOR_CONNECTION_ID);
+
+    callTool(conn, "update_task_dependencies", {
+      taskId: "T2",
+      dependsOn: ["T1", 1, null, "T3"],
+    });
+
+    expect(calls).toEqual(["updateTaskDependencies:T2:T1,T3"]);
+  });
+
+  it("add_task/remove_task/update_task_dependenciesが拒否されるとisErrorになる（send_messageと同じ流儀）", () => {
+    const port: OrchestratorControlPort = {
+      ...fakeControl().port,
+      addTask: () => ({ accepted: false, reason: "autoApprove はadd_taskから指定できません" }),
+      removeTask: () => ({ accepted: false, reason: "走行中のタスクは削除できません" }),
+      updateTaskDependencies: () => ({ accepted: false, reason: "循環しています" }),
+    };
+    const conn = wire(port)(ORCHESTRATOR_CONNECTION_ID);
+
+    const addResponse = callTool(conn, "add_task", {
+      id: "T9",
+      prompt: "p",
+      done: "d",
+      dependsOn: [],
+    });
+    const removeResponse = callTool(conn, "remove_task", { taskId: "T1" });
+    const updateDepsResponse = callTool(conn, "update_task_dependencies", {
+      taskId: "T1",
+      dependsOn: [],
+    });
+
+    for (const [response, expectedText] of [
+      [addResponse, "autoApprove"],
+      [removeResponse, "走行中"],
+      [updateDepsResponse, "循環"],
+    ] as const) {
+      expect(response !== undefined && "result" in response).toBe(true);
+      if (response !== undefined && "result" in response) {
+        const result = response.result as { isError?: boolean; content: [{ text: string }] };
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain(expectedText);
+      }
+    }
+  });
+
+  it("ask_userの引数のうち文字列でないchoicesは除かれて実体へ渡る（design.md §16.33）", () => {
+    const { port, calls } = fakeControl();
+    const conn = wire(port)(ORCHESTRATOR_CONNECTION_ID);
+
+    callTool(conn, "ask_user", { question: "q", choices: ["A", 1, null, "B"] });
+
+    expect(calls).toEqual(["askUser:q:A,B"]);
+  });
+
+  it("ask_userはタスクの接続からは見えず、名指しで呼んでも拒否される", () => {
+    const { port, calls } = fakeControl();
+
+    const names = toolNames(wire(port)("T1"));
+    expect(names).not.toContain("ask_user");
+
+    const response = callTool(wire(port)("T1"), "ask_user", {
+      question: "q",
+      choices: ["A", "B"],
+    });
+    expect(response !== undefined && "error" in response).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  it("ask_userが拒否されるとisErrorになる（send_messageと同じ流儀）", () => {
+    const port: OrchestratorControlPort = {
+      ...fakeControl().port,
+      askUser: () => ({ accepted: false, reason: "既に回答待ちの質問があります。人が答えるまで新しい質問はできません。" }),
+    };
+
+    const response = callTool(wire(port)(ORCHESTRATOR_CONNECTION_ID), "ask_user", {
+      question: "q",
+      choices: ["A", "B"],
+    });
+
+    expect(response !== undefined && "result" in response).toBe(true);
+    if (response !== undefined && "result" in response) {
+      const result = response.result as { isError?: boolean; content: [{ text: string }] };
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("既に回答待ちの質問があります");
+    }
   });
 
   it("受け付けられなかった制御ツールの結果はisErrorになる（send_messageと同じ流儀）", () => {

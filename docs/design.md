@@ -3799,14 +3799,14 @@ Viewからの手動の「再実行」だけを受け付ける。手動の再実�
 
 #### 回数切れから続ける（issue #284）
 
-回数切れ（`maxReached`）だけは、**同じ会話・同じworktreeのまま続きを走らせられる**ようにする（Viewの「続ける」。§16.8）。再試行が「最初からやり直す」形しか持たないのは、失敗（`failed`）が「その文脈のまま送り直しても同じところで詰まる」状態だからで、回数切れは違う。作業は正しい方向へ進んでいて、単に送信回数の予算が尽きただけという場合が多く、そこで20回分の文脈を捨てて最初からやり直させるのは無駄が大きい。
+回数切れ（`maxReached`）は、**同じ会話・同じworktreeのまま続きを走らせられる**ようにする（Viewの「続ける」。§16.8）。再試行が「最初からやり直す」形しか持たないのは、失敗（`failed`）が「その文脈のまま送り直しても同じところで詰まる」状態だからで、回数切れは違う。作業は正しい方向へ進んでいて、単に送信回数の予算が尽きただけという場合が多く、そこで20回分の文脈を捨てて最初からやり直させるのは無駄が大きい。**同じ理由で停滞（`stalled`）も「続ける」の対象に含めた（§16.27、Issue #336）。停滞はCLIが壊れたわけではなく同じ応答を繰り返しているだけなので、指示を変えれば同じ文脈のまま続けられる余地がある。**
 
 - 状態は `failed`（回数切れ）から `running` へ戻す（`continueTask`）。連鎖して `skipped` になった依存先を `pending` へ戻すことと、`haltedByUser` を解除することは手動の再実行と同じ
 - **`retryCount` / `manualRetryCount` は増やさない。** worktreeもブランチも作り直さないため、増やすと名前（`retrySuffixOf`）だけが実体とずれる。`submissionCount` も通算のまま残す（何回送ったかは人が予算を足すかどうかの判断材料になる）
 - ループは生きているセッションへ `runLoop` をもう1度かけて再開する。`initialPrompt` は空にして継続指示から送る（`LoopController.start` は空の初回指示を継続指示で代替する）。初回の指示を送り直すと、同じ作業を最初からやり直させることになる
 - 送信回数の予算は `maxIterations` 分そのまま足す。上限（`LOOP_ITERATION_LIMIT` = 200）は1回の `runLoop` に対する頭打ちなので、人が「続ける」を押した回数だけ通算では伸びる。**押すたびに人の判断が挟まる**ので、回数無制限の設定を用意するのとは危険度が違う（無制限は止まらないループをそのまま課金し続ける）
 
-そのため、**回数切れのときだけセッションを解放しない**（他の停止理由は従来どおり解放する。§16.10）。ここで解放すると続きから走らせる足がかりが無くなる。残ったセッションは、同じタスクを開き直したとき（「再実行」）に `startTask` が解放する。worktreeは元から `done` のときしか撤去しない（`shouldRemoveWorktree`）ので、こちらは変更しなくてよい。
+そのため、**回数切れと停滞（`stalled`。§16.27）のときだけセッションを解放しない**（他の停止理由は従来どおり解放する。§16.10）。ここで解放すると続きから走らせる足がかりが無くなる。残ったセッションは、同じタスクを開き直したとき（「再実行」）に `startTask` が解放する。worktreeは元から `done` のときしか撤去しない（`shouldRemoveWorktree`）ので、こちらは変更しなくてよい。
 
 **ウィンドウのリロード後は使えない**（セッション＝CLIのプロセスが失われている。§16.11）。Viewは「続ける」を出さず、従来どおり「再実行」だけになる。同じ理由で `allow` の実行前確認（§16.7）は挟まない。セッションが生きているということは、このプロセスの `start()` / 手動の再実行が既に確認を通してからそのタスクを起動している、ということだから。
 
@@ -4053,7 +4053,7 @@ worktreeを作れないため、`isolation` の値を問わず**git worktree隔�
   - `中断`: 進行中のターンだけ止める（`turn/interrupt` 相当）。タスクは止まらず、次の指示から続く
   - `タスク停止`: そのタスクのループを止め、`failed`（手動）にする。`merging`（衝突解決中）のときは、衝突解決セッションが生きていれば（`mergeResolutionActive`）そちらへ届き、`blocked` に確定する（`git merge --abort` は呼ばない。issue #514・§16.17）。**このタスクだけが対象で、実行全体は止めない。** 他のタスクへ依存しない・依存されない枝は通常どおり走り続ける（issue #514。§16.23「道具」の`stop_task`も同じ）
   - `再実行`: `failed` / `skipped` のタスクを、依存が満たされていればもう1度走らせる（新しいセッション・新しいworktreeで最初からやり直す）
-  - `続ける`: 回数切れ（`maxReached`）で止まったタスクを、同じ会話・同じworktreeのまま続きから走らせる（§16.5「回数切れから続ける」、issue #284）。送信回数の予算は押すたびに `maxIterations` 分足される。セッションが生きているタスク（`hasLiveSession`）でのみ出せる
+  - `続ける`: 回数切れ（`maxReached`）または停滞（`stalled`。§16.27、Issue #336）で止まったタスクを、同じ会話・同じworktreeのまま続きから走らせる（§16.5「回数切れから続ける」、issue #284）。送信回数の予算は押すたびに `maxIterations` 分足される。セッションが生きているタスク（`hasLiveSession`）でのみ出せる
   - `承認`: `waitingApproval` のとき、要求の内容をその場に出して許可・拒否を決める
   - `プロンプトを見る`: 展開後の（`{{T1.result}}` 等を差し込んだあとの）`prompt` と `continuePrompt` の両方をその場に開く（§16.4「テンプレート変数経由の権限越境」、Issue #67）。セッションが生きているタスク（`hasLiveSession`）でのみ出せる。もう一度押すと閉じる
   - `再マージ`: `blocked` のタスクを、人が手元で衝突を解いたあとにもう1度マージする（§16.17）。状態遷移（`retryMergeState`）とView側の呼び出し配線は実装済み（Issue #104）
@@ -4139,6 +4139,8 @@ worktreeを作れないため、`isolation` の値を問わず**git worktree隔�
 - 確認: 保存の直前に入力欄で名前を見せ、人が直せるようにする。既定値のままで良ければEnterだけで進むので操作は増えない。取り消した場合は保存しない。入力された名前はパス区切り・記号・制御文字・予約名・長さを検証する（出力先の外を指す名前を入口で弾く）
 - 重複: `agent.workflows.dir` 配下の既存ファイル名（拡張子を除いた部分）と衝突する場合は `-2` `-3` ... と連番を足す。一覧取得と保存の間に別の生成が割り込む競合を避けるため、実際の書き込みは排他フラグで行い、書き込み時点で衝突が判明したらその名前を候補から外してもう一度連番を進める
 
+**この節が扱うのは検証（`validateWorkflow`が見る構文的な妥当性）と安全設定の検出（`detectSecurityWarnings`）までで、タスクへの分解そのものが妥当か（並列にできるはずのタスクが直列になっていないか等）は検証していない。** 保存の直後にそれを見るレビュー段（§16.28）が続く。
+
 ### 16.10 モジュール構成
 
 ```
@@ -4162,14 +4164,15 @@ src/
     messaging.ts    タスク間メッセージングのMCPサーバと配送（§16.21。*）
     taskSession.ts  `TaskSessionHost` / `TaskSession` のインターフェース（チャット画面側の口）
     runner.ts       `WorkflowRunner`本体（薄いファサード）。セッションの生成・指示の送信・
-                     完了検知・状態遷移の接続（VSCode層）。関心事ごとの実体は下記5ファイルへ
+                     完了検知・状態遷移の接続（VSCode層）。関心事ごとの実体は下記6ファイルへ
                      切り出し済み（Issue #147）
     runnerSnapshot.ts   ワークフローViewのスナップショット構築（`getSnapshot`等。読み取り専用）
     runnerRestore.ts    ウィンドウのリロード後の実行再開（`rebuildLiveRun`等。§16.11）
     runnerWorkingDirectory.ts 作業ディレクトリの解決と疑似worktree統合（§16.6・§16.20）
     runnerMerge.ts      マージと衝突解決、タスク層のPR/MR作成（§16.17・§16.18）
     runnerMessaging.ts  タスク間メッセージング（§16.21）
-    runnerInternals.ts  上記5ファイルだけが触る`WorkflowRunner`の内部の口
+    runnerReviewComments.ts 統合PR/MRのレビューコメントのポーリング取得と通知（§16.30）
+    runnerInternals.ts  上記6ファイルだけが触る`WorkflowRunner`の内部の口
                      （`WorkflowRunnerInternals`。クラス外へは公開しない）
     planner.ts      ゴール文からYAMLを生成する（§16.9）
     roadmap.ts      ロードマップの生成・YAML化・完了の書き戻し（§16.19。*）
@@ -4180,7 +4183,7 @@ src/
 
 `*` を付けた4ファイルも、`runner.ts` / `extension.ts` からの配線を含めて実装済みで、実行に反映される（§16.13）。
 
-`runnerSnapshot.ts` / `runnerRestore.ts` / `runnerWorkingDirectory.ts` / `runnerMerge.ts` / `runnerMessaging.ts` の5ファイルは、`WorkflowRunner`のメソッドを機能単位で切り出したもので、`self: WorkflowRunnerInternals`を第一引数に取る関数の集まりとして実装している（Issue #147）。`runner.ts`側のクラスメソッドはこれらへ委譲する薄いラッパーとして残す（`getSnapshot` / `restoreRunsForView` / `retryMerge` のように公開APIとして呼ばれ続けるものは、シグネチャを変えずメソッドのまま残す）。`WorktreeCreationQueue`を1つだけ使い回す不変条件（§16.6・§16.17）は、`WorkflowRunner`のコンストラクタで組み立てたインスタンスを`self.integrationQueue`（`IntegrationMergeQueue`経由）として共有し続けることで変えていない。
+`runnerSnapshot.ts` / `runnerRestore.ts` / `runnerWorkingDirectory.ts` / `runnerMerge.ts` / `runnerMessaging.ts` / `runnerReviewComments.ts` の6ファイルは、`WorkflowRunner`のメソッドを機能単位で切り出したもので、`self: WorkflowRunnerInternals`を第一引数に取る関数の集まりとして実装している（Issue #147）。`runner.ts`側のクラスメソッドはこれらへ委譲する薄いラッパーとして残す（`getSnapshot` / `restoreRunsForView` / `retryMerge` のように公開APIとして呼ばれ続けるものは、シグネチャを変えずメソッドのまま残す）。`WorktreeCreationQueue`を1つだけ使い回す不変条件（§16.6・§16.17）は、`WorkflowRunner`のコンストラクタで組み立てたインスタンスを`self.integrationQueue`（`IntegrationMergeQueue`経由）として共有し続けることで変えていない。
 
 分割にあたって渡す`self`の型は`WorkflowRunnerInternals`（`runnerInternals.ts`）に閉じる。`runs`・`integrationQueue`・`deps`・`notify`・`pump`・`persist`・`resolveForgeState`は`WorkflowRunner`側では`private`のままにし、分割ファイルへは、コンストラクタで組み立てた`internals`（`WorkflowRunnerInternals`型のオブジェクト）だけを渡す。`this as unknown as WorkflowRunnerInternals`のキャストにはしない。キャストは構造的部分型の検査ごと無効にするため、クラス側とインターフェースがずれても`tsc`が検出できず（`pump`をリネームしても型検査は通る）、実行時に`self.pump is not a function`で初めて表面化する。メソッドはアロー関数で包み、`prototype`側の実装を都度引かせる（テストが`WorkflowRunner.prototype`へ張ったスパイを効かせるため）。分割のために`private`を外すと、`src/view/`や`extension.ts`から`runner.runs.get(id)!.runState = ...`や`runner.pump(id)`を直接書いても型検査が止められず、`persist()`・`notify()`を経ない書き換えで永続化した値とメモリ上の`LiveRun`が食い違うため（PR #157のレビュー指摘）。
 
@@ -4272,7 +4275,7 @@ Codexは送信のたびに `readConfig().codex`（VSCodeのグローバル設定
 - キーは `codex.workflow.runs`。値はrunの配列で、各runが `runId`（UUID）・定義ファイルのパス・開始時刻・統合ブランチ名・統合PR/MRの番号・タスクごとの `{ 状態, sessionId, cwd, ブランチ名, 送信回数, 失敗理由, PR/MRの番号 }` を持つ
 - 統合ブランチ名とPR/MRの番号を持たせるのは、リロード後もViewから統合の状況を辿れるようにするため。どちらもホスト側にも残っている情報で、機微は含まない
 - **応答本文は保存しない。** `{{T.result}}` の元になるテキストは機微を含みうるため、暗号化されない `workspaceState` に平文で置かない。必要になったらセッションの `ChatState` から読み直す（リロードで失われた場合は、そのタスクは再実行の対象になる）
-- ウィンドウのリロードで走行中だったタスクは、いったん `failed`（理由: 中断）として扱う。人がViewから再実行できる。`waitingReply`（§16.21）も同じ扱いにする。未配送のメッセージは保存していないため、リロードをまたいで届くことはない
+- ウィンドウのリロードで走行中だったタスクは、いったん `failed`（理由: 中断）として扱う。`waitingReply`（§16.21）も同じ扱いにする。未配送のメッセージは保存していないため、リロードをまたいで届くことはない。この直後、条件を満たせば自動的に再開する（`agent.workflows.autoResume`、既定`true`。§16.35「中断からの自動再開」）。満たさない・`false`にしている場合は、従来どおり人がViewから再実行する
 - `merging` だったタスクは、マージが途中で切れている可能性がある。状態の記録ではなく**統合ブランチの実際の状態から判定し直す**（そのタスクのマージコミットが入っていれば `done`、入っていなければ `merging` からやり直す）。統合worktreeに未解決の衝突が残っていれば `blocked` として扱い、人へ回す
 - **`originCommit`（そのタスクを開始した時点の統合ブランチのHEAD、§16.17「タスクブランチの分岐元」）は永続化していない。** リロード後に `blocked` のタスクを「再マージ」すると、`originCommit` は空文字として扱われる。この値はコンフリクト解決セッション（§16.17）へ渡す「突き合わせる相手（自分の起点から見て、他にどのタスクが先にマージされたか）」の文脈を組み立てるのに使うため、空になった場合はその文脈が空のまま解決セッションが始まる（制約）
 - タスク管理下のセッションは、汎用のパネル復元（§16.10 の7）に任せない
@@ -4423,20 +4426,25 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 
 #### ワークフロー設定の一覧
 
-`agent.workflows.*` の全11項目。実際に登録している値（型・既定値・markdownDescription）は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている（§7と同じ原則）。
+`agent.workflows.*` の全15項目。実際に登録している値（型・既定値・markdownDescription）は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている（§7と同じ原則）。
 
 | 設定                                    | スコープ            | 用途・理由                                                                                                                                             |
 | --------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `agent.workflows.dir`                   | resource            | ワークフロー定義ファイルを探すディレクトリ（既定 `.agents/workflows`）。中身は§16.16のとおり信用しないので、置き場自体はワークスペースごとに変えてよい |
 | `agent.workflows.allowAutoApprove`      | machine             | YAMLの `autoApprove: true` を有効化できるかどうか（既定 `false`）。無効化してある間はYAMLの指定によらず全承認を人へ回す（前掲の表参照）                |
+| `agent.workflows.allowClaudeBypassPermissions` | machine      | `claude.permissionMode` が `bypassPermissions` のとき、ワークフローのClaudeタスクもそのまま無人で走らせるかどうか（既定 `false`）。有効にすると§16.7の危険判定が全て無効になる                |
 | `agent.workflows.replyTimeoutSec`       | machine-overridable | タスク間メッセージング（§16.21）の返信待ちの上限秒数                                                                                                   |
-| `agent.workflows.finalMerge`            | machine             | mainを無人で書き換えるかどうかを決める。リポジトリの `.vscode/settings.json` から `auto` にされてはいけない                                            |
+| `agent.workflows.finalMerge`            | machine             | mainを無人で書き換えるかどうかを決める。リポジトリの `.vscode/settings.json` から `auto` や `orchestrator`（既定、§16.26）にされてはいけない           |
 | `agent.workflows.forge`                 | machine             | どのCLI（`gh` / `glab`）を起動するかを決める。実行するコマンドの選択にあたるので §8 と同じ扱いにする                                                   |
 | `agent.workflows.pullRequest`           | machine-overridable | 作るPR/MRの層。権限には関わらない                                                                                                                      |
 | `agent.workflows.roadmapDir`            | machine-overridable | ロードマップの出力先のパス。ワークスペースフォルダの配下に限る                                                                                         |
 | `agent.workflows.pseudoWorktreeExclude` | machine-overridable | 疑似worktreeで複製から外すディレクトリ名。増やしても安全側にしか働かない                                                                               |
 | `agent.workflows.branchNaming`          | machine-overridable | タスクブランチの命名方式（§16.6）。ブランチ名の形を決めるだけで、push先も権限も変えない                                                                |
 | `agent.workflows.draftPullRequest`      | machine-overridable | PR/MRをDraftで作るかどうか（§16.18）。有効にするほうが「人の確認を挟む」側へ倒れるため、強い制限は要らない                                             |
+| `agent.workflows.mergeApprovalTimeoutSec` | machine-overridable | 衝突解決セッション（§16.17「コンフリクト」）が承認待ちのまま止まってよい上限秒数（既定3600秒）。超えたら自動でセッションを止め`blocked`にする。権限には関わらない                |
+| `agent.workflows.finalMergeDecisionTimeoutSec` | machine-overridable | `finalMerge: orchestrator` の最終マージ判断待ちの上限秒数（既定900秒、§16.26）。タイムアウトすると `hold` へ倒す                                 |
+| `agent.workflows.ciWaitTimeoutSec`      | machine-overridable | 統合PR/MRをマージする前にCIチェックの完了を待つ上限秒数（既定1800秒、§16.36）。超えたら赤と同じ扱いで失敗にする。権限には関わらない                   |
+| `agent.workflows.ciUpdateBranchMaxRetries` | machine-overridable | マージが「baseの最新でない」ことで拒否されたときの取り込み直しの最大リトライ回数（既定2、§16.36）。権限には関わらない                              |
 
 push先のremoteをYAMLや設定から選ぶ手段は設けない。常に `origin` を使う。任意のURLへpushできると、リポジトリの中身を別の宛先へ出す経路になる。
 
@@ -4569,10 +4577,15 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 1. タスクのコミットが揃った時点で、タスクブランチをpushする
 2. 統合ブランチが未pushならpushする。baseが存在しないとPR/MRを作れない
 3. PR/MRを作る（base=統合ブランチ、head=タスクブランチ）
+3.5. `agent.workflows.reviewTaskPullRequest` が有効なら、3で作ったPR/MRを別の読み取り専用
+     セッションでレビューする（§16.31）。指摘の有無・レビュー自体の失敗を問わず4へ進む
+     （マージをブロックしない）
 4. 統合worktreeでマージし、統合ブランチをpushする
 5. `draftPullRequest` が有効なら、3で作ったPR/MRをreadyへ切り替える
 
 先にマージしてしまうと、baseとheadの間に差分が無くなり作成に失敗する（GitHubは "No commits between" を返す）。4のpushによって、作ったPR/MRはホスト側でマージ済みとして扱われる。
+
+3.5は3と4の間に挟む段で、既定は無効。3が失敗していれば（PR/MRが作れていなければ）3.5は行わない。
 
 5を4の後に置くのは、「統合ブランチへ入るまではDraftのまま」という状態をホスト側でも読めるようにするため。3が失敗していれば5は行わない。5の失敗はワークフローを止めない（PR/MRまわりの失敗で実行全体を落とさない方針は「前提が欠けている場合」と同じ）。
 
@@ -4588,7 +4601,7 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 - GitLabのMR作成は `glab mr create` ではなく `glab api projects/:id/merge_requests` へのPOSTを使っている（「本文」参照）ため、Draft指定もAPIのフィールド（`draft`）で渡す。`glab mr create --draft` のようなフラグは経由しない
 - `--field=draft=true` は文字列 `"true"` ではなく、真にJSON booleanとして送られる。実測済み: `glab 1.112.0` の `glab api --help` に「The `--field` flag behaves like `--raw-field` but converts values based on their format: Literal values `true`, `false`, `null`, and integer numbers are converted to the matching JSON types.」とある（`--raw-field` を使った場合は文字列のまま送られ、GitLab APIのboolean検証に落ちる）
 - ready化には**PR/MRの番号が要る**（下の「PR/MRの番号」）。URLから番号を取り出せなかった場合はready化を飛ばし、警告を残す。Draftのまま残るほうが、誤った番号のPR/MRをreadyにするより害が小さい
-- 統合層のPR/MRもDraftで作る。ただしこちらは**最終マージ（`finalMerge: auto`）の直前**にreadyへ切り替える。Draftのままではマージできないため、タスク層とは順序が違う
+- 統合層のPR/MRもDraftで作る。ただしこちらは**最終マージの直前（`finalMerge` の値によらず `performFinalMerge` が担う）**にreadyへ切り替える。Draftのままではマージできないため、タスク層とは順序が違う
 - 既定を `false` にしているのは後方互換のため。Draftを前提としないリポジトリで、いきなり全てのPR/MRがDraftになると人手のレビュー導線が変わる
 
 #### 統合ブランチpushの直列化とリトライ（Issue #253）
@@ -4626,12 +4639,16 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 
 #### 最終マージ
 
-設定 `agent.workflows.finalMerge`（`auto` / `pr-only`、既定 `auto`）。
+設定 `agent.workflows.finalMerge`（`auto` / `orchestrator` / `confirm` / `pr-only`、既定 `orchestrator`）。
 
 - `auto`: 統合→mainのPR/MRを作ったうえで、`gh pr merge --merge` / `glab mr merge --remove-source-branch` まで実行する
+- `orchestrator`: PR/MRを作ったうえで、mainへマージするかどうかをオーケストレーターの判断へ委ねる（**新しい既定**。判断の仕組みは§16.26）
+- `confirm`: PR/MRを作ったうえで、人の承認を待つ。承認されたときだけマージする（判断の仕組みは§16.26）
 - `pr-only`: PR/MRを作って止める。mainへの書き込みは人が行う
 
-この設定はmainを書き換えるかどうかを決めるので、**machineスコープに固定する**（§16.16）。リポジトリの `.vscode/settings.json` から `auto` へ変えられてはいけない。MRの自己マージを禁じる運用規約を持つ組織のリポジトリでは、利用者がmachine設定で `pr-only` にする。
+この設定はmainを書き換えるかどうかを決めるので、**machineスコープに固定する**（§16.16）。リポジトリの `.vscode/settings.json` から緩められてはいけない。MRの自己マージを禁じる運用規約を持つ組織のリポジトリでは、利用者がmachine設定で `pr-only` にする。
+
+**マージを実行する直前に、CIチェックの完了を待つ（§16.36、Issue #556）。** `auto` / `orchestrator` / `confirm` のいずれも、実際に`gh pr merge` / `glab mr merge`を呼ぶ直前で統合PR/MRのCIチェック（`statusCheckRollup` / パイプライン）の完了を待ち、赤ならマージせずタスクを失敗として確定する。CIが1件も設定されていないリポジトリでは待たずに即マージする（チェックが0件なのと赤なのを取り違えない）。マージが「baseの最新でない」ことで拒否された場合は`gh pr update-branch` / `glab mr rebase`で取り込み直し、CIの完了を待ち直してから再度マージを試みる。詳細は§16.36を参照。
 
 mainへマージした後も統合ブランチは残す。片付けはViewの操作から行う。
 
@@ -4647,7 +4664,7 @@ mainへマージした後も統合ブランチは残す。片付けはViewの操
 
 この場合、`finalMerge: auto` であってもmainへのマージは行わない。PR/MRを介さずにmainを書き換えることはしない。統合ブランチが残るので、人が後から確かめてマージする。
 
-「作る順序」と最終マージそのものは`test/integration/workflowForgeOrder.test.ts`（5件。Issue #172）が実VSCode上で確かめる。実行の起点に**ローカルのbareリポジトリを`origin`に持つ作業ツリー**を使い（`test/integration/helpers/forgeRepo.ts`）、`git push`は本物を走らせる。push先がローカルのファイルパスなので、本番と同じ手順を通しながらネットワーク越しのホストへは到達しない（§14.33）。`gh` / `glab`は記録するだけのフェイクが受け、gitは記録しつつ実物へ委譲する（`RecordingCli` / `RecordingGit`）。pushとPR/MR作成にまたがる順序は1本の時系列（`ForgeCallLog`）へ落として比べる。確かめるのは、タスク層が`push <taskBranch>` → `push <integrationBranch>` → PR/MR作成 → マージ → `push <integrationBranch>`の順に進むこと・`pullRequest`が`per-task` / `integration` / `none`で作られる層が変わること・GitHubなら`gh`、GitLabなら`glab`（本文は`--field description=@<path>`）が選ばれること・`finalMerge: auto`で統合PR/MRの作成に続けて`gh pr merge --merge` / `glab mr merge --remove-source-branch`まで進み、`pr-only`では作成で止まること・mainへマージした後も統合ブランチがローカルに残ることの5点。実ホストで実引数が受理されるかは[manual-test.md](manual-test.md)のW-Dに残る（1回通せば足りる）。
+「作る順序」と最終マージそのものは`test/integration/workflowForgeOrder.test.ts`（5件。Issue #172）が実VSCode上で確かめる。実行の起点に**ローカルのbareリポジトリを`origin`に持つ作業ツリー**を使い（`test/integration/helpers/forgeRepo.ts`）、`git push`は本物を走らせる。push先がローカルのファイルパスなので、本番と同じ手順を通しながらネットワーク越しのホストへは到達しない（§14.33）。`gh` / `glab`は記録するだけのフェイクが受け、gitは記録しつつ実物へ委譲する（`RecordingCli` / `RecordingGit`）。pushとPR/MR作成にまたがる順序は1本の時系列（`ForgeCallLog`）へ落として比べる。確かめるのは、タスク層が`push <taskBranch>` → `push <integrationBranch>` → PR/MR作成 → マージ → `push <integrationBranch>`の順に進むこと・`pullRequest`が`per-task` / `integration` / `none`で作られる層が変わること・GitHubなら`gh`、GitLabなら`glab`（本文は`--field description=@<path>`）が選ばれること・`finalMerge: auto`で統合PR/MRの作成に続けて`gh pr merge --merge` / `glab mr merge --remove-source-branch`まで進み、`pr-only`では作成で止まること・mainへマージした後も統合ブランチがローカルに残ることの5点。**§16.36（Issue #556）以降、`RecordingCli`は`gh pr view --json=statusCheckRollup` / `glab api .../merge_requests/<iid>`（CI状態取得）にも応答する。**あえて「チェックが1件あって緑」の形にしてある（空応答のままだと`fetchCiConclusion`が`JSON.parse('')`で例外を投げ、fail-closedの設計どおり`conclusion: 'failed'`へ倒れてマージが一度も呼ばれなくなるため。空配列を返すと今度は「CI未設定」の経路に落ちて、`finalMerge: auto`が確かめたい「CIの完了を待ってからマージする」経路を通らなくなる。セキュリティ監査の指摘で判明。2026-08-23）。実ホストで実引数が受理されるかは[manual-test.md](manual-test.md)のW-Dに残る（1回通せば足りる）。
 
 この経路は`test/integration/workflowForgePrerequisites.test.ts`（4件。Issue #169）が実VSCode上で確かめる。統合テストのfixtureリポジトリは`origin` remoteを持たず`PATH`も絞ってあるため、**前提が欠けている状態が既定**で、追加の外部依存なしに再現できる。ホストの判定結果・`gh` / `glab`のPATH上の有無・認証状態だけを`ExtensionTestApi.workflow.setForgeOverrides()`（`AGENT_SESSIONS_INTEGRATION_TEST=1`のときだけ公開する差し替え口。`setTaskSessionHost`と同じ仕組みで、渡した項目だけが差し替わる）で入れ替え、欠けている項目を1つずつ変える。`git`は差し替えないので統合ブランチへのマージは実gitで行われ、`gh` / `glab`は記録するだけのフェイク（`RecordingCli`）が受けるため、テストがホストへ触れることはない。確かめるのは、警告が`WorkflowRunSnapshot.warnings`へ出ること・PR/MRの作成が飛ばされること（`auth status`以外のCLI呼び出しが1件も無いこと）・ローカルのマージが最後まで進んでrunが完走すること・`finalMerge: auto`でもmainが動かず統合ブランチがローカルに残ることの4点。
 
@@ -4704,7 +4721,7 @@ PR/MRの本文には、YAMLに書かれた `prompt` と `done` が入る。こ�
 - **`issue` だけは転記の誤りを警告に留めず、ロードマップの値へ直す**（`alignRoadmapIssues`）。分解セッションは、ロードマップにIssue番号が無い項目にも近くの番号を書き写してしまう（実測では、番号を持つ項目の隣にある無関係な項目へ同じ番号が並んだ）。`issue` はマージ時に `Closes #<N>` として**無関係のIssueを閉じる**ため、人が警告を見落としたときの被害が取り返しのつかない種類のものになる。ロードマップが正であり、YAML側は写しでしかない以上、直す方向に迷いは無い（ロードマップにIssue行が無ければ `issue` を削る）。直した件数は `correctedIssues` として返して人へ知らせる
 - **ただしIssue行はあるが番号として読めない項目では、`issue` を削らない**（Issue #408）。`#12abc` のような書き損じや、桁が極端に多くて安全な整数に収まらない番号がこれに当たる。人は番号を書いているのだから「番号が無い」とは扱えず、削るとYAML側にある正しい値まで失う。この場合は項目に `issueUnparseable` を立てて `issue` には触れず、警告として人へ見せる（人が直すべきはロードマップ側であるため）
 - 材料に無いタスク（分解セッションが独自に足したもの）の `issue` は触らない。そちらは転記の確認（`detectRoadmapMaterialMismatches`）が人へ見せる範囲
-- 生成後の検証と、`autoApprove` / `allow` を含む場合の強調は §16.9 のまま
+- 生成後の検証と、`autoApprove` / `allow` を含む場合の強調は §16.9 のまま。タスク分解のレビュー（§16.28）も、ゴール文から生成した場合と同じ`handlePlanSuccess`を経由するため、この経路（ロードマップ由来）にも同じく掛かる
 
 #### ロードマップの更新
 
@@ -4753,11 +4770,11 @@ PR/MRの本文には、YAMLに書かれた `prompt` と `done` が入る。こ�
 
 ### 16.21 タスク間のメッセージング
 
-runごとにMCPサーバ（`messaging.ts`）を立て、タスクのセッションへツールとして見せる配線は済んでいる（Issue #105・#123）。実行中のタスクには `list_tasks` / `send_message` が実際に見える。`waitingReply` も `runState.ts` の `TaskState` に含まれ、ワークフローViewに表示される。
+runごとにMCPサーバ（`messaging.ts`）を立て、タスクのセッションへツールとして見せる配線は済んでいる（Issue #105・#123）。実行中のタスクには `list_tasks` / `send_message` / `ask_orchestrator`（roadmap W7、Issue #571。オーケストレーターへ判断を仰ぐ経路。詳細は§16.32）が実際に見える。`waitingReply` も `runState.ts` の `TaskState` に含まれ、ワークフローViewに表示される。
 
 §16.4 の `{{T1.result}}` は、**完了したタスクの結果を一方向に渡す**だけの仕組みである。並列で走っているタスク同士が途中で問い合わせる手段は無い。UI側のタスクがAPI側のタスクへレスポンスの形を聞きたくても、相手が終わるまで待つか、人が仲介するしかない。
 
-Claude Codeには、別々に走っているセッションが互いに名前で呼び合ってメッセージを送る仕組みがある。同じことをワークフローのタスク同士でできるようにする。**Codexにはこれに相当する機能が無い**ため、拡張機能側で両プロバイダに同じ口を用意する。
+Claude Codeには、別々に走っているセッションが互いに名前で呼び合ってメッセージを送る仕組みがある。これと同じ口をワークフローのタスクにも用意する（**ただし§16.34（roadmap W9、Issue #547）以降、宛先はオーケストレーターに固定されており、タスク同士が直接互いを名指しすることはできない。「同じ口」は送信手段の話であって、宛先の自由度まで揃えたわけではない**）。**Codexにはこれに相当する機能が無い**ため、拡張機能側で両プロバイダに同じ口を用意する。
 
 #### 口の与え方
 
@@ -4766,12 +4783,18 @@ Claude Codeには、別々に走っているセッションが互いに名前で
 - サーバはrunごとに立て、タスクのセッションを開くときにMCPの設定として渡す
 - **送信元はサーバ側が接続で判別する。** ツールの引数でタスクidを名乗らせない。名乗らせると、あるタスクが別のタスクを騙って送れてしまう
 
-| ツール         | 引数                                            | 返り値                                       |
-| -------------- | ----------------------------------------------- | -------------------------------------------- |
-| `list_tasks`   | なし                                            | 同じrunのタスクid・状態・直近の応答の1行要約 |
-| `send_message` | `to`（タスクid）・`body`・`expectReply`（真偽） | 受け付けたかどうかと、その理由               |
+| ツール              | 引数                                            | 返り値                                       |
+| ------------------- | ----------------------------------------------- | -------------------------------------------- |
+| `list_tasks`        | なし                                            | 同じrunのタスクid・状態・直近の応答の1行要約 |
+| `send_message`      | `to`（宛先）・`body`・`expectReply`（真偽）     | 受け付けたかどうかと、その理由                |
+| `ask_orchestrator`  | `question`・`blocking`（真偽）                  | 受け付けたかどうかと、その理由（§16.32、Issue #571） |
 
 `wait_reply` のような、返事が来るまでツールの中で待つものは置かない。互いに待つとデッドロックする。
+
+**`send_message`の宛先は、送信元によって意味が変わる（§16.34、Issue #547でタスク間の直接
+メッセージングを廃した）。** タスクからの呼び出しでは`to`は常にオーケストレーターに固定され、
+他タスクのidを書いても拒否される。オーケストレーターからの呼び出しでは`to`に同じrunの
+タスクidを指定できる（従来どおり）。詳細は§16.34を見ること。
 
 トランスポート（`startHttpMcpTransport`、HTTP実装）は、JSONをパースする前のHTTPリクエストボディの受信バイト数にも上限（`MAX_MCP_REQUEST_BODY_BYTES`、64KiB）を設ける（Issue #132 PRレビューでのセキュリティ監査、Info）。`MAX_MESSAGE_BODY_LENGTH` はJSONをパースし終えた後の `validateSendMessage` で効くため、パース前の受信量そのものには効かない。ローカルループバック（`127.0.0.1`）+ 128bitトークン付きURLでしか到達できず外部からの悪用は考えにくいが、そのタスクのCLIプロセス自身が巨大なボディを送る経路は残るため、受信を打ち切る上限を別に設けた。上限を超えたら413で打ち切る。
 
@@ -4796,6 +4819,7 @@ Claude Codeには、別々に走っているセッションが互いに名前で
 
 - 受け取ったメッセージは、そのタスクの**次の指示の先頭へ添える**。走行中のターンへ割り込まない。ターンの途中で文脈が変わるのを避けるため
 - 宛先が `pending` なら、そのタスクの開始時の最初の指示へ添える
+- 上の「`pending`なら…」「`done`/`failed`/…なら配送できない」は、宛先が実在タスクである場合（オーケストレーターからタスクへの送信）にだけ当てはまる。タスクからオーケストレーターへの送信は宛先が固定（§16.34）で、オーケストレーターはrunが生きている間ずっと存在するため、この意味での配送不能状態を持たない
 - 宛先が `done` / `failed` / `blocked` / `skipped` なら配送できない。`send_message` はその旨を返す
 - 1件あたりの長さの上限は独立した定数 `MAX_MESSAGE_BODY_LENGTH`（4000文字）を持つ（Issue #132）。以前は `MAX_PROMPT_LENGTH`（20000文字。YAMLに書く `prompt` 自体の上限）を流用していたが、性質が異なる値の流用だった。メッセージの本文はエージェントが実行時に自由に生成し、`dependsOn` を問わず任意の（送信元より緩い権限を持ちうる）宛先へ届く。これは §16.4 の `{{T1.result}}`（`MAX_TEMPLATE_RESULT_LENGTH`、4000文字）と同じ脅威クラス（上流の自由記述がより緩い権限の下流へそのまま渡る経路）にあたるため、値もそちらへ揃えた。上限を超えた場合、`validateSendMessage` は `{{T1.result}}` 側（黙って切り詰める）と違い**受付自体を拒否する**。`send_message` はモデルが明示的に呼ぶツール呼び出しであり拒否理由がその場でモデルへ返るため、モデル自身が本文を短くして送り直せる。一方 `{{T1.result}}` の展開はテンプレート変数を差し込むオーケストレータ側の自動処理で、その時点でモデルの判断が介在する余地が無い（差し込む先の `prompt` はワークフロー開始前に固定されている）ため、黙って切り詰めることだけが唯一実行可能な安全策になる、という違いによる
 - run全体で配送できる総数にも上限を置く（`MAX_MESSAGES_PER_RUN` = 500。タスク総数の上限 `MAX_TASK_COUNT`（50）の10倍を採った）。無制限だと互いに送り合ってコンテキストとレート制限を食い潰す
@@ -4805,7 +4829,7 @@ Claude Codeには、別々に走っているセッションが互いに名前で
 
 #### 宛先の範囲
 
-同じrunのタスクにだけ送れる。依存関係の有無は問わない。**並列で走っているタスク同士の問い合わせがこの機能の主目的**なので、`dependsOn` で絞ると使えなくなる。
+**タスクからの送信は、宛先を問わずオーケストレーターに固定される（§16.34、Issue #547）。**タスク同士が直接つながる経路は無い。オーケストレーターからの送信は、同じrunの実在タスクへ依存関係の有無を問わず送れる（従来どおり。並列で走っているタスク同士の状況をオーケストレーター経由で橋渡しするのがこの経路の主目的なので、`dependsOn` では絞らない）。
 
 runをまたぐ通信と、ワークフローの外のセッションへの送信はできない。
 
@@ -4813,7 +4837,7 @@ runをまたぐ通信と、ワークフローの外のセッションへの送�
 
 受け取ったメッセージは、別のエージェントが生成した文である。**指示ではなくデータとして扱わせる。**
 
-- 配送するときは出所と範囲が分かる形で包む（`<task-message from="T2">…</task-message>` のような明示的な囲い）。本文中の `<` `>` は実体参照（`&lt;` `&gt;`）へ変換してから包む（`escapeAngleBrackets`）。本文がどんな文字列（`</task-message>` や偽の `from` 属性を含む文字列）であっても、これだけで `<...>` というタグ構造そのものを再構成できなくなるため、囲いの偽装は構造的に成立しない。§16.4の対策3「区切る」がテンプレート変数側で採っている `nonce`（呼び出しごとの乱数）に相当する仕掛けはここでは不要（実体参照化のほうが強い防御であり、乱数で偽装の確率を下げる必要が無い）
+- 配送するときは出所と範囲が分かる形で包む（`<task-message from="T2">…</task-message>` のような明示的な囲い。**ただし§16.34（roadmap W9、Issue #547）以降、タスクが実際に受け取るメッセージの`from`は常にオーケストレーター（`-orchestrator-`）になる**——タスク同士が直接の宛先になることはなくなったため。囲いの仕組み自体（無害化・構造再構成の防止）は経路によらず同じ）。本文中の `<` `>` は実体参照（`&lt;` `&gt;`）へ変換してから包む（`escapeAngleBrackets`）。本文がどんな文字列（`</task-message>` や偽の `from` 属性を含む文字列）であっても、これだけで `<...>` というタグ構造そのものを再構成できなくなるため、囲いの偽装は構造的に成立しない。§16.4の対策3「区切る」がテンプレート変数側で採っている `nonce`（呼び出しごとの乱数）に相当する仕掛けはここでは不要（実体参照化のほうが強い防御であり、乱数で偽装の確率を下げる必要が無い）
 - 囲いの中の文を指示として実行しないよう、添える文面で明示する
 - 本文の制御文字は落とすが、**改行・タブ・復帰は残す**（`stripControlCharsPreservingNewlines`、Issue #132）。以前は改行も空白へ畳む `stripControlChars` を使っており、複数行のメッセージがCLIへ実際に送る本文の上で1行に潰れてしまっていた（意図した仕様ではない。改行を潰す必要があるのは1行の表示（承認カードのタイトル等）に限られ、CLIへ送る本文の意味そのものを変えてよい理由にはならない）。改行を残しても囲いの偽装は成立しない。`escapeAngleBrackets` による無害化（前掲）は本文の中身に関わらず一様に効くため、改行の有無は安全性に影響しない
 - ただしこれは補助でしかない。**一次防御は下流タスク自身の権限設定（`sandbox` / `approvalMode` / `autoApprove`。§16.16）であり、上の囲いはそれを補う見える化でしかない。** 送信元と受信先が同じ権限の下にある保証はどこにもない（詳細は次項「メッセージング経由の権限越境」）
@@ -4832,7 +4856,7 @@ runをまたぐ通信と、ワークフローの外のセッションへの送�
 
 しかも、メッセージングの宛先は**`dependsOn` を問わない**（前掲「宛先の範囲」）。テンプレート変数（`{{T1.result}}`）は依存関係に沿ってしか流れないのに対し、メッセージは同じrunの任意のタスクへ送れる。`sandbox: read-only` のタスクから `workspace-write` かつ `autoApprove: true` のタスクへ、依存の有無を問わず自由記述を送れてしまう。**経路としてはテンプレート変数より広い。**
 
-**§16.4と本節は、同じ脅威クラスの2つの経路である。** 一方は「完了したタスクの結果を一方向に、依存関係に沿って渡す」経路、他方は「走行中のタスク同士が依存を問わず送り合う」経路で、下流タスクの権限が上流より緩ければどちらも同じ形で権限越境になりうる。片方（§16.4）だけに対策を入れて本節を素通りさせると、経路として広い分だけ穴が残る。
+**§16.4と本節は、同じ脅威クラスの2つの経路である。** 一方は「完了したタスクの結果を一方向に、依存関係に沿って渡す」経路、他方は「走行中のタスクの自由記述が、依存を問わず別のタスクへ渡る」経路で、下流タスクの権限が上流より緩ければどちらも同じ形で権限越境になりうる。片方（§16.4）だけに対策を入れて本節を素通りさせると、経路として広い分だけ穴が残る。**§16.34（roadmap W9、Issue #547）以降、この経路は必ずオーケストレーターの中継を経由する（走行中のタスク同士が直接送り合うことはできない）が、中継を挟んでも「上流タスクの自由記述が下流タスクの権限で実行されうる」という脅威の形そのものは変わらない。一方で、この節が説明する`messagingPermissionEscalation`警告は中継後は実質発火しなくなる（§16.34「影響範囲」）。**
 
 対策は§16.4の案2（警告）と同じ立て付けにする。**エラーにはせず、警告として出す。** 送信先のタスクが送信元より緩い `sandbox` / `approvalMode` / `autoApprove` を持つ場合に、ワークフローViewの警告欄へ出す。書けてしまうこと自体は止めず、見えるようにするだけである（§16.7の危険判定・§16.4の案2と同じ位置付け）。判定ロジック（`permissionEscalationReasons`、安全順序表 `SANDBOX_SAFETY_ORDER` / `CODEX_APPROVAL_SAFETY_ORDER` / `CLAUDE_PERMISSION_SAFETY_ORDER`）は§16.4の実装をそのまま再利用し、独自の判定は持たない（Issue #132で実装済み）。
 
@@ -4903,7 +4927,7 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 
 - `planner.ts` の分解セッション（§16.9）は**実行前**に1回だけ動き、YAMLを作って役目を終える。実行中のrunは見ない
 - `runner.ts` は実行中のrunを完全に把握しているが、モデルではないので人の自然文を解釈しない
-- タスク間メッセージング（§16.21）は**タスク同士**の横の通信で、人は関与しない
+- タスク間メッセージング（§16.21）はタスクとオーケストレーターの通信で、人は関与しない（§16.34（roadmap W9、Issue #547）以降、タスク同士が直接の宛先になることはなく、必ずオーケストレーターの中継を経由する）
 
 オーケストレーターセッションは、この3つの隙間にある「実行中のrun全体を見て、人と自然文で話し、必要なら実行へ手を入れる」役を担う。
 
@@ -4947,15 +4971,18 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 | run開始              | ゴール・タスクid一覧・依存関係・並列枠の要約       |
 | タスクが `done`      | id・所要・直近の応答の1行要約                      |
 | タスクが `failed`    | id・理由（回数切れ／ターン失敗／手動停止）         |
+| タスクが停滞して止まる（`stalled`。§16.27、Issue #336） | id・停滞した旨・`continue_task`/`retry_task`のどちらでも復帰できる旨（`taskStalled`） |
 | `waitingApproval` へ | id・要求の1行要約（`TaskPendingApprovalSnapshot`） |
 | `blocked` へ         | id・衝突して統合できていない旨                     |
+| タスクからメッセージを受信（`taskMessage`。§16.34、roadmap W9、Issue #547） | 送信元id・本文・返信待ちかどうか |
+| 統合PR/MRに新しいレビューコメントが付く（`reviewComment`。§16.30、roadmap W5、Issue #339） | 投稿者・本文 |
 | run終了              | 全体の結果・統合とPR/MRの結果                      |
 
 - 送信は走行中のターンへ割り込まない。ターン実行中に起きたイベントは溜めておき、**次の送信へまとめて添える**。§16.21の `composeNextPrompt` と同じ流儀にする（合流させないと、並列で3タスクが同時に終わった瞬間に3ターン連続で走る）
 - 人の発話とイベント通知が同時に溜まった場合、**人の発話を基準の本文とし、イベントはその前に添える**。§16.21の対処（`basePrompt` は常に全量温存し、削るのはメッセージ側だけ）と同じ理由で、人の指示が押し出されてはならない
 - run全体で送るイベント通知の総数に上限を置く（`MAX_ORCHESTRATOR_EVENTS_PER_RUN`。`MAX_MESSAGES_PER_RUN` と同じ500）。超えた分は落とし、落としたことを次の通知に添える
 
-定期ポーリング（N秒ごとに現状を見せて報告させる）は採らない。変化が無い間もターンを消費し続けるうえ、イベント通知があれば「変化した瞬間」に必ず届くため、ポーリングで拾える追加の情報が無い。
+定期ポーリング（N秒ごとに現状を見せて報告させる）は採らない。変化が無い間もターンを消費し続けるうえ、イベント通知があれば「変化した瞬間」に必ず届くため、ポーリングで拾える追加の情報が無い。**これはオーケストレーターのターンを駆動する頻度についての話であり、外部（ホスト側）の状態をCLIで取りに行く頻度とは別の話。** レビューコメントの取得（`reviewComment`、§16.30）はCLIをポーリングするが、変化（新しいコメント）を見つけた回だけ通知するため、この節の「定期ポーリングは採らない」（＝変化が無くてもターンを消費させない）という原則自体は破っていない。
 
 #### 道具（MCPツール）
 
@@ -4973,13 +5000,18 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 | `continue_task`      | `taskId`                      | `WorkflowRunner.continueTask`                        |
 | `decide_approval`    | `taskId` / `decision`         | `WorkflowRunner.decideApproval`                      |
 | `update_task_prompt` | `taskId` / `continuePrompt`   | 後述（新設）                                         |
+| `decide_final_merge` | `decision` / `reason`         | 後述（新設、§16.26）                                 |
+| `ask_user`           | `question` / `choices`        | 後述（新設、§16.33、Issue #583）                     |
+| `add_task`           | `id` / `prompt` / `done` / `dependsOn` 等 | 後述（新設、§16.29、roadmap W4、Issue #338）        |
+| `remove_task`        | `taskId`                      | 後述（新設、§16.29、roadmap W4、Issue #338）         |
+| `update_task_dependencies` | `taskId` / `dependsOn`  | 後述（新設、§16.29、roadmap W4、Issue #338）         |
 
 - 制御ツールは**既存のrunnerのメソッドをそのまま呼ぶ**。Viewのボタンが通るのと同じ経路にし、モデル用の別経路を作らない。状態遷移の正しさを1か所（`runState.ts`）に保つため
 - `stop_task` の対象は「走行中のタスク」に限らない。**衝突解決セッション（`live.mergeResolutions`。§16.17「コンフリクト」5.）も対象**（issue #514）。`merging` のタスク自身のループは既に終わっているが、統合worktreeで開く衝突解決セッションはまだ生きており、そちらへ `stopLoop()` を届ける。`WorkflowRunner.stopTask` は戻り値（`boolean`）を「送り先を見つけて `stopLoop()` を呼べたか」の根拠にし、見つからなければ `false` を返す。制御ツール側（`buildOrchestratorControlPort` の `stopTask`）はこれを見て `no(...)` を返し、届いていないのに「止めました」という成功を返さない。人はワークフローViewを見て「止まっていない」ことに気づけるが、オーケストレーターは応答（`accepted`）しか見ないため、一度嘘の成功を返すとその経路を二度と再試行しない
 - `no(...)` は「見つからない」と「届いたが既に終わっていた」を同じ文言で返してはならない（issue #514 medium指摘）。`live.tasks` のエントリは `onTaskFinished` 後も消えないため、`merging` のタスクのように「送り先はあったが、ループは既に終わっていた」場合にも `stopLoop()` は `false` を返す。これを「見つかりません」と伝えるとオーケストレーターが誤診する（実際には届いていたのに、届いていないと思って的外れな再試行をする）。`WorkflowRunner.hasStoppableSession` で送り先の有無だけを別に判定し、文言を「見つかりません」／「既に停止しています」に分ける
 - **`stop_task` はこのタスク単体だけを止め、run全体を止めない。** `merging` のタスクへの `stop_task` は衝突解決セッションへ `stopLoop()` を送るが、その結果（`LoopStopReason: 'taskStopped'`）を `WorkflowRunner.stop()`（全体停止）からの同じ `stopLoop()` と区別できないと、`runnerMerge.ts` の `finishMergeResolution` が誤って実行全体を `haltedByUser` にしてしまう（issue #514の本題）。`MergeResolutionEntry.stoppedByStopTask` を送り元の印にし、`stop_task` 経由なら他の `pending` タスクを `skipped` にせず、`retry_task` / `continue_task` / `decide_approval` も通常どおり使えるままにする。だからこそ次の一文が成り立つ: `stop_task` はこの検査（`runHaltedByUserReason`）を通さない（止める方向は停止意図と矛盾しないため呼び出し側で除外する）。もし `stop_task` 自身が `haltedByUser` を立ててしまうなら、この一文の前提が壊れる
 - `get_run_status` が返すのは進捗の件数・タスクの状態・直近の応答の1行要約・警告欄の内容・統合の状況まで。**応答本文そのものは返さない**（`LiveTask` が本文を持たないのと同じ。§16.11）
-- **run終了時にMCPサーバごと閉じる**（§16.21のとおり、runが終われば新しいタスクは開始されないため接続は要らない）。以降オーケストレーターからは制御ツールも `list_tasks` も見えなくなり、**会話だけが続けられる**。「制御ツールだけを無効にしてサーバは残す」形は採らない。runごとのHTTPサーバがウィンドウの寿命まで開いたままになるうえ、runが終わったあとに動かせる対象がもう無いため。run終了の通知（次項の表）に「以降ツールは使えない」ことを明記して、モデルが使えないツールを呼び続けないようにする
+- **run終了時にMCPサーバごと閉じる**（§16.21のとおり、runが終われば新しいタスクは開始されないため接続は要らない）。以降オーケストレーターからは制御ツールも `list_tasks` も見えなくなり、**会話だけが続けられる**。「制御ツールだけを無効にしてサーバは残す」形は採らない。runごとのHTTPサーバがウィンドウの寿命まで開いたままになるうえ、runが終わったあとに動かせる対象がもう無いため。run終了の通知（次項の表）に「以降ツールは使えない」ことを明記して、モデルが使えないツールを呼び続けないようにする。**例外: `finalMerge: orchestrator` の最終マージ判断待ちの間（§16.26）は、outcomeが`succeeded`（終了確定）になった後もサーバを閉じない。** `decide_final_merge`で判断を受ける以上、判断待ちの間にサーバが閉じていては判断そのものを受け付けられないため
 - `stop`（run全体の停止）はツールにしない。run全体を止めるのは人の判断に残す
 
 `update_task_prompt` が方針転換の実体になる。走行中のタスクへ「以降はこの方針でやれ」を届ける手段が、現状は `send_message`（次の指示の先頭へ添えるだけで、元の `continuePrompt` は残り続ける）しか無い。
@@ -4999,7 +5031,8 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 - **チャットタブ**: 全文・思考の折りたたみ・承認カード・Markdown描画は通常のチャット画面がすでに持っている。オーケストレーター用に作り直さず、`会話を開く`（またはオーケストレーター欄の要約の押下）で同じ画面を前面に出す（`reveal`）
 - webview → ホスト: `{type: 'orchestratorSend', text}` / `{type: 'orchestratorReveal'}`（`workflowScript.ts` → `workflowView.ts` の `handleMessage`）
 - ホスト → webview: 既存の `state` メッセージへ `orchestrator: {available, busy, lastSummary}` を足す（差分のみ送る既存の流儀に乗せる）
-- **人が最後に見てから応答が増えていれば、オーケストレーター欄に未読の印を出す。** 疑問点の確認（オーケストレーターから人への質問）はこの経路で気付かせる。専用の `ask_user` ツールは置かない。質問は普通の応答として出せば足り、ツールにすると「返事があるまでツールの中で待つ」形になって§16.21が避けたデッドロックを持ち込む
+- **人が最後に見てから応答が増えていれば、オーケストレーター欄に未読の印を出す。** オーケストレーターが自発的に報告するだけの疑問点はこの経路で気付かせれば足りる。
+- **人へ確認を絞って求める場合は`ask_user`ツールを使う（W8、Issue #583、§16.33）。** 当初はこの§16.23だけで「ツールにすると返事があるまでツールの中で待つ形になり、§16.21が避けたデッドロックを持ち込む」との理由で専用ツールを置かない方針だったが、§16.33ではツール呼び出し自体は同期的にすぐ返し（HTTPレスポンスを保留しない）、「人が選ぶまで待つ」は送信ゲート（`notifyOrchestrator`等がイベント送信を止めて溜める）だけで実現しているため、デッドロックは持ち込まない
 - 入力欄へ入れた文字列は人の入力であり、タスクの出力ではない。`wrapTaskMessage` の囲いは付けない。逆に、イベント通知に含まれるタスク由来の文字列（応答の1行要約・失敗理由）は**エージェントの出力なので囲う**（`wrapTaskMessage` / `TASK_MESSAGE_GUIDANCE` を再利用し、`stripControlCharsPreservingNewlines` を通す）
 
 #### 信頼境界
@@ -5016,7 +5049,7 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 #### 制約
 
 - runごとに1つ。複数人が別々のオーケストレーターと話す形は考えない
-- オーケストレーター自身はワークフロー定義（YAML）を書き換えない。タスクの追加・依存の変更は行えず、方針転換は既存タスクの `continuePrompt` の差し替えと `send_message` の範囲に収まる。定義そのものを変えたい場合は、人が定義ファイルを直して再実行する（§16.9の経路）
+- オーケストレーター自身はワークフロー定義ファイル（YAML）を書き換えない。ただし実行中の定義（メモリ上の`live.def`）に対しては、`add_task` / `remove_task` / `update_task_dependencies`（§16.29、roadmap W4、Issue #338）でタスクの追加・削除・依存の変更ができる。人の承認を挟まずオーケストレーターの判断で適用され、適用した内容は全文が警告欄へ残る。方針転換は既存タスクの `continuePrompt` の差し替え（`update_task_prompt`）・`send_message`・この3ツールの範囲に収まる。YAMLファイルそのものを変えたい場合は、人が定義ファイルを直して再実行する（§16.9の経路）
 - run終了後の制御ツールは無効。過去のrunを後から動かす経路は作らない
 
 #### 実装順序（TDD）
@@ -5127,3 +5160,957 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 6. 同じ性質を複数箇所で確認している場合、**片方だけ戻すともう片方がマスクする**ことがある。片方を戻すともう一方が代わりに検知して見かけ上REDになる（正しく検出できているように見える）が、それは戻した側の欠陥を見ているのではなく、別の防御が別の理由でREDにしているだけの場合がある。同じ性質を複数箇所で確認しているときは、その全てを戻した状態でも測ること
 7. 仕込んだ攻撃入力が、**検査地点まで実際に届いているか**。Issue #505のRED実測では、偽装したマニフェストのキー `../evil-...` が境界検査より手前の `isValidManifestKey` で弾かれており、テストは境界検査について何も測っていなかった。手前に別の検証がある場合、そこを通過する入力でなければ、目的の検査地点には到達しない
 8. RED実測は、**その修正の核となる一箇所だけを戻して**測る。`git stash` 等で差分全体を戻すと、同じPRに含まれる別の変更（無関係な配線変更・ゲート除去等）が代わりにREDを出し、核心そのものは何も検証されていないのに「REDを実測した」という誤った記録が残る。実例（Issue #511）: `runnerWorkingDirectory.ts` の `baseline` 更新1行を含むPRで、`git stash` により差分全体を旧実装へ戻してRED実測としたが、実際にREDを出していたのは同じPR内の別変更（`runner.ts` の `finishedNotified` ゲート除去）であり、baseline更新ロジック自体はその1行を無効化しても・常に更新するよう変えても2件とも緑のままだった（後日の再監査で発覚）
+
+### 16.26 最終マージの判断（Issue #335、ロードマップW1）
+
+統合→mainの最終マージ（§16.18「最終マージ」）を実行するかどうかを、誰がどう決めるかの設定。設定は `agent.workflows.finalMerge` で、4つの値を持つ。**`auto` と `pr-only` は既存の値のまま消さない。**
+
+- `auto` — PR/MRを作ってそのままマージする（従来の既定）
+- `orchestrator` — PR/MRを作り、オーケストレーターの判断でマージする（**新しい既定**）
+- `confirm` — PR/MRを作って人の承認を待ち、承認されたときだけマージする
+- `pr-only` — PR/MRを作った時点でrunを終える
+
+`auto` と `pr-only` の挙動そのものは§16.18に書いたとおりで変わらない。以下は `orchestrator` / `confirm` が追加で必要とする「判断待ち」の仕組みを扱う。
+
+#### 判断待ちに入る条件
+
+`shouldRunFinalMerge`（`auto`かつPR/MRが作れた）が`false`で、かつ`needsFinalMergeDecision`（`orchestrator` または `confirm`かつPR/MRが作れた）が`true`のとき、`WorkflowRunner.beginFinalMergeDecision`（`src/orchestrator/runner.ts`のprivateメソッド。`forge.ts`には無い）が判断待ちへ入る。PR/MRの作成に失敗していれば、`auto`と同じく最終マージ自体を試みない（判断待ちにも入らない）。
+
+判断待ちの状態は `LiveRun.finalMergeDecision`（`{ mode: 'orchestrator' | 'confirm', since, timer? }`）が持つ。`continuePromptOverride`・`live.warnings` 自体と同じく**永続化しない**（`runStore.ts`のスキーマへは載せない）。VSCodeのリロードで判断待ちの状態は失われ、人がホスト（GitHub/GitLab）側でPR/MRの状態を見て判断する形に戻る。これは既存の非永続状態と同じ設計判断であり、見落としではない。
+
+#### 判断の確定経路
+
+判断は3つの経路のいずれかから届き、すべて `WorkflowRunner.decideFinalMerge(runId, decision, reason)` へ合流する（`decision: 'merge' | 'hold'`、`reason`は必須）。**確定した判断とその理由は、経路によらず必ずワークフローViewの警告欄（`WorkflowWarning.kind: 'finalMergeDecision'`）へ記録する。** `orchestrator`モードは人の承認を挟まないため、この警告欄の記録が唯一の追跡手段になる。
+
+1. **`decide_final_merge` MCPツール**（`orchestrator`モードのみ）。オーケストレーター専用の制御ツール群（§16.23「道具」）に追加した。`decision` / `reason` を引数に取り、`taskId` を取らない点が他の制御ツールと異なるため、`messaging.ts`の`handleControlToolCall`では`taskId`抽出より前の特別扱いの分岐で処理する。判断待ちが無い・`confirm`モードである・`decision`が不正・`reason`が空文字、のいずれかであれば理由付きで拒否する
+2. **ワークフローViewのボタン**（`confirm`モードのみ）。`workflowScript.ts`が「mainへマージする」/「マージしない」ボタンと理由入力欄を出し、`decideFinalMerge`メッセージを`workflowView.ts`経由で`WorkflowRunner.decideFinalMerge`へ渡す
+3. **タイムアウト**（`orchestrator`モードのみ）。次項
+
+`confirm`モードには2のボタン経路のみで、MCPツールもタイムアウトも働かない。人の応答時間は予測できないため、自動的に判断を確定させる仕組みを持たせない。
+
+#### タイムアウト（`agent.workflows.finalMergeDecisionTimeoutSec`、既定900秒）
+
+`orchestrator`モードだけ、判断待ちに入ると同時にタイマーを張る（`beginFinalMergeDecision`）。既定は900秒（15分）で、`setTimeout` + `.unref()`（`scheduleApprovalTimeout`と同じ流儀。テスト・プロセス終了を妨げない）。応答が無いまま閾値を超えると、`decideFinalMerge(runId, 'hold', <タイムアウトである旨の理由>)`を自動的に呼ぶ。**応答が無い場合は`hold`（マージしない）へ倒す。** マージしない方向へ倒すことで、判断が確定しないままprocessが無期限に止まる事態を避けつつ、誤ってmainを書き換える事故を防ぐ（`hold`はPR/MRを残すだけで取り消せるが、誤マージは取り消しにくい）。
+
+既定値900秒は、`agent.workflows.mergeApprovalTimeoutSec`（既定3600秒、衝突解決の承認待ち）より短い。衝突解決の承認待ちは人が複数ターンかけて対話しうるのに対し、最終マージの判断はオーケストレーターが`get_run_status`で差分・警告欄・CI結果を確認したうえで単発のツール呼び出しに答えるだけの判断であり、長時間の往復を前提としないため。
+
+#### MCPサーバの寿命との整合
+
+既存の`pump()`終了処理は、runの結果が確定した時点でタスク間メッセージングのMCPサーバを同期的に閉じ、オーケストレーターへ「実行が終了しました」の通知を送っていた（§16.23）。この処理は`finalizeForge`（統合PR/MR作成・最終マージを行う非同期処理）を`void`で fire-and-forget 起動するのと同じティックで走るため、`finalizeForge`が`await`で中断する前に先に完了してしまう。**`finalMerge: orchestrator`でPR/MRを作れた場合にこの経路をそのまま使うと、`decide_final_merge`ツールが生えるより先にMCPサーバが閉じ、判断そのものを一切受け付けられなくなる。**（実装前の設計段階で気づいた欠陥で、テストのRED/GREENで見つけたものではない）
+
+これを避けるため、`pump()`は`mayAwaitFinalMergeDecision`（outcomeがsucceeded、forgeが有効、`finalMerge: orchestrator`）を判定し、真であれば`finalizeForge`の完了を待ってから閉鎖処理（`closeMessagingIfFinalMergeSettled`）を呼ぶ。`closeMessagingIfFinalMergeSettled`は`live.finalMergeDecision`が`undefined`（判断待ちが無い）ことを確認したうえでのみ実際に閉じるため、次の3箇所いずれから呼ばれても安全に収束する。
+
+- `pump()`の終了処理（`mayAwaitFinalMergeDecision`が偽の通常経路。PR/MRを作れなかった場合や`auto`/`confirm`/`pr-only`）
+- `finalizeForge`完了後のコールバック（`orchestrator`でPR/MRを作れなかった場合。判断待ちに入らないため即座に閉じる）
+- `decideFinalMerge`確定後（`orchestrator`で判断が確定した場合。ここで初めて閉じる）
+
+`confirm`モードはMCPサーバの寿命に影響しない。`confirm`の判断はワークフローViewのボタン（Webview⇔拡張機能間のメッセージ）経由であり、タスク間メッセージングのMCPサーバとは別経路のため、判断待ちの間もサーバをすぐ閉じてよい。
+
+#### `held`という結果
+
+`finalMergeOutcome`（スナップショット・永続化とも）に`held`を追加した（従来は`'merged' | 'failed' | undefined`）。`hold`判断が確定した場合（タイムアウト経由を含む）にこの値になる。`merged`/`failed`と異なり試み自体は行わない（マージコマンドを呼ばない）ため、失敗とは区別する。
+
+#### 検証
+
+`test/unit/forge.test.ts`が`needsFinalMergeDecision`を、`test/unit/runner.test.ts`の「WorkflowRunner: 最終マージの判断」ブロックが判断待ちへ入ること・MCPサーバがそれまで閉じないこと・`decide_final_merge`相当の確定経路（`decideFinalMerge`）が`merge`/`hold`それぞれで正しい結果と警告を残すこと・タイムアウトで自動的に`hold`へ倒れること・`confirm`はタイムアウトしないことを確かめる。実ホストでのMCPツール呼び出し・ワークフローViewのボタンの見た目・実際のオーケストレーターモデルの判断挙動は[manual-test.md](manual-test.md)のW-Fに残す。
+
+### 16.27 タスクのループ・停滞を検知して止める（Issue #336、ロードマップW2）
+
+無人実行の停止条件（§16.7）は「送信回数の上限（`maxIterations`）に達した」「CLIが`done`を宣言した」「CLIがエラーで落ちた」の3種類を持つが、いずれにも当てはまらないまま**同じ内容を繰り返すだけで実質的に進んでいない**タスクを止める手段が無かった。CLIは正常応答を返し続けるため`failed`にはならず、`maxIterations`まで待つしかコストの上限が無い。
+
+#### 検知方式の選択
+
+停滞の検知方法として次の3案を検討した。
+
+- **A（採用）応答要約が直近N回連続で完全一致**
+- B 連続N回、編集ファイル数が0
+- C 同一のエラー文字列が繰り返される
+
+**Aを選んだ理由**: Issueが問題としているのは「ループ」、すなわち同じやり取りの反復そのものであり、A はこれを直接検知する。加えてCは「同一エラー文字列の繰り返し」だが、エラー文字列が繰り返されるとき応答要約（`buildResponseSummary`が作る`lastResponseSummary`）自体もほぼ同一になるため、Cが検知する事象はAが検知する集合に包含される特殊ケースにすぎず、別実装を持つ価値が無い。
+
+**Bを採用しなかった理由**: 「連続N回、編集ファイル数が0」は誤検知が大きすぎる。調査・レビュー・原因切り分けなど、正当に何度もファイルを編集せず思考・報告だけを重ねるタスクが存在し、そうしたタスクをBは停滞と誤判定してしまう。停滞検知は「壊れているタスクを止める」ためのものであり、「編集しないタスクを止める」ためのものではない。
+
+#### 実装（`src/loop/stallDetector.ts`）
+
+`vscode`に依存しない純粋関数として実装した（`loop/`は`orchestrator/`より下位の層であり、`orchestrator/`に依存できない、§16.10）。
+
+- `extractTurnSignature(state: ChatState): string` — 比較用の文字列を1ターン分取り出す。**実装は`state.turnResultText.trim()`のみを返し、`lastNonEmptyAgentMessageText`へはフォールバックしない**（この記述はフォールバックする案の段階のまま実装確定前の内容が残っていた誤りで、`src/loop/stallDetector.ts`のJSDocに理由がある。`taskSummary.ts`の`buildResponseSummary`（表示用の1行要約）は`turnResultText`が空のとき`lastNonEmptyAgentMessageText`で直近の発言まで遡るが、これは「表示用に何かしら見せたい」要件であって、こちらの「このターンで進んだかどうかを比較したい」要件とは違う。`items`全体へ遡ると、ツール呼び出しだけで本文を返さないターンが続いたときに古いターンの発言テキストを使い回して比較してしまい、編集内容が毎回違っても同じ署名が返り続けて誤検知する。`turnResultText`が空のときは比較不能として空文字を返し、`detectStalledLoop`は空文字の反復を停滞と見なさないためこの空文字が連続しても誤検知しない
+- `pushTurnSignature(history, signature, threshold)` — 履歴へ1件追加し、`threshold`件（最低`MIN_STALL_REPEAT_COUNT=2`件）だけ末尾を残す。無制限に伸ばさない
+- `detectStalledLoop(history, threshold)` — 履歴の末尾`threshold`件がすべて同一かつ空文字列でないときだけ`true`。空文字列同士の一致は停滞と見なさない（応答要約が取れないケースの誤検知を避けるため）
+
+`LoopController.observe()`は毎ターン、`declaresDone`の判定の後・`maxIterations`到達判定の前に`pushTurnSignature`→`detectStalledLoop`を挟み、真であれば`this.stop('stalled')`で止める。`maxIterations`到達より先に判定することで、閾値さえ超えれば送信回数の上限を待たずに止まる。
+
+#### `LoopStopReason: 'stalled'`と`failed`との区別
+
+`LoopStopReason`（`loop/loopController.ts`）に`'stalled'`を追加した。**`failed`とは意図的に別種別にする**。`failed`はCLIプロセスが異常終了した状態だが、停滞はCLIもセッションも壊れておらず「同じ応答を繰り返しているだけ」であり、`retry_task`（新しいworktreeでの最初からのやり直し）だけでなく`continue_task`（同じセッション・同じ会話のまま指示を変えて続ける）でも復帰できる余地がある。この非対称性を`runState.ts`の`applyLoopStopReason`・`continueTask`の両方に反映した。
+
+- `applyLoopStopReason`: `stalled`は`taskStopped`（手動停止）と同じく即座に`failed`確定へ倒す。`maxReached`のように自動リトライの予算を消費させない（`TaskFailureReason: { kind: 'stalled' }`を`markFailed`へ渡す）
+- `continueTask`: 従来`current.failure?.kind === 'maxReached'`のときだけ再開を許していたガードへ`'stalled'`も追加した。セッション（`runner.ts`の`onTaskFinished`）も`maxReached`と同様に`dispose()`しない（`reason !== 'maxReached' && reason !== 'stalled'`のときだけ破棄）ため、`continueTask`が同じ会話を実際に再開できる
+
+#### オーケストレーターへの通知（既存の通知テーブルへの追加のみ）
+
+新しい直接通知経路は作らず、`runnerOrchestrator.ts`の`buildTaskEvent`の既存`case 'failed':`分岐へ、`failure.kind === 'stalled'`のときだけ`taskFailed`ではなく`taskStalled`（`OrchestratorEventKind`へ追加、`orchestratorSession.ts`）を返す判定を足しただけである。本文は既存の`withSummary`（内部で`lastResponseSummary`を埋め込む）を使い、`wrapEvent`（`escapeAngleBrackets(stripControlCharsPreservingNewlines(...))`）による単一のサニタイズ点をそのまま通過する。二重にエスケープしない・素通りもさせない。
+
+#### ワークフローViewへの表示
+
+`runnerSnapshot.ts`に`deriveStalledWarnings`を追加し、`live.runState`から`failure.kind === 'stalled'`のタスクを毎回導出して`WorkflowWarning.kind: 'loopStalled'`として警告欄へ出す（`live.warnings`へ一度だけpushする方式ではなく、既存の`deriveMaxReachedWarnings`等と同じ「都度導出」方式。VSCodeのウィンドウ再読み込みでもrunStateの永続化から復元できる）。`kind`名は既存の`'messagingStalled'`（§16.21、タスク間メッセージングの返信待ち膠着とは別の仕組み）と紛れないよう`'loopStalled'`とした。`workflowScript.ts`の`FAILURE_LABEL`へ`stalled: '停滞'`を、`canContinueTask`へ`maxReached`と並べて`stalled`を追加し、「続ける」ボタンが押せるようにした。チャット画面側（`chatScript.ts`の`LOOP_STOP_LABEL`）にも表示文言を足した。
+
+#### 設定（`agent.workflows.stallRepeatCount`、既定4）
+
+閾値は`agent.workflows.stallRepeatCount`（`config.ts`、既定4・範囲2〜50・`scope: machine-overridable`）で変更できる。範囲外・非数値は既定値へフォールバックする（`normalizeStallRepeatCount`、他の`agent.workflows.*`設定と同じ規約で`config.ts`側に正規化関数を置く）。既定値4は**誤検知しない側（大きめ）**に振ってある。閾値を小さくしすぎると、たまたま似た応答が続いただけの正常なタスクを停滞と誤判定するおそれがあるため、既定は保守的に倒し、必要なら利用者が下げられるようにした。
+
+#### 確かめ方
+
+`test/unit/stallDetector.test.ts`が`extractTurnSignature`・`pushTurnSignature`・`detectStalledLoop`を単体で、`test/unit/loopController.test.ts`の「LoopController: 停滞検知」ブロックが実際のターン進行の中で閾値通りに止まること・閾値を変えると検知タイミングが変わること・`start()`し直すと履歴がリセットされることを確かめる。`test/unit/runState.test.ts`は`applyLoopStopReason`が`stalled`を`maxReached`と異なる理由で`failed`にすること・retryCountを消費しないこと・`continueTask`で再開できることを、`test/unit/runner.test.ts`の「WorkflowRunner: 停滞（stalled）で止まる」ブロックがセッションを破棄しないこと・警告欄に`loopStalled`として出ること・オーケストレーターへ`taskStalled`として通知されること（`taskFailed`にはならないこと）を確かめる。
+
+### 16.28 生成したワークフローの分解レビュー（`reviewWorkflowPlan`、roadmap W3、Issue #337）
+
+§16.9の分解セッションへ渡す生成プロンプトは「並列にできるタスクを直列にしない」「合流タスクを置く」「外から判定できる`done`を書く」という指針を含むが、生成したYAMLが実際にこの指針へ従っているかどうかは検証していなかった。`validateWorkflow`（§16.2）が見るのはタスク数・id形式・循環依存・未定義参照・プロンプト長・権限の緩和といった構文的な妥当性だけで、分解そのものの質は見ない。
+
+これを埋めるため、生成したYAMLを**別の読み取り専用セッション**でレビューさせる段を、保存の直後に足す。観点は次の4つに絞る（`WORKFLOW_REVIEW_ASPECTS`、`planner.ts`）。
+
+- `serializedParallelizable`: 並列にできるタスクが `dependsOn` で直列になっていないか
+- `missingConvergence`: 並列タスクの結果を統合・レビューする合流タスクがあるか
+- `doneNotObservable`: `done` が外から（ファイルの有無・テストの合否等で）機械的に判定できる条件か
+- `goalMismatch`: ゴールに対してタスクが過不足なく分解されているか
+
+結果は**保存時の警告**として出すだけで、**自動では直さない**。指針違反があってもワークフロー定義の保存そのものは妨げない。
+
+#### どちらの生成経路も通る
+
+ワークフロー生成の起点は2つある（§16.9「ゴール文から生成」/§16.19「ロードマップから生成」）。この機能はどちらか片方だけを塞ぐと意味が薄れるため、**両方の起点が最終的に合流する`extension.ts`の`handlePlanSuccess`**（`planWorkflowFromGoalCommand`と`planWorkflowFromRoadmapCommand`の両方から呼ばれる、ファイル保存とView表示を担う共通関数）へ1箇所だけ足した。`planWorkflow`（YAML生成そのもの、`planner.ts`）や`planWorkflowFromRoadmapPhases`（ロードマップ経由の生成、`roadmap.ts`）へは足していない——足すと`planWorkflow`の既存のユニットテスト（検証・再生成の振る舞いを確認する一群）が、無関係なレビュー呼び出しの分だけ`host.openCalls`の件数を変えてしまい、既存の受入基準（「既存の構文的な検証と再生成の挙動が変わらない」）を壊さずに済まない。`handlePlanSuccess`は「生成が成功した後の後処理」という既存の役目（ファイル保存・View表示・警告の表示）をそのまま担っており、レビューはそこへ足す後処理の1つとして自然に収まる。
+
+順序は次のとおり。
+
+1. `handlePlanSuccess`が`writeUniqueWorkflowFile`でYAMLをファイルへ書き込む（**保存が先**）
+2. 保存直後、`securityWarnings`だけを渡して`WorkflowViewManager.previewDefinition`を呼び、エディタも開く（**レビューの完了を待たない**）
+3. その後を追いかけて（`await`せず）`reviewWorkflowPlan`を呼ぶ（`vscode.window.withProgress`で「ワークフローをレビューしています…」の進捗を出す。§16.9の生成そのものと同じ流儀）
+4. 指摘が見つかった時点で、`securityWarnings`と`review.findings`の両方を渡して`previewDefinition`をもう一度呼び（同じ`defPath`へのスナップショット差し替えなので安全に上書きされる）、`vscode.window.showWarningMessage`でも知らせる。指摘が0件ならこの手順は何もしない
+
+2.と3.の間に`await`を挟まない設計にした理由は、レビューが`PLANNER_TURN_TIMEOUT_MS`（既定5分）までかかりうるため、完了を待ってから表示すると「保存は妨げない」という受入基準の実質（人がすぐ結果を見られる）を損なうため。3.〜4.は`handlePlanSuccess`本体からは`await`されない`void`な即時実行関数（IIFE）の中で走る——本体は既に`resolve`済みのため、この中で例外を投げても受け取る呼び出し元がどこにも無く、未処理rejectになる。`reviewWorkflowPlan`自体は例外を投げず`findings: []`と`error`を返す設計だが、**IIFEの中には`vscode.window.withProgress`・`previewDefinition`・`showWarningMessage`という他の呼び出しもあり、これらは投げうる**（拡張のdeactivate中やViewパネル破棄後の呼び出し等）。そのため`reviewWorkflowPlan`が例外を投げないことだけを根拠にIIFEを無防備にはできない——**IIFE全体を`try/catch`で囲み、catchでは`log.warn`（`sanitizeForLog`を通す）に留めて表示済みの内容や保存済みファイルへは波及させない**。design.md §16.25 確認事項3の裏返しで、保存という「本番の効果」が先に確定してから、失敗しうるレビューを後に置く順序そのものが安全側になる、という設計意図自体は変わらない。
+
+なお、指摘到着時に呼び直す`previewDefinition`はViewパネルの現在の表示（`activeRunId`）を無条件にプレビューへ戻す。ユーザーがレビュー完了前に別のrunの表示へ切り替えていた場合、その表示がレビュー到着で差し替わりうる（フォーカスは奪わない）。この取り回しはW3の受入基準の対象外として許容している。
+
+#### 権限の与え方（読み取り専用であることの担保）
+
+**レビューセッション専用の権限経路は新設しない。** §16.9の分解セッションが使う`buildPlannerSessionInput` / `sendSingleTurn`（`planner.ts`）をそのまま再利用する。
+
+- `buildPlannerSessionInput(provider, cwd)`が`sandbox: read-only`（Codex）・`approvalMode: never`（Codex）/`permissionMode: manual`（Claude）を組み立てる。§16.16のクランプ（`clampToSafer`）は経由しない——分解セッションと同じ理由で、baselineが何であれ固定の最安全値を使う
+- `sendSingleTurn`が承認要求を理由を問わず全て拒否する（`setApprovalHandler(async () => ({ kind: 'auto', decision: 'decline' }))`）
+- 起動直前に`assertPlannerSessionIsSafe`が実効値のずれを確認する（§16.9の最後の砦と同じ）
+
+これにより、「レビューセッションがファイルを書き換えない」という受入基準は**プロンプトの指示ではなく起動設定**で担保される。§16.16の信頼境界（YAMLからは安全側にしか設定を動かせない）とも矛盾しない——レビューセッションはYAMLの内容を一切参照せずに権限を固定するため、レビュー対象のワークフロー定義がどんな`sandbox`/`autoApprove`を書いていても影響を受けない。
+
+新しい権限経路を作らないことで、§16.9の分解セッションが積んできた防御（承認要求全拒否・baseline非依存の固定値・起動直前の最終確認・ワークスペース情報の無害化）を、レビューセッションもそのまま相続する。
+
+#### 外部由来テキストの扱い
+
+レビューセッションへ渡すゴール文とレビュー対象のYAMLは、どちらも外部由来テキストとして`untrustedText.ts`の`formatUntrusted`で囲う（§16.24、Issue #369）。**1回のプロンプトの中で2つのフィールド（`goal`と`workflow`）を囲むため、`expandTemplate`と同じ流儀で呼び出し側が1つの`nonce`を生成し、両方へ明示的に渡す**（`buildWorkflowReviewPrompt`）。ゴール文の長さ上限は§16.9の分解プロンプトと同じ`MAX_GOAL_LENGTH`を共有し、YAMLの埋め込みは`messaging.ts`の`MAX_COMPOSED_PROMPT_LENGTH`（§16.21）と同じ動機・同じ値（60000文字）の上限を新たに設けた（`MAX_REVIEW_YAML_LENGTH`）。
+
+レビューセッションの応答（JSON配列）も、モデルが自由記述で生成した文字列である。指摘の`message`は`sanitizeInlineText`（§16.24）を通してから警告欄・ログへ渡す。応答がJSONとして解釈できない・期待した形でない場合は、**エラーにせず指摘0件として扱う**（`parseReviewFindings`）。レビューは警告を足すだけの機能であり、応答の形が崩れたことをもってワークフロー定義の保存を失敗させてはならないため。
+
+#### 応答形式
+
+指摘が無ければ`[]`だけを、あれば`{"aspect": ..., "taskIds": [...], "message": "..."}`の配列だけを出力するよう指示する。`aspect`は`WORKFLOW_REVIEW_ASPECTS`の4値以外（未知の値・型違い）と、`message`が空文字・欠落の項目は`parseReviewFindings`が個別に捨てる（応答全体を捨てるのではなく、読める項目だけを拾う）。件数にも上限（`MAX_REVIEW_FINDINGS` = 30）を設け、超えた分は警告欄・警告欄を埋めないよう捨てる（`workflowRoadmap.ts`のパース警告の上限20件と同じ「壊れた応答で画面を埋めない」動機）。
+
+#### 既存の検証・再生成との関係
+
+`validateWorkflow`（構文的な検証）と`planWorkflow`の再生成ループ（検証エラーを踏まえた1度だけの投げ直し、§16.9）は変えていない。レビューは検証が通った後、**保存が確定してから**動く独立した工程であり、レビューの結果によって再生成が走ることも、検証の合否が変わることも無い。`plannerSecurity`（§16.9の安全設定の上書き検出）と`plannerReview`（本節）は別の`WorkflowWarning.kind`として区別し、`WorkflowViewManager.previewDefinition`の警告一覧に両方を並べて表示する。
+
+### 16.29 オーケストレーターが実行中の計画を書き換える（`add_task`/`remove_task`/`update_task_dependencies`、roadmap W4、Issue #338）
+
+これまでオーケストレーターは、実行中のワークフローに対して`update_task_prompt`（既存タスクの`continuePrompt`差し替え）と`send_message`（タスクへの伝言）でしか介入できず、タスクの追加・削除・依存関係の変更は一切できなかった（§16.23）。観測した状況（タスクの停滞、想定外の分岐、追加で必要になった作業）に応じて計画そのものを組み替えたい場合、既存タスクの言い回しを変えるだけでは足りない。この節は、その空白を埋める3つの制御ツール`add_task`/`remove_task`/`update_task_dependencies`を追加する。
+
+#### 変えないもの（Issue #338の非交渉事項）
+
+- **YAMLファイルは書き換えない。** 3つのツール自身は実行中の定義（`LiveRun.def`、メモリ上のみ）を直接書き換え、この3ツール自身の経路からは`persist`を呼ばない。既存の`update_task_prompt`（`continuePromptOverride`）と同じ「実行中だけの上書き」の流儀を踏襲した
+
+  **ただし`live.runState`（タスクの状態）は、この3ツール自身が呼ばなくても別の経路（他タスクの完了・`pump`など、`self.persist`を呼ぶ十数箇所）で結果的に永続化される（レビューblocking指摘、2026-08-23）。** `add_task`で加えたタスクのidが、後続の何らかのpersistでたまたま永続データに紛れ込むことがあり、`remove_task`で消したタスクのidは、後続のpersistで永続データから消える。ウィンドウを再読み込みすると、リロード後の復元（`runnerRestore.ts`の`reconcileRestoredTaskStates`）が、この永続データと再読み込みした定義ファイル（YAML本来の内容）を**突き合わせて**ずれを解消する：定義に無いタスクの永続状態は復元しない、永続データに無い定義側のタスクは`pending`として補う。突き合わせで実際に何かを落とす・補うと`reloadTaskDefMismatch`警告が出る。この突き合わせがあって初めて「ウィンドウを再読み込みすればYAML本来の内容へ戻る」が成り立つ（突き合わせ自体の詳細は`runnerRestore.ts`のJSDoc参照。人がrunの途中でYAMLを直接編集してからリロードしたときにも起こりうる、元からあった穴の恒久修正でもある）
+- **追加したタスクは既存の検証を必ず通る。** id形式・重複/大小無視の衝突・循環依存・タスク数上限（`MAX_TASK_COUNT`=50）・プロンプト長上限・未定義参照は`validateWorkflow`（§16.2）を候補定義に対してそのまま実行し、`errors`が1件でもあれば適用前に拒否して理由をオーケストレーターへ返す。新しい検証ロジックは作らず、既存の1箇所を再利用する
+- **オーケストレーターは権限を緩められない。** `add_task`の引数に`autoApprove`/`allow`/`sandbox`/`approvalMode`のいずれかが含まれていたら、値を問わず（`false`や`[]`のような無害に見える値でも）即座に拒否する。権限の緩和は人が書いたYAML定義からしか発生しない、という§16.16の信頼境界を、この新しい入口でも維持する
+- **実行中のタスクは消せない。** `remove_task`はタスクの状態が`pending`（まだ開始していない）の場合に限って許可する。動いているタスクを止めたい場合は既存の`stop_task`を使う経路へ誘導する
+
+#### 3つのツール
+
+| ツール | 引数 | 実体 |
+| --- | --- | --- |
+| `add_task` | `id`・`prompt`・`done`・`dependsOn`等（YAMLのタスク定義とほぼ同じ形） | `buildOrchestratorTask`（`workflow.ts`）で候補タスクを組み立て、`validateWorkflow`で検証してから`live.def.tasks`・`live.runState`へ反映 |
+| `remove_task` | `taskId` | `pending`のタスクに限り`live.def.tasks`・`live.runState`から取り除く |
+| `update_task_dependencies` | `taskId`・`dependsOn` | 対象タスクが`pending`の場合に限り`dependsOn`を差し替え、`validateWorkflow`で循環・未定義参照を検証してから反映 |
+
+いずれも成功時は`self.notify(runId)`でView側へ変更を伝え、`self.pump(runId)`でスケジューラを再評価させる。`add_task`で増えたタスクや、依存が外れて実行可能になったタスクは次のpumpで即座に拾われる。
+
+#### 設計判断（4点）
+
+1. **権限フィールドは黙って無視せず、理由付きで拒否する。** `buildOrchestratorTask`は`autoApprove`/`allow`/`sandbox`/`approvalMode`のいずれかが引数に含まれているかを`Object.prototype.hasOwnProperty`で判定し、含まれていれば該当フィールド名を名指しした`error`を返す。黙って無視すると、指示が握りつぶされたことにオーケストレーターが気づけないため、明示的な拒否を選んだ
+2. **稼働中タスクへの依存変更は拒否する。** `update_task_dependencies`は対象タスクが`pending`でなければ拒否する。`scheduler.ts`は`dependsOn`を`pending`のタスクに対してしか参照しないため、`pending`を外れたタスクへ依存を書き換えても以降のスケジューリングには何の効果も無い。効果の無い変更を黙って受理すると「変更が反映された」とオーケストレーターに誤解させるため、無効化ではなく拒否とした
+3. **`remove_task`は`pending`のタスクに限る。** Issue本文の「まだ始まっていないタスクに限る」を文字どおり`pending`のみに対応させた。`skipped`/`failed`/`done`のタスクは、既にworktree・ブランチ・実行履歴を持ち、他タスクが`{{T1.result}}`のようなテンプレート参照で結果を参照している可能性があるため、削除対象から除外した
+4. **`remove_task`は削除対象への依存を残さない。** 削除されるタスクを`dependsOn`に含む他タスクからは、同じ操作の中でそのidを取り除く（`strippedFrom`として警告文に列挙）。`remove_task`が`pending`のタスクのみを対象とする以上、それに依存している他タスクも必然的に`pending`のままである（依存先が`done`になっていない限りスケジューラは依存元を開始しないため）。したがって、この剥がし処理が既に進行・完了したタスクの依存関係を誤って書き換えることは構造的に起こり得ない
+
+#### 監査ログ（承認ゲートが無い代わりの説明責任）
+
+この3つのツールは人の承認を経ずに即座に適用される。唯一の追跡手段として、適用した変更は`WorkflowWarning`（`orchestratorTaskAdded`/`orchestratorTaskRemoved`/`orchestratorDependenciesChanged`）としてワークフロー Viewの警告欄へ全文を記録する。警告欄は`message`を`textContent`として描画するため（§16.8・§16.34）、オーケストレーターが生成した文字列（タスクid・プロンプトの要約・変更前後の依存一覧）をそのまま渡してもHTMLとしては解釈されない。
+
+#### `ask_user`（§16.33）との使い分け・`taskStalled`（§16.27）との連携
+
+この3ツールは計画の実行方法（タスクの追加・削除・依存の組み替え）に関する判断であり、人の承認を要さない。一方で、チームの範囲を越える・設計前提を変える・受入基準を緩めるといった**方針そのものに関わる変更**は、この3ツールでは適用せず、既存の`ask_user`（§16.33）で人に確認を仰ぐよう、オーケストレーターへのシステムプロンプト（`buildIntroBody`）で明示している。
+
+また、§16.27の`taskStalled`（停滞検知）通知を受け取った際の振る舞いとして、`buildIntroBody`に「停滞したタスクに対しては、`update_task_prompt`での言い回し変更に加えて、必要なら`add_task`/`remove_task`/`update_task_dependencies`で計画自体の組み替えを検討する」旨の案内を追加した。
+
+### 16.30 PR/MRのレビュー結果を取り込んでタスクへ反映する（roadmap W5、Issue #339）
+
+統合PR/MR（§16.18）を作った後、人がレビューコメントを付けても、これまでのワークフローにはそれを拾う経路が無かった。オーケストレーターはレビューが付いたことに気づけず、コメントへの対応は完全に人の手作業（ワークフローの外）に委ねられていた。本節は、統合PR/MRに新しく付いたレビューコメントを`fetchReviewComments`（`forge.ts`）でポーリング取得し、オーケストレーターへの通知（既存の`notifyOrchestrator`経路）として届ける機能を足す。
+
+#### 承認ゲートを置かない（Issue #497の方針転換）
+
+Issue #341（epic）の方針転換により、「判断するのはオーケストレーターであって人ではない」。したがって、取り込んだレビューコメントに対して何らかの調整（`add_task`/`update_task_prompt`/`send_message`等、§16.29・既存経路）をオーケストレーターが行う際、本機能自体は人の承認ゲートを一切挟まない。唯一の追跡手段として、取り込んだコメントの全文を`WorkflowWarning`（`kind: 'reviewCommentImported'`）としてワークフローViewの警告欄へ記録する。§16.29の「監査ログ（承認ゲートが無い代わりの説明責任）」と同じ考え方で、`message`は`textContent`として描画される（§16.8・§16.34）ため、レビューコメントの本文（人が書いた任意の文字列）をそのまま渡してもHTMLとしては解釈されない。
+
+#### いつ・何を取得するか
+
+1. **統合PR/MRを作れた実行だけが対象。** `finalizeForge`（`runner.ts`）が統合PR/MRの作成に成功し、URLから番号を取り出せた直後に`startReviewCommentPoll`（`runnerReviewComments.ts`）を1度だけ呼ぶ。番号を取り出せなかった場合はログだけ残して飛ばす（`fetchReviewComments`が番号を要求するため）。`pullRequest: 'none'`（統合PR/MRを作らない設定）や、統合PR/MRの作成自体が失敗した実行は対象にならない——`shouldCreateIntegrationPullRequest`による既存のゲート（§16.18）をそのまま通っているため、レビューコメント側に別のゲートを重ねて実装する必要は無い
+2. **取得コマンドは既存のCI状態取得（§16.36）と同じ形。** GitHubは`gh pr view <number> --json=reviews,comments`（`reviews`＝レビュー本体に添えたコメント、`comments`＝PRへのissueコメントの両方が対象。個別レビューコメント——GitHubの「review comments」API相当——はこのコマンドの出力に含まれないため対象外。今回はここまでとし、コード行への行コメントの取り込みはスコープ外とする）、GitLabは`glab api projects/:id/merge_requests/<iid>/notes`（`system: true`のシステム通知は除外）。両方とも`CliCommandRunner`（`forge.ts`）を経由し、新しい実行経路は作らない
+3. **取得の間隔は設定で決める。** `agent.workflows.reviewCommentPollIntervalSec`（既定600秒＝10分、`machine-overridable`、範囲は0〜2147483秒）。「取得のタイミングと頻度は設定で決める。APIを叩き続けない」（Issue #339）を受け、CIの完了待ちポーリング（§16.36、既定15秒固定）よりずっと長い値を既定にした。0にすると取得しない（無効化できる）。範囲外・非整数の値は既定値へフォールバックする（`normalizeReviewCommentPollIntervalSec`、`config.ts`。他の`agent.workflows.*`設定と同じ「範囲外はVSCode側のJSON schema検証を通り抜けてもランタイムで丸める」流儀、§16.16）
+4. **タイマーは`messaging.waitingReplyPollTimer`（§16.21）と同じ後始末の流儀。** `setInterval`で立て`.unref()`する（プロセス・テストの終了を妨げない）。最終マージ・判断が確定してこれ以上PR/MRの状態を追う必要が無くなった時点（`closeMessagingIfFinalMergeSettled`）と、拡張機能の終了時（`dispose()`）の両方から`closeReviewCommentPoll`（冪等）を呼ぶ
+5. **新しく見つかったコメントだけを届ける。** `id`（GitHubは`review:<databaseId>` / `comment:<databaseId>`、GitLabは`note:<id>`の形でホスト・種別ごとに前置詞を付ける）ごとに`seenCommentIds`（`Set`、run単位）で重複排除する。2周目以降のポーリングでは、前回までに届けた分は再通知しない
+
+#### 届け方（サニタイズは1度だけ、§16.24・§16.34）
+
+`buildReviewCommentBody`（`runnerReviewComments.ts`）は`runnerMessaging.ts`の`buildTaskMessageEventBody`/`buildTaskQuestionEventBody`と同じ規約に従う——**ここではサニタイズしない、プレーンテキストの本文を組み立てるだけ**。無害化は`orchestratorSession.ts`の`wrapEvent`が`<workflow-event kind="reviewComment">`で囲むときに`escapeAngleBrackets(stripControlCharsPreservingNewlines(...))`で一度だけ行う。本文はレビューコメントという外部由来・未検証のテキストであり、指示ではなくデータとして扱う（§16.24）。本文の長さは`MAX_MESSAGE_BODY_LENGTH`（`messaging.ts`、`send_message`等と同じ上限）でコードポイント単位に切り詰める。切り詰め無しに載せると、コメント1件の長さに`live.warnings`・オーケストレーターへの通知本文の量が際限なく引きずられるため
+
+`pollReviewComments`は、新しいコメントが1件見つかるたびに`notifyOrchestrator`（`kind: 'reviewComment'`）と`live.warnings.push({ kind: 'reviewCommentImported', ... })`の両方を呼ぶ。前者がオーケストレーターへの配送、後者が人向けの監査ログで、経路も届け先も別（§16.29と同じ二本立て）
+
+#### 前提が欠けている場合は警告だけ、runは止めない
+
+統合PR/MRを作れた時点でCLIの有無・認証は一度通っているはずだが、認証切れ・CLIの更新等で後から失われる場合がある。`fetchReviewComments`がCLI呼び出しの失敗（`code !== 0`）を`{ ok: false, message }`として返した場合、`pollReviewComments`はログへ警告を残すだけで次の周回を待つ（§16.18「前提が欠けている場合」・タスク間メッセージングの「無くても実行は止めない」設計と同じ方針）。runの成否・スケジューリングには一切影響しない
+
+#### `startReviewCommentPoll`の呼び出しと`live.finished`の競合（実装時に踏んだ穴）
+
+`pump()`（`runner.ts`）は、全タスクが`done`等で実行が終わったと判定した時点で`live.finished = true`を立ててから`finalizeForge`を呼ぶ。つまり`startReviewCommentPoll`（`finalizeForge`の内側から呼ばれる）が動く時点では、run自体は既に「終了」扱いになっている。`pollReviewComments`の実装当初、ガードに`live.finished`を含めていたため、統合PR/MR作成直後の1回目の取得（起動直後に必ず1回走る分）が毎回無条件で早期returnし、レビューコメントが1件も届かないという事故があった。「実行が終わっている＝もう何もしない」という直感に反して、統合PR/MRの作成・CIの完了待ち・最終マージ・そして本機能のポーリングは、いずれも`live.finished`が立った**後**に進む処理であり、`live.finished`を汚染源として使ってはいけない。停止判定は`live.reviewCommentPoll`の有無（`startReviewCommentPoll`/`closeReviewCommentPoll`が管理）だけで行う
+
+さらに、`fetchReviewComments`の`await`中に最終マージが確定して`closeReviewCommentPoll`が`live.reviewCommentPoll`を先にundefinedへ戻すことがある（両者は非同期に競合しうる）。この場合でも、既に取得できているコメントを「ポーリングが閉じられたから」という理由で握りつぶさない——`await`前に取り出しておいた`poll`（`host`/`cwd`/`number`/`seenCommentIds`）への参照を使い続け、`await`後に再確認するのは「runそのものが破棄されていないか」（`self.runs.get(runId)`の存否）だけに留める
+
+#### 届いた後に手を打てる状態にする（レビューblocking指摘への対応、2026-08-23）
+
+初版の実装は、レビューコメントの通知が届くところまでしか届けていなかった。`pump()`（`runner.ts`）は`getRunOutcome`が`'running'`でなくなった時点で`live.finished`を立ててから`finalizeForge`を呼ぶため、`finalizeForge`の中で立ち上がる本機能のポーリングが最初のコメントを届ける時点で、runは必ず`outcome !== 'running'`になっている。一方`runFinishedReason`（`runnerOrchestrator.ts`）は`outcome !== 'running'`なら`add_task`等の制御ツールを一律拒否するため、オーケストレーターは通知を受けても§16.29のツールで対応する手段が無かった（レビューblocking指摘）。Issue #339の受入基準「コメントを受けたタスク調整がW4と同じ経路を通り、適用した内容が警告欄へ全文で残る」を満たすには、届いた後に実際に手を打てる必要がある。
+
+レビューで提示された3案（A: 計画変更ツールをポーリング中は許可する／B: レビュー待ちの間runを終了扱いにしない／C: 受入基準を下げる）のうち、**Aを採った**。Bは`getRunOutcome`・`live.finished`の意味自体を変え、W1（最終マージ判断）・W11（CI待ち）と影響範囲が重なるため見送った。Cは受入基準を下げる判断であり、そもそも採る選択肢ではない。
+
+1. **`planChangeFinishedReason`（`runnerOrchestrator.ts`）を新設し、`update_task_prompt`/`add_task`/`remove_task`/`update_task_dependencies`の4ツールだけに適用する。** 通常の`runFinishedReason`と同じ判定に加え、`live.reviewCommentPoll !== undefined`（レビューコメントのポーリングが生きている）間だけ許可する例外を1つ足した。**例外はこの4ツールに限る。** `stop_task`/`retry_task`/`continue_task`/`decide_approval`/`ask_user`等は引き続き`runFinishedReason`をそのまま使う——これらは「終わったタスクの実行そのものへ手を加える」経路であり、「まだ始まっていないタスクへの追加・変更」に閉じる計画変更ツールとは性質が違う。ここまで開けると「終わったはずのrunを人の意図しないタイミングで動かし直せる」範囲が広がりすぎる（レビュー指摘の確認事項3）
+2. **`live.finished`を戻す必要があるか（レビュー指摘の確認事項1）: ある。** `pump()`は`live.finished`が立っていると即座に早期returnするため、`add_task`が`live.runState`へ`pending`タスクを加えても、`live.finished`を戻さない限りスケジューラは一切それを拾わない。`resumeIfFinishedForPlanChange`（`runnerOrchestrator.ts`）を新設し、`add_task`/`remove_task`/`update_task_dependencies`の3つ（`self.pump(runId)`を呼ぶ関数）だけが、`self.pump(runId)`の直前でこれを呼ぶ。`update_task_prompt`は`pump()`を呼ばないため対象外
+3. **戻した場合に`finalizeForge`が二度走らないか（レビュー指摘の確認事項2）: 「二度走ることはある。ただし2度目は統合PR/MRを作り直さない」。** `pump()`のJSDoc（Issue #432-2）は「1周目が`succeeded`だったrunで2周目の`succeeded`到達は現状のコードでは起こらない」としていたが、本節の変更でこの前提が崩れる——`add_task`で加えた`pending`タスクが後になって完了し、runが再び終了条件を満たすと、2周目としてpump()の終了ブロックへ到達し`finalizeForge`が2回目として呼ばれうる（`getRunOutcome`は`pending`が1件でもあれば無条件で`'running'`を返すため、`resumeIfFinishedForPlanChange`を呼んだ同一の`pump()`呼び出しの中で即座に2回目が呼ばれることは無い。新しいタスクが完了して初めて起こる）。この2回目の呼び出しに備えて、`finalizeForge`（`runner.ts`）の先頭に冪等ガードを足した: `live.integrationPullRequest !== undefined`なら、統合PR/MRを作り直さず即returnする。`pump()`側のJSDoc（Issue #432-2の箇所）も、この新しい経路と冪等ガードの存在を明記するよう更新した
+
+**この変更の効果として、レビューコメントを受けて`add_task`したタスクが完了した後は、そのタスクの成果が既存の統合ブランチへ取り込まれる（§16.17、通常のタスク完了と同じ経路）ものの、統合PR/MRを2回目として作り直したり、mainへの最終マージをやり直したりはしない。** 既に作成・マージ済みの統合PR/MR自体を更新したい場合（例: 追加タスクの成果を含めてもう一度マージする）は、本Issueのスコープ外とし、人がワークフローViewから統合ブランチの状態を見て判断する（既存の「再マージ」ボタン等の経路が使える場面かどうかは別途確認が要る想定。フォローアップ課題）。
+
+#### レビューを取り込めるのは最終マージ確定までである（2度目のレビューblocking指摘への対応、2026-08-23）
+
+上記1〜3だけでは、`reviewCommentPoll`が生きている＝まだ手を打てる、という前提が崩れる場面が残っていた。`finalMerge: auto`では、統合PR/MRの作成直後に`startReviewCommentPoll`が走り、その直後に`performFinalMerge`でmainへ実際にマージされる。ところが`closeMessagingIfFinalMergeSettled`（MCPサーバーとレビューコメントのポーリングを両方閉じる関数）は、`pump()`が`finalizeForge`をfire-and-forgetで呼ぶのと同じ同期経路で先に1度呼ばれてしまい、その時点ではまだ`live.reviewCommentPoll`が`undefined`のため閉じ損なっていた。結果として、mainへのマージが**既に完了した後**もレビューコメントのポーリングだけが開いたまま残り続け、その状態で届いたコメントを受けて`add_task`すると、`planChangeFinishedReason`の例外（`live.reviewCommentPoll !== undefined`のみを見る）が素通しして受理してしまう。追加したタスクの成果は統合ブランチには積まれるが、統合PR/MRは既にクローズ済み（マージ済み）で二重作成もしない設計（上記3）のため、**mainへは永久に届かない。** しかもオーケストレーターへはそれが伝わらず、Viewにも出ない。**さらに実害として、`finalMergeOutcome`確定後もレビューコメント取得CLI（`gh pr view --json reviews,comments`等）が既定600秒ごとに永久に叩かれ続ける（VSCodeを閉じるまで止まらない）ことを、タイマーを複数周期進めて実測で確認した。**Issue #339の「取得の頻度は設定で控えめに置き、APIを叩き続けない」という前提に反していた。
+
+レビューで提示された3案（A: 2周目に統合PR/MRを作り直す／B: レビューを取り込めるのは最終マージ確定までに限る／C: 現状のまま限界だけ文書化する）のうち、**Bを採った。** Aは`live.integrationPullRequest`の意味づけ（1runにつき1件を前提にした型・警告・Viewの表示）・PR番号の持ち方・W11のCI待ちまで波及し、W5の範囲としては重い。Cは`add_task`が受理されたのに成果がmainへ届かないという乖離を黙って残す形になり、受入基準を下げるのと実質同じ結果になるため採らない。
+
+4. **`planChangeFinishedReason`（`runnerOrchestrator.ts`）に、`live.finalMergeOutcome !== undefined`（最終マージの判断が`'merged'`/`'failed'`/`'held'`のいずれかで確定済み）なら`live.reviewCommentPoll`の生死に関わらず拒否する分岐を足した。** 拒否時は「最終マージの判断が確定しているため、これ以降は計画を変更できない」旨の理由をオーケストレーターへ返す（黙って乖離させない。会話は続けられる）。**この分岐は、下記「レビューコメントのポーリングを最終マージ確定の1点で閉じる」の修正が入る前は`finalMerge: auto`で実際に効いていたが、その修正でポーリング自体が最終マージ確定と同時に閉じるようになった後は、多層防御（ポーリングを閉じ損なう経路が将来また出ても計画変更そのものを拒否できる保険）としての意味合いが主になる。** `finalMerge: orchestrator`/`confirm`（判断待ち）では、決定時に`closeMessagingIfFinalMergeSettled`がMCPサーバーとレビューコメントのポーリングを同時に閉じるため、この分岐は元々ここでは効かない。**この結果、「まだ手を打てる」ウィンドウは実質「最終マージがまだ確定していない間」に一致する**——`finalMerge: orchestrator`/`confirm`の判断待ちの間（`live.finalMergeDecision !== undefined`）はレビューコメントを受けた`add_task`が引き続き通り、その後の最終マージ確定（`decideFinalMerge`）でT2等の追加タスクの成果を含めてmainへ1回だけ正しくマージされる。`finalMerge: auto`で既にマージが確定した後は拒否される
+
+**MCPサーバーが既に閉じられている場合に`add_task`を呼べてしまわないか（レビューの非blocking確認事項）を合わせて確認した。** `closeMessagingIfFinalMergeSettled`は`closeMessaging`（MCPサーバーのtransportを閉じる）と`closeReviewCommentPoll`を常に同時に呼ぶ実装になっている。`finalMerge: orchestrator`/`confirm`の判断待ちの間は、`live.finalMergeDecision !== undefined`のガードでこの関数自体が早期returnするため、MCPサーバーとレビューコメントのポーリングは常に同じタイミングで開いたまま/閉じたままになり、両者がずれることはない。`finalMerge: auto`では`closeMessaging`が`finalizeForge`の完了を待たずに先に走る——つまりレビューコメントのポーリングが開く時点で、MCPサーバーは既に閉じられている。したがって本番の呼び出し経路では、この状態で`add_task`のMCPツール呼び出しがオーケストレーター（LLM）からサーバーへ届くこと自体が無い（transportが閉じているため接続できない）。`live.finalMergeOutcome`ベースの拒否は、この状態でも将来の実装変更（MCPを閉じるタイミングの変更等）に対する多層防御として機能する
+
+**`live.finishedNotified`が2周目で二重に飛ばないかも確認した。** `closeMessagingIfFinalMergeSettled`は`if (!live.finishedNotified) { notifyOrchestratorRunFinished(...); live.finishedNotified = true; }`という既存のガードを持っており、この関数自体が最終マージ確定後にしか本体を実行しない（`live.finalMergeDecision !== undefined`の間は早期return）ため、2周目で再度この関数へ到達しても、既に`finishedNotified`が立っていれば通知は送られない。追加の変更は不要
+
+#### レビューコメントのポーリングを最終マージ確定の1点で閉じる（3度目のレビューblocking指摘への対応、2026-08-23）
+
+4の分岐は「add_taskを拒否する」対策であって、レビューコメント取得CLIが永久に叩かれ続ける問題自体は直っていなかった。**`performFinalMerge`（`runner.ts`）が`live.finalMergeOutcome`を確定させる各分岐（`haltedByUser`による中止・マージ失敗・マージ成功）の直後で、`closeReviewCommentPoll(live)`を直接呼ぶよう修正した。** これにより、`finalMerge: auto`でも最終マージが確定した瞬間にポーリングのタイマーが止まる（実測: 修正前は最終マージ確定後にタイマーを600秒×10周期進めると取得CLIの呼び出しが1回から11回まで増え続けていたが、修正後は増えない）。
+
+**「MCPを閉じるのとポーリングを閉じるのを`closeMessagingIfFinalMergeSettled`の同じ順序制約に乗せるか、最終マージ確定の1点で別途閉じるか」は、後者（別途閉じる）を採った。** 理由は次の2点。
+
+- `finalMerge: auto`が`closeMessagingIfFinalMergeSettled`を`finalizeForge`の完了を待たず同期的に呼ぶのは、判断待ちが無い`auto`ではMCPを判断待ちなしで即座に閉じてよいという意図的な設計であり、この呼び出し順序自体を変える（`finalizeForge`の完了を待ってから閉じるよう遅らせる）と、`auto`でMCPが開いたままになる期間が新たに生まれ、影響範囲が本Issueの外まで広がる
+- `live.finalMergeOutcome`は「最終マージの判断が確定した」ことそのものを表す状態であり、レビューコメントのポーリングという「その判断が付くまでは有用」な機能の寿命を、この状態の確定点へ直接結びつける方が素直（`orchestrator`/`confirm`の`merge`/`hold`決定は、引き続き`closeMessagingIfFinalMergeSettled`（`decideFinalMerge`末尾）がMCP・ポーリングの両方をまとめて閉じる。こちらは`live.finalMergeDecision`を判断確定の同期処理内で先に`undefined`へ戻すため、`auto`のような競合は起きず、直す必要が無い）
+
+`closeReviewCommentPoll`自身は`live.reviewCommentPoll === undefined`なら何もしない冪等な実装（`runnerReviewComments.ts`）なので、複数の呼び出し経路（`performFinalMerge`・`closeMessagingIfFinalMergeSettled`の両方）から重ねて呼ばれても安全。
+
+**`finalMergeOutcome`を確定させる4箇所（`runner.ts`の`'failed'`×2・`'merged'`・`'held'`）すべてで閉じ漏れが無いことを確認した。** `haltedByUser`による中止と`performFinalMerge`末尾のマージ成功/失敗の3箇所は、本節の修正で`closeReviewCommentPoll(live)`を直接呼ぶ。残る`'held'`（`decideFinalMerge`の`hold`決定、および`finalMergeDecisionTimeoutSec`超過による自動`hold`。どちらも同じ`decideFinalMerge`を通る）は、`live.finalMergeOutcome = 'held'`を設定した直後に`closeMessagingIfFinalMergeSettled`が同期的に呼ばれ、そちらがポーリングを閉じる。
+
+#### `finalMerge: 'pr-only'`（マージを人に委ねる設定）ではポーリングを閉じない（意図の確認、2026-08-23）
+
+`finalMerge: 'pr-only'`は`shouldRunFinalMerge`・`needsFinalMergeDecision`のどちらも`false`を返すため、`finalizeForge`は統合PR/MRを作った時点で何もせず戻り、`performFinalMerge`（＝上記の閉じ口）を一切通らない。`live.finalMergeOutcome`はrunが終わった後も`undefined`のまま残り、`live.reviewCommentPoll`は開いたまま、runが`succeeded`で終わった後もレビューコメント取得CLIが既定間隔（600秒）ごとに呼ばれ続ける（実測で確認済み）。
+
+**これは意図的な挙動として扱う（不具合ではない）。** `pr-only`は「統合PR/MRを作るところまでで、mainへのマージは人が別途行う」設定であり、その統合PR/MRが（人の手で閉じられるまで）開いている間はレビューを取り込み続けるのが設定の趣旨に沿う。実際、`planChangeFinishedReason`も`live.finalMergeOutcome === undefined`のままなので計画変更を通し続け、レビューを受けて追加したタスクの成果は開いたままの統合PRへ通常のタスク完了と同じ経路で載る——`auto`で問題になっていた「成果がmainへ届かない」という乖離は`pr-only`では起こらない（マージ自体を人が握っているため、届ける先が無くなることが無い）。
+
+**寿命の上限（例: 一定時間で強制的にポーリングを止める）は、今回は設けない。** 統合PR/MRが実際にクローズ・マージされたかを検知する仕組みが無いと、「開いている間だけ取り込む」という上記の趣旨を保ったまま安全に止めることができず、それを作るのはW5（Issue #339）の範囲を超える（統合PR/MR自体の状態をポーリングで確認する別機能が要る）。runを何本も`pr-only`で回すと、終わったrunのぶんだけタイマーが積み上がる点は限界として残る——ただし各runの`live`は`dispose()`（拡張機能の終了・ウィンドウのリロード等）で`closeReviewCommentPoll`が呼ばれ確実に閉じるため（`dispose()`内の呼び出し参照）、無制限に積み上がるのはそのセッション（VSCodeを閉じるまで）の間に限られる。統合PR/MRのクローズ検知によるポーリングの自動停止は、本Issueのスコープ外のフォローアップ課題とする。
+
+#### 検証
+
+`test/unit/forge.test.ts`が`parseGithubReviewComments`/`parseGitlabReviewComments`（レビュー本体とissueコメントの混在・空本文の除外・GitLabのシステム通知除外・壊れたJSON応答の扱い）・`fetchReviewComments`（ホストごとのCLI引数組み立て、CLI呼び出し失敗時に`ok: false`になること）を確かめる。`test/unit/config.test.ts`が`reviewCommentPollIntervalSec`の丸め（既定値・範囲内の値の通過・範囲外の値のフォールバック）を確かめる。`test/unit/runner.test.ts`が、本番の呼び出し経路（`finalizeForge` → `startReviewCommentPoll` → `setInterval`の発火 → `pollReviewComments`）を通して、統合PR/MRにレビューコメントが付くと警告欄へ全文で記録されオーケストレーターへも`<workflow-event kind="reviewComment">`として通知されること・同じコメントは2周目のポーリングで重複して取り込まないこと（idでの重複排除）・`reviewCommentPollIntervalSec: 0`はポーリングを行わないこと・レビューコメント取得のCLI呼び出しが失敗してもrunは止まらないことを確かめる。**さらに、レビューコメントが届いた後に`add_task`が実際に通り、追加したタスクが本番の呼び出し経路（`pump()`の再起動）で実際にスケジュールされて完走すること・その間`finalizeForge`が統合PR/MRを二重に作らないこと（`live.integrationPullRequest`ベースの冪等ガードで確かめる）を、`planChangeFinishedReason`の例外を`if (false)`へ戻すと実測どおり失敗することを確認済みの回帰テストで確かめる（前掲「届いた後に手を打てる状態にする」参照）。**さらに、`finalMerge: auto`で最終マージが既に確定した後にレビューコメントが届いた場合はadd_taskが理由付きで拒否されること（mainへ成果が届かず終わる乖離を防ぐ回帰）と、`finalMerge: orchestrator`で最終マージの判断待ちの間にadd_taskしたタスクが実際に完走し、その後の`decideFinalMerge(merge)`でT1・T2両方の成果を含めてmainへ1回だけマージされること（「gateの先」＝成果が実際にmainへ届くところまでの検証）を、`live.finalMergeOutcome !== undefined`の分岐を`if (false)`へ戻すと実測どおり失敗することを確認済みの回帰テストで確かめる（前掲「レビューを取り込めるのは最終マージ確定までである」参照）。**さらに、`finalMerge: auto`で最終マージが確定した後、既定間隔（600秒）×10周期ぶんタイマーを進めてもレビューコメント取得CLI（`--json=reviews,comments`）の呼び出し回数が増えないこと（コーディネーターの実測で確認された「11回目まで呼ばれ続ける」漏れの回帰）を、`performFinalMerge`末尾の`closeReviewCommentPoll(live)`呼び出しを外すと実測どおり失敗する（11回まで増える）ことを確認済みの回帰テストで確かめる（前掲「レビューコメントのポーリングを最終マージ確定の1点で閉じる」参照）。**さらに、`finalMerge: 'pr-only'`ではrunが`succeeded`で終わった後もレビューコメント取得CLIの呼び出し回数がタイマーを進めるほど増え続けること（＝ポーリングが意図的に生きたままであること）を、断言する形の回帰テストで固定する（前掲「`finalMerge: 'pr-only'`ではポーリングを閉じない」参照）。これにより、将来`pr-only`でも閉じる方向へ実装が変わった場合にテストが検知する。**実ホストでのレビューコメント取得コマンドが実引数として受理されるかは[manual-test.md](manual-test.md)のW-Jに残す。
+
+### 16.31 タスクごとにIssueを起票し、PRのレビューを経てマージする（roadmap W6、Issue #596）
+
+`per-task`のPR/MR作成フロー（§16.18、`runTaskPullRequestFlow`）には、これまで「タスクの進捗を追跡するIssue」と「PR/MRの中身を確かめるレビュー」のどちらも無かった。本節は、この2つを既存のフロー（タスクブランチをpush→統合ブランチをpush→PR/MRを作る→マージして統合ブランチをpush→（あれば）Draftで作ったPR/MRをreadyへ切り替える）を作り直さずに追加する。**両方とも既定は無効**（`agent.workflows.createTaskIssue`/`agent.workflows.reviewTaskPullRequest`、いずれも`boolean`・既定`false`・`machine-overridable`）。有効化しても`per-task`以外（`none`/`integration`）の挙動は変えない——`shouldCreateTaskPullRequest(pullRequest)`が`false`を返す層では、そもそも起票・レビューの対象になるPR/MRが無いため、両機能とも自然に素通りする。
+
+#### (a) タスクの開始時にIssueを起票する
+
+`maybeCreateTaskIssue`（`runner.ts`）を`prepareTaskLaunch`の末尾（作業ディレクトリの解決・実効設定のクランプ・権限越境チェック・bypassPermissionsの最終防御を終えた直後）から呼ぶ。**外部ホストへの副作用（`gh issue create`/`glab api`）を伴うため、セキュリティゲート（bypassPermissionsの最終防御）より後で呼ぶ。** 先に呼ぶと、危険な設定として開始を拒否したタスクについてもIssueだけが起票されたまま残る。次の条件が**すべて**揃ったときだけ`createIssue`（`forge.ts`）を呼ぶ。
+
+- `live.forge.kind === 'active'`かつ`createTaskIssue: true`
+- `shouldCreateTaskPullRequest(live.forge.pullRequest)`が`true`（`per-task`のときだけ）
+- `task.issue`が未指定（YAML・ロードマップ由来のIssueが既にあるタスクは起票しない。既存のIssueを使い回す）
+- 同じtaskIdへまだ起票していない（`live.createdTaskIssues`に無い。後述）
+
+起票した本文は`buildTaskIssueBody`（`prompt`/`done`/`meta`（`runId`/`taskId`）の3段構成。§16.18の`buildTaskPullRequestBody`と同じ「タスクの指示・完了条件をそのまま載せる」流儀を踏襲し、Issue独自の項目は追加しない）。タイトルは`buildTaskPullRequestTitle`をPR/MRと共用する（`T1: <promptの先頭>`の形。同じタスクのPRとIssueが同じタイトルで並ぶ）。
+
+**起票した番号の受け渡しは`live.createdTaskIssues: Map<taskId, number>`を介す。** タスク開始時（`prepareTaskLaunch`）と、PR本文組み立て時（`mergeTaskWithForge`、`runnerMerge.ts`、タスク完了・マージ時）は別のタイミングで呼ばれ、`LiveTask`自体は再試行のたびに作り直される。そのため`LiveTask`ではなく`LiveRun`側の`Map`へ番号を持たせ、`buildTaskPullRequestFlowCallbacks`の`createPullRequest`ステップで`task.issue ?? live.createdTaskIssues.get(taskId)`として参照する（`task.issue`が明示されていればそちらを優先し、無ければ起票した番号にフォールバックする）。`retryTask`で同じtaskIdを再実行しても、既に`live.createdTaskIssues`にあれば二重に起票しない（同じ番号を使い回す）。**この`Map`はworkspaceStateへ永続化しない**（`rebuildLiveRun`、`runnerRestore.ts`では空の`Map`で再構築する）。リロード後に`retryTask`すると再度起票しうる——番号自体は永続化される`task.issue`側の対象外（起票由来の番号はYAML由来ではないため）であり、追跡専用の値をリロードのたびに増やしうるという既知の制約として文書化するに留める（`WorkflowRunnerForgeDeps`の他の実行中限定の値と同じ扱い）。
+
+**起票できなくてもrunは止めない。** `live.forge.kind === 'active'`である以上`checkForgePrerequisites`（CLI・認証・originリモート）は既に通っているが、`gh issue create`/`glab api`個別の呼び出し自体はレート制限・権限不足等で失敗しうる。失敗時（CLI呼び出しの失敗・URLから番号を取り出せない・例外のいずれも）は`live.warnings`へ`kind: 'taskIssueFailed'`の警告を積むだけで、タスクの実行そのもの・PR/MR作成は通常どおり進む（PR本文の`Closes #<N>`/参照はその回だけ出ない）。
+
+#### (b) PRを作った後、ローカルマージの前にレビューを1段挟む
+
+`TaskPullRequestSteps<TMerge>`（`forge.ts`）へ`reviewPullRequest?: (url) => Promise<ForgeStepOutcome>`を新設し、`runTaskPullRequestFlow`の中で**`createPullRequest`の後・`mergeAndPushIntegration`の前**に呼ぶ（既存の4手順の順序は変えない。レビューは3.5番目、ready化は5番目として足す）。PR/MRの作成に成功したときだけ呼び、**結果（指摘の有無・レビュー自体の失敗）に関わらず`mergeAndPushIntegration`は必ず呼ぶ**——forgeの「人のレビューを待つ」方式のように、応答が無いまま待ち続ける構造は持ち込まない（epicの方針、W8の`ask_user`で近い欠陥をほぼ持ち込みかけたのと同じ理由）。
+
+実施主体は**forge（人のレビューを待つ機構）ではなく、拡張自身が別のエージェントセッションを立てて読み取り専用でレビューさせる方式**を採る。§16.28の`reviewWorkflowPlan`（分解レビュー、roadmap W3）と同じ形をそのまま踏襲する。
+
+- `reviewTaskPullRequest`（`planner.ts`）は`buildPlannerSessionInput` + `sendSingleTurn`（既定`PLANNER_TURN_TIMEOUT_MS` = 5分）で1ターンだけ送って閉じる。§16.28と同じく`sandbox: read-only`（Codex）・`approvalMode: never`（Codex）/`permissionMode: manual`（Claude）で起動し、承認要求は理由を問わず全て拒否する。**読み取り専用であることはプロンプトの指示ではなく起動設定で担保する**
+- プロンプトへ渡すのは対象タスクの`prompt`/`done`と、タスクブランチ・統合ブランチ間の`git diff`（`runnerMerge.ts`の`buildTaskPullRequestReviewStep`が取得）。差分の取得自体が失敗した場合は空文字列にフォールバックする（差分無しでもレビュー自体は試みる。取得失敗を理由にレビュー全体を諦めない）
+- 応答はJSON配列（`[{"message": "..."}]`）を期待し、`TaskPullRequestReviewFinding`（`message`のみ。§16.28の`WorkflowReviewFinding`と違い`aspect`の固定リストは持たない——分解固有の観点はコード差分レビューには当てはまらないため）へ変換する。JSONとして解釈できない・配列でない応答は**例外にせず指摘0件として扱う**（`parseTaskPullRequestReviewFindings`、§16.28の`parseReviewFindings`と同じ流儀）。件数上限は30件（`MAX_TASK_REVIEW_FINDINGS`）、メッセージは500文字（`MAX_TASK_REVIEW_FINDING_MESSAGE_LENGTH`）で`sanitizeInlineText`を通す
+- レビューセッションの起動・応答待ちそのものが失敗した場合（タイムアウト等）も例外を投げず、`error`へ理由を残して`findings: []`を返す
+
+`buildTaskPullRequestReviewStep`（`runnerMerge.ts`）は、レビューの結果に関わらず`{ ok: true }`を返す（`ForgeStepOutcome`としてこのステップ自体を失敗扱いにしない）。エラーが出た場合・指摘が1件以上あった場合は、`live.warnings`へ`kind: 'taskPullRequestReview'`の警告を積み、レビュー結果を人が確認できるようにする——`markPullRequestReady`等と同じ「結果は警告として残すだけで、フローの成否には影響しない」設計。
+
+#### 外部由来テキストの扱い（サニタイズは1度だけ、§16.24）
+
+Issue本文（`buildTaskIssueBody`）・レビュープロンプト（`buildTaskPullRequestReviewPrompt`）のどちらも、既存の`buildTaskPullRequestBody`（§16.18）と同じく**本文・プロンプトを組み立てる側ではサニタイズしない**。レビュープロンプトは`prompt`/`done`/`diff`の3フィールドを`formatUntrusted`（§16.24）で囲み、1回のプロンプトの中で複数フィールドを囲む既存の流儀（§16.28の`goal`/`workflow`と同じ）に合わせ、呼び出し側が1つの`nonce`を生成して3つとも使い回す。Issue本文自体は`createIssue`が一時ファイル経由（`--body-file`/`glab api`の`--field description=@…`）で渡すだけで、`createPullRequest`と同じくCLIの引数へ直接展開しない（§16.18のコマンドインジェクション対策をそのまま踏襲）。レビュー応答の`message`は`sanitizeInlineText`を、警告欄への表示はワークフローViewの既存の`textContent`描画（§16.8）を、それぞれ1回だけ通る——集約点（`wrapEvent`相当）を二重に通さない、という既存の規約はどちらの経路でも崩していない。
+
+#### 検証
+
+`test/unit/forge.test.ts`が`buildTaskIssueBody`の構成・`createIssue`のホストごとのCLI引数組み立て（GitHub: `gh issue create --body-file=…`、GitLab: `glab api projects/:id/issues --field=description=@…`）・危険な文字列を含む本文が引数へ直接展開されないこと・invalidInput/cliErrorの扱い・一時ファイルの後始末を確かめる。同ファイルが`runTaskPullRequestFlow`に`reviewPullRequest`を渡した場合の呼び出し順序（create→review→merge）・PR/MR作成が失敗すればレビューを呼ばないこと・レビューが失敗（`ok: false`）してもmergeは進むことを確かめる。`test/unit/planner.test.ts`が`reviewTaskPullRequest`について、§16.28の`reviewWorkflowPlan`のテストと同じ観点（指摘の変換・上限・壊れた応答の扱い・起動設定・1ターンで閉じること・`formatUntrusted`のnonce共有）を確かめる。`test/unit/runner.test.ts`が、本番の呼び出し経路（`runner.start` → タスク完了 → `prepareTaskLaunch`/`mergeTaskWithForge`）を通して、`createTaskIssue`/`reviewTaskPullRequest`いずれも既定では動かないこと・有効化するとIssue起票・レビューセッションの起動が実際に起きること・`pullRequest: 'integration'`では起票しないこと・YAML側で`issue`が既に指定されていれば起票しないこと・起票が失敗してもrunは止まらずタスクが完了することを確かめる。実ホスト（GitHub/GitLab）でIssue起票・レビューコメントの内容が実引数として受理されるかは[manual-test.md](manual-test.md)のW-Kに残す。
+
+
+### 16.32 タスクからオーケストレーターへ判断を仰ぐ経路（`ask_orchestrator`、roadmap W7、Issue #571）
+
+§16.21・§16.34のとおり、`send_message`の宛先はタスクからは常にオーケストレーターに固定されている。しかしこれは「送れる」だけで、「判断を仰いでいる」という意味づけは無かった。タスクが行き詰まったとき、いまできるのは`maxIterations`を消費し尽くすか、`done`を満たさないまま終わるかのどちらかで、能動的にオーケストレーターへ「この方針でよいか」と問う経路が無かった。
+
+**この節が足すのは新しい配送経路ではない。** §16.21・§16.34が作った中継（`send_message`→`deliverTaskMessageToOrchestrator`→`notifyOrchestrator`）の上に、「問い」という意味づけと`blocking`の扱いを載せるだけである。新しい直通経路を作ると、W9（§16.34）で「タスク間の直接メッセージングを廃し、オーケストレーターの中継にする」として潰した形（スター型を崩すメッシュ型の経路）へ戻ることになる。
+
+#### `ask_orchestrator`ツール（`messaging.ts`）
+
+タスク側の接続にだけ見せる（`list_tasks` / `send_message`と同じ基本ツールの並びに追加する）。**オーケストレーター自身の接続には見せない**（`MessagingMcpServer.visibleTools`）。タスクが判断を仰ぐための道具であり、オーケストレーターが自分自身へ問うことに意味が無いため。`tools/list`に出さないだけでなく、名前を推測して呼ばれた場合に備えて`handleToolCall`側でも同じ条件（`taskId === ORCHESTRATOR_CONNECTION_ID`）で「未知のツール」として拒否する（§16.23の制御ツールが採る多層防御と同じ流儀）。
+
+| 引数 | 型 | 意味 |
+| --- | --- | --- |
+| `question` | string | 問いの本文 |
+| `blocking` | boolean | 答えが届くまで待つ場合はtrue |
+
+呼び出しの実体は、`from`を接続の`taskId`（既存の`send_message`と同じくサーバ側が判別。引数には含めない）、`to`を`ORCHESTRATOR_CONNECTION_ID`に固定した`TaskMessagingHub.sendMessage`の呼び出しに変換するだけである。`expectReply`には`blocking`をそのまま渡す。
+
+```
+hub.sendMessage({ from: taskId, to: ORCHESTRATOR_CONNECTION_ID, body: question, expectReply: blocking, kind: 'question' })
+```
+
+`validateSendMessage`（宛先固定・`MAX_MESSAGE_BODY_LENGTH`・`MAX_MESSAGES_PER_RUN`・宛先の配送可否）は`send_message`と完全に共有する。`ask_orchestrator`専用の検証は追加していない。
+
+#### 「問い」という意味づけ（`StoredMessage.kind`）
+
+`StoredMessage`に`kind: 'message' | 'question'`を足した。`send_message`が送るものは常に`'message'`（`TaskMessagingHub.sendMessage`の既定値）、`ask_orchestrator`が送るものだけ`'question'`になる。
+
+`kind`が変えるのは、オーケストレーターへ届ける通知の**種別と文面**だけである。
+
+- `runnerMessaging.ts`の`deliverTaskMessageToOrchestrator`が`message.kind`を見て、`OrchestratorEventKind`を`taskMessage`（従来どおり）か`taskQuestion`（新設）のどちらにするかを分岐する
+- 本文の組み立ても`buildTaskMessageEventBody`と`buildTaskQuestionEventBody`に分かれる。後者は「問いが届いた」「`blocking: true`なら答えるまでこのタスクは進めない」「`send_message`（`to`に問うたタスクのid）で答えること」を明記する
+- **配送そのもの（`notifyOrchestrator`の呼び出し・`hub.takeDeliverableMessages`によるキュー消費）はkindを問わず共通**（§16.34「タスクからオーケストレーターへの配送」の一手をそのまま使う）。ここを2経路に分けなかった理由は次項
+
+`OrchestratorEventKind`への`taskQuestion`の追加は`orchestratorSession.ts`で行った。囲い（`wrapEvent`の`escapeAngleBrackets(stripControlCharsPreservingNewlines(...))`）は`kind`属性の値が変わるだけで、無害化の仕組み自体はkindを問わず共通のまま（次項参照）。
+
+#### 本文の無害化は1回に一本化されたまま（二重適用も素通りも作らない）
+
+§16.34が明記したとおり、タスク→オーケストレーターの経路では本文の無害化を`wrapEvent`（`orchestratorSession.ts`）の1箇所に一本化してある。`buildTaskMessageEventBody`と同じく、新設した`buildTaskQuestionEventBody`も**無害化前のプレーンテキストを組み立てるだけ**にした（`escapeAngleBrackets`や`stripControlCharsPreservingNewlines`をここで呼ばない）。`wrapEvent`が`<workflow-event kind="taskQuestion">`で囲む際にまとめて無害化するため、二重適用（見た目が壊れる）も素通り（無害化されないまま届く）もどちらも起きない。
+
+#### `blocking`と`waitingReply`（新しい状態遷移は増やしていない）
+
+`blocking: true`は`expectReply: true`としてそのまま`hub.sendMessage`へ渡るため、送信元タスクを`waitingReply`へ倒す処理（`onMessageAccepted`の`markWaitingReply` + `session.pauseLoop()`）は**`kind`を一切見ない既存のロジックがそのまま動く**。答えは既存の`send_message`（オーケストレーターから、`to`に問うたタスクのidを指定）で行う。**答えるための新しいツールは追加していない**（Issue #571の受入基準・実装上の注意のとおり）。
+
+このため、`src/orchestrator/runState.ts`・`src/orchestrator/runner.ts`（`waitingReply`への遷移・解除そのものを担う部分）・`src/orchestrator/loopController.ts`（`maxIterations`のカウントそのもの）には変更を加えていない。**「既存の仕組みで足りる」の根拠は次項**。
+
+#### 答えが来ないまま`maxIterations`に達した場合の失敗確定（新しい終了経路は増やしていない）
+
+受入基準は「答えが来ないまま`maxIterations`に達した場合は、タスクが失敗として確定する（返事待ちで枠を占有し続けない）」である。これは次の3つの**既存の仕組みの組み合わせ**でそのまま成立し、`ask_orchestrator`のために新しい終了経路を足す必要が無かった。
+
+1. `waitingReply`は`pauseLoop()`でループを実際に止めるため、待っている間は`maxIterations`のカウント（送信回数）も進まない。ここだけを見ると「答えが来ない限り永遠に待つ」ように見える
+2. しかし`waitingReply`には既存の待ちぼうけ検出（§16.21「待ちぼうけを検出する経路」）が必ず効く。全走行中タスクが`waitingReply`かつ未配送メッセージ0件（経路1、`detectAllWaitingStalemate`）、または`agent.workflows.replyTimeoutSec`（既定300秒）を超えた（経路2、タイムアウト）のどちらかで、答えが無くても`running`へ戻される。**この2つの検出関数はどちらも`TaskState`と経過時間だけを見ており、`StoredMessage.kind`（問いか通常のメッセージか）を一切参照しない。** そのため`blocking: true`の`ask_orchestrator`が増えても、判定対象になる`waitingReply`の母数が増えるだけで、検出の仕組み自体は変わらない
+3. `running`へ戻った後は通常のループが再開し、`continuePrompt`を送り続ける。答えが結局来ないまま`maxIterations`（送信回数の上限）を使い切れば、`LoopStopReason: 'maxReached'`が`onFinished`経由で届き、`applyLoopStopReason`（`runState.ts`）が`retries`の判定を経ずに`markFailed`で`failed`へ確定する（`maxReached`は元から`retries`の対象外。§16.5の表）。これは`ask_orchestrator`の有無に関わらず、回数切れのタスクが辿る唯一の経路である
+
+**「答えが来ないまま`maxIterations`に達したら失敗」は、`waitingReply`の待ちぼうけ検出（新しい終了経路を持ち込まない）と、`maxReached`の既存の失敗確定（`retries`を経ない）を単純に直列させただけで成立する。** 新しい判定コード（例えば「blocking待ちの間だけmaxIterationsを別枠で数える」ような特別扱い）を入れていない。特別扱いを入れなかった理由は、待ちぼうけ検出がある以上「blocking待ちのまま永遠に枠を占有し続ける」状態そのものが既に起こり得ないため。
+
+この直列（`ask_orchestrator(blocking: true)`→`waitingReply`→待ちぼうけ検出で解放→`running`で継続→`maxReached`→`failed`）を`test/unit/runner.test.ts`の`describe('WorkflowRunner: ask_orchestrator（design.md §16.32、Issue #571）')`で実際の呼び出し経路（`FakeTaskSession`・`vi.useFakeTimers`によるタイムアウト実測・`t1.finish('maxReached', ...)`）を通して固定した。
+
+#### `detectAllWaitingStalemate`との関係（壊していないことの固定）
+
+前項3のとおり、待ちぼうけ検出の2関数（`detectAllWaitingStalemate` / `detectTimedOutWaitingReplies`、`messaging.ts`）はどちらも`StoredMessage`や`kind`を引数に取らず、`TaskState`のマップと経過時間だけを見る純粋関数である。`ask_orchestrator`はこれらの関数のシグネチャにも実装にも触れていない。`blocking: true`が増えることで変わるのは「`waitingReply`というTaskStateを持つタスクが増えるかもしれない」という**入力側の母数**だけで、判定ロジック自体は一切変えていない。
+
+`test/unit/runner.test.ts`に「答えが来ないままreplyTimeoutSecを超えても待ちぼうけ検出で解放される」テストを追加し、`kind: 'question'`のメッセージで`waitingReply`に入ったタスクが、既存のタイムアウト経路（経路2）でこれまでどおり`running`へ戻り、`messagingStalled`警告が積まれることを確認した。経路1（`detectAllWaitingStalemate`そのもの）は`messaging.ts`の`kind`を取らないシグネチャによって構造的に`kind`非依存であることが自明なため、経路2（実行層の配線を通す）だけを実行層のテストとして追加し、経路1は純粋関数レベルの既存テスト（`test/unit/messaging.test.ts`）がそのままカバーする。
+
+#### 問いと答えの両方がワークフローViewへ残る（新しいUIは追加していない）
+
+§16.34「往復の内容をワークフローViewへ残す」と同じ理由で、新しい永続ログや専用UIは追加していない。
+
+- **タスク→オーケストレーター（問い）**: `taskQuestion`イベントは`notifyOrchestrator`経由でオーケストレーターのセッションへ実際に送信される。チャットタブ（§16.23「会話のUI」）から見える
+- **オーケストレーター→タスク（答え）**: 既存の`send_message`で転送されるため、宛先タスクの次の送信で`composeNextPrompt`により合成され、`LiveTask.lastSentPrompt`（§16.21「人が目視確認できるようにする」）へそのまま反映される。ワークフローViewの「プロンプトを見る」から確認できる
+
+このため`src/view/workflowView.ts`には変更を加えていない。
+
+#### `decide_approval`の承認経路とは独立（探した範囲）
+
+「`ask_orchestrator`が承認経路の検査を素通りする道になっていないか」を確認した。`ask_orchestrator`は`TaskMessagingHub.sendMessage`を呼ぶだけで、承認経路（`runner.ts`の`handleApproval`・`escalation.ts`の`classifyApprovalRequest`・`runState.ts`の`pendingApproval`/`waitingApproval`・制御ツール`decide_approval`が呼ぶ`WorkflowRunner.decideApproval`）のどの関数も呼ばない。`ask_orchestrator`はタスクの`sandbox`/`approvalMode`/`autoApprove`を一切変更せず、危険操作の実行そのものも行わない（純粋な情報伝達）。そのタスクが実際に危険な操作を試みる場合は、これまでどおり`session.setApprovalHandler`経由で`handleApproval`が呼ばれ、`decide_approval`（人またはオーケストレーター）の判断を経る。両者は経路として交わらない。**素通りする道は見つからなかった。**
+
+#### 兄弟の穴の確認
+
+- **他のタスク側ツール（`send_message`）**: `expectReply: true`は`ask_orchestrator`の`blocking: true`と全く同じ機構（`markWaitingReply` + `pauseLoop()`）を使うため、同じ待ちぼうけ検出・同じ`maxReached`直列が既に効いている。`send_message`側の穴では無い
+- **他の通知種別（`taskDone` / `taskFailed` / `taskWaitingApproval` / `taskBlocked` / `finalMergeDecision` / `runFinished` / `runHaltedByUser`）**: これらはいずれもタスクの状態遷移や実行全体の区切りをオーケストレーターへ知らせるだけの一方向通知で、`waitingReply`のような「タスクが人（に相当するオーケストレーター）の応答を待って占有し続ける」性質を持たない。同じ穴は無い
+- **他の待ち状態（`waitingApproval`）**: `waitingApproval`は承認要求に対する待ちで、`decide_approval`が答えるまで待つが、これは`maxIterations`のカウント方法自体は`waitingReply`と同様にループが止まっているため進まない。承認待ちが`maxIterations`到達で失敗するかどうかはこのIssueのスコープ外（既存の承認経路の話であり、`ask_orchestrator`が触れていない）だが、構造は同じ（ループが止まる→待ちぼうけに相当する解除機構が要る）ため、承認待ちが無期限に残り得るかどうかは別途確認の価値がある。**このIssueでは変更していない（報告のみ）**
+
+#### `orchestratorSession.ts` / `runnerOrchestrator.ts`への最小限の変更（W2との交差）
+
+この2ファイルは並行しているW2（roadmap、Issue #336）も触っている。この節の実装で加えた変更は次の2点のみで、どちらもW2の対象（`loopController.ts` / `runState.ts`のタスク実行制御そのもの）とは重ならない。
+
+- `orchestratorSession.ts`: `OrchestratorEventKind`へ`'taskQuestion'`を1行追加しただけ（既存の`'taskMessage'`と並ぶ列挙値の追加）
+- `runnerOrchestrator.ts`: `buildIntroBody`（run開始時にオーケストレーターへ渡す道具の説明文）へ、`ask_orchestrator`で届いた問いにも既存の`send_message`で答えられることを1文追記しただけ
+
+#### 影響範囲
+
+- `messaging.ts`: `ASK_ORCHESTRATOR_TOOL`の追加・`StoredMessage.kind`の追加・`TaskMessagingHub.sendMessage`の`kind`引数・`visibleTools`/`handleToolCall`への配線
+- `runnerMessaging.ts`: `deliverTaskMessageToOrchestrator`のkind分岐・`buildTaskQuestionEventBody`の新設
+- `orchestratorSession.ts`: `OrchestratorEventKind`へ`taskQuestion`を追加
+- `runnerOrchestrator.ts`: `buildIntroBody`の説明文に1文追記
+- `docs/manual-test.md` W-L: 実VSCodeでしか確かめられない受入基準（追記のみ、実施はしない）
+
+#### 確かめ方
+
+- `test/unit/messaging.test.ts`（`describe('ask_orchestrator（design.md §16.32、Issue #571）')`）: `tools/call`経由で`ask_orchestrator`を呼ぶと`send_message`と同じ経路でオーケストレーター宛に積まれ`kind: 'question'`が付くこと、`blocking: true`が`expectReply: true`として伝わること、送信元は接続から判別され引数のなりすましが効かないこと、オーケストレーター自身の接続には見えず名指しでも拒否されること、`MAX_MESSAGE_BODY_LENGTH`を共有すること
+- `test/unit/runner.test.ts`（`describe('WorkflowRunner: ask_orchestrator（design.md §16.32、Issue #571）')`）: 問いが`taskQuestion`として（`taskMessage`ではなく）届くこと、`blocking: true`で`waitingReply`へ入り既存の`send_message`の返信で再開すること、答えが来ないまま`replyTimeoutSec`を超えても既存の待ちぼうけ検出で解放されること、解放後も答えが来ないまま`maxIterations`を使い切ると`failed`へ確定すること（RED実測は`runnerMessaging.ts`の`deliverTaskMessageToOrchestrator`のkind分岐1行のみを潰して行い、「taskQuestionとして届く」テスト1件だけが失敗することを確認済み）
+- `docs/manual-test.md` W-L: 実VSCode上でask_orchestratorが実際にオーケストレーターへ届くこと・blockingの実際の待ち・問いと答えがチャットタブに残ることを確認する
+
+### 16.33 オーケストレーターから人へ確認する経路（`ask_user`、roadmap W8、Issue #583）
+
+§16.23はオーケストレーター専用の制御ツール群（`list_tasks`/`send_message`/`get_run_status`/`stop_task`/`retry_task`/`continue_task`/`decide_approval`/`update_task_prompt`/`decide_final_merge`）を置く一方、「人へ確認する」経路は「オーケストレーター欄の未読の印に気付かせる」だけで、**人が選ぶまでオーケストレーターを止める**手段が無かった。W4（roadmap）が「担当領域をまたぐ変更」「設計の前提を変える変更」の判断をオーケストレーター自身へ委ねる以上、委ねきれない・委ねてはいけない一部の判断（後述の4条件）だけは人へ戻す経路が要る。これがこの節が足す`ask_user`ツールである。
+
+#### なぜ§16.23の元の判断（「専用ツールは置かない」）を覆したか
+
+§16.23は当初、「ツールにすると『返事があるまでツールの中で待つ』形になって§16.21が避けたデッドロックを持ち込む」という理由で専用ツールを避けていた。§16.21が避けたデッドロックとは、MCPのHTTPレスポンスを長時間保留する（=接続を占有し続ける）ことで、他の正当なMCP呼び出しがブロックされる形を指す。
+
+`ask_user`はこの前提を崩さない。**ツール呼び出し自体は他の制御ツールと同じく同期的にすぐ返る**（`accepted: true/false`を返すだけで、HTTPレスポンスを保留しない）。「人が選ぶまで待つ」は、レスポンスの保留ではなく、**オーケストレーターへのイベント送信を止めて溜める送信ゲート**として実装した（次項)。したがってHTTPレスポンスを保留する経路は一切増えておらず、§16.21が避けたかったデッドロックは持ち込んでいない。
+
+#### `ask_user`ツール（`messaging.ts`）
+
+`decide_final_merge`と同じく、オーケストレーター専用の接続にだけ見せる（タスク側の接続には現れず、名指しで呼んでも「未知のツール」として拒否する）。`decide_final_merge`と同じ理由で`taskId`を取らないため、`handleControlToolCall`では`taskId`抽出より前の特別扱いの分岐で処理する。
+
+| 引数 | 型 | 意味 |
+| --- | --- | --- |
+| `question` | string | 問いの本文 |
+| `choices` | string[]（2〜4個） | 選択肢 |
+
+ツールの説明文（`description`）へ、**呼べる条件を絞る文言**を書いた: 担当領域をまたぐ変更（他のワークフローへ影響する）・設計の前提を変える変更・受入基準を下げる判断・同じ失敗を3回繰り返して打つ手が尽きた場合、の4つに限る。この絞り込みは**説明文だけで実現し、機械的には検証しない**（モデルへの指示であり、コード側で「本当に担当領域をまたいでいるか」を判定する手段が無いため）。機械的に強制するのは次項の呼び出し回数上限だけである。
+
+引数の形式検証（`beginAskUser`、`runnerOrchestrator.ts`）は次の順で行う:
+
+- 既に回答待ちの質問がある（`live.pendingAskUser !== undefined`）間は次の`ask_user`を拒否する（**1runにつき同時に1問だけ**。人が答えを選ぶまで次の問いを出せない）
+- `question`が空文字（trim後）なら拒否
+- `question`が`MAX_MESSAGE_BODY_LENGTH`（4000文字、`send_message`/`update_task_prompt`と共有）を超えたら拒否
+- `choices`が2〜4個の範囲外なら拒否
+
+#### 呼び出し回数の上限（「確認を絞る」の機械的な強制）
+
+呼べる条件（4つ）自体は説明文でしか強制できないため、代わりに**1runあたりの呼び出し回数**を機械的に絞る。既定は3回（`DEFAULT_MAX_ASK_USER_PER_RUN`、`orchestratorSession.ts`）。`agent.workflows.maxAskUserPerRun`（1〜20、既定3。範囲外・非数値・非整数は既定へ落とす。`config.ts`の`normalizeMaxAskUserPerRun`）で変更できる。
+
+上限を超えた呼び出しは受付自体を拒否し（`send_message`と同じ流儀）、理由に**自分で判断するか、`decide_final_merge`の`hold`で止めるよう**明記する。「確認したいことがまだあるが上限に達した」場合の代替手段を用意しておかないと、オーケストレーターが行き詰まったまま`maxIterations`を消費するだけになりかねないため、既存の停止手段（`decide_final_merge`の`hold`）を案内する。
+
+`LiveOrchestrator.askUserCount`はrunの開始時に0で初期化し（`setupOrchestratorForStart`）、`beginAskUser`が受け付けるたびに1加算する。カウンタはrun単位で、`decide_final_merge`の判断待ちのような特別な扱いは無い。**ただし自動再開（§16.35、W10、Issue #584）で未回答の`pendingAskUser`を引き継いだ場合は、0ではなく1から始める**（引き継いだ問いは既に1回分の`ask_user`を消費済みであり、0から始めるとリロードのたびに実質無料で上限をすり抜けられてしまうため。詳細は§16.35参照）。
+
+#### 「人が選ぶまで待つ」の実装（送信ゲート。新しいタスク状態は増やしていない）
+
+`LiveRun.pendingAskUser`（`{question, choices, since}` | `undefined`）を「いま回答待ちの質問があるかどうか」の唯一の状態として持つ。これが`undefined`でない間、次の3箇所がオーケストレーターへの送信を止める:
+
+1. `notifyOrchestrator`（イベント通知の自動flush）: `!orchestrator.busy && live.pendingAskUser === undefined`のときだけ`flushOrchestrator`を呼ぶ。回答待ちの間に届いたイベント（タスク完了・失敗等）は`orchestrator.pending`に溜まったまま送られない
+2. `onOrchestratorStateChanged`（ターン終了時のflush）: `finishedTurn && live.pendingAskUser === undefined`のときだけ`flushOrchestrator`を呼ぶ。`ask_user`を呼んだターン自体が終わっても、回答が来るまで次のターンは開かない
+3. `sendUserMessageToOrchestrator`（人の自由記述の発話。ワークフローViewの入力欄）: `live.pendingAskUser !== undefined`なら`false`を返して送らせない。回答の経路を選択ボタン（`answerAskUser`）だけに絞り、モデルが「自由記述の返信」と「選択肢からの回答」のどちらを見ているかが常に一意に決まるようにする
+
+**新しいタスク状態（`TaskState`）は増やしていない。** `pendingAskUser`はrun全体に1つ持つ`LiveRun`のフィールドであり、オーケストレーター自身のセッションは`busy`のままで構わない（実際には送信ゲートで止まっているため、次のターンが開始されない形で待つ）。`waitingReply`/`waitingApproval`のような`TaskState`の追加やタイムアウト・待ちぼうけ検出の新設は行っていない（次項「兄弟の穴の確認」参照）。
+
+#### `answerAskUser`（回答の合流。busy中の回答を失わない）
+
+ワークフローViewの選択ボタンから`WorkflowRunner.answerAskUser(runId, choiceIndex)`を呼ぶ。`live.pendingAskUser`が無い・`orchestrator`セッションが無い（リロード後等）・`choiceIndex`が選択肢の範囲外・既に答え済み（配送待ちの間の二重回答）、のいずれかであれば`false`を返し何もしない（`sendToOrchestrator`と同じ「なにもしない」失敗の返し方）。
+
+**`ask_user`のツール呼び出しはオーケストレーターのターンの最中に届く。** つまり`beginAskUser`が走る時点で`orchestrator.busy`は`true`であり、`self.notify(runId)`で選択ボタンはその瞬間からViewに出る。人がそこですぐ押すと、`answerAskUser`が呼ばれる時点でもまだ`orchestrator.busy === true`のことがある。ここで`orchestrator.session.send`を素通しで呼んでしまうと、走行中のターンへ割り込む送信になり、`chatView.ts`の`sendOnce`は送信の失敗を投げ直さず`reportError`するだけであるため、失敗すれば**答えが届かないまま`pendingAskUser`だけが消えてボタンも無くなり、`ask_user`は待ちぼうけ検出を持たないため人は答え直せずrunが無期限に止まる**（レビュー指摘、実装直後に発見・修正）。
+
+これを避けるため、答えは`live.pendingAskUser.answeredChoice`（`string | undefined`）へ保持するだけにとどめ、実際の送信は`busy`でなくなってから行う:
+
+1. `answerAskUser`は`live.pendingAskUser`を`{...pending, answeredChoice: choice}`へ更新するだけ（**まだ送らない**）。`orchestrator.busy`が`false`ならこの場で`deliverAskUserAnswer`を呼んで即座に送る
+2. `orchestrator.busy`が`true`のままなら送らずに終わる。ターンが終わったとき（`onOrchestratorStateChanged`の`finishedTurn`の枝）に`live.pendingAskUser?.answeredChoice !== undefined`を見て、そこで`deliverAskUserAnswer`を呼ぶ（既存の`flushOrchestrator`の「ターンが終わってからまとめて送る」流儀と揃える）
+3. `deliverAskUserAnswer`が実際の送信を行う: `live.pendingAskUser`を`undefined`に戻す（次の`ask_user`が呼べるようになる）→ 回答待ちの間に送信ゲートで止めていた`orchestrator.pending`のイベントを、`composeOrchestratorPrompt(orchestrator.pending, answerText)`で答えの文言と**合流**させ、1回の送信にまとめる（答えだけを送って溜まっていたイベントを後回しにする形は採らない。§16.23「何が駆動するか」の合流と同じ流儀）→ `orchestrator.session.send(composed)`で送る（`sendUserMessageToOrchestrator`と同じ経路）
+
+**二重回答は`pending.answeredChoice !== undefined`で防ぐ。** 配送待ち（答え済みだがまだ送っていない）の間に選択ボタンが再度押されても（Viewは`answered: true`の間ボタンを出さないが、多層防御として`WorkflowRunner`側でも弾く）、`answerAskUser`は`false`を返し二重送信にならない。
+
+答えの文言はサーバ側が組み立てる固定文（`人がask_userの質問に答えました: "<選択肢の文字列>"`）で、人が選んだ選択肢の文字列をそのまま埋め込む。選択肢自体はオーケストレーター（エージェント）が`ask_user`の引数として出した文字列であり、次項の無害化の対象になる。
+
+`WorkflowRunSnapshot.pendingAskUser`には`answered: boolean`を持たせ（`live.pendingAskUser.answeredChoice !== undefined`をそのまま反映）、ワークフローViewは`answered: true`の間、選択ボタンの代わりに「答えました。オーケストレーターへ届くまでお待ちください。」を表示する（`workflowScript.ts`の`renderAskUser`）。
+
+#### 永続化（`finalMergeDecision`との違い、roadmap W10との関係）
+
+`finalMergeDecision`（§16.26）は判断待ちの状態を**永続化しない**方針である。理由は「対象（統合PR/MR）がホスト側で直接確認できるため、リロード後は再構築ではなく現況確認で足りる」ため。`ask_user`の問いにはそのような外部記録が無い（問い自体がオーケストレーターの発話でしかない）。
+
+roadmap W10（design.md §16.35「中断からの自動再開」、Issue #584。この節（W8）の時点では未実装だった）は「`ask_user`待ちで落ちた場合は、再開時に問いを出し直す。人の答えを永続化の対象に含める」ことを求めていた。この要求に応えるため、`ask_user`は**`finalMergeDecision`の前例から意図的に外れ**、`PersistedRun.pendingAskUser`（`{question, choices, askedAt}`）として`WorkflowRunner.persist()`で永続化する。
+
+- `live.pendingAskUser`が設定される（`beginAskUser`）・解除される（`answerAskUser`）たびに`persist()`を呼ぶ
+- `persist()`は`current?.pendingAskUser`へのフォールバックを**行わない**（他のフィールドと異なる）。回答待ちは「いま宙に浮いている問い」であり、`live.pendingAskUser`が`undefined`になった時点で消えるべき値であって、直前の確定値を保持し続ける性質のもの（`finalMergeOutcome`等）ではないため
+- リロード直後（`restoreRunsForView`/`rebuildLiveRun`）は`live.pendingAskUser`を**復元しない**（`undefined`のまま）。この時点ではオーケストレーターセッション自体（答えを送る先）が無いため、`live.pendingAskUser`を復元しても答える経路が無く、`answerAskUser`を呼べば`orchestrator === undefined`で必ず`false`になる
+- `WorkflowRunSnapshot.pendingAskUser`は`live.pendingAskUser`（あれば`hasLiveSession: true`）と、無ければ`persisted.pendingAskUser`（`hasLiveSession: false`）のどちらかを返す（`runnerSnapshot.ts`の`buildPendingAskUserSnapshot`）。自動再開が走らない・見送られた場合、ワークフローViewは**問いの文言だけは見えるが、答えられない**（選択ボタンを出さず、「このセッションは復元できていないため、いまは回答できません」を表示する）ことで、Viewを見た人が「宙に浮いた問いがあった」ことに気付ける
+
+**「再開時に問いを出し直す」自体は§16.35（W10）で実装した。** この節（W8）では`PersistedRun.pendingAskUser`を永続化し、リロード後の表示（現況の可視化）にしか使っていなかった。§16.35の自動再開が走ると、`runnerRestore.ts`の`autoResumeIfEligible`が新しいオーケストレーターセッションを立てる際（`setupOrchestratorForStart`）に永続化された値から`live.pendingAskUser`を作り直し、`hasLiveSession: true`へ戻って人が再び答えられるようになる。詳細は§16.35を参照。
+
+#### `ask_user`は`buildIntroBody`（オーケストレーターへの案内）に1文追記した
+
+`runnerOrchestrator.ts`の`buildIntroBody`（run開始時にオーケストレーターへ送る道具の説明）へ、`ask_user`の呼べる条件（4つ）と回数上限がある旨を1行追記した。**このとき、既存の`decide_final_merge`が同じ説明文に含まれていないことに気付いた**（§16.26で追加された際に案内文への追記が漏れていた、この節より前からある既存の穴）。この節のスコープ（`ask_user`）ではないため`decide_final_merge`側は直していないが、ここに記録しておく。
+
+#### 兄弟の穴の確認
+
+- **`ask_orchestrator`（§16.32、タスク→オーケストレーター）**: 逆方向（オーケストレーター→人）であり、送信ゲートではなく`waitingReply` + 待ちぼうけ検出という別の仕組みで「答えが来ないまま`maxIterations`に達したら失敗」を保証している。`ask_user`には`maxIterations`に相当する消費資源が無い（オーケストレーターはループを回さず、単発の送信ゲートで止まるだけ）ため、待ちぼうけ検出に相当する自動解放の仕組みは無い。**これは意図的な非対称**であり、代わりに呼び出し回数の上限（既定3回）と`decide_final_merge`の`hold`への案内が「行き詰まったまま無限に待つ」ことへの対処になる。回数上限が「機械的に絞る」役割を担うのは`ask_orchestrator`には無い性質で、`ask_user`が人に確認を求める側（乱用されるとView上の対応コストが人に乗る）だからこそ必要になる非対称でもある
+- **`decide_approval`/`waitingApproval`**: `ask_user`はタスクの`sandbox`/`approvalMode`/`autoApprove`を一切変更せず、承認要求そのものも発生させない。両者は経路として交わらない。`ask_user`の回答待ちの間にタスク側で承認要求（`waitingApproval`）が発生しても、`decide_approval`制御ツールは`pendingAskUser`を見ずに通常どおり動く（承認判断とask_userの回答待ちは独立した状態のため、互いをブロックしない）
+- **`finalMergeDecision`（§16.26）との相互作用**: `ask_user`の回答待ちの間に最終マージの判断待ちが同時に発生し得るが（両方とも`live`の別フィールド）、`decide_final_merge`は`pendingAskUser`を見ない・`ask_user`は`finalMergeDecision`を見ない、互いに独立している。**ただし両方が同時に立つと、人はワークフローViewで両方に答える必要があり、UI上の見え方の整理（両方の欄を同時に出す）は本実装の範囲内で対応済み**（`WorkflowRunSnapshot`は両フィールドを独立に持つ。表示側の排他制御は行っていない＝両方同時に出しても壊れない設計）
+
+#### 本文の無害化は§16.34の1箇所に一本化されたまま
+
+`ask_user`が扱う文字列（`question`・`choices`）はいずれもオーケストレーター（エージェント）の出力であり、外部/未信頼のテキストとして扱う。この節では**新しい無害化の呼び出しを追加していない**。
+
+- ワークフローViewの描画（`workflowScript.ts`の`renderAskUser`）は、`pending.question`・`choices`の各文字列を`textContent`（`text()`ヘルパー）へ代入するだけで、`innerHTML`は使わない。DOM挿入時点での無害化（HTMLエスケープ相当）はブラウザのtextContent代入そのものが担う
+- `answerAskUser`が組み立てる答えの文言（`人がask_userの質問に答えました: "<選択肢>"`）はサーバ側の固定文＋選択肢の埋め込みで、`orchestrator.session.send`経由でオーケストレーターへ渡る。この経路は`sendUserMessageToOrchestrator`（人の発話）と同じであり、§16.23のとおり人の入力として扱い`wrapEvent`の囲いは付けない（人の発話は元からタスク由来の文字列を偽装する経路ではないため）
+- `question`/`choices`自体をオーケストレーターへ送り返す経路（=オーケストレーター自身が出した文字列をオーケストレーターへ送り返す）は無い（`ask_user`は人向けの表示にしか使わない）ため、§16.34が定めた「タスク由来の文字列は`wrapEvent`で1回だけ無害化する」対象にも当たらない
+
+#### 影響範囲
+
+- `orchestratorSession.ts`: `DEFAULT_MAX_ASK_USER_PER_RUN`/`MIN_MAX_ASK_USER_PER_RUN`/`MAX_MAX_ASK_USER_PER_RUN`の追加
+- `config.ts`: `WorkflowsConfig.maxAskUserPerRun`・`normalizeMaxAskUserPerRun`の追加
+- `package.json`: `agent.workflows.maxAskUserPerRun`設定項目の追加
+- `messaging.ts`: `ASK_USER_TOOL`の追加・`OrchestratorControlPort.askUser`・`handleControlToolCall`への配線
+- `runner.ts`: `LiveOrchestrator.askUserCount`・`LiveRun.pendingAskUser`・`LiveAskUser`・`WorkflowRunSnapshot.pendingAskUser`・`WorkflowRunnerDeps.readMaxAskUserPerRun`・`WorkflowRunner.answerAskUser`の追加。`persist()`への`pendingAskUser`の書き出し
+- `runStore.ts`: `PersistedRun.pendingAskUser`の追加
+- `runnerRestore.ts`: 復元時は`live.pendingAskUser`を`undefined`のまま保つ
+- `runnerOrchestrator.ts`: `beginAskUser`/`answerAskUser`の新設。`notifyOrchestrator`/`onOrchestratorStateChanged`/`sendUserMessageToOrchestrator`への送信ゲートの追加。`buildIntroBody`への1文追記
+- `runnerSnapshot.ts`: `buildPendingAskUserSnapshot`の新設
+- `extension.ts`: `readMaxAskUserPerRun`の配線
+- `workflowView.ts`: `answerAskUser`メッセージの受信・HTML（`#orchAskUser`）の追加
+- `workflowScript.ts`: `renderAskUser`の新設（`applyState`/`applyNoRun`から呼ぶ）
+- `docs/manual-test.md` W-M: 実VSCodeでしか確かめられない受入基準（追記のみ、実施はしない）
+
+#### 確かめ方
+
+- `test/unit/messaging.test.ts`（`describe('オーケストレーター専用の制御ツール（design.md §16.23「道具」）')`内）: `ask_user`がオーケストレーター専用の接続にだけ現れ、タスク側の接続からは見えず名指しでも拒否されること、`tools/call`経由で引数どおり`OrchestratorControlPort.askUser`が呼ばれること、文字列でない`choices`の要素は除かれて渡ること、拒否されると`isError: true`になること
+- `test/unit/runner.test.ts`（`describe('WorkflowRunner: ask_user（design.md §16.33、Issue #583）')`）: 受け付けるとスナップショットへ問いが載ること、回答待ちの間は次の`ask_user`を拒否すること、`question`が空・`choices`が2〜4個の範囲外なら拒否すること、既定3回で上限に達し4回目を拒否しその理由が自己判断/`decide_final_merge`の`hold`を促すこと、`agent.workflows.maxAskUserPerRun`（`readMaxAskUserPerRun`）で上限を変えられること、`answerAskUser`が選んだ答えをオーケストレーターへ送り回答待ちを消すこと、範囲外の`choiceIndex`・回答待ちが無い場合は`false`を返し何も変えないこと、回答待ちの間はタスク完了通知の送信を止めて溜め`answerAskUser`が答えと合流させて送ること、回答待ちの間は人の自由記述の発話（`sendToOrchestrator`）を送らせないこと、リロード後は永続化された問いの文言だけ復元し`hasLiveSession: false`で答えられないこと、**`answerAskUser`はターンの最中（`orchestrator.busy: true`）に答えても送信を保留し、ターンが終わってからまとめて送ること（busy中の割り込み送信で答えが失われる穴の回帰テスト。レビュー指摘で発見・修正）**、配送待ちの間の二重回答は`false`を返し二重送信にならないこと。RED実測は上限判定（`orchestrator.askUserCount >= limit`）・送信ゲート2箇所（`notifyOrchestrator`/`sendUserMessageToOrchestrator`）・`answerAskUser`のbusyガード（`!orchestrator.busy`）・二重回答ガード（`pending.answeredChoice !== undefined`）・ターン終了時の配送分岐（`onOrchestratorStateChanged`の`deliverAskUserAnswer`呼び出し）のそれぞれ1行のみを潰して行い、対応するテストだけが正しい理由で失敗することを確認済み
+- `test/unit/config.test.ts`: `maxAskUserPerRun`の既定値（3）・範囲内の指定値・範囲外/非数値/非整数での既定値へのフォールバックを確認
+- `test/unit/webviewScript.test.ts`（`describe('workflowScript')`内）: `renderAskUser`が生成されること（`el('orchAskUser')`/`snapshot.pendingAskUser`/`answerAskUser`メッセージ型/`choiceIndex`を含むこと）、質問文が`textContent`相当（`text()`ヘルパー）で挿入されること。RED実測は`workflowScript.ts`側の送信メッセージ型の文字列1箇所を潰して行った
+- `docs/manual-test.md` W-M: 実VSCode上でask_userが実際にワークフローViewへ問いと選択肢を出すこと・選ぶまでオーケストレーターが止まって見えること・選ぶと答えが反映されること・上限に達すると拒否されること・リロード後に問いの文言だけ残り回答できないことを確認する
+
+### 16.34 タスク間の直接メッセージングを廃し、オーケストレーターの中継にする（roadmap W9、Issue #547）
+
+§16.21のタスク間メッセージングは、`send_message`の宛先を「同じrunのタスク」に限っていた（`knownTaskIds`判定）。これはタスクからタスクへ直接届くメッシュ型で、WF-Eの方針2「やりとりは必ずオーケストレーターを通す。人 ←→ オーケストレーター ←→ タスク の3層に固定する（スター型）」に反していた。タスクがn個あれば経路はn×(n-1)本になり、オーケストレーターはどのタスクが何を伝えたのかを一切知らないままだった。
+
+これは機能の削減ではなく経路の集約である。タスクAがタスクBへ伝えたい情報は、オーケストレーターを経由して届く。かわりに、オーケストレーターが全ての伝達内容を見られる。
+
+#### 宛先の固定（`messaging.ts`）
+
+`validateSendMessage`（§16.21）の検証を、送信元がタスクかオーケストレーターかで分岐させた。
+
+- **`from`がタスク**（接続の`taskId`が`ORCHESTRATOR_CONNECTION_ID`と異なる）: `to`は**必ず`ORCHESTRATOR_CONNECTION_ID`でなければならない**。それ以外（実在するタスクid・存在しないid・自分自身のidを問わず）は「宛先はオーケストレーターに固定されています」という同じ理由で拒否する
+- **`from`が`ORCHESTRATOR_CONNECTION_ID`**（オーケストレーターからの送信）: 「自己宛」→「宛先の存在」の順で検証し（順序の理由は次段落）、`to`には`knownTaskIds`に含まれる実在タスクidを指定できる
+
+`ORCHESTRATOR_CONNECTION_ID`（`orchestratorSession.ts`、値は`-orchestrator-`）をそのままタスク側の予約宛先として再利用した。`TASK_ID_PATTERN`が先頭の`-`を許さないため、これと衝突するタスクidは定義できない（新しい予約語をワークフロー検証（`workflow.ts`）へ追加する必要が無い）。
+
+`SEND_MESSAGE_TOOL`の説明文（モデルへ見せる`description`）も、接続によって`to`の意味が変わることを明記するよう書き直した。同じツール定義をタスク・オーケストレーターの両方が見る（`visibleTools`は`send_message`をどちらの接続にも常に含める）ため、1つの説明文の中で両方の振る舞いを説明する形にしてある。
+
+自己宛の拒否（Issue #365、`to === from`）はオーケストレーター分岐に残した。**タスク分岐では「宛先固定」の拒否がタスク宛（自分自身のidを含む）を包括的に弾くため、タスクが自分自身へ送ろうとした場合の拒否理由は「自分自身へは送信できません」ではなく「宛先はオーケストレーターに固定されています」になる**（design.md執筆時点の実装のまま、拒否そのものはされる。`test/unit/messaging.test.ts`「タスクから自分自身宛（実質タスク宛）も同じ理由で拒否する」で固定）。
+
+**オーケストレーター分岐側の自己宛チェックは、初版では`knownTaskIds`の判定の後段に置いており、実運用では到達しないデッドコードだった。** `ORCHESTRATOR_CONNECTION_ID`は`TASK_ID_PATTERN`の制約上`knownTaskIds`（実タスクidの集合）に現れないため、オーケストレーターが自分自身を宛先にした場合、先に「宛先が見つかりません」判定が成立してしまい、後ろに置いた`to === from`の専用チェックへは一度も到達しなかった（レビュー指摘。design.md初版もこの前提で「実運用では到達しない」と誤って書いていた）。**チェックの順序を入れ替え、`to === from`の自己宛判定を`knownTaskIds`判定より先に置くことで、この分岐は実際に到達するようにした。** 現在オーケストレーターが自分自身を宛先にすると、常に「自分自身へは送信できません」で拒否される（`messaging.ts`の`validateSendMessage`、`test/unit/messaging.test.ts`「オーケストレーターが自分自身宛だと拒否する」で固定）。
+
+#### タスクからオーケストレーターへの配送（`runnerMessaging.ts`）
+
+タスク間メッセージング（§16.21）の配送は、宛先タスクの次の送信（`setPromptTransform`）が`takeDeliverableMessages`を呼ぶ**プル**型だった。オーケストレーターはこの仕組みを持たない（走行中のタスクのように繰り返しターンを送るループではなく、イベント駆動で`notifyOrchestrator`が**プッシュ**する。§16.23「何が駆動するか」）。
+
+`onMessageAccepted`（`TaskMessagingHub.sendMessage`が受け付けた直後に同期的に呼ばれるフック）を、宛先で分岐させた。
+
+- `message.to === ORCHESTRATOR_CONNECTION_ID`（タスク→オーケストレーター）: 新設した`deliverTaskMessageToOrchestrator`を呼ぶ。`notifyOrchestrator`で新しいイベント種別`taskMessage`（`orchestratorSession.ts`の`OrchestratorEventKind`）としてオーケストレーターへ即座にプッシュし、**同時に`hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID)`でキューからも取り除く**
+- それ以外（オーケストレーター→タスク）: 従来どおり。宛先タスクが`waitingReply`なら`resumeFromWaitingReply`で再開する（変更なし）
+
+**キューから取り除く一手が無いと、待ちぼうけ検出（§16.21「待ちぼうけを検出する経路」の経路1、`detectAllWaitingStalemate`）が恒久的に壊れる。** オーケストレーターは`takeDeliverableMessages`を自分から呼ぶ経路を持たないため、プッシュだけで済ませて`store.queued`へ残したままにすると、その1件は`totalUndeliveredCount`に数えられ続ける。経路1は「走行中の全タスクが`waitingReply`で、未配送のメッセージが1件も無ければ」を条件にしており、いずれかのタスクが一度でもオーケストレーターへメッセージを送った時点でこの条件が二度と満たせなくなる——runの残り全体で「全員待ち」からの自動復帰が機能しなくなる、という壊れ方をする。design.md執筆時点でこの機序に気づけたのは§16.25の確認事項4（「途中にバッファ・キュー・busyゲート・デバウンスがある場合、そこを通過させるところまで状態を進めているか」）を踏まえて設計段階で見直したため。テスト（`test/unit/runner.test.ts`。この機能を専用に切り出したファイルは無く、既存の慣例どおりタスク間メッセージング関連のテストは`runner.test.ts`側に置く）は、タスクがオーケストレーターへメッセージを送った**直後**に`hub.totalUndeliveredCount()`が0へ戻ることを直接確かめる形にしてある（経路1「全員`waitingReply`かつ未配送0件」が壊れないための必要条件を、hub側から直接観測する。RED実測は`deliverTaskMessageToOrchestrator`の`takeDeliverableMessages`呼び出し1行だけを戻して行い、実際にこの1テストだけが失敗することを確認済み。§16.25確認事項8）。
+
+送信元タスクを`waitingReply`へ倒す処理（`expectReply: true`のときの`markWaitingReply` + `pauseLoop()`）は宛先を見ない既存のロジックのままで、変更していない。**`waitingReply`が中継を挟んでも成立する**というIssue #547の受入基準は、次の3つが揃って成り立つ。
+
+1. タスクが`expectReply: true`で送ると、宛先に関わらず送信元は`waitingReply`へ入る（変更なし）
+2. オーケストレーターが`send_message`（`to`に元の送信元のタスクidを指定）で返信すると、`onMessageAccepted`のオーケストレーター→タスク分岐が`resumeFromWaitingReply`を呼び、送信元は`running`へ戻る（変更なし。オーケストレーターは元の送信元と同じ相手へ返す必要はなく、別のタスクへ転送してもよい。ただし`expectReply`で待っている送信元を再開させたいなら、その送信元id宛てに送る）
+3. オーケストレーターが応答しないまま`waitingReply`が続いた場合も、待ちぼうけの経路1・経路2（§16.21）はどちらも壊れず機能する（経路1は上の対処、経路2＝タイムアウトはこの変更の影響を受けない）
+
+オーケストレーターのセッションが存在しない（起動失敗等、§16.23「セッションの生成に失敗した場合」）場合、`notifyOrchestrator`は何もせず、メッセージは黙って失われる。§16.21「MCPツールの可視性確認」・§16.23「オーケストレーターが利用できません」と同じ「見えなければ通信なしで走らせる。runは止めない」方針を踏襲した。
+
+#### 往復の内容をワークフローViewへ残す
+
+新しい永続ログや専用UIは追加していない。既存の2つの経路がそのまま満たす。
+
+- **タスク→オーケストレーター**: `taskMessage`イベントは`notifyOrchestrator`経由でオーケストレーターのセッションへ実際に送信される（§16.23「何が駆動するか」の合流・送信と同じ経路）。チャットタブ（§16.23「会話のUI」）は送った内容・応答の両方を通常の会話として表示するため、「会話を開く」から見える
+- **オーケストレーター→タスク**: `send_message`で転送された内容は、宛先タスクの次の送信で`composeNextPrompt`により合成され、`LiveTask.lastSentPrompt`（§16.21「人が目視確認できるようにする」）へそのまま反映される。ワークフローViewの「プロンプトを見る」から実際に送った文面として確認できる
+
+どちらも§16.21・§16.23が既に持っていた「実際に送った文面をそのまま見せる」仕組みに乗せてあるため、中継固有の追加コードは無い。
+
+#### 変わらないもの
+
+- 自己宛の拒否（オーケストレーター分岐で継続）
+- 1件あたりの本文の長さ上限（`MAX_MESSAGE_BODY_LENGTH`）・run全体の総数上限（`MAX_MESSAGES_PER_RUN`）・`composeNextPrompt`の合成後の総量上限（`MAX_COMPOSED_PROMPT_LENGTH`）
+- `wrapTaskMessage`による囲い（オーケストレーター→タスクの配送）・`wrapEvent`による囲い（タスク→オーケストレーターの通知）は、どちらも既存の無害化（`escapeAngleBrackets` + `stripControlCharsPreservingNewlines`）をそのまま使う
+- MCPサーバの起動・接続の判別（`ORCHESTRATOR_CONNECTION_ID`による接続単位の識別）・`list_tasks`
+
+#### 影響範囲
+
+- `messaging.ts`: `validateSendMessage`の宛先固定・`SEND_MESSAGE_TOOL`の説明文
+- `orchestratorSession.ts`: `OrchestratorEventKind`へ`taskMessage`を追加
+- `runnerMessaging.ts`: `onMessageAccepted`の分岐・`deliverTaskMessageToOrchestrator`・`buildTaskMessageEventBody`
+- `docs/manual-test.md` W-N: 実VSCodeでしか確かめられない受入基準（追記のみ、実施はしない）
+
+**副作用として`messagingPermissionEscalation`（前項「メッセージング経由の権限越境」・Issue #132）が実質発火しなくなる。** `checkMessagingPermissionEscalation`（`runnerSnapshot.ts`）は配送された`StoredMessage.from`を`live.def.tasks`から引き、送信元タスクの実効値と宛先タスクの実効値を比較する実装のまま変えていない。中継後は実タスクへ配送されるメッセージの`from`が常にオーケストレーター（`ORCHESTRATOR_CONNECTION_ID`）になるため、`live.def.tasks`に見つからず`senderTask === undefined`で毎回素通りする。仮に`ORCHESTRATOR_CONNECTION_ID`を`live.def.tasks`相当の比較対象に含めたとしても、オーケストレーターの実効`sandbox`は常に`read-only`固定（`ORCHESTRATOR_SANDBOX`、§16.23）のため「宛先より緩い」は成立しない。この警告が拾っていた脅威（緩い送信元の自由記述が厳しい宛先で実行される）自体は消えていない——中継を挟んでも、オーケストレーターが転送する自由記述に仕込まれた指示文は依然として宛先タスク自身の権限で実行されうる。オーケストレーターの`read-only`はオーケストレーター自身が直接何をできるかの制約であり、宛先タスクの実行権限とは無関係だからである。ただし脅威の一次防御は変わらず宛先タスク自身の権限設定（`sandbox`/`approvalMode`/`autoApprove`）であり、今回失われるのはその見える化（実行時警告）の経路だけである。この経路をオーケストレーター中継後も保つには「配送されたメッセージの元の送信元」を`StoredMessage`とは別に追跡する仕組みが要るが、オーケストレーターが内容を要約・改変しうる設計（本節冒頭）と相性が悪く、本Issueのスコープ外として見送った。実行時警告としての検出は失われるが、既存の受信内容の無害化（`<task-message>`によるデータ扱い化、前項「受信内容の扱い」）は経路を問わず変わらず効く。**この検出を復活させるか、死んだコードとして削除するかはIssue #562で決める**（まだどちらとも決まっていない）
+
+#### 確かめ方
+
+- `test/unit/messaging.test.ts`: タスクが実在タスクidを`to`に書くと拒否され理由が返ること／`ORCHESTRATOR_CONNECTION_ID`宛なら受け付けること／オーケストレーターからは従来どおりタスクidを`to`にできること／自己宛の拒否（オーケストレーター分岐）／`MessagingMcpServer`・`startHttpMcpTransport`経由の既存テスト（送信元のなりすまし防止等）は宛先をオーケストレーターへ差し替えて維持
+- `test/unit/runner.test.ts`（`describe('WorkflowRunner: 直接メッセージングを廃しオーケストレーター中継にする（design.md §16.34、Issue #547）')`）: タスクからタスクid宛の直接送信が拒否されること／タスク→オーケストレーターの`onMessageAccepted`が`notifyOrchestrator`を呼ぶこと・`takeDeliverableMessages`でキューを空にすること（`totalUndeliveredCount()`が0へ戻ることを直接観測）／`expectReply: true`での`waitingReply`遷移が中継後も成立すること（オーケストレーターからの送り返しで実際に`resumeLoop`されるところまで）／オーケストレーターの自己宛拒否・未知宛先拒否が変わらないこと（RED実測は`takeDeliverableMessages`呼び出し1行だけを戻して行う）
+- `test/unit/runner.test.ts`（既存の`describe('メッセージング経由の権限差の警告・実際の送信文面の表示...')`）: 上記の`messagingPermissionEscalation`不発火を明示のテストとして固定・`lastSentPrompt`（実送信文面の表示、Trojan Source対策の制御文字除去）は宛先をオーケストレーターへ差し替えて維持
+- `docs/manual-test.md` W-N: 実VSCode上でタスクからタスクへ直接届かないこと・オーケストレーターの転送が実際のCLIプロセスへ届くことを確認する
+### 16.35 中断からの自動再開（roadmap W10、Issue #584）
+
+#### 背景
+
+§16.11「永続化と復元」は、ウィンドウのリロード（あるいはWSLの停止・再起動でVSCode拡張機能ホストごと落ちる場合も含む）で走行中だったタスクを`failed`（理由: `reloadInterrupted`）へ倒し、runを`workspaceState`から復元してViewへ表示するところまでしか行っていなかった。それ以降は`isRunHalted`（`hasFailedTask`）の門に引っかかり、人がワークフローViewから「再実行」を押すまでrunは進まない。
+
+長時間・無人で走らせる運用（roadmapが目指す自律度）では、VSCodeのリロードやWSLの一時的な停止・再起動のたびに人が張り付いて「再実行」を押す前提は成立しない。そこで、条件を満たす場合は復元直後に自動的に再開する。
+
+#### 設計方針: 純粋な判定層と、副作用を起こす統合層を分ける
+
+`applyAutoResume`（`runState.ts`）に、`RunState`から`RunState`への変換（「再開すべきか」「どのタスクを`pending`へ戻すか」の判定）を全て寄せ、`vscode`にもファイルI/Oにも依存しない純粋関数にした。実際に副作用（オーケストレーターセッションを立てる・`persist()`する・`pump()`でスケジューリングを起こす）を行う`autoResumeIfEligible`（`runnerRestore.ts`）は、この純粋関数が返した判定をただ適用するだけにする。
+
+理由は`retryTask`/`continueTask`（人の手動操作、同じく`runState.ts`）と同じ構図で自動版を作りたかったため。手動の「再実行」がタスク単位の状態遷移として`runState.ts`に閉じているのに対し、自動再開はrun単位でまとめて判定する必要がある（後述「`allow`ゲート」参照）が、判定そのものを純粋関数に閉じ込める設計は変えない。テスト（`test/unit/runState.test.ts`）もVSCodeのモックなしに全パターンを踏める。
+
+#### 再開の条件（4つ）
+
+`autoResumeIfEligible`は`restoreRunsForView`が`rebuildLiveRun`の直後（`self.runs.set(p.runId, rebuilt)`の直後）に呼ぶ。以下の4つを順に満たさなければ、その場で何もしない（次のリロードまで`failed(reloadInterrupted)`のまま残る）。
+
+1. **`agent.workflows.autoResume`が`false`でない**（既定`true`、`machine-overridable`）。`false`にすれば§16.11単体の時代と同じ完全手動の挙動に戻る。
+2. **`haltedByUser`でない**。人が「全体停止」ボタンで明示的に止めたrunを、リロードのたびに黙って再開すると、その場に残していた理由（レビュー中・調査中等）を壊す。人の意図的な停止は、リロードを挟んでも人の意図的な再開（「再実行」）を待つ。
+3. **`applyAutoResume`が`resumed`を返す。** 内部で2つのゲートを持つ:
+   - **他の理由による`failed`が1件でも混ざっていれば、run全体の自動再開を見送る（`blockedByOtherFailure`）。** `nextTasksToStart`は`isRunHalted`（`haltedByUser || hasFailedTask`）の間は一切スケジュールしない（`markMergeSucceeded`のJSDocが説明する「孤立した`pending`」の不変条件、Issue #432・PR #517）。ここで`reloadInterrupted`のタスクだけを`pending`へ戻しても、他の`failed`が残っている限りスケジュールされず、Viewからも「再開したのに動いていない」ように見えて紛らわしい。
+   - **`allow`（危険な操作の確認）を要するタスクが`reloadInterrupted`に混ざっていれば、run全体の自動再開を見送る（`blockedByAllowGate`）。** 自動再開はその場に人がいない前提で走る。`allow`は人が明示的に確認して初めて実行してよい操作（§16.7）で、自動再開の中でその確認を代行することはできない。そのタスクだけを`failed`のまま残して他を`pending`へ戻すことも考えたが、それも「孤立した`pending`」の不変条件を壊す（残った`failed`が`hasFailedTask`を立て、結局run全体が動かない）ため、run全体を見送る一択にした。
+   - この2つで見送った場合も`autoResumeBlocked`という`WorkflowWarning`を積む（当初は「既存のfailed/skipped表示で理由が分かる」として無警告にしていたが、レビューで「条件4（上限超過）だけ理由がViewへ出て、条件3の見送りは出ないのは非対称」と指摘され改めた。受入基準「回数上限を超えたら理由が見える」を、上限超過以外の見送り理由にもそろえる）。
+4. **`agent.workflows.maxAutoResumeAttempts`（既定3、`machine-overridable`）に達していない。** 定義ファイルが壊れている・依存先のCIが恒久的に落ちている等で、起動のたびにクラッシュ→自動再開→クラッシュ……を繰り返すrunを止めるための上限。`PersistedRun.autoResumeAttempts`（省略可能。無ければ`0`扱い）へ実際に再開した回数を記録し、`restoreRunsForView`が`store.update`で直接インクリメントする（`persist()`は`current?.autoResumeAttempts`をそのまま引き継ぐだけで、増減はここでしか起きない）。上限に達していれば再開せず、`autoResumeLimitExceeded`という新しい`WorkflowWarning`をこのrunの直近1件へ丸めて積む（`persistFailed`・`finalMergeDecision`と同じ規律）。人がViewから手動で「再実行」すれば、そのタスク自身の`retryTask`/`continueTask`が`autoResumeAttempts`を触らない（`PersistedRun`の他のフィールドと同じく`persist()`が前回値を引き継ぐだけ）ため、次回リロード時の自動再開判定にはそのまま影響し続ける（手動再実行を境に自動再開の権利がリセットされるわけではない。上限はあくまで「自動で」再開した回数だけを数える）。
+
+4つとも満たしたときだけ、`applyAutoResume`が返した`RunState`（`reloadInterrupted`のタスクを`pending`へ、それによって道連れで`skipped(runHalted)`になっていた後続も併せて`pending`へ戻したもの）を`rebuilt.runState`へ適用し、`autoResume`という`WorkflowWarning`（戻したタスクidを列挙。直近1件へ丸める）を積む。
+
+#### worktreeの二重作成を避ける
+
+`applyAutoResume`は`pending`へ戻すタスクの`manualRetryCount`を1増やす（`retryCount`ではなく）。`retrySuffixOf`（`runner.ts`）は`retryCount + manualRetryCount`からworktree・ブランチ名の接尾辞（`-retry0`、`-retry1`……）を決めるため、クラッシュした試行が既に作っていたworktree・ブランチ（接尾辞なし、または前の接尾辞）とは別名になる。`createWorktree`はブランチが既に存在すれば`branchExists`エラーで作成そのものを拒否する（git層での二重防止）ため、どちらかのカウンタを増やし忘れると自動再開そのものが常に失敗する形で発覚する設計になっている。
+
+当初は手動の「再実行」（`retryTask`）が`manualRetryCount`を増やすのと対称に、自動再開は`retryCount`を増やす実装にしていたが、レビューで指摘を受け改めた。`retryCount`は`applyLoopStopReason`の`'failed'`分岐（`current.retryCount < task.retries`）で`task.retries`（タスク定義のループ内自動リトライ回数の予算）と直接比較される値であり、ここを自動再開で先に消費してしまうと、`retries: 1`のタスクがリロードで中断→自動再開したあと本物の理由で改めて失敗した場合に、まだ使っていないはずの自動リトライの権利が残っていないという、受入基準にもこのdesign.mdにも書かれていない振る舞いを生む。`manualRetryCount`は`totalAttempts`の表示と`retrySuffixOf`の接尾辞計算にしか使われておらず（grep済み）、`retries`との比較箇所を持たない。そのため「worktree名を変える」というここでの目的だけを、`retries`の予算を消費せずに達成できる`manualRetryCount`側を進めることにした（`manualRetryCount`のJSDocも「人の明示操作**または自動再開**による試行回数」へ意味を広げた）。
+
+#### オーケストレーターセッションの立て直しと`ask_user`の再質問
+
+自動再開が実際に走る場合、`ensureMessaging` → `setupOrchestratorForStart`（`start()`と同じ手順）でこのプロセス上に新しいオーケストレーターセッションを立てる（`rebuildLiveRun`は`orchestrator: undefined`のまま復元するだけで、セッションまでは作らない。§16.23「永続化と復元」参照）。
+
+このとき、`PersistedRun.pendingAskUser`（§16.33、Issue #583）に答え待ちの問いが残っていれば、`OrchestratorResumeContext`として`setupOrchestratorForStart`へ渡す:
+
+- `buildIntroBody`（run開始時の案内文）へ、「このセッションは自動再開で、前回のセッションで出した次の問いにまだ答えられていない」旨と、問い・選択肢の文言を1段落追記する（会話そのものは復元できないため、この文脈だけを引き継ぐ）。
+- `live.pendingAskUser`を永続化された問いから作り直す。これだけで`buildPendingAskUserSnapshot`（`runnerSnapshot.ts`）が`hasLiveSession: true`を返すようになり、ワークフローViewの選択ボタンが復活する（`runnerSnapshot.ts`側の変更は不要。`live`優先・`persisted`フォールバックという既存のロジックがそのまま効く）。
+- `askUserCount`（このrunでの`ask_user`呼び出し回数、`agent.workflows.maxAskUserPerRun`の上限判定に使う）は`0`ではなく`1`から始める。引き継いだ問いは既に1回分の`ask_user`を消費済みであり、`0`から始めるとリロードのたびに実質無料で上限をすり抜けられてしまう（§16.33「確認を絞る」の意図を守るための判断）。
+
+人が答えると、通常の`answerAskUser` → `deliverAskUserAnswer`の経路（§16.33）でそのまま配送される。`live.pendingAskUser`が`orchestrator.busy`かどうかに関わらず送信ゲートで止める設計（§16.33）のため、自動再開の`buildIntroBody`（イントロ本文）自体も答えが届くまでは新しいオーケストレーターへ送られず、答えと合流して初めて1通で届く。
+
+#### 実装ファイル
+
+- `runState.ts`: `applyAutoResume`・`AutoResumeOutcome`（純粋な判定層）
+- `runStore.ts`: `PersistedRun.autoResumeAttempts`（省略可能フィールド）
+- `runnerRestore.ts`: `autoResumeIfEligible`・`DEFAULT_AUTO_RESUME`・`DEFAULT_MAX_AUTO_RESUME_ATTEMPTS`・`MIN_MAX_AUTO_RESUME_ATTEMPTS`・`MAX_MAX_AUTO_RESUME_ATTEMPTS`
+- `runnerOrchestrator.ts`: `OrchestratorResumeContext`・`buildIntroBody`/`setupOrchestratorForStart`への配線
+- `runnerInternals.ts`・`runner.ts`: `WorkflowRunnerInternals.ensureMessaging`（分割モジュールへの公開）、`WorkflowRunnerDeps.readAutoResume`/`readMaxAutoResumeAttempts`、`WorkflowWarning`の`autoResume`/`autoResumeLimitExceeded`/`autoResumeBlocked`、`persist()`の`autoResumeAttempts`引き継ぎ
+- `config.ts`: `WorkflowsConfig.autoResume`/`maxAutoResumeAttempts`・`normalizeMaxAutoResumeAttempts`
+- `package.json`: `agent.workflows.autoResume`・`agent.workflows.maxAutoResumeAttempts`
+- `extension.ts`: 上記2つの`readXxx`の配線
+
+#### 確かめ方
+
+- `test/unit/runState.test.ts`（`describe('applyAutoResume（design.md §16.35、roadmap W10、Issue #584）')`）: `reloadInterrupted`の`pending`復帰（`manualRetryCount`を1増やし`retryCount`は増やさないこと）・道連れの`skipped(runHalted)`復帰・`dependencyFailed`/`mergeBlocked`起因の`skipped`は戻さないこと・他の理由の`failed`混在での`blockedByOtherFailure`・対象なしでの`nothingToResume`・`allow`混在での`blockedByAllowGate`・`retries`（自動リトライの予算）を自動再開が消費しないこと（`retries: 1`のタスクが自動再開後に本物の理由で失敗しても自動リトライが起きる回帰テスト）
+- `test/unit/runner.test.ts`（`describe('WorkflowRunner: 中断からの自動再開（design.md §16.35、roadmap W10、Issue #584）')`）: 既定（`autoResume: true`）での自動再開・`haltedByUser`での見送り・`autoResume: false`での従来どおりの手動待ち・上限超過での`autoResumeLimitExceeded`警告・`allow`混在での見送りと`autoResumeBlocked`警告・他の理由の`failed`混在での見送りと`autoResumeBlocked`警告・worktree/ブランチが別名で二重作成にならないこと（`manualRetryCount`側を進め`retryCount`は増やさないこと）・`ask_user`回答待ちの再質問（新しいオーケストレーターセッションへの問いの引き継ぎと配送）
+- `test/unit/config.test.ts`: `autoResume`/`maxAutoResumeAttempts`の既定値・範囲内の指定・範囲外/非数値/非整数のフォールバック
+- `docs/manual-test.md` W-O: 実VSCode上でのウィンドウのリロード・WSLの停止/再起動からの自動再開、worktreeが二重に作られないことの確認（追記のみ、実施はしない）
+
+### 16.36 CIの完了待ちとブランチ保護への対応（roadmap W11、Issue #556）
+
+2026-08-22、mainにブランチ保護（PR必須・`checks`必須・**strict**）を入れた直後に、PR #481のマージでPR #482が「baseの最新でない」ことを理由にブロックされ詰まった。**strictなブランチ保護の下では、mainへ1本マージするたびに他の全てのopen PRが古くなる。** 統合ブランチからmainへ複数のPRを順に出す運用（§16.17）では必ず起きる。
+
+§16.18「最終マージ」が呼ぶ`gh pr merge` / `glab mr merge`は、それまでCIの結果を一切見ずに実行していた。`forge.ts`が呼ぶGitHub/GitLabの操作は`pr create` / `pr merge` / `pr ready`の3つだけで、CIチェックの完了を待つ手段も、baseを取り込み直す手段（`gh pr update-branch`相当）も無かった。本節はこの2つを`forge.ts`へ足す。
+
+#### CIの完了を待つ（`runFinalMergeWithCiGate`）
+
+`performFinalMerge`（`runner.ts`）は、`runFinalMerge`を直接呼ぶ代わりに`runFinalMergeWithCiGate`（`forge.ts`）を呼ぶ。`auto` / `orchestrator` / `confirm`のどのモードでも同じ1箇所（`performFinalMerge`）を経由するため（§16.26参照）、CIの完了待ちは`finalMerge`の値と無関係に一律で効く。
+
+1. **CI状態の取得。** GitHubは`gh pr view <number> --json=statusCheckRollup`、GitLabは`glab api projects/:id/merge_requests/<iid>`（`head_pipeline.status`）で取得する。GitLabは`glab ci status`が対象を「ブランチ」で指定するテキスト向けコマンドでJSON出力を持たない（実機の`--help`で確認済み。`glab` 1.112.0）ため使わず、`createPullRequest`と同じ理由で構造化データを得やすい`glab api`へ寄せた。「同じ形で用意する」（ロードマップ方針5・providerを問わない）はコマンド名の一致ではなく、CIの完了待ち・失敗判定という挙動の一致を指す
+2. **集約結果は4値。** `none`（チェックが1件も無い＝CI未設定）・`pending`（未完了のチェックがある）・`passed`（全て完了し失敗が無い）・`failed`（完了したチェックに失敗がある。CLI呼び出し自体の失敗もここに含める——認証切れ等で状態を取得できない異常状態を`pending`のまま無期限に待たせないため）
+3. **`none`は待たずに即マージへ進む。** 受入基準「CIが設定されていないリポジトリでは従来どおり即マージする」。**`none`はリポジトリ側が意味を持って返す明示的な形（`statusCheckRollup: []` / `head_pipeline: null`）に限る。** JSONの解析自体には成功したが期待するキーが無い・型が違う（`gh`/`glab`のバージョン差やAPIのスキーマ変更を想定）場合は`none`ではなく`failed`へ倒す（セキュリティ監査の指摘。2026-08-23。以前の実装は`statusCheckRollup`キーの有無・型を確認せず、無ければ即座に空配列と同じ`none`扱いにしていたため、応答の形が想定外でもCIが赤かどうか見ずにマージする経路になっていた）。「チェックが0件」と「応答の形が想定外」を`parseGithubCiConclusion` / `parseGitlabCiConclusion`の内部で型のレベルで区別しており、取り違えようがない
+4. **GitHubの`conclusion`は成功値のホワイトリストで判定する。** 失敗値のホワイトリスト（`FAILURE` / `CANCELLED`等を列挙）から成功値のホワイトリスト（`SUCCESS` / `NEUTRAL` / `SKIPPED`）へ反転した（セキュリティ監査の指摘。2026-08-23）。失敗値のホワイトリストは、そこに載っていない未知の値（例: baseが進んだ後の再実行待ちを示す`STALE`）を素通しして成功寄りに扱う構造的なfail-openになる。mainへの実マージを左右する機能のため、知らない`conclusion`は失敗側へ倒す（fail-closed）ほうが安全という判断
+5. **`pending`はポーリングで待つ。** `agent.workflows.ciWaitTimeoutSec`（既定1800秒、`machine-overridable`）を超えたら`timeout`を返し、`failed`と同じ扱いにする（受入基準「待ち時間の上限を超えたら赤と同じ扱いになる」）。ポーリング間隔は15秒固定で、そのタイマーは`.unref()`している（`beginFinalMergeDecision`の判断待ちタイマーと同じく、テスト・プロセス終了を妨げないため。レビュー指摘。2026-08-23）。`now`/`wait`はテストから注入できる（`pushBranch`の`PushBranchWait`と同じ流儀。テストは実時間で待たない）
+6. **`failed`・`timeout`はマージせずタスクを失敗として確定する。** `performFinalMerge`は`live.finalMergeOutcome`を`'failed'`にし、理由を`WorkflowWarning`（`kind: 'forgeFailed'`）へ積む。これはワークフローViewの警告欄に残る（受入基準「赤ならマージせずタスクが失敗で確定する（理由がワークフローViewに残る）」）
+7. **`failed`の理由メッセージ（失敗したチェック名の列挙・パイプラインのstatus）は`sanitizeForLog`を通す。** 件数・文字列長の上限が無いと、チェックが数百あるリポジトリでこのメッセージがそのまま`live.warnings`・ログへ入り巨大化する（レビュー指摘。2026-08-23）。他のCLI出力由来のメッセージと表記を揃える意味もある
+
+#### baseの取り込み直し（`updatePullRequestBranch`）
+
+`runFinalMergeWithCiGate`は、CIが`none`/`passed`でマージを試み、それが失敗したときだけ次の判定へ進む。
+
+1. **「baseの最新でない」ことによる拒否かどうかを、stderrのテキストパターン（`isBranchNotUpToDateError`）で判定する。** `gh pr merge`はGraphQLエラー文字列（例: `Base branch was modified. Review and try the merge again.`）を、`glab mr merge`はREST APIのエラーメッセージをそのままstderrへ出すため、`isRetryablePushError`（§16.18「統合ブランチpushの直列化とリトライ」）と同じ、既知の文言をパターンで拾う方式にした。一致しなければ「baseの最新でない」以外の失敗（コンフリクト・権限不足等）として扱い、取り込み直しは試みない。**逆に、実際は別の失敗（コンフリクト解消の案内文等）でもパターンに誤って一致する場合がありうる**（テキストパターン照合の限界。レビュー指摘。2026-08-23）。誤って一致しても、取り込み直しを1回無駄に試みるだけで、それでも解決しなければ次の`runFinalMerge`が同じ理由で再び失敗し、`ciUpdateBranchMaxRetries`の上限で必ず止まる（無限リトライにはならない）
+2. **一致すれば取り込み直す。** GitHubは`gh pr update-branch <number>`、GitLabは`glab mr rebase <number>`（いずれも実機のドキュメント・`--help`で確認済み）
+3. **取り込み直した後、CIの完了を待ち直してから再度マージを試みる。** baseの内容が変わった以上、直前のCI結果は使い回さず再取得する
+4. **リトライ回数の上限は`agent.workflows.ciUpdateBranchMaxRetries`（既定2、`machine-overridable`）。** 初回のマージ試行を含まない回数で、超えたら失敗として確定する（受入基準「再試行の上限を超えたら失敗として確定する」）
+
+#### 呼び出しの入口は1箇所
+
+`performFinalMerge`（`runner.ts`）は`auto`（`finalizeForge`から直接呼ばれる経路）・`orchestrator`/`confirm`（`decideFinalMerge`が判断確定後に呼ぶ経路）のいずれからも同じ関数として呼ばれる（§16.26）。タスク層のPR/MR（`runTaskPullRequestFlow`の`mergeAndPushIntegration`）は`gh pr merge` / `glab mr merge`を呼ばずローカルの`git merge`+pushで完結する（§16.18「作る順序」4番目の手順のJSDoc「4のpushによって、作ったPR/MRはホスト側でマージ済みとして扱われる」）ため、CIの完了待ちが要るのは統合層の最終マージだけであり、`performFinalMerge`という単一の入口へ足すことで両ホスト・全`finalMerge`モードに一律で効く。タスク層と統合層で対称性が崩れる余地は無い。
+
+#### 全体の停止（`haltedByUser`）への対応
+
+W1（Issue #335）は「最終マージの判断が確定する瞬間」を`decideFinalMerge`のガード（`live.runState.haltedByUser`が立っていれば`decision: 'merge'`を拒否する）で守った。W11はその判断が確定した**後**に、CIの完了を待つ長い区間（既定で最大`ciWaitTimeoutSec` × (`ciUpdateBranchMaxRetries` + 1）秒、既定値では約90分）を新設した。瞬間だけを守るガードはこの区間をカバーしないため、追加で次の対応をしている（セキュリティ監査の指摘。2026-08-23）。
+
+1. **`performFinalMerge`の入口で確認する。** `finalMerge: auto`は`finalizeForge`から`decideFinalMerge`を経由せず直接`performFinalMerge`を呼ぶため、W1のガード（`decideFinalMerge`にしか無い）が素通りする兄弟の穴になっていた。`performFinalMerge`は`auto` / `orchestrator` / `confirm`のどのモードでも合流する唯一の入口（前掲「呼び出しの入口は1箇所」）なので、ここに置けば全モードを一律で守れる
+2. **`runFinalMergeWithCiGate`（`forge.ts`）へ`isCancelled: () => boolean`コールバックを渡す。** `forge.ts`はロジック層で`LiveRun`を直接見られないため、`config.now` / `config.wait`と同じ流儀で、`runner.ts`側が`() => live.runState.haltedByUser || this.disposing`を渡す（`disposing`は`WorkflowRunner.dispose()`が立てる印。拡張機能終了後もポーリングが動き続けるのを防ぐ）
+3. **確認する箇所は3つ。** `waitForCiChecks`のポーリングの各周回（ループ先頭。「`wait()`の前」であると同時に、2周目以降は「直前の`wait()`の後」でもあるため1箇所の確認で両方を満たす）・`waitForCiChecks`から制御が戻った直後（`none`/`passed`で即座に返った場合を含む。ポーリングを1回も経ないまま`runFinalMerge`を呼んでしまう抜けを防ぐ）・`updatePullRequestBranch`を呼ぶ直前（baseへ実際に変更を及ぼす操作のため）
+4. **停止していれば`{ ok: false, reason: 'cancelled', message: '人が停止したため最終マージを中止しました' }`を返す。** `performFinalMerge`はこれを他の失敗と同じ経路で扱い、`live.finalMergeOutcome`を`'failed'`にして理由を`WorkflowWarning`（`kind: 'forgeFailed'`）へ積む。W1の「判断の内容と理由は必ず警告欄へ残る」という考え方と揃える
+
+**停止を解除しても、最終マージは自動では再開しない。** `retryTask` / `continueTask`（`runState.ts`）は`haltedByUser`を`false`へ戻すが、いずれも個別タスクの再開を意図した操作で、既に`failed`として確定した`performFinalMerge`をもう一度呼び直す経路は無い（レビュー指摘。2026-08-23。セキュリティ監査は当初「`haltedByUser`を戻す箇所自体が無い」と報告したが、これは事実誤認で`retryTask`/`continueTask`が戻す。ただし戻すのは人の明示操作であり、危険はない）。CI待ちの最中に止めてから停止を解除した場合、mainへマージしたければ人が統合PR/MRを手動でマージするか、ワークフローを再実行する必要がある。[manual-test.md](manual-test.md)のW-Pに確認項目がある。
+
+#### 検証
+
+`test/unit/forge.test.ts`が、GitHub/GitLabそれぞれのCI状態パース（`parseGithubCiConclusion` / `parseGitlabCiConclusion`。CheckRun/StatusContextの混在・`head_pipeline`が`null`の場合に加え、**キー自体が無い／型が違う想定外の応答形は`none`ではなく`failed`へ倒れること**・**GitHubの`conclusion`が成功値ホワイトリストに無い未知の値（`STALE`等）は`failed`になること**を含む）・`waitForCiChecks`のポーリングとタイムアウト（実時間では待たない）・**`isCancelled`が真になったときの打ち切り（ポーリング開始前・ポーリングの周回中の両方）**・`isBranchNotUpToDateError`の既知パターン一致/不一致・`updatePullRequestBranch`のホストごとのコマンド組み立て・`runFinalMergeWithCiGate`の一連の流れ（CI未設定は待たずに即マージ・赤はマージコマンドを呼ばずに失敗・タイムアウトも同様・「baseの最新でない」からの取り込み直し→再CI確認→再マージ・無関係な失敗は取り込み直しを試みない・リトライ上限超過・番号不明時は`runFinalMerge`と同じ振る舞い・**`isCancelled`の3箇所の確認点それぞれで`{ reason: 'cancelled' }`になりマージコマンドを呼ばないこと**）を確かめる。`test/unit/runner.test.ts`が`performFinalMerge`の配線（CI確認が`pr merge`より前に呼ばれること・CIが赤なら`finalMergeOutcome`が`failed`になり警告欄に残ること・「baseの最新でない」からの取り込み直しを経て`merged`になること・**`finalMerge: auto`の経路で統合PR/MR作成の完了時点で既に停止していればCI確認もマージも一切呼ばれないこと（旧: 兄弟の穴の回帰テスト。`isCancelled`が同じ`haltedByUser`を見るため`pr view`/`pr merge`が呼ばれないことだけを見ると入口ガードだけを消しても赤くならず2重の防御の片方がもう片方をマスクしてしまう。レビュー指摘。2026-08-23。`isCancelled`より手前で起きる副作用——タスク層自身のPRのready化とは別に、統合PR/MRぶんの`pr ready`が呼ばれないこと——を観測点にして入口ガード単体を検証する形にした。`runner.ts`の入口ガードの条件だけを`if (false)`へ戻して赤くなることを実測済み）**・**CI状態を実際に取得している最中に「全体の停止」が押されると、その後CIが緑だと分かってもマージコマンドが一度も呼ばれないこと（本番の呼び出し経路`performFinalMerge` → `runFinalMergeWithCiGate`を通し、`cli.calls`で確認する）**）を確かめる。`test/unit/config.test.ts`が`ciWaitTimeoutSec` / `ciUpdateBranchMaxRetries`の丸め（既定値・範囲外の値の扱い）を確かめる。**`test/integration/helpers/workflow.ts`の`RecordingCli`にもCI状態取得コマンド（`gh pr view` / `glab api .../merge_requests/<iid>`）への応答を足してあり（「チェックが1件あって緑」の形。空応答のままだと`fetchCiConclusion`のJSON解析が失敗して`failed`へ倒れ、マージが一度も呼ばれずに`workflowForgeOrder.test.ts`の既存2件が壊れていた。セキュリティ監査の指摘で判明。2026-08-23）、`npm run test:integration:xvfb`で実VSCode上でも確認済み。**実ホストでのCI状態取得・取り込み直しコマンドが実引数として受理されるかは[manual-test.md](manual-test.md)のW-Pに残す。
+
+### 16.37 runをまたぐ統括（プログラム、roadmap W12、epic #341）
+
+#### 背景
+
+1 run = 1ワークフローで、runの上に層が無い。ロードマップからの生成も「選べるのはフェーズ単位のみ」（§16.19）。複数のワークフローを波に分けて、波の内側は並列・波をまたぐと逐次、という進め方を拡張機能では表現できなかった。これは2026-08-22に人手で回した7ワークフロー・3波の運用そのものにあたる。
+
+runの上に**プログラム**（複数runの束）を置く。プログラムが持つのは、runの一覧とrun同士の依存（「WF-Eは WF-A2 の完了を待つ」）・波の概念・プログラム全体の状態とその永続化（W10の自動再開の対象に含める）。
+
+**上位のオーケストレーターは置かない。** 各runのオーケストレーターが自分のrunだけを見る構成のまま、runの起動順をプログラムが決める。
+
+roadmapが「他の項目より大きく、他の項目が無いと意味を成さない」と書いていたとおり、着手時に3件へ分割し直した。依存は一方向で、(1) → (2) → (3) の順に逐次進める。
+
+- **(1) プログラムの定義と永続化（roadmap W12-1、Issue #604）** — この小節
+- (2) 波のスケジューリングとrun間の依存（roadmap W12-2、Issue #605）
+- (3) 失敗の伝播と人による停止（roadmap W12-3、Issue #606）
+
+W12全体の依存はW1 / W7 / W8 / W9 / W10（すべて完了済み）。
+
+#### 16.37.1 プログラムの定義と永続化（W12-1、Issue #604）
+
+**この段で作るのは、プログラムの定義と、その状態の永続化だけ。** 波のスケジューリング（依存の無いrunを同時に起動する）・前段の完了待ち・失敗の伝播・人による停止は、いずれも(2)・(3)の受入基準であり、ここでは持たない。
+
+##### 定義（`program.ts`）
+
+`workflow.ts`がタスクの束（1run）を扱うのに対し、`program.ts`はrunの束（1プログラム）を扱う。読み込み（`parseProgramYaml`）・検証（`validateProgram`）の役割分担も`workflow.ts`の`parseWorkflowYaml` / `validateWorkflow`とそろえてある。
+
+```yaml
+version: 1
+name: 7ワークフロー・3波の運用
+
+runs:
+  - id: R1
+    defPath: .agents/workflows/wf-a2.yaml
+  - id: R2
+    defPath: .agents/workflows/wf-e.yaml
+    dependsOn: [R1]
+```
+
+`ProgramRunRef`（`id` / `defPath` / `dependsOn`）1件が、`WorkflowDefinition`（`workflow.ts`）を指す1つのrunに対応する。`defPath`はワークスペース内の`.yaml`/`.yml`を指す相対パスに限る（`workflow.ts`の`roadmap`フィールドが`.md`に限るのと同じ動機。パストラバーサル対策）。
+
+検証（`validateProgram`）が1件でも該当すれば実行を始めない。エラーは全件まとめて返す（`workflow.ts`と同じ方針）。
+
+- `id`の重複、`dependsOn`の未定義参照
+- 依存の循環。`workflow.ts`の`findCycleGroups`（Tarjanの強連結成分アルゴリズム。要素数2以上のSCC、または自己参照を1件のグループとして採用する）をそのまま再利用する。`ProgramRunRef`（`{ id, dependsOn }`）は`workflow.ts`の`DependencyGraphNode`と同じ形を持つため、Issue #146で汎用化済みのこの関数がそのまま使える（ロードマップの項目・ワークフローのタスクに続く3件目の利用箇所）
+- `id`の字種（`workflow.ts`の`TASK_ID_PATTERN`をそのまま`PROGRAM_RUN_ID_PATTERN`として再輸出。半角英数字・_・-のみ、1〜50文字）
+- `name`未指定、`version`が1以外、`runs`が0件（配列でない場合を含む）、runの総数が上限（`MAX_PROGRAM_RUN_COUNT` = 50）を超える
+- `defPath`がワークスペース外・`.yaml`/`.yml`以外を指している
+
+未知のフィールドは読み飛ばす（`workflow.ts`と同じ方針。CLIやスキーマの更新で壊れないようにする）。
+
+##### 状態（`programState.ts`）
+
+`runState.ts`がタスク状態（`TaskState`）を持つのに対し、`programState.ts`はrun状態（`ProgramRunState`）を持つ。値は`pending`（未着手）/ `running`（実行中）/ `done`（完了）/ `failed`（失敗）の4値で、design.mdの起票文が挙げた4状態にそのまま対応する。
+
+`createInitialProgramState`が、検証済みのプログラム定義から初期状態（全runを`pending`）を組み立てる。**この段では状態遷移そのもの（`pending`から`running`へ進める・依存の完了を見て次のrunを選ぶ等）は持たない。** それはrunを実際に起動する(2)の担当。
+
+##### 永続化（`programStore.ts`）
+
+`runStore.ts`の`WorkflowRunStore`と対になる、プログラム単位の同じ役割の層。`workspaceState`のキー`codex.workflow.programs`（既存の`codex.workflow.runs`とは別キー）へ、`PersistedProgram`（`programId` / `defPath` / `workspaceRoot` / `startedAt` / `finishedAt` / `state`）の配列として持つ。最新10件（`MAX_STORED_PROGRAMS`、`runStore.ts`の`MAX_STORED_RUNS`と同じ値）まで残し、古いものは開始時刻順に消す。`workspaceState`への読み書きは`SerialQueue`（`serialQueue.ts`）で直列化する（`WorkflowRunStore`と同じ理由、Issue #146）。
+
+**W10（中断からの自動再開、§16.35）の対象に含める。** `reconcileProgramStateOnReload`（`programState.ts`の純粋関数）が、ウィンドウのリロード直後に`running`のrun参照を`failed`へ倒す（`runStore.ts`の`reconcileRunOnReload`がタスク単位で行うのと同じ扱いをプログラム単位でも行う）。`pending`のrunはそのまま`pending`に留める。単発runの`reconcileRunOnReload`が`pending`を`skipped`へ道連れにするのとは異なる（道連れにしない理由は§16.37.2「リロード・WSL停止をまたいでも続きの波から進む」参照。W12-2で波のスケジューリング自体は持つようになったが、道連れにしない判断は変わっていない）。
+
+`extension.ts`は、`workflowRunner.restoreRunsForView()`と同じタイミング（拡張機能の起動直後）で`programStore.reconcileAfterReload()`を呼ぶ。この段（W12-1）では実際に自動でrunを再開する処理を持たなかったが、**W12-2（§16.37.2）でこの直後に`pumpProgram`を呼び、続きの波を実際に起動するようになった。** `autoResumeIfEligible`（`runnerRestore.ts`）のような単発run側のオーケストレーターセッションの立て直しそのものには触れていない（そちらは既存の`workflowRunner.restoreRunsForView()`の担当のまま）。
+
+##### 前段が失敗した場合の挙動
+
+**この段では決め打ちしなかった。** あるrunが`failed`になったとき、それに依存する後続のrunをどう扱うか（起動しない・警告のうえ起動する・プログラム全体を止める等）は、失敗の伝播そのものを扱う(3)（roadmap W12-3、Issue #606）で決めた。**→ §16.37.3で、依存先が`failed`または`skipped`の`pending`runを`skipped`（理由付き）へ倒す`propagateProgramFailures`として実装した。**
+
+##### 既存の単発runへの影響
+
+`WorkflowRunner` / `runner.ts` / 既存の`workspaceState`キー（`codex.workflow.runs`）には一切触れていない。`ProgramStore`は別クラス・別キーで独立して動き、`extension.ts`側の配線も既存の`workflowRunner.restoreRunsForView()`の呼び出しに追記する形（既存の呼び出し自体は変更していない）。プログラムを使わない既存の単発run実行は、この変更の影響を受けない。
+
+##### 確かめ方
+
+- `test/unit/program.test.ts`: `parseProgramYaml`（正常系・未知フィールドの読み飛ばし・`dependsOn`が配列でない場合のparseErrors）、`validateProgram`（複数runの定義・循環依存とその理由・無関係な複数循環のグループ分け・未定義run参照・id重複/字種・`name`/`version`/`runs`件数・`defPath`の安全性）
+- `test/unit/programState.test.ts`: `createInitialProgramState`（全run`pending`初期化）、`reconcileProgramStateOnReload`（`running`→`failed`・`done`/`failed`は不変・`pending`を道連れにしないこと・無変化時は同一参照を返すこと）
+- `test/unit/programStore.test.ts`: `ProgramStore`のCRUD・並行`update`の直列化（lost updateが起きないこと）・最新`MAX_STORED_PROGRAMS`件までのトリミング・`reconcileAfterReload`が`running`を含むプログラムだけを書き換え変化の無いものは書き込まないこと・`clearAll`
+- `docs/manual-test.md` W-Q: 実VSCode上での確認項目（追記のみ、実施はしない）
+
+#### 16.37.2 波のスケジューリングとrun間の依存でrunを起動する（W12-2、Issue #605）
+
+**この段で作るのは、(1)が持つプログラムの定義・状態・永続化を使って、runを実際に起動する部分。** 波の組み立て（`programScheduler.ts`）・状態遷移（`programState.ts`への追加）・実際の起動（`programRunner.ts`、新規）の3つに分かれる。失敗の伝播・人による停止はこの段では引き続き決め打ちしなかった（(3)、roadmap W12-3、Issue #606で実装。**→ §16.37.3**）。
+
+##### 波の組み立て（`programScheduler.ts`、新規）
+
+`scheduler.ts`が1run内のタスクの波を組み立てる（`nextTasksToStart`）のに対し、`programScheduler.ts`は同じ考え方をrunの束（1プログラム）へ持ち上げたもの。
+
+`nextProgramRunsToStart(def, state)`が次に開始するrunidの集合を返す。判定は`scheduler.ts`の`nextTasksToStart`と対応するが、`ProgramRunState`が`pending`/`running`/`done`/`failed`の4値のみで`waitingApproval`等の中間状態を持たないぶん単純になっている。
+
+- `dependsOn`の全てが`done`であること
+- 自身が`pending`であること
+- `running`の総数が`def.maxParallel`未満であること
+- `def.runs`に書かれた順で埋める（`scheduler.ts`と同じく再現性のため）
+
+**この段（W12-2）の時点では失敗の伝播を決め打ちしなかった。** あるrunが`failed`になっても、それに依存する後続runは単に`dependsOn`の充足条件（`done`であること）を満たさないため開始されないまま`pending`に留まるだけで、それ以上の処理（`skipped`扱いにする等）はしなかった。それ以外の独立した`pending`（`failed`なrunに依存しない）は引き続き開始対象のまま。**→ W12-3（§16.37.3）で、このまま`pending`に留まり続けていたrunを`skipped`（理由付き）へ倒す`propagateProgramFailures`を追加した。**
+
+##### 同時実行数の上限（`maxParallel`）
+
+**プログラムYAMLに`maxParallel`フィールドを追加した。** `workflow.ts`が1run内のタスク並列数を`maxParallel`（既定3、範囲1〜10）で持つのと同じ考え方を、プログラム全体の同時run数にもそのまま踏襲する（`program.ts`の`DEFAULT_PROGRAM_MAX_PARALLEL` = 3、`PROGRAM_MAX_PARALLEL_MIN` = 1、`PROGRAM_MAX_PARALLEL_MAX` = 10）。
+
+根拠: runは1つでworktree・統合ブランチ・オーケストレーターセッションを作る、タスクより重い単位である。それでも既定値を変えなかったのは、(a) 2026-08-22に人手で回した実績が3波・7ワークフローという規模であり既定3で当面十分と見込めること、(b) 重さの違いを理由に既定値だけを変えても実測に基づく根拠が無いこと、(c) `maxParallel`をプログラムYAML側で明示的に指定できるようにしたため、運用実績を見ながら個々のプログラム定義側で調整できること、の3点による。将来的に既定値そのものを見直す場合は、実際の同時実行での負荷（worktree数・CLIプロセス数等）を計測してから変える。
+
+##### 状態遷移（`programState.ts`への追加）
+
+`markRunStarted(state, runRefId, runId)`が`pending`を`running`へ進め、`WorkflowRunner.start`が返した`runId`を紐づける。`markRunFinished(state, runRefId, outcome)`が`running`を`done`（`outcome === 'succeeded'`のとき）または`failed`（それ以外）へ倒す。
+
+**`succeeded`以外（`failed` / `blocked` / `aborted`）は全て`failed`へ丸める。** `ProgramRunState`は起票文の4状態（`pending`/`running`/`done`/`failed`）のみで、単発run側の`blocked`（統合できなかった）・`aborted`（人の割り込み等）に対応する専用の値を持たない。プログラムの観点で意味を持つのは「後続runの依存を満たす`done`か否か」の一点のみで、`blocked`/`aborted`を`failed`と区別して別の対応を取る判断は失敗の伝播そのものであり、引き続き(3)（Issue #606）の担当。
+
+##### 実際の起動（`programRunner.ts`、新規）
+
+`ProgramRunner`が、`programScheduler.ts`（波の組み立て）・`programState.ts`（状態遷移）・`programStore.ts`（永続化、W12-1）を束ね、`WorkflowRunner.start`を実際に呼んでrunを起動する。`WorkflowRunner`本体には依存せず、必要な操作（`start` / `listLive` / `onChanged`）だけを`ProgramWorkflowPort`として注入で受け取る（`runner.ts`が`WorkflowRunnerDeps`で外部依存を注入で受け取るのと同じ方針）。`WorkflowRunner`は構造的にこの口を満たすため、`extension.ts`側はアダプタを挟まずそのまま渡す。
+
+- `startProgram(defPath, workspaceRoot)`: プログラム定義ファイルを読み込み・検証し、通れば`programStore`へ初期状態（全run`pending`）を永続化してから`pumpProgram`を呼ぶ。`runner.ts`の`WorkflowRunner.start`と対になる形（読み込み・検証・開始の役割分担も同じ）
+- `pumpProgram(programId)`: 永続化済みのプログラムを読み、定義ファイルを読み直し（プログラム自体の状態は永続化されているが定義は都度読み直す。`runner.ts`の`parseAndValidateWorkflow`と同じ方針）、`nextProgramRunsToStart`が返したrunを実際に`workflow.start(path.join(workspaceRoot, defPath), workspaceRoot)`で起動する。起動できたら`markRunStarted`で`running`へ進め、`runId`を追跡表（`trackedRuns`、メモリ上のみ）へ記録する。**起動そのものに失敗した場合（検証エラー・git前提の不足等）はそのrunを`failed`として記録する。** allowを含むワークフローがプログラムのrunに使われた場合の確認（`needsAllowConfirmation`）は人の判断を要するため、この段では確認を挟まず`failed`として扱う（allowを含むワークフローをプログラムのrunに使う場合の扱いは(3)以降で検討）。**（訂正、Issue #605レビュー指摘F3）** `defPath`は常に`path.join(workspaceRoot, ...)`で解決し、絶対パスをそのまま使う分岐は持たない。`validateProgram`の`isSafeDefPath`が絶対パスを検証時に既に拒否しているため通常この分岐へ絶対パスが渡ることは無いが、以前の実装は「絶対パスならそのまま使う」という、検証を経ていない値が来た場合にワークスペース外を指せてしまう向きの分岐を持っていた。到達しないことと、到達した場合に安全な向きへ書くことは別の問題であり、後者を安全側（絶対パスなら拒否して`failed`記録）へ直した
+- `attach()`: `workflow.onChanged`を購読し、追跡表にあるrunIdの状態変化を検知する。`listLive()`から該当runの`outcome`（`scheduler.ts`の`getRunOutcome`）を引き、`running`以外なら`markRunFinished`で状態を確定させたうえで、追跡表から外し`pumpProgram`を再度呼ぶ（次の波を進める）。**（訂正、Issue #605レビュー指摘F2）** `programStore.update`のupdater内での`throw`は`SerialQueue.enqueue`経由でそのまま呼び出し元のPromiseをreject させるため、`attach()`内の`void this.onRunChanged(runId)`と`extension.ts`側の呼び出しは、`runnerRestore.ts`の`autoResumeIfEligible`呼び出し（`.catch((e) => log.error(...))`）と同じ形で`.catch`を付け、ログへ落として握り潰す（未処理rejectionにしない）
+- `finishedAt`の記録: `isProgramSettled(def, state)`（全runが`done`または`failed`）が真になったとき、`finishedAt`を埋める。**`pending`が1件でも残っていれば`false`という保守的な判定に留める。** 依存先の`failed`によって永久に開始されないのか、単に`maxParallel`の空きを待っているだけなのかを積極的に見分けて後者だけ完了扱いにするのは失敗の伝播の判断そのものであり、(3)（Issue #606）が決めるまでの意図した保留（バグではない）
+
+**追跡表（`trackedRuns`）はリロードそのものをまたいでは保持しないが、リロード直後に部分的に組み直す。** `WorkflowRunner`本体の`runs`（メモリ上のLiveRunのMap）が`restoreRunsForView()`で明示的に復元される設計（design.md §16.11）と同じく、`ProgramRunner`インスタンス自体はリロード直後は空の追跡表から始まる。ただし`reconcileAfterReload()`（後述「リロード・WSL停止をまたいでも続きの波から進む」）が、`ProgramRunEntry.runId`（W12-1で永続化済み）を種にして、まだ生きているrunぶんだけ追跡表を復元する。
+
+##### `extension.ts`の配線
+
+`workflowRunner`の構築直後に`programRunner`を組み立て`attach()`する。`workflowRunner.restoreRunsForView()`（W10の自動再開そのもの）と`programStore.reconcileAfterReload()`（プログラム状態の暫定`failed`化）を`Promise.all`で両方待ってから、`programRunner.reconcileAfterReload()`を1回呼ぶ。**この順序は必須。** どちらか一方でも完了前に呼ぶと、まだ再開されていない・まだ暫定`failed`化されていない状態を見て誤った判断をする。`programRunner.reconcileAfterReload()`が内部で全プログラムぶんの整合と`pumpProgram`を行うため、以前あった「reconcile後にプログラムごと`pumpProgram`を呼ぶループ」は`ProgramRunner`側へ引き取った。
+
+コマンド`agent.workflows.runProgram`（`.agents/programs/**/*.{yaml,yml}`からQuickPickで選択）を追加し、`runWorkflow`と同じ形で`programRunner.startProgram`を呼ぶ。**プログラム専用のビュー（ワークフローView相当）はこの段では持たない。** 起動した各runは既存の`agent.workflows.view`（ワークフローView）から個別に確認できるため、受入基準にない専用画面の追加は見送った。プログラム定義ファイルの置き場所（`.agents/programs`）は新しい設定項目を増やさず固定パスにした。**（訂正、Issue #605レビュー指摘F4）** 以前の記述は「`programStore.test.ts`のfixtureが既に使っていた慣例に合わせた」としていたが、その文字列自体がW12-1でこの機能のために新規に決めたもので、先行する慣例は存在しなかった。兄弟の`runWorkflow`は`readWorkflowsConfig().dir`で探索先を設定できる（`extension.ts`）が、プログラム側は設定項目を増やしたくないという判断だけを理由に固定パスにしている。
+
+##### リロード・WSL停止をまたいでも続きの波から進む
+
+W12-1の永続化（`ProgramStore`・`reconcileProgramStateOnReload`）と組み合わせて実現する。リロード直後、`running`だったrunは`failed`へ倒れ、`pending`はそのまま残る。ここまではW12-1で決めた挙動のまま変えていない。
+
+**この`failed`は暫定値であり、W10の自動再開と突き合わせて訂正する（Issue #605レビュー指摘F1）。** レビューで指摘された懸念は次の通り: `runnerRestore.ts`の`restoreRunsForView()`は永続化されている**全run**に対して`autoResumeIfEligible`を呼び、既定（`DEFAULT_AUTO_RESUME = true`）では中断していたrunを同じ`runId`のまま自動再開する。一方`reconcileProgramStateOnReload`は`running`だったプログラムのrun参照を無条件に`failed`へ倒す。プログラム側の追跡表（`trackedRuns`）はメモリ上のみでリロード後は空になるため、この2つを何もせず組み合わせると、実際にはW10が最後まで走らせたrunを、プログラム側は永久に`failed`のまま持ち続け、それに依存する後続runが実際には依存先が成功しているのに永久に開始されなくなる。
+
+**実際に確かめた結果、この懸念は正しかった。** `test/unit/programRunner.test.ts`の「リロード後、W10が同じrunIdを再開していれば、それに依存する後続runも続きの波として起動される」で、訂正処理（`ProgramRunner.reconcileAfterReload()`）を一時的に無効化してから実行すると、`expected 'failed' to be 'running'`で具体的に落ちることを確認した（RED）。訂正処理を戻すと同じテストが通り（GREEN）、依存していた後続run（R2）も実際に起動されることを確認した。
+
+**訂正の仕組みにタイミング上の競合は無い。** `autoResumeIfEligible`（`runnerRestore.ts`）はrunを再開すると決めた場合、`LiveRun.runState`を最初の`await`より前で**同期的に**書き換える。JavaScriptの実行モデル上、`await workflowRunner.restoreRunsForView()`が解決した時点で、`workflowRunner.listLive()`は既にどのrunが再開されたかを正しく反映している。そのため`ProgramRunner.reconcileAfterReload()`は、`restoreRunsForView()`と`programStore.reconcileAfterReload()`の両方が完了した後に呼びさえすれば、追加のポーリングや待機なしに`listLive()`を信頼してよい。
+
+具体的な訂正手順（`ProgramRunner.reconcileAfterReload()`）:
+
+1. 永続化済みの全プログラムを走査し、`state`が`failed`かつ`runId`を持つrun参照ごとに、`workflow.listLive()`にその`runId`が現れるか調べる
+2. 現れなければ（定義ファイルが読めない等で復元自体に失敗した）、`reconcileProgramStateOnReload`が付けた`failed`をそのまま確定値として扱う（訂正しない）
+3. 現れれば、その最新の`outcome`（`scheduler.ts`の`RunOutcome`）へ`reapplyLiveRunOutcome`（`programState.ts`、新設）で合わせ直す。`running`ならプログラム状態を`running`へ戻したうえで追跡表（`trackedRuns`）へ再登録し、`running`以外（`succeeded`/`failed`/`blocked`/`aborted`）ならその場で`markRunFinished`相当の確定状態へ進める
+4. 最後に全プログラムぶん`pumpProgram`を呼び、訂正後の状態から続きの波を計算する。`nextProgramRunsToStart`が改めて依存関係を評価し、次のいずれかが起きる:
+   - W10で再開されず本当に`failed`のまま確定したrunに依存していた`pending`のrun: 依存が`done`ではなくなったため開始されない（この時点では自然に停止したまま。W12-3で`propagateProgramFailures`が`skipped`へ倒すようになった。§16.37.3参照）
+   - `failed`のrunに依存しない独立した`pending`のrun、または訂正によって依存先が`done`になった`pending`のrun: `maxParallel`の空きが生まれていれば起動される（「続きの波から進む」の実体）
+
+これにより、プログラム全体を最初からやり直すことも、失敗した箇所を勝手に再試行することもなく、進められるところまで自然に進む。
+
+**スコープ判断（コーディネーターの見立てに同意）。** この訂正は失敗の伝播（依存先が本当に失敗したときに後続runをどう扱うか、W12-3・Issue #606の担当）の話ではなく、W10が既に持っていた「リロードをまたいでも再開する」という事実に、プログラム層の状態を単純に追従させるだけの整合の話である。したがってIssue #605「リロードやWSLの停止をまたいでも、続きの波から進む」の範囲内として、この段（W12-2）で対応した。W12-3へ先送りする判断はしていない。
+
+##### 既存の単発runへの影響
+
+`WorkflowRunner.start`をそのまま呼ぶだけで、`runner.ts`本体には一切手を入れていない。`ProgramRunner.attach()`が購読する`workflow.onChanged`は複数の購読者を持てる仕組み（`SimpleEmitter`）であり、既存のワークフローView側の購読とは独立して動く。プログラムを使わない既存の単発run実行（`agent.workflows.run`）は、この変更の影響を受けない。
+
+##### 確かめ方
+
+- `test/unit/programScheduler.test.ts`（新規）: `nextProgramRunsToStart`（依存の無いrunの同時起動・前段完了待ち・`maxParallel`の枠・依存先`failed`による自然な停止・それに依存しない独立runは引き続き対象になること）、`isProgramSettled`（全`done`/`failed`でtrue・`pending`/`running`が残っていればfalse）
+- `test/unit/programState.test.ts`: `markRunStarted`（`pending`→`running`・`runId`の紐づけ）、`markRunFinished`（`succeeded`→`done`、`failed`/`blocked`/`aborted`→`failed`）を追加
+- `test/unit/programRunner.test.ts`（新規）: `WorkflowRunner`をフェイクの`ProgramWorkflowPort`へ差し替え、`startProgram`/`pumpProgram`が本番と同じ経路（`programScheduler.ts` → `programState.ts` → `programStore.ts`）を通ることを確認。依存の無い同時起動・前段完了待ち・`maxParallel`の枠・起動失敗時の`failed`記録・依存先`failed`後も独立runは再開されること・**W10が同じrunIdを再開していれば依存する後続runも続きの波として起動されること（新規、Issue #605レビュー指摘F1のRED/GREEN確認を含む）**・**W10で再開されず本当に失われていれば暫定`failed`のまま据え置き後続runも起動しないこと（回帰確認）**
+- `test/unit/program.test.ts`: `maxParallel`のパース（既定値・指定値）・検証（範囲外・非整数）を追加
+- `docs/manual-test.md` W-Q: 実VSCode上での確認項目（追記のみ、実施はしない）
+
+#### 16.37.3 失敗の伝播と人による停止（W12-3、Issue #606）
+
+**この段で作るのは、(2)が起動したrunのうち失敗したものを、依存する後続runへ伝播させる処理と、プログラム全体を人の手で止める処理の2つ。** どちらも既存の単発run側（`runState.ts`のタスクの`skipped`道連れ、`WorkflowRunner.stop()`の`haltedByUser`）が持つ考え方を、run一段上のプログラム層へそのまま持ち上げたもの。
+
+##### 失敗の伝播（`programScheduler.ts`の`propagateProgramFailures`）
+
+`ProgramRunState`に`skipped`を追加した（`pending` / `running` / `done` / `failed` / `skipped`の5値）。`failed`は「起動し、実際に失敗した」run、`skipped`は「依存先の失敗または人による停止により、一度も起動されなかった」runで、意味が異なるため別の値にした（単発run側の`TaskState`が`failed`と`skipped`を別の値に持つのと同じ判断）。
+
+`propagateProgramFailures(def, state)`（`programScheduler.ts`、新規の純粋関数）が、`dependsOn`に`failed`または`skipped`のrunを含む`pending`のrunを`skipped`へ倒す。`skipReason`（`programState.ts`の新設の型）に、どの依存先が原因で止まったかを記録する。
+
+```ts
+export type ProgramRunSkipReason =
+  | { kind: 'failedDependency'; failedRunId: string }
+  | { kind: 'haltedByUser' };
+```
+
+**伝播は不動点まで繰り返す。** `def.runs`の記述順が依存元より依存先を先に書いている場合（例: R3→R2の順でR2がR3に依存）、1周の走査だけでは伝播を取りこぼす。1周で1件でも`skipped`にしたら`progressed`フラグで再走査し、変化が無くなるまで繰り返す。`MAX_PROGRAM_RUN_COUNT`（50）が上限のため、最悪でも50周で必ず止まる。
+
+**`skipReason.failedRunId`は直接の依存先（直近のブロッカー）を指し、根本原因まで遡らない。** R1が`failed`→R2が（R1に依存して）`skipped`→R3が（R2に依存して）`skipped`という連鎖の場合、R3の`skipReason.failedRunId`は`R2`であり`R1`ではない。根本原因までの追跡は表示上あった方が親切ではあるが、`propagateProgramFailures`を単純な不動点ループのまま保てる利点を優先し、この段では直接のブロッカーのみを記録する判断にした（`test/unit/programScheduler.test.ts`の連鎖伝播のテストで、この仕様どおりであることを確認している）。
+
+##### 「暫定`failed`」と「確定`failed`」の区別（この段で最も注意した点）
+
+**`propagateProgramFailures`は、確定した`failed`/`skipped`にしか反応してはならない。** §16.37.2「リロード・WSL停止をまたいでも続きの波から進む」で説明したとおり、リロード直後は`reconcileProgramStateOnReload`が`running`だったrun参照を無条件に`failed`へ倒す（暫定値）。この直後、`ProgramRunner.reconcileAfterReload()`が`workflow.listLive()`と突き合わせ、W10が実際に再開できていたrunを`reapplyLiveRunOutcome`で正しい`outcome`へ訂正する（確定値）。
+
+もし`propagateProgramFailures`をこの訂正より前、あるいは訂正と無関係なタイミングで呼んでしまうと、W10が実際には最後まで走らせて成功したrunを「暫定`failed`」のまま見て、それに依存する後続runを`skipped`へ倒してしまう。`skipped`は`markRunSkipped`のガード（対象が`pending`のときのみ遷移する）により、一度`skipped`になった後で依存先が訂正されても`pending`へは戻らない一方通行の終端状態のため、この誤判定は取り消せない事故になる（W10で本来なら続きから進められたはずのrunが、プログラム全体としては永久に止まったままになる）。
+
+**実装では、`propagateProgramFailures`の呼び出し箇所を`ProgramRunner.pumpProgram(programId)`の中の1箇所だけに絞ることで、この事故を構造的に防いだ。** `pumpProgram`は次の2つの経路からしか呼ばれない。
+
+1. リロード直後: `ProgramRunner.reconcileAfterReload()`の末尾（`for (const persisted of this.deps.programStore.list()) { await this.pumpProgram(persisted.programId); }`、W12-2で既にあった構造）。この時点では同じ`reconcileAfterReload()`内で、対象プログラムぶんの`reapplyLiveRunOutcome`による訂正が**先に完了し、`programStore`へ永続化済み**（`await`で直列に処理しているため、`pumpProgram`が読む`programStore.find(programId)`は必ず訂正後の状態を返す）
+2. 生存中のrunの変化: `attach()`が購読する`workflow.onChanged`ハンドラの中で、`markRunFinished`により状態を確定させたあと（W12-2で既にあった構造）
+
+**つまり`pumpProgram`が`propagateProgramFailures`を呼ぶ時点では、その関数が読む`ProgramState`は必ずどちらかの経路で既に確定済みであり、暫定`failed`をそのまま読むことは無い。** 新しい同期処理やロックを追加せずに済んだのは、W12-2が既に「訂正してから`pumpProgram`」という順序を守っていたため。`pumpProgram`内での呼び出し順序は次のとおり: `propagateProgramFailures`で伝播（変化があれば`programStore.update`で永続化）→ `nextProgramRunsToStart`で次の波を計算→ 起動。伝播を先に行うことで、直前に確定した`failed`/`skipped`が同じ`pumpProgram`呼び出し内で次の波の計算にも正しく反映される。
+
+この設計は`test/unit/programRunner.test.ts`の「リロード後、runIdがW10で再開されず本当に失われていれば、暫定`failed`のまま据え置き、依存する後続runはskippedとして走らせない（回帰確認、W12-3で挙動が変わった点を含む）」と、新設の「リロード後、W10が同じrunIdを再開していれば、それに依存する後続runも続きの波として起動される」の両方で確認している。前者は暫定値が確定値としてそのまま`skipped`へ伝播する正常系、後者は暫定値が訂正されて`skipped`化を免れる系で、どちらも`pumpProgram`一箇所からの呼び出しだけで正しく分岐する。
+
+##### 人による停止（`ProgramState.haltedByUser`、`ProgramRunner.haltProgram`）
+
+`ProgramState`に`haltedByUser: boolean`を追加した。単発run側の`RunState.haltedByUser`（design.md §16.35「人が止めたrunは再開しない」）と同じ役割・同じフィールド名を、プログラム層へそのまま持ち上げたもの。
+
+`markProgramHaltedByUser(state)`（`programState.ts`、新設の純粋関数）が、`haltedByUser`を立てたうえで、その時点で`pending`のrun全てを`skipped`（`skipReason: { kind: 'haltedByUser' }`）へ倒す。**`running`のrunは即座には終端状態にしない。** 単発run側の`WorkflowRunner.stop()`が「新規の開始を止める・現在のタスクのループを止めるが、実行中のタスクをその場で強制終了はしない」という非破壊的な停止を選んでいるのと同じ考え方（design.md §16.7「無人実行と停止条件」）。プログラム側は`running`のrunそれぞれに対し`workflow.stop(runId)`（`ProgramWorkflowPort`に新設）を呼ぶだけで、その先の停止処理は単発run側の既存の`stop()`実装にそのまま委ねる。
+
+`nextProgramRunsToStart`の先頭に`if (state.haltedByUser) { return new Set(); }`を追加した。以後どの経路（伝播による新たな`pending`化はそもそも起きないが、念のため）から呼ばれても新規のrun起動が一切発生しないことを、呼び出し側ごとに個別に確認する必要がないよう、この1箇所に集約した。
+
+`ProgramRunner.haltProgram(programId)`の処理順序:
+
+1. 追跡表（`trackedRuns`）から、対象プログラムに属し現在生存中のrunを洗い出し、それぞれへ`workflow.stop(runId)`を呼ぶ
+2. `programStore.update`で`markProgramHaltedByUser`を適用し、`haltedByUser`と`pending`の一括`skipped`化を永続化する
+3. `maybeMarkFinished(programId)`を呼び、その時点で全run済み（`done`/`failed`/`skipped`）ならば`finishedAt`を埋める（停止時点で`running`が無ければ、停止操作そのものでプログラムが完了扱いになる）
+
+**永続化した`haltedByUser`は、ウィンドウのリロードやWSLの再起動をまたいでも自動再開の対象にしない。** `reconcileProgramStateOnReload`が返す状態に`haltedByUser: state.haltedByUser`をそのまま含めるよう修正した（このフィールドを含め忘れると、`haltedByUser`が既存のプログラム定義の再読み込みのたびに`false`へ初期化されてしまい、人が止めたはずのプログラムがリロード後に再開してしまう。修正前はまさにこの不具合を含んでいた）。`reconcileAfterReload()`が呼ぶ`pumpProgram`は`nextProgramRunsToStart`の先頭ガードにより、`haltedByUser`なプログラムに対しては何もrunを起動しない。単発run側の`autoResumeIfEligible`が`rebuilt.runState.haltedByUser`を見て再開をスキップするのと同じ扱いを、プログラム層でも実現している。
+
+##### 既存の単発runへの影響
+
+`ProgramRunner.haltProgram`は`workflow.stop(runId)`（＝`WorkflowRunner.stop`）を呼ぶだけで、`stop`自体の実装や単発run側の`haltedByUser`の意味・保存形式には一切手を入れていない。プログラムを使わない既存の単発run実行・既存の`agent.workflows.stop`コマンドは、この変更の影響を受けない。`isProgramSettled`の判定に`skipped`を追加したことも、`skipped`を持たない既存の永続化済みプログラム（W12-1・W12-2時点で保存されたもの）に対しては、単に`skipped`のrunが存在しないため判定結果が変わらない。
+
+##### ワークフローViewでの表示
+
+**単発runと違い専用のビューはまだ持たない、としていたW12-2時点の判断を、この段で見直した。** 失敗・停止の状態がワークフローViewから読めることが受入基準（Issue #606）に含まれるため、既存のワークフローView（`workflowView.ts`）へプログラム一覧の表示を追加した。専用の新規パネルは作らず、既存パネルに「プログラム」欄を追加する形にとどめている（新規パネルを起こすほどの表示量ではなく、既存のワークフローViewから各runへも導線があるため）。
+
+- `WorkflowViewManager`のコンストラクタへ、任意（optional）の第3引数`ProgramViewPort`（`list()` / `halt(programId)` / `onChanged(listener)`）を追加した。`ProgramStore` / `ProgramRunner`はこの口を構造的に満たすため、`extension.ts`側はアダプタを挟まず`{ list: () => programStore.list(), halt: (id) => programRunner.haltProgram(id), onChanged: (l) => programRunner.onChanged(l) }`をそのまま渡す。省略可能にしたのは、`test/unit/workflowViewGraph.test.ts`の既存5箇所のインスタンス化を壊さないため
+- 表示更新は`postAll()`（画面初期表示・run切替時）と、`ProgramRunner`側に新設した専用の変化通知（`onChanged`、後述）の両方から`postPrograms()`を呼ぶ形にした。**当初は`onRunnerChanged(runId)`（`runner.onChanged`、何らかのrunが変化した時）にただ乗りする形で実装していたが、レビュー指摘F1（Issue #606）でこれが誤りだと判明した。** `runner.onChanged`（`WorkflowRunner`側の`SimpleEmitter`）は同期的にリスナを呼ぶが、`ProgramRunner.attach()`が登録するリスナ自体は非同期（`void this.onRunChanged(runId).catch(...)`。定義ファイルの再読込を`await`する`pumpProgram`を経て`programStore`へ永続化する）。そのため`onRunnerChanged`の中で`postPrograms()`を呼んでも、`ProgramRunner`側の永続化が完了する前の状態を読んでしまう。依存する後続runがある場合はその後続runの起動が新たな`runner.onChanged`を起こすため実害が薄く隠れていたが、**依存する後続run全てが`skipped`へ倒れてプログラムが終端する（それ以上runが起動しない）ケースでは、以後`runner.onChanged`が一切発火しないため、`skipped`化の結果が永久にビューへ届かなかった**（`docs/manual-test.md` W12-3の「R2が『スキップ』と表示され、理由が読める」を満たせていなかった）。修正では、`ProgramRunner`に`pumpProgram` / `haltProgram`が状態の永続化を終えた後にだけ発火する専用の`onChanged(listener: (programId: string) => void)`を追加し、`WorkflowViewManager`はこちらを購読して`postPrograms()`を呼ぶ形へ変えた。`onRunnerChanged`は run一覧・run詳細の再描画のみを担い、プログラム欄には触れない。**このpub-subの実装は`runner.ts`の`SimpleEmitter`を`export`してそのまま再利用しており、`programRunner.ts`側に同じ形を複製してはいない**（レビュー指摘F2、Issue #606。当初は複製していたが、`fire`が登録順に同期でリスナを呼ぶという順序契約がJSDoc化されていなかったことが今回のF1と#605のF1で同じ機序を2回踏んだ原因のため、複製をやめて契約ごと1箇所へ集約し、`SimpleEmitter`のJSDocへその契約を明記した）
+- 各プログラムの行に、`haltedByUser`が立っておらず`finishedAt`も無い（＝まだ止められる）ときだけ「停止」ボタンを出す。クリックで`vscode.postMessage({ type: 'stopProgram', programId })`を送り、`workflowView.ts`の`handleMessage`が受けて`this.programs.halt(programId)`→`postPrograms()`（即時再描画）を行う
+- 各runの行には、`ProgramRunState`（タスク側の`STATE_LABEL`をそのまま流用）に加え、`skipped`のときは`skipReason`の内容（`failedDependency`なら「Rxの失敗により未着手」、`haltedByUser`なら「人がプログラム全体を停止したため未着手」）を表示する
+- コマンド`agent.workflows.stopProgram`（QuickPickで未完了プログラムを選択し`programRunner.haltProgram`を呼ぶ）を追加した。`agent.workflows.stop`（単発run停止）と対になる形。既存の`agent.workflows.runProgram`のJSDocが「プログラム専用のビューはまだ持たない」としていた記述は、この段の実装に合わせて書き換えた
+
+##### 確かめ方
+
+- `test/unit/programState.test.ts`: `markRunSkipped`（`pending`のみ`skipped`へ遷移・他状態は不変・未知idは無視）、`markProgramHaltedByUser`（`pending`一括`skipped`化・`running`/`done`は不変・二重呼び出しの冪等性）、`reconcileProgramStateOnReload`が`haltedByUser`を素通しすることを追加
+- `test/unit/programScheduler.test.ts`: `propagateProgramFailures`（直接伝播とその理由・連鎖伝播で理由が直近のブロッカーを指すこと・独立runや`running`は不変・伝播対象が無ければ同一参照を返すこと）、`nextProgramRunsToStart`が`haltedByUser`のとき何も返さないこと・依存先が`skipped`のrunも起動しないこと、`isProgramSettled`の終端判定に`skipped`を追加したことを追加
+- `test/unit/programRunner.test.ts`: 失敗の伝播（基本形・R1→R2→R3の連鎖）、`haltProgram`（生存中の子runへの`stop`呼び出し・`pending`の一括`skipped`化・`running`を即終端にしないこと・停止後にリロードをまたいでも再開しないこと）を追加。既存のW12-2の回帰確認テストは、`pending`のまま止め置かれる旧挙動から`skipped`（理由付き）へ倒れる新挙動へ、W12-3による意図した変化として期待値を更新した
+- `docs/manual-test.md` W-Q #### W12-3: 実VSCode上での確認項目（追記のみ、実施はしない）
+- `test/unit/workflowViewPrograms.test.ts`（レビュー指摘F1、Issue #606で新設）: 依存先の失敗によりR2が`skipped`へ倒れ、以後runの起動が無い終端ケースで、`ProgramRunner`（フェイクではなく実物）と`WorkflowViewManager`（実物）を本番と同じ配線でつなぎ、Webviewへ送られた`programs`メッセージにR2の`skipped`と`skipReason`が実際に届くことを確認する

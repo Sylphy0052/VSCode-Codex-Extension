@@ -78,9 +78,7 @@ export function normalizeForgeHostConfig(value: string): ForgeHostConfig {
 }
 
 export type ResolveForgeHostResult =
-  | { kind: 'host'; host: ForgeHost }
-  | { kind: 'none' }
-  | { kind: 'undetermined'; message: string };
+  { kind: 'host'; host: ForgeHost } | { kind: 'none' } | { kind: 'undetermined'; message: string };
 
 /**
  * ホストを最終的に決定する。設定 `agent.workflows.forge` が `github` / `gitlab` を明示
@@ -290,16 +288,29 @@ export function shouldCreateIntegrationPullRequest(config: PullRequestLayerConfi
   return config === 'integration' || config === 'per-task';
 }
 
-/** 設定 `agent.workflows.finalMerge`（machineスコープ。design.md §16.16・§16.18）。 */
-export type FinalMergeConfig = 'auto' | 'pr-only';
+/**
+ * 設定 `agent.workflows.finalMerge`（machineスコープ。design.md §16.16・§16.18・§16.26）。
+ *
+ * - `auto`: PR/MRを作ってそのままマージする（従来の既定）
+ * - `orchestrator`: PR/MRを作り、オーケストレーターの判断でマージする（**新しい既定**）
+ * - `confirm`: PR/MRを作って人の承認を待ち、承認されたときだけマージする
+ * - `pr-only`: PR/MRを作った時点でrunを終える。マージは拡張の外（GitHub/GitLab上）で行う
+ */
+export type FinalMergeConfig = 'auto' | 'orchestrator' | 'confirm' | 'pr-only';
 
-/** `agent.workflows.finalMerge` の生値を安全な既定（`auto`）へ丸める。 */
+/** `agent.workflows.finalMerge` の生値を安全な既定（`orchestrator`、design.md §16.26）へ丸める。 */
 export function normalizeFinalMergeConfig(value: string): FinalMergeConfig {
-  return value === 'pr-only' ? 'pr-only' : 'auto';
+  return value === 'auto' || value === 'orchestrator' || value === 'confirm' || value === 'pr-only'
+    ? value
+    : 'orchestrator';
 }
 
 /**
- * 最終マージ（`gh pr merge` / `glab mr merge`）を実行してよいか。
+ * 最終マージ（`gh pr merge` / `glab mr merge`）を**即座に**実行してよいか。
+ *
+ * `auto` のときだけ `true`。`orchestrator` / `confirm` はPR/MR作成の直後にはマージせず、
+ * 判断が付いてから（`needsFinalMergeDecision`が`true`を返した後の`decide_final_merge`／
+ * 人の承認）マージする（design.md §16.26）。
  *
  * **前提チェックが通らずPR/MRを作れなかった場合、`finalMerge: auto` であってもmainへは
  * マージしない**（design.md §16.18「この場合、finalMerge: autoであってもmainへのマージは
@@ -311,6 +322,20 @@ export function shouldRunFinalMerge(
   pullRequestCreated: boolean,
 ): boolean {
   return config === 'auto' && pullRequestCreated;
+}
+
+/**
+ * マージするかどうかの判断を待つ必要があるか（design.md §16.26）。
+ *
+ * `orchestrator`（オーケストレーターへ判断を問う）と `confirm`（人の承認を待つ）が対象。
+ * `shouldRunFinalMerge`と同じく、PR/MRを作れていなければ（`pullRequestCreated: false`）
+ * 判断を待つ意味が無いため常に `false`。
+ */
+export function needsFinalMergeDecision(
+  config: FinalMergeConfig,
+  pullRequestCreated: boolean,
+): boolean {
+  return (config === 'orchestrator' || config === 'confirm') && pullRequestCreated;
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -386,7 +411,9 @@ export interface IntegrationPullRequestContentInput {
   taskIds: readonly string[];
 }
 
-export function buildIntegrationPullRequestTitle(input: IntegrationPullRequestContentInput): string {
+export function buildIntegrationPullRequestTitle(
+  input: IntegrationPullRequestContentInput,
+): string {
   return `run ${input.runId} の統合`;
 }
 
@@ -403,6 +430,40 @@ export function buildIntegrationPullRequestBody(input: IntegrationPullRequestCon
       lines.push(`- ${taskId}`);
     }
   }
+  return lines.join('\n');
+}
+
+/**
+ * タスクのIssue（design.md §16.31、roadmap W6、Issue #596）の本文に渡す入力。PR/MRの本文
+ * （`TaskPullRequestBodyInput`）と違い、`dependsOn` / `issue`（このIssue自身への自己参照は
+ * 意味を持たない）は持たない。
+ */
+export interface TaskIssueBodyInput {
+  prompt: string;
+  done: string;
+  runId: string;
+  taskId: string;
+}
+
+/**
+ * タスクのIssueの本文（design.md §16.31「タスクの開始時にIssueを起票し、PR本文から参照する」）。
+ * `buildTaskPullRequestBody`と同じ`prompt`/`done`の2段構成に、`runId`/`taskId`を`meta`として
+ * 添える。
+ */
+export function buildTaskIssueBody(input: TaskIssueBodyInput): string {
+  const lines: string[] = [];
+  lines.push('## prompt');
+  lines.push('');
+  lines.push(input.prompt);
+  lines.push('');
+  lines.push('## done');
+  lines.push('');
+  lines.push(input.done);
+  lines.push('');
+  lines.push('## meta');
+  lines.push('');
+  lines.push(`- runId: ${input.runId}`);
+  lines.push(`- taskId: ${input.taskId}`);
   return lines.join('\n');
 }
 
@@ -717,6 +778,97 @@ export async function createPullRequest(
   }
 }
 
+/**
+ * ホストごとのIssue作成コマンドを組み立てる（design.md §16.31、roadmap W6、Issue #596）。
+ * `buildCreatePullRequestArgs`と同じ「全フラグを`--flag=value`の1トークン形式にする」防御を
+ * そのまま踏襲する。
+ *
+ * - GitHub: `gh issue create --title=<title> --body-file=<path>`
+ * - GitLab: `glab issue create`の`-d/--description`もPR/MRと同じくファイル読み込みに
+ *   対応していない（`buildCreatePullRequestArgs`のコメント参照）ため、同じく`glab api`で
+ *   `projects/:id/issues`へPOSTする
+ */
+function buildCreateIssueArgs(
+  host: ForgeHost,
+  params: { title: string; bodyFilePath: string },
+): { command: 'gh' | 'glab'; args: string[] } {
+  if (host === 'github') {
+    return {
+      command: 'gh',
+      args: ['issue', 'create', `--title=${params.title}`, `--body-file=${params.bodyFilePath}`],
+    };
+  }
+  return {
+    command: 'glab',
+    args: [
+      'api',
+      'projects/:id/issues',
+      `--field=title=${params.title}`,
+      `--field=description=@${params.bodyFilePath}`,
+    ],
+  };
+}
+
+/** `createPullRequest`と同じ戻り値の形（URLが取れれば返す。番号は呼び出し側が`parsePullRequestNumberFromUrl`で取り出す）。 */
+export type CreateIssueOutcome = CreatePullRequestOutcome;
+
+export interface CreateIssueRequest {
+  host: ForgeHost;
+  cwd: string;
+  title: string;
+  body: string;
+}
+
+/**
+ * タスクのIssueを1件作る（design.md §16.31「タスクの開始時にIssueを起票し、PR本文から
+ * 参照する」、roadmap W6、Issue #596）。`createPullRequest`と同じく本文は一時ファイル経由
+ * （`--body-file` / `glab api`の`--field description=@…`）で渡し、結果に関わらず必ず片付ける。
+ *
+ * **呼び出し側（`runner.ts`）が前提（CLI・認証）を確かめてから呼ぶ。** この関数自体は
+ * CLIの起動が失敗すれば`{ ok: false }`をそのまま返すだけで、呼び出し側はそれを警告として
+ * 記録し、Issueが起票できなくても`run`を止めない（design.md §16.31の受入基準）。
+ */
+export async function createIssue(
+  deps: CreatePullRequestDeps,
+  request: CreateIssueRequest,
+): Promise<CreateIssueOutcome> {
+  if (invalidCliArgumentValue(request.title)) {
+    return {
+      ok: false,
+      reason: 'invalidInput',
+      message: 'title が空、または改行を含んでいます',
+    };
+  }
+
+  const bodyFilePath = await deps.fs.writeTempFile(request.body);
+  try {
+    const { command, args } = buildCreateIssueArgs(request.host, {
+      title: stripControlChars(request.title),
+      bodyFilePath,
+    });
+    const result = await deps.cli.run(command, args, request.cwd);
+    if (result.code !== 0) {
+      return {
+        ok: false,
+        reason: 'cliError',
+        message:
+          result.stderr.trim() !== ''
+            ? sanitizeForLog(result.stderr)
+            : `${command} の実行に失敗しました（終了コード ${result.code}）`,
+      };
+    }
+    // 関数名はPR/MR限定に読めるが、URLの形は使い回してよい（GitHubの`gh issue create`も
+    // PR同様URLを1行だけ吐き、GitLabのissues APIも`web_url`を返す）ため、そのまま流用する
+    const url =
+      request.host === 'github'
+        ? extractGithubPullRequestUrl(result.stdout)
+        : extractGitlabMergeRequestUrl(result.stdout);
+    return { ok: true, url };
+  } finally {
+    await deps.fs.removeTempFile(bodyFilePath);
+  }
+}
+
 /* -------------------------------------------------------------------------------------------- */
 /* PR/MRの番号の取り出し                                                                         */
 /* -------------------------------------------------------------------------------------------- */
@@ -752,7 +904,9 @@ export function parsePullRequestNumberFromUrl(url: string): number | undefined {
 export type ForgeStepOutcome = { ok: true } | { ok: false; message: string };
 
 /**
- * タスク層のPR/MR作成フローの4手順。design.md §16.18「作る順序」がそのまま手順名になる。
+ * タスク層のPR/MR作成フローの手順（design.md §16.18「作る順序」がそのまま手順名になる。
+ * 元は4手順だったが、readyへの切り替え（5番目、`markPullRequestReady`）・レビュー
+ * （3.5番目、`reviewPullRequest`、roadmap W6）が任意手順として増え、現在は最大6手順）。
  *
  * 手順の実体（実際に `git push` / `gh pr create` / 統合worktreeでのマージを行う関数）は
  * 呼び出し側が組み立てて渡す。`mergeAndPushIntegration` の型を `TMerge` で汎用化している
@@ -764,6 +918,18 @@ export interface TaskPullRequestSteps<TMerge> {
   pushTaskBranch: () => Promise<ForgeStepOutcome>;
   pushIntegrationBranch: () => Promise<ForgeStepOutcome>;
   createPullRequest: () => Promise<CreatePullRequestOutcome>;
+  /**
+   * PR/MRを作った後、ローカルマージの前に読み取り専用の別セッションでレビューさせる
+   * （design.md §16.31「PRを作ったあと、ローカルマージの前にレビューを1段挟む」、
+   * roadmap W6、Issue #596）。PR/MRの作成に成功したときだけ、mergeAndPushIntegration の
+   * 前に呼ぶ。省略時は行わない（既定は無効。design.md「forge側の『人のレビューを待つ』
+   * 方式は採らない」）。
+   *
+   * **結果に関わらずマージは進める。** 指摘は呼び出し側が警告として記録するだけで、
+   * このフロー自体は指摘の有無でマージをブロックしない（forgeの「人のレビューを待つ」
+   * 方式のように、応答が無いまま待ち続ける構造を持ち込まないため。design.md §16.31）。
+   */
+  reviewPullRequest?: (url: string | undefined) => Promise<ForgeStepOutcome>;
   mergeAndPushIntegration: () => Promise<TMerge>;
   /**
    * Draftで作ったPR/MRをreadyへ切り替える。Draftを使わない設定なら undefined。
@@ -780,6 +946,8 @@ export interface TaskPullRequestFlowResult<TMerge> {
         stage: 'pushTaskBranch' | 'pushIntegrationBranch' | 'createPullRequest';
         message: string;
       };
+  /** レビューを試みた場合の結果。試みていなければ undefined。 */
+  review?: ForgeStepOutcome;
   mergeOutcome: TMerge;
   /** ready化を試みた場合の結果。試みていなければ undefined。 */
   markReady?: ForgeStepOutcome;
@@ -787,8 +955,9 @@ export interface TaskPullRequestFlowResult<TMerge> {
 
 /**
  * タスク層のPR/MR作成フローを、design.mdが定める順序（タスクブランチをpush→統合ブランチを
- * push→PR/MRを作る→マージして統合ブランチをpush→（あれば）Draftで作ったPR/MRをreadyへ
- * 切り替える）で実行する。**既存の4手順の順序は変えない。ready化は5番目として最後に足す。**
+ * push→PR/MRを作る→（あれば）レビューさせる→マージして統合ブランチをpush→（あれば）
+ * Draftで作ったPR/MRをreadyへ切り替える）で実行する。**既存の4手順の順序は変えない。
+ * レビューは3.5番目、ready化は5番目として足す。**
  *
  * **先にマージしてしまうと、baseとheadの間に差分が無くなりPR/MRの作成に失敗する**
  * （GitHubは"No commits between"を返す。design.md §16.18）ため、この順序を型で強制する
@@ -799,6 +968,11 @@ export interface TaskPullRequestFlowResult<TMerge> {
  * `mergeAndPushIntegration` は必ず最後に実行する。統合ブランチへのローカルのマージは
  * PR/MRの成否に関わらず進める必要がある（design.md §16.18「前提が欠けている場合」と
  * 同じ「ワークフロー自体は止めない」方針を、PR/MR作成の他の失敗要因にも一貫して適用する）。
+ *
+ * レビュー（`reviewPullRequest`、design.md §16.31、roadmap W6）はPR/MRが作れたときだけ
+ * `mergeAndPushIntegration` の前に呼ぶ。**結果（指摘の有無・レビュー自体の失敗）に関わらず
+ * `mergeAndPushIntegration` は必ず呼ぶ**（マージをブロックしない。ready化・pushの失敗と
+ * 同じ「ワークフロー自体は止めない」方針）。
  *
  * ready化（`markPullRequestReady`）は「統合ブランチへのマージが済んでからDraftを外す」ため
  * `mergeAndPushIntegration` の後に置く。PR/MRが作れていないとき（作成に失敗した、または
@@ -829,6 +1003,11 @@ export async function runTaskPullRequestFlow<TMerge>(
     }
   }
 
+  let review: ForgeStepOutcome | undefined;
+  if (pullRequest.created && steps.reviewPullRequest !== undefined) {
+    review = await steps.reviewPullRequest(pullRequest.url);
+  }
+
   const mergeOutcome = await steps.mergeAndPushIntegration();
 
   let markReady: ForgeStepOutcome | undefined;
@@ -836,9 +1015,12 @@ export async function runTaskPullRequestFlow<TMerge>(
     markReady = await steps.markPullRequestReady(pullRequest.url);
   }
 
-  return markReady === undefined
-    ? { pullRequest, mergeOutcome }
-    : { pullRequest, mergeOutcome, markReady };
+  return {
+    pullRequest,
+    ...(review === undefined ? {} : { review }),
+    mergeOutcome,
+    ...(markReady === undefined ? {} : { markReady }),
+  };
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -1050,3 +1232,717 @@ export async function markPullRequestReady(
   }
   return { ok: true };
 }
+
+/* -------------------------------------------------------------------------------------------- */
+/* CIの完了待ちとbaseの取り込み直し（design.md §16.36、Issue #556）                              */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * CIチェックの集約結果（design.md §16.36）。
+ *
+ * - `none`: チェックが1件も設定されていない（CI未設定リポジトリ）。この場合は待たずに
+ *   即座にマージへ進む（受入基準「CIが設定されていないリポジトリでは従来どおり即マージする」）。
+ *   **`none`はリポジトリ側が意味を持って返す明示的な形（`statusCheckRollup: []` /
+ *   `head_pipeline: null`）に限る。** JSONの解析自体には成功したが期待するキーが
+ *   無い・型が違う（`gh`/`glab`のバージョン差やAPIのスキーマ変更を想定）場合は
+ *   `none`ではなく`failed`へ倒す（セキュリティ監査の指摘。2026-08-23。「チェックが
+ *   0件」と「応答の形が想定外」を型のレベルで区別し、後者を空配列と取り違えて
+ *   fail-openにしない）
+ * - `pending`: 1件でも完了していないチェックがある
+ * - `passed`: 全て完了し、失敗が無い
+ * - `failed`: 完了したチェックの中に失敗がある（CLI呼び出し自体の失敗、および上記の
+ *   応答形が想定外な場合もここに含める。認証切れ等で状態を取得できない異常状態を
+ *   `pending`のまま無期限に待たせないため）
+ */
+export type CiConclusion = 'none' | 'pending' | 'passed' | 'failed';
+
+export interface CiConclusionResult {
+  conclusion: CiConclusion;
+  /** `failed`のとき、失敗した理由を人が読める形にしたもの。 */
+  message?: string;
+}
+
+/** `gh pr view <number> --json=statusCheckRollup` が返す1件分の型（必要な項目だけ）。 */
+interface GithubStatusCheckRollupEntry {
+  status?: unknown;
+  state?: unknown;
+  conclusion?: unknown;
+}
+
+/**
+ * GitHubの`conclusion`のうち成功として扱う値。`SKIPPED`は必須チェックでなければ
+ * ブロックしない、の意。
+ *
+ * セキュリティ監査の指摘（2026-08-23）を受けて「失敗値のホワイトリスト」から
+ * 「成功値のホワイトリスト」へ反転した。失敗値のホワイトリストは、ここに載って
+ * いない未知の値（例: baseが進んだ後の再実行待ちを示す`STALE`）を素通しして成功
+ * 寄りに扱ってしまう構造的なfail-openになる。この機能はmainへの実マージを左右
+ * するため、知らない`conclusion`が来たときは待つ・失敗させる側（fail-closed）へ
+ * 倒すほうが安全（`STALE`はこの反転により自動的に失敗側へ回る。個別に列挙する
+ * 必要が無い）。
+ */
+const GITHUB_SUCCESS_CONCLUSIONS = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
+
+/**
+ * `gh pr view <number> --json=statusCheckRollup` の標準出力を解釈する（純粋関数）。
+ *
+ * `statusCheckRollup`の要素はCheckRun（`status`/`conclusion`を持つ）とStatusContext
+ * （レガシーAPI由来。`state`だけを持つ）が混在しうる（GitHub GraphQLの仕様）。両方を見る。
+ */
+export function parseGithubCiConclusion(stdout: string): CiConclusionResult {
+  let data: unknown;
+  try {
+    data = JSON.parse(stdout);
+  } catch {
+    return { conclusion: 'failed', message: 'statusCheckRollupの出力を解釈できませんでした' };
+  }
+  // パースはできたがオブジェクトでない・`statusCheckRollup`キーが無い・配列でない場合は
+  // 「チェックが0件（`none`）」ではなく想定外の応答形（`failed`）として扱う。空配列
+  // （キーがあり、明示的に0件）とは型のレベルで区別する（セキュリティ監査の指摘）
+  if (typeof data !== 'object' || data === null) {
+    return { conclusion: 'failed', message: 'statusCheckRollupの出力を解釈できませんでした（想定外の応答形）' };
+  }
+  if (!('statusCheckRollup' in data)) {
+    return { conclusion: 'failed', message: 'statusCheckRollupキーが応答に含まれていません（想定外の応答形）' };
+  }
+  const rollup = (data as { statusCheckRollup: unknown }).statusCheckRollup;
+  if (!Array.isArray(rollup)) {
+    return { conclusion: 'failed', message: 'statusCheckRollupが配列ではありません（想定外の応答形）' };
+  }
+  if (rollup.length === 0) {
+    return { conclusion: 'none' };
+  }
+  const entries = rollup as GithubStatusCheckRollupEntry[];
+  const failed: string[] = [];
+  let pending = false;
+  for (const entry of entries) {
+    if (typeof entry.state === 'string') {
+      // StatusContext（レガシーAPI由来）
+      const state = entry.state.toUpperCase();
+      if (state === 'PENDING') {
+        pending = true;
+      } else if (state === 'ERROR' || state === 'FAILURE') {
+        failed.push(state);
+      }
+      continue;
+    }
+    const status = typeof entry.status === 'string' ? entry.status.toUpperCase() : '';
+    if (status !== 'COMPLETED') {
+      pending = true;
+      continue;
+    }
+    // 成功値のホワイトリストに無い値は全て失敗として扱う（`STALE`等の未知の値を
+    // 含む。`GITHUB_SUCCESS_CONCLUSIONS`のコメント参照）
+    const conclusion = typeof entry.conclusion === 'string' ? entry.conclusion.toUpperCase() : '';
+    if (!GITHUB_SUCCESS_CONCLUSIONS.has(conclusion)) {
+      failed.push(conclusion === '' ? '(不明)' : conclusion);
+    }
+  }
+  if (failed.length > 0) {
+    // 失敗したチェックの件数・名前に上限が無いと、チェックが数百あるリポジトリで
+    // このメッセージがそのまま`live.warnings`・ログへ入り巨大化する
+    // （レビュー指摘。2026-08-23）。他のCLI出力由来のメッセージと同じく`sanitizeForLog`
+    // で長さを切る（現状の値はGitHubのenum語彙なので制御文字等の実害は無いが、
+    // 「ここは通さなくてよい」と読ませない表記の一貫性のため）
+    return {
+      conclusion: 'failed',
+      message: sanitizeForLog(`失敗したチェックがあります: ${failed.join(', ')}`),
+    };
+  }
+  if (pending) {
+    return { conclusion: 'pending' };
+  }
+  return { conclusion: 'passed' };
+}
+
+/**
+ * GitLabの`head_pipeline.status`のうち失敗として扱う値。
+ */
+const GITLAB_FAILURE_PIPELINE_STATUSES = new Set(['failed', 'canceled', 'cancelled']);
+/** GitLabの`head_pipeline.status`のうち成功として扱う値（`skipped`は必須でなければブロックしない）。 */
+const GITLAB_PASSED_PIPELINE_STATUSES = new Set(['success', 'skipped']);
+
+/**
+ * `glab api projects/:id/merge_requests/<iid>` の標準出力を解釈する（純粋関数）。
+ *
+ * `glab ci status`はテキスト向けの対話コマンドでJSON出力が無く、しかも対象を「ブランチ」で
+ * 指定する（実機の`--help`で確認済み。`glab` 1.112.0。`docs.gitlab.com/cli/ci/status/`も
+ * 同様）ため、`createPullRequest`と同じく構造化データを得やすい`glab api`へ寄せた
+ * （Issue #556。「同じ形で用意する」はコマンド名の一致ではなく、CIの完了待ち・失敗判定という
+ * 挙動の一致を指す）。GitLabのMR単体取得レスポンスは`head_pipeline`フィールドにそのMRの
+ * 先頭コミットのパイプライン状態を持つ（`docs.gitlab.com/api/merge_requests/`）。
+ * `head_pipeline`が無い（`null`）ならパイプライン自体が無い＝CI未設定として扱う。
+ */
+export function parseGitlabCiConclusion(stdout: string): CiConclusionResult {
+  let data: unknown;
+  try {
+    data = JSON.parse(stdout);
+  } catch {
+    return { conclusion: 'failed', message: 'マージリクエストの応答を解釈できませんでした' };
+  }
+  if (typeof data !== 'object' || data === null) {
+    return { conclusion: 'failed', message: 'マージリクエストの応答を解釈できませんでした（想定外の応答形）' };
+  }
+  // `head_pipeline`キーが無い・`null`以外の想定外の型は「パイプライン無し（`none`）」
+  // ではなく想定外の応答形（`failed`）として扱う。GitLabが「パイプライン自体が無い」
+  // ことを表す明示的な形は`null`のみ（`docs.gitlab.com/api/merge_requests/`）。
+  // キーが無いのはAPIのスキーマ変更等を想定した異常系（セキュリティ監査の指摘）
+  if (!('head_pipeline' in data)) {
+    return { conclusion: 'failed', message: 'head_pipelineキーが応答に含まれていません（想定外の応答形）' };
+  }
+  const headPipeline = (data as Record<string, unknown>)['head_pipeline'];
+  if (headPipeline === null) {
+    return { conclusion: 'none' };
+  }
+  if (typeof headPipeline !== 'object') {
+    return { conclusion: 'failed', message: 'head_pipelineの形が想定外です' };
+  }
+  const status = (headPipeline as Record<string, unknown>)['status'];
+  const normalized = typeof status === 'string' ? status.toLowerCase() : '';
+  if (GITLAB_FAILURE_PIPELINE_STATUSES.has(normalized)) {
+    // GitHub側と同じ理由で`sanitizeForLog`を通す（レビュー指摘。2026-08-23）
+    return {
+      conclusion: 'failed',
+      message: sanitizeForLog(`パイプラインが失敗しました（status: ${normalized}）`),
+    };
+  }
+  if (GITLAB_PASSED_PIPELINE_STATUSES.has(normalized)) {
+    return { conclusion: 'passed' };
+  }
+  // running / pending / created / waiting_for_resource / preparing / scheduled / manual等
+  return { conclusion: 'pending' };
+}
+
+/** ホストごとのCI状態取得コマンド（design.md §16.36）。 */
+function buildCiStatusArgs(host: ForgeHost, number: number): { command: 'gh' | 'glab'; args: string[] } {
+  if (host === 'github') {
+    return { command: 'gh', args: ['pr', 'view', String(number), '--json=statusCheckRollup'] };
+  }
+  return { command: 'glab', args: ['api', `projects/:id/merge_requests/${String(number)}`] };
+}
+
+/**
+ * PR/MRのCI状態を1回だけ取得する。ポーリングそのものは`waitForCiChecks`が担う。
+ *
+ * CLI呼び出し自体が失敗した場合（認証切れ・番号不正など）は`failed`として扱う。
+ * `pending`のまま返すと、状態を取得できない異常状態がタイムアウトまで気づかれない。
+ */
+export async function fetchCiConclusion(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  number: number,
+): Promise<CiConclusionResult> {
+  const { command, args } = buildCiStatusArgs(host, number);
+  const result = await cli.run(command, args, cwd);
+  if (result.code !== 0) {
+    return {
+      conclusion: 'failed',
+      message:
+        result.stderr.trim() !== ''
+          ? sanitizeForLog(result.stderr)
+          : `${command} ${args.join(' ')} に失敗しました（終了コード ${result.code}）`,
+    };
+  }
+  return host === 'github' ? parseGithubCiConclusion(result.stdout) : parseGitlabCiConclusion(result.stdout);
+}
+
+/** `waitForCiChecks`のポーリング間隔をテストから注入するための型（`PushBranchWait`と同じ方針）。 */
+export type CiWait = () => Promise<void>;
+
+/** ポーリング間隔（ミリ秒）。 */
+const CI_POLL_INTERVAL_MS = 15_000;
+
+const defaultCiWait: CiWait = () =>
+  new Promise((resolve) => {
+    const timer = setTimeout(resolve, CI_POLL_INTERVAL_MS);
+    // `runner.ts`の最終マージ判断タイムアウト（`beginFinalMergeDecision`）と同じく、
+    // このタイマーだけでテスト・プロセス終了を妨げないようにする
+    // （レビュー指摘。2026-08-23。以前は`.unref()`が無く扱いが不揃いだった）
+    timer.unref?.();
+  });
+
+export type CiWaitOutcome =
+  | { kind: 'none' }
+  | { kind: 'passed' }
+  | { kind: 'failed'; message: string }
+  | { kind: 'timeout'; message: string }
+  /**
+   * 人が「全体の停止」を押した（`isCancelled`が`true`を返した）ため、CIの完了を
+   * 待たずに切り上げた（セキュリティ監査の指摘。2026-08-23。W1（Issue #335）が
+   * 「判断が確定する瞬間」を守ったのに対し、W11（Issue #556）が新設したCI待ちの
+   * 長い区間（既定で最大約90分）を守る）。
+   */
+  | { kind: 'cancelled' };
+
+/**
+ * CIチェックの完了を待つ（design.md §16.36「CIの完了を待つ」）。`pending`の間は
+ * `wait`（既定は`CI_POLL_INTERVAL_MS`間隔の実待ち）を挟んでポーリングし、`timeoutMs`を
+ * 超えたら赤（`failed`）と同じ扱いの`timeout`を返す（受入基準「待ち時間の上限を超えたら
+ * 赤と同じ扱いになる」）。`now`/`wait`はテストから注入できる（`pushBranch`と同じ流儀。
+ * テストは実時間で待たない）。
+ */
+export async function waitForCiChecks(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  number: number,
+  timeoutMs: number,
+  now: () => number = Date.now,
+  wait: CiWait = defaultCiWait,
+  isCancelled: () => boolean = () => false,
+): Promise<CiWaitOutcome> {
+  const deadline = now() + timeoutMs;
+  for (;;) {
+    // ループの先頭で毎周確認する。これは「これから行う`fetchCiConclusion`の直前」で
+    // あると同時に、初回以外は「直前の`wait()`の直後」でもある（`wait()`の前後の
+    // 両方を見る、というセキュリティ監査の要求を1箇所の確認で満たす）
+    if (isCancelled()) {
+      return { kind: 'cancelled' };
+    }
+    const result = await fetchCiConclusion(cli, host, cwd, number);
+    if (result.conclusion === 'none') {
+      return { kind: 'none' };
+    }
+    if (result.conclusion === 'passed') {
+      return { kind: 'passed' };
+    }
+    if (result.conclusion === 'failed') {
+      return { kind: 'failed', message: result.message ?? 'CIチェックが失敗しました' };
+    }
+    if (now() >= deadline) {
+      return {
+        kind: 'timeout',
+        message: `CIチェックの完了を待つ時間の上限を超えました（${Math.floor(timeoutMs / 1000)}秒）`,
+      };
+    }
+    await wait();
+  }
+}
+
+/** ホストごとの取り込み直しコマンド（design.md §16.36）。 */
+function buildUpdateBranchArgs(
+  host: ForgeHost,
+  number: number,
+): { ok: true; command: 'gh' | 'glab'; args: string[] } | { ok: false; message: string } {
+  if (!Number.isInteger(number) || number <= 0) {
+    return { ok: false, message: `不正なPR/MR番号（正の整数ではありません）: ${number}` };
+  }
+  if (host === 'github') {
+    return { ok: true, command: 'gh', args: ['pr', 'update-branch', String(number)] };
+  }
+  return { ok: true, command: 'glab', args: ['mr', 'rebase', String(number)] };
+}
+
+export type UpdatePullRequestBranchResult = { ok: true } | { ok: false; message: string };
+
+/**
+ * PR/MRのbaseを取り込み直す（`gh pr update-branch <number>` / `glab mr rebase <number>`。
+ * design.md §16.36「baseの取り込み直し」）。strictなブランチ保護の下でマージが
+ * 「baseの最新でない」ことで拒否されたときに呼ぶ。
+ */
+export async function updatePullRequestBranch(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  number: number,
+): Promise<UpdatePullRequestBranchResult> {
+  const built = buildUpdateBranchArgs(host, number);
+  if (!built.ok) {
+    return { ok: false, message: built.message };
+  }
+  const { command, args } = built;
+  const result = await cli.run(command, args, cwd);
+  if (result.code !== 0) {
+    return {
+      ok: false,
+      message:
+        result.stderr.trim() !== ''
+          ? sanitizeForLog(result.stderr)
+          : `${command} ${args.join(' ')} に失敗しました（終了コード ${result.code}）`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * マージ失敗のメッセージが「baseの最新でない」ことを理由にした拒否かどうか（`isRetryablePushError`
+ * と同じ、stderrのテキストパターン照合による判定。design.md §16.36）。
+ *
+ * GitHub・GitLabいずれも「これに一致すれば必ずbase遅れ」という単一の構造化フィールドを
+ * CLIの標準エラーからは得られない（`gh pr merge`はGraphQLエラー文字列を、`glab mr merge`は
+ * REST APIのエラーメッセージをそのままstderrへ出す）ため、既知の文言をパターンで拾う。
+ * 一致しなければ「baseの最新でない」以外の失敗（コンフリクト・権限不足等）として扱い、
+ * 取り込み直しは試みない（取り込み直しても解決しない失敗を再試行で浪費しないため）。
+ *
+ * **逆に、実際は「baseの最新でない」以外の失敗（コンフリクト解消の案内文等）でも
+ * このパターンに一致してしまう場合がありうる**（テキストパターン照合の限界。特に
+ * `needs? (a )?rebase`は緩め）。誤って一致したときは`updatePullRequestBranch`を無駄に
+ * 1回試みるだけで、それでも解決しなければ次の`runFinalMerge`が同じ理由（コンフリクト等）
+ * で再び失敗し、`maxUpdateBranchRetries`の上限で必ず止まる（無限リトライにはならない。
+ * レビュー指摘。2026-08-23）。
+ */
+const NOT_UP_TO_DATE_PATTERN =
+  /not up.to.date|out.of.date with the base|base branch was modified|head branch was modified|is behind the (base|target) branch|needs? (a )?rebase/iu;
+
+export function isBranchNotUpToDateError(message: string): boolean {
+  return NOT_UP_TO_DATE_PATTERN.test(message);
+}
+
+/**
+ * CIチェックの完了を待つ時間の上限（秒）の既定値（`agent.workflows.ciWaitTimeoutSec`、
+ * design.md §16.36）。CIの実行時間はリポジトリごとに大きく異なるため長めに取る。
+ */
+export const DEFAULT_CI_WAIT_TIMEOUT_SEC = 1800;
+
+/**
+ * 「baseの最新でない」拒否からの取り込み直しの最大リトライ回数の既定値
+ * （`agent.workflows.ciUpdateBranchMaxRetries`、design.md §16.36）。
+ */
+export const DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES = 2;
+
+/** `runFinalMergeWithCiGate`が読む待ち時間・リトライ回数の設定。 */
+export interface CiGateConfig {
+  /** CIチェックの完了を待つ時間の上限（ミリ秒）。design.md §16.36・`agent.workflows.ciWaitTimeoutSec`。 */
+  waitTimeoutMs: number;
+  /**
+   * 「baseの最新でない」拒否からの取り込み直しの最大リトライ回数（初回のマージ試行を
+   * 含まない）。design.md §16.36・`agent.workflows.ciUpdateBranchMaxRetries`。
+   */
+  maxUpdateBranchRetries: number;
+  now?: () => number;
+  wait?: CiWait;
+  /**
+   * 人が「全体の停止」を押したかどうかを問い合わせるコールバック（`config.now` /
+   * `config.wait`と同じ、テストから注入できる流儀）。`forge.ts`はロジック層で
+   * `LiveRun`を直接見られないため、`runner.ts`側が`live.runState.haltedByUser`
+   * （必要なら`dispose()`中かどうかも合わせて）を見る関数を渡す。省略時は常に
+   * `false`（＝停止していない）として扱う。セキュリティ監査の指摘（2026-08-23）:
+   * CI待ちのポーリング・取り込み直しの再試行ループの各周回で確認する
+   */
+  isCancelled?: () => boolean;
+}
+
+export type RunFinalMergeWithCiGateResult =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: 'ciFailed' | 'ciTimeout' | 'updateBranchFailed' | 'mergeFailed' | 'cancelled';
+      message: string;
+      /** 「baseの最新でない」ことによる取り込み直しを実際に試みた回数。 */
+      updateBranchAttempts: number;
+    };
+
+/**
+ * 統合PR/MRをCIの完了待ち・baseの取り込み直しを挟んだうえでマージする（design.md §16.36、
+ * Issue #556）。`performFinalMerge`（`runner.ts`）が`runFinalMerge`の代わりに呼ぶ、
+ * このモジュールでの唯一の最終マージの入口になる。
+ *
+ * 手順:
+ * 1. CIチェックの完了を待つ（`waitForCiChecks`）。`none`（CI未設定）・`passed`ならマージへ
+ *    進む。`failed`・`timeout`はマージせず、理由付きで失敗を返す（受入基準）
+ * 2. マージを試みる（`runFinalMerge`）。成功すれば完了
+ * 3. 失敗理由が「baseの最新でない」（`isBranchNotUpToDateError`）で、かつ取り込み直しの
+ *    残り回数があれば、`updatePullRequestBranch`を実行し、1へ戻ってCIの完了を待ち直してから
+ *    再度マージを試みる（取り込み直しはbaseの内容を変えるため、直前のCI結果を使い回さず
+ *    再取得する）
+ * 4. 「baseの最新でない」以外の失敗、または取り込み直しの上限を超えたら、理由付きで失敗を返す
+ *
+ * `number`が`undefined`のとき（統合PR/MRの番号が不明）はCI状態を取得しようがないため、
+ * 待たずに`runFinalMerge`（番号不明時は自身がCLIを呼ばず`{ ok: false }`を返す）へそのまま
+ * 委ねる。
+ *
+ * **`config.isCancelled`が`true`を返す間はマージへ進まない。** CI待ちのポーリングの各周回
+ * （`waitForCiChecks`の内部）、`waitForCiChecks`から制御が戻った直後（`none`/`passed`で
+ * 即座に返った場合を含む）、`updatePullRequestBranch`を呼ぶ直前の3箇所で確認する
+ * （セキュリティ監査の指摘。2026-08-23）。W1（Issue #335）が「最終マージの判断が確定する
+ * 瞬間」を`decideFinalMerge`のガードで守ったのに対し、W11（Issue #556）はその判断の後に
+ * 新設したCI待ち・取り込み直しの長い区間（既定で最大`waitTimeoutMs` ×
+ * (`maxUpdateBranchRetries` + 1）秒、既定値では約90分）を守る必要がある。瞬間だけを守る
+ * ガードは、この待ちが伸びた分をカバーしないため。
+ */
+export async function runFinalMergeWithCiGate(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  number: number | undefined,
+  config: CiGateConfig,
+): Promise<RunFinalMergeWithCiGateResult> {
+  const isCancelled = config.isCancelled ?? (() => false);
+  const cancelledResult: RunFinalMergeWithCiGateResult = {
+    ok: false,
+    reason: 'cancelled',
+    message: '人が停止したため最終マージを中止しました',
+    updateBranchAttempts: 0,
+  };
+
+  if (number === undefined) {
+    const merge = await runFinalMerge(cli, host, cwd, number);
+    return merge.ok
+      ? { ok: true }
+      : { ok: false, reason: 'mergeFailed', message: merge.message, updateBranchAttempts: 0 };
+  }
+
+  for (let attempt = 0; attempt <= config.maxUpdateBranchRetries; attempt += 1) {
+    const ci = await waitForCiChecks(
+      cli,
+      host,
+      cwd,
+      number,
+      config.waitTimeoutMs,
+      config.now,
+      config.wait,
+      isCancelled,
+    );
+    if (ci.kind === 'cancelled') {
+      return { ...cancelledResult, updateBranchAttempts: attempt };
+    }
+    if (ci.kind === 'failed') {
+      return { ok: false, reason: 'ciFailed', message: ci.message, updateBranchAttempts: attempt };
+    }
+    if (ci.kind === 'timeout') {
+      return { ok: false, reason: 'ciTimeout', message: ci.message, updateBranchAttempts: attempt };
+    }
+    // 'none' か 'passed'（CI未設定リポジトリは待たずにここへ来る。受入基準）。
+    // CIの完了を待っている間に停止された可能性があるため、実マージを呼ぶ直前でも
+    // 改めて確認する（セキュリティ監査の指摘。`waitForCiChecks`の`isCancelled`は
+    // ポーリングの各周回だけを見ており、`none`/`passed`で即座に返った直後は通らない）
+    if (isCancelled()) {
+      return { ...cancelledResult, updateBranchAttempts: attempt };
+    }
+    const merge = await runFinalMerge(cli, host, cwd, number);
+    if (merge.ok) {
+      return { ok: true };
+    }
+    const isLastAttempt = attempt === config.maxUpdateBranchRetries;
+    if (isLastAttempt || !isBranchNotUpToDateError(merge.message)) {
+      return { ok: false, reason: 'mergeFailed', message: merge.message, updateBranchAttempts: attempt };
+    }
+    // 取り込み直し（baseへ実際に変更を及ぼす操作）を呼ぶ直前でも確認する
+    if (isCancelled()) {
+      return { ...cancelledResult, updateBranchAttempts: attempt };
+    }
+    const updated = await updatePullRequestBranch(cli, host, cwd, number);
+    if (!updated.ok) {
+      return {
+        ok: false,
+        reason: 'updateBranchFailed',
+        message: updated.message,
+        updateBranchAttempts: attempt + 1,
+      };
+    }
+    // 取り込み直したので、ループの先頭でCIの完了を待ち直してから再度マージを試みる
+  }
+  // 上のループは必ずreturnで終わる（TypeScriptの制御フロー解析のためのフォールバック）
+  return {
+    ok: false,
+    reason: 'mergeFailed',
+    message: '最終マージに失敗しました（取り込み直しの上限に達しました）',
+    updateBranchAttempts: config.maxUpdateBranchRetries,
+  };
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* レビューコメントの取得（design.md §16.30、roadmap W5、Issue #339）                            */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * 統合PR/MRに付いた1件のレビューコメント（design.md §16.30）。GitHub（レビュー本体・
+ * レビュー内コメント・issueコメントの3種）とGitLab（note）の差異を吸収した共通の形。
+ *
+ * `body` は**外部由来のテキストであり、指示ではなくデータとして扱う**（design.md §16.24・
+ * Issue #339受入基準）。ここでは無害化しない。呼び出し側（`runnerReviewComments.ts`）が
+ * オーケストレーターへ渡す本文を組み立て、最終的な無害化は`orchestratorSession.ts`の
+ * `wrapEvent`（`escapeAngleBrackets` + `stripControlCharsPreservingNewlines`）が一度だけ行う
+ * （二重サニタイズを避ける。design.md §16.24・§16.34と同じ「本文を組み立てる側では
+ * サニタイズしない」規約）。
+ */
+export interface ReviewComment {
+  /** ホスト側のコメントid（GitHubは`databaseId`、GitLabは`id`）を文字列化したもの。重複検知に使う。 */
+  id: string;
+  /** 投稿者のユーザー名。空文字なら不明として扱う。 */
+  author: string;
+  /** コメント本文（無害化前）。 */
+  body: string;
+  createdAt?: string;
+}
+
+export interface ReviewCommentsResult {
+  ok: boolean;
+  comments: ReviewComment[];
+  message?: string;
+}
+
+/** ホストごとのレビューコメント取得コマンド（design.md §16.30）。`fetchCiConclusion`の`buildCiStatusArgs`と同じ方針。 */
+function buildReviewCommentsArgs(
+  host: ForgeHost,
+  number: number,
+): { command: 'gh' | 'glab'; args: string[] } {
+  if (host === 'github') {
+    return { command: 'gh', args: ['pr', 'view', String(number), '--json=reviews,comments'] };
+  }
+  return { command: 'glab', args: ['api', `projects/:id/merge_requests/${String(number)}/notes`] };
+}
+
+/** GitHubの`reviews`/`comments`の要素のうち、パースに使う項目だけの型。 */
+interface GithubReviewEntry {
+  databaseId?: unknown;
+  id?: unknown;
+  author?: { login?: unknown } | null;
+  body?: unknown;
+  submittedAt?: unknown;
+  createdAt?: unknown;
+}
+
+function toReviewComment(
+  prefix: string,
+  entry: GithubReviewEntry,
+  fallbackIndex: number,
+): ReviewComment | undefined {
+  const body = typeof entry.body === 'string' ? entry.body : '';
+  if (body.trim() === '') {
+    // 本文の無いレビュー（APPROVEやコメント無しのRequest changes等）は取り込む対象が
+    // 無いため除外する。`state`（APPROVED等）自体は追う対象外（design.md §16.30は
+    // コメント本文の取り込みが目的で、承認状態の同期は範囲外）
+    return undefined;
+  }
+  const rawId = entry.databaseId ?? entry.id;
+  const id =
+    typeof rawId === 'string' || typeof rawId === 'number'
+      ? `${prefix}:${String(rawId)}`
+      : `${prefix}:${String(fallbackIndex)}`;
+  const author = typeof entry.author?.login === 'string' ? entry.author.login : '';
+  const createdAt =
+    typeof entry.submittedAt === 'string'
+      ? entry.submittedAt
+      : typeof entry.createdAt === 'string'
+        ? entry.createdAt
+        : undefined;
+  return createdAt === undefined
+    ? { id, author, body }
+    : { id, author, body, createdAt };
+}
+
+/**
+ * `gh pr view <number> --json=reviews,comments` の標準出力を解釈する（純粋関数）。
+ *
+ * `reviews`（レビュー本体。承認・変更要求等に添えたコメント）と`comments`（PRへの
+ * issueコメント）の両方を対象にする。レビュー内の個別コメント（review comments API相当）は
+ * `gh pr view`のJSON出力に含まれないため対象外（`gh api`での別経路の取得はIssue #339の
+ * スコープ外、design.md §16.30「今回は含めないもの」）。
+ */
+export function parseGithubReviewComments(stdout: string): ReviewCommentsResult {
+  let data: unknown;
+  try {
+    data = JSON.parse(stdout);
+  } catch {
+    return { ok: false, comments: [], message: 'reviews/commentsの出力を解釈できませんでした' };
+  }
+  if (typeof data !== 'object' || data === null) {
+    return {
+      ok: false,
+      comments: [],
+      message: 'reviews/commentsの出力を解釈できませんでした（想定外の応答形）',
+    };
+  }
+  const record = data as Record<string, unknown>;
+  const reviews = Array.isArray(record['reviews']) ? (record['reviews'] as GithubReviewEntry[]) : [];
+  const comments = Array.isArray(record['comments'])
+    ? (record['comments'] as GithubReviewEntry[])
+    : [];
+  const result: ReviewComment[] = [];
+  reviews.forEach((entry, index) => {
+    const comment = toReviewComment('review', entry, index);
+    if (comment !== undefined) {
+      result.push(comment);
+    }
+  });
+  comments.forEach((entry, index) => {
+    const comment = toReviewComment('comment', entry, index);
+    if (comment !== undefined) {
+      result.push(comment);
+    }
+  });
+  return { ok: true, comments: result };
+}
+
+/** GitLabの note の要素のうち、パースに使う項目だけの型。 */
+interface GitlabNoteEntry {
+  id?: unknown;
+  body?: unknown;
+  author?: { username?: unknown } | null;
+  created_at?: unknown;
+  system?: unknown;
+}
+
+/**
+ * `glab api projects/:id/merge_requests/<iid>/notes` の標準出力を解釈する（純粋関数）。
+ *
+ * `system: true`のnote（ラベル変更・承認等、GitLabが自動生成する記録）は人が書いた
+ * レビューコメントではないため除外する。
+ */
+export function parseGitlabReviewComments(stdout: string): ReviewCommentsResult {
+  let data: unknown;
+  try {
+    data = JSON.parse(stdout);
+  } catch {
+    return { ok: false, comments: [], message: 'notesの出力を解釈できませんでした' };
+  }
+  if (!Array.isArray(data)) {
+    return { ok: false, comments: [], message: 'notesの出力を解釈できませんでした（想定外の応答形）' };
+  }
+  const entries = data as GitlabNoteEntry[];
+  const result: ReviewComment[] = [];
+  entries.forEach((entry, index) => {
+    if (entry.system === true) {
+      return;
+    }
+    const body = typeof entry.body === 'string' ? entry.body : '';
+    if (body.trim() === '') {
+      return;
+    }
+    const id =
+      typeof entry.id === 'string' || typeof entry.id === 'number'
+        ? `note:${String(entry.id)}`
+        : `note:${String(index)}`;
+    const author = typeof entry.author?.username === 'string' ? entry.author.username : '';
+    const createdAt = typeof entry.created_at === 'string' ? entry.created_at : undefined;
+    result.push(createdAt === undefined ? { id, author, body } : { id, author, body, createdAt });
+  });
+  return { ok: true, comments: result };
+}
+
+/**
+ * PR/MRのレビューコメントを1回だけ取得する（design.md §16.30）。ポーリングそのものは
+ * `runnerReviewComments.ts`の`pollReviewComments`が担う（`fetchCiConclusion`と
+ * `waitForCiChecks`の分担と同じ形）。
+ *
+ * CLI呼び出し自体が失敗した場合（認証切れ・番号不正等）は`ok: false`を返す。
+ */
+export async function fetchReviewComments(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  number: number,
+): Promise<ReviewCommentsResult> {
+  const { command, args } = buildReviewCommentsArgs(host, number);
+  const result = await cli.run(command, args, cwd);
+  if (result.code !== 0) {
+    return {
+      ok: false,
+      comments: [],
+      message:
+        result.stderr.trim() !== ''
+          ? sanitizeForLog(result.stderr)
+          : `${command} ${args.join(' ')} に失敗しました（終了コード ${result.code}）`,
+    };
+  }
+  return host === 'github' ? parseGithubReviewComments(result.stdout) : parseGitlabReviewComments(result.stdout);
+}
+
+/**
+ * レビューコメントの取得間隔（秒）の既定値（`agent.workflows.reviewCommentPollIntervalSec`、
+ * design.md §16.30）。「既定は控えめに置く。APIを叩き続けない」（Issue #339）ため、
+ * CIの完了待ちポーリング（`CI_POLL_INTERVAL_MS`=15秒）よりずっと長い10分を既定にする。
+ */
+export const DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC = 600;

@@ -450,8 +450,18 @@
         "category": "Agent"
       },
       {
+        "command": "agent.workflows.runProgram",
+        "title": "プログラムを実行…",
+        "category": "Agent"
+      },
+      {
         "command": "agent.workflows.stop",
         "title": "ワークフローを停止…",
+        "category": "Agent"
+      },
+      {
+        "command": "agent.workflows.stopProgram",
+        "title": "プログラムを停止…",
         "category": "Agent"
       },
       {
@@ -792,6 +802,38 @@
           "scope": "machine-overridable",
           "markdownDescription": "衝突解決セッション（設計書 §16.17「コンフリクト」）が承認待ちのまま止まってよい時間の上限（秒）。超えたら自動的にセッションを停止し、対象タスクを`blocked`にする（`git merge --abort`は呼ばない。統合worktreeは衝突した状態のまま残り、Viewの「再マージ」で再開できる）。承認待ちで**ない**（LLMが作業中の）時間は計測に含まれない。権限には関わらないため`forge`/`finalMerge`ほど強い制限は要らない。上限は`2147483`秒（約24.8日、`setTimeout`の32bit上限）。範囲外（1未満・上限超過・非数値）の値は既定値（3600秒）にフォールバックする。"
         },
+        "agent.workflows.finalMergeDecisionTimeoutSec": {
+          "type": "number",
+          "default": 900,
+          "minimum": 1,
+          "maximum": 2147483,
+          "scope": "machine-overridable",
+          "markdownDescription": "`agent.workflows.finalMerge` が `orchestrator` のとき、統合PR/MRの作成後にオーケストレーターが `decide_final_merge` で応答するのを待つ時間の上限（秒）。超えたら応答が無かったものとして自動的に `hold`（マージせずPR/MRを残す）へ倒す（判断を待って無限に止まらないため。設計書 §16.26）。`confirm`（人の承認待ち）には効かない。権限には関わらないため`forge`/`finalMerge`ほど強い制限は要らない。上限は`2147483`秒（約24.8日、`setTimeout`の32bit上限）。範囲外（1未満・上限超過・非数値）の値は既定値（900秒）にフォールバックする。"
+        },
+        "agent.workflows.ciWaitTimeoutSec": {
+          "type": "number",
+          "default": 1800,
+          "minimum": 1,
+          "maximum": 2147483,
+          "scope": "machine-overridable",
+          "markdownDescription": "統合PR/MRをマージする前に、CIチェック（`statusCheckRollup` / パイプライン）の完了を待つ時間の上限（秒）。超えたら赤（CI失敗）と同じ扱いでタスクを失敗として確定する（設計書 §16.36）。CIが1件も設定されていないリポジトリでは待たずに即マージする。権限には関わらないため`forge`/`finalMerge`ほど強い制限は要らない。上限は`2147483`秒（約24.8日、`setTimeout`の32bit上限）。範囲外（1未満・上限超過・非数値）の値は既定値（1800秒）にフォールバックする。"
+        },
+        "agent.workflows.ciUpdateBranchMaxRetries": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 100,
+          "scope": "machine-overridable",
+          "markdownDescription": "統合PR/MRのマージが「baseの最新でない」ことで拒否されたときに、`gh pr update-branch` / `glab mr rebase` で取り込み直してから再試行する最大回数（初回のマージ試行は含まない）。取り込み直すたびにCIの完了を待ち直す。上限を超えたら失敗として確定する（設計書 §16.36）。0にすると取り込み直しをせず初回の失敗をそのまま確定する。範囲外（0未満・100超過・非整数）の値は既定値（2回）にフォールバックする。"
+        },
+        "agent.workflows.reviewCommentPollIntervalSec": {
+          "type": "number",
+          "default": 600,
+          "minimum": 0,
+          "maximum": 2147483,
+          "scope": "machine-overridable",
+          "markdownDescription": "統合PR/MRのレビューコメントを取得する間隔（秒）。統合PR/MRを作成できた実行だけが対象で、新しく見つかったコメントはオーケストレーターへ通知され（設計書 §16.30・§16.23）、対応するタスクの調整（`add_task`等）に人の承認は挟まない。適用した内容はワークフローViewの警告欄へ全文で残る。0にすると取得しない（既定は控えめに置き、APIを叩き続けない設計判断）。範囲外（0未満・上限超過・非整数）の値は既定値（600秒）にフォールバックする。"
+        },
         "agent.workflows.roadmapDir": {
           "type": "string",
           "default": "docs/roadmap",
@@ -839,11 +881,13 @@
           "type": "string",
           "enum": [
             "auto",
+            "orchestrator",
+            "confirm",
             "pr-only"
           ],
-          "default": "auto",
+          "default": "orchestrator",
           "scope": "machine",
-          "markdownDescription": "統合ブランチ→mainのPR/MRを無人でマージするか。`auto` は `gh pr merge --merge` / `glab mr merge --remove-source-branch` まで実行する。`pr-only` はPR/MRを作って止め、mainへの書き込みは人が行う。mainを無人で書き換えるかどうかを決めるため、machineスコープに固定している。リポジトリの `.vscode/settings.json` から `auto` へは変えられない。MRの自己マージを禁じる運用規約を持つ組織では `pr-only` にする（設計書 §16.16・§16.18）。"
+          "markdownDescription": "統合ブランチ→mainのPR/MRを作った後、マージするかどうかをどう決めるか。`auto` はPR/MRを作ってそのままマージする（従来の既定）。`orchestrator` はPR/MRを作り、オーケストレーターの判断でマージする（**新しい既定**。判断とその理由は必ずワークフローViewの警告欄に残り、`agent.workflows.finalMergeDecisionTimeoutSec` 秒応答が無ければ自動的に `hold` として扱う）。`confirm` はPR/MRを作って人の承認を待ち、承認されたときだけマージする。`pr-only` はPR/MRを作った時点でrunを終え、mainへの書き込みは人が行う。いずれもマージ（`gh pr merge --merge` / `glab mr merge --remove-source-branch`）を実行するかどうかを決めるため、machineスコープに固定している。リポジトリの `.vscode/settings.json` から緩めることはできない。MRの自己マージを禁じる運用規約を持つ組織では `pr-only` にする（設計書 §16.16・§16.18・§16.26）。"
         },
         "agent.workflows.branchNaming": {
           "type": "string",
@@ -860,6 +904,48 @@
           "default": false,
           "scope": "machine-overridable",
           "markdownDescription": "PR/MRをDraftとして作り、統合ブランチへのマージが済んでからreadyへ切り替えるか。`gh pr create --draft` / `glab api --field=draft=true` で作り、`gh pr ready` / `glab mr update --ready` で外す（設計書 §16.18）。"
+        },
+        "agent.workflows.createTaskIssue": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine-overridable",
+          "markdownDescription": "タスクの開始時にIssueを起票し、PR/MRの本文から参照するか。`pullRequest: per-task` のときだけ有効（`gh issue create` / `glab api projects/:id/issues`）。タスクのYAML側で既に `issue` が指定されている場合は起票しない（設計書 §16.31）。"
+        },
+        "agent.workflows.reviewTaskPullRequest": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine-overridable",
+          "markdownDescription": "PR/MRを作った後、ローカルマージの前に、拡張が別の読み取り専用セッションでレビューさせるか。forgeの「人のレビューを待つ」機構ではなく、分解レビュー（`reviewWorkflowPlan`）と同じ方式で、応答を待ち続けることはない。結果は警告として記録するだけでマージは止めない（設計書 §16.31）。"
+        },
+        "agent.workflows.stallRepeatCount": {
+          "type": "number",
+          "default": 4,
+          "minimum": 2,
+          "maximum": 50,
+          "scope": "machine-overridable",
+          "markdownDescription": "タスクのループが停滞したとみなすまでに必要な、同一の応答が連続する回数。直近の応答要約がこの回数だけ連続して同一になったら、送信回数の上限（`maxIterations`）を使い切る前にループを止め、失敗とは区別できる状態（停滞）でオーケストレーターへ通知する（設計書 §16.27）。既定値は誤検知しない側（大きめ）に振ってある。範囲外（2未満・50超過・非整数）の値は既定値（4）にフォールバックする。"
+        },
+        "agent.workflows.maxAskUserPerRun": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 20,
+          "scope": "machine-overridable",
+          "markdownDescription": "オーケストレーターが `ask_user`（人へ確認する道具。設計書 §16.33）を1つの実行で呼べる回数の上限。担当領域をまたぐ変更・設計の前提を変える変更・受入基準を下げる判断・同じ失敗を3回繰り返して打つ手が尽きた場合に限って使う道具で、乱発を防ぐため設定ではなく既定の挙動として回数に上限を置く。上限に達した以降の呼び出しは拒否され、オーケストレーターは自分で判断するか `decide_final_merge` の `hold` で止めるよう促される。範囲外（1未満・20超過・非整数）の値は既定値（3回）にフォールバックする。"
+        },
+        "agent.workflows.autoResume": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine-overridable",
+          "markdownDescription": "ウィンドウのリロードやWSLの停止・再起動でワークフロー実行が中断された後、条件を満たせば自動的に再開するか（設計書 §16.35）。人が「全体停止」で止めた実行、他の理由で失敗しているタスクが混ざっている実行、危険な操作の確認（`allow`）が必要なタスクが混ざっている実行は対象外で、これまでどおりワークフロービューから手動で再実行する。`false` にすると自動再開そのものを行わず、従来どおり常に手動で再実行する。"
+        },
+        "agent.workflows.maxAutoResumeAttempts": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 20,
+          "scope": "machine-overridable",
+          "markdownDescription": "自動再開（`agent.workflows.autoResume`、設計書 §16.35）を試みる回数の上限。同じ実行がクラッシュと自動再開を繰り返し続けて壊れるのを防ぐための値で、上限に達した以降はワークフロービューにその旨を表示したまま自動再開をあきらめ、手動での再実行を待つ。範囲外（1未満・20超過・非整数）の値は既定値（3回）にフォールバックする。"
         },
         "claude.executablePath": {
           "type": "string",

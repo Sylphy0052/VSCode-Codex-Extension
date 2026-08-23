@@ -1808,6 +1808,8 @@ export function chatScript(
     failed: '応答が失敗したため止めました',
     manual: '停止しました',
     interrupted: '手動の操作が入ったため止めました',
+    // design.md §16.27、Issue #336。同じ応答が繰り返され進捗が無いまま停止した
+    stalled: '同じ応答が繰り返されたため止めました',
   };
 
   function applyLoop(loop) {

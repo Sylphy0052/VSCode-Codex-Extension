@@ -265,6 +265,27 @@ export function workflowStyles(): string {
   /* タスク間メッセージング経由の権限差の警告（design.md §16.21、Issue #132）。
      permissionEscalationと同じ重大度として同じ色にする（経路が違うだけでリスクの質は同じ）。 */
   .warning-item.messagingPermissionEscalation { border-left-color: var(--vscode-errorForeground); }
+  /* タスク分解のレビュー指摘（design.md §16.28、roadmap W3、Issue #337）。安全設定の
+     上書きとは性質が違う（危険度ではなく分解の妥当性）ため、plannerSecurity等の
+     errorForegroundとは別の色にして見分けをつける。 */
+  .warning-item.plannerReview { border-left-color: var(--vscode-charts-blue); }
+
+  /* ---- プログラム欄（design.md §16.37.3、roadmap W12-3、Issue #606） ---- */
+  #programsSection { margin-top: 8px; }
+  #programs { display: flex; flex-direction: column; gap: 6px; }
+  .program-item {
+    padding: 6px 8px;
+    border: 1px solid var(--vscode-widget-border, transparent);
+    border-radius: 4px;
+    background-color: color-mix(in srgb, var(--vscode-charts-blue) 6%, transparent);
+  }
+  .program-head { display: flex; align-items: center; gap: 8px; }
+  .program-def { font-weight: 600; font-size: 0.9em; }
+  .program-status { font-size: 0.85em; color: var(--vscode-descriptionForeground); }
+  .program-status.program-halted { color: var(--vscode-errorForeground); }
+  .program-runs { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
+  .program-run { font-size: 0.85em; }
+  .program-stop-btn { margin-left: auto; }
 
   /* ---- オーケストレーター欄（design.md §16.23「会話のUI」） ---- */
   #orchestrator {

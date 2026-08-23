@@ -81,6 +81,8 @@ import {
 } from './orchestrator/roadmap';
 import { sanitizeForLog } from './orchestrator/sanitize';
 import { WorkflowRunStore } from './orchestrator/runStore';
+import { ProgramStore } from './orchestrator/programStore';
+import { ProgramRunner } from './orchestrator/programRunner';
 import { WorkflowRunner, nodeWorkflowFilePort } from './orchestrator/runner';
 import type { ExtensionSafetyBaseline } from './orchestrator/taskConfig';
 import type { TaskSessionHost } from './orchestrator/taskSession';
@@ -90,6 +92,7 @@ import {
   planWorkflow,
   providerHintToProvider,
   resolveUniqueFileName,
+  reviewWorkflowPlan,
   slugifyGoal,
   validateSlugInput,
   locateSecurityWarningLine,
@@ -250,6 +253,8 @@ export interface ForgeOverrides {
     finalMerge: FinalMergeConfig;
     branchNaming: BranchNaming;
     draftPullRequest: boolean;
+    createTaskIssue: boolean;
+    reviewTaskPullRequest: boolean;
   };
   /**
    * `WorkflowRunner` が使うgitコマンドの実行（`WorkflowRunnerDeps.git`）。forgeまわり
@@ -482,6 +487,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   context.subscriptions.push(claudeChat);
 
   const workflowStore = new WorkflowRunStore(context.workspaceState);
+  // プログラム（複数runの束、design.md §16.37、roadmap W12-1、Issue #604）の永続化。
+  // この段ではrunのスケジューリングは持たないため、実際に読み書きするのは
+  // `reconcileAfterReload`（リロード直後の中断扱い）のみ
+  const programStore = new ProgramStore(context.workspaceState);
   // 統合テスト（Issue #158）だけがここへフェイクを入れる。空のままなら常に実物へ委譲
   // するため、本番の経路は差し替え口が無かったときと変わらない。
   const taskSessionHostOverrides: Partial<Record<Provider, TaskSessionHost>> = {};
@@ -530,6 +539,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           finalMerge: c.finalMerge,
           branchNaming: c.branchNaming,
           draftPullRequest: c.draftPullRequest,
+          createTaskIssue: c.createTaskIssue,
+          reviewTaskPullRequest: c.reviewTaskPullRequest,
         };
         return forgeOverrides.readConfig?.() ?? actual;
       },
@@ -557,6 +568,24 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // 常に効かせるため、トップレベルへ配線する（`WorkflowRunnerDeps.readMergeApprovalTimeoutSec`
     // のJSDoc参照）
     readMergeApprovalTimeoutSec: () => readWorkflowsConfig().mergeApprovalTimeoutSec,
+    // 最終マージの判断待ち（design.md §16.26、`finalMerge: orchestrator`）。オーケストレーターが
+    // `decide_final_merge`で応答しない場合に自動的に`hold`へ倒すまでの秒数。`messaging`とは
+    // 無関係に常に効かせるため、`readMergeApprovalTimeoutSec`と同じくトップレベルへ配線する
+    readFinalMergeDecisionTimeoutSec: () => readWorkflowsConfig().finalMergeDecisionTimeoutSec,
+    // CIの完了待ち・baseの取り込み直し（design.md §16.36、Issue #556）。`readMergeApprovalTimeoutSec`
+    // と同じくトップレベルへ配線し、`performFinalMerge`が呼ぶたびに現在値を読み直す
+    readCiWaitTimeoutSec: () => readWorkflowsConfig().ciWaitTimeoutSec,
+    readCiUpdateBranchMaxRetries: () => readWorkflowsConfig().ciUpdateBranchMaxRetries,
+    // レビューコメントの取得間隔（design.md §16.30、roadmap W5、Issue #339）。他のreadXxxと
+    // 同じくトップレベルへ配線し、`finalizeForge`が呼ぶたびに現在値を読み直す
+    readReviewCommentPollIntervalSec: () => readWorkflowsConfig().reviewCommentPollIntervalSec,
+    // ask_user（design.md §16.33、Issue #583）の呼び出し上限。他のreadXxxと同じく
+    // トップレベルへ配線し、`buildOrchestratorControlPort`が呼ぶたびに現在値を読み直す
+    readMaxAskUserPerRun: () => readWorkflowsConfig().maxAskUserPerRun,
+    // 自動再開（design.md §16.35、roadmap W10、Issue #584）。他のreadXxxと同じく
+    // トップレベルへ配線し、`restoreRunsForView`が呼ぶたびに現在値を読み直す
+    readAutoResume: () => readWorkflowsConfig().autoResume,
+    readMaxAutoResumeAttempts: () => readWorkflowsConfig().maxAutoResumeAttempts,
   });
   // isTaskManagedThreadのクロージャが参照する箱を埋める。以降の`workflowRunner`
   // （コマンド登録などで使う）はこの束縛を指し、常にWorkflowRunnerとして扱える
@@ -568,11 +597,39 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // （`disposeOrchestrator`が`live.orchestrator`をundefinedへ戻すため冪等）。
   context.subscriptions.push({ dispose: () => workflowRunner.dispose() });
 
+  // プログラム（design.md §16.37、roadmap W12-1・W12-2、Issue #604・#605）の永続化状態も、
+  // 単発runと同じタイミングでリロード直後の中断扱いへ書き換える（W10の自動再開の対象に
+  // 含める）。reconcile前後でプログラムごとに実際に書き換わったか（`running`だったrunが
+  // `failed`へ倒れたか）を比較するため、先にrunごとの状態をスナップショットしておく
+  const runStatesBeforeReconcile = new Map(
+    programStore.list().map((p) => [p.programId, JSON.stringify(p.state)] as const),
+  );
+  // 波のスケジューリング（design.md §16.37.2、roadmap W12-2、Issue #605）。`WorkflowRunner`は
+  // `ProgramWorkflowPort`（`start` / `listLive` / `onChanged`）を構造的に満たすため、
+  // アダプタを挟まずそのまま渡す。
+  //
+  // **`workflowView`（次のブロック）より先に作る。** `WorkflowViewManager`のコンストラクタが
+  // `programRunner.onChanged`を即座に購読するため（design.md §16.37.3のレビュー指摘F1、
+  // Issue #606）、この時点で`programRunner`が存在している必要がある
+  // （`halt`のようにクロージャ越しの遅延参照では済まない）
+  const programRunner = new ProgramRunner({
+    programStore,
+    filePort: nodeWorkflowFilePort,
+    workflow: workflowRunner,
+    log,
+  });
+  programRunner.attach();
+  context.subscriptions.push({ dispose: () => programRunner.dispose() });
+
   // ワークフローView（#57）。`restoreRunsForView`がworkspaceStateのreconcileと
   // メモリ上への復元（design.md §16.11「リロード後の実行再開」）を両方行う
-  const workflowView = new WorkflowViewManager(workflowRunner, log);
+  const workflowView = new WorkflowViewManager(workflowRunner, log, {
+    list: () => programStore.list(),
+    halt: (programId) => programRunner.haltProgram(programId),
+    onChanged: (listener) => programRunner.onChanged(listener),
+  });
   context.subscriptions.push(workflowView);
-  void workflowRunner.restoreRunsForView().then(() => {
+  const restoreRunsForViewDone = workflowRunner.restoreRunsForView().then(() => {
     const interrupted = workflowStore
       .list()
       .filter((r) => Object.values(r.tasks).some((t) => t.failure?.kind === 'reloadInterrupted'));
@@ -582,6 +639,30 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       );
     }
   });
+
+  const reconcileProgramStoreDone = programStore.reconcileAfterReload().then((reconciled) => {
+    const interruptedProgramIds = reconciled
+      .filter((p) => runStatesBeforeReconcile.get(p.programId) !== JSON.stringify(p.state))
+      .map((p) => p.programId);
+    if (interruptedProgramIds.length > 0) {
+      log.info(`リロードにより中断扱いにしたプログラム: ${interruptedProgramIds.join(', ')}`);
+    }
+  });
+  // `programRunner.reconcileAfterReload()`は、`WorkflowRunner`側で生きている（＝W10が
+  // 再開した）runを`ProgramState`とtrackedRunsへ拾い直す（design.md §16.37.2「リロードと
+  // W10の自動再開の整合」、Issue #605のレビュー指摘F1）。そのため`workflowRunner.
+  // restoreRunsForView()`（W10の自動再開そのもの）と`programStore.reconcileAfterReload()`
+  // （`running`を暫定`failed`へ倒す側）の**両方が完了してから**呼ぶ必要がある。順序を
+  // 崩すと、まだ再開されていない・まだfailedへ倒されていない状態を見て誤った判断をする
+  void Promise.all([restoreRunsForViewDone, reconcileProgramStoreDone])
+    .then(() => programRunner.reconcileAfterReload())
+    .catch((e: unknown) => {
+      log.error(
+        `[program] リロード直後の整合に失敗しました: ${sanitizeForLog(
+          e instanceof Error ? e.message : String(e),
+        )}`,
+      );
+    });
 
   // ロードマップ（design.md §16.19、#95・配線はIssue #105）。既存Issueの取得は
   // `git remote` + `gh`/`glab` をポート越しに呼ぶだけなので、ここで実装を組み立てて渡す。
@@ -815,7 +896,13 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     vscode.commands.registerCommand('agent.workflows.run', () =>
       runWorkflow(workflowRunner, workflowView, log),
     ),
+    vscode.commands.registerCommand('agent.workflows.runProgram', () =>
+      runProgram(programRunner, log),
+    ),
     vscode.commands.registerCommand('agent.workflows.stop', () => stopWorkflow(workflowRunner)),
+    vscode.commands.registerCommand('agent.workflows.stopProgram', () =>
+      stopProgram(programRunner, programStore),
+    ),
     vscode.commands.registerCommand('agent.workflows.view', () => workflowView.show()),
     vscode.commands.registerCommand('agent.workflows.plan', (providerHint?: unknown) =>
       planWorkflowCommand(chat, claudeChat, workflowView, log, providerHint),
@@ -1096,6 +1183,54 @@ async function runWorkflow(
   view.show(result.runId);
 }
 
+/**
+ * プログラム定義ファイルを選んで実行する（design.md §16.37.2、roadmap W12-2、Issue #605）。
+ *
+ * `runWorkflow`と同じ形のQuickPick選択にしてあるが、探索ディレクトリは`.agents/programs`
+ * 固定。兄弟の`runWorkflow`は`readWorkflowsConfig().dir`で探索先を設定できるが、
+ * プログラム側は現時点で設定項目を増やしたくないため、あえて固定パスにした
+ * （design.md §16.37.2「設定・固定パスの判断」。「既存の慣例」を根拠にしていた
+ * 以前の記述はIssue #605のレビュー指摘F4により誤り。この`.agents/programs`という
+ * 文字列自体はW12-1でこの機能のために新規に決めたもので、先行する慣例は無い）。
+ *
+ * ワークフローView（`agent.workflows.view`）は、起動した各runを個別に確認できることに加えて
+ * W12-3（design.md §16.37.3、Issue #606）でプログラム全体の状態（各runの進捗・失敗伝播による
+ * スキップ理由・人による停止の有無）も表示するようになった。停止は`agent.workflows.stopProgram`
+ * コマンド、またはワークフローView内の「プログラムを停止」ボタンから行える（`stopProgram`）。
+ */
+async function runProgram(programRunner: ProgramRunner, log: Logger): Promise<void> {
+  const folder = currentWorkspaceFolder();
+  if (folder === undefined) {
+    void vscode.window.showErrorMessage('プログラムを実行するにはフォルダを開いてください');
+    return;
+  }
+  const dir = '.agents/programs';
+  const pattern = new vscode.RelativePattern(folder, `${dir}/**/*.{yaml,yml}`);
+  const files = await vscode.workspace.findFiles(pattern, undefined, 200);
+  if (files.length === 0) {
+    void vscode.window.showInformationMessage(
+      `プログラム定義が見つかりません（${dir} 配下に .yaml / .yml を置いてください）`,
+    );
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(
+    files.map((f) => ({ label: vscode.workspace.asRelativePath(f), file: f })),
+    { placeHolder: '実行するプログラム定義を選択' },
+  );
+  if (picked === undefined) {
+    return;
+  }
+
+  const result = await programRunner.startProgram(picked.file.fsPath, folder.uri.fsPath);
+  if (!result.ok) {
+    const detail = (result.errors ?? []).map((e) => e.message).join('\n');
+    log.error(`プログラムを開始できません:\n${detail}`);
+    void vscode.window.showErrorMessage(`プログラムを開始できません: ${detail}`);
+    return;
+  }
+  void vscode.window.showInformationMessage(`プログラムを開始しました: ${picked.label}`);
+}
+
 /** 実行中のワークフローを選んで停止する。 */
 async function stopWorkflow(runner: WorkflowRunner): Promise<void> {
   const live = runner.listLive().filter((r) => r.outcome === 'running');
@@ -1115,6 +1250,33 @@ async function stopWorkflow(runner: WorkflowRunner): Promise<void> {
     return;
   }
   runner.stop(picked.runId);
+}
+
+/**
+ * 実行中のプログラムを選んで人の手で止める（design.md §16.37.3、roadmap W12-3、Issue #606）。
+ *
+ * `stopWorkflow`と対になるコマンド。停止対象は`programStore.list()`のうち未完了
+ * （`finishedAt === undefined`）のものに絞る。実際の停止処理は`ProgramRunner.haltProgram`が
+ * 持つ（配下の生存中runへの`stop`呼び出し・`haltedByUser`の永続化・保留中runの一括skipped化）。
+ */
+async function stopProgram(programRunner: ProgramRunner, programStore: ProgramStore): Promise<void> {
+  const unfinished = programStore.list().filter((p) => p.finishedAt === undefined);
+  if (unfinished.length === 0) {
+    void vscode.window.showInformationMessage('実行中のプログラムはありません');
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(
+    unfinished.map((p) => ({
+      label: p.state.haltedByUser ? `${p.defPath}（停止処理中）` : p.defPath,
+      description: p.programId,
+      programId: p.programId,
+    })),
+    { placeHolder: '停止するプログラムを選択' },
+  );
+  if (picked === undefined) {
+    return;
+  }
+  await programRunner.haltProgram(picked.programId);
 }
 
 /**
@@ -1525,7 +1687,7 @@ async function planWorkflowFromGoalCommand(
   );
 
   if (result.ok) {
-    await handlePlanSuccess(result, goal, workspaceRoot, view, log);
+    await handlePlanSuccess(result, goal, workspaceRoot, view, log, provider, host);
     return;
   }
   await handlePlanFailure(result, log);
@@ -1705,6 +1867,8 @@ async function planWorkflowFromRoadmapCommand(
       workspaceRoot,
       view,
       log,
+      provider,
+      host,
     );
   }
 
@@ -1811,6 +1975,28 @@ async function writeUniqueWorkflowFile(
  * Viewを開く（design.md §16.9手順4）。セキュリティ警告があれば、該当行へ移動したうえで
  * 強調して知らせる（design.md §16.9「多数のタスクに紛れた1件のallowを人が見落とすのを
  * 防ぐ」）。
+ *
+ * 保存の後、別の読み取り専用セッションでタスク分解の妥当性をレビューする
+ * （design.md §16.28、roadmap W3）。ゴール文からの生成（`planWorkflowFromGoalCommand`）と
+ * ロードマップからの生成（`planWorkflowFromRoadmapCommand`）の両方がこの関数を通るため、
+ * ここに置くことでどちらの起点で生成しても同じくレビューがかかる（片方だけ塞ぐ実装に
+ * しない）。
+ *
+ * **エディタとワークフローViewの表示は、レビューの完了を待たない。** レビューは
+ * `PLANNER_TURN_TIMEOUT_MS`（既定5分）までかかりうるため、表示までそれだけ人を待たせる
+ * と「保存は妨げない」という受入基準の実質を損なう。表示はまず`securityWarnings`だけで
+ * 出し、レビューはバックグラウンドで走らせて、指摘が見つかった時点で`previewDefinition`
+ * をもう一度呼んで警告欄へ追加し、`showWarningMessage`も別途出す（design.md §16.28）。
+ * このもう一度の呼び出しは無条件——ユーザーが既に別のrunの表示へ切り替えていた場合、
+ * その表示がレビュー結果の到着で差し替わりうる（フォーカスは奪わない。W3の受入基準の
+ * 対象外として許容している）。
+ *
+ * レビューを追いかける処理はバックグラウンドの`void`な即時実行関数（IIFE）の中にあり、
+ * この関数自体は先に`resolve`済みのため、IIFE内で投げた例外を受け取る呼び出し元が無い。
+ * `reviewWorkflowPlan`自体は例外を投げない設計だが、IIFE内の他の呼び出し
+ * （`withProgress`・`previewDefinition`・`showWarningMessage`）は投げうるため、
+ * **IIFE全体を`try/catch`で囲み、失敗しても`log.warn`に留めて表示済みの内容へは
+ * 波及させない。**
  */
 async function handlePlanSuccess(
   result: Extract<PlanWorkflowResult, { ok: true }>,
@@ -1818,6 +2004,8 @@ async function handlePlanSuccess(
   workspaceRoot: string,
   view: WorkflowViewManager,
   log: Logger,
+  provider: Provider,
+  host: TaskSessionHost,
 ): Promise<void> {
   const dirConfig = readWorkflowsConfig().dir;
   const dirAbs = path.join(workspaceRoot, dirConfig);
@@ -1833,15 +2021,12 @@ async function handlePlanSuccess(
     log.info('ワークフロー定義の保存を取り消しました');
     return;
   }
-  const filePath = await writeUniqueWorkflowFile(
-    dirAbs,
-    fileName,
-    existingBaseNames,
-    result.yaml,
-  );
+  const filePath = await writeUniqueWorkflowFile(dirAbs, fileName, existingBaseNames, result.yaml);
 
-  // エディタより先にViewを開く。エディタの`showTextDocument`が最後に呼ばれるほうへ
-  // フォーカスが残るようにするため（Viewのパネル作成自体はフォーカスを奪う作りのため）
+  // 生成直後の表示はレビューの完了を待たない（design.md §16.28「表示は保存直後に出す。
+  // レビューは後追いで警告欄へ足す」）。エディタより先にViewを開く。エディタの
+  // `showTextDocument`が最後に呼ばれるほうへフォーカスが残るようにするため（Viewの
+  // パネル作成自体はフォーカスを奪う作りのため）
   view.previewDefinition(
     filePath,
     result.definition,
@@ -1889,6 +2074,68 @@ async function handlePlanSuccess(
         (result.attempts > 1 ? '（検証エラーを踏まえて再生成しました）' : ''),
     );
   }
+
+  // タスク分解のレビュー（design.md §16.28）は表示の後を追いかけて走らせる。保存済み
+  // ファイル・既に開いたエディタ・上のトーストは待たない（await しない）。指摘があれば、
+  // 開いたままのプレビューへ後から追加する（`previewDefinition`は毎回スナップショットを
+  // 作り直すため、この2回目の呼び出しは1回目を上書きする。ただしユーザーが既に別のrunの
+  // 表示へ切り替えていた場合はその表示が差し替わりうる——design.md §16.28「限界」参照）。
+  //
+  // `reviewWorkflowPlan`自体は例外を投げない設計だが、この関数の外側は既に`resolve`済み
+  // （`handlePlanSuccess`の呼び出し元は待っていない）なので、IIFE内の他の呼び出し
+  // （`withProgress`・`previewDefinition`・`showWarningMessage`）が投げた場合に受け取る
+  // 呼び出し元がどこにも無く、未処理rejectになる。そのためIIFE全体を`try/catch`で囲み、
+  // catchでは`log.warn`に留める（レビューは警告を足すだけの機能なので、この経路の失敗で
+  // 保存済みの状態や既に開いた表示へ波及させてはならない）。
+  void (async () => {
+    try {
+      const review = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'ワークフローをレビューしています…',
+        },
+        () =>
+          reviewWorkflowPlan({
+            goal,
+            yaml: result.yaml,
+            provider,
+            host,
+            cwd: workspaceRoot,
+            log,
+          }),
+      );
+
+      if (review.findings.length === 0) {
+        return;
+      }
+
+      view.previewDefinition(filePath, result.definition, [
+        ...result.securityWarnings.map((w) => ({
+          kind: 'plannerSecurity' as const,
+          taskId: w.taskId,
+          message: w.message,
+        })),
+        ...review.findings.map((f) => ({
+          kind: 'plannerReview' as const,
+          taskId: f.taskIds[0],
+          message: f.taskIds.length > 0 ? `[${f.taskIds.join(', ')}] ${f.message}` : f.message,
+        })),
+      ]);
+
+      log.warn(
+        `[planner] タスク分解のレビューで指摘があります: ${review.findings
+          .map((f) => sanitizeForLog(f.message))
+          .join(' / ')}`,
+      );
+      void vscode.window.showWarningMessage(
+        `タスク分解のレビューで指摘があります（${review.findings.length}件）。` +
+          '内容を確認してください（自動では直していません。詳しくはログ）',
+      );
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      log.warn(`[planner] タスク分解のレビュー表示中にエラーが発生しました: ${sanitizeForLog(message)}`);
+    }
+  })();
 }
 
 /**

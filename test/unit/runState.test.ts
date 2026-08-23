@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  applyAutoResume,
   applyLoopStopReason,
   createRunState,
   hasFailedTask,
@@ -118,6 +119,40 @@ describe('applyLoopStopReason', () => {
     const t2 = stateOf(run, 'T2');
     expect(t2.state).toBe('failed');
     expect(t2.failure).toEqual({ kind: 'maxReached' });
+  });
+
+  it('stalledはfailedになり、理由をmaxReachedと区別して記録する（design.md §16.27、Issue #336）', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T2');
+    run = applyLoopStopReason(run, tasks, 'T2', 'stalled');
+    const t2 = stateOf(run, 'T2');
+    expect(t2.state).toBe('failed');
+    expect(t2.failure).toEqual({ kind: 'stalled' });
+    expect(t2.failure).not.toEqual({ kind: 'loopFailed' });
+  });
+
+  it('stalledはretriesを消費しない（failedとは別経路。retryCountが増えない）', () => {
+    const tasks = chainTasks(2); // T2のretries: 2
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = finishDone(run, tasks, 'T1');
+    run = markRunning(run, 'T2');
+    run = applyLoopStopReason(run, tasks, 'T2', 'stalled');
+    const t2 = stateOf(run, 'T2');
+    // retriesが残っていても、failedのように自動でpendingへ戻さず即座にfailedで確定する
+    // （taskStopped=manualStopと同じ扱い。design.md §16.27）
+    expect(t2.state).toBe('failed');
+    expect(t2.retryCount).toBe(0);
+  });
+
+  it('stalledは依存する後続をskippedにする（failedの波及と同じ）', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T2');
+    run = applyLoopStopReason(run, tasks, 'T2', 'stalled'); // T3・T4が依存
+    expect(stateOf(run, 'T3').state).toBe('skipped');
+    expect(stateOf(run, 'T3').failure).toEqual({ kind: 'dependencyFailed', failedTaskIds: ['T2'] });
   });
 
   it('failedはretriesの範囲でpendingへ戻し、再試行回数を増やす', () => {
@@ -953,4 +988,165 @@ describe('continueTask（回数切れから続ける、issue #284）', () => {
 
     expect(continueTask(run, tasks, 'T1').haltedByUser).toBe(false);
   });
+
+  it('停滞（stalled）もmaxReachedと同じくrunningへ戻せる（design.md §16.27、Issue #336）', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = markRunning(run, 'T1');
+    run = finishDone(run, tasks, 'T1');
+    run = markRunning(run, 'T2');
+    run = recordSubmissionCount(run, 'T2', 5);
+    run = applyLoopStopReason(run, tasks, 'T2', 'stalled'); // T2: failed(stalled), T3・T4: skipped
+
+    const continued = continueTask(run, tasks, 'T2');
+    expect(stateOf(continued, 'T2').state).toBe('running');
+    expect(stateOf(continued, 'T2').failure).toBeUndefined();
+    expect(stateOf(continued, 'T3').state).toBe('pending');
+    expect(stateOf(continued, 'T2').manualRetryCount).toBe(0);
+    expect(stateOf(continued, 'T2').submissionCount).toBe(5);
+  });
+});
+
+describe('applyAutoResume（design.md §16.35、roadmap W10、Issue #584）', () => {
+  const withTaskState = (run: RunState, id: string, patch: Partial<TaskRunState>): RunState => {
+    const tasks = new Map(run.tasks);
+    tasks.set(id, { ...stateOf(run, id), ...patch });
+    return { ...run, tasks };
+  };
+
+  it(
+    'reloadInterrupted(failed)のタスクをpendingへ戻し、manualRetryCountを1増やす' +
+      '（worktree名を変えてbranchExistsとの衝突を避けるため。retryCountは増やさない）',
+    () => {
+      const tasks = chainTasks();
+      let run = createRunState(tasks);
+      run = withTaskState(run, 'T1', {
+        state: 'failed',
+        failure: { kind: 'reloadInterrupted' },
+        submissionCount: 3,
+      });
+
+      const outcome = applyAutoResume(run, tasks);
+      expect(outcome.kind).toBe('resumed');
+      if (outcome.kind !== 'resumed') {
+        throw new Error('unreachable');
+      }
+      expect(outcome.resumedTaskIds).toEqual(['T1']);
+      expect(stateOf(outcome.run, 'T1').state).toBe('pending');
+      expect(stateOf(outcome.run, 'T1').failure).toBeUndefined();
+      expect(stateOf(outcome.run, 'T1').retryCount).toBe(0);
+      expect(stateOf(outcome.run, 'T1').manualRetryCount).toBe(1);
+      expect(stateOf(outcome.run, 'T1').submissionCount).toBe(0);
+    },
+  );
+
+  it(
+    '自動再開はretries（自動再試行の予算）を消費しない: retries:1のタスクが' +
+      'リロードで中断→自動再開したあと、本物の理由(loopFailed)で失敗しても、' +
+      'まだ自動再試行の権利が残っているため`failed`ではなく`pending`へ戻る' +
+      '（レビュー指摘。2026-08-23。retryCountを進めていると自動再試行の予算を' +
+      'リロードが黙って1回消費してしまい、ここが`failed`のまま確定してしまう）',
+    () => {
+      const tasksWithRetry = [task('T1', [], 1)];
+      let run = createRunState(tasksWithRetry);
+      run = withTaskState(run, 'T1', {
+        state: 'failed',
+        failure: { kind: 'reloadInterrupted' },
+      });
+
+      const outcome = applyAutoResume(run, tasksWithRetry);
+      expect(outcome.kind).toBe('resumed');
+      if (outcome.kind !== 'resumed') {
+        throw new Error('unreachable');
+      }
+      // 自動再開の直後、retries自体はまだ1回も消費していない
+      expect(stateOf(outcome.run, 'T1').retryCount).toBe(0);
+
+      // 自動再開後、そのタスクが本物の理由(loopFailed)で失敗した
+      const afterFail = applyLoopStopReason(outcome.run, tasksWithRetry, 'T1', 'failed');
+
+      // retries:1の予算をまだ使い切っていないため、自動再試行でpendingへ戻る
+      expect(stateOf(afterFail, 'T1').state).toBe('pending');
+      expect(stateOf(afterFail, 'T1').retryCount).toBe(1);
+    },
+  );
+
+  it('reloadInterruptedで実行全体が止まったためskipped(runHalted)になっていた後続もpendingへ戻す', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = withTaskState(run, 'T1', { state: 'done' });
+    run = withTaskState(run, 'T2', { state: 'failed', failure: { kind: 'reloadInterrupted' } });
+    run = withTaskState(run, 'T3', { state: 'skipped', failure: { kind: 'runHalted' } });
+    run = withTaskState(run, 'T4', { state: 'skipped', failure: { kind: 'runHalted' } });
+
+    const outcome = applyAutoResume(run, tasks);
+    expect(outcome.kind).toBe('resumed');
+    if (outcome.kind !== 'resumed') {
+      throw new Error('unreachable');
+    }
+    expect(new Set(outcome.resumedTaskIds)).toEqual(new Set(['T2', 'T3', 'T4']));
+    expect(stateOf(outcome.run, 'T3').state).toBe('pending');
+    expect(stateOf(outcome.run, 'T4').state).toBe('pending');
+  });
+
+  it('dependencyFailed／mergeBlockedによるskippedは戻さない（reload起因のrunHaltedだけを戻す）', () => {
+    const tasks = chainTasks();
+    let run = createRunState(tasks);
+    run = withTaskState(run, 'T2', { state: 'failed', failure: { kind: 'reloadInterrupted' } });
+    run = withTaskState(run, 'T3', {
+      state: 'skipped',
+      failure: { kind: 'dependencyFailed', failedTaskIds: ['X'] },
+    });
+
+    const outcome = applyAutoResume(run, tasks);
+    expect(outcome.kind).toBe('resumed');
+    if (outcome.kind !== 'resumed') {
+      throw new Error('unreachable');
+    }
+    expect(outcome.resumedTaskIds).toEqual(['T2']);
+    expect(stateOf(outcome.run, 'T3').state).toBe('skipped');
+  });
+
+  it(
+    'reloadInterrupted以外の理由でfailedのタスクが1件でもあれば自動再開をあきらめる' +
+      '（isRunHaltedが引き続き真のままになり、戻したpendingがnextTasksToStartに拾われず' +
+      '迷子になるため。markMergeSucceededの不変条件と同じ）',
+    () => {
+      const tasks = chainTasks();
+      let run = createRunState(tasks);
+      run = withTaskState(run, 'T1', { state: 'failed', failure: { kind: 'loopFailed' } });
+      run = withTaskState(run, 'T2', { state: 'failed', failure: { kind: 'reloadInterrupted' } });
+
+      const outcome = applyAutoResume(run, tasks);
+      expect(outcome.kind).toBe('blockedByOtherFailure');
+      expect(stateOf(run, 'T2').state).toBe('failed');
+    },
+  );
+
+  it('reloadInterruptedなタスクが1件も無ければ何もしない', () => {
+    const tasks = chainTasks();
+    const run = createRunState(tasks);
+    const outcome = applyAutoResume(run, tasks);
+    expect(outcome.kind).toBe('nothingToResume');
+  });
+
+  it(
+    'allowを持つタスクがreloadInterruptedで止まっていれば、run全体の自動再開をあきらめる' +
+      '（人が居ないため危険操作の実行前確認ができない。start()/retryTaskと同じ規約）',
+    () => {
+      const tasksWithAllow = [
+        { ...task('T1', []), allow: ['npm test'] },
+        task('T2', ['T1']),
+      ];
+      let run = createRunState(tasksWithAllow);
+      run = withTaskState(run, 'T1', { state: 'failed', failure: { kind: 'reloadInterrupted' } });
+
+      const outcome = applyAutoResume(run, tasksWithAllow);
+      expect(outcome.kind).toBe('blockedByAllowGate');
+      if (outcome.kind !== 'blockedByAllowGate') {
+        throw new Error('unreachable');
+      }
+      expect(outcome.taskIds).toEqual(['T1']);
+    },
+  );
 });

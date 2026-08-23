@@ -500,7 +500,15 @@ Codexがサブエージェントを起動したとき、その活動を会話の
 - **Claude Codeの `bypassPermissions` はワークフローでは使われない**（`agent.workflows.allowClaudeBypassPermissions` で明示的に許可した場合を除く）**。** この設定では承認要求そのものが発行されず、上の危険判定が丸ごと働かない。`claude.permissionMode` を `bypassPermissions` にしている場合、ワークフローのタスクは `acceptEdits` へ読み替えて実行し、その旨を警告に出す（チャットの設定はそのまま。ワークフロー実行時だけの読み替え）。**確認を挟まずに走らせたい場合は、`bypassPermissions` ではなく `autoApprove` を使う**（[後述](#確認を挟まずに走らせたい場合)）
 - **タスクの `allow` を書くと、そのタスクに関する限り危険判定そのものが効かなくなる。** `allow` は「既定の停止条件から外すパターン」を追加するフィールドで、書いた分だけそのタスクは自動承認の対象が広がる（`.git` 配下への書き込みなど一部は `allow` でも解除できない）。使っているワークフローは実行前に確認が出て、ワークフローViewの警告欄に常時表示される
 - **`autoApprove: true` はYAMLに書くだけでは効かない。** machineスコープの設定 `agent.workflows.allowAutoApprove`（既定 `false`）が有効なときだけ意味を持つ。無効のままなら、YAMLに何と書かれていても全ての承認要求を人へ回して走る（設定は[後述](#設定)）
-- **`agent.workflows.finalMerge` の既定は `auto`。** 全タスクが `done` になると、統合ブランチからmainへのPR/MRを作ったうえで、そのままmainへマージする（`gh pr merge` / `glab mr merge`）。**人の目を通さずmainが進む。** MRの自己マージを禁じる運用規約がある場合は、machineスコープの設定で `agent.workflows.finalMerge` を `pr-only` にする。PR/MRを作って止め、mainへの書き込みは人が行う
+- **`agent.workflows.finalMerge` は4つから選べる（既定 `orchestrator`）。** 全タスクが `done` になると、統合ブランチからmainへのPR/MRを作る。そのあと実際にマージするかどうかは値ごとに違う。
+  - `auto` — PR/MRを作ってそのままマージする（従来の既定。`gh pr merge` / `glab mr merge`。**人の目を通さずmainが進む**）
+  - `orchestrator` — PR/MRを作り、オーケストレーターの判断でマージする（**新しい既定**）。判断の内容と理由は必ずワークフローViewの警告欄に残る。オーケストレーターが `agent.workflows.finalMergeDecisionTimeoutSec`（既定900秒）以内に応答しなければ、判断を待って無限に止まらないよう自動的に `hold`（マージせずPR/MRを残す）として扱う
+  - `confirm` — PR/MRを作って人の承認を待ち、承認されたときだけマージする
+  - `pr-only` — PR/MRを作った時点でrunを終える。mainへの書き込みは人が行う
+
+  MRの自己マージを禁じる運用規約がある場合は、machineスコープの設定で `agent.workflows.finalMerge` を `pr-only` にする
+
+  **どのモードでも、マージを実行する直前にCIチェックの完了を待つ。** 赤ならマージせずタスクを失敗として確定し、理由をワークフローViewの警告欄に残す。CIが1件も設定されていないリポジトリでは待たずに即マージする。マージが「baseの最新でない」（strictなブランチ保護の下で他のPRが先にmainへ入った場合等）ことで拒否されたときは、`gh pr update-branch` / `glab mr rebase` で自動的に取り込み直し、CIの完了を待ち直してから再度マージを試みる（上限は `agent.workflows.ciWaitTimeoutSec` / `agent.workflows.ciUpdateBranchMaxRetries`、[後述](#設定)）
 
 ### 最小のYAML
 
@@ -577,7 +585,7 @@ runごとに、タスクとは別のセッションが1つ立つ。**run全体�
 
 - **話しかけ方**: 欄の1行入力へ書いてEnter（または `送る`）。全文・承認カード・Markdown描画は通常のチャット画面がそのまま使えるので、長いやり取りは `会話を開く`（または要約の押下）でタブを前面に出す
 - **向こうからも話しかけてくる**: run開始・タスクの完了／失敗／承認待ち／マージのブロック・run終了が通知として届き、オーケストレーターがそれに応じて報告や質問をする。**人が最後に会話を開いてから応答が増えていれば、欄に未読の印が出る**。走行中のターンへは割り込まず、次の送信へまとめて添えるので、こちらの発話が押し出されることはない
-- **できること**: 進行状況を読む（`list_tasks` / `get_run_status`）、走行中のタスクへメッセージを送る（`send_message`）、タスクを止める・やり直す・続ける・承認する（`stop_task` / `retry_task` / `continue_task` / `decide_approval`）、走行中のタスクの継続指示を差し替える（`update_task_prompt`）
+- **できること**: 進行状況を読む（`list_tasks` / `get_run_status`）、走行中のタスクへメッセージを送る（`send_message`）、タスクを止める・やり直す・続ける・承認する（`stop_task` / `retry_task` / `continue_task` / `decide_approval`）、走行中のタスクの継続指示を差し替える（`update_task_prompt`）。**タスク同士は直接メッセージを送り合えない**（[後述](#ワークフロー並列オーケストレーション)）。タスクが送った内容はまずオーケストレーターへ届き、転送するかどうか・内容を変えるかどうかはオーケストレーターが判断する
 - **できないこと**: オーケストレーター自身は**読み取り専用**で、ファイルを書き換えない（実際の作業は各タスクが行う）。権限を動かすツール（`sandbox` / `approvalMode` / `autoApprove` の変更）は持たない。run全体の停止（`全体の停止`）も人の判断に残してあり、ツールにはしていない。`allow` を含むタスクの再実行は拒否して人へ回す
 - **方針転換は必ず見える**: `update_task_prompt` で継続指示が差し替わると、**ワークフローViewの警告欄に必ず出る**。人がYAMLに書いた指示が実行中に別のものへ変わるのは、Viewを見ている人から見て最も気付きにくい変化だから。差し替えた文面のテンプレート変数（`{{T1.result}}`）は展開せず、そのままの文字列として送る
 - **run終了後**: 会話は続けられる（「なぜ失敗したのか」を聞くのは走り終えた後が多い）。ただし**制御ツールだけが無効になり**、理由付きで断られる。過去のrunを後から動かす経路は作っていない
@@ -740,7 +748,10 @@ tasks:
 | `agent.workflows.pseudoWorktreeExclude` | `[node_modules,.venv,dist,out]` | machine-overridable | 疑似worktree（gitでないフォルダでの複製ベースの隔離）で複製から除外するディレクトリ名                                                |
 | `agent.workflows.forge`                 | `auto`                          | machine             | PR/MR作成に使うホスト（`auto` / `github` / `gitlab` / `none`）                                                                       |
 | `agent.workflows.pullRequest`           | `per-task`                      | machine-overridable | 作るPR/MRの層（`none` / `integration` / `per-task`）                                                                                 |
-| `agent.workflows.finalMerge`            | `auto`                          | machine             | 統合ブランチ→mainのPR/MRを無人でマージするか（`auto` / `pr-only`。[無人実行についての注意](#無人実行についての注意)参照）            |
+| `agent.workflows.finalMerge`            | `orchestrator`                  | machine             | 統合ブランチ→mainのPR/MRをマージするかどうかをどう決めるか（`auto` / `orchestrator` / `confirm` / `pr-only`。[無人実行についての注意](#無人実行についての注意)参照）           |
+| `agent.workflows.finalMergeDecisionTimeoutSec` | `900`                     | machine-overridable | `finalMerge: orchestrator` で、オーケストレーターが `decide_final_merge` に応答するのを待つ上限秒数。超えたら自動的に `hold` にする |
+| `agent.workflows.ciWaitTimeoutSec`      | `1800`                          | machine-overridable | 最終マージの前にCIチェックの完了を待つ上限秒数。超えたらCIが赤扱いでマージせずタスクを失敗にする。CIが1件も設定されていないPR/MRは待たずに即マージする              |
+| `agent.workflows.ciUpdateBranchMaxRetries` | `2`                           | machine-overridable | マージが「baseの最新でない」ため拒否されたとき、`gh pr update-branch` / `glab mr rebase` で取り込み直してCI待ち・マージを再試行する回数の上限。超えたら失敗にする |
 | `agent.workflows.branchNaming`          | `wf`                            | machine-overridable | タスクブランチの命名方式（`wf` = `wf/<runId>/<taskId>` / `conventional` = `<type>/<IID>/<slug>`）                                    |
 | `agent.workflows.draftPullRequest`      | `false`                         | machine-overridable | PR/MRをDraftで作り、統合ブランチへのマージ後にreadyへ切り替えるか                                                                    |
 
@@ -799,7 +810,8 @@ VSCodeが読むPATHはシェルの対話設定（`.bashrc` 等）を経ないこ
 - **マルチルートワークスペース**: 既存の「新しい会話」（サイドバーの `+` / スパークル、`codex.newChat` / `claude.newChat`）はフォルダを1つだけ選ぶ（アクティブエディタが属するフォルダ、なければ先頭）。狙ったフォルダを毎回選びたい場合は[プリセットから新しい会話を開く](#プリセットから新しい会話を開く)を使う。プリセットに`workingDirectory`が無ければ開く前にQuickPickでフォルダを選べる（issue #295・design.md §14.56）
 - **ウィンドウを跨いだ排他はしない**: 同一ウィンドウ内の二重オープンは防ぐが、別ウィンドウで同じセッションを開くことは止めない
 - **CLIから直接archive/deleteした場合**: 履歴は追従するが、開いているタブは残る
-- **ワークフローは実装・配線ともに完了しているが実機確認は途上**: 統合ブランチからのPR/MR自動作成、`agent.workflows.roadmap` によるゴール→ロードマップ→YAMLの2段階生成、`blocked` タスクのワークフローViewからの「再マージ」、タスク間メッセージング（MCPツール `list_tasks` / `send_message`）、gitリポジトリでないフォルダでの複製による隔離（疑似worktree）は、いずれも実行層（`runner.ts`）への配線を含めて実装済みで動く。ユニットテストとプロトコル上の実測までは済んでいるが、実VSCode上で通しで確認した記録はまだ無い。詳細は[docs/design.md](docs/design.md) §16.13を参照
+- **ワークフローは実装・配線ともに完了しているが実機確認は途上**: 統合ブランチからのPR/MR自動作成、`agent.workflows.roadmap` によるゴール→ロードマップ→YAMLの2段階生成、`blocked` タスクのワークフローViewからの「再マージ」、タスク間メッセージング（MCPツール `list_tasks` / `send_message` / `ask_orchestrator`。宛先はオーケストレーターに固定してあり、タスク同士が直接やり取りすることはできない。`ask_orchestrator`はタスクからオーケストレーターへ判断を仰ぐ経路で、答えは既存の`send_message`で返る。詳細はdesign.md §16.32）、gitリポジトリでないフォルダでの複製による隔離（疑似worktree）は、いずれも実行層（`runner.ts`）への配線を含めて実装済みで動く。ユニットテストとプロトコル上の実測までは済んでいるが、実VSCode上で通しで確認した記録はまだ無い。詳細は[docs/design.md](docs/design.md) §16.13を参照
+- **最終マージ前のCI完了待ちとブランチ保護への対応は実機未確認**: CIチェックの完了待ち・タイムアウト時の失敗確定・マージが「baseの最新でない」ため拒否されたときの `gh pr update-branch` / `glab mr rebase` による自動取り込み直しは、いずれもユニットテストのみで検証済み。実際のGitHub/GitLab上でstrictなブランチ保護・CIパイプラインと組み合わせた確認はまだ無い。詳細は[docs/design.md](docs/design.md) §16.36、[docs/manual-test.md](docs/manual-test.md) W-Pを参照
 - **Codexの履歴取得はthread/list優先**: app-serverに繋がっていれば `thread/list` を使い、繋がらない・応答が空のときはファイル読みへ退避する。退避したときは出力チャネル（`Agent: ログを表示`）に理由が残る（詳細は設計書 §4.0）
 - **agent threadを切り替える経路が無い**: Codex app-serverのClientRequest 95メソッドを全数確認したが、「アクティブなagent threadを切り替える」に相当するものが無い（実測。詳細は設計書 §14.26）。サブエージェントの状況は会話内の項目として見えるが、そこへ「切り替える」操作は無い
 - **検索（Ctrl+F）は折り畳んだ部分を拾わない**: コマンド出力・思考の要約の折りたたみ、`<details>` の中はDOM上非表示のため検索対象にならない。畳んでいる箇所を検索したい場合は開いてから検索する（詳細は設計書 §14.48）

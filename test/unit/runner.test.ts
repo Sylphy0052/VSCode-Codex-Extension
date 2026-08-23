@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { initialChatState, type ChatState } from '../../src/appserver/chatState';
@@ -26,6 +27,10 @@ import type {
   PullRequestLayerConfig,
 } from '../../src/orchestrator/forge';
 import { deserializeManifest, integrationPath } from '../../src/orchestrator/pseudoWorktree';
+import {
+  ORCHESTRATOR_CONNECTION_ID,
+  DEFAULT_MAX_ASK_USER_PER_RUN,
+} from '../../src/orchestrator/orchestratorSession';
 import type { RoadmapFileSystemPort } from '../../src/orchestrator/roadmap';
 import { formatPathList } from '../../src/orchestrator/runnerWorkingDirectory';
 import type {
@@ -37,6 +42,7 @@ import type {
   DispatchErrorLogPort,
   HttpMcpTransportHandle,
   OrchestratorControlPort,
+  OrchestratorControlResult,
   TaskMessagingHub,
 } from '../../src/orchestrator/messaging';
 import {
@@ -472,6 +478,31 @@ function fakeForgeCli(options?: {
   failMerge?: boolean;
   failReady?: boolean;
   prUrl?: string;
+  /** `waitForCiChecks`のCLI呼び出し自体を失敗させる（design.md §16.36、Issue #556）。 */
+  failCiStatus?: boolean;
+  /** GitHubのCI状態フェイク応答（`statusCheckRollup`の中身）。既定は空配列（CI未設定）。 */
+  ciStatusCheckRollup?: unknown[];
+  /** GitLabのCI状態フェイク応答（`head_pipeline`の中身）。既定は`null`（CI未設定）。 */
+  ciHeadPipeline?: unknown;
+  /** `updatePullRequestBranch`のCLI呼び出しを失敗させる。 */
+  failUpdateBranch?: boolean;
+  /**
+   * design.md §16.36（Issue #556）の回帰テスト用。最初の`pr merge`/`mr merge`だけ
+   * 「baseの最新でない」を示すエラーで失敗させ、`updatePullRequestBranch`を挟んだ
+   * 再試行では成功させる。
+   */
+  failMergeNotUpToDateOnce?: boolean;
+  /** design.md §16.30（Issue #339）のレビューコメント取得フェイク応答。既定は0件。 */
+  reviewComments?: {
+    github?: { reviews?: unknown[]; comments?: unknown[] };
+    gitlabNotes?: unknown[];
+  };
+  /** レビューコメント取得のCLI呼び出し自体を失敗させる。 */
+  failReviewComments?: boolean;
+  /** `createIssue`（design.md §16.31、roadmap W6、Issue #596）のCLI呼び出しを失敗させる。 */
+  failIssueCreate?: boolean;
+  /** `createIssue`が返すURL。既定は`https://github.com/acme/repo/issues/1`。 */
+  issueUrl?: string;
 }): FakeForgeCli {
   const calls: Array<{ command: string; args: string[]; cwd: string }> = [];
   return {
@@ -493,6 +524,22 @@ function fakeForgeCli(options?: {
             };
       }
       if (args[0] === 'pr' && args[1] === 'merge') {
+        // design.md §16.36（Issue #556）: 「baseの最新でない」拒否からの取り込み直しの
+        // 回帰テスト用。1回目のマージだけ拒否し、`updatePullRequestBranch`を挟んだ
+        // 2回目の再試行では成功させる
+        if (options?.failMergeNotUpToDateOnce === true) {
+          const priorMergeCalls = calls.filter(
+            (c) => c.args[0] === 'pr' && c.args[1] === 'merge',
+          ).length;
+          if (priorMergeCalls <= 1) {
+            return {
+              code: 1,
+              stdout: '',
+              stderr:
+                'GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)',
+            };
+          }
+        }
         return options?.failMerge
           ? { code: 1, stdout: '', stderr: 'fake pr merge failure' }
           : { code: 0, stdout: '', stderr: '' };
@@ -528,6 +575,104 @@ function fakeForgeCli(options?: {
         return options?.failMerge
           ? { code: 1, stdout: '', stderr: 'fake mr merge failure' }
           : { code: 0, stdout: '', stderr: '' };
+      }
+      // `waitForCiChecks`（GitHub）が呼ぶ`gh pr view <number> --json=statusCheckRollup`の
+      // フェイク応答（design.md §16.36、Issue #556）。既定はCI未設定（`statusCheckRollup: []`）
+      // として即マージへ進ませ、既存のfinalMerge系テストの前提（CIを待たず即マージする）を
+      // 崩さない。CIの完了待ちそのものを確かめるテストは`ciConclusion`オプションで上書きする
+      // `fetchReviewComments`（GitHub）が呼ぶ`gh pr view <number> --json=reviews,comments`の
+      // フェイク応答（design.md §16.30、Issue #339）。CI状態取得（`--json=statusCheckRollup`）
+      // とは第3引数の`--json=`の中身で区別する
+      if (args[0] === 'pr' && args[1] === 'view' && args[3] === '--json=reviews,comments') {
+        return options?.failReviewComments
+          ? { code: 1, stdout: '', stderr: 'fake pr view (reviews) failure' }
+          : {
+              code: 0,
+              stdout: JSON.stringify({
+                reviews: options?.reviewComments?.github?.reviews ?? [],
+                comments: options?.reviewComments?.github?.comments ?? [],
+              }),
+              stderr: '',
+            };
+      }
+      if (args[0] === 'pr' && args[1] === 'view') {
+        return options?.failCiStatus
+          ? { code: 1, stdout: '', stderr: 'fake pr view failure' }
+          : {
+              code: 0,
+              stdout: JSON.stringify({ statusCheckRollup: options?.ciStatusCheckRollup ?? [] }),
+              stderr: '',
+            };
+      }
+      // `updatePullRequestBranch`（GitHub）が呼ぶ`gh pr update-branch <number>`のフェイク応答
+      if (args[0] === 'pr' && args[1] === 'update-branch') {
+        return options?.failUpdateBranch
+          ? { code: 1, stdout: '', stderr: 'fake pr update-branch failure' }
+          : { code: 0, stdout: '', stderr: '' };
+      }
+      // `fetchReviewComments`（GitLab）が呼ぶ
+      // `glab api projects/:id/merge_requests/<iid>/notes`のフェイク応答（design.md §16.30、
+      // Issue #339）。CI状態取得（末尾に`/notes`が付かない）とはパスの形で区別する
+      if (
+        args[0] === 'api' &&
+        args[1] !== undefined &&
+        args[1].startsWith('projects/:id/merge_requests/') &&
+        args[1].endsWith('/notes')
+      ) {
+        return options?.failReviewComments
+          ? { code: 1, stdout: '', stderr: 'fake mr notes failure' }
+          : {
+              code: 0,
+              stdout: JSON.stringify(options?.reviewComments?.gitlabNotes ?? []),
+              stderr: '',
+            };
+      }
+      // `waitForCiChecks`（GitLab）が呼ぶ`glab api projects/:id/merge_requests/<iid>`の
+      // フェイク応答。MR作成（`projects/:id/merge_requests`、末尾に番号が付かない）・
+      // レビューコメント取得（末尾に`/notes`が付く。上のブロック）とはパスの形で区別する
+      if (
+        args[0] === 'api' &&
+        args[1] !== undefined &&
+        args[1] !== 'projects/:id/merge_requests' &&
+        args[1].startsWith('projects/:id/merge_requests/') &&
+        !args[1].endsWith('/notes')
+      ) {
+        return options?.failCiStatus
+          ? { code: 1, stdout: '', stderr: 'fake mr view failure' }
+          : {
+              code: 0,
+              stdout: JSON.stringify({ head_pipeline: options?.ciHeadPipeline ?? null }),
+              stderr: '',
+            };
+      }
+      // `updatePullRequestBranch`（GitLab）が呼ぶ`glab mr rebase <iid>`のフェイク応答
+      if (args[0] === 'mr' && args[1] === 'rebase') {
+        return options?.failUpdateBranch
+          ? { code: 1, stdout: '', stderr: 'fake mr rebase failure' }
+          : { code: 0, stdout: '', stderr: '' };
+      }
+      // `createIssue`（GitHub）が呼ぶ`gh issue create`のフェイク応答（design.md §16.31、
+      // roadmap W6、Issue #596）
+      if (args[0] === 'issue' && args[1] === 'create') {
+        return options?.failIssueCreate
+          ? { code: 1, stdout: '', stderr: 'fake issue create failure' }
+          : {
+              code: 0,
+              stdout: `${options?.issueUrl ?? 'https://github.com/acme/repo/issues/1'}\n`,
+              stderr: '',
+            };
+      }
+      // `createIssue`（GitLab）が呼ぶ`glab api projects/:id/issues`のフェイク応答
+      if (args[0] === 'api' && args[1] === 'projects/:id/issues') {
+        return options?.failIssueCreate
+          ? { code: 1, stdout: '', stderr: 'fake issue create failure' }
+          : {
+              code: 0,
+              stdout: `${JSON.stringify({
+                web_url: options?.issueUrl ?? 'https://gitlab.example.com/acme/repo/-/issues/1',
+              })}\n`,
+              stderr: '',
+            };
       }
       return { code: 1, stdout: '', stderr: `unhandled: ${command} ${args.join(' ')}` };
     },
@@ -684,6 +829,8 @@ function fakeForgeDeps(
     finalMerge?: FinalMergeConfig;
     branchNaming?: BranchNaming;
     draftPullRequest?: boolean;
+    createTaskIssue?: boolean;
+    reviewTaskPullRequest?: boolean;
   },
   cliAvailability: CliAvailabilityPort = fakeForgeCliAvailability,
 ): WorkflowRunnerForgeDeps {
@@ -698,6 +845,9 @@ function fakeForgeDeps(
       // 既定は`wf`/`false`。branchNaming・draftPullRequestを明示するテストだけ上書きする
       branchNaming: config?.branchNaming ?? DEFAULT_BRANCH_NAMING,
       draftPullRequest: config?.draftPullRequest ?? false,
+      // 既定は両方`false`（design.md §16.31、roadmap W6、Issue #596）。明示するテストだけ上書きする
+      createTaskIssue: config?.createTaskIssue ?? false,
+      reviewTaskPullRequest: config?.reviewTaskPullRequest ?? false,
     }),
   };
 }
@@ -896,6 +1046,13 @@ function createHarness(
     roadmap?: { fs: RoadmapFileSystemPort };
     log?: Logger;
     readMergeApprovalTimeoutSec?: () => number;
+    readFinalMergeDecisionTimeoutSec?: () => number;
+    readCiWaitTimeoutSec?: () => number;
+    readCiUpdateBranchMaxRetries?: () => number;
+    readMaxAskUserPerRun?: () => number;
+    readAutoResume?: () => boolean;
+    readMaxAutoResumeAttempts?: () => number;
+    readReviewCommentPollIntervalSec?: () => number;
   },
 ): Harness {
   const codexHost = new FakeHost();
@@ -925,6 +1082,31 @@ function createHarness(
     ...(options?.roadmap !== undefined ? { roadmap: options.roadmap } : {}),
     ...(options?.readMergeApprovalTimeoutSec !== undefined
       ? { readMergeApprovalTimeoutSec: options.readMergeApprovalTimeoutSec }
+      : {}),
+    ...(options?.readFinalMergeDecisionTimeoutSec !== undefined
+      ? { readFinalMergeDecisionTimeoutSec: options.readFinalMergeDecisionTimeoutSec }
+      : {}),
+    ...(options?.readCiWaitTimeoutSec !== undefined
+      ? { readCiWaitTimeoutSec: options.readCiWaitTimeoutSec }
+      : {}),
+    ...(options?.readCiUpdateBranchMaxRetries !== undefined
+      ? { readCiUpdateBranchMaxRetries: options.readCiUpdateBranchMaxRetries }
+      : {}),
+    ...(options?.readMaxAskUserPerRun !== undefined
+      ? { readMaxAskUserPerRun: options.readMaxAskUserPerRun }
+      : {}),
+    // 自動再開（design.md §16.35、roadmap W10、Issue #584）の既定は本番では`true`だが、
+    // ここ（共有テストハーネス）では`false`を既定にする。本番の既定値を素直に継承すると、
+    // このハーネスへ依存する既存の「リロード後の実行再開」系テスト（`reloadedRunner`を
+    // 使わずこの`createHarness`経由で`restoreRunsForView()`を呼ぶもの）が軒並み自動再開の
+    // 影響を受けて意図せず挙動が変わるため、明示的に上書きしない限り無効のままにする
+    // （新しく自動再開そのものを確かめるテストは`options.readAutoResume`で個別に有効化する）
+    readAutoResume: options?.readAutoResume ?? (() => false),
+    ...(options?.readMaxAutoResumeAttempts !== undefined
+      ? { readMaxAutoResumeAttempts: options.readMaxAutoResumeAttempts }
+      : {}),
+    ...(options?.readReviewCommentPollIntervalSec !== undefined
+      ? { readReviewCommentPollIntervalSec: options.readReviewCommentPollIntervalSec }
       : {}),
     randomId: () => `00000000-0000-4000-8000-${String((seq += 1)).padStart(12, '0')}`,
   });
@@ -1494,6 +1676,10 @@ tasks:
 
       // 新しいプロセス（リロード後）を模す。復元だけなのでライブなセッションは無い
       const reloadedRunner = new WorkflowRunner({
+        // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+        // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+        // （design.md §16.35、roadmap W10、Issue #584）
+        readAutoResume: () => false,
         hosts: { codex: new FakeHost(), claude: new FakeHost() },
         worktreeQueue: new WorktreeCreationQueue(),
         git: fakeGit(),
@@ -2630,6 +2816,10 @@ tasks:
       claude: newCodexHost,
     };
     const reloadedRunner = new WorkflowRunner({
+      // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+      // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+      // （design.md §16.35、roadmap W10、Issue #584）
+      readAutoResume: () => false,
       hosts: newHosts,
       worktreeQueue: new WorktreeCreationQueue(),
       git: fakeGit(),
@@ -2691,6 +2881,10 @@ tasks:
       // 新しいプロセス（リロード後）を模す
       const newCodexHost = new FakeHost();
       const reloadedRunner = new WorkflowRunner({
+        // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+        // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+        // （design.md §16.35、roadmap W10、Issue #584）
+        readAutoResume: () => false,
         hosts: { codex: newCodexHost, claude: newCodexHost },
         worktreeQueue: new WorktreeCreationQueue(),
         git: fakeGit(),
@@ -2744,6 +2938,10 @@ tasks:
       readTextFile: async () => YAML,
     };
     const reloadedRunner = new WorkflowRunner({
+      // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+      // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+      // （design.md §16.35、roadmap W10、Issue #584）
+      readAutoResume: () => false,
       hosts: { codex: new FakeHost(), claude: new FakeHost() },
       worktreeQueue: new WorktreeCreationQueue(),
       git: fakeGit(),
@@ -2776,6 +2974,10 @@ tasks:
       readTextFile: async () => undefined,
     };
     const reloadedRunner = new WorkflowRunner({
+      // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+      // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+      // （design.md §16.35、roadmap W10、Issue #584）
+      readAutoResume: () => false,
       hosts: { codex: new FakeHost(), claude: new FakeHost() },
       worktreeQueue: new WorktreeCreationQueue(),
       git: fakeGit(),
@@ -3698,6 +3900,212 @@ tasks:
     void result;
   });
 
+  it('CIチェックの完了を待ってから最終マージする（design.md §16.36、Issue #556）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli({
+      ciStatusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }],
+    });
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // `gh pr view <統合PR番号> --json=statusCheckRollup`（CI確認）が
+    // `gh pr merge`より前に呼ばれている
+    const viewIndex = cli.calls.findIndex((c) => c.args[0] === 'pr' && c.args[1] === 'view');
+    const mergeIndex = cli.calls.findIndex((c) => c.args[0] === 'pr' && c.args[1] === 'merge');
+    expect(viewIndex).toBeGreaterThanOrEqual(0);
+    expect(mergeIndex).toBeGreaterThan(viewIndex);
+  });
+
+  it('CIが赤ならmainへマージせず、理由付きの警告を残してfinalMergeOutcomeがfailedになる（design.md §16.36）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli({
+      ciStatusCheckRollup: [{ status: 'COMPLETED', conclusion: 'FAILURE' }],
+    });
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // CIが赤のためマージコマンド自体を呼ばない
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.finalMergeOutcome).toBe('failed');
+    expect(snapshot?.warnings.some((w) => w.message.includes('最終マージに失敗しました'))).toBe(
+      true,
+    );
+  });
+
+  it('マージが「baseの最新でない」ことで拒否されたら取り込み直して再試行し、成功すればmergedになる（design.md §16.36）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli({
+      ciStatusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }],
+      failMergeNotUpToDateOnce: true,
+    });
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const mergeCalls = cli.calls.filter((c) => c.args[0] === 'pr' && c.args[1] === 'merge');
+    const updateBranchCalls = cli.calls.filter(
+      (c) => c.args[0] === 'pr' && c.args[1] === 'update-branch',
+    );
+    expect(mergeCalls.length).toBe(2);
+    expect(updateBranchCalls.length).toBe(1);
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.finalMergeOutcome).toBe('merged');
+  });
+
+  describe('全体の停止（haltedByUser）はCI待ちの区間も守る（design.md §16.36、セキュリティ監査の指摘。2026-08-23）', () => {
+    /**
+     * `FakeForgeCli`の呼び出しに副作用（`onCall`）を差し込むための薄いラッパー。
+     * `waitForCiChecks`がCI状態を実際に取得している最中に人が「全体の停止」を押した、
+     * という状況を`runner.stop()`の呼び出しとして模すために使う。`calls`は元のフェイクの
+     * ものをそのまま共有する（ラッパー自身は呼び出しを記録しない）。
+     */
+    function wrapCliWithSideEffect(
+      base: FakeForgeCli,
+      onCall: (command: string, args: readonly string[]) => void,
+    ): FakeForgeCli {
+      return {
+        calls: base.calls,
+        async run(command, args, cwd) {
+          const result = await base.run(command, args, cwd);
+          onCall(command, args);
+          return result;
+        },
+      };
+    }
+
+    it('finalMerge: autoでも、統合PR/MR作成の完了時点で既に「全体の停止」が押されていれば最終マージを試みない（旧: auto経路はperformFinalMergeの前にhaltedByUserを見ていなかった。兄弟の穴）', async () => {
+      // レビュー指摘（2026-08-23）: `pr view`/`pr merge`が呼ばれないことだけを見る形では、
+      // `performFinalMerge`入口のガード（`runner.ts`）と`runFinalMergeWithCiGate`へ渡す
+      // `isCancelled`（`forge.ts`）が同じ`haltedByUser`を見るため、入口のガード**だけ**を
+      // 消してもこのテストは通過したまま赤くならない（2重の防御の片方がもう片方をマスクする。
+      // design.md §16.25の確認事項6）。`isCancelled`はCIゲート（`runFinalMergeWithCiGate`）の
+      // 内側でしか働かないため、それより手前で起きる副作用を観測点にすれば入口ガードだけを
+      // 検証できる。`draftPullRequest: true`にすると、`performFinalMerge`は入口ガードの直後・
+      // `runFinalMergeWithCiGate`を呼ぶよりも前に統合PR/MRのready化（`gh pr ready <number>`）を
+      // 行う（design.md §16.18）。入口ガードが効いていれば`pr ready`は一度も呼ばれない。
+      // 入口ガードだけを消すと（`isCancelled`はまだ効かない箇所のため）`pr ready`が呼ばれて
+      // しまい、このテストが赤くなる
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      const cli = fakeForgeCli({
+        ciStatusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }],
+      });
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { draftPullRequest: true }),
+      });
+      const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      // T1が終わってfinalizeForge（`finalMerge: auto`の経路）が走る前に、人が
+      // 「全体の停止」を押した、という状況を模す
+      runner.stop(runId);
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // `pr ready`は、pullRequest: per-task（既定）のタスク層自身のPRready化
+      // （`runnerMerge.ts`の`buildMarkTaskPullRequestReady`。T1の統合ブランチへの取り込み時に
+      // 呼ばれ、`haltedByUser`とは無関係な既存の挙動）で1回はどうしても呼ばれてしまう。
+      // 入口ガードが効いていれば、統合PR/MRぶんの2回目の`pr ready`（`performFinalMerge`）は
+      // 呼ばれないため、合計はちょうど1回にとどまる。入口ガードだけを消すと2回になり赤くなる
+      const readyCalls = cli.calls.filter((c) => c.args[0] === 'pr' && c.args[1] === 'ready');
+      expect(readyCalls).toHaveLength(1);
+      // CIの完了待ち・マージコマンドのいずれも一度も呼ばれない（統合PR/MRの作成自体・
+      // レビューコメントのポーリング開始（design.md §16.30、Issue #339）は
+      // `haltedByUser`と無関係に走る既存/新規の仕様のため、ここでは確認しない。
+      // `--json=statusCheckRollup`（CI状態）を`--json=reviews,comments`
+      // （レビューコメント）と区別して、CI待ちだけを狙って確認する
+      expect(
+        cli.calls.some(
+          (c) => c.args[0] === 'pr' && c.args[1] === 'view' && c.args[3] === '--json=statusCheckRollup',
+        ),
+      ).toBe(false);
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+      const snapshot = runner.getSnapshot(runId);
+      expect(snapshot?.finalMergeOutcome).toBe('failed');
+      expect(
+        snapshot?.warnings.some((w) =>
+          w.message.includes('人が停止したため最終マージを中止しました'),
+        ),
+      ).toBe(true);
+    });
+
+    it('CI待ちの最中に「全体の停止」を押すと、その後CIが緑だと分かってもpr mergeは一度も呼ばれない', async () => {
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      const baseCli = fakeForgeCli({
+        ciStatusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }],
+      });
+      const ref: { runner?: WorkflowRunner; runId?: string } = {};
+      const cli = wrapCliWithSideEffect(baseCli, (command, args) => {
+        if (
+          command === 'gh' &&
+          args[0] === 'pr' &&
+          args[1] === 'view' &&
+          ref.runner !== undefined &&
+          ref.runId !== undefined
+        ) {
+          // CI状態（`gh pr view --json=statusCheckRollup`）を実際に取得している最中に
+          // 人が「全体の停止」を押した、という状況を模す
+          ref.runner.stop(ref.runId);
+        }
+      });
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli),
+      });
+      const result = await runner.start('/repo/.agents/workflows/forge.yaml', '/repo');
+      ref.runner = runner;
+      ref.runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // CI状態そのものは取得している（`isCancelled`は`pr view`を呼ぶ前に確認するため、
+      // 呼び出しの直後に停止しても取得自体は妨げない）。CIが緑と分かった直後の
+      // 停止確認（マージ直前のチェックポイント）でマージへ進まない、という点を確かめる
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'view')).toBe(true);
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+      const snapshot = runner.getSnapshot(ref.runId as string);
+      expect(snapshot?.finalMergeOutcome).toBe('failed');
+      expect(
+        snapshot?.warnings.some((w) =>
+          w.message.includes('人が停止したため最終マージを中止しました'),
+        ),
+      ).toBe(true);
+    });
+  });
+
   it('finalMerge: pr-onlyなら統合PR/MRは作るがmainへはマージしない', async () => {
     const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
     const cli = fakeForgeCli();
@@ -3817,6 +4225,469 @@ tasks:
       const snapshot = runner.getSnapshot(runId);
       const warning = snapshot?.warnings.find((w) => w.kind === 'forgeFailed');
       expect(warning?.message).toContain('番号が不明');
+    },
+  );
+});
+
+describe('WorkflowRunner: レビューコメントの取り込み（design.md §16.30、roadmap W5、Issue #339）', () => {
+  const SINGLE_TASK_YAML = `
+version: 1
+name: review-comment-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it(
+    '統合PR/MRにレビューコメントが付くと、警告欄へ全文で記録され' +
+      'オーケストレーターへも通知される（本番の呼び出し経路: finalizeForge→' +
+      'startReviewCommentPoll→setIntervalの発火→pollReviewComments）',
+    async () => {
+      vi.useFakeTimers();
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+      const cli = fakeForgeCli({
+        reviewComments: {
+          github: {
+            comments: [
+              {
+                databaseId: 55,
+                author: { login: 'reviewer1' },
+                body: 'ここを直してください',
+                createdAt: '2026-08-23T00:00:00Z',
+              },
+            ],
+          },
+        },
+      });
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli),
+        readReviewCommentPollIntervalSec: () => 60,
+      });
+      const result = await runner.start('/repo/.agents/workflows/review.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      // `startReviewCommentPoll`は立てた直後にも1度取得する（次の周期まで待たせない）ため、
+      // タイマーを進めなくても最初の1件はここまでで届く
+      const snapshot = runner.getSnapshot(runId);
+      const warning = snapshot?.warnings.find((w) => w.kind === 'reviewCommentImported');
+      expect(warning?.message).toContain('reviewer1');
+      expect(warning?.message).toContain('ここを直してください');
+
+      // オーケストレーターへも`reviewComment`イベントとして届く（`taskMessage`/
+      // `taskQuestion`と同じ`<workflow-event>`の囲い。design.md §16.23・§16.24）
+      const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+      orchestrator.emitState({ ...initialChatState, busy: true });
+      orchestrator.emitState({ ...initialChatState, busy: false });
+      const last = orchestrator.sentTexts[orchestrator.sentTexts.length - 1] as string;
+      expect(last).toContain('kind="reviewComment"');
+      expect(last).toContain('reviewer1');
+      expect(last).toContain('ここを直してください');
+    },
+  );
+
+  it('同じコメントは2周目のポーリングで重複して取り込まない（idで重複排除）', async () => {
+    vi.useFakeTimers();
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli({
+      reviewComments: {
+        github: {
+          comments: [
+            { databaseId: 1, author: { login: 'reviewer1' }, body: '直して', createdAt: '2026-08-23T00:00:00Z' },
+          ],
+        },
+      },
+    });
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+      readReviewCommentPollIntervalSec: () => 60,
+    });
+    const result = await runner.start('/repo/.agents/workflows/review.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    expect(
+      runner.getSnapshot(runId)?.warnings.filter((w) => w.kind === 'reviewCommentImported'),
+    ).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flush();
+
+    // 同じコメント（同じid）は2周目でも増えない
+    expect(
+      runner.getSnapshot(runId)?.warnings.filter((w) => w.kind === 'reviewCommentImported'),
+    ).toHaveLength(1);
+  });
+
+  it('agent.workflows.reviewCommentPollIntervalSecが0ならレビューコメントを取得しない', async () => {
+    vi.useFakeTimers();
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli({
+      reviewComments: {
+        github: {
+          comments: [{ databaseId: 1, author: { login: 'reviewer1' }, body: '直して' }],
+        },
+      },
+    });
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+      readReviewCommentPollIntervalSec: () => 0,
+    });
+    const result = await runner.start('/repo/.agents/workflows/review.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(cli.calls.some((c) => c.args[3] === '--json=reviews,comments')).toBe(false);
+    expect(
+      runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'reviewCommentImported'),
+    ).toBe(false);
+  });
+
+  it(
+    'レビューコメント取得のCLI呼び出しが失敗しても、警告を出すだけでrunを止めない' +
+      '（design.md §16.18「前提が欠けている場合」と同じ、runを止めない方針）',
+    async () => {
+      vi.useFakeTimers();
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+      const cli = fakeForgeCli({ failReviewComments: true });
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli),
+        readReviewCommentPollIntervalSec: () => 60,
+      });
+      const result = await runner.start('/repo/.agents/workflows/review.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      const snapshot = runner.getSnapshot(runId);
+      expect(snapshot?.outcome).toBe('succeeded');
+      expect(snapshot?.warnings.some((w) => w.kind === 'reviewCommentImported')).toBe(false);
+    },
+  );
+
+  it(
+    '最終マージが確定した後（finalMerge: auto）は、レビューコメント取得CLIの' +
+      'ポーリングが止まる（3度目のレビューblocking指摘の回帰: 以前は`performFinalMerge`' +
+      '完了後もタイマーが動き続け、VSCodeを閉じるまでAPIを叩き続けていた。本番の呼び出し' +
+      '経路: performFinalMergeがfinalMergeOutcomeを確定させる1点でcloseReviewCommentPoll' +
+      'を直接呼ぶ）',
+    async () => {
+      vi.useFakeTimers();
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+      const cli = fakeForgeCli({
+        reviewComments: {
+          github: {
+            comments: [
+              { databaseId: 1, author: { login: 'reviewer1' }, body: '対応済みです' },
+            ],
+          },
+        },
+      });
+      // `readReviewCommentPollIntervalSec`を敢えて指定せず、既定値
+      // （`DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC` = 600秒）で計測する
+      // （コーディネーターの実測と同じ条件）
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli),
+      });
+      const result = await runner.start('/repo/.agents/workflows/review.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // finalMerge: auto（既定）なので、ここまでで最終マージは確定している
+      expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBe('merged');
+      const pollCall = (c: { args: readonly string[] }) => c.args[3] === '--json=reviews,comments';
+      const before = cli.calls.filter(pollCall).length;
+      // `startReviewCommentPoll`は立てた直後にも1度取得するため、この時点で最低1回は
+      // 呼ばれている
+      expect(before).toBeGreaterThanOrEqual(1);
+
+      // 既定の間隔（600秒）× 10周期ぶんタイマーを進める（コーディネーターの実測と同じ条件）
+      await vi.advanceTimersByTimeAsync(600_000 * 10);
+      await flush();
+
+      const after = cli.calls.filter(pollCall).length;
+      // 最終マージ確定後はポーリングのタイマー自体が閉じているため、10周期進めても
+      // 呼び出し回数は増えない（以前は`before`から`+10`まで増え続けていた）
+      expect(after).toBe(before);
+      expect(store.find(runId)?.finalMergeOutcome).toBe('merged');
+    },
+  );
+
+  it(
+    'finalMerge: pr-onlyでrunがsucceededで終わった後も、レビューコメント取得CLIの' +
+      'ポーリングは意図的に生きたまま（`finalMergeOutcome`が確定しないため）で、' +
+      '呼び出し回数はタイマーを進めるほど増え続ける（design.md §16.30' +
+      '「finalMerge: \'pr-only\'ではポーリングを閉じない」の意図をテストで固定する。' +
+      'これが将来\'閉じる\'方向に変わったらこのテストが気づく）',
+    async () => {
+      vi.useFakeTimers();
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+      const cli = fakeForgeCli({
+        reviewComments: {
+          github: {
+            comments: [
+              { databaseId: 1, author: { login: 'reviewer1' }, body: '対応済みです' },
+            ],
+          },
+        },
+      });
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { finalMerge: 'pr-only' }),
+      });
+      const result = await runner.start('/repo/.agents/workflows/review.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // finalMerge: pr-onlyはperformFinalMergeを一切通らないため、runがsucceededで
+      // 終わった後もfinalMergeOutcomeは確定しない
+      expect(runner.getSnapshot(runId)?.outcome).toBe('succeeded');
+      expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBeUndefined();
+      const pollCall = (c: { args: readonly string[] }) => c.args[3] === '--json=reviews,comments';
+      const before = cli.calls.filter(pollCall).length;
+      expect(before).toBeGreaterThanOrEqual(1);
+
+      // 既定の間隔（600秒）× 10周期ぶんタイマーを進める
+      await vi.advanceTimersByTimeAsync(600_000 * 10);
+      await flush();
+
+      const after = cli.calls.filter(pollCall).length;
+      // finalMergeOutcomeが確定しないため閉じ口（performFinalMerge・
+      // closeMessagingIfFinalMergeSettled）のどれにも到達せず、ポーリングは開いたまま
+      // 呼び出し回数が増え続ける（意図的な挙動。design.md参照）
+      expect(after).toBeGreaterThan(before);
+      expect(store.find(runId)?.finalMergeOutcome).toBeUndefined();
+    },
+  );
+
+  it(
+    '最終マージが確定済み（finalMerge: auto。既にmainへマージ済み）の後にレビューコメントが' +
+      '届いても、add_taskは理由付きで拒否される（2度目のレビューblocking指摘の回帰:' +
+      '追加したタスクの成果が統合ブランチには積まれるのにmainへは二度と届かない、という' +
+      '乖離を黙って許してはならない。本番の呼び出し経路: finalizeForgeが' +
+      'performFinalMergeまで完了しlive.finalMergeOutcomeが確定した後、' +
+      'planChangeFinishedReasonがreviewCommentPollの生死とは別にfinalMergeOutcomeを見て拒否する）',
+    async () => {
+      vi.useFakeTimers();
+      const { deps: messaging, state } = fakeMessagingDeps();
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+      const cli = fakeForgeCli({
+        reviewComments: {
+          github: {
+            comments: [
+              { databaseId: 1, author: { login: 'reviewer1' }, body: '追加対応してください' },
+            ],
+          },
+        },
+      });
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli),
+        messaging,
+        readReviewCommentPollIntervalSec: () => 60,
+      });
+      const result = await runner.start('/repo/.agents/workflows/review.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // runは既に終了扱い（統合PR/MR作成・最終マージまで完了）。レビューコメント自体は
+      // 届いて警告欄へ記録されるが、最終マージが確定した時点でポーリングは既に閉じている
+      // （`performFinalMerge`が`closeReviewCommentPoll`を直接呼ぶ。design.md §16.30
+      // 「レビューコメントのポーリングを最終マージ確定の1点で閉じる」参照）
+      expect(runner.getSnapshot(runId)?.outcome).toBe('succeeded');
+      expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBe('merged');
+      expect(
+        runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'reviewCommentImported'),
+      ).toBe(true);
+
+      const port = state.hub?.orchestratorControl;
+      if (port === undefined) {
+        throw new Error('制御ツールが配線されていません');
+      }
+      const addResult = port.addTask({ id: 'T2', prompt: 'p2', done: 'd2', dependsOn: [] });
+
+      // 最終マージ確定後は拒否し、理由をオーケストレーターへ返す（黙って乖離させない）。
+      // ポーリングが既に閉じているため、ここでは`planChangeFinishedReason`の基本経路
+      // （`runFinishedReason`と同じ「run終了」の理由）で拒否される。`live.finalMergeOutcome`
+      // ベースの専用の理由文は、ポーリングを閉じ損なう経路が万一残っていた場合の多層防御
+      // であり、その経路は下の回帰テスト（`finalMergeOutcome`の判定を`if (false)`へ戻す）
+      // で別途確かめる
+      expect(addResult.accepted).toBe(false);
+      if (addResult.accepted) {
+        throw new Error('unreachable');
+      }
+      expect(addResult.reason).toContain('終了しています');
+
+      // 拒否されたのでrunは走行中へ戻らず、T2も一切作られない
+      expect(runner.getSnapshot(runId)?.outcome).toBe('succeeded');
+      expect(store.find(runId)?.tasks['T2']).toBeUndefined();
+
+      // 統合PR/MRは1回しか作られておらず、mainへのマージも1回のまま
+      const integrationCreateCalls = cli.calls.filter(
+        (c) =>
+          c.args[0] === 'pr' &&
+          c.args[1] === 'create' &&
+          c.args.some((a) => a.startsWith('--base=main')),
+      );
+      expect(integrationCreateCalls).toHaveLength(1);
+      const finalMergeCalls = cli.calls.filter(
+        (c) => c.args[0] === 'pr' && c.args[1] === 'merge',
+      );
+      expect(finalMergeCalls).toHaveLength(1);
+    },
+  );
+
+  it(
+    '最終マージがまだ確定していない間（finalMerge: orchestrator、判断待ち）にレビュー' +
+      'コメントが届いた場合はadd_taskが通り、追加したタスクは実際にスケジュールされて' +
+      '完走し、その後の最終マージ確定（decideFinalMerge(merge)）でT2の成果を含めて' +
+      'mainへ1回だけマージされる（Issue #339 blocking指摘の回帰: 「gateの先」＝通知だけで' +
+      '終わらせず、成果が実際にmainへ届くところまで確かめる）',
+    async () => {
+      vi.useFakeTimers();
+      const { deps: messaging, state } = fakeMessagingDeps();
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+      const cli = fakeForgeCli({
+        reviewComments: {
+          github: {
+            comments: [
+              { databaseId: 1, author: { login: 'reviewer1' }, body: '追加対応してください' },
+            ],
+          },
+        },
+      });
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+        messaging,
+        readReviewCommentPollIntervalSec: () => 60,
+      });
+      const result = await runner.start('/repo/.agents/workflows/review.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // 統合PR/MRは作られているが、最終マージの判断はまだ付いていない
+      // （finalMerge: orchestrator。design.md §16.26）。この判断待ちの間だけMCPサーバーも
+      // レビューコメントのポーリングも生きている
+      expect(runner.getSnapshot(runId)?.outcome).toBe('succeeded');
+      expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBeUndefined();
+      expect(runner.getSnapshot(runId)?.finalMergeDecision).toMatchObject({ mode: 'orchestrator' });
+      expect(
+        runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'reviewCommentImported'),
+      ).toBe(true);
+
+      const port = state.hub?.orchestratorControl;
+      if (port === undefined) {
+        throw new Error('制御ツールが配線されていません');
+      }
+      const addResult = port.addTask({ id: 'T2', prompt: 'p2', done: 'd2', dependsOn: [] });
+      expect(addResult.accepted).toBe(true);
+
+      // 追加直後、runは走行中へ戻る（`getRunOutcome`はpendingが1件でもあれば'running'を
+      // 返す。design.md §16.30「レビューコメントを受けた計画変更」）
+      expect(runner.getSnapshot(runId)?.outcome).toBe('running');
+
+      await flush();
+      const t2 = codexHost.byTaskId('T2');
+      t2.finish('done', doneState('ok2'));
+      await flush();
+
+      expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+      expect(runner.getSnapshot(runId)?.outcome).toBe('succeeded');
+      // T2が加わった後も最終マージの判断はまだ付いていない
+      // （finalizeForgeの冪等ガードで2回目の統合PR/MR作成・判断待ち開始は起きない）
+      expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBeUndefined();
+      expect(runner.getSnapshot(runId)?.finalMergeDecision).toMatchObject({ mode: 'orchestrator' });
+
+      // 統合PR/MRの作成は1回のまま（`finalizeForge`の冪等ガード）
+      const integrationCreateCalls = cli.calls.filter(
+        (c) =>
+          c.args[0] === 'pr' &&
+          c.args[1] === 'create' &&
+          c.args.some((a) => a.startsWith('--base=main')),
+      );
+      expect(integrationCreateCalls).toHaveLength(1);
+
+      // T1・T2それぞれの統合ブランチへの取り込み（タスク層マージ）が実際に走っている
+      // ことを確認する。これがT2の成果が統合ブランチへ入っている証跡
+      const taskMergeCalls = git.calls.filter(
+        (c) => c.args[0] === 'merge' && c.args.some((a) => typeof a === 'string' && a.includes('-m')),
+      );
+      const t1Merged = taskMergeCalls.some((c) =>
+        c.args.some((a) => typeof a === 'string' && a.includes('T1')),
+      );
+      const t2Merged = taskMergeCalls.some((c) =>
+        c.args.some((a) => typeof a === 'string' && a.includes('T2')),
+      );
+      expect(t1Merged).toBe(true);
+      expect(t2Merged).toBe(true);
+
+      // ここで初めて最終マージを確定する。T2の成果を含む統合ブランチがmainへ1回だけ
+      // マージされることを確かめる（「gateの先」まで進めた検証）
+      const accepted = runner.decideFinalMerge(runId, 'merge', 'レビュー対応も含めて確認済み');
+      await flush();
+
+      expect(accepted).toBe(true);
+      expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBe('merged');
+      const finalMergeCalls = cli.calls.filter(
+        (c) => c.args[0] === 'pr' && c.args[1] === 'merge',
+      );
+      expect(finalMergeCalls).toHaveLength(1);
+
+      // 適用した内容が警告欄へ全文で残る（W4と同じ経路、design.md §16.29）
+      const added = runner
+        .getSnapshot(runId)
+        ?.warnings.find((w) => w.kind === 'orchestratorTaskAdded');
+      expect(added?.message).toContain('T2');
+
+      // 判断が確定したのでMCPサーバー・レビューコメントのポーリングは閉じる
+      expect(state.handle?.closed).toBe(true);
     },
   );
 });
@@ -4404,6 +5275,10 @@ tasks:
     // 同じstoreを共有する新しいWorkflowRunnerインスタンス（ウィンドウのリロードを模す）
     const reloadedHost = new FakeHost();
     const reloadedRunner = new WorkflowRunner({
+      // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+      // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+      // （design.md §16.35、roadmap W10、Issue #584）
+      readAutoResume: () => false,
       hosts: { codex: reloadedHost, claude: reloadedHost },
       worktreeQueue: new WorktreeCreationQueue(),
       git,
@@ -4428,6 +5303,244 @@ tasks:
     expect(task?.hasLiveSession).toBe(false);
     expect(task?.pullRequestUrl).toBe('https://github.com/acme/repo/pull/9');
     expect(snapshot?.integrationPullRequestUrl).toBe('https://github.com/acme/repo/pull/9');
+  });
+});
+
+describe('WorkflowRunner: タスクのIssue起票（design.md §16.31、roadmap W6、Issue #596）', () => {
+  const SINGLE_TASK_YAML = `
+version: 1
+name: task-issue-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+  /**
+   * `fakeForgeDeps`の`fs`は本文を捨てるので、本文そのものを確かめたいときだけ差し替える
+   * （`WorkflowRunner: PR/MRの結果の保持...`describeの同名関数と同じ実装）。
+   */
+  function captureForgeBodies(deps: WorkflowRunnerForgeDeps): {
+    deps: WorkflowRunnerForgeDeps;
+    bodies: string[];
+  } {
+    const bodies: string[] = [];
+    return {
+      bodies,
+      deps: {
+        ...deps,
+        fs: {
+          async writeTempFile(content: string): Promise<string> {
+            bodies.push(content);
+            return '/tmp/fake-forge-body.md';
+          },
+          async removeTempFile(): Promise<void> {
+            return undefined;
+          },
+        },
+      },
+    };
+  }
+
+  it('既定（createTaskIssue: false）ではIssueを起票しない', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    await runner.start('/repo/.agents/workflows/task-issue.yaml', '/repo');
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    expect(cli.calls.some((c) => c.args[0] === 'issue' && c.args[1] === 'create')).toBe(false);
+  });
+
+  it('createTaskIssue: trueなら、タスク開始時にIssueを起票しPR本文から参照する', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli({ issueUrl: 'https://github.com/acme/repo/issues/99' });
+    const captured = captureForgeBodies(fakeForgeDeps(cli, { createTaskIssue: true }));
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: captured.deps,
+    });
+    await runner.start('/repo/.agents/workflows/task-issue.yaml', '/repo');
+    await flush();
+
+    // Issueの起票はタスク開始時（セッションを開く前後）に行われる。ここでは開始済み
+    // （セッションが立ち上がっている）ことをもって「タスク開始後」を確認する
+    expect(cli.calls.some((c) => c.args[0] === 'issue' && c.args[1] === 'create')).toBe(true);
+    const createCall = cli.calls.find((c) => c.args[0] === 'issue' && c.args[1] === 'create');
+    expect(createCall?.args.some((a) => a === '--title=T1: p1')).toBe(true);
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    // Issueの番号（URLから取り出した99）がPR本文から参照される
+    expect(captured.bodies.some((body) => body.includes('#99'))).toBe(true);
+  });
+
+  it('pullRequest: integration（per-task以外）ではcreateTaskIssue: trueでも起票しない', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { createTaskIssue: true, pullRequest: 'integration' }),
+    });
+    await runner.start('/repo/.agents/workflows/task-issue.yaml', '/repo');
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    expect(cli.calls.some((c) => c.args[0] === 'issue' && c.args[1] === 'create')).toBe(false);
+  });
+
+  it('YAML側で既にissueが指定されているタスクは、createTaskIssue: trueでも起票しない', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli();
+    const YAML_WITH_ISSUE = `
+version: 1
+name: task-issue-existing-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+    issue: 12
+`;
+    const { runner, codexHost } = createHarness(YAML_WITH_ISSUE, {
+      git,
+      forge: fakeForgeDeps(cli, { createTaskIssue: true }),
+    });
+    await runner.start('/repo/.agents/workflows/task-issue-existing.yaml', '/repo');
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    expect(cli.calls.some((c) => c.args[0] === 'issue' && c.args[1] === 'create')).toBe(false);
+  });
+
+  it('Issueの起票が失敗しても、runは止めず警告を出すだけでタスクは完了する', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli({ failIssueCreate: true });
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { createTaskIssue: true }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/task-issue.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.warnings.some((w) => w.kind === 'taskIssueFailed')).toBe(true);
+    // PR/MR自体は通常どおり作られる（Issueが起票できなくてもPR/MR作成は止めない）
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'create')).toBe(true);
+  });
+
+  /**
+   * `maybeCreateTaskIssue`の呼び出し位置は、`prepareTaskLaunch`内のbypassPermissions
+   * 最終防御（`if (task.provider === 'claude' && effective.config.approvalMode ===
+   * 'bypassPermissions' && !baseline.allowClaudeBypassPermissions) { throw ... }`）より
+   * **後**でなければならない（レビュー指摘）。先に呼ぶと、「危険判定が働かない設定なので
+   * 開始できません」と拒否したタスクについても、外部ホストへIssueだけが起票されたまま
+   * 残ってしまう。
+   *
+   * この不変条件は、実行時の呼び出し順序としては直接検証できない。`buildEffectiveTaskConfig`
+   * （唯一のクランプ入口、design.md §16.16）が`bypassPermissions`を必ず`acceptEdits`へ
+   * 読み替える（`baseline.allowClaudeBypassPermissions`が有効なときを除くが、その場合は
+   * throw自体の条件`!baseline.allowClaudeBypassPermissions`を満たさずthrowが起きない）ため、
+   * このthrow分岐は現在の唯一の正規経路（`buildEffectiveTaskConfig`経由）からは到達し得ない
+   * 多層防御であり、単体テストの中で実際にthrowを起こす前提を作れない
+   * （`taskConfig.ts`のコメント「通常この分岐へは入らない」のとおり）。
+   *
+   * そのため、ソースの並び順そのもの（`maybeCreateTaskIssue(`の呼び出しが、throwの本文
+   * （実効approvalModeがbypassPermissionsのため、のエラーメッセージ）より後に現れること）
+   * を機械的に固定する。呼び出し位置を元（`resolveWorkingDirectory`の直後）へ戻すと、
+   * このテストは失敗する（§16.25 #8で実測済み。最終報告に貼る）。
+   */
+  it('maybeCreateTaskIssueの呼び出しは、bypassPermissionsの最終防御より後のソース位置にある', () => {
+    const source = readFileSync(
+      path.resolve(__dirname, '../../src/orchestrator/runner.ts'),
+      'utf8',
+    );
+    const throwIndex = source.indexOf(
+      '実効approvalModeがbypassPermissionsのため、このタスクは開始できません',
+    );
+    const callIndex = source.indexOf('await this.maybeCreateTaskIssue(');
+    expect(throwIndex).toBeGreaterThan(0);
+    expect(callIndex).toBeGreaterThan(0);
+    expect(callIndex).toBeGreaterThan(throwIndex);
+  });
+});
+
+describe('WorkflowRunner: タスクPR/MRのレビュー段（design.md §16.31、roadmap W6、Issue #596）', () => {
+  const SINGLE_TASK_YAML = `
+version: 1
+name: task-review-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+  it('既定（reviewTaskPullRequest: false）ではレビューセッションを開かない', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli),
+    });
+    await runner.start('/repo/.agents/workflows/task-review.yaml', '/repo');
+    await flush();
+    // タスク本体のセッションが1つ開いた時点
+    const openCountBeforeFinish = codexHost.openInputs.length;
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    // タスク本体のセッション以外に、レビュー用の追加セッションは開かれない
+    expect(codexHost.openInputs.length).toBe(openCountBeforeFinish);
+  });
+
+  it('reviewTaskPullRequest: trueなら、PR/MR作成後・マージ前に読み取り専用セッションでレビューする', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { reviewTaskPullRequest: true }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/task-review.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    // タスク本体のセッションが1つ開いた時点
+    const openCountBeforeFinish = codexHost.openInputs.length;
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    // レビュー用の読み取り専用セッションが1つ追加で開かれている
+    // （`buildPlannerSessionInput`と同じ形。design.md §16.28と同じ「起動設定で読み取り
+    // 専用を担保する」方式）
+    expect(codexHost.openInputs.length).toBe(openCountBeforeFinish + 1);
+    const reviewInput = codexHost.openInputs[codexHost.openInputs.length - 1];
+    expect(reviewInput?.sandbox).toBe('read-only');
+
+    // レビューセッションは`sendSingleTurn`で1ターンの応答を待っている状態なので、
+    // ここで応答を返して完了させる（指摘なし＝空配列）
+    const reviewSession = codexHost.sessions[codexHost.sessions.length - 1];
+    reviewSession?.finish('done', doneState('[]'));
+    await flush();
+
+    // レビューを挟んでもタスクは最終的に完了する（マージを止めない）
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
   });
 });
 
@@ -5036,9 +6149,7 @@ tasks:
         expect.stringContaining('実行状態の永続化に失敗しました'),
       );
       // Issue #379: ログだけでなく`live.warnings`（Viewの警告欄）へも記録される
-      const warning = runner
-        .getSnapshot(runId)
-        ?.warnings.find((w) => w.kind === 'persistFailed');
+      const warning = runner.getSnapshot(runId)?.warnings.find((w) => w.kind === 'persistFailed');
       expect(warning).toBeDefined();
       expect(warning?.taskId).toBeUndefined();
       expect(warning?.message).toContain('実行状態の永続化に失敗しました');
@@ -5061,7 +6172,9 @@ tasks:
         },
         update(): Thenable<void> {
           updateCount += 1;
-          return Promise.reject(new Error(`workspaceStateへの書き込みに失敗しました(${updateCount})`));
+          return Promise.reject(
+            new Error(`workspaceStateへの書き込みに失敗しました(${updateCount})`),
+          );
         },
       };
       const TWO_TASK_YAML = `
@@ -5081,7 +6194,10 @@ tasks:
         memento: failingMemento,
         log: fakeLogger,
       });
-      const result = await runner.start('/repo/.agents/workflows/persist-fail-repeat.yaml', '/repo');
+      const result = await runner.start(
+        '/repo/.agents/workflows/persist-fail-repeat.yaml',
+        '/repo',
+      );
       const runId = result.runId as string;
       await flush();
 
@@ -5227,12 +6343,10 @@ tasks:
       },
     );
 
-    it(
-      '自動再試行（retries: 1）でも、疑似worktreeが前回と別ディレクトリを使って成功する',
-      async () => {
-        const git = fakeGit({ notGitRepo: true });
-        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
-        const yaml = `
+    it('自動再試行（retries: 1）でも、疑似worktreeが前回と別ディレクトリを使って成功する', async () => {
+      const git = fakeGit({ notGitRepo: true });
+      const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+      const yaml = `
 version: 1
 name: pseudo-auto-retry-test
 tasks:
@@ -5241,31 +6355,30 @@ tasks:
     prompt: p1
     done: d1
 `;
-        const { runner, codexHost, store } = createHarness(yaml, {
-          git,
-          pseudoWorktree: { fs, exclude: [] },
-        });
-        const result = await runner.start('/repo/.agents/workflows/pseudo-auto-retry.yaml', '/repo');
-        const runId = result.runId as string;
-        await flush();
+      const { runner, codexHost, store } = createHarness(yaml, {
+        git,
+        pseudoWorktree: { fs, exclude: [] },
+      });
+      const result = await runner.start('/repo/.agents/workflows/pseudo-auto-retry.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
 
-        const attempt1 = codexHost.byTaskId('T1');
-        attempt1.finish('failed', { ...initialChatState, turnFailed: true });
-        await flush();
+      const attempt1 = codexHost.byTaskId('T1');
+      attempt1.finish('failed', { ...initialChatState, turnFailed: true });
+      await flush();
 
-        // 自動再試行が同じ経路で即死すると、retryCountだけが1に進み'loopFailed'で
-        // 確定してしまう（修正前の症状）。修正後は新しいディレクトリで実際にセッションが
-        // 開始される
-        expect(store.find(runId)?.tasks['T1']?.retryCount).toBe(1);
-        const cloneDir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T1-retry0');
-        const attempt2 = codexHost.sessions.find((s) => s.cwd === cloneDir2);
-        expect(attempt2).toBeDefined();
+      // 自動再試行が同じ経路で即死すると、retryCountだけが1に進み'loopFailed'で
+      // 確定してしまう（修正前の症状）。修正後は新しいディレクトリで実際にセッションが
+      // 開始される
+      expect(store.find(runId)?.tasks['T1']?.retryCount).toBe(1);
+      const cloneDir2 = path.join('/repo', '.agents', 'worktrees', runId, 'T1-retry0');
+      const attempt2 = codexHost.sessions.find((s) => s.cwd === cloneDir2);
+      expect(attempt2).toBeDefined();
 
-        attempt2?.finish('done', doneState('ok'));
-        await flush();
-        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
-      },
-    );
+      attempt2?.finish('done', doneState('ok'));
+      await flush();
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+    });
 
     it(
       'removeWorktreesは疑似worktreeでも再試行したタスクの全試行分（初回+全retry）を撤去する' +
@@ -5372,6 +6485,10 @@ tasks:
         // メモリ上のマニフェスト）は失われる
         const newCodexHost = new FakeHost();
         const reloadedRunner = new WorkflowRunner({
+          // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+          // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+          // （design.md §16.35、roadmap W10、Issue #584）
+          readAutoResume: () => false,
           hosts: { codex: newCodexHost, claude: newCodexHost },
           worktreeQueue: new WorktreeCreationQueue(),
           git: fakeGit({ notGitRepo: true }),
@@ -5437,6 +6554,10 @@ tasks:
 
         const newCodexHost = new FakeHost();
         const reloadedRunner = new WorkflowRunner({
+          // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+          // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+          // （design.md §16.35、roadmap W10、Issue #584）
+          readAutoResume: () => false,
           hosts: { codex: newCodexHost, claude: newCodexHost },
           worktreeQueue: new WorktreeCreationQueue(),
           git: fakeGit({ notGitRepo: true }),
@@ -5522,6 +6643,10 @@ tasks:
         // リロード（新しいプロセスを模す。同じstore・同じディスクを使い回す）
         const newCodexHost = new FakeHost();
         const reloadedRunner = new WorkflowRunner({
+          // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+          // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+          // （design.md §16.35、roadmap W10、Issue #584）
+          readAutoResume: () => false,
           hosts: { codex: newCodexHost, claude: newCodexHost },
           worktreeQueue: new WorktreeCreationQueue(),
           git: fakeGit({ notGitRepo: true }),
@@ -5604,29 +6729,34 @@ tasks:
     },
   );
 
-  it('send_messageで受け付けたメッセージは、宛先タスクの次の送信の先頭へ添えられる', async () => {
-    const { deps, state } = fakeMessagingDeps();
-    const { runner, codexHost } = createHarness(TWO_TASK_YAML, { messaging: deps });
-    await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
-    await flush();
+  it(
+    'send_messageで受け付けたメッセージは、宛先タスクの次の送信の先頭へ添えられる' +
+      '（Issue #547: 宛先はオーケストレーターに固定されるため、実タスクへの配送は' +
+      'オーケストレーターからの送信で再現する）',
+    async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
+      await flush();
 
-    const t2 = codexHost.byTaskId('T2');
-    const result = state.hub?.sendMessage({
-      from: 'T1',
-      to: 'T2',
-      body: 'hi T2',
-      expectReply: false,
-    });
-    expect(result?.accepted).toBe(true);
+      const t2 = codexHost.byTaskId('T2');
+      const result = state.hub?.sendMessage({
+        from: ORCHESTRATOR_CONNECTION_ID,
+        to: 'T2',
+        body: 'hi T2',
+        expectReply: false,
+      });
+      expect(result?.accepted).toBe(true);
 
-    const composed = t2.promptTransform?.('続けてください') ?? '';
-    expect(composed).toContain('T1');
-    expect(composed).toContain('hi T2');
-    expect(composed).toContain('続けてください');
-    // 一度取り出したメッセージは再度は添えられない（配送済みとして消費される）
-    const secondSend = t2.promptTransform?.('もう一度') ?? '';
-    expect(secondSend).toBe('もう一度');
-  });
+      const composed = t2.promptTransform?.('続けてください') ?? '';
+      expect(composed).toContain(ORCHESTRATOR_CONNECTION_ID);
+      expect(composed).toContain('hi T2');
+      expect(composed).toContain('続けてください');
+      // 一度取り出したメッセージは再度は添えられない（配送済みとして消費される）
+      const secondSend = t2.promptTransform?.('もう一度') ?? '';
+      expect(secondSend).toBe('もう一度');
+    },
+  );
 
   it('MCPサーバの起動に失敗しても、通信なしでワークフローが最後まで走る（design.md「runは止めない」）', async () => {
     const { deps } = fakeMessagingDeps({ failStart: true });
@@ -5703,7 +6833,7 @@ tasks:
       const t1 = codexHost.byTaskId('T1');
       const before = state.hub?.sendMessage({
         from: 'T1',
-        to: 'T2',
+        to: ORCHESTRATOR_CONNECTION_ID,
         body: '状況はどうですか',
         expectReply: true,
       });
@@ -5726,11 +6856,22 @@ tasks:
       await flush();
 
       const t1 = codexHost.byTaskId('T1');
-      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: '状況は?', expectReply: true });
+      state.hub?.sendMessage({
+        from: 'T1',
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: '状況は?',
+        expectReply: true,
+      });
       await flush();
       expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingReply');
 
-      state.hub?.sendMessage({ from: 'T2', to: 'T1', body: '順調です', expectReply: false });
+      // 返信はオーケストレーターから届く（Issue #547: T2からT1への直接送信は無くなった）
+      state.hub?.sendMessage({
+        from: ORCHESTRATOR_CONNECTION_ID,
+        to: 'T1',
+        body: '順調です',
+        expectReply: false,
+      });
       await flush();
 
       expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
@@ -5753,7 +6894,12 @@ tasks:
       await flush();
 
       const t1 = codexHost.byTaskId('T1');
-      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: '状況は?', expectReply: true });
+      state.hub?.sendMessage({
+        from: 'T1',
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: '状況は?',
+        expectReply: true,
+      });
       await flush();
       expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingReply');
 
@@ -5860,10 +7006,11 @@ tasks:
         expect(rebuiltT1Input?.mcp?.url).toContain('/mcp/');
         expect(rebuiltT2Input?.mcp?.url).toContain('/mcp/');
 
-        // 実際にメッセージがやり取りできることを確かめる
+        // 実際にメッセージがやり取りできることを確かめる（Issue #547: 宛先はオーケストレーター
+        // に固定されるため、実タスクへの配送はオーケストレーターからの送信で再現する）
         const t2 = codexHost.byTaskId('T2');
         const sendResult = state.hub?.sendMessage({
-          from: 'T1',
+          from: ORCHESTRATOR_CONNECTION_ID,
           to: 'T2',
           body: '再開後のテストメッセージ',
           expectReply: false,
@@ -5874,37 +7021,45 @@ tasks:
       },
     );
 
-    it(
-      'run全体で500件のメッセージ数カウンタは、再開をまたいでも作り直されずリセットされない',
-      async () => {
-        const { deps, state } = fakeMessagingDeps();
-        const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, { messaging: deps });
-        const result = await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
-        const runId = result.runId as string;
-        await flush();
+    it('run全体で500件のメッセージ数カウンタは、再開をまたいでも作り直されずリセットされない', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/messaging.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
 
-        // 送受信できる状態で何件か送っておき、カウンタを進める
-        state.hub?.sendMessage({ from: 'T1', to: 'T2', body: 'a', expectReply: false });
-        state.hub?.sendMessage({ from: 'T2', to: 'T1', body: 'b', expectReply: false });
-        const totalBeforeClose = state.hub?.snapshotStore().totalSent;
-        expect(totalBeforeClose).toBe(2);
+      // 送受信できる状態で何件か送っておき、カウンタを進める（宛先はオーケストレーター固定。
+      // Issue #547）
+      state.hub?.sendMessage({
+        from: 'T1',
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: 'a',
+        expectReply: false,
+      });
+      state.hub?.sendMessage({
+        from: 'T2',
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: 'b',
+        expectReply: false,
+      });
+      const totalBeforeClose = state.hub?.snapshotStore().totalSent;
+      expect(totalBeforeClose).toBe(2);
 
-        await failBothTasks(codexHost);
-        expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+      await failBothTasks(codexHost);
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
 
-        expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
-        expect(runner.retryTask(runId, 'T2')).toEqual({ ok: true });
-        await flush();
+      expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+      expect(runner.retryTask(runId, 'T2')).toEqual({ ok: true });
+      await flush();
 
-        // 再構築自体が起きていることを先に確かめる。ここを確認しないと、
-        // 「再開そのものがメッセージングを立て直さない」壊れ方（Issue #475の実害そのもの）
-        // でも`totalSent`が変わらないため見かけ上パスしてしまう
-        // （レビュー指摘: テストが弱い。修正前コードではここが1のままで落ちる）
-        expect(state.startCallCount).toBe(2);
-        // hubを作り直していれば`totalSent`は0へ戻ってしまう。再利用していれば引き継がれる
-        expect(state.hub?.snapshotStore().totalSent).toBe(totalBeforeClose);
-      },
-    );
+      // 再構築自体が起きていることを先に確かめる。ここを確認しないと、
+      // 「再開そのものがメッセージングを立て直さない」壊れ方（Issue #475の実害そのもの）
+      // でも`totalSent`が変わらないため見かけ上パスしてしまう
+      // （レビュー指摘: テストが弱い。修正前コードではここが1のままで落ちる）
+      expect(state.startCallCount).toBe(2);
+      // hubを作り直していれば`totalSent`は0へ戻ってしまう。再利用していれば引き継がれる
+      expect(state.hub?.snapshotStore().totalSent).toBe(totalBeforeClose);
+    });
 
     it('ensureMessagingは冪等で、既に生きているメッセージングを二重に立てない', async () => {
       const { deps, state } = fakeMessagingDeps();
@@ -5977,6 +7132,10 @@ tasks:
         const { deps: deps2, state: state2 } = fakeMessagingDeps();
         const newCodexHost = new FakeHost();
         const reloadedRunner = new WorkflowRunner({
+          // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+          // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+          // （design.md §16.35、roadmap W10、Issue #584）
+          readAutoResume: () => false,
           hosts: { codex: newCodexHost, claude: newCodexHost },
           worktreeQueue: new WorktreeCreationQueue(),
           git: fakeGit(),
@@ -6038,8 +7197,14 @@ tasks:
 
       const t1 = codexHost.byTaskId('T1');
       // T2は無反応のまま。T1だけがexpectReply:trueで待つ（経路1は未配送0件では成立しない
-      // ケース: T2は`running`のまま止まらないため、経路2（時間切れ）だけが解く）
-      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: 'a', expectReply: true });
+      // ケース: T2は`running`のまま止まらないため、経路2（時間切れ）だけが解く。宛先は
+      // オーケストレーター固定。Issue #547）
+      state.hub?.sendMessage({
+        from: 'T1',
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: 'a',
+        expectReply: true,
+      });
       await flush();
       expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingReply');
 
@@ -6053,10 +7218,13 @@ tasks:
     });
   });
 
-  describe('メッセージング経由の権限差の警告・実際の送信文面の表示（design.md §16.21、Issue #132）', () => {
-    // T1はsandbox: read-only、T2はsandbox: workspace-write。dependsOnで結ばない
-    // （メッセージは依存関係を問わず送れることを再現するため）
-    const SANDBOX_DIFF_YAML = `
+  describe(
+    'メッセージング経由の権限差の警告・実際の送信文面の表示' +
+      '（design.md §16.21・§16.34、Issue #132・Issue #547）',
+    () => {
+      // T1はsandbox: read-only、T2はsandbox: workspace-write。dependsOnで結ばない
+      // （メッセージは依存関係を問わず送れることを再現するため）
+      const SANDBOX_DIFF_YAML = `
 version: 1
 name: messaging-escalation-test
 defaults:
@@ -6072,139 +7240,289 @@ tasks:
     done: d2
 `;
 
-    it('送信元より緩い実効権限の宛先へ配送された時点でmessagingPermissionEscalationを積む（受付時点では出ない）', async () => {
-      const { deps, state } = fakeMessagingDeps();
-      const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, {
-        messaging: deps,
-        codexSandbox: 'workspace-write',
-      });
-      const result = await runner.start(
-        '/repo/.agents/workflows/messaging-escalation.yaml',
-        '/repo',
+      it(
+        'Issue #547後、messagingPermissionEscalationは実質発火しなくなる' +
+          '（`checkMessagingPermissionEscalation`は配送された`StoredMessage.from`を' +
+          '`live.def.tasks`から引き、送信元タスクの実効値と比較する。中継後は実タスクへ' +
+          '配送されるメッセージの`from`が常にオーケストレーター（`ORCHESTRATOR_CONNECTION_ID`）' +
+          'になり、`live.def.tasks`には見つからないため`senderTask === undefined`で' +
+          '素通りする。オーケストレーター自身の実効サンドボックスは常に`read-only`固定' +
+          '（`ORCHESTRATOR_SANDBOX`）なので、仮に比較対象にしても「宛先より緩い」は成立しない。' +
+          'この警告が拾っていた脅威（緩い送信元の自由記述が厳しい宛先で実行される）自体は' +
+          'オーケストレーターの中継判断へ移っただけで消えてはいないが、実行時警告としての' +
+          '検出経路は失われる。design.md §16.34「影響範囲」に明記し、既知の帰結として残す）',
+        async () => {
+          const { deps, state } = fakeMessagingDeps();
+          const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, {
+            messaging: deps,
+            codexSandbox: 'workspace-write',
+          });
+          const result = await runner.start(
+            '/repo/.agents/workflows/messaging-escalation.yaml',
+            '/repo',
+          );
+          const runId = result.runId as string;
+          await flush();
+
+          // 【このテストの趣旨】権限昇格の検出という防御を守るテストではない。W9（#547）で
+          // 宛先が固定された副作用として、この検出が構造上不発火になったこと自体を
+          // 固定するテスト。将来`from`の扱いが変わり検出が意図せず復活/再度死ぬような
+          // 変化が起きたときに気づけるようにするために存在する
+          // （`checkMessagingPermissionEscalation`のJSDoc・design.md §16.34「影響範囲」参照）
+          // T1（read-only）の情報をオーケストレーターがT2（workspace-write）へ中継する形
+          state.hub?.sendMessage({
+            from: 'T1',
+            to: ORCHESTRATOR_CONNECTION_ID,
+            body: '調査結果です',
+            expectReply: false,
+          });
+          const relayed = state.hub?.sendMessage({
+            from: ORCHESTRATOR_CONNECTION_ID,
+            to: 'T2',
+            body: '調査結果です',
+            expectReply: false,
+          });
+          expect(relayed?.accepted).toBe(true);
+
+          const t2 = codexHost.byTaskId('T2');
+          t2.promptTransform?.('続けてください');
+
+          const snapshot = runner.getSnapshot(runId);
+          expect(snapshot?.warnings.some((w) => w.kind === 'messagingPermissionEscalation')).toBe(
+            false,
+          );
+          // #67経由の警告（permissionEscalation）とは元から別経路で、ここでも出ない
+          expect(snapshot?.warnings.some((w) => w.kind === 'permissionEscalation')).toBe(false);
+        },
       );
-      const runId = result.runId as string;
-      await flush();
 
-      const sendResult = state.hub?.sendMessage({
-        from: 'T1',
-        to: 'T2',
-        body: '調査結果です',
-        expectReply: false,
+      it('lastSentPromptは実際にCLIへ送った本文（メッセージの合成後）と一致する', async () => {
+        const { deps, state } = fakeMessagingDeps();
+        const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, { messaging: deps });
+        const result = await runner.start(
+          '/repo/.agents/workflows/messaging-last-sent.yaml',
+          '/repo',
+        );
+        const runId = result.runId as string;
+        await flush();
+
+        // メッセージが無い最初の送信では、実際に送った本文と展開後プロンプトが一致する
+        const t2 = codexHost.byTaskId('T2');
+        const firstSent = t2.promptTransform?.('p2') ?? '';
+        let snapshot = runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2');
+        expect(snapshot?.lastSentPrompt).toBe(firstSent);
+        expect(snapshot?.lastSentPrompt).toBe(snapshot?.expandedPrompt);
+
+        // メッセージが配送されると、expandedPromptは変わらないがlastSentPromptには
+        // メッセージの内容が現れる（design.md §16.21、Issue #132「4. 人が目視確認できる
+        // ようにする」。expandedPromptはcomposeNextPromptを経由しないため確認できなかった）。
+        // 宛先はオーケストレーター固定（Issue #547）なので、実タスクへの配送は
+        // オーケストレーターからの送信で再現する
+        state.hub?.sendMessage({
+          from: ORCHESTRATOR_CONNECTION_ID,
+          to: 'T2',
+          body: '追加の指示です',
+          expectReply: false,
+        });
+        const secondSent = t2.promptTransform?.('続けてください') ?? '';
+        snapshot = runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2');
+        expect(snapshot?.lastSentPrompt).toBe(secondSent);
+        expect(snapshot?.lastSentPrompt).toContain('追加の指示です');
+        expect(snapshot?.lastSentPrompt).toContain(
+          `<task-message from="${ORCHESTRATOR_CONNECTION_ID}">`,
+        );
       });
-      expect(sendResult?.accepted).toBe(true);
-      // 受付時点（sendMessageの直後）ではまだ配送していないため警告は出ない
-      expect(
-        runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'messagingPermissionEscalation'),
-      ).toBe(false);
 
-      // 宛先（T2）の次の送信で実際に配送される（setPromptTransformがtakeDeliverableMessagesを
-      // 呼ぶ）。この時点で初めて警告が積まれる
-      const t2 = codexHost.byTaskId('T2');
-      t2.promptTransform?.('続けてください');
+      it(
+        'lastSentPromptは双方向制御文字を落とすが改行は保持する' +
+          '（表示専用の無害化、監査指摘#5と同じ扱い）',
+        async () => {
+          const rtlOverride = String.fromCodePoint(0x202e);
+          const { deps, state } = fakeMessagingDeps();
+          const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, { messaging: deps });
+          const result = await runner.start('/repo/.agents/workflows/messaging-rtl.yaml', '/repo');
+          const runId = result.runId as string;
+          await flush();
 
-      const snapshot = runner.getSnapshot(runId);
-      const warning = snapshot?.warnings.find((w) => w.kind === 'messagingPermissionEscalation');
-      expect(warning?.taskId).toBe('T2');
-      expect(warning?.message).toContain('T1');
-      expect(warning?.message).toContain('sandbox');
-      // #67経由の警告（permissionEscalation）とは別のkindで区別される
-      expect(snapshot?.warnings.some((w) => w.kind === 'permissionEscalation')).toBe(false);
-    });
+          const t2 = codexHost.byTaskId('T2');
+          state.hub?.sendMessage({
+            from: ORCHESTRATOR_CONNECTION_ID,
+            to: 'T2',
+            body: `1行目\n安全${rtlOverride}exe.悪意のある名前`,
+            expectReply: false,
+          });
+          t2.promptTransform?.('続けてください');
 
-    it('宛先の実効権限が送信元と同じか厳しければ警告は出ない', async () => {
-      const { deps, state } = fakeMessagingDeps();
-      const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, {
-        messaging: deps,
-        codexSandbox: 'workspace-write',
-      });
-      const result = await runner.start(
-        '/repo/.agents/workflows/messaging-no-escalation.yaml',
-        '/repo',
+          const snapshot = runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2');
+          expect(snapshot?.lastSentPrompt).not.toContain(rtlOverride);
+          expect(snapshot?.lastSentPrompt?.includes('\n')).toBe(true);
+        },
       );
-      const runId = result.runId as string;
-      await flush();
+    },
+  );
+});
 
-      // T2（workspace-write、緩い）からT1（read-only、厳しい）へ送る向き
-      state.hub?.sendMessage({ from: 'T2', to: 'T1', body: 'お願いします', expectReply: false });
-      const t1 = codexHost.byTaskId('T1');
-      t1.promptTransform?.('続けてください');
+/**
+ * design.md §16.34、Issue #547: タスク間の直接メッセージングを廃し、オーケストレーターの
+ * 中継にする。上の「タスク間メッセージング（design.md §16.21）」describeが積んできた
+ * 大半のケース（配送・waitingReply遷移・待ちぼうけ検出そのもの等）は変えていないので、
+ * ここでは変更点（宛先の固定・タスク→オーケストレーターの配送経路・その配送が
+ * `detectAllWaitingStalemate`を壊さないこと）だけを、実際の`hub.sendMessage`を通す
+ * 経路で確認する。
+ */
+describe('WorkflowRunner: 直接メッセージングを廃しオーケストレーター中継にする（design.md §16.34、Issue #547）', () => {
+  const TWO_TASK_YAML = `
+version: 1
+name: relay-test
+defaults:
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
 
-      expect(
-        runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'messagingPermissionEscalation'),
-      ).toBe(false);
+  it('タスクからタスクidを直接指定した送信は拒否され、理由にオーケストレーター宛の案内が入る', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/relay.yaml', '/repo');
+    await flush();
+
+    const result = state.hub?.sendMessage({
+      from: 'T1',
+      to: 'T2',
+      body: 'hi T2',
+      expectReply: false,
     });
+    expect(result?.accepted).toBe(false);
+    expect(result?.reason).toContain(ORCHESTRATOR_CONNECTION_ID);
+  });
 
-    it('同じ警告文言は積み直さない（重複除去）', async () => {
-      const { deps, state } = fakeMessagingDeps();
-      const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, {
-        messaging: deps,
-        codexSandbox: 'workspace-write',
-      });
-      const result = await runner.start('/repo/.agents/workflows/messaging-dedup.yaml', '/repo');
-      const runId = result.runId as string;
-      await flush();
+  it('タスクからオーケストレーター宛の送信は受け付けられ、通知が届く', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(TWO_TASK_YAML, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/relay.yaml', '/repo');
+    await flush();
+    const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+    // run開始の通知でターンが走っている。まず終わらせて次の通知がflushされる状態にする
+    orchestrator.emitState({ ...initialChatState, busy: true });
+    orchestrator.emitState({ ...initialChatState, busy: false });
 
-      const t2 = codexHost.byTaskId('T2');
-      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: '1回目', expectReply: false });
-      t2.promptTransform?.('続けて1');
-      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: '2回目', expectReply: false });
-      t2.promptTransform?.('続けて2');
-
-      const warnings = runner
-        .getSnapshot(runId)
-        ?.warnings.filter((w) => w.kind === 'messagingPermissionEscalation');
-      expect(warnings).toHaveLength(1);
+    const result = state.hub?.sendMessage({
+      from: 'T1',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: '状況を共有します',
+      expectReply: false,
     });
+    expect(result?.accepted).toBe(true);
+    await flush();
 
-    it('lastSentPromptは実際にCLIへ送った本文（メッセージの合成後）と一致する', async () => {
+    // notifyOrchestratorはbusyの間pendingに積むだけなので、ここでも1回ターンを終わらせる
+    orchestrator.emitState({ ...initialChatState, busy: true });
+    orchestrator.emitState({ ...initialChatState, busy: false });
+    const last = orchestrator.sentTexts[orchestrator.sentTexts.length - 1] as string;
+    expect(last).toContain('T1');
+    expect(last).toContain('状況を共有します');
+  });
+
+  it(
+    'オーケストレーター宛の配送は、hub内部の未配送キューも同時に消費する' +
+      '（Issue #547でもっとも壊れやすい箇所。ここを消費し忘れると、以後' +
+      '`totalUndeliveredCount()`が0へ戻らず、待ちぼうけ検出の経路1' +
+      '「全員waitingReplyかつ未配送0件」が二度と成立しなくなる。design.md §16.25の' +
+      '「状態を実際に進めてから観測する」に沿い、pull用のキューが実際に空になった' +
+      'ことをhub側から直接観測する）',
+    async () => {
       const { deps, state } = fakeMessagingDeps();
-      const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, { messaging: deps });
-      const result = await runner.start(
-        '/repo/.agents/workflows/messaging-last-sent.yaml',
-        '/repo',
-      );
-      const runId = result.runId as string;
+      const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      await runner.start('/repo/.agents/workflows/relay.yaml', '/repo');
       await flush();
 
-      // メッセージが無い最初の送信では、実際に送った本文と展開後プロンプトが一致する
-      const t2 = codexHost.byTaskId('T2');
-      const firstSent = t2.promptTransform?.('p2') ?? '';
-      let snapshot = runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2');
-      expect(snapshot?.lastSentPrompt).toBe(firstSent);
-      expect(snapshot?.lastSentPrompt).toBe(snapshot?.expandedPrompt);
-
-      // メッセージが配送されると、expandedPromptは変わらないがlastSentPromptには
-      // メッセージの内容が現れる（design.md §16.21、Issue #132「4. 人が目視確認できる
-      // ようにする」。expandedPromptはcomposeNextPromptを経由しないため確認できなかった）
-      state.hub?.sendMessage({ from: 'T1', to: 'T2', body: '追加の指示です', expectReply: false });
-      const secondSent = t2.promptTransform?.('続けてください') ?? '';
-      snapshot = runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2');
-      expect(snapshot?.lastSentPrompt).toBe(secondSent);
-      expect(snapshot?.lastSentPrompt).toContain('追加の指示です');
-      expect(snapshot?.lastSentPrompt).toContain('<task-message from="T1">');
-    });
-
-    it('lastSentPromptは双方向制御文字を落とすが改行は保持する（表示専用の無害化、監査指摘#5と同じ扱い）', async () => {
-      const rtlOverride = String.fromCodePoint(0x202e);
-      const { deps, state } = fakeMessagingDeps();
-      const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, { messaging: deps });
-      const result = await runner.start('/repo/.agents/workflows/messaging-rtl.yaml', '/repo');
-      const runId = result.runId as string;
-      await flush();
-
-      const t2 = codexHost.byTaskId('T2');
       state.hub?.sendMessage({
         from: 'T1',
-        to: 'T2',
-        body: `1行目\n安全${rtlOverride}exe.悪意のある名前`,
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: '状況を共有します',
         expectReply: false,
       });
-      t2.promptTransform?.('続けてください');
+      await flush();
 
-      const snapshot = runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2');
-      expect(snapshot?.lastSentPrompt).not.toContain(rtlOverride);
-      expect(snapshot?.lastSentPrompt?.includes('\n')).toBe(true);
+      expect(state.hub?.totalUndeliveredCount()).toBe(0);
+    },
+  );
+
+  it(
+    'expectReply:trueでオーケストレーターへ送るとwaitingReplyへ遷移し、' +
+      'オーケストレーターからの送り返しで実際にループが再開する' +
+      '（中継を挟んでもwaitingReplyの仕組みは変わらない）',
+    async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/relay.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      const sendResult = state.hub?.sendMessage({
+        from: 'T1',
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: '状況はどうですか',
+        expectReply: true,
+      });
+      await flush();
+
+      expect(sendResult?.accepted).toBe(true);
+      expect(t1.pauseLoopCount).toBe(1);
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingReply');
+
+      // オーケストレーター自身の`send_message`（from: ORCHESTRATOR_CONNECTION_ID）は
+      // これまでどおり実タスクidを直接宛先にできる
+      const reply = state.hub?.sendMessage({
+        from: ORCHESTRATOR_CONNECTION_ID,
+        to: 'T1',
+        body: '順調です、続けてください',
+        expectReply: false,
+      });
+      await flush();
+
+      expect(reply?.accepted).toBe(true);
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+      expect(t1.resumeLoopCount).toBe(1);
+      const composed = t1.promptTransform?.('続けてください') ?? '';
+      expect(composed).toContain('順調です、続けてください');
+    },
+  );
+
+  it('オーケストレーターが自分自身へ送ろうとすると拒否される（自己送信の禁止は変わらない）', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/relay.yaml', '/repo');
+    await flush();
+
+    const result = state.hub?.sendMessage({
+      from: ORCHESTRATOR_CONNECTION_ID,
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: 'x',
+      expectReply: false,
     });
+    expect(result?.accepted).toBe(false);
+  });
+
+  it('オーケストレーターから同じrunに存在しない宛先への送信は拒否される（従来どおり）', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/relay.yaml', '/repo');
+    await flush();
+
+    const result = state.hub?.sendMessage({
+      from: ORCHESTRATOR_CONNECTION_ID,
+      to: 'T9',
+      body: 'x',
+      expectReply: false,
+    });
+    expect(result?.accepted).toBe(false);
   });
 });
 
@@ -6215,6 +7533,199 @@ tasks:
  * `false`へ戻す（design.md §16.5参照）。この3経路のいずれで再開しても、run全体が
  * 再び終了状態へ確定した時点で`notifyOrchestratorRunFinished`を重ねて送ってはいけない。
  */
+/**
+ * design.md §16.32、Issue #571: タスク側ツール`ask_orchestrator`。
+ *
+ * 配送・waitingReplyへの遷移・待ちぼうけ検出は`send_message`（design.md §16.21・§16.34）と
+ * 完全に共有する経路で、ここでは`ask_orchestrator`固有の差分だけを確認する:
+ * `StoredMessage.kind: 'question'`がオーケストレーターへの通知種別を`taskQuestion`へ
+ * 変えること、`blocking: true`（`expectReply: true`）でも既存のwaitingReply・待ちぼうけ
+ * 検出（`detectAllWaitingStalemate`・タイムアウト）がそのまま機能すること、答えが来ないまま
+ * 解放されたタスクがその後`maxIterations`を使い切ると通常どおり`failed`で確定すること
+ * （返事待ちで枠を占有し続けない）。ツール呼び出し自体（`ask_orchestrator`→
+ * `hub.sendMessage({kind: 'question'})`への変換）は`test/unit/messaging.test.ts`の
+ * `MessagingMcpServer`レベルのテストが確認済みなので、ここでは既存の慣例どおり
+ * `state.hub.sendMessage(...)`を直接呼んで実行層の配線を確認する。
+ */
+describe('WorkflowRunner: ask_orchestrator（design.md §16.32、Issue #571）', () => {
+  const ASK_YAML = `
+version: 1
+name: ask-orchestrator-test
+defaults:
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    continuePrompt: つづき
+    maxIterations: 2
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+
+  it(
+    '問い（kind: question）はtaskMessageではなくtaskQuestionとしてオーケストレーターへ届く' +
+      '（「問い」という意味づけ、design.md §16.32）',
+    async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(ASK_YAML, { messaging: deps });
+      await runner.start('/repo/.agents/workflows/ask.yaml', '/repo');
+      await flush();
+
+      const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+      // run開始の通知でターンが走っている。まず終わらせる
+      orchestrator.emitState({ ...initialChatState, busy: true });
+      orchestrator.emitState({ ...initialChatState, busy: false });
+
+      const result = state.hub?.sendMessage({
+        from: 'T1',
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: 'この方針で進めてよいですか',
+        expectReply: false,
+        kind: 'question',
+      });
+      expect(result?.accepted).toBe(true);
+      await flush();
+
+      // notifyOrchestratorはbusyの間pendingに積むだけなので、もう一度ターンを終わらせる
+      orchestrator.emitState({ ...initialChatState, busy: true });
+      orchestrator.emitState({ ...initialChatState, busy: false });
+      const last = orchestrator.sentTexts[orchestrator.sentTexts.length - 1] as string;
+      expect(last).toContain('kind="taskQuestion"');
+      expect(last).not.toContain('kind="taskMessage"');
+      expect(last).toContain('この方針で進めてよいですか');
+    },
+  );
+
+  it(
+    'blocking: true（expectReply: true）で送るとwaitingReplyへ遷移し、' +
+      '既存のsend_messageで答えると再開する（新しい返信専用ツールは無い）',
+    async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost, store } = createHarness(ASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/ask.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      state.hub?.sendMessage({
+        from: 'T1',
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: '進めてよいですか',
+        expectReply: true,
+        kind: 'question',
+      });
+      await flush();
+
+      expect(t1.pauseLoopCount).toBe(1);
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingReply');
+
+      state.hub?.sendMessage({
+        from: ORCHESTRATOR_CONNECTION_ID,
+        to: 'T1',
+        body: '進めてください',
+        expectReply: false,
+      });
+      await flush();
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+      expect(t1.resumeLoopCount).toBe(1);
+    },
+  );
+
+  it(
+    '答えが来ないままreplyTimeoutSecを超えても待ちぼうけ検出で解放される' +
+      '（design.md §16.21「待ちぼうけを検出する経路」を壊していないことの固定。' +
+      'blocking: trueが増えても既存の検出は変わらない）',
+    async () => {
+      vi.useFakeTimers();
+      try {
+        const { deps, state } = fakeMessagingDeps();
+        const readReplyTimeoutSec = () => 10;
+        const { runner, codexHost, store } = createHarness(ASK_YAML, {
+          messaging: { ...deps, readReplyTimeoutSec },
+        });
+        const result = await runner.start('/repo/.agents/workflows/ask.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const t1 = codexHost.byTaskId('T1');
+        // T2は無反応のまま走り続ける。問いは`kind: 'question'`
+        state.hub?.sendMessage({
+          from: 'T1',
+          to: ORCHESTRATOR_CONNECTION_ID,
+          body: '進めてよいですか',
+          expectReply: true,
+          kind: 'question',
+        });
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingReply');
+
+        await vi.advanceTimersByTimeAsync(10_000 + WAITING_REPLY_POLL_INTERVAL_MS);
+        await flush();
+
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+        expect(t1.resumeLoopCount).toBe(1);
+        const snapshot = runner.getSnapshot(runId);
+        expect(snapshot?.warnings.some((w) => w.kind === 'messagingStalled')).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it(
+    '答えが来ないまま待ちぼうけ検出で解放された後、maxIterationsを使い切ると失敗として確定する' +
+      '（受入基準「答えが来ないままmaxIterationsに達したらタスクが失敗として確定する' +
+      '（返事待ちで枠を占有し続けない）」。RED実測はrunnerMessaging.tsのJSDoc・報告に記録）',
+    async () => {
+      vi.useFakeTimers();
+      try {
+        const { deps, state } = fakeMessagingDeps();
+        const readReplyTimeoutSec = () => 10;
+        const { runner, codexHost, store } = createHarness(ASK_YAML, {
+          messaging: { ...deps, readReplyTimeoutSec },
+        });
+        const result = await runner.start('/repo/.agents/workflows/ask.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const t1 = codexHost.byTaskId('T1');
+        state.hub?.sendMessage({
+          from: 'T1',
+          to: ORCHESTRATOR_CONNECTION_ID,
+          body: '進めてよいですか',
+          expectReply: true,
+          kind: 'question',
+        });
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('waitingReply');
+
+        // 誰も答えないまま時間切れで解放される（待ちぼうけ検出の経路2）
+        await vi.advanceTimersByTimeAsync(10_000 + WAITING_REPLY_POLL_INTERVAL_MS);
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+
+        // 解放後も答えが来ないまま、このタスクのmaxIterations（2）を使い切って
+        // ループが回数切れになった経路（LoopController自体はtest/unit/loopController.test.ts
+        // が別途カバーする。ここでは`waitingReply`からの解放後もmaxIterationsの管理が
+        // 生きていて、占有し続けず失敗に確定することだけを確認する）
+        t1.finish('maxReached', { ...initialChatState });
+        await flush();
+
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+        // 回数切れだけはセッションを残す（issue #284と同じ扱い）。「占有し続けない」とは
+        // waitingReplyのまま並列枠を塞ぎ続けないことで、ここではT1がfailedへ確定して
+        // 枠を明け渡したこと自体を確認する（T2はT1に依存しないため走り続けてよい）
+        expect(t1.disposed).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+});
+
 describe('WorkflowRunner: run終了処理はrunにつき1度だけ（Issue #432-2）', () => {
   /**
    * オーケストレーターへの通知はターン中は`pending`に溜まり、ターンが終わって
@@ -6470,7 +7981,10 @@ tasks:
           git,
           pseudoWorktree: { fs, exclude: [] },
         });
-        const result = await runner.start('/repo/.agents/workflows/pseudo-retry-3round.yaml', '/repo');
+        const result = await runner.start(
+          '/repo/.agents/workflows/pseudo-retry-3round.yaml',
+          '/repo',
+        );
         const runId = result.runId as string;
         await flush();
 
@@ -6711,6 +8225,7 @@ tasks:
       integrationPullRequestNumber: undefined,
       integrationPullRequestUrl: undefined,
       finalMergeOutcome: undefined,
+      pendingAskUser: undefined,
     }));
 
     const git = fakeGit();
@@ -6764,6 +8279,7 @@ tasks:
       integrationPullRequestNumber: undefined,
       integrationPullRequestUrl: undefined,
       finalMergeOutcome: undefined,
+      pendingAskUser: undefined,
     }));
 
     const git = fakeGit(); // 既定でmerge --no-ffは成功する
@@ -6805,6 +8321,7 @@ tasks:
       integrationPullRequestNumber: undefined,
       integrationPullRequestUrl: undefined,
       finalMergeOutcome: undefined,
+      pendingAskUser: undefined,
     }));
 
     const git = fakeGit();
@@ -7174,6 +8691,116 @@ tasks:
   });
 });
 
+describe('WorkflowRunner: 停滞（stalled）で止まる（design.md §16.27、Issue #336）', () => {
+  const YAML = `
+version: 1
+name: stall-test
+tasks:
+  - id: T1
+    prompt: p
+    continuePrompt: つづき
+    maxIterations: 20
+    done: d
+  - id: T2
+    dependsOn: [T1]
+    prompt: p2
+    done: d2
+`;
+
+  it('停滞ではセッションを解放せず、maxReachedとは区別できる理由でfailedに確定する', async () => {
+    const { runner, codexHost, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/stall.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('stalled', { ...initialChatState });
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+    expect(store.find(runId)?.tasks['T1']?.failure).toEqual({ kind: 'stalled' });
+    // maxReachedと同じく、続けるための足がかりとしてセッションを残す
+    expect(t1.disposed).toBe(false);
+    // 依存する後続はfailedの波及と同じくskippedになる
+    expect(store.find(runId)?.tasks['T2']?.state).toBe('skipped');
+  });
+
+  it('停滞は続ける（continueTask）で同じセッションのまま再開できる', async () => {
+    const { runner, codexHost, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/stall.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('stalled', { ...initialChatState });
+    await flush();
+
+    expect(runner.continueTask(runId, 'T1')).toBe(true);
+    await flush();
+
+    // 新しいセッションは作らない（同じ会話・同じworktreeのまま）
+    expect(codexHost.sessions).toHaveLength(1);
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+    expect(store.find(runId)?.tasks['T1']?.failure).toBeUndefined();
+    expect(t1.runLoopCalls).toHaveLength(2);
+  });
+
+  it('停滞はワークフローViewの警告欄にloopStalledとして出る（maxReachedとは別kind）', async () => {
+    const { runner, codexHost } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/stall.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('stalled', { ...initialChatState });
+    await flush();
+
+    const snapshot = runner.getSnapshot(runId);
+    const warning = snapshot?.warnings.find((w) => w.kind === 'loopStalled');
+    expect(warning?.taskId).toBe('T1');
+    expect(warning?.message).toContain('T1');
+    // maxReached専用の警告としては出ない（別kindで区別できる）
+    expect(snapshot?.warnings.find((w) => w.kind === 'maxReached')).toBeUndefined();
+  });
+
+  it('停滞はオーケストレーターへtaskFailedではなくtaskStalledとして通知される', async () => {
+    const { runner, codexHost } = createHarness(YAML);
+    await runner.start('/repo/.agents/workflows/stall.yaml', '/repo');
+    await flush();
+    const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+    // run開始の通知でターンが走っている。走行中は割り込まないので、まず終わらせる
+    orchestrator.emitState({ ...initialChatState, busy: true });
+    orchestrator.emitState({ ...initialChatState, busy: false });
+    const sentBefore = orchestrator.sentTexts.length;
+
+    codexHost.byTaskId('T1').finish('stalled', { ...initialChatState });
+    await flush();
+
+    // notifyOrchestratorはbusyの間pendingに積むだけなので、ここでも1回ターンを終わらせる
+    // （design.md §16.25 確認事項4。busyゲートを通過させるところまで状態を進める）
+    orchestrator.emitState({ ...initialChatState, busy: true });
+    orchestrator.emitState({ ...initialChatState, busy: false });
+
+    const added = orchestrator.sentTexts.slice(sentBefore).join('\n');
+    expect(added).toContain('T1');
+    expect(added).toContain('停滞');
+    expect(added).toContain('continue_task');
+    expect(added).not.toContain('kind="taskFailed"');
+  });
+
+  it('未知のrun・未知のtaskIdでは何もしない', async () => {
+    const { runner, codexHost } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/continue.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('maxReached', { ...initialChatState });
+    await flush();
+
+    expect(runner.continueTask('no-such-run', 'T1')).toBe(false);
+    expect(runner.continueTask(runId, 'no-such-task')).toBe(false);
+  });
+});
+
 describe('WorkflowRunner: オーケストレーターセッション（design.md §16.23）', () => {
   const YAML_ONE = `version: 1
 name: orchestrator
@@ -7505,6 +9132,15 @@ tasks:
     done: d3
 `;
 
+    const SINGLE_TASK_HALT_YAML = `
+version: 1
+name: control-final-merge-halt-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
     it('retry_taskは停止直後（走行中タスクが残りoutcomeがrunningのまま）でもhaltedByUserを解除しない', async () => {
       const { deps, state } = fakeMessagingDeps();
       const { runner, codexHost } = createHarness(THREE_TASK_YAML, {
@@ -7673,6 +9309,46 @@ tasks:
       expect(outcome.accepted).toBe(true);
       expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe('running');
     });
+
+    it(
+      'decide_final_mergeも停止直後は拒否する（design.md §16.26、レビュー指摘。' +
+        '他の判断系制御ツールと同じくhaltedByUserを見る）',
+      async () => {
+        const git = fakeGit({
+          originRemoteUrl: 'git@github.com:acme/repo.git',
+          headBranch: 'main',
+        });
+        const cli = fakeForgeCli();
+        const { deps, state } = fakeMessagingDeps();
+        const { runner, codexHost } = createHarness(SINGLE_TASK_HALT_YAML, {
+          git,
+          forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+          messaging: deps,
+        });
+        const result = await runner.start(
+          '/repo/.agents/workflows/control-final-merge.yaml',
+          '/repo',
+        );
+        const runId = result.runId as string;
+        await flush();
+
+        codexHost.byTaskId('T1').finish('done', doneState('ok'));
+        await flush();
+        expect(runner.getSnapshot(runId)?.finalMergeDecision).toMatchObject({
+          mode: 'orchestrator',
+        });
+
+        runner.stop(runId);
+        await flush();
+        expect(runner.getSnapshot(runId)?.haltedByUser).toBe(true);
+
+        const outcome = control(state).decideFinalMerge('merge', 'stop後にマージを試みる');
+
+        expect(outcome.accepted).toBe(false);
+        expect(outcome.reason).toContain('人がこの実行全体を停止しました');
+        expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+      },
+    );
   });
 
   it('decide_approvalはacceptとdeclineだけを受け付ける（セッション全体への承認は選べない）', async () => {
@@ -7826,6 +9502,1111 @@ tasks:
 
     expect(outcome.accepted).toBe(false);
     expect(outcome.reason).toContain('T9');
+  });
+});
+
+describe(
+  'WorkflowRunner: add_task / remove_task / update_task_dependencies' +
+    '（design.md §16.29、roadmap W4、Issue #338）',
+  () => {
+    const TWO_TASK_YAML = `
+version: 1
+name: task-edit-test
+defaults:
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    continuePrompt: c1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+
+    /** T1が走行中のまま、T2がT3へ依存し、T3は独立しているがmaxParallelの空きが無くpendingで残るYAML。 */
+    const PENDING_DEPENDENT_YAML = `
+version: 1
+name: task-edit-remove-test
+defaults:
+  maxParallel: 1
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    dependsOn: [T3]
+    prompt: p2
+    done: d2
+  - id: T3
+    prompt: p3
+    done: d3
+`;
+
+    /** 制御ツールの実体（オーケストレーター専用接続に見せているもの）を取り出す。 */
+    function control(state: FakeMessagingState): OrchestratorControlPort {
+      const port = state.hub?.orchestratorControl;
+      if (port === undefined) {
+        throw new Error('制御ツールが配線されていません');
+      }
+      return port;
+    }
+
+    it('add_taskでタスクが増え、依存グラフとタスク一覧に反映される', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const outcome = control(state).addTask({
+        id: 'T3',
+        prompt: 'p3',
+        done: 'd3',
+        dependsOn: ['T1'],
+      });
+
+      expect(outcome.accepted).toBe(true);
+      const snapshot = runner.getSnapshot(runId);
+      const t3 = snapshot?.tasks.find((t) => t.id === 'T3');
+      expect(t3).toBeDefined();
+      expect(t3?.dependsOn).toEqual(['T1']);
+      expect(t3?.state).toBe('pending');
+      expect(snapshot?.tasks.map((t) => t.id).sort()).toEqual(['T1', 'T2', 'T3']);
+    });
+
+    it('add_taskは実行中の定義（メモリ）だけへ適用し、永続化した定義には書き込まない', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, store } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      control(state).addTask({ id: 'T3', prompt: 'p3', done: 'd3', dependsOn: [] });
+
+      expect(store.find(runId)?.tasks['T3']).toBeUndefined();
+    });
+
+    it('add_taskは循環依存になる追加を適用前に拒否し、理由を返す', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const outcome = control(state).addTask({
+        id: 'T3',
+        prompt: 'p3',
+        done: 'd3',
+        dependsOn: ['T3'],
+      });
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('循環');
+      expect(
+        runner
+          .getSnapshot(runId)
+          ?.tasks.map((t) => t.id)
+          .sort(),
+      ).toEqual(['T1', 'T2']);
+    });
+
+    it('add_taskは上限件数を超える追加を適用前に拒否する', async () => {
+      const manyTasks = Array.from(
+        { length: 50 },
+        (_, i) => `  - id: T${i + 1}\n    prompt: p\n    done: d\n`,
+      ).join('');
+      const FULL_YAML = `version: 1\nname: full-test\ndefaults:\n  maxParallel: 5\ntasks:\n${manyTasks}`;
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(FULL_YAML, { messaging: deps });
+      await runner.start('/repo/.agents/workflows/full.yaml', '/repo');
+      await flush();
+
+      const outcome = control(state).addTask({
+        id: 'T51',
+        prompt: 'p51',
+        done: 'd51',
+        dependsOn: [],
+      });
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('上限');
+    });
+
+    it('add_taskはautoApprove/allow/sandbox/approvalModeを指定できず、指定すると拒否される', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const autoApprove = control(state).addTask({
+        id: 'T3',
+        prompt: 'p3',
+        done: 'd3',
+        dependsOn: [],
+        autoApprove: true,
+      });
+      const allow = control(state).addTask({
+        id: 'T4',
+        prompt: 'p4',
+        done: 'd4',
+        dependsOn: [],
+        allow: ['危険なコマンド'],
+      });
+      const sandbox = control(state).addTask({
+        id: 'T5',
+        prompt: 'p5',
+        done: 'd5',
+        dependsOn: [],
+        sandbox: 'danger-full-access',
+      });
+      const approvalMode = control(state).addTask({
+        id: 'T6',
+        prompt: 'p6',
+        done: 'd6',
+        dependsOn: [],
+        approvalMode: 'never',
+      });
+
+      expect(autoApprove.accepted).toBe(false);
+      expect(autoApprove.reason).toContain('autoApprove');
+      expect(allow.accepted).toBe(false);
+      expect(allow.reason).toContain('allow');
+      expect(sandbox.accepted).toBe(false);
+      expect(sandbox.reason).toContain('sandbox');
+      expect(approvalMode.accepted).toBe(false);
+      expect(approvalMode.reason).toContain('approvalMode');
+      // どれも適用されていない
+      expect(
+        runner
+          .getSnapshot(runId)
+          ?.tasks.map((t) => t.id)
+          .sort(),
+      ).toEqual(['T1', 'T2']);
+    });
+
+    it('add_taskは適用した内容を全文でワークフローViewの警告欄へ残す', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const longPrompt = 'この指示を実施してください。'.repeat(20);
+      control(state).addTask({
+        id: 'T3',
+        prompt: longPrompt,
+        done: 'テストが通ること',
+        dependsOn: ['T1', 'T2'],
+      });
+
+      const warning = runner
+        .getSnapshot(runId)
+        ?.warnings.find((w) => w.kind === 'orchestratorTaskAdded');
+      expect(warning?.taskId).toBe('T3');
+      expect(warning?.message).toContain(longPrompt);
+      expect(warning?.message).toContain('テストが通ること');
+      expect(warning?.message).toContain('T1, T2');
+    });
+
+    it('remove_taskは走行中のタスクを拒否する（stop_taskを使わせる）', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe('running');
+      const outcome = control(state).removeTask('T1');
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('stop_task');
+      expect(
+        runner
+          .getSnapshot(runId)
+          ?.tasks.map((t) => t.id)
+          .sort(),
+      ).toEqual(['T1', 'T2']);
+    });
+
+    it(
+      'remove_taskはpendingのタスクを取り除き、依存していたタスクのdependsOnからも' +
+        '取り除いて孤立させない',
+      async () => {
+        const { deps, state } = fakeMessagingDeps();
+        const { runner } = createHarness(PENDING_DEPENDENT_YAML, { messaging: deps });
+        const result = await runner.start('/repo/.agents/workflows/pending.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const before = runner.getSnapshot(runId);
+        expect(before?.tasks.find((t) => t.id === 'T1')?.state).toBe('running');
+        expect(before?.tasks.find((t) => t.id === 'T3')?.state).toBe('pending');
+
+        const outcome = control(state).removeTask('T3');
+
+        expect(outcome.accepted).toBe(true);
+        const after = runner.getSnapshot(runId);
+        expect(after?.tasks.map((t) => t.id).sort()).toEqual(['T1', 'T2']);
+        const t2 = after?.tasks.find((t) => t.id === 'T2');
+        expect(t2?.dependsOn).toEqual([]);
+
+        const warning = after?.warnings.find((w) => w.kind === 'orchestratorTaskRemoved');
+        expect(warning?.taskId).toBe('T3');
+        expect(warning?.message).toContain('T2');
+      },
+    );
+
+    it('remove_taskは存在しないidを理由付きで拒否する', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+      await flush();
+
+      const outcome = control(state).removeTask('T9');
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('T9');
+    });
+
+    it('update_task_dependenciesはpendingでないタスクへの変更を拒否する', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(PENDING_DEPENDENT_YAML, { messaging: deps });
+      await runner.start('/repo/.agents/workflows/pending.yaml', '/repo');
+      await flush();
+
+      const outcome = control(state).updateTaskDependencies('T1', []);
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('running');
+    });
+
+    it('update_task_dependenciesは循環依存になる変更を適用前に拒否する', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(PENDING_DEPENDENT_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/pending.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      // T2はT3へ依存している。T3の依存へT2を足すと循環になる
+      const outcome = control(state).updateTaskDependencies('T3', ['T2']);
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('循環');
+      expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T3')?.dependsOn).toEqual([]);
+    });
+
+    it('update_task_dependenciesは依存を差し替え、警告欄へ変更前後を全文残す', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(PENDING_DEPENDENT_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/pending.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const outcome = control(state).updateTaskDependencies('T3', ['T1']);
+
+      expect(outcome.accepted).toBe(true);
+      const snapshot = runner.getSnapshot(runId);
+      expect(snapshot?.tasks.find((t) => t.id === 'T3')?.dependsOn).toEqual(['T1']);
+      const warning = snapshot?.warnings.find((w) => w.kind === 'orchestratorDependenciesChanged');
+      expect(warning?.taskId).toBe('T3');
+      expect(warning?.message).toContain('変更前: (なし)');
+      expect(warning?.message).toContain('変更後: T1');
+    });
+
+    it('update_task_dependenciesは未定義のidへの参照を適用前に拒否する', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(PENDING_DEPENDENT_YAML, { messaging: deps });
+      await runner.start('/repo/.agents/workflows/pending.yaml', '/repo');
+      await flush();
+
+      const outcome = control(state).updateTaskDependencies('T3', ['T9']);
+
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.reason).toContain('T9');
+    });
+
+    it(
+      'リロード後、add_taskで足したタスクの永続状態は定義（YAML）に無ければ落とされ、' +
+        'runが完走できる（レビューblocking指摘、2026-08-23。§16.29「どの経路からもpersist' +
+        'を呼ばない」はlive.defには成り立つが、live.runStateは他の経路のpersistで永続化される）',
+      async () => {
+        const { deps, state } = fakeMessagingDeps();
+        const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, { messaging: deps });
+        const result = await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        control(state).addTask({ id: 'T3', prompt: 'p3', done: 'd3', dependsOn: [] });
+
+        // T1・T2・T3のいずれかが完了すると、その経路のpersist()がlive.runState.tasksを
+        // 丸ごと書き出す。add_task自身はpersistを呼ばないが、この持続化でT3のidが
+        // 永続データへ入る（レビュー指摘の核心）
+        // TWO_TASK_YAMLのmaxParallelは2で、T1・T2が既にその枠を使い切っているため、
+        // 追加したT3は空き枠が出るまでpendingのまま（`nextTasksToStart`のcapacity判定）。
+        // T1・T2を終わらせてpersist()させた後、T3がpendingのまま永続データへ入っていた
+        // 瞬間（capacityが空く直前）を模すため、T3の永続状態を直接差し込む
+        // （T3自身が実際に走り出すタイミングとは切り離し、「追加した直後にpersistが
+        // 走った」という事実だけを再現する）
+        const t1 = codexHost.byTaskId('T1');
+        t1.finish('done', doneState('T1の応答'));
+        const t2 = codexHost.byTaskId('T2');
+        t2.finish('done', doneState('T2の応答'));
+        await flush();
+
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+        expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
+
+        await store.update(runId, (current) => {
+          if (current === undefined) {
+            throw new Error('persisted run not found');
+          }
+          const t1 = current.tasks['T1'];
+          if (t1 === undefined) {
+            throw new Error('T1 not found in persisted run');
+          }
+          return {
+            ...current,
+            tasks: {
+              ...current.tasks,
+              T3: {
+                ...t1,
+                state: 'pending',
+                submissionCount: 0,
+                retryCount: 0,
+                manualRetryCount: 0,
+                failure: undefined,
+                sessionId: undefined,
+                cwd: undefined,
+                branch: undefined,
+                pullRequestNumber: undefined,
+                pullRequestUrl: undefined,
+              },
+            },
+          };
+        });
+
+        expect(store.find(runId)?.tasks['T3']?.state).toBe('pending');
+
+        // 新しいプロセス（リロード後）を模す。定義ファイルは元のTWO_TASK_YAML
+        // （add_taskで足したT3を含まない）のまま
+        const reloadedRunner = new WorkflowRunner({
+          readAutoResume: () => false,
+          hosts: { codex: new FakeHost(), claude: new FakeHost() },
+          worktreeQueue: new WorktreeCreationQueue(),
+          git: fakeGit(),
+          fs: identityFs,
+          filePort: filePort(TWO_TASK_YAML),
+          store,
+          log: fakeLogger,
+          readBaseline: () => ({
+            codexSandbox: 'read-only',
+            codexApprovalMode: 'on-request',
+            claudePermissionMode: 'manual',
+            allowAutoApprove: true,
+            allowClaudeBypassPermissions: false,
+          }),
+        });
+        await reloadedRunner.restoreRunsForView();
+
+        const snapshot = reloadedRunner.getSnapshot(runId);
+        // 定義に無いT3はタスク一覧に出ない（YAML本来の2件だけに戻る）
+        expect(snapshot?.tasks.map((t) => t.id).sort()).toEqual(['T1', 'T2']);
+        // T1・T2はどちらもdoneのため、runは完走（succeeded）として扱えるはず
+        expect(snapshot?.outcome).toBe('succeeded');
+      },
+    );
+
+    it(
+      'リロード後、remove_taskで消したタスクが定義（YAML）に残っていれば、' +
+        'pendingとして復元され直す（レビューblocking指摘、2026-08-23。消したまま定義に残る' +
+        'タスクを黙って無視すると、一度も走っていないタスクがあるのにrunが完走扱いになりうる）',
+      async () => {
+        // maxParallel: 1にして、T1が走行中の間はT2がpendingのまま残るようにする
+        // （TWO_TASK_YAMLのmaxParallel: 2だと両方すぐ走り始め、pendingのタスクを
+        // 用意できない）
+        const ONE_AT_A_TIME_YAML = `
+version: 1
+name: task-edit-remove-reload-test
+defaults:
+  maxParallel: 1
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+        const { deps, state } = fakeMessagingDeps();
+        const { runner, codexHost, store } = createHarness(ONE_AT_A_TIME_YAML, {
+          messaging: deps,
+        });
+        const result = await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        // T2はpendingのまま（maxParallel: 1でT1が枠を使い切っているため）
+        expect(runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2')?.state).toBe('pending');
+        const removeOutcome = control(state).removeTask('T2');
+        expect(removeOutcome.accepted).toBe(true);
+
+        const t1 = codexHost.byTaskId('T1');
+        t1.finish('done', doneState('T1の応答'));
+        await flush();
+
+        // 永続データにT2は無い（remove_task後にpersistされたため）
+        expect(store.find(runId)?.tasks['T2']).toBeUndefined();
+
+        // 新しいプロセス（リロード後）を模す。定義ファイルは元のONE_AT_A_TIME_YAML
+        // （remove_taskで消したT2を含む）のまま
+        const reloadedRunner = new WorkflowRunner({
+          readAutoResume: () => false,
+          hosts: { codex: new FakeHost(), claude: new FakeHost() },
+          worktreeQueue: new WorktreeCreationQueue(),
+          git: fakeGit(),
+          fs: identityFs,
+          filePort: filePort(ONE_AT_A_TIME_YAML),
+          store,
+          log: fakeLogger,
+          readBaseline: () => ({
+            codexSandbox: 'read-only',
+            codexApprovalMode: 'on-request',
+            claudePermissionMode: 'manual',
+            allowAutoApprove: true,
+            allowClaudeBypassPermissions: false,
+          }),
+        });
+        await reloadedRunner.restoreRunsForView();
+
+        const snapshot = reloadedRunner.getSnapshot(runId);
+        // T2が定義どおりタスク一覧に戻り、pendingとして数えられる（完走扱いにしない）
+        const t2Snapshot = snapshot?.tasks.find((t) => t.id === 'T2');
+        expect(t2Snapshot).toBeDefined();
+        expect(t2Snapshot?.state).toBe('pending');
+        expect(snapshot?.outcome).toBe('running');
+      },
+    );
+  },
+);
+
+describe('WorkflowRunner: ask_user（design.md §16.33、Issue #583）', () => {
+  const YAML_ONE = `version: 1
+name: ask-user-test
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+
+  /** 制御ツールの実体（オーケストレーター専用接続に見せているもの）を取り出す。 */
+  function control(state: FakeMessagingState): OrchestratorControlPort {
+    const port = state.hub?.orchestratorControl;
+    if (port === undefined) {
+      throw new Error('制御ツールが配線されていません');
+    }
+    return port;
+  }
+
+  it('ask_userを呼ぶと問いをスナップショットへ載せ、受け付ける（本番と同じくrun開始の通知でbusyのまま呼ぶ）', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner } = createHarness(YAML_ONE, { messaging: deps });
+    const result = await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    // ask_userはオーケストレーターのターンの最中に呼ばれる。run開始の通知（flushOrchestrator）で
+    // 既にbusy: trueのはずで、ここでは明示的にbusyを崩さない
+    expect(runner.getSnapshot(runId)?.orchestrator?.busy).toBe(true);
+
+    const outcome = control(state).askUser('どちらへ進める？', ['A案', 'B案']);
+
+    expect(outcome.accepted).toBe(true);
+    expect(runner.getSnapshot(runId)?.pendingAskUser).toMatchObject({
+      question: 'どちらへ進める？',
+      choices: ['A案', 'B案'],
+      hasLiveSession: true,
+    });
+  });
+
+  it('回答待ちの間に次のask_userを呼ぶと拒否する（人が答えるまで1問だけ）', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner } = createHarness(YAML_ONE, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
+    await flush();
+
+    control(state).askUser('問1', ['A', 'B']);
+    const second = control(state).askUser('問2', ['C', 'D']);
+
+    expect(second.accepted).toBe(false);
+    expect(second.reason).toContain('既に回答待ちの質問があります');
+  });
+
+  it('questionが空・choicesが2〜4個の範囲外なら拒否する（機械的な形式検証のみ）', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner } = createHarness(YAML_ONE, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
+    await flush();
+
+    const empty = control(state).askUser('   ', ['A', 'B']);
+    const tooFew = control(state).askUser('問い', ['A']);
+    const tooMany = control(state).askUser('問い', ['A', 'B', 'C', 'D', 'E']);
+
+    expect(empty.accepted).toBe(false);
+    expect(empty.reason).toContain('空です');
+    expect(tooFew.accepted).toBe(false);
+    expect(tooFew.reason).toContain('2〜4個');
+    expect(tooMany.accepted).toBe(false);
+    expect(tooMany.reason).toContain('2〜4個');
+  });
+
+  it(
+    `既定では1runにつき${DEFAULT_MAX_ASK_USER_PER_RUN}回まで呼べ、超えると拒否し` +
+      '自己判断かdecide_final_mergeのholdを促す（design.md §16.33「確認を絞る」）',
+    async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(YAML_ONE, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+      const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+
+      const outcomes: OrchestratorControlResult[] = [];
+      for (let i = 0; i < DEFAULT_MAX_ASK_USER_PER_RUN; i += 1) {
+        outcomes.push(control(state).askUser(`問${i}`, ['A', 'B']));
+        // 次のask_userを呼べるように、直前の質問へ都度答えておく（1回に1問だけの制約）。
+        // answerAskUserはbusy中は送信を保留するため、ターンが終わったことにして配送させる
+        runner.answerAskUser(runId, 0);
+        orchestrator.emitState({ ...initialChatState, busy: false });
+      }
+      const overLimit = control(state).askUser('もう1問', ['A', 'B']);
+
+      expect(outcomes.every((o) => o.accepted)).toBe(true);
+      expect(overLimit.accepted).toBe(false);
+      expect(overLimit.reason).toContain(`上限（${DEFAULT_MAX_ASK_USER_PER_RUN}回/run）`);
+      expect(overLimit.reason).toContain('decide_final_merge');
+    },
+  );
+
+  it('readMaxAskUserPerRunで上限を変えられる（config.tsのworkflows.maxAskUserPerRun経由）', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(YAML_ONE, {
+      messaging: deps,
+      readMaxAskUserPerRun: () => 1,
+    });
+    const result = await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+
+    const first = control(state).askUser('問1', ['A', 'B']);
+    expect(first.accepted).toBe(true);
+    expect(runner.answerAskUser(runId, 0)).toBe(true);
+    // answerAskUserはbusy中は送信を保留する。ターンが終わったことにして配送させる
+    orchestrator.emitState({ ...initialChatState, busy: false });
+
+    const second = control(state).askUser('問2', ['C', 'D']);
+    expect(second.accepted).toBe(false);
+    expect(second.reason).toContain('上限（1回/run）');
+    expect(second.reason).toContain('decide_final_merge');
+  });
+
+  it(
+    'answerAskUserはbusy中に答えても失わず、ターンが終わってからまとめて送る' +
+      '（レビュー指摘: ask_userはオーケストレーターのターンの最中に呼ばれるため、答えた時点で' +
+      'busyがtrueのことがある。割り込んで送ると送信が失われrunが無期限に止まるため、' +
+      'busy中は保留し、ターンが終わってから送る）',
+    async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(YAML_ONE, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+      const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+      // run開始の通知でターンが走っている（本番と同じくbusy: trueのまま）
+      expect(runner.getSnapshot(runId)?.orchestrator?.busy).toBe(true);
+
+      // ask_userもそのターンの最中に呼ばれる
+      control(state).askUser('どちらへ進める？', ['A案', 'B案']);
+      expect(runner.getSnapshot(runId)?.pendingAskUser).toMatchObject({ answered: false });
+
+      const sentBefore = orchestrator.sentTexts.length;
+      const accepted = runner.answerAskUser(runId, 1);
+
+      // busy中はまだ送らない（走行中のターンへ割り込むと送信が失われかねないため）
+      expect(accepted).toBe(true);
+      expect(orchestrator.sentTexts.length).toBe(sentBefore);
+      expect(runner.getSnapshot(runId)?.pendingAskUser).toMatchObject({ answered: true });
+
+      // ターンが終わって初めて送る
+      orchestrator.emitState({ ...initialChatState, busy: false });
+
+      expect(runner.getSnapshot(runId)?.pendingAskUser).toBeUndefined();
+      const last = orchestrator.sentTexts[orchestrator.sentTexts.length - 1] as string;
+      expect(last).toContain('B案');
+    },
+  );
+
+  it('答え済み・配送待ちの間にもう一度答えても二重送信にならない', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(YAML_ONE, { messaging: deps });
+    const result = await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+
+    control(state).askUser('どちらへ進める？', ['A案', 'B案']);
+    const first = runner.answerAskUser(runId, 0);
+    const sentBefore = orchestrator.sentTexts.length;
+    const second = runner.answerAskUser(runId, 1);
+
+    expect(first).toBe(true);
+    expect(second).toBe(false);
+    expect(orchestrator.sentTexts.length).toBe(sentBefore);
+
+    orchestrator.emitState({ ...initialChatState, busy: false });
+
+    const sent = orchestrator.sentTexts.join('\n');
+    expect(sent).toContain('A案');
+    expect(sent).not.toContain('B案');
+  });
+
+  it('answerAskUserは範囲外のindex・回答待ちが無いときはfalseを返し、何も変えない', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner } = createHarness(YAML_ONE, { messaging: deps });
+    const result = await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    expect(runner.answerAskUser(runId, 0)).toBe(false);
+
+    control(state).askUser('問い', ['A', 'B']);
+    expect(runner.answerAskUser(runId, 9)).toBe(false);
+    expect(runner.getSnapshot(runId)?.pendingAskUser).toBeDefined();
+    expect(runner.answerAskUser('unknown-run', 0)).toBe(false);
+  });
+
+  it(
+    '回答待ちの間はタスク完了通知の送信を止めて溜め、answerAskUserが答えと一緒に合流させる' +
+      '（design.md §16.33「待たせる仕組み」）',
+    async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(YAML_ONE, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+      const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+      orchestrator.emitState({ ...initialChatState, busy: true });
+      orchestrator.emitState({ ...initialChatState, busy: false });
+
+      control(state).askUser('どちらへ進める？', ['A案', 'B案']);
+      const sentBefore = orchestrator.sentTexts.length;
+
+      // 回答待ちの間にタスクが完了しても、まだオーケストレーターへは送らない
+      (codexHost.sessions[0] as FakeTaskSession).finish('done', doneState('ok'));
+      await flush();
+      expect(orchestrator.sentTexts.length).toBe(sentBefore);
+
+      runner.answerAskUser(runId, 0);
+
+      const added = orchestrator.sentTexts.slice(sentBefore).join('\n');
+      expect(added).toContain('A案');
+      expect(added).toContain('T1');
+    },
+  );
+
+  it('回答待ちの間は人の自由記述の発話を送らせない（design.md §16.33「回答の経路を一意にする」）', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner } = createHarness(YAML_ONE, { messaging: deps });
+    const result = await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    control(state).askUser('どちらへ進める？', ['A案', 'B案']);
+
+    expect(runner.sendToOrchestrator(runId, '横から一言')).toBe(false);
+  });
+
+  it(
+    'リロード後は永続化された問いの文言だけ復元し、hasLiveSession: falseで答えられない' +
+      '（design.md §16.33「永続化」。オーケストレーターセッション自体は復元できない）',
+    async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, store } = createHarness(YAML_ONE, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      control(state).askUser('どちらへ進める？', ['A案', 'B案']);
+      await flush();
+      expect(store.find(runId)?.pendingAskUser).toMatchObject({
+        question: 'どちらへ進める？',
+        choices: ['A案', 'B案'],
+      });
+
+      const newCodexHost = new FakeHost();
+      const reloadedRunner = new WorkflowRunner({
+        // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+        // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+        // （design.md §16.35、roadmap W10、Issue #584）
+        readAutoResume: () => false,
+        hosts: { codex: newCodexHost, claude: newCodexHost },
+        worktreeQueue: new WorktreeCreationQueue(),
+        git: fakeGit(),
+        fs: identityFs,
+        filePort: filePort(YAML_ONE),
+        store,
+        log: fakeLogger,
+        readBaseline: () => ({
+          codexSandbox: 'read-only',
+          codexApprovalMode: 'on-request',
+          claudePermissionMode: 'manual',
+          allowAutoApprove: true,
+          allowClaudeBypassPermissions: false,
+        }),
+      });
+
+      await reloadedRunner.restoreRunsForView();
+
+      const snapshot = reloadedRunner.getSnapshot(runId);
+      expect(snapshot?.pendingAskUser).toEqual({
+        question: 'どちらへ進める？',
+        choices: ['A案', 'B案'],
+        hasLiveSession: false,
+        answered: false,
+      });
+      // 答える経路自体が無い（セッションが無いのでfalseで何もしない）
+      expect(reloadedRunner.answerAskUser(runId, 0)).toBe(false);
+    },
+  );
+});
+
+describe('WorkflowRunner: 中断からの自動再開（design.md §16.35、roadmap W10、Issue #584）', () => {
+  const YAML = `
+version: 1
+name: auto-resume-test
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+
+  const ALLOW_YAML = `
+version: 1
+name: auto-resume-allow-test
+tasks:
+  - id: T1
+    allow:
+      - "npm test"
+    prompt: p
+    done: d
+`;
+
+  function reloadWith(
+    store: WorkflowRunStore,
+    yaml: string,
+    options?: { readAutoResume?: () => boolean; readMaxAutoResumeAttempts?: () => number },
+  ): { reloadedRunner: WorkflowRunner; newCodexHost: FakeHost } {
+    const newCodexHost = new FakeHost();
+    const reloadedRunner = new WorkflowRunner({
+      ...(options?.readAutoResume !== undefined ? { readAutoResume: options.readAutoResume } : {}),
+      ...(options?.readMaxAutoResumeAttempts !== undefined
+        ? { readMaxAutoResumeAttempts: options.readMaxAutoResumeAttempts }
+        : {}),
+      hosts: { codex: newCodexHost, claude: newCodexHost },
+      worktreeQueue: new WorktreeCreationQueue(),
+      git: fakeGit(),
+      fs: identityFs,
+      filePort: filePort(yaml),
+      store,
+      log: fakeLogger,
+      readBaseline: () => ({
+        codexSandbox: 'read-only',
+        codexApprovalMode: 'on-request',
+        claudePermissionMode: 'manual',
+        allowAutoApprove: true,
+        allowClaudeBypassPermissions: false,
+      }),
+    });
+    return { reloadedRunner, newCodexHost };
+  }
+
+  it('既定（autoResume: true）ではreloadInterruptedのタスクをpendingへ戻し自動的に再開する', async () => {
+    const { runner, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/auto-resume.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+
+    // 明示的に`true`を渡す（本番の既定値と同じ）。ハーネス既定は`false`のため
+    const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+      readAutoResume: () => true,
+    });
+    await reloadedRunner.restoreRunsForView();
+    await flush();
+
+    // 再実行を待つ`failed`ではなく、新しいセッションから自動的に走り出している
+    const snapshot = reloadedRunner.getSnapshot(runId);
+    expect(snapshot?.tasks[0]?.state).toBe('running');
+    expect(snapshot?.tasks[0]?.hasLiveSession).toBe(true);
+    expect(newCodexHost.sessions).toHaveLength(1);
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+
+    // 戻したタスクidがViewから見える形で残る（design.md §16.35の受入基準）
+    const warning = snapshot?.warnings.find((w) => w.kind === 'autoResume');
+    expect(warning).toBeDefined();
+    expect(warning?.message).toContain('T1');
+
+    // 自動再開の実施回数を数えている（次のリロードで上限判定に使う）
+    expect(store.find(runId)?.autoResumeAttempts).toBe(1);
+  });
+
+  it('haltedByUser（人が全体停止した実行）は自動再開しない', async () => {
+    const { runner, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/auto-resume-halted.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // 全体停止した直後、走行中タスクのstopLoopがまだ返ってきていない状態でリロードが来た
+    // ことを模す（haltedByUser: trueかつタスクはまだ`running`のまま）
+    runner.stop(runId);
+    await flush();
+    expect(store.find(runId)?.haltedByUser).toBe(true);
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+
+    const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+      readAutoResume: () => true,
+    });
+    await reloadedRunner.restoreRunsForView();
+    await flush();
+
+    // reconcileAfterReloadでfailed(reloadInterrupted)になったまま、自動再開はしない
+    const snapshot = reloadedRunner.getSnapshot(runId);
+    expect(snapshot?.tasks[0]?.state).toBe('failed');
+    expect(snapshot?.tasks[0]?.failure).toEqual({ kind: 'reloadInterrupted' });
+    expect(newCodexHost.sessions).toHaveLength(0);
+    expect(snapshot?.warnings.some((w) => w.kind === 'autoResume')).toBe(false);
+  });
+
+  it('agent.workflows.autoResumeがfalseなら従来どおり再開せず、人の再実行を待つ', async () => {
+    const { runner, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/auto-resume-off.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+      readAutoResume: () => false,
+    });
+    await reloadedRunner.restoreRunsForView();
+    await flush();
+
+    const snapshot = reloadedRunner.getSnapshot(runId);
+    expect(snapshot?.tasks[0]?.state).toBe('failed');
+    expect(snapshot?.tasks[0]?.failure).toEqual({ kind: 'reloadInterrupted' });
+    expect(newCodexHost.sessions).toHaveLength(0);
+    expect(reloadedRunner.retryTask(runId, 'T1')).toEqual({ ok: true });
+    await flush();
+    expect(newCodexHost.sessions).toHaveLength(1);
+  });
+
+  it('自動再開の上限（maxAutoResumeAttempts）に達していれば再開せず、理由をViewへ残す', async () => {
+    const { runner, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/auto-resume-limit.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // 前回までの自動再開で既に上限（1回）へ達していたことを模す
+    const before = store.find(runId);
+    if (before === undefined) {
+      throw new Error('runが見つかりません');
+    }
+    await store.update(runId, () => ({ ...before, autoResumeAttempts: 1 }));
+
+    const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+      readAutoResume: () => true,
+      readMaxAutoResumeAttempts: () => 1,
+    });
+    await reloadedRunner.restoreRunsForView();
+    await flush();
+
+    const snapshot = reloadedRunner.getSnapshot(runId);
+    // 再開せず、reloadInterruptedのままViewから見える
+    expect(snapshot?.tasks[0]?.state).toBe('failed');
+    expect(snapshot?.tasks[0]?.failure).toEqual({ kind: 'reloadInterrupted' });
+    expect(newCodexHost.sessions).toHaveLength(0);
+    const warning = snapshot?.warnings.find((w) => w.kind === 'autoResumeLimitExceeded');
+    expect(warning).toBeDefined();
+    expect(warning?.message).toContain('1');
+    // 上限超過では実施回数を増やさない（機械的に増え続けない）
+    expect(store.find(runId)?.autoResumeAttempts).toBe(1);
+  });
+
+  it('allowを持つタスクがreloadInterruptedなら、run全体の自動再開を見送る', async () => {
+    const { runner, store } = createHarness(ALLOW_YAML);
+    const result = await runner.start('/repo/.agents/workflows/auto-resume-allow.yaml', '/repo', {
+      allowConfirmed: true,
+    });
+    const runId = result.runId as string;
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+
+    const { reloadedRunner, newCodexHost } = reloadWith(store, ALLOW_YAML, {
+      readAutoResume: () => true,
+    });
+    await reloadedRunner.restoreRunsForView();
+    await flush();
+
+    const snapshot = reloadedRunner.getSnapshot(runId);
+    // 人が居ないその場でallow確認を代行できないため、reloadInterruptedのまま残す
+    expect(snapshot?.tasks[0]?.state).toBe('failed');
+    expect(snapshot?.tasks[0]?.failure).toEqual({ kind: 'reloadInterrupted' });
+    expect(newCodexHost.sessions).toHaveLength(0);
+    expect(snapshot?.warnings.some((w) => w.kind === 'autoResume')).toBe(false);
+    // 見送った理由自体はViewから見える（レビュー指摘。2026-08-23。上限超過だけ理由が
+    // 見えて他は見えないと人が区別できないため、autoResumeBlockedとしてrunへ積む）
+    const blockedWarning = snapshot?.warnings.find((w) => w.kind === 'autoResumeBlocked');
+    expect(blockedWarning).toBeDefined();
+    expect(blockedWarning?.message).toContain('allow');
+    // 再実行にはallow確認が要る（従来どおり）
+    expect(reloadedRunner.retryTask(runId, 'T1')).toEqual({
+      ok: false,
+      needsAllowConfirmation: true,
+    });
+  });
+
+  it(
+    '他の理由で失敗したタスクが混ざっているreloadInterruptedは、run全体の自動再開を見送り、' +
+      '理由をViewへ残す',
+    async () => {
+      const TWO_TASK_YAML = `
+version: 1
+name: auto-resume-other-failure-test
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+  - id: T2
+    prompt: p
+    done: d
+`;
+      const { runner, store } = createHarness(TWO_TASK_YAML);
+      const result = await runner.start(
+        '/repo/.agents/workflows/auto-resume-other-failure.yaml',
+        '/repo',
+      );
+      const runId = result.runId as string;
+      await flush();
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+      expect(store.find(runId)?.tasks['T2']?.state).toBe('running');
+
+      // T2は本物の理由（loopFailed）で先に失敗していたとする。T1はまだ走行中のまま
+      // リロードが来た（reconcileAfterReloadでreloadInterruptedになる）
+      const before = store.find(runId);
+      if (before === undefined) {
+        throw new Error('runが見つかりません');
+      }
+      await store.update(runId, () => ({
+        ...before,
+        tasks: {
+          ...before.tasks,
+          T2: {
+            ...before.tasks['T2']!,
+            state: 'failed',
+            failure: { kind: 'loopFailed', reason: 'stopped' },
+          },
+        },
+      }));
+
+      const { reloadedRunner, newCodexHost } = reloadWith(store, TWO_TASK_YAML, {
+        readAutoResume: () => true,
+      });
+      await reloadedRunner.restoreRunsForView();
+      await flush();
+
+      const snapshot = reloadedRunner.getSnapshot(runId);
+      // 孤立したpendingを作らないため、T1もreloadInterruptedのまま残す
+      const t1 = snapshot?.tasks.find((t) => t.id === 'T1');
+      expect(t1?.state).toBe('failed');
+      expect(t1?.failure).toEqual({ kind: 'reloadInterrupted' });
+      expect(newCodexHost.sessions).toHaveLength(0);
+      expect(snapshot?.warnings.some((w) => w.kind === 'autoResume')).toBe(false);
+      const blockedWarning = snapshot?.warnings.find((w) => w.kind === 'autoResumeBlocked');
+      expect(blockedWarning).toBeDefined();
+    },
+  );
+
+  it('自動再開したタスクは前の試行と別のworktree・別のブランチで走り、二重作成にならない', async () => {
+    const { runner, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/auto-resume-worktree.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    const before = store.find(runId)?.tasks['T1'];
+    expect(before?.state).toBe('running');
+    expect(before?.retryCount).toBe(0);
+
+    const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+      readAutoResume: () => true,
+    });
+    await reloadedRunner.restoreRunsForView();
+    await flush();
+
+    // クラッシュした試行のworktree・ブランチ名（.../T1）とは別名（.../T1-retry0）で
+    // 作り直す。`applyAutoResume`がmanualRetryCountを1増やすため（`retrySuffixOf`と同じ計算）。
+    // retryCountは増やさない（自動再試行=`retries`の予算を消費させないため。レビュー指摘、
+    // 2026-08-23）
+    const resumed = newCodexHost.sessions.find((s) => s.cwd.endsWith('/T1-retry0'));
+    expect(resumed).toBeDefined();
+    expect(store.find(runId)?.tasks['T1']?.retryCount).toBe(0);
+    expect(store.find(runId)?.tasks['T1']?.manualRetryCount).toBe(1);
+  });
+
+  it('ask_user回答待ちのまま中断した実行は、自動再開後に問いを出し直す', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, store } = createHarness(YAML, { messaging: deps });
+    const result = await runner.start('/repo/.agents/workflows/auto-resume-ask.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const port = state.hub?.orchestratorControl;
+    if (port === undefined) {
+      throw new Error('制御ツールが配線されていません');
+    }
+    port.askUser('どちらへ進める？', ['A案', 'B案']);
+    await flush();
+    expect(store.find(runId)?.pendingAskUser).toMatchObject({
+      question: 'どちらへ進める？',
+      choices: ['A案', 'B案'],
+    });
+
+    const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+      readAutoResume: () => true,
+    });
+    await reloadedRunner.restoreRunsForView();
+    await flush();
+
+    // 答え待ちの問いが、新しいオーケストレーターセッションでも生きている
+    // （hasLiveSession: trueに戻り、人が答えられる。design.md §16.33「答える経路」）
+    const snapshot = reloadedRunner.getSnapshot(runId);
+    expect(snapshot?.pendingAskUser).toMatchObject({
+      question: 'どちらへ進める？',
+      choices: ['A案', 'B案'],
+      hasLiveSession: true,
+      answered: false,
+    });
+    expect(newCodexHost.orchestratorSessions).toHaveLength(1);
+
+    // 答えると、質問を引き継いだ文脈と一緒に配送される（会話は復元できないため、
+    // イントロへ問いの文言を織り込む形で引き継ぐ。`runnerOrchestrator.ts`の
+    // `buildIntroBody`参照）
+    expect(reloadedRunner.answerAskUser(runId, 0)).toBe(true);
+    const orchestrator = newCodexHost.orchestratorSessions[0] as FakeTaskSession;
+    orchestrator.emitState({ ...initialChatState, busy: false });
+    await flush();
+
+    const sent = orchestrator.sentTexts.join('\n');
+    expect(sent).toContain('自動再開です');
+    expect(sent).toContain('どちらへ進める？');
+    expect(sent).toContain('A案');
   });
 });
 
@@ -8311,6 +11092,7 @@ tasks:
       integrationPullRequestNumber: undefined,
       integrationPullRequestUrl: undefined,
       finalMergeOutcome: undefined,
+      pendingAskUser: undefined,
     }));
 
     const host = new FakeHost();
@@ -8479,6 +11261,7 @@ tasks:
       integrationPullRequestNumber: undefined,
       integrationPullRequestUrl: undefined,
       finalMergeOutcome: undefined,
+      pendingAskUser: undefined,
     }));
 
     const errorLog = vi.fn();
@@ -8510,9 +11293,7 @@ tasks:
     expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
     // catch節のログ文言（`runnerRestore.ts`）も検証する
     expect(errorLog).toHaveBeenCalledWith(
-      expect.stringContaining(
-        `[workflow ${runId}/T1] リロード後のマージのやり直しに失敗しました`,
-      ),
+      expect.stringContaining(`[workflow ${runId}/T1] リロード後のマージのやり直しに失敗しました`),
     );
   });
 
@@ -8588,7 +11369,10 @@ tasks:
   it('retryMerge内のvoid startMerge(...)がgitの例外で落ちても、mergingで固着せずfailedへ確定する', async () => {
     const conflictGit = fakeGit({ conflictOnce: true });
     const { runner, codexHost, store } = createHarness(SOLO_YAML, { git: conflictGit });
-    const result = await runner.start('/repo/.agents/workflows/merge-rejection-retry.yaml', '/repo');
+    const result = await runner.start(
+      '/repo/.agents/workflows/merge-rejection-retry.yaml',
+      '/repo',
+    );
     const runId = result.runId as string;
     await flush();
 
@@ -8637,7 +11421,10 @@ tasks:
       },
     };
     const { runner, codexHost, store } = createHarness(SOLO_YAML, { git });
-    const result = await runner.start('/repo/.agents/workflows/merge-resolution-throw.yaml', '/repo');
+    const result = await runner.start(
+      '/repo/.agents/workflows/merge-resolution-throw.yaml',
+      '/repo',
+    );
     const runId = result.runId as string;
     await flush();
 
@@ -9119,9 +11906,7 @@ tasks:
 
     const snapshot = runner.getSnapshot(runId);
     expect(snapshot?.tasks.find((t) => t.id === 'T2')?.state).toBe('merging');
-    expect(
-      snapshot?.warnings.some((w) => w.kind === 'mergeBusy' && w.taskId === 'T2'),
-    ).toBe(false);
+    expect(snapshot?.warnings.some((w) => w.kind === 'mergeBusy' && w.taskId === 'T2')).toBe(false);
     expect(JSON.stringify(store.find(runId))).toBe(persistedBefore);
   });
 
@@ -9328,7 +12113,10 @@ tasks:
         git,
         readMergeApprovalTimeoutSec: () => 60,
       });
-      const result = await runner.start('/repo/.agents/workflows/merge-approval-timeout.yaml', '/repo');
+      const result = await runner.start(
+        '/repo/.agents/workflows/merge-approval-timeout.yaml',
+        '/repo',
+      );
       const runId = result.runId as string;
       await flush();
 
@@ -9392,7 +12180,10 @@ tasks:
       git,
       readMergeApprovalTimeoutSec: () => 60,
     });
-    const result = await runner.start('/repo/.agents/workflows/merge-approval-timeout-2.yaml', '/repo');
+    const result = await runner.start(
+      '/repo/.agents/workflows/merge-approval-timeout-2.yaml',
+      '/repo',
+    );
     const runId = result.runId as string;
     await flush();
 
@@ -9484,7 +12275,10 @@ tasks:
       git,
       readMergeApprovalTimeoutSec: () => 60,
     });
-    const result = await runner.start('/repo/.agents/workflows/merge-approval-timeout-5.yaml', '/repo');
+    const result = await runner.start(
+      '/repo/.agents/workflows/merge-approval-timeout-5.yaml',
+      '/repo',
+    );
     const runId = result.runId as string;
     await flush();
 
@@ -9613,4 +12407,313 @@ tasks:
       expect(store.find(runId)?.haltedByUser).toBe(true);
     },
   );
+});
+
+/**
+ * design.md §16.26（最終マージの判断、Issue #335）。
+ *
+ * `finalMerge: orchestrator | confirm` は統合PR/MR作成後にmainへ即マージせず、判断待ちの
+ * 状態へ入る。判断は`decide_final_merge`（MCP、orchestratorモードのみ）／Webviewの
+ * ボタン（confirmモードのみ）／タイムアウト（orchestratorモードのみ）のいずれかで確定し、
+ * どの経路でも`WorkflowRunner.decideFinalMerge(runId, decision, reason)`へ合流する。
+ *
+ * 判断待ちの間はMCPサーバー（`state.handle`）を閉じない（`decide_final_merge`を呼べる
+ * 状態を保つため）。決着後に閉じる。この開閉のタイミングそのものが今回の実装で見つけた
+ * 既存の欠陥（`pump()`がfinalizeForgeの完了を待たずに閉じていた）の修正対象であり、
+ * `state.handle?.closed`で直接検証する。
+ */
+describe('WorkflowRunner: 最終マージの判断（design.md §16.26、Issue #335）', () => {
+  const SINGLE_TASK_YAML = `
+version: 1
+name: final-merge-decision-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+  /**
+   * 制御ツールの実体（オーケストレーター専用接続に見せているもの）を取り出す。
+   * 「WorkflowRunner: オーケストレーターの制御ツール」describeのローカルヘルパーと
+   * 同じ実装（このdescribeのスコープからは参照できないため複製）。
+   */
+  function control(state: FakeMessagingState): OrchestratorControlPort {
+    const port = state.hub?.orchestratorControl;
+    if (port === undefined) {
+      throw new Error('制御ツールが配線されていません');
+    }
+    return port;
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it(
+    'finalMerge: orchestratorはPR/MR作成後、即マージせず判断待ちを警告欄へ記録し、' +
+      'MCPサーバーを開けたままにする',
+    async () => {
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      const cli = fakeForgeCli();
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+        messaging: deps,
+      });
+      const result = await runner.start('/repo/.agents/workflows/final-merge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // 統合PR/MRは作られているが、mainへのマージはまだ呼ばれていない
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'create')).toBe(true);
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+
+      const snapshot = runner.getSnapshot(runId);
+      expect(snapshot?.finalMergeOutcome).toBeUndefined();
+      expect(snapshot?.finalMergeDecision).toMatchObject({ mode: 'orchestrator' });
+      expect(
+        snapshot?.warnings.some(
+          (w) => w.kind === 'finalMergeDecision' && w.message.includes('待っています'),
+        ),
+      ).toBe(true);
+
+      // decide_final_mergeを呼べる状態を保つため、MCPサーバーはまだ閉じない
+      expect(state.handle?.closed).toBe(false);
+    },
+  );
+
+  it('decideFinalMerge(merge)は最終マージを実行し、決定と理由を警告欄へ記録してMCPサーバーを閉じる', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli();
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+      messaging: deps,
+    });
+    const result = await runner.start('/repo/.agents/workflows/final-merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const accepted = runner.decideFinalMerge(runId, 'merge', 'CIが全緑のため');
+    await flush();
+
+    expect(accepted).toBe(true);
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(true);
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.finalMergeOutcome).toBe('merged');
+    expect(snapshot?.finalMergeDecision).toBeUndefined();
+    expect(
+      snapshot?.warnings.some(
+        (w) =>
+          w.kind === 'finalMergeDecision' &&
+          w.message.includes('merge') &&
+          w.message.includes('CIが全緑のため'),
+      ),
+    ).toBe(true);
+    // 判断が確定したので、遅らせていたMCPサーバーの解放が進む
+    expect(state.handle?.closed).toBe(true);
+  });
+
+  it('decideFinalMerge(hold)はマージせずheldとして扱い、理由を警告欄へ記録する', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/final-merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    t1.finish('done', doneState('ok'));
+    await flush();
+
+    const accepted = runner.decideFinalMerge(runId, 'hold', 'レビュー未完了のため');
+    await flush();
+
+    expect(accepted).toBe(true);
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.finalMergeOutcome).toBe('held');
+    expect(store.find(runId)?.finalMergeOutcome).toBe('held');
+    expect(
+      snapshot?.warnings.some(
+        (w) => w.kind === 'finalMergeDecision' && w.message.includes('レビュー未完了のため'),
+      ),
+    ).toBe(true);
+  });
+
+  it('判断待ちが無い状態でdecideFinalMergeを呼んでもfalseを返し、何も変えない（二重確定・不明runId対策）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      // finalMerge: auto。判断待ちが発生しない
+      forge: fakeForgeDeps(cli, { finalMerge: 'auto' }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/final-merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    expect(runner.decideFinalMerge(runId, 'merge', 'x')).toBe(false);
+    expect(runner.decideFinalMerge('unknown-run', 'merge', 'x')).toBe(false);
+  });
+
+  it('decide_final_mergeは上限超過のreasonを受付自体で拒否する（update_task_promptと同じ流儀）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli();
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+      messaging: deps,
+    });
+    const result = await runner.start('/repo/.agents/workflows/final-merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    const tooLong = control(state).decideFinalMerge('merge', 'x'.repeat(4001));
+
+    expect(tooLong.accepted).toBe(false);
+    expect(tooLong.reason).toContain('4000');
+    // 拒否されたので判断待ちは解消されず、マージも実行されない
+    expect(runner.getSnapshot(runId)?.finalMergeDecision).toMatchObject({
+      mode: 'orchestrator',
+    });
+    expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+  });
+
+  it(
+    'finalMerge: orchestratorは応答が無いままagent.workflows.finalMergeDecisionTimeoutSecを' +
+      '超えると自動的にholdへ倒す（design.md §16.26。processを無期限に止めないための保険）',
+    async () => {
+      vi.useFakeTimers();
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      const cli = fakeForgeCli();
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+        readFinalMergeDecisionTimeoutSec: () => 60,
+      });
+      const result = await runner.start('/repo/.agents/workflows/final-merge.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      codexHost.byTaskId('T1').finish('done', doneState('ok'));
+      await flush();
+
+      expect(runner.getSnapshot(runId)?.finalMergeDecision).toMatchObject({ mode: 'orchestrator' });
+
+      // 閾値の直前ではまだ倒さない
+      await vi.advanceTimersByTimeAsync(59_000);
+      await flush();
+      expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBeUndefined();
+
+      // 閾値を超えたら自動的にholdへ倒す
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+
+      const snapshot = runner.getSnapshot(runId);
+      expect(snapshot?.finalMergeOutcome).toBe('held');
+      expect(snapshot?.finalMergeDecision).toBeUndefined();
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+      expect(snapshot?.warnings.some((w) => w.kind === 'finalMergeDecision')).toBe(true);
+    },
+  );
+
+  it(
+    '人が「全体の停止」を押した後は、オーケストレーターがdecide_final_merge相当（' +
+      "decideFinalMerge）でdecision: 'merge'を呼んでもmainへマージされない（" +
+      'レビュー指摘。他の判断系制御ツールと同じくhaltedByUserを見る）',
+    async () => {
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      const cli = fakeForgeCli();
+      const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+      });
+      const result = await runner.start('/repo/.agents/workflows/final-merge-halt.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      codexHost.byTaskId('T1').finish('done', doneState('ok'));
+      await flush();
+
+      expect(runner.getSnapshot(runId)?.finalMergeDecision).toMatchObject({ mode: 'orchestrator' });
+
+      // 全タスクが既に完了しているため、stop()はhaltedByUserを立てるだけでoutcomeは
+      // succeededのまま変わらない（getRunOutcomeはpending/runningの残りが無い限りskip扱いに
+      // しない）。判断待ちの状態で「全体の停止」が押されるケースそのものが再現できる
+      runner.stop(runId);
+      await flush();
+      expect(runner.getSnapshot(runId)?.outcome).toBe('succeeded');
+
+      const accepted = runner.decideFinalMerge(runId, 'merge', '停止後に無理やりマージを試みる');
+      await flush();
+
+      expect(accepted).toBe(false);
+      expect(cli.calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge')).toBe(false);
+      const snapshot = runner.getSnapshot(runId);
+      expect(snapshot?.finalMergeOutcome).toBeUndefined();
+      // 判断待ちの状態自体は解除されない（拒否しただけで、タイムアウトによる自動holdは
+      // 引き続き効く。holdは安全側なので拒否しない）
+      expect(snapshot?.finalMergeDecision).toMatchObject({ mode: 'orchestrator' });
+
+      // holdは拒否しない（安全側。タイムアウトの自動hold呼び出しも同じ経路を通るため、
+      // ここを塞ぐと判断待ちが無期限に解消されなくなる）
+      const heldAccepted = runner.decideFinalMerge(runId, 'hold', '停止後なのでholdにする');
+      await flush();
+      expect(heldAccepted).toBe(true);
+      expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBe('held');
+    },
+  );
+
+  it('finalMerge: confirmはタイムアウトしない（人の応答時間は予測できないため）', async () => {
+    vi.useFakeTimers();
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { finalMerge: 'confirm' }),
+      readFinalMergeDecisionTimeoutSec: () => 60,
+    });
+    const result = await runner.start('/repo/.agents/workflows/final-merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    expect(runner.getSnapshot(runId)?.finalMergeDecision).toMatchObject({ mode: 'confirm' });
+
+    // 閾値を大きく超えて進めても倒れない（confirmにはタイムアウトが効かない）
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    await flush();
+
+    const snapshot = runner.getSnapshot(runId);
+    expect(snapshot?.finalMergeOutcome).toBeUndefined();
+    expect(snapshot?.finalMergeDecision).toMatchObject({ mode: 'confirm' });
+
+    // 人が判断すれば通常どおり確定する
+    expect(runner.decideFinalMerge(runId, 'merge', '人が確認済み')).toBe(true);
+    await flush();
+    expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBe('merged');
+  });
 });

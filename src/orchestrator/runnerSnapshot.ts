@@ -59,6 +59,7 @@ export function getSnapshot(self: WorkflowRunnerInternals, runId: string): Workf
     warnings: [
       ...live.warnings,
       ...deriveMaxReachedWarnings(live),
+      ...deriveStalledWarnings(live),
       ...deriveAllowWarnings(live),
       ...derivePermissionEscalationWarnings(live),
     ],
@@ -69,8 +70,51 @@ export function getSnapshot(self: WorkflowRunnerInternals, runId: string): Workf
     integrationPullRequestUrl:
       live.integrationPullRequest?.url ?? persisted?.integrationPullRequestUrl,
     finalMergeOutcome: live.finalMergeOutcome ?? persisted?.finalMergeOutcome,
+    // design.md §16.26。ウィンドウのリロードでは復元しない（`LiveRun.finalMergeDecision`の
+    // JSDoc参照）ため、`persisted`へのフォールバックは無い（`live`にしか存在しえない）
+    finalMergeDecision:
+      live.finalMergeDecision === undefined
+        ? undefined
+        : {
+            mode: live.finalMergeDecision.mode,
+            pullRequestUrl:
+              live.integrationPullRequest?.url ?? persisted?.integrationPullRequestUrl,
+          },
     orchestrator: buildOrchestratorSnapshot(live),
+    pendingAskUser: buildPendingAskUserSnapshot(live, persisted),
   };
+}
+
+/**
+ * `ask_user`の回答待ち（design.md §16.33）の表示用の値。`live`（回答可能）を優先し、
+ * 無ければ永続化された値（リロード直後、自動再開（design.md §16.35、roadmap W10、
+ * Issue #584）がまだ走っていない・見送った間は答える経路が無く、問いの文言だけは読める。
+ * `LiveRun.pendingAskUser`のJSDoc参照）へフォールバックする。
+ */
+function buildPendingAskUserSnapshot(
+  live: LiveRun,
+  persisted: PersistedRun | undefined,
+): { question: string; choices: readonly string[]; hasLiveSession: boolean; answered: boolean } | undefined {
+  if (live.pendingAskUser !== undefined) {
+    return {
+      question: live.pendingAskUser.question,
+      choices: live.pendingAskUser.choices,
+      hasLiveSession: true,
+      // `true`の間は答え済み・配送待ち（`orchestrator.busy`中に答えたため、ターンが
+      // 終わるまで送信を保留している。`LiveAskUser.answeredChoice`のJSDoc参照）。
+      // 二重回答を防ぐため、Viewはこの間ボタンを押せなくする
+      answered: live.pendingAskUser.answeredChoice !== undefined,
+    };
+  }
+  if (persisted?.pendingAskUser !== undefined) {
+    return {
+      question: persisted.pendingAskUser.question,
+      choices: persisted.pendingAskUser.choices,
+      hasLiveSession: false,
+      answered: false,
+    };
+  }
+  return undefined;
 }
 
 /**
@@ -257,6 +301,20 @@ export function checkEffectivePermissionEscalation(
  * `autoApprove`（`checkEffectivePermissionEscalation`と同じ値）を使う。`send_message`は
  * 呼び出し元のセッションが生きていないと成立しない（MCPツールの呼び出しのため）ので、
  * 送信元の`LiveTask`は通常必ず見つかるが、内部矛盾で見つからない場合は判定を諦める。
+ *
+ * **【現在この関数は実質的に死んでいる】W9（roadmap、Issue #547）以降、`send_message`の
+ * 宛先はオーケストレーターに固定され、タスク同士が直接メッセージを送り合うことはできなく
+ * なった（design.md §16.34）。実タスクへ配送されるメッセージの`from`は常に
+ * `ORCHESTRATOR_CONNECTION_ID`（値`-orchestrator-`）になるが、この値は`live.def.tasks`
+ * （実タスクの定義一覧）には存在しない。下のループの`senderTask === undefined`判定が
+ * 毎回成立し、`continue`して警告を一度も積まずに終わる——関数もこのファイルの実装も、
+ * 意図的に変えていない（変える必要が無い）。実装だけを読むと「権限差を検出する防御が
+ * ここで働いている」ように見えるが、実際には常に素通りする。**この検出を復活させるか、
+ * 死んだコードとして削除するかは Issue #562 で決める**（まだどちらとも決まっていない。
+ * 復活させる場合は、配送されたメッセージの元の送信元を`StoredMessage`とは別に追跡する
+ * 仕組みが要る——現状の`StoredMessage`には由来の追跡情報（元はどのタスクが書いたか）が
+ * 無いため、この構造のままでは復活させられない）。詳細と経緯はdesign.md §16.34
+ * 「影響範囲」を参照。
  */
 export function checkMessagingPermissionEscalation(
   self: WorkflowRunnerInternals,
@@ -323,6 +381,30 @@ export function deriveMaxReachedWarnings(live: LiveRun): WorkflowWarning[] {
         kind: 'maxReached',
         taskId,
         message: `送信回数の上限に達しました（終了条件が満たされないまま停止）: ${taskId}${hint}`,
+      });
+    }
+  }
+  return warnings;
+}
+
+/**
+ * 停滞（design.md §16.27、Issue #336）も`maxReached`と同じく状態としてすでに`failed`が
+ * 持っているため、都度導出する（`deriveMaxReachedWarnings`と同じ理由）。
+ */
+export function deriveStalledWarnings(live: LiveRun): WorkflowWarning[] {
+  const warnings: WorkflowWarning[] = [];
+  for (const [taskId, state] of live.runState.tasks) {
+    if (state.state === 'failed' && state.failure?.kind === 'stalled') {
+      // セッションが残っていれば「続ける」で続きから走らせられる（`continueTask`が
+      // `maxReached`と同じ扱いに拡張してある）。リロード後は会話が失われているため
+      // 「再実行」しかできない
+      const hint = live.tasks.has(taskId)
+        ? '。「続ける」で同じ会話のまま指示を変えて再開できます'
+        : '';
+      warnings.push({
+        kind: 'loopStalled',
+        taskId,
+        message: `同じ応答が繰り返され、進捗が無いまま停止しました: ${taskId}${hint}`,
       });
     }
   }
