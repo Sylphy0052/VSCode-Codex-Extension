@@ -5432,7 +5432,7 @@ Issue #341（epic）の方針転換により、「判断するのはオーケス
 
 #### (a) タスクの開始時にIssueを起票する
 
-`maybeCreateTaskIssue`（`runner.ts`）を`prepareTaskLaunch`の先頭（作業ディレクトリの解決直後）から呼ぶ。次の条件が**すべて**揃ったときだけ`createIssue`（`forge.ts`）を呼ぶ。
+`maybeCreateTaskIssue`（`runner.ts`）を`prepareTaskLaunch`の末尾（作業ディレクトリの解決・実効設定のクランプ・権限越境チェック・bypassPermissionsの最終防御を終えた直後）から呼ぶ。**外部ホストへの副作用（`gh issue create`/`glab api`）を伴うため、セキュリティゲート（bypassPermissionsの最終防御）より後で呼ぶ。** 先に呼ぶと、危険な設定として開始を拒否したタスクについてもIssueだけが起票されたまま残る。次の条件が**すべて**揃ったときだけ`createIssue`（`forge.ts`）を呼ぶ。
 
 - `live.forge.kind === 'active'`かつ`createTaskIssue: true`
 - `shouldCreateTaskPullRequest(live.forge.pullRequest)`が`true`（`per-task`のときだけ）
@@ -5591,12 +5591,12 @@ hub.sendMessage({ from: taskId, to: ORCHESTRATOR_CONNECTION_ID, body: question, 
 
 ツールの説明文（`description`）へ、**呼べる条件を絞る文言**を書いた: 担当領域をまたぐ変更（他のワークフローへ影響する）・設計の前提を変える変更・受入基準を下げる判断・同じ失敗を3回繰り返して打つ手が尽きた場合、の4つに限る。この絞り込みは**説明文だけで実現し、機械的には検証しない**（モデルへの指示であり、コード側で「本当に担当領域をまたいでいるか」を判定する手段が無いため）。機械的に強制するのは次項の呼び出し回数上限だけである。
 
-引数の形式検証（`beginAskUser`、`runnerOrchestrator.ts`）は次のとおり:
+引数の形式検証（`beginAskUser`、`runnerOrchestrator.ts`）は次の順で行う:
 
+- 既に回答待ちの質問がある（`live.pendingAskUser !== undefined`）間は次の`ask_user`を拒否する（**1runにつき同時に1問だけ**。人が答えを選ぶまで次の問いを出せない）
 - `question`が空文字（trim後）なら拒否
 - `question`が`MAX_MESSAGE_BODY_LENGTH`（4000文字、`send_message`/`update_task_prompt`と共有）を超えたら拒否
 - `choices`が2〜4個の範囲外なら拒否
-- 既に回答待ちの質問がある（`live.pendingAskUser !== undefined`）間は次の`ask_user`を拒否する（**1runにつき同時に1問だけ**。人が答えを選ぶまで次の問いを出せない）
 
 #### 呼び出し回数の上限（「確認を絞る」の機械的な強制）
 
@@ -5604,7 +5604,7 @@ hub.sendMessage({ from: taskId, to: ORCHESTRATOR_CONNECTION_ID, body: question, 
 
 上限を超えた呼び出しは受付自体を拒否し（`send_message`と同じ流儀）、理由に**自分で判断するか、`decide_final_merge`の`hold`で止めるよう**明記する。「確認したいことがまだあるが上限に達した」場合の代替手段を用意しておかないと、オーケストレーターが行き詰まったまま`maxIterations`を消費するだけになりかねないため、既存の停止手段（`decide_final_merge`の`hold`）を案内する。
 
-`LiveOrchestrator.askUserCount`はrunの開始時に0で初期化し（`setupOrchestratorForStart`）、`beginAskUser`が受け付けるたびに1加算する。カウンタはrun単位で、`decide_final_merge`の判断待ちのような特別な扱いは無い。
+`LiveOrchestrator.askUserCount`はrunの開始時に0で初期化し（`setupOrchestratorForStart`）、`beginAskUser`が受け付けるたびに1加算する。カウンタはrun単位で、`decide_final_merge`の判断待ちのような特別な扱いは無い。**ただし自動再開（§16.35、W10、Issue #584）で未回答の`pendingAskUser`を引き継いだ場合は、0ではなく1から始める**（引き継いだ問いは既に1回分の`ask_user`を消費済みであり、0から始めるとリロードのたびに実質無料で上限をすり抜けられてしまうため。詳細は§16.35参照）。
 
 #### 「人が選ぶまで待つ」の実装（送信ゲート。新しいタスク状態は増やしていない）
 
