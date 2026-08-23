@@ -23,20 +23,35 @@
     `grep -rln "型検査もlintも効かない" src/` は使わない——`workflowScript.ts` の
     ヘッダでその一文が折り返し、「型検査もlintも」と「効かない」が別の行にあるため
     **取りこぼす**。
-    **ラベル表は22あり、3階層に分かれる。直し方が違う**（以下は #646 時点の観測。
+    **ラベル表は25あり、3階層に分かれる。直し方が違う**（以下は #646 時点の観測。
     **着手時に測り直すこと**——#645 のマージで `FAILURE_LABEL` の件数が11→12へ動いた。
     さらにこの表自体、**最初に書いた時点で3階層とも件数が間違っており**、#646 のレビューで
     直った。数字を残しているのは変化の幅を伝えるためで、そのまま使うためではない）。
-    **数える基準**: キーから表示文字列を引く**定数**の辞書（リテラルで全キーが書かれて
-    いるもの）。**除外**は、空で初期化して後から詰めるアキュムレータだけ
+    **数える基準を読む前に、引き方を先に読むこと。**基準を2回書いて2回とも外した
+    （1回目は (1) を丸ごと除外、2回目は (3) を3件取りこぼした）。**実際に効いたのは
+    基準ではなく、命名に依存しない引き方だった:**
+
+    ```
+    grep -nE "^ *const [A-Za-z_]+ = \{" src/view/chatScript.ts src/view/controlPanelScript.ts src/view/workflowScript.ts
+    ```
+
+    **20件ほど出るので、1件ずつ目で判断する。**`_LABEL` でも `_TITLE` でも `labelOf` でも
+    `known` でも出る。**(1)(2) が一度も動かなかったのは、そちらを型
+    （`Record<UnionType, string>` / `Record<string, string>`）で引いていて、
+    もともと命名に依存していなかったから。**(3) だけが型で引けず、命名に頼ったので外れた。
+
+    **数える基準**（1件ずつ判断するときの目安）: キーから表示文字列を引く**定数**の辞書
+    （リテラルで全キーが書かれているもの）。**除外**は、空で初期化して後から詰める
+    アキュムレータだけ
     （`const result: Record<string, string> = {}`。`codex/configToml.ts:23` と
     `provider/slashCommands.ts:68`）。
     **「未知のキーにフォールバックするか」は数える基準ではなく、危険度の指標として使う。**
     最初この一文を基準の側に書いたが、それだと (1) の6件が全部落ちて 8+8=16 になる
     （tscが網羅を強制するのでフォールバックを書く理由が無い）——**基準が3階層のうち1つを
     丸ごと除外していた。**指標としての読み方は次のとおり:
-    **フォールバックがある = 足し忘れても緑のまま、画面に生の識別子が出る**（(2)(3) の16件。
-    `?? key` / `|| kind` の形。実測で16件すべてが該当）。
+    **フォールバックがある = 足し忘れても緑のまま、画面に生の識別子が出る**（(2)(3) の19件中18件。
+    `?? key` / `|| kind` の形）。**残る1件（`controlPanelScript.ts:392`）はフォールバックが無く、
+    型も無い。足し忘れると画面に `undefined` が出る——この表で最も危険。**
     **フォールバックが無い = 足し忘れるとコンパイルが落ちる**（(1) の6件。
     `ACTION_LABELS[action]` のように素で索く）。
     **この軸は3階層の分け方とほぼ一致するが、意味が違う。**階層は「型がどう書かれているか」、
@@ -65,11 +80,33 @@
     受けているので、閉じた型を作れるかは着手時に確かめること**（(3)の
     `EXTRA_USAGE_DISABLED_REASON_LABEL` と同じ性質）。**命名規則を持たない
     （`known` という変数名）ため、`_LABEL` / `_TITLE` のような命名で引くと出ない。**
-    (3) **テンプレートリテラルの中 — 型検査が届かない。8件**
-    （`chatScript.ts:92` `KIND_LABEL` / `:159` `STATUS_LABEL` / `:1338` `TODO_MARK` /
-    `:1717` `EXTRA_USAGE_DISABLED_REASON_LABEL` / `:1805` `LOOP_STOP_LABEL` /
-    `workflowScript.ts:19` `STATE_LABEL` / `:31` `FAILURE_LABEL` / `:975`
-    `PROGRAM_SKIP_REASON_LABEL`）。型注釈を書く場所が無いので、
+    (3) **テンプレートリテラルの中 — 型検査が届かない。11件**
+    （`chatScript.ts:92` `KIND_LABEL` / `chatScript.ts:159` `STATUS_LABEL` /
+    `chatScript.ts:812` 無名（`createDiff` 内の `kindLabel`） /
+    `chatScript.ts:1338` `TODO_MARK` /
+    `chatScript.ts:1717` `EXTRA_USAGE_DISABLED_REASON_LABEL` /
+    `chatScript.ts:1805` `LOOP_STOP_LABEL` /
+    `controlPanelScript.ts:392` 無名（`formatProvides` 内の `labelOf`） /
+    `controlPanelScript.ts:591` 無名（`importDetailKindLabel` 内の `labels`） /
+    `workflowScript.ts:19` `STATE_LABEL` / `workflowScript.ts:31` `FAILURE_LABEL` /
+    `workflowScript.ts:979` `PROGRAM_SKIP_REASON_LABEL`）。
+    **後半3件は命名で引いたときに落ちていた**——`_LABEL` / `_TITLE` を持たず、
+    2件は変数へ入れずその場で索いている。**`controlPanelScript.ts` が1141行あって
+    0件だったのが手がかり。件数が0のファイルは、引き方を疑う。**
+    **`workflowScript.ts` の `PROGRAM_SKIP_REASON_LABEL` は当初 `:975` と書いていたが、
+    #645 が `FAILURE_LABEL` に1件足したぶん4行ずれて `:979` になった。**
+    行番号は動く。名前で引き直すこと。
+    **`chatScript.ts:812` は `appserver/transcriptMarkdown.ts:33` の `DIFF_KIND_TITLE` と
+    中身が同一**（`add: '追加'` / `delete: '削除'` / `update: '変更'`）。
+    **重複は事故ではなく、`DIFF_KIND_TITLE` 側のJSDocに「`chatScript.ts` の `createDiff` と
+    同じ対応」と明記されている。**T26は「見つける」のではなく「共有するか、2箇所のままにするか」を
+    決める。同じ表が (2) と (3) にまたがっているので、片方だけ型で閉じても残る。
+    **`controlPanelScript.ts:392` は3階層のどれにも当てはまらない**——型が無く
+    （テンプレートリテラル内）、**フォールバックも無い**。索くキーはすぐ下の固定配列
+    （`['skills', 'agents', 'hooks', 'mcpServers']`）と手で揃えてあるだけで、
+    配列に足して辞書に足し忘れると画面に `undefined` が出る。
+    **危険度は (2)(3) の他より高い**（他は生の識別子が出るだけ）。
+    型注釈を書く場所が無いので、
     `test/unit/webviewScript.test.ts` が `FAILURE_LABEL` にやっている形
     （対応する型定義をソースから抽出してキーを突き合わせる）しか手が無い。
     **「同じテストを繰り返すだけ」ではない。抽出の形が4種以上ある**——
@@ -80,6 +117,17 @@
     そして **`EXTRA_USAGE_DISABLED_REASON_LABEL` は閉じた型が存在しない**
     （CLIの語彙をそのまま受けている）ため、**網羅を主張する相手がおらず同じ検査は
     原理的に書けない**。型を作るところからになる。
+    **判断が割れた1件を残しておく: `chatScript.ts:176` `CLASS_OF` は数えていない。**
+    キー体系は `KIND_LABEL` と同じ（`userMessage` / `commandExecution` …）で、
+    足し忘れると見た目が壊れる——ここまでは同じ。**分けたのはキーの数**:
+    `KIND_LABEL` は18キー、`CLASS_OF` は9キー。**`CLASS_OF` は全キーを書く表ではなく、
+    CSSクラスが要る種類だけを書く部分的な表で、`|| ''` は足し忘れの受け皿ではなく
+    正規の値である。**種類を足したときに `CLASS_OF` へ足すかどうかは、その種類に
+    クラスが要るかで決まる。**「値を足したらここも足さないと壊れる」が成り立たない。**
+    同じ理由で `controlPanelScript.ts:1069` `SECTION_CONTAINERS` と
+    `workflowScript.ts:361` `ARROW_IDS` も外した（どちらもキー→要素IDで、
+    型の値が増えても連動しない）。
+    **着手時にこの判断ごと見直してよい。**入れるなら (3) は12、合計26。
     **追いIssueに「6回繰り返すだけ」と書かないこと**——着手した人が最初の1つで止まる
   - [#491](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/491)
     終了したrunを `retry_task` で再開してもオーケストレーターの制御ツールが復活しない
