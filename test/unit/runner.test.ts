@@ -977,6 +977,8 @@ function createHarness(
     readCiWaitTimeoutSec?: () => number;
     readCiUpdateBranchMaxRetries?: () => number;
     readMaxAskUserPerRun?: () => number;
+    readAutoResume?: () => boolean;
+    readMaxAutoResumeAttempts?: () => number;
   },
 ): Harness {
   const codexHost = new FakeHost();
@@ -1018,6 +1020,16 @@ function createHarness(
       : {}),
     ...(options?.readMaxAskUserPerRun !== undefined
       ? { readMaxAskUserPerRun: options.readMaxAskUserPerRun }
+      : {}),
+    // 自動再開（design.md §16.35、roadmap W10、Issue #584）の既定は本番では`true`だが、
+    // ここ（共有テストハーネス）では`false`を既定にする。本番の既定値を素直に継承すると、
+    // このハーネスへ依存する既存の「リロード後の実行再開」系テスト（`reloadedRunner`を
+    // 使わずこの`createHarness`経由で`restoreRunsForView()`を呼ぶもの）が軒並み自動再開の
+    // 影響を受けて意図せず挙動が変わるため、明示的に上書きしない限り無効のままにする
+    // （新しく自動再開そのものを確かめるテストは`options.readAutoResume`で個別に有効化する）
+    readAutoResume: options?.readAutoResume ?? (() => false),
+    ...(options?.readMaxAutoResumeAttempts !== undefined
+      ? { readMaxAutoResumeAttempts: options.readMaxAutoResumeAttempts }
       : {}),
     randomId: () => `00000000-0000-4000-8000-${String((seq += 1)).padStart(12, '0')}`,
   });
@@ -1587,6 +1599,10 @@ tasks:
 
       // 新しいプロセス（リロード後）を模す。復元だけなのでライブなセッションは無い
       const reloadedRunner = new WorkflowRunner({
+        // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+        // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+        // （design.md §16.35、roadmap W10、Issue #584）
+        readAutoResume: () => false,
         hosts: { codex: new FakeHost(), claude: new FakeHost() },
         worktreeQueue: new WorktreeCreationQueue(),
         git: fakeGit(),
@@ -2723,6 +2739,10 @@ tasks:
       claude: newCodexHost,
     };
     const reloadedRunner = new WorkflowRunner({
+      // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+      // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+      // （design.md §16.35、roadmap W10、Issue #584）
+      readAutoResume: () => false,
       hosts: newHosts,
       worktreeQueue: new WorktreeCreationQueue(),
       git: fakeGit(),
@@ -2784,6 +2804,10 @@ tasks:
       // 新しいプロセス（リロード後）を模す
       const newCodexHost = new FakeHost();
       const reloadedRunner = new WorkflowRunner({
+        // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+        // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+        // （design.md §16.35、roadmap W10、Issue #584）
+        readAutoResume: () => false,
         hosts: { codex: newCodexHost, claude: newCodexHost },
         worktreeQueue: new WorktreeCreationQueue(),
         git: fakeGit(),
@@ -2837,6 +2861,10 @@ tasks:
       readTextFile: async () => YAML,
     };
     const reloadedRunner = new WorkflowRunner({
+      // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+      // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+      // （design.md §16.35、roadmap W10、Issue #584）
+      readAutoResume: () => false,
       hosts: { codex: new FakeHost(), claude: new FakeHost() },
       worktreeQueue: new WorktreeCreationQueue(),
       git: fakeGit(),
@@ -2869,6 +2897,10 @@ tasks:
       readTextFile: async () => undefined,
     };
     const reloadedRunner = new WorkflowRunner({
+      // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+      // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+      // （design.md §16.35、roadmap W10、Issue #584）
+      readAutoResume: () => false,
       hosts: { codex: new FakeHost(), claude: new FakeHost() },
       worktreeQueue: new WorktreeCreationQueue(),
       git: fakeGit(),
@@ -4696,6 +4728,10 @@ tasks:
     // 同じstoreを共有する新しいWorkflowRunnerインスタンス（ウィンドウのリロードを模す）
     const reloadedHost = new FakeHost();
     const reloadedRunner = new WorkflowRunner({
+      // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+      // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+      // （design.md §16.35、roadmap W10、Issue #584）
+      readAutoResume: () => false,
       hosts: { codex: reloadedHost, claude: reloadedHost },
       worktreeQueue: new WorktreeCreationQueue(),
       git,
@@ -5664,6 +5700,10 @@ tasks:
         // メモリ上のマニフェスト）は失われる
         const newCodexHost = new FakeHost();
         const reloadedRunner = new WorkflowRunner({
+          // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+          // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+          // （design.md §16.35、roadmap W10、Issue #584）
+          readAutoResume: () => false,
           hosts: { codex: newCodexHost, claude: newCodexHost },
           worktreeQueue: new WorktreeCreationQueue(),
           git: fakeGit({ notGitRepo: true }),
@@ -5729,6 +5769,10 @@ tasks:
 
         const newCodexHost = new FakeHost();
         const reloadedRunner = new WorkflowRunner({
+          // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+          // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+          // （design.md §16.35、roadmap W10、Issue #584）
+          readAutoResume: () => false,
           hosts: { codex: newCodexHost, claude: newCodexHost },
           worktreeQueue: new WorktreeCreationQueue(),
           git: fakeGit({ notGitRepo: true }),
@@ -5814,6 +5858,10 @@ tasks:
         // リロード（新しいプロセスを模す。同じstore・同じディスクを使い回す）
         const newCodexHost = new FakeHost();
         const reloadedRunner = new WorkflowRunner({
+          // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+          // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+          // （design.md §16.35、roadmap W10、Issue #584）
+          readAutoResume: () => false,
           hosts: { codex: newCodexHost, claude: newCodexHost },
           worktreeQueue: new WorktreeCreationQueue(),
           git: fakeGit({ notGitRepo: true }),
@@ -6299,6 +6347,10 @@ tasks:
         const { deps: deps2, state: state2 } = fakeMessagingDeps();
         const newCodexHost = new FakeHost();
         const reloadedRunner = new WorkflowRunner({
+          // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+          // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+          // （design.md §16.35、roadmap W10、Issue #584）
+          readAutoResume: () => false,
           hosts: { codex: newCodexHost, claude: newCodexHost },
           worktreeQueue: new WorktreeCreationQueue(),
           git: fakeGit(),
@@ -8926,6 +8978,10 @@ tasks:
 
       const newCodexHost = new FakeHost();
       const reloadedRunner = new WorkflowRunner({
+        // 本番の既定値（true）だとリロード後の自動再開が動き、この既存テストが確かめている
+        // 「人が手動で再実行するまで再開しない」前提が崩れるため明示的に無効化する
+        // （design.md §16.35、roadmap W10、Issue #584）
+        readAutoResume: () => false,
         hosts: { codex: newCodexHost, claude: newCodexHost },
         worktreeQueue: new WorktreeCreationQueue(),
         git: fakeGit(),
@@ -8955,6 +9011,337 @@ tasks:
       expect(reloadedRunner.answerAskUser(runId, 0)).toBe(false);
     },
   );
+});
+
+describe('WorkflowRunner: 中断からの自動再開（design.md §16.35、roadmap W10、Issue #584）', () => {
+  const YAML = `
+version: 1
+name: auto-resume-test
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+`;
+
+  const ALLOW_YAML = `
+version: 1
+name: auto-resume-allow-test
+tasks:
+  - id: T1
+    allow:
+      - "npm test"
+    prompt: p
+    done: d
+`;
+
+  function reloadWith(
+    store: WorkflowRunStore,
+    yaml: string,
+    options?: { readAutoResume?: () => boolean; readMaxAutoResumeAttempts?: () => number },
+  ): { reloadedRunner: WorkflowRunner; newCodexHost: FakeHost } {
+    const newCodexHost = new FakeHost();
+    const reloadedRunner = new WorkflowRunner({
+      ...(options?.readAutoResume !== undefined
+        ? { readAutoResume: options.readAutoResume }
+        : {}),
+      ...(options?.readMaxAutoResumeAttempts !== undefined
+        ? { readMaxAutoResumeAttempts: options.readMaxAutoResumeAttempts }
+        : {}),
+      hosts: { codex: newCodexHost, claude: newCodexHost },
+      worktreeQueue: new WorktreeCreationQueue(),
+      git: fakeGit(),
+      fs: identityFs,
+      filePort: filePort(yaml),
+      store,
+      log: fakeLogger,
+      readBaseline: () => ({
+        codexSandbox: 'read-only',
+        codexApprovalMode: 'on-request',
+        claudePermissionMode: 'manual',
+        allowAutoApprove: true,
+        allowClaudeBypassPermissions: false,
+      }),
+    });
+    return { reloadedRunner, newCodexHost };
+  }
+
+  it('既定（autoResume: true）ではreloadInterruptedのタスクをpendingへ戻し自動的に再開する', async () => {
+    const { runner, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/auto-resume.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+
+    // 明示的に`true`を渡す（本番の既定値と同じ）。ハーネス既定は`false`のため
+    const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+      readAutoResume: () => true,
+    });
+    await reloadedRunner.restoreRunsForView();
+    await flush();
+
+    // 再実行を待つ`failed`ではなく、新しいセッションから自動的に走り出している
+    const snapshot = reloadedRunner.getSnapshot(runId);
+    expect(snapshot?.tasks[0]?.state).toBe('running');
+    expect(snapshot?.tasks[0]?.hasLiveSession).toBe(true);
+    expect(newCodexHost.sessions).toHaveLength(1);
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+
+    // 戻したタスクidがViewから見える形で残る（design.md §16.35の受入基準）
+    const warning = snapshot?.warnings.find((w) => w.kind === 'autoResume');
+    expect(warning).toBeDefined();
+    expect(warning?.message).toContain('T1');
+
+    // 自動再開の実施回数を数えている（次のリロードで上限判定に使う）
+    expect(store.find(runId)?.autoResumeAttempts).toBe(1);
+  });
+
+  it('haltedByUser（人が全体停止した実行）は自動再開しない', async () => {
+    const { runner, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/auto-resume-halted.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // 全体停止した直後、走行中タスクのstopLoopがまだ返ってきていない状態でリロードが来た
+    // ことを模す（haltedByUser: trueかつタスクはまだ`running`のまま）
+    runner.stop(runId);
+    await flush();
+    expect(store.find(runId)?.haltedByUser).toBe(true);
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+
+    const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+      readAutoResume: () => true,
+    });
+    await reloadedRunner.restoreRunsForView();
+    await flush();
+
+    // reconcileAfterReloadでfailed(reloadInterrupted)になったまま、自動再開はしない
+    const snapshot = reloadedRunner.getSnapshot(runId);
+    expect(snapshot?.tasks[0]?.state).toBe('failed');
+    expect(snapshot?.tasks[0]?.failure).toEqual({ kind: 'reloadInterrupted' });
+    expect(newCodexHost.sessions).toHaveLength(0);
+    expect(snapshot?.warnings.some((w) => w.kind === 'autoResume')).toBe(false);
+  });
+
+  it('agent.workflows.autoResumeがfalseなら従来どおり再開せず、人の再実行を待つ', async () => {
+    const { runner, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/auto-resume-off.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+      readAutoResume: () => false,
+    });
+    await reloadedRunner.restoreRunsForView();
+    await flush();
+
+    const snapshot = reloadedRunner.getSnapshot(runId);
+    expect(snapshot?.tasks[0]?.state).toBe('failed');
+    expect(snapshot?.tasks[0]?.failure).toEqual({ kind: 'reloadInterrupted' });
+    expect(newCodexHost.sessions).toHaveLength(0);
+    expect(reloadedRunner.retryTask(runId, 'T1')).toEqual({ ok: true });
+    await flush();
+    expect(newCodexHost.sessions).toHaveLength(1);
+  });
+
+  it('自動再開の上限（maxAutoResumeAttempts）に達していれば再開せず、理由をViewへ残す', async () => {
+    const { runner, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/auto-resume-limit.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    // 前回までの自動再開で既に上限（1回）へ達していたことを模す
+    const before = store.find(runId);
+    if (before === undefined) {
+      throw new Error('runが見つかりません');
+    }
+    await store.update(runId, () => ({ ...before, autoResumeAttempts: 1 }));
+
+    const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+      readAutoResume: () => true,
+      readMaxAutoResumeAttempts: () => 1,
+    });
+    await reloadedRunner.restoreRunsForView();
+    await flush();
+
+    const snapshot = reloadedRunner.getSnapshot(runId);
+    // 再開せず、reloadInterruptedのままViewから見える
+    expect(snapshot?.tasks[0]?.state).toBe('failed');
+    expect(snapshot?.tasks[0]?.failure).toEqual({ kind: 'reloadInterrupted' });
+    expect(newCodexHost.sessions).toHaveLength(0);
+    const warning = snapshot?.warnings.find((w) => w.kind === 'autoResumeLimitExceeded');
+    expect(warning).toBeDefined();
+    expect(warning?.message).toContain('1');
+    // 上限超過では実施回数を増やさない（機械的に増え続けない）
+    expect(store.find(runId)?.autoResumeAttempts).toBe(1);
+  });
+
+  it('allowを持つタスクがreloadInterruptedなら、run全体の自動再開を見送る', async () => {
+    const { runner, store } = createHarness(ALLOW_YAML);
+    const result = await runner.start('/repo/.agents/workflows/auto-resume-allow.yaml', '/repo', {
+      allowConfirmed: true,
+    });
+    const runId = result.runId as string;
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+
+    const { reloadedRunner, newCodexHost } = reloadWith(store, ALLOW_YAML, {
+      readAutoResume: () => true,
+    });
+    await reloadedRunner.restoreRunsForView();
+    await flush();
+
+    const snapshot = reloadedRunner.getSnapshot(runId);
+    // 人が居ないその場でallow確認を代行できないため、reloadInterruptedのまま残す
+    expect(snapshot?.tasks[0]?.state).toBe('failed');
+    expect(snapshot?.tasks[0]?.failure).toEqual({ kind: 'reloadInterrupted' });
+    expect(newCodexHost.sessions).toHaveLength(0);
+    expect(snapshot?.warnings.some((w) => w.kind === 'autoResume')).toBe(false);
+    // 見送った理由自体はViewから見える（レビュー指摘。2026-08-23。上限超過だけ理由が
+    // 見えて他は見えないと人が区別できないため、autoResumeBlockedとしてrunへ積む）
+    const blockedWarning = snapshot?.warnings.find((w) => w.kind === 'autoResumeBlocked');
+    expect(blockedWarning).toBeDefined();
+    expect(blockedWarning?.message).toContain('allow');
+    // 再実行にはallow確認が要る（従来どおり）
+    expect(reloadedRunner.retryTask(runId, 'T1')).toEqual({
+      ok: false,
+      needsAllowConfirmation: true,
+    });
+  });
+
+  it(
+    '他の理由で失敗したタスクが混ざっているreloadInterruptedは、run全体の自動再開を見送り、' +
+      '理由をViewへ残す',
+    async () => {
+      const TWO_TASK_YAML = `
+version: 1
+name: auto-resume-other-failure-test
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+  - id: T2
+    prompt: p
+    done: d
+`;
+      const { runner, store } = createHarness(TWO_TASK_YAML);
+      const result = await runner.start(
+        '/repo/.agents/workflows/auto-resume-other-failure.yaml',
+        '/repo',
+      );
+      const runId = result.runId as string;
+      await flush();
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+      expect(store.find(runId)?.tasks['T2']?.state).toBe('running');
+
+      // T2は本物の理由（loopFailed）で先に失敗していたとする。T1はまだ走行中のまま
+      // リロードが来た（reconcileAfterReloadでreloadInterruptedになる）
+      const before = store.find(runId);
+      if (before === undefined) {
+        throw new Error('runが見つかりません');
+      }
+      await store.update(runId, () => ({
+        ...before,
+        tasks: {
+          ...before.tasks,
+          T2: {
+            ...before.tasks['T2']!,
+            state: 'failed',
+            failure: { kind: 'loopFailed', reason: 'stopped' },
+          },
+        },
+      }));
+
+      const { reloadedRunner, newCodexHost } = reloadWith(store, TWO_TASK_YAML, {
+        readAutoResume: () => true,
+      });
+      await reloadedRunner.restoreRunsForView();
+      await flush();
+
+      const snapshot = reloadedRunner.getSnapshot(runId);
+      // 孤立したpendingを作らないため、T1もreloadInterruptedのまま残す
+      const t1 = snapshot?.tasks.find((t) => t.id === 'T1');
+      expect(t1?.state).toBe('failed');
+      expect(t1?.failure).toEqual({ kind: 'reloadInterrupted' });
+      expect(newCodexHost.sessions).toHaveLength(0);
+      expect(snapshot?.warnings.some((w) => w.kind === 'autoResume')).toBe(false);
+      const blockedWarning = snapshot?.warnings.find((w) => w.kind === 'autoResumeBlocked');
+      expect(blockedWarning).toBeDefined();
+    },
+  );
+
+  it('自動再開したタスクは前の試行と別のworktree・別のブランチで走り、二重作成にならない', async () => {
+    const { runner, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/auto-resume-worktree.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    const before = store.find(runId)?.tasks['T1'];
+    expect(before?.state).toBe('running');
+    expect(before?.retryCount).toBe(0);
+
+    const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+      readAutoResume: () => true,
+    });
+    await reloadedRunner.restoreRunsForView();
+    await flush();
+
+    // クラッシュした試行のworktree・ブランチ名（.../T1）とは別名（.../T1-retry0）で
+    // 作り直す。`applyAutoResume`がmanualRetryCountを1増やすため（`retrySuffixOf`と同じ計算）。
+    // retryCountは増やさない（自動再試行=`retries`の予算を消費させないため。レビュー指摘、
+    // 2026-08-23）
+    const resumed = newCodexHost.sessions.find((s) => s.cwd.endsWith('/T1-retry0'));
+    expect(resumed).toBeDefined();
+    expect(store.find(runId)?.tasks['T1']?.retryCount).toBe(0);
+    expect(store.find(runId)?.tasks['T1']?.manualRetryCount).toBe(1);
+  });
+
+  it('ask_user回答待ちのまま中断した実行は、自動再開後に問いを出し直す', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, store } = createHarness(YAML, { messaging: deps });
+    const result = await runner.start('/repo/.agents/workflows/auto-resume-ask.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const port = state.hub?.orchestratorControl;
+    if (port === undefined) {
+      throw new Error('制御ツールが配線されていません');
+    }
+    port.askUser('どちらへ進める？', ['A案', 'B案']);
+    await flush();
+    expect(store.find(runId)?.pendingAskUser).toMatchObject({
+      question: 'どちらへ進める？',
+      choices: ['A案', 'B案'],
+    });
+
+    const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+      readAutoResume: () => true,
+    });
+    await reloadedRunner.restoreRunsForView();
+    await flush();
+
+    // 答え待ちの問いが、新しいオーケストレーターセッションでも生きている
+    // （hasLiveSession: trueに戻り、人が答えられる。design.md §16.33「答える経路」）
+    const snapshot = reloadedRunner.getSnapshot(runId);
+    expect(snapshot?.pendingAskUser).toMatchObject({
+      question: 'どちらへ進める？',
+      choices: ['A案', 'B案'],
+      hasLiveSession: true,
+      answered: false,
+    });
+    expect(newCodexHost.orchestratorSessions).toHaveLength(1);
+
+    // 答えると、質問を引き継いだ文脈と一緒に配送される（会話は復元できないため、
+    // イントロへ問いの文言を織り込む形で引き継ぐ。`runnerOrchestrator.ts`の
+    // `buildIntroBody`参照）
+    expect(reloadedRunner.answerAskUser(runId, 0)).toBe(true);
+    const orchestrator = newCodexHost.orchestratorSessions[0] as FakeTaskSession;
+    orchestrator.emitState({ ...initialChatState, busy: false });
+    await flush();
+
+    const sent = orchestrator.sentTexts.join('\n');
+    expect(sent).toContain('自動再開です');
+    expect(sent).toContain('どちらへ進める？');
+    expect(sent).toContain('A案');
+  });
 });
 
 describe('formatPathList（先頭20件+残り件数の丸め、レビュー指摘: risk、Issue #380）', () => {

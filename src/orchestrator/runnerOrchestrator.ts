@@ -35,14 +35,38 @@ import { truncateByCodePoint } from './workflow';
  * ここが持つのはセッションの生成・寿命・イベントの発火だけ。
  */
 
+/**
+ * 自動再開（design.md §16.35、roadmap W10、Issue #584）で立て直したオーケストレーターへ
+ * 渡す文脈。中断前に`ask_user`の回答待ちのまま落ちた問いがあれば、新しいセッションは
+ * その会話を覚えていないため、intro文へ書き添えて出し直す（このオブジェクト自体は
+ * `PersistedRun.pendingAskUser`をそのまま渡す想定）。
+ */
+export interface OrchestratorResumeContext {
+  pendingAskUser?: { question: string; choices: readonly string[]; askedAt: string };
+}
+
 /** run開始時にオーケストレーターへ渡す、役割と道具の説明。 */
-function buildIntroBody(live: LiveRun): string {
+function buildIntroBody(live: LiveRun, resume?: OrchestratorResumeContext): string {
   const tasks = live.def.tasks
     .map((t) => {
       const deps = t.dependsOn.length > 0 ? `（依存: ${t.dependsOn.join(', ')}）` : '';
       return `- ${t.id}${deps}`;
     })
     .join('\n');
+  const pendingAskUser = resume?.pendingAskUser;
+  const resumeNote =
+    pendingAskUser === undefined
+      ? []
+      : [
+          '',
+          'このセッションは中断（ウィンドウのリロード等）からの自動再開です。前回のセッションで' +
+            '次の質問を出したまま、まだ回答されていません（会話そのものは復元できないため、' +
+            'この文脈だけを引き継いでいます）:',
+          `質問: "${pendingAskUser.question}"`,
+          `選択肢: ${pendingAskUser.choices.join(' / ')}`,
+          '人が選ぶと「人がask_userの質問に答えました: "<選択肢>"」という発話が届きます。それまで' +
+            '新しい ask_user は呼べません（回答待ちは1runにつき同時に1問だけ）。',
+        ];
   return [
     `ワークフロー「${live.def.name}」の実行を開始しました。あなたはこの実行のオーケストレーターです。`,
     '人からの質問に答え、進行の要点を報告し、頼まれたら方針の変更を実行してください。',
@@ -60,6 +84,7 @@ function buildIntroBody(live: LiveRun): string {
     '',
     `タスク（${live.def.tasks.length}件、並列上限 ${live.def.maxParallel}）:`,
     tasks,
+    ...resumeNote,
   ].join('\n');
 }
 
@@ -567,6 +592,7 @@ export async function setupOrchestratorForStart(
   self: WorkflowRunnerInternals,
   runId: string,
   live: LiveRun,
+  resume?: OrchestratorResumeContext,
 ): Promise<void> {
   const provider = pickOrchestratorProvider(live.def);
   const effective = buildOrchestratorConfig(provider, self.deps.readBaseline());
@@ -585,6 +611,7 @@ export async function setupOrchestratorForStart(
     });
     session.open({ preserveFocus: true });
 
+    const pendingAskUser = resume?.pendingAskUser;
     const orchestrator: LiveOrchestrator = {
       session,
       provider,
@@ -593,12 +620,24 @@ export async function setupOrchestratorForStart(
       eventsSent: 0,
       lastResponseSummary: '',
       unreadCount: 0,
-      askUserCount: 0,
+      // 自動再開で引き継いだ未回答の問い（あれば）は、すでに1回分の`ask_user`を
+      // 消費している。ここで0から始めると、リロードのたびに実質無料で上限を
+      // すり抜けられてしまう（design.md §16.33「呼び出し回数の上限」の意図が崩れる）
+      askUserCount: pendingAskUser !== undefined ? 1 : 0,
     };
     live.orchestrator = orchestrator;
+    if (pendingAskUser !== undefined) {
+      // 答えを届ける先（このオーケストレーターセッション）が立て直った以上、`hasLiveSession:
+      // true`として人が答えられる状態にする（`buildPendingAskUserSnapshot`のJSDoc参照）
+      live.pendingAskUser = {
+        question: pendingAskUser.question,
+        choices: pendingAskUser.choices,
+        since: Date.parse(pendingAskUser.askedAt) || (self.deps.now?.() ?? new Date()).getTime(),
+      };
+    }
     session.onStateChanged((state) => onOrchestratorStateChanged(self, runId, state));
 
-    notifyOrchestrator(self, runId, { kind: 'runStarted', body: buildIntroBody(live) });
+    notifyOrchestrator(self, runId, { kind: 'runStarted', body: buildIntroBody(live, resume) });
     self.notify(runId);
   } catch (e) {
     const message = sanitizeForLog(e instanceof Error ? e.message : String(e));

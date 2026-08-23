@@ -903,6 +903,20 @@
           "scope": "machine-overridable",
           "markdownDescription": "オーケストレーターが `ask_user`（人へ確認する道具。設計書 §16.33）を1つの実行で呼べる回数の上限。担当領域をまたぐ変更・設計の前提を変える変更・受入基準を下げる判断・同じ失敗を3回繰り返して打つ手が尽きた場合に限って使う道具で、乱発を防ぐため設定ではなく既定の挙動として回数に上限を置く。上限に達した以降の呼び出しは拒否され、オーケストレーターは自分で判断するか `decide_final_merge` の `hold` で止めるよう促される。範囲外（1未満・20超過・非整数）の値は既定値（3回）にフォールバックする。"
         },
+        "agent.workflows.autoResume": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine-overridable",
+          "markdownDescription": "ウィンドウのリロードやWSLの停止・再起動でワークフロー実行が中断された後、条件を満たせば自動的に再開するか（設計書 §16.35）。人が「全体停止」で止めた実行、他の理由で失敗しているタスクが混ざっている実行、危険な操作の確認（`allow`）が必要なタスクが混ざっている実行は対象外で、これまでどおりワークフロービューから手動で再実行する。`false` にすると自動再開そのものを行わず、従来どおり常に手動で再実行する。"
+        },
+        "agent.workflows.maxAutoResumeAttempts": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 20,
+          "scope": "machine-overridable",
+          "markdownDescription": "自動再開（`agent.workflows.autoResume`、設計書 §16.35）を試みる回数の上限。同じ実行がクラッシュと自動再開を繰り返し続けて壊れるのを防ぐための値で、上限に達した以降はワークフロービューにその旨を表示したまま自動再開をあきらめ、手動での再実行を待つ。範囲外（1未満・20超過・非整数）の値は既定値（3回）にフォールバックする。"
+        },
         "claude.executablePath": {
           "type": "string",
           "default": "claude",

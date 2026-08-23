@@ -84,13 +84,23 @@ export interface PersistedRun {
    * 呼んでから人が答えるまでの間だけ存在する。`finalMergeOutcome`等と違い「確定した結果」
    * ではなく「宙に浮いている問い」なので、答えが確定した・run再開時にオーケストレーターが
    * 新しく開き直した等で消えれば`undefined`に戻る（`WorkflowRunner.persist`参照）。
-   * ロードマップW10（中断からの自動再開、Issue未起票）が「再開時に問いを出し直す」ために
-   * 読む想定のデータで、この節（W8）では永続化するだけで自動的な出し直しはしない
-   * （オーケストレーターセッション自体がリロードで復元できないため。`LiveRun.pendingAskUser`
-   * のJSDoc参照）。既存の永続データ（このフィールドが無い形式）を読んでも`undefined`に
-   * なるだけで壊れない。
+   * ロードマップW10（中断からの自動再開、design.md §16.35、Issue #584）の
+   * `runnerRestore.ts`（`autoResumeIfEligible` → `setupOrchestratorForStart`）が、
+   * 自動再開のたびに「再開時に問いを出し直す」ためここを読む。既存の永続データ
+   * （このフィールドが無い形式）を読んでも`undefined`になるだけで壊れない。
    */
   pendingAskUser: { question: string; choices: string[]; askedAt: string } | undefined;
+  /**
+   * 自動再開（design.md §16.35、roadmap W10、Issue #584）を実際に行った回数。
+   * `runnerRestore.ts`が、`reloadInterrupted`のタスクを`pending`へ戻すたびに1増やす
+   * （戻す対象が無かった・他の失敗やallowで見送った場合は増やさない）。
+   * `agent.workflows.maxAutoResumeAttempts`（既定3）に達したら、それ以降のこのrunの
+   * 自動再開はあきらめる（同じrunが起動のたびに再開を繰り返して壊れ続けるのを防ぐ）。
+   * 省略可能な最適な理由: 既存の永続データ（このフィールドが無い形式）を読んでも
+   * `undefined`になるだけで壊れず（`0`として扱う）、既存の`PersistedRun`リテラルを
+   * 一括で書き換える必要が無い。
+   */
+  autoResumeAttempts?: number;
 }
 
 /**

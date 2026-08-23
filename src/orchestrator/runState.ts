@@ -121,10 +121,16 @@ export interface TaskRunState {
   /** これまでの自動再試行回数（0開始）。手動の再実行ではここを増やさない。 */
   readonly retryCount: number;
   /**
-   * ワークフローViewからの手動の再実行の回数（0開始）。`retries`の権利とは別に数える。
+   * `retries`の権利（`retryCount`）を消費しない再試行の回数（0開始）。ワークフローViewからの
+   * 手動の再実行（`retryTask`）に加えて、リロード・WSL再起動からの自動再開
+   * （`applyAutoResume`、design.md §16.35、roadmap W10、Issue #584）も、`reloadInterrupted`の
+   * タスクを`pending`へ戻すときにここを増やす。
    *
    * 分けて持つのは、`retryCount`が「自動再試行を何回使ったか」という**権利の消費**を
-   * 表しているからで、人の操作でそれを増やすと使える自動再試行が減ってしまう。
+   * 表しているからで、人の操作・自動再開のどちらでそれを増やしても使える自動再試行が
+   * 減ってしまう（特に自動再開は「タスクが中断されただけで、まだ何も本物の失敗をしていない」
+   * ケースを扱うため、`retryCount`を進めると後で本物の理由（`loopFailed`等）で失敗したときの
+   * 自動再試行の権利を黙って1回消費してしまう。レビュー指摘、2026-08-23）。
    * 一方でworktreeのディレクトリ名とブランチ名（`wf/<runId>/<taskId>-retry<n>`。§16.5）は
    * **試行が何回目か**で決まる必要がある。失敗した試行のworktreeとブランチは人が中身を
    * 見られるように残るため、同じ名前で作り直そうとすると`branchExists`で必ず失敗する
@@ -821,6 +827,123 @@ export function retryTask(run: RunState, tasks: readonly WorkflowTask[], taskId:
     nextTasks.set(id, { ...s, state: 'pending', failure: undefined });
   }
   return { ...run, tasks: nextTasks, haltedByUser: false };
+}
+
+/**
+ * `WorkflowRunner.retryTask`/`WorkflowRunner.continueTask`が「人の明示操作」を起点に
+ * するのと対で、ウィンドウのリロード（design.md §16.11）で`reloadInterrupted`（環境側の理由に
+ * よる中断、`runStore.ts`の`reconcileRunOnReload`が付ける）へ倒れたタスクを、人の操作を
+ * 待たずに`pending`へ戻す（design.md §16.35、roadmap W10、Issue #584）。呼び出し元
+ * （`runnerRestore.ts`）が、run単位の事前条件（`haltedByUser`でない・再開試行回数が
+ * 上限内・定義ファイルが読める）を確認してから呼ぶ。この関数自身は次を判定する。
+ *
+ * **`reloadInterrupted`以外の理由で`failed`が1件でも残っていれば、run全体の自動再開を
+ * あきらめる（`blockedByOtherFailure`）。** `nextTasksToStart`（`scheduler.ts`）は
+ * `isRunHalted`（`haltedByUser || hasFailedTask`）が真の間いっさい新規開始しない。他の
+ * タスクが本物の理由（`loopFailed`等）で`failed`のまま残っていると、ここで`reloadInterrupted`
+ * のタスクだけ`pending`へ戻しても`nextTasksToStart`に一生拾われない「開始されない`pending`」
+ * を作ってしまう（`markMergeSucceeded`のJSDocが書く不変条件と同じ）。誰にも回収できない
+ * 状態を防ぐため、他に本物の`failed`が残っている run はまるごと自動再開の対象から外し、
+ * 人の操作（Viewの「再実行」）に委ねる。
+ *
+ * **`allow`（危険操作の実行前確認、design.md §16.7）を持つタスクが`reloadInterrupted`で
+ * 止まっていれば、run全体の自動再開をあきらめる（`blockedByAllowGate`）。** `start()`/
+ * `retryTask()`はどちらも`allow`が非空のタスクを`allowConfirmed: true`が来るまで開始しない。
+ * 自動再開には人が居らず確認を取れないため、そのタスクだけ`pending`へ戻さず`failed`のまま
+ * 残すことになるが、それでは上と同じ理由（残った`failed`が`isRunHalted`を真に保つ）で
+ * 他の`reloadInterrupted`タスクも道連れで拾われなくなる。したがって`allow`を持つタスクが
+ * 1件でも対象に含まれていれば、run全体をまるごと対象から外す。
+ *
+ * **`reloadInterrupted`のタスクを`pending`へ戻すとき、`manualRetryCount`を1増やす
+ * （`retryCount`ではない）。** `worktree.ts`の`createWorktree`はブランチ名が既存なら
+ * `branchExists`で拒否し、`git worktree add`自体を試みない（設計上、二重にworktreeを
+ * 作ることはできない）。リロード前に中断したタスクは、多くの場合すでに自分のworktree・
+ * ブランチを作った後（`running`まで進んでいた）ため、`retryCount`/`manualRetryCount`を
+ * 変えずに`pending`へ戻すと`retrySuffixOf`が同じ試行番号を返し、`createWorktree`が
+ * 古いworktreeとの`branchExists`衝突で失敗する（＝自動再開のたびに必ず失敗する）。
+ * 新しい試行番号（新しいworktree・ブランチ名）を割り当てて衝突を避ける必要がある点は
+ * `applyLoopStopReason`の`'failed'`分岐（自動再試行）と同じだが、**`retryCount`を進める
+ * 選択はしない**。`retryCount`は`task.retries`（design.md §16.5、タスク定義の自動再試行の
+ * 予算）と比較される消費カウンタそのもの（このファイルの`'failed'`分岐、
+ * `current.retryCount < task.retries`）で、リロードで中断されただけのタスクの`retryCount`を
+ * 進めると、そのタスクが後で本物の理由（`loopFailed`等）で失敗したとき自動再試行の予算を
+ * 1回黙って消費してしまう——受入基準にもdesign.mdにも無い副作用になる（レビュー指摘。
+ * 2026-08-23）。`retrySuffixOf`（`runner.ts`）はworktree/ブランチの接尾辞を
+ * `retryCount + manualRetryCount`の合計から決めるため、どちらを進めても衝突回避の
+ * 目的は等しく果たせる。`manualRetryCount`は`task.retries`と比較される箇所が無い
+ * （`grep`で確認済み。使うのは`totalAttempts`の算出と`retrySuffixOf`のみ）ため、
+ * こちらを進めて「人の明示操作または自動再開による試行回数（`retries`の予算を消費しない
+ * 試行）」という意味へ広げる（`TaskRunState.manualRetryCount`のJSDoc参照）。
+ *
+ * **reload起因で`skipped(runHalted)`になっていた後続も`pending`へ戻す。** 上の2つの
+ * ガード（他のfailedが無い・allowを持つ対象が無い）を通過した時点で、このrunに残る
+ * `skipped(runHalted)`は必ずこのリロードによって`pending`から倒された（`reconcileRunOnReload`）
+ * ものだけだと確定できる（`haltedByUser`は呼び出し元が事前に確認済み、他の`failed`も
+ * 無いことをここで確認済みのため、`runHalted`を作りうる経路がこのリロード以外に無い）。
+ * `markMergeSucceeded`が依存先の`skipped(mergeBlocked)`を戻すのと同じ考え方で、これらも
+ * まとめて`pending`へ戻し、スケジューラ（`nextTasksToStart`）の依存充足チェックに委ねる。
+ */
+export type AutoResumeOutcome =
+  | { readonly kind: 'nothingToResume' }
+  | { readonly kind: 'blockedByOtherFailure' }
+  | { readonly kind: 'blockedByAllowGate'; readonly taskIds: readonly string[] }
+  | { readonly kind: 'resumed'; readonly run: RunState; readonly resumedTaskIds: readonly string[] };
+
+export function applyAutoResume(
+  run: RunState,
+  tasks: readonly WorkflowTask[],
+): AutoResumeOutcome {
+  const reloadInterruptedIds: string[] = [];
+  let hasOtherFailure = false;
+  for (const [id, s] of run.tasks) {
+    if (s.state !== 'failed') {
+      continue;
+    }
+    if (s.failure?.kind === 'reloadInterrupted') {
+      reloadInterruptedIds.push(id);
+    } else {
+      hasOtherFailure = true;
+    }
+  }
+  if (hasOtherFailure) {
+    return { kind: 'blockedByOtherFailure' };
+  }
+  if (reloadInterruptedIds.length === 0) {
+    return { kind: 'nothingToResume' };
+  }
+  const allowGatedIds = reloadInterruptedIds.filter((id) => {
+    const task = tasks.find((t) => t.id === id);
+    return task !== undefined && task.allow.length > 0;
+  });
+  if (allowGatedIds.length > 0) {
+    return { kind: 'blockedByAllowGate', taskIds: allowGatedIds };
+  }
+
+  const nextTasks = new Map(run.tasks);
+  const resumedTaskIds: string[] = [];
+  for (const id of reloadInterruptedIds) {
+    const s = nextTasks.get(id);
+    if (s === undefined) {
+      continue;
+    }
+    nextTasks.set(id, {
+      ...s,
+      state: 'pending',
+      // `retryCount`ではなく`manualRetryCount`を進める（`task.retries`の予算を消費させない
+      // ため。上のJSDoc参照）
+      manualRetryCount: s.manualRetryCount + 1,
+      submissionCount: 0,
+      failure: undefined,
+    });
+    resumedTaskIds.push(id);
+  }
+  for (const [id, s] of nextTasks) {
+    if (s.state === 'skipped' && s.failure?.kind === 'runHalted') {
+      nextTasks.set(id, { ...s, state: 'pending', failure: undefined });
+      resumedTaskIds.push(id);
+    }
+  }
+  return { kind: 'resumed', run: { ...run, tasks: nextTasks }, resumedTaskIds };
 }
 
 /**

@@ -352,6 +352,20 @@ export interface WorkflowRunnerDeps {
    */
   readMaxAskUserPerRun?: () => number;
   /**
+   * `agent.workflows.autoResume`の現在値（design.md §16.35、roadmap W10、Issue #584）。
+   * 省略時は`DEFAULT_AUTO_RESUME`（`runnerRestore.ts`、既定`true`）を使う。`false`なら
+   * リロード後・WSL再起動後も従来どおり人がViewから再実行するまで再開しない
+   * （`readMaxAskUserPerRun`と同じく、呼び出し側は毎回現在値を返す関数を渡すこと）。
+   */
+  readAutoResume?: () => boolean;
+  /**
+   * `agent.workflows.maxAutoResumeAttempts`の現在値（design.md §16.35、roadmap W10、
+   * Issue #584）。省略時は`DEFAULT_MAX_AUTO_RESUME_ATTEMPTS`（`runnerRestore.ts`、既定3）を
+   * 使う。同じrunがクラッシュと自動再開を繰り返し続けるのを止めるための上限
+   * （`readMaxAskUserPerRun`と同じく、呼び出し側は毎回現在値を返す関数を渡すこと）。
+   */
+  readMaxAutoResumeAttempts?: () => number;
+  /**
    * `agent.workflows.ciWaitTimeoutSec`の現在値（秒）。省略時は`DEFAULT_CI_WAIT_TIMEOUT_SEC`
    * （既定1800秒）を使う（design.md §16.36、Issue #556）。統合PR/MRをマージする前に
    * CIチェックの完了を待つ時間の上限で、超えたら赤（CI失敗）と同じ扱いにする
@@ -570,7 +584,32 @@ export interface WorkflowWarning {
      * ウィンドウのリロードで復元した実行では二度と出せない。`deriveAllowWarnings`と
      * 同じ理由）。
      */
-    | 'loopStalled';
+    | 'loopStalled'
+    /**
+     * リロード・WSL再起動等からの復元直後、`reloadInterrupted`のタスクを`pending`へ戻して
+     * 自動的に再開した（design.md §16.35、roadmap W10、Issue #584）。`message`に戻した
+     * タスクidを列挙する。`persistFailed`・`finalMergeDecision`と同じく、同一runにつき
+     * 直近1件へ丸める（taskIdを持たない警告のため）。
+     */
+    | 'autoResume'
+    /**
+     * 自動再開の対象ではあったが、`agent.workflows.maxAutoResumeAttempts`（既定3）に
+     * 達していたため見送った（design.md §16.35、roadmap W10、Issue #584）。人がViewから
+     * 手動で再実行するまでこのrunは`failed`のまま止まる。`autoResume`と同じく直近1件へ
+     * 丸める。
+     */
+    | 'autoResumeLimitExceeded'
+    /**
+     * 自動再開の対象（`reloadInterrupted`のタスク）はあったが、他の理由による`failed`が
+     * 混ざっている・`allow`確認が要るタスクが混ざっているため、run全体の自動再開を見送った
+     * （design.md §16.35、roadmap W10、Issue #584。`applyAutoResume`の`blockedByOtherFailure`
+     * / `blockedByAllowGate`）。`autoResumeLimitExceeded`と同じく、上限超過以外にも
+     * 「自動では再開されなかった」ケースがあることをViewから区別できるようにするための警告
+     * （レビュー指摘。2026-08-23。当初は既存のfailed/skipped表示で足りるとして省略していたが、
+     * 受入基準「再開の試行が上限を超えたrunは理由がViewへ出る」とそろえ、見送った理由も
+     * 同じ場所で分かるようにした）。直近1件へ丸める。
+     */
+    | 'autoResumeBlocked';
   /** ワークフロー全体に関わる警告（gitignoreなど）は undefined。 */
   taskId: string | undefined;
   message: string;
@@ -716,7 +755,9 @@ export interface WorkflowRunSnapshot {
    * `ask_user`（design.md §16.33、Issue #583）の回答待ち。存在する間、ワークフローViewは
    * 問いと選択肢を出し、人が選ぶボタンを描く。`live`に無ければ永続化された値
    * （`PersistedRun.pendingAskUser`）へフォールバックする（`LiveRun.pendingAskUser`の
-   * JSDoc参照。リロード後は問いの文言だけが読める状態で、答える経路はまだ無い）。
+   * JSDoc参照。自動再開（design.md §16.35、roadmap W10、Issue #584）が走ればオーケストレーター
+   * セッションを立て直して答える経路も復活する。走らなかった・見送った間は問いの文言だけが
+   * 読める状態のまま）。
    * `hasLiveSession`が`false`のときはボタンを無効にする（`workflowScript.ts`）。
    */
   pendingAskUser?:
@@ -1152,13 +1193,19 @@ export interface LiveRun {
    * **`finalMergeDecision`とは異なり、値そのもの（question/choices）を永続化する**
    * （`WorkflowRunner.persist`・`PersistedRun.pendingAskUser`）。`finalMergeDecision`が
    * 永続化しないのは、判断対象（統合PR/MR）をホスト側で直接確認できるからだが、`ask_user`の
-   * 問いにはそれに相当する外部記録が無い。ロードマップW10（中断からの自動再開、Issue未起票）が
-   * 「`ask_user`待ちで落ちた場合は再開時に問いを出し直す」ために必要な最小限のデータとして、
-   * この節（W8）で先に永続化しておく。**ただし`live.pendingAskUser`自体（実行時の値）は
-   * ウィンドウのリロードでは復元しない**（`orchestrator`セッション自体が復元できない以上、
+   * 問いにはそれに相当する外部記録が無い。ロードマップW10（中断からの自動再開、design.md
+   * §16.35、Issue #584）が「`ask_user`待ちで落ちた場合は再開時に問いを出し直す」ために
+   * 必要な最小限のデータとして、この節（W8）で先に永続化しておいた。**ただし
+   * `live.pendingAskUser`自体（実行時の値）は、ウィンドウのリロード直後（`rebuildLiveRun`が
+   * 復元した直後）にはまだ復元しない**（`orchestrator`セッション自体が復元できない以上、
    * 答えを届ける先が無いため。`finalMergeDecision`と同じ「実行時のみ」の扱い）。永続化された
-   * 値は`WorkflowRunSnapshot.pendingAskUser`が`persisted`側からも読むため、リロード後も
-   * Viewには「問いが残っている」ことだけは表示できる（再度答える経路はW10が実装するまで無い）。
+   * 値は`WorkflowRunSnapshot.pendingAskUser`が`persisted`側からも読むため、リロード直後の
+   * Viewにも「問いが残っている」ことは表示できる。**自動再開（`runnerRestore.ts`の
+   * `autoResumeIfEligible` → `setupOrchestratorForStart`）が走ると、新しいオーケストレーター
+   * セッションを立てる際に永続化された問いから`live.pendingAskUser`を作り直し、答える経路が
+   * 復活する**（`hasLiveSession: true`に戻る。`buildPendingAskUserSnapshot`参照）。自動再開が
+   * 見送られた（`haltedByUser`・他の失敗・上限超過等）場合は、従来どおり問いの文言だけが
+   * 読める状態のまま残る。
    */
   pendingAskUser: LiveAskUser | undefined;
 }
@@ -1343,6 +1390,7 @@ export class WorkflowRunner {
       resolveForgeState: (repoRoot) => this.resolveForgeState(repoRoot),
       cleanupWorktreeIfNeeded: (live, task, taskId, liveTask) =>
         this.cleanupWorktreeIfNeeded(live, task, taskId, liveTask),
+      ensureMessaging: (runId, live) => this.ensureMessaging(runId, live),
     };
   }
 
@@ -3775,6 +3823,14 @@ export class WorkflowRunner {
                   choices: [...live.pendingAskUser.choices],
                   askedAt: new Date(live.pendingAskUser.since).toISOString(),
                 },
+          // 自動再開の実施回数（design.md §16.35、Issue #584）。`LiveRun`側に対応する
+          // 状態を持たないため、`current`（前回persistした値）をそのまま引き継ぐしかない
+          // （`runnerRestore.ts`側が`store.update`で直接インクリメントする）。`exactOptional
+          // PropertyTypes`のため、値が無ければキー自体を書かない（`undefined`を明示代入
+          // しない）
+          ...(current?.autoResumeAttempts === undefined
+            ? {}
+            : { autoResumeAttempts: current.autoResumeAttempts }),
         };
       });
     } catch (e) {

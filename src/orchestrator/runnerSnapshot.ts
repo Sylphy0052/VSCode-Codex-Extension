@@ -87,7 +87,8 @@ export function getSnapshot(self: WorkflowRunnerInternals, runId: string): Workf
 
 /**
  * `ask_user`の回答待ち（design.md §16.33）の表示用の値。`live`（回答可能）を優先し、
- * 無ければ永続化された値（リロード後、答える経路はまだ無いが問いの文言だけは読める。
+ * 無ければ永続化された値（リロード直後、自動再開（design.md §16.35、roadmap W10、
+ * Issue #584）がまだ走っていない・見送った間は答える経路が無く、問いの文言だけは読める。
  * `LiveRun.pendingAskUser`のJSDoc参照）へフォールバックする。
  */
 function buildPendingAskUserSnapshot(
