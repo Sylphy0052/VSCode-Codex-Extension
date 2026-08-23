@@ -183,15 +183,22 @@ function runFinishedReason(
  * 適用内容が警告欄へ残る）を満たせない。
  *
  * **`live.finalMergeOutcome`の確認が必要な理由（2度目のレビューblocking指摘）。**
- * 当初は`reviewCommentPoll`の生死だけを見ていたが、`finalMerge: auto`では統合PR/MRの
+ * 当初は`reviewCommentPoll`の生死だけを見ていた。`finalMerge: auto`では統合PR/MRの
  * 作成直後に`startReviewCommentPoll`が走り、その後`performFinalMerge`でmainへ実際に
- * マージされた**後も**ポーリング自体は開いたまま残り続ける（`closeMessagingIfFinalMergeSettled`
- * は`finalizeForge`をfire-and-forgetで呼ぶ側の同期経路で先に1度走ってしまい、その時点
- * ではまだ`live.reviewCommentPoll`が`undefined`のため閉じ損なう。既存の別バグだが、
- * ここでは前提として扱う）。つまり`reviewCommentPoll`が生きている＝まだ手を打てる、
- * とは限らない。既にmainへマージ済み（`live.finalMergeOutcome === 'merged'`）の統合PR/MR
- * は再オープンできず、その状態で`add_task`を許すと、追加したタスクの成果が統合ブランチ
- * には積まれるのにmainへは二度と届かない（`finalizeForge`の冪等ガードが2回目のPR/MR
+ * マージされる。以前は、この`performFinalMerge`完了後もポーリング自体が開いたまま
+ * 残り続けるバグがあった（`closeMessagingIfFinalMergeSettled`は`finalizeForge`を
+ * fire-and-forgetで呼ぶ側の同期経路で先に1度走ってしまい、その時点ではまだ
+ * `live.reviewCommentPoll`が`undefined`のため閉じ損なっていた）。**このバグは
+ * `performFinalMerge`自身が`live.finalMergeOutcome`を確定させる1点で`closeReview
+ * CommentPoll`を直接呼ぶよう修正済み（`runner.ts`の`performFinalMerge`末尾のJSDoc
+ * 参照）。** そのため実運用では`reviewCommentPoll`が生きている間は`finalMergeOutcome`
+ * も未確定のはずだが、**この判定はそれでも多層防御として残す。** ポーリングを閉じ損なう
+ * 経路が将来また出ても（例えば新しい呼び出し経路が`closeReviewCommentPoll`を呼び忘れる
+ * 等）、`finalMergeOutcome`が確定していれば計画変更そのものを拒否できるため、
+ * 「add_taskが受理されたのに成果がmainへ届かない」という実害には至らない。既に
+ * mainへマージ済み（`live.finalMergeOutcome === 'merged'`）の統合PR/MRは再オープン
+ * できず、その状態で`add_task`を許すと、追加したタスクの成果が統合ブランチには
+ * 積まれるのにmainへは二度と届かない（`finalizeForge`の冪等ガードが2回目のPR/MR
  * 作り直しを止めるため）。`finalMergeOutcome`が`'merged'`/`'failed'`/`'held'`のいずれか
  * （＝最終マージの判断が確定済み）になったら、`reviewCommentPoll`の生死に関わらず拒否し、
  * 理由をオーケストレーターへ返す（黙って乖離させない）。

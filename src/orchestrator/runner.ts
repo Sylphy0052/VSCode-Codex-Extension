@@ -3428,6 +3428,11 @@ export class WorkflowRunner {
         message: '人が停止したため最終マージを中止しました',
       });
       live.finalMergeOutcome = 'failed';
+      // design.md §16.30「レビューを取り込めるのは最終マージ確定までである」
+      // （2度目のレビューblocking指摘）: `finalMergeOutcome`が確定した時点で、レビュー
+      // コメントのポーリングもここで直接閉じる。詳細は`performFinalMerge`末尾の
+      // 同じ呼び出しのJSDoc参照
+      closeReviewCommentPoll(live);
       void this.persist(runId);
       this.notify(runId);
       return;
@@ -3501,6 +3506,34 @@ export class WorkflowRunner {
       this.deps.log.info(`[workflow ${runId}] mainへの最終マージが完了しました`);
       live.finalMergeOutcome = 'merged';
     }
+    // design.md §16.30「レビューを取り込めるのは最終マージ確定までである」（2度目の
+    // レビューblocking指摘）: `live.finalMergeOutcome`が確定した（`merged`/`failed`）
+    // この1点で、レビューコメントのポーリングを直接閉じる。
+    //
+    // **`closeMessagingIfFinalMergeSettled`（MCPサーバーとポーリングを同じ関数・同じ
+    // 呼び出しでまとめて閉じる既存の合流点）に寄せず、ここで別途閉じることにした。**
+    // 理由は`finalMerge: auto`の経路（`pump()`）が、`mayAwaitFinalMergeDecision`が
+    // 偽のとき`closeMessagingIfFinalMergeSettled`を`finalizeForge`の完了を待たず
+    // 同期的に呼んでしまうため（MCPを判断待ちなしで即座に閉じるための意図的な設計）。
+    // この時点では`live.reviewCommentPoll`はまだ`undefined`（`startReviewCommentPoll`は
+    // その後、統合PR/MR作成成功時に走る）のため、その1回きりの呼び出しでは
+    // ポーリングを閉じ損なう。その後`finalMerge: auto`の経路では`closeMessagingIfFinal
+    // MergeSettled`が二度と呼ばれないため、ポーリングは開いたまま残り続けていた
+    // （実測: 最終マージ確定後もタイマーを600秒×10周期進めると取得CLIが11回目まで
+    // 呼ばれ続ける。以前のJSDocはこれを「既存の別バグ」として前提扱いしていたが、
+    // 本行で実際に直った）。`closeMessagingIfFinalMergeSettled`側の呼び出し順序を
+    // 直す代わりにここで別途閉じることにしたのは、MCPを即座に閉じる`auto`の既存挙動
+    // 自体は変えたくない（変えると`finalMerge: auto`でMCPが開いたままになる期間が
+    // 新たに生まれ、影響範囲が広がる）ためで、`live.finalMergeOutcome`という
+    // 「最終マージの判断が確定した」ことそのものを表す状態と、レビューコメントの
+    // ポーリングという「その判断が付くまでは有用」な機能の寿命を直接結びつける方が
+    // 素直だと判断した。`orchestrator`/`confirm`の`merge`決定・`hold`決定は、
+    // 引き続き`closeMessagingIfFinalMergeSettled`（`decideFinalMerge`末尾）が
+    // 両方をまとめて閉じる（`live.finalMergeDecision`を判断確定の同期処理内で先に
+    // `undefined`へ戻すため、`auto`のような競合は起きない）。`closeReviewCommentPoll`
+    // 自身は`live.reviewCommentPoll === undefined`なら何もしない冪等な実装
+    // （`runnerReviewComments.ts`）なので、ここで重ねて呼んでも安全
+    closeReviewCommentPoll(live);
     void this.persist(runId);
     this.notify(runId);
   }

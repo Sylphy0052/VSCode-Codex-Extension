@@ -4362,6 +4362,59 @@ tasks:
   );
 
   it(
+    '最終マージが確定した後（finalMerge: auto）は、レビューコメント取得CLIの' +
+      'ポーリングが止まる（3度目のレビューblocking指摘の回帰: 以前は`performFinalMerge`' +
+      '完了後もタイマーが動き続け、VSCodeを閉じるまでAPIを叩き続けていた。本番の呼び出し' +
+      '経路: performFinalMergeがfinalMergeOutcomeを確定させる1点でcloseReviewCommentPoll' +
+      'を直接呼ぶ）',
+    async () => {
+      vi.useFakeTimers();
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+      const cli = fakeForgeCli({
+        reviewComments: {
+          github: {
+            comments: [
+              { databaseId: 1, author: { login: 'reviewer1' }, body: '対応済みです' },
+            ],
+          },
+        },
+      });
+      // `readReviewCommentPollIntervalSec`を敢えて指定せず、既定値
+      // （`DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC` = 600秒）で計測する
+      // （コーディネーターの実測と同じ条件）
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli),
+      });
+      const result = await runner.start('/repo/.agents/workflows/review.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // finalMerge: auto（既定）なので、ここまでで最終マージは確定している
+      expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBe('merged');
+      const pollCall = (c: { args: readonly string[] }) => c.args[3] === '--json=reviews,comments';
+      const before = cli.calls.filter(pollCall).length;
+      // `startReviewCommentPoll`は立てた直後にも1度取得するため、この時点で最低1回は
+      // 呼ばれている
+      expect(before).toBeGreaterThanOrEqual(1);
+
+      // 既定の間隔（600秒）× 10周期ぶんタイマーを進める（コーディネーターの実測と同じ条件）
+      await vi.advanceTimersByTimeAsync(600_000 * 10);
+      await flush();
+
+      const after = cli.calls.filter(pollCall).length;
+      // 最終マージ確定後はポーリングのタイマー自体が閉じているため、10周期進めても
+      // 呼び出し回数は増えない（以前は`before`から`+10`まで増え続けていた）
+      expect(after).toBe(before);
+      expect(store.find(runId)?.finalMergeOutcome).toBe('merged');
+    },
+  );
+
+  it(
     '最終マージが確定済み（finalMerge: auto。既にmainへマージ済み）の後にレビューコメントが' +
       '届いても、add_taskは理由付きで拒否される（2度目のレビューblocking指摘の回帰:' +
       '追加したタスクの成果が統合ブランチには積まれるのにmainへは二度と届かない、という' +
@@ -4395,8 +4448,10 @@ tasks:
       t1.finish('done', doneState('ok'));
       await flush();
 
-      // runは既に終了扱い（統合PR/MR作成・最終マージまで完了）だが、レビューコメントが
-      // 届いてポーリングは生きている（finalMerge: autoの既知の挙動。JSDoc参照）
+      // runは既に終了扱い（統合PR/MR作成・最終マージまで完了）。レビューコメント自体は
+      // 届いて警告欄へ記録されるが、最終マージが確定した時点でポーリングは既に閉じている
+      // （`performFinalMerge`が`closeReviewCommentPoll`を直接呼ぶ。design.md §16.30
+      // 「レビューコメントのポーリングを最終マージ確定の1点で閉じる」参照）
       expect(runner.getSnapshot(runId)?.outcome).toBe('succeeded');
       expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBe('merged');
       expect(
@@ -4409,12 +4464,17 @@ tasks:
       }
       const addResult = port.addTask({ id: 'T2', prompt: 'p2', done: 'd2', dependsOn: [] });
 
-      // 最終マージ確定後は拒否し、理由をオーケストレーターへ返す（黙って乖離させない）
+      // 最終マージ確定後は拒否し、理由をオーケストレーターへ返す（黙って乖離させない）。
+      // ポーリングが既に閉じているため、ここでは`planChangeFinishedReason`の基本経路
+      // （`runFinishedReason`と同じ「run終了」の理由）で拒否される。`live.finalMergeOutcome`
+      // ベースの専用の理由文は、ポーリングを閉じ損なう経路が万一残っていた場合の多層防御
+      // であり、その経路は下の回帰テスト（`finalMergeOutcome`の判定を`if (false)`へ戻す）
+      // で別途確かめる
       expect(addResult.accepted).toBe(false);
       if (addResult.accepted) {
         throw new Error('unreachable');
       }
-      expect(addResult.reason).toContain('確定');
+      expect(addResult.reason).toContain('終了しています');
 
       // 拒否されたのでrunは走行中へ戻らず、T2も一切作られない
       expect(runner.getSnapshot(runId)?.outcome).toBe('succeeded');
