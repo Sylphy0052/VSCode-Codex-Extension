@@ -5,7 +5,7 @@
 - ブランチ: `fix/589/intro-body-control-tools`（`origin/main` の `2c73657c` から分岐）
 - worktree絶対パス: `/home/kfuruhashi/workspace/github/VSCode-Codex-Extension/.claude/worktrees/agent-adea22599c3f05363`
 - Issue: #589
-- PR: 作成準備完了（このあとcommit → PR作成）
+- PR: #641（main宛て、作成済み。CIは`pending`、まだマージしていない。マージ可否は呼び出し元の判断）
 
 `git status --short`:
 ```
@@ -46,9 +46,8 @@
 
 ## 4. 次の一手
 
-1. `git fetch origin`で`origin/main`が`7571a19d`かを確認する（rebaseは不要という指示だが、実測はしておく）
-2. `git add`で対象ファイル（`docs/design.md` / `src/orchestrator/runnerOrchestrator.ts` / `test/unit/runner.test.ts` / `.agents/handoff/wf-g-issue-589.md`）をcommitする
-3. `gh pr create`で`main`宛てのPRを作成する（統合ブランチは作らない）。本文には突き合わせテストの形と`ORCHESTRATOR_CONTROL_TOOLS`の全要素をどう列挙したかを書く
-4. `gh pr diff <番号> | grep "^diff --git"`で意図しないファイルが含まれていないことを確認する
-5. PRはマージしない（呼び出し元の判断）
-6. このファイルをPR作成後の区切りで更新する（この一手が完了した時点で更新済み）
+実装・PR作成・意図しないファイル混入の確認までは完了済み。残っているのは:
+
+1. PR #641のCI結果を待つ（作成直後は`checks`/`external-cli`とも`pending`。`gh pr checks 641`で再確認）
+2. CIが緑になったら呼び出し元（WF-Gオーケストレーター）へ報告し、マージ可否の判断を仰ぐ（自分ではマージしない）
+3. もしCIが落ちたら、原因を確認し必要な修正をこのブランチへ追いcommitする
