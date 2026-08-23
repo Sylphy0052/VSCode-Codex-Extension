@@ -4362,11 +4362,12 @@ tasks:
   );
 
   it(
-    'レビューコメントが届いた後もadd_taskでタスク調整でき（design.md §16.29と同じ経路・' +
-      'validateWorkflowでの検証を通る）、追加したタスクは実際にスケジュールされて完走する' +
-      '（Issue #339 blocking指摘の回帰: 通知が届くだけでオーケストレーターが手を打てない' +
-      '状態を防ぐ。本番の呼び出し経路: finalizeForge完了後もplanChangeFinishedReasonの' +
-      '例外でadd_taskが通り、resumeIfFinishedForPlanChangeがpump()を再度動かす）',
+    '最終マージが確定済み（finalMerge: auto。既にmainへマージ済み）の後にレビューコメントが' +
+      '届いても、add_taskは理由付きで拒否される（2度目のレビューblocking指摘の回帰:' +
+      '追加したタスクの成果が統合ブランチには積まれるのにmainへは二度と届かない、という' +
+      '乖離を黙って許してはならない。本番の呼び出し経路: finalizeForgeが' +
+      'performFinalMergeまで完了しlive.finalMergeOutcomeが確定した後、' +
+      'planChangeFinishedReasonがreviewCommentPollの生死とは別にfinalMergeOutcomeを見て拒否する）',
     async () => {
       vi.useFakeTimers();
       const { deps: messaging, state } = fakeMessagingDeps();
@@ -4395,8 +4396,84 @@ tasks:
       await flush();
 
       // runは既に終了扱い（統合PR/MR作成・最終マージまで完了）だが、レビューコメントが
-      // 届いてポーリングは生きている
+      // 届いてポーリングは生きている（finalMerge: autoの既知の挙動。JSDoc参照）
       expect(runner.getSnapshot(runId)?.outcome).toBe('succeeded');
+      expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBe('merged');
+      expect(
+        runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'reviewCommentImported'),
+      ).toBe(true);
+
+      const port = state.hub?.orchestratorControl;
+      if (port === undefined) {
+        throw new Error('制御ツールが配線されていません');
+      }
+      const addResult = port.addTask({ id: 'T2', prompt: 'p2', done: 'd2', dependsOn: [] });
+
+      // 最終マージ確定後は拒否し、理由をオーケストレーターへ返す（黙って乖離させない）
+      expect(addResult.accepted).toBe(false);
+      if (addResult.accepted) {
+        throw new Error('unreachable');
+      }
+      expect(addResult.reason).toContain('確定');
+
+      // 拒否されたのでrunは走行中へ戻らず、T2も一切作られない
+      expect(runner.getSnapshot(runId)?.outcome).toBe('succeeded');
+      expect(store.find(runId)?.tasks['T2']).toBeUndefined();
+
+      // 統合PR/MRは1回しか作られておらず、mainへのマージも1回のまま
+      const integrationCreateCalls = cli.calls.filter(
+        (c) =>
+          c.args[0] === 'pr' &&
+          c.args[1] === 'create' &&
+          c.args.some((a) => a.startsWith('--base=main')),
+      );
+      expect(integrationCreateCalls).toHaveLength(1);
+      const finalMergeCalls = cli.calls.filter(
+        (c) => c.args[0] === 'pr' && c.args[1] === 'merge',
+      );
+      expect(finalMergeCalls).toHaveLength(1);
+    },
+  );
+
+  it(
+    '最終マージがまだ確定していない間（finalMerge: orchestrator、判断待ち）にレビュー' +
+      'コメントが届いた場合はadd_taskが通り、追加したタスクは実際にスケジュールされて' +
+      '完走し、その後の最終マージ確定（decideFinalMerge(merge)）でT2の成果を含めて' +
+      'mainへ1回だけマージされる（Issue #339 blocking指摘の回帰: 「gateの先」＝通知だけで' +
+      '終わらせず、成果が実際にmainへ届くところまで確かめる）',
+    async () => {
+      vi.useFakeTimers();
+      const { deps: messaging, state } = fakeMessagingDeps();
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+      const cli = fakeForgeCli({
+        reviewComments: {
+          github: {
+            comments: [
+              { databaseId: 1, author: { login: 'reviewer1' }, body: '追加対応してください' },
+            ],
+          },
+        },
+      });
+      const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli, { finalMerge: 'orchestrator' }),
+        messaging,
+        readReviewCommentPollIntervalSec: () => 60,
+      });
+      const result = await runner.start('/repo/.agents/workflows/review.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      const t1 = codexHost.byTaskId('T1');
+      t1.finish('done', doneState('ok'));
+      await flush();
+
+      // 統合PR/MRは作られているが、最終マージの判断はまだ付いていない
+      // （finalMerge: orchestrator。design.md §16.26）。この判断待ちの間だけMCPサーバーも
+      // レビューコメントのポーリングも生きている
+      expect(runner.getSnapshot(runId)?.outcome).toBe('succeeded');
+      expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBeUndefined();
+      expect(runner.getSnapshot(runId)?.finalMergeDecision).toMatchObject({ mode: 'orchestrator' });
       expect(
         runner.getSnapshot(runId)?.warnings.some((w) => w.kind === 'reviewCommentImported'),
       ).toBe(true);
@@ -4419,10 +4496,12 @@ tasks:
 
       expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
       expect(runner.getSnapshot(runId)?.outcome).toBe('succeeded');
+      // T2が加わった後も最終マージの判断はまだ付いていない
+      // （finalizeForgeの冪等ガードで2回目の統合PR/MR作成・判断待ち開始は起きない）
+      expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBeUndefined();
+      expect(runner.getSnapshot(runId)?.finalMergeDecision).toMatchObject({ mode: 'orchestrator' });
 
-      // 統合PR/MRは1回しか作られていない（`finalizeForge`の冪等ガード。design.md §16.30
-      // 「`finalizeForge`の二重呼び出しにならないか」）。タスク層（`--base=wf/.../integration`）
-      // のPR作成はT1・T2それぞれで1回ずつ起きるため区別する
+      // 統合PR/MRの作成は1回のまま（`finalizeForge`の冪等ガード）
       const integrationCreateCalls = cli.calls.filter(
         (c) =>
           c.args[0] === 'pr' &&
@@ -4431,11 +4510,40 @@ tasks:
       );
       expect(integrationCreateCalls).toHaveLength(1);
 
+      // T1・T2それぞれの統合ブランチへの取り込み（タスク層マージ）が実際に走っている
+      // ことを確認する。これがT2の成果が統合ブランチへ入っている証跡
+      const taskMergeCalls = git.calls.filter(
+        (c) => c.args[0] === 'merge' && c.args.some((a) => typeof a === 'string' && a.includes('-m')),
+      );
+      const t1Merged = taskMergeCalls.some((c) =>
+        c.args.some((a) => typeof a === 'string' && a.includes('T1')),
+      );
+      const t2Merged = taskMergeCalls.some((c) =>
+        c.args.some((a) => typeof a === 'string' && a.includes('T2')),
+      );
+      expect(t1Merged).toBe(true);
+      expect(t2Merged).toBe(true);
+
+      // ここで初めて最終マージを確定する。T2の成果を含む統合ブランチがmainへ1回だけ
+      // マージされることを確かめる（「gateの先」まで進めた検証）
+      const accepted = runner.decideFinalMerge(runId, 'merge', 'レビュー対応も含めて確認済み');
+      await flush();
+
+      expect(accepted).toBe(true);
+      expect(runner.getSnapshot(runId)?.finalMergeOutcome).toBe('merged');
+      const finalMergeCalls = cli.calls.filter(
+        (c) => c.args[0] === 'pr' && c.args[1] === 'merge',
+      );
+      expect(finalMergeCalls).toHaveLength(1);
+
       // 適用した内容が警告欄へ全文で残る（W4と同じ経路、design.md §16.29）
       const added = runner
         .getSnapshot(runId)
         ?.warnings.find((w) => w.kind === 'orchestratorTaskAdded');
       expect(added?.message).toContain('T2');
+
+      // 判断が確定したのでMCPサーバー・レビューコメントのポーリングは閉じる
+      expect(state.handle?.closed).toBe(true);
     },
   );
 });

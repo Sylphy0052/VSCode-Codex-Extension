@@ -175,11 +175,32 @@ function runFinishedReason(
  *
  * 通常は`runFinishedReason`と同じ（`outcome !== 'running'`なら拒否）だが、**統合PR/MRの
  * レビューコメントのポーリングが生きている間（`live.reviewCommentPoll !== undefined`）
- * だけ例外的に許可する**。`finalizeForge`（統合PR/MR作成）は`pump()`が`live.finished`を
+ * かつ最終マージがまだ確定していない間（`live.finalMergeOutcome === undefined`）**だけ
+ * 例外的に許可する。`finalizeForge`（統合PR/MR作成）は`pump()`が`live.finished`を
  * 立てた**後**に走るため、レビューコメントが届く時点でrunは必ず`outcome !== 'running'`
  * になっている。この例外が無いと、レビューコメントは通知されるだけでオーケストレーターが
  * `add_task`等で対応する手段が無く、Issue #339の受入基準（W4と同じ経路でタスク調整でき、
  * 適用内容が警告欄へ残る）を満たせない。
+ *
+ * **`live.finalMergeOutcome`の確認が必要な理由（2度目のレビューblocking指摘）。**
+ * 当初は`reviewCommentPoll`の生死だけを見ていたが、`finalMerge: auto`では統合PR/MRの
+ * 作成直後に`startReviewCommentPoll`が走り、その後`performFinalMerge`でmainへ実際に
+ * マージされた**後も**ポーリング自体は開いたまま残り続ける（`closeMessagingIfFinalMergeSettled`
+ * は`finalizeForge`をfire-and-forgetで呼ぶ側の同期経路で先に1度走ってしまい、その時点
+ * ではまだ`live.reviewCommentPoll`が`undefined`のため閉じ損なう。既存の別バグだが、
+ * ここでは前提として扱う）。つまり`reviewCommentPoll`が生きている＝まだ手を打てる、
+ * とは限らない。既にmainへマージ済み（`live.finalMergeOutcome === 'merged'`）の統合PR/MR
+ * は再オープンできず、その状態で`add_task`を許すと、追加したタスクの成果が統合ブランチ
+ * には積まれるのにmainへは二度と届かない（`finalizeForge`の冪等ガードが2回目のPR/MR
+ * 作り直しを止めるため）。`finalMergeOutcome`が`'merged'`/`'failed'`/`'held'`のいずれか
+ * （＝最終マージの判断が確定済み）になったら、`reviewCommentPoll`の生死に関わらず拒否し、
+ * 理由をオーケストレーターへ返す（黙って乖離させない）。
+ *
+ * レビューで提示された3案（A: 2周目に統合PR/MRを作り直す／B: レビューを取り込めるのは
+ * 最終マージ確定までに限る／C: 現状のまま限界だけ文書化する）のうち、**Bを採った**。
+ * Aは`live.integrationPullRequest`の意味づけ（1runにつき1件前提）・PR番号の持ち方・
+ * W11のCI待ちまで波及し、W5の範囲としては重い。Cは`add_task`が受理されたのに成果が
+ * mainへ届かないという乖離を黙って残す形になり、採らない。
  *
  * **例外はこの4ツールに限る。** `stop_task`/`retry_task`/`continue_task`/`decide_approval`/
  * `ask_user`等、他の制御ツールは引き続き`runFinishedReason`をそのまま使い、この例外の
@@ -225,10 +246,20 @@ function planChangeFinishedReason(
   if (base === undefined) {
     return undefined;
   }
-  if (self.runs.get(runId)?.reviewCommentPoll !== undefined) {
-    return undefined;
+  const live = self.runs.get(runId);
+  if (live?.reviewCommentPoll === undefined) {
+    return base;
   }
-  return base;
+  // 最終マージが確定済み（`'merged'`/`'failed'`/`'held'`のいずれか）なら、
+  // レビューコメントのポーリングがまだ生きていても計画変更は許さない（上のJSDoc
+  // 「2度目のレビューblocking指摘」参照）。理由を明示して返し、乖離を黙って残さない
+  if (live.finalMergeOutcome !== undefined) {
+    return (
+      `この実行の統合PR/MRは最終マージの判断が確定しています（${live.finalMergeOutcome}）。` +
+      'これ以降は計画を変更できません。会話は続けられます。'
+    );
+  }
+  return undefined;
 }
 
 /**
