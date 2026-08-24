@@ -580,7 +580,7 @@ ${controlPanelStyles()}
       <span id="usageLabel"></span><span class="percent" id="usagePercent"></span>
     </div>
     <div class="bar"><div class="fill" id="usageFill"></div></div>
-    <div class="hint" id="usageMeta"></div>
+    <div class="usage-meta" id="usageMeta"></div>
   </div>
 
   <div class="row">
