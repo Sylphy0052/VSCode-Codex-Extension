@@ -258,6 +258,21 @@ export function controlPanelStyles(): string {
     outline: 1px solid var(--vscode-focusBorder);
     outline-offset: 2px;
   }
+  /*
+   * セクション見出しのアイコン（issue #739）。中身はインラインSVG（controlPanelIcons.ts）。
+   *
+   * summary の display は変えていない。display を flex や block にすると折りたたみの
+   * 三角マーカー（::marker）が消えるため、インラインのspanで包んで縦位置だけを揃える。
+   * inline-flex は SVG のベースライン下がりを打ち消すためで、vertical-align で
+   * 文字の中心に寄せる。
+   *
+   * 色は指定しない。SVG側が currentColor を使っているので、見出しの文字色にそのまま従う。
+   */
+  .sectionIcon {
+    display: inline-flex;
+    vertical-align: -2px;
+    margin-right: 5px;
+  }
   .section .sectionBody { padding-top: 2px; }
   /* 承認の下位項目（承認の詳細）。アカウント等の大セクションと同じ重さに見えないよう、
      区切り線を引かず余白も詰める */
