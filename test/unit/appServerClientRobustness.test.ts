@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Logger } from '../../src/log';
 import { type JsonRpcMessage } from '../../src/codex/jsonRpc';
-import { MAX_LINE_BUFFER_BYTES } from '../../src/process/childProcess';
+/**
+ * このテストでの受信バッファの1行上限（issue #795）。
+ *
+ * 実際の既定値（`MAX_APP_SERVER_LINE_BYTES`）は128MBあり、超過させるだけのために
+ * その大きさの文字列を作るとテストが重くなる。上限値そのものはここでの関心では
+ * ないため、コンストラクタから小さい値を渡して挙動だけを見る。
+ */
+const TEST_MAX_LINE_BYTES = 1024;
 
 /**
  * issue #402（T17: ストリーム受信とプロセス終了の頑健性）の2点目・3点目を、
@@ -187,7 +194,7 @@ describe('AppServerClient: 受信バッファの上限（issue #402、1点目・
   it('同じチャンクに正常な応答と上限超過の未完成行が同居しても、正常な応答は処理される', async () => {
     const fake = fakeChildProcess();
     spawnMock.mockReturnValueOnce(fake.proc);
-    const client = new AppServerClient(() => 'codex', fakeLogger());
+    const client = new AppServerClient(() => 'codex', fakeLogger(), 30_000, TEST_MAX_LINE_BYTES);
 
     const pending = client.forkThread(
       '11111111-1111-1111-1111-111111111111',
@@ -206,7 +213,7 @@ describe('AppServerClient: 受信バッファの上限（issue #402、1点目・
     })}
 `;
     // 同じstdoutチャンクの中に、改行を含まない上限超過分（未完成行）を同居させる
-    const overflowTail = 'x'.repeat(MAX_LINE_BUFFER_BYTES + 1);
+    const overflowTail = 'x'.repeat(TEST_MAX_LINE_BYTES + 1);
     fake.proc.stdout.emit('data', Buffer.from(responseLine + overflowTail));
 
     // overflowより先にmessagesが処理されるため、正常だった応答は失敗へすり替わらない
@@ -219,7 +226,7 @@ describe('AppServerClient: 受信バッファの上限（issue #402、1点目・
   it('overflow検知時にクロージャ内のbufferが確実にクリアされる（レビュー指摘・MEDIUM）', async () => {
     const fake = fakeChildProcess();
     spawnMock.mockReturnValueOnce(fake.proc);
-    const client = new AppServerClient(() => 'codex', fakeLogger());
+    const client = new AppServerClient(() => 'codex', fakeLogger(), 30_000, TEST_MAX_LINE_BYTES);
 
     const pending = client.forkThread(
       '11111111-1111-1111-1111-111111111111',
@@ -231,7 +238,7 @@ describe('AppServerClient: 受信バッファの上限（issue #402、1点目・
     await Promise.resolve();
 
     // 改行を一切含まない上限超過分だけのチャンク（completeなmessagesは無い）
-    const overflowTail = 'x'.repeat(MAX_LINE_BUFFER_BYTES + 1);
+    const overflowTail = 'x'.repeat(TEST_MAX_LINE_BYTES + 1);
     fake.proc.stdout.emit('data', Buffer.from(overflowTail));
 
     // bufferがクリアされていれば、続くチャンクは単独で解釈される。クリアされて
@@ -255,7 +262,7 @@ describe('AppServerClient: 受信バッファの上限（issue #402、1点目・
   it('通知リスナーが同期的に例外を投げても、overflow時の後始末（打ち切りの予約）は行われる（レビュー指摘・LOW）', async () => {
     const fake = fakeChildProcess();
     spawnMock.mockReturnValueOnce(fake.proc);
-    const client = new AppServerClient(() => 'codex', fakeLogger());
+    const client = new AppServerClient(() => 'codex', fakeLogger(), 30_000, TEST_MAX_LINE_BYTES);
 
     const call = (client as unknown as { call: CallMethod }).call;
     const outer = call.call(
@@ -280,7 +287,7 @@ describe('AppServerClient: 受信バッファの上限（issue #402、1点目・
     // 完成した通知行の直後に、改行を含まない上限超過分を同居させる
     const notifyLine = `${JSON.stringify({ jsonrpc: '2.0', method: 'some/event', params: {} })}
 `;
-    const overflowTail = 'x'.repeat(MAX_LINE_BUFFER_BYTES + 1);
+    const overflowTail = 'x'.repeat(TEST_MAX_LINE_BYTES + 1);
 
     // 通知リスナーの例外はforループ内で起きるため、'data'イベントの外まで伝播する
     // （try/finallyは握り潰さない。ここではfinallyでの後始末だけを確かめる）

@@ -16,7 +16,14 @@ vi.mock('node:child_process', () => ({
 
 // `vi.mock`はホイストされるため、この静的importは差し替え後の`spawn`を使う
 import { AppServerConnection } from '../../src/appserver/connection';
-import { MAX_LINE_BUFFER_BYTES } from '../../src/process/childProcess';
+/**
+ * このテストでの受信バッファの1行上限（issue #795）。
+ *
+ * 実際の既定値（`MAX_APP_SERVER_LINE_BYTES`）は128MBあり、超過させるだけのために
+ * その大きさの文字列を作るとテストが重くなる。上限値そのものはここでの関心では
+ * ないため、コンストラクタから小さい値を渡して挙動だけを見る。
+ */
+const TEST_MAX_LINE_BYTES = 1024;
 import { createFakeChildProcess as fakeChildProcess } from '../helpers/fakeChildProcess';
 
 function fakeLogger(): Logger {
@@ -136,6 +143,7 @@ describe('AppServerConnection: 受信バッファの上限（issue #402、1点�
       () => undefined,
       async () => undefined,
       onDisconnect,
+      TEST_MAX_LINE_BYTES,
     );
 
     const started = connection.ensureStarted();
@@ -144,7 +152,7 @@ describe('AppServerConnection: 受信バッファの上限（issue #402、1点�
     await started;
 
     // 改行を一切含まない巨大な出力（診断ログの乱れ・バイナリ混入等を模す）
-    proc1.proc.stdout.emit('data', Buffer.from('x'.repeat(MAX_LINE_BUFFER_BYTES + 1)));
+    proc1.proc.stdout.emit('data', Buffer.from('x'.repeat(TEST_MAX_LINE_BYTES + 1)));
 
     expect(proc1.kill).toHaveBeenCalledTimes(1);
     expect(onDisconnect).toHaveBeenCalledTimes(1);
@@ -191,6 +199,7 @@ describe('AppServerConnection: 受信バッファの上限（issue #402、1点�
       () => undefined,
       async () => undefined,
       onDisconnect,
+      TEST_MAX_LINE_BYTES,
     );
 
     const started = connection.ensureStarted();
@@ -204,7 +213,7 @@ describe('AppServerConnection: 受信バッファの上限（issue #402、1点�
     const responseLine = `${JSON.stringify({ jsonrpc: '2.0', id: forkId, result: { ok: true } })}
 `;
     // 同じstdoutチャンクの中に、改行を含まない上限超過分（未完成行）を同居させる
-    const overflowTail = 'x'.repeat(MAX_LINE_BUFFER_BYTES + 1);
+    const overflowTail = 'x'.repeat(TEST_MAX_LINE_BYTES + 1);
     proc.proc.stdout.emit('data', Buffer.from(responseLine + overflowTail));
 
     // overflowより先にmessagesが処理されるため、正常だった応答は失敗へすり替わらない
@@ -230,6 +239,7 @@ describe('AppServerConnection: 受信バッファの上限（issue #402、1点�
       },
       async () => undefined,
       onDisconnect,
+      TEST_MAX_LINE_BYTES,
     );
 
     const started = connection.ensureStarted();
@@ -240,7 +250,7 @@ describe('AppServerConnection: 受信バッファの上限（issue #402、1点�
     // 完成した通知行の直後に、改行を含まない上限超過分を同居させる
     const notifyLine = `${JSON.stringify({ jsonrpc: '2.0', method: 'some/event', params: {} })}
 `;
-    const overflowTail = 'x'.repeat(MAX_LINE_BUFFER_BYTES + 1);
+    const overflowTail = 'x'.repeat(TEST_MAX_LINE_BYTES + 1);
 
     // 通知ハンドラの例外はforループ内で起きるため、receive()の外まで伝播する
     // （try/finallyは握り潰さない。ここではfinallyでの後始末だけを確かめる）
@@ -298,6 +308,7 @@ describe('AppServerConnection: 古い世代のプロセスからの通知を捨�
       () => undefined,
       async () => undefined,
       onDisconnect,
+      TEST_MAX_LINE_BYTES,
     );
 
     // proc1で起動し、上限超過でreset()させる（issue #402と同じ経路で古い世代を作る）
@@ -305,7 +316,7 @@ describe('AppServerConnection: 古い世代のプロセスからの通知を捨�
     const initId1 = initializeRequestId(proc1.writes);
     proc1.emitStdout(JSON.stringify({ jsonrpc: '2.0', id: initId1, result: {} }));
     await started;
-    proc1.proc.stdout.emit('data', Buffer.from('x'.repeat(MAX_LINE_BUFFER_BYTES + 1)));
+    proc1.proc.stdout.emit('data', Buffer.from('x'.repeat(TEST_MAX_LINE_BYTES + 1)));
     expect(onDisconnect).toHaveBeenCalledTimes(1);
 
     // 新しいプロセス（proc2）で繋ぎ直す
@@ -350,13 +361,14 @@ describe('AppServerConnection: 古い世代のプロセスからの通知を捨�
       () => undefined,
       async () => undefined,
       onDisconnect,
+      TEST_MAX_LINE_BYTES,
     );
 
     const started = connection.ensureStarted();
     const initId1 = initializeRequestId(proc1.writes);
     proc1.emitStdout(JSON.stringify({ jsonrpc: '2.0', id: initId1, result: {} }));
     await started;
-    proc1.proc.stdout.emit('data', Buffer.from('x'.repeat(MAX_LINE_BUFFER_BYTES + 1)));
+    proc1.proc.stdout.emit('data', Buffer.from('x'.repeat(TEST_MAX_LINE_BYTES + 1)));
 
     const second = connection.ensureStarted();
     const initId2 = initializeRequestId(proc2.writes);
@@ -421,13 +433,14 @@ describe('AppServerConnection: 古い世代のプロセスからの通知を捨�
       () => undefined,
       async () => undefined,
       onDisconnect,
+      TEST_MAX_LINE_BYTES,
     );
 
     const started = connection.ensureStarted();
     const initId1 = initializeRequestId(proc1.writes);
     proc1.emitStdout(JSON.stringify({ jsonrpc: '2.0', id: initId1, result: {} }));
     await started;
-    proc1.proc.stdout.emit('data', Buffer.from('x'.repeat(MAX_LINE_BUFFER_BYTES + 1)));
+    proc1.proc.stdout.emit('data', Buffer.from('x'.repeat(TEST_MAX_LINE_BYTES + 1)));
 
     const second = connection.ensureStarted();
     const initId2 = initializeRequestId(proc2.writes);
@@ -480,6 +493,8 @@ describe('AppServerConnection: LOWレビュー指摘の後始末（issue #419）
       fakeLogger(),
       () => undefined,
       async () => undefined,
+      () => undefined,
+      TEST_MAX_LINE_BYTES,
     );
 
     const started = connection.ensureStarted();
@@ -487,7 +502,7 @@ describe('AppServerConnection: LOWレビュー指摘の後始末（issue #419）
 
     // `initialize`の応答がまだ無い間に、改行を含まない出力が上限を超えて届く。
     // `receive()`のoverflow処理が先にkillWithEscalation()+reset()を済ませる
-    proc.proc.stdout.emit('data', Buffer.from('x'.repeat(MAX_LINE_BUFFER_BYTES + 1)));
+    proc.proc.stdout.emit('data', Buffer.from('x'.repeat(TEST_MAX_LINE_BYTES + 1)));
     await rejected;
 
     // 修正前は、上のoverflow処理と`start()`のcatch節の両方がkillWithEscalation()を
