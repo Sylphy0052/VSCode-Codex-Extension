@@ -297,6 +297,39 @@ describe('chatScript', () => {
       expect(new Set(labelKeys)).toEqual(new Set([...titleKeys, 'agentMessage']));
     },
   );
+
+  it(
+    'createDiff内のkindLabelはFileDiffKindの全値を網羅している' +
+      '（テンプレートリテラルの中にあり型検査が届かない。フォールバック（|| diff.kind）が' +
+      '効くため、キーを足し忘れても緑のまま画面に生の識別子が出る。Issue #668）',
+    () => {
+      const chatStateSource = readFileSync(
+        path.resolve(__dirname, '../../src/appserver/chatState.ts'),
+        'utf8',
+      );
+      const typeStart = chatStateSource.indexOf('export type FileDiffKind =');
+      expect(typeStart).toBeGreaterThan(0);
+      // 1行で書かれたstring literal union。LOOP_STOP_LABELテストの
+      // /^\s*\|\s*'(\w+)'/gm（行頭が | の行だけを拾う）をこの型へ掛けると0件になる
+      // （実測済み）。宣言行だけを範囲にして、行頭を要求せずに拾う
+      const declLineEnd = chatStateSource.indexOf('\n', typeStart);
+      expect(declLineEnd).toBeGreaterThan(typeStart);
+      const typeBody = chatStateSource.slice(typeStart, declLineEnd);
+      const allDiffKinds = [...typeBody.matchAll(/'(\w+)'/g)].map((m) => m[1]);
+      // 抽出に失敗すると0件になり、後続のSet同士のtoEqualが空集合同士で素通りする
+      expect(allDiffKinds.length).toBeGreaterThan(0);
+
+      const source = chatScript('Codex', { mode: 'quickPick' });
+      const labelMatch = source.match(/const kindLabel = \{([^}]*)\}/);
+      expect(labelMatch).not.toBeNull();
+      const body = labelMatch?.[1] ?? '';
+      // こちらも1行に3キーが並ぶ。他の表と同じ /^\s*(\w+):/gm を掛けると先頭の1件しか
+      // 拾えない（実測済み）
+      const labelKeys = [...body.matchAll(/(\w+):/g)].map((m) => m[1]);
+      expect(labelKeys.length).toBeGreaterThan(0);
+      expect(new Set(labelKeys)).toEqual(new Set(allDiffKinds));
+    },
+  );
 });
 
 describe('controlPanelScript', () => {
