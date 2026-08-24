@@ -35,6 +35,12 @@ describe('chatStyles', () => {
       expect(script.includes(id), `${id} を扱う処理が無い`).toBe(true);
     }
   });
+
+  it('ツール出力の既定折りたたみ用クラスが定義されている（issue #679）', () => {
+    const css = chatStyles();
+    expect(css).toContain('.body-fold');
+    expect(css).toContain('.body-content');
+  });
 });
 
 describe('controlPanelStyles', () => {

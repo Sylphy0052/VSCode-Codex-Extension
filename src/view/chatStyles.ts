@@ -42,14 +42,7 @@ export function chatStyles(): string {
     border-left: 2px solid var(--vscode-textLink-foreground);
   }
   .agent .body { padding-left: 0; }
-  .tool .body {
-    font-family: var(--vscode-editor-font-family);
-    font-size: 0.9em;
-    background-color: var(--vscode-textCodeBlock-background);
-    max-height: 240px;
-    overflow: auto;
-  }
-  .reasoning .body { color: var(--vscode-descriptionForeground); font-style: italic; }
+  .reasoning .body-content { color: var(--vscode-descriptionForeground); font-style: italic; }
   /* 会話に出す画像。既定はサムネイル、クリックで原寸まで広げる */
   .images { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
   .image img {
@@ -68,7 +61,10 @@ export function chatStyles(): string {
     font-size: 0.85em;
   }
   /* 実行中のコマンド。完了したものと見分けが付くようにする */
-  .item.running .body { border-left: 2px solid var(--vscode-progressBar-background); }
+  .item.running .body,
+  .item.running .body-fold {
+    border-left: 2px solid var(--vscode-progressBar-background);
+  }
   .item.running .head { color: var(--vscode-foreground); }
   .approval {
     margin: 10px 0;
@@ -447,7 +443,7 @@ export function chatStyles(): string {
   .item .head .actions { display: flex; gap: 6px; flex: none; }
   .item .head .actions button { padding: 1px 8px; font-size: 0.85em; }
   /* 本文は選択してコピーできるようにする */
-  .body { user-select: text; cursor: text; }
+  .body, .body-content { user-select: text; cursor: text; }
   /*
    * 設定は既定で折りたたむ（issue #266）。開いたままだとドロップダウン群と但し書きで
    * 下部が6行前後を占め、会話の見える量を削ってしまう。閉じているときは現在値の
@@ -628,6 +624,35 @@ export function chatStyles(): string {
   }
   .search-results-fold[open] > summary { margin-bottom: 4px; }
   .search-results-fold .search-result { margin-bottom: 4px; }
+
+  /* ツール出力系（コマンド実行・思考・MCP呼び出し等）の既定折りたたみ（issue #679）。
+     diffと同じ体裁に揃える */
+  .body-fold {
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-radius: 3px;
+  }
+  .body-fold > summary {
+    padding: 4px 8px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+    cursor: pointer;
+    user-select: none;
+  }
+  .body-fold[open] > summary {
+    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+  }
+  .body-content {
+    max-height: 420px;
+    margin: 0;
+    padding: 6px 8px;
+    overflow: auto;
+    background-color: var(--vscode-textCodeBlock-background);
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 0.85em;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
 
   /*
    * 応答本文のMarkdown描画（issue #290）。'.body' 直下だけに効かせる（'.tool .body'
