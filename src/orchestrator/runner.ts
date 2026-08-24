@@ -3486,11 +3486,6 @@ export class WorkflowRunner {
   }
 
   /**
-   * 全タスクが`done`になった直後（design.md §16.18「全体の終了とmainへの反映」）に、
-   * 統合ブランチからmainへのPR/MRを作る。`pump()`から`getRunOutcome`が`succeeded`を
-   * 返した回だけ呼ばれる。
-   */
-  /**
    * runが終わったとき、`done`になったタスクに対応するロードマップの項目のチェックを
    * 書き戻す（design.md §16.19「ロードマップの更新」、Issue #173）。
    *
@@ -3542,6 +3537,11 @@ export class WorkflowRunner {
     }
   }
 
+  /**
+   * 全タスクが`done`になった直後（design.md §16.18「全体の終了とmainへの反映」）に、
+   * 統合ブランチからmainへのPR/MRを作る。`pump()`から`getRunOutcome`が`succeeded`を
+   * 返した回だけ呼ばれる。
+   */
   private async finalizeForge(runId: string): Promise<void> {
     const live = this.runs.get(runId);
     if (live === undefined || live.integration === undefined) {

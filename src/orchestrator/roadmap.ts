@@ -511,6 +511,13 @@ export function splitRoadmapPhasesIntoChunks(
 }
 
 /**
+ * ロードマップ項目の本文（`item.text`）に設ける長さ上限。前段のLLM生成セッションが
+ * 出力したロードマップMarkdown由来の自由記述であり、上限が無いと下流のプロンプトを
+ * 圧迫する（design.md §16.24、Issue #369）。
+ */
+const ROADMAP_ITEM_TEXT_MAX_LENGTH = 2000;
+
+/**
  * 選んだ項目を、分解セッションへ渡すテキストの材料として整形する（design.md §16.19 2段目
  * 「項目をtasksに、依存をdependsOnに写す」「Issue番号を持つ項目は…issueフィールドとして
  * 持たせる」）。
@@ -522,13 +529,6 @@ export function splitRoadmapPhasesIntoChunks(
  * 確認し、`issue`については`alignRoadmapIssues`が実際に直す）。**この指示だけでは防げない
  * ことは実測済み**で、Issue番号を持つ項目の隣にある無関係な項目へ同じ番号が並んだ。
  */
-/**
- * ロードマップ項目の本文（`item.text`）に設ける長さ上限。前段のLLM生成セッションが
- * 出力したロードマップMarkdown由来の自由記述であり、上限が無いと下流のプロンプトを
- * 圧迫する（design.md §16.24、Issue #369）。
- */
-const ROADMAP_ITEM_TEXT_MAX_LENGTH = 2000;
-
 export function formatRoadmapMaterial(items: readonly RoadmapMaterialItem[]): string {
   const lines: string[] = [];
   lines.push('## ロードマップの材料');

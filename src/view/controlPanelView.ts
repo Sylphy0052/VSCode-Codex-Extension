@@ -411,11 +411,6 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * ログイン/ログアウト操作を実行し、結果にかかわらず実際の状態を読み直して表示する
-   * （issue #29）。確認ダイアログでの取り消し（`error` が `undefined`）は静かに終える。
-   * 失敗時だけエラーを通知する。
-   */
-  /**
    * pluginをインストールする（issue #32）。
    *
    * どちらも名前をテキスト入力で受ける（既存の `loginCodexApiKey` と同じ
@@ -474,6 +469,11 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     );
   }
 
+  /**
+   * ログイン/ログアウト操作を実行し、結果にかかわらず実際の状態を読み直して表示する
+   * （issue #29）。確認ダイアログでの取り消し（`error` が `undefined`）は静かに終える。
+   * 失敗時だけエラーを通知する。
+   */
   private async runAccountAction(
     action: () => Promise<{ ok: true } | { ok: false; error: string | undefined }>,
     label: string,

@@ -20,12 +20,6 @@ const obj = (v: unknown): Record<string, unknown> | undefined =>
   typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : undefined;
 
 /**
- * ロールアウトの `token_count` イベント1行から使用量を取り出す。
- *
- * レート制限はアカウント単位で記録されるため、どのセッションの行でも現在値として使える。
- * ただしCodexがAPIを呼んだ時点の値であり、能動的に取得する手段はない（`capturedAt` を併記する理由）。
- */
-/**
  * `account/rateLimits/read` の応答を読む。
  *
  * ロールアウトの追記を待たずに現在値を問い合わせられる。ファイル由来のスナップショット
@@ -53,6 +47,12 @@ export function readRateLimits(result: unknown, capturedAt: string): UsageSnapsh
   };
 }
 
+/**
+ * ロールアウトの `token_count` イベント1行から使用量を取り出す。
+ *
+ * レート制限はアカウント単位で記録されるため、どのセッションの行でも現在値として使える。
+ * ただしCodexがAPIを呼んだ時点の値であり、能動的に取得する手段はない（`capturedAt` を併記する理由）。
+ */
 export function parseTokenCountLine(line: string): UsageSnapshot | undefined {
   let raw: unknown;
   try {

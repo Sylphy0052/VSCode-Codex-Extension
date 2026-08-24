@@ -91,12 +91,6 @@ export interface ClaudeStreamOptions {
 }
 
 /**
- * `claude --print --input-format stream-json` を1会話につき1つ常駐させる。
- *
- * Codexのapp-serverと違い1プロセス1セッションなので、画面ごとにプロセスを持つ。
- * プロセスは使い回し、発言のたびに起動し直さない（文脈が切れるため）。
- */
-/**
  * `claude` プロセスの起動（統合テストの差し替え口。Issue #186）。
  *
  * stream-json の組み立てとcontrol protocolの往復は `ClaudeStreamSession` 自身の責務なので、
@@ -109,6 +103,12 @@ export type ClaudeSpawnPort = (
   options: { cwd: string; env: NodeJS.ProcessEnv },
 ) => ChildProcessWithoutNullStreams;
 
+/**
+ * `claude --print --input-format stream-json` を1会話につき1つ常駐させる。
+ *
+ * Codexのapp-serverと違い1プロセス1セッションなので、画面ごとにプロセスを持つ。
+ * プロセスは使い回し、発言のたびに起動し直さない（文脈が切れるため）。
+ */
 export class ClaudeStreamSession {
   private proc: ChildProcessWithoutNullStreams | undefined;
   private buffer = '';

@@ -1959,12 +1959,6 @@ async function pickRoadmapPhases(parsed: ParsedRoadmap): Promise<RoadmapPhase[] 
 }
 
 /**
- * 一覧取得と書き込みの間に別の生成が割り込んでも上書きしないよう、排他フラグ（`wx`）で
- * 書き込む（design.md §16.9セキュリティ監査 low）。`EEXIST`（他プロセス・他コマンド
- * 呼び出しが同名で先に作っていた）なら、その名前を候補集合へ足して連番を1つ進め、
- * 空いている名前が見つかるまで再試行する。
- */
-/**
  * 生成物の保存先ファイル名（拡張子なし）を利用者に確認してもらう。
  *
  * 既定値は `slugifyGoal` がゴール文から機械的に作るが、ゴールにファイルパスや指示の
@@ -1987,6 +1981,12 @@ async function askOutputFileName(
   return value === undefined ? undefined : value.trim();
 }
 
+/**
+ * 一覧取得と書き込みの間に別の生成が割り込んでも上書きしないよう、排他フラグ（`wx`）で
+ * 書き込む（design.md §16.9セキュリティ監査 low）。`EEXIST`（他プロセス・他コマンド
+ * 呼び出しが同名で先に作っていた）なら、その名前を候補集合へ足して連番を1つ進め、
+ * 空いている名前が見つかるまで再試行する。
+ */
 async function writeUniqueWorkflowFile(
   dirAbs: string,
   slug: string,
