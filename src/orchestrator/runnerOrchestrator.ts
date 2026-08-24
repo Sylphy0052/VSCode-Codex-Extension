@@ -800,6 +800,11 @@ function addTask(
  * dependsOn に挙げていないタスクを参照しています」）で拒否しており、`remove_task`だけが
  * 素通りしていた非対称を揃える。エラーがあれば削除自体を拒否し、理由を返す（部分適用は
  * 残さない。`live.def`/`live.runState`はどちらも書き換えない）。
+ *
+ * 拒否されたオーケストレーターが取れる手は「参照している側のタスクも`remove_task`で
+ * 取り除く」か「削除を諦める」のどちらか。**`update_task_prompt`で参照元の文面を直す道は
+ * 使えない**（参照元は`pending`のままであり、`update_task_prompt`は`LiveTask`のある
+ * ＝開始済みのタスクにしか効かないため）。この点は拒否メッセージにも書く。
  */
 function removeTask(
   self: WorkflowRunnerInternals,
@@ -838,8 +843,8 @@ function removeTask(
   if (validation.errors.length > 0) {
     return no(
       `タスクを取り除けません: ${validation.errors.map((e) => e.message).join(' / ')}` +
-        '（削除で宙に浮く参照が残る場合は、先にupdate_task_promptで参照している側の文面を' +
-        '直してから削除してください）',
+        '（参照している側のタスクも取り除くか、この削除を諦めてください。参照元がまだ' +
+        '開始していない場合、その文面はupdate_task_promptでは直せません）',
     );
   }
   live.def = candidateDef;
