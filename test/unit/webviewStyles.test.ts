@@ -5,6 +5,7 @@ import { chatStyles } from '../../src/view/chatStyles';
 import { CODE_TOKEN_TYPES } from '../../src/view/highlight';
 import { controlPanelStyles } from '../../src/view/controlPanelStyles';
 import { progressStyles } from '../../src/view/progressStyles';
+import { sharedStyles } from '../../src/view/sharedStyles';
 import { workflowStyles } from '../../src/view/workflowStyles';
 
 /**
@@ -74,7 +75,7 @@ describe('chatStyles', () => {
   it('エージェントの応答に縁取りがある（issue #712）', () => {
     const css = chatStyles();
     // 応答に境界が無いとターンの切れ目が分からない。色はテーマ変数から取る
-    expect(css).toMatch(/\.agent \.body\s*\{[^}]*border-left:[^}]*var\(--vscode-/);
+    expect(css).toMatch(/\.agent \.body\s*\{[^}]*border-left:[^}]*var\(--(vscode|agent)-/);
   });
 
   it('応答中の色が応答の縁取りより後に来て上書きする（issue #712）', () => {
@@ -209,7 +210,7 @@ describe('chatStyles', () => {
     const css = stripComments(chatStyles());
     // margin だけを持つ先頭の .item 規則とは別に、囲いの規則がある
     const card = css.match(
-      /\.item\s*\{[^}]*border:[^}]*var\(--vscode-[^}]*border-radius:[^}]*background-color:[^}]*\}/,
+      /\.item\s*\{[^}]*border:[^}]*var\(--(vscode|agent)-[^}]*border-radius:[^}]*background-color:[^}]*\}/,
     );
     expect(card, 'カードの規則が見つからない').not.toBeNull();
   });
@@ -380,8 +381,7 @@ describe('controlPanelStyles', () => {
     while ((m = rule.exec(css)) !== null) {
       const selector = (m[1] ?? '').trim();
       const body = m[2] ?? '';
-      const isCard =
-        body.includes('padding: 6px 8px') && body.includes('var(--vscode-widget-border');
+      const isCard = body.includes('padding: 6px 8px') && body.includes('var(--agent-border');
       const isHover = body.includes('var(--vscode-list-hoverBackground)');
       for (const part of selector.split(',')) {
         const one = part.trim();
@@ -427,12 +427,17 @@ describe('controlPanelStyles', () => {
     expect(css).toContain(".tabs button:not([aria-selected='true']):hover");
   });
 
-  it('使用量バーの太さがワークフロー画面と揃っている（issue #742）', () => {
-    // 画面ごとに太さが違うと、同じ意味の表示に見えない
+  it('使用量バーの太さがワークフロー画面と揃っている（issue #742、issue #757で共通化）', () => {
+    // 画面ごとに太さが違うと、同じ意味の表示に見えない。値は sharedStyles が持つので、
+    // ここでは「両画面が同じ変数を使っていること」と「その変数が1度だけ定義されること」を見る
     const bar = stripComments(controlPanelStyles()).match(/\n\s*\.bar \{([^}]*)\}/);
     expect(bar, '.bar の規則が見つからない').not.toBeNull();
-    expect(bar?.[1]).toMatch(/height:\s*8px/);
-    expect(bar?.[1]).toMatch(/border-radius:\s*4px/);
+    expect(bar?.[1]).toMatch(/height:\s*var\(--agent-bar-height\)/);
+    expect(bar?.[1]).toMatch(/border-radius:\s*var\(--agent-bar-radius\)/);
+    const workflowBar = stripComments(workflowStyles()).match(/\n\s*#progressBar \{([^}]*)\}/);
+    expect(workflowBar, '#progressBar の規則が見つからない').not.toBeNull();
+    expect(workflowBar?.[1]).toMatch(/height:\s*var\(--agent-bar-height\)/);
+    expect(workflowBar?.[1]).toMatch(/border-radius:\s*var\(--agent-bar-radius\)/);
   });
 
   it('使用量バーのトラックがopacityではなく色で薄くしてある（issue #742）', () => {
@@ -441,7 +446,9 @@ describe('controlPanelStyles', () => {
     const bar = css.match(/\n\s*\.bar \{([^}]*)\}/);
     expect(bar, '.bar の規則が見つからない').not.toBeNull();
     expect(bar?.[1]).not.toMatch(/opacity:/);
-    expect(bar?.[1]).toMatch(/color-mix\(/);
+    // 薄め方の実体は --agent-bar-track（issue #757）。同じCSSの中にある定義まで見る
+    expect(bar?.[1]).toMatch(/background-color:\s*var\(--agent-bar-track\)/);
+    expect(css).toMatch(/--agent-bar-track:\s*color-mix\(/);
     // ハイコントラストテーマでだけ描かれる輪郭。レイアウトを動かさない outline で出す
     expect(bar?.[1]).toMatch(/outline:[^;]*var\(--vscode-contrastBorder/);
   });
@@ -514,6 +521,58 @@ describe('枠線のフォールバック（issue #758）', () => {
       // 変数を使っていないスタイルで素通りしないよう、拾えること自体を先に確かめる
       expect(css, '検査対象の変数が使われていない').toContain('--vscode-widget-border');
       expect(css).not.toContain('--vscode-widget-border, transparent');
+    });
+  }
+});
+
+/**
+ * 画面をまたぐ共通のスタイル（issue #757）。
+ *
+ * 4画面が同じ意味の要素を別々の値で書いていたため、寸法と枠線をカスタムプロパティへ
+ * 集約した。集約が効いているかは「各画面の出力に定義が入っていること」と「各画面が
+ * 生の値ではなく変数を使っていること」の2点で見る。
+ */
+describe('共通スタイル（issue #757）', () => {
+  const TOKENS = [
+    '--agent-radius-sm',
+    '--agent-radius-md',
+    '--agent-radius-lg',
+    '--agent-radius-pill',
+    '--agent-bar-height',
+    '--agent-bar-radius',
+    '--agent-bar-track',
+    '--agent-border',
+  ];
+
+  it('共通スタイルがトークンを定義する', () => {
+    const css = sharedStyles();
+    for (const token of TOKENS) {
+      expect(css, `${token} の定義が無い`).toMatch(new RegExp(`${token}:`));
+    }
+  });
+
+  it('共通スタイルが hidden の打ち消しを持つ', () => {
+    // 各画面から重複を消したので、ここが唯一の定義になった
+    expect(hasHiddenReset(sharedStyles())).toBe(true);
+  });
+
+  for (const [name, build] of styleSources) {
+    it(`${name}: 共通スタイルを連結している`, () => {
+      const css = build();
+      for (const token of TOKENS) {
+        expect(css, `${token} の定義が届いていない`).toMatch(new RegExp(`${token}:`));
+      }
+    });
+
+    it(`${name}: 角丸を生の値で書かない`, () => {
+      const css = stripComments(build());
+      // 陽性対照: そもそも角丸の指定を拾えているか（拾えていないと0件で素通りする）
+      expect(css, '角丸の指定が見つからない').toMatch(/border-radius:/);
+      // 0 と 50% は寸法ではなく形の指定なので対象外
+      const literals = [...css.matchAll(/border-radius:\s*([^;]+);/g)]
+        .map((m) => (m[1] ?? '').trim())
+        .filter((value) => value !== '0' && value !== '50%' && !value.startsWith('var('));
+      expect(literals).toEqual([]);
     });
   }
 });

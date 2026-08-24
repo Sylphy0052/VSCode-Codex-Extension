@@ -1,4 +1,5 @@
 import { reducedMotionStyles } from './reducedMotion';
+import { sharedStyles } from './sharedStyles';
 
 /**
  * 進捗画面（issue #721、見た目の作り直しは issue #781）のスタイル。
@@ -13,11 +14,7 @@ import { reducedMotionStyles } from './reducedMotion';
  */
 export function progressStyles(): string {
   return `
-  /*
-   * hidden属性を常に効かせる。display指定のある要素はhiddenより詳細度が高く、
-   * 隠したつもりの領域が出しっぱなしになるため一律に打ち消す（chatStyles.tsと同じ）。
-   */
-  [hidden] { display: none !important; }
+${sharedStyles()}
   body {
     font-family: var(--vscode-font-family);
     font-size: var(--vscode-font-size);
@@ -30,7 +27,7 @@ export function progressStyles(): string {
     font-size: 1em;
     margin: 20px 0 6px;
     padding-bottom: 4px;
-    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-bottom: 1px solid var(--agent-border);
     display: flex;
     align-items: center;
     gap: 6px;
@@ -98,7 +95,7 @@ export function progressStyles(): string {
     padding: 12px 0 10px;
     /* 下の内容が透けると数字が読めなくなるため、必ず不透明な背景を敷く */
     background-color: var(--vscode-editor-background, var(--vscode-sideBar-background));
-    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-bottom: 1px solid var(--agent-border);
   }
   #summaryHeader {
     display: flex;
@@ -111,7 +108,7 @@ export function progressStyles(): string {
     align-items: center;
     gap: 5px;
     padding: 1px 8px;
-    border-radius: 10px;
+    border-radius: var(--agent-radius-pill);
     font-size: 0.85em;
     background-color: var(--vscode-badge-background);
     color: var(--vscode-badge-foreground);
@@ -136,8 +133,8 @@ export function progressStyles(): string {
   }
   .kpi {
     padding: 8px 10px;
-    border-radius: 4px;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-radius: var(--agent-radius-md);
+    border: 1px solid var(--agent-border);
     background-color: var(--vscode-editorWidget-background);
   }
   .kpi-value {
@@ -163,10 +160,13 @@ export function progressStyles(): string {
   }
   #progressBar {
     flex: 1;
-    height: 10px;
-    border-radius: 5px;
-    background-color: var(--vscode-editorWidget-background);
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    height: var(--agent-bar-height);
+    border-radius: var(--agent-bar-radius);
+    background-color: var(--agent-bar-track);
+    /* ハイコントラストのときだけ縁を出す。border と違い、幅を取らないので
+       ライト/ダークではバーの高さが変わらない（設定パネルのバーと同じ書き方） */
+    outline: 1px solid var(--vscode-contrastBorder, transparent);
+    outline-offset: -1px;
     overflow: hidden;
   }
   #progressFill {
@@ -230,7 +230,7 @@ export function progressStyles(): string {
   .path .count {
     flex: none;
     padding: 0 5px;
-    border-radius: 8px;
+    border-radius: var(--agent-radius-pill);
     font-family: var(--vscode-font-family);
     font-size: 0.85em;
     background-color: var(--vscode-badge-background);
@@ -259,7 +259,7 @@ export function progressStyles(): string {
   .groupHead .count {
     flex: none;
     padding: 0 5px;
-    border-radius: 8px;
+    border-radius: var(--agent-radius-pill);
     font-variant-numeric: tabular-nums;
     background-color: var(--vscode-badge-background);
     color: var(--vscode-badge-foreground);
@@ -272,7 +272,7 @@ export function progressStyles(): string {
     margin-top: 4px;
     padding: 2px 8px;
     border: none;
-    border-radius: 2px;
+    border-radius: var(--agent-radius-sm);
     cursor: pointer;
     font-family: inherit;
     font-size: 0.9em;
@@ -294,7 +294,7 @@ export function progressStyles(): string {
     top: 6px;
     bottom: 6px;
     width: 2px;
-    background-color: var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    background-color: var(--agent-border);
   }
   .turn { padding: 8px 0; }
   .turn > summary {
@@ -317,7 +317,7 @@ export function progressStyles(): string {
     height: 8px;
     border-radius: 50%;
     background-color: var(--vscode-editor-background, var(--vscode-sideBar-background));
-    border: 2px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border: 2px solid var(--agent-border);
     box-sizing: border-box;
   }
   .turn.latest > summary::before {
@@ -337,11 +337,11 @@ export function progressStyles(): string {
     align-items: center;
     gap: 3px;
     padding: 0 6px;
-    border-radius: 8px;
+    border-radius: var(--agent-radius-pill);
     font-size: 0.8em;
     color: var(--vscode-descriptionForeground);
     background-color: var(--vscode-editorWidget-background);
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border: 1px solid var(--agent-border);
   }
   .turn .body { padding: 6px 0 2px; }
   .turn .instruction {

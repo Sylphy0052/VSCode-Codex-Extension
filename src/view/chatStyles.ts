@@ -1,4 +1,5 @@
 import { reducedMotionStyles } from './reducedMotion';
+import { sharedStyles } from './sharedStyles';
 
 /**
  * チャット画面のスタイル。
@@ -9,12 +10,8 @@ import { reducedMotionStyles } from './reducedMotion';
  */
 export function chatStyles(): string {
   return `
+${sharedStyles()}
   html, body { height: 100%; margin: 0; }
-  /*
-   * hidden属性を常に効かせる。display指定のある要素は hidden より詳細度が高く、
-   * 隠したつもりの領域が出しっぱなしになる事故が続いたため、ここで一律に打ち消す。
-   */
-  [hidden] { display: none !important; }
   body {
     display: flex;
     flex-direction: column;
@@ -75,7 +72,7 @@ export function chatStyles(): string {
     align-items: center;
     justify-content: center;
     border-radius: 50%;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border: 1px solid var(--agent-border);
     background: var(--vscode-button-secondaryBackground);
     color: var(--vscode-button-secondaryForeground);
     cursor: pointer;
@@ -142,8 +139,8 @@ export function chatStyles(): string {
    * 減る。採否は実機での見比べで決める前提の変更（issue #719 の進め方）。
    */
   .item {
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 6px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-lg);
     padding: 2px 10px 6px;
     background-color: var(--vscode-editorWidget-background);
   }
@@ -169,7 +166,7 @@ export function chatStyles(): string {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     padding: var(--chat-body-padding);
-    border-radius: 4px;
+    border-radius: var(--agent-radius-md);
     /* 詰まって見えるのを解く（issue #713）。等幅で出す領域は個別に 1.45 を持つ */
     line-height: var(--chat-line-height);
   }
@@ -185,7 +182,7 @@ export function chatStyles(): string {
    * 変更前の padding-left: 0 は外し、.body の左余白（10px）へ戻す。線と本文が詰まる。
    */
   .agent .body {
-    border-left: 2px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-left: 2px solid var(--agent-border);
   }
   .reasoning .body-content { color: var(--vscode-descriptionForeground); font-style: italic; }
   /* 会話に出す画像。既定はサムネイル、クリックで原寸まで広げる */
@@ -193,14 +190,14 @@ export function chatStyles(): string {
   .image img {
     max-height: 160px;
     max-width: 100%;
-    border-radius: 4px;
+    border-radius: var(--agent-radius-md);
     border: 1px solid var(--vscode-panel-border);
     cursor: zoom-in;
   }
   .image.zoom img { max-height: none; cursor: zoom-out; }
   .image-note {
     padding: 6px 8px;
-    border-radius: 4px;
+    border-radius: var(--agent-radius-md);
     background-color: var(--vscode-textCodeBlock-background);
     color: var(--vscode-descriptionForeground);
     font-size: 0.85em;
@@ -227,7 +224,7 @@ export function chatStyles(): string {
     margin: 10px 0;
     padding: 10px 12px;
     border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-focusBorder));
-    border-radius: 4px;
+    border-radius: var(--agent-radius-md);
     background-color: var(--vscode-inputValidation-warningBackground, transparent);
   }
   .approval h3 { margin: 0 0 6px; font-size: 1em; }
@@ -236,7 +233,7 @@ export function chatStyles(): string {
     margin: 10px 0;
     padding: 10px 12px;
     border: 1px solid var(--vscode-focusBorder);
-    border-radius: 4px;
+    border-radius: var(--agent-radius-md);
     background-color: var(--vscode-editorWidget-background);
   }
   .prompt h3 { margin: 0 0 6px; font-size: 1em; }
@@ -280,7 +277,7 @@ export function chatStyles(): string {
     color: var(--vscode-input-foreground);
     background-color: var(--vscode-input-background);
     border: 1px solid var(--vscode-input-border, transparent);
-    border-radius: 2px;
+    border-radius: var(--agent-radius-sm);
     font-family: inherit;
     font-size: inherit;
   }
@@ -298,7 +295,7 @@ export function chatStyles(): string {
     color: var(--vscode-button-foreground);
     background-color: var(--vscode-button-background);
     border: 1px solid var(--vscode-button-border, transparent);
-    border-radius: 2px;
+    border-radius: var(--agent-radius-sm);
     cursor: pointer;
     font-family: inherit;
     font-size: 0.9em;
@@ -328,8 +325,8 @@ export function chatStyles(): string {
     align-items: center;
     gap: 6px;
     padding: 4px 6px;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 4px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
     background-color: var(--vscode-editorWidget-background);
     font-size: 0.85em;
   }
@@ -337,7 +334,7 @@ export function chatStyles(): string {
     width: 40px;
     height: 40px;
     object-fit: cover;
-    border-radius: 2px;
+    border-radius: var(--agent-radius-sm);
   }
   .attachment .name {
     max-width: 220px;
@@ -359,7 +356,7 @@ export function chatStyles(): string {
     flex-direction: column;
     gap: 8px;
     padding: 10px 16px 14px;
-    border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-top: 1px solid var(--agent-border);
   }
   #composerInputRow {
     display: flex;
@@ -402,8 +399,8 @@ export function chatStyles(): string {
     gap: 2px;
     padding: 4px;
     min-width: 180px;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 4px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
     background-color: var(--vscode-editorSuggestWidget-background, var(--vscode-editorWidget-background));
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
     z-index: 10;
@@ -435,7 +432,7 @@ export function chatStyles(): string {
     color: var(--vscode-input-foreground);
     background-color: var(--vscode-input-background);
     border: 1px solid var(--vscode-input-border, transparent);
-    border-radius: 2px;
+    border-radius: var(--agent-radius-sm);
     font-family: inherit;
     font-size: inherit;
   }
@@ -450,8 +447,8 @@ export function chatStyles(): string {
     overflow-y: auto;
     margin-bottom: 4px;
     padding: 4px 0;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 4px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
     background-color: var(--vscode-editorSuggestWidget-background, var(--vscode-editorWidget-background));
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
     z-index: 10;
@@ -502,8 +499,8 @@ export function chatStyles(): string {
   #queue {
     margin: 0 16px 8px;
     padding: 8px 10px;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 4px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
     background-color: var(--vscode-editorWidget-background);
     font-size: 0.9em;
   }
@@ -547,8 +544,8 @@ export function chatStyles(): string {
   #todos {
     margin: 0 16px 8px;
     padding: 8px 10px;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 4px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
     background-color: var(--vscode-editorWidget-background);
     font-size: 0.9em;
   }
@@ -571,8 +568,8 @@ export function chatStyles(): string {
   #backgroundTerminals {
     margin: 0 16px 8px;
     padding: 8px 10px;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 4px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
     background-color: var(--vscode-editorWidget-background);
     font-size: 0.9em;
   }
@@ -651,7 +648,7 @@ export function chatStyles(): string {
     color: var(--vscode-dropdown-foreground);
     background-color: var(--vscode-dropdown-background);
     border: 1px solid var(--vscode-dropdown-border);
-    border-radius: 2px;
+    border-radius: var(--agent-radius-sm);
     font-family: inherit;
     font-size: inherit;
   }
@@ -684,7 +681,7 @@ export function chatStyles(): string {
     flex-direction: column;
     gap: 8px;
     padding: 10px 16px;
-    border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-top: 1px solid var(--agent-border);
   }
   #loop label {
     display: flex;
@@ -699,7 +696,7 @@ export function chatStyles(): string {
     color: var(--vscode-input-foreground);
     background-color: var(--vscode-input-background);
     border: 1px solid var(--vscode-input-border, transparent);
-    border-radius: 2px;
+    border-radius: var(--agent-radius-sm);
     font-family: inherit;
     font-size: inherit;
   }
@@ -717,8 +714,8 @@ export function chatStyles(): string {
   }
   .diffs { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
   .diff {
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 3px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
   }
   .diff > summary {
     display: flex;
@@ -732,7 +729,7 @@ export function chatStyles(): string {
     user-select: none;
   }
   .diff[open] > summary {
-    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-bottom: 1px solid var(--agent-border);
   }
   .diff-label { overflow-wrap: anywhere; }
   /* 差分の見出し行の操作ボタン（issue #291）。コードブロックのmd-code-actionsと揃える */
@@ -769,8 +766,8 @@ export function chatStyles(): string {
     padding: 6px 8px;
     color: inherit;
     background-color: var(--vscode-textCodeBlock-background);
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 4px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
     cursor: pointer;
     font-family: inherit;
     font-size: 0.9em;
@@ -796,8 +793,8 @@ export function chatStyles(): string {
   /* ツール出力系（コマンド実行・思考・MCP呼び出し等）の既定折りたたみ（issue #679）。
      diffと同じ体裁に揃える */
   .body-fold {
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 3px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
   }
   .body-fold > summary {
     padding: 4px 8px;
@@ -807,7 +804,7 @@ export function chatStyles(): string {
     user-select: none;
   }
   .body-fold[open] > summary {
-    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-bottom: 1px solid var(--agent-border);
   }
   .body-content {
     max-height: 420px;
@@ -882,7 +879,7 @@ export function chatStyles(): string {
   .body hr {
     margin: 10px 0;
     border: none;
-    border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-top: 1px solid var(--agent-border);
   }
   /* タスクリスト（issue #332）。チェックボックスは表示専用（クリック不可）で操作は伴わない */
   .md-task-item { list-style: none; margin-left: -1.4em; }
@@ -890,7 +887,7 @@ export function chatStyles(): string {
   .body blockquote.md-quote {
     margin: 6px 0 10px;
     padding: 2px 10px;
-    border-left: 3px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-left: 3px solid var(--agent-border);
     color: var(--vscode-descriptionForeground);
   }
   /* 表（issue #332）。列が多いと画面幅を超えるため、ラップ要素だけを横スクロールさせる */
@@ -898,7 +895,7 @@ export function chatStyles(): string {
   .md-table { border-collapse: collapse; width: max-content; min-width: 100%; }
   .md-table th, .md-table td {
     padding: 4px 10px;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border: 1px solid var(--agent-border);
     text-align: left;
   }
   .md-table th { background-color: var(--vscode-editorWidget-background); font-weight: 600; }
@@ -908,15 +905,15 @@ export function chatStyles(): string {
   /* インラインコード。コードブロック内（.md-code pre code）は下で上書きする */
   .body code {
     padding: 1px 4px;
-    border-radius: 3px;
+    border-radius: var(--agent-radius-md);
     background-color: var(--vscode-textCodeBlock-background);
     font-family: var(--vscode-editor-font-family);
     font-size: 0.9em;
   }
   .md-code {
     margin: 6px 0;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 4px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
     overflow: hidden;
   }
   .md-code-head {

@@ -1,4 +1,5 @@
 import { reducedMotionStyles } from './reducedMotion';
+import { sharedStyles } from './sharedStyles';
 
 /**
  * ワークフローViewのスタイル（design.md §16.8）。
@@ -8,7 +9,7 @@ import { reducedMotionStyles } from './reducedMotion';
  */
 export function workflowStyles(): string {
   return `
-  [hidden] { display: none !important; }
+${sharedStyles()}
   * { box-sizing: border-box; }
   body {
     font-family: var(--vscode-font-family);
@@ -26,7 +27,7 @@ export function workflowStyles(): string {
     color: var(--vscode-button-foreground);
     background-color: var(--vscode-button-background);
     border: 1px solid var(--vscode-button-border, transparent);
-    border-radius: 2px;
+    border-radius: var(--agent-radius-sm);
     cursor: pointer;
     font-family: inherit;
     font-size: 0.9em;
@@ -35,7 +36,7 @@ export function workflowStyles(): string {
   button.secondary {
     color: var(--vscode-foreground);
     background-color: var(--vscode-button-secondaryBackground, transparent);
-    border-color: var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-color: var(--agent-border);
   }
   button.secondary:hover { background-color: var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground)); }
   button.danger { border-color: var(--vscode-errorForeground); color: var(--vscode-errorForeground); }
@@ -45,7 +46,7 @@ export function workflowStyles(): string {
     color: var(--vscode-dropdown-foreground);
     background-color: var(--vscode-dropdown-background);
     border: 1px solid var(--vscode-dropdown-border);
-    border-radius: 2px;
+    border-radius: var(--agent-radius-sm);
     font-family: inherit;
   }
 
@@ -57,7 +58,7 @@ export function workflowStyles(): string {
     justify-content: space-between;
     gap: 8px 16px;
     padding-bottom: 10px;
-    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-bottom: 1px solid var(--agent-border);
   }
   #header .title-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
   #header .counts { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
@@ -70,14 +71,10 @@ export function workflowStyles(): string {
   #progressBar {
     display: flex;
     margin-top: 8px;
-    height: 8px;
-    border-radius: 4px;
+    height: var(--agent-bar-height);
+    border-radius: var(--agent-bar-radius);
     overflow: hidden;
-    background-color: color-mix(
-      in srgb,
-      var(--vscode-progressBar-background, var(--vscode-editorWidget-border)) 35%,
-      transparent
-    );
+    background-color: var(--agent-bar-track);
   }
   #progressBar .fill {
     height: 100%;
@@ -97,7 +94,7 @@ export function workflowStyles(): string {
   #banner {
     margin-top: 8px;
     padding: 6px 10px;
-    border-radius: 3px;
+    border-radius: var(--agent-radius-md);
     border: 1px solid;
     font-size: 0.9em;
   }
@@ -132,9 +129,9 @@ export function workflowStyles(): string {
        バッジの形を保つ。font は inherit しないと OS の UI フォントで出る */
     font-family: inherit;
     cursor: pointer;
-    border-radius: 10px;
+    border-radius: var(--agent-radius-pill);
     font-size: 0.9em;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border: 1px solid var(--agent-border);
     color: var(--vscode-descriptionForeground);
     background-color: var(--vscode-editorWidget-background, var(--vscode-editor-background));
   }
@@ -175,7 +172,7 @@ export function workflowStyles(): string {
     position: relative;
     height: 3px;
     margin-bottom: 4px;
-    border-radius: 2px;
+    border-radius: var(--agent-radius-sm);
     background-color: color-mix(
       in srgb,
       var(--vscode-progressBar-background, var(--vscode-editorWidget-border)) 30%,
@@ -187,7 +184,7 @@ export function workflowStyles(): string {
     top: 0;
     bottom: 0;
     min-width: 8px;
-    border-radius: 2px;
+    border-radius: var(--agent-radius-sm);
     background-color: var(--vscode-progressBar-background, var(--vscode-foreground));
     /* ハイコントラストでは色が落ちるため、枠でも位置が分かるようにする */
     outline: 1px solid var(--vscode-contrastBorder, transparent);
@@ -275,7 +272,7 @@ export function workflowStyles(): string {
   #taskTable th, #taskTable td {
     text-align: left;
     padding: 5px 8px;
-    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-bottom: 1px solid var(--agent-border);
     vertical-align: top;
   }
   #taskTable th { color: var(--vscode-descriptionForeground); font-weight: 500; }
@@ -289,7 +286,7 @@ export function workflowStyles(): string {
   .state-pill {
     display: inline-block;
     padding: 1px 8px;
-    border-radius: 10px;
+    border-radius: var(--agent-radius-pill);
     font-size: 0.92em;
     white-space: nowrap;
     border: 1px solid transparent;
@@ -315,7 +312,7 @@ export function workflowStyles(): string {
 
   tr.approval-row td {
     background-color: color-mix(in srgb, var(--vscode-charts-yellow) 8%, transparent);
-    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-bottom: 1px solid var(--agent-border);
   }
   .approval-box { padding: 4px 2px; }
   .approval-box .detail {
@@ -330,7 +327,7 @@ export function workflowStyles(): string {
   /* ---- 展開後のプロンプト（design.md §16.4 案1「見せる」、Issue #67） ---- */
   tr.prompt-row td {
     background-color: color-mix(in srgb, var(--vscode-charts-blue) 6%, transparent);
-    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-bottom: 1px solid var(--agent-border);
   }
   .prompt-box { padding: 4px 2px; }
   .prompt-box .detail {
@@ -363,8 +360,8 @@ export function workflowStyles(): string {
   #programs { display: flex; flex-direction: column; gap: 6px; }
   .program-item {
     padding: 6px 8px;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 4px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
     background-color: color-mix(in srgb, var(--vscode-charts-blue) 6%, transparent);
   }
   .program-head { display: flex; align-items: center; gap: 8px; }
@@ -379,8 +376,8 @@ export function workflowStyles(): string {
   #orchestrator {
     margin-top: 8px;
     padding: 6px 8px;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 4px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
     background-color: color-mix(in srgb, var(--vscode-charts-purple) 6%, transparent);
   }
   .orch-head { display: flex; align-items: center; gap: 8px; }
@@ -388,7 +385,7 @@ export function workflowStyles(): string {
   .orch-status { color: var(--vscode-descriptionForeground); font-size: 0.85em; }
   .orch-unread {
     padding: 0 6px;
-    border-radius: 8px;
+    border-radius: var(--agent-radius-pill);
     background-color: var(--vscode-charts-purple);
     color: var(--vscode-editor-background);
     font-size: 0.78em;
