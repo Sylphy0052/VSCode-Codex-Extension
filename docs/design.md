@@ -3660,15 +3660,16 @@ Codexの`/btw`は`thread/fork`で**新しいスレッド**を作ってから聞�
 #### 実装
 
 - `src/view/chatStyles.ts`: `.body`へ`line-height: 1.6`。等幅の領域は個別に`1.45`を持つのでそのまま
-- `src/view/chatStyles.ts`: `body`へ`--chat-measure: 84ch`を置き、`.body`直下の文章要素（`p` / `ul` / `ol` / `h1`〜`h6` / `blockquote`）と`.body.plain`へ`max-width: var(--chat-measure)`
+- `src/view/chatStyles.ts`: `body`へ`--chat-measure: 84ch`を置き、`.body`直下の文章要素（`p` / `ul` / `ol` / `h1`〜`h6` / `blockquote` / `hr`）と`.body.plain`へ`max-width: var(--chat-measure)`
 - `src/view/chatStyles.ts`: 行間に合わせて`.body p`の下余白を`8px`→`10px`、見出しの上余白を`10px`→`14px`
 - `src/view/chatScript.ts`: `renderBody`で`node.body.classList.toggle('plain', !useMarkdown)`
 
 **上限は`.body`自身ではなく直下の文章要素へ掛けた。** `.body`へ掛けると、その中の表
 （`.md-table-wrap`）とコードブロック（`.md-code`）まで同じ箱に閉じ込められる。表は
 `width: max-content` + ラッパ側の`overflow-x: auto`で横スクロールさせる設計（§14.60）
-なので、箱を狭めると列が読めなくなる。掛ける先を列挙する形にすれば、`.md-table-wrap` /
-`.md-code` / `hr`は「並べていない」ことがそのまま「上限を持たない」になる。
+なので、箱を狭めると列が読めなくなる。掛ける先を列挙する形にすれば、`.md-table-wrap`と
+`.md-code`は「並べていない」ことがそのまま「上限を持たない」になる。`hr`は文章ではないが
+並べている。区切り線だけが本文より長いと、幅が揃わず段落の区切りに見えなくなるため。
 
 **生テキストで出す場合だけ`.body`自身へ掛ける。** `agent.chat.renderMarkdown`が`false`の
 とき、本文は`textContent`で`.body`へ直接載り、上の子セレクタが当たらない。ただしこの

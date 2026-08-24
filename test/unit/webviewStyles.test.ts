@@ -85,10 +85,18 @@ describe('chatStyles', () => {
   });
 
   it('本文の行長に上限がある（issue #713）', () => {
-    const css = chatStyles();
-    // 上限値は1箇所（--chat-measure）に持ち、掛ける先は '.body' 直下の文章要素
+    const css = stripComments(chatStyles());
+    // 上限値は1箇所（--chat-measure）に持つ
     expect(css).toMatch(/--chat-measure:\s*\d+ch/);
-    expect(css).toMatch(/\.body > blockquote\s*\{\s*max-width: var\(--chat-measure\)/);
+    // 掛ける先は '.body' 直下の文章要素。セレクタの列挙を取り出して中身を確かめる
+    // （末尾がどれかに依存すると、要素を1つ足しただけで壊れる）
+    const selectors = css.match(
+      /((?:\s*\.body > [a-z0-9]+,)+\s*\.body > [a-z0-9]+)\s*\{\s*max-width: var\(--chat-measure\)/,
+    );
+    expect(selectors, '行長の上限を掛ける規則が見つからない').not.toBeNull();
+    for (const selector of ['.body > p', '.body > ul', '.body > blockquote', '.body > hr']) {
+      expect(selectors![1]).toContain(selector);
+    }
     // Markdownを描画しない設定では '.body' 自身が本文を持つ
     expect(css).toMatch(/\.body\.plain\s*\{\s*max-width: var\(--chat-measure\)/);
   });

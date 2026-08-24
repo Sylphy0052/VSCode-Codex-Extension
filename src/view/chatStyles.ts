@@ -734,8 +734,11 @@ export function chatStyles(): string {
    *
    * 上限は '.body' 直下の文章要素にだけ掛ける。'.body' 自身へ掛けると、その中の表と
    * コードブロックまで同じ箱に閉じ込められて横へ伸びられなくなる（表は
-   * '.md-table-wrap' の横スクロールで見せる設計。§14.60）。'.md-table-wrap' /
-   * '.md-code' / 'hr' をここへ並べていないのは、上限を持たせないため。
+   * '.md-table-wrap' の横スクロールで見せる設計。§14.60）。'.md-table-wrap' と
+   * '.md-code' をここへ並べていないのは、上限を持たせないため。
+   *
+   * 'hr' は文章ではないが並べる。区切り線だけが本文より長いと、幅が揃わず段落の
+   * 区切りに見えなくなる。
    */
   .body > p,
   .body > ul,
@@ -746,7 +749,8 @@ export function chatStyles(): string {
   .body > h4,
   .body > h5,
   .body > h6,
-  .body > blockquote {
+  .body > blockquote,
+  .body > hr {
     max-width: var(--chat-measure);
   }
   /*
