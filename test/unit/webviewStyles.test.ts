@@ -267,11 +267,18 @@ describe('prefers-reduced-motion（issue #760）', () => {
         /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\*,\s*\*::before,\s*\*::after\s*\{([^}]*)\}/,
       );
       expect(rule, '抑制の規則が見つからない').not.toBeNull();
-      for (const property of ['animation-duration', 'transition-duration', 'scroll-behavior']) {
-        expect(rule![1]).toContain(property);
+      // 全称セレクタは詳細度0で、個別の規則にはまず負ける。1つでも !important が
+      // 欠けるとそのプロパティだけ抑制が効かないため、値まで含めて見る
+      for (const property of [
+        'animation-duration',
+        'animation-iteration-count',
+        'transition-duration',
+        'scroll-behavior',
+      ]) {
+        expect(rule![1], `${property} に !important が無い`).toMatch(
+          new RegExp(`${property}:[^;]*!important`),
+        );
       }
-      // !important が無いと、個別の規則（同じ詳細度で後から来るもの）に負ける
-      expect(rule![1]).toContain('!important');
     });
   }
 });
