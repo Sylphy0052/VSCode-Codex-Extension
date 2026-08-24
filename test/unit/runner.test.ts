@@ -9655,6 +9655,29 @@ tasks:
     done: d3
 `;
 
+    /**
+     * 削除対象（T3）を`dependsOn`に持ち、かつその成果をテンプレート変数で参照している
+     * タスク（T2）を含む定義（Issue #764）。`remove_task`が検証を挟まないと、T2の
+     * `{{T3.cwd}}`が空文字へ展開されたまま走ってしまう。
+     */
+    const TEMPLATE_REF_YAML = `
+version: 1
+name: task-remove-template-ref-test
+defaults:
+  maxParallel: 1
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    dependsOn: [T3]
+    prompt: "p2 {{T3.cwd}}"
+    done: d2
+  - id: T3
+    prompt: p3
+    done: d3
+`;
+
     /** 制御ツールの実体（オーケストレーター専用接続に見せているもの）を取り出す。 */
     function control(state: FakeMessagingState): OrchestratorControlPort {
       const port = state.hub?.orchestratorControl;
@@ -9881,6 +9904,29 @@ tasks:
       expect(outcome.accepted).toBe(false);
       expect(outcome.reason).toContain('T9');
     });
+
+    it(
+      'remove_taskは、削除で宙に浮くテンプレート参照が残る場合を理由付きで拒否し、' +
+        '定義も状態も書き換えない（Issue #764）',
+      async () => {
+        const { deps, state } = fakeMessagingDeps();
+        const { runner } = createHarness(TEMPLATE_REF_YAML, { messaging: deps });
+        const result = await runner.start('/repo/.agents/workflows/pending.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const outcome = control(state).removeTask('T3');
+
+        expect(outcome.accepted).toBe(false);
+        expect(outcome.reason).toContain('{{T3.cwd}}');
+
+        // 部分適用が残っていないこと（T3は消えず、T2のdependsOnも剥がされていない）
+        const after = runner.getSnapshot(runId);
+        expect(after?.tasks.map((t) => t.id).sort()).toEqual(['T1', 'T2', 'T3']);
+        expect(after?.tasks.find((t) => t.id === 'T2')?.dependsOn).toEqual(['T3']);
+        expect(after?.warnings.some((w) => w.kind === 'orchestratorTaskRemoved')).toBe(false);
+      },
+    );
 
     it('update_task_dependenciesはpendingでないタスクへの変更を拒否する', async () => {
       const { deps, state } = fakeMessagingDeps();

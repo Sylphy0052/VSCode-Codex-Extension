@@ -791,6 +791,15 @@ function addTask(
  * いるタスクも必ず`pending`（スケジューラは依存先が`done`でなければ開始しない、design.md
  * §16.3）なので、依存を失っても孤立した`pending`（永久に開始できないタスク）を作らない
  * よう、削除対象へ依存していたタスクの`dependsOn`からも取り除く。
+ *
+ * **剥がした後の候補定義は`validateWorkflow`にそのまま通す（Issue #764）。** `dependsOn`を
+ * 剥がしても、依存していた側の`prompt`/`continuePrompt`に残る`{{<削除したid>.cwd}}`のような
+ * テンプレート変数までは消えない。`expandTemplate`（`workflow.ts`）は対応するタスクが無い
+ * 参照を**空文字へ展開する**ため、検証を挟まないと「指示文の一部が黙って欠けたまま走る」形に
+ * なる。同じ事象について`update_task_dependencies`は`validateWorkflow`（「テンプレート変数が
+ * dependsOn に挙げていないタスクを参照しています」）で拒否しており、`remove_task`だけが
+ * 素通りしていた非対称を揃える。エラーがあれば削除自体を拒否し、理由を返す（部分適用は
+ * 残さない。`live.def`/`live.runState`はどちらも書き換えない）。
  */
 function removeTask(
   self: WorkflowRunnerInternals,
@@ -824,7 +833,16 @@ function removeTask(
       remainingTasks.push(t);
     }
   }
-  live.def = { ...live.def, tasks: remainingTasks };
+  const candidateDef: WorkflowDefinition = { ...live.def, tasks: remainingTasks };
+  const validation = validateWorkflow(candidateDef);
+  if (validation.errors.length > 0) {
+    return no(
+      `タスクを取り除けません: ${validation.errors.map((e) => e.message).join(' / ')}` +
+        '（削除で宙に浮く参照が残る場合は、先にupdate_task_promptで参照している側の文面を' +
+        '直してから削除してください）',
+    );
+  }
+  live.def = candidateDef;
   live.runState = removeTaskState(live.runState, taskId);
   live.warnings.push({
     kind: 'orchestratorTaskRemoved',

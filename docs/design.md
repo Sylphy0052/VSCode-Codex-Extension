@@ -5623,17 +5623,18 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 | ツール                     | 引数                                                                  | 実体                                                                                                                                    |
 | -------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `add_task`                 | `id`・`prompt`・`done`・`dependsOn`等（YAMLのタスク定義とほぼ同じ形） | `buildOrchestratorTask`（`workflow.ts`）で候補タスクを組み立て、`validateWorkflow`で検証してから`live.def.tasks`・`live.runState`へ反映 |
-| `remove_task`              | `taskId`                                                              | `pending`のタスクに限り`live.def.tasks`・`live.runState`から取り除く                                                                    |
+| `remove_task`              | `taskId`                                                              | `pending`のタスクに限り`live.def.tasks`・`live.runState`から取り除く（剥がした後の候補定義を`validateWorkflow`で検証してから反映）      |
 | `update_task_dependencies` | `taskId`・`dependsOn`                                                 | 対象タスクが`pending`の場合に限り`dependsOn`を差し替え、`validateWorkflow`で循環・未定義参照を検証してから反映                          |
 
 いずれも成功時は`self.notify(runId)`でView側へ変更を伝え、`self.pump(runId)`でスケジューラを再評価させる。`add_task`で増えたタスクや、依存が外れて実行可能になったタスクは次のpumpで即座に拾われる。
 
-#### 設計判断（4点）
+#### 設計判断（5点）
 
 1. **権限フィールドは黙って無視せず、理由付きで拒否する。** `buildOrchestratorTask`は`autoApprove`/`allow`/`sandbox`/`approvalMode`のいずれかが引数に含まれているかを`Object.prototype.hasOwnProperty`で判定し、含まれていれば該当フィールド名を名指しした`error`を返す。黙って無視すると、指示が握りつぶされたことにオーケストレーターが気づけないため、明示的な拒否を選んだ
 2. **稼働中タスクへの依存変更は拒否する。** `update_task_dependencies`は対象タスクが`pending`でなければ拒否する。`scheduler.ts`は`dependsOn`を`pending`のタスクに対してしか参照しないため、`pending`を外れたタスクへ依存を書き換えても以降のスケジューリングには何の効果も無い。効果の無い変更を黙って受理すると「変更が反映された」とオーケストレーターに誤解させるため、無効化ではなく拒否とした
 3. **`remove_task`は`pending`のタスクに限る。** Issue本文の「まだ始まっていないタスクに限る」を文字どおり`pending`のみに対応させた。`skipped`/`failed`/`done`のタスクは、既にworktree・ブランチ・実行履歴を持ち、他タスクが`{{T1.result}}`のようなテンプレート参照で結果を参照している可能性があるため、削除対象から除外した
 4. **`remove_task`は削除対象への依存を残さない。** 削除されるタスクを`dependsOn`に含む他タスクからは、同じ操作の中でそのidを取り除く（`strippedFrom`として警告文に列挙）。`remove_task`が`pending`のタスクのみを対象とする以上、それに依存している他タスクも必然的に`pending`のままである（依存先が`done`になっていない限りスケジューラは依存元を開始しないため）。したがって、この剥がし処理が既に進行・完了したタスクの依存関係を誤って書き換えることは構造的に起こり得ない
+5. **`remove_task`も剥がした後の定義を`validateWorkflow`に通す（Issue #764）。** `dependsOn`から削除対象のidを剥がしても、依存していた側の`prompt`/`continuePrompt`に書かれた`{{<削除したid>.cwd}}`のようなテンプレート参照は残る。`expandTemplate`（`workflow.ts`）は対応するタスクが無い参照を空文字へ展開するため、検証を挟まないと「指示文の一部が黙って欠けたまま走る」状態になる。同じ事象を`update_task_dependencies`は`validateWorkflow`（「テンプレート変数が dependsOn に挙げていないタスクを参照しています」）で拒否しており、`remove_task`だけが素通りしていた非対称を揃えた。エラーがある場合は削除自体を拒否し、`live.def`・`live.runState`のどちらも書き換えない（部分適用を残さない）。オーケストレーターは先に`update_task_prompt`で参照側の文面を直してから削除し直せる
 
 #### 監査ログ（承認ゲートが無い代わりの説明責任）
 
