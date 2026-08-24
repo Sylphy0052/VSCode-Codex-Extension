@@ -230,6 +230,28 @@ export function controlPanelStyles(): string {
     font-size: 0.85em;
   }
   .mcpError { color: var(--vscode-errorForeground, var(--vscode-descriptionForeground)); }
+  /*
+   * 一覧の項目（カード）にマウスを乗せたときの反応（issue #746）。
+   *
+   * 枠だけだとどこまでが1件なのか追いにくい。VS Codeの一覧と同じ
+   * --vscode-list-hoverBackground を使い、拡張機能の外の一覧と挙動を揃える。
+   *
+   * カード内のボタン（.hookTrustButton / .pluginItem-actions button / .importRunButton）は
+   * --vscode-button-background の不透明な背景を持つので、カードの背景が変わっても
+   * ボタンの読みやすさには影響しない。
+   *
+   * 枠の指定自体は各カードの規則に重複したまま残してある。まとめるのは共通トークンを
+   * 入れるissue #757 の担当（先に片方だけ動かすと、あとで突き合わせる相手が消える）。
+   */
+  .mcpServer:hover,
+  .hookItem:hover,
+  .skillItem:hover,
+  .pluginItem:hover,
+  .appItem:hover,
+  .importItem:hover,
+  .importHistoryItem:hover {
+    background-color: var(--vscode-list-hoverBackground);
+  }
   .mcpServer {
     padding: 6px 8px;
     border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
