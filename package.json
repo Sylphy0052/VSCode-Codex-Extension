@@ -437,6 +437,11 @@
         "category": "Agent"
       },
       {
+        "command": "codex.showApprovalPending",
+        "title": "承認待ちの会話を開く",
+        "category": "Agent"
+      },
+      {
         "command": "codex.showLog",
         "title": "ログを表示",
         "category": "Agent"

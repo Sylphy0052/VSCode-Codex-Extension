@@ -295,17 +295,38 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   }
 
   /**
-   * 開いている全セッションの活動状態（issue #734）。承認待ちの件数を数えるのに使う。
+   * 承認待ちのセッション（issue #734・#755）。バッジの件数とステータスバーから開く先の
+   * 両方がこれを母数にする。
    *
    * 母数は`getActivityState`と同じ`panels`にする（`allPanels()`ではない）。
    * `allPanels()`が追加で含むCodex側の`pendingStarts`は`thread/start`の応答待ちで、
-   * まだセッションが無く承認要求も出ないため、数に含めても常に0を足すだけであり、
+   * まだセッションが無く承認要求も出ないため、含めても結果は変わらないが、
    * 履歴ツリーの印（`getActivityState`）と母数がずれる分だけ食い違いの元になる。
    */
-  activityStates(): SessionActivityState[] {
-    return [...this.panels.values()].map((entry) =>
-      deriveSessionActivityState(entry.session.getState()),
-    );
+  approvalPendingSessions(): Array<{ threadId: string; title: string }> {
+    const pending: Array<{ threadId: string; title: string }> = [];
+    for (const [threadId, entry] of this.panels) {
+      if (deriveSessionActivityState(entry.session.getState()) === 'approvalPending') {
+        pending.push({ threadId, title: entry.title });
+      }
+    }
+    return pending;
+  }
+
+  /**
+   * 開いているセッションを表に出す（issue #755）。ステータスバーから承認待ちの画面へ
+   * 戻るのに使う。既に閉じられていれば何もせず`false`を返す。
+   *
+   * タブを閉じたタスク管理下のセッション（`panel === undefined`）も対象で、
+   * `showPanel`がパネルを作り直す（design.md §16.10の4）。
+   */
+  revealSession(threadId: string): boolean {
+    const entry = this.panels.get(threadId);
+    if (entry === undefined || entry.disposed) {
+      return false;
+    }
+    this.showPanel(entry, false);
+    return true;
   }
 
   /**
