@@ -804,7 +804,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           return;
         }
         // 手動の発言にだけ要約指示を足す（issue #709）。擬似コマンドより後に置いてあるので、
-        // CLIへ送らない入力には付かない。ループの自動送信（`sendLoopMessage`）も対象外
+        // CLIへ送らない入力には付かない。ループの自動送信（`sendFromLoop`）も対象外
         const sent = appendTurnSummaryInstruction(text, readChatTurnSummaryConfig());
         const attachments = entry.attachments.take();
         try {

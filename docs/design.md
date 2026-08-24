@@ -6456,7 +6456,7 @@ run終了時、`notifyOrchestratorRunFinished`（`src/orchestrator/runnerOrchest
 
 連結するのは**手動の発言だけ**である。`chatView.ts`（Codex）・`claudeChatView.ts`（Claude Code）の `send` ハンドラのうち、擬似コマンド（`/btw` 等）と入力モード（行頭 `!` `#`）の振り分けより**後**に置いた。それらはCLIへ送らない拡張機能側の機能であり、指示文を足す意味が無い。
 
-ループの自動送信（`chatView.ts` の `sendLoopMessage`、`claudeChatView.ts` の `sendFromLoop`）には付けない。ループは同じ指示を条件成立まで繰り返す仕組みで、1周ごとに要約を求めるのは目的とずれる。
+ループの自動送信（両画面の `sendFromLoop`）には付けない。ループは同じ指示を条件成立まで繰り返す仕組みで、1周ごとに要約を求めるのは目的とずれる。
 
 本文が空のときも連結しない。画像だけを送る経路があり、そこで指示文だけが本文になるのを避ける。
 
