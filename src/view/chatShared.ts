@@ -1147,10 +1147,10 @@ ${chatStyles()}
     <div class="head">TODO一覧</div>
     <ul id="todosList"></ul>
   </div>
-  <div id="backgroundTerminals" hidden>
-    <div class="head">バックグラウンドで実行中</div>
+  <details id="backgroundTerminals" hidden>
+    <summary title="バックグラウンドで実行中の処理を開閉します"><span class="label">バックグラウンドで実行中</span><span id="backgroundTerminalsSummary"></span></summary>
     <ul id="backgroundTerminalsList"></ul>
-  </div>
+  </details>
   <div id="loopBar" hidden>
     <span id="loopProgress"></span>
     <button id="loopStop" type="button" class="secondary" hidden>ループ停止</button>

@@ -397,7 +397,8 @@ export function chatStyles(): string {
   #todos li.in_progress { font-weight: 600; }
   /*
    * バックグラウンドで実行中のプロセス一覧（issue #33、design.md 14.23、Codexの/ps相当）。
-   * TODO一覧と同じ並びに置く。
+   * TODO一覧と同じ並びに置く。既定は折りたたみ（issue #678）。#settingsBoxと同じ
+   * details/summaryパターンで、閉じていても件数だけは分かるようにする。
    */
   #backgroundTerminals {
     margin: 0 16px 8px;
@@ -407,8 +408,20 @@ export function chatStyles(): string {
     background-color: var(--vscode-editorWidget-background);
     font-size: 0.9em;
   }
-  #backgroundTerminals .head { color: var(--vscode-descriptionForeground); margin-bottom: 4px; }
-  #backgroundTerminals ul { margin: 0; padding: 0; list-style: none; }
+  #backgroundTerminals > summary {
+    cursor: pointer;
+    color: var(--vscode-descriptionForeground);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #backgroundTerminals > summary:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: 2px;
+  }
+  #backgroundTerminals > summary .label { font-weight: 600; }
+  #backgroundTerminalsSummary { margin-left: 8px; }
+  #backgroundTerminals ul { margin: 4px 0 0; padding: 0; list-style: none; }
   #backgroundTerminals li {
     display: flex;
     align-items: baseline;

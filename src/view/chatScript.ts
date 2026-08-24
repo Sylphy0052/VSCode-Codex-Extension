@@ -65,6 +65,8 @@ export function chatScript(
   let menuMode = '';
   /** 最後に描いた項目。画像が遅れて届いたときに描き直すため保つ。 */
   let lastItems = undefined;
+  /** 待ち行列。入力欄でのEsc（末尾を書き戻す）に使うため保つ。 */
+  let queuedMessages = [];
   /**
    * 拡張機能から差し分で届く会話項目を積む先（issue #262）。
    * 全項目を毎回受け取ると、会話が長いほど1回の受信が重くなる。
@@ -1344,6 +1346,16 @@ export function chatScript(
     });
   }
 
+  // バックグラウンド実行中一覧の開閉もリロードをまたいで覚える（issue #678）。既定は閉じた状態
+  const backgroundTerminalsBox = el('backgroundTerminals');
+  if (backgroundTerminalsBox) {
+    const saved = vscode.getState() || {};
+    backgroundTerminalsBox.open = saved.backgroundTerminalsOpen === true;
+    backgroundTerminalsBox.addEventListener('toggle', () => {
+      patchState({ backgroundTerminalsOpen: backgroundTerminalsBox.open });
+    });
+  }
+
   // TODOの進み具合の記号。計画（Codexの plan）と同じ記号を使う。絵文字は使わない
   const TODO_MARK = { pending: '[ ]', in_progress: '[~]', completed: '[x]' };
 
@@ -1382,8 +1394,12 @@ export function chatScript(
   function renderBackgroundTerminals(terminals) {
     const box = el('backgroundTerminals');
     const list = el('backgroundTerminalsList');
+    const summary = el('backgroundTerminalsSummary');
     const items = terminals || [];
     box.hidden = items.length === 0;
+    if (summary) {
+      summary.textContent = items.length > 0 ? '(' + items.length + ')' : '';
+    }
     list.replaceChildren();
     for (const t of items) {
       const li = document.createElement('li');
@@ -1423,8 +1439,8 @@ export function chatScript(
     }
 
     box.hidden = false;
-    // 割り込めなかった指示だけがここに残る
-    el('queueLabel').textContent = '割り込めなかったので待っています（' + queued.length + '件）';
+    // 応答中に送った指示は既定で待ち行列に積む。今すぐ送るには「今すぐ送る」ボタンを使う
+    el('queueLabel').textContent = '順番待ちです（' + queued.length + '件）';
     list.replaceChildren();
     queued.forEach((message, index) => {
       const li = document.createElement('li');
@@ -1471,13 +1487,13 @@ export function chatScript(
       approvals.appendChild(renderApproval(approval, state.items || []));
     }
     renderPrompts(state.prompts);
-    if (atBottom) log.scrollTop = log.scrollHeight;
 
     renderTodos(state.todos);
     renderBackgroundTerminals(state.backgroundTerminals);
-    renderQueue(state.queued);
+    queuedMessages = state.queued || [];
+    renderQueue(queuedMessages);
     el('stop').hidden = !state.busy;
-    // 応答中でも送れる。進行中のターンへ割り込むので、応答は止まらない
+    // 応答中でも送れる。既定では待ち行列に積むだけで応答は止まらない
     el('send').disabled = false;
     // 圧縮は新しいターンを起こす。応答中に重ねると割り込みになるため止める
     el('compact').disabled = !!state.busy;
@@ -1497,6 +1513,9 @@ export function chatScript(
     renderAttachments(state.attachments);
     applyLoop(state.loop);
     renderStatus(state);
+    // todos/queue/backgroundTerminals等、#logと高さを取り合う兄弟要素の描画が
+    // 全部済んでからでないと、#logの実際の最下部（clientHeight）が確定しない
+    if (atBottom) log.scrollTop = log.scrollHeight;
   }
 
   // いま添えている枚数。本文が空でも送れるかの判定に使う
@@ -2387,6 +2406,18 @@ export function chatScript(
       }
     }
 
+    // 待ち行列の末尾を入力欄へ戻す（Codex CLI本家のEsc相当）。中断（グローバルの
+    // Escハンドラ）より優先し、stopPropagationで中断側へ流さない。書きかけの文章を
+    // 消さないよう、入力欄が空のときだけ戻す。取り出しは拡張側の最新stateに対して
+    // 行う（ここで持つqueuedMessagesは直近のapply()時点のスナップショットでしかなく、
+    // ターン完了時の自動デキューと競合すると別の指示を取り消しかねないため）
+    if (e.key === 'Escape' && !menuOpen() && queuedMessages.length > 0 && e.target.value.trim() === '') {
+      e.preventDefault();
+      e.stopPropagation();
+      vscode.postMessage({ type: 'popLastQueuedForInput' });
+      return;
+    }
+
     // Shift+Tab で承認レベルを回す（TUIと同じ操作。入力欄にいるときだけ効かせる）。
     // 「全承認」は循環に入っていないため、連打で保護が外れることはない
     if (e.key === 'Tab' && e.shiftKey && APPROVAL_CYCLE.length > 0) {
@@ -2470,6 +2501,14 @@ export function chatScript(
       imageData.set(data.path, data.dataUrl || data.error || '画像を読み込めませんでした');
       // 届いた画像を反映する。差分がある項目だけ描き直される
       if (lastItems) syncItems(lastItems);
+    }
+    if (data.type === 'restoreQueuedText' && typeof data.text === 'string') {
+      // Escで戻した待ち行列の末尾。拡張側で既にキューから取り除き済みなので、
+      // 入力欄へそのまま書き戻すだけでよい
+      const input = el('input');
+      input.value = data.text;
+      input.selectionStart = input.selectionEnd = input.value.length;
+      input.focus();
     }
     if (data.type === 'insertComposerText' && typeof data.text === 'string') {
       // エディタの選択範囲を入力欄へ挿す（issue #292）。ホスト側（chatView.ts /

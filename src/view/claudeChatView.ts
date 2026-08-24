@@ -1530,6 +1530,14 @@ export class ClaudeChatViewManager
         entry.session.cancelQueued(m['index']);
         return;
       }
+      if (type === 'popLastQueuedForInput') {
+        // 常に拡張側の最新stateから取り出す（UI側の古いスナップショット由来のズレを防ぐ）
+        const popped = entry.session.popLastQueuedForInput();
+        if (popped !== undefined && entry.panel !== undefined) {
+          void entry.panel.webview.postMessage({ type: 'restoreQueuedText', text: popped.text });
+        }
+        return;
+      }
       if (type === 'flushQueue') {
         // 待たせていた指示を先に通すため、ループは割り込みとして止める
         entry.loop.noteUserAction();

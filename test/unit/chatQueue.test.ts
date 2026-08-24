@@ -3,6 +3,7 @@ import {
   clearQueue,
   enqueue,
   initialChatState,
+  popLastQueued,
   removeQueued,
   routeSend,
   takeQueued,
@@ -57,6 +58,21 @@ describe('takeQueued', () => {
 
   it('空なら取り出せない', () => {
     const { message, next } = takeQueued(busy);
+    expect(message).toBeUndefined();
+    expect(next).toBe(busy);
+  });
+});
+
+describe('popLastQueued', () => {
+  it('末尾を取り出し、残りを返す', () => {
+    const state = enqueue(enqueue(busy, '1つめ'), '2つめ');
+    const { message, next } = popLastQueued(state);
+    expect(message?.text).toBe('2つめ');
+    expect(next.queued.map((q) => q.text)).toEqual(['1つめ']);
+  });
+
+  it('空なら取り出せない', () => {
+    const { message, next } = popLastQueued(busy);
     expect(message).toBeUndefined();
     expect(next).toBe(busy);
   });
