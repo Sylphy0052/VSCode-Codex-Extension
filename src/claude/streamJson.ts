@@ -183,10 +183,17 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
 /**
  * ユーザー側のイベント。ツール結果と、`--replay-user-messages` で返ってくる
  * 自分の発言の2種類が来る。
+ *
+ * Skillツール実行時は、CLIがSKILL.md全文を `isMeta: true` かつ
+ * `sourceToolUseID`（起動したSkillツールのtool_use id）付きのuserテキストとして
+ * 別途注入してくる（実測、issue #691）。他の `isMeta: true`（`<local-command-caveat>`・
+ * cross-session-message等）と混同しないよう `sourceToolUseID` の有無で絞り込み、
+ * 通常のuserMessageと区別してfold対象（`skillContext`、chatScript.tsのFOLD_KINDS）にする。
  */
 function applyUser(state: ChatState, event: Record<string, unknown>): ChatState {
   const content = list(rec(event['message'])?.['content']);
   const toolResultCount = content.filter((part) => str(part['type']) === 'tool_result').length;
+  const isSkillContext = event['isMeta'] === true && str(event['sourceToolUseID']) !== '';
   let items = state.items;
 
   for (const part of content) {
@@ -229,7 +236,7 @@ function applyUser(state: ChatState, event: Record<string, unknown>): ChatState 
   if (text !== '' || images.length > 0) {
     items = upsert(items, {
       id: str(event['uuid']) || `user-${items.length}`,
-      kind: 'userMessage',
+      kind: isSkillContext ? 'skillContext' : 'userMessage',
       text,
       detail: '',
       status: undefined,

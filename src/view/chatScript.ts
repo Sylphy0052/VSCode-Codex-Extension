@@ -116,6 +116,9 @@ export function chatScript(
     // Claude CodeのAskUserQuestion（issue #685）。承認カード解決後、会話ログに
     // 質問と回答を1項目として残すための種類
     askUserQuestion: '質問',
+    // Skillツール実行時にCLIが注入するSKILL.md全文（issue #691）。通常のuserMessageとは
+    // 分け、他のツール出力と同じ既定折りたたみにする
+    skillContext: 'Skill',
   };
 
   /** ホスト側から渡されたレビューボタンの動作。 */
@@ -169,6 +172,7 @@ export function chatScript(
     'collabAgentToolCall',
     'autoApprovalReview',
     'fileRead',
+    'skillContext',
   ]);
 
   /** Web検索結果を畳まずに出す件数（issue #18）。超えた分は開くまで隠す。 */
@@ -202,6 +206,7 @@ export function chatScript(
     subAgentActivity: 'tool',
     collabAgentToolCall: 'tool',
     autoApprovalReview: 'tool',
+    skillContext: 'tool',
   };
 
   // 全体を作り直すと選択中のテキストが消えてコピーできないため、要素を使い回す
@@ -1109,8 +1114,45 @@ export function chatScript(
       box.appendChild(row);
     }
 
+    // 公式仕様どおり、選択肢に加えて自由記述（その他）を常に出す。書き始めたら選ばれた
+    // 扱いにして、選び忘れで入力内容が捨てられるのを防ぐ（buildOptionsと同じ作り）
+    const otherRow = document.createElement('label');
+    otherRow.className = 'option';
+
+    const otherPick = document.createElement('input');
+    otherPick.type = question.multiSelect ? 'checkbox' : 'radio';
+    otherPick.name = name;
+    otherPick.value = '';
+    otherRow.appendChild(otherPick);
+    inputs.push(otherPick);
+
+    const otherLabel = document.createElement('span');
+    otherLabel.textContent = 'その他';
+    otherRow.appendChild(otherLabel);
+
+    const other = document.createElement('input');
+    other.type = 'text';
+    other.className = 'other';
+    otherRow.appendChild(other);
+    box.appendChild(otherRow);
+
+    other.addEventListener('input', () => {
+      if (other.value.trim() !== '') otherPick.checked = true;
+    });
+
     readers.push((values) => {
-      values[question.question] = inputs.filter((i) => i.checked).map((i) => i.value);
+      const picked = [];
+      for (const input of inputs) {
+        if (!input.checked) continue;
+        // 「その他」は空欄（空白のみを含む）なら回答に数えない（未回答として送信が止まる）
+        if (input === otherPick) {
+          const free = other.value.trim();
+          if (free !== '') picked.push(free);
+        } else {
+          picked.push(input.value);
+        }
+      }
+      values[question.question] = picked;
     });
 
     return box;
@@ -1628,6 +1670,8 @@ export function chatScript(
     renderBackgroundTerminals(state.backgroundTerminals);
     queuedMessages = state.queued || [];
     renderQueue(queuedMessages);
+    // 応答中かどうかを画面の外周の枠色で示す（issue #701）。赤=応答中、青=待機中
+    document.body.classList.toggle('busy', !!state.busy);
     el('stop').hidden = !state.busy;
     // 応答中でも送れる。既定では待ち行列に積むだけで応答は止まらない
     el('send').disabled = false;
@@ -2247,22 +2291,33 @@ export function chatScript(
   let historyIndex = -1;
   let draft = '';
 
+  // 直前の操作が履歴移動そのものだったか（issue #698）。連続で上下を押している間は
+  // キャレットが末尾にあっても履歴をたどり続ける。文字入力やクリックが挟まると降りる。
+  let historyNavigating = false;
+
   function resetHistory() {
     historyIndex = -1;
     draft = '';
+    historyNavigating = false;
   }
 
   function historyEntries() {
     return sentTexts.slice().reverse();
   }
 
-  /** カーソルが1行目にあるか。複数行の編集を邪魔しないための判定。 */
-  function atFirstLine(input) {
-    return input.value.lastIndexOf('\\n', Math.max(0, input.selectionStart - 1)) === -1;
+  /**
+   * キャレットが入力全体の先頭にあるか（issue #698）。行頭ではなく全体の先頭で判定する。
+   * 1行目の途中で上を押したときは既定動作に任せ、キャレットが先頭へ寄るだけにする。
+   * 折り返された長い行でも視覚行ではなくキャレット位置で決まるため、途中で履歴へ飛ばない。
+   */
+  function atInputStart(input) {
+    return input.selectionStart === 0 && input.selectionEnd === 0;
   }
 
-  function atLastLine(input) {
-    return input.value.indexOf('\\n', input.selectionStart) === -1;
+  /** キャレットが入力全体の末尾にあるか（issue #698）。atInputStartの対称。 */
+  function atInputEnd(input) {
+    const end = input.value.length;
+    return input.selectionStart === end && input.selectionEnd === end;
   }
 
   function applyHistory(input, index) {
@@ -2281,11 +2336,13 @@ export function chatScript(
       if (historyIndex === -1) draft = input.value;
       if (historyIndex + 1 >= entries.length) return false;
       applyHistory(input, historyIndex + 1);
+      historyNavigating = true;
       return true;
     }
 
     if (historyIndex === -1) return false;
     applyHistory(input, historyIndex - 1);
+    historyNavigating = true;
     return true;
   }
 
@@ -2485,6 +2542,8 @@ export function chatScript(
   });
 
   el('input').addEventListener('input', (e) => {
+    // 文字を打った時点で履歴の連続移動は終わり（issue #698）
+    historyNavigating = false;
     renderArgumentHint();
     renderInputModeHint();
     const command = commandQuery(e.target);
@@ -2503,6 +2562,10 @@ export function chatScript(
   });
 
   el('input').addEventListener('blur', closeMenu);
+  // クリックでキャレットを動かしたら履歴の連続移動は終わり（issue #698）
+  el('input').addEventListener('mouseup', () => {
+    historyNavigating = false;
+  });
 
   /**
    * IME変換中かどうかの追跡（issue #288）。keydownのe.isComposingだけに頼ると
@@ -2595,11 +2658,14 @@ export function chatScript(
     }
 
     const input = e.target;
-    if (e.key === 'ArrowUp' && !e.altKey && atFirstLine(input) && stepHistory(input, -1)) {
+    // 端に着いた状態でもう一度押したときだけ履歴へ移る。途中なら既定の行移動に任せる
+    const navigable = historyNavigating;
+    historyNavigating = false;
+    if (e.key === 'ArrowUp' && !e.altKey && (navigable || atInputStart(input)) && stepHistory(input, -1)) {
       e.preventDefault();
       return;
     }
-    if (e.key === 'ArrowDown' && !e.altKey && atLastLine(input) && stepHistory(input, 1)) {
+    if (e.key === 'ArrowDown' && !e.altKey && (navigable || atInputEnd(input)) && stepHistory(input, 1)) {
       e.preventDefault();
     }
   });

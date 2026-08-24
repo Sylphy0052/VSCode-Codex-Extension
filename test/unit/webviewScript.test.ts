@@ -213,6 +213,22 @@ describe('chatScript', () => {
     expect(source).toContain('decideSendKeyAction(');
   });
 
+  it('入力欄の履歴移動はキャレットが端にあるときだけ発火する（issue #698）', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+    expect(() => parses(source)).not.toThrow();
+    // 行頭ではなく入力全体の先頭・末尾で判定する（1行目の途中で押しても履歴へ飛ばない）
+    expect(source).toContain('function atInputStart(input)');
+    expect(source).toContain('function atInputEnd(input)');
+    expect(source).toContain('input.selectionStart === 0 && input.selectionEnd === 0');
+    // 行単位の旧判定は残さない（残ると列位置を見ない経路が復活する）
+    expect(source).not.toContain('atFirstLine');
+    expect(source).not.toContain('atLastLine');
+    // 連続で押している間はキャレットが末尾でも履歴をたどり続ける
+    expect(source).toContain('navigable || atInputStart(input)');
+    expect(source).toContain('navigable || atInputEnd(input)');
+    expect(source).toContain('historyNavigating = true');
+  });
+
   it('セッション累計のトークン数（issue #294）: state.sessionTokensがフッターへ出る配線がある', () => {
     const source = chatScript('Codex', { mode: 'quickPick' });
     expect(source).toContain('formatSessionTokens');
@@ -338,7 +354,7 @@ describe('chatScript', () => {
       expect(() => parses(source)).not.toThrow();
     });
 
-    it('対象7kindがFOLD_KINDSに揃っている', () => {
+    it('対象8kindがFOLD_KINDSに揃っている', () => {
       const match = source.match(/const FOLD_KINDS = new Set\(\[([\s\S]*?)\]\);/);
       expect(match).not.toBeNull();
       const body = match?.[1] ?? '';
@@ -352,6 +368,7 @@ describe('chatScript', () => {
           'collabAgentToolCall',
           'autoApprovalReview',
           'fileRead',
+          'skillContext',
         ]),
       );
     });
@@ -378,6 +395,27 @@ describe('chatScript', () => {
 
     it('コピーは畳んだ状態でも全文（node.fullText）を対象にする', () => {
       expect(source).toContain('node.fullText');
+    });
+  });
+
+  describe('AskUserQuestionの選択UI（issue #696）', () => {
+    const source = chatScript('Claude Code', { mode: 'command', commandName: 'code-review' });
+
+    it('選択肢に加えて自由記述（その他）の入力欄を出す', () => {
+      const field = source.slice(source.indexOf('function buildAskUserQuestionField'));
+      expect(field).toContain("otherLabel.textContent = 'その他'");
+      expect(field).toContain("other.type = 'text'");
+      expect(field).toContain("other.className = 'other'");
+    });
+
+    it('その他はmultiSelectに合わせてcheckbox/radioを切り替える', () => {
+      expect(source).toContain("otherPick.type = question.multiSelect ? 'checkbox' : 'radio'");
+    });
+
+    it('その他が空欄（空白のみを含む）なら回答に数えない（未回答として送信が止まる）', () => {
+      const field = source.slice(source.indexOf('function buildAskUserQuestionField'));
+      expect(field).toContain('const free = other.value.trim();');
+      expect(field).toContain("if (free !== '') picked.push(free);");
     });
   });
 });
@@ -813,7 +851,9 @@ describe('会話の一番下へジャンプするボタン', () => {
 
     expect(source).toContain('function isLogNearBottom(log)');
     expect(source).toContain('function updateScrollToBottomVisibility()');
-    expect(source).toContain("el('log').addEventListener('scroll', updateScrollToBottomVisibility)");
+    expect(source).toContain(
+      "el('log').addEventListener('scroll', updateScrollToBottomVisibility)",
+    );
     expect(source).toContain("el('scrollToBottom').addEventListener('click'");
     expect(source).toContain('log.scrollTop = log.scrollHeight');
   });

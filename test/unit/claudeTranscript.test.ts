@@ -230,6 +230,30 @@ describe('transcriptItems', () => {
     expect(items[0]?.text).toBe('本命');
   });
 
+  it('Skillツールが注入するSKILL.md本文をskillContextとして畳む（issue #691）', () => {
+    const { items } = transcriptItems([
+      userLine('SKILL.mdの内容', {
+        isMeta: true,
+        sourceToolUseID: 'toolu_01abc',
+        userType: undefined,
+        origin: undefined,
+      }),
+    ]);
+    expect(items.map((i) => i.kind)).toEqual(['skillContext']);
+    expect(items[0]?.text).toBe('SKILL.mdの内容');
+  });
+
+  it('sourceToolUseID無しのisMeta（caveat等）は従来どおり非表示にする', () => {
+    const { items } = transcriptItems([
+      userLine('<local-command-caveat>Caveat</local-command-caveat>', {
+        isMeta: true,
+        userType: undefined,
+        origin: undefined,
+      }),
+    ]);
+    expect(items).toEqual([]);
+  });
+
   it('TodoWriteは会話の項目には積まない', () => {
     const { items } = transcriptItems([
       JSON.stringify({

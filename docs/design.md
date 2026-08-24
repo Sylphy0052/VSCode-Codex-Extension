@@ -3566,6 +3566,44 @@ Codexの`/btw`は`thread/fork`で**新しいスレッド**を作ってから聞�
 - `test/unit/webviewStyles.test.ts`: `.body-fold`/`.body-content`が定義されていることを固定
 - webview側の実際の開閉・スクロール・視覚的な体裁はvitestのnode環境では確認できない（§14.60と同じ制約）。実機での確認は`docs/manual-test.md`のU-34に委ねる
 
+### 14.65 応答中かどうかをチャット画面の外枠の色で示す（issue #701）
+
+#### 背景
+
+チャット画面で、いまエージェントが応答中かどうかは中断ボタン（`#stop`）の表示有無と、
+ステータス行の「応答中…」でしか分からなかった。どちらも画面下端の`#composer`まわりに
+あるため、ログ本文をスクロールして読んでいる最中は視線の外にあり、状態の把握に画面下部を
+見に行く必要があった。
+
+画面の外周そのものを状態表示に使う。待機中は青、応答中は赤の枠を1本重ね、どこを見ていても
+視界の端で状態が分かるようにした。
+
+#### 実装
+
+- `src/view/chatStyles.ts`: `body::after`で外周の枠を描く。既定は`border: 2px solid var(--vscode-charts-blue)`、`body.busy::after`のとき`border-color`を`var(--vscode-charts-red)`へ差し替える
+- `src/view/chatScript.ts`: `apply(state)`で`document.body.classList.toggle('busy', !!state.busy)`を実行する。判定は既存の`state.busy`（`el('stop').hidden = !state.busy`と同じ値）をそのまま使い、状態の持ち方は増やしていない
+
+**枠を実体のある要素やbodyのborderにしなかった。** `body`は`display: flex; flex-direction: column`で、
+`#logWrap`（`flex: 1`）と`#composer`が高さを取り合っている。ここへborderや枠用の要素を足すと
+ログの表示領域が枠の分だけ縮み、スクロール位置の計算（`isLogNearBottom`）にも影響する。
+`position: fixed`の擬似要素にすればflexの高さ計算に一切入らないため、既存のレイアウトを
+触らずに済む。あわせて`pointer-events: none`を付け、枠の上をクリックしても下の要素が
+操作できるようにした。
+
+`z-index`は`1`にした。`#log`より前面に出れば足りる一方、`#scrollToBottom`・`#commands`・
+`#composerOverflowMenu`（いずれも`z-index: 10`）のような浮き出す要素の前へ枠が出る必要は
+無いため、それらには譲る。
+
+色は`--vscode-charts-blue` / `--vscode-charts-red`から取り、ハードコードしていない。
+`chatStyles()`と`chatScript()`は`chatShared.ts`の`renderShell`経由でCodex画面
+（`chatView.ts`）とClaude Code画面（`claudeChatView.ts`）の双方へ配られるため、
+どちらの画面にも同じ枠が出る。
+
+#### 確かめ方
+
+- `test/unit/webviewStyles.test.ts`: `body::after`が青の枠・`position: fixed`・`pointer-events: none`を持つこと、`body.busy::after`が赤へ差し替えることを固定。あわせて`chatScript()`の出力に`document.body.classList.toggle('busy'`が含まれることを確認する
+- 実際の色味・枠の太さ（2px）・テーマ切り替え時の見え方はvitestのnode環境では確認できない（§14.60・§14.64と同じ制約）。実機での確認は`docs/manual-test.md`のC-49（Claude Code画面はL-50）に委ねる
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）
@@ -6395,6 +6433,43 @@ run終了時、`notifyOrchestratorRunFinished`（`src/orchestrator/runnerOrchest
 - `test/unit/runner.test.ts`: 終了したrunを `retryTask` / `continueTask` / `retryMerge` で再開すると `runResumed` が届き、再開後にもう1度終了すると `runFinished` がふたたび届くこと（#432-2 から上書きした3件）。**まだ終わっていないrunの再実行では `runResumed` を送らない**ことも別のテストで固定する——依存関係の無い2タスクで片方だけ失敗させ、runが `running` のまま `retryTask` する形にした
 - 実測: 旗を戻す1行を外すと、上の3件が `expected 1 to be 2` で落ちることを確認した。緑になった理由が実装の変更であることを、この対照で測っている
 - `docs/manual-test.md` W-U: 「終了 → 再実行 → 再終了」で通知が3本届くこと、再開後にオーケストレーターが制御ツールを呼ぶと実際に何が起きるかを実機で見る。**再開後に制御ツールが使えないことは仕様であり、使えるようになっていたらこの節のほうが古い**
+
+### 14.66 応答の末尾に指示・実施内容・次の推奨アクションを毎回出させる（issue #709）
+
+チャットで指示を送るたびに、応答の最後へ「今回の指示」「実施した内容の要約」「次の推奨アクション」を必ず出させたい。モデル任せにすると長い会話で出たり出なかったりするため、拡張機能側で確実に毎ターン提示させる。
+
+#### 完了後に別リクエストを投げる案は採らなかった
+
+ターンの完了検知は既にある（`chatView.ts` の `finished = entry.wasBusy && !state.busy`。§14.55）。ここへ乗せて要約用のリクエストを追加で投げることもできたが、採らなかった。追加のAPI呼び出しとその待ち時間が毎ターン発生し、会話履歴にも要約用のやり取りが積もる。得られるものは「発言の末尾に指示を足す」場合と変わらない。
+
+**採ったのは、送信直前にユーザーの発言の末尾へ定型の指示文を連結する方式である。**追加のリクエストは発生せず、要約は本来のターンの応答の一部として返る。
+
+#### AGENTS.md / CLAUDE.md へ書く案との違い
+
+同じことは指示ファイル（AGENTS.md・CLAUDE.md）へ書いても実現できる。実装は要らず、両プロバイダに一度で効く。ただし**「毎回」の保証が無い。**長い会話では指示が薄れて出なくなる。
+
+拡張機能側で毎ターン連結すれば、そこは決定論的になる。代わりに全てのターンでトークンが増え、短い応答も冗長になる。**どちらが良いかは使い方次第なので、既定を無効にして設定で選べるようにした**（`agent.chat.turnSummary.enabled`、既定 `false`）。有効にするまで送信テキストは一字一句変わらない。
+
+指示の文面も `agent.chat.turnSummary.instruction` で差し替えられる。空文字にすると連結しない（無効化と同じ扱い）。既定値は `src/view/turnSummary.ts` の `DEFAULT_TURN_SUMMARY_INSTRUCTION` と `package.json` の両方にリテラルで持たせてあるので、変える場合は両方を合わせて直す（`pseudoWorktreeExclude` と同じ扱い。§16.20）。
+
+#### 付ける口と付けない口
+
+連結するのは**手動の発言だけ**である。`chatView.ts`（Codex）・`claudeChatView.ts`（Claude Code）の `send` ハンドラのうち、擬似コマンド（`/btw` 等）と入力モード（行頭 `!` `#`）の振り分けより**後**に置いた。それらはCLIへ送らない拡張機能側の機能であり、指示文を足す意味が無い。
+
+ループの自動送信（両画面の `sendFromLoop`）には付けない。ループは同じ指示を条件成立まで繰り返す仕組みで、1周ごとに要約を求めるのは目的とずれる。
+
+本文が空のときも連結しない。画像だけを送る経路があり、そこで指示文だけが本文になるのを避ける。
+
+#### 作業記録には元の文面を残す
+
+Claude Code側は `dispatch` の `logText`（§16.12。テンプレート展開前の文面を記録するための口）へ元のテキストを渡し、作業記録には連結前を残す。Codex側の `reportActivity` も元のテキストのまま呼んでいる。記録に残したいのは人が書いた指示であって、拡張機能が足した定型文ではない。
+
+**連結した指示文は送信テキストにそのまま含まれ、会話履歴にも見える。**隠す処理は入れていない。何を送ったかが画面と実際で食い違うほうが困る。
+
+#### 確かめ方
+
+- `test/unit/turnSummary.test.ts`: 無効なら本文を変えないこと、有効なら空行で区切って連結すること、指示文が空・本文が空なら連結しないこと、本文末尾の空白を落としてから連結すること
+- `docs/manual-test.md` C-50（Claude Code画面はL-51）: 実機で両画面の応答末尾に要約と次アクションが出ること、擬似コマンドとループには付かないこと
 
 ### 16.44 チームモード（Issue #693）
 

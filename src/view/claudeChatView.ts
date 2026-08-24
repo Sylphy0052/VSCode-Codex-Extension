@@ -27,6 +27,7 @@ import {
   readChatComposerButtonsConfig,
   readChatRenderMarkdownConfig,
   readChatSendOnConfig,
+  readChatTurnSummaryConfig,
   readClaudeConfig,
   readWorkflowsConfig,
   workspaceFolderPaths,
@@ -96,6 +97,8 @@ import {
 import { readPersistedThreadId } from './panelState';
 import { buildItemsDelta, stripHostOnlyItems } from './stateDelta';
 import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
+import { buildHandoffPrompt, resolveWithRetry } from './handoff';
+import { appendTurnSummaryInstruction } from './turnSummary';
 import { CLAUDE_PERMISSION_MODES } from '../claude/types';
 import {
   APPROVAL_LEVEL_CYCLE,
@@ -509,19 +512,24 @@ export class ClaudeChatViewManager
     this.handleMessage(entry, message);
   }
 
-  /** 新しい会話を開く。idは起動前に決まるため、開いた時点で履歴と紐づく。 */
-  async openNew(cwd?: string, taskConfig?: ClaudeConfig): Promise<void> {
+  /**
+   * 新しい会話を開く。idは起動前に決まるため、開いた時点で履歴と紐づく。
+   *
+   * 呼び出し元がその後すぐ発言を送りたい場合（`handoffToNewSession`）のために、
+   * 発行した`sessionId`を返す。開けなかった場合は`undefined`。
+   */
+  async openNew(cwd?: string, taskConfig?: ClaudeConfig): Promise<string | undefined> {
     const folder = currentWorkspaceFolder();
     const targetCwd = cwd ?? folder?.uri.fsPath;
     if (targetCwd === undefined) {
       void vscode.window.showErrorMessage(
         'Claude Codeを開始するにはフォルダを開いてください（ファイル > フォルダーを開く）',
       );
-      return;
+      return undefined;
     }
     const effectiveConfig = taskConfig ?? readClaudeConfig().claude;
     if (isUnsafeClaudeCombination(effectiveConfig) && !(await this.confirmUnsafe())) {
-      return;
+      return undefined;
     }
 
     const sessionId = randomSessionId();
@@ -534,6 +542,40 @@ export class ClaudeChatViewManager
       sessionId,
       config: effectiveConfig,
     });
+    return sessionId;
+  }
+
+  /**
+   * 現在アクティブなセッションのtranscriptを新セッションへ渡し、引き継ぎを開始する
+   * （issue #694）。CLIの応答を待って解析するのではなく、旧セッションのtranscript
+   * ファイルパスを固定文言に埋め込んで新セッションへそのまま送る（新セッション側の
+   * CLI自身に読ませて要約させる）。
+   */
+  async handoffToNewSession(): Promise<void> {
+    const entry = this.active;
+    if (entry === undefined) {
+      return;
+    }
+    const sessionId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
+    if (sessionId === undefined) {
+      return;
+    }
+    const transcriptPath = await resolveWithRetry(() =>
+      this.store.resolveTranscriptPath(sessionId),
+    );
+    if (transcriptPath === undefined) {
+      void vscode.window.showErrorMessage('引き継ぎ元セッションのtranscriptが見つかりませんでした');
+      return;
+    }
+    const newSessionId = await this.openNew(entry.cwd, entry.taskConfig);
+    if (newSessionId === undefined) {
+      return;
+    }
+    const newEntry = this.panels.get(newSessionId);
+    if (newEntry === undefined) {
+      return;
+    }
+    this.dispatch(newEntry, buildHandoffPrompt(transcriptPath));
   }
 
   /**
@@ -1380,7 +1422,11 @@ export class ClaudeChatViewManager
           void this.runPseudoCommand(entry, pseudo);
           return;
         }
-        this.dispatch(entry, text, true);
+        // 手動の発言にだけ要約指示を足す（issue #709）。擬似コマンド・入力モードより後に
+        // 置いてあるので、CLIへ送らない入力には付かない。ループの自動送信も対象外。
+        // 作業記録には元の文面を残す（`logText`。テンプレート展開前を記録する§16.12と同じ扱い）
+        const sent = appendTurnSummaryInstruction(text, readChatTurnSummaryConfig());
+        this.dispatch(entry, sent, true, text);
         this.refreshSettings(entry);
         return;
       }

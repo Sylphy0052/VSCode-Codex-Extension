@@ -463,6 +463,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         },
       };
     },
+    store,
   );
   context.subscriptions.push(chat);
 
@@ -818,6 +819,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     }),
     vscode.commands.registerCommand('codex.newChat', () => chat.openNew()),
     vscode.commands.registerCommand('claude.newChat', () => claudeChat.openNew()),
+    // セッション引き継ぎ（issue #694）。現在開いているセッションのtranscriptを新セッションへ渡す
+    vscode.commands.registerCommand('codex.handoffToNewSession', () => chat.handoffToNewSession()),
+    vscode.commands.registerCommand('claude.handoffToNewSession', () =>
+      claudeChat.handoffToNewSession(),
+    ),
     // プリセットを選んで新しい会話を開く（issue #295、design.md §14.56）。既存の
     // `codex.newChat` / `claude.newChat` は変えず、別コマンドとして追加する
     vscode.commands.registerCommand('agent.openPresetChat', () =>
