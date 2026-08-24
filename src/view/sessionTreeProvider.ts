@@ -67,6 +67,17 @@ export class SessionTreeProvider
    */
   private visibleSessions = new Map<string, SessionSummary>();
 
+  private readonly decorationEmitter = new vscode.EventEmitter<void>();
+  /**
+   * 行末のデコレーション（issue #735）を引き直させる合図。一覧が実際に入れ替わった
+   * 後（`getChildren`のルート呼び出しの末尾）に発火する。
+   *
+   * `onDidChangeTreeData`を代わりに使うことはできない。あちらは再読込を**依頼した**
+   * 時点で発火するため、装飾側がまだ更新されていない一覧を読んでしまい、次に一覧が
+   * 届いても誰も引き直さないまま古いバッジが残る。
+   */
+  readonly onDidChangeDecorations = this.decorationEmitter.event;
+
   private scopeOverride: HistoryScope | undefined;
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
   /** タイトルバーの絞り込み入力（issue #293）。表示だけを変え、読み込み件数には関与しない。 */
@@ -174,6 +185,7 @@ export class SessionTreeProvider
     // URIしか渡さないため、URIからセッションへ戻れるようにここで持ち直す。
     // グループ化の分岐より前に置く（`none`でも同じように引けるようにする）
     this.visibleSessions = new Map(visible.map((s) => [`${s.provider}:${s.id}`, s]));
+    this.decorationEmitter.fire();
 
     if (config.historyGroupBy === 'none') {
       // `none`は既存の表示（更新時刻降順のフラットな1リスト）へそのまま戻す。ピン留めして
@@ -323,6 +335,7 @@ export class SessionTreeProvider
       clearTimeout(this.refreshTimer);
     }
     this.emitter.dispose();
+    this.decorationEmitter.dispose();
   }
 }
 

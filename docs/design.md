@@ -3210,7 +3210,9 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 **状態はキャッシュしない**。`SessionDecorationProvider` は問い合わせのたびに `SessionTreeProvider.decorationStateFor(uri)` を引く。装飾側に状態の写しを持つと、ツリーの更新と装飾の更新がずれたときに古いバッジが残る。ツリー側は `getChildren` で組んだ表示中の一覧（絞り込み後）を `<provider>:<id>` で引ける形に持ち直す——VS Codeは `provideFileDecoration` へURIしか渡さないため。絞り込みで消えた行・別スキームのURIには何も返さない（このプロバイダは全URIに対して呼ばれる）。
 
-**依存の向きはツリー→装飾の一方向**。装飾側が `onDidChangeTreeData` を購読して `onDidChangeFileDecorations` を発火する。ツリー側から装飾を突く形にすると両方が互いを持つ配線になる。この向きにしたことで、`tree.refresh()` を呼ぶ既存の経路（`refreshDebounced` を含む）がそのまま装飾の更新にもなる。どの行が変わったかはツリー側も持っていないため、URIを絞らず `undefined`（全体を無効化）で発火する。
+**依存の向きはツリー→装飾の一方向**。装飾側がツリーのイベントを購読して `onDidChangeFileDecorations` を発火する。ツリー側から装飾を突く形にすると両方が互いを持つ配線になる。この向きにしたことで、`tree.refresh()` を呼ぶ既存の経路（`refreshDebounced` を含む）がそのまま装飾の更新にもなる。どの行が変わったかはツリー側も持っていないため、URIを絞らず `undefined`（全体を無効化）で発火する。
+
+購読するのは `onDidChangeTreeData` ではなく専用の `onDidChangeDecorations`（`getChildren` のルート呼び出しの末尾で発火する）。`onDidChangeTreeData` はツリーの再読込を**依頼した**時点で発火するため、そこで装飾を引き直させると、`visibleSessions` がまだ入れ替わっていない状態で読んでしまう。しかも次に一覧が届いたときには誰も装飾を引き直さないので、古いバッジがそのまま残る。
 
 `resourceUri` の追加が `item.id` / `item.command` / `contextValue` を壊していないことは `sessionTreeProvider.test.ts` で固定した（issue #236の再発防止）。
 

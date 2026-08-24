@@ -318,6 +318,23 @@ describe('SessionTreeProvider の行末デコレーション（issue #735）', (
     expect(provider.decorationStateFor(sessionUri(hidden))).toBeUndefined();
   });
 
+  it('装飾の引き直しは一覧が入れ替わった後に促す（refreshの時点ではない）', async () => {
+    // onDidChangeTreeData は再読込を「依頼した」時点で発火する。そこで装飾を引き直させると
+    // まだ古い一覧を読んでしまい、次に一覧が届いても誰も引き直さないまま古いバッジが残る
+    const s = session({ id: 's1' });
+    const provider = makeProvider([s], new PinnedSessionStore(), [], () => 'running');
+    const order: string[] = [];
+    provider.onDidChangeTreeData(() => order.push('tree'));
+    provider.onDidChangeDecorations(() => order.push('decorations'));
+
+    provider.refresh();
+    expect(order).toEqual(['tree']);
+
+    await provider.getChildren();
+
+    expect(order).toEqual(['tree', 'decorations']);
+  });
+
   it('resourceUriを足してもコマンド引数とcontextValueは変わらない（issue #236の再発防止）', () => {
     const s = session({ id: 's1', provider: 'codex', archived: false });
     const provider = makeProvider([s]);

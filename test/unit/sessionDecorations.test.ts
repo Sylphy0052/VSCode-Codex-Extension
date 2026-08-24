@@ -101,7 +101,7 @@ describe('SESSION_DECORATIONS', () => {
 /** `SessionDecorationSource` の最小フェイク。ツリーの更新イベントを手で発火できる。 */
 function fakeSource(state: SessionDecorationState | undefined): {
   source: SessionDecorationSource;
-  fireTreeChange: () => void;
+  fireListChanged: () => void;
   setState: (next: SessionDecorationState | undefined) => void;
   askedFor: string[];
 } {
@@ -110,16 +110,16 @@ function fakeSource(state: SessionDecorationState | undefined): {
   let current = state;
   return {
     source: {
-      onDidChangeTreeData: ((listener: () => void) => {
+      onDidChangeDecorations: ((listener: () => void) => {
         listeners.push(listener);
         return { dispose: () => undefined };
-      }) as SessionDecorationSource['onDidChangeTreeData'],
+      }) as SessionDecorationSource['onDidChangeDecorations'],
       decorationStateFor: (uri) => {
         askedFor.push(uri.path);
         return current;
       },
     },
-    fireTreeChange: () => {
+    fireListChanged: () => {
       for (const l of listeners) l();
     },
     setState: (next) => {
@@ -159,26 +159,26 @@ describe('SessionDecorationProvider', () => {
     expect(provider.provideFileDecoration(uri)).toBeUndefined();
   });
 
-  it('ツリーが更新されたら装飾の引き直しを促す', () => {
-    const { source, fireTreeChange } = fakeSource('running');
+  it('一覧が入れ替わったら装飾の引き直しを促す', () => {
+    const { source, fireListChanged } = fakeSource('running');
     const provider = new SessionDecorationProvider(source);
     const fired: Array<unknown> = [];
     provider.onDidChangeFileDecorations((e) => fired.push(e));
 
-    fireTreeChange();
+    fireListChanged();
 
     // どの行が変わったかはツリー側も持っていないため、URIを絞らず全体を無効化する
     expect(fired).toEqual([undefined]);
   });
 
   it('disposeするとツリーの購読を外す', () => {
-    const { source, fireTreeChange } = fakeSource('running');
+    const { source, fireListChanged } = fakeSource('running');
     const provider = new SessionDecorationProvider(source);
     const fired: Array<unknown> = [];
     provider.onDidChangeFileDecorations((e) => fired.push(e));
 
     provider.dispose();
-    fireTreeChange();
+    fireListChanged();
 
     expect(fired).toEqual([]);
   });

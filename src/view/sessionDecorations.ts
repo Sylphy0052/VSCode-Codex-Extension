@@ -96,9 +96,15 @@ export function decorationStateOf(
  *
  * 依存の向きをツリー→装飾の一方向にするため、装飾側がツリーの更新イベントを購読する。
  * ツリー側から装飾を突く形にすると、両方が互いを持つ配線になる。
+ *
+ * 購読するのは`onDidChangeTreeData`ではなく専用の`onDidChangeDecorations`。
+ * `onDidChangeTreeData`はツリーの再読込を**依頼した**時点で発火するため、そこで装飾を
+ * 引き直させると、まだ更新されていない一覧を読んでしまい、次に一覧が届いても誰も装飾を
+ * 引き直さないまま古いバッジが残る。`onDidChangeDecorations`は一覧が実際に入れ替わった
+ * 後に発火する。
  */
 export interface SessionDecorationSource {
-  readonly onDidChangeTreeData: vscode.Event<void>;
+  readonly onDidChangeDecorations: vscode.Event<void>;
   decorationStateFor(uri: vscode.Uri): SessionDecorationState | undefined;
 }
 
@@ -114,9 +120,9 @@ export class SessionDecorationProvider implements vscode.FileDecorationProvider,
   private readonly subscription: vscode.Disposable;
 
   constructor(private readonly source: SessionDecorationSource) {
-    // ツリーが変わったら全URIの装飾を引き直させる（どの行が変わったかはツリー側も
+    // 一覧が入れ替わったら全URIの装飾を引き直させる（どの行が変わったかはツリー側も
     // 持っていないため、URIを絞らず`undefined`で全体を無効化する）
-    this.subscription = source.onDidChangeTreeData(() => {
+    this.subscription = source.onDidChangeDecorations(() => {
       this.emitter.fire(undefined);
     });
   }
