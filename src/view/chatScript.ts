@@ -1339,6 +1339,16 @@ export function chatScript(
     });
   }
 
+  // バックグラウンド実行中一覧の開閉もリロードをまたいで覚える（issue #678）。既定は閉じた状態
+  const backgroundTerminalsBox = el('backgroundTerminals');
+  if (backgroundTerminalsBox) {
+    const saved = vscode.getState() || {};
+    backgroundTerminalsBox.open = saved.backgroundTerminalsOpen === true;
+    backgroundTerminalsBox.addEventListener('toggle', () => {
+      patchState({ backgroundTerminalsOpen: backgroundTerminalsBox.open });
+    });
+  }
+
   // TODOの進み具合の記号。計画（Codexの plan）と同じ記号を使う。絵文字は使わない
   const TODO_MARK = { pending: '[ ]', in_progress: '[~]', completed: '[x]' };
 
@@ -1377,8 +1387,12 @@ export function chatScript(
   function renderBackgroundTerminals(terminals) {
     const box = el('backgroundTerminals');
     const list = el('backgroundTerminalsList');
+    const summary = el('backgroundTerminalsSummary');
     const items = terminals || [];
     box.hidden = items.length === 0;
+    if (summary) {
+      summary.textContent = items.length > 0 ? '(' + items.length + ')' : '';
+    }
     list.replaceChildren();
     for (const t of items) {
       const li = document.createElement('li');
