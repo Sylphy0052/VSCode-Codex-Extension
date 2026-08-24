@@ -1,4 +1,5 @@
 import type { ProviderId } from '../provider/id';
+import { HIGHLIGHT_SOURCE } from './highlight';
 import { MARKDOWN_PARSE_SOURCE } from './markdown';
 import { SEND_KEY_SOURCE, type SendOnMode } from './sendKey';
 import { MERGE_ITEMS_SOURCE } from './stateDelta';
@@ -425,6 +426,12 @@ export function chatScript(
    */
   ${MARKDOWN_PARSE_SOURCE}
 
+  /*
+   * コードブロックの構文強調（issue #717）。実装は highlight.ts に置き、ここへ差し込む。
+   * ここでは highlightCode(lang, code) だけを使う。
+   */
+  ${HIGHLIGHT_SOURCE}
+
   /**
    * インライントークン列をDOMへ差し込む。HTML文字列を組み立ててDOMへ流し込むAPIは
    * 使わない。すべて createElement / createTextNode で作り、エージェントの出力が
@@ -631,7 +638,23 @@ export function chatScript(
 
     const pre = document.createElement('pre');
     const code = document.createElement('code');
-    code.textContent = token.code;
+    /*
+     * 構文強調（issue #717）。着色は表示だけに効かせる。コピー・エディタへ挿入・
+     * 新規ファイルで開くはいずれも上で token.code をそのまま渡しており、着色の影響を
+     * 受けない。断片の value をつなぐと元のコードに戻るので、textContent を辿っても
+     * 同じ文字列が得られる。
+     */
+    const pieces = highlightCode(token.lang, token.code);
+    for (const piece of pieces) {
+      if (piece.type === 'plain') {
+        code.appendChild(document.createTextNode(piece.value));
+        continue;
+      }
+      const span = document.createElement('span');
+      span.className = 'tok-' + piece.type;
+      span.textContent = piece.value;
+      code.appendChild(span);
+    }
     pre.appendChild(code);
     wrap.appendChild(pre);
     return wrap;

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { chatCsp } from '../../src/view/chatCsp';
 import { chatScript } from '../../src/view/chatScript';
 import { chatStyles } from '../../src/view/chatStyles';
+import { CODE_TOKEN_TYPES } from '../../src/view/highlight';
 import { controlPanelStyles } from '../../src/view/controlPanelStyles';
 import { progressStyles } from '../../src/view/progressStyles';
 
@@ -149,6 +150,17 @@ describe('chatStyles', () => {
     // 見出しに隠されると「一番下へ」もスラッシュコマンド候補も押せなくなる
     expect(zOf('.item .head')).toBeLessThan(zOf('#scrollToBottom'));
     expect(zOf('.item .head')).toBeLessThan(zOf('#commands'));
+  });
+
+  it('構文強調の分類すべてに色がある（issue #717）', () => {
+    const css = stripComments(chatStyles());
+    // plain は地の文なので色を持たない。それ以外は色が無いと分類しただけで終わる
+    for (const type of CODE_TOKEN_TYPES) {
+      if (type === 'plain') continue;
+      expect(css, type + ' の色が無い').toMatch(
+        new RegExp('\\.md-code \\.tok-' + type + '\\s*\\{[^}]*color:\\s*var\\(--vscode-'),
+      );
+    }
   });
 
   it('状態の色が実行中の見出し色より後に来て上書きする（issue #715）', () => {
