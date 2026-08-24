@@ -1670,6 +1670,8 @@ export function chatScript(
     renderBackgroundTerminals(state.backgroundTerminals);
     queuedMessages = state.queued || [];
     renderQueue(queuedMessages);
+    // 応答中かどうかを画面の外周の枠色で示す（issue #701）。赤=応答中、青=待機中
+    document.body.classList.toggle('busy', !!state.busy);
     el('stop').hidden = !state.busy;
     // 応答中でも送れる。既定では待ち行列に積むだけで応答は止まらない
     el('send').disabled = false;

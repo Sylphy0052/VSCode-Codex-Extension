@@ -36,6 +36,21 @@ describe('chatStyles', () => {
     }
   });
 
+  it('応答中かどうかを外枠の色で示す規則がある（issue #701）', () => {
+    const css = chatStyles();
+    // 待機中は青、応答中は赤。色はテーマ変数から取る
+    expect(css).toMatch(/body::after\s*\{[^}]*border:[^}]*var\(--vscode-charts-blue\)/);
+    expect(css).toMatch(/body\.busy::after\s*\{[^}]*var\(--vscode-charts-red\)/);
+    // レイアウトを動かさず、下の要素の操作も妨げない
+    expect(css).toMatch(/body::after\s*\{[^}]*position:\s*fixed/);
+    expect(css).toMatch(/body::after\s*\{[^}]*pointer-events:\s*none/);
+  });
+
+  it('外枠のbusyクラスをスクリプトが付け外しする（issue #701）', () => {
+    const script = chatScript('Codex', { mode: 'quickPick' });
+    expect(script).toContain("document.body.classList.toggle('busy'");
+  });
+
   it('ツール出力の既定折りたたみ用クラスが定義されている（issue #679）', () => {
     const css = chatStyles();
     expect(css).toContain('.body-fold');

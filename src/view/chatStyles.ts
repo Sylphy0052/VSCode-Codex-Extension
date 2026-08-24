@@ -20,6 +20,22 @@ export function chatStyles(): string {
     font-size: var(--vscode-font-size);
     color: var(--vscode-foreground);
   }
+  /*
+   * 応答中かどうかを画面の外周で示す（issue #701）。ログ本文を読んでいる最中でも
+   * 視界の端で状態が分かるようにするため、bodyの内側に固定位置の枠を1本重ねる。
+   * position: fixed の擬似要素にすることで、既存のflexレイアウトの高さ計算に
+   * 影響を与えず、pointer-events: none で下の要素の操作も妨げない。
+   */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 100;
+    border: 2px solid var(--vscode-charts-blue);
+  }
+  /* 応答中は赤。busyクラスの付け外しは chatScript.ts の apply() が行う */
+  body.busy::after { border-color: var(--vscode-charts-red); }
   #logWrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
   #log { flex: 1; overflow-y: auto; padding: 12px 16px; }
   #scrollToBottom {
