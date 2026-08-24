@@ -53,7 +53,7 @@ export function chatStyles(): string {
     align-items: center;
     justify-content: center;
     border-radius: 50%;
-    border: 1px solid var(--vscode-widget-border, transparent);
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
     background: var(--vscode-button-secondaryBackground);
     color: var(--vscode-button-secondaryForeground);
     cursor: pointer;
@@ -449,7 +449,7 @@ export function chatStyles(): string {
   #queue {
     margin: 0 16px 8px;
     padding: 8px 10px;
-    border: 1px solid var(--vscode-widget-border, transparent);
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
     border-radius: 4px;
     background-color: var(--vscode-editorWidget-background);
     font-size: 0.9em;
@@ -494,7 +494,7 @@ export function chatStyles(): string {
   #todos {
     margin: 0 16px 8px;
     padding: 8px 10px;
-    border: 1px solid var(--vscode-widget-border, transparent);
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
     border-radius: 4px;
     background-color: var(--vscode-editorWidget-background);
     font-size: 0.9em;
@@ -518,7 +518,7 @@ export function chatStyles(): string {
   #backgroundTerminals {
     margin: 0 16px 8px;
     padding: 8px 10px;
-    border: 1px solid var(--vscode-widget-border, transparent);
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
     border-radius: 4px;
     background-color: var(--vscode-editorWidget-background);
     font-size: 0.9em;

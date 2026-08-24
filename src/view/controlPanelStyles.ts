@@ -43,7 +43,7 @@ export function controlPanelStyles(): string {
   .usage {
     margin-bottom: 14px;
     padding-bottom: 12px;
-    border-bottom: 1px solid var(--vscode-widget-border, transparent);
+    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
   }
   .usage-head {
     display: flex;
@@ -87,7 +87,7 @@ export function controlPanelStyles(): string {
     display: flex;
     gap: 2px;
     margin-bottom: 12px;
-    border-bottom: 1px solid var(--vscode-widget-border, transparent);
+    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
   }
   .tabs button {
     width: auto;
@@ -110,7 +110,7 @@ export function controlPanelStyles(): string {
   .note {
     margin-top: 4px;
     padding-top: 8px;
-    border-top: 1px solid var(--vscode-widget-border, transparent);
+    border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
     color: var(--vscode-descriptionForeground);
     font-size: 0.85em;
     line-height: 1.5;
@@ -118,7 +118,7 @@ export function controlPanelStyles(): string {
   .section {
     margin: 16px 0 0;
     padding-top: 12px;
-    border-top: 1px solid var(--vscode-widget-border, transparent);
+    border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
   }
   .section summary.sectionTitle {
     margin: 0 0 8px;
@@ -152,7 +152,7 @@ export function controlPanelStyles(): string {
   .mcpError { color: var(--vscode-errorForeground, var(--vscode-descriptionForeground)); }
   .mcpServer {
     padding: 6px 8px;
-    border: 1px solid var(--vscode-widget-border, transparent);
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
     border-radius: 3px;
   }
   .mcpServer-head {
@@ -197,7 +197,7 @@ export function controlPanelStyles(): string {
   }
   .hookItem {
     padding: 6px 8px;
-    border: 1px solid var(--vscode-widget-border, transparent);
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
     border-radius: 3px;
   }
   .hookItem-head {
@@ -258,7 +258,7 @@ export function controlPanelStyles(): string {
   }
   .skillItem {
     padding: 6px 8px;
-    border: 1px solid var(--vscode-widget-border, transparent);
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
     border-radius: 3px;
   }
   .skillItem-head {
@@ -326,7 +326,7 @@ export function controlPanelStyles(): string {
   }
   .pluginItem, .appItem {
     padding: 6px 8px;
-    border: 1px solid var(--vscode-widget-border, transparent);
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
     border-radius: 3px;
   }
   .pluginItem-head, .appItem-head {
@@ -385,7 +385,7 @@ export function controlPanelStyles(): string {
   .importError { color: var(--vscode-errorForeground, var(--vscode-descriptionForeground)); }
   .importItem, .importHistoryItem {
     padding: 6px 8px;
-    border: 1px solid var(--vscode-widget-border, transparent);
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
     border-radius: 3px;
   }
   .importItem-head, .importHistoryItem-head {
