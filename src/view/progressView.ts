@@ -159,6 +159,7 @@ ${progressStyles()}
   <section id="timelineSection" hidden>
     <h2>タイムライン</h2>
     <div id="timeline"></div>
+    <div id="timelineMore"></div>
   </section>
 <script nonce="${nonce}">
 ${progressScript()}

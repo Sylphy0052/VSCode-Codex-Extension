@@ -7009,6 +7009,16 @@ codiconのフォントは使えない。`.vscodeignore` が `node_modules/**` �
 
 `ProgressTurn.editedFiles` は重複を落とした一覧のままにし、回数は `fileEditCounts`（パス→回数）を新設して持つ。既存の利用側（件数の集計、サマリの重複除去）の数え方を変えずに「同じファイルを何度も往復した」ことだけを足せる。
 
+#### ターンの開閉を覚える（issue #750）
+
+古いターンを `<details>` で畳む仕組み自体は上の「古い情報を畳む」で入れたが、開閉をDOMにしか持っていなかった。`render` は状態が届くたびにタイムラインを作り直すため、応答中は数秒おきに、自分で開いた古いターンが閉じ直されていた。ターン番号 → 開閉の対応（`turnOpen`）をスクリプト側に持ち、触ったターンだけその状態を優先する。触っていないターンは従来どおり末尾 `OPEN_TURNS` 件だけ開く。
+
+**人の操作は `toggle` ではなく `summary` の `click` で拾う**。`toggle` は描画時の `article.open` への代入でも発火し、しかも仕様上その発火はタスクとしてキューされるため、直後にフラグを立てて区別することもできない。区別に失敗すると、既定で開いたターンが「自分で開いた」ものとして記録され、以降どれだけターンが増えても畳まれなくなる。`summary` の `click` はキーボード操作（Enter / Space）でも届き、人の操作だけを拾える。クリックの時点ではまだ開閉が反転していないので、反転後の値（`!article.open`）を覚える。
+
+**応答中の最新ターンは既定で開く**。ただし自分で閉じたなら閉じたままにする。issueの文面は「常に開く」だが、再描画のたびに開き直すと、確認点の「自分で開いた（閉じた）ターンが再描画で戻らない」と正面から衝突する。人の操作を優先し、まだ触っていないときの既定として開く形にした。
+
+**「閉じているNターンを開く」は畳まれたターンがあるときだけ出す**。ターンが `OPEN_TURNS` 件以下のセッションでは、押しても何も起きないボタンが常時出ることになるため。
+
 #### 応答中の稼働バー（issue #751）
 
 応答中かどうかは見出しの右のバッジ（点の明滅）で示していたが、サマリは `position: sticky` で上に残るとはいえ、タイムラインを追って下を読んでいるときにバッジの明滅は視野に入りにくい。画面上端に固定した2pxの帯（`#busyBar`）を足し、`ProgressSummary.busy` のときだけ出す。
@@ -7028,6 +7038,7 @@ codiconのフォントは使えない。`.vscodeignore` が `node_modules/**` �
 #### 確かめ方
 
 - `test/unit/progressStyles.test.ts`: チェックリストの行が `flex-start` で印を1行目に留めること（issue #748）
+- `test/unit/webviewScript.test.ts`: 開閉を `turnOpen` へ覚えること、`toggle` を使わないこと、畳まれたターンが0件なら「開く」を出さないこと（issue #750）
 - `test/unit/webviewScript.test.ts`: 稼働バーを `busy` で開閉すること、`@keyframes busySlide` が `transform` しか変えないこと、`#busyBar` だけが `position: fixed` であること（issue #751）
 - `test/unit/webviewScript.test.ts`: SVGで組み立てていること（`createElementNS`があり`codicon`が無い）、KPIの各idを書き換えていること、`OPEN_TURNS` / `FILES_SHOWN` による打ち切り、スタイルが生の色リテラルを持たないこと、`position: sticky` と不透明な背景
 - `test/unit/progressModel.test.ts`: `fileEditCounts` の集計

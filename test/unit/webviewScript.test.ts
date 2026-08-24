@@ -1068,6 +1068,33 @@ describe('progressScript', () => {
     expect(source).toContain('progressPercent');
   });
 
+  it('ターンの開閉を覚えて再描画で失わない（issue #750）', () => {
+    const source = progressScript();
+    // 陽性対照: 開閉を覚える入れ物がある（綴り違いで空振りしていない）
+    expect(source).toContain('const turnOpen = {};');
+    // 人の操作は summary のクリックで拾う。toggle は描画時の代入でも発火するため使わない
+    expect(source).toContain("head.addEventListener('click'");
+    expect(source).toContain('turnOpen[turn.index] = !article.open;');
+    expect(source).not.toContain("addEventListener('toggle'");
+    // 覚えた値は既定（末尾 OPEN_TURNS 件）より優先する
+    expect(source).toContain('const remembered = turnOpen[turn.index];');
+    expect(source).toContain('remembered === undefined');
+  });
+
+  it('畳まれたターンがあるときだけ「開く」を出す（issue #750）', () => {
+    const source = progressScript();
+    expect(source).toContain('renderExpandAll');
+    expect(source).toContain('timelineMore');
+    // 閉じているターンが0件なら何も出さない（3件以下のセッションで死んだボタンを見せない）
+    expect(source).toContain('if (closed === 0) {');
+  });
+
+  it('応答中の最新ターンは既定で開く（issue #750）', () => {
+    const source = progressScript();
+    expect(source).toContain('isLatest && isBusy');
+    expect(source).toContain('isBusy = summary.busy === true;');
+  });
+
   it('応答中は上端の稼働バーを出し、終わると隠す（issue #751）', () => {
     const source = progressScript();
     // 陽性対照: そもそもこの要素を触る処理がある（idの綴り違いで空振りしていない）

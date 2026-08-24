@@ -50,6 +50,14 @@ export function progressScript(): string {
 
   /** 閉じずに開いたまま出すターン数（末尾から数える）。 */
   const OPEN_TURNS = 3;
+  /**
+   * ターン番号 → 開閉。自分で開閉したターンだけを覚え、触っていないターンは
+   * OPEN_TURNS の既定に従わせる（issue 750）。render は状態が届くたびに
+   * タイムラインを作り直すので、開閉をDOM側に置いたままにはできない。
+   */
+  const turnOpen = {};
+  /** 応答中か。renderSummary が更新し、renderTimeline が既定の開閉を決めるのに使う。 */
+  let isBusy = false;
   /** ファイル一覧を畳まずに出す件数。これを超えた分は「もっと見る」の裏へ回す。 */
   const FILES_SHOWN = 20;
 
@@ -224,6 +232,13 @@ export function progressScript(): string {
     article.open = isOpen;
 
     const head = node('summary', '', undefined);
+    // 開閉を覚えるのは toggle ではなく summary のクリックで拾う（issue 750）。
+    // toggle は描画時の article.open への代入でも発火するため、どちらが人の操作かを
+    // 区別できない。クリックの時点ではまだ反転していないので、反転後の値を入れる。
+    // キーボード操作（Enter / Space）も summary への click として届く
+    head.addEventListener('click', () => {
+      turnOpen[turn.index] = !article.open;
+    });
     head.appendChild(node('span', 'title', 'ターン ' + (turn.index + 1)));
     if (turn.editedFiles.length > 0) {
       head.appendChild(chip('file', String(turn.editedFiles.length), '変更したファイル'));
@@ -275,10 +290,42 @@ export function progressScript(): string {
     clear(timeline);
     // 古いターンは畳む。全部開いたままだと、長いセッションでは下まで辿れない
     const firstOpen = Math.max(turns.length - OPEN_TURNS, 0);
+    let closed = 0;
     for (let i = 0; i < turns.length; i += 1) {
-      timeline.appendChild(renderTurn(turns[i], i === turns.length - 1, i >= firstOpen));
+      const turn = turns[i];
+      const isLatest = i === turns.length - 1;
+      // 自分で開閉したターンはその状態を優先する。触っていないターンだけ既定に従う。
+      // 応答中の最新ターンは、まだ触っていなければ開いておく（issue 750）
+      const remembered = turnOpen[turn.index];
+      const isOpen = remembered === undefined ? i >= firstOpen || (isLatest && isBusy) : remembered;
+      if (!isOpen) {
+        closed += 1;
+      }
+      timeline.appendChild(renderTurn(turn, isLatest, isOpen));
     }
     el('timelineSection').hidden = turns.length === 0;
+    renderExpandAll(turns, closed);
+  }
+
+  /**
+   * 「すべて開く」。畳まれたターンが1件も無いときは出さない（issue 750。ターンが
+   * OPEN_TURNS 件以下のセッションで、押しても何も起きないボタンを見せないため）。
+   */
+  function renderExpandAll(turns, closed) {
+    const holder = el('timelineMore');
+    clear(holder);
+    if (closed === 0) {
+      return;
+    }
+    const button = node('button', 'more', '閉じている' + closed + 'ターンを開く');
+    button.type = 'button';
+    button.addEventListener('click', () => {
+      for (const turn of turns) {
+        turnOpen[turn.index] = true;
+      }
+      renderTimeline(turns);
+    });
+    holder.appendChild(button);
   }
 
   function setKpi(id, value, suffix) {
@@ -286,6 +333,7 @@ export function progressScript(): string {
   }
 
   function renderSummary(summary) {
+    isBusy = summary.busy === true;
     // 画面上端の稼働バー（issue 751）。バッジの点滅だけでは、画面を下へスクロールして
     // サマリが見えていないときに動いているかが分からない
     el('busyBar').hidden = !summary.busy;
