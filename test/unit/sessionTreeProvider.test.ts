@@ -11,6 +11,7 @@ import {
   type TreeElement,
 } from '../../src/view/sessionTreeProvider';
 import type { SessionActivityState } from '../../src/view/sessionActivity';
+import { formatRelativeTime } from '../../src/view/relativeTime';
 import { SESSION_URI_SCHEME, sessionUri } from '../../src/view/sessionDecorations';
 
 /**
@@ -256,6 +257,59 @@ describe('SessionTreeProvider.getTreeItem のアイコンの色（issue #733）'
     );
 
     expect(new Set(colors).size).toBe(states.length);
+  });
+});
+
+describe('SessionTreeProvider.getTreeItem の補足行（issue #736）', () => {
+  const descriptionOf = (provider: SessionTreeProvider, s: SessionSummary): string =>
+    String(provider.getTreeItem(s).description);
+
+  it('このワークスペース表示では相対時刻だけ', () => {
+    // CLI名は幅を食うわりにアイコンとツールチップで分かる。切れて相対時刻が
+    // 押し出されるのを避けるため載せない
+    const s = session({ id: 's1', provider: 'codex' });
+    const provider = makeProvider([s]);
+
+    expect(descriptionOf(provider, s)).toBe(formatRelativeTime(s.updatedAt, Date.now()));
+  });
+
+  it('CLI名を載せない（Codex・Claude Codeのどちらでも）', () => {
+    const codex = session({ id: 's1', provider: 'codex' });
+    const claude = session({ id: 's2', provider: 'claude' });
+    const provider = makeProvider([codex, claude]);
+    // 陽性対照: フェイクのProviderRegistryは実際にこのラベルを返す
+    expect(fakeProviders([]).get('claude')?.label).toBe('Claude Code');
+
+    expect(descriptionOf(provider, codex)).not.toContain('Codex');
+    expect(descriptionOf(provider, claude)).not.toContain('Claude Code');
+  });
+
+  it('CLI名はツールチップに残る', () => {
+    const s = session({ id: 's1', provider: 'claude' });
+    const provider = makeProvider([s]);
+
+    const tooltip = provider.getTreeItem(s).tooltip;
+    const text = typeof tooltip === 'string' ? tooltip : (tooltip?.value ?? '');
+    expect(text).toContain('- CLI: Claude Code');
+  });
+
+  it('すべて表示のときはフォルダ名を中黒でつなぐ', async () => {
+    const s = session({ id: 's1', cwd: '/tmp/example' });
+    const provider = makeProvider([s]);
+    await provider.setScope('all');
+
+    expect(descriptionOf(provider, s)).toBe(
+      `${formatRelativeTime(s.updatedAt, Date.now())} · example`,
+    );
+  });
+
+  it('承認待ち・実行中は先頭に残る（色だけに頼らないため）', () => {
+    const s = session({ id: 's1' });
+    const pending = makeProvider([s], new PinnedSessionStore(), [], () => 'approvalPending');
+    const running = makeProvider([s], new PinnedSessionStore(), [], () => 'running');
+
+    expect(descriptionOf(pending, s).startsWith('承認待ち · ')).toBe(true);
+    expect(descriptionOf(running, s).startsWith('実行中 · ')).toBe(true);
   });
 });
 

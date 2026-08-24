@@ -3144,7 +3144,7 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 `sessionTreeProvider.ts`の`buildSessionTreeItem`は、`open ? 'circle-filled' : session.archived ? 'archive' : ...`という「開いているか」だけを見る分岐だった。承認待ち・実行中はこれより優先して出す：
 
 - アイコン: 承認待ちは`bell-dot`、実行中は`sync~spin`（VS Code本体が拡張機能の一覧などで「進行中」を表すのに使っている回転アイコン）。どちらでも無ければ従来の分岐
-- `description`: 既存の`[ラベル, 相対時刻, cwd]`の先頭へ「承認待ち」「実行中」を差し込む
+- `description`: 既存の`[相対時刻, cwd]`（issue #736より前は`[ラベル, 相対時刻, cwd]`）の先頭へ「承認待ち」「実行中」を差し込む
 
 **セッションの葉ノードは生の`SessionSummary`のまま**という不変条件（issue #236・#293、`TreeElement = SessionSummary | SessionGroupNode`）は崩していない。状態はラップではなく、コンストラクタへ渡す関数`getActivity: (session: SessionSummary) => SessionActivityState | undefined`から都度引く形にした。`isOpen: (sessionId: string) => boolean`だった既存の引数をこの関数へ差し替えている（`undefined`が「未オープン」で、旧`isOpen`の`false`に相当）。
 
@@ -3193,6 +3193,17 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 - タブ名の印は英数記号のみ（`*` / `!`）。ローカライズや、印の意味を凡例として画面内に示す導線は無い（ホバーで見るタブのツールチップ自体がVS Code標準機能に無いため、意味は本ドキュメントとREADMEでのみ説明する）
 - ターン完了の通知は成功・失敗を区別しない（`turnFailed`の値を見ていない）。文言も「応答が終わりました」で共通
 - 通知の「開く」はタブをrevealするだけで、承認カード自体へスクロールする等の追加の誘導は無い（既存の承認カードは会話の最新項目に出るため、revealで大抵は視界に入る）
+
+#### 補足行を短くする（issue #736）
+
+補足（`TreeItem.description`）は`Codex  3分前  リポジトリ名`のように全角スペース2個でつないでいた。サイドバーの幅が狭いと後ろから切れるため、3つ並べるといちばん見たい「いつ更新されたか」が押し出される。CLI名を落とし、区切りを`·`（中黒）にした。結果は`3分前`（このワークスペース表示）または`3分前 · リポジトリ名`（すべて表示）。承認待ち・実行中の先頭差し込みは残す（色だけに頼らない方針）。
+
+**CLI名はツールチップ（`- CLI: <label>`）だけに残す**——issueが挙げていた代案(a)「開いている行もプロバイダ別アイコン＋色で表す」は採らなかった。理由は2つある。
+
+1. (a)が塞ぐのは`open`（`circle-filled`）の分岐だけで、`approvalPending`（`bell-dot`）・`running`（`sync~spin`）・`archived`（`archive`）にも同じ穴が開いている。CLI名を落とすと、アイコンでCLIが分かるのは「未オープンかつ未アーカイブ」の行だけになる
+2. `idle`をプロバイダ別アイコンにすると、未オープンの行と形が同じになり、両者の違いが色（`charts.green`の有無）だけになる。これは§6「状態表示は色だけに頼らない」がまさに禁じている形
+
+CLIを混在させている利用者にとっては情報が1つ減るが、アイコンの形の区別（未オープン行では`sparkle` / `comment-discussion`）とツールチップで補える。
 
 #### 行末の状態デコレーション（issue #735）
 
