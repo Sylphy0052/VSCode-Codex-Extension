@@ -19,9 +19,9 @@ import { isProviderId } from '../provider/id';
 import type { ImportHistoryItemTypeResultView, ImportHistorySnapshot } from '../provider/import';
 import { chatCsp } from './chatCsp';
 import { buildPanelAlert, type PanelAlert } from './controlPanelAlerts';
-import { buildSectionSummaries, type SectionSummaries } from './controlPanelSummaries';
 import { controlPanelScript } from './controlPanelScript';
 import { controlPanelStyles } from './controlPanelStyles';
+import { buildSectionSummaries, type SectionSummaries } from './controlPanelSummaries';
 import { formatAbsoluteTime } from './relativeTime';
 import {
   isClaudeEditableKey,

@@ -174,6 +174,28 @@ describe('セクション識別子の整合性（issue #225 レビュー指摘3�
     }
   });
 
+  it('class="sectionCount"を持つ要素のidはすべてcount-で始まる（issue #740）', () => {
+    // webview側（controlPanelScript.tsのapplySectionSummaries）は`.sectionCount`を母数に
+    // 走査し、idからcount-を落としてセクションidを得る。この前提が崩れると、
+    // 空文字のキーで集計を引いて全部の集計が消える
+    const html = renderedHtml();
+    const re = /<span class="sectionCount" id="([^"]+)"/g;
+    const ids: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null) {
+      const id = m[1];
+      if (id !== undefined) {
+        ids.push(id);
+      }
+    }
+    // 陽性対照: 1件も拾えていないとこの検査は何も確かめていない
+    expect(ids.length).toBe(extractCountHtmlIds(html).length);
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) {
+      expect(id.startsWith('count-'), `${id} がcount-で始まらない`).toBe(true);
+    }
+  });
+
   it('SECTION_CONTAINERSのキー集合とHTMLのid="section-*"の集合が一致する', () => {
     const containerKeys = extractSectionContainerKeys(
       controlPanelScript(JSON.stringify(approvalLevelMeta())),
