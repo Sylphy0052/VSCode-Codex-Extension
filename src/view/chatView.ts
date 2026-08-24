@@ -25,10 +25,12 @@ import {
   readChatComposerButtonsConfig,
   readChatRenderMarkdownConfig,
   readChatSendOnConfig,
+  readChatTurnSummaryConfig,
   readConfig,
   readWorkflowsConfig,
   workspaceFolderPaths,
 } from '../config';
+import { appendTurnSummaryInstruction } from './turnSummary';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
@@ -801,10 +803,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           await this.runPseudoCommand(entry, pseudo);
           return;
         }
+        // 手動の発言にだけ要約指示を足す（issue #709）。擬似コマンドより後に置いてあるので、
+        // CLIへ送らない入力には付かない。ループの自動送信（`sendLoopMessage`）も対象外
+        const sent = appendTurnSummaryInstruction(text, readChatTurnSummaryConfig());
         const attachments = entry.attachments.take();
         try {
           await entry.session.sendOrQueue(
-            text,
+            sent,
             entry.taskConfig ?? readConfig().codex,
             attachments,
           );
