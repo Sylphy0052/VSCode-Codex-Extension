@@ -261,6 +261,38 @@ describe('controlPanelStyles', () => {
     expect(css).toContain('.sectionLoading');
   });
 
+  it('一覧のカードすべてにホバー時の背景がある（issue #746）', () => {
+    // カードを1種類足したときにホバーだけ付け忘れても見た目では気付けない。
+    // 「カードの書式を持つ規則」を母数にして、その全部にホバーがあることを確かめる
+    const css = stripComments(controlPanelStyles());
+    const cardSelectors = new Set<string>();
+    const hoverSelectors = new Set<string>();
+    const rule = /([^{}]+)\{([^{}]*)\}/g;
+    let m: RegExpExecArray | null;
+    while ((m = rule.exec(css)) !== null) {
+      const selector = (m[1] ?? '').trim();
+      const body = m[2] ?? '';
+      const isCard =
+        body.includes('padding: 6px 8px') && body.includes('var(--vscode-widget-border');
+      const isHover = body.includes('var(--vscode-list-hoverBackground)');
+      for (const part of selector.split(',')) {
+        const one = part.trim();
+        if (isCard) {
+          cardSelectors.add(one);
+        }
+        if (isHover && one.endsWith(':hover')) {
+          hoverSelectors.add(one.slice(0, -':hover'.length));
+        }
+      }
+    }
+    // 陽性対照: どちらかが空だとこの検査は何も確かめていない
+    expect(cardSelectors.size).toBeGreaterThan(0);
+    expect(hoverSelectors.size).toBeGreaterThan(0);
+    for (const selector of cardSelectors) {
+      expect(hoverSelectors.has(selector), `${selector} にホバーの規則が無い`).toBe(true);
+    }
+  });
+
   it('選択中のタブが背景と2pxの下線で分かる（issue #743）', () => {
     const css = stripComments(controlPanelStyles());
     const selected = css.match(/\.tabs button\[aria-selected='true'\] \{([^}]*)\}/);
