@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { activateExtension } from './helpers/extension';
 import { readManifest } from './helpers/manifest';
-import { waitFor } from './helpers/waitFor';
+import { waitFor, waitForFileContent } from './helpers/waitFor';
 import {
   describeSnapshot,
   FakeTaskSessionHost,
@@ -225,21 +225,20 @@ suite('疑似worktree（design.md §16.20）', () => {
 
     // design.md §16.20「runが終わったら、統合先の内容をワークスペースへ反映する」。
     // 反映はrunの結果を条件にしていないため、失敗で終わっても統合済みの分は反映される。
-    await waitFor(
-      () => fs.existsSync(path.join(root, 'docs', 't2.md')),
-      (exists) => exists,
+    // 存在ではなく内容を待つ（Issue #541、§16.25）。存在だけを待つと、作られてから
+    // 書き込みが終わるまでの間に読んで空を得る
+    const t1 = await waitForFileContent(
+      path.join(root, 'docs', 't1.md'),
+      (text) => text === 'T1\n',
       WAIT_OPTIONS,
     );
-    assert.equal(
-      fs.readFileSync(path.join(root, 'docs', 't1.md'), 'utf8'),
-      'T1\n',
-      'T1の成果がワークスペースへ反映されていない',
+    const t2 = await waitForFileContent(
+      path.join(root, 'docs', 't2.md'),
+      (text) => text === 'T2\n',
+      WAIT_OPTIONS,
     );
-    assert.equal(
-      fs.readFileSync(path.join(root, 'docs', 't2.md'), 'utf8'),
-      'T2\n',
-      'T2の成果がワークスペースへ反映されていない',
-    );
+    assert.equal(t1, 'T1\n', 'T1の成果がワークスペースへ反映されていない');
+    assert.equal(t2, 'T2\n', 'T2の成果がワークスペースへ反映されていない');
   });
 
   test('同じファイルを変更した並列タスクは、解決用セッションを開かず直接blockedになる', async function () {

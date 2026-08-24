@@ -5,7 +5,7 @@ import * as vscode from 'vscode';
 import { createFakeClaudeSpawn, type FakeClaudeProcess } from './helpers/chat';
 import { activateExtension, type ChatTestApiLike } from './helpers/extension';
 import { readManifest } from './helpers/manifest';
-import { waitFor } from './helpers/waitFor';
+import { waitFor, waitForFileContent } from './helpers/waitFor';
 
 /**
  * Claude Code画面: 設定変更・コマンド送信・巻き戻し・入力欄モードの配線（Issue #188、親Issue #186）。
@@ -512,6 +512,7 @@ suite('Claude Code画面: 設定変更・コマンド・入力欄モードの配
       proc.emitLine(initializeSuccessResponse(initRequestId));
       const before = proc.writtenLines().length;
 
+      let content = '';
       const originalPick = vscode.window.showQuickPick;
       const originalWarning = vscode.window.showWarningMessage;
       try {
@@ -525,9 +526,11 @@ suite('Claude Code画面: 設定変更・コマンド・入力欄モードの配
           type: 'send',
           text: '#常にpnpmを使う',
         });
-        await waitFor(
-          () => fs.existsSync(claudeMdPath),
-          (exists) => exists,
+        // 存在ではなく内容を待つ。存在だけを待つと、作られてから書き込みが終わるまでの
+        // 間に読んで `''` を得る（Issue #541、6並列18回中2回再現）
+        content = await waitForFileContent(
+          claudeMdPath,
+          (text) => /- 常にpnpmを使う/.test(text),
           WAIT_OPTIONS,
         );
       } finally {
@@ -541,7 +544,6 @@ suite('Claude Code画面: 設定変更・コマンド・入力欄モードの配
         before,
         'CLIへ送られている（#常にpnpmを使うが発言として届いている）',
       );
-      const content = fs.readFileSync(claudeMdPath, 'utf8');
       assert.match(content, /- 常にpnpmを使う/);
     } finally {
       if (fs.existsSync(claudeMdPath)) {
