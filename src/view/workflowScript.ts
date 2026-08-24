@@ -243,7 +243,35 @@ export function workflowScript(): string {
   // 行い、ここではその結果（kanban）を表示するだけにする。renderHeader/renderBannerと
   // 同じ方針（Issue #104の再発防止）。
 
-  const KANBAN_LABEL = { todo: 'ToDo', inProgress: 'InProgress', done: 'Done' };
+  const KANBAN_LABEL = { todo: 'ToDo', inProgress: 'InProgress', done: 'Done', attention: '要対応' };
+
+  /**
+   * 押されているバッジのバケット（issue #752）。未選択は undefined。
+   * 状態が届くたびに画面は組み直されるが、この値は残るので絞り込みは維持される。
+   */
+  let kanbanFilter = undefined;
+
+  /** バッジを1枚作る。押すとそのバケットのタスクだけを強調する（トグル）。 */
+  function kanbanBadge(bucket, count) {
+    const button = text(
+      'button',
+      'kanban-badge kanban-' + bucket + (kanbanFilter === bucket ? ' selected' : ''),
+      KANBAN_LABEL[bucket] + ': ' + count,
+    );
+    button.type = 'button';
+    // 0件のバッジは押しても強調するものが無い。押せないことを見た目と支援技術の両方へ伝える
+    button.disabled = count === 0;
+    button.setAttribute('aria-pressed', kanbanFilter === bucket ? 'true' : 'false');
+    button.addEventListener('click', () => {
+      kanbanFilter = kanbanFilter === bucket ? undefined : bucket;
+      // バッジ自身の押下状態と、グラフの強調の両方を引き直す
+      renderKanban(currentKanban);
+      if (currentSnapshot && currentLayout) {
+        renderGraph(currentSnapshot, currentLayout);
+      }
+    });
+    return button;
+  }
 
   function renderKanban(kanban) {
     const box = el('kanbanBadges');
@@ -252,16 +280,19 @@ export function workflowScript(): string {
       box.hidden = true;
       return;
     }
+    // 絞り込み中のバケットが0件になったら解除する。該当が1つも無いまま「絞り込み中」の
+    // 見た目だけが残ると、なぜ全部が淡いのかが分からなくなる
+    if (kanbanFilter !== undefined && !(kanban[kanbanFilter] > 0)) {
+      kanbanFilter = undefined;
+    }
     box.hidden = false;
     for (const bucket of ['todo', 'inProgress', 'done']) {
-      box.appendChild(
-        text('span', 'kanban-badge kanban-' + bucket, KANBAN_LABEL[bucket] + ': ' + kanban[bucket]),
-      );
+      box.appendChild(kanbanBadge(bucket, kanban[bucket]));
     }
     // 要対応（failed/blocked/skipped）は1件以上のときだけ、警告色のバッジを追加で出す
     // （design.mdの受入基準）。0件のときは他の3バケットと並べても目立たせる意味が無い
     if (kanban.attention > 0) {
-      box.appendChild(text('span', 'kanban-badge kanban-attention', '要対応: ' + kanban.attention));
+      box.appendChild(kanbanBadge('attention', kanban.attention));
     }
   }
 
@@ -303,7 +334,12 @@ export function workflowScript(): string {
 
   function buildNode(task, pos) {
     const group = svgEl('g', {
-      class: 'wf-node state-' + task.state + (task.id === selectedTaskId ? ' selected' : ''),
+      class:
+        'wf-node state-' + task.state +
+        (task.id === selectedTaskId ? ' selected' : '') +
+        // 絞り込み中は該当しないノードを淡くする（issue #752）。消さずに残すのは、
+        // 依存グラフが主役の画面でノードが消えると関係が読めなくなるため
+        (kanbanFilter !== undefined && task.kanbanBucket !== kanbanFilter ? ' dimmed' : ''),
       transform: 'translate(' + pos.x + ',' + pos.y + ')',
       'data-task-id': task.id,
     });
@@ -1002,6 +1038,8 @@ export function workflowScript(): string {
   // ---- 選択・操作 ----
 
   let selectedTaskId = undefined;
+  /** 最後に受け取ったカンバンの集計。バッジを押したときに引き直すために持つ（issue #752）。 */
+  let currentKanban = undefined;
 
   function selectAndReveal(taskId) {
     selectedTaskId = taskId;
@@ -1034,6 +1072,7 @@ export function workflowScript(): string {
   function applyState(snapshot, layout, progress, kanban, integration, segments) {
     currentSnapshot = snapshot;
     currentLayout = layout;
+    currentKanban = kanban;
     el('content').hidden = false;
     el('empty').hidden = true;
     renderHeader(snapshot, progress, segments);
