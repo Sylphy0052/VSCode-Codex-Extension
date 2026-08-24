@@ -688,6 +688,8 @@ ${workflowStyles()}
         <button id="graphZoomFitBtn" type="button" class="secondary" title="幅に合わせて全体を表示">全体表示</button>
       </div>
     </div>
+    <!-- 拡大中に全体のどこを見ているかを示す帯（issue #753）。全体表示のときは隠す -->
+    <div id="graphViewport" hidden><div id="graphViewportWindow"></div></div>
     <div id="graphWrap">
       <svg id="graph" xmlns="http://www.w3.org/2000/svg"></svg>
     </div>

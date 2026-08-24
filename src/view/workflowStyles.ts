@@ -170,6 +170,30 @@ export function workflowStyles(): string {
      ノードが消えると関係が読めなくなるため */
   .wf-node.dimmed { opacity: 0.25; }
 
+  /* 拡大中の現在地を示す帯（issue 753）。ミニマップではなく横方向だけの表示にしている */
+  #graphViewport {
+    position: relative;
+    height: 3px;
+    margin-bottom: 4px;
+    border-radius: 2px;
+    background-color: color-mix(
+      in srgb,
+      var(--vscode-progressBar-background, var(--vscode-editorWidget-border)) 30%,
+      transparent
+    );
+  }
+  #graphViewportWindow {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    min-width: 8px;
+    border-radius: 2px;
+    background-color: var(--vscode-progressBar-background, var(--vscode-foreground));
+    /* ハイコントラストでは色が落ちるため、枠でも位置が分かるようにする */
+    outline: 1px solid var(--vscode-contrastBorder, transparent);
+    outline-offset: -1px;
+  }
+
   /* ---- 依存グラフ ---- */
   .section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; }
   .graph-tools { display: flex; align-items: center; gap: 6px; }

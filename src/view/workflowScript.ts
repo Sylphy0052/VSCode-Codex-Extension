@@ -462,6 +462,45 @@ export function workflowScript(): string {
     el('graphZoomInBtn').disabled = zoomMode === 'manual' && zoomScale >= MAX_ZOOM;
     el('graphZoomOutBtn').disabled = zoomMode === 'manual' && zoomScale <= MIN_ZOOM;
     el('graphWrapNote').hidden = !layout.wrapped;
+    // 倍率が変わるとスクロールできる幅も変わる（issue #753）
+    updateGraphViewport();
+  }
+
+  /**
+   * 拡大中に「グラフ全体のどこを見ているか」を示す帯を引き直す（issue #753）。
+   *
+   * ミニマップ（ノードの縮小図）ではなく横方向の帯にした。縦は段が積み上がっても
+   * 画面に収まることが多く、読みたいのは主に横方向のどこか。描くのは矩形1つだけなので、
+   * タスク数が増えても描画量は変わらない。
+   *
+   * 全体表示（zoomMode === 'fit'）のときと、横スクロールが起きていないときは隠す。
+   */
+  function updateGraphViewport() {
+    const bar = el('graphViewport');
+    const wrap = el('graphWrap');
+    if (!bar || !wrap) return;
+    const total = wrap.scrollWidth;
+    const visible = wrap.clientWidth;
+    if (zoomMode === 'fit' || total <= 0 || visible <= 0 || total - visible < 1) {
+      bar.hidden = true;
+      return;
+    }
+    bar.hidden = false;
+    const window_ = el('graphViewportWindow');
+    window_.style.left = (wrap.scrollLeft / total) * 100 + '%';
+    window_.style.width = (visible / total) * 100 + '%';
+  }
+
+  /**
+   * スクロールは1回の操作で何十回も発火する。描画は次のフレームまで1回にまとめる。
+   */
+  let viewportFrame = 0;
+  function scheduleGraphViewport() {
+    if (viewportFrame !== 0) return;
+    viewportFrame = requestAnimationFrame(() => {
+      viewportFrame = 0;
+      updateGraphViewport();
+    });
   }
 
   function setZoom(next) {
@@ -1197,6 +1236,9 @@ export function workflowScript(): string {
     scheduleReportViewport();
   });
   graphResizeObserver.observe(el('graphWrap'));
+
+  // 現在地の帯（issue #753）。スクロールのたびに引き直す
+  el('graphWrap').addEventListener('scroll', scheduleGraphViewport);
 
   el('runSelect').addEventListener('change', (e) => {
     vscode.postMessage({ type: 'selectRun', runId: e.target.value });

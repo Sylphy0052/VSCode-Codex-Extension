@@ -694,6 +694,32 @@ describe('controlPanelScript', () => {
   );
 });
 
+describe('workflowScript のグラフの現在地表示（issue #753）', () => {
+  it('スクロール位置から可視範囲の割合を出す', () => {
+    const source = workflowScript();
+    // 陽性対照: 帯を引き直す関数がある（綴り違いで空振りしていない）
+    expect(source).toContain('function updateGraphViewport()');
+    expect(source).toContain("window_.style.left = (wrap.scrollLeft / total) * 100 + '%';");
+    expect(source).toContain("window_.style.width = (visible / total) * 100 + '%';");
+  });
+
+  it('全体表示のときと横スクロールが無いときは隠す', () => {
+    const source = workflowScript();
+    expect(source).toContain(
+      "zoomMode === 'fit' || total <= 0 || visible <= 0 || total - visible < 1",
+    );
+    expect(source).toContain('bar.hidden = true;');
+  });
+
+  it('スクロールは次のフレームまでまとめる', () => {
+    const source = workflowScript();
+    expect(source).toContain('requestAnimationFrame');
+    expect(source).toContain("el('graphWrap').addEventListener('scroll', scheduleGraphViewport);");
+    // 二重に予約しない
+    expect(source).toContain('if (viewportFrame !== 0) return;');
+  });
+});
+
 describe('workflowScript のカンバンバッジからの絞り込み（issue #752）', () => {
   it('バッジはボタンで、押下状態を aria-pressed で持つ', () => {
     const source = workflowScript();
