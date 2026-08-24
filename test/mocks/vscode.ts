@@ -50,6 +50,10 @@ class Emitter<T> {
       listener(value);
     }
   }
+  /** 本物の`vscode.EventEmitter`と同じく、破棄後は誰にも届かない。 */
+  dispose(): void {
+    this.listeners.length = 0;
+  }
 }
 
 export interface FakeWebview {
@@ -404,10 +408,27 @@ export const workspace = {
   },
 };
 
-/** テスト用: `vscode.Uri` の最小フェイク（`Uri.file` のみ実装コードが使う）。 */
+/**
+ * テスト用: `vscode.Uri` の最小フェイク。
+ *
+ * `Uri.file` に加えて `Uri.from`（履歴ツリーの仮想URI、issue #735）を持つ。
+ * `from` が返す値は `scheme` / `path` を持ち、`fsPath` は本物と同じく path 相当を返す。
+ */
 export const Uri = {
   file: (fsPath: string): FakeUri => ({ fsPath }),
+  from: ({ scheme, path }: { scheme: string; path?: string }): FakeSchemeUri => ({
+    scheme,
+    path: path ?? '',
+    fsPath: path ?? '',
+  }),
 };
+
+/** テスト用: スキーム付きURIの最小フェイク（issue #735）。 */
+export interface FakeSchemeUri {
+  readonly scheme: string;
+  readonly path: string;
+  readonly fsPath: string;
+}
 
 /**
  * テスト用: `vscode.commands` の最小フェイク（issue #250）。
@@ -546,6 +567,18 @@ export class ThemeColor {
   constructor(readonly id: string) {}
 }
 
+/**
+ * `vscode.FileDecoration` の代わり（issue #735）。
+ * バッジ・ツールチップ・色を持つだけ。
+ */
+export class FileDecoration {
+  constructor(
+    readonly badge?: string,
+    readonly tooltip?: string,
+    readonly color?: ThemeColor,
+  ) {}
+}
+
 export class ThemeIcon {
   constructor(
     readonly id: string,
@@ -560,6 +593,8 @@ export class MarkdownString {
 export class TreeItem {
   id?: string;
   description?: string;
+  /** issue #735: 行末デコレーションを効かせるための仮想URI。 */
+  resourceUri?: FakeSchemeUri;
   tooltip?: MarkdownString | string;
   iconPath?: ThemeIcon;
   contextValue?: string;
