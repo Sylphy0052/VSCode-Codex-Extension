@@ -156,6 +156,16 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    */
   protected readonly stateChanged = new vscode.EventEmitter<ChatStateChange>();
   readonly onDidChangeState = this.stateChanged.event;
+  private readonly panelsChanged = new vscode.EventEmitter<void>();
+  /**
+   * 開いているセッションの集合が変わった（issue #734）。
+   *
+   * `teardown`は`onDidChangeState`を出さない（`entry.disposed`を先に立ててから
+   * `session.dispose()`で保留中の承認を解放するため、`onSessionChange`が
+   * `entry.disposed`の早期returnで止まる）。承認待ちのままタブを閉じた分を
+   * 数え直す契機が他に無いので、集合の変化として別に出す。
+   */
+  readonly onDidChangePanels = this.panelsChanged.event;
 
   /**
    * 進捗画面（issue #721）が開く対象。表に出ているチャットが無い・スレッドがまだ
@@ -285,6 +295,20 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   }
 
   /**
+   * 開いている全セッションの活動状態（issue #734）。承認待ちの件数を数えるのに使う。
+   *
+   * 母数は`getActivityState`と同じ`panels`にする（`allPanels()`ではない）。
+   * `allPanels()`が追加で含むCodex側の`pendingStarts`は`thread/start`の応答待ちで、
+   * まだセッションが無く承認要求も出ないため、数に含めても常に0を足すだけであり、
+   * 履歴ツリーの印（`getActivityState`）と母数がずれる分だけ食い違いの元になる。
+   */
+  activityStates(): SessionActivityState[] {
+    return [...this.panels.values()].map((entry) =>
+      deriveSessionActivityState(entry.session.getState()),
+    );
+  }
+
+  /**
    * エディタの選択範囲（issue #292）を送る先。最後にアクティブだった画面を返す
    * （`this.active`。名前変更・クリアと同じ対象）。開いているタブが無ければ`undefined`。
    *
@@ -399,6 +423,11 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    *
    * 二重に呼んでも安全（`disposed` で早期return）。タブを閉じたことによる破棄と、
    * 明示的な `dispose()` 呼び出しの両方から通る。
+   *
+   * `entry.disposed` を先に立ててから `session.dispose()` を呼ぶため、そこで解放される
+   * 保留中の承認は `onSessionChange`（`entry.disposed` で早期return）に届かず、
+   * `onDidChangeState` も出ない。承認待ちを数えている側（issue #734）が取り残されないよう、
+   * 管理表から取り除いた後に `onDidChangePanels` を出す。
    */
   protected teardown(entry: TPanel): void {
     if (entry.disposed) {
@@ -422,6 +451,7 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         this.panels.delete(id);
       }
     }
+    this.panelsChanged.fire();
   }
 
   /**
@@ -438,6 +468,7 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     }
     this.panels.clear();
     this.stateChanged.dispose();
+    this.panelsChanged.dispose();
     this.onDispose();
   }
 

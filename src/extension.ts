@@ -134,6 +134,7 @@ import {
 } from './util/editorSelection';
 import { ChatViewManager } from './view/chatView';
 import type { ActiveComposerTarget } from './view/activePanelSequence';
+import { approvalPendingBadge, countApprovalPending } from './view/approvalPending';
 import { ClaudeChatViewManager } from './view/claudeChatView';
 import { ControlPanelViewProvider } from './view/controlPanelView';
 import { ConversationViewManager } from './view/conversationView';
@@ -709,6 +710,25 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     showCollapseAll: false,
   });
   context.subscriptions.push(tree, sessionsView);
+
+  // 承認待ちの件数をAgentsビューのバッジに出す（issue #734）。
+  // 件数の数え方と文言は`approvalPending.ts`に寄せてあり、ステータスバー（issue #755）と
+  // 共有する。契機は活動状態の変化（`onDidChangeState`）と、開いているセッションの
+  // 増減（`onDidChangePanels`）の両方。承認待ちのままタブを閉じた場合は前者が出ないため
+  // （`teardown`のJSDoc参照）、後者が無いとバッジが減らないまま残る。履歴の再読込
+  // （`tree.refresh`）は一覧の中身が変わったときに走るもので、承認要求の増減とは別の出来事。
+  const updateSessionsBadge = (): void => {
+    const count = countApprovalPending([...chat.activityStates(), ...claudeChat.activityStates()]);
+    sessionsView.badge = approvalPendingBadge(count);
+  };
+  updateSessionsBadge();
+  context.subscriptions.push(
+    chat.onDidChangeState(() => updateSessionsBadge()),
+    claudeChat.onDidChangeState(() => updateSessionsBadge()),
+    chat.onDidChangePanels(() => updateSessionsBadge()),
+    claudeChat.onDidChangePanels(() => updateSessionsBadge()),
+  );
+
   void tree.setScope(readConfig().historyScope);
   // プリセットが空のときはコマンドを出さない（issue #295、design.md §14.56）
   void updateSessionPresetsContext(log);
