@@ -19,6 +19,7 @@ import {
   interruptFailedNoticeId,
   markInterruptedCommands,
   normalizeItem,
+  popLastQueued,
   removeApproval,
   removePrompt,
   removeQueued,
@@ -26,6 +27,7 @@ import {
   takeQueued,
   type ChatState,
   type PendingApproval,
+  type QueuedMessage,
 } from './chatState';
 import { buildCodexInput, type Attachment } from '../provider/attachments';
 import type { AppServerConnectionPort, ServerRequest } from './connection';
@@ -340,30 +342,18 @@ export class ChatSession {
   }
 
   /**
-   * 発言を送る。応答中なら割り込んで送る。
+   * 発言を送る。応答中なら待ち行列へ積む。
    *
-   * 割り込めない場合（ターンidが判らない、ターンが終わった直後で id が食い違う）は
-   * 指示を捨てずに待ち行列へ積み、ターンが終わってから送る。
+   * 応答中に割り込みたい場合はUI側の「今すぐ送る」（`flushQueue`）を明示的に使う。
    */
   async sendOrQueue(
     text: string,
     config: CodexConfig,
     attachments: Attachment[] = [],
   ): Promise<'sent' | 'queued'> {
-    const route = routeSend(this.state);
-    if (route === 'start') {
+    if (!this.state.busy) {
       await this.send(text, config, attachments);
       return 'sent';
-    }
-
-    if (route === 'steer') {
-      try {
-        await this.steer(text, attachments);
-        return 'sent';
-      } catch (e) {
-        // ターンが入れ替わった直後など。指示を失わないよう積み直す
-        this.log.warn(`割り込めなかったため待ち行列へ積みます: ${message(e)}`);
-      }
     }
 
     this.update(enqueue(this.state, text, attachments));
@@ -373,6 +363,23 @@ export class ChatSession {
   /** 待機中の指示を1件取り消す。 */
   cancelQueued(index: number): void {
     this.update(removeQueued(this.state, index));
+  }
+
+  /**
+   * 待機中の末尾の指示を取り出し、入力欄へ書き戻す（Esc）。
+   *
+   * 常にこの時点の`state.queued`から直接取り出すため、UI側が持つ古いスナップショットとの
+   * ずれで別の指示を取り消してしまうことがない（issue #677レビュー指摘）。添付があると
+   * 入力欄へ戻せず黙って消えるため、その場合は何もしない。
+   */
+  popLastQueuedForInput(): QueuedMessage | undefined {
+    const last = this.state.queued[this.state.queued.length - 1];
+    if (last === undefined || last.attachments.length > 0) {
+      return undefined;
+    }
+    const { next } = popLastQueued(this.state);
+    this.update(next);
+    return last;
   }
 
   /**

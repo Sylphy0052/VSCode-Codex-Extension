@@ -5,11 +5,13 @@ import {
   appendNotice,
   appendSideQuestion,
   enqueue,
+  popLastQueued,
   removeApproval,
   removeQueued,
   takeQueued,
   type ChatState,
   type PendingApproval,
+  type QueuedMessage,
 } from '../appserver/chatState';
 import type { LaunchTarget } from '../codex/types';
 import type { Logger } from '../log';
@@ -930,6 +932,23 @@ export class ClaudeStreamSession {
 
   cancelQueued(index: number): void {
     this.update(removeQueued(this.state, index));
+  }
+
+  /**
+   * 待機中の末尾の指示を取り出し、入力欄へ書き戻す（Esc）。
+   *
+   * 常にこの時点の`state.queued`から直接取り出すため、UI側が持つ古いスナップショットとの
+   * ずれで別の指示を取り消してしまうことがない（issue #677レビュー指摘）。添付があると
+   * 入力欄へ戻せず黙って消えるため、その場合は何もしない。
+   */
+  popLastQueuedForInput(): QueuedMessage | undefined {
+    const last = this.state.queued[this.state.queued.length - 1];
+    if (last === undefined || last.attachments.length > 0) {
+      return undefined;
+    }
+    const { next } = popLastQueued(this.state);
+    this.update(next);
+    return last;
   }
 
   /** 応答を止めて、待機中の指示をすぐ送る。 */
