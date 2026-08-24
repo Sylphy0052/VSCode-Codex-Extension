@@ -15,6 +15,7 @@ import { DEFAULT_REPLY_TIMEOUT_SEC } from './orchestrator/messaging';
 import { DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerMerge';
 import { DEFAULT_TASK_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerApproval';
 import { DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC } from './orchestrator/runner';
+import { normalizeChatDensity, type ChatDensity } from './view/density';
 import {
   DEFAULT_CI_WAIT_TIMEOUT_SEC,
   DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES,
@@ -152,6 +153,18 @@ export function readActivityLogConfig(): ActivityLogConfig {
 export function readChatRenderMarkdownConfig(): boolean {
   const c = vscode.workspace.getConfiguration('agent');
   return c.get<boolean>('chat.renderMarkdown') ?? true;
+}
+
+/**
+ * 会話画面の表示密度（`agent.chat.density`、既定 `comfortable`、issue #718）。
+ * `compact` にすると項目の間隔・本文の余白・行間が詰まる。丸めは
+ * `normalizeChatDensity`（`vscode`に依存しない純粋関数）が行い、ここでは生値を
+ * 渡すだけ。`renderMarkdown` / `sendOn`と同じ`agent.chat.*`名前空間・`window`
+ * スコープ（見た目の好みであって権限には関わらないため）。
+ */
+export function readChatDensityConfig(): ChatDensity {
+  const c = vscode.workspace.getConfiguration('agent');
+  return normalizeChatDensity(c.get<unknown>('chat.density'));
 }
 
 /**

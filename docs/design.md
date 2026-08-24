@@ -3872,6 +3872,56 @@ JSソース1本を正とし、`test/unit/highlight.test.ts`がその文字列を
 - `test/unit/webviewStyles.test.ts`: `CODE_TOKEN_TYPES`のうちplain以外すべてに色の規則があること
 - 実際の色の読みやすさ・テーマ切り替え時の見え方はvitestのnode環境では確認できない。実機での確認は`docs/manual-test.md`のU-40に委ねる
 
+### 14.73 会話画面の表示密度を設定で切り替える（issue #718）
+
+#### 背景
+
+余白の好みは割れる。詰めて多く見たい人と、広く取って読みやすくしたい人がいる。
+§14.67（ターン境界の余白）・§14.68（行間と行長）でどちらも増やす方向へ動かしたので、
+戻す道を設定として用意する。
+
+#### 実装
+
+新設した設定は`agent.chat.density`（`compact` / `comfortable`、既定`comfortable`）。
+`renderMarkdown` / `sendOn` と同じ`agent.chat.*`名前空間・`window`スコープに置く
+（見た目の好みであって権限には関わらないため）。
+
+配線は既存の設定と同じ経路:
+
+- `src/view/density.ts`（新規、`vscode`非依存）: 値の丸め（`normalizeChatDensity`）とクラス名（`densityBodyClass`）
+- `src/config.ts`: `readChatDensityConfig()`
+- `src/view/chatView.ts` / `src/view/claudeChatView.ts`: 両画面の`attachPanel`から渡す
+- `src/view/chatShared.ts`: `body`のクラスにする
+- `src/view/chatStyles.ts`: 寸法をカスタムプロパティで持つ
+
+**寸法はカスタムプロパティ1箇所で切り替える。** 個々の規則へ両方の値を書くと、以降に
+余白を触ったときへ片方だけ反映されて黙ってずれる。切り替える寸法は5つ:
+
+| プロパティ            | comfortable | compact | 使う所                             |
+| --------------------- | ----------- | ------- | ---------------------------------- |
+| `--chat-turn-gap`     | 22px        | 12px    | `.item.user`の上（ターンの切れ目） |
+| `--chat-item-gap`     | 12px        | 6px     | `.item`の下                        |
+| `--chat-sub-gap`      | 6px         | 2px     | 思考・ツール出力の下               |
+| `--chat-body-padding` | 8px 10px    | 4px 8px | `.body`の内側                      |
+| `--chat-line-height`  | 1.6         | 1.4     | `.body`の行間                      |
+
+**comfortableは`body`側の既定として持つ。** `body.density-comfortable`という規則は
+作らず、`body`に書いた値がそのまま既定になる。`body.density-compact`だけがこの5つを
+上書きする。クラス自体は両方付けるので、実機ではどちらが効いているか見分けられる。
+
+**反映には会話タブの開き直しが要る。** クラスはHTMLの生成時に決まる。設定を読み直して
+差し替える経路は作っていない（`sendOn`などと同じ扱い）。
+
+**色・線・アイコンは密度に含めない。** 縁取り（§14.67）や状態色（§14.69）は情報を
+持つ表現で、詰めても薄めても意味が変わってしまう。密度が動かすのは余白と行間だけ。
+
+#### 確かめ方
+
+- `test/unit/density.test.ts`: 丸め（未知の値・型違い）とクラス名
+- `test/unit/chatView.test.ts`: 既定で`density-comfortable`、`compact`指定で`density-compact`が`body`に付くこと
+- `test/unit/webviewStyles.test.ts`: 5つのプロパティが`body`に既定を持ち、`body.density-compact`が**漏れなく**上書きすること。加えて**使う側が`var()`越しに参照していること**（規則へ直接書くと密度が効かない）
+- 実際の詰まり具合、表・差分・コードブロック・折りたたみ済みツール出力の崩れはvitestのnode環境では確認できない。実機での確認は`docs/manual-test.md`のU-41に委ねる
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）
@@ -5694,7 +5744,10 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 
 #### 設計判断（5点）
 
-1. **権限フィールドは黙って無視せず、理由付きで拒否する。** `buildOrchestratorTask`は`autoApprove`/`allow`/`sandbox`/`approvalMode`のいずれかが引数に含まれているかを`Object.prototype.hasOwnProperty`で判定し、含まれていれば該当フィールド名を名指しした`error`を返す。黙って無視すると、指示が握りつぶされたことにオーケストレーターが気づけないため、明示的な拒否を選んだ
+1. **権限フィールドは黙って無視せず、理由付きで拒否する。** `buildOrchestratorTask`は`autoApprove`/`allow`/`sandbox`/`approvalMode`/`escalate`/`cwd`のいずれかが引数に含まれているかを`Object.prototype.hasOwnProperty`で判定し、含まれていれば該当フィールド名を名指しした`error`を返す。黙って無視すると、指示が握りつぶされたことにオーケストレーターが気づけないため、明示的な拒否を選んだ。`escalate`（承認のエスカレーション）と`cwd`（タスクの作業ディレクトリ＝worktreeの外に出るかどうかの境界）は当初この判定に入っておらず、`raw`から読まずに既定へ落としていた（安全側ではあるが「指定したのに効かない」ことに気づけない形だった）。Issue #766で拒否側へ揃えた。
+
+   なお`role`（§16.44）の未知の値だけは例外で、黙って「役割なし」へ倒す。`role`が決めるのは`model`/`effort`の既定値だけで権限には関与せず（`rolePresets.ts`）、実効値は拡張機能の設定に従う従来どおりの`add_task`と同じになるため
+
 2. **稼働中タスクへの依存変更は拒否する。** `update_task_dependencies`は対象タスクが`pending`でなければ拒否する。`scheduler.ts`は`dependsOn`を`pending`のタスクに対してしか参照しないため、`pending`を外れたタスクへ依存を書き換えても以降のスケジューリングには何の効果も無い。効果の無い変更を黙って受理すると「変更が反映された」とオーケストレーターに誤解させるため、無効化ではなく拒否とした
 3. **`remove_task`は`pending`のタスクに限る。** Issue本文の「まだ始まっていないタスクに限る」を文字どおり`pending`のみに対応させた。`skipped`/`failed`/`done`のタスクは、既にworktree・ブランチ・実行履歴を持ち、他タスクが`{{T1.result}}`のようなテンプレート参照で結果を参照している可能性があるため、削除対象から除外した
 4. **`remove_task`は削除対象への依存を残さない。** 削除されるタスクを`dependsOn`に含む他タスクからは、同じ操作の中でそのidを取り除く（`strippedFrom`として警告文に列挙）。`remove_task`が`pending`のタスクのみを対象とする以上、それに依存している他タスクも必然的に`pending`のままである（依存先が`done`になっていない限りスケジューラは依存元を開始しないため）。したがって、この剥がし処理が既に進行・完了したタスクの依存関係を誤って書き換えることは構造的に起こり得ない
@@ -5702,7 +5755,14 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 
 #### 監査ログ（承認ゲートが無い代わりの説明責任）
 
-この3つのツールは人の承認を経ずに即座に適用される。唯一の追跡手段として、適用した変更は`WorkflowWarning`（`orchestratorTaskAdded`/`orchestratorTaskRemoved`/`orchestratorDependenciesChanged`）としてワークフロー Viewの警告欄へ全文を記録する。警告欄は`message`を`textContent`として描画するため（§16.8・§16.34）、オーケストレーターが生成した文字列（タスクid・プロンプトの要約・変更前後の依存一覧）をそのまま渡してもHTMLとしては解釈されない。
+この3つのツールは人の承認を経ずに即座に適用される。唯一の追跡手段として、適用した変更は`WorkflowWarning`（`orchestratorTaskAdded`/`orchestratorTaskRemoved`/`orchestratorDependenciesChanged`）としてワークフロー Viewの警告欄へ全文を記録する。
+
+**記録の積み方（Issue #765）。** `live.warnings`には全体の上限が無いため、無制限に積むとViewとメモリの両方が際限なく膨らむ（`add_task`→`remove_task`は何度でも繰り返せる）。種類ごとに次のように扱う。
+
+- `orchestratorDependenciesChanged`は同一`taskId`につき直近1件へ丸める（`orchestratorPromptOverride`（Issue #366）と同じ扱い。依存は最新の状態さえ分かればよい）
+- `orchestratorTaskAdded`/`orchestratorTaskRemoved`は「いつ何が加減されたか」の履歴そのもののため丸めず、2種の合計へ上限（`MAX_PLAN_CHANGE_HISTORY_WARNINGS`、50件）を設けて古い順に落とす。落とし始めたことは`orchestratorPlanHistoryTrimmed`（同一runにつき直近1件）で残す。落とした内容そのものは復元できないため、件数ではなく事実だけを伝える文面にする
+
+警告欄は`message`を`textContent`として描画するため（§16.8・§16.34）、オーケストレーターが生成した文字列（タスクid・プロンプトの要約・変更前後の依存一覧）をそのまま渡してもHTMLとしては解釈されない。
 
 #### `ask_user`（§16.33）との使い分け・`taskStalled`（§16.27）との連携
 

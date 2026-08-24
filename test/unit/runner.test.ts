@@ -9928,6 +9928,56 @@ tasks:
       },
     );
 
+    it('同一taskIdへのupdate_task_dependenciesの警告は直近1件へ丸める（Issue #765）', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(PENDING_DEPENDENT_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/pending.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      expect(control(state).updateTaskDependencies('T2', []).accepted).toBe(true);
+      expect(control(state).updateTaskDependencies('T2', ['T3']).accepted).toBe(true);
+      expect(control(state).updateTaskDependencies('T2', []).accepted).toBe(true);
+
+      const warnings = runner
+        .getSnapshot(runId)
+        ?.warnings.filter((w) => w.kind === 'orchestratorDependenciesChanged');
+      expect(warnings?.length).toBe(1);
+      // 残るのは最新の1件（直前は[T3]、変更後は空）
+      expect(warnings?.[0]?.message).toContain('変更前: T3 → 変更後: (なし)');
+    });
+
+    it('add_task/remove_taskの履歴警告は上限で古い順に落とし、落とした事実を残す（Issue #765）', async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner } = createHarness(TWO_TASK_YAML, { messaging: deps });
+      const result = await runner.start('/repo/.agents/workflows/edit.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+
+      // 追加と削除を繰り返す（1周で履歴警告が2件積まれる）
+      for (let i = 0; i < 40; i += 1) {
+        const added = control(state).addTask({
+          id: `X${i}`,
+          prompt: `p${i}`,
+          done: `d${i}`,
+        });
+        expect(added.accepted).toBe(true);
+        expect(control(state).removeTask(`X${i}`).accepted).toBe(true);
+      }
+
+      const warnings = runner.getSnapshot(runId)?.warnings ?? [];
+      const history = warnings.filter(
+        (w) => w.kind === 'orchestratorTaskAdded' || w.kind === 'orchestratorTaskRemoved',
+      );
+      expect(history.length).toBe(50);
+      // 落ちたのは古い方（最後の追加・削除は残っている）
+      expect(history.some((w) => w.taskId === 'X39')).toBe(true);
+      expect(history.some((w) => w.taskId === 'X0')).toBe(false);
+
+      const trimmed = warnings.filter((w) => w.kind === 'orchestratorPlanHistoryTrimmed');
+      expect(trimmed.length).toBe(1);
+    });
+
     it('update_task_dependenciesはpendingでないタスクへの変更を拒否する', async () => {
       const { deps, state } = fakeMessagingDeps();
       const { runner } = createHarness(PENDING_DEPENDENT_YAML, { messaging: deps });

@@ -172,6 +172,39 @@ describe('chatStyles', () => {
     }
   });
 
+  it('表示密度の寸法をカスタムプロパティで持つ（issue #718）', () => {
+    const css = stripComments(chatStyles());
+    const props = [
+      '--chat-turn-gap',
+      '--chat-item-gap',
+      '--chat-sub-gap',
+      '--chat-body-padding',
+      '--chat-line-height',
+    ];
+    const compact = css.match(/body\.density-compact\s*\{([^}]*)\}/);
+    expect(compact, 'body.density-compact の規則が見つからない').not.toBeNull();
+    // 先頭の改行と字下げで 'body' 単独の規則に限定する（body.density-compact と分ける）
+    const body = css.match(/\n {2}body\s*\{([^}]*)\}/);
+    expect(body, 'body の規則が見つからない').not.toBeNull();
+    for (const prop of props) {
+      // comfortable は body 側の既定。compact はその5つを漏れなく上書きする
+      expect(body![1] ?? '', prop + ' の既定が body に無い').toContain(prop + ':');
+      expect(compact![1] ?? '', prop + ' を compact が上書きしていない').toContain(prop + ':');
+    }
+  });
+
+  it('密度に関わる寸法を規則へ直接書かない（issue #718）', () => {
+    const css = stripComments(chatStyles());
+    // 直接書くと、密度を切り替えても片方だけ変わらないという壊れ方をする
+    expect(css).toMatch(/\.item\s*\{[^}]*margin-bottom:\s*var\(--chat-item-gap\)/);
+    expect(css).toMatch(/\.item\.user\s*\{[^}]*margin-top:\s*var\(--chat-turn-gap\)/);
+    expect(css).toMatch(
+      /\.item\.reasoning,\s*\.item\.tool\s*\{[^}]*margin-bottom:\s*var\(--chat-sub-gap\)/,
+    );
+    expect(css).toMatch(/\.body\s*\{[^}]*padding:\s*var\(--chat-body-padding\)/);
+    expect(css).toMatch(/\.body\s*\{[^}]*line-height:\s*var\(--chat-line-height\)/);
+  });
+
   it('状態の色が実行中の見出し色より後に来て上書きする（issue #715）', () => {
     const css = stripComments(chatStyles());
     // 前に置くと .item.running .head（同じ詳細度）に負けて、色が出ない

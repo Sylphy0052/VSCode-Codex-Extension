@@ -24,6 +24,7 @@ import {
   currentWorkspaceFolder,
   readChatComposerButtonsConfig,
   readChatRenderMarkdownConfig,
+  readChatDensityConfig,
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
   readConfig,
@@ -643,6 +644,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       // 送信キー（issue #288、設定 agent.chat.sendOn）。Codex画面にのみ配線している
       // （ChatShellOptions.sendOnのJSDoc参照）
       sendOn: readChatSendOnConfig(),
+      // 表示密度（issue #718、設定 agent.chat.density）。body のクラスにだけ効く
+      density: readChatDensityConfig(),
     });
   }
 
