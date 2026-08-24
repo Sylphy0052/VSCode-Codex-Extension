@@ -286,6 +286,10 @@ export function progressScript(): string {
   }
 
   function renderSummary(summary) {
+    // 画面上端の稼働バー（issue 751）。バッジの点滅だけでは、画面を下へスクロールして
+    // サマリが見えていないときに動いているかが分からない
+    el('busyBar').hidden = !summary.busy;
+
     const badge = el('statusBadge');
     badge.className = summary.busy ? 'busy' : '';
     clear(badge);
@@ -325,6 +329,7 @@ export function progressScript(): string {
     if (view === undefined || view === null || view.summary.turnCount === 0) {
       el('empty').hidden = false;
       el('summary').hidden = true;
+      el('busyBar').hidden = true;
       el('checklistSection').hidden = true;
       el('filesSection').hidden = true;
       el('timelineSection').hidden = true;

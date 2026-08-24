@@ -60,6 +60,36 @@ export function progressStyles(): string {
   #empty .icon { width: 32px; height: 32px; opacity: 0.5; }
   #empty .hint { font-size: 0.9em; }
 
+  /* ---- 応答中の稼働バー（issue 751） ----
+     画面上端に固定する。サマリの中にあるTODOの完了率バー（#progressRow）とは
+     位置も形も分けてある（あちらは左から伸びる帯、こちらは往復する短い帯）。
+     動かすのは transform だけにする。width や background-position を毎フレーム
+     変えるとレイアウトや再描画が走り、長い応答の間ずっとCPUを使う。
+     減光設定では reducedMotionStyles() がアニメーションを止め、
+     transform の当たっていない初期状態＝上端いっぱいの静的な色帯として残る */
+  #busyBar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    overflow: hidden;
+    z-index: 2;
+    background-color: color-mix(in srgb, var(--vscode-progressBar-background) 25%, transparent);
+  }
+  #busyBarFill {
+    height: 100%;
+    width: 100%;
+    transform-origin: left center;
+    background-color: var(--vscode-progressBar-background);
+    animation: busySlide 1.6s ease-in-out infinite;
+  }
+  @keyframes busySlide {
+    0% { transform: translateX(-100%) scaleX(0.4); }
+    50% { transform: translateX(20%) scaleX(0.6); }
+    100% { transform: translateX(100%) scaleX(0.4); }
+  }
+
   /* ---- サマリー（スクロールしても残す） ---- */
   #summary {
     position: sticky;

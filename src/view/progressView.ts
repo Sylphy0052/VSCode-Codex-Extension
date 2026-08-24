@@ -123,6 +123,9 @@ ${progressStyles()}
 </style>
 </head>
 <body>
+  <!-- 応答中の稼働バー（issue 751）。画面上端に固定する。TODOの完了率バー
+       （#progressRow）とは別物なので、位置と形で区別できるようにしてある -->
+  <div id="busyBar" hidden><div id="busyBarFill"></div></div>
   <div id="empty">
     <span id="emptyIcon"></span>
     <div>まだ進捗はありません。</div>
