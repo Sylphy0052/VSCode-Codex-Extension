@@ -27,6 +27,7 @@ import {
   readChatComposerButtonsConfig,
   readChatRenderMarkdownConfig,
   readChatSendOnConfig,
+  readChatTurnSummaryConfig,
   readClaudeConfig,
   readWorkflowsConfig,
   workspaceFolderPaths,
@@ -97,6 +98,7 @@ import { readPersistedThreadId } from './panelState';
 import { buildItemsDelta, stripHostOnlyItems } from './stateDelta';
 import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import { buildHandoffPrompt, resolveWithRetry } from './handoff';
+import { appendTurnSummaryInstruction } from './turnSummary';
 import { CLAUDE_PERMISSION_MODES } from '../claude/types';
 import {
   APPROVAL_LEVEL_CYCLE,
@@ -1420,7 +1422,11 @@ export class ClaudeChatViewManager
           void this.runPseudoCommand(entry, pseudo);
           return;
         }
-        this.dispatch(entry, text, true);
+        // 手動の発言にだけ要約指示を足す（issue #709）。擬似コマンド・入力モードより後に
+        // 置いてあるので、CLIへ送らない入力には付かない。ループの自動送信も対象外。
+        // 作業記録には元の文面を残す（`logText`。テンプレート展開前を記録する§16.12と同じ扱い）
+        const sent = appendTurnSummaryInstruction(text, readChatTurnSummaryConfig());
+        this.dispatch(entry, sent, true, text);
         this.refreshSettings(entry);
         return;
       }

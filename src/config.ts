@@ -41,6 +41,7 @@ import { sanitizeForLog } from './orchestrator/sanitize';
 import { normalizeBranchNaming, type BranchNaming } from './orchestrator/worktree';
 import type { HistoryScope } from './session/sessionStore';
 import { normalizeComposerButtons, type ComposerButtonsResult } from './view/composerButtons';
+import { DEFAULT_TURN_SUMMARY_INSTRUCTION, type TurnSummaryConfig } from './view/turnSummary';
 import { normalizeSendOn, type SendOnMode } from './view/sendKey';
 import type { HistoryGroupBy } from './util/sessionGrouping';
 import { parseSessionPresets, type SessionPreset } from './sessionPresets';
@@ -176,6 +177,22 @@ export function readChatSendOnConfig(): SendOnMode {
 export function readChatComposerButtonsConfig(): ComposerButtonsResult {
   const c = vscode.workspace.getConfiguration('agent');
   return normalizeComposerButtons(c.get<unknown>('chat.composerButtons'));
+}
+
+/**
+ * 手動で送る発言の末尾へ付ける要約指示（`agent.chat.turnSummary.*`、issue #709）。
+ * 既定は無効で、有効にするまで送信テキストは一字一句変わらない。連結の判断と実体は
+ * `src/view/turnSummary.ts`（`vscode`をimportしないロジック層）が持ち、ここでは
+ * 生値を渡すだけ。`renderMarkdown` / `sendOn`と同じ`agent.chat.*`名前空間・`window`
+ * スコープにしてある（応答の書き方の好みであって権限には関わらないため）。
+ */
+export function readChatTurnSummaryConfig(): TurnSummaryConfig {
+  const c = vscode.workspace.getConfiguration('agent');
+  const instruction = c.get<string>('chat.turnSummary.instruction');
+  return {
+    enabled: c.get<boolean>('chat.turnSummary.enabled') ?? false,
+    instruction: typeof instruction === 'string' ? instruction : DEFAULT_TURN_SUMMARY_INSTRUCTION,
+  };
 }
 
 /** ターンの完了・承認待ちの通知（issue #286、design.md §14.55）。 */
