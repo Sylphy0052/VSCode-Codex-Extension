@@ -152,8 +152,18 @@ export function chatScript(
   /** 残りがこの割合を下回ったら警告として見せる。 */
   const LOW_CONTEXT_PERCENT = 20;
 
-  /** コマンド出力を畳まずに出す行数。超えた分は末尾だけ見せる。 */
-  const MAX_VISIBLE_LINES = 20;
+  /**
+   * 本文を既定で畳んで表示するkind。クリックで開くまで中身を隠す（issue #679）。
+   * diff・Web検索結果と同じ<details>/<summary>方式に揃える。
+   */
+  const FOLD_KINDS = new Set([
+    'commandExecution',
+    'reasoning',
+    'mcpToolCall',
+    'subAgentActivity',
+    'collabAgentToolCall',
+    'autoApprovalReview',
+  ]);
 
   /** Web検索結果を畳まずに出す件数（issue #18）。超えた分は開くまで隠す。 */
   const MAX_VISIBLE_SEARCH_RESULTS = 5;
@@ -220,16 +230,6 @@ export function chatScript(
     });
     actions.appendChild(copy);
 
-    // 長いコマンド出力の展開。開いた状態は要素と一緒に保つ（再描画で閉じない）
-    const expand = document.createElement('button');
-    expand.className = 'secondary';
-    expand.hidden = true;
-    expand.addEventListener('click', () => {
-      node.expanded = !node.expanded;
-      renderBody(node, node.lastItem);
-    });
-    actions.appendChild(expand);
-
     const fork = document.createElement('button');
     fork.className = 'secondary';
     fork.textContent = 'ここから分岐';
@@ -256,8 +256,23 @@ export function chatScript(
     head.appendChild(actions);
     wrap.appendChild(head);
 
-    const body = document.createElement('div');
-    body.className = 'body';
+    // ツール出力系は既定で閉じ、クリックで開くまで中身を隠す（issue #679）。
+    // diff・Web検索結果と同じ<details>/<summary>方式。それ以外は従来どおり単一div
+    const foldBody = FOLD_KINDS.has(item.kind);
+    let body, bodyContent, bodySummary;
+    if (foldBody) {
+      body = document.createElement('details');
+      body.className = 'body-fold';
+      bodySummary = document.createElement('summary');
+      body.appendChild(bodySummary);
+      bodyContent = document.createElement('pre');
+      bodyContent.className = 'body-content';
+      body.appendChild(bodyContent);
+    } else {
+      body = document.createElement('div');
+      body.className = 'body';
+      bodyContent = body;
+    }
     wrap.appendChild(body);
 
     // Web検索の結果（issue #18）。URLとタイトルの一覧を出す。webSearch以外では常に空
@@ -280,6 +295,9 @@ export function chatScript(
       wrap,
       label,
       body,
+      bodyContent,
+      bodySummary,
+      foldBody,
       searchResults,
       searchResultsKey: '',
       images,
@@ -287,12 +305,10 @@ export function chatScript(
       diffs,
       diffKey: '',
       copy,
-      expand,
       fork,
       forkTarget: undefined,
       rewind,
       rewindTarget: undefined,
-      expanded: false,
       fullText: '',
       lastItem: undefined,
       // Markdown描画のキャッシュ（issue #290）。'text' はtextContentのみ、
@@ -567,15 +583,16 @@ export function chatScript(
   }
 
   /**
-   * 本文を描く。長い場合は畳んで、展開できるようにする。
+   * 本文を描く。
    *
-   * コマンド出力・思考の全文は途中経過が流れ込んで伸び続けるため、全部を描き続けると重くなる。
+   * ツール出力系（FOLD_KINDS）はdiff・Web検索結果と同じ<details>/<summary>で既定折りたたみ
+   * にする（issue #679）。summary文言だけを見せ、開くまで全文は隠す。
    *
-   * 思考（reasoning）だけは畳み方が違う。Codexは要約(text)と全文(reasoningFull)が別に
-   * 届くことがあり、その場合は既定で要約だけを見せ、展開すると全文に切り替える
-   * （コマンド出力のような「末尾だけ」ではなく丸ごと入れ替える）。全文が無い・要約と同じ
-   * ときは、コマンド出力と同じ行数での折りたたみに落ちる（Claude Codeの思考は要約を
-   * 持たずここに該当する。issue #19）。
+   * 思考（reasoning）はsummary文言の作り方だけ他と違う。Codexは要約(text)と全文
+   * (reasoningFull)が別に届くことがあり、その場合は要約をsummary文言として常に見せ、
+   * 開けば全文に切り替わる（コマンド出力のような行数カウントではなく丸ごと入れ替える）。
+   * 全文が無い・要約と同じときは、他のツール出力と同じ行数ベースのsummary文言に落ちる
+   * （Claude Codeの思考は要約を持たずここに該当する。issue #19）。
    */
   function renderBody(node, item) {
     if (!item) return;
@@ -583,57 +600,47 @@ export function chatScript(
     const text = item.text || '';
     const full = item.kind === 'reasoning' ? item.reasoningFull || '' : '';
     const hasSummaryAndFull = full !== '' && text !== '' && full !== text;
+    const primary = hasSummaryAndFull ? full : text !== '' ? text : full;
+    node.fullText = primary;
 
-    if (hasSummaryAndFull) {
-      node.fullText = full;
-      const shown = node.expanded ? full : text;
-      if (node.body.textContent !== shown) node.body.textContent = shown;
-      node.body.hidden = false;
-      node.copy.hidden = false;
-      node.expand.hidden = false;
-      node.expand.textContent = node.expanded ? '要約だけ表示' : '全文を表示';
+    if (node.foldBody) {
+      let summaryLabel;
+      if (hasSummaryAndFull) {
+        summaryLabel = text;
+      } else {
+        const lineCount = primary.split('\\n').length;
+        summaryLabel = lineCount > 1 ? '出力を表示（' + lineCount + '行）' : '出力を表示';
+      }
+      const key = summaryLabel + '\\n' + primary;
+      if (node.bodyKey !== key) {
+        node.bodyKey = key;
+        if (node.bodySummary.textContent !== summaryLabel) node.bodySummary.textContent = summaryLabel;
+        node.bodyContent.textContent = primary;
+      }
+      node.body.hidden = primary === '';
+      node.copy.hidden = primary === '';
       return;
     }
 
-    // 要約が無ければ全文をそのまま本文として扱う（コマンド出力と同じ行数折りたたみ）
-    const primary = text !== '' ? text : full;
-    node.fullText = primary;
-
-    const foldByLines = item.kind === 'commandExecution' || item.kind === 'reasoning';
-    const lines = foldByLines ? primary.split('\\n') : undefined;
-    const overflow = lines !== undefined && lines.length > MAX_VISIBLE_LINES;
-    const shown =
-      overflow && !node.expanded
-        ? lines.slice(lines.length - MAX_VISIBLE_LINES).join('\\n')
-        : primary;
-
     // Markdownとして解釈するのは通常の発言・応答（userMessage/agentMessage）と
     // 脇道の質問（sideQuestion、issue #334。質問と応答を1本文にまとめており、応答部分は
-    // 普通の発言と同じ体裁で見せたい）。commandExecution・reasoningは折りたたみ含め
-    // 従来どおり生テキストのまま（issue #290）
+    // 普通の発言と同じ体裁で見せたい）。それ以外は従来どおり生テキストのまま（issue #290）
     const useMarkdown =
       RENDER_MARKDOWN &&
       (item.kind === 'userMessage' || item.kind === 'agentMessage' || item.kind === 'sideQuestion');
     const bodyMode = useMarkdown ? 'markdown' : 'text';
-    if (node.bodyMode !== bodyMode || node.bodyKey !== shown) {
+    if (node.bodyMode !== bodyMode || node.bodyKey !== primary) {
       node.bodyMode = bodyMode;
-      node.bodyKey = shown;
+      node.bodyKey = primary;
       if (useMarkdown) {
-        renderMarkdownInto(node.body, shown);
+        renderMarkdownInto(node.body, primary);
       } else {
         node.body.replaceChildren();
-        node.body.textContent = shown;
+        node.body.textContent = primary;
       }
     }
     node.body.hidden = primary === '';
     node.copy.hidden = primary === '';
-
-    node.expand.hidden = !overflow;
-    if (overflow) {
-      node.expand.textContent = node.expanded
-        ? '末尾だけ表示'
-        : '全体を表示（' + lines.length + '行）';
-    }
   }
 
   /**

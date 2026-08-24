@@ -330,6 +330,55 @@ describe('chatScript', () => {
       expect(new Set(labelKeys)).toEqual(new Set(allDiffKinds));
     },
   );
+
+  describe('ツール出力の既定折りたたみ（issue #679）', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+
+    it('構文として成立している', () => {
+      expect(() => parses(source)).not.toThrow();
+    });
+
+    it('対象6kindがFOLD_KINDSに揃っている', () => {
+      const match = source.match(/const FOLD_KINDS = new Set\(\[([\s\S]*?)\]\);/);
+      expect(match).not.toBeNull();
+      const body = match?.[1] ?? '';
+      const kinds = [...body.matchAll(/'(\w+)'/g)].map((m) => m[1]);
+      expect(new Set(kinds)).toEqual(
+        new Set([
+          'commandExecution',
+          'reasoning',
+          'mcpToolCall',
+          'subAgentActivity',
+          'collabAgentToolCall',
+          'autoApprovalReview',
+        ]),
+      );
+    });
+
+    it('fold対象は<details>要素として生成される', () => {
+      expect(source).toContain("body = document.createElement('details')");
+      expect(source).toContain("body.className = 'body-fold'");
+      expect(source).toContain("bodySummary = document.createElement('summary')");
+    });
+
+    it('20行超で末尾だけ表示する旧ロジック（MAX_VISIBLE_LINES）は無い', () => {
+      expect(source).not.toContain('MAX_VISIBLE_LINES');
+    });
+
+    it('展開ボタン（expand）は無く、<details>標準の開閉に統一されている', () => {
+      expect(source).not.toContain('expand.addEventListener');
+      expect(source).not.toContain('node.expand');
+    });
+
+    it('summary文言は行数、reasoningは要約文で組み立てる', () => {
+      expect(source).toContain('出力を表示');
+      expect(source).toContain('summaryLabel = text');
+    });
+
+    it('コピーは畳んだ状態でも全文（node.fullText）を対象にする', () => {
+      expect(source).toContain('node.fullText');
+    });
+  });
 });
 
 describe('controlPanelScript', () => {

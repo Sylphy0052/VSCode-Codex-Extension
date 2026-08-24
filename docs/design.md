@@ -3541,6 +3541,31 @@ Codexの`/btw`は`thread/fork`で**新しいスレッド**を作ってから聞�
 
 検証は`test/unit/integrationFixturesRoot.test.ts`（vitest、3件）。呼ぶたびに別のパスが返ること・`<repoRoot>/.vscode-test/`の直下であること・返った時点で実在することを見る。「自分が作った根だけを消す」ことは`process.on('exit')`に張ったフックの中身で、フックはプロセスが実際に終了するときにしか走らないためテストの実行中には観測できない。振る舞いのテストで書けない理由はテスト側のコメントに残してある。
 
+### 14.64 ツール出力を既定で折りたたみ表示にする（issue #679）
+
+#### 背景
+
+コマンド実行結果・思考・MCPツール呼び出し・サブエージェント活動などの出力が全文展開されたまま表示され、会話が縦に長く伸びて読みにくいという指摘があった。折りたたみの実装は`renderBody`（`chatScript.ts`）に既に2系統あったが、対象範囲も方式も揃っていなかった。
+
+- `commandExecution`/`reasoning`のみ「20行（`MAX_VISIBLE_LINES`）を超えたら末尾だけ表示し、`expand`ボタンで全体表示に切り替える」という独自の折りたたみ
+- `mcpToolCall`/`subAgentActivity`/`collabAgentToolCall`/`autoApprovalReview`は折りたたみが無く、常に全文が表示される
+- 一方でdiff表示（`createDiff`）とWeb検索結果（`renderSearchResults`）は既に`<details>/<summary>`で既定折りたたみ・クリックで展開という体裁になっていた
+
+対象6kind（上記の`commandExecution`/`reasoning`/`mcpToolCall`/`subAgentActivity`/`collabAgentToolCall`/`autoApprovalReview`）を、diff・Web検索結果と同じ`<details>/<summary>`方式に揃えた。`fileChange`（`text`は常に空、`diffs`枠が別に折りたたみを持つ）と`userMessage`/`agentMessage`/`sideQuestion`（Markdown発言）は対象外。
+
+#### 実装
+
+- `src/view/chatScript.ts`: `FOLD_KINDS`（対象6kindのSet）を追加。`createNode`は対象kindのとき`node.body`を`<div class="body">`ではなく`<details class="body-fold"><summary></summary><pre class="body-content"></pre></details>`として組み立てる（非対象kindは従来どおり単一div）。`renderBody`は`node.foldBody`で分岐し、対象は行数（または`reasoning`の要約/全文がある場合は要約文）をsummary文言にして本文全体を`body-content`へ入れる——20行での末尾省略（`MAX_VISIBLE_LINES`）は廃止し、開けば常に全文が見える形にした。`head`内の`expand`ボタンは削除し、`<details>`標準の開閉に統一した（`copy`ボタンは維持、`node.fullText`は畳んだ状態でも全文を保つ）
+- `src/view/chatStyles.ts`: `.body-fold`/`.body-content`を追加（`.diff`/`.diff-body`と同じ体裁、`max-height:420px; overflow:auto`）。既存の`.tool .body`/`.item.running .body`は`.body`クラスを持たない`.body-fold`には効かないため、`.item.running .body-fold`を追加し、`.tool .body`の背景色・フォント指定は`.body-content`側へ移した（`.reasoning .body`の斜体色も同様に`.reasoning .body-content`へ）
+
+**`.body`クラスをdetails要素にも付けたままにしなかった。** 最初は`class="body body-fold"`のように両方付ける案で実装したが、`.tool .body`（背景色・`max-height:240px`）や`.body { padding: 8px 10px }`など既存の`.body`向けルールがdetails要素にもそのまま乗り、中の`.body-content`が持つ`max-height:420px`とネストしたスクロール領域が二重にできる問題に気付いた。fold対象のdetails要素は`.body-fold`のみを持たせ、`.body`側の既存ルールのうち折りたたみでも要る挙動（実行中の左ボーダー、選択してコピー可能にする`user-select:text`）だけを個別に`.body-fold`/`.body-content`へ複製する形に直した。
+
+#### 確かめ方
+
+- `test/unit/webviewScript.test.ts`（`describe('ツール出力の既定折りたたみ（issue #679）')`）: `FOLD_KINDS`が対象6kindちょうどであること、fold対象が`<details>`として生成されること、`MAX_VISIBLE_LINES`と`expand`関連コードが残っていないこと、summary文言の組み立て（行数／reasoningの要約文）、`node.fullText`によるコピー対象を固定
+- `test/unit/webviewStyles.test.ts`: `.body-fold`/`.body-content`が定義されていることを固定
+- webview側の実際の開閉・スクロール・視覚的な体裁はvitestのnode環境では確認できない（§14.60と同じ制約）。実機での確認は`docs/manual-test.md`のU-34に委ねる
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）
