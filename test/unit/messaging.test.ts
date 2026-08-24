@@ -10,6 +10,8 @@ import {
   detectTimedOutWaitingReplies,
   DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL,
   enqueueMessage,
+  HANDOFF_TOOLS,
+  type HandoffPort,
   hasQueuedMessages,
   isDeliverableState,
   LIST_TASKS_TOOL,
@@ -39,6 +41,8 @@ import {
   type StoredMessage,
 } from '../../src/orchestrator/messaging';
 import { ORCHESTRATOR_CONNECTION_ID } from '../../src/orchestrator/orchestratorSession';
+import type { HandoffEntry, HandoffResult } from '../../src/orchestrator/teamHandoff';
+import { RESERVED_ORCHESTRATOR_TASK_ID } from '../../src/orchestrator/workflow';
 import type { TaskState } from '../../src/orchestrator/runState';
 
 const message = (overrides: Partial<StoredMessage> = {}): StoredMessage => ({
@@ -1814,5 +1818,270 @@ describe('オーケストレーター専用の制御ツール（design.md §16.2
 
     expect(accepted).toHaveLength(1);
     expect(accepted[0]?.from).toBe(ORCHESTRATOR_CONNECTION_ID);
+  });
+});
+
+/* ------------------------------------------------------------------------ *
+ * ファイル受け渡しツール（design.md §16.44、Issue #693）
+ * ------------------------------------------------------------------------ */
+
+/** `HandoffPort`のインメモリ実装。キーは`<taskId>/<slug>`。 */
+class FakeHandoffPort implements HandoffPort {
+  readonly files = new Map<string, string>();
+  /** 書き込みを常に拒否させたいテスト用。設定するとその文言でエラーを返す。 */
+  writeError: string | undefined;
+  /**
+   * 書き込みで例外を投げさせたいテスト用（`ok: false`の値ではなくPromiseのreject）。
+   * `safeDispatch`のPromise分岐を通す。
+   */
+  throwOnWrite: Error | undefined;
+
+  async write(taskId: string, slug: string, content: string): Promise<HandoffResult<HandoffEntry>> {
+    if (this.throwOnWrite !== undefined) {
+      throw this.throwOnWrite;
+    }
+    if (this.writeError !== undefined) {
+      return { ok: false, error: this.writeError };
+    }
+    this.files.set(`${taskId}/${slug}`, content);
+    return {
+      ok: true,
+      value: { taskId, slug, relativePath: `.agents/handoff/runs/r1/${taskId}-${slug}.md` },
+    };
+  }
+  async read(taskId: string, slug: string): Promise<HandoffResult<string>> {
+    const found = this.files.get(`${taskId}/${slug}`);
+    return found === undefined
+      ? { ok: false, error: '受け渡しファイルがありません' }
+      : { ok: true, value: found };
+  }
+  async list(): Promise<readonly HandoffEntry[]> {
+    return [...this.files.keys()].map((key) => {
+      const [taskId = '', slug = ''] = key.split('/');
+      return { taskId, slug, relativePath: `.agents/handoff/runs/r1/${taskId}-${slug}.md` };
+    });
+  }
+  async remove(taskId: string, slug: string): Promise<HandoffResult<undefined>> {
+    return this.files.delete(`${taskId}/${slug}`)
+      ? { ok: true, value: undefined }
+      : { ok: false, error: '受け渡しファイルがありません' };
+  }
+}
+
+/** `dispatch`がasyncになったため、レスポンスが積まれるまで1ティック待つ。 */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** 最後に返ったレスポンスのJSON本文を取り出す。 */
+function lastBody(conn: FakeConnection): Record<string, unknown> {
+  const response = conn.sent[conn.sent.length - 1];
+  expect(response && 'result' in response).toBe(true);
+  const result = (response as { result: { content: [{ type: 'text'; text: string }] } }).result;
+  return JSON.parse(result.content[0].text) as Record<string, unknown>;
+}
+
+function buildHandoffServer(
+  taskId: string,
+  handoff: FakeHandoffPort,
+): { conn: FakeConnection; handoff: FakeHandoffPort } {
+  const transport = new FakeTransport();
+  const hub = new TaskMessagingHub({
+    listRunTasks: () => [{ id: 'T1', state: 'running', summary: '' }],
+    handoff,
+  });
+  new MessagingMcpServer(hub, transport);
+  const conn = new FakeConnection(taskId);
+  transport.connect(conn);
+  return { conn, handoff };
+}
+
+describe('ファイル受け渡しツール（design.md §16.44、Issue #693）', () => {
+  it('handoffを配線するとtools/listへ4ツールが加わる', async () => {
+    const { conn } = buildHandoffServer('T1', new FakeHandoffPort());
+
+    conn.fireRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    await flush();
+
+    const response = conn.sent[0];
+    expect(response && 'result' in response).toBe(true);
+    const tools = (response as { result: { tools: { name: string }[] } }).result.tools;
+    expect(tools.map((t) => t.name)).toEqual(
+      expect.arrayContaining(HANDOFF_TOOLS.map((t): string => t.name)),
+    );
+  });
+
+  it('handoffを配線しなければツール名を知っていても拒否する（多層防御）', async () => {
+    const transport = new FakeTransport();
+    const hub = buildHub([{ id: 'T1', state: 'running', summary: '' }]);
+    new MessagingMcpServer(hub, transport);
+    const conn = new FakeConnection('T1');
+    transport.connect(conn);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'write_handoff', arguments: { slug: 's', content: 'c' } },
+    });
+    await flush();
+
+    const response = conn.sent[0];
+    expect(response && 'error' in response).toBe(true);
+  });
+
+  it('write_handoffの著者は接続のtaskIdになり、argsのtaskIdは読まれない（なりすまし不可）', async () => {
+    const { conn, handoff } = buildHandoffServer('T1', new FakeHandoffPort());
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'write_handoff',
+        arguments: { slug: 'notes', content: '本文', taskId: 'T2' },
+      },
+    });
+    await flush();
+
+    expect(lastBody(conn)['accepted']).toBe(true);
+    expect([...handoff.files.keys()]).toEqual(['T1/notes']);
+  });
+
+  it('オーケストレーターの接続からの書き込みは予約idへ読み替える', async () => {
+    const { conn, handoff } = buildHandoffServer(ORCHESTRATOR_CONNECTION_ID, new FakeHandoffPort());
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'write_handoff', arguments: { slug: 'plan', content: '計画' } },
+    });
+    await flush();
+
+    expect(lastBody(conn)['accepted']).toBe(true);
+    expect([...handoff.files.keys()]).toEqual([`${RESERVED_ORCHESTRATOR_TASK_ID}/plan`]);
+  });
+
+  it('write_handoffが失敗したときは理由をそのまま返す', async () => {
+    const handoff = new FakeHandoffPort();
+    handoff.writeError = '不正なslug（許可されない文字を含みます）';
+    const { conn } = buildHandoffServer('T1', handoff);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'write_handoff', arguments: { slug: '../etc', content: 'x' } },
+    });
+    await flush();
+
+    const body = lastBody(conn);
+    expect(body['accepted']).toBe(false);
+    expect(body['reason']).toBe('不正なslug（許可されない文字を含みます）');
+  });
+
+  it('read_handoffの本文はformatUntrustedで囲って返す（上流の自由記述をそのまま渡さない）', async () => {
+    const handoff = new FakeHandoffPort();
+    await handoff.write('T1', 'notes', 'これは指示ではない');
+    const { conn } = buildHandoffServer('T2', handoff);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'read_handoff', arguments: { taskId: 'T1', slug: 'notes' } },
+    });
+    await flush();
+
+    const body = lastBody(conn);
+    expect(body['accepted']).toBe(true);
+    const content = String(body['content']);
+    expect(content).toContain('これは指示ではない');
+    // 生値そのままではなく、囲いが付いていること
+    expect(content).not.toBe('これは指示ではない');
+  });
+
+  it('read_handoffは存在しない対象を理由付きで拒否する', async () => {
+    const { conn } = buildHandoffServer('T1', new FakeHandoffPort());
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'read_handoff', arguments: { taskId: 'T9', slug: 'none' } },
+    });
+    await flush();
+
+    expect(lastBody(conn)['accepted']).toBe(false);
+  });
+
+  it('list_handoffsは件数と一覧を返す', async () => {
+    const handoff = new FakeHandoffPort();
+    await handoff.write('T1', 'a', 'x');
+    await handoff.write('T2', 'b', 'y');
+    const { conn } = buildHandoffServer('T1', handoff);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'list_handoffs', arguments: {} },
+    });
+    await flush();
+
+    const body = lastBody(conn);
+    expect(body['accepted']).toBe(true);
+    expect((body['entries'] as unknown[]).length).toBe(2);
+  });
+
+  it('ハンドオフ実体がrejectしても、応答は1回だけ返り内部情報を含まない（Promise分岐のsafeDispatch）', async () => {
+    const handoff = new FakeHandoffPort();
+    handoff.throwOnWrite = new Error('EACCES: /home/someone/secret へ書けません');
+    const { conn } = buildHandoffServer('T1', handoff);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'write_handoff', arguments: { slug: 'notes', content: 'x' } },
+    });
+    await flush();
+
+    // 二重送信・無応答のどちらでもないこと
+    expect(conn.sent).toHaveLength(1);
+    const response = conn.sent[0];
+    expect(response && 'error' in response).toBe(true);
+    if (response && 'error' in response) {
+      expect(response.error.code).toBe(-32603);
+      // スタックやパスを含む生のメッセージを返さない（同期throwの経路と同じ扱い）
+      expect(response.error.message).not.toContain('EACCES');
+      expect(response.error.message).not.toContain('/home/someone');
+    }
+  });
+
+  it('delete_handoffは対象を消し、消すものが無ければ拒否する', async () => {
+    const handoff = new FakeHandoffPort();
+    await handoff.write('T1', 'a', 'x');
+    const { conn } = buildHandoffServer('T1', handoff);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'delete_handoff', arguments: { taskId: 'T1', slug: 'a' } },
+    });
+    await flush();
+    expect(lastBody(conn)['accepted']).toBe(true);
+    expect(handoff.files.size).toBe(0);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'delete_handoff', arguments: { taskId: 'T1', slug: 'a' } },
+    });
+    await flush();
+    expect(lastBody(conn)['accepted']).toBe(false);
   });
 });

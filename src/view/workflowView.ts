@@ -11,7 +11,13 @@ import type {
 import type { PersistedProgram } from '../orchestrator/programStore';
 import type { WorkflowDefinition } from '../orchestrator/workflow';
 import { chatCsp } from './chatCsp';
-import { aggregateProgress, layoutGraph, summarizeIntegration } from './workflowGraph';
+import {
+  aggregateProgress,
+  layoutGraph,
+  summarizeIntegration,
+  summarizeKanban,
+  taskRoleLabel,
+} from './workflowGraph';
 import { workflowScript } from './workflowScript';
 import { workflowStyles } from './workflowStyles';
 
@@ -275,13 +281,32 @@ export class WorkflowViewManager implements vscode.Disposable {
     // 「そのほか」・Issue #104。以前はWebview内のJavaScriptで独自に集計しており、
     // `merging`/`blocked`/`waitingReply`の3状態がここでの追随漏れの原因になっていた）
     const progress = aggregateProgress(snapshot.tasks);
+    // カンバン風の3バケット + 要対応枠の集計（design.md §16.44、Issue #693）。progressと同じく
+    // 純粋関数（workflowGraph.ts、テスト済み）で集計し、Webview側では受け取った結果を
+    // 表示するだけにする（aggregateProgressのコメントと同じ理由。Issue #104の再発防止）
+    const kanban = summarizeKanban(snapshot.tasks);
     const integration = summarizeIntegration(snapshot.integrationBranch, snapshot.tasks, {
       number: snapshot.integrationPullRequestNumber,
       url: snapshot.integrationPullRequestUrl,
       finalMergeOutcome: snapshot.finalMergeOutcome,
       finalMergeDecision: snapshot.finalMergeDecision,
     });
-    void this.panel.webview.postMessage({ type: 'state', snapshot, layout, progress, integration });
+    // 役割ラベル（design.md §16.44、Issue #693）。`TaskSnapshot.role`（runner.ts）は
+    // 定義ファイルの解決結果（`WorkflowTask.role`）を`buildTaskSnapshot`が都度写したもので、
+    // 実行中のrunでも下書きのプレビューでも同じように入る。役割が無いタスクは
+    // `taskRoleLabel`が`undefined`を返し、Webview側は何も表示しない
+    const tasksWithRoleLabel = snapshot.tasks.map((t) => ({
+      ...t,
+      roleLabel: taskRoleLabel(t.role),
+    }));
+    void this.panel.webview.postMessage({
+      type: 'state',
+      snapshot: { ...snapshot, tasks: tasksWithRoleLabel },
+      layout,
+      progress,
+      kanban,
+      integration,
+    });
   }
 
   private async handleMessage(message: unknown): Promise<void> {
@@ -644,6 +669,7 @@ ${workflowStyles()}
   </div>
 
   <div id="content" hidden>
+    <div id="kanbanBadges" class="kanban-badges" hidden></div>
     <div class="section-head">
       <h2>依存グラフ</h2>
       <div class="graph-tools">
@@ -662,7 +688,7 @@ ${workflowStyles()}
     <table id="taskTable">
       <thead>
         <tr>
-          <th>id</th><th>状態</th><th>provider</th><th>作業ディレクトリ</th>
+          <th>id</th><th>役割</th><th>状態</th><th>provider</th><th>作業ディレクトリ</th>
           <th>経過</th><th>送信回数</th><th>直近の応答</th><th>操作</th>
         </tr>
       </thead>
@@ -704,9 +730,10 @@ function buildPreviewSnapshot(
 ): WorkflowRunSnapshot {
   const tasks: TaskSnapshot[] = def.tasks.map((task) => ({
     id: task.id,
+    role: task.role,
     dependsOn: task.dependsOn,
     provider: task.provider,
-    state: 'pending',
+    state: 'pending' as const,
     cwd: undefined,
     branch: undefined,
     submissionCount: 0,

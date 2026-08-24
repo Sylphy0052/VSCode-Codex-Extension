@@ -918,6 +918,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     vscode.commands.registerCommand('agent.workflows.plan', (providerHint?: unknown) =>
       planWorkflowCommand(chat, claudeChat, workflowView, log, providerHint),
     ),
+    vscode.commands.registerCommand('agent.workflows.team', (providerHint?: unknown) =>
+      planTeamWorkflowCommand(chat, claudeChat, workflowView, log, providerHint),
+    ),
     vscode.commands.registerCommand('agent.workflows.roadmap', (providerHint?: unknown) =>
       runRoadmap(roadmapIssuePort, chat, claudeChat, log, providerHint),
     ),
@@ -1672,7 +1675,33 @@ async function planWorkflowCommand(
     await planWorkflowFromRoadmapCommand(chat, claudeChat, view, log, folder, provider);
     return;
   }
-  await planWorkflowFromGoalCommand(chat, claudeChat, view, log, folder, provider);
+  await planWorkflowFromGoalCommand(chat, claudeChat, view, log, folder, provider, false);
+}
+
+/**
+ * チームモードを開始する（design.md §16.44、issue #693、`agent.workflows.team`）。
+ *
+ * 生成経路は`planWorkflowFromGoalCommand`と同じで、違いはタスクへ`role`を書かせることだけ。
+ * ロードマップからの生成を選ばせないのは、ロードマップのフェーズは既に工程で割れており、
+ * そこへ役割を重ねる意味が薄いため。ここでも実行はせず、YAMLを作ってViewを開くところで止める。
+ */
+async function planTeamWorkflowCommand(
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
+  view: WorkflowViewManager,
+  log: Logger,
+  providerHint?: unknown,
+): Promise<void> {
+  const folder = currentWorkspaceFolder();
+  if (folder === undefined) {
+    void vscode.window.showErrorMessage('チームモードを使うにはフォルダを開いてください');
+    return;
+  }
+  const provider = await resolvePlannerProvider(providerHint);
+  if (provider === undefined) {
+    return;
+  }
+  await planWorkflowFromGoalCommand(chat, claudeChat, view, log, folder, provider, true);
 }
 
 /**
@@ -1690,9 +1719,11 @@ async function planWorkflowFromGoalCommand(
   log: Logger,
   folder: vscode.WorkspaceFolder,
   provider: Provider,
+  /** チームモードか（issue #693）。trueならタスクへ`role`を書かせる。 */
+  team: boolean,
 ): Promise<void> {
   const goal = await vscode.window.showInputBox({
-    title: 'ワークフローのゴール',
+    title: team ? 'チームで達成したいゴール' : 'ワークフローのゴール',
     prompt:
       '達成したいことを文章で入力してください（例: 認証機能を追加してテストとレビューまで終える）',
     ignoreFocusOut: true,
@@ -1722,6 +1753,7 @@ async function planWorkflowFromGoalCommand(
         host,
         cwd: workspaceRoot,
         baseline: readSafetyBaseline(),
+        team,
         log,
       });
     },

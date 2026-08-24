@@ -105,6 +105,34 @@ export function workflowStyles(): string {
     background-color: color-mix(in srgb, var(--vscode-charts-orange, var(--vscode-charts-yellow)) 12%, transparent);
   }
 
+  /* ---- カンバン風のバッジ集計（design.md §16.44、Issue #693） ---- */
+  .kanban-badges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .kanban-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-size: 0.9em;
+    border: 1px solid var(--vscode-widget-border, transparent);
+    color: var(--vscode-descriptionForeground);
+    background-color: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  }
+  .kanban-badge.kanban-inProgress {
+    color: var(--vscode-charts-blue);
+    border-color: color-mix(in srgb, var(--vscode-charts-blue) 55%, transparent);
+  }
+  .kanban-badge.kanban-done {
+    color: var(--vscode-charts-green);
+    border-color: color-mix(in srgb, var(--vscode-charts-green) 55%, transparent);
+  }
+  /* 要対応（failed/blocked/skipped）は1件以上のときだけ出す別枠。全体の進捗のbanner.failed
+     と同じ配色にして「強い警告」であることを揃える */
+  .kanban-badge.kanban-attention {
+    font-weight: 600;
+    color: var(--vscode-errorForeground);
+    border-color: var(--vscode-errorForeground);
+    background-color: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent);
+  }
+
   /* ---- 依存グラフ ---- */
   .section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; }
   .graph-tools { display: flex; align-items: center; gap: 6px; }
@@ -217,6 +245,8 @@ export function workflowStyles(): string {
   .state-pill.state-merging { --wf-state-color: var(--vscode-charts-green); }
   .state-pill.state-failed { --wf-state-color: var(--vscode-errorForeground); }
   #taskTable .summary-cell { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 役割（design.md §16.44、Issue #693）。役割が無いタスクはこのセルが空になる */
+  #taskTable .role-cell { color: var(--vscode-descriptionForeground); white-space: nowrap; }
   #taskTable .hint, #integrationInfo .hint { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
 
   /* ---- 統合の状況（design.md §16.8「そのほか」・§16.17。Issue #104） ---- */

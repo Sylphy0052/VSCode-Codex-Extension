@@ -32,6 +32,7 @@ const withState = (run: RunState, taskId: string, state: TaskState): RunState =>
 
 const task = (id: string, dependsOn: string[] = [], retries = 0): WorkflowTask => ({
   id,
+  role: undefined,
   prompt: '作業する',
   done: '作業が終わっている',
   dependsOn,

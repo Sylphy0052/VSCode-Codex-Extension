@@ -31,6 +31,7 @@ import { getRunOutcome, nextTasksToStart } from '../../src/orchestrator/schedule
 /** テストで頻出する最小構成のタスク。dependsOn以外は固定値でよい。 */
 const task = (id: string, dependsOn: string[] = [], retries = 0): WorkflowTask => ({
   id,
+  role: undefined,
   prompt: '作業する',
   done: '作業が終わっている',
   dependsOn,

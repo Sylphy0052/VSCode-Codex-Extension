@@ -6512,3 +6512,56 @@ Claude Code側は `dispatch` の `logText`（§16.12。テンプレート展開�
 
 - `test/unit/turnSummary.test.ts`: 無効なら本文を変えないこと、有効なら空行で区切って連結すること、指示文が空・本文が空なら連結しないこと、本文末尾の空白を落としてから連結すること
 - `docs/manual-test.md` C-50（Claude Code画面はL-51）: 実機で両画面の応答末尾に要約と次アクションが出ること、擬似コマンドとループには付かないこと
+
+### 16.44 チームモード（Issue #693）
+
+#### 何を足したのか
+
+**新しいサブシステムではなく、既存のワークフロー実行の拡張である。**タスクへ「会社の役割」を表す`role`フィールドを足し、役割から`model`/`effort`の既定値を引けるようにした（`rolePresets.ts`）。加えて、`send_message`/`ask_orchestrator`（§16.21・§16.32）が運べない分量・寿命の情報をセッション間で受け渡すための一時ファイル領域（`teamHandoff.ts`）を用意した。ワークフローの実行経路（`WorkflowRunner`・依存関係・承認・マージ）自体は変えていない。
+
+役割の語彙は`orchestrator` / `manager` / `em` / `architect` / `designer` / `implementer` / `reviewer` / `tester` / `writer` / `researcher`の固定10種（`TEAM_ROLES`、`rolePresets.ts:24-35`）。自由文字列を許さないのは、役割がプリセットの参照キーであり、綴り違いを黙って受け入れると意図しないモデル・effortで走ってしまうためである。
+
+#### 役割はmodel/effortの既定を決めるだけで、権限には触れない
+
+役割はまず`RoleTier`（`light` / `standard` / `deep` / `escalation`）という抽象へ寄せ、プロバイダごとのモデルslugとeffortの対応表（`TIER_MODELS`・`TIER_EFFORTS`、`rolePresets.ts:67-86`）で解決する。`orchestrator`/`manager`/`em`/`architect`/`designer`は`deep`、`implementer`/`reviewer`/`tester`は`light`、`writer`/`researcher`は`standard`にしてある。
+
+**`approvalMode`/`sandbox`/`autoApprove`はここでは一切決めない**（`rolePresets.ts:10-14`）。従来どおり`buildEffectiveTaskConfig`（`taskConfig.ts`、§16.16「実効設定を組み立てる唯一の入口」）のクランプだけが実効権限を決める。役割から権限まで引けるようにすると、エージェントが生成しうるYAMLが役割名の指定だけで実効権限を動かせる経路になるため、意図的に外してある。
+
+`role`は`add_task`（§16.29、実行中の定義へタスクを足すオーケストレーターの道具）からも指定できる。`autoApprove`/`allow`/`sandbox`/`approvalMode`が`add_task`から指定できないのは権限を緩める経路になるためで、`role`はその条件に当たらない（決まるのは`model`/`effort`の既定値だけ）。`ADD_TASK_TOOL.inputSchema`にも`role`を載せてある——読む側（`buildOrchestratorTask`）だけを実装しても、スキーマに無いフィールドはオーケストレーターから見て存在しないのと同じになる。
+
+適用の優先順位は`resolveTask`（`workflow.ts:513-528`）が持つ。タスクが`role`を書かなければ`defaults.role`を継ぎ（未指定なら「役割なし」）、`role`から引いた`model`/`effort`はあくまで既定値で、タスクが`model`/`effort`を明示していればそちらが勝つ（`optStr(t['model']) ?? roleDefault ?? defaults.model`の順）。未知の`role`値は`resolveRole`が`undefined`（役割なし）へ倒し、`resolveTask`が`parseWarnings`へ指定できる値の一覧を添えて残す（`workflow.ts:513-519`。`defaults.role`側は`resolveDefaults`が同じ扱いをする）。エラーにしないのは、`provider`や`type`の未知値と同じ「既定へ倒して警告する」流儀に揃えるため。
+
+#### escalation段はどの役割の既定にもならない
+
+`RoleTier`には`light`/`standard`/`deep`のほかに`escalation`（Codex: `gpt-5.6-sol` / Claude: `fable`）があるが、`ROLE_TIERS`のいずれの役割もこの段を指さない（`rolePresets.ts:46-64`）。到達できるのは、タスクの`model`を明示指定する経路だけである。`escalationModel`関数（`rolePresets.ts:142-144`）は、その明示指定に使うモデル名をプロバイダごとに引くためのもので、いまの唯一の呼び出し元は`planner.ts`（`buildRoleDescription`）——分解セッションへ「詰まりそうなタスクに限りこのモデルを明示してよい」と伝えるプロンプト——である。「詰まったときだけ使う」という運用方針（Issue #693）を、既定値からは構造的に到達できないという形で担保している。
+
+#### ファイル受け渡し
+
+置き場は`.agents/handoff/runs/<runId>/<taskId>-<slug>.md`（`teamHandoff.ts:15,25`）。`send_message`/`ask_orchestrator`の本文上限（`MAX_MESSAGE_BODY_LENGTH`）に収まらない・後から読み返したい情報（設計メモ、レビュー結果、共有コンテキスト）だけをファイルとして残すための領域で、メッセージング（§16.21・§16.34）の代わりではない。1ファイルの本文は`MAX_HANDOFF_BYTES`（256KiB、`teamHandoff.ts:36`）、1run内のファイル数は`MAX_HANDOFF_FILES_PER_RUN`（100件、`teamHandoff.ts:39`）が上限。パスの組み立ては`handoffPath`（`teamHandoff.ts:73-87`）だけが行い、各操作の前に祖先へのシンボリックリンクガード（`findSymlinkedAncestor`、§16.6と同じ一次防御）を通す。
+
+書き換える操作（`makeDirectory` / `writeTextFile` / `removeFile` / `removeDirectory`）は、`HandoffFileSystemPort`の側で成否を`boolean`で返す。失敗を`void`で握り潰すと、`write_handoff`が書けていないファイルに対して「書き込みました」と応答し、直後の`read_handoff`が「ありません」になる——呼び出したエージェントからは原因を追えない不整合になるためである。読む操作（`readTextFile` / `listDirectory`）は「無ければ空」という戻り値自体が失敗を表せるので`boolean`にしていない。
+
+`write_handoff`/`read_handoff`/`list_handoffs`/`delete_handoff`の4ツール（`messaging.ts:973-1026`）は、オーケストレーター・タスクの両方の接続へ見せる（`visibleTools`、`messaging.ts:1489-1506`）。想定利用が「役割セッションが設計メモを書き、オーケストレーターが読む」で書く側・読む側のどちらも固定できないためである。`write_handoff`だけ`taskId`引数を取らない——`send_message`の`from`と同じ理由（§16.21）で、書き込み先の`taskId`部分は接続そのもの（`connection.taskId`）から決め、別のタスクの名義を騙れないようにしている（`messaging.ts:964-971`）。
+
+**runが終わるとファイルは丸ごと消える。**`WorkflowRunner`の終了処理が`TeamHandoffStore.removeRun`を`closeMessaging`・`closeReviewCommentPoll`と同じ位置で呼ぶ（`runner.ts:3078-3105`）。受け渡し4ツールはMCPサーバ越しにしか使えず、サーバが閉じた時点でどのセッションからも到達できなくなるためで、「到達できなくなったものを残さない」という一点で消す位置が決まっている。**再開（`retryTask`/`continueTask`/`retryMerge`）した2周目は、受け渡し領域が空の状態から始まる**（`runner.ts:3084-3088`）。再開時は`ensureMessaging`がMCPサーバを作り直すのでツール自体は使えるが、1周目に書いたファイルは残っていない。これは§16.43が「再開しても制御ツールは戻らない」で書いた制約と同じ性質——MCPのURLが作り直され1周目の状態を引き継げない——であり、引き継ぎたい内容はオーケストレーターが自分の会話に持っている前提にする。
+
+オーケストレーターの接続id（`ORCHESTRATOR_CONNECTION_ID`、値は`-orchestrator-`）は`TASK_ID_PATTERN`に一致しないため、そのままではファイル名に使えない。`write_handoff`はオーケストレーターからの書き込みだけ`RESERVED_ORCHESTRATOR_TASK_ID`（`_orchestrator`、`workflow.ts:105`）へ読み替える（`messaging.ts:1625-1629`）。同名のタスクは`validateWorkflow`が定義できないよう弾いている（`workflow.ts:1345-1348`）ため、この読み替えがタスクのファイルと衝突することはない。
+
+`read_handoff`が返す本文は`formatUntrusted`で囲ってから返す（`messaging.ts:1652-1657`）。受け渡しファイルの中身はエージェントが書いた自由記述であり、`send_message`の本文（`wrapTaskMessage`）や`{{T1.result}}`と同じ脅威クラス（上流の自由記述がそのまま下流のプロンプトへ入る経路）にあたるためで、無害化を経ずに素通りさせない。
+
+#### Viewの表示
+
+`kanbanBucket`/`summarizeKanban`/`taskRoleLabel`（`workflowGraph.ts`）はいずれもチームモードで新設した。`kanbanBucket`は`TaskState`をToDo（`pending`）/ InProgress / Done（`done`）/ 要対応（`failed`・`blocked`・`skipped`）の4バケツへ寄せ、`summarizeKanban`がその件数を数える。InProgressの判定には`runState.ts`の`isActiveTaskState`をそのまま使い、「進行中とは何か」の定義を二重に持たない。`taskRoleLabel`はタスクの`role`から日本語の表示ラベルを引く。`role`が`undefined`（役割なし）のタスクは何も返さず、Webview側も表示しない——チームモードを使わないワークフローの見た目を変えないためである。`workflowView.ts:297-300`がこれをカンバンの各タスクカードへ`roleLabel`として渡す。
+
+`agent.workflows.team`（`workflowMenu.ts:41-45`、`extension.ts:915`）はワークフローメニューに「チームモードを開始…」を足す。実体（`planTeamWorkflowCommand`、`extension.ts:1682-1699`）は`planWorkflowFromGoalCommand`を`team: true`で呼ぶだけで、生成経路自体は§16.9のゴール文からのYAML生成と同じである。`team`が`true`のときだけ`planWorkflow`（`planner.ts`）が「全てのタスクにroleを書くこと」という指示をプロンプトへ足し（`planner.ts:353-357`）、`buildRoleDescription`（`planner.ts:168-174`）が役割ごとのmodel/effortの対応を列挙してモデルへ見せる。生成したYAMLはこれまでどおり実行せず保存するだけで、実行は人がワークフローViewから明示的に選んだときに限る（§16.13）。
+
+#### 確かめ方
+
+- `test/unit/rolePresets.test.ts`: 役割ごとの`model`/`effort`の対応・`escalation`段がどの役割からも引けないこと・未知の役割の扱い
+- `test/unit/teamHandoff.test.ts`: `write`/`read`/`list`/`remove`/`removeRun`の正常系、本文サイズ上限・ファイル数上限での拒否、シンボリックリンクガード、`parseHandoffFileName`の境界（最後の`-`で割る仕様）
+- `test/unit/messaging.test.ts`: 4ツールの可視性（`hub.handoff`未設定時は見せない）、`write_handoff`が接続の`taskId`のみを使い引数の同名フィールドを無視すること、オーケストレーターの書き込みが`RESERVED_ORCHESTRATOR_TASK_ID`へ読み替わること、`read_handoff`の本文が`formatUntrusted`で囲まれること
+- `test/unit/workflow.test.ts`: `role`の解決優先順位4段（タスクが明示 > タスクの役割 > `defaults`が明示 > `defaults`の役割）と、どちらも無いときに`model`/`effort`が`undefined`のまま（従来どおり拡張機能の設定に従う）であること、`id: "_orchestrator"`が`validateWorkflow`のエラーになること
+- `test/unit/planner.test.ts`: `team`を指定したときだけ`role`の説明と役割ごとの`model`/`effort`がプロンプトへ出ること
+- `test/unit/workflowGraph.test.ts`: `kanbanBucket`のバケツ分け、`summarizeKanban`の件数、`taskRoleLabel`
+
+**未着手**: run終了時に`removeRun`が呼ばれることのユニットテスト（`runner.test.ts`）と、`docs/manual-test.md`への手動確認項目（メニューからのYAML生成、実機のMCP越しの`write_handoff`/`read_handoff`、run終了後に`.agents/handoff/runs/<runId>/`が消えていること）はまだ無い。

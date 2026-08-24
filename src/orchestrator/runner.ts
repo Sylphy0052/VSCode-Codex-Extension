@@ -37,6 +37,8 @@ import {
 } from './forge';
 import { INTEGRATION_DIR_NAME, IntegrationMergeQueue } from './integration';
 import { applyRunCompletionToFile, type RoadmapFileSystemPort } from './roadmap';
+import type { TeamRole } from './rolePresets';
+import { TeamHandoffStore } from './teamHandoff';
 import {
   IntegrationQueue as PseudoWorktreeIntegrationQueue,
   removePseudoIntegration,
@@ -48,8 +50,10 @@ import {
   composeNextPrompt,
   TaskMessagingHub,
   type DispatchErrorLogPort,
+  type HandoffPort,
   type HttpMcpTransportHandle,
 } from './messaging';
+import { nodeHandoffFileSystem } from './nodeHandoffFileSystem';
 import {
   applyLoopStopReason,
   clampWorktreeRemovalAttempts,
@@ -704,6 +708,12 @@ export interface TaskPendingApprovalSnapshot {
 /** タスク1件のView向けスナップショット。応答本文そのものではなく1行要約だけを持つ。 */
 export interface TaskSnapshot {
   id: string;
+  /**
+   * チームモードの役割（design.md §16.44、Issue #693）。`undefined` は役割なし。
+   * ワークフローViewがタスクidと併記して出す（役割はidの代わりではない。同じ役割を
+   * 複数のタスクへ割り当てられるため）。
+   */
+  role: TeamRole | undefined;
   dependsOn: readonly string[];
   provider: Provider;
   state: TaskState;
@@ -1476,6 +1486,25 @@ function pushFinalMergeWarning(live: LiveRun, message: string): void {
   live.warnings.push({ kind: 'finalMergeDecision', taskId: undefined, message });
 }
 
+/**
+ * `TaskMessagingHubDeps.handoff`（`messaging.ts`、design.md §16.44、Issue #693）の実体を
+ * 組み立てる。`TeamHandoffStore`（`teamHandoff.ts`）の`write`/`read`/`list`/`remove`は
+ * いずれも第1引数に`runId`を取るが、`HandoffPort`は`runId`を持たない薄い形（`messaging.ts`
+ * がVSCode非依存・run単体の関心事だけを扱う方針を保つため）なので、ここで`runId`を
+ * 束縛したクロージャに変換する。`buildOrchestratorControlPort`（`runnerOrchestrator.ts`）が
+ * `WorkflowRunner`の公開メソッドをそのまま橋渡しするのと同じ「実体は既存クラスの
+ * メソッドをそのまま呼ぶ」方針で、ここにも新しいロジックは持たせない。
+ */
+function buildHandoffPort(repoRoot: string, runId: string): HandoffPort {
+  const store = new TeamHandoffStore(repoRoot, nodeHandoffFileSystem);
+  return {
+    write: (taskId, slug, content) => store.write(runId, taskId, slug, content),
+    read: (taskId, slug) => store.read(runId, taskId, slug),
+    list: () => store.list(runId),
+    remove: (taskId, slug) => store.remove(runId, taskId, slug),
+  };
+}
+
 export class WorkflowRunner {
   /**
    * 分割後のファイル（`runnerSnapshot.ts`等、Issue #147）からは`self.runs`として読むが、
@@ -1840,6 +1869,12 @@ export class WorkflowRunner {
         // オーケストレーター専用の接続にだけ見せる制御ツール（design.md §16.23）。
         // Viewのボタンと同じ公開メソッド（`this`）を通す
         orchestratorControl: buildOrchestratorControlPort(this.internals, this, runId),
+        // ファイル受け渡し（design.md §16.44、Issue #693）。`TeamHandoffStore`の`runId`引数を
+        // ここで束縛し、`HandoffPort`（`taskId`/`slug`だけを引数に取る薄い口）にして渡す
+        // （`messaging.ts`の`TaskMessagingHubDeps.handoff`のJSDoc参照）。`live.repoRoot`は
+        // ワークフロー定義ファイルが属するワークスペースフォルダの絶対パスで、run開始時に
+        // 一度だけ解決済みの値（`startRun`のJSDoc参照）をそのまま使う
+        handoff: buildHandoffPort(live.repoRoot, runId),
       });
     live.messagingHub = hub;
     try {
@@ -3040,6 +3075,44 @@ export class WorkflowRunner {
     // レビューコメントのポーリング（design.md §16.30）も、最終マージ・判断が確定して
     // これ以上PR/MRの状態を追う必要が無くなった時点で一緒に閉じる
     closeReviewCommentPoll(live);
+    // チームモードの受け渡しファイル（design.md §16.44、Issue #693）を片付ける。
+    //
+    // 消す位置を`closeMessaging`と揃えているのは、受け渡しファイルを読み書きする4ツールが
+    // MCPサーバ越しにしか使えず、サーバが閉じた時点でどのセッションからも到達できなく
+    // なるため。「到達できなくなったものを残さない」という一点で位置が決まる。
+    //
+    // **再開（`retryTask`/`continueTask`/`retryMerge`）した2周目は、受け渡しファイルが
+    // 空の状態から始まる。** 再開時は`ensureMessaging`がMCPサーバを作り直すのでツール
+    // 自体は使えるが、1周目に書いたファイルは残っていない。これはMCPのURLが作り直され、
+    // 起動済みセッションの制御ツールが戻らないのと同じ性質の制約（design.md §16.43）で、
+    // 引き継ぎたい内容はオーケストレーターが自分の会話へ持っている前提にする。
+    //
+    // 失敗しても実行の結果には影響しないため、ログだけ残して握る（`disposeQuietly`と
+    // 同じ流儀。ここは非同期なので`void`＋`catch`で書く）。
+    //
+    // `buildHandoffPort`が作る`HandoffPort`はrun内の1ファイルを読み書きする口だけを
+    // 公開しており、run丸ごとの撤去（`removeRun`）を持たない——タスクやオーケストレーターに
+    // 「他のセッションのファイルもまとめて消す」操作を渡さないための線引きなので、ここでは
+    // ポートを経由せず`TeamHandoffStore`を直接組み立てる
+    //
+    // 失敗は例外（パス検証・シンボリックリンクガード）と`ok: false`（ファイルシステムの
+    // 撤去失敗）の2通りある。どちらも同じ文言で残す——片方だけ見ていると「片付けに失敗した」
+    // 事実がログに出ない（PR #711 自己レビュー指摘: medium）
+    const warnCleanupFailure = (reason: string): void => {
+      this.deps.log.warn(
+        `[workflow ${runId}] 受け渡しファイルの片付けに失敗しました: ${sanitizeForLog(reason)}`,
+      );
+    };
+    void new TeamHandoffStore(live.repoRoot, nodeHandoffFileSystem)
+      .removeRun(runId)
+      .then((result) => {
+        if (!result.ok) {
+          warnCleanupFailure(result.error);
+        }
+      })
+      .catch((e: unknown) => {
+        warnCleanupFailure(e instanceof Error ? e.message : String(e));
+      });
   }
 
   /**
