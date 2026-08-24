@@ -590,6 +590,12 @@ export class MarkdownString {
   constructor(public value = '') {}
 }
 
+/** issue #738: 一致箇所を強調するラベル。VS Code本体の`TreeItemLabel`に相当する。 */
+export interface TreeItemLabel {
+  label: string;
+  highlights?: [number, number][];
+}
+
 export class TreeItem {
   id?: string;
   description?: string;
@@ -601,7 +607,7 @@ export class TreeItem {
   command?: { command: string; title: string; arguments?: unknown[] };
 
   constructor(
-    public label: string,
+    public label: string | TreeItemLabel,
     public collapsibleState: TreeItemCollapsibleState = TreeItemCollapsibleState.None,
   ) {}
 }

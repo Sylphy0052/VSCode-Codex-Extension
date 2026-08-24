@@ -674,3 +674,55 @@ describe('SessionTreeProvider のピン留め（issue #293）', () => {
     expect(provider.getTreeItem(archived).contextValue).toBe('codexSession.codex.archived.pinned');
   });
 });
+
+describe('絞り込み中のラベルの強調（issue #738）', () => {
+  const named = session({ id: 's1', threadName: '認証まわりの相談', cwd: '/tmp/example' });
+
+  it('絞り込みが無いときは素の文字列を返す', () => {
+    const provider = makeProvider([named]);
+    expect(provider.getTreeItem(named).label).toBe('認証まわりの相談');
+  });
+
+  it('スレッド名に一致すると一致箇所つきのラベルを返す', async () => {
+    const provider = makeProvider([named]);
+    await provider.setFilter('まわり');
+    expect(provider.getTreeItem(named).label).toEqual({
+      label: '認証まわりの相談',
+      highlights: [[2, 5]],
+    });
+  });
+
+  it('大小文字が違う一致でも元の文字列の位置を強調する', async () => {
+    const s = session({ id: 's2', threadName: 'Fix Auth bug' });
+    const provider = makeProvider([s]);
+    await provider.setFilter('auth');
+    expect(provider.getTreeItem(s).label).toEqual({
+      label: 'Fix Auth bug',
+      highlights: [[4, 8]],
+    });
+  });
+
+  it('cwdだけに一致した行は強調なしの素の文字列で出す', async () => {
+    const provider = makeProvider([named]);
+    __mock.setConfig('codex', { 'history.groupBy': 'none' });
+    await provider.setFilter('example');
+    // 陽性対照: この語では確かに行が残る（強調が無いのは「絞り込まれて消えた」からではない）
+    expect(await provider.getChildren()).toEqual([named]);
+    expect(provider.getTreeItem(named).label).toBe('認証まわりの相談');
+  });
+
+  it('名前の無いセッションは既定のラベルのまま出す', async () => {
+    const s = session({ id: 's3', threadName: undefined, cwd: '/tmp/example' });
+    const provider = makeProvider([s]);
+    await provider.setFilter('example');
+    expect(provider.getTreeItem(s).label).toBe('(名称未設定)');
+  });
+
+  it('絞り込みを解除すると強調が消える', async () => {
+    const provider = makeProvider([named]);
+    await provider.setFilter('認証');
+    expect(provider.getTreeItem(named).label).not.toBe('認証まわりの相談');
+    await provider.clearFilter();
+    expect(provider.getTreeItem(named).label).toBe('認証まわりの相談');
+  });
+});

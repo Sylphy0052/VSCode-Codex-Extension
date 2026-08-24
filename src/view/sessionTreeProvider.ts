@@ -6,7 +6,7 @@ import type { ProviderRegistry } from '../provider/registry';
 import type { HistoryScope } from '../session/sessionStore';
 import { basenameOf } from '../util/paths';
 import { PinnedSessionStore, partitionPinned, pinKeyFor } from '../util/pinnedSessions';
-import { matchesSessionQuery } from '../util/sessionFilter';
+import { matchesSessionQuery, sessionNameHighlights } from '../util/sessionFilter';
 import { buildDateGroups, buildFolderGroups, type SessionGroup } from '../util/sessionGrouping';
 import { formatAbsoluteTime, formatRelativeTime } from './relativeTime';
 import type { SessionActivityState } from './sessionActivity';
@@ -260,10 +260,28 @@ export class SessionTreeProvider
     return item;
   }
 
+  /**
+   * 行のラベル。絞り込み中にスレッド名が一致していれば、一致箇所を強調する
+   * `TreeItemLabel` を返す（issue #738）。絞り込みが空のときや、`cwd`・IDにだけ
+   * 一致した行では従来どおり素の文字列を返す——常に `TreeItemLabel` にすると
+   * ラベルの読み出し側（テスト・ツールチップ生成）が分岐だらけになるため
+   */
+  private buildSessionLabel(session: SessionSummary): string | vscode.TreeItemLabel {
+    const name = session.threadName ?? '(名称未設定)';
+    if (!this.filterActive) {
+      return name;
+    }
+    const highlights = sessionNameHighlights(name, this.filterText);
+    if (highlights.length === 0) {
+      return name;
+    }
+    return { label: name, highlights };
+  }
+
   private buildSessionTreeItem(session: SessionSummary): vscode.TreeItem {
     const activity = this.getActivity(session);
     const item = new vscode.TreeItem(
-      session.threadName ?? '(名称未設定)',
+      this.buildSessionLabel(session),
       vscode.TreeItemCollapsibleState.None,
     );
 
