@@ -127,6 +127,30 @@ describe('chatStyles', () => {
     expect(css).toMatch(/\.item \.head \.head-label\s*\{[^}]*flex: 1/);
   });
 
+  it('見出しがスクロール中も項目の上端に残る（issue #716）', () => {
+    const css = stripComments(chatStyles());
+    const head = css.match(/\.item \.head\s*\{([^}]*)\}/);
+    expect(head, '.item .head の規則が見つからない').not.toBeNull();
+    expect(head![1]).toMatch(/position:\s*sticky/);
+    expect(head![1]).toMatch(/top:\s*0/);
+    // 塗らないと本文が見出しの下を通り抜けて重なる（body に背景指定が無い）
+    expect(head![1]).toMatch(/background-color:\s*var\(--vscode-editor-background/);
+  });
+
+  it('貼り付いた見出しが浮き出すメニュー類より前へ出ない（issue #716）', () => {
+    const css = stripComments(chatStyles());
+    const zOf = (selector: string): number => {
+      const rule = css.match(new RegExp(selector.replace(/[.#]/g, '\\$&') + '\\s*\\{([^}]*)\\}'));
+      expect(rule, selector + ' の規則が見つからない').not.toBeNull();
+      const z = (rule![1] ?? '').match(/z-index:\s*(\d+)/);
+      expect(z, selector + ' に z-index が無い').not.toBeNull();
+      return Number(z![1]);
+    };
+    // 見出しに隠されると「一番下へ」もスラッシュコマンド候補も押せなくなる
+    expect(zOf('.item .head')).toBeLessThan(zOf('#scrollToBottom'));
+    expect(zOf('.item .head')).toBeLessThan(zOf('#commands'));
+  });
+
   it('状態の色が実行中の見出し色より後に来て上書きする（issue #715）', () => {
     const css = stripComments(chatStyles());
     // 前に置くと .item.running .head（同じ詳細度）に負けて、色が出ない

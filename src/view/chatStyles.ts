@@ -70,12 +70,31 @@ export function chatStyles(): string {
   .item.reasoning, .item.tool { margin-bottom: 6px; }
   /* 会話の先頭が不自然に落ちないよう、最初の項目だけは上を空けない */
   #log > .item:first-child { margin-top: 0; }
+  /*
+   * 見出しはスクロールしても項目の上端に残す（issue #716）。応答が長いと見出しが
+   * 画面外へ流れ、いま読んでいるのが誰の発言か・何のログかが分からなくなる。
+   *
+   * 貼り付く範囲は親の .item の中だけなので、次の項目へ進むと見出しが入れ替わる。
+   *
+   * 背景を塗るのは必須。body に背景指定が無くエディタの背景が透けるため、塗らないと
+   * 本文が見出しの下を通り抜けて文字が重なる。この画面は createWebviewPanel で
+   * エディタ領域に出す（chatView.ts）ので、背景色は editor のものを使う。
+   *
+   * z-index は 1。.body（位置指定なし）より前へ出れば足りる。応答中の外枠
+   * （body::after、issue #701）も 1 だが、body の生成内容は #logWrap より後ろの
+   * ツリー順になるため外枠が上に残る。浮き出すメニュー類（z-index: 10）にも譲る。
+   */
   .item .head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background-color: var(--vscode-editor-background, var(--vscode-editorWidget-background));
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 8px;
-    margin-bottom: 3px;
+    /* 貼り付いたときに本文と接して見えないよう、帯の上下に少しだけ余白を持たせる */
+    padding: 3px 0;
     color: var(--vscode-descriptionForeground);
     font-size: 0.85em;
   }
