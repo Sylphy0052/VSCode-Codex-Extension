@@ -6,6 +6,7 @@ import type { MementoLike } from '../../src/util/memento';
 import { PinnedSessionStore } from '../../src/util/pinnedSessions';
 import { __mock } from '../mocks/vscode';
 import {
+  groupSummaryText,
   SessionTreeProvider,
   type SessionGroupNode,
   type TreeElement,
@@ -310,6 +311,75 @@ describe('SessionTreeProvider.getTreeItem の補足行（issue #736）', () => {
 
     expect(descriptionOf(pending, s).startsWith('承認待ち · ')).toBe(true);
     expect(descriptionOf(running, s).startsWith('実行中 · ')).toBe(true);
+  });
+});
+
+describe('groupSummaryText（issue #737）', () => {
+  it('内訳が無ければ件数だけ', () => {
+    expect(groupSummaryText([undefined, undefined, 'idle'])).toBe('3件');
+  });
+
+  it('承認待ちの件数を足す', () => {
+    expect(groupSummaryText(['approvalPending', undefined])).toBe('2件 · 承認待ち1');
+  });
+
+  it('実行中の件数を足す', () => {
+    expect(groupSummaryText(['running', 'running', 'idle'])).toBe('3件 · 実行中2');
+  });
+
+  it('両方あっても承認待ちだけを出す（狭い幅で切れて急ぐ方が押し出されないように）', () => {
+    expect(groupSummaryText(['approvalPending', 'running', 'running'])).toBe('3件 · 承認待ち1');
+  });
+
+  it('空のグループは0件', () => {
+    expect(groupSummaryText([])).toBe('0件');
+  });
+});
+
+describe('SessionTreeProvider のグループ見出しの内訳（issue #737）', () => {
+  const groupDescriptions = async (
+    provider: SessionTreeProvider,
+  ): Promise<Array<string | undefined>> => {
+    const children = await provider.getChildren();
+    return children
+      .filter(isGroup)
+      .map((g) => provider.getTreeItem(g).description)
+      .map((d) => (d === undefined ? undefined : String(d)));
+  };
+
+  it('見出しに件数と内訳が出る', async () => {
+    const s1 = session({ id: 's1', updatedAt: new Date().toISOString() });
+    const s2 = session({ id: 's2', updatedAt: new Date().toISOString() });
+    const provider = makeProvider([s1, s2], new PinnedSessionStore(), [], (s) =>
+      s.id === 's1' ? 'approvalPending' : undefined,
+    );
+
+    expect(await groupDescriptions(provider)).toEqual(['2件 · 承認待ち1']);
+  });
+
+  it('ピン留めグループでも同じ形式で出る', async () => {
+    const pinnedSession = session({ id: 's1', updatedAt: new Date().toISOString() });
+    const store = new PinnedSessionStore(fakeMemento());
+    const provider = makeProvider([pinnedSession], store, [], () => 'running');
+    await provider.pin(pinnedSession);
+
+    const children = await provider.getChildren();
+    const pinnedGroup = children.filter(isGroup).find((g) => g.groupKind === 'pinned');
+
+    expect(pinnedGroup, 'ピン留めグループが無い').toBeDefined();
+    expect(String(provider.getTreeItem(pinnedGroup as TreeElement).description)).toBe(
+      '1件 · 実行中1',
+    );
+  });
+
+  it('groupBy: none では見出し自体が出ない（表示が変わらない）', async () => {
+    __mock.setConfig('codex', { 'history.groupBy': 'none' });
+    const s = session({ id: 's1' });
+    const provider = makeProvider([s], new PinnedSessionStore(), [], () => 'running');
+
+    const children = await provider.getChildren();
+
+    expect(children.some(isGroup)).toBe(false);
   });
 });
 
