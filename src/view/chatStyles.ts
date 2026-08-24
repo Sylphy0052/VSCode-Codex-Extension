@@ -92,9 +92,9 @@ export function chatStyles(): string {
    * ときにターンの切れ目が本文の途切れ方でしか分からない。自分の発言（textLink色の線と
    * 背景）より弱い線にして、どちらが自分の発言かは引き続き見分けられるようにする。
    * 応答中は下の .item.running が progressBar 色でこの線を上書きする（詳細度で勝つ）。
+   * 変更前の padding-left: 0 は外し、.body の左余白（10px）へ戻す。線と本文が詰まる。
    */
   .agent .body {
-    padding-left: 10px;
     border-left: 2px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
   }
   .reasoning .body-content { color: var(--vscode-descriptionForeground); font-style: italic; }

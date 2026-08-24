@@ -3619,7 +3619,7 @@ Codexの`/btw`は`thread/fork`で**新しいスレッド**を作ってから聞�
 
 #### 実装
 
-- `src/view/chatStyles.ts`: `.agent .body`へ`border-left: 2px solid var(--vscode-widget-border, var(--vscode-editorWidget-border))`と`padding-left: 10px`を与える
+- `src/view/chatStyles.ts`: `.agent .body`へ`border-left: 2px solid var(--vscode-widget-border, var(--vscode-editorWidget-border))`を与える。あわせて従来の`padding-left: 0`を外し、`.body`の左余白（`10px`）へ戻す（線と本文が詰まって読みにくくなるため）
 - `src/view/chatStyles.ts`: `.item`の一律`margin-bottom: 12px`に加えて、`.item.user`へ`margin-top: 22px`、`.item.reasoning, .item.tool`へ`margin-bottom: 6px`を与える。先頭が落ちないよう`#log > .item:first-child`だけ`margin-top: 0`にする
 
 **線の色を自分の発言より弱くした。** 同じ強さにすると、どちらが自分の発言かが色でしか
