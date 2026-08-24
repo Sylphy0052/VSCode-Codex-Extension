@@ -79,6 +79,8 @@ const flushAsync = (): Promise<void> => new Promise((resolve) => setTimeout(reso
 function fakeSettingsProvider(): {
   settings: SettingsProvider;
   ensureSectionLoadedCalls: string[];
+  /** 取得に失敗した一覧の「再試行」（issue #745）が読み直しを頼んだ先。 */
+  reloadSectionCalls: string[];
   /**
    * `settings.loadingSections`をテスト側から差し替える（issue #225 レビュー指摘1）。
    * `ControlPanelViewProvider.buildState()`がこの値をそのまま`state.loadingSections`
@@ -87,6 +89,7 @@ function fakeSettingsProvider(): {
   setLoadingSections: (ids: string[]) => void;
 } {
   const ensureSectionLoadedCalls: string[] = [];
+  const reloadSectionCalls: string[] = [];
   let loadingSections: string[] = [];
   const settings = {
     load: async () => undefined,
@@ -132,10 +135,14 @@ function fakeSettingsProvider(): {
     ensureSectionLoaded: async (id: string) => {
       ensureSectionLoadedCalls.push(id);
     },
+    reloadSection: async (id: string) => {
+      reloadSectionCalls.push(id);
+    },
   };
   return {
     settings: settings as unknown as SettingsProvider,
     ensureSectionLoadedCalls,
+    reloadSectionCalls,
     setLoadingSections: (ids: string[]) => {
       loadingSections = ids;
     },
@@ -192,6 +199,38 @@ describe('ControlPanelViewProviderのセクション遅延取得（issue #225）
     // hooksの先読み（issue #741）とは別に、展開されたセクションだけが読まれる
     expect(ensureSectionLoadedCalls.filter((id) => !id.endsWith('Hooks'))).toEqual(['codexMcp']);
     expect(stateMessagesOf(sent).length).toBeGreaterThan(before);
+  });
+
+  it('retrySectionを受け取ると、取得済みでもそのセクションを読み直して送り返す（issue #745）', async () => {
+    const { settings, reloadSectionCalls, ensureSectionLoadedCalls } = fakeSettingsProvider();
+    const { logger } = fakeLogger();
+    const provider = new ControlPanelViewProvider(settings, logger);
+    const { view, sent, simulateMessage } = fakeWebviewView();
+    provider.resolveWebviewView(view as never);
+    await flushAsync();
+    const before = stateMessagesOf(sent).length;
+
+    await simulateMessage({ type: 'retrySection', id: 'codexMcp' });
+
+    // 失敗したセクションも取得済みとして記録されているため、ensureSectionLoadedでは
+    // 何も起きない。必ず読み直す方（reloadSection）を通すこと
+    expect(reloadSectionCalls).toEqual(['codexMcp']);
+    expect(ensureSectionLoadedCalls).not.toContain('codexMcp');
+    expect(stateMessagesOf(sent).length).toBeGreaterThan(before);
+  });
+
+  it('不正なセクション識別子のretrySectionは読み直さず警告だけ出す（issue #745）', async () => {
+    const { settings, reloadSectionCalls } = fakeSettingsProvider();
+    const { logger, warnings } = fakeLogger();
+    const provider = new ControlPanelViewProvider(settings, logger);
+    const { view, simulateMessage } = fakeWebviewView();
+    provider.resolveWebviewView(view as never);
+    await flushAsync();
+
+    await simulateMessage({ type: 'retrySection', id: 'notASection' });
+
+    expect(reloadSectionCalls).toEqual([]);
+    expect(warnings.some((w) => w.includes('notASection'))).toBe(true);
   });
 
   it('不正なセクション識別子は無視し、警告を出すだけでensureSectionLoadedを呼ばない', async () => {

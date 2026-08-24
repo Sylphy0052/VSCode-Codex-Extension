@@ -282,16 +282,73 @@ export function controlPanelStyles(): string {
     border-top: none;
   }
   .subsection summary.sectionTitle { margin: 0 0 4px; }
-  .sectionLoading {
+  /*
+   * 一覧の状態表示（issue #745）。読み込み中・0件・取得失敗の3つは、これまでどれも
+   * 同じ大きさの灰色の1行で、違いは色だけだった。取得失敗の色は
+   * --vscode-errorForeground だが、色だけを手掛かりにはできない
+   * （docs/design.md「状態表示は色だけに頼らない」）。行頭に形（空の受け皿／警告の
+   * 三角／動く帯）を置き、色が読めなくても3つを見分けられるようにする。
+   */
+  .stateBlock {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
     color: var(--vscode-descriptionForeground);
     font-size: 0.85em;
+  }
+  .stateIcon { display: inline-flex; flex: none; }
+  .stateText { flex: 1; }
+  /*
+   * 取得失敗だけは descriptionForeground へ落とさない。落とすと0件と同じ色になり、
+   * 形と色の2つあった手掛かりが形だけに減る
+   */
+  .state-error { color: var(--vscode-errorForeground, var(--vscode-charts-red)); }
+  /*
+   * 読み込み中は形ではなく動く帯で示す。止まった絵にすると「まだ終わっていない」と
+   * 「終わったが何も無い」の区別が付かないため。prefers-reduced-motion のときは
+   * reducedMotionStyles() が animation を止め、静止した短い帯として残る
+   */
+  .stateBar {
+    position: relative;
+    flex: none;
+    width: 24px;
+    height: 3px;
+    border-radius: 2px;
+    overflow: hidden;
+    background-color: color-mix(
+      in srgb,
+      var(--vscode-progressBar-background, var(--vscode-foreground)) 30%,
+      transparent
+    );
+  }
+  .stateBar::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 40%;
+    border-radius: 2px;
+    background-color: var(--vscode-progressBar-background, var(--vscode-foreground));
+    animation: stateBarSlide 1.2s ease-in-out infinite;
+  }
+  @keyframes stateBarSlide {
+    from { left: -40%; }
+    to { left: 100%; }
+  }
+  /*
+   * 取得に失敗した一覧を読み直すボタン（issue #745）。これまでは失敗すると
+   * セクションを閉じて開き直すしか手が無かった。全体の button は width: 100% なので、
+   * ここで文字幅へ戻す
+   */
+  .stateRetry {
+    width: auto;
+    flex: none;
+    margin-top: 0;
+    padding: 2px 8px;
+    font-size: 1em;
   }
   .mcpList { display: flex; flex-direction: column; gap: 6px; }
-  .mcpEmpty, .mcpError {
-    color: var(--vscode-descriptionForeground);
-    font-size: 0.85em;
-  }
-  .mcpError { color: var(--vscode-errorForeground, var(--vscode-descriptionForeground)); }
   /*
    * 一覧の項目（カード）にマウスを乗せたときの反応（issue #746）。
    *
@@ -350,11 +407,6 @@ export function controlPanelStyles(): string {
     border: 1px solid var(--vscode-charts-red);
   }
   .hooksList { display: flex; flex-direction: column; gap: 6px; }
-  .hooksEmpty, .hooksError {
-    color: var(--vscode-descriptionForeground);
-    font-size: 0.85em;
-  }
-  .hooksError { color: var(--vscode-errorForeground, var(--vscode-descriptionForeground)); }
   .hooksWarning {
     color: var(--vscode-charts-yellow, var(--vscode-descriptionForeground));
     font-size: 0.85em;
@@ -411,11 +463,6 @@ export function controlPanelStyles(): string {
     border: 1px solid var(--vscode-widget-border, var(--vscode-descriptionForeground));
   }
   .skillsList { display: flex; flex-direction: column; gap: 6px; }
-  .skillsEmpty, .skillsError {
-    color: var(--vscode-descriptionForeground);
-    font-size: 0.85em;
-  }
-  .skillsError { color: var(--vscode-errorForeground, var(--vscode-descriptionForeground)); }
   .skillsWarning {
     color: var(--vscode-charts-yellow, var(--vscode-descriptionForeground));
     font-size: 0.85em;
@@ -479,11 +526,6 @@ export function controlPanelStyles(): string {
   }
   .accountActions .note { border-top: none; padding-top: 0; margin-top: 6px; }
   .pluginsList, .appsList { display: flex; flex-direction: column; gap: 6px; }
-  .pluginsEmpty, .pluginsError, .appsEmpty, .appsError {
-    color: var(--vscode-descriptionForeground);
-    font-size: 0.85em;
-  }
-  .pluginsError, .appsError { color: var(--vscode-errorForeground, var(--vscode-descriptionForeground)); }
   .pluginsWarning {
     color: var(--vscode-charts-yellow, var(--vscode-descriptionForeground));
     font-size: 0.85em;
@@ -542,11 +584,6 @@ export function controlPanelStyles(): string {
     color: var(--vscode-descriptionForeground);
   }
   .importList, .importHistoryList { display: flex; flex-direction: column; gap: 6px; }
-  .importEmpty, .importError, .importHistoryEmpty {
-    color: var(--vscode-descriptionForeground);
-    font-size: 0.85em;
-  }
-  .importError { color: var(--vscode-errorForeground, var(--vscode-descriptionForeground)); }
   .importItem, .importHistoryItem {
     padding: 6px 8px;
     border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));

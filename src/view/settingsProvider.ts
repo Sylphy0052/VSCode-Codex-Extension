@@ -485,6 +485,19 @@ export class SettingsProvider {
   }
 
   /**
+   * セクションを取得済みかどうかに関わらず読み直す（issue #745、webviewの
+   * `retrySection` から呼ぶ）。
+   *
+   * 取得に失敗したセクションは `loadedSections` に入ったままなので
+   * `ensureSectionLoaded` では何も起きない。失敗した一覧の「再試行」はここを通す。
+   * 進行中の取得があれば `runFetchSection` がそれに相乗りするため、ボタンを連打しても
+   * CLIの起動は増えない。
+   */
+  async reloadSection(id: SectionId): Promise<void> {
+    await this.runFetchSection(id);
+  }
+
+  /**
    * 即時に読むものと、これまでに一度でも展開して取得したセクションをまとめて読み直す
    * （issue #225）。一度も展開していないセクションはここでも読まない
    * （パネルを開いた直後・畳んだままのセクションでCLIを起動しないのが目的）。

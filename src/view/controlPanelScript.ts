@@ -1,3 +1,5 @@
+import { STATE_ICON_PATHS } from './controlPanelIcons';
+
 /**
  * 設定パネルのWebviewで動くスクリプト。
  *
@@ -13,6 +15,92 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
   // 承認レベル（3段階）の表示名・説明・プロバイダごとの実効値。拡張機能側の
   // src/provider/approvalLevel.ts が唯一の定義元で、ここへは組み立て済みの値が入る
   const APPROVAL_LEVEL_META = ${approvalLevelMetaJson};
+
+  // 空・エラーのアイコンの形（issue #745）。定義元は src/view/controlPanelIcons.ts。
+  // SVGの文字列ではなくpathのdだけを受け取り、DOM APIで組む（HTML文字列の流し込みはしない）
+  const STATE_ICON_PATHS = ${JSON.stringify(STATE_ICON_PATHS)};
+
+  /**
+   * 一覧の「読み込み中」「0件」「取得に失敗」を見分けられる形で描く（issue #745）。
+   *
+   * 3つとも同じ小さい灰色の1行で出していたため、失敗したのか元から無いのかが
+   * 読み取れなかった。組み立てを1か所へ集約し、セクションごとに書式がずれないようにする。
+   *
+   * 返り値は組み立てた要素。呼び出し側が再試行ボタンなどを足せるようにしている。
+   */
+  function appendState(container, kind, message) {
+    const box = document.createElement('div');
+    box.className = 'stateBlock state-' + kind;
+
+    if (kind === 'loading') {
+      // 読み込み中は形ではなく動く帯で示す。動きを減らす設定では
+      // reducedMotionStyles() が止めるので、帯は止まったまま残る
+      const bar = document.createElement('span');
+      bar.className = 'stateBar';
+      box.appendChild(bar);
+    } else {
+      box.appendChild(stateIcon(kind));
+    }
+
+    const text = document.createElement('span');
+    text.className = 'stateText';
+    text.textContent = message;
+    box.appendChild(text);
+
+    container.appendChild(box);
+    return box;
+  }
+
+  /** STATE_ICON_PATHS から <svg> を組む。色は currentColor で親の文字色に従う */
+  function stateIcon(kind) {
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('viewBox', '0 0 16 16');
+    svg.setAttribute('width', '14');
+    svg.setAttribute('height', '14');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '1.3');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    for (const d of STATE_ICON_PATHS[kind] || []) {
+      const path = document.createElementNS(ns, 'path');
+      path.setAttribute('d', d);
+      svg.appendChild(path);
+    }
+    const wrap = document.createElement('span');
+    wrap.className = 'stateIcon';
+    wrap.appendChild(svg);
+    return wrap;
+  }
+
+  /**
+   * 取得に失敗したときの表示。メッセージに加えて再試行ボタンを出す。
+   *
+   * どのセクションを読み直すかは、描き込む先の要素idから引く（SECTION_CONTAINERS の逆引き）。
+   * 描画関数へsectionIdを配って回ると、渡し忘れた1つだけ再試行できない状態になりうる。
+   */
+  function appendError(container, message) {
+    const box = appendState(container, 'error', message);
+    const sectionId = SECTION_OF_CONTAINER[container.id];
+    if (!sectionId) return box;
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'stateRetry';
+    retry.textContent = '再試行';
+    retry.addEventListener('click', () => {
+      // ホストからの応答は取得が終わってから届くので、押した瞬間の手応えはここで出す。
+      // 出さないと、押しても何も変わらないまま数秒エラーが残る
+      for (const containerId of SECTION_CONTAINERS[sectionId]) {
+        renderLoading(containerId);
+      }
+      vscode.postMessage({ type: 'retrySection', id: sectionId });
+    });
+    box.appendChild(retry);
+    return box;
+  }
 
   /**
    * 承認レベルの選択と補足を現在の設定に合わせる。
@@ -193,19 +281,13 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     container.replaceChildren();
 
     if (!snapshot || snapshot.ok !== true) {
-      const p = document.createElement('p');
-      p.className = 'mcpError';
       const reason = snapshot && snapshot.reason ? snapshot.reason : '不明なエラー';
-      p.textContent = 'MCPサーバー一覧を取得できませんでした: ' + reason;
-      container.appendChild(p);
+      appendError(container, 'MCPサーバー一覧を取得できませんでした: ' + reason);
       return;
     }
 
     if (snapshot.servers.length === 0) {
-      const p = document.createElement('p');
-      p.className = 'mcpEmpty';
-      p.textContent = 'MCPサーバーは設定されていません';
-      container.appendChild(p);
+      appendState(container, 'empty', 'MCPサーバーは設定されていません');
       return;
     }
 
@@ -289,11 +371,8 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     container.replaceChildren();
 
     if (!snapshot || snapshot.ok !== true) {
-      const p = document.createElement('p');
-      p.className = 'hooksError';
       const reason = snapshot && snapshot.reason ? snapshot.reason : '不明なエラー';
-      p.textContent = 'hooks一覧を取得できませんでした: ' + reason;
-      container.appendChild(p);
+      appendError(container, 'hooks一覧を取得できませんでした: ' + reason);
       return;
     }
 
@@ -305,10 +384,7 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     }
 
     if (snapshot.hooks.length === 0) {
-      const p = document.createElement('p');
-      p.className = 'hooksEmpty';
-      p.textContent = 'hookは設定されていません';
-      container.appendChild(p);
+      appendState(container, 'empty', 'hookは設定されていません');
       return;
     }
 
@@ -393,11 +469,8 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     container.replaceChildren();
 
     if (!snapshot || snapshot.ok !== true) {
-      const p = document.createElement('p');
-      p.className = 'skillsError';
       const reason = snapshot && snapshot.reason ? snapshot.reason : '不明なエラー';
-      p.textContent = 'skills一覧を取得できませんでした: ' + reason;
-      container.appendChild(p);
+      appendError(container, 'skills一覧を取得できませんでした: ' + reason);
       return;
     }
 
@@ -409,10 +482,7 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     }
 
     if (snapshot.skills.length === 0) {
-      const p = document.createElement('p');
-      p.className = 'skillsEmpty';
-      p.textContent = 'skillは設定されていません';
-      container.appendChild(p);
+      appendState(container, 'empty', 'skillは設定されていません');
       return;
     }
 
@@ -518,11 +588,8 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     container.replaceChildren();
 
     if (!snapshot || snapshot.ok !== true) {
-      const p = document.createElement('p');
-      p.className = 'pluginsError';
       const reason = snapshot && snapshot.reason ? snapshot.reason : '不明なエラー';
-      p.textContent = 'plugin一覧を取得できませんでした: ' + reason;
-      container.appendChild(p);
+      appendError(container, 'plugin一覧を取得できませんでした: ' + reason);
       return;
     }
 
@@ -545,10 +612,7 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     }
 
     if (snapshot.plugins.length === 0) {
-      const p = document.createElement('p');
-      p.className = 'pluginsEmpty';
-      p.textContent = 'pluginは導入されていません';
-      container.appendChild(p);
+      appendState(container, 'empty', 'pluginは導入されていません');
       return;
     }
 
@@ -596,19 +660,13 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     container.replaceChildren();
 
     if (!snapshot || snapshot.ok !== true) {
-      const p = document.createElement('p');
-      p.className = 'appsError';
       const reason = snapshot && snapshot.reason ? snapshot.reason : '不明なエラー';
-      p.textContent = 'app一覧を取得できませんでした: ' + reason;
-      container.appendChild(p);
+      appendError(container, 'app一覧を取得できませんでした: ' + reason);
       return;
     }
 
     if (snapshot.apps.length === 0) {
-      const p = document.createElement('p');
-      p.className = 'appsEmpty';
-      p.textContent = 'appは導入されていません';
-      container.appendChild(p);
+      appendState(container, 'empty', 'appは導入されていません');
       return;
     }
 
@@ -710,11 +768,8 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     container.replaceChildren();
 
     if (!snapshot || snapshot.ok !== true) {
-      const p = document.createElement('p');
-      p.className = 'importError';
       const reason = snapshot && snapshot.reason ? snapshot.reason : '不明なエラー';
-      p.textContent = 'インポート候補を取得できませんでした: ' + reason;
-      container.appendChild(p);
+      appendError(container, 'インポート候補を取得できませんでした: ' + reason);
       return;
     }
 
@@ -725,10 +780,7 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     });
 
     if (snapshot.items.length === 0) {
-      const p = document.createElement('p');
-      p.className = 'importEmpty';
-      p.textContent = 'インポートできる項目は見つかりませんでした';
-      container.appendChild(p);
+      appendState(container, 'empty', 'インポートできる項目は見つかりませんでした');
       return;
     }
 
@@ -790,19 +842,13 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     container.replaceChildren();
 
     if (!snapshot || snapshot.ok !== true) {
-      const p = document.createElement('p');
-      p.className = 'importError';
       const reason = snapshot && snapshot.reason ? snapshot.reason : '不明なエラー';
-      p.textContent = 'インポート履歴を取得できませんでした: ' + reason;
-      container.appendChild(p);
+      appendError(container, 'インポート履歴を取得できませんでした: ' + reason);
       return;
     }
 
     if (snapshot.entries.length === 0) {
-      const p = document.createElement('p');
-      p.className = 'importHistoryEmpty';
-      p.textContent = 'インポートの実行履歴はありません';
-      container.appendChild(p);
+      appendState(container, 'empty', 'インポートの実行履歴はありません');
       return;
     }
 
@@ -816,11 +862,8 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     container.replaceChildren();
 
     if (!snapshot || snapshot.ok !== true) {
-      const p = document.createElement('p');
-      p.className = 'mcpError';
       const reason = snapshot && snapshot.reason ? snapshot.reason : '不明なエラー';
-      p.textContent = 'ログイン状態を取得できませんでした: ' + reason;
-      container.appendChild(p);
+      appendError(container, 'ログイン状態を取得できませんでした: ' + reason);
       return;
     }
 
@@ -1011,10 +1054,7 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
   function renderLoading(elId) {
     const container = el(elId);
     container.replaceChildren();
-    const p = document.createElement('p');
-    p.className = 'sectionLoading';
-    p.textContent = '読み込み中…';
-    container.appendChild(p);
+    appendState(container, 'loading', '読み込み中…');
   }
 
   // 取得中のセクションは読み込み中のまま留め、無関係な応答で「取得できませんでした」に
@@ -1118,6 +1158,16 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     claudeSkills: ['skillsListClaude'],
     claudePlugins: ['pluginsListClaude'],
   };
+
+  // 要素id → セクションid の逆引き（issue #745）。取得に失敗した一覧の再試行ボタンが、
+  // どのセクションを読み直せばよいかを引くのに使う。SECTION_CONTAINERSから導くので、
+  // セクションを足したときに片方だけ更新して食い違うことがない
+  const SECTION_OF_CONTAINER = {};
+  for (const sectionId of Object.keys(SECTION_CONTAINERS)) {
+    for (const containerId of SECTION_CONTAINERS[sectionId]) {
+      SECTION_OF_CONTAINER[containerId] = sectionId;
+    }
+  }
 
   for (const sectionId of Object.keys(SECTION_CONTAINERS)) {
     const details = el('section-' + sectionId);

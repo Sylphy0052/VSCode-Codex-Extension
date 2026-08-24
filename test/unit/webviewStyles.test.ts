@@ -258,7 +258,51 @@ describe('controlPanelStyles', () => {
     const css = controlPanelStyles();
     expect(css).toContain('.section');
     expect(css).toContain('summary.sectionTitle');
-    expect(css).toContain('.sectionLoading');
+    // 読み込み中の表示は issue #745 で .stateBlock / .state-loading へ移した
+    expect(css).toContain('.stateBlock');
+  });
+
+  it('一覧の状態表示が色以外でも見分けられる（issue #745）', () => {
+    const css = stripComments(controlPanelStyles());
+
+    // 0件と取得失敗は形（アイコン）、読み込み中は動き（帯）で示す
+    expect(css).toContain('.stateIcon');
+    const bar = css.match(/\.stateBar::after \{([^}]*)\}/);
+    expect(bar, '.stateBar::after の規則が見つからない').not.toBeNull();
+    expect(bar?.[1]).toContain('animation:');
+    expect(css).toContain('@keyframes stateBarSlide');
+
+    // 取得失敗の色は descriptionForeground へ落とさない。落とすと0件と同じ色になり、
+    // 形と色の2つあった手掛かりが形だけに減る
+    const err = css.match(/\.state-error \{([^}]*)\}/);
+    expect(err, '.state-error の規則が見つからない').not.toBeNull();
+    expect(err?.[1]).toContain('--vscode-errorForeground');
+    expect(err?.[1]).not.toContain('descriptionForeground');
+  });
+
+  it('セクションごとの空・エラー用スタイルが共通化されている（issue #745）', () => {
+    const css = stripComments(controlPanelStyles());
+
+    // 母数は、セクションごとに同じ内容を書き写していた旧いクラス名。
+    // 先に検査が実在のクラス名を拾えることを確かめてから0件を主張する
+    const legacy = /\.\w+(Empty|Error) *[,{]/;
+    expect(legacy.test('.mcpEmpty, .mcpError {'), '検査の正規表現が旧いクラス名を拾えない').toBe(
+      true,
+    );
+    expect(css).not.toMatch(legacy);
+
+    // 警告（--vscode-charts-yellow）はこの置き換えの対象外。巻き込んで消していないこと
+    expect(css).toContain('.hooksWarning');
+    expect(css).toContain('.skillsWarning');
+    expect(css).toContain('.pluginsWarning');
+  });
+
+  it('再試行ボタンが全幅のボタン指定を引き継がない（issue #745）', () => {
+    const css = stripComments(controlPanelStyles());
+    // 全体の button は width: 100%。一覧の中に置く小さいボタンは文字幅へ戻す
+    const retry = css.match(/\.stateRetry \{([^}]*)\}/);
+    expect(retry, '.stateRetry の規則が見つからない').not.toBeNull();
+    expect(retry?.[1]).toContain('width: auto');
   });
 
   it('セクション見出しのアイコンが三角マーカーを潰さない（issue #739）', () => {

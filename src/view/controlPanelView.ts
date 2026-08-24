@@ -229,6 +229,19 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    if (m['type'] === 'retrySection') {
+      // 取得に失敗した一覧の「再試行」（issue #745）。失敗したセクションも取得済みとして
+      // 記録されているため、`ensureSectionLoaded` ではなく必ず読み直す方を呼ぶ
+      const id = m['id'];
+      if (!isSectionId(id)) {
+        this.log.warn(`セクションの再取得要求が不正です: ${JSON.stringify(m)}`);
+        return;
+      }
+      await this.settings.reloadSection(id);
+      await this.post();
+      return;
+    }
+
     if (m['type'] === 'newSession') {
       await vscode.commands.executeCommand(
         m['provider'] === 'claude' ? 'claude.newChat' : 'codex.newChat',

@@ -52,3 +52,26 @@ export type SectionIconName = keyof typeof SECTION_ICONS;
 export function sectionIcon(name: SectionIconName): string {
   return `<span class="sectionIcon">${SECTION_ICONS[name]}</span>`;
 }
+
+/**
+ * 一覧が空・取得に失敗したときに出すアイコンの `<path>`（issue #745）。
+ *
+ * 見出しのアイコン（`SECTION_ICONS`）と違い、こちらはwebview側のスクリプトが実行時に
+ * 組み立てる。`controlPanelScript.ts` はDOM APIだけでDOMを組む方針（`innerHTML` 系を
+ * 使わない）なので、SVGの文字列ではなく `<path>` の `d` だけを渡し、あちらで
+ * `createElementNS` を使って組む（`workflowGraph.ts` と同じ作り）。
+ *
+ * 読み込み中には形を割り当てない。止まった絵ではなく動く帯で示す方が「まだ終わっていない」
+ * ことが伝わるため（`controlPanelStyles.ts` の `.stateBar`）。
+ */
+export const STATE_ICON_PATHS = {
+  /** 0件。空の受け皿 */
+  empty: [
+    'M2.5 9.5 4.3 3.2h7.4l1.8 6.3v3a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1z',
+    'M2.5 9.5h3l1 2h3l1-2h3',
+  ],
+  /** 取得に失敗。感嘆符付きの三角 */
+  error: ['M8 2.2 14.3 13.2H1.7z', 'M8 6.4v3.1', 'M8 11.4v0.01'],
+} as const satisfies Record<string, readonly string[]>;
+
+export type StateIconName = keyof typeof STATE_ICON_PATHS;
