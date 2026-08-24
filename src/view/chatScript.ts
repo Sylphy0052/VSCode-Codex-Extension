@@ -2289,22 +2289,33 @@ export function chatScript(
   let historyIndex = -1;
   let draft = '';
 
+  // 直前の操作が履歴移動そのものだったか（issue #698）。連続で上下を押している間は
+  // キャレットが末尾にあっても履歴をたどり続ける。文字入力やクリックが挟まると降りる。
+  let historyNavigating = false;
+
   function resetHistory() {
     historyIndex = -1;
     draft = '';
+    historyNavigating = false;
   }
 
   function historyEntries() {
     return sentTexts.slice().reverse();
   }
 
-  /** カーソルが1行目にあるか。複数行の編集を邪魔しないための判定。 */
-  function atFirstLine(input) {
-    return input.value.lastIndexOf('\\n', Math.max(0, input.selectionStart - 1)) === -1;
+  /**
+   * キャレットが入力全体の先頭にあるか（issue #698）。行頭ではなく全体の先頭で判定する。
+   * 1行目の途中で上を押したときは既定動作に任せ、キャレットが先頭へ寄るだけにする。
+   * 折り返された長い行でも視覚行ではなくキャレット位置で決まるため、途中で履歴へ飛ばない。
+   */
+  function atInputStart(input) {
+    return input.selectionStart === 0 && input.selectionEnd === 0;
   }
 
-  function atLastLine(input) {
-    return input.value.indexOf('\\n', input.selectionStart) === -1;
+  /** キャレットが入力全体の末尾にあるか（issue #698）。atInputStartの対称。 */
+  function atInputEnd(input) {
+    const end = input.value.length;
+    return input.selectionStart === end && input.selectionEnd === end;
   }
 
   function applyHistory(input, index) {
@@ -2323,11 +2334,13 @@ export function chatScript(
       if (historyIndex === -1) draft = input.value;
       if (historyIndex + 1 >= entries.length) return false;
       applyHistory(input, historyIndex + 1);
+      historyNavigating = true;
       return true;
     }
 
     if (historyIndex === -1) return false;
     applyHistory(input, historyIndex - 1);
+    historyNavigating = true;
     return true;
   }
 
@@ -2527,6 +2540,8 @@ export function chatScript(
   });
 
   el('input').addEventListener('input', (e) => {
+    // 文字を打った時点で履歴の連続移動は終わり（issue #698）
+    historyNavigating = false;
     renderArgumentHint();
     renderInputModeHint();
     const command = commandQuery(e.target);
@@ -2545,6 +2560,10 @@ export function chatScript(
   });
 
   el('input').addEventListener('blur', closeMenu);
+  // クリックでキャレットを動かしたら履歴の連続移動は終わり（issue #698）
+  el('input').addEventListener('mouseup', () => {
+    historyNavigating = false;
+  });
 
   /**
    * IME変換中かどうかの追跡（issue #288）。keydownのe.isComposingだけに頼ると
@@ -2637,11 +2656,14 @@ export function chatScript(
     }
 
     const input = e.target;
-    if (e.key === 'ArrowUp' && !e.altKey && atFirstLine(input) && stepHistory(input, -1)) {
+    // 端に着いた状態でもう一度押したときだけ履歴へ移る。途中なら既定の行移動に任せる
+    const navigable = historyNavigating;
+    historyNavigating = false;
+    if (e.key === 'ArrowUp' && !e.altKey && (navigable || atInputStart(input)) && stepHistory(input, -1)) {
       e.preventDefault();
       return;
     }
-    if (e.key === 'ArrowDown' && !e.altKey && atLastLine(input) && stepHistory(input, 1)) {
+    if (e.key === 'ArrowDown' && !e.altKey && (navigable || atInputEnd(input)) && stepHistory(input, 1)) {
       e.preventDefault();
     }
   });
