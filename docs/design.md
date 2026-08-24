@@ -3646,46 +3646,6 @@ Codexの`/btw`は`thread/fork`で**新しいスレッド**を作ってから聞�
 - `test/unit/webviewStyles.test.ts`: `.agent .body`がテーマ変数由来の`border-left`を持つこと、`.item.running .body`が`.agent .body`より後に来ること、`.item.user`の`margin-top`と`.item.reasoning, .item.tool`の`margin-bottom`が定義されていることを固定
 - 実際の線の見え方・余白の量・テーマ切り替え時の視認性はvitestのnode環境では確認できない（§14.60・§14.64・§14.65と同じ制約）。実機での確認は`docs/manual-test.md`のU-35に委ねる
 
-### 14.68 本文の行間と行長を読みやすさの基準へ揃える（issue #713）
-
-#### 背景
-
-本文の`line-height`を指定していなかった。等幅で出す領域（`.body-content` / `.diff-body` /
-`.md-code pre`）には`1.45`を置いていたが、通常の本文はブラウザ既定の`normal`（およそ1.2）
-のままで、日本語の応答が詰まって見えていた。
-
-あわせて`#log`に横幅の上限が無く、ウィンドウを広げると1行が100文字を超える。行を折り返した
-ときに次の行の先頭を見失う。
-
-#### 実装
-
-- `src/view/chatStyles.ts`: `.body`へ`line-height: 1.6`。等幅の領域は個別に`1.45`を持つのでそのまま
-- `src/view/chatStyles.ts`: `body`へ`--chat-measure: 84ch`を置き、`.body`直下の文章要素（`p` / `ul` / `ol` / `h1`〜`h6` / `blockquote` / `hr`）と`.body.plain`へ`max-width: var(--chat-measure)`
-- `src/view/chatStyles.ts`: 行間に合わせて`.body p`の下余白を`8px`→`10px`、見出しの上余白を`10px`→`14px`
-- `src/view/chatScript.ts`: `renderBody`で`node.body.classList.toggle('plain', !useMarkdown)`
-
-**上限は`.body`自身ではなく直下の文章要素へ掛けた。** `.body`へ掛けると、その中の表
-（`.md-table-wrap`）とコードブロック（`.md-code`）まで同じ箱に閉じ込められる。表は
-`width: max-content` + ラッパ側の`overflow-x: auto`で横スクロールさせる設計（§14.60）
-なので、箱を狭めると列が読めなくなる。掛ける先を列挙する形にすれば、`.md-table-wrap`と
-`.md-code`は「並べていない」ことがそのまま「上限を持たない」になる。`hr`は文章ではないが
-並べている。区切り線だけが本文より長いと、幅が揃わず段落の区切りに見えなくなるため。
-
-**生テキストで出す場合だけ`.body`自身へ掛ける。** `agent.chat.renderMarkdown`が`false`の
-とき、本文は`textContent`で`.body`へ直接載り、上の子セレクタが当たらない。ただしこの
-モードでは表もコードも生テキスト（`white-space: pre-wrap`）なので、`.body`へ直接掛けて
-問題が無い。CSSからは描画モードを判別できないため、`renderBody`が`plain`クラスを付ける。
-判定には既存の`useMarkdown`をそのまま使い、状態の持ち方は増やしていない。
-
-**上限値は`--chat-measure`の1箇所に持つ。** 掛ける先が2箇所（子セレクタの列挙と
-`.body.plain`）に分かれるため、値を直接書くと片方だけずれる。
-
-#### 確かめ方
-
-- `test/unit/webviewStyles.test.ts`: `.body`が`line-height`を持つこと、`--chat-measure`が定義され`.body > blockquote`と`.body.plain`がそれを使うこと、`.md-table-wrap`と`.md-code`に`max-width`が**無い**ことを固定する。この最後の1件は、検査そのものが規則を見つけられる形になっていることを`overflow-x` / `overflow`の対照で示している（セレクタ名はコメント中にも出るため、コメントを落としてから検査する）
-- `test/unit/webviewScript.test.ts`: `renderBody`が`plain`クラスを付け外しすること
-- 実際の行間の見え方・1行の長さ・折り返しの具合はvitestのnode環境では確認できない（§14.60・§14.64・§14.65・§14.67と同じ制約）。実機での確認は`docs/manual-test.md`のU-36に委ねる
-
 ### 14.69 ツール実行の成否を見出しの色で示す（issue #715）
 
 #### 背景
@@ -3721,7 +3681,7 @@ Codexの`/btw`は`thread/fork`で**新しいスレッド**を作ってから聞�
 
 - `test/unit/webviewScript.test.ts`: `updateNode`が`STATUS_CLASS`を引いてクラスを付け外しすること、**`STATUS_LABEL`と`STATUS_CLASS`のキーが食い違っていないこと**（成否でない`completed` / `approved` / `interacted`の3つだけが対象外）、コード中に現れる`status-*`クラスが`STATUS_CLASS_NAMES`に漏れなく並んでいること。ラベルを足したのに色の割り当てを忘れる、付け外しの一覧から漏れて消えないクラスが残る、の2つを機械的に拾う
 - `test/unit/webviewStyles.test.ts`: `.item.status-failed .head`がエラー色を使うこと、`.item.running .head`より後に来ること
-- 実際の色味・テーマ切り替え時の見え方はvitestのnode環境では確認できない（§14.60・§14.64・§14.65・§14.67・§14.68と同じ制約）。実機での確認は`docs/manual-test.md`のU-37に委ねる
+- 実際の色味・テーマ切り替え時の見え方はvitestのnode環境では確認できない（§14.60・§14.64・§14.65・§14.67・§14.75と同じ制約）。実機での確認は`docs/manual-test.md`のU-37に委ねる
 
 ### 14.70 見出しに種別のアイコンを出す（issue #714）
 
@@ -3877,7 +3837,7 @@ JSソース1本を正とし、`test/unit/highlight.test.ts`がその文字列を
 #### 背景
 
 余白の好みは割れる。詰めて多く見たい人と、広く取って読みやすくしたい人がいる。
-§14.67（ターン境界の余白）・§14.68（行間と行長）でどちらも増やす方向へ動かしたので、
+§14.67（ターン境界の余白）・§14.75（行間と行長）でどちらも増やす方向へ動かしたので、
 戻す道を設定として用意する。
 
 #### 実装
@@ -3967,6 +3927,46 @@ issue #719 は「実装して実機で見比べ、良くならなければ入れ
 
 - `test/unit/webviewStyles.test.ts`: カードの規則があること、入れ子の枠を落としていること、**実行中の合図が残る順序であること**、見出しの背景がカードに合っていること
 - 見た目そのもの（件数の減り方、狭い幅での窮屈さ）はvitestのnode環境では確認できない。実機での確認は`docs/manual-test.md`のU-42に委ねる
+
+### 14.75 本文の行間と行長を読みやすさの基準へ揃える（issue #713）
+
+#### 背景
+
+本文の`line-height`を指定していなかった。等幅で出す領域（`.body-content` / `.diff-body` /
+`.md-code pre`）には`1.45`を置いていたが、通常の本文はブラウザ既定の`normal`（およそ1.2）
+のままで、日本語の応答が詰まって見えていた。
+
+あわせて`#log`に横幅の上限が無く、ウィンドウを広げると1行が100文字を超える。行を折り返した
+ときに次の行の先頭を見失う。
+
+#### 実装
+
+- `src/view/chatStyles.ts`: `.body`へ`line-height: 1.6`。等幅の領域は個別に`1.45`を持つのでそのまま
+- `src/view/chatStyles.ts`: `body`へ`--chat-measure: 84ch`を置き、`.body`直下の文章要素（`p` / `ul` / `ol` / `h1`〜`h6` / `blockquote` / `hr`）と`.body.plain`へ`max-width: var(--chat-measure)`
+- `src/view/chatStyles.ts`: 行間に合わせて`.body p`の下余白を`8px`→`10px`、見出しの上余白を`10px`→`14px`
+- `src/view/chatScript.ts`: `renderBody`で`node.body.classList.toggle('plain', !useMarkdown)`
+
+**上限は`.body`自身ではなく直下の文章要素へ掛けた。** `.body`へ掛けると、その中の表
+（`.md-table-wrap`）とコードブロック（`.md-code`）まで同じ箱に閉じ込められる。表は
+`width: max-content` + ラッパ側の`overflow-x: auto`で横スクロールさせる設計（§14.60）
+なので、箱を狭めると列が読めなくなる。掛ける先を列挙する形にすれば、`.md-table-wrap`と
+`.md-code`は「並べていない」ことがそのまま「上限を持たない」になる。`hr`は文章ではないが
+並べている。区切り線だけが本文より長いと、幅が揃わず段落の区切りに見えなくなるため。
+
+**生テキストで出す場合だけ`.body`自身へ掛ける。** `agent.chat.renderMarkdown`が`false`の
+とき、本文は`textContent`で`.body`へ直接載り、上の子セレクタが当たらない。ただしこの
+モードでは表もコードも生テキスト（`white-space: pre-wrap`）なので、`.body`へ直接掛けて
+問題が無い。CSSからは描画モードを判別できないため、`renderBody`が`plain`クラスを付ける。
+判定には既存の`useMarkdown`をそのまま使い、状態の持ち方は増やしていない。
+
+**上限値は`--chat-measure`の1箇所に持つ。** 掛ける先が2箇所（子セレクタの列挙と
+`.body.plain`）に分かれるため、値を直接書くと片方だけずれる。
+
+#### 確かめ方
+
+- `test/unit/webviewStyles.test.ts`: `.body`が`line-height`を持つこと、`--chat-measure`が定義され`.body > blockquote`と`.body.plain`がそれを使うこと、`.md-table-wrap`と`.md-code`に`max-width`が**無い**ことを固定する。この最後の1件は、検査そのものが規則を見つけられる形になっていることを`overflow-x` / `overflow`の対照で示している（セレクタ名はコメント中にも出るため、コメントを落としてから検査する）
+- `test/unit/webviewScript.test.ts`: `renderBody`が`plain`クラスを付け外しすること
+- 実際の行間の見え方・1行の長さ・折り返しの具合はvitestのnode環境では確認できない（§14.60・§14.64・§14.65・§14.67と同じ制約）。実機での確認は`docs/manual-test.md`のU-36に委ねる
 
 ## 15. 作業記録（日報・週報連携）
 
