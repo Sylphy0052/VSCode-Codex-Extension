@@ -949,6 +949,8 @@ const COMPOSER_ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9V2M5.3 4.7 8 2l2.7 2.7"/><path d="M2.5 11v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/></svg>',
   workflow:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="3.2" r="1.9"/><circle cx="3.6" cy="12.8" r="1.9"/><circle cx="12.4" cy="12.8" r="1.9"/><path d="M7.2 4.9 4.4 11.1M8.8 4.9l2.8 6.2"/></svg>',
+  scrollToBottom:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v9M5.3 8.3 8 11l2.7-2.7"/><path d="M3.5 13.5h9"/></svg>',
 } as const satisfies Record<string, string>;
 
 /** Claude Code画面の既定のインポートボタン文言（`showImport: true` のときに使う）。 */
@@ -1132,7 +1134,10 @@ ${chatStyles()}
 </style>
 </head>
 <body>
-  <div id="log"></div>
+  <div id="logWrap">
+    <div id="log"></div>
+    <button id="scrollToBottom" type="button" aria-label="会話の一番下へ移動" title="会話の一番下へ移動します" hidden>${COMPOSER_ICONS.scrollToBottom}</button>
+  </div>
   <div id="approvals"></div>
   <div id="prompts"></div>
   <div id="queue" hidden>

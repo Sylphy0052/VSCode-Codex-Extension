@@ -651,3 +651,17 @@ describe('buildChatPanelOptions（Ctrl+Fの検索窓、issue #287、design.md §
     });
   });
 });
+
+describe('会話の一番下へジャンプするボタン', () => {
+  it('#logと同じ#logWrapの中に、初期状態でhidden属性を持って描画される', () => {
+    const html = renderShell(fakeWebview() as never, buildOptions());
+    const wrapMatch = html.match(/<div id="logWrap">([\s\S]*?)<\/div>\n\s*<div id="approvals">/u);
+    expect(wrapMatch).not.toBeNull();
+    const wrapHtml = wrapMatch![1];
+
+    expect(wrapHtml).toContain('<div id="log"></div>');
+    const tag = extractButtonOpenTag(html, 'scrollToBottom');
+    expect(tag).toContain('hidden');
+    expect(tag).toContain('aria-label="会話の一番下へ移動"');
+  });
+});
