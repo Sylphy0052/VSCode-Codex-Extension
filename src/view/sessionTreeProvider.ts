@@ -284,7 +284,10 @@ export class SessionTreeProvider
     item.resourceUri = sessionUri(session);
 
     const label = this.providers.get(session.provider)?.label ?? session.provider;
-    const parts = [label, formatRelativeTime(session.updatedAt, Date.now())];
+    // 補足はいちばん見たい「いつ更新されたか」を先頭に置く（issue #736）。CLI名
+    // （`Codex` / `Claude Code`）は載せない——サイドバーの幅が狭いと後ろから切れるため、
+    // 3つ並べると相対時刻が押し出される。CLI名はツールチップの`- CLI:`に残してある
+    const parts = [formatRelativeTime(session.updatedAt, Date.now())];
     if (this.scope === 'all' && session.cwd !== undefined) {
       parts.push(basenameOf(session.cwd));
     }
@@ -295,7 +298,8 @@ export class SessionTreeProvider
     } else if (activity === 'running') {
       parts.unshift('実行中');
     }
-    item.description = parts.filter((p) => p !== '').join('  ');
+    // 区切りは中黒（issue #736）。全角スペース2個は幅を取るわりに切れ目が読み取りにくい
+    item.description = parts.filter((p) => p !== '').join(' · ');
 
     const pinned = this.isPinned(session);
 
