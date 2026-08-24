@@ -40,9 +40,13 @@ const STATUS_LABELS: Record<AutoApprovalReviewStatus, string> = {
   aborted: '中止',
 };
 
-/** 人が覆せる（＝Codexが実行を止めた）状態か。 */
+/**
+ * 実行が止まっている状態。ここを`AutoApprovalReviewStatus`で型付けしてあるので、
+ * unionの綴りを変えるとこの配列が落ちる。リテラルの`===`比較を散らすと同じ守りが効かない。
+ */
 const BLOCKING_STATUSES: readonly AutoApprovalReviewStatus[] = ['denied', 'timedOut'];
 
+/** 人が覆せる（＝Codexが実行を止めた）状態か。 */
 export function isBlockedByReview(status: string): boolean {
   return (BLOCKING_STATUSES as readonly string[]).includes(status);
 }
