@@ -875,8 +875,8 @@ export const ADD_TASK_TOOL: McpToolDefinition = {
     'approvalMode/escalateは指定できない（指定すると拒否される。権限の緩和は人が書いた' +
     '定義からのみ許可される）。cwdも指定できない（タスクがどこで動くかは人が書いた定義' +
     'からのみ決まる。追加したタスクは常にisolationの既定の置き場で動く）。roleは指定できる' +
-    '（決まるのはmodelとeffortの既定値だけで、権限には関与しない）。担当領域をまたぐ・設計の前提を変える・受入基準を下げる追加は、先に' +
-    'ask_userで人に確認すること。',
+    '（決まるのはmodelとeffortの既定値だけで、権限には関与しない）。担当領域をまたぐ・' +
+    '設計の前提を変える・受入基準を下げる追加は、先にask_userで人に確認すること。',
   inputSchema: {
     type: 'object',
     properties: {
