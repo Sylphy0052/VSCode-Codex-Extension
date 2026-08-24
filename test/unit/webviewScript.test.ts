@@ -213,6 +213,22 @@ describe('chatScript', () => {
     expect(source).toContain('decideSendKeyAction(');
   });
 
+  it('入力欄の履歴移動はキャレットが端にあるときだけ発火する（issue #698）', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+    expect(() => parses(source)).not.toThrow();
+    // 行頭ではなく入力全体の先頭・末尾で判定する（1行目の途中で押しても履歴へ飛ばない）
+    expect(source).toContain('function atInputStart(input)');
+    expect(source).toContain('function atInputEnd(input)');
+    expect(source).toContain('input.selectionStart === 0 && input.selectionEnd === 0');
+    // 行単位の旧判定は残さない（残ると列位置を見ない経路が復活する）
+    expect(source).not.toContain('atFirstLine');
+    expect(source).not.toContain('atLastLine');
+    // 連続で押している間はキャレットが末尾でも履歴をたどり続ける
+    expect(source).toContain('navigable || atInputStart(input)');
+    expect(source).toContain('navigable || atInputEnd(input)');
+    expect(source).toContain('historyNavigating = true');
+  });
+
   it('セッション累計のトークン数（issue #294）: state.sessionTokensがフッターへ出る配線がある', () => {
     const source = chatScript('Codex', { mode: 'quickPick' });
     expect(source).toContain('formatSessionTokens');
