@@ -3,11 +3,13 @@ import {
   __resetPseudoWorktreeExcludeWarningForTestOnly,
   readChatComposerButtonsConfig,
   readChatSendOnConfig,
+  readChatTurnSummaryConfig,
   readClaudeConfig,
   readNotificationsConfig,
   readWorkflowsConfig,
 } from '../../src/config';
 import { DEFAULT_COMPOSER_BUTTONS } from '../../src/view/composerButtons';
+import { DEFAULT_TURN_SUMMARY_INSTRUCTION } from '../../src/view/turnSummary';
 import { __mock } from '../mocks/vscode';
 
 describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
@@ -586,6 +588,39 @@ describe('readChatComposerButtonsConfig（issue #296）', () => {
     const result = readChatComposerButtonsConfig();
     expect(result.buttons).toEqual(DEFAULT_COMPOSER_BUTTONS);
     expect(result.warning).toContain('nope');
+  });
+});
+
+describe('readChatTurnSummaryConfig（issue #709）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('既定は無効で、指示文はDEFAULT_TURN_SUMMARY_INSTRUCTION', () => {
+    expect(readChatTurnSummaryConfig()).toEqual({
+      enabled: false,
+      instruction: DEFAULT_TURN_SUMMARY_INSTRUCTION,
+    });
+  });
+
+  it('agent.chat.turnSummary.enabledをtrueにできる', () => {
+    __mock.setConfig('agent', { 'chat.turnSummary.enabled': true });
+    expect(readChatTurnSummaryConfig().enabled).toBe(true);
+  });
+
+  it('agent.chat.turnSummary.instructionを差し替えられる', () => {
+    __mock.setConfig('agent', { 'chat.turnSummary.instruction': '要約も出して' });
+    expect(readChatTurnSummaryConfig().instruction).toBe('要約も出して');
+  });
+
+  it('空文字の指示文はそのまま返す（連結側が無効化として扱う）', () => {
+    __mock.setConfig('agent', { 'chat.turnSummary.instruction': '' });
+    expect(readChatTurnSummaryConfig().instruction).toBe('');
+  });
+
+  it('文字列でない指示文は既定へ倒す', () => {
+    __mock.setConfig('agent', { 'chat.turnSummary.instruction': 42 });
+    expect(readChatTurnSummaryConfig().instruction).toBe(DEFAULT_TURN_SUMMARY_INSTRUCTION);
   });
 });
 
