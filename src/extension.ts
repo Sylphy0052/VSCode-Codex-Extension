@@ -134,7 +134,8 @@ import {
 } from './util/editorSelection';
 import { ChatViewManager } from './view/chatView';
 import type { ActiveComposerTarget } from './view/activePanelSequence';
-import { approvalPendingBadge, countApprovalPending } from './view/approvalPending';
+import { approvalPendingBadge, type ApprovalPendingSession } from './view/approvalPending';
+import { ApprovalStatusBar, SHOW_APPROVAL_PENDING_COMMAND } from './view/approvalStatusBar';
 import { ClaudeChatViewManager } from './view/claudeChatView';
 import { ControlPanelViewProvider } from './view/controlPanelView';
 import { ConversationViewManager } from './view/conversationView';
@@ -711,22 +712,47 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   });
   context.subscriptions.push(tree, sessionsView);
 
-  // 承認待ちの件数をAgentsビューのバッジに出す（issue #734）。
-  // 件数の数え方と文言は`approvalPending.ts`に寄せてあり、ステータスバー（issue #755）と
-  // 共有する。契機は活動状態の変化（`onDidChangeState`）と、開いているセッションの
-  // 増減（`onDidChangePanels`）の両方。承認待ちのままタブを閉じた場合は前者が出ないため
-  // （`teardown`のJSDoc参照）、後者が無いとバッジが減らないまま残る。履歴の再読込
+  // 承認待ちをAgentsビューのバッジ（issue #734）とステータスバー（issue #755）へ出す。
+  // 一覧の作り方と文言は`approvalPending.ts`に寄せてあり、件数は一覧の長さで導く
+  // （数える口と開く口を分けると、バッジは1なのに開ける先が0件、という食い違いが起こる）。
+  // 契機は活動状態の変化（`onDidChangeState`）と、開いているセッションの増減
+  // （`onDidChangePanels`）の両方。承認待ちのままタブを閉じた場合は前者が出ないため
+  // （`teardown`のJSDoc参照）、後者が無いと表示が減らないまま残る。履歴の再読込
   // （`tree.refresh`）は一覧の中身が変わったときに走るもので、承認要求の増減とは別の出来事。
-  const updateSessionsBadge = (): void => {
-    const count = countApprovalPending([...chat.activityStates(), ...claudeChat.activityStates()]);
-    sessionsView.badge = approvalPendingBadge(count);
+  const approvalBar = new ApprovalStatusBar();
+  context.subscriptions.push(approvalBar);
+  const listApprovalPending = (): ApprovalPendingSession[] => [
+    ...chat.approvalPendingSessions().map((s) => ({ ...s, provider: 'codex' as const })),
+    ...claudeChat.approvalPendingSessions().map((s) => ({ ...s, provider: 'claude' as const })),
+  ];
+  const updateApprovalPending = (): void => {
+    const pending = listApprovalPending();
+    sessionsView.badge = approvalPendingBadge(pending.length);
+    approvalBar.update(pending);
   };
-  updateSessionsBadge();
+  updateApprovalPending();
   context.subscriptions.push(
-    chat.onDidChangeState(() => updateSessionsBadge()),
-    claudeChat.onDidChangeState(() => updateSessionsBadge()),
-    chat.onDidChangePanels(() => updateSessionsBadge()),
-    claudeChat.onDidChangePanels(() => updateSessionsBadge()),
+    chat.onDidChangeState(() => updateApprovalPending()),
+    claudeChat.onDidChangeState(() => updateApprovalPending()),
+    chat.onDidChangePanels(() => updateApprovalPending()),
+    claudeChat.onDidChangePanels(() => updateApprovalPending()),
+    // ステータスバーを押したとき（issue #755）。1件ならそのまま開き、複数なら選ばせる。
+    // 押した時点で数え直す（表示から時間が経って解決済みになっていることがある）
+    vscode.commands.registerCommand(SHOW_APPROVAL_PENDING_COMMAND, async () => {
+      const pending = listApprovalPending();
+      const target = pending.length === 1 ? pending[0] : await pickApprovalPending(pending);
+      if (target === undefined) {
+        return;
+      }
+      const revealed =
+        target.provider === 'claude'
+          ? claudeChat.revealSession(target.threadId)
+          : chat.revealSession(target.threadId);
+      if (!revealed) {
+        // 選んでいる間に閉じられた場合。表示も数え直して合わせる
+        updateApprovalPending();
+      }
+    }),
   );
 
   void tree.setScope(readConfig().historyScope);
@@ -2462,6 +2488,31 @@ function createExecutablePathResolver(provider: AgentProvider, log: Logger): () 
     }
     return spawnPath;
   };
+}
+
+/**
+ * 承認待ちが複数あるときに、どれへ戻るか選ばせる（issue #755）。
+ *
+ * 0件で押されることもある（表示から時間が経って全て解決済みになった場合）。
+ * 空のQuickPickを開くと「選ぶものが無い」のか「壊れている」のか分からないため、
+ * その旨を出して何も開かない。
+ */
+async function pickApprovalPending(
+  pending: readonly ApprovalPendingSession[],
+): Promise<ApprovalPendingSession | undefined> {
+  if (pending.length === 0) {
+    void vscode.window.showInformationMessage('承認待ちの会話はありません。');
+    return undefined;
+  }
+  const picked = await vscode.window.showQuickPick(
+    pending.map((session) => ({
+      label: session.title,
+      description: session.provider === 'claude' ? 'Claude Code' : 'Codex',
+      session,
+    })),
+    { placeHolder: '承認待ちの会話を選ぶ' },
+  );
+  return picked?.session;
 }
 
 /**

@@ -478,7 +478,49 @@ export const window = {
     _options: unknown,
     task: (progress: { report: () => void }) => Thenable<T>,
   ): Promise<T> => task({ report: () => undefined }),
+  /** テスト用: 表示はせず、状態を持つだけの項目を返す（issue #755）。 */
+  createStatusBarItem: (alignment: StatusBarAlignment, priority?: number): FakeStatusBarItem =>
+    new FakeStatusBarItem(alignment, priority),
 };
+
+/** `vscode.StatusBarAlignment` の代わり。実物と同じ値にする。 */
+export enum StatusBarAlignment {
+  Left = 1,
+  Right = 2,
+}
+
+/**
+ * `vscode.StatusBarItem` の代わり（issue #755）。`show()` / `hide()` は
+ * 見えているかどうかを `visible` に記録するだけ。
+ */
+export class FakeStatusBarItem {
+  text = '';
+  name: string | undefined;
+  command: string | undefined;
+  tooltip: MarkdownString | string | undefined;
+  backgroundColor: ThemeColor | undefined;
+  visible = false;
+  disposed = false;
+
+  constructor(
+    readonly alignment: StatusBarAlignment,
+    readonly priority: number | undefined,
+  ) {}
+
+  show(): void {
+    this.visible = true;
+  }
+
+  hide(): void {
+    this.visible = false;
+  }
+
+  dispose(): void {
+    this.disposed = true;
+  }
+}
+
+export type StatusBarItem = FakeStatusBarItem;
 
 export type WebviewPanel = FakeWebviewPanel;
 export type Webview = FakeWebview;
