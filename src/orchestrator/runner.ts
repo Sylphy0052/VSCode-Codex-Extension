@@ -3094,14 +3094,24 @@ export class WorkflowRunner {
     // 公開しており、run丸ごとの撤去（`removeRun`）を持たない——タスクやオーケストレーターに
     // 「他のセッションのファイルもまとめて消す」操作を渡さないための線引きなので、ここでは
     // ポートを経由せず`TeamHandoffStore`を直接組み立てる
+    //
+    // 失敗は例外（パス検証・シンボリックリンクガード）と`ok: false`（ファイルシステムの
+    // 撤去失敗）の2通りある。どちらも同じ文言で残す——片方だけ見ていると「片付けに失敗した」
+    // 事実がログに出ない（PR #711 自己レビュー指摘: medium）
+    const warnCleanupFailure = (reason: string): void => {
+      this.deps.log.warn(
+        `[workflow ${runId}] 受け渡しファイルの片付けに失敗しました: ${sanitizeForLog(reason)}`,
+      );
+    };
     void new TeamHandoffStore(live.repoRoot, nodeHandoffFileSystem)
       .removeRun(runId)
+      .then((result) => {
+        if (!result.ok) {
+          warnCleanupFailure(result.error);
+        }
+      })
       .catch((e: unknown) => {
-        this.deps.log.warn(
-          `[workflow ${runId}] 受け渡しファイルの片付けに失敗しました: ${sanitizeForLog(
-            e instanceof Error ? e.message : String(e),
-          )}`,
-        );
+        warnCleanupFailure(e instanceof Error ? e.message : String(e));
       });
   }
 

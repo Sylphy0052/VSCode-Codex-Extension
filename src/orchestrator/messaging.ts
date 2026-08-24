@@ -8,6 +8,7 @@ import {
   sanitizeForLog,
   stripControlCharsPreservingNewlines,
 } from './sanitize';
+import { TEAM_ROLES } from './rolePresets';
 import { MAX_HANDOFF_BYTES, type HandoffEntry, type HandoffResult } from './teamHandoff';
 import { formatUntrusted } from './untrustedText';
 import { RESERVED_ORCHESTRATOR_TASK_ID, truncateByCodePoint } from './workflow';
@@ -872,7 +873,8 @@ export const ADD_TASK_TOOL: McpToolDefinition = {
     'は必須。dependsOnは省略時[]。既存の検証（id形式・循環依存・上限件数・プロンプト長）を' +
     'そのまま通し、違反すれば適用前に拒否され理由が返る。autoApprove/allow/sandbox/' +
     'approvalModeは指定できない（指定すると拒否される。権限の緩和は人が書いた定義からのみ' +
-    '許可される）。担当領域をまたぐ・設計の前提を変える・受入基準を下げる追加は、先に' +
+    '許可される）。roleは指定できる（決まるのはmodelとeffortの既定値だけで、権限には' +
+    '関与しない）。担当領域をまたぐ・設計の前提を変える・受入基準を下げる追加は、先に' +
     'ask_userで人に確認すること。',
   inputSchema: {
     type: 'object',
@@ -892,6 +894,16 @@ export const ADD_TASK_TOOL: McpToolDefinition = {
       type: { type: 'string', description: 'コミットのtype（省略可）' },
       retries: { type: 'number', description: '自動再試行回数の上限（省略可）' },
       issue: { type: 'number', description: '対応するIssue番号（省略可）' },
+      // 役割（design.md §16.44、Issue #693）。`buildOrchestratorTask`が読む側を実装して
+      // いても、ここへ書かないとオーケストレーターは`tools/list`でフィールドの存在を
+      // 知れず、`additionalProperties: false`にも当たる（PR #711 自己レビュー指摘: high）
+      role: {
+        type: 'string',
+        enum: [...TEAM_ROLES],
+        description:
+          '担当する役割（省略可）。modelとeffortの既定値だけが決まる: ' +
+          `${TEAM_ROLES.join(' / ')}`,
+      },
     },
     required: ['id', 'prompt', 'done', 'dependsOn'],
     additionalProperties: false,

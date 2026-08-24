@@ -1830,8 +1830,16 @@ class FakeHandoffPort implements HandoffPort {
   readonly files = new Map<string, string>();
   /** 書き込みを常に拒否させたいテスト用。設定するとその文言でエラーを返す。 */
   writeError: string | undefined;
+  /**
+   * 書き込みで例外を投げさせたいテスト用（`ok: false`の値ではなくPromiseのreject）。
+   * `safeDispatch`のPromise分岐を通す。
+   */
+  throwOnWrite: Error | undefined;
 
   async write(taskId: string, slug: string, content: string): Promise<HandoffResult<HandoffEntry>> {
+    if (this.throwOnWrite !== undefined) {
+      throw this.throwOnWrite;
+    }
     if (this.writeError !== undefined) {
       return { ok: false, error: this.writeError };
     }
@@ -2025,6 +2033,31 @@ describe('ファイル受け渡しツール（design.md §16.44、Issue #693）'
     const body = lastBody(conn);
     expect(body['accepted']).toBe(true);
     expect((body['entries'] as unknown[]).length).toBe(2);
+  });
+
+  it('ハンドオフ実体がrejectしても、応答は1回だけ返り内部情報を含まない（Promise分岐のsafeDispatch）', async () => {
+    const handoff = new FakeHandoffPort();
+    handoff.throwOnWrite = new Error('EACCES: /home/someone/secret へ書けません');
+    const { conn } = buildHandoffServer('T1', handoff);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'write_handoff', arguments: { slug: 'notes', content: 'x' } },
+    });
+    await flush();
+
+    // 二重送信・無応答のどちらでもないこと
+    expect(conn.sent).toHaveLength(1);
+    const response = conn.sent[0];
+    expect(response && 'error' in response).toBe(true);
+    if (response && 'error' in response) {
+      expect(response.error.code).toBe(-32603);
+      // スタックやパスを含む生のメッセージを返さない（同期throwの経路と同じ扱い）
+      expect(response.error.message).not.toContain('EACCES');
+      expect(response.error.message).not.toContain('/home/someone');
+    }
   });
 
   it('delete_handoffは対象を消し、消すものが無ければ拒否する', async () => {

@@ -45,18 +45,26 @@ export const MAX_HANDOFF_FILES_PER_RUN = 100;
 
 /** このモジュールが必要とする最小限のファイルシステム操作。 */
 export interface HandoffFileSystemPort extends SymlinkCheckPort {
-  /** 親を含めてディレクトリを作る。既にあれば何もしない。 */
-  makeDirectory(target: string): Promise<void>;
-  /** UTF-8で書き込む（既存は上書き）。 */
-  writeTextFile(target: string, content: string): Promise<void>;
+  /**
+   * 親を含めてディレクトリを作る。既にあれば何もしない。
+   *
+   * **書き換える操作は成否を`boolean`で返す。** 失敗を`void`で握り潰すと、
+   * `TeamHandoffStore.write`が書けていないファイルに対して`ok: true`（「書き込みました」）
+   * を返し、直後の`read`が「ありません」になる——という、呼び出し側からは原因の追えない
+   * 不整合になる（PR #711 自己レビュー指摘: high）。読む操作（`readTextFile` /
+   * `listDirectory`）は「無ければ空」という戻り値自体が失敗を表せるので`boolean`にしない。
+   */
+  makeDirectory(target: string): Promise<boolean>;
+  /** UTF-8で書き込む（既存は上書き）。書けたら true。 */
+  writeTextFile(target: string, content: string): Promise<boolean>;
   /** UTF-8で読む。存在しなければ undefined。 */
   readTextFile(target: string): Promise<string | undefined>;
   /** ディレクトリ直下の名前一覧。存在しなければ空配列。 */
   listDirectory(target: string): Promise<string[]>;
-  /** ファイルを消す。存在しなければ何もしない。 */
-  removeFile(target: string): Promise<void>;
-  /** ディレクトリを中身ごと消す。存在しなければ何もしない。 */
-  removeDirectory(target: string): Promise<void>;
+  /** ファイルを消す。存在しなければ何もしない（その場合も true）。 */
+  removeFile(target: string): Promise<boolean>;
+  /** ディレクトリを中身ごと消す。存在しなければ何もしない（その場合も true）。 */
+  removeDirectory(target: string): Promise<boolean>;
 }
 
 /** 成否と理由。`worktree.ts` の `Result` と同じ流儀（例外ではなく値で返す）。 */
@@ -189,8 +197,12 @@ export class TeamHandoffStore {
       };
     }
 
-    await this.fs.makeDirectory(dir);
-    await this.fs.writeTextFile(target, content);
+    if (!(await this.fs.makeDirectory(dir))) {
+      return { ok: false, error: '受け渡しファイルの置き場を作れませんでした' };
+    }
+    if (!(await this.fs.writeTextFile(target, content))) {
+      return { ok: false, error: '受け渡しファイルを書き込めませんでした' };
+    }
     return {
       ok: true,
       value: { taskId, slug, relativePath: path.relative(this.repoRoot, target) },
@@ -252,7 +264,9 @@ export class TeamHandoffStore {
     if (guardMessage !== undefined) {
       return { ok: false, error: guardMessage };
     }
-    await this.fs.removeFile(target);
+    if (!(await this.fs.removeFile(target))) {
+      return { ok: false, error: '受け渡しファイルを削除できませんでした' };
+    }
     return { ok: true, value: undefined };
   }
 
@@ -274,7 +288,9 @@ export class TeamHandoffStore {
     if (guardMessage !== undefined) {
       return { ok: false, error: guardMessage };
     }
-    await this.fs.removeDirectory(dir);
+    if (!(await this.fs.removeDirectory(dir))) {
+      return { ok: false, error: '受け渡しファイルの置き場を削除できませんでした' };
+    }
     return { ok: true, value: undefined };
   }
 }

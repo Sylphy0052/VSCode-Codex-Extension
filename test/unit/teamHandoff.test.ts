@@ -24,6 +24,13 @@ class FakeHandoffFileSystem implements HandoffFileSystemPort {
   private readonly files = new Map<string, string>();
   private readonly dirs = new Set<string>();
   private readonly symlinks: Set<string>;
+  /**
+   * 書き換える操作を失敗させたいテスト用。ここへ操作名を入れると、その操作が`false`を
+   * 返す（実ファイルシステムの権限エラー・容量不足に相当する）。
+   */
+  readonly failing = new Set<
+    'makeDirectory' | 'writeTextFile' | 'removeFile' | 'removeDirectory'
+  >();
 
   constructor(symlinks: readonly string[] = []) {
     this.symlinks = new Set(symlinks);
@@ -33,12 +40,20 @@ class FakeHandoffFileSystem implements HandoffFileSystemPort {
     return this.symlinks.has(target);
   }
 
-  async makeDirectory(target: string): Promise<void> {
+  async makeDirectory(target: string): Promise<boolean> {
+    if (this.failing.has('makeDirectory')) {
+      return false;
+    }
     this.dirs.add(target);
+    return true;
   }
 
-  async writeTextFile(target: string, content: string): Promise<void> {
+  async writeTextFile(target: string, content: string): Promise<boolean> {
+    if (this.failing.has('writeTextFile')) {
+      return false;
+    }
     this.files.set(target, content);
+    return true;
   }
 
   async readTextFile(target: string): Promise<string | undefined> {
@@ -56,11 +71,18 @@ class FakeHandoffFileSystem implements HandoffFileSystemPort {
     return names;
   }
 
-  async removeFile(target: string): Promise<void> {
+  async removeFile(target: string): Promise<boolean> {
+    if (this.failing.has('removeFile')) {
+      return false;
+    }
     this.files.delete(target);
+    return true;
   }
 
-  async removeDirectory(target: string): Promise<void> {
+  async removeDirectory(target: string): Promise<boolean> {
+    if (this.failing.has('removeDirectory')) {
+      return false;
+    }
     const prefix = target.endsWith(path.sep) ? target : target + path.sep;
     for (const filePath of [...this.files.keys()]) {
       if (filePath.startsWith(prefix)) {
@@ -68,6 +90,7 @@ class FakeHandoffFileSystem implements HandoffFileSystemPort {
       }
     }
     this.dirs.delete(target);
+    return true;
   }
 
   /** テストの検証用：直接書き込んだ本文を取り出す。 */
@@ -345,6 +368,73 @@ describe('TeamHandoffStore', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toContain('シンボリックリンク');
+    }
+  });
+});
+
+describe('ファイルシステムの失敗を握り潰さない（PR #711 自己レビュー指摘: high）', () => {
+  it('書き込みに失敗したらok: falseを返す（「書き込みました」と嘘をつかない）', async () => {
+    const fs = new FakeHandoffFileSystem();
+    fs.failing.add('writeTextFile');
+    const store = new TeamHandoffStore(REPO_ROOT, fs);
+
+    const result = await store.write(RUN_ID, 'T1', 'notes', '本文');
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain('書き込めませんでした');
+    }
+  });
+
+  it('置き場を作れなければ、書き込みを試みる前にok: falseを返す', async () => {
+    const fs = new FakeHandoffFileSystem();
+    fs.failing.add('makeDirectory');
+    const store = new TeamHandoffStore(REPO_ROOT, fs);
+
+    const result = await store.write(RUN_ID, 'T1', 'notes', '本文');
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain('置き場を作れませんでした');
+    }
+    // 書き込みまで進んでいないこと（後片付けの対象になるファイルを作らない）
+    expect(fs.raw(handoffPath(REPO_ROOT, RUN_ID, 'T1', 'notes'))).toBeUndefined();
+  });
+
+  it('書き込みに失敗したファイルは実体としても残らない', async () => {
+    const fs = new FakeHandoffFileSystem();
+    fs.failing.add('writeTextFile');
+    const store = new TeamHandoffStore(REPO_ROOT, fs);
+
+    await store.write(RUN_ID, 'T1', 'notes', '本文');
+
+    expect(fs.raw(handoffPath(REPO_ROOT, RUN_ID, 'T1', 'notes'))).toBeUndefined();
+  });
+
+  it('削除に失敗したらok: falseを返す', async () => {
+    const fs = new FakeHandoffFileSystem();
+    const store = new TeamHandoffStore(REPO_ROOT, fs);
+    await store.write(RUN_ID, 'T1', 'notes', '本文');
+    fs.failing.add('removeFile');
+
+    const result = await store.remove(RUN_ID, 'T1', 'notes');
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain('削除できませんでした');
+    }
+  });
+
+  it('runの片付けに失敗したらok: falseを返す（呼び出し側がログに残せる）', async () => {
+    const fs = new FakeHandoffFileSystem();
+    fs.failing.add('removeDirectory');
+    const store = new TeamHandoffStore(REPO_ROOT, fs);
+
+    const result = await store.removeRun(RUN_ID);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain('削除できませんでした');
     }
   });
 });
