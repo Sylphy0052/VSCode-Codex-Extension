@@ -205,6 +205,37 @@ describe('chatStyles', () => {
     expect(css).toMatch(/\.body\s*\{[^}]*line-height:\s*var\(--chat-line-height\)/);
   });
 
+  it('発言をカードにする（issue #719）', () => {
+    const css = stripComments(chatStyles());
+    // margin だけを持つ先頭の .item 規則とは別に、囲いの規則がある
+    const card = css.match(
+      /\.item\s*\{[^}]*border:[^}]*var\(--vscode-[^}]*border-radius:[^}]*background-color:[^}]*\}/,
+    );
+    expect(card, 'カードの規則が見つからない').not.toBeNull();
+  });
+
+  it('カードの中で枠が二重にならない（issue #719）', () => {
+    const css = stripComments(chatStyles());
+    // 内側が自前の囲いを持つと、カードの枠と合わせて二重・三重の線になる
+    expect(css).toMatch(/\.item\.agent \.body\s*\{[^}]*border-left:\s*none/);
+    expect(css).toMatch(/\.item \.body-fold\s*\{[^}]*border:\s*none/);
+  });
+
+  it('カード化しても実行中の合図が残る（issue #719）', () => {
+    const css = stripComments(chatStyles());
+    // 同じ詳細度（0-3-0）なので、後に来たほうが勝つ。前に置くと動いている項目の線が消える
+    expect(css.indexOf('.item.running .body')).toBeGreaterThan(css.indexOf('.item.agent .body'));
+  });
+
+  it('貼り付いた見出しの背景をカードに合わせる（issue #719）', () => {
+    const css = stripComments(chatStyles());
+    // エディタの背景のままだと、カードの中に色の違う帯が浮く
+    const heads = [...css.matchAll(/\.item \.head\s*\{([^}]*)\}/g)].map((m) => m[1] ?? '');
+    expect(heads.length, '.item .head の規則が見つからない').toBeGreaterThan(0);
+    const last = heads[heads.length - 1] ?? '';
+    expect(last).toContain('background-color: var(--vscode-editorWidget-background)');
+  });
+
   it('状態の色が実行中の見出し色より後に来て上書きする（issue #715）', () => {
     const css = stripComments(chatStyles());
     // 前に置くと .item.running .head（同じ詳細度）に負けて、色が出ない

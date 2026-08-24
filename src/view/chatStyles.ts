@@ -134,6 +134,37 @@ export function chatStyles(): string {
     margin-right: -4px;
   }
   .item .head .head-label { flex: 1; min-width: 0; }
+  /*
+   * 発言をカードにする（issue #719）。1件ずつを枠・角丸・背景で囲み、どこからどこまでが
+   * 1つの発言かを形で示す。
+   *
+   * この画面はツール実行のログが多く並ぶため、全部をカードにすると1画面あたりの件数が
+   * 減る。採否は実機での見比べで決める前提の変更（issue #719 の進め方）。
+   */
+  .item {
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-radius: 6px;
+    padding: 2px 10px 6px;
+    background-color: var(--vscode-editorWidget-background);
+  }
+  /*
+   * 貼り付いた見出し（issue #716）の背景をカードに合わせる。エディタの背景のままだと、
+   * カードの中に色の違う帯が浮く。
+   */
+  .item .head {
+    background-color: var(--vscode-editorWidget-background);
+  }
+  /*
+   * 入れ子の枠を落とす。カードの内側でさらに枠を持つと、二重・三重の線になる。
+   *
+   * 落とすのは「囲い」だけで、意味を持つ線は残す:
+   * - 応答の弱い縁取り（issue #712）はカードの枠と役割が重なるので外す
+   * - 自分の発言の textLink 色の線と背景（誰の発言かの区別）は残す
+   * - 実行中の progressBar 色の線（issue #712）は .item.running が同じ詳細度で
+   *   後ろに来るため残る。動いている項目の合図を消さない
+   */
+  .item.agent .body { border-left: none; }
+  .item .body-fold { border: none; border-radius: 0; }
   .body {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
