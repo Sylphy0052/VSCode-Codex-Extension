@@ -170,8 +170,15 @@ export function progressStyles(): string {
   }
 
   /* ---- チェックリスト ---- */
-  .todo { display: flex; gap: 6px; align-items: baseline; }
-  .todo .mark { flex: none; color: var(--vscode-descriptionForeground); }
+  /* アイコンはbaselineだと縦位置が合わず、本文が折り返すと最終行へ落ちる。flex-startで
+     1行目に留め、行の高さとアイコンの差の半分だけ下げて1行目の中央へ合わせる（issue 748）。 */
+  .todo { display: flex; gap: 6px; align-items: flex-start; }
+  .todo .mark {
+    flex: none;
+    display: flex;
+    margin-top: 0.2em;
+    color: var(--vscode-descriptionForeground);
+  }
   .todo.completed .mark { color: var(--vscode-charts-green, var(--vscode-progressBar-background)); }
   .todo.completed .text {
     color: var(--vscode-descriptionForeground);
