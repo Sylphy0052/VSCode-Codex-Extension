@@ -1114,8 +1114,44 @@ export function chatScript(
       box.appendChild(row);
     }
 
+    // 公式仕様どおり、選択肢に加えて自由記述（その他）を常に出す。書き始めたら選ばれた
+    // 扱いにして、選び忘れで入力内容が捨てられるのを防ぐ（buildOptionsと同じ作り）
+    const otherRow = document.createElement('label');
+    otherRow.className = 'option';
+
+    const otherPick = document.createElement('input');
+    otherPick.type = question.multiSelect ? 'checkbox' : 'radio';
+    otherPick.name = name;
+    otherPick.value = '';
+    otherRow.appendChild(otherPick);
+    inputs.push(otherPick);
+
+    const otherLabel = document.createElement('span');
+    otherLabel.textContent = 'その他';
+    otherRow.appendChild(otherLabel);
+
+    const other = document.createElement('input');
+    other.type = 'text';
+    other.className = 'other';
+    otherRow.appendChild(other);
+    box.appendChild(otherRow);
+
+    other.addEventListener('input', () => {
+      if (other.value) otherPick.checked = true;
+    });
+
     readers.push((values) => {
-      values[question.question] = inputs.filter((i) => i.checked).map((i) => i.value);
+      const picked = [];
+      for (const input of inputs) {
+        if (!input.checked) continue;
+        // 「その他」は空欄なら回答に数えない（未回答として送信が止まる）
+        if (input === otherPick) {
+          if (other.value !== '') picked.push(other.value);
+        } else {
+          picked.push(input.value);
+        }
+      }
+      values[question.question] = picked;
     });
 
     return box;

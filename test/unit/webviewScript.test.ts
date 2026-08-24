@@ -381,6 +381,26 @@ describe('chatScript', () => {
       expect(source).toContain('node.fullText');
     });
   });
+
+  describe('AskUserQuestionの選択UI（issue #696）', () => {
+    const source = chatScript('Claude Code', { mode: 'command', commandName: 'code-review' });
+
+    it('選択肢に加えて自由記述（その他）の入力欄を出す', () => {
+      const field = source.slice(source.indexOf('function buildAskUserQuestionField'));
+      expect(field).toContain("otherLabel.textContent = 'その他'");
+      expect(field).toContain("other.type = 'text'");
+      expect(field).toContain("other.className = 'other'");
+    });
+
+    it('その他はmultiSelectに合わせてcheckbox/radioを切り替える', () => {
+      expect(source).toContain("otherPick.type = question.multiSelect ? 'checkbox' : 'radio'");
+    });
+
+    it('その他が空欄なら回答に数えない（未回答として送信が止まる）', () => {
+      const field = source.slice(source.indexOf('function buildAskUserQuestionField'));
+      expect(field).toContain("if (other.value !== '') picked.push(other.value);");
+    });
+  });
 });
 
 describe('controlPanelScript', () => {
@@ -814,7 +834,9 @@ describe('会話の一番下へジャンプするボタン', () => {
 
     expect(source).toContain('function isLogNearBottom(log)');
     expect(source).toContain('function updateScrollToBottomVisibility()');
-    expect(source).toContain("el('log').addEventListener('scroll', updateScrollToBottomVisibility)");
+    expect(source).toContain(
+      "el('log').addEventListener('scroll', updateScrollToBottomVisibility)",
+    );
     expect(source).toContain("el('scrollToBottom').addEventListener('click'");
     expect(source).toContain('log.scrollTop = log.scrollHeight');
   });
