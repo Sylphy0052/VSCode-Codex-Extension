@@ -7009,6 +7009,24 @@ codiconのフォントは使えない。`.vscodeignore` が `node_modules/**` �
 
 `ProgressTurn.editedFiles` は重複を落とした一覧のままにし、回数は `fileEditCounts`（パス→回数）を新設して持つ。既存の利用側（件数の集計、サマリの重複除去）の数え方を変えずに「同じファイルを何度も往復した」ことだけを足せる。
 
+#### 変更したファイルをディレクトリでまとめる（issue #749）
+
+「変更したファイル」はパスの平坦な一覧だった。長いセッションでは数十件になり、どのあたりを触っているのかが読み取れない。`groupEditedFiles`（`progressModel.ts`）でディレクトリごとにまとめ、見出しの下にファイル名だけを並べる。
+
+**共通の接頭辞はセグメント単位で落とす**。文字単位で比べると `src/view/a.ts` と `src/viewer/b.ts` から `src/view` が共通に見え、落とすと `er/b.ts` という読めない残骸が出る。ディレクトリを `/` で切ってから比べる。
+
+**`cwd` は使わない**。`ChatState` の `cwd` とエージェントが報告するパスの基準が一致する保証が無い（相対パスで届くこともある）。実際に届いたパスだけから共通接頭辞を決めれば、基準の取り違えが起きない。
+
+**1件のときは接頭辞を落とさない**。落とすとファイル名だけが残り、どこのファイルか分からなくなる。
+
+**並びは最初に変更した順**。名前順にすると、直近で触ったディレクトリが上に来なくなる。
+
+**打ち切りはファイル数で数える**（グループ数ではない）。1つのディレクトリに数百件ある形でも、既定の表示が `FILES_SHOWN` 件で収まる。残りは従来どおり「残りN件を表示」の裏へ回す。
+
+**階層は入れ子にしない**。見出しの文字列（`src/view/`）で階層を表し、字下げは1段だけにする。入れ子にすると深い階層でインデントが積み上がり、狭い幅でファイル名が読めなくなる。
+
+**モデル側に置いた**。`progressScript.ts` はテンプレートリテラルで型検査もlintも効かないため、パスの分解のような間違えやすいロジックは `progressModel.ts` へ寄せ、`ProgressSummary.editedFileGroups` として渡す。`editedFiles` は件数の集計（KPIタイル）が使っているのでそのまま残す。
+
 #### ターンの開閉を覚える（issue #750）
 
 古いターンを `<details>` で畳む仕組み自体は上の「古い情報を畳む」で入れたが、開閉をDOMにしか持っていなかった。`render` は状態が届くたびにタイムラインを作り直すため、応答中は数秒おきに、自分で開いた古いターンが閉じ直されていた。ターン番号 → 開閉の対応（`turnOpen`）をスクリプト側に持ち、触ったターンだけその状態を優先する。触っていないターンは従来どおり末尾 `OPEN_TURNS` 件だけ開く。
@@ -7042,6 +7060,7 @@ codiconのフォントは使えない。`.vscodeignore` が `node_modules/**` �
 - `test/unit/webviewScript.test.ts`: 稼働バーを `busy` で開閉すること、`@keyframes busySlide` が `transform` しか変えないこと、`#busyBar` だけが `position: fixed` であること（issue #751）
 - `test/unit/webviewScript.test.ts`: SVGで組み立てていること（`createElementNS`があり`codicon`が無い）、KPIの各idを書き換えていること、`OPEN_TURNS` / `FILES_SHOWN` による打ち切り、スタイルが生の色リテラルを持たないこと、`position: sticky` と不透明な背景
 - `test/unit/progressModel.test.ts`: `fileEditCounts` の集計
+- `test/unit/progressModel.test.ts`: `groupEditedFiles` のまとめ方（セグメント単位の共通接頭辞、1件のとき、同一ディレクトリのとき、並び順）（issue #749）
 - `docs/manual-test.md` C-52: 実機での見え方（ライト／ダーク、畳み、スクロール、減光設定）
 
 ### 16.44 チームモード（Issue #693）

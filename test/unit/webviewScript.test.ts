@@ -1068,6 +1068,18 @@ describe('progressScript', () => {
     expect(source).toContain('progressPercent');
   });
 
+  it('変更したファイルをディレクトリごとに出す（issue #749）', () => {
+    const source = progressScript();
+    // 陽性対照: グループを組み立てる関数がある（綴り違いで空振りしていない）
+    expect(source).toContain('function fileGroupRow(group, names)');
+    expect(source).toContain('renderFiles(view.summary.editedFileGroups);');
+    // 打ち切りはグループ数ではなくファイル数で数える
+    expect(source).toContain('const room = FILES_SHOWN - shown;');
+    expect(source).toContain('残り');
+    // 平坦な一覧を作る旧経路は残さない
+    expect(source).not.toContain('fillPathList');
+  });
+
   it('ターンの開閉を覚えて再描画で失わない（issue #750）', () => {
     const source = progressScript();
     // 陽性対照: 開閉を覚える入れ物がある（綴り違いで空振りしていない）

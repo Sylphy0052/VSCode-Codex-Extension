@@ -244,6 +244,30 @@ export function progressStyles(): string {
     font-family: var(--vscode-editor-font-family);
     font-size: 0.9em;
   }
+  /* ---- 変更したファイルのディレクトリまとめ（issue 749） ---- */
+  .fileGroup { padding: 0; }
+  .fileGroup + .fileGroup { margin-top: 6px; }
+  .groupHead {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+    overflow-wrap: anywhere;
+  }
+  .groupHead .dir { font-family: var(--vscode-editor-font-family); }
+  .groupHead .count {
+    flex: none;
+    padding: 0 5px;
+    border-radius: 8px;
+    font-variant-numeric: tabular-nums;
+    background-color: var(--vscode-badge-background);
+    color: var(--vscode-badge-foreground);
+  }
+  /* 見出しの下は1段だけ字下げする。深い階層でも段が増えないよう、階層は見出しの
+     文字列で表し、入れ子にはしない */
+  .groupFiles { padding-left: 16px; }
+
   .more {
     margin-top: 4px;
     padding: 2px 8px;
