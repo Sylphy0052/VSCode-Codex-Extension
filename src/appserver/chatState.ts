@@ -1,3 +1,4 @@
+import type { AskUserQuestionItem } from '../claude/askUserQuestion';
 import type { Attachment } from '../provider/attachments';
 import { NO_IMAGES, readUserInputImages, type ChatImage } from '../provider/imageRefs';
 import { readAutoApprovalReview } from './autoApprovalReview';
@@ -269,8 +270,10 @@ export interface PendingApproval {
   /**
    * 要求の種類。応答の形がこれで決まる。
    * `applyPatch` と `execCommand` は旧形式で、decisionの語彙が他と違う。
+   * `askUserQuestion`（issue #685）はCLIからの選択式の問い合わせで、`decide()`の
+   * 4値では応答を表現できないため専用の`questions`/`answerAskUserQuestion()`経路を使う。
    */
-  kind: 'command' | 'fileChange' | 'permissions' | 'applyPatch' | 'execCommand';
+  kind: 'command' | 'fileChange' | 'permissions' | 'applyPatch' | 'execCommand' | 'askUserQuestion';
   title: string;
   detail: string;
   /**
@@ -281,6 +284,8 @@ export interface PendingApproval {
    * 値を写さずidだけを持ち、表示のたびに項目から引く。
    */
   itemId: string | undefined;
+  /** `kind === 'askUserQuestion'` のときだけ入る、選択UIを組むための質問一覧。 */
+  questions?: AskUserQuestionItem[] | undefined;
 }
 
 export interface ChatUsage {

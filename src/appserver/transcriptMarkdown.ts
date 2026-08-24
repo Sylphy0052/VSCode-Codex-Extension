@@ -44,6 +44,7 @@ const KIND_TITLE: Record<string, string> = {
   collabAgentToolCall: 'サブエージェント操作',
   autoApprovalReview: '自動承認レビュー',
   fileRead: 'ファイル読み取り',
+  askUserQuestion: '質問',
 };
 
 /**

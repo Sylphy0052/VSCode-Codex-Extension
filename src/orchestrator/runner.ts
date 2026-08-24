@@ -3948,6 +3948,16 @@ export class WorkflowRunner {
       return { kind: 'ask' };
     }
 
+    // AskUserQuestion（issue #685）は「実際にユーザーが選んだ回答」を代行できない。
+    // ワークフロー実行系（サブエージェント内で使えない制約はCLI側にもあるが、防御的に
+    // ここでも）は自動承認の対象から外し、常に人の判断（'ask'）へ倒す。
+    // 実際に選択肢を送れるのはwebviewの`answerAskUserQuestion`だけで、承認カード側の
+    // 「承認」操作は`decide()`（`streamSession.ts`）が種別を見て常に拒否へ倒す安全策と
+    // 二重に効く
+    if (approval.kind === 'askUserQuestion') {
+      return { kind: 'ask' };
+    }
+
     const request = await buildEscalationRequest(
       task.provider,
       approval,

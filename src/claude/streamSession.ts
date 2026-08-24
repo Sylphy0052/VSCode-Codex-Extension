@@ -19,6 +19,8 @@ import type { ApprovalHandlerResult } from '../orchestrator/taskSession';
 import { killWithEscalation, MAX_LINE_BUFFER_BYTES } from '../process/childProcess';
 import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
 import { consumeNdjson } from '../util/ndjson';
+import { buildAskUserQuestionDenyResponse, buildAskUserQuestionResponse } from './askUserQuestion';
+import type { AskUserQuestionSelections } from './askUserQuestion';
 import { buildClaudeStreamArgs } from './argvBuilder';
 import {
   buildCanUseToolResponse,
@@ -1003,8 +1005,39 @@ export class ClaudeStreamSession {
       return;
     }
     this.waiting.delete(key);
+    // AskUserQuestion（issue #685）は「選んだ回答」を運べない汎用の4値decisionでは
+    // 応答を組めない。ここへ`accept`が誤って渡ってきても（想定外の呼び出し元、または
+    // ワークフロー実行系からの汎用accept）、答えの無い`allow`をCLIへ送らないよう
+    // 常に拒否で返す。実際に選択肢を送るのは`answerAskUserQuestion()`だけ。
+    // `decline`はwebview側の拒否ボタンが意図的に通る正規の経路なので、そこだけ
+    // 誤動作を疑わせるログにしない
+    if (waiting.approval.kind === 'askUserQuestion') {
+      this.write(buildControlResponse(key, buildAskUserQuestionDenyResponse()));
+      if (decision === 'decline') {
+        this.log.info('承認: askUserQuestion → 拒否');
+      } else {
+        this.log.info(
+          `承認: askUserQuestion → 拒否（${decision}経由、選択肢の送信はanswerAskUserQuestionのみ）`,
+        );
+      }
+      this.update(removeApproval(this.state, requestId));
+      return;
+    }
     this.write(buildControlResponse(key, buildCanUseToolResponse(decision, waiting.input)));
     this.log.info(`承認: ${waiting.approval.kind} → ${decision}`);
+    this.update(removeApproval(this.state, requestId));
+  }
+
+  /** ユーザーがAskUserQuestionの選択UIで選んで送信したとき。 */
+  answerAskUserQuestion(requestId: number | string, selections: AskUserQuestionSelections): void {
+    const key = String(requestId);
+    const waiting = this.waiting.get(key);
+    if (waiting === undefined || waiting.approval.kind !== 'askUserQuestion') {
+      return;
+    }
+    this.waiting.delete(key);
+    this.write(buildControlResponse(key, buildAskUserQuestionResponse(waiting.input, selections)));
+    this.log.info('AskUserQuestion回答を送信しました');
     this.update(removeApproval(this.state, requestId));
   }
 

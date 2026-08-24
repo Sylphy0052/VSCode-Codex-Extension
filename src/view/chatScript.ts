@@ -113,6 +113,9 @@ export function chatScript(
     // Claude CodeのReadツール。describeTool（claude/transcript.ts）が作る種類で、
     // Codex側には対応する項目種別が無い
     fileRead: 'ファイル読み取り',
+    // Claude CodeのAskUserQuestion（issue #685）。承認カード解決後、会話ログに
+    // 質問と回答を1項目として残すための種類
+    askUserQuestion: '質問',
   };
 
   /** ホスト側から渡されたレビューボタンの動作。 */
@@ -165,6 +168,7 @@ export function chatScript(
     'subAgentActivity',
     'collabAgentToolCall',
     'autoApprovalReview',
+    'fileRead',
   ]);
 
   /** Web検索結果を畳まずに出す件数（issue #18）。超えた分は開くまで隠す。 */
@@ -202,6 +206,11 @@ export function chatScript(
 
   // 全体を作り直すと選択中のテキストが消えてコピーできないため、要素を使い回す
   const nodes = new Map();
+
+  // 承認カードは毎回作り直す設計（下のrequestId→要素の対応）だが、AskUserQuestionだけは
+  // 選択中のradio/checkboxの状態を持つため、他のツールの再描画（stateが変わるたびに
+  // 呼ばれる）に巻き込まれて選択が消えないよう要素を使い回す（issue #685）
+  const askUserQuestionNodes = new Map();
 
   function createNode(item) {
     const wrap = document.createElement('div');
@@ -955,6 +964,17 @@ export function chatScript(
   }
 
   function renderApproval(approval, items) {
+    // AskUserQuestion（issue #685）は選択UIが要る特殊な承認カードなので、通常の
+    // 許可/拒否ボタンとは別の描画に分ける。選択中の状態を保つため要素を使い回す
+    if (approval.kind === 'askUserQuestion') {
+      const key = String(approval.requestId);
+      const existing = askUserQuestionNodes.get(key);
+      if (existing) return existing;
+      const node = renderAskUserQuestion(approval);
+      askUserQuestionNodes.set(key, node);
+      return node;
+    }
+
     const wrap = document.createElement('div');
     wrap.className = 'approval';
 
@@ -997,6 +1017,103 @@ export function chatScript(
     }
     wrap.appendChild(actions);
     return wrap;
+  }
+
+  /**
+   * AskUserQuestion（issue #685）の選択UI。「送信」/「拒否」の2ボタンに絞る
+   * （選ばずに常時許可という概念が成立しないため、常時許可ボタンは出さない）。
+   * 1〜4問を質問ごとに区切って並べ、multiSelect指定に応じてradio/checkboxを出す
+   * （見た目はbuildOptions＝requestUserInput/elicitation用と似せているが、
+   * 型（questions/options）が違うため呼び出しは共有できず別実装にしてある）。
+   */
+  function renderAskUserQuestion(approval) {
+    const wrap = document.createElement('div');
+    wrap.className = 'approval';
+
+    const title = document.createElement('h3');
+    title.textContent = approval.title;
+    wrap.appendChild(title);
+
+    const readers = [];
+    const questions = approval.questions || [];
+    questions.forEach((question, index) => {
+      wrap.appendChild(buildAskUserQuestionField(approval.requestId, question, index, readers));
+    });
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+
+    const submit = document.createElement('button');
+    submit.textContent = '送信';
+    submit.addEventListener('click', () => {
+      const answers = {};
+      for (const read of readers) read(answers);
+      // 選択必須。未回答の質問があれば送信しない（multiSelect:falseはradioで自然に
+      // 1つへ強制されるが、選び忘れ自体は防げないため両方とも件数で確認する）
+      const unanswered = questions.some((q) => (answers[q.question] || []).length === 0);
+      if (unanswered) return;
+      actions.querySelectorAll('button').forEach((b) => (b.disabled = true));
+      vscode.postMessage({ type: 'answerAskUserQuestion', requestId: approval.requestId, answers });
+    });
+    actions.appendChild(submit);
+
+    const decline = document.createElement('button');
+    decline.textContent = '拒否';
+    decline.className = 'secondary';
+    decline.addEventListener('click', () => {
+      actions.querySelectorAll('button').forEach((b) => (b.disabled = true));
+      vscode.postMessage({ type: 'approve', requestId: approval.requestId, decision: 'decline' });
+    });
+    actions.appendChild(decline);
+
+    wrap.appendChild(actions);
+    return wrap;
+  }
+
+  /** 1問分の見出し・本文・選択肢。 */
+  function buildAskUserQuestionField(requestId, question, index, readers) {
+    const box = document.createElement('div');
+    box.className = 'field';
+
+    const label = document.createElement('div');
+    label.className = 'field-label';
+    label.textContent = question.header || question.question;
+    box.appendChild(label);
+
+    if (question.header && question.header !== question.question) {
+      const desc = document.createElement('div');
+      desc.className = 'field-desc';
+      desc.textContent = question.question;
+      box.appendChild(desc);
+    }
+
+    // requestIdでscopeする。複数のAskUserQuestion承認カードが同時に並ぶとき、
+    // name（radio/checkboxのグループ化キー）が衝突するとブラウザが別カード同士を
+    // 同一グループとして扱い、片方の選択がもう片方を解除してしまう
+    const name = 'askUserQuestion-' + String(requestId) + '-' + index;
+    const inputs = [];
+    for (const option of question.options || []) {
+      const row = document.createElement('label');
+      row.className = 'option';
+
+      const input = document.createElement('input');
+      input.type = question.multiSelect ? 'checkbox' : 'radio';
+      input.name = name;
+      input.value = option.label;
+      row.appendChild(input);
+      inputs.push(input);
+
+      const text = document.createElement('span');
+      text.textContent = option.label + (option.description ? ' ・ ' + option.description : '');
+      row.appendChild(text);
+      box.appendChild(row);
+    }
+
+    readers.push((values) => {
+      values[question.question] = inputs.filter((i) => i.checked).map((i) => i.value);
+    });
+
+    return box;
   }
 
   /**
@@ -1493,8 +1610,14 @@ export function chatScript(
     const atBottom = isLogNearBottom(log);
     lastItems = state.items;
     syncItems(state.items);
-    // 承認カードは一時的なので作り直してよい（会話本文の選択は壊れない）
+    // 承認カードは一時的なので作り直してよい（会話本文の選択は壊れない）。
+    // ただしAskUserQuestionの選択状態はaskUserQuestionNodes（renderApproval）側で
+    // 要素ごと使い回すため、解決済み（一覧から消えた）分だけここで掃除する
     const approvals = el('approvals');
+    const pendingRequestIds = new Set(state.approvals.map((a) => String(a.requestId)));
+    for (const key of [...askUserQuestionNodes.keys()]) {
+      if (!pendingRequestIds.has(key)) askUserQuestionNodes.delete(key);
+    }
     approvals.replaceChildren();
     for (const approval of state.approvals) {
       approvals.appendChild(renderApproval(approval, state.items || []));
