@@ -261,6 +261,20 @@ describe('controlPanelStyles', () => {
     expect(css).toContain('.sectionLoading');
   });
 
+  it('承認レベルの選択肢に選択中・危険・ホバーの見た目がある（issue #744）', () => {
+    const css = stripComments(controlPanelStyles());
+    // 選択中は枠と背景で示す。:has が効かない環境でもネイティブのラジオの点が残る
+    expect(css).toContain('.levelOption:has(input:checked)');
+    // 保護を全て外すレベルは選ぶ前から注意色で縁取る
+    const unsafe = css.match(/\.levelOption-unsafe \{([^}]*)\}/);
+    expect(unsafe, '.levelOption-unsafe の規則が見つからない').not.toBeNull();
+    expect(unsafe?.[1]).toMatch(/border-color:/);
+    expect(css).toContain('.levelOption-unsafe:has(input:checked)');
+    // キーボードで移動したときに、どの選択肢にいるか分かる
+    expect(css).toContain('.levelOption:focus-within');
+    expect(css).toContain('.levelOption:hover');
+  });
+
   it('状態を表すバッジすべてに色以外の手掛かりがある（issue #759）', () => {
     // 色だけで分けると、グレースケールやハイコントラストで種別が消える。
     // 「色を指定している状態バッジ」を母数にして、その全部に記号か線種があることを確かめる

@@ -15,30 +15,29 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
   const APPROVAL_LEVEL_META = ${approvalLevelMetaJson};
 
   /**
-   * 承認レベルのセレクタと補足を現在の設定に合わせる。
+   * 承認レベルの選択と補足を現在の設定に合わせる。
    *
-   * どのレベルとも一致しない設定（詳細で個別に指定した状態）のときだけ「カスタム」を
-   * 選択肢へ足す。選ばせるためではなく、いまの状態を正しく見せるために出す。
+   * 選択肢はラジオボタンの並び（issue #744）。表示名と1行説明はHTML側に入っているので、
+   * ここで入れるのはプロバイダごとに変わる「実際に効く値」と、選択中の印だけ。
+   *
+   * どのレベルとも一致しない設定（承認の詳細で個別に指定した状態）では、どのラジオも
+   * 選ばない。以前の <select> では「カスタム」という選択肢を足して表していたが、
+   * ラジオでは「どれも選ばれていない」がそのまま同じ意味になる。
    */
-  function applyApprovalLevel(selectId, hintId, provider, level) {
-    const select = el(selectId);
-    const custom = select.querySelector('option[value=""]');
-    if (level) {
-      if (custom) custom.remove();
-      select.value = level;
-    } else {
-      if (!custom) {
-        const opt = document.createElement('option');
-        opt.value = '';
-        opt.textContent = 'カスタム（詳細で個別に指定）';
-        select.insertBefore(opt, select.firstChild);
+  function applyApprovalLevel(groupId, hintId, provider, level) {
+    const inputs = el(groupId).querySelectorAll('input[type="radio"]');
+    for (const input of inputs) {
+      const checked = input.value === level;
+      input.checked = checked;
+      const effective = input.parentNode.querySelector('.levelOption-effective');
+      const meta = APPROVAL_LEVEL_META[input.value];
+      if (effective) {
+        effective.textContent = checked && meta ? meta.effective[provider] : '';
       }
-      select.value = '';
     }
-    const meta = level ? APPROVAL_LEVEL_META[level] : undefined;
-    el(hintId).textContent = meta
-      ? meta.description + '（' + meta.effective[provider] + '）'
-      : '承認の詳細で個別に指定されています';
+    // どのレベルにも一致しないとき（承認の詳細で個別に指定された状態）は、
+    // どのラジオも選ばれていない状態にして、その旨を下に出す
+    el(hintId).textContent = level ? '' : '承認の詳細で個別に指定されています';
   }
 
   function defaultLabel(value) {
@@ -1066,7 +1065,8 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     });
   }
 
-  // 承認レベルは1つ選ぶと複数の設定項目へ展開される。空文字（カスタム）は選ばせない
+  // 承認レベルは1つ選ぶと複数の設定項目へ展開される。changeはラジオからグループの
+  // 要素まで伝播するので、リスナーはグループ側に1つで足りる
   for (const [id, provider] of [
     ['approvalLevel', 'codex'],
     ['claudeApprovalLevel', 'claude'],

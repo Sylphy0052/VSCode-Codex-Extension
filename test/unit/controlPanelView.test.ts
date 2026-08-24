@@ -2,6 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { noDefaults } from '../../src/codex/configToml';
 import { noClaudeDefaults } from '../../src/claude/settingsJson';
 import type { Logger } from '../../src/log';
+import {
+  APPROVAL_LEVELS,
+  APPROVAL_LEVEL_DESCRIPTIONS,
+  APPROVAL_LEVEL_LABELS,
+  isUnsafeLevel,
+} from '../../src/provider/approvalLevel';
 import { chatCsp } from '../../src/view/chatCsp';
 import { ControlPanelViewProvider } from '../../src/view/controlPanelView';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
@@ -265,6 +271,73 @@ describe('ControlPanelViewProvider（issue #358、パネル破棄時の参照ク
     await expect(provider.refresh()).resolves.toBeUndefined();
     // 破棄後は送り先（this.view）が無いので何も送られない
     expect(sent).toEqual([]);
+  });
+});
+
+describe('承認レベルを常時表示のラジオにする（issue #744）', () => {
+  const renderedHtml = async (): Promise<string> => {
+    const { settings } = fakeSettingsProvider();
+    const { logger } = fakeLogger();
+    const provider = new ControlPanelViewProvider(settings, logger);
+    const { view } = fakeWebviewView();
+    provider.resolveWebviewView(view as never);
+    await flushAsync();
+    return (view.webview as { html: string }).html;
+  };
+
+  /** name属性で束ねられたラジオのvalueを、出てくる順に取り出す。 */
+  const radioValues = (html: string, name: string): string[] => {
+    const values: string[] = [];
+    const re = new RegExp(`<input type="radio" name="${name}" value="(\\w+)">`, 'g');
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null) {
+      const value = m[1];
+      if (value !== undefined) {
+        values.push(value);
+      }
+    }
+    return values;
+  };
+
+  it('Codex側とClaude Code側の両方に、全レベルのラジオが並んでいる', async () => {
+    const html = await renderedHtml();
+    // 並びは APPROVAL_LEVELS の宣言順（安全な順）と同じでなければならない。
+    // ここがずれると、上から順に危険になっていくという読み方が崩れる
+    expect(radioValues(html, 'approvalLevel')).toEqual([...APPROVAL_LEVELS]);
+    expect(radioValues(html, 'claudeApprovalLevel')).toEqual([...APPROVAL_LEVELS]);
+  });
+
+  it('開かないと選択肢が見えない<select>へ戻っていない', async () => {
+    const html = await renderedHtml();
+    expect(html).not.toContain('<select id="approvalLevel">');
+    expect(html).not.toContain('<select id="claudeApprovalLevel">');
+    expect(html).toContain('<div class="levelGroup" id="approvalLevel" role="radiogroup"');
+  });
+
+  it('表示名と1行説明がHTMLに入っている（選ばなくても全部読める）', async () => {
+    const html = await renderedHtml();
+    for (const level of APPROVAL_LEVELS) {
+      expect(html, `${level} の表示名が無い`).toContain(APPROVAL_LEVEL_LABELS[level]);
+      expect(html, `${level} の説明が無い`).toContain(APPROVAL_LEVEL_DESCRIPTIONS[level]);
+    }
+  });
+
+  it('保護を全て外すレベルにだけ注意用のクラスが付く', async () => {
+    const html = await renderedHtml();
+    const unsafe = APPROVAL_LEVELS.filter((level) => isUnsafeLevel(level));
+    // 陽性対照: 対象が0件だとこの検査は何も確かめていない
+    expect(unsafe.length).toBeGreaterThan(0);
+    const marked = (html.match(/class="levelOption levelOption-unsafe"/g) ?? []).length;
+    // Codex側とClaude Code側で2組ぶん出る
+    expect(marked).toBe(unsafe.length * 2);
+  });
+
+  it('グループにラベルが結び付いている（読み上げで何の選択か分かる）', async () => {
+    const html = await renderedHtml();
+    expect(html).toContain('aria-labelledby="approvalLevelLabel"');
+    expect(html).toContain('id="approvalLevelLabel"');
+    expect(html).toContain('aria-labelledby="claudeApprovalLevelLabel"');
+    expect(html).toContain('id="claudeApprovalLevelLabel"');
   });
 });
 
