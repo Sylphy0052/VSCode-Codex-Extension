@@ -241,8 +241,8 @@ export function chatScript(
    * 入力欄のアイコン（chatShared.ts の COMPOSER_ICONS）は文字列のまま埋め込めるが、
    * ここは webview 側で組み立てるため同じ手が使えない。HTML文字列を流し込む経路を
    * 増やさない方針（エージェントの出力を扱う画面のため）に合わせ、パスだけを持って
-   * createElementNS で組む。この語は webviewScript.test.ts が禁止しているため、
-   * 該当のプロパティ名をコメントにも書かない。
+   * createElementNS で組む。webviewScript.test.ts はソース文字列に対して検査するため、
+   * 禁じられているプロパティ名はコメントにも書けない。
    */
   const KIND_ICON_PATHS = {
     user: [
@@ -256,7 +256,7 @@ export function chatScript(
 
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
-  /** 種別アイコンを作る。対応する図案が無ければ何も出さない（null を返す）。 */
+  /** 種別アイコンを作る。対応する図案が無ければ何も出さない（undefined を返す）。 */
   function createKindIcon(kindClass) {
     const paths = KIND_ICON_PATHS[kindClass];
     if (!paths) return undefined;
