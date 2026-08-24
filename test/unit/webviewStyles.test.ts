@@ -25,6 +25,14 @@ const balanced = (css: string): boolean => {
   return open === close;
 };
 
+/** 画面をまたいで同じことを確かめる検査の対象。画面を足したらここへ足す。 */
+const styleSources: ReadonlyArray<readonly [string, () => string]> = [
+  ['chatStyles', chatStyles],
+  ['controlPanelStyles', controlPanelStyles],
+  ['progressStyles', progressStyles],
+  ['workflowStyles', workflowStyles],
+];
+
 describe('chatStyles', () => {
   it('hidden属性を打ち消す規則がある', () => {
     expect(hasHiddenReset(chatStyles())).toBe(true);
@@ -235,19 +243,35 @@ describe('progressStyles', () => {
  * 区切りが消える。フォールバック先には実在する変数を置くこと。
  */
 describe('枠線のフォールバック（issue #758）', () => {
-  const sources: ReadonlyArray<readonly [string, () => string]> = [
-    ['chatStyles', chatStyles],
-    ['controlPanelStyles', controlPanelStyles],
-    ['progressStyles', progressStyles],
-    ['workflowStyles', workflowStyles],
-  ];
-
-  for (const [name, build] of sources) {
+  for (const [name, build] of styleSources) {
     it(`${name}: --vscode-widget-border を transparent へ落とさない`, () => {
       const css = build();
       // 変数を使っていないスタイルで素通りしないよう、拾えること自体を先に確かめる
       expect(css, '検査対象の変数が使われていない').toContain('--vscode-widget-border');
       expect(css).not.toContain('--vscode-widget-border, transparent');
+    });
+  }
+});
+
+/**
+ * 動きを減らす設定への追随（issue #760）。
+ *
+ * 抑制はアニメーションを名指しせず全称セレクタで掛ける。名指しにすると、後から足した
+ * アニメーションが漏れたまま誰にも気付かれない。
+ */
+describe('prefers-reduced-motion（issue #760）', () => {
+  for (const [name, build] of styleSources) {
+    it(`${name}: 動きを減らす設定で抑制する規則がある`, () => {
+      const css = build();
+      const rule = css.match(
+        /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\*,\s*\*::before,\s*\*::after\s*\{([^}]*)\}/,
+      );
+      expect(rule, '抑制の規則が見つからない').not.toBeNull();
+      for (const property of ['animation-duration', 'transition-duration', 'scroll-behavior']) {
+        expect(rule![1]).toContain(property);
+      }
+      // !important が無いと、個別の規則（同じ詳細度で後から来るもの）に負ける
+      expect(rule![1]).toContain('!important');
     });
   }
 });

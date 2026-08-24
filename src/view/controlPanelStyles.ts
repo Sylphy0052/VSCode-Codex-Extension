@@ -1,3 +1,5 @@
+import { reducedMotionStyles } from './reducedMotion';
+
 /**
  * 設定パネルのスタイル。
  *
@@ -443,5 +445,6 @@ export function controlPanelStyles(): string {
     font-size: 0.8em;
     word-break: break-all;
   }
+${reducedMotionStyles()}
 `;
 }
