@@ -72,6 +72,25 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     select.value = current;
   }
 
+  // 折りたたまれたセクションの中にしか出ていない異常のまとめ（issue #741）。
+  // 何を出すか・どれを優先するかの判定はホスト側（controlPanelAlerts.ts）が済ませており、
+  // ここは受け取った1件を描くだけ。押すと該当セクションを開いてそこまで運ぶ
+  function applyAlert(alert) {
+    const banner = el('alertBanner');
+    if (!banner) return;
+    if (!alert) {
+      banner.hidden = true;
+      banner.className = '';
+      banner.textContent = '';
+      return;
+    }
+    banner.hidden = false;
+    banner.className = alert.severity;
+    banner.textContent = alert.message;
+    alertSectionId = alert.sectionId;
+  }
+  // 帯を押したときの飛び先。applyAlertが最後に受け取った値を持つ
+  let alertSectionId = '';
   function applyUsage(u) {
     const box = el('usage');
     if (!u) {
@@ -877,6 +896,7 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     // 「取得できませんでした」へ誤って上書きされないよう、取得中は読み込み中の表示を
     // 保つ
     const loadingSections = state.loadingSections || [];
+    applyAlert(state.alert);
     applyUsage(state.usage);
     applyClaude(state.claude, loadingSections);
     renderSection('codexAccount', loadingSections, () => renderCodexAccount(state.account));
@@ -1125,6 +1145,18 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     }
     selectProvider(sectionId.indexOf('claude') === 0 ? 'claude' : 'codex');
     details.open = true;
+    // 開いただけでは画面外のことがある（issue #741）。パネルは縦に長い
+    details.scrollIntoView({ block: 'nearest' });
+  }
+
+  // 異常のまとめ（issue #741）を押したら、その異常があるセクションまで運ぶ。
+  // 開く処理はホストからのopenSectionと同じ関数を通す（取得の要求・読み込み中の表示は
+  // 既存のtoggleイベントが引き続き担う）
+  const alertBanner = el('alertBanner');
+  if (alertBanner) {
+    alertBanner.addEventListener('click', () => {
+      if (alertSectionId) openRequestedSection(alertSectionId);
+    });
   }
 
   window.addEventListener('message', (event) => {

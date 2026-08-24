@@ -70,6 +70,8 @@ function fakeSettingsProvider(): SettingsProvider {
   const settings = {
     load: async () => undefined,
     loadingSections: [],
+    /** 異常のまとめ（issue #741）が未読込と読み込み失敗を区別するのに使う。 */
+    loadedSectionIds: new Set<string>(),
     snapshot: () => ({
       models: [],
       efforts: [],

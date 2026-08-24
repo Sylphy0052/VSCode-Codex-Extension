@@ -461,6 +461,18 @@ export class SettingsProvider {
   }
 
   /**
+   * 一度でも取得したセクション（issue #741）。
+   *
+   * 未取得のセクションは中身が`{ ok: false, reason: 'まだ読み込んでいません' }`のままで、
+   * 取得に失敗した状態と形が同じ。異常のまとめ（`controlPanelAlerts.ts`）が
+   * 「読み込んでいないだけ」を「読み込みに失敗した」と誤って出さないよう、
+   * どこまで読んだかを外から見られるようにする。
+   */
+  get loadedSectionIds(): ReadonlySet<SectionId> {
+    return this.loadedSections;
+  }
+
+  /**
    * セクションを未取得なら取得する（issue #225、webviewの`toggleSection`から呼ぶ）。
    * 既に一度取得済みのセクションは何もしない（開き直すたびにCLIを起動し直さないため）。
    * 取り直したいときは `load()` を呼ぶこと。

@@ -85,6 +85,38 @@ export function controlPanelStyles(): string {
     outline: 1px solid var(--vscode-focusBorder);
     outline-offset: 2px;
   }
+  /* 折りたたまれたセクションの中にしか出ていない異常のまとめ（issue #741）。
+     書式はワークフロー画面の #banner（workflowStyles.ts）へ揃える（#757 で共通化する対象）。
+     押せる要素なので button だが、ボタンの既定の見た目（幅・背景）は打ち消す */
+  #alertBanner {
+    display: block;
+    width: 100%;
+    margin: 0 0 8px;
+    padding: 6px 10px;
+    border-radius: 3px;
+    border: 1px solid;
+    background-color: transparent;
+    font-size: 0.9em;
+    text-align: left;
+    cursor: pointer;
+  }
+  #alertBanner.error {
+    border-color: var(--vscode-errorForeground);
+    color: var(--vscode-errorForeground);
+    background-color: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent);
+  }
+  #alertBanner.warning {
+    border-color: var(--vscode-charts-yellow);
+    color: var(--vscode-charts-yellow);
+    background-color: color-mix(in srgb, var(--vscode-charts-yellow) 12%, transparent);
+  }
+  /* 押せることが分かるよう、hoverでだけ濃くする（色そのものは変えない） */
+  #alertBanner.error:hover {
+    background-color: color-mix(in srgb, var(--vscode-errorForeground) 20%, transparent);
+  }
+  #alertBanner.warning:hover {
+    background-color: color-mix(in srgb, var(--vscode-charts-yellow) 20%, transparent);
+  }
   .tabs {
     display: flex;
     gap: 2px;
