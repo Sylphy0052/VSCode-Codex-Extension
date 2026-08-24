@@ -3670,7 +3670,7 @@ tasks:
    * 全タスクがdoneになると、`pump()`の終了ブロックが2周目を走る。`notifyOrchestratorRunFinished`
    * はrunにつき1度だけ送るべきで、2周目で重ねて送ってはいけない。
    */
-  it('blockedで終了→再マージ成功→再度終了、の一連でnotifyOrchestratorRunFinishedが1回だけ送られる', async () => {
+  it('blockedで終了→再マージ成功→再度終了、でnotifyOrchestratorRunFinishedが2回送られる（再開通知の追加により。Issue #491）', async () => {
     const git = fakeGit({ conflictOnce: true });
     const { runner, codexHost, store } = createHarness(YAML, { git });
     const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
@@ -3721,8 +3721,9 @@ tasks:
     // 2周目: 今度はsucceededで終了する
     expect(store.find(runId)?.tasks['T4']?.state).toBe('done');
     expect(store.find(runId)?.haltedByUser).toBe(false);
-    // notifyOrchestratorRunFinishedはrunにつき1度だけ（2周目で重ねて送られない）
-    expect(countRunFinishedNotices()).toBe(1);
+    // 再開を挟んだ2度目の終了は「同じ終了」ではないので、もう1度送られる（Issue #491。
+    // 理由は`runner.test.ts`の「run終了処理の回数」describeにある`retryTask`のテスト参照）
+    expect(countRunFinishedNotices()).toBe(2);
   });
 
   /**
@@ -7742,7 +7743,7 @@ tasks:
   );
 });
 
-describe('WorkflowRunner: run終了処理はrunにつき1度だけ（Issue #432-2）', () => {
+describe('WorkflowRunner: run終了処理の回数（Issue #432-2、Issue #491で上書き）', () => {
   /**
    * オーケストレーターへの通知はターン中は`pending`に溜まり、ターンが終わって
    * （`busy: true → false`）初めて`session.send`へ渡る（`onOrchestratorStateChanged`）。
@@ -7762,6 +7763,13 @@ describe('WorkflowRunner: run終了処理はrunにつき1度だけ（Issue #432-
     const orchestrator = codexHost.orchestratorSessions[0];
     const joined = orchestrator?.sentTexts.join('\n') ?? '';
     return (joined.match(/ワークフローの実行が終了しました/g) ?? []).length;
+  };
+
+  /** 再開通知（`notifyOrchestratorRunResumed`、design.md §16.43、Issue #491）の件数。 */
+  const countRunResumedNotices = (codexHost: FakeHost): number => {
+    const orchestrator = codexHost.orchestratorSessions[0];
+    const joined = orchestrator?.sentTexts.join('\n') ?? '';
+    return (joined.match(/終了していた実行が人の操作で再開されました/g) ?? []).length;
   };
 
   it('通常の1回で終わるrunでは、従来どおりnotifyOrchestratorRunFinishedが1回だけ送られる（誤検知防止）', async () => {
@@ -7786,7 +7794,21 @@ tasks:
     expect(countRunFinishedNotices(codexHost)).toBe(1);
   });
 
-  it('retryTask経由でも、失敗で終了→再実行成功→再度終了、の一連で1回だけ送られる', async () => {
+  /**
+   * **Issue #432-2 の受入基準をIssue #491が上書きした。**元は「runにつき1度だけ」で、
+   * 2周目の`notifyOrchestratorRunFinished`は送られなかった。
+   *
+   * #432-2 が避けたかったのは**唐突な2度目の終了通知**である。当時は再開を伝える経路が
+   * 無く、オーケストレーターから見ると「終了しました」と言われたきり黙っていたところへ
+   * もう一度「終了しました」だけが届く形だった。再開通知（`runResumed`、design.md
+   * §16.43）が入ったことでその前提が変わり、「終了→再開→終了」という筋の通った並びに
+   * なる。**2度目の終了を伝えないほうが、走っているのか終わったのか分からない状態を残す。**
+   *
+   * 一律に2回へ増えたわけではない。**再開を挟まないrunは従来どおり1回**であることを、
+   * この describe の先頭の「通常の1回で終わるrunでは、従来どおり…（誤検知防止）」が
+   * 固定している。あちらを一緒に2へ変えてはいけない。
+   */
+  it('retryTask経由では、失敗で終了→再実行成功→再度終了、で2回送られる（再開通知の追加により。Issue #491）', async () => {
     const YAML = `
 version: 1
 name: retry-task-test
@@ -7823,11 +7845,14 @@ tasks:
 
     // 2周目: 今度はsucceededで終わる
     expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
-    // notifyOrchestratorRunFinishedはrunにつき1度だけ（2周目で重ねて送られない）
-    expect(countRunFinishedNotices(codexHost)).toBe(1);
+    // 再開を挟んだ2度目の終了は「同じ終了」ではないので、もう1度送られる（Issue #491）
+    expect(countRunFinishedNotices(codexHost)).toBe(2);
+    // 再開自体も伝わっている。これが無いと2度目の「終了しました」が唐突に届く形になり、
+    // #432-2 が絞った当時の状況へ戻る
+    expect(countRunResumedNotices(codexHost)).toBe(1);
   });
 
-  it('continueTask経由でも、回数切れで終了→続けて成功→再度終了、の一連で1回だけ送られる', async () => {
+  it('continueTask経由では、回数切れで終了→続けて成功→再度終了、で2回送られる（再開通知の追加により。Issue #491）', async () => {
     const YAML = `
 version: 1
 name: continue-task-test
@@ -7867,8 +7892,45 @@ tasks:
 
     // 2周目: 今度はsucceededで終わる
     expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
-    // notifyOrchestratorRunFinishedはrunにつき1度だけ（2周目で重ねて送られない）
-    expect(countRunFinishedNotices(codexHost)).toBe(1);
+    // Issue #491。上の`retryTask`のテストと同じ理由
+    expect(countRunFinishedNotices(codexHost)).toBe(2);
+    expect(countRunResumedNotices(codexHost)).toBe(1);
+  });
+
+  it('まだ終わっていないrunの再実行では、再開通知を送らない（Issue #491）', async () => {
+    // T1とT2に依存関係を持たせない。T1が失敗してもT2が走り続けるため、runは`running`の
+    // ままになる。この状態の`retryTask`はオーケストレーターにとって「終わったものが
+    // 動き出した」ではないので、再開通知は要らない——送ると、終わっていないrunについて
+    // 「終了していた実行が再開されました」と伝えることになり、状態の認識を壊す
+    const YAML = `
+version: 1
+name: resume-notice-scope-test
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+    const { runner, codexHost, store } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/scope.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('failed', { ...initialChatState, turnFailed: true });
+    await flush();
+    flushOrchestratorTurn(codexHost);
+    // T2がまだ走っているのでrunは終わっていない（終了通知も出ていない）
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+    expect(store.find(runId)?.finishedAt).toBeUndefined();
+    expect(countRunFinishedNotices(codexHost)).toBe(0);
+
+    expect(runner.retryTask(runId, 'T1')).toEqual({ ok: true });
+    await flush();
+    flushOrchestratorTurn(codexHost);
+
+    expect(countRunResumedNotices(codexHost)).toBe(0);
   });
 
   /**

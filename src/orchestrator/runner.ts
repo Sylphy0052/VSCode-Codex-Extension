@@ -107,6 +107,7 @@ import {
   notifyOrchestratorRunFinished,
   notifyOrchestratorRunHalted,
   sendUserMessageToOrchestrator,
+  notifyOrchestratorRunResumed,
   setupOrchestratorForStart,
   syncOrchestratorTaskEvents,
 } from './runnerOrchestrator';
@@ -1169,12 +1170,24 @@ export interface LiveRun {
   tasks: Map<string, LiveTask>;
   finished: boolean;
   /**
-   * run終了時の後始末（`pump()`の終了ブロック）を実行済みかどうか（design.md §16.5、Issue #432-2）。
+   * `notifyOrchestratorRunFinished`を送り済みかどうか（design.md §16.5・§16.43、
+   * Issue #432-2、Issue #491）。
    *
    * `finished`は`retryMerge`/`retryTask`/`continueTask`が再開の起点として`false`へ戻すため、
-   * run全体が再び終了状態へ確定すると終了ブロックの2周目が走りうる。`finishedNotified`は
-   * それとは別に**一度立てたら戻さない**（再開そのものは正当な操作であり、後始末を1度に
-   * 絞りたいだけなので、`finished`と違って再開時にリセットしない）。
+   * run全体が再び終了状態へ確定すると終了ブロックの2周目が走りうる。
+   *
+   * **この旗が絞っているのは終了通知だけである。**同じ関数
+   * （`closeMessagingIfFinalMergeSettled`）が呼ぶ`closeMessaging`/`closeReviewCommentPoll`は
+   * それ自体が冪等なので旗を見ておらず、2周目でも毎回呼ばれる。
+   *
+   * **`notifyOrchestratorRunResumed`（§16.43、Issue #491）が再開を伝えるときだけ`false`へ
+   * 戻す。**#432-2 は「一度立てたら戻さない」としていたが、それは**再開を伝える経路が
+   * 無かった当時に、2度目の「終了しました」だけが唐突に届くのを避ける判断**だった。
+   * 再開通知が入って前提が変わったため、§16.43 がその判断を明示的に置き換えている
+   * （`runner.test.ts`の「run終了処理の回数」describe参照。受入基準3件を書き換えた）。
+   *
+   * 逆に、**通知以外の理由でここを戻してはいけない。**戻す条件は「再開を伝えたとき」だけで、
+   * 終了ブロックが2周目を走ること自体は戻す理由にならない（それが#432-2の塞いだ形である）。
    */
   finishedNotified: boolean;
   /** design.md §16.8「警告欄」。発生した順に積む（`maxReached` はスナップショット生成時に動的に足す）。 */
@@ -2321,7 +2334,13 @@ export class WorkflowRunner {
     }
     live.runState = next;
     // 停止していた実行を人の操作で再開する起点でもあるため、finishedを解除する
+    const wasFinished = live.finished;
     live.finished = false;
+    // 終了通知を出した後の再開だけ知らせる（Issue #491）。実行中の再実行では
+    // オーケストレーターは終わったと思っていないので、送ると混乱を増やすだけになる
+    if (wasFinished) {
+      notifyOrchestratorRunResumed(this.internals, runId, '再実行');
+    }
     this.notify(runId);
     void this.persist(runId);
     this.pump(runId);
@@ -2359,7 +2378,13 @@ export class WorkflowRunner {
     }
     live.runState = next;
     // 停止していた実行を人の操作で再開する起点（`retryTask`と同じ）
+    const wasFinished = live.finished;
     live.finished = false;
+    // Issue #491。`retryTask`と同じ条件。こちらは`prepareTaskLaunch`を通らないため
+    // MCPサーバ自体も立て直らない（`ensureMessaging`のJSDoc参照）
+    if (wasFinished) {
+      notifyOrchestratorRunResumed(this.internals, runId, '続ける');
+    }
     // `finishTaskLaunch`と同じ終了条件を組み立てる。専用ブランチを持つタスクは
     // 「コミットしてあること」を自動で足す（design.md §16.17）
     const condition = liveTask.usedWorktree ? withCommitRequirement(task.done) : task.done;

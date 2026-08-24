@@ -6299,3 +6299,56 @@ Issue本文は`ChatState`へ足す案で書かれていて、あわせて「`thr
 - `test/unit/chatViewManager.test.ts` / `test/unit/claudeChatViewManager.test.ts`: `deriveTitle`の3段（`pinnedName` → `state.name` → 最初の発言）と、`pinnedName`にラベルを重ねないこと、空白のみの`pinnedName`を無視することを固定する
 - `test/unit/runner.test.ts`: **runnerが`TaskSessionInput.taskId`を渡していることを固定する。**組み立てが正しくても、渡していなければタブ名は変わらない。fake hostは`title`という概念を持たない（§16.41）ため、観測できるのは入力までである
 - 実測（陽性の対照）: `deriveTitle`の`pinnedName`分岐を消すと両Managerのテストが落ち、`buildSessionPanelTitle`のtaskId分岐を消すと`sessionTitle.test.ts`が落ち、`runner.ts`の`taskId`の受け渡しを消すと`runner.test.ts`が落ちることを確認した（3箇所とも別々のテストが検出する）
+
+### 16.43 終了したrunを再開したとき、オーケストレーターへ再開を伝える（Issue #491）
+
+#### 背景
+
+run終了時、`notifyOrchestratorRunFinished`（`src/orchestrator/runnerOrchestrator.ts`）はオーケストレーターへ「この時点でMCPサーバは閉じるため、`list_tasks` や制御ツールはもう使えません」と伝える（§16.23）。
+
+一方、終了したrunは人の操作で再開できる。`retryTask` / `continueTask`（§16.8）と `retryMerge`（§16.17）が `live.finished` を `false` へ戻して実行を動かし直す。**この再開を伝える経路が無かった。**結果、走っているrunなのにオーケストレーターは終了したものと思ったままになる。
+
+#### 再開しても制御ツールは戻らない
+
+まずこの事実を書いておく。次に読む人がコードを読み直さずに済むようにするためで、対応の前提でもある。
+
+`retryTask` / `retryMerge` はタスクを起動する過程で `prepareTaskLaunch` を通り、そこから `ensureMessaging`（Issue #475）が呼ばれるため、**MCPサーバ自体は立て直る。**それでもオーケストレーターの制御ツールは戻らない。URLが変わるからである。
+
+- `startHttpMcpTransport`（`src/orchestrator/messaging.ts`）は `server.listen(0, '127.0.0.1', ...)` で待ち受ける。ポートはOSが毎回割り当てるため、立て直すたびに変わる
+- `registerTask` は呼ぶたびに `randomBytes(16)` で新しいトークンを発行し、URLパス（`/mcp/<token>`）へ埋める。旧トークンは `close()` の `tokenToTaskId.clear()` で消える
+- オーケストレーターがURLを受け取るのは `setupOrchestratorForStart` がセッションを開く1回だけで、その呼び出し元は `start()` と自動再開（`runnerRestore.ts`）の2つしかない。再開の経路（`retryTask` / `continueTask` / `retryMerge`）はここを通らない
+- CodexもClaude Codeも、起動後のプロセスへMCPの接続先を差し替える口を持たない（Codexは `thread/start` の `config.mcp_servers`、Claude Codeは `--mcp-config`。どちらもプロセス起動時に固定される）
+
+`continueTask` は `prepareTaskLaunch` を通らないので、MCPサーバ自体も立て直らない。
+
+#### 対応: `runResumed` を送る
+
+`OrchestratorEventKind` へ `runResumed` を足し、`notifyOrchestratorRunResumed` を新設した。`retryTask` / `continueTask` / `retryMerge` の3箇所から、**`live.finished` が `true` だったときだけ**送る。実行中の再実行では送らない——オーケストレーターは終わったと思っていないため、送ると混乱を増やすだけになる。
+
+本文には、できないこととできることの両方を書く。制御ツールは使えないままであること、実行の状況はこれまでどおり通知で届くこと、会話は続けられること。できないことだけ伝えると、オーケストレーターは会話まで諦める。
+
+この通知自体はMCPが閉じていても届く。`notifyOrchestrator` はCLIセッションへ直接送っており、MCPには依存していない（`notifyOrchestratorRunFinished` が「もうツールは使えません」と送れているのと同じ経路）。
+
+**オーケストレーターセッションを作り直して新しいURLを渡す案は採らなかった。**制御ツールは戻るが、会話の継続性を失う。`askUserCount`（§16.33の呼び出し回数上限）など、セッションに紐づく状態の引き継ぎも要る。制御ツールを戻すために会話を捨てるのは、`retry_task` を呼んだ本人にとって割に合わない。
+
+#### Issue #432-2 の受入基準を上書きする
+
+`live.finishedNotified`（Issue #432-2）は、終了ブロックが2周目を走ったときに「実行が終了しました」を二重に送らないための旗である。**再開を伝えるときにこれを `false` へ戻す。**つまり再開を挟んだrunでは、終了通知が2回送られるようになる。
+
+**これは #432-2 の判断を明示的に置き換えるものである。**#432-2 は「`notifyOrchestratorRunFinished` は run につき1度だけ」を受入基準としてテスト3件で固定していた。それを2回へ書き換えた（`test/unit/runner.test.ts` の「run終了処理の回数」describe と、§16.17 のマージのテスト1件）。
+
+**#432-2 が守っていたのは「唐突な2度目の終了通知」である。**当時は再開を伝える経路が無く、オーケストレーターから見ると「終了しました」と言われたきり黙っていたところへ、もう一度「終了しました」だけが届く形だった。何が起きたのか分からないまま同じ文面が2回届くくらいなら、1回に絞るほうが正しい。
+
+再開通知が入って前提が変わった。「終了 → 再開 → 終了」は筋の通った並びであり、**2度目の終了を伝えないほうが、走っているのか終わったのかを判断できない状態を残す。**判断を消したのではなく、前提が変わったので置き換えた。
+
+**一律に2回へ増えるわけではない。**再開を挟まないrunは従来どおり1回である。これは #432-2 が同時に置いた「通常の1回で終わるrunでは、従来どおり1回だけ送られる（誤検知防止）」のテストがそのまま固定している。上書きしたのは再開を挟む3件だけで、このテストは変えていない。
+
+戻して安全であることも測って確かめた。`closeMessagingIfFinalMergeSettled` は通知のほかに `closeMessaging` と `closeReviewCommentPoll` を呼ぶが、**そのどちらも旗を見ていない**（それ自体が冪等なため、2周目でも毎回呼ばれる）。旗の読み取りはコードベース中1箇所で、`notifyOrchestratorRunFinished` を絞る `if` だけである。したがって戻しても新たに二重に走る後始末は無い。
+
+ただし**「安全か」と「そうすべきか」は別の問いである。**上の測定が答えているのは前者だけで、後者は #432-2 の判断を読み直したうえでの仕様の選択である。
+
+#### 確かめ方
+
+- `test/unit/runner.test.ts`: 終了したrunを `retryTask` / `continueTask` / `retryMerge` で再開すると `runResumed` が届き、再開後にもう1度終了すると `runFinished` がふたたび届くこと（#432-2 から上書きした3件）。**まだ終わっていないrunの再実行では `runResumed` を送らない**ことも別のテストで固定する——依存関係の無い2タスクで片方だけ失敗させ、runが `running` のまま `retryTask` する形にした
+- 実測: 旗を戻す1行を外すと、上の3件が `expected 1 to be 2` で落ちることを確認した。緑になった理由が実装の変更であることを、この対照で測っている
+- `docs/manual-test.md` W-U: 「終了 → 再実行 → 再終了」で通知が3本届くこと、再開後にオーケストレーターが制御ツールを呼ぶと実際に何が起きるかを実機で見る。**再開後に制御ツールが使えないことは仕様であり、使えるようになっていたらこの節のほうが古い**
