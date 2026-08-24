@@ -101,6 +101,15 @@ describe('highlightCode', () => {
     expect(typesOf(highlightCode('SCSS', '/* c */'))).toEqual(['comment']);
   });
 
+  it("語の途中の '#' をコメントの開始にしない", () => {
+    // YAMLに書いたURLの断片指定などで、以降の行末までが灰色になるのを防ぐ
+    const tokens = highlightCode('yaml', 'url: http://example.com/a#b\nkey: 1');
+    expect(valuesOf(tokens, 'comment')).toEqual([]);
+    // 空白の直後なら従来どおりコメントとして拾えること（陽性対照）
+    expect(valuesOf(highlightCode('yaml', 'key: 1 # メモ'), 'comment')).toEqual(['# メモ']);
+    expect(valuesOf(highlightCode('bash', '# 行頭'), 'comment')).toEqual(['# 行頭']);
+  });
+
   it('識別子の途中の数字を数値として切らない', () => {
     expect(typesOf(highlightCode('ts', 'value2'))).toEqual(['plain']);
   });

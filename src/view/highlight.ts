@@ -42,6 +42,7 @@ export const HIGHLIGHT_SOURCE = `
   var HL_BACKTICK = String.fromCharCode(96);
   var HL_ESC = String.fromCharCode(92);
   var HL_NL = String.fromCharCode(10);
+  var HL_TAB = String.fromCharCode(9);
   var HL_DOLLAR = String.fromCharCode(36);
 
   /*
@@ -82,6 +83,7 @@ export const HIGHLIGHT_SOURCE = `
     },
     python: {
       line: '#',
+      lineBoundary: true,
       block: null,
       quotes: HL_SQ + HL_DQ,
       triple: true,
@@ -89,6 +91,7 @@ export const HIGHLIGHT_SOURCE = `
     },
     bash: {
       line: '#',
+      lineBoundary: true,
       block: null,
       quotes: HL_SQ + HL_DQ,
       triple: false,
@@ -97,6 +100,7 @@ export const HIGHLIGHT_SOURCE = `
     json: { line: null, block: null, quotes: HL_DQ, triple: false, keywords: HL_KEYWORDS.json },
     yaml: {
       line: '#',
+      lineBoundary: true,
       block: null,
       quotes: HL_SQ + HL_DQ,
       triple: false,
@@ -168,6 +172,17 @@ export const HIGHLIGHT_SOURCE = `
   }
 
   /*
+   * 行コメントの開始と見なしてよいかを返す。'#' を使う言語では、語の途中の '#'
+   * （YAMLに書いたURLの断片指定など）までコメント扱いにすると、以降の行末までが
+   * 灰色になる。行頭か空白の直後だけを開始と見なす。'//' 側にこの制限は要らない。
+   */
+  function hlCommentStarts(profile, text, i) {
+    if (!profile.lineBoundary || i === 0) return true;
+    var prev = text.charAt(i - 1);
+    return prev === ' ' || prev === HL_TAB || prev === HL_NL;
+  }
+
+  /*
    * 文字列の終わりを探して、その次の位置を返す。閉じないまま行が終わったら行末で
    * 打ち切る（ストリーミング途中の欠けたコードで、以降が全部文字列に見えるのを防ぐ）。
    */
@@ -217,7 +232,7 @@ export const HIGHLIGHT_SOURCE = `
     while (i < text.length) {
       var ch = text.charAt(i);
 
-      if (profile.line && text.startsWith(profile.line, i)) {
+      if (profile.line && text.startsWith(profile.line, i) && hlCommentStarts(profile, text, i)) {
         var lineEnd = text.indexOf(HL_NL, i);
         if (lineEnd < 0) lineEnd = text.length;
         push('comment', text.slice(i, lineEnd));
