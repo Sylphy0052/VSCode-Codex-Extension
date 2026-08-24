@@ -3189,6 +3189,9 @@ export class WorkflowRunner {
     // Issueの範囲外（`WorkflowRunnerMessagingDeps`のJSDoc参照）。ここでは値を渡すところまで
     const messagingUrl = live.messaging?.transport.registerTask(taskId);
     const input: TaskSessionInput = {
+      // タブ名にtaskIdを含めるため（Issue #599）。ワークフローが並列に開いたタスクの
+      // タブが、これが無いと全部同じ名前になる。権限の決定には使わない
+      taskId,
       cwd,
       config: effective.config,
       sandbox: effective.sandbox,

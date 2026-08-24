@@ -77,6 +77,15 @@ export interface TaskSessionInput {
    * （`'Codex'`/`LABEL`）になり、複数並んだときにどのタスクの解決か見分けられない。
    */
   mergeResolutionTaskId?: string;
+  /**
+   * このセッションが担当するタスクのid（Issue #599）。`role`・`mergeResolutionTaskId`と
+   * 同じく**タブ名を分ける用途だけに使う**（権限の決定には使わない）。
+   *
+   * 渡さないと、ワークフローが並列に開いたタスクのタブが全部同じ名前（`'Codex'`/`LABEL`）に
+   * なり、どのタブがどのタスクか画面から分からない。衝突解決セッションだけは
+   * `mergeResolutionTaskId`が先に効くため、こちらは通常のタスクにだけ現れる。
+   */
+  taskId?: string;
   /** タスクの作業ディレクトリ（worktreeまたは明示cwd）。 */
   cwd: string;
   config: TaskSessionConfig;

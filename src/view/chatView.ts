@@ -432,7 +432,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // （Issue #413 PR4）はタスクと同じ経路で開くが、タブ名だけ分けて人が見分けられるように
     // する（組み立ては`sessionTitle.ts`。Issue #533）
     const title = buildSessionPanelTitle(input, 'Codex');
-    const entry = this.buildEntry(input.cwd, title, true, taskConfig);
+    const entry = this.buildEntry(input.cwd, title, true, taskConfig, title);
     const pendingKey = this.pendingStarts.begin(entry);
     // タスク間メッセージング（design.md §16.21）。`input.mcp`が渡されていれば、
     // このスレッドだけに見せるMCPサーバとして`thread/start`のconfigへ差し込む
@@ -514,6 +514,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     title: string,
     taskManaged: boolean,
     taskConfig: CodexConfig | undefined,
+    pinnedName?: string,
   ): ChatPanel {
     // sessionのコールバックはentryを参照するが、実際に呼ばれるのはentry代入後
     // （closureが束縛するのは変数、呼び出し時点の値を読む。既存コードと同じ流儀）。
@@ -535,6 +536,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       attachments: new AttachmentBox(),
       disposed: false,
       title,
+      pinnedName,
       taskManaged,
       taskConfig,
       wasBusy: false,
@@ -712,7 +714,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       reportTurnResult(this.onActivity, entry.session.threadId, entry.cwd, state);
       this.notifyTurnComplete(entry);
     }
-    const title = deriveTitle(state);
+    const title = deriveTitle(state, entry.pinnedName);
     if (title !== undefined && entry.title !== title) {
       entry.title = title;
     }
@@ -1515,13 +1517,25 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
 export type { ChatState };
 
 /**
- * タブ名を決める。
+ * タブ名を決める。**優先順位は「オーケストレータが指定した名前 > Codexが付ける名前 >
+ * 最初の指示」**（Issue #599）。
  *
  * Codexが会話内容から付ける名前を優先するが、それが届くまでは最初の指示から作る。
  * 名前が付かないまま会話が進むと、どのタブが何の話か判らなくなるため。
+ *
+ * `pinnedName`を最優先にするのは、**ワークフローが並列に開いたタスクを見分けるため**。
+ * これが無いと、`openTaskSession`が渡したタブ名は初回表示の一瞬しか生き残らず、
+ * 最初のターンが終わった時点でCodexの要約名に置き換わる。
+ *
+ * 空白のみの名前を弾く（`.trim()`）のは`claudeChatView.ts`の`deriveTitle`と揃える
+ * （Issue #599。それまでこちら側だけ`state.name !== ''`で、空白だけのタブ名になりえた。
+ * design.md §16.41が「差の意図は未検証」としていたもの）。
  */
-export function deriveTitle(state: ChatState): string | undefined {
-  if (state.name !== undefined && state.name !== '') {
+export function deriveTitle(state: ChatState, pinnedName?: string): string | undefined {
+  if (pinnedName !== undefined && pinnedName.trim() !== '') {
+    return pinnedName;
+  }
+  if (state.name !== undefined && state.name.trim() !== '') {
     return `Codex: ${state.name}`;
   }
   const first = state.items.find((i) => i.kind === 'userMessage' && i.text.trim() !== '');

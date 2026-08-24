@@ -1353,6 +1353,38 @@ tasks:
   });
 });
 
+/**
+ * タブ名にtaskIdを載せる配線（Issue #599）。タブ名そのものの組み立ては
+ * `sessionTitle.test.ts`（`buildSessionPanelTitle`）が見ているが、**runnerが
+ * `TaskSessionInput.taskId`を渡していなければ、組み立てが正しくてもタブ名は変わらない。**
+ * 組み立てとの間の配線をここで固定する（fake hostは`title`という概念を持たないため、
+ * 観測できるのは`input.taskId`まで）。
+ */
+describe('WorkflowRunner: タブ名のためのtaskIdの受け渡し（Issue #599）', () => {
+  const YAML = `
+version: 1
+name: task-id-title
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+  - id: T2
+    provider: claude
+    prompt: p
+    done: d
+`;
+
+  it('openTaskSessionへ、そのタスク自身のidを渡す（provider問わず）', async () => {
+    const { runner, codexHost, claudeHost } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/a.yaml', '/repo');
+    expect(result.ok).toBe(true);
+    await flush();
+
+    expect(codexHost.openInputs[0]?.taskId).toBe('T1');
+    expect(claudeHost.openInputs[0]?.taskId).toBe('T2');
+  });
+});
+
 describe('WorkflowRunner: autoApprove（design.md §16.16）', () => {
   const YAML = `
 version: 1

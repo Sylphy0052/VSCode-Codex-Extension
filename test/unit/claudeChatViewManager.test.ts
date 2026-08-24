@@ -1105,15 +1105,54 @@ describe('deriveTitle（issue #199の名前解決順）', () => {
     expect(deriveTitle(baseState())).toBeUndefined();
   });
 
-  // claudeChatView.ts側は .trim() !== '' で判定しており、chatView.ts側の state.name !== ''
-  // と挙動が違う（空白のみの名前の扱い）。この差が意図されたものかは未確認。
-  // Issue #533はテストを置く回であって挙動を変える回ではないため、現状をそのまま固定する。
-  it('空白のみの名前は空文字扱いとなり、最初の発言から作る（chatView.tsとの相違点）', () => {
+  // Issue #533の時点では chatView.ts 側が state.name !== '' で判定していて挙動が違った
+  // （あちらは空白のみの名前をそのまま使った）。Issue #599 でこちらへ揃えたため、
+  // これは相違点ではなく両者で同じ挙動になっている
+  it('空白のみの名前は空文字扱いとなり、最初の発言から作る（Issue #599でchatView.tsと揃えた）', () => {
     const state = baseState({
       name: '   ',
       items: [{ kind: 'userMessage', id: '1', text: '最初の発言' } as never],
     });
     expect(deriveTitle(state)).toBe('Claude Code: 最初の発言');
+  });
+});
+
+describe('deriveTitle（Issue #599、pinnedNameを最優先にする）', () => {
+  const baseState = (
+    overrides: Partial<Parameters<typeof deriveTitle>[0]> = {},
+  ): Parameters<typeof deriveTitle>[0] =>
+    ({
+      items: [],
+      name: undefined,
+      ...overrides,
+    }) as Parameters<typeof deriveTitle>[0];
+
+  it('pinnedNameがあれば、人が付けた名前より優先する', () => {
+    const state = baseState({
+      name: '人が付けた名前',
+      items: [{ kind: 'userMessage', id: '1', text: '最初の発言' } as never],
+    });
+    expect(deriveTitle(state, 'Claude Code: task-3')).toBe('Claude Code: task-3');
+  });
+
+  // pinnedNameは`buildSessionPanelTitle`が組み立てた完成形（ラベルを含む）なので、
+  // ここでラベルを重ねない
+  it('pinnedNameはそのまま使い、ラベルを重ねない', () => {
+    expect(deriveTitle(baseState(), 'Claude Code: 衝突解決 task-9')).toBe(
+      'Claude Code: 衝突解決 task-9',
+    );
+  });
+
+  it('pinnedNameが空白のみなら無視して、次の優先度へ落ちる', () => {
+    const state = baseState({ name: '人が付けた名前' });
+    expect(deriveTitle(state, '   ')).toBe('Claude Code: 人が付けた名前');
+  });
+
+  it('pinnedNameが無ければ従来どおりの優先順位（人が手で開いた画面）', () => {
+    const state = baseState({
+      items: [{ kind: 'userMessage', id: '1', text: '設計を見直したい' } as never],
+    });
+    expect(deriveTitle(state, undefined)).toBe('Claude Code: 設計を見直したい');
   });
 });
 
