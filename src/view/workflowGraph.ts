@@ -258,6 +258,45 @@ export function aggregateProgress(tasks: readonly { state: TaskState }[]): Progr
   };
 }
 
+/** 全体進捗バーの1区画（issue #754）。 */
+export interface ProgressSegment {
+  /** 区画の種別。CSSのクラス名（`seg-<kind>`）と対応させる。 */
+  kind: 'done' | 'active' | 'attention';
+  /** その区画が表すタスク数。 */
+  count: number;
+  /** バーに占める幅（百分率）。小数を残す——四捨五入すると合計が100%を超えることがある。 */
+  percent: number;
+}
+
+/**
+ * 全体進捗バーを状態ごとの積み上げに分ける（issue #754）。
+ *
+ * 完了だけを1色で塗っていると、失敗しているタスクがあってもバーからは分からず、
+ * 上の警告帯を読むまで気付けない。`done` / 進行中 / 要対応 の3区画に分け、
+ * 残り（`pending`）はトラックの地色のままにする。
+ *
+ * 件数が0の区画は返さない。幅0の要素を残すと、区切り線（`border`）だけが積み上がる。
+ */
+export function progressSegments(progress: ProgressSummary): ProgressSegment[] {
+  const c = progress.counts;
+  // 分類はカンバンの3バケット（summarizeKanban）と揃える。同じ状態が画面の2箇所で
+  // 別の枠に入っていると、どちらが正しいのか読み手には分からない
+  const active = c.running + c.waitingApproval + c.waitingReply + c.merging;
+  const attention = c.failed + c.blocked + c.skipped;
+  const segments: ProgressSegment[] = [
+    { kind: 'done', count: c.done, percent: 0 },
+    { kind: 'active', count: active, percent: 0 },
+    { kind: 'attention', count: attention, percent: 0 },
+  ];
+  const total = progress.total;
+  return segments
+    .filter((segment) => segment.count > 0)
+    .map((segment) => ({
+      ...segment,
+      percent: total === 0 ? 0 : (segment.count / total) * 100,
+    }));
+}
+
 /**
  * カンバン風の3バケット + 要対応枠への分類（design.md §16.44、Issue #693、チームモード）。
  *

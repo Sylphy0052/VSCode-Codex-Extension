@@ -4522,6 +4522,18 @@ worktreeを作れないため、`isolation` の値を問わず**git worktree隔�
 - 状態の内訳: §16.3 の全ての状態（`done` / `running` / `waitingApproval` / `waitingReply` / `merging` / `pending` / `failed` / `blocked` / `skipped` の9件）
 - 承認待ち・失敗・統合できていないものが1件でもあれば、その旨を最上段で目立たせる（並列で走っていると個々のノードを見落とすため）
 
+##### 進捗バーは状態ごとの積み上げにする（issue #754）
+
+バーは完了率だけを1色で塗っていた。失敗しているタスクがあってもバーからは分からず、下の警告帯を読むまで気付けない。`progressSegments`（`workflowGraph.ts`）で **完了 / 進行中 / 要対応** の3区画に分け、`display: flex` で積み上げる。残り（`pending`）はトラックの地色のまま残す。完了率の数字（`#progressPercent`）は従来どおり出す。
+
+- 区画の分け方はカンバンの3バケット（`summarizeKanban`）と揃える。進行中＝`running` / `waitingApproval` / `waitingReply` / `merging`、要対応＝`failed` / `blocked` / `skipped`。同じ状態が画面の2箇所で別の枠に入っていると、どちらが正しいのか読み手には分からない
+- **幅は四捨五入せず小数のまま持つ**。3等分のような比率で丸めると合計が100%を超え、最後の区画がはみ出す
+- **件数が0の区画は返さない**。幅0のまま残すと区切り線だけが積み上がる
+- **区切りは色ではなく線**（`border-left: 1px solid var(--vscode-editor-background)`）。色を落としても区画の境目が分かる。加えて `#progressBar` の `aria-label` に内訳を文字でも入れる。線を付ける区画はスクリプト側が `divided` クラスで決める——CSSの隣接セレクタ（`.fill + .fill`）だと、件数0で隠した区画も兄弟としては残るため、先頭の区画にまで線が付いてバーの左端に1本余分に出る
+- **完了色は `charts.blue` から `charts.green` へ変わる**（既存の見え方の変更）。進行中に青が残るため、青＝動いている・緑＝終わった、の対応になる
+- トラックの薄さは `opacity` ではなく `color-mix` で出す。`opacity` は要素の集合に掛かるため、子の `.fill` 側で `opacity: 1` と書いても打ち消せず、**塗りまで35%に薄まっていた**（今回あわせて直した）
+- 集計は拡張機能側の純粋関数で済ませ、Webviewは受け取った幅を当てるだけにする（Issue #104の再発防止と同じ方針）
+
 #### 依存グラフ
 
 タスクをノード、`dependsOn` をエッジとした有向グラフを描く。外部ライブラリは使わず、Webview内でSVGを組み立てる（CSPを緩めない・バンドルを太らせないため）。

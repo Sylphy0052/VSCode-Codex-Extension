@@ -133,7 +133,54 @@ export function workflowScript(): string {
   // （waitingReply/merging/blocked）がここに反映されない食い違いの原因になっていた
   // （Issue #104が起きた背景そのもの）。
 
-  function renderHeader(snapshot, progress) {
+  const SEGMENT_ELEMENT = { done: 'segDone', active: 'segActive', attention: 'segAttention' };
+  const SEGMENT_LABEL = { done: '完了', active: '進行中', attention: '要対応' };
+
+  /**
+   * 全体進捗バーを状態ごとの積み上げにする（issue #754）。区画の集計は拡張機能側
+   * （workflowGraph.tsのprogressSegments。純粋関数でテスト済み）が済ませており、
+   * ここでは受け取った幅を当てるだけにする（renderHeaderと同じ方針。Issue #104の再発防止）。
+   *
+   * 件数が0の区画は隠す。幅0のまま残すと区切り線だけが積み上がる。
+   */
+  function renderProgressBar(progress, segments) {
+    const list = segments || [];
+    const shown = {};
+    let isFirst = true;
+    for (const segment of list) {
+      const id = SEGMENT_ELEMENT[segment.kind];
+      if (id === undefined) {
+        continue;
+      }
+      const element = el(id);
+      element.hidden = false;
+      element.style.width = segment.percent + '%';
+      // 区切り線は2つ目以降だけ。先頭に付けるとバーの左端に1本余分に出る
+      element.className = 'fill seg-' + segment.kind + (isFirst ? '' : ' divided');
+      isFirst = false;
+      shown[segment.kind] = segment.count;
+    }
+    for (const kind of ['done', 'active', 'attention']) {
+      if (shown[kind] === undefined) {
+        const element = el(SEGMENT_ELEMENT[kind]);
+        element.hidden = true;
+        element.style.width = '0%';
+      }
+    }
+    // 色を読めない環境でも内訳が分かるよう、同じ内容を読み上げ用の文字でも持つ
+    const parts = [];
+    for (const kind of ['done', 'active', 'attention']) {
+      if (shown[kind] !== undefined) {
+        parts.push(SEGMENT_LABEL[kind] + ' ' + shown[kind] + '件');
+      }
+    }
+    el('progressBar').setAttribute(
+      'aria-label',
+      '全体の進捗 ' + progress.percentDone + '%' + (parts.length > 0 ? '（' + parts.join('、') + '）' : ''),
+    );
+  }
+
+  function renderHeader(snapshot, progress, segments) {
     const counts = progress.counts;
     const total = progress.total;
 
@@ -147,7 +194,7 @@ export function workflowScript(): string {
       (counts.failed > 0 ? ' / ' + counts.failed + '失敗' : '') +
       (counts.blocked > 0 ? ' / ' + counts.blocked + 'ブロック' : '') +
       (counts.skipped > 0 ? ' / ' + counts.skipped + 'スキップ' : '');
-    el('progressFill').style.width = progress.percentDone + '%';
+    renderProgressBar(progress, segments);
     el('progressPercent').textContent = progress.percentDone + '%';
     el('runStartedAt').setAttribute('data-started', String(Date.parse(snapshot.startedAt) || 0));
 
@@ -984,12 +1031,12 @@ export function workflowScript(): string {
     el('empty').hidden = runs.length > 0;
   }
 
-  function applyState(snapshot, layout, progress, kanban, integration) {
+  function applyState(snapshot, layout, progress, kanban, integration, segments) {
     currentSnapshot = snapshot;
     currentLayout = layout;
     el('content').hidden = false;
     el('empty').hidden = true;
-    renderHeader(snapshot, progress);
+    renderHeader(snapshot, progress, segments);
     renderKanban(kanban);
     renderOrchestrator(snapshot);
     renderAskUser(snapshot);
@@ -1154,7 +1201,7 @@ export function workflowScript(): string {
     if (msg.type === 'runs') {
       applyRuns(msg.runs);
     } else if (msg.type === 'state') {
-      applyState(msg.snapshot, msg.layout, msg.progress, msg.kanban, msg.integration);
+      applyState(msg.snapshot, msg.layout, msg.progress, msg.kanban, msg.integration, msg.progressSegments);
     } else if (msg.type === 'noRun') {
       applyNoRun();
     } else if (msg.type === 'programs') {

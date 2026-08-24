@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   aggregateProgress,
+  progressSegments,
   computeRanks,
   kanbanBucket,
   layoutGraph,
@@ -415,3 +416,58 @@ describe('taskRoleLabel（design.md §16.44、Issue #693）', () => {
 // XSS対策は「HTML文字列結合の経路を作らない」設計そのもの（`workflowScript.ts`の
 // `textContent`/`createElementNS`のみでのDOM組み立て）で担保しており、
 // `webviewScript.test.ts`の「innerHTML等を使わない」検査で機械的に固定している。
+
+describe('progressSegments（issue #754）', () => {
+  function summaryOf(states: TaskState[]) {
+    return aggregateProgress(states.map((state) => ({ state })));
+  }
+
+  it('完了・進行中・要対応を件数の比で分ける', () => {
+    const segments = progressSegments(summaryOf(['done', 'done', 'running', 'failed', 'pending']));
+    expect(segments).toEqual([
+      { kind: 'done', count: 2, percent: 40 },
+      { kind: 'active', count: 1, percent: 20 },
+      { kind: 'attention', count: 1, percent: 20 },
+    ]);
+    // 残り（pending）は区画にしない。トラックの地色のまま残す
+    // （3区画で合計80%。残りの20%＝pending 1件はバーの地色として残る）
+    expect(segments.reduce((acc, s) => acc + s.percent, 0)).toBe(80);
+    expect(segments.some((s) => s.count === 0)).toBe(false);
+  });
+
+  it('進行中はカンバンのInProgressと同じ状態をまとめる', () => {
+    const segments = progressSegments(
+      summaryOf(['running', 'waitingApproval', 'waitingReply', 'merging']),
+    );
+    expect(segments).toEqual([{ kind: 'active', count: 4, percent: 100 }]);
+  });
+
+  it('要対応は失敗・ブロック・スキップをまとめる', () => {
+    const segments = progressSegments(summaryOf(['failed', 'blocked', 'skipped']));
+    expect(segments).toEqual([{ kind: 'attention', count: 3, percent: 100 }]);
+  });
+
+  it('件数が0の区画は返さない（幅0の区切り線を積み上げないため）', () => {
+    // 陽性対照: この入力では done の区画は返る
+    expect(progressSegments(summaryOf(['done'])).map((s) => s.kind)).toEqual(['done']);
+    expect(progressSegments(summaryOf(['pending', 'pending']))).toEqual([]);
+  });
+
+  it('タスクが1件でも破綻しない', () => {
+    expect(progressSegments(summaryOf(['failed']))).toEqual([
+      { kind: 'attention', count: 1, percent: 100 },
+    ]);
+  });
+
+  it('タスクが0件なら空', () => {
+    expect(progressSegments(summaryOf([]))).toEqual([]);
+  });
+
+  it('割り切れない比率でも合計が100%を超えない', () => {
+    const segments = progressSegments(summaryOf(['done', 'running', 'failed']));
+    const sum = segments.reduce((acc, s) => acc + s.percent, 0);
+    expect(sum).toBeLessThanOrEqual(100);
+    // 四捨五入していたら 34 * 3 = 102 になる
+    expect(segments.every((s) => s.percent > 33 && s.percent < 34)).toBe(true);
+  });
+});

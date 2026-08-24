@@ -63,19 +63,35 @@ export function workflowStyles(): string {
   #header .counts { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
   #header .elapsed { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
   #header .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  /* 全体進捗バー（issue 754）。完了だけを1色で塗るのではなく、完了／進行中／要対応を
+     積み上げる。残り（pending）はトラックの地色のまま。
+     トラックの薄さは opacity ではなく color-mix で出す。opacity は要素の集合に掛かるため、
+     子の .fill 側で opacity: 1 と書いても打ち消せず、塗りまで薄くなっていた */
   #progressBar {
+    display: flex;
     margin-top: 8px;
     height: 8px;
     border-radius: 4px;
-    background-color: var(--vscode-progressBar-background, var(--vscode-editorWidget-border));
-    opacity: 0.35;
+    overflow: hidden;
+    background-color: color-mix(
+      in srgb,
+      var(--vscode-progressBar-background, var(--vscode-editorWidget-border)) 35%,
+      transparent
+    );
   }
   #progressBar .fill {
     height: 100%;
-    border-radius: 4px;
-    opacity: 1;
-    background-color: var(--vscode-charts-blue);
     transition: width 0.2s ease;
+  }
+  /* 色を落としても区画の境目が分かるよう、区切りは色ではなく線で出す。
+     隣接セレクタ（.fill + .fill）は使わない——件数0で隠した区画も兄弟としては残るため、
+     先頭の区画にまで線が付いてバーの左端に1本余分に出る。どの区画へ付けるかは
+     workflowScript.ts の renderProgressBar が決める */
+  #progressBar .fill.divided { border-left: 1px solid var(--vscode-editor-background); }
+  #progressBar .seg-done { background-color: var(--vscode-charts-green); }
+  #progressBar .seg-active { background-color: var(--vscode-charts-blue); }
+  #progressBar .seg-attention {
+    background-color: var(--vscode-errorForeground, var(--vscode-charts-red));
   }
   /* 承認待ち・失敗が1件でもあれば最上段で目立たせる（design.md §16.8） */
   #banner {
