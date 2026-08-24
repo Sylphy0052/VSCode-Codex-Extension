@@ -808,13 +808,6 @@ export const nodePseudoWorktreeFileSystem: PseudoWorktreeFileSystemPort = {
 };
 
 /**
- * `root` 配下を再帰的に走査し、除外に該当しないファイルの相対パス（`/` 区切り）一覧を返す。
- * ディレクトリ自体は含まない。**シンボリックリンクは辿らず、対象からも除く。** ワークスペース内の
- * ファイルが外部を指すシンボリックリンクである場合、それを複製・統合・反映のいずれの経路でも
- * 一切扱わないことで、リンク先（ワークスペースの外）への書き込み・読み出しが発生する余地を
- * 構造的に無くす（`worktree.ts` の祖先ディレクトリ対策とは別に、ファイル単位でも同じ脅威に備える）。
- */
-/**
  * 反映の一時ファイル（`reflectIntegrationToWorkspace`が`copyFile`+`rename`で使う）の
  * 名前かどうか。接尾辞は`randomBytes(16).toString('hex')`なので16進32文字で固定である。
  *
@@ -830,6 +823,13 @@ function isReflectTempName(name: string): boolean {
   return /^\.pwt-reflect-[0-9a-f]{32}\.tmp$/.test(name);
 }
 
+/**
+ * `root` 配下を再帰的に走査し、除外に該当しないファイルの相対パス（`/` 区切り）一覧を返す。
+ * ディレクトリ自体は含まない。**シンボリックリンクは辿らず、対象からも除く。** ワークスペース内の
+ * ファイルが外部を指すシンボリックリンクである場合、それを複製・統合・反映のいずれの経路でも
+ * 一切扱わないことで、リンク先（ワークスペースの外）への書き込み・読み出しが発生する余地を
+ * 構造的に無くす（`worktree.ts` の祖先ディレクトリ対策とは別に、ファイル単位でも同じ脅威に備える）。
+ */
 async function listFiles(
   root: string,
   exclude: readonly string[],

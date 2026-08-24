@@ -911,10 +911,6 @@ export interface ChatShellOptions {
   composerButtons?: readonly ComposerButtonId[];
 }
 
-/**
- * チャット画面のHTMLを組み立てる。CodexとClaude Codeで共有する。
- * 描画するのは `ChatState` だけなので、プロバイダごとの差はここでは扱わない。
- */
 /** 設定から来る文字列をHTMLへ埋め込む前に無害化する。 */
 function escapeHtml(text: string): string {
   return text
@@ -1100,6 +1096,10 @@ function renderComposerButton(
   return `<button id="${id}" type="button" class="secondary"${pressedAttr} aria-label="${ariaLabel}" title="${title}"${roleAttr}${hiddenAttr}>${spec.icon}${label}</button>`;
 }
 
+/**
+ * チャット画面のHTMLを組み立てる。CodexとClaude Codeで共有する。
+ * 描画するのは `ChatState` だけなので、プロバイダごとの差はここでは扱わない。
+ */
 export function renderShell(webview: vscode.Webview, options: ChatShellOptions): string {
   const nonce = randomBytes(16).toString('base64');
   const csp = chatCsp(webview.cspSource, nonce);

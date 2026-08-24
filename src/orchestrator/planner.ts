@@ -632,16 +632,6 @@ const PATH_LIKE_TOKEN_SCAN_LIMIT = 1000;
 const SLUG_INPUT_MAX_LENGTH = 80;
 
 /**
- * ゴール文から短いスラッグを作る。日本語のゴール文をローマ字化する依存ライブラリは
- * 使わず、ファイル名として不正な文字だけを除いて元の文字（漢字・かな含む）を残す
- * （UTF-8のファイル名はLinux/macOS/Windowsのいずれでも問題なく扱える。それより、
- * ローマ字化で意味が失われるほうが「ゴール文から作った」スラッグの目的に反する）。
- *
- * `stripControlChars`（`sanitize.ts`）を先に通す。ゴール文は人が直接入力する値だが、
- * 双方向制御文字・ゼロ幅文字を含む値がそのままファイル名（＝タブ・ファイル一覧に出る
- * 表示文字列）へ入り込むのを防ぐ、既存のワークフロー機能と同じ防御線を通しておく。
- */
-/**
  * ゴール文からファイルパスらしき断片を取り除き、そのファイル名（拡張子なし）へ縮める。
  * `slugifyGoal` の前処理。`roadmap.ts` 側の `slugifyGoal` も同じ前処理を通すため、
  * 実装はここ1つに置いて共有する（`roadmap.ts` は `planner.ts` を参照しているので、
@@ -694,6 +684,16 @@ export function validateSlugInput(value: string): string | undefined {
   return undefined;
 }
 
+/**
+ * ゴール文から短いスラッグを作る。日本語のゴール文をローマ字化する依存ライブラリは
+ * 使わず、ファイル名として不正な文字だけを除いて元の文字（漢字・かな含む）を残す
+ * （UTF-8のファイル名はLinux/macOS/Windowsのいずれでも問題なく扱える。それより、
+ * ローマ字化で意味が失われるほうが「ゴール文から作った」スラッグの目的に反する）。
+ *
+ * `stripControlChars`（`sanitize.ts`）を先に通す。ゴール文は人が直接入力する値だが、
+ * 双方向制御文字・ゼロ幅文字を含む値がそのままファイル名（＝タブ・ファイル一覧に出る
+ * 表示文字列）へ入り込むのを防ぐ、既存のワークフロー機能と同じ防御線を通しておく。
+ */
 export function slugifyGoal(goal: string): string {
   const collapsed = stripPathLikeTokens(stripControlChars(goal))
     .replace(UNSAFE_FILENAME_CHARS, ' ')

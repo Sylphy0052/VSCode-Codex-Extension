@@ -170,6 +170,32 @@ function runFinishedReason(actions: OrchestratorControlActions, runId: string): 
 }
 
 /**
+ * 計画変更ツールが`planChangeFinishedReason`の例外（レビューコメントのポーリング中）を
+ * 通って呼ばれたとき、`live.finished`が立ったままだと直後の`self.pump(runId)`が
+ * 何もせず即座に早期returnし、追加・変更したタスクが一切スケジューリングされない。
+ * `pump()`を呼ぶ直前にここで戻す（`add_task`/`remove_task`/`update_task_dependencies`の
+ * 3つだけが対象。`update_task_prompt`は`pump()`を呼ばないため対象外）。既に`false`
+ * （通常の実行中に呼ばれた場合）なら何もしない（冪等）。
+ *
+ * **ここで戻して`finalizeForge`の二重呼び出しにならないか（レビュー指摘の確認事項）。**
+ * `pump()`は戻り値のこの同一呼び出しの中で`outcome`を再計算する。`add_task`で加えた
+ * タスクは`pending`であり、`getRunOutcome`は`pending`が1件でもあれば無条件で`'running'`
+ * を返す（`scheduler.ts`）。`remove_task`/`update_task_dependencies`は対象が`pending`
+ * 限定のため、呼び出し時点で既に`pending`のタスクが最低1件残っている。したがって、
+ * `pump()`のこの呼び出しの中で再び`live.finished = true`が立ち`finalizeForge`が
+ * 即座に2回目として呼ばれることは無い。新しく増えた/残った`pending`タスクが後になって
+ * 完了し、runが再び終了条件を満たしたときに初めて2回目の`succeeded`到達（＝
+ * `finalizeForge`の2回目の呼び出し）が起こりうる——これは`pump()`のJSDoc（Issue #432-2）
+ * が「現状のコードでは起こらない」としていた前提を崩す。2回目の呼び出しでも統合PR/MRを
+ * 二重に作らないよう、`finalizeForge`自身に冪等ガードを足した（下記参照。design.md §16.30）
+ */
+function resumeIfFinishedForPlanChange(live: LiveRun): void {
+  if (live.finished) {
+    live.finished = false;
+  }
+}
+
+/**
  * 計画変更ツール（`update_task_prompt`/`add_task`/`remove_task`/`update_task_dependencies`）
  * だけに適用する終了判定（design.md §16.30、Issue #339 blocking指摘）。
  *
@@ -218,32 +244,6 @@ function runFinishedReason(actions: OrchestratorControlActions, runId: string): 
  * （`retry_task`等）とは性質が違うため。後者まで開けると「終わったはずのrunを人の
  * 意図しないタイミングで動かし直せる」範囲が広がりすぎる。
  */
-/**
- * 計画変更ツールが`planChangeFinishedReason`の例外（レビューコメントのポーリング中）を
- * 通って呼ばれたとき、`live.finished`が立ったままだと直後の`self.pump(runId)`が
- * 何もせず即座に早期returnし、追加・変更したタスクが一切スケジューリングされない。
- * `pump()`を呼ぶ直前にここで戻す（`add_task`/`remove_task`/`update_task_dependencies`の
- * 3つだけが対象。`update_task_prompt`は`pump()`を呼ばないため対象外）。既に`false`
- * （通常の実行中に呼ばれた場合）なら何もしない（冪等）。
- *
- * **ここで戻して`finalizeForge`の二重呼び出しにならないか（レビュー指摘の確認事項）。**
- * `pump()`は戻り値のこの同一呼び出しの中で`outcome`を再計算する。`add_task`で加えた
- * タスクは`pending`であり、`getRunOutcome`は`pending`が1件でもあれば無条件で`'running'`
- * を返す（`scheduler.ts`）。`remove_task`/`update_task_dependencies`は対象が`pending`
- * 限定のため、呼び出し時点で既に`pending`のタスクが最低1件残っている。したがって、
- * `pump()`のこの呼び出しの中で再び`live.finished = true`が立ち`finalizeForge`が
- * 即座に2回目として呼ばれることは無い。新しく増えた/残った`pending`タスクが後になって
- * 完了し、runが再び終了条件を満たしたときに初めて2回目の`succeeded`到達（＝
- * `finalizeForge`の2回目の呼び出し）が起こりうる——これは`pump()`のJSDoc（Issue #432-2）
- * が「現状のコードでは起こらない」としていた前提を崩す。2回目の呼び出しでも統合PR/MRを
- * 二重に作らないよう、`finalizeForge`自身に冪等ガードを足した（下記参照。design.md §16.30）
- */
-function resumeIfFinishedForPlanChange(live: LiveRun): void {
-  if (live.finished) {
-    live.finished = false;
-  }
-}
-
 function planChangeFinishedReason(
   self: WorkflowRunnerInternals,
   actions: OrchestratorControlActions,

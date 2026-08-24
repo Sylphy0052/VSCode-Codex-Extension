@@ -1152,13 +1152,6 @@ export function findPermissionEscalationWarnings(
 }
 
 /**
- * 読み込み時の検証（design.md §16.2「検証」）。1件でも該当すれば実行を始めない前提で、
- * エラーは1件見つかった時点で止めず全件まとめて返す。
- *
- * `cwd` のワークスペース境界検証は、ファイルシステムに触れるためこのIssueの範囲外。
- * `WorkflowTask.cwd` のコメントの通り、拡張の余地は残してある。
- */
-/**
  * `roadmap` に許す形（design.md §16.19、Issue #173）。ワークフロー定義はエージェントが
  * 生成しうるため、書き戻し先を任意のパスへ向けられないようにする。
  *
@@ -1183,6 +1176,13 @@ function isSafeRoadmapPath(value: string): boolean {
   return value.toLowerCase().endsWith('.md');
 }
 
+/**
+ * 読み込み時の検証（design.md §16.2「検証」）。1件でも該当すれば実行を始めない前提で、
+ * エラーは1件見つかった時点で止めず全件まとめて返す。
+ *
+ * `cwd` のワークスペース境界検証は、ファイルシステムに触れるためこのIssueの範囲外。
+ * `WorkflowTask.cwd` のコメントの通り、拡張の余地は残してある。
+ */
 export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationResult {
   const errors: WorkflowError[] = [];
   const warnings: WorkflowWarning[] = [];
