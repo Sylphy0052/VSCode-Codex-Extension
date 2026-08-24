@@ -19,6 +19,8 @@ export function chatStyles(): string {
     font-family: var(--vscode-font-family);
     font-size: var(--vscode-font-size);
     color: var(--vscode-foreground);
+    /* 本文1行の上限（issue #713）。値を使う側は下の「行長」の節を参照 */
+    --chat-measure: 84ch;
   }
   /*
    * 応答中かどうかを画面の外周で示す（issue #701）。ログ本文を読んでいる最中でも
@@ -82,6 +84,8 @@ export function chatStyles(): string {
     overflow-wrap: anywhere;
     padding: 8px 10px;
     border-radius: 4px;
+    /* 詰まって見えるのを解く（issue #713）。等幅で出す領域は個別に 1.45 を持つ */
+    line-height: 1.6;
   }
   .user .body {
     background-color: var(--vscode-textBlockQuote-background);
@@ -724,11 +728,40 @@ export function chatStyles(): string {
    * 応答本文のMarkdown描画（issue #290）。'.body' 直下だけに効かせる（'.tool .body'
    * などコマンド出力・思考は従来どおり生テキストのままのため、ここには来ない）。
    */
+  /*
+   * 行長（issue #713）。ウィンドウを広げると1行が100文字を超え、折り返したときに
+   * 次の行の先頭を見失う。
+   *
+   * 上限は '.body' 直下の文章要素にだけ掛ける。'.body' 自身へ掛けると、その中の表と
+   * コードブロックまで同じ箱に閉じ込められて横へ伸びられなくなる（表は
+   * '.md-table-wrap' の横スクロールで見せる設計。§14.60）。'.md-table-wrap' /
+   * '.md-code' / 'hr' をここへ並べていないのは、上限を持たせないため。
+   */
+  .body > p,
+  .body > ul,
+  .body > ol,
+  .body > h1,
+  .body > h2,
+  .body > h3,
+  .body > h4,
+  .body > h5,
+  .body > h6,
+  .body > blockquote {
+    max-width: var(--chat-measure);
+  }
+  /*
+   * Markdownを描画しない設定（agent.chat.renderMarkdown: false）のときは '.body' 自身が
+   * 本文を持ち、上の子セレクタが当たらない。この場合は表もコードも生テキストなので
+   * '.body' へ直接掛けてよい。'plain' の付け外しは chatScript.ts の renderBody が行う。
+   */
+  .body.plain {
+    max-width: var(--chat-measure);
+  }
   .body > *:first-child { margin-top: 0; }
   .body > *:last-child { margin-bottom: 0; }
-  .body p { margin: 0 0 8px; }
+  .body p { margin: 0 0 10px; }
   .body h1, .body h2, .body h3, .body h4, .body h5, .body h6 {
-    margin: 10px 0 6px;
+    margin: 14px 0 6px;
     line-height: 1.3;
     font-weight: 600;
   }

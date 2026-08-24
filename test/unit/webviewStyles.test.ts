@@ -12,8 +12,11 @@ import { controlPanelStyles } from '../../src/view/controlPanelStyles';
 const hasHiddenReset = (css: string): boolean =>
   /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/.test(css);
 
+/** コメントを落とす。セレクタ名はコメント中にも出るため、規則を検査する前に外す。 */
+const stripComments = (css: string): string => css.replace(/\/\*[\s\S]*?\*\//g, '');
+
 const balanced = (css: string): boolean => {
-  const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const withoutComments = stripComments(css);
   const open = (withoutComments.match(/\{/g) ?? []).length;
   const close = (withoutComments.match(/\}/g) ?? []).length;
   return open === close;
@@ -74,6 +77,32 @@ describe('chatStyles', () => {
     // 自分の発言の手前を空け、同じターンに連なる思考・ツール出力は詰める
     expect(css).toMatch(/\.item\.user\s*\{[^}]*margin-top:/);
     expect(css).toMatch(/\.item\.reasoning,\s*\.item\.tool\s*\{[^}]*margin-bottom:/);
+  });
+
+  it('本文に行間の指定がある（issue #713）', () => {
+    const css = chatStyles();
+    expect(css).toMatch(/\.body\s*\{[^}]*line-height:/);
+  });
+
+  it('本文の行長に上限がある（issue #713）', () => {
+    const css = chatStyles();
+    // 上限値は1箇所（--chat-measure）に持ち、掛ける先は '.body' 直下の文章要素
+    expect(css).toMatch(/--chat-measure:\s*\d+ch/);
+    expect(css).toMatch(/\.body > blockquote\s*\{\s*max-width: var\(--chat-measure\)/);
+    // Markdownを描画しない設定では '.body' 自身が本文を持つ
+    expect(css).toMatch(/\.body\.plain\s*\{\s*max-width: var\(--chat-measure\)/);
+  });
+
+  it('表とコードブロックには行長の上限を掛けない（issue #713）', () => {
+    // コメントを落としてから見る。セレクタ名はコメント中にも出るため、そのまま
+    // 検査すると「コメントに書いた名前」と後続の規則がつながって偽陽性になる
+    const css = stripComments(chatStyles());
+    // 掛けると横へ伸びられなくなる。表は横スクロールで見せる設計（design.md §14.60）
+    expect(css).not.toMatch(/\.md-table-wrap[^{}]*\{[^}]*max-width/);
+    expect(css).not.toMatch(/\.md-code[^{}]*\{[^}]*max-width/);
+    // 検査そのものが効いていること（規則を見つけられる形になっているか）を対照で示す
+    expect(css).toMatch(/\.md-table-wrap[^{}]*\{[^}]*overflow-x/);
+    expect(css).toMatch(/\.md-code pre[^{}]*\{[^}]*overflow/);
   });
 });
 

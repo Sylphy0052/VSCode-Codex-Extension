@@ -651,6 +651,9 @@ export function chatScript(
     if (node.bodyMode !== bodyMode || node.bodyKey !== primary) {
       node.bodyMode = bodyMode;
       node.bodyKey = primary;
+      // 生テキストのときは本文が '.body' 自身に載る。行長の上限をどちらへ掛けるかが
+      // 変わるため、CSSから見分けられるようにしておく（issue #713、chatStyles.ts参照）
+      node.body.classList.toggle('plain', !useMarkdown);
       if (useMarkdown) {
         renderMarkdownInto(node.body, primary);
       } else {
