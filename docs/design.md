@@ -6395,3 +6395,50 @@ run終了時、`notifyOrchestratorRunFinished`（`src/orchestrator/runnerOrchest
 - `test/unit/runner.test.ts`: 終了したrunを `retryTask` / `continueTask` / `retryMerge` で再開すると `runResumed` が届き、再開後にもう1度終了すると `runFinished` がふたたび届くこと（#432-2 から上書きした3件）。**まだ終わっていないrunの再実行では `runResumed` を送らない**ことも別のテストで固定する——依存関係の無い2タスクで片方だけ失敗させ、runが `running` のまま `retryTask` する形にした
 - 実測: 旗を戻す1行を外すと、上の3件が `expected 1 to be 2` で落ちることを確認した。緑になった理由が実装の変更であることを、この対照で測っている
 - `docs/manual-test.md` W-U: 「終了 → 再実行 → 再終了」で通知が3本届くこと、再開後にオーケストレーターが制御ツールを呼ぶと実際に何が起きるかを実機で見る。**再開後に制御ツールが使えないことは仕様であり、使えるようになっていたらこの節のほうが古い**
+
+### 16.44 チームモード（Issue #693）
+
+#### 何を足したのか
+
+**新しいサブシステムではなく、既存のワークフロー実行の拡張である。**タスクへ「会社の役割」を表す`role`フィールドを足し、役割から`model`/`effort`の既定値を引けるようにした（`rolePresets.ts`）。加えて、`send_message`/`ask_orchestrator`（§16.21・§16.32）が運べない分量・寿命の情報をセッション間で受け渡すための一時ファイル領域（`teamHandoff.ts`）を用意した。ワークフローの実行経路（`WorkflowRunner`・依存関係・承認・マージ）自体は変えていない。
+
+役割の語彙は`orchestrator` / `manager` / `em` / `architect` / `designer` / `implementer` / `reviewer` / `tester` / `writer` / `researcher`の固定10種（`TEAM_ROLES`、`rolePresets.ts:24-35`）。自由文字列を許さないのは、役割がプリセットの参照キーであり、綴り違いを黙って受け入れると意図しないモデル・effortで走ってしまうためである。
+
+#### 役割はmodel/effortの既定を決めるだけで、権限には触れない
+
+役割はまず`RoleTier`（`light` / `standard` / `deep` / `escalation`）という抽象へ寄せ、プロバイダごとのモデルslugとeffortの対応表（`TIER_MODELS`・`TIER_EFFORTS`、`rolePresets.ts:67-86`）で解決する。`orchestrator`/`manager`/`em`/`architect`/`designer`は`deep`、`implementer`/`reviewer`/`tester`は`light`、`writer`/`researcher`は`standard`にしてある。
+
+**`approvalMode`/`sandbox`/`autoApprove`はここでは一切決めない**（`rolePresets.ts:10-14`）。従来どおり`buildEffectiveTaskConfig`（`taskConfig.ts`、§16.16「実効設定を組み立てる唯一の入口」）のクランプだけが実効権限を決める。役割から権限まで引けるようにすると、エージェントが生成しうるYAMLが役割名の指定だけで実効権限を動かせる経路になるため、意図的に外してある。
+
+適用の優先順位は`resolveTask`（`workflow.ts:513-528`）が持つ。タスクが`role`を書かなければ`defaults.role`を継ぎ（未指定なら「役割なし」）、`role`から引いた`model`/`effort`はあくまで既定値で、タスクが`model`/`effort`を明示していればそちらが勝つ（`optStr(t['model']) ?? roleDefault ?? defaults.model`の順）。未知の`role`値は`validateWorkflow`が警告して「役割なし」へ倒す（`workflow.ts:513-520`）。
+
+#### escalation段はどの役割の既定にもならない
+
+`RoleTier`には`light`/`standard`/`deep`のほかに`escalation`（Codex: `gpt-5.6-sol` / Claude: `fable`）があるが、`ROLE_TIERS`のいずれの役割もこの段を指さない（`rolePresets.ts:46-64`）。到達できるのは`escalationModel`関数（`rolePresets.ts:142-144`）を明示的に呼ぶ経路——ワークフローViewの注記や`planner.ts`のプロンプトで人・オーケストレーターへ「詰まったときはここへ上げられる」と示すためだけに公開している——か、タスクの`model`/`effort`を明示指定する経路のいずれかに限られる。「詰まったときだけ使う」という運用方針（Issue #693）を、既定値からは構造的に到達できないという形で担保している。
+
+#### ファイル受け渡し
+
+置き場は`.agents/handoff/runs/<runId>/<taskId>-<slug>.md`（`teamHandoff.ts:15,25`）。`send_message`/`ask_orchestrator`の本文上限（`MAX_MESSAGE_BODY_LENGTH`）に収まらない・後から読み返したい情報（設計メモ、レビュー結果、共有コンテキスト）だけをファイルとして残すための領域で、メッセージング（§16.21・§16.34）の代わりではない。1ファイルの本文は`MAX_HANDOFF_BYTES`（256KiB、`teamHandoff.ts:36`）、1run内のファイル数は`MAX_HANDOFF_FILES_PER_RUN`（100件、`teamHandoff.ts:39`）が上限。パスの組み立ては`handoffPath`（`teamHandoff.ts:73-87`）だけが行い、各操作の前に祖先へのシンボリックリンクガード（`findSymlinkedAncestor`、§16.6と同じ一次防御）を通す。
+
+`write_handoff`/`read_handoff`/`list_handoffs`/`delete_handoff`の4ツール（`messaging.ts:973-1026`）は、オーケストレーター・タスクの両方の接続へ見せる（`visibleTools`、`messaging.ts:1489-1506`）。想定利用が「役割セッションが設計メモを書き、オーケストレーターが読む」で書く側・読む側のどちらも固定できないためである。`write_handoff`だけ`taskId`引数を取らない——`send_message`の`from`と同じ理由（§16.21）で、書き込み先の`taskId`部分は接続そのもの（`connection.taskId`）から決め、別のタスクの名義を騙れないようにしている（`messaging.ts:964-971`）。
+
+**runが終わるとファイルは丸ごと消える。**`WorkflowRunner`の終了処理が`TeamHandoffStore.removeRun`を`closeMessaging`・`closeReviewCommentPoll`と同じ位置で呼ぶ（`runner.ts:3078-3105`）。受け渡し4ツールはMCPサーバ越しにしか使えず、サーバが閉じた時点でどのセッションからも到達できなくなるためで、「到達できなくなったものを残さない」という一点で消す位置が決まっている。**再開（`retryTask`/`continueTask`/`retryMerge`）した2周目は、受け渡し領域が空の状態から始まる**（`runner.ts:3084-3088`）。再開時は`ensureMessaging`がMCPサーバを作り直すのでツール自体は使えるが、1周目に書いたファイルは残っていない。これは§16.43が「再開しても制御ツールは戻らない」で書いた制約と同じ性質——MCPのURLが作り直され1周目の状態を引き継げない——であり、引き継ぎたい内容はオーケストレーターが自分の会話に持っている前提にする。
+
+オーケストレーターの接続id（`ORCHESTRATOR_CONNECTION_ID`、値は`-orchestrator-`）は`TASK_ID_PATTERN`に一致しないため、そのままではファイル名に使えない。`write_handoff`はオーケストレーターからの書き込みだけ`RESERVED_ORCHESTRATOR_TASK_ID`（`_orchestrator`、`workflow.ts:105`）へ読み替える（`messaging.ts:1625-1629`）。同名のタスクは`validateWorkflow`が定義できないよう弾いている（`workflow.ts:1345-1348`）ため、この読み替えがタスクのファイルと衝突することはない。
+
+`read_handoff`が返す本文は`formatUntrusted`で囲ってから返す（`messaging.ts:1652-1657`）。受け渡しファイルの中身はエージェントが書いた自由記述であり、`send_message`の本文（`wrapTaskMessage`）や`{{T1.result}}`と同じ脅威クラス（上流の自由記述がそのまま下流のプロンプトへ入る経路）にあたるためで、無害化を経ずに素通りさせない。
+
+#### Viewの表示
+
+`workflowGraph.ts`の`kanbanBucket`/`summarizeKanban`（既存、状態からカンバンのバケツと件数バッジを作る）自体はチームモードで変わっていない。新設したのは`taskRoleLabel`（`workflowGraph.ts:319-325`）で、タスクの`role`から日本語の表示ラベルを引く。`role`が`undefined`（役割なし）のタスクは何も返さず、Webview側も表示しない——チームモードを使わないワークフローの見た目を変えないためである。`workflowView.ts:297-300`がこれをカンバンの各タスクカードへ`roleLabel`として渡す。
+
+`agent.workflows.team`（`workflowMenu.ts:41-45`、`extension.ts:915`）はワークフローメニューに「チームモードを開始…」を足す。実体（`planTeamWorkflowCommand`、`extension.ts:1682-1699`）は`planWorkflowFromGoalCommand`を`team: true`で呼ぶだけで、生成経路自体は§16.9のゴール文からのYAML生成と同じである。`team`が`true`のときだけ`planWorkflow`（`planner.ts`）が「全てのタスクにroleを書くこと」という指示をプロンプトへ足し（`planner.ts:353-357`）、`buildRoleDescription`（`planner.ts:168-174`）が役割ごとのmodel/effortの対応を列挙してモデルへ見せる。生成したYAMLはこれまでどおり実行せず保存するだけで、実行は人がワークフローViewから明示的に選んだときに限る（§16.13）。
+
+#### 確かめ方
+
+- `test/unit/rolePresets.test.ts`: 役割ごとの`model`/`effort`の対応・`escalation`段がどの役割からも引けないこと・未知の役割の扱い
+- `test/unit/teamHandoff.test.ts`: `write`/`read`/`list`/`remove`/`removeRun`の正常系、本文サイズ上限・ファイル数上限での拒否、シンボリックリンクガード、`parseHandoffFileName`の境界（最後の`-`で割る仕様）
+- `test/unit/messaging.test.ts`: 4ツールの可視性（`hub.handoff`未設定時は見せない）、`write_handoff`が接続の`taskId`のみを使い引数の同名フィールドを無視すること、オーケストレーターの書き込みが`RESERVED_ORCHESTRATOR_TASK_ID`へ読み替わること、`read_handoff`の本文が`formatUntrusted`で囲まれること
+- `test/unit/workflow.test.ts`: `role`の解決優先順位（タスク明示 > `defaults.role` > 役割なし）、未知の`role`値が警告付きで「役割なし」へ倒れること
+- `test/unit/runner.test.ts`: run終了時に`removeRun`が呼ばれること、再開後に受け渡し領域が空から始まること
+- `docs/manual-test.md`: チームモードのメニューからYAML生成、実行中に`write_handoff`/`read_handoff`が実機のMCP越しに機能すること、run終了後に`.agents/handoff/runs/<runId>/`が消えていることを確認する

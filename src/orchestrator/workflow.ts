@@ -8,6 +8,7 @@ import {
   CODEX_APPROVAL_SAFETY_ORDER,
   SANDBOX_SAFETY_ORDER,
 } from '../util/safetyClamp';
+import { isTeamRole, roleDefaults, TEAM_ROLES, type TeamRole } from './rolePresets';
 import { formatUntrusted, truncateByCodePoint } from './untrustedText';
 
 /**
@@ -88,6 +89,21 @@ const RETRY_SUFFIX_PATTERN = /-retry\d+$/;
  */
 const RESERVED_INTEGRATION_TASK_ID = '_integration';
 
+/**
+ * オーケストレーター自身が書いた受け渡しファイル（design.md §16.44、Issue #693）の
+ * 置き場を表す予約id。
+ *
+ * `ORCHESTRATOR_CONNECTION_ID`（`orchestratorSession.ts` の `'-orchestrator-'`）は
+ * **`TASK_ID_PATTERN` にわざと合致しない値**にしてあり（タスク側からその識別子を名乗れない
+ * ようにするため）、そのままではファイル名の一部にできない。`messaging.ts` が
+ * `write_handoff` の呼び出し元がオーケストレーターだったときにこの値へ読み替える。
+ *
+ * 読み替え先を `_integration` と同じく予約するのは、同名のタスクを定義できてしまうと
+ * オーケストレーターとそのタスクが同じファイル名空間を共有し、片方がもう片方のファイルを
+ * 上書き・削除できてしまうため。
+ */
+export const RESERVED_ORCHESTRATOR_TASK_ID = '_orchestrator';
+
 export const MAX_PARALLEL_MIN = 1;
 export const MAX_PARALLEL_MAX = 10;
 export const MAX_TASK_COUNT = 50;
@@ -142,6 +158,17 @@ export const DEFAULT_AUTO_APPROVE = false;
 /** 1タスク分の内部表現。`defaults` を解決済みで持つため、呼び出し側はdefaultsを意識しなくてよい。 */
 export interface WorkflowTask {
   id: string;
+  /**
+   * チームモードの役割（design.md §16.44、Issue #693）。`undefined` は「役割なし」で、
+   * 従来どおりの振る舞い（`model` / `effort` は `defaults` と拡張機能の設定に従う）になる。
+   *
+   * **役割はタスクidではない。** 同じ役割を複数のタスクへ割り当ててよく（実装を2人に
+   * 分ける等）、そのときも `id` は従来どおりタスクごとに一意である必要がある。
+   *
+   * 役割が決めるのは `model` / `effort` の**既定値だけ**で、権限（`approvalMode` /
+   * `sandbox` / `autoApprove`）には一切関与しない（`rolePresets.ts` のJSDoc参照）。
+   */
+  role: TeamRole | undefined;
   prompt: string;
   done: string;
   dependsOn: string[];
@@ -357,8 +384,34 @@ function resolveEnum<T extends string>(
   return { value: fallback, invalidRaw: s };
 }
 
+/** `role` を解決した結果。既定値が「役割なし」（`undefined`）なので `resolveEnum` とは別にする。 */
+interface ResolvedRole {
+  value: TeamRole | undefined;
+  invalidRaw: string | undefined;
+}
+
+/**
+ * `role` を解決する（design.md §16.44、Issue #693）。未指定は「役割なし」、未知の値は
+ * 「役割なし」へ倒しつつ `invalidRaw` に残す（`resolveEnum` と同じく呼び出し側が警告を出す）。
+ *
+ * 未知の役割を黙って受け入れないのは、役割が `model` / `effort` の既定値を引くキーであり、
+ * 綴り違いが「意図しないモデルで走った」という気付きにくい形で現れるため。
+ */
+function resolveRole(raw: unknown): ResolvedRole {
+  const s = str(raw);
+  if (s === '') {
+    return { value: undefined, invalidRaw: undefined };
+  }
+  if (isTeamRole(s)) {
+    return { value: s, invalidRaw: undefined };
+  }
+  return { value: undefined, invalidRaw: s };
+}
+
 interface ResolvedDefaults {
   provider: Provider;
+  /** `defaults.role`。タスクが `role` を書かなかったときに使う（design.md §16.44）。 */
+  role: TeamRole | undefined;
   isolation: Isolation;
   maxIterations: number;
   autoApprove: boolean;
@@ -383,8 +436,14 @@ function resolveDefaults(raw: unknown): ResolvedDefaultsResult {
   const isolation = resolveEnum(d['isolation'], isIsolation, DEFAULT_ISOLATION);
   const cleanup = resolveEnum(d['cleanup'], isCleanup, DEFAULT_CLEANUP);
   const type = resolveEnum(d['type'], isCommitType, DEFAULT_COMMIT_TYPE);
+  const role = resolveRole(d['role']);
 
   const warnings: string[] = [];
+  if (role.invalidRaw !== undefined) {
+    warnings.push(
+      `defaults.role に未知の値が指定されたため役割なしとして扱いました（指定できる値: ${TEAM_ROLES.join(' / ')}）: ${role.invalidRaw}`,
+    );
+  }
   if (provider.invalidRaw !== undefined) {
     warnings.push(
       `defaults.provider に未知の値が指定されたため既定値(${DEFAULT_PROVIDER})を使いました: ${provider.invalidRaw}`,
@@ -409,6 +468,7 @@ function resolveDefaults(raw: unknown): ResolvedDefaultsResult {
   return {
     defaults: {
       provider: provider.value,
+      role: role.value,
       isolation: isolation.value,
       maxIterations: num(d['maxIterations'], DEFAULT_MAX_ITERATIONS),
       autoApprove: bool(d['autoApprove'], DEFAULT_AUTO_APPROVE),
@@ -450,6 +510,23 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
     );
   }
 
+  // 役割（design.md §16.44、Issue #693）。タスクが書いていなければ`defaults.role`を継ぐ
+  const roleResult = resolveRole(t['role']);
+  if (roleResult.invalidRaw !== undefined) {
+    parseWarnings.push(
+      `role に未知の値が指定されたため役割なしとして扱いました（指定できる値: ${TEAM_ROLES.join(' / ')}）: ${roleResult.invalidRaw}`,
+    );
+  }
+  const role = roleResult.value ?? defaults.role;
+  // 役割から引くのは`model` / `effort`の既定値だけ（権限には関与しない）。
+  // 優先順は「タスクが明示 > タスクの役割 > defaults が明示 > defaults の役割」——
+  // 同じ階層では明示した値が役割より強く、階層が下（タスク）のほうが上（defaults）より
+  // 強い。役割だけが階層を飛び越えて defaults.model を上書きすることはない
+  const taskRoleDefaults =
+    roleResult.value === undefined ? undefined : roleDefaults(roleResult.value, provider.value);
+  const defaultsRoleDefaults =
+    defaults.role === undefined ? undefined : roleDefaults(defaults.role, provider.value);
+
   // dependsOnは配列であること自体が意味を持つ（直列/並列の分岐点）。
   // `dependsOn: T1`のような書き忘れを黙って`[]`にすると、直列であるべきタスクが並列で走ってしまうため、
   // 「配列でなかった」ことをparseErrorsへ残し、validateWorkflowでエラーにする。
@@ -490,6 +567,7 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
 
   return {
     id: str(t['id']),
+    role,
     prompt: str(t['prompt']),
     done: str(t['done']),
     dependsOn,
@@ -499,8 +577,16 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
     isolation: isolation.value,
     type: type.value,
     cwd: optStr(t['cwd']),
-    model: optStr(t['model']) ?? defaults.model,
-    effort: optStr(t['effort']) ?? defaults.effort,
+    model:
+      optStr(t['model']) ??
+      taskRoleDefaults?.model ??
+      defaults.model ??
+      defaultsRoleDefaults?.model,
+    effort:
+      optStr(t['effort']) ??
+      taskRoleDefaults?.effort ??
+      defaults.effort ??
+      defaultsRoleDefaults?.effort,
     approvalMode: optStr(t['approvalMode']) ?? defaults.approvalMode,
     sandbox: optStr(t['sandbox']) ?? defaults.sandbox,
     autoApprove: bool(t['autoApprove'], defaults.autoApprove),
@@ -547,12 +633,20 @@ export function buildOrchestratorTask(
   const provider = resolveEnum(raw['provider'], isProvider, DEFAULT_PROVIDER).value;
   const isolation = resolveEnum(raw['isolation'], isIsolation, DEFAULT_ISOLATION).value;
   const type = resolveEnum(raw['type'], isCommitType, DEFAULT_COMMIT_TYPE).value;
+  // 役割（design.md §16.44、Issue #693）は`add_task`から指定できる。上の禁止リスト
+  // （autoApprove / allow / sandbox / approvalMode）と違い、役割が決めるのは
+  // `model` / `effort` の既定値だけで権限には関与しないため（`rolePresets.ts`）。
+  // 未知の値は「役割なし」へ倒す（ここでは警告の置き場が無いので黙って倒し、
+  // 実効値は従来の add_task と同じ「拡張機能の設定に従う」になる）
+  const role = resolveRole(raw['role']).value;
+  const roleModelEffort = role === undefined ? undefined : roleDefaults(role, provider);
   const dependsOnRaw = raw['dependsOn'];
   const dependsOn = Array.isArray(dependsOnRaw) ? filterStringArray(dependsOnRaw).values : [];
   const continuePromptRaw = str(raw['continuePrompt']);
   const issueResult = resolveIssue(raw['issue']);
   const task: WorkflowTask = {
     id: str(raw['id']),
+    role,
     prompt: str(raw['prompt']),
     done: str(raw['done']),
     dependsOn,
@@ -562,8 +656,8 @@ export function buildOrchestratorTask(
     isolation,
     type,
     cwd: undefined,
-    model: undefined,
-    effort: undefined,
+    model: roleModelEffort?.model,
+    effort: roleModelEffort?.effort,
     approvalMode: undefined,
     sandbox: undefined,
     autoApprove: DEFAULT_AUTO_APPROVE,
@@ -1249,6 +1343,12 @@ export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationRes
       errors.push({
         taskIds: [t.id],
         message: `id "${RESERVED_INTEGRATION_TASK_ID}" は統合worktree用に予約されているため使えません`,
+      });
+    }
+    if (t.id === RESERVED_ORCHESTRATOR_TASK_ID) {
+      errors.push({
+        taskIds: [t.id],
+        message: `id "${RESERVED_ORCHESTRATOR_TASK_ID}" はオーケストレーターの受け渡しファイル用に予約されているため使えません`,
       });
     }
   }

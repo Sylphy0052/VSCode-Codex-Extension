@@ -1,4 +1,5 @@
-import type { TaskState } from '../orchestrator/runState';
+import { roleLabel, type TeamRole } from '../orchestrator/rolePresets';
+import { isActiveTaskState, type TaskState } from '../orchestrator/runState';
 
 /**
  * ワークフローViewの純粋ロジック（design.md §16.8）。
@@ -255,6 +256,79 @@ export function aggregateProgress(tasks: readonly { state: TaskState }[]): Progr
     hasWaitingReply: counts.waitingReply > 0,
     hasBlocked: counts.blocked > 0,
   };
+}
+
+/**
+ * カンバン風の3バケット + 要対応枠への分類（design.md §16.44、Issue #693、チームモード）。
+ *
+ * `runState.ts`の`TaskState`（9値）をそのまま一覧・グラフへ出すと、並列実行中は状態の
+ * 種類が多すぎて「進んでいるのか止まっているのか」がひと目で分からない。ここではカンバンの
+ * 3列（todo/inProgress/done）に丸め、加えて人の対応が要る状態（failed/blocked/skipped）を
+ * `attention`として別枠に出す（`done`と違い「タスクの作業は終わったが良い終わり方ではない」
+ * ため同列にしない）。
+ *
+ * - `todo`: `pending`
+ * - `inProgress`: `running` / `waitingApproval` / `waitingReply` / `merging`
+ * - `done`: `done`
+ * - `attention`: `failed` / `blocked` / `skipped`
+ *
+ * **`inProgress`の4状態は`isActiveTaskState`（runState.ts）が「並列枠を占める」と判定する
+ * 集合と完全に一致する。** 意味も一致する（「進行中」という直感は「並列枠を占めている」と
+ * ほぼ同じ）ため、ここで独立に4値を書き並べず`isActiveTaskState`をそのまま再利用する。
+ * `TaskState`へ新しい状態が増えたとき両者がずれたまま気付かれない事故
+ * （`isActiveTaskState`のJSDocが警告する「状態を1つ足すたびに揃えて直す」対象の1つ）を防ぐ。
+ */
+export type KanbanBucket = 'todo' | 'inProgress' | 'done' | 'attention';
+
+export function kanbanBucket(state: TaskState): KanbanBucket {
+  if (state === 'pending') {
+    return 'todo';
+  }
+  if (state === 'done') {
+    return 'done';
+  }
+  if (state === 'failed' || state === 'blocked' || state === 'skipped') {
+    return 'attention';
+  }
+  // 残りは running/waitingApproval/waitingReply/merging の4状態のみ（`TaskState`の全9値から
+  // 上で判定済みの5値を除いた残り）。`isActiveTaskState`と一致する前提だが、分類関数としては
+  // 万一ずれても値を返し切る必要があるため、falseの場合も人の目に留まりやすい`attention`へ倒す
+  return isActiveTaskState(state) ? 'inProgress' : 'attention';
+}
+
+/** `kanbanBucket`の件数集計。バッジ表示（ToDo: N / InProgress: N / Done: N、要対応: N）に使う。 */
+export interface KanbanSummary {
+  total: number;
+  todo: number;
+  inProgress: number;
+  done: number;
+  /** failed/blocked/skippedの合計。1件以上のときだけ警告色のバッジを別途出す判断に使う。 */
+  attention: number;
+}
+
+/** `aggregateProgress`と同じく、テストしやすいよう`state`だけを持つ最小限の形を受け取る。 */
+export function summarizeKanban(tasks: readonly { state: TaskState }[]): KanbanSummary {
+  const summary: KanbanSummary = {
+    total: tasks.length,
+    todo: 0,
+    inProgress: 0,
+    done: 0,
+    attention: 0,
+  };
+  for (const t of tasks) {
+    summary[kanbanBucket(t.state)] += 1;
+  }
+  return summary;
+}
+
+/**
+ * タスクの役割表示ラベル（design.md §16.44、Issue #693）。`role`が`undefined`
+ * （役割なし。従来どおりの振る舞い、`rolePresets.ts`参照）のタスクは何も表示しない、という
+ * 判定をここへ集約する。ノード（`workflowScript.ts`の`buildNode`）とタスク一覧
+ * （`renderTable`）の両方が同じ判定を使うため、二重に書かない。
+ */
+export function taskRoleLabel(role: TeamRole | undefined): string | undefined {
+  return role === undefined ? undefined : roleLabel(role);
 }
 
 /** 統合の状況（design.md §16.8「そのほか」・§16.17・§16.18）。表示できる項目だけを持つ。 */

@@ -10,3 +10,7 @@ coverage/
 
 # ワークフローがタスクごとに作るworktree。実行中だけ存在する作業領域なので共有しない
 .agents/worktrees/
+
+# チームモードでセッション同士が受け渡すファイル。run中だけ存在する作業領域なので共有しない
+# （.agents/handoff/ 直下の手書きの申し送りは追跡対象のままにするため、runs/ だけを除く）
+.agents/handoff/runs/

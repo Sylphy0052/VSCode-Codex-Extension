@@ -7,6 +7,7 @@ import { SANDBOX_MODES, type ApprovalMode } from '../codex/types';
 import { LOOP_ITERATION_LIMIT } from '../loop/loopController';
 import type { Logger } from '../log';
 import { DANGER_PATTERN_IDS } from './escalation';
+import { escalationModel, roleDefaults, roleLabel, TEAM_ROLES } from './rolePresets';
 import { sanitizeForLog, stripControlChars } from './sanitize';
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { TaskSessionHost, TaskSessionInput } from './taskSession';
@@ -141,10 +142,43 @@ export interface SchemaDescriptionOptions {
    */
   unattended?: boolean;
   /**
+   * チームモード（design.md §16.44、issue #693）。有効にすると、タスクへ `role` を
+   * 書かせる説明を足す。
+   *
+   * 既定でoffにしてあるのは、役割を書かせるとタスクごとのmodel/effortが役割のプリセットで
+   * 決まるため（`rolePresets.ts`）で、ふつうのワークフロー生成の挙動を黙って変えたくないから。
+   * 「チームモードを起動する」導線を通ったときだけonになる。
+   */
+  team?: boolean;
+  /**
    * 分解に使っているエージェント（issue #321）。生成されるYAMLの `defaults.provider` へ
    * これを書くよう指示する。省略時は `DEFAULT_PROVIDER`。
    */
   provider?: Provider;
+}
+
+/**
+ * チームモードの `role` フィールドの説明を組み立てる（design.md §16.44）。
+ *
+ * 役割の一覧も、役割ごとのmodel/effortも `rolePresets.ts` から引く。ここに語彙や
+ * モデル名を手で書き写さない（`buildSchemaDescription` 全体の方針と同じ）。
+ * `escalation` 段（Sol/Fable）はどの役割の既定にもならないので、必要なときだけ
+ * `model` を明示して上げる、という運用をそのまま説明文にしている。
+ */
+function buildRoleDescription(provider: Provider): string[] {
+  const lines = TEAM_ROLES.map((role) => {
+    const d = roleDefaults(role, provider);
+    return `  - ${role}（${roleLabel(role)}）: model=${d.model}, effort=${d.effort}`;
+  });
+  return [
+    '- role（省略可）: そのタスクを担当する役割。書くと、その役割に対応するmodelとeffortが' +
+      '自動で決まる。同じ役割を複数のタスクへ付けてよい（役割はタスクidではない）。' +
+      `${provider} での既定は次のとおり:`,
+    ...lines,
+    `  役割を書いたタスクへ model / effort を重ねて書くと、そちらが優先される。` +
+      `難易度が高く詰まりそうなタスクに限り model: ${escalationModel(provider)} を明示してよいが、` +
+      '高額なので既定では使わないこと',
+  ];
 }
 
 /**
@@ -158,6 +192,7 @@ export interface SchemaDescriptionOptions {
  */
 export function buildSchemaDescription(options: SchemaDescriptionOptions = {}): string {
   const unattended = options.unattended ?? false;
+  const team = options.team ?? false;
   const provider = options.provider ?? DEFAULT_PROVIDER;
   return [
     '# ワークフロー定義（YAML）のスキーマ',
@@ -196,6 +231,7 @@ export function buildSchemaDescription(options: SchemaDescriptionOptions = {}): 
     `- cleanup（省略可）: ${CLEANUP_MODES.join(' または ')}。タスク単位では指定できず defaults.cleanup に従う`,
     '- model / effort / approvalMode / sandbox（省略可）: 拡張機能側の設定より安全な方向にしか' +
       '動かせない。緩める指定は無視されるので、特別な理由がなければ書かないこと',
+    ...(team ? buildRoleDescription(provider) : []),
     unattended
       ? '- autoApprove（省略可、既定 false）: trueにすると危険と判定した要求以外を自動で許可する。' +
         'このワークフローは無人で実行するので、defaults へ autoApprove: true を書くこと'
@@ -241,6 +277,11 @@ export interface BuildPlannerPromptInput {
    * 無人実行向けの指定を書かせるか（`buildSchemaDescription` へそのまま渡す。issue #278）。
    */
   unattended?: boolean;
+  /**
+   * チームモードか（`buildSchemaDescription` へそのまま渡す。issue #693）。
+   * onのときは「役割で分けること」という分解の指針も足す。
+   */
+  team?: boolean;
   /**
    * 分解に使っているエージェント（`buildSchemaDescription` へそのまま渡す。issue #321）。
    */
@@ -300,6 +341,7 @@ export function buildPlannerPrompt(input: BuildPlannerPromptInput): string {
     '',
     buildSchemaDescription({
       unattended: input.unattended ?? false,
+      team: input.team ?? false,
       provider: input.provider ?? DEFAULT_PROVIDER,
     }),
     '',
@@ -308,6 +350,13 @@ export function buildPlannerPrompt(input: BuildPlannerPromptInput): string {
     '- 並列に走らせたタスクの結果を統合・レビューする合流タスクを置くこと' +
       '（design.md §16.4のテンプレート変数で各タスクの結果を参照できる）',
     '- 全てのタスクにdoneを書くこと。外から判定できる終了条件にすること',
+    ...(input.team === true
+      ? [
+          '- 全てのタスクにroleを書くこと。会社の役割分担と同じように、設計・実装・レビュー・' +
+            'テスト・文書化を別々のタスクへ分けること',
+          '- 分量が多い工程は、同じroleのタスクを複数に分けて並列に走らせてよい',
+        ]
+      : []),
     '',
     OUTPUT_FORMAT_INSTRUCTION,
   );
@@ -738,6 +787,11 @@ export interface PlanWorkflowInput {
   log: Logger;
   /** `buildPlannerPrompt`にそのまま渡す（design.md §16.19 2段目）。 */
   roadmapMaterial?: string;
+  /**
+   * チームモードの導線から呼ばれたか（design.md §16.44、issue #693）。
+   * `buildPlannerPrompt`へそのまま渡し、タスクへ `role` を書かせる。
+   */
+  team?: boolean;
 }
 
 export interface PlanWorkflowSuccess {
@@ -1072,6 +1126,8 @@ export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkfl
     ...(input.roadmapMaterial !== undefined ? { roadmapMaterial: input.roadmapMaterial } : {}),
     // 無人実行を許した環境（machineスコープ設定がon）でだけ、生成の時点でその形にする
     unattended: input.baseline.allowAutoApprove,
+    // チームモードの導線から来たときだけ、役割で分けさせる（issue #693）
+    team: input.team ?? false,
     // 分解に使ったエージェントを、そのまま実行にも使う（issue #321）
     provider: input.provider,
   });

@@ -191,6 +191,33 @@ export function workflowScript(): string {
     banner.textContent = '';
   }
 
+  // ---- カンバン風のバッジ集計（design.md §16.44、Issue #693） ----
+  // 集計そのものは拡張機能側（workflowGraph.tsのsummarizeKanban。純粋関数でテスト済み）が
+  // 行い、ここではその結果（kanban）を表示するだけにする。renderHeader/renderBannerと
+  // 同じ方針（Issue #104の再発防止）。
+
+  const KANBAN_LABEL = { todo: 'ToDo', inProgress: 'InProgress', done: 'Done' };
+
+  function renderKanban(kanban) {
+    const box = el('kanbanBadges');
+    box.replaceChildren();
+    if (!kanban) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    for (const bucket of ['todo', 'inProgress', 'done']) {
+      box.appendChild(
+        text('span', 'kanban-badge kanban-' + bucket, KANBAN_LABEL[bucket] + ': ' + kanban[bucket]),
+      );
+    }
+    // 要対応（failed/blocked/skipped）は1件以上のときだけ、警告色のバッジを追加で出す
+    // （design.mdの受入基準）。0件のときは他の3バケットと並べても目立たせる意味が無い
+    if (kanban.attention > 0) {
+      box.appendChild(text('span', 'kanban-badge kanban-attention', '要対応: ' + kanban.attention));
+    }
+  }
+
   // ---- 依存グラフ（SVG） ----
 
   function markForState(state, submissionCount) {
@@ -242,8 +269,13 @@ export function workflowScript(): string {
 
     const idText = svgEl('text', { class: 'wf-id', x: -w / 2 + 26, y: -h / 2 + 18 });
     // idはYAML由来（design.mdの検証で字種は絞られているが、Viewとしては信用しない）。
-    // 必ずtextContentへ代入する（HTML/SVGとして解釈させない）
-    idText.textContent = task.id;
+    // 必ずtextContentへ代入する（HTML/SVGとして解釈させない）。
+    // 役割ラベル（design.md §16.44、Issue #693。roleLabelは拡張機能側でroleLabel()を通した
+    // 表示名なのでYAML由来ではないが、同じ扱いでtextContentへ入れる）は、役割が無いタスクとの
+    // 表示幅の違いで判別できてしまわないよう、idと同じ行へ併記する。ノードの縦幅が60pxしか無く
+    // 別行を割く余地が無いため。idを置き換えるのではなく必ず併記する（同じ役割を複数タスクへ
+    // 割り当てられるため、idの代わりにはできない）
+    idText.textContent = task.roleLabel ? task.id + '（' + task.roleLabel + '）' : task.id;
     group.appendChild(idText);
 
     const metaParts = [STATE_LABEL[task.state] || task.state];
@@ -285,6 +317,7 @@ export function workflowScript(): string {
 
     const title = svgEl('title');
     title.textContent = task.id + ' ・ ' + (STATE_LABEL[task.state] || task.state) +
+      (task.roleLabel ? ' ・ 役割: ' + task.roleLabel : '') +
       (task.mergeResolutionActive ? ' ・ ' + mergeResolutionBadgeLabel(task) : '') +
       (task.lastResponseSummary ? ' ・ ' + task.lastResponseSummary : '');
     group.appendChild(title);
@@ -564,7 +597,7 @@ export function workflowScript(): string {
   function buildApprovalRow(task) {
     const row = el2('tr', 'approval-row');
     const cell = document.createElement('td');
-    cell.colSpan = 8;
+    cell.colSpan = 9;
     const box = el2('div', 'approval-box');
 
     const heading = text('div', 'kind', task.pendingApproval.kind + ' の承認要求: ');
@@ -614,7 +647,7 @@ export function workflowScript(): string {
   function buildPromptRow(task) {
     const row = el2('tr', 'prompt-row');
     const cell = document.createElement('td');
-    cell.colSpan = 8;
+    cell.colSpan = 9;
     const box = el2('div', 'prompt-box');
 
     box.appendChild(
@@ -677,6 +710,12 @@ export function workflowScript(): string {
       row.addEventListener('click', () => selectAndReveal(task.id));
 
       row.appendChild(text('td', '', task.id));
+
+      // 役割（design.md §16.44、Issue #693）。roleが無い（undefined）タスクは何も出さない。
+      // idの代わりではなく専用の列に併記する（表は元々idごとに1行のため、この列自体が
+      // 「同じ役割の複数タスク」を一覧で見比べられる場所になる）
+      const roleCell = text('td', 'role-cell', task.roleLabel || '');
+      row.appendChild(roleCell);
 
       const stateCell = el2('td', 'state-badge');
       stateCell.appendChild(
@@ -945,12 +984,13 @@ export function workflowScript(): string {
     el('empty').hidden = runs.length > 0;
   }
 
-  function applyState(snapshot, layout, progress, integration) {
+  function applyState(snapshot, layout, progress, kanban, integration) {
     currentSnapshot = snapshot;
     currentLayout = layout;
     el('content').hidden = false;
     el('empty').hidden = true;
     renderHeader(snapshot, progress);
+    renderKanban(kanban);
     renderOrchestrator(snapshot);
     renderAskUser(snapshot);
     renderGraph(snapshot, layout);
@@ -968,6 +1008,7 @@ export function workflowScript(): string {
     currentLayout = null;
     el('content').hidden = true;
     el('empty').hidden = false;
+    el('kanbanBadges').hidden = true;
     el('openIntegrationPrBtn').disabled = true;
     // オーケストレーター欄は#header側にあり#contentのhiddenでは消えないため明示的に隠す
     el('orchestrator').hidden = true;
@@ -1113,7 +1154,7 @@ export function workflowScript(): string {
     if (msg.type === 'runs') {
       applyRuns(msg.runs);
     } else if (msg.type === 'state') {
-      applyState(msg.snapshot, msg.layout, msg.progress, msg.integration);
+      applyState(msg.snapshot, msg.layout, msg.progress, msg.kanban, msg.integration);
     } else if (msg.type === 'noRun') {
       applyNoRun();
     } else if (msg.type === 'programs') {

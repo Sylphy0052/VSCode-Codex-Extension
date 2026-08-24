@@ -31,6 +31,19 @@ const PLAN: WorkflowMenuEntry = {
   command: 'agent.workflows.plan',
 };
 
+/**
+ * チームモード（design.md §16.44、issue #693）。
+ *
+ * 中身は「ゴール文からワークフローを生成」と同じ経路だが、役割ごとのセッションへ
+ * 分けさせる点だけが違う。導線を分けているのは、役割を書かせるとタスクごとのmodel/effortが
+ * 役割のプリセットで決まるため（`rolePresets.ts`）で、ふつうの生成と混ぜたくないから。
+ */
+const TEAM: WorkflowMenuEntry = {
+  label: '$(organization) チームモードを開始…',
+  description: 'ゴールを役割ごとのセッションへ分けたYAMLを作ります（自動では実行しません）',
+  command: 'agent.workflows.team',
+};
+
 const ROADMAP: WorkflowMenuEntry = {
   label: '$(list-ordered) ロードマップを生成…',
   description: 'ゴールからフェーズ分けのMarkdownを作ります',
@@ -53,12 +66,13 @@ const STOP: WorkflowMenuEntry = {
  */
 export function buildWorkflowMenuEntries(runningCount: number): WorkflowMenuEntry[] {
   if (runningCount <= 0) {
-    return [RUN, VIEW, PLAN, ROADMAP];
+    return [RUN, VIEW, PLAN, TEAM, ROADMAP];
   }
   return [
     { ...VIEW, description: `実行中 ${runningCount}件 — ${VIEW.description}` },
     RUN,
     PLAN,
+    TEAM,
     ROADMAP,
     STOP,
   ];

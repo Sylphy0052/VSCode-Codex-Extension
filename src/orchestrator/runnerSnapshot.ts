@@ -159,6 +159,10 @@ function buildTaskSnapshot(
   const persistedTask = persisted?.tasks[task.id];
   return {
     id: task.id,
+    // 役割は定義ファイル（`live.def.tasks`）から都度導出する。`deriveAllowWarnings` と
+    // 同じ考え方で、定義から決まる情報は状態として持たない——永続化しないので、
+    // リロードで復元したrunでも表示が欠けない（design.md §16.44）
+    role: task.role,
     dependsOn: task.dependsOn,
     provider: task.provider,
     state: state?.state ?? 'pending',

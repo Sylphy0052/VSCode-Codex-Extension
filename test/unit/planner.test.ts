@@ -11,6 +11,7 @@ import {
 } from '../../src/loop/loopController';
 import type { Logger } from '../../src/log';
 import { DANGER_PATTERN_IDS } from '../../src/orchestrator/escalation';
+import { roleDefaults, roleLabel, TEAM_ROLES } from '../../src/orchestrator/rolePresets';
 import type { ExtensionSafetyBaseline } from '../../src/orchestrator/taskConfig';
 import type {
   ApprovalHandler,
@@ -307,6 +308,55 @@ describe('buildPlannerPrompt（design.md §16.9）', () => {
     });
     expect(prompt).toContain('issue');
     expect(prompt).toContain('Closes #');
+  });
+
+  describe('チームモード（design.md §16.44、issue #693）', () => {
+    const summary = { topLevelEntries: [], hasAgentsMd: false, hasClaudeMd: false };
+
+    it('team省略時はroleの説明を出さない（ふつうの生成の挙動を変えない）', () => {
+      const prompt = buildPlannerPrompt({ goal: 'ゴール', workspaceSummary: summary });
+
+      expect(prompt).not.toContain('role（省略可）');
+    });
+
+    it('team指定時はroleの説明と全役割の既定を出す', () => {
+      const prompt = buildPlannerPrompt({
+        goal: 'ゴール',
+        workspaceSummary: summary,
+        team: true,
+        provider: 'codex',
+      });
+
+      expect(prompt).toContain('role（省略可）');
+      for (const role of TEAM_ROLES) {
+        const defaults = roleDefaults(role, 'codex');
+        expect(prompt).toContain(role);
+        expect(prompt).toContain(roleLabel(role));
+        expect(prompt).toContain(`model=${defaults.model}, effort=${defaults.effort}`);
+      }
+    });
+
+    it('providerごとに違うmodelを説明する', () => {
+      const forClaude = buildPlannerPrompt({
+        goal: 'ゴール',
+        workspaceSummary: summary,
+        team: true,
+        provider: 'claude',
+      });
+
+      expect(forClaude).toContain(roleDefaults('implementer', 'claude').model);
+      expect(forClaude).not.toContain(roleDefaults('implementer', 'codex').model);
+    });
+
+    it('team指定時は役割ごとに分けるよう指示する', () => {
+      const prompt = buildPlannerPrompt({
+        goal: 'ゴール',
+        workspaceSummary: summary,
+        team: true,
+      });
+
+      expect(prompt).toContain('全てのタスクにroleを書くこと');
+    });
   });
 
   it(
