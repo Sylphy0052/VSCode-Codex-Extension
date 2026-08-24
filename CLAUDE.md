@@ -5,6 +5,7 @@
 ## PR運用
 
 - PR作成後は自己レビュー必須。指摘があれば自分で修正してから次へ進む
+- CI (`checks` / `external-cli`) の確認、他者レビューは不要。自己マージしてよい
 - 自己レビュー・修正が済んでいれば、CI (`checks` / `external-cli`) の完了を待たずに自己mergeしてよい
   - ブランチ保護は承認数0で自己merge可能な設定になっている（詳細: `docs/repository-hygiene.md`）
   - CI未完了で `gh pr merge` が `mergeStateStatus: BLOCKED` を返す場合は `--admin` を付けてstatus check待ちを迂回する
