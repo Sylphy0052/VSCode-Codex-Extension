@@ -117,6 +117,14 @@ export function controlPanelStyles(): string {
   #alertBanner.warning:hover {
     background-color: color-mix(in srgb, var(--vscode-charts-yellow) 20%, transparent);
   }
+  /* セクション見出しの集計（issue #740）。異常の強調は先頭の帯（issue #741）が担うので、
+     ここでは色を付けず件数だけを出す */
+  .sectionCount {
+    margin-left: 6px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+    font-weight: normal;
+  }
   .tabs {
     display: flex;
     gap: 2px;
