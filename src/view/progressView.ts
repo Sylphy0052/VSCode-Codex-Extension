@@ -123,11 +123,26 @@ ${progressStyles()}
 </style>
 </head>
 <body>
-  <div id="empty">まだ進捗はありません。</div>
+  <div id="empty">
+    <span id="emptyIcon"></span>
+    <div>まだ進捗はありません。</div>
+    <div class="hint">このセッションで指示を送ると、ターンごとの経過がここに出ます。</div>
+  </div>
   <section id="summary" hidden>
-    <h1>進捗</h1>
-    <div id="summaryLine" class="meta"></div>
-    <div id="progressBar"><div id="progressFill"></div></div>
+    <div id="summaryHeader">
+      <h1>進捗</h1>
+      <span id="statusBadge"></span>
+    </div>
+    <div id="kpis">
+      <div class="kpi"><span class="kpi-value" id="kpiTurns">0</span><span class="kpi-label">ターン</span></div>
+      <div class="kpi"><span class="kpi-value" id="kpiFiles">0</span><span class="kpi-label">変更ファイル</span></div>
+      <div class="kpi"><span class="kpi-value" id="kpiCommands">0</span><span class="kpi-label">コマンド</span></div>
+      <div class="kpi"><span class="kpi-value" id="kpiTodo">0</span><span class="kpi-label">TODO</span></div>
+    </div>
+    <div id="progressRow" hidden>
+      <div id="progressBar"><div id="progressFill"></div></div>
+      <span id="progressPercent"></span>
+    </div>
   </section>
   <section id="checklistSection" hidden>
     <h2>チェックリスト</h2>
@@ -136,6 +151,7 @@ ${progressStyles()}
   <section id="filesSection" hidden>
     <h2>変更したファイル</h2>
     <ul id="files"></ul>
+    <div id="filesMore"></div>
   </section>
   <section id="timelineSection" hidden>
     <h2>タイムライン</h2>

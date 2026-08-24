@@ -5,6 +5,7 @@ import { chatScript } from '../../src/view/chatScript';
 import { approvalLevelMeta } from '../../src/provider/approvalLevel';
 import { controlPanelScript } from '../../src/view/controlPanelScript';
 import { progressScript } from '../../src/view/progressScript';
+import { progressStyles } from '../../src/view/progressStyles';
 import { workflowScript } from '../../src/view/workflowScript';
 import { workflowStyles } from '../../src/view/workflowStyles';
 
@@ -998,5 +999,52 @@ describe('progressScript', () => {
     for (const id of ['empty', 'summary', 'checklistSection', 'filesSection', 'timelineSection']) {
       expect(source.includes(id), `${id} を扱う処理が無い`).toBe(true);
     }
+  });
+
+  it('アイコンをインラインSVGで作る（issue #781）', () => {
+    const source = progressScript();
+    // codiconのフォントはvsce package --no-dependenciesで配布物から落ちるため使えない。
+    // SVGならCSPを広げずに済む（font-src / img-src を足さない）
+    expect(source).toContain('createElementNS');
+    expect(source).toContain('http://www.w3.org/2000/svg');
+    expect(source).not.toContain('codicon');
+  });
+
+  it('KPIのタイルをすべて書き換える（issue #781）', () => {
+    const source = progressScript();
+    for (const id of ['kpiTurns', 'kpiFiles', 'kpiCommands', 'kpiTodo']) {
+      expect(source.includes(id), `${id} を扱う処理が無い`).toBe(true);
+    }
+    // TODOが無いセッションでは0%の棒を出さずに隠す
+    expect(source).toContain('progressRow');
+    expect(source).toContain('progressPercent');
+  });
+
+  it('古いターンを畳み、ファイル一覧を打ち切る（issue #781）', () => {
+    const source = progressScript();
+    expect(source).toContain('OPEN_TURNS');
+    expect(source).toContain('FILES_SHOWN');
+    // 折りたたみは <details> の open で行う
+    expect(source).toContain("node('details'");
+    expect(source).toContain('残り');
+  });
+});
+
+describe('progressStyles', () => {
+  it('色をVS Codeのテーマ変数から取る（issue #781）', () => {
+    const source = progressStyles();
+    // 生の色指定はストライプの透過白のみ。他はテーマ変数に追随させる
+    const literals = source.match(/#[0-9a-fA-F]{3,8}\b/g) ?? [];
+    expect(literals).toEqual([]);
+  });
+
+  it('サマリーを上に固定し、下の内容が透けないようにする（issue #781）', () => {
+    const source = progressStyles();
+    expect(source).toContain('position: sticky');
+    expect(source).toContain('--vscode-editor-background');
+  });
+
+  it('動きを減らす設定に追随する（issue #760）', () => {
+    expect(progressStyles()).toContain('prefers-reduced-motion');
   });
 });

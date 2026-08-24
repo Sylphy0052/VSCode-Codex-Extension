@@ -97,6 +97,25 @@ describe('buildProgress', () => {
     expect(view.summary.commandCount).toBe(2);
   });
 
+  it('同じファイルへ何回書き込んだかを別に数える（issue #781）', () => {
+    const view = buildProgress(
+      stateWith([
+        item('userMessage', { text: '指示' }),
+        fileChange('a.ts'),
+        fileChange('a.ts'),
+        fileChange('b.ts'),
+        item('userMessage', { text: '続き' }),
+        fileChange('a.ts'),
+      ]),
+    );
+
+    // 一覧は重複を落としたまま。回数だけをこちらで持つ
+    expect(view.turns[0]?.editedFiles).toEqual(['a.ts', 'b.ts']);
+    expect(view.turns[0]?.fileEditCounts).toEqual({ 'a.ts': 2, 'b.ts': 1 });
+    // 回数はターンごとに数え直す（前のターンの分を持ち越さない）
+    expect(view.turns[1]?.fileEditCounts).toEqual({ 'a.ts': 1 });
+  });
+
   it('TODOの履歴をターンごとの変化として配る', () => {
     const history: TodoSnapshot[] = [
       { todos: [todo('A', 'pending'), todo('B', 'pending')], turnIndex: 0 },

@@ -6889,6 +6889,40 @@ TODOの同一性は本文（`content`）で見る。`TodoWrite` の項目はid�
 - `test/unit/webviewScript.test.ts` / `test/unit/webviewStyles.test.ts`: スクリプトの構文、`innerHTML` を使っていないこと、`hidden` の打ち消し規則
 - `docs/manual-test.md` C-51（Claude Code画面はL-52）: 実機での開き方とライブ更新
 
+### 14.76 進捗画面の視認性を上げる（issue #781、§14.68の続き）
+
+出す情報は§14.68のまま変えず、見え方だけを組み直した。文字だけの1行サマリと6pxの棒では、開いた瞬間に「どこまで進んだか」が読み取れなかった。
+
+#### KPIのタイルとスティッキー表示
+
+サマリ1行を4枚のタイル（ターン／変更ファイル／コマンド／TODO）へ置き換え、数値を大きく出す。応答中かどうかは見出しの右のバッジで示す。サマリ全体を `position: sticky; top: 0` で上に固定するため、背景には必ず不透明な `--vscode-editor-background` を敷く（透けると下のタイムラインと数字が重なって読めなくなる）。
+
+進捗バーは高さを10pxへ拡げ、右にパーセントを併記し、100%で `--vscode-charts-green` へ替える。TODOを持たないセッション（Codex）では0%の棒を出す意味が無いため、行そのものを隠す。
+
+#### アイコンはインラインSVGで持つ
+
+codiconのフォントは使えない。`.vscodeignore` が `node_modules/**` を除外し、`vsce package --no-dependencies` で固めるため、`@vscode/codicons` を `asWebviewUri` で参照しても配布物に含まれず、開発機では動くのに配布物では黙って四角が並ぶ。`resources/` へコピーするビルド手順を足す手もあるが、必要なのは十数個の単純な形なので割に合わない。
+
+そこで `progressScript.ts` の `ICONS` に16×16のパスを持ち、`document.createElementNS` でSVGを組み立てる。`fill` / `stroke` は `currentColor` にして、CSS側の色指定だけで文脈に追随させる。この選択の効果として、CSPは§14.68のまま（`default-src 'none'`、`font-src` も `img-src` も無し）で済む。
+
+#### 古い情報を畳む
+
+ターンは `<details>` にし、末尾3ターン（`OPEN_TURNS`）だけ開いた状態で描く。畳まれていても何のターンか分かるよう、見出しにファイル数・コマンド数・TODO変化数のチップと指示の先頭を出す。
+
+変更ファイルの一覧は20件（`FILES_SHOWN`）で打ち切り、「残りN件を表示」で続きを出す。長いセッションでは数百件になり、下にあるタイムラインが画面から押し出されるため。
+
+タイムラインは左に縦線を引き、各ターンの先頭に丸ノードを置く。最新のターンだけ塗って現在地を示す。
+
+#### ファイルの回数は別のフィールドで持つ
+
+`ProgressTurn.editedFiles` は重複を落とした一覧のままにし、回数は `fileEditCounts`（パス→回数）を新設して持つ。既存の利用側（件数の集計、サマリの重複除去）の数え方を変えずに「同じファイルを何度も往復した」ことだけを足せる。
+
+#### 確かめ方
+
+- `test/unit/webviewScript.test.ts`: SVGで組み立てていること（`createElementNS`があり`codicon`が無い）、KPIの各idを書き換えていること、`OPEN_TURNS` / `FILES_SHOWN` による打ち切り、スタイルが生の色リテラルを持たないこと、`position: sticky` と不透明な背景
+- `test/unit/progressModel.test.ts`: `fileEditCounts` の集計
+- `docs/manual-test.md` C-52: 実機での見え方（ライト／ダーク、畳み、スクロール、減光設定）
+
 ### 16.44 チームモード（Issue #693）
 
 #### 何を足したのか
