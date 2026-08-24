@@ -285,6 +285,20 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   }
 
   /**
+   * 開いている全セッションの活動状態（issue #734）。承認待ちの件数を数えるのに使う。
+   *
+   * 母数は`getActivityState`と同じ`panels`にする（`allPanels()`ではない）。
+   * `allPanels()`が追加で含むCodex側の`pendingStarts`は`thread/start`の応答待ちで、
+   * まだセッションが無く承認要求も出ないため、数に含めても常に0を足すだけであり、
+   * 履歴ツリーの印（`getActivityState`）と母数がずれる分だけ食い違いの元になる。
+   */
+  activityStates(): SessionActivityState[] {
+    return [...this.panels.values()].map((entry) =>
+      deriveSessionActivityState(entry.session.getState()),
+    );
+  }
+
+  /**
    * エディタの選択範囲（issue #292）を送る先。最後にアクティブだった画面を返す
    * （`this.active`。名前変更・クリアと同じ対象）。開いているタブが無ければ`undefined`。
    *
