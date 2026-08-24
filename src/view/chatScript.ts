@@ -165,6 +165,7 @@ export function chatScript(
     'subAgentActivity',
     'collabAgentToolCall',
     'autoApprovalReview',
+    'fileRead',
   ]);
 
   /** Web検索結果を畳まずに出す件数（issue #18）。超えた分は開くまで隠す。 */
