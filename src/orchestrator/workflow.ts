@@ -606,8 +606,8 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
  * タスクを組み立てる。`resolveTask`（YAMLの1タスク分の解決）とほぼ同じ考え方で未知の
  * フィールドを読み飛ばすが、次の2点が異なる。
  *
- * - `autoApprove` / `allow` / `sandbox` / `approvalMode` は受け取らない。**指定されて
- *   いれば（値によらず）拒否する。** 黙って既定値へ落とすと「指定したのに反映されな
+ * - `autoApprove` / `allow` / `sandbox` / `approvalMode` / `escalate` / `cwd` は受け取らない。
+ *   **指定されていれば（値によらず）拒否する。** 黙って既定値へ落とすと「指定したのに反映されな
  *   かった」だけに見え、拒否されたことにモデルが気付けない（design.md §16.29「指定を
  *   無視して黙って既定で作る形にはしない」）
  * - `defaults`ブロック（YAMLの`defaults:`）は実行時には残っていない
@@ -621,7 +621,7 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
 export function buildOrchestratorTask(
   raw: Record<string, unknown>,
 ): { task: WorkflowTask } | { error: string } {
-  for (const field of ['autoApprove', 'allow', 'sandbox', 'approvalMode'] as const) {
+  for (const field of ['autoApprove', 'allow', 'sandbox', 'approvalMode', 'escalate'] as const) {
     if (Object.prototype.hasOwnProperty.call(raw, field)) {
       return {
         error:
@@ -629,6 +629,17 @@ export function buildOrchestratorTask(
           `定義からのみ許可されます）: ${field}`,
       };
     }
+  }
+  // `cwd`は権限そのものではないが、タスクがどこで動くか（worktreeの外に出るか）を決める
+  // 境界であり、人が書いたYAMLからしか指定させない点は上の5つと同じ（Issue #766）。
+  // 従来は黙って`undefined`へ落としていたため、指定したのに効かないことにモデルが
+  // 気付けなかった
+  if (Object.prototype.hasOwnProperty.call(raw, 'cwd')) {
+    return {
+      error:
+        'cwd はadd_taskから指定できません（タスクの作業ディレクトリは人が書いた' +
+        'ワークフロー定義からのみ指定できます）: cwd',
+    };
   }
   const provider = resolveEnum(raw['provider'], isProvider, DEFAULT_PROVIDER).value;
   const isolation = resolveEnum(raw['isolation'], isIsolation, DEFAULT_ISOLATION).value;
@@ -655,12 +666,14 @@ export function buildOrchestratorTask(
     provider,
     isolation,
     type,
+    // 上で拒否済み（Issue #766）。`add_task`のタスクは常にisolation既定の置き場で動く
     cwd: undefined,
     model: roleModelEffort?.model,
     effort: roleModelEffort?.effort,
     approvalMode: undefined,
     sandbox: undefined,
     autoApprove: DEFAULT_AUTO_APPROVE,
+    // 上で拒否済み（Issue #766）
     escalate: [],
     allow: [],
     retries: Math.max(0, Math.trunc(num(raw['retries'], 0))),
