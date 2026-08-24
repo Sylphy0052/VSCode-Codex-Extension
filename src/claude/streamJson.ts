@@ -217,22 +217,27 @@ function applyUser(state: ChatState, event: Record<string, unknown>): ChatState 
       items = next;
       continue;
     }
-    if (type === 'text') {
-      const text = str(part['text']);
-      if (text === '') {
-        continue;
-      }
-      items = upsert(items, {
-        id: str(event['uuid']) || `user-${items.length}`,
-        kind: 'userMessage',
-        text,
-        detail: '',
-        status: undefined,
-        turnId: undefined,
-        diffs: [],
-        searchResults: [],
-      });
-    }
+  }
+
+  // テキストと画像は同じcontent配列に混在しうる（例: 貼り付けた画像+コメント）ため、
+  // ループとは別に一度だけ集約してitem化する。画像だけ・テキストだけの送信も拾う。
+  const text = content
+    .filter((part) => str(part['type']) === 'text')
+    .map((part) => str(part['text']))
+    .join('');
+  const images = readClaudeResultImages(content, '送った画像');
+  if (text !== '' || images.length > 0) {
+    items = upsert(items, {
+      id: str(event['uuid']) || `user-${items.length}`,
+      kind: 'userMessage',
+      text,
+      detail: '',
+      status: undefined,
+      turnId: undefined,
+      diffs: [],
+      searchResults: [],
+      images,
+    });
   }
 
   return items === state.items ? state : { ...state, items };

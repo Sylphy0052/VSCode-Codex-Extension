@@ -78,12 +78,16 @@ export function readUserInputImages(content: unknown): ChatImage[] {
 }
 
 /**
- * Claude Codeの `tool_result` から画像を取り出す。
+ * Claude Codeのcontent配列（`tool_result` / ユーザーメッセージ共通）から画像を取り出す。
  *
  * 実測した形（CLI 2.1.227、`Read` でpngを読ませた）:
  * `{type:'image', source:{type:'base64', media_type:'image/png', data:'...'}}`。
+ * ユーザーが送った画像も同じMessages API形式で来る（stream-jsonはAPI形式をそのまま出す）。
  */
-export function readClaudeResultImages(content: unknown): ChatImage[] {
+export function readClaudeResultImages(
+  content: unknown,
+  alt = 'ツールが読んだ画像',
+): ChatImage[] {
   if (!Array.isArray(content)) {
     return [];
   }
@@ -102,7 +106,7 @@ export function readClaudeResultImages(content: unknown): ChatImage[] {
     images.push({
       dataUrl: `data:${mediaType};base64,${data}`,
       path: undefined,
-      alt: 'ツールが読んだ画像',
+      alt,
     });
   }
   return images;

@@ -435,6 +435,43 @@ describe('applyStreamEvent', () => {
     expect(state.items[0]?.text).toBe('直して');
   });
 
+  it('ユーザーが送った画像を項目にする（issue #690）', () => {
+    const state = apply([
+      {
+        type: 'user',
+        uuid: 'u1',
+        message: {
+          content: [
+            { type: 'text', text: '見て' },
+            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0K' } },
+          ],
+        },
+      },
+    ]);
+    expect(state.items[0]?.kind).toBe('userMessage');
+    expect(state.items[0]?.text).toBe('見て');
+    expect(state.items[0]?.images).toEqual([
+      { dataUrl: 'data:image/png;base64,iVBORw0K', path: undefined, alt: '送った画像' },
+    ]);
+  });
+
+  it('テキストなし・画像だけの送信でも項目にする', () => {
+    const state = apply([
+      {
+        type: 'user',
+        uuid: 'u1',
+        message: {
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0K' } },
+          ],
+        },
+      },
+    ]);
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]?.text).toBe('');
+    expect(state.items[0]?.images).toHaveLength(1);
+  });
+
   it('未知のイベントで状態を変えない', () => {
     const state = apply([{ type: 'prompt_suggestion', text: '次はこれ' }]);
     expect(state).toEqual(initialClaudeState);

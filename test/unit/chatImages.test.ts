@@ -157,6 +157,16 @@ describe('readClaudeResultImages', () => {
     ]);
   });
 
+  it('altを渡すとその文言になる', () => {
+    const images = readClaudeResultImages(
+      [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0K' } }],
+      '送った画像',
+    );
+    expect(images).toEqual([
+      { dataUrl: 'data:image/png;base64,iVBORw0K', path: undefined, alt: '送った画像' },
+    ]);
+  });
+
   it('対応しない形式や壊れた中身は捨てる', () => {
     expect(
       readClaudeResultImages([
