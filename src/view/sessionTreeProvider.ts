@@ -212,7 +212,6 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement>
 
   private buildSessionTreeItem(session: SessionSummary): vscode.TreeItem {
     const activity = this.getActivity(session);
-    const open = activity !== undefined;
     const item = new vscode.TreeItem(
       session.threadName ?? '(名称未設定)',
       vscode.TreeItemCollapsibleState.None,
@@ -262,7 +261,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement>
       ].join('\n'),
     );
 
-    item.iconPath = buildSessionIcon(session, activity, open);
+    item.iconPath = buildSessionIcon(session, activity);
     // メニューの出し分けにプロバイダ・アーカイブ状態・ピン留め状態を含める
     // （Claude Codeにはarchive/deleteが無い。`package.json`のwhen句は正規表現で
     // `.pinned`サフィックスの有無に関わらずマッチするようにしてある）
@@ -299,8 +298,9 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement>
 function buildSessionIcon(
   session: SessionSummary,
   activity: SessionActivityState | undefined,
-  open: boolean,
 ): vscode.ThemeIcon {
+  // `undefined` は「開いていない」（従来の`isOpen`相当）。`idle` は開いてはいる
+  const open = activity !== undefined;
   if (activity === 'approvalPending') {
     return new vscode.ThemeIcon('bell-dot', new vscode.ThemeColor('charts.yellow'));
   }
