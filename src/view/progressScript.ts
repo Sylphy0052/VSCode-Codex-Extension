@@ -39,6 +39,7 @@ export function progressScript(): string {
     play: { fill: ['M5 3 L12 8 L5 13 Z'] },
     list: { stroke: ['M2.5 4 L13.5 4', 'M2.5 8 L13.5 8', 'M2.5 12 L9 12'] },
     clock: { stroke: ['M8 2.5 A5.5 5.5 0 1 0 8 13.5 A5.5 5.5 0 1 0 8 2.5', 'M8 5 L8 8 L10.5 9.5'] },
+    folder: { stroke: ['M1.5 3.5 L6 3.5 L7.5 5.5 L14.5 5.5 L14.5 12.5 L1.5 12.5 Z'] },
   };
 
   /** TODOの状態ごとのアイコン。未知の値が来たときは未着手として出す。 */
@@ -163,37 +164,72 @@ export function progressScript(): string {
     return row;
   }
 
-  /**
-   * 一覧へ行を足す。FILES_SHOWN を超えた分は「もっと見る」を押すまで出さない。
-   * 長いセッションで変更ファイルが数百件になると、他の情報が画面から押し出されるため。
-   */
-  function fillPathList(list, paths, counts, after) {
-    clear(list);
-    const shown = paths.slice(0, FILES_SHOWN);
-    for (const path of shown) {
-      list.appendChild(pathRow(path, counts));
+  /** ディレクトリの見出しと、その下のファイル名の並びを作る（issue 749）。 */
+  function fileGroupRow(group, names) {
+    const row = node('li', 'fileGroup', undefined);
+    if (group.dir !== '') {
+      const head = node('div', 'groupHead', undefined);
+      head.appendChild(icon('folder', undefined));
+      head.appendChild(node('span', 'dir', group.dir));
+      head.appendChild(node('span', 'count', String(group.files.length)));
+      row.appendChild(head);
     }
-    const rest = paths.slice(FILES_SHOWN);
-    if (rest.length === 0) {
-      return;
+    const list = node('ul', 'groupFiles', undefined);
+    for (const name of names) {
+      const item = node('li', 'path', undefined);
+      item.appendChild(icon('file', undefined));
+      item.appendChild(node('span', 'name', name));
+      list.appendChild(item);
     }
-    const button = node('button', 'more', '残り' + rest.length + '件を表示');
-    button.type = 'button';
-    button.addEventListener('click', () => {
-      for (const path of rest) {
-        list.appendChild(pathRow(path, counts));
-      }
-      button.remove();
-    });
-    after.appendChild(button);
+    row.appendChild(list);
+    return row;
   }
 
-  function renderFiles(files) {
+  /**
+   * 変更したファイルをディレクトリごとにまとめて出す（issue 749）。
+   *
+   * 先頭から FILES_SHOWN 件で打ち切り、残りは「もっと見る」の裏へ回す。打ち切りは
+   * ファイル数で数える（グループ数ではない）。1つのディレクトリに数百件ある形でも
+   * 既定の表示が短く収まるようにするため。
+   */
+  function renderFiles(groups) {
     const list = el('files');
     const foot = el('filesMore');
+    clear(list);
     clear(foot);
-    fillPathList(list, files, undefined, foot);
-    el('filesSection').hidden = files.length === 0;
+
+    let shown = 0;
+    const rest = [];
+    for (const group of groups) {
+      const room = FILES_SHOWN - shown;
+      if (room <= 0) {
+        rest.push(group);
+        continue;
+      }
+      list.appendChild(fileGroupRow(group, group.files.slice(0, room)));
+      shown += Math.min(group.files.length, room);
+      if (group.files.length > room) {
+        rest.push({ dir: group.dir, files: group.files.slice(room) });
+      }
+    }
+
+    let hidden = 0;
+    for (const group of rest) {
+      hidden += group.files.length;
+    }
+    if (hidden > 0) {
+      const button = node('button', 'more', '残り' + hidden + '件を表示');
+      button.type = 'button';
+      button.addEventListener('click', () => {
+        for (const group of rest) {
+          list.appendChild(fileGroupRow(group, group.files));
+        }
+        button.remove();
+      });
+      foot.appendChild(button);
+    }
+
+    el('filesSection').hidden = groups.length === 0;
   }
 
   function renderDetail(parent, label, iconName, values, className, counts) {
@@ -387,7 +423,7 @@ export function progressScript(): string {
     el('summary').hidden = false;
     renderSummary(view.summary);
     renderChecklist(view.checklist);
-    renderFiles(view.summary.editedFiles);
+    renderFiles(view.summary.editedFileGroups);
     renderTimeline(view.turns);
   }
 
