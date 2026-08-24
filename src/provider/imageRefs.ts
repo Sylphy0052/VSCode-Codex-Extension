@@ -84,10 +84,7 @@ export function readUserInputImages(content: unknown): ChatImage[] {
  * `{type:'image', source:{type:'base64', media_type:'image/png', data:'...'}}`。
  * ユーザーが送った画像も同じMessages API形式で来る（stream-jsonはAPI形式をそのまま出す）。
  */
-export function readClaudeResultImages(
-  content: unknown,
-  alt = 'ツールが読んだ画像',
-): ChatImage[] {
+export function readClaudeResultImages(content: unknown, alt = 'ツールが読んだ画像'): ChatImage[] {
   if (!Array.isArray(content)) {
     return [];
   }

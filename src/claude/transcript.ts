@@ -1,11 +1,14 @@
 import {
+  currentTurnIndex,
   NO_SEARCH_RESULTS,
+  NO_TODO_HISTORY,
   NO_TODOS,
   readWebSearchResults,
   type ChatItem,
   type EditReplace,
   type FileDiff,
   type TodoItem,
+  type TodoSnapshot,
   type WebSearchResult,
 } from '../appserver/chatState';
 import { isSessionId } from '../codex/argvBuilder';
@@ -80,6 +83,11 @@ export interface TranscriptItems {
   items: ChatItem[];
   /** 最後に呼ばれた TodoWrite の内容。使っていなければ空。 */
   todos: TodoItem[];
+  /**
+   * TodoWriteが呼ばれるたびの一覧（issue #721）。進捗画面のタイムラインに使う。
+   * 使っていなければ空。
+   */
+  todoHistory: TodoSnapshot[];
 }
 
 /**
@@ -94,6 +102,7 @@ export function transcriptItems(lines: readonly string[]): TranscriptItems {
   /** tool_use id → items上の位置。tool_result で結果を書き戻すため。 */
   const toolIndex = new Map<string, number>();
   let todos: TodoItem[] = NO_TODOS;
+  let todoHistory: TodoSnapshot[] = NO_TODO_HISTORY;
 
   for (const line of lines) {
     const entry = parseLine(line);
@@ -110,11 +119,13 @@ export function transcriptItems(lines: readonly string[]): TranscriptItems {
       const found = appendAssistantEntry(entry, items, toolIndex);
       if (found !== undefined) {
         todos = found;
+        // 進捗画面のタイムライン用に、書き換わった時点の一覧を積む（issue #721）
+        todoHistory = [...todoHistory, { todos: found, turnIndex: currentTurnIndex(items) }];
       }
     }
   }
 
-  return { items, todos };
+  return { items, todos, todoHistory };
 }
 
 function appendUserEntry(

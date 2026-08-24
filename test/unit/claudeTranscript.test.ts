@@ -304,6 +304,34 @@ describe('transcriptItems', () => {
     const { todos } = transcriptItems([userLine('本文')]);
     expect(todos).toEqual([]);
   });
+
+  it('TodoWriteが呼ばれるたびの一覧を、何ターン目かと一緒に積む（issue #721）', () => {
+    const call = (id: string, todos: unknown[]): string =>
+      JSON.stringify({
+        type: 'assistant',
+        uuid: id,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id, name: 'TodoWrite', input: { todos } }],
+        },
+      });
+
+    const { todoHistory } = transcriptItems([
+      userLine('最初の指示'),
+      call('t1', [{ content: 'A', status: 'pending', activeForm: 'A中' }]),
+      userLine('次の指示'),
+      call('t2', [{ content: 'A', status: 'completed', activeForm: 'A中' }]),
+    ]);
+
+    expect(todoHistory).toEqual([
+      { todos: [{ content: 'A', status: 'pending', activeForm: 'A中' }], turnIndex: 0 },
+      { todos: [{ content: 'A', status: 'completed', activeForm: 'A中' }], turnIndex: 1 },
+    ]);
+  });
+
+  it('TodoWriteを使っていないセッションでは履歴も空になる（issue #721）', () => {
+    expect(transcriptItems([userLine('本文')]).todoHistory).toEqual([]);
+  });
 });
 
 describe('normalizeTodos', () => {

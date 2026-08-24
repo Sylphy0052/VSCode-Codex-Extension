@@ -1151,7 +1151,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * 必ず最後に1回送る（送り漏らして古い画面が残らないようにする）。
    */
   private postState(entry: ChatPanel): void {
-    if (entry.disposed || entry.panel === undefined || entry.postTimer !== undefined) {
+    // タブが閉じていても間引きの経路自体は回す。進捗画面（issue #721）はチャットのタブとは
+    // 別のタブで、タスク管理下のセッションはタブを閉じても動き続ける（design.md §16.10）。
+    // webviewへの送信は`flushState`側でタブの有無を見て止める
+    if (entry.disposed || entry.postTimer !== undefined) {
       return;
     }
     const since = Date.now() - (entry.lastPostAt ?? 0);
@@ -1174,11 +1177,18 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * webview側は受け取った差し分を積み直して描画する（`stateDelta.ts` の `mergeItems`）。
    */
   private flushState(entry: ChatPanel): void {
-    if (entry.disposed || entry.panel === undefined) {
+    if (entry.disposed) {
       return;
     }
     entry.lastPostAt = Date.now();
     const state = entry.session.getState();
+    // 進捗画面（issue #721）へはタブの有無によらず配る
+    this.fireStateChanged(entry, state);
+    if (entry.panel === undefined) {
+      // タブが閉じている間は差し分を送らない。`entry.sentItems`もここでは進めない
+      // （進めると、タブを開き直したときに送られていない項目が画面から抜ける）
+      return;
+    }
     const items = buildItemsDelta(entry.sentItems, state.items);
     entry.sentItems = state.items;
     void entry.panel.webview.postMessage({

@@ -1,7 +1,9 @@
 import {
   appendNotice,
   capOutput,
+  currentTurnIndex,
   NO_BACKGROUND_TERMINALS,
+  NO_TODO_HISTORY,
   NO_TODOS,
   type BackgroundTerminalItem,
   type ChatItem,
@@ -42,6 +44,7 @@ export const initialClaudeState: ChatState = {
   turnResultText: '',
   turnEditedFiles: [],
   todos: NO_TODOS,
+  todoHistory: NO_TODO_HISTORY,
   backgroundTerminals: NO_BACKGROUND_TERMINALS,
 };
 
@@ -97,6 +100,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
   let items = state.items;
   let editedFiles = state.turnEditedFiles;
   let todos = state.todos;
+  let todoHistory = state.todoHistory;
   let autocompactWindow = state.autocompactWindow;
 
   for (const [position, part] of content.entries()) {
@@ -144,6 +148,9 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
       // TODO一覧は会話に項目として積まず、専用の一覧（state.todos）だけを書き換える
       if (name === TODO_WRITE_TOOL) {
         todos = normalizeTodos(part['input']);
+        // 進捗画面のタイムライン用に、書き換わった時点の一覧を積む（issue #721）。
+        // `items` はこのターンのユーザー発言を既に含むため、そこから何ターン目かが決まる
+        todoHistory = [...todoHistory, { todos, turnIndex: currentTurnIndex(items) }];
         continue;
       }
       const input = rec(part['input']) ?? {};
@@ -177,7 +184,15 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
   ) {
     return state;
   }
-  return { ...state, items, turnEditedFiles: editedFiles, todos, autocompactWindow, busy: true };
+  return {
+    ...state,
+    items,
+    turnEditedFiles: editedFiles,
+    todos,
+    todoHistory,
+    autocompactWindow,
+    busy: true,
+  };
 }
 
 /**

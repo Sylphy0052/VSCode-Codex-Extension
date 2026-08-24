@@ -138,6 +138,11 @@
           "group": "navigation@103"
         },
         {
+          "command": "agent.openProgress",
+          "when": "activeWebviewPanelId == codex.chat",
+          "group": "navigation@104"
+        },
+        {
           "command": "claude.newChat",
           "when": "activeWebviewPanelId == claude.chat",
           "group": "navigation@101"
@@ -151,6 +156,11 @@
           "command": "claude.handoffToNewSession",
           "when": "activeWebviewPanelId == claude.chat",
           "group": "navigation@103"
+        },
+        {
+          "command": "agent.openProgress",
+          "when": "activeWebviewPanelId == claude.chat",
+          "group": "navigation@104"
         }
       ],
       "editor/context": [
@@ -351,6 +361,12 @@
         "title": "新しい会話（Codex）",
         "category": "Agent",
         "icon": "$(add)"
+      },
+      {
+        "command": "agent.openProgress",
+        "title": "進捗を表示",
+        "category": "Agent",
+        "icon": "$(checklist)"
       },
       {
         "command": "codex.handoffToNewSession",

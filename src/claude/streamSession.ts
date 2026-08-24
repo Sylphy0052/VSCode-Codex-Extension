@@ -88,6 +88,11 @@ export interface ClaudeStreamOptions {
   /** 過去の会話に含まれていた最後のTODO一覧。resume時にtranscriptから読んだものを使う。 */
   initialTodos?: ChatState['todos'];
   /**
+   * 過去の会話に含まれていたTODOの書き換え履歴（issue #721）。resume時にtranscriptから
+   * 読んだものを使う。進捗画面のタイムラインだけが読む。
+   */
+  initialTodoHistory?: ChatState['todoHistory'];
+  /**
    * 人が付けた会話名（issue #199）。`ClaudeSessionStore.getName()` を呼び出し側
    * （`claudeChatView.ts`）が読み、既に付いていれば開いた時点からタブ名に反映する。
    */
@@ -351,6 +356,7 @@ export class ClaudeStreamSession {
       threadId,
       items: options.initialItems ?? [],
       todos: options.initialTodos ?? initialClaudeState.todos,
+      todoHistory: options.initialTodoHistory ?? initialClaudeState.todoHistory,
       name: options.initialName,
     });
 
