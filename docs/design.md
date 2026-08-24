@@ -7009,6 +7009,16 @@ codiconのフォントは使えない。`.vscodeignore` が `node_modules/**` �
 
 `ProgressTurn.editedFiles` は重複を落とした一覧のままにし、回数は `fileEditCounts`（パス→回数）を新設して持つ。既存の利用側（件数の集計、サマリの重複除去）の数え方を変えずに「同じファイルを何度も往復した」ことだけを足せる。
 
+#### 応答中の稼働バー（issue #751）
+
+応答中かどうかは見出しの右のバッジ（点の明滅）で示していたが、サマリは `position: sticky` で上に残るとはいえ、タイムラインを追って下を読んでいるときにバッジの明滅は視野に入りにくい。画面上端に固定した2pxの帯（`#busyBar`）を足し、`ProgressSummary.busy` のときだけ出す。
+
+**TODOの完了率バー（`#progressRow`）とは位置も形も分けた**。あちらはサマリの中にあって左から伸びる帯、こちらは画面上端を往復する短い帯。同じ画面に2本の横棒が出るため、どちらが何かを取り違えないようにする。
+
+**動かすのは `transform` だけにする**。`width` や `background-position` を毎フレーム変えるとレイアウトと再描画が走り、長い応答の間ずっとCPUを使う。`translateX` と `scaleX` だけならコンポジタで済む。
+
+**減光設定では静的な色帯になる**。`reducedMotionStyles()` はアニメーションを実質0秒で終わらせるが `animation-fill-mode` は `none` のままなので、`transform` の当たっていない初期状態へ戻る。`#busyBarFill` の初期状態を `width: 100%` かつ変形なしにしてあるので、止まると上端いっぱいの帯として残る（消えない）。
+
 #### チェックリストの印は1行目に留める（issue #748）
 
 `.todo` は `align-items: baseline` だった。印を文字からSVGアイコンへ替えた後もこれが残っており、本文が2行以上に折り返すと印が最終行のベースラインへ落ちて、行頭が縦に揃わなくなる。`flex-start` にして印を1行目へ固定し、印の側に `margin-top: 0.2em`（行の高さとアイコンの高さの差の半分）を足して1行目の中央へ合わせる。
@@ -7018,6 +7028,7 @@ codiconのフォントは使えない。`.vscodeignore` が `node_modules/**` �
 #### 確かめ方
 
 - `test/unit/progressStyles.test.ts`: チェックリストの行が `flex-start` で印を1行目に留めること（issue #748）
+- `test/unit/webviewScript.test.ts`: 稼働バーを `busy` で開閉すること、`@keyframes busySlide` が `transform` しか変えないこと、`#busyBar` だけが `position: fixed` であること（issue #751）
 - `test/unit/webviewScript.test.ts`: SVGで組み立てていること（`createElementNS`があり`codicon`が無い）、KPIの各idを書き換えていること、`OPEN_TURNS` / `FILES_SHOWN` による打ち切り、スタイルが生の色リテラルを持たないこと、`position: sticky` と不透明な背景
 - `test/unit/progressModel.test.ts`: `fileEditCounts` の集計
 - `docs/manual-test.md` C-52: 実機での見え方（ライト／ダーク、畳み、スクロール、減光設定）

@@ -1068,6 +1068,15 @@ describe('progressScript', () => {
     expect(source).toContain('progressPercent');
   });
 
+  it('応答中は上端の稼働バーを出し、終わると隠す（issue #751）', () => {
+    const source = progressScript();
+    // 陽性対照: そもそもこの要素を触る処理がある（idの綴り違いで空振りしていない）
+    expect(source).toContain('busyBar');
+    expect(source).toContain("el('busyBar').hidden = !summary.busy;");
+    // 進捗が1件も無い（サマリごと隠す）経路でも消す
+    expect(source).toContain("el('busyBar').hidden = true;");
+  });
+
   it('古いターンを畳み、ファイル一覧を打ち切る（issue #781）', () => {
     const source = progressScript();
     expect(source).toContain('OPEN_TURNS');
@@ -1094,5 +1103,27 @@ describe('progressStyles', () => {
 
   it('動きを減らす設定に追随する（issue #760）', () => {
     expect(progressStyles()).toContain('prefers-reduced-motion');
+  });
+
+  it('稼働バーはtransformだけで動かす（issue #751）', () => {
+    const source = progressStyles();
+    const rule = source.slice(source.indexOf('@keyframes busySlide'));
+    const body = rule.slice(0, rule.indexOf('}\n'));
+    // 陽性対照: keyframesの本体を切り出せている（空文字列に対する検査ではない）
+    expect(body).toContain('translateX');
+    // width / background-position を毎フレーム変えるとレイアウトと再描画が走る
+    expect(body).not.toContain('width');
+    expect(body).not.toContain('background-position');
+  });
+
+  it('稼働バーは画面上端に固定し、完了率バーと位置で分ける（issue #751）', () => {
+    const source = progressStyles();
+    const rule = source.slice(source.indexOf('#busyBar {'));
+    const body = rule.slice(0, rule.indexOf('}'));
+    expect(body).toContain('position: fixed');
+    expect(body).toContain('top: 0');
+    // 完了率バーはサマリの中に置いたまま（固定しない）
+    const fill = source.slice(source.indexOf('#progressFill {'));
+    expect(fill.slice(0, fill.indexOf('}'))).not.toContain('position: fixed');
   });
 });
