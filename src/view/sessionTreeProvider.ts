@@ -10,6 +10,13 @@ import { matchesSessionQuery } from '../util/sessionFilter';
 import { buildDateGroups, buildFolderGroups, type SessionGroup } from '../util/sessionGrouping';
 import { formatAbsoluteTime, formatRelativeTime } from './relativeTime';
 import type { SessionActivityState } from './sessionActivity';
+import {
+  decorationStateOf,
+  parseSessionUri,
+  sessionUri,
+  type SessionDecorationSource,
+  type SessionDecorationState,
+} from './sessionDecorations';
 
 /**
  * グループの見出し用ツリー要素（issue #293。日付/作業ディレクトリ/ピン留めのグループ化）。
@@ -48,9 +55,28 @@ const GROUP_ICON: Readonly<Record<SessionGroupNode['groupKind'], string>> = {
   folder: 'folder',
 };
 
-export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement> {
+export class SessionTreeProvider
+  implements vscode.TreeDataProvider<TreeElement>, SessionDecorationSource
+{
   private readonly emitter = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.emitter.event;
+
+  /**
+   * 現在表示している（絞り込み後の）セッションを`<provider>:<id>`で引ける形で持つ
+   * （issue #735）。`FileDecorationProvider`にはURIしか渡ってこないため。
+   */
+  private visibleSessions = new Map<string, SessionSummary>();
+
+  private readonly decorationEmitter = new vscode.EventEmitter<void>();
+  /**
+   * 行末のデコレーション（issue #735）を引き直させる合図。一覧が実際に入れ替わった
+   * 後（`getChildren`のルート呼び出しの末尾）に発火する。
+   *
+   * `onDidChangeTreeData`を代わりに使うことはできない。あちらは再読込を**依頼した**
+   * 時点で発火するため、装飾側がまだ更新されていない一覧を読んでしまい、次に一覧が
+   * 届いても誰も引き直さないまま古いバッジが残る。
+   */
+  readonly onDidChangeDecorations = this.decorationEmitter.event;
 
   private scopeOverride: HistoryScope | undefined;
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -155,6 +181,12 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement>
       ? sessions.filter((s) => matchesSessionQuery(s, this.filterText))
       : sessions;
 
+    // 行末のデコレーション（issue #735）の引き先。VS Codeは`provideFileDecoration`へ
+    // URIしか渡さないため、URIからセッションへ戻れるようにここで持ち直す。
+    // グループ化の分岐より前に置く（`none`でも同じように引けるようにする）
+    this.visibleSessions = new Map(visible.map((s) => [`${s.provider}:${s.id}`, s]));
+    this.decorationEmitter.fire();
+
     if (config.historyGroupBy === 'none') {
       // `none`は既存の表示（更新時刻降順のフラットな1リスト）へそのまま戻す。ピン留めして
       // いてもグループ化はしない（「noneで現状とまったく同じ」という受入基準を優先した判断。
@@ -193,6 +225,24 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement>
     return groups;
   }
 
+  /**
+   * 行末のデコレーションの状態を引く（issue #735、`SessionDecorationSource`）。
+   *
+   * 一覧に無いURI（絞り込みで消えた・別スキーム）は`undefined`を返す。VS Codeは
+   * このプロバイダを全URIに対して呼ぶため、他のビュー（エクスプローラ等）のURIも届く。
+   */
+  decorationStateFor(uri: vscode.Uri): SessionDecorationState | undefined {
+    const parsed = parseSessionUri(uri);
+    if (parsed === undefined) {
+      return undefined;
+    }
+    const session = this.visibleSessions.get(`${parsed.provider}:${parsed.id}`);
+    if (session === undefined) {
+      return undefined;
+    }
+    return decorationStateOf(session, this.getActivity(session));
+  }
+
   getTreeItem(element: TreeElement): vscode.TreeItem {
     return isGroupNode(element)
       ? this.buildGroupTreeItem(element)
@@ -226,6 +276,12 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement>
     // グループ化（issue #293）後もこの値は変えていない。グループのidは常に`group:`から
     // 始まり、プロバイダ名（`codex` / `claude`）が`group`になることは無いため衝突しない。
     item.id = `${session.provider}:${session.id}`;
+
+    // 行末のデコレーション（issue #735）を効かせるための仮想URI。`FileDecorationProvider`
+    // は`resourceUri`を持つ項目にしか効かない。実ファイル（rolloutのjsonl）ではなく
+    // 専用スキームを指す（実パスにすると同じファイルを開いている他のUIへ装飾が波及する）。
+    // ラベルは`TreeItem.label`が優先されるので、表示名はこれで変わらない
+    item.resourceUri = sessionUri(session);
 
     const label = this.providers.get(session.provider)?.label ?? session.provider;
     const parts = [label, formatRelativeTime(session.updatedAt, Date.now())];
@@ -279,6 +335,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement>
       clearTimeout(this.refreshTimer);
     }
     this.emitter.dispose();
+    this.decorationEmitter.dispose();
   }
 }
 

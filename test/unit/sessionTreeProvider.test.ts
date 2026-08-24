@@ -11,6 +11,7 @@ import {
   type TreeElement,
 } from '../../src/view/sessionTreeProvider';
 import type { SessionActivityState } from '../../src/view/sessionActivity';
+import { SESSION_URI_SCHEME, sessionUri } from '../../src/view/sessionDecorations';
 
 /**
  * `vscode.Memento` 互換のフェイク（`test/unit/pinnedSessions.test.ts`と同じ流儀）。
@@ -255,6 +256,95 @@ describe('SessionTreeProvider.getTreeItem のアイコンの色（issue #733）'
     );
 
     expect(new Set(colors).size).toBe(states.length);
+  });
+});
+
+describe('SessionTreeProvider の行末デコレーション（issue #735）', () => {
+  it('セッションの行に仮想URIを振る（実ファイルは指さない）', () => {
+    const s = session({ id: 's1', provider: 'codex' });
+    const provider = makeProvider([s]);
+
+    const uri = provider.getTreeItem(s).resourceUri;
+
+    expect(uri).toBeDefined();
+    expect(uri?.scheme).toBe(SESSION_URI_SCHEME);
+    // 実パス（rolloutのjsonl）を指すと、同じファイルを開いている他のUIへ装飾が波及する
+    expect(uri?.scheme).not.toBe('file');
+  });
+
+  it('グループの見出しにはURIを振らない（バッジを出す対象ではない）', async () => {
+    const s = session({ id: 's1', updatedAt: new Date().toISOString() });
+    const provider = makeProvider([s]);
+    const groups = await provider.getChildren();
+
+    expect(groups.length).toBeGreaterThan(0);
+    expect(provider.getTreeItem(groups[0] as TreeElement).resourceUri).toBeUndefined();
+  });
+
+  it('URIから状態を引ける', async () => {
+    const s = session({ id: 's1', provider: 'codex' });
+    const provider = makeProvider([s], new PinnedSessionStore(), [], () => 'approvalPending');
+    await provider.getChildren();
+
+    expect(provider.decorationStateFor(sessionUri(s))).toBe('approvalPending');
+  });
+
+  it('一覧に無いURI・別スキームのURIには何も返さない', async () => {
+    // VS Codeはこのプロバイダを全URIに対して呼ぶ。他のビューのURIも届く
+    const s = session({ id: 's1', provider: 'codex' });
+    const provider = makeProvider([s], new PinnedSessionStore(), [], () => 'running');
+    await provider.getChildren();
+
+    expect(
+      provider.decorationStateFor(sessionUri({ provider: 'codex', id: 'other' })),
+    ).toBeUndefined();
+    expect(
+      provider.decorationStateFor({ scheme: 'file', path: '/tmp/a' } as never),
+    ).toBeUndefined();
+  });
+
+  it('絞り込みで消えた行の状態は返さない', async () => {
+    const shown = session({ id: 's1', threadName: 'あたり' });
+    const hidden = session({ id: 's2', threadName: 'はずれ' });
+    const provider = makeProvider([shown, hidden], new PinnedSessionStore(), [], () => 'running');
+    await provider.getChildren();
+    // 陽性対照: 絞り込む前は両方引ける
+    expect(provider.decorationStateFor(sessionUri(hidden))).toBe('running');
+
+    await provider.setFilter('あたり');
+    await provider.getChildren();
+
+    expect(provider.decorationStateFor(sessionUri(shown))).toBe('running');
+    expect(provider.decorationStateFor(sessionUri(hidden))).toBeUndefined();
+  });
+
+  it('装飾の引き直しは一覧が入れ替わった後に促す（refreshの時点ではない）', async () => {
+    // onDidChangeTreeData は再読込を「依頼した」時点で発火する。そこで装飾を引き直させると
+    // まだ古い一覧を読んでしまい、次に一覧が届いても誰も引き直さないまま古いバッジが残る
+    const s = session({ id: 's1' });
+    const provider = makeProvider([s], new PinnedSessionStore(), [], () => 'running');
+    const order: string[] = [];
+    provider.onDidChangeTreeData(() => order.push('tree'));
+    provider.onDidChangeDecorations(() => order.push('decorations'));
+
+    provider.refresh();
+    expect(order).toEqual(['tree']);
+
+    await provider.getChildren();
+
+    expect(order).toEqual(['tree', 'decorations']);
+  });
+
+  it('resourceUriを足してもコマンド引数とcontextValueは変わらない（issue #236の再発防止）', () => {
+    const s = session({ id: 's1', provider: 'codex', archived: false });
+    const provider = makeProvider([s]);
+
+    const item = provider.getTreeItem(s);
+
+    expect(item.id).toBe('codex:s1');
+    expect(item.command?.command).toBe('codex.openSession');
+    expect(item.command?.arguments).toEqual([s]);
+    expect(item.contextValue).toBe('codexSession.codex');
   });
 });
 

@@ -141,6 +141,7 @@ import { ControlPanelViewProvider } from './view/controlPanelView';
 import { ConversationViewManager } from './view/conversationView';
 import { ProgressViewManager } from './view/progressView';
 import { formatRelativeTime } from './view/relativeTime';
+import { SessionDecorationProvider } from './view/sessionDecorations';
 import { SessionTreeProvider } from './view/sessionTreeProvider';
 import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
@@ -711,6 +712,14 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     showCollapseAll: false,
   });
   context.subscriptions.push(tree, sessionsView);
+
+  // 履歴の行末に状態のバッジを出す（issue #735）。ツリーの更新イベントを装飾側が
+  // 購読しているので、`tree.refresh()` を呼ぶ既存の経路がそのまま装飾の更新にもなる
+  const sessionDecorations = new SessionDecorationProvider(tree);
+  context.subscriptions.push(
+    sessionDecorations,
+    vscode.window.registerFileDecorationProvider(sessionDecorations),
+  );
 
   // 承認待ちをAgentsビューのバッジ（issue #734）とステータスバー（issue #755）へ出す。
   // 一覧の作り方と文言は`approvalPending.ts`に寄せてあり、件数は一覧の長さで導く
