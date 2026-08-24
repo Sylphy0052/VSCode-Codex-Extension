@@ -919,6 +919,33 @@ describe('buildOrchestratorTask（design.md §16.29、roadmap W4、Issue #338、
     }
   });
 
+  it('escalate/cwdを指定すると拒否する（値によらず、Issue #766）', () => {
+    const escalate = buildOrchestratorTask({
+      id: 'T1',
+      prompt: 'p',
+      done: 'd',
+      dependsOn: [],
+      escalate: [],
+    });
+    const cwd = buildOrchestratorTask({
+      id: 'T1',
+      prompt: 'p',
+      done: 'd',
+      dependsOn: [],
+      cwd: '/repo',
+    });
+
+    for (const [field, result] of [
+      ['escalate', escalate],
+      ['cwd', cwd],
+    ] as const) {
+      expect('error' in result).toBe(true);
+      if ('error' in result) {
+        expect(result.error).toContain(field);
+      }
+    }
+  });
+
   it('id/prompt/done/dependsOnをそのまま持つタスクを組み立てる', () => {
     const result = buildOrchestratorTask({
       id: 'T3',
@@ -938,6 +965,8 @@ describe('buildOrchestratorTask（design.md §16.29、roadmap W4、Issue #338、
       expect(result.task.allow).toEqual([]);
       expect(result.task.sandbox).toBeUndefined();
       expect(result.task.approvalMode).toBeUndefined();
+      expect(result.task.escalate).toEqual([]);
+      expect(result.task.cwd).toBeUndefined();
     }
   });
 

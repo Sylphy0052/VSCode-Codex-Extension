@@ -5744,7 +5744,10 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 
 #### 設計判断（5点）
 
-1. **権限フィールドは黙って無視せず、理由付きで拒否する。** `buildOrchestratorTask`は`autoApprove`/`allow`/`sandbox`/`approvalMode`のいずれかが引数に含まれているかを`Object.prototype.hasOwnProperty`で判定し、含まれていれば該当フィールド名を名指しした`error`を返す。黙って無視すると、指示が握りつぶされたことにオーケストレーターが気づけないため、明示的な拒否を選んだ
+1. **権限フィールドは黙って無視せず、理由付きで拒否する。** `buildOrchestratorTask`は`autoApprove`/`allow`/`sandbox`/`approvalMode`/`escalate`/`cwd`のいずれかが引数に含まれているかを`Object.prototype.hasOwnProperty`で判定し、含まれていれば該当フィールド名を名指しした`error`を返す。黙って無視すると、指示が握りつぶされたことにオーケストレーターが気づけないため、明示的な拒否を選んだ。`escalate`（承認のエスカレーション）と`cwd`（タスクの作業ディレクトリ＝worktreeの外に出るかどうかの境界）は当初この判定に入っておらず、`raw`から読まずに既定へ落としていた（安全側ではあるが「指定したのに効かない」ことに気づけない形だった）。Issue #766で拒否側へ揃えた。
+
+   なお`role`（§16.44）の未知の値だけは例外で、黙って「役割なし」へ倒す。`role`が決めるのは`model`/`effort`の既定値だけで権限には関与せず（`rolePresets.ts`）、実効値は拡張機能の設定に従う従来どおりの`add_task`と同じになるため
+
 2. **稼働中タスクへの依存変更は拒否する。** `update_task_dependencies`は対象タスクが`pending`でなければ拒否する。`scheduler.ts`は`dependsOn`を`pending`のタスクに対してしか参照しないため、`pending`を外れたタスクへ依存を書き換えても以降のスケジューリングには何の効果も無い。効果の無い変更を黙って受理すると「変更が反映された」とオーケストレーターに誤解させるため、無効化ではなく拒否とした
 3. **`remove_task`は`pending`のタスクに限る。** Issue本文の「まだ始まっていないタスクに限る」を文字どおり`pending`のみに対応させた。`skipped`/`failed`/`done`のタスクは、既にworktree・ブランチ・実行履歴を持ち、他タスクが`{{T1.result}}`のようなテンプレート参照で結果を参照している可能性があるため、削除対象から除外した
 4. **`remove_task`は削除対象への依存を残さない。** 削除されるタスクを`dependsOn`に含む他タスクからは、同じ操作の中でそのidを取り除く（`strippedFrom`として警告文に列挙）。`remove_task`が`pending`のタスクのみを対象とする以上、それに依存している他タスクも必然的に`pending`のままである（依存先が`done`になっていない限りスケジューラは依存元を開始しないため）。したがって、この剥がし処理が既に進行・完了したタスクの依存関係を誤って書き換えることは構造的に起こり得ない
