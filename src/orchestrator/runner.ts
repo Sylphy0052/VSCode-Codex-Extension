@@ -654,6 +654,14 @@ export interface WorkflowWarning {
      */
     | 'orchestratorDependenciesChanged'
     /**
+     * 計画変更の履歴（`orchestratorTaskAdded`/`orchestratorTaskRemoved`）が上限に達し、
+     * 古いものから落とし始めた（Issue #765）。この2種は履歴そのものなので直近1件へは
+     * 丸められない一方、`add_task`→`remove_task`の繰り返しで`prompt`全文級の警告を
+     * いくらでも積めてしまうため、上限を設けている。落とした内容は復元できないため、
+     * 「落としている」という事実だけを同一runにつき直近1件で残す。
+     */
+    | 'orchestratorPlanHistoryTrimmed'
+    /**
      * リロードで復元するとき、永続化されたタスク状態と定義（YAML）を突き合わせた結果、
      * 一方にしか無いタスクがあった（design.md §16.29「リロード時の突き合わせ」、
      * レビューblocking指摘、2026-08-23）。

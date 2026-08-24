@@ -5702,7 +5702,14 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 
 #### 監査ログ（承認ゲートが無い代わりの説明責任）
 
-この3つのツールは人の承認を経ずに即座に適用される。唯一の追跡手段として、適用した変更は`WorkflowWarning`（`orchestratorTaskAdded`/`orchestratorTaskRemoved`/`orchestratorDependenciesChanged`）としてワークフロー Viewの警告欄へ全文を記録する。警告欄は`message`を`textContent`として描画するため（§16.8・§16.34）、オーケストレーターが生成した文字列（タスクid・プロンプトの要約・変更前後の依存一覧）をそのまま渡してもHTMLとしては解釈されない。
+この3つのツールは人の承認を経ずに即座に適用される。唯一の追跡手段として、適用した変更は`WorkflowWarning`（`orchestratorTaskAdded`/`orchestratorTaskRemoved`/`orchestratorDependenciesChanged`）としてワークフロー Viewの警告欄へ全文を記録する。
+
+**記録の積み方（Issue #765）。** `live.warnings`には全体の上限が無いため、無制限に積むとViewとメモリの両方が際限なく膨らむ（`add_task`→`remove_task`は何度でも繰り返せる）。種類ごとに次のように扱う。
+
+- `orchestratorDependenciesChanged`は同一`taskId`につき直近1件へ丸める（`orchestratorPromptOverride`（Issue #366）と同じ扱い。依存は最新の状態さえ分かればよい）
+- `orchestratorTaskAdded`/`orchestratorTaskRemoved`は「いつ何が加減されたか」の履歴そのもののため丸めず、2種の合計へ上限（`MAX_PLAN_CHANGE_HISTORY_WARNINGS`、50件）を設けて古い順に落とす。落とし始めたことは`orchestratorPlanHistoryTrimmed`（同一runにつき直近1件）で残す。落とした内容そのものは復元できないため、件数ではなく事実だけを伝える文面にする
+
+警告欄は`message`を`textContent`として描画するため（§16.8・§16.34）、オーケストレーターが生成した文字列（タスクid・プロンプトの要約・変更前後の依存一覧）をそのまま渡してもHTMLとしては解釈されない。
 
 #### `ask_user`（§16.33）との使い分け・`taskStalled`（§16.27）との連携
 
