@@ -10,6 +10,7 @@ import { isEffortToken, type EffortInfo, type ModelInfo } from '../codex/modelCa
 import { buildClaudeContent, type Attachment } from '../provider/attachments';
 import type { McpServerView } from '../provider/mcpServers';
 import type { SlashCommand } from '../provider/slashCommands';
+import { describeAskUserQuestion } from './askUserQuestion';
 import { parseSessionCost } from './costText';
 import { describeTool } from './transcript';
 import type { ClaudeAgentInfo } from './types';
@@ -922,6 +923,13 @@ export function describeCanUseTool(
     return undefined;
   }
   const input = rec(request['input']) ?? {};
+
+  // AskUserQuestion（issue #685）は選択UIが要る特殊なツールなので、他のツール（コマンド/
+  // ファイル変更/汎用permissions）と分けて専用の承認カードを組む。
+  if (name === 'AskUserQuestion') {
+    return describeAskUserQuestion(requestId, input);
+  }
+
   const tool = describeTool(name, input);
 
   if (tool.kind === 'commandExecution') {

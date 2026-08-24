@@ -118,15 +118,25 @@ export function chatStyles(): string {
     font-family: var(--vscode-editor-font-family);
     font-size: 0.85em;
   }
-  .prompt .field { margin-bottom: 10px; }
-  .prompt .field-label { margin-bottom: 2px; font-weight: 600; font-size: 0.9em; }
-  .prompt .field-desc {
+  /* .approvalはAskUserQuestion（issue #685）の選択UIがここを使う */
+  .prompt .field, .approval .field { margin-bottom: 10px; }
+  .prompt .field-label, .approval .field-label {
+    margin-bottom: 2px;
+    font-weight: 600;
+    font-size: 0.9em;
+  }
+  .prompt .field-desc, .approval .field-desc {
     margin-bottom: 4px;
     color: var(--vscode-descriptionForeground);
     font-size: 0.85em;
     white-space: pre-wrap;
   }
-  .prompt .option { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+  .prompt .option, .approval .option {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 3px;
+  }
   .prompt input[type='text'], .prompt input[type='password'], .prompt input[type='number'] {
     padding: 3px 6px;
     color: var(--vscode-input-foreground);

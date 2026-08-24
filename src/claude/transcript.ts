@@ -9,6 +9,7 @@ import {
   type WebSearchResult,
 } from '../appserver/chatState';
 import { isSessionId } from '../codex/argvBuilder';
+import { readAskUserQuestions, summarizeAskUserQuestions } from './askUserQuestion';
 import type { TranscriptMeta } from './types';
 
 /**
@@ -265,9 +266,18 @@ export function describeTool(
       return { kind: 'webSearch', detail: str(input['query']), diffs: [] };
     case 'WebFetch':
       return { kind: 'webSearch', detail: str(input['url']), diffs: [] };
+    case 'AskUserQuestion':
+      return { kind: 'askUserQuestion', detail: summarizeAskUserQuestion(input), diffs: [] };
     default:
       return { kind: 'mcpToolCall', detail: name, diffs: [] };
   }
+}
+
+/** 会話ログ（`kind: 'askUserQuestion'`）の一覧行に出す短い要約。 */
+function summarizeAskUserQuestion(input: Record<string, unknown>): string {
+  const questions = readAskUserQuestions(input['questions']);
+  const summary = questions === undefined ? undefined : summarizeAskUserQuestions(questions);
+  return summary ?? 'AskUserQuestion';
 }
 
 function fileChange(

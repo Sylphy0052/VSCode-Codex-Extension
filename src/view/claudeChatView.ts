@@ -8,6 +8,7 @@ import {
   type ChatState,
   type ChatUsage,
 } from '../appserver/chatState';
+import { isAskUserQuestionSelections } from '../claude/askUserQuestion';
 import { debugLogCandidates } from '../claude/cliLocator';
 import { describeForkFromTurnError } from '../claude/forkFromTurn';
 import {
@@ -1586,6 +1587,15 @@ export class ClaudeChatViewManager
         const requestId = m['requestId'];
         if (typeof requestId === 'number' || typeof requestId === 'string') {
           this.resolveApproval(entry, requestId, m['decision']);
+        }
+        return;
+      }
+      // AskUserQuestion（issue #685）の選択送信。汎用の`approve`（4値decision）では
+      // 選んだ回答を運べないため専用メッセージにしている（拒否は従来通り`approve`を使う）
+      if (type === 'answerAskUserQuestion' && isAskUserQuestionSelections(m['answers'])) {
+        const requestId = m['requestId'];
+        if (typeof requestId === 'number' || typeof requestId === 'string') {
+          entry.session.answerAskUserQuestion(requestId, m['answers']);
         }
       }
     } catch (e) {
