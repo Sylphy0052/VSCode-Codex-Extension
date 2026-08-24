@@ -11,9 +11,11 @@ import {
 import type { Logger } from '../log';
 import {
   APPROVAL_LEVELS,
+  APPROVAL_LEVEL_DESCRIPTIONS,
   APPROVAL_LEVEL_LABELS,
   approvalLevelMeta,
   isApprovalLevel,
+  isUnsafeLevel,
 } from '../provider/approvalLevel';
 import { isProviderId } from '../provider/id';
 import type { ImportHistoryItemTypeResultView, ImportHistorySnapshot } from '../provider/import';
@@ -551,9 +553,8 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     );
     const sandboxOptions = SANDBOX_MODES.map((m) => `<option value="${m}">${m}</option>`).join('');
     // 承認レベル（3段階）の選択肢。CodexとClaude Codeで同じ語彙・同じ並びを使う
-    const levelOptions = APPROVAL_LEVELS.map(
-      (level) => `<option value="${level}">${APPROVAL_LEVEL_LABELS[level]}</option>`,
-    ).join('');
+    const codexLevelChoices = levelChoices('approvalLevel');
+    const claudeLevelChoices = levelChoices('claudeApprovalLevel');
 
     return `<!DOCTYPE html>
 <html lang="ja">
@@ -596,10 +597,10 @@ ${controlPanelStyles()}
   </div>
 
   <div class="row">
-    <label for="approvalLevel">承認</label>
-    <select id="approvalLevel">
-      ${levelOptions}
-    </select>
+    <span class="fieldLabel" id="approvalLevelLabel">承認</span>
+    <div class="levelGroup" id="approvalLevel" role="radiogroup" aria-labelledby="approvalLevelLabel">
+      ${codexLevelChoices}
+    </div>
     <div class="hint" id="approvalLevelHint"></div>
   </div>
 
@@ -700,10 +701,10 @@ ${controlPanelStyles()}
     </div>
 
     <div class="row">
-      <label for="claudeApprovalLevel">承認</label>
-      <select id="claudeApprovalLevel">
-        ${levelOptions}
-      </select>
+      <span class="fieldLabel" id="claudeApprovalLevelLabel">承認</span>
+      <div class="levelGroup" id="claudeApprovalLevel" role="radiogroup" aria-labelledby="claudeApprovalLevelLabel">
+        ${claudeLevelChoices}
+      </div>
       <div class="hint" id="claudeApprovalLevelHint"></div>
     </div>
 
@@ -774,6 +775,34 @@ ${controlPanelScript(JSON.stringify(approvalLevelMeta()))}
 </body>
 </html>`;
   }
+}
+
+/**
+ * 承認レベルの選択肢をラジオボタンの並びとして組み立てる（issue #744）。
+ *
+ * `<select>` は開くまで他の選択肢が見えない。承認レベルは「どこまで確認なしで実行してよいか」を
+ * 決める設定なので、全部の選択肢を開かずに読めるようにする。
+ *
+ * 素の `<input type="radio">` を同じ `name` で並べているのは、矢印キーでの移動と
+ * Tabでのグループ単位の出入りをブラウザに任せるため（`role="radio"` を自分で組むと
+ * roving tabindex を手で実装することになる）。
+ *
+ * 表示名と1行説明はここ（TypeScript側）で埋める。プロバイダごとに変わる「実際に効く値」だけは
+ * `controlPanelScript.ts` が `APPROVAL_LEVEL_META` から選択中の行へ入れる——タブを切り替えても
+ * HTMLは組み直さないため、プロバイダに依存する文言をここへ埋めると片方が嘘になる。
+ */
+function levelChoices(name: string): string {
+  return APPROVAL_LEVELS.map((level) => {
+    const unsafe = isUnsafeLevel(level) ? ' levelOption-unsafe' : '';
+    return `<label class="levelOption${unsafe}">
+        <input type="radio" name="${name}" value="${level}">
+        <span class="levelOption-text">
+          <span class="levelOption-label">${APPROVAL_LEVEL_LABELS[level]}</span>
+          <span class="levelOption-desc">${APPROVAL_LEVEL_DESCRIPTIONS[level]}</span>
+          <span class="levelOption-effective"></span>
+        </span>
+      </label>`;
+  }).join('');
 }
 
 /** 表示用の整形はここで済ませ、Webview側のスクリプトを単純に保つ。 */

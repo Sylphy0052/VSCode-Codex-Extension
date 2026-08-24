@@ -550,6 +550,19 @@ describe('controlPanelScript', () => {
     expect(source).toContain("type: 'updateApprovalLevel'");
   });
 
+  it('承認レベルをラジオから読み書きする（issue #744）', () => {
+    const source = controlPanelScript(JSON.stringify(approvalLevelMeta()));
+    // <select>のvalue代入ではなく、ラジオのcheckedを立てる形になっていること
+    expect(source).toContain('input[type="radio"]');
+    expect(source).toContain('input.checked = checked');
+    // 「カスタム」という選択肢を足す作りは無くなっている（どれも選ばれていない状態で表す）
+    expect(source).not.toContain('カスタム（詳細で個別に指定）');
+    expect(source).toContain('承認の詳細で個別に指定されています');
+    // プロバイダごとに変わる実効値だけはメタから入れる（HTML側に埋めると片方が嘘になる）
+    expect(source).toContain('.levelOption-effective');
+    expect(source).toContain('meta.effective[provider]');
+  });
+
   it('セクションを開いたときにtoggleSectionをホストへ送る（issue #225）', () => {
     const source = controlPanelScript(JSON.stringify(approvalLevelMeta()));
     expect(source).toContain("type: 'toggleSection'");

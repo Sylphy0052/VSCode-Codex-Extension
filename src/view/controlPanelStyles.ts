@@ -16,11 +16,58 @@ export function controlPanelStyles(): string {
     padding: 8px 12px 12px;
   }
   .row { margin-bottom: 12px; }
-  label {
+  label, .fieldLabel {
     display: block;
     margin-bottom: 4px;
     color: var(--vscode-descriptionForeground);
     font-size: 0.9em;
+  }
+  /*
+   * 承認レベルの選択肢（issue #744）。<select> は開くまで他の選択肢が見えないため、
+   * 3段階を常に並べて出す。
+   *
+   * 縦積みにしているのは、表示名が横並びに収まらないため（着手時の実測: 「全確認」3文字 /
+   * 「Auto（承認をエージェントに任せる）」18文字 / 「全承認」3文字）。サイドバーの幅では
+   * いちばん長いものが必ず折り返す。
+   *
+   * 選択中は枠の色・背景・ネイティブのラジオの点の3つで示す。:has が効かない環境でも
+   * ラジオの点は残るので、選択が完全に見えなくなることはない。
+   */
+  .levelGroup { display: flex; flex-direction: column; gap: 4px; }
+  .levelOption {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin-bottom: 0;
+    padding: 5px 8px;
+    color: var(--vscode-foreground);
+    font-size: 1em;
+    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .levelOption:hover { background-color: var(--vscode-list-hoverBackground); }
+  .levelOption:focus-within {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: 1px;
+  }
+  .levelOption input { margin: 3px 0 0; }
+  .levelOption-text { display: flex; flex-direction: column; }
+  .levelOption-label { font-weight: 600; }
+  .levelOption-desc, .levelOption-effective {
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+  }
+  /* 選択中。文字色は変えず背景だけを薄く敷く（説明文の色をそのまま読めるようにする） */
+  .levelOption:has(input:checked) {
+    border-color: var(--vscode-focusBorder);
+    background-color: color-mix(in srgb, var(--vscode-focusBorder) 15%, transparent);
+  }
+  /* 全承認（確認を一切しない）。選ぶ前から注意色で縁取り、選ぶと更に濃くする */
+  .levelOption-unsafe { border-color: var(--vscode-charts-yellow); }
+  .levelOption-unsafe:has(input:checked) {
+    border-color: var(--vscode-errorForeground);
+    background-color: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent);
   }
   select {
     width: 100%;
