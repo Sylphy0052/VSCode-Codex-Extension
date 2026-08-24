@@ -113,6 +113,20 @@ describe('chatStyles', () => {
     expect(css).toMatch(/\.md-table-wrap[^{}]*\{[^}]*overflow-x/);
     expect(css).toMatch(/\.md-code pre[^{}]*\{[^}]*overflow/);
   });
+
+  it('失敗した実行の見出しをエラー色にする（issue #715）', () => {
+    const css = stripComments(chatStyles());
+    expect(css).toMatch(/\.item\.status-failed \.head\s*\{[^}]*var\(--vscode-errorForeground\)/);
+    expect(css).toMatch(/\.item\.status-running \.head\s*\{[^}]*var\(--vscode-/);
+  });
+
+  it('状態の色が実行中の見出し色より後に来て上書きする（issue #715）', () => {
+    const css = stripComments(chatStyles());
+    // 前に置くと .item.running .head（同じ詳細度）に負けて、色が出ない
+    expect(css.indexOf('.item.status-running .head')).toBeGreaterThan(
+      css.indexOf('.item.running .head'),
+    );
+  });
 });
 
 describe('controlPanelStyles', () => {

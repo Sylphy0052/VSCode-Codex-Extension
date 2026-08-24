@@ -3686,6 +3686,43 @@ Codexの`/btw`は`thread/fork`で**新しいスレッド**を作ってから聞�
 - `test/unit/webviewScript.test.ts`: `renderBody`が`plain`クラスを付け外しすること
 - 実際の行間の見え方・1行の長さ・折り返しの具合はvitestのnode環境では確認できない（§14.60・§14.64・§14.65・§14.67と同じ制約）。実機での確認は`docs/manual-test.md`のU-36に委ねる
 
+### 14.69 ツール実行の成否を見出しの色で示す（issue #715）
+
+#### 背景
+
+ツール出力は既定で畳んである（§14.64）。閉じた行の見出しには`STATUS_LABEL`が返す
+「完了」「失敗」「拒否」などが出るが、`.item .head`は`descriptionForeground`の一色で、
+文字も`0.85em`と小さい。実行が何件も並ぶと、失敗したものを1件ずつ読んで探すことになる。
+
+なお、状態は折りたたみの`<summary>`ではなく**見出し（`.head`）**に出る。`<summary>`側は
+「出力を表示（N行）」で、状態とは無関係である。
+
+#### 実装
+
+- `src/view/chatScript.ts`: `STATUS_LABEL`の直下に`STATUS_CLASS`（状態→クラス）と`STATUS_CLASS_NAMES`（付け外しの対象）を置く。`updateNode`で`node.wrap.classList.toggle(name, name === statusClass)`
+- `src/view/chatStyles.ts`: `.item.status-failed .head`を`var(--vscode-errorForeground)`、`.item.status-running .head`を`var(--vscode-progressBar-background)`
+
+**完了（`completed` / `approved`）に色を当てていない。** ほとんどの出力は完了で終わるため、
+色を付けると画面が一色に埋まり、目立たせたい失敗のほうが埋もれる。「実行中・完了・失敗の
+3つが見分けられる」という目的は、完了を既定色のまま残すことでも満たせる。
+
+**色だけに情報を載せていない。** 状態の日本語（「失敗」「拒否」「時間切れ」「中止」）は
+従来どおり見出しに出る。色を見分けられなくても読める。
+
+**`.item.running .head`より後に置いて上書きする。** どちらも詳細度は同じ（クラス3つで`0-3-0`）なので
+記述順で決まる。実行中の見出しは`foreground`より進行中の色（本文の左borderと同じ
+`progressBar`）へ寄せたほうが、どの項目が動いているかが揃う。順序が入れ替わると色が
+出なくなるため、`webviewStyles.test.ts`で記述順を固定している。
+
+**`interacted`はここに入れていない。** これは`subAgentActivity`（issue #34）の種類が
+そのまま`status`へ入っているもので、成否ではない。
+
+#### 確かめ方
+
+- `test/unit/webviewScript.test.ts`: `updateNode`が`STATUS_CLASS`を引いてクラスを付け外しすること、**`STATUS_LABEL`と`STATUS_CLASS`のキーが食い違っていないこと**（成否でない`completed` / `approved` / `interacted`の3つだけが対象外）、コード中に現れる`status-*`クラスが`STATUS_CLASS_NAMES`に漏れなく並んでいること。ラベルを足したのに色の割り当てを忘れる、付け外しの一覧から漏れて消えないクラスが残る、の2つを機械的に拾う
+- `test/unit/webviewStyles.test.ts`: `.item.status-failed .head`がエラー色を使うこと、`.item.running .head`より後に来ること
+- 実際の色味・テーマ切り替え時の見え方はvitestのnode環境では確認できない（§14.60・§14.64・§14.65・§14.67・§14.68と同じ制約）。実機での確認は`docs/manual-test.md`のU-37に委ねる
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）
