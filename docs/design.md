@@ -6521,5 +6521,5 @@ Claude Code側は `dispatch` の `logText`（§16.12。テンプレート展開�
 - `test/unit/workflow.test.ts`: `role`の解決優先順位4段（タスクが明示 > タスクの役割 > `defaults`が明示 > `defaults`の役割）と、どちらも無いときに`model`/`effort`が`undefined`のまま（従来どおり拡張機能の設定に従う）であること、`id: "_orchestrator"`が`validateWorkflow`のエラーになること
 - `test/unit/planner.test.ts`: `team`を指定したときだけ`role`の説明と役割ごとの`model`/`effort`がプロンプトへ出ること
 - `test/unit/workflowGraph.test.ts`: `kanbanBucket`のバケツ分け、`summarizeKanban`の件数、`taskRoleLabel`
-
-**未着手**: run終了時に`removeRun`が呼ばれることのユニットテスト（`runner.test.ts`）と、`docs/manual-test.md`への手動確認項目（メニューからのYAML生成、実機のMCP越しの`write_handoff`/`read_handoff`、run終了後に`.agents/handoff/runs/<runId>/`が消えていること）はまだ無い。
+- `test/unit/runnerTeamHandoff.test.ts`: run終了時に受け渡しファイルの置き場ごと消すこと、撤去に失敗したとき（`ok: false`・例外・祖先のシンボリックリンク）は警告だけ残してrunの結果を書き換えないこと。`runner.ts`の終了処理は`TeamHandoffStore`を`nodeHandoffFileSystem`と直接組み立てる（注入点を意図的に持たない）ため、このテストだけはモジュールごと差し替えて観測している（Issue #725）
+- `docs/manual-test.md` W-W: メニューからの起動と生成されたYAMLに`role`が入ること、カンバンのバッジと役割ラベルの見え方、実機のMCP越しの`write_handoff`/`read_handoff`、run終了後に`.agents/handoff/runs/<runId>/`が消えていること、再開した2周目が空から始まること（Issue #725）
