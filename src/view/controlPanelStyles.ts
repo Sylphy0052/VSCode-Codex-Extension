@@ -524,6 +524,61 @@ export function controlPanelStyles(): string {
     color: var(--vscode-charts-orange, var(--vscode-charts-yellow));
     border: 1px solid var(--vscode-charts-orange, var(--vscode-charts-yellow));
   }
+  /*
+   * バッジを色以外でも見分けられるようにする（issue #759）。
+   * ワークフロー画面が既に採っている方針（workflowStyles.ts 冒頭・design.md §16.8の
+   * 「色だけに頼らない」）を設定パネルへも広げる。
+   *
+   * 各バッジには既に状態名の文字が載っている（「接続済み」「未信頼」「無効」など）ので、
+   * ここで足すのは2つ目の手掛かりにあたる。
+   *
+   * - 状態（良好・危険・無効）は先頭の記号で分ける
+   * - 出どころ（user / project / plugin、home / project）は枠線の線種で分ける。
+   *   出どころは状態ではないので記号を割り当てず、ワークフロー画面のノードが
+   *   stroke-dasharray で種別を分けているのと同じ手を使う
+   *
+   * 記号は全角1文字ぶんの幅しか増やさない。バッジは white-space: nowrap なので、
+   * 折り返しは起きない。
+   *
+   * 出どころの規則は各バッジの border 一括指定より後に置くこと。詳細度が同じなので、
+   * 前に置くと border: 1px solid に上書きされて線種が消える。
+   */
+  .mcpBadge-connected::before,
+  .hookBadge-trusted::before,
+  .pluginBadge-enabled::before,
+  .appBadge-enabled::before {
+    content: '●';
+  }
+  .mcpBadge-unavailable::before,
+  .hookBadge-untrusted::before,
+  .hookBadge-modified::before {
+    content: '▲';
+  }
+  .mcpBadge-disabled::before,
+  .hookBadge-managed::before,
+  .hookBadge-disabled::before,
+  .skillBadge-disabled::before,
+  .skillBadge-system::before,
+  .skillBadge-admin::before,
+  .skillBadge-unknown::before,
+  .pluginBadge-disabled::before,
+  .appBadge-disabled::before {
+    content: '○';
+  }
+  .mcpBadge::before,
+  .hookBadge::before,
+  .skillBadge::before,
+  .pluginBadge::before,
+  .appBadge::before {
+    margin-right: 3px;
+    font-size: 0.9em;
+  }
+  /* 出どころの線種。project は clone しただけで効く経路なので、実線から外して目立たせる。
+     user / home の実線は border 一括指定の既定と同じ値だが、割り当てを明示するために書く
+     （書かないと「線種を割り当て忘れた」のか「実線を選んだ」のかが読めない） */
+  .skillBadge-user, .importBadge-home { border-style: solid; }
+  .skillBadge-project, .importBadge-project { border-style: dashed; }
+  .skillBadge-plugin { border-style: dotted; }
   .importRunButton {
     width: auto;
     margin-top: 4px;
