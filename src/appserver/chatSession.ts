@@ -340,30 +340,18 @@ export class ChatSession {
   }
 
   /**
-   * 発言を送る。応答中なら割り込んで送る。
+   * 発言を送る。応答中なら待ち行列へ積む。
    *
-   * 割り込めない場合（ターンidが判らない、ターンが終わった直後で id が食い違う）は
-   * 指示を捨てずに待ち行列へ積み、ターンが終わってから送る。
+   * 応答中に割り込みたい場合はUI側の「今すぐ送る」（`flushQueue`）を明示的に使う。
    */
   async sendOrQueue(
     text: string,
     config: CodexConfig,
     attachments: Attachment[] = [],
   ): Promise<'sent' | 'queued'> {
-    const route = routeSend(this.state);
-    if (route === 'start') {
+    if (!this.state.busy) {
       await this.send(text, config, attachments);
       return 'sent';
-    }
-
-    if (route === 'steer') {
-      try {
-        await this.steer(text, attachments);
-        return 'sent';
-      } catch (e) {
-        // ターンが入れ替わった直後など。指示を失わないよう積み直す
-        this.log.warn(`割り込めなかったため待ち行列へ積みます: ${message(e)}`);
-      }
     }
 
     this.update(enqueue(this.state, text, attachments));

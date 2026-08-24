@@ -65,6 +65,8 @@ export function chatScript(
   let menuMode = '';
   /** 最後に描いた項目。画像が遅れて届いたときに描き直すため保つ。 */
   let lastItems = undefined;
+  /** 待ち行列。入力欄でのEsc（末尾を書き戻す）に使うため保つ。 */
+  let queuedMessages = [];
   /**
    * 拡張機能から差し分で届く会話項目を積む先（issue #262）。
    * 全項目を毎回受け取ると、会話が長いほど1回の受信が重くなる。
@@ -1416,8 +1418,8 @@ export function chatScript(
     }
 
     box.hidden = false;
-    // 割り込めなかった指示だけがここに残る
-    el('queueLabel').textContent = '割り込めなかったので待っています（' + queued.length + '件）';
+    // 応答中に送った指示は既定で待ち行列に積む。今すぐ送るには「今すぐ送る」ボタンを使う
+    el('queueLabel').textContent = '順番待ちです（' + queued.length + '件）';
     list.replaceChildren();
     queued.forEach((message, index) => {
       const li = document.createElement('li');
@@ -1468,9 +1470,10 @@ export function chatScript(
 
     renderTodos(state.todos);
     renderBackgroundTerminals(state.backgroundTerminals);
-    renderQueue(state.queued);
+    queuedMessages = state.queued || [];
+    renderQueue(queuedMessages);
     el('stop').hidden = !state.busy;
-    // 応答中でも送れる。進行中のターンへ割り込むので、応答は止まらない
+    // 応答中でも送れる。既定では待ち行列に積むだけで応答は止まらない
     el('send').disabled = false;
     // 圧縮は新しいターンを起こす。応答中に重ねると割り込みになるため止める
     el('compact').disabled = !!state.busy;
@@ -2378,6 +2381,20 @@ export function chatScript(
         closeMenu();
         return;
       }
+    }
+
+    // 待ち行列の末尾を入力欄へ戻す（Codex CLI本家のEsc相当）。中断（グローバルの
+    // Escハンドラ）より優先し、stopPropagationで中断側へ流さない。書きかけの文章を
+    // 消さないよう、入力欄が空のときだけ戻す
+    if (e.key === 'Escape' && !menuOpen() && queuedMessages.length > 0 && e.target.value.trim() === '') {
+      e.preventDefault();
+      e.stopPropagation();
+      const lastIndex = queuedMessages.length - 1;
+      const last = queuedMessages[lastIndex];
+      e.target.value = last.text;
+      e.target.selectionStart = e.target.selectionEnd = e.target.value.length;
+      vscode.postMessage({ type: 'cancelQueued', index: lastIndex });
+      return;
     }
 
     // Shift+Tab で承認レベルを回す（TUIと同じ操作。入力欄にいるときだけ効かせる）。
