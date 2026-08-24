@@ -164,3 +164,34 @@ export function severityOf(usedPercent: number | undefined): UsageSeverity {
   }
   return 'normal';
 }
+
+/** ゲージの目盛り数。ステータスバーの幅を取りすぎない範囲で増減が読める粒度。 */
+export const USAGE_GAUGE_CELLS = 5;
+
+/**
+ * 使用率をブロック文字のゲージにする。
+ *
+ * 数字だけだと残りの少なさに気付きにくいので、形でも分かるようにする。
+ * 目盛り数を固定し、埋まっている側と空いている側で同じ幅の文字（`▮` / `▯`）を使うため、
+ * 使用率が変わってもゲージの幅は変わらない。
+ *
+ * 端は丸め切らない。0%でないのに全部空、100%でないのに全部埋まる、という誤読を避けるため、
+ * 0%と100%以外は必ず1目盛り以上を埋め、1目盛り以上を空けて残す。
+ */
+export function formatUsageGauge(
+  usedPercent: number | undefined,
+  cells: number = USAGE_GAUGE_CELLS,
+): string {
+  if (usedPercent === undefined || !Number.isFinite(usedPercent) || cells <= 0) {
+    return '';
+  }
+  const ratio = Math.min(1, Math.max(0, usedPercent / 100));
+  let filled = Math.round(ratio * cells);
+  if (ratio > 0 && filled === 0) {
+    filled = 1;
+  }
+  if (ratio < 1 && filled === cells) {
+    filled = cells - 1;
+  }
+  return '▮'.repeat(filled) + '▯'.repeat(cells - filled);
+}

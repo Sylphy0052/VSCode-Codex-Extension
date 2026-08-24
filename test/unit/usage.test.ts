@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   findLastTokenCount,
   formatResetsIn,
+  formatUsageGauge,
   formatWindow,
   parseTokenCountLine,
   severityOf,
@@ -142,5 +143,41 @@ describe('severityOf', () => {
     expect(severityOf(89.9)).toBe('warning');
     expect(severityOf(90)).toBe('critical');
     expect(severityOf(undefined)).toBe('normal');
+  });
+});
+
+describe('formatUsageGauge', () => {
+  it('使用率に応じて埋まる目盛りが増える', () => {
+    expect(formatUsageGauge(0)).toBe('▯▯▯▯▯');
+    expect(formatUsageGauge(30)).toBe('▮▮▯▯▯');
+    expect(formatUsageGauge(50)).toBe('▮▮▮▯▯');
+    expect(formatUsageGauge(100)).toBe('▮▮▮▮▮');
+  });
+
+  it('使用率が変わっても幅が変わらない', () => {
+    const widths = new Set(
+      [0, 1, 17, 42, 63, 88, 99, 100].map((percent) => [...formatUsageGauge(percent)].length),
+    );
+    expect([...widths]).toEqual([5]);
+  });
+
+  it('0%でない限り1目盛りは埋まり、100%でない限り1目盛りは空く', () => {
+    expect(formatUsageGauge(0.4)).toBe('▮▯▯▯▯');
+    expect(formatUsageGauge(99.9)).toBe('▮▮▮▮▯');
+  });
+
+  it('範囲外の値は0%と100%へ丸める', () => {
+    expect(formatUsageGauge(-10)).toBe('▯▯▯▯▯');
+    expect(formatUsageGauge(140)).toBe('▮▮▮▮▮');
+  });
+
+  it('取得できていないときと目盛り0のときは空文字', () => {
+    expect(formatUsageGauge(undefined)).toBe('');
+    expect(formatUsageGauge(Number.NaN)).toBe('');
+    expect(formatUsageGauge(50, 0)).toBe('');
+  });
+
+  it('目盛り数を変えられる', () => {
+    expect(formatUsageGauge(50, 10)).toBe('▮▮▮▮▮▯▯▯▯▯');
   });
 });
