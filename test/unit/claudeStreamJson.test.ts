@@ -472,6 +472,32 @@ describe('applyStreamEvent', () => {
     expect(state.items[0]?.images).toHaveLength(1);
   });
 
+  it('Skillツールが注入するSKILL.md本文をskillContextとして畳む（issue #691）', () => {
+    const state = apply([
+      {
+        type: 'user',
+        uuid: 'u1',
+        isMeta: true,
+        sourceToolUseID: 'toolu_01abc',
+        message: { content: [{ type: 'text', text: 'SKILL.mdの内容' }] },
+      },
+    ]);
+    expect(state.items[0]?.kind).toBe('skillContext');
+    expect(state.items[0]?.text).toBe('SKILL.mdの内容');
+  });
+
+  it('sourceToolUseID無しのisMeta（caveat等）は従来どおりuserMessageのまま', () => {
+    const state = apply([
+      {
+        type: 'user',
+        uuid: 'u1',
+        isMeta: true,
+        message: { content: [{ type: 'text', text: '<local-command-caveat>Caveat</...>' }] },
+      },
+    ]);
+    expect(state.items[0]?.kind).toBe('userMessage');
+  });
+
   it('未知のイベントで状態を変えない', () => {
     const state = apply([{ type: 'prompt_suggestion', text: '次はこれ' }]);
     expect(state).toEqual(initialClaudeState);

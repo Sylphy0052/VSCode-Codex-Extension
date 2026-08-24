@@ -45,6 +45,7 @@ const KIND_TITLE: Record<string, string> = {
   autoApprovalReview: '自動承認レビュー',
   fileRead: 'ファイル読み取り',
   askUserQuestion: '質問',
+  skillContext: 'Skill',
 };
 
 /**
