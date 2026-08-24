@@ -1,3 +1,5 @@
+import { reducedMotionStyles } from './reducedMotion';
+
 /**
  * ワークフローViewのスタイル（design.md §16.8）。
  *
@@ -353,5 +355,6 @@ export function workflowStyles(): string {
   .orch-input input:disabled { opacity: 0.5; }
 
   #empty { color: var(--vscode-descriptionForeground); padding: 24px 0; }
+${reducedMotionStyles()}
 `;
 }

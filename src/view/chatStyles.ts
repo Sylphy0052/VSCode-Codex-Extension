@@ -1,3 +1,5 @@
+import { reducedMotionStyles } from './reducedMotion';
+
 /**
  * チャット画面のスタイル。
  *
@@ -932,5 +934,6 @@ export function chatStyles(): string {
   .md-code .tok-number {
     color: var(--vscode-symbolIcon-numberForeground, var(--vscode-charts-green));
   }
+${reducedMotionStyles()}
 `;
 }

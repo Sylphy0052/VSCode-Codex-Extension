@@ -1,3 +1,5 @@
+import { reducedMotionStyles } from './reducedMotion';
+
 /**
  * 進捗画面（issue #721）のスタイル。
  *
@@ -75,5 +77,6 @@ export function progressStyles(): string {
   .change.completed { color: var(--vscode-charts-green, var(--vscode-progressBar-background)); }
   .change.removed { color: var(--vscode-descriptionForeground); text-decoration: line-through; }
   .busy { color: var(--vscode-progressBar-background); }
+${reducedMotionStyles()}
 `;
 }
