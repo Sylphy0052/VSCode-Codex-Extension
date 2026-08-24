@@ -56,6 +56,25 @@ describe('chatStyles', () => {
     expect(css).toContain('.body-fold');
     expect(css).toContain('.body-content');
   });
+
+  it('エージェントの応答に縁取りがある（issue #712）', () => {
+    const css = chatStyles();
+    // 応答に境界が無いとターンの切れ目が分からない。色はテーマ変数から取る
+    expect(css).toMatch(/\.agent \.body\s*\{[^}]*border-left:[^}]*var\(--vscode-/);
+  });
+
+  it('応答中の色が応答の縁取りより後に来て上書きする（issue #712）', () => {
+    const css = chatStyles();
+    // 詳細度でも順序でも .item.running が勝たないと、実行中の合図が消える
+    expect(css.indexOf('.item.running .body')).toBeGreaterThan(css.indexOf('.agent .body'));
+  });
+
+  it('ターンの切れ目を余白でも示す（issue #712）', () => {
+    const css = chatStyles();
+    // 自分の発言の手前を空け、同じターンに連なる思考・ツール出力は詰める
+    expect(css).toMatch(/\.item\.user\s*\{[^}]*margin-top:/);
+    expect(css).toMatch(/\.item\.reasoning,\s*\.item\.tool\s*\{[^}]*margin-bottom:/);
+  });
 });
 
 describe('controlPanelStyles', () => {

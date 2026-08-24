@@ -3604,6 +3604,48 @@ Codexの`/btw`は`thread/fork`で**新しいスレッド**を作ってから聞�
 - `test/unit/webviewStyles.test.ts`: `body::after`が青の枠・`position: fixed`・`pointer-events: none`を持つこと、`body.busy::after`が赤へ差し替えることを固定。あわせて`chatScript()`の出力に`document.body.classList.toggle('busy'`が含まれることを確認する
 - 実際の色味・枠の太さ（2px）・テーマ切り替え時の見え方はvitestのnode環境では確認できない（§14.60・§14.64と同じ制約）。実機での確認は`docs/manual-test.md`のC-49（Claude Code画面はL-50）に委ねる
 
+### 14.67 会話のターンの切れ目を余白と縁取りで示す（issue #712）
+
+#### 背景
+
+会話画面は、自分の発言・エージェントの応答・思考・ツール出力を同じ縦一列に積む。
+このうち縁取りを持っていたのは自分の発言（`.user .body`、`textLink`色の左線と
+`textBlockQuote`の背景）と実行中の項目（`.item.running`、`progressBar`色の左線）だけで、
+エージェントの応答は`.agent .body { padding-left: 0; }`のみ、つまり境界が何も無かった。
+応答が長くなるとターンの切れ目が本文の途切れ方でしか分からず、スクロールしながら
+「どこからが次のターンか」を探すことになっていた。
+
+余白と縁取りの2つで切れ目を示す。
+
+#### 実装
+
+- `src/view/chatStyles.ts`: `.agent .body`へ`border-left: 2px solid var(--vscode-widget-border, var(--vscode-editorWidget-border))`を与える。あわせて従来の`padding-left: 0`を外し、`.body`の左余白（`10px`）へ戻す（線と本文が詰まって読みにくくなるため）
+- `src/view/chatStyles.ts`: `.item`の一律`margin-bottom: 12px`に加えて、`.item.user`へ`margin-top: 22px`、`.item.reasoning, .item.tool`へ`margin-bottom: 6px`を与える。先頭が落ちないよう`#log > .item:first-child`だけ`margin-top: 0`にする
+
+**線の色を自分の発言より弱くした。** 同じ強さにすると、どちらが自分の発言かが色でしか
+判別できなくなる。自分の発言は`textLink`色の線と背景の2つを持ち、応答は`widget-border`の
+線だけにすることで、強弱の差がそのまま「どちらが自分か」の手掛かりになる。
+
+**実行中の色との競合は詳細度で解いた。** `.item.running .body`（`0-3-0`）は
+`.agent .body`（`0-2-0`）より詳細度が高く、記述位置も後ろにある。したがって応答中は
+従来どおり`progressBar`色の線で示され、本節の縁取りに埋もれない。この順序が入れ替わると
+実行中の合図が消えるため、`webviewStyles.test.ts`で記述順を固定している。
+
+**余白はブロック整形のmargin相殺に乗せた。** `#log`は通常のブロック整形なので、
+隣り合う項目の`margin-bottom`と`margin-top`は相殺され、広いほうだけが残る。
+`.item.user`へ`margin-top`を与えるだけで「自分の発言の手前が広い」が成立し、
+「次が自分の発言かどうか」を判定するセレクタ（`:has()`）や、スクリプト側での
+クラス付与を足さずに済む。
+
+色はすべて`var(--vscode-*)`から取り、ハードコードしていない。
+`chatStyles()`は`chatShared.ts`の`renderShell`経由でCodex画面とClaude Code画面の
+双方へ配られるため、どちらの画面にも同じ体裁が出る。
+
+#### 確かめ方
+
+- `test/unit/webviewStyles.test.ts`: `.agent .body`がテーマ変数由来の`border-left`を持つこと、`.item.running .body`が`.agent .body`より後に来ること、`.item.user`の`margin-top`と`.item.reasoning, .item.tool`の`margin-bottom`が定義されていることを固定
+- 実際の線の見え方・余白の量・テーマ切り替え時の視認性はvitestのnode環境では確認できない（§14.60・§14.64・§14.65と同じ制約）。実機での確認は`docs/manual-test.md`のU-35に委ねる
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）
