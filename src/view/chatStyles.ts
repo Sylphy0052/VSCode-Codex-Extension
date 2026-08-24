@@ -79,6 +79,20 @@ export function chatStyles(): string {
     color: var(--vscode-descriptionForeground);
     font-size: 0.85em;
   }
+  /*
+   * 種別のアイコン（issue #714）。色は .head からそのまま継ぐので、状態の色分け
+   * （issue #715）にも自動で追随する。
+   *
+   * アイコンを足すと見出しの子が3つになり、justify-content: space-between だけでは
+   * ラベルが中央へ寄る。ラベル側を伸ばして、操作ボタンを右端へ押し付ける。
+   */
+  .item .head .head-icon {
+    flex: none;
+    display: inline-flex;
+    /* 4px は文字とアイコンの間隔。gap: 8px は広すぎて種別と文言が離れて見える */
+    margin-right: -4px;
+  }
+  .item .head .head-label { flex: 1; min-width: 0; }
   .body {
     white-space: pre-wrap;
     overflow-wrap: anywhere;

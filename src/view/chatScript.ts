@@ -234,6 +234,53 @@ export function chatScript(
     skillContext: 'tool',
   };
 
+  /**
+   * 見出しの先頭に出す種別アイコン（issue #714）。CLASS_OF が返す4種に1つずつ
+   * 対応させる。図案は自分の発言＝人、応答＝吹き出し、思考＝電球、ツール＝ターミナル。
+   *
+   * 入力欄のアイコン（chatShared.ts の COMPOSER_ICONS）は文字列のまま埋め込めるが、
+   * ここは webview 側で組み立てるため同じ手が使えない。HTML文字列を流し込む経路を
+   * 増やさない方針（エージェントの出力を扱う画面のため）に合わせ、パスだけを持って
+   * createElementNS で組む。webviewScript.test.ts はソース文字列に対して検査するため、
+   * 禁じられているプロパティ名はコメントにも書けない。
+   */
+  const KIND_ICON_PATHS = {
+    user: [
+      'M8 8.2a2.6 2.6 0 1 0 0-5.2 2.6 2.6 0 0 0 0 5.2z',
+      'M3.2 13.6c0-2.4 2.2-3.9 4.8-3.9s4.8 1.5 4.8 3.9',
+    ],
+    agent: ['M4 3.5h8a1.5 1.5 0 0 1 1.5 1.5v4.5a1.5 1.5 0 0 1-1.5 1.5H7.5l-3 2.4V11H4a1.5 1.5 0 0 1-1.5-1.5V5A1.5 1.5 0 0 1 4 3.5z'],
+    reasoning: ['M8 2.2a3.6 3.6 0 0 0-2.1 6.5v1.6h4.2V8.7A3.6 3.6 0 0 0 8 2.2z', 'M6.6 12.2h2.8', 'M7.1 13.8h1.8'],
+    tool: ['M3.5 3h9a1.5 1.5 0 0 1 1.5 1.5v7a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 10.5v-7A1.5 1.5 0 0 1 3.5 3z', 'M4.8 6.4 6.6 8l-1.8 1.6', 'M8.4 9.8h2.8'],
+  };
+
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+
+  /** 種別アイコンを作る。対応する図案が無ければ何も出さない（undefined を返す）。 */
+  function createKindIcon(kindClass) {
+    const paths = KIND_ICON_PATHS[kindClass];
+    if (!paths) return undefined;
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 16 16');
+    svg.setAttribute('width', '13');
+    svg.setAttribute('height', '13');
+    // 見出しの文言が種別を表しているので、読み上げからは外す
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+    svg.setAttribute('fill', 'none');
+    // 色は見出しの色をそのまま継ぐ。状態の色分け（issue #715）にも自動で追随する
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '1.3');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    for (const d of paths) {
+      const path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('d', d);
+      svg.appendChild(path);
+    }
+    return svg;
+  }
+
   // 全体を作り直すと選択中のテキストが消えてコピーできないため、要素を使い回す
   const nodes = new Map();
 
@@ -244,11 +291,21 @@ export function chatScript(
 
   function createNode(item) {
     const wrap = document.createElement('div');
-    wrap.className = 'item ' + (CLASS_OF[item.kind] || '');
+    const kindClass = CLASS_OF[item.kind] || '';
+    wrap.className = 'item ' + kindClass;
 
     const head = document.createElement('div');
     head.className = 'head';
+    // 種別のアイコン（issue #714）。文字を読まなくても誰の発言かが分かるようにする
+    const icon = createKindIcon(kindClass);
+    if (icon) {
+      const iconWrap = document.createElement('span');
+      iconWrap.className = 'head-icon';
+      iconWrap.appendChild(icon);
+      head.appendChild(iconWrap);
+    }
     const label = document.createElement('span');
+    label.className = 'head-label';
     head.appendChild(label);
 
     const actions = document.createElement('span');
