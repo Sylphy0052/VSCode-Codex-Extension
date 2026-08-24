@@ -396,9 +396,10 @@ describe('chatScript', () => {
       expect(source).toContain("otherPick.type = question.multiSelect ? 'checkbox' : 'radio'");
     });
 
-    it('その他が空欄なら回答に数えない（未回答として送信が止まる）', () => {
+    it('その他が空欄（空白のみを含む）なら回答に数えない（未回答として送信が止まる）', () => {
       const field = source.slice(source.indexOf('function buildAskUserQuestionField'));
-      expect(field).toContain("if (other.value !== '') picked.push(other.value);");
+      expect(field).toContain('const free = other.value.trim();');
+      expect(field).toContain("if (free !== '') picked.push(free);");
     });
   });
 });

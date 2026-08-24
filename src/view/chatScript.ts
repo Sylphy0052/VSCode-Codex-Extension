@@ -1137,16 +1137,17 @@ export function chatScript(
     box.appendChild(otherRow);
 
     other.addEventListener('input', () => {
-      if (other.value) otherPick.checked = true;
+      if (other.value.trim() !== '') otherPick.checked = true;
     });
 
     readers.push((values) => {
       const picked = [];
       for (const input of inputs) {
         if (!input.checked) continue;
-        // 「その他」は空欄なら回答に数えない（未回答として送信が止まる）
+        // 「その他」は空欄（空白のみを含む）なら回答に数えない（未回答として送信が止まる）
         if (input === otherPick) {
-          if (other.value !== '') picked.push(other.value);
+          const free = other.value.trim();
+          if (free !== '') picked.push(free);
         } else {
           picked.push(input.value);
         }
