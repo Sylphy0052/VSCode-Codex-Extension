@@ -316,6 +316,9 @@ export function controlPanelStyles(): string {
     height: 3px;
     border-radius: 2px;
     overflow: hidden;
+    /* ハイコントラストでは color-mix の下地が沈むので、枠で帯の範囲を残す（使用量バーと同じ手） */
+    outline: 1px solid var(--vscode-contrastBorder, transparent);
+    outline-offset: -1px;
     background-color: color-mix(
       in srgb,
       var(--vscode-progressBar-background, var(--vscode-foreground)) 30%,

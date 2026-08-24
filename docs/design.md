@@ -480,7 +480,7 @@ Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡
 
 組み立ては `controlPanelScript.ts` の `appendState()` / `appendError()` へ集約する。セクションごとに書き写す形（`mcpEmpty` / `hooksEmpty` / …）だと、後から状態を足したときに一部のセクションだけ古い書式のまま残る。CSSも `.stateBlock` / `.state-error` の1組にまとめ、セクション別のクラスは廃止した。ただし `.hooksWarning` / `.skillsWarning` / `.pluginsWarning`（`--vscode-charts-yellow`）は「状態」ではなく取得できた結果への注記なので対象外。
 
-アイコンは `controlPanelIcons.ts` の `STATE_ICON_PATHS` に `<path>` の `d` だけを持ち、webview側で `createElementNS` を使って組む。webviewのスクリプトは `innerHTML` 系を使わない方針（§16.3）のため、SVGの文字列をそのまま渡す形にはしない。
+アイコンは `controlPanelIcons.ts` の `STATE_ICON_PATHS` に `<path>` の `d` だけを持ち、webview側で `createElementNS` を使って組む。webviewのスクリプトは `innerHTML` 系を使わない方針（§16.8）のため、SVGの文字列をそのまま渡す形にはしない。
 
 **再試行**: 取得に失敗した一覧には「再試行」ボタンを出し、`retrySection` をホストへ送る。取得に失敗したセクションも `loadedSections` には入っているため `ensureSectionLoaded()` では何も起きない。読み直し専用の `SettingsProvider.reloadSection()` を通す（進行中の取得があれば `runFetchSection()` がそれに相乗りするので、連打してもCLIの起動は増えない）。どのセクションを読み直すかは、描き込む先の要素idから `SECTION_CONTAINERS` の逆引き（`SECTION_OF_CONTAINER`）で決める——描画関数へsectionIdを配って回る作りだと、渡し忘れた1つだけ再試行できない状態になりうる。ホストからの応答は取得が終わってから届くので、押した瞬間の手応えは押した側で読み込み中へ差し替えて出す。
 
