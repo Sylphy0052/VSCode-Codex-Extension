@@ -880,8 +880,7 @@ function plannerApprovalModeFor(provider: Provider): string {
  *
  * プロンプトでの指示ではなく、この関数が組み立てる起動設定こそが縛りの実体である
  * （design.md §16.9「プロンプトで頼むだけでは足りない」）。
- */
-/**
+ *
  * `roadmap.ts`（design.md §16.19「生成セッションは§16.9の分解セッションと同じ制限
  * （`sandbox: read-only`相当、承認要求は全て拒否）で走らせる」）からも使う共通の組み立て。
  * 両者は同じ安全要件を持つ別のユースケース（ワークフロー分解／ロードマップ生成）のため、
@@ -965,8 +964,9 @@ export const PLANNER_TURN_TIMEOUT_MS = 5 * 60_000;
  * 二重にresolve/rejectしない（`Promise`はそもそも2度目以降の決着を無視するが、
  * ここでは`clearTimeout`忘れやログの二重出力も避ける）。`session.dispose()`は
  * 経路によらず`finally`で1回だけ呼ぶ。
+ *
+ * `roadmap.ts`からも使う（`buildPlannerSessionInput`と同じ理由でexportする）。
  */
-/** `roadmap.ts`からも使う（`buildPlannerSessionInput`と同じ理由でexportする）。 */
 export async function sendSingleTurn(
   host: TaskSessionHost,
   provider: Provider,

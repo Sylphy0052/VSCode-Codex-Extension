@@ -575,8 +575,7 @@ function readStringArray(value: unknown): string {
  * `detail` には他の種類（`mcpToolCall` の server/tool 名など）と違って翻訳の通り道が無いため
  * （`status` はチャット画面側の `STATUS_LABEL` を経由する。`chatScript.ts` 参照）、ここで直接
  * 日本語へ変える。未知の値（スキーマ追加）はそのまま出す。
- */
-/**
+ *
  * キーをunionで閉じるかを検討し、閉じないと決めた（Issue #649）。この語彙を見ているのは
  * すぐ下の索く1行だけで、辞書の外にこの値で分岐するコードが無い
  * （`spawnAgent` などの綴りは `src/` のここ以外に現れない）。unionを足しても

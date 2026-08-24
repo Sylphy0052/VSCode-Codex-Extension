@@ -552,11 +552,6 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     return entry;
   }
 
-  /**
-   * パネルを表に出す。既にタブがあれば `reveal`、閉じていれば作り直す
-   * （design.md §16.10の4「reveal()でパネルを作り直し、ChatStateから会話を描き直す」）。
-   * 会話の再描画は、webview起動時の `ready` 通知への応答（`postState`）に任せる。
-   */
   /** `BaseChatViewManager.showPanel`（基底クラス）が新規作成時に呼ぶ、Codex用のパネル生成。 */
   protected override createWebviewPanel(
     entry: ChatPanel,

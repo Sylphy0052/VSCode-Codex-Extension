@@ -2389,8 +2389,9 @@ function withSession(
 /**
  * 履歴からセッションを開く。既に開いているタブがあれば新規に開かず、そのタブへ移る
  * （ファイルタブと同じ挙動）。
+ *
+ * 履歴から開く。プロバイダに応じたチャット画面へ渡す。
  */
-/** 履歴から開く。プロバイダに応じたチャット画面へ渡す。 */
 function openSession(
   chat: ChatViewManager,
   claudeChat: ClaudeChatViewManager,

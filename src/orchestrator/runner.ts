@@ -3436,8 +3436,10 @@ export class WorkflowRunner {
    * `none` なら `disabled`。ホストを判定できない、または前提（`origin` remote・`gh`/`glab`の
    * PATH・認証）が欠けていれば `skipped`（呼び出し側が警告を出し、ローカルのマージだけ
    * 進める。design.md「前提が欠けている場合...ワークフロー自体は止めない」）。
+   *
+   * `rebuildLiveRun`（`runnerRestore.ts`、Issue #147）から`self.resolveForgeState(...)`として
+   * 呼ぶ（公開範囲は`WorkflowRunnerInternals`に閉じる）。
    */
-  /** `rebuildLiveRun`（`runnerRestore.ts`、Issue #147）から`self.resolveForgeState(...)`として呼ぶ（公開範囲は`WorkflowRunnerInternals`に閉じる）。 */
   private async resolveForgeState(repoRoot: string): Promise<LiveRunForgeState> {
     const forgeDeps = this.deps.forge;
     if (forgeDeps === undefined) {
