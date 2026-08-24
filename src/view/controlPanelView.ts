@@ -21,6 +21,7 @@ import { chatCsp } from './chatCsp';
 import { buildPanelAlert, type PanelAlert } from './controlPanelAlerts';
 import { controlPanelScript } from './controlPanelScript';
 import { controlPanelStyles } from './controlPanelStyles';
+import { buildSectionSummaries, type SectionSummaries } from './controlPanelSummaries';
 import { formatAbsoluteTime } from './relativeTime';
 import {
   isClaudeEditableKey,
@@ -69,6 +70,11 @@ interface PanelState extends Omit<SettingsSnapshot, 'importHistory'> {
    * 判定は`controlPanelAlerts.ts`。
    */
   alert: PanelAlert | undefined;
+  /**
+   * 折りたたまれたセクションの見出しに出す集計（issue #740）。
+   * 載っていないセクションは何も出さない。集計は`controlPanelSummaries.ts`。
+   */
+  sectionSummaries: SectionSummaries;
 }
 
 /**
@@ -177,6 +183,19 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
         claudeHooks: claude.hooks,
         codexMcp: snapshot.mcpServers,
         claudeMcp: claude.mcpServers,
+        loadedSections: this.settings.loadedSectionIds,
+      }),
+      // 閉じたままでも中身の状態が読めるようにする（issue #740）
+      sectionSummaries: buildSectionSummaries({
+        codexMcp: snapshot.mcpServers,
+        codexHooks: snapshot.hooks,
+        codexSkills: snapshot.skills,
+        codexPlugins: snapshot.plugins,
+        codexApps: snapshot.apps,
+        claudeMcp: claude.mcpServers,
+        claudeHooks: claude.hooks,
+        claudeSkills: claude.skills,
+        claudePlugins: claude.plugins,
         loadedSections: this.settings.loadedSectionIds,
       }),
     };
@@ -618,14 +637,14 @@ ${controlPanelStyles()}
   </details>
 
   <details class="section" id="section-codexMcp">
-  <summary class="sectionTitle">MCPサーバー</summary>
+  <summary class="sectionTitle">MCPサーバー<span class="sectionCount" id="count-codexMcp"></span></summary>
   <div class="sectionBody">
   <div class="mcpList" id="mcpListCodex"></div>
   </div>
   </details>
 
   <details class="section" id="section-codexHooks">
-  <summary class="sectionTitle">hooks</summary>
+  <summary class="sectionTitle">hooks<span class="sectionCount" id="count-codexHooks"></span></summary>
   <div class="sectionBody">
   <p class="note">hooksは任意のコマンドを実行する仕組みです。特にプロジェクト側で定義されたhookは、cloneしただけで任意コマンドが動く経路になりえます。何が実行されるかを確認してから信頼してください。</p>
   <div class="hooksList" id="hooksListCodex"></div>
@@ -633,7 +652,7 @@ ${controlPanelStyles()}
   </details>
 
   <details class="section" id="section-codexSkills">
-  <summary class="sectionTitle">skills</summary>
+  <summary class="sectionTitle">skills<span class="sectionCount" id="count-codexSkills"></span></summary>
   <div class="sectionBody">
   <p class="note">skillsはモデルへ渡す指示（プロンプト）です。特にプロジェクト側で定義されたskillは、cloneしただけで効く経路になりえます。どこ由来かを確認してから使ってください。</p>
   <div class="skillsList" id="skillsListCodex"></div>
@@ -641,7 +660,7 @@ ${controlPanelStyles()}
   </details>
 
   <details class="section" id="section-codexPlugins">
-  <summary class="sectionTitle">plugins</summary>
+  <summary class="sectionTitle">plugins<span class="sectionCount" id="count-codexPlugins"></span></summary>
   <div class="sectionBody">
   <p class="note">pluginは任意のコード（hookやMCPサーバーなど）を持ち込む仕組みです。中身を確認してから使ってください。Codexには有効/無効を切り替える経路がありません（実測。導入済みかどうかはインストール/アンインストールで扱います）。</p>
   <div class="pluginsList" id="pluginsListCodex"></div>
@@ -649,7 +668,7 @@ ${controlPanelStyles()}
   </details>
 
   <details class="section" id="section-codexApps">
-  <summary class="sectionTitle">apps</summary>
+  <summary class="sectionTitle">apps<span class="sectionCount" id="count-codexApps"></span></summary>
   <div class="sectionBody">
   <p class="note">appはChatGPTに接続されたコネクタです。この一覧は閲覧のみです。Codexには有効/無効・インストール/アンインストールを拡張機能から操作する確定した経路がありません。</p>
   <div class="appsList" id="appsListCodex"></div>
@@ -716,14 +735,14 @@ ${controlPanelStyles()}
     </details>
 
     <details class="section" id="section-claudeMcp">
-    <summary class="sectionTitle">MCPサーバー</summary>
+    <summary class="sectionTitle">MCPサーバー<span class="sectionCount" id="count-claudeMcp"></span></summary>
     <div class="sectionBody">
     <div class="mcpList" id="mcpListClaude"></div>
     </div>
     </details>
 
     <details class="section" id="section-claudeHooks">
-    <summary class="sectionTitle">hooks</summary>
+    <summary class="sectionTitle">hooks<span class="sectionCount" id="count-claudeHooks"></span></summary>
     <div class="sectionBody">
     <p class="note">hooksは任意のコマンドを実行する仕組みです。特にプロジェクト側で定義されたhookは、cloneしただけで任意コマンドが動く経路になりえます。Claude Codeにはこの拡張機能から信頼状態を確認・操作する経路がありません（実測。CLI側の挙動に委ねます）。</p>
     <div class="hooksList" id="hooksListClaude"></div>
@@ -731,7 +750,7 @@ ${controlPanelStyles()}
     </details>
 
     <details class="section" id="section-claudeSkills">
-    <summary class="sectionTitle">skills</summary>
+    <summary class="sectionTitle">skills<span class="sectionCount" id="count-claudeSkills"></span></summary>
     <div class="sectionBody">
     <p class="note">skillsはモデルへ渡す指示（プロンプト）です。特にプロジェクト側で定義されたskillは、cloneしただけで効く経路になりえます。Claude Codeにはこの拡張機能から有効/無効を切り替える経路がありません（実測。出どころの表示はCLIの説明文からの推測です）。</p>
     <button id="reloadClaudeSkills" type="button">skillsを読み直す</button>
@@ -741,7 +760,7 @@ ${controlPanelStyles()}
     </details>
 
     <details class="section" id="section-claudePlugins">
-    <summary class="sectionTitle">plugins</summary>
+    <summary class="sectionTitle">plugins<span class="sectionCount" id="count-claudePlugins"></span></summary>
     <div class="sectionBody">
     <p class="note">pluginは任意のコード（hookやMCPサーバーなど）を持ち込む仕組みです。中身を確認してから使ってください。Claude Codeは <code>claude plugin</code> CLI経由で有効/無効・インストール/アンインストールをすべて操作できます。</p>
     <div class="pluginsList" id="pluginsListClaude"></div>

@@ -72,6 +72,21 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     select.value = current;
   }
 
+  // 折りたたまれたセクションの見出しに出す集計（issue #740）。
+  // 何をどう数えるかはホスト側（controlPanelSummaries.ts）が済ませており、ここは
+  // 受け取った文字列を置くだけ。まだ読み込んでいないセクションは載ってこないので、
+  // 「読んでいないのに0件」と出ることはない
+  function applySectionSummaries(summaries) {
+    // 集計を出すセクションはHTML側のid="count-*"で決まる。ここを母数にすれば、
+    // 集計が消えた（未読込へ戻った）セクションを消し忘れることが無い
+    const targets = document.querySelectorAll('.sectionCount');
+    for (const target of targets) {
+      const sectionId = target.id.slice('count-'.length);
+      const summary = summaries && summaries[sectionId];
+      target.textContent = summary ? summary : '';
+    }
+  }
+
   // 帯（異常のまとめ、issue #741）を押したときの飛び先。applyAlertが最後に受け取った値を持つ
   let alertSectionId = '';
   // 折りたたまれたセクションの中にしか出ていない異常のまとめ（issue #741）。
@@ -899,6 +914,7 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     // 保つ
     const loadingSections = state.loadingSections || [];
     applyAlert(state.alert);
+    applySectionSummaries(state.sectionSummaries);
     applyUsage(state.usage);
     applyClaude(state.claude, loadingSections);
     renderSection('codexAccount', loadingSections, () => renderCodexAccount(state.account));

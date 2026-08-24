@@ -43,6 +43,20 @@ function extractSectionContainerKeys(scriptSource: string): string[] {
 }
 
 /** `ControlPanelViewProvider` が出すHTMLから `id="section-*"` の集合を取り出す。 */
+/** 見出しの集計（issue #740）の`id="count-*"`を拾う。 */
+function extractCountHtmlIds(html: string): string[] {
+  const ids: string[] = [];
+  const re = /id="count-(\w+)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const id = m[1];
+    if (id !== undefined) {
+      ids.push(id);
+    }
+  }
+  return ids;
+}
+
 function extractSectionHtmlIds(html: string): string[] {
   const ids: string[] = [];
   const re = /id="section-(\w+)"/g;
@@ -142,6 +156,44 @@ describe('セクション識別子の整合性（issue #225 レビュー指摘3�
     const htmlIds = extractSectionHtmlIds(renderedHtml());
     expect(new Set(htmlIds)).toEqual(new Set(SECTION_IDS));
     expect(htmlIds.length).toBe(SECTION_IDS.length);
+  });
+
+  it('集計を出すセクション（issue #740）のid="count-*"はSECTION_IDSの部分集合で、重複しない', () => {
+    // アカウントとインポートには集計を出さない（数えて意味のあるものが無い）ため、
+    // 一致ではなく部分集合であることを確かめる
+    const countIds = extractCountHtmlIds(renderedHtml());
+    expect(countIds.length).toBeGreaterThan(0);
+    expect(new Set(countIds).size).toBe(countIds.length);
+    for (const id of countIds) {
+      expect(SECTION_IDS as readonly string[]).toContain(id);
+    }
+    // 対応するセクション自体がHTMLにあること（見出しだけ孤立していない）
+    const htmlIds = new Set(extractSectionHtmlIds(renderedHtml()));
+    for (const id of countIds) {
+      expect(htmlIds.has(id), `section-${id} が無い`).toBe(true);
+    }
+  });
+
+  it('class="sectionCount"を持つ要素のidはすべてcount-で始まる（issue #740）', () => {
+    // webview側（controlPanelScript.tsのapplySectionSummaries）は`.sectionCount`を母数に
+    // 走査し、idからcount-を落としてセクションidを得る。この前提が崩れると、
+    // 空文字のキーで集計を引いて全部の集計が消える
+    const html = renderedHtml();
+    const re = /<span class="sectionCount" id="([^"]+)"/g;
+    const ids: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null) {
+      const id = m[1];
+      if (id !== undefined) {
+        ids.push(id);
+      }
+    }
+    // 陽性対照: 1件も拾えていないとこの検査は何も確かめていない
+    expect(ids.length).toBe(extractCountHtmlIds(html).length);
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) {
+      expect(id.startsWith('count-'), `${id} がcount-で始まらない`).toBe(true);
+    }
   });
 
   it('SECTION_CONTAINERSのキー集合とHTMLのid="section-*"の集合が一致する', () => {
