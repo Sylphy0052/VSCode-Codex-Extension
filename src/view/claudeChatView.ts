@@ -550,7 +550,7 @@ export class ClaudeChatViewManager
     // （Issue #413 PR4）はタスクと同じ経路で開くが、タブ名だけ分けて人が見分けられるように
     // する（組み立ては`sessionTitle.ts`。Issue #533）
     const title = buildSessionPanelTitle(input, LABEL);
-    const entry = this.buildEntry(input.cwd, title, true, taskConfig);
+    const entry = this.buildEntry(input.cwd, title, true, taskConfig, title);
     this.panels.set(sessionId, entry);
     entry.session.start({
       cwd: input.cwd,
@@ -972,6 +972,7 @@ export class ClaudeChatViewManager
     title: string,
     taskManaged: boolean,
     taskConfig: ClaudeConfig | undefined,
+    pinnedName?: string,
   ): ClaudePanel {
     const session = new ClaudeStreamSession(
       this.claudePath,
@@ -1006,6 +1007,7 @@ export class ClaudeChatViewManager
       attachments: new AttachmentBox(),
       disposed: false,
       title,
+      pinnedName,
       taskManaged,
       taskConfig,
       wasBusy: false,
@@ -1151,7 +1153,7 @@ export class ClaudeChatViewManager
       reportTurnResult(this.onActivity, entry.session.threadId, entry.cwd, state);
       this.notifyTurnComplete(entry);
     }
-    const next = deriveTitle(state);
+    const next = deriveTitle(state, entry.pinnedName);
     if (next !== undefined && entry.title !== next) {
       entry.title = next;
     }
@@ -2002,11 +2004,17 @@ export class ClaudeChatViewManager
 }
 
 /**
- * タブ名。解決順は「人が付けた名前（`state.name`） > 最初の指示から作った名前」
- * （issue #199の受入基準）。Claude Codeは要約名をCLI側に持たないため、後者は
- * 最初のユーザー発言から作る。
+ * タブ名。解決順は「**オーケストレータが指定した名前（`pinnedName`）** > 人が付けた名前
+ * （`state.name`） > 最初の指示から作った名前」（issue #199の受入基準、Issue #599）。
+ * Claude Codeは要約名をCLI側に持たないため、最後は最初のユーザー発言から作る。
+ *
+ * `pinnedName`を最優先にするのは、**ワークフローが並列に開いたタスクを見分けるため**。
+ * これが無いと、`openTaskSession`が渡したタブ名は初回表示の一瞬しか生き残らない。
  */
-export function deriveTitle(state: ChatState): string | undefined {
+export function deriveTitle(state: ChatState, pinnedName?: string): string | undefined {
+  if (pinnedName !== undefined && pinnedName.trim() !== '') {
+    return pinnedName;
+  }
   if (state.name !== undefined && state.name.trim() !== '') {
     return `${LABEL}: ${state.name}`;
   }

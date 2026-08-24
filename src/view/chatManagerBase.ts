@@ -56,6 +56,21 @@ export interface BaseChatPanel {
   /** パネルの見出し。タブが閉じている間もタイトルを見失わないよう、パネルとは別に保持する。 */
   title: string;
   /**
+   * オーケストレータが指定したタブ名（Issue #599）。`openTaskSession`が
+   * `buildSessionPanelTitle`で組み立てた値をそのまま持ち、**CLI側の要約名より優先する**
+   * （`deriveTitle`の第2引数）。人が手で開いた画面では`undefined`。
+   *
+   * **`ChatState`ではなくここに持つ。**`ChatState`はapp-serverからの通知でまるごと
+   * 組み替わる状態で、そこへ置くと「`thread/name/updated`はこの値を触らない」という
+   * 禁止を規約で守ることになる。`ChatPanel`にはapp-serverから触れる経路が無いため、
+   * 同じことを構造で守れる。
+   *
+   * **揮発してよい。**リロード後、タスク管理下のスレッドは`restorePanel`が拾わず
+   * （`isTaskManagedThread`）、`runner.ts`が`openTaskSession`で開き直すため
+   * （design.md §16.10の7）、この値も同じ経路で再び渡る。
+   */
+  pinnedName: string | undefined;
+  /**
    * タスク（オーケストレータ）管理下のセッションか。
    *
    * `true` の場合だけタブを閉じてもセッションを維持する（design.md §16.10の4）。

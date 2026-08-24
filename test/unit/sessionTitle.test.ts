@@ -35,6 +35,32 @@ describe('buildSessionPanelTitle（Issue #533の3分岐）', () => {
         const input: SessionPanelTitleInput = { role: 'task' };
         expect(buildSessionPanelTitle(input, label)).toBe(label);
       });
+
+      it('taskIdがあれば通常のタスクのタブ名に含める（Issue #599）', () => {
+        const input: SessionPanelTitleInput = { role: 'task', taskId: 'task-3' };
+        expect(buildSessionPanelTitle(input, label)).toBe(`${label}: task-3`);
+      });
+
+      // 衝突解決セッションは対象idを既に含むため、taskIdより情報量が多い
+      it('mergeResolutionTaskIdはtaskIdより優先する', () => {
+        const input: SessionPanelTitleInput = {
+          taskId: 'task-3',
+          mergeResolutionTaskId: 'task-42',
+        };
+        expect(buildSessionPanelTitle(input, label)).toBe(`${label}: 衝突解決 task-42`);
+      });
+
+      // オーケストレーターセッションは依存グラフのノードではないため、taskIdを持つ
+      // 意味が無い。万一渡ってきても役割のほうを見せる
+      it('role === orchestrator はtaskIdより優先する', () => {
+        const input: SessionPanelTitleInput = { role: 'orchestrator', taskId: 'task-3' };
+        expect(buildSessionPanelTitle(input, label)).toBe(`${label}: オーケストレーター`);
+      });
+
+      it('taskIdが空文字ならラベルのみ（値が無いのと同じ扱い）', () => {
+        const input: SessionPanelTitleInput = { role: 'task', taskId: '' };
+        expect(buildSessionPanelTitle(input, label)).toBe(label);
+      });
     });
   }
 });

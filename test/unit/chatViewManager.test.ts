@@ -1572,14 +1572,52 @@ describe('deriveTitle（Issue #533、優先順位の固定）', () => {
     expect(deriveTitle(baseState())).toBeUndefined();
   });
 
-  // chatView.ts側は state.name !== '' のみで、claudeChatView.ts側の .trim() !== '' と
-  // 挙動が違う（空白のみの名前の扱い）。この差が意図されたものかは未確認。
-  // Issue #533はテストを置く回であって挙動を変える回ではないため、現状をそのまま固定する。
-  it('空白のみの名前は空文字ではないため、そのまま使われる（claudeChatView.tsとの相違点）', () => {
+  // Issue #533の時点では chatView.ts 側が state.name !== '' のみで、claudeChatView.ts 側の
+  // .trim() !== '' と挙動が違った（空白のみの名前がそのままタブ名になった）。差の意図は
+  // 未検証のまま現状を固定していたが、Issue #599 で claudeChatView.ts 側へ揃えた。
+  // 空白だけのタブ名は、どのタブが何か分からなくする点で「名前が無い」と同じである。
+  it('空白のみの名前は使わず、最初の発言へ落ちる（claudeChatView.tsと揃えた。Issue #599）', () => {
     const state = baseState({
       name: '   ',
       items: [{ kind: 'userMessage', id: '1', text: '最初の発言' } as never],
     });
-    expect(deriveTitle(state)).toBe('Codex:    ');
+    expect(deriveTitle(state)).toBe('Codex: 最初の発言');
+  });
+});
+
+describe('deriveTitle（Issue #599、pinnedNameを最優先にする）', () => {
+  const baseState = (
+    overrides: Partial<Parameters<typeof deriveTitle>[0]> = {},
+  ): Parameters<typeof deriveTitle>[0] =>
+    ({
+      items: [],
+      name: undefined,
+      ...overrides,
+    }) as Parameters<typeof deriveTitle>[0];
+
+  it('pinnedNameがあれば、Codexが付けた名前より優先する', () => {
+    const state = baseState({
+      name: 'Codexが付けた要約名',
+      items: [{ kind: 'userMessage', id: '1', text: '最初の発言' } as never],
+    });
+    expect(deriveTitle(state, 'Codex: task-3')).toBe('Codex: task-3');
+  });
+
+  // pinnedNameは`buildSessionPanelTitle`が組み立てた完成形（ラベルを含む）なので、
+  // ここでラベルを重ねない。`Codex: Codex: task-3`にならないことを固定する
+  it('pinnedNameはそのまま使い、ラベルを重ねない', () => {
+    expect(deriveTitle(baseState(), 'Codex: 衝突解決 task-9')).toBe('Codex: 衝突解決 task-9');
+  });
+
+  it('pinnedNameが空白のみなら無視して、次の優先度へ落ちる', () => {
+    const state = baseState({ name: 'Codexが付けた要約名' });
+    expect(deriveTitle(state, '   ')).toBe('Codex: Codexが付けた要約名');
+  });
+
+  it('pinnedNameが無ければ従来どおりの優先順位（人が手で開いた画面）', () => {
+    const state = baseState({
+      items: [{ kind: 'userMessage', id: '1', text: '設計を見直したい' } as never],
+    });
+    expect(deriveTitle(state, undefined)).toBe('Codex: 設計を見直したい');
   });
 });

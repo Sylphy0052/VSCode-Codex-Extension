@@ -6245,12 +6245,57 @@ W7（#571、`ask_orchestrator`）のセキュリティ監査が指摘した。**
 
 `chatView.ts`の`deriveTitle`（非export）と`claudeChatView.ts`の`deriveTitle`（export）は統合しなかった。§16.10「実装の集約」が、`onSessionChange`を含む主要メソッドは「プロバイダごとの差が大きいため、引き続き各サブクラスに残る」と明記しており、`deriveTitle`はこの`onSessionChange`から直接呼ばれる名前解決ロジックである。
 
-実際に中身も違う。`chatView.ts`側は`state.name !== ''`のみで名前の有無を判定するのに対し、`claudeChatView.ts`側は`state.name.trim() !== ''`で判定する。空白のみの名前（例: `'   '`）を渡すと、`chatView.ts`はそれをそのまま「付いた名前」として使う（`Codex:    `）が、`claudeChatView.ts`は空文字扱いにして次の優先順位（最初の発言）へ落ちる。**この`.trim()`の差が意図されたものかは未確認。** Issue #533はテストを置く回であって挙動を変える回ではないため、現状の非対称のままそれぞれをテストで固定した（`test/unit/chatViewManager.test.ts` / `test/unit/claudeChatViewManager.test.ts`の`deriveTitle`系テスト）。統合すればこの非対称は自動的に解消するが、それは「テストの無い関数の挙動を変える」ことになり、#599（`deriveTitle`の優先順位を変える）のスコープと衝突する。
+実際に中身も違った。`chatView.ts`側は`state.name !== ''`のみで名前の有無を判定するのに対し、`claudeChatView.ts`側は`state.name.trim() !== ''`で判定していた。空白のみの名前（例: `'   '`）を渡すと、`chatView.ts`はそれをそのまま「付いた名前」として使い（`Codex:    `）、`claudeChatView.ts`は空文字扱いにして次の優先順位（最初の発言）へ落ちる。Issue #533はテストを置く回であって挙動を変える回ではないため、当時は現状の非対称のままそれぞれをテストで固定し、**「この`.trim()`の差が意図されたものかは未確認」と書いた。**
+
+**この未確認は Issue #599 で解消した（§16.43）。意図された差ではなく、`claudeChatView.ts`側へ揃えた。** 空白だけのタブ名は、どのタブが何か分からなくする点で「名前が無い」と同じであり、`chatView.ts`側の挙動に意味を見つけられなかった。**未確認と書いた記述を、確認せずに残さないこと**——`deriveTitle`の優先順位を触る回（#599）は、この行を必ず読む回でもある。
+
+`deriveTitle`を2つのまま残す判断自体は#599の後も変わっていない。優先順位の段数（#599で3段になった）と`.trim()`は揃ったが、`chatView.ts`側はCodexの要約名を、`claudeChatView.ts`側は人が付けた名前を扱うという呼び出し元ごとの差は残る。
 
 `buildSessionPanelTitle`のように呼び出し元をまたいでロジックが完全一致している箇所は関数へ集約し、`deriveTitle`のように呼び出し元ごとに（未確認とはいえ）挙動が違う箇所はサブクラスへ残す、という使い分けは§16.10の方針をそのまま踏襲している。
 
 #### 確かめ方
 
 - `test/unit/sessionTitle.test.ts`（新設）: `buildSessionPanelTitle`の3分岐（通常のタスク／`role === 'orchestrator'`／`mergeResolutionTaskId`あり）を、`'Codex'`・`'Claude Code'`両ラベルについて検証する
-- `test/unit/chatViewManager.test.ts` / `test/unit/claudeChatViewManager.test.ts`: `deriveTitle`の優先順位（名前 → 最初の発言 → `undefined`）と、空白のみの名前についての両者の相違点をそれぞれ固定する
+- `test/unit/chatViewManager.test.ts` / `test/unit/claudeChatViewManager.test.ts`: `deriveTitle`の優先順位（名前 → 最初の発言 → `undefined`）を固定する。空白のみの名前は#533の時点では両者の相違点として固定していたが、#599で揃えたため現在は同じ挙動を固定している
 - 実測: 各分岐の組み立てを一時的に固定文字列へ戻すと、対応するテストが期待文字列との不一致でRED（`AssertionError: expected 'Codex' to be 'Codex: オーケストレーター'`等）になることを確認した。モックを使っていないため、Issue #529のような「配線がズレて落ちる」失敗モードは成立しない
+
+### 16.43 ワークフローが開くセッションのタブ名をオーケストレータが決める（Issue #599）
+
+#### 背景
+
+ワークフローが複数のタスクセッションを並列に開くと、**どのタブがどのタスクか画面から分からない**。原因は2つある。
+
+**(a) 通常タスクのタブ名にtaskIdが入らない。** 衝突解決セッションには`衝突解決 <taskId>`が入る（PR #532）が、通常のタスクはラベル（`Codex` / `Claude Code`）だけだった。並列に開いた5つのタブが全部同じ名前になる。
+
+**(b) 渡したタブ名は初回表示の一瞬しか生き残らない。** `openTaskSession`が組み立てた名前は`entry.title`に入るが、最初の状態更新で`deriveTitle(state)`の結果に置き換わる。`deriveTitle`が見るのはCLI由来の`state.name`と最初のユーザー発言だけで、**オーケストレータが指定した名前はどこにも残らない。**
+
+#### 対応
+
+`buildSessionPanelTitle`（§16.41）に**taskIdの分岐を足し**、その結果を`ChatPanel`（`BaseChatPanel`）の`pinnedName`として保持して、`deriveTitle`の第1優先にする。
+
+分岐の順序は**衝突解決 > オーケストレーター > taskId > ラベルのみ**。前2つを優先するのは、そちらのほうが情報量が多いため（衝突解決は対象idを既に含み、オーケストレーターはそもそもタスクではない）。
+
+#### `pinnedName`は`ChatState`ではなく`ChatPanel`に持つ
+
+Issue本文は`ChatState`へ足す案で書かれていて、あわせて「`thread/name/updated`はこれを触らない」という**禁止**を書いていた。**禁止を書く必要が生じるのは、その置き場では触れてしまうからである。**
+
+`ChatState`はapp-serverからの通知でまるごと組み替わる状態で、`pinnedName`は逆にapp-serverが触ってはいけない値になる。`ChatPanel`はホスト側（`ChatViewManager` / `ClaudeChatViewManager`）が持つ入れ物で、**app-serverから触れる経路が構造的に無い。**同じことを規約ではなく構造で守れる。
+
+**`pinnedName`は揮発してよい。** リロード後、タスク管理下のスレッドは`restorePanel`が拾わず（`isTaskManagedThread`）、`runner.ts`が`openTaskSession`で開き直す（§16.10の7）。`openTaskSession`の呼び出しは`runner.ts`の1箇所だけなので、開き直しでも同じ入力が渡り、タブ名も同じ経路で戻る。**Issue本文が永続化に触れていないのは「不要」ではなく「見ていない」なので、実測してから揮発でよいと判断した。**
+
+#### `SessionPanelTitleInput`の書き写しを消した
+
+`sessionTitle.ts`の`SessionPanelTitleInput`は、`TaskSessionInput`の`role` / `mergeResolutionTaskId`を**手で書き写した**独立のinterfaceだった（PR #647のレビュー指摘、#599へ持ち越し）。`Pick<TaskSessionInput, ...>`へ変えた。**書き写しは書いた瞬間だけ正しく、その後は誰も見ていない。**`Pick`なら元の型で名前や省略可能性が変わったときに`tsc`が落ちる。
+
+`taskSession.ts`が`vscode`をimportしていないことを先に実測してから変えている（`sessionTitle.ts`の「vscode非依存」という制約を壊さないため）。
+
+#### `.trim()`の非対称を解消した
+
+`chatView.ts`側の`state.name !== ''`を`state.name.trim() !== ''`へ揃えた（§16.41の「差の意図は未確認」の解消）。空白だけのタブ名は、どのタブが何か分からなくする点で「名前が無い」と同じである。`pinnedName`も同じ基準で見る（空白のみなら次の優先度へ落ちる）。
+
+#### 確かめ方
+
+- `test/unit/sessionTitle.test.ts`: taskIdの分岐と、`mergeResolutionTaskId` / `role === 'orchestrator'`がそれより優先されること、空文字のtaskIdは値が無いのと同じ扱いになることを、両ラベルについて検証する
+- `test/unit/chatViewManager.test.ts` / `test/unit/claudeChatViewManager.test.ts`: `deriveTitle`の3段（`pinnedName` → `state.name` → 最初の発言）と、`pinnedName`にラベルを重ねないこと、空白のみの`pinnedName`を無視することを固定する
+- `test/unit/runner.test.ts`: **runnerが`TaskSessionInput.taskId`を渡していることを固定する。**組み立てが正しくても、渡していなければタブ名は変わらない。fake hostは`title`という概念を持たない（§16.41）ため、観測できるのは入力までである
+- 実測（陽性の対照）: `deriveTitle`の`pinnedName`分岐を消すと両Managerのテストが落ち、`buildSessionPanelTitle`のtaskId分岐を消すと`sessionTitle.test.ts`が落ち、`runner.ts`の`taskId`の受け渡しを消すと`runner.test.ts`が落ちることを確認した（3箇所とも別々のテストが検出する）
