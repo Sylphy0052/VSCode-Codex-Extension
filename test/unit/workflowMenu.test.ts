@@ -8,11 +8,12 @@ function commands(runningCount: number): string[] {
 
 describe('buildWorkflowMenuEntries（ワークフローの導線、issue #250）', () => {
   describe('実行中のrunが無いとき', () => {
-    it('実行・View・生成・ロードマップの4項目をこの順で返す', () => {
+    it('実行・View・生成・チーム・ロードマップの5項目をこの順で返す', () => {
       expect(commands(0)).toEqual([
         'agent.workflows.run',
         'agent.workflows.view',
         'agent.workflows.plan',
+        'agent.workflows.team',
         'agent.workflows.roadmap',
       ]);
     });
@@ -32,6 +33,7 @@ describe('buildWorkflowMenuEntries（ワークフローの導線、issue #250）
         'agent.workflows.view',
         'agent.workflows.run',
         'agent.workflows.plan',
+        'agent.workflows.team',
         'agent.workflows.roadmap',
         'agent.workflows.stop',
       ]);
