@@ -66,6 +66,13 @@ describe('UsageStatusBar のゲージ（issue #756）', () => {
     expect(backgroundOf(bar)).toBe('statusBarItem.errorBackground');
   });
 
+  it('ゲージを作れない値でも余分な空白を残さない', () => {
+    const bar = new UsageStatusBar();
+    // `usedPercent` が undefined でなければ表示へ進むため、NaN はここまで来る
+    bar.update(snapshot(Number.NaN));
+    expect(textOf(bar)).not.toContain('Codex  ');
+  });
+
   it('未取得のときの表示は変わらない', () => {
     const bar = new UsageStatusBar();
     bar.update(undefined);

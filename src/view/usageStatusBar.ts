@@ -72,8 +72,8 @@ export class UsageStatusBar implements vscode.Disposable {
 
     const percent = Math.round(snapshot.usedPercent);
     const resets = formatResetsIn(snapshot.resetsAt, Date.now());
-    const gauge = isGaugeEnabled() ? `${formatUsageGauge(snapshot.usedPercent)} ` : '';
-    this.item.text = `$(pulse) Codex ${gauge}${percent}%${resets === '' ? '' : ` ・ ${resets}`}`;
+    const gauge = isGaugeEnabled() ? formatUsageGauge(snapshot.usedPercent) : '';
+    this.item.text = `$(pulse) Codex ${gauge === '' ? '' : `${gauge} `}${percent}%${resets === '' ? '' : ` ・ ${resets}`}`;
     this.item.tooltip = buildTooltip(snapshot);
 
     const severity = severityOf(snapshot.usedPercent);
