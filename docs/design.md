@@ -3872,6 +3872,56 @@ JSソース1本を正とし、`test/unit/highlight.test.ts`がその文字列を
 - `test/unit/webviewStyles.test.ts`: `CODE_TOKEN_TYPES`のうちplain以外すべてに色の規則があること
 - 実際の色の読みやすさ・テーマ切り替え時の見え方はvitestのnode環境では確認できない。実機での確認は`docs/manual-test.md`のU-40に委ねる
 
+### 14.73 会話画面の表示密度を設定で切り替える（issue #718）
+
+#### 背景
+
+余白の好みは割れる。詰めて多く見たい人と、広く取って読みやすくしたい人がいる。
+§14.67（ターン境界の余白）・§14.68（行間と行長）でどちらも増やす方向へ動かしたので、
+戻す道を設定として用意する。
+
+#### 実装
+
+新設した設定は`agent.chat.density`（`compact` / `comfortable`、既定`comfortable`）。
+`renderMarkdown` / `sendOn` と同じ`agent.chat.*`名前空間・`window`スコープに置く
+（見た目の好みであって権限には関わらないため）。
+
+配線は既存の設定と同じ経路:
+
+- `src/view/density.ts`（新規、`vscode`非依存）: 値の丸め（`normalizeChatDensity`）とクラス名（`densityBodyClass`）
+- `src/config.ts`: `readChatDensityConfig()`
+- `src/view/chatView.ts` / `src/view/claudeChatView.ts`: 両画面の`attachPanel`から渡す
+- `src/view/chatShared.ts`: `body`のクラスにする
+- `src/view/chatStyles.ts`: 寸法をカスタムプロパティで持つ
+
+**寸法はカスタムプロパティ1箇所で切り替える。** 個々の規則へ両方の値を書くと、以降に
+余白を触ったときへ片方だけ反映されて黙ってずれる。切り替える寸法は5つ:
+
+| プロパティ            | comfortable | compact | 使う所                             |
+| --------------------- | ----------- | ------- | ---------------------------------- |
+| `--chat-turn-gap`     | 22px        | 12px    | `.item.user`の上（ターンの切れ目） |
+| `--chat-item-gap`     | 12px        | 6px     | `.item`の下                        |
+| `--chat-sub-gap`      | 6px         | 2px     | 思考・ツール出力の下               |
+| `--chat-body-padding` | 8px 10px    | 4px 8px | `.body`の内側                      |
+| `--chat-line-height`  | 1.6         | 1.4     | `.body`の行間                      |
+
+**comfortableは`body`側の既定として持つ。** `body.density-comfortable`という規則は
+作らず、`body`に書いた値がそのまま既定になる。`body.density-compact`だけがこの5つを
+上書きする。クラス自体は両方付けるので、実機ではどちらが効いているか見分けられる。
+
+**反映には会話タブの開き直しが要る。** クラスはHTMLの生成時に決まる。設定を読み直して
+差し替える経路は作っていない（`sendOn`などと同じ扱い）。
+
+**色・線・アイコンは密度に含めない。** 縁取り（§14.67）や状態色（§14.69）は情報を
+持つ表現で、詰めても薄めても意味が変わってしまう。密度が動かすのは余白と行間だけ。
+
+#### 確かめ方
+
+- `test/unit/density.test.ts`: 丸め（未知の値・型違い）とクラス名
+- `test/unit/chatView.test.ts`: 既定で`density-comfortable`、`compact`指定で`density-compact`が`body`に付くこと
+- `test/unit/webviewStyles.test.ts`: 5つのプロパティが`body`に既定を持ち、`body.density-compact`が**漏れなく**上書きすること。加えて**使う側が`var()`越しに参照していること**（規則へ直接書くと密度が効かない）
+- 実際の詰まり具合、表・差分・コードブロック・折りたたみ済みツール出力の崩れはvitestのnode環境では確認できない。実機での確認は`docs/manual-test.md`のU-41に委ねる
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）

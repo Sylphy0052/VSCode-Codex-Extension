@@ -15,6 +15,7 @@ import {
   approvalLevelMeta,
 } from '../provider/approvalLevel';
 import type { ProviderId } from '../provider/id';
+import { DEFAULT_CHAT_DENSITY, densityBodyClass, type ChatDensity } from './density';
 import { AttachmentBox, dropRejectionReason } from '../provider/attachments';
 import { buildImageReply } from '../provider/imageRefs';
 import { FileMentionCatalog, filterFiles } from '../provider/fileMentions';
@@ -884,6 +885,13 @@ export interface ChatShellOptions {
    */
   renderMarkdown?: boolean;
   /**
+   * 会話画面の表示密度（設定 `agent.chat.density`、既定 `comfortable`、issue #718）。
+   * 変換は `density.ts` の `densityBodyClass` が行い、ここでは `body` のクラスにするだけ。
+   * 寸法そのものは `chatStyles.ts` のカスタムプロパティが持つ。両画面共通の設定で、
+   * `renderMarkdown` / `sendOn` と同じく双方の `attachPanel` から渡す。
+   */
+  density?: ChatDensity;
+  /**
    * 入力欄でEnterを送信に使うか（設定 `agent.chat.sendOn`、既定 `ctrlEnter`、issue #288）。
    *
    * `ctrlEnter`はCtrl+Enter / Cmd+Enterで送信しEnterは改行のまま（従来の挙動）。`enter`は
@@ -1133,7 +1141,7 @@ export function renderShell(webview: vscode.Webview, options: ChatShellOptions):
 ${chatStyles()}
 </style>
 </head>
-<body>
+<body class="${densityBodyClass(options.density ?? DEFAULT_CHAT_DENSITY)}">
   <div id="logWrap">
     <div id="log"></div>
     <button id="scrollToBottom" type="button" aria-label="会話の一番下へ移動" title="会話の一番下へ移動します" hidden>${COMPOSER_ICONS.scrollToBottom}</button>

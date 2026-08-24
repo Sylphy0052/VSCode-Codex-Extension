@@ -21,6 +21,26 @@ export function chatStyles(): string {
     color: var(--vscode-foreground);
     /* 本文1行の上限（issue #713）。値を使う側は下の「行長」の節を参照 */
     --chat-measure: 84ch;
+    /*
+     * 表示密度（issue #718、設定 agent.chat.density）。ここが comfortable の値で、
+     * 設定を書いていない利用者の見た目はこれ。compact は下の body.density-compact が
+     * この5つだけを上書きする。
+     *
+     * 寸法を各規則へ直接書くと、密度を足したときに片方だけ直し漏れる。使う側は
+     * 必ず var() 越しに参照すること。
+     */
+    --chat-turn-gap: 22px;
+    --chat-item-gap: 12px;
+    --chat-sub-gap: 6px;
+    --chat-body-padding: 8px 10px;
+    --chat-line-height: 1.6;
+  }
+  body.density-compact {
+    --chat-turn-gap: 12px;
+    --chat-item-gap: 6px;
+    --chat-sub-gap: 2px;
+    --chat-body-padding: 4px 8px;
+    --chat-line-height: 1.4;
   }
   /*
    * 応答中かどうかを画面の外周で示す（issue #701）。ログ本文を読んでいる最中でも
@@ -65,9 +85,9 @@ export function chatStyles(): string {
    * 自分の発言の手前を広く空け、同じターンの中に連なる思考・ツール出力は詰める。
    * #log は通常のブロック整形なので、隣り合う項目の上下marginは相殺され広いほうが残る。
    */
-  .item { margin-bottom: 12px; }
-  .item.user { margin-top: 22px; }
-  .item.reasoning, .item.tool { margin-bottom: 6px; }
+  .item { margin-bottom: var(--chat-item-gap); }
+  .item.user { margin-top: var(--chat-turn-gap); }
+  .item.reasoning, .item.tool { margin-bottom: var(--chat-sub-gap); }
   /* 会話の先頭が不自然に落ちないよう、最初の項目だけは上を空けない */
   #log > .item:first-child { margin-top: 0; }
   /*
@@ -115,10 +135,10 @@ export function chatStyles(): string {
   .body {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    padding: 8px 10px;
+    padding: var(--chat-body-padding);
     border-radius: 4px;
     /* 詰まって見えるのを解く（issue #713）。等幅で出す領域は個別に 1.45 を持つ */
-    line-height: 1.6;
+    line-height: var(--chat-line-height);
   }
   .user .body {
     background-color: var(--vscode-textBlockQuote-background);
