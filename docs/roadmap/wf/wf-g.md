@@ -21,8 +21,14 @@
   **#551 と T26 は「未マージPRがゼロ」を着手条件にしていたため、条件が満たされた時点で
   回の順番より先に消化された。**回の構成は消化の順序を決めるものであって、
   着手条件を上書きするものではない
-- **第4回**: #485 + #490。どちらも疑似worktreeの同じ層で、**#490 はgit側と疑似worktree側の
-  両方をまとめて直す必要がある**
+- **第4回**（完了）: #485（PR #652、`36985b99`）+ #490（PR #653、`35853cd7`）。
+  #485 は `rename` を必須にして旧コピー経路を削除し、あわせて**中断で取り残された
+  `.pwt-reflect-*.tmp` を一覧から除外し、次の反映時に掃除する**ようにした。
+  #490 は `MAX_WORKTREE_REMOVAL_ATTEMPTS = 100` を置き、**git側と疑似worktree側の両方を
+  同じPRで直した**（片方だけで出すと、対称性が崩れた状態がmainに残る期間ができる）。
+  上限に達したらworktreeは残り、警告を出す。`Infinity` は0ではなく上限へ丸める
+  ——「際限なく試す」が「一度も試さない」に反転するため。
+  **この回で1件、検査が原理的に届かない事故を起こしている**（下の「JSDocの付け替え」）
 - **第5回**: #599 + #524。#599 は `design.md` §16.42 と `manual-test.md` W-T を使う
   （**2026-08-24時点で両方とも空きであることを確認済み。着手時にもう一度確かめること**）。
   #524 は6箇所まとめて直す
@@ -34,6 +40,32 @@
 
 **第4回と第5回は並行できる**（触るファイルが交差しない）。第6回は調査の結論が出るまで
 後続を積まない。
+
+**第4回で起きた事故: JSDocの付け替え（PR #653）。**新しい定数を、既存の関数と
+そのJSDocの**間**へ挿入した。`retryTask` のJSDocの閉じ `*/` の直後に定数の定義を置いたため、
+**20行のJSDocが定数の説明として読まれ、`retryTask` は説明を失った。**
+文言は1文字も変わらないので grep では出ず、差分にも追加行しか出ない。
+
+**7つの検査が全部緑だった。** `tsc --noEmit` / eslint / prettier / vitest 3838件の4つと、
+GitHub Actions の checks / external-cli。**足せる検査が無い**——JSDocはどこにあっても構文として
+妥当なので、いずれも原理的に見られない。**この事故だけ、対策が「検査を足す」ではなく
+「別の抽出を書く」になる。**
+
+```
+python3 -c "
+import re,io,sys
+s=io.open(sys.argv[1],encoding='utf-8').read()
+for m in re.findall(r'\*/\n(export (?:function|const|type|interface|class) [A-Za-z_]+)', s): print(m)
+" <file>
+```
+
+自分が触った宣言が全部この一覧に出るかを見る。**JSDocを奪われた宣言は一覧から落ちる。**
+
+**同じ事故はWF-Eの#596（PR #598）で1つのPRの中で2箇所起きており、`ops-rules.md` にも
+「新しく挿入した定義の直前に、既存の宣言のJSDocが無いかを見る」と既に書いてあった。**
+書いてあったが実行されなかった。**手が動いている最中に自分で思い出して自分で止まる形の確認は、
+思い出せなかったことを検出できない。** 規約側もこの回で書き換えた（`ops-rules.md`
+「検査が緑であることの意味を確かめる」）。
 
 - **WF-G 横断の仕上げ**（18項目）
   - T26 eslintへ型情報を要するルールを導入し、未処理Promiseを機械的に検出できるようにする
@@ -54,9 +86,27 @@
     5ファイルで、`chatScript.ts` / `controlPanelScript.ts` / `workflowScript.ts` の
     いずれにも触っていない（実測）。**Issue #649 がOPENのまま残っているのは整合していて、
     閉じてはいけない。**以下のラベル表に関する記述は残件としてそのまま生きている
-    **当初の前提は `chatScript.ts` 1ファイルだったが、実測は3ファイル4743行である**
-    （2026-08-23、第2回の途中で測り直した）。`chatScript.ts` 2476 /
-    `controlPanelScript.ts` 1141 / `workflowScript.ts` 1126。
+    **T26は仮説ではなく、既に画面に出ていた。**2026-08-24、PR #654（`8fb2ed70`）が
+    表示バグ3件を直した。`LOOP_STOP_LABEL` に `taskStopped` が無く、ループ終了の表示が
+    「ループ終了（3/5回目）・taskStopped」になっていた（`LoopStopReason` は7値、辞書は6キー）。
+    `KIND_LABEL` に `fileRead` が無く、Claude Codeでファイルを読むたびに見出しが英語で出ていた。
+    階層(2)の `KIND_TITLE`（`transcriptMarkdown.ts:15`）に4件足りず、会話のMarkdown書き出しで
+    見出しが識別子になっていた——**このJSDocは「`KIND_LABEL` と語彙を揃えてある」と
+    書いている。書いてあることと揃っていることは別である。**
+    **`Refs #649` で入れたため Issue #649 はOPENのまま。**残件（型を作る側）は消えていない。
+    **3件はいずれも、緑のまま存在できた。**キーから表示文字列を引く辞書は25あるが、
+    **2026-08-24時点のmainでは、網羅性を突き合わせるテストは `FAILURE_LABEL` の1表だけである**
+    （`test/unit/webviewScript.test.ts:354` が
+    `indexOf('export type TaskFailureReason =')` で範囲を切ってから拾うため、
+    **他の型には最初から届かない**）。**3件は全部その外側で起きている。**
+    **T26後半（#649）のPRで6表へ広がる見込み**——下の(3)の内訳「書ける6件」がその対象である。
+    なお当初この棚には「`ProgramRunSkipReason` は1行書きで `readonly` が無いため、
+    既存テストの正規表現が拾えない」と書こうとしたが、**測ったら参照するテストが無かった**
+    （書式は結果に効いていない）。**この0件も時点付きである**——mainで0件、
+    T26後半の作業ブランチでは既に3件ある。**同じgrepが、どのツリーで引いたかで別の答えを返す。**
+    **当初の前提は `chatScript.ts` 1ファイルだったが、実測は3ファイル4749行である**
+    （2026-08-23に第2回の途中で測り直し、2026-08-24にPR #654のぶんを引き直した）。
+    `chatScript.ts` 2482 / `controlPanelScript.ts` 1141 / `workflowScript.ts` 1126。
     **前提の出どころはWF-Fの見積りで、チャット画面という担当領域の内側で数えたため
     1ファイルになった。**T26は「テンプレートリテラルで型検査が効かない場所」という
     横断の条件で切るもので、担当領域で切ると `workflowScript.ts` と
@@ -131,15 +181,38 @@
     `EXTRA_USAGE_DISABLED_REASON_LABEL` と同じ性質）。**命名規則を持たない
     （`known` という変数名）ため、`_LABEL` / `_TITLE` のような命名で引くと出ない。**
     (3) **テンプレートリテラルの中 — 型検査が届かない。11件**
-    （`chatScript.ts:92` `KIND_LABEL` / `chatScript.ts:159` `STATUS_LABEL` /
-    `chatScript.ts:812` 無名（`createDiff` 内の `kindLabel`） /
-    `chatScript.ts:1338` `TODO_MARK` /
-    `chatScript.ts:1717` `EXTRA_USAGE_DISABLED_REASON_LABEL` /
-    `chatScript.ts:1805` `LOOP_STOP_LABEL` /
+    （`chatScript.ts:92` `KIND_LABEL` / `chatScript.ts:162` `STATUS_LABEL` /
+    `chatScript.ts:815` 無名（`createDiff` 内の `kindLabel`） /
+    `chatScript.ts:1341` `TODO_MARK` /
+    `chatScript.ts:1720` `EXTRA_USAGE_DISABLED_REASON_LABEL` /
+    `chatScript.ts:1808` `LOOP_STOP_LABEL` /
     `controlPanelScript.ts:392` 無名（`formatProvides` 内の `labelOf`） /
     `controlPanelScript.ts:591` 無名（`importDetailKindLabel` 内の `labels`） /
     `workflowScript.ts:19` `STATE_LABEL` / `workflowScript.ts:31` `FAILURE_LABEL` /
     `workflowScript.ts:979` `PROGRAM_SKIP_REASON_LABEL`）。
+    **2026-08-24に上記の引き方で引き直した。合計11は変わらない**（PR #654 が
+    `chatScript.ts` へ6行足したぶん、`chatScript.ts` の5件だけ行番号がずれた）。
+    **この11件は、突き合わせテストが書けるかどうかで6件と5件に分かれる。
+    直し方が違うのはここである。**
+    **書ける6件**——ソース側に網羅を主張できる閉じた集合が既にある。
+    `workflowScript.ts:31` `FAILURE_LABEL`（`TaskFailureReason`）/
+    `workflowScript.ts:19` `STATE_LABEL`（`TaskState = (typeof TASK_STATES)[number]`）/
+    `workflowScript.ts:979` `PROGRAM_SKIP_REASON_LABEL`（`ProgramRunSkipReason`）/
+    `chatScript.ts:1808` `LOOP_STOP_LABEL`（`loopController.ts:34` の
+    `LoopStopReason`、string literal union）/
+    `controlPanelScript.ts:591` `labels`（`ImportItemDetailGroup.kind` の8値union、
+    `provider/import.ts:30`）/ `controlPanelScript.ts:392` `labelOf`
+    （型ではなく**すぐ下の固定配列** `['skills', 'agents', 'hooks', 'mcpServers']` が相手。
+    抽出元がリテラル配列である点は `STATE_LABEL` と同じ）。
+    **書けない5件**——相手が `string` で、CLIから届く語彙をそのまま持っている。
+    `chatScript.ts:92` `KIND_LABEL`（`ChatItem.kind: string`。JSDocに
+    「未知の種類も捨てずに保持する」と明記）/ `chatScript.ts:162` `STATUS_LABEL`
+    （`ChatItem.status: string | undefined`。しかも `SubAgentActivityKind` と
+    `GuardianApprovalReviewStatus` と実行状態の**3系統が1つの表に同居**している）/
+    `chatScript.ts:815` `kindLabel`（`FileDiff.kind: string`）/
+    `chatScript.ts:1341` `TODO_MARK`（`TodoItem.status: string`）/
+    `chatScript.ts:1720` `EXTRA_USAGE_DISABLED_REASON_LABEL`。
+    **こちらは型を作るところからになる。**「テストを書く」作業ではない。
     **後半3件は命名で引いたときに落ちていた**——`_LABEL` / `_TITLE` を持たず、
     2件は変数へ入れずその場で索いている。**`controlPanelScript.ts` が1141行あって
     0件だったのが手がかり。件数が0のファイルは、引き方を疑う。**
