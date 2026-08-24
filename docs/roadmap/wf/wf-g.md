@@ -62,8 +62,29 @@
   <!-- 着地したら埋める: PR番号 / design.md の節番号 / manual-test.md のケース番号 -->
 - **第6回**: #541 + #562。**どちらも調査が先で、直さずに閉じる結論があり得る。**
   #541 は再現から入り、#562 は「復活させるか消すか」を決めるところから
-- **第7回**: T26の後半（ラベル表）。**Issue #649 はこの分が残っているためOPENのままである。**
-  #636 はここまでに溜まった規約の候補を渡す
+- **第7回**: T26の後半（ラベル表）は**着地した**（PR #655、`0992379e`。Issue #649 は CLOSED）。
+  **回そのものは終わっていない。**この回はもう1つ「#636 はここまでに溜まった規約の候補を渡す」を
+  持っていて、**そちらは続いている**（#636 はOPEN。`ops-rules.md` へ足している項目が
+  その引き渡しの一部にあたる）。**引き渡し先は回をまたぐので、片方の着地で回を
+  閉じないこと。**
+  T26後半で分かったこと。`workflowScript.ts` の `FAILURE_LABEL` は**12キー**である
+  （一度「12→13」と報告されたが、引き直すと12。`taskApprovalTimedOut` に
+  design.md §16.39 / Issue #579 のコメントが付いている分を二重に数えていた）。
+  **この回でJSDocの付け替えが2件目として出ている**——`src/appserver/autoApprovalReview.ts` で
+  `BLOCKING_STATUSES` の定義を `isBlockedByReview` とそのJSDocの**間**へ挿入した。
+  第4回の PR #653 とまったく同じ形で、**第4回の事故を受けて規約を書いた回に、
+  同じ規約の側から再発している。**（現在のmainでは直っていて、`BLOCKING_STATUSES` と
+  `isBlockedByReview` がそれぞれ自分のJSDocを持っている。）
+  **この2件目は、検算スクリプトのPASSでは捕まっていない。**PASSを見て「奪取なし」と
+  読んだ側と、修正前のHEADを新側に置いて `isBlockedByReview` が実際に検出されることまで
+  確かめた側がいて、後者だけが「そのPASSは正規表現を写し間違えていても出るPASSだった」に
+  到達した。**`ops-rules.md`「抽出を書いたら、その抽出が陽性を出すことも確かめる」の
+  直接の由来はここである。**
+  もう1件、`test/unit/webviewScript.test.ts` のコメントにあった「全体16件」が実測15件だった。
+  `AutoResumeOutcome` の `resumed` が抽出の正規表現の形をしておらず、**書いた時点から
+  母数に入っていなかった**——腐りではなく初期不整合で、#524 の6/7/8 と同じ形。
+  現在は件数を書かず「母数を知りたいときはこの正規表現を実際に流して数えること」に
+  置き換わっている
 - **第8回**: 全体レビュー
 
 **第4回と第5回は並行できる**（触るファイルが交差しない）。第6回は調査の結論が出るまで
@@ -97,8 +118,10 @@ for m in re.findall(r'\*/\n(export (?:function|const|type|interface|class) [A-Za
 
 - **WF-G 横断の仕上げ**（18項目）
   - T26 eslintへ型情報を要するルールを導入し、未処理Promiseを機械的に検出できるようにする
-    **前半だけ完了。PR #650（Issue #649）が2026-08-23にmainへsquashで入った
-    （`3a83ed23`）。**`no-floating-promises` / `no-misused-promises` /
+    **完了。前半は PR #650（`3a83ed23`、2026-08-23）、後半は PR #655（`0992379e`、
+    2026-08-24）。Issue #649 は CLOSED。**以下は前半・後半それぞれの着手時の観測で、
+    **着地の記録は第7回の行にある。**
+    前半（PR #650）は `no-floating-promises` / `no-misused-promises` /
     `await-thenable` をerrorにし、parserへ `tsconfig.json` と
     `tsconfig.integration.json` の両方を渡した（片方だけだと渡していない側の
     全ファイルがParsing errorになる）。`test/unit/eslintConfig.test.ts` を新設し、
@@ -109,11 +132,14 @@ for m in re.findall(r'\*/\n(export (?:function|const|type|interface|class) [A-Za
     守っている実装のため）。
     **導入時点の違反は0件で、いま違反を見つけるための変更ではなく、これから入る違反を
     止めるための変更である。**
-    **後半のラベル表は手つかずである。**PR #650 が触ったのは `eslint.config.mjs` /
-    `test/unit/eslintConfig.test.ts` / `ci.yml` / `CONTRIBUTING.md` / `design.md` の
+    **この段落を書いた時点で、後半のラベル表は手つかずだった。**PR #650 が触ったのは
+    `eslint.config.mjs` / `test/unit/eslintConfig.test.ts` / `ci.yml` /
+    `CONTRIBUTING.md` / `design.md` の
     5ファイルで、`chatScript.ts` / `controlPanelScript.ts` / `workflowScript.ts` の
-    いずれにも触っていない（実測）。**Issue #649 がOPENのまま残っているのは整合していて、
-    閉じてはいけない。**以下のラベル表に関する記述は残件としてそのまま生きている
+    いずれにも触っていない（実測）。**この時点で Issue #649 がOPENのまま残っているのは
+    整合していた。**——**2026-08-24、後半が PR #655（`0992379e`）で着地して #649 は CLOSED。
+    上の「閉じてはいけない」は、この段落を書いた時点の話であって現在の指示ではない。**
+    以下のラベル表に関する記述は、着手時の観測の記録として読むこと
     **T26は仮説ではなく、既に画面に出ていた。**2026-08-24、PR #654（`8fb2ed70`）が
     表示バグ3件を直した。`LOOP_STOP_LABEL` に `taskStopped` が無く、ループ終了の表示が
     「ループ終了（3/5回目）・taskStopped」になっていた（`LoopStopReason` は7値、辞書は6キー）。
@@ -121,7 +147,8 @@ for m in re.findall(r'\*/\n(export (?:function|const|type|interface|class) [A-Za
     階層(2)の `KIND_TITLE`（`transcriptMarkdown.ts:15`）に4件足りず、会話のMarkdown書き出しで
     見出しが識別子になっていた——**このJSDocは「`KIND_LABEL` と語彙を揃えてある」と
     書いている。書いてあることと揃っていることは別である。**
-    **`Refs #649` で入れたため Issue #649 はOPENのまま。**残件（型を作る側）は消えていない。
+    **`Refs #649` で入れたため、この時点では Issue #649 はOPENのままだった**
+    （残件＝型を作る側が残っていたため。その残件は PR #655 で着地し、#649 は CLOSED）。
     **3件はいずれも、緑のまま存在できた。**キーから表示文字列を引く辞書は25あるが、
     **3件が起きた時点のmainでは、網羅性を突き合わせるテストは `FAILURE_LABEL` の1表だけだった**
     （`test/unit/webviewScript.test.ts` が
