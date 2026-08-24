@@ -72,12 +72,20 @@ CI待ち中の「全体の停止」・停止を解除しても最終マージが
 **ブランチ保護（`checks`必須・strict）を設定した使い捨てリポジトリが要る**ため、W-Dと同じ
 リポジトリを流用する。
 W-I は W4（オーケストレーターが実行中の計画を書き換える、
-Issue [#338](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/338)）で、期待が7件。
+Issue [#338](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/338)）で、期待が11件。
 `add_task` の反映・権限を緩める追加の拒否・検証（未定義参照や循環依存）での拒否・`remove_task` と
 依存の付け替え・走行中タスクの削除の拒否・`update_task_dependencies` の警告欄への全文表示、そして
-**リロードすると保存済みYAML本来の内容へ戻ること**を見る。最後の1件は、実行中に加減したタスクの
+**リロードすると保存済みYAML本来の内容へ戻ること**を見る。この1件は、実行中に加減したタスクの
 永続状態を定義と突き合わせる修正（レビューの指摘、design.md §16.29「リロード時の突き合わせ」）が
 効いているかの確認も兼ねる。
+着地後の後追い修正で4件を足した。**削除で宙に浮くテンプレート参照が残る場合の `remove_task` の拒否**
+（Issue [#764](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/764)）、
+**同一タスクへの `update_task_dependencies` の警告が直近1件へ丸められること**と
+**追加・削除の履歴警告が50件で頭打ちになり `orchestratorPlanHistoryTrimmed` が出ること**
+（Issue [#765](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/765)）、
+**`add_task` の `escalate` / `cwd` の拒否**
+（Issue [#766](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/766)）の4件で、
+いずれも拒否理由や警告欄の見え方が画面上で確かめられるかを見る。
 W-J は W5（PR/MRのレビュー結果を取り込んでタスクへ反映する、
 Issue [#339](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/339)）で、期待が10件。
 警告欄とオーケストレーターの会話への到達・2件目だけが追記される重複排除・GitLab側での同じ結果・

@@ -2038,7 +2038,7 @@ YAMLとロードマップの**中身が使えるものになっているか**を
 
 ### W-I オーケストレーターが実行中の計画を書き換える（design.md §16.29、roadmap W4、Issue #338）
 
-`buildOrchestratorTask`の権限フィールド拒否・`validateWorkflow`再利用・`pending`限定の削除/依存変更・依存の剥がし・警告文言・MCPツールとしての公開範囲はユニットテストで確かめてある（`test/unit/workflow.test.ts`の`describe('buildOrchestratorTask（design.md §16.29、roadmap W4、Issue #338、オーケストレーターのadd_task）')`・`test/unit/messaging.test.ts`・`test/unit/runner.test.ts`の`describe('WorkflowRunner: add_task / remove_task / update_task_dependencies（design.md §16.29、roadmap W4、Issue #338）')`）。ここで見るのは、実際のオーケストレーターのCLIプロセスが実物のMCP接続を通してこれらのツールを呼んだときの、画面上の見え方と再読み込み後の挙動。
+`buildOrchestratorTask`の権限フィールド拒否（`escalate`/`cwd`を含む。Issue #766）・`validateWorkflow`再利用（`remove_task`の剥がし後も通す。Issue #764）・`pending`限定の削除/依存変更・依存の剥がし・警告文言と警告の丸め・上限（Issue #765）・MCPツールとしての公開範囲はユニットテストで確かめてある（`test/unit/workflow.test.ts`の`describe('buildOrchestratorTask（design.md §16.29、roadmap W4、Issue #338、オーケストレーターのadd_task）')`・`test/unit/messaging.test.ts`・`test/unit/runner.test.ts`の`describe('WorkflowRunner: add_task / remove_task / update_task_dependencies（design.md §16.29、roadmap W4、Issue #338）')`）。ここで見るのは、実際のオーケストレーターのCLIプロセスが実物のMCP接続を通してこれらのツールを呼んだときの、画面上の見え方と再読み込み後の挙動。
 
 - 前提: タスクT1・T2（T2はT1に依存）だけの短いワークフローを用意し、オーケストレーターのプロンプトで「T3という新しいタスクを`add_task`で追加して」のように明示的に依頼する
 - 操作: ワークフローを実行し、オーケストレーターへ依頼する
@@ -2056,6 +2056,16 @@ YAMLとロードマップの**中身が使えるものになっているか**を
 - 期待: 削除は拒否され、理由（実行中のタスクは削除できず、`stop_task`で止めるよう促す旨）がオーケストレーターへ届く。T1はタスク一覧に残ったまま
 - 操作: オーケストレーターへ「T2の依存をT1からT3に変更して」のように、`update_task_dependencies`を促す依頼をする（T2が`pending`のまま）
 - 期待: 依存グラフの表示がT2→T1からT2→T3へ切り替わる。警告欄に変更前後の依存関係が全文で表示される
+- 操作: オーケストレーターへ「T2の依存をもう一度変えて」と続けて依頼し、同じT2に対する`update_task_dependencies`を3回以上呼ばせる（Issue #765）
+- 期待: 警告欄の`orchestratorDependenciesChanged`は1件だけで、内容が最新の変更（直前の依存→今の依存）になっている。呼んだ回数だけ警告が積み上がらない
+- 操作: `add_task`と`remove_task`を繰り返させ、計画変更の履歴警告を50件より多く発生させる（Issue #765。オーケストレーターへ「T9を追加して、すぐ消して。これを30回繰り返して」のように依頼する）
+- 期待: 警告欄の追加・削除の履歴は50件で頭打ちになり、古いものから消える。あわせて「計画変更（タスクの追加・削除）の記録が上限（50件）に達したため、古いものから順に落としています」旨の警告（`orchestratorPlanHistoryTrimmed`）が1件だけ出る
+- 前提: T2のプロンプトにT3の成果を参照するテンプレート変数（`{{T3.cwd}}`）を書き、T2の`dependsOn`にT3を入れたワークフローを用意する（T2・T3はどちらも`pending`のままにする）
+- 操作: オーケストレーターへ「T3を消して」と依頼する（Issue #764）
+- 期待: 削除は拒否され、拒否理由（テンプレート変数が`dependsOn`に挙げていないタスクを参照することになる旨）がオーケストレーターのチャットタブへ届く。T3はタスク一覧・依存グラフに残ったまま、T2の`dependsOn`もT3を指したまま（部分的に適用されない）
+- 確認: 拒否理由に、回避策として「参照している側のタスクも取り除くか、削除を諦める」旨が書かれている。`update_task_prompt`で参照元の文面を直す案内にはなっていない（参照元は`pending`のままで、`update_task_prompt`は開始済みのタスクにしか効かないため）
+- 操作: オーケストレーターへ「`escalate`を指定した新しいタスクを追加して」「`cwd`にリポジトリの外を指定したタスクを追加して」のように依頼する（Issue #766）
+- 期待: どちらも追加が拒否され、拒否理由に該当フィールド名（`escalate` / `cwd`）が入っている。ワークフローViewのタスク一覧にそのタスクが現れない
 - 操作: ウィンドウを再読み込みする（またはVSCodeを再起動して同じワークフロー実行の状態を開き直す）
 - 期待: 追加・削除・依存変更のいずれも消え、保存済みYAMLファイル本来の内容（T1・T2のみ、元の依存関係）に戻っている。YAMLファイル自体は一切書き換わっていない（実行前後でファイルの内容・更新日時に変化が無い）
 - 確認: `add_task`で加えていたタスクが、リロード直後に一度でも他タスクの完了等で永続化されていた場合でも、警告欄に「実行中に加減されたタスクを定義（YAML）本来の内容へ合わせました」旨（`reloadTaskDefMismatch`）が出て、runが（他のタスクが全てdoneであれば）詰まらず完走扱いになる（design.md §16.29「リロード時の突き合わせ」、レビューblocking指摘の実機確認）
