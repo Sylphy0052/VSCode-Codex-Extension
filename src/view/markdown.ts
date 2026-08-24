@@ -48,9 +48,22 @@ export type BlockToken =
  * `**太字**` を `*斜体*` より先に置く（先に置かないと `**x**` の最初の `*` が
  * 斜体側に食われる）。閉じ側が見つからない記法（ストリーミング中の未完な強調等）は
  * どの選択肢にもマッチしないため、そのまま地の文として残る＝描画は壊れない。
+ *
+ * 生URL（`http(s)://...`とそのまま貼られたもの）も最後の選択肢としてリンク化する
+ * （issue #688）。`[text](url)`が既に前方の選択肢にあるため、Markdownリンクの
+ * `(url)`部分が二重にマッチすることはない。
  */
 const INLINE_RE =
-  /`([^`]+)`|\[([^\]]+)\]\(([^)\s]+)\)|~~([^~]+)~~|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*]+)\*|_([^_]+)_/g;
+  /`([^`]+)`|\[([^\]]+)\]\(([^)\s]+)\)|~~([^~]+)~~|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*]+)\*|_([^_]+)_|(https?:\/\/[A-Za-z0-9\-._~:/?#@!$&*+,;=%]+)/g;
+
+/** 生URLマッチの末尾に付いた文末記号は本文側へ戻す（`〜を見て。`のURLに句点を含めない）。 */
+const URL_TRAILING_PUNCT_RE = /[.,;:!?、。！？]+$/;
+
+function splitUrlTrailing(raw: string): { url: string; trailing: string } {
+  const match = URL_TRAILING_PUNCT_RE.exec(raw);
+  if (!match) return { url: raw, trailing: '' };
+  return { url: raw.slice(0, match.index), trailing: raw.slice(match.index) };
+}
 
 export function parseInline(line: string): InlineToken[] {
   const tokens: InlineToken[] = [];
@@ -75,6 +88,10 @@ export function parseInline(line: string): InlineToken[] {
       tokens.push({ type: 'italic', value: match[7] });
     } else if (match[8] !== undefined) {
       tokens.push({ type: 'italic', value: match[8] });
+    } else if (match[9] !== undefined) {
+      const { url, trailing } = splitUrlTrailing(match[9]);
+      tokens.push({ type: 'link', value: url, url });
+      if (trailing) tokens.push({ type: 'text', value: trailing });
     }
     lastIndex = INLINE_RE.lastIndex;
   }
@@ -336,9 +353,17 @@ export const MARKDOWN_PARSE_SOURCE = `
       '|\\\\*\\\\*([^*]+)\\\\*\\\\*' +
       '|__([^_]+)__' +
       '|\\\\*([^*]+)\\\\*' +
-      '|_([^_]+)_',
+      '|_([^_]+)_' +
+      '|(https?://[A-Za-z0-9\\\\-._~:/?#@!$&*+,;=%]+)',
     'g',
   );
+  var URL_TRAILING_PUNCT_RE = /[.,;:!?、。！？]+$/;
+
+  function splitUrlTrailing(raw) {
+    var match = URL_TRAILING_PUNCT_RE.exec(raw);
+    if (!match) return { url: raw, trailing: '' };
+    return { url: raw.slice(0, match.index), trailing: raw.slice(match.index) };
+  }
 
   function parseInline(line) {
     var tokens = [];
@@ -363,6 +388,10 @@ export const MARKDOWN_PARSE_SOURCE = `
         tokens.push({ type: 'italic', value: match[7] });
       } else if (match[8] !== undefined) {
         tokens.push({ type: 'italic', value: match[8] });
+      } else if (match[9] !== undefined) {
+        var split = splitUrlTrailing(match[9]);
+        tokens.push({ type: 'link', value: split.url, url: split.url });
+        if (split.trailing) tokens.push({ type: 'text', value: split.trailing });
       }
       lastIndex = INLINE_RE.lastIndex;
     }

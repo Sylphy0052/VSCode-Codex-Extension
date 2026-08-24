@@ -368,10 +368,12 @@ export function chatScript(
         const a = document.createElement('a');
         a.href = '#';
         a.textContent = token.value;
-        // Webviewから直接遷移はさせない。押した行き先は既存のopenUrl経路（Web検索結果と
-        // 同じ）でホスト側へ渡し、vscode.env.openExternalで開く
+        // Webviewから直接遷移はさせない。ctrl(macはcmd)+クリックのときだけ、
+        // 既存のopenUrl経路（Web検索結果と同じ）でホスト側へ渡し外部ブラウザで開く
+        // （issue #688）。修飾キーなしの通常クリックは本文選択と競合しないよう何もしない
         a.addEventListener('click', (e) => {
           e.preventDefault();
+          if (!e.ctrlKey && !e.metaKey) return;
           vscode.postMessage({ type: 'openUrl', url: token.url });
         });
         parent.appendChild(a);
