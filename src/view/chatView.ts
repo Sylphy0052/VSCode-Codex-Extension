@@ -46,6 +46,8 @@ import { decoratePanelTitle, deriveSessionActivityState } from './sessionActivit
 import { buildSessionPanelTitle } from './sessionTitle';
 import { buildItemsDelta } from './stateDelta';
 import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
+import { buildHandoffPrompt, resolveWithRetry } from './handoff';
+import type { SessionStore } from '../session/sessionStore';
 import { APPROVAL_LEVEL_CYCLE, isApprovalLevel } from '../provider/approvalLevel';
 import { AttachmentBox } from '../provider/attachments';
 import { CommandCatalog } from '../provider/commandCatalog';
@@ -318,6 +320,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       onDisconnect: () => void,
     ) => AppServerConnectionPort = (onNotification, onServerRequest, onDisconnect) =>
       new AppServerConnection(codexPath, log, onNotification, onServerRequest, onDisconnect),
+    /** セッション引き継ぎ（issue #694）でtranscript相当（rollout）のパスを解決する口。 */
+    private readonly store?: SessionStore,
   ) {
     super();
     this.catalog = new CommandCatalog(this.fs);
@@ -387,14 +391,14 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * `cwd` / `taskConfig` を省略すると、従来通りワークスペース直下・拡張機能の
    * グローバル設定で始まる（design.md §16.10の1。既存の呼び出しは全て既定値で動く）。
    */
-  async openNew(cwd?: string, taskConfig?: CodexConfig): Promise<void> {
+  async openNew(cwd?: string, taskConfig?: CodexConfig): Promise<string | undefined> {
     const folder = currentWorkspaceFolder();
     const targetCwd = cwd ?? folder?.uri.fsPath;
     if (targetCwd === undefined) {
       void vscode.window.showErrorMessage(
         'Codexを開始するにはフォルダを開いてください（ファイル > フォルダーを開く）',
       );
-      return;
+      return undefined;
     }
 
     // 保護を外した設定のまま開こうとしていないか（issue #222）。パネルを作る前に聞く。
@@ -402,7 +406,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // そちらは `toCodexConfig` が危険な値を持ち込まないようにして防いでいる
     const config = taskConfig ?? readConfig().codex;
     if (!(await confirmUnsafeCombination(config))) {
-      return;
+      return undefined;
     }
 
     const entry = this.buildEntry(targetCwd, 'Codex', false, taskConfig);
@@ -412,11 +416,50 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       const threadId = await entry.session.start(targetCwd, config);
       this.pendingStarts.end(pendingKey);
       this.panels.set(threadId, entry);
+      return threadId;
     } catch (e) {
       this.pendingStarts.end(pendingKey);
       this.teardown(entry);
       this.reportError(e);
+      return undefined;
     }
+  }
+
+  /**
+   * 現在アクティブなセッションのtranscript相当（rollout）を新セッションへ渡し、
+   * 引き継ぎを開始する（issue #694）。Claude Code側の`handoffToNewSession`と同じ設計
+   * （`src/view/handoff.ts`参照）。
+   */
+  async handoffToNewSession(): Promise<void> {
+    if (this.store === undefined) {
+      return;
+    }
+    const entry = this.active;
+    if (entry === undefined) {
+      return;
+    }
+    const threadId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
+    if (threadId === undefined) {
+      return;
+    }
+    const rolloutPath = await resolveWithRetry(() => this.store!.resolveRolloutPath(threadId));
+    if (rolloutPath === undefined) {
+      void vscode.window.showErrorMessage(
+        '引き継ぎ元セッションのtranscriptが見つかりませんでした',
+      );
+      return;
+    }
+    const newThreadId = await this.openNew(entry.cwd, entry.taskConfig);
+    if (newThreadId === undefined) {
+      return;
+    }
+    const newEntry = this.panels.get(newThreadId);
+    if (newEntry === undefined) {
+      return;
+    }
+    const text = buildHandoffPrompt(rolloutPath);
+    await newEntry.session.sendOrQueue(text, newEntry.taskConfig ?? readConfig().codex);
+    this.reportActivity(newEntry, text);
   }
 
   /**

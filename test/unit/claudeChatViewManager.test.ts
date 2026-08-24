@@ -2419,3 +2419,60 @@ describe('X3: 脇道の質問のmanager層配線（issue #334、issue #340横断
     expect(commandsMessage?.commands.some((c) => c.name === 'btw')).toBe(true);
   });
 });
+
+describe('handoffToNewSession（issue #694）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('アクティブなタブが無ければ何もしない', async () => {
+    const { manager } = createManager();
+    await manager.handoffToNewSession();
+    expect(__mock.messages.errors).toHaveLength(0);
+  });
+
+  it('transcriptが解決できれば、新セッションへ固定文言とパスを送る', async () => {
+    stubStartCapturing();
+    const sendSpy = vi
+      .spyOn(ClaudeStreamSession.prototype, 'sendOrQueue')
+      .mockReturnValue('sent');
+    const store = fakeStore({ resolveTranscriptPath: async () => '/home/user/.claude/x.jsonl' });
+    const { manager } = createManager({ store });
+    await manager.openNew('/workspace/root');
+
+    await manager.handoffToNewSession();
+
+    expect(sendSpy).toHaveBeenCalledWith(
+      expect.stringContaining('/home/user/.claude/x.jsonl'),
+      [],
+    );
+    // 新セッションが増えている（元のタブ+新タブ）
+    expect(__mock.createdPanels.length).toBe(2);
+  });
+
+  it('transcriptが解決できなければ、短時間リトライ後にエラー通知して新セッションを作らない', async () => {
+    stubStartCapturing();
+    const sendSpy = vi.spyOn(ClaudeStreamSession.prototype, 'sendOrQueue');
+    const store = fakeStore({ resolveTranscriptPath: async () => undefined });
+    const { manager } = createManager({ store });
+    await manager.openNew('/workspace/root');
+    const panelsBefore = __mock.createdPanels.length;
+
+    const handoff = manager.handoffToNewSession();
+    await vi.runAllTimersAsync();
+    await handoff;
+
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(__mock.createdPanels.length).toBe(panelsBefore);
+    expect(__mock.messages.errors).toContainEqual(
+      expect.stringContaining('transcriptが見つかりませんでした'),
+    );
+  });
+});

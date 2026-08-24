@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { noDefaults } from '../../src/codex/configToml';
 import type { Logger } from '../../src/log';
 import type { FileSystemPort } from '../../src/session/ports';
+import type { SessionStore } from '../../src/session/sessionStore';
 import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMentions';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import { ChatViewManager, deriveTitle } from '../../src/view/chatView';
@@ -61,6 +62,14 @@ function fakeSettingsProvider(): SettingsProvider {
 
 const EMPTY_TASK_CONFIG: TaskSessionConfig = { model: '', effort: '', approvalMode: '' };
 
+/** セッション引き継ぎ（issue #694）のテスト用フェイク。既定は「見つからない」。 */
+function fakeSessionStore(overrides?: Partial<SessionStore>): SessionStore {
+  return {
+    resolveRolloutPath: async () => undefined,
+    ...overrides,
+  } as unknown as SessionStore;
+}
+
 /**
  * `ChatSession.start`/`resume` は `connection.ensureStarted()` の1tick分だけ
  * `thread/start`/`thread/resume` の発行が遅れる。フェイク接続は実プロセスを
@@ -87,6 +96,7 @@ function createManager(options?: {
   isTaskManagedThread?: (threadId: string) => boolean;
   onActivity?: (activity: ChatActivity) => void;
   revealImportSection?: () => void | Promise<void>;
+  store?: SessionStore;
 }): {
   manager: ChatViewManager;
   connection: FakeAppServerConnection;
@@ -103,6 +113,7 @@ function createManager(options?: {
     options?.isTaskManagedThread ?? (() => false),
     options?.revealImportSection ?? (() => undefined),
     factory,
+    options?.store,
   );
   return { manager, connection: connection() };
 }
@@ -1619,5 +1630,72 @@ describe('deriveTitle（Issue #599、pinnedNameを最優先にする）', () => 
       items: [{ kind: 'userMessage', id: '1', text: '設計を見直したい' } as never],
     });
     expect(deriveTitle(state, undefined)).toBe('Codex: 設計を見直したい');
+  });
+});
+
+describe('handoffToNewSession（issue #694）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('アクティブなタブが無ければ何もしない', async () => {
+    const { manager } = createManager({ store: fakeSessionStore() });
+    await manager.handoffToNewSession();
+    expect(__mock.messages.errors).toHaveLength(0);
+  });
+
+  it('rolloutが解決できれば、新セッションへ固定文言とパスを送る', async () => {
+    const store = fakeSessionStore({
+      resolveRolloutPath: async () => '/home/user/.codex/sessions/rollout-x.jsonl',
+    });
+    const { manager, connection } = createManager({ store });
+
+    const opened = manager.openNew('/workspace/root');
+    await tick();
+    connection.resolveFirst('thread/start', threadStartResult('thread-orig'));
+    await opened;
+
+    const handoff = manager.handoffToNewSession();
+    await tick();
+    connection.resolveFirst('thread/start', threadStartResult('thread-new'));
+    await tick();
+    connection.resolveFirst('turn/start', {});
+    await handoff;
+
+    const turnStart = connection.requests.filter((r) => r.method === 'turn/start');
+    expect(
+      turnStart.some((r) =>
+        JSON.stringify(r.params).includes('/home/user/.codex/sessions/rollout-x.jsonl'),
+      ),
+    ).toBe(true);
+  });
+
+  it('rolloutが解決できなければ、短時間リトライ後にエラー通知して新セッションを作らない', async () => {
+    const store = fakeSessionStore({ resolveRolloutPath: async () => undefined });
+    const { manager, connection } = createManager({ store });
+
+    const opened = manager.openNew('/workspace/root');
+    await tick();
+    connection.resolveFirst('thread/start', threadStartResult('thread-orig'));
+    await opened;
+    const threadStartsBefore = connection.requests.filter((r) => r.method === 'thread/start')
+      .length;
+
+    const handoff = manager.handoffToNewSession();
+    await vi.runAllTimersAsync();
+    await handoff;
+
+    expect(
+      connection.requests.filter((r) => r.method === 'thread/start').length,
+    ).toBe(threadStartsBefore);
+    expect(__mock.messages.errors).toContainEqual(
+      expect.stringContaining('transcriptが見つかりませんでした'),
+    );
   });
 });
