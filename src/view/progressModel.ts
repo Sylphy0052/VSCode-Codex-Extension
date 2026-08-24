@@ -34,6 +34,14 @@ export interface ProgressTurn {
   response: string;
   /** そのターンで変更したファイル。重複は除く。 */
   editedFiles: string[];
+  /**
+   * そのターンで各ファイルへ何回書き込みが届いたか。`editedFiles` の各要素をキーに持つ。
+   *
+   * `editedFiles` から重複を落としたままだと「1回直しただけ」と「同じファイルを10回
+   * 往復した」が画面上で区別できない。件数の一覧性は `editedFiles` 側で保ち、
+   * 回数はこちらに分けて持つ（既存の利用側の数え方を変えないため）。
+   */
+  fileEditCounts: Record<string, number>;
   /** そのターンで実行したコマンド。同じコマンドの繰り返しも別の行として残す。 */
   commands: string[];
   /** そのターンで起きたTODOの変化。同じTODOが複数回変わったときは最後の変化だけを残す。 */
@@ -129,6 +137,7 @@ function emptyTurn(index: number): ProgressTurn {
     instruction: '',
     response: '',
     editedFiles: [],
+    fileEditCounts: {},
     commands: [],
     todoChanges: [],
   };
@@ -151,9 +160,13 @@ function absorb(turn: ProgressTurn, item: ChatItem): void {
     return;
   }
   for (const diff of item.diffs) {
-    if (diff.path !== '' && !turn.editedFiles.includes(diff.path)) {
+    if (diff.path === '') {
+      continue;
+    }
+    if (!turn.editedFiles.includes(diff.path)) {
       turn.editedFiles.push(diff.path);
     }
+    turn.fileEditCounts[diff.path] = (turn.fileEditCounts[diff.path] ?? 0) + 1;
   }
 }
 
