@@ -803,3 +803,24 @@ describe('workflowScript', () => {
     },
   );
 });
+
+describe('会話の一番下へジャンプするボタン', () => {
+  it('#logのスクロール位置に応じてボタンのhiddenを切り替え、クリックで最下部へ戻す配線が入っている', () => {
+    // 実DOMでのscrollHeight/scrollTop計算はvitestのnode環境では動かせない
+    // （実webviewが無いため）。配線がソースに残っていることを固定して回帰を検出する
+    const source = chatScript('Codex', { mode: 'quickPick' });
+
+    expect(source).toContain('function isLogNearBottom(log)');
+    expect(source).toContain('function updateScrollToBottomVisibility()');
+    expect(source).toContain("el('log').addEventListener('scroll', updateScrollToBottomVisibility)");
+    expect(source).toContain("el('scrollToBottom').addEventListener('click'");
+    expect(source).toContain('log.scrollTop = log.scrollHeight');
+  });
+
+  it('state更新のたびにボタンの表示状態を再計算する（apply内でupdateScrollToBottomVisibilityを呼ぶ）', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+    const applyMatch = source.match(/function apply\(state\) \{[\s\S]*?\n {2}\}/u);
+    expect(applyMatch).not.toBeNull();
+    expect(applyMatch![0]).toContain('updateScrollToBottomVisibility();');
+  });
+});

@@ -20,7 +20,27 @@ export function chatStyles(): string {
     font-size: var(--vscode-font-size);
     color: var(--vscode-foreground);
   }
+  #logWrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
   #log { flex: 1; overflow-y: auto; padding: 12px 16px; }
+  #scrollToBottom {
+    position: absolute;
+    right: 20px;
+    bottom: 12px;
+    z-index: 10;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    border: 1px solid var(--vscode-widget-border, transparent);
+    background: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+    cursor: pointer;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  }
+  #scrollToBottom:hover { background: var(--vscode-button-secondaryHoverBackground); }
   .item { margin-bottom: 12px; }
   .item .head {
     display: flex;

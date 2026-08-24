@@ -1463,6 +1463,16 @@ export function chatScript(
     });
   }
 
+  // ログの最下部近くにいるかどうか。40pxの余白は指でのスクロールのブレを吸収するため
+  function isLogNearBottom(log) {
+    return log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  }
+
+  // 一番下から離れているときだけ「一番下へ」ボタンを出す
+  function updateScrollToBottomVisibility() {
+    el('scrollToBottom').hidden = isLogNearBottom(el('log'));
+  }
+
   function apply(state) {
     // リロード後にVSCodeがパネルを復元したとき、どのスレッドかを思い出すために保持する
     if (state.threadId) {
@@ -1477,7 +1487,7 @@ export function chatScript(
       .map((i) => i.text);
     applySettings(state.settings, state.planMode);
     const log = el('log');
-    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+    const atBottom = isLogNearBottom(log);
     lastItems = state.items;
     syncItems(state.items);
     // 承認カードは一時的なので作り直してよい（会話本文の選択は壊れない）
@@ -1516,6 +1526,7 @@ export function chatScript(
     // todos/queue/backgroundTerminals等、#logと高さを取り合う兄弟要素の描画が
     // 全部済んでからでないと、#logの実際の最下部（clientHeight）が確定しない
     if (atBottom) log.scrollTop = log.scrollHeight;
+    updateScrollToBottomVisibility();
   }
 
   // いま添えている枚数。本文が空でも送れるかの判定に使う
@@ -1888,6 +1899,13 @@ export function chatScript(
   });
 
   el('loopStop').addEventListener('click', () => vscode.postMessage({ type: 'loop/stop' }));
+
+  el('log').addEventListener('scroll', updateScrollToBottomVisibility);
+  el('scrollToBottom').addEventListener('click', () => {
+    const log = el('log');
+    log.scrollTop = log.scrollHeight;
+    updateScrollToBottomVisibility();
+  });
 
   // 使用量の表記。Codexは消費率、Claude Codeは制限の種類とリセットまでの時間で示す。
   function formatUsage(usage) {
