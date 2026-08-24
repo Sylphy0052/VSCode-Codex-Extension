@@ -1194,6 +1194,51 @@ export function notifyOrchestratorRunFinished(
 }
 
 /**
+ * 終了していたrunが人の操作で再開されたことを知らせる（design.md §16.43、Issue #491）。
+ * `notifyOrchestratorRunFinished`の対になる通知。
+ *
+ * **再開しても制御ツールは戻らない。** `retryTask` / `retryMerge`はタスクを起動する過程で
+ * `ensureMessaging`（Issue #475）を通るためMCPサーバ自体は立て直るが、`startHttpMcpTransport`
+ * は`server.listen(0)`でポートを取り直し、`registerTask`はトークンを新規に発行するため、
+ * **URLが変わる**。オーケストレーターがURLを受け取るのは`setupOrchestratorForStart`が
+ * セッションを開くときの1回だけで、その呼び出し元は`start()`と自動再開の2つしかない
+ * （CodexもClaude Codeも、起動後のプロセスへMCPの接続先を差し替える口を持たない）。
+ * `continueTask`は`prepareTaskLaunch`を通らないのでサーバも立たない。
+ *
+ * それでもこの通知自体は届く。`notifyOrchestrator`はCLIセッションへ直接送っており、
+ * MCPには依存していないため（`notifyOrchestratorRunFinished`が「もうツールは使えません」
+ * と送れているのと同じ経路）。
+ *
+ * これを送らないと、**走っているrunなのにオーケストレーターは終了したと思ったまま**に
+ * なる。何が起きたか分からないまま制御ツールを呼んで接続を拒否される、という順序を
+ * 避ける。
+ */
+export function notifyOrchestratorRunResumed(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  trigger: string,
+): void {
+  const live = self.runs.get(runId);
+  if (live === undefined) {
+    return;
+  }
+  // 次にrunが終了したとき`notifyOrchestratorRunFinished`がもう1度送れるようにする。
+  // この旗が絞っているのは通知だけで（`closeMessagingIfFinalMergeSettled`の
+  // `closeMessaging`/`closeReviewCommentPoll`は旗を見ずに毎回呼ばれる冪等な後始末）、
+  // 戻しても二重に走る後始末は無い。戻さないと「終わった→再開した→（無言）」に
+  // なり、本Issueが直そうとしている非対称と同じ形が残る
+  live.finishedNotified = false;
+  notifyOrchestrator(self, runId, {
+    kind: 'runResumed',
+    body: [
+      `終了していた実行が人の操作で再開されました（${trigger}）。`,
+      'MCPサーバの接続先はこのとき作り直されるため、list_tasks や制御ツールは使えないままです。',
+      '実行の状況はこれまでと同じように通知で届きます。会話も続けられます。',
+    ].join('\n'),
+  });
+}
+
+/**
  * 人が実行全体を停止したことを知らせる（design.md §16.23、Issue #401）。
  *
  * `stop()`は走行中タスクへ`stopLoop()`を送るだけで、確定（`failed`への遷移）は進行中の

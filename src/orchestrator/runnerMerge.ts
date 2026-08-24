@@ -42,6 +42,7 @@ import {
   type LiveTask,
   type PullRequestResult,
 } from './runner';
+import { notifyOrchestratorRunResumed } from './runnerOrchestrator';
 import type { WorkflowRunnerInternals } from './runnerInternals';
 
 /**
@@ -1388,7 +1389,12 @@ export function retryMerge(self: WorkflowRunnerInternals, runId: string, taskId:
   // 一度確定させたら動かさない設計）。`blocked`はrunの終了判定（`getRunOutcome`）を`running`
   // 以外へ倒すため、`retryTask`（手動の再実行）が同じ理由で`finished`を解除しているのと
   // 同様、ここでも再開の起点として明示的に解除する
+  const wasFinished = live.finished;
   live.finished = false;
+  // 終了通知を出した後の再開だけ知らせる（Issue #491。`retryTask`と同じ条件）
+  if (wasFinished) {
+    notifyOrchestratorRunResumed(self, runId, '再マージ');
+  }
   void self.persist(runId);
   self.notify(runId);
   void startMerge(self, runId, taskId, task, cwd, branch, liveTask?.originCommit ?? '');

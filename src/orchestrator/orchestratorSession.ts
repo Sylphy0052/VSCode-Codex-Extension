@@ -127,6 +127,14 @@ export type OrchestratorEventKind =
    */
   | 'finalMergeDecision'
   | 'runFinished'
+  /**
+   * 終了していたrunが人の操作で再開された（design.md §16.43、Issue #491）。
+   * `runFinished`の対。「終わった」と伝えたあとに実行が動き出す経路（`retryTask` /
+   * `continueTask` / `retryMerge`）があるため、伝えないとオーケストレーターは
+   * 走っているrunを終了したものと思ったままになる。**再開しても制御ツールは戻らない**
+   * （MCPのURLが作り直され、起動後のセッションへ差し替える口が無い）ことも本文で伝える。
+   */
+  | 'runResumed'
   // 人が「全体の停止」を押したことを知らせる（Issue #401）。走行中タスクの`stopLoop()`は
   // ターンの終わりを待ってから確定するため、確定前は`taskFailed`しか届かず「タスクが
   // 次々失敗している」ように見え、`retry_task`を呼ぶのが自然な反応になってしまう
