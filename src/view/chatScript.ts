@@ -1480,7 +1480,6 @@ export function chatScript(
       approvals.appendChild(renderApproval(approval, state.items || []));
     }
     renderPrompts(state.prompts);
-    if (atBottom) log.scrollTop = log.scrollHeight;
 
     renderTodos(state.todos);
     renderBackgroundTerminals(state.backgroundTerminals);
@@ -1507,6 +1506,9 @@ export function chatScript(
     renderAttachments(state.attachments);
     applyLoop(state.loop);
     renderStatus(state);
+    // todos/queue/backgroundTerminals等、#logと高さを取り合う兄弟要素の描画が
+    // 全部済んでからでないと、#logの実際の最下部（clientHeight）が確定しない
+    if (atBottom) log.scrollTop = log.scrollHeight;
   }
 
   // いま添えている枚数。本文が空でも送れるかの判定に使う
