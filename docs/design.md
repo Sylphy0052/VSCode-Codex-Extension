@@ -7009,8 +7009,15 @@ codiconのフォントは使えない。`.vscodeignore` が `node_modules/**` �
 
 `ProgressTurn.editedFiles` は重複を落とした一覧のままにし、回数は `fileEditCounts`（パス→回数）を新設して持つ。既存の利用側（件数の集計、サマリの重複除去）の数え方を変えずに「同じファイルを何度も往復した」ことだけを足せる。
 
+#### チェックリストの印は1行目に留める（issue #748）
+
+`.todo` は `align-items: baseline` だった。印を文字からSVGアイコンへ替えた後もこれが残っており、本文が2行以上に折り返すと印が最終行のベースラインへ落ちて、行頭が縦に揃わなくなる。`flex-start` にして印を1行目へ固定し、印の側に `margin-top: 0.2em`（行の高さとアイコンの高さの差の半分）を足して1行目の中央へ合わせる。
+
+3状態は色だけでなく形でも区別してある（完了＝チェック、着手中＝半分塗った丸、未着手＝空の丸）。ハイコントラストで色が落ちても読み分けられる。
+
 #### 確かめ方
 
+- `test/unit/progressStyles.test.ts`: チェックリストの行が `flex-start` で印を1行目に留めること（issue #748）
 - `test/unit/webviewScript.test.ts`: SVGで組み立てていること（`createElementNS`があり`codicon`が無い）、KPIの各idを書き換えていること、`OPEN_TURNS` / `FILES_SHOWN` による打ち切り、スタイルが生の色リテラルを持たないこと、`position: sticky` と不透明な背景
 - `test/unit/progressModel.test.ts`: `fileEditCounts` の集計
 - `docs/manual-test.md` C-52: 実機での見え方（ライト／ダーク、畳み、スクロール、減光設定）
