@@ -694,6 +694,34 @@ describe('controlPanelScript', () => {
   );
 });
 
+describe('workflowScript の全体進捗バー（issue #754）', () => {
+  it('区画の集計は拡張機能側の結果をそのまま当てる', () => {
+    const source = workflowScript();
+    // 陽性対照: 区画を描く関数がある（綴り違いで空振りしていない）
+    expect(source).toContain('function renderProgressBar(progress, segments)');
+    // Webview側で状態を数え直さない（Issue #104の再発防止と同じ方針）
+    expect(source).toContain('msg.progressSegments');
+    expect(source).not.toContain('counts.failed + counts.blocked');
+  });
+
+  it('件数が0の区画は隠す', () => {
+    const source = workflowScript();
+    expect(source).toContain('element.hidden = true;');
+    expect(source).toContain("element.style.width = '0%';");
+  });
+
+  it('完了率の数字は従来どおり出す', () => {
+    const source = workflowScript();
+    expect(source).toContain("el('progressPercent').textContent = progress.percentDone + '%';");
+  });
+
+  it('色を読めなくても内訳が分かるよう読み上げ用の文字を持つ', () => {
+    const source = workflowScript();
+    expect(source).toContain("setAttribute(\n      'aria-label',");
+    expect(source).toContain('SEGMENT_LABEL');
+  });
+});
+
 describe('workflowStyles', () => {
   // Issue #280: 一覧のバッジはグラフのノード枠と同じ配色を使う。どちらか片方だけ
   // 色を足して図と一覧が食い違う事故を機械的に防ぐ

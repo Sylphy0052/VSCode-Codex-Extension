@@ -13,6 +13,7 @@ import type { WorkflowDefinition } from '../orchestrator/workflow';
 import { chatCsp } from './chatCsp';
 import {
   aggregateProgress,
+  progressSegments,
   layoutGraph,
   summarizeIntegration,
   summarizeKanban,
@@ -304,6 +305,9 @@ export class WorkflowViewManager implements vscode.Disposable {
       snapshot: { ...snapshot, tasks: tasksWithRoleLabel },
       layout,
       progress,
+      // 全体進捗バーの積み上げ（issue #754）。集計はここ（純粋関数）で済ませ、
+      // Webview側は受け取った幅を当てるだけにする（Issue #104の再発防止と同じ方針）
+      progressSegments: progressSegments(progress),
       kanban,
       integration,
     });
@@ -644,7 +648,7 @@ ${workflowStyles()}
       <button id="openIntegrationPrBtn" type="button" class="secondary" disabled>統合ブランチのPR/MRを開く</button>
       <button id="cleanupIntegrationBtn" type="button" class="danger">統合ブランチと残ったworktreeをまとめて片付ける</button>
     </div>
-    <div id="progressBar"><div class="fill" id="progressFill"></div></div>
+    <div id="progressBar" role="img"><div class="fill seg-done" id="segDone" hidden></div><div class="fill seg-active" id="segActive" hidden></div><div class="fill seg-attention" id="segAttention" hidden></div></div>
     <div id="progressPercent"></div>
     <div id="banner" hidden></div>
     <div id="orchestrator" hidden>
