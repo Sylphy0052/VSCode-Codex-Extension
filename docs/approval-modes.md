@@ -53,7 +53,7 @@ Codexは2軸なので、Claudeの1軸に対しては組み合わせが対応す�
 - 「全確認」のサンドボックスを`read-only`にしていないのは、承認しても書けない状態になり、Claudeの`manual`（読み取りは無承認、他は都度確認）と挙動がずれるため。読み取り専用にしたい場合はPlan modeを使う。
 - 「Auto」だけが`approvalsReviewer`を`auto_review`にする。承認要求そのものは飛ぶが、答えるのが人ではなくCodex内部の自動レビュー(Guardian)になる。Claudeの`auto`（内部のsafety checksが判定する）と判定主体が揃う。
 - 「全承認」に`--dangerously-bypass-approvals-and-sandbox`を使わないのは、あちらが`thread/start`では表現できず（[SandboxPolicyの実測](#app-serverでの表現sandboxpolicyの実測)）、`codex.bypassApprovalsAndSandbox`という別軸の設定と二重になるため。保護を全て外す状態になる点は同じで、選ぶ前に必ずモーダルで同意を取る。
-- 3段階のどれとも一致しない設定（`acceptEdits` / `plan` / `dontAsk`、または詳細で個別に組み合わせた状態）は「カスタム」と表示する。生の値は「承認の詳細」を開けば従来どおり個別に選べる。
+- 3段階のどれとも一致しない設定（`acceptEdits` / `plan` / `dontAsk`、または詳細で個別に組み合わせた状態）は、3段階の**どれも選ばれていない**状態で表し、その下に「承認の詳細で個別に指定されています」と出す（issue #744でラジオへ変えるまでは「カスタム」という選択肢を足して表していた）。生の値は「承認の詳細」を開けば従来どおり個別に選べる。
 - Shift+Tabの循環は**全確認 ↔ Auto**の2つだけを回る。全承認はセレクタから明示の同意を経てのみ選べる（連打で保護が外れないようにするため。`CLAUDE_APPROVAL_CYCLE`が`bypassPermissions`を外していたのと同じ理由）。
 - ワークフローYAMLのクランプ（design.md §16.16）とセッションプリセット（§14.56）は従来どおり**生の値**を見る。レベルは生の値へ展開されてから既存のクランプに乗るため、`src/util/safetyClamp.ts`はレベルを知らない。
 
