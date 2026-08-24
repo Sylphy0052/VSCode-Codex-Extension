@@ -338,7 +338,7 @@ describe('chatScript', () => {
       expect(() => parses(source)).not.toThrow();
     });
 
-    it('対象6kindがFOLD_KINDSに揃っている', () => {
+    it('対象7kindがFOLD_KINDSに揃っている', () => {
       const match = source.match(/const FOLD_KINDS = new Set\(\[([\s\S]*?)\]\);/);
       expect(match).not.toBeNull();
       const body = match?.[1] ?? '';
@@ -351,6 +351,7 @@ describe('chatScript', () => {
           'subAgentActivity',
           'collabAgentToolCall',
           'autoApprovalReview',
+          'fileRead',
         ]),
       );
     });
