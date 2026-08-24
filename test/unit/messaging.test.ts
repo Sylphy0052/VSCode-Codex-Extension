@@ -1540,6 +1540,17 @@ describe('オーケストレーター専用の制御ツール（design.md §16.2
     return result.tools.map((t) => t.name);
   }
 
+  /** `tools/list`の結果から、ツール名→descriptionの対応を取り出す。 */
+  function toolDescriptions(conn: FakeConnection): Map<string, string> {
+    conn.fireRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    const response = conn.sent[conn.sent.length - 1];
+    if (response === undefined || !('result' in response)) {
+      return new Map();
+    }
+    const result = response.result as { tools: { name: string; description: string }[] };
+    return new Map(result.tools.map((t) => [t.name, t.description]));
+  }
+
   function callTool(
     conn: FakeConnection,
     name: string,
@@ -1651,6 +1662,25 @@ describe('オーケストレーター専用の制御ツール（design.md §16.2
       'removeTask:T3',
       'updateTaskDependencies:T2:T1',
     ]);
+  });
+
+  it('add_task/remove_taskのdescriptionが実装の拒否条件と揃っている（Issue #777）', () => {
+    const { port } = fakeControl();
+    const descriptions = toolDescriptions(wire(port)(ORCHESTRATOR_CONNECTION_ID));
+
+    // `buildOrchestratorTask`（workflow.ts）が拒否するフィールドは、すべてdescriptionにも
+    // 書かれていること（モデルはdescriptionでしか拒否条件を知れない。Issue #766・#777）
+    const addTask = descriptions.get('add_task') ?? '';
+    for (const field of ['autoApprove', 'allow', 'sandbox', 'approvalMode', 'escalate', 'cwd']) {
+      expect(addTask).toContain(field);
+    }
+
+    // `removeTask`（runnerOrchestrator.ts）は剥がした後の定義を検証して拒否しうる
+    // （Issue #764・#777）
+    const removeTask = descriptions.get('remove_task') ?? '';
+    expect(removeTask).toContain('テンプレート変数');
+    expect(removeTask).toContain('拒否');
+    expect(removeTask).toContain('update_task_prompt');
   });
 
   it('add_task/remove_task/update_task_dependenciesはタスクの接続からは見えず、名指しでも拒否される（design.md §16.29）', () => {
