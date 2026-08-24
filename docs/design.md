@@ -6554,6 +6554,7 @@ TODOの同一性は本文（`content`）で見る。`TodoWrite` の項目はid�
 - `test/unit/claudeStreamJson.test.ts` / `test/unit/claudeTranscript.test.ts`: 書き換わるたびに履歴へ積むこと
 - `test/unit/webviewScript.test.ts` / `test/unit/webviewStyles.test.ts`: スクリプトの構文、`innerHTML` を使っていないこと、`hidden` の打ち消し規則
 - `docs/manual-test.md` C-51（Claude Code画面はL-52）: 実機での開き方とライブ更新
+
 ### 16.44 チームモード（Issue #693）
 
 #### 何を足したのか
