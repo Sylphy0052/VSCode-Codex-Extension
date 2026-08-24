@@ -145,6 +145,19 @@ function appendUserEntry(
     };
   }
 
+  // Skillツール実行時にCLIが注入するSKILL.md全文（`isMeta: true` かつ起動元Skillツールの
+  // tool_use idを持つ `sourceToolUseID`、issue #691）。他の `isMeta: true`
+  // （`<local-command-caveat>`・cross-session-message等）と混同しないよう
+  // `sourceToolUseID` の有無で絞り込み、streamJson.tsのapplyUserと同じ判定で
+  // fold対象（`skillContext`）として積む。非表示にはしない
+  if (entry['isMeta'] === true && str(entry['sourceToolUseID']) !== '') {
+    const skillText = cleanText(messageText(entry));
+    if (skillText !== '') {
+      items.push(item(entry, 'skillContext', { text: skillText }));
+    }
+    return;
+  }
+
   if (!isHumanMessage(entry)) {
     return;
   }

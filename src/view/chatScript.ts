@@ -116,6 +116,9 @@ export function chatScript(
     // Claude CodeのAskUserQuestion（issue #685）。承認カード解決後、会話ログに
     // 質問と回答を1項目として残すための種類
     askUserQuestion: '質問',
+    // Skillツール実行時にCLIが注入するSKILL.md全文（issue #691）。通常のuserMessageとは
+    // 分け、他のツール出力と同じ既定折りたたみにする
+    skillContext: 'Skill',
   };
 
   /** ホスト側から渡されたレビューボタンの動作。 */
@@ -169,6 +172,7 @@ export function chatScript(
     'collabAgentToolCall',
     'autoApprovalReview',
     'fileRead',
+    'skillContext',
   ]);
 
   /** Web検索結果を畳まずに出す件数（issue #18）。超えた分は開くまで隠す。 */
@@ -202,6 +206,7 @@ export function chatScript(
     subAgentActivity: 'tool',
     collabAgentToolCall: 'tool',
     autoApprovalReview: 'tool',
+    skillContext: 'tool',
   };
 
   // 全体を作り直すと選択中のテキストが消えてコピーできないため、要素を使い回す
