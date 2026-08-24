@@ -9,6 +9,7 @@ import {
   isUnsafeLevel,
 } from '../../src/provider/approvalLevel';
 import { chatCsp } from '../../src/view/chatCsp';
+import { SECTION_ICONS } from '../../src/view/controlPanelIcons';
 import { ControlPanelViewProvider } from '../../src/view/controlPanelView';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 
@@ -274,17 +275,57 @@ describe('ControlPanelViewProvider（issue #358、パネル破棄時の参照ク
   });
 });
 
-describe('承認レベルを常時表示のラジオにする（issue #744）', () => {
-  const renderedHtml = async (): Promise<string> => {
-    const { settings } = fakeSettingsProvider();
-    const { logger } = fakeLogger();
-    const provider = new ControlPanelViewProvider(settings, logger);
-    const { view } = fakeWebviewView();
-    provider.resolveWebviewView(view as never);
-    await flushAsync();
-    return (view.webview as { html: string }).html;
-  };
+/** `ControlPanelViewProvider` が実際に出すHTML。 */
+const renderedHtml = async (): Promise<string> => {
+  const { settings } = fakeSettingsProvider();
+  const { logger } = fakeLogger();
+  const provider = new ControlPanelViewProvider(settings, logger);
+  const { view } = fakeWebviewView();
+  provider.resolveWebviewView(view as never);
+  await flushAsync();
+  return (view.webview as { html: string }).html;
+};
 
+describe('セクション見出しのアイコン（issue #739）', () => {
+  it('すべてのセクション見出しにアイコンが入っている', async () => {
+    const html = await renderedHtml();
+    const summaries = html.match(/<summary class="sectionTitle">[\s\S]*?<\/summary>/g) ?? [];
+    // 陽性対照: 見出しが1つも拾えないとこの検査は何も確かめていない
+    expect(summaries.length).toBeGreaterThan(0);
+    for (const summary of summaries) {
+      expect(summary.includes('<span class="sectionIcon">'), `アイコンが無い: ${summary}`).toBe(
+        true,
+      );
+    }
+  });
+
+  it('アイコンは見出しの文字より前に置く', async () => {
+    const html = await renderedHtml();
+    // 後ろに付くと、見出しを縦に走査するときの手掛かりにならない
+    expect(html).not.toMatch(/<summary class="sectionTitle">[^<]/);
+  });
+
+  it('codiconのwebfontや外部の画像を読み込まない', async () => {
+    const html = await renderedHtml();
+    // webviewのCSPは default-src 'none' で font-src も img-src も開けていない。
+    // 読み込む書き方を混ぜると、アイコンが黙って出なくなる
+    expect(html).not.toContain('codicon');
+    expect(html).not.toContain('@font-face');
+    expect(html).not.toMatch(/<img\b/);
+  });
+
+  it('アイコンの色をテーマに従わせる（currentColorのみを使う）', () => {
+    for (const [name, svg] of Object.entries(SECTION_ICONS)) {
+      expect(svg.includes('currentColor'), `${name} が currentColor を使っていない`).toBe(true);
+      // 生の色値を書くと、テーマによっては背景と同化する
+      expect(svg, `${name} に色値が直書きされている`).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+      // 見出しの文字が同じ情報を持つので、読み上げでは飛ばす
+      expect(svg.includes('aria-hidden="true"'), `${name} が aria-hidden でない`).toBe(true);
+    }
+  });
+});
+
+describe('承認レベルを常時表示のラジオにする（issue #744）', () => {
   /** name属性で束ねられたラジオのvalueを、出てくる順に取り出す。 */
   const radioValues = (html: string, name: string): string[] => {
     const values: string[] = [];

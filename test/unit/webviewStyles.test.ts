@@ -261,6 +261,20 @@ describe('controlPanelStyles', () => {
     expect(css).toContain('.sectionLoading');
   });
 
+  it('セクション見出しのアイコンが三角マーカーを潰さない（issue #739）', () => {
+    const css = stripComments(controlPanelStyles());
+    const icon = css.match(/\.sectionIcon \{([^}]*)\}/);
+    expect(icon, '.sectionIcon の規則が見つからない').not.toBeNull();
+    // summary の display を変えると ::marker（折りたたみの三角）が消える。
+    // アイコン側をインラインで包むことで、summary の display を既定のまま保つ
+    const summary = css.match(/\.section summary\.sectionTitle \{([^}]*)\}/);
+    expect(summary, 'summary.sectionTitle の規則が見つからない').not.toBeNull();
+    expect(summary?.[1]).not.toMatch(/display:/);
+    expect(summary?.[1]).not.toMatch(/list-style/);
+    // 色はSVG側の currentColor に任せる。ここで色を指定すると見出しの文字と食い違う
+    expect(icon?.[1]).not.toMatch(/color:/);
+  });
+
   it('承認レベルの選択肢に選択中・危険・ホバーの見た目がある（issue #744）', () => {
     const css = stripComments(controlPanelStyles());
     // 選択中は枠と背景で示す。:has が効かない環境でもネイティブのラジオの点が残る
