@@ -133,6 +133,11 @@
           "group": "navigation@102"
         },
         {
+          "command": "codex.handoffToNewSession",
+          "when": "activeWebviewPanelId == codex.chat",
+          "group": "navigation@103"
+        },
+        {
           "command": "claude.newChat",
           "when": "activeWebviewPanelId == claude.chat",
           "group": "navigation@101"
@@ -141,6 +146,11 @@
           "command": "claude.clearChat",
           "when": "activeWebviewPanelId == claude.chat",
           "group": "navigation@102"
+        },
+        {
+          "command": "claude.handoffToNewSession",
+          "when": "activeWebviewPanelId == claude.chat",
+          "group": "navigation@103"
         }
       ],
       "editor/context": [
@@ -343,6 +353,12 @@
         "icon": "$(add)"
       },
       {
+        "command": "codex.handoffToNewSession",
+        "title": "新セッションへ引き継ぐ（Codex）",
+        "category": "Agent",
+        "icon": "$(arrow-right)"
+      },
+      {
         "command": "agent.openPresetChat",
         "title": "プリセットから新しい会話を開く…",
         "category": "Agent",
@@ -414,6 +430,12 @@
         "title": "新しい会話（Claude Code）",
         "category": "Agent",
         "icon": "$(sparkle)"
+      },
+      {
+        "command": "claude.handoffToNewSession",
+        "title": "新セッションへ引き継ぐ（Claude Code）",
+        "category": "Agent",
+        "icon": "$(arrow-right)"
       },
       {
         "command": "claude.openChat",
