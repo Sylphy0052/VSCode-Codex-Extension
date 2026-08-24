@@ -146,6 +146,7 @@ export function workflowScript(): string {
   function renderProgressBar(progress, segments) {
     const list = segments || [];
     const shown = {};
+    let isFirst = true;
     for (const segment of list) {
       const id = SEGMENT_ELEMENT[segment.kind];
       if (id === undefined) {
@@ -154,6 +155,9 @@ export function workflowScript(): string {
       const element = el(id);
       element.hidden = false;
       element.style.width = segment.percent + '%';
+      // 区切り線は2つ目以降だけ。先頭に付けるとバーの左端に1本余分に出る
+      element.className = 'fill seg-' + segment.kind + (isFirst ? '' : ' divided');
+      isFirst = false;
       shown[segment.kind] = segment.count;
     }
     for (const kind of ['done', 'active', 'attention']) {

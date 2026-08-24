@@ -710,6 +710,14 @@ describe('workflowScript の全体進捗バー（issue #754）', () => {
     expect(source).toContain("element.style.width = '0%';");
   });
 
+  it('区切り線は2つ目以降の区画にだけ付ける', () => {
+    const source = workflowScript();
+    // 隣接セレクタだと、件数0で隠した区画も兄弟として残り先頭に線が付く
+    expect(source).toContain("(isFirst ? '' : ' divided')");
+    expect(workflowStyles()).toContain('#progressBar .fill.divided');
+    expect(workflowStyles()).not.toContain('#progressBar .fill + .fill');
+  });
+
   it('完了率の数字は従来どおり出す', () => {
     const source = workflowScript();
     expect(source).toContain("el('progressPercent').textContent = progress.percentDone + '%';");

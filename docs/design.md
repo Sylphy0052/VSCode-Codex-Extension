@@ -4529,7 +4529,7 @@ worktreeを作れないため、`isolation` の値を問わず**git worktree隔�
 - 区画の分け方はカンバンの3バケット（`summarizeKanban`）と揃える。進行中＝`running` / `waitingApproval` / `waitingReply` / `merging`、要対応＝`failed` / `blocked` / `skipped`。同じ状態が画面の2箇所で別の枠に入っていると、どちらが正しいのか読み手には分からない
 - **幅は四捨五入せず小数のまま持つ**。3等分のような比率で丸めると合計が100%を超え、最後の区画がはみ出す
 - **件数が0の区画は返さない**。幅0のまま残すと区切り線だけが積み上がる
-- **区切りは色ではなく線**（`border-left: 1px solid var(--vscode-editor-background)`）。色を落としても区画の境目が分かる。加えて `#progressBar` の `aria-label` に内訳を文字でも入れる
+- **区切りは色ではなく線**（`border-left: 1px solid var(--vscode-editor-background)`）。色を落としても区画の境目が分かる。加えて `#progressBar` の `aria-label` に内訳を文字でも入れる。線を付ける区画はスクリプト側が `divided` クラスで決める——CSSの隣接セレクタ（`.fill + .fill`）だと、件数0で隠した区画も兄弟としては残るため、先頭の区画にまで線が付いてバーの左端に1本余分に出る
 - **完了色は `charts.blue` から `charts.green` へ変わる**（既存の見え方の変更）。進行中に青が残るため、青＝動いている・緑＝終わった、の対応になる
 - トラックの薄さは `opacity` ではなく `color-mix` で出す。`opacity` は要素の集合に掛かるため、子の `.fill` 側で `opacity: 1` と書いても打ち消せず、**塗りまで35%に薄まっていた**（今回あわせて直した）
 - 集計は拡張機能側の純粋関数で済ませ、Webviewは受け取った幅を当てるだけにする（Issue #104の再発防止と同じ方針）

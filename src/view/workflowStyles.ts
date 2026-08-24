@@ -83,8 +83,11 @@ export function workflowStyles(): string {
     height: 100%;
     transition: width 0.2s ease;
   }
-  /* 色を落としても区画の境目が分かるよう、区切りは色ではなく線で出す */
-  #progressBar .fill + .fill { border-left: 1px solid var(--vscode-editor-background); }
+  /* 色を落としても区画の境目が分かるよう、区切りは色ではなく線で出す。
+     隣接セレクタ（.fill + .fill）は使わない——件数0で隠した区画も兄弟としては残るため、
+     先頭の区画にまで線が付いてバーの左端に1本余分に出る。どの区画へ付けるかは
+     workflowScript.ts の renderProgressBar が決める */
+  #progressBar .fill.divided { border-left: 1px solid var(--vscode-editor-background); }
   #progressBar .seg-done { background-color: var(--vscode-charts-green); }
   #progressBar .seg-active { background-color: var(--vscode-charts-blue); }
   #progressBar .seg-attention {
