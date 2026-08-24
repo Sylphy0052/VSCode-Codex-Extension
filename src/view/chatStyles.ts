@@ -137,7 +137,8 @@ export function chatStyles(): string {
     gap: 6px;
     margin-bottom: 3px;
   }
-  .prompt input[type='text'], .prompt input[type='password'], .prompt input[type='number'] {
+  .prompt input[type='text'], .prompt input[type='password'], .prompt input[type='number'],
+  .approval input[type='text'] {
     padding: 3px 6px;
     color: var(--vscode-input-foreground);
     background-color: var(--vscode-input-background);
@@ -146,7 +147,7 @@ export function chatStyles(): string {
     font-family: inherit;
     font-size: inherit;
   }
-  .prompt .other { flex: 1; }
+  .prompt .other, .approval .other { flex: 1; }
   .approval pre {
     margin: 0 0 8px;
     white-space: pre-wrap;
