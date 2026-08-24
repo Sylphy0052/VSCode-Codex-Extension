@@ -85,8 +85,8 @@ describe('consumeFrames', () => {
 describe('FrameBuffer', () => {
   it('チャンクをまたいで完成した行だけを返す', () => {
     const frames = new FrameBuffer();
-    expect(frames.push('{"id":1,').messages).toEqual([]);
-    const result = frames.push('"result":{}}\n{"id":2');
+    expect(frames.push(Buffer.from('{"id":1,')).messages).toEqual([]);
+    const result = frames.push(Buffer.from('"result":{}}\n{"id":2'));
     expect(result.messages).toHaveLength(1);
     expect(result.messages[0]?.id).toBe(1);
     expect(result.rest).toBe('{"id":2');
@@ -94,38 +94,61 @@ describe('FrameBuffer', () => {
 
   it('1チャンクに複数行が入っていてもすべて取り出す', () => {
     const frames = new FrameBuffer();
-    const { messages } = frames.push('{"id":1}\n{"id":2}\n');
+    const { messages } = frames.push(Buffer.from('{"id":1}\n{"id":2}\n'));
     expect(messages.map((m) => m.id)).toEqual([1, 2]);
   });
 
   it('改行が来ないまま上限を超えるとoverflowが立つ（issue #795）', () => {
     const frames = new FrameBuffer(1024);
     // 行が完成しないチャンクでも、上限の判定は毎回行う
-    expect(frames.push('x'.repeat(1024)).overflow).toBe(false);
-    expect(frames.push('x').overflow).toBe(true);
+    expect(frames.push(Buffer.from('x'.repeat(1024))).overflow).toBe(false);
+    expect(frames.push(Buffer.from('x')).overflow).toBe(true);
   });
 
   it('上限の判定はバイト数で行う（マルチバイト文字）', () => {
     const frames = new FrameBuffer(11);
-    expect(frames.push('あああ').overflow).toBe(false);
-    expect(frames.push('あ').overflow).toBe(true);
+    expect(frames.push(Buffer.from('あああ')).overflow).toBe(false);
+    expect(frames.push(Buffer.from('あ')).overflow).toBe(true);
   });
 
   it('clearで溜めている未完成分と積算バイト数を捨てる', () => {
     const frames = new FrameBuffer(1024);
-    expect(frames.push('x'.repeat(1025)).overflow).toBe(true);
+    expect(frames.push(Buffer.from('x'.repeat(1025))).overflow).toBe(true);
     frames.clear();
-    const after = frames.push('{"id":1}\n');
+    const after = frames.push(Buffer.from('{"id":1}\n'));
     expect(after.overflow).toBe(false);
     expect(after.messages).toHaveLength(1);
     expect(after.rest).toBe('');
   });
 
+  it('マルチバイト文字がチャンクの境界で分断されても壊れない（issue #795）', () => {
+    // `chunk.toString('utf8')`をチャンクごとに呼ぶと置換文字（U+FFFD）へ化ける分割位置
+    const line = Buffer.from('{"id":1,"result":{"t":"あいう"}}\n');
+    const frames = new FrameBuffer();
+    for (let i = 1; i < line.length; i += 1) {
+      frames.clear();
+      expect(frames.push(line.subarray(0, i)).messages).toEqual([]);
+      const { messages } = frames.push(line.subarray(i));
+      expect(messages).toHaveLength(1);
+      expect(messages[0]?.result).toEqual({ t: 'あいう' });
+    }
+  });
+
+  it('clearすると持ち越し中の不完全なバイト列も捨てる（前の世代の残骸を継がない）', () => {
+    const frames = new FrameBuffer();
+    const head = Buffer.from('あ').subarray(0, 2);
+    expect(frames.push(head).messages).toEqual([]);
+    frames.clear();
+    const { messages, rest } = frames.push(Buffer.from('{"id":1}\n'));
+    expect(messages).toHaveLength(1);
+    expect(rest).toBe('');
+  });
+
   it('行の完成後は積算バイト数が残りの分まで戻る', () => {
     const frames = new FrameBuffer(16);
-    expect(frames.push('{"id":1}\n').overflow).toBe(false);
+    expect(frames.push(Buffer.from('{"id":1}\n')).overflow).toBe(false);
     // 直前のチャンクを含めた総量（9+9=18バイト）ではなく、restの分だけで判定する
-    expect(frames.push('{"id":2}\n').overflow).toBe(false);
+    expect(frames.push(Buffer.from('{"id":2}\n')).overflow).toBe(false);
   });
 });
 

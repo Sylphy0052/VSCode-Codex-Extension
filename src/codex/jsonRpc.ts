@@ -1,3 +1,4 @@
+import { StringDecoder } from 'node:string_decoder';
 import { MAX_LINE_BUFFER_BYTES } from '../process/childProcess';
 
 export interface JsonRpcMessage {
@@ -87,19 +88,29 @@ function exceedsByteLimit(rest: string, maxBytes: number): boolean {
  *
  * 上限の判定は省かない。改行が来ないまま溜まり続ける出力こそが防ぎたいもの
  * （issue #402、1点目）なので、バイト数を加算で持ち、チャンクごとに必ず見る。
+ *
+ * 文字列化には`StringDecoder`を使う。`chunk.toString('utf8')`をチャンクごとに呼ぶと、
+ * マルチバイト文字がチャンクの境界で分断されたときに置換文字（U+FFFD）へ化けてJSONが
+ * 壊れる（実測: `Buffer.from('{"t":"あいう"}')`は14通りの分割位置のうち6通りで壊れる）。
+ * 1行が数十MBになる経路ではチャンクの境界が数百回以上できるため、日本語を含む会話では
+ * ほぼ確実に踏む。`StringDecoder`は不完全なバイト列を次のチャンクまで持ち越す。
  */
 export class FrameBuffer {
   private buffer = '';
   private bytes = 0;
+  private decoder = new StringDecoder('utf8');
 
   constructor(private readonly maxBytes: number = MAX_LINE_BUFFER_BYTES) {}
 
   /** チャンクを受け取り、そこまでで完成した行を返す。 */
-  push(chunk: string): FrameResult {
-    this.buffer += chunk;
-    this.bytes += Buffer.byteLength(chunk, 'utf8');
+  push(chunk: Buffer): FrameResult {
+    const text = this.decoder.write(chunk);
+    this.buffer += text;
+    // 持ち越されたバイトは`decoder`の中にあり`buffer`には入っていないため、chunkの長さ
+    // ではなく実際に文字列化できた分を数える
+    this.bytes += Buffer.byteLength(text, 'utf8');
 
-    if (!chunk.includes('\n')) {
+    if (!text.includes('\n')) {
       // 行は完成していない。走査せず、上限の判定だけ行う
       return { messages: [], rest: this.buffer, overflow: this.bytes > this.maxBytes };
     }
@@ -114,6 +125,9 @@ export class FrameBuffer {
   clear(): void {
     this.buffer = '';
     this.bytes = 0;
+    // `decoder`が持ち越している不完全なバイト列も捨てる。残したままだと、次に繋いだ
+    // プロセスの最初のチャンクの先頭へ前の世代の残骸がくっつく
+    this.decoder = new StringDecoder('utf8');
   }
 }
 

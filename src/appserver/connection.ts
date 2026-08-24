@@ -138,7 +138,7 @@ export class AppServerConnection {
       if (this.proc !== proc) {
         return;
       }
-      this.receive(chunk.toString('utf8'));
+      this.receive(chunk);
     });
     proc.stderr.on('data', (chunk: Buffer) => {
       if (this.proc !== proc) {
@@ -199,7 +199,7 @@ export class AppServerConnection {
     this.log.info('app-serverに接続しました');
   }
 
-  private receive(chunk: string): void {
+  private receive(chunk: Buffer): void {
     const { messages, overflow } = this.frames.push(chunk);
 
     try {

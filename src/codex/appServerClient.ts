@@ -774,7 +774,7 @@ export class AppServerClient {
       );
 
       proc.stdout.on('data', (chunk: Buffer) => {
-        const { messages, overflow } = frames.push(chunk.toString('utf8'));
+        const { messages, overflow } = frames.push(chunk);
         try {
           // 完成した行（messages）は、上限超過の判定より先に処理する（レビュー指摘・MEDIUM）。
           // overflowを先に見て早期returnすると、同じチャンクの中に「正常に完成した応答」と
