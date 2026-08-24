@@ -89,19 +89,29 @@ export function readAskUserQuestions(raw: unknown): AskUserQuestionItem[] | unde
   return items;
 }
 
+/**
+ * 質問一覧の短い要約（「先頭の見出し ・他N問」）。承認カードの`detail`と会話ログの
+ * 一覧行（`transcript.ts`の`summarizeAskUserQuestion`）が同じ文言になるよう共有する。
+ */
+export function summarizeAskUserQuestions(questions: AskUserQuestionItem[]): string | undefined {
+  const first = questions[0];
+  if (first === undefined) {
+    return undefined;
+  }
+  const firstLabel = first.header !== '' ? first.header : first.question;
+  return questions.length === 1 ? firstLabel : `${firstLabel} ・他${questions.length - 1}問`;
+}
+
 /** `can_use_tool`要求を承認カード（選択UI）にする。 */
 export function describeAskUserQuestion(
   requestId: string,
   input: Record<string, unknown>,
 ): PendingApproval | undefined {
   const questions = readAskUserQuestions(input['questions']);
-  const first = questions?.[0];
-  if (questions === undefined || first === undefined) {
+  const detail = questions === undefined ? undefined : summarizeAskUserQuestions(questions);
+  if (questions === undefined || detail === undefined) {
     return undefined;
   }
-  const firstLabel = first.header !== '' ? first.header : first.question;
-  const detail =
-    questions.length === 1 ? firstLabel : `${firstLabel} ・他${questions.length - 1}問`;
   return {
     requestId,
     kind: 'askUserQuestion',
@@ -143,14 +153,21 @@ export function buildAskUserQuestionDenyResponse(): Record<string, unknown> {
 
 /**
  * webviewから届いた`answerAskUserQuestion`メッセージの`answers`が期待する形
- * （質問文→選ばれたラベルの配列）かを確認する。`isApprovalDecision`と同じく、
- * 拡張機能側で受け取ったものは信用せずホワイトリスト的に検証する。
+ * （質問文→選ばれたラベルの配列、各質問は1つ以上選択済み）かを確認する。
+ * `isApprovalDecision`と同じく、拡張機能側で受け取ったものは信用せずホワイトリスト的に
+ * 検証する。空配列（未回答）を許すと、webview側の未回答チェックを経由しない経路
+ * （不整合なpostMessage）で選ばれていない質問が空文字の回答としてそのままCLIへ
+ * `allow`で送られてしまう。
  */
 export function isAskUserQuestionSelections(value: unknown): value is AskUserQuestionSelections {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return false;
   }
-  return Object.values(value).every(
-    (v) => Array.isArray(v) && v.every((label) => typeof label === 'string'),
+  const entries = Object.values(value);
+  if (entries.length === 0) {
+    return false;
+  }
+  return entries.every(
+    (v) => Array.isArray(v) && v.length > 0 && v.every((label) => typeof label === 'string'),
   );
 }

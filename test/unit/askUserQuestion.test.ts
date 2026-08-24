@@ -158,4 +158,12 @@ describe('isAskUserQuestionSelections（issue #685、webviewからの入力検�
     expect(isAskUserQuestionSelections(null)).toBe(false);
     expect(isAskUserQuestionSelections(undefined)).toBe(false);
   });
+
+  it('空配列（未回答）は偽', () => {
+    expect(isAskUserQuestionSelections({ どちらにしますか: [] })).toBe(false);
+  });
+
+  it('空オブジェクトは偽', () => {
+    expect(isAskUserQuestionSelections({})).toBe(false);
+  });
 });

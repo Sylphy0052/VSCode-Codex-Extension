@@ -1033,7 +1033,7 @@ export function chatScript(
     const readers = [];
     const questions = approval.questions || [];
     questions.forEach((question, index) => {
-      wrap.appendChild(buildAskUserQuestionField(question, index, readers));
+      wrap.appendChild(buildAskUserQuestionField(approval.requestId, question, index, readers));
     });
 
     const actions = document.createElement('div');
@@ -1067,7 +1067,7 @@ export function chatScript(
   }
 
   /** 1問分の見出し・本文・選択肢。 */
-  function buildAskUserQuestionField(question, index, readers) {
+  function buildAskUserQuestionField(requestId, question, index, readers) {
     const box = document.createElement('div');
     box.className = 'field';
 
@@ -1083,7 +1083,10 @@ export function chatScript(
       box.appendChild(desc);
     }
 
-    const name = 'askUserQuestion-' + index;
+    // requestIdでscopeする。複数のAskUserQuestion承認カードが同時に並ぶとき、
+    // name（radio/checkboxのグループ化キー）が衝突するとブラウザが別カード同士を
+    // 同一グループとして扱い、片方の選択がもう片方を解除してしまう
+    const name = 'askUserQuestion-' + String(requestId) + '-' + index;
     const inputs = [];
     for (const option of question.options || []) {
       const row = document.createElement('label');

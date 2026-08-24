@@ -1008,12 +1008,18 @@ export class ClaudeStreamSession {
     // AskUserQuestion（issue #685）は「選んだ回答」を運べない汎用の4値decisionでは
     // 応答を組めない。ここへ`accept`が誤って渡ってきても（想定外の呼び出し元、または
     // ワークフロー実行系からの汎用accept）、答えの無い`allow`をCLIへ送らないよう
-    // 常に拒否で返す。実際に選択肢を送るのは`answerAskUserQuestion()`だけ
+    // 常に拒否で返す。実際に選択肢を送るのは`answerAskUserQuestion()`だけ。
+    // `decline`はwebview側の拒否ボタンが意図的に通る正規の経路なので、そこだけ
+    // 誤動作を疑わせるログにしない
     if (waiting.approval.kind === 'askUserQuestion') {
       this.write(buildControlResponse(key, buildAskUserQuestionDenyResponse()));
-      this.log.info(
-        `承認: askUserQuestion → 拒否（${decision}経由、選択肢の送信はanswerAskUserQuestionのみ）`,
-      );
+      if (decision === 'decline') {
+        this.log.info('承認: askUserQuestion → 拒否');
+      } else {
+        this.log.info(
+          `承認: askUserQuestion → 拒否（${decision}経由、選択肢の送信はanswerAskUserQuestionのみ）`,
+        );
+      }
       this.update(removeApproval(this.state, requestId));
       return;
     }

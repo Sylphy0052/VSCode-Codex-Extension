@@ -9,7 +9,7 @@ import {
   type WebSearchResult,
 } from '../appserver/chatState';
 import { isSessionId } from '../codex/argvBuilder';
-import { readAskUserQuestions } from './askUserQuestion';
+import { readAskUserQuestions, summarizeAskUserQuestions } from './askUserQuestion';
 import type { TranscriptMeta } from './types';
 
 /**
@@ -276,12 +276,8 @@ export function describeTool(
 /** 会話ログ（`kind: 'askUserQuestion'`）の一覧行に出す短い要約。 */
 function summarizeAskUserQuestion(input: Record<string, unknown>): string {
   const questions = readAskUserQuestions(input['questions']);
-  const first = questions?.[0];
-  if (questions === undefined || first === undefined) {
-    return 'AskUserQuestion';
-  }
-  const firstLabel = first.header !== '' ? first.header : first.question;
-  return questions.length === 1 ? firstLabel : `${firstLabel} ・他${questions.length - 1}問`;
+  const summary = questions === undefined ? undefined : summarizeAskUserQuestions(questions);
+  return summary ?? 'AskUserQuestion';
 }
 
 function fileChange(
