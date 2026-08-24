@@ -18,6 +18,7 @@ import {
 import { isProviderId } from '../provider/id';
 import type { ImportHistoryItemTypeResultView, ImportHistorySnapshot } from '../provider/import';
 import { chatCsp } from './chatCsp';
+import { buildPanelAlert, type PanelAlert } from './controlPanelAlerts';
 import { controlPanelScript } from './controlPanelScript';
 import { controlPanelStyles } from './controlPanelStyles';
 import { formatAbsoluteTime } from './relativeTime';
@@ -63,6 +64,11 @@ interface PanelState extends Omit<SettingsSnapshot, 'importHistory'> {
    * 化けないようにするため）。
    */
   loadingSections: SectionId[];
+  /**
+   * 先頭に出す異常のまとめ（issue #741）。無ければ`undefined`＝帯を出さない。
+   * 判定は`controlPanelAlerts.ts`。
+   */
+  alert: PanelAlert | undefined;
 }
 
 /**
@@ -129,7 +135,26 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     await this.settings.load();
+    await this.loadHooksForAlert();
     await this.post();
+  }
+
+  /**
+   * hooksは折りたたまれていても読む（issue #741）。
+   *
+   * 他のセクションは開いたときにだけ読む（issue #225。パネルを開いた直後にCLIを
+   * いくつも起動しないため）が、hooksだけは例外にする。hooksは任意のコマンドを実行する
+   * 仕組みで、未信頼のものがあることに気付けないまま実行されるのが最悪の結果になる。
+   * 起動コスト1回と引き換えにしてよい。
+   *
+   * `ensureSectionLoaded`は既に取得済みなら何もしないため、2回目以降の`refresh`で
+   * 余計な起動は増えない（`load()`が展開済みセクションとして読み直す対象にはなる）。
+   */
+  private async loadHooksForAlert(): Promise<void> {
+    await Promise.all([
+      this.settings.ensureSectionLoaded('codexHooks'),
+      this.settings.ensureSectionLoaded('claudeHooks'),
+    ]);
   }
 
   private async post(): Promise<void> {
@@ -138,12 +163,22 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
 
   private buildState(): PanelState {
     const snapshot = this.settings.snapshot();
+    const claude = this.settings.claudeSnapshot();
     return {
       ...snapshot,
       usage: buildUsageView(this.usage),
-      claude: this.settings.claudeSnapshot(),
+      claude,
       importHistory: buildImportHistoryView(snapshot.importHistory),
       loadingSections: this.settings.loadingSections,
+      // 折りたたまれたセクションの中にしか出ていない異常を最上部へ引き上げる（issue #741）。
+      // 判定はホスト側で行い、webviewへは結果だけを渡す
+      alert: buildPanelAlert({
+        codexHooks: snapshot.hooks,
+        claudeHooks: claude.hooks,
+        codexMcp: snapshot.mcpServers,
+        claudeMcp: claude.mcpServers,
+        loadedSections: this.settings.loadedSectionIds,
+      }),
     };
   }
 
@@ -511,6 +546,10 @@ ${controlPanelStyles()}
 </style>
 </head>
 <body>
+  <!-- 折りたたまれたセクションの中にしか出ていない異常のまとめ（issue #741）。
+       タブより上に置き、どちらのプロバイダを見ていても目に入るようにする -->
+  <button type="button" id="alertBanner" hidden></button>
+
   <div class="tabs" role="tablist">
     <button id="tabCodex" type="button" role="tab" aria-selected="true">Codex</button>
     <button id="tabClaude" type="button" role="tab" aria-selected="false">Claude Code</button>

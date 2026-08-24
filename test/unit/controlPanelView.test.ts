@@ -52,14 +52,22 @@ function fakeWebviewView(): {
     // このヘルパーの返すPromiseを待つ
     simulateMessage: async (message: unknown) => {
       handler?.(message);
-      await Promise.resolve();
-      await Promise.resolve();
+      await flushAsync();
     },
     simulateDispose: () => {
       disposeListener?.();
     },
   };
 }
+
+/**
+ * 非同期の解決を待つ（issue #741）。
+ *
+ * もとは`await Promise.resolve()`を2回並べていたが、これは実装側のawaitの段数と
+ * ちょうど一致していることに依存する。hooksの先読み（issue #741）で段数が増えたときに
+ * 4本まとめて落ちたため、段数に依存しないタイマー待ちへ替える。
+ */
+const flushAsync = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
 function fakeSettingsProvider(): {
   settings: SettingsProvider;
@@ -78,6 +86,8 @@ function fakeSettingsProvider(): {
     get loadingSections() {
       return loadingSections;
     },
+    /** 異常のまとめ（issue #741）が未読込と読み込み失敗を区別するのに使う。 */
+    loadedSectionIds: new Set<string>(),
     snapshot: () => ({
       models: [],
       efforts: [],
@@ -152,12 +162,13 @@ describe('ControlPanelViewProviderのセクション遅延取得（issue #225）
     const { view, sent } = fakeWebviewView();
 
     provider.resolveWebviewView(view as never);
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushAsync();
 
     expect(stateMessagesOf(sent).length).toBeGreaterThan(0);
-    // 展開されたセクションが無いので、この時点ではどのセクションも取得しに行かない
-    expect(ensureSectionLoadedCalls).toEqual([]);
+    // hooksだけは折りたたまれていても読む（issue #741。未信頼のhookに気付けないまま
+    // 実行されるのを避けるため、起動コスト1回と引き換えにする）。他のセクションは
+    // 展開されるまで取得しに行かない
+    expect(ensureSectionLoadedCalls.sort()).toEqual(['claudeHooks', 'codexHooks']);
   });
 
   it('toggleSectionを受け取ると、そのセクションだけensureSectionLoadedを呼び、状態を送り返す', async () => {
@@ -166,13 +177,13 @@ describe('ControlPanelViewProviderのセクション遅延取得（issue #225）
     const provider = new ControlPanelViewProvider(settings, logger);
     const { view, sent, simulateMessage } = fakeWebviewView();
     provider.resolveWebviewView(view as never);
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushAsync();
     const before = stateMessagesOf(sent).length;
 
     await simulateMessage({ type: 'toggleSection', id: 'codexMcp' });
 
-    expect(ensureSectionLoadedCalls).toEqual(['codexMcp']);
+    // hooksの先読み（issue #741）とは別に、展開されたセクションだけが読まれる
+    expect(ensureSectionLoadedCalls.filter((id) => !id.endsWith('Hooks'))).toEqual(['codexMcp']);
     expect(stateMessagesOf(sent).length).toBeGreaterThan(before);
   });
 
@@ -182,12 +193,12 @@ describe('ControlPanelViewProviderのセクション遅延取得（issue #225）
     const provider = new ControlPanelViewProvider(settings, logger);
     const { view, simulateMessage } = fakeWebviewView();
     provider.resolveWebviewView(view as never);
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushAsync();
 
     await simulateMessage({ type: 'toggleSection', id: 'notASection' });
 
-    expect(ensureSectionLoadedCalls).toEqual([]);
+    // hooksの先読み（issue #741）以外は何も読まれない
+    expect(ensureSectionLoadedCalls.filter((id) => !id.endsWith('Hooks'))).toEqual([]);
     expect(warnings.length).toBeGreaterThan(0);
   });
 
@@ -205,8 +216,7 @@ describe('ControlPanelViewProviderのセクション遅延取得（issue #225）
       // セットしておく
       setLoadingSections(['codexMcp']);
       provider.resolveWebviewView(view as never);
-      await Promise.resolve();
-      await Promise.resolve();
+      await flushAsync();
 
       const states = stateMessagesOf(sent) as { state: { loadingSections: string[] } }[];
       expect(states.length).toBeGreaterThan(0);
@@ -223,8 +233,7 @@ describe('ControlPanelViewProvider.revealSection（issue #227、ホスト→webv
     const provider = new ControlPanelViewProvider(settings, logger);
     const { view, sent } = fakeWebviewView();
     provider.resolveWebviewView(view as never);
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushAsync();
 
     provider.revealSection('codexImport');
 
@@ -247,8 +256,7 @@ describe('ControlPanelViewProvider（issue #358、パネル破棄時の参照ク
     const provider = new ControlPanelViewProvider(settings, logger);
     const { view, sent, simulateDispose } = fakeWebviewView();
     provider.resolveWebviewView(view as never);
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushAsync();
     sent.length = 0;
 
     simulateDispose();
@@ -268,8 +276,7 @@ describe('CSPを`chatCsp()`へ集約する（issue #420）', () => {
     const { view } = fakeWebviewView();
 
     provider.resolveWebviewView(view as never);
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushAsync();
 
     const html = (view.webview as { html: string }).html;
     const match = html.match(/<meta http-equiv="Content-Security-Policy" content="([^"]*)">/);
