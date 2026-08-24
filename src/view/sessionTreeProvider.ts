@@ -252,7 +252,7 @@ export class SessionTreeProvider
   private buildGroupTreeItem(group: SessionGroupNode): vscode.TreeItem {
     const item = new vscode.TreeItem(group.label, vscode.TreeItemCollapsibleState.Expanded);
     item.id = group.id;
-    item.description = `${group.sessions.length}`;
+    item.description = groupSummaryText(group.sessions.map((s) => this.getActivity(s)));
     // メニューのwhen句（`/^codexSession\./`系）はどれも一致しない値にしてある
     // （グループへ右クリック操作を出さないため。`package.json`のview/item/context参照）
     item.contextValue = 'codexSessionGroup';
@@ -375,6 +375,34 @@ function buildSessionIcon(
     return new vscode.ThemeIcon('archive', new vscode.ThemeColor('descriptionForeground'));
   }
   return new vscode.ThemeIcon(session.provider === 'claude' ? 'sparkle' : 'comment-discussion');
+}
+
+/**
+ * グループ見出しの右に出す件数と内訳（issue #737）。
+ *
+ * 畳んだグループは中の行が見えないため、件数だけだと「この中に承認待ちが居るか」が
+ * 分からない。件数のあとに内訳を1つだけ足す。
+ *
+ * **両方あっても1つしか出さない**。`3件 · 承認待ち1 · 実行中2`まで並べると、サイドバーの
+ * 幅が狭いときに後ろから切れ、いちばん急ぐ承認待ちが押し出されることがある。承認待ちを
+ * 優先するのは、こちらが人の操作を待って止まっている状態だから（実行中は放っておけば進む）。
+ *
+ * 引数は活動状態の配列。`SessionSummary`ではなく状態だけを受け取るのは、この関数を
+ * ツリーの外から検査できるようにするため。
+ */
+export function groupSummaryText(
+  activities: ReadonlyArray<SessionActivityState | undefined>,
+): string {
+  const base = `${activities.length}件`;
+  const pending = activities.filter((a) => a === 'approvalPending').length;
+  if (pending > 0) {
+    return `${base} · 承認待ち${pending}`;
+  }
+  const running = activities.filter((a) => a === 'running').length;
+  if (running > 0) {
+    return `${base} · 実行中${running}`;
+  }
+  return base;
 }
 
 function buildSessionContextValue(session: SessionSummary, pinned: boolean): string {
