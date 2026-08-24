@@ -26,6 +26,7 @@ function definition(providers: readonly ('codex' | 'claude')[]): WorkflowDefinit
     maxParallel: 2,
     tasks: providers.map((provider, i) => ({
       id: `T${i + 1}`,
+      role: undefined,
       provider,
       type: 'chore' as const,
       prompt: 'p',

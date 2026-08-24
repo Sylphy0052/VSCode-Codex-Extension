@@ -518,6 +518,11 @@
         "category": "Agent"
       },
       {
+        "command": "agent.workflows.team",
+        "title": "チームモードを開始…",
+        "category": "Agent"
+      },
+      {
         "command": "agent.sendSelectionToChat",
         "title": "Agentへ送る",
         "category": "Agent"

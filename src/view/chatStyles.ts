@@ -58,7 +58,16 @@ export function chatStyles(): string {
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
   }
   #scrollToBottom:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  /*
+   * 発言の種別ごとに余白を変えて、ターンの切れ目を余白の広さでも示す（issue #712）。
+   * 自分の発言の手前を広く空け、同じターンの中に連なる思考・ツール出力は詰める。
+   * #log は通常のブロック整形なので、隣り合う項目の上下marginは相殺され広いほうが残る。
+   */
   .item { margin-bottom: 12px; }
+  .item.user { margin-top: 22px; }
+  .item.reasoning, .item.tool { margin-bottom: 6px; }
+  /* 会話の先頭が不自然に落ちないよう、最初の項目だけは上を空けない */
+  #log > .item:first-child { margin-top: 0; }
   .item .head {
     display: flex;
     justify-content: space-between;
@@ -78,7 +87,16 @@ export function chatStyles(): string {
     background-color: var(--vscode-textBlockQuote-background);
     border-left: 2px solid var(--vscode-textLink-foreground);
   }
-  .agent .body { padding-left: 0; }
+  /*
+   * エージェントの応答にも縁取りを付ける（issue #712）。ここに何も無いと、応答が長い
+   * ときにターンの切れ目が本文の途切れ方でしか分からない。自分の発言（textLink色の線と
+   * 背景）より弱い線にして、どちらが自分の発言かは引き続き見分けられるようにする。
+   * 応答中は下の .item.running が progressBar 色でこの線を上書きする（詳細度で勝つ）。
+   * 変更前の padding-left: 0 は外し、.body の左余白（10px）へ戻す。線と本文が詰まる。
+   */
+  .agent .body {
+    border-left: 2px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+  }
   .reasoning .body-content { color: var(--vscode-descriptionForeground); font-style: italic; }
   /* 会話に出す画像。既定はサムネイル、クリックで原寸まで広げる */
   .images { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }

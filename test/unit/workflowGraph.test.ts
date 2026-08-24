@@ -2,13 +2,17 @@ import { describe, expect, it } from 'vitest';
 import {
   aggregateProgress,
   computeRanks,
+  kanbanBucket,
   layoutGraph,
   NODE_GAP_X,
   NODE_HEIGHT,
   NODE_WIDTH,
   summarizeIntegration,
+  summarizeKanban,
+  taskRoleLabel,
   type GraphTaskInput,
 } from '../../src/view/workflowGraph';
+import type { TaskState } from '../../src/orchestrator/runState';
 
 /** design.mdが繰り返し例示する形。T1完了後にT2・T3が並列で走り、両方の完了後にT4が走る。 */
 const DIAMOND: GraphTaskInput[] = [
@@ -336,6 +340,74 @@ describe('summarizeIntegration（design.md §16.8「そのほか」・§16.17。
     expect(withUndefinedFields?.pullRequestNumber).toBeUndefined();
     expect(withUndefinedFields?.pullRequestUrl).toBeUndefined();
     expect(withUndefinedFields?.finalMergeOutcome).toBeUndefined();
+  });
+});
+
+describe('kanbanBucket（design.md §16.44、Issue #693、チームモード）', () => {
+  it('pendingはtodo', () => {
+    expect(kanbanBucket('pending')).toBe('todo');
+  });
+
+  it('running/waitingApproval/waitingReply/mergingはinProgress（isActiveTaskStateと一致する4状態）', () => {
+    const activeStates: TaskState[] = ['running', 'waitingApproval', 'waitingReply', 'merging'];
+    for (const state of activeStates) {
+      expect(kanbanBucket(state)).toBe('inProgress');
+    }
+  });
+
+  it('doneはdone', () => {
+    expect(kanbanBucket('done')).toBe('done');
+  });
+
+  it('failed/blocked/skippedはattention（作業は終わったが良い終わり方ではない）', () => {
+    const attentionStates: TaskState[] = ['failed', 'blocked', 'skipped'];
+    for (const state of attentionStates) {
+      expect(kanbanBucket(state)).toBe('attention');
+    }
+  });
+});
+
+describe('summarizeKanban', () => {
+  it('4バケットの件数を集計する', () => {
+    const summary = summarizeKanban([
+      { state: 'pending' },
+      { state: 'running' },
+      { state: 'waitingApproval' },
+      { state: 'done' },
+      { state: 'done' },
+      { state: 'failed' },
+      { state: 'blocked' },
+      { state: 'skipped' },
+    ]);
+    expect(summary).toEqual({
+      total: 8,
+      todo: 1,
+      inProgress: 2,
+      done: 2,
+      attention: 3,
+    });
+  });
+
+  it('タスクが0件なら全バケットが0', () => {
+    expect(summarizeKanban([])).toEqual({
+      total: 0,
+      todo: 0,
+      inProgress: 0,
+      done: 0,
+      attention: 0,
+    });
+  });
+});
+
+describe('taskRoleLabel（design.md §16.44、Issue #693）', () => {
+  it('roleがundefinedならundefined（役割なしのタスクは何も表示しない）', () => {
+    expect(taskRoleLabel(undefined)).toBeUndefined();
+  });
+
+  it('roleが指定されていればroleLabelの日本語ラベルを返す', () => {
+    expect(taskRoleLabel('architect')).toBe('アーキテクト');
+    expect(taskRoleLabel('implementer')).toBe('実装');
+    expect(taskRoleLabel('reviewer')).toBe('レビュワー');
   });
 });
 

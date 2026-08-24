@@ -19,6 +19,7 @@ import {
 /** テストで頻出する最小構成のタスク。 */
 const task = (overrides: Partial<WorkflowTask> = {}): WorkflowTask => ({
   id: 'T1',
+  role: undefined,
   prompt: '作業する',
   done: '作業が終わっている',
   dependsOn: [],
@@ -848,6 +849,41 @@ tasks:
 });
 
 describe('buildOrchestratorTask（design.md §16.29、roadmap W4、Issue #338、オーケストレーターのadd_task）', () => {
+  it('roleを指定するとmodel/effortの既定が決まる（design.md §16.44、Issue #693）', () => {
+    const result = buildOrchestratorTask({
+      id: 'T1',
+      prompt: 'p',
+      done: 'd',
+      dependsOn: [],
+      provider: 'codex',
+      role: 'architect',
+    });
+
+    expect('task' in result).toBe(true);
+    if ('task' in result) {
+      expect(result.task.role).toBe('architect');
+      expect(result.task.model).toBe('gpt-5.6-terra');
+      expect(result.task.effort).toBe('high');
+    }
+  });
+
+  it('未知のroleは黙って役割なしへ倒す（model/effortは拡張機能の設定に従う）', () => {
+    const result = buildOrchestratorTask({
+      id: 'T1',
+      prompt: 'p',
+      done: 'd',
+      dependsOn: [],
+      role: 'bogus',
+    });
+
+    expect('task' in result).toBe(true);
+    if ('task' in result) {
+      expect(result.task.role).toBeUndefined();
+      expect(result.task.model).toBeUndefined();
+      expect(result.task.effort).toBeUndefined();
+    }
+  });
+
   it('autoApprove/allow/sandbox/approvalModeを指定すると拒否する（値によらず）', () => {
     const autoApprove = buildOrchestratorTask({
       id: 'T1',
@@ -1532,5 +1568,174 @@ tasks:
     const result = ensureDefaultsProvider(yaml, 'claude');
     expect(result.applied).toBe(false);
     expect(result.yaml).toBe(yaml);
+  });
+});
+
+describe('roleの解決優先順位（design.md §16.44、Issue #693）', () => {
+  it('タスクが明示したmodel/effortが最優先（タスクのroleより強い）', () => {
+    const yaml = `
+version: 1
+name: テスト
+defaults:
+  provider: codex
+  role: implementer
+tasks:
+  - id: T1
+    role: architect
+    model: gpt-5.6-custom
+    effort: xhigh
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+    expect(def.tasks[0]?.model).toBe('gpt-5.6-custom');
+    expect(def.tasks[0]?.effort).toBe('xhigh');
+  });
+
+  it('タスクのroleは、defaultsが明示したmodel/effortより強い', () => {
+    const yaml = `
+version: 1
+name: テスト
+defaults:
+  provider: codex
+  model: gpt-5.6-defaults-explicit
+  effort: medium
+tasks:
+  - id: T1
+    role: architect
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+    // architect（deep）はcodexでgpt-5.6-terra/high。defaultsの明示値より役割が勝つ
+    expect(def.tasks[0]?.model).toBe('gpt-5.6-terra');
+    expect(def.tasks[0]?.effort).toBe('high');
+  });
+
+  it('defaultsが明示したmodel/effortは、defaultsのroleより強い', () => {
+    const yaml = `
+version: 1
+name: テスト
+defaults:
+  provider: codex
+  role: architect
+  model: gpt-5.6-defaults-explicit
+  effort: medium
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+    // タスク・defaultsのどちらもroleを明示していないが、defaultsのmodel/effort明示が
+    // defaults.roleの既定値（architect→gpt-5.6-terra/high）より優先される
+    expect(def.tasks[0]?.model).toBe('gpt-5.6-defaults-explicit');
+    expect(def.tasks[0]?.effort).toBe('medium');
+  });
+
+  it('何も明示が無ければdefaultsのroleが使われる（4段のうち最後）', () => {
+    const yaml = `
+version: 1
+name: テスト
+defaults:
+  provider: codex
+  role: architect
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+    expect(def.tasks[0]?.model).toBe('gpt-5.6-terra');
+    expect(def.tasks[0]?.effort).toBe('high');
+  });
+
+  it('未知のroleは役割なしへ倒し、指定できる値を添えて警告する（スペルミスで黙って別のモデルにしない）', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    role: implementor
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+    const task = def.tasks[0];
+
+    expect(task?.role).toBeUndefined();
+    expect(task?.model).toBeUndefined();
+    expect(task?.effort).toBeUndefined();
+    expect(task?.parseWarnings.join('\n')).toContain('implementor');
+    expect(task?.parseWarnings.join('\n')).toContain('implementer');
+  });
+
+  it('defaults.roleが未知なら、そちらも役割なしへ倒して警告する', () => {
+    const yaml = `
+version: 1
+name: テスト
+defaults:
+  role: bogus
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+
+    expect(def.tasks[0]?.role).toBeUndefined();
+    expect(def.tasks[0]?.model).toBeUndefined();
+    expect((def.defaultsWarnings ?? []).join('\n')).toContain('bogus');
+  });
+
+  it('タスクのroleが未知でも、defaults.roleが正しければそちらへ倒れる', () => {
+    const yaml = `
+version: 1
+name: テスト
+defaults:
+  provider: codex
+  role: architect
+tasks:
+  - id: T1
+    role: bogus
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+
+    expect(def.tasks[0]?.role).toBe('architect');
+    expect(def.tasks[0]?.model).toBe('gpt-5.6-terra');
+  });
+
+  it('role未指定・defaults.role未指定なら、model/effortはundefined（従来どおり拡張機能の設定に従う）', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+`;
+    const def = parseWorkflowYaml(yaml);
+    expect(def.tasks[0]?.role).toBeUndefined();
+    expect(def.tasks[0]?.model).toBeUndefined();
+    expect(def.tasks[0]?.effort).toBeUndefined();
+  });
+});
+
+describe('validateWorkflow の RESERVED_ORCHESTRATOR_TASK_ID（design.md §16.44、Issue #693）', () => {
+  it('id: "_orchestrator" のタスクはエラーになる', () => {
+    const def = {
+      version: 1,
+      name: 'テスト',
+      maxParallel: 3,
+      tasks: [task({ id: '_orchestrator' })],
+    };
+    const { errors } = validateWorkflow(def);
+    expect(
+      errors.some(
+        (e) => e.taskIds.includes('_orchestrator') && e.message.includes('予約されている'),
+      ),
+    ).toBe(true);
   });
 });

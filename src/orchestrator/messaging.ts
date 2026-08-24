@@ -8,7 +8,10 @@ import {
   sanitizeForLog,
   stripControlCharsPreservingNewlines,
 } from './sanitize';
-import { truncateByCodePoint } from './workflow';
+import { TEAM_ROLES } from './rolePresets';
+import { MAX_HANDOFF_BYTES, type HandoffEntry, type HandoffResult } from './teamHandoff';
+import { formatUntrusted } from './untrustedText';
+import { RESERVED_ORCHESTRATOR_TASK_ID, truncateByCodePoint } from './workflow';
 
 /**
  * タスク間のメッセージング（design.md §16.21）。
@@ -870,7 +873,8 @@ export const ADD_TASK_TOOL: McpToolDefinition = {
     'は必須。dependsOnは省略時[]。既存の検証（id形式・循環依存・上限件数・プロンプト長）を' +
     'そのまま通し、違反すれば適用前に拒否され理由が返る。autoApprove/allow/sandbox/' +
     'approvalModeは指定できない（指定すると拒否される。権限の緩和は人が書いた定義からのみ' +
-    '許可される）。担当領域をまたぐ・設計の前提を変える・受入基準を下げる追加は、先に' +
+    '許可される）。roleは指定できる（決まるのはmodelとeffortの既定値だけで、権限には' +
+    '関与しない）。担当領域をまたぐ・設計の前提を変える・受入基準を下げる追加は、先に' +
     'ask_userで人に確認すること。',
   inputSchema: {
     type: 'object',
@@ -890,6 +894,16 @@ export const ADD_TASK_TOOL: McpToolDefinition = {
       type: { type: 'string', description: 'コミットのtype（省略可）' },
       retries: { type: 'number', description: '自動再試行回数の上限（省略可）' },
       issue: { type: 'number', description: '対応するIssue番号（省略可）' },
+      // 役割（design.md §16.44、Issue #693）。`buildOrchestratorTask`が読む側を実装して
+      // いても、ここへ書かないとオーケストレーターは`tools/list`でフィールドの存在を
+      // 知れず、`additionalProperties: false`にも当たる（PR #711 自己レビュー指摘: high）
+      role: {
+        type: 'string',
+        enum: [...TEAM_ROLES],
+        description:
+          '担当する役割（省略可）。modelとeffortの既定値だけが決まる: ' +
+          `${TEAM_ROLES.join(' / ')}`,
+      },
     },
     required: ['id', 'prompt', 'done', 'dependsOn'],
     additionalProperties: false,
@@ -941,6 +955,95 @@ export const UPDATE_TASK_DEPENDENCIES_TOOL: McpToolDefinition = {
     additionalProperties: false,
   },
 };
+
+/* ------------------------------------------------------------------------ *
+ * ファイル受け渡し（design.md §16.44、Issue #693、`teamHandoff.ts`）
+ * ------------------------------------------------------------------------ */
+
+/**
+ * `write_handoff` / `read_handoff` / `list_handoffs` / `delete_handoff` の4ツール
+ * （design.md §16.44、Issue #693）。
+ *
+ * `send_message` / `ask_orchestrator`（メッセージ本文の上限`MAX_MESSAGE_BODY_LENGTH`に
+ * 収まらない・後から読み返したい情報を運べない）を補う経路として、`.agents/handoff/runs/`
+ * 配下へファイルとして残す（実体は`teamHandoff.ts`の`TeamHandoffStore`）。
+ *
+ * **オーケストレーター専用の`ORCHESTRATOR_CONTROL_TOOLS`とは別枠にする。** この4つは
+ * オーケストレーター・タスクの両方の接続へ見せる（`visibleTools`参照）。想定利用が
+ * 「役割セッション（タスク）が設計メモを書き、オーケストレーターが読む」で、
+ * 書く側・読む側のどちらも固定できないため。
+ *
+ * **`write_handoff`だけ`taskId`を引数に取らない。** `send_message`の`from`と同じ理由
+ * （design.md §16.21「送信元はサーバー側が接続から判別する」）で、書き込む先の
+ * ファイル名（`<taskId>-<slug>.md`）の`taskId`部分は接続そのもの（`connection.taskId`）
+ * から決める。引数に`taskId`を持たせると、あるタスクが別のタスクの`taskId`を騙って
+ * その名義でファイルを書けてしまう。`read_handoff`/`delete_handoff`は逆に、誰が書いた
+ * ファイルでも読み書きの対象に指定できる必要がある（自分が書いたファイルしか読めないと
+ * 「別のタスクが読む」という想定利用そのものが成立しない）ため、`taskId`を対象指定の
+ * 引数として持つ。
+ */
+export const WRITE_HANDOFF_TOOL: McpToolDefinition = {
+  name: 'write_handoff',
+  description:
+    'メッセージ本文の上限に収まらない・後から読み返したい情報をファイルとして残す' +
+    '（`.agents/handoff/runs/`配下）。書き込み先のファイル名は呼び出し元（自分自身）の' +
+    'taskIdとslugから決まる（既存の場合は上書き）。runが終わると自動的に消える一時領域で、' +
+    '成果物そのものはPR/MRの側に残すこと。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      slug: {
+        type: 'string',
+        description:
+          'ファイル名の自由記述部分（英数字・`_`・`-`のみ、64文字以内）。同じslugへ再度' +
+          '書き込むと上書きされる。',
+      },
+      content: { type: 'string', description: '書き込む本文' },
+    },
+    required: ['slug', 'content'],
+    additionalProperties: false,
+  },
+};
+
+export const READ_HANDOFF_TOOL: McpToolDefinition = {
+  name: 'read_handoff',
+  description:
+    '`write_handoff`が残したファイルを読む。自分が書いたものに限らず、同じrunの' +
+    '他タスク・オーケストレーターが書いたものも指定できる。見つからなければ理由が返る。',
+  inputSchema: {
+    type: 'object',
+    properties: { taskId: TASK_ID_ARG, slug: { type: 'string', description: '対象のslug' } },
+    required: ['taskId', 'slug'],
+    additionalProperties: false,
+  },
+};
+
+export const LIST_HANDOFFS_TOOL: McpToolDefinition = {
+  name: 'list_handoffs',
+  description: 'このrunで残されている受け渡しファイルの一覧（taskId・slug・パス）を読む。',
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+};
+
+export const DELETE_HANDOFF_TOOL: McpToolDefinition = {
+  name: 'delete_handoff',
+  description:
+    '`write_handoff`が残したファイルを1件消す。不要になったら消すためのツールで、' +
+    '既に無い場合も成功として扱う。',
+  inputSchema: {
+    type: 'object',
+    properties: { taskId: TASK_ID_ARG, slug: { type: 'string', description: '対象のslug' } },
+    required: ['taskId', 'slug'],
+    additionalProperties: false,
+  },
+};
+
+/** ファイル受け渡しの4ツール。`visibleTools`が両方の接続種別へまとめて足すための束。 */
+export const HANDOFF_TOOLS: readonly McpToolDefinition[] = [
+  WRITE_HANDOFF_TOOL,
+  READ_HANDOFF_TOOL,
+  LIST_HANDOFFS_TOOL,
+  DELETE_HANDOFF_TOOL,
+];
 
 /**
  * オーケストレーター用の接続にだけ見せるツール（design.md §16.23）。
@@ -1045,6 +1148,30 @@ export interface TaskMessagingHubDeps {
    * §16.21のタスク間メッセージングだけが動く）。
    */
   orchestratorControl?: OrchestratorControlPort;
+  /**
+   * ファイル受け渡し（design.md §16.44、Issue #693）の実体。**省略可能**（省略時は
+   * `HANDOFF_TOOLS`が一切現れず、従来どおり`send_message`/`ask_orchestrator`だけが動く。
+   * `orchestratorControl`と同じ「後方互換のため省略可能にする」流儀）。
+   *
+   * runId・repoRootを引数に取らない薄いポートにしてあるのは、`TaskMessagingHub`自体が
+   * 特定の1run分の状態しか持たない（`listRunTasks`が既にrunId込みのクロージャである）のと
+   * 揃えるため。呼び出し側（`runner.ts`）が`TeamHandoffStore`の`runId`引数を先に
+   * 束縛したうえでここへ渡す。
+   */
+  handoff?: HandoffPort;
+}
+
+/**
+ * `TaskMessagingHubDeps.handoff` が満たす形。`teamHandoff.ts`の`TeamHandoffStore`の
+ * `write`/`read`/`list`/`remove`から`runId`引数を束縛（呼び出し側があらかじめ固定）した
+ * だけの薄い口。`OrchestratorControlPort`と同じ「実体は既存のクラスのメソッドをそのまま
+ * 呼ぶ」方針で、モデル用の別経路のロジックは持たせない。
+ */
+export interface HandoffPort {
+  write(taskId: string, slug: string, content: string): Promise<HandoffResult<HandoffEntry>>;
+  read(taskId: string, slug: string): Promise<HandoffResult<string>>;
+  list(): Promise<readonly HandoffEntry[]>;
+  remove(taskId: string, slug: string): Promise<HandoffResult<undefined>>;
 }
 
 /**
@@ -1090,6 +1217,16 @@ export class TaskMessagingHub {
    */
   get orchestratorControl(): OrchestratorControlPort | undefined {
     return this.deps.orchestratorControl;
+  }
+
+  /**
+   * ファイル受け渡し（design.md §16.44）の実体（無ければ `undefined`）。
+   * `MessagingMcpServer` が `HANDOFF_TOOLS` を見せるかどうか・呼び出しを実行するかどうかの
+   * 両方をこの値の有無で判定する。`orchestratorControl` と違い、接続の種別
+   * （オーケストレーター／タスク）を問わず同じ値を使う。
+   */
+  get handoff(): HandoffPort | undefined {
+    return this.deps.handoff;
   }
 
   /**
@@ -1258,8 +1395,18 @@ export class MessagingMcpServer {
 
   private handleConnection(connection: McpConnection): void {
     connection.onRequest((request) => {
-      const response = this.safeDispatch(connection.taskId, request);
-      connection.send(response);
+      // `write_handoff`等（`teamHandoff.ts`のTeamHandoffStore）はファイルI/Oを伴うため
+      // `safeDispatch`がPromiseを返すことがある（Issue #693）。その場合だけ解決を待って
+      // から`connection.send`を呼ぶ（HTTP実装の`res.end`は非同期に呼んでもよい。
+      // `startHttpMcpTransport`のJSDoc参照）。それ以外は従来どおり同期で返す。
+      const dispatched = this.safeDispatch(connection.taskId, request);
+      if (dispatched instanceof Promise) {
+        void dispatched.then((response) => {
+          connection.send(response);
+        });
+        return;
+      }
+      connection.send(dispatched);
     });
   }
 
@@ -1274,10 +1421,25 @@ export class MessagingMcpServer {
    * 例外が起きた事実自体は`logPort`（渡されていれば）へ記録する（Issue #375）。以前は
    * ここで完全に握り潰しており、同一runの他タスクが意図的に例外を誘発する呼び出しを
    * 繰り返しても事後調査ができなかった。
+   *
+   * **ファイル受け渡し（Issue #693）のときだけPromiseを返す。** `dispatch`の戻り値が
+   * Promiseなら、その拒否も同じ扱い（記録して`-32603`）へ寄せる。`async`にして一律
+   * Promiseを返さないのは、既存のツールの応答が1ティック遅れるのを避けるため
+   * （`handleToolCall`のJSDoc参照）。
    */
-  private safeDispatch(taskId: string, request: JsonRpcRequest): JsonRpcResponse {
+  private safeDispatch(
+    taskId: string,
+    request: JsonRpcRequest,
+  ): JsonRpcResponse | Promise<JsonRpcResponse> {
     try {
-      return this.dispatch(taskId, request);
+      const dispatched = this.dispatch(taskId, request);
+      if (dispatched instanceof Promise) {
+        return dispatched.catch((error: unknown) => {
+          this.logDispatchError(error);
+          return failure(request.id, -32603, '内部エラーが発生しました');
+        });
+      }
+      return dispatched;
     } catch (error) {
       this.logDispatchError(error);
       return failure(request.id, -32603, '内部エラーが発生しました');
@@ -1333,7 +1495,10 @@ export class MessagingMcpServer {
     }
   }
 
-  private dispatch(taskId: string, request: JsonRpcRequest): JsonRpcResponse {
+  private dispatch(
+    taskId: string,
+    request: JsonRpcRequest,
+  ): JsonRpcResponse | Promise<JsonRpcResponse> {
     switch (request.method) {
       case 'initialize':
         return success(request.id, SERVER_INFO_RESULT);
@@ -1349,18 +1514,25 @@ export class MessagingMcpServer {
   /**
    * この接続から見えるツール。制御ツールはオーケストレーターの接続にだけ足す
    * （design.md §16.23）。ここも `connection.taskId` だけで判断し、引数は見ない。
+   *
+   * ファイル受け渡しの4ツール（`HANDOFF_TOOLS`、design.md §16.44）は接続の種別を問わず
+   * 足す。`this.hub.handoff`が未設定（省略可能）なら足さない——`tools/list`に出しておいて
+   * 呼び出し時に「未知のツール」で拒否するより、そもそも見せないほうが一貫している
+   * （`orchestratorControl`未設定時の`base`のみ返却と同じ判断）。
    */
   private visibleTools(taskId: string): McpToolDefinition[] {
     const base = [LIST_TASKS_TOOL, SEND_MESSAGE_TOOL];
+    const handoffTools = this.hub.handoff === undefined ? [] : HANDOFF_TOOLS;
     // ask_orchestrator（design.md §16.32、Issue #571）はタスク側の道具で、
     // オーケストレーター自身の接続には見せない（自分自身へ問う意味が無い）。
     // 接続の種類はtaskId自体で判定する（`orchestratorControl`未設定のオーケストレーター
     // 接続も「タスク扱い」にしないため。制御ツールの実体の有無とは独立に判定する）
     if (taskId === ORCHESTRATOR_CONNECTION_ID) {
       const control = this.controlFor(taskId);
-      return control === undefined ? base : [...base, ...ORCHESTRATOR_CONTROL_TOOLS];
+      const controlTools = control === undefined ? [] : ORCHESTRATOR_CONTROL_TOOLS;
+      return [...base, ...handoffTools, ...controlTools];
     }
-    return [...base, ASK_ORCHESTRATOR_TOOL];
+    return [...base, ASK_ORCHESTRATOR_TOOL, ...handoffTools];
   }
 
   /**
@@ -1374,7 +1546,17 @@ export class MessagingMcpServer {
     return taskId === ORCHESTRATOR_CONNECTION_ID ? this.hub.orchestratorControl : undefined;
   }
 
-  private handleToolCall(taskId: string, request: JsonRpcRequest): JsonRpcResponse {
+  /**
+   * ツール呼び出しの実行。ファイル受け渡し（`handleHandoffToolCall`）だけがファイルI/Oを
+   * 伴うためPromiseを返し、他のツールは従来どおり同期で応答を返す（Issue #693）。
+   * 全体をasyncにしてしまうと、既存のツールの応答まで1ティック遅れる——実運用では
+   * 差が出ないが、「要求を投げたらその場で応答が返る」という既存の観測可能な挙動を
+   * 新機能のために変える理由が無い。
+   */
+  private handleToolCall(
+    taskId: string,
+    request: JsonRpcRequest,
+  ): JsonRpcResponse | Promise<JsonRpcResponse> {
     const params = rec(request.params);
     const name = str(params?.['name']);
     const args = rec(params?.['arguments']) ?? {};
@@ -1414,11 +1596,116 @@ export class MessagingMcpServer {
       return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
     }
 
+    if (
+      name === WRITE_HANDOFF_TOOL.name ||
+      name === READ_HANDOFF_TOOL.name ||
+      name === LIST_HANDOFFS_TOOL.name ||
+      name === DELETE_HANDOFF_TOOL.name
+    ) {
+      return this.handleHandoffToolCall(taskId, request, name, args);
+    }
+
     if (ORCHESTRATOR_CONTROL_TOOL_NAMES.has(name)) {
       return this.handleControlToolCall(taskId, request, name, args);
     }
 
     return failure(request.id, -32602, `未知のツールです: ${name}`);
+  }
+
+  /**
+   * ファイル受け渡し4ツール（`HANDOFF_TOOLS`、design.md §16.44、Issue #693）の呼び出し。
+   *
+   * `this.hub.handoff`が未設定なら「未知のツール」で拒否する（`visibleTools`が
+   * そもそも見せていないが、ツール名を推測して呼ばれる余地に備えた多層防御。
+   * `handleControlToolCall`の`control === undefined`と同じ流儀）。
+   *
+   * **返り値は`{ accepted, reason }`を基本形にする**（`send_message`/`OrchestratorControlResult`
+   * と同じ「受け付けたかどうかと、その理由」の流儀）。`read_handoff`の成功時だけ`content`
+   * フィールドを足す。
+   *
+   * **`read_handoff`が返す本文は`formatUntrusted`で囲ってから返す。** 受け渡しファイルの
+   * 中身はエージェントが書いた自由記述であり、`send_message`の本文（`wrapTaskMessage`）や
+   * `{{T1.result}}`（`workflow.ts`）と同じ脅威クラス（上流の自由記述がそのまま下流の
+   * プロンプトへ入る経路）にあたる。`maxLength`には`teamHandoff.ts`の`MAX_HANDOFF_BYTES`
+   * （バイト数）をそのまま使う——`formatUntrusted`はコードポイント単位で数えるため
+   * 名目上は保守的すぎる上限になるが、`write`の時点で既にバイト数として弾かれているので
+   * 実際に切り詰めが起きることは無い（コードポイント数は常にUTF-8バイト数以下）。
+   *
+   * `taskId`/`slug`はここでは字種を検証しない（`teamHandoff.ts`の`handoffPath`が唯一の
+   * 検証入口。二重に検証しない）。不正な値を渡した場合の`HandoffResult.error`（例:
+   * 「不正なslug（許可されない文字を含みます）」）はそのまま`reason`へ載せて返す——
+   * 埋め込まれるのは呼び出し元が渡した`taskId`/`slug`の生値そのものであり、`teamHandoff.ts`
+   * 側の正規表現が許す字種（英数字・`_`・`-`）しか通らないため、この文言自体が新たな
+   * 注入経路にはならない（不正な値はそもそもエラーになって処理が止まる）。
+   */
+  private async handleHandoffToolCall(
+    taskId: string,
+    request: JsonRpcRequest,
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<JsonRpcResponse> {
+    const handoff = this.hub.handoff;
+    if (handoff === undefined) {
+      return failure(request.id, -32602, `未知のツールです: ${name}`);
+    }
+
+    if (name === LIST_HANDOFFS_TOOL.name) {
+      const entries = await handoff.list();
+      return success(
+        request.id,
+        toolTextResult(JSON.stringify({ accepted: true, reason: `${entries.length}件`, entries })),
+      );
+    }
+
+    if (name === WRITE_HANDOFF_TOOL.name) {
+      // `taskId`は接続（`connection.taskId`）のみを使う。`send_message`の`from`と同じ理由
+      // （このファイル冒頭のクラスコメント参照）で、argsに同名フィールドがあっても読まない。
+      //
+      // オーケストレーターの接続だけは`ORCHESTRATOR_CONNECTION_ID`（`'-orchestrator-'`）が
+      // そのままではファイル名にできない（`TASK_ID_PATTERN`にわざと合致しない値にしてある）
+      // ため、予約idへ読み替える。同名のタスクは`validateWorkflow`が定義できないよう
+      // 弾いているので、この読み替えでタスクのファイルと衝突することはない
+      const author = taskId === ORCHESTRATOR_CONNECTION_ID ? RESERVED_ORCHESTRATOR_TASK_ID : taskId;
+      const slug = str(args['slug']);
+      const content = str(args['content']);
+      const result = await handoff.write(author, slug, content);
+      const body = result.ok
+        ? { accepted: true, reason: '書き込みました', relativePath: result.value.relativePath }
+        : { accepted: false, reason: result.error };
+      return success(request.id, toolTextResult(JSON.stringify(body), !result.ok));
+    }
+
+    // read_handoff / delete_handoff は対象を指定する`taskId`引数を取る（`HANDOFF_TOOLS`の
+    // JSDoc参照）
+    const target = str(args['taskId']);
+    const slug = str(args['slug']);
+
+    if (name === READ_HANDOFF_TOOL.name) {
+      const result = await handoff.read(target, slug);
+      if (!result.ok) {
+        return success(
+          request.id,
+          toolTextResult(JSON.stringify({ accepted: false, reason: result.error }), true),
+        );
+      }
+      const content = formatUntrusted(result.value, {
+        id: `${target}-${slug}`,
+        field: 'handoff',
+        maxLength: MAX_HANDOFF_BYTES,
+        preserveNewlines: true,
+      });
+      return success(
+        request.id,
+        toolTextResult(JSON.stringify({ accepted: true, reason: '読み込みました', content })),
+      );
+    }
+
+    // name === DELETE_HANDOFF_TOOL.name（このメソッドを呼ぶ4分岐のうち残りの1つ）
+    const result = await handoff.remove(target, slug);
+    const body = result.ok
+      ? { accepted: true, reason: '削除しました' }
+      : { accepted: false, reason: result.error };
+    return success(request.id, toolTextResult(JSON.stringify(body), !result.ok));
   }
 
   /**
