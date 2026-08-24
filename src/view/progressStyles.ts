@@ -60,6 +60,36 @@ export function progressStyles(): string {
   #empty .icon { width: 32px; height: 32px; opacity: 0.5; }
   #empty .hint { font-size: 0.9em; }
 
+  /* ---- 応答中の稼働バー（issue 751） ----
+     画面上端に固定する。サマリの中にあるTODOの完了率バー（#progressRow）とは
+     位置も形も分けてある（あちらは左から伸びる帯、こちらは往復する短い帯）。
+     動かすのは transform だけにする。width や background-position を毎フレーム
+     変えるとレイアウトや再描画が走り、長い応答の間ずっとCPUを使う。
+     減光設定では reducedMotionStyles() がアニメーションを止め、
+     transform の当たっていない初期状態＝上端いっぱいの静的な色帯として残る */
+  #busyBar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    overflow: hidden;
+    z-index: 2;
+    background-color: color-mix(in srgb, var(--vscode-progressBar-background) 25%, transparent);
+  }
+  #busyBarFill {
+    height: 100%;
+    width: 100%;
+    transform-origin: left center;
+    background-color: var(--vscode-progressBar-background);
+    animation: busySlide 1.6s ease-in-out infinite;
+  }
+  @keyframes busySlide {
+    0% { transform: translateX(-100%) scaleX(0.4); }
+    50% { transform: translateX(20%) scaleX(0.6); }
+    100% { transform: translateX(100%) scaleX(0.4); }
+  }
+
   /* ---- サマリー（スクロールしても残す） ---- */
   #summary {
     position: sticky;
@@ -170,8 +200,15 @@ export function progressStyles(): string {
   }
 
   /* ---- チェックリスト ---- */
-  .todo { display: flex; gap: 6px; align-items: baseline; }
-  .todo .mark { flex: none; color: var(--vscode-descriptionForeground); }
+  /* アイコンはbaselineだと縦位置が合わず、本文が折り返すと最終行へ落ちる。flex-startで
+     1行目に留め、行の高さとアイコンの差の半分だけ下げて1行目の中央へ合わせる（issue 748）。 */
+  .todo { display: flex; gap: 6px; align-items: flex-start; }
+  .todo .mark {
+    flex: none;
+    display: flex;
+    margin-top: 0.2em;
+    color: var(--vscode-descriptionForeground);
+  }
   .todo.completed .mark { color: var(--vscode-charts-green, var(--vscode-progressBar-background)); }
   .todo.completed .text {
     color: var(--vscode-descriptionForeground);
@@ -207,6 +244,30 @@ export function progressStyles(): string {
     font-family: var(--vscode-editor-font-family);
     font-size: 0.9em;
   }
+  /* ---- 変更したファイルのディレクトリまとめ（issue 749） ---- */
+  .fileGroup { padding: 0; }
+  .fileGroup + .fileGroup { margin-top: 6px; }
+  .groupHead {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+    overflow-wrap: anywhere;
+  }
+  .groupHead .dir { font-family: var(--vscode-editor-font-family); }
+  .groupHead .count {
+    flex: none;
+    padding: 0 5px;
+    border-radius: 8px;
+    font-variant-numeric: tabular-nums;
+    background-color: var(--vscode-badge-background);
+    color: var(--vscode-badge-foreground);
+  }
+  /* 見出しの下は1段だけ字下げする。深い階層でも段が増えないよう、階層は見出しの
+     文字列で表し、入れ子にはしない */
+  .groupFiles { padding-left: 16px; }
+
   .more {
     margin-top: 4px;
     padding: 2px 8px;

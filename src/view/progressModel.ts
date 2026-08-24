@@ -48,10 +48,27 @@ export interface ProgressTurn {
   todoChanges: TodoChange[];
 }
 
+/** 変更したファイルをディレクトリでまとめた1組（issue #749）。 */
+export interface EditedFileGroup {
+  /**
+   * 表示用のディレクトリ。共通の接頭辞を落とした後の値で、末尾に `/` を付ける。
+   * すべてのファイルが同じ階層にあるときや、共通接頭辞を落として何も残らないときは空文字列。
+   */
+  dir: string;
+  /** そのディレクトリ直下のファイル名。並びは最初に変更した順。 */
+  files: string[];
+}
+
 export interface ProgressSummary {
   turnCount: number;
   /** セッション全体で変更したファイル。重複は除く。 */
   editedFiles: string[];
+  /**
+   * `editedFiles` をディレクトリでまとめたもの（issue #749）。平坦な一覧のままだと、
+   * 長いセッションでどのあたりを触っているのかが読み取れないため。
+   * 数え方を変えずに済むよう、`editedFiles` はそのまま残してある。
+   */
+  editedFileGroups: EditedFileGroup[];
   commandCount: number;
   /** 現在のTODOの件数。 */
   todoTotal: number;
@@ -97,11 +114,74 @@ function buildSummary(state: ChatState, turns: readonly ProgressTurn[]): Progres
   return {
     turnCount: turns.length,
     editedFiles,
+    editedFileGroups: groupEditedFiles(editedFiles),
     commandCount,
     todoTotal: state.todos.length,
     todoCompleted: state.todos.filter((todo) => todo.status === STATUS_COMPLETED).length,
     busy: state.busy,
   };
+}
+
+/** パスをディレクトリ部分（末尾の `/` 込み）とファイル名へ分ける。 */
+function splitPath(path: string): { dir: string; name: string } {
+  const cut = path.lastIndexOf('/');
+  return cut < 0
+    ? { dir: '', name: path }
+    : { dir: path.slice(0, cut + 1), name: path.slice(cut + 1) };
+}
+
+/**
+ * すべてのパスに共通するディレクトリの接頭辞を返す（末尾の `/` 込み。無ければ空文字列）。
+ *
+ * 文字単位ではなくセグメント単位で比べる。文字で比べると `src/view/a` と `src/viewer/b`
+ * から `src/view` が共通だと出てしまい、落とすと `er/b` のような読めないパスが残る。
+ */
+function commonDirPrefix(paths: readonly string[]): string {
+  const first = paths[0];
+  if (paths.length < 2 || first === undefined) {
+    return '';
+  }
+  let segments = splitPath(first).dir.split('/');
+  for (const path of paths.slice(1)) {
+    const other = splitPath(path).dir.split('/');
+    const next: string[] = [];
+    for (let i = 0; i < Math.min(segments.length, other.length); i += 1) {
+      if (segments[i] !== other[i]) {
+        break;
+      }
+      next.push(other[i] as string);
+    }
+    segments = next;
+  }
+  const prefix = segments.join('/');
+  return prefix === '' ? '' : prefix + (prefix.endsWith('/') ? '' : '/');
+}
+
+/**
+ * 変更したファイルをディレクトリでまとめる（issue #749）。
+ *
+ * 共通の接頭辞（ワークスペースのルートなど）は落とす。`cwd` を使わないのは、
+ * `ChatState` の `cwd` とエージェントが報告するパスの基準が一致する保証が無いため
+ * （相対パスで届くこともある）。実際に届いたパスだけから決めれば取り違えが起きない。
+ *
+ * 並びは最初に変更した順を保つ。名前順にすると、直近で触ったものが上に来なくなる。
+ */
+export function groupEditedFiles(paths: readonly string[]): EditedFileGroup[] {
+  const prefix = commonDirPrefix(paths);
+  const groups: EditedFileGroup[] = [];
+  const byDir = new Map<string, EditedFileGroup>();
+  for (const path of paths) {
+    const { dir, name } = splitPath(path.startsWith(prefix) ? path.slice(prefix.length) : path);
+    const found = byDir.get(dir);
+    if (found === undefined) {
+      const group: EditedFileGroup = { dir, files: [name] };
+      byDir.set(dir, group);
+      groups.push(group);
+    } else {
+      found.files.push(name);
+    }
+  }
+  return groups;
 }
 
 /**

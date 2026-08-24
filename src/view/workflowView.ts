@@ -13,6 +13,8 @@ import type { WorkflowDefinition } from '../orchestrator/workflow';
 import { chatCsp } from './chatCsp';
 import {
   aggregateProgress,
+  kanbanBucket,
+  progressSegments,
   layoutGraph,
   summarizeIntegration,
   summarizeKanban,
@@ -298,12 +300,18 @@ export class WorkflowViewManager implements vscode.Disposable {
     const tasksWithRoleLabel = snapshot.tasks.map((t) => ({
       ...t,
       roleLabel: taskRoleLabel(t.role),
+      // カンバンのバッジから該当タスクを絞り込む（issue #752）ための分類。Webview側で
+      // 状態を振り分け直すと、状態が増えたときにここだけ追随漏れになる（Issue #104）
+      kanbanBucket: kanbanBucket(t.state),
     }));
     void this.panel.webview.postMessage({
       type: 'state',
       snapshot: { ...snapshot, tasks: tasksWithRoleLabel },
       layout,
       progress,
+      // 全体進捗バーの積み上げ（issue #754）。集計はここ（純粋関数）で済ませ、
+      // Webview側は受け取った幅を当てるだけにする（Issue #104の再発防止と同じ方針）
+      progressSegments: progressSegments(progress),
       kanban,
       integration,
     });
@@ -644,7 +652,7 @@ ${workflowStyles()}
       <button id="openIntegrationPrBtn" type="button" class="secondary" disabled>統合ブランチのPR/MRを開く</button>
       <button id="cleanupIntegrationBtn" type="button" class="danger">統合ブランチと残ったworktreeをまとめて片付ける</button>
     </div>
-    <div id="progressBar"><div class="fill" id="progressFill"></div></div>
+    <div id="progressBar" role="img"><div class="fill seg-done" id="segDone" hidden></div><div class="fill seg-active" id="segActive" hidden></div><div class="fill seg-attention" id="segAttention" hidden></div></div>
     <div id="progressPercent"></div>
     <div id="banner" hidden></div>
     <div id="orchestrator" hidden>
@@ -680,6 +688,8 @@ ${workflowStyles()}
         <button id="graphZoomFitBtn" type="button" class="secondary" title="幅に合わせて全体を表示">全体表示</button>
       </div>
     </div>
+    <!-- 拡大中に全体のどこを見ているかを示す帯（issue #753）。全体表示のときは隠す -->
+    <div id="graphViewport" hidden><div id="graphViewportWindow"></div></div>
     <div id="graphWrap">
       <svg id="graph" xmlns="http://www.w3.org/2000/svg"></svg>
     </div>

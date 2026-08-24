@@ -694,6 +694,104 @@ describe('controlPanelScript', () => {
   );
 });
 
+describe('workflowScript のグラフの現在地表示（issue #753）', () => {
+  it('スクロール位置から可視範囲の割合を出す', () => {
+    const source = workflowScript();
+    // 陽性対照: 帯を引き直す関数がある（綴り違いで空振りしていない）
+    expect(source).toContain('function updateGraphViewport()');
+    expect(source).toContain("window_.style.left = (wrap.scrollLeft / total) * 100 + '%';");
+    expect(source).toContain("window_.style.width = (visible / total) * 100 + '%';");
+  });
+
+  it('全体表示のときと横スクロールが無いときは隠す', () => {
+    const source = workflowScript();
+    expect(source).toContain(
+      "zoomMode === 'fit' || total <= 0 || visible <= 0 || total - visible < 1",
+    );
+    expect(source).toContain('bar.hidden = true;');
+  });
+
+  it('スクロールは次のフレームまでまとめる', () => {
+    const source = workflowScript();
+    expect(source).toContain('requestAnimationFrame');
+    expect(source).toContain("el('graphWrap').addEventListener('scroll', scheduleGraphViewport);");
+    // 二重に予約しない
+    expect(source).toContain('if (viewportFrame !== 0) return;');
+  });
+});
+
+describe('workflowScript のカンバンバッジからの絞り込み（issue #752）', () => {
+  it('バッジはボタンで、押下状態を aria-pressed で持つ', () => {
+    const source = workflowScript();
+    // 陽性対照: バッジを作る関数がある（綴り違いで空振りしていない）
+    expect(source).toContain('function kanbanBadge(bucket, count)');
+    expect(source).toContain("text(\n      'button',");
+    expect(source).toContain("button.setAttribute('aria-pressed'");
+    expect(source).toContain("button.type = 'button';");
+  });
+
+  it('押すとトグルし、0件のバッジは押せない', () => {
+    const source = workflowScript();
+    expect(source).toContain('kanbanFilter = kanbanFilter === bucket ? undefined : bucket;');
+    expect(source).toContain('button.disabled = count === 0;');
+  });
+
+  it('該当しないノードは消さずに淡くする', () => {
+    const source = workflowScript();
+    expect(source).toContain("' dimmed'");
+    expect(workflowStyles()).toContain('.wf-node.dimmed');
+  });
+
+  it('バケットの分類はWebview側で振り分け直さない', () => {
+    const source = workflowScript();
+    // 拡張機能側が付けた kanbanBucket をそのまま使う（Issue #104の再発防止）
+    expect(source).toContain('task.kanbanBucket !== kanbanFilter');
+    expect(source).not.toContain("state === 'failed' || state === 'blocked'");
+  });
+
+  it('絞り込み中のバケットが0件になったら解除する', () => {
+    const source = workflowScript();
+    expect(source).toContain('kanbanFilter = undefined;');
+    expect(source).toContain('!(kanban[kanbanFilter] > 0)');
+  });
+});
+
+describe('workflowScript の全体進捗バー（issue #754）', () => {
+  it('区画の集計は拡張機能側の結果をそのまま当てる', () => {
+    const source = workflowScript();
+    // 陽性対照: 区画を描く関数がある（綴り違いで空振りしていない）
+    expect(source).toContain('function renderProgressBar(progress, segments)');
+    // Webview側で状態を数え直さない（Issue #104の再発防止と同じ方針）
+    expect(source).toContain('msg.progressSegments');
+    expect(source).not.toContain('counts.failed + counts.blocked');
+  });
+
+  it('件数が0の区画は隠す', () => {
+    const source = workflowScript();
+    expect(source).toContain('element.hidden = true;');
+    expect(source).toContain("element.style.width = '0%';");
+  });
+
+  it('区切り線は2つ目以降の区画にだけ付ける', () => {
+    const source = workflowScript();
+    // 隣接セレクタだと、件数0で隠した区画も兄弟として残り先頭に線が付く
+    expect(source).toContain("(isFirst ? '' : ' divided')");
+    expect(workflowStyles()).toContain('#progressBar .fill.divided');
+    expect(workflowStyles()).not.toContain('#progressBar .fill + .fill');
+  });
+
+  it('完了率の数字は従来どおり出す', () => {
+    const source = workflowScript();
+    expect(source).toContain("el('progressPercent').textContent = progress.percentDone + '%';");
+  });
+
+  it('色を読めなくても内訳が分かるよう読み上げ用の文字を持つ', () => {
+    const source = workflowScript();
+    expect(source).toContain("setAttribute(\n      'aria-label',");
+    expect(source).toContain('SEGMENT_LABEL');
+  });
+});
+
 describe('workflowStyles', () => {
   // Issue #280: 一覧のバッジはグラフのノード枠と同じ配色を使う。どちらか片方だけ
   // 色を足して図と一覧が食い違う事故を機械的に防ぐ
@@ -1068,6 +1166,54 @@ describe('progressScript', () => {
     expect(source).toContain('progressPercent');
   });
 
+  it('変更したファイルをディレクトリごとに出す（issue #749）', () => {
+    const source = progressScript();
+    // 陽性対照: グループを組み立てる関数がある（綴り違いで空振りしていない）
+    expect(source).toContain('function fileGroupRow(group, names)');
+    expect(source).toContain('renderFiles(view.summary.editedFileGroups);');
+    // 打ち切りはグループ数ではなくファイル数で数える
+    expect(source).toContain('const room = FILES_SHOWN - shown;');
+    expect(source).toContain('残り');
+    // 平坦な一覧を作る旧経路は残さない
+    expect(source).not.toContain('fillPathList');
+  });
+
+  it('ターンの開閉を覚えて再描画で失わない（issue #750）', () => {
+    const source = progressScript();
+    // 陽性対照: 開閉を覚える入れ物がある（綴り違いで空振りしていない）
+    expect(source).toContain('const turnOpen = {};');
+    // 人の操作は summary のクリックで拾う。toggle は描画時の代入でも発火するため使わない
+    expect(source).toContain("head.addEventListener('click'");
+    expect(source).toContain('turnOpen[turn.index] = !article.open;');
+    expect(source).not.toContain("addEventListener('toggle'");
+    // 覚えた値は既定（末尾 OPEN_TURNS 件）より優先する
+    expect(source).toContain('const remembered = turnOpen[turn.index];');
+    expect(source).toContain('remembered === undefined');
+  });
+
+  it('畳まれたターンがあるときだけ「開く」を出す（issue #750）', () => {
+    const source = progressScript();
+    expect(source).toContain('renderExpandAll');
+    expect(source).toContain('timelineMore');
+    // 閉じているターンが0件なら何も出さない（3件以下のセッションで死んだボタンを見せない）
+    expect(source).toContain('if (closed === 0) {');
+  });
+
+  it('応答中の最新ターンは既定で開く（issue #750）', () => {
+    const source = progressScript();
+    expect(source).toContain('isLatest && isBusy');
+    expect(source).toContain('isBusy = summary.busy === true;');
+  });
+
+  it('応答中は上端の稼働バーを出し、終わると隠す（issue #751）', () => {
+    const source = progressScript();
+    // 陽性対照: そもそもこの要素を触る処理がある（idの綴り違いで空振りしていない）
+    expect(source).toContain('busyBar');
+    expect(source).toContain("el('busyBar').hidden = !summary.busy;");
+    // 進捗が1件も無い（サマリごと隠す）経路でも消す
+    expect(source).toContain("el('busyBar').hidden = true;");
+  });
+
   it('古いターンを畳み、ファイル一覧を打ち切る（issue #781）', () => {
     const source = progressScript();
     expect(source).toContain('OPEN_TURNS');
@@ -1094,5 +1240,27 @@ describe('progressStyles', () => {
 
   it('動きを減らす設定に追随する（issue #760）', () => {
     expect(progressStyles()).toContain('prefers-reduced-motion');
+  });
+
+  it('稼働バーはtransformだけで動かす（issue #751）', () => {
+    const source = progressStyles();
+    const rule = source.slice(source.indexOf('@keyframes busySlide'));
+    const body = rule.slice(0, rule.indexOf('}\n'));
+    // 陽性対照: keyframesの本体を切り出せている（空文字列に対する検査ではない）
+    expect(body).toContain('translateX');
+    // width / background-position を毎フレーム変えるとレイアウトと再描画が走る
+    expect(body).not.toContain('width');
+    expect(body).not.toContain('background-position');
+  });
+
+  it('稼働バーは画面上端に固定し、完了率バーと位置で分ける（issue #751）', () => {
+    const source = progressStyles();
+    const rule = source.slice(source.indexOf('#busyBar {'));
+    const body = rule.slice(0, rule.indexOf('}'));
+    expect(body).toContain('position: fixed');
+    expect(body).toContain('top: 0');
+    // 完了率バーはサマリの中に置いたまま（固定しない）
+    const fill = source.slice(source.indexOf('#progressFill {'));
+    expect(fill.slice(0, fill.indexOf('}'))).not.toContain('position: fixed');
   });
 });

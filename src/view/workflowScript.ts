@@ -133,7 +133,54 @@ export function workflowScript(): string {
   // （waitingReply/merging/blocked）がここに反映されない食い違いの原因になっていた
   // （Issue #104が起きた背景そのもの）。
 
-  function renderHeader(snapshot, progress) {
+  const SEGMENT_ELEMENT = { done: 'segDone', active: 'segActive', attention: 'segAttention' };
+  const SEGMENT_LABEL = { done: '完了', active: '進行中', attention: '要対応' };
+
+  /**
+   * 全体進捗バーを状態ごとの積み上げにする（issue #754）。区画の集計は拡張機能側
+   * （workflowGraph.tsのprogressSegments。純粋関数でテスト済み）が済ませており、
+   * ここでは受け取った幅を当てるだけにする（renderHeaderと同じ方針。Issue #104の再発防止）。
+   *
+   * 件数が0の区画は隠す。幅0のまま残すと区切り線だけが積み上がる。
+   */
+  function renderProgressBar(progress, segments) {
+    const list = segments || [];
+    const shown = {};
+    let isFirst = true;
+    for (const segment of list) {
+      const id = SEGMENT_ELEMENT[segment.kind];
+      if (id === undefined) {
+        continue;
+      }
+      const element = el(id);
+      element.hidden = false;
+      element.style.width = segment.percent + '%';
+      // 区切り線は2つ目以降だけ。先頭に付けるとバーの左端に1本余分に出る
+      element.className = 'fill seg-' + segment.kind + (isFirst ? '' : ' divided');
+      isFirst = false;
+      shown[segment.kind] = segment.count;
+    }
+    for (const kind of ['done', 'active', 'attention']) {
+      if (shown[kind] === undefined) {
+        const element = el(SEGMENT_ELEMENT[kind]);
+        element.hidden = true;
+        element.style.width = '0%';
+      }
+    }
+    // 色を読めない環境でも内訳が分かるよう、同じ内容を読み上げ用の文字でも持つ
+    const parts = [];
+    for (const kind of ['done', 'active', 'attention']) {
+      if (shown[kind] !== undefined) {
+        parts.push(SEGMENT_LABEL[kind] + ' ' + shown[kind] + '件');
+      }
+    }
+    el('progressBar').setAttribute(
+      'aria-label',
+      '全体の進捗 ' + progress.percentDone + '%' + (parts.length > 0 ? '（' + parts.join('、') + '）' : ''),
+    );
+  }
+
+  function renderHeader(snapshot, progress, segments) {
     const counts = progress.counts;
     const total = progress.total;
 
@@ -147,7 +194,7 @@ export function workflowScript(): string {
       (counts.failed > 0 ? ' / ' + counts.failed + '失敗' : '') +
       (counts.blocked > 0 ? ' / ' + counts.blocked + 'ブロック' : '') +
       (counts.skipped > 0 ? ' / ' + counts.skipped + 'スキップ' : '');
-    el('progressFill').style.width = progress.percentDone + '%';
+    renderProgressBar(progress, segments);
     el('progressPercent').textContent = progress.percentDone + '%';
     el('runStartedAt').setAttribute('data-started', String(Date.parse(snapshot.startedAt) || 0));
 
@@ -196,7 +243,35 @@ export function workflowScript(): string {
   // 行い、ここではその結果（kanban）を表示するだけにする。renderHeader/renderBannerと
   // 同じ方針（Issue #104の再発防止）。
 
-  const KANBAN_LABEL = { todo: 'ToDo', inProgress: 'InProgress', done: 'Done' };
+  const KANBAN_LABEL = { todo: 'ToDo', inProgress: 'InProgress', done: 'Done', attention: '要対応' };
+
+  /**
+   * 押されているバッジのバケット（issue #752）。未選択は undefined。
+   * 状態が届くたびに画面は組み直されるが、この値は残るので絞り込みは維持される。
+   */
+  let kanbanFilter = undefined;
+
+  /** バッジを1枚作る。押すとそのバケットのタスクだけを強調する（トグル）。 */
+  function kanbanBadge(bucket, count) {
+    const button = text(
+      'button',
+      'kanban-badge kanban-' + bucket + (kanbanFilter === bucket ? ' selected' : ''),
+      KANBAN_LABEL[bucket] + ': ' + count,
+    );
+    button.type = 'button';
+    // 0件のバッジは押しても強調するものが無い。押せないことを見た目と支援技術の両方へ伝える
+    button.disabled = count === 0;
+    button.setAttribute('aria-pressed', kanbanFilter === bucket ? 'true' : 'false');
+    button.addEventListener('click', () => {
+      kanbanFilter = kanbanFilter === bucket ? undefined : bucket;
+      // バッジ自身の押下状態と、グラフの強調の両方を引き直す
+      renderKanban(currentKanban);
+      if (currentSnapshot && currentLayout) {
+        renderGraph(currentSnapshot, currentLayout);
+      }
+    });
+    return button;
+  }
 
   function renderKanban(kanban) {
     const box = el('kanbanBadges');
@@ -205,16 +280,19 @@ export function workflowScript(): string {
       box.hidden = true;
       return;
     }
+    // 絞り込み中のバケットが0件になったら解除する。該当が1つも無いまま「絞り込み中」の
+    // 見た目だけが残ると、なぜ全部が淡いのかが分からなくなる
+    if (kanbanFilter !== undefined && !(kanban[kanbanFilter] > 0)) {
+      kanbanFilter = undefined;
+    }
     box.hidden = false;
     for (const bucket of ['todo', 'inProgress', 'done']) {
-      box.appendChild(
-        text('span', 'kanban-badge kanban-' + bucket, KANBAN_LABEL[bucket] + ': ' + kanban[bucket]),
-      );
+      box.appendChild(kanbanBadge(bucket, kanban[bucket]));
     }
     // 要対応（failed/blocked/skipped）は1件以上のときだけ、警告色のバッジを追加で出す
     // （design.mdの受入基準）。0件のときは他の3バケットと並べても目立たせる意味が無い
     if (kanban.attention > 0) {
-      box.appendChild(text('span', 'kanban-badge kanban-attention', '要対応: ' + kanban.attention));
+      box.appendChild(kanbanBadge('attention', kanban.attention));
     }
   }
 
@@ -256,7 +334,12 @@ export function workflowScript(): string {
 
   function buildNode(task, pos) {
     const group = svgEl('g', {
-      class: 'wf-node state-' + task.state + (task.id === selectedTaskId ? ' selected' : ''),
+      class:
+        'wf-node state-' + task.state +
+        (task.id === selectedTaskId ? ' selected' : '') +
+        // 絞り込み中は該当しないノードを淡くする（issue #752）。消さずに残すのは、
+        // 依存グラフが主役の画面でノードが消えると関係が読めなくなるため
+        (kanbanFilter !== undefined && task.kanbanBucket !== kanbanFilter ? ' dimmed' : ''),
       transform: 'translate(' + pos.x + ',' + pos.y + ')',
       'data-task-id': task.id,
     });
@@ -379,6 +462,45 @@ export function workflowScript(): string {
     el('graphZoomInBtn').disabled = zoomMode === 'manual' && zoomScale >= MAX_ZOOM;
     el('graphZoomOutBtn').disabled = zoomMode === 'manual' && zoomScale <= MIN_ZOOM;
     el('graphWrapNote').hidden = !layout.wrapped;
+    // 倍率が変わるとスクロールできる幅も変わる（issue #753）
+    updateGraphViewport();
+  }
+
+  /**
+   * 拡大中に「グラフ全体のどこを見ているか」を示す帯を引き直す（issue #753）。
+   *
+   * ミニマップ（ノードの縮小図）ではなく横方向の帯にした。縦は段が積み上がっても
+   * 画面に収まることが多く、読みたいのは主に横方向のどこか。描くのは矩形1つだけなので、
+   * タスク数が増えても描画量は変わらない。
+   *
+   * 全体表示（zoomMode === 'fit'）のときと、横スクロールが起きていないときは隠す。
+   */
+  function updateGraphViewport() {
+    const bar = el('graphViewport');
+    const wrap = el('graphWrap');
+    if (!bar || !wrap) return;
+    const total = wrap.scrollWidth;
+    const visible = wrap.clientWidth;
+    if (zoomMode === 'fit' || total <= 0 || visible <= 0 || total - visible < 1) {
+      bar.hidden = true;
+      return;
+    }
+    bar.hidden = false;
+    const window_ = el('graphViewportWindow');
+    window_.style.left = (wrap.scrollLeft / total) * 100 + '%';
+    window_.style.width = (visible / total) * 100 + '%';
+  }
+
+  /**
+   * スクロールは1回の操作で何十回も発火する。描画は次のフレームまで1回にまとめる。
+   */
+  let viewportFrame = 0;
+  function scheduleGraphViewport() {
+    if (viewportFrame !== 0) return;
+    viewportFrame = requestAnimationFrame(() => {
+      viewportFrame = 0;
+      updateGraphViewport();
+    });
   }
 
   function setZoom(next) {
@@ -955,6 +1077,8 @@ export function workflowScript(): string {
   // ---- 選択・操作 ----
 
   let selectedTaskId = undefined;
+  /** 最後に受け取ったカンバンの集計。バッジを押したときに引き直すために持つ（issue #752）。 */
+  let currentKanban = undefined;
 
   function selectAndReveal(taskId) {
     selectedTaskId = taskId;
@@ -984,12 +1108,13 @@ export function workflowScript(): string {
     el('empty').hidden = runs.length > 0;
   }
 
-  function applyState(snapshot, layout, progress, kanban, integration) {
+  function applyState(snapshot, layout, progress, kanban, integration, segments) {
     currentSnapshot = snapshot;
     currentLayout = layout;
+    currentKanban = kanban;
     el('content').hidden = false;
     el('empty').hidden = true;
-    renderHeader(snapshot, progress);
+    renderHeader(snapshot, progress, segments);
     renderKanban(kanban);
     renderOrchestrator(snapshot);
     renderAskUser(snapshot);
@@ -1112,6 +1237,9 @@ export function workflowScript(): string {
   });
   graphResizeObserver.observe(el('graphWrap'));
 
+  // 現在地の帯（issue #753）。スクロールのたびに引き直す
+  el('graphWrap').addEventListener('scroll', scheduleGraphViewport);
+
   el('runSelect').addEventListener('change', (e) => {
     vscode.postMessage({ type: 'selectRun', runId: e.target.value });
   });
@@ -1154,7 +1282,7 @@ export function workflowScript(): string {
     if (msg.type === 'runs') {
       applyRuns(msg.runs);
     } else if (msg.type === 'state') {
-      applyState(msg.snapshot, msg.layout, msg.progress, msg.kanban, msg.integration);
+      applyState(msg.snapshot, msg.layout, msg.progress, msg.kanban, msg.integration, msg.progressSegments);
     } else if (msg.type === 'noRun') {
       applyNoRun();
     } else if (msg.type === 'programs') {

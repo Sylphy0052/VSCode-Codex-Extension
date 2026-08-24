@@ -6,7 +6,7 @@ import {
   type TodoItem,
   type TodoSnapshot,
 } from '../../src/appserver/chatState';
-import { buildProgress, diffTodos } from '../../src/view/progressModel';
+import { buildProgress, diffTodos, groupEditedFiles } from '../../src/view/progressModel';
 
 /**
  * 進捗画面の表示モデル（issue #721）。ターンの区切り・集計・TODOの差分を固定する。
@@ -201,5 +201,53 @@ describe('diffTodos', () => {
   it('変化が無ければ空を返す', () => {
     const todos = [todo('A', 'pending')];
     expect(diffTodos(todos, todos)).toEqual([]);
+  });
+});
+
+describe('groupEditedFiles（issue #749）', () => {
+  it('ディレクトリごとにまとめる', () => {
+    expect(
+      groupEditedFiles(['/w/src/view/a.ts', '/w/src/view/b.ts', '/w/test/unit/c.test.ts']),
+    ).toEqual([
+      { dir: 'src/view/', files: ['a.ts', 'b.ts'] },
+      { dir: 'test/unit/', files: ['c.test.ts'] },
+    ]);
+  });
+
+  it('共通の接頭辞はセグメント単位で落とす（文字単位では切らない）', () => {
+    // 文字で比べると `/w/src/view` が共通に見えて `er/b.ts` のような残骸が出る
+    expect(groupEditedFiles(['/w/src/view/a.ts', '/w/src/viewer/b.ts'])).toEqual([
+      { dir: 'view/', files: ['a.ts'] },
+      { dir: 'viewer/', files: ['b.ts'] },
+    ]);
+  });
+
+  it('全部が同じディレクトリなら階層を出さない', () => {
+    expect(groupEditedFiles(['/w/src/a.ts', '/w/src/b.ts'])).toEqual([
+      { dir: '', files: ['a.ts', 'b.ts'] },
+    ]);
+  });
+
+  it('1件だけのときは共通接頭辞を落とさない（どこのファイルか分からなくなるため）', () => {
+    expect(groupEditedFiles(['/w/src/view/a.ts'])).toEqual([
+      { dir: '/w/src/view/', files: ['a.ts'] },
+    ]);
+  });
+
+  it('最初に変更した順を保つ（名前順に並べ替えない）', () => {
+    expect(groupEditedFiles(['/w/b/z.ts', '/w/a/y.ts', '/w/b/x.ts'])).toEqual([
+      { dir: 'b/', files: ['z.ts', 'x.ts'] },
+      { dir: 'a/', files: ['y.ts'] },
+    ]);
+  });
+
+  it('ディレクトリを持たないパスも扱える', () => {
+    expect(groupEditedFiles(['README.md', 'LICENSE'])).toEqual([
+      { dir: '', files: ['README.md', 'LICENSE'] },
+    ]);
+  });
+
+  it('空の入力では空の配列', () => {
+    expect(groupEditedFiles([])).toEqual([]);
   });
 });
