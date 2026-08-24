@@ -636,6 +636,12 @@
           "scope": "machine-overridable",
           "markdownDescription": "`-p` に渡すCodexのプロファイル名。"
         },
+        "codex.usage.statusBarGauge": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "ステータスバーのCodex使用量に、5目盛りのゲージ（`▮▮▯▯▯`）を数字の手前へ添える。無効にすると数字だけの従来表示に戻る。使用量をまだ取得できていない間の表示（`Codex --`）はどちらでも変わらない。"
+        },
         "codex.history.scope": {
           "type": "string",
           "enum": [

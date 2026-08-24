@@ -1,7 +1,13 @@
 import * as vscode from 'vscode';
 import type { ChatUsage } from '../appserver/chatState';
 import { formatClaudeUsage } from '../claude/usageText';
-import { formatResetsIn, formatWindow, severityOf, type UsageSnapshot } from '../codex/usage';
+import {
+  formatResetsIn,
+  formatUsageGauge,
+  formatWindow,
+  severityOf,
+  type UsageSnapshot,
+} from '../codex/usage';
 import { formatAbsoluteTime } from './relativeTime';
 
 /**
@@ -66,7 +72,8 @@ export class UsageStatusBar implements vscode.Disposable {
 
     const percent = Math.round(snapshot.usedPercent);
     const resets = formatResetsIn(snapshot.resetsAt, Date.now());
-    this.item.text = `$(pulse) Codex ${percent}%${resets === '' ? '' : ` ・ ${resets}`}`;
+    const gauge = isGaugeEnabled() ? formatUsageGauge(snapshot.usedPercent) : '';
+    this.item.text = `$(pulse) Codex ${gauge === '' ? '' : `${gauge} `}${percent}%${resets === '' ? '' : ` ・ ${resets}`}`;
     this.item.tooltip = buildTooltip(snapshot);
 
     const severity = severityOf(snapshot.usedPercent);
@@ -82,6 +89,15 @@ export class UsageStatusBar implements vscode.Disposable {
     this.item.dispose();
     this.claudeItem.dispose();
   }
+}
+
+/**
+ * ステータスバーにゲージを添えるか。
+ *
+ * 文字数が増えて他の項目を押し出すのを嫌う人がいるため、数字だけへ戻せるようにする。
+ */
+function isGaugeEnabled(): boolean {
+  return vscode.workspace.getConfiguration('codex').get<boolean>('usage.statusBarGauge') !== false;
 }
 
 function buildTooltip(snapshot: UsageSnapshot): vscode.MarkdownString {
