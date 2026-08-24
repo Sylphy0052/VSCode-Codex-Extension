@@ -4,6 +4,7 @@ import { chatScript } from '../../src/view/chatScript';
 import { chatStyles } from '../../src/view/chatStyles';
 import { controlPanelStyles } from '../../src/view/controlPanelStyles';
 import { progressStyles } from '../../src/view/progressStyles';
+import { workflowStyles } from '../../src/view/workflowStyles';
 
 /**
  * Webviewのスタイルはテンプレートリテラルの中身で、型検査もlintも効かない。
@@ -212,4 +213,29 @@ describe('progressStyles', () => {
   it('色をテーマ変数から取る（ハードコードした色値を増やさない）', () => {
     expect(progressStyles()).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
+});
+
+/**
+ * 枠線のフォールバック（issue #758）。
+ *
+ * `--vscode-widget-border` はすべてのテーマが定義しているわけではない。未定義のテーマで
+ * `transparent` へ落とすと、枠は描かれないのに幅だけが残り、カード・セクション・タブの
+ * 区切りが消える。フォールバック先には実在する変数を置くこと。
+ */
+describe('枠線のフォールバック（issue #758）', () => {
+  const sources: ReadonlyArray<readonly [string, () => string]> = [
+    ['chatStyles', chatStyles],
+    ['controlPanelStyles', controlPanelStyles],
+    ['progressStyles', progressStyles],
+    ['workflowStyles', workflowStyles],
+  ];
+
+  for (const [name, build] of sources) {
+    it(`${name}: --vscode-widget-border を transparent へ落とさない`, () => {
+      const css = build();
+      // 変数を使っていないスタイルで素通りしないよう、拾えること自体を先に確かめる
+      expect(css, '検査対象の変数が使われていない').toContain('--vscode-widget-border');
+      expect(css).not.toContain('--vscode-widget-border, transparent');
+    });
+  }
 });
