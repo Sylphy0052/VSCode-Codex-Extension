@@ -273,6 +273,7 @@ describe('controlPanelStyles', () => {
     // opacity は子要素にも掛かるうえ、ハイコントラストテーマで背景と同化する
     const css = stripComments(controlPanelStyles());
     const bar = css.match(/\n\s*\.bar \{([^}]*)\}/);
+    expect(bar, '.bar の規則が見つからない').not.toBeNull();
     expect(bar?.[1]).not.toMatch(/opacity:/);
     expect(bar?.[1]).toMatch(/color-mix\(/);
     // ハイコントラストテーマでだけ描かれる輪郭。レイアウトを動かさない outline で出す
