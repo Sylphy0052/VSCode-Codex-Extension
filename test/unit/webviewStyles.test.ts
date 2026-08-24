@@ -261,6 +261,42 @@ describe('controlPanelStyles', () => {
     expect(css).toContain('.sectionLoading');
   });
 
+  it('状態を表すバッジすべてに色以外の手掛かりがある（issue #759）', () => {
+    // 色だけで分けると、グレースケールやハイコントラストで種別が消える。
+    // 「色を指定している状態バッジ」を母数にして、その全部に記号か線種があることを確かめる
+    const css = stripComments(controlPanelStyles());
+    const colored = new Set<string>();
+    const cued = new Set<string>();
+    const rule = /([^{}]+)\{([^{}]*)\}/g;
+    let m: RegExpExecArray | null;
+    while ((m = rule.exec(css)) !== null) {
+      const selector = (m[1] ?? '').trim();
+      const body = m[2] ?? '';
+      for (const part of selector.split(',')) {
+        const one = part.trim();
+        // 状態を表すのは .xxxBadge-yyy の形。土台の .xxxBadge には色を載せていない
+        const isStateBadge = /^\.\w+Badge-\w+(::before)?$/.test(one);
+        if (!isStateBadge) {
+          continue;
+        }
+        const base = one.replace('::before', '');
+        if (one.endsWith('::before') && body.includes('content:')) {
+          cued.add(base);
+        } else if (body.includes('border-style:')) {
+          cued.add(base);
+        } else if (body.includes('color:')) {
+          colored.add(base);
+        }
+      }
+    }
+    // 陽性対照: 母数が空だとこの検査は何も確かめていない
+    expect(colored.size).toBeGreaterThan(0);
+    expect(cued.size).toBeGreaterThan(0);
+    for (const selector of colored) {
+      expect(cued.has(selector), `${selector} に色以外の手掛かりが無い`).toBe(true);
+    }
+  });
+
   it('一覧のカードすべてにホバー時の背景がある（issue #746）', () => {
     // カードを1種類足したときにホバーだけ付け忘れても見た目では気付けない。
     // 「カードの書式を持つ規則」を母数にして、その全部にホバーがあることを確かめる
