@@ -261,6 +261,32 @@ describe('controlPanelStyles', () => {
     expect(css).toContain('.sectionLoading');
   });
 
+  it('選択中のタブが背景と2pxの下線で分かる（issue #743）', () => {
+    const css = stripComments(controlPanelStyles());
+    const selected = css.match(/\.tabs button\[aria-selected='true'\] \{([^}]*)\}/);
+    expect(selected, '選択中のタブの規則が見つからない').not.toBeNull();
+    expect(selected?.[1]).toMatch(/background-color:[^;]*var\(--vscode-tab-activeBackground/);
+    expect(selected?.[1]).toMatch(/color:\s*var\(--vscode-foreground\)/);
+    // 非選択側も同じ太さの透明な下線を持たせ、切り替えで高さが動かないようにする
+    const base = css.match(/\n\s*\.tabs button \{([^}]*)\}/);
+    expect(base, '.tabs button の規則が見つからない').not.toBeNull();
+    expect(base?.[1]).toMatch(/border-bottom:\s*2px solid transparent/);
+  });
+
+  it('非選択のタブをopacityで薄くしない（issue #743）', () => {
+    // opacity は文字だけでなく button:focus のフォーカスリングまで薄くする
+    const base = stripComments(controlPanelStyles()).match(/\n\s*\.tabs button \{([^}]*)\}/);
+    expect(base, '.tabs button の規則が見つからない').not.toBeNull();
+    expect(base?.[1]).not.toMatch(/opacity:/);
+    expect(base?.[1]).toMatch(/color:\s*var\(--vscode-descriptionForeground\)/);
+  });
+
+  it('タブのhoverが選択中の背景を打ち消さない（issue #743）', () => {
+    // 同じ詳細度なら後に来た規則が勝つ。hover が選択中にも当たると選択が見えなくなる
+    const css = stripComments(controlPanelStyles());
+    expect(css).toContain(".tabs button:not([aria-selected='true']):hover");
+  });
+
   it('使用量バーの太さがワークフロー画面と揃っている（issue #742）', () => {
     // 画面ごとに太さが違うと、同じ意味の表示に見えない
     const bar = stripComments(controlPanelStyles()).match(/\n\s*\.bar \{([^}]*)\}/);

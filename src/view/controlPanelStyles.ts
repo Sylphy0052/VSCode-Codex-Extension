@@ -155,22 +155,36 @@ export function controlPanelStyles(): string {
     margin-bottom: 12px;
     border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
   }
+  /*
+   * どちらのプロバイダを編集しているかを取り違えると、設定が反対側のCLIに入る（issue #743）。
+   * 太さの差だけではサイドバーの小さい字で判別しにくいので、選択中には背景と2pxの下線を付ける。
+   *
+   * 非選択を opacity で薄くすると、フォーカスリング（button:focus の outline）まで薄くなる。
+   * 文字色を descriptionForeground へ落とす形にして、リングの濃さは保つ。
+   *
+   * 下線は非選択側も 2px の transparent にしてある。選択時に太さが変わると、選択の切り替えで
+   * タブの高さが1pxずつ動く。
+   */
   .tabs button {
     width: auto;
     flex: 1;
     margin-top: 0;
     padding: 4px 8px;
-    color: var(--vscode-foreground);
+    color: var(--vscode-descriptionForeground);
     background-color: transparent;
     border: none;
-    border-bottom: 1px solid transparent;
+    border-bottom: 2px solid transparent;
     border-radius: 0;
-    opacity: 0.7;
   }
-  .tabs button:hover { background-color: var(--vscode-toolbar-hoverBackground, transparent); }
+  /* 選択中を除くのは、hover の背景が選択中の背景を打ち消して選択が見えなくなるため
+     （同じ詳細度で後に来た規則が勝つ） */
+  .tabs button:not([aria-selected='true']):hover {
+    background-color: var(--vscode-toolbar-hoverBackground, transparent);
+  }
   .tabs button[aria-selected='true'] {
-    opacity: 1;
     font-weight: 600;
+    color: var(--vscode-foreground);
+    background-color: var(--vscode-tab-activeBackground, var(--vscode-editorWidget-background));
     border-bottom-color: var(--vscode-focusBorder);
   }
   .note {
