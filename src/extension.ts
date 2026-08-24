@@ -2491,15 +2491,6 @@ function createExecutablePathResolver(provider: AgentProvider, log: Logger): () 
 }
 
 /**
- * セッションツリーの要素を引数に取るコマンドを包む共通ガード（issue #236）。
- *
- * `view/item/context`（インラインアイコン・右クリックメニュー）から呼ばれるコマンドは、
- * VS Codeがツリーの要素を復元できないと引数が `undefined` のまま届く。素通しすると
- * `Cannot read properties of undefined` で落ちるため、ここで受け止めてログだけ残す。
- * 復元が壊れる原因自体は `SessionTreeProvider.getTreeItem` の `id` で塞いであり、
- * これはメニュー定義を増やしたときの再発に備えた防御。
- */
-/**
  * 承認待ちが複数あるときに、どれへ戻るか選ばせる（issue #755）。
  *
  * 0件で押されることもある（表示から時間が経って全て解決済みになった場合）。
@@ -2524,6 +2515,15 @@ async function pickApprovalPending(
   return picked?.session;
 }
 
+/**
+ * セッションツリーの要素を引数に取るコマンドを包む共通ガード（issue #236）。
+ *
+ * `view/item/context`（インラインアイコン・右クリックメニュー）から呼ばれるコマンドは、
+ * VS Codeがツリーの要素を復元できないと引数が `undefined` のまま届く。素通しすると
+ * `Cannot read properties of undefined` で落ちるため、ここで受け止めてログだけ残す。
+ * 復元が壊れる原因自体は `SessionTreeProvider.getTreeItem` の `id` で塞いであり、
+ * これはメニュー定義を増やしたときの再発に備えた防御。
+ */
 function withSession(
   log: Logger,
   command: string,
