@@ -22,13 +22,13 @@ import {
   parseReadHistoriesResponse,
 } from './importStatus';
 import {
-  consumeFrames,
+  FrameBuffer,
   encodeNotification,
   encodeRequest,
   readForkedThreadId,
   type JsonRpcMessage,
 } from './jsonRpc';
-import { killWithEscalation, MAX_LINE_BUFFER_BYTES } from '../process/childProcess';
+import { killWithEscalation, MAX_APP_SERVER_LINE_BYTES } from '../process/childProcess';
 import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
 import {
   mergeMcpServers,
@@ -96,6 +96,12 @@ export class AppServerClient {
     private readonly codexPath: () => string,
     private readonly log: Logger,
     private readonly timeoutMs = 30_000,
+    /**
+     * 受信バッファの1行上限（issue #795）。既定は会話アイテムを全件含む`thread/fork`の
+     * 応答が通る`MAX_APP_SERVER_LINE_BYTES`。小さい値で上限超過の挙動を確かめられるよう、
+     * テストからだけ差し替える。
+     */
+    private readonly maxLineBytes: number = MAX_APP_SERVER_LINE_BYTES,
   ) {}
 
   /** 指定ターンまでで分岐した新しいスレッドを作る。元のスレッドは変更されない。 */
@@ -723,7 +729,7 @@ export class AppServerClient {
           return () => notificationListeners.delete(listener);
         },
       };
-      let buffer = '';
+      const frames = new FrameBuffer(this.maxLineBytes);
       let settled = false;
       let alreadyExited = false;
       let nextId = 1;
@@ -768,9 +774,7 @@ export class AppServerClient {
       );
 
       proc.stdout.on('data', (chunk: Buffer) => {
-        buffer += chunk.toString('utf8');
-        const { messages, rest, overflow } = consumeFrames(buffer);
-        buffer = rest;
+        const { messages, overflow } = frames.push(chunk.toString('utf8'));
         try {
           // 完成した行（messages）は、上限超過の判定より先に処理する（レビュー指摘・MEDIUM）。
           // overflowを先に見て早期returnすると、同じチャンクの中に「正常に完成した応答」と
@@ -795,12 +799,10 @@ export class AppServerClient {
           // 例外で`if (overflow)`まで到達しない経路ができていた
           if (overflow) {
             // 改行を含まない出力が上限を超えて溜まり続けた（issue #402、1点目）。
-            // クロージャ内の`buffer`（このコールバックの外側で`let`宣言）はここで
-            // 明示的に空にする。overflow検知時点の`rest`＝上限超過分そのものが
-            // `buffer`に残ったままだと、`setImmediate`で`finish`するまでの間に
-            // 次の`data`イベントが来た場合、10MB超のバッファへさらに追記して
-            // `consumeFrames`のフル再パースが走ってしまう（レビュー指摘・MEDIUM）
-            buffer = '';
+            // 溜めている未完成分はここで明示的に捨てる。上限超過分がそのまま残っていると、
+            // `setImmediate`で`finish`するまでの間に次の`data`イベントが来た場合、
+            // 上限超えのバッファへさらに追記が続いてしまう（レビュー指摘・MEDIUM）
+            frames.clear();
             // 単発の問い合わせなので、既に決着させる作りの`finish`へそのまま寄せて打ち切る。
             //
             // ただし`finish`をここで同期的に呼ぶと、直前の`for`ループで応答を受け取った
@@ -814,7 +816,7 @@ export class AppServerClient {
             setImmediate(() => {
               finish({
                 ok: false,
-                error: `app-serverからの出力が上限（${MAX_LINE_BUFFER_BYTES}バイト）を超えて改行なしで届きました`,
+                error: `app-serverからの出力が上限（${this.maxLineBytes}バイト）を超えて改行なしで届きました`,
               });
             });
           }

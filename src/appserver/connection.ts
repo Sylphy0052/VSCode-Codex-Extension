@@ -1,15 +1,15 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { Logger } from '../log';
 import {
-  consumeFrames,
   encodeErrorResponse,
   encodeNotification,
   encodeRequest,
   encodeResponse,
+  FrameBuffer,
   isServerRequest,
   type JsonRpcMessage,
 } from '../codex/jsonRpc';
-import { killWithEscalation, MAX_LINE_BUFFER_BYTES } from '../process/childProcess';
+import { killWithEscalation, MAX_APP_SERVER_LINE_BYTES } from '../process/childProcess';
 import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
 
 export interface ServerRequest {
@@ -48,7 +48,7 @@ const REQUEST_TIMEOUT_MS = 120_000;
  */
 export class AppServerConnection {
   private proc: ChildProcessWithoutNullStreams | undefined;
-  private buffer = '';
+  private readonly frames: FrameBuffer;
   private nextId = 1;
   private readonly pending = new Map<number, (message: JsonRpcMessage) => void>();
   private starting: Promise<void> | undefined;
@@ -73,7 +73,15 @@ export class AppServerConnection {
      * app-serverがクラッシュしたときに開いている全スレッドの承認待ちが永久にハングする。
      */
     private readonly onDisconnect: () => void = () => undefined,
-  ) {}
+    /**
+     * 受信バッファの1行上限（issue #795）。既定は会話アイテムを全件含む応答が通る
+     * `MAX_APP_SERVER_LINE_BYTES`。小さい値で上限超過の挙動を確かめられるよう、
+     * テストからだけ差し替える。
+     */
+    private readonly maxLineBytes: number = MAX_APP_SERVER_LINE_BYTES,
+  ) {
+    this.frames = new FrameBuffer(maxLineBytes);
+  }
 
   /** 起動と初期化。多重呼び出しは同じ処理を共有する。 */
   async ensureStarted(): Promise<void> {
@@ -192,9 +200,7 @@ export class AppServerConnection {
   }
 
   private receive(chunk: string): void {
-    this.buffer += chunk;
-    const { messages, rest, overflow } = consumeFrames(this.buffer);
-    this.buffer = rest;
+    const { messages, overflow } = this.frames.push(chunk);
 
     try {
       // 完成した行（messages）は、上限超過の判定より先に処理する（レビュー指摘・MEDIUM）。
@@ -224,12 +230,12 @@ export class AppServerConnection {
       if (overflow) {
         // 改行を含まない出力（診断ログの乱れ・バイナリ混入等）が上限を超えて溜まり続けた
         // （issue #402、1点目）。このまま連結し続けると無制限にメモリを消費するため、
-        // 接続を切って回収する。`reset()`が`this.buffer`も`''`へ戻すため、上のforループで
+        // 接続を切って回収する。`reset()`が溜めている未完成分も捨てるため、上のforループで
         // 処理済みの`messages`とは別に、上限超過分の`rest`がバッファに残り続けることはない。
         // `this.proc`も`undefined`へ戻るので、次の`ensureStarted()`が新しいプロセスを
         // 起動し直す（＝「切って再起動」はここで達成する）
         this.log.error(
-          `app-serverからの出力が上限（${MAX_LINE_BUFFER_BYTES}バイト）を超えて改行なしで届いたため、接続を切って再起動します`,
+          `app-serverからの出力が上限（${this.maxLineBytes}バイト）を超えて改行なしで届いたため、接続を切って再起動します`,
         );
         if (this.proc !== undefined) {
           killWithEscalation(this.proc);
@@ -300,7 +306,7 @@ export class AppServerConnection {
     this.connected = false;
     this.proc = undefined;
     this.starting = undefined;
-    this.buffer = '';
+    this.frames.clear();
     for (const resolve of this.pending.values()) {
       resolve({ error: { code: -1, message: 'app-serverとの接続が切れました' } });
     }

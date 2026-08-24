@@ -13,7 +13,8 @@ export interface FrameResult {
   /** 次のチャンクと連結するために残す、行として完成していない部分。 */
   rest: string;
   /**
-   * `rest`が上限（{@link MAX_LINE_BUFFER_BYTES}）を超えたか（issue #402）。
+   * `rest`が上限（既定は{@link MAX_LINE_BUFFER_BYTES}。`consumeFrames`の第2引数で
+   * 変えられる）を超えたか（issue #402）。
    *
    * 立ったら呼び出し側は`rest`をそのまま使い続けず、接続を切って再起動すること。
    * ここでは切断はしない（このモジュールは純粋なパース処理に留め、プロセスの
@@ -25,8 +26,15 @@ export interface FrameResult {
 /**
  * 改行区切りJSONのストリームを、完成した行だけメッセージに変換する。
  * パースできない行は捨てる（app-serverは診断メッセージを混ぜることがあるため）。
+ *
+ * `maxBytes`は未完成行（`rest`）の上限。app-server経路は会話アイテムを全件含む応答が
+ * 1行で届くため`MAX_APP_SERVER_LINE_BYTES`を渡す（issue #795）。既定は他の経路と
+ * 揃えた{@link MAX_LINE_BUFFER_BYTES}。
  */
-export function consumeFrames(buffer: string): FrameResult {
+export function consumeFrames(
+  buffer: string,
+  maxBytes: number = MAX_LINE_BUFFER_BYTES,
+): FrameResult {
   const messages: JsonRpcMessage[] = [];
   let rest = buffer;
 
@@ -46,8 +54,67 @@ export function consumeFrames(buffer: string): FrameResult {
     }
   }
 
-  const overflow = Buffer.byteLength(rest, 'utf8') > MAX_LINE_BUFFER_BYTES;
-  return { messages, rest, overflow };
+  return { messages, rest, overflow: exceedsByteLimit(rest, maxBytes) };
+}
+
+/**
+ * `rest`のUTF-8バイト数が`maxBytes`を超えるか。
+ *
+ * `Buffer.byteLength`は文字列全体を走査するため、上限を大きく取ったapp-server経路
+ * （`MAX_APP_SERVER_LINE_BYTES`）では、1行が完成するまでの毎チャンクで数十MBを
+ * 数え直すことになる（issue #795）。UTF-8のバイト数はUTF-16のcode unit数以上・その3倍
+ * 以下に必ず収まるので、まず安い`length`で決着する場合を先に返し、決着しない範囲でだけ
+ * 実際に数える。
+ */
+function exceedsByteLimit(rest: string, maxBytes: number): boolean {
+  if (rest.length > maxBytes) {
+    return true;
+  }
+  if (rest.length * 3 <= maxBytes) {
+    return false;
+  }
+  return Buffer.byteLength(rest, 'utf8') > maxBytes;
+}
+
+/**
+ * 受信チャンクを溜めながら、完成した行だけを取り出す行バッファ（issue #795）。
+ *
+ * `consumeFrames`をチャンクごとにそのまま呼ぶと、1行が完成するまでの間、毎回バッファ全体を
+ * `indexOf('\n')`で走査し直す。1行が数十MBになるapp-server経路（`thread/fork` /
+ * `thread/resume` の応答）ではこれが積み上がり、40MBの応答を64KBずつ受けると約12秒かかる
+ * （実測、2026-08-25）。改行を含まないチャンクでは行が完成しないと分かっているので、
+ * そのときは連結だけして走査を省く。
+ *
+ * 上限の判定は省かない。改行が来ないまま溜まり続ける出力こそが防ぎたいもの
+ * （issue #402、1点目）なので、バイト数を加算で持ち、チャンクごとに必ず見る。
+ */
+export class FrameBuffer {
+  private buffer = '';
+  private bytes = 0;
+
+  constructor(private readonly maxBytes: number = MAX_LINE_BUFFER_BYTES) {}
+
+  /** チャンクを受け取り、そこまでで完成した行を返す。 */
+  push(chunk: string): FrameResult {
+    this.buffer += chunk;
+    this.bytes += Buffer.byteLength(chunk, 'utf8');
+
+    if (!chunk.includes('\n')) {
+      // 行は完成していない。走査せず、上限の判定だけ行う
+      return { messages: [], rest: this.buffer, overflow: this.bytes > this.maxBytes };
+    }
+
+    const result = consumeFrames(this.buffer, this.maxBytes);
+    this.buffer = result.rest;
+    this.bytes = Buffer.byteLength(result.rest, 'utf8');
+    return result;
+  }
+
+  /** 溜めている未完成分を捨てる（接続を切るとき・上限超過の後始末）。 */
+  clear(): void {
+    this.buffer = '';
+    this.bytes = 0;
+  }
 }
 
 function parseMessage(line: string): JsonRpcMessage | undefined {
