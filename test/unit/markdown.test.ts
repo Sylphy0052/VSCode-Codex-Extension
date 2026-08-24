@@ -40,6 +40,22 @@ describe('parseInline', () => {
     ]);
   });
 
+  it('生URLを自動でリンク化する', () => {
+    expect(parseInline('詳細はhttps://example.com/aを参照')).toEqual([
+      { type: 'text', value: '詳細は' },
+      { type: 'link', value: 'https://example.com/a', url: 'https://example.com/a' },
+      { type: 'text', value: 'を参照' },
+    ]);
+  });
+
+  it('生URL末尾の句点は本文側へ戻す', () => {
+    expect(parseInline('これを見て。https://example.com/b。')).toEqual([
+      { type: 'text', value: 'これを見て。' },
+      { type: 'link', value: 'https://example.com/b', url: 'https://example.com/b' },
+      { type: 'text', value: '。' },
+    ]);
+  });
+
   it('閉じていない太字は地の文のまま残る（ストリーミング途中でも壊れない）', () => {
     expect(parseInline('これは**まだ閉じていない強調')).toEqual([
       { type: 'text', value: 'これは**まだ閉じていない強調' },
