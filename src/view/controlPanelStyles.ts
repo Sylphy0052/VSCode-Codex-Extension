@@ -1,4 +1,5 @@
 import { reducedMotionStyles } from './reducedMotion';
+import { sharedStyles } from './sharedStyles';
 
 /**
  * 設定パネルのスタイル。
@@ -7,8 +8,7 @@ import { reducedMotionStyles } from './reducedMotion';
  */
 export function controlPanelStyles(): string {
   return `
-  /* hidden属性を常に効かせる（display指定に負けないように） */
-  [hidden] { display: none !important; }
+${sharedStyles()}
   body {
     font-family: var(--vscode-font-family);
     font-size: var(--vscode-font-size);
@@ -23,7 +23,7 @@ export function controlPanelStyles(): string {
     font-size: 0.9em;
   }
   /*
-   * 承認レベルの選択肢（issue #744）。<select> は開くまで他の選択肢が見えないため、
+   * 承認レベルの選択肢（issue 744）。<select> は開くまで他の選択肢が見えないため、
    * 3段階を常に並べて出す。
    *
    * 縦積みにしているのは、表示名が横並びに収まらないため（着手時の実測: 「全確認」3文字 /
@@ -42,8 +42,8 @@ export function controlPanelStyles(): string {
     padding: 5px 8px;
     color: var(--vscode-foreground);
     font-size: 1em;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 3px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
     cursor: pointer;
   }
   .levelOption:hover { background-color: var(--vscode-list-hoverBackground); }
@@ -75,7 +75,7 @@ export function controlPanelStyles(): string {
     color: var(--vscode-dropdown-foreground);
     background-color: var(--vscode-dropdown-background);
     border: 1px solid var(--vscode-dropdown-border);
-    border-radius: 2px;
+    border-radius: var(--agent-radius-sm);
     font-family: inherit;
     font-size: inherit;
   }
@@ -92,7 +92,7 @@ export function controlPanelStyles(): string {
   .usage {
     margin-bottom: 14px;
     padding-bottom: 12px;
-    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-bottom: 1px solid var(--agent-border);
   }
   .usage-head {
     display: flex;
@@ -103,7 +103,7 @@ export function controlPanelStyles(): string {
   .usage-head .percent { font-weight: 600; font-size: 1.15em; }
   /*
    * 使用量の内訳（リセットまでの時間・プラン・取得時刻）。以前は .hint（0.85em の
-   * descriptionForeground）で出していたが、割合の次に読む値なので1段上げる（issue #742）。
+   * descriptionForeground）で出していたが、割合の次に読む値なので1段上げる（issue 742）。
    * min-height は中身が空のときにレイアウトが動かないようにするため（.hint と同じ理由）。
    */
   .usage-meta {
@@ -113,7 +113,7 @@ export function controlPanelStyles(): string {
     color: var(--vscode-foreground);
   }
   /*
-   * バーの太さはワークフロー画面（workflowStyles.ts の #progressBar）と揃えて 8px（issue #742）。
+   * バーの太さはワークフロー画面（workflowStyles.ts の #progressBar）と揃えて 8px（issue 742）。
    * トラックは opacity を掛けるのではなく color-mix で薄い色を作る。opacity は子要素にも
    * 掛かるため .fill { opacity: 1 } で打ち消す必要があり、ハイコントラストテーマでは
    * トラックが背景と同化していた。
@@ -121,19 +121,15 @@ export function controlPanelStyles(): string {
    * transparent に落ちて何も描かれず、レイアウトにも影響しない。
    */
   .bar {
-    height: 8px;
-    border-radius: 4px;
-    background-color: color-mix(
-      in srgb,
-      var(--vscode-progressBar-background, var(--vscode-editorWidget-border)) 30%,
-      transparent
-    );
+    height: var(--agent-bar-height);
+    border-radius: var(--agent-bar-radius);
+    background-color: var(--agent-bar-track);
     outline: 1px solid var(--vscode-contrastBorder, transparent);
     outline-offset: -1px;
   }
   .bar .fill {
     height: 100%;
-    border-radius: 4px;
+    border-radius: var(--agent-bar-radius);
     background-color: var(--vscode-charts-blue);
     transition: width 0.2s ease;
   }
@@ -146,7 +142,7 @@ export function controlPanelStyles(): string {
     color: var(--vscode-button-foreground);
     background-color: var(--vscode-button-background);
     border: 1px solid var(--vscode-button-border, transparent);
-    border-radius: 2px;
+    border-radius: var(--agent-radius-sm);
     cursor: pointer;
     font-family: inherit;
     font-size: inherit;
@@ -156,7 +152,7 @@ export function controlPanelStyles(): string {
     outline: 1px solid var(--vscode-focusBorder);
     outline-offset: 2px;
   }
-  /* 折りたたまれたセクションの中にしか出ていない異常のまとめ（issue #741）。
+  /* 折りたたまれたセクションの中にしか出ていない異常のまとめ（issue 741）。
      書式はワークフロー画面の #banner（workflowStyles.ts）へ揃える（#757 で共通化する対象）。
      押せる要素なので button だが、ボタンの既定の見た目（幅・背景）は打ち消す */
   #alertBanner {
@@ -164,7 +160,7 @@ export function controlPanelStyles(): string {
     width: 100%;
     margin: 0 0 8px;
     padding: 6px 10px;
-    border-radius: 3px;
+    border-radius: var(--agent-radius-md);
     border: 1px solid;
     background-color: transparent;
     font-size: 0.9em;
@@ -188,7 +184,7 @@ export function controlPanelStyles(): string {
   #alertBanner.warning:hover {
     background-color: color-mix(in srgb, var(--vscode-charts-yellow) 20%, transparent);
   }
-  /* セクション見出しの集計（issue #740）。異常の強調は先頭の帯（issue #741）が担うので、
+  /* セクション見出しの集計（issue 740）。異常の強調は先頭の帯（issue 741）が担うので、
      ここでは色を付けず件数だけを出す */
   .sectionCount {
     margin-left: 6px;
@@ -200,10 +196,10 @@ export function controlPanelStyles(): string {
     display: flex;
     gap: 2px;
     margin-bottom: 12px;
-    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-bottom: 1px solid var(--agent-border);
   }
   /*
-   * どちらのプロバイダを編集しているかを取り違えると、設定が反対側のCLIに入る（issue #743）。
+   * どちらのプロバイダを編集しているかを取り違えると、設定が反対側のCLIに入る（issue 743）。
    * 太さの差だけではサイドバーの小さい字で判別しにくいので、選択中には背景と2pxの下線を付ける。
    *
    * 非選択を opacity で薄くすると、フォーカスリング（button:focus の outline）まで薄くなる。
@@ -237,7 +233,7 @@ export function controlPanelStyles(): string {
   .note {
     margin-top: 4px;
     padding-top: 8px;
-    border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-top: 1px solid var(--agent-border);
     color: var(--vscode-descriptionForeground);
     font-size: 0.85em;
     line-height: 1.5;
@@ -245,7 +241,7 @@ export function controlPanelStyles(): string {
   .section {
     margin: 16px 0 0;
     padding-top: 12px;
-    border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+    border-top: 1px solid var(--agent-border);
   }
   .section summary.sectionTitle {
     margin: 0 0 8px;
@@ -259,7 +255,7 @@ export function controlPanelStyles(): string {
     outline-offset: 2px;
   }
   /*
-   * セクション見出しのアイコン（issue #739）。中身はインラインSVG（controlPanelIcons.ts）。
+   * セクション見出しのアイコン（issue 739）。中身はインラインSVG（controlPanelIcons.ts）。
    *
    * summary の display は変えていない。display を flex や block にすると折りたたみの
    * 三角マーカー（::marker）が消えるため、インラインのspanで包んで縦位置だけを揃える。
@@ -283,7 +279,7 @@ export function controlPanelStyles(): string {
   }
   .subsection summary.sectionTitle { margin: 0 0 4px; }
   /*
-   * 一覧の状態表示（issue #745）。読み込み中・0件・取得失敗の3つは、これまでどれも
+   * 一覧の状態表示（issue 745）。読み込み中・0件・取得失敗の3つは、これまでどれも
    * 同じ大きさの灰色の1行で、違いは色だけだった。取得失敗の色は
    * --vscode-errorForeground だが、色だけを手掛かりにはできない
    * （docs/design.md「状態表示は色だけに頼らない」）。行頭に形（空の受け皿／警告の
@@ -314,7 +310,7 @@ export function controlPanelStyles(): string {
     flex: none;
     width: 24px;
     height: 3px;
-    border-radius: 2px;
+    border-radius: var(--agent-radius-sm);
     overflow: hidden;
     /* ハイコントラストでは color-mix の下地が沈むので、枠で帯の範囲を残す（使用量バーと同じ手） */
     outline: 1px solid var(--vscode-contrastBorder, transparent);
@@ -331,7 +327,7 @@ export function controlPanelStyles(): string {
     top: 0;
     bottom: 0;
     width: 40%;
-    border-radius: 2px;
+    border-radius: var(--agent-radius-sm);
     background-color: var(--vscode-progressBar-background, var(--vscode-foreground));
     animation: stateBarSlide 1.2s ease-in-out infinite;
   }
@@ -340,7 +336,7 @@ export function controlPanelStyles(): string {
     to { left: 100%; }
   }
   /*
-   * 取得に失敗した一覧を読み直すボタン（issue #745）。これまでは失敗すると
+   * 取得に失敗した一覧を読み直すボタン（issue 745）。これまでは失敗すると
    * セクションを閉じて開き直すしか手が無かった。全体の button は width: 100% なので、
    * ここで文字幅へ戻す
    */
@@ -353,7 +349,7 @@ export function controlPanelStyles(): string {
   }
   .mcpList { display: flex; flex-direction: column; gap: 6px; }
   /*
-   * 一覧の項目（カード）にマウスを乗せたときの反応（issue #746）。
+   * 一覧の項目（カード）にマウスを乗せたときの反応（issue 746）。
    *
    * 枠だけだとどこまでが1件なのか追いにくい。VS Codeの一覧と同じ
    * --vscode-list-hoverBackground を使い、拡張機能の外の一覧と挙動を揃える。
@@ -363,7 +359,7 @@ export function controlPanelStyles(): string {
    * ボタンの読みやすさには影響しない。
    *
    * 枠の指定自体は各カードの規則に重複したまま残してある。まとめるのは共通トークンを
-   * 入れるissue #757 の担当（先に片方だけ動かすと、あとで突き合わせる相手が消える）。
+   * 入れるissue 757 の担当（先に片方だけ動かすと、あとで突き合わせる相手が消える）。
    */
   .mcpServer:hover,
   .hookItem:hover,
@@ -376,8 +372,8 @@ export function controlPanelStyles(): string {
   }
   .mcpServer {
     padding: 6px 8px;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 3px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
   }
   .mcpServer-head {
     display: flex;
@@ -391,10 +387,14 @@ export function controlPanelStyles(): string {
     color: var(--vscode-descriptionForeground);
     font-size: 0.85em;
   }
-  .mcpBadge {
-    font-size: 0.8em;
-    padding: 1px 6px;
-    border-radius: 10px;
+  /*
+   * バッジ（丸い枠つきラベル）の共通の形（issue 757）。以前は同じ中身を5箇所へ
+   * 別々に書いていた。色と枠は用途ごとの -* クラスが足す。
+   */
+  .mcpBadge, .hookBadge, .skillBadge, .pluginBadge, .appBadge, .importBadge {
+    font-size: var(--agent-badge-font-size);
+    padding: var(--agent-badge-padding);
+    border-radius: var(--agent-radius-pill);
     white-space: nowrap;
   }
   .mcpBadge-connected {
@@ -416,8 +416,8 @@ export function controlPanelStyles(): string {
   }
   .hookItem {
     padding: 6px 8px;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 3px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
   }
   .hookItem-head {
     display: flex;
@@ -434,7 +434,7 @@ export function controlPanelStyles(): string {
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: 0.85em;
     background-color: var(--vscode-textCodeBlock-background, transparent);
-    border-radius: 2px;
+    border-radius: var(--agent-radius-sm);
   }
   .hookItem-meta {
     margin-top: 2px;
@@ -446,12 +446,6 @@ export function controlPanelStyles(): string {
     width: auto;
     margin-top: 6px;
     padding: 3px 10px;
-  }
-  .hookBadge {
-    font-size: 0.8em;
-    padding: 1px 6px;
-    border-radius: 10px;
-    white-space: nowrap;
   }
   .hookBadge-trusted {
     color: var(--vscode-charts-green);
@@ -472,8 +466,8 @@ export function controlPanelStyles(): string {
   }
   .skillItem {
     padding: 6px 8px;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 3px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
   }
   .skillItem-head {
     display: flex;
@@ -493,12 +487,6 @@ export function controlPanelStyles(): string {
     color: var(--vscode-descriptionForeground);
     font-size: 0.8em;
     word-break: break-all;
-  }
-  .skillBadge {
-    font-size: 0.8em;
-    padding: 1px 6px;
-    border-radius: 10px;
-    white-space: nowrap;
   }
   .skillBadge-user {
     color: var(--vscode-charts-blue);
@@ -535,8 +523,8 @@ export function controlPanelStyles(): string {
   }
   .pluginItem, .appItem {
     padding: 6px 8px;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 3px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
   }
   .pluginItem-head, .appItem-head {
     display: flex;
@@ -556,12 +544,6 @@ export function controlPanelStyles(): string {
     color: var(--vscode-descriptionForeground);
     font-size: 0.8em;
     word-break: break-all;
-  }
-  .pluginBadge, .appBadge {
-    font-size: 0.8em;
-    padding: 1px 6px;
-    border-radius: 10px;
-    white-space: nowrap;
   }
   .pluginBadge-enabled, .appBadge-enabled {
     color: var(--vscode-charts-green);
@@ -589,8 +571,8 @@ export function controlPanelStyles(): string {
   .importList, .importHistoryList { display: flex; flex-direction: column; gap: 6px; }
   .importItem, .importHistoryItem {
     padding: 6px 8px;
-    border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
-    border-radius: 3px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
   }
   .importItem-head, .importHistoryItem-head {
     display: flex;
@@ -612,12 +594,6 @@ export function controlPanelStyles(): string {
     font-size: 0.8em;
     word-break: break-all;
   }
-  .importBadge {
-    font-size: 0.8em;
-    padding: 1px 6px;
-    border-radius: 10px;
-    white-space: nowrap;
-  }
   .importBadge-home {
     color: var(--vscode-charts-blue);
     border: 1px solid var(--vscode-charts-blue);
@@ -627,7 +603,7 @@ export function controlPanelStyles(): string {
     border: 1px solid var(--vscode-charts-orange, var(--vscode-charts-yellow));
   }
   /*
-   * バッジを色以外でも見分けられるようにする（issue #759）。
+   * バッジを色以外でも見分けられるようにする（issue 759）。
    * ワークフロー画面が既に採っている方針（workflowStyles.ts 冒頭・design.md §16.8の
    * 「色だけに頼らない」）を設定パネルへも広げる。
    *
