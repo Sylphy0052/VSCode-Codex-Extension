@@ -72,6 +72,8 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     select.value = current;
   }
 
+  // 帯（異常のまとめ、issue #741）を押したときの飛び先。applyAlertが最後に受け取った値を持つ
+  let alertSectionId = '';
   // 折りたたまれたセクションの中にしか出ていない異常のまとめ（issue #741）。
   // 何を出すか・どれを優先するかの判定はホスト側（controlPanelAlerts.ts）が済ませており、
   // ここは受け取った1件を描くだけ。押すと該当セクションを開いてそこまで運ぶ
@@ -82,6 +84,8 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
       banner.hidden = true;
       banner.className = '';
       banner.textContent = '';
+      // 異常が消えたら飛び先も捨てる（帯は隠れているので押せないが、状態を残さない）
+      alertSectionId = '';
       return;
     }
     banner.hidden = false;
@@ -89,8 +93,6 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     banner.textContent = alert.message;
     alertSectionId = alert.sectionId;
   }
-  // 帯を押したときの飛び先。applyAlertが最後に受け取った値を持つ
-  let alertSectionId = '';
   function applyUsage(u) {
     const box = el('usage');
     if (!u) {
