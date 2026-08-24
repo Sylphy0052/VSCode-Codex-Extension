@@ -70,11 +70,7 @@ import {
   type TaskRunState,
   type TaskState,
 } from './runState';
-import {
-  checkEffectivePermissionEscalation,
-  checkMessagingPermissionEscalation,
-  getSnapshot,
-} from './runnerSnapshot';
+import { checkEffectivePermissionEscalation, getSnapshot } from './runnerSnapshot';
 import type { WorkflowRunnerInternals } from './runnerInternals';
 import { scheduleTaskApprovalTimeout } from './runnerApproval';
 import { cleanupWorktreeIfNeeded, retryMerge, startMerge } from './runnerMerge';
@@ -555,16 +551,6 @@ export interface WorkflowWarning {
      * `findPermissionEscalationWarnings` が読み込み時（`start()`）に検出する。
      */
     | 'permissionEscalation'
-    /**
-     * タスク間メッセージング（design.md §16.21）経由で、送信元より緩い実効権限を持つ
-     * 宛先へメッセージが配送された（Issue #132）。`permissionEscalation`
-     * （`{{T1.result}}`経由、Issue #67・依存関係のあるタスク間に限る）とは経路が違う
-     * （メッセージは`dependsOn`を問わず任意の宛先へ送れる）ため、別のkindにして区別する。
-     * `checkMessagingPermissionEscalation`が、メッセージが実際に配送される時点
-     * （`setPromptTransform`が`takeDeliverableMessages`を呼んだ直後）で検出し
-     * `live.warnings`へ積む。`permissionEscalation`と同じく警告のみでエラーにはしない。
-     */
-    | 'messagingPermissionEscalation'
     /**
      * タスク間メッセージング（design.md §16.21）専用のMCPツールが、タスクのセッションを
      * 開いた後に確認しても見えなかった（`TaskSession.checkMessagingToolVisible`が
@@ -3307,19 +3293,6 @@ export class WorkflowRunner {
       // ため、送信のたびにここで取りに行く必要がある
       const hub = live.messaging?.hub;
       const delivered = hub?.takeDeliverableMessages(taskId) ?? [];
-      // 配送される時点で、送信元より緩い実効権限へメッセージが届いていないかを確認する
-      // （design.md §16.21、Issue #132「1. 権限差の警告」）。静的には検査できない
-      // （送信はモデルの判断で実行時に起きる）ため、実際に配送するこの時点でのみ判定できる
-      if (delivered.length > 0) {
-        checkMessagingPermissionEscalation(
-          this.internals,
-          live,
-          task,
-          taskId,
-          effective,
-          delivered,
-        );
-      }
       const composed = composeNextPrompt(expanded, delivered);
       // Viewで実際に送った文面を確認できるようにする（design.md §16.21、Issue #132
       // 「4. 人が目視確認できるようにする」）。`expandedPrompt`はcomposeNextPromptを

@@ -7236,8 +7236,8 @@ tasks:
   });
 
   describe(
-    'メッセージング経由の権限差の警告・実際の送信文面の表示' +
-      '（design.md §16.21・§16.34、Issue #132・Issue #547）',
+    '中継の不変条件・実際の送信文面の表示' +
+      '（design.md §16.21・§16.34、Issue #132・Issue #547・Issue #562）',
     () => {
       // T1はsandbox: read-only、T2はsandbox: workspace-write。dependsOnで結ばない
       // （メッセージは依存関係を問わず送れることを再現するため）
@@ -7258,16 +7258,14 @@ tasks:
 `;
 
       it(
-        'Issue #547後、messagingPermissionEscalationは実質発火しなくなる' +
-          '（`checkMessagingPermissionEscalation`は配送された`StoredMessage.from`を' +
-          '`live.def.tasks`から引き、送信元タスクの実効値と比較する。中継後は実タスクへ' +
-          '配送されるメッセージの`from`が常にオーケストレーター（`ORCHESTRATOR_CONNECTION_ID`）' +
-          'になり、`live.def.tasks`には見つからないため`senderTask === undefined`で' +
-          '素通りする。オーケストレーター自身の実効サンドボックスは常に`read-only`固定' +
-          '（`ORCHESTRATOR_SANDBOX`）なので、仮に比較対象にしても「宛先より緩い」は成立しない。' +
-          'この警告が拾っていた脅威（緩い送信元の自由記述が厳しい宛先で実行される）自体は' +
-          'オーケストレーターの中継判断へ移っただけで消えてはいないが、実行時警告としての' +
-          '検出経路は失われる。design.md §16.34「影響範囲」に明記し、既知の帰結として残す）',
+        '実タスクへ配送されるメッセージの`from`は常にオーケストレーターになる' +
+          '（W9（Issue #547）の中継の不変条件。タスク同士は直接送り合えず、実タスクが' +
+          '受け取るのは必ずオーケストレーターが中継した1本になる。この不変条件が成り立つ' +
+          '限り、配送されたメッセージから元の送信元タスクを引くことはできない——' +
+          '`messagingPermissionEscalation`（Issue #132）が構造上不発火になり、' +
+          'Issue #562で削除したのはこれが理由である。復活させるなら、まずこの不変条件を' +
+          '変える（`StoredMessage`とは別に由来を追跡する）必要がある。' +
+          'design.md §16.34「影響範囲」参照）',
         async () => {
           const { deps, state } = fakeMessagingDeps();
           const { runner, codexHost } = createHarness(SANDBOX_DIFF_YAML, {
@@ -7281,11 +7279,15 @@ tasks:
           const runId = result.runId as string;
           await flush();
 
-          // 【このテストの趣旨】権限昇格の検出という防御を守るテストではない。W9（#547）で
-          // 宛先が固定された副作用として、この検出が構造上不発火になったこと自体を
-          // 固定するテスト。将来`from`の扱いが変わり検出が意図せず復活/再度死ぬような
-          // 変化が起きたときに気づけるようにするために存在する
-          // （`checkMessagingPermissionEscalation`のJSDoc・design.md §16.34「影響範囲」参照）
+          // タスクからタスクへは直接送れない（中継が唯一の経路）
+          const direct = state.hub?.sendMessage({
+            from: 'T1',
+            to: 'T2',
+            body: '直接送ります',
+            expectReply: false,
+          });
+          expect(direct?.accepted).toBe(false);
+
           // T1（read-only）の情報をオーケストレーターがT2（workspace-write）へ中継する形
           state.hub?.sendMessage({
             from: 'T1',
@@ -7301,14 +7303,15 @@ tasks:
           });
           expect(relayed?.accepted).toBe(true);
 
+          const delivered = state.hub?.takeDeliverableMessages('T2') ?? [];
+          expect(delivered.length).toBe(1);
+          expect(delivered.every((m) => m.from === ORCHESTRATOR_CONNECTION_ID)).toBe(true);
+
+          // 中継後も`{{T1.result}}`経由の警告（permissionEscalation、Issue #67）とは
+          // 別経路のままで、ここでは出ない（この2つを混同しないための対照）
           const t2 = codexHost.byTaskId('T2');
           t2.promptTransform?.('続けてください');
-
           const snapshot = runner.getSnapshot(runId);
-          expect(snapshot?.warnings.some((w) => w.kind === 'messagingPermissionEscalation')).toBe(
-            false,
-          );
-          // #67経由の警告（permissionEscalation）とは元から別経路で、ここでも出ない
           expect(snapshot?.warnings.some((w) => w.kind === 'permissionEscalation')).toBe(false);
         },
       );
