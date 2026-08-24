@@ -26,6 +26,7 @@ import {
   currentWorkspaceFolder,
   readChatComposerButtonsConfig,
   readChatRenderMarkdownConfig,
+  readChatDensityConfig,
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
   readClaudeConfig,
@@ -1139,6 +1140,8 @@ export class ClaudeChatViewManager
       renderMarkdown: readChatRenderMarkdownConfig(),
       // 送信キー（issue #288、設定 agent.chat.sendOn）。chatView.ts（Codex）と同じ配線
       sendOn: readChatSendOnConfig(),
+      // 表示密度（issue #718、設定 agent.chat.density）。chatView.ts（Codex）と同じ配線
+      density: readChatDensityConfig(),
     });
   }
 

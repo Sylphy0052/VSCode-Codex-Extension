@@ -682,6 +682,20 @@
           "scope": "window",
           "markdownDescription": "チャット画面の応答本文を見出し・箇条書き・強調・インラインコード・コードブロック・リンクとして描画する。コードブロックには「コピー」「エディタへ挿入」「新規ファイルで開く」を付ける。無効にすると従来どおり生テキストのまま表示する（Codex/Claude Code両画面共通）。"
         },
+        "agent.chat.density": {
+          "type": "string",
+          "enum": [
+            "comfortable",
+            "compact"
+          ],
+          "enumDescriptions": [
+            "既定。項目の間隔・本文の余白・行間をゆったり取る",
+            "間隔・余白・行間を詰めて、一度に多くの発言を出す"
+          ],
+          "default": "comfortable",
+          "scope": "window",
+          "markdownDescription": "チャット画面の表示密度。`compact`にすると発言どうしの間隔・本文の余白・行間が詰まる（Codex/Claude Code両画面共通）。変更を反映するには会話タブを開き直す。"
+        },
         "agent.chat.sendOn": {
           "type": "string",
           "enum": [

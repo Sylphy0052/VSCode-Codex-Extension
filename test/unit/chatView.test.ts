@@ -51,6 +51,19 @@ function extractButtonOpenTag(html: string, id: string): string {
   return match[0];
 }
 
+describe('表示密度のクラス（issue #718）', () => {
+  it('既定では comfortable のクラスが付く', () => {
+    // 設定を書いていない利用者の見た目が変わらないこと
+    const html = renderShell(fakeWebview() as never, buildOptions());
+    expect(html).toContain('<body class="density-comfortable">');
+  });
+
+  it('compact を渡すと compact のクラスが付く', () => {
+    const html = renderShell(fakeWebview() as never, buildOptions({ density: 'compact' }));
+    expect(html).toContain('<body class="density-compact">');
+  });
+});
+
 describe('renderShellのボタン（issue #226のアイコン化後、アクセシブル名の検査）', () => {
   it.each(Object.entries(NON_SEND_BUTTON_LABELS))(
     'button#%sはaria-labelとtitleを両方持ち、期待するラベル文言と一致する',
