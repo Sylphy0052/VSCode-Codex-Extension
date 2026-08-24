@@ -287,6 +287,16 @@ Codexのapp-serverにはPlan modeそのものが無いため、**権限で作っ
 - 入力欄のプレースホルダの案内文が設定に追随する
 - `agent.chat.sendOn`で切り替える（[設定](#共通)参照）
 
+### 応答末尾の要約と次の推奨アクション
+
+チャットで指示を送るたびに、応答の最後へ「今回の指示」「実施した内容の要約」「次の推奨アクション」を出させる（issue #709・design.md §14.66）。**Codex / Claude Code両画面共通**。
+
+- `agent.chat.turnSummary.enabled` を有効にすると、手動で送る発言の末尾へ指示文が毎回連結される。既定は無効で、有効にするまで送信内容は変わらない
+- 連結する文面は `agent.chat.turnSummary.instruction` で差し替えられる。既定は `最後に次の3点を必ず示すこと。1) 今回受け取った指示、2) この会話で実施した内容の要約、3) 次の推奨アクション。`。空文字にすると連結しない（無効化と同じ）
+- 擬似コマンド（`/btw` 等）・入力モード（行頭 `!` `#`）・ループの自動送信には連結しない。本文が空で画像だけを送る場合も連結しない
+- 連結した指示文は送信内容にそのまま含まれ、会話にも見える（隠さない）。日報バッファの作業記録には連結前の元の文面が残る
+- ターンの完了後に別のリクエストを投げる方式は採っていないため、追加のAPI呼び出しや待ち時間は発生しない。代わりに全てのターンで送信するテキストが指示文の分だけ長くなる
+
 ### 入力欄アイコン列の整理
 
 入力欄下のアイコン列（画像・ループ・圧縮・インポート・要約・計画・高速・レビュー・エクスポート・ワークフロー）は使用頻度の差が大きく、既定ではよく使う4つ（画像・ループ・圧縮・インポート）だけを表に残し、残りを「…」ボタンのメニューへ畳む（issue #296・design.md §14.58）。**Codex / Claude Code両画面共通**。
@@ -770,6 +780,8 @@ tasks:
 | `agent.chat.renderMarkdown`           | `true`                                     | window   | [応答本文をMarkdownとして描画するか](#応答のmarkdown描画)。`false`で従来の生テキスト表示に戻す                                                                                                                                                |
 | `agent.chat.sendOn`                   | `ctrlEnter`                                | window   | [入力欄の送信キー](#送信キーの切り替え)。`ctrlEnter` / `enter`（Codex/Claude Code両画面共通）                                                                                                                                                 |
 | `agent.chat.composerButtons`          | `[attach,loopToggle,compact,claudeImport]` | window   | 入力欄アイコン列の表に直接出すボタン。残りは「…」メニューへ畳む（[後述](#入力欄アイコン列の整理)）。未知のIDや重複を含む場合は既定へ丸める                                                                                                    |
+| `agent.chat.turnSummary.enabled`      | `false`                                    | window   | [応答末尾に要約と次アクションを出させる](#応答末尾の要約と次の推奨アクション)。手動で送る発言の末尾へ指示文を毎回足す。既定は無効                                                                                                             |
+| `agent.chat.turnSummary.instruction`  | 下記の既定文                               | window   | 有効なときに発言の末尾へ足す指示文。空文字なら足さない（無効化と同じ）                                                                                                                                                                        |
 | `agent.notifications.approvalPending` | `true`                                     | window   | 承認要求が出た直後、そのタブが見えていなければ通知を出す（Codex/Claude Code両画面共通）。同じ要求での重複通知はしない                                                                                                                         |
 | `agent.notifications.turnComplete`    | `false`                                    | window   | ターンが完了した直後、そのタブが見えていなければ通知を出す。既定は無効                                                                                                                                                                        |
 | `agent.sessionPresets`                | `[]`                                       | resource | [プリセットから新しい会話を開く](#プリセットから新しい会話を開く)。`name` / `provider` / `model` / `effort` / `approvalMode` / `sandbox` / `workingDirectory` を持つ配列。`approvalMode` / `sandbox` は拡張機能側の現在の設定より緩められない |
