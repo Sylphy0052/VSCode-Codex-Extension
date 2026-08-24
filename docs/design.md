@@ -3566,6 +3566,44 @@ Codexの`/btw`は`thread/fork`で**新しいスレッド**を作ってから聞�
 - `test/unit/webviewStyles.test.ts`: `.body-fold`/`.body-content`が定義されていることを固定
 - webview側の実際の開閉・スクロール・視覚的な体裁はvitestのnode環境では確認できない（§14.60と同じ制約）。実機での確認は`docs/manual-test.md`のU-34に委ねる
 
+### 14.65 応答中かどうかをチャット画面の外枠の色で示す（issue #701）
+
+#### 背景
+
+チャット画面で、いまエージェントが応答中かどうかは中断ボタン（`#stop`）の表示有無と、
+ステータス行の「応答中…」でしか分からなかった。どちらも画面下端の`#composer`まわりに
+あるため、ログ本文をスクロールして読んでいる最中は視線の外にあり、状態の把握に画面下部を
+見に行く必要があった。
+
+画面の外周そのものを状態表示に使う。待機中は青、応答中は赤の枠を1本重ね、どこを見ていても
+視界の端で状態が分かるようにした。
+
+#### 実装
+
+- `src/view/chatStyles.ts`: `body::after`で外周の枠を描く。既定は`border: 2px solid var(--vscode-charts-blue)`、`body.busy::after`のとき`border-color`を`var(--vscode-charts-red)`へ差し替える
+- `src/view/chatScript.ts`: `apply(state)`で`document.body.classList.toggle('busy', !!state.busy)`を実行する。判定は既存の`state.busy`（`el('stop').hidden = !state.busy`と同じ値）をそのまま使い、状態の持ち方は増やしていない
+
+**枠を実体のある要素やbodyのborderにしなかった。** `body`は`display: flex; flex-direction: column`で、
+`#logWrap`（`flex: 1`）と`#composer`が高さを取り合っている。ここへborderや枠用の要素を足すと
+ログの表示領域が枠の分だけ縮み、スクロール位置の計算（`isLogNearBottom`）にも影響する。
+`position: fixed`の擬似要素にすればflexの高さ計算に一切入らないため、既存のレイアウトを
+触らずに済む。あわせて`pointer-events: none`を付け、枠の上をクリックしても下の要素が
+操作できるようにした。
+
+`z-index`は`1`にした。`#log`より前面に出れば足りる一方、`#scrollToBottom`・`#commands`・
+`#composerOverflowMenu`（いずれも`z-index: 10`）のような浮き出す要素の前へ枠が出る必要は
+無いため、それらには譲る。
+
+色は`--vscode-charts-blue` / `--vscode-charts-red`から取り、ハードコードしていない。
+`chatStyles()`と`chatScript()`は`chatShared.ts`の`renderShell`経由でCodex画面
+（`chatView.ts`）とClaude Code画面（`claudeChatView.ts`）の双方へ配られるため、
+どちらの画面にも同じ枠が出る。
+
+#### 確かめ方
+
+- `test/unit/webviewStyles.test.ts`: `body::after`が青の枠・`position: fixed`・`pointer-events: none`を持つこと、`body.busy::after`が赤へ差し替えることを固定。あわせて`chatScript()`の出力に`document.body.classList.toggle('busy'`が含まれることを確認する
+- 実際の色味・枠の太さ（2px）・テーマ切り替え時の見え方はvitestのnode環境では確認できない（§14.60・§14.64と同じ制約）。実機での確認は`docs/manual-test.md`のC-49（Claude Code画面はL-50）に委ねる
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）
