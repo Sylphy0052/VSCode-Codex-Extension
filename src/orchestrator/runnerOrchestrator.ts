@@ -24,6 +24,7 @@ import type {
   LiveRun,
   RetryTaskResult,
   WorkflowRunSnapshot,
+  WorkflowWarning,
 } from './runner';
 import type { WorkflowRunnerInternals } from './runnerInternals';
 import {
@@ -146,6 +147,51 @@ export interface OrchestratorControlActions {
 
 /** 差し替えた継続指示のうち、警告欄へ出す先頭部分の長さ。 */
 const PROMPT_OVERRIDE_PREVIEW_LENGTH = 200;
+
+/**
+ * 計画変更の履歴として残す警告（`orchestratorTaskAdded`/`orchestratorTaskRemoved`）の
+ * 上限件数（Issue #765）。
+ *
+ * この2種は「いつ何が加減されたか」の履歴そのものなので、`orchestratorPromptOverride`の
+ * ように直近1件へ丸めることはできない。一方で`add_task`→`remove_task`を繰り返せば
+ * `prompt`全文級の警告をいくらでも積めてしまい（`live.warnings`に全体の上限は無い）、
+ * ワークフローViewの警告欄とメモリの両方が際限なく膨らむ。上限に達したら古いものから
+ * 落とし、落としている事実自体は`orchestratorPlanHistoryTrimmed`で残す。
+ */
+const MAX_PLAN_CHANGE_HISTORY_WARNINGS = 50;
+
+/** 履歴として積む（丸めない）計画変更の警告の種類。 */
+const PLAN_CHANGE_HISTORY_KINDS: readonly WorkflowWarning['kind'][] = [
+  'orchestratorTaskAdded',
+  'orchestratorTaskRemoved',
+];
+
+/**
+ * 計画変更の履歴（`orchestratorTaskAdded`/`orchestratorTaskRemoved`）を積み、
+ * `MAX_PLAN_CHANGE_HISTORY_WARNINGS`を超えた分を古い順に落とす（Issue #765）。
+ *
+ * 落としたことは`orchestratorPlanHistoryTrimmed`（同一runにつき直近1件へ丸める）で
+ * 残す。落とした内容そのものは復元できないため、件数ではなく「上限に達して古いものから
+ * 落としている」という事実を伝える文面にする。
+ */
+function pushPlanChangeHistoryWarning(live: LiveRun, warning: WorkflowWarning): void {
+  live.warnings.push(warning);
+  const history = live.warnings.filter((w) => PLAN_CHANGE_HISTORY_KINDS.includes(w.kind));
+  if (history.length <= MAX_PLAN_CHANGE_HISTORY_WARNINGS) {
+    return;
+  }
+  const dropped = new Set(history.slice(0, history.length - MAX_PLAN_CHANGE_HISTORY_WARNINGS));
+  live.warnings = live.warnings.filter(
+    (w) => !dropped.has(w) && w.kind !== 'orchestratorPlanHistoryTrimmed',
+  );
+  live.warnings.push({
+    kind: 'orchestratorPlanHistoryTrimmed',
+    taskId: undefined,
+    message:
+      `計画変更（タスクの追加・削除）の記録が上限（${MAX_PLAN_CHANGE_HISTORY_WARNINGS}件）に` +
+      '達したため、古いものから順に落としています。落とした内容はこの画面からは追えません。',
+  });
+}
 
 const ok = (reason: string): OrchestratorControlResult => ({ accepted: true, reason });
 const no = (reason: string): OrchestratorControlResult => ({ accepted: false, reason });
@@ -768,7 +814,7 @@ function addTask(
   }
   live.def = candidateDef;
   live.runState = addTaskState(live.runState, task.id);
-  live.warnings.push({
+  pushPlanChangeHistoryWarning(live, {
     kind: 'orchestratorTaskAdded',
     taskId: task.id,
     message:
@@ -849,7 +895,7 @@ function removeTask(
   }
   live.def = candidateDef;
   live.runState = removeTaskState(live.runState, taskId);
-  live.warnings.push({
+  pushPlanChangeHistoryWarning(live, {
     kind: 'orchestratorTaskRemoved',
     taskId,
     message:
@@ -908,6 +954,12 @@ function updateTaskDependencies(
   }
   const before = target.dependsOn;
   live.def = candidateDef;
+  // 同一taskIdへの`update_task_dependencies`は`pending`である限り何度でも呼べるため、
+  // `orchestratorPromptOverride`（Issue #366）と同じく直近1件へ丸める。依存は最新の状態
+  // さえ分かればよく、途中経過を積む意味が無い（Issue #765）
+  live.warnings = live.warnings.filter(
+    (w) => !(w.kind === 'orchestratorDependenciesChanged' && w.taskId === taskId),
+  );
   live.warnings.push({
     kind: 'orchestratorDependenciesChanged',
     taskId,
