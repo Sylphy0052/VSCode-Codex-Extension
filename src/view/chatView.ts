@@ -444,9 +444,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
     const rolloutPath = await resolveWithRetry(() => this.store!.resolveRolloutPath(threadId));
     if (rolloutPath === undefined) {
-      void vscode.window.showErrorMessage(
-        '引き継ぎ元セッションのtranscriptが見つかりませんでした',
-      );
+      void vscode.window.showErrorMessage('引き継ぎ元セッションのtranscriptが見つかりませんでした');
       return;
     }
     const newThreadId = await this.openNew(entry.cwd, entry.taskConfig);

@@ -2440,19 +2440,14 @@ describe('handoffToNewSession（issue #694）', () => {
 
   it('transcriptが解決できれば、新セッションへ固定文言とパスを送る', async () => {
     stubStartCapturing();
-    const sendSpy = vi
-      .spyOn(ClaudeStreamSession.prototype, 'sendOrQueue')
-      .mockReturnValue('sent');
+    const sendSpy = vi.spyOn(ClaudeStreamSession.prototype, 'sendOrQueue').mockReturnValue('sent');
     const store = fakeStore({ resolveTranscriptPath: async () => '/home/user/.claude/x.jsonl' });
     const { manager } = createManager({ store });
     await manager.openNew('/workspace/root');
 
     await manager.handoffToNewSession();
 
-    expect(sendSpy).toHaveBeenCalledWith(
-      expect.stringContaining('/home/user/.claude/x.jsonl'),
-      [],
-    );
+    expect(sendSpy).toHaveBeenCalledWith(expect.stringContaining('/home/user/.claude/x.jsonl'), []);
     // 新セッションが増えている（元のタブ+新タブ）
     expect(__mock.createdPanels.length).toBe(2);
   });

@@ -1684,16 +1684,17 @@ describe('handoffToNewSession（issue #694）', () => {
     await tick();
     connection.resolveFirst('thread/start', threadStartResult('thread-orig'));
     await opened;
-    const threadStartsBefore = connection.requests.filter((r) => r.method === 'thread/start')
-      .length;
+    const threadStartsBefore = connection.requests.filter(
+      (r) => r.method === 'thread/start',
+    ).length;
 
     const handoff = manager.handoffToNewSession();
     await vi.runAllTimersAsync();
     await handoff;
 
-    expect(
-      connection.requests.filter((r) => r.method === 'thread/start').length,
-    ).toBe(threadStartsBefore);
+    expect(connection.requests.filter((r) => r.method === 'thread/start').length).toBe(
+      threadStartsBefore,
+    );
     expect(__mock.messages.errors).toContainEqual(
       expect.stringContaining('transcriptが見つかりませんでした'),
     );

@@ -558,11 +558,11 @@ export class ClaudeChatViewManager
     if (sessionId === undefined) {
       return;
     }
-    const transcriptPath = await resolveWithRetry(() => this.store.resolveTranscriptPath(sessionId));
+    const transcriptPath = await resolveWithRetry(() =>
+      this.store.resolveTranscriptPath(sessionId),
+    );
     if (transcriptPath === undefined) {
-      void vscode.window.showErrorMessage(
-        '引き継ぎ元セッションのtranscriptが見つかりませんでした',
-      );
+      void vscode.window.showErrorMessage('引き継ぎ元セッションのtranscriptが見つかりませんでした');
       return;
     }
     const newSessionId = await this.openNew(entry.cwd, entry.taskConfig);
