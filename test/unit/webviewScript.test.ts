@@ -398,6 +398,16 @@ describe('chatScript', () => {
     });
   });
 
+  describe('本文の行長（issue #713）', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+
+    it('生テキストで出す本文に plain クラスを付ける', () => {
+      // CSSは本文が '.body' 自身に載っているかを見分けられない。renderBody が印を付ける
+      const body = source.slice(source.indexOf('function renderBody'));
+      expect(body).toContain("node.body.classList.toggle('plain', !useMarkdown)");
+    });
+  });
+
   describe('AskUserQuestionの選択UI（issue #696）', () => {
     const source = chatScript('Claude Code', { mode: 'command', commandName: 'code-review' });
 
