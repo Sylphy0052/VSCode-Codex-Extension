@@ -128,6 +128,10 @@ export function workflowStyles(): string {
   .kanban-badge {
     display: inline-block;
     padding: 2px 10px;
+    /* button になった（issue 752）ので、ブラウザ既定の見た目を打ち消して従来の
+       バッジの形を保つ。font は inherit しないと OS の UI フォントで出る */
+    font-family: inherit;
+    cursor: pointer;
     border-radius: 10px;
     font-size: 0.9em;
     border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
@@ -150,6 +154,21 @@ export function workflowStyles(): string {
     border-color: var(--vscode-errorForeground);
     background-color: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent);
   }
+
+  /* 絞り込み中のバッジ（issue 752）。押されていることを色だけでなく枠の太さでも示す */
+  .kanban-badge.selected {
+    border-width: 2px;
+    border-color: currentColor;
+    font-weight: 600;
+  }
+  .kanban-badge:disabled {
+    cursor: default;
+    opacity: 0.5;
+  }
+  .kanban-badge:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+  /* 絞り込みに該当しないノードは消さずに淡くする。依存グラフが主役の画面で
+     ノードが消えると関係が読めなくなるため */
+  .wf-node.dimmed { opacity: 0.25; }
 
   /* ---- 依存グラフ ---- */
   .section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; }

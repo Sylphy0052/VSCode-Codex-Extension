@@ -694,6 +694,42 @@ describe('controlPanelScript', () => {
   );
 });
 
+describe('workflowScript のカンバンバッジからの絞り込み（issue #752）', () => {
+  it('バッジはボタンで、押下状態を aria-pressed で持つ', () => {
+    const source = workflowScript();
+    // 陽性対照: バッジを作る関数がある（綴り違いで空振りしていない）
+    expect(source).toContain('function kanbanBadge(bucket, count)');
+    expect(source).toContain("text(\n      'button',");
+    expect(source).toContain("button.setAttribute('aria-pressed'");
+    expect(source).toContain("button.type = 'button';");
+  });
+
+  it('押すとトグルし、0件のバッジは押せない', () => {
+    const source = workflowScript();
+    expect(source).toContain('kanbanFilter = kanbanFilter === bucket ? undefined : bucket;');
+    expect(source).toContain('button.disabled = count === 0;');
+  });
+
+  it('該当しないノードは消さずに淡くする', () => {
+    const source = workflowScript();
+    expect(source).toContain("' dimmed'");
+    expect(workflowStyles()).toContain('.wf-node.dimmed');
+  });
+
+  it('バケットの分類はWebview側で振り分け直さない', () => {
+    const source = workflowScript();
+    // 拡張機能側が付けた kanbanBucket をそのまま使う（Issue #104の再発防止）
+    expect(source).toContain('task.kanbanBucket !== kanbanFilter');
+    expect(source).not.toContain("state === 'failed' || state === 'blocked'");
+  });
+
+  it('絞り込み中のバケットが0件になったら解除する', () => {
+    const source = workflowScript();
+    expect(source).toContain('kanbanFilter = undefined;');
+    expect(source).toContain('!(kanban[kanbanFilter] > 0)');
+  });
+});
+
 describe('workflowScript の全体進捗バー（issue #754）', () => {
   it('区画の集計は拡張機能側の結果をそのまま当てる', () => {
     const source = workflowScript();

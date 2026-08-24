@@ -13,6 +13,7 @@ import type { WorkflowDefinition } from '../orchestrator/workflow';
 import { chatCsp } from './chatCsp';
 import {
   aggregateProgress,
+  kanbanBucket,
   progressSegments,
   layoutGraph,
   summarizeIntegration,
@@ -299,6 +300,9 @@ export class WorkflowViewManager implements vscode.Disposable {
     const tasksWithRoleLabel = snapshot.tasks.map((t) => ({
       ...t,
       roleLabel: taskRoleLabel(t.role),
+      // カンバンのバッジから該当タスクを絞り込む（issue #752）ための分類。Webview側で
+      // 状態を振り分け直すと、状態が増えたときにここだけ追随漏れになる（Issue #104）
+      kanbanBucket: kanbanBucket(t.state),
     }));
     void this.panel.webview.postMessage({
       type: 'state',
