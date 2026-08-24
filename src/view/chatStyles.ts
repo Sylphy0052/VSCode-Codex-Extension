@@ -31,7 +31,8 @@ export function chatStyles(): string {
     position: fixed;
     inset: 0;
     pointer-events: none;
-    z-index: 100;
+    /* #logより前面に出れば足りる。浮き出すメニュー類（z-index: 10）には譲る */
+    z-index: 1;
     border: 2px solid var(--vscode-charts-blue);
   }
   /* 応答中は赤。busyクラスの付け外しは chatScript.ts の apply() が行う */
