@@ -3723,6 +3723,49 @@ Codexの`/btw`は`thread/fork`で**新しいスレッド**を作ってから聞�
 - `test/unit/webviewStyles.test.ts`: `.item.status-failed .head`がエラー色を使うこと、`.item.running .head`より後に来ること
 - 実際の色味・テーマ切り替え時の見え方はvitestのnode環境では確認できない（§14.60・§14.64・§14.65・§14.67・§14.68と同じ制約）。実機での確認は`docs/manual-test.md`のU-37に委ねる
 
+### 14.70 見出しに種別のアイコンを出す（issue #714）
+
+#### 背景
+
+会話の各項目の見出しは「あなた」「Codex」「コマンド実行」といったラベル文字だけで、しかも
+`descriptionForeground`の`0.85em`で出る。スクロール中に誰の発言か・何のログかを読み取るのに
+一拍かかっていた。
+
+#### 実装
+
+- `src/view/chatScript.ts`: `KIND_ICON_PATHS`（`CLASS_OF`が返す4種→SVGのパス）と`createKindIcon`を置き、`createNode`で見出しの先頭へ差し込む
+- `src/view/chatStyles.ts`: `.item .head .head-icon`（`flex: none`）と`.item .head .head-label`（`flex: 1`）
+
+**SVGはDOM APIで組む。** 入力欄のアイコン（`chatShared.ts`の`COMPOSER_ICONS`）はホスト側で
+HTMLを組み立てるため文字列のまま埋め込めるが、見出しのアイコンはwebview側で作るので同じ手が
+使えない。この画面はエージェントの出力を扱うため、HTML文字列を流し込む経路を増やさない方針
+（`chatScript.ts`のMarkdown描画のコメント、および`webviewScript.test.ts`の禁止）に従い、
+`document.createElementNS`で`svg`と`path`を組む。持つのはパス文字列だけにした。
+
+**`stroke: currentColor`にした。** 見出しの色をそのまま継ぐため、テーマの切り替えにも、
+状態による色分け（§14.69）にも自動で追随する。失敗した実行はアイコンごとエラー色になる。
+
+**ラベル側に`flex: 1`が要る。** 見出しは`display: flex; justify-content: space-between`で、
+子が「ラベル」「操作ボタン」の2つである前提だった。アイコンを足して3つになると、
+`space-between`は3つを均等に散らすためラベルが中央へ寄る。ラベルを伸ばして操作ボタンを
+右端へ押し付ける。
+
+**アイコンは読み上げから外す（`aria-hidden="true"`）。** 種別は見出しの文言が既に表している。
+
+#### 確かめ方
+
+- `test/unit/webviewScript.test.ts`: `createNode`がアイコンを差し込むこと、`createElementNS`で組むこと、`stroke`が`currentColor`であること、**`CLASS_OF`が返す値のすべてに図案があること**（種別を足したときにアイコンが1つだけ出ない、を防ぐ）
+- `test/unit/webviewStyles.test.ts`: `.head-icon`が`flex: none`、`.head-label`が`flex: 1`を持つこと
+- 実際の図案の見え方・テーマ切り替え時の視認性はvitestのnode環境では確認できない（§14.60・§14.64・§14.65・§14.67〜§14.69と同じ制約）。実機での確認は`docs/manual-test.md`のU-38に委ねる
+
+#### 実装中に踏んだもの
+
+コメントに`innerHTML`という語を書いたところ、`webviewScript.test.ts`の
+「動的な文字列をHTMLへ組み込まない（issue #18）」が落ちた。この検査は
+`chatScript()`が返すソース文字列にその語が含まれないことを見ており、**コメントも
+ソースの一部**である。同種の制約として「バッククォートと`${`を書かない」もある
+（テンプレートリテラルの中身のため）。コメントの文言を変えて回避した。
+
 ## 15. 作業記録（日報・週報連携）
 
 ## 16. 並列オーケストレーション（ワークフロー実行）

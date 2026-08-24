@@ -120,6 +120,13 @@ describe('chatStyles', () => {
     expect(css).toMatch(/\.item\.status-running \.head\s*\{[^}]*var\(--vscode-/);
   });
 
+  it('見出しのアイコンとラベルの並びを決めている（issue #714）', () => {
+    const css = stripComments(chatStyles());
+    // アイコンで子が3つになるため、ラベルを伸ばさないと操作ボタンが右端へ寄らない
+    expect(css).toMatch(/\.item \.head \.head-icon\s*\{[^}]*flex: none/);
+    expect(css).toMatch(/\.item \.head \.head-label\s*\{[^}]*flex: 1/);
+  });
+
   it('状態の色が実行中の見出し色より後に来て上書きする（issue #715）', () => {
     const css = stripComments(chatStyles());
     // 前に置くと .item.running .head（同じ詳細度）に負けて、色が出ない

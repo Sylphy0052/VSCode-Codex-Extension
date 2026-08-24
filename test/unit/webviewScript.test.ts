@@ -443,6 +443,48 @@ describe('chatScript', () => {
     });
   });
 
+  describe('見出しの種別アイコン（issue #714）', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+
+    /** `const <name> = {` から `};` までのキーを取り出す。 */
+    const keysOf = (name: string): string[] => {
+      const start = source.indexOf(`const ${name} = {`);
+      expect(start, `${name} が見つからない`).toBeGreaterThan(-1);
+      const block = source.slice(start, source.indexOf('};', start));
+      return [...block.matchAll(/^\s+([A-Za-z]+):/gmu)].map((m) => m[1]!);
+    };
+
+    it('見出しの先頭へアイコンを差し込む', () => {
+      const create = source.slice(source.indexOf('function createNode'));
+      expect(create).toContain('createKindIcon(kindClass)');
+      expect(create).toContain("iconWrap.className = 'head-icon'");
+      // 操作ボタンを右端へ押し付けるため、ラベル側にもクラスが要る
+      expect(create).toContain("label.className = 'head-label'");
+    });
+
+    it('SVGはDOM APIで組み、innerHTMLを使わない', () => {
+      // エージェントの出力を扱う画面なので、HTML文字列の流し込み経路を増やさない
+      expect(source).toContain("document.createElementNS(SVG_NS, 'svg')");
+      expect(source).toContain("document.createElementNS(SVG_NS, 'path')");
+      expect(source.includes('innerHTML')).toBe(false);
+    });
+
+    it('色を見出しから継ぐ（テーマと状態の色分けに追随する）', () => {
+      const icon = source.slice(source.indexOf('function createKindIcon'));
+      expect(icon.slice(0, icon.indexOf('\n  }'))).toContain("'stroke', 'currentColor'");
+    });
+
+    it('種別の4種すべてに図案がある', () => {
+      // CLASS_OF が返す値のどれかに図案が無いと、その種別だけアイコンが出ない
+      const classOf = source.slice(source.indexOf('const CLASS_OF = {'));
+      const values = new Set(
+        [...classOf.slice(0, classOf.indexOf('};')).matchAll(/:\s*'([a-z]+)'/gu)].map((m) => m[1]!),
+      );
+      expect(values.size).toBeGreaterThan(0);
+      expect(keysOf('KIND_ICON_PATHS').sort()).toEqual([...values].sort());
+    });
+  });
+
   describe('AskUserQuestionの選択UI（issue #696）', () => {
     const source = chatScript('Claude Code', { mode: 'command', commandName: 'code-review' });
 
