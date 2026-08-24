@@ -80,3 +80,50 @@ describe('ChatSession.sendOrQueue（キューを既定にし、割込は明示�
     expect(fake.session.getState().queued.map((q) => q.text)).toEqual(['1つめ', '2つめ']);
   });
 });
+
+describe('ChatSession.popLastQueuedForInput（Escでの書き戻し、issue #677レビュー指摘）', () => {
+  it('末尾を取り出し、待ち行列から取り除く', async () => {
+    const fake = await runningTurn();
+    await fake.session.sendOrQueue('1つめ', emptyConfig);
+    await fake.session.sendOrQueue('2つめ', emptyConfig);
+
+    const popped = fake.session.popLastQueuedForInput();
+
+    expect(popped?.text).toBe('2つめ');
+    expect(fake.session.getState().queued.map((q) => q.text)).toEqual(['1つめ']);
+  });
+
+  it('空なら取り出さない', async () => {
+    const fake = await runningTurn();
+
+    expect(fake.session.popLastQueuedForInput()).toBeUndefined();
+  });
+
+  it('添付があると入力欄へ戻せず黙って消えるため、取り出さない', async () => {
+    const fake = await runningTurn();
+    const image = { id: 'a1', name: 'shot.png', mediaType: 'image/png', data: 'QUJD', bytes: 3 };
+    await fake.session.sendOrQueue('画像付き', emptyConfig, [image]);
+
+    const popped = fake.session.popLastQueuedForInput();
+
+    expect(popped).toBeUndefined();
+    expect(fake.session.getState().queued.map((q) => q.text)).toEqual(['画像付き']);
+  });
+
+  it('拡張側の最新stateから直接取り出すため、自動デキュー直後でも別の指示を取り消さない', async () => {
+    // ターン完了によるsendNextQueuedの自動デキューと、Escによる書き戻しが競合しても、
+    // UI側の古いスナップショットではなく拡張側の現在のqueuedを見るためズレない
+    const fake = await runningTurn();
+    await fake.session.sendOrQueue('1つめ', emptyConfig);
+    await fake.session.sendOrQueue('2つめ', emptyConfig);
+
+    // ターン完了相当。先頭を自動的に取り出して送る
+    await fake.session.sendNextQueued(emptyConfig);
+    expect(fake.session.getState().queued.map((q) => q.text)).toEqual(['2つめ']);
+
+    const popped = fake.session.popLastQueuedForInput();
+
+    expect(popped?.text).toBe('2つめ');
+    expect(fake.session.getState().queued).toEqual([]);
+  });
+});

@@ -1490,6 +1490,18 @@ export function takeQueued(state: ChatState): {
   return { message: head, next: { ...state, queued: rest } };
 }
 
+/** 末尾の指示を取り出す。空なら取り出さない。入力欄への書き戻し（Esc）に使う。 */
+export function popLastQueued(state: ChatState): {
+  message: QueuedMessage | undefined;
+  next: ChatState;
+} {
+  const last = state.queued[state.queued.length - 1];
+  if (last === undefined) {
+    return { message: undefined, next: state };
+  }
+  return { message: last, next: { ...state, queued: state.queued.slice(0, -1) } };
+}
+
 /** 待機中の指示を1件取り消す。 */
 export function removeQueued(state: ChatState, index: number): ChatState {
   if (index < 0 || index >= state.queued.length) {

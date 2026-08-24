@@ -2385,15 +2385,13 @@ export function chatScript(
 
     // 待ち行列の末尾を入力欄へ戻す（Codex CLI本家のEsc相当）。中断（グローバルの
     // Escハンドラ）より優先し、stopPropagationで中断側へ流さない。書きかけの文章を
-    // 消さないよう、入力欄が空のときだけ戻す
+    // 消さないよう、入力欄が空のときだけ戻す。取り出しは拡張側の最新stateに対して
+    // 行う（ここで持つqueuedMessagesは直近のapply()時点のスナップショットでしかなく、
+    // ターン完了時の自動デキューと競合すると別の指示を取り消しかねないため）
     if (e.key === 'Escape' && !menuOpen() && queuedMessages.length > 0 && e.target.value.trim() === '') {
       e.preventDefault();
       e.stopPropagation();
-      const lastIndex = queuedMessages.length - 1;
-      const last = queuedMessages[lastIndex];
-      e.target.value = last.text;
-      e.target.selectionStart = e.target.selectionEnd = e.target.value.length;
-      vscode.postMessage({ type: 'cancelQueued', index: lastIndex });
+      vscode.postMessage({ type: 'popLastQueuedForInput' });
       return;
     }
 
@@ -2480,6 +2478,14 @@ export function chatScript(
       imageData.set(data.path, data.dataUrl || data.error || '画像を読み込めませんでした');
       // 届いた画像を反映する。差分がある項目だけ描き直される
       if (lastItems) syncItems(lastItems);
+    }
+    if (data.type === 'restoreQueuedText' && typeof data.text === 'string') {
+      // Escで戻した待ち行列の末尾。拡張側で既にキューから取り除き済みなので、
+      // 入力欄へそのまま書き戻すだけでよい
+      const input = el('input');
+      input.value = data.text;
+      input.selectionStart = input.selectionEnd = input.value.length;
+      input.focus();
     }
     if (data.type === 'insertComposerText' && typeof data.text === 'string') {
       // エディタの選択範囲を入力欄へ挿す（issue #292）。ホスト側（chatView.ts /
