@@ -408,6 +408,40 @@ describe('chatScript', () => {
     });
   });
 
+  describe('ツール実行の成否の色分け（issue #715）', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+
+    /** `const <name> = { ... }` のキーを取り出す。 */
+    const keysOf = (name: string): string[] => {
+      const start = source.indexOf(`const ${name} = {`);
+      expect(start, `${name} が見つからない`).toBeGreaterThan(-1);
+      const block = source.slice(start, source.indexOf('};', start));
+      return [...block.matchAll(/^\s+([A-Za-z]+):/gmu)].map((m) => m[1]!);
+    };
+
+    it('見出しへ状態のクラスを付ける', () => {
+      const update = source.slice(source.indexOf('function updateNode'));
+      expect(update).toContain('STATUS_CLASS[item.status]');
+      expect(update).toContain('node.wrap.classList.toggle(name, name === statusClass)');
+    });
+
+    it('状態のラベルと色の割り当てが食い違っていない', () => {
+      // ラベルを足したのに色を割り当て忘れる、を防ぐ。成否でない3つだけが対象外
+      const uncolored = ['completed', 'approved', 'interacted'];
+      const expected = keysOf('STATUS_LABEL').filter((key) => !uncolored.includes(key));
+      expect(keysOf('STATUS_CLASS').sort()).toEqual(expected.sort());
+    });
+
+    it('付け外しの対象がクラス名の一覧と一致する', () => {
+      // 一覧から漏れたクラスは、状態が変わっても消えずに残る
+      const names = new Set([...source.matchAll(/'(status-[a-z]+)'/gu)].map((m) => m[1]!));
+      const listed = source.slice(source.indexOf('const STATUS_CLASS_NAMES'));
+      for (const name of names) {
+        expect(listed.slice(0, listed.indexOf(';'))).toContain(name);
+      }
+    });
+  });
+
   describe('AskUserQuestionの選択UI（issue #696）', () => {
     const source = chatScript('Claude Code', { mode: 'command', commandName: 'code-review' });
 

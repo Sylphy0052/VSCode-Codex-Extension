@@ -125,6 +125,18 @@ export function chatStyles(): string {
     border-left: 2px solid var(--vscode-progressBar-background);
   }
   .item.running .head { color: var(--vscode-foreground); }
+  /*
+   * 成否を見出しの色で示す（issue #715）。ツール出力は既定で畳まれている（issue #679）
+   * ため、閉じたまま何行も並ぶと失敗を1件ずつ開いて探すことになる。
+   *
+   * 色だけに情報を載せない。状態の日本語（STATUS_LABEL の「失敗」「拒否」など）は
+   * 従来どおり見出しに出しており、色を見分けられなくても読める。
+   *
+   * 上の .item.running .head より後に置いて上書きする。実行中の見出しは進行中の色
+   * （本文の左borderと同じ progressBar）へ寄せたほうが、どの項目が動いているかが揃う。
+   */
+  .item.status-running .head { color: var(--vscode-progressBar-background); }
+  .item.status-failed .head { color: var(--vscode-errorForeground); }
   .approval {
     margin: 10px 0;
     padding: 10px 12px;

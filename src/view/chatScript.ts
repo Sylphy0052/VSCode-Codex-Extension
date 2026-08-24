@@ -196,6 +196,31 @@ export function chatScript(
     aborted: '中止',
   };
 
+  /**
+   * 状態ごとの見出しの色分け（issue #715）。ツール出力は既定で畳まれているため
+   * （issue #679）、開かずに失敗を見つけられるようにする。STATUS_LABEL の真下に置くのは、
+   * ラベルを足したときに色の割り当て漏れに気付けるようにするため（対応は
+   * webviewScript.test.ts が突き合わせている）。
+   *
+   * 完了（completed / approved）に色を当てていない。ほとんどの出力は完了で終わるため、
+   * 色を付けると画面が一色に埋まり、目立たせたい失敗のほうが埋もれる。
+   * interacted は subAgentActivity の種類であって成否ではないので、ここには入れない。
+   */
+  const STATUS_CLASS = {
+    inProgress: 'status-running',
+    running: 'status-running',
+    started: 'status-running',
+    failed: 'status-failed',
+    declined: 'status-failed',
+    denied: 'status-failed',
+    interrupted: 'status-failed',
+    timedOut: 'status-failed',
+    aborted: 'status-failed',
+  };
+
+  /** 付け外しの対象。どれか1つだけが付く。 */
+  const STATUS_CLASS_NAMES = ['status-running', 'status-failed'];
+
   const CLASS_OF = {
     userMessage: 'user',
     agentMessage: 'agent',
@@ -908,6 +933,12 @@ export function chatScript(
       item.kind === 'commandExecution' &&
       (item.status === 'inProgress' || item.status === 'running');
     node.wrap.classList.toggle('running', running);
+
+    // 成否を見出しの色で示す（issue #715）。畳んだままでも失敗が見つかるようにする
+    const statusClass = item.status ? STATUS_CLASS[item.status] : undefined;
+    for (const name of STATUS_CLASS_NAMES) {
+      node.wrap.classList.toggle(name, name === statusClass);
+    }
 
     renderBody(node, item);
 
