@@ -198,6 +198,66 @@ describe('SessionTreeProvider.getTreeItem の活動状態表示（issue #286、d
   });
 });
 
+/**
+ * アイコンの色（issue #733）。
+ *
+ * 形だけでは一覧を流し見したときの差が小さい。色は形の補助で、形の出し分けは変えない。
+ */
+describe('SessionTreeProvider.getTreeItem のアイコンの色（issue #733）', () => {
+  const colorOf = (item: { iconPath?: unknown }): string | undefined =>
+    (item.iconPath as { color?: { id: string } }).color?.id;
+
+  it('承認待ちは注意色', () => {
+    const s = session({ id: 's1' });
+    const provider = makeProvider([s], new PinnedSessionStore(), [], () => 'approvalPending');
+
+    expect(colorOf(provider.getTreeItem(s))).toBe('charts.yellow');
+  });
+
+  it('実行中は進行中の色', () => {
+    const s = session({ id: 's1' });
+    const provider = makeProvider([s], new PinnedSessionStore(), [], () => 'running');
+
+    expect(colorOf(provider.getTreeItem(s))).toBe('charts.blue');
+  });
+
+  it('開いている（idle）は開いていることを表す色', () => {
+    const s = session({ id: 's1' });
+    const provider = makeProvider([s], new PinnedSessionStore(), [], () => 'idle');
+
+    expect(colorOf(provider.getTreeItem(s))).toBe('charts.green');
+  });
+
+  it('アーカイブ済みは控えめな色', () => {
+    const s = session({ id: 's1', archived: true });
+    const provider = makeProvider([s], new PinnedSessionStore(), [], () => undefined);
+
+    const item = provider.getTreeItem(s);
+
+    expect((item.iconPath as { id: string }).id).toBe('archive');
+    expect(colorOf(item)).toBe('descriptionForeground');
+  });
+
+  it('未オープンには色を付けない（一覧の大半なので、付けると合図でなくなる）', () => {
+    const codex = session({ id: 's1', provider: 'codex', archived: false });
+    const claude = session({ id: 's2', provider: 'claude', archived: false });
+    const provider = makeProvider([codex, claude], new PinnedSessionStore(), [], () => undefined);
+
+    expect(colorOf(provider.getTreeItem(codex))).toBeUndefined();
+    expect(colorOf(provider.getTreeItem(claude))).toBeUndefined();
+  });
+
+  it('状態ごとに色が違う（同じ色を配って区別が消えていないこと）', () => {
+    const s = session({ id: 's1' });
+    const states: readonly SessionActivityState[] = ['approvalPending', 'running', 'idle'];
+    const colors = states.map((state) =>
+      colorOf(makeProvider([s], new PinnedSessionStore(), [], () => state).getTreeItem(s)),
+    );
+
+    expect(new Set(colors).size).toBe(states.length);
+  });
+});
+
 describe('SessionTreeProvider.getChildren のグループ化（issue #293、既定 groupBy: date）', () => {
   it('日付でグループ化したノードを返す（セッションは直接ラップしない）', async () => {
     const s = session({ id: 's1', updatedAt: new Date().toISOString() });

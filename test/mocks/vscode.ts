@@ -499,8 +499,16 @@ export enum TreeItemCollapsibleState {
   Expanded = 2,
 }
 
-export class ThemeIcon {
+/** `vscode.ThemeColor` の代わり。色IDを持つだけ（issue #733）。 */
+export class ThemeColor {
   constructor(readonly id: string) {}
+}
+
+export class ThemeIcon {
+  constructor(
+    readonly id: string,
+    readonly color?: ThemeColor,
+  ) {}
 }
 
 export class MarkdownString {

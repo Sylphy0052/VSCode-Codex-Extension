@@ -212,7 +212,6 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement>
 
   private buildSessionTreeItem(session: SessionSummary): vscode.TreeItem {
     const activity = this.getActivity(session);
-    const open = activity !== undefined;
     const item = new vscode.TreeItem(
       session.threadName ?? '(名称未設定)',
       vscode.TreeItemCollapsibleState.None,
@@ -262,21 +261,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement>
       ].join('\n'),
     );
 
-    // 承認待ち／実行中はオープン状態より優先して出す（issue #286、design.md §14.55）。
-    // どちらでも無ければ従来どおりの分岐（open ? circle-filled : archived ? archive : ...）
-    item.iconPath = new vscode.ThemeIcon(
-      activity === 'approvalPending'
-        ? 'bell-dot'
-        : activity === 'running'
-          ? 'sync~spin'
-          : open
-            ? 'circle-filled'
-            : session.archived
-              ? 'archive'
-              : session.provider === 'claude'
-                ? 'sparkle'
-                : 'comment-discussion',
-    );
+    item.iconPath = buildSessionIcon(session, activity);
     // メニューの出し分けにプロバイダ・アーカイブ状態・ピン留め状態を含める
     // （Claude Codeにはarchive/deleteが無い。`package.json`のwhen句は正規表現で
     // `.pinned`サフィックスの有無に関わらずマッチするようにしてある）
@@ -295,6 +280,40 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeElement>
     }
     this.emitter.dispose();
   }
+}
+
+/**
+ * 状態を表すアイコンと、その色（issue #286・#733、design.md §14.55）。
+ *
+ * 承認待ち／実行中はオープン状態より優先して出す。どちらでも無ければ従来どおりの分岐
+ * （open ? circle-filled : archived ? archive : ...）。
+ *
+ * 色は形（アイコンID）の補助であり、形の出し分けは変えない。色だけに頼ると、ハイ
+ * コントラストや色覚特性の環境で区別が消える。色IDはVS Code組み込みのものだけを使い、
+ * 拡張機能側で新しい色を宣言しない（テーマ作者が想定していない色が増えるのを避ける）。
+ *
+ * 未オープンには色を付けない。一覧のほとんどは未オープンなので、そこへ色を付けると
+ * 「色が付いていること」自体が合図でなくなる。
+ */
+function buildSessionIcon(
+  session: SessionSummary,
+  activity: SessionActivityState | undefined,
+): vscode.ThemeIcon {
+  // `undefined` は「開いていない」（従来の`isOpen`相当）。`idle` は開いてはいる
+  const open = activity !== undefined;
+  if (activity === 'approvalPending') {
+    return new vscode.ThemeIcon('bell-dot', new vscode.ThemeColor('charts.yellow'));
+  }
+  if (activity === 'running') {
+    return new vscode.ThemeIcon('sync~spin', new vscode.ThemeColor('charts.blue'));
+  }
+  if (open) {
+    return new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('charts.green'));
+  }
+  if (session.archived) {
+    return new vscode.ThemeIcon('archive', new vscode.ThemeColor('descriptionForeground'));
+  }
+  return new vscode.ThemeIcon(session.provider === 'claude' ? 'sparkle' : 'comment-discussion');
 }
 
 function buildSessionContextValue(session: SessionSummary, pinned: boolean): string {
