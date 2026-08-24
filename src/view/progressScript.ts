@@ -43,6 +43,8 @@ export function progressScript(): string {
 
   /** TODOの状態ごとのアイコン。未知の値が来たときは未着手として出す。 */
   const TODO_ICON = { completed: 'check', in_progress: 'half', pending: 'circle' };
+  /** 印だけでは読み上げに乗らないため、同じ状態を文字でも持つ。 */
+  const TODO_LABEL = { completed: '完了', in_progress: '着手中', pending: '未着手' };
   const CHANGE_LABEL = { added: '追加', started: '着手', completed: '完了', removed: '取り下げ' };
   const CHANGE_ICON = { added: 'plus', started: 'play', completed: 'check', removed: 'minus' };
 
@@ -51,13 +53,28 @@ export function progressScript(): string {
   /** ファイル一覧を畳まずに出す件数。これを超えた分は「もっと見る」の裏へ回す。 */
   const FILES_SHOWN = 20;
 
-  function icon(name) {
+  /**
+   * アイコンを作る。label を渡した場合だけ読み上げの対象にする。
+   *
+   * 文字が横に並ぶアイコン（ファイル・コマンドなど）は飾りなので aria-hidden にする。
+   * 状態そのものをアイコンだけで表す箇所（TODOの印など）は、以前は '[x]' のような
+   * 文字で読めていた。ラベルを付けないとそこだけ読み上げから消えるため、
+   * title を持たせて role=img で拾わせる。
+   */
+  function icon(name, label) {
     const shape = ICONS[name] || ICONS.circle;
     const svg = document.createElementNS(SVG_NS, 'svg');
     svg.setAttribute('class', 'icon');
     svg.setAttribute('viewBox', '0 0 16 16');
-    svg.setAttribute('aria-hidden', 'true');
     svg.setAttribute('focusable', 'false');
+    if (label === undefined || label === '') {
+      svg.setAttribute('aria-hidden', 'true');
+    } else {
+      svg.setAttribute('role', 'img');
+      const title = document.createElementNS(SVG_NS, 'title');
+      title.textContent = label;
+      svg.appendChild(title);
+    }
     for (const d of shape.stroke || []) {
       const path = document.createElementNS(SVG_NS, 'path');
       path.setAttribute('d', d);
@@ -91,7 +108,7 @@ export function progressScript(): string {
   /** アイコンとテキストを並べた要素を作る。テキストは必ず textContent 経由で入る。 */
   function labeled(tag, className, iconName, value) {
     const created = node(tag, className, undefined);
-    created.appendChild(icon(iconName));
+    created.appendChild(icon(iconName, undefined));
     created.appendChild(node('span', 'text', value));
     return created;
   }
@@ -108,7 +125,7 @@ export function progressScript(): string {
     for (const todo of todos) {
       const row = node('li', 'todo ' + todo.status, undefined);
       const mark = node('span', 'mark', undefined);
-      mark.appendChild(icon(TODO_ICON[todo.status] || 'circle'));
+      mark.appendChild(icon(TODO_ICON[todo.status] || 'circle', TODO_LABEL[todo.status] || '未着手'));
       row.appendChild(mark);
       const label = todo.status === 'in_progress' && todo.activeForm !== '' ? todo.activeForm : todo.content;
       row.appendChild(node('span', 'text', label));
@@ -123,7 +140,7 @@ export function progressScript(): string {
    */
   function pathRow(path, counts) {
     const row = node('li', 'path', undefined);
-    row.appendChild(icon('file'));
+    row.appendChild(icon('file', undefined));
     const cut = path.lastIndexOf('/');
     if (cut >= 0) {
       row.appendChild(node('span', 'dir', path.slice(0, cut + 1)));
@@ -191,8 +208,15 @@ export function progressScript(): string {
     parent.appendChild(block);
   }
 
-  function chip(iconName, value) {
-    return labeled('span', 'chip', iconName, value);
+  /**
+   * 畳んだターンの見出しに出す数のチップ。数字だけでは何の数か分からないため、
+   * ホバーと読み上げ向けに名前を持たせる（画面上はアイコンで区別する）。
+   */
+  function chip(iconName, value, label) {
+    const created = labeled('span', 'chip', iconName, value);
+    created.title = label;
+    created.setAttribute('aria-label', label + ' ' + value);
+    return created;
   }
 
   function renderTurn(turn, isLatest, isOpen) {
@@ -202,13 +226,13 @@ export function progressScript(): string {
     const head = node('summary', '', undefined);
     head.appendChild(node('span', 'title', 'ターン ' + (turn.index + 1)));
     if (turn.editedFiles.length > 0) {
-      head.appendChild(chip('file', String(turn.editedFiles.length)));
+      head.appendChild(chip('file', String(turn.editedFiles.length), '変更したファイル'));
     }
     if (turn.commands.length > 0) {
-      head.appendChild(chip('terminal', String(turn.commands.length)));
+      head.appendChild(chip('terminal', String(turn.commands.length), '実行したコマンド'));
     }
     if (turn.todoChanges.length > 0) {
-      head.appendChild(chip('check', String(turn.todoChanges.length)));
+      head.appendChild(chip('check', String(turn.todoChanges.length), 'TODOの変化'));
     }
     if (turn.instruction !== '') {
       // 閉じたままでも何のターンか分かるように、指示の頭を1行だけ添える
@@ -231,7 +255,7 @@ export function progressScript(): string {
       for (const change of turn.todoChanges) {
         const row = node('li', 'change ' + change.kind, undefined);
         const mark = node('span', 'mark', undefined);
-        mark.appendChild(icon(CHANGE_ICON[change.kind] || 'circle'));
+        mark.appendChild(icon(CHANGE_ICON[change.kind] || 'circle', undefined));
         row.appendChild(mark);
         row.appendChild(node('span', 'text', (CHANGE_LABEL[change.kind] || change.kind) + ' ' + change.content));
         list.appendChild(row);
@@ -286,7 +310,14 @@ export function progressScript(): string {
     const percent = Math.round(done * 100);
     const fill = el('progressFill');
     fill.style.width = percent + '%';
-    fill.className = (percent === 100 ? 'done' : '') + (summary.busy ? ' busy' : '');
+    const marks = [];
+    if (percent === 100) {
+      marks.push('done');
+    }
+    if (summary.busy) {
+      marks.push('busy');
+    }
+    fill.className = marks.join(' ');
     el('progressPercent').textContent = percent + '%';
   }
 
@@ -310,7 +341,7 @@ export function progressScript(): string {
   function renderEmptyDecoration() {
     const target = el('emptyIcon');
     clear(target);
-    target.appendChild(icon('clock'));
+    target.appendChild(icon('clock', undefined));
   }
 
   window.addEventListener('message', (event) => {

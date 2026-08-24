@@ -199,6 +199,14 @@ export function progressStyles(): string {
     background-color: var(--vscode-badge-background);
     color: var(--vscode-badge-foreground);
   }
+  /* 実行したコマンド。ファイルと違い分解しないが、等幅で出す点は揃える */
+  .command {
+    display: flex;
+    gap: 5px;
+    align-items: baseline;
+    font-family: var(--vscode-editor-font-family);
+    font-size: 0.9em;
+  }
   .more {
     margin-top: 4px;
     padding: 2px 8px;
@@ -217,11 +225,11 @@ export function progressStyles(): string {
     position: relative;
     padding-left: 18px;
   }
-  /* ターンをつなぐ縦線。ノードの中心（left:18px の -13px）に合わせる */
+  /* ターンをつなぐ縦線。ノードの丸（padding-left:18px から -17px、幅8px）と中心を揃える */
   #timeline::before {
     content: '';
     position: absolute;
-    left: 5px;
+    left: 4px;
     top: 6px;
     bottom: 6px;
     width: 2px;
