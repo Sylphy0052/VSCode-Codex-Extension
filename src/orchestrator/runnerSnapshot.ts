@@ -6,7 +6,6 @@ import {
   type WorkflowTask,
 } from './workflow';
 import type { EffectiveTaskConfig } from './taskConfig';
-import type { StoredMessage } from './messaging';
 import type { PersistedRun } from './runStore';
 import { getRunOutcome } from './scheduler';
 import type {
@@ -284,91 +283,6 @@ export function checkEffectivePermissionEscalation(
     }
     self.deps.log.warn(`[workflow ${live.runId}/${taskId}] ${message}`);
     live.warnings.push({ kind: 'permissionEscalation', taskId, message });
-  }
-}
-
-/**
- * タスク間メッセージング（design.md §16.21）専用の権限差の警告（Issue #132「1. 権限差の
- * 警告」）。`checkEffectivePermissionEscalation`（`{{T1.result}}`経由、Issue #67）と
- * 判定ロジック自体（`permissionEscalationReasons`）は共有するが、経路が異なるため
- * 別メソッド・別`WorkflowWarning.kind`にする:
- *
- * - `{{T1.result}}`は`dependsOn`に挙げた依存先しか参照できず、読み込み時
- *   （`findPermissionEscalationWarnings`）と実行時の二段で検出できる
- * - メッセージは`dependsOn`を問わず同じrunの任意の宛先へ送れるうえ、`send_message`の
- *   呼び出しはモデルの判断で実行時に起きるため**静的には検査できない**。実行時、
- *   実際に配送された時点でしか検出できない
- *
- * 呼び出し元（`setPromptTransform`）は、メッセージが実際に宛先の次の指示へ組み込まれる
- * 直前（`takeDeliverableMessages`で取り出した直後）でこれを呼ぶ。宛先（recipient）が
- * このタスク自身、送信元（sender）が`message.from`。送信元の実効権限は、送信元タスクが
- * 開始した時点で`LiveTask`へ保存済みの`effectiveSandbox` / `effectiveApprovalMode` /
- * `autoApprove`（`checkEffectivePermissionEscalation`と同じ値）を使う。`send_message`は
- * 呼び出し元のセッションが生きていないと成立しない（MCPツールの呼び出しのため）ので、
- * 送信元の`LiveTask`は通常必ず見つかるが、内部矛盾で見つからない場合は判定を諦める。
- *
- * **【現在この関数は実質的に死んでいる】W9（roadmap、Issue #547）以降、`send_message`の
- * 宛先はオーケストレーターに固定され、タスク同士が直接メッセージを送り合うことはできなく
- * なった（design.md §16.34）。実タスクへ配送されるメッセージの`from`は常に
- * `ORCHESTRATOR_CONNECTION_ID`（値`-orchestrator-`）になるが、この値は`live.def.tasks`
- * （実タスクの定義一覧）には存在しない。下のループの`senderTask === undefined`判定が
- * 毎回成立し、`continue`して警告を一度も積まずに終わる——関数もこのファイルの実装も、
- * 意図的に変えていない（変える必要が無い）。実装だけを読むと「権限差を検出する防御が
- * ここで働いている」ように見えるが、実際には常に素通りする。**この検出を復活させるか、
- * 死んだコードとして削除するかは Issue #562 で決める**（まだどちらとも決まっていない。
- * 復活させる場合は、配送されたメッセージの元の送信元を`StoredMessage`とは別に追跡する
- * 仕組みが要る——現状の`StoredMessage`には由来の追跡情報（元はどのタスクが書いたか）が
- * 無いため、この構造のままでは復活させられない）。詳細と経緯はdesign.md §16.34
- * 「影響範囲」を参照。
- */
-export function checkMessagingPermissionEscalation(
-  self: WorkflowRunnerInternals,
-  live: LiveRun,
-  recipientTask: WorkflowTask,
-  recipientTaskId: string,
-  effective: EffectiveTaskConfig,
-  messages: readonly StoredMessage[],
-): void {
-  const downstream: PermissionProfile = {
-    provider: recipientTask.provider,
-    sandbox: effective.sandbox,
-    approvalMode: effective.config.approvalMode,
-    autoApprove: effective.autoApprove,
-  };
-
-  for (const m of messages) {
-    const senderTask = live.def.tasks.find((t) => t.id === m.from);
-    const senderLive = live.tasks.get(m.from);
-    if (senderTask === undefined || senderLive === undefined) {
-      continue;
-    }
-    const upstream: PermissionProfile = {
-      provider: senderTask.provider,
-      sandbox: senderLive.effectiveSandbox,
-      approvalMode: senderLive.effectiveApprovalMode,
-      autoApprove: senderLive.autoApprove,
-    };
-
-    const reasons = permissionEscalationReasons(upstream, downstream);
-    if (reasons.length === 0) {
-      continue;
-    }
-
-    const message =
-      `${recipientTaskId} は送信元タスク ${m.from} より緩い実効権限でメッセージを受け取り` +
-      `ました（${reasons.join(', ')}）。${m.from} が送った本文に仕込まれた指示文が ` +
-      `${recipientTaskId} の権限で実行されうるため、内容を確認してください`;
-    const alreadyWarned = live.warnings.some(
-      (w) =>
-        w.kind === 'messagingPermissionEscalation' &&
-        w.taskId === recipientTaskId &&
-        w.message === message,
-    );
-    if (alreadyWarned) {
-      continue;
-    }
-    self.deps.log.warn(`[workflow ${live.runId}/${recipientTaskId}] ${message}`);
-    live.warnings.push({ kind: 'messagingPermissionEscalation', taskId: recipientTaskId, message });
   }
 }
 

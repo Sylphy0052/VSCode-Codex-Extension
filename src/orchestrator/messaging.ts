@@ -29,9 +29,10 @@ import { truncateByCodePoint } from './workflow';
  * `MAX_MESSAGE_BODY_LENGTH`（1件あたりの上限を独立の定数にする）・
  * `MAX_COMPOSED_PROMPT_LENGTH`（`composeNextPrompt`の合成後の総量に粗い安全弁を掛ける）・
  * `wrapTaskMessage`の改行保持（`stripControlCharsPreservingNewlines`への差し替え）。
- * 送信元・宛先の実効権限を比べる警告（配送時点）と、合成後の実際の送信文面をViewで
- * 確認できるようにする対応は`runner.ts`側（`checkMessagingPermissionEscalation` /
- * `LiveTask.lastSentPrompt`）にある。
+ * 合成後の実際の送信文面をViewで確認できるようにする対応は`runner.ts`側
+ * （`LiveTask.lastSentPrompt`）にある。送信元・宛先の実効権限を比べる配送時点の警告も
+ * 同じ対応に含まれていたが、W9（Issue #547）で宛先がオーケストレーターに固定された結果
+ * 構造上不発火になり、Issue #562で削除した（design.md §16.34「影響範囲」）。
  */
 
 /**
