@@ -137,6 +137,7 @@ import type { ActiveComposerTarget } from './view/activePanelSequence';
 import { ClaudeChatViewManager } from './view/claudeChatView';
 import { ControlPanelViewProvider } from './view/controlPanelView';
 import { ConversationViewManager } from './view/conversationView';
+import { ProgressViewManager } from './view/progressView';
 import { formatRelativeTime } from './view/relativeTime';
 import { SessionTreeProvider } from './view/sessionTreeProvider';
 import { SettingsProvider } from './view/settingsProvider';
@@ -679,6 +680,17 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   );
   context.subscriptions.push(conversations);
 
+  // 進捗画面（issue #721）。チャットの状態を読むだけで、こちらから会話を操作することは無い
+  const progress = new ProgressViewManager(
+    (threadId) => chat.getChatState(threadId) ?? claudeChat.getChatState(threadId),
+    log,
+  );
+  context.subscriptions.push(
+    progress,
+    chat.onDidChangeState((change) => progress.notify(change)),
+    claudeChat.onDidChangeState((change) => progress.notify(change)),
+  );
+
   const actions = new SessionActions(nodeCommandRunner, codexPath);
 
   // ピン留め（issue #293）。セッションidはワークスペースをまたいでも一意なため、
@@ -823,6 +835,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     vscode.commands.registerCommand('codex.handoffToNewSession', () => chat.handoffToNewSession()),
     vscode.commands.registerCommand('claude.handoffToNewSession', () =>
       claudeChat.handoffToNewSession(),
+    ),
+    // セッションの進捗を別タブで開く（issue #721）。Codex・Claude Codeで同じコマンドを使う
+    // （画面の中身は`ChatState`だけで決まり、プロバイダごとの分岐が無いため）
+    vscode.commands.registerCommand('agent.openProgress', () =>
+      openProgress(chat, claudeChat, progress),
     ),
     // プリセットを選んで新しい会話を開く（issue #295、design.md §14.56）。既存の
     // `codex.newChat` / `claude.newChat` は変えず、別コマンドとして追加する
@@ -1401,6 +1418,32 @@ async function sendEditorSelectionToChat(
   const manager = provider === 'codex' ? chat : claudeChat;
   await manager.openNew();
   manager.getActiveComposerTarget()?.insert(payload);
+}
+
+/**
+ * 進捗画面を開く（issue #721）。対象は、より最近アクティブだったチャットのスレッド
+ * （選択範囲の送り先と同じ決め方。`pickActiveComposerTarget`のJSDoc参照）。
+ */
+function openProgress(
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
+  progress: ProgressViewManager,
+): void {
+  const codex = chat.getActiveProgressTarget();
+  const claude = claudeChat.getActiveProgressTarget();
+  const target =
+    codex === undefined
+      ? claude
+      : claude === undefined
+        ? codex
+        : codex.activeSequence >= claude.activeSequence
+          ? codex
+          : claude;
+  if (target === undefined) {
+    void vscode.window.showInformationMessage('進捗を出せるチャットが開かれていません');
+    return;
+  }
+  progress.open(target);
 }
 
 /** Codex/Claude Codeのうち、より最近アクティブだった方の挿入先を返す。両方無ければ`undefined`。 */

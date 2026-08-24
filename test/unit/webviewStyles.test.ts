@@ -3,6 +3,7 @@ import { chatCsp } from '../../src/view/chatCsp';
 import { chatScript } from '../../src/view/chatScript';
 import { chatStyles } from '../../src/view/chatStyles';
 import { controlPanelStyles } from '../../src/view/controlPanelStyles';
+import { progressStyles } from '../../src/view/progressStyles';
 
 /**
  * Webviewのスタイルはテンプレートリテラルの中身で、型検査もlintも効かない。
@@ -95,5 +96,19 @@ describe('chatCsp', () => {
     // データURL以外の画像取得（http/https）を許すと、会話の内容が外へ漏れうる
     expect(csp).not.toContain('img-src *');
     expect(csp).not.toMatch(/img-src[^;]*https?:/u);
+  });
+});
+
+describe('progressStyles', () => {
+  it('hidden属性を打ち消す規則がある（issue #721）', () => {
+    expect(hasHiddenReset(progressStyles())).toBe(true);
+  });
+
+  it('括弧が対応している', () => {
+    expect(balanced(progressStyles())).toBe(true);
+  });
+
+  it('色をテーマ変数から取る（ハードコードした色値を増やさない）', () => {
+    expect(progressStyles()).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
 });

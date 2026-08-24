@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { chatScript } from '../../src/view/chatScript';
 import { approvalLevelMeta } from '../../src/provider/approvalLevel';
 import { controlPanelScript } from '../../src/view/controlPanelScript';
+import { progressScript } from '../../src/view/progressScript';
 import { workflowScript } from '../../src/view/workflowScript';
 import { workflowStyles } from '../../src/view/workflowStyles';
 
@@ -863,5 +864,25 @@ describe('会話の一番下へジャンプするボタン', () => {
     const applyMatch = source.match(/function apply\(state\) \{[\s\S]*?\n {2}\}/u);
     expect(applyMatch).not.toBeNull();
     expect(applyMatch![0]).toContain('updateScrollToBottomVisibility();');
+  });
+});
+
+describe('progressScript', () => {
+  it('構文として成立している', () => {
+    expect(() => parses(progressScript())).not.toThrow();
+  });
+
+  it('本文をHTMLとして組み立てない（issue #721）', () => {
+    // 指示・応答・パス・コマンドはエージェントの出力。テキストノードとしてのみ入れる
+    const source = progressScript();
+    expect(source).not.toContain('innerHTML');
+    expect(source).toContain('textContent');
+  });
+
+  it('隠す領域をすべて開閉できる（issue #721）', () => {
+    const source = progressScript();
+    for (const id of ['empty', 'summary', 'checklistSection', 'filesSection', 'timelineSection']) {
+      expect(source.includes(id), `${id} を扱う処理が無い`).toBe(true);
+    }
   });
 });

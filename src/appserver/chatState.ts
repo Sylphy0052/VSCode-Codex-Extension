@@ -224,6 +224,50 @@ export interface TodoItem {
 export const NO_TODOS: TodoItem[] = [];
 
 /**
+ * TODO一覧が書き換わった時点の記録（issue #721）。進捗画面のタイムラインで
+ * 「どのターンで何が終わったか」を出すために使う。
+ *
+ * `ChatState.todos` は最後に呼ばれた `TodoWrite` の内容で毎回上書きされるため、
+ * それだけでは経過が辿れない。書き換わるたびにここへ積む。
+ *
+ * 時刻は持たない。ライブ（`src/claude/streamJson.ts`）も復元（`src/claude/transcript.ts`）も
+ * 状態の畳み込みで、時計を持ち込むと同じ入力から同じ状態を作れなくなる。代わりに
+ * 「何ターン目の出来事か」を `turnIndex` で持ち、これで表示位置が決まる。
+ */
+export interface TodoSnapshot {
+  /** 書き換わった直後の一覧まるごと。`TodoWrite` は毎回全件を送ってくる（実測）。 */
+  todos: TodoItem[];
+  /**
+   * その時点で何ターン目だったか（0起点）。会話項目のうち `userMessage` を数えた値から
+   * 1を引いたもの。ユーザーの発言より前に書き換わった場合は 0 に丸める。
+   */
+  turnIndex: number;
+}
+
+/** TODOの書き換えが一度も起きていない状態のための空配列。 */
+export const NO_TODO_HISTORY: TodoSnapshot[] = [];
+
+/**
+ * 会話項目の並びから「いま何ターン目か」を数える（0起点、issue #721）。
+ *
+ * ターンの境界はユーザーの発言（`userMessage`）に置く。Claude Codeの項目は
+ * `turnId` を持たない（`src/claude/streamJson.ts` が常に `undefined` で積む）ため、
+ * `ChatItem.turnId` ではプロバイダをまたいで同じ数え方ができない。
+ *
+ * ユーザーの発言がまだ1件も無い状態（起動直後、`/`コマンドだけを送った直後など）は
+ * 0を返す。「0ターン目」と「1ターン目より前」を区別する必要がある呼び出し元は無い。
+ */
+export function currentTurnIndex(items: readonly ChatItem[]): number {
+  let count = 0;
+  for (const item of items) {
+    if (item.kind === 'userMessage') {
+      count += 1;
+    }
+  }
+  return count === 0 ? 0 : count - 1;
+}
+
+/**
  * バックグラウンドで走っているプロセスの一覧（issue #33、design.md §14.23、Codex `/ps` 相当）。
  *
  * CodexとClaude Codeで持つ情報も停止できるかどうかも違う（実測で確認した非対称。
@@ -521,6 +565,13 @@ export interface ChatState {
    */
   todos: TodoItem[];
   /**
+   * TODO一覧が書き換わった履歴（issue #721）。進捗画面だけが読む。
+   *
+   * Claude Codeの `TodoWrite` からのみ積まれる。Codexには対応する概念が無いため
+   * （`src/codex/` にTODOを読む処理が無い）、Codexのセッションでは常に空のまま。
+   */
+  todoHistory: TodoSnapshot[];
+  /**
    * バックグラウンドで走っているプロセスの一覧（issue #33、design.md §14.23）。
    * `BackgroundTerminalItem` のJSDocを参照。走っているものが無い間は空のまま。
    */
@@ -547,6 +598,7 @@ export const initialChatState: ChatState = {
   turnResultText: '',
   turnEditedFiles: [],
   todos: NO_TODOS,
+  todoHistory: NO_TODO_HISTORY,
   backgroundTerminals: NO_BACKGROUND_TERMINALS,
 };
 

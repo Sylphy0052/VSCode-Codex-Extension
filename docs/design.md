@@ -6470,3 +6470,45 @@ Claude Code側は `dispatch` の `logText`（§16.12。テンプレート展開�
 
 - `test/unit/turnSummary.test.ts`: 無効なら本文を変えないこと、有効なら空行で区切って連結すること、指示文が空・本文が空なら連結しないこと、本文末尾の空白を落としてから連結すること
 - `docs/manual-test.md` C-50（Claude Code画面はL-51）: 実機で両画面の応答末尾に要約と次アクションが出ること、擬似コマンドとループには付かないこと
+
+### 14.67 セッションの進捗を別タブで可視化する（issue #721）
+
+チャットの会話を上から追わなくても「何が終わって、何が残っていて、どこを触ったか」が分かる専用タブを追加した。チャットのツールバーのアイコン（`agent.openProgress`）から開き、横（`ViewColumn.Beside`）に並べて使う。
+
+#### 何を出すか
+
+- サマリ: ターン数、変更したファイルの件数、実行したコマンドの件数、TODOの完了数、応答中か
+- チェックリスト: 現在のTODO一覧（Claude Codeのみ。Codexでは常に空）
+- 変更したファイル: セッション全体、重複を除いた一覧
+- タイムライン: ターンごとに、指示・応答の抜粋・変更したファイル・実行したコマンド・TODOの変化
+
+#### ターンの区切りをユーザーの発言に置く
+
+`ChatItem.turnId` は使わない。Claude Code側は項目を積むときに常に `turnId: undefined` を入れる（`src/claude/streamJson.ts`）ため、`turnId` で数えるとCodexでしか動かない。両プロバイダで共通に使える区切りは `userMessage` の位置だけなので、`currentTurnIndex`（`src/appserver/chatState.ts`）に数え方を1つだけ置き、履歴の記録側と表示側の両方がそれを使う。
+
+ユーザーの発言より前に届いた項目（復元直後の通知など）は最初のターンへ入れる。捨てると「実行したはずのコマンドが画面に出ない」ことになるため。
+
+#### TODOの履歴を持つ
+
+`ChatState.todos` は `TodoWrite` が届くたびに全体を上書きする（CLIが毎回全件を送ってくる。§14.34）。この値だけでは「いつ何が終わったか」が残らないため、書き換わった時点の一覧を `ChatState.todoHistory` へ積む。ライブ（`src/claude/streamJson.ts`）と復元（`src/claude/transcript.ts`）の両方で積むので、タブを開き直しても経過が消えない。
+
+**時刻は持たない。** どちらも状態の畳み込みで、そこへ時計を持ち込むと同じ入力から同じ状態を作れなくなる（テストも書けなくなる）。代わりに「何ターン目の出来事か」を `turnIndex` として持ち、表示位置はこれだけで決まるようにした。
+
+TODOの同一性は本文（`content`）で見る。`TodoWrite` の項目はidを持たないため、これ以外に手掛かりが無い。本文が書き換わった場合は「消えて増えた」ものとして出る。
+
+#### ライブ更新の経路
+
+`BaseChatViewManager` に `onDidChangeState` を足し、Codex・Claude Codeの `flushState`（webviewへ送るのと同じ、`STATE_POST_INTERVAL_MS` で間引き済みの経路）から発火する。生の状態変化ごとに投げると応答中は毎デルタで発火するため、既存の間引きに相乗りさせる。
+
+これに伴い `postState` / `flushState` のタブ有無の判定を組み替えた。以前は `entry.panel === undefined`（チャットのタブが閉じている）なら `postState` の時点で打ち切っていたが、進捗タブはチャットのタブとは別に開かれ、タスク管理下のセッションはタブを閉じても動き続ける（§16.10）。そこで打ち切りは `flushState` の中へ移し、**webviewへの送信だけ**をタブの有無で止める。`entry.sentItems` はタブが閉じている間は進めない（進めると、タブを開き直したときに送られていない項目が画面から抜ける）。
+
+#### 表示は必ずテキストノードとして入れる
+
+指示・応答・パス・コマンド・TODOの本文はすべてエージェントの出力に由来する。`progressScript.ts` は文字列結合でHTMLを組み立てず、`document.createElement` で作ったノードの `textContent` へ入れる（`innerHTML` は登場しない。§16.8と同じ方針）。画像は扱わないため、CSPは `img-src data:` を含めない。
+
+#### 確かめ方
+
+- `test/unit/progressModel.test.ts`: ターンの区切り、集計、TODOの差分と範囲外の `turnIndex`、TODOを持たないセッション（Codex）の扱い
+- `test/unit/claudeStreamJson.test.ts` / `test/unit/claudeTranscript.test.ts`: 書き換わるたびに履歴へ積むこと
+- `test/unit/webviewScript.test.ts` / `test/unit/webviewStyles.test.ts`: スクリプトの構文、`innerHTML` を使っていないこと、`hidden` の打ち消し規則
+- `docs/manual-test.md` C-51（Claude Code画面はL-52）: 実機での開き方とライブ更新

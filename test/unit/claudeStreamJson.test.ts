@@ -443,7 +443,10 @@ describe('applyStreamEvent', () => {
         message: {
           content: [
             { type: 'text', text: '見て' },
-            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0K' } },
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0K' },
+            },
           ],
         },
       },
@@ -462,7 +465,10 @@ describe('applyStreamEvent', () => {
         uuid: 'u1',
         message: {
           content: [
-            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0K' } },
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0K' },
+            },
           ],
         },
       },
@@ -566,6 +572,31 @@ describe('TODO一覧（TodoWrite）', () => {
       },
     ]);
     expect(state.todos).toEqual([{ content: 'A', status: 'in_progress', activeForm: 'A中' }]);
+  });
+
+  it('書き換わるたびに履歴へ積む（issue #721）', () => {
+    const write = (id: string, status: string): Record<string, unknown> => ({
+      type: 'assistant',
+      message: {
+        id,
+        content: [
+          {
+            type: 'tool_use',
+            id,
+            name: 'TodoWrite',
+            input: { todos: [{ content: 'A', status, activeForm: 'A中' }] },
+          },
+        ],
+      },
+    });
+
+    const state = apply([write('m1', 'pending'), write('m2', 'completed')]);
+
+    // ユーザーの発言が無い状態で書かれた分は0ターン目として積む
+    expect(state.todoHistory).toEqual([
+      { todos: [{ content: 'A', status: 'pending', activeForm: 'A中' }], turnIndex: 0 },
+      { todos: [{ content: 'A', status: 'completed', activeForm: 'A中' }], turnIndex: 0 },
+    ]);
   });
 
   it('TodoWriteを使わないセッションではtodosが空のまま', () => {

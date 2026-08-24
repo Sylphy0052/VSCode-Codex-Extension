@@ -94,6 +94,23 @@ export interface BaseChatPanel {
   postTimer?: ReturnType<typeof setTimeout> | undefined;
 }
 
+/** 状態が変わったことの通知の中身（issue #721）。 */
+export interface ChatStateChange {
+  threadId: string;
+  state: ChatState;
+}
+
+/**
+ * 進捗画面を開く対象（issue #721）。`activeSequence`はプロバイダをまたいで
+ * 「どちらのタブがより最近アクティブだったか」を比べるためだけに使う
+ * （`ActiveComposerTarget`と同じ流儀）。
+ */
+export interface ProgressTarget {
+  threadId: string;
+  title: string;
+  activeSequence: number;
+}
+
 /**
  * `ChatViewManager`（Codex、chatView.ts）と`ClaudeChatViewManager`（Claude Code、
  * claudeChatView.ts）の重複を抽出した基底クラス（issue #410）。
@@ -130,6 +147,49 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    * 使う（`getActiveComposerTarget` 参照）。
    */
   protected activeSequence = 0;
+
+  /**
+   * 状態が変わったことの通知（issue #721）。進捗画面がこれを購読して描き直す。
+   *
+   * 発火するのは各サブクラスの`postState`（間引き済みの経路）からで、webviewへ送るのと
+   * 同じ頻度になる。生の状態変化ごとに投げると、応答中は毎デルタで発火してしまう。
+   */
+  protected readonly stateChanged = new vscode.EventEmitter<ChatStateChange>();
+  readonly onDidChangeState = this.stateChanged.event;
+
+  /**
+   * 進捗画面（issue #721）が開く対象。表に出ているチャットが無い・スレッドがまだ
+   * 始まっていない（`thread/start`の応答待ち）ときは`undefined`。
+   */
+  getActiveProgressTarget(): ProgressTarget | undefined {
+    const entry = this.active;
+    if (entry === undefined || entry.disposed) {
+      return undefined;
+    }
+    const threadId = entry.session.threadId;
+    if (threadId === undefined) {
+      return undefined;
+    }
+    return { threadId, title: entry.title, activeSequence: this.activeSequence };
+  }
+
+  /**
+   * 指定したスレッドの現在の状態（issue #721）。進捗画面が開いた直後の初期表示に使う。
+   * 既に閉じられているスレッドでは`undefined`。
+   */
+  getChatState(threadId: string): ChatState | undefined {
+    const entry = this.panels.get(threadId);
+    return entry === undefined || entry.disposed ? undefined : entry.session.getState();
+  }
+
+  /** サブクラスの`postState`から呼ぶ。webviewへ送るのと同じ内容を進捗画面へも配る。 */
+  protected fireStateChanged(entry: TPanel, state: ChatState): void {
+    const threadId = entry.session.threadId;
+    if (threadId === undefined) {
+      return;
+    }
+    this.stateChanged.fire({ threadId, state });
+  }
 
   /**
    * 開いている（開始待ちも含む）全パネル。既定は`panels`の値のみ。Codex側は
@@ -377,6 +437,7 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       this.teardown(entry);
     }
     this.panels.clear();
+    this.stateChanged.dispose();
     this.onDispose();
   }
 

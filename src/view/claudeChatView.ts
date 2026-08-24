@@ -438,7 +438,10 @@ export class ClaudeChatViewManager
    * 送る（送り漏らして古い画面が残らないようにする）。
    */
   private postState(entry: ClaudePanel): void {
-    if (entry.disposed || entry.panel === undefined || entry.postTimer !== undefined) {
+    // タブが閉じていても間引きの経路自体は回す。進捗画面（issue #721）はチャットのタブとは
+    // 別のタブで、タスク管理下のセッションはタブを閉じても動き続ける（design.md §16.10）。
+    // webviewへの送信は`flushState`側でタブの有無を見て止める
+    if (entry.disposed || entry.postTimer !== undefined) {
       return;
     }
     const since = Date.now() - (entry.lastPostAt ?? 0);
@@ -465,11 +468,18 @@ export class ClaudeChatViewManager
    * 抜け落ちる。
    */
   private flushState(entry: ClaudePanel): void {
-    if (entry.disposed || entry.panel === undefined) {
+    if (entry.disposed) {
       return;
     }
     entry.lastPostAt = Date.now();
     const state = entry.session.getState();
+    // 進捗画面（issue #721）へはタブの有無によらず配る
+    this.fireStateChanged(entry, state);
+    if (entry.panel === undefined) {
+      // タブが閉じている間は差し分を送らない。`entry.sentItems`もここでは進めない
+      // （進めると、タブを開き直したときに送られていない項目が画面から抜ける）
+      return;
+    }
     const items = buildItemsDelta(entry.sentItems, state.items);
     entry.sentItems = state.items;
     void entry.panel.webview.postMessage({
@@ -629,6 +639,7 @@ export class ClaudeChatViewManager
       config: readClaudeConfig().claude,
       initialItems: transcript.items,
       initialTodos: transcript.todos,
+      initialTodoHistory: transcript.todoHistory,
       // 人が付けた名前があれば開いた時点からタブ名に反映する（issue #199）
       initialName: this.store.getName(sessionId),
     });
@@ -887,15 +898,18 @@ export class ClaudeChatViewManager
    * `--resume` は過去のやり取りを流さないため、transcriptを読んで初期表示にする。
    * TODO一覧も同じtranscriptから最後の内容を拾い、専用表示の初期値に使う。
    */
-  private async readTranscript(
-    sessionId: string,
-  ): Promise<{ items: ChatState['items']; todos: ChatState['todos'] }> {
+  private async readTranscript(sessionId: string): Promise<{
+    items: ChatState['items'];
+    todos: ChatState['todos'];
+    todoHistory: ChatState['todoHistory'];
+  }> {
+    const empty = { items: [], todos: [], todoHistory: [] };
     const filePath = await this.store.resolveTranscriptPath(sessionId);
     if (filePath === undefined) {
-      return { items: [], todos: [] };
+      return empty;
     }
     const content = await this.fs.readTextFile(filePath);
-    return content === undefined ? { items: [], todos: [] } : transcriptItems(content.split('\n'));
+    return content === undefined ? empty : transcriptItems(content.split('\n'));
   }
 
   /**
@@ -934,6 +948,7 @@ export class ClaudeChatViewManager
       config: readClaudeConfig().claude,
       initialItems: transcript.items,
       initialTodos: transcript.todos,
+      initialTodoHistory: transcript.todoHistory,
       // 人が付けた名前があれば開いた時点からタブ名に反映する（issue #199）
       initialName: this.store.getName(sessionId),
     });
