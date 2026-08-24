@@ -563,6 +563,41 @@ describe('controlPanelScript', () => {
     expect(source).toContain('meta.effective[provider]');
   });
 
+  it('一覧の空・取得失敗の表示が共通のヘルパーを通る（issue #745）', () => {
+    const source = controlPanelScript(JSON.stringify(approvalLevelMeta()));
+
+    // 母数は、セクションごとに散らばっていた旧い書き方（p.className = 'xxxEmpty' など）。
+    // 先に、この正規表現が旧い書き方を拾えることを確かめてから0件を主張する
+    const legacy = /className = '\w+(Empty|Error)'/;
+    expect(legacy.test("p.className = 'mcpEmpty';"), '検査の正規表現が旧い書き方を拾えない').toBe(
+      true,
+    );
+    expect(source).not.toMatch(legacy);
+
+    // 置き換え先が実際に使われていること（0件になっただけ、を弾く）
+    expect(source.match(/appendState\(container, 'empty'/g)?.length ?? 0).toBeGreaterThan(0);
+    expect(source.match(/appendError\(container,/g)?.length ?? 0).toBeGreaterThan(0);
+    expect(source).toContain("appendState(container, 'loading'");
+
+    // DOMはDOM APIで組む（このリポジトリの方針。innerHTML系は使わない）
+    expect(source).toContain('createElementNS');
+    expect(source).not.toContain('innerHTML');
+  });
+
+  it('取得に失敗した一覧から再試行できる（issue #745）', () => {
+    const source = controlPanelScript(JSON.stringify(approvalLevelMeta()));
+    expect(source).toContain("type: 'retrySection'");
+
+    // どのセクションを読み直すかは SECTION_CONTAINERS から逆引きする。
+    // 描画関数へsectionIdを配って回る作りだと、渡し忘れた1つだけ再試行できなくなる
+    expect(source).toContain('SECTION_OF_CONTAINER');
+    const build = source.match(
+      /const SECTION_OF_CONTAINER = \{\};[\s\S]*?SECTION_OF_CONTAINER\[containerId\] = sectionId;/,
+    );
+    expect(build, 'SECTION_OF_CONTAINER が SECTION_CONTAINERS から導かれていない').not.toBeNull();
+    expect(build?.[0]).toContain('SECTION_CONTAINERS[sectionId]');
+  });
+
   it('セクションを開いたときにtoggleSectionをホストへ送る（issue #225）', () => {
     const source = controlPanelScript(JSON.stringify(approvalLevelMeta()));
     expect(source).toContain("type: 'toggleSection'");
