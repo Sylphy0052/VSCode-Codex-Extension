@@ -1512,6 +1512,28 @@ export function formatDroppedDependenciesDetail(deps: readonly DroppedRoadmapDep
     .join(', ');
 }
 
+/** `warnWithLogLink`が出す通知のボタンの文言（Issue #524）。 */
+export const OPEN_LOG_ACTION = 'ログを開く';
+
+/**
+ * 「詳しくはログ」と書いてある警告通知を、ログを開くボタン付きで出す（Issue #524）。
+ *
+ * 文面はログを見ろと言っているのに、出力チャネルを開く導線はコマンドパレットの
+ * `Codex: ログを表示`しかなく、通知からは辿れなかった。ボタンが押されたときだけ
+ * `log.show()`を呼ぶ。
+ *
+ * 呼び出し側は返り値を待たない（`void`を付ける）。元の
+ * `void vscode.window.showWarningMessage(...)`と同じく、通知の表示で後続の処理を
+ * 止めない。Promiseを返しているのはテストからボタンの選択後まで進めるためで、
+ * 呼び出し側で待つためではない。
+ */
+export async function warnWithLogLink(log: Logger, message: string): Promise<void> {
+  const picked = await vscode.window.showWarningMessage(message, OPEN_LOG_ACTION);
+  if (picked === OPEN_LOG_ACTION) {
+    log.show();
+  }
+}
+
 /**
  * ゴールの文からロードマップを生成する（design.md §16.19、#95・配線はIssue #105）。
  *
@@ -1581,7 +1603,8 @@ async function runRoadmap(
   if (result.validation.errors.length > 0) {
     const detail = result.validation.errors.map((e) => e.message).join('\n');
     log.error(`生成されたロードマップに問題があります:\n${detail}`);
-    void vscode.window.showWarningMessage(
+    void warnWithLogLink(
+      log,
       '生成されたロードマップに問題があります。内容を確認してください（詳しくはログ）',
     );
   }
@@ -1591,7 +1614,8 @@ async function runRoadmap(
     log.warn(`生成されたロードマップに警告があります:\n${detail}`);
     // Issue #427: この通知（showWarningMessage）を消すと、警告の握り潰しが再発する。
     // 呼び出し側のこの配線は自動テストでは検出できない（純粋関数側はユニットテストで担保）。
-    void vscode.window.showWarningMessage(
+    void warnWithLogLink(
+      log,
       `生成されたロードマップに警告が${result.validation.warnings.length}件あります。内容を確認してください（詳しくはログ）`,
     );
   }
@@ -1752,7 +1776,8 @@ async function planWorkflowFromRoadmapCommand(
         .map((e) => e.message)
         .join(' / ')}`,
     );
-    void vscode.window.showWarningMessage(
+    void warnWithLogLink(
+      log,
       '選択したロードマップに問題があります。内容を確認してください（詳しくはログ）',
     );
   }
@@ -1766,7 +1791,8 @@ async function planWorkflowFromRoadmapCommand(
     );
     // Issue #427: この通知（showWarningMessage）を消すと、警告の握り潰しが再発する。
     // 呼び出し側のこの配線は自動テストでは検出できない（純粋関数側はユニットテストで担保）。
-    void vscode.window.showWarningMessage(
+    void warnWithLogLink(
+      log,
       `選択したロードマップに警告が${validation.warnings.length}件あります。内容を確認してください（詳しくはログ）`,
     );
   }
@@ -1847,7 +1873,8 @@ async function planWorkflowFromRoadmapCommand(
           .map((m) => m.message)
           .join(' / ')}`,
       );
-      void vscode.window.showWarningMessage(
+      void warnWithLogLink(
+        log,
         '生成されたワークフローが、ロードマップの内容（id・依存・Issue）と一致しない箇所があります' +
           `（${result.roadmapMismatches.length}件）。内容を確認してください（詳しくはログ）`,
       );
@@ -1856,7 +1883,8 @@ async function planWorkflowFromRoadmapCommand(
     if (result.droppedDependencies.length > 0) {
       const detail = formatDroppedDependenciesDetail(result.droppedDependencies);
       log.warn(`[planner] 分割によりYAMLをまたぐ依存を落としました: ${detail}`);
-      void vscode.window.showWarningMessage(
+      void warnWithLogLink(
+        log,
         `分割したため、このワークフローでは表現できない依存を${result.droppedDependencies.length}件` +
           '落としました。落とした依存の順序は、runを実行する順で守ってください（詳しくはログ）',
       );
@@ -2054,7 +2082,8 @@ async function handlePlanSuccess(
   if (result.droppedTemplateRefs.length > 0) {
     const detail = result.droppedTemplateRefs.map((r) => `${r.taskId}: ${r.ref}`).join(', ');
     log.warn(`[planner] dependsOnに無いタスクを参照するテンプレート変数を落としました: ${detail}`);
-    void vscode.window.showWarningMessage(
+    void warnWithLogLink(
+      log,
       `dependsOnに挙げていないタスクを参照していたテンプレート変数を${result.droppedTemplateRefs.length}件` +
         '落としました（そのままでは検証を通らないため）。参照が消えて文意が通らないタスクがないか確認してください（詳しくはログ）',
     );
@@ -2138,7 +2167,8 @@ async function handlePlanSuccess(
           .map((f) => sanitizeForLog(f.message))
           .join(' / ')}`,
       );
-      void vscode.window.showWarningMessage(
+      void warnWithLogLink(
+        log,
         `タスク分解のレビューで指摘があります（${review.findings.length}件）。` +
           '内容を確認してください（自動では直していません。詳しくはログ）',
       );
