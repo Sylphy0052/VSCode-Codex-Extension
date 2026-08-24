@@ -19,6 +19,15 @@ export type ProgressStateReader = (threadId: string) => ChatState | undefined;
  */
 export class ProgressViewManager implements vscode.Disposable {
   private readonly panels = new Map<string, vscode.WebviewPanel>();
+  /**
+   * 見えていない間に状態が変わったスレッド。
+   *
+   * `buildProgress`は会話項目を毎回全部走る。状態の通知は応答中に間引き後でも
+   * 秒間20回ほど届くため、見えていないタブのために毎回組み立てると、会話が長いほど
+   * 拡張ホスト側の無駄が増える。`retainContextWhenHidden`で中身は保たれるので、
+   * 見えるようになった時点で最新へ追いつかせれば足りる。
+   */
+  private readonly staleThreadIds = new Set<string>();
 
   constructor(
     private readonly read: ProgressStateReader,
@@ -40,7 +49,15 @@ export class ProgressViewManager implements vscode.Disposable {
       { enableScripts: true, retainContextWhenHidden: true },
     );
     this.panels.set(target.threadId, panel);
-    panel.onDidDispose(() => this.panels.delete(target.threadId));
+    panel.onDidDispose(() => {
+      this.panels.delete(target.threadId);
+      this.staleThreadIds.delete(target.threadId);
+    });
+    panel.onDidChangeViewState(() => {
+      if (panel.visible && this.staleThreadIds.delete(target.threadId)) {
+        this.post(target.threadId, panel);
+      }
+    });
     panel.webview.html = render(panel.webview);
     // webviewの読み込みが終わってから初期表示を送る（HTMLを入れた直後は受け取れない）
     panel.webview.onDidReceiveMessage((message: unknown) => {
@@ -55,6 +72,10 @@ export class ProgressViewManager implements vscode.Disposable {
   notify(change: ChatStateChange): void {
     const panel = this.panels.get(change.threadId);
     if (panel === undefined) {
+      return;
+    }
+    if (!panel.visible) {
+      this.staleThreadIds.add(change.threadId);
       return;
     }
     void panel.webview.postMessage({ type: 'progress', view: buildProgress(change.state) });
@@ -75,6 +96,7 @@ export class ProgressViewManager implements vscode.Disposable {
       panel.dispose();
     }
     this.panels.clear();
+    this.staleThreadIds.clear();
   }
 }
 
