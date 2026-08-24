@@ -19,8 +19,20 @@ const rec = (v: unknown): Record<string, unknown> | undefined =>
 const strings = (v: unknown): string[] =>
   Array.isArray(v) ? v.filter((e): e is string => typeof e === 'string') : [];
 
-/** 判定の状態（`GuardianApprovalReviewStatus`）。表示語をこちらで持つ。 */
-const STATUS_LABELS: Record<string, string> = {
+/**
+ * 判定の状態（`GuardianApprovalReviewStatus`）。
+ *
+ * スキーマ由来の語彙だが、内側でunionとして宣言する（Issue #649）。`isBlockedByReview`が
+ * この語彙のうち2つを名指しで見ているため、綴りが食い違うと**その判定が黙って外れる**
+ * （承認を止めるべき状態を素通りさせる）。unionにしておけばtscが落とす。
+ * スキーマ側が種類を増やしたことまでは検出できないが、それはこの型の役目ではなく、
+ * 未知の値をそのまま出すフォールバック（`describeReviewOutcome`）の担当である。
+ */
+export type AutoApprovalReviewStatus =
+  'inProgress' | 'approved' | 'denied' | 'timedOut' | 'aborted';
+
+/** 表示語をこちらで持つ。unionに値を足してここへ足し忘れるとコンパイルが落ちる。 */
+const STATUS_LABELS: Record<AutoApprovalReviewStatus, string> = {
   inProgress: '判定中',
   approved: '承認',
   denied: '拒否',
@@ -28,9 +40,15 @@ const STATUS_LABELS: Record<string, string> = {
   aborted: '中止',
 };
 
+/**
+ * 実行が止まっている状態。ここを`AutoApprovalReviewStatus`で型付けしてあるので、
+ * unionの綴りを変えるとこの配列が落ちる。リテラルの`===`比較を散らすと同じ守りが効かない。
+ */
+const BLOCKING_STATUSES: readonly AutoApprovalReviewStatus[] = ['denied', 'timedOut'];
+
 /** 人が覆せる（＝Codexが実行を止めた）状態か。 */
 export function isBlockedByReview(status: string): boolean {
-  return status === 'denied' || status === 'timedOut';
+  return (BLOCKING_STATUSES as readonly string[]).includes(status);
 }
 
 /**
@@ -84,7 +102,9 @@ export function describeReviewOutcome(review: unknown): string {
   const r = rec(review);
   const status = str(r?.['status']);
   // 未知の状態は語を訳さずそのまま出す。表を引けないことを「承認」と読み替えない
-  const label = STATUS_LABELS[status] ?? (status === '' ? '不明' : status);
+  const label =
+    (STATUS_LABELS as Record<string, string | undefined>)[status] ??
+    (status === '' ? '不明' : status);
   const risk = str(r?.['riskLevel']);
   const rationale = str(r?.['rationale']);
   const head = risk === '' ? `自動レビュー: ${label}` : `自動レビュー: ${label}（リスク ${risk}）`;

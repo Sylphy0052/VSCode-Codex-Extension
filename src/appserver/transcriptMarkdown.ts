@@ -1,4 +1,4 @@
-import type { ChatItem } from './chatState';
+import type { ChatItem, FileDiffKind } from './chatState';
 
 /**
  * 会話全体をMarkdownで取り出す（issue #25・design.md §14.23）。
@@ -9,9 +9,22 @@ import type { ChatItem } from './chatState';
  * （書き出した内容が会話と一致することが受入基準のため）。
  */
 
-/** 見出しに使う項目種類ごとのラベル。`chatScript.ts` の `KIND_LABEL` と語彙を揃えてある。
+/**
+ * 見出しに使う項目種類ごとのラベル。`chatScript.ts` の `KIND_LABEL` と語彙を揃えてある。
  * `agentMessage` だけは呼び出し側が渡す `agentLabel`（Codex / Claude Code）で決まるため
- * ここには含めない。 */
+ * ここには含めない。
+ *
+ * キーをunionで閉じるかを検討し、閉じないと決めた（Issue #649）。`ChatItem.kind` は
+ * `string` で、未知の種類も捨てずに保持する方針である。加えて種類を作る場所が
+ * Codex経路（`chatState.ts` の `normalizeItem`）とClaude Code経路
+ * （`claude/transcript.ts` の `describeTool`）に分かれており、**unionを「正」として
+ * 維持する相手がいない。**
+ *
+ * 代わりに、この表と `KIND_LABEL` のキー集合が一致することを
+ * `test/unit/webviewScript.test.ts` で突き合わせる。**「語彙を揃えてある」と
+ * ここに書いてありながら実際にはずれており、Markdown書き出しの見出しが英語の
+ * 識別子になっていた**（`subAgentActivity` など4件）。文で約束する代わりに検査する。
+ */
 const KIND_TITLE: Record<string, string> = {
   userMessage: 'あなた',
   reasoning: '思考',
@@ -33,8 +46,19 @@ const KIND_TITLE: Record<string, string> = {
   fileRead: 'ファイル読み取り',
 };
 
-/** ファイル変更の種類ラベル。`chatScript.ts` の `createDiff` と同じ対応。 */
-const DIFF_KIND_TITLE: Record<string, string> = { add: '追加', delete: '削除', update: '変更' };
+/**
+ * ファイル変更の種類ラベル。`chatScript.ts` の `createDiff` と同じ対応。
+ *
+ * `FileDiffKind` で閉じてある。`FileDiff.kind` 自体は外から来る文字列なので `string` の
+ * ままだが、この語彙で分岐しているコードが辞書の外にある（`chatState.ts` の
+ * `normalizeDiffBody` が `add` / `delete` を名指しで見て差分行の記号を決める）。
+ * 分岐する側と表す側で綴りが食い違うと、片方だけが黙って外れる。
+ */
+const DIFF_KIND_TITLE: Record<FileDiffKind, string> = {
+  add: '追加',
+  delete: '削除',
+  update: '変更',
+};
 
 /** 未知の種類でも崩れないよう、対応する見出しが無ければ種類名をそのまま出す（`normalizeItem` と同じ方針）。 */
 function titleOf(item: ChatItem, agentLabel: string): string {
@@ -74,7 +98,9 @@ function bodyOf(item: ChatItem): string {
 
 function diffBlocks(item: ChatItem): string[] {
   return item.diffs.map((diff) => {
-    const kindLabel = DIFF_KIND_TITLE[diff.kind] ?? diff.kind;
+    // 閉じた表を開いた値で索く。未知の種類でも見出しは崩さず、種類名をそのまま出す
+    const kindLabel =
+      (DIFF_KIND_TITLE as Record<string, string | undefined>)[diff.kind] ?? diff.kind;
     const header = `${diff.path}${diff.movePath === undefined ? '' : ` → ${diff.movePath}`}（${kindLabel}）`;
     return `${header}\n\n\`\`\`diff\n${diff.diff}\n\`\`\``;
   });

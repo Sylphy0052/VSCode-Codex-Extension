@@ -1044,7 +1044,17 @@ async function confirmBypass(): Promise<boolean> {
   return choice === 'この設定にする';
 }
 
-/** 広げる先ごとの、実際に何が起きるか。 */
+/**
+ * 広げる先ごとの、実際に何が起きるか。
+ *
+ * `Record<SandboxMode, string>` にはしない（Issue #649で検討して、しないと決めた）。
+ * これは全キーを書く表ではなく、**緩和になる遷移先だけを書く部分的な表**である。
+ * `SandboxMode` は3値だが `read-only` はここへ来ない——`isSandboxRelaxed`
+ * （`codex/sandboxPolicy.ts`）が `SANDBOX_MODES` の並び順を安全順とみなしてランクで
+ * 比較しており、先頭の `read-only` へ向かう変更は「緩和」と判定されないため、
+ * `confirmRelaxedSandbox` が呼ばれない。3値を要求する型にすると `read-only` にも
+ * 「権限が広がります」と読める文を書く羽目になり、意図が逆に読める。
+ */
 const RELAXED_SANDBOX_DETAIL: Record<string, string> = {
   'workspace-write': 'Codexは作業フォルダの中へ承認なしで書き込めるようになります。',
   'danger-full-access': 'Codexはファイルもネットワークも制限なく扱えるようになります。',

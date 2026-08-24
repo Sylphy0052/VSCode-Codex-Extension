@@ -228,6 +228,75 @@ describe('chatScript', () => {
     expect(source).toContain('function formatSessionCost(cost)');
     expect(source).toContain('function formatSessionTokens(tokens)');
   });
+
+  it(
+    'LOOP_STOP_LABELはLoopStopReasonの全メンバーを網羅している' +
+      '（画面に生の識別子が出た再発防止。`src/loop/loopController.ts`の`LoopStopReason`を' +
+      '真として読み取り、そこに理由を足してchatScript.tsのLOOP_STOP_LABELを足し忘れると' +
+      'このテストが落ちる）',
+    () => {
+      const loopControllerSource = readFileSync(
+        path.resolve(__dirname, '../../src/loop/loopController.ts'),
+        'utf8',
+      );
+      const typeStart = loopControllerSource.indexOf('export type LoopStopReason =');
+      expect(typeStart).toBeGreaterThan(0);
+      const typeEndOffset = loopControllerSource.indexOf(';', typeStart);
+      expect(typeEndOffset).toBeGreaterThan(typeStart);
+      const typeBody = loopControllerSource.slice(typeStart, typeEndOffset);
+
+      // 値ごとにJSDocコメントが挟まる複数行のstring literal union。コメント本文にも
+      // 他の値の名前（例: `stalled`の説明中に出てくる`taskStopped`）が登場するため、
+      // 行頭が`| '...'`の形になっている行だけを拾う（コメント行は`|`から始まらない）
+      const allStopReasons = [...typeBody.matchAll(/^\s*\|\s*'(\w+)'/gm)].map((m) => m[1]);
+      // 範囲・抽出に失敗すると0件になりうる。0件だと後続のSet同士のtoEqualが
+      // 空集合同士で素通りしてしまうため、ここで空でないことを先に固定する
+      expect(allStopReasons.length).toBeGreaterThan(0);
+
+      const source = chatScript('Codex', { mode: 'quickPick' });
+      const labelMatch = source.match(/const LOOP_STOP_LABEL = \{([\s\S]*?)\n {2}\};/);
+      expect(labelMatch).not.toBeNull();
+      const body = labelMatch?.[1] ?? '';
+      const labelKeys = [...body.matchAll(/^\s*(\w+):/gm)].map((m) => m[1]);
+      expect(new Set(labelKeys)).toEqual(new Set(allStopReasons));
+    },
+  );
+
+  it(
+    'KIND_LABELとKIND_TITLEが同じ語彙を持つ' +
+      '（appserver/transcriptMarkdown.tsのJSDocが「chatScript.tsのKIND_LABELと語彙を' +
+      '揃えてある」と書いているが、実際にずれてMarkdown書き出しの見出しが英語の' +
+      '識別子になっていた）',
+    () => {
+      // この2つは片方が型で、もう片方が実装という関係ではない。どちらも手書きの
+      // 辞書で、ChatItem.kindはstring型（未知の種類も捨てない方針）のため
+      // 突き合わせる相手の型が無い。片方に足してもう片方に足し忘れる事故だけを
+      // 捕まえる
+      const markdownSource = readFileSync(
+        path.resolve(__dirname, '../../src/appserver/transcriptMarkdown.ts'),
+        'utf8',
+      );
+      const titleStart = markdownSource.indexOf('const KIND_TITLE');
+      expect(titleStart).toBeGreaterThan(0);
+      const titleEnd = markdownSource.indexOf('};', titleStart);
+      expect(titleEnd).toBeGreaterThan(titleStart);
+      const titleBody = markdownSource.slice(titleStart, titleEnd);
+      const titleKeys = [...titleBody.matchAll(/^\s*(\w+):/gm)].map((m) => m[1]);
+      expect(titleKeys.length).toBeGreaterThan(0);
+
+      const source = chatScript('Codex', { mode: 'quickPick' });
+      const labelMatch = source.match(/const KIND_LABEL = \{([\s\S]*?)\n {2}\};/);
+      expect(labelMatch).not.toBeNull();
+      const body = labelMatch?.[1] ?? '';
+      const labelKeys = [...body.matchAll(/^\s*(\w+):/gm)].map((m) => m[1]);
+      expect(labelKeys.length).toBeGreaterThan(0);
+
+      // agentMessageだけはKIND_TITLE側に無い。見出しが呼び出し側の渡すagentLabel
+      // （Codex / Claude Code）で決まるためで、意図的な除外（transcriptMarkdown.tsの
+      // JSDocに明記されている）
+      expect(new Set(labelKeys)).toEqual(new Set([...titleKeys, 'agentMessage']));
+    },
+  );
 });
 
 describe('controlPanelScript', () => {
@@ -266,6 +335,76 @@ describe('controlPanelScript', () => {
       // 新しく取得ロジックを重複させず、既存のtoggleイベント（details.open代入）へ
       // 合流させる実装になっていることを確かめる
       expect(source).toContain('details.open = true');
+    },
+  );
+
+  it(
+    'importDetailKindLabelはImportItemDetailGroupのkindの全メンバーを網羅している' +
+      '（画面に生の識別子が出た再発防止。`src/provider/import.ts`の' +
+      '`ImportItemDetailGroup.kind`を真として読み取る）',
+    () => {
+      const importSource = readFileSync(
+        path.resolve(__dirname, '../../src/provider/import.ts'),
+        'utf8',
+      );
+      const interfaceStart = importSource.indexOf('export interface ImportItemDetailGroup');
+      expect(interfaceStart).toBeGreaterThan(0);
+      // 同じファイルには別のunion（ImportItemType。'AGENTS_MD'など大文字の値）もあるため、
+      // ImportItemDetailGroup内のkindプロパティの範囲だけへ絞って抽出する
+      const kindStart = importSource.indexOf('kind:', interfaceStart);
+      expect(kindStart).toBeGreaterThan(interfaceStart);
+      const kindEnd = importSource.indexOf(';', kindStart);
+      expect(kindEnd).toBeGreaterThan(kindStart);
+      const kindBody = importSource.slice(kindStart, kindEnd);
+      const allKinds = [...kindBody.matchAll(/'(\w+)'/g)]
+        .map((m) => m[1])
+        .filter((k): k is string => k !== undefined);
+      expect(allKinds.length).toBeGreaterThan(0);
+      // 範囲の切り出しに失敗してImportItemType（大文字の値）が混ざっていないことも確かめる
+      for (const kind of allKinds) {
+        expect(kind).not.toBe(kind.toUpperCase());
+      }
+
+      const source = controlPanelScript(JSON.stringify(approvalLevelMeta()));
+      const labelMatch = source.match(
+        /function importDetailKindLabel\(kind\) \{\s*const labels = \{([\s\S]*?)\n {4}\};/,
+      );
+      expect(labelMatch).not.toBeNull();
+      const body = labelMatch?.[1] ?? '';
+      const labelKeys = [...body.matchAll(/^\s*(\w+):/gm)].map((m) => m[1]);
+      expect(new Set(labelKeys)).toEqual(new Set(allKinds));
+    },
+  );
+
+  it(
+    'formatProvides内のlabelOfと索き用の固定配列がPluginProvidesのプロパティを網羅している' +
+      '（画面に生の識別子・undefinedが出た再発防止。labelOfにフォールバックが無いため、' +
+      '固定配列に足してlabelOfへ足し忘れると画面にundefinedが出る。' +
+      '`src/provider/plugins.ts`の`PluginProvides`を真として読み取る）',
+    () => {
+      const pluginsSource = readFileSync(
+        path.resolve(__dirname, '../../src/provider/plugins.ts'),
+        'utf8',
+      );
+      const interfaceStart = pluginsSource.indexOf('export interface PluginProvides');
+      expect(interfaceStart).toBeGreaterThan(0);
+      const interfaceEnd = pluginsSource.indexOf('}', interfaceStart);
+      expect(interfaceEnd).toBeGreaterThan(interfaceStart);
+      const interfaceBody = pluginsSource.slice(interfaceStart, interfaceEnd);
+      const allProps = [...interfaceBody.matchAll(/^\s*(\w+):/gm)].map((m) => m[1]);
+      expect(allProps.length).toBeGreaterThan(0);
+
+      const source = controlPanelScript(JSON.stringify(approvalLevelMeta()));
+      const labelOfMatch = source.match(/const labelOf = \{([^}]*)\};/);
+      expect(labelOfMatch).not.toBeNull();
+      const labelOfKeys = [...(labelOfMatch?.[1] ?? '').matchAll(/(\w+):/g)].map((m) => m[1]);
+
+      const arrayMatch = source.match(/for \(const key of \[([^\]]*)\]\)/);
+      expect(arrayMatch).not.toBeNull();
+      const arrayKeys = [...(arrayMatch?.[1] ?? '').matchAll(/'(\w+)'/g)].map((m) => m[1]);
+
+      expect(new Set(labelOfKeys)).toEqual(new Set(allProps));
+      expect(new Set(arrayKeys)).toEqual(new Set(allProps));
     },
   );
 });
@@ -514,4 +653,71 @@ describe('workflowScript', () => {
     expect(source.includes('outerHTML')).toBe(false);
     expect(source.includes('insertAdjacentHTML')).toBe(false);
   });
+
+  it(
+    'STATE_LABELはTASK_STATESの全状態を網羅している' +
+      '（画面に生の識別子が出た再発防止。`src/orchestrator/runState.ts`の`TASK_STATES`を' +
+      '真として読み取り、そこに状態を足してworkflowScript.tsのSTATE_LABELを足し忘れると' +
+      'このテストが落ちる）',
+    () => {
+      const runStateSource = readFileSync(
+        path.resolve(__dirname, '../../src/orchestrator/runState.ts'),
+        'utf8',
+      );
+      // union型ではなく`as const`の配列リテラルなので、kindの正規表現ではなく
+      // 配列要素の抽出になる
+      const arrayStart = runStateSource.indexOf('export const TASK_STATES = [');
+      expect(arrayStart).toBeGreaterThan(0);
+      const arrayEnd = runStateSource.indexOf('] as const;', arrayStart);
+      expect(arrayEnd).toBeGreaterThan(arrayStart);
+      const arrayBody = runStateSource.slice(arrayStart, arrayEnd);
+      const allStates = [...arrayBody.matchAll(/'(\w+)'/g)].map((m) => m[1]);
+      expect(allStates.length).toBeGreaterThan(0);
+
+      const source = workflowScript();
+      const labelMatch = source.match(/const STATE_LABEL = \{([\s\S]*?)\n {2}\};/);
+      expect(labelMatch).not.toBeNull();
+      const body = labelMatch?.[1] ?? '';
+      const labelKeys = [...body.matchAll(/^\s*(\w+):/gm)].map((m) => m[1]);
+      expect(new Set(labelKeys)).toEqual(new Set(allStates));
+    },
+  );
+
+  it(
+    'PROGRAM_SKIP_REASON_LABELはProgramRunSkipReasonの全kindを網羅している' +
+      '（画面に生の識別子が出た再発防止。`src/orchestrator/programState.ts`の' +
+      '`ProgramRunSkipReason`を真として読み取る）',
+    () => {
+      const programStateSource = readFileSync(
+        path.resolve(__dirname, '../../src/orchestrator/programState.ts'),
+        'utf8',
+      );
+      const typeStart = programStateSource.indexOf('export type ProgramRunSkipReason =');
+      expect(typeStart).toBeGreaterThan(0);
+      // この型は`readonly`を使わず、さらに2つの選択肢が同じ物理行に並ぶ
+      // （`{ kind: 'failedDependency'; failedRunId: string } | { kind: 'haltedByUser' };`）。
+      // FAILURE_LABELテストと同じ`{ readonly kind: '...'` という正規表現をこの型に掛けると
+      // 0件になる（実測済み）ため`readonly`無しの形を使う。また`indexOf(';', typeStart)`は
+      // 選択肢内部のプロパティ（`failedRunId: string`の`;`）に先に当たって範囲が
+      // 短く切れてしまうため、宣言行の次の改行までを範囲にする
+      const declLineEnd = programStateSource.indexOf('\n', typeStart);
+      expect(declLineEnd).toBeGreaterThan(typeStart);
+      const typeEndOffset = programStateSource.indexOf('\n', declLineEnd + 1);
+      expect(typeEndOffset).toBeGreaterThan(declLineEnd);
+      const typeBody = programStateSource.slice(typeStart, typeEndOffset);
+      const allSkipReasons = [...typeBody.matchAll(/\{ kind: '(\w+)'/g)].map((m) => m[1]);
+      expect(allSkipReasons.length).toBeGreaterThan(0);
+      // 範囲の切り出しが効いているかの確認。`haltedByUser`は同じファイルの他の場所
+      // （stop処理でのskipReason生成やコメント）にも登場するが、範囲を切らずに拾うと
+      // 重複や無関係な一致が混ざる
+      expect(allSkipReasons.filter((k) => k === 'haltedByUser')).toHaveLength(1);
+
+      const source = workflowScript();
+      const labelMatch = source.match(/const PROGRAM_SKIP_REASON_LABEL = \{([\s\S]*?)\n {2}\};/);
+      expect(labelMatch).not.toBeNull();
+      const body = labelMatch?.[1] ?? '';
+      const labelKeys = [...body.matchAll(/^\s*(\w+):/gm)].map((m) => m[1]);
+      expect(new Set(labelKeys)).toEqual(new Set(allSkipReasons));
+    },
+  );
 });

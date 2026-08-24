@@ -16,10 +16,22 @@ export interface EditReplace {
   newString: string;
 }
 
+/**
+ * ファイル変更の種類（`FileUpdateChange` の `type`）。
+ *
+ * スキーマ由来の語彙だが、内側でunionとして宣言する（Issue #649）。`normalizeDiffBody`が
+ * `add` / `delete` を名指しで見て差分の行頭記号を決めているため、綴りが食い違うと
+ * **記号が付かないまま黙って通る**。unionにしておけばtscが落とす。
+ *
+ * `FileDiff.kind` 自体は `string` のまま置く。app-serverから届いた値をそのまま持つ
+ * フィールドで、未知の種類が来ても捨てない方針（`normalizeItem` と同じ）のため。
+ */
+export type FileDiffKind = 'add' | 'delete' | 'update';
+
 /** 1ファイル分の変更。app-server の `FileUpdateChange` に対応する。 */
 export interface FileDiff {
   path: string;
-  /** `add` / `delete` / `update`。 */
+  /** `add` / `delete` / `update`。未知の種類も捨てずに保持するため `string` にしてある。 */
   kind: string;
   /** 移動先。`update` で移動を伴う場合だけ入る。 */
   movePath: string | undefined;
@@ -564,6 +576,14 @@ function readStringArray(value: unknown): string {
  * （`status` はチャット画面側の `STATUS_LABEL` を経由する。`chatScript.ts` 参照）、ここで直接
  * 日本語へ変える。未知の値（スキーマ追加）はそのまま出す。
  */
+/**
+ * キーをunionで閉じるかを検討し、閉じないと決めた（Issue #649）。この語彙を見ているのは
+ * すぐ下の索く1行だけで、辞書の外にこの値で分岐するコードが無い
+ * （`spawnAgent` などの綴りは `src/` のここ以外に現れない）。unionを足しても
+ * tscが守る対象が増えず、読む型だけが増える。`autoApprovalReview.ts` の
+ * `AutoApprovalReviewStatus` を閉じたのは、あちらには綴りを名指しで見る
+ * `isBlockedByReview` があるため。
+ */
 const COLLAB_TOOL_LABEL: Record<string, string> = {
   spawnAgent: 'エージェントを起動',
   sendInput: '入力を送信',
@@ -572,7 +592,12 @@ const COLLAB_TOOL_LABEL: Record<string, string> = {
   closeAgent: 'エージェントを終了',
 };
 
-/** `agentsStates` 内の `CollabAgentStatus` を日本語にする（issue #34）。未知の値はそのまま出す。 */
+/**
+ * `agentsStates` 内の `CollabAgentStatus` を日本語にする（issue #34）。未知の値はそのまま出す。
+ *
+ * `COLLAB_TOOL_LABEL` と同じ理由でunionでは閉じない（Issue #649）。辞書の外にこの語彙で
+ * 分岐するコードが無い。
+ */
 const COLLAB_AGENT_STATUS_LABEL: Record<string, string> = {
   pendingInit: '初期化待ち',
   running: '実行中',
@@ -792,7 +817,14 @@ export function normalizeDiffBody(diff: string, kind: string): string {
   if (HUNK_HEADER.test(diff)) {
     return diff;
   }
-  const marker = kind === 'add' ? '+' : kind === 'delete' ? '-' : undefined;
+  // satisfiesで綴りをFileDiffKindに突き合わせる。型注釈付きの変数を挟むより、
+  // 「この2つはFileDiffKindの値である」という主張がその場に残る
+  const marker =
+    kind === ('add' satisfies FileDiffKind)
+      ? '+'
+      : kind === ('delete' satisfies FileDiffKind)
+        ? '-'
+        : undefined;
   if (marker === undefined) {
     return diff;
   }
@@ -875,7 +907,14 @@ export function readWebSearchResults(results: unknown): WebSearchResult[] {
   return items.length === 0 ? NO_SEARCH_RESULTS : items;
 }
 
-/** 計画の進捗記号。絵文字は使わない（環境で欠けるため）。 */
+/**
+ * 計画の進捗記号。絵文字は使わない（環境で欠けるため）。
+ *
+ * `COLLAB_TOOL_LABEL` と同じ理由でunionでは閉じない（Issue #649）。辞書の外にこの語彙で
+ * 分岐するコードが無い。**`chatScript.ts` の `TODO_MARK` とは別の語彙である**——
+ * あちらはClaude Codeの `TodoWrite`（`in_progress`。区切りが`_`）、こちらはCodexの
+ * `turn/plan/updated`（`inProgress`）で、記号が同じでも由来が違う。
+ */
 const PLAN_MARK: Record<string, string> = {
   pending: '[ ]',
   inProgress: '[~]',
