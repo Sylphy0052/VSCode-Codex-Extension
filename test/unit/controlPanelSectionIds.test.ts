@@ -196,6 +196,13 @@ describe('セクション識別子の整合性（issue #225 レビュー指摘3�
     }
   });
 
+  it('使用量の内訳がusage-metaクラスで出る（issue #742）', () => {
+    // CSS側（controlPanelStyles.tsの.usage-meta）とクラス名がずれると、
+    // 見出しの割合の次に読む値が無スタイルへ落ちる。落ちても表示自体は出るので気付けない
+    const html = renderedHtml();
+    expect(html).toContain('<div class="usage-meta" id="usageMeta">');
+  });
+
   it('SECTION_CONTAINERSのキー集合とHTMLのid="section-*"の集合が一致する', () => {
     const containerKeys = extractSectionContainerKeys(
       controlPanelScript(JSON.stringify(approvalLevelMeta())),

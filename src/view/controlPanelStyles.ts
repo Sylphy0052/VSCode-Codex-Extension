@@ -53,18 +53,42 @@ export function controlPanelStyles(): string {
     align-items: baseline;
     margin-bottom: 4px;
   }
-  .usage-head .percent { font-weight: 600; }
+  .usage-head .percent { font-weight: 600; font-size: 1.15em; }
+  /*
+   * 使用量の内訳（リセットまでの時間・プラン・取得時刻）。以前は .hint（0.85em の
+   * descriptionForeground）で出していたが、割合の次に読む値なので1段上げる（issue #742）。
+   * min-height は中身が空のときにレイアウトが動かないようにするため（.hint と同じ理由）。
+   */
+  .usage-meta {
+    margin-top: 4px;
+    min-height: 1em;
+    font-size: 0.95em;
+    color: var(--vscode-foreground);
+  }
+  /*
+   * バーの太さはワークフロー画面（workflowStyles.ts の #progressBar）と揃えて 8px（issue #742）。
+   * トラックは opacity を掛けるのではなく color-mix で薄い色を作る。opacity は子要素にも
+   * 掛かるため .fill { opacity: 1 } で打ち消す必要があり、ハイコントラストテーマでは
+   * トラックが背景と同化していた。
+   * contrastBorder はハイコントラストテーマでのみ定義される。outline なので通常のテーマでは
+   * transparent に落ちて何も描かれず、レイアウトにも影響しない。
+   */
   .bar {
-    height: 4px;
-    border-radius: 2px;
-    background-color: var(--vscode-progressBar-background, var(--vscode-editorWidget-border));
-    opacity: 0.35;
+    height: 8px;
+    border-radius: 4px;
+    background-color: color-mix(
+      in srgb,
+      var(--vscode-progressBar-background, var(--vscode-editorWidget-border)) 30%,
+      transparent
+    );
+    outline: 1px solid var(--vscode-contrastBorder, transparent);
+    outline-offset: -1px;
   }
   .bar .fill {
     height: 100%;
-    border-radius: 2px;
-    opacity: 1;
+    border-radius: 4px;
     background-color: var(--vscode-charts-blue);
+    transition: width 0.2s ease;
   }
   .bar .fill.warning { background-color: var(--vscode-charts-yellow); }
   .bar .fill.critical { background-color: var(--vscode-charts-red); }

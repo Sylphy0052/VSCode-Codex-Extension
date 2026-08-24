@@ -260,6 +260,41 @@ describe('controlPanelStyles', () => {
     expect(css).toContain('summary.sectionTitle');
     expect(css).toContain('.sectionLoading');
   });
+
+  it('使用量バーの太さがワークフロー画面と揃っている（issue #742）', () => {
+    // 画面ごとに太さが違うと、同じ意味の表示に見えない
+    const bar = stripComments(controlPanelStyles()).match(/\n\s*\.bar \{([^}]*)\}/);
+    expect(bar, '.bar の規則が見つからない').not.toBeNull();
+    expect(bar?.[1]).toMatch(/height:\s*8px/);
+    expect(bar?.[1]).toMatch(/border-radius:\s*4px/);
+  });
+
+  it('使用量バーのトラックがopacityではなく色で薄くしてある（issue #742）', () => {
+    // opacity は子要素にも掛かるうえ、ハイコントラストテーマで背景と同化する
+    const css = stripComments(controlPanelStyles());
+    const bar = css.match(/\n\s*\.bar \{([^}]*)\}/);
+    expect(bar, '.bar の規則が見つからない').not.toBeNull();
+    expect(bar?.[1]).not.toMatch(/opacity:/);
+    expect(bar?.[1]).toMatch(/color-mix\(/);
+    // ハイコントラストテーマでだけ描かれる輪郭。レイアウトを動かさない outline で出す
+    expect(bar?.[1]).toMatch(/outline:[^;]*var\(--vscode-contrastBorder/);
+  });
+
+  it('使用量バーの塗りが幅の変化をなめらかにする（issue #742）', () => {
+    // 動きを減らす設定では reducedMotionStyles() が止める
+    const fill = stripComments(controlPanelStyles()).match(/\.bar \.fill \{([^}]*)\}/);
+    expect(fill, '.bar .fill の規則が見つからない').not.toBeNull();
+    expect(fill?.[1]).toMatch(/transition:\s*width/);
+    expect(fill?.[1]).not.toMatch(/opacity:/);
+  });
+
+  it('使用量の内訳が.hintより読みやすい（issue #742）', () => {
+    const meta = stripComments(controlPanelStyles()).match(/\.usage-meta \{([^}]*)\}/);
+    expect(meta, '.usage-meta の規則が見つからない').not.toBeNull();
+    // 中身が空でも高さを保ち、値が入ったときに下の要素が動かないようにする
+    expect(meta?.[1]).toMatch(/min-height:/);
+    expect(meta?.[1]).toMatch(/var\(--vscode-foreground\)/);
+  });
 });
 
 describe('chatCsp', () => {
