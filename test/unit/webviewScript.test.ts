@@ -485,6 +485,34 @@ describe('chatScript', () => {
     });
   });
 
+  describe('コードブロックの構文強調（issue #717）', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+
+    it('トークナイザを埋め込んでいる', () => {
+      // 実装は highlight.ts の HIGHLIGHT_SOURCE。差し込み忘れると highlightCode が未定義になる
+      expect(source).toContain('function highlightCode(lang, code)');
+    });
+
+    it('分類した断片をspanで包んで組み立てる', () => {
+      const create = source.slice(source.indexOf('function createCodeBlock'));
+      const body = create.slice(0, create.indexOf('\n  }'));
+      expect(body).toContain('highlightCode(token.lang, token.code)');
+      expect(body).toContain("span.className = 'tok-' + piece.type");
+      // 地の文はspanを作らずテキストノードのまま入れる
+      expect(body).toContain('document.createTextNode(piece.value)');
+    });
+
+    it('コピー・挿入・開くは着色前のコードを渡す', () => {
+      const create = source.slice(source.indexOf('function createCodeBlock'));
+      const body = create.slice(0, create.indexOf('\n  }'));
+      expect(body).toContain('navigator.clipboard.writeText(token.code)');
+      expect(body).toContain("type: 'insertCode', code: token.code");
+      expect(body).toContain("type: 'openCodeFile', code: token.code");
+      // 組み立てたDOMからコードを読み直す形にすると、着色の切れ目が混ざる余地ができる
+      expect(body.includes('code.textContent')).toBe(false);
+    });
+  });
+
   describe('AskUserQuestionの選択UI（issue #696）', () => {
     const source = chatScript('Claude Code', { mode: 'command', commandName: 'code-review' });
 

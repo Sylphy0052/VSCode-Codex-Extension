@@ -893,5 +893,24 @@ export function chatStyles(): string {
     font-family: inherit;
     font-size: inherit;
   }
+  /*
+   * 構文強調のトークン色（issue #717）。分類は highlight.ts の CODE_TOKEN_TYPES と
+   * 対応する（plain は地の文なので色を持たない）。
+   *
+   * webviewにはエディタのトークン色（テーマのtokenColors）は渡ってこないため、
+   * 意味の近いワークベンチ色で代用する。symbolIcon.* は補完一覧やアウトラインで
+   * 種別を示すのに使われる色で、どのテーマでも本文の上に置いて読める前提の値が入る。
+   * 取れない場合に備えて、より基本的な変数を代替に置く。
+   */
+  .md-code .tok-comment { color: var(--vscode-descriptionForeground); }
+  .md-code .tok-string {
+    color: var(--vscode-symbolIcon-stringForeground, var(--vscode-charts-orange));
+  }
+  .md-code .tok-keyword {
+    color: var(--vscode-symbolIcon-keywordForeground, var(--vscode-textLink-foreground));
+  }
+  .md-code .tok-number {
+    color: var(--vscode-symbolIcon-numberForeground, var(--vscode-charts-green));
+  }
 `;
 }
