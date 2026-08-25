@@ -1207,8 +1207,9 @@ describe('sendSingleTurn: 応答本文の取得', () => {
       openTaskSession: async () => session,
     };
 
-    await expect(sendSingleTurn(host, 'codex', buildPlannerSessionInput('codex', '/repo'), 'goal'))
-      .resolves.toBe('# ゴール\n\n## Phase 1: 実装\n\n- [ ] R1 実装する');
+    await expect(
+      sendSingleTurn(host, 'codex', buildPlannerSessionInput('codex', '/repo'), 'goal'),
+    ).resolves.toBe('# ゴール\n\n## Phase 1: 実装\n\n- [ ] R1 実装する');
   });
 });
 
