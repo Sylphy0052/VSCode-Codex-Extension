@@ -2707,7 +2707,7 @@ issue #195・#203の調査（§14.36）でClaude Codeの`/recap`はCLI内蔵の�
 
 Codexには要約専用のAPIが無いため、拡張機能側が要約を依頼する指示文（`RECAP_INSTRUCTION`、`src/appserver/chatSession.ts`）を組み立て、`turn/start`で**通常のターンとして**送る。応答は`ChatSession.send()`が返す通常のモデル応答として会話にそのまま残る。
 
-指示文は§14.36実測2で見つかったClaude Code内蔵`/recap`の生成指示文（"The user stepped away and is coming back. Recap in under 40 words, 1-2 plain sentences, no markdown. Lead with the overall goal and current task, ..."）と同じ趣旨にした上で、次の一文を明示的に足している。
+指示文は§14.36実測2で見つかったClaude Code内蔵`/recap`の生成指示文（"The user stepped away and is coming back. Recap in under 40 words, 1-2 plain sentences, no markdown. Lead with the overall goal and current task, ..."）と同じ趣旨にした上で、40語以内を目安としつつ重要な文脈を残すために必要なら超過できるようにし、次の一文を明示的に足している。
 
 > Reply in the same language the conversation has been using so far.
 
