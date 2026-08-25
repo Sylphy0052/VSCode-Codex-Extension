@@ -428,6 +428,17 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
   }
 
+  /** 指定cwdで会話を開き、開始指示を1件だけ送る。外部UIの明示操作から使う。 */
+  async openNewWithPrompt(cwd: string, prompt: string): Promise<string | undefined> {
+    const threadId = await this.openNew(cwd);
+    if (threadId === undefined) return undefined;
+    const entry = this.panels.get(threadId);
+    if (entry === undefined) return undefined;
+    await entry.session.sendOrQueue(prompt, entry.taskConfig ?? readConfig().codex);
+    this.reportActivity(entry, prompt);
+    return threadId;
+  }
+
   /**
    * 現在アクティブなセッションのtranscript相当（rollout）を新セッションへ渡し、
    * 引き継ぎを開始する（issue #694）。Claude Code側の`handoffToNewSession`と同じ設計
@@ -959,6 +970,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       }
       if (type === 'sessionKanban') {
         await vscode.commands.executeCommand('agent.sessionKanban');
+        return;
+      }
+      if (type === 'forgeHub') {
+        await vscode.commands.executeCommand('agent.forgeHub', 'codex');
         return;
       }
       if (type === 'openProgress') {

@@ -790,23 +790,46 @@ export async function createPullRequest(
  */
 function buildCreateIssueArgs(
   host: ForgeHost,
-  params: { title: string; bodyFilePath: string },
+  params: {
+    title: string;
+    bodyFilePath: string;
+    labels?: string;
+    assignees?: string;
+    assigneeIds?: readonly number[];
+    milestone?: string;
+  },
 ): { command: 'gh' | 'glab'; args: string[] } {
   if (host === 'github') {
+    const args = [
+      'issue',
+      'create',
+      `--title=${params.title}`,
+      `--body-file=${params.bodyFilePath}`,
+    ];
+    if (params.labels !== undefined && params.labels !== '') args.push(`--label=${params.labels}`);
+    if (params.assignees !== undefined && params.assignees !== '')
+      args.push(`--assignee=${params.assignees}`);
+    if (params.milestone !== undefined && params.milestone !== '')
+      args.push(`--milestone=${params.milestone}`);
     return {
       command: 'gh',
-      args: ['issue', 'create', `--title=${params.title}`, `--body-file=${params.bodyFilePath}`],
+      args,
     };
   }
-  return {
-    command: 'glab',
-    args: [
-      'api',
-      'projects/:id/issues',
-      `--field=title=${params.title}`,
-      `--field=description=@${params.bodyFilePath}`,
-    ],
-  };
+  const args = [
+    'api',
+    'projects/:id/issues',
+    `--field=title=${params.title}`,
+    `--field=description=@${params.bodyFilePath}`,
+  ];
+  if (params.labels !== undefined && params.labels !== '')
+    args.push(`--field=labels=${params.labels}`);
+  for (const assigneeId of params.assigneeIds ?? []) {
+    args.push(`--field=assignee_ids[]=${String(assigneeId)}`);
+  }
+  if (params.milestone !== undefined && params.milestone !== '')
+    args.push(`--field=milestone=${params.milestone}`);
+  return { command: 'glab', args };
 }
 
 /** `createPullRequest`と同じ戻り値の形（URLが取れれば返す。番号は呼び出し側が`parsePullRequestNumberFromUrl`で取り出す）。 */
@@ -817,6 +840,9 @@ export interface CreateIssueRequest {
   cwd: string;
   title: string;
   body: string;
+  labels?: string;
+  assignees?: string;
+  milestone?: string;
 }
 
 /**
@@ -839,12 +865,31 @@ export async function createIssue(
       message: 'title が空、または改行を含んでいます',
     };
   }
+  const assigneeIds =
+    request.host === 'gitlab' && request.assignees !== undefined && request.assignees.trim() !== ''
+      ? request.assignees.split(',').map((value) => Number(value.trim()))
+      : undefined;
+  if (assigneeIds?.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+    return {
+      ok: false,
+      reason: 'invalidInput',
+      message: 'GitLabのassigneeは正のユーザーIDをカンマ区切りで指定してください',
+    };
+  }
 
   const bodyFilePath = await deps.fs.writeTempFile(request.body);
   try {
     const { command, args } = buildCreateIssueArgs(request.host, {
       title: stripControlChars(request.title),
       bodyFilePath,
+      ...(request.labels === undefined ? {} : { labels: stripControlChars(request.labels) }),
+      ...(request.assignees === undefined
+        ? {}
+        : { assignees: stripControlChars(request.assignees) }),
+      ...(assigneeIds === undefined ? {} : { assigneeIds }),
+      ...(request.milestone === undefined
+        ? {}
+        : { milestone: stripControlChars(request.milestone) }),
     });
     const result = await deps.cli.run(command, args, request.cwd);
     if (result.code !== 0) {
@@ -864,6 +909,48 @@ export async function createIssue(
         ? extractGithubPullRequestUrl(result.stdout)
         : extractGitlabMergeRequestUrl(result.stdout);
     return { ok: true, url };
+  } finally {
+    await deps.fs.removeTempFile(bodyFilePath);
+  }
+}
+
+/** Issueへ実装計画をコメントとして残す。既存本文を上書きしない。 */
+export async function postIssueComment(
+  deps: CreatePullRequestDeps,
+  request: { host: ForgeHost; cwd: string; number: number; body: string },
+): Promise<CreateIssueOutcome> {
+  if (!Number.isSafeInteger(request.number) || request.number <= 0 || request.body.trim() === '') {
+    return { ok: false, reason: 'invalidInput', message: 'Issue番号または本文が不正です' };
+  }
+  const bodyFilePath = await deps.fs.writeTempFile(request.body);
+  try {
+    const args =
+      request.host === 'github'
+        ? ['issue', 'comment', String(request.number), `--body-file=${bodyFilePath}`]
+        : [
+            'api',
+            `projects/:id/issues/${String(request.number)}/notes`,
+            `--field=body=@${bodyFilePath}`,
+          ];
+    const command = request.host === 'github' ? 'gh' : 'glab';
+    const result = await deps.cli.run(command, args, request.cwd);
+    if (result.code !== 0) {
+      return {
+        ok: false,
+        reason: 'cliError',
+        message:
+          result.stderr.trim() !== ''
+            ? sanitizeForLog(result.stderr)
+            : 'Issue計画の反映に失敗しました',
+      };
+    }
+    return {
+      ok: true,
+      url:
+        request.host === 'github'
+          ? result.stdout.trim() || undefined
+          : extractGitlabMergeRequestUrl(result.stdout),
+    };
   } finally {
     await deps.fs.removeTempFile(bodyFilePath);
   }
@@ -1467,6 +1554,155 @@ export async function fetchCiConclusion(
     : parseGitlabCiConclusion(result.stdout);
 }
 
+/** PR/MRのマージ可否と承認状態をHubへ渡す共通表現。 */
+export interface PullRequestStatus {
+  state: 'open' | 'merged' | 'closed' | 'unknown';
+  draft: boolean | undefined;
+  mergeable: boolean | undefined;
+  approvalsLeft: number | undefined;
+  message: string | undefined;
+}
+
+/** `gh pr view --json=state,isDraft,mergeable,mergeStateStatus,reviewDecision`を解釈する。 */
+export function parseGithubPullRequestStatus(stdout: string): PullRequestStatus {
+  let data: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    if (typeof parsed !== 'object' || parsed === null) throw new Error('not object');
+    data = parsed as Record<string, unknown>;
+  } catch {
+    return {
+      state: 'unknown',
+      draft: undefined,
+      mergeable: undefined,
+      approvalsLeft: undefined,
+      message: 'PR状態の応答を解釈できませんでした',
+    };
+  }
+  const stateValue = typeof data['state'] === 'string' ? data['state'].toUpperCase() : '';
+  const state =
+    stateValue === 'OPEN'
+      ? 'open'
+      : stateValue === 'MERGED'
+        ? 'merged'
+        : stateValue === 'CLOSED'
+          ? 'closed'
+          : 'unknown';
+  const mergeable =
+    typeof data['mergeable'] === 'string'
+      ? data['mergeable'].toUpperCase() === 'MERGEABLE'
+      : undefined;
+  const reviewDecision =
+    typeof data['reviewDecision'] === 'string' ? data['reviewDecision'].toUpperCase() : '';
+  const approvalsLeft = reviewDecision === 'APPROVED' ? 0 : reviewDecision === '' ? undefined : 1;
+  const mergeState =
+    typeof data['mergeStateStatus'] === 'string' ? data['mergeStateStatus'] : undefined;
+  return {
+    state,
+    draft: typeof data['isDraft'] === 'boolean' ? data['isDraft'] : undefined,
+    mergeable,
+    approvalsLeft,
+    message: mergeState,
+  };
+}
+
+/** GitLabのMR本体とapprovals APIの応答を解釈する。 */
+export function parseGitlabPullRequestStatus(
+  mergeRequestStdout: string,
+  approvalsStdout: string | undefined,
+): PullRequestStatus {
+  try {
+    const parsed: unknown = JSON.parse(mergeRequestStdout);
+    if (typeof parsed !== 'object' || parsed === null) throw new Error('not object');
+    const data = parsed as Record<string, unknown>;
+    const stateValue = typeof data['state'] === 'string' ? data['state'].toLowerCase() : '';
+    const state =
+      stateValue === 'opened'
+        ? 'open'
+        : stateValue === 'merged'
+          ? 'merged'
+          : stateValue === 'closed'
+            ? 'closed'
+            : 'unknown';
+    const mergeStatus =
+      typeof data['detailed_merge_status'] === 'string' ? data['detailed_merge_status'] : undefined;
+    let approvalsLeft: number | undefined;
+    if (approvalsStdout !== undefined) {
+      const approvals: unknown = JSON.parse(approvalsStdout);
+      if (
+        typeof approvals === 'object' &&
+        approvals !== null &&
+        typeof (approvals as Record<string, unknown>)['approvals_left'] === 'number'
+      ) {
+        approvalsLeft = (approvals as Record<string, unknown>)['approvals_left'] as number;
+      }
+    }
+    return {
+      state,
+      draft: typeof data['draft'] === 'boolean' ? data['draft'] : undefined,
+      mergeable: mergeStatus === 'mergeable' ? true : mergeStatus === undefined ? undefined : false,
+      approvalsLeft,
+      message: mergeStatus,
+    };
+  } catch {
+    return {
+      state: 'unknown',
+      draft: undefined,
+      mergeable: undefined,
+      approvalsLeft: undefined,
+      message: 'MR状態の応答を解釈できませんでした',
+    };
+  }
+}
+
+/** PR/MR状態を1回取得する。GitLabでは承認状態も追加で読む。 */
+export async function fetchPullRequestStatus(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  number: number,
+): Promise<PullRequestStatus> {
+  if (host === 'github') {
+    const result = await cli.run(
+      'gh',
+      [
+        'pr',
+        'view',
+        String(number),
+        '--json=state,isDraft,mergeable,mergeStateStatus,reviewDecision',
+      ],
+      cwd,
+    );
+    return result.code === 0
+      ? parseGithubPullRequestStatus(result.stdout)
+      : {
+          state: 'unknown',
+          draft: undefined,
+          mergeable: undefined,
+          approvalsLeft: undefined,
+          message: sanitizeForLog(result.stderr || 'PR状態を取得できませんでした'),
+        };
+  }
+  const mr = await cli.run('glab', ['api', `projects/:id/merge_requests/${String(number)}`], cwd);
+  if (mr.code !== 0)
+    return {
+      state: 'unknown',
+      draft: undefined,
+      mergeable: undefined,
+      approvalsLeft: undefined,
+      message: sanitizeForLog(mr.stderr || 'MR状態を取得できませんでした'),
+    };
+  const approvals = await cli.run(
+    'glab',
+    ['api', `projects/:id/merge_requests/${String(number)}/approvals`],
+    cwd,
+  );
+  return parseGitlabPullRequestStatus(
+    mr.stdout,
+    approvals.code === 0 ? approvals.stdout : undefined,
+  );
+}
+
 /** `waitForCiChecks`のポーリング間隔をテストから注入するための型（`PushBranchWait`と同じ方針）。 */
 export type CiWait = () => Promise<void>;
 
@@ -1790,6 +2026,9 @@ export interface ReviewComment {
   /** コメント本文（無害化前）。 */
   body: string;
   createdAt?: string;
+  /** 返信・解決に使うスレッドID。スレッドを持たないコメントでは未設定。 */
+  threadId?: string;
+  resolved?: boolean;
 }
 
 export interface ReviewCommentsResult {
@@ -1891,6 +2130,51 @@ export function parseGithubReviewComments(stdout: string): ReviewCommentsResult 
   return { ok: true, comments: result };
 }
 
+/** GitHub GraphQLのreviewThreads応答を、返信・解決可能なコメントへ変換する。 */
+export function parseGithubReviewThreads(stdout: string): ReviewCommentsResult {
+  try {
+    const data = JSON.parse(stdout) as {
+      data?: { node?: { reviewThreads?: { nodes?: unknown[] } } };
+    };
+    const threads = data.data?.node?.reviewThreads?.nodes;
+    if (!Array.isArray(threads)) throw new Error('invalid response');
+    const comments: ReviewComment[] = [];
+    for (const thread of threads) {
+      if (typeof thread !== 'object' || thread === null) continue;
+      const record = thread as Record<string, unknown>;
+      const threadId = typeof record['id'] === 'string' ? record['id'] : undefined;
+      const resolved = typeof record['isResolved'] === 'boolean' ? record['isResolved'] : undefined;
+      const nodes = (record['comments'] as { nodes?: unknown[] } | undefined)?.nodes;
+      if (threadId === undefined || !Array.isArray(nodes)) continue;
+      for (const node of nodes) {
+        if (typeof node !== 'object' || node === null) continue;
+        const comment = node as Record<string, unknown>;
+        const body = typeof comment['body'] === 'string' ? comment['body'] : '';
+        if (body.trim() === '') continue;
+        const author =
+          typeof (comment['author'] as { login?: unknown } | undefined)?.login === 'string'
+            ? (comment['author'] as { login: string }).login
+            : '';
+        const id =
+          typeof comment['id'] === 'string' ? comment['id'] : `${threadId}:${comments.length}`;
+        const createdAt =
+          typeof comment['createdAt'] === 'string' ? comment['createdAt'] : undefined;
+        comments.push({
+          id,
+          author,
+          body,
+          threadId,
+          ...(createdAt === undefined ? {} : { createdAt }),
+          ...(resolved === undefined ? {} : { resolved }),
+        });
+      }
+    }
+    return { ok: true, comments };
+  } catch {
+    return { ok: false, comments: [], message: 'reviewThreadsの出力を解釈できませんでした' };
+  }
+}
+
 /** GitLabの note の要素のうち、パースに使う項目だけの型。 */
 interface GitlabNoteEntry {
   id?: unknown;
@@ -1898,6 +2182,12 @@ interface GitlabNoteEntry {
   author?: { username?: unknown } | null;
   created_at?: unknown;
   system?: unknown;
+  resolved?: unknown;
+}
+
+interface GitlabDiscussionEntry {
+  id?: unknown;
+  notes?: unknown;
 }
 
 /**
@@ -1920,23 +2210,33 @@ export function parseGitlabReviewComments(stdout: string): ReviewCommentsResult 
       message: 'notesの出力を解釈できませんでした（想定外の応答形）',
     };
   }
-  const entries = data as GitlabNoteEntry[];
+  const discussions = data as Array<GitlabNoteEntry | GitlabDiscussionEntry>;
   const result: ReviewComment[] = [];
-  entries.forEach((entry, index) => {
-    if (entry.system === true) {
-      return;
-    }
-    const body = typeof entry.body === 'string' ? entry.body : '';
-    if (body.trim() === '') {
-      return;
-    }
-    const id =
-      typeof entry.id === 'string' || typeof entry.id === 'number'
-        ? `note:${String(entry.id)}`
-        : `note:${String(index)}`;
-    const author = typeof entry.author?.username === 'string' ? entry.author.username : '';
-    const createdAt = typeof entry.created_at === 'string' ? entry.created_at : undefined;
-    result.push(createdAt === undefined ? { id, author, body } : { id, author, body, createdAt });
+  discussions.forEach((discussion, discussionIndex) => {
+    const rawThreadId = (discussion as GitlabDiscussionEntry).id;
+    const threadId = typeof rawThreadId === 'string' ? rawThreadId : undefined;
+    const entries = Array.isArray((discussion as GitlabDiscussionEntry).notes)
+      ? ((discussion as GitlabDiscussionEntry).notes as GitlabNoteEntry[])
+      : [discussion as GitlabNoteEntry];
+    entries.forEach((entry, index) => {
+      if (entry.system === true) return;
+      const body = typeof entry.body === 'string' ? entry.body : '';
+      if (body.trim() === '') return;
+      const id =
+        typeof entry.id === 'string' || typeof entry.id === 'number'
+          ? `note:${String(entry.id)}`
+          : `note:${String(discussionIndex)}:${String(index)}`;
+      const author = typeof entry.author?.username === 'string' ? entry.author.username : '';
+      const createdAt = typeof entry.created_at === 'string' ? entry.created_at : undefined;
+      result.push({
+        id,
+        author,
+        body,
+        ...(createdAt === undefined ? {} : { createdAt }),
+        ...(threadId === undefined ? {} : { threadId }),
+        ...(typeof entry.resolved === 'boolean' ? { resolved: entry.resolved } : {}),
+      });
+    });
   });
   return { ok: true, comments: result };
 }
@@ -1969,6 +2269,163 @@ export async function fetchReviewComments(
   return host === 'github'
     ? parseGithubReviewComments(result.stdout)
     : parseGitlabReviewComments(result.stdout);
+}
+
+/** Forge Hub向けに、返信・解決に必要なthread IDを含むレビューを取得する。 */
+export async function fetchReviewThreads(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  number: number,
+): Promise<ReviewCommentsResult> {
+  if (host === 'gitlab') {
+    const discussions = await cli.run(
+      'glab',
+      ['api', `projects/:id/merge_requests/${String(number)}/discussions`],
+      cwd,
+    );
+    if (discussions.code !== 0) {
+      return {
+        ok: false,
+        comments: [],
+        message: sanitizeForLog(discussions.stderr || 'review discussionsの取得に失敗しました'),
+      };
+    }
+    return parseGitlabReviewComments(discussions.stdout);
+  }
+  const result = await cli.run(
+    'gh',
+    ['pr', 'view', String(number), '--json=reviews,comments,id'],
+    cwd,
+  );
+  if (result.code !== 0) {
+    return {
+      ok: false,
+      comments: [],
+      message: sanitizeForLog(result.stderr || 'レビューの取得に失敗しました'),
+    };
+  }
+  const reviews = parseGithubReviewComments(result.stdout);
+  if (!reviews.ok) return reviews;
+  let pullRequestId: unknown;
+  try {
+    pullRequestId = (JSON.parse(result.stdout) as Record<string, unknown>)['id'];
+  } catch {
+    return reviews;
+  }
+  if (typeof pullRequestId !== 'string' || pullRequestId === '') return reviews;
+  const threads = await cli.run(
+    'gh',
+    [
+      'api',
+      'graphql',
+      '-f',
+      'query=query($id:ID!){node(id:$id){... on PullRequest{reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{id body createdAt author{login}}}}}}}}',
+      '-F',
+      `id=${pullRequestId}`,
+    ],
+    cwd,
+  );
+  if (threads.code !== 0) return reviews;
+  const parsedThreads = parseGithubReviewThreads(threads.stdout);
+  return parsedThreads.ok
+    ? { ok: true, comments: [...reviews.comments, ...parsedThreads.comments] }
+    : reviews;
+}
+
+export type ReviewThreadActionOutcome = { ok: true } | { ok: false; message: string };
+
+function invalidReviewThreadAction(number: number, threadId: string, body?: string): boolean {
+  return (
+    !Number.isSafeInteger(number) ||
+    number <= 0 ||
+    threadId.trim() === '' ||
+    /[\r\n]/u.test(threadId) ||
+    (body !== undefined && body.trim() === '')
+  );
+}
+
+/** レビューのスレッドへ返信する。GitHubはGraphQL、GitLabはDiscussions APIを使う。 */
+export async function replyToReviewThread(
+  deps: CreatePullRequestDeps,
+  request: { host: ForgeHost; cwd: string; number: number; threadId: string; body: string },
+): Promise<ReviewThreadActionOutcome> {
+  if (invalidReviewThreadAction(request.number, request.threadId, request.body)) {
+    return { ok: false, message: 'レビュー返信の入力が不正です。' };
+  }
+  if (request.host === 'github') {
+    const result = await deps.cli.run(
+      'gh',
+      [
+        'api',
+        'graphql',
+        '-f',
+        'query=mutation($threadId:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}){comment{id}}}',
+        '-F',
+        `threadId=${request.threadId}`,
+        '-F',
+        `body=${request.body}`,
+      ],
+      request.cwd,
+    );
+    return result.code === 0
+      ? { ok: true }
+      : { ok: false, message: sanitizeForLog(result.stderr || 'レビュー返信に失敗しました。') };
+  }
+  const bodyFilePath = await deps.fs.writeTempFile(request.body);
+  try {
+    const result = await deps.cli.run(
+      'glab',
+      [
+        'api',
+        `projects/:id/merge_requests/${String(request.number)}/discussions/${request.threadId}/notes`,
+        `--field=body=@${bodyFilePath}`,
+      ],
+      request.cwd,
+    );
+    return result.code === 0
+      ? { ok: true }
+      : { ok: false, message: sanitizeForLog(result.stderr || 'レビュー返信に失敗しました。') };
+  } finally {
+    await deps.fs.removeTempFile(bodyFilePath);
+  }
+}
+
+/** レビューのスレッドを解決済みにする。呼び出し側で必ず確認を取る。 */
+export async function resolveReviewThread(
+  cli: CliCommandRunner,
+  request: { host: ForgeHost; cwd: string; number: number; threadId: string },
+): Promise<ReviewThreadActionOutcome> {
+  if (invalidReviewThreadAction(request.number, request.threadId)) {
+    return { ok: false, message: 'レビュー解決の入力が不正です。' };
+  }
+  const result =
+    request.host === 'github'
+      ? await cli.run(
+          'gh',
+          [
+            'api',
+            'graphql',
+            '-f',
+            'query=mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}}',
+            '-F',
+            `threadId=${request.threadId}`,
+          ],
+          request.cwd,
+        )
+      : await cli.run(
+          'glab',
+          [
+            'api',
+            '--method=PUT',
+            `projects/:id/merge_requests/${String(request.number)}/discussions/${request.threadId}`,
+            '--field=resolved=true',
+          ],
+          request.cwd,
+        );
+  return result.code === 0
+    ? { ok: true }
+    : { ok: false, message: sanitizeForLog(result.stderr || 'レビュー解決に失敗しました。') };
 }
 
 /**
