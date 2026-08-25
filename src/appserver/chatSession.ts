@@ -62,7 +62,7 @@ const AUTO_APPROVAL_REVIEW_COMPLETED = 'item/autoApprovalReview/completed';
  *   指示文で明示する」に対応）
  */
 export const RECAP_INSTRUCTION =
-  'The user stepped away and is coming back. Recap this conversation in under 40 words, ' +
+  'The user stepped away and is coming back. Recap this conversation concisely; aim for under 40 words, but exceed that when needed to preserve important context. ' +
   '1-2 plain sentences, no markdown. Lead with the overall goal and current task. ' +
   'Reply in the same language the conversation has been using so far.';
 
