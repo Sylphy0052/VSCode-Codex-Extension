@@ -1465,9 +1465,10 @@ export class ClaudeChatViewManager
       if (type === 'openUrl' && typeof m['url'] === 'string') {
         // Markdownのfile: URI・相対パスは会話の作業ディレクトリから開く。
         // それ以外のhttp(s) URLだけが従来どおり外部ブラウザへ渡る。
-        void openChatFileLink(m['url'], entry.cwd).then((opened) => {
-          if (!opened && isOpenableSearchUrl(m['url'])) {
-            void vscode.env.openExternal(vscode.Uri.parse(m['url']));
+        const url = m['url'];
+        void openChatFileLink(url, entry.cwd).then((opened) => {
+          if (!opened && isOpenableSearchUrl(url)) {
+            void vscode.env.openExternal(vscode.Uri.parse(url));
           }
         });
         return;
