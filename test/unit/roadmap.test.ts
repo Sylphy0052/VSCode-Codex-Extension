@@ -3,6 +3,7 @@ import { initialChatState, type ChatState } from '../../src/appserver/chatState'
 import type { LoopPlan, LoopStopReason } from '../../src/loop/loopController';
 import type { Logger } from '../../src/log';
 import {
+  applyRoadmapIssueNumbers,
   applyRunCompletion,
   applyRunCompletionToFile,
   withRoadmapReference,
@@ -1427,6 +1428,51 @@ describe('generateRoadmap', () => {
     }
   });
 
+  it('未紐付け項目のIssue番号を反映してから保存する', async () => {
+    const d = deps({
+      issueCreation: {
+        createIssues: async () => ({ ok: true, issues: new Map([['R3', 103]]) }),
+      },
+    });
+    const result = await generateRoadmap(d, {
+      goal: '認証機能を追加する',
+      workspaceRoot: '/repo',
+      roadmapDir: 'docs/roadmap',
+      workspaceSummary: [],
+      hasAgentsFile: false,
+      hasClaudeFile: false,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const items = result.parsed.phases[0]?.items;
+      expect(items?.map((item) => item.issue)).toEqual([12, 13, 103]);
+      expect(await d.fs.readTextFile(result.path)).toContain('- Issue: #103');
+    }
+  });
+
+  it('Issue起票に失敗した場合はロードマップを保存しない', async () => {
+    let writeCount = 0;
+    const d = deps({
+      fs: {
+        writeTextFile: async () => {
+          writeCount += 1;
+        },
+        readTextFile: async () => undefined,
+      },
+      issueCreation: { createIssues: async () => ({ ok: false, message: '認証が必要です' }) },
+    });
+    const result = await generateRoadmap(d, {
+      goal: '認証機能を追加する',
+      workspaceRoot: '/repo',
+      roadmapDir: 'docs/roadmap',
+      workspaceSummary: [],
+      hasAgentsFile: false,
+      hasClaudeFile: false,
+    });
+    expect(result.ok).toBe(false);
+    expect(writeCount).toBe(0);
+  });
+
   it(
     'slugが省略された場合、既定値はplanner.ts側へ一本化したslugifyGoalで作られ、' +
       '上限は40文字になる（一本化前は60文字だった。Issue #408）',
@@ -1493,6 +1539,24 @@ describe('generateRoadmap', () => {
       expect(result.reason).toBe('generationFailed');
       expect(result.message).toBe('timeout');
     }
+  });
+});
+
+describe('applyRoadmapIssueNumbers', () => {
+  it('Issue行を追加または置換し、依存行の後へ置く', () => {
+    const markdown =
+      '# g\n\n## Phase 1\n\n- [ ] R1 a\n  - 依存: なし\n- [ ] R2 b\n  - Issue: 未起票\n';
+    expect(
+      applyRoadmapIssueNumbers(
+        markdown,
+        new Map([
+          ['R1', 10],
+          ['R2', 20],
+        ]),
+      ),
+    ).toBe(
+      '# g\n\n## Phase 1\n\n- [ ] R1 a\n  - 依存: なし\n  - Issue: #10\n- [ ] R2 b\n  - Issue: #20\n',
+    );
   });
 });
 
