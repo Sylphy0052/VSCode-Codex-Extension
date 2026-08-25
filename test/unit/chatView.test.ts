@@ -217,7 +217,7 @@ describe('チャット下部の3段固定（issue #234）', () => {
       }
     });
 
-    it('2段目（composerIconRow）は15個の操作を持ち、入力欄・送信・中断は含まない', () => {
+    it('2段目（composerIconRow）は16個の操作を持ち、入力欄・送信・中断は含まない', () => {
       const html = renderShell(fakeWebview() as never, buildOptions());
       const row2 = extractRowHtml(html, 'composerIconRow');
 
@@ -461,7 +461,7 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
     }
   });
 
-  it('composerButtonsに15個すべてを指定すると「…」メニューは空になり、入れ物（#composerOverflow）自体がhiddenになる', () => {
+  it('composerButtonsに16個すべてを指定すると「…」メニューは空になり、入れ物（#composerOverflow）自体がhiddenになる', () => {
     const html = renderShell(
       fakeWebview() as never,
       buildOptions({
@@ -479,6 +479,7 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
           'teamWorkflow',
           'workflowView',
           'sessionKanban',
+          'forgeHub',
           'openProgress',
           'handoffToNewSession',
         ],
@@ -490,7 +491,7 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
     expect(overflowTag).toContain('hidden');
   });
 
-  it('composerButtonsが空配列だと15個すべてが「…」メニューに入り、#composerOverflowはhiddenを持たない', () => {
+  it('composerButtonsが空配列だと16個すべてが「…」メニューに入り、#composerOverflowはhiddenを持たない', () => {
     const html = renderShell(fakeWebview() as never, buildOptions({ composerButtons: [] }));
 
     const overflowTag = html.match(/<div id="composerOverflow"[^>]*>/u)?.[0];

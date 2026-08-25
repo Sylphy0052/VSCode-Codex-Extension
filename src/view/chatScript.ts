@@ -2536,6 +2536,9 @@ export function chatScript(
   el('sessionKanban').addEventListener('click', () =>
     vscode.postMessage({ type: 'sessionKanban' }),
   );
+  el('forgeHub').addEventListener('click', () =>
+    vscode.postMessage({ type: 'forgeHub' }),
+  );
   el('openProgress').addEventListener('click', () =>
     vscode.postMessage({ type: 'openProgress' }),
   );
