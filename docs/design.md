@@ -5920,7 +5920,10 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 - `doneNotObservable`: `done` が外から（ファイルの有無・テストの合否等で）機械的に判定できる条件か
 - `goalMismatch`: ゴールに対してタスクが過不足なく分解されているか
 
-結果は**保存時の警告**として出すだけで、**自動では直さない**。指針違反があってもワークフロー定義の保存そのものは妨げない。
+指摘があれば、別の読み取り専用修正セッションへ現在のYAMLと指摘を渡し、修正したYAMLを
+既存の構文検証へ通してから再レビューする。修正セッションがファイルを書き換える権限は持たず、
+保存済みファイルへの反映は拡張側だけが行う。利用者が開いたYAMLを編集していた場合は競合として
+自動反映を止める。無限な往復を避けるため修正は最大3回とし、上限後に残る指摘は警告として表示する。
 
 #### どちらの生成経路も通る
 
@@ -5931,11 +5934,12 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 1. `handlePlanSuccess`が`writeUniqueWorkflowFile`でYAMLをファイルへ書き込む（**保存が先**）
 2. 保存直後、`securityWarnings`だけを渡して`WorkflowViewManager.previewDefinition`を呼び、エディタも開く（**レビューの完了を待たない**）
 3. その後を追いかけて（`await`せず）`reviewWorkflowPlan`を呼ぶ（`vscode.window.withProgress`で「ワークフローをレビューしています…」の進捗を出す。§16.9の生成そのものと同じ流儀）
-4. 指摘が見つかった時点で、`securityWarnings`と`review.findings`の両方を渡して`previewDefinition`をもう一度呼び（同じ`defPath`へのスナップショット差し替えなので安全に上書きされる）、`vscode.window.showWarningMessage`でも知らせる。指摘が0件ならこの手順は何もしない
+4. 指摘があれば`reviseWorkflowPlan`が別の読み取り専用セッションでYAMLだけを返す。既存の抽出・テンプレート参照修復・provider補完・構文検証を通った場合だけ、拡張側が開いているエディタ本文が保存直後のYAMLと一致することを確認して置換・保存する。未保存編集または保存失敗なら反映しない
+5. 修正済みYAMLを再レビューし、指摘が無くなるまで4.〜5.を繰り返す。指摘なしで完了したときは、修正回数とともに`[planner] ワークフローのレビューが完了しました…`をOutputへ`info`ログとして残す。修正は最大3回で打ち切り、残った指摘は`securityWarnings`とともに`previewDefinition`へ表示して利用者へ知らせる
 
 2.と3.の間に`await`を挟まない設計にした理由は、レビューが`PLANNER_TURN_TIMEOUT_MS`（既定5分）までかかりうるため、完了を待ってから表示すると「保存は妨げない」という受入基準の実質（人がすぐ結果を見られる）を損なうため。3.〜4.は`handlePlanSuccess`本体からは`await`されない`void`な即時実行関数（IIFE）の中で走る——本体は既に`resolve`済みのため、この中で例外を投げても受け取る呼び出し元がどこにも無く、未処理rejectになる。`reviewWorkflowPlan`自体は例外を投げず`findings: []`と`error`を返す設計だが、**IIFEの中には`vscode.window.withProgress`・`previewDefinition`・`showWarningMessage`という他の呼び出しもあり、これらは投げうる**（拡張のdeactivate中やViewパネル破棄後の呼び出し等）。そのため`reviewWorkflowPlan`が例外を投げないことだけを根拠にIIFEを無防備にはできない——**IIFE全体を`try/catch`で囲み、catchでは`log.warn`（`sanitizeForLog`を通す）に留めて表示済みの内容や保存済みファイルへは波及させない**。design.md §16.25 確認事項3の裏返しで、保存という「本番の効果」が先に確定してから、失敗しうるレビューを後に置く順序そのものが安全側になる、という設計意図自体は変わらない。
 
-なお、指摘到着時に呼び直す`previewDefinition`はViewパネルの現在の表示（`activeRunId`）を無条件にプレビューへ戻す。ユーザーがレビュー完了前に別のrunの表示へ切り替えていた場合、その表示がレビュー到着で差し替わりうる（フォーカスは奪わない）。この取り回しはW3の受入基準の対象外として許容している。
+なお、指摘到着時および修正回ごとに呼び直す`previewDefinition`はViewパネルの現在の表示（`activeRunId`）を無条件にプレビューへ戻す。ユーザーがレビュー完了前に別のrunの表示へ切り替えていた場合、その表示がレビュー到着で差し替わりうる（フォーカスは奪わない）。この取り回しはW3の受入基準の対象外として許容している。
 
 #### 権限の与え方（読み取り専用であることの担保）
 
@@ -5953,7 +5957,7 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 
 レビューセッションへ渡すゴール文とレビュー対象のYAMLは、どちらも外部由来テキストとして`untrustedText.ts`の`formatUntrusted`で囲う（§16.24、Issue #369）。**1回のプロンプトの中で2つのフィールド（`goal`と`workflow`）を囲むため、`expandTemplate`と同じ流儀で呼び出し側が1つの`nonce`を生成し、両方へ明示的に渡す**（`buildWorkflowReviewPrompt`）。ゴール文の長さ上限は§16.9の分解プロンプトと同じ`MAX_GOAL_LENGTH`を共有し、YAMLの埋め込みは`messaging.ts`の`MAX_COMPOSED_PROMPT_LENGTH`（§16.21）と同じ動機・同じ値（60000文字）の上限を新たに設けた（`MAX_REVIEW_YAML_LENGTH`）。
 
-レビューセッションの応答（JSON配列）も、モデルが自由記述で生成した文字列である。指摘の`message`は`sanitizeInlineText`（§16.24）を通してから警告欄・ログへ渡す。応答がJSONとして解釈できない・期待した形でない場合は、**エラーにせず指摘0件として扱う**（`parseReviewFindings`）。レビューは警告を足すだけの機能であり、応答の形が崩れたことをもってワークフロー定義の保存を失敗させてはならないため。
+レビューセッションの応答（JSON配列）も、モデルが自由記述で生成した文字列である。指摘の`message`は`sanitizeInlineText`（§16.24）を通してから警告欄・ログへ渡す。応答がJSONとして解釈できない・配列でない場合は、**指摘0件＝レビュー通過とは扱わない**（`parseReviewFindings`）。生成済みYAMLは維持したまま自動修正を中止し、失敗を利用者へ知らせる。壊れた応答を通過として扱うと、レビュー済みという誤った完了表示になるためである。
 
 #### 応答形式
 
