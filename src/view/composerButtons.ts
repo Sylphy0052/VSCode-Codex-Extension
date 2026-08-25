@@ -19,6 +19,7 @@ export const COMPOSER_BUTTON_IDS = [
   'workflowMenu',
   'teamWorkflow',
   'workflowView',
+  'sessionKanban',
   'openProgress',
   'handoffToNewSession',
 ] as const;

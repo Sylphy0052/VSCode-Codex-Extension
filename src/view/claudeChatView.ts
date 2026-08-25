@@ -1575,6 +1575,10 @@ export class ClaudeChatViewManager
         void vscode.commands.executeCommand('agent.workflows.view');
         return;
       }
+      if (type === 'sessionKanban') {
+        void vscode.commands.executeCommand('agent.sessionKanban');
+        return;
+      }
       if (type === 'openProgress') {
         void vscode.commands.executeCommand('agent.openProgress');
         return;

@@ -667,7 +667,7 @@ describe('ChatViewManager', () => {
       return buttonIndex > menuOpenIndex;
     }
 
-    it('設定を読んでいなければCodex側の実描画でも既定4つ（attach/loopToggle/compact/claudeImport）が表に残り、残り10個はメニューへ畳まれる', async () => {
+    it('設定を読んでいなければCodex側の実描画でも既定4つ（attach/loopToggle/compact/claudeImport）が表に残り、残り11個はメニューへ畳まれる', async () => {
       const { manager, connection } = createManager();
       const p = manager.openNew();
       await tick();
@@ -687,6 +687,7 @@ describe('ChatViewManager', () => {
         'workflowMenu',
         'teamWorkflow',
         'workflowView',
+        'sessionKanban',
         'openProgress',
         'handoffToNewSession',
       ]) {
@@ -1325,7 +1326,7 @@ describe('ChatViewManager', () => {
       expect(__mock.executedCommands).toContain('agent.workflows.team');
     });
 
-    it('三点メニューのワークフローViewからagent.workflows.viewを実行する', async () => {
+  it('三点メニューのワークフローViewからagent.workflows.viewを実行する', async () => {
       const { manager, connection } = createManager();
       const p = manager.openNew('/workspace/root');
       await tick();
@@ -1352,6 +1353,19 @@ describe('ChatViewManager', () => {
 
       expect(connection.requests.find((r) => r.method === 'turn/start')).toBeUndefined();
     });
+  });
+
+  it('三点メニューのセッションカンバンからagent.sessionKanbanを実行する', async () => {
+    const { manager, connection } = createManager();
+    const opened = manager.openNew();
+    await tick();
+    connection.resolveFirst('thread/start', threadStartResult('thread-session-kanban'));
+    await opened;
+
+    __mock.lastCreatedPanel()?.webview.simulateMessage({ type: 'sessionKanban' });
+    await tick();
+
+    expect(__mock.executedCommands).toContain('agent.sessionKanban');
   });
 
   describe('タブ名の状態表示（issue #286、design.md §14.55）', () => {
