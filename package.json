@@ -143,16 +143,6 @@
           "group": "navigation@102"
         },
         {
-          "command": "codex.handoffToNewSession",
-          "when": "activeWebviewPanelId == codex.chat",
-          "group": "navigation@103"
-        },
-        {
-          "command": "agent.openProgress",
-          "when": "activeWebviewPanelId == codex.chat",
-          "group": "navigation@104"
-        },
-        {
           "command": "claude.newChat",
           "when": "activeWebviewPanelId == claude.chat",
           "group": "navigation@101"
@@ -161,16 +151,6 @@
           "command": "claude.clearChat",
           "when": "activeWebviewPanelId == claude.chat",
           "group": "navigation@102"
-        },
-        {
-          "command": "claude.handoffToNewSession",
-          "when": "activeWebviewPanelId == claude.chat",
-          "group": "navigation@103"
-        },
-        {
-          "command": "agent.openProgress",
-          "when": "activeWebviewPanelId == claude.chat",
-          "group": "navigation@104"
         }
       ],
       "editor/context": [
@@ -755,6 +735,7 @@
               "workflowMenu",
               "teamWorkflow",
               "workflowView",
+              "sessionKanban",
               "openProgress",
               "handoffToNewSession"
             ],
@@ -771,6 +752,7 @@
               "ワークフローの実行・View・生成・停止を選ぶ",
               "チームモードのワークフローを作成する",
               "ワークフローViewを開く",
+              "このワークスペースで開いている会話を状態別に表示する",
               "このセッションの進捗を別タブで表示する",
               "この会話を新しいセッションへ引き継ぐ"
             ]

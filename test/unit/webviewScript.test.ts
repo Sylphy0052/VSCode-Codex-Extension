@@ -126,13 +126,14 @@ describe('chatScript', () => {
     );
   });
 
-  it('ワークフロー・進捗・引き継ぎのボタンがメッセージを送る', () => {
+  it('ワークフロー・カンバン・進捗・引き継ぎのボタンがメッセージを送る', () => {
     const source = chatScript('Codex', { mode: 'quickPick' });
 
     for (const id of [
       'workflowMenu',
       'teamWorkflow',
       'workflowView',
+      'sessionKanban',
       'openProgress',
       'handoffToNewSession',
     ]) {

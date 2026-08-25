@@ -456,7 +456,7 @@ describe('ClaudeChatViewManager', () => {
       return buttonIndex > menuOpenIndex;
     }
 
-    it('設定を読んでいなければClaude Code側の実描画でも既定4つ（attach/loopToggle/compact/claudeImport）が表に残り、残り10個はメニューへ畳まれる', async () => {
+    it('設定を読んでいなければClaude Code側の実描画でも既定4つ（attach/loopToggle/compact/claudeImport）が表に残り、残り11個はメニューへ畳まれる', async () => {
       stubStart();
       const { manager } = createManager();
 
@@ -475,6 +475,7 @@ describe('ClaudeChatViewManager', () => {
         'workflowMenu',
         'teamWorkflow',
         'workflowView',
+        'sessionKanban',
         'openProgress',
         'handoffToNewSession',
       ]) {
@@ -1937,6 +1938,17 @@ describe('ワークフローの導線（issue #250）', () => {
     await flush();
 
     expect(__mock.executedCommands).toContain('agent.workflows.view');
+  });
+
+  it('三点メニューのセッションカンバンからagent.sessionKanbanを実行する', async () => {
+    stubStart();
+    const { manager } = createManager();
+    await manager.openNew();
+
+    __mock.lastCreatedPanel()?.webview.simulateMessage({ type: 'sessionKanban' });
+    await flush();
+
+    expect(__mock.executedCommands).toContain('agent.sessionKanban');
   });
 
   it('セッションが起動していなくてもエラーにしない（会話と独立した操作のため）', async () => {

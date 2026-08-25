@@ -2533,6 +2533,9 @@ export function chatScript(
   el('workflowView').addEventListener('click', () =>
     vscode.postMessage({ type: 'workflowView' }),
   );
+  el('sessionKanban').addEventListener('click', () =>
+    vscode.postMessage({ type: 'sessionKanban' }),
+  );
   el('openProgress').addEventListener('click', () =>
     vscode.postMessage({ type: 'openProgress' }),
   );
