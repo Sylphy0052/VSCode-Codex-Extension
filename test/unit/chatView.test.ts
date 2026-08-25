@@ -196,6 +196,10 @@ const ICON_ROW_BUTTON_IDS = [
   'review',
   'exportTranscript',
   'workflowMenu',
+  'teamWorkflow',
+  'workflowView',
+  'openProgress',
+  'handoffToNewSession',
 ];
 
 describe('チャット下部の3段固定（issue #234）', () => {
@@ -212,7 +216,7 @@ describe('チャット下部の3段固定（issue #234）', () => {
       }
     });
 
-    it('2段目（composerIconRow）は画像/ループ/圧縮/インポート/要約/計画/高速/レビュー/エクスポート/ワークフローの10個を持ち、入力欄・送信・中断は含まない', () => {
+    it('2段目（composerIconRow）は14個の操作を持ち、入力欄・送信・中断は含まない', () => {
       const html = renderShell(fakeWebview() as never, buildOptions());
       const row2 = extractRowHtml(html, 'composerIconRow');
 
@@ -405,7 +409,7 @@ function isInOverflowMenu(html: string, id: string): boolean {
 }
 
 describe('入力欄アイコン列の「…」メニュー折りたたみ（issue #296）', () => {
-  it('composerButtons省略時は既定の4つ（attach/loopToggle/compact/claudeImport）が表、残り6つが「…」メニューに入る', () => {
+  it('composerButtons省略時は既定の4つ（attach/loopToggle/compact/claudeImport）が表、残り10個が「…」メニューに入る', () => {
     const html = renderShell(fakeWebview() as never, buildOptions({ showImport: true }));
 
     for (const id of ['attach', 'loopToggle', 'compact', 'claudeImport']) {
@@ -418,6 +422,10 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
       'review',
       'exportTranscript',
       'workflowMenu',
+      'teamWorkflow',
+      'workflowView',
+      'openProgress',
+      'handoffToNewSession',
     ]) {
       expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
     }
@@ -441,12 +449,16 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
       'planToggle',
       'fastToggle',
       'exportTranscript',
+      'teamWorkflow',
+      'workflowView',
+      'openProgress',
+      'handoffToNewSession',
     ]) {
       expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
     }
   });
 
-  it('composerButtonsに10個すべてを指定すると「…」メニューは空になり、入れ物（#composerOverflow）自体がhiddenになる', () => {
+  it('composerButtonsに14個すべてを指定すると「…」メニューは空になり、入れ物（#composerOverflow）自体がhiddenになる', () => {
     const html = renderShell(
       fakeWebview() as never,
       buildOptions({
@@ -461,6 +473,10 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
           'review',
           'exportTranscript',
           'workflowMenu',
+          'teamWorkflow',
+          'workflowView',
+          'openProgress',
+          'handoffToNewSession',
         ],
       }),
     );
@@ -470,7 +486,7 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
     expect(overflowTag).toContain('hidden');
   });
 
-  it('composerButtonsが空配列だと10個すべてが「…」メニューに入り、#composerOverflowはhiddenを持たない', () => {
+  it('composerButtonsが空配列だと14個すべてが「…」メニューに入り、#composerOverflowはhiddenを持たない', () => {
     const html = renderShell(fakeWebview() as never, buildOptions({ composerButtons: [] }));
 
     const overflowTag = html.match(/<div id="composerOverflow"[^>]*>/u)?.[0];

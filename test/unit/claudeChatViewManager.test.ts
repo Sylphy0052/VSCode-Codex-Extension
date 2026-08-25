@@ -456,7 +456,7 @@ describe('ClaudeChatViewManager', () => {
       return buttonIndex > menuOpenIndex;
     }
 
-    it('設定を読んでいなければClaude Code側の実描画でも既定4つ（attach/loopToggle/compact/claudeImport）が表に残り、残り6つはメニューへ畳まれる', async () => {
+    it('設定を読んでいなければClaude Code側の実描画でも既定4つ（attach/loopToggle/compact/claudeImport）が表に残り、残り10個はメニューへ畳まれる', async () => {
       stubStart();
       const { manager } = createManager();
 
@@ -473,6 +473,10 @@ describe('ClaudeChatViewManager', () => {
         'review',
         'exportTranscript',
         'workflowMenu',
+        'teamWorkflow',
+        'workflowView',
+        'openProgress',
+        'handoffToNewSession',
       ]) {
         expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
       }
@@ -1909,6 +1913,30 @@ describe('ワークフローの導線（issue #250）', () => {
     await flush();
 
     expect(__mock.executedCommands).toContain('agent.workflows.menu');
+  });
+
+  it('三点メニューのチームモード開始からagent.workflows.teamを実行する', async () => {
+    stubStart();
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const panel = __mock.lastCreatedPanel();
+
+    panel?.webview.simulateMessage({ type: 'teamWorkflow' });
+    await flush();
+
+    expect(__mock.executedCommands).toContain('agent.workflows.team');
+  });
+
+  it('三点メニューのワークフローViewからagent.workflows.viewを実行する', async () => {
+    stubStart();
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const panel = __mock.lastCreatedPanel();
+
+    panel?.webview.simulateMessage({ type: 'workflowView' });
+    await flush();
+
+    expect(__mock.executedCommands).toContain('agent.workflows.view');
   });
 
   it('セッションが起動していなくてもエラーにしない（会話と独立した操作のため）', async () => {

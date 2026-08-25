@@ -2527,6 +2527,18 @@ export function chatScript(
   el('workflowMenu').addEventListener('click', () =>
     vscode.postMessage({ type: 'workflowMenu' }),
   );
+  el('teamWorkflow').addEventListener('click', () =>
+    vscode.postMessage({ type: 'teamWorkflow' }),
+  );
+  el('workflowView').addEventListener('click', () =>
+    vscode.postMessage({ type: 'workflowView' }),
+  );
+  el('openProgress').addEventListener('click', () =>
+    vscode.postMessage({ type: 'openProgress' }),
+  );
+  el('handoffToNewSession').addEventListener('click', () =>
+    vscode.postMessage({ type: 'handoffToNewSession' }),
+  );
 
   /**
    * アイコン列の「…」メニューの開閉（issue #296）。畳んだボタンはcomposerIconRowの
@@ -2550,7 +2562,26 @@ export function chatScript(
     if (focusToggle) composerOverflowToggle.focus();
   }
 
+  /**
+   * 「…」の上下でより広い側へ開き、表示可能な高さだけをメニューのスクロール領域にする。
+   * 入力欄が画面下部にあっても、項目数が増えて画面外へ伸びないようにする。
+   */
+  function positionOverflowMenu() {
+    const rect = composerOverflowToggle.getBoundingClientRect();
+    const gap = 8;
+    const above = Math.max(0, rect.top - gap);
+    const below = Math.max(0, window.innerHeight - rect.bottom - gap);
+    const openUpward = above >= below;
+
+    composerOverflowMenu.style.top = openUpward ? 'auto' : '100%';
+    composerOverflowMenu.style.bottom = openUpward ? '100%' : 'auto';
+    composerOverflowMenu.style.marginTop = openUpward ? '0' : '4px';
+    composerOverflowMenu.style.marginBottom = openUpward ? '4px' : '0';
+    composerOverflowMenu.style.maxHeight = Math.max(0, openUpward ? above : below) + 'px';
+  }
+
   function openOverflowMenu() {
+    positionOverflowMenu();
     composerOverflowMenu.hidden = false;
     composerOverflowToggle.setAttribute('aria-expanded', 'true');
     const items = overflowMenuItems();
@@ -2609,6 +2640,10 @@ export function chatScript(
     if (!composerOverflowMenu.hidden && !composerOverflow.contains(e.target)) {
       closeOverflowMenu(false);
     }
+  });
+
+  window.addEventListener('resize', () => {
+    if (!composerOverflowMenu.hidden) positionOverflowMenu();
   });
 
   el('attach').addEventListener('click', () => el('filePicker').click());

@@ -949,6 +949,22 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         await vscode.commands.executeCommand('agent.workflows.menu', 'codex');
         return;
       }
+      if (type === 'teamWorkflow') {
+        await vscode.commands.executeCommand('agent.workflows.team', 'codex');
+        return;
+      }
+      if (type === 'workflowView') {
+        await vscode.commands.executeCommand('agent.workflows.view');
+        return;
+      }
+      if (type === 'openProgress') {
+        await vscode.commands.executeCommand('agent.openProgress');
+        return;
+      }
+      if (type === 'handoffToNewSession') {
+        await this.handoffToNewSession();
+        return;
+      }
       if (type === 'cancelQueued' && typeof m['index'] === 'number') {
         entry.session.cancelQueued(m['index']);
         return;

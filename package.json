@@ -86,6 +86,11 @@
           "group": "navigation@5"
         },
         {
+          "command": "agent.workflows.team",
+          "when": "view == codex.sessions",
+          "group": "navigation@5.1"
+        },
+        {
           "command": "codex.filterSessions",
           "when": "view == codex.sessions",
           "group": "navigation@6"
@@ -525,7 +530,8 @@
       {
         "command": "agent.workflows.team",
         "title": "チームモードを開始…",
-        "category": "Agent"
+        "category": "Agent",
+        "icon": "$(organization)"
       },
       {
         "command": "agent.sendSelectionToChat",
@@ -735,7 +741,11 @@
               "fastToggle",
               "review",
               "exportTranscript",
-              "workflowMenu"
+              "workflowMenu",
+              "teamWorkflow",
+              "workflowView",
+              "openProgress",
+              "handoffToNewSession"
             ],
             "enumDescriptions": [
               "画像を添付する",
@@ -747,7 +757,11 @@
               "高速モード（Fast mode）を切り替える",
               "コードレビューを実行する",
               "会話全体をMarkdownとして取り出す（エクスポート）",
-              "ワークフローの実行・View・生成・停止を選ぶ"
+              "ワークフローの実行・View・生成・停止を選ぶ",
+              "チームモードのワークフローを作成する",
+              "ワークフローViewを開く",
+              "このセッションの進捗を別タブで表示する",
+              "この会話を新しいセッションへ引き継ぐ"
             ]
           },
           "default": [
