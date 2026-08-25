@@ -1371,7 +1371,12 @@ export function createTaskSessionRoadmapGenerationPort(
             };
           },
         );
-        return { ok: true, text, dispose, reportFailure };
+        return {
+          ok: true,
+          text,
+          ...(dispose !== undefined ? { dispose } : {}),
+          ...(reportFailure !== undefined ? { reportFailure } : {}),
+        };
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         return { ok: false, message: `ロードマップ生成セッションが失敗しました: ${message}` };
