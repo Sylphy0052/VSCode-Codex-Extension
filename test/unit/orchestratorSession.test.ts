@@ -60,22 +60,22 @@ describe('オーケストレーターセッション（design.md §16.23）', ()
   });
 
   describe('権限（design.md §16.23「権限」）', () => {
-    it('Codexでは read-only / on-request / autoApprove無効へ落ちる', () => {
+    it('Codexでは read-only / on-request、無人実行が明示されればautoApprove有効へ落ちる', () => {
       const effective = buildOrchestratorConfig('codex', LOOSE_BASELINE);
 
       expect(effective.sandbox).toBe('read-only');
       expect(effective.config.approvalMode).toBe('on-request');
-      expect(effective.autoApprove).toBe(false);
+      expect(effective.autoApprove).toBe(true);
       // モデルとeffortは拡張機能の既定に委ねる
       expect(effective.config.model).toBe('');
       expect(effective.config.effort).toBe('');
     });
 
-    it('Claudeでは manual（読み取りのみ）へ落ちる', () => {
+    it('Claudeでは manual（読み取りのみ）へ落ち、無人実行が明示されればautoApprove有効になる', () => {
       const effective = buildOrchestratorConfig('claude', LOOSE_BASELINE);
 
       expect(effective.config.approvalMode).toBe('manual');
-      expect(effective.autoApprove).toBe(false);
+      expect(effective.autoApprove).toBe(true);
     });
 
     it('拡張機能側の設定のほうが厳しければ、そちらが勝つ（クランプの不変条件）', () => {
@@ -88,6 +88,7 @@ describe('オーケストレーターセッション（design.md §16.23）', ()
       const effective = buildOrchestratorConfig('claude', strict);
 
       expect(effective.config.approvalMode).toBe('plan');
+      expect(effective.autoApprove).toBe(false);
     });
   });
 

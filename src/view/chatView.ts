@@ -5,6 +5,7 @@ import {
   defaultDenyResponse,
   describeApproval,
   isApprovalDecision,
+  SERVER_REQUEST_METHODS,
 } from '../appserver/approvals';
 import { isOpenableSearchUrl, type ChatItem, type ChatState } from '../appserver/chatState';
 import { ChatSession } from '../appserver/chatSession';
@@ -41,6 +42,7 @@ import type { PromptSubmission } from '../appserver/prompts';
 import { MESSAGING_MCP_SERVER_NAME } from '../orchestrator/messaging';
 import type {
   ApprovalHandler,
+  McpElicitationHandler,
   TaskSession,
   TaskSessionHost,
   TaskSessionInput,
@@ -142,6 +144,8 @@ interface ChatPanel extends BaseChatPanel {
   wasLoopRunning: boolean;
   /** `setApprovalHandler` で差し込まれた自動判定。未設定なら従来通り必ず承認カードを出す。 */
   approvalHandler: ApprovalHandler | undefined;
+  /** ワークフローの無人実行時に、許可済みMCPツールのelicitationだけを通す。 */
+  mcpElicitationHandler: McpElicitationHandler | undefined;
   /**
    * `setPromptTransform` で差し込まれた本文変換。実際の送信直前に適用する
    * （design.md §16.4のテンプレート展開）。未設定ならそのまま送る。
@@ -598,6 +602,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       wasBusy: false,
       wasLoopRunning: false,
       approvalHandler: undefined,
+      mcpElicitationHandler: undefined,
       promptTransform: undefined,
       stateListeners: [],
       finishedListeners: [],
@@ -687,6 +692,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       onStateChanged: (listener) => entry.stateListeners.push(listener),
       setApprovalHandler: (handler) => {
         entry.approvalHandler = handler;
+      },
+      setMcpElicitationHandler: (handler) => {
+        entry.mcpElicitationHandler = handler;
       },
       onApprovalResolved: (listener) => entry.approvalResolvedListeners.push(listener),
       interrupt: () => entry.session.interrupt(),
@@ -1571,6 +1579,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         }
         // ask: 従来どおり承認カードを出して人を待つ
       }
+    }
+    if (
+      request.method === SERVER_REQUEST_METHODS.elicitation &&
+      target.mcpElicitationHandler?.(request.params)
+    ) {
+      this.log.info('MCP elicitationを自動許可しました');
+      return { action: 'accept', content: {} };
     }
     return target.session.requestApproval(request);
   }

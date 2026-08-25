@@ -1,6 +1,7 @@
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { ChatState } from '../appserver/chatState';
 import {
+  MESSAGING_MCP_SERVER_NAME,
   MAX_MESSAGE_BODY_LENGTH,
   type OrchestratorControlPort,
   type OrchestratorControlResult,
@@ -51,6 +52,20 @@ import {
  */
 export interface OrchestratorResumeContext {
   pendingAskUser?: { question: string; choices: readonly string[]; askedAt: string };
+}
+
+const AUTO_APPROVED_ORCHESTRATOR_READ_TOOLS = new Set(['list_tasks', 'get_run_status']);
+
+/**
+ * task-messagingの読み取り専用ツールを呼ぶ前だけ、MCPのelicitationを自動許可する。
+ * 状態変更を伴う制御ツールや別サーバからの問いは、無人実行時でも従来どおり人へ回す。
+ */
+export function shouldAutoApproveOrchestratorElicitation(params: Record<string, unknown>): boolean {
+  if (params['serverName'] !== MESSAGING_MCP_SERVER_NAME || typeof params['message'] !== 'string') {
+    return false;
+  }
+  const match = /run tool "([^"]+)"\?$/.exec(params['message']);
+  return match !== null && AUTO_APPROVED_ORCHESTRATOR_READ_TOOLS.has(match[1] ?? '');
 }
 
 /** run開始時にオーケストレーターへ渡す、役割と道具の説明。 */
@@ -1002,6 +1017,13 @@ export async function setupOrchestratorForStart(
       sandbox: effective.sandbox,
       ...(url !== undefined ? { mcp: { url } } : {}),
     });
+    if (effective.autoApprove) {
+      // オーケストレーターはread-only sandboxで起動する。machineスコープの
+      // allowAutoApproveを明示的に有効化した利用者に限り、読み取り・MCP操作の
+      // 承認待ちでワークフロー全体が止まらないよう自動で許可する。
+      session.setApprovalHandler(async () => ({ kind: 'auto', decision: 'accept' }));
+      session.setMcpElicitationHandler?.(shouldAutoApproveOrchestratorElicitation);
+    }
     session.open({ preserveFocus: true });
 
     const pendingAskUser = resume?.pendingAskUser;

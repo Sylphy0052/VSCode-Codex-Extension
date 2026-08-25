@@ -695,15 +695,17 @@ ${workflowStyles()}
     </div>
 
     <h2>タスク一覧</h2>
-    <table id="taskTable">
-      <thead>
-        <tr>
-          <th>id</th><th>役割</th><th>状態</th><th>provider</th><th>作業ディレクトリ</th>
-          <th>経過</th><th>送信回数</th><th>直近の応答</th><th>操作</th>
-        </tr>
-      </thead>
-      <tbody id="taskTableBody"></tbody>
-    </table>
+    <div id="taskTableWrap" tabindex="0" aria-label="タスク一覧。横にスクロールできます">
+      <table id="taskTable">
+        <thead>
+          <tr>
+            <th>id</th><th>役割</th><th>状態</th><th>provider</th><th>作業ディレクトリ</th>
+            <th>経過</th><th>送信回数</th><th>直近の応答</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="taskTableBody"></tbody>
+      </table>
+    </div>
 
     <div id="integrationSection" hidden>
       <h2>統合の状況</h2>

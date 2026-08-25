@@ -190,7 +190,10 @@ export function buildOrchestratorConfig(
       effort: '',
       approvalMode: ORCHESTRATOR_APPROVAL_MODE[provider],
       sandbox: ORCHESTRATOR_SANDBOX,
-      autoApprove: false,
+      // オーケストレーター自身はYAMLからautoApproveを指定できない。machineスコープの
+      // allowAutoApproveを人が有効化した場合だけ、読み取り専用のこのセッションでも
+      // 承認待ちを作らない。既定falseは従来どおり人へ回す。
+      autoApprove: baseline.allowAutoApprove,
     },
     baseline,
   );

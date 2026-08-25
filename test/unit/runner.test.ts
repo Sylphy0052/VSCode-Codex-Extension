@@ -7,6 +7,7 @@ import type { LoopPlan, LoopStopReason } from '../../src/loop/loopController';
 import type {
   ApprovalHandler,
   ApprovalOutcome,
+  McpElicitationHandler,
   TaskSession,
   TaskSessionHost,
   TaskSessionInput,
@@ -85,6 +86,7 @@ class FakeTaskSession implements TaskSession {
   runLoopCalls: LoopPlan[] = [];
   promptTransform: ((text: string) => string) | undefined;
   approvalHandler: ApprovalHandler | undefined;
+  mcpElicitationHandler: McpElicitationHandler | undefined;
   disposed = false;
   interruptCount = 0;
   private readonly stateListeners: Array<(state: ChatState) => void> = [];
@@ -125,6 +127,9 @@ class FakeTaskSession implements TaskSession {
   }
   setApprovalHandler(handler: ApprovalHandler): void {
     this.approvalHandler = handler;
+  }
+  setMcpElicitationHandler(handler: McpElicitationHandler): void {
+    this.mcpElicitationHandler = handler;
   }
   onApprovalResolved(listener: (outcome: ApprovalOutcome) => void): void {
     this.approvalResolvedListeners.push(listener);
@@ -8907,6 +8912,44 @@ tasks:
     const session = codexHost.orchestratorSessions[0] as FakeTaskSession;
     // worktreeを作らず、メインのワークスペースで動かす
     expect(session.cwd).toBe('/repo');
+  });
+
+  it('allowAutoApproveが有効なら、オーケストレーターの承認要求を自動許可する', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE, { allowAutoApprove: true });
+    await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    await flush();
+
+    const session = codexHost.orchestratorSessions[0] as FakeTaskSession;
+    const result = await session.requestApproval({
+      requestId: 'orchestrator-read',
+      kind: 'command',
+      title: '',
+      detail: '',
+      itemId: undefined,
+    });
+
+    expect(result).toEqual({ kind: 'auto', decision: 'accept' });
+    expect(
+      session.mcpElicitationHandler?.({
+        serverName: 'task-messaging',
+        message: 'Allow the task-messaging MCP server to run tool "get_run_status"?',
+      }),
+    ).toBe(true);
+    expect(
+      session.mcpElicitationHandler?.({
+        serverName: 'task-messaging',
+        message: 'Allow the task-messaging MCP server to run tool "stop_task"?',
+      }),
+    ).toBe(false);
+  });
+
+  it('allowAutoApproveが無効なら、オーケストレーターの承認ハンドラを設定しない', async () => {
+    const { runner, codexHost } = createHarness(YAML_ONE, { allowAutoApprove: false });
+    await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
+    await flush();
+
+    const session = codexHost.orchestratorSessions[0] as FakeTaskSession;
+    expect(session.approvalHandler).toBeUndefined();
   });
 
   it('run開始の通知を送る（役割と道具の説明つき）', async () => {
