@@ -515,6 +515,11 @@
         "category": "Agent"
       },
       {
+        "command": "agent.workflows.convertRoadmap",
+        "title": "ファイルからロードマップを作成…",
+        "category": "Agent"
+      },
+      {
         "command": "agent.workflows.view",
         "title": "ワークフローViewを開く",
         "category": "Agent"

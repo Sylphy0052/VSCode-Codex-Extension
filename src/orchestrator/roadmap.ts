@@ -1067,6 +1067,62 @@ export function buildRoadmapPrompt(input: RoadmapPromptInput): string {
   return lines.join('\n');
 }
 
+/** 任意の計画Markdownをワークフロー用ロードマップへ変換するための入力。 */
+export interface RoadmapConversionPromptInput {
+  /** 選択したファイルのワークスペース相対パス（表示用）。 */
+  sourcePath: string;
+  /** 選択したMarkdownの本文。外部由来のデータとして扱う。 */
+  sourceMarkdown: string;
+}
+
+/**
+ * 任意Markdownの変換セッションへ渡す本文の上限。
+ *
+ * 計画書はロードマップより長くなりやすいため、ゴール文の上限より大きく取る。一方で、
+ * プロンプト全体を不必要に圧迫しないよう無制限にはしない。
+ */
+const ROADMAP_CONVERSION_SOURCE_MAX_LENGTH = 100_000;
+
+/**
+ * 任意のMarkdownを、ロードマップの機械可読な形式へ変換させるプロンプトを組み立てる。
+ *
+ * 入力文書はエージェントへの命令ではなく材料なので、`formatUntrusted`で明示的に区切る。
+ * これにより、文書中の指示が生成セッションの上位指示を上書きする経路を作らない。
+ */
+export function buildRoadmapConversionPrompt(input: RoadmapConversionPromptInput): string {
+  return [
+    '次の計画Markdownを、ワークフロー実行用のロードマップへ変換してください。',
+    '入力文書の意図、実施順、依存関係を保ち、実行できる粒度の項目へ分解してください。',
+    '',
+    '## 入力ファイル',
+    '',
+    sanitizeInlineText(input.sourcePath, WORKSPACE_ENTRY_MAX_LENGTH),
+    '',
+    '## 入力Markdown',
+    '',
+    formatUntrusted(input.sourceMarkdown, {
+      id: 'roadmap-conversion',
+      field: 'sourceMarkdown',
+      maxLength: ROADMAP_CONVERSION_SOURCE_MAX_LENGTH,
+      preserveNewlines: true,
+    }),
+    '',
+    '## 出力形式',
+    '',
+    '次の形式のMarkdownのみを返してください。説明文やコードフェンスの前後の文章は含めないでください。',
+    '',
+    '```markdown',
+    ROADMAP_FORMAT_EXAMPLE,
+    '```',
+    '',
+    '- フェーズ見出しは必ず `## ` で始めること',
+    '- 実行項目は必ず `- [ ] <一意なid> <内容>` の形式にすること',
+    '- 項目のidは半角英数字・`_`・`-`だけを使い、ロードマップ内で一意にすること',
+    '- `依存` は同じロードマップ内の項目idで書くこと（無ければ `なし`）',
+    '- 入力にIssue番号が明記されている項目だけ、対応する `Issue: #<番号>` を添えること',
+  ].join('\n');
+}
+
 /** コードフェンスで囲まれて返ることが多いため、剥がしてからパーサへ渡す（design.md §16.9）。 */
 export function stripMarkdownCodeFence(text: string): string {
   const trimmed = text.trim();
@@ -1311,7 +1367,13 @@ export type GenerateRoadmapResult =
       parsed: ParsedRoadmap;
       validation: RoadmapValidationResult;
     }
-  | { ok: false; reason: 'pathOutsideWorkspace' | 'generationFailed'; message: string };
+  | {
+      ok: false;
+      reason: 'pathOutsideWorkspace' | 'generationFailed' | 'invalidRoadmap';
+      message: string;
+      /** 形式外の生成結果を保存せず人へ見せるための生の応答。 */
+      rawResponse?: string;
+    };
 
 /**
  * ゴールの文からロードマップを生成し、設定した置き場へ保存する（design.md §16.19の1段目）。
@@ -1345,8 +1407,56 @@ export async function generateRoadmap(
   const markdown = stripMarkdownCodeFence(generated.text);
   const parsed = parseRoadmapMarkdown(markdown);
   const validation = validateRoadmap(parsed);
+  if (validation.errors.length > 0) {
+    return {
+      ok: false,
+      reason: 'invalidRoadmap',
+      message: validation.errors.map((error) => error.message).join(' / '),
+      rawResponse: generated.text,
+    };
+  }
   await deps.fs.writeTextFile(pathResult.path, markdown);
 
+  return { ok: true, path: pathResult.path, markdown, parsed, validation };
+}
+
+/** 任意Markdownからロードマップへ変換するための入力。 */
+export interface ConvertMarkdownToRoadmapInput extends RoadmapConversionPromptInput {
+  workspaceRoot: string;
+  roadmapDir: string;
+  /** 保存先のファイル名（拡張子なし）。省略時は入力ファイル名から作る。 */
+  slug?: string;
+}
+
+/** 任意のMarkdownをワークフロー用ロードマップへ変換して保存する。 */
+export async function convertMarkdownToRoadmap(
+  deps: Pick<GenerateRoadmapDeps, 'generation' | 'fs'>,
+  input: ConvertMarkdownToRoadmapInput,
+): Promise<GenerateRoadmapResult> {
+  const slug =
+    input.slug ?? slugifyGoal(path.basename(input.sourcePath, path.extname(input.sourcePath)));
+  const pathResult = resolveRoadmapOutputPath(input.workspaceRoot, input.roadmapDir, slug);
+  if (!pathResult.ok) {
+    return { ok: false, reason: 'pathOutsideWorkspace', message: pathResult.message };
+  }
+
+  const generated = await deps.generation.generate({ prompt: buildRoadmapConversionPrompt(input) });
+  if (!generated.ok) {
+    return { ok: false, reason: 'generationFailed', message: generated.message };
+  }
+
+  const markdown = stripMarkdownCodeFence(generated.text);
+  const parsed = parseRoadmapMarkdown(markdown);
+  const validation = validateRoadmap(parsed);
+  if (validation.errors.length > 0) {
+    return {
+      ok: false,
+      reason: 'invalidRoadmap',
+      message: validation.errors.map((error) => error.message).join(' / '),
+      rawResponse: generated.text,
+    };
+  }
+  await deps.fs.writeTextFile(pathResult.path, markdown);
   return { ok: true, path: pathResult.path, markdown, parsed, validation };
 }
 
