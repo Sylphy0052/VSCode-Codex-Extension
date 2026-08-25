@@ -17,6 +17,7 @@ import {
   detectForgeHost,
   fetchCiConclusion,
   fetchReviewComments,
+  fetchReviewThreads,
   forgeCliCommand,
   isBranchNotUpToDateError,
   isRetryablePushError,
@@ -1875,7 +1876,7 @@ describe('parseGithubReviewThreads', () => {
 });
 
 describe('fetchReviewComments（design.md §16.30、Issue #339）', () => {
-  it('GitHubは gh pr view <number> --json=reviews,comments,id を呼ぶ', async () => {
+  it('GitHubは gh pr view <number> --json=reviews,comments を呼ぶ', async () => {
     const cli = new FakeCli();
     cli.respond('gh', ['pr', 'view'], {
       code: 0,
@@ -1897,12 +1898,12 @@ describe('fetchReviewComments（design.md §16.30、Issue #339）', () => {
     expect(result.comments).toHaveLength(1);
     expect(cli.calls[0]).toEqual({
       command: 'gh',
-      args: ['pr', 'view', '42', '--json=reviews,comments,id'],
+      args: ['pr', 'view', '42', '--json=reviews,comments'],
       cwd: '/repo/_integration',
     });
   });
 
-  it('GitLabは glab api projects/:id/merge_requests/<number>/discussions を呼ぶ', async () => {
+  it('GitLabは glab api projects/:id/merge_requests/<number>/notes を呼ぶ', async () => {
     const cli = new FakeCli();
     cli.respond('glab', ['api'], {
       code: 0,
@@ -1914,7 +1915,7 @@ describe('fetchReviewComments（design.md §16.30、Issue #339）', () => {
     expect(result.comments).toHaveLength(1);
     expect(cli.calls[0]).toEqual({
       command: 'glab',
-      args: ['api', 'projects/:id/merge_requests/7/discussions'],
+      args: ['api', 'projects/:id/merge_requests/7/notes'],
       cwd: '/repo/_integration',
     });
   });
@@ -1925,6 +1926,23 @@ describe('fetchReviewComments（design.md §16.30、Issue #339）', () => {
     const result = await fetchReviewComments(cli, 'github', '/repo/_integration', 42);
     expect(result.ok).toBe(false);
     expect(result.message).toContain('authentication failed');
+  });
+});
+
+describe('fetchReviewThreads（Forge Hub専用）', () => {
+  it('GitLabは既存pollingのnotes経路と分けてdiscussionsを取得する', async () => {
+    const cli = new FakeCli();
+    cli.respond('glab', ['api'], {
+      code: 0,
+      stdout: JSON.stringify([{ id: 'discussion-1', notes: [{ id: 1, body: 'hi' }] }]),
+      stderr: '',
+    });
+
+    const result = await fetchReviewThreads(cli, 'gitlab', '/repo', 7);
+
+    expect(result.ok).toBe(true);
+    expect(result.comments[0]).toMatchObject({ threadId: 'discussion-1', body: 'hi' });
+    expect(cli.calls[0]?.args).toEqual(['api', 'projects/:id/merge_requests/7/discussions']);
   });
 });
 

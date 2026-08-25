@@ -5,7 +5,7 @@ import {
   detectForgeHost,
   fetchCiConclusion,
   fetchPullRequestStatus,
-  fetchReviewComments,
+  fetchReviewThreads,
   parsePullRequestNumberFromUrl,
   postIssueComment,
   pushBranch,
@@ -399,7 +399,7 @@ export class ForgeHubService {
     if (item?.pullRequestNumber === undefined) {
       return { ok: false, message: 'PR/MR番号がないため、レビューを取得できません。' };
     }
-    const review = await fetchReviewComments(
+    const review = await fetchReviewThreads(
       this.deps.cli,
       item.host,
       item.cwd,

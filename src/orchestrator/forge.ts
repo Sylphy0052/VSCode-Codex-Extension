@@ -2043,12 +2043,9 @@ function buildReviewCommentsArgs(
   number: number,
 ): { command: 'gh' | 'glab'; args: string[] } {
   if (host === 'github') {
-    return { command: 'gh', args: ['pr', 'view', String(number), '--json=reviews,comments,id'] };
+    return { command: 'gh', args: ['pr', 'view', String(number), '--json=reviews,comments'] };
   }
-  return {
-    command: 'glab',
-    args: ['api', `projects/:id/merge_requests/${String(number)}/discussions`],
-  };
+  return { command: 'glab', args: ['api', `projects/:id/merge_requests/${String(number)}/notes`] };
 }
 
 /** GitHubの`reviews`/`comments`の要素のうち、パースに使う項目だけの型。 */
@@ -2269,7 +2266,45 @@ export async function fetchReviewComments(
           : `${command} ${args.join(' ')} に失敗しました（終了コード ${result.code}）`,
     };
   }
-  if (host === 'gitlab') return parseGitlabReviewComments(result.stdout);
+  return host === 'github'
+    ? parseGithubReviewComments(result.stdout)
+    : parseGitlabReviewComments(result.stdout);
+}
+
+/** Forge Hub向けに、返信・解決に必要なthread IDを含むレビューを取得する。 */
+export async function fetchReviewThreads(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  number: number,
+): Promise<ReviewCommentsResult> {
+  if (host === 'gitlab') {
+    const discussions = await cli.run(
+      'glab',
+      ['api', `projects/:id/merge_requests/${String(number)}/discussions`],
+      cwd,
+    );
+    if (discussions.code !== 0) {
+      return {
+        ok: false,
+        comments: [],
+        message: sanitizeForLog(discussions.stderr || 'review discussionsの取得に失敗しました'),
+      };
+    }
+    return parseGitlabReviewComments(discussions.stdout);
+  }
+  const result = await cli.run(
+    'gh',
+    ['pr', 'view', String(number), '--json=reviews,comments,id'],
+    cwd,
+  );
+  if (result.code !== 0) {
+    return {
+      ok: false,
+      comments: [],
+      message: sanitizeForLog(result.stderr || 'レビューの取得に失敗しました'),
+    };
+  }
   const reviews = parseGithubReviewComments(result.stdout);
   if (!reviews.ok) return reviews;
   let pullRequestId: unknown;
