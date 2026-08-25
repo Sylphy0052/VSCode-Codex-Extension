@@ -2500,6 +2500,11 @@ async function handlePlanSuccess(
           return;
         }
         if (review.findings.length === 0) {
+          log.info(
+            revision === 0
+              ? '[planner] ワークフローのレビューが完了しました（指摘なし）'
+              : `[planner] ワークフローのレビューが完了しました（${revision}回修正後に指摘なし）`,
+          );
           if (revision > 0) {
             void vscode.window.showInformationMessage(
               `レビュー指摘を反映し、ワークフローの再レビューを通過しました（${revision}回修正）。`,
