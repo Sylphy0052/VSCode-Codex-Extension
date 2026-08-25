@@ -80,7 +80,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function render(webview: vscode.Webview): string {
   const nonce = String(Date.now());
-  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${chatCsp(webview, nonce)}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body><main><header><div><p class="eyebrow">CURRENT WORKSPACE</p><h1>セッションカンバン</h1><p class="description">この拡張機能が開いて管理している会話だけを表示します。</p></div><div id="summary" class="summary" aria-live="polite"></div></header><section id="board" class="board" aria-label="セッションの状態"></section></main><script nonce="${nonce}">${script}</script></body></html>`;
+  const csp = chatCsp(webview.cspSource, nonce, { includeImgData: false });
+  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body><main><header><div><p class="eyebrow">CURRENT WORKSPACE</p><h1>セッションカンバン</h1><p class="description">この拡張機能が開いて管理している会話だけを表示します。</p></div><div id="summary" class="summary" aria-live="polite"></div></header><section id="board" class="board" aria-label="セッションの状態"></section></main><script nonce="${nonce}">${script}</script></body></html>`;
 }
 
 const styles = `
