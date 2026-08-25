@@ -21,12 +21,14 @@ export interface ForgeOrchestratorSnapshot {
  */
 export class ForgeOrchestrator {
   private current: { provider: Provider; cwd: string; session: TaskSession } | undefined;
+  private readonly workSessions = new Map<string, TaskSession>();
   private snapshot: ForgeOrchestratorSnapshot | undefined;
   private readonly listeners: Array<(snapshot: ForgeOrchestratorSnapshot) => void> = [];
 
   constructor(
     private readonly hosts: Record<Provider, TaskSessionHost>,
     private readonly readBaseline: () => ExtensionSafetyBaseline,
+    private readonly reveal?: (provider: Provider, sessionId: string) => boolean,
   ) {}
 
   onChanged(listener: (snapshot: ForgeOrchestratorSnapshot) => void): void {
@@ -43,12 +45,43 @@ export class ForgeOrchestrator {
     return session.sessionId;
   }
 
+  /** Issue専用worktreeをcwdにした、表示可能な作業会話を新規に起動する。 */
+  async startWork(provider: Provider, cwd: string, taskId: string, text: string): Promise<string> {
+    const effective = buildEffectiveTaskConfig(
+      {
+        provider,
+        model: '',
+        effort: '',
+        approvalMode: '',
+        sandbox: this.readBaseline().codexSandbox,
+        autoApprove: false,
+      },
+      this.readBaseline(),
+    );
+    const session = await this.hosts[provider].openTaskSession({
+      role: 'task',
+      taskId,
+      cwd,
+      config: effective.config,
+      sandbox: effective.sandbox,
+    });
+    this.workSessions.set(session.sessionId, session);
+    session.send(text);
+    return session.sessionId;
+  }
+
+  revealWorkSession(provider: Provider, sessionId: string): boolean {
+    return this.reveal?.(provider, sessionId) ?? false;
+  }
+
   decideApproval(requestId: number | string, decision: ApprovalDecision): void {
     this.current?.session.decideApproval(requestId, decision);
   }
 
   dispose(): void {
     this.current?.session.dispose();
+    for (const session of this.workSessions.values()) session.dispose();
+    this.workSessions.clear();
     this.current = undefined;
     this.snapshot = undefined;
   }

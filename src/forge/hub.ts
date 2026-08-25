@@ -7,7 +7,10 @@ import {
   fetchPullRequestStatus,
   fetchReviewComments,
   parsePullRequestNumberFromUrl,
+  postIssueComment,
   pushBranch,
+  replyToReviewThread,
+  resolveReviewThread,
   type CliAvailabilityPort,
   type CliCommandRunner,
   type ForgeFileSystemPort,
@@ -24,6 +27,7 @@ import { randomUUID } from 'node:crypto';
 import type { MementoLike } from '../util/memento';
 
 export const FORGE_WORK_ITEMS_KEY = 'agent.forge.workItems.v1';
+export const FORGE_PLANNED_ISSUES_KEY = 'agent.forge.plannedIssues.v1';
 
 /** Forge Hubが扱う、Codex / Claude Code共通の会話起点。 */
 export type ForgeHubProvider = 'codex' | 'claude';
@@ -95,14 +99,20 @@ export interface ForgeWorkItem {
   cwd: string;
   branch: string;
   sessionId: string;
-  status: 'inProgress' | 'review' | 'ci' | 'cleanup' | 'blocked';
+  status: 'inProgress' | 'review' | 'ciPending' | 'ci' | 'cleanup' | 'blocked';
   startedAt: string;
   pullRequestNumber?: number;
   pullRequestUrl?: string;
   ciMessage?: string;
   reviewCommentCount?: number;
   reviewMessage?: string;
-  reviewComments?: ReadonlyArray<{ id: string; author: string; body: string }>;
+  reviewComments?: ReadonlyArray<{
+    id: string;
+    author: string;
+    body: string;
+    threadId?: string;
+    resolved?: boolean;
+  }>;
   mergeable?: boolean;
   approvalsLeft?: number;
   pullRequestState?: 'open' | 'merged' | 'closed' | 'unknown';
@@ -110,14 +120,29 @@ export interface ForgeWorkItem {
   updatedAt: string;
 }
 
+export interface ForgePlannedIssue {
+  number: number;
+  plannedAt: string;
+}
+
 /** `gh` / `glab`への操作をWebviewから切り離す。最初は診断とIssue作成を担当する。 */
 export class ForgeHubService {
   private readonly worktrees = new WorktreeCreationQueue();
   private readonly workItems = new Map<string, ForgeWorkItem>();
+  private readonly plannedIssues = new Map<number, ForgePlannedIssue>();
 
   constructor(private readonly deps: ForgeHubDeps) {
     for (const item of deps.memento.get<ForgeWorkItem[]>(FORGE_WORK_ITEMS_KEY, [])) {
       if (isForgeWorkItem(item)) this.workItems.set(item.branch, item);
+    }
+    for (const planned of deps.memento.get<ForgePlannedIssue[]>(FORGE_PLANNED_ISSUES_KEY, [])) {
+      if (
+        Number.isSafeInteger(planned.number) &&
+        planned.number > 0 &&
+        typeof planned.plannedAt === 'string'
+      ) {
+        this.plannedIssues.set(planned.number, planned);
+      }
     }
   }
 
@@ -168,8 +193,42 @@ export class ForgeHubService {
       cwd: snapshot.cwd,
       title: draft.title,
       body: buildForgeIssueBody(draft),
+      ...(draft.labels === undefined ? {} : { labels: draft.labels }),
+      ...(draft.assignees === undefined ? {} : { assignees: draft.assignees }),
+      ...(draft.milestone === undefined ? {} : { milestone: draft.milestone }),
     });
     return result.ok ? result : { ok: false, message: result.message };
+  }
+
+  /** 既存Issueへ実装計画を追記する。本文を置換せず、時系列で監査できるコメントとして残す。 */
+  async postIssuePlan(
+    snapshot: ForgeHubSnapshot,
+    issue: RoadmapIssueSummary,
+    plan: string,
+  ): Promise<{ ok: true; url: string | undefined } | { ok: false; message: string }> {
+    if (snapshot.host === undefined || snapshot.prerequisites?.ready !== true) {
+      return {
+        ok: false,
+        message: 'CLIの導入・認証・origin remoteを確認してから計画を反映してください。',
+      };
+    }
+    if (plan.trim() === '') return { ok: false, message: '実装計画を入力してください。' };
+    const result = await postIssueComment(
+      { cli: this.deps.cli, fs: this.deps.fs },
+      {
+        host: snapshot.host,
+        cwd: snapshot.cwd,
+        number: issue.number,
+        body: ['## 実装計画', '', plan.trim()].join('\n'),
+      },
+    );
+    if (!result.ok) return { ok: false, message: result.message };
+    this.plannedIssues.set(issue.number, {
+      number: issue.number,
+      plannedAt: new Date().toISOString(),
+    });
+    await this.deps.memento.update(FORGE_PLANNED_ISSUES_KEY, [...this.plannedIssues.values()]);
+    return result;
   }
 
   async listIssues(snapshot: ForgeHubSnapshot): Promise<readonly RoadmapIssueSummary[]> {
@@ -232,11 +291,36 @@ export class ForgeHubService {
       startedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
+    this.plannedIssues.delete(issue.number);
     await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
+    await this.deps.memento.update(FORGE_PLANNED_ISSUES_KEY, [...this.plannedIssues.values()]);
   }
 
   listWorkItems(): readonly ForgeWorkItem[] {
     return [...this.workItems.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  }
+
+  listPlannedIssues(
+    issues: readonly RoadmapIssueSummary[],
+  ): readonly (ForgePlannedIssue & { issue: RoadmapIssueSummary })[] {
+    return issues
+      .flatMap((issue) => {
+        const planned = this.plannedIssues.get(issue.number);
+        return planned === undefined ? [] : [{ ...planned, issue }];
+      })
+      .sort((a, b) => b.plannedAt.localeCompare(a.plannedAt));
+  }
+
+  /** cleanup済みであることを利用者が確認したカードだけ、Hubの追跡対象から外す。 */
+  async completeCleanup(branch: string): Promise<{ ok: true } | { ok: false; message: string }> {
+    const item = this.workItems.get(branch);
+    if (item === undefined) return { ok: false, message: '対象のForge作業が見つかりません。' };
+    if (item.status !== 'cleanup') {
+      return { ok: false, message: 'マージ済み・cleanup待ちのカードだけ完了にできます。' };
+    }
+    this.workItems.delete(branch);
+    await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
+    return { ok: true };
   }
 
   async refreshRemoteStates(): Promise<void> {
@@ -297,7 +381,7 @@ export class ForgeHubService {
     }
     const ci = await fetchCiConclusion(this.deps.cli, item.host, item.cwd, item.pullRequestNumber);
     const status =
-      ci.conclusion === 'failed' ? 'blocked' : ci.conclusion === 'passed' ? 'ci' : 'review';
+      ci.conclusion === 'failed' ? 'blocked' : ci.conclusion === 'passed' ? 'ci' : 'ciPending';
     const itemWithoutCiMessage = { ...item };
     delete itemWithoutCiMessage.ciMessage;
     this.workItems.set(branch, {
@@ -334,6 +418,8 @@ export class ForgeHubService {
               id: comment.id,
               author: comment.author,
               body: comment.body,
+              ...(comment.threadId === undefined ? {} : { threadId: comment.threadId }),
+              ...(comment.resolved === undefined ? {} : { resolved: comment.resolved }),
             })),
           }
         : { reviewMessage: review.message ?? 'レビューを取得できませんでした。' }),
@@ -343,6 +429,37 @@ export class ForgeHubService {
     return review.ok
       ? { ok: true }
       : { ok: false, message: review.message ?? 'レビューを取得できませんでした。' };
+  }
+
+  async replyToReviewThread(
+    branch: string,
+    threadId: string,
+    body: string,
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
+    const item = this.workItems.get(branch);
+    if (item?.pullRequestNumber === undefined) {
+      return { ok: false, message: 'PR/MR番号がないため、レビューへ返信できません。' };
+    }
+    return replyToReviewThread(
+      { cli: this.deps.cli, fs: this.deps.fs },
+      { host: item.host, cwd: item.cwd, number: item.pullRequestNumber, threadId, body },
+    );
+  }
+
+  async resolveReviewThread(
+    branch: string,
+    threadId: string,
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
+    const item = this.workItems.get(branch);
+    if (item?.pullRequestNumber === undefined) {
+      return { ok: false, message: 'PR/MR番号がないため、レビューを解決できません。' };
+    }
+    return resolveReviewThread(this.deps.cli, {
+      host: item.host,
+      cwd: item.cwd,
+      number: item.pullRequestNumber,
+      threadId,
+    });
   }
 
   async refreshPullRequestStatus(
@@ -389,6 +506,7 @@ function isForgeWorkItem(value: unknown): value is ForgeWorkItem {
     typeof item['sessionId'] === 'string' &&
     (item['status'] === 'inProgress' ||
       item['status'] === 'review' ||
+      item['status'] === 'ciPending' ||
       item['status'] === 'ci' ||
       item['status'] === 'cleanup' ||
       item['status'] === 'blocked') &&

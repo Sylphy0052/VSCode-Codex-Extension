@@ -212,6 +212,9 @@ describe('ForgeHubService', () => {
     expect(service.listWorkItems()).toMatchObject([
       { status: 'blocked', ciMessage: expect.any(String) },
     ]);
+    ciOutput = '{"statusCheckRollup":[{"status":"IN_PROGRESS","conclusion":null}]}';
+    await service.refreshCi(item.branch);
+    expect(service.listWorkItems()).toMatchObject([{ status: 'ciPending' }]);
     ciOutput = '{"statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}]}';
     await service.refreshCi(item.branch);
 

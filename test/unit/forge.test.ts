@@ -28,10 +28,14 @@ import {
   parseGithubCiConclusion,
   parseGithubPullRequestStatus,
   parseGithubReviewComments,
+  parseGithubReviewThreads,
   parseGitlabCiConclusion,
   parseGitlabPullRequestStatus,
   parseGitlabReviewComments,
   parsePullRequestNumberFromUrl,
+  postIssueComment,
+  replyToReviewThread,
+  resolveReviewThread,
   PUSH_BRANCH_MAX_ATTEMPTS,
   pushBranch,
   resolveForgeHost,
@@ -911,6 +915,47 @@ describe('createIssue（design.md §16.31 W6 Issue #596）', () => {
     ]);
   });
 
+  it('hostごとのlabel・assignee・milestoneを作成引数へ反映する', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['issue', 'create'], {
+      code: 0,
+      stdout: 'https://github.com/org/repo/issues/42\n',
+      stderr: '',
+    });
+    const fs = new FakeForgeFileSystem();
+
+    await createIssue(
+      { cli, fs },
+      {
+        host: 'github',
+        cwd: '/repo',
+        title: 'Issue',
+        body: '本文',
+        labels: 'bug,ui',
+        assignees: '@me,octocat',
+        milestone: 'v1',
+      },
+    );
+
+    expect(cli.calls[0]?.args).toContain('--label=bug,ui');
+    expect(cli.calls[0]?.args).toContain('--assignee=@me,octocat');
+    expect(cli.calls[0]?.args).toContain('--milestone=v1');
+  });
+
+  it('GitLabのassigneeはユーザーID配列として送る', async () => {
+    const cli = new FakeCli();
+    cli.respond('glab', ['api'], { code: 0, stdout: '{}', stderr: '' });
+    const fs = new FakeForgeFileSystem();
+
+    await createIssue(
+      { cli, fs },
+      { host: 'gitlab', cwd: '/repo', title: 'Issue', body: '本文', assignees: '12,34' },
+    );
+
+    expect(cli.calls[0]?.args).toContain('--field=assignee_ids[]=12');
+    expect(cli.calls[0]?.args).toContain('--field=assignee_ids[]=34');
+  });
+
   it('body/promptの中身は引数へ直接置かず、一時ファイルへ書く', async () => {
     const cli = new FakeCli();
     cli.respond('gh', ['issue', 'create'], {
@@ -968,6 +1013,50 @@ describe('createIssue（design.md §16.31 W6 Issue #596）', () => {
       expect(result.message).toContain('authentication required');
     }
     expect(fs.removed).toEqual([fs.written[0]?.path]);
+  });
+});
+
+describe('postIssueComment（Forge Hubの実装計画反映）', () => {
+  it('GitHubはIssue本文を上書きせず、body-fileでコメントを追加する', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['issue', 'comment'], {
+      code: 0,
+      stdout: 'https://github.com/org/repo/issues/42#issuecomment-1\n',
+      stderr: '',
+    });
+    const fs = new FakeForgeFileSystem();
+
+    const result = await postIssueComment(
+      { cli, fs },
+      { host: 'github', cwd: '/repo', number: 42, body: '## 実装計画\n\n段階的に実装する' },
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      url: 'https://github.com/org/repo/issues/42#issuecomment-1',
+    });
+    expect(cli.calls[0]?.args).toEqual([
+      'issue',
+      'comment',
+      '42',
+      `--body-file=${fs.written[0]?.path}`,
+    ]);
+    expect(fs.written[0]?.content).toContain('実装計画');
+    expect(fs.removed).toEqual([fs.written[0]?.path]);
+  });
+
+  it('空の本文または不正な番号ではCLIを呼ばない', async () => {
+    const cli = new FakeCli();
+    const fs = new FakeForgeFileSystem();
+
+    const result = await postIssueComment(
+      { cli, fs },
+      { host: 'gitlab', cwd: '/repo', number: 0, body: '' },
+    );
+
+    expect(result).toMatchObject({ ok: false, reason: 'invalidInput' });
+    expect(cli.calls).toEqual([]);
+    expect(fs.written).toEqual([]);
   });
 });
 
@@ -1740,8 +1829,53 @@ describe('parseGitlabReviewComments（design.md §16.30、Issue #339）', () => 
   });
 });
 
+describe('parseGithubReviewThreads', () => {
+  it('返信・解決に必要なthread IDと解決状態を保持する', () => {
+    const result = parseGithubReviewThreads(
+      JSON.stringify({
+        data: {
+          node: {
+            reviewThreads: {
+              nodes: [
+                {
+                  id: 'PRRT_1',
+                  isResolved: false,
+                  comments: {
+                    nodes: [
+                      {
+                        id: 'PRRC_1',
+                        body: '修正してください',
+                        createdAt: '2026-08-25T00:00:00Z',
+                        author: { login: 'alice' },
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      comments: [
+        {
+          id: 'PRRC_1',
+          author: 'alice',
+          body: '修正してください',
+          threadId: 'PRRT_1',
+          resolved: false,
+          createdAt: '2026-08-25T00:00:00Z',
+        },
+      ],
+    });
+  });
+});
+
 describe('fetchReviewComments（design.md §16.30、Issue #339）', () => {
-  it('GitHubは gh pr view <number> --json=reviews,comments を呼ぶ', async () => {
+  it('GitHubは gh pr view <number> --json=reviews,comments,id を呼ぶ', async () => {
     const cli = new FakeCli();
     cli.respond('gh', ['pr', 'view'], {
       code: 0,
@@ -1763,12 +1897,12 @@ describe('fetchReviewComments（design.md §16.30、Issue #339）', () => {
     expect(result.comments).toHaveLength(1);
     expect(cli.calls[0]).toEqual({
       command: 'gh',
-      args: ['pr', 'view', '42', '--json=reviews,comments'],
+      args: ['pr', 'view', '42', '--json=reviews,comments,id'],
       cwd: '/repo/_integration',
     });
   });
 
-  it('GitLabは glab api projects/:id/merge_requests/<number>/notes を呼ぶ', async () => {
+  it('GitLabは glab api projects/:id/merge_requests/<number>/discussions を呼ぶ', async () => {
     const cli = new FakeCli();
     cli.respond('glab', ['api'], {
       code: 0,
@@ -1780,7 +1914,7 @@ describe('fetchReviewComments（design.md §16.30、Issue #339）', () => {
     expect(result.comments).toHaveLength(1);
     expect(cli.calls[0]).toEqual({
       command: 'glab',
-      args: ['api', 'projects/:id/merge_requests/7/notes'],
+      args: ['api', 'projects/:id/merge_requests/7/discussions'],
       cwd: '/repo/_integration',
     });
   });
@@ -1791,6 +1925,43 @@ describe('fetchReviewComments（design.md §16.30、Issue #339）', () => {
     const result = await fetchReviewComments(cli, 'github', '/repo/_integration', 42);
     expect(result.ok).toBe(false);
     expect(result.message).toContain('authentication failed');
+  });
+});
+
+describe('レビューthread操作', () => {
+  it('GitLabの返信はdiscussion endpointへ本文ファイルを送る', async () => {
+    const cli = new FakeCli();
+    cli.respond('glab', ['api'], { code: 0, stdout: '{}', stderr: '' });
+    const fs = new FakeForgeFileSystem();
+
+    const result = await replyToReviewThread(
+      { cli, fs },
+      { host: 'gitlab', cwd: '/repo', number: 7, threadId: 'discussion-1', body: '対応しました' },
+    );
+
+    expect(result).toEqual({ ok: true });
+    expect(cli.calls[0]?.args).toEqual([
+      'api',
+      'projects/:id/merge_requests/7/discussions/discussion-1/notes',
+      `--field=body=@${fs.written[0]?.path}`,
+    ]);
+    expect(fs.removed).toEqual([fs.written[0]?.path]);
+  });
+
+  it('GitHubの解決はGraphQL mutationを使う', async () => {
+    const cli = new FakeCli();
+    cli.respond('gh', ['api', 'graphql'], { code: 0, stdout: '{}', stderr: '' });
+
+    const result = await resolveReviewThread(cli, {
+      host: 'github',
+      cwd: '/repo',
+      number: 7,
+      threadId: 'PRRT_thread',
+    });
+
+    expect(result).toEqual({ ok: true });
+    expect(cli.calls[0]?.args.join(' ')).toContain('resolveReviewThread');
+    expect(cli.calls[0]?.args).toContain('threadId=PRRT_thread');
   });
 });
 

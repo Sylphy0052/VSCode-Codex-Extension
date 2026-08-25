@@ -728,7 +728,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       memento: context.workspaceState,
     }),
     () => currentWorkspaceFolder()?.uri.fsPath,
-    new ForgeOrchestrator({ codex: chat, claude: claudeChat }, readSafetyBaseline),
+    new ForgeOrchestrator(
+      { codex: chat, claude: claudeChat },
+      readSafetyBaseline,
+      (provider, sessionId) =>
+        provider === 'claude' ? claudeChat.revealSession(sessionId) : chat.revealSession(sessionId),
+    ),
     log,
   );
   context.subscriptions.push(
