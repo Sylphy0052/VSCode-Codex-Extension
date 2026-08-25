@@ -437,7 +437,7 @@ export class ForgeHubService {
       return { ok: false, message: 'PR/MR番号がないためCIを取得できません。' };
     }
     const ci = await fetchCiConclusion(this.deps.cli, item.host, item.cwd, item.pullRequestNumber);
-    const status =
+    const status: ForgeWorkItem['status'] =
       ci.conclusion === 'failed' ? 'blocked' : ci.conclusion === 'passed' ? 'ci' : 'ciPending';
     const itemWithoutCiMessage = { ...item };
     delete itemWithoutCiMessage.ciMessage;
