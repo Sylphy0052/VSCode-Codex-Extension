@@ -1126,6 +1126,48 @@ export function buildRoadmapConversionPrompt(input: RoadmapConversionPromptInput
   ].join('\n');
 }
 
+/**
+ * 初回の生成結果にパース可能な項目が1件も無い場合だけ使う、形式修復用の再試行プロンプト。
+ * 元の返答は命令ではなく変換対象のデータとして扱う。
+ */
+export function buildRoadmapRepairPrompt(response: string): string {
+  return [
+    '前の返答にはワークフロー用ロードマップとして認識できる実行項目がありませんでした。',
+    '次の内容を、必ず指定形式のMarkdownだけへ変換してください。説明文、コードフェンス、作業報告は返さないでください。',
+    '',
+    '## 必須形式',
+    '',
+    '```markdown',
+    ROADMAP_FORMAT_EXAMPLE,
+    '```',
+    '',
+    '- フェーズ見出しは `## ` で始める',
+    '- 実行項目は必ず `- [ ] R1 内容` の形式にする',
+    '- 項目は1件以上にする',
+    '',
+    '## 変換対象',
+    '',
+    formatUntrusted(response, {
+      id: 'roadmap-repair',
+      field: 'response',
+      maxLength: ROADMAP_CONVERSION_SOURCE_MAX_LENGTH,
+      preserveNewlines: true,
+    }),
+  ].join('\n');
+}
+
+async function repairRoadmapIfEmpty(
+  generation: RoadmapGenerationPort,
+  generated: RoadmapGenerationResult,
+): Promise<RoadmapGenerationResult> {
+  if (!generated.ok) return generated;
+  if (allItems(parseRoadmapMarkdown(stripMarkdownCodeFence(generated.text))).length > 0) {
+    return generated;
+  }
+  generated.dispose?.();
+  return generation.generate({ prompt: buildRoadmapRepairPrompt(generated.text) });
+}
+
 /** コードフェンスで囲まれて返ることが多いため、剥がしてからパーサへ渡す（design.md §16.9）。 */
 export function stripMarkdownCodeFence(text: string): string {
   const trimmed = text.trim();
@@ -1261,7 +1303,9 @@ export interface RoadmapGenerationRequest {
   prompt: string;
 }
 
-export type RoadmapGenerationResult = { ok: true; text: string } | { ok: false; message: string };
+export type RoadmapGenerationResult =
+  | { ok: true; text: string; dispose?: () => void; reportFailure?: (message: string) => void }
+  | { ok: false; message: string };
 
 /**
  * ロードマップ生成セッションの起動を抽象化するポート。
@@ -1298,8 +1342,8 @@ export interface RoadmapIssueCreationPort {
  * ずれていないか確認してから開く」（`assertPlannerSessionIsSafe`）を内包しているため、
  * ここで安全設定を再実装する必要が無い。
  *
- * 生成は1ターンで終わらせ、`sendSingleTurn` が `finally` でセッションを閉じる
- * （design.md §16.19「生成が終わったらセッションを閉じる」）。
+ * 生成は1ターンで終わらせる。形式外の応答を利用者が会話画面で確認できるよう、
+ * ロードマップ生成セッションは自動で閉じない。
  */
 export function createTaskSessionRoadmapGenerationPort(
   host: TaskSessionHost,
@@ -1309,9 +1353,25 @@ export function createTaskSessionRoadmapGenerationPort(
   return {
     async generate(request: RoadmapGenerationRequest): Promise<RoadmapGenerationResult> {
       const input = buildPlannerSessionInput(provider, cwd);
+      let dispose: (() => void) | undefined;
+      let reportFailure: ((message: string) => void) | undefined;
       try {
-        const text = await sendSingleTurn(host, provider, input, request.prompt);
-        return { ok: true, text };
+        const text = await sendSingleTurn(
+          host,
+          provider,
+          input,
+          request.prompt,
+          undefined,
+          undefined,
+          false,
+          (session) => {
+            dispose = () => session.dispose();
+            reportFailure = (message) => {
+              session.send(`ロードマップ生成は失敗しました。理由: ${message}`);
+            };
+          },
+        );
+        return { ok: true, text, dispose, reportFailure };
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         return { ok: false, message: `ロードマップ生成セッションが失敗しました: ${message}` };
@@ -1412,7 +1472,10 @@ export async function generateRoadmap(
     existingIssues,
   });
 
-  const generated = await deps.generation.generate({ prompt });
+  const generated = await repairRoadmapIfEmpty(
+    deps.generation,
+    await deps.generation.generate({ prompt }),
+  );
   if (!generated.ok) {
     return { ok: false, reason: 'generationFailed', message: generated.message };
   }
@@ -1421,10 +1484,12 @@ export async function generateRoadmap(
   let parsed = parseRoadmapMarkdown(markdown);
   let validation = validateRoadmap(parsed);
   if (validation.errors.length > 0) {
+    const message = validation.errors.map((error) => error.message).join(' / ');
+    generated.reportFailure?.(message);
     return {
       ok: false,
       reason: 'invalidRoadmap',
-      message: validation.errors.map((error) => error.message).join(' / '),
+      message,
       rawResponse: generated.text,
     };
   }
@@ -1434,10 +1499,12 @@ export async function generateRoadmap(
     if (missingIssueItems.length > 0) {
       const created = await deps.issueCreation.createIssues(input.workspaceRoot, missingIssueItems);
       if (!created.ok) {
+        const message = `ロードマップ項目のIssue起票に失敗しました: ${created.message}`;
+        generated.reportFailure?.(message);
         return {
           ok: false,
           reason: 'generationFailed',
-          message: `ロードマップ項目のIssue起票に失敗しました: ${created.message}`,
+          message,
           rawResponse: generated.text,
         };
       }
@@ -1445,16 +1512,19 @@ export async function generateRoadmap(
       parsed = parseRoadmapMarkdown(markdown);
       validation = validateRoadmap(parsed);
       if (validation.errors.length > 0) {
+        const message = validation.errors.map((error) => error.message).join(' / ');
+        generated.reportFailure?.(message);
         return {
           ok: false,
           reason: 'invalidRoadmap',
-          message: validation.errors.map((error) => error.message).join(' / '),
+          message,
           rawResponse: generated.text,
         };
       }
     }
   }
   await deps.fs.writeTextFile(pathResult.path, markdown);
+  generated.dispose?.();
 
   return { ok: true, path: pathResult.path, markdown, parsed, validation };
 }
@@ -1517,7 +1587,10 @@ export async function convertMarkdownToRoadmap(
     return { ok: false, reason: 'pathOutsideWorkspace', message: pathResult.message };
   }
 
-  const generated = await deps.generation.generate({ prompt: buildRoadmapConversionPrompt(input) });
+  const generated = await repairRoadmapIfEmpty(
+    deps.generation,
+    await deps.generation.generate({ prompt: buildRoadmapConversionPrompt(input) }),
+  );
   if (!generated.ok) {
     return { ok: false, reason: 'generationFailed', message: generated.message };
   }
@@ -1526,14 +1599,17 @@ export async function convertMarkdownToRoadmap(
   const parsed = parseRoadmapMarkdown(markdown);
   const validation = validateRoadmap(parsed);
   if (validation.errors.length > 0) {
+    const message = validation.errors.map((error) => error.message).join(' / ');
+    generated.reportFailure?.(message);
     return {
       ok: false,
       reason: 'invalidRoadmap',
-      message: validation.errors.map((error) => error.message).join(' / '),
+      message,
       rawResponse: generated.text,
     };
   }
   await deps.fs.writeTextFile(pathResult.path, markdown);
+  generated.dispose?.();
   return { ok: true, path: pathResult.path, markdown, parsed, validation };
 }
 

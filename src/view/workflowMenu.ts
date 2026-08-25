@@ -50,6 +50,12 @@ const ROADMAP: WorkflowMenuEntry = {
   command: 'agent.workflows.roadmap',
 };
 
+const CONVERT_ROADMAP: WorkflowMenuEntry = {
+  label: '$(file-code) ファイルからロードマップを作成…',
+  description: '既存のMarkdownをワークフロー用ロードマップへ変換します',
+  command: 'agent.workflows.convertRoadmap',
+};
+
 const STOP: WorkflowMenuEntry = {
   label: '$(debug-stop) ワークフローを停止…',
   description: '実行中のワークフローを選んで止めます',
@@ -66,7 +72,7 @@ const STOP: WorkflowMenuEntry = {
  */
 export function buildWorkflowMenuEntries(runningCount: number): WorkflowMenuEntry[] {
   if (runningCount <= 0) {
-    return [RUN, VIEW, PLAN, TEAM, ROADMAP];
+    return [RUN, VIEW, PLAN, TEAM, ROADMAP, CONVERT_ROADMAP];
   }
   return [
     { ...VIEW, description: `実行中 ${runningCount}件 — ${VIEW.description}` },
@@ -74,6 +80,7 @@ export function buildWorkflowMenuEntries(runningCount: number): WorkflowMenuEntr
     PLAN,
     TEAM,
     ROADMAP,
+    CONVERT_ROADMAP,
     STOP,
   ];
 }

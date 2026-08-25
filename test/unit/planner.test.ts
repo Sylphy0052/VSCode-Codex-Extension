@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   initialChatState,
+  type ChatItem,
   type ChatState,
   type PendingApproval,
 } from '../../src/appserver/chatState';
@@ -105,7 +106,10 @@ class FakePlannerSession implements TaskSession {
   disposed = false;
   private finishedListener: ((reason: LoopStopReason, state: ChatState) => void) | undefined;
 
-  constructor(private readonly responseText: string) {}
+  constructor(
+    private readonly responseText: string,
+    private readonly responseItems: readonly ChatItem[] = [],
+  ) {}
 
   /** `TaskSession.send`（design.md §16.23）。この経路では使わない。 */
   sentTexts: string[] = [];
@@ -118,6 +122,7 @@ class FakePlannerSession implements TaskSession {
     this.finishedListener?.('maxReached', {
       ...initialChatState,
       turnResultText: this.responseText,
+      items: [...this.responseItems],
     });
   }
   setPromptTransform(): void {}
@@ -1182,6 +1187,28 @@ describe('sendSingleTurn: タイムアウト（issue #389 根拠3）', () => {
     await expect(promise).resolves.toBe(VALID_YAML);
     expect(session?.interruptCalls).toBe(0);
     expect(session?.disposeCalls).toBe(1);
+  });
+});
+
+describe('sendSingleTurn: 応答本文の取得', () => {
+  it('turnResultTextが空でも、画面に残る最後のagentMessageを返す', async () => {
+    const session = new FakePlannerSession('', [
+      {
+        id: 'message-1',
+        kind: 'agentMessage',
+        text: '# ゴール\n\n## Phase 1: 実装\n\n- [ ] R1 実装する',
+        detail: '',
+        status: undefined,
+        turnId: 'turn-1',
+        diffs: [],
+      },
+    ]);
+    const host: TaskSessionHost = {
+      openTaskSession: async () => session,
+    };
+
+    await expect(sendSingleTurn(host, 'codex', buildPlannerSessionInput('codex', '/repo'), 'goal'))
+      .resolves.toBe('# ゴール\n\n## Phase 1: 実装\n\n- [ ] R1 実装する');
   });
 });
 
