@@ -155,7 +155,7 @@ describe('chatScript', () => {
     expect(source).toContain('function positionOverflowMenu()');
     expect(source).toContain('const above = Math.max(0, rect.top - gap)');
     expect(source).toContain('const below = Math.max(0, window.innerHeight - rect.bottom - gap)');
-    expect(source).toContain("composerOverflowMenu.style.maxHeight");
+    expect(source).toContain('composerOverflowMenu.style.maxHeight');
   });
 
   it('showInputModeHintsを省略すると !/# の案内を出さない（既定はfalse、issue #5/#6）', () => {
