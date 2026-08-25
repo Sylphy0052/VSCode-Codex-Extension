@@ -456,7 +456,12 @@ export async function openChatFileLink(url: string, cwd: string | undefined): Pr
       preview: false,
       ...(line === undefined
         ? {}
-        : { selection: new vscode.Range(new vscode.Position(line - 1, 0), new vscode.Position(line - 1, 0)) }),
+        : {
+            selection: new vscode.Range(
+              new vscode.Position(line - 1, 0),
+              new vscode.Position(line - 1, 0),
+            ),
+          }),
     });
   } catch {
     void vscode.window.showWarningMessage(`ファイルを開けません: ${target.fsPath}`);
