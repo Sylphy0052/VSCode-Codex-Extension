@@ -268,7 +268,10 @@ ${sharedStyles()}
   .wf-arrow-head.related { fill: var(--vscode-charts-blue); }
 
   /* ---- タスク一覧 ---- */
-  table#taskTable { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+  /* タスク数・worktreeの絶対パスにより最小幅がパネル幅を超える。表そのものを
+     縮めて列を消すのではなく、横スクロールで全列（特に右端の操作）へ到達可能にする */
+  #taskTableWrap { max-width: 100%; overflow-x: auto; }
+  table#taskTable { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 0.9em; }
   #taskTable th, #taskTable td {
     text-align: left;
     padding: 5px 8px;

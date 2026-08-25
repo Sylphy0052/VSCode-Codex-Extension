@@ -44,6 +44,9 @@ export type ApprovalHandler = (
   rawParams: Record<string, unknown>,
 ) => Promise<ApprovalHandlerResult>;
 
+/** MCPサーバが発行するelicitationを自動許可できるか判定する。 */
+export type McpElicitationHandler = (params: Record<string, unknown>) => boolean;
+
 /** `setApprovalHandler` が `ask` を返した要求が、その後どう解決したか。 */
 export interface ApprovalOutcome {
   requestId: number | string;
@@ -148,6 +151,11 @@ export interface TaskSession {
   onStateChanged(listener: (state: ChatState) => void): void;
   /** 承認要求の判定を差し込む。 */
   setApprovalHandler(handler: ApprovalHandler): void;
+  /**
+   * MCPのelicitation（ツール呼び出し前の確認）を自動許可するための任意の差し込み口。
+   * 未実装のプロバイダは従来どおり人へ問い合わせる。
+   */
+  setMcpElicitationHandler?(handler: McpElicitationHandler): void;
   /**
    * `setApprovalHandler` が `ask` を返した要求（＝従来通り承認カードへ委ねた要求）が
    * 実際に解決された（人が承認カードのボタンを押した）ときに呼ばれる。
