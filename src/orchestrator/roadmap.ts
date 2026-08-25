@@ -1058,6 +1058,9 @@ export function buildRoadmapPrompt(input: RoadmapPromptInput): string {
   lines.push('```');
   lines.push('');
   lines.push('- 項目のid（`R1` など）はロードマップの中で一意にしてください');
+  lines.push('- フェーズ見出しは必ず `## ` で始めてください');
+  lines.push('- 実行項目は必ず `- [ ] <一意なid> <内容>` の形式にしてください');
+  lines.push('- 各フェーズに実行項目を1件以上含めてください');
   lines.push(
     '- `依存` は同じロードマップ内の項目idで書いてください（無ければ `なし`）。書かれていない項目同士は並列に走らせられます',
   );
@@ -1276,6 +1279,14 @@ export interface RoadmapGenerationPort {
   generate(request: RoadmapGenerationRequest): Promise<RoadmapGenerationResult>;
 }
 
+/** ロードマップの未紐付け項目へIssueを起票するポート。 */
+export interface RoadmapIssueCreationPort {
+  createIssues(
+    workspaceRoot: string,
+    items: readonly RoadmapItem[],
+  ): Promise<{ ok: true; issues: ReadonlyMap<string, number> } | { ok: false; message: string }>;
+}
+
 /**
  * `RoadmapGenerationPort` の実装（Issue #105。上のJSDocが「範囲外」としていた配線）。
  *
@@ -1340,6 +1351,8 @@ export interface GenerateRoadmapDeps {
   generation: RoadmapGenerationPort;
   issues: IssueListPort;
   fs: RoadmapFileSystemPort;
+  /** 指定時は、既存Issueを持たない項目を保存前にIssue化する。 */
+  issueCreation?: RoadmapIssueCreationPort;
 }
 
 export interface GenerateRoadmapInput {
@@ -1404,9 +1417,9 @@ export async function generateRoadmap(
     return { ok: false, reason: 'generationFailed', message: generated.message };
   }
 
-  const markdown = stripMarkdownCodeFence(generated.text);
-  const parsed = parseRoadmapMarkdown(markdown);
-  const validation = validateRoadmap(parsed);
+  let markdown = stripMarkdownCodeFence(generated.text);
+  let parsed = parseRoadmapMarkdown(markdown);
+  let validation = validateRoadmap(parsed);
   if (validation.errors.length > 0) {
     return {
       ok: false,
@@ -1415,9 +1428,73 @@ export async function generateRoadmap(
       rawResponse: generated.text,
     };
   }
+
+  if (deps.issueCreation !== undefined) {
+    const missingIssueItems = allItems(parsed).filter((item) => item.issue === undefined);
+    if (missingIssueItems.length > 0) {
+      const created = await deps.issueCreation.createIssues(input.workspaceRoot, missingIssueItems);
+      if (!created.ok) {
+        return {
+          ok: false,
+          reason: 'generationFailed',
+          message: `ロードマップ項目のIssue起票に失敗しました: ${created.message}`,
+          rawResponse: generated.text,
+        };
+      }
+      markdown = applyRoadmapIssueNumbers(markdown, created.issues);
+      parsed = parseRoadmapMarkdown(markdown);
+      validation = validateRoadmap(parsed);
+      if (validation.errors.length > 0) {
+        return {
+          ok: false,
+          reason: 'invalidRoadmap',
+          message: validation.errors.map((error) => error.message).join(' / '),
+          rawResponse: generated.text,
+        };
+      }
+    }
+  }
   await deps.fs.writeTextFile(pathResult.path, markdown);
 
   return { ok: true, path: pathResult.path, markdown, parsed, validation };
+}
+
+/**
+ * 指定した項目へIssue番号を書き戻す。既存の`Issue:`行は置換し、無ければ依存行の後へ追加する。
+ * 生成直後のMarkdownだけを対象にし、元のタイトル・タスク本文・チェック状態は変更しない。
+ */
+export function applyRoadmapIssueNumbers(
+  markdown: string,
+  issues: ReadonlyMap<string, number>,
+): string {
+  if (issues.size === 0) return markdown;
+
+  const parsed = parseRoadmapMarkdown(markdown);
+  const lineEnding = detectLineEnding(markdown);
+  const lines = markdown.split(/\r?\n/u);
+  const items = allItems(parsed)
+    .filter((item) => issues.has(item.id))
+    .sort((a, b) => b.line - a.line);
+
+  for (const item of items) {
+    const issue = issues.get(item.id);
+    if (issue === undefined || !Number.isSafeInteger(issue) || issue <= 0) continue;
+
+    let insertAt = item.line + 1;
+    let replaced = false;
+    for (let index = item.line + 1; index < lines.length; index += 1) {
+      const line = lines[index] ?? '';
+      if (CHECKBOX_ITEM_PATTERN.test(line) || PHASE_HEADING_PATTERN.test(line)) break;
+      if (ISSUE_LINE_CANDIDATE_PATTERN.test(line)) {
+        lines[index] = `  - Issue: #${String(issue)}`;
+        replaced = true;
+        break;
+      }
+      if (DEPENDS_LINE_PATTERN.test(line)) insertAt = index + 1;
+    }
+    if (!replaced) lines.splice(insertAt, 0, `  - Issue: #${String(issue)}`);
+  }
+  return lines.join(lineEnding);
 }
 
 /** 任意Markdownからロードマップへ変換するための入力。 */

@@ -49,9 +49,12 @@ import {
   type GitCommandRunner,
 } from './orchestrator/worktree';
 import {
+  createIssue,
+  detectForgeHost,
   nodeCliAvailability,
   nodeCliCommandRunner,
   nodeForgeFileSystem,
+  parsePullRequestNumberFromUrl,
   type CliAvailabilityPort,
   type CliCommandRunner,
   type FinalMergeConfig,
@@ -81,6 +84,8 @@ import {
   selectNextRoadmapPhase,
   validateRoadmap,
   type IssueListPort,
+  type RoadmapIssueCreationPort,
+  type RoadmapItem,
 } from './orchestrator/roadmap';
 import { sanitizeForLog } from './orchestrator/sanitize';
 import { WorkflowRunStore } from './orchestrator/runStore';
@@ -1700,6 +1705,64 @@ export async function warnWithLogLink(log: Logger, message: string): Promise<voi
   }
 }
 
+function buildRoadmapTaskIssueBody(item: RoadmapItem): string {
+  const dependencies = item.dependsOn.length > 0 ? item.dependsOn.join(', ') : 'なし';
+  return [
+    '## タスク',
+    '',
+    item.text,
+    '',
+    '## 依存',
+    '',
+    dependencies,
+    '',
+    '## ロードマップ',
+    '',
+    `- id: ${item.id}`,
+  ].join('\n');
+}
+
+/** ロードマップ生成時に未紐付けタスクをGitHub/GitLab Issueへ起票する。 */
+function createRoadmapIssueCreationPort(): RoadmapIssueCreationPort {
+  return {
+    async createIssues(workspaceRoot, items) {
+      const remote = await nodeGitCommandRunner.run(['remote', 'get-url', 'origin'], workspaceRoot);
+      if (remote.code !== 0) {
+        return { ok: false, message: 'originリモートを取得できませんでした' };
+      }
+      const forgeHost = detectForgeHost(remote.stdout.trim());
+      if (forgeHost === undefined) {
+        return { ok: false, message: 'GitHubまたはGitLabのoriginリモートが必要です' };
+      }
+
+      const issueNumbers = new Map<string, number>();
+      for (const item of items) {
+        const result = await createIssue(
+          { cli: nodeCliCommandRunner, fs: nodeForgeFileSystem },
+          {
+            host: forgeHost,
+            cwd: workspaceRoot,
+            title: `${item.id}: ${item.text}`,
+            body: buildRoadmapTaskIssueBody(item),
+          },
+        );
+        if (!result.ok || result.url === undefined) {
+          return {
+            ok: false,
+            message: result.ok ? `${item.id}のIssue URLを取得できませんでした` : result.message,
+          };
+        }
+        const number = parsePullRequestNumberFromUrl(result.url);
+        if (number === undefined) {
+          return { ok: false, message: `${item.id}のIssue番号をURLから取得できませんでした` };
+        }
+        issueNumbers.set(item.id, number);
+      }
+      return { ok: true, issues: issueNumbers };
+    },
+  };
+}
+
 /**
  * ゴールの文からロードマップを生成する（design.md §16.19、#95・配線はIssue #105）。
  *
@@ -1748,7 +1811,12 @@ async function runRoadmap(
   }
 
   const result = await generateRoadmap(
-    { generation, issues, fs: nodeRoadmapFileSystem },
+    {
+      generation,
+      issues,
+      fs: nodeRoadmapFileSystem,
+      issueCreation: createRoadmapIssueCreationPort(),
+    },
     {
       goal,
       workspaceRoot,
