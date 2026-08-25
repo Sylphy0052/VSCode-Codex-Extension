@@ -96,9 +96,11 @@ import type { ExtensionSafetyBaseline } from './orchestrator/taskConfig';
 import type { TaskSessionHost } from './orchestrator/taskSession';
 import {
   buildWorkspaceSummary,
+  MAX_AUTO_REVIEW_REVISIONS,
   nodePlannerWorkspacePort,
   planWorkflow,
   providerHintToProvider,
+  reviseWorkflowPlan,
   resolveUniqueFileName,
   reviewWorkflowPlan,
   slugifyGoal,
@@ -2372,8 +2374,8 @@ async function writeUniqueWorkflowFile(
  * **エディタとワークフローViewの表示は、レビューの完了を待たない。** レビューは
  * `PLANNER_TURN_TIMEOUT_MS`（既定5分）までかかりうるため、表示までそれだけ人を待たせる
  * と「保存は妨げない」という受入基準の実質を損なう。表示はまず`securityWarnings`だけで
- * 出し、レビューはバックグラウンドで走らせて、指摘が見つかった時点で`previewDefinition`
- * をもう一度呼んで警告欄へ追加し、`showWarningMessage`も別途出す（design.md §16.28）。
+ * 出し、レビューはバックグラウンドで走らせる。指摘があれば修正セッションへ渡して検証済み
+ * YAMLだけを適用し、再レビューで指摘が消えるまで最大3回繰り返す（design.md §16.28）。
  * このもう一度の呼び出しは無条件——ユーザーが既に別のrunの表示へ切り替えていた場合、
  * その表示がレビュー結果の到着で差し替わりうる（フォーカスは奪わない。W3の受入基準の
  * 対象外として許容している）。
@@ -2381,9 +2383,8 @@ async function writeUniqueWorkflowFile(
  * レビューを追いかける処理はバックグラウンドの`void`な即時実行関数（IIFE）の中にあり、
  * この関数自体は先に`resolve`済みのため、IIFE内で投げた例外を受け取る呼び出し元が無い。
  * `reviewWorkflowPlan`自体は例外を投げない設計だが、IIFE内の他の呼び出し
- * （`withProgress`・`previewDefinition`・`showWarningMessage`）は投げうるため、
- * **IIFE全体を`try/catch`で囲み、失敗しても`log.warn`に留めて表示済みの内容へは
- * 波及させない。**
+ * （`withProgress`・`previewDefinition`・`showWarningMessage`・エディタ保存）は投げうるため、
+ * **IIFE全体を`try/catch`で囲み、失敗しても`log.warn`に留めて保存済みのYAMLを壊さない。**
  */
 async function handlePlanSuccess(
   result: Extract<PlanWorkflowResult, { ok: true }>,
@@ -2463,63 +2464,136 @@ async function handlePlanSuccess(
     );
   }
 
-  // タスク分解のレビュー（design.md §16.28）は表示の後を追いかけて走らせる。保存済み
-  // ファイル・既に開いたエディタ・上のトーストは待たない（await しない）。指摘があれば、
-  // 開いたままのプレビューへ後から追加する（`previewDefinition`は毎回スナップショットを
-  // 作り直すため、この2回目の呼び出しは1回目を上書きする。ただしユーザーが既に別のrunの
-  // 表示へ切り替えていた場合はその表示が差し替わりうる——design.md §16.28「限界」参照）。
-  //
-  // `reviewWorkflowPlan`自体は例外を投げない設計だが、この関数の外側は既に`resolve`済み
-  // （`handlePlanSuccess`の呼び出し元は待っていない）なので、IIFE内の他の呼び出し
-  // （`withProgress`・`previewDefinition`・`showWarningMessage`）が投げた場合に受け取る
-  // 呼び出し元がどこにも無く、未処理rejectになる。そのためIIFE全体を`try/catch`で囲み、
-  // catchでは`log.warn`に留める（レビューは警告を足すだけの機能なので、この経路の失敗で
-  // 保存済みの状態や既に開いた表示へ波及させてはならない）。
+  // 保存済みYAMLを別セッションでレビューし、指摘があれば修正セッションへ戻してから
+  // 再レビューする。各セッションは読み取り専用で、ファイルへの反映はこのUI層だけが行う。
+  // 利用者が開いたエディタを編集した場合は、内容を上書きせず警告を残して止める。
   void (async () => {
     try {
-      const review = await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Notification,
-          title: 'ワークフローをレビューしています…',
-        },
-        () =>
-          reviewWorkflowPlan({
-            goal,
-            yaml: result.yaml,
-            provider,
-            host,
-            cwd: workspaceRoot,
+      let yaml = result.yaml;
+      let definition = result.definition;
+      let securityWarnings = result.securityWarnings;
+      for (let revision = 0; revision <= MAX_AUTO_REVIEW_REVISIONS; revision += 1) {
+        const review = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title:
+              revision === 0
+                ? 'ワークフローをレビューしています…'
+                : `ワークフローを再レビューしています…（${revision}/${MAX_AUTO_REVIEW_REVISIONS}）`,
+          },
+          () =>
+            reviewWorkflowPlan({
+              goal,
+              yaml,
+              provider,
+              host,
+              cwd: workspaceRoot,
+              log,
+            }),
+        );
+
+        if (review.error !== undefined) {
+          void warnWithLogLink(
             log,
-          }),
-      );
+            'ワークフローのレビューに失敗したため、自動修正を中止しました（詳しくはログ）',
+          );
+          return;
+        }
+        if (review.findings.length === 0) {
+          if (revision > 0) {
+            void vscode.window.showInformationMessage(
+              `レビュー指摘を反映し、ワークフローの再レビューを通過しました（${revision}回修正）。`,
+            );
+          }
+          return;
+        }
 
-      if (review.findings.length === 0) {
-        return;
+        const warnings = [
+          ...securityWarnings.map((w) => ({
+            kind: 'plannerSecurity' as const,
+            taskId: w.taskId,
+            message: w.message,
+          })),
+          ...review.findings.map((finding) => ({
+            kind: 'plannerReview' as const,
+            taskId: finding.taskIds[0],
+            message:
+              finding.taskIds.length > 0
+                ? `[${finding.taskIds.join(', ')}] ${finding.message}`
+                : finding.message,
+          })),
+        ];
+        view.previewDefinition(filePath, definition, warnings);
+
+        if (revision === MAX_AUTO_REVIEW_REVISIONS) {
+          log.warn(
+            `[planner] タスク分解レビューの自動修正が上限${MAX_AUTO_REVIEW_REVISIONS}回に達しました: ${review.findings
+              .map((finding) => sanitizeForLog(finding.message))
+              .join(' / ')}`,
+          );
+          void warnWithLogLink(
+            log,
+            `タスク分解レビューの自動修正が上限${MAX_AUTO_REVIEW_REVISIONS}回に達しました（指摘${review.findings.length}件）。内容を確認してください（詳しくはログ）`,
+          );
+          return;
+        }
+
+        const revised = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: `レビュー指摘を反映しています…（${revision + 1}/${MAX_AUTO_REVIEW_REVISIONS}）`,
+          },
+          () =>
+            reviseWorkflowPlan({
+              goal,
+              yaml,
+              findings: review.findings,
+              provider,
+              host,
+              cwd: workspaceRoot,
+              baseline: readSafetyBaseline(),
+              log,
+            }),
+        );
+        if (!revised.ok) {
+          void warnWithLogLink(
+            log,
+            `レビュー指摘を反映したYAMLが検証を通らなかったため、自動修正を中止しました: ${sanitizeForLog(revised.error)}`,
+          );
+          return;
+        }
+        if (revised.droppedTemplateRefs.length > 0) {
+          log.warn(
+            `[planner] レビュー指摘の修正時にdependsOnに無いテンプレート変数を落としました: ${revised.droppedTemplateRefs
+              .map((reference) => `${reference.taskId}: ${reference.ref}`)
+              .join(', ')}`,
+          );
+        }
+
+        // ファイルを開いてから利用者が編集していれば、その編集を上書きしない。修正案は
+        // エージェントではなくこのUI層が適用するため、保存前の本文比較をここで行う。
+        if (doc.isDirty || doc.getText() !== yaml) {
+          log.warn('[planner] 利用者によるYAML編集を検出したため、レビュー指摘の自動反映を中止しました');
+          void warnWithLogLink(
+            log,
+            '開いたワークフローYAMLが編集されたため、レビュー指摘の自動反映を中止しました（詳しくはログ）',
+          );
+          return;
+        }
+        const edit = new vscode.WorkspaceEdit();
+        edit.replace(doc.uri, new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)), revised.yaml);
+        if (!(await vscode.workspace.applyEdit(edit)) || !(await doc.save())) {
+          void warnWithLogLink(
+            log,
+            'レビュー指摘を反映したYAMLを保存できなかったため、自動修正を中止しました（詳しくはログ）',
+          );
+          return;
+        }
+
+        yaml = revised.yaml;
+        definition = revised.definition;
+        securityWarnings = revised.securityWarnings;
       }
-
-      view.previewDefinition(filePath, result.definition, [
-        ...result.securityWarnings.map((w) => ({
-          kind: 'plannerSecurity' as const,
-          taskId: w.taskId,
-          message: w.message,
-        })),
-        ...review.findings.map((f) => ({
-          kind: 'plannerReview' as const,
-          taskId: f.taskIds[0],
-          message: f.taskIds.length > 0 ? `[${f.taskIds.join(', ')}] ${f.message}` : f.message,
-        })),
-      ]);
-
-      log.warn(
-        `[planner] タスク分解のレビューで指摘があります: ${review.findings
-          .map((f) => sanitizeForLog(f.message))
-          .join(' / ')}`,
-      );
-      void warnWithLogLink(
-        log,
-        `タスク分解のレビューで指摘があります（${review.findings.length}件）。` +
-          '内容を確認してください（自動では直していません。詳しくはログ）',
-      );
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       log.warn(
