@@ -168,13 +168,14 @@ describe('ForgeHubService', () => {
 
   it('GitHubのCI成功をCI列の状態へ永続化する', async () => {
     const cli = new FakeCli();
+    let ciOutput = '{"statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}]}';
     cli.run = async (command, args) => {
       cli.calls.push({ command, args });
       if (args[0] === 'auth') return { code: 0, stdout: '', stderr: '' };
       if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
         return {
           code: 0,
-          stdout: '{"statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}]}',
+          stdout: ciOutput,
           stderr: '',
         };
       }
@@ -208,10 +209,16 @@ describe('ForgeHubService', () => {
     if (item === undefined) throw new Error('作業カードが記録されませんでした');
     await service.createDraftPullRequest(item.branch);
     await service.refreshCi(item.branch);
+    expect(service.listWorkItems()).toMatchObject([
+      { status: 'blocked', ciMessage: expect.any(String) },
+    ]);
+    ciOutput = '{"statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}]}';
+    await service.refreshCi(item.branch);
 
     expect(service.listWorkItems()).toMatchObject([
       { provider: 'claude', status: 'ci', pullRequestNumber: 12, updatedAt: expect.any(String) },
     ]);
+    expect(service.listWorkItems()[0]?.ciMessage).toBeUndefined();
     expect(cli.calls.some((call) => call.command === 'gh' && call.args[0] === 'pr')).toBe(true);
   });
 });

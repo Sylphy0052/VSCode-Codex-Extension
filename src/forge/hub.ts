@@ -269,8 +269,9 @@ export class ForgeHubService {
     const ci = await fetchCiConclusion(this.deps.cli, item.host, item.cwd, item.pullRequestNumber);
     const status =
       ci.conclusion === 'failed' ? 'blocked' : ci.conclusion === 'passed' ? 'ci' : 'review';
+    const { ciMessage: _previousCiMessage, ...itemWithoutCiMessage } = item;
     this.workItems.set(branch, {
-      ...item,
+      ...itemWithoutCiMessage,
       status,
       ...(ci.message === undefined ? {} : { ciMessage: ci.message }),
       updatedAt: new Date().toISOString(),
