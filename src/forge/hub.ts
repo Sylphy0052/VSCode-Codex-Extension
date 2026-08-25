@@ -240,14 +240,13 @@ export class ForgeHubService {
   }
 
   async refreshRemoteStates(): Promise<void> {
-    await Promise.all(
-      this.listWorkItems()
-        .filter((item) => item.pullRequestNumber !== undefined)
-        .flatMap((item) => [
-          this.refreshPullRequestStatus(item.branch),
-          this.refreshReview(item.branch),
-        ]),
-    );
+    for (const item of this.listWorkItems()) {
+      if (item.pullRequestNumber === undefined) continue;
+      // 両メソッドは同じカードを読み直して丸ごと永続化する。並列化すると後着の書き込みが
+      // 先着のPR状態またはレビュー状態を消してしまうため、カード内だけは直列にする。
+      await this.refreshPullRequestStatus(item.branch);
+      await this.refreshReview(item.branch);
+    }
   }
 
   async createDraftPullRequest(
