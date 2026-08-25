@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { realpath as fsRealpath } from 'node:fs/promises';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { type ChatItem, type ChatState, type FileDiff } from '../appserver/chatState';
 import {
@@ -419,6 +420,72 @@ export async function openCodeInNewFile(code: string, lang: string): Promise<voi
     language: codeFenceLanguageId(lang),
   });
   await vscode.window.showTextDocument(doc, { preview: false });
+}
+
+/**
+ * 会話本文のMarkdownリンクが指すローカルファイルをエディタで開く。
+ *
+ * `file:` URIと、会話の作業ディレクトリからの相対パスだけを扱う。外部URLや
+ * `command:`などは呼び出し元の外部URL経路へ委ね、この関数から実行しない。
+ */
+export async function openChatFileLink(url: string, cwd: string | undefined): Promise<boolean> {
+  let filePath: string | undefined;
+  const parsed = vscode.Uri.parse(url);
+  let line = lineFromFileLink(parsed.fragment);
+
+  if (parsed.scheme === 'file') {
+    filePath = parsed.fsPath;
+  } else if (/^[a-z]:[\\/]/iu.test(url)) {
+    filePath = url.split('#', 1)[0];
+  } else if (parsed.scheme === '' && path.isAbsolute(parsed.path)) {
+    filePath = parsed.path;
+  } else if (parsed.scheme === '' && cwd !== undefined && parsed.path !== '') {
+    filePath = path.resolve(cwd, parsed.path);
+  }
+
+  if (filePath === undefined) {
+    return false;
+  }
+  const location = splitFileLinkLine(filePath);
+  const target = vscode.Uri.file(location.filePath);
+  line ??= location.line;
+
+  try {
+    const doc = await vscode.workspace.openTextDocument(target);
+    await vscode.window.showTextDocument(doc, {
+      preview: false,
+      ...(line === undefined
+        ? {}
+        : {
+            selection: new vscode.Range(
+              new vscode.Position(line - 1, 0),
+              new vscode.Position(line - 1, 0),
+            ),
+          }),
+    });
+  } catch {
+    void vscode.window.showWarningMessage(`ファイルを開けません: ${target.fsPath}`);
+  }
+  return true;
+}
+
+/** `/path/to/file.ts:12` の末尾に付く、会話リンク用の行番号を分ける。 */
+function splitFileLinkLine(filePath: string): { filePath: string; line: number | undefined } {
+  const match = /^(.*):(\d+)$/u.exec(filePath);
+  const lineText = match?.[2];
+  const linkPath = match?.[1];
+  if (lineText === undefined || linkPath === undefined) {
+    return { filePath, line: undefined };
+  }
+  const line = Number(lineText);
+  return line < 1 ? { filePath, line: undefined } : { filePath: linkPath, line };
+}
+
+/** `file:` URIの`#L12`/`#12`も行番号として扱う。 */
+function lineFromFileLink(fragment: string): number | undefined {
+  const match = /^L?(\d+)$/iu.exec(fragment);
+  const line = match === null ? undefined : Number(match[1]);
+  return line === undefined || line < 1 ? undefined : line;
 }
 
 /**
