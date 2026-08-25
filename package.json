@@ -151,7 +151,7 @@
           "command": "claude.clearChat",
           "when": "activeWebviewPanelId == claude.chat",
           "group": "navigation@102"
-        },
+        }
       ],
       "editor/context": [
         {

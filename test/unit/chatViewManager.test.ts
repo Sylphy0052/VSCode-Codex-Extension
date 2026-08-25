@@ -1326,7 +1326,7 @@ describe('ChatViewManager', () => {
       expect(__mock.executedCommands).toContain('agent.workflows.team');
     });
 
-  it('三点メニューのワークフローViewからagent.workflows.viewを実行する', async () => {
+    it('三点メニューのワークフローViewからagent.workflows.viewを実行する', async () => {
       const { manager, connection } = createManager();
       const p = manager.openNew('/workspace/root');
       await tick();
