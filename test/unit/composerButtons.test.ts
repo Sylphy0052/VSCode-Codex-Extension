@@ -8,7 +8,7 @@ import {
 } from '../../src/view/composerButtons';
 
 describe('COMPOSER_BUTTON_IDS（issue #296、入力欄アイコン列の正準の並び）', () => {
-  it('元の10個の並び（変更前の既定順）と一致する', () => {
+  it('14個の操作を正準の並びで持つ', () => {
     expect(COMPOSER_BUTTON_IDS).toEqual([
       'attach',
       'loopToggle',
@@ -20,6 +20,10 @@ describe('COMPOSER_BUTTON_IDS（issue #296、入力欄アイコン列の正準�
       'review',
       'exportTranscript',
       'workflowMenu',
+      'teamWorkflow',
+      'workflowView',
+      'openProgress',
+      'handoffToNewSession',
     ]);
   });
 });
@@ -91,7 +95,7 @@ describe('normalizeComposerButtons（設定 agent.chat.composerButtons の検証
 });
 
 describe('overflowComposerButtons（「…」メニューへ畳むボタンの算出）', () => {
-  it('既定の4つを渡すと、残り6つが正準の並びの順で返る', () => {
+  it('既定の4つを渡すと、残り10個が正準の並びの順で返る', () => {
     expect(overflowComposerButtons(DEFAULT_COMPOSER_BUTTONS)).toEqual([
       'recap',
       'planToggle',
@@ -99,14 +103,18 @@ describe('overflowComposerButtons（「…」メニューへ畳むボタンの�
       'review',
       'exportTranscript',
       'workflowMenu',
+      'teamWorkflow',
+      'workflowView',
+      'openProgress',
+      'handoffToNewSession',
     ]);
   });
 
-  it('空配列（表に何も出さない設定）を渡すと10個すべてが返る', () => {
+  it('空配列（表に何も出さない設定）を渡すと14個すべてが返る', () => {
     expect(overflowComposerButtons([])).toEqual(COMPOSER_BUTTON_IDS);
   });
 
-  it('10個すべてを渡すと空配列が返る（どこにも重複しない）', () => {
+  it('14個すべてを渡すと空配列が返る（どこにも重複しない）', () => {
     expect(overflowComposerButtons(COMPOSER_BUTTON_IDS)).toEqual([]);
   });
 

@@ -957,6 +957,12 @@ const COMPOSER_ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9V2M5.3 4.7 8 2l2.7 2.7"/><path d="M2.5 11v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/></svg>',
   workflow:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="3.2" r="1.9"/><circle cx="3.6" cy="12.8" r="1.9"/><circle cx="12.4" cy="12.8" r="1.9"/><path d="M7.2 4.9 4.4 11.1M8.8 4.9l2.8 6.2"/></svg>',
+  workflowView:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2.5" width="12" height="11" rx="1.2"/><path d="M5 6h6M5 9h6M5 12h3"/></svg>',
+  progress:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2" width="11" height="12" rx="1.2"/><path d="m5 6 1.2 1.2L8.5 5M9.5 6h1.5M5 10l1.2 1.2L8.5 9M9.5 10h1.5"/></svg>',
+  handoff:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8h8M8.5 4.5 12 8l-3.5 3.5"/><path d="M2.5 3.5v9"/></svg>',
   scrollToBottom:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v9M5.3 8.3 8 11l2.7-2.7"/><path d="M3.5 13.5h9"/></svg>',
 } as const satisfies Record<string, string>;
@@ -990,7 +996,7 @@ interface ComposerButtonSpec {
 }
 
 /**
- * 10個のボタンの元の仕様（aria-label・title・hidden条件・アイコン）を1か所にまとめる
+ * 14個のボタンの元の仕様（aria-label・title・hidden条件・アイコン）を1か所にまとめる
  * （issue #296）。表・「…」メニューのどちらへ描画するかは`renderComposerButton`が
  * 決め、ここでは条件を変えない。**この関数を触るだけで置き場所に関わらず両方へ効く**
  * ことが、受入基準「畳んだ後も同じ条件で出入りする」の実装上の担保。
@@ -1078,6 +1084,38 @@ function composerButtonSpec(id: ComposerButtonId, ctx: ComposerButtonContext): C
         hidden: false,
         pressed: false,
         icon: COMPOSER_ICONS.workflow,
+      };
+    case 'teamWorkflow':
+      return {
+        ariaLabel: 'チームモードを開始',
+        title: 'ゴールを役割ごとのセッションへ分けたワークフローを作成します',
+        hidden: false,
+        pressed: false,
+        icon: COMPOSER_ICONS.workflow,
+      };
+    case 'workflowView':
+      return {
+        ariaLabel: 'ワークフローViewを開く',
+        title: 'ワークフローの定義と進行状況を表示します',
+        hidden: false,
+        pressed: false,
+        icon: COMPOSER_ICONS.workflowView,
+      };
+    case 'openProgress':
+      return {
+        ariaLabel: '進捗を表示',
+        title: 'このセッションの進捗を別タブで表示します',
+        hidden: false,
+        pressed: false,
+        icon: COMPOSER_ICONS.progress,
+      };
+    case 'handoffToNewSession':
+      return {
+        ariaLabel: '新セッションへ引き継ぐ',
+        title: 'この会話の内容を新しいセッションへ引き継ぎます',
+        hidden: false,
+        pressed: false,
+        icon: COMPOSER_ICONS.handoff,
       };
   }
 }

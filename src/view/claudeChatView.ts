@@ -1567,6 +1567,22 @@ export class ClaudeChatViewManager
         void vscode.commands.executeCommand('agent.workflows.menu', 'claude');
         return;
       }
+      if (type === 'teamWorkflow') {
+        void vscode.commands.executeCommand('agent.workflows.team', 'claude');
+        return;
+      }
+      if (type === 'workflowView') {
+        void vscode.commands.executeCommand('agent.workflows.view');
+        return;
+      }
+      if (type === 'openProgress') {
+        void vscode.commands.executeCommand('agent.openProgress');
+        return;
+      }
+      if (type === 'handoffToNewSession') {
+        void this.handoffToNewSession();
+        return;
+      }
       if (type === 'rewind' && typeof m['messageId'] === 'string') {
         entry.loop.noteUserAction();
         void this.rewindFiles(entry, m['messageId']);

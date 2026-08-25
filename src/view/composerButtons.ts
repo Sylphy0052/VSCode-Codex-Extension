@@ -1,7 +1,7 @@
 /**
  * 入力欄アイコン列（`#composerIconRow`）に置けるボタンのID一覧と表示順（issue #296）。
  *
- * 元の並び（変更前の10個の既定順）をそのまま正準の並びとして持つ。`agent.chat.
+ * 元の並びにチームモードとワークフローViewを足した並びを正準として持つ。`agent.chat.
  * composerButtons`（設定）で表に直接出すボタンを選べるようにし、それ以外はこの並びの
  * まま「…」メニューへ畳む（`chatView.ts`の`renderShell`参照）。`vscode`には依存しない
  * 純粋なロジックのみを置き、`config.ts`・`chatView.ts`の両方から使う。
@@ -17,6 +17,10 @@ export const COMPOSER_BUTTON_IDS = [
   'review',
   'exportTranscript',
   'workflowMenu',
+  'teamWorkflow',
+  'workflowView',
+  'openProgress',
+  'handoffToNewSession',
 ] as const;
 
 export type ComposerButtonId = (typeof COMPOSER_BUTTON_IDS)[number];

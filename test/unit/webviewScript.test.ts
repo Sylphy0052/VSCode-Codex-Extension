@@ -126,11 +126,19 @@ describe('chatScript', () => {
     );
   });
 
-  it('ワークフローのボタンがメッセージを送る（issue #250）', () => {
+  it('ワークフロー・進捗・引き継ぎのボタンがメッセージを送る', () => {
     const source = chatScript('Codex', { mode: 'quickPick' });
 
-    expect(source).toContain("el('workflowMenu')");
-    expect(source).toContain("type: 'workflowMenu'");
+    for (const id of [
+      'workflowMenu',
+      'teamWorkflow',
+      'workflowView',
+      'openProgress',
+      'handoffToNewSession',
+    ]) {
+      expect(source).toContain(`el('${id}')`);
+      expect(source).toContain(`type: '${id}'`);
+    }
   });
 
   it('ワークフローのボタンは応答中も無効化しない（issue #250）', () => {
@@ -139,6 +147,15 @@ describe('chatScript', () => {
     const source = chatScript('Codex', { mode: 'quickPick' });
 
     expect(source).not.toContain("el('workflowMenu').disabled");
+  });
+
+  it('三点メニューは表示可能な側へ開き、表示可能な高さでスクロールする', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+
+    expect(source).toContain('function positionOverflowMenu()');
+    expect(source).toContain('const above = Math.max(0, rect.top - gap)');
+    expect(source).toContain('const below = Math.max(0, window.innerHeight - rect.bottom - gap)');
+    expect(source).toContain("composerOverflowMenu.style.maxHeight");
   });
 
   it('showInputModeHintsを省略すると !/# の案内を出さない（既定はfalse、issue #5/#6）', () => {
