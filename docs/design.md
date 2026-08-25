@@ -5935,7 +5935,7 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 2. 保存直後、`securityWarnings`だけを渡して`WorkflowViewManager.previewDefinition`を呼び、エディタも開く（**レビューの完了を待たない**）
 3. その後を追いかけて（`await`せず）`reviewWorkflowPlan`を呼ぶ（`vscode.window.withProgress`で「ワークフローをレビューしています…」の進捗を出す。§16.9の生成そのものと同じ流儀）
 4. 指摘があれば`reviseWorkflowPlan`が別の読み取り専用セッションでYAMLだけを返す。既存の抽出・テンプレート参照修復・provider補完・構文検証を通った場合だけ、拡張側が開いているエディタ本文が保存直後のYAMLと一致することを確認して置換・保存する。未保存編集または保存失敗なら反映しない
-5. 修正済みYAMLを再レビューし、指摘が無くなるまで4.〜5.を繰り返す。修正は最大3回で打ち切り、残った指摘は`securityWarnings`とともに`previewDefinition`へ表示して利用者へ知らせる
+5. 修正済みYAMLを再レビューし、指摘が無くなるまで4.〜5.を繰り返す。指摘なしで完了したときは、修正回数とともに`[planner] ワークフローのレビューが完了しました…`をOutputへ`info`ログとして残す。修正は最大3回で打ち切り、残った指摘は`securityWarnings`とともに`previewDefinition`へ表示して利用者へ知らせる
 
 2.と3.の間に`await`を挟まない設計にした理由は、レビューが`PLANNER_TURN_TIMEOUT_MS`（既定5分）までかかりうるため、完了を待ってから表示すると「保存は妨げない」という受入基準の実質（人がすぐ結果を見られる）を損なうため。3.〜4.は`handlePlanSuccess`本体からは`await`されない`void`な即時実行関数（IIFE）の中で走る——本体は既に`resolve`済みのため、この中で例外を投げても受け取る呼び出し元がどこにも無く、未処理rejectになる。`reviewWorkflowPlan`自体は例外を投げず`findings: []`と`error`を返す設計だが、**IIFEの中には`vscode.window.withProgress`・`previewDefinition`・`showWarningMessage`という他の呼び出しもあり、これらは投げうる**（拡張のdeactivate中やViewパネル破棄後の呼び出し等）。そのため`reviewWorkflowPlan`が例外を投げないことだけを根拠にIIFEを無防備にはできない——**IIFE全体を`try/catch`で囲み、catchでは`log.warn`（`sanitizeForLog`を通す）に留めて表示済みの内容や保存済みファイルへは波及させない**。design.md §16.25 確認事項3の裏返しで、保存という「本番の効果」が先に確定してから、失敗しうるレビューを後に置く順序そのものが安全側になる、という設計意図自体は変わらない。
 
