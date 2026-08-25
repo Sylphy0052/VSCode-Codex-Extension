@@ -1773,15 +1773,6 @@ async function runRoadmap(
     return;
   }
 
-  if (result.validation.errors.length > 0) {
-    const detail = result.validation.errors.map((e) => e.message).join('\n');
-    log.error(`生成されたロードマップに問題があります:\n${detail}`);
-    void warnWithLogLink(
-      log,
-      '生成されたロードマップに問題があります。内容を確認してください（詳しくはログ）',
-    );
-  }
-
   if (result.validation.warnings.length > 0) {
     const detail = formatRoadmapWarningsDetail(result.validation.warnings, '\n');
     log.warn(`生成されたロードマップに警告があります:\n${detail}`);
