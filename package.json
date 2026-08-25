@@ -484,6 +484,12 @@
         "icon": "$(project)"
       },
       {
+        "command": "agent.forgeHub",
+        "title": "Forge Hubを開く",
+        "category": "Agent",
+        "icon": "$(repo)"
+      },
+      {
         "command": "agent.workflows.run",
         "title": "ワークフローを実行…",
         "category": "Agent"
@@ -736,6 +742,7 @@
               "teamWorkflow",
               "workflowView",
               "sessionKanban",
+              "forgeHub",
               "openProgress",
               "handoffToNewSession"
             ],
@@ -753,6 +760,7 @@
               "チームモードのワークフローを作成する",
               "ワークフローViewを開く",
               "このワークスペースで開いている会話を状態別に表示する",
+              "Forge Hubを開く",
               "このセッションの進捗を別タブで表示する",
               "この会話を新しいセッションへ引き継ぐ"
             ]

@@ -58,6 +58,7 @@ import {
   type ForgeHostConfig,
   type PullRequestLayerConfig,
 } from './orchestrator/forge';
+import { ForgeHubService } from './forge/hub';
 import { startHttpMcpTransport } from './orchestrator/messaging';
 import { nodePseudoWorktreeFileSystem } from './orchestrator/pseudoWorktree';
 import {
@@ -143,6 +144,7 @@ import { ProgressViewManager } from './view/progressView';
 import { formatRelativeTime } from './view/relativeTime';
 import { buildSessionKanban } from './view/sessionKanbanModel';
 import { SessionKanbanViewManager } from './view/sessionKanbanView';
+import { ForgeHubViewManager } from './view/forgeHubView';
 import { SessionDecorationProvider } from './view/sessionDecorations';
 import { SessionTreeProvider } from './view/sessionTreeProvider';
 import { SettingsProvider } from './view/settingsProvider';
@@ -715,8 +717,27 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       provider === 'claude' ? claudeChat.revealSession(threadId) : chat.revealSession(threadId),
     log,
   );
+  const forgeHub = new ForgeHubViewManager(
+    new ForgeHubService({
+      git: nodeGitCommandRunner,
+      cli: nodeCliCommandRunner,
+      cliAvailability: nodeCliAvailability,
+      fs: nodeForgeFileSystem,
+      worktreeFs: nodeWorktreeFileSystem,
+      memento: context.workspaceState,
+    }),
+    () => currentWorkspaceFolder()?.uri.fsPath,
+    (provider, cwd, prompt) =>
+      provider === 'claude'
+        ? claudeChat.openNewWithPrompt(cwd, prompt)
+        : chat.openNewWithPrompt(cwd, prompt),
+    (provider, sessionId) =>
+      provider === 'claude' ? claudeChat.revealSession(sessionId) : chat.revealSession(sessionId),
+    log,
+  );
   context.subscriptions.push(
     sessionKanban,
+    forgeHub,
     chat.onDidChangeState(() => sessionKanban.refresh()),
     claudeChat.onDidChangeState(() => sessionKanban.refresh()),
     chat.onDidChangePanels(() => sessionKanban.refresh()),
@@ -1017,6 +1038,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     ),
     vscode.commands.registerCommand('agent.workflows.view', () => workflowView.show()),
     vscode.commands.registerCommand('agent.sessionKanban', () => sessionKanban.show()),
+    vscode.commands.registerCommand('agent.forgeHub', (providerHint?: unknown) =>
+      forgeHub.show(providerHint === 'claude' ? 'claude' : 'codex'),
+    ),
     vscode.commands.registerCommand('agent.workflows.plan', (providerHint?: unknown) =>
       planWorkflowCommand(chat, claudeChat, workflowView, log, providerHint),
     ),

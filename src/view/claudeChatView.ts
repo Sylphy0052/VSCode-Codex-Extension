@@ -556,6 +556,16 @@ export class ClaudeChatViewManager
     return sessionId;
   }
 
+  /** 指定cwdで会話を開き、開始指示を1件だけ送る。外部UIの明示操作から使う。 */
+  async openNewWithPrompt(cwd: string, prompt: string): Promise<string | undefined> {
+    const sessionId = await this.openNew(cwd);
+    if (sessionId === undefined) return undefined;
+    const entry = this.panels.get(sessionId);
+    if (entry === undefined) return undefined;
+    this.dispatch(entry, prompt);
+    return sessionId;
+  }
+
   /**
    * 現在アクティブなセッションのtranscriptを新セッションへ渡し、引き継ぎを開始する
    * （issue #694）。CLIの応答を待って解析するのではなく、旧セッションのtranscript
@@ -1577,6 +1587,10 @@ export class ClaudeChatViewManager
       }
       if (type === 'sessionKanban') {
         void vscode.commands.executeCommand('agent.sessionKanban');
+        return;
+      }
+      if (type === 'forgeHub') {
+        void vscode.commands.executeCommand('agent.forgeHub', 'claude');
         return;
       }
       if (type === 'openProgress') {
