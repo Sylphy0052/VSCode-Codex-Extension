@@ -344,14 +344,21 @@ export class ForgeHubService {
   }
 
   /** 作業会話の状態はローカルの進捗信号として即座に保存する。 */
-  async recordSessionState(sessionId: string, state: { busy: boolean; failed: boolean }): Promise<void> {
+  async recordSessionState(
+    sessionId: string,
+    state: { busy: boolean; failed: boolean },
+  ): Promise<void> {
     const item = this.listWorkItems().find((candidate) => candidate.sessionId === sessionId);
     if (item === undefined) return;
     this.workItems.set(item.branch, {
       ...item,
       sessionBusy: state.busy,
       sessionFailed: state.failed,
-      nextAction: deriveNextAction({ ...item, sessionBusy: state.busy, sessionFailed: state.failed }),
+      nextAction: deriveNextAction({
+        ...item,
+        sessionBusy: state.busy,
+        sessionFailed: state.failed,
+      }),
       updatedAt: new Date().toISOString(),
     });
     await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
@@ -363,7 +370,11 @@ export class ForgeHubService {
     const result =
       item.host === 'github'
         ? await this.deps.cli.run('gh', ['pr', 'view', branch, '--json=number,url'], item.cwd)
-        : await this.deps.cli.run('glab', ['mr', 'list', '--source-branch', branch, '--output', 'json'], item.cwd);
+        : await this.deps.cli.run(
+            'glab',
+            ['mr', 'list', '--source-branch', branch, '--output', 'json'],
+            item.cwd,
+          );
     if (result.code !== 0 || result.stdout.trim() === '') return;
     const found = parseDiscoveredPullRequest(item.host, result.stdout);
     if (found === undefined) return;
@@ -426,7 +437,8 @@ export class ForgeHubService {
       return { ok: false, message: 'PR/MR番号がないためCIを取得できません。' };
     }
     const ci = await fetchCiConclusion(this.deps.cli, item.host, item.cwd, item.pullRequestNumber);
-    const status = ci.conclusion === 'failed' ? 'blocked' : ci.conclusion === 'passed' ? 'ci' : 'ciPending';
+    const status =
+      ci.conclusion === 'failed' ? 'blocked' : ci.conclusion === 'passed' ? 'ci' : 'ciPending';
     const itemWithoutCiMessage = { ...item };
     delete itemWithoutCiMessage.ciMessage;
     const next = {
@@ -538,7 +550,10 @@ export class ForgeHubService {
   }
 }
 
-function parseDiscoveredPullRequest(host: ForgeHost, stdout: string): { number: number; url: string | undefined } | undefined {
+function parseDiscoveredPullRequest(
+  host: ForgeHost,
+  stdout: string,
+): { number: number; url: string | undefined } | undefined {
   try {
     const data: unknown = JSON.parse(stdout);
     const value = host === 'gitlab' && Array.isArray(data) ? data[0] : data;
