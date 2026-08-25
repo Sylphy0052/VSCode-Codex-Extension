@@ -472,11 +472,13 @@ export async function openChatFileLink(url: string, cwd: string | undefined): Pr
 /** `/path/to/file.ts:12` の末尾に付く、会話リンク用の行番号を分ける。 */
 function splitFileLinkLine(filePath: string): { filePath: string; line: number | undefined } {
   const match = /^(.*):(\d+)$/u.exec(filePath);
-  const line = match === null ? undefined : Number(match[2]);
-  if (match === null || line < 1) {
+  const lineText = match?.[2];
+  const linkPath = match?.[1];
+  if (lineText === undefined || linkPath === undefined) {
     return { filePath, line: undefined };
   }
-  return { filePath: match[1], line };
+  const line = Number(lineText);
+  return line < 1 ? { filePath, line: undefined } : { filePath: linkPath, line };
 }
 
 /** `file:` URIの`#L12`/`#12`も行番号として扱う。 */
