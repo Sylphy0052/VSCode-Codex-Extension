@@ -78,6 +78,10 @@ export class ForgeOrchestrator {
     this.current?.session.decideApproval(requestId, decision);
   }
 
+  async interrupt(): Promise<void> {
+    await this.current?.session.interrupt();
+  }
+
   dispose(): void {
     this.current?.session.dispose();
     for (const session of this.workSessions.values()) session.dispose();
