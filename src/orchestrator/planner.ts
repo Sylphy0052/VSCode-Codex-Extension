@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
+import { lastNonEmptyAgentMessageText } from '../appserver/chatState';
 import type { ClaudePermissionMode } from '../claude/types';
 import { SANDBOX_MODES, type ApprovalMode } from '../codex/types';
 import { LOOP_ITERATION_LIMIT } from '../loop/loopController';
@@ -10,7 +11,7 @@ import { DANGER_PATTERN_IDS } from './escalation';
 import { escalationModel, roleDefaults, roleLabel, TEAM_ROLES } from './rolePresets';
 import { sanitizeForLog, stripControlChars } from './sanitize';
 import type { ExtensionSafetyBaseline } from './taskConfig';
-import type { TaskSessionHost, TaskSessionInput } from './taskSession';
+import type { TaskSession, TaskSessionHost, TaskSessionInput } from './taskSession';
 import { formatUntrusted, sanitizeInlineText } from './untrustedText';
 import {
   clampClaudePermissionMode,
@@ -1028,9 +1029,12 @@ export async function sendSingleTurn(
   prompt: string,
   timeoutMs: number = PLANNER_TURN_TIMEOUT_MS,
   log?: Logger,
+  disposeSession: boolean = true,
+  onSessionOpened?: (session: TaskSession) => void,
 ): Promise<string> {
   assertPlannerSessionIsSafe(provider, input);
   const session = await host.openTaskSession(input);
+  onSessionOpened?.(session);
   session.setApprovalHandler(async () => ({ kind: 'auto', decision: 'decline' }));
   session.open({ preserveFocus: true });
   try {
@@ -1066,7 +1070,14 @@ export async function sendSingleTurn(
           reject(new Error('分解セッションのターンが失敗しました'));
           return;
         }
-        resolve(state.turnResultText);
+        // Codexの完了通知では、画面上のagentMessageは残っているのに
+        // turnResultTextだけ空になることがある。単発セッションはこのターンだけを
+        // 実行するため、表示中の最後のagentMessageを安全なフォールバックにする。
+        resolve(
+          state.turnResultText.trim() !== ''
+            ? state.turnResultText
+            : lastNonEmptyAgentMessageText(state.items),
+        );
       });
       session.runLoop({
         initialPrompt: prompt,
@@ -1078,7 +1089,9 @@ export async function sendSingleTurn(
   } finally {
     // design.md §16.9「生成が終わったらセッションを閉じる」。1ターンごとに新しいセッション
     // を開くため（`runner.ts`の再試行が新しいセッションを作るのと同じ流儀）、ここで閉じる
-    session.dispose();
+    if (disposeSession) {
+      session.dispose();
+    }
   }
 }
 

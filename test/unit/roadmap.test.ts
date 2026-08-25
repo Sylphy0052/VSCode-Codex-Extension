@@ -1672,7 +1672,7 @@ describe('applyRunCompletionToFile', () => {
 });
 
 describe('createTaskSessionRoadmapGenerationPort', () => {
-  it('read-only相当・承認全拒否のセッションを1つ開き、応答テキストを返して閉じる（design.md §16.19）', async () => {
+  it('read-only相当・承認全拒否のセッションを1つ開き、応答を確認できるよう開いたままにする', async () => {
     const host = new FakeRoadmapHost('# ゴール\n\n## Phase 1: a\n\n- [ ] R1 やる\n  - 依存: なし');
     const port = createTaskSessionRoadmapGenerationPort(host, 'codex', '/repo');
 
@@ -1697,8 +1697,7 @@ describe('createTaskSessionRoadmapGenerationPort', () => {
       {},
     );
     expect(decision).toEqual({ kind: 'auto', decision: 'decline' });
-    // 生成が終わったらセッションを閉じる（design.md §16.19）
-    expect(session?.disposed).toBe(true);
+    expect(session?.disposed).toBe(false);
   });
 
   it('セッションのターンが失敗したら ok: false を返す', async () => {
