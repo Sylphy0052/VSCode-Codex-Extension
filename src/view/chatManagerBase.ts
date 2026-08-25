@@ -42,6 +42,8 @@ export interface BaseChatPanel {
    * `reveal()` / `open()` はこの値が `undefined` ならパネルを作り直す。
    */
   panel: vscode.WebviewPanel | undefined;
+  /** セッションを開始した作業ディレクトリ。カンバンのワークスペース絞り込みに使う。 */
+  cwd: string | undefined;
   session: ChatSessionLike;
   /** この画面で走らせているループ。走っていなければ待機状態のまま。 */
   loop: LoopController;
@@ -109,6 +111,14 @@ export interface ProgressTarget {
   threadId: string;
   title: string;
   activeSequence: number;
+}
+
+/** 開いている会話の一覧へ公開する最小の状態（Issue #811）。 */
+export interface ManagedChatSession {
+  threadId: string;
+  title: string;
+  cwd: string | undefined;
+  activity: SessionActivityState;
 }
 
 /**
@@ -190,6 +200,24 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   getChatState(threadId: string): ChatState | undefined {
     const entry = this.panels.get(threadId);
     return entry === undefined || entry.disposed ? undefined : entry.session.getState();
+  }
+
+  /** この拡張機能が現在管理している会話だけを返す。履歴だけの会話は含めない。 */
+  managedSessions(): ManagedChatSession[] {
+    const sessions: ManagedChatSession[] = [];
+    for (const entry of this.allPanels()) {
+      const threadId = entry.session.threadId;
+      if (entry.disposed || threadId === undefined) {
+        continue;
+      }
+      sessions.push({
+        threadId,
+        title: entry.title,
+        cwd: entry.cwd,
+        activity: deriveSessionActivityState(entry.session.getState()),
+      });
+    }
+    return sessions;
   }
 
   /** サブクラスの`postState`から呼ぶ。webviewへ送るのと同じ内容を進捗画面へも配る。 */

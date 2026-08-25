@@ -141,6 +141,8 @@ import { ControlPanelViewProvider } from './view/controlPanelView';
 import { ConversationViewManager } from './view/conversationView';
 import { ProgressViewManager } from './view/progressView';
 import { formatRelativeTime } from './view/relativeTime';
+import { buildSessionKanban } from './view/sessionKanbanModel';
+import { SessionKanbanViewManager } from './view/sessionKanbanView';
 import { SessionDecorationProvider } from './view/sessionDecorations';
 import { SessionTreeProvider } from './view/sessionTreeProvider';
 import { SettingsProvider } from './view/settingsProvider';
@@ -694,6 +696,33 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     claudeChat.onDidChangeState((change) => progress.notify(change)),
   );
 
+  // セッションカンバン（Issue #811）。履歴ファイルではなく、両チャットマネージャーが
+  // 現在管理している会話だけを読むため、外部ターミナルの状態を推測して表示しない。
+  const sessionKanban = new SessionKanbanViewManager(
+    () => {
+      const roots = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
+      return buildSessionKanban(
+        [
+          ...chat.managedSessions().map((session) => ({ ...session, provider: 'codex' as const })),
+          ...claudeChat
+            .managedSessions()
+            .map((session) => ({ ...session, provider: 'claude' as const })),
+        ],
+        roots,
+      );
+    },
+    (provider, threadId) =>
+      provider === 'claude' ? claudeChat.revealSession(threadId) : chat.revealSession(threadId),
+    log,
+  );
+  context.subscriptions.push(
+    sessionKanban,
+    chat.onDidChangeState(() => sessionKanban.refresh()),
+    claudeChat.onDidChangeState(() => sessionKanban.refresh()),
+    chat.onDidChangePanels(() => sessionKanban.refresh()),
+    claudeChat.onDidChangePanels(() => sessionKanban.refresh()),
+  );
+
   const actions = new SessionActions(nodeCommandRunner, codexPath);
 
   // ピン留め（issue #293）。セッションidはワークスペースをまたいでも一意なため、
@@ -987,6 +1016,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       stopProgram(programRunner, programStore),
     ),
     vscode.commands.registerCommand('agent.workflows.view', () => workflowView.show()),
+    vscode.commands.registerCommand('agent.sessionKanban', () => sessionKanban.show()),
     vscode.commands.registerCommand('agent.workflows.plan', (providerHint?: unknown) =>
       planWorkflowCommand(chat, claudeChat, workflowView, log, providerHint),
     ),
