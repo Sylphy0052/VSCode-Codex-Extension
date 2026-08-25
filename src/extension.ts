@@ -66,6 +66,7 @@ import {
   buildRoadmapPlanGoal,
   createCliIssueListPort,
   createTaskSessionRoadmapGenerationPort,
+  convertMarkdownToRoadmap,
   generateRoadmap,
   nodeRoadmapFileSystem,
   parseRoadmapMarkdown,
@@ -1051,6 +1052,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     vscode.commands.registerCommand('agent.workflows.roadmap', (providerHint?: unknown) =>
       runRoadmap(roadmapIssuePort, chat, claudeChat, log, providerHint),
     ),
+    vscode.commands.registerCommand('agent.workflows.convertRoadmap', (providerHint?: unknown) =>
+      convertMarkdownFileToRoadmap(chat, claudeChat, log, providerHint),
+    ),
     vscode.commands.registerCommand('agent.workflows.menu', (providerHint?: unknown) =>
       showWorkflowMenu(workflowRunner, providerHint),
     ),
@@ -1758,6 +1762,13 @@ async function runRoadmap(
 
   if (!result.ok) {
     log.error(`ロードマップを生成できません: ${result.message}`);
+    if (result.rawResponse !== undefined) {
+      const doc = await vscode.workspace.openTextDocument({
+        content: result.rawResponse,
+        language: 'markdown',
+      });
+      await vscode.window.showTextDocument(doc, { preview: false });
+    }
     void vscode.window.showErrorMessage(`ロードマップを生成できません: ${result.message}`);
     return;
   }
@@ -1784,6 +1795,92 @@ async function runRoadmap(
 
   const doc = await vscode.workspace.openTextDocument(result.path);
   await vscode.window.showTextDocument(doc);
+}
+
+/** ワークスペース内の任意Markdownを、ワークフロー用ロードマップへ変換する。 */
+async function convertMarkdownFileToRoadmap(
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
+  log: Logger,
+  providerHint?: unknown,
+): Promise<void> {
+  const folder = currentWorkspaceFolder();
+  if (folder === undefined) {
+    void vscode.window.showErrorMessage('ロードマップを作成するにはフォルダを開いてください');
+    return;
+  }
+
+  const files = await vscode.workspace.findFiles(
+    new vscode.RelativePattern(folder, '**/*.md'),
+    new vscode.RelativePattern(folder, '**/{node_modules,.git}/**'),
+    500,
+  );
+  if (files.length === 0) {
+    void vscode.window.showInformationMessage('変換できるMarkdownファイルが見つかりません');
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(
+    files.map((file) => ({ label: vscode.workspace.asRelativePath(file), file })),
+    { placeHolder: 'ワークフロー用ロードマップへ変換するMarkdownを選択', ignoreFocusOut: true },
+  );
+  if (picked === undefined) {
+    return;
+  }
+
+  const provider = await resolvePlannerProvider(providerHint);
+  if (provider === undefined) {
+    return;
+  }
+  const source = await vscode.workspace.openTextDocument(picked.file);
+  const workspaceRoot = folder.uri.fsPath;
+  const roadmapDir = readWorkflowsConfig().roadmapDir;
+  const sourcePath = vscode.workspace.asRelativePath(picked.file, false);
+  const fileName = await askOutputFileName(
+    path.basename(sourcePath, path.extname(sourcePath)),
+    roadmapDir,
+    '.md',
+  );
+  if (fileName === undefined) {
+    log.info('ロードマップへの変換を取り消しました');
+    return;
+  }
+
+  const host = provider === 'claude' ? claudeChat : chat;
+  const result = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'ロードマップへ変換しています…' },
+    () =>
+      convertMarkdownToRoadmap(
+        {
+          generation: createTaskSessionRoadmapGenerationPort(host, provider, workspaceRoot),
+          fs: nodeRoadmapFileSystem,
+        },
+        {
+          workspaceRoot,
+          roadmapDir,
+          slug: fileName,
+          sourcePath,
+          sourceMarkdown: source.getText(),
+        },
+      ),
+  );
+  if (!result.ok) {
+    log.error(`ロードマップへ変換できません: ${result.message}`);
+    if (result.rawResponse !== undefined) {
+      const doc = await vscode.workspace.openTextDocument({
+        content: result.rawResponse,
+        language: 'markdown',
+      });
+      await vscode.window.showTextDocument(doc, { preview: false });
+    }
+    void vscode.window.showErrorMessage(`ロードマップへ変換できません: ${result.message}`);
+    return;
+  }
+  if (result.validation.warnings.length > 0) {
+    log.warn(
+      `変換したロードマップに警告があります:\n${formatRoadmapWarningsDetail(result.validation.warnings, '\n')}`,
+    );
+  }
+  await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(result.path));
 }
 
 /**
@@ -1971,6 +2068,7 @@ async function planWorkflowFromRoadmapCommand(
       log,
       '選択したロードマップに問題があります。内容を確認してください（詳しくはログ）',
     );
+    return;
   }
 
   if (validation.warnings.length > 0) {
