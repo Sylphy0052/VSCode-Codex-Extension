@@ -91,6 +91,11 @@
           "group": "navigation@5.1"
         },
         {
+          "command": "agent.sessionKanban",
+          "when": "view == codex.sessions",
+          "group": "navigation@5.2"
+        },
+        {
           "command": "codex.filterSessions",
           "when": "view == codex.sessions",
           "group": "navigation@6"
@@ -491,6 +496,12 @@
         "title": "ワークフロー…",
         "category": "Agent",
         "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "agent.sessionKanban",
+        "title": "セッションカンバンを開く",
+        "category": "Agent",
+        "icon": "$(project)"
       },
       {
         "command": "agent.workflows.run",
