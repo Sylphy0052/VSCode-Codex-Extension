@@ -71,6 +71,7 @@ import {
   handleRevertDiff,
   insertCodeIntoEditor,
   noteDropRejected,
+  openChatFileLink,
   openCodeInNewFile,
   postFileMentions,
   postImageData,
@@ -1462,8 +1463,11 @@ export class ClaudeChatViewManager
         return;
       }
       if (type === 'openUrl' && typeof m['url'] === 'string') {
-        // Webviewからは直接開けない。押した＝行き先を見た上での明示の意思表示なので
-        // 追加の確認はしない（design.md §9.9の `url` モードと同じ考え方。issue #18）
+        // Markdownのfile: URI・相対パスは会話の作業ディレクトリから開く。
+        // それ以外のhttp(s) URLだけが従来どおり外部ブラウザへ渡る。
+        if (await openChatFileLink(m['url'], entry.cwd)) {
+          return;
+        }
         if (isOpenableSearchUrl(m['url'])) {
           void vscode.env.openExternal(vscode.Uri.parse(m['url']));
         }
