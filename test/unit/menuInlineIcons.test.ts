@@ -26,6 +26,7 @@ const manifest = JSON.parse(
 ) as Manifest;
 const commands = manifest.contributes.commands;
 const itemMenus = manifest.contributes.menus['view/item/context'] ?? [];
+const titleMenus = manifest.contributes.menus['view/title'] ?? [];
 
 function iconOf(command: string): string | undefined {
   return commands.find((c) => c.command === command)?.icon;
@@ -72,5 +73,15 @@ describe('メニューとコマンド定義の整合性（issue #237）', () => 
         groups.length,
       );
     }
+  });
+
+  it('チームモードはセッションViewのタイトルアイコンから直接開始できる', () => {
+    const team = titleMenus.find((m) => m.command === 'agent.workflows.team');
+
+    expect(team).toMatchObject({
+      when: 'view == codex.sessions',
+      group: 'navigation@5.1',
+    });
+    expect(iconOf('agent.workflows.team')).toBe('$(organization)');
   });
 });

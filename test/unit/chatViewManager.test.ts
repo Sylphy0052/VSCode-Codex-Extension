@@ -667,7 +667,7 @@ describe('ChatViewManager', () => {
       return buttonIndex > menuOpenIndex;
     }
 
-    it('設定を読んでいなければCodex側の実描画でも既定4つ（attach/loopToggle/compact/claudeImport）が表に残り、残り6つはメニューへ畳まれる', async () => {
+    it('設定を読んでいなければCodex側の実描画でも既定4つ（attach/loopToggle/compact/claudeImport）が表に残り、残り10個はメニューへ畳まれる', async () => {
       const { manager, connection } = createManager();
       const p = manager.openNew();
       await tick();
@@ -685,6 +685,10 @@ describe('ChatViewManager', () => {
         'review',
         'exportTranscript',
         'workflowMenu',
+        'teamWorkflow',
+        'workflowView',
+        'openProgress',
+        'handoffToNewSession',
       ]) {
         expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
       }
@@ -1305,6 +1309,34 @@ describe('ChatViewManager', () => {
       await tick();
 
       expect(__mock.executedCommands).toContain('agent.workflows.menu');
+    });
+
+    it('三点メニューのチームモード開始からagent.workflows.teamを実行する', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openNew('/workspace/root');
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p;
+      const panel = __mock.lastCreatedPanel();
+
+      panel?.webview.simulateMessage({ type: 'teamWorkflow' });
+      await tick();
+
+      expect(__mock.executedCommands).toContain('agent.workflows.team');
+    });
+
+    it('三点メニューのワークフローViewからagent.workflows.viewを実行する', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openNew('/workspace/root');
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p;
+      const panel = __mock.lastCreatedPanel();
+
+      panel?.webview.simulateMessage({ type: 'workflowView' });
+      await tick();
+
+      expect(__mock.executedCommands).toContain('agent.workflows.view');
     });
 
     it('会話へは何も送らない（ターンを消費しない）', async () => {

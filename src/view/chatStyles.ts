@@ -385,20 +385,22 @@ ${sharedStyles()}
   /*
    * アイコン列の「…」メニュー（issue #296）。位置の基準にするため入れ物
    * （#composerOverflow）だけ相対配置にし、メニュー本体（#composerOverflowMenu）は
-   * トグルボタンの右下に絶対配置で開く。#commandsと同じ浮き出し方（枠線・影・z-index）
-   * に揃える。
+   * トグルボタンの上に絶対配置で開く。入力欄は画面下部にあるため、下へ開くと画面外へ
+   * 出やすい。高さに上限を設け、項目が多い場合はメニュー内だけをスクロールさせる。
    */
   #composerOverflow { position: relative; display: inline-flex; }
   #composerOverflowMenu {
     position: absolute;
     right: 0;
-    top: 100%;
-    margin-top: 4px;
+    bottom: 100%;
+    margin-bottom: 4px;
     display: flex;
     flex-direction: column;
     gap: 2px;
     padding: 4px;
     min-width: 180px;
+    max-height: calc(100vh - 24px);
+    overflow-y: auto;
     border: 1px solid var(--agent-border);
     border-radius: var(--agent-radius-md);
     background-color: var(--vscode-editorSuggestWidget-background, var(--vscode-editorWidget-background));
