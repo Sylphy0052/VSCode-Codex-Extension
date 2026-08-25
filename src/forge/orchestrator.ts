@@ -24,6 +24,9 @@ export class ForgeOrchestrator {
   private readonly workSessions = new Map<string, TaskSession>();
   private snapshot: ForgeOrchestratorSnapshot | undefined;
   private readonly listeners: Array<(snapshot: ForgeOrchestratorSnapshot) => void> = [];
+  private readonly workListeners: Array<
+    (sessionId: string, state: Pick<ChatState, 'busy' | 'turnFailed'>) => void
+  > = [];
 
   constructor(
     private readonly hosts: Record<Provider, TaskSessionHost>,
@@ -33,6 +36,12 @@ export class ForgeOrchestrator {
 
   onChanged(listener: (snapshot: ForgeOrchestratorSnapshot) => void): void {
     this.listeners.push(listener);
+  }
+
+  onWorkStateChanged(
+    listener: (sessionId: string, state: Pick<ChatState, 'busy' | 'turnFailed'>) => void,
+  ): void {
+    this.workListeners.push(listener);
   }
 
   getSnapshot(): ForgeOrchestratorSnapshot | undefined {
@@ -66,6 +75,11 @@ export class ForgeOrchestrator {
       sandbox: effective.sandbox,
     });
     this.workSessions.set(session.sessionId, session);
+    session.onStateChanged((state) => {
+      for (const listener of this.workListeners) {
+        listener(session.sessionId, { busy: state.busy, turnFailed: state.turnFailed });
+      }
+    });
     session.send(text);
     return session.sessionId;
   }

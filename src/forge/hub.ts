@@ -117,6 +117,11 @@ export interface ForgeWorkItem {
   approvalsLeft?: number;
   pullRequestState?: 'open' | 'merged' | 'closed' | 'unknown';
   pullRequestMessage?: string;
+  /** 作業会話から得た実行状態。リモートのCI/レビューとは混ぜない。 */
+  sessionBusy?: boolean;
+  sessionFailed?: boolean;
+  /** 画面が次に提示する操作。 */
+  nextAction?: string;
   updatedAt: string;
 }
 
@@ -280,7 +285,7 @@ export class ForgeHubService {
     sessionId: string,
   ): Promise<void> {
     if (snapshot.host === undefined) return;
-    this.workItems.set(worktree.branch, {
+    const item: ForgeWorkItem = {
       issue,
       host: snapshot.host,
       provider: snapshot.provider,
@@ -288,9 +293,12 @@ export class ForgeHubService {
       branch: worktree.branch,
       sessionId,
       status: 'inProgress',
+      sessionBusy: true,
       startedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-    });
+      nextAction: '実装を続ける',
+    };
+    this.workItems.set(worktree.branch, item);
     this.plannedIssues.delete(issue.number);
     await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
     await this.deps.memento.update(FORGE_PLANNED_ISSUES_KEY, [...this.plannedIssues.values()]);
@@ -325,12 +333,60 @@ export class ForgeHubService {
 
   async refreshRemoteStates(): Promise<void> {
     for (const item of this.listWorkItems()) {
-      if (item.pullRequestNumber === undefined) continue;
+      if (item.pullRequestNumber === undefined) await this.discoverPullRequest(item.branch);
+      if (this.workItems.get(item.branch)?.pullRequestNumber === undefined) continue;
       // 両メソッドは同じカードを読み直して丸ごと永続化する。並列化すると後着の書き込みが
       // 先着のPR状態またはレビュー状態を消してしまうため、カード内だけは直列にする。
       await this.refreshPullRequestStatus(item.branch);
       await this.refreshReview(item.branch);
+      await this.refreshCi(item.branch);
     }
+  }
+
+  /** 作業会話の状態はローカルの進捗信号として即座に保存する。 */
+  async recordSessionState(
+    sessionId: string,
+    state: { busy: boolean; failed: boolean },
+  ): Promise<void> {
+    const item = this.listWorkItems().find((candidate) => candidate.sessionId === sessionId);
+    if (item === undefined) return;
+    this.workItems.set(item.branch, {
+      ...item,
+      sessionBusy: state.busy,
+      sessionFailed: state.failed,
+      nextAction: deriveNextAction({
+        ...item,
+        sessionBusy: state.busy,
+        sessionFailed: state.failed,
+      }),
+      updatedAt: new Date().toISOString(),
+    });
+    await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
+  }
+
+  private async discoverPullRequest(branch: string): Promise<void> {
+    const item = this.workItems.get(branch);
+    if (item === undefined || item.pullRequestNumber !== undefined) return;
+    const result =
+      item.host === 'github'
+        ? await this.deps.cli.run('gh', ['pr', 'view', branch, '--json=number,url'], item.cwd)
+        : await this.deps.cli.run(
+            'glab',
+            ['mr', 'list', '--source-branch', branch, '--output', 'json'],
+            item.cwd,
+          );
+    if (result.code !== 0 || result.stdout.trim() === '') return;
+    const found = parseDiscoveredPullRequest(item.host, result.stdout);
+    if (found === undefined) return;
+    const next: ForgeWorkItem = {
+      ...item,
+      pullRequestNumber: found.number,
+      ...(found.url === undefined ? {} : { pullRequestUrl: found.url }),
+      status: 'review',
+      updatedAt: new Date().toISOString(),
+    };
+    this.workItems.set(branch, { ...next, nextAction: deriveNextAction(next) });
+    await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
   }
 
   async createDraftPullRequest(
@@ -363,13 +419,14 @@ export class ForgeHubService {
     if (!created.ok) return { ok: false, message: created.message };
     const number =
       created.url === undefined ? undefined : parsePullRequestNumberFromUrl(created.url);
-    this.workItems.set(branch, {
+    const next = {
       ...item,
-      status: 'review',
+      status: 'review' as const,
       ...(created.url === undefined ? {} : { pullRequestUrl: created.url }),
       ...(number === undefined ? {} : { pullRequestNumber: number }),
       updatedAt: new Date().toISOString(),
-    });
+    };
+    this.workItems.set(branch, { ...next, nextAction: deriveNextAction(next) });
     await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
     return { ok: true, url: created.url };
   }
@@ -380,16 +437,17 @@ export class ForgeHubService {
       return { ok: false, message: 'PR/MR番号がないためCIを取得できません。' };
     }
     const ci = await fetchCiConclusion(this.deps.cli, item.host, item.cwd, item.pullRequestNumber);
-    const status =
+    const status: ForgeWorkItem['status'] =
       ci.conclusion === 'failed' ? 'blocked' : ci.conclusion === 'passed' ? 'ci' : 'ciPending';
     const itemWithoutCiMessage = { ...item };
     delete itemWithoutCiMessage.ciMessage;
-    this.workItems.set(branch, {
+    const next = {
       ...itemWithoutCiMessage,
       status,
       ...(ci.message === undefined ? {} : { ciMessage: ci.message }),
       updatedAt: new Date().toISOString(),
-    });
+    };
+    this.workItems.set(branch, { ...next, nextAction: deriveNextAction(next) });
     await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
     return { ok: true };
   }
@@ -409,7 +467,7 @@ export class ForgeHubService {
     delete base.reviewCommentCount;
     delete base.reviewMessage;
     delete base.reviewComments;
-    this.workItems.set(branch, {
+    const next = {
       ...base,
       ...(review.ok
         ? {
@@ -424,7 +482,8 @@ export class ForgeHubService {
           }
         : { reviewMessage: review.message ?? 'レビューを取得できませんでした。' }),
       updatedAt: new Date().toISOString(),
-    });
+    };
+    this.workItems.set(branch, { ...next, nextAction: deriveNextAction(next) });
     await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
     return review.ok
       ? { ok: true }
@@ -474,7 +533,7 @@ export class ForgeHubService {
       item.cwd,
       item.pullRequestNumber,
     );
-    this.workItems.set(branch, {
+    const next = {
       ...item,
       pullRequestState: remote.state,
       ...(remote.mergeable === undefined ? {} : { mergeable: remote.mergeable }),
@@ -482,12 +541,43 @@ export class ForgeHubService {
       ...(remote.message === undefined ? {} : { pullRequestMessage: remote.message }),
       status: remote.state === 'merged' ? 'cleanup' : item.status,
       updatedAt: new Date().toISOString(),
-    });
+    };
+    this.workItems.set(branch, { ...next, nextAction: deriveNextAction(next) });
     await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
     return remote.state === 'unknown'
       ? { ok: false, message: remote.message ?? 'PR/MR状態を取得できませんでした。' }
       : { ok: true };
   }
+}
+
+function parseDiscoveredPullRequest(
+  host: ForgeHost,
+  stdout: string,
+): { number: number; url: string | undefined } | undefined {
+  try {
+    const data: unknown = JSON.parse(stdout);
+    const value = host === 'gitlab' && Array.isArray(data) ? data[0] : data;
+    if (typeof value !== 'object' || value === null) return undefined;
+    const record = value as Record<string, unknown>;
+    const number = record['number'] ?? record['iid'];
+    const url = record['url'] ?? record['web_url'];
+    return typeof number === 'number' && Number.isSafeInteger(number) && number > 0
+      ? { number, url: typeof url === 'string' ? url : undefined }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function deriveNextAction(item: ForgeWorkItem): string {
+  if (item.pullRequestState === 'merged') return 'cleanupを確認する';
+  if (item.sessionFailed || item.status === 'blocked') return 'ブロック理由を確認する';
+  if (item.reviewComments?.some((comment) => !comment.resolved)) return '未解決レビューへ対応する';
+  if (item.status === 'ciPending') return 'CI完了を待つ';
+  if (item.status === 'ci') return 'レビューとマージ準備を進める';
+  if (item.pullRequestNumber !== undefined) return 'レビュー状態を確認する';
+  if (item.sessionBusy) return '実装の進捗を確認する';
+  return '実装を続ける';
 }
 
 function isForgeWorkItem(value: unknown): value is ForgeWorkItem {
