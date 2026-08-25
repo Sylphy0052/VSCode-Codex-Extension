@@ -1467,6 +1467,155 @@ export async function fetchCiConclusion(
     : parseGitlabCiConclusion(result.stdout);
 }
 
+/** PR/MRのマージ可否と承認状態をHubへ渡す共通表現。 */
+export interface PullRequestStatus {
+  state: 'open' | 'merged' | 'closed' | 'unknown';
+  draft: boolean | undefined;
+  mergeable: boolean | undefined;
+  approvalsLeft: number | undefined;
+  message: string | undefined;
+}
+
+/** `gh pr view --json=state,isDraft,mergeable,mergeStateStatus,reviewDecision`を解釈する。 */
+export function parseGithubPullRequestStatus(stdout: string): PullRequestStatus {
+  let data: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    if (typeof parsed !== 'object' || parsed === null) throw new Error('not object');
+    data = parsed as Record<string, unknown>;
+  } catch {
+    return {
+      state: 'unknown',
+      draft: undefined,
+      mergeable: undefined,
+      approvalsLeft: undefined,
+      message: 'PR状態の応答を解釈できませんでした',
+    };
+  }
+  const stateValue = typeof data['state'] === 'string' ? data['state'].toUpperCase() : '';
+  const state =
+    stateValue === 'OPEN'
+      ? 'open'
+      : stateValue === 'MERGED'
+        ? 'merged'
+        : stateValue === 'CLOSED'
+          ? 'closed'
+          : 'unknown';
+  const mergeable =
+    typeof data['mergeable'] === 'string'
+      ? data['mergeable'].toUpperCase() === 'MERGEABLE'
+      : undefined;
+  const reviewDecision =
+    typeof data['reviewDecision'] === 'string' ? data['reviewDecision'].toUpperCase() : '';
+  const approvalsLeft = reviewDecision === 'APPROVED' ? 0 : reviewDecision === '' ? undefined : 1;
+  const mergeState =
+    typeof data['mergeStateStatus'] === 'string' ? data['mergeStateStatus'] : undefined;
+  return {
+    state,
+    draft: typeof data['isDraft'] === 'boolean' ? data['isDraft'] : undefined,
+    mergeable,
+    approvalsLeft,
+    message: mergeState,
+  };
+}
+
+/** GitLabのMR本体とapprovals APIの応答を解釈する。 */
+export function parseGitlabPullRequestStatus(
+  mergeRequestStdout: string,
+  approvalsStdout: string | undefined,
+): PullRequestStatus {
+  try {
+    const parsed: unknown = JSON.parse(mergeRequestStdout);
+    if (typeof parsed !== 'object' || parsed === null) throw new Error('not object');
+    const data = parsed as Record<string, unknown>;
+    const stateValue = typeof data['state'] === 'string' ? data['state'].toLowerCase() : '';
+    const state =
+      stateValue === 'opened'
+        ? 'open'
+        : stateValue === 'merged'
+          ? 'merged'
+          : stateValue === 'closed'
+            ? 'closed'
+            : 'unknown';
+    const mergeStatus =
+      typeof data['detailed_merge_status'] === 'string' ? data['detailed_merge_status'] : undefined;
+    let approvalsLeft: number | undefined;
+    if (approvalsStdout !== undefined) {
+      const approvals: unknown = JSON.parse(approvalsStdout);
+      if (
+        typeof approvals === 'object' &&
+        approvals !== null &&
+        typeof (approvals as Record<string, unknown>)['approvals_left'] === 'number'
+      ) {
+        approvalsLeft = (approvals as Record<string, unknown>)['approvals_left'] as number;
+      }
+    }
+    return {
+      state,
+      draft: typeof data['draft'] === 'boolean' ? data['draft'] : undefined,
+      mergeable: mergeStatus === 'mergeable' ? true : mergeStatus === undefined ? undefined : false,
+      approvalsLeft,
+      message: mergeStatus,
+    };
+  } catch {
+    return {
+      state: 'unknown',
+      draft: undefined,
+      mergeable: undefined,
+      approvalsLeft: undefined,
+      message: 'MR状態の応答を解釈できませんでした',
+    };
+  }
+}
+
+/** PR/MR状態を1回取得する。GitLabでは承認状態も追加で読む。 */
+export async function fetchPullRequestStatus(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  number: number,
+): Promise<PullRequestStatus> {
+  if (host === 'github') {
+    const result = await cli.run(
+      'gh',
+      [
+        'pr',
+        'view',
+        String(number),
+        '--json=state,isDraft,mergeable,mergeStateStatus,reviewDecision',
+      ],
+      cwd,
+    );
+    return result.code === 0
+      ? parseGithubPullRequestStatus(result.stdout)
+      : {
+          state: 'unknown',
+          draft: undefined,
+          mergeable: undefined,
+          approvalsLeft: undefined,
+          message: sanitizeForLog(result.stderr || 'PR状態を取得できませんでした'),
+        };
+  }
+  const mr = await cli.run('glab', ['api', `projects/:id/merge_requests/${String(number)}`], cwd);
+  if (mr.code !== 0)
+    return {
+      state: 'unknown',
+      draft: undefined,
+      mergeable: undefined,
+      approvalsLeft: undefined,
+      message: sanitizeForLog(mr.stderr || 'MR状態を取得できませんでした'),
+    };
+  const approvals = await cli.run(
+    'glab',
+    ['api', `projects/:id/merge_requests/${String(number)}/approvals`],
+    cwd,
+  );
+  return parseGitlabPullRequestStatus(
+    mr.stdout,
+    approvals.code === 0 ? approvals.stdout : undefined,
+  );
+}
+
 /** `waitForCiChecks`のポーリング間隔をテストから注入するための型（`PushBranchWait`と同じ方針）。 */
 export type CiWait = () => Promise<void>;
 

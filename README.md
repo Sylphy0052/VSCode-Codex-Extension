@@ -167,12 +167,12 @@ Claude Codeには会話の要約名が無いため、一覧とタブ名は最初
 
 会話の「…」メニューから開く開発用の操作画面。起動元のCodex/Claude Codeと、現在のワークスペースの`origin`から推定したGitHub/GitLabを引き継ぐ。`gh`または`glab`の導入・認証が不足している場合は操作せず理由を表示する。
 
-- Issueは「着手前の現状」「非エンジニア向け概要」「エンジニア向け仕様・実装計画」「確認者向け確認点」を確認してから作成する。
-- 既存Issueを選ぶと、専用worktreeと起動元と同じ種類の会話を作る。作業カードは再起動後も復元される。
-- カードからDraft PR/MR作成、会話への移動、CI状態の手動更新を行える。CI成功は`CI成功`列、取得失敗・CI失敗は`ブロック`列に表示する。
-- PR/MR作成は未commit変更がないことを確認し、確認ダイアログ後にのみpushする。マージ、Issue close、ブランチ削除は実行しない。
+- Hub内のForgeオーケストレータが通常入力と状態別ボタンを同じ会話として扱う。Issue作成時は「着手前の現状」「非エンジニア向け概要」「エンジニア向け仕様・実装計画」「確認者向け確認点」に加え、利用可能なlabel・assignee・milestoneを指定できる。
+- 既存Issueを選ぶと、確認後に隔離worktreeを作り、同じForgeオーケストレータへ着手を依頼する。作業カードは再起動後も復元される。
+- 更新時にCI、レビュー本文、承認残数、マージ可否、PR/MRのopen/merged/closed状態を取得する。マージ済みは`マージ済み・cleanup待ち`列へ移る。
+- cleanupは対象を表示した確認後にだけ依頼する。マージ、Issue close、branch/worktree削除はオーケストレータが対象を確認してから実行し、自動マージ・自己マージはしない。
 
-手動確認では、GitHubとGitLabで各1件ずつ、Codex/Claude Codeの両方からHubを開き、ホスト判定・Issue選択・worktree作成・Draft PR/MR・CI更新・会話カードの遷移を確認する。
+手動確認では、GitHubとGitLabで各1件ずつ、Codex/Claude Codeの両方からHubを開く。host判定、Issue作成/計画反映、確認後のworktree作成、Draft PR/MR、CI/承認/マージ可否/レビュー更新、マージ済みcleanup依頼、承認カードへの応答を確認する。cleanupは検証用のマージ済みPR/MRだけを対象にする。
 
 ### スラッシュコマンド
 

@@ -59,6 +59,7 @@ import {
   type PullRequestLayerConfig,
 } from './orchestrator/forge';
 import { ForgeHubService } from './forge/hub';
+import { ForgeOrchestrator } from './forge/orchestrator';
 import { startHttpMcpTransport } from './orchestrator/messaging';
 import { nodePseudoWorktreeFileSystem } from './orchestrator/pseudoWorktree';
 import {
@@ -727,12 +728,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       memento: context.workspaceState,
     }),
     () => currentWorkspaceFolder()?.uri.fsPath,
-    (provider, cwd, prompt) =>
-      provider === 'claude'
-        ? claudeChat.openNewWithPrompt(cwd, prompt)
-        : chat.openNewWithPrompt(cwd, prompt),
-    (provider, sessionId) =>
-      provider === 'claude' ? claudeChat.revealSession(sessionId) : chat.revealSession(sessionId),
+    new ForgeOrchestrator({ codex: chat, claude: claudeChat }, readSafetyBaseline),
     log,
   );
   context.subscriptions.push(

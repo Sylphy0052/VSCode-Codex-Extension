@@ -26,8 +26,10 @@ import {
   normalizeForgeHostConfig,
   normalizePullRequestLayerConfig,
   parseGithubCiConclusion,
+  parseGithubPullRequestStatus,
   parseGithubReviewComments,
   parseGitlabCiConclusion,
+  parseGitlabPullRequestStatus,
   parseGitlabReviewComments,
   parsePullRequestNumberFromUrl,
   PUSH_BRANCH_MAX_ATTEMPTS,
@@ -1559,6 +1561,53 @@ describe('parseGitlabCiConclusion', () => {
   it('head_pipelineがオブジェクトでも配列でもない（例: 文字列）応答もfailed', () => {
     const result = parseGitlabCiConclusion(JSON.stringify({ head_pipeline: 'unexpected' }));
     expect(result.conclusion).toBe('failed');
+  });
+});
+
+describe('parseGithubPullRequestStatus', () => {
+  it('マージ可能かつ承認済みのopen PRを読む', () => {
+    expect(
+      parseGithubPullRequestStatus(
+        JSON.stringify({
+          state: 'OPEN',
+          isDraft: false,
+          mergeable: 'MERGEABLE',
+          mergeStateStatus: 'CLEAN',
+          reviewDecision: 'APPROVED',
+        }),
+      ),
+    ).toEqual({
+      state: 'open',
+      draft: false,
+      mergeable: true,
+      approvalsLeft: 0,
+      message: 'CLEAN',
+    });
+  });
+
+  it('壊れた応答はunknownとして扱う', () => {
+    expect(parseGithubPullRequestStatus('not json').state).toBe('unknown');
+  });
+});
+
+describe('parseGitlabPullRequestStatus', () => {
+  it('merged MRと承認残数を読む', () => {
+    expect(
+      parseGitlabPullRequestStatus(
+        JSON.stringify({ state: 'merged', draft: false, detailed_merge_status: 'mergeable' }),
+        JSON.stringify({ approvals_left: 0 }),
+      ),
+    ).toEqual({
+      state: 'merged',
+      draft: false,
+      mergeable: true,
+      approvalsLeft: 0,
+      message: 'mergeable',
+    });
+  });
+
+  it('壊れた応答はunknownとして扱う', () => {
+    expect(parseGitlabPullRequestStatus('not json', undefined).state).toBe('unknown');
   });
 });
 

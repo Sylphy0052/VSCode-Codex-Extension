@@ -4,6 +4,8 @@ import {
   createIssue,
   detectForgeHost,
   fetchCiConclusion,
+  fetchPullRequestStatus,
+  fetchReviewComments,
   parsePullRequestNumberFromUrl,
   pushBranch,
   type CliAvailabilityPort,
@@ -33,6 +35,9 @@ export interface ForgeIssueDraft {
   overview: string;
   implementation: string;
   verification: string;
+  labels?: string;
+  assignees?: string;
+  milestone?: string;
 }
 
 /** GitHub/GitLabどちらにも送れる、標準Issue本文を組み立てる。 */
@@ -90,11 +95,18 @@ export interface ForgeWorkItem {
   cwd: string;
   branch: string;
   sessionId: string;
-  status: 'inProgress' | 'review' | 'ci' | 'blocked';
+  status: 'inProgress' | 'review' | 'ci' | 'cleanup' | 'blocked';
   startedAt: string;
   pullRequestNumber?: number;
   pullRequestUrl?: string;
   ciMessage?: string;
+  reviewCommentCount?: number;
+  reviewMessage?: string;
+  reviewComments?: ReadonlyArray<{ id: string; author: string; body: string }>;
+  mergeable?: boolean;
+  approvalsLeft?: number;
+  pullRequestState?: 'open' | 'merged' | 'closed' | 'unknown';
+  pullRequestMessage?: string;
   updatedAt: string;
 }
 
@@ -109,11 +121,15 @@ export class ForgeHubService {
     }
   }
 
-  async inspect(provider: ForgeHubProvider, cwd: string): Promise<ForgeHubSnapshot> {
+  async inspect(
+    provider: ForgeHubProvider,
+    cwd: string,
+    hostOverride?: ForgeHost,
+  ): Promise<ForgeHubSnapshot> {
     const remote = await this.deps.git.run(['remote', 'get-url', 'origin'], cwd);
     const remoteUrl =
       remote.code === 0 && remote.stdout.trim() !== '' ? remote.stdout.trim() : undefined;
-    const host = remoteUrl === undefined ? undefined : detectForgeHost(remoteUrl);
+    const host = hostOverride ?? (remoteUrl === undefined ? undefined : detectForgeHost(remoteUrl));
     if (host === undefined) {
       return {
         provider,
@@ -143,6 +159,9 @@ export class ForgeHubService {
         ok: false,
         message: 'CLIの導入・認証・origin remoteを確認してからIssueを作成してください。',
       };
+    }
+    if (draft.currentState.trim() === '') {
+      return { ok: false, message: '「着手前の現状」は必須です。' };
     }
     const result = await createIssue(this.deps, {
       host: snapshot.host,
@@ -220,6 +239,17 @@ export class ForgeHubService {
     return [...this.workItems.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
   }
 
+  async refreshRemoteStates(): Promise<void> {
+    await Promise.all(
+      this.listWorkItems()
+        .filter((item) => item.pullRequestNumber !== undefined)
+        .flatMap((item) => [
+          this.refreshPullRequestStatus(item.branch),
+          this.refreshReview(item.branch),
+        ]),
+    );
+  }
+
   async createDraftPullRequest(
     branch: string,
   ): Promise<{ ok: true; url: string | undefined } | { ok: false; message: string }> {
@@ -269,7 +299,8 @@ export class ForgeHubService {
     const ci = await fetchCiConclusion(this.deps.cli, item.host, item.cwd, item.pullRequestNumber);
     const status =
       ci.conclusion === 'failed' ? 'blocked' : ci.conclusion === 'passed' ? 'ci' : 'review';
-    const { ciMessage: _previousCiMessage, ...itemWithoutCiMessage } = item;
+    const itemWithoutCiMessage = { ...item };
+    delete itemWithoutCiMessage.ciMessage;
     this.workItems.set(branch, {
       ...itemWithoutCiMessage,
       status,
@@ -278,6 +309,68 @@ export class ForgeHubService {
     });
     await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
     return { ok: true };
+  }
+
+  async refreshReview(branch: string): Promise<{ ok: true } | { ok: false; message: string }> {
+    const item = this.workItems.get(branch);
+    if (item?.pullRequestNumber === undefined) {
+      return { ok: false, message: 'PR/MR番号がないため、レビューを取得できません。' };
+    }
+    const review = await fetchReviewComments(
+      this.deps.cli,
+      item.host,
+      item.cwd,
+      item.pullRequestNumber,
+    );
+    const base = { ...item };
+    delete base.reviewCommentCount;
+    delete base.reviewMessage;
+    delete base.reviewComments;
+    this.workItems.set(branch, {
+      ...base,
+      ...(review.ok
+        ? {
+            reviewCommentCount: review.comments.length,
+            reviewComments: review.comments.map((comment) => ({
+              id: comment.id,
+              author: comment.author,
+              body: comment.body,
+            })),
+          }
+        : { reviewMessage: review.message ?? 'レビューを取得できませんでした。' }),
+      updatedAt: new Date().toISOString(),
+    });
+    await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
+    return review.ok
+      ? { ok: true }
+      : { ok: false, message: review.message ?? 'レビューを取得できませんでした。' };
+  }
+
+  async refreshPullRequestStatus(
+    branch: string,
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
+    const item = this.workItems.get(branch);
+    if (item?.pullRequestNumber === undefined)
+      return { ok: false, message: 'PR/MR番号がないため、状態を取得できません。' };
+    const remote = await fetchPullRequestStatus(
+      this.deps.cli,
+      item.host,
+      item.cwd,
+      item.pullRequestNumber,
+    );
+    this.workItems.set(branch, {
+      ...item,
+      pullRequestState: remote.state,
+      ...(remote.mergeable === undefined ? {} : { mergeable: remote.mergeable }),
+      ...(remote.approvalsLeft === undefined ? {} : { approvalsLeft: remote.approvalsLeft }),
+      ...(remote.message === undefined ? {} : { pullRequestMessage: remote.message }),
+      status: remote.state === 'merged' ? 'cleanup' : item.status,
+      updatedAt: new Date().toISOString(),
+    });
+    await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
+    return remote.state === 'unknown'
+      ? { ok: false, message: remote.message ?? 'PR/MR状態を取得できませんでした。' }
+      : { ok: true };
   }
 }
 
@@ -298,6 +391,7 @@ function isForgeWorkItem(value: unknown): value is ForgeWorkItem {
     (item['status'] === 'inProgress' ||
       item['status'] === 'review' ||
       item['status'] === 'ci' ||
+      item['status'] === 'cleanup' ||
       item['status'] === 'blocked') &&
     typeof item['startedAt'] === 'string' &&
     (item['updatedAt'] === undefined || typeof item['updatedAt'] === 'string')
