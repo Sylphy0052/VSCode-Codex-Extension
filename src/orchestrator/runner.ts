@@ -172,6 +172,51 @@ export interface WorkflowFilePort {
  */
 export const WAITING_REPLY_POLL_INTERVAL_MS = 5_000;
 
+/** Issue・PR・レビュー・実行指示で共有する全体契約。 */
+export function formatTaskExecutionContract(
+  definition: WorkflowDefinition,
+  task: WorkflowTask,
+): string {
+  const contract: string[] = [];
+  const addList = (label: string, values: readonly string[] | undefined): void => {
+    if (values !== undefined && values.length > 0) {
+      contract.push(`### ${label}`, ...values.map((value) => `- ${value}`), '');
+    }
+  };
+  if (definition.goal !== undefined) contract.push('### 全体ゴール', definition.goal, '');
+  addList('全体の受入条件', definition.acceptance);
+  addList('前提', definition.assumptions);
+  addList('対象外', definition.nonGoals);
+  if (task.outcome !== undefined) contract.push('### このタスクの成果', task.outcome, '');
+  addList('根拠', task.evidence);
+  addList('成果物', task.outputs);
+  addList('リスク・要確認', task.risks);
+  const dependencies = task.dependsOn
+    .map((id) => definition.tasks.find((candidate) => candidate.id === id))
+    .filter((candidate): candidate is WorkflowTask => candidate !== undefined);
+  if (dependencies.length > 0) {
+    contract.push('### 依存タスクから受け取る成果');
+    for (const dependency of dependencies) {
+      contract.push(
+        `- ${dependency.id}: ${dependency.outcome ?? '成果はprompt/doneを参照'}`,
+        ...(dependency.outputs ?? []).map((output) => `  - 成果物: ${output}`),
+      );
+    }
+    contract.push('');
+  }
+  return contract.length === 0 ? '' : ['## 実行契約', ...contract].join('\n').trimEnd();
+}
+
+/** 全体ゴールとタスク成果を、初回・継続の全指示へ同じ形で伝える。 */
+export function composeTaskExecutionContract(
+  definition: WorkflowDefinition,
+  task: WorkflowTask,
+  prompt: string,
+): string {
+  const contract = formatTaskExecutionContract(definition, task);
+  return contract === '' ? prompt : [contract, '', '## 今回の指示', prompt].join('\n');
+}
+
 /**
  * `startMessagingTransport`のMCPサーバ起動失敗警告を、1runにつき実際に記録する上限件数
  * （Issue #475/PR #495レビュー指摘: low〜medium）。
@@ -1732,6 +1777,16 @@ export class WorkflowRunner {
     if (validation.errors.length > 0) {
       return { ok: false, errors: validation.errors };
     }
+    if (def.reviewStatus === 'reviewing') {
+      return {
+        ok: false,
+        errors: [
+          issue(
+            'ワークフローの意味レビューが完了していません。reviewStatusがreadyになってから実行してください',
+          ),
+        ],
+      };
+    }
     return { ok: true, def };
   }
 
@@ -3286,7 +3341,13 @@ export class WorkflowRunner {
           host: forge.host,
           cwd,
           title: buildTaskPullRequestTitle(taskId, task.prompt),
-          body: buildTaskIssueBody({ prompt: task.prompt, done: task.done, runId, taskId }),
+          body: buildTaskIssueBody({
+            prompt: task.prompt,
+            done: task.done,
+            runId,
+            taskId,
+            contract: formatTaskExecutionContract(live.def, task),
+          }),
         },
       );
       if (!outcome.ok) {
@@ -3489,12 +3550,13 @@ export class WorkflowRunner {
       const override = liveTask.continuePromptOverride;
       const expanded =
         override === undefined ? expandTemplate(text, resultsMap, templateNonce) : override;
+      const contracted = composeTaskExecutionContract(live.def, task, expanded);
       // 受け取ったメッセージは、次の指示の先頭へ添える（design.md §16.21「配送」）。
       // `takeDeliverableMessages`は呼ぶたびに未配送分を取り出す（配送済みとして消費する）
       // ため、送信のたびにここで取りに行く必要がある
       const hub = live.messaging?.hub;
       const delivered = hub?.takeDeliverableMessages(taskId) ?? [];
-      const composed = composeNextPrompt(expanded, delivered);
+      const composed = composeNextPrompt(contracted, delivered);
       // Viewで実際に送った文面を確認できるようにする（design.md §16.21、Issue #132
       // 「4. 人が目視確認できるようにする」）。`expandedPrompt`はcomposeNextPromptを
       // 経由しないため、メッセージ経由で注入された内容を映せなかった。ここは
@@ -3514,13 +3576,21 @@ export class WorkflowRunner {
     // `stripControlCharsPreservingNewlines`を使う。CLIへ実際に送る本文
     // （`promptTransform`側）は意味を変えたくないため、表示専用のこちらだけに適用する
     liveTask.expandedPrompt = stripControlCharsPreservingNewlines(
-      expandTemplate(task.prompt, resultsMap, templateNonce),
+      composeTaskExecutionContract(
+        live.def,
+        task,
+        expandTemplate(task.prompt, resultsMap, templateNonce),
+      ),
     );
     // 継続プロンプト（2回目以降に送る指示）の展開結果もViewで確認できるようにする
     // （design.md §16.4、セキュリティ監査指摘#6）。上記のとおりresultsMapは以後の
     // ターンでも変わらないため、ここで一度計算した値が実際に送られる値と一致し続ける
     liveTask.expandedContinuePrompt = stripControlCharsPreservingNewlines(
-      expandTemplate(task.continuePrompt, resultsMap, templateNonce),
+      composeTaskExecutionContract(
+        live.def,
+        task,
+        expandTemplate(task.continuePrompt, resultsMap, templateNonce),
+      ),
     );
   }
 

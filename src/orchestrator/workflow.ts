@@ -158,6 +158,14 @@ export const DEFAULT_AUTO_APPROVE = false;
 /** 1タスク分の内部表現。`defaults` を解決済みで持つため、呼び出し側はdefaultsを意識しなくてよい。 */
 export interface WorkflowTask {
   id: string;
+  /** このタスクが利用者へ届ける成果。旧YAMLでは未指定。 */
+  outcome?: string;
+  /** 計画・実装判断を裏付けるファイル、シンボル、Issue等。 */
+  evidence?: string[];
+  /** 完了時に存在・変化する成果物。 */
+  outputs?: string[];
+  /** 既知のリスクと確認が必要な前提。 */
+  risks?: string[];
   /**
    * チームモードの役割（design.md §16.44、Issue #693）。`undefined` は「役割なし」で、
    * 従来どおりの振る舞い（`model` / `effort` は `defaults` と拡張機能の設定に従う）になる。
@@ -229,6 +237,18 @@ export interface WorkflowTask {
 export interface WorkflowDefinition {
   version: number;
   name: string;
+  /** run全体が達成する利用者成果。旧YAMLでは未指定。 */
+  goal?: string;
+  /** 明示的に今回扱わない範囲。 */
+  nonGoals?: string[];
+  /** run全体の外部から観測可能な受入条件。 */
+  acceptance?: string[];
+  /** 計画時点で置いた前提。 */
+  assumptions?: string[];
+  /** 生成元ロードマップの改訂識別子。 */
+  roadmapRevision?: string;
+  /** 生成定義の意味レビュー状態。既存・手書きYAMLでは未指定。 */
+  reviewStatus?: 'reviewing' | 'ready';
   /** `defaults.maxParallel` を解決した値。タスク単位ではなくワークフロー全体に効く。 */
   maxParallel: number;
   tasks: WorkflowTask[];
@@ -560,6 +580,19 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
     parseWarnings.push('allow に文字列でない要素が含まれていたため無視しました');
   }
 
+  const evidence = filterStringArray(arr(t['evidence']));
+  const outputs = filterStringArray(arr(t['outputs']));
+  const risks = filterStringArray(arr(t['risks']));
+  for (const [field, filtered] of [
+    ['evidence', evidence],
+    ['outputs', outputs],
+    ['risks', risks],
+  ] as const) {
+    if (filtered.hadNonStringElements) {
+      parseWarnings.push(`${field} に文字列でない要素が含まれていたため無視しました`);
+    }
+  }
+
   const issueResult = resolveIssue(t['issue']);
   if (issueResult.error !== undefined) {
     parseErrors.push(issueResult.error);
@@ -567,6 +600,10 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
 
   return {
     id: str(t['id']),
+    ...(str(t['outcome']) !== '' ? { outcome: str(t['outcome']) } : {}),
+    ...(t['evidence'] !== undefined ? { evidence: evidence.values } : {}),
+    ...(t['outputs'] !== undefined ? { outputs: outputs.values } : {}),
+    ...(t['risks'] !== undefined ? { risks: risks.values } : {}),
     role,
     prompt: str(t['prompt']),
     done: str(t['done']),
@@ -657,6 +694,16 @@ export function buildOrchestratorTask(
   const issueResult = resolveIssue(raw['issue']);
   const task: WorkflowTask = {
     id: str(raw['id']),
+    ...(str(raw['outcome']) !== '' ? { outcome: str(raw['outcome']) } : {}),
+    ...(raw['evidence'] !== undefined
+      ? { evidence: filterStringArray(arr(raw['evidence'])).values }
+      : {}),
+    ...(raw['outputs'] !== undefined
+      ? { outputs: filterStringArray(arr(raw['outputs'])).values }
+      : {}),
+    ...(raw['risks'] !== undefined
+      ? { risks: filterStringArray(arr(raw['risks'])).values }
+      : {}),
     role,
     prompt: str(raw['prompt']),
     done: str(raw['done']),
@@ -699,14 +746,57 @@ export function parseWorkflowYaml(source: string): WorkflowDefinition {
   const { defaults, warnings: defaultsWarnings } = resolveDefaults(root['defaults']);
   const tasksRaw = arr(root['tasks']);
   const roadmap = str(root['roadmap']);
+  const nonGoals = filterStringArray(arr(root['nonGoals']));
+  const acceptance = filterStringArray(arr(root['acceptance']));
+  const assumptions = filterStringArray(arr(root['assumptions']));
+  const reviewStatusRaw = str(root['reviewStatus']);
+  for (const [field, filtered] of [
+    ['nonGoals', nonGoals],
+    ['acceptance', acceptance],
+    ['assumptions', assumptions],
+  ] as const) {
+    if (filtered.hadNonStringElements) {
+      defaultsWarnings.push(`${field} に文字列でない要素が含まれていたため無視しました`);
+    }
+  }
   return {
     version: num(root['version'], 1),
     name: str(root['name']),
+    ...(str(root['goal']) !== '' ? { goal: str(root['goal']) } : {}),
+    ...(root['nonGoals'] !== undefined ? { nonGoals: nonGoals.values } : {}),
+    ...(root['acceptance'] !== undefined ? { acceptance: acceptance.values } : {}),
+    ...(root['assumptions'] !== undefined ? { assumptions: assumptions.values } : {}),
+    ...(str(root['roadmapRevision']) !== ''
+      ? { roadmapRevision: str(root['roadmapRevision']) }
+      : {}),
+    ...(reviewStatusRaw === 'reviewing' || reviewStatusRaw === 'ready'
+      ? { reviewStatus: reviewStatusRaw }
+      : {}),
     maxParallel: defaults.maxParallel,
     tasks: tasksRaw.map((t) => resolveTask(t, defaults)),
     defaultsWarnings,
     // 未指定と空文字は同じ「ロードマップ由来ではない」扱いにする（検証側で分岐を増やさない）
     ...(roadmap !== '' ? { roadmap } : {}),
+  };
+}
+
+/** 生成YAMLのレビュー状態だけを書き換え、他の行を可能な限り維持する。 */
+export function withWorkflowReviewStatus(
+  source: string,
+  definition: WorkflowDefinition,
+  status: 'reviewing' | 'ready',
+): { yaml: string; definition: WorkflowDefinition } {
+  const lines = source.split(/\r?\n/u);
+  const existing = lines.findIndex((line) => /^reviewStatus\s*:/u.test(line));
+  if (existing >= 0) {
+    lines[existing] = `reviewStatus: ${status}`;
+  } else {
+    const version = lines.findIndex((line) => /^version\s*:/u.test(line));
+    lines.splice(version >= 0 ? version + 1 : 0, 0, `reviewStatus: ${status}`);
+  }
+  return {
+    yaml: lines.join(source.includes('\r\n') ? '\r\n' : '\n'),
+    definition: { ...definition, reviewStatus: status },
   };
 }
 
@@ -1295,6 +1385,21 @@ export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationRes
   const warnings: WorkflowWarning[] = [];
   const tasks = def.tasks;
 
+  for (const [field, value] of [
+    ['goal', def.goal],
+    ['nonGoals', def.nonGoals?.join('\n')],
+    ['acceptance', def.acceptance?.join('\n')],
+    ['assumptions', def.assumptions?.join('\n')],
+    ['roadmapRevision', def.roadmapRevision],
+  ] as const) {
+    if (value !== undefined && value.length > MAX_PROMPT_LENGTH) {
+      errors.push({
+        taskIds: [],
+        message: `${field} が長すぎます（上限${MAX_PROMPT_LENGTH}文字）: ${value.length}文字`,
+      });
+    }
+  }
+
   if (!Array.isArray(tasks) || tasks.length === 0) {
     errors.push({
       taskIds: [],
@@ -1398,6 +1503,19 @@ export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationRes
     }
     if (t.prompt.trim() === '') {
       errors.push({ taskIds: [t.id], message: 'prompt が指定されていません' });
+    }
+    for (const [field, value] of [
+      ['outcome', t.outcome],
+      ['evidence', t.evidence?.join('\n')],
+      ['outputs', t.outputs?.join('\n')],
+      ['risks', t.risks?.join('\n')],
+    ] as const) {
+      if (value !== undefined && value.length > MAX_PROMPT_LENGTH) {
+        errors.push({
+          taskIds: [t.id],
+          message: `${field} が長すぎます（上限${MAX_PROMPT_LENGTH}文字）: ${value.length}文字`,
+        });
+      }
     }
     for (const [field, value] of [
       ['prompt', t.prompt],

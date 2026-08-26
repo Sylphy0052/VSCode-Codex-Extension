@@ -201,6 +201,12 @@ export function buildSchemaDescription(options: SchemaDescriptionOptions = {}): 
     '## ルート',
     '- version: 数値。1を指定する',
     '- name: ワークフロー名（文字列）',
+    '- goal（必須）: run全体が利用者へ届ける成果。入力されたゴールを実行可能な形で保持する',
+    '- nonGoals（必須）: 今回は扱わない範囲の配列。無ければ []',
+    '- acceptance（必須）: run全体の外部から観測可能な受入条件の配列',
+    '- assumptions（必須）: 計画時点の前提と未確定事項の配列。無ければ []',
+    '- roadmapRevision（ロードマップ由来では必須）: 計画を具体化した時点を追跡できる識別子',
+    '- reviewStatus: reviewing を指定する。独立レビュー通過後に拡張機能がreadyへ変更する',
     '- defaults: 省略可。省略時の既定値は次のとおり:' +
       ` provider=${DEFAULT_PROVIDER}, isolation=${DEFAULT_ISOLATION},` +
       ` maxParallel=${DEFAULT_MAX_PARALLEL}（${MAX_PARALLEL_MIN}〜${MAX_PARALLEL_MAX}）,` +
@@ -216,6 +222,10 @@ export function buildSchemaDescription(options: SchemaDescriptionOptions = {}): 
     `- id（必須）: ワークフロー内で一意。文字種は正規表現 ${TASK_ID_PATTERN.source}` +
       '（半角英数字・アンダースコア・ハイフンのみ、1〜50文字、先頭にハイフンは使えない）',
     `- prompt（必須）: 最初に送る指示。${MAX_PROMPT_LENGTH}文字以内`,
+    '- outcome（必須）: このタスクが利用者または後続タスクへ届ける完結した成果',
+    '- evidence（必須）: 計画の根拠にしたファイル・シンボル・Issue等の配列',
+    '- outputs（必須）: 完了時に存在または変化する成果物の配列',
+    '- risks（必須）: 既知のリスク・要確認事項の配列。無ければ []',
     '- done（必須）: 終了条件。エージェントの応答を読まなくても外から判定できる書き方にすること' +
       '（例:「テストが通っている」。「頑張って実装した」のような自己申告に頼る書き方は避ける）',
     '- dependsOn（省略可、既定 []）: 先に完了していなければならないタスクidの配列。' +
@@ -330,6 +340,7 @@ export function buildPlannerPrompt(input: BuildPlannerPromptInput): string {
     'あなたはワークフロー定義（YAML）の作成担当です。次のゴールを、依存関係を持つ' +
       'タスクへ分解し、下記スキーマに従うYAML定義だけを出力してください。',
     '実際にタスクを実行することはしないでください（読み取りと提案のみ）。',
+    '出力前に読み取り専用の道具で関連する規約・設計・実装・テストを調査し、evidenceに具体的な根拠を残してください。',
     '',
     `## ゴール\n${formatUntrusted(input.goal, { id: 'planner', field: 'goal', maxLength: MAX_GOAL_LENGTH, preserveNewlines: true })}`,
     '',
@@ -1239,6 +1250,16 @@ export const WORKFLOW_REVIEW_ASPECTS = [
   'doneNotObservable',
   /** ゴールに対してタスクが過不足なく分解されているか。 */
   'goalMismatch',
+  /** 工程・ファイル・役割だけを理由に過剰分割されていないか。 */
+  'overFragmented',
+  /** リポジトリ上の根拠が無い仮定を事実として扱っていないか。 */
+  'unsupportedAssumption',
+  /** 計画判断の根拠が欠けていないか。 */
+  'missingEvidence',
+  /** 依存が成果の受け渡しと一致しているか。 */
+  'dependencyMismatch',
+  /** リスク・要確認事項が欠けていないか。 */
+  'missingRisk',
 ] as const;
 
 export type WorkflowReviewAspect = (typeof WORKFLOW_REVIEW_ASPECTS)[number];
@@ -1331,7 +1352,7 @@ function buildWorkflowReviewPrompt(goal: string, yaml: string): string {
   const nonce = randomUUID();
   const parts = [
     'あなたはワークフロー定義（YAML）のレビュー担当です。次のゴールと、既に生成された' +
-      'ワークフロー定義（YAML）を読み、タスクへの分解が妥当かを下記4つの観点だけで' +
+      'ワークフロー定義（YAML）を読み、タスクへの分解と実行契約が妥当かを下記9つの観点だけで' +
       '確認してください。',
     'あなた自身はタスクを実行せず、ファイルを書き換えることもしません（読み取りと' +
       'レビューのみ）。',
@@ -1352,7 +1373,7 @@ function buildWorkflowReviewPrompt(goal: string, yaml: string): string {
       nonce,
     })}`,
     '',
-    '## レビューの観点（この4つだけを見ること。それ以外の指摘はしないこと）',
+    '## レビューの観点（この9つだけを見ること。それ以外の指摘はしないこと）',
     '- serializedParallelizable: 並列に進められるはずのタスクが、dependsOnで不要に直列に' +
       'されていないか',
     '- missingConvergence: 並列に走らせたタスクの結果を統合・レビューする合流タスクが' + 'あるか',
@@ -1361,12 +1382,17 @@ function buildWorkflowReviewPrompt(goal: string, yaml: string): string {
       '表現になっていないか',
     '- goalMismatch: ゴールに対してタスクが過不足なく分解されているか（ゴールの一部が' +
       'どのタスクにも含まれていない、逆にゴールに無い作業が混ざっている等）',
+    '- overFragmented: 設計・API・UI・テスト・文書・ファイル・roleだけを理由に、同じ成果が複数タスクへ分断されていないか',
+    '- unsupportedAssumption: evidenceで裏付けられない構成・仕様・実装を事実として断定していないか',
+    '- missingEvidence: 各タスクのevidenceが具体的で、outcomeとpromptの判断を支持しているか',
+    '- dependencyMismatch: dependsOnが成果の受け渡しに必要十分で、不要な直列化や依存漏れがないか',
+    '- missingRisk: assumptionsやタスクのrisksへ未確定事項が残されているか',
     '',
     '## 出力形式（厳守）',
     '指摘が無ければ空配列 `[]` だけを出力すること。指摘があれば、次の形のJSON配列だけを' +
       '出力すること（前置き・説明文・コードフェンスなど、JSON以外の文字は一切含めない' +
       'こと）:',
-    '[{"aspect": "serializedParallelizable" | "missingConvergence" | "doneNotObservable" | "goalMismatch", "taskIds": ["T1"], "message": "指摘の内容（日本語で簡潔に）"}]',
+    `[${JSON.stringify({ aspect: 'overFragmented', taskIds: ['T1'], message: '指摘の内容' })}]`,
   ];
   return parts.join('\n');
 }
@@ -1514,7 +1540,7 @@ function parseReviewFindings(response: string, log?: Logger): WorkflowReviewFind
  * 生成したワークフロー定義（YAML）を、別の読み取り専用セッションでレビューさせる
  * （design.md §16.28、roadmap W3、Issue #337）。
  *
- * 観点は`WORKFLOW_REVIEW_ASPECTS`の4つ。結果は呼び出し側（`extension.ts`）が修正
+ * 観点は`WORKFLOW_REVIEW_ASPECTS`の9つ。結果は呼び出し側（`extension.ts`）が修正
  * セッションへ渡し、指摘が残らなくなるまで再レビューする。この関数自身はYAMLを書き換えない。
  *
  * **読み取り専用であることは、プロンプトの指示ではなく起動設定で担保する。**

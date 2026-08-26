@@ -36,6 +36,8 @@ import {
   retryMergeState,
 } from './runState';
 import {
+  composeTaskExecutionContract,
+  formatTaskExecutionContract,
   parsePullRequestNumberFromUrl,
   retrySuffixOf,
   type LiveRun,
@@ -157,6 +159,7 @@ function buildTaskPullRequestFlowCallbacks(
           body: buildTaskPullRequestBody({
             prompt: task.prompt,
             done: task.done,
+            contract: formatTaskExecutionContract(live.def, task),
             runId,
             dependsOn: task.dependsOn,
             // `task.issue`（YAML・ロードマップ由来）を優先し、無ければタスク開始時に
@@ -246,7 +249,7 @@ function buildTaskPullRequestReviewStep(
 
     const host = self.deps.hosts[task.provider];
     const review = await reviewTaskPullRequest({
-      prompt: task.prompt,
+      prompt: composeTaskExecutionContract(live.def, task, task.prompt),
       done: task.done,
       diff,
       provider: task.provider,
@@ -1073,7 +1076,11 @@ async function startMergeResolution(
     });
 
     const prompt = buildMergeResolutionPrompt(
-      { id: taskId, prompt: task.prompt, done: task.done },
+      {
+        id: taskId,
+        prompt: composeTaskExecutionContract(live.def, task, task.prompt),
+        done: task.done,
+      },
       others,
       conflict.unresolvedPaths,
     );
