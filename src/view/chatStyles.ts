@@ -60,11 +60,16 @@ ${sharedStyles()}
   body.busy::after { border-color: var(--vscode-charts-red); }
   #logWrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
   #log { flex: 1; overflow-y: auto; padding: 12px 16px; }
-  #scrollToBottom {
+  #conversationNavigation {
     position: absolute;
     right: 20px;
     bottom: 12px;
     z-index: 10;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  #conversationNavigation button {
     width: 30px;
     height: 30px;
     padding: 0;
@@ -78,7 +83,7 @@ ${sharedStyles()}
     cursor: pointer;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
   }
-  #scrollToBottom:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  #conversationNavigation button:hover { background: var(--vscode-button-secondaryHoverBackground); }
   /*
    * 発言の種別ごとに余白を変えて、ターンの切れ目を余白の広さでも示す（issue #712）。
    * 自分の発言の手前を広く空け、同じターンの中に連なる思考・ツール出力は詰める。

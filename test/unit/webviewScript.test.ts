@@ -1131,9 +1131,8 @@ describe('会話の一番下へジャンプするボタン', () => {
 
     expect(source).toContain('function isLogNearBottom(log)');
     expect(source).toContain('function updateScrollToBottomVisibility()');
-    expect(source).toContain(
-      "el('log').addEventListener('scroll', updateScrollToBottomVisibility)",
-    );
+    expect(source).toContain('function updateScrollNavigation()');
+    expect(source).toContain("el('log').addEventListener('scroll', updateScrollNavigation)");
     expect(source).toContain("el('scrollToBottom').addEventListener('click'");
     expect(source).toContain('log.scrollTop = log.scrollHeight');
   });
@@ -1143,6 +1142,24 @@ describe('会話の一番下へジャンプするボタン', () => {
     const applyMatch = source.match(/function apply\(state\) \{[\s\S]*?\n {2}\}/u);
     expect(applyMatch).not.toBeNull();
     expect(applyMatch![0]).toContain('updateScrollToBottomVisibility();');
+  });
+});
+
+describe('自分の発言間を移動する会話ナビゲーション', () => {
+  it('自分の発言だけを前後の移動対象にし、スクロール位置と会話更新でボタンを更新する', () => {
+    // 実DOMでのoffsetTopはvitestのnode環境では計算できないため、対象抽出と配線を固定する
+    const source = chatScript('Codex', { mode: 'quickPick' });
+
+    expect(source).toContain("querySelectorAll('.item.user')");
+    expect(source).toContain('function userMessageTarget(direction)');
+    expect(source).toContain("direction === 'previous'");
+    expect(source).toContain("el('previousUserMessage').addEventListener('click'");
+    expect(source).toContain("el('nextUserMessage').addEventListener('click'");
+    expect(source).toContain("scrollToUserMessage('previous')");
+    expect(source).toContain("scrollToUserMessage('next')");
+    expect(source).toContain('updateUserMessageNavigation();');
+    expect(source).toContain("window.matchMedia('(prefers-reduced-motion: reduce)').matches");
+    expect(source).toContain("reducedMotion ? 'auto' : 'smooth'");
   });
 });
 
