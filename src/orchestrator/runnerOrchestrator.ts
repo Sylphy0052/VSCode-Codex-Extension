@@ -462,6 +462,7 @@ export function buildOrchestratorControlPort(
   runId: string,
 ): OrchestratorControlPort {
   return {
+    hasProgramControl: () => self.runs.get(runId)?.programControl !== undefined,
     getProgramStatus: () =>
       self.runs.get(runId)?.programControl?.getProgramStatus() ?? {
         error: 'このrunはprogramに属していません。',

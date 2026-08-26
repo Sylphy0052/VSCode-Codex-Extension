@@ -681,6 +681,8 @@ export interface ProgramControlPort {
 }
 
 export interface OrchestratorControlPort {
+  /** このrunへprogram制御口が接続済みか。単独runではprogram用ツールを公開しない。 */
+  hasProgramControl?: () => boolean;
   getProgramStatus?: ProgramControlPort['getProgramStatus'];
   addProgramRun?: ProgramControlPort['addProgramRun'];
   removeProgramRun?: ProgramControlPort['removeProgramRun'];
@@ -1640,16 +1642,22 @@ export class MessagingMcpServer {
       const controlTools =
         control === undefined
           ? []
-          : control.getProgramStatus === undefined
-            ? ORCHESTRATOR_CONTROL_TOOLS.filter(
-                (tool) =>
-                  tool.name !== GET_PROGRAM_STATUS_TOOL.name &&
-                  tool.name !== ADD_PROGRAM_RUN_TOOL.name &&
-                  tool.name !== REMOVE_PROGRAM_RUN_TOOL.name &&
-                  tool.name !== RETRY_PROGRAM_RUN_TOOL.name &&
-                  tool.name !== UPDATE_PROGRAM_RUN_DEPENDENCIES_TOOL.name,
-              )
-            : ORCHESTRATOR_CONTROL_TOOLS;
+          : ORCHESTRATOR_CONTROL_TOOLS.filter((tool) => {
+              if (tool.name === UPDATE_TASK_TOOL.name && control.updateTask === undefined) {
+                return false;
+              }
+              if (
+                control.hasProgramControl?.() !== true &&
+                (tool.name === GET_PROGRAM_STATUS_TOOL.name ||
+                  tool.name === ADD_PROGRAM_RUN_TOOL.name ||
+                  tool.name === REMOVE_PROGRAM_RUN_TOOL.name ||
+                  tool.name === RETRY_PROGRAM_RUN_TOOL.name ||
+                  tool.name === UPDATE_PROGRAM_RUN_DEPENDENCIES_TOOL.name)
+              ) {
+                return false;
+              }
+              return true;
+            });
       return [...base, ...handoffTools, ...controlTools];
     }
     return [...base, ASK_ORCHESTRATOR_TOOL, ...handoffTools];

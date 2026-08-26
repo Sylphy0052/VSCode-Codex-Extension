@@ -3926,12 +3926,16 @@ export class WorkflowRunner {
     if (live === undefined || live.integration === undefined) {
       return;
     }
-    const integrationReviewBase =
-      live.forge.kind === 'active' && live.forge.baseBranch !== undefined
-        ? live.forge.baseBranch
-        : live.headCommit;
-    if (!(await this.reviewIntegrationDiff(runId, live, integrationReviewBase))) {
-      return;
+    // plannerの独立レビューを通過した定義だけが統合差分レビュー契約を持つ。
+    // reviewStatusを持たない既存・手書き定義は従来互換のまま実行する。
+    if (live.def.reviewStatus === 'ready') {
+      const integrationReviewBase =
+        live.forge.kind === 'active' && live.forge.baseBranch !== undefined
+          ? live.forge.baseBranch
+          : live.headCommit;
+      if (!(await this.reviewIntegrationDiff(runId, live, integrationReviewBase))) {
+        return;
+      }
     }
     // 冪等ガード（design.md §16.30、Issue #339 blocking指摘）: `add_task`等の計画変更
     // ツールが、レビューコメントのポーリング中（統合PR/MR作成後）に呼ばれると、新しく

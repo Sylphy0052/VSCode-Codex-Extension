@@ -283,6 +283,17 @@ export class ProgramRunner {
     }
     const { def } = parsed;
     let state = persisted.state;
+    // beginProgramRecoveryを実装する新しいWorkflowRunnerでは失敗を保留して復旧口を維持する。
+    // この任意APIを持たない既存アダプターでは従来どおり即時伝播し、後方互換を保つ。
+    if (this.deps.workflow.beginProgramRecovery === undefined) {
+      const propagated = propagateProgramFailures(def, state);
+      if (propagated !== state) {
+        await this.deps.programStore.update(programId, (current) =>
+          current === undefined ? current : { ...current, state: propagated },
+        );
+        state = propagated;
+      }
+    }
     const toStart = nextProgramRunsToStart(def, state);
     if (toStart.size > 0 && persisted.recovery !== undefined) {
       await this.clearProgramRecovery(programId, '計画変更後に再スケジューリングを開始しました');
@@ -292,7 +303,11 @@ export class ProgramRunner {
       await this.startOneRun(programId, persisted.workspaceRoot, def, runRefId);
     }
     const latest = this.deps.programStore.find(programId);
-    if (latest !== undefined && this.needsProgramRecovery(def, latest.state)) {
+    if (
+      this.deps.workflow.beginProgramRecovery !== undefined &&
+      latest !== undefined &&
+      this.needsProgramRecovery(def, latest.state)
+    ) {
       await this.ensureProgramRecovery(programId, latest);
     } else if (latest?.recovery !== undefined) {
       await this.clearProgramRecovery(programId, 'program変更により失敗した依存が解消されました');
