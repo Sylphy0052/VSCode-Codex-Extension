@@ -18,8 +18,10 @@ import {
   validateProgram,
   type ProgramDefinition,
   type ProgramIssue,
+  type ProgramRunRef,
 } from './program';
-import type { ProgramStore } from './programStore';
+import type { PersistedProgram, ProgramStore } from './programStore';
+import type { OrchestratorControlResult, ProgramControlPort } from './messaging';
 import { SerialQueue } from './serialQueue';
 import { sanitizeForLog } from './sanitize';
 import {
@@ -37,10 +39,8 @@ import type { Logger } from '../log';
  * （波の組み立て・失敗の伝播の判断）・`programState.ts`（状態遷移）・`programStore.ts`
  * （永続化、W12-1）を束ね、`WorkflowRunner.start`/`stop`を実際に呼んでrunを起動・停止する層。
  *
- * **上位のオーケストレーターは置かない。** ここは「どのrunをいつ起動・停止するか」だけを
- * 決めて`WorkflowRunner.start`/`stop`を呼ぶだけで、起動した各runのオーケストレーターは
- * 引き続き自分のrunだけを見る（design.md §16.23。既存の単発run実行と同じ経路をそのまま
- * 通る）。
+ * 起動した各runのオーケストレーターへprogram制御口を注入する。前段run失敗時は後続を
+ * 即skipせずpendingに保ち、run追加・削除・依存変更・再試行による復旧を10分待つ。
  *
  * `WorkflowRunner`本体には依存せず、必要な操作だけを`ProgramWorkflowPort`として
  * 注入で受け取る（`runner.ts`が`WorkflowRunnerDeps`で外部依存を注入で受け取るのと
@@ -49,7 +49,11 @@ import type { Logger } from '../log';
 
 /** `ProgramRunner`が`WorkflowRunner`へ要求する最小限の口。`WorkflowRunner`は構造的にこれを満たす。 */
 export interface ProgramWorkflowPort {
-  start(defPath: string, repoRoot: string): Promise<StartWorkflowResult>;
+  start(
+    defPath: string,
+    repoRoot: string,
+    options?: { programControl?: ProgramControlPort },
+  ): Promise<StartWorkflowResult>;
   listLive(): readonly LiveRunSummary[];
   onChanged(listener: (runId: string) => void): () => void;
   /**
@@ -59,6 +63,9 @@ export interface ProgramWorkflowPort {
    * 待つ（`haltProgram`のJSDoc参照）。
    */
   stop(runId: string): void;
+  attachProgramControl?(runId: string, control: ProgramControlPort): void;
+  beginProgramRecovery?(runId: string, message: string): boolean;
+  endProgramRecovery?(runId: string): void;
 }
 
 export interface ProgramRunnerDeps {
@@ -145,6 +152,10 @@ export class ProgramRunner {
    * 参照する理由が無い）。
    */
   private readonly programQueues = new Map<string, SerialQueue>();
+  private readonly recoveryTimers = new Map<
+    string,
+    { timer: ReturnType<typeof setTimeout>; heldRunIds: readonly string[] }
+  >();
 
   constructor(private readonly deps: ProgramRunnerDeps) {}
 
@@ -174,6 +185,8 @@ export class ProgramRunner {
   dispose(): void {
     this.unsubscribe?.();
     this.unsubscribe = undefined;
+    for (const recovery of this.recoveryTimers.values()) clearTimeout(recovery.timer);
+    this.recoveryTimers.clear();
   }
 
   /**
@@ -224,6 +237,9 @@ export class ProgramRunner {
       startedAt,
       finishedAt: undefined,
       state: createInitialProgramState(def),
+      definition: def,
+      recovery: undefined,
+      changeHistory: [],
     }));
     await this.pumpProgram(programId);
     return { ok: true, programId };
@@ -257,7 +273,7 @@ export class ProgramRunner {
     if (persisted === undefined) {
       return;
     }
-    const parsed = await this.parseAndValidateProgram(persisted.defPath);
+    const parsed = await this.resolveProgramDefinition(persisted);
     if (!parsed.ok) {
       this.deps.log.error(
         `[program ${programId}] 定義ファイルの再読込に失敗したため、波を進められません:\n` +
@@ -267,19 +283,37 @@ export class ProgramRunner {
     }
     const { def } = parsed;
     let state = persisted.state;
-    const propagated = propagateProgramFailures(def, state);
-    if (propagated !== state) {
-      await this.deps.programStore.update(programId, (current) => {
-        if (current === undefined) {
-          throw new Error(`[program ${programId}] 失敗の伝播の記録中にプログラムが消えました`);
-        }
-        return { ...current, state: propagated };
-      });
-      state = propagated;
+    // beginProgramRecoveryを実装する新しいWorkflowRunnerでは失敗を保留して復旧口を維持する。
+    // この任意APIを持たない既存アダプターでは従来どおり即時伝播し、後方互換を保つ。
+    if (this.deps.workflow.beginProgramRecovery === undefined) {
+      const propagated = propagateProgramFailures(def, state);
+      if (propagated !== state) {
+        await this.deps.programStore.update(programId, (current) => {
+          if (current === undefined) {
+            throw new Error(`[program ${programId}] 失敗伝播中にプログラムが消えました`);
+          }
+          return { ...current, state: propagated };
+        });
+        state = propagated;
+      }
     }
     const toStart = nextProgramRunsToStart(def, state);
+    if (toStart.size > 0 && persisted.recovery !== undefined) {
+      await this.clearProgramRecovery(programId, '計画変更後に再スケジューリングを開始しました');
+      state = this.deps.programStore.find(programId)?.state ?? state;
+    }
     for (const runRefId of toStart) {
       await this.startOneRun(programId, persisted.workspaceRoot, def, runRefId);
+    }
+    const latest = this.deps.programStore.find(programId);
+    if (
+      this.deps.workflow.beginProgramRecovery !== undefined &&
+      latest !== undefined &&
+      this.needsProgramRecovery(def, latest.state)
+    ) {
+      await this.ensureProgramRecovery(programId, latest);
+    } else if (latest?.recovery !== undefined) {
+      await this.clearProgramRecovery(programId, 'program変更により失敗した依存が解消されました');
     }
     await this.maybeMarkFinished(programId);
     // 状態の永続化がここまで全て完了した後に発火する（`changeEmitter`のJSDoc参照）
@@ -370,6 +404,10 @@ export class ProgramRunner {
           continue;
         }
         nextState = reapplyLiveRunOutcome(nextState, runRefId, runId, live.outcome);
+        this.deps.workflow.attachProgramControl?.(
+          runId,
+          this.buildProgramControl(persisted.programId),
+        );
         if (live.outcome === 'running') {
           this.trackedRuns.set(runId, { programId: persisted.programId, runRefId });
         }
@@ -420,10 +458,14 @@ export class ProgramRunner {
       return;
     }
     const absoluteDefPath = path.join(workspaceRoot, runRef.defPath);
-    const result = await this.deps.workflow.start(absoluteDefPath, workspaceRoot);
+    const programControl = this.buildProgramControl(programId);
+    const result = await this.deps.workflow.start(absoluteDefPath, workspaceRoot, {
+      programControl,
+    });
     if (result.ok && result.runId !== undefined) {
       const runId = result.runId;
       this.trackedRuns.set(runId, { programId, runRefId });
+      this.deps.workflow.attachProgramControl?.(runId, programControl);
       await this.deps.programStore.update(programId, (current) => {
         if (current === undefined) {
           throw new Error(
@@ -455,10 +497,14 @@ export class ProgramRunner {
 
   private async maybeMarkFinished(programId: string): Promise<void> {
     const persisted = this.deps.programStore.find(programId);
-    if (persisted === undefined || persisted.finishedAt !== undefined) {
+    if (
+      persisted === undefined ||
+      persisted.finishedAt !== undefined ||
+      persisted.recovery !== undefined
+    ) {
       return;
     }
-    const parsed = await this.parseAndValidateProgram(persisted.defPath);
+    const parsed = await this.resolveProgramDefinition(persisted);
     if (!parsed.ok || !isProgramSettled(parsed.def, persisted.state)) {
       return;
     }
@@ -486,6 +532,12 @@ export class ProgramRunner {
     // クロージャ内では`live.outcome`の絞り込み（'running'除外）が保持されないため、
     // 確定した値を変数へ取り出してから渡す
     const outcome = live.outcome;
+    if (outcome !== 'succeeded') {
+      this.deps.workflow.beginProgramRecovery?.(
+        runId,
+        `program内のrun ${runRefId} が失敗しました。program全体の計画修復を開始します。`,
+      );
+    }
     await this.deps.programStore.update(programId, (current) => {
       if (current === undefined) {
         // 理論上到達しない（このrunIdを追跡していた時点でprogramは存在したはず）。
@@ -495,6 +547,300 @@ export class ProgramRunner {
       return { ...current, state: markRunFinished(current.state, runRefId, outcome) };
     });
     await this.pumpProgram(programId);
+  }
+
+  private resolveProgramDefinition(persisted: PersistedProgram): Promise<ParsedProgram> {
+    if (persisted.definition === undefined) {
+      return this.parseAndValidateProgram(persisted.defPath);
+    }
+    const validation = validateProgram(persisted.definition);
+    return Promise.resolve(
+      validation.errors.length === 0
+        ? { ok: true, def: persisted.definition }
+        : { ok: false, errors: validation.errors },
+    );
+  }
+
+  private needsProgramRecovery(def: ProgramDefinition, state: PersistedProgram['state']): boolean {
+    if (state.haltedByUser) return false;
+    const failed = new Set(
+      Object.entries(state.runs)
+        .filter(([, entry]) => entry.state === 'failed')
+        .map(([id]) => id),
+    );
+    if (failed.size === 0) return false;
+    return (
+      def.runs.some(
+        (run) =>
+          state.runs[run.id]?.state === 'pending' && run.dependsOn.some((id) => failed.has(id)),
+      ) || Object.values(state.runs).every((entry) => entry.state !== 'running')
+    );
+  }
+
+  private async ensureProgramRecovery(
+    programId: string,
+    persisted: PersistedProgram,
+  ): Promise<void> {
+    const failedRunIds = Object.entries(persisted.state.runs)
+      .filter(([, entry]) => entry.state === 'failed')
+      .map(([id]) => id);
+    const recovery = persisted.recovery;
+    if (recovery !== undefined) {
+      const mergedFailedRunIds = [...new Set([...recovery.failedRunIds, ...failedRunIds])];
+      if (mergedFailedRunIds.length !== recovery.failedRunIds.length) {
+        await this.deps.programStore.update(programId, (current) => {
+          if (current === undefined)
+            throw new Error(`[program ${programId}] 復旧更新中に消えました`);
+          return {
+            ...current,
+            recovery: { deadline: recovery.deadline, failedRunIds: mergedFailedRunIds },
+            changeHistory: this.appendProgramHistory(
+              current,
+              `追加の失敗runを復旧対象へ加えました: ${failedRunIds.join(', ')}`,
+            ),
+          };
+        });
+      }
+      this.scheduleProgramRecoveryTimeout(programId, recovery.deadline);
+      return;
+    }
+    const deadline = new Date(
+      (this.deps.now?.() ?? new Date()).getTime() + 10 * 60 * 1000,
+    ).toISOString();
+    const message = `run ${failedRunIds.join(', ')} の失敗後、programオーケストレーターによる復旧を待っています`;
+    await this.deps.programStore.update(programId, (current) => {
+      if (current === undefined) throw new Error(`[program ${programId}] 復旧開始中に消えました`);
+      return {
+        ...current,
+        recovery: { failedRunIds, deadline },
+        changeHistory: this.appendProgramHistory(current, message),
+      };
+    });
+    this.scheduleProgramRecoveryTimeout(programId, deadline);
+    this.changeEmitter.fire(programId);
+  }
+
+  private scheduleProgramRecoveryTimeout(programId: string, deadline: string): void {
+    const persisted = this.deps.programStore.find(programId);
+    const heldRunIds = Object.values(persisted?.state.runs ?? {})
+      .filter((entry) => entry.state === 'failed' && entry.runId !== undefined)
+      .map((entry) => entry.runId as string);
+    const scheduled = this.recoveryTimers.get(programId);
+    if (scheduled !== undefined) {
+      this.recoveryTimers.set(programId, {
+        timer: scheduled.timer,
+        heldRunIds: [...new Set([...scheduled.heldRunIds, ...heldRunIds])],
+      });
+      return;
+    }
+    const remaining = Math.max(
+      0,
+      Date.parse(deadline) - (this.deps.now?.() ?? new Date()).getTime(),
+    );
+    const timer = setTimeout(() => {
+      void this.finalizeProgramRecoveryTimeout(programId);
+    }, remaining);
+    timer.unref?.();
+    this.recoveryTimers.set(programId, { timer, heldRunIds });
+  }
+
+  private async finalizeProgramRecoveryTimeout(programId: string): Promise<void> {
+    await this.runExclusive(programId, async () => {
+      const persisted = this.deps.programStore.find(programId);
+      if (persisted?.recovery === undefined) return;
+      const parsed = await this.resolveProgramDefinition(persisted);
+      if (!parsed.ok) return;
+      const state = propagateProgramFailures(parsed.def, persisted.state);
+      await this.deps.programStore.update(programId, (current) => {
+        if (current === undefined)
+          throw new Error(`[program ${programId}] 復旧期限処理中に消えました`);
+        return {
+          ...current,
+          state,
+          recovery: undefined,
+          changeHistory: this.appendProgramHistory(
+            current,
+            '10分以内に復旧計画が適用されなかったため、依存失敗を後続runへ最終伝播しました',
+          ),
+        };
+      });
+      const held = this.recoveryTimers.get(programId)?.heldRunIds ?? [];
+      this.recoveryTimers.delete(programId);
+      for (const runId of held) this.deps.workflow.endProgramRecovery?.(runId);
+      await this.maybeMarkFinished(programId);
+      this.changeEmitter.fire(programId);
+    });
+  }
+
+  private async clearProgramRecovery(programId: string, message: string): Promise<void> {
+    const recovery = this.recoveryTimers.get(programId);
+    if (recovery !== undefined) clearTimeout(recovery.timer);
+    this.recoveryTimers.delete(programId);
+    await this.deps.programStore.update(programId, (current) => {
+      if (current === undefined) throw new Error(`[program ${programId}] 復旧解除中に消えました`);
+      return {
+        ...current,
+        recovery: undefined,
+        changeHistory: this.appendProgramHistory(current, message),
+      };
+    });
+    for (const runId of recovery?.heldRunIds ?? []) this.deps.workflow.endProgramRecovery?.(runId);
+  }
+
+  private appendProgramHistory(
+    current: PersistedProgram,
+    message: string,
+  ): readonly { at: string; message: string }[] {
+    return [
+      ...(current.changeHistory ?? []),
+      { at: (this.deps.now?.() ?? new Date()).toISOString(), message },
+    ].slice(-50);
+  }
+
+  private buildProgramControl(programId: string): ProgramControlPort {
+    const unavailable = (reason: string): OrchestratorControlResult => ({
+      accepted: false,
+      reason,
+    });
+    const accepted = (reason: string): OrchestratorControlResult => ({ accepted: true, reason });
+    const update = async (
+      change: (
+        current: PersistedProgram,
+        def: ProgramDefinition,
+      ) =>
+        | { def: ProgramDefinition; state: PersistedProgram['state']; message: string }
+        | OrchestratorControlResult,
+    ): Promise<OrchestratorControlResult> => {
+      let result: OrchestratorControlResult = unavailable('programが見つかりません。');
+      await this.runExclusive(programId, async () => {
+        const current = this.deps.programStore.find(programId);
+        if (current === undefined) return;
+        const parsed = await this.resolveProgramDefinition(current);
+        if (!parsed.ok) {
+          result = unavailable(parsed.errors.map((error) => error.message).join(' / '));
+          return;
+        }
+        const changed = change(current, parsed.def);
+        if ('accepted' in changed) {
+          result = changed;
+          return;
+        }
+        const validation = validateProgram(changed.def);
+        if (validation.errors.length > 0) {
+          result = unavailable(validation.errors.map((error) => error.message).join(' / '));
+          return;
+        }
+        await this.deps.programStore.update(programId, (latest) => {
+          if (latest === undefined)
+            throw new Error(`[program ${programId}] 計画変更中に消えました`);
+          return {
+            ...latest,
+            definition: changed.def,
+            state: changed.state,
+            finishedAt: undefined,
+            changeHistory: this.appendProgramHistory(latest, changed.message),
+          };
+        });
+        result = accepted(changed.message);
+        this.changeEmitter.fire(programId);
+      });
+      if (result.accepted) await this.pumpProgram(programId);
+      return result;
+    };
+    return {
+      getProgramStatus: () => {
+        const current = this.deps.programStore.find(programId);
+        return current === undefined
+          ? { error: 'programが見つかりません。' }
+          : {
+              programId,
+              definition: current.definition,
+              state: current.state,
+              recovery: current.recovery,
+              changeHistory: current.changeHistory ?? [],
+            };
+      },
+      addProgramRun: (input) =>
+        update((current, def) => {
+          const id = typeof input['id'] === 'string' ? input['id'] : '';
+          const defPath = typeof input['defPath'] === 'string' ? input['defPath'] : '';
+          const rawDeps = input['dependsOn'];
+          const dependsOn = Array.isArray(rawDeps)
+            ? rawDeps.filter((value): value is string => typeof value === 'string')
+            : [];
+          const run: ProgramRunRef = { id, defPath, dependsOn, parseErrors: [] };
+          return {
+            def: { ...def, runs: [...def.runs, run] },
+            state: {
+              ...current.state,
+              runs: {
+                ...current.state.runs,
+                [id]: { state: 'pending', runId: undefined, skipReason: undefined },
+              },
+            },
+            message: `run ${id} を追加しました（dependsOn: ${dependsOn.join(', ') || 'なし'}）`,
+          };
+        }),
+      removeProgramRun: (runRefId) =>
+        update((current, def) => {
+          const entry = current.state.runs[runRefId];
+          if (entry === undefined) return unavailable(`runが見つかりません: ${runRefId}`);
+          if (entry.state === 'running' || entry.state === 'done') {
+            return unavailable(`${runRefId} は${entry.state}のため削除できません。`);
+          }
+          const runs = { ...current.state.runs };
+          delete runs[runRefId];
+          return {
+            def: {
+              ...def,
+              runs: def.runs
+                .filter((run) => run.id !== runRefId)
+                .map((run) => ({
+                  ...run,
+                  dependsOn: run.dependsOn.filter((id) => id !== runRefId),
+                })),
+            },
+            state: { ...current.state, runs },
+            message: `run ${runRefId} を削除し、参照する依存を取り除きました`,
+          };
+        }),
+      retryProgramRun: (runRefId) =>
+        update((current, def) => {
+          const entry = current.state.runs[runRefId];
+          if (entry?.state !== 'failed' && entry?.state !== 'skipped') {
+            return unavailable(`${runRefId} は再試行できる状態ではありません。`);
+          }
+          return {
+            def,
+            state: {
+              ...current.state,
+              runs: {
+                ...current.state.runs,
+                [runRefId]: { state: 'pending', runId: undefined, skipReason: undefined },
+              },
+            },
+            message: `run ${runRefId} をpendingへ戻して再試行します`,
+          };
+        }),
+      updateProgramRunDependencies: (runRefId, dependsOn) =>
+        update((current, def) => {
+          const entry = current.state.runs[runRefId];
+          if (entry?.state !== 'pending') {
+            return unavailable(`${runRefId} はpendingではないため依存を変更できません。`);
+          }
+          const unique = [...new Set(dependsOn)];
+          return {
+            def: {
+              ...def,
+              runs: def.runs.map((run) =>
+                run.id === runRefId ? { ...run, dependsOn: unique } : run,
+              ),
+            },
+            state: current.state,
+            message: `run ${runRefId} のdependsOnを ${unique.join(', ') || 'なし'} へ変更しました`,
+          };
+        }),
+    };
   }
 
   private async parseAndValidateProgram(defPath: string): Promise<ParsedProgram> {

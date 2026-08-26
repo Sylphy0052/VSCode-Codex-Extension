@@ -599,7 +599,9 @@ export function formatRoadmapMaterial(items: readonly RoadmapMaterialItem[]): st
     lines.push(`- id: ${item.id}`);
     lines.push(`  内容: ${safeText}`);
     if (item.acceptance !== undefined) {
-      lines.push(`  完了条件: ${sanitizeInlineText(item.acceptance, ROADMAP_ITEM_TEXT_MAX_LENGTH)}`);
+      lines.push(
+        `  完了条件: ${sanitizeInlineText(item.acceptance, ROADMAP_ITEM_TEXT_MAX_LENGTH)}`,
+      );
     }
     if (item.evidence !== undefined) {
       lines.push(
@@ -609,7 +611,9 @@ export function formatRoadmapMaterial(items: readonly RoadmapMaterialItem[]): st
       );
     }
     if (item.risks !== undefined) {
-      lines.push(`  リスク・要確認: ${sanitizeInlineText(item.risks, ROADMAP_ITEM_TEXT_MAX_LENGTH)}`);
+      lines.push(
+        `  リスク・要確認: ${sanitizeInlineText(item.risks, ROADMAP_ITEM_TEXT_MAX_LENGTH)}`,
+      );
     }
     lines.push(`  依存: ${depends}`);
     lines.push(`  Issue: ${issueText}`);
@@ -1598,9 +1602,7 @@ const MAX_ROADMAP_REVIEW_MESSAGE_LENGTH = 500;
 const MAX_ROADMAP_REVIEW_CONTENT_LENGTH = 60_000;
 
 function isRoadmapReviewAspect(value: unknown): value is RoadmapReviewAspect {
-  return (
-    typeof value === 'string' && (ROADMAP_REVIEW_ASPECTS as readonly string[]).includes(value)
-  );
+  return typeof value === 'string' && (ROADMAP_REVIEW_ASPECTS as readonly string[]).includes(value);
 }
 
 function extractJsonArray(response: string): string {

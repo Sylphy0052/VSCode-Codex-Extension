@@ -669,7 +669,25 @@ export const ASK_ORCHESTRATOR_TOOL: McpToolDefinition = {
  * runnerのメソッドをそのまま呼び、モデル用の別経路を作らない（状態遷移の正しさを
  * `runState.ts` 1か所に保つため）。
  */
+export interface ProgramControlPort {
+  getProgramStatus(): unknown;
+  addProgramRun(input: Record<string, unknown>): Promise<OrchestratorControlResult>;
+  removeProgramRun(runRefId: string): Promise<OrchestratorControlResult>;
+  retryProgramRun(runRefId: string): Promise<OrchestratorControlResult>;
+  updateProgramRunDependencies(
+    runRefId: string,
+    dependsOn: readonly string[],
+  ): Promise<OrchestratorControlResult>;
+}
+
 export interface OrchestratorControlPort {
+  /** このrunへprogram制御口が接続済みか。単独runではprogram用ツールを公開しない。 */
+  hasProgramControl?: () => boolean;
+  getProgramStatus?: ProgramControlPort['getProgramStatus'];
+  addProgramRun?: ProgramControlPort['addProgramRun'];
+  removeProgramRun?: ProgramControlPort['removeProgramRun'];
+  retryProgramRun?: ProgramControlPort['retryProgramRun'];
+  updateProgramRunDependencies?: ProgramControlPort['updateProgramRunDependencies'];
   /** 進捗の要約。応答本文そのものは含めない（design.md §16.11・§16.23）。 */
   getRunStatus(): unknown;
   stopTask(taskId: string): OrchestratorControlResult;
@@ -983,6 +1001,65 @@ export const UPDATE_TASK_DEPENDENCIES_TOOL: McpToolDefinition = {
   },
 };
 
+export const GET_PROGRAM_STATUS_TOOL: McpToolDefinition = {
+  name: 'get_program_status',
+  description: 'このrunを含むprogramのrun一覧・依存・復旧状態・変更履歴を読む。',
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+};
+
+export const ADD_PROGRAM_RUN_TOOL: McpToolDefinition = {
+  name: 'add_run',
+  description: '復旧中のprogramへ新しいrunを追加し、定義・状態・変更履歴へ永続化する。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: { type: 'string' },
+      defPath: { type: 'string' },
+      dependsOn: { type: 'array', items: { type: 'string' } },
+    },
+    required: ['id', 'defPath', 'dependsOn'],
+    additionalProperties: false,
+  },
+};
+
+const PROGRAM_RUN_ID_ARG = { type: 'string', description: 'program内のrun id' } as const;
+
+export const REMOVE_PROGRAM_RUN_TOOL: McpToolDefinition = {
+  name: 'remove_run',
+  description: '未実行または失敗したrunをprogramから削除し、参照する依存も取り除く。',
+  inputSchema: {
+    type: 'object',
+    properties: { runRefId: PROGRAM_RUN_ID_ARG },
+    required: ['runRefId'],
+    additionalProperties: false,
+  },
+};
+
+export const RETRY_PROGRAM_RUN_TOOL: McpToolDefinition = {
+  name: 'retry_run',
+  description: '失敗またはskipされたrunをpendingへ戻し、新しいrunとして再スケジュールする。',
+  inputSchema: {
+    type: 'object',
+    properties: { runRefId: PROGRAM_RUN_ID_ARG },
+    required: ['runRefId'],
+    additionalProperties: false,
+  },
+};
+
+export const UPDATE_PROGRAM_RUN_DEPENDENCIES_TOOL: McpToolDefinition = {
+  name: 'update_run_dependencies',
+  description: 'pending runのrun間依存を変更し、programへ永続化して再スケジュールする。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      runRefId: PROGRAM_RUN_ID_ARG,
+      dependsOn: { type: 'array', items: { type: 'string' } },
+    },
+    required: ['runRefId', 'dependsOn'],
+    additionalProperties: false,
+  },
+};
+
 /* ------------------------------------------------------------------------ *
  * ファイル受け渡し（design.md §16.44、Issue #693、`teamHandoff.ts`）
  * ------------------------------------------------------------------------ */
@@ -1091,8 +1168,17 @@ export const ORCHESTRATOR_CONTROL_TOOLS: readonly McpToolDefinition[] = [
   UPDATE_TASK_DEPENDENCIES_TOOL,
 ];
 
+/** program配下のrunだけへ追加公開するprogram単位の制御ツール。 */
+export const PROGRAM_CONTROL_TOOLS: readonly McpToolDefinition[] = [
+  GET_PROGRAM_STATUS_TOOL,
+  ADD_PROGRAM_RUN_TOOL,
+  REMOVE_PROGRAM_RUN_TOOL,
+  RETRY_PROGRAM_RUN_TOOL,
+  UPDATE_PROGRAM_RUN_DEPENDENCIES_TOOL,
+];
+
 const ORCHESTRATOR_CONTROL_TOOL_NAMES: ReadonlySet<string> = new Set(
-  ORCHESTRATOR_CONTROL_TOOLS.map((t) => t.name),
+  [...ORCHESTRATOR_CONTROL_TOOLS, ...PROGRAM_CONTROL_TOOLS].map((t) => t.name),
 );
 
 /**
@@ -1557,8 +1643,17 @@ export class MessagingMcpServer {
     // 接続も「タスク扱い」にしないため。制御ツールの実体の有無とは独立に判定する）
     if (taskId === ORCHESTRATOR_CONNECTION_ID) {
       const control = this.controlFor(taskId);
-      const controlTools = control === undefined ? [] : ORCHESTRATOR_CONTROL_TOOLS;
-      return [...base, ...handoffTools, ...controlTools];
+      const controlTools =
+        control === undefined
+          ? []
+          : ORCHESTRATOR_CONTROL_TOOLS.filter((tool) => {
+              if (tool.name === UPDATE_TASK_TOOL.name && control.updateTask === undefined) {
+                return false;
+              }
+              return true;
+            });
+      const programTools = control?.hasProgramControl?.() === true ? PROGRAM_CONTROL_TOOLS : [];
+      return [...base, ...handoffTools, ...controlTools, ...programTools];
     }
     return [...base, ASK_ORCHESTRATOR_TOOL, ...handoffTools];
   }
@@ -1746,7 +1841,7 @@ export class MessagingMcpServer {
     request: JsonRpcRequest,
     name: string,
     args: Record<string, unknown>,
-  ): JsonRpcResponse {
+  ): JsonRpcResponse | Promise<JsonRpcResponse> {
     const control = this.controlFor(taskId);
     if (control === undefined) {
       return failure(request.id, -32602, `未知のツールです: ${name}`);
@@ -1754,6 +1849,44 @@ export class MessagingMcpServer {
 
     if (name === GET_RUN_STATUS_TOOL.name) {
       return success(request.id, toolTextResult(JSON.stringify(control.getRunStatus())));
+    }
+    if (name === GET_PROGRAM_STATUS_TOOL.name) {
+      return success(
+        request.id,
+        toolTextResult(
+          JSON.stringify(
+            control.getProgramStatus?.() ?? { error: 'program制御を利用できません。' },
+          ),
+        ),
+      );
+    }
+    if (name === ADD_PROGRAM_RUN_TOOL.name) {
+      const action = control.addProgramRun?.(args);
+      if (action === undefined) return failure(request.id, -32602, `未知のツールです: ${name}`);
+      return action.then((result) =>
+        success(request.id, toolTextResult(JSON.stringify(result), !result.accepted)),
+      );
+    }
+    if (name === REMOVE_PROGRAM_RUN_TOOL.name || name === RETRY_PROGRAM_RUN_TOOL.name) {
+      const action =
+        name === REMOVE_PROGRAM_RUN_TOOL.name
+          ? control.removeProgramRun?.(str(args['runRefId']))
+          : control.retryProgramRun?.(str(args['runRefId']));
+      if (action === undefined) return failure(request.id, -32602, `未知のツールです: ${name}`);
+      return action.then((result) =>
+        success(request.id, toolTextResult(JSON.stringify(result), !result.accepted)),
+      );
+    }
+    if (name === UPDATE_PROGRAM_RUN_DEPENDENCIES_TOOL.name) {
+      const rawDeps = args['dependsOn'];
+      const deps = Array.isArray(rawDeps)
+        ? rawDeps.filter((value): value is string => typeof value === 'string')
+        : [];
+      const action = control.updateProgramRunDependencies?.(str(args['runRefId']), deps);
+      if (action === undefined) return failure(request.id, -32602, `未知のツールです: ${name}`);
+      return action.then((result) =>
+        success(request.id, toolTextResult(JSON.stringify(result), !result.accepted)),
+      );
     }
     // `decide_final_merge`はrun全体で1つの判断（統合PR/MRという1つの対象）にしか使えず、
     // 他の制御ツールと違って`taskId`を取らない。`target`（`taskId`）を読む前に分岐する

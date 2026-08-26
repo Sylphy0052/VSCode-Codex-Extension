@@ -52,9 +52,7 @@ export function getSnapshot(
   // ストア読み出しになっていた）
   const persisted = self.deps.store.find(runId);
   const tasks = live.def.tasks.map((task) => buildTaskSnapshot(live, task, persisted));
-  const hasVerificationFailure = tasks.some(
-    (task) => task.verification?.status === 'failed',
-  );
+  const hasVerificationFailure = tasks.some((task) => task.verification?.status === 'failed');
   return {
     runId: live.runId,
     name: live.def.name,
@@ -93,16 +91,18 @@ export function getSnapshot(
         ? {}
         : { plannerProvider: live.def.plannerProvider }),
       ...(live.def.plannerModel === undefined ? {} : { plannerModel: live.def.plannerModel }),
-      ...(live.def.reviewRevision === undefined
-        ? {}
-        : { reviewRevision: live.def.reviewRevision }),
+      ...(live.def.reviewRevision === undefined ? {} : { reviewRevision: live.def.reviewRevision }),
       ...(live.def.reviewFindingCount === undefined
         ? {}
         : { reviewFindingCount: live.def.reviewFindingCount }),
       ...(live.def.reviewFindingsResolved === undefined
         ? {}
         : { reviewFindingsResolved: live.def.reviewFindingsResolved }),
-      taskModels: [...new Set(live.def.tasks.map((task) => task.model).filter((v): v is string => v !== undefined))],
+      taskModels: [
+        ...new Set(
+          live.def.tasks.map((task) => task.model).filter((v): v is string => v !== undefined),
+        ),
+      ],
     },
     haltedByUser: live.runState.haltedByUser,
     failureRecovery:

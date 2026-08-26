@@ -446,6 +446,7 @@ ${sharedStyles()}
   .program-def { font-weight: 600; font-size: 0.9em; }
   .program-status { font-size: 0.85em; color: var(--vscode-descriptionForeground); }
   .program-status.program-halted { color: var(--vscode-errorForeground); }
+  .program-status.program-recovering { color: var(--vscode-charts-yellow); }
   .program-runs { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
   .program-run { font-size: 0.85em; }
   .program-stop-btn { margin-left: auto; }
