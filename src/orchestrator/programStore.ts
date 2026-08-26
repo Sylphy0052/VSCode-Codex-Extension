@@ -42,7 +42,7 @@ export interface PersistedProgram {
   /** 実行開始時の定義と、オーケストレーターが適用したprogram変更の最新版。 */
   definition?: ProgramDefinition;
   /** 前段run失敗後、後続をpendingに保ってprogramオーケストレーターを待つ状態。 */
-  recovery?: { failedRunIds: readonly string[]; deadline: string };
+  recovery?: { failedRunIds: readonly string[]; deadline: string } | undefined;
   /** program単位の追加・削除・依存変更・再試行をUIへライブ表示する履歴。 */
   changeHistory?: readonly { at: string; message: string }[];
 }

@@ -4420,7 +4420,7 @@ export class WorkflowRunner {
     );
     if (decision === 'merge') {
       pending.merging = true;
-      pending.recoveryMessage = undefined;
+      delete pending.recoveryMessage;
       void this.performFinalMerge(runId);
     } else {
       live.finalMergeDecision = undefined;
