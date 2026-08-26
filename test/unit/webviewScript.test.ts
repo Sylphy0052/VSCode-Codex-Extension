@@ -1151,7 +1151,7 @@ describe('自分の発言間を移動する会話ナビゲーション', () => {
     const source = chatScript('Codex', { mode: 'quickPick' });
 
     expect(source).toContain("querySelectorAll('.item.user')");
-    expect(source).toContain("function userMessageTarget(direction)");
+    expect(source).toContain('function userMessageTarget(direction)');
     expect(source).toContain("direction === 'previous'");
     expect(source).toContain("el('previousUserMessage').addEventListener('click'");
     expect(source).toContain("el('nextUserMessage').addEventListener('click'");
