@@ -176,6 +176,9 @@ export function chatScript(
     'skillContext',
   ]);
 
+  /** 閉じたコマンド実行カードの見出しに出す、コマンド先頭の文字数。 */
+  const COMMAND_PREVIEW_LENGTH = 48;
+
   /** Web検索結果を畳まずに出す件数（issue #18）。超えた分は開くまで隠す。 */
   const MAX_VISIBLE_SEARCH_RESULTS = 5;
 
@@ -724,7 +727,12 @@ export function chatScript(
     const text = item.text || '';
     const full = item.kind === 'reasoning' ? item.reasoningFull || '' : '';
     const hasSummaryAndFull = full !== '' && text !== '' && full !== text;
-    const primary = hasSummaryAndFull ? full : text !== '' ? text : full;
+    let primary = hasSummaryAndFull ? full : text !== '' ? text : full;
+    // 閉じた見出しでは先頭だけを見せるため、開いたときは実行コマンドも全文を確認できる
+    // ように出力の先頭へ含める。Codex/Claude CodeともcommandExecutionを使う。
+    if (item.kind === 'commandExecution' && item.detail) {
+      primary = 'コマンド: ' + item.detail + (primary ? '\n\n出力:\n' + primary : '');
+    }
     node.fullText = primary;
 
     if (node.foldBody) {
@@ -999,7 +1007,13 @@ export function chatScript(
 
   function updateNode(node, item, forkTarget) {
     const bits = [KIND_LABEL[item.kind] || item.kind];
-    if (item.detail) bits.push(item.detail);
+    if (item.detail) {
+      const detail =
+        item.kind === 'commandExecution' && item.detail.length > COMMAND_PREVIEW_LENGTH
+          ? item.detail.slice(0, COMMAND_PREVIEW_LENGTH) + '…'
+          : item.detail;
+      bits.push(detail);
+    }
     if (item.status) bits.push(STATUS_LABEL[item.status] || item.status);
     // 上限を超えて先頭を捨てた分は本文に印を混ぜず、ここで断る
     if (item.truncated) bits.push('先頭は省略');
