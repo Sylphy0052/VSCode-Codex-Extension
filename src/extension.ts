@@ -128,6 +128,7 @@ import {
 import { nodeCommandRunner as nodeAccountCommandRunner } from './process/commandRunner';
 import { nodeFileSystem, nodeMemoryFileSystem } from './session/nodeFileSystem';
 import { nodeFileScan } from './session/nodeFileScan';
+import { SessionModelSettingsStore } from './sessionModelSettings';
 import { FileMentionCatalog } from './provider/fileMentions';
 import { InMemoryMetaCache } from './session/ports';
 import { pruneMetaCacheOnStartup } from './session/pruneOnStartup';
@@ -445,6 +446,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ControlPanelViewProvider.viewType, panel),
   );
+  const sessionModelSettings = new SessionModelSettingsStore(context.globalState);
 
   const chat = new ChatViewManager(
     codexPath,
@@ -481,6 +483,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       };
     },
     store,
+    sessionModelSettings,
   );
   context.subscriptions.push(chat);
 
@@ -501,6 +504,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // Claude Code画面の統合テスト（Issue #186）。セッションを作るたびに読み直すため、
     // `activate()` が終わった後からでも差し替えられる。
     () => claudeSpawnOverride.spawn,
+    sessionModelSettings,
   );
   context.subscriptions.push(claudeChat);
 
@@ -1014,19 +1018,19 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     vscode.commands.registerCommand(
       'codex.archiveSession',
       withSession(log, 'codex.archiveSession', (s) => {
-        void runAction(actions, tree, log, 'archive', s);
+        void runAction(actions, tree, log, sessionModelSettings, 'archive', s);
       }),
     ),
     vscode.commands.registerCommand(
       'codex.unarchiveSession',
       withSession(log, 'codex.unarchiveSession', (s) => {
-        void runAction(actions, tree, log, 'unarchive', s);
+        void runAction(actions, tree, log, sessionModelSettings, 'unarchive', s);
       }),
     ),
     vscode.commands.registerCommand(
       'codex.deleteSession',
       withSession(log, 'codex.deleteSession', (s) => {
-        void runAction(actions, tree, log, 'delete', s);
+        void runAction(actions, tree, log, sessionModelSettings, 'delete', s);
       }),
     ),
     vscode.commands.registerCommand('codex.showLog', () => log.show()),
@@ -2704,6 +2708,7 @@ async function runAction(
   actions: SessionActions,
   tree: SessionTreeProvider,
   log: Logger,
+  sessionModelSettings: SessionModelSettingsStore,
   action: SessionAction,
   session: SessionSummary,
 ): Promise<void> {
@@ -2724,6 +2729,9 @@ async function runAction(
 
   const result = await actions.run(action, session.id);
   if (result.code === 0) {
+    if (action === 'delete') {
+      await sessionModelSettings.delete('codex', session.id);
+    }
     log.info(`${label}しました: ${name}`);
   } else {
     log.error(`${label}に失敗しました (exit ${result.code}): ${result.stderr.trim()}`);

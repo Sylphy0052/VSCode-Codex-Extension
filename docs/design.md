@@ -385,7 +385,7 @@ Agents
 - 設定画面から変更された場合も `onDidChangeConfiguration` でパネルへ反映し、表示が二重管理にならないようにする。
 - CSPは `default-src 'none'` を基点にし、スクリプトはnonceで限定する。配色はVSCodeのCSS変数のみを使い、テーマに追従させる。
 
-**適用範囲の制約**: ここでの変更が効くのは**次に開くセッション**。Codex画面は `turn/start` に毎回渡すため次の発言から効く（§9.5）。
+**適用範囲の制約**: サイドバーで変更したモデル/effortは、VSCode設定へ書き込み、**次に開くセッションの既定値**として使う。すでに開いているセッション固有のモデル/effortは変更しない。承認、サンドボックス、permission mode、エージェントは従来どおりVSCode設定を共有し、実行中セッションへの反映可否もそれぞれの既存経路に従う。
 
 **プロバイダの切り替え**: パネル上部のタブで Codex / Claude Code を1クリックで切り替える。選んだ側は `setState` に持たせ、リロード後も保つ。
 
@@ -1139,6 +1139,12 @@ Issue #21着手時点でのIssue #2（Z-11）の記録は「`rewind_files` 実�
 ### 14.7 チャット画面の設定行
 
 Codex画面と同じHTML（`renderShell`）を使うため、画面下の設定行はClaude Code側にも出る。承認は共通の3段階（全確認 / Auto / 全承認）を両画面に同じ語彙で出し、生の値は「承認の詳細」の中でプロバイダごとに差し替える（Codexは `APPROVAL_MODES` とサンドボックス、Claude Codeは `--permission-mode` の6種とエージェント）。3段階の展開先は `src/provider/approvalLevel.ts`、対応表は [approval-modes.md](approval-modes.md)。
+
+- モデル/effortは `SessionModelSettingsStore` が `context.globalState` にプロバイダとセッションIDをキーとして保存する。チャット画面で変更しても別セッションやVSCode設定へは書き込まず、履歴から同じセッションを開き直したときに復元する。
+- 保存値が無いセッションは、そのセッションを開いた時点のVSCode設定を初期値にする。モデル変更でeffortが非対応になった場合の既定値への戻しも、そのセッション内だけで行う。
+- forkとレビュー用セッションは元セッションのモデル/effortを引き継ぐ。Codexの `/btw` 用使い捨てセッションは元セッションの値を使うが、使い捨てIDでは保存しない。
+- Codexセッションを削除したときは、対応する保存値も `SessionModelSettingsStore.delete` で削除する。アーカイブでは復元後も使うため残す。
+- 承認、サンドボックス、permission mode、エージェントはセッション保存の対象外で、従来どおり共有設定と各プロバイダの適用経路を使う。
 
 - 3段階を変えたときのメッセージは `config`（キーと値の組）ではなく専用の `approvalLevel` にする。Codexでは1回の操作が複数の設定項目の変更になるため、キー1つの経路には載らない。Claude Code側は展開後の `permissionMode` を、セレクタから直接変えたときと同じ経路で実行中のセッションへ流す。
 - Shift+Tabの循環（issue #13）は生の承認方法ではなく3段階を回る。「全承認」は循環に含めない。

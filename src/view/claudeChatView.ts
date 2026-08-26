@@ -22,6 +22,7 @@ import type { ClaudeSessionStore } from '../claude/sessionStore';
 import { ClaudeStreamSession, type ClaudeSpawnPort } from '../claude/streamSession';
 import { transcriptItems } from '../claude/transcript';
 import { isUnsafeClaudeCombination } from '../claude/argvBuilder';
+import { effortsFor } from '../codex/modelCatalog';
 import {
   currentWorkspaceFolder,
   readChatComposerButtonsConfig,
@@ -101,7 +102,8 @@ import { buildItemsDelta, stripHostOnlyItems } from './stateDelta';
 import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import { buildHandoffPrompt, resolveWithRetry } from './handoff';
 import { appendTurnSummaryInstruction } from './turnSummary';
-import { CLAUDE_PERMISSION_MODES } from '../claude/types';
+import { CLAUDE_EFFORTS, CLAUDE_PERMISSION_MODES } from '../claude/types';
+import { SessionModelSettingsStore, type SessionModelSettings } from '../sessionModelSettings';
 import {
   APPROVAL_LEVEL_CYCLE,
   claudePermissionModeForLevel,
@@ -130,6 +132,8 @@ interface ClaudePanel extends BaseChatPanel {
    * 戻し先（`permissionMode`）だけはグローバル設定ではなくこちらを見る。
    */
   taskConfig: ClaudeConfig | undefined;
+  /** このセッションだけに適用するモデルとeffort（issue #844）。 */
+  modelSettings: SessionModelSettings;
   /** ターン完了検知に使う直前の値。 */
   wasBusy: boolean;
   /** ループ停止検知に使う直前の値。 */
@@ -311,10 +315,49 @@ export class ClaudeChatViewManager
      * `undefined` を返す間は `ClaudeStreamSession` の既定（実際に起動する）が使われる。
      */
     private readonly resolveSpawn: () => ClaudeSpawnPort | undefined = () => undefined,
+    /** モデルとeffortのセッション別保存先（issue #844）。 */
+    private readonly sessionSettings?: SessionModelSettingsStore,
   ) {
     super();
     this.catalog = new CommandCatalog(fs);
     this.usageProbe = new ClaudeUsageProbe(claudePath, log);
+  }
+
+  private initialModelSettings(
+    taskConfig?: ClaudeConfig,
+    sessionId?: string,
+  ): SessionModelSettings {
+    const stored =
+      sessionId === undefined ? undefined : this.sessionSettings?.get('claude', sessionId);
+    if (stored !== undefined) {
+      return stored;
+    }
+    const config = taskConfig ?? readClaudeConfig().claude;
+    return { model: config.model, effort: config.effort };
+  }
+
+  /** Global設定のうちモデルとeffortだけを、このセッションの値で上書きする。 */
+  private configFor(entry: ClaudePanel): ClaudeConfig {
+    const config = entry.taskConfig ?? readClaudeConfig().claude;
+    return {
+      ...config,
+      model: entry.modelSettings.model,
+      effort: entry.modelSettings.effort,
+    };
+  }
+
+  private async persistModelSettings(entry: ClaudePanel, sessionId?: string): Promise<void> {
+    const id = sessionId ?? entry.session.threadId;
+    if (id === undefined || this.sessionSettings === undefined) {
+      return;
+    }
+    try {
+      await this.sessionSettings.set('claude', id, entry.modelSettings);
+    } catch (e) {
+      this.log.warn(
+        `セッションのモデル設定を保存できませんでした: ${e instanceof Error ? e.message : e}`,
+      );
+    }
   }
 
   /**
@@ -361,14 +404,14 @@ export class ClaudeChatViewManager
    * `refreshSettings`・`flushState`の両方から呼ぶ（issue #420: 揃える前は`refreshSettings`
    * だけがこれを組み立てて送っており、`flushState`経由の更新には設定が乗らなかった）。
    */
-  private buildSettingsPayload(): ChatSettingsPayload {
+  private buildSettingsPayload(entry: ClaudePanel): ChatSettingsPayload {
     const snapshot = this.settings.claudeSnapshot();
     return {
       models: snapshot.models,
-      efforts: snapshot.efforts,
+      efforts: effortsFor(snapshot.models, entry.modelSettings.model, CLAUDE_EFFORTS),
       agents: snapshot.agents,
-      model: snapshot.model,
-      reasoningEffort: snapshot.effort,
+      model: entry.modelSettings.model,
+      reasoningEffort: entry.modelSettings.effort,
       approvalMode: snapshot.permissionMode,
       approvalLevel: snapshot.approvalLevel,
       agent: snapshot.agent,
@@ -422,7 +465,7 @@ export class ClaudeChatViewManager
         // 権威ある判定はホスト側（handleOpenDiffFile等）が行うため、ここは
         // ボタン表示のヒントに過ぎない
         workspaceRoots: workspaceFolderPaths(),
-        settings: this.buildSettingsPayload(),
+        settings: this.buildSettingsPayload(entry),
       },
     });
   }
@@ -492,7 +535,7 @@ export class ClaudeChatViewManager
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),
         workspaceRoots: workspaceFolderPaths(),
-        settings: this.buildSettingsPayload(),
+        settings: this.buildSettingsPayload(entry),
       },
       items,
     });
@@ -552,8 +595,9 @@ export class ClaudeChatViewManager
       cwd: targetCwd,
       target: { kind: 'new' },
       sessionId,
-      config: effectiveConfig,
+      config: this.configFor(entry),
     });
+    await this.persistModelSettings(entry, sessionId);
     return sessionId;
   }
 
@@ -621,8 +665,9 @@ export class ClaudeChatViewManager
       cwd: input.cwd,
       target: { kind: 'new' },
       sessionId,
-      config: taskConfig,
+      config: this.configFor(entry),
     });
+    await this.persistModelSettings(entry, sessionId);
     return this.buildTaskSession(entry, sessionId, input.mcp !== undefined);
   }
 
@@ -640,7 +685,14 @@ export class ClaudeChatViewManager
       return;
     }
 
-    const entry = this.buildEntry(folder, `${LABEL}: ${title}`, false, undefined);
+    const entry = this.buildEntry(
+      folder,
+      `${LABEL}: ${title}`,
+      false,
+      undefined,
+      undefined,
+      this.initialModelSettings(undefined, sessionId),
+    );
     this.showPanel(entry, false);
     this.panels.set(sessionId, entry);
     const transcript = await this.readTranscript(sessionId);
@@ -648,7 +700,7 @@ export class ClaudeChatViewManager
       cwd: folder,
       target: { kind: 'resume', sessionId },
       sessionId: undefined,
-      config: readClaudeConfig().claude,
+      config: this.configFor(entry),
       initialItems: transcript.items,
       initialTodos: transcript.todos,
       initialTodoHistory: transcript.todoHistory,
@@ -689,14 +741,21 @@ export class ClaudeChatViewManager
       return;
     }
 
-    const entry = this.buildEntry(folder, `${LABEL}: ${title}`, false, undefined);
+    const entry = this.buildEntry(
+      folder,
+      `${LABEL}: ${title}`,
+      false,
+      undefined,
+      undefined,
+      this.initialModelSettings(undefined, sessionId),
+    );
     this.showPanel(entry, false);
     this.panels.set(`fork:${randomUUID()}`, entry);
     entry.session.start({
       cwd: folder,
       target: { kind: 'fork', sessionId },
       sessionId: undefined,
-      config: readClaudeConfig().claude,
+      config: this.configFor(entry),
     });
     entry.session.noteLocalEvent(
       `forkNotice:${randomUUID()}`,
@@ -764,14 +823,21 @@ export class ClaudeChatViewManager
       return;
     }
 
-    const entry = this.buildEntry(folder, `${LABEL}: ${title}`, false, undefined);
+    const entry = this.buildEntry(
+      folder,
+      `${LABEL}: ${title}`,
+      false,
+      undefined,
+      undefined,
+      this.initialModelSettings(undefined, sessionId),
+    );
     this.showPanel(entry, false);
     this.panels.set(`fork:${randomUUID()}`, entry);
     entry.session.start({
       cwd: folder,
       target: { kind: 'fork', sessionId },
       sessionId: undefined,
-      config: readClaudeConfig().claude,
+      config: this.configFor(entry),
     });
     entry.session.noteLocalEvent(
       `forkNotice:${randomUUID()}`,
@@ -949,7 +1015,14 @@ export class ClaudeChatViewManager
       return;
     }
 
-    const entry = this.buildEntry(cwd, LABEL, false, undefined);
+    const entry = this.buildEntry(
+      cwd,
+      LABEL,
+      false,
+      undefined,
+      undefined,
+      this.initialModelSettings(undefined, sessionId),
+    );
     this.attachPanel(entry, panel);
     this.panels.set(sessionId, entry);
     const transcript = await this.readTranscript(sessionId);
@@ -957,7 +1030,7 @@ export class ClaudeChatViewManager
       cwd,
       target: { kind: 'resume', sessionId },
       sessionId: undefined,
-      config: readClaudeConfig().claude,
+      config: this.configFor(entry),
       initialItems: transcript.items,
       initialTodos: transcript.todos,
       initialTodoHistory: transcript.todoHistory,
@@ -1043,6 +1116,7 @@ export class ClaudeChatViewManager
     taskManaged: boolean,
     taskConfig: ClaudeConfig | undefined,
     pinnedName?: string,
+    modelSettings: SessionModelSettings = this.initialModelSettings(taskConfig),
   ): ClaudePanel {
     const session = new ClaudeStreamSession(
       this.claudePath,
@@ -1080,6 +1154,7 @@ export class ClaudeChatViewManager
       pinnedName,
       taskManaged,
       taskConfig,
+      modelSettings,
       wasBusy: false,
       wasLoopRunning: false,
       approvalHandler: undefined,
@@ -1306,6 +1381,22 @@ export class ClaudeChatViewManager
               : undefined;
     if (mapped === undefined) {
       this.log.warn(`変更を許可していないキーです: ${String(key)}`);
+      return;
+    }
+    if (mapped === 'model' || mapped === 'effort') {
+      if (mapped === 'model') {
+        entry.modelSettings.model = value;
+        const snapshot = this.settings.claudeSnapshot();
+        const allowed = effortsFor(snapshot.models, value, CLAUDE_EFFORTS);
+        if (entry.modelSettings.effort !== '' && !allowed.includes(entry.modelSettings.effort)) {
+          entry.modelSettings.effort = '';
+        }
+      } else {
+        entry.modelSettings.effort = value;
+      }
+      await this.persistModelSettings(entry);
+      this.applyToSession(entry, mapped, value);
+      this.refreshSettings(entry);
       return;
     }
     // 取り消された場合も表示を現在値へ戻すため、結果によらず再送する
