@@ -695,10 +695,10 @@ describe('会話の一番下へジャンプするボタン', () => {
 
     expect(wrapHtml).toContain('<div id="log"></div>');
     expect(wrapHtml).toContain('<div id="conversationNavigation">');
-    for (const [id, label] of [
-      ['previousUserMessage', '前の自分の発言へ移動'],
-      ['nextUserMessage', '次の自分の発言へ移動'],
-      ['scrollToBottom', '会話の一番下へ移動'],
+    for (const { id, label } of [
+      { id: 'previousUserMessage', label: '前の自分の発言へ移動' },
+      { id: 'nextUserMessage', label: '次の自分の発言へ移動' },
+      { id: 'scrollToBottom', label: '会話の一番下へ移動' },
     ]) {
       const tag = extractButtonOpenTag(html, id);
       expect(tag).toContain('hidden');
