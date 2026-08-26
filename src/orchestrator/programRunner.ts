@@ -563,7 +563,6 @@ export class ProgramRunner {
 
   private needsProgramRecovery(def: ProgramDefinition, state: PersistedProgram['state']): boolean {
     if (state.haltedByUser) return false;
-    if (Object.values(state.runs).some((entry) => entry.state === 'running')) return false;
     const failed = new Set(
       Object.entries(state.runs)
         .filter(([, entry]) => entry.state === 'failed')
@@ -582,13 +581,27 @@ export class ProgramRunner {
     programId: string,
     persisted: PersistedProgram,
   ): Promise<void> {
-    if (persisted.recovery !== undefined) {
-      this.scheduleProgramRecoveryTimeout(programId, persisted.recovery.deadline);
-      return;
-    }
     const failedRunIds = Object.entries(persisted.state.runs)
       .filter(([, entry]) => entry.state === 'failed')
       .map(([id]) => id);
+    if (persisted.recovery !== undefined) {
+      const mergedFailedRunIds = [...new Set([...persisted.recovery.failedRunIds, ...failedRunIds])];
+      if (mergedFailedRunIds.length !== persisted.recovery.failedRunIds.length) {
+        await this.deps.programStore.update(programId, (current) => {
+          if (current === undefined) throw new Error(`[program ${programId}] 復旧更新中に消えました`);
+          return {
+            ...current,
+            recovery: { ...persisted.recovery, failedRunIds: mergedFailedRunIds },
+            changeHistory: this.appendProgramHistory(
+              current,
+              `追加の失敗runを復旧対象へ加えました: ${failedRunIds.join(', ')}`,
+            ),
+          };
+        });
+      }
+      this.scheduleProgramRecoveryTimeout(programId, persisted.recovery.deadline);
+      return;
+    }
     const deadline = new Date(
       (this.deps.now?.() ?? new Date()).getTime() + 10 * 60 * 1000,
     ).toISOString();
@@ -606,11 +619,18 @@ export class ProgramRunner {
   }
 
   private scheduleProgramRecoveryTimeout(programId: string, deadline: string): void {
-    if (this.recoveryTimers.has(programId)) return;
     const persisted = this.deps.programStore.find(programId);
     const heldRunIds = Object.values(persisted?.state.runs ?? {})
       .filter((entry) => entry.state === 'failed' && entry.runId !== undefined)
       .map((entry) => entry.runId as string);
+    const scheduled = this.recoveryTimers.get(programId);
+    if (scheduled !== undefined) {
+      this.recoveryTimers.set(programId, {
+        timer: scheduled.timer,
+        heldRunIds: [...new Set([...scheduled.heldRunIds, ...heldRunIds])],
+      });
+      return;
+    }
     const remaining = Math.max(
       0,
       Date.parse(deadline) - (this.deps.now?.() ?? new Date()).getTime(),

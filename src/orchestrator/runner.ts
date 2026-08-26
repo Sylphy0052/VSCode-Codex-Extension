@@ -3181,15 +3181,13 @@ export class WorkflowRunner {
             })
             .then(() => this.closeMessagingIfFinalMergeSettled(runId, outcome));
         } else {
-          void this.finalizeForge(runId)
-            .catch((e: unknown) => {
-              this.deps.log.error(
-                `[workflow ${runId}] finalizeForgeに失敗しました: ${sanitizeForLog(
-                  e instanceof Error ? e.message : String(e),
-                )}`,
-              );
-            })
-            .then(() => this.closeMessagingIfFinalMergeSettled(runId, outcome));
+          void this.finalizeForge(runId).catch((e: unknown) => {
+            this.deps.log.error(
+              `[workflow ${runId}] finalizeForgeに失敗しました: ${sanitizeForLog(
+                e instanceof Error ? e.message : String(e),
+              )}`,
+            );
+          });
         }
       }
       // ロードマップの更新（design.md §16.19）もrunの結果を問わず行う。`done`になった

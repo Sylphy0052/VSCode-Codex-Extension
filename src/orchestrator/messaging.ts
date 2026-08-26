@@ -1166,6 +1166,10 @@ export const ORCHESTRATOR_CONTROL_TOOLS: readonly McpToolDefinition[] = [
   ADD_TASK_TOOL,
   REMOVE_TASK_TOOL,
   UPDATE_TASK_DEPENDENCIES_TOOL,
+];
+
+/** program配下のrunだけへ追加公開するprogram単位の制御ツール。 */
+export const PROGRAM_CONTROL_TOOLS: readonly McpToolDefinition[] = [
   GET_PROGRAM_STATUS_TOOL,
   ADD_PROGRAM_RUN_TOOL,
   REMOVE_PROGRAM_RUN_TOOL,
@@ -1174,7 +1178,7 @@ export const ORCHESTRATOR_CONTROL_TOOLS: readonly McpToolDefinition[] = [
 ];
 
 const ORCHESTRATOR_CONTROL_TOOL_NAMES: ReadonlySet<string> = new Set(
-  ORCHESTRATOR_CONTROL_TOOLS.map((t) => t.name),
+  [...ORCHESTRATOR_CONTROL_TOOLS, ...PROGRAM_CONTROL_TOOLS].map((t) => t.name),
 );
 
 /**
@@ -1646,19 +1650,10 @@ export class MessagingMcpServer {
               if (tool.name === UPDATE_TASK_TOOL.name && control.updateTask === undefined) {
                 return false;
               }
-              if (
-                control.hasProgramControl?.() !== true &&
-                (tool.name === GET_PROGRAM_STATUS_TOOL.name ||
-                  tool.name === ADD_PROGRAM_RUN_TOOL.name ||
-                  tool.name === REMOVE_PROGRAM_RUN_TOOL.name ||
-                  tool.name === RETRY_PROGRAM_RUN_TOOL.name ||
-                  tool.name === UPDATE_PROGRAM_RUN_DEPENDENCIES_TOOL.name)
-              ) {
-                return false;
-              }
               return true;
             });
-      return [...base, ...handoffTools, ...controlTools];
+      const programTools = control?.hasProgramControl?.() === true ? PROGRAM_CONTROL_TOOLS : [];
+      return [...base, ...handoffTools, ...controlTools, ...programTools];
     }
     return [...base, ASK_ORCHESTRATOR_TOOL, ...handoffTools];
   }
