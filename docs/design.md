@@ -5232,8 +5232,8 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 2. 統合ブランチが未pushならpushする。baseが存在しないとPR/MRを作れない
 3. PR/MRを作る（base=統合ブランチ、head=タスクブランチ）
    3.5. `agent.workflows.reviewTaskPullRequest` が有効なら、3で作ったPR/MRを別の読み取り専用
-   セッションでレビューする（§16.31）。指摘の有無・レビュー自体の失敗を問わず4へ進む
-   （マージをブロックしない）
+   セッションでレビューする（§16.31）。指摘0件のときだけ4へ進み、指摘・壊れた応答・
+   レビュー失敗ではマージを止めて復旧オーケストレーターへ渡す
 4. 統合worktreeでマージし、統合ブランチをpushする
 5. `draftPullRequest` が有効なら、3で作ったPR/MRをreadyへ切り替える
 
@@ -6151,16 +6151,22 @@ Issue #341（epic）の方針転換により、「判断するのはオーケス
 
 #### (b) PRを作った後、ローカルマージの前にレビューを1段挟む
 
-`TaskPullRequestSteps<TMerge>`（`forge.ts`）へ`reviewPullRequest?: (url) => Promise<ForgeStepOutcome>`を新設し、`runTaskPullRequestFlow`の中で**`createPullRequest`の後・`mergeAndPushIntegration`の前**に呼ぶ（既存の4手順の順序は変えない。レビューは3.5番目、ready化は5番目として足す）。PR/MRの作成に成功したときだけ呼び、**結果（指摘の有無・レビュー自体の失敗）に関わらず`mergeAndPushIntegration`は必ず呼ぶ**——forgeの「人のレビューを待つ」方式のように、応答が無いまま待ち続ける構造は持ち込まない（epicの方針、W8の`ask_user`で近い欠陥をほぼ持ち込みかけたのと同じ理由）。
+`TaskPullRequestSteps<TMerge>`（`forge.ts`）の`reviewPullRequest`を、`runTaskPullRequestFlow`の中で**`createPullRequest`の後・`mergeAndPushIntegration`の前**に呼ぶ。PR/MRの作成に成功したときだけ実施し、`ok: false`なら待ち続けず例外として上位の`markMergeFailed`へ合流させる。指摘やレビュー不能を成功扱いにして統合しない（Issue #847）。
+
+#### (c) DONE後の独立検証
+
+タスクの`[DONE]`は検証開始の合図であり、それだけでは`done`へ遷移しない。任意の`verify`に`commands`、`files`、`diff`、`semantic`を持ち、必須ファイルの存在と変更必須パスを拡張機能側で確認したうえで、別のread-only・承認拒否セッションが検証コマンドとdiffを完了条件に照らして確認する。コマンドを拡張機能ホストのシェルで直接動かすとYAMLからサンドボックス外で任意実行できるため、必ず制限された検証セッションへ渡す。
+
+失敗時は具体的な指摘を同じ会話・同じworktreeへ返して修正を続ける。初回を含め最大3回で、通過時だけ従来のマージ処理へ進む。3回失敗、レビュー応答が壊れている、レビューセッションが失敗した場合は`failed`として復旧オーケストレーターへ渡す。
 
 実施主体は**forge（人のレビューを待つ機構）ではなく、拡張自身が別のエージェントセッションを立てて読み取り専用でレビューさせる方式**を採る。§16.28の`reviewWorkflowPlan`（分解レビュー、roadmap W3）と同じ形をそのまま踏襲する。
 
 - `reviewTaskPullRequest`（`planner.ts`）は`buildPlannerSessionInput` + `sendSingleTurn`（既定`PLANNER_TURN_TIMEOUT_MS` = 5分）で1ターンだけ送って閉じる。§16.28と同じく`sandbox: read-only`（Codex）・`approvalMode: never`（Codex）/`permissionMode: manual`（Claude）で起動し、承認要求は理由を問わず全て拒否する。**読み取り専用であることはプロンプトの指示ではなく起動設定で担保する**
 - プロンプトへ渡すのは対象タスクの`prompt`/`done`と、タスクブランチ・統合ブランチ間の`git diff`（`runnerMerge.ts`の`buildTaskPullRequestReviewStep`が取得）。差分の取得自体が失敗した場合は空文字列にフォールバックする（差分無しでもレビュー自体は試みる。取得失敗を理由にレビュー全体を諦めない）
-- 応答はJSON配列（`[{"message": "..."}]`）を期待し、`TaskPullRequestReviewFinding`（`message`のみ。§16.28の`WorkflowReviewFinding`と違い`aspect`の固定リストは持たない——分解固有の観点はコード差分レビューには当てはまらないため）へ変換する。JSONとして解釈できない・配列でない応答は**例外にせず指摘0件として扱う**（`parseTaskPullRequestReviewFindings`、§16.28の`parseReviewFindings`と同じ流儀）。件数上限は30件（`MAX_TASK_REVIEW_FINDINGS`）、メッセージは500文字（`MAX_TASK_REVIEW_FINDING_MESSAGE_LENGTH`）で`sanitizeInlineText`を通す
+- 応答はJSON配列（`[{"message": "..."}]`）を期待し、`TaskPullRequestReviewFinding`へ変換する。JSONとして解釈できない・配列でない応答は指摘0件とせずレビュー失敗にする。件数上限は30件、メッセージは500文字で`sanitizeInlineText`を通す
 - レビューセッションの起動・応答待ちそのものが失敗した場合（タイムアウト等）も例外を投げず、`error`へ理由を残して`findings: []`を返す
 
-`buildTaskPullRequestReviewStep`（`runnerMerge.ts`）は、レビューの結果に関わらず`{ ok: true }`を返す（`ForgeStepOutcome`としてこのステップ自体を失敗扱いにしない）。エラーが出た場合・指摘が1件以上あった場合は、`live.warnings`へ`kind: 'taskPullRequestReview'`の警告を積み、レビュー結果を人が確認できるようにする——`markPullRequestReady`等と同じ「結果は警告として残すだけで、フローの成否には影響しない」設計。
+`buildTaskPullRequestReviewStep`は、エラーまたは指摘があれば警告を積んで`ok: false`を返す。`runTaskPullRequestFlow`はローカルマージを呼ばず、上位がタスクを失敗へ倒す。
 
 #### 外部由来テキストの扱い（サニタイズは1度だけ、§16.24）
 

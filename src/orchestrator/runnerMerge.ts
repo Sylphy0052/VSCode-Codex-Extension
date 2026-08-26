@@ -64,10 +64,8 @@ import type { WorkflowRunnerInternals } from './runnerInternals';
  * （`runTaskPullRequestFlow`。push→push→create→merge+push）で行う。無効なら
  * 従来どおりローカルの統合worktreeへのマージだけを行う。
  *
- * PR/MRの作成（`pushTaskBranch`/`pushIntegrationBranch`/`createPullRequest`）が
- * 失敗しても、統合ブランチへのローカルのマージ（`mergeAndPushIntegration`）は必ず行う
- * （`runTaskPullRequestFlow`自身の保証。design.md §16.18「前提が欠けている場合」と同じ
- * 「ワークフロー自体は止めない」方針）。
+ * PR/MRの作成失敗時は従来どおりローカルマージを続ける。PR/MR作成後の独立レビューで
+ * 指摘・解析失敗があった場合だけはマージを止め、タスク失敗として復旧経路へ渡す。
  */
 export async function mergeTaskWithForge(
   self: WorkflowRunnerInternals,
@@ -230,9 +228,8 @@ function buildTaskPullRequestFlowCallbacks(
  * （diffが空でもレビューセッション自体は起動する。指摘0件で返るだけ）。
  *
  * 指摘・レビュー自体の失敗はどちらも`taskPullRequestReview`警告として`live.warnings`へ
- * 積む。**この関数はマージをブロックしない**（常に`{ ok: true }`系の結果を返し、
- * `runTaskPullRequestFlow`は結果を問わず`mergeAndPushIntegration`を呼ぶ。design.md
- * §16.31「結果に関わらずマージは進める」）。
+ * 積み、`ok: false`でローカルマージを止める。DONE後の独立検証を通過していても、PR作成後の
+ * 最終レビューで新しい問題が見つかった場合は未解決のまま統合しない。
  */
 function buildTaskPullRequestReviewStep(
   self: WorkflowRunnerInternals,
@@ -267,7 +264,7 @@ function buildTaskPullRequestReviewStep(
         taskId,
         message: `PR/MRのレビューに失敗しました: ${sanitizeForLog(review.error)}`,
       });
-      return { ok: true };
+      return { ok: false, message: `PR/MRのレビューに失敗しました: ${review.error}` };
     }
 
     if (review.findings.length > 0) {
@@ -280,6 +277,10 @@ function buildTaskPullRequestReviewStep(
         taskId,
         message: `PR/MRのレビューで指摘がありました:\n${summary}`,
       });
+      return {
+        ok: false,
+        message: `PR/MRレビューの指摘が${review.findings.length}件残っています`,
+      };
     }
     return { ok: true };
   };

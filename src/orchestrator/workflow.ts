@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import * as path from 'node:path';
 
 import { isMap, isScalar, isSeq, parse, parseDocument } from 'yaml';
 
@@ -166,6 +167,13 @@ export interface WorkflowTask {
   outputs?: string[];
   /** 既知のリスクと確認が必要な前提。 */
   risks?: string[];
+  /** DONE宣言後に別セッションと拡張機能側で確認する検証契約。 */
+  verify?: {
+    commands: string[];
+    files: string[];
+    diff: string[];
+    semantic: boolean;
+  };
   /**
    * チームモードの役割（design.md §16.44、Issue #693）。`undefined` は「役割なし」で、
    * 従来どおりの振る舞い（`model` / `effort` は `defaults` と拡張機能の設定に従う）になる。
@@ -598,12 +606,36 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
     parseErrors.push(issueResult.error);
   }
 
+  const verifyRaw = rec(t['verify']);
+  const verifyCommands = filterStringArray(arr(verifyRaw?.['commands']));
+  const verifyFiles = filterStringArray(arr(verifyRaw?.['files']));
+  const verifyDiff = filterStringArray(arr(verifyRaw?.['diff']));
+  for (const [field, filtered] of [
+    ['verify.commands', verifyCommands],
+    ['verify.files', verifyFiles],
+    ['verify.diff', verifyDiff],
+  ] as const) {
+    if (filtered.hadNonStringElements) {
+      parseWarnings.push(`${field} に文字列でない要素が含まれていたため無視しました`);
+    }
+  }
+
   return {
     id: str(t['id']),
     ...(str(t['outcome']) !== '' ? { outcome: str(t['outcome']) } : {}),
     ...(t['evidence'] !== undefined ? { evidence: evidence.values } : {}),
     ...(t['outputs'] !== undefined ? { outputs: outputs.values } : {}),
     ...(t['risks'] !== undefined ? { risks: risks.values } : {}),
+    ...(verifyRaw !== undefined
+      ? {
+          verify: {
+            commands: verifyCommands.values,
+            files: verifyFiles.values,
+            diff: verifyDiff.values,
+            semantic: bool(verifyRaw['semantic'], true),
+          },
+        }
+      : {}),
     role,
     prompt: str(t['prompt']),
     done: str(t['done']),
@@ -692,6 +724,7 @@ export function buildOrchestratorTask(
   const dependsOn = Array.isArray(dependsOnRaw) ? filterStringArray(dependsOnRaw).values : [];
   const continuePromptRaw = str(raw['continuePrompt']);
   const issueResult = resolveIssue(raw['issue']);
+  const verifyRaw = rec(raw['verify']);
   const task: WorkflowTask = {
     id: str(raw['id']),
     ...(str(raw['outcome']) !== '' ? { outcome: str(raw['outcome']) } : {}),
@@ -703,6 +736,16 @@ export function buildOrchestratorTask(
       : {}),
     ...(raw['risks'] !== undefined
       ? { risks: filterStringArray(arr(raw['risks'])).values }
+      : {}),
+    ...(verifyRaw !== undefined
+      ? {
+          verify: {
+            commands: filterStringArray(arr(verifyRaw['commands'])).values,
+            files: filterStringArray(arr(verifyRaw['files'])).values,
+            diff: filterStringArray(arr(verifyRaw['diff'])).values,
+            semantic: bool(verifyRaw['semantic'], true),
+          },
+        }
       : {}),
     role,
     prompt: str(raw['prompt']),
@@ -1503,6 +1546,32 @@ export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationRes
     }
     if (t.prompt.trim() === '') {
       errors.push({ taskIds: [t.id], message: 'prompt が指定されていません' });
+    }
+    if (t.verify !== undefined) {
+      for (const file of [...t.verify.files, ...t.verify.diff]) {
+        if (
+          file.trim() === '' ||
+          path.isAbsolute(file) ||
+          file.split(/[\\/]/u).includes('..')
+        ) {
+          errors.push({
+            taskIds: [t.id],
+            message: `verify.files / verify.diff はworktree内の相対パスにしてください: ${file}`,
+          });
+        }
+      }
+      for (const [field, value] of [
+        ['verify.commands', t.verify.commands.join('\n')],
+        ['verify.files', t.verify.files.join('\n')],
+        ['verify.diff', t.verify.diff.join('\n')],
+      ] as const) {
+        if (value.length > MAX_PROMPT_LENGTH) {
+          errors.push({
+            taskIds: [t.id],
+            message: `${field} が長すぎます（上限${MAX_PROMPT_LENGTH}文字）: ${value.length}文字`,
+          });
+        }
+      }
     }
     for (const [field, value] of [
       ['outcome', t.outcome],
