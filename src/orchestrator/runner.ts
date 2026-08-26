@@ -653,6 +653,8 @@ export interface WorkflowWarning {
      * 全文で残す。
      */
     | 'orchestratorDependenciesChanged'
+    /** オーケストレーターの失敗復旧待ちが期限切れになった。 */
+    | 'orchestratorFailureRecoveryTimedOut'
     /**
      * 計画変更の履歴（`orchestratorTaskAdded`/`orchestratorTaskRemoved`）が上限に達し、
      * 古いものから落とし始めた（Issue #765）。この2種は履歴そのものなので直近1件へは
@@ -800,6 +802,8 @@ export interface WorkflowRunSnapshot {
   warnings: readonly WorkflowWarning[];
   /** 人の割り込み（`manual`/`interrupted`）で実行全体が停止しているか。 */
   haltedByUser: boolean;
+  /** 失敗後、オーケストレーターが復旧計画を適用できる状態。 */
+  failureRecovery?: { failedTaskIds: readonly string[]; deadline: string } | undefined;
   /**
    * ゴール文から生成した直後・未実行の下書きプレビューか（`WorkflowViewManager.
    * previewDefinition`専用。design.md §16.9セキュリティ監査 low「outcome: 'aborted'が
@@ -1194,6 +1198,15 @@ export interface LiveRun {
    * 終了ブロックが2周目を走ること自体は戻す理由にならない（それが#432-2の塞いだ形である）。
    */
   finishedNotified: boolean;
+  /**
+   * タスク失敗後、制御MCPを閉じずにオーケストレーターの復旧計画を待つ期間。
+   * タイマーはプロセス内だけの寿命管理であり、リロード後には復元しない。
+   */
+  failureRecovery:
+    | { failedTaskIds: readonly string[]; deadline: string; timer: ReturnType<typeof setTimeout> }
+    | undefined;
+  /** 復旧待ちが期限切れになったため、次のpumpで通常の最終失敗へ進める。 */
+  failureRecoveryExhausted: boolean;
   /** design.md §16.8「警告欄」。発生した順に積む（`maxReached` はスナップショット生成時に動的に足す）。 */
   warnings: WorkflowWarning[];
   /**
@@ -2042,6 +2055,8 @@ export class WorkflowRunner {
       tasks: new Map(),
       finished: false,
       finishedNotified: false,
+      failureRecovery: undefined,
+      failureRecoveryExhausted: false,
       warnings,
       integration,
       forge,
@@ -2362,6 +2377,12 @@ export class WorkflowRunner {
       return { ok: false };
     }
     live.runState = next;
+    // 失敗復旧待ちからの再実行なら、古い期限で新しい試行を打ち切らない。
+    if (live.failureRecovery !== undefined) {
+      clearTimeout(live.failureRecovery.timer);
+      live.failureRecovery = undefined;
+      live.failureRecoveryExhausted = false;
+    }
     // 停止していた実行を人の操作で再開する起点でもあるため、finishedを解除する
     const wasFinished = live.finished;
     live.finished = false;
@@ -2945,6 +2966,11 @@ export class WorkflowRunner {
 
     const outcome = getRunOutcome(live.runState);
     if (outcome !== 'running' && !live.finished) {
+      if (outcome === 'failed') {
+        if (live.failureRecovery !== undefined || this.beginFailureRecovery(runId, live)) {
+          return;
+        }
+      }
       live.finished = true;
       this.deps.log.info(`[workflow ${runId}] 実行が終了しました: ${outcome}`);
       // 全タスクがdoneになったときだけ統合→mainのPR/MRを作る（design.md §16.18）。
@@ -3051,6 +3077,55 @@ export class WorkflowRunner {
         this.closeMessagingIfFinalMergeSettled(runId, outcome);
       }
     }
+  }
+
+  /**
+   * 失敗したrunを短時間だけ生かし、オーケストレーターが復旧計画を組めるようにする。
+   * 復旧操作が計画を変えるとタイマーを解除して通常のスケジューリングへ戻る。
+   */
+  private beginFailureRecovery(runId: string, live: LiveRun): boolean {
+    if (
+      live.failureRecovery !== undefined ||
+      live.failureRecoveryExhausted ||
+      live.runState.haltedByUser ||
+      !this.deps.readBaseline().allowAutoApprove
+    ) {
+      return false;
+    }
+    const failedTaskIds = [...live.runState.tasks.entries()]
+      .filter(([, state]) => state.state === 'failed')
+      .map(([taskId]) => taskId);
+    if (failedTaskIds.length === 0) {
+      return false;
+    }
+    const timeoutMs = 10 * 60 * 1000;
+    const deadline = new Date((this.deps.now?.() ?? new Date()).getTime() + timeoutMs).toISOString();
+    const timer = setTimeout(() => {
+      const current = this.runs.get(runId);
+      if (current?.failureRecovery?.timer !== timer) {
+        return;
+      }
+      current.failureRecovery = undefined;
+      current.failureRecoveryExhausted = true;
+      current.warnings.push({
+        kind: 'orchestratorFailureRecoveryTimedOut',
+        taskId: undefined,
+        message: 'オーケストレーターによる復旧計画が10分以内に適用されなかったため、実行を失敗として終了します。',
+      });
+      this.notify(runId);
+      this.pump(runId);
+    }, timeoutMs);
+    live.failureRecovery = { failedTaskIds, deadline, timer };
+    notifyOrchestrator(this.internals, runId, {
+      kind: 'failureRecovery',
+      body: [
+        `タスク ${failedTaskIds.join(', ')} が失敗しました。runは復旧計画を待っています。`,
+        '10分以内にretry_task、add_task、remove_task、update_task_dependencies、update_task_promptで対応してください。',
+        '計画変更は人の確認なしに適用され、ワークフロー画面へライブ反映されます。',
+      ].join('\n'),
+    });
+    this.notify(runId);
+    return true;
   }
 
   /**

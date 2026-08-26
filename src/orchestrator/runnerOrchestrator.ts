@@ -220,7 +220,14 @@ const no = (reason: string): OrchestratorControlResult => ({ accepted: false, re
  * 閉じるまでの隙間と、サーバの寿命に依存しない多層防御としてここでも止める。**`get_run_status`
  * は無効にしない**（走り終えた後に「なぜ失敗したのか」を聞く経路を残すため）。
  */
-function runFinishedReason(actions: OrchestratorControlActions, runId: string): string | undefined {
+function runFinishedReason(
+  self: WorkflowRunnerInternals,
+  actions: OrchestratorControlActions,
+  runId: string,
+): string | undefined {
+  if (self.runs.get(runId)?.failureRecovery !== undefined) {
+    return undefined;
+  }
   const outcome = actions.getSnapshot(runId)?.outcome;
   if (outcome === undefined) {
     return 'この実行はすでに破棄されているため、制御ツールは使えません。';
@@ -251,9 +258,12 @@ function runFinishedReason(actions: OrchestratorControlActions, runId: string): 
  * 二重に作らないよう、`finalizeForge`自身に冪等ガードを足した（下記参照。design.md §16.30）
  */
 function resumeIfFinishedForPlanChange(live: LiveRun): void {
-  if (live.finished) {
-    live.finished = false;
+  if (live.failureRecovery !== undefined) {
+    clearTimeout(live.failureRecovery.timer);
+    live.failureRecovery = undefined;
+    live.failureRecoveryExhausted = false;
   }
+  live.finished = false;
 }
 
 /**
@@ -310,11 +320,14 @@ function planChangeFinishedReason(
   actions: OrchestratorControlActions,
   runId: string,
 ): string | undefined {
-  const base = runFinishedReason(actions, runId);
+  const base = runFinishedReason(self, actions, runId);
   if (base === undefined) {
     return undefined;
   }
   const live = self.runs.get(runId);
+  if (live?.failureRecovery !== undefined) {
+    return undefined;
+  }
   if (live?.reviewCommentPoll === undefined) {
     return base;
   }
@@ -386,7 +399,7 @@ export function buildOrchestratorControlPort(
   return {
     getRunStatus: () => buildRunStatus(actions, runId),
     stopTask: (taskId) => {
-      const finished = runFinishedReason(actions, runId);
+      const finished = runFinishedReason(self, actions, runId);
       if (finished !== undefined) {
         return no(finished);
       }
@@ -418,7 +431,7 @@ export function buildOrchestratorControlPort(
       return ok(`${taskId} のループを止めました（状態: ${state}）。`);
     },
     retryTask: (taskId) => {
-      const finished = runFinishedReason(actions, runId);
+      const finished = runFinishedReason(self, actions, runId);
       if (finished !== undefined) {
         return no(finished);
       }
@@ -439,7 +452,7 @@ export function buildOrchestratorControlPort(
         : no(`${taskId} は再実行できる状態ではありません。`);
     },
     continueTask: (taskId) => {
-      const finished = runFinishedReason(actions, runId);
+      const finished = runFinishedReason(self, actions, runId);
       if (finished !== undefined) {
         return no(finished);
       }
@@ -452,7 +465,7 @@ export function buildOrchestratorControlPort(
         : no(`${taskId} は続きから走らせられる状態ではありません。`);
     },
     decideApproval: (taskId, decision) => {
-      const finished = runFinishedReason(actions, runId);
+      const finished = runFinishedReason(self, actions, runId);
       if (finished !== undefined) {
         return no(finished);
       }
@@ -537,7 +550,7 @@ export function buildOrchestratorControlPort(
         : no('最終マージの判断待ちが見つかりません（既に確定した可能性があります）。');
     },
     askUser: (question, choices) => {
-      const finished = runFinishedReason(actions, runId);
+      const finished = runFinishedReason(self, actions, runId);
       if (finished !== undefined) {
         return no(finished);
       }
@@ -1053,6 +1066,14 @@ export async function setupOrchestratorForStart(
     session.onStateChanged((state) => onOrchestratorStateChanged(self, runId, state));
 
     notifyOrchestrator(self, runId, { kind: 'runStarted', body: buildIntroBody(live, resume) });
+    if (live.failureRecovery !== undefined) {
+      notifyOrchestrator(self, runId, {
+        kind: 'failureRecovery',
+        body:
+          `タスク ${live.failureRecovery.failedTaskIds.join(', ')} の失敗後、復旧計画を待っています。` +
+          'retry_taskまたは計画変更ツールで自動復旧してください。',
+      });
+    }
     self.notify(runId);
   } catch (e) {
     const message = sanitizeForLog(e instanceof Error ? e.message : String(e));

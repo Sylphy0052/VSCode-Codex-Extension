@@ -1100,7 +1100,9 @@ function createHarness(
       codexSandbox: options?.codexSandbox ?? 'read-only',
       codexApprovalMode: options?.codexApprovalMode ?? 'on-request',
       claudePermissionMode: options?.claudePermissionMode ?? 'manual',
-      allowAutoApprove: options?.allowAutoApprove ?? true,
+      // 失敗後の自動復旧はallowAutoApproveを有効にした無人運用だけで始まる。
+      // 既存の終了処理を検証する標準ハーネスは明示的にopt-inしない。
+      allowAutoApprove: options?.allowAutoApprove ?? false,
       allowClaudeBypassPermissions: options?.allowClaudeBypassPermissions ?? false,
     }),
     ...(options?.forge !== undefined ? { forge: options.forge } : {}),

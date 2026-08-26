@@ -416,6 +416,8 @@ async function rebuildLiveRun(
     // 見て早期returnするため、既に終了済みの run はこのプロセスで再開されない限り
     // 終了ブロックへ再入しないから
     finishedNotified: false,
+    failureRecovery: undefined,
+    failureRecoveryExhausted: false,
     warnings: reconcileWarnings,
     integration,
     forge,
