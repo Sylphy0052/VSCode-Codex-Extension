@@ -109,9 +109,10 @@ function buildIntroBody(live: LiveRun, resume?: OrchestratorResumeContext): stri
       '既存の検証（id形式・循環依存・上限件数・プロンプト長）が適用され、autoApprove/' +
       'allow/sandbox/approvalModeは指定できません（指定すると拒否されます）。削除できるのは' +
       'まだ開始していない（pendingの）タスクだけで、走行中のタスクはstop_taskを使ってください。' +
-      'タスクが停滞した（taskStalled）通知を受けたときは、update_task_promptで指示を' +
-      '調整するだけでなく、必要ならタスクを分割・統合するためにこれらのツールで計画自体を' +
-      '見直すことも検討してください',
+      'タスクが停滞した（taskStalled）通知を受けたときは、まずupdate_task_promptで既存タスクの' +
+      '指示を調整する。追加・分割は、独立した成果物・受入条件がある、または並列化の効果が' +
+      'ある場合だけにし、同じ縦切りの作業を工程やファイル単位へ細分化しないこと。不要に' +
+      '細かいpendingタスクは統合または削除し、最小の計画へ見直してください',
     '- ask_user: 担当領域をまたぐ変更・設計の前提を変える変更・受入基準を下げる判断・' +
       '同じ失敗を3回繰り返した場合に限り、人へ確認する（それ以外は自分で判断する。呼べる' +
       '回数に上限あり）。add_task/remove_task/update_task_dependenciesで方針そのものが' +
