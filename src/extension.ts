@@ -108,7 +108,11 @@ import {
   locateSecurityWarningLine,
   type PlanWorkflowResult,
 } from './orchestrator/planner';
-import { MAX_PROMPT_LENGTH, MAX_TASK_COUNT } from './orchestrator/workflow';
+import {
+  MAX_PROMPT_LENGTH,
+  MAX_TASK_COUNT,
+  withWorkflowReviewStatus,
+} from './orchestrator/workflow';
 import type { Provider } from './orchestrator/workflow';
 import {
   formatResolutionFailureMessage,
@@ -2428,7 +2432,13 @@ async function handlePlanSuccess(
     log.info('ワークフロー定義の保存を取り消しました');
     return;
   }
-  const filePath = await writeUniqueWorkflowFile(dirAbs, fileName, existingBaseNames, result.yaml);
+  const pendingReview = withWorkflowReviewStatus(result.yaml, result.definition, 'reviewing');
+  const filePath = await writeUniqueWorkflowFile(
+    dirAbs,
+    fileName,
+    existingBaseNames,
+    pendingReview.yaml,
+  );
 
   // 生成直後の表示はレビューの完了を待たない（design.md §16.28「表示は保存直後に出す。
   // レビューは後追いで警告欄へ足す」）。エディタより先にViewを開く。エディタの
@@ -2436,7 +2446,7 @@ async function handlePlanSuccess(
   // パネル作成自体はフォーカスを奪う作りのため）
   view.previewDefinition(
     filePath,
-    result.definition,
+    pendingReview.definition,
     result.securityWarnings.map((w) => ({
       kind: 'plannerSecurity' as const,
       taskId: w.taskId,
@@ -2460,7 +2470,7 @@ async function handlePlanSuccess(
   if (result.securityWarnings.length > 0) {
     const first = result.securityWarnings[0];
     if (first !== undefined) {
-      const line = locateSecurityWarningLine(result.yaml, first.taskId, first.kind);
+      const line = locateSecurityWarningLine(pendingReview.yaml, first.taskId, first.kind);
       if (line !== undefined) {
         const pos = new vscode.Position(Math.max(0, line - 1), 0);
         editor.selection = new vscode.Selection(pos, pos);
@@ -2488,8 +2498,8 @@ async function handlePlanSuccess(
   // 利用者が開いたエディタを編集した場合は、内容を上書きせず警告を残して止める。
   void (async () => {
     try {
-      let yaml = result.yaml;
-      let definition = result.definition;
+      let yaml = pendingReview.yaml;
+      let definition = pendingReview.definition;
       let securityWarnings = result.securityWarnings;
       for (let revision = 0; revision <= MAX_AUTO_REVIEW_REVISIONS; revision += 1) {
         const review = await vscode.window.withProgress(
@@ -2519,6 +2529,41 @@ async function handlePlanSuccess(
           return;
         }
         if (review.findings.length === 0) {
+          if (doc.isDirty || doc.getText() !== yaml) {
+            log.warn(
+              '[planner] 利用者によるYAML編集を検出したため、reviewStatusをreadyへ変更しませんでした',
+            );
+            void warnWithLogLink(
+              log,
+              '開いたワークフローYAMLが編集されたため、レビュー完了状態を自動反映しませんでした（詳しくはログ）',
+            );
+            return;
+          }
+          const ready = withWorkflowReviewStatus(yaml, definition, 'ready');
+          const readyEdit = new vscode.WorkspaceEdit();
+          readyEdit.replace(
+            doc.uri,
+            new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)),
+            ready.yaml,
+          );
+          if (!(await vscode.workspace.applyEdit(readyEdit)) || !(await doc.save())) {
+            void warnWithLogLink(
+              log,
+              'レビュー完了状態を保存できなかったため、ワークフローは実行待ちのままです（詳しくはログ）',
+            );
+            return;
+          }
+          yaml = ready.yaml;
+          definition = ready.definition;
+          view.previewDefinition(
+            filePath,
+            definition,
+            securityWarnings.map((warning) => ({
+              kind: 'plannerSecurity' as const,
+              taskId: warning.taskId,
+              message: warning.message,
+            })),
+          );
           log.info(
             revision === 0
               ? '[planner] ワークフローのレビューが完了しました（指摘なし）'
@@ -2604,8 +2649,17 @@ async function handlePlanSuccess(
           );
           return;
         }
+        const revisedReviewing = withWorkflowReviewStatus(
+          revised.yaml,
+          revised.definition,
+          'reviewing',
+        );
         const edit = new vscode.WorkspaceEdit();
-        edit.replace(doc.uri, new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)), revised.yaml);
+        edit.replace(
+          doc.uri,
+          new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)),
+          revisedReviewing.yaml,
+        );
         if (!(await vscode.workspace.applyEdit(edit)) || !(await doc.save())) {
           void warnWithLogLink(
             log,
@@ -2614,8 +2668,8 @@ async function handlePlanSuccess(
           return;
         }
 
-        yaml = revised.yaml;
-        definition = revised.definition;
+        yaml = revisedReviewing.yaml;
+        definition = revisedReviewing.definition;
         securityWarnings = revised.securityWarnings;
       }
     } catch (e) {

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { ChatState } from '../appserver/chatState';
 import {
@@ -17,6 +19,7 @@ import {
 } from './orchestratorSession';
 import { sanitizeForLog, stripControlChars } from './sanitize';
 import { buildResponseSummary } from './taskSummary';
+import { formatUntrusted } from './untrustedText';
 import { addTaskState, removeTaskState } from './runState';
 import type { TaskState } from './runState';
 import type {
@@ -73,9 +76,17 @@ function buildIntroBody(live: LiveRun, resume?: OrchestratorResumeContext): stri
   const tasks = live.def.tasks
     .map((t) => {
       const deps = t.dependsOn.length > 0 ? `（依存: ${t.dependsOn.join(', ')}）` : '';
-      return `- ${t.id}${deps}`;
+      const outcome = t.outcome === undefined ? '' : `: ${t.outcome}`;
+      return `- ${t.id}${outcome}${deps}`;
     })
     .join('\n');
+  const safeTasks = formatUntrusted(tasks, {
+    id: 'runOrchestrator',
+    field: 'tasks',
+    maxLength: MAX_MESSAGE_BODY_LENGTH,
+    preserveNewlines: true,
+    nonce: randomUUID(),
+  });
   const pendingAskUser = resume?.pendingAskUser;
   const resumeNote =
     pendingAskUser === undefined
@@ -89,6 +100,29 @@ function buildIntroBody(live: LiveRun, resume?: OrchestratorResumeContext): stri
           `選択肢: ${pendingAskUser.choices.join(' / ')}`,
           '人が選ぶと「人がask_userの質問に答えました: "<選択肢>"」という発話が届きます。それまで' +
             '新しい ask_user は呼べません（回答待ちは1runにつき同時に1問だけ）。',
+        ];
+  const contractText = [
+    ...(live.def.goal === undefined ? [] : [`ゴール: ${live.def.goal}`]),
+    ...(live.def.acceptance ?? []).map((value) => `受入条件: ${value}`),
+    ...(live.def.assumptions ?? []).map((value) => `前提: ${value}`),
+    ...(live.def.nonGoals ?? []).map((value) => `対象外: ${value}`),
+    ...(live.def.roadmapRevision === undefined
+      ? []
+      : [`ロードマップ改訂: ${live.def.roadmapRevision}`]),
+  ].join('\n');
+  const contract =
+    contractText === ''
+      ? []
+      : [
+          '',
+          'このrunの実行契約:',
+          formatUntrusted(contractText, {
+            id: 'runOrchestrator',
+            field: 'contract',
+            maxLength: MAX_MESSAGE_BODY_LENGTH,
+            preserveNewlines: true,
+            nonce: randomUUID(),
+          }),
         ];
   return [
     `ワークフロー「${live.def.name}」の実行を開始しました。あなたはこの実行のオーケストレーターです。`,
@@ -120,9 +154,10 @@ function buildIntroBody(live: LiveRun, resume?: OrchestratorResumeContext): stri
       'ask_userで人に確認すること',
     '',
     'あなた自身はファイルを書き換えられません（読み取り専用）。実際の作業は各タスクが行います。',
+    ...contract,
     '',
     `タスク（${live.def.tasks.length}件、並列上限 ${live.def.maxParallel}）:`,
-    tasks,
+    safeTasks,
     ...resumeNote,
   ].join('\n');
 }

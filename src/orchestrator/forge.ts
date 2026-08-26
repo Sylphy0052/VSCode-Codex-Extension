@@ -366,6 +366,8 @@ export function buildTaskPullRequestTitle(taskId: string, prompt: string): strin
 export interface TaskPullRequestBodyInput {
   prompt: string;
   done: string;
+  /** run全体とタスク固有の実行契約。旧呼び出しでは未指定。 */
+  contract?: string;
   runId: string;
   dependsOn: readonly string[];
   /** 対応するIssue番号。あれば本文の先頭に `Closes #<N>` を出す。 */
@@ -380,6 +382,10 @@ export function buildTaskPullRequestBody(input: TaskPullRequestBodyInput): strin
   const lines: string[] = [];
   if (input.issue !== undefined) {
     lines.push(`Closes #${input.issue}`);
+    lines.push('');
+  }
+  if (input.contract !== undefined && input.contract !== '') {
+    lines.push(input.contract);
     lines.push('');
   }
   lines.push('## prompt');
@@ -441,6 +447,7 @@ export function buildIntegrationPullRequestBody(input: IntegrationPullRequestCon
 export interface TaskIssueBodyInput {
   prompt: string;
   done: string;
+  contract?: string;
   runId: string;
   taskId: string;
 }
@@ -452,6 +459,10 @@ export interface TaskIssueBodyInput {
  */
 export function buildTaskIssueBody(input: TaskIssueBodyInput): string {
   const lines: string[] = [];
+  if (input.contract !== undefined && input.contract !== '') {
+    lines.push(input.contract);
+    lines.push('');
+  }
   lines.push('## prompt');
   lines.push('');
   lines.push(input.prompt);
