@@ -288,9 +288,12 @@ export class ProgramRunner {
     if (this.deps.workflow.beginProgramRecovery === undefined) {
       const propagated = propagateProgramFailures(def, state);
       if (propagated !== state) {
-        await this.deps.programStore.update(programId, (current) =>
-          current === undefined ? current : { ...current, state: propagated },
-        );
+        await this.deps.programStore.update(programId, (current) => {
+          if (current === undefined) {
+            throw new Error(`[program ${programId}] 失敗伝播中にプログラムが消えました`);
+          }
+          return { ...current, state: propagated };
+        });
         state = propagated;
       }
     }
