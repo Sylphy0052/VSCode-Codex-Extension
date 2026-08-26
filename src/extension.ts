@@ -2658,7 +2658,9 @@ async function handlePlanSuccess(
         // ファイルを開いてから利用者が編集していれば、その編集を上書きしない。修正案は
         // エージェントではなくこのUI層が適用するため、保存前の本文比較をここで行う。
         if (doc.isDirty || doc.getText() !== yaml) {
-          log.warn('[planner] 利用者によるYAML編集を検出したため、レビュー指摘の自動反映を中止しました');
+          log.warn(
+            '[planner] 利用者によるYAML編集を検出したため、レビュー指摘の自動反映を中止しました',
+          );
           void warnWithLogLink(
             log,
             '開いたワークフローYAMLが編集されたため、レビュー指摘の自動反映を中止しました（詳しくはログ）',

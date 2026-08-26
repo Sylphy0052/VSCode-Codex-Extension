@@ -743,9 +743,7 @@ export function buildOrchestratorTask(
     ...(raw['outputs'] !== undefined
       ? { outputs: filterStringArray(arr(raw['outputs'])).values }
       : {}),
-    ...(raw['risks'] !== undefined
-      ? { risks: filterStringArray(arr(raw['risks'])).values }
-      : {}),
+    ...(raw['risks'] !== undefined ? { risks: filterStringArray(arr(raw['risks'])).values } : {}),
     ...(verifyRaw !== undefined
       ? {
           verify: {
@@ -888,9 +886,7 @@ export function withWorkflowReviewStatus(
       ...(metadata.provider === undefined ? {} : { plannerProvider: metadata.provider }),
       ...(metadata.model === undefined ? {} : { plannerModel: metadata.model }),
       ...(metadata.revision === undefined ? {} : { reviewRevision: metadata.revision }),
-      ...(metadata.findingCount === undefined
-        ? {}
-        : { reviewFindingCount: metadata.findingCount }),
+      ...(metadata.findingCount === undefined ? {} : { reviewFindingCount: metadata.findingCount }),
       ...(metadata.findingsResolved === undefined
         ? {}
         : { reviewFindingsResolved: metadata.findingsResolved }),
@@ -1604,11 +1600,7 @@ export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationRes
     }
     if (t.verify !== undefined) {
       for (const file of [...t.verify.files, ...t.verify.diff]) {
-        if (
-          file.trim() === '' ||
-          path.isAbsolute(file) ||
-          file.split(/[\\/]/u).includes('..')
-        ) {
+        if (file.trim() === '' || path.isAbsolute(file) || file.split(/[\\/]/u).includes('..')) {
           errors.push({
             taskIds: [t.id],
             message: `verify.files / verify.diff はworktree内の相対パスにしてください: ${file}`,

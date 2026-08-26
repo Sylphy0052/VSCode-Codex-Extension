@@ -1754,15 +1754,11 @@ function parseTaskPullRequestReviewFindings(
   try {
     parsed = JSON.parse(jsonText);
   } catch {
-    log?.warn(
-      '[planner] タスクPR/MRレビュー応答をJSON配列として解釈できませんでした',
-    );
+    log?.warn('[planner] タスクPR/MRレビュー応答をJSON配列として解釈できませんでした');
     return undefined;
   }
   if (!Array.isArray(parsed)) {
-    log?.warn(
-      '[planner] タスクPR/MRレビュー応答がJSON配列ではありませんでした',
-    );
+    log?.warn('[planner] タスクPR/MRレビュー応答がJSON配列ではありませんでした');
     return undefined;
   }
 
@@ -1820,9 +1816,7 @@ export async function reviewTaskPullRequest(
       : { findings, error: undefined };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    input.log.warn(
-      `[planner] タスクPR/MRのレビューに失敗しました: ${sanitizeForLog(message)}`,
-    );
+    input.log.warn(`[planner] タスクPR/MRのレビューに失敗しました: ${sanitizeForLog(message)}`);
     return { findings: [], error: message };
   }
 }

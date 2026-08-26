@@ -24,7 +24,10 @@ export function evaluateWorkflowQuality(def: WorkflowDefinition): WorkflowQualit
     return (
       task.done.trim() !== '' &&
       verify !== undefined &&
-      (verify.semantic || verify.commands.length > 0 || verify.files.length > 0 || verify.diff.length > 0)
+      (verify.semantic ||
+        verify.commands.length > 0 ||
+        verify.files.length > 0 ||
+        verify.diff.length > 0)
     );
   }).length;
   const outcomeCount = tasks.filter(

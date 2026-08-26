@@ -817,7 +817,9 @@ function buildPreviewSnapshot(
       ...(def.reviewFindingsResolved === undefined
         ? {}
         : { reviewFindingsResolved: def.reviewFindingsResolved }),
-      taskModels: [...new Set(def.tasks.map((task) => task.model).filter((v): v is string => v !== undefined))],
+      taskModels: [
+        ...new Set(def.tasks.map((task) => task.model).filter((v): v is string => v !== undefined)),
+      ],
     },
     haltedByUser: false,
     isDraft: true,
