@@ -71,4 +71,13 @@ describe('SessionModelSettingsStore（issue #844）', () => {
 
     expect(store.get('codex', 's1')).toEqual({ model: 'model-b', effort: 'high' });
   });
+
+  it('セッション削除後は保存値を返さない', async () => {
+    const store = new SessionModelSettingsStore(fakeMemento());
+    await store.set('codex', 'deleted', { model: 'gpt-a', effort: 'high' });
+
+    await store.delete('codex', 'deleted');
+
+    expect(store.get('codex', 'deleted')).toBeUndefined();
+  });
 });

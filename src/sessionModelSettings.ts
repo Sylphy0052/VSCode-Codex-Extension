@@ -67,4 +67,20 @@ export class SessionModelSettingsStore {
       }
     }
   }
+
+  /** セッション本体を削除したときに、対応する保存値も破棄する。 */
+  async delete(provider: ProviderId, sessionId: string): Promise<void> {
+    const key = storageId(provider, sessionId);
+    this.latest.delete(key);
+    const previous = this.pendingWrites.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(() => this.memento.update(key, undefined));
+    this.pendingWrites.set(key, next);
+    try {
+      await next;
+    } finally {
+      if (this.pendingWrites.get(key) === next) {
+        this.pendingWrites.delete(key);
+      }
+    }
+  }
 }
