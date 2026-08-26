@@ -4,6 +4,7 @@ import {
   readChatComposerButtonsConfig,
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
+  setChatTurnSummaryEnabled,
   readClaudeConfig,
   readNotificationsConfig,
   readWorkflowsConfig,
@@ -606,6 +607,13 @@ describe('readChatTurnSummaryConfig（issue #709）', () => {
   it('agent.chat.turnSummary.enabledをtrueにできる', () => {
     __mock.setConfig('agent', { 'chat.turnSummary.enabled': true });
     expect(readChatTurnSummaryConfig().enabled).toBe(true);
+  });
+
+  it('ターン要約の有効無効をユーザー設定へ保存できる', async () => {
+    await setChatTurnSummaryEnabled(true);
+    expect(readChatTurnSummaryConfig().enabled).toBe(true);
+    await setChatTurnSummaryEnabled(false);
+    expect(readChatTurnSummaryConfig().enabled).toBe(false);
   });
 
   it('agent.chat.turnSummary.instructionを差し替えられる', () => {

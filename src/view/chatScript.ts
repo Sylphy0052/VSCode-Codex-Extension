@@ -2603,6 +2603,17 @@ export function chatScript(
   el('handoffToNewSession').addEventListener('click', () =>
     vscode.postMessage({ type: 'handoffToNewSession' }),
   );
+  el('turnSummaryToggle').addEventListener('click', () =>
+    vscode.postMessage({ type: 'toggleTurnSummary' }),
+  );
+
+  function applyTurnSummaryEnabled(enabled) {
+    const button = el('turnSummaryToggle');
+    const action = enabled ? '無効にする' : '有効にする';
+    button.setAttribute('aria-pressed', String(enabled));
+    button.setAttribute('aria-label', 'ターン要約を' + action);
+    button.querySelector('.composerOverflowLabel').textContent = 'ターン要約を' + action;
+  }
 
   /**
    * アイコン列の「…」メニューの開閉（issue #296）。畳んだボタンはcomposerIconRowの
@@ -2913,6 +2924,9 @@ export function chatScript(
       if (REVIEW.mode === 'command') {
         el('review').hidden = !commands.some((c) => c.name === REVIEW.commandName);
       }
+    }
+    if (data.type === 'turnSummary' && typeof data.enabled === 'boolean') {
+      applyTurnSummaryEnabled(data.enabled);
     }
     if (data.type === 'files') {
       // 打っている途中に古い応答が届くことがある。今の語と一致するものだけ出す

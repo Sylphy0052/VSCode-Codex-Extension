@@ -984,6 +984,8 @@ export interface ChatShellOptions {
    * 出し入れはそのまま効く。省略時は`DEFAULT_COMPOSER_BUTTONS`。
    */
   composerButtons?: readonly ComposerButtonId[];
+  /** 手動送信時のターン要約。入力欄の「…」メニューで切り替える。 */
+  turnSummaryEnabled?: boolean;
 }
 
 /** 設定から来る文字列をHTMLへ埋め込む前に無害化する。 */
@@ -1316,12 +1318,13 @@ ${chatStyles()}
       ${primaryComposerButtons
         .map((id) => renderComposerButton(id, composerButtonCtx, 'toolbar'))
         .join('\n      ')}
-      <div id="composerOverflow"${overflowButtons.length === 0 ? ' hidden' : ''}>
+      <div id="composerOverflow">
         <button id="composerOverflowToggle" type="button" class="secondary" aria-haspopup="true" aria-expanded="false" aria-label="その他" title="その他の操作を開きます">...</button>
         <div id="composerOverflowMenu" role="menu" hidden>
           ${overflowButtons
             .map((id) => renderComposerButton(id, composerButtonCtx, 'menu'))
             .join('\n          ')}
+          <button id="turnSummaryToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.turnSummaryEnabled === true}" aria-label="ターン要約を${options.turnSummaryEnabled === true ? '無効にする' : '有効にする'}" title="手動で送る発言の末尾へ要約指示を毎回付けるか切り替えます">${COMPOSER_ICONS.recap}<span class="composerOverflowLabel">ターン要約を${options.turnSummaryEnabled === true ? '無効にする' : '有効にする'}</span></button>
         </div>
       </div>
     </div>

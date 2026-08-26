@@ -29,6 +29,7 @@ import {
   readChatDensityConfig,
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
+  setChatTurnSummaryEnabled,
   readConfig,
   readWorkflowsConfig,
   workspaceFolderPaths,
@@ -719,6 +720,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       sandboxModes: SANDBOX_MODES,
       showSettings: true,
       composerButtons: composerButtonsConfig.buttons,
+      turnSummaryEnabled: readChatTurnSummaryConfig().enabled,
       // review/startはapp-serverの標準機能なので、コマンド一覧を待たずに常に出す
       review: { mode: 'quickPick' },
       // 会話の1行要約（issue #228、design.md §14.41）。拡張機能の独自機能として、
@@ -1155,6 +1157,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           await this.settings.update(key, value);
         }
         this.refreshSettings();
+        return;
+      }
+      if (type === 'toggleTurnSummary') {
+        const enabled = !readChatTurnSummaryConfig().enabled;
+        await setChatTurnSummaryEnabled(enabled);
+        void entry.panel?.webview.postMessage({ type: 'turnSummary', enabled });
         return;
       }
       if (type === 'stateFull') {

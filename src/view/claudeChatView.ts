@@ -30,6 +30,7 @@ import {
   readChatDensityConfig,
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
+  setChatTurnSummaryEnabled,
   readClaudeConfig,
   readWorkflowsConfig,
   workspaceFolderPaths,
@@ -1198,6 +1199,7 @@ export class ClaudeChatViewManager
       showSettings: true,
       showAgentSelector: true,
       composerButtons: composerButtonsConfig.buttons,
+      turnSummaryEnabled: readChatTurnSummaryConfig().enabled,
       // effort・エージェントだけ扱いが違う。黙って効かないより、効くタイミングを書くほうがまし
       settingsNote:
         'モデルと承認は今の会話にすぐ効きます。Effortは送りますが、CLIが結果を返さないため反映は確かめられません。エージェントは起動引数でのみ決まるため、変更は次のセッションから効きます。「既定」へ戻す操作も次のセッションから効きます。',
@@ -1774,6 +1776,13 @@ export class ClaudeChatViewManager
       }
       if (type === 'config') {
         void this.applyConfig(entry, m['key'], m['value']);
+        return;
+      }
+      if (type === 'toggleTurnSummary') {
+        const enabled = !readChatTurnSummaryConfig().enabled;
+        void setChatTurnSummaryEnabled(enabled)
+          .then(() => entry.panel?.webview.postMessage({ type: 'turnSummary', enabled }))
+          .catch((e: unknown) => this.reportError(e));
         return;
       }
       if (type === 'approve' && isApprovalDecision(m['decision'])) {

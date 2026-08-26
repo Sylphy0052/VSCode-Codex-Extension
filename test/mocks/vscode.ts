@@ -361,8 +361,22 @@ function getNested(values: Record<string, unknown>, key: string): unknown {
   return cursor;
 }
 
+function setNested(values: Record<string, unknown>, key: string, value: unknown): void {
+  const parts = key.split('.');
+  let cursor = values;
+  for (const part of parts.slice(0, -1)) {
+    const next = cursor[part];
+    if (typeof next !== 'object' || next === null || Array.isArray(next)) {
+      cursor[part] = {};
+    }
+    cursor = cursor[part] as Record<string, unknown>;
+  }
+  cursor[parts[parts.length - 1] as string] = value;
+}
+
 function makeWorkspaceConfiguration(section: string): {
   get<T>(key: string, defaultValue?: T): T | undefined;
+  update(key: string, value: unknown, target?: unknown): Promise<void>;
 } {
   return {
     get<T>(key: string, defaultValue?: T): T | undefined {
@@ -370,7 +384,17 @@ function makeWorkspaceConfiguration(section: string): {
       const value = getNested(values, key);
       return (value === undefined ? defaultValue : value) as T | undefined;
     },
+    update(key: string, value: unknown): Promise<void> {
+      const values = state.configs.get(section) ?? {};
+      setNested(values, key, value);
+      state.configs.set(section, values);
+      return Promise.resolve();
+    },
   };
+}
+
+export enum ConfigurationTarget {
+  Global = 1,
 }
 
 export const workspace = {
