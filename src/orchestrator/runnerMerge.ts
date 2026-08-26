@@ -64,10 +64,8 @@ import type { WorkflowRunnerInternals } from './runnerInternals';
  * （`runTaskPullRequestFlow`。push→push→create→merge+push）で行う。無効なら
  * 従来どおりローカルの統合worktreeへのマージだけを行う。
  *
- * PR/MRの作成（`pushTaskBranch`/`pushIntegrationBranch`/`createPullRequest`）が
- * 失敗しても、統合ブランチへのローカルのマージ（`mergeAndPushIntegration`）は必ず行う
- * （`runTaskPullRequestFlow`自身の保証。design.md §16.18「前提が欠けている場合」と同じ
- * 「ワークフロー自体は止めない」方針）。
+ * PR/MRの作成失敗時は従来どおりローカルマージを続ける。PR/MR作成後の独立レビューで
+ * 指摘・解析失敗があった場合だけはマージを止め、タスク失敗として復旧経路へ渡す。
  */
 export async function mergeTaskWithForge(
   self: WorkflowRunnerInternals,

@@ -1666,7 +1666,7 @@ export interface ReviewTaskPullRequestResult {
   /**
    * レビューセッション自体の実行（起動・応答待ち）に失敗した場合のエラーメッセージ。
    * `undefined`なら正常に完了している（`findings`が空でも「指摘なし」を意味する）。
-   * 失敗してもマージは妨げない（design.md §16.31「結果に関わらずマージは進める」）。
+   * 失敗は指摘0件と同一視せず、呼び出し側がマージを止めて復旧経路へ渡す。
    */
   error: string | undefined;
 }

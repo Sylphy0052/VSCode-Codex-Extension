@@ -4403,7 +4403,12 @@ export class WorkflowRunner {
     }
     const liveTask = live.tasks.get(taskId);
 
-    if (reason === 'done' && liveTask !== undefined && !liveTask.verificationPassed) {
+    if (
+      reason === 'done' &&
+      liveTask !== undefined &&
+      task.verify !== undefined &&
+      !liveTask.verificationPassed
+    ) {
       if (!liveTask.verificationInProgress) {
         liveTask.verificationInProgress = true;
         void this.verifyTaskCompletion(runId, taskId, task, state, liveTask);
@@ -4542,7 +4547,7 @@ export class WorkflowRunner {
       }
     }
 
-    if (verify?.semantic !== false) {
+    if (verify?.semantic === true) {
       const verificationContract = [
         task.prompt,
         '',
