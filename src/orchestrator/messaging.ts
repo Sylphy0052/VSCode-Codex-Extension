@@ -677,6 +677,8 @@ export interface OrchestratorControlPort {
   continueTask(taskId: string): OrchestratorControlResult;
   decideApproval(taskId: string, decision: string): OrchestratorControlResult;
   updateTaskPrompt(taskId: string, continuePrompt: string): OrchestratorControlResult;
+  /** pendingタスクの指示・完了条件・role・反復上限を一括更新する。 */
+  updateTask?(taskId: string, changes: Record<string, unknown>): OrchestratorControlResult;
   /**
    * 人へ問う（design.md §16.33、Issue #583）。問いの本文と選択肢（2〜4個）を受け取り、
    * ワークフローViewへ出す。人が選ぶまでオーケストレーターは待つ（`live.pendingAskUser`が
@@ -793,6 +795,26 @@ export const UPDATE_TASK_PROMPT_TOOL: McpToolDefinition = {
       continuePrompt: { type: 'string', description: '以降のターンで送る指示の本文' },
     },
     required: ['taskId', 'continuePrompt'],
+    additionalProperties: false,
+  },
+};
+
+export const UPDATE_TASK_TOOL: McpToolDefinition = {
+  name: 'update_task',
+  description:
+    'まだ開始していない（pendingの）タスクのprompt、done、continuePrompt、role、maxIterationsを' +
+    '問題内容に合わせて変更する。指定したフィールドだけを更新し、既存の検証を通過した場合だけ適用する。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      taskId: TASK_ID_ARG,
+      prompt: { type: 'string' },
+      done: { type: 'string' },
+      continuePrompt: { type: 'string' },
+      role: { type: 'string', enum: [...TEAM_ROLES] },
+      maxIterations: { type: 'number' },
+    },
+    required: ['taskId'],
     additionalProperties: false,
   },
 };
@@ -1061,6 +1083,7 @@ export const ORCHESTRATOR_CONTROL_TOOLS: readonly McpToolDefinition[] = [
   CONTINUE_TASK_TOOL,
   DECIDE_APPROVAL_TOOL,
   UPDATE_TASK_PROMPT_TOOL,
+  UPDATE_TASK_TOOL,
   DECIDE_FINAL_MERGE_TOOL,
   ASK_USER_TOOL,
   ADD_TASK_TOOL,
@@ -1772,6 +1795,13 @@ export class MessagingMcpServer {
           return control.decideApproval(target, str(args['decision']));
         case UPDATE_TASK_PROMPT_TOOL.name:
           return control.updateTaskPrompt(target, str(args['continuePrompt']));
+        case UPDATE_TASK_TOOL.name:
+          return (
+            control.updateTask?.(target, args) ?? {
+              accepted: false,
+              reason: 'update_taskはこの実行環境では利用できません。',
+            }
+          );
         case REMOVE_TASK_TOOL.name:
           return control.removeTask(target);
         case UPDATE_TASK_DEPENDENCIES_TOOL.name: {

@@ -4175,7 +4175,7 @@ defaults:
   isolation: worktree # worktree | worktree-strict | shared
   sandbox: workspace-write # 拡張機能の設定より緩められない（§16.16）
   autoApprove: true # machine設定で許可されている場合のみ有効（§16.16）
-  maxIterations: 20
+  maxIterations: 3
   cleanup: after-merge # keep | after-merge | remove（worktreeの後始末。§16.17）
 
 tasks:
@@ -4242,6 +4242,10 @@ T4は「T2とT3のブランチをマージする」タスクではない。マ�
 | `role`                                    | -    | defaults                 | 会社の役割（`orchestrator` / `manager` / `em` / `architect` / `designer` / `implementer` / `reviewer` / `tester` / `writer` / `researcher`）。決まるのは`model`/`effort`の既定値だけで、権限（`approvalMode`/`sandbox`/`autoApprove`）には関与しない。タスクが`model`/`effort`を明示すればそちらが勝つ。未知の値は役割なしへ倒して警告に残す（§16.44） |
 
 未知のフィールドは読み飛ばす（CLIやスキーマの更新で壊れないようにする）。
+
+`maxIterations`の組み込み既定は3回とする（Issue #848。旧既定20回）。3回で終了条件を満たせない場合は同じ指示を繰り返さず、失敗内容をオーケストレーターへ渡して`update_task`・追加・削除・依存変更で計画を調整する。
+
+オーケストレーターが`task-messaging`へ行うrun内の読取・停止・再試行・継続・計画変更は、通常の`autoApprove`設定とは分離してMCP elicitationを自動許可する。これらは当該runのメモリ上の状態だけを操作し、変更履歴を警告欄へ残す。危険操作の承認（`decide_approval`）とmainへの最終マージ（`decide_final_merge`）は自動許可しない。
 
 #### 検証
 

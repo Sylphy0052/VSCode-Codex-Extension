@@ -20,6 +20,7 @@ import {
 import { sanitizeForLog, stripControlChars } from './sanitize';
 import { buildResponseSummary } from './taskSummary';
 import { formatUntrusted } from './untrustedText';
+import { isTeamRole } from './rolePresets';
 import { addTaskState, removeTaskState } from './runState';
 import type { TaskState } from './runState';
 import type {
@@ -57,18 +58,29 @@ export interface OrchestratorResumeContext {
   pendingAskUser?: { question: string; choices: readonly string[]; askedAt: string };
 }
 
-const AUTO_APPROVED_ORCHESTRATOR_READ_TOOLS = new Set(['list_tasks', 'get_run_status']);
+const AUTO_APPROVED_ORCHESTRATOR_TOOLS = new Set([
+  'list_tasks',
+  'get_run_status',
+  'stop_task',
+  'retry_task',
+  'continue_task',
+  'update_task_prompt',
+  'update_task',
+  'add_task',
+  'remove_task',
+  'update_task_dependencies',
+]);
 
 /**
- * task-messagingの読み取り専用ツールを呼ぶ前だけ、MCPのelicitationを自動許可する。
- * 状態変更を伴う制御ツールや別サーバからの問いは、無人実行時でも従来どおり人へ回す。
+ * task-messagingのrun内操作を呼ぶ前のMCP elicitationを自動許可する。計画変更は実行中runに
+ * 閉じ、変更履歴も警告欄へ残る。危険操作の承認とmainへの最終マージは人へ回す。
  */
 export function shouldAutoApproveOrchestratorElicitation(params: Record<string, unknown>): boolean {
   if (params['serverName'] !== MESSAGING_MCP_SERVER_NAME || typeof params['message'] !== 'string') {
     return false;
   }
   const match = /run tool "([^"]+)"\?$/.exec(params['message']);
-  return match !== null && AUTO_APPROVED_ORCHESTRATOR_READ_TOOLS.has(match[1] ?? '');
+  return match !== null && AUTO_APPROVED_ORCHESTRATOR_TOOLS.has(match[1] ?? '');
 }
 
 /** run開始時にオーケストレーターへ渡す、役割と道具の説明。 */
@@ -134,10 +146,11 @@ function buildIntroBody(live: LiveRun, resume?: OrchestratorResumeContext): stri
       '届いた場合も、この send_message（to に問うたタスクのidを指定）で答える）',
     '- stop_task / retry_task / continue_task / decide_approval: タスクを止める・やり直す・続ける・承認する',
     '- update_task_prompt: 走行中のタスクの継続指示を差し替える（方針転換）',
+    '- update_task: pendingタスクのprompt・done・continuePrompt・role・maxIterationsを変更する',
     '- decide_final_merge: 統合PR/MRの作成後、mainへ最終マージするか（merge）・PR/MRを' +
       '残すか（hold）を判断する（`finalMerge: orchestrator`のrunでのみ判断待ちが立つ）。' +
       'get_run_statusで差分・警告欄・統合の状況を確認したうえで呼ぶこと',
-    '- add_task / remove_task / update_task_dependencies: 計画そのものを直す' +
+    '- add_task / remove_task / update_task / update_task_dependencies: 計画そのものを直す' +
       '（タスクの追加・pendingタスクの削除・pendingタスクの依存の変更）。人の承認は挟まず' +
       'あなたの判断で適用され、適用した内容は全文が警告欄へ残ります。追加するタスクにも' +
       '既存の検証（id形式・循環依存・上限件数・プロンプト長）が適用され、autoApprove/' +
@@ -528,6 +541,13 @@ export function buildOrchestratorControlPort(
       }
       return updateTaskPrompt(self, runId, taskId, continuePrompt);
     },
+    updateTask: (taskId, changes) => {
+      const finished = planChangeFinishedReason(self, actions, runId);
+      if (finished !== undefined) return no(finished);
+      const halted = runHaltedByUserReason(actions, runId);
+      if (halted !== undefined) return no(halted);
+      return updatePendingTask(self, runId, taskId, changes);
+    },
     decideFinalMerge: (decision, reason) => {
       // `runFinishedReason`は使わない。最終マージの判断待ち（design.md §16.26）は
       // 全タスクが`done`になり`outcome`が既に`succeeded`（＝「終了している」）に
@@ -846,6 +866,70 @@ function updateTaskPrompt(
   return ok(`${taskId} の継続指示を差し替えました。`);
 }
 
+/** pendingタスクの実行契約を、検証後に一括更新する（Issue #848）。 */
+function updatePendingTask(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  taskId: string,
+  changes: Record<string, unknown>,
+): OrchestratorControlResult {
+  const live = self.runs.get(runId);
+  if (live === undefined) return no('実行が見つかりません。');
+  const state = live.runState.tasks.get(taskId)?.state;
+  if (state !== 'pending') {
+    return no(
+      `${taskId} はpendingではありません（状態: ${state ?? '不明'}）。開始済みタスクはupdate_task_promptを使ってください。`,
+    );
+  }
+  const target = live.def.tasks.find((task) => task.id === taskId);
+  if (target === undefined) return no(`タスクが見つかりません: ${taskId}`);
+
+  const changedFields: string[] = [];
+  let candidate: WorkflowTask = target;
+  for (const field of ['prompt', 'done', 'continuePrompt'] as const) {
+    const value = changes[field];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || value.trim() === '') return no(`${field} は空にできません。`);
+    candidate = { ...candidate, [field]: value };
+    changedFields.push(field);
+  }
+  if (changes['role'] !== undefined) {
+    if (!isTeamRole(changes['role'])) return no(`roleの値が不正です: ${String(changes['role'])}`);
+    candidate = { ...candidate, role: changes['role'] };
+    changedFields.push('role');
+  }
+  if (changes['maxIterations'] !== undefined) {
+    if (typeof changes['maxIterations'] !== 'number') return no('maxIterationsは数値で指定してください。');
+    candidate = { ...candidate, maxIterations: changes['maxIterations'] };
+    changedFields.push('maxIterations');
+  }
+  if (changedFields.length === 0) return no('変更するフィールドがありません。');
+
+  const candidateDef: WorkflowDefinition = {
+    ...live.def,
+    tasks: live.def.tasks.map((task) => (task.id === taskId ? candidate : task)),
+  };
+  const validation = validateWorkflow(candidateDef);
+  if (validation.errors.length > 0) {
+    return no(`タスクを変更できません: ${validation.errors.map((error) => error.message).join(' / ')}`);
+  }
+  live.def = candidateDef;
+  live.warnings = live.warnings.filter(
+    (warning) => !(warning.kind === 'orchestratorTaskUpdated' && warning.taskId === taskId),
+  );
+  live.warnings.push({
+    kind: 'orchestratorTaskUpdated',
+    taskId,
+    message:
+      `オーケストレーターがpendingタスク ${taskId} を変更しました` +
+      `（${changedFields.join(', ')}。YAMLは変更せず、リロード後は元に戻ります）。`,
+  });
+  resumeIfFinishedForPlanChange(live);
+  self.notify(runId);
+  self.pump(runId);
+  return ok(`${taskId} の${changedFields.join(', ')}を変更しました。`);
+}
+
 /**
  * `add_task`（design.md §16.29、roadmap W4、Issue #338）を受け付ける。適用先は実行中の
  * 定義（`live.def`）だけで、YAMLファイルは書き換えない。追加するタスクは`buildOrchestratorTask`
@@ -1068,11 +1152,14 @@ export async function setupOrchestratorForStart(
     });
     if (effective.autoApprove) {
       // オーケストレーターはread-only sandboxで起動する。machineスコープの
-      // allowAutoApproveを明示的に有効化した利用者に限り、読み取り・MCP操作の
-      // 承認待ちでワークフロー全体が止まらないよう自動で許可する。
+      // allowAutoApproveを明示的に有効化した利用者に限り、通常の承認待ちを自動で許可する。
       session.setApprovalHandler(async () => ({ kind: 'auto', decision: 'accept' }));
-      session.setMcpElicitationHandler?.(shouldAutoApproveOrchestratorElicitation);
     }
+    // run内に閉じたtask-messaging操作は、通常のshell/ファイル操作のautoApproveとは
+    // 分離して常に自動許可する。ここを上の条件内に置くと、read-onlyのlist/statusまで
+    // 毎回「入力を求められています」になり、無人復旧が成立しない（Issue #848）。
+    // decide_approval/decide_final_mergeは許可集合に含めず、危険な決定は従来どおり人へ回す。
+    session.setMcpElicitationHandler?.(shouldAutoApproveOrchestratorElicitation);
     session.open({ preserveFocus: true });
 
     const pendingAskUser = resume?.pendingAskUser;
