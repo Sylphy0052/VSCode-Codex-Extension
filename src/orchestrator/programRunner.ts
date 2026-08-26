@@ -585,10 +585,13 @@ export class ProgramRunner {
       .filter(([, entry]) => entry.state === 'failed')
       .map(([id]) => id);
     if (persisted.recovery !== undefined) {
-      const mergedFailedRunIds = [...new Set([...persisted.recovery.failedRunIds, ...failedRunIds])];
+      const mergedFailedRunIds = [
+        ...new Set([...persisted.recovery.failedRunIds, ...failedRunIds]),
+      ];
       if (mergedFailedRunIds.length !== persisted.recovery.failedRunIds.length) {
         await this.deps.programStore.update(programId, (current) => {
-          if (current === undefined) throw new Error(`[program ${programId}] 復旧更新中に消えました`);
+          if (current === undefined)
+            throw new Error(`[program ${programId}] 復旧更新中に消えました`);
           return {
             ...current,
             recovery: { ...persisted.recovery, failedRunIds: mergedFailedRunIds },
