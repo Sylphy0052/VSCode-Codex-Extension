@@ -586,9 +586,7 @@ export class ProgramRunner {
       .map(([id]) => id);
     const recovery = persisted.recovery;
     if (recovery !== undefined) {
-      const mergedFailedRunIds = [
-        ...new Set([...recovery.failedRunIds, ...failedRunIds]),
-      ];
+      const mergedFailedRunIds = [...new Set([...recovery.failedRunIds, ...failedRunIds])];
       if (mergedFailedRunIds.length !== recovery.failedRunIds.length) {
         await this.deps.programStore.update(programId, (current) => {
           if (current === undefined)
