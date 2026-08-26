@@ -8,6 +8,7 @@ import type { FileSystemPort, MemoryFileSystemPort } from '../../src/session/por
 import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMentions';
 import { MESSAGING_MCP_SERVER_NAME } from '../../src/orchestrator/messaging';
 import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
+import { SessionModelSettingsStore } from '../../src/sessionModelSettings';
 import type { McpServerView } from '../../src/provider/mcpServers';
 import {
   MEMORY_LAST_SELECTED_PATH_KEY,
@@ -116,6 +117,7 @@ function createManager(options?: {
   memoryMemento?: MemoryModeMemento;
   store?: ClaudeSessionStore;
   onActivity?: (activity: ChatActivity) => void;
+  sessionSettings?: SessionModelSettingsStore;
 }): {
   manager: ClaudeChatViewManager;
   store: ClaudeSessionStore;
@@ -134,6 +136,8 @@ function createManager(options?: {
     options?.isTaskManagedThread ?? (() => false),
     options?.memoryFs ?? fakeMemoryFileSystem(),
     options?.memoryMemento ?? fakeMemento(),
+    undefined,
+    options?.sessionSettings,
   );
   return { manager, store };
 }
@@ -390,6 +394,43 @@ describe('ClaudeChatViewManager', () => {
 
       expect(calls).toHaveLength(1);
       expect(__mock.messages.warnings).toHaveLength(0);
+    });
+  });
+
+  describe('セッション単位のモデル設定（issue #844）', () => {
+    it('変更を他セッションへ波及させず、同じsessionIdを開き直すと復元する', async () => {
+      __mock.setConfig('claude', { model: 'global-model', effort: 'low' });
+      const { calls, sessions } = stubStartCapturing();
+      const sessionSettings = new SessionModelSettingsStore(fakeMemento());
+      const { manager } = createManager({ sessionSettings });
+
+      const firstId = await manager.openNew('/workspace/root');
+      expect(firstId).toBeDefined();
+      sessions[0]?.receive(initLine(firstId as string));
+      const firstPanel = __mock.lastCreatedPanel();
+
+      await manager.simulateWebviewMessage(firstId as string, {
+        type: 'config',
+        key: 'model',
+        value: 'session-model',
+      });
+      await manager.simulateWebviewMessage(firstId as string, {
+        type: 'config',
+        key: 'reasoningEffort',
+        value: 'high',
+      });
+      await flush();
+
+      const secondId = await manager.openNew('/workspace/root');
+      expect(secondId).toBeDefined();
+      sessions[1]?.receive(initLine(secondId as string));
+
+      expect(calls[1]?.config).toMatchObject({ model: 'global-model', effort: 'low' });
+
+      firstPanel?.dispose();
+      await manager.openThread(firstId as string, 'A', '/workspace/root');
+
+      expect(calls[2]?.config).toMatchObject({ model: 'session-model', effort: 'high' });
     });
   });
 

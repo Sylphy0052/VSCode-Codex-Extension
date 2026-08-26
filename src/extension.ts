@@ -128,6 +128,7 @@ import {
 import { nodeCommandRunner as nodeAccountCommandRunner } from './process/commandRunner';
 import { nodeFileSystem, nodeMemoryFileSystem } from './session/nodeFileSystem';
 import { nodeFileScan } from './session/nodeFileScan';
+import { SessionModelSettingsStore } from './sessionModelSettings';
 import { FileMentionCatalog } from './provider/fileMentions';
 import { InMemoryMetaCache } from './session/ports';
 import { pruneMetaCacheOnStartup } from './session/pruneOnStartup';
@@ -445,6 +446,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ControlPanelViewProvider.viewType, panel),
   );
+  const sessionModelSettings = new SessionModelSettingsStore(context.globalState);
 
   const chat = new ChatViewManager(
     codexPath,
@@ -481,6 +483,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       };
     },
     store,
+    sessionModelSettings,
   );
   context.subscriptions.push(chat);
 
@@ -501,6 +504,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // Claude Code画面の統合テスト（Issue #186）。セッションを作るたびに読み直すため、
     // `activate()` が終わった後からでも差し替えられる。
     () => claudeSpawnOverride.spawn,
+    sessionModelSettings,
   );
   context.subscriptions.push(claudeChat);
 

@@ -3,6 +3,8 @@ import { noDefaults } from '../../src/codex/configToml';
 import type { Logger } from '../../src/log';
 import type { FileSystemPort } from '../../src/session/ports';
 import type { SessionStore } from '../../src/session/sessionStore';
+import { SessionModelSettingsStore } from '../../src/sessionModelSettings';
+import type { MementoLike } from '../../src/util/memento';
 import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMentions';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import { ChatViewManager, deriveTitle } from '../../src/view/chatView';
@@ -41,6 +43,18 @@ const fakeScanPort: FileScanPort = {
 };
 function fakeMentions(): FileMentionCatalog {
   return new FileMentionCatalog(fakeScanPort);
+}
+
+function fakeMemento(): MementoLike {
+  const data = new Map<string, unknown>();
+  return {
+    get: <T>(key: string, defaultValue: T): T =>
+      data.has(key) ? (data.get(key) as T) : defaultValue,
+    update: (key: string, value: unknown): Promise<void> => {
+      data.set(key, value);
+      return Promise.resolve();
+    },
+  };
 }
 
 function fakeSettingsProvider(): SettingsProvider {
@@ -97,6 +111,7 @@ function createManager(options?: {
   onActivity?: (activity: ChatActivity) => void;
   revealImportSection?: () => void | Promise<void>;
   store?: SessionStore;
+  sessionSettings?: SessionModelSettingsStore;
 }): {
   manager: ChatViewManager;
   connection: FakeAppServerConnection;
@@ -114,6 +129,7 @@ function createManager(options?: {
     options?.revealImportSection ?? (() => undefined),
     factory,
     options?.store,
+    options?.sessionSettings,
   );
   return { manager, connection: connection() };
 }
@@ -561,6 +577,68 @@ describe('ChatViewManager', () => {
       const turnStart = connection.requests.find((r) => r.method === 'turn/start');
       expect(turnStart).toBeDefined();
       expect((turnStart?.params as { model?: string } | undefined)?.model).toBe('task-model');
+    });
+  });
+
+  describe('セッション単位のモデル設定（issue #844）', () => {
+    it('変更を他セッションへ波及させず、同じthreadIdを開き直すと復元する', async () => {
+      __mock.setConfig('codex', { model: 'global-model', reasoningEffort: 'low' });
+      const sessionSettings = new SessionModelSettingsStore(fakeMemento());
+      const { manager, connection } = createManager({ sessionSettings });
+
+      const firstStart = manager.openNew('/workspace/root');
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await firstStart;
+      const firstPanel = __mock.lastCreatedPanel();
+
+      await manager.simulateWebviewMessage('thread-A', {
+        type: 'config',
+        key: 'model',
+        value: 'session-model',
+      });
+      await manager.simulateWebviewMessage('thread-A', {
+        type: 'config',
+        key: 'reasoningEffort',
+        value: 'high',
+      });
+
+      const secondStart = manager.openNew('/workspace/root');
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-B'));
+      await secondStart;
+
+      const firstSend = manager.simulateWebviewMessage('thread-A', { type: 'send', text: 'A' });
+      await tick();
+      connection.resolveFirst('turn/start', {});
+      await firstSend;
+      const secondSend = manager.simulateWebviewMessage('thread-B', { type: 'send', text: 'B' });
+      await tick();
+      connection.resolveFirst('turn/start', {});
+      await secondSend;
+
+      const turns = connection.requests.filter((request) => request.method === 'turn/start');
+      expect(turns).toHaveLength(2);
+      expect(turns[0]?.params).toMatchObject({ model: 'session-model', effort: 'high' });
+      expect(turns[1]?.params).toMatchObject({ model: 'global-model', effort: 'low' });
+
+      firstPanel?.dispose();
+      const reopened = manager.openThread('thread-A', 'A', '/workspace/root');
+      await tick();
+      connection.resolveFirst('thread/resume', threadStartResult('thread-A'));
+      await reopened;
+      const reopenedSend = manager.simulateWebviewMessage('thread-A', {
+        type: 'send',
+        text: 'A2',
+      });
+      await tick();
+      connection.resolveFirst('turn/start', {});
+      await reopenedSend;
+
+      const latest = connection.requests
+        .filter((request) => request.method === 'turn/start')
+        .at(-1);
+      expect(latest?.params).toMatchObject({ model: 'session-model', effort: 'high' });
     });
   });
 

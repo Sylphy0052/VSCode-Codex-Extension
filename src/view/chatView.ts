@@ -19,6 +19,7 @@ import {
 import { describeUnsafeCombination } from '../codex/argvBuilder';
 import { summarize } from '../codex/conversation';
 import { readForkedThreadId } from '../codex/jsonRpc';
+import { effortsFor } from '../codex/modelCatalog';
 import { readSkillsList } from '../codex/skillsList';
 import { readRateLimits, type UsageSnapshot } from '../codex/usage';
 import {
@@ -53,6 +54,7 @@ import { buildItemsDelta } from './stateDelta';
 import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import { buildHandoffPrompt, resolveWithRetry } from './handoff';
 import type { SessionStore } from '../session/sessionStore';
+import { SessionModelSettingsStore, type SessionModelSettings } from '../sessionModelSettings';
 import { APPROVAL_LEVEL_CYCLE, isApprovalLevel } from '../provider/approvalLevel';
 import { AttachmentBox } from '../provider/attachments';
 import { CommandCatalog } from '../provider/commandCatalog';
@@ -138,6 +140,10 @@ interface ChatPanel extends BaseChatPanel {
    * `readConfig().codex`（拡張機能のグローバル設定）を見ない（design.md §16.10の5）。
    */
   taskConfig: CodexConfig | undefined;
+  /** このセッションだけに適用するモデルとeffort（issue #844）。 */
+  modelSettings: SessionModelSettings;
+  /** ephemeralな脇道は再開不能なので、永続化対象外にする。 */
+  persistModelSettings: boolean;
   /** ターン完了検知（`busy` の立ち下がり）に使う直前の値。 */
   wasBusy: boolean;
   /** ループ停止検知（`running` の立ち下がり）に使う直前の値。 */
@@ -330,6 +336,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       new AppServerConnection(codexPath, log, onNotification, onServerRequest, onDisconnect),
     /** セッション引き継ぎ（issue #694）でtranscript相当（rollout）のパスを解決する口。 */
     private readonly store?: SessionStore,
+    /** モデルとeffortのセッション別保存先（issue #844）。 */
+    private readonly sessionSettings?: SessionModelSettingsStore,
   ) {
     super();
     this.catalog = new CommandCatalog(this.fs);
@@ -338,6 +346,54 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       (request) => this.routeServerRequest(request),
       () => this.handleConnectionLost(),
     );
+  }
+
+  private initialModelSettings(taskConfig?: CodexConfig, threadId?: string): SessionModelSettings {
+    const stored =
+      threadId === undefined ? undefined : this.sessionSettings?.get('codex', threadId);
+    if (stored !== undefined) {
+      return stored;
+    }
+    const config = taskConfig ?? readConfig().codex;
+    return { model: config.model, effort: config.reasoningEffort };
+  }
+
+  /** Global設定のうちモデルとeffortだけを、このセッションの値で上書きする。 */
+  private configFor(entry: ChatPanel): CodexConfig {
+    const config = entry.taskConfig ?? readConfig().codex;
+    return {
+      ...config,
+      model: entry.modelSettings.model,
+      reasoningEffort: entry.modelSettings.effort,
+    };
+  }
+
+  private settingsSnapshotFor(entry: ChatPanel): ReturnType<SettingsProvider['snapshot']> {
+    const snapshot = this.settings.snapshot();
+    return {
+      ...snapshot,
+      model: entry.modelSettings.model,
+      reasoningEffort: entry.modelSettings.effort,
+      efforts: effortsFor(snapshot.models, entry.modelSettings.model),
+    };
+  }
+
+  private async persistModelSettings(entry: ChatPanel, threadId?: string): Promise<void> {
+    const id = threadId ?? entry.session.threadId;
+    if (
+      (threadId === undefined && !entry.persistModelSettings) ||
+      id === undefined ||
+      this.sessionSettings === undefined
+    ) {
+      return;
+    }
+    try {
+      await this.sessionSettings.set('codex', id, entry.modelSettings);
+    } catch (e) {
+      this.log.warn(
+        `セッションのモデル設定を保存できませんでした: ${e instanceof Error ? e.message : e}`,
+      );
+    }
   }
 
   /**
@@ -424,6 +480,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       const threadId = await entry.session.start(targetCwd, config);
       this.pendingStarts.end(pendingKey);
       this.panels.set(threadId, entry);
+      await this.persistModelSettings(entry, threadId);
       return threadId;
     } catch (e) {
       this.pendingStarts.end(pendingKey);
@@ -439,7 +496,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (threadId === undefined) return undefined;
     const entry = this.panels.get(threadId);
     if (entry === undefined) return undefined;
-    await entry.session.sendOrQueue(prompt, entry.taskConfig ?? readConfig().codex);
+    await entry.session.sendOrQueue(prompt, this.configFor(entry));
     this.reportActivity(entry, prompt);
     return threadId;
   }
@@ -475,7 +532,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return;
     }
     const text = buildHandoffPrompt(rolloutPath);
-    await newEntry.session.sendOrQueue(text, newEntry.taskConfig ?? readConfig().codex);
+    await newEntry.session.sendOrQueue(text, this.configFor(newEntry));
     this.reportActivity(newEntry, text);
   }
 
@@ -505,6 +562,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       const threadId = await entry.session.start(input.cwd, taskConfig, mcpServersConfig);
       this.pendingStarts.end(pendingKey);
       this.panels.set(threadId, entry);
+      await this.persistModelSettings(entry, threadId);
       return this.buildTaskSession(entry, threadId, input.mcp !== undefined);
     } catch (e) {
       this.pendingStarts.end(pendingKey);
@@ -522,7 +580,14 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return;
     }
 
-    const entry = this.buildEntry(cwd, `Codex: ${title}`, false, undefined);
+    const entry = this.buildEntry(
+      cwd,
+      `Codex: ${title}`,
+      false,
+      undefined,
+      undefined,
+      this.initialModelSettings(undefined, threadId),
+    );
     this.showPanel(entry, false);
     this.panels.set(threadId, entry);
     try {
@@ -556,7 +621,14 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
 
     // 復元されたパネルはcwdを保持していないため、このウィンドウのフォルダを充てる
-    const entry = this.buildEntry(currentWorkspaceFolder()?.uri.fsPath, 'Codex', false, undefined);
+    const entry = this.buildEntry(
+      currentWorkspaceFolder()?.uri.fsPath,
+      'Codex',
+      false,
+      undefined,
+      undefined,
+      this.initialModelSettings(undefined, threadId),
+    );
     this.attachPanel(entry, panel);
     this.panels.set(threadId, entry);
     try {
@@ -575,6 +647,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     taskManaged: boolean,
     taskConfig: CodexConfig | undefined,
     pinnedName?: string,
+    modelSettings: SessionModelSettings = this.initialModelSettings(taskConfig),
+    persistModelSettings = true,
   ): ChatPanel {
     // sessionのコールバックはentryを参照するが、実際に呼ばれるのはentry代入後
     // （closureが束縛するのは変数、呼び出し時点の値を読む。既存コードと同じ流儀）。
@@ -599,6 +673,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       pinnedName,
       taskManaged,
       taskConfig,
+      modelSettings,
+      persistModelSettings,
       wasBusy: false,
       wasLoopRunning: false,
       approvalHandler: undefined,
@@ -769,7 +845,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const finished = entry.wasBusy && !state.busy;
     entry.wasBusy = state.busy;
     if (finished && state.queued.length > 0) {
-      void entry.session.sendNextQueued(entry.taskConfig ?? readConfig().codex);
+      void entry.session.sendNextQueued(this.configFor(entry));
     }
     if (finished) {
       reportTurnResult(this.onActivity, entry.session.threadId, entry.cwd, state);
@@ -831,11 +907,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         const sent = appendTurnSummaryInstruction(text, readChatTurnSummaryConfig());
         const attachments = entry.attachments.take();
         try {
-          await entry.session.sendOrQueue(
-            sent,
-            entry.taskConfig ?? readConfig().codex,
-            attachments,
-          );
+          await entry.session.sendOrQueue(sent, this.configFor(entry), attachments);
         } catch (e) {
           // 取り出したまま失わない。貼り直しを強いない
           entry.attachments.restore(attachments);
@@ -940,7 +1012,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         // 不可逆な操作ではないため、`compact`と違って確認ダイアログは挟まない
         // （`planMode`と同じ扱い。issue #228）
         entry.loop.noteUserAction();
-        await entry.session.recap(entry.taskConfig ?? readConfig().codex);
+        await entry.session.recap(this.configFor(entry));
         return;
       }
       if (type === 'claudeImport') {
@@ -1011,7 +1083,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       if (type === 'flushQueue') {
         // 待たせていた指示を先に通すため、ループは割り込みとして止める
         entry.loop.noteUserAction();
-        await entry.session.flushQueue(entry.taskConfig ?? readConfig().codex);
+        await entry.session.flushQueue(this.configFor(entry));
         return;
       }
       if (type === 'loop/start') {
@@ -1062,6 +1134,23 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         const key = m['key'];
         const value = m['value'];
         if (isEditableKey(key) && typeof value === 'string') {
+          if (key === 'model' || key === 'reasoningEffort') {
+            if (key === 'model') {
+              entry.modelSettings.model = value;
+              const allowed = effortsFor(this.settings.snapshot().models, value);
+              if (
+                entry.modelSettings.effort !== '' &&
+                !allowed.includes(entry.modelSettings.effort)
+              ) {
+                entry.modelSettings.effort = '';
+              }
+            } else {
+              entry.modelSettings.effort = value;
+            }
+            await this.persistModelSettings(entry);
+            this.postState(entry);
+            return;
+          }
           // 取り消された場合も表示を現在値へ戻すため、結果によらず再送する
           await this.settings.update(key, value);
         }
@@ -1142,7 +1231,15 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       () => this.connection.request('thread/fork', buildSideQuestionForkParams(threadId)),
     );
 
-    const sideEntry = this.buildEntry(entry.cwd, SIDE_QUESTION_TAB_TITLE, false, undefined);
+    const sideEntry = this.buildEntry(
+      entry.cwd,
+      SIDE_QUESTION_TAB_TITLE,
+      false,
+      entry.taskConfig,
+      undefined,
+      { ...entry.modelSettings },
+      false,
+    );
     let sideThreadId: string;
     try {
       sideThreadId = sideEntry.session.loadForkedThread(response.result);
@@ -1155,7 +1252,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     this.log.info(`脇道の質問を開始しました: ${threadId} → ${sideThreadId}`);
 
     try {
-      await sideEntry.session.send(question, entry.taskConfig ?? readConfig().codex);
+      await sideEntry.session.send(question, this.configFor(sideEntry));
     } catch (e) {
       this.reportError(e);
       return;
@@ -1184,7 +1281,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return;
     }
     const text = buildInitInstructionText(existing !== undefined);
-    await entry.session.sendOrQueue(text, entry.taskConfig ?? readConfig().codex);
+    await entry.session.sendOrQueue(text, this.configFor(entry));
     this.reportActivity(entry, text);
   }
 
@@ -1246,7 +1343,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       state: {
         ...state,
         items: [],
-        settings: this.settings.snapshot(),
+        settings: this.settingsSnapshotFor(entry),
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),
         // 差分の見出し行の操作（issue #291）をWebview側でも出し分けるための一覧。
@@ -1268,7 +1365,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   private async sendFromLoop(entry: ChatPanel, text: string): Promise<void> {
     const toSend = entry.promptTransform?.(text) ?? text;
     try {
-      await entry.session.send(toSend, entry.taskConfig ?? readConfig().codex);
+      await entry.session.send(toSend, this.configFor(entry));
       this.reportActivity(entry, text);
     } catch (e) {
       this.reportError(e);
@@ -1285,7 +1382,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    */
   private async sendOnce(entry: ChatPanel, text: string): Promise<void> {
     try {
-      await entry.session.send(text, entry.taskConfig ?? readConfig().codex);
+      await entry.session.send(text, this.configFor(entry));
     } catch (e) {
       this.reportError(e);
     }
@@ -1318,6 +1415,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return;
     }
     this.log.info(`分岐しました: ${threadId} → ${newThreadId}`);
+    await this.persistModelSettings(entry, newThreadId);
     await this.openThread(newThreadId, '分岐', undefined);
   }
 
@@ -1357,6 +1455,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       );
       this.log.info(`レビューを開始しました: ${reviewThreadId} (${deliveryChoice.delivery})`);
       if (deliveryChoice.delivery === 'detached') {
+        await this.persistModelSettings(entry, reviewThreadId);
         await this.openThread(reviewThreadId, 'レビュー', entry.cwd);
       }
     } catch (e) {
