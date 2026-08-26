@@ -157,8 +157,8 @@ describe('chatStyles', () => {
       expect(z, selector + ' に z-index が無い').not.toBeNull();
       return Number(z![1]);
     };
-    // 見出しに隠されると「一番下へ」もスラッシュコマンド候補も押せなくなる
-    expect(zOf('.item .head')).toBeLessThan(zOf('#scrollToBottom'));
+    // 見出しに隠されると会話ナビゲーションもスラッシュコマンド候補も押せなくなる
+    expect(zOf('.item .head')).toBeLessThan(zOf('#conversationNavigation'));
     expect(zOf('.item .head')).toBeLessThan(zOf('#commands'));
   });
 

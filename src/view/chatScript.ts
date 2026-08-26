@@ -1749,6 +1749,38 @@ export function chatScript(
     el('scrollToBottom').hidden = isLogNearBottom(el('log'));
   }
 
+  // 自分の発言だけを移動対象にする。会話項目の種類は増えても、表示用のuserクラスが
+  // 付く要素だけを見るので、ツール出力や承認カードを誤って飛び越え先にしない。
+  function userMessageNodes() {
+    return Array.from(el('log').querySelectorAll('.item.user'));
+  }
+
+  function userMessageTarget(direction) {
+    const top = el('log').scrollTop;
+    const nodes = userMessageNodes();
+    if (direction === 'previous') {
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        if (nodes[i].offsetTop < top - 1) return nodes[i];
+      }
+      return undefined;
+    }
+    return nodes.find((node) => node.offsetTop > top + 1);
+  }
+
+  // 各方向に移動先があるときだけ出す。項目追加・ユーザー自身のスクロールのどちらでも
+  // 再計算するため、先頭/末尾で押しても何も起きないボタンを残さない。
+  function updateUserMessageNavigation() {
+    el('previousUserMessage').hidden = userMessageTarget('previous') === undefined;
+    el('nextUserMessage').hidden = userMessageTarget('next') === undefined;
+  }
+
+  function scrollToUserMessage(direction) {
+    const target = userMessageTarget(direction);
+    if (!target) return;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    el('log').scrollTo({ top: target.offsetTop, behavior: reducedMotion ? 'auto' : 'smooth' });
+  }
+
   function apply(state) {
     // リロード後にVSCodeがパネルを復元したとき、どのスレッドかを思い出すために保持する
     if (state.threadId) {
@@ -1811,6 +1843,7 @@ export function chatScript(
     // 全部済んでからでないと、#logの実際の最下部（clientHeight）が確定しない
     if (atBottom) log.scrollTop = log.scrollHeight;
     updateScrollToBottomVisibility();
+    updateUserMessageNavigation();
   }
 
   // いま添えている枚数。本文が空でも送れるかの判定に使う
@@ -2184,7 +2217,15 @@ export function chatScript(
 
   el('loopStop').addEventListener('click', () => vscode.postMessage({ type: 'loop/stop' }));
 
-  el('log').addEventListener('scroll', updateScrollToBottomVisibility);
+  // 1回のスクロールで、最下部への移動と発言間の移動の両方を更新する。
+  // 個別のリスナーに分けると、高頻度のscrollイベントごとにDOM探索が重複する。
+  function updateScrollNavigation() {
+    updateScrollToBottomVisibility();
+    updateUserMessageNavigation();
+  }
+  el('log').addEventListener('scroll', updateScrollNavigation);
+  el('previousUserMessage').addEventListener('click', () => scrollToUserMessage('previous'));
+  el('nextUserMessage').addEventListener('click', () => scrollToUserMessage('next'));
   el('scrollToBottom').addEventListener('click', () => {
     const log = el('log');
     log.scrollTop = log.scrollHeight;
