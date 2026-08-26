@@ -66,6 +66,13 @@ export function getSnapshot(
       ...derivePermissionEscalationWarnings(live),
     ],
     haltedByUser: live.runState.haltedByUser,
+    failureRecovery:
+      live.failureRecovery === undefined
+        ? undefined
+        : {
+            failedTaskIds: live.failureRecovery.failedTaskIds,
+            deadline: live.failureRecovery.deadline,
+          },
     integrationBranch: live.integration?.branch,
     integrationPullRequestNumber:
       live.integrationPullRequest?.number ?? persisted?.integrationPullRequestNumber,

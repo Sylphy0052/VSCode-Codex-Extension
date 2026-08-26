@@ -214,6 +214,15 @@ export function workflowScript(): string {
     const banner = el('banner');
     const counts = progress.counts;
     const parts = [];
+    if (snapshot.failureRecovery) {
+      banner.hidden = false;
+      banner.className = 'approval';
+      banner.textContent =
+        'オーケストレーターが復旧計画を検討中です（失敗: ' +
+        snapshot.failureRecovery.failedTaskIds.join(', ') +
+        '）。計画変更はこの画面へ反映されます。';
+      return;
+    }
     if (progress.hasFailed) parts.push('失敗（' + counts.failed + '件）');
     if (progress.hasBlocked) parts.push('統合できていないタスク（' + counts.blocked + '件）');
     if (progress.hasWaitingApproval) parts.push('承認待ち（' + counts.waitingApproval + '件）');

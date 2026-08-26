@@ -83,6 +83,8 @@ export type OrchestratorEventKind =
    * オーケストレーターへ伝える必要があるため。
    */
   | 'taskStalled'
+  /** タスク失敗後、オーケストレーターの計画変更を待っている。 */
+  | 'failureRecovery'
   /**
    * タスクが`send_message`でオーケストレーターへメッセージを送った（design.md §16.34、
    * Issue #547）。タスク間の直接メッセージングを廃し、宛先をオーケストレーターへ固定した
