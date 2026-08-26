@@ -120,6 +120,36 @@ ${sharedStyles()}
     background-color: color-mix(in srgb, var(--vscode-charts-orange, var(--vscode-charts-yellow)) 12%, transparent);
   }
 
+  /* ---- 計画・品質契約（Issue #849） ---- */
+  #qualitySection {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
+    background-color: color-mix(in srgb, var(--vscode-charts-blue) 5%, transparent);
+  }
+  .quality-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .quality-head h2 { margin: 0; }
+  .quality-phase {
+    padding: 2px 8px;
+    border: 1px solid var(--vscode-charts-blue);
+    border-radius: var(--agent-radius-pill);
+    font-size: 0.85em;
+    white-space: nowrap;
+  }
+  .quality-phase.phase-verificationFailed { border-color: var(--vscode-errorForeground); }
+  .quality-phase.phase-recovering { border-color: var(--vscode-charts-yellow); }
+  .quality-contract {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+    gap: 6px 12px;
+    margin-top: 8px;
+  }
+  .quality-item { min-width: 0; }
+  .quality-label { color: var(--vscode-descriptionForeground); font-size: 0.86em; }
+  .quality-values { margin: 2px 0 0; padding-left: 18px; }
+  .quality-values li { overflow-wrap: anywhere; }
+
   /* ---- カンバン風のバッジ集計（design.md §16.44、Issue #693） ---- */
   .kanban-badges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
   .kanban-badge {
@@ -306,9 +336,54 @@ ${sharedStyles()}
   .state-pill.state-merging { --wf-state-color: var(--vscode-charts-green); }
   .state-pill.state-failed { --wf-state-color: var(--vscode-errorForeground); }
   #taskTable .summary-cell { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #taskTable .task-summary-cell { min-width: 220px; }
+  #taskTable .verification-cell { white-space: nowrap; }
+  #taskTable .verification-passed { color: var(--vscode-charts-green); }
+  #taskTable .verification-failed { color: var(--vscode-errorForeground); }
+  #taskTable .verification-checking { color: var(--vscode-charts-blue); }
   /* 役割（design.md §16.44、Issue #693）。役割が無いタスクはこのセルが空になる */
   #taskTable .role-cell { color: var(--vscode-descriptionForeground); white-space: nowrap; }
   #taskTable .hint, #integrationInfo .hint { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
+
+  /* 狭幅では横長表をカードへ切り替える。主要情報と操作を最初の画面内で読めるようにする。 */
+  @media (max-width: 680px) {
+    body { padding-inline: 8px; }
+    #header { align-items: stretch; }
+    #header .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+    #header .actions button { white-space: normal; }
+    table#taskTable { min-width: 0; }
+    #taskTable thead { display: none; }
+    #taskTable tr.task-row {
+      display: grid;
+      grid-template-columns: minmax(90px, auto) minmax(0, 1fr);
+      gap: 3px 10px;
+      padding: 8px;
+      margin-bottom: 8px;
+      border: 1px solid var(--agent-border);
+      border-radius: var(--agent-radius-md);
+    }
+    #taskTable tr.task-row td { display: flex; gap: 6px; padding: 2px 0; border: 0; min-width: 0; }
+    #taskTable tr.task-row td::before {
+      flex: 0 0 72px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 0.85em;
+    }
+    #taskTable tr.task-row td:nth-child(1)::before { content: 'id'; }
+    #taskTable tr.task-row td:nth-child(2)::before { content: '役割'; }
+    #taskTable tr.task-row td:nth-child(3)::before { content: '作業内容'; }
+    #taskTable tr.task-row td:nth-child(4)::before { content: '状態'; }
+    #taskTable tr.task-row td:nth-child(5)::before { content: '検証'; }
+    #taskTable tr.task-row td:nth-child(6)::before { content: 'provider'; }
+    #taskTable tr.task-row td:nth-child(7)::before { content: '経過'; }
+    #taskTable tr.task-row td:nth-child(8)::before { content: '送信回数'; }
+    #taskTable tr.task-row td:nth-child(9)::before { content: '操作'; }
+    #taskTable tr.task-row td:nth-child(3),
+    #taskTable tr.task-row td:nth-child(4),
+    #taskTable tr.task-row td:nth-child(5),
+    #taskTable tr.task-row td:nth-child(9) { grid-column: 1 / -1; }
+    #taskTable .summary-cell { max-width: none; white-space: normal; overflow-wrap: anywhere; }
+    #taskTable .ops { flex: 1 1 auto; }
+  }
 
   /* ---- 統合の状況（design.md §16.8「そのほか」・§16.17。Issue #104） ---- */
   #integrationInfo { display: flex; flex-direction: column; gap: 2px; font-size: 0.92em; }

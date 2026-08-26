@@ -4247,6 +4247,8 @@ T4は「T2とT3のブランチをマージする」タスクではない。マ�
 
 オーケストレーターが`task-messaging`へ行うrun内の読取・タスク通信・handoffの読書き・停止・再試行・継続・計画変更は、通常の`autoApprove`設定とは分離してMCP elicitationを自動許可する。これらは当該runの状態と専用handoff領域だけを操作し、計画変更履歴を警告欄へ残す。危険操作の承認（`decide_approval`）、mainへの最終マージ（`decide_final_merge`）、handoff削除（`delete_handoff`）は自動許可しない。
 
+生成ワークフローには`plannerPromptVersion`・`plannerProvider`・`plannerModel`・`reviewRevision`・レビュー指摘数を記録する。ワークフローViewはゴール、受入条件、前提、対象外、生成条件、レビュー・検証・復旧状態を表示する。タスク一覧は作業内容要約を表示し、作業ディレクトリと直近応答は一覧から外す。狭幅では横長表をカードへ切り替える。代表ゴールは`docs/fixtures/workflow-evaluation.json`、決定的な比較指標は`workflowEvaluation.ts`で管理する。
+
 #### 検証
 
 読み込み時に次を検査し、1件でも該当すれば実行を始めない。エラーは全件まとめて返す（1件直すたびに再実行させない）。

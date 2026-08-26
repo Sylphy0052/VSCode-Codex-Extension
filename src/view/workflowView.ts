@@ -22,6 +22,7 @@ import {
 } from './workflowGraph';
 import { workflowScript } from './workflowScript';
 import { workflowStyles } from './workflowStyles';
+import { buildTaskWorkSummary } from '../orchestrator/taskSummary';
 
 /**
  * ワークフローViewから、失敗の伝播・人による停止の状態が読める最小限の口
@@ -678,6 +679,13 @@ ${workflowStyles()}
 
   <div id="content" hidden>
     <div id="kanbanBadges" class="kanban-badges" hidden></div>
+    <section id="qualitySection" hidden>
+      <div class="quality-head">
+        <h2>計画・品質契約</h2>
+        <span id="qualityPhase" class="quality-phase"></span>
+      </div>
+      <div id="qualityContract" class="quality-contract"></div>
+    </section>
     <div class="section-head">
       <h2>依存グラフ</h2>
       <div class="graph-tools">
@@ -699,8 +707,8 @@ ${workflowStyles()}
       <table id="taskTable">
         <thead>
           <tr>
-            <th>id</th><th>役割</th><th>状態</th><th>provider</th><th>作業ディレクトリ</th>
-            <th>経過</th><th>送信回数</th><th>直近の応答</th><th>操作</th>
+            <th>id</th><th>役割</th><th>作業内容要約</th><th>状態</th><th>検証</th>
+            <th>provider</th><th>経過</th><th>送信回数</th><th>操作</th>
           </tr>
         </thead>
         <tbody id="taskTableBody"></tbody>
@@ -742,6 +750,17 @@ function buildPreviewSnapshot(
 ): WorkflowRunSnapshot {
   const tasks: TaskSnapshot[] = def.tasks.map((task) => ({
     id: task.id,
+    workSummary: buildTaskWorkSummary(task.prompt),
+    contract: {
+      ...(task.outcome === undefined ? {} : { outcome: task.outcome }),
+      evidence: task.evidence ?? [],
+      outputs: task.outputs ?? [],
+      risks: task.risks ?? [],
+    },
+    verification: {
+      status: task.verify === undefined ? 'notConfigured' : 'pending',
+      attempts: 0,
+    },
     role: task.role,
     dependsOn: task.dependsOn,
     provider: task.provider,
@@ -773,6 +792,33 @@ function buildPreviewSnapshot(
     startedAt: new Date().toISOString(),
     tasks,
     warnings,
+    quality: {
+      phase:
+        def.reviewStatus === 'reviewing'
+          ? 'reviewing'
+          : def.reviewStatus === 'ready'
+            ? 'ready'
+            : 'planning',
+      ...(def.goal === undefined ? {} : { goal: def.goal }),
+      acceptance: def.acceptance ?? [],
+      assumptions: def.assumptions ?? [],
+      nonGoals: def.nonGoals ?? [],
+      ...(def.roadmapRevision === undefined ? {} : { roadmapRevision: def.roadmapRevision }),
+      ...(def.reviewStatus === undefined ? {} : { reviewStatus: def.reviewStatus }),
+      ...(def.plannerPromptVersion === undefined
+        ? {}
+        : { plannerPromptVersion: def.plannerPromptVersion }),
+      ...(def.plannerProvider === undefined ? {} : { plannerProvider: def.plannerProvider }),
+      ...(def.plannerModel === undefined ? {} : { plannerModel: def.plannerModel }),
+      ...(def.reviewRevision === undefined ? {} : { reviewRevision: def.reviewRevision }),
+      ...(def.reviewFindingCount === undefined
+        ? {}
+        : { reviewFindingCount: def.reviewFindingCount }),
+      ...(def.reviewFindingsResolved === undefined
+        ? {}
+        : { reviewFindingsResolved: def.reviewFindingsResolved }),
+      taskModels: [...new Set(def.tasks.map((task) => task.model).filter((v): v is string => v !== undefined))],
+    },
     haltedByUser: false,
     isDraft: true,
   };
