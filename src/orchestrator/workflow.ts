@@ -142,7 +142,7 @@ export const MAX_TEMPLATE_RESULT_LENGTH = 4000;
 
 /** `defaults` 省略時に使う組み込みの既定値。design.md §16.2のサンプルおよび§16.13の記述に合わせる。 */
 export const DEFAULT_MAX_PARALLEL = 3;
-export const DEFAULT_MAX_ITERATIONS = 20;
+export const DEFAULT_MAX_ITERATIONS = 3;
 export const DEFAULT_CONTINUE_PROMPT = '続けてください';
 export const DEFAULT_PROVIDER: Provider = 'codex';
 export const DEFAULT_ISOLATION: Isolation = 'worktree';

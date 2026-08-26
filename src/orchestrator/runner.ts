@@ -700,6 +700,8 @@ export interface WorkflowWarning {
      * 全文で残す。
      */
     | 'orchestratorDependenciesChanged'
+    /** pendingタスクの実行契約をオーケストレーターが変更した。 */
+    | 'orchestratorTaskUpdated'
     /** オーケストレーターの失敗復旧待ちが期限切れになった。 */
     | 'orchestratorFailureRecoveryTimedOut'
     /**
@@ -3194,7 +3196,7 @@ export class WorkflowRunner {
       kind: 'failureRecovery',
       body: [
         `タスク ${failedTaskIds.join(', ')} が失敗しました。runは復旧計画を待っています。`,
-        '10分以内にretry_task、add_task、remove_task、update_task_dependencies、update_task_promptで対応してください。',
+        '10分以内に問題の原因を確認し、update_task、add_task、remove_task、update_task_dependencies、update_task_promptで計画を調整してください。同じretry_taskだけを繰り返さないでください。',
         '計画変更は人の確認なしに適用され、ワークフロー画面へライブ反映されます。',
       ].join('\n'),
     });
@@ -3231,7 +3233,7 @@ export class WorkflowRunner {
       kind: 'failureRecovery',
       body: [
         `${recoveryMessage}\n統合PR/MR: ${live.integrationPullRequest?.url ?? 'URL不明'}`,
-        'holdせず、失敗内容を確認してadd_task / remove_task / update_task_dependencies / update_task_promptで修正計画を適用してください。',
+        'holdせず、失敗内容を確認してupdate_task / add_task / remove_task / update_task_dependencies / update_task_promptで修正計画を適用してください。同じretry_taskだけを繰り返さないでください。',
         '追加タスクの完了後、同じ統合PR/MRに対してCI確認と最終マージの判断をやり直します。10分以内に計画変更が無ければ最終失敗にします。',
       ].join('\n'),
     });
