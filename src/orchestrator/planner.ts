@@ -335,7 +335,16 @@ export function buildPlannerPrompt(input: BuildPlannerPromptInput): string {
     '',
   ];
   if (input.roadmapMaterial !== undefined && input.roadmapMaterial !== '') {
-    parts.push(input.roadmapMaterial, '');
+    parts.push(
+      input.roadmapMaterial,
+      '',
+      '## ロードマップから具体化するときの規則',
+      '- ロードマップの各項目は既に1つの完結した機能Issueである。項目ごとに同じidのタスクを1件だけ作り、設計・API・UI・テスト・文書・ファイル・役割へ再分割しない',
+      '- 読み取り専用の道具で、選択項目の根拠にあるファイルと現在の関連実装・テスト・規約を読み直し、最新コードに合うpromptとdoneへ具体化する',
+      '- ロードマップの完了条件をdoneの基準にし、根拠とリスク・要確認をpromptへ反映する。調査で未確定な点を事実として断定しない',
+      '- id、dependsOn、issue、機能の範囲はロードマップを正とする。材料に無いタスクや依存を追加しない',
+      '',
+    );
   }
   parts.push(
     describeWorkspace(input.workspaceSummary),
