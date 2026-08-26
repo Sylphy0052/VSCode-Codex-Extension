@@ -1714,9 +1714,21 @@ export async function warnWithLogLink(log: Logger, message: string): Promise<voi
 function buildRoadmapTaskIssueBody(item: RoadmapItem): string {
   const dependencies = item.dependsOn.length > 0 ? item.dependsOn.join(', ') : 'なし';
   return [
-    '## タスク',
+    '## 機能',
     '',
     item.text,
+    '',
+    '## 完了条件',
+    '',
+    item.acceptance ?? '要確認',
+    '',
+    '## 根拠',
+    '',
+    item.evidence?.map((value) => `- ${value}`).join('\n') ?? '要確認',
+    '',
+    '## リスク・要確認',
+    '',
+    item.risks ?? 'なし',
     '',
     '## 依存',
     '',
@@ -1819,6 +1831,7 @@ async function runRoadmap(
   const result = await generateRoadmap(
     {
       generation,
+      review: generation,
       issues,
       fs: nodeRoadmapFileSystem,
       issueCreation: createRoadmapIssueCreationPort(),
@@ -1911,12 +1924,14 @@ async function convertMarkdownFileToRoadmap(
   }
 
   const host = provider === 'claude' ? claudeChat : chat;
+  const generation = createTaskSessionRoadmapGenerationPort(host, provider, workspaceRoot);
   const result = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'ロードマップへ変換しています…' },
     () =>
       convertMarkdownToRoadmap(
         {
-          generation: createTaskSessionRoadmapGenerationPort(host, provider, workspaceRoot),
+          generation,
+          review: generation,
           fs: nodeRoadmapFileSystem,
         },
         {
