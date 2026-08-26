@@ -61,6 +61,7 @@ export interface OrchestratorResumeContext {
 const AUTO_APPROVED_ORCHESTRATOR_TOOLS = new Set([
   'list_tasks',
   'get_run_status',
+  'send_message',
   'stop_task',
   'retry_task',
   'continue_task',
@@ -69,6 +70,9 @@ const AUTO_APPROVED_ORCHESTRATOR_TOOLS = new Set([
   'add_task',
   'remove_task',
   'update_task_dependencies',
+  'write_handoff',
+  'read_handoff',
+  'list_handoffs',
 ]);
 
 /**

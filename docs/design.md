@@ -4245,7 +4245,7 @@ T4は「T2とT3のブランチをマージする」タスクではない。マ�
 
 `maxIterations`の組み込み既定は3回とする（Issue #848。旧既定20回）。3回で終了条件を満たせない場合は同じ指示を繰り返さず、失敗内容をオーケストレーターへ渡して`update_task`・追加・削除・依存変更で計画を調整する。
 
-オーケストレーターが`task-messaging`へ行うrun内の読取・停止・再試行・継続・計画変更は、通常の`autoApprove`設定とは分離してMCP elicitationを自動許可する。これらは当該runのメモリ上の状態だけを操作し、変更履歴を警告欄へ残す。危険操作の承認（`decide_approval`）とmainへの最終マージ（`decide_final_merge`）は自動許可しない。
+オーケストレーターが`task-messaging`へ行うrun内の読取・タスク通信・handoffの読書き・停止・再試行・継続・計画変更は、通常の`autoApprove`設定とは分離してMCP elicitationを自動許可する。これらは当該runの状態と専用handoff領域だけを操作し、計画変更履歴を警告欄へ残す。危険操作の承認（`decide_approval`）、mainへの最終マージ（`decide_final_merge`）、handoff削除（`delete_handoff`）は自動許可しない。
 
 #### 検証
 
