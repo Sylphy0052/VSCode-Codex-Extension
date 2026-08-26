@@ -208,6 +208,13 @@ export function readChatTurnSummaryConfig(): TurnSummaryConfig {
   };
 }
 
+/** 手動送信時にターン要約の指示を付けるかを、ユーザー設定へ保存する。 */
+export async function setChatTurnSummaryEnabled(enabled: boolean): Promise<void> {
+  await vscode.workspace
+    .getConfiguration('agent')
+    .update('chat.turnSummary.enabled', enabled, vscode.ConfigurationTarget.Global);
+}
+
 /** ターンの完了・承認待ちの通知（issue #286、design.md §14.55）。 */
 export interface NotificationsConfig {
   /** 承認待ちになった直後、タブが見えていなければ通知を出すか（既定 `true`）。 */

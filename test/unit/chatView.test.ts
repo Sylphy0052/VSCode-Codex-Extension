@@ -461,7 +461,7 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
     }
   });
 
-  it('composerButtonsに16個すべてを指定すると「…」メニューは空になり、入れ物（#composerOverflow）自体がhiddenになる', () => {
+  it('composerButtonsに16個すべてを指定しても、ターン要約の切替を置くため「…」メニューは残る', () => {
     const html = renderShell(
       fakeWebview() as never,
       buildOptions({
@@ -488,7 +488,18 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
 
     const overflowTag = html.match(/<div id="composerOverflow"[^>]*>/u)?.[0];
     expect(overflowTag).toBeDefined();
-    expect(overflowTag).toContain('hidden');
+    expect(overflowTag).not.toContain('hidden');
+    expect(isInOverflowMenu(html, 'turnSummaryToggle')).toBe(true);
+  });
+
+  it('ターン要約の切替は現在の設定に応じて有効化または無効化を示す', () => {
+    const disabled = renderShell(fakeWebview() as never, buildOptions());
+    const enabled = renderShell(fakeWebview() as never, buildOptions({ turnSummaryEnabled: true }));
+
+    expect(extractButtonOpenTag(disabled, 'turnSummaryToggle')).toContain('aria-pressed="false"');
+    expect(disabled).toContain('ターン要約を有効にする');
+    expect(extractButtonOpenTag(enabled, 'turnSummaryToggle')).toContain('aria-pressed="true"');
+    expect(enabled).toContain('ターン要約を無効にする');
   });
 
   it('composerButtonsが空配列だと16個すべてが「…」メニューに入り、#composerOverflowはhiddenを持たない', () => {
