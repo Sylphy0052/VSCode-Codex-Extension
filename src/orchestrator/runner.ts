@@ -876,6 +876,7 @@ export interface WorkflowRunSnapshot {
     reviewStatus?: 'reviewing' | 'ready';
     plannerPromptVersion?: string;
     plannerProvider?: Provider;
+    plannerModel?: string;
     reviewRevision?: number;
     reviewFindingCount?: number;
     reviewFindingsResolved?: number;

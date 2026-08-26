@@ -92,6 +92,7 @@ export function getSnapshot(
       ...(live.def.plannerProvider === undefined
         ? {}
         : { plannerProvider: live.def.plannerProvider }),
+      ...(live.def.plannerModel === undefined ? {} : { plannerModel: live.def.plannerModel }),
       ...(live.def.reviewRevision === undefined
         ? {}
         : { reviewRevision: live.def.reviewRevision }),

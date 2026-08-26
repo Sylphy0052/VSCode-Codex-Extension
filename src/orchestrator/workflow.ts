@@ -262,6 +262,7 @@ export interface WorkflowDefinition {
   /** 拡張機能が記録する生成・レビュー条件。手書きYAMLでは未指定。 */
   plannerPromptVersion?: string;
   plannerProvider?: Provider;
+  plannerModel?: string;
   reviewRevision?: number;
   reviewFindingCount?: number;
   reviewFindingsResolved?: number;
@@ -828,6 +829,7 @@ export function parseWorkflowYaml(source: string): WorkflowDefinition {
       ? { plannerPromptVersion: str(root['plannerPromptVersion']) }
       : {}),
     ...(isProvider(plannerProviderRaw) ? { plannerProvider: plannerProviderRaw } : {}),
+    ...(str(root['plannerModel']) !== '' ? { plannerModel: str(root['plannerModel']) } : {}),
     ...(root['reviewRevision'] !== undefined
       ? { reviewRevision: num(root['reviewRevision'], 0) }
       : {}),
@@ -852,6 +854,7 @@ export function withWorkflowReviewStatus(
   status: 'reviewing' | 'ready',
   metadata: {
     provider?: Provider;
+    model?: string;
     revision?: number;
     findingCount?: number;
     findingsResolved?: number;
@@ -870,6 +873,7 @@ export function withWorkflowReviewStatus(
   upsert('reviewStatus', status);
   upsert('plannerPromptVersion', WORKFLOW_PLANNER_PROMPT_VERSION);
   if (metadata.provider !== undefined) upsert('plannerProvider', metadata.provider);
+  if (metadata.model !== undefined) upsert('plannerModel', JSON.stringify(metadata.model));
   if (metadata.revision !== undefined) upsert('reviewRevision', metadata.revision);
   if (metadata.findingCount !== undefined) upsert('reviewFindingCount', metadata.findingCount);
   if (metadata.findingsResolved !== undefined) {
@@ -882,6 +886,7 @@ export function withWorkflowReviewStatus(
       reviewStatus: status,
       plannerPromptVersion: WORKFLOW_PLANNER_PROMPT_VERSION,
       ...(metadata.provider === undefined ? {} : { plannerProvider: metadata.provider }),
+      ...(metadata.model === undefined ? {} : { plannerModel: metadata.model }),
       ...(metadata.revision === undefined ? {} : { reviewRevision: metadata.revision }),
       ...(metadata.findingCount === undefined
         ? {}

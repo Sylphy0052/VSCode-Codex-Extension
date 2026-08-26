@@ -2432,8 +2432,11 @@ async function handlePlanSuccess(
     log.info('ワークフロー定義の保存を取り消しました');
     return;
   }
+  const plannerModel =
+    provider === 'codex' ? readConfig().codex.model : readClaudeConfig().claude.model;
   const pendingReview = withWorkflowReviewStatus(result.yaml, result.definition, 'reviewing', {
     provider,
+    model: plannerModel,
     revision: 0,
     findingCount: 0,
     findingsResolved: 0,
@@ -2547,6 +2550,7 @@ async function handlePlanSuccess(
           }
           const ready = withWorkflowReviewStatus(yaml, definition, 'ready', {
             provider,
+            model: plannerModel,
             revision,
             findingCount: 0,
             findingsResolved: totalReviewFindings,
@@ -2667,6 +2671,7 @@ async function handlePlanSuccess(
           'reviewing',
           {
             provider,
+            model: plannerModel,
             revision: revision + 1,
             findingCount: review.findings.length,
             findingsResolved: totalReviewFindings,

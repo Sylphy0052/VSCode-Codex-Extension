@@ -809,6 +809,7 @@ function buildPreviewSnapshot(
         ? {}
         : { plannerPromptVersion: def.plannerPromptVersion }),
       ...(def.plannerProvider === undefined ? {} : { plannerProvider: def.plannerProvider }),
+      ...(def.plannerModel === undefined ? {} : { plannerModel: def.plannerModel }),
       ...(def.reviewRevision === undefined ? {} : { reviewRevision: def.reviewRevision }),
       ...(def.reviewFindingCount === undefined
         ? {}

@@ -252,6 +252,7 @@ export function workflowScript(): string {
     appendQualityItem(box, 'ロードマップ改訂', quality.roadmapRevision);
     appendQualityItem(box, '生成条件', [
       quality.plannerProvider ? 'provider: ' + quality.plannerProvider : '',
+      quality.plannerModel ? 'planner model: ' + quality.plannerModel : '',
       quality.plannerPromptVersion ? 'prompt: ' + quality.plannerPromptVersion : '',
       quality.taskModels && quality.taskModels.length > 0
         ? 'task model: ' + quality.taskModels.join(', ')
