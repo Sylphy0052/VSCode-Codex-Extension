@@ -584,17 +584,18 @@ export class ProgramRunner {
     const failedRunIds = Object.entries(persisted.state.runs)
       .filter(([, entry]) => entry.state === 'failed')
       .map(([id]) => id);
-    if (persisted.recovery !== undefined) {
+    const recovery = persisted.recovery;
+    if (recovery !== undefined) {
       const mergedFailedRunIds = [
-        ...new Set([...persisted.recovery.failedRunIds, ...failedRunIds]),
+        ...new Set([...recovery.failedRunIds, ...failedRunIds]),
       ];
-      if (mergedFailedRunIds.length !== persisted.recovery.failedRunIds.length) {
+      if (mergedFailedRunIds.length !== recovery.failedRunIds.length) {
         await this.deps.programStore.update(programId, (current) => {
           if (current === undefined)
             throw new Error(`[program ${programId}] 復旧更新中に消えました`);
           return {
             ...current,
-            recovery: { ...persisted.recovery, failedRunIds: mergedFailedRunIds },
+            recovery: { deadline: recovery.deadline, failedRunIds: mergedFailedRunIds },
             changeHistory: this.appendProgramHistory(
               current,
               `追加の失敗runを復旧対象へ加えました: ${failedRunIds.join(', ')}`,
@@ -602,7 +603,7 @@ export class ProgramRunner {
           };
         });
       }
-      this.scheduleProgramRecoveryTimeout(programId, persisted.recovery.deadline);
+      this.scheduleProgramRecoveryTimeout(programId, recovery.deadline);
       return;
     }
     const deadline = new Date(
