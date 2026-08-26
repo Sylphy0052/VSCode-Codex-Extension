@@ -731,7 +731,10 @@ export function chatScript(
     // 閉じた見出しでは先頭だけを見せるため、開いたときは実行コマンドも全文を確認できる
     // ように出力の先頭へ含める。Codex/Claude CodeともcommandExecutionを使う。
     if (item.kind === 'commandExecution' && item.detail) {
-      primary = 'コマンド: ' + item.detail + (primary ? '\n\n出力:\n' + primary : '');
+      primary =
+        'コマンド: ' +
+        item.detail +
+        (primary ? String.fromCharCode(10, 10) + '出力:' + String.fromCharCode(10) + primary : '');
     }
     node.fullText = primary;
 
