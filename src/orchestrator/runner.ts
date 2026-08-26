@@ -54,6 +54,7 @@ import {
   type HttpMcpTransportHandle,
 } from './messaging';
 import { nodeHandoffFileSystem } from './nodeHandoffFileSystem';
+import { reviewTaskPullRequest } from './planner';
 import {
   applyLoopStopReason,
   clampWorktreeRemovalAttempts,
@@ -171,6 +172,7 @@ export interface WorkflowFilePort {
  * 負荷にならない値にしてある。
  */
 export const WAITING_REPLY_POLL_INTERVAL_MS = 5_000;
+export const MAX_TASK_VERIFICATION_ATTEMPTS = 3;
 
 /** Issue・PR・レビュー・実行指示で共有する全体契約。 */
 export function formatTaskExecutionContract(
@@ -746,7 +748,9 @@ export interface WorkflowWarning {
      * 分解のレビュー）と同じく**自動では直さない**（保存済みのPR/MRはそのまま、警告として
      * 出すだけ）。マージ自体はこの警告の有無に関わらず進む。
      */
-    | 'taskPullRequestReview';
+    | 'taskPullRequestReview'
+    /** DONE後の独立検証が失敗し、同じworktreeへ修正を返した。 */
+    | 'taskVerification';
   /** ワークフロー全体に関わる警告（gitignoreなど）は undefined。 */
   taskId: string | undefined;
   message: string;
@@ -1047,6 +1051,12 @@ export interface LiveTask {
   lastState: ChatState | undefined;
   /** `done` になったときだけ埋まる。後続タスクのテンプレート変数に使う（応答本文は永続化しない）。 */
   result: TaskResult | undefined;
+  /** DONE後の独立検証回数。初回を含め最大3回。 */
+  verificationAttempts?: number;
+  /** 同じDONE通知から検証を二重起動しないための印。 */
+  verificationInProgress?: boolean;
+  /** 独立検証を通過したDONEだけを通常の完了処理へ流す。 */
+  verificationPassed?: boolean;
   wasBusy: boolean;
   submissionCount: number;
   /** タスクが開始された時刻（ISO8601）。Viewの経過時間表示に使う。 */
@@ -3505,6 +3515,9 @@ export class WorkflowRunner {
       originCommit: prepared.originCommit,
       lastState: undefined,
       result: undefined,
+      verificationAttempts: 0,
+      verificationInProgress: false,
+      verificationPassed: false,
       wasBusy: false,
       submissionCount: 0,
       startedAt: (this.deps.now?.() ?? new Date()).toISOString(),
@@ -4390,6 +4403,14 @@ export class WorkflowRunner {
     }
     const liveTask = live.tasks.get(taskId);
 
+    if (reason === 'done' && liveTask !== undefined && !liveTask.verificationPassed) {
+      if (!liveTask.verificationInProgress) {
+        liveTask.verificationInProgress = true;
+        void this.verifyTaskCompletion(runId, taskId, task, state, liveTask);
+      }
+      return;
+    }
+
     if (reason === 'done' && liveTask !== undefined) {
       liveTask.result = {
         result: state.turnResultText,
@@ -4465,6 +4486,124 @@ export class WorkflowRunner {
     void this.persist(runId);
     this.notify(runId);
     this.pump(runId);
+  }
+
+  /** DONE自己申告を、機械条件と別のread-onlyセッションで確認する。 */
+  private async verifyTaskCompletion(
+    runId: string,
+    taskId: string,
+    task: WorkflowTask,
+    state: ChatState,
+    liveTask: LiveTask,
+  ): Promise<void> {
+    const live = this.runs.get(runId);
+    if (live === undefined) return;
+    const attempt = (liveTask.verificationAttempts ?? 0) + 1;
+    liveTask.verificationAttempts = attempt;
+    const failures: string[] = [];
+    const verify = task.verify;
+
+    for (const file of verify?.files ?? []) {
+      const target = path.resolve(liveTask.cwd, file);
+      if ((await this.deps.filePort.fileSize(target)) === undefined) {
+        failures.push(`必須ファイルがありません: ${file}`);
+      }
+    }
+
+    const diffBase = liveTask.originCommit === '' ? [] : [liveTask.originCommit];
+    const [diffResult, changedResult] = await Promise.all([
+      this.deps.git.run(['diff', ...diffBase], liveTask.cwd),
+      this.deps.git.run(['diff', '--name-only', ...diffBase], liveTask.cwd),
+    ]).catch((error: unknown) => {
+      if ((verify?.diff.length ?? 0) > 0) {
+        failures.push(
+          `diffの取得に失敗しました: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      return [
+        { code: 1, stdout: '', stderr: '' },
+        { code: 1, stdout: '', stderr: '' },
+      ] as const;
+    });
+    if ((verify?.diff.length ?? 0) > 0 && (diffResult.code !== 0 || changedResult.code !== 0)) {
+      failures.push('独立検証用のdiffを取得できませんでした');
+    }
+    const changed = new Set(
+      changedResult.code === 0
+        ? changedResult.stdout
+            .split(/\r?\n/u)
+            .map((value) => value.trim())
+            .filter((value) => value !== '')
+        : [],
+    );
+    for (const expected of verify?.diff ?? []) {
+      if (!changed.has(expected.split('\\').join('/'))) {
+        failures.push(`変更必須のパスがdiffにありません: ${expected}`);
+      }
+    }
+
+    if (verify?.semantic !== false) {
+      const verificationContract = [
+        task.prompt,
+        '',
+        `完了条件: ${task.done}`,
+        ...(verify?.commands ?? []).map((command) => `検証コマンド（実行して確認）: ${command}`),
+        ...(verify?.files ?? []).map((file) => `存在必須: ${file}`),
+        ...(verify?.diff ?? []).map((file) => `変更必須: ${file}`),
+      ].join('\n');
+      const reviewed = await reviewTaskPullRequest({
+        prompt: verificationContract,
+        done: task.done,
+        diff: diffResult.code === 0 ? diffResult.stdout : '',
+        provider: task.provider,
+        host: this.deps.hosts[task.provider],
+        cwd: liveTask.cwd,
+        log: this.deps.log,
+      });
+      if (reviewed.error !== undefined) {
+        failures.push(`独立レビューに失敗しました: ${reviewed.error}`);
+      }
+      failures.push(...reviewed.findings.map((finding) => finding.message));
+    }
+
+    liveTask.verificationInProgress = false;
+    if (failures.length === 0) {
+      liveTask.verificationPassed = true;
+      this.deps.log.info(
+        `[workflow ${runId}/${taskId}] 独立検証を通過しました（${attempt}回目）`,
+      );
+      this.onTaskFinished(runId, taskId, task, 'done', state);
+      return;
+    }
+
+    const detail = failures.map((failure) => `- ${failure}`).join('\n');
+    live.warnings.push({
+      kind: 'taskVerification',
+      taskId,
+      message: `独立検証${attempt}回目に失敗しました:\n${detail}`,
+    });
+    if (attempt >= MAX_TASK_VERIFICATION_ATTEMPTS) {
+      this.deps.log.warn(
+        `[workflow ${runId}/${taskId}] 独立検証が${attempt}回失敗したためタスクをfailedにします`,
+      );
+      this.onTaskFinished(runId, taskId, task, 'failed', state);
+      return;
+    }
+
+    const feedback = [
+      `独立検証${attempt}回目で次の問題が見つかりました。全て修正し、検証してから再度DONEを宣言してください。`,
+      detail,
+    ].join('\n\n');
+    liveTask.continuePromptOverride = feedback;
+    const condition = liveTask.usedWorktree ? withCommitRequirement(task.done) : task.done;
+    liveTask.session.runLoop({
+      initialPrompt: feedback,
+      continuePrompt: feedback,
+      maxIterations: task.maxIterations,
+      condition,
+    });
+    void this.persist(runId);
+    this.notify(runId);
   }
 
   // ---- マージ（design.md §16.17） ----

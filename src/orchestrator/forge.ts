@@ -1023,9 +1023,8 @@ export interface TaskPullRequestSteps<TMerge> {
    * 前に呼ぶ。省略時は行わない（既定は無効。design.md「forge側の『人のレビューを待つ』
    * 方式は採らない」）。
    *
-   * **結果に関わらずマージは進める。** 指摘は呼び出し側が警告として記録するだけで、
-   * このフロー自体は指摘の有無でマージをブロックしない（forgeの「人のレビューを待つ」
-   * 方式のように、応答が無いまま待ち続ける構造を持ち込まないため。design.md §16.31）。
+   * `ok: false`なら未解決のレビュー指摘としてマージを止める。待ち続けるのではなく失敗として
+   * 呼び出し側の復旧経路へ返す。
    */
   reviewPullRequest?: (url: string | undefined) => Promise<ForgeStepOutcome>;
   mergeAndPushIntegration: () => Promise<TMerge>;
@@ -1104,6 +1103,10 @@ export async function runTaskPullRequestFlow<TMerge>(
   let review: ForgeStepOutcome | undefined;
   if (pullRequest.created && steps.reviewPullRequest !== undefined) {
     review = await steps.reviewPullRequest(pullRequest.url);
+  }
+
+  if (review !== undefined && !review.ok) {
+    throw new Error(review.message);
   }
 
   const mergeOutcome = await steps.mergeAndPushIntegration();

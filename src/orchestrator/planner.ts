@@ -228,6 +228,9 @@ export function buildSchemaDescription(options: SchemaDescriptionOptions = {}): 
     '- risks（必須）: 既知のリスク・要確認事項の配列。無ければ []',
     '- done（必須）: 終了条件。エージェントの応答を読まなくても外から判定できる書き方にすること' +
       '（例:「テストが通っている」。「頑張って実装した」のような自己申告に頼る書き方は避ける）',
+    '- verify（必須）: DONE宣言後に独立して確認する契約。commands（検証コマンド文字列の配列）、' +
+      'files（存在必須の相対パス配列）、diff（変更必須の相対パス配列）、semantic（意味レビューの真偽）を持つ。' +
+      'commandsは拡張機能ホストのシェルではなくread-onlyの検証セッションが実行する',
     '- dependsOn（省略可、既定 []）: 先に完了していなければならないタスクidの配列。' +
       '独立して並列実行するタスクだけを別々のdependsOnに分ける。並列タスクを置いた場合に' +
       '結果を統合・レビューする必要があれば、両方をdependsOnに挙げた合流タスクを置くこと',
@@ -1698,6 +1701,7 @@ function buildTaskPullRequestReviewPrompt(prompt: string, done: string, diff: st
       '実際の変更差分（diff）を読み、変更が指示・完了条件に照らして妥当かをレビューして' +
       'ください。',
     'あなた自身はコードを書き換えません（読み取りとレビューのみ）。',
+    'タスクの指示に「検証コマンド（実行して確認）」が含まれる場合は、読み取り専用環境で実行し、失敗を指摘として返してください。実行できない場合も指摘にしてください。',
     '',
     `## タスクの指示\n${formatUntrusted(prompt, {
       id: 'taskReviewer',
@@ -1734,32 +1738,32 @@ function buildTaskPullRequestReviewPrompt(prompt: string, done: string, diff: st
 
 /**
  * タスクPR/MRレビュー応答を`TaskPullRequestReviewFinding[]`へ変換する。`parseReviewFindings`
- * と同じく、壊れた応答はエラーにせず指摘0件として扱う（design.md §16.31「結果に関わらず
- * マージは進める」を、応答の形が崩れた場合にも一貫して適用する）。
+ * と同じく、壊れた応答は`undefined`として呼び出し側へ返す。指摘0件と誤認すると、検証不能な
+ * 状態で完了・マージへ進むためfail-closedにする（Issue #847）。
  */
 function parseTaskPullRequestReviewFindings(
   response: string,
   log?: Logger,
-): TaskPullRequestReviewFinding[] {
+): TaskPullRequestReviewFinding[] | undefined {
   const jsonText = extractJsonArrayFromResponse(response);
   if (Buffer.byteLength(jsonText, 'utf8') > MAX_WORKFLOW_FILE_BYTES) {
     log?.warn('[planner] タスクPR/MRレビュー応答が大きすぎるため解析しませんでした');
-    return [];
+    return undefined;
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(jsonText);
   } catch {
     log?.warn(
-      '[planner] タスクPR/MRレビュー応答をJSON配列として解釈できなかったため、指摘なしとして扱います',
+      '[planner] タスクPR/MRレビュー応答をJSON配列として解釈できませんでした',
     );
-    return [];
+    return undefined;
   }
   if (!Array.isArray(parsed)) {
     log?.warn(
-      '[planner] タスクPR/MRレビュー応答がJSON配列ではなかったため、指摘なしとして扱います',
+      '[planner] タスクPR/MRレビュー応答がJSON配列ではありませんでした',
     );
-    return [];
+    return undefined;
   }
 
   const findings: TaskPullRequestReviewFinding[] = [];
@@ -1793,9 +1797,8 @@ function parseTaskPullRequestReviewFindings(
  * 単発ターン（`sendSingleTurn`、既定`PLANNER_TURN_TIMEOUT_MS`）で完結し、応答を待ち続ける
  * ことはない。
  *
- * **結果に関わらずマージは進める。** レビューセッションの起動・応答待ちが失敗しても
- * （タイムアウト等）、ここで例外を投げずに`error`へ理由を残して`findings: []`を返す。
- * 呼び出し側（`runnerMerge.ts`）は指摘の有無・レビューの成否を問わずマージを進めてよい。
+ * レビューセッションの起動・応答待ちが失敗しても（タイムアウト等）、ここで例外を投げずに
+ * `error`へ理由を残す。呼び出し側はこれを指摘0件と同一視せず、完了・マージを止める。
  */
 export async function reviewTaskPullRequest(
   input: ReviewTaskPullRequestInput,
@@ -1811,11 +1814,14 @@ export async function reviewTaskPullRequest(
       PLANNER_TURN_TIMEOUT_MS,
       input.log,
     );
-    return { findings: parseTaskPullRequestReviewFindings(response, input.log), error: undefined };
+    const findings = parseTaskPullRequestReviewFindings(response, input.log);
+    return findings === undefined
+      ? { findings: [], error: 'レビュー応答をJSON配列として解釈できませんでした' }
+      : { findings, error: undefined };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     input.log.warn(
-      `[planner] タスクPR/MRのレビューに失敗したため、レビュー警告なしでマージを続けます: ${sanitizeForLog(message)}`,
+      `[planner] タスクPR/MRのレビューに失敗しました: ${sanitizeForLog(message)}`,
     );
     return { findings: [], error: message };
   }
