@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "responsive-workflow-ui",
+      "goal": "ワークフロー画面のタスク一覧を狭い幅でも確認・操作できるようにする",
+      "requiredOutcomes": ["主要情報の表示", "操作導線の維持", "狭幅レイアウト"]
+    },
+    {
+      "id": "autonomous-failure-recovery",
+      "goal": "タスク失敗時にオーケストレーターが計画を修正して自動復旧する",
+      "requiredOutcomes": ["失敗通知", "計画変更", "再スケジューリング", "復旧不能時の終了"]
+    },
+    {
+      "id": "outcome-roadmap",
+      "goal": "リポジトリ調査に基づき、1 Issueを完結した機能としてロードマップを生成する",
+      "requiredOutcomes": ["調査根拠", "受入条件", "依存関係", "過剰分割の防止"]
+    }
+  ]
+}

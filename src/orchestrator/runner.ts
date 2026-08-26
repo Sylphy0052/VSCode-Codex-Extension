@@ -769,6 +769,20 @@ export interface TaskPendingApprovalSnapshot {
 /** タスク1件のView向けスナップショット。応答本文そのものではなく1行要約だけを持つ。 */
 export interface TaskSnapshot {
   id: string;
+  /** 定義された作業内容（prompt）の一覧表示用1行要約。 */
+  workSummary?: string;
+  /** タスク単位の成果・根拠・成果物・リスク。旧定義では未指定。 */
+  contract?: {
+    outcome?: string;
+    evidence: readonly string[];
+    outputs: readonly string[];
+    risks: readonly string[];
+  };
+  /** 独立検証の進行状況。 */
+  verification?: {
+    status: 'notConfigured' | 'pending' | 'checking' | 'passed' | 'failed';
+    attempts: number;
+  };
   /**
    * チームモードの役割（design.md §16.44、Issue #693）。`undefined` は役割なし。
    * ワークフローViewがタスクidと併記して出す（役割はidの代わりではない。同じ役割を
@@ -851,6 +865,22 @@ export interface WorkflowRunSnapshot {
   startedAt: string;
   tasks: readonly TaskSnapshot[];
   warnings: readonly WorkflowWarning[];
+  /** 計画の品質契約と、現在どの品質ゲートにいるか。 */
+  quality?: {
+    phase: 'planning' | 'reviewing' | 'ready' | 'verificationFailed' | 'recovering';
+    goal?: string;
+    acceptance: readonly string[];
+    assumptions: readonly string[];
+    nonGoals: readonly string[];
+    roadmapRevision?: string;
+    reviewStatus?: 'reviewing' | 'ready';
+    plannerPromptVersion?: string;
+    plannerProvider?: Provider;
+    reviewRevision?: number;
+    reviewFindingCount?: number;
+    reviewFindingsResolved?: number;
+    taskModels: readonly string[];
+  };
   /** 人の割り込み（`manual`/`interrupted`）で実行全体が停止しているか。 */
   haltedByUser: boolean;
   /** 失敗後、オーケストレーターが復旧計画を適用できる状態。 */

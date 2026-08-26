@@ -2432,7 +2432,12 @@ async function handlePlanSuccess(
     log.info('ワークフロー定義の保存を取り消しました');
     return;
   }
-  const pendingReview = withWorkflowReviewStatus(result.yaml, result.definition, 'reviewing');
+  const pendingReview = withWorkflowReviewStatus(result.yaml, result.definition, 'reviewing', {
+    provider,
+    revision: 0,
+    findingCount: 0,
+    findingsResolved: 0,
+  });
   const filePath = await writeUniqueWorkflowFile(
     dirAbs,
     fileName,
@@ -2501,6 +2506,7 @@ async function handlePlanSuccess(
       let yaml = pendingReview.yaml;
       let definition = pendingReview.definition;
       let securityWarnings = result.securityWarnings;
+      let totalReviewFindings = 0;
       for (let revision = 0; revision <= MAX_AUTO_REVIEW_REVISIONS; revision += 1) {
         const review = await vscode.window.withProgress(
           {
@@ -2539,7 +2545,12 @@ async function handlePlanSuccess(
             );
             return;
           }
-          const ready = withWorkflowReviewStatus(yaml, definition, 'ready');
+          const ready = withWorkflowReviewStatus(yaml, definition, 'ready', {
+            provider,
+            revision,
+            findingCount: 0,
+            findingsResolved: totalReviewFindings,
+          });
           const readyEdit = new vscode.WorkspaceEdit();
           readyEdit.replace(
             doc.uri,
@@ -2592,6 +2603,7 @@ async function handlePlanSuccess(
                 : finding.message,
           })),
         ];
+        totalReviewFindings += review.findings.length;
         view.previewDefinition(filePath, definition, warnings);
 
         if (revision === MAX_AUTO_REVIEW_REVISIONS) {
@@ -2653,6 +2665,12 @@ async function handlePlanSuccess(
           revised.yaml,
           revised.definition,
           'reviewing',
+          {
+            provider,
+            revision: revision + 1,
+            findingCount: review.findings.length,
+            findingsResolved: totalReviewFindings,
+          },
         );
         const edit = new vscode.WorkspaceEdit();
         edit.replace(

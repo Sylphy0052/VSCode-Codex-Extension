@@ -124,6 +124,8 @@ export const MAX_PROMPT_LENGTH = 20000;
  * どちらもこの純粋ロジック層から読む形にして依存の向きを揃える（design.md §16.10 / §16.14）。
  */
 export const MAX_WORKFLOW_FILE_BYTES = 1 * 1024 * 1024;
+/** 生成品質の比較時に、どのプロンプト契約で作ったかを追跡する識別子。 */
+export const WORKFLOW_PLANNER_PROMPT_VERSION = '2026-08-26.1';
 
 /**
  * `{{T1.result}}` / `{{T1.summary}}` / `{{T1.files}}` の展開結果に設ける長さ上限
@@ -257,6 +259,12 @@ export interface WorkflowDefinition {
   roadmapRevision?: string;
   /** 生成定義の意味レビュー状態。既存・手書きYAMLでは未指定。 */
   reviewStatus?: 'reviewing' | 'ready';
+  /** 拡張機能が記録する生成・レビュー条件。手書きYAMLでは未指定。 */
+  plannerPromptVersion?: string;
+  plannerProvider?: Provider;
+  reviewRevision?: number;
+  reviewFindingCount?: number;
+  reviewFindingsResolved?: number;
   /** `defaults.maxParallel` を解決した値。タスク単位ではなくワークフロー全体に効く。 */
   maxParallel: number;
   tasks: WorkflowTask[];
@@ -793,6 +801,7 @@ export function parseWorkflowYaml(source: string): WorkflowDefinition {
   const acceptance = filterStringArray(arr(root['acceptance']));
   const assumptions = filterStringArray(arr(root['assumptions']));
   const reviewStatusRaw = str(root['reviewStatus']);
+  const plannerProviderRaw = str(root['plannerProvider']);
   for (const [field, filtered] of [
     ['nonGoals', nonGoals],
     ['acceptance', acceptance],
@@ -815,6 +824,19 @@ export function parseWorkflowYaml(source: string): WorkflowDefinition {
     ...(reviewStatusRaw === 'reviewing' || reviewStatusRaw === 'ready'
       ? { reviewStatus: reviewStatusRaw }
       : {}),
+    ...(str(root['plannerPromptVersion']) !== ''
+      ? { plannerPromptVersion: str(root['plannerPromptVersion']) }
+      : {}),
+    ...(isProvider(plannerProviderRaw) ? { plannerProvider: plannerProviderRaw } : {}),
+    ...(root['reviewRevision'] !== undefined
+      ? { reviewRevision: num(root['reviewRevision'], 0) }
+      : {}),
+    ...(root['reviewFindingCount'] !== undefined
+      ? { reviewFindingCount: num(root['reviewFindingCount'], 0) }
+      : {}),
+    ...(root['reviewFindingsResolved'] !== undefined
+      ? { reviewFindingsResolved: num(root['reviewFindingsResolved'], 0) }
+      : {}),
     maxParallel: defaults.maxParallel,
     tasks: tasksRaw.map((t) => resolveTask(t, defaults)),
     defaultsWarnings,
@@ -828,18 +850,46 @@ export function withWorkflowReviewStatus(
   source: string,
   definition: WorkflowDefinition,
   status: 'reviewing' | 'ready',
+  metadata: {
+    provider?: Provider;
+    revision?: number;
+    findingCount?: number;
+    findingsResolved?: number;
+  } = {},
 ): { yaml: string; definition: WorkflowDefinition } {
   const lines = source.split(/\r?\n/u);
-  const existing = lines.findIndex((line) => /^reviewStatus\s*:/u.test(line));
-  if (existing >= 0) {
-    lines[existing] = `reviewStatus: ${status}`;
-  } else {
+  const insertAt = (): number => {
     const version = lines.findIndex((line) => /^version\s*:/u.test(line));
-    lines.splice(version >= 0 ? version + 1 : 0, 0, `reviewStatus: ${status}`);
+    return version >= 0 ? version + 1 : 0;
+  };
+  const upsert = (key: string, value: string | number): void => {
+    const existing = lines.findIndex((line) => new RegExp(`^${key}\\s*:`, 'u').test(line));
+    if (existing >= 0) lines[existing] = `${key}: ${value}`;
+    else lines.splice(insertAt(), 0, `${key}: ${value}`);
+  };
+  upsert('reviewStatus', status);
+  upsert('plannerPromptVersion', WORKFLOW_PLANNER_PROMPT_VERSION);
+  if (metadata.provider !== undefined) upsert('plannerProvider', metadata.provider);
+  if (metadata.revision !== undefined) upsert('reviewRevision', metadata.revision);
+  if (metadata.findingCount !== undefined) upsert('reviewFindingCount', metadata.findingCount);
+  if (metadata.findingsResolved !== undefined) {
+    upsert('reviewFindingsResolved', metadata.findingsResolved);
   }
   return {
     yaml: lines.join(source.includes('\r\n') ? '\r\n' : '\n'),
-    definition: { ...definition, reviewStatus: status },
+    definition: {
+      ...definition,
+      reviewStatus: status,
+      plannerPromptVersion: WORKFLOW_PLANNER_PROMPT_VERSION,
+      ...(metadata.provider === undefined ? {} : { plannerProvider: metadata.provider }),
+      ...(metadata.revision === undefined ? {} : { reviewRevision: metadata.revision }),
+      ...(metadata.findingCount === undefined
+        ? {}
+        : { reviewFindingCount: metadata.findingCount }),
+      ...(metadata.findingsResolved === undefined
+        ? {}
+        : { reviewFindingsResolved: metadata.findingsResolved }),
+    },
   };
 }
 

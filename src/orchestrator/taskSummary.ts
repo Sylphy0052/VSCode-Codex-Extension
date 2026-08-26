@@ -25,6 +25,11 @@ export function buildResponseSummary(state: ChatState): string {
   return firstLineOf(source);
 }
 
+/** タスク定義のpromptを、一覧で読める1行の作業内容へ縮める（Issue #836/#849）。 */
+export function buildTaskWorkSummary(prompt: string): string {
+  return firstLineOf(prompt);
+}
+
 /**
  * 最初の空でない行を取り、制御文字（ANSIエスケープ・ゼロ幅文字・双方向制御文字を含む。
  * `sanitize.ts`のstripControlChars）を落としてから上限で省略する。改行以降は

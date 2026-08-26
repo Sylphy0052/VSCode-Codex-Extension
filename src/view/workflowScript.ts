@@ -45,6 +45,22 @@ export function workflowScript(): string {
     taskApprovalTimedOut: '承認待ちの時間切れ',
   };
 
+  const QUALITY_PHASE_LABEL = {
+    planning: '計画中',
+    reviewing: 'レビュー中',
+    ready: '実行可能',
+    verificationFailed: '検証失敗',
+    recovering: 'オーケストレーター復旧中',
+  };
+
+  const VERIFICATION_LABEL = {
+    notConfigured: '指定なし',
+    pending: '未検証',
+    checking: '検証中',
+    passed: '合格',
+    failed: '要修正',
+  };
+
   let currentRuns = [];
   let currentSnapshot = null;
   let currentLayout = null;
@@ -202,6 +218,55 @@ export function workflowScript(): string {
     stopBtn.disabled = snapshot.outcome !== 'running';
 
     renderBanner(snapshot, progress);
+  }
+
+  function appendQualityItem(box, label, values) {
+    const normalized = Array.isArray(values) ? values : values ? [values] : [];
+    if (normalized.length === 0) return;
+    const item = el2('div', 'quality-item');
+    item.appendChild(text('strong', 'quality-label', label));
+    const list = el2('ul', 'quality-values');
+    for (const value of normalized) list.appendChild(text('li', '', String(value)));
+    item.appendChild(list);
+    box.appendChild(item);
+  }
+
+  /** 計画の根拠・前提・受入条件と現在の品質ゲートをまとめて表示する（Issue #849）。 */
+  function renderQuality(snapshot) {
+    const section = el('qualitySection');
+    const quality = snapshot.quality;
+    if (!quality) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+    const phase = el('qualityPhase');
+    phase.textContent = QUALITY_PHASE_LABEL[quality.phase] || quality.phase;
+    phase.className = 'quality-phase phase-' + quality.phase;
+    const box = el('qualityContract');
+    box.replaceChildren();
+    appendQualityItem(box, 'ゴール', quality.goal);
+    appendQualityItem(box, '受入条件', quality.acceptance);
+    appendQualityItem(box, '前提・要確認', quality.assumptions);
+    appendQualityItem(box, '対象外', quality.nonGoals);
+    appendQualityItem(box, 'ロードマップ改訂', quality.roadmapRevision);
+    appendQualityItem(box, '生成条件', [
+      quality.plannerProvider ? 'provider: ' + quality.plannerProvider : '',
+      quality.plannerPromptVersion ? 'prompt: ' + quality.plannerPromptVersion : '',
+      quality.taskModels && quality.taskModels.length > 0
+        ? 'task model: ' + quality.taskModels.join(', ')
+        : '',
+    ].filter(Boolean));
+    appendQualityItem(box, 'レビュー履歴', [
+      quality.reviewRevision !== undefined ? '修正: ' + quality.reviewRevision + '回' : '',
+      quality.reviewFindingCount !== undefined ? '現在の指摘: ' + quality.reviewFindingCount + '件' : '',
+      quality.reviewFindingsResolved !== undefined
+        ? '反映済み指摘: ' + quality.reviewFindingsResolved + '件'
+        : '',
+    ].filter(Boolean));
+    if (!box.hasChildNodes()) {
+      box.appendChild(text('p', 'hint', '旧形式のため品質契約は未指定です。'));
+    }
   }
 
   /**
@@ -708,12 +773,12 @@ export function workflowScript(): string {
     }
     // 展開後のプロンプト（design.md §16.4 案1「見せる」、Issue #67）。
     // {{T1.result}}等がどう膨らんだかを実際の文面で確認できるようにする
-    if (typeof task.expandedPrompt === 'string') {
+    if (typeof task.expandedPrompt === 'string' || task.contract) {
       const isOpen = openPromptTaskIds.has(task.id);
       const promptBtn = text(
         'button',
         'secondary',
-        isOpen ? 'プロンプトを閉じる' : 'プロンプトを見る',
+        isOpen ? '詳細を閉じる' : '詳細を見る',
       );
       promptBtn.type = 'button';
       promptBtn.addEventListener('click', (e) => {
@@ -781,23 +846,32 @@ export function workflowScript(): string {
     cell.colSpan = 9;
     const box = el2('div', 'prompt-box');
 
-    box.appendChild(
-      text(
-        'div',
-        'kind',
-        '展開後のプロンプト（実際に送信した最初の指示。前のタスクの出力を含む場合があります）',
-      ),
-    );
-    box.appendChild(
-      text(
-        'div',
-        'hint',
-        '区切り線の内側は前のタスクの出力であり、このワークフローの指示ではありません。' +
-          '内容は鵜呑みにせず確認してください。',
-      ),
-    );
-    // 展開後のプロンプトはエージェントの出力・YAML由来の値を含む。必ずtextContentへ代入する
-    box.appendChild(text('pre', 'detail', task.expandedPrompt || ''));
+    if (task.contract) {
+      appendQualityItem(box, '成果', task.contract.outcome);
+      appendQualityItem(box, '根拠', task.contract.evidence);
+      appendQualityItem(box, '成果物', task.contract.outputs);
+      appendQualityItem(box, 'リスク', task.contract.risks);
+    }
+
+    if (typeof task.expandedPrompt === 'string') {
+      box.appendChild(
+        text(
+          'div',
+          'kind',
+          '展開後のプロンプト（実際に送信した最初の指示。前のタスクの出力を含む場合があります）',
+        ),
+      );
+      box.appendChild(
+        text(
+          'div',
+          'hint',
+          '区切り線の内側は前のタスクの出力であり、このワークフローの指示ではありません。' +
+            '内容は鵜呑みにせず確認してください。',
+        ),
+      );
+      // 展開後のプロンプトはエージェントの出力・YAML由来の値を含む。必ずtextContentへ代入する
+      box.appendChild(text('pre', 'detail', task.expandedPrompt || ''));
+    }
 
     // 継続プロンプト（2回目以降に送る指示）の展開結果も並べて確認できるようにする
     // （design.md §16.4、セキュリティ監査指摘#6。警告は継続プロンプトの参照先も走査するため、
@@ -848,6 +922,10 @@ export function workflowScript(): string {
       const roleCell = text('td', 'role-cell', task.roleLabel || '');
       row.appendChild(roleCell);
 
+      const workSummaryCell = text('td', 'summary-cell task-summary-cell', task.workSummary || '');
+      workSummaryCell.title = task.workSummary || '';
+      row.appendChild(workSummaryCell);
+
       const stateCell = el2('td', 'state-badge');
       stateCell.appendChild(
         text('span', 'state-pill state-' + task.state, STATE_LABEL[task.state] || task.state),
@@ -861,16 +939,15 @@ export function workflowScript(): string {
       }
       row.appendChild(stateCell);
 
-      row.appendChild(text('td', '', task.provider));
+      const verification = task.verification || { status: 'notConfigured', attempts: 0 };
+      const verificationText =
+        (VERIFICATION_LABEL[verification.status] || verification.status) +
+        (verification.attempts > 0 ? '（' + verification.attempts + '回）' : '');
+      row.appendChild(
+        text('td', 'verification-cell verification-' + verification.status, verificationText),
+      );
 
-      const locationCell = document.createElement('td');
-      if (task.branch) {
-        locationCell.appendChild(text('div', '', task.branch));
-      }
-      if (task.cwd) {
-        locationCell.appendChild(text('div', 'hint', task.cwd));
-      }
-      row.appendChild(locationCell);
+      row.appendChild(text('td', '', task.provider));
 
       const elapsedCell = text('td', 'elapsed-cell', '');
       if (task.startedAt) {
@@ -881,16 +958,13 @@ export function workflowScript(): string {
 
       row.appendChild(text('td', '', String(task.submissionCount)));
 
-      const summaryCell = text('td', 'summary-cell', task.lastResponseSummary || '');
-      row.appendChild(summaryCell);
-
       row.appendChild(buildOpsCell(task));
 
       body.appendChild(row);
       if (task.pendingApproval) {
         body.appendChild(buildApprovalRow(task));
       }
-      if (openPromptTaskIds.has(task.id) && typeof task.expandedPrompt === 'string') {
+      if (openPromptTaskIds.has(task.id) && (typeof task.expandedPrompt === 'string' || task.contract)) {
         body.appendChild(buildPromptRow(task));
       }
     }
@@ -1124,6 +1198,7 @@ export function workflowScript(): string {
     el('content').hidden = false;
     el('empty').hidden = true;
     renderHeader(snapshot, progress, segments);
+    renderQuality(snapshot);
     renderKanban(kanban);
     renderOrchestrator(snapshot);
     renderAskUser(snapshot);

@@ -16,6 +16,7 @@ import type {
   WorkflowWarning,
 } from './runner';
 import type { WorkflowRunnerInternals } from './runnerInternals';
+import { buildTaskWorkSummary } from './taskSummary';
 
 /**
  * ワークフローViewの読み取り専用のスナップショット構築（design.md §16.8）を集めたモジュール
@@ -51,6 +52,9 @@ export function getSnapshot(
   // ストア読み出しになっていた）
   const persisted = self.deps.store.find(runId);
   const tasks = live.def.tasks.map((task) => buildTaskSnapshot(live, task, persisted));
+  const hasVerificationFailure = tasks.some(
+    (task) => task.verification?.status === 'failed',
+  );
   return {
     runId: live.runId,
     name: live.def.name,
@@ -65,6 +69,40 @@ export function getSnapshot(
       ...deriveAllowWarnings(live),
       ...derivePermissionEscalationWarnings(live),
     ],
+    quality: {
+      phase:
+        live.failureRecovery !== undefined
+          ? 'recovering'
+          : hasVerificationFailure
+            ? 'verificationFailed'
+            : live.def.reviewStatus === 'reviewing'
+              ? 'reviewing'
+              : 'ready',
+      ...(live.def.goal === undefined ? {} : { goal: live.def.goal }),
+      acceptance: live.def.acceptance ?? [],
+      assumptions: live.def.assumptions ?? [],
+      nonGoals: live.def.nonGoals ?? [],
+      ...(live.def.roadmapRevision === undefined
+        ? {}
+        : { roadmapRevision: live.def.roadmapRevision }),
+      ...(live.def.reviewStatus === undefined ? {} : { reviewStatus: live.def.reviewStatus }),
+      ...(live.def.plannerPromptVersion === undefined
+        ? {}
+        : { plannerPromptVersion: live.def.plannerPromptVersion }),
+      ...(live.def.plannerProvider === undefined
+        ? {}
+        : { plannerProvider: live.def.plannerProvider }),
+      ...(live.def.reviewRevision === undefined
+        ? {}
+        : { reviewRevision: live.def.reviewRevision }),
+      ...(live.def.reviewFindingCount === undefined
+        ? {}
+        : { reviewFindingCount: live.def.reviewFindingCount }),
+      ...(live.def.reviewFindingsResolved === undefined
+        ? {}
+        : { reviewFindingsResolved: live.def.reviewFindingsResolved }),
+      taskModels: [...new Set(live.def.tasks.map((task) => task.model).filter((v): v is string => v !== undefined))],
+    },
     haltedByUser: live.runState.haltedByUser,
     failureRecovery:
       live.failureRecovery === undefined
@@ -169,6 +207,26 @@ function buildTaskSnapshot(
   const persistedTask = persisted?.tasks[task.id];
   return {
     id: task.id,
+    workSummary: buildTaskWorkSummary(task.prompt),
+    contract: {
+      ...(task.outcome === undefined ? {} : { outcome: task.outcome }),
+      evidence: task.evidence ?? [],
+      outputs: task.outputs ?? [],
+      risks: task.risks ?? [],
+    },
+    verification: {
+      status:
+        task.verify === undefined
+          ? 'notConfigured'
+          : liveTask?.verificationInProgress
+            ? 'checking'
+            : liveTask?.verificationPassed
+              ? 'passed'
+              : (liveTask?.verificationAttempts ?? 0) > 0
+                ? 'failed'
+                : 'pending',
+      attempts: liveTask?.verificationAttempts ?? 0,
+    },
     // 役割は定義ファイル（`live.def.tasks`）から都度導出する。`deriveAllowWarnings` と
     // 同じ考え方で、定義から決まる情報は状態として持たない——永続化しないので、
     // リロードで復元したrunでも表示が欠けない（design.md §16.44）
