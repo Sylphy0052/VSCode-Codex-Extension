@@ -5838,7 +5838,11 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 
 `orchestrator`モードだけ、判断待ちに入ると同時にタイマーを張る（`beginFinalMergeDecision`）。既定は900秒（15分）で、`setTimeout` + `.unref()`（`scheduleApprovalTimeout`と同じ流儀。テスト・プロセス終了を妨げない）。応答が無いまま閾値を超えると、`decideFinalMerge(runId, 'hold', <タイムアウトである旨の理由>)`を自動的に呼ぶ。**応答が無い場合は`hold`（マージしない）へ倒す。** マージしない方向へ倒すことで、判断が確定しないままprocessが無期限に止まる事態を避けつつ、誤ってmainを書き換える事故を防ぐ（`hold`はPR/MRを残すだけで取り消せるが、誤マージは取り消しにくい）。
 
-既定値900秒は、`agent.workflows.mergeApprovalTimeoutSec`（既定3600秒、衝突解決の承認待ち）より短い。衝突解決の承認待ちは人が複数ターンかけて対話しうるのに対し、最終マージの判断はオーケストレーターが`get_run_status`で差分・警告欄・CI結果を確認したうえで単発のツール呼び出しに答えるだけの判断であり、長時間の往復を前提としないため。
+既定値900秒は、`agent.workflows.mergeApprovalTimeoutSec`（既定3600秒、衝突解決の承認待ち）より短い。衝突解決の承認待ちは人が複数ターンかけて対話しうるのに対し、最終マージの判断はオーケストレーターが`get_run_status`で警告欄・統合の状況を確認したうえで単発のツール呼び出しに答えるだけの判断であり、長時間の往復を前提としないため。CI確認は`decision: merge`の後に拡張機能側のCIゲートが行うため、オーケストレーターは`glab`/`gh`を直接実行して状態を取り直さない。
+
+#### CI失敗からの計画復旧（Issue #840）
+
+`finalMerge: orchestrator`でCIゲートが赤になった場合、最終マージを`failed`や`hold`へ確定させない。判断待ちとMCP制御口を維持し、CI失敗理由と統合PR/MRのURLを`failureRecovery`通知および`get_run_status`の`integration.finalMergeDecision.recoveryMessage`へ渡す。オーケストレーターは失敗内容を根拠に`add_task` / `remove_task` / `update_task_dependencies` / `update_task_prompt`で修正計画を適用し、追加タスクの完了後に同じ統合PR/MRへ`decide_final_merge(decision: 'merge')`を再実行する。計画変更が10分以内に無ければ、復旧不能として最終失敗に確定する。
 
 #### MCPサーバの寿命との整合
 

@@ -844,7 +844,12 @@ export interface WorkflowRunSnapshot {
    * `continuePromptOverride`と同じ「実行時のみの状態」）。
    */
   finalMergeDecision?:
-    { mode: 'orchestrator' | 'confirm'; pullRequestUrl: string | undefined } | undefined;
+    {
+      mode: 'orchestrator' | 'confirm';
+      pullRequestUrl: string | undefined;
+      recoveryMessage?: string;
+    }
+    | undefined;
   /**
    * オーケストレーターセッション（design.md §16.23「会話のUI」）の状態。ワークフローView
    * の「オーケストレーター」欄がこれを描く。セッションを開けなかったrun・リロードで復元した
@@ -1411,6 +1416,10 @@ export interface LiveFinalMergeDecision {
    * （人はいつ確認するか分からないため、タイムアウトで自動`hold`にする理由が無い）。
    */
   timer?: ReturnType<typeof setTimeout>;
+  /** `merge`の決定後、CIゲートまたはマージ処理の完了を待っている間は再決定を受けない。 */
+  merging?: boolean;
+  /** CIゲート失敗から復旧判断へ戻った理由。`get_run_status`にも露出する。 */
+  recoveryMessage?: string;
 }
 
 /**
@@ -3128,6 +3137,42 @@ export class WorkflowRunner {
     return true;
   }
 
+  /** 統合PR/MRのCI失敗後、計画変更だけを許可してオーケストレーターの復旧を待つ。 */
+  private beginIntegrationCiRecovery(runId: string, live: LiveRun, recoveryMessage: string): void {
+    const timeoutMs = 10 * 60 * 1000;
+    const deadline = new Date((this.deps.now?.() ?? new Date()).getTime() + timeoutMs).toISOString();
+    const timer = setTimeout(() => {
+      const current = this.runs.get(runId);
+      if (current?.failureRecovery?.timer !== timer) {
+        return;
+      }
+      current.failureRecovery = undefined;
+      current.failureRecoveryExhausted = true;
+      current.finalMergeDecision = undefined;
+      current.finalMergeOutcome = 'failed';
+      current.warnings.push({
+        kind: 'orchestratorFailureRecoveryTimedOut',
+        taskId: undefined,
+        message: '統合PR/MRのCI失敗後、10分以内に復旧計画が適用されなかったため最終失敗としました。',
+      });
+      closeReviewCommentPoll(current);
+      this.closeMessagingIfFinalMergeSettled(runId, getRunOutcome(current.runState));
+      void this.persist(runId);
+      this.notify(runId);
+    }, timeoutMs);
+    timer.unref?.();
+    live.failureRecovery = { failedTaskIds: [], deadline, timer };
+    notifyOrchestrator(this.internals, runId, {
+      kind: 'failureRecovery',
+      body: [
+        `${recoveryMessage}\n統合PR/MR: ${live.integrationPullRequest?.url ?? 'URL不明'}`,
+        'holdせず、失敗内容を確認してadd_task / remove_task / update_task_dependencies / update_task_promptで修正計画を適用してください。',
+        '追加タスクの完了後、同じ統合PR/MRに対してCI確認と最終マージの判断をやり直します。10分以内に計画変更が無ければ最終失敗にします。',
+      ].join('\n'),
+    });
+    this.notify(runId);
+  }
+
   /**
    * オーケストレーターへの終了通知（`notifyOrchestratorRunFinished`）とMCPサーバの
    * 解放（`closeMessaging`）をまとめて行う（design.md §16.23・§16.26）。
@@ -3918,6 +3963,23 @@ export class WorkflowRunner {
         isCancelled: () => live.runState.haltedByUser || this.disposing,
       },
     );
+    if (
+      !merge.ok &&
+      merge.reason === 'ciFailed' &&
+      live.finalMergeDecision?.mode === 'orchestrator' &&
+      live.finalMergeDecision.merging === true
+    ) {
+      // CI失敗は、統合MRをholdして終わらせるのではなく、修正タスクを追加できる判断待ちへ戻す。
+      // finalMergeDecisionを残すのでMCP制御口とレビューコメントのポーリングは閉じない。
+      const recoveryMessage = `統合PR/MRのCIが失敗しました: ${merge.message}`;
+      live.finalMergeDecision.merging = false;
+      live.finalMergeDecision.recoveryMessage = recoveryMessage;
+      this.deps.log.warn(`[workflow ${runId}] ${recoveryMessage}`);
+      live.warnings.push({ kind: 'forgeFailed', taskId: undefined, message: recoveryMessage });
+      this.beginIntegrationCiRecovery(runId, live, recoveryMessage);
+      void this.persist(runId);
+      return;
+    }
     if (!merge.ok) {
       this.deps.log.warn(`[workflow ${runId}] 最終マージに失敗しました: ${merge.message}`);
       live.warnings.push({
@@ -3929,6 +3991,12 @@ export class WorkflowRunner {
     } else {
       this.deps.log.info(`[workflow ${runId}] mainへの最終マージが完了しました`);
       live.finalMergeOutcome = 'merged';
+    }
+    // `orchestrator`のmerge決定は、CIゲートを通過してここまで到達したときに初めて確定する。
+    // 失敗時は上で判断待ちへ戻すため、この経路では閉じない。
+    if (live.finalMergeDecision?.merging === true) {
+      clearTimeout(live.finalMergeDecision.timer);
+      live.finalMergeDecision = undefined;
     }
     // design.md §16.30「レビューを取り込めるのは最終マージ確定までである」（2度目の
     // レビューblocking指摘）: `live.finalMergeOutcome`が確定した（`merged`/`failed`）
@@ -3959,6 +4027,7 @@ export class WorkflowRunner {
     // （`runnerReviewComments.ts`）なので、ここで重ねて呼んでも安全
     closeReviewCommentPoll(live);
     void this.persist(runId);
+    this.closeMessagingIfFinalMergeSettled(runId, getRunOutcome(live.runState));
     this.notify(runId);
   }
 
@@ -3991,9 +4060,10 @@ export class WorkflowRunner {
         body: [
           `統合PR/MR${url !== undefined ? `（${url}）` : ''}を作成しました。`,
           'mainへ最終マージするかどうかを判断してください。',
-          'get_run_statusで差分・警告欄・統合の状況を確認したうえで、decide_final_mergeツールを',
+          'get_run_statusで警告欄・統合の状況を確認したうえで、decide_final_mergeツールを',
           "decision: 'merge'（mainへマージする） または decision: 'hold'（マージせずPR/MRを残す）、",
           'reason（判断の理由。必須）を添えて呼んでください。',
+          'CIの状態確認はdecision: mergeの後に拡張機能のCIゲートが行います。MR状態を得るためにglab/ghを直接実行しないでください。CIが失敗した場合は、修正タスクを追加できる復旧通知を送ります。',
           `${timeoutSec}秒以内に応答が無い場合は、判断を待って無限に止まらないよう自動的にholdとして扱います。`,
         ].join('\n'),
       });
@@ -4054,14 +4124,13 @@ export class WorkflowRunner {
   public decideFinalMerge(runId: string, decision: FinalMergeDecision, reason: string): boolean {
     const live = this.runs.get(runId);
     const pending = live?.finalMergeDecision;
-    if (live === undefined || pending === undefined) {
+    if (live === undefined || pending === undefined || pending.merging === true) {
       return false;
     }
     if (decision === 'merge' && live.runState.haltedByUser) {
       return false;
     }
     clearTimeout(pending.timer);
-    live.finalMergeDecision = undefined;
     const decisionLabel =
       decision === 'merge' ? 'merge（mainへマージする）' : 'hold（マージせずPR/MRを残す）';
     // `reason`はオーケストレーター（LLM）が生成する自由記述であり、外部由来相当
@@ -4074,16 +4143,19 @@ export class WorkflowRunner {
       `最終マージの判断が確定しました: ${decisionLabel}。理由: ${safeReason === '' ? '（理由が示されませんでした）' : safeReason}`,
     );
     if (decision === 'merge') {
+      pending.merging = true;
+      pending.recoveryMessage = undefined;
       void this.performFinalMerge(runId);
     } else {
+      live.finalMergeDecision = undefined;
       live.finalMergeOutcome = 'held';
       void this.persist(runId);
     }
-    // 判断が確定したので、MCPサーバを閉じられるなら閉じる（`live.finalMergeDecision`は
-    // 上で既に`undefined`へ戻してあるので、判断待ちの再チェックは通る）。
-    // `performFinalMerge`は`forgeDeps.cli`（gitホストCLI）しか使わず、MCPには依存しない
-    // ため、その完了を待たずに閉じてよい
-    this.closeMessagingIfFinalMergeSettled(runId, getRunOutcome(live.runState));
+    // `merge`はCIゲートの結果が出るまで判断待ちを残す。失敗時に修正計画へ戻すため、
+    // この時点でMCP制御口を閉じてはならない。`hold`だけは即時に判断を確定する。
+    if (decision === 'hold') {
+      this.closeMessagingIfFinalMergeSettled(runId, getRunOutcome(live.runState));
+    }
     this.notify(runId);
     return true;
   }

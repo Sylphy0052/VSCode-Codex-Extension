@@ -88,6 +88,9 @@ export function getSnapshot(
             mode: live.finalMergeDecision.mode,
             pullRequestUrl:
               live.integrationPullRequest?.url ?? persisted?.integrationPullRequestUrl,
+            ...(live.finalMergeDecision.recoveryMessage === undefined
+              ? {}
+              : { recoveryMessage: live.finalMergeDecision.recoveryMessage }),
           },
     orchestrator: buildOrchestratorSnapshot(live),
     pendingAskUser: buildPendingAskUserSnapshot(live, persisted),
