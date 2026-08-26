@@ -1256,6 +1256,8 @@ export function workflowScript(): string {
       head.appendChild(text('span', 'program-def', p.defPath));
       if (p.state.haltedByUser) {
         head.appendChild(text('span', 'program-status program-halted', '人が停止'));
+      } else if (p.recovery) {
+        head.appendChild(text('span', 'program-status program-recovering', 'オーケストレーター復旧中'));
       } else if (p.finishedAt) {
         head.appendChild(text('span', 'program-status program-finished', '完了'));
       } else {
@@ -1277,6 +1279,12 @@ export function workflowScript(): string {
         runsBox.appendChild(text('div', 'program-run', formatProgramRunLine(runRefId, p.state.runs[runRefId])));
       }
       item.appendChild(runsBox);
+      if (p.recovery) {
+        item.appendChild(text('div', 'program-run', '失敗run: ' + p.recovery.failedRunIds.join(', ') + ' / 期限: ' + new Date(p.recovery.deadline).toLocaleString()));
+      }
+      for (const history of (p.changeHistory || []).slice(-5)) {
+        item.appendChild(text('div', 'program-run', new Date(history.at).toLocaleString() + ' ' + history.message));
+      }
       box.appendChild(item);
     }
     el('programsSection').hidden = programs.length === 0;

@@ -52,6 +52,7 @@ import {
   type DispatchErrorLogPort,
   type HandoffPort,
   type HttpMcpTransportHandle,
+  type ProgramControlPort,
 } from './messaging';
 import { nodeHandoffFileSystem } from './nodeHandoffFileSystem';
 import { reviewTaskPullRequest } from './planner';
@@ -704,6 +705,7 @@ export interface WorkflowWarning {
     | 'orchestratorTaskUpdated'
     /** オーケストレーターの失敗復旧待ちが期限切れになった。 */
     | 'orchestratorFailureRecoveryTimedOut'
+    | 'integrationReview'
     /**
      * 計画変更の履歴（`orchestratorTaskAdded`/`orchestratorTaskRemoved`）が上限に達し、
      * 古いものから落とし始めた（Issue #765）。この2種は履歴そのものなので直近1件へは
@@ -926,11 +928,11 @@ export interface WorkflowRunSnapshot {
    * `continuePromptOverride`と同じ「実行時のみの状態」）。
    */
   finalMergeDecision?:
-    {
-      mode: 'orchestrator' | 'confirm';
-      pullRequestUrl: string | undefined;
-      recoveryMessage?: string;
-    }
+    | {
+        mode: 'orchestrator' | 'confirm';
+        pullRequestUrl: string | undefined;
+        recoveryMessage?: string;
+      }
     | undefined;
   /**
    * オーケストレーターセッション（design.md §16.23「会話のUI」）の状態。ワークフローView
@@ -1300,6 +1302,14 @@ export interface LiveRun {
     | undefined;
   /** 復旧待ちが期限切れになったため、次のpumpで通常の最終失敗へ進める。 */
   failureRecoveryExhausted: boolean;
+  /** program配下のrun失敗後、program計画の変更が終わるまで制御MCPを維持する。 */
+  programRecoveryHold: boolean;
+  /** program配下でだけ注入される、run追加・削除・再試行・依存変更の制御口。 */
+  programControl: ProgramControlPort | undefined;
+  /** 全タスク統合後の全体差分レビュー回数。 */
+  integrationReviewAttempts: number;
+  /** 非同期の統合差分レビュー中にMCPを先に閉じないための寿命フラグ。 */
+  integrationReviewInProgress: boolean;
   /** design.md §16.8「警告欄」。発生した順に積む（`maxReached` はスナップショット生成時に動的に足す）。 */
   warnings: WorkflowWarning[];
   /**
@@ -2082,7 +2092,7 @@ export class WorkflowRunner {
   async start(
     defPath: string,
     repoRoot: string,
-    options?: { allowConfirmed?: boolean },
+    options?: { allowConfirmed?: boolean; programControl?: ProgramControlPort },
   ): Promise<StartWorkflowResult> {
     const parsed = await this.parseAndValidateWorkflow(defPath);
     if (!parsed.ok) {
@@ -2164,6 +2174,10 @@ export class WorkflowRunner {
       finishedNotified: false,
       failureRecovery: undefined,
       failureRecoveryExhausted: false,
+      programRecoveryHold: false,
+      programControl: options?.programControl,
+      integrationReviewAttempts: 0,
+      integrationReviewInProgress: false,
       warnings,
       integration,
       forge,
@@ -2565,6 +2579,38 @@ export class WorkflowRunner {
    */
   sendToOrchestrator(runId: string, text: string): boolean {
     return sendUserMessageToOrchestrator(this.internals, runId, text);
+  }
+
+  /** リロード後にprogramとの制御口を同じrunへ付け直す。 */
+  attachProgramControl(runId: string, control: ProgramControlPort): void {
+    const live = this.runs.get(runId);
+    if (live !== undefined) live.programControl = control;
+  }
+
+  /** program復旧中は終了済み子runのMCPとオーケストレーターを閉じずに維持する。 */
+  beginProgramRecovery(runId: string, message: string): boolean {
+    const live = this.runs.get(runId);
+    if (live === undefined) return false;
+    live.programRecoveryHold = true;
+    notifyOrchestrator(this.internals, runId, {
+      kind: 'failureRecovery',
+      body: [
+        message,
+        'get_program_statusで全体を確認し、retry_run、add_run、remove_run、update_run_dependenciesでprogram計画を修復してください。',
+        '後続runはskipせずpendingのままです。10分以内に計画を変更できない場合だけ最終失敗になります。',
+      ].join('\n'),
+    });
+    this.notify(runId);
+    return true;
+  }
+
+  /** program変更で再スケジュール可能になったか、復旧期限が切れたときに制御口を閉じる。 */
+  endProgramRecovery(runId: string): void {
+    const live = this.runs.get(runId);
+    if (live === undefined) return;
+    live.programRecoveryHold = false;
+    this.closeMessagingIfFinalMergeSettled(runId, getRunOutcome(live.runState));
+    this.notify(runId);
   }
 
   /**
@@ -3135,13 +3181,15 @@ export class WorkflowRunner {
             })
             .then(() => this.closeMessagingIfFinalMergeSettled(runId, outcome));
         } else {
-          void this.finalizeForge(runId).catch((e: unknown) => {
-            this.deps.log.error(
-              `[workflow ${runId}] finalizeForgeに失敗しました: ${sanitizeForLog(
-                e instanceof Error ? e.message : String(e),
-              )}`,
-            );
-          });
+          void this.finalizeForge(runId)
+            .catch((e: unknown) => {
+              this.deps.log.error(
+                `[workflow ${runId}] finalizeForgeに失敗しました: ${sanitizeForLog(
+                  e instanceof Error ? e.message : String(e),
+                )}`,
+              );
+            })
+            .then(() => this.closeMessagingIfFinalMergeSettled(runId, outcome));
         }
       }
       // ロードマップの更新（design.md §16.19）もrunの結果を問わず行う。`done`になった
@@ -3206,7 +3254,9 @@ export class WorkflowRunner {
       return false;
     }
     const timeoutMs = 10 * 60 * 1000;
-    const deadline = new Date((this.deps.now?.() ?? new Date()).getTime() + timeoutMs).toISOString();
+    const deadline = new Date(
+      (this.deps.now?.() ?? new Date()).getTime() + timeoutMs,
+    ).toISOString();
     const timer = setTimeout(() => {
       const current = this.runs.get(runId);
       if (current?.failureRecovery?.timer !== timer) {
@@ -3217,7 +3267,8 @@ export class WorkflowRunner {
       current.warnings.push({
         kind: 'orchestratorFailureRecoveryTimedOut',
         taskId: undefined,
-        message: 'オーケストレーターによる復旧計画が10分以内に適用されなかったため、実行を失敗として終了します。',
+        message:
+          'オーケストレーターによる復旧計画が10分以内に適用されなかったため、実行を失敗として終了します。',
       });
       this.notify(runId);
       this.pump(runId);
@@ -3238,7 +3289,9 @@ export class WorkflowRunner {
   /** 統合PR/MRのCI失敗後、計画変更だけを許可してオーケストレーターの復旧を待つ。 */
   private beginIntegrationCiRecovery(runId: string, live: LiveRun, recoveryMessage: string): void {
     const timeoutMs = 10 * 60 * 1000;
-    const deadline = new Date((this.deps.now?.() ?? new Date()).getTime() + timeoutMs).toISOString();
+    const deadline = new Date(
+      (this.deps.now?.() ?? new Date()).getTime() + timeoutMs,
+    ).toISOString();
     const timer = setTimeout(() => {
       const current = this.runs.get(runId);
       if (current?.failureRecovery?.timer !== timer) {
@@ -3251,7 +3304,8 @@ export class WorkflowRunner {
       current.warnings.push({
         kind: 'orchestratorFailureRecoveryTimedOut',
         taskId: undefined,
-        message: '統合PR/MRのCI失敗後、10分以内に復旧計画が適用されなかったため最終失敗としました。',
+        message:
+          '統合PR/MRのCI失敗後、10分以内に復旧計画が適用されなかったため最終失敗としました。',
       });
       closeReviewCommentPoll(current);
       this.closeMessagingIfFinalMergeSettled(runId, getRunOutcome(current.runState));
@@ -3283,7 +3337,13 @@ export class WorkflowRunner {
    */
   private closeMessagingIfFinalMergeSettled(runId: string, outcome: string): void {
     const live = this.runs.get(runId);
-    if (live === undefined || live.finalMergeDecision !== undefined) {
+    if (
+      live === undefined ||
+      live.finalMergeDecision !== undefined ||
+      live.failureRecovery !== undefined ||
+      live.integrationReviewInProgress ||
+      live.programRecoveryHold
+    ) {
       return;
     }
     // `notifyOrchestratorRunFinished`はrunにつき1度だけ送る（Issue #432-2）。
@@ -3866,6 +3926,13 @@ export class WorkflowRunner {
     if (live === undefined || live.integration === undefined) {
       return;
     }
+    const integrationReviewBase =
+      live.forge.kind === 'active' && live.forge.baseBranch !== undefined
+        ? live.forge.baseBranch
+        : live.headCommit;
+    if (!(await this.reviewIntegrationDiff(runId, live, integrationReviewBase))) {
+      return;
+    }
     // 冪等ガード（design.md §16.30、Issue #339 blocking指摘）: `add_task`等の計画変更
     // ツールが、レビューコメントのポーリング中（統合PR/MR作成後）に呼ばれると、新しく
     // 加わった/残った`pending`タスクの完了によって`pump()`の終了ブロックへ再度到達し、
@@ -3973,6 +4040,99 @@ export class WorkflowRunner {
     }
     void this.persist(runId);
     this.notify(runId);
+  }
+
+  /** 全タスクを取り込んだ統合差分を、run全体のgoalとacceptanceに照らして独立レビューする。 */
+  private async reviewIntegrationDiff(
+    runId: string,
+    live: LiveRun,
+    baseBranch: string,
+  ): Promise<boolean> {
+    live.integrationReviewInProgress = true;
+    live.integrationReviewAttempts += 1;
+    const diff = await this.deps.git.run(
+      ['diff', `${baseBranch}...HEAD`],
+      live.integration?.cwd ?? live.repoRoot,
+    );
+    const task = live.def.tasks[0];
+    const failures: string[] = [];
+    if (diff.code !== 0) {
+      failures.push(`統合差分を取得できませんでした: ${diff.stderr.trim() || 'git diff failed'}`);
+    } else if (task === undefined) {
+      failures.push('レビューを担当するproviderを決定できませんでした');
+    } else {
+      const contract = [
+        `ワークフロー: ${live.def.name}`,
+        ...(live.def.goal === undefined ? [] : [`全体ゴール: ${live.def.goal}`]),
+        ...(live.def.acceptance ?? []).map((value) => `受入条件: ${value}`),
+        ...(live.def.nonGoals ?? []).map((value) => `対象外: ${value}`),
+        '全タスクの成果が統合された差分全体を確認し、ゴール未達・受入条件漏れ・回帰・巻き込みだけを指摘してください。',
+      ].join('\n');
+      const reviewed = await reviewTaskPullRequest({
+        prompt: contract,
+        done: (live.def.acceptance ?? []).join('\n') || live.def.goal || live.def.name,
+        diff: diff.stdout,
+        provider: task.provider,
+        host: this.deps.hosts[task.provider],
+        cwd: live.integration?.cwd ?? live.repoRoot,
+        log: this.deps.log,
+      });
+      if (reviewed.error !== undefined)
+        failures.push(`統合差分レビューに失敗しました: ${reviewed.error}`);
+      failures.push(...reviewed.findings.map((finding) => finding.message));
+    }
+    if (failures.length === 0) {
+      live.integrationReviewInProgress = false;
+      this.deps.log.info(
+        `[workflow ${runId}] 統合差分が全体ゴールの独立レビューを通過しました（${live.integrationReviewAttempts}回目）`,
+      );
+      return true;
+    }
+    const detail = failures.map((failure) => `- ${failure}`).join('\n');
+    live.warnings.push({
+      kind: 'integrationReview',
+      taskId: undefined,
+      message: `統合差分レビュー${live.integrationReviewAttempts}回目で問題が見つかりました:\n${detail}`,
+    });
+    this.beginIntegrationReviewRecovery(runId, live, detail);
+    live.integrationReviewInProgress = false;
+    void this.persist(runId);
+    this.notify(runId);
+    return false;
+  }
+
+  /** 統合差分レビューの指摘を修正タスクへ変換できるよう、MCPを10分維持する。 */
+  private beginIntegrationReviewRecovery(runId: string, live: LiveRun, detail: string): void {
+    const timeoutMs = 10 * 60 * 1000;
+    const deadline = new Date(
+      (this.deps.now?.() ?? new Date()).getTime() + timeoutMs,
+    ).toISOString();
+    const timer = setTimeout(() => {
+      const current = this.runs.get(runId);
+      if (current?.failureRecovery?.timer !== timer) return;
+      current.failureRecovery = undefined;
+      current.failureRecoveryExhausted = true;
+      current.finalMergeOutcome = 'failed';
+      current.warnings.push({
+        kind: 'orchestratorFailureRecoveryTimedOut',
+        taskId: undefined,
+        message:
+          '統合差分レビューの問題に対する修正計画が10分以内に適用されなかったため最終失敗としました。',
+      });
+      this.closeMessagingIfFinalMergeSettled(runId, getRunOutcome(current.runState));
+      void this.persist(runId);
+      this.notify(runId);
+    }, timeoutMs);
+    timer.unref?.();
+    live.failureRecovery = { failedTaskIds: [], deadline, timer };
+    notifyOrchestrator(this.internals, runId, {
+      kind: 'failureRecovery',
+      body: [
+        `統合差分の全体レビューで問題が見つかりました:\n${detail}`,
+        'add_task、update_task、remove_task、update_task_dependenciesで修正計画を適用してください。',
+        '修正タスクの完了後、統合差分全体を再レビューします。',
+      ].join('\n'),
+    });
   }
 
   /**
@@ -4607,9 +4767,7 @@ export class WorkflowRunner {
     liveTask.verificationInProgress = false;
     if (failures.length === 0) {
       liveTask.verificationPassed = true;
-      this.deps.log.info(
-        `[workflow ${runId}/${taskId}] 独立検証を通過しました（${attempt}回目）`,
-      );
+      this.deps.log.info(`[workflow ${runId}/${taskId}] 独立検証を通過しました（${attempt}回目）`);
       this.onTaskFinished(runId, taskId, task, 'done', state);
       return;
     }

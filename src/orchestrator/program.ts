@@ -15,9 +15,8 @@ import { findCycleGroups, TASK_ID_PATTERN, type DependencyGraphNode } from './wo
  * #606。着手時点では未実装だったが、両方とも着地済み）。** `workflow.ts`と同じく
  * VSCode APIには一切依存しない純粋なロジックのみを置く。
  *
- * **上位のオーケストレーターは置かない。** プログラムが持つのは定義と状態
- * （`programState.ts`）だけで、各runのオーケストレーターは引き続き自分のrunだけを見る
- * （design.md §16.23）。
+ * program配下のrunにはprogram制御口を追加し、失敗時だけrunのオーケストレーターが
+ * run追加・削除・依存変更・再試行を行える。変更後の定義はProgramStoreへ永続化する。
  */
 
 /** プログラム内で束ねられるrun1件の定義。 */

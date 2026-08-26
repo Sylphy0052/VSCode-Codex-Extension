@@ -70,6 +70,11 @@ const AUTO_APPROVED_ORCHESTRATOR_TOOLS = new Set([
   'add_task',
   'remove_task',
   'update_task_dependencies',
+  'get_program_status',
+  'add_run',
+  'remove_run',
+  'retry_run',
+  'update_run_dependencies',
   'write_handoff',
   'read_handoff',
   'list_handoffs',
@@ -164,6 +169,13 @@ function buildIntroBody(live: LiveRun, resume?: OrchestratorResumeContext): stri
       '指示を調整する。追加・分割は、独立した成果物・受入条件がある、または並列化の効果が' +
       'ある場合だけにし、同じ縦切りの作業を工程やファイル単位へ細分化しないこと。不要に' +
       '細かいpendingタスクは統合または削除し、最小の計画へ見直してください',
+    ...(live.programControl === undefined
+      ? []
+      : [
+          '- get_program_status / add_run / remove_run / retry_run / update_run_dependencies: ' +
+            '複数runを束ねるprogramの状態を読み、失敗時にrunの追加・削除・再試行・依存変更を' +
+            '行う。変更はprogram状態へ永続化され、ワークフロー画面へライブ反映されます',
+        ]),
     '- ask_user: 担当領域をまたぐ変更・設計の前提を変える変更・受入基準を下げる判断・' +
       '同じ失敗を3回繰り返した場合に限り、人へ確認する（それ以外は自分で判断する。呼べる' +
       '回数に上限あり）。add_task/remove_task/update_task_dependenciesで方針そのものが' +
@@ -450,6 +462,22 @@ export function buildOrchestratorControlPort(
   runId: string,
 ): OrchestratorControlPort {
   return {
+    getProgramStatus: () =>
+      self.runs.get(runId)?.programControl?.getProgramStatus() ?? {
+        error: 'このrunはprogramに属していません。',
+      },
+    addProgramRun: (input) =>
+      self.runs.get(runId)?.programControl?.addProgramRun(input) ??
+      Promise.resolve(no('このrunはprogramに属していません。')),
+    removeProgramRun: (runRefId) =>
+      self.runs.get(runId)?.programControl?.removeProgramRun(runRefId) ??
+      Promise.resolve(no('このrunはprogramに属していません。')),
+    retryProgramRun: (runRefId) =>
+      self.runs.get(runId)?.programControl?.retryProgramRun(runRefId) ??
+      Promise.resolve(no('このrunはprogramに属していません。')),
+    updateProgramRunDependencies: (runRefId, dependsOn) =>
+      self.runs.get(runId)?.programControl?.updateProgramRunDependencies(runRefId, dependsOn) ??
+      Promise.resolve(no('このrunはprogramに属していません。')),
     getRunStatus: () => buildRunStatus(actions, runId),
     stopTask: (taskId) => {
       const finished = runFinishedReason(self, actions, runId);
@@ -903,7 +931,8 @@ function updatePendingTask(
     changedFields.push('role');
   }
   if (changes['maxIterations'] !== undefined) {
-    if (typeof changes['maxIterations'] !== 'number') return no('maxIterationsは数値で指定してください。');
+    if (typeof changes['maxIterations'] !== 'number')
+      return no('maxIterationsは数値で指定してください。');
     candidate = { ...candidate, maxIterations: changes['maxIterations'] };
     changedFields.push('maxIterations');
   }
@@ -915,7 +944,9 @@ function updatePendingTask(
   };
   const validation = validateWorkflow(candidateDef);
   if (validation.errors.length > 0) {
-    return no(`タスクを変更できません: ${validation.errors.map((error) => error.message).join(' / ')}`);
+    return no(
+      `タスクを変更できません: ${validation.errors.map((error) => error.message).join(' / ')}`,
+    );
   }
   live.def = candidateDef;
   live.warnings = live.warnings.filter(
