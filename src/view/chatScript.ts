@@ -1759,6 +1759,14 @@ export function chatScript(
       label.title = text;
       li.appendChild(label);
 
+      const send = document.createElement('button');
+      send.className = 'secondary';
+      send.textContent = '送る';
+      send.addEventListener('click', () => {
+        vscode.postMessage({ type: 'sendQueued', index });
+      });
+      li.appendChild(send);
+
       const cancel = document.createElement('button');
       cancel.className = 'secondary';
       cancel.textContent = '取り消す';

@@ -1093,6 +1093,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         entry.session.cancelQueued(m['index']);
         return;
       }
+      if (type === 'sendQueued' && typeof m['index'] === 'number') {
+        entry.loop.noteUserAction();
+        await entry.session.sendQueued(m['index'], this.configFor(entry));
+        return;
+      }
       if (type === 'popLastQueuedForInput') {
         // 常に拡張側の最新stateから取り出す（UI側の古いスナップショット由来のズレを防ぐ）
         const popped = entry.session.popLastQueuedForInput();
