@@ -347,6 +347,62 @@ describe('applyStreamEvent', () => {
     expect(messages[0]?.text).toBe('こんにちは');
   });
 
+  it('message_startが無い次ターンでも前ターンの断片を上書きしない', () => {
+    const state = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      {
+        type: 'stream_event',
+        event: { type: 'message_start', message: { id: 'msg_1', role: 'assistant', content: [] } },
+      },
+      {
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '前の応答' } },
+      },
+      {
+        type: 'assistant',
+        message: { id: 'msg_1', role: 'assistant', content: [{ type: 'text', text: '前の応答' }] },
+      },
+      {
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '次の応答' } },
+      },
+      {
+        type: 'assistant',
+        message: { id: 'msg_2', role: 'assistant', content: [{ type: 'text', text: '次の応答' }] },
+      },
+    ]);
+
+    const messages = state.items.filter((i) => i.kind === 'agentMessage');
+    expect(messages).toHaveLength(2);
+    expect(messages.map((i) => i.text)).toEqual(['前の応答', '次の応答']);
+    expect(messages[1]?.id).toBe('msg_2:text:0');
+  });
+
+  it('message_startと完成メッセージのIDが異なっても断片を置き換える', () => {
+    const state = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      {
+        type: 'stream_event',
+        event: {
+          type: 'message_start',
+          message: { id: 'partial_msg', role: 'assistant', content: [] },
+        },
+      },
+      {
+        type: 'stream_event',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '応答' } },
+      },
+      {
+        type: 'assistant',
+        message: { id: 'complete_msg', role: 'assistant', content: [{ type: 'text', text: '応答' }] },
+      },
+    ]);
+
+    const messages = state.items.filter((i) => i.kind === 'agentMessage');
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ id: 'complete_msg:text:0', text: '応答' });
+  });
+
   it('rate_limit_event から制限の状態を取り込む', () => {
     const state = apply([
       { type: 'system', subtype: 'init', session_id: ID },
