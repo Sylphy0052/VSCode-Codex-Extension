@@ -1548,11 +1548,35 @@ export function takeQueued(state: ChatState): {
   message: QueuedMessage | undefined;
   next: ChatState;
 } {
-  const [head, ...rest] = state.queued;
-  if (head === undefined) {
+  return takeQueuedAt(state, 0);
+}
+
+/** 指定した位置の指示を取り出す。空または範囲外なら取り出さない。 */
+export function takeQueuedAt(
+  state: ChatState,
+  index: number,
+): {
+  message: QueuedMessage | undefined;
+  next: ChatState;
+} {
+  const message = state.queued[index];
+  if (message === undefined) {
     return { message: undefined, next: state };
   }
-  return { message: head, next: { ...state, queued: rest } };
+  return { message, next: { ...state, queued: state.queued.filter((_, i) => i !== index) } };
+}
+
+/** 送信失敗で取り出した指示を元の位置へ戻す。 */
+export function restoreQueued(state: ChatState, index: number, message: QueuedMessage): ChatState {
+  const insertionIndex = Math.max(0, Math.min(index, state.queued.length));
+  return {
+    ...state,
+    queued: [
+      ...state.queued.slice(0, insertionIndex),
+      message,
+      ...state.queued.slice(insertionIndex),
+    ],
+  };
 }
 
 /** 末尾の指示を取り出す。空なら取り出さない。入力欄への書き戻し（Esc）に使う。 */

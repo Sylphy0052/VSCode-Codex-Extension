@@ -8,7 +8,8 @@ import {
   popLastQueued,
   removeApproval,
   removeQueued,
-  takeQueued,
+  restoreQueued,
+  takeQueuedAt,
   type ChatState,
   type PendingApproval,
   type QueuedMessage,
@@ -961,31 +962,43 @@ export class ClaudeStreamSession {
 
   /** 応答を止めて、待機中の指示をすぐ送る。 */
   flushQueue(): void {
-    if (this.state.queued.length === 0) {
+    this.sendQueued(0);
+  }
+
+  /** 待機中の指定した指示をすぐ送る。 */
+  sendQueued(index: number): void {
+    const { message, next } = takeQueuedAt(this.state, index);
+    if (message === undefined) {
       return;
     }
-    if (this.state.busy) {
-      this.interrupt();
+    const wasBusy = this.state.busy;
+    // interrupt()がbusy=falseを通知すると、Viewの自動送信が残りの先頭を先に取り出す。
+    // 選択した項目を先に送る間はbusyを保ったまま、待機列から先に外す。
+    this.update(next);
+    if (wasBusy) {
+      this.interrupt(false);
     }
-    this.sendNextQueued();
+    try {
+      this.send(message.text, message.attachments);
+    } catch (e) {
+      this.update(restoreQueued(this.state, index, message));
+      throw e;
+    }
   }
 
   /** 待機中の先頭を送る。ターンが終わったときに呼ぶ。 */
   sendNextQueued(): void {
-    const { message, next } = takeQueued(this.state);
-    if (message === undefined) {
-      return;
-    }
-    this.update(next);
-    this.send(message.text, message.attachments);
+    this.sendQueued(0);
   }
 
-  interrupt(): void {
+  interrupt(updateState = true): void {
     if (this.proc === undefined) {
       return;
     }
     this.write(buildControlRequest(`req_${this.nextControlId++}`, { subtype: 'interrupt' }));
-    this.update({ ...this.state, busy: false });
+    if (updateState) {
+      this.update({ ...this.state, busy: false });
+    }
   }
 
   /**

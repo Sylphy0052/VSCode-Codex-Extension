@@ -1726,6 +1726,11 @@ export class ClaudeChatViewManager
         entry.session.cancelQueued(m['index']);
         return;
       }
+      if (type === 'sendQueued' && typeof m['index'] === 'number') {
+        entry.loop.noteUserAction();
+        entry.session.sendQueued(m['index']);
+        return;
+      }
       if (type === 'popLastQueuedForInput') {
         // 常に拡張側の最新stateから取り出す（UI側の古いスナップショット由来のズレを防ぐ）
         const popped = entry.session.popLastQueuedForInput();

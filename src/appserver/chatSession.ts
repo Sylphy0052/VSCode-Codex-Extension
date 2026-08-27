@@ -24,8 +24,9 @@ import {
   removeApproval,
   removePrompt,
   removeQueued,
+  restoreQueued,
   routeSend,
-  takeQueued,
+  takeQueuedAt,
   type ChatState,
   type PendingApproval,
   type QueuedMessage,
@@ -411,10 +412,7 @@ export class ChatSession {
    * 応答中でも `turn/steer` で割り込めるため、中断は挟まない。
    */
   async flushQueue(config: CodexConfig): Promise<void> {
-    if (this.state.queued.length === 0) {
-      return;
-    }
-    await this.sendNextQueued(config);
+    await this.sendQueued(0, config);
   }
 
   /**
@@ -422,7 +420,12 @@ export class ChatSession {
    * 送信に失敗したら積み直す（取り出したまま失われないようにする）。
    */
   async sendNextQueued(config: CodexConfig): Promise<void> {
-    const { message: queued, next } = takeQueued(this.state);
+    await this.sendQueued(0, config);
+  }
+
+  /** 待機中の指定した指示をすぐ送る。 */
+  async sendQueued(index: number, config: CodexConfig): Promise<void> {
+    const { message: queued, next } = takeQueuedAt(this.state, index);
     if (queued === undefined) {
       return;
     }
@@ -435,7 +438,7 @@ export class ChatSession {
       }
       await this.send(queued.text, config, queued.attachments);
     } catch (e) {
-      this.update(enqueue(this.state, queued.text, queued.attachments));
+      this.update(restoreQueued(this.state, index, queued));
       throw e instanceof Error ? e : new Error(message(e));
     }
   }
