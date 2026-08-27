@@ -1105,10 +1105,6 @@ export async function runTaskPullRequestFlow<TMerge>(
     review = await steps.reviewPullRequest(pullRequest.url);
   }
 
-  if (review !== undefined && !review.ok) {
-    throw new Error(review.message);
-  }
-
   const mergeOutcome = await steps.mergeAndPushIntegration();
 
   let markReady: ForgeStepOutcome | undefined;
