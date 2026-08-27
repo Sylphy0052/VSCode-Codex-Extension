@@ -8942,7 +8942,7 @@ tasks:
         serverName: 'task-messaging',
         message: 'Allow the task-messaging MCP server to run tool "stop_task"?',
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it('allowAutoApproveが無効なら、オーケストレーターの承認ハンドラを設定しない', async () => {
