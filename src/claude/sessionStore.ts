@@ -186,33 +186,29 @@ export class ClaudeSessionStore {
     // 件数分の`mtimeMs`取得を逐次待つと台数に比例して遅くなるため並列化する
     // （issue #436、Codex側の`orderByRecency`と同じ形）。最終的に全件ソートするため
     // 呼び出し順は問わない。ただし件数分を無制限に同時発火しないよう上限を設ける。
-    const entries = await mapWithLimit(
-      named,
-      MTIME_CONCURRENCY_LIMIT,
-      async ({ filePath, id }) => {
-        const mtimeMs = await this.fs.mtimeMs(filePath);
-        const cached = this.index.get(filePath);
-        if (cached?.mtimeMs === mtimeMs) {
-          return cached;
-        }
-        const meta = parseTranscriptHead(await this.fs.readHead(filePath, HEAD_LINES));
-        if (meta === undefined) {
-          return undefined;
-        }
-        return {
-          filePath,
-          mtimeMs,
-          session: {
-            id,
-            provider: 'claude' as const,
-            threadName: meta.firstUserText,
-            updatedAt: new Date((mtimeMs ?? Date.parse(meta.startedAt ?? '')) || 0).toISOString(),
-            cwd: meta.cwd,
-            archived: false,
-          },
-        };
-      },
-    );
+    const entries = await mapWithLimit(named, MTIME_CONCURRENCY_LIMIT, async ({ filePath, id }) => {
+      const mtimeMs = await this.fs.mtimeMs(filePath);
+      const cached = this.index.get(filePath);
+      if (cached?.mtimeMs === mtimeMs) {
+        return cached;
+      }
+      const meta = parseTranscriptHead(await this.fs.readHead(filePath, HEAD_LINES));
+      if (meta === undefined) {
+        return undefined;
+      }
+      return {
+        filePath,
+        mtimeMs,
+        session: {
+          id,
+          provider: 'claude' as const,
+          threadName: meta.firstUserText,
+          updatedAt: new Date((mtimeMs ?? Date.parse(meta.startedAt ?? '')) || 0).toISOString(),
+          cwd: meta.cwd,
+          archived: false,
+        },
+      };
+    });
 
     return entries.filter((entry): entry is ClaudeSessionIndexEntry => entry !== undefined);
   }
