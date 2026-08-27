@@ -1266,7 +1266,7 @@ describe('reviewWorkflowPlan（design.md §16.28、roadmap W3、Issue #337）', 
     const host = new FakePlannerHost(['これは指摘ではありません（自然文の応答）']);
     const result = await reviewWorkflowPlan({ ...reviewBaseInput, host });
     expect(result.findings).toEqual([]);
-    expect(result.error).toBeUndefined();
+    expect(result.error).toBe('レビュー応答をJSON配列として解釈できませんでした');
   });
 
   it('JSON配列でない応答（オブジェクト等）は指摘なしとして扱う', async () => {
@@ -1408,7 +1408,7 @@ describe('reviewTaskPullRequest（design.md §16.31、roadmap W6、Issue #596）
     const host = new FakePlannerHost(['これは指摘ではありません（自然文の応答）']);
     const result = await reviewTaskPullRequest({ ...taskReviewBaseInput, host });
     expect(result.findings).toEqual([]);
-    expect(result.error).toBeUndefined();
+    expect(result.error).toBe('レビュー応答をJSON配列として解釈できませんでした');
   });
 
   it('messageが空文字・欠落の項目は捨てる', async () => {

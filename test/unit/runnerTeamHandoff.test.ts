@@ -255,7 +255,8 @@ function createHarness(): Harness {
       codexSandbox: 'read-only',
       codexApprovalMode: 'on-request',
       claudePermissionMode: 'manual',
-      allowAutoApprove: true,
+      // 自動復旧を有効にすると、起動失敗後のrunが終了せず、終了時の片付けを観測できない。
+      allowAutoApprove: false,
       allowClaudeBypassPermissions: false,
     }),
     readAutoResume: () => false,
