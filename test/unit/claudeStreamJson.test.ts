@@ -356,7 +356,11 @@ describe('applyStreamEvent', () => {
       },
       {
         type: 'stream_event',
-        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '前の応答' } },
+        event: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: '前の応答' },
+        },
       },
       {
         type: 'assistant',
@@ -364,7 +368,11 @@ describe('applyStreamEvent', () => {
       },
       {
         type: 'stream_event',
-        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '次の応答' } },
+        event: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: '次の応答' },
+        },
       },
       {
         type: 'assistant',
@@ -390,11 +398,19 @@ describe('applyStreamEvent', () => {
       },
       {
         type: 'stream_event',
-        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '応答' } },
+        event: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: '応答' },
+        },
       },
       {
         type: 'assistant',
-        message: { id: 'complete_msg', role: 'assistant', content: [{ type: 'text', text: '応答' }] },
+        message: {
+          id: 'complete_msg',
+          role: 'assistant',
+          content: [{ type: 'text', text: '応答' }],
+        },
       },
     ]);
 
