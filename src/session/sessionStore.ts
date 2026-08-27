@@ -26,6 +26,7 @@ export const MTIME_CONCURRENCY_LIMIT = 32;
 
 /** 引き継ぎ元が履歴DBへ反映されたことを確認するために読む最新スレッド数。 */
 const HANDOFF_THREAD_LIST_LIMIT = 20;
+const FILE_FALLBACK_CACHE_MS = 30_000;
 
 /**
  * 表示名を作るために読む先頭行数。
@@ -84,6 +85,7 @@ export class SessionStore {
   private threadNameSetter: ThreadNameSetterPort | undefined;
   /** app-serverの反映待ちに同じスレッドへ更新要求を重ねない。 */
   private readonly requestedThreadNameUpdates = new Set<string>();
+  private fileFallback: { key: string; expiresAt: number; result: ListResult } | undefined;
 
   constructor(
     private readonly fs: FileSystemPort,
@@ -108,6 +110,14 @@ export class SessionStore {
    * `threadListFallbackReason` に残す（黙って表示が変わらないようにするため）。
    */
   async list(options: ListOptions): Promise<ListResult> {
+    const fallbackKey = JSON.stringify(options);
+    if (
+      this.fileFallback !== undefined &&
+      this.fileFallback.key === fallbackKey &&
+      this.fileFallback.expiresAt > Date.now()
+    ) {
+      return this.fileFallback.result;
+    }
     if (this.threadList !== undefined) {
       const outcome = await this.threadList(
         Math.max(0, options.maxEntries),
@@ -118,10 +128,21 @@ export class SessionStore {
       }
       const reason = outcome.ok ? 'thread/listの応答が空でした' : outcome.error;
       const fallback = await this.listFromFiles(options);
-      return { ...fallback, threadListFallbackReason: reason };
+      const result = { ...fallback, threadListFallbackReason: reason };
+      this.fileFallback = {
+        key: fallbackKey,
+        expiresAt: Date.now() + FILE_FALLBACK_CACHE_MS,
+        result,
+      };
+      return result;
     }
 
     return this.listFromFiles(options);
+  }
+
+  /** ロールアウトまたは索引が変化したため、退避時キャッシュを捨てる。 */
+  invalidateFileFallback(): void {
+    this.fileFallback = undefined;
   }
 
   /** `thread/list`で得たセッションにスコープ絞り込み、名称補完、件数上限を適用する。 */

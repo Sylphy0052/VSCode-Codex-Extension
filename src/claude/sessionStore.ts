@@ -10,6 +10,7 @@ import { mapWithLimit } from '../util/concurrency';
 import { basenameOf } from '../util/paths';
 import type { ClaudePaths } from './cliLocator';
 import { ClaudeSessionNameStore } from './sessionNames';
+import { ClaudeSessionIndex, type ClaudeSessionIndexEntry } from './sessionIndex';
 import { parseTranscriptHead, sessionIdFromTranscriptName } from './transcript';
 
 /**
@@ -21,14 +22,21 @@ const HEAD_LINES = 40;
 /**
  * Claude Code のセッション一覧。
  *
- * Codexの `session_index.jsonl` にあたる索引が無いため、`projects/**` の
- * transcript を mtime 降順に並べ、上位N件だけ先頭を読んで組み立てる。
+ * Codexの `session_index.jsonl` にあたる索引が無いため、前回読み取った一覧を
+ * `globalState`へ保存する。起動時はそのスナップショットを返し、実ファイルとの照合は
+ * バックグラウンドで行う。
  *
  * 表示名は「人が付けた名前（`ClaudeSessionNameStore`） > transcriptの最初の発言」の順で
  * 解決する（issue #199）。CLI側の `rename_session` は実在するが読み戻す索引が無いため、
  * ここでは使わない（`control.ts` の `buildRenameSessionRequest` のJSDoc参照）。
  */
 export class ClaudeSessionStore {
+  private refreshing = false;
+  private refreshScheduled = false;
+  private stale = true;
+  private unresolved = 0;
+  private onRefreshed: (() => void) | undefined;
+
   constructor(
     private readonly fs: FileSystemPort,
     private readonly paths: ClaudePaths,
@@ -37,41 +45,88 @@ export class ClaudeSessionStore {
      * （`ClaudeSessionNameStore` のJSDoc参照）。
      */
     private readonly names: ClaudeSessionNameStore = new ClaudeSessionNameStore(),
+    private readonly index: ClaudeSessionIndex = new ClaudeSessionIndex(),
   ) {}
 
   async list(options: ListOptions): Promise<ListResult> {
-    const ordered = await this.orderedTranscripts();
+    if (this.index.all().length === 0) {
+      await this.refreshIndex(options);
+      this.scheduleRefresh();
+    } else if (this.stale) {
+      this.scheduleRefresh();
+    }
+
+    return this.listFromIndex(options);
+  }
+
+  /** バックグラウンド照合の完了を受ける。履歴ツリーの再描画に使う。 */
+  setOnRefreshed(listener: (() => void) | undefined): void {
+    this.onRefreshed = listener;
+  }
+
+  /**
+   * watcherから呼ぶ差分更新。変更されたtranscriptだけを読み直し、全件のmtime取得を避ける。
+   */
+  async refreshFile(filePath: string): Promise<void> {
+    const id = sessionIdFromTranscriptName(basenameOf(filePath));
+    if (id === undefined) {
+      return;
+    }
+    const mtimeMs = await this.fs.mtimeMs(filePath);
+    if (mtimeMs === undefined) {
+      this.index.delete(filePath);
+    } else {
+      const previous = this.index.get(filePath);
+      if (previous !== undefined && previous.mtimeMs === mtimeMs) {
+        return;
+      }
+      const meta = parseTranscriptHead(await this.fs.readHead(filePath, HEAD_LINES));
+      if (meta === undefined) {
+        this.index.delete(filePath);
+      } else {
+        this.index.set({
+          filePath,
+          mtimeMs,
+          session: {
+            id,
+            provider: 'claude',
+            threadName: meta.firstUserText,
+            updatedAt: new Date((mtimeMs ?? Date.parse(meta.startedAt ?? '')) || 0).toISOString(),
+            cwd: meta.cwd,
+            archived: false,
+          },
+        });
+      }
+    }
+    await this.index.persist();
+    this.onRefreshed?.();
+  }
+
+  private listFromIndex(options: ListOptions): ListResult {
+    const ordered = this.index
+      .all()
+      .sort((a, b) => b.session.updatedAt.localeCompare(a.session.updatedAt));
 
     const sessions: SessionSummary[] = [];
-    let unresolved = 0;
 
-    for (const { filePath, id, mtimeMs } of ordered) {
+    for (const { session } of ordered) {
       if (sessions.length >= Math.max(0, options.maxEntries)) {
         break;
       }
-
-      const meta = parseTranscriptHead(await this.fs.readHead(filePath, HEAD_LINES));
-      if (meta === undefined) {
-        unresolved++;
+      if (
+        options.scope === 'workspace' &&
+        !isWithinAny(session.cwd ?? '', options.workspaceFolders)
+      ) {
         continue;
       }
-      if (options.scope === 'workspace' && !isWithinAny(meta.cwd, options.workspaceFolders)) {
-        continue;
-      }
-
       sessions.push({
-        id,
-        provider: 'claude',
+        ...session,
         // 解決順: 人が付けた名前 > transcriptの最初の発言（issue #199の受入基準）
-        threadName: this.names.get(id) ?? meta.firstUserText,
-        updatedAt: new Date((mtimeMs ?? Date.parse(meta.startedAt ?? '')) || 0).toISOString(),
-        cwd: meta.cwd,
-        archived: false,
+        threadName: this.names.get(session.id) ?? session.threadName,
       });
     }
 
-    // 索引を読まないためパース失敗の概念が無い（壊れた行は素性側で吸収する）
-    return { sessions, skippedIndexLines: 0, unresolved };
+    return { sessions, skippedIndexLines: 0, unresolved: this.unresolved };
   }
 
   /** 人が付けた名前を読む（issue #199）。付けていなければ `undefined`。 */
@@ -108,28 +163,97 @@ export class ClaudeSessionStore {
     return parseTranscriptHead(await this.fs.readHead(filePath, HEAD_LINES))?.cwd;
   }
 
-  /** id が読めたtranscriptを、更新の新しい順に。 */
-  private async orderedTranscripts(): Promise<
-    Array<{ filePath: string; id: string; mtimeMs: number | undefined }>
-  > {
+  /** 初回・キャッシュ不整合時だけ全transcriptを照合する。 */
+  private async refreshIndex(options?: ListOptions): Promise<void> {
+    if (this.refreshing) {
+      return;
+    }
+    this.refreshing = true;
+    try {
+      const next = await this.readIndexFromFiles(options);
+      this.index.replace(next.entries);
+      this.unresolved = next.unresolved;
+      this.stale = options !== undefined;
+      await this.index.persist();
+      this.onRefreshed?.();
+    } finally {
+      this.refreshing = false;
+    }
+  }
+
+  private scheduleRefresh(): void {
+    if (this.refreshScheduled || this.refreshing) {
+      return;
+    }
+    this.refreshScheduled = true;
+    setTimeout(() => {
+      this.refreshScheduled = false;
+      void this.refreshIndex().catch(() => undefined);
+    }, 0);
+  }
+
+  private async readIndexFromFiles(options?: ListOptions): Promise<{
+    entries: ClaudeSessionIndexEntry[];
+    unresolved: number;
+  }> {
     const files = await this.fs.listJsonl(this.paths.projects);
     const named = files
       .map((filePath) => ({ filePath, id: sessionIdFromTranscriptName(basenameOf(filePath)) }))
       .filter((entry): entry is { filePath: string; id: string } => entry.id !== undefined);
 
-    // 件数分の`mtimeMs`取得を逐次待つと台数に比例して遅くなるため並列化する
-    // （issue #436、Codex側の`orderByRecency`と同じ形）。最終的に全件ソートするため
-    // 呼び出し順は問わない。ただし件数分を無制限に同時発火しないよう上限を設ける。
-    const entries = await mapWithLimit(
-      named,
-      MTIME_CONCURRENCY_LIMIT,
-      async ({ filePath, id }) => ({
-        filePath,
-        id,
-        mtimeMs: await this.fs.mtimeMs(filePath),
-      }),
-    );
+    const ordered = await mapWithLimit(named, MTIME_CONCURRENCY_LIMIT, async ({ filePath, id }) => {
+      const mtimeMs = await this.fs.mtimeMs(filePath);
+      return { filePath, id, mtimeMs };
+    });
+    ordered.sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0));
 
-    return entries.sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0));
+    const entries: ClaudeSessionIndexEntry[] = [];
+    let unresolved = 0;
+    for (const { filePath, id, mtimeMs } of ordered) {
+      const cached = this.index.get(filePath);
+      const entry =
+        cached !== undefined && cached.mtimeMs === mtimeMs
+          ? cached
+          : await this.readIndexEntry(filePath, id, mtimeMs);
+      if (entry === undefined) {
+        unresolved += 1;
+        continue;
+      }
+      if (
+        options?.scope === 'workspace' &&
+        !isWithinAny(entry.session.cwd ?? '', options.workspaceFolders)
+      ) {
+        continue;
+      }
+      entries.push(entry);
+      if (options !== undefined && entries.length >= Math.max(0, options.maxEntries)) {
+        break;
+      }
+    }
+
+    return { entries, unresolved };
+  }
+
+  private async readIndexEntry(
+    filePath: string,
+    id: string,
+    mtimeMs: number | undefined,
+  ): Promise<ClaudeSessionIndexEntry | undefined> {
+    const meta = parseTranscriptHead(await this.fs.readHead(filePath, HEAD_LINES));
+    if (meta === undefined) {
+      return undefined;
+    }
+    return {
+      filePath,
+      mtimeMs,
+      session: {
+        id,
+        provider: 'claude' as const,
+        threadName: meta.firstUserText,
+        updatedAt: new Date((mtimeMs ?? Date.parse(meta.startedAt ?? '')) || 0).toISOString(),
+        cwd: meta.cwd,
+        archived: false,
+      },
+    };
   }
 }

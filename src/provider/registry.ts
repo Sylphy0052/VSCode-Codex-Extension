@@ -42,27 +42,29 @@ export class ProviderRegistry {
   async listSessions(options: ListOptions, log: Logger): Promise<SessionSummary[]> {
     const sessions: SessionSummary[] = [];
 
-    for (const provider of this.all()) {
-      try {
-        const result = await provider.listSessions(options);
-        if (result.skippedIndexLines > 0 || result.unresolved > 0) {
-          log.warn(
-            `${provider.label} の一覧構築: 壊れた行 ${result.skippedIndexLines} / 実体なし ${result.unresolved}`,
-          );
+    await Promise.all(
+      this.all().map(async (provider) => {
+        try {
+          const result = await provider.listSessions(options);
+          if (result.skippedIndexLines > 0 || result.unresolved > 0) {
+            log.warn(
+              `${provider.label} の一覧構築: 壊れた行 ${result.skippedIndexLines} / 実体なし ${result.unresolved}`,
+            );
+          }
+          // thread/listが使えず（未接続・空応答・エラー）ファイル読みへ退避した場合、
+          // 黙って表示が変わらないよう理由を出力パネルに残す（issue #45）
+          if (result.threadListFallbackReason !== undefined) {
+            log.warn(
+              `${provider.label} の一覧構築: thread/list を使わずファイル読みへ退避しました (${result.threadListFallbackReason})`,
+            );
+          }
+          sessions.push(...result.sessions);
+        } catch (e) {
+          const reason = e instanceof Error ? e.message : String(e);
+          log.error(`${provider.label} の一覧を構築できませんでした: ${reason}`);
         }
-        // thread/listが使えず（未接続・空応答・エラー）ファイル読みへ退避した場合、
-        // 黙って表示が変わらないよう理由を出力パネルに残す（issue #45）
-        if (result.threadListFallbackReason !== undefined) {
-          log.warn(
-            `${provider.label} の一覧構築: thread/list を使わずファイル読みへ退避しました (${result.threadListFallbackReason})`,
-          );
-        }
-        sessions.push(...result.sessions);
-      } catch (e) {
-        const reason = e instanceof Error ? e.message : String(e);
-        log.error(`${provider.label} の一覧を構築できませんでした: ${reason}`);
-      }
-    }
+      }),
+    );
 
     return sessions
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))

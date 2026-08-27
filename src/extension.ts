@@ -16,6 +16,7 @@ import { ClaudePluginsProbe } from './claude/pluginsProbe';
 import { ClaudeProvider } from './claude/provider';
 import { ClaudeSessionNameStore } from './claude/sessionNames';
 import { ClaudeSessionStore } from './claude/sessionStore';
+import { ClaudeSessionIndex } from './claude/sessionIndex';
 import { ClaudeSkillsProbe } from './claude/skillsProbe';
 import { ClaudeTranscriptWatcher } from './claude/transcriptWatcher';
 import { CodexAccountActions } from './codex/accountActions';
@@ -307,17 +308,6 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     context.globalState.get<Record<string, SessionMeta>>(META_CACHE_KEY) ?? {},
   );
   const store = new SessionStore(nodeFileSystem, paths, cache);
-  // 実体が消えたセッションのメタキャッシュを起動時に掃除する（issue #382）。activateを
-  // 妨げないよう非同期で投げっぱなしにし、失敗してもここで吸収する
-  // （`pruneMetaCacheOnStartup` 参照）
-  void pruneMetaCacheOnStartup(
-    store,
-    (removed) => {
-      log.info(`起動時にメタキャッシュを${removed}件掃除しました`);
-      return persistCache(context, cache);
-    },
-    log,
-  );
 
   const claudeHome = resolveClaudeHome(readClaudeConfig().configDir, nodeLocatorDeps);
   const claudeDirs = claudePaths(claudeHome);
@@ -325,7 +315,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 人が付け直したセッション名（issue #199）。globalStateはワークスペースをまたいで
   // 有効なため、セッションidがワークスペースをまたいでも一意であることと合わせられる
   const claudeSessionNames = new ClaudeSessionNameStore(context.globalState);
-  const claudeStore = new ClaudeSessionStore(nodeFileSystem, claudeDirs, claudeSessionNames);
+  const claudeStore = new ClaudeSessionStore(
+    nodeFileSystem,
+    claudeDirs,
+    claudeSessionNames,
+    new ClaudeSessionIndex(context.globalState),
+  );
 
   const codex = new CodexProvider(store);
   const claude = new ClaudeProvider(claudeStore);
@@ -775,11 +770,25 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       ? claudeChat.getActivityState(session.id)
       : chat.getActivityState(session.id);
   const tree = new SessionTreeProvider(providers, getSessionActivity, log, pinnedSessions);
+  claudeStore.setOnRefreshed(() => tree.refresh());
   const sessionsView = vscode.window.createTreeView('codex.sessions', {
     treeDataProvider: tree,
     showCollapseAll: false,
   });
   context.subscriptions.push(tree, sessionsView);
+
+  // 初回の履歴表示と同時に全ロールアウトを走査しない。掃除は表示が落ち着いた後に行う。
+  const pruneTimer = setTimeout(() => {
+    void pruneMetaCacheOnStartup(
+      store,
+      (removed) => {
+        log.info(`起動時にメタキャッシュを${removed}件掃除しました`);
+        return persistCache(context, cache);
+      },
+      log,
+    );
+  }, 3_000);
+  context.subscriptions.push(new vscode.Disposable(() => clearTimeout(pruneTimer)));
 
   // 履歴の行末に状態のバッジを出す（issue #735）。ツリーの更新イベントを装飾側が
   // 購読しているので、`tree.refresh()` を呼ぶ既存の経路がそのまま装飾の更新にもなる
@@ -863,9 +872,13 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   void readUsage();
 
   const watcher = new SessionWatcher(paths, {
-    onRolloutCreated: () => tree.refresh(),
+    onRolloutCreated: () => {
+      store.invalidateFileFallback();
+      tree.refresh();
+    },
     onRolloutChanged: () => readUsageDebounced(),
     onIndexChanged: () => {
+      store.invalidateFileFallback();
       tree.refreshDebounced();
       void persistCache(context, cache);
     },
@@ -874,8 +887,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
 
   // Claude Codeには索引が無いため、transcriptの作成・追記を一覧更新の契機にする
   const claudeWatcher = new ClaudeTranscriptWatcher(claudeDirs, {
-    onTranscriptChanged: () => {
-      tree.refreshDebounced();
+    onTranscriptChanged: (filePath) => {
+      void claudeStore.refreshFile(filePath);
     },
   });
   context.subscriptions.push(claudeWatcher);
