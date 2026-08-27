@@ -32,7 +32,9 @@ const HEAD_LINES = 40;
  */
 export class ClaudeSessionStore {
   private refreshing = false;
+  private refreshScheduled = false;
   private stale = true;
+  private unresolved = 0;
   private onRefreshed: (() => void) | undefined;
 
   constructor(
@@ -48,9 +50,10 @@ export class ClaudeSessionStore {
 
   async list(options: ListOptions): Promise<ListResult> {
     if (this.index.all().length === 0) {
-      await this.refreshIndex();
+      await this.refreshIndex(options);
+      this.scheduleRefresh();
     } else if (this.stale) {
-      void this.refreshIndex().catch(() => undefined);
+      this.scheduleRefresh();
     }
 
     return this.listFromIndex(options);
@@ -74,7 +77,7 @@ export class ClaudeSessionStore {
       this.index.delete(filePath);
     } else {
       const previous = this.index.get(filePath);
-      if (previous?.mtimeMs === mtimeMs) {
+      if (previous !== undefined && previous.mtimeMs === mtimeMs) {
         return;
       }
       const meta = parseTranscriptHead(await this.fs.readHead(filePath, HEAD_LINES));
@@ -123,7 +126,7 @@ export class ClaudeSessionStore {
       });
     }
 
-    return { sessions, skippedIndexLines: 0, unresolved: 0 };
+    return { sessions, skippedIndexLines: 0, unresolved: this.unresolved };
   }
 
   /** 人が付けた名前を読む（issue #199）。付けていなければ `undefined`。 */
@@ -161,15 +164,16 @@ export class ClaudeSessionStore {
   }
 
   /** 初回・キャッシュ不整合時だけ全transcriptを照合する。 */
-  private async refreshIndex(): Promise<void> {
+  private async refreshIndex(options?: ListOptions): Promise<void> {
     if (this.refreshing) {
       return;
     }
     this.refreshing = true;
     try {
-      const next = await this.readIndexFromFiles();
-      this.index.replace(next);
-      this.stale = false;
+      const next = await this.readIndexFromFiles(options);
+      this.index.replace(next.entries);
+      this.unresolved = next.unresolved;
+      this.stale = options !== undefined;
       await this.index.persist();
       this.onRefreshed?.();
     } finally {
@@ -177,39 +181,79 @@ export class ClaudeSessionStore {
     }
   }
 
-  private async readIndexFromFiles(): Promise<ClaudeSessionIndexEntry[]> {
+  private scheduleRefresh(): void {
+    if (this.refreshScheduled || this.refreshing) {
+      return;
+    }
+    this.refreshScheduled = true;
+    setTimeout(() => {
+      this.refreshScheduled = false;
+      void this.refreshIndex().catch(() => undefined);
+    }, 0);
+  }
+
+  private async readIndexFromFiles(options?: ListOptions): Promise<{
+    entries: ClaudeSessionIndexEntry[];
+    unresolved: number;
+  }> {
     const files = await this.fs.listJsonl(this.paths.projects);
     const named = files
       .map((filePath) => ({ filePath, id: sessionIdFromTranscriptName(basenameOf(filePath)) }))
       .filter((entry): entry is { filePath: string; id: string } => entry.id !== undefined);
 
-    // 件数分の`mtimeMs`取得を逐次待つと台数に比例して遅くなるため並列化する
-    // （issue #436、Codex側の`orderByRecency`と同じ形）。最終的に全件ソートするため
-    // 呼び出し順は問わない。ただし件数分を無制限に同時発火しないよう上限を設ける。
-    const entries = await mapWithLimit(named, MTIME_CONCURRENCY_LIMIT, async ({ filePath, id }) => {
+    const ordered = await mapWithLimit(named, MTIME_CONCURRENCY_LIMIT, async ({ filePath, id }) => {
       const mtimeMs = await this.fs.mtimeMs(filePath);
-      const cached = this.index.get(filePath);
-      if (cached?.mtimeMs === mtimeMs) {
-        return cached;
-      }
-      const meta = parseTranscriptHead(await this.fs.readHead(filePath, HEAD_LINES));
-      if (meta === undefined) {
-        return undefined;
-      }
-      return {
-        filePath,
-        mtimeMs,
-        session: {
-          id,
-          provider: 'claude' as const,
-          threadName: meta.firstUserText,
-          updatedAt: new Date((mtimeMs ?? Date.parse(meta.startedAt ?? '')) || 0).toISOString(),
-          cwd: meta.cwd,
-          archived: false,
-        },
-      };
+      return { filePath, id, mtimeMs };
     });
+    ordered.sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0));
 
-    return entries.filter((entry): entry is ClaudeSessionIndexEntry => entry !== undefined);
+    const entries: ClaudeSessionIndexEntry[] = [];
+    let unresolved = 0;
+    for (const { filePath, id, mtimeMs } of ordered) {
+      const cached = this.index.get(filePath);
+      const entry =
+        cached !== undefined && cached.mtimeMs === mtimeMs
+          ? cached
+          : await this.readIndexEntry(filePath, id, mtimeMs);
+      if (entry === undefined) {
+        unresolved += 1;
+        continue;
+      }
+      if (
+        options?.scope === 'workspace' &&
+        !isWithinAny(entry.session.cwd ?? '', options.workspaceFolders)
+      ) {
+        continue;
+      }
+      entries.push(entry);
+      if (options !== undefined && entries.length >= Math.max(0, options.maxEntries)) {
+        break;
+      }
+    }
+
+    return { entries, unresolved };
+  }
+
+  private async readIndexEntry(
+    filePath: string,
+    id: string,
+    mtimeMs: number | undefined,
+  ): Promise<ClaudeSessionIndexEntry | undefined> {
+    const meta = parseTranscriptHead(await this.fs.readHead(filePath, HEAD_LINES));
+    if (meta === undefined) {
+      return undefined;
+    }
+    return {
+      filePath,
+      mtimeMs,
+      session: {
+        id,
+        provider: 'claude' as const,
+        threadName: meta.firstUserText,
+        updatedAt: new Date((mtimeMs ?? Date.parse(meta.startedAt ?? '')) || 0).toISOString(),
+        cwd: meta.cwd,
+        archived: false,
+      },
+    };
   }
 }
