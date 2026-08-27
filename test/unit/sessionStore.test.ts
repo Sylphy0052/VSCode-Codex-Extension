@@ -300,6 +300,33 @@ describe('SessionStore.list（thread/list優先・ファイル読みへの退避
   });
 });
 
+describe('SessionStore.resolveHandoffRolloutPath', () => {
+  it('JSONLの先頭IDとthread/listの両方が一致するときだけ返す', async () => {
+    const store = new SessionStore(buildFs(), paths, new InMemoryMetaCache());
+    store.attachThreadList(okPort([threadSession(ID_A, '/work/alpha', '2026-08-06T15:09:29Z')]));
+
+    await expect(store.resolveHandoffRolloutPath(ID_A)).resolves.toBe(
+      rollout(`${paths.sessions}/2026/08/07`, ID_A),
+    );
+  });
+
+  it('thread/listに無い間は返さない', async () => {
+    const store = new SessionStore(buildFs(), paths, new InMemoryMetaCache());
+    store.attachThreadList(emptyPort);
+
+    await expect(store.resolveHandoffRolloutPath(ID_A)).resolves.toBeUndefined();
+  });
+
+  it('ロールアウト先頭のsession IDが異なれば返さない', async () => {
+    const path = rollout(`${paths.sessions}/2026/08/07`, ID_A);
+    const fs = new FakeFs({ [path]: metaLine(ID_B, '/work/alpha') });
+    const store = new SessionStore(fs, paths, new InMemoryMetaCache());
+    store.attachThreadList(okPort([threadSession(ID_A, '/work/alpha', '2026-08-06T15:09:29Z')]));
+
+    await expect(store.resolveHandoffRolloutPath(ID_A)).resolves.toBeUndefined();
+  });
+});
+
 describe('SessionStore.pruneCache', () => {
   it('実体が消えたエントリだけを落とす', async () => {
     const fs = buildFs();
