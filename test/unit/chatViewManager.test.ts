@@ -1063,17 +1063,15 @@ describe('ChatViewManager', () => {
       expect(manager.isOpen('thread-task')).toBe(false);
     });
 
-    it('タスク管理下でないスレッドは従来通り復元される', async () => {
+    it('タスク管理下でないスレッドも明示ロードまで復元しない', async () => {
       const { manager, connection } = createManager({ isTaskManagedThread: () => false });
       const panel = fakeWindow.createWebviewPanel('codex.chat', 'x', ViewColumn.Active, {});
 
-      const p = manager.restorePanel(panel, { threadId: 'thread-normal' });
-      await tick();
-      connection.resolveFirst('thread/resume', threadStartResult('thread-normal'));
-      await p;
+      await manager.restorePanel(panel, { threadId: 'thread-normal' });
 
       expect(panel.disposed).toBe(false);
       expect(manager.isOpen('thread-normal')).toBe(true);
+      expect(connection.requests.find((r) => r.method === 'thread/resume')).toBeUndefined();
     });
   });
 

@@ -483,7 +483,7 @@ describe('SessionTreeProvider.getChildren のグループ化（issue #293、既�
     const group = children[0];
     expect(group !== undefined && isGroup(group)).toBe(true);
     if (group !== undefined && isGroup(group)) {
-      expect(group.label).toBe('今日');
+      expect(group.label).toBe('12時間以内');
       expect(group.sessions).toEqual([s]);
     }
   });

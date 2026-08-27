@@ -79,6 +79,7 @@ export function normalizeThread(
     updatedAt,
     cwd: cwd === '' ? undefined : cwd,
     archived: path !== '' && isUnderDir(path, archivedSessionsDir),
+    rolloutPath: path === '' ? undefined : path,
     parentThreadId: parentThreadId === '' ? undefined : parentThreadId,
   };
 }

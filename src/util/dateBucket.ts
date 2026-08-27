@@ -1,11 +1,18 @@
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-export type DateBucket = 'today' | 'yesterday' | 'thisWeek' | 'older';
+export type DateBucket = 'recent' | 'today' | 'yesterday' | 'thisWeek' | 'older';
 
 /** 各バケットの表示ラベルと並び順（この配列順に並べる）。 */
-export const DATE_BUCKET_ORDER: readonly DateBucket[] = ['today', 'yesterday', 'thisWeek', 'older'];
+export const DATE_BUCKET_ORDER: readonly DateBucket[] = [
+  'recent',
+  'today',
+  'yesterday',
+  'thisWeek',
+  'older',
+];
 
 export const DATE_BUCKET_LABEL: Readonly<Record<DateBucket, string>> = {
+  recent: '12時間以内',
   today: '今日',
   yesterday: '昨日',
   thisWeek: '今週',
@@ -20,7 +27,7 @@ function startOfDay(ms: number): number {
 }
 
 /**
- * セッションの更新時刻を「今日・昨日・今週・それ以前」へ分類する。
+ * セッションの更新時刻を「12時間以内・今日・昨日・今週・それ以前」へ分類する。
  *
  * `vscode` に依存しない純粋関数（CONTRIBUTING.mdのレイヤの制約）。`now` を引数で受けるため、
  * テストは固定時刻で境界を確かめられる。
@@ -40,6 +47,10 @@ export function dateBucketFor(isoTimestamp: string, now: number): DateBucket {
     // 壊れた値は最も安全側（それ以前）に倒す。グルーピングが目的の表示専用ロジックなので、
     // 例外にせず落ち着いた既定へ丸める（CONTRIBUTING.mdの「未知の入力で壊さない」方針）。
     return 'older';
+  }
+
+  if (t <= now && t >= now - 12 * 60 * 60 * 1000) {
+    return 'recent';
   }
 
   const diffDays = Math.floor((startOfDay(now) - startOfDay(t)) / DAY_MS);

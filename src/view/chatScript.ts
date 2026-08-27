@@ -960,8 +960,14 @@ export function chatScript(
     const kindLabel = { add: '追加', delete: '削除', update: '変更' }[diff.kind] || diff.kind;
     const label = document.createElement('span');
     label.className = 'diff-label';
-    label.textContent = diff.path + (diff.movePath ? ' → ' + diff.movePath : '') +
-      ' ・ ' + kindLabel;
+    const displayPath = abbreviateDiffPath(diff.path);
+    const displayMovePath = diff.movePath ? abbreviateDiffPath(diff.movePath) : '';
+    const fullLabel = diff.path + (diff.movePath ? ' → ' + diff.movePath : '');
+    const displayLabel = displayPath + (displayMovePath ? ' → ' + displayMovePath : '');
+    label.textContent = displayLabel + ' ・ ' + kindLabel;
+    if (displayLabel !== fullLabel) {
+      label.title = fullLabel;
+    }
     summary.appendChild(label);
 
     if (interactive) {
@@ -983,6 +989,14 @@ export function chatScript(
     }
     details.appendChild(pre);
     return details;
+  }
+
+  // チャット領域を長い絶対パスで占有しないよう、末尾を残して表示を省略する。
+  // 操作に渡すdiff.path / movePathはこの関数を通さず、元の値を使い続ける。
+  const MAX_DIFF_PATH_DISPLAY_LENGTH = 96;
+  function abbreviateDiffPath(value) {
+    if (value.length <= MAX_DIFF_PATH_DISPLAY_LENGTH) return value;
+    return '…' + value.slice(-(MAX_DIFF_PATH_DISPLAY_LENGTH - 1));
   }
 
   function renderDiffs(container, diffs, itemId, interactive) {
@@ -1812,6 +1826,21 @@ export function chatScript(
       .map((i) => i.text);
     applySettings(state.settings, state.planMode);
     const log = el('log');
+    const restore = state.restore;
+    const deferredRestore = el('deferredRestore');
+    const loadDeferredRestore = el('loadDeferredRestore');
+    const deferredRestoreMessage = el('deferredRestoreMessage');
+    const restoreVisible = restore !== undefined;
+    deferredRestore.hidden = !restoreVisible;
+    if (restoreVisible) {
+      const loading = restore.state === 'loading';
+      loadDeferredRestore.disabled = loading;
+      loadDeferredRestore.textContent = loading ? '読み込み中…' : '会話を読み込む';
+      deferredRestoreMessage.textContent =
+        restore.state === 'failed'
+          ? '会話を読み込めませんでした: ' + (restore.message || '不明なエラー')
+          : '会話はまだ読み込まれていません。必要なときに読み込んでください。';
+    }
     const atBottom = isLogNearBottom(log);
     lastItems = state.items;
     syncItems(state.items);
@@ -1833,11 +1862,16 @@ export function chatScript(
     renderBackgroundTerminals(state.backgroundTerminals);
     queuedMessages = state.queued || [];
     renderQueue(queuedMessages);
-    // 応答中かどうかを画面の外周の枠色で示す（issue #701）。赤=応答中、青=待機中
+    // 外周の枠色で状態を示す。赤=応答中、黄=応答終了後もバックグラウンド実行中、青=待機中
     document.body.classList.toggle('busy', !!state.busy);
+    document.body.classList.toggle(
+      'background-running',
+      !state.busy && (state.backgroundTerminals || []).length > 0,
+    );
     el('stop').hidden = !state.busy;
     // 応答中でも送れる。既定では待ち行列に積むだけで応答は止まらない
-    el('send').disabled = false;
+    el('send').disabled = restoreVisible;
+    el('input').disabled = restoreVisible;
     // 圧縮は新しいターンを起こす。応答中に重ねると割り込みになるため止める
     el('compact').disabled = !!state.busy;
     // インポートの確認要求も新しいターンを起こす（Claude Code画面のみ、issue #200）
@@ -1862,6 +1896,10 @@ export function chatScript(
     updateScrollToBottomVisibility();
     updateUserMessageNavigation();
   }
+
+  el('loadDeferredRestore').addEventListener('click', () => {
+    vscode.postMessage({ type: 'resume' });
+  });
 
   // いま添えている枚数。本文が空でも送れるかの判定に使う
   let attachmentCount = 0;

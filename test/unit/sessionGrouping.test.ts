@@ -18,18 +18,18 @@ const iso = (y: number, m: number, d: number): string => new Date(y, m - 1, d, 1
 const NOW = new Date(2026, 7, 16, 12, 0).getTime();
 
 describe('buildDateGroups（issue #293）', () => {
-  it('今日・昨日・今週・それ以前の順に並べる', () => {
+  it('12時間以内・今日・昨日・今週・それ以前の順に並べる', () => {
     const sessions = [
       session({ id: 'older', updatedAt: iso(2026, 1, 1) }),
-      session({ id: 'today', updatedAt: iso(2026, 8, 16) }),
+      session({ id: 'recent', updatedAt: iso(2026, 8, 16) }),
       session({ id: 'thisWeek', updatedAt: iso(2026, 8, 12) }),
       session({ id: 'yesterday', updatedAt: iso(2026, 8, 15) }),
     ];
 
     const groups = buildDateGroups(sessions, NOW);
 
-    expect(groups.map((g) => g.key)).toEqual(['today', 'yesterday', 'thisWeek', 'older']);
-    expect(groups.map((g) => g.label)).toEqual(['今日', '昨日', '今週', 'それ以前']);
+    expect(groups.map((g) => g.key)).toEqual(['recent', 'yesterday', 'thisWeek', 'older']);
+    expect(groups.map((g) => g.label)).toEqual(['12時間以内', '昨日', '今週', 'それ以前']);
   });
 
   it('該当セッションが無いバケットは出さない', () => {
@@ -38,7 +38,7 @@ describe('buildDateGroups（issue #293）', () => {
     const groups = buildDateGroups(sessions, NOW);
 
     expect(groups).toHaveLength(1);
-    expect(groups[0]?.key).toBe('today');
+    expect(groups[0]?.key).toBe('recent');
   });
 
   it('各グループ内は入力順を保つ', () => {

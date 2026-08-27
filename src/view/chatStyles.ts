@@ -56,9 +56,22 @@ ${sharedStyles()}
     z-index: 1;
     border: 2px solid var(--vscode-charts-blue);
   }
+  /* バックグラウンド実行だけが残る間は黄。応答中の赤を後置して優先する */
+  body.background-running::after { border-color: var(--vscode-charts-yellow); }
   /* 応答中は赤。busyクラスの付け外しは chatScript.ts の apply() が行う */
   body.busy::after { border-color: var(--vscode-charts-red); }
   #logWrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  #deferredRestore {
+    margin: auto;
+    max-width: 36rem;
+    padding: 16px;
+    border: 1px solid var(--vscode-widget-border);
+    border-radius: var(--agent-radius-md);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    align-items: flex-start;
+  }
   #log { flex: 1; overflow-y: auto; padding: 12px 16px; }
   #conversationNavigation {
     position: absolute;
