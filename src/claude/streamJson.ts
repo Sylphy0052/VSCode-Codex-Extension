@@ -107,7 +107,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
     const type = str(part['type']);
     if (type === 'text') {
       const text = str(part['text']);
-      items = upsert(items, {
+      items = upsertCompletedBlock(items, state.streamingMessageId, {
         id: blockId(message, position, 'text'),
         kind: 'agentMessage',
         text,
@@ -131,7 +131,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
       continue;
     }
     if (type === 'thinking') {
-      items = upsert(items, {
+      items = upsertCompletedBlock(items, state.streamingMessageId, {
         id: blockId(message, position, 'thinking'),
         kind: 'reasoning',
         text: str(part['thinking']),
@@ -180,7 +180,8 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
     items === state.items &&
     editedFiles === state.turnEditedFiles &&
     todos === state.todos &&
-    autocompactWindow === state.autocompactWindow
+    autocompactWindow === state.autocompactWindow &&
+    state.streamingMessageId === undefined
   ) {
     return state;
   }
@@ -191,6 +192,9 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
     todos,
     todoHistory,
     autocompactWindow,
+    // 次のmessage_startが欠落した場合に前ターンのidを使い回さない。使い回すと、
+    // 次ターンの断片が前の項目を上書きし、完成応答が別項目として追加される。
+    streamingMessageId: undefined,
     busy: true,
   };
 }
@@ -549,6 +553,41 @@ function upsert(items: readonly ChatItem[], item: ChatItem): ChatItem[] {
   }
   const existing = items[index];
   const next = [...items];
+  next[index] = {
+    ...item,
+    // デルタで積んだ本文を、本文が空の完成イベントで消さない
+    text: item.text === '' && existing !== undefined ? existing.text : item.text,
+  };
+  return next;
+}
+
+/**
+ * 完成応答を反映する。
+ *
+ * 通常は完成応答と`message_start`が同じmessage.idを持つため、`upsert`だけで足りる。
+ * ただしmessage_startが欠落したとき、または両者のidが一致しないときは、断片が
+ * `assistant:<kind>:<position>`またはmessage_start由来のidで残る。完成応答を別項目に
+ * 追加せず、その断片を実際のmessage.idへ置き換える。
+ */
+function upsertCompletedBlock(
+  items: readonly ChatItem[],
+  streamingMessageId: string | undefined,
+  item: ChatItem,
+): ChatItem[] {
+  if (items.some((existing) => existing.id === item.id)) {
+    return upsert(items, item);
+  }
+  const position = item.id.slice(item.id.lastIndexOf(':') + 1);
+  const kind = item.kind === 'reasoning' ? 'thinking' : 'text';
+  const candidates = [streamingMessageId, 'assistant']
+    .filter((base): base is string => base !== undefined)
+    .map((base) => `${base}:${kind}:${position}`);
+  const index = items.findIndex((existing) => candidates.includes(existing.id));
+  if (index === -1) {
+    return upsert(items, item);
+  }
+  const next = [...items];
+  const existing = items[index];
   next[index] = {
     ...item,
     // デルタで積んだ本文を、本文が空の完成イベントで消さない
