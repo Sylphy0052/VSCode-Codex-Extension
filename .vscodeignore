@@ -2,6 +2,7 @@
 .vscode-test/**
 .vscode-test.mjs
 .git/**
+.worktree/**
 .claude/**
 .agents/**
 .github/**
