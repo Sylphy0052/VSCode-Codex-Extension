@@ -18,6 +18,7 @@ tsconfig.integration.json
 vitest.config.ts
 src/**
 test/**
+coverage/**
 out/**
 scripts/**
 docs/**
