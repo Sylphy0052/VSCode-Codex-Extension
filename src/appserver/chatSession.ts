@@ -13,6 +13,7 @@ import {
   addPrompt,
   appendNotice,
   applyEvent,
+  deriveCodexBackgroundTerminals,
   deriveReviewing,
   enqueue,
   initialChatState,
@@ -226,6 +227,8 @@ export class ChatSession {
       items,
       // レビュー中に復元・detachedで開いた画面でも、割り込みの扱いを取り違えない
       reviewing: deriveReviewing(items),
+      // 復元前の一覧を持ち越さず、スナップショット時点で実行中のコマンドだけを出す
+      backgroundTerminals: deriveCodexBackgroundTerminals(items),
     });
   }
 

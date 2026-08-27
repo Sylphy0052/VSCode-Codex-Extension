@@ -56,6 +56,8 @@ ${sharedStyles()}
     z-index: 1;
     border: 2px solid var(--vscode-charts-blue);
   }
+  /* バックグラウンド実行だけが残る間は黄。応答中の赤を後置して優先する */
+  body.background-running::after { border-color: var(--vscode-charts-yellow); }
   /* 応答中は赤。busyクラスの付け外しは chatScript.ts の apply() が行う */
   body.busy::after { border-color: var(--vscode-charts-red); }
   #logWrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
