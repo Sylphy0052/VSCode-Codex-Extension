@@ -126,6 +126,10 @@ const SIDE_QUESTION_TAB_TITLE = '脇道';
  */
 const MCP_STARTUP_CHECK_TIMEOUT_MS = 8_000;
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 interface ChatPanel extends BaseChatPanel {
   // `panel` / `loop` / `disposed` / `title` / `taskManaged` / `postTimer` /
   // `approvalResolvedListeners` / `notifiedApprovalRequestIds` は`BaseChatPanel`
@@ -600,8 +604,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     try {
       await entry.session.resume(threadId, cwd);
     } catch (e) {
-      this.panels.delete(threadId);
-      this.teardown(entry);
+      entry.session.resumeFailed(errorMessage(e));
       this.reportError(e);
     }
   }
@@ -638,13 +641,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     );
     this.attachPanel(entry, panel);
     this.panels.set(threadId, entry);
-    try {
-      await entry.session.resume(threadId, undefined);
-    } catch (e) {
-      this.panels.delete(threadId);
-      this.teardown(entry);
-      this.reportError(e);
-    }
+    entry.session.deferResume(threadId);
   }
 
   /** セッションとループだけを組み立てる。パネルはまだ作らない。 */
@@ -902,6 +899,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         if (text.trim() === '' && entry.attachments.list.length === 0) {
           return;
         }
+        if (entry.session.getState().restore !== undefined) {
+          return;
+        }
         // 手動の発言はループへの割り込み。指示が交互に飛ぶ状態を作らない
         entry.loop.noteUserAction();
         // 擬似コマンドはCLIへ送らない。送っても文章として素通しされるだけ
@@ -923,6 +923,19 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         }
         this.reportActivity(entry, text);
         this.postState(entry);
+        return;
+      }
+      if (type === 'resume') {
+        const threadId = entry.session.threadId;
+        if (threadId === undefined || entry.session.getState().restore?.state === 'loading') {
+          return;
+        }
+        try {
+          await entry.session.resume(threadId, entry.cwd);
+        } catch (e) {
+          entry.session.resumeFailed(errorMessage(e));
+          this.reportError(e);
+        }
         return;
       }
       if (type === 'requestFiles') {

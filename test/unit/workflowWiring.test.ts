@@ -229,17 +229,15 @@ describe('isTaskManagedThreadの結線（design.md §16.10の7、レビュー指
     expect(after.connection.requests.find((r) => r.method === 'thread/resume')).toBeUndefined();
   });
 
-  it('タスク管理下でない（人が手で開いた）スレッドは、リロード後も従来通り復元される', async () => {
+  it('タスク管理下でない（人が手で開いた）スレッドも、リロード後は明示ロードまで復元しない', async () => {
     const memento = fakeMemento();
     const after = wireWindow(memento);
     const panel = fakeWindow.createWebviewPanel('codex.chat', 'x', ViewColumn.Active, {});
 
-    const p = after.chat.restorePanel(panel, { threadId: 'thread-manual' });
-    await flush();
-    after.connection.resolveFirst('thread/resume', { thread: { id: 'thread-manual' } });
-    await p;
+    await after.chat.restorePanel(panel, { threadId: 'thread-manual' });
 
     expect(panel.disposed).toBe(false);
     expect(after.chat.isOpen('thread-manual')).toBe(true);
+    expect(after.connection.requests.find((r) => r.method === 'thread/resume')).toBeUndefined();
   });
 });

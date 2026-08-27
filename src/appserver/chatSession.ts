@@ -184,6 +184,11 @@ export class ChatSession {
 
   /** 既存のスレッドを読み込む。 */
   async resume(threadId: string, cwd: string | undefined): Promise<void> {
+    this.update({
+      ...this.state,
+      threadId,
+      restore: { state: 'loading', message: undefined },
+    });
     await this.connection.ensureStarted();
     const params: Record<string, unknown> = { threadId };
     if (cwd !== undefined) {
@@ -191,6 +196,20 @@ export class ChatSession {
     }
     const response = await this.connection.request('thread/resume', params);
     this.applyThreadSnapshot(threadId, response.result);
+  }
+
+  /** VS Codeが復元したタブを、会話本文を取らない状態で保持する。 */
+  deferResume(threadId: string): void {
+    this.update({
+      ...this.state,
+      threadId,
+      restore: { state: 'deferred', message: undefined },
+    });
+  }
+
+  /** 明示的な復元に失敗しても、タブを閉じずに再試行できる状態へ戻す。 */
+  resumeFailed(reason: string): void {
+    this.update({ ...this.state, restore: { state: 'failed', message: reason } });
   }
 
   /**
@@ -223,6 +242,7 @@ export class ChatSession {
     this.update({
       ...this.state,
       threadId,
+      restore: undefined,
       name: readThreadName(result) ?? this.state.name,
       items,
       // レビュー中に復元・detachedで開いた画面でも、割り込みの扱いを取り違えない

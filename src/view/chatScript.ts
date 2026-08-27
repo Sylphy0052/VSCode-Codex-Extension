@@ -1812,6 +1812,21 @@ export function chatScript(
       .map((i) => i.text);
     applySettings(state.settings, state.planMode);
     const log = el('log');
+    const restore = state.restore;
+    const deferredRestore = el('deferredRestore');
+    const loadDeferredRestore = el('loadDeferredRestore');
+    const deferredRestoreMessage = el('deferredRestoreMessage');
+    const restoreVisible = restore !== undefined;
+    deferredRestore.hidden = !restoreVisible;
+    if (restoreVisible) {
+      const loading = restore.state === 'loading';
+      loadDeferredRestore.disabled = loading;
+      loadDeferredRestore.textContent = loading ? '読み込み中…' : '会話を読み込む';
+      deferredRestoreMessage.textContent =
+        restore.state === 'failed'
+          ? '会話を読み込めませんでした: ' + (restore.message || '不明なエラー')
+          : '会話はまだ読み込まれていません。必要なときに読み込んでください。';
+    }
     const atBottom = isLogNearBottom(log);
     lastItems = state.items;
     syncItems(state.items);
@@ -1841,7 +1856,8 @@ export function chatScript(
     );
     el('stop').hidden = !state.busy;
     // 応答中でも送れる。既定では待ち行列に積むだけで応答は止まらない
-    el('send').disabled = false;
+    el('send').disabled = restoreVisible;
+    el('input').disabled = restoreVisible;
     // 圧縮は新しいターンを起こす。応答中に重ねると割り込みになるため止める
     el('compact').disabled = !!state.busy;
     // インポートの確認要求も新しいターンを起こす（Claude Code画面のみ、issue #200）
@@ -1866,6 +1882,10 @@ export function chatScript(
     updateScrollToBottomVisibility();
     updateUserMessageNavigation();
   }
+
+  el('loadDeferredRestore').addEventListener('click', () => {
+    vscode.postMessage({ type: 'resume' });
+  });
 
   // いま添えている枚数。本文が空でも送れるかの判定に使う
   let attachmentCount = 0;

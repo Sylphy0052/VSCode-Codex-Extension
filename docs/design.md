@@ -4090,7 +4090,7 @@ issue #719 は「実装して実機で見比べ、良くならなければ入れ
 
 #### 上限を2系統に分ける
 
-`MAX_APP_SERVER_LINE_BYTES`（128MB）を追加し、app-serverとのJSON-RPCだけがこちらを使う。
+`MAX_APP_SERVER_LINE_BYTES`（512MB）を追加し、app-serverとのJSON-RPCだけがこちらを使う。
 `MAX_LINE_BUFFER_BYTES`（10MB）は据え置きで、Claude CLIのストリーム（`claude/streamSession.ts`）・
 `util/ndjson.ts`・`orchestrator/` はそのまま。上限そのものは撤廃しない。撤廃すると壊れた出力を
 延々と連結してメモリを食い潰す経路（issue #402、1点目）が復活する。
