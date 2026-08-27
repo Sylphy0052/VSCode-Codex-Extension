@@ -36,9 +36,9 @@ describe('openChatFileLink', () => {
       return undefined;
     };
 
-    await expect(openChatFileLink('file:///outside-workspace/image.png', '/workspace')).resolves.toBe(
-      true,
-    );
+    await expect(
+      openChatFileLink('file:///outside-workspace/image.png', '/workspace'),
+    ).resolves.toBe(true);
 
     expect(calls).toEqual([
       {
