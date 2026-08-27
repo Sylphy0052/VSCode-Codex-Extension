@@ -5,6 +5,7 @@ import {
   InMemoryMetaCache,
   type FileSystemPort,
   type ThreadListPort,
+  type ThreadNameSetterPort,
 } from '../../src/session/ports';
 import { SessionStore, isWithinAny } from '../../src/session/sessionStore';
 
@@ -264,6 +265,32 @@ describe('SessionStore.list（thread/list優先・ファイル読みへの退避
     const result = await store.list(options({ scope: 'all', maxEntries: 1 }));
     // 更新時刻の降順で先頭1件
     expect(result.sessions.map((s) => s.id)).toEqual([ID_B]);
+  });
+
+  it('thread/listで名称未設定なら最初の指示を短い表示名にして保存する', async () => {
+    const fs = buildFs();
+    const store = new SessionStore(fs, paths, new InMemoryMetaCache());
+    const filePath = rollout(`${paths.sessions}/2026/08/07`, ID_D);
+    const saved: Array<[string, string]> = [];
+    const setter: ThreadNameSetterPort = async (id, name) => {
+      saved.push([id, name]);
+      return true;
+    };
+    store.attachThreadList(
+      okPort([
+        {
+          ...threadSession(ID_D, '/work/alpha', '2026-08-06T15:09:29Z'),
+          threadName: undefined,
+          rolloutPath: filePath,
+        },
+      ]),
+    );
+    store.attachThreadNameSetter(setter);
+
+    const result = await store.list(options({ scope: 'all' }));
+
+    expect(result.sessions[0]?.threadName).toBe('テスト用の指示を書く');
+    expect(saved).toEqual([[ID_D, 'テスト用の指示を書く']]);
   });
 
   it('thread/listが空応答ならファイル読みへ退避し、理由を残す', async () => {

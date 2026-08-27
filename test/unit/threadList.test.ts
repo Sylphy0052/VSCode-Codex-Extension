@@ -66,6 +66,9 @@ describe('normalizeThread', () => {
       updatedAt: new Date(1786444859 * 1000).toISOString(),
       cwd: '/home/kfuruhashi/workspace/github/novel-writer',
       archived: false,
+      rolloutPath:
+        '/home/u/.codex/sessions/2026/08/11/rollout-2026-08-11T19-06-41-019ff049-df7c-7272-ba69-9b333f9d9102.jsonl',
+      parentThreadId: undefined,
     });
   });
 

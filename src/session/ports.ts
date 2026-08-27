@@ -76,6 +76,9 @@ export type ThreadListPort = (
   archivedSessionsDir: string,
 ) => Promise<ThreadListOutcome>;
 
+/** `thread/list`で名前が空だったスレッドだけへ、導出した名前を保存する口。 */
+export type ThreadNameSetterPort = (threadId: string, name: string) => Promise<boolean>;
+
 /** session_meta の永続キャッシュ。1行目は不変なので無効化はエントリ削除のみ。 */
 export interface MetaCachePort {
   get(sessionId: string): SessionMeta | undefined;

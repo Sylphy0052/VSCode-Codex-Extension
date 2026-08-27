@@ -360,6 +360,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   store.attachThreadList((limit, archivedSessionsDir) =>
     appServer.listThreads(limit, archivedSessionsDir),
   );
+  store.attachThreadNameSetter((threadId, name) => appServer.setThreadName(threadId, name));
   const claudeModels = new ClaudeModelProbe(claudePath, log);
   const claudeAgents = new ClaudeAgentProbe(claudePath, log);
   const claudeMcp = new ClaudeMcpProbe(claudePath, log);
