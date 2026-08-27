@@ -427,8 +427,11 @@ ${sharedStyles()}
   }
   .composerOverflowLabel { white-space: nowrap; }
   #composerInputRow textarea {
-    /* ボタン列に押し潰されても入力欄だと分かる最小幅を確保する */
-    min-width: 160px;
+    /*
+     * 複数タブでパネルが狭くなったときも、送信ボタンを画面外へ押し出さない。
+     * flex項目の既定の最小幅では内容幅より小さくならないため、残り幅まで縮小を許可する。
+     */
+    min-width: 0;
   }
   textarea {
     flex: 1;
