@@ -64,7 +64,7 @@ ${sharedStyles()}
     max-width: 36rem;
     padding: 16px;
     border: 1px solid var(--vscode-widget-border);
-    border-radius: 6px;
+    border-radius: var(--agent-radius-md);
     display: flex;
     flex-direction: column;
     gap: 12px;
