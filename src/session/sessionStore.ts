@@ -10,12 +10,7 @@ import {
 import type { SessionMeta, SessionSummary } from '../codex/types';
 import { mapWithLimit } from '../util/concurrency';
 import { basenameOf } from '../util/paths';
-import type {
-  FileSystemPort,
-  MetaCachePort,
-  ThreadListPort,
-  ThreadNameSetterPort,
-} from './ports';
+import type { FileSystemPort, MetaCachePort, ThreadListPort, ThreadNameSetterPort } from './ports';
 
 export type HistoryScope = 'workspace' | 'all';
 
