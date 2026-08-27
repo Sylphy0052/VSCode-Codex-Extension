@@ -79,7 +79,7 @@ const EMPTY_TASK_CONFIG: TaskSessionConfig = { model: '', effort: '', approvalMo
 /** セッション引き継ぎ（issue #694）のテスト用フェイク。既定は「見つからない」。 */
 function fakeSessionStore(overrides?: Partial<SessionStore>): SessionStore {
   return {
-    resolveRolloutPath: async () => undefined,
+    resolveHandoffRolloutPath: async () => undefined,
     ...overrides,
   } as unknown as SessionStore;
 }
@@ -1776,7 +1776,7 @@ describe('handoffToNewSession（issue #694）', () => {
 
   it('rolloutが解決できれば、新セッションへ固定文言とパスを送る', async () => {
     const store = fakeSessionStore({
-      resolveRolloutPath: async () => '/home/user/.codex/sessions/rollout-x.jsonl',
+      resolveHandoffRolloutPath: async () => '/home/user/.codex/sessions/rollout-x.jsonl',
     });
     const { manager, connection } = createManager({ store });
 
@@ -1801,7 +1801,7 @@ describe('handoffToNewSession（issue #694）', () => {
   });
 
   it('rolloutが解決できなければ、短時間リトライ後にエラー通知して新セッションを作らない', async () => {
-    const store = fakeSessionStore({ resolveRolloutPath: async () => undefined });
+    const store = fakeSessionStore({ resolveHandoffRolloutPath: async () => undefined });
     const { manager, connection } = createManager({ store });
 
     const opened = manager.openNew('/workspace/root');
@@ -1820,7 +1820,7 @@ describe('handoffToNewSession（issue #694）', () => {
       threadStartsBefore,
     );
     expect(__mock.messages.errors).toContainEqual(
-      expect.stringContaining('transcriptが見つかりませんでした'),
+      expect.stringContaining('履歴保存が完了しませんでした'),
     );
   });
 });

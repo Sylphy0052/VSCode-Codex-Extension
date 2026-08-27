@@ -23,6 +23,9 @@ export type HistoryScope = 'workspace' | 'all';
  */
 export const MTIME_CONCURRENCY_LIMIT = 32;
 
+/** 引き継ぎ元が履歴DBへ反映されたことを確認するために読む最新スレッド数。 */
+const HANDOFF_THREAD_LIST_LIMIT = 20;
+
 /**
  * 表示名を作るために読む先頭行数。
  * developerロールの前置きが数行入るため1行では足りない。
@@ -240,6 +243,27 @@ export class SessionStore {
   /** 会話ビューアなど、全文を読む用途のためにロールアウトの場所を解決する。 */
   async resolveRolloutPath(sessionId: string): Promise<string | undefined> {
     return (await this.locateRollouts()).get(sessionId)?.filePath;
+  }
+
+  /**
+   * 新セッションへの引き継ぎに使えるロールアウトを解決する。
+   *
+   * ファイルが作成された直後は、Codexの履歴DB（`thread/list`）からまだ読めない場合がある。
+   * JSONLの先頭メタデータと履歴一覧の両方で同じセッションを確認できるまで待たせる。
+   */
+  async resolveHandoffRolloutPath(sessionId: string): Promise<string | undefined> {
+    const filePath = await this.resolveRolloutPath(sessionId);
+    if (filePath === undefined) {
+      return undefined;
+    }
+    const meta = parseSessionMeta((await this.fs.readFirstLine(filePath)) ?? '');
+    if (meta?.sessionId !== sessionId || this.threadList === undefined) {
+      return undefined;
+    }
+    const outcome = await this.threadList(HANDOFF_THREAD_LIST_LIMIT, this.paths.archivedSessions);
+    return outcome.ok && outcome.sessions.some((session) => session.id === sessionId)
+      ? filePath
+      : undefined;
   }
 
   /** id → ロールアウトの所在。archived_sessions 配下かどうかがアーカイブ状態そのもの。 */
