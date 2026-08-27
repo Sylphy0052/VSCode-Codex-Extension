@@ -960,8 +960,14 @@ export function chatScript(
     const kindLabel = { add: '追加', delete: '削除', update: '変更' }[diff.kind] || diff.kind;
     const label = document.createElement('span');
     label.className = 'diff-label';
-    label.textContent = diff.path + (diff.movePath ? ' → ' + diff.movePath : '') +
-      ' ・ ' + kindLabel;
+    const displayPath = abbreviateDiffPath(diff.path);
+    const displayMovePath = diff.movePath ? abbreviateDiffPath(diff.movePath) : '';
+    const fullLabel = diff.path + (diff.movePath ? ' → ' + diff.movePath : '');
+    const displayLabel = displayPath + (displayMovePath ? ' → ' + displayMovePath : '');
+    label.textContent = displayLabel + ' ・ ' + kindLabel;
+    if (displayLabel !== fullLabel) {
+      label.title = fullLabel;
+    }
     summary.appendChild(label);
 
     if (interactive) {
@@ -983,6 +989,14 @@ export function chatScript(
     }
     details.appendChild(pre);
     return details;
+  }
+
+  // チャット領域を長い絶対パスで占有しないよう、末尾を残して表示を省略する。
+  // 操作に渡すdiff.path / movePathはこの関数を通さず、元の値を使い続ける。
+  const MAX_DIFF_PATH_DISPLAY_LENGTH = 96;
+  function abbreviateDiffPath(value) {
+    if (value.length <= MAX_DIFF_PATH_DISPLAY_LENGTH) return value;
+    return '…' + value.slice(-(MAX_DIFF_PATH_DISPLAY_LENGTH - 1));
   }
 
   function renderDiffs(container, diffs, itemId, interactive) {
