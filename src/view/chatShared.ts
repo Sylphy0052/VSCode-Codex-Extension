@@ -451,8 +451,7 @@ export async function openChatFileLink(url: string, cwd: string | undefined): Pr
   line ??= location.line;
 
   try {
-    const doc = await vscode.workspace.openTextDocument(target);
-    await vscode.window.showTextDocument(doc, {
+    await vscode.commands.executeCommand('vscode.open', target, {
       preview: false,
       ...(line === undefined
         ? {}
