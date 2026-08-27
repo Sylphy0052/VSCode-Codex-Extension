@@ -1274,6 +1274,10 @@ ${chatStyles()}
 <body class="${densityBodyClass(options.density ?? DEFAULT_CHAT_DENSITY)}">
   <div id="logWrap">
     <div id="log"></div>
+    <div id="deferredRestore" hidden>
+      <span id="deferredRestoreMessage"></span>
+      <button id="loadDeferredRestore" type="button">会話を読み込む</button>
+    </div>
     <div id="conversationNavigation">
       <button id="previousUserMessage" type="button" aria-label="前の自分の発言へ移動" title="前の自分の発言へ移動します" hidden>${COMPOSER_ICONS.previousUserMessage}</button>
       <button id="nextUserMessage" type="button" aria-label="次の自分の発言へ移動" title="次の自分の発言へ移動します" hidden>${COMPOSER_ICONS.nextUserMessage}</button>

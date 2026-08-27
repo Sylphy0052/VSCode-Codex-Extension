@@ -454,6 +454,13 @@ export interface ExtraUsageView {
 
 export interface ChatState {
   threadId: string | undefined;
+  /**
+   * VS Codeの再読み込みで復元された会話本文の状態。
+   *
+   * `thread/resume` は会話全体を返すため、復元直後に自動実行すると大きなロールアウトが
+   * app-server接続全体を圧迫する。復元タブだけは人が読み込みを選ぶまで待たせる。
+   */
+  restore?: { state: 'deferred' | 'loading' | 'failed'; message: string | undefined } | undefined;
   /** Codexが会話内容から付ける要約名。ユーザーが変更することもできる。 */
   name: string | undefined;
   /** Codexが応答中かどうか。入力欄の活性制御に使う。 */
@@ -580,6 +587,7 @@ export interface ChatState {
 
 export const initialChatState: ChatState = {
   threadId: undefined,
+  restore: undefined,
   name: undefined,
   busy: false,
   turnId: undefined,
