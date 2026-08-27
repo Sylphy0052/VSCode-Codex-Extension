@@ -4,7 +4,7 @@ import { type JsonRpcMessage } from '../../src/codex/jsonRpc';
 /**
  * このテストでの受信バッファの1行上限（issue #795）。
  *
- * 実際の既定値（`MAX_APP_SERVER_LINE_BYTES`）は128MBあり、超過させるだけのために
+ * 実際の既定値（`MAX_APP_SERVER_LINE_BYTES`）は512MBあり、超過させるだけのために
  * その大きさの文字列を作るとテストが重くなる。上限値そのものはここでの関心では
  * ないため、コンストラクタから小さい値を渡して挙動だけを見る。
  */
