@@ -198,6 +198,23 @@ export class AppServerClient {
   }
 
   /**
+   * 名称未設定のスレッドへ表示名を保存する。既存名の上書き判断は呼び出し側が行う。
+   */
+  async setThreadName(threadId: string, name: string): Promise<boolean> {
+    const result = await this.call<void>(async (request) => {
+      const response = await request('thread/name/set', { threadId, name });
+      return response.error === undefined
+        ? { ok: true, value: undefined }
+        : { ok: false, error: response.error.message };
+    });
+    if (!result.ok) {
+      this.log.warn(`スレッド名を更新できませんでした: ${result.error}`);
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * MCPサーバーの一覧を取る（issue #27、design.md TP-50）。
    *
    * `mcpServerStatus/list` と `config/read` を1回ずつ呼び、接続状況（ツール数など）と

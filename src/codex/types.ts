@@ -116,6 +116,11 @@ export interface SessionSummary {
   cwd: string | undefined;
   archived: boolean;
   /**
+   * Codexのロールアウトファイル。`thread/list`の応答で得られる場合だけ持つ。
+   * 名称未設定スレッドの最初のユーザー発言を読むために使い、UIへは公開しない。
+   */
+  rolloutPath?: string | undefined;
+  /**
    * 親スレッドのid（issue #34、design.md §14.26）。
    *
    * `thread/list`（Codexのみ）の応答にあるキーで、`normalizeThread`で読む。実測・スキーマの

@@ -1,4 +1,5 @@
 import type { CodexPaths } from '../codex/cliLocator';
+import { summarize } from '../codex/conversation';
 import { parseSessionIndex } from '../codex/sessionIndex';
 import {
   firstUserMessage,
@@ -9,7 +10,7 @@ import {
 import type { SessionMeta, SessionSummary } from '../codex/types';
 import { mapWithLimit } from '../util/concurrency';
 import { basenameOf } from '../util/paths';
-import type { FileSystemPort, MetaCachePort, ThreadListPort } from './ports';
+import type { FileSystemPort, MetaCachePort, ThreadListPort, ThreadNameSetterPort } from './ports';
 
 export type HistoryScope = 'workspace' | 'all';
 
@@ -31,6 +32,7 @@ const HANDOFF_THREAD_LIST_LIMIT = 20;
  * developerロールの前置きが数行入るため1行では足りない。
  */
 const HEAD_LINES = 40;
+const FALLBACK_THREAD_NAME_LENGTH = 48;
 
 export interface ListOptions {
   scope: HistoryScope;
@@ -79,6 +81,9 @@ export class SessionStore {
    * 常にファイル読みだけを使う。
    */
   private threadList: ThreadListPort | undefined;
+  private threadNameSetter: ThreadNameSetterPort | undefined;
+  /** app-serverの反映待ちに同じスレッドへ更新要求を重ねない。 */
+  private readonly requestedThreadNameUpdates = new Set<string>();
 
   constructor(
     private readonly fs: FileSystemPort,
@@ -89,6 +94,10 @@ export class SessionStore {
   /** `thread/list` を使えるようにする。呼ばなければ従来どおりファイル読みのみで動く。 */
   attachThreadList(port: ThreadListPort): void {
     this.threadList = port;
+  }
+
+  attachThreadNameSetter(port: ThreadNameSetterPort): void {
+    this.threadNameSetter = port;
   }
 
   /**
@@ -115,8 +124,11 @@ export class SessionStore {
     return this.listFromFiles(options);
   }
 
-  /** `thread/list` で得たセッションにスコープ絞り込みと件数上限だけを適用する。 */
-  private buildFromThreadList(sessions: SessionSummary[], options: ListOptions): ListResult {
+  /** `thread/list`で得たセッションにスコープ絞り込み、名称補完、件数上限を適用する。 */
+  private async buildFromThreadList(
+    sessions: SessionSummary[],
+    options: ListOptions,
+  ): Promise<ListResult> {
     const scoped = sessions.filter(
       (s) =>
         options.scope !== 'workspace' ||
@@ -125,8 +137,20 @@ export class SessionStore {
     const sorted = [...scoped].sort((a, b) =>
       a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0,
     );
+    const limited = sorted.slice(0, Math.max(0, options.maxEntries));
+    const named = await mapWithLimit(limited, MTIME_CONCURRENCY_LIMIT, async (session) => {
+      if (session.threadName !== undefined || session.rolloutPath === undefined) {
+        return session;
+      }
+      const threadName = await this.firstInstruction(session.rolloutPath);
+      if (threadName === undefined) {
+        return session;
+      }
+      this.requestThreadNameUpdate(session.id, threadName);
+      return { ...session, threadName };
+    });
     return {
-      sessions: sorted.slice(0, Math.max(0, options.maxEntries)),
+      sessions: named,
       skippedIndexLines: 0,
       unresolved: 0,
     };
@@ -216,9 +240,32 @@ export class SessionStore {
     );
   }
 
-  /** 要約名が無いセッションの表示名。最初の指示を先頭数十行から拾う。 */
+  /**
+   * 要約名が無いセッションの表示名。最初の指示を先頭数十行から拾い、一覧向けの短い見出しへ
+   * 整形する。
+   */
   private async firstInstruction(filePath: string): Promise<string | undefined> {
-    return firstUserMessage(await this.fs.readHead(filePath, HEAD_LINES));
+    const first = firstUserMessage(await this.fs.readHead(filePath, HEAD_LINES));
+    return first === undefined ? undefined : summarize(first, FALLBACK_THREAD_NAME_LENGTH);
+  }
+
+  /**
+   * 表示中に得た導出名を非同期で保存する。名前が存在するスレッドはこの経路に入らないため、
+   * 手動名やCodexが既に付けた名前を上書きしない。
+   */
+  private requestThreadNameUpdate(threadId: string, name: string): void {
+    if (this.threadNameSetter === undefined || this.requestedThreadNameUpdates.has(threadId)) {
+      return;
+    }
+    this.requestedThreadNameUpdates.add(threadId);
+    void this.threadNameSetter(threadId, name).then(
+      (updated) => {
+        if (!updated) {
+          this.requestedThreadNameUpdates.delete(threadId);
+        }
+      },
+      () => this.requestedThreadNameUpdates.delete(threadId),
+    );
   }
 
   /**
