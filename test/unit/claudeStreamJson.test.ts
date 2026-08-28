@@ -1159,3 +1159,33 @@ describe('自動圧縮の窓サイズ（issue #201、design.md §14.37）', () =
     expect(initialClaudeState.autocompactWindow).toBeUndefined();
   });
 });
+
+describe('turnCompletionSeq（ターン結果の確定、issue #939）', () => {
+  it('result の1イベントで busy を落とし、同時に確定させる', () => {
+    const state = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      { type: 'result', subtype: 'success', result: '直しました' },
+    ]);
+    expect(state.busy).toBe(false);
+    expect(state.turnResultText).toBe('直しました');
+    expect(state.turnCompletionSeq).toBe(1);
+  });
+
+  it('失敗した result も確定として数える', () => {
+    const state = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      { type: 'result', subtype: 'error_during_execution', result: '' },
+    ]);
+    expect(state.turnFailed).toBe(true);
+    expect(state.turnCompletionSeq).toBe(1);
+  });
+
+  it('ターンを重ねるたびに増える', () => {
+    const state = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      { type: 'result', subtype: 'success', result: '1回目' },
+      { type: 'result', subtype: 'success', result: '2回目' },
+    ]);
+    expect(state.turnCompletionSeq).toBe(2);
+  });
+});

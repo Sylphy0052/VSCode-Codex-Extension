@@ -559,6 +559,20 @@ export interface ChatState {
    */
   turnResultText: string;
   /**
+   * ターンの結果が確定した回数（issue #939）。
+   *
+   * `turn/completed` と `turn/failed` でだけ1つ増やす。**`thread/status/changed` では
+   * 増やさない。** Codexは `thread/status/changed`（idle）を `turn/completed` より先に
+   * 送るため、`busy` の立ち下がりは「threadが暇になった」を表すだけで、「そのターンの
+   * 結果が確定した」を表さない。その時点の `turnResultText` は `turn/started` で空に
+   * 戻したままなので、`busy` の立ち下がりを完了とみなす読み手は必ず空を見る。
+   *
+   * 真偽値ではなく単調増加の数にしてあるのは、ターン開始時の戻し忘れを構造的に無くす
+   * ため。読み手は「前に見た値と違うか」だけを見ればよく、途中に何件のイベントが挟まって
+   * も、`turnResultText` が正当に空でも、完了そのものは判定できる。
+   */
+  turnCompletionSeq: number;
+  /**
    * 直前に完了/失敗したターンで編集したファイルパス。
    * Codexは items を turnId で辿って作るため、ここは常に turn/completed・turn/failed 時点で埋める。
    * Claude Codeは tool_use（Edit/Write/NotebookEdit）から都度積み、ターン開始時にリセットする。
@@ -605,6 +619,7 @@ export const initialChatState: ChatState = {
   reviewing: false,
   turnResultText: '',
   turnEditedFiles: [],
+  turnCompletionSeq: 0,
   todos: NO_TODOS,
   todoHistory: NO_TODO_HISTORY,
   backgroundTerminals: NO_BACKGROUND_TERMINALS,
@@ -1262,6 +1277,7 @@ export function applyEvent(
         backgroundTerminals: NO_BACKGROUND_TERMINALS,
         turnResultText: summary.text,
         turnEditedFiles: summary.editedFiles,
+        turnCompletionSeq: state.turnCompletionSeq + 1,
       };
     }
 
@@ -1276,6 +1292,7 @@ export function applyEvent(
         backgroundTerminals: NO_BACKGROUND_TERMINALS,
         turnResultText: summary.text,
         turnEditedFiles: summary.editedFiles,
+        turnCompletionSeq: state.turnCompletionSeq + 1,
       };
     }
 
@@ -1285,6 +1302,9 @@ export function applyEvent(
     }
 
     case 'thread/status/changed': {
+      // ここでは `turnCompletionSeq` を増やさない（issue #939）。この通知は
+      // `turn/completed` より先に届き、その時点では `turnResultText` がまだ空である。
+      // ターンの結果を読む側は `busy` ではなく `turnCompletionSeq` の変化を見る
       const status = rec(params['status']);
       return { ...state, busy: str(status?.['type']) === 'active' };
     }

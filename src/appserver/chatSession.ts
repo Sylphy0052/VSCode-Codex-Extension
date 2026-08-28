@@ -756,7 +756,15 @@ export class ChatSession {
     if (!this.state.busy) {
       return;
     }
-    this.update({ ...this.state, busy: false, turnFailed: true });
+    this.update({
+      ...this.state,
+      busy: false,
+      turnFailed: true,
+      // 走っていたターンが「失敗として確定した」（issue #939）。ここで進めないと、
+      // 完了の世代を見て次を決める側（`LoopController.observe`）が `turn/completed` を
+      // 永久に待ち、接続断でループが止まらなくなる
+      turnCompletionSeq: this.state.turnCompletionSeq + 1,
+    });
   }
 
   /** 画面を閉じるときなど。保留中の要求を全て拒否して解放し、覚えていた状態も破棄する。 */

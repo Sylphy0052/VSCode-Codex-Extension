@@ -300,8 +300,10 @@ export function declaresDone(item: ChatItem): boolean {
 /**
  * 同じ指示を条件成立まで送り続ける。
  *
- * ターンの完了は `ChatState.busy` の立ち下がりで見る。CodexとClaude Codeで
- * 状態の形が共通なので、この制御はプロバイダを問わず同じものを使える。
+ * ターンの完了は `ChatState.busy` の立ち下がりと `turnCompletionSeq` の変化の両方で見る
+ * （issue #939）。`busy` だけでは「threadが暇になった」しか分からず、Codexではその時点で
+ * まだターンの結果が確定していない。CodexとClaude Codeで状態の形が共通なので、この制御は
+ * プロバイダを問わず同じものを使える。
  * 画面ではなく拡張機能側に置くのは、タブの再描画やウィンドウのリロードで
  * 進行中のループが消えないようにするため。
  */
@@ -310,6 +312,19 @@ export class LoopController {
   private status: LoopStatus = idleLoopStatus;
   /** 送った指示のターンが始まったのを見たか。始まる前の busy=false と区別する。 */
   private sawBusy = false;
+  /**
+   * 走っているターンが始まった時点の`ChatState.turnCompletionSeq`（issue #939）。
+   *
+   * `busy`の立ち下がりだけではターンの完了を判定できない。Codexは
+   * `thread/status/changed`（idle）を`turn/completed`より先に送るため、`busy`が落ちた
+   * 時点の`turnResultText`は`turn/started`で空に戻したままである。ここを完了とみなすと、
+   * 停滞検知の署名も作業記録の成果もworker-reportの証拠も、常に空を見ることになる。
+   *
+   * そこで「ターンが始まったときの完了世代」を覚え、`busy`が落ちたあとも世代が変わる
+   * まで待つ。イベントが`idle`→`completed`でも`completed`→`idle`でも、結果が確定した
+   * あとにだけ次へ進む。
+   */
+  private resultSeqAtTurnStart: number | undefined;
   /**
    * `pause()` で一時停止中か（design.md §16.21「waitingReplyへの遷移」）。
    *
@@ -509,6 +524,7 @@ export class LoopController {
       existingItems.filter(isSettledCommandItem).map((item) => item.id),
     );
     this.lastMessage = lastAgentMessage(existingItems);
+    this.resultSeqAtTurnStart = undefined;
     this.indeterminateStreak = 0;
     this.evaluating = false;
     this.pendingPrompt = undefined;
@@ -548,6 +564,7 @@ export class LoopController {
     // 自分の世代と食い違うことで「もう自分の実行ではない」と気づける
     this.runGeneration += 1;
     this.sawBusy = false;
+    this.resultSeqAtTurnStart = undefined;
     this.paused = false;
     this.stallHistory = [];
     this.startedAt = undefined;
@@ -577,6 +594,10 @@ export class LoopController {
       return;
     }
     if (state.busy) {
+      if (!this.sawBusy) {
+        // このターンが始まった時点の完了世代を覚える（issue #939）
+        this.resultSeqAtTurnStart = state.turnCompletionSeq;
+      }
       this.sawBusy = true;
       return;
     }
@@ -596,7 +617,14 @@ export class LoopController {
       // 送った指示のターンがまだ始まっていない
       return;
     }
+    if (state.turnCompletionSeq === this.resultSeqAtTurnStart) {
+      // threadは暇になったが、`turn/completed`・`turn/failed`をまだ受け取っていない
+      // （issue #939）。この時点の`turnResultText`は空なので、ここでターンを消費すると
+      // 停滞検知の署名もゴール駆動の証拠も空のまま確定してしまう
+      return;
+    }
     this.sawBusy = false;
+    this.resultSeqAtTurnStart = undefined;
 
     // このターンで新しい発言が出たかを、合図の判定より前に確定させる（issue #937）。
     // 更新を分岐の後ろに置くと、どこかの`return`で更新を忘れて次のターンの判定が

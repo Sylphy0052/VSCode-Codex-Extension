@@ -50,6 +50,10 @@ export const initialClaudeState: ChatState = {
   reviewing: false,
   turnResultText: '',
   turnEditedFiles: [],
+  // Claude Codeは `result` の1イベントで `busy: false` と `turnResultText` を同時に決めるため、
+  // Codexのような順序の食い違い（issue #939）は起きない。それでも読み手を共通にするため、
+  // 完了の世代はプロバイダを問わず同じ意味で持つ
+  turnCompletionSeq: 0,
   todos: NO_TODOS,
   todoHistory: NO_TODO_HISTORY,
   backgroundTerminals: NO_BACKGROUND_TERMINALS,
@@ -363,7 +367,14 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
 function applyResult(state: ChatState, event: Record<string, unknown>): ChatState {
   const subtype = str(event['subtype']);
   const failed = event['is_error'] === true || (subtype !== '' && subtype !== 'success');
-  return { ...state, busy: false, turnFailed: failed, turnResultText: str(event['result']) };
+  return {
+    ...state,
+    busy: false,
+    turnFailed: failed,
+    turnResultText: str(event['result']),
+    // ターンの結果が確定した（issue #939）。Codexの `turn/completed` に対応する
+    turnCompletionSeq: state.turnCompletionSeq + 1,
+  };
 }
 
 /**

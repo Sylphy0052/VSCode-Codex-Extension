@@ -1362,6 +1362,9 @@ export class ClaudeStreamSession {
       ...this.state,
       busy: false,
       turnFailed: true,
+      // 走っていたターンが「失敗として確定した」（issue #939）。`result` を受け取れない
+      // まま終わった経路なので、完了の世代はここで進める
+      turnCompletionSeq: this.state.turnCompletionSeq + 1,
       backgroundTerminals: NO_BACKGROUND_TERMINALS,
     };
   }
