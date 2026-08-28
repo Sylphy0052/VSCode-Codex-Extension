@@ -1007,7 +1007,13 @@ export class ClaudeStreamSession {
     }
     this.write(buildControlRequest(`req_${this.nextControlId++}`, { subtype: 'interrupt' }));
     if (updateState) {
-      this.update({ ...this.state, busy: false });
+      // 中断でターンが終わる。`result`が来ない経路もあるため、ここで完了の世代を進める
+      // （issue #939、`chatSession.interrupt()`と同じ理由）
+      this.update({
+        ...this.state,
+        busy: false,
+        turnCompletionSeq: this.state.turnCompletionSeq + 1,
+      });
     }
   }
 

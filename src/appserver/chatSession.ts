@@ -590,7 +590,14 @@ export class ChatSession {
     // 画面がそれを伝えないと「中断が効かない」としか見えないため、印と注記を残す。
     // 注記のidは要求を投げる前に捕まえた turnId から作る。応答を待つ間に `Esc` をもう一度
     // 押されると、そのときには state.turnId が落ちていて別idの注記がもう1行出てしまう（issue #258）
-    const marked = markInterruptedCommands({ ...this.state, busy: false }, turnId);
+    // 中断はターンを終わらせる。`turn/completed`が来ない経路なので、ここで完了の世代を
+    // 進める（issue #939）。進めないと、世代の変化を待つ側（`LoopController.observe`）が
+    // 走行中のターンを抱えたまま次へ進めなくなる。上の中断失敗の分岐では進めない——
+    // あちらはターンが続いている可能性が高く、完了として扱うと次の指示を重ねて送る
+    const marked = markInterruptedCommands(
+      { ...this.state, busy: false, turnCompletionSeq: this.state.turnCompletionSeq + 1 },
+      turnId,
+    );
     this.update({ ...marked, turnId: undefined });
   }
 
