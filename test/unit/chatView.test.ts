@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildChatPanelOptions } from '../../src/view/chatView';
 import { renderShell, type ChatShellOptions } from '../../src/view/chatShared';
 import type { ReviewButtonConfig } from '../../src/view/chatScript';
+import { DEFAULT_COMPOSER_BUTTONS, type ComposerButtonId } from '../../src/view/composerButtons';
 
 /**
  * `vscode.Webview` の最小フェイク。`renderShell` が使うのは `cspSource` だけなので、
@@ -410,15 +411,22 @@ function isInOverflowMenu(html: string, id: string): boolean {
 }
 
 describe('入力欄アイコン列の「…」メニュー折りたたみ（issue #296）', () => {
-  it('composerButtons省略時は既定の4つ（attach/loopToggle/compact/claudeImport）が表、残り11個が「…」メニューに入る', () => {
+  it('composerButtons省略時は既定の7つが表、インポートを含む残りが「…」メニューに入る（Issue #900）', () => {
     const html = renderShell(fakeWebview() as never, buildOptions({ showImport: true }));
 
-    for (const id of ['attach', 'loopToggle', 'compact', 'claudeImport']) {
+    for (const id of [
+      'attach',
+      'loopToggle',
+      'compact',
+      'recap',
+      'planToggle',
+      'handoffToNewSession',
+      'secondOpinion',
+    ]) {
       expect(isInOverflowMenu(html, id), `${id} は表にあるはず`).toBe(false);
     }
     for (const id of [
-      'recap',
-      'planToggle',
+      'claudeImport',
       'fastToggle',
       'review',
       'exportTranscript',
@@ -427,7 +435,6 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
       'workflowView',
       'sessionKanban',
       'openProgress',
-      'handoffToNewSession',
     ]) {
       expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
     }
@@ -669,14 +676,8 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
       );
 
       for (const [id, label] of Object.entries(NON_SEND_BUTTON_LABELS)) {
-        if (
-          id === 'stop' ||
-          id === 'attach' ||
-          id === 'loopToggle' ||
-          id === 'compact' ||
-          id === 'claudeImport'
-        ) {
-          continue; // 表側の既定4つ（+stop）はここでは検査済み（別テスト）
+        if (id === 'stop' || DEFAULT_COMPOSER_BUTTONS.includes(id as ComposerButtonId)) {
+          continue; // 表側の既定（+stop）はここでは検査済み（別テスト）
         }
         const tag = extractButtonOpenTag(html, id);
         expect(tag, `${id} はメニュー項目のはず`).toContain('role="menuitem"');
@@ -685,7 +686,7 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
       }
     });
 
-    it('planToggle/fastToggleは「…」メニューに移ってもaria-pressedを保つ（トグル状態が分かるように）', () => {
+    it('planToggle/fastToggleは表でも「…」メニューでもaria-pressedを保つ（トグル状態が分かるように）', () => {
       const html = renderShell(fakeWebview() as never, buildOptions());
 
       expect(extractButtonOpenTag(html, 'planToggle')).toContain('aria-pressed="false"');

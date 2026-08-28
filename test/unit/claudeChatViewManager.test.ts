@@ -497,19 +497,26 @@ describe('ClaudeChatViewManager', () => {
       return buttonIndex > menuOpenIndex;
     }
 
-    it('設定を読んでいなければClaude Code側の実描画でも既定4つ（attach/loopToggle/compact/claudeImport）が表に残り、残り11個はメニューへ畳まれる', async () => {
+    it('設定を読んでいなければClaude Code側の実描画でも既定7つが表に残り、インポートを含む残りはメニューへ畳まれる', async () => {
       stubStart();
       const { manager } = createManager();
 
       await manager.openNew();
 
       const html = __mock.lastCreatedPanel()?.webview.html ?? '';
-      for (const id of ['attach', 'loopToggle', 'compact', 'claudeImport']) {
+      for (const id of [
+        'attach',
+        'loopToggle',
+        'compact',
+        'recap',
+        'planToggle',
+        'handoffToNewSession',
+        'secondOpinion',
+      ]) {
         expect(isInOverflowMenu(html, id), `${id} は表にあるはず`).toBe(false);
       }
       for (const id of [
-        'recap',
-        'planToggle',
+        'claudeImport',
         'fastToggle',
         'review',
         'exportTranscript',
@@ -518,7 +525,6 @@ describe('ClaudeChatViewManager', () => {
         'workflowView',
         'sessionKanban',
         'openProgress',
-        'handoffToNewSession',
       ]) {
         expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
       }
@@ -549,9 +555,12 @@ describe('ClaudeChatViewManager', () => {
       await manager.openNew();
 
       const html = __mock.lastCreatedPanel()?.webview.html ?? '';
-      for (const id of ['attach', 'loopToggle', 'compact', 'claudeImport']) {
+      for (const id of ['attach', 'loopToggle', 'compact', 'recap']) {
         expect(isInOverflowMenu(html, id), `${id} は表にあるはず`).toBe(false);
       }
+      expect(isInOverflowMenu(html, 'claudeImport'), 'claudeImport は「…」メニューにあるはず').toBe(
+        true,
+      );
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('nope'));
 
       warnSpy.mockRestore();

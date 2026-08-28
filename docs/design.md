@@ -3387,7 +3387,7 @@ CLIを混在させている利用者にとっては情報が1つ減るが、ア�
 
 #### ボタンのID一覧・既定・検証は`vscode`に依存しない別モジュールへ
 
-`src/view/composerButtons.ts`に`COMPOSER_BUTTON_IDS`（正準の並び、変更前の10個の既定順そのまま）・`DEFAULT_COMPOSER_BUTTONS`（先頭4つ）・`normalizeComposerButtons`（設定の生値の検証）・`overflowComposerButtons`（表に出す分を除いた残りを正準の並びの順で返す）を置いた。`vscode`に依存しない純粋関数のみで、`config.ts`（検証）と`chatShared.ts`（描画）の両方から使う。
+`src/view/composerButtons.ts`に`COMPOSER_BUTTON_IDS`（正準の並び、変更前の10個の既定順そのまま）・`DEFAULT_COMPOSER_BUTTONS`（表に直接出す既定。着手時は先頭4つ。Issue #900で7つへ見直した。§14.82）・`normalizeComposerButtons`（設定の生値の検証）・`overflowComposerButtons`（表に出す分を除いた残りを正準の並びの順で返す）を置いた。`vscode`に依存しない純粋関数のみで、`config.ts`（検証）と`chatShared.ts`（描画）の両方から使う。
 
 `normalizeComposerButtons`は、配列でない・未知のIDを含む・IDが重複する、のいずれかであれば**丸ごと**`DEFAULT_COMPOSER_BUTTONS`へ戻す（`config.ts`の`normalizePseudoWorktreeExclude`と同じ「壊れた設定値は既定へ丸める」方針。一部のIDだけ間引く実装も検討したが、利用者が意図しない並びのまま中途半端に描画されるより、既定へ全戻しして警告を出す方が事故に気付きやすいと判断した）。空配列は「表には何も出さず全部畳む」という有効な指定として受け入れる。
 
@@ -7417,6 +7417,25 @@ Evaluatorへ渡す会話の抜粋は `untrustedText.ts` の囲い（`formatUntru
 - `test/unit/goalEvaluatorProcess.test.ts`: 組み立てた引数にツール無効化（`--tools ""` / `--sandbox read-only`）と設定隔離（`--setting-sources ""` / `--ignore-user-config`）が入ること、セッションを引き継ぐ引数（`--resume` / `--continue` / `resume` / `fork`）が入らないこと、`auto` が軽量モデルへ解決されること
 - `test/unit/loopController.test.ts`: `achieved` で `done`・`escalate` で `escalated` として止まること、`continue` で `nextFocus` を添えた次のターンを送ること、Workerへ `<<LOOP_DONE>>` を付けないこと・Workerの自己申告では止まらないこと・撤退の申告は尊重すること、毎ターン新しく評価すること、`indeterminate` が続いたら人へ渡すこと・`continue` で連続が途切れること、Evaluatorが例外を投げてもループが壊れないこと、最終ターンの達成が `maxReached` に埋もれないこと、評価を待つ間に止められたら次を送らないこと
 - `test/unit/config.test.ts`: 既定が `inherit` / `auto` であること、未知のproviderが `inherit` へ倒れること
+
+### 14.82 入力欄下に直接出すボタンの既定構成を見直す（Issue #900）
+
+§14.58で「…」メニューへの折りたたみを入れた時点の既定は、正準の並びの先頭4つ（画像・ループ・圧縮・インポート）だった。その後に要約（§14.36）・計画・新セッションへ引き継ぐ・セカンドオピニオン（§14.80）が増え、会話中に押す頻度が高い操作ほど「…」の中に隠れている状態になっていた。既定を次の7つへ変えた。
+
+画像・ループ・圧縮・要約・計画・新セッションへ引き継ぐ・セカンドオピニオン
+
+インポート（`claudeImport`）は表から外して「…」メニューへ移した。他エージェントからの設定の取り込みは、会話の最中に繰り返し押すものではなく、環境を整えるときに一度使うものであるため。
+
+#### 変えたのは既定値だけ
+
+`DEFAULT_COMPOSER_BUTTONS`（`src/view/composerButtons.ts`）と`package.json`の`agent.chat.composerButtons`の`default`を差し替えただけで、描画・検証・折りたたみの仕組み（§14.58）は変えていない。`agent.chat.composerButtons`を明示している利用者の並びには影響しない。表から外したボタンは`overflowComposerButtons`が正準の並びのまま「…」メニューへ回すため、どこからも到達できなくなるボタンは生まれない。
+
+#### 確かめ方
+
+- `test/unit/composerButtons.test.ts`: 既定が上記7つであること、`overflowComposerButtons(DEFAULT_COMPOSER_BUTTONS)`が`claudeImport`を含む残り10個を正準の並びの順で返すこと
+- `test/unit/config.test.ts`: 設定を省略したときに既定が返ること、明示した並びはそのまま使われること
+- `test/unit/chatView.test.ts`: 設定を省略した`renderShell`の出力で、7つが表・残りが「…」メニューの側に置かれること
+- `docs/manual-test.md` U-25: 壊れた設定値を入れたときに既定へ戻ること（期待する並びを7つへ更新）
 
 ### 16.44 チームモード（Issue #693）
 

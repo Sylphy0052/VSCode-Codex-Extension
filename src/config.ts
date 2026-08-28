@@ -197,7 +197,7 @@ export function readChatSendOnConfig(): SendOnMode {
 
 /**
  * 入力欄アイコン列（`#composerIconRow`）の表に直接出すボタン（`agent.chat.
- * composerButtons`、既定は変更前の並びの先頭4つ、issue #296）。それ以外は「…」
+ * composerButtons`、既定は`DEFAULT_COMPOSER_BUTTONS`の7つ、issue #296・Issue #900）。それ以外は「…」
  * メニューへ畳む（`chatView.ts`の`renderShell`参照）。検証・既定への丸めは
  * `normalizeComposerButtons`（`vscode`に依存しない純粋関数）が行い、ここでは生値を
  * 渡すだけ。`renderMarkdown` / `sendOn`と同じ`agent.chat.*`名前空間・`window`スコープ

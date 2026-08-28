@@ -579,7 +579,7 @@ describe('readChatComposerButtonsConfig（issue #296）', () => {
     __mock.reset();
   });
 
-  it('既定はDEFAULT_COMPOSER_BUTTONS（変更前の並びの先頭4つ）で、警告は無い', () => {
+  it('既定はDEFAULT_COMPOSER_BUTTONS（Issue #900で見直した7つ）で、警告は無い', () => {
     const result = readChatComposerButtonsConfig();
     expect(result.buttons).toEqual(DEFAULT_COMPOSER_BUTTONS);
     expect(result.warning).toBeUndefined();
