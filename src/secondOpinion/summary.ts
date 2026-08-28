@@ -154,15 +154,17 @@ export function buildSummarySessionInput(
  * **保証しないこと**: 絶対パスを指定した読み取りは止まらない。完全な隔離はツール自体の
  * 無効化・読み取りrootの制限が要る（#926 P2 の E 完全版）。
  *
- * 作れなかった場合は `undefined` を返し、呼び出し側は従来どおり実workspaceで走らせる
- * （要約はセカンドオピニオンの付随情報であり、隔離できないことを理由に落とさない）。
+ * 作れなかった場合は `undefined` を返し、呼び出し側は**要約自体を諦める**。実workspaceへ
+ * fallbackすると、障害時だけ「要約セッションはworkspaceを参照しない」という保証が外れる。
+ * 要約は付随情報であり、無くてもセカンドオピニオン本体は続けられる（受入基準5）以上、
+ * fail-open（実workspaceで実行）ではなくfail-without-summaryを選ぶ。
  */
 async function createIsolatedSummaryDir(log?: Logger): Promise<string | undefined> {
   try {
     return await fs.mkdtemp(path.join(os.tmpdir(), 'agent-sessions-summary-'));
   } catch (e) {
     log?.warn(
-      `${SUMMARY_LOG_PREFIX} 隔離用の一時ディレクトリを作れませんでした（実workspaceで実行します）: ${
+      `${SUMMARY_LOG_PREFIX} 隔離用の一時ディレクトリを作れませんでした（要約を作らずに続行します）: ${
         e instanceof Error ? e.message : String(e)
       }`,
     );
@@ -171,8 +173,6 @@ async function createIsolatedSummaryDir(log?: Logger): Promise<string | undefine
 }
 
 export interface ConversationSummaryRequest {
-  /** 親セッションの作業ディレクトリ。一時ディレクトリを作れなかったときのfallbackに使う。 */
-  cwd: string;
   model: string;
   effort: string;
   /** `buildTranscriptMarkdown` が作った会話の記録。上限はこの関数の中で掛ける。 */
@@ -204,13 +204,16 @@ export async function summarizeConversation(
     `${SUMMARY_LOG_PREFIX} start model=${request.model} effort=${request.effort} ` +
       `promptChars=${prompt.length}`,
   );
-  // 実workspaceから外して走らせる（Issue #926 E）。作れなければ従来どおり実workspaceで走る
+  // 実workspaceから外して走らせる（Issue #926 E）。作れなければ要約自体を諦める
   const isolatedDir = await createIsolatedSummaryDir(log);
+  if (isolatedDir === undefined) {
+    return { ok: false, reason: '要約用の隔離ディレクトリを作れませんでした' };
+  }
   try {
     const response = await runSingleTurnTask(
       host,
       'codex',
-      buildSummarySessionInput(isolatedDir ?? request.cwd, request.model, request.effort),
+      buildSummarySessionInput(isolatedDir, request.model, request.effort),
       prompt,
       {
         timeoutMs: request.timeoutMs ?? DEFAULT_SUMMARY_TIMEOUT_MS,
@@ -230,14 +233,12 @@ export async function summarizeConversation(
   } finally {
     // 成功・失敗・打ち切りのいずれでも消す。中身は空のままのはず（read-onlyで書けない）だが、
     // 相手側が何を置いていても消せるように再帰で消す
-    if (isolatedDir !== undefined) {
-      await fs.rm(isolatedDir, { recursive: true, force: true }).catch((e: unknown) => {
-        log?.warn(
-          `${SUMMARY_LOG_PREFIX} 一時ディレクトリを消せませんでした: ${
-            e instanceof Error ? e.message : String(e)
-          }`,
-        );
-      });
-    }
+    await fs.rm(isolatedDir, { recursive: true, force: true }).catch((e: unknown) => {
+      log?.warn(
+        `${SUMMARY_LOG_PREFIX} 一時ディレクトリを消せませんでした: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    });
   }
 }

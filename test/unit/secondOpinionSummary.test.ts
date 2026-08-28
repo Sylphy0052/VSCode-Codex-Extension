@@ -90,7 +90,6 @@ describe('summarizeConversation（Issue #903）', () => {
   it('要約は独立したセッションで走り、read-only・承認拒否・タブを開かない', async () => {
     const host = new FakeHost();
     const result = await summarizeConversation(host, {
-      cwd: '/repo',
       model: 'gpt-5.6-sol',
       effort: 'low',
       conversation: CONVERSATION,
@@ -117,7 +116,6 @@ describe('summarizeConversation（Issue #903）', () => {
       entriesDuringRun = readdirSync(input.cwd);
     };
     await summarizeConversation(host, {
-      cwd: '/repo',
       model: 'gpt-5.6-sol',
       effort: 'low',
       conversation: CONVERSATION,
@@ -134,7 +132,6 @@ describe('summarizeConversation（Issue #903）', () => {
   it('要約セッションへは会話の記録が渡り、データであって指示ではないと明示される', async () => {
     const host = new FakeHost();
     await summarizeConversation(host, {
-      cwd: '/repo',
       model: 'gpt-5.6-sol',
       effort: 'low',
       conversation: CONVERSATION,
@@ -152,7 +149,6 @@ describe('summarizeConversation（Issue #903）', () => {
   it('応答が空なら理由付きで失敗を返す（呼び出し側は要約なしで続行できる）', async () => {
     const host = new FakeHost('   ');
     const result = await summarizeConversation(host, {
-      cwd: '/repo',
       model: 'gpt-5.6-sol',
       effort: 'low',
       conversation: CONVERSATION,
@@ -165,7 +161,6 @@ describe('summarizeConversation（Issue #903）', () => {
   it('会話が空なら要約セッションを開かない', async () => {
     const host = new FakeHost();
     const result = await summarizeConversation(host, {
-      cwd: '/repo',
       model: 'gpt-5.6-sol',
       effort: 'low',
       conversation: '   ',

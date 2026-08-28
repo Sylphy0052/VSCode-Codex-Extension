@@ -168,7 +168,6 @@ async function buildConversationSummary(
   port: SecondOpinionPanelPort,
   host: TaskSessionHost,
   config: SecondOpinionConfig,
-  cwd: string,
   log: Logger,
 ): Promise<{ text: string | undefined; failure: string | undefined }> {
   if (!config.summary.enabled) {
@@ -184,7 +183,6 @@ async function buildConversationSummary(
       summarizeConversation(
         host,
         {
-          cwd,
           model: config.summary.model,
           effort: config.summary.effort,
           conversation,
@@ -268,7 +266,7 @@ export async function startSecondOpinion(
     port.setRunning(true);
     port.note(id, pendingSecondOpinionDisplay(candidate, artifactKind, request));
     // 要約は本体より先に作る（本体のプロンプトへ載せるため）。失敗しても本体は続ける
-    const summary = await buildConversationSummary(port, host, config, cwd, log);
+    const summary = await buildConversationSummary(port, host, config, log);
     if (summary.failure !== undefined) {
       log.warn(`[secondOpinion] 会話の要約を作れませんでした: ${summary.failure}`);
     }
