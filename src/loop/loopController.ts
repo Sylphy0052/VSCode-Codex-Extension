@@ -8,6 +8,7 @@ import {
 import {
   appendLoopEngineeringInstruction,
   declaresEscalate,
+  lastAgentMessageFinalLine,
   type LoopEngineeringConfig,
   type LoopEngineeringPhase,
 } from './loopEngineering';
@@ -267,18 +268,25 @@ export function decoratePrompt(prompt: string, condition: string): string {
   if (condition === '') {
     return prompt;
   }
-  return `${prompt}\n\n（終了条件「${condition}」を満たしている場合は、作業をせず ${LOOP_DONE_TOKEN} とだけ出力してください）`;
+  return `${prompt}\n\n（終了条件「${condition}」を満たしている場合は、作業をせず、応答の最後の非空行に ${LOOP_DONE_TOKEN} だけを出力し、それ以降は何も出力しないでください）`;
 }
 
-/** 直近のエージェント発言が終了を宣言しているか。 */
+/**
+ * 直近のエージェント発言が終了を宣言しているか。
+ *
+ * **応答の最後の非空行が`LOOP_DONE_TOKEN`と完全に一致する場合だけ**成立とする
+ * （issue #914）。以前は`includes`で本文中に現れれば成立としていたが、この合図を
+ * 教えるのは`decoratePrompt`が終了条件へ添える文そのものであり、その綴りが会話に残る。
+ * そのため「まだ <<LOOP_DONE>> は出しません」といった説明文だけでループが終了していた。
+ * `declaresEscalate`（issue #891）が同じ理由で最終行の完全一致にしてあり、判定方式を
+ * 揃えた（共通の取り出しは`lastAgentMessageFinalLine`）。
+ *
+ * **これは挙動の変更である。** 合図を文中へ埋めて返していたエージェントでは、これまで
+ * 終了していたループが終了しなくなる。`decoratePrompt`の依頼文も、合図だけを最後の行へ
+ * 出すよう明示する文面へ合わせて直してある。
+ */
 export function declaresDone(state: ChatState): boolean {
-  for (let i = state.items.length - 1; i >= 0; i -= 1) {
-    const item = state.items[i];
-    if (item?.kind === 'agentMessage') {
-      return item.text.includes(LOOP_DONE_TOKEN);
-    }
-  }
-  return false;
+  return lastAgentMessageFinalLine(state) === LOOP_DONE_TOKEN;
 }
 
 /**
@@ -348,10 +356,18 @@ export class LoopController {
      */
     private readonly stallThreshold: number = DEFAULT_STALL_REPEAT_COUNT,
     /**
-     * 現在時刻の取得（issue #891）。時間上限の判定にだけ使う。
-     * テストから任意の時刻を流し込めるよう差し替え可能にしてある（既定は`Date.now`）。
+     * 経過時間の計測（issue #891）。時間上限の判定にだけ使う。
+     *
+     * 既定は`performance.now`（issue #914）。使うのは`start()`時点との差だけなので
+     * 基準時刻に意味は無く、NTP同期や手動の時刻変更で飛ばないことの方が重要である
+     * （`Date.now` は経過時間の計測には向かない）。テストから任意の値を流し込めるよう
+     * 差し替え可能にしてある。
+     *
+     * **OS・実行環境のサスペンド中の時間は数えない**（Linuxでの基準は`CLOCK_MONOTONIC`
+     * 相当で、サスペンドを含める`CLOCK_BOOTTIME`とは違う）。この値は進行中のターンへ
+     * 割り込まないsoft deadlineであり、実時間に対する厳密な期限管理ではない。
      */
-    private readonly now: () => number = () => Date.now(),
+    private readonly now: () => number = () => performance.now(),
   ) {}
 
   getStatus(): LoopStatus {
@@ -400,6 +416,14 @@ export class LoopController {
       return;
     }
     this.pendingPrompt = undefined;
+    // 保留してから再開までの待ち時間で時間上限を跨いでいないかを、送る直前にもう一度見る
+    // （issue #914）。ターンが完了した時点では超えていなくても、返信を待っている間に
+    // 上限へ達することがある——人が2時間後に答えることもある。回数上限を見直さないのは、
+    // 待っている間に`iteration`が進むことはなく、保留を作った時点の判定で足りるため
+    if (this.hasExceededDuration(this.plan)) {
+      this.stop('timedOut');
+      return;
+    }
     this.dispatch(pending, 'continue');
   }
 

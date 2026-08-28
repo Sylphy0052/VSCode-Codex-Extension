@@ -52,15 +52,29 @@ export const LOOP_ESCALATE_TOKEN = '<<LOOP_ESCALATE>>';
  * この合図を書いた場合にも効かせるためで、完全一致にしてあるぶん誤検知の余地は小さい。
  */
 export function declaresEscalate(state: ChatState): boolean {
+  return lastAgentMessageFinalLine(state) === LOOP_ESCALATE_TOKEN;
+}
+
+/**
+ * 末尾から数えて最初の`agentMessage`の、**最後の非空行**（前後の空白を除く）。
+ *
+ * エージェントの発言が1つも無ければ`undefined`。合図（`LOOP_ESCALATE_TOKEN` /
+ * `LOOP_DONE_TOKEN`）の判定はどちらもこの値との完全一致で行う（issue #914）。
+ *
+ * 見るのが配列の最後の項目ではなく最後の`agentMessage`なのは、応答の後ろに
+ * `commandExecution`などの項目が並ぶことがあるため。合図はエージェントの発言の中に
+ * あればよく、その後ろにツールの実行記録が続いていても成立する。
+ */
+export function lastAgentMessageFinalLine(state: ChatState): string | undefined {
   for (let i = state.items.length - 1; i >= 0; i -= 1) {
     const item = state.items[i];
     if (item?.kind === 'agentMessage') {
       const lines = item.text.trimEnd().split('\n');
       const lastLine = lines[lines.length - 1];
-      return lastLine !== undefined && lastLine.trim() === LOOP_ESCALATE_TOKEN;
+      return lastLine === undefined ? undefined : lastLine.trim();
     }
   }
-  return false;
+  return undefined;
 }
 
 /**
@@ -73,22 +87,28 @@ export function declaresEscalate(state: ChatState): boolean {
  */
 export const DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION =
   'このループでは次の方針で作業すること。' +
-  '1) 完了したかどうかは、テストの終了コードやコマンドの実行結果など、機械的に確認できる根拠で判断する。自己申告で完了としない。' +
-  '2) 前回と同じやり方で解決しなかった場合は、同じ手を繰り返さず方針を変える。' +
-  '3) 直前のターンで出たエラーや失敗した出力は、次の作業の入力として扱う。' +
-  `4) 自力では解決できないと判断した場合は、作業を続けずに、応答の最終行へ ${LOOP_ESCALATE_TOKEN} とだけ出力して人へ引き継ぐ。`;
+  '1) 完了は自己申告だけで判断せず、可能な場合はテストの終了コード、コマンド結果、生成物の確認など機械的に検証できる根拠で確認する。機械的な検証が適さない作業では、完了を確認できる具体的な根拠を示す。' +
+  '2) 直前の結果を確認してから次の行動を決める。同じ前提・同じ操作で進展せず、新しい情報も得られない場合は、そのまま繰り返さず原因仮説または方針を変える。一時的な失敗と判断できる根拠がある場合の再試行はよい。' +
+  '3) 直前のターンで得た成功・失敗・エラー・検証結果を次の判断へ反映し、未解決の原因と次に確かめることを更新する。' +
+  '4) 必要な権限・入力・外部判断が無い、複数の異なる方針を試しても進展しない、または追加作業から新しい情報を得られる見込みが無い場合は無意味に作業を続けない。' +
+  `行き詰まりの原因、試したこと、人に必要な判断や入力を簡潔に報告した後、応答の最後の非空行に ${LOOP_ESCALATE_TOKEN} だけを出力し、それ以降は何も出力しない。`;
 
 /**
  * `agent.chat.loopEngineering.continueInstruction` の既定値。**2回目以降に**連結する
  * 短い再確認。
  *
  * 完全な方針文を200回（`LOOP_ITERATION_LIMIT`）送り直しても得るものは無いため、
- * 継続側は要点だけにする。1回目の指示は同じ会話の中に残っているので、方針そのものを
- * 再掲せずに参照できる。
+ * 継続側は要点だけにする。ただし**短くても自己完結させる**（issue #914）。
+ * 「1回目の方針を継続すること」と参照するだけの文面にしていた頃は、会話の圧縮・要約や
+ * tool outputによる希釈で初回メッセージの意味が薄れると、何を続ければよいのかが
+ * 分からなくなっていた。4軸それぞれの中身を1文ずつ入れ、初回指示を読み直せなくても
+ * 成立する文面にしてある。
  */
 export const DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION =
-  'ループの作業方針（機械的な検証・行き詰まったときの方針変更・エラーの折り返し・' +
-  `解決不能なときの ${LOOP_ESCALATE_TOKEN}）を継続すること。前ターンの検証結果を根拠に次の行動を選ぶこと。`;
+  '直前の検証結果を確認してから次の行動を決めること。完了は自己申告だけでなく確認可能な根拠に基づいて判断すること。' +
+  '同じ前提・同じ操作で進展せず新しい情報も得られない場合は繰り返さず、原因仮説または方針を変えること。' +
+  '直前の成功・失敗・エラーを次の判断へ反映すること。' +
+  `追加作業で進展する見込みが無い場合は必要な報告を終えた後、最後の非空行に ${LOOP_ESCALATE_TOKEN} だけを出力し、それ以降は何も出力しない。`;
 
 /** ループの何回目の送信かの区別。連結する指示文をこれで選ぶ。 */
 export type LoopEngineeringPhase = 'initial' | 'continue';
