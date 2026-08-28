@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 import { isApprovalDecision } from '../appserver/approvals';
 import {
   isOpenableSearchUrl,
+  lastNonEmptyAgentMessageText,
   type ChatItem,
   type ChatState,
   type ChatUsage,
@@ -11,6 +12,8 @@ import {
 import { isAskUserQuestionSelections } from '../claude/askUserQuestion';
 import { debugLogCandidates } from '../claude/cliLocator';
 import { describeForkFromTurnError } from '../claude/forkFromTurn';
+import { SecondOpinionRegistry } from '../secondOpinion/run';
+import { startSecondOpinion } from './secondOpinionCommand';
 import {
   capSideQuestionHistory,
   finishedSideQuestionDisplay,
@@ -137,6 +140,11 @@ interface ClaudePanel extends BaseChatPanel {
   taskConfig: ClaudeConfig | undefined;
   /** このセッションだけに適用するモデルとeffort（issue #844）。 */
   modelSettings: SessionModelSettings;
+  /**
+   * セカンドオピニオン（Issue #894）の重複起動判定に使うキー。タブごとに一意
+   * （`chatView.ts`の`ChatPanel.secondOpinionKey`と同じ理由）。
+   */
+  secondOpinionKey: string;
   /** ターン完了検知に使う直前の値。 */
   wasBusy: boolean;
   /** ループ停止検知に使う直前の値。 */
@@ -278,6 +286,17 @@ export class ClaudeChatViewManager
   private readonly catalog: CommandCatalog;
   private readonly usageProbe: ClaudeUsageProbe;
   private commands: SlashCommand[] | undefined;
+  /** セカンドオピニオン（Issue #894）の実行中管理。親セッションごとに1本へ絞る。 */
+  private readonly secondOpinionRegistry = new SecondOpinionRegistry();
+  /**
+   * セカンドオピニオンの依頼先となるCodex側のホスト（`ChatViewManager`）。
+   *
+   * Claude Code画面から押しても**Codexのセッション**を開く（Issue #894 の決定3。
+   * この機能の値打ちはモデルの多様性ではなくコンテキストの分離にあるため、
+   * プロバイダの選択は導入しない）。Claude側の管理クラスはCodexのホストを持たないので、
+   * `extension.ts` が組み立て時に注入する。
+   */
+  private secondOpinionHost: TaskSessionHost | undefined;
 
   constructor(
     private readonly claudePath: () => string,
@@ -900,6 +919,40 @@ export class ClaudeChatViewManager
     await this.startSideQuestion(entry, question);
   }
 
+  /** `extension.ts` から、セカンドオピニオンの依頼先（Codex側のホスト）を注入する。 */
+  setSecondOpinionHost(host: TaskSessionHost): void {
+    this.secondOpinionHost = host;
+  }
+
+  /**
+   * セカンドオピニオン（Issue #894）を起動する。
+   *
+   * 脇道の質問（`startSideQuestion`）と違い、この会話は一切渡さない。独立したCodex
+   * セッションが起動時点の成果物と依頼文だけを見て評価し、その結果をこの会話へ表示する
+   * （この会話へ発言として送り返すことはしない）。
+   */
+  private async startSecondOpinionFor(entry: ClaudePanel): Promise<void> {
+    const host = this.secondOpinionHost;
+    if (host === undefined) {
+      void vscode.window.showErrorMessage('セカンドオピニオンの依頼先（Codex）を利用できません');
+      return;
+    }
+    await startSecondOpinion(
+      {
+        parentSessionId: entry.secondOpinionKey,
+        cwd: entry.cwd,
+        lastAssistantResponse: () => lastNonEmptyAgentMessageText(entry.session.getState().items),
+        note: (id, display) => entry.session.noteSecondOpinion(id, display),
+        setRunning: (running) => {
+          void entry.panel?.webview.postMessage({ type: 'secondOpinionRunning', running });
+        },
+      },
+      host,
+      this.secondOpinionRegistry,
+      this.log,
+    );
+  }
+
   /**
    * 脇道の質問を送る（issue #334、design.md §14.62、Codexの `/btw` 相当）。
    *
@@ -1158,6 +1211,7 @@ export class ClaudeChatViewManager
       taskManaged,
       taskConfig,
       modelSettings,
+      secondOpinionKey: randomUUID(),
       wasBusy: false,
       wasLoopRunning: false,
       approvalHandler: undefined,
@@ -1699,6 +1753,10 @@ export class ClaudeChatViewManager
       }
       if (type === 'handoffToNewSession') {
         void this.handoffToNewSession();
+        return;
+      }
+      if (type === 'secondOpinion') {
+        void this.startSecondOpinionFor(entry);
         return;
       }
       if (type === 'rewind' && typeof m['messageId'] === 'string') {

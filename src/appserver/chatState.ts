@@ -1663,6 +1663,35 @@ export function appendSideQuestion(
 }
 
 /**
+ * セカンドオピニオン（Issue #894）を会話へ1項目として残す/更新する。
+ *
+ * `appendSideQuestion` と同じく「同じidで呼び直すと上書きする」形にする（実行中 →
+ * 完了/失敗と状態が進むたびに同じ項目を書き換え、項目を積み増さない）。表示の中身は
+ * `src/secondOpinion/display.ts`（`vscode`を持ち込まない純粋なロジック層）が組み立てる。
+ * 脇道の質問とは別の種類にしてあるのは、渡している文脈が正反対（脇道の質問は本流の
+ * 会話を踏まえる／セカンドオピニオンは踏まえない）で、読み手が取り違えると指摘の
+ * 重みを誤って判断するため。
+ */
+export function appendSecondOpinion(
+  state: ChatState,
+  id: string,
+  display: { status: string; text: string; detail: string },
+): ChatState {
+  return {
+    ...state,
+    items: upsertItem(state.items, {
+      id,
+      kind: 'secondOpinion',
+      text: display.text,
+      detail: display.detail,
+      status: display.status,
+      turnId: undefined,
+      diffs: NO_DIFFS,
+    }),
+  };
+}
+
+/**
  * 中断の注記のid（issue #258）。
  *
  * ターンごとに別のidにする。中断はターンを終わらせるので、1回の中断につき1行になり、

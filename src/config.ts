@@ -42,6 +42,12 @@ import { sanitizeForLog } from './orchestrator/sanitize';
 import { normalizeBranchNaming, type BranchNaming } from './orchestrator/worktree';
 import type { HistoryScope } from './session/sessionStore';
 import { normalizeComposerButtons, type ComposerButtonsResult } from './view/composerButtons';
+import {
+  normalizeSecondOpinionCandidates,
+  type SecondOpinionCandidate,
+} from './secondOpinion/candidates';
+import { DEFAULT_SECOND_OPINION_TEMPLATE } from './secondOpinion/prompt';
+import { DEFAULT_SECOND_OPINION_TIMEOUT_MS } from './secondOpinion/run';
 import { DEFAULT_TURN_SUMMARY_INSTRUCTION, type TurnSummaryConfig } from './view/turnSummary';
 import {
   DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
@@ -195,6 +201,52 @@ export function readChatSendOnConfig(): SendOnMode {
 export function readChatComposerButtonsConfig(): ComposerButtonsResult {
   const c = vscode.workspace.getConfiguration('agent');
   return normalizeComposerButtons(c.get<unknown>('chat.composerButtons'));
+}
+
+/** セカンドオピニオン（Issue #894）の設定。 */
+export interface SecondOpinionConfig {
+  /** 依頼先の候補。必ず1件以上ある（壊れた設定は既定へ丸める）。 */
+  candidates: SecondOpinionCandidate[];
+  /** 候補の検証で捨てた項目の理由。呼び出し側がログへ出す。 */
+  candidateWarnings: string[];
+  /** タブを開かずに走らせるか。既定は `true`。 */
+  headless: boolean;
+  timeoutMs: number;
+  /** 依頼文の既定値。 */
+  template: string;
+}
+
+/**
+ * セカンドオピニオン（Issue #894。`agent.secondOpinion.*`）。
+ *
+ * 候補の検証は `normalizeSecondOpinionCandidates`（`vscode`に依存しない純粋関数）が
+ * 行い、ここでは生値を渡すだけ。`sandbox` / `approvalMode` は設定にしない（読み取り
+ * 専用・承認は全拒否で固定する。`secondOpinion/run.ts`参照）。
+ */
+export function readSecondOpinionConfig(): SecondOpinionConfig {
+  const c = vscode.workspace.getConfiguration('agent');
+  const parsed = normalizeSecondOpinionCandidates(c.get<unknown>('secondOpinion.candidates'));
+  const rawTemplate = str(c, 'secondOpinion.template', DEFAULT_SECOND_OPINION_TEMPLATE);
+  return {
+    candidates: parsed.candidates,
+    candidateWarnings: parsed.warnings,
+    headless: c.get<boolean>('secondOpinion.headless') ?? true,
+    timeoutMs: normalizeSecondOpinionTimeoutMs(c.get<unknown>('secondOpinion.timeoutMs')),
+    template: rawTemplate.trim() === '' ? DEFAULT_SECOND_OPINION_TEMPLATE : rawTemplate,
+  };
+}
+
+/**
+ * `agent.secondOpinion.timeoutMs` の検証。
+ *
+ * 数値でなければ既定へ戻し、極端な値は10秒〜60分へ収める。0や負値をそのまま渡すと
+ * 起動直後に必ず打ち切られ、「動かない」としか見えない状態になるため。
+ */
+function normalizeSecondOpinionTimeoutMs(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return DEFAULT_SECOND_OPINION_TIMEOUT_MS;
+  }
+  return Math.min(60 * 60_000, Math.max(10_000, Math.round(value)));
 }
 
 /**

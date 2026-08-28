@@ -3,6 +3,7 @@ import type { ApprovalDecision } from '../appserver/approvals';
 import {
   addApproval,
   appendNotice,
+  appendSecondOpinion,
   appendSideQuestion,
   enqueue,
   NO_BACKGROUND_TERMINALS,
@@ -248,6 +249,14 @@ export class ClaudeStreamSession {
    */
   noteSideQuestion(id: string, display: { status: string; text: string; detail: string }): void {
     this.update(appendSideQuestion(this.state, id, display));
+  }
+
+  /**
+   * セカンドオピニオン（Issue #894）を会話へ1項目として残す/更新する。
+   * `noteSideQuestion` と同じくCLIとのやり取り（transcript）には乗らない画面だけの表示。
+   */
+  noteSecondOpinion(id: string, display: { status: string; text: string; detail: string }): void {
+    this.update(appendSecondOpinion(this.state, id, display));
   }
 
   /** プロセスを起動する。発言はこの後 `send` で流す。 */
