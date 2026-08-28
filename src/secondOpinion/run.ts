@@ -12,7 +12,7 @@
 import type { ApprovalMode } from '../codex/types';
 import { SANDBOX_MODES } from '../codex/types';
 import type { Logger } from '../log';
-import { runSingleTurnTask } from '../orchestrator/planner';
+import { runSingleTurnTask, SingleTurnTimeoutError } from '../orchestrator/planner';
 import type { TaskSessionHost, TaskSessionInput } from '../orchestrator/taskSession';
 import type { SecondOpinionCandidate } from './candidates';
 import { buildSecondOpinionPrompt, type SecondOpinionContext } from './prompt';
@@ -23,8 +23,13 @@ import { buildSecondOpinionPrompt, type SecondOpinionContext } from './prompt';
  */
 const SECOND_OPINION_APPROVAL_MODE: ApprovalMode = 'never';
 
-/** 既定のタイムアウト（5分）。設定 `agent.secondOpinion.timeoutMs` の既定値でもある。 */
-export const DEFAULT_SECOND_OPINION_TIMEOUT_MS = 5 * 60_000;
+/**
+ * 既定のタイムアウト（15分）。設定 `agent.secondOpinion.timeoutMs` の既定値でもある。
+ *
+ * 当初は5分だったが、`gpt-5.6-sol` / `high` はそれを超えることがある（Issue #907）。
+ * この機能はタブを開かず手も塞がないため、上限を短く保つ動機が弱い。
+ */
+export const DEFAULT_SECOND_OPINION_TIMEOUT_MS = 15 * 60_000;
 
 /** ログ・エラー文言の主語。`runSingleTurnTask` の `label` へ渡す。 */
 const SECOND_OPINION_LABEL = 'セカンドオピニオン';
@@ -72,7 +77,17 @@ export interface SecondOpinionRequest {
   timeoutMs?: number | undefined;
 }
 
-export type SecondOpinionResult = { ok: true; response: string } | { ok: false; reason: string };
+export type SecondOpinionResult =
+  | {
+      ok: true;
+      response: string;
+      /**
+       * 打ち切られ、そこまでに出ていた分だけを返した場合の理由（Issue #907）。
+       * 最後まで返ってきた場合は `undefined`。
+       */
+      partialReason?: string | undefined;
+    }
+  | { ok: false; reason: string };
 
 /**
  * 1回分のセカンドオピニオンを走らせる。
@@ -111,6 +126,8 @@ export async function runSecondOpinion(
         openPanel: !request.headless,
         label: SECOND_OPINION_LABEL,
         logPrefix: SECOND_OPINION_LOG_PREFIX,
+        // 打ち切られても、そこまでの回答は捨てない（Issue #907）
+        partialOnTimeout: true,
       },
     );
     if (response.trim() === '') {
@@ -118,6 +135,14 @@ export async function runSecondOpinion(
     }
     return { ok: true, response };
   } catch (e) {
+    // 打ち切りでも途中まで出ていれば「失敗」にはしない。長考するモデルほど、
+    // ここで捨てると成果が丸ごと消える（Issue #907）。本文はログへ出さず、分量だけ残す
+    if (e instanceof SingleTurnTimeoutError && e.partialText !== undefined) {
+      log?.info(
+        `${SECOND_OPINION_LOG_PREFIX} timeout partial=yes responseChars=${e.partialText.length}`,
+      );
+      return { ok: true, response: e.partialText, partialReason: e.message };
+    }
     return { ok: false, reason: e instanceof Error ? e.message : String(e) };
   }
 }

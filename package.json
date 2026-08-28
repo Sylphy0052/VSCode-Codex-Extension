@@ -852,9 +852,9 @@
         },
         "agent.secondOpinion.timeoutMs": {
           "type": "number",
-          "default": 300000,
+          "default": 900000,
           "scope": "window",
-          "markdownDescription": "セカンドオピニオンの1ターンを待つ上限（ミリ秒）。超えると打ち切り、理由を会話へ残す。10秒〜60分の範囲へ丸める。"
+          "markdownDescription": "セカンドオピニオンの1ターンを待つ上限（ミリ秒）。超えると打ち切り、そこまでに出ていた回答があればそれを会話へ残す（無ければ理由だけ残す）。10秒〜60分の範囲へ丸める。"
         },
         "agent.secondOpinion.template": {
           "type": "string",
