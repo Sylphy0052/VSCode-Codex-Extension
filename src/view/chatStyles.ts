@@ -727,6 +727,10 @@ ${sharedStyles()}
   #loop .line { display: flex; gap: 12px; align-items: flex-end; }
   #loop .line label.grow { flex: 1; }
   #loop .line input[type='number'] { width: 72px; }
+  #loopGoalBox { margin-top: 8px; }
+  #loopGoalBox > summary { cursor: pointer; opacity: 0.9; }
+  #loopGoalBox > label { margin-top: 6px; }
+  #loop .loopGoalNote { margin: 6px 0 0; opacity: 0.75; font-size: 0.9em; }
   #loopBar {
     display: flex;
     align-items: center;

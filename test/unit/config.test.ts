@@ -6,6 +6,7 @@ import {
   readChatTurnSummaryConfig,
   setChatTurnSummaryEnabled,
   readChatLoopEngineeringConfig,
+  readGoalEvaluatorConfig,
   setChatLoopEngineeringEnabled,
   readClaudeConfig,
   readNotificationsConfig,
@@ -17,6 +18,7 @@ import {
   DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
   DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION,
 } from '../../src/loop/loopEngineering';
+import { DEFAULT_MAX_INDETERMINATE } from '../../src/loop/goalLoop';
 import { __mock } from '../mocks/vscode';
 
 describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
@@ -678,6 +680,53 @@ describe('readChatLoopEngineeringConfig（issue #891）', () => {
     expect(readChatLoopEngineeringConfig().continueInstruction).toBe(
       DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
     );
+  });
+});
+
+describe('readGoalEvaluatorConfig（issue #892）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('既定は会話と同じCLI・軽量モデル', () => {
+    expect(readGoalEvaluatorConfig()).toEqual({
+      provider: 'inherit',
+      model: 'auto',
+      timeoutSeconds: 120,
+      maxIndeterminate: DEFAULT_MAX_INDETERMINATE,
+    });
+  });
+
+  it('評価するCLIとモデルを指定できる', () => {
+    __mock.setConfig('agent', {
+      'chat.goalEvaluator.provider': 'codex',
+      'chat.goalEvaluator.model': 'gpt-5-codex',
+    });
+    const config = readGoalEvaluatorConfig();
+    expect(config.provider).toBe('codex');
+    expect(config.model).toBe('gpt-5-codex');
+  });
+
+  it('未知のproviderは inherit へ倒す', () => {
+    __mock.setConfig('agent', { 'chat.goalEvaluator.provider': 'gemini' });
+    expect(readGoalEvaluatorConfig().provider).toBe('inherit');
+    __mock.setConfig('agent', { 'chat.goalEvaluator.provider': 42 });
+    expect(readGoalEvaluatorConfig().provider).toBe('inherit');
+  });
+
+  it('タイムアウトと判定不能の上限を差し替えられる', () => {
+    __mock.setConfig('agent', {
+      'chat.goalEvaluator.timeoutSeconds': 30,
+      'chat.goalEvaluator.maxIndeterminate': 5,
+    });
+    const config = readGoalEvaluatorConfig();
+    expect(config.timeoutSeconds).toBe(30);
+    expect(config.maxIndeterminate).toBe(5);
+  });
+
+  it('数値でない値は既定へ倒す', () => {
+    __mock.setConfig('agent', { 'chat.goalEvaluator.timeoutSeconds': 'すぐ' });
+    expect(readGoalEvaluatorConfig().timeoutSeconds).toBe(120);
   });
 });
 

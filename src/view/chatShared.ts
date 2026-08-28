@@ -1368,6 +1368,19 @@ ${chatStyles()}
       </label>
       <button id="loopStart" type="button">ループ開始</button>
     </div>
+    <details id="loopGoalBox">
+      <summary>ゴール駆動（目的とゴールを両方入れると、別のAIが達成を判定します）</summary>
+      <label>目的
+        <textarea id="loopGoalPurpose" placeholder="例: 認証まわりのテストを全て通す"></textarea>
+      </label>
+      <label>ゴール（受入基準）
+        <textarea id="loopGoalCriteria" placeholder="例: npm test が終了コード0で終わる"></textarea>
+      </label>
+      <label>制約（任意）
+        <textarea id="loopGoalConstraints" placeholder="例: テストを弱めない。既存の公開APIを変えない"></textarea>
+      </label>
+      <p class="loopGoalNote">両方を入れて開始すると、毎ターン別のAIが会話と実行結果を読んで達成したかを判定し、未達なら次に集中することを添えて自動で続けます。継続指示と終了条件は使いません。</p>
+    </details>
   </div>
   <details id="settingsBox"${options.showSettings ? '' : ' hidden'}>
     <summary title="モデル・承認などの設定を開閉します"><span class="label">設定</span><span id="settingsSummary"></span></summary>

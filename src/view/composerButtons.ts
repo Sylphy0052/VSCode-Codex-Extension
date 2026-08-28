@@ -36,7 +36,7 @@ export function isComposerButtonId(value: unknown): value is ComposerButtonId {
 }
 
 /**
- * 表（`#composerIconRow`）に直接出す既定のボタン（Issue #900）。
+ * 表（`#composerIconRow`）に直接出す既定のボタン（Issue #900、design.md §14.82）。
  *
  * issue #296の時点では正準の並びの先頭4つ（`attach` / `loopToggle` / `compact` /
  * `claudeImport`）だったが、その後に増えた要約・計画・引き継ぎ・セカンドオピニオンの方が
