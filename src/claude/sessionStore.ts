@@ -193,8 +193,19 @@ export class ClaudeSessionStore {
     await this.names.set(sessionId, name);
   }
 
-  /** 会話ビューアなど、全文を読む用途のために場所を解決する。 */
+  /**
+   * 会話ビューアなど、全文を読む用途のために場所を解決する。
+   *
+   * 索引に載っていればそこから引く（Issue #887）。この経路は会話を開くたび
+   * （リロード後の復元を含む）に通るため、毎回 `projects/` を再帰走査していると
+   * 復元されるタブの枚数だけ走査が積み上がる。索引が指すパスは消えていることが
+   * あるので、実在を確かめてから返す。
+   */
   async resolveTranscriptPath(sessionId: string): Promise<string | undefined> {
+    const indexed = this.index.findBySessionId(sessionId);
+    if (indexed !== undefined && (await this.fs.mtimeMs(indexed.filePath)) !== undefined) {
+      return indexed.filePath;
+    }
     const found = await this.fs.listJsonl(this.paths.projects);
     return found.find(
       (filePath) => sessionIdFromTranscriptName(basenameOf(filePath)) === sessionId,
@@ -207,6 +218,11 @@ export class ClaudeSessionStore {
    * リロードで復元されたパネルはcwdを持たないため、transcriptの素性から取り戻す。
    */
   async resolveCwd(sessionId: string): Promise<string | undefined> {
+    // 索引はcwdも持っている（Issue #887）。載っていればtranscriptを開かずに済む
+    const indexed = this.index.findBySessionId(sessionId);
+    if (indexed?.session.cwd !== undefined) {
+      return indexed.session.cwd;
+    }
     const filePath = await this.resolveTranscriptPath(sessionId);
     if (filePath === undefined) {
       return undefined;
