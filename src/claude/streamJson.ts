@@ -210,10 +210,12 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
  * ユーザー側のイベント。ツール結果と、`--replay-user-messages` で返ってくる
  * 自分の発言の2種類が来る。
  *
- * Skill起動時は、CLIがSKILL.md全文を `isMeta: true` のuserテキストとして別途注入して
- * くる（実測、issue #691）。他の `isMeta: true`（`<local-command-caveat>`・
- * cross-session-message等）と混同しないよう `isSkillContextEntry` で絞り込み、通常の
- * userMessageと区別してfold対象（`skillContext`、chatScript.tsのFOLD_KINDS）にする。
+ * Skill起動時は、CLIがSKILL.md全文をuserテキストとして別途注入してくる（実測、issue #691）。
+ * このイベントに付く目印はセッション履歴側と違い、`isSynthetic: true` だけで `isMeta` も
+ * `sourceToolUseID` も付かない（実測、issue #934）。他の合成メッセージ
+ * （`<local-command-caveat>`・cross-session-message等）と混同しないよう
+ * `isSkillContextEntry` で絞り込み、通常のuserMessageと区別してfold対象
+ * （`skillContext`、chatScript.tsのFOLD_KINDS）にする。
  */
 function applyUser(state: ChatState, event: Record<string, unknown>): ChatState {
   const content = list(rec(event['message'])?.['content']);

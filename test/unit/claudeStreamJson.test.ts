@@ -596,6 +596,74 @@ describe('applyStreamEvent', () => {
     expect(state.items[0]?.kind).toBe('userMessage');
   });
 
+  it('isMetaが無くisSyntheticだけの注入も畳む（issue #934、動作中のstream-jsonの実態）', () => {
+    const state = apply([
+      {
+        type: 'user',
+        uuid: 'u1',
+        isSynthetic: true,
+        message: {
+          content: [
+            {
+              type: 'text',
+              text: 'Base directory for this skill: /home/u/.claude/skills/ask-chatgpt\n\n# ask-chatgpt',
+            },
+          ],
+        },
+      },
+    ]);
+    expect(state.items[0]?.kind).toBe('skillContext');
+    expect(state.items[0]?.detail).toBe('ask-chatgpt');
+  });
+
+  it('再実行時の注記も畳み、見出しにskill名を出す（issue #934）', () => {
+    const notes = [
+      '(Re-invocation of /ask-chatgpt — the skill instructions were previously loaded; the arguments or dynamic output below are new.)',
+      '(Re-invocation of /ask-chatgpt — the previously loaded copy was truncated by compaction; the full instructions follow.)',
+      'Skill /ask-chatgpt was loaded earlier (see the invoked-skills reminder above); this is a NEW invocation — follow those instructions now, including any setup steps.',
+      'Skill /ask-chatgpt is already loaded above; instructions unchanged.',
+    ];
+    for (const [index, text] of notes.entries()) {
+      const state = apply([
+        {
+          type: 'user',
+          uuid: `u${index}`,
+          isSynthetic: true,
+          message: { content: [{ type: 'text', text }] },
+        },
+      ]);
+      expect(state.items[0]?.kind).toBe('skillContext');
+      expect(state.items[0]?.detail).toBe('ask-chatgpt');
+    }
+  });
+
+  it('isSyntheticでも書き出しが合わない合成メッセージはuserMessageのまま（issue #934）', () => {
+    const state = apply([
+      {
+        type: 'user',
+        uuid: 'u1',
+        isSynthetic: true,
+        message: { content: [{ type: 'text', text: 'No response requested.' }] },
+      },
+    ]);
+    expect(state.items[0]?.kind).toBe('userMessage');
+  });
+
+  it('目印が無いユーザーの発言は同じ文面でも畳まない（issue #934）', () => {
+    const state = apply([
+      {
+        type: 'user',
+        uuid: 'u1',
+        message: {
+          content: [
+            { type: 'text', text: 'Base directory for this skill: /home/u/.claude/skills/x' },
+          ],
+        },
+      },
+    ]);
+    expect(state.items[0]?.kind).toBe('userMessage');
+  });
+
   it('未知のイベントで状態を変えない', () => {
     const state = apply([{ type: 'prompt_suggestion', text: '次はこれ' }]);
     expect(state).toEqual(initialClaudeState);
