@@ -7768,6 +7768,47 @@ Claude Codeは `result` の1イベントで `busy: false` と `turnResultText` �
 - `test/unit/claudeStreamSessionExitRelease.test.ts`: 走行中のプロセス消失は確定させ、`result` の後・起動失敗・応答中でない中断では確定を作らないこと
 - **陽性対照**: 消費側を `busy` の立ち下がりへ戻すと8件が落ちる（うち新規6件: `LoopController` 4件、`chatViewManager` 2件）。`chatState.ts` 側で `thread/status/changed` に世代を進めさせると `chatState.test.ts` の5件が落ちる。exactly onceのガード3つを外す（中断で進める／`markTurnFailed` を `busy` だけで見る／Claude側を無条件に進める）と7件が落ちる。**落ちない新規テストが5件ある**（「idle だけでは作業記録へ成果を残さない」「`turn/completed` で1回だけ次を送る」「確定後に二重に送らない」「中断が失敗したときも進めない」「走行中のプロセス消失は確定させる」）。`reportTurnResult` の空ガードや既存の `sawBusy`、元から進めていない分岐が偶然カバーしているためで、**回帰防止テストであって陽性対照ではない**
 
+### 14.91 セカンドオピニオンの実行時間を短くする（Issue #944）
+
+§14.80のセカンドオピニオンは、実機では既定の使い方（`gpt-5.6-sol` / `high`、追加資料は依頼文のみ）でも打ち切りに達することが多かった。上限（`agent.secondOpinion.timeoutMs`、§14.85で15分へ延長済み）をさらに延ばしても待ち時間が伸びるだけなので、所要時間そのものへ効く4点を変えた。**出力の長さ・書式には手を入れていない**（回答を短く縛ると、この機能の値打ちである指摘の深さが落ちる）。
+
+#### effortは実行時に選ぶ
+
+依頼先（`agent.secondOpinion.candidates`）は候補が1件なら選択UIを出さない（§14.80 受入基準2）。そのため設定を書き換えない限り毎回 `high` で走っていた。依頼先の選択の後ろにeffortのQuickPickを1段足し、候補が持つ値を既定（先頭）にしたうえで、その場だけ軽い設定へ落とせるようにした。**設定は書き換えない**（今回だけの上書き）。速さと指摘の深さのどちらを取るかは、「急いで一言ほしい」「腰を据えて見てほしい」というその場の事情で決まるためである。受け付ける値の一覧はCodexのモデルカタログを持つ`ChatViewManager`が渡し、渡されなければ`FALLBACK_EFFORTS`を使う。
+
+#### 探索を止める
+
+固定指示（`secondOpinion/prompt.ts`）には調査範囲の制限が無かった。権限は`read-only`だが読み取り自体は全面的に許されているため、依頼文だけで答えられる問いでもリポジトリを読み回る余地が残る。追加資料が `none` / `lastAssistantResponse` のときは「渡された材料だけで答え、探索は行わない。足りなければ探しに行かず、何が足りないかを書く」を、`workspaceChanges` のときは既存の `git show <baseCommit>:<path>` の案内に「読むのは判断に必要な範囲に限り、リポジトリ全体の探索は行わない」を足した。
+
+#### MCPサーバを載せない
+
+`ChatSession.start` に`mcpServersConfig`を渡さないと`thread/start`に`config`が載らず、利用者の`config.toml`のサーバとCodex組み込みの`codex_apps`がそのまま接続される。セカンドオピニオンとその要約は渡した材料を読んで答えるだけでMCPのツールを使わないため、起動待ちとツール定義がそのまま無駄になる。
+
+実測（codex-cli 0.148.0、`codex app-server`へ直接JSON-RPCを送って確認。この環境の`config.toml`には3サーバ）:
+
+- 指定なし: playwright(24 tools) / codegraph(1) / agentic-imagegen(16) / `codex_apps`(183) の**計224ツール**が接続される
+- `config.mcp_servers = {}`: **変化なし**。このフィールドはマージであって置換ではない
+- 名前ごとに `enabled: false`: `config.toml`由来の3本は接続されなくなる（`mcpServerStatus/list`で`serverInfo: null` / `tools: {}`）。`codex_apps`は残る
+- `codex_apps` へ `{ enabled: false, command: 'true' }`: 4本すべて無効化。`command`を省くと`invalid transport`で`thread/start`自体が失敗する（`config.toml`に定義が無いため）
+
+したがってオーバーレイは名前を列挙して組み立てるしかない。名前は`config/read`（実測35ms）から読み、そこに現れない組み込み分（`BUILTIN_MCP_SERVER_NAMES`）を足す（`src/codex/mcpDisable.ts`）。`config/read`に失敗しても組み込み分だけのオーバーレイで続ける。指定は`TaskSessionInput.disableMcpServers`で、タスク間メッセージングの`mcp`（§16.21）が指定されていればそちらを優先する（メッセージングを黙って壊さない）。
+
+#### 要約セッションを短くする・開かない
+
+背景要約（§14.83）はセカンドオピニオン本体の**前に直列で**走るため、そこへ入れた分がそのまま人の待ち時間になる。app-serverのプロセスは全セッションで共有されており（`chatView.ts`の`connection`）、プロセス起動を削る余地は無い。削れるのは入力量と実行の有無だけである。
+
+- 入力上限（`MAX_SUMMARY_INPUT_CHARS`）を120,000文字から30,000文字へ下げた。中間を落として先頭と末尾を残す形（§14.83、Issue #926 G）は変えていない
+- 会話が4,000文字未満なら要約セッションを開かず、記録そのものを背景として渡す。要約の目標長は2,000文字（`SUMMARY_TARGET_CHARS`）で、それと同じ桁の会話を圧縮しても、縮む量より1往復ぶんの待ちの方が大きい
+
+記録そのものを渡す場合は、プロンプトの見出しと会話へ残す注記を書き分ける（`ConversationBackgroundKind`）。「別のセッションが記録から作った要約」と見せると、圧縮による抜けを警戒しながら読ませることになり、要約でないものを要約と偽ることにもなる。
+
+#### 確かめ方
+
+- `test/unit/mcpDisable.test.ts`: オーバーレイに設定のサーバと組み込みのサーバが両方入ること、`enabled: false`だけでなく`command`も添えること、`config/read`が読めない形でも組み込み分は無効化すること
+- `test/unit/secondOpinion.test.ts`: 追加資料の種類ごとの探索の指示、背景が要約か記録かで見出しと注意書きが変わること、本体のセッション入力に`disableMcpServers`が入ること
+- `test/unit/secondOpinionSpeed.test.ts`: 選んだeffortがセッションへ渡ること（権限とMCPの扱いは選択に関係なく固定）、effortを選ばずに閉じたら何も起動しないこと、短い会話では要約セッションを開かず記録を渡すこと、長い会話では要約セッションを開くこと
+- `docs/manual-test.md` U-44: 実機でのeffortの選択、同一条件での所要時間の比較
+
 ### 16.44 チームモード（Issue #693）
 
 #### 何を足したのか

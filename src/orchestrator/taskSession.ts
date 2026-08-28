@@ -112,6 +112,21 @@ export interface TaskSessionInput {
    * どちらもサーバ名には`messaging.ts`の`MESSAGING_MCP_SERVER_NAME`を使う。
    */
   mcp?: { url: string };
+  /**
+   * このセッションではMCPサーバを一切使わない（Issue #944）。
+   *
+   * 単発ターンのセッション（セカンドオピニオン・その要約）は、渡した材料を読んで答えるだけで
+   * MCPのツールを必要としない。それでも既定では利用者の`config.toml`に書かれたサーバと、
+   * Codex組み込みの`codex_apps`が起動し、ツール定義がそのままターンへ載る（実測:
+   * codex-cli 0.148.0、4サーバ・計224ツール）。起動待ちとツール定義の分だけ遅くなる。
+   *
+   * タスク間メッセージング用の{@link mcp}とは別物で、両方指定された場合は`mcp`を優先し
+   * こちらを無視する（メッセージングが黙って壊れる形を作らない）。
+   *
+   * Claude側（`claudeChatView.ts`）は無視する。この指定を使う経路（セカンドオピニオン）は
+   * 常にCodexのセッションを開くため、Claude側の配線は要らない。
+   */
+  disableMcpServers?: boolean;
 }
 
 export interface TaskSessionHost {

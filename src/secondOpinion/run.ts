@@ -15,7 +15,11 @@ import type { Logger } from '../log';
 import { runSingleTurnTask, SingleTurnTimeoutError } from '../orchestrator/planner';
 import type { TaskSessionHost, TaskSessionInput } from '../orchestrator/taskSession';
 import type { SecondOpinionCandidate } from './candidates';
-import { buildSecondOpinionPrompt, type SecondOpinionArtifact } from './prompt';
+import {
+  buildSecondOpinionPrompt,
+  type ConversationBackgroundKind,
+  type SecondOpinionArtifact,
+} from './prompt';
 
 /**
  * 承認要求を人へ回さず全て拒否するモード。`runSingleTurnTask` が起動直前に確かめる
@@ -56,6 +60,9 @@ export function buildSecondOpinionSessionInput(
       approvalMode: SECOND_OPINION_APPROVAL_MODE,
     },
     sandbox: SANDBOX_MODES[0],
+    // 材料を読んで答えるだけのターンでMCPのツールは要らない。既定のまま開くと
+    // 利用者のサーバと組み込みの `codex_apps` が接続され、その分だけ遅くなる（Issue #944）
+    disableMcpServers: true,
   };
 }
 
@@ -72,6 +79,11 @@ export interface SecondOpinionRequest {
    * 渡さない（渡さなければ、元の会話に由来する材料は一切渡らない）。
    */
   conversationSummary?: string | undefined;
+  /**
+   * {@link conversationSummary} が要約か、会話の記録そのものか（Issue #944）。
+   * 省略時は `'summary'`。
+   */
+  conversationBackgroundKind?: ConversationBackgroundKind | undefined;
   /** タブを開かずに走らせるか（設定 `agent.secondOpinion.headless`）。 */
   headless: boolean;
   timeoutMs?: number | undefined;
@@ -90,6 +102,20 @@ export type SecondOpinionResult =
   | { ok: false; reason: string };
 
 /**
+ * ログに出す背景の状態（Issue #944）。
+ *
+ * 要約を作ったのか、短いので記録をそのまま渡したのか、そもそも渡していないのかは、
+ * 後から所要時間を読むときに要る（要約セッションを開いたかどうかで待ち時間が変わる）。
+ * 本文は出さない（受入基準14）。
+ */
+function describeBackgroundForLog(request: SecondOpinionRequest): string {
+  if (request.conversationSummary === undefined) {
+    return 'off';
+  }
+  return request.conversationBackgroundKind === 'transcript' ? 'transcript' : 'on';
+}
+
+/**
  * 1回分のセカンドオピニオンを走らせる。
  *
  * 失敗・タイムアウトは例外にせず `ok: false` と理由で返す（headlessではタブが無く、
@@ -104,6 +130,7 @@ export async function runSecondOpinion(
     userRequest: request.request,
     artifact: request.artifact,
     conversationSummary: request.conversationSummary,
+    conversationBackgroundKind: request.conversationBackgroundKind,
   });
   // 依頼文・差分の中身は出さない（credential・顧客情報・proprietary codeが入りうる。
   // 受入基準14）。出すのは実行条件と分量だけ
@@ -111,7 +138,7 @@ export async function runSecondOpinion(
     `${SECOND_OPINION_LOG_PREFIX} start provider=codex model=${request.candidate.model} ` +
       `effort=${request.candidate.effort} headless=${String(request.headless)} ` +
       `artifact=${request.artifact.kind} ` +
-      `summary=${request.conversationSummary === undefined ? 'off' : 'on'} ` +
+      `summary=${describeBackgroundForLog(request)} ` +
       `promptChars=${prompt.length}`,
   );
   try {

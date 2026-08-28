@@ -26,6 +26,7 @@ import {
 import { describeUnsafeCombination } from '../codex/argvBuilder';
 import { summarize } from '../codex/conversation';
 import { readForkedThreadId } from '../codex/jsonRpc';
+import { buildDisabledMcpServersOverlay } from '../codex/mcpDisable';
 import { effortsFor } from '../codex/modelCatalog';
 import { readSkillsList } from '../codex/skillsList';
 import { readRateLimits, type UsageSnapshot } from '../codex/usage';
@@ -594,10 +595,15 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // タスク間メッセージング（design.md §16.21）。`input.mcp`が渡されていれば、
     // このスレッドだけに見せるMCPサーバとして`thread/start`のconfigへ差し込む
     // （`ChatSession.start`はmcp_servers自体の意味を知らない。同メソッドのJSDoc参照）
+    // MCPを使わないセッション（セカンドオピニオンとその要約。Issue #944）は、サーバを
+    // 名指しで無効化したオーバーレイを渡す。`mcp`が指定されていればそちらを優先する
+    // （メッセージングを黙って壊さない。`TaskSessionInput.disableMcpServers`のJSDoc参照）
     const mcpServersConfig =
       input.mcp !== undefined
         ? { [MESSAGING_MCP_SERVER_NAME]: { url: input.mcp.url, type: 'streamable_http' } }
-        : undefined;
+        : input.disableMcpServers === true
+          ? await this.disabledMcpServersConfig()
+          : undefined;
     try {
       const threadId = await entry.session.start(input.cwd, taskConfig, mcpServersConfig);
       this.pendingStarts.end(pendingKey);
@@ -609,6 +615,28 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       this.teardown(entry);
       this.reportError(e);
       throw e instanceof Error ? e : new Error(String(e));
+    }
+  }
+
+  /**
+   * MCPサーバを1本も接続させない `thread/start` のconfig（Issue #944）。
+   *
+   * サーバ名は `config/read`（実測35ms）から読み、`config.toml` に現れない組み込みの
+   * サーバは `buildDisabledMcpServersOverlay` が足す。`config/read` に失敗しても
+   * 組み込み分だけのオーバーレイで続ける（ツールを積んだまま走らせる理由が無いため）。
+   */
+  private async disabledMcpServersConfig(): Promise<Record<string, unknown>> {
+    try {
+      await this.connection.ensureStarted();
+      const response = await this.connection.request('config/read', {});
+      return buildDisabledMcpServersOverlay(response.result);
+    } catch (e) {
+      this.log.warn(
+        `MCPサーバ一覧を読めなかったため、組み込み分だけを無効化して開始します: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+      return buildDisabledMcpServersOverlay(undefined);
     }
   }
 
@@ -1319,6 +1347,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       this,
       this.secondOpinionRegistry,
       this.log,
+      undefined,
+      // effortの選択肢（Issue #944）。Codexのモデルカタログを持っているのはここだけなので、
+      // 受け付ける値の一覧はこちらから渡す
+      (model) => effortsFor(this.settings.snapshot().models, model),
     );
   }
 
