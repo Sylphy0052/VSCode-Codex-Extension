@@ -366,6 +366,48 @@ describe('LoopController', () => {
       expect(sent).toEqual(['第1話を執筆']);
     });
 
+    describe('停止ポリシーは一時停止をまたいでも効く（issue #914）', () => {
+      it('一時停止中に完了したターンが終了条件を満たしていればdoneで止まる', () => {
+        const { sent, send } = spy();
+        const controller = new LoopController(send);
+        controller.start(plan({ condition: '20話完了' }));
+        controller.pause();
+        runTurn(controller, state({ items: [agentMessage(LOOP_DONE_TOKEN)] }));
+        expect(controller.getStatus().stopReason).toBe('done');
+        controller.resume();
+        expect(sent).toHaveLength(1);
+      });
+
+      it('一時停止中に時間上限を超えていたらtimedOutで止まる', () => {
+        const { sent, send } = spy();
+        let now = 0;
+        const controller = new LoopController(send, undefined, undefined, () => now);
+        controller.start(plan({ maxDurationMs: 1000 }));
+        controller.pause();
+        now = 1000;
+        runTurn(controller);
+        expect(controller.getStatus().stopReason).toBe('timedOut');
+        controller.resume();
+        expect(sent).toHaveLength(1);
+      });
+
+      it('返信を待っている間に時間上限を跨いだら、再開しても次を送らずtimedOutで止まる', () => {
+        // ターンが完了した時点では超えていない。人が答えるまでの待ち時間で超える
+        const { sent, send } = spy();
+        let now = 0;
+        const controller = new LoopController(send, undefined, undefined, () => now);
+        controller.start(plan({ maxDurationMs: 1000 }));
+        controller.pause();
+        now = 500;
+        runTurn(controller);
+        expect(controller.running).toBe(true);
+        now = 5000;
+        controller.resume();
+        expect(sent).toHaveLength(1);
+        expect(controller.getStatus().stopReason).toBe('timedOut');
+      });
+    });
+
     it('stop()すると一時停止フラグも解ける', () => {
       const { sent, send } = spy();
       const controller = new LoopController(send);
@@ -591,6 +633,90 @@ describe('LoopController（撤退の申告・時間上限・ループエンジ�
     expect(first.indexOf(DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION)).toBeLessThan(
       first.indexOf('20話完了'),
     );
+  });
+});
+
+describe('LoopController: 停止理由の優先順位（issue #914）', () => {
+  it('撤退の申告と終了条件が同時に成立していればescalatedを採る', () => {
+    // 「解決できないので止めてくれ」を「終わった」と読み替えない
+    const { send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan({ condition: '20話完了' }));
+    runTurn(
+      controller,
+      state({ items: [agentMessage(`${LOOP_DONE_TOKEN}\n${LOOP_ESCALATE_TOKEN}`)] }),
+    );
+    expect(controller.getStatus().stopReason).toBe('escalated');
+  });
+
+  it('停滞と時間切れが同時に成立していればstalledを採る', () => {
+    // 「進んでいない」は原因を名指しできる分だけ理由として具体的
+    const { send } = spy();
+    let now = 0;
+    const controller = new LoopController(send, undefined, 2, () => now);
+    controller.start(plan({ maxIterations: 20, maxDurationMs: 1000 }));
+    runTurn(controller, state({ turnResultText: '同じ内容' }));
+    now = 5000;
+    runTurn(controller, state({ turnResultText: '同じ内容' }));
+    expect(controller.getStatus().stopReason).toBe('stalled');
+  });
+
+  it('時間切れと回数切れが同時に成立していればtimedOutを採る', () => {
+    const { send } = spy();
+    let now = 0;
+    const controller = new LoopController(send, undefined, undefined, () => now);
+    controller.start(plan({ maxIterations: 1, maxDurationMs: 1000 }));
+    now = 5000;
+    runTurn(controller);
+    expect(controller.getStatus().stopReason).toBe('timedOut');
+  });
+
+  it('ターンの失敗は撤退の申告より先に見る', () => {
+    const { send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan());
+    runTurn(controller, state({ turnFailed: true, items: [agentMessage(LOOP_ESCALATE_TOKEN)] }));
+    expect(controller.getStatus().stopReason).toBe('failed');
+  });
+});
+
+describe('LoopController: 時間上限の境界（issue #914）', () => {
+  const runWithElapsed = (elapsed: number): LoopController => {
+    const { send } = spy();
+    let now = 0;
+    const controller = new LoopController(send, undefined, undefined, () => now);
+    controller.start(plan({ maxIterations: 20, maxDurationMs: 1000 }));
+    now = elapsed;
+    runTurn(controller);
+    return controller;
+  };
+
+  it('上限に1ミリ秒足りなければ続ける', () => {
+    expect(runWithElapsed(999).running).toBe(true);
+  });
+
+  it('上限ちょうどで止める', () => {
+    expect(runWithElapsed(1000).getStatus().stopReason).toBe('timedOut');
+  });
+
+  it('上限を超えていれば止める', () => {
+    expect(runWithElapsed(1001).getStatus().stopReason).toBe('timedOut');
+  });
+
+  it('上限を大きく超えても、ターンが走っている間は止めない（hard timeoutではない）', () => {
+    // 走行中のターンへ割り込まない割り切り。仕様として固定しておく
+    const { send } = spy();
+    let now = 0;
+    const controller = new LoopController(send, undefined, undefined, () => now);
+    controller.start(plan({ maxIterations: 20, maxDurationMs: 1000 }));
+    controller.observe(state({ busy: true }));
+    now = 60 * 60 * 1000;
+    controller.observe(state({ busy: true }));
+    expect(controller.running).toBe(true);
+    expect(controller.getStatus().stopReason).toBeUndefined();
+    // busyが下りたターン境界で初めて止まる
+    controller.observe(state({ busy: false }));
+    expect(controller.getStatus().stopReason).toBe('timedOut');
   });
 });
 
@@ -962,6 +1088,35 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
     await Promise.resolve();
     expect(sent).toHaveLength(1);
     expect(loop.getStatus().stopReason).toBe('manual');
+  });
+
+  it('評価を待っている間に一時停止して再開しても、判定が返ったときに1回だけ送る（issue #914）', async () => {
+    // `pendingPrompt` / `paused` / `evaluating` と非同期のEvaluatorが最も競合する境界。
+    // resume時点ではまだ判定が無いので送らず、判定が返った時点で`paused`が解けている
+    // ためそのまま送る
+    const sent: string[] = [];
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const loop = new LoopController((t) => void sent.push(t));
+    loop.start(
+      goalPlan(async () => {
+        await gate;
+        return evaluation({ nextFocus: 'ログを確認する' });
+      }),
+    );
+    loop.observe(state({ busy: true }));
+    loop.observe(state({ busy: false }));
+    loop.pause();
+    loop.resume();
+    expect(sent).toHaveLength(1);
+    release?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toContain('ログを確認する');
   });
 
   describe('issue #909: 証拠の取りこぼし・pauseによるBound迂回・判定順', () => {

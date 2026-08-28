@@ -348,10 +348,14 @@ export class LoopController {
      */
     private readonly stallThreshold: number = DEFAULT_STALL_REPEAT_COUNT,
     /**
-     * 現在時刻の取得（issue #891）。時間上限の判定にだけ使う。
-     * テストから任意の時刻を流し込めるよう差し替え可能にしてある（既定は`Date.now`）。
+     * 経過時間の計測（issue #891）。時間上限の判定にだけ使う。
+     *
+     * 既定は`performance.now`（issue #914）。使うのは`start()`時点との差だけなので
+     * 基準時刻に意味は無く、NTP同期や手動の時刻変更で飛ばないことの方が重要である
+     * （`Date.now` は経過時間の計測には向かない）。テストから任意の値を流し込めるよう
+     * 差し替え可能にしてある。
      */
-    private readonly now: () => number = () => Date.now(),
+    private readonly now: () => number = () => performance.now(),
   ) {}
 
   getStatus(): LoopStatus {
@@ -400,6 +404,14 @@ export class LoopController {
       return;
     }
     this.pendingPrompt = undefined;
+    // 保留してから再開までの待ち時間で時間上限を跨いでいないかを、送る直前にもう一度見る
+    // （issue #914）。ターンが完了した時点では超えていなくても、返信を待っている間に
+    // 上限へ達することがある——人が2時間後に答えることもある。回数上限を見直さないのは、
+    // 待っている間に`iteration`が進むことはなく、保留を作った時点の判定で足りるため
+    if (this.hasExceededDuration(this.plan)) {
+      this.stop('timedOut');
+      return;
+    }
     this.dispatch(pending, 'continue');
   }
 
