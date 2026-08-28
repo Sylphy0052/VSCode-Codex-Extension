@@ -75,6 +75,8 @@ export function chatScript(
    * メッセージでクラスを付けるだけでは次の状態更新で消える。ここへ持って計算へ混ぜる。
    */
   let secondOpinionRunning = false;
+  /** 直近の状態でバックグラウンドターミナルが残っているか（枠色の計算に使う）。 */
+  let hasBackgroundTerminals = false;
   /**
    * 拡張機能から差し分で届く会話項目を積む先（issue #262）。
    * 全項目を毎回受け取ると、会話が長いほど1回の受信が重くなる。
@@ -1836,14 +1838,11 @@ export function chatScript(
     el('log').scrollTo({ top: target.offsetTop, behavior: reducedMotion ? 'auto' : 'smooth' });
   }
 
-  /** 直近の状態でバックグラウンドターミナルが残っているか（枠色の計算に使う）。 */
-  let hasBackgroundTerminals = false;
-
   /**
    * 外周の枠を黄色（バックグラウンド実行中）にするかを決める（Issue #905）。
    *
    * バックグラウンドターミナルとセカンドオピニオンのどちらか一方でも走っていれば黄。
-   * 応答中（赤）が優先されるのはCSS側の後置指定によるが、状態としても混ぜない。
+   * ただし応答中（赤）は優先で、そのときは黄を付けない。
    */
   function applyBackgroundRunning(busy) {
     document.body.classList.toggle(
