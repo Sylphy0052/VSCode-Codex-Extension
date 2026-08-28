@@ -988,17 +988,21 @@ export function buildPlannerSessionInput(provider: Provider, cwd: string): TaskS
  * baseline依存のクランプが再び挟まれた場合や、呼び出し側の実装ミスで安全でない値が
  * 混入した場合に、プロンプトでの指示だけに頼らず起動そのものを止める最後の砦にする。
  */
-function assertPlannerSessionIsSafe(provider: Provider, input: TaskSessionInput): void {
+function assertSingleTurnSessionIsSafe(
+  provider: Provider,
+  input: TaskSessionInput,
+  label: string,
+): void {
   const expectedApprovalMode = plannerApprovalModeFor(provider);
   if (input.config.approvalMode !== expectedApprovalMode) {
     throw new Error(
-      '分解セッションの実効approvalModeが期待値と一致しないため、' +
+      `${label}の実効approvalModeが期待値と一致しないため、` +
         `起動を中止しました（実効値: "${input.config.approvalMode}", 期待値: "${expectedApprovalMode}"）`,
     );
   }
   if (provider === 'codex' && input.sandbox !== SANDBOX_MODES[0]) {
     throw new Error(
-      '分解セッションの実効sandboxが期待値と一致しないため、' +
+      `${label}の実効sandboxが期待値と一致しないため、` +
         `起動を中止しました（実効値: "${input.sandbox}", 期待値: "${SANDBOX_MODES[0]}"）`,
     );
   }
@@ -1022,6 +1026,38 @@ function assertPlannerSessionIsSafe(provider: Provider, input: TaskSessionInput)
  * ことが目的であり、遅いだけの正常系を犠牲にしてまで短くする理由は無い。
  */
 export const PLANNER_TURN_TIMEOUT_MS = 5 * 60_000;
+
+/** `runSingleTurnTask` のログ・エラー文言の既定の主語（分解セッション用）。 */
+const DEFAULT_SINGLE_TURN_LABEL = '分解セッション';
+
+/** `runSingleTurnTask` のログのprefixの既定値（分解セッション用）。 */
+const DEFAULT_SINGLE_TURN_LOG_PREFIX = '[planner]';
+
+/**
+ * `runSingleTurnTask` の任意指定。
+ *
+ * 分解セッション（`sendSingleTurn`）とセカンドオピニオン（Issue #894）で違うのは
+ * 「タブを開くか」「ログ・エラー文言の主語」だけで、セッションの安全側の固定値
+ * （`approvalMode: 'never'` / `sandbox: 'read-only'`）と1ターンで閉じる流れは同じ。
+ * 違う部分だけをここへ出し、本体は1つに保つ。
+ */
+export interface SingleTurnOptions {
+  /** 既定は {@link PLANNER_TURN_TIMEOUT_MS}。 */
+  timeoutMs?: number | undefined;
+  log?: Logger | undefined;
+  /** 既定は `true`。`false` なら呼び出し側が `dispose()` の責任を持つ。 */
+  disposeSession?: boolean | undefined;
+  onSessionOpened?: ((session: TaskSession) => void) | undefined;
+  /**
+   * タブ（webviewパネル）を開くか。既定は `true`（従来の分解セッションの挙動）。
+   * `false` にすると画面にタブを出さないまま1ターンを完走する（Issue #894 のheadless）。
+   */
+  openPanel?: boolean | undefined;
+  /** ログ・エラー文言の主語。既定は「分解セッション」。 */
+  label?: string | undefined;
+  /** ログのprefix。既定は `[planner]`。 */
+  logPrefix?: string | undefined;
+}
 
 /**
  * 分解専用のセッションを1つ開き、1ターンだけ送って応答を受け取り、閉じる。
@@ -1050,21 +1086,33 @@ export const PLANNER_TURN_TIMEOUT_MS = 5 * 60_000;
  *
  * `roadmap.ts`からも使う（`buildPlannerSessionInput`と同じ理由でexportする）。
  */
-export async function sendSingleTurn(
+export async function runSingleTurnTask(
   host: TaskSessionHost,
   provider: Provider,
   input: TaskSessionInput,
   prompt: string,
-  timeoutMs: number = PLANNER_TURN_TIMEOUT_MS,
-  log?: Logger,
-  disposeSession: boolean = true,
-  onSessionOpened?: (session: TaskSession) => void,
+  options: SingleTurnOptions = {},
 ): Promise<string> {
-  assertPlannerSessionIsSafe(provider, input);
+  const {
+    timeoutMs = PLANNER_TURN_TIMEOUT_MS,
+    log,
+    disposeSession = true,
+    onSessionOpened,
+    openPanel = true,
+    label = DEFAULT_SINGLE_TURN_LABEL,
+    logPrefix = DEFAULT_SINGLE_TURN_LOG_PREFIX,
+  } = options;
+  assertSingleTurnSessionIsSafe(provider, input, label);
   const session = await host.openTaskSession(input);
   onSessionOpened?.(session);
   session.setApprovalHandler(async () => ({ kind: 'auto', decision: 'decline' }));
-  session.open({ preserveFocus: true });
+  // タブを開くかどうかは呼び出し側が決める（Issue #894。`openPanel: false` なら
+  // `TaskSession.open()` を呼ばず、パネルを作らないまま完走する。`buildEntry` は
+  // `panel: undefined` で生成し、`postState` / `onSessionChange` はタブが無い状態を
+  // 織り込み済みのため、開かなくても状態の更新経路は回る）
+  if (openPanel) {
+    session.open({ preserveFocus: true });
+  }
   try {
     return await new Promise<string>((resolve, reject) => {
       let settled = false;
@@ -1080,12 +1128,10 @@ export async function sendSingleTurn(
         // ログには残す（#400コードレビュー指摘 low 2。完全に握り潰さない）
         void session.interrupt().catch((e: unknown) => {
           const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
-          log?.warn(`[planner] タイムアウト後のinterrupt()に失敗しました: ${message}`);
+          log?.warn(`${logPrefix} タイムアウト後のinterrupt()に失敗しました: ${message}`);
         });
         reject(
-          new Error(
-            `分解セッションのターンが${timeoutMs}ミリ秒以内に完了しなかったため打ち切りました`,
-          ),
+          new Error(`${label}のターンが${timeoutMs}ミリ秒以内に完了しなかったため打ち切りました`),
         );
       }, timeoutMs);
       session.onFinished((reason, state) => {
@@ -1095,7 +1141,7 @@ export async function sendSingleTurn(
         settled = true;
         clearTimeout(timer);
         if (reason === 'failed') {
-          reject(new Error('分解セッションのターンが失敗しました'));
+          reject(new Error(`${label}のターンが失敗しました`));
           return;
         }
         // Codexの完了通知では、画面上のagentMessageは残っているのに
@@ -1121,6 +1167,30 @@ export async function sendSingleTurn(
       session.dispose();
     }
   }
+}
+
+/**
+ * 分解専用のセッションを1つ開き、1ターンだけ送って応答を受け取り、閉じる。
+ *
+ * 実体は {@link runSingleTurnTask}。従来の引数の並びを保つラッパで、`planner.ts` /
+ * `roadmap.ts` の既存の呼び出しはこちらを使い続ける（挙動は変えていない。タブは開く）。
+ */
+export async function sendSingleTurn(
+  host: TaskSessionHost,
+  provider: Provider,
+  input: TaskSessionInput,
+  prompt: string,
+  timeoutMs: number = PLANNER_TURN_TIMEOUT_MS,
+  log?: Logger,
+  disposeSession: boolean = true,
+  onSessionOpened?: (session: TaskSession) => void,
+): Promise<string> {
+  return runSingleTurnTask(host, provider, input, prompt, {
+    timeoutMs,
+    log,
+    disposeSession,
+    onSessionOpened,
+  });
 }
 
 /**
