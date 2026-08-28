@@ -114,20 +114,22 @@ describe('decoratePrompt', () => {
 });
 
 describe('declaresDone', () => {
-  it('直近のエージェント発言に合図があれば真', () => {
-    expect(declaresDone(state({ items: [agentMessage(LOOP_DONE_TOKEN)] }))).toBe(true);
+  it('最終行が合図と完全一致していれば真', () => {
+    expect(declaresDone(agentMessage(LOOP_DONE_TOKEN))).toBe(true);
   });
 
-  it('古い発言の合図は見ない', () => {
-    const items = [
-      { ...agentMessage(LOOP_DONE_TOKEN), id: 'old' },
-      { ...agentMessage('まだ続きます'), id: 'new' },
-    ];
-    expect(declaresDone(state({ items }))).toBe(false);
+  it('本文の途中に現れただけでは偽', () => {
+    expect(declaresDone(agentMessage(`まだ ${LOOP_DONE_TOKEN} は出しません`))).toBe(false);
   });
 
-  it('エージェントの発言が無ければ偽', () => {
-    expect(declaresDone(state())).toBe(false);
+  it('本文が空なら偽', () => {
+    expect(declaresDone(agentMessage('  '))).toBe(false);
+  });
+
+  it('エージェントの発言以外を渡されても偽（issue #937）', () => {
+    expect(
+      declaresDone({ ...agentMessage(LOOP_DONE_TOKEN), id: 'c1', kind: 'commandExecution' }),
+    ).toBe(false);
   });
 });
 
@@ -1040,6 +1042,100 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
     await finishTurn(loop, items);
     await finishTurn(loop, items);
     expect((inputs[1]?.evidence ?? []).filter((e) => e.kind === 'test')).toHaveLength(1);
+  });
+
+  describe('合図は現在のターンで出た発言にだけ効く（issue #937）', () => {
+    /** idと本文を指定した`agentMessage`。ターンを跨ぐ同一性の検証に使う。 */
+    const message = (id: string, text: string): ChatItem => ({ ...agentMessage(text), id });
+
+    it('開始前に残っていた合図では止まらない', () => {
+      // 前のループの最後の応答が会話に残っている状態でループを始め、1ターン目が
+      // コマンド実行だけで終わる（新しい`agentMessage`が出ない）
+      const before = [message('old', `終わりました\n${LOOP_DONE_TOKEN}`)];
+      const controller = new LoopController(() => undefined);
+      controller.start(plan({ condition: '20話完了' }), before);
+      runTurn(controller, state({ items: before }));
+      expect(controller.running).toBe(true);
+    });
+
+    it('開始前に残っていた撤退の申告でも止まらない', () => {
+      const before = [message('old', `手が尽きた\n${LOOP_ESCALATE_TOKEN}`)];
+      const controller = new LoopController(() => undefined);
+      controller.start(plan(), before);
+      runTurn(controller, state({ items: before }));
+      expect(controller.running).toBe(true);
+    });
+
+    it('前のターンの発言を、ツールだけの次のターンで新しい発言として扱わない', () => {
+      // 合図を含まない応答を1ターン目に出し、2ターン目はコマンド実行だけで終わる。
+      // このとき1ターン目の発言が判定に掛かってはいけない
+      const first = [message('a1', '直しました')];
+      const controller = new LoopController(() => undefined);
+      controller.start(plan({ condition: '20話完了', maxIterations: 5 }));
+      runTurn(controller, state({ items: first }));
+      expect(controller.running).toBe(true);
+      // 2ターン目。`items`は変わらない（新しい発言が無い）
+      runTurn(controller, state({ items: first }));
+      expect(controller.running).toBe(true);
+    });
+
+    it('そのターンで新しく出た合図では、これまでどおり止まる', () => {
+      const controller = new LoopController(() => undefined);
+      controller.start(plan({ condition: '20話完了', maxIterations: 5 }));
+      runTurn(controller, state({ items: [message('a1', '直しました')] }));
+      expect(controller.running).toBe(true);
+      runTurn(
+        controller,
+        state({ items: [message('a1', '直しました'), message('a2', LOOP_DONE_TOKEN)] }),
+      );
+      expect(controller.getStatus().stopReason).toBe('done');
+    });
+
+    it('idが使い回されても、新しい発言なら合図として扱う', () => {
+      // Claude側は`message.id`が取れないと`assistant:text:0`へフォールバックするため、
+      // 別のターンの発言が同じidになる（`streamJson.ts`の`blockId` / `partialId`）。
+      // idで比べると、ここで合図を取りこぼして止まれなくなる
+      const controller = new LoopController(() => undefined);
+      controller.start(plan({ condition: '20話完了', maxIterations: 5 }));
+      runTurn(controller, state({ items: [message('assistant:text:0', '直しました')] }));
+      expect(controller.running).toBe(true);
+      runTurn(controller, state({ items: [message('assistant:text:0', LOOP_DONE_TOKEN)] }));
+      expect(controller.getStatus().stopReason).toBe('done');
+    });
+
+    it('turnResultTextが空でも、新しい発言に合図があれば止まる', () => {
+      // `appendDelta`が作った項目は`turnId`が付かないことがあり、`summarizeTurn`が
+      // それを落として`turnResultText`が空になる（`planner.ts`のフォールバック参照）。
+      // 合図の判定をこの値に頼っていないことを固定する
+      const controller = new LoopController(() => undefined);
+      controller.start(plan({ condition: '20話完了', maxIterations: 5 }));
+      runTurn(controller, state({ items: [message('a1', LOOP_DONE_TOKEN)], turnResultText: '' }));
+      expect(controller.getStatus().stopReason).toBe('done');
+    });
+
+    it('始め直した後に、同じidで同じ合図を新しく返しても止まる', () => {
+      // Claudeのfallback idでは、別の実行の発言が同じ`assistant:text:0`になる。
+      // idと最終行だけを比べると、開始前のbaselineと区別が付かず**新しく返した合図を
+      // 無視して止まれなくなる**。境界は項目そのもので比べる
+      const previous = [message('assistant:text:0', LOOP_DONE_TOKEN)];
+      const controller = new LoopController(() => undefined);
+      controller.start(plan({ condition: '20話完了', maxIterations: 5 }), previous);
+      // 別のオブジェクトだが、idも本文も開始前の発言と完全に同じ
+      runTurn(controller, state({ items: [message('assistant:text:0', LOOP_DONE_TOKEN)] }));
+      expect(controller.getStatus().stopReason).toBe('done');
+    });
+
+    it('止め直したループでは、前の実行の発言を持ち越さない', () => {
+      const items = [message('a1', `終わりました\n${LOOP_DONE_TOKEN}`)];
+      const controller = new LoopController(() => undefined);
+      controller.start(plan({ condition: '20話完了' }));
+      runTurn(controller, state({ items }));
+      expect(controller.getStatus().stopReason).toBe('done');
+      // 同じ発言が会話に残ったまま始め直す。開始時点の項目を渡すので拾い直さない
+      controller.start(plan({ condition: '20話完了' }), items);
+      runTurn(controller, state({ items }));
+      expect(controller.running).toBe(true);
+    });
   });
 
   describe('現在の実行以外の状態を持ち込まない（issue #933）', () => {

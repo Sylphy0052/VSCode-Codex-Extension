@@ -24,7 +24,7 @@
  * `LoopController`が送る指示であり、参照するのも`LoopController`自身のため。
  */
 
-import type { ChatState } from '../appserver/chatState';
+import type { ChatItem } from '../appserver/chatState';
 
 /**
  * 行き詰まりを申告するための合図（Escalate、issue #891）。
@@ -42,36 +42,61 @@ import type { ChatState } from '../appserver/chatState';
 export const LOOP_ESCALATE_TOKEN = '<<LOOP_ESCALATE>>';
 
 /**
- * 直近のエージェント発言が行き詰まりを宣言しているか。
+ * **渡された発言が**行き詰まりを宣言しているか。
  *
- * **応答の最終行が`LOOP_ESCALATE_TOKEN`と完全に一致する場合だけ**成立とする
+ * **発言の最終行が`LOOP_ESCALATE_TOKEN`と完全に一致する場合だけ**成立とする
  * （前後の空白は除いて比べる）。本文の途中に説明として現れただけでは成立しない。
  *
- * 判定に使うのは「末尾から数えて最初の`agentMessage`」で、`declaresDone`と同じ。
+ * 受け取るのが`ChatState`ではなく`ChatItem`なのは、**「どの発言を見るか」の判断を
+ * `LoopController`へ移したため**（issue #937）。会話全体から直近の発言を探していた頃は、
+ * ツール実行だけで本文を返さなかったターンで過去のターンの発言を拾い、ループを始める
+ * 前の合図で停止しえた。この関数は「渡された発言が合図か」だけを答え、それが現在の
+ * ターンのものかは呼び出し側が決める（`declaresDone`も同じ形）。
+ *
  * ループエンジニアリングモードが無効でも判定自体は行う——利用者が自分の指示文へ
  * この合図を書いた場合にも効かせるためで、完全一致にしてあるぶん誤検知の余地は小さい。
  */
-export function declaresEscalate(state: ChatState): boolean {
-  return lastAgentMessageFinalLine(state) === LOOP_ESCALATE_TOKEN;
+export function declaresEscalate(item: ChatItem): boolean {
+  return agentMessageFinalLine(item) === LOOP_ESCALATE_TOKEN;
 }
 
 /**
- * 末尾から数えて最初の`agentMessage`の、**最後の非空行**（前後の空白を除く）。
+ * エージェントの発言の、**最後の非空行**（前後の空白を除く）。
  *
- * エージェントの発言が1つも無ければ`undefined`。合図（`LOOP_ESCALATE_TOKEN` /
- * `LOOP_DONE_TOKEN`）の判定はどちらもこの値との完全一致で行う（issue #914）。
+ * `agentMessage`以外を渡された場合と、本文が空白だけの場合は`undefined`。合図
+ * （`LOOP_ESCALATE_TOKEN` / `LOOP_DONE_TOKEN`）の判定はどちらもこの値との完全一致で
+ * 行う（issue #914）。
+ */
+export function agentMessageFinalLine(item: ChatItem): string | undefined {
+  if (item.kind !== 'agentMessage') {
+    return undefined;
+  }
+  const text = item.text.trimEnd();
+  if (text === '') {
+    return undefined;
+  }
+  const lines = text.split('\n');
+  const lastLine = lines[lines.length - 1];
+  return lastLine === undefined ? undefined : lastLine.trim();
+}
+
+/**
+ * 末尾から数えて最初の`agentMessage`。1つも無ければ`undefined`。
  *
  * 見るのが配列の最後の項目ではなく最後の`agentMessage`なのは、応答の後ろに
  * `commandExecution`などの項目が並ぶことがあるため。合図はエージェントの発言の中に
  * あればよく、その後ろにツールの実行記録が続いていても成立する。
+ *
+ * これが**どのターンの発言かはここでは分からない**。`ChatItem.turnId`は
+ * `item/agentMessage/delta`で作られた項目では`undefined`のままになることがあり
+ * （`chatState.ts`の`appendDelta`）、ターンの絞り込みには使えない。現在のターンの
+ * ものかは`LoopController`が前のターン境界の値と比べて決める（issue #937）。
  */
-export function lastAgentMessageFinalLine(state: ChatState): string | undefined {
-  for (let i = state.items.length - 1; i >= 0; i -= 1) {
-    const item = state.items[i];
+export function lastAgentMessage(items: readonly ChatItem[]): ChatItem | undefined {
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const item = items[i];
     if (item?.kind === 'agentMessage') {
-      const lines = item.text.trimEnd().split('\n');
-      const lastLine = lines[lines.length - 1];
-      return lastLine === undefined ? undefined : lastLine.trim();
+      return item;
     }
   }
   return undefined;
