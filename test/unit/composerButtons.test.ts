@@ -31,9 +31,17 @@ describe('COMPOSER_BUTTON_IDS（issue #296、入力欄アイコン列の正準�
   });
 });
 
-describe('DEFAULT_COMPOSER_BUTTONS（issue #296本文どおり先頭4つ）', () => {
+describe('DEFAULT_COMPOSER_BUTTONS（Issue #900で見直した既定の7つ）', () => {
   it('attach/loopToggle/compact/claudeImportの4つ', () => {
-    expect(DEFAULT_COMPOSER_BUTTONS).toEqual(['attach', 'loopToggle', 'compact', 'claudeImport']);
+    expect(DEFAULT_COMPOSER_BUTTONS).toEqual([
+      'attach',
+      'loopToggle',
+      'compact',
+      'recap',
+      'planToggle',
+      'handoffToNewSession',
+      'secondOpinion',
+    ]);
   });
 });
 
@@ -98,10 +106,9 @@ describe('normalizeComposerButtons（設定 agent.chat.composerButtons の検証
 });
 
 describe('overflowComposerButtons（「…」メニューへ畳むボタンの算出）', () => {
-  it('既定の4つを渡すと、残り13個が正準の並びの順で返る', () => {
+  it('既定の7つを渡すと、残り10個が正準の並びの順で返る（インポートも到達できる）', () => {
     expect(overflowComposerButtons(DEFAULT_COMPOSER_BUTTONS)).toEqual([
-      'recap',
-      'planToggle',
+      'claudeImport',
       'fastToggle',
       'review',
       'exportTranscript',
@@ -111,8 +118,6 @@ describe('overflowComposerButtons（「…」メニューへ畳むボタンの�
       'sessionKanban',
       'forgeHub',
       'openProgress',
-      'handoffToNewSession',
-      'secondOpinion',
     ]);
   });
 

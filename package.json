@@ -776,10 +776,13 @@
             "attach",
             "loopToggle",
             "compact",
-            "claudeImport"
+            "recap",
+            "planToggle",
+            "handoffToNewSession",
+            "secondOpinion"
           ],
           "scope": "window",
-          "markdownDescription": "チャット入力欄のアイコン列（`#composerIconRow`）の表に直接並べるボタン。ここに無いボタンは「…」メニューへ畳まれる（無くなるわけではない、issue #296）。既定は変更前の並びの先頭4つ。未知のIDや重複を含む場合は既定へ丸める。Codex/Claude Code両画面共通（実行時の条件で元から出ないボタン、例えば`fastToggle`はFast mode非対応環境では終始非表示、を指定しても、その状態のままなら出ない）。"
+          "markdownDescription": "チャット入力欄のアイコン列（`#composerIconRow`）の表に直接並べるボタン。ここに無いボタンは「…」メニューへ畳まれる（無くなるわけではない、issue #296）。既定は添付・ループ・圧縮・要約・計画・新セッションへ引き継ぐ・セカンドオピニオンの7つ（Issue #900）。未知のIDや重複を含む場合は既定へ丸める。Codex/Claude Code両画面共通（実行時の条件で元から出ないボタン、例えば`fastToggle`はFast mode非対応環境では終始非表示、を指定しても、その状態のままなら出ない）。"
         },
         "agent.secondOpinion.candidates": {
           "type": "array",

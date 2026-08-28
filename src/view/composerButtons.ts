@@ -36,13 +36,23 @@ export function isComposerButtonId(value: unknown): value is ComposerButtonId {
 }
 
 /**
- * 表（`#composerIconRow`）に直接出す既定のボタン。元の並びの先頭4つ（issue #296本文）。
+ * 表（`#composerIconRow`）に直接出す既定のボタン（Issue #900）。
+ *
+ * issue #296の時点では正準の並びの先頭4つ（`attach` / `loopToggle` / `compact` /
+ * `claudeImport`）だったが、その後に増えた要約・計画・引き継ぎ・セカンドオピニオンの方が
+ * 会話中に押す頻度が高い。逆に`claudeImport`（他エージェントからの設定の取り込み）は
+ * 会話中ではなく初回の設定時に一度使うもののため「…」メニューへ畳む。
+ *
+ * ここは**既定値**であり、`agent.chat.composerButtons`を明示した利用者の並びには影響しない。
  */
 export const DEFAULT_COMPOSER_BUTTONS: readonly ComposerButtonId[] = [
   'attach',
   'loopToggle',
   'compact',
-  'claudeImport',
+  'recap',
+  'planToggle',
+  'handoffToNewSession',
+  'secondOpinion',
 ];
 
 export interface ComposerButtonsResult {

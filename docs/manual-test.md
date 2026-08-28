@@ -2993,7 +2993,7 @@ Codex画面・Claude Code画面の両方に共通する機能（`chatScript.ts`/
 - 操作: `agent.chat.composerButtons`を`["review", "workflowMenu"]`に変更し、ウィンドウをリロードする（またはタブを開き直す）
 - 期待: 表にレビュー・ワークフローの2つだけが並び、画像・ループ・圧縮・インポートを含む残り8つは「…」メニューへ移る。どの操作も表・メニューのどちらからでも実行できる
 - 操作: `agent.chat.composerButtons`に存在しないID（例: `["attach", "doesNotExist"]`）を設定し、ウィンドウをリロードする
-- 期待: 入力欄は壊れず、既定の4つ（画像・ループ・圧縮・インポート）に戻る。出力チャネル「Agent Sessions」（Codex・Claude Code共通）に警告が記録される
+- 期待: 入力欄は壊れず、既定の7つ（画像・ループ・圧縮・要約・計画・新セッションへ引き継ぐ・セカンドオピニオン）に戻る。出力チャネル「Agent Sessions」（Codex・Claude Code共通）に警告が記録される
 - 操作: `agent.chat.composerButtons`を未設定に戻す
 
 ### U-24 Claude CodeのEditツール由来の差分の「差分を開く」「この変更を戻す」（design.md §14.52、issue #310）

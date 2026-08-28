@@ -973,7 +973,7 @@ export interface ChatShellOptions {
   sendOn?: SendOnMode;
   /**
    * 入力欄アイコン列（`#composerIconRow`）の表に直接出すボタン（設定`agent.chat.
-   * composerButtons`、既定は`DEFAULT_COMPOSER_BUTTONS`＝変更前の並びの先頭4つ、
+   * composerButtons`、既定は`DEFAULT_COMPOSER_BUTTONS`（Issue #900で見直した7つ）、
    * issue #296）。それ以外の既存ボタンは正準の並び（`COMPOSER_BUTTON_IDS`）のまま
    * 「…」メニュー（`#composerOverflowMenu`）へ畳む。**畳んだ後もボタン要素そのものは
    * 移動するだけで、`id`・`hidden`条件・イベント配線は一切変えない**
