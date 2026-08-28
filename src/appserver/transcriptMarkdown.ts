@@ -34,6 +34,7 @@ const KIND_TITLE: Record<string, string> = {
   webSearch: 'Web検索',
   plan: '計画',
   contextCompaction: '会話を圧縮しました',
+  contextCompactionStarted: '会話を圧縮しています',
   settingsChanged: '設定',
   imageView: '画像',
   imageGeneration: '画像の生成',

@@ -405,8 +405,9 @@ function applyCompactBoundary(state: ChatState, event: Record<string, unknown>):
  * 圧縮の進行と結果。実測した中身は `{status, compact_result, compact_error}` で、
  * `compact_result` は `success` か `failed`。
  *
- * 成功は `compact_boundary` が受け持つので、ここでは失敗だけを項目にする。
- * 失敗を黙って捨てると「押したのに何も起きない」状態になる。
+ * 始まったことは `status: "compacting"` で判るので、それを項目にする。成功は
+ * `compact_boundary` が受け持つので、ここでは失敗だけを項目にする。
+ * 進行中と失敗を黙って捨てると「押したのに何も起きない」状態になる。
  */
 function applyStatus(state: ChatState, event: Record<string, unknown>): ChatState {
   // 承認方法の変更。こちらから変えた場合も、TUIなど他の経路で変わった場合も届く
@@ -418,6 +419,30 @@ function applyStatus(state: ChatState, event: Record<string, unknown>): ChatStat
       'settings:' + (str(event['uuid']) || permissionMode),
       '承認方法を ' + permissionMode + ' に変えました',
     );
+  }
+
+  // 圧縮の開始（issue #893）。CLI 2.1.227〜2.1.247 の実測では、圧縮を始めた時点で
+  // `{"subtype":"status","status":"compacting"}` が届く。圧縮は数十秒かかることがあり、
+  // これを捨てると完了（`compact_boundary`）か失敗（`compact_result: "failed"`）が
+  // 届くまで画面に何も出ず、実行できていないように見える。
+  //
+  // 完了時にこの項目を消して1件へまとめることはしない。3つの通知はuuidがそれぞれ
+  // 異なるうえ、「いつ始めて、いつ終わったか」は時系列として残っていた方が読める。
+  if (str(event['status']) === 'compacting') {
+    return {
+      ...state,
+      items: upsert(state.items, {
+        id: compactionId(event),
+        kind: 'contextCompactionStarted',
+        text: '',
+        detail: '',
+        // 見出しが「会話を圧縮しています」なので、状態を重ねて出すと冗長になる
+        status: undefined,
+        turnId: undefined,
+        diffs: [],
+        searchResults: [],
+      }),
+    };
   }
 
   if (str(event['compact_result']) !== 'failed') {
