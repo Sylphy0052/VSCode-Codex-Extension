@@ -819,6 +819,31 @@
           "scope": "window",
           "markdownDescription": "セカンドオピニオン（独立したCodexセッションへレビューを依頼する機能）の依頼先候補。候補が1件だけなら選択UIを出さずにその候補で起動する。壊れた値・空配列を指定した場合は既定へ丸める。起動先はCodex固定で、`sandbox`（read-only）と承認の扱い（全て拒否）は設定できない。"
         },
+        "agent.secondOpinion.summary": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "会話の要約を添えるか"
+            },
+            "model": {
+              "type": "string",
+              "description": "要約を作るセッションのモデルslug"
+            },
+            "effort": {
+              "type": "string",
+              "description": "要約を作るセッションのreasoning effort"
+            }
+          },
+          "additionalProperties": false,
+          "default": {
+            "enabled": true,
+            "model": "gpt-5.6-sol",
+            "effort": "low"
+          },
+          "scope": "window",
+          "markdownDescription": "セカンドオピニオンへ添える会話の要約。要約を作るのは**この会話を進めているエージェントではなく、別の独立したセッション**で、会話の記録を読んで事実だけを圧縮する（作業した本人に要約させると、その仮説や見落としがそのまま渡り、独立レビューとしての値打ちが落ちるため）。`enabled` を `false` にすると要約セッションを開かず、渡すのは依頼文と変更のスナップショットだけになる。要約セッションも `read-only` / 承認は全て拒否で、タブは開かない。要約に失敗してもセカンドオピニオン自体は要約なしで続行する。"
+        },
         "agent.secondOpinion.headless": {
           "type": "boolean",
           "default": true,

@@ -13,7 +13,11 @@
 
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
-import { currentWorkspaceFolder, readSecondOpinionConfig } from '../config';
+import {
+  currentWorkspaceFolder,
+  readSecondOpinionConfig,
+  type SecondOpinionConfig,
+} from '../config';
 import type { Logger } from '../log';
 import type { TaskSessionHost } from '../orchestrator/taskSession';
 import { nodeGitCommandRunner, type GitCommandRunner } from '../orchestrator/worktree';
@@ -32,6 +36,7 @@ import {
 } from '../secondOpinion/prompt';
 import { runSecondOpinion, SecondOpinionRegistry } from '../secondOpinion/run';
 import { captureWorkspaceSnapshot } from '../secondOpinion/snapshot';
+import { summarizeConversation } from '../secondOpinion/summary';
 
 /** 画面1つ分の差し込み口。`ChatPanel` / `ClaudePanel` の違いをここへ閉じ込める。 */
 export interface SecondOpinionPanelPort {
@@ -41,6 +46,13 @@ export interface SecondOpinionPanelPort {
   cwd: string | undefined;
   /** 直近のエージェント応答（`lastAssistantResponse` を選んだときだけ使う）。 */
   lastAssistantResponse(): string;
+  /**
+   * 会話の記録（Issue #903）。要約セッションへの入力になる。
+   *
+   * 親セッションへ問い合わせるのではなく、画面が持っている `ChatState.items` から
+   * 組み立てたものを読むだけ（親のターンを1つも使わない。受入基準3）。
+   */
+  conversationTranscript(): string;
   /** 会話へ1項目として残す/更新する。 */
   note(id: string, display: SecondOpinionDisplay): void;
   /** webviewのボタンの押下可否を切り替える。 */
@@ -123,6 +135,47 @@ async function captureContext(
 }
 
 /**
+ * 会話の要約（Issue #903）を作る。
+ *
+ * 要約は**別セッション**が作る（作業した本人に要約させると、その解釈が圧縮されて渡り、
+ * 独立レビューとしての値打ちが落ちるため。`summary.ts` 参照）。設定で切っている場合と、
+ * 要約に失敗した場合は本文を返さない。どちらでもセカンドオピニオン本体は続行し、
+ * 要約なしのプロンプト（Issue #894時点と同じ）で走る。
+ */
+async function buildConversationSummary(
+  port: SecondOpinionPanelPort,
+  host: TaskSessionHost,
+  config: SecondOpinionConfig,
+  cwd: string,
+  log: Logger,
+): Promise<{ text: string | undefined; failure: string | undefined }> {
+  if (!config.summary.enabled) {
+    return { text: undefined, failure: undefined };
+  }
+  const conversation = port.conversationTranscript();
+  if (conversation.trim() === '') {
+    return { text: undefined, failure: undefined };
+  }
+  const result = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Window, title: '会話の要約を作成しています…' },
+    () =>
+      summarizeConversation(
+        host,
+        {
+          cwd,
+          model: config.summary.model,
+          effort: config.summary.effort,
+          conversation,
+        },
+        log,
+      ),
+  );
+  return result.ok
+    ? { text: result.summary, failure: undefined }
+    : { text: undefined, failure: result.reason };
+}
+
+/**
  * セカンドオピニオンを起動する。
  *
  * 途中で人が取り消した場合は何も起こさずに戻る（会話にも残さない）。起動した後は、
@@ -163,14 +216,15 @@ export async function startSecondOpinion(
   if (contextKind === undefined) {
     return;
   }
-  const request = await vscode.window.showInputBox({
+  const requestText = await vscode.window.showInputBox({
     title: 'セカンドオピニオンへの依頼',
     prompt: 'この会話の内容は渡りません。依頼したいことだけを書いてください',
     value: config.template,
   });
-  if (request === undefined || request.trim() === '') {
+  if (requestText === undefined || requestText.trim() === '') {
     return;
   }
+  const request = requestText;
   const context = await captureContext(contextKind, cwd, port, git);
   if (context === undefined) {
     return;
@@ -185,15 +239,34 @@ export async function startSecondOpinion(
   port.setRunning(true);
   port.note(id, pendingSecondOpinionDisplay(candidate, contextKind, request));
   try {
+    // 要約は本体より先に作る（本体のプロンプトへ載せるため）。失敗しても本体は続ける
+    const summary = await buildConversationSummary(port, host, config, cwd, log);
+    if (summary.failure !== undefined) {
+      log.warn(`[secondOpinion] 会話の要約を作れませんでした: ${summary.failure}`);
+    }
     const result = await runSecondOpinion(
       host,
-      { cwd, candidate, request, context, headless: config.headless, timeoutMs: config.timeoutMs },
+      {
+        cwd,
+        candidate,
+        request,
+        context,
+        headless: config.headless,
+        timeoutMs: config.timeoutMs,
+        conversationSummary: summary.text,
+      },
       log,
     );
     port.note(
       id,
       result.ok
-        ? finishedSecondOpinionDisplay(candidate, contextKind, request, result.response)
+        ? finishedSecondOpinionDisplay(
+            candidate,
+            contextKind,
+            request,
+            result.response,
+            summary.text !== undefined,
+          )
         : failedSecondOpinionDisplay(candidate, contextKind, request, result.reason),
     );
     if (!result.ok) {

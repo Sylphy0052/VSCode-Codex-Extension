@@ -76,13 +76,21 @@ function fence(body: string, info: string): string {
  * 押下時にcaptureして渡すことで裏打ちする（`snapshot.ts`）。文面はそのうえで、
  * 実行中に人が触ったファイルを読みに行かせないための補強として置く。
  */
-function systemInstruction(context: SecondOpinionContext): string {
+function systemInstruction(context: SecondOpinionContext, hasSummary: boolean): string {
   const lines = [
     'あなたは、別のAIエージェントが進めている作業に対する独立したレビュアーです。',
-    'そのエージェントとの会話内容は渡されていません。以下の情報だけを根拠に評価してください。',
+    'そのエージェントとの会話そのものは渡されていません。以下の情報だけを根拠に評価してください。',
     '分からない前提を推測で埋めないでください。不明な点は「不明」として指摘してください。',
     'ファイルの書き換えは行わないでください（読み取りのみが許可されています）。',
   ];
+  if (hasSummary) {
+    // 要約を作ったのは作業したエージェント自身ではない（`summary.ts`）。それでも圧縮である
+    // 以上は落ちた情報があり、要約に引きずられて差分を読まない事故を避ける必要がある
+    lines.push(
+      '会話の要約が添えてある場合、それは会話を見ていない別のセッションが記録から作った圧縮であり、抜けや誤りがありえます。',
+      '要約と差分が食い違う場合は差分を優先し、食い違い自体を指摘してください。',
+    );
+  }
   if (context.kind === 'workspaceSnapshot') {
     lines.push(
       '以下の baseCommit と差分を、レビュー対象の正本として扱ってください。',
@@ -113,19 +121,38 @@ function contextSection(context: SecondOpinionContext): string | undefined {
 }
 
 /**
+ * 会話の要約の区画（Issue #903）。
+ *
+ * 誰が作った要約なのかを本文へ明記する。作業した本人の要約とは重みが違い、レビュー側が
+ * それを知らないと「エージェント自身の言い分」として読んでしまうため。
+ */
+function summarySection(summary: string): string {
+  return (
+    '## 会話の要約（作業したエージェント自身ではなく、別のセッションが記録から作ったもの）\n\n' +
+    `${fence(summary, '')}`
+  );
+}
+
+/**
  * 送信するプロンプト全文を組み立てる。
  *
- * 並びは「固定指示 → 利用者の依頼 → レビュー対象」。依頼文とレビュー対象を明確に
- * 分けた見出しの下に置くことで、対象の中に指示めいた文字列が含まれていても、それが
- * レビュー対象の一部であることが読み取れるようにする。
+ * 並びは「固定指示 → 利用者の依頼 → 会話の要約 → レビュー対象」。依頼文・要約・レビュー
+ * 対象を明確に分けた見出しの下に置くことで、対象の中に指示めいた文字列が含まれていても、
+ * それがレビュー対象の一部であることが読み取れるようにする。
+ *
+ * `conversationSummary` を渡さなければ、出力はIssue #894時点と一字一句同じになる
+ * （設定で要約を切ったときに独立性が完全に元へ戻ることの担保。Issue #903 受入基準6）。
  */
 export function buildSecondOpinionPrompt(input: {
   request: string;
   context: SecondOpinionContext;
+  conversationSummary?: string | undefined;
 }): string {
+  const summary = input.conversationSummary?.trim() ?? '';
   const sections = [
-    systemInstruction(input.context),
+    systemInstruction(input.context, summary !== ''),
     `## 依頼\n\n${input.request.trim()}`,
+    summary === '' ? undefined : summarySection(summary),
     contextSection(input.context),
   ].filter((section): section is string => section !== undefined);
   return sections.join('\n\n');

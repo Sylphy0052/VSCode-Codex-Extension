@@ -33,6 +33,19 @@ function describeRun(
  */
 const INDEPENDENT_NOTE = 'この会話の内容は渡していません（独立したセッションの評価です）';
 
+/**
+ * 要約（Issue #903）を添えた場合の注記。
+ *
+ * 「会話は渡していない」とだけ出すと事実と食い違う。渡したのは会話そのものではなく、
+ * 別セッションが記録から作った圧縮であることを、読み手が区別できるように書き分ける。
+ */
+const SUMMARY_ATTACHED_NOTE =
+  'この会話そのものは渡していません（別セッションが作った要約のみを添えた独立評価です）';
+
+function independenceNote(summaryAttached: boolean): string {
+  return summaryAttached ? SUMMARY_ATTACHED_NOTE : INDEPENDENT_NOTE;
+}
+
 /** 起動直後、応答が届く前の表示。 */
 export function pendingSecondOpinionDisplay(
   candidate: SecondOpinionCandidate,
@@ -57,11 +70,12 @@ export function finishedSecondOpinionDisplay(
   contextKind: SecondOpinionContextKind,
   request: string,
   response: string,
+  summaryAttached: boolean = false,
 ): SecondOpinionDisplay {
   return {
     status: 'completed',
     text: `セカンドオピニオン（${candidate.name}）\n\n**依頼**\n\n${request}\n\n**回答**\n\n${response}`,
-    detail: `${INDEPENDENT_NOTE} ・ ${describeRun(candidate, contextKind)}`,
+    detail: `${independenceNote(summaryAttached)} ・ ${describeRun(candidate, contextKind)}`,
   };
 }
 

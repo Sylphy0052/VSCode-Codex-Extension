@@ -9,6 +9,7 @@ import {
   type ChatState,
   type ChatUsage,
 } from '../appserver/chatState';
+import { buildTranscriptMarkdown } from '../appserver/transcriptMarkdown';
 import { isAskUserQuestionSelections } from '../claude/askUserQuestion';
 import { debugLogCandidates } from '../claude/cliLocator';
 import { describeForkFromTurnError } from '../claude/forkFromTurn';
@@ -943,6 +944,10 @@ export class ClaudeChatViewManager
         parentSessionId: entry.secondOpinionKey,
         cwd: entry.cwd,
         lastAssistantResponse: () => lastNonEmptyAgentMessageText(entry.session.getState().items),
+        // 要約（Issue #903）の入力。画面が持っている項目から組み立てるだけで、
+        // 親セッションへは何も送らない
+        conversationTranscript: () =>
+          buildTranscriptMarkdown(entry.session.getState().items, 'Claude Code'),
         note: (id, display) => entry.session.noteSecondOpinion(id, display),
         setRunning: (running) => {
           void entry.panel?.webview.postMessage({ type: 'secondOpinionRunning', running });
