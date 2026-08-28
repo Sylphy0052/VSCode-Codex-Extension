@@ -8,6 +8,7 @@ import {
 import {
   appendLoopEngineeringInstruction,
   declaresEscalate,
+  lastAgentMessageFinalLine,
   type LoopEngineeringConfig,
   type LoopEngineeringPhase,
 } from './loopEngineering';
@@ -267,18 +268,25 @@ export function decoratePrompt(prompt: string, condition: string): string {
   if (condition === '') {
     return prompt;
   }
-  return `${prompt}\n\n（終了条件「${condition}」を満たしている場合は、作業をせず ${LOOP_DONE_TOKEN} とだけ出力してください）`;
+  return `${prompt}\n\n（終了条件「${condition}」を満たしている場合は、作業をせず、応答の最後の非空行に ${LOOP_DONE_TOKEN} だけを出力し、それ以降は何も出力しないでください）`;
 }
 
-/** 直近のエージェント発言が終了を宣言しているか。 */
+/**
+ * 直近のエージェント発言が終了を宣言しているか。
+ *
+ * **応答の最後の非空行が`LOOP_DONE_TOKEN`と完全に一致する場合だけ**成立とする
+ * （issue #914）。以前は`includes`で本文中に現れれば成立としていたが、この合図を
+ * 教えるのは`decoratePrompt`が終了条件へ添える文そのものであり、その綴りが会話に残る。
+ * そのため「まだ <<LOOP_DONE>> は出しません」といった説明文だけでループが終了していた。
+ * `declaresEscalate`（issue #891）が同じ理由で最終行の完全一致にしてあり、判定方式を
+ * 揃えた（共通の取り出しは`lastAgentMessageFinalLine`）。
+ *
+ * **これは挙動の変更である。** 合図を文中へ埋めて返していたエージェントでは、これまで
+ * 終了していたループが終了しなくなる。`decoratePrompt`の依頼文も、合図だけを最後の行へ
+ * 出すよう明示する文面へ合わせて直してある。
+ */
 export function declaresDone(state: ChatState): boolean {
-  for (let i = state.items.length - 1; i >= 0; i -= 1) {
-    const item = state.items[i];
-    if (item?.kind === 'agentMessage') {
-      return item.text.includes(LOOP_DONE_TOKEN);
-    }
-  }
-  return false;
+  return lastAgentMessageFinalLine(state) === LOOP_DONE_TOKEN;
 }
 
 /**

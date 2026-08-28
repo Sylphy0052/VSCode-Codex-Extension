@@ -52,15 +52,29 @@ export const LOOP_ESCALATE_TOKEN = '<<LOOP_ESCALATE>>';
  * この合図を書いた場合にも効かせるためで、完全一致にしてあるぶん誤検知の余地は小さい。
  */
 export function declaresEscalate(state: ChatState): boolean {
+  return lastAgentMessageFinalLine(state) === LOOP_ESCALATE_TOKEN;
+}
+
+/**
+ * 末尾から数えて最初の`agentMessage`の、**最後の非空行**（前後の空白を除く）。
+ *
+ * エージェントの発言が1つも無ければ`undefined`。合図（`LOOP_ESCALATE_TOKEN` /
+ * `LOOP_DONE_TOKEN`）の判定はどちらもこの値との完全一致で行う（issue #914）。
+ *
+ * 見るのが配列の最後の項目ではなく最後の`agentMessage`なのは、応答の後ろに
+ * `commandExecution`などの項目が並ぶことがあるため。合図はエージェントの発言の中に
+ * あればよく、その後ろにツールの実行記録が続いていても成立する。
+ */
+export function lastAgentMessageFinalLine(state: ChatState): string | undefined {
   for (let i = state.items.length - 1; i >= 0; i -= 1) {
     const item = state.items[i];
     if (item?.kind === 'agentMessage') {
       const lines = item.text.trimEnd().split('\n');
       const lastLine = lines[lines.length - 1];
-      return lastLine !== undefined && lastLine.trim() === LOOP_ESCALATE_TOKEN;
+      return lastLine === undefined ? undefined : lastLine.trim();
     }
   }
-  return false;
+  return undefined;
 }
 
 /**

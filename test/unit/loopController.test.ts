@@ -175,8 +175,46 @@ describe('LoopController', () => {
     const { sent, send } = spy();
     const controller = new LoopController(send);
     controller.start(plan({ condition: '20話完了' }));
-    runTurn(controller, state({ items: [agentMessage(`了解しました ${LOOP_DONE_TOKEN}`)] }));
+    runTurn(controller, state({ items: [agentMessage(`了解しました\n${LOOP_DONE_TOKEN}`)] }));
     expect(sent).toHaveLength(1);
+    expect(controller.getStatus().stopReason).toBe('done');
+  });
+
+  it('合図が本文の途中にあるだけでは止まらない（issue #914）', () => {
+    // 合図を教えるのは`decoratePrompt`が添える文そのもので、その綴りが会話に残る。
+    // `includes`判定だと「まだ出しません」という説明文で終了してしまっていた
+    const { send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan({ condition: '20話完了' }));
+    runTurn(
+      controller,
+      state({ items: [agentMessage(`まだ ${LOOP_DONE_TOKEN} は出しません。続けます。`)] }),
+    );
+    expect(controller.getStatus().stopReason).toBeUndefined();
+    expect(controller.running).toBe(true);
+  });
+
+  it('最終行に合図以外の文字が混ざっていれば止まらない（issue #914）', () => {
+    const { send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan({ condition: '20話完了' }));
+    runTurn(controller, state({ items: [agentMessage(`${LOOP_DONE_TOKEN} 理由: 完了`)] }));
+    expect(controller.getStatus().stopReason).toBeUndefined();
+  });
+
+  it('応答の後ろにコマンド実行が並んでいても合図を拾う（issue #914）', () => {
+    const { send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan({ condition: '20話完了' }));
+    runTurn(
+      controller,
+      state({
+        items: [
+          agentMessage(`終わりました\n${LOOP_DONE_TOKEN}`),
+          { ...agentMessage(''), id: 'c1', kind: 'commandExecution', detail: 'npm test' },
+        ],
+      }),
+    );
     expect(controller.getStatus().stopReason).toBe('done');
   });
 

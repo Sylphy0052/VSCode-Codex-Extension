@@ -8,6 +8,7 @@ import {
   defaultLoopEngineeringConfig,
   DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
   DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION,
+  lastAgentMessageFinalLine,
   LOOP_ESCALATE_TOKEN,
   type LoopEngineeringConfig,
 } from '../../src/loop/loopEngineering';
@@ -111,6 +112,26 @@ describe('declaresEscalate', () => {
 
   it('エージェントの発言が無ければ成立しない', () => {
     expect(declaresEscalate(state([]))).toBe(false);
+  });
+  it('応答の後ろにコマンド実行の項目が並んでいても成立する（issue #914）', () => {
+    // 見るのは配列の最後の項目ではなく、最後の`agentMessage`
+    const command: ChatItem = {
+      ...agentMessage(''),
+      id: 'c1',
+      kind: 'commandExecution',
+      detail: 'npm test',
+    };
+    expect(declaresEscalate(state([agentMessage(LOOP_ESCALATE_TOKEN), command]))).toBe(true);
+  });
+});
+
+describe('lastAgentMessageFinalLine', () => {
+  it('最後のエージェント発言の、最後の非空行を前後の空白を除いて返す', () => {
+    expect(lastAgentMessageFinalLine(state([agentMessage('1行目\n  結び  \n\n')]))).toBe('結び');
+  });
+
+  it('エージェントの発言が無ければundefined', () => {
+    expect(lastAgentMessageFinalLine(state([]))).toBeUndefined();
   });
 });
 
