@@ -502,6 +502,29 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
     expect(enabled).toContain('ターン要約を無効にする');
   });
 
+  it('ループエンジニアリングの切替は「…」メニューにあり、現在の設定を示す（issue #891）', () => {
+    const disabled = renderShell(fakeWebview() as never, buildOptions());
+    const enabled = renderShell(
+      fakeWebview() as never,
+      buildOptions({ loopEngineeringEnabled: true }),
+    );
+
+    expect(isInOverflowMenu(disabled, 'loopEngineeringToggle')).toBe(true);
+    expect(extractButtonOpenTag(disabled, 'loopEngineeringToggle')).toContain(
+      'aria-pressed="false"',
+    );
+    expect(disabled).toContain('ループエンジニアリングを有効にする');
+    expect(extractButtonOpenTag(enabled, 'loopEngineeringToggle')).toContain('aria-pressed="true"');
+    expect(enabled).toContain('ループエンジニアリングを無効にする');
+  });
+
+  it('ループパネルに時間上限の入力を持つ（issue #891）', () => {
+    const html = renderShell(fakeWebview() as never, buildOptions());
+    // 上限は LOOP_DURATION_LIMIT_MINUTES（24時間）と揃える
+    expect(html).toContain('id="loopMaxDuration"');
+    expect(html).toContain('max="1440"');
+  });
+
   it('composerButtonsが空配列だと16個すべてが「…」メニューに入り、#composerOverflowはhiddenを持たない', () => {
     const html = renderShell(fakeWebview() as never, buildOptions({ composerButtons: [] }));
 

@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { initialChatState, type ChatItem, type ChatState } from '../../src/appserver/chatState';
 import {
@@ -109,5 +111,42 @@ describe('declaresEscalate', () => {
 
   it('エージェントの発言が無ければ成立しない', () => {
     expect(declaresEscalate(state([]))).toBe(false);
+  });
+});
+
+describe('既定の指示文', () => {
+  /**
+   * 既定値は`package.json`の`contributes.configuration`とこのモジュールの定数の
+   * 両方にリテラルで持っている。**実際に使われるのは`package.json`側**
+   * （`workspace.getConfiguration().get()`が返すのはそちら）で、モジュール側の定数は
+   * 設定を読めなかったときのフォールバックとテストの期待値になる。片方だけ直すと
+   * 「テストは通るのに実際に送られる文面が違う」が起きるため、機械的に突き合わせる。
+   */
+  const configuredDefault = (key: string): unknown => {
+    const raw = readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8');
+    const parsed = JSON.parse(raw) as {
+      contributes: { configuration: { properties: Record<string, { default?: unknown }> } };
+    };
+    return parsed.contributes.configuration.properties[key]?.default;
+  };
+
+  it('package.jsonの既定値とモジュールの定数が一致する', () => {
+    expect(configuredDefault('agent.chat.loopEngineering.initialInstruction')).toBe(
+      DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION,
+    );
+    expect(configuredDefault('agent.chat.loopEngineering.continueInstruction')).toBe(
+      DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
+    );
+  });
+
+  it('モードの既定は無効', () => {
+    expect(configuredDefault('agent.chat.loopEngineering.enabled')).toBe(false);
+    expect(defaultLoopEngineeringConfig.enabled).toBe(false);
+  });
+
+  it('既定の指示文はどちらも撤退の合図を含む', () => {
+    // 合図を教えるのは指示文だけなので、文面から落ちるとescalateが起きなくなる
+    expect(DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION).toContain(LOOP_ESCALATE_TOKEN);
+    expect(DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION).toContain(LOOP_ESCALATE_TOKEN);
   });
 });
