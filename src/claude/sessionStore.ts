@@ -11,13 +11,48 @@ import { basenameOf } from '../util/paths';
 import type { ClaudePaths } from './cliLocator';
 import { ClaudeSessionNameStore } from './sessionNames';
 import { ClaudeSessionIndex, type ClaudeSessionIndexEntry } from './sessionIndex';
-import { parseTranscriptHead, sessionIdFromTranscriptName } from './transcript';
+import {
+  createTranscriptHeadReader,
+  parseTranscriptHead,
+  sessionIdFromTranscriptName,
+  transcriptDirSlug,
+} from './transcript';
+import type { TranscriptMeta } from './types';
 
 /**
  * 素性を得るために読む先頭行数。
  * `queue-operation` などが数行挟まるため1行では足りない。
  */
 const HEAD_LINES = 40;
+
+/**
+ * 素性を読むときに1ファイルから読み込むバイト数の上限（Issue #885）。
+ *
+ * transcriptは1行にtool_resultを丸ごと積むため、40行が数MBになることがある。
+ * cwdとsessionIdは通常先頭の数行で揃うので、揃わないまま膨らんだファイルは
+ * ここで打ち切って次へ進む。
+ */
+const HEAD_MAX_BYTES = 256 * 1024;
+
+/**
+ * 索引を作り直す範囲（Issue #885）。
+ *
+ * `limit` を指定すると件数が揃った時点で走査をやめる（初回表示を早く出すため）。
+ * 省くと範囲内を最後まで走査する（索引を完成させるため）。
+ */
+interface RefreshScope {
+  scope: ListOptions['scope'];
+  workspaceFolders: string[];
+  limit?: number;
+}
+
+/** 索引がどの範囲で作られたかを表す鍵（Issue #885）。 */
+function scopeKey(scope: RefreshScope | undefined): string {
+  if (scope === undefined) {
+    return 'all:';
+  }
+  return `${scope.scope}:${[...scope.workspaceFolders].sort().join('\u0000')}`;
+}
 
 /**
  * Claude Code のセッション一覧。
@@ -36,6 +71,18 @@ export class ClaudeSessionStore {
   private stale = true;
   private unresolved = 0;
   private onRefreshed: (() => void) | undefined;
+  /**
+   * 直近の `list` が求めた範囲（Issue #885）。バックグラウンドの照合はこの範囲を引き継ぐ。
+   * 以前は範囲を渡さずに走らせていたため、起動直後に全transcriptを開き直していた。
+   */
+  private lastScope: RefreshScope | undefined;
+  /**
+   * 索引を作ったときの範囲（Issue #885）。ワークスペース絞り込みで作った索引には
+   * 他のワークスペースのセッションが入らないため、`scope` を切り替えたら
+   * `stale` と同じ扱いで照合し直す。これが無いと `scope: all` へ変えたとき、
+   * 絞り込み済みの索引をそのまま返して他ワークスペースのセッションが消える。
+   */
+  private indexedScopeKey: string | undefined;
 
   constructor(
     private readonly fs: FileSystemPort,
@@ -49,8 +96,12 @@ export class ClaudeSessionStore {
   ) {}
 
   async list(options: ListOptions): Promise<ListResult> {
-    if (this.index.all().length === 0) {
-      await this.refreshIndex(options);
+    this.lastScope = { scope: options.scope, workspaceFolders: options.workspaceFolders };
+    // 索引が無いとき、および索引が別の範囲で作られているときは、その場で作り直す。
+    // 後者を待たずに返すと、`scope` を切り替えた直後の1回だけ絞り込み済みの索引が
+    // そのまま出てしまう（Issue #885）
+    if (this.index.all().length === 0 || this.indexedScopeKey !== scopeKey(this.lastScope)) {
+      await this.refreshIndex({ ...this.lastScope, limit: options.maxEntries });
       this.scheduleRefresh();
     } else if (this.stale) {
       this.scheduleRefresh();
@@ -80,7 +131,7 @@ export class ClaudeSessionStore {
       if (previous !== undefined && previous.mtimeMs === mtimeMs) {
         return;
       }
-      const meta = parseTranscriptHead(await this.fs.readHead(filePath, HEAD_LINES));
+      const meta = await this.readHeadMeta(filePath);
       if (meta === undefined) {
         this.index.delete(filePath);
       } else {
@@ -160,20 +211,22 @@ export class ClaudeSessionStore {
     if (filePath === undefined) {
       return undefined;
     }
-    return parseTranscriptHead(await this.fs.readHead(filePath, HEAD_LINES))?.cwd;
+    return (await this.readHeadMeta(filePath))?.cwd;
   }
 
-  /** 初回・キャッシュ不整合時だけ全transcriptを照合する。 */
-  private async refreshIndex(options?: ListOptions): Promise<void> {
+  /** 初回・キャッシュ不整合時だけtranscriptを照合する。 */
+  private async refreshIndex(scope?: RefreshScope): Promise<void> {
     if (this.refreshing) {
       return;
     }
     this.refreshing = true;
     try {
-      const next = await this.readIndexFromFiles(options);
+      const next = await this.readIndexFromFiles(scope);
       this.index.replace(next.entries);
       this.unresolved = next.unresolved;
-      this.stale = options !== undefined;
+      // 件数で打ち切ったなら索引は途中までなので、あとで走査し直す必要がある
+      this.stale = scope?.limit !== undefined;
+      this.indexedScopeKey = scopeKey(scope);
       await this.index.persist();
       this.onRefreshed?.();
     } finally {
@@ -188,15 +241,61 @@ export class ClaudeSessionStore {
     this.refreshScheduled = true;
     setTimeout(() => {
       this.refreshScheduled = false;
-      void this.refreshIndex().catch(() => undefined);
+      // 件数上限だけ外し、ワークスペースの絞り込みは引き継ぐ（Issue #885）
+      void this.refreshIndex(this.lastScope).catch(() => undefined);
     }, 0);
   }
 
-  private async readIndexFromFiles(options?: ListOptions): Promise<{
+  private async readIndexFromFiles(scope?: RefreshScope): Promise<{
     entries: ClaudeSessionIndexEntry[];
     unresolved: number;
   }> {
-    const files = await this.fs.listJsonl(this.paths.projects);
+    const narrowed = await this.narrowedTranscripts(scope);
+    if (narrowed !== undefined) {
+      const result = await this.buildEntries(narrowed, scope);
+      // ディレクトリ名はcwdと食い違うことがある（`transcriptDirSlug`のJSDoc参照）。
+      // 1件も拾えなかったときだけ全走査へ広げ、絞り込みの取りこぼしを防ぐ
+      if (result.entries.length > 0) {
+        return result;
+      }
+    }
+    return this.buildEntries(await this.fs.listJsonl(this.paths.projects), scope);
+  }
+
+  /**
+   * ワークスペース絞り込みのとき、`projects/` 直下のディレクトリ名だけで候補を削る
+   * （Issue #885）。絞り込めない条件なら `undefined` を返し、呼び出し側が全走査する。
+   */
+  private async narrowedTranscripts(scope?: RefreshScope): Promise<string[] | undefined> {
+    const listSubdirectories = this.fs.listSubdirectories?.bind(this.fs);
+    if (scope?.scope !== 'workspace' || listSubdirectories === undefined) {
+      return undefined;
+    }
+    const prefixes = scope.workspaceFolders
+      .map((folder) => transcriptDirSlug(folder))
+      .filter((slug) => slug !== '');
+    if (prefixes.length === 0) {
+      return undefined;
+    }
+    const dirs = (await listSubdirectories(this.paths.projects)).filter((name) =>
+      prefixes.some((prefix) => name === prefix || name.startsWith(`${prefix}-`)),
+    );
+    if (dirs.length === 0) {
+      return undefined;
+    }
+    const nested = await mapWithLimit(dirs, MTIME_CONCURRENCY_LIMIT, (name) =>
+      this.fs.listJsonl(`${this.paths.projects}/${name}`),
+    );
+    return nested.flat();
+  }
+
+  private async buildEntries(
+    files: readonly string[],
+    scope?: RefreshScope,
+  ): Promise<{
+    entries: ClaudeSessionIndexEntry[];
+    unresolved: number;
+  }> {
     const named = files
       .map((filePath) => ({ filePath, id: sessionIdFromTranscriptName(basenameOf(filePath)) }))
       .filter((entry): entry is { filePath: string; id: string } => entry.id !== undefined);
@@ -220,13 +319,13 @@ export class ClaudeSessionStore {
         continue;
       }
       if (
-        options?.scope === 'workspace' &&
-        !isWithinAny(entry.session.cwd ?? '', options.workspaceFolders)
+        scope?.scope === 'workspace' &&
+        !isWithinAny(entry.session.cwd ?? '', scope.workspaceFolders)
       ) {
         continue;
       }
       entries.push(entry);
-      if (options !== undefined && entries.length >= Math.max(0, options.maxEntries)) {
+      if (scope?.limit !== undefined && entries.length >= Math.max(0, scope.limit)) {
         break;
       }
     }
@@ -234,12 +333,28 @@ export class ClaudeSessionStore {
     return { entries, unresolved };
   }
 
+  /**
+   * 素性が揃った時点で読むのをやめる先頭読み（Issue #885）。
+   *
+   * `readHeadUntil` を持たないポート（テストのフェイク等）では、これまでどおり
+   * 先頭 `HEAD_LINES` 行を読んでから解釈する。どちらの経路でも結果は同じ。
+   */
+  private async readHeadMeta(filePath: string): Promise<TranscriptMeta | undefined> {
+    const readHeadUntil = this.fs.readHeadUntil?.bind(this.fs);
+    if (readHeadUntil === undefined) {
+      return parseTranscriptHead(await this.fs.readHead(filePath, HEAD_LINES));
+    }
+    const reader = createTranscriptHeadReader();
+    await readHeadUntil(filePath, HEAD_LINES, HEAD_MAX_BYTES, (line) => reader.push(line));
+    return reader.result();
+  }
+
   private async readIndexEntry(
     filePath: string,
     id: string,
     mtimeMs: number | undefined,
   ): Promise<ClaudeSessionIndexEntry | undefined> {
-    const meta = parseTranscriptHead(await this.fs.readHead(filePath, HEAD_LINES));
+    const meta = await this.readHeadMeta(filePath);
     if (meta === undefined) {
       return undefined;
     }

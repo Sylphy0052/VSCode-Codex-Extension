@@ -23,6 +23,31 @@ export interface FileSystemPort {
   /** 先頭 maxLines 行だけを読む。全文をメモリに載せないための専用メソッド。 */
   readHead(filePath: string, maxLines: number): Promise<string[]>;
   /**
+   * 直下のサブディレクトリ名だけを返す（Issue #885）。
+   *
+   * Claude Codeのtranscriptは `projects/<cwd-slug>/<sessionId>.jsonl` に置かれ、
+   * slugはcwdの英数字以外を `-` へ置換したものになる。ワークスペース絞り込みのとき、
+   * ファイルを開かずに候補ディレクトリを削るために使う。
+   *
+   * 任意実装。持たないポート（テストのフェイク等）では全走査へ退避する。
+   */
+  listSubdirectories?(dir: string): Promise<string[]>;
+  /**
+   * 先頭を読むが、`isComplete` が true を返した行、`maxLines` 行、累積 `maxBytes` の
+   * いずれか早い方で打ち切る（Issue #885）。
+   *
+   * Claude Codeのtranscriptは1行にtool_resultを丸ごと積むため1行が巨大になりうる。
+   * 素性（cwd・sessionId・最初の発言）が揃った時点で読むのをやめるために使う。
+   *
+   * 任意実装。持たないポートでは `readHead` へ退避する。
+   */
+  readHeadUntil?(
+    filePath: string,
+    maxLines: number,
+    maxBytes: number,
+    isComplete: (line: string) => boolean,
+  ): Promise<string[]>;
+  /**
    * ファイル全体をbase64で読む。会話に出す画像に使う。
    *
    * `maxBytes` を超えるファイルは読まずに `undefined` を返す。Webviewへ渡す前に
