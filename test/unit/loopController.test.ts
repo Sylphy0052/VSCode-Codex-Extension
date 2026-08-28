@@ -20,6 +20,7 @@ import type {
   GoalEvaluation,
   GoalEvaluator,
   GoalEvaluatorInput,
+  GoalEvidence,
   GoalLoopConfig,
   GoalVerdict,
 } from '../../src/loop/goalLoop';
@@ -742,6 +743,15 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
     await Promise.resolve();
   };
 
+  /** `finishTurn`と同じだが、完了時の状態を丸ごと差し替えられる（停滞判定のテスト用）。 */
+  const finishTurn2 = async (loop: LoopController, completed: ChatState): Promise<void> => {
+    loop.observe(state({ busy: true }));
+    loop.observe(completed);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+
   const goalPlan = (
     evaluate: GoalEvaluator,
     overrides: Partial<LoopPlan> = {},
@@ -916,14 +926,18 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
     expect(sent[0]).toContain(goalInput.purpose);
   });
 
-  it('一時停止からの再開でも空文字を送らない', () => {
+  it('一時停止中に終わったターンの評価結果を、再開時に空文字ではなく指示として送る', async () => {
     const sent: string[] = [];
     const loop = new LoopController((t) => void sent.push(t));
-    loop.start(goalPlan(async () => evaluation()));
+    loop.start(goalPlan(async () => evaluation({ nextFocus: 'トークンの期限を見る' })));
     loop.pause();
+    await finishTurn(loop);
+    // 一時停止中は送らない（issue #909。停止判定そのものは済ませている）
+    expect(sent).toHaveLength(1);
     loop.resume();
     expect(sent).toHaveLength(2);
     expect(sent[1]).toContain(goalInput.purpose);
+    expect(sent[1]).toContain('トークンの期限を見る');
   });
 
   it('評価を待っている間に止められたら次のターンを送らない', async () => {
@@ -948,5 +962,147 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
     await Promise.resolve();
     expect(sent).toHaveLength(1);
     expect(loop.getStatus().stopReason).toBe('manual');
+  });
+
+  describe('issue #909: 証拠の取りこぼし・pauseによるBound迂回・判定順', () => {
+    /** 評価のたびに、そのとき渡された証拠を記録する。 */
+    const recordingEvaluator = (
+      log: GoalEvidence[][],
+      verdicts: GoalVerdict[] = [],
+    ): GoalEvaluator => {
+      let call = 0;
+      return async (input: GoalEvaluatorInput) => {
+        log.push([...input.evidence]);
+        const verdict = verdicts[call] ?? 'continue';
+        call += 1;
+        return evaluation({ verdict });
+      };
+    };
+
+    it('ターン完了時に実行中だったコマンドを、終了コードが出た次のターンで証拠にする', async () => {
+      const log: GoalEvidence[][] = [];
+      const loop = new LoopController(() => undefined);
+      loop.start(goalPlan(recordingEvaluator(log)));
+      // 1ターン目の完了時点ではまだ走っている（終了コードが読めない）
+      await finishTurn(loop, [commandItem('c1', 'npm test', 'running')]);
+      // 2ターン目の完了時点で exit 0 になった
+      await finishTurn(loop, [commandItem('c1', 'npm test', 'exit 0')]);
+      // ledgerは累積するため、最後の評価へ渡ったものを見る（積み直せば2件になる）
+      const commands = (log[log.length - 1] ?? []).filter((e) => e.kind !== 'worker-report');
+      expect(commands).toHaveLength(1);
+      expect(commands[0]?.status).toBe('pass');
+    });
+
+    it('終了コードが0以外で確定したコマンドも、fail の証拠として1回だけ積む', async () => {
+      const log: GoalEvidence[][] = [];
+      const loop = new LoopController(() => undefined);
+      loop.start(goalPlan(recordingEvaluator(log)));
+      await finishTurn(loop, [commandItem('c1', 'npm test', 'running')]);
+      await finishTurn(loop, [commandItem('c1', 'npm test', 'exit 1')]);
+      // 3ターン目にも同じ項目が会話へ残っているが、積み直さない
+      await finishTurn(loop, [commandItem('c1', 'npm test', 'exit 1')]);
+      const commands = (log[log.length - 1] ?? []).filter((e) => e.kind !== 'worker-report');
+      expect(commands).toHaveLength(1);
+      expect(commands[0]?.status).toBe('fail');
+    });
+
+    it('一時停止中に回数上限へ達したターンが終われば、再開しても次を送らずに止まっている', () => {
+      const sent: string[] = [];
+      const loop = new LoopController((t) => void sent.push(t));
+      loop.start(plan({ maxIterations: 1 }));
+      loop.pause();
+      runTurn(loop);
+      loop.resume();
+      expect(sent).toHaveLength(1);
+      expect(loop.running).toBe(false);
+      expect(loop.getStatus().stopReason).toBe('maxReached');
+    });
+
+    it('一時停止中に撤退が申告されたら、再開を待たずに escalated で止める', () => {
+      const sent: string[] = [];
+      const loop = new LoopController((t) => void sent.push(t));
+      loop.start(plan({ maxIterations: 5 }));
+      loop.pause();
+      runTurn(loop, state({ items: [agentMessage(`直せません\n${LOOP_ESCALATE_TOKEN}`)] }));
+      loop.resume();
+      expect(sent).toHaveLength(1);
+      expect(loop.getStatus().stopReason).toBe('escalated');
+    });
+
+    it('一時停止中に停滞が成立したら、再開しても次を送らない', () => {
+      const sent: string[] = [];
+      const loop = new LoopController((t) => void sent.push(t), undefined, 2);
+      loop.start(plan({ maxIterations: 20 }));
+      const same = state({ turnResultText: '同じ報告' });
+      runTurn(loop, same);
+      loop.pause();
+      runTurn(loop, same);
+      loop.resume();
+      expect(sent).toHaveLength(2);
+      expect(loop.getStatus().stopReason).toBe('stalled');
+    });
+
+    it('ターンの走行中に再開しても、完了を見ないまま次を重ねて送らない', () => {
+      const sent: string[] = [];
+      const loop = new LoopController((t) => void sent.push(t));
+      loop.start(plan({ maxIterations: 5 }));
+      loop.observe(state({ busy: true }));
+      loop.pause();
+      loop.resume();
+      expect(sent).toHaveLength(1);
+      // 走行中のターンが終われば、通常どおり次を送る
+      loop.observe(state({ busy: false }));
+      expect(sent).toHaveLength(2);
+    });
+
+    it('ゴール駆動で一時停止中に達成と判定されたら、再開しても次を送らない', async () => {
+      const sent: string[] = [];
+      const loop = new LoopController((t) => void sent.push(t));
+      loop.start(goalPlan(async () => evaluation({ verdict: 'achieved' })));
+      loop.pause();
+      await finishTurn(loop);
+      loop.resume();
+      expect(sent).toHaveLength(1);
+      expect(loop.getStatus().stopReason).toBe('done');
+    });
+
+    it('ゴール駆動で一時停止中に撤退と判定されたら、再開しても次を送らない', async () => {
+      const sent: string[] = [];
+      const loop = new LoopController((t) => void sent.push(t));
+      loop.start(goalPlan(async () => evaluation({ verdict: 'escalate' })));
+      loop.pause();
+      await finishTurn(loop);
+      loop.resume();
+      expect(sent).toHaveLength(1);
+      expect(loop.getStatus().stopReason).toBe('escalated');
+    });
+
+    it('ゴール駆動では、停滞が成立していても Evaluator の達成判定を先に見る', async () => {
+      const log: GoalEvidence[][] = [];
+      const loop = new LoopController(
+        () => undefined,
+        () => undefined,
+        2,
+      );
+      loop.start(goalPlan(recordingEvaluator(log, ['continue', 'achieved'])));
+      const same = state({ turnResultText: '同じ報告' });
+      await finishTurn2(loop, same);
+      await finishTurn2(loop, same);
+      expect(log).toHaveLength(2);
+      expect(loop.getStatus().stopReason).toBe('done');
+    });
+
+    it('ゴール駆動でも、未達のまま停滞すれば stalled で止める', async () => {
+      const loop = new LoopController(
+        () => undefined,
+        () => undefined,
+        2,
+      );
+      loop.start(goalPlan(async () => evaluation({ verdict: 'continue' })));
+      const same = state({ turnResultText: '同じ報告' });
+      await finishTurn2(loop, same);
+      await finishTurn2(loop, same);
+      expect(loop.getStatus().stopReason).toBe('stalled');
+    });
   });
 });

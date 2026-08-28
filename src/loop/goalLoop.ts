@@ -216,6 +216,17 @@ function classifyCommand(command: string): GoalEvidence['kind'] {
   return 'build';
 }
 
+/**
+ * 証拠として確定した（終了コードを読める）コマンド実行の項目か。
+ *
+ * `collectCommandEvidence`がその項目を拾う条件と同じ判定を、呼び出し側からも使えるように
+ * する。`LoopController`が「拾ったid」を記録するときに実行中のものまで含めてしまうと、
+ * 終了コードが出た次のターンで拾い直せなくなる（issue #909）。
+ */
+export function isSettledCommandItem(item: ChatItem): boolean {
+  return item.kind === 'commandExecution' && readExitCode(item.status) !== undefined;
+}
+
 /** `exit 0` の形をした`status`から終了コードを読む。読めなければ`undefined`。 */
 function readExitCode(status: string | undefined): number | undefined {
   if (status === undefined) {
