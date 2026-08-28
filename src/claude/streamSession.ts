@@ -1007,7 +1007,16 @@ export class ClaudeStreamSession {
     }
     this.write(buildControlRequest(`req_${this.nextControlId++}`, { subtype: 'interrupt' }));
     if (updateState) {
-      this.update({ ...this.state, busy: false });
+      // 走っていたターンがあったときだけ確定させる（issue #939）。CLIは中断後に`result`を
+      // 返さないことがあるためここが確定点になるが、ターンを抱えていない状態で進めると、
+      // 直前のターンの成果を作業記録へ二重に残すなど、無かった完了を1つ作ってしまう
+      this.update({
+        ...this.state,
+        busy: false,
+        turnCompletionSeq: this.state.busy
+          ? this.state.turnCompletionSeq + 1
+          : this.state.turnCompletionSeq,
+      });
     }
   }
 
@@ -1362,6 +1371,14 @@ export class ClaudeStreamSession {
       ...this.state,
       busy: false,
       turnFailed: true,
+      // 走っていたターンが「失敗として確定した」（issue #939）。`result`を受け取れない
+      // まま終わった経路なので、完了の世代はここで進める。**走っていたターンがあるとき
+      // だけ**進めるのは、この関数がプロセスの`exit`・`error`（起動失敗を含む）から
+      // 呼ばれるため。1ターンも送っていない状態や、`result`を処理し終えたidleの状態で
+      // 進めると、無かった完了を1つ作ってしまう
+      turnCompletionSeq: this.state.busy
+        ? this.state.turnCompletionSeq + 1
+        : this.state.turnCompletionSeq,
       backgroundTerminals: NO_BACKGROUND_TERMINALS,
     };
   }

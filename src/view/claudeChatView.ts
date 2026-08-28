@@ -147,8 +147,15 @@ interface ClaudePanel extends BaseChatPanel {
    * （`chatView.ts`の`ChatPanel.secondOpinionKey`と同じ理由）。
    */
   secondOpinionKey: string;
-  /** ターン完了検知に使う直前の値。 */
-  wasBusy: boolean;
+  /**
+   * ターン結果の確定検知に使う直前の`ChatState.turnCompletionSeq`（issue #939）。
+   *
+   * `busy`の立ち下がりは「threadが暇になったか」しか表さない。Codexは
+   * `thread/status/changed`（idle）を`turn/completed`より先に送るため、その時点では
+   * `turnResultText`がまだ空である。成果の通知・待機列の送信・ターン完了の通知は、
+   * `busy`ではなくこの値の変化を境目にする。
+   */
+  lastTurnCompletionSeq: number;
   /** ループ停止検知に使う直前の値。 */
   wasLoopRunning: boolean;
   /** `setApprovalHandler` で差し込まれた自動判定。未設定なら従来通り必ず承認カードを出す。 */
@@ -1218,7 +1225,7 @@ export class ClaudeChatViewManager
       taskConfig,
       modelSettings,
       secondOpinionKey: randomUUID(),
-      wasBusy: false,
+      lastTurnCompletionSeq: 0,
       wasLoopRunning: false,
       approvalHandler: undefined,
       promptTransform: undefined,
@@ -1355,13 +1362,16 @@ export class ClaudeChatViewManager
     if (entry.disposed) {
       return;
     }
-    // ターンが終わった瞬間に、待たせていた指示を1件送る
-    const finished = entry.wasBusy && !state.busy;
-    entry.wasBusy = state.busy;
-    if (finished && state.queued.length > 0) {
+    // ターンの結果が確定した瞬間に、待たせていた指示を1件送る（issue #939、
+    // `chatView.ts`の`onSessionChange`と同じ扱い）。Claude Codeは`result`の1イベントで
+    // `busy: false`と`turnResultText`を同時に決めるためCodexのような順序の食い違いは
+    // 起きないが、境目の意味を両画面で揃える
+    const turnFinished = entry.lastTurnCompletionSeq !== state.turnCompletionSeq;
+    entry.lastTurnCompletionSeq = state.turnCompletionSeq;
+    if (turnFinished && state.queued.length > 0) {
       entry.session.sendNextQueued();
     }
-    if (finished) {
+    if (turnFinished) {
       reportTurnResult(this.onActivity, entry.session.threadId, entry.cwd, state);
       this.notifyTurnComplete(entry);
     }
@@ -1378,7 +1388,7 @@ export class ClaudeChatViewManager
     if (state.usage !== undefined) {
       this.onUsage(state.usage);
     }
-    if (finished) {
+    if (turnFinished) {
       void this.refreshUsage();
     }
     // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
