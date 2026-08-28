@@ -26,6 +26,14 @@ export interface ClaudeSessionIndexEntry {
  */
 export class ClaudeSessionIndex {
   private readonly entries = new Map<string, ClaudeSessionIndexEntry>();
+  /**
+   * sessionId からエントリを引くための副次索引（Issue #887）。
+   *
+   * 主索引は transcript の絶対パスをキーにしているため、sessionId しか手元に無い
+   * `resolveTranscriptPath` / `resolveCwd` は全件を舐めるしかなかった。両者は会話を
+   * 開くたび（リロード後の復元を含む）に通るので、逆引きを持っておく。
+   */
+  private readonly bySessionId = new Map<string, ClaudeSessionIndexEntry>();
 
   constructor(
     private readonly memento: MementoLike = {
@@ -35,7 +43,7 @@ export class ClaudeSessionIndex {
   ) {
     for (const entry of this.memento.get<ClaudeSessionIndexEntry[]>(CLAUDE_SESSION_INDEX_KEY, [])) {
       if (entry.filePath !== '' && entry.session.provider === 'claude') {
-        this.entries.set(entry.filePath, entry);
+        this.remember(entry);
       }
     }
   }
@@ -48,19 +56,41 @@ export class ClaudeSessionIndex {
     return this.entries.get(filePath);
   }
 
+  /** sessionId からエントリを引く（Issue #887）。 */
+  findBySessionId(sessionId: string): ClaudeSessionIndexEntry | undefined {
+    return this.bySessionId.get(sessionId);
+  }
+
   replace(entries: readonly ClaudeSessionIndexEntry[]): void {
     this.entries.clear();
+    this.bySessionId.clear();
     for (const entry of entries) {
-      this.entries.set(entry.filePath, entry);
+      this.remember(entry);
     }
   }
 
   set(entry: ClaudeSessionIndexEntry): void {
-    this.entries.set(entry.filePath, entry);
+    this.remember(entry);
   }
 
   delete(filePath: string): void {
+    const removed = this.entries.get(filePath);
     this.entries.delete(filePath);
+    // 同じsessionIdが別パスで登録し直されている場合があるため、
+    // 逆引きは自分が指していたときだけ消す
+    if (removed !== undefined && this.bySessionId.get(removed.session.id) === removed) {
+      this.bySessionId.delete(removed.session.id);
+    }
+  }
+
+  /** 主索引と逆引きを同時に更新する。両者がずれないよう入口を1つにする。 */
+  private remember(entry: ClaudeSessionIndexEntry): void {
+    const previous = this.entries.get(entry.filePath);
+    if (previous !== undefined && this.bySessionId.get(previous.session.id) === previous) {
+      this.bySessionId.delete(previous.session.id);
+    }
+    this.entries.set(entry.filePath, entry);
+    this.bySessionId.set(entry.session.id, entry);
   }
 
   async persist(): Promise<void> {
