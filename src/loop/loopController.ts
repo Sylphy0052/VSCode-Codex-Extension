@@ -1,4 +1,4 @@
-import type { ChatState } from '../appserver/chatState';
+import type { ChatItem, ChatState } from '../appserver/chatState';
 import {
   detectStalledLoop,
   extractTurnSignature,
@@ -30,7 +30,9 @@ import { buildResponseSummary } from '../orchestrator/taskSummary';
 /**
  * ループの終了をエージェント自身に宣言させるための合図。
  *
- * 会話に紛れない綴りにしてある。エージェントの発言にこれが現れたら条件成立とみなす。
+ * 会話に紛れない綴りにしてある。判定は`declaresDone`が行い、**エージェントの発言の最後の
+ * 非空行がこの綴りと完全に一致する場合だけ**条件成立とみなす（issue #914）。本文の途中に
+ * 現れただけでは成立しない。
  */
 export const LOOP_DONE_TOKEN = '<<LOOP_DONE>>';
 
@@ -305,11 +307,11 @@ export class LoopController {
   /**
    * `pause()` で一時停止中か（design.md §16.21「waitingReplyへの遷移」）。
    *
-   * `true` の間、`observe()` はターンの完了を検知しても `continuePrompt` を送らない
-   * （回数上限・終了条件の判定そのものへも進ませない。`resume()` が呼ばれるまで
-   * ループは実際に止まったまま待つ。`running` 自体は `true` のまま保つ
-   * （`stop()` は呼ばない）。タスクのセッションは生きているため、design.mdの
-   * 「waitingReplyも並列の枠を占める」という状態と整合する。
+   * **`true` の間も停止条件の判定は行い、止めるのは次の指示の送信だけ**（issue #909）。
+   * 撤退の申告・終了条件・停滞・時間上限・回数上限はターンの完了時にそのまま評価し、
+   * 送るはずだった指示を`sendNext()`が`pendingPrompt`へ保留して`resume()`が送る。
+   * `running` 自体は `true` のまま保つ（`stop()` は呼ばない）。タスクのセッションは
+   * 生きているため、design.mdの「waitingReplyも並列の枠を占める」という状態と整合する。
    */
   private paused = false;
   /**
@@ -345,6 +347,17 @@ export class LoopController {
    * （走行中のターンの完了時に`observe()`が続きを決める）。`start()`・`stop()`で戻す。
    */
   private pendingPrompt: string | undefined;
+  /**
+   * ループ実行の世代（issue #933）。`start()`と`stop()`で1つ進める。
+   *
+   * **非同期の処理が、自分を始めた実行がもう終わっていることに気づくための印。**
+   * Evaluatorの応答待ちや送信の`Promise`は、ループを止めた後・別の計画で始め直した後に
+   * 解決することがある。開始時点の世代を捕まえておき、解決した時点で
+   * `this.runGeneration`と違っていれば何もしない。`this.plan !== plan`の参照比較では
+   * `.finally()`や`Promise.catch()`のように計画を持たない経路を守れず、同じ計画の
+   * オブジェクトを使い回されると誤って一致してしまう。
+   */
+  private runGeneration = 0;
 
   constructor(
     private readonly send: (text: string) => void | Promise<void>,
@@ -443,13 +456,25 @@ export class LoopController {
     return buildNextTurnPrompt(indeterminate(''), plan.goal.definition.purpose);
   }
 
-  /** ループを開始し、1回目の指示を送る。 */
-  start(plan: LoopPlan): void {
+  /**
+   * ループを開始し、1回目の指示を送る。
+   *
+   * `existingItems`には**開始時点の会話の項目**を渡す（issue #933）。ここで既に終了コードの
+   * 出ているコマンド実行を「拾い済み」として記録しておかないと、ゴール駆動ループの最初の
+   * 評価で、ループを始める前に実行されたコマンドまで`iteration=1`の証拠として積まれる
+   * （`ChatState.items`は会話全体を持ち続けるため）。「開始前に`npm test`が通っていた」
+   * だけで受入基準を満たしたと判定され、現在のコードを一度も検証しないまま止まりうる。
+   * 省略時は空として扱う（従来ループでは証拠を使わないため影響しない）。
+   */
+  start(plan: LoopPlan, existingItems: readonly ChatItem[] = []): void {
     this.plan = plan;
+    this.runGeneration += 1;
     this.stallHistory = [];
     this.startedAt = this.now();
     this.goalEvidence = [];
-    this.seenEvidenceIds = new Set();
+    this.seenEvidenceIds = new Set(
+      existingItems.filter(isSettledCommandItem).map((item) => item.id),
+    );
     this.indeterminateStreak = 0;
     this.evaluating = false;
     this.pendingPrompt = undefined;
@@ -485,6 +510,9 @@ export class LoopController {
       return false;
     }
     this.plan = undefined;
+    // 走っていた実行の世代を閉じる（issue #933）。停止後に解決する非同期の処理は、
+    // 自分の世代と食い違うことで「もう自分の実行ではない」と気づける
+    this.runGeneration += 1;
     this.sawBusy = false;
     this.paused = false;
     this.stallHistory = [];
@@ -569,8 +597,13 @@ export class LoopController {
     // 完了判定の所有権をEvaluatorへ渡した以上、終局の判定はEvaluatorに先に見せる（issue #909）
     if (plan.goal !== undefined) {
       this.evaluating = true;
-      void this.runGoalTurn(plan, state).finally(() => {
-        this.evaluating = false;
+      // 世代を捕まえてから始める（issue #933）。この評価が終わる前にループが止まり、
+      // 別の実行が始まっていた場合、その実行の`evaluating`を折らないため
+      const generation = this.runGeneration;
+      void this.runGoalTurn(plan, state, generation).finally(() => {
+        if (generation === this.runGeneration) {
+          this.evaluating = false;
+        }
       });
       return;
     }
@@ -625,7 +658,7 @@ export class LoopController {
    * **次のターンの指示文はここ（`LoopController`）で組み立てる。** Evaluatorが返した
    * 文字列をそのままユーザープロンプトとして送る経路は作らない。
    */
-  private async runGoalTurn(plan: LoopPlan, state: ChatState): Promise<void> {
+  private async runGoalTurn(plan: LoopPlan, state: ChatState, generation: number): Promise<void> {
     const goal = plan.goal;
     if (goal === undefined) {
       return;
@@ -645,8 +678,10 @@ export class LoopController {
       })
       .catch(() => indeterminate('Evaluatorの呼び出しが失敗しました'));
 
-    // 評価を待っている間に止められた・別の計画で開始し直された場合は何もしない
-    if (!this.status.running || this.plan !== plan) {
+    // 評価を待っている間に止められた・別の実行が始まっていた場合は何もしない
+    // （issue #933。`this.plan !== plan`だけでは、同じ計画のオブジェクトを使い回されると
+    // 別の実行を自分の実行と取り違える）
+    if (!this.status.running || this.plan !== plan || generation !== this.runGeneration) {
       return;
     }
     if (evaluation.verdict === 'achieved') {
@@ -722,7 +757,14 @@ export class LoopController {
         plan.goal === undefined ? decoratePrompt(withPolicy, plan.condition) : withPolicy,
       );
       if (result instanceof Promise) {
-        result.catch(() => this.stop('failed'));
+        // 送信が失敗しても、その頃には別の実行が始まっていることがある（issue #933）。
+        // 古い送信のrejectで今のループを止めない
+        const generation = this.runGeneration;
+        result.catch(() => {
+          if (generation === this.runGeneration) {
+            this.stop('failed');
+          }
+        });
       }
     } catch {
       this.stop('failed');

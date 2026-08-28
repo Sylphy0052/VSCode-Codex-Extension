@@ -134,9 +134,12 @@ describe('collectCommandEvidence', () => {
 });
 
 describe('buildWorkerReportEvidence', () => {
-  it('直近の応答を status unknown の申告として1件にする', () => {
+  it('そのターンの応答を status unknown の申告として1件にする', () => {
     const report = buildWorkerReportEvidence(
-      state([item({ id: 'a1', kind: 'agentMessage', text: '直しました' })]),
+      {
+        ...state([item({ id: 'a1', kind: 'agentMessage', text: '直しました' })]),
+        turnResultText: '直しました',
+      },
       2,
     );
     expect(report).toMatchObject({ kind: 'worker-report', status: 'unknown', iteration: 2 });
@@ -145,6 +148,18 @@ describe('buildWorkerReportEvidence', () => {
 
   it('応答が無ければ証拠を作らない', () => {
     expect(buildWorkerReportEvidence(state([]), 1)).toBeUndefined();
+  });
+
+  it('そのターンが何も言わなければ、会話に残る過去の発言は拾わない（issue #933）', () => {
+    // コマンド実行だけで本文を返さなかったターン。`items`には前のターンの発言が残る
+    const report = buildWorkerReportEvidence(
+      {
+        ...state([item({ id: 'a1', kind: 'agentMessage', text: '前のターンで直しました' })]),
+        turnResultText: '',
+      },
+      2,
+    );
+    expect(report).toBeUndefined();
   });
 });
 

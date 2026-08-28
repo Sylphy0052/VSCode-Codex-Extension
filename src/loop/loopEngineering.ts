@@ -29,10 +29,10 @@ import type { ChatState } from '../appserver/chatState';
 /**
  * 行き詰まりを申告するための合図（Escalate、issue #891）。
  *
- * 会話に紛れない綴りにしてある点は`LOOP_DONE_TOKEN`（`loopController.ts`）と同じだが、
- * **判定は`declaresEscalate`が最終行の完全一致で行う**（`LOOP_DONE_TOKEN`のような
- * `includes`ではない）。この合図は「解決できないので止めてくれ」という強い意味を持ち、
- * 指示文そのものが会話の中でこの綴りを含むため、`includes`では
+ * 会話に紛れない綴りにしてある点も、**判定が最終行の完全一致である**点も
+ * `LOOP_DONE_TOKEN`（`loopController.ts`）と同じ（`LOOP_DONE_TOKEN`は`includes`だったが、
+ * 同じ理由でissue #914に完全一致へ揃えた）。この合図は「解決できないので止めてくれ」と
+ * いう強い意味を持ち、指示文そのものが会話の中でこの綴りを含むため、`includes`では
  * 「必要なら <<LOOP_ESCALATE>> を返します」といった説明文だけで誤って停止してしまう。
  *
  * 合図の定義をこのモジュールへ置くのは、これを教えるのが`loopEngineering`の指示文
