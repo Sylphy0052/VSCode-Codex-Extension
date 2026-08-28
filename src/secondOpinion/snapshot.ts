@@ -1,5 +1,5 @@
 /**
- * セカンドオピニオン（Issue #894）のレビュー対象スナップショットの取得。
+ * セカンドオピニオン（Issue #894）の追加資料（作業ツリーの変更）のスナップショットの取得。
  *
  * `read-only` サンドボックスは**セカンドオピニオン自身**の書き込みを防ぐだけで、
  * 親セッションが実行中に作業ツリーを書き換えることは止められない。何もしないと
@@ -46,12 +46,18 @@ export async function captureWorkspaceSnapshot(
   }
   // 追跡外のファイルは含まれない。`git add -N` 相当まで面倒を見ると作業ツリーを
   // 書き換えることになるため、読み取りだけで完結する範囲に留める
-  const result = await git.run(['diff', 'HEAD'], cwd);
+  //
+  // `HEAD` ではなく解決済みのハッシュを渡す。`git diff HEAD` は `HEAD` を解決し直すため、
+  // `rev-parse` との間にコミットが入ると `baseCommit` と差分が別の地点を指す（#926 A）。
+  // `--no-ext-diff` / `--no-textconv` は、利用者の `.gitconfig` / `.gitattributes` に
+  // 設定された外部diffドライバ・textconvフィルタを走らせないため。レビュー用の写しを
+  // 取るだけの経路で任意の外部コマンドを起動する理由が無い
+  const result = await git.run(['diff', '--no-ext-diff', '--no-textconv', baseCommit, '--'], cwd);
   if (result.code !== 0) {
     const detail = result.stderr.trim();
     return {
       ok: false,
-      reason: `git diff HEAD に失敗しました（終了コード ${result.code}）${detail === '' ? '' : `: ${detail}`}`,
+      reason: `git diff に失敗しました（終了コード ${result.code}）${detail === '' ? '' : `: ${detail}`}`,
     };
   }
   const diff = result.stdout;
@@ -59,7 +65,7 @@ export async function captureWorkspaceSnapshot(
     return {
       ok: false,
       reason:
-        '作業ツリーに未コミットの変更がありません（レビュー対象を「依頼文のみ」に変えて実行してください）',
+        '作業ツリーに未コミットの変更がありません（追加資料を「追加資料なし」に変えて実行してください）',
     };
   }
   if (diff.length > maxDiffChars) {

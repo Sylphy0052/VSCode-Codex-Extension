@@ -21,7 +21,7 @@ export interface SecondOpinionCandidate {
 }
 
 /**
- * 既定の候補。Issue #894 で決めた「独立レビューは Sol / high」をそのまま持つ。
+ * 既定の候補。Issue #894 で決めた「セカンドオピニオン本体は Sol / high」をそのまま持つ。
  *
  * 候補が0件になると機能そのものが起動できなくなるため、設定が壊れているときは
  * 必ずここへ丸める（受入基準13）。
@@ -135,7 +135,7 @@ export interface SecondOpinionSummarySettings {
  * 要約の既定。
  *
  * effortを既定の候補（`high`）より下げてあるのは、要約に求めるのが判断ではなく事実の圧縮で、
- * ここへ時間と費用を掛けても独立レビューの質は上がらないため。
+ * ここへ時間と費用を掛けても独立した意見の質は上がらないため。
  */
 export const DEFAULT_SECOND_OPINION_SUMMARY: SecondOpinionSummarySettings = {
   enabled: true,

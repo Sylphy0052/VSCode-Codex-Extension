@@ -129,26 +129,31 @@ describe('normalizeSecondOpinionCandidates（Issue #894）', () => {
 });
 
 describe('buildSecondOpinionPrompt（Issue #894）', () => {
-  it('独立レビューであることと、スナップショットを正本として扱う指示を含む', () => {
+  it('独立したAdvisorであることと、スナップショットを正本として扱う指示を含む', () => {
     const prompt = buildSecondOpinionPrompt({
-      request: 'この変更をレビューして',
-      context: {
-        kind: 'workspaceSnapshot',
+      userRequest: 'この変更をレビューして',
+      artifact: {
+        kind: 'workspaceChanges',
         snapshot: { baseCommit: 'abc1234', diff: 'diff --git a/a.ts b/a.ts', truncated: false },
       },
     });
-    expect(prompt).toContain('独立したレビュアー');
+    expect(prompt).toContain('独立した立場から意見を求められています');
+    // 用途をコードレビューへ限定しない（Issue #926 P0）
+    expect(prompt).toContain('求められるのはコードレビューに限りません');
+    // 独立性は「セッション状態を継承しない」こと。回答は自動反映されない（Human Gate）
+    expect(prompt).toContain('そのエージェントの内部の判断過程は渡されていません');
+    expect(prompt).toContain('元の作業へ自動では反映されません');
     expect(prompt).toContain('abc1234');
     expect(prompt).toContain('diff --git a/a.ts b/a.ts');
-    expect(prompt).toContain('現在の作業ツリーはレビュー中に変更されている可能性がある');
+    expect(prompt).toContain('現在の作業ツリーは実行中に変更されている可能性がある');
     expect(prompt).toContain('この変更をレビューして');
   });
 
   it('差分を切り詰めたときは、その旨を本文に載せる', () => {
     const prompt = buildSecondOpinionPrompt({
-      request: 'レビューして',
-      context: {
-        kind: 'workspaceSnapshot',
+      userRequest: 'レビューして',
+      artifact: {
+        kind: 'workspaceChanges',
         snapshot: { baseCommit: 'abc1234', diff: 'diff', truncated: true },
       },
     });
@@ -158,9 +163,9 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
   it('差分にコードフェンスが含まれても囲みが壊れない', () => {
     const diff = '+```ts\n+const a = 1;\n+```';
     const prompt = buildSecondOpinionPrompt({
-      request: 'レビューして',
-      context: {
-        kind: 'workspaceSnapshot',
+      userRequest: 'レビューして',
+      artifact: {
+        kind: 'workspaceChanges',
         snapshot: { baseCommit: 'abc1234', diff, truncated: false },
       },
     });
@@ -170,8 +175,8 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
 
   it('レビュー対象なしなら依頼文だけを載せる', () => {
     const prompt = buildSecondOpinionPrompt({
-      request: '設計の考え方を聞きたい',
-      context: { kind: 'none' },
+      userRequest: '設計の考え方を聞きたい',
+      artifact: { kind: 'none' },
     });
     expect(prompt).toContain('設計の考え方を聞きたい');
     expect(prompt).not.toContain('レビュー対象');
@@ -180,7 +185,7 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
 
 describe('runSecondOpinion（Issue #894）', () => {
   const snapshotContext = {
-    kind: 'workspaceSnapshot' as const,
+    kind: 'workspaceChanges' as const,
     snapshot: { baseCommit: 'abc1234', diff: '+const a = 1;', truncated: false },
   };
 
@@ -190,7 +195,7 @@ describe('runSecondOpinion（Issue #894）', () => {
       cwd: '/repo',
       candidate: CANDIDATE,
       request: 'レビューして',
-      context: snapshotContext,
+      artifact: snapshotContext,
       headless: true,
     });
     expect(result).toEqual({ ok: true, response: 'レビュー結果です' });
@@ -209,14 +214,14 @@ describe('runSecondOpinion（Issue #894）', () => {
       cwd: '/repo',
       candidate: CANDIDATE,
       request: 'レビューして',
-      context: snapshotContext,
+      artifact: snapshotContext,
       headless: true,
     });
     const prompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
     // 実際に送られた本文が、依頼文とスナップショットだけから組み立てた本文と
     // 一字一句一致する（＝親セッションの会話が入り込む余地がない）
     expect(prompt).toBe(
-      buildSecondOpinionPrompt({ request: 'レビューして', context: snapshotContext }),
+      buildSecondOpinionPrompt({ userRequest: 'レビューして', artifact: snapshotContext }),
     );
     // ループの合図（LOOP_DONE）等の付加も無い。1ターンで完結する
     expect(host.sessions[0]?.runLoopCalls[0]?.condition).toBe('');
@@ -229,7 +234,7 @@ describe('runSecondOpinion（Issue #894）', () => {
       cwd: '/repo',
       candidate: CANDIDATE,
       request: 'レビューして',
-      context: snapshotContext,
+      artifact: snapshotContext,
       headless: true,
     });
     expect(host.sessions[0]?.openCalls).toBe(0);
@@ -242,7 +247,7 @@ describe('runSecondOpinion（Issue #894）', () => {
       cwd: '/repo',
       candidate: CANDIDATE,
       request: 'レビューして',
-      context: snapshotContext,
+      artifact: snapshotContext,
       headless: false,
     });
     expect(host.sessions[0]?.openCalls).toBe(1);
@@ -254,7 +259,7 @@ describe('runSecondOpinion（Issue #894）', () => {
       cwd: '/repo',
       candidate: CANDIDATE,
       request: 'レビューして',
-      context: snapshotContext,
+      artifact: snapshotContext,
       headless: true,
     });
     expect(result.ok).toBe(false);
@@ -280,12 +285,31 @@ describe('captureWorkspaceSnapshot（Issue #894）', () => {
     const git = fakeGit({
       'rev-parse --is-inside-work-tree': okResult('true\n'),
       'rev-parse HEAD': okResult('abc1234\n'),
-      'diff HEAD': okResult('+const a = 1;\n'),
+      'diff --no-ext-diff --no-textconv abc1234 --': okResult('+const a = 1;\n'),
     });
     const result = await captureWorkspaceSnapshot('/repo', git);
     expect(result).toEqual({
       ok: true,
       snapshot: { baseCommit: 'abc1234', diff: '+const a = 1;\n', truncated: false },
+    });
+  });
+
+  it('rev-parse の後にHEADが動いても、baseCommitと差分が同じ地点を指す（Issue #926 A）', async () => {
+    // `git diff HEAD` は `HEAD` を解決し直すため、2コマンドの間にコミットが入ると
+    // 「baseCommit: abc1234」と「新しいHEAD基準の差分」という食い違った組み合わせになる。
+    // 解決済みハッシュを渡していれば、HEADが動いた後の差分は引かれない
+    const git = fakeGit({
+      'rev-parse --is-inside-work-tree': okResult('true\n'),
+      'rev-parse HEAD': okResult('abc1234\n'),
+      'diff --no-ext-diff --no-textconv abc1234 --': okResult('+固定した地点の差分\n'),
+      // 実行中にコミットが入り、HEADが別の地点へ動いた状態
+      'diff HEAD': okResult('+動いた後の差分\n'),
+      'diff --no-ext-diff --no-textconv HEAD --': okResult('+動いた後の差分\n'),
+    });
+    const result = await captureWorkspaceSnapshot('/repo', git);
+    expect(result).toEqual({
+      ok: true,
+      snapshot: { baseCommit: 'abc1234', diff: '+固定した地点の差分\n', truncated: false },
     });
   });
 
@@ -299,7 +323,7 @@ describe('captureWorkspaceSnapshot（Issue #894）', () => {
     const git = fakeGit({
       'rev-parse --is-inside-work-tree': okResult('true\n'),
       'rev-parse HEAD': okResult('abc1234\n'),
-      'diff HEAD': okResult('\n'),
+      'diff --no-ext-diff --no-textconv abc1234 --': okResult('\n'),
     });
     const result = await captureWorkspaceSnapshot('/repo', git);
     expect(result.ok).toBe(false);
@@ -309,7 +333,7 @@ describe('captureWorkspaceSnapshot（Issue #894）', () => {
     const git = fakeGit({
       'rev-parse --is-inside-work-tree': okResult('true\n'),
       'rev-parse HEAD': okResult('abc1234\n'),
-      'diff HEAD': okResult('x'.repeat(50)),
+      'diff --no-ext-diff --no-textconv abc1234 --': okResult('x'.repeat(50)),
     });
     const result = await captureWorkspaceSnapshot('/repo', git, 10);
     expect(result).toEqual({

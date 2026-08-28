@@ -15,7 +15,7 @@ import type { Logger } from '../log';
 import { runSingleTurnTask, SingleTurnTimeoutError } from '../orchestrator/planner';
 import type { TaskSessionHost, TaskSessionInput } from '../orchestrator/taskSession';
 import type { SecondOpinionCandidate } from './candidates';
-import { buildSecondOpinionPrompt, type SecondOpinionContext } from './prompt';
+import { buildSecondOpinionPrompt, type SecondOpinionArtifact } from './prompt';
 
 /**
  * 承認要求を人へ回さず全て拒否するモード。`runSingleTurnTask` が起動直前に確かめる
@@ -65,11 +65,11 @@ export interface SecondOpinionRequest {
   candidate: SecondOpinionCandidate;
   /** 利用者が編集した依頼文。 */
   request: string;
-  /** 押下時に固定したレビュー対象。 */
-  context: SecondOpinionContext;
+  /** 押下時に固定した追加資料（Issue #926 P0）。 */
+  artifact: SecondOpinionArtifact;
   /**
-   * 別セッションが作った会話の要約（Issue #903）。要約を切っている・作れなかった場合は
-   * 渡さない（渡さなければプロンプトはIssue #894時点と同じになる）。
+   * 別セッションが作った会話の背景要約（Issue #903）。要約を切っている・作れなかった場合は
+   * 渡さない（渡さなければ、元の会話に由来する材料は一切渡らない）。
    */
   conversationSummary?: string | undefined;
   /** タブを開かずに走らせるか（設定 `agent.secondOpinion.headless`）。 */
@@ -101,8 +101,8 @@ export async function runSecondOpinion(
   log?: Logger,
 ): Promise<SecondOpinionResult> {
   const prompt = buildSecondOpinionPrompt({
-    request: request.request,
-    context: request.context,
+    userRequest: request.request,
+    artifact: request.artifact,
     conversationSummary: request.conversationSummary,
   });
   // 依頼文・差分の中身は出さない（credential・顧客情報・proprietary codeが入りうる。
@@ -110,7 +110,7 @@ export async function runSecondOpinion(
   log?.info(
     `${SECOND_OPINION_LOG_PREFIX} start provider=codex model=${request.candidate.model} ` +
       `effort=${request.candidate.effort} headless=${String(request.headless)} ` +
-      `contextSource=${request.context.kind} ` +
+      `artifact=${request.artifact.kind} ` +
       `summary=${request.conversationSummary === undefined ? 'off' : 'on'} ` +
       `promptChars=${prompt.length}`,
   );
