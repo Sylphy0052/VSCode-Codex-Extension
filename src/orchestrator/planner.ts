@@ -1073,8 +1073,11 @@ export interface SingleTurnOptions {
  *
  * 従来は素の`Error`だったため、呼び出し側は文言でしか打ち切りを判別できなかった。
  * Issue #907で「打ち切っても途中の回答を残す」を入れるにあたり、型で判別できるようにし、
- * 回収した部分出力を運ばせる。文言は従来と一字一句同じに保つ（既存のテスト・
- * 会話へ残る表示がこの文面に依存している）。
+ * 回収した部分出力を運ばせる。
+ *
+ * 文言には「停止の完了は保証しない」旨を含める（Issue #926 D）。拡張側が保証できるのは
+ * 打ち切りを**要求した**ことまでで、相手側の処理が続いていることはありうる。この一文が
+ * 無いと、打ち切り表示を見た人は相手側も止まったと読む。
  */
 export class SingleTurnTimeoutError extends Error {
   /**
@@ -1112,13 +1115,18 @@ export class SingleTurnTimeoutError extends Error {
  * 取りこぼしで`onFinished`が一度も呼ばれないと、以前は`Promise`が永久に解決せず
  * `finally`の`session.dispose()`にも到達しなかった）。
  *
- * 打ち切り時は`session.interrupt()`を呼び、進行中のターン・CLIプロセス側も止める
+ * 打ち切り時は`session.interrupt()`を呼び、進行中のターンを止めるよう要求する
  * （`interrupt()`自体がハングする可能性もあるため、その完了を待たずにタイムアウトの
- * `reject`を確定させる。`interrupt()`は結果を問わず投げっぱなしにする）。`settled`で
- * 「最初に決着した経路」だけを採用し、後から本来の`onFinished`が遅れて呼ばれても
- * 二重にresolve/rejectしない（`Promise`はそもそも2度目以降の決着を無視するが、
- * ここでは`clearTimeout`忘れやログの二重出力も避ける）。`session.dispose()`は
- * 経路によらず`finally`で1回だけ呼ぶ。
+ * `reject`を確定させる。`interrupt()`は結果を問わず投げっぱなしにする。**相手側の停止が
+ * 完了したことまでは保証しない**——Issue #926 D の調査結果を design.md §14.80 に記す）。
+ * 決着は`settle()`の1箇所に集約し、「最初に決着した経路」だけを採用したうえで必ず
+ * `clearTimeout`する。後から本来の`onFinished`が遅れて呼ばれても二重にresolve/rejectしない。
+ * `session.runLoop()`の同期throwもこの経路を通す（Issue #926 C。以前はタイマーが残り、
+ * dispose済みのセッションへ後から`interrupt()`を呼んでいた）。
+ *
+ * `session.dispose()`は経路によらず`finally`で1回だけ呼ぶ。`try`は`openTaskSession()`が
+ * 返った直後から始めるため、準備段階（`onSessionOpened` / `setApprovalHandler` /
+ * `open()`）が投げてもセッションは閉じる（Issue #926 C）。
  *
  * `roadmap.ts`・`secondOpinion/run.ts`からも使う（`buildPlannerSessionInput`と同じ理由でexportする）。
  */
@@ -1141,18 +1149,42 @@ export async function runSingleTurnTask(
   } = options;
   assertSingleTurnSessionIsSafe(provider, input, label);
   const session = await host.openTaskSession(input);
-  onSessionOpened?.(session);
-  session.setApprovalHandler(async () => ({ kind: 'auto', decision: 'decline' }));
-  // タブを開くかどうかは呼び出し側が決める（Issue #894。`openPanel: false` なら
-  // `TaskSession.open()` を呼ばず、パネルを作らないまま完走する。`buildEntry` は
-  // `panel: undefined` で生成し、`postState` / `onSessionChange` はタブが無い状態を
-  // 織り込み済みのため、開かなくても状態の更新経路は回る）
-  if (openPanel) {
-    session.open({ preserveFocus: true });
-  }
+  // `openTaskSession()` が返った直後から `try` を始める。準備段階（`onSessionOpened` /
+  // `setApprovalHandler` / `open()`）で投げると、開いたセッションが `dispose()` されずに
+  // 残る（Issue #926 C。`headless: false` で `open()` が投げる経路が該当し、共有基盤
+  // なので分解セッション・ロードマップ生成にも同じ穴があった）
   try {
+    onSessionOpened?.(session);
+    session.setApprovalHandler(async () => ({ kind: 'auto', decision: 'decline' }));
+    // タブを開くかどうかは呼び出し側が決める（Issue #894。`openPanel: false` なら
+    // `TaskSession.open()` を呼ばず、パネルを作らないまま完走する。`buildEntry` は
+    // `panel: undefined` で生成し、`postState` / `onSessionChange` はタブが無い状態を
+    // 織り込み済みのため、開かなくても状態の更新経路は回る）
+    if (openPanel) {
+      session.open({ preserveFocus: true });
+    }
     return await new Promise<string>((resolve, reject) => {
       let settled = false;
+      /**
+       * 決着を1箇所に集める（Issue #926 C）。
+       *
+       * 「最初に決着した経路」だけを採用し、そのときタイマーを必ず解除する。個別の経路が
+       * `clearTimeout` を持つ形だと、経路が増えるたびに解除を書き足すことになり、実際に
+       * `runLoop()` の同期throw経路で解除が漏れていた（残ったタイマーが後から発火し、
+       * dispose済みのセッションへ `interrupt()` を呼ぶ）。
+       *
+       * `timer` は下で宣言する`const`を閉包で掴む。ここが呼ばれるのは必ず`setTimeout`より
+       * 後（タイマー・`onFinished`・`runLoop`のcatchのいずれも非同期または後続の行）なので、
+       * 未初期化のまま参照されることは無い。
+       */
+      const settle = (action: () => void): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        action();
+      };
       // 打ち切り時に部分出力を拾うため、直近の状態を持つ。`TaskSession`には状態を
       // 取り出す口が無く、`onFinished`は打ち切り時には呼ばれないため、変化を受けて
       // 保つしかない（`partialOnTimeout`が偽なら参照しない）
@@ -1163,57 +1195,70 @@ export async function runSingleTurnTask(
         });
       }
       const timer = setTimeout(() => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        // 完了・失敗を待たず投げっぱなしにする（interrupt自体がハングしても、
-        // このタイムアウトが打ち切りとして確定することを妨げない）。ただし、
-        // interrupt()自体が失敗した場合はCLIプロセスが残り続けている可能性があるため、
-        // 内部情報（スタックトレース・絶対パス・プロンプト全文）を含まない形で
-        // ログには残す（#400コードレビュー指摘 low 2。完全に握り潰さない）
-        void session.interrupt().catch((e: unknown) => {
-          const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
-          log?.warn(`${logPrefix} タイムアウト後のinterrupt()に失敗しました: ${message}`);
+        settle(() => {
+          // 完了・失敗を待たず投げっぱなしにする（interrupt自体がハングしても、
+          // このタイムアウトが打ち切りとして確定することを妨げない）。ただし、
+          // interrupt()自体が失敗した場合は相手側の処理が残り続けている可能性があるため、
+          // 内部情報（スタックトレース・絶対パス・プロンプト全文）を含まない形で
+          // ログには残す（#400コードレビュー指摘 low 2。完全に握り潰さない）
+          void session.interrupt().catch((e: unknown) => {
+            const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+            log?.warn(`${logPrefix} タイムアウト後のinterrupt()に失敗しました: ${message}`);
+          });
+          // Issue #926 D の調査結果: app-serverには `turn/interrupt` があり、`ChatSession`は
+          // それを呼ぶ（`appserver/chatSession.ts`）。ただし停止の**完了**は保証できない。
+          // ターンidが割り当たる前は要求自体が送られず、`turn/interrupt` はターンを終わらせても
+          // 実行中コマンドの子プロセスはCLI側に残る（issue #246）。ここで待たない設計も含め、
+          // 「打ち切りを要求した」までが保証の範囲であることをログにも残す
+          log?.warn(
+            `${logPrefix} 打ち切りを要求しました（停止の完了は保証しません。相手側で処理が続いている可能性があります）`,
+          );
+          // 打ち切りまでに出ていた分は、呼び出し側が望めば渡す（Issue #907）。ここで
+          // 捨てると、長考するモデルほど成果が丸ごと消える。本文はログへ出さない
+          const partial =
+            partialOnTimeout && latestState !== undefined
+              ? lastNonEmptyAgentMessageText(latestState.items)
+              : '';
+          reject(
+            new SingleTurnTimeoutError(
+              `${label}のターンが${timeoutMs}ミリ秒以内に完了しなかったため打ち切りました` +
+                '（停止を要求しましたが、相手側で処理が続いている可能性があります）',
+              partial.trim() === '' ? undefined : partial,
+            ),
+          );
         });
-        // 打ち切りまでに出ていた分は、呼び出し側が望めば渡す（Issue #907）。ここで
-        // 捨てると、長考するモデルほど成果が丸ごと消える。本文はログへ出さない
-        const partial =
-          partialOnTimeout && latestState !== undefined
-            ? lastNonEmptyAgentMessageText(latestState.items)
-            : '';
-        reject(
-          new SingleTurnTimeoutError(
-            `${label}のターンが${timeoutMs}ミリ秒以内に完了しなかったため打ち切りました`,
-            partial.trim() === '' ? undefined : partial,
-          ),
-        );
       }, timeoutMs);
       session.onFinished((reason, state) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        clearTimeout(timer);
-        if (reason === 'failed') {
-          reject(new Error(`${label}のターンが失敗しました`));
-          return;
-        }
-        // Codexの完了通知では、画面上のagentMessageは残っているのに
-        // turnResultTextだけ空になることがある。単発セッションはこのターンだけを
-        // 実行するため、表示中の最後のagentMessageを安全なフォールバックにする。
-        resolve(
-          state.turnResultText.trim() !== ''
-            ? state.turnResultText
-            : lastNonEmptyAgentMessageText(state.items),
-        );
+        settle(() => {
+          if (reason === 'failed') {
+            reject(new Error(`${label}のターンが失敗しました`));
+            return;
+          }
+          // Codexの完了通知では、画面上のagentMessageは残っているのに
+          // turnResultTextだけ空になることがある。単発セッションはこのターンだけを
+          // 実行するため、表示中の最後のagentMessageを安全なフォールバックにする。
+          resolve(
+            state.turnResultText.trim() !== ''
+              ? state.turnResultText
+              : lastNonEmptyAgentMessageText(state.items),
+          );
+        });
       });
-      session.runLoop({
-        initialPrompt: prompt,
-        continuePrompt: '',
-        maxIterations: 1,
-        condition: '',
-      });
+      try {
+        session.runLoop({
+          initialPrompt: prompt,
+          continuePrompt: '',
+          maxIterations: 1,
+          condition: '',
+        });
+      } catch (e) {
+        // `runLoop()` は同期で投げうる。ここで拾わないとPromiseはrejectされるが
+        // タイマーが残り、後から発火してdispose済みのセッションへ `interrupt()` を
+        // 呼ぶ（Issue #926 C）
+        settle(() => {
+          reject(e instanceof Error ? e : new Error(String(e)));
+        });
+      }
     });
   } finally {
     // design.md §16.9「生成が終わったらセッションを閉じる」。1ターンごとに新しいセッション

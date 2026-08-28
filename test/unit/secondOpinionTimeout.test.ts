@@ -104,7 +104,7 @@ const SESSION_INPUT: TaskSessionInput = {
 
 const CANDIDATE = { name: 'Sol (high)', model: 'gpt-5.6-sol', effort: 'high' };
 const SNAPSHOT_CONTEXT = {
-  kind: 'workspaceSnapshot' as const,
+  kind: 'workspaceChanges' as const,
   snapshot: { baseCommit: 'abc1234', diff: '+const a = 1;', truncated: false },
 };
 
@@ -159,7 +159,7 @@ describe('runSingleTurnTask の打ち切り（Issue #907）', () => {
     expect(host.sessions[0]?.disposeCalls).toBe(1);
   });
 
-  it('打ち切りの文言は従来と同じ', async () => {
+  it('打ち切りの文言に、停止の完了を保証しない旨が入る（Issue #926 D）', async () => {
     const host = new FakeHost([]);
 
     const error = await runSingleTurnTask(host, 'codex', SESSION_INPUT, 'やって', {
@@ -169,7 +169,7 @@ describe('runSingleTurnTask の打ち切り（Issue #907）', () => {
     }).catch((e: unknown) => e);
 
     expect((error as Error).message).toBe(
-      'セカンドオピニオンのターンが5ミリ秒以内に完了しなかったため打ち切りました',
+      'セカンドオピニオンのターンが5ミリ秒以内に完了しなかったため打ち切りました（停止を要求しましたが、相手側で処理が続いている可能性があります）',
     );
   });
 });
@@ -179,7 +179,7 @@ describe('runSecondOpinion の打ち切り（Issue #907）', () => {
     cwd: '/repo',
     candidate: CANDIDATE,
     request: 'レビューして',
-    context: SNAPSHOT_CONTEXT,
+    artifact: SNAPSHOT_CONTEXT,
     headless: true,
     timeoutMs: 5,
   };
@@ -226,7 +226,7 @@ describe('打ち切り時の表示（Issue #907）', () => {
   it('全文が返ったときと見分けがつく（途中までである旨と理由が出る）', () => {
     const display = partialSecondOpinionDisplay(
       CANDIDATE,
-      'workspaceSnapshot',
+      'workspaceChanges',
       'レビューして',
       'ここまでの指摘',
       'セカンドオピニオンのターンが900000ミリ秒以内に完了しなかったため打ち切りました',

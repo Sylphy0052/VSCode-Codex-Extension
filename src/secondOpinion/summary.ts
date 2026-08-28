@@ -12,6 +12,9 @@
  * `vscode` には依存しない。
  */
 
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { Logger } from '../log';
 import { SANDBOX_MODES } from '../codex/types';
 import type { ApprovalMode } from '../codex/types';
@@ -32,17 +35,31 @@ export const DEFAULT_SUMMARY_TIMEOUT_MS = 2 * 60_000;
 /**
  * 要約へ渡す会話の記録の上限（文字数）。
  *
- * 超えた分は**先頭**を落として末尾（直近のやり取り）を残す。会話は後ろほど今の状況に
- * 近く、レビューに効くため（`transcriptMarkdown.ts` の `capTranscript` と同じ考え方）。
+ * 超えた分は**中間**を落とし、先頭と末尾を残す（Issue #926 G）。
  */
 export const MAX_SUMMARY_INPUT_CHARS = 120_000;
+
+/**
+ * 上限を超えたときに、先頭へ回す予算の割合。
+ *
+ * 当初は末尾だけを残していたが、それでは「利用者が何を求めたか（依頼の変遷があればそれも）」
+ * という要約プロンプトの1項目目を、入力から削っておいて書けと要求する形になっていた。
+ * 最初の依頼・受入基準・「これはやるな」という制約は会話の先頭付近にあることが多い。
+ * 一方で会話は後ろほど今の状況に近いため、末尾を厚くする（Issue #926 G）。
+ */
+const SUMMARY_HEAD_RATIO = 0.2;
 
 /** 要約セッションが返してよい長さの目安。プロンプトで指示する。 */
 const SUMMARY_TARGET_CHARS = 2_000;
 
 /**
- * 会話の記録を上限へ収める。落としたことは本文へ明記する（黙って切ると、要約する側は
- * 「会話の全部を見た」前提で書いてしまう）。
+ * 会話の記録を上限へ収める。
+ *
+ * 先頭と末尾の両方を残し、中間を省略する。落としたことは本文へ明記する（黙って切ると、
+ * 要約する側は「会話の全部を見た」前提で書いてしまう）。
+ *
+ * 文字数で機械的に切るため、1つの発言の途中で切れることは避けられない。`ChatItem` の
+ * 境界で切る形（切り詰めを配列に対して行う）は #926 P2 以降の課題として残す。
  */
 export function capConversationForSummary(
   conversation: string,
@@ -51,8 +68,20 @@ export function capConversationForSummary(
   if (conversation.length <= maxChars) {
     return conversation;
   }
-  const kept = conversation.slice(conversation.length - maxChars);
-  return `（会話が長いため、先頭を省略しています。以下は直近${maxChars.toLocaleString('ja-JP')}文字分です）\n\n${kept}`;
+  const headChars = Math.floor(maxChars * SUMMARY_HEAD_RATIO);
+  const tailChars = maxChars - headChars;
+  const head = conversation.slice(0, headChars);
+  const tail = conversation.slice(conversation.length - tailChars);
+  const omitted = conversation.length - maxChars;
+  return [
+    `（会話が長いため、中間の約${omitted.toLocaleString('ja-JP')}文字を省略しています。以下は先頭${headChars.toLocaleString('ja-JP')}文字分です）`,
+    '',
+    head,
+    '',
+    `（ここで中間を省略。以下は直近${tailChars.toLocaleString('ja-JP')}文字分です）`,
+    '',
+    tail,
+  ].join('\n');
 }
 
 /**
@@ -91,6 +120,9 @@ export function buildConversationSummaryPrompt(conversation: string): string {
     '',
     'エージェントが述べた結論・自己評価・見通しは、事実と混ぜずに「エージェントはそう主張している」と分かる形で書いてください。',
     '記録に無いことを推測で補わないでください。分からない点は「記録からは不明」と書いてください。',
+    // このセッションのcwdは空の一時ディレクトリで、リポジトリのファイルは見えない（Issue #926 E）。
+    // 探しに行かせても無駄なターンを使うだけなので、要らないことを明示する
+    'ファイルを読む必要はありません。この記録だけを材料にしてください。',
     '',
     '## 会話の記録',
     '',
@@ -111,7 +143,35 @@ export function buildSummarySessionInput(
   };
 }
 
+/**
+ * 要約セッションのcwdに使う空の一時ディレクトリを作る（Issue #926 E）。
+ *
+ * 要約が読むべきなのはプロンプトへ載せた会話の記録だけで、リポジトリのファイルを読む
+ * 必要は無い。`sandbox: 'read-only'` は書き込みしか止めないため、実workspaceをcwdにして
+ * いる限り読み取りは全面的に許される。cwdを空のディレクトリへ向けることで、少なくとも
+ * 相対パスでの読み取りは何も取れなくなる。
+ *
+ * **保証しないこと**: 絶対パスを指定した読み取りは止まらない。完全な隔離はツール自体の
+ * 無効化・読み取りrootの制限が要る（#926 P2 の E 完全版）。
+ *
+ * 作れなかった場合は `undefined` を返し、呼び出し側は従来どおり実workspaceで走らせる
+ * （要約はセカンドオピニオンの付随情報であり、隔離できないことを理由に落とさない）。
+ */
+async function createIsolatedSummaryDir(log?: Logger): Promise<string | undefined> {
+  try {
+    return await fs.mkdtemp(path.join(os.tmpdir(), 'agent-sessions-summary-'));
+  } catch (e) {
+    log?.warn(
+      `${SUMMARY_LOG_PREFIX} 隔離用の一時ディレクトリを作れませんでした（実workspaceで実行します）: ${
+        e instanceof Error ? e.message : String(e)
+      }`,
+    );
+    return undefined;
+  }
+}
+
 export interface ConversationSummaryRequest {
+  /** 親セッションの作業ディレクトリ。一時ディレクトリを作れなかったときのfallbackに使う。 */
   cwd: string;
   model: string;
   effort: string;
@@ -144,11 +204,13 @@ export async function summarizeConversation(
     `${SUMMARY_LOG_PREFIX} start model=${request.model} effort=${request.effort} ` +
       `promptChars=${prompt.length}`,
   );
+  // 実workspaceから外して走らせる（Issue #926 E）。作れなければ従来どおり実workspaceで走る
+  const isolatedDir = await createIsolatedSummaryDir(log);
   try {
     const response = await runSingleTurnTask(
       host,
       'codex',
-      buildSummarySessionInput(request.cwd, request.model, request.effort),
+      buildSummarySessionInput(isolatedDir ?? request.cwd, request.model, request.effort),
       prompt,
       {
         timeoutMs: request.timeoutMs ?? DEFAULT_SUMMARY_TIMEOUT_MS,
@@ -165,5 +227,17 @@ export async function summarizeConversation(
     return { ok: true, summary: response.trim() };
   } catch (e) {
     return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  } finally {
+    // 成功・失敗・打ち切りのいずれでも消す。中身は空のままのはず（read-onlyで書けない）だが、
+    // 相手側が何を置いていても消せるように再帰で消す
+    if (isolatedDir !== undefined) {
+      await fs.rm(isolatedDir, { recursive: true, force: true }).catch((e: unknown) => {
+        log?.warn(
+          `${SUMMARY_LOG_PREFIX} 一時ディレクトリを消せませんでした: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        );
+      });
+    }
   }
 }
