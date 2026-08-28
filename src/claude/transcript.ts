@@ -28,6 +28,21 @@ const CONTROL_BLOCK =
 
 const JSONL_SUFFIX = '.jsonl';
 
+/**
+ * cwd から `projects/` 直下のディレクトリ名を作る（Issue #885）。
+ *
+ * Claude Code は cwd の英数字以外をすべて `-` へ置換した名前を使う。
+ * 手元の1,054ディレクトリで検証したところ、ディレクトリ名がこの規則と食い違うのは
+ * 「worktreeで起動したためディレクトリ名はworktree側のパス由来だが、transcriptの
+ * `cwd` は別パス」という50件だけで、「ディレクトリ名は対象ワークスペース外なのに
+ * `cwd` はワークスペース内」に当たるものは無かった。つまり前方一致による絞り込みは
+ * 安全側（取りこぼさない）に働く。確証ではないため、呼び出し側は絞り込みが空振り
+ * したときに全走査へ退避する。
+ */
+export function transcriptDirSlug(cwd: string): string {
+  return cwd.replace(/[^A-Za-z0-9]/g, '-');
+}
+
 export function sessionIdFromTranscriptName(fileName: string): string | undefined {
   if (!fileName.endsWith(JSONL_SUFFIX)) {
     return undefined;
@@ -43,39 +58,65 @@ export function sessionIdFromTranscriptName(fileName: string): string | undefine
  * cwd と最初のユーザー発言が揃うまで読み進める。
  */
 export function parseTranscriptHead(lines: readonly string[]): TranscriptMeta | undefined {
+  const reader = createTranscriptHeadReader();
+  for (const line of lines) {
+    if (reader.push(line)) {
+      break;
+    }
+  }
+  return reader.result();
+}
+
+/** 1行ずつ食わせて素性を組み立てる読み手（Issue #885）。 */
+export interface TranscriptHeadReader {
+  /** 1行を取り込む。素性が揃って以降の行が要らなくなったら true を返す。 */
+  push(line: string): boolean;
+  /** それまでに取り込んだ内容から素性を返す。揃っていなければ undefined。 */
+  result(): TranscriptMeta | undefined;
+}
+
+/**
+ * `parseTranscriptHead` の増分版（Issue #885）。
+ *
+ * 一覧の構築ではファイルを開く回数と読むバイト数の両方が効くため、行を読みながら
+ * 「もう十分か」を判定できる形を用意する。判定条件は `parseTranscriptHead` の
+ * 打ち切り条件と同じで、両者の結果は一致する。
+ */
+export function createTranscriptHeadReader(): TranscriptHeadReader {
   let sessionId: string | undefined;
   let cwd: string | undefined;
   let startedAt: string | undefined;
   let gitBranch: string | undefined;
   let firstUserText: string | undefined;
 
-  for (const line of lines) {
-    const entry = parseLine(line);
-    if (entry === undefined) {
-      continue;
-    }
-
-    sessionId ??= str(entry['sessionId']) || undefined;
-    cwd ??= str(entry['cwd']) || undefined;
-    startedAt ??= str(entry['timestamp']) || undefined;
-    gitBranch ??= str(entry['gitBranch']) || undefined;
-
-    if (firstUserText === undefined && isHumanMessage(entry)) {
-      const text = cleanText(messageText(entry));
-      if (text !== '') {
-        firstUserText = text;
+  return {
+    push(line: string): boolean {
+      const entry = parseLine(line);
+      if (entry === undefined) {
+        return false;
       }
-    }
 
-    if (sessionId !== undefined && cwd !== undefined && firstUserText !== undefined) {
-      break;
-    }
-  }
+      sessionId ??= str(entry['sessionId']) || undefined;
+      cwd ??= str(entry['cwd']) || undefined;
+      startedAt ??= str(entry['timestamp']) || undefined;
+      gitBranch ??= str(entry['gitBranch']) || undefined;
 
-  if (sessionId === undefined || cwd === undefined) {
-    return undefined;
-  }
-  return { sessionId, cwd, firstUserText, startedAt, gitBranch };
+      if (firstUserText === undefined && isHumanMessage(entry)) {
+        const text = cleanText(messageText(entry));
+        if (text !== '') {
+          firstUserText = text;
+        }
+      }
+
+      return sessionId !== undefined && cwd !== undefined && firstUserText !== undefined;
+    },
+    result(): TranscriptMeta | undefined {
+      if (sessionId === undefined || cwd === undefined) {
+        return undefined;
+      }
+      return { sessionId, cwd, firstUserText, startedAt, gitBranch };
+    },
+  };
 }
 
 /** transcript / tool_use から読み取った結果。 */

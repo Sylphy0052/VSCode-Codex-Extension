@@ -38,6 +38,41 @@ async function readFirstLine(filePath: string): Promise<string | undefined> {
   return (await readHead(filePath, 1))[0];
 }
 
+/**
+ * `readHead` の打ち切り付き版（Issue #885）。
+ *
+ * `isComplete` が true を返した行で読むのをやめる。行の切り出しは readline に任せる
+ * ため1行が巨大な場合はその行までは読み切るが、累積が `maxBytes` を超えた時点で次の
+ * 行へは進まない。累積は文字数で数える（UTF-8のバイト数とは厳密には一致しないが、
+ * 目的は青天井の読み込みを止めることなので概算で足りる）。
+ */
+async function readHeadUntil(
+  filePath: string,
+  maxLines: number,
+  maxBytes: number,
+  isComplete: (line: string) => boolean,
+): Promise<string[]> {
+  const stream = createReadStream(filePath, { encoding: 'utf8' });
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  const lines: string[] = [];
+  let bytes = 0;
+  try {
+    for await (const line of rl) {
+      lines.push(line);
+      bytes += line.length;
+      if (isComplete(line) || lines.length >= maxLines || bytes >= maxBytes) {
+        break;
+      }
+    }
+    return lines;
+  } catch {
+    return lines;
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+}
+
 /** 拡張子で絞ってディレクトリを再帰的に走査する。 */
 async function walkFiles(dir: string, accept: (name: string) => boolean): Promise<string[]> {
   const found: string[] = [];
@@ -121,6 +156,17 @@ export const nodeFileSystem: FileSystemPort = {
   async listMarkdown(dir: string): Promise<string[]> {
     return walkFiles(dir, (name) => name.endsWith('.md'));
   },
+
+  async listSubdirectories(dir: string): Promise<string[]> {
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+    } catch {
+      return [];
+    }
+  },
+
+  readHeadUntil,
 };
 
 /** `MemoryFileSystemPort` の既定実装（issue #144。`nodeFileSystem` とは意図的に分ける）。 */
