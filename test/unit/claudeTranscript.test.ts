@@ -243,6 +243,42 @@ describe('transcriptItems', () => {
     expect(items[0]?.text).toBe('SKILL.mdの内容');
   });
 
+  it('slash command起動でsourceToolUseIDが無くてもskillContextにする（issue #889）', () => {
+    const { items } = transcriptItems([
+      userLine(
+        'Base directory for this skill: /home/u/.claude/skills/gitlab-cleanup\n\n# gitlab-cleanup',
+        {
+          isMeta: true,
+          userType: undefined,
+          origin: undefined,
+        },
+      ),
+    ]);
+    expect(items.map((i) => i.kind)).toEqual(['skillContext']);
+    expect(items[0]?.detail).toBe('gitlab-cleanup');
+  });
+
+  it('attachmentのinvoked_skillsもskillContextにする（issue #889）', () => {
+    const { items } = transcriptItems([
+      JSON.stringify({
+        type: 'attachment',
+        uuid: 'at1',
+        attachment: {
+          type: 'invoked_skills',
+          skills: [
+            {
+              name: 'gitlab-cleanup',
+              content:
+                'Base directory for this skill: /home/u/.claude/skills/gitlab-cleanup\n\n# gitlab-cleanup',
+            },
+          ],
+        },
+      }),
+    ]);
+    expect(items.map((i) => i.kind)).toEqual(['skillContext']);
+    expect(items[0]?.detail).toBe('gitlab-cleanup');
+  });
+
   it('sourceToolUseID無しのisMeta（caveat等）は従来どおり非表示にする', () => {
     const { items } = transcriptItems([
       userLine('<local-command-caveat>Caveat</local-command-caveat>', {

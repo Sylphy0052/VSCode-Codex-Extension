@@ -156,6 +156,10 @@ export function transcriptItems(lines: readonly string[]): TranscriptItems {
       appendUserEntry(entry, items, toolIndex);
       continue;
     }
+    if (type === 'attachment') {
+      appendInvokedSkills(entry, items);
+      continue;
+    }
     if (type === 'assistant') {
       const found = appendAssistantEntry(entry, items, toolIndex);
       if (found !== undefined) {
@@ -167,6 +171,40 @@ export function transcriptItems(lines: readonly string[]): TranscriptItems {
   }
 
   return { items, todos, todoHistory };
+}
+
+/**
+ * `type: "attachment"` で届くSkill注入（`attachment.type === 'invoked_skills'`、issue #889）。
+ *
+ * 手元のtranscriptでは185件がこの形で、`type: "user"` の注入とは別枠で積まれる。
+ * 表示は同じ `skillContext` に寄せ、1件のattachmentに複数skillが入る場合は
+ * uuidに連番を足して別項目にする。
+ */
+function appendInvokedSkills(entry: Record<string, unknown>, items: ChatItem[]): void {
+  const attachment = rec(entry['attachment']);
+  if (attachment === undefined || str(attachment['type']) !== 'invoked_skills') {
+    return;
+  }
+  const skills = Array.isArray(attachment['skills']) ? attachment['skills'] : [];
+  skills.forEach((raw, index) => {
+    const skill = rec(raw);
+    if (skill === undefined) {
+      return;
+    }
+    const text = cleanText(str(skill['content']));
+    if (text === '') {
+      return;
+    }
+    const name = str(skill['name']) || skillContextName(text);
+    const uuid = str(entry['uuid']);
+    items.push(
+      item(entry, 'skillContext', {
+        text,
+        detail: name,
+        id: index === 0 ? uuid : `${uuid}-${index}`,
+      }),
+    );
+  });
 }
 
 function appendUserEntry(
@@ -197,15 +235,16 @@ function appendUserEntry(
     };
   }
 
-  // Skillツール実行時にCLIが注入するSKILL.md全文（`isMeta: true` かつ起動元Skillツールの
-  // tool_use idを持つ `sourceToolUseID`、issue #691）。他の `isMeta: true`
-  // （`<local-command-caveat>`・cross-session-message等）と混同しないよう
-  // `sourceToolUseID` の有無で絞り込み、streamJson.tsのapplyUserと同じ判定で
+  // Skill起動時にCLIが注入するSKILL.md全文（issue #691、判定はissue #889で拡張）。
+  // 他の `isMeta: true`（`<local-command-caveat>`・cross-session-message等）と混同しない
+  // よう `isSkillContextEntry` で絞り込み、streamJson.tsのapplyUserと同じ判定で
   // fold対象（`skillContext`）として積む。非表示にはしない
-  if (entry['isMeta'] === true && str(entry['sourceToolUseID']) !== '') {
+  if (entry['isMeta'] === true) {
     const skillText = cleanText(messageText(entry));
-    if (skillText !== '') {
-      items.push(item(entry, 'skillContext', { text: skillText }));
+    if (skillText !== '' && isSkillContextEntry(entry, skillText)) {
+      items.push(
+        item(entry, 'skillContext', { text: skillText, detail: skillContextName(skillText) }),
+      );
     }
     return;
   }
@@ -398,6 +437,41 @@ function prefixLines(text: string, marker: string): string {
     shown.push(`… 残り${lines.length - MAX_DIFF_LINES}行を省略`);
   }
   return shown.join('\n');
+}
+
+/** Skill起動時にCLIが注入する本文の書き出し（実測、issue #889）。 */
+const SKILL_CONTEXT_PREFIX = 'Base directory for this skill:';
+
+/**
+ * Skill注入の本文かどうか（issue #889）。
+ *
+ * issue #691 では起動元Skillツールの `sourceToolUseID` の有無だけで判定していたが、
+ * `/<skill名>` のようにslash commandから直接起動した場合は `sourceToolUseID` が付かない。
+ * 手元の全transcript（613件の注入）では492件が `sourceToolUseID` 付き、85件が無しで、
+ * 無しの側はCLIのバージョンに相関しなかった。書き出しの一文でも拾う。
+ */
+export function isSkillContextEntry(entry: Record<string, unknown>, text: string): boolean {
+  if (entry['isMeta'] !== true) {
+    return false;
+  }
+  return str(entry['sourceToolUseID']) !== '' || text.startsWith(SKILL_CONTEXT_PREFIX);
+}
+
+/**
+ * 注入本文の1行目 `Base directory for this skill: <path>` からskill名を取り出す。
+ * 見出しに出して「どのskillが動いたか」だけは畳んだままでも判るようにする（issue #889）。
+ */
+export function skillContextName(text: string): string {
+  const head = text.split('\n', 1)[0] ?? '';
+  if (!head.startsWith(SKILL_CONTEXT_PREFIX)) {
+    return '';
+  }
+  const path = head
+    .slice(SKILL_CONTEXT_PREFIX.length)
+    .trim()
+    .replace(/[/\\]+$/, '');
+  const name = path.split(/[/\\]/).pop() ?? '';
+  return name;
 }
 
 function item(

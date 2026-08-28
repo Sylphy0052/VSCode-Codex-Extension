@@ -564,6 +564,26 @@ describe('applyStreamEvent', () => {
     expect(state.items[0]?.text).toBe('SKILL.mdの内容');
   });
 
+  it('slash command起動でsourceToolUseIDが無くてもskillContextにする（issue #889）', () => {
+    const state = apply([
+      {
+        type: 'user',
+        uuid: 'u1',
+        isMeta: true,
+        message: {
+          content: [
+            {
+              type: 'text',
+              text: 'Base directory for this skill: /home/u/.claude/skills/gitlab-cleanup\n\n# gitlab-cleanup',
+            },
+          ],
+        },
+      },
+    ]);
+    expect(state.items[0]?.kind).toBe('skillContext');
+    expect(state.items[0]?.detail).toBe('gitlab-cleanup');
+  });
+
   it('sourceToolUseID無しのisMeta（caveat等）は従来どおりuserMessageのまま', () => {
     const state = apply([
       {
