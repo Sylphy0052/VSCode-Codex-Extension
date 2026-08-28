@@ -523,6 +523,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 判定に使う設定を統合テストから差し替えるためのもの。`taskSessionHostOverrides` と同じく
   // 空のままなら常に実物へ委譲するので、本番の経路は差し替え口が無かったときと変わらない。
   const forgeOverrides: ForgeOverrides = {};
+  // セカンドオピニオン（Issue #894）はClaude Code画面から押してもCodexのセッションを開く。
+  // Claude側の管理クラスはCodexのホストを持たないため、ここで注入する（統合テストからの
+  // 差し替えも効くよう`overridableHost`を通す）
+  claudeChat.setSecondOpinionHost(overridableHost('codex', chat));
+
   const workflowRunner = new WorkflowRunner({
     hosts: {
       codex: overridableHost('codex', chat),

@@ -23,6 +23,7 @@ export const COMPOSER_BUTTON_IDS = [
   'forgeHub',
   'openProgress',
   'handoffToNewSession',
+  'secondOpinion',
 ] as const;
 
 export type ComposerButtonId = (typeof COMPOSER_BUTTON_IDS)[number];

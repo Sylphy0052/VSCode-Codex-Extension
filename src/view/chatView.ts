@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import {
@@ -7,7 +8,12 @@ import {
   isApprovalDecision,
   SERVER_REQUEST_METHODS,
 } from '../appserver/approvals';
-import { isOpenableSearchUrl, type ChatItem, type ChatState } from '../appserver/chatState';
+import {
+  isOpenableSearchUrl,
+  lastNonEmptyAgentMessageText,
+  type ChatItem,
+  type ChatState,
+} from '../appserver/chatState';
 import { ChatSession } from '../appserver/chatSession';
 import {
   AppServerConnection,
@@ -76,6 +82,8 @@ import {
   type ReviewTargetKind,
 } from '../codex/reviewTarget';
 import { buildSideQuestionForkParams } from '../codex/sideQuestion';
+import { SecondOpinionRegistry } from '../secondOpinion/run';
+import { startSecondOpinion } from './secondOpinionCommand';
 import { PendingStartRegistry } from './pendingStarts';
 import { readPersistedThreadId } from './panelState';
 import { isEditableKey, type SettingsProvider } from './settingsProvider';
@@ -149,6 +157,13 @@ interface ChatPanel extends BaseChatPanel {
   modelSettings: SessionModelSettings;
   /** ephemeralな脇道は再開不能なので、永続化対象外にする。 */
   persistModelSettings: boolean;
+  /**
+   * セカンドオピニオン（Issue #894）の重複起動判定に使うキー。
+   *
+   * スレッドを開始する前でも押せるため`threadId`は使えない（`undefined`同士が衝突し、
+   * 別のタブの実行中が互いに見えてしまう）。タブごとに一意な値をここへ持つ。
+   */
+  secondOpinionKey: string;
   /** ターン完了検知（`busy` の立ち下がり）に使う直前の値。 */
   wasBusy: boolean;
   /** ループ停止検知（`running` の立ち下がり）に使う直前の値。 */
@@ -301,6 +316,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * 誤配送する（詳しくは `pendingStarts.ts` のコメント）。
    */
   private readonly pendingStarts = new PendingStartRegistry<ChatPanel>();
+
+  /** セカンドオピニオン（Issue #894）の実行中管理。親セッションごとに1本へ絞る。 */
+  private readonly secondOpinionRegistry = new SecondOpinionRegistry();
 
   private readonly catalog: CommandCatalog;
   private commands: SlashCommand[] | undefined;
@@ -679,6 +697,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       taskConfig,
       modelSettings,
       persistModelSettings,
+      secondOpinionKey: randomUUID(),
       wasBusy: false,
       wasLoopRunning: false,
       approvalHandler: undefined,
@@ -1089,6 +1108,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         await this.handoffToNewSession();
         return;
       }
+      if (type === 'secondOpinion') {
+        await this.startSecondOpinionFor(entry);
+        return;
+      }
       if (type === 'cancelQueued' && typeof m['index'] === 'number') {
         entry.session.cancelQueued(m['index']);
         return;
@@ -1252,6 +1275,30 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * 元のスレッド（`entry`）の状態には一切触れない。本流の会話が脇道の質問で
    * 汚れないのはこのため。
    */
+  /**
+   * セカンドオピニオン（Issue #894）を起動する。
+   *
+   * 脇道の質問（`startSideQuestion`）と違い、この会話は一切渡さない。独立したCodex
+   * セッションを開き、起動時点の成果物と依頼文だけを見て評価させ、その結果をこの会話へ
+   * 表示するだけに留める（親セッションへ発言として送り返すことはしない）。
+   */
+  private async startSecondOpinionFor(entry: ChatPanel): Promise<void> {
+    await startSecondOpinion(
+      {
+        parentSessionId: entry.secondOpinionKey,
+        cwd: entry.cwd,
+        lastAssistantResponse: () => lastNonEmptyAgentMessageText(entry.session.getState().items),
+        note: (id, display) => entry.session.noteSecondOpinion(id, display),
+        setRunning: (running) => {
+          void entry.panel?.webview.postMessage({ type: 'secondOpinionRunning', running });
+        },
+      },
+      this,
+      this.secondOpinionRegistry,
+      this.log,
+    );
+  }
+
   private async startSideQuestion(entry: ChatPanel, question: string): Promise<void> {
     const threadId = entry.session.threadId;
     if (threadId === undefined) {

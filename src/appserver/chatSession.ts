@@ -12,6 +12,7 @@ import {
   addApproval,
   addPrompt,
   appendNotice,
+  appendSecondOpinion,
   applyEvent,
   deriveCodexBackgroundTerminals,
   deriveReviewing,
@@ -206,6 +207,17 @@ export class ChatSession {
       threadId,
       restore: { state: 'deferred', message: undefined },
     });
+  }
+
+  /**
+   * セカンドオピニオン（Issue #894）を会話へ1項目として残す/更新する。
+   *
+   * CLIとのやり取り（rollout）には乗らない、この画面だけの表示。同じidで呼び直すと
+   * 上書きする（`appendSecondOpinion` 参照）。プロセスの生死に関わらず呼べる
+   * （`ClaudeStreamSession.noteSideQuestion` と同じ扱い）。
+   */
+  noteSecondOpinion(id: string, display: { status: string; text: string; detail: string }): void {
+    this.update(appendSecondOpinion(this.state, id, display));
   }
 
   /** 明示的な復元に失敗しても、タブを閉じずに再試行できる状態へ戻す。 */

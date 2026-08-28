@@ -114,6 +114,9 @@ export function chatScript(
     collabAgentToolCall: 'サブエージェント操作',
     autoApprovalReview: '自動承認レビュー',
     sideQuestion: '脇道の質問',
+    // セカンドオピニオン（Issue #894）。脇道の質問と違い、この会話の内容は渡さずに
+    // 独立したセッションへ依頼した結果なので、種類を分けて見分けられるようにする
+    secondOpinion: 'セカンドオピニオン',
     // Claude CodeのReadツール。describeTool（claude/transcript.ts）が作る種類で、
     // Codex側には対応する項目種別が無い
     fileRead: 'ファイル読み取り',
@@ -765,7 +768,10 @@ export function chatScript(
     // 普通の発言と同じ体裁で見せたい）。それ以外は従来どおり生テキストのまま（issue #290）
     const useMarkdown =
       RENDER_MARKDOWN &&
-      (item.kind === 'userMessage' || item.kind === 'agentMessage' || item.kind === 'sideQuestion');
+      (item.kind === 'userMessage' ||
+        item.kind === 'agentMessage' ||
+        item.kind === 'sideQuestion' ||
+        item.kind === 'secondOpinion');
     const bodyMode = useMarkdown ? 'markdown' : 'text';
     if (node.bodyMode !== bodyMode || node.bodyKey !== primary) {
       node.bodyMode = bodyMode;
@@ -2652,6 +2658,9 @@ export function chatScript(
   el('handoffToNewSession').addEventListener('click', () =>
     vscode.postMessage({ type: 'handoffToNewSession' }),
   );
+  el('secondOpinion').addEventListener('click', () =>
+    vscode.postMessage({ type: 'secondOpinion' }),
+  );
   el('turnSummaryToggle').addEventListener('click', () =>
     vscode.postMessage({ type: 'toggleTurnSummary' }),
   );
@@ -2995,6 +3004,14 @@ export function chatScript(
       input.value = data.text;
       input.selectionStart = input.selectionEnd = input.value.length;
       input.focus();
+    }
+    if (data.type === 'secondOpinionRunning' && typeof data.running === 'boolean') {
+      // セカンドオピニオン（Issue #894）は親セッションごとに1本だけ。走っている間は
+      // このボタンだけを押せなくする。入力欄と送信は止めない（別視点の待ち時間で
+      // 本流の作業を止めない、という受入基準7のため）
+      const button = el('secondOpinion');
+      button.disabled = data.running;
+      button.setAttribute('aria-disabled', String(data.running));
     }
     if (data.type === 'insertComposerText' && typeof data.text === 'string') {
       // エディタの選択範囲を入力欄へ挿す（issue #292）。ホスト側（chatView.ts /

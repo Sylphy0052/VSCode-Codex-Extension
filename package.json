@@ -749,7 +749,8 @@
               "sessionKanban",
               "forgeHub",
               "openProgress",
-              "handoffToNewSession"
+              "handoffToNewSession",
+              "secondOpinion"
             ],
             "enumDescriptions": [
               "画像を添付する",
@@ -767,7 +768,8 @@
               "このワークスペースで開いている会話を状態別に表示する",
               "Forge Hubを開く",
               "このセッションの進捗を別タブで表示する",
-              "この会話を新しいセッションへ引き継ぐ"
+              "この会話を新しいセッションへ引き継ぐ",
+              "独立したCodexセッションへレビューを依頼する（セカンドオピニオン）"
             ]
           },
           "default": [
@@ -778,6 +780,59 @@
           ],
           "scope": "window",
           "markdownDescription": "チャット入力欄のアイコン列（`#composerIconRow`）の表に直接並べるボタン。ここに無いボタンは「…」メニューへ畳まれる（無くなるわけではない、issue #296）。既定は変更前の並びの先頭4つ。未知のIDや重複を含む場合は既定へ丸める。Codex/Claude Code両画面共通（実行時の条件で元から出ないボタン、例えば`fastToggle`はFast mode非対応環境では終始非表示、を指定しても、その状態のままなら出ない）。"
+        },
+        "agent.secondOpinion.candidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "model",
+              "effort"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "選択UIに出す表示名"
+              },
+              "model": {
+                "type": "string",
+                "description": "Codexのモデルslug（例: gpt-5.6-sol）"
+              },
+              "effort": {
+                "type": "string",
+                "description": "reasoning effort（例: high）"
+              }
+            },
+            "additionalProperties": false
+          },
+          "default": [
+            {
+              "name": "Sol (high)",
+              "model": "gpt-5.6-sol",
+              "effort": "high"
+            }
+          ],
+          "scope": "window",
+          "markdownDescription": "セカンドオピニオン（独立したCodexセッションへレビューを依頼する機能）の依頼先候補。候補が1件だけなら選択UIを出さずにその候補で起動する。壊れた値・空配列を指定した場合は既定へ丸める。起動先はCodex固定で、`sandbox`（read-only）と承認の扱い（全て拒否）は設定できない。"
+        },
+        "agent.secondOpinion.headless": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "セカンドオピニオンのセッションをタブを開かずに走らせる。`false` にすると進行が見えるタブを開く（どちらの場合もフォーカスは元の会話から移らない）。タブを開かない場合も、結果・失敗・打ち切りは必ず元の会話へ残る。"
+        },
+        "agent.secondOpinion.timeoutMs": {
+          "type": "number",
+          "default": 300000,
+          "scope": "window",
+          "markdownDescription": "セカンドオピニオンの1ターンを待つ上限（ミリ秒）。超えると打ち切り、理由を会話へ残す。10秒〜60分の範囲へ丸める。"
+        },
+        "agent.secondOpinion.template": {
+          "type": "string",
+          "default": "この変更をレビューしてください。特に設計上の欠陥、見落とし、より単純な代替案を挙げてください。",
+          "scope": "window",
+          "markdownDescription": "セカンドオピニオンの依頼文の既定値。実行のたびに編集できる。"
         },
         "agent.chat.turnSummary.enabled": {
           "type": "boolean",

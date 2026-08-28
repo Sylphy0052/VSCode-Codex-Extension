@@ -1,0 +1,206 @@
+/**
+ * セカンドオピニオン（Issue #894）の起動導線。
+ *
+ * 依頼先・レビュー対象・依頼文を人に選ばせ、起動時点の成果物を固定してから、独立した
+ * Codexセッションへ1ターンだけ送り、結果を元の会話へ差し込む。CodexとClaude Codeの
+ * どちらの画面から押しても**Codexのセッションを開く**（この機能の値打ちはモデルの
+ * 多様性ではなくコンテキストの分離にあるため。Issue #894 の決定3）。
+ *
+ * 画面ごとに違うのは「どの会話へ差し込むか」「直近の応答は何か」だけで、それらは
+ * {@link SecondOpinionPanelPort} として呼び出し側（`chatView.ts` / `claudeChatView.ts`）が
+ * 渡す。ここは `vscode` のUI（QuickPick / InputBox）と進行の面倒だけを見る。
+ */
+
+import { randomUUID } from 'node:crypto';
+import * as vscode from 'vscode';
+import { currentWorkspaceFolder, readSecondOpinionConfig } from '../config';
+import type { Logger } from '../log';
+import type { TaskSessionHost } from '../orchestrator/taskSession';
+import { nodeGitCommandRunner, type GitCommandRunner } from '../orchestrator/worktree';
+import type { SecondOpinionCandidate } from '../secondOpinion/candidates';
+import {
+  failedSecondOpinionDisplay,
+  finishedSecondOpinionDisplay,
+  pendingSecondOpinionDisplay,
+  type SecondOpinionDisplay,
+} from '../secondOpinion/display';
+import {
+  CONTEXT_KIND_LABELS,
+  SECOND_OPINION_CONTEXT_KINDS,
+  type SecondOpinionContext,
+  type SecondOpinionContextKind,
+} from '../secondOpinion/prompt';
+import { runSecondOpinion, SecondOpinionRegistry } from '../secondOpinion/run';
+import { captureWorkspaceSnapshot } from '../secondOpinion/snapshot';
+
+/** 画面1つ分の差し込み口。`ChatPanel` / `ClaudePanel` の違いをここへ閉じ込める。 */
+export interface SecondOpinionPanelPort {
+  /** 重複起動の判定キー（親セッションのid）。 */
+  parentSessionId: string;
+  /** 親セッションの作業ディレクトリ。未設定ならワークスペースを使う。 */
+  cwd: string | undefined;
+  /** 直近のエージェント応答（`lastAssistantResponse` を選んだときだけ使う）。 */
+  lastAssistantResponse(): string;
+  /** 会話へ1項目として残す/更新する。 */
+  note(id: string, display: SecondOpinionDisplay): void;
+  /** webviewのボタンの押下可否を切り替える。 */
+  setRunning(running: boolean): void;
+}
+
+const CONTEXT_KIND_DETAILS: Record<SecondOpinionContextKind, string> = {
+  workspaceSnapshot: '押した時点の git diff HEAD を固定して渡します（実行中の変更は含みません）',
+  lastAssistantResponse: 'この会話の直近の応答だけを渡します（独立性は下がります）',
+  none: '依頼文だけを渡します',
+};
+
+async function pickCandidate(
+  candidates: readonly SecondOpinionCandidate[],
+): Promise<SecondOpinionCandidate | undefined> {
+  const first = candidates[0];
+  if (first !== undefined && candidates.length === 1) {
+    // 候補が1件だけなら選ばせない（毎回同じ選択を押させない。受入基準2）
+    return first;
+  }
+  const picked = await vscode.window.showQuickPick(
+    candidates.map((candidate) => ({
+      label: candidate.name,
+      description: `${candidate.model} / ${candidate.effort}`,
+      candidate,
+    })),
+    { title: 'セカンドオピニオンの依頼先', placeHolder: '独立したCodexセッションのモデル' },
+  );
+  return picked?.candidate;
+}
+
+async function pickContextKind(): Promise<SecondOpinionContextKind | undefined> {
+  const picked = await vscode.window.showQuickPick(
+    SECOND_OPINION_CONTEXT_KINDS.map((kind) => ({
+      label: CONTEXT_KIND_LABELS[kind],
+      detail: CONTEXT_KIND_DETAILS[kind],
+      // `kind` は QuickPickItem の予約フィールド（区切り行の指定）なので別名で持つ
+      contextKind: kind,
+    })),
+    { title: 'レビュー対象', placeHolder: 'この会話の内容は、どれを選んでも渡しません' },
+  );
+  return picked?.contextKind;
+}
+
+/**
+ * レビュー対象を、押下時の状態で固定する。
+ *
+ * `read-only` サンドボックスは相手側の書き込みしか止められないため、実行中に親セッションが
+ * 作業ツリーを書き換えると、どの時点にも存在しなかった状態をレビューすることになる。
+ * ここで内容を確定させることが受入基準5の実体。
+ */
+async function captureContext(
+  kind: SecondOpinionContextKind,
+  cwd: string,
+  port: SecondOpinionPanelPort,
+  git: GitCommandRunner,
+): Promise<SecondOpinionContext | undefined> {
+  if (kind === 'none') {
+    return { kind: 'none' };
+  }
+  if (kind === 'lastAssistantResponse') {
+    const response = port.lastAssistantResponse().trim();
+    if (response === '') {
+      void vscode.window.showErrorMessage(
+        'この会話にはまだエージェントの応答がないため、レビュー対象にできません',
+      );
+      return undefined;
+    }
+    return { kind: 'lastAssistantResponse', response };
+  }
+  const captured = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Window, title: '変更のスナップショットを取得しています…' },
+    () => captureWorkspaceSnapshot(cwd, git),
+  );
+  if (!captured.ok) {
+    void vscode.window.showErrorMessage(`セカンドオピニオン: ${captured.reason}`);
+    return undefined;
+  }
+  return { kind: 'workspaceSnapshot', snapshot: captured.snapshot };
+}
+
+/**
+ * セカンドオピニオンを起動する。
+ *
+ * 途中で人が取り消した場合は何も起こさずに戻る（会話にも残さない）。起動した後は、
+ * 成功・失敗・打ち切りのいずれでも必ず会話へ1項目を残す（タブを開かない設定でも、
+ * 結果がどこにも出ないという状態を作らない。受入基準10）。
+ */
+export async function startSecondOpinion(
+  port: SecondOpinionPanelPort,
+  host: TaskSessionHost,
+  registry: SecondOpinionRegistry,
+  log: Logger,
+  git: GitCommandRunner = nodeGitCommandRunner,
+): Promise<void> {
+  if (registry.isRunning(port.parentSessionId)) {
+    void vscode.window.showInformationMessage(
+      'この会話のセカンドオピニオンは既に実行中です（終わるまで待つか、結果の項目を確認してください）',
+    );
+    return;
+  }
+  const cwd = port.cwd ?? currentWorkspaceFolder()?.uri.fsPath;
+  if (cwd === undefined) {
+    void vscode.window.showErrorMessage(
+      'セカンドオピニオンを走らせる作業ディレクトリが分かりません（ワークスペースを開いてください）',
+    );
+    return;
+  }
+
+  const config = readSecondOpinionConfig();
+  for (const warning of config.candidateWarnings) {
+    log.warn(`[secondOpinion] ${warning}`);
+  }
+
+  const candidate = await pickCandidate(config.candidates);
+  if (candidate === undefined) {
+    return;
+  }
+  const contextKind = await pickContextKind();
+  if (contextKind === undefined) {
+    return;
+  }
+  const request = await vscode.window.showInputBox({
+    title: 'セカンドオピニオンへの依頼',
+    prompt: 'この会話の内容は渡りません。依頼したいことだけを書いてください',
+    value: config.template,
+  });
+  if (request === undefined || request.trim() === '') {
+    return;
+  }
+  const context = await captureContext(contextKind, cwd, port, git);
+  if (context === undefined) {
+    return;
+  }
+
+  if (!registry.begin(port.parentSessionId)) {
+    // 選択している間に別経路から起動された場合。二重に走らせない
+    void vscode.window.showInformationMessage('この会話のセカンドオピニオンは既に実行中です');
+    return;
+  }
+  const id = `secondOpinion:${randomUUID()}`;
+  port.setRunning(true);
+  port.note(id, pendingSecondOpinionDisplay(candidate, contextKind, request));
+  try {
+    const result = await runSecondOpinion(
+      host,
+      { cwd, candidate, request, context, headless: config.headless, timeoutMs: config.timeoutMs },
+      log,
+    );
+    port.note(
+      id,
+      result.ok
+        ? finishedSecondOpinionDisplay(candidate, contextKind, request, result.response)
+        : failedSecondOpinionDisplay(candidate, contextKind, request, result.reason),
+    );
+    if (!result.ok) {
+      log.warn(`[secondOpinion] 失敗しました: ${result.reason}`);
+    }
+  } finally {
+    registry.end(port.parentSessionId);
+    port.setRunning(false);
+  }
+}
