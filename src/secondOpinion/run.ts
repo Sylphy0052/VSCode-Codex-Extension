@@ -62,6 +62,11 @@ export interface SecondOpinionRequest {
   request: string;
   /** 押下時に固定したレビュー対象。 */
   context: SecondOpinionContext;
+  /**
+   * 別セッションが作った会話の要約（Issue #903）。要約を切っている・作れなかった場合は
+   * 渡さない（渡さなければプロンプトはIssue #894時点と同じになる）。
+   */
+  conversationSummary?: string | undefined;
   /** タブを開かずに走らせるか（設定 `agent.secondOpinion.headless`）。 */
   headless: boolean;
   timeoutMs?: number | undefined;
@@ -83,13 +88,16 @@ export async function runSecondOpinion(
   const prompt = buildSecondOpinionPrompt({
     request: request.request,
     context: request.context,
+    conversationSummary: request.conversationSummary,
   });
   // 依頼文・差分の中身は出さない（credential・顧客情報・proprietary codeが入りうる。
   // 受入基準14）。出すのは実行条件と分量だけ
   log?.info(
     `${SECOND_OPINION_LOG_PREFIX} start provider=codex model=${request.candidate.model} ` +
       `effort=${request.candidate.effort} headless=${String(request.headless)} ` +
-      `contextSource=${request.context.kind} promptChars=${prompt.length}`,
+      `contextSource=${request.context.kind} ` +
+      `summary=${request.conversationSummary === undefined ? 'off' : 'on'} ` +
+      `promptChars=${prompt.length}`,
   );
   try {
     const response = await runSingleTurnTask(

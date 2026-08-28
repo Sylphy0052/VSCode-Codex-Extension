@@ -44,7 +44,9 @@ import type { HistoryScope } from './session/sessionStore';
 import { normalizeComposerButtons, type ComposerButtonsResult } from './view/composerButtons';
 import {
   normalizeSecondOpinionCandidates,
+  normalizeSecondOpinionSummary,
   type SecondOpinionCandidate,
+  type SecondOpinionSummarySettings,
 } from './secondOpinion/candidates';
 import { DEFAULT_SECOND_OPINION_TEMPLATE } from './secondOpinion/prompt';
 import { DEFAULT_SECOND_OPINION_TIMEOUT_MS } from './secondOpinion/run';
@@ -214,6 +216,8 @@ export interface SecondOpinionConfig {
   candidates: SecondOpinionCandidate[];
   /** 候補の検証で捨てた項目の理由。呼び出し側がログへ出す。 */
   candidateWarnings: string[];
+  /** 会話の要約（Issue #903）を作るセッションの設定。 */
+  summary: SecondOpinionSummarySettings;
   /** タブを開かずに走らせるか。既定は `true`。 */
   headless: boolean;
   timeoutMs: number;
@@ -231,10 +235,12 @@ export interface SecondOpinionConfig {
 export function readSecondOpinionConfig(): SecondOpinionConfig {
   const c = vscode.workspace.getConfiguration('agent');
   const parsed = normalizeSecondOpinionCandidates(c.get<unknown>('secondOpinion.candidates'));
+  const summary = normalizeSecondOpinionSummary(c.get<unknown>('secondOpinion.summary'));
   const rawTemplate = str(c, 'secondOpinion.template', DEFAULT_SECOND_OPINION_TEMPLATE);
   return {
     candidates: parsed.candidates,
-    candidateWarnings: parsed.warnings,
+    candidateWarnings: [...parsed.warnings, ...summary.warnings],
+    summary: summary.summary,
     headless: c.get<boolean>('secondOpinion.headless') ?? true,
     timeoutMs: normalizeSecondOpinionTimeoutMs(c.get<unknown>('secondOpinion.timeoutMs')),
     template: rawTemplate.trim() === '' ? DEFAULT_SECOND_OPINION_TEMPLATE : rawTemplate,

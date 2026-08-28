@@ -122,3 +122,82 @@ export function normalizeSecondOpinionCandidates(value: unknown): ParsedSecondOp
   }
   return { candidates, warnings };
 }
+
+/** 会話の要約（Issue #903）を作るセッションの設定。 */
+export interface SecondOpinionSummarySettings {
+  /** 要約を添えるか。`false` ならセッションを開かない。 */
+  enabled: boolean;
+  model: string;
+  effort: string;
+}
+
+/**
+ * 要約の既定。
+ *
+ * effortを既定の候補（`high`）より下げてあるのは、要約に求めるのが判断ではなく事実の圧縮で、
+ * ここへ時間と費用を掛けても独立レビューの質は上がらないため。
+ */
+export const DEFAULT_SECOND_OPINION_SUMMARY: SecondOpinionSummarySettings = {
+  enabled: true,
+  model: 'gpt-5.6-sol',
+  effort: 'low',
+};
+
+export interface ParsedSecondOpinionSummary {
+  summary: SecondOpinionSummarySettings;
+  warnings: string[];
+}
+
+/**
+ * `agent.secondOpinion.summary` の生値を検証する。
+ *
+ * 候補（`normalizeSecondOpinionCandidates`）と違い1件しか無い設定なので、項目ごとに
+ * 既定へ落とす（`model` だけ書き間違えても `enabled` の指定は生かす）。
+ */
+export function normalizeSecondOpinionSummary(value: unknown): ParsedSecondOpinionSummary {
+  if (value === undefined) {
+    return { summary: { ...DEFAULT_SECOND_OPINION_SUMMARY }, warnings: [] };
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return {
+      summary: { ...DEFAULT_SECOND_OPINION_SUMMARY },
+      warnings: [
+        `agent.secondOpinion.summary がオブジェクトではないため既定へ戻しました: ${JSON.stringify(value)}`,
+      ],
+    };
+  }
+  const record = value as Record<string, unknown>;
+  const warnings: string[] = [];
+
+  const rawEnabled = record['enabled'];
+  let enabled = DEFAULT_SECOND_OPINION_SUMMARY.enabled;
+  if (typeof rawEnabled === 'boolean') {
+    enabled = rawEnabled;
+  } else if (rawEnabled !== undefined) {
+    warnings.push(
+      `agent.secondOpinion.summary.enabled が真偽値ではないため既定を使います: ${JSON.stringify(rawEnabled)}`,
+    );
+  }
+
+  const rawModel = record['model'];
+  let model = DEFAULT_SECOND_OPINION_SUMMARY.model;
+  if (typeof rawModel === 'string' && MODEL_SLUG_RE.test(rawModel)) {
+    model = rawModel;
+  } else if (rawModel !== undefined) {
+    warnings.push(
+      `agent.secondOpinion.summary.model が受け付けない形のため既定を使います: ${JSON.stringify(rawModel)}`,
+    );
+  }
+
+  const rawEffort = record['effort'];
+  let effort = DEFAULT_SECOND_OPINION_SUMMARY.effort;
+  if (typeof rawEffort === 'string' && isEffortToken(rawEffort)) {
+    effort = rawEffort;
+  } else if (rawEffort !== undefined) {
+    warnings.push(
+      `agent.secondOpinion.summary.effort が受け付けない形のため既定を使います: ${JSON.stringify(rawEffort)}`,
+    );
+  }
+
+  return { summary: { enabled, model, effort }, warnings };
+}

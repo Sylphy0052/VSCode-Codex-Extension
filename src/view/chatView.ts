@@ -14,6 +14,7 @@ import {
   type ChatItem,
   type ChatState,
 } from '../appserver/chatState';
+import { buildTranscriptMarkdown } from '../appserver/transcriptMarkdown';
 import { ChatSession } from '../appserver/chatSession';
 import {
   AppServerConnection,
@@ -1293,6 +1294,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         parentSessionId: entry.secondOpinionKey,
         cwd: entry.cwd,
         lastAssistantResponse: () => lastNonEmptyAgentMessageText(entry.session.getState().items),
+        // 要約（Issue #903）の入力。画面が持っている項目から組み立てるだけで、
+        // 親セッションへは何も送らない
+        conversationTranscript: () =>
+          buildTranscriptMarkdown(entry.session.getState().items, 'Codex'),
         note: (id, display) => entry.session.noteSecondOpinion(id, display),
         setRunning: (running) => {
           void entry.panel?.webview.postMessage({ type: 'secondOpinionRunning', running });
