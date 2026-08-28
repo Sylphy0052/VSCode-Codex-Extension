@@ -134,3 +134,56 @@ describe('ClaudeStreamSession: exit/errorハンドラからの応答待ち解放
     });
   });
 });
+
+describe('ClaudeStreamSession: ターンの結果が確定した回数（issue #939）', () => {
+  /** そのターンの結果を返す `result` イベント。 */
+  const resultLine = (text: string): string =>
+    `${JSON.stringify({ type: 'result', subtype: 'success', result: text })}\n`;
+
+  it('走行中のターンがある間にプロセスが落ちれば、失敗として確定させる', () => {
+    const { session, proc } = createStartedSession();
+    session.send('直して');
+    const before = session.getState().turnCompletionSeq;
+
+    proc.emit('exit', 1);
+
+    const state = session.getState();
+    expect(state.turnFailed).toBe(true);
+    expect(state.turnCompletionSeq).toBe(before + 1);
+  });
+
+  it('resultを受け取った後にプロセスが落ちても、確定を重ねない', () => {
+    const { session, proc } = createStartedSession();
+    session.send('直して');
+    session.receive(resultLine('直しました'));
+    const before = session.getState().turnCompletionSeq;
+    expect(session.getState().busy).toBe(false);
+
+    proc.emit('exit', 1);
+
+    // `result` で既に確定している。無かった完了をもう1つ作らない
+    expect(session.getState().turnCompletionSeq).toBe(before);
+  });
+
+  it('1ターンも送らないまま起動に失敗しても、確定を作らない', () => {
+    const { session, proc } = createStartedSession();
+    const before = session.getState().turnCompletionSeq;
+
+    proc.emit('error', new Error('spawn ENOENT'));
+
+    expect(session.getState().turnCompletionSeq).toBe(before);
+  });
+
+  it('走行中の中断は確定させ、応答中でない中断は確定させない', () => {
+    const { session } = createStartedSession();
+    session.send('直して');
+    const before = session.getState().turnCompletionSeq;
+
+    session.interrupt();
+    expect(session.getState().turnCompletionSeq).toBe(before + 1);
+
+    // 応答が終わっている状態でもう一度押されても、無かった完了を作らない
+    session.interrupt();
+    expect(session.getState().turnCompletionSeq).toBe(before + 1);
+  });
+});

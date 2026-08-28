@@ -7655,9 +7655,14 @@ turn/completed                  ← ここで初めて turnResultText が入る
 
 `chatSession.ts` の `markTurnFailed()`（issue #420）と `streamSession.ts` の `stateAfterProcessGone()`（issue #897）は、CLIとの接続が切れたときに `busy: false, turnFailed: true` まで戻す。**ここでも `turnCompletionSeq` を進める。** 進めないと、完了の世代を見て次を決める側が `turn/completed` を永久に待ち、接続断でループが止まらなくなる。「結果が確定した」には「失敗として確定した」を含める。
 
-中断（`chatSession.interrupt()` / `streamSession.interrupt()`）も同じ扱いにする。中断はターンを終わらせるが `turn/completed` は来ない。**ただし中断リクエスト自体が失敗した分岐では進めない**——あちらはターンが続いている可能性が高く（コード中のコメントもそう書いている）、完了として扱うと次の指示を重ねて送ることになる。`startReview`（inline）の失敗ロールバックも進めない。ターンが始まっていないためである。「`busy` を false にする箇所」と「結果が確定した箇所」は一致しない、というのがこの節の要点である。
+**Codexの中断（`chatSession.interrupt()`）では進めない。** app-serverは `turn/interrupt` が成功したターンも `turn/completed`（`status: "interrupted"`）で終わらせる（`codex-rs/app-server/README.md`: 「the turn finishes with `status: "interrupted"`」「When the model is done (or the turn is interrupted via making the `turn/interrupt` call), the server sends `turn/completed`」）。中断側でも進めると同じターンを2回確定させ、作業記録とターン完了の通知が二重になり、待機列があれば次の指示まで余分に送る。ここは `turn/completed` を唯一の確定点にする。**中断リクエスト自体が失敗した分岐でも進めない**——あちらはターンが続いている可能性が高く（コード中のコメントもそう書いている）、完了として扱うと次の指示を重ねて送る。`startReview`（inline）の失敗ロールバックも同様で、そもそもターンが始まっていない。
 
-Claude Codeは `result` の1イベントで `busy: false` と `turnResultText` を同時に決めるため、この順序の食い違いは起きない。それでも同じ意味で世代を進め、読み手をプロバイダ共通にしている。
+Claude Codeは `result` の1イベントで `busy: false` と `turnResultText` を同時に決めるため、この順序の食い違いは起きない。それでも同じ意味で世代を進め、読み手をプロバイダ共通にしている。中断（`streamSession.interrupt()`）では進める——CLIは中断後に `result` を返さないことがあり、ここが確定点になる。
+
+**代替の確定点には「未確定のターンがあるか」のガードが要る。** どれも「終局通知が来ない」ことを理由に確定を作る側なので、ターンを抱えていない状態で通ると、無かった完了を1つ生む。Viewは世代の変化を無条件に「ターンが終わった」と読むため、直前のターンの成果が作業記録へ二重に残り、待機列があれば送信まで走る。
+
+- `chatSession.markTurnFailed()`: 判定は `busy || turnId !== undefined`。**`busy` だけでは足りない**——`thread/status/changed`（idle）は `turn/completed` より先に届くので、その窓で接続が切れると `busy` は既に `false` で、それでも結果の確定していないターンが残っている。この窓を落とすと `LoopController.observe` が永久に `turn/completed` を待つ。確定と同時に `turnId` も落とし、接続断の後始末が複数回呼ばれても確定を1回に留める
+- `streamSession.stateAfterProcessGone()` / `interrupt()`: 判定は `busy`。`send()` が送信前に `busy: true` にするため、Claude側ではこれが未確定ターンの印になる。`stateAfterProcessGone()` はプロセスの `exit`・`error`（**起動失敗を含む**）から呼ばれるので、1ターンも送っていない状態や `result` を処理し終えたidleの状態でも通りうる
 
 #### 消費側を`busy`から移す
 
@@ -7680,7 +7685,10 @@ Claude Codeは `result` の1イベントで `busy: false` と `turnResultText` �
 - `test/unit/claudeStreamJson.test.ts`: `result` の1イベントで確定すること（成功・失敗とも）
 - `test/unit/loopController.test.ts`: idle だけでは次の指示を送らず評価も始めないこと、`turn/completed` で1回だけ消費すること、確定後の別の状態変化で二重に送らないこと、idle 時点の空の応答を停滞の履歴へ積まないこと（同じ本文の反復が正しく `stalled` になる）、失敗と完了の合図も確定した時点で判定すること
 - `test/unit/chatViewManager.test.ts`: 実イベント列で、idle だけでは作業記録へ成果を残さず、`turn/completed` で本文を1回だけ残すこと
-- **陽性対照**: 消費側を `busy` の立ち下がりへ戻すと8件が落ちる。うち新規テストは6件（`LoopController` 4件、`chatViewManager` 2件）。`chatState.ts` 側で `thread/status/changed` に世代を進めさせると `chatState.test.ts` の5件が落ちる。残る新規テスト（「idle だけでは作業記録へ成果を残さない」「`turn/completed` で1回だけ次を送る」「確定後に二重に送らない」）は戻しても通る——`reportTurnResult` の空ガードや既存の `sawBusy` が偶然カバーしているためで、**回帰防止テストであって陽性対照ではない**
+- `test/unit/chatSessionInterrupt.test.ts`: `interrupt()` 自身は世代を進めず、後から届く `turn/completed` で1回だけ確定すること、中断が失敗したときは進めないこと
+- `test/unit/chatSessionConnectionLost.test.ts`: `busy` が既に `false` でも未確定のターンが残っていれば確定させること、後始末が2回呼ばれても2回確定させないこと
+- `test/unit/claudeStreamSessionExitRelease.test.ts`: 走行中のプロセス消失は確定させ、`result` の後・起動失敗・応答中でない中断では確定を作らないこと
+- **陽性対照**: 消費側を `busy` の立ち下がりへ戻すと8件が落ちる（うち新規6件: `LoopController` 4件、`chatViewManager` 2件）。`chatState.ts` 側で `thread/status/changed` に世代を進めさせると `chatState.test.ts` の5件が落ちる。exactly onceのガード3つを外す（中断で進める／`markTurnFailed` を `busy` だけで見る／Claude側を無条件に進める）と7件が落ちる。**落ちない新規テストが5件ある**（「idle だけでは作業記録へ成果を残さない」「`turn/completed` で1回だけ次を送る」「確定後に二重に送らない」「中断が失敗したときも進めない」「走行中のプロセス消失は確定させる」）。`reportTurnResult` の空ガードや既存の `sawBusy`、元から進めていない分岐が偶然カバーしているためで、**回帰防止テストであって陽性対照ではない**
 
 ### 16.44 チームモード（Issue #693）
 

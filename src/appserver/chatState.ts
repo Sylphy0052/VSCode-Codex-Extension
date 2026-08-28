@@ -561,11 +561,24 @@ export interface ChatState {
   /**
    * ターンの結果が確定した回数（issue #939）。
    *
-   * `turn/completed` と `turn/failed` でだけ1つ増やす。**`thread/status/changed` では
-   * 増やさない。** Codexは `thread/status/changed`（idle）を `turn/completed` より先に
-   * 送るため、`busy` の立ち下がりは「threadが暇になった」を表すだけで、「そのターンの
-   * 結果が確定した」を表さない。その時点の `turnResultText` は `turn/started` で空に
-   * 戻したままなので、`busy` の立ち下がりを完了とみなす読み手は必ず空を見る。
+   * **未確定だった1つのターンが終局の状態へ確定したときに1増える。同じターンについて
+   * 2回以上増やしてはいけない（exactly once）。** 増やす場所はイベント名ではなくこの
+   * 意味で決める。現在の該当箇所は次の通り。
+   *
+   * - プロバイダの終局通知: Codexの `turn/completed` / `turn/failed`、Claude Codeの `result`
+   * - 終局通知を受け取れないと確定できる場合の代替: 接続断・CLIプロセスの消失
+   *   （`chatSession.markTurnFailed()` / `streamSession.stateAfterProcessGone()`）と、
+   *   Claude Codeの中断（`result` が返らないことがある）
+   *
+   * **`thread/status/changed` では増やさない。** Codexは `thread/status/changed`（idle）を
+   * `turn/completed` より先に送るため、`busy` の立ち下がりは「threadが暇になった」を表す
+   * だけで、「そのターンの結果が確定した」を表さない。その時点の `turnResultText` は
+   * `turn/started` で空に戻したままなので、`busy` の立ち下がりを完了とみなす読み手は
+   * 必ず空を見る。
+   *
+   * **Codexの中断でも増やさない。** app-serverは `turn/interrupt` が成功したターンも
+   * `turn/completed`（`status: "interrupted"`）で終わらせるため、中断側でも増やすと
+   * 同じターンを2回確定させてしまう。
    *
    * 真偽値ではなく単調増加の数にしてあるのは、ターン開始時の戻し忘れを構造的に無くす
    * ため。読み手は「前に見た値と違うか」だけを見ればよく、途中に何件のイベントが挟まって

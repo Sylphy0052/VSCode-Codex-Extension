@@ -199,3 +199,35 @@ describe('ChatSession.interrupt（issue #246、design.md §9.6）', () => {
     expect(noticesOf(session)).toEqual([]);
   });
 });
+
+describe('中断したターンの確定はturn/completedだけが行う（issue #939）', () => {
+  it('interrupt()自身はturnCompletionSeqを進めない', async () => {
+    const { session } = await runningCommand();
+    const before = session.getState().turnCompletionSeq;
+
+    await session.interrupt();
+
+    // app-serverは`turn/interrupt`が成功したターンも`turn/completed`
+    // （`status: "interrupted"`）で終わらせる。ここで進めると同じターンを2回確定させる
+    expect(session.getState().turnCompletionSeq).toBe(before);
+  });
+
+  it('中断の後に届くturn/completedで、1回だけ確定する', async () => {
+    const { session } = await runningCommand();
+    const before = session.getState().turnCompletionSeq;
+
+    await session.interrupt();
+    session.applyNotification('turn/completed', { threadId: 'th-1' });
+
+    expect(session.getState().turnCompletionSeq).toBe(before + 1);
+  });
+
+  it('中断が失敗したときも進めない（ターンは続いている可能性が高い）', async () => {
+    const { session } = await runningCommand({ failInterrupt: true });
+    const before = session.getState().turnCompletionSeq;
+
+    await expect(session.interrupt()).rejects.toThrow();
+
+    expect(session.getState().turnCompletionSeq).toBe(before);
+  });
+});
