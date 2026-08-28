@@ -69,6 +69,15 @@ export function chatScript(
   /** 待ち行列。入力欄でのEsc（末尾を書き戻す）に使うため保つ。 */
   let queuedMessages = [];
   /**
+   * セカンドオピニオン（Issue #894）が走っているか（Issue #905）。
+   *
+   * 外周の枠色は apply() が状態から毎回計算し直すため、secondOpinionRunning
+   * メッセージでクラスを付けるだけでは次の状態更新で消える。ここへ持って計算へ混ぜる。
+   */
+  let secondOpinionRunning = false;
+  /** 直近の状態でバックグラウンドターミナルが残っているか（枠色の計算に使う）。 */
+  let hasBackgroundTerminals = false;
+  /**
    * 拡張機能から差し分で届く会話項目を積む先（issue #262）。
    * 全項目を毎回受け取ると、会話が長いほど1回の受信が重くなる。
    */
@@ -1829,6 +1838,19 @@ export function chatScript(
     el('log').scrollTo({ top: target.offsetTop, behavior: reducedMotion ? 'auto' : 'smooth' });
   }
 
+  /**
+   * 外周の枠を黄色（バックグラウンド実行中）にするかを決める（Issue #905）。
+   *
+   * バックグラウンドターミナルとセカンドオピニオンのどちらか一方でも走っていれば黄。
+   * ただし応答中（赤）は優先で、そのときは黄を付けない。
+   */
+  function applyBackgroundRunning(busy) {
+    document.body.classList.toggle(
+      'background-running',
+      !busy && (hasBackgroundTerminals || secondOpinionRunning),
+    );
+  }
+
   function apply(state) {
     // リロード後にVSCodeがパネルを復元したとき、どのスレッドかを思い出すために保持する
     if (state.threadId) {
@@ -1881,10 +1903,8 @@ export function chatScript(
     renderQueue(queuedMessages);
     // 外周の枠色で状態を示す。赤=応答中、黄=応答終了後もバックグラウンド実行中、青=待機中
     document.body.classList.toggle('busy', !!state.busy);
-    document.body.classList.toggle(
-      'background-running',
-      !state.busy && (state.backgroundTerminals || []).length > 0,
-    );
+    hasBackgroundTerminals = (state.backgroundTerminals || []).length > 0;
+    applyBackgroundRunning(!!state.busy);
     el('stop').hidden = !state.busy;
     // 応答中でも送れる。既定では待ち行列に積むだけで応答は止まらない
     el('send').disabled = restoreVisible;
@@ -3047,6 +3067,9 @@ export function chatScript(
       const button = el('secondOpinion');
       button.disabled = data.running;
       button.setAttribute('aria-disabled', String(data.running));
+      // 既定ではタブが開かないため、走っていることが分かるのはこの枠色だけ（Issue #905）
+      secondOpinionRunning = data.running;
+      applyBackgroundRunning(document.body.classList.contains('busy'));
     }
     if (data.type === 'insertComposerText' && typeof data.text === 'string') {
       // エディタの選択範囲を入力欄へ挿す（issue #292）。ホスト側（chatView.ts /
