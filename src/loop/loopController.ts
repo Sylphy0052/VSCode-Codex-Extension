@@ -11,6 +11,19 @@ import {
   type LoopEngineeringConfig,
   type LoopEngineeringPhase,
 } from './loopEngineering';
+import {
+  appendEvidence,
+  buildWorkerReportEvidence,
+  collectCommandEvidence,
+  collectRecentTurns,
+  DEFAULT_MAX_INDETERMINATE,
+  normalizeGoalDefinition,
+  type GoalEvaluator,
+  type GoalEvidence,
+  type GoalLoopConfig,
+} from './goalLoop';
+import { buildNextTurnPrompt, indeterminate } from './goalPrompt';
+import { buildResponseSummary } from '../orchestrator/taskSummary';
 
 /**
  * ループの終了をエージェント自身に宣言させるための合図。
@@ -47,6 +60,14 @@ export interface LoopPlan {
    * （`stallThreshold`と同じく、`LoopController`自身は`vscode`に依存させない）。
    */
   engineering?: LoopEngineeringConfig;
+  /**
+   * ゴール駆動ループの設定（issue #892）。省略すると従来どおり`continuePrompt`を繰り返す。
+   *
+   * 有効なとき、各ターンの完了後に別セッションのEvaluatorへ判定させ、その結果から
+   * 次のターンの指示文を組み立てて送る。**完了判定の所有権はWorkerからEvaluatorへ移る**
+   * ため、この設定があるときは`condition`（`<<LOOP_DONE>>`の依頼）を送信文へ添えない。
+   */
+  goal?: GoalLoopConfig;
 }
 
 export type LoopStopReason =
@@ -149,6 +170,7 @@ export const LOOP_DURATION_LIMIT_MINUTES = 24 * 60;
 export function normalizeLoopPlan(
   raw: unknown,
   engineering?: LoopEngineeringConfig,
+  goalOptions?: GoalLoopOptions,
 ): LoopPlan | undefined {
   if (typeof raw !== 'object' || raw === null) {
     return undefined;
@@ -156,7 +178,10 @@ export function normalizeLoopPlan(
   const value = raw as Record<string, unknown>;
   const initialPrompt = str(value['initialPrompt']).trim();
   const continuePrompt = str(value['continuePrompt']).trim();
-  if (continuePrompt === '') {
+  const goal = normalizeGoalLoop(value['goal'], goalOptions);
+  // ゴール駆動ループでは2回目以降の指示文をEvaluatorの判定から組み立てるため、
+  // `continuePrompt`は使わない。従来のループでだけ必須にする
+  if (continuePrompt === '' && goal === undefined) {
     return undefined;
   }
 
@@ -170,9 +195,50 @@ export function normalizeLoopPlan(
     initialPrompt,
     continuePrompt,
     maxIterations: Math.min(Math.floor(parsed), LOOP_ITERATION_LIMIT),
-    condition: str(value['condition']).trim(),
+    // ゴール駆動では終了条件をWorkerへ渡さない（完了判定はEvaluatorが持つ）。
+    // 計画の時点で落としておき、「画面に入っているのに効かない値」を残さない
+    condition: goal === undefined ? str(value['condition']).trim() : '',
     ...normalizeMaxDuration(value['maxDurationMinutes']),
     ...(engineering === undefined ? {} : { engineering }),
+    ...(goal === undefined ? {} : { goal }),
+  };
+}
+
+/**
+ * ゴール駆動ループを組み立てるために、画面の入力とは別に呼び出し側から渡すもの（issue #892）。
+ *
+ * `evaluate`（Evaluatorの実際の呼び出し）はプロセス起動を伴うため、webviewから届く値では
+ * 作れない。`engineering`と同じく、設定に由来する値はwebviewの`raw`から読まない。
+ */
+export interface GoalLoopOptions {
+  evaluate: GoalEvaluator;
+  /** `indeterminate`が続くのを許す回数。省略時は`DEFAULT_MAX_INDETERMINATE`。 */
+  maxIndeterminate?: number;
+}
+
+/**
+ * 画面から届いたゴールの入力と、呼び出し側のEvaluatorを合わせて設定にする。
+ *
+ * 目的と受入基準が揃っていない、またはEvaluatorが渡されていないときは`undefined`
+ * （＝従来の繰り返しループとして扱う）。
+ */
+function normalizeGoalLoop(
+  raw: unknown,
+  options: GoalLoopOptions | undefined,
+): GoalLoopConfig | undefined {
+  if (options === undefined) {
+    return undefined;
+  }
+  const definition = normalizeGoalDefinition(raw);
+  if (definition === undefined) {
+    return undefined;
+  }
+  return {
+    definition,
+    evaluate: options.evaluate,
+    ...(options.maxIndeterminate === undefined
+      ? {}
+      : { maxIndeterminate: options.maxIndeterminate }),
   };
 }
 
@@ -248,6 +314,20 @@ export class LoopController {
    * 走っていない間は`undefined`。`stop()`で戻す（前の実行の開始時刻を次へ持ち越さない）。
    */
   private startedAt: number | undefined;
+  /**
+   * ゴール駆動ループの証拠のledger（issue #892）。`start()`・`stop()`で空に戻す。
+   * 上限は`MAX_EVIDENCE_ITEMS`で、古いものから落ちる。
+   */
+  private goalEvidence: GoalEvidence[] = [];
+  /** 既に証拠として拾った項目のid。同じコマンド実行を毎ターン積み直さないため。 */
+  private seenEvidenceIds = new Set<string>();
+  /** `indeterminate`が連続した回数。`achieved`/`continue`/`escalate`で0に戻す。 */
+  private indeterminateStreak = 0;
+  /**
+   * Evaluatorの応答を待っている間か。待っている間に届く`observe()`で二重に評価を
+   * 走らせない（評価はターンごとに1回）。
+   */
+  private evaluating = false;
 
   constructor(
     private readonly send: (text: string) => void | Promise<void>,
@@ -299,7 +379,21 @@ export class LoopController {
       return;
     }
     this.paused = false;
-    this.dispatch(this.plan.continuePrompt, 'continue');
+    this.dispatch(this.continuationPrompt(this.plan), 'continue');
+  }
+
+  /**
+   * 一時停止からの再開で送る指示（issue #892）。
+   *
+   * ゴール駆動では`continuePrompt`を使わない（次の指示文はEvaluatorの判定から組み立てる）
+   * ため、空文字を送ってしまわないよう元の目的だけを添えた文にする。再開の直後は
+   * まだ新しい判定が無いため、`gaps`や`nextFocus`は付けようがない。
+   */
+  private continuationPrompt(plan: LoopPlan): string {
+    if (plan.goal === undefined) {
+      return plan.continuePrompt;
+    }
+    return buildNextTurnPrompt(indeterminate(''), plan.goal.definition.purpose);
   }
 
   /** ループを開始し、1回目の指示を送る。 */
@@ -307,6 +401,10 @@ export class LoopController {
     this.plan = plan;
     this.stallHistory = [];
     this.startedAt = this.now();
+    this.goalEvidence = [];
+    this.seenEvidenceIds = new Set();
+    this.indeterminateStreak = 0;
+    this.evaluating = false;
     this.status = {
       running: true,
       iteration: 0,
@@ -316,7 +414,10 @@ export class LoopController {
     };
     // 初回指示が空なら継続指示の文面で始めるが、**ループとしては1回目**なので
     // ループエンジニアリングの指示は`initial`（完全な方針文）を連結する
-    this.dispatch(plan.initialPrompt === '' ? plan.continuePrompt : plan.initialPrompt, 'initial');
+    this.dispatch(
+      plan.initialPrompt === '' ? this.continuationPrompt(plan) : plan.initialPrompt,
+      'initial',
+    );
   }
 
   /**
@@ -340,6 +441,10 @@ export class LoopController {
     this.paused = false;
     this.stallHistory = [];
     this.startedAt = undefined;
+    this.goalEvidence = [];
+    this.seenEvidenceIds = new Set();
+    this.indeterminateStreak = 0;
+    this.evaluating = false;
     this.status = { ...this.status, running: false, stopReason: reason };
     this.onStatus(this.status);
     return true;
@@ -371,6 +476,10 @@ export class LoopController {
     if (state.queued.length > 0) {
       return;
     }
+    if (this.evaluating) {
+      // Evaluatorの判定を待っている（issue #892）。評価はターンごとに1回だけ行う
+      return;
+    }
     if (!this.sawBusy) {
       // 送った指示のターンがまだ始まっていない
       return;
@@ -396,7 +505,9 @@ export class LoopController {
       this.stop('escalated');
       return;
     }
-    if (plan.condition !== '' && declaresDone(state)) {
+    // ゴール駆動ループ（issue #892）ではWorkerへ`<<LOOP_DONE>>`を頼まないため、
+    // 自己申告による完了は見ない。完了判定はEvaluatorだけが持つ
+    if (plan.goal === undefined && plan.condition !== '' && declaresDone(state)) {
       this.stop('done');
       return;
     }
@@ -413,6 +524,16 @@ export class LoopController {
       this.stop('stalled');
       return;
     }
+    // ゴール駆動ループ（issue #892）はここから先を非同期で行う。時間上限・回数切れの
+    // 判定を評価より後ろに置くのは、**最終ターンで達成していた場合を取りこぼさない**ため。
+    // 先に回数で止めると、達成していたループが`maxReached`（未達扱い）で終わってしまう
+    if (plan.goal !== undefined) {
+      this.evaluating = true;
+      void this.runGoalTurn(plan, state).finally(() => {
+        this.evaluating = false;
+      });
+      return;
+    }
     // 時間上限（issue #891）。停滞・回数切れと並ぶ3本目の縛りで、ターン境界で見る。
     // 停滞判定より後、回数切れより前に置く——停滞は「進んでいない」という原因を
     // 名指しできる分だけ理由として具体的で、時間切れ・回数切れより優先する価値がある
@@ -425,6 +546,83 @@ export class LoopController {
       return;
     }
     this.dispatch(plan.continuePrompt, 'continue');
+  }
+
+  /**
+   * ゴール駆動ループの1ターン分の後処理（issue #892）。
+   *
+   * 証拠を積む → Evaluatorへ判定させる → 判定と上限から継続/停止を決める、の順で進む。
+   * **次のターンの指示文はここ（`LoopController`）で組み立てる。** Evaluatorが返した
+   * 文字列をそのままユーザープロンプトとして送る経路は作らない。
+   */
+  private async runGoalTurn(plan: LoopPlan, state: ChatState): Promise<void> {
+    const goal = plan.goal;
+    if (goal === undefined) {
+      return;
+    }
+    const iteration = this.status.iteration;
+    this.ingestEvidence(state, iteration);
+
+    // Evaluatorの実装が例外を投げてもループを壊さない。判定できなかったこと自体を
+    // `indeterminate`として扱い、続けるか止めるかは下の共通の分岐へ委ねる
+    const evaluation = await goal
+      .evaluate({
+        goal: goal.definition,
+        evidence: this.goalEvidence,
+        summary: buildResponseSummary(state),
+        recentTurns: collectRecentTurns(state.items),
+        iteration,
+      })
+      .catch(() => indeterminate('Evaluatorの呼び出しが失敗しました'));
+
+    // 評価を待っている間に止められた・別の計画で開始し直された場合は何もしない
+    if (!this.status.running || this.plan !== plan) {
+      return;
+    }
+    if (evaluation.verdict === 'achieved') {
+      this.stop('done');
+      return;
+    }
+    if (evaluation.verdict === 'escalate') {
+      this.stop('escalated');
+      return;
+    }
+    if (evaluation.verdict === 'indeterminate') {
+      // 証拠不足は「未達」ではない。黙って回し続けず、続いたら人へ渡す
+      this.indeterminateStreak += 1;
+      // 0以下を設定されても最初の1回で止めない。少なくとも1回は判定を試みる
+      const limit = Math.max(1, goal.maxIndeterminate ?? DEFAULT_MAX_INDETERMINATE);
+      if (this.indeterminateStreak >= limit) {
+        this.stop('escalated');
+        return;
+      }
+    } else {
+      this.indeterminateStreak = 0;
+    }
+    if (this.hasExceededDuration(plan)) {
+      this.stop('timedOut');
+      return;
+    }
+    if (this.status.iteration >= plan.maxIterations) {
+      this.stop('maxReached');
+      return;
+    }
+    this.dispatch(buildNextTurnPrompt(evaluation, goal.definition.purpose), 'continue');
+  }
+
+  /** このターンで新しく得た証拠をledgerへ積む。 */
+  private ingestEvidence(state: ChatState, iteration: number): void {
+    const added = collectCommandEvidence(state.items, this.seenEvidenceIds, iteration);
+    for (const item of state.items) {
+      if (item.kind === 'commandExecution') {
+        this.seenEvidenceIds.add(item.id);
+      }
+    }
+    const report = buildWorkerReportEvidence(state, iteration);
+    this.goalEvidence = appendEvidence(this.goalEvidence, [
+      ...added,
+      ...(report === undefined ? [] : [report]),
+    ]);
   }
 
   /** 時間上限に達したか。上限の指定が無い場合と、開始時刻が分からない場合は達していない扱い。 */
@@ -449,7 +647,11 @@ export class LoopController {
       // 方針（ループエンジニアリング）を先に、終了条件を後ろに置く。終了条件は
       // 「満たしていれば作業せず合図だけ返せ」という最後の指示のため、末尾に来る方が読み違えにくい
       const withPolicy = appendLoopEngineeringInstruction(prompt, plan.engineering, phase);
-      const result = this.send(decoratePrompt(withPolicy, plan.condition));
+      // ゴール駆動ループ（issue #892）では終了条件をWorkerへ渡さない。完了判定は
+      // Evaluatorが持つため、Workerに`<<LOOP_DONE>>`を出させると判定の所有権が二重になる
+      const result = this.send(
+        plan.goal === undefined ? decoratePrompt(withPolicy, plan.condition) : withPolicy,
+      );
       if (result instanceof Promise) {
         result.catch(() => this.stop('failed'));
       }

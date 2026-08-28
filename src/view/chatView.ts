@@ -43,6 +43,7 @@ import {
   workspaceFolderPaths,
 } from '../config';
 import { appendTurnSummaryInstruction } from './turnSummary';
+import { createGoalLoopOptions } from './goalEvaluatorFactory';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
@@ -1142,7 +1143,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         // ループエンジニアリングの方針（issue #891）は設定から読んで渡す。webviewから
         // 届いた`plan`には含めない——送信文の組み立てに使う指示文をwebview側の値で
         // 差し替えられるようにしないため
-        const plan = normalizeLoopPlan(m['plan'], readChatLoopEngineeringConfig());
+        const plan = normalizeLoopPlan(
+          m['plan'],
+          readChatLoopEngineeringConfig(),
+          createGoalLoopOptions('codex', this.log),
+        );
         if (plan === undefined) {
           void vscode.window.showErrorMessage('ループの継続指示と最大回数を入力してください');
           return;
