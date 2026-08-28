@@ -809,6 +809,42 @@
           "scope": "window",
           "markdownDescription": "`agent.chat.loopEngineering.enabled` が有効なときに、ループの**2回目以降**の指示の末尾へ付け足す再確認。1回目の方針は同じ会話に残っているため、繰り返し送るぶんは短くしてある。空文字にすると付け足さない。"
         },
+        "agent.chat.goalEvaluator.provider": {
+          "type": "string",
+          "enum": [
+            "inherit",
+            "claude",
+            "codex"
+          ],
+          "enumDescriptions": [
+            "会話しているのと同じCLIで判定する",
+            "常に claude で判定する",
+            "常に codex で判定する"
+          ],
+          "default": "inherit",
+          "scope": "window",
+          "markdownDescription": "ゴール駆動ループ（issue #892）で達成を判定する評価役を、どのCLIで動かすか。既定の `inherit` は会話しているのと同じCLIを使う（認証が済んでいる・レイテンシが小さい・プロバイダ差による挙動差が出ない）。判定の独立性は別のCLIを使うことではなく、別のセッション・別の役割・別のプロンプトで走らせることから来るため、既定でプロバイダをまたがせる必要はない。評価役にはツールを渡さない（claude は `--tools \"\"`、codex は `--sandbox read-only`）。"
+        },
+        "agent.chat.goalEvaluator.model": {
+          "type": "string",
+          "default": "auto",
+          "scope": "window",
+          "markdownDescription": "ゴール駆動ループの評価役に使うモデル。`auto` なら軽量なモデルに任せる（claude は `haiku`、codex はCLIの既定）。判定は毎ターン走るため、重いモデルを指定するとそのぶんループ全体が遅く・高くなる。"
+        },
+        "agent.chat.goalEvaluator.timeoutSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 10,
+          "scope": "window",
+          "markdownDescription": "ゴール駆動ループの評価役の応答を待つ上限（秒）。超えた場合は「判定できなかった」（`indeterminate`）として扱い、ループは壊さない。"
+        },
+        "agent.chat.goalEvaluator.maxIndeterminate": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "scope": "window",
+          "markdownDescription": "「証拠が足りず判定できない」（`indeterminate`）が何回続いたら人へ渡すか。判定できない状態は**未達とは別物**であり、黙って回し続けない。この回数に達するとループは「撤退の申告」として止まる。"
+        },
         "agent.notifications.approvalPending": {
           "type": "boolean",
           "default": true,

@@ -48,6 +48,11 @@ import {
   DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION,
   type LoopEngineeringConfig,
 } from './loop/loopEngineering';
+import { DEFAULT_MAX_INDETERMINATE } from './loop/goalLoop';
+import type {
+  GoalEvaluatorProviderSetting,
+  GoalEvaluatorSettings,
+} from './loop/goalEvaluatorProcess';
 import { normalizeSendOn, type SendOnMode } from './view/sendKey';
 import type { HistoryGroupBy } from './util/sessionGrouping';
 import { parseSessionPresets, type SessionPreset } from './sessionPresets';
@@ -244,6 +249,28 @@ export async function setChatLoopEngineeringEnabled(enabled: boolean): Promise<v
   await vscode.workspace
     .getConfiguration('agent')
     .update('chat.loopEngineering.enabled', enabled, vscode.ConfigurationTarget.Global);
+}
+
+/**
+ * ゴール駆動ループのEvaluatorの設定を読む（issue #892）。
+ *
+ * 既定は「会話しているのと同じCLI・軽量モデル」。判定の独立性は別のCLIを使うことではなく、
+ * 別のcontext・別の役割・別のプロンプトで走らせることから来るため、既定でプロバイダを
+ * またがせる必要はない。
+ */
+export function readGoalEvaluatorConfig(): GoalEvaluatorSettings {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    provider: normalizeEvaluatorProvider(c.get<string>('chat.goalEvaluator.provider')),
+    model: str(c, 'chat.goalEvaluator.model', 'auto'),
+    timeoutSeconds: num(c, 'chat.goalEvaluator.timeoutSeconds', 120),
+    maxIndeterminate: num(c, 'chat.goalEvaluator.maxIndeterminate', DEFAULT_MAX_INDETERMINATE),
+  };
+}
+
+/** 未知の値は既定の `inherit`（会話と同じCLI）に倒す。 */
+function normalizeEvaluatorProvider(value: string | undefined): GoalEvaluatorProviderSetting {
+  return value === 'claude' || value === 'codex' ? value : 'inherit';
 }
 
 /** ターンの完了・承認待ちの通知（issue #286、design.md §14.55）。 */

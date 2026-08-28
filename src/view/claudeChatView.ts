@@ -105,6 +105,7 @@ import { buildItemsDelta, stripHostOnlyItems } from './stateDelta';
 import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import { buildHandoffPrompt, resolveWithRetry } from './handoff';
 import { appendTurnSummaryInstruction } from './turnSummary';
+import { createGoalLoopOptions } from './goalEvaluatorFactory';
 import { CLAUDE_EFFORTS, CLAUDE_PERMISSION_MODES } from '../claude/types';
 import { SessionModelSettingsStore, type SessionModelSettings } from '../sessionModelSettings';
 import {
@@ -1751,7 +1752,11 @@ export class ClaudeChatViewManager
       if (type === 'loop/start') {
         // ループエンジニアリングの方針（issue #891）は設定から読んで渡す。webviewから
         // 届いた`plan`には含めない（`chatView.ts`側と同じ理由）
-        const plan = normalizeLoopPlan(m['plan'], readChatLoopEngineeringConfig());
+        const plan = normalizeLoopPlan(
+          m['plan'],
+          readChatLoopEngineeringConfig(),
+          createGoalLoopOptions('claude', this.log),
+        );
         if (plan === undefined) {
           void vscode.window.showErrorMessage('ループの継続指示と最大回数を入力してください');
           return;

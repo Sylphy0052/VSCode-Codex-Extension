@@ -525,6 +525,13 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
     expect(html).toContain('max="1440"');
   });
 
+  it('ループパネルにゴール駆動の入力を持つ（issue #892）', () => {
+    const html = renderShell(fakeWebview() as never, buildOptions());
+    expect(html).toContain('id="loopGoalPurpose"');
+    expect(html).toContain('id="loopGoalCriteria"');
+    expect(html).toContain('id="loopGoalConstraints"');
+  });
+
   it('composerButtonsが空配列だと16個すべてが「…」メニューに入り、#composerOverflowはhiddenを持たない', () => {
     const html = renderShell(fakeWebview() as never, buildOptions({ composerButtons: [] }));
 

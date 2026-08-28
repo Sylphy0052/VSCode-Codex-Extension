@@ -2279,8 +2279,19 @@ export function chatScript(
       // 時間上限（分、issue #891）。空なら拡張機能側で「時間では止めない」に丸められる
       maxDurationMinutes: el('loopMaxDuration').value,
       condition: el('loopCondition').value,
+      // ゴール駆動ループ（issue #892）。目的と受入基準が両方揃っているときだけ、
+      // 拡張機能側がゴール駆動として扱う
+      goal: {
+        purpose: el('loopGoalPurpose').value,
+        acceptanceCriteria: el('loopGoalCriteria').value,
+        constraints: el('loopGoalConstraints').value,
+      },
     };
-    if (!plan.continuePrompt.trim()) {
+    const goalDriven = Boolean(
+      plan.goal.purpose.trim() && plan.goal.acceptanceCriteria.trim(),
+    );
+    // ゴール駆動では2回目以降の指示文をEvaluatorの判定から組み立てるため、継続指示は要らない
+    if (!goalDriven && !plan.continuePrompt.trim()) {
       el('loopContinue').focus();
       return;
     }

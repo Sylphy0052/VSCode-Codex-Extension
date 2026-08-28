@@ -16,6 +16,14 @@ import {
   DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION,
   LOOP_ESCALATE_TOKEN,
 } from '../../src/loop/loopEngineering';
+import type {
+  GoalEvaluation,
+  GoalEvaluator,
+  GoalEvaluatorInput,
+  GoalLoopConfig,
+  GoalVerdict,
+} from '../../src/loop/goalLoop';
+import { indeterminate } from '../../src/loop/goalPrompt';
 
 const state = (overrides: Partial<ChatState> = {}): ChatState => ({
   ...initialChatState,
@@ -632,5 +640,313 @@ describe('normalizeLoopPlan（時間上限とループエンジニアリング�
   it('方針を渡さなければキーごと持たない', () => {
     const built = normalizeLoopPlan({ continuePrompt: '次へ', maxIterations: 5 });
     expect(built && 'engineering' in built).toBe(false);
+  });
+});
+
+/** ゴール駆動ループ（issue #892）で使う入力。 */
+const goalInput = { purpose: '認証を直す', acceptanceCriteria: 'npm test が exit 0 で終わる' };
+
+const evaluation = (overrides: Partial<GoalEvaluation> = {}): GoalEvaluation => ({
+  verdict: 'continue',
+  reason: '',
+  evidence: [],
+  gaps: [],
+  nextFocus: '',
+  ...overrides,
+});
+
+const commandItem = (id: string, detail: string, status: string): ChatItem => ({
+  id,
+  kind: 'commandExecution',
+  text: '',
+  detail,
+  status,
+  turnId: undefined,
+  diffs: [],
+});
+
+describe('normalizeLoopPlan（ゴール駆動、issue #892）', () => {
+  const evaluate = async (): Promise<GoalEvaluation> => indeterminate('テスト');
+
+  it('目的と受入基準が揃い、Evaluatorが渡されたときだけゴール駆動にする', () => {
+    const built = normalizeLoopPlan(
+      { continuePrompt: '次へ', maxIterations: 5, goal: goalInput },
+      undefined,
+      { evaluate },
+    );
+    expect(built?.goal?.definition).toEqual(goalInput);
+  });
+
+  it('Evaluatorが渡されなければゴールの入力があっても従来のループにする', () => {
+    const built = normalizeLoopPlan({ continuePrompt: '次へ', maxIterations: 5, goal: goalInput });
+    expect(built && 'goal' in built).toBe(false);
+  });
+
+  it('目的だけ・受入基準だけではゴール駆動にしない', () => {
+    const built = normalizeLoopPlan(
+      { continuePrompt: '次へ', maxIterations: 5, goal: { purpose: '認証を直す' } },
+      undefined,
+      { evaluate },
+    );
+    expect(built && 'goal' in built).toBe(false);
+  });
+
+  it('ゴール駆動なら継続指示が空でも計画を作る', () => {
+    const built = normalizeLoopPlan(
+      { initialPrompt: '始めて', continuePrompt: '', maxIterations: 5, goal: goalInput },
+      undefined,
+      { evaluate },
+    );
+    expect(built?.goal).toBeDefined();
+    expect(built?.continuePrompt).toBe('');
+  });
+
+  it('ゴールが無ければ継続指示は今までどおり必須', () => {
+    expect(
+      normalizeLoopPlan({ continuePrompt: '', maxIterations: 5 }, undefined, { evaluate }),
+    ).toBeUndefined();
+  });
+
+  it('ゴール駆動では終了条件を計画へ残さない（判定はEvaluatorが持つ）', () => {
+    const built = normalizeLoopPlan(
+      { continuePrompt: '次へ', maxIterations: 5, condition: '20話完了', goal: goalInput },
+      undefined,
+      { evaluate },
+    );
+    expect(built?.condition).toBe('');
+  });
+
+  it('indeterminateの上限は指定があるときだけ持つ', () => {
+    const withLimit = normalizeLoopPlan(
+      { continuePrompt: '次へ', maxIterations: 5, goal: goalInput },
+      undefined,
+      { evaluate, maxIndeterminate: 2 },
+    );
+    expect(withLimit?.goal?.maxIndeterminate).toBe(2);
+    const withoutLimit = normalizeLoopPlan(
+      { continuePrompt: '次へ', maxIterations: 5, goal: goalInput },
+      undefined,
+      { evaluate },
+    );
+    expect(withoutLimit?.goal && 'maxIndeterminate' in withoutLimit.goal).toBe(false);
+  });
+});
+
+describe('LoopController（ゴール駆動、issue #892）', () => {
+  /** ターンを1回終わらせ、非同期の評価が進むところまで待つ。 */
+  const finishTurn = async (loop: LoopController, items: ChatItem[] = []): Promise<void> => {
+    loop.observe(state({ busy: true }));
+    loop.observe(state({ busy: false, items }));
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+
+  const goalPlan = (
+    evaluate: GoalEvaluator,
+    overrides: Partial<LoopPlan> = {},
+    goalOverrides: Partial<GoalLoopConfig> = {},
+  ): LoopPlan => ({
+    initialPrompt: '始めて',
+    continuePrompt: '',
+    maxIterations: 5,
+    condition: '終了条件',
+    goal: { definition: goalInput, evaluate, ...goalOverrides },
+    ...overrides,
+  });
+
+  it('achieved でループを止める', async () => {
+    const sent: string[] = [];
+    const loop = new LoopController((t) => void sent.push(t));
+    loop.start(goalPlan(async () => evaluation({ verdict: 'achieved' })));
+    await finishTurn(loop);
+    expect(loop.running).toBe(false);
+    expect(loop.getStatus().stopReason).toBe('done');
+    expect(sent).toHaveLength(1);
+  });
+
+  it('escalate で escalated として止める', async () => {
+    const loop = new LoopController(() => undefined);
+    loop.start(goalPlan(async () => evaluation({ verdict: 'escalate' })));
+    await finishTurn(loop);
+    expect(loop.getStatus().stopReason).toBe('escalated');
+  });
+
+  it('continue なら Evaluator の nextFocus を添えて次のターンを送る', async () => {
+    const sent: string[] = [];
+    const loop = new LoopController((t) => void sent.push(t));
+    loop.start(
+      goalPlan(async () =>
+        evaluation({
+          reason: 'テストが落ちている',
+          gaps: ['test_auth を直す'],
+          nextFocus: 'リフレッシュトークンを調べる',
+        }),
+      ),
+    );
+    await finishTurn(loop);
+    expect(loop.running).toBe(true);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toContain('テストが落ちている');
+    expect(sent[1]).toContain('- test_auth を直す');
+    expect(sent[1]).toContain('リフレッシュトークンを調べる');
+  });
+
+  it('Workerへ終了条件（<<LOOP_DONE>>の依頼）を付けない', async () => {
+    const sent: string[] = [];
+    const loop = new LoopController((t) => void sent.push(t));
+    loop.start(goalPlan(async () => evaluation()));
+    await finishTurn(loop);
+    expect(sent.join('\n')).not.toContain(LOOP_DONE_TOKEN);
+  });
+
+  it('Workerの自己申告（<<LOOP_DONE>>）では止まらない', async () => {
+    const loop = new LoopController(() => undefined);
+    loop.start(goalPlan(async () => evaluation()));
+    await finishTurn(loop, [agentMessage(`できました ${LOOP_DONE_TOKEN}`)]);
+    expect(loop.running).toBe(true);
+  });
+
+  it('Workerの撤退の申告は尊重する', async () => {
+    const loop = new LoopController(() => undefined);
+    loop.start(goalPlan(async () => evaluation()));
+    await finishTurn(loop, [agentMessage(`無理でした\n${LOOP_ESCALATE_TOKEN}`)]);
+    expect(loop.getStatus().stopReason).toBe('escalated');
+  });
+
+  it('毎ターン新しく評価する（前回の判定を引き継がない）', async () => {
+    const inputs: GoalEvaluatorInput[] = [];
+    const loop = new LoopController(() => undefined);
+    loop.start(
+      goalPlan(async (i) => {
+        inputs.push(i);
+        return evaluation();
+      }),
+    );
+    await finishTurn(loop);
+    await finishTurn(loop);
+    expect(inputs).toHaveLength(2);
+    expect(inputs[0]?.iteration).toBe(1);
+    expect(inputs[1]?.iteration).toBe(2);
+  });
+
+  it('コマンドの実行結果を証拠としてEvaluatorへ渡す', async () => {
+    const inputs: GoalEvaluatorInput[] = [];
+    const loop = new LoopController(() => undefined);
+    loop.start(
+      goalPlan(async (i) => {
+        inputs.push(i);
+        return evaluation();
+      }),
+    );
+    await finishTurn(loop, [commandItem('c1', 'npm test', 'exit 0'), agentMessage('直しました')]);
+    const evidence = inputs[0]?.evidence ?? [];
+    expect(evidence.some((e) => e.kind === 'test' && e.status === 'pass')).toBe(true);
+    expect(evidence.some((e) => e.kind === 'worker-report' && e.status === 'unknown')).toBe(true);
+  });
+
+  it('同じコマンドを毎ターン積み直さない', async () => {
+    const inputs: GoalEvaluatorInput[] = [];
+    const loop = new LoopController(() => undefined);
+    loop.start(
+      goalPlan(async (i) => {
+        inputs.push(i);
+        return evaluation();
+      }),
+    );
+    const items = [commandItem('c1', 'npm test', 'exit 0')];
+    await finishTurn(loop, items);
+    await finishTurn(loop, items);
+    expect((inputs[1]?.evidence ?? []).filter((e) => e.kind === 'test')).toHaveLength(1);
+  });
+
+  it('indeterminate が続いたら人へ渡す', async () => {
+    const loop = new LoopController(() => undefined);
+    loop.start(goalPlan(async () => indeterminate('証拠が足りない'), {}, { maxIndeterminate: 2 }));
+    await finishTurn(loop);
+    expect(loop.running).toBe(true);
+    await finishTurn(loop);
+    expect(loop.getStatus().stopReason).toBe('escalated');
+  });
+
+  it('indeterminate の連続は continue で途切れる', async () => {
+    const verdicts: GoalVerdict[] = ['indeterminate', 'continue', 'indeterminate', 'continue'];
+    let index = 0;
+    const loop = new LoopController(() => undefined);
+    loop.start(
+      goalPlan(
+        async () => evaluation({ verdict: verdicts[index++] ?? 'continue' }),
+        {},
+        { maxIndeterminate: 2 },
+      ),
+    );
+    for (let i = 0; i < verdicts.length; i += 1) {
+      await finishTurn(loop);
+    }
+    expect(loop.running).toBe(true);
+  });
+
+  it('Evaluatorが例外を投げてもループを壊さず、判定不能として扱う', async () => {
+    const loop = new LoopController(() => undefined);
+    loop.start(
+      goalPlan(() => Promise.reject(new Error('CLIが落ちた')), {}, { maxIndeterminate: 1 }),
+    );
+    await finishTurn(loop);
+    expect(loop.getStatus().stopReason).toBe('escalated');
+  });
+
+  it('最終ターンで達成していれば maxReached ではなく done で止める', async () => {
+    const loop = new LoopController(() => undefined);
+    loop.start(goalPlan(async () => evaluation({ verdict: 'achieved' }), { maxIterations: 1 }));
+    await finishTurn(loop);
+    expect(loop.getStatus().stopReason).toBe('done');
+  });
+
+  it('未達のまま回数を使い切れば maxReached で止める', async () => {
+    const loop = new LoopController(() => undefined);
+    loop.start(goalPlan(async () => evaluation(), { maxIterations: 1 }));
+    await finishTurn(loop);
+    expect(loop.getStatus().stopReason).toBe('maxReached');
+  });
+
+  it('初回指示が空でも空文字を送らず、元の目的を添えて始める', () => {
+    const sent: string[] = [];
+    const loop = new LoopController((t) => void sent.push(t));
+    loop.start(goalPlan(async () => evaluation(), { initialPrompt: '' }));
+    expect(sent[0]).toContain(goalInput.purpose);
+  });
+
+  it('一時停止からの再開でも空文字を送らない', () => {
+    const sent: string[] = [];
+    const loop = new LoopController((t) => void sent.push(t));
+    loop.start(goalPlan(async () => evaluation()));
+    loop.pause();
+    loop.resume();
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toContain(goalInput.purpose);
+  });
+
+  it('評価を待っている間に止められたら次のターンを送らない', async () => {
+    const sent: string[] = [];
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const loop = new LoopController((t) => void sent.push(t));
+    loop.start(
+      goalPlan(async () => {
+        await gate;
+        return evaluation();
+      }),
+    );
+    loop.observe(state({ busy: true }));
+    loop.observe(state({ busy: false }));
+    loop.stop('manual');
+    release?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sent).toHaveLength(1);
+    expect(loop.getStatus().stopReason).toBe('manual');
   });
 });
