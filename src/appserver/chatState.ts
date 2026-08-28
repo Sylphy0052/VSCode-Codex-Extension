@@ -1732,7 +1732,11 @@ export function markInterruptedCommands(state: ChatState, turnId: string | undef
   );
   return appendNotice(
     // 印を付けた項目は「バックグラウンドで実行中」の一覧から外れる（issue #897）。
-    // 中断後に `item/completed` が届く保証は無く、再派生をここで行わないと一覧が残り続ける
+    // 中断後に `item/completed` が届く保証は無く、再派生をここで行わないと一覧が残り続ける。
+    // 派生し直してよいのは、この関数の呼び出し元がCodexの`chatSession.ts`だけであり、
+    // Codexの一覧が常に`items`から作られるため。Claude Codeの一覧は
+    // `background_tasks_changed`通知だけを正とするので、この関数をClaude Code側から
+    // 呼ぶことになったら、ここで派生し直してはいけない
     { ...state, items, backgroundTerminals: deriveCodexBackgroundTerminals(items) },
     interruptedCommandsNoticeId(turnId),
     'ターンを中断しました。実行中だったコマンドはCLI側で走り続けることがあります' +
