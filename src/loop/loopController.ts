@@ -531,12 +531,9 @@ export class LoopController {
       this.stop('done');
       return;
     }
-    // 停滞判定（design.md §16.27、Issue #336）。回数上限に達する前に、同じ応答が
-    // `stallThreshold`回連続していないかを見る。履歴の更新は判定の対象になった
-    // ターンの直後、maxReachedの判定より先に行う——停滞と回数切れが同時に成立しうる
-    // 最終ターンでは、進捗の無さそのものを理由にできる停滞判定を優先する
-    // 履歴の更新はゴール駆動かどうかに関わらずここで行う。**判定**の位置だけが違う
-    // （ゴール駆動ではEvaluatorの後ろ。issue #909）
+    // 停滞判定（design.md §16.27、Issue #336）に使う履歴を、判定の対象になったターンの
+    // 直後に更新する。**履歴の更新はゴール駆動かどうかに関わらずここで行い、判定の位置
+    // だけが違う**（ゴール駆動ではEvaluatorの後ろ。issue #909）。判定そのものは`finishTurn`
     this.stallHistory = pushTurnSignature(
       this.stallHistory,
       extractTurnSignature(state),
