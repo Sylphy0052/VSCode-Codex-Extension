@@ -198,7 +198,7 @@ app-serverのJSON-RPC。`AppServerClient.listThreads(limit, archivedSessionsDir)
 - `updatedAt` ← `updatedAt`。**実測でUnix epoch秒（数値）**。ISO8601文字列で来た場合も念のため受け付ける。読めなければそのエントリ自体を除く
 - `cwd` ← `cwd`。空文字は `undefined` にする
 - `archived` ← `archived` に相当するフィールドが応答に無いため、`path` が `archivedSessionsDir`（`CodexPaths.archivedSessions`）配下かどうかで判定する。ファイル読み経路（§4.2）と同じ考え方
-- `threadSource` が明示的に `'user'` 以外の値（`'subagent'` など）を持つ派生スレッドのみ除く。実測（§14.28、`thread/list` を `{limit:100}` で全件ページングし尽くした33件）では `threadSource` は**全件 `null`** だったため、`null` / 未設定は除外せず一覧に含める（issue #224）。当初は `threadSource !== 'user'` で絞り込んでいたが、これだと `null` も除外対象になり、実データでは全件が落ちて `thread/list` 経由の一覧が常に空になっていた。ファイル読み経路（`sessionMeta.isUserThread`）も同じ規則で判定する。あちらが見ているのは`session_index.jsonl` ではなくロールアウト1行目の `session_meta` で、codex-cli 0.148.0 ではそこに `thread_source` が無い。当初はファイル読み経路だけ `=== 'user'` の絞り込みを残していたが、それだと未設定が全件落ちてファイル読み経路の一覧が常に空になっていた（issue #943）。現在は両経路とも同じ条件で揃えてある
+- `threadSource` が明示的に `'user'` 以外の値（`'subagent'` など）を持つ派生スレッドのみ除く。実測（§14.28、`thread/list` を `{limit:100}` で全件ページングし尽くした33件）では `threadSource` は**全件 `null`** だったため、`null` / 未設定は除外せず一覧に含める（issue #224）。当初は `threadSource !== 'user'` で絞り込んでいたが、これだと `null` も除外対象になり、実データでは全件が落ちて `thread/list` 経由の一覧が常に空になっていた。ファイル読み経路（`sessionMeta.isUserThread`）も同じ規則で判定する。あちらが見ているのは `session_index.jsonl` ではなくロールアウト1行目の `session_meta` で、codex-cli 0.148.0 ではそこに `thread_source` が無い。当初はファイル読み経路だけ `=== 'user'` の絞り込みを残していたが、それだと未設定が全件落ちてファイル読み経路の一覧が常に空になっていた（issue #943）。現在は両経路とも同じ条件で揃えてある
 
 **既知の簡略化**: `limit` はサーバーへの要求件数の上限であり、`threadSource` やワークスペーススコープでの絞り込みは正規化・`SessionStore` 側で後から行う。そのため、絞り込み後の件数が `maxEntries` より少なくなることがある（ファイル読み経路は絞り込み後もロールアウトの実在を全件走査するため、この制約が無い）。実用上は問題になりにくいと考えているが、体感で件数が足りないという報告があれば見直す。
 
