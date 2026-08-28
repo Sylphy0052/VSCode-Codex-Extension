@@ -7380,7 +7380,7 @@ interface SecondOpinionInput {
 
 - `agent.secondOpinion.candidates`: 依頼先の候補（`{name, model, effort}[]`）。既定は `gpt-5.6-sol` / `high` の1件。**候補が1件なら選択UIを出さずに起動する。** 壊れた値・空配列は既定へ丸める（候補ゼロで起動不能にしない）。`provider` は持たせない（Codex固定。この機能の値打ちはモデルの多様性ではなくコンテキストの分離にある）
 - `agent.secondOpinion.headless`: 既定 `true`。`TaskSession.open()` を呼ばず、タブを作らないまま完走する。`buildEntry` が `panel: undefined` でパネルを作り、`postState` / `onSessionChange` がタブの無い状態を織り込み済みなので、開かなくても状態の更新経路は回る。`false` にすると進行が見えるタブを開く（`preserveFocus: true` なのでフォーカスは奪わない）
-- `agent.secondOpinion.timeoutMs`: 既定5分。10秒〜60分へ丸める
+- `agent.secondOpinion.timeoutMs`: 既定15分（Issue #907 で5分から延ばした。`gpt-5.6-sol` / `high` は5分を超えることがある）。10秒〜60分へ丸める
 - `agent.secondOpinion.template`: 依頼文の既定値
 
 `sandbox` と `approvalMode` は設定にしない。レビューに書き込みは要らず、「ついでに直しておきました」を構造として不可能にする。
@@ -7389,7 +7389,7 @@ interface SecondOpinionInput {
 
 親セッションごとに1本（`SecondOpinionRegistry`）。実行中はそのボタンだけをdisableし、**入力欄と送信は止めない**（別視点の待ち時間で本流の作業を止めない）。別の親セッションからの同時実行は禁止しない。
 
-本番ログにはプロンプト全文・diff全文を出さない（credential・顧客情報・proprietary codeが入りうる）。出すのは `model` / `effort` / `headless` / `artifact` / `promptChars` だけ。
+本番ログにはプロンプト全文・diff全文を出さない（credential・顧客情報・proprietary codeが入りうる）。出すのは `provider` / `model` / `effort` / `headless` / `artifact` / `summary` / `promptChars` だけ。
 
 実行中フラグ（`SecondOpinionRegistry`）とUIの状態は、`begin()` の成功直後から `try` の中で扱う（Issue #926 B）。以前は `setRunning(true)` と最初の `note()` が `try` の外にあり、破棄済みパネルへの書き込みで投げるとidが残って以後その会話では起動できなくなっていた。`SecondOpinionPanelPort` の契約として「破棄後の `note()` / `setRunning()` はno-opで、例外を投げてはならない」を明記したうえで、呼び出し側でも `finally` で守る。
 
