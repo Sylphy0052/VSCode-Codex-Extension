@@ -904,9 +904,9 @@ describe('workflowScript', () => {
 
       // 範囲の切り出しに失敗すると0件になりうる。0件だと後続の検査（forループ・空集合同士の
       // Set一致）が何も検査しないまま素通りしてしまうため、件数そのものを先に主張して固定する
-      // （design.md §16.40時点で12種）。kindを足すときはこの数字も直すことになり、
+      // （design.md §14.79時点で14種）。kindを足すときはこの数字も直すことになり、
       // それは意図した変更として差分に出る。
-      expect(allFailureKinds).toHaveLength(12);
+      expect(allFailureKinds).toHaveLength(14);
       // 範囲を切らずに拾うと`AutoResumeOutcome`のkindが混ざる。正規表現を緩めて範囲チェックが
       // 効かなくなったときに、これらが入っていないことで検出する。`resumed`だけは現状の
       // 正規表現では拾われない形（この行の一覧に残してあるのは、書き方が揃えられたときに
@@ -1015,12 +1015,17 @@ describe('workflowScript', () => {
     expect(source).toContain("'state-pill state-' + task.state");
   });
 
-  it('回数切れかつセッションが生きているタスクにだけ「続ける」を出す（Issue #284）', () => {
+  it('続きを試せる失敗かつセッションが生きているタスクにだけ「続ける」を出す（Issue #284、#891）', () => {
     const source = workflowScript();
     expect(source).toContain("'続ける'");
     expect(source).toContain("type: 'continueTask'");
-    // 回数切れ以外の失敗や、リロード後（セッションが無い）のタスクには出さない
-    expect(source).toContain("task.failure.kind === 'maxReached'");
+    // 続きを試せる失敗（回数切れ・停滞・撤退の申告・時間切れ）に限る。それ以外の失敗や、
+    // リロード後（セッションが無い）のタスクには出さない。拡張機能側の同じ集合は
+    // runState.ts の isResumableFailure にあり、両者は揃えて直す（design.md §14.79）
+    expect(source).toContain(
+      "const resumableKinds = ['maxReached', 'stalled', 'escalated', 'timedOut']",
+    );
+    expect(source).toContain('resumableKinds.includes(task.failure.kind)');
     expect(source).toContain('task.hasLiveSession === true');
   });
 

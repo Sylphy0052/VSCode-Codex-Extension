@@ -43,6 +43,10 @@ export function workflowScript(): string {
     stalled: '停滞',
     // design.md §16.39、Issue #579。承認待ちがtaskApprovalTimeoutSecを超えて時間切れになった
     taskApprovalTimedOut: '承認待ちの時間切れ',
+    // design.md §14.79、Issue #891。エージェント自身が解決できないと申告して止まった
+    escalated: '撤退の申告',
+    // design.md §14.79、Issue #891。ループが時間上限に達して止まった
+    timedOut: '時間切れ',
   };
 
   const QUALITY_PHASE_LABEL = {
@@ -680,12 +684,15 @@ export function workflowScript(): string {
    * そのあとは「再実行」だけになる。
    */
   function canContinueTask(task) {
-    // 回数切れ（maxReached）に加え、停滞（stalled、design.md §16.27、Issue #336）も
-    // 同じ会話のまま続けられる。どちらもセッションは生きたまま止まっている
+    // 回数切れ（maxReached）に加え、停滞（stalled、design.md §16.27、Issue #336）、
+    // 撤退の申告（escalated）、時間切れ（timedOut、どちらもIssue #891）も同じ会話のまま
+    // 続けられる。いずれもセッションは生きたまま止まっている。
+    // 拡張機能側の同じ判定は runState.ts の isResumableFailure にある
+    const resumableKinds = ['maxReached', 'stalled', 'escalated', 'timedOut'];
     return (
       task.state === 'failed'
       && task.failure
-      && (task.failure.kind === 'maxReached' || task.failure.kind === 'stalled')
+      && resumableKinds.includes(task.failure.kind)
       && task.hasLiveSession === true
     );
   }

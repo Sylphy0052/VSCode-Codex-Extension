@@ -985,6 +985,11 @@ export interface ChatShellOptions {
   composerButtons?: readonly ComposerButtonId[];
   /** 手動送信時のターン要約。入力欄の「…」メニューで切り替える。 */
   turnSummaryEnabled?: boolean;
+  /**
+   * ループエンジニアリングモード（`agent.chat.loopEngineering.enabled`、issue #891）が
+   * 有効か。「…」メニューのトグルの初期状態に使う。
+   */
+  loopEngineeringEnabled?: boolean;
 }
 
 /** 設定から来る文字列をHTMLへ埋め込む前に無害化する。 */
@@ -1328,6 +1333,7 @@ ${chatStyles()}
             .map((id) => renderComposerButton(id, composerButtonCtx, 'menu'))
             .join('\n          ')}
           <button id="turnSummaryToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.turnSummaryEnabled === true}" aria-label="ターン要約を${options.turnSummaryEnabled === true ? '無効にする' : '有効にする'}" title="手動で送る発言の末尾へ要約指示を毎回付けるか切り替えます">${COMPOSER_ICONS.recap}<span class="composerOverflowLabel">ターン要約を${options.turnSummaryEnabled === true ? '無効にする' : '有効にする'}</span></button>
+          <button id="loopEngineeringToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.loopEngineeringEnabled === true}" aria-label="ループエンジニアリングを${options.loopEngineeringEnabled === true ? '無効にする' : '有効にする'}" title="ループが送る指示の末尾へ、機械的な検証・方針変更・撤退の申告の方針を毎回付けるか切り替えます">${COMPOSER_ICONS.loop}<span class="composerOverflowLabel">ループエンジニアリングを${options.loopEngineeringEnabled === true ? '無効にする' : '有効にする'}</span></button>
         </div>
       </div>
     </div>
@@ -1342,6 +1348,9 @@ ${chatStyles()}
     <div class="line">
       <label>最大回数
         <input id="loopMax" type="number" min="1" max="200" value="20">
+      </label>
+      <label>時間上限（分。空なら時間では止めません）
+        <input id="loopMaxDuration" type="number" min="1" max="1440" placeholder="例: 60">
       </label>
       <label class="grow">終了条件（空なら回数だけで終わります）
         <input id="loopCondition" type="text" placeholder="例: 20話の執筆が完了している">
