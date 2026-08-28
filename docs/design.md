@@ -7595,6 +7595,26 @@ Evaluatorへ渡す会話の抜粋は `untrustedText.ts` の囲い（`formatUntru
 - `test/unit/loopController.test.ts`（`issue #933`のdescribe）: ループ開始前に完了していたコマンドが最初の評価の証拠に入らないこと、開始後に完了したコマンドはこれまでどおり入ること、開始時点で実行中だったコマンドは終わった時点で証拠になること、そのターンが何も言わなければ過去の発言を申告として積み直さないこと、古い実行のEvaluatorが返っても新しい実行の評価待ちを折らないこと、同じ計画のオブジェクトで始め直しても古い評価が新しい実行を止めないこと、古い実行の送信の失敗が新しい実行を `failed` にしないこと
 - 上の7件は、修正を1つずつ戻すと落ちることを確認した（実際に不具合を捕まえていること）
 
+### 14.89 完了・撤退の合図を現在のターンに限定する（Issue #937）
+
+§14.88（issue #933）で塞いだ「実行の外にある状態が混ざる」不変条件の違反が、完了・撤退の合図の判定にも残っていた。`declaresDone` / `declaresEscalate` は `state.items` を末尾から走査して最初に見つかった `agentMessage` を見ていた。`ChatState.items` は会話全体を持ち続けるため、**そのターンが本文を返さなかった場合（コマンド実行だけで終わったターン）、過去のターンの発言が判定に掛かる**。ループを始める前の会話に最終行が `<<LOOP_DONE>>` の応答が残っていれば――前回のループの最後の応答がまさにそれである――1ターン目で即座に `done` で止まる。`declaresEscalate` は `plan.condition` の有無に関わらず効くため、終了条件を設定していないループでも起きる。
+
+**`turnResultText` へ寄せる形は採らなかった。** §14.88 の `worker-report` と停滞検知（§16.27）は「そのターンの `agentMessage` だけを連結した値」を根拠にしているが、合図の判定にこれを使うと止まれなくなる。`appendDelta`（`chatState.ts`）が `item/agentMessage/delta` で作る項目は `turnId` が `undefined` のままで、`item/completed` が `turnId` を持たなければ `upsertItem` でも埋まらない。`summarizeTurn` は `turnId` の一致で絞るためこの項目を落とし、**画面に発言が出ているのに `turnResultText` だけが空になる**（`planner.ts` がこの取りこぼしにフォールバックを入れている）。worker-report と停滞検知はこの場合「申告なし」「検知しない」に落ちるだけだが、合図は「正しく合図を返しているのに止まらない」になる。停止できない側へ倒れる誤りは避ける。
+
+**代わりに、前のターン境界の `agentMessage` と比べて「このターンで新しく出た発言か」を直接見る。** `LoopController` が `lastMessageBoundary` を持ち、`start(plan, existingItems)` で開始時点の値を入れ、`observe()` がターンの完了を消費した直後に更新する。更新を停止判定より**前**に置くのは、どこかの `return` で更新を忘れて次のターンの判定が狂うのを防ぐため。合図の判定は、新しい発言が出たときだけ行う。
+
+境界に持つのは `id` と**最終行の両方**である。`id` だけでは足りない。Claude側の `blockId` / `partialId`（`claude/streamJson.ts`）は `message.id` が取れないとき `assistant` へフォールバックするため、`assistant:text:0` が毎ターン同じ値になる。`id` だけを比べると、この状況で新しい発言を「前と同じ」と見て合図を取りこぼす。最終行だけでも足りない（別の発言がたまたま同じ行で終わることがある）。残る取りこぼしは「同じ `id` で最終行も同じ発言が2ターン続く」場合だけで、その最終行が合図なら1ターン目で既に止まっているため、合図の判定としては到達しない。
+
+**純粋関数側は「渡された発言が合図か」だけを答える。** `declaresDone(item)` / `declaresEscalate(item)` / `agentMessageFinalLine(item)` は `ChatItem` を受け取る形にし、「どの発言を見るか」は `LoopController` が決める。会話の全体像を見る責務を1箇所へ寄せた（`lastAgentMessage(items)` だけが `items` を走査する）。
+
+`appendDelta` 由来の `turnId` 欠落そのものは、`summarizeTurn` / `turnResultText` / worker-report / 停滞検知にまたがるデータモデル側の課題として別に扱う。**#937 の正しさはその修正に依存しない。**
+
+#### 確かめ方
+
+- `test/unit/loopController.test.ts`（`issue #937`のdescribe）: 開始前に残っていた `<<LOOP_DONE>>` / `<<LOOP_ESCALATE>>` で止まらないこと、前のターンの発言を次のツールだけのターンで拾い直さないこと、そのターンで新しく出た合図ではこれまでどおり止まること、`id` が使い回されても本文が変わっていれば新しい発言として扱うこと、`turnResultText` が空でも新しい発言の合図で止まること、止め直したループが前の実行の発言を持ち越さないこと
+- `test/unit/loopEngineering.test.ts`: `declaresEscalate` / `agentMessageFinalLine` が `agentMessage` 以外を渡されたとき成立しないこと、`lastAgentMessage` が応答の後ろにコマンド実行が並んでいてもその応答を返すこと（§14.87 からの要件）
+- 境界の比較を無効化すると「開始前に残っていた合図では止まらない」など3件が落ち、比較を `id` だけに落とすと「idが使い回されても」の1件が落ちることを確認した
+
 ### 16.44 チームモード（Issue #693）
 
 #### 何を足したのか

@@ -7,8 +7,9 @@ import {
 } from './stallDetector';
 import {
   appendLoopEngineeringInstruction,
+  agentMessageFinalLine,
   declaresEscalate,
-  lastAgentMessageFinalLine,
+  lastAgentMessage,
   type LoopEngineeringConfig,
   type LoopEngineeringPhase,
 } from './loopEngineering';
@@ -274,21 +275,48 @@ export function decoratePrompt(prompt: string, condition: string): string {
 }
 
 /**
- * 直近のエージェント発言が終了を宣言しているか。
+ * **渡された発言が**終了を宣言しているか。
  *
- * **応答の最後の非空行が`LOOP_DONE_TOKEN`と完全に一致する場合だけ**成立とする
- * （issue #914）。以前は`includes`で本文中に現れれば成立としていたが、この合図を
- * 教えるのは`decoratePrompt`が終了条件へ添える文そのものであり、その綴りが会話に残る。
- * そのため「まだ <<LOOP_DONE>> は出しません」といった説明文だけでループが終了していた。
+ * **発言の最終行が`LOOP_DONE_TOKEN`と完全に一致する場合だけ**成立とする（issue #914）。
+ * 以前は`includes`で本文中に現れれば成立としていたが、この合図を教えるのは
+ * `decoratePrompt`が終了条件へ添える文そのものであり、その綴りが会話に残る。そのため
+ * 「まだ <<LOOP_DONE>> は出しません」といった説明文だけでループが終了していた。
  * `declaresEscalate`（issue #891）が同じ理由で最終行の完全一致にしてあり、判定方式を
- * 揃えた（共通の取り出しは`lastAgentMessageFinalLine`）。
+ * 揃えた（共通の取り出しは`agentMessageFinalLine`）。
  *
- * **これは挙動の変更である。** 合図を文中へ埋めて返していたエージェントでは、これまで
- * 終了していたループが終了しなくなる。`decoratePrompt`の依頼文も、合図だけを最後の行へ
- * 出すよう明示する文面へ合わせて直してある。
+ * **その発言が現在のターンのものかは、この関数では判断しない**（issue #937）。会話全体
+ * から直近の`agentMessage`を探す形にしていた頃は、ツール実行だけで本文を返さなかった
+ * ターンで過去の発言を拾い、ループを始める前に残っていた合図で停止しえた。どの発言を
+ * 渡すかは`observe()`が`lastMessageBoundary`と比べて決める。
  */
-export function declaresDone(state: ChatState): boolean {
-  return lastAgentMessageFinalLine(state) === LOOP_DONE_TOKEN;
+export function declaresDone(item: ChatItem): boolean {
+  return agentMessageFinalLine(item) === LOOP_DONE_TOKEN;
+}
+
+/** ターン境界で覚えておく目印を作る。発言が無ければ`undefined`。 */
+function toMessageBoundary(item: ChatItem | undefined): AgentMessageBoundary | undefined {
+  return item === undefined ? undefined : { id: item.id, finalLine: agentMessageFinalLine(item) };
+}
+
+/**
+ * 2つの境界が同じ発言を指しているか。
+ *
+ * `id`と最終行の**両方**が一致したときだけ同じと見る。`id`だけを比べると、Claude側で
+ * `message.id`が取れず`assistant:text:0`が毎ターン同じ値になる場面（`streamJson.ts`の
+ * `blockId` / `partialId`）で、新しい発言を前と同じものと取り違える。最終行だけを比べると、
+ * 別の発言がたまたま同じ行で終わったときに取り違える。
+ *
+ * 残る取りこぼしは「同じ`id`で最終行も同じ発言が2ターン続く」場合だけで、その最終行が
+ * 合図なら1ターン目で既に止まっているため、合図の判定としては到達しない。
+ */
+function isSameBoundary(
+  a: AgentMessageBoundary | undefined,
+  b: AgentMessageBoundary | undefined,
+): boolean {
+  if (a === undefined || b === undefined) {
+    return a === b;
+  }
+  return a.id === b.id && a.finalLine === b.finalLine;
 }
 
 /**
@@ -299,6 +327,17 @@ export function declaresDone(state: ChatState): boolean {
  * 画面ではなく拡張機能側に置くのは、タブの再描画やウィンドウのリロードで
  * 進行中のループが消えないようにするため。
  */
+/**
+ * ターン境界で覚えておく、最後の`agentMessage`の目印（issue #937）。
+ *
+ * `id`と最終行の**両方**が前の境界と一致していれば、そのターンは新しい発言を出して
+ * いないと見る。片方だけでは足りない理由は`LoopController.lastMessageBoundary`のJSDoc。
+ */
+interface AgentMessageBoundary {
+  id: string;
+  finalLine: string | undefined;
+}
+
 export class LoopController {
   private plan: LoopPlan | undefined;
   private status: LoopStatus = idleLoopStatus;
@@ -358,6 +397,26 @@ export class LoopController {
    * オブジェクトを使い回されると誤って一致してしまう。
    */
   private runGeneration = 0;
+  /**
+   * 前のターン境界で見えていた、最後の`agentMessage`の目印（issue #937）。
+   *
+   * 完了・撤退の合図は**そのターンで新しく出た発言にだけ**効かせる。会話全体から直近の
+   * `agentMessage`を探すと、ツール実行だけで本文を返さなかったターンで過去のターンの
+   * 発言が判定に掛かり、ループを始める前に残っていた`<<LOOP_DONE>>`で即座に停止しうる。
+   *
+   * ターンの絞り込みに`ChatItem.turnId`も`ChatState.turnResultText`も使えない。
+   * `appendDelta`（`chatState.ts`）が作る項目は`turnId`が`undefined`のままになることが
+   * あり、`summarizeTurn`がそれを落とすため`turnResultText`が空になる（`planner.ts`が
+   * この取りこぼしにフォールバックを入れている）。合図を`turnResultText`だけで見ると、
+   * その場合に**正しく合図を返しているのに止まらない**。停止できない側へ倒れる誤りは
+   * 避ける。
+   *
+   * `id`だけでなく最終行も持つのは、`id`がターンを跨いで再利用されうるため。Claude側の
+   * `blockId` / `partialId`（`claude/streamJson.ts`）は`message.id`が取れないとき
+   * `assistant`へフォールバックし、`assistant:text:0`が毎ターン同じ値になる。`id`だけを
+   * 比べると、この状況で新しい発言を「前と同じ」と見て合図を取りこぼす。
+   */
+  private lastMessageBoundary: AgentMessageBoundary | undefined;
 
   constructor(
     private readonly send: (text: string) => void | Promise<void>,
@@ -465,6 +524,9 @@ export class LoopController {
    * （`ChatState.items`は会話全体を持ち続けるため）。「開始前に`npm test`が通っていた」
    * だけで受入基準を満たしたと判定され、現在のコードを一度も検証しないまま止まりうる。
    * 省略時は空として扱う（従来ループでは証拠を使わないため影響しない）。
+   *
+   * 同じ`existingItems`から、完了・撤退の合図の境界（`lastMessageBoundary`）も作る
+   * （issue #937）。開始前に残っていた`<<LOOP_DONE>>`で1ターン目に止まらないようにする。
    */
   start(plan: LoopPlan, existingItems: readonly ChatItem[] = []): void {
     this.plan = plan;
@@ -475,6 +537,7 @@ export class LoopController {
     this.seenEvidenceIds = new Set(
       existingItems.filter(isSettledCommandItem).map((item) => item.id),
     );
+    this.lastMessageBoundary = toMessageBoundary(lastAgentMessage(existingItems));
     this.indeterminateStreak = 0;
     this.evaluating = false;
     this.pendingPrompt = undefined;
@@ -522,6 +585,7 @@ export class LoopController {
     this.indeterminateStreak = 0;
     this.evaluating = false;
     this.pendingPrompt = undefined;
+    this.lastMessageBoundary = undefined;
     this.status = { ...this.status, running: false, stopReason: reason };
     this.onStatus(this.status);
     return true;
@@ -563,6 +627,17 @@ export class LoopController {
     }
     this.sawBusy = false;
 
+    // このターンで新しい発言が出たかを、合図の判定より前に確定させる（issue #937）。
+    // 更新を分岐の後ろに置くと、どこかの`return`で更新を忘れて次のターンの判定が
+    // 狂う。境界の更新と「新しいか」の記録をここで済ませ、以降は`hasNewMessage`だけを見る
+    const lastMessage = lastAgentMessage(state.items);
+    const previousBoundary = this.lastMessageBoundary;
+    this.lastMessageBoundary = toMessageBoundary(lastMessage);
+    const newMessage =
+      lastMessage !== undefined && !isSameBoundary(previousBoundary, this.lastMessageBoundary)
+        ? lastMessage
+        : undefined;
+
     if (state.turnFailed) {
       // 一時停止中でも、ターン自体が失敗していれば止める。「返信待ちのまま実は
       // 失敗していた」を黙って握り潰さない（安全側の判断。最終報告に記載）
@@ -573,13 +648,18 @@ export class LoopController {
     // 「解決できないので止めてくれ」は条件の成立とは独立した申し出であり、条件を
     // 設定していないループでも効かせる必要がある。完了（`done`）より先に判定するのは、
     // 同じ応答が両方の合図を含んでいた場合に「終わった」と誤って扱わないため
-    if (declaresEscalate(state)) {
+    if (newMessage !== undefined && declaresEscalate(newMessage)) {
       this.stop('escalated');
       return;
     }
     // ゴール駆動ループ（issue #892）ではWorkerへ`<<LOOP_DONE>>`を頼まないため、
     // 自己申告による完了は見ない。完了判定はEvaluatorだけが持つ
-    if (plan.goal === undefined && plan.condition !== '' && declaresDone(state)) {
+    if (
+      newMessage !== undefined &&
+      plan.goal === undefined &&
+      plan.condition !== '' &&
+      declaresDone(newMessage)
+    ) {
       this.stop('done');
       return;
     }
