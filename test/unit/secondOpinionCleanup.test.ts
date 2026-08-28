@@ -186,9 +186,12 @@ describe('startSecondOpinion の実行中フラグ（Issue #926 B）', () => {
   beforeEach(() => {
     __mock.reset();
     __mock.setWorkspaceFolder('/repo');
-    // 候補は既定の1件なので選択UIは出ない。対象は「追加資料なし」、依頼文はそのまま通す
-    __mock.showQuickPickAnswer = (items) =>
-      (items as Array<{ artifactKind?: string }>).find((item) => item.artifactKind === 'none');
+    // 候補は既定の1件なので依頼先の選択UIは出ない。effortは既定（先頭）、対象は
+    // 「追加資料なし」、依頼文はそのまま通す
+    __mock.showQuickPickAnswer = (items) => {
+      const list = items as Array<{ artifactKind?: string; effort?: string }>;
+      return list.find((item) => item.artifactKind === 'none') ?? list[0];
+    };
     __mock.showInputBoxAnswer = '設計判断について意見がほしい';
   });
 

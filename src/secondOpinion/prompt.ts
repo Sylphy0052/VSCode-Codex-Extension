@@ -67,11 +67,26 @@ export interface SecondOpinionInput {
   /**
    * 別セッションが会話の記録から作った背景要約（Issue #903）。基本コンテキスト。
    * 設定で切っている・作れなかった場合は渡さない。
+   *
+   * 会話が短く要約セッションを開かなかった場合（Issue #944）は、会話の記録そのものが
+   * ここへ入る。どちらなのかは {@link conversationBackgroundKind} で示す。
    */
   conversationSummary?: string | undefined;
+  /**
+   * {@link conversationSummary} が要約か、会話の記録そのものかの区別（Issue #944）。
+   * 省略時は `'summary'`（従来どおり）。
+   *
+   * 見出しと注意書きを出し分けるために要る。要約でないものを「別のセッションが作った要約」
+   * として見せると、圧縮による抜けを警戒させる必要のない材料を疑わせることになり、
+   * 逆に記録を要約と偽ることにもなる。
+   */
+  conversationBackgroundKind?: ConversationBackgroundKind | undefined;
   /** 今回評価してほしい追加資料。 */
   artifact: SecondOpinionArtifact;
 }
+
+/** 背景として渡した本文の出所（Issue #944）。 */
+export type ConversationBackgroundKind = 'summary' | 'transcript';
 
 /** 既定の依頼文。設定 `agent.secondOpinion.template` の既定値でもある。 */
 export const DEFAULT_SECOND_OPINION_TEMPLATE =
@@ -104,7 +119,11 @@ function fence(body: string, info: string): string {
  * 最後の1文（回答は自動反映されない）は、Advisorに「利用者へ判断材料を出す」書き方を
  * させるためのもの。作業指示として書かせると、そのまま実行される前提の文体になる。
  */
-function systemInstruction(artifact: SecondOpinionArtifact, hasSummary: boolean): string {
+function systemInstruction(
+  artifact: SecondOpinionArtifact,
+  hasSummary: boolean,
+  backgroundKind: ConversationBackgroundKind,
+): string {
   const lines = [
     'あなたは、別のAIエージェントが進めている作業について、独立した立場から意見を求められています。',
     '求められるのはコードレビューに限りません。設計判断の妥当性、複数案からの選択、このまま進めてよいかの判断、次に検証すべきことなども対象です。依頼文の求めに合わせて答えてください。',
@@ -115,9 +134,12 @@ function systemInstruction(artifact: SecondOpinionArtifact, hasSummary: boolean)
   ];
   if (hasSummary) {
     // 要約を作ったのは作業したエージェント自身ではない（`summary.ts`）。それでも圧縮である
-    // 以上は落ちた情報があり、要約に引きずられて追加資料を読まない事故を避ける必要がある
+    // 以上は落ちた情報があり、要約に引きずられて追加資料を読まない事故を避ける必要がある。
+    // 会話が短く要約を作らなかった場合（Issue #944）は圧縮ではないため、その旨を書かない
     lines.push(
-      '「ここまでの背景」は、会話を見ていない別のセッションが記録から作った圧縮であり、抜けや誤りがありえます。',
+      backgroundKind === 'summary'
+        ? '「ここまでの背景」は、会話を見ていない別のセッションが記録から作った圧縮であり、抜けや誤りがありえます。'
+        : '「ここまでの背景」は、その会話の記録そのものです（短いため要約していません）。',
     );
     if (artifact.kind !== 'none') {
       lines.push(
@@ -125,11 +147,19 @@ function systemInstruction(artifact: SecondOpinionArtifact, hasSummary: boolean)
       );
     }
   }
+  // 調査の範囲（Issue #944）。read-onlyのツールは使えるため、指示が無いと材料で足りる問いでも
+  // リポジトリを読み回り、そのぶん回答が遅れる。何を根拠にすべきかは資料の種類で決まる
   if (artifact.kind === 'workspaceChanges') {
     lines.push(
       '以下の baseCommit と差分を、現在の変更の正本として扱ってください。',
       '現在の作業ツリーは実行中に変更されている可能性があるため、判断の根拠に含めないでください。',
       'ベース側のコードを読む必要がある場合は `git show <baseCommit>:<path>` を使ってください。',
+      'ただし読むのは判断に必要な範囲に限り、リポジトリ全体の探索は行わないでください。',
+    );
+  } else {
+    lines.push(
+      '渡された材料だけで答えてください。リポジトリを探索する必要はありません。',
+      '材料だけでは答えられない場合は、探しに行くのではなく、何が足りないかを書いてください。',
     );
   }
   return lines.join('\n');
@@ -160,11 +190,12 @@ function artifactSection(artifact: SecondOpinionArtifact): string | undefined {
  * 誰が作った要約なのかを本文へ明記する。作業した本人の要約とは重みが違い、Advisor側が
  * それを知らないと「エージェント自身の言い分」として読んでしまうため。
  */
-function summarySection(summary: string): string {
-  return (
-    '## ここまでの背景（作業したエージェント自身ではなく、別のセッションが記録から作った要約）\n\n' +
-    `${fence(summary, '')}`
-  );
+function summarySection(summary: string, kind: ConversationBackgroundKind): string {
+  const heading =
+    kind === 'summary'
+      ? '## ここまでの背景（作業したエージェント自身ではなく、別のセッションが記録から作った要約）'
+      : '## ここまでの背景（会話の記録そのもの。短いため要約していません）';
+  return `${heading}\n\n${fence(summary, '')}`;
 }
 
 /**
@@ -179,10 +210,11 @@ function summarySection(summary: string): string {
  */
 export function buildSecondOpinionPrompt(input: SecondOpinionInput): string {
   const summary = input.conversationSummary?.trim() ?? '';
+  const backgroundKind = input.conversationBackgroundKind ?? 'summary';
   const sections = [
-    systemInstruction(input.artifact, summary !== ''),
+    systemInstruction(input.artifact, summary !== '', backgroundKind),
     `## 依頼\n\n${input.userRequest.trim()}`,
-    summary === '' ? undefined : summarySection(summary),
+    summary === '' ? undefined : summarySection(summary, backgroundKind),
     artifactSection(input.artifact),
   ].filter((section): section is string => section !== undefined);
   return sections.join('\n\n');

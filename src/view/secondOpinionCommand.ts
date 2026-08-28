@@ -18,6 +18,7 @@ import {
   readSecondOpinionConfig,
   type SecondOpinionConfig,
 } from '../config';
+import { FALLBACK_EFFORTS } from '../codex/modelCatalog';
 import type { Logger } from '../log';
 import type { TaskSessionHost } from '../orchestrator/taskSession';
 import { nodeGitCommandRunner, type GitCommandRunner } from '../orchestrator/worktree';
@@ -33,6 +34,7 @@ import {
 import {
   ARTIFACT_KIND_LABELS,
   SECOND_OPINION_ARTIFACT_KINDS,
+  type ConversationBackgroundKind,
   type SecondOpinionArtifact,
   type SecondOpinionArtifactKind,
 } from '../secondOpinion/prompt';
@@ -73,6 +75,14 @@ export interface SecondOpinionPanelPort {
   setRunning(running: boolean): void;
 }
 
+/**
+ * これ未満の長さの会話は、要約せずに記録そのものを背景として渡す（Issue #944）。
+ *
+ * 要約セッションの目標長（`summary.ts` の `SUMMARY_TARGET_CHARS`、2,000文字）と同じ桁に
+ * 置く。これより短い会話を要約しても、縮む量より、本体の前に1往復ぶん待たされる損の方が大きい。
+ */
+const SUMMARY_SKIP_THRESHOLD_CHARS = 4_000;
+
 const ARTIFACT_KIND_DETAILS: Record<SecondOpinionArtifactKind, string> = {
   workspaceChanges: '押した時点の変更を固定して渡します（実行中の変更は含みません）',
   lastAssistantResponse: 'この会話の直近の応答を渡します（そのAIのフレーミングが混じります）',
@@ -96,6 +106,45 @@ async function pickCandidate(
     { title: 'セカンドオピニオンの依頼先', placeHolder: '独立したCodexセッションのモデル' },
   );
   return picked?.candidate;
+}
+
+/**
+ * 今回だけのeffortを選ばせる（Issue #944）。
+ *
+ * 候補（設定）が持つeffortが既定で、その場だけ軽い設定へ落とせるようにする。速さと
+ * 判断の質はここで直接効くうえ、どちらを取るかは「急いで一言ほしい」「腰を据えて見てほしい」
+ * という**その場の事情**で決まるため、設定ではなく実行時に選ばせる。
+ *
+ * 選択肢はモデルが受け付ける値の一覧（`listEfforts`）から作る。既定値がその一覧に無い場合も
+ * 必ず先頭へ出す（設定した値を選べないUIにしない）。
+ */
+async function pickEffort(
+  candidate: SecondOpinionCandidate,
+  listEfforts: (model: string) => readonly string[],
+): Promise<string | undefined> {
+  const available = listEfforts(candidate.model);
+  const ordered = [candidate.effort, ...available.filter((e) => e !== candidate.effort)];
+  if (ordered.length === 1) {
+    // 選べる値が1つしか無い（effortを持たないモデルなど）なら選ばせない。
+    // 依頼先が1件のときにQuickPickを出さないのと同じ扱い（受入基準2）
+    return candidate.effort;
+  }
+  const picked = await vscode.window.showQuickPick(
+    ordered.map((effort) =>
+      effort === candidate.effort
+        ? { label: effort, description: '既定（設定の候補が持つ値）', effort }
+        : {
+            label: effort,
+            detail: '軽くするほど速く返るが、指摘の深さは落ちる（重くするほどその逆）',
+            effort,
+          },
+    ),
+    {
+      title: `セカンドオピニオンの思考の深さ（${candidate.model}）`,
+      placeHolder: '今回だけの指定。設定の候補は変わらない',
+    },
+  );
+  return picked?.effort;
 }
 
 async function pickArtifactKind(
@@ -163,19 +212,33 @@ async function captureArtifact(
  * 独立した意見としての値打ちが落ちるため。`summary.ts` 参照）。設定で切っている場合と、
  * 要約に失敗した場合は本文を返さない。どちらでもセカンドオピニオン本体は続行し、
  * 背景の区画が無いプロンプトで走る。
+ *
+ * 会話が {@link SUMMARY_SKIP_THRESHOLD_CHARS} 未満なら要約セッションを開かず、記録を
+ * そのまま背景として渡す（Issue #944）。要約セッションは本体の**前に直列で**走るため、
+ * 圧縮する必要が無い長さの会話にまでその1往復を払うと、待ち時間だけが増える。
  */
 async function buildConversationSummary(
   port: SecondOpinionPanelPort,
   host: TaskSessionHost,
   config: SecondOpinionConfig,
   log: Logger,
-): Promise<{ text: string | undefined; failure: string | undefined }> {
+): Promise<{
+  text: string | undefined;
+  kind: ConversationBackgroundKind;
+  failure: string | undefined;
+}> {
   if (!config.summary.enabled) {
-    return { text: undefined, failure: undefined };
+    return { text: undefined, kind: 'summary', failure: undefined };
   }
   const conversation = port.conversationTranscript();
   if (conversation.trim() === '') {
-    return { text: undefined, failure: undefined };
+    return { text: undefined, kind: 'summary', failure: undefined };
+  }
+  if (conversation.length < SUMMARY_SKIP_THRESHOLD_CHARS) {
+    log.info(
+      `[secondOpinion] 会話が短いため要約セッションを開きません（${conversation.length}文字）`,
+    );
+    return { text: conversation, kind: 'transcript', failure: undefined };
   }
   const result = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Window, title: '会話の要約を作成しています…' },
@@ -191,8 +254,8 @@ async function buildConversationSummary(
       ),
   );
   return result.ok
-    ? { text: result.summary, failure: undefined }
-    : { text: undefined, failure: result.reason };
+    ? { text: result.summary, kind: 'summary', failure: undefined }
+    : { text: undefined, kind: 'summary', failure: result.reason };
 }
 
 /**
@@ -208,6 +271,12 @@ export async function startSecondOpinion(
   registry: SecondOpinionRegistry,
   log: Logger,
   git: GitCommandRunner = nodeGitCommandRunner,
+  /**
+   * モデルが受け付けるeffortの一覧（Issue #944）。既定はカタログを読めないときの
+   * フォールバック（`modelCatalog.ts`）。Codexのカタログを持っている呼び出し側
+   * （`ChatViewManager`）はそれを渡す。
+   */
+  listEfforts: (model: string) => readonly string[] = () => FALLBACK_EFFORTS,
 ): Promise<void> {
   if (registry.isRunning(port.parentSessionId)) {
     void vscode.window.showInformationMessage(
@@ -228,10 +297,16 @@ export async function startSecondOpinion(
     log.warn(`[secondOpinion] ${warning}`);
   }
 
-  const candidate = await pickCandidate(config.candidates);
-  if (candidate === undefined) {
+  const picked = await pickCandidate(config.candidates);
+  if (picked === undefined) {
     return;
   }
+  const effort = await pickEffort(picked, listEfforts);
+  if (effort === undefined) {
+    return;
+  }
+  // 今回だけの上書き。設定の候補（`candidates.ts`）は変えない（Issue #944）
+  const candidate: SecondOpinionCandidate = { ...picked, effort };
   const artifactKind = await pickArtifactKind(config.summary.enabled);
   if (artifactKind === undefined) {
     return;
@@ -280,11 +355,18 @@ export async function startSecondOpinion(
         headless: config.headless,
         timeoutMs: config.timeoutMs,
         conversationSummary: summary.text,
+        conversationBackgroundKind: summary.kind,
       },
       log,
     );
     const summaryStatus: SecondOpinionSummaryStatus =
-      summary.text !== undefined ? 'attached' : summary.failure === undefined ? 'off' : 'failed';
+      summary.text !== undefined
+        ? summary.kind === 'transcript'
+          ? 'transcript'
+          : 'attached'
+        : summary.failure === undefined
+          ? 'off'
+          : 'failed';
     port.note(id, resultDisplay(candidate, artifactKind, request, result, summaryStatus));
     if (!result.ok) {
       log.warn(`[secondOpinion] 失敗しました: ${result.reason}`);

@@ -181,6 +181,48 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
     expect(prompt).toContain('設計の考え方を聞きたい');
     expect(prompt).not.toContain('レビュー対象');
   });
+
+  it('追加資料が無いときは、探索せず材料だけで答えるよう指示する（Issue #944）', () => {
+    const prompt = buildSecondOpinionPrompt({
+      userRequest: '設計の考え方を聞きたい',
+      artifact: { kind: 'none' },
+    });
+    expect(prompt).toContain('リポジトリを探索する必要はありません');
+    expect(prompt).toContain('何が足りないかを書いてください');
+  });
+
+  it('差分を渡すときも、読む範囲を判断に必要な分へ限らせる（Issue #944）', () => {
+    const prompt = buildSecondOpinionPrompt({
+      userRequest: 'レビューして',
+      artifact: {
+        kind: 'workspaceChanges',
+        snapshot: { baseCommit: 'abc1234', diff: 'diff', truncated: false },
+      },
+    });
+    // ベース側を読む手段（git show）は残したうえで、全体の探索だけを止める
+    expect(prompt).toContain('git show <baseCommit>:<path>');
+    expect(prompt).toContain('リポジトリ全体の探索は行わないでください');
+  });
+
+  it('背景が要約か記録そのものかで、見出しと注意書きを書き分ける（Issue #944）', () => {
+    const summarized = buildSecondOpinionPrompt({
+      userRequest: '意見がほしい',
+      artifact: { kind: 'none' },
+      conversationSummary: 'これまでの経緯',
+    });
+    expect(summarized).toContain('別のセッションが記録から作った要約');
+    expect(summarized).toContain('抜けや誤りがありえます');
+
+    const transcript = buildSecondOpinionPrompt({
+      userRequest: '意見がほしい',
+      artifact: { kind: 'none' },
+      conversationSummary: 'これまでの経緯',
+      conversationBackgroundKind: 'transcript',
+    });
+    expect(transcript).toContain('会話の記録そのもの');
+    // 圧縮していない材料に、圧縮による抜けの警告を付けない
+    expect(transcript).not.toContain('抜けや誤りがありえます');
+  });
 });
 
 describe('runSecondOpinion（Issue #894）', () => {
@@ -204,6 +246,8 @@ describe('runSecondOpinion（Issue #894）', () => {
         cwd: '/repo',
         config: { model: 'gpt-5.6-sol', effort: 'high', approvalMode: 'never' },
         sandbox: 'read-only',
+        // MCPサーバは1本も載せない（Issue #944）
+        disableMcpServers: true,
       },
     ]);
   });

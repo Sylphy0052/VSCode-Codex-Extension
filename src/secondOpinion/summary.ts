@@ -36,8 +36,12 @@ export const DEFAULT_SUMMARY_TIMEOUT_MS = 2 * 60_000;
  * 要約へ渡す会話の記録の上限（文字数）。
  *
  * 超えた分は**中間**を落とし、先頭と末尾を残す（Issue #926 G）。
+ *
+ * 当初は120,000文字だったが、要約セッションはセカンドオピニオン本体の**前に直列で**走るため、
+ * ここへ入れた分がそのまま人の待ち時間になる（Issue #944）。要約に求めるのは事実の圧縮で、
+ * 会話の全文をなぞることではないので、上限を下げて入力を減らす方を採る。
  */
-export const MAX_SUMMARY_INPUT_CHARS = 120_000;
+export const MAX_SUMMARY_INPUT_CHARS = 30_000;
 
 /**
  * 上限を超えたときに、先頭へ回す予算の割合。
@@ -140,6 +144,8 @@ export function buildSummarySessionInput(
     cwd,
     config: { model, effort, approvalMode: SUMMARY_APPROVAL_MODE },
     sandbox: SANDBOX_MODES[0],
+    // 会話の記録だけを材料にするターンで、MCPのツールは要らない（Issue #944）
+    disableMcpServers: true,
   };
 }
 

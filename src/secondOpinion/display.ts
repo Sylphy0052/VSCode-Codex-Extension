@@ -52,13 +52,24 @@ const SUMMARY_ATTACHED_NOTE =
 const SUMMARY_FAILED_NOTE =
   '作業中のAIとは別セッションの意見です（背景要約は作れなかったため添えていません）';
 
+/**
+ * 会話が短く、要約せずに記録そのものを背景として渡した場合の注記（Issue #944）。
+ *
+ * 「要約を添えた」と出すと、圧縮による抜けを警戒しながら読ませることになる。渡したのが
+ * 記録そのものである以上、その但し書きは事実と違う。
+ */
+const TRANSCRIPT_ATTACHED_NOTE =
+  '作業中のAIとは別セッションの意見です（会話が短いため、要約せず記録そのものを背景に添えています）';
+
 /** 要約の結末。`off` は設定で切っている・要約する会話がまだ無い場合。 */
-export type SecondOpinionSummaryStatus = 'off' | 'attached' | 'failed';
+export type SecondOpinionSummaryStatus = 'off' | 'attached' | 'transcript' | 'failed';
 
 function independenceNote(summaryStatus: SecondOpinionSummaryStatus): string {
   switch (summaryStatus) {
     case 'attached':
       return SUMMARY_ATTACHED_NOTE;
+    case 'transcript':
+      return TRANSCRIPT_ATTACHED_NOTE;
     case 'failed':
       return SUMMARY_FAILED_NOTE;
     case 'off':
