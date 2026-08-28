@@ -496,7 +496,7 @@ export class LoopController {
    * だけで受入基準を満たしたと判定され、現在のコードを一度も検証しないまま止まりうる。
    * 省略時は空として扱う（従来ループでは証拠を使わないため影響しない）。
    *
-   * 同じ`existingItems`から、完了・撤退の合図の境界（`lastMessageBoundary`）も作る
+   * 同じ`existingItems`から、完了・撤退の合図の境界（`lastMessage`）も作る
    * （issue #937）。開始前に残っていた`<<LOOP_DONE>>`で1ターン目に止まらないようにする。
    */
   start(plan: LoopPlan, existingItems: readonly ChatItem[] = []): void {

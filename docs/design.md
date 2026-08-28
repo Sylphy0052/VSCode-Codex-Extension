@@ -7601,7 +7601,7 @@ Evaluatorへ渡す会話の抜粋は `untrustedText.ts` の囲い（`formatUntru
 
 **`turnResultText` へ寄せる形は採らなかった。** §14.88 の `worker-report` と停滞検知（§16.27）は「そのターンの `agentMessage` だけを連結した値」を根拠にしているが、合図の判定にこれを使うと止まれなくなる。`appendDelta`（`chatState.ts`）が `item/agentMessage/delta` で作る項目は `turnId` が `undefined` のままで、`item/completed` が `turnId` を持たなければ `upsertItem` でも埋まらない。`summarizeTurn` は `turnId` の一致で絞るためこの項目を落とし、**画面に発言が出ているのに `turnResultText` だけが空になる**（`planner.ts` がこの取りこぼしにフォールバックを入れている）。worker-report と停滞検知はこの場合「申告なし」「検知しない」に落ちるだけだが、合図は「正しく合図を返しているのに止まらない」になる。停止できない側へ倒れる誤りは避ける。
 
-**代わりに、前のターン境界の `agentMessage` と比べて「このターンで新しく出た発言か」を直接見る。** `LoopController` が `lastMessageBoundary` を持ち、`start(plan, existingItems)` で開始時点の値を入れ、`observe()` がターンの完了を消費した直後に更新する。更新を停止判定より**前**に置くのは、どこかの `return` で更新を忘れて次のターンの判定が狂うのを防ぐため。合図の判定は、新しい発言が出たときだけ行う。
+**代わりに、前のターン境界の `agentMessage` と比べて「このターンで新しく出た発言か」を直接見る。** `LoopController` が `lastMessage` を持ち、`start(plan, existingItems)` で開始時点の値を入れ、`observe()` がターンの完了を消費した直後に更新する。更新を停止判定より**前**に置くのは、どこかの `return` で更新を忘れて次のターンの判定が狂うのを防ぐため。合図の判定は、新しい発言が出たときだけ行う。
 
 **比べるのは項目そのもの（参照の同一性）である。** `id` と最終行の組で比べる案は成立しない。Claude側の `blockId` / `partialId`（`claude/streamJson.ts`）は `message.id` が取れないとき `assistant` へフォールバックするため、`assistant:text:0` が実行を跨いで同じ値になる。`<<LOOP_DONE>>` で終えた会話から始め直し、1ターン目に同じ合図を返すと、開始時点のbaselineと `id` も最終行も一致してしまい、**新しく返した合図を「前と同じ」と見て無視する**。同一実行の中では「合図が2ターン続くなら1ターン目で止まっている」が成り立つが、実行を跨ぐ `start()` のbaselineでは成り立たない。
 
