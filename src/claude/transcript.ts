@@ -464,14 +464,18 @@ const SKILL_REINVOCATION_PATTERNS = [
  * さらにissue #934で、セッション履歴（`~/.claude/projects/*.jsonl`）と動作中の
  * stream-jsonでフィールドが違うことが判った。前者には `isMeta: true` が付くが、後者は
  * `isSynthetic: true` だけで `isMeta` も `sourceToolUseID` も付かない（CLI 2.1.247で実測）。
- * どちらの目印でも入口を通し、実際の判定は書き出しに寄せる。ユーザー自身の発言には
- * どちらの目印も付かないので、手で同じ文面を書かない限り巻き込まない。
+ *
+ * `isSynthetic` は割り込みの通知など他の合成メッセージにも付くため、そちらは
+ * `sourceToolUseID` では通さず書き出しが合ったものだけを拾う。履歴側の判定は
+ * issue #889 までと同じままにして、読み直したときの見え方を変えない。
+ * ユーザー自身の発言にはどちらの目印も付かないので、手で同じ文面を書かない限り
+ * 巻き込まない。
  */
 export function isSkillContextEntry(entry: Record<string, unknown>, text: string): boolean {
-  if (entry['isMeta'] !== true && entry['isSynthetic'] !== true) {
-    return false;
+  if (entry['isMeta'] === true) {
+    return str(entry['sourceToolUseID']) !== '' || isSkillContextText(text);
   }
-  return str(entry['sourceToolUseID']) !== '' || isSkillContextText(text);
+  return entry['isSynthetic'] === true && isSkillContextText(text);
 }
 
 /** 書き出しだけでSkill注入と判る文面か（本文・再実行時の注記の両方）。 */
