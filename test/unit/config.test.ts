@@ -5,12 +5,18 @@ import {
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
   setChatTurnSummaryEnabled,
+  readChatLoopEngineeringConfig,
+  setChatLoopEngineeringEnabled,
   readClaudeConfig,
   readNotificationsConfig,
   readWorkflowsConfig,
 } from '../../src/config';
 import { DEFAULT_COMPOSER_BUTTONS } from '../../src/view/composerButtons';
 import { DEFAULT_TURN_SUMMARY_INSTRUCTION } from '../../src/view/turnSummary';
+import {
+  DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
+  DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION,
+} from '../../src/loop/loopEngineering';
 import { __mock } from '../mocks/vscode';
 
 describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
@@ -629,6 +635,49 @@ describe('readChatTurnSummaryConfig（issue #709）', () => {
   it('文字列でない指示文は既定へ倒す', () => {
     __mock.setConfig('agent', { 'chat.turnSummary.instruction': 42 });
     expect(readChatTurnSummaryConfig().instruction).toBe(DEFAULT_TURN_SUMMARY_INSTRUCTION);
+  });
+});
+
+describe('readChatLoopEngineeringConfig（issue #891）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('既定は無効で、指示文は両方ともモジュールの既定値', () => {
+    expect(readChatLoopEngineeringConfig()).toEqual({
+      enabled: false,
+      initialInstruction: DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION,
+      continueInstruction: DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
+    });
+  });
+
+  it('有効無効をユーザー設定へ保存できる', async () => {
+    await setChatLoopEngineeringEnabled(true);
+    expect(readChatLoopEngineeringConfig().enabled).toBe(true);
+    await setChatLoopEngineeringEnabled(false);
+    expect(readChatLoopEngineeringConfig().enabled).toBe(false);
+  });
+
+  it('1回目と2回目以降の指示文をそれぞれ差し替えられる', () => {
+    __mock.setConfig('agent', {
+      'chat.loopEngineering.initialInstruction': '方針を守れ',
+      'chat.loopEngineering.continueInstruction': '継続',
+    });
+    const config = readChatLoopEngineeringConfig();
+    expect(config.initialInstruction).toBe('方針を守れ');
+    expect(config.continueInstruction).toBe('継続');
+  });
+
+  it('空文字の指示文はそのまま返す（連結側が無効化として扱う）', () => {
+    __mock.setConfig('agent', { 'chat.loopEngineering.initialInstruction': '' });
+    expect(readChatLoopEngineeringConfig().initialInstruction).toBe('');
+  });
+
+  it('文字列でない指示文は既定へ倒す', () => {
+    __mock.setConfig('agent', { 'chat.loopEngineering.continueInstruction': 42 });
+    expect(readChatLoopEngineeringConfig().continueInstruction).toBe(
+      DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
+    );
   });
 });
 

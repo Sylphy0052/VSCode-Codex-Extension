@@ -1422,12 +1422,29 @@ function buildTaskEvent(
       // `failed`と一緒くたにすると、オーケストレーターは「壊れて失敗した」のか
       // 「同じ内容を繰り返しているだけ」なのかを区別できない
       const failure = live.runState.tasks.get(taskId)?.failure;
-      if (failure?.kind === 'stalled') {
+      // 撤退の申告（`escalated`）と時間切れ（`timedOut`）も同じ`taskStalled`で通知する
+      // （issue #891）。通知の種別を増やさないのは、オーケストレーターにとっての意味が
+      // 「壊れて失敗したのではなく、続きを試す余地が残っている停止」で共通しているため。
+      // どれで止まったのかは本文で言い分ける
+      if (failure?.kind === 'stalled' || failure?.kind === 'escalated') {
+        const cause =
+          failure.kind === 'stalled'
+            ? '停滞したため停止しました（同じ応答が繰り返されました）'
+            : '自力では解決できないと申告したため停止しました';
         return {
           kind: 'taskStalled',
           body: withSummary(
-            `タスク ${taskId} が停滞したため停止しました（同じ応答が繰り返されました）。` +
+            `タスク ${taskId} が${cause}。` +
               'continue_taskで指示を変えて続けるか、retry_taskで最初からやり直せます。',
+          ),
+        };
+      }
+      if (failure?.kind === 'timedOut') {
+        return {
+          kind: 'taskStalled',
+          body: withSummary(
+            `タスク ${taskId} が時間上限に達したため停止しました。` +
+              'continue_taskで続けるか、retry_taskで最初からやり直せます。',
           ),
         };
       }

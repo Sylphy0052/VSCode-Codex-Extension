@@ -4652,7 +4652,16 @@ export class WorkflowRunner {
       //
       // それ以外（done / failed）は従来どおり解放する（design.md §16.10の4）。
       // 再試行はここで新しいセッション・worktreeを新規に作るため、古いものは残さない
-      if (reason !== 'maxReached' && reason !== 'stalled') {
+      //
+      // 撤退の申告（`escalated`）と時間切れ（`timedOut`）も同じ集合に入れる（issue #891）。
+      // どちらもセッションは生きたまま止まっているだけで、指示を変えれば続きを試せる
+      // （状態側の同じ判定は`runState.ts`の`isResumableFailure`）
+      if (
+        reason !== 'maxReached' &&
+        reason !== 'stalled' &&
+        reason !== 'escalated' &&
+        reason !== 'timedOut'
+      ) {
         liveTask?.session.dispose();
       }
 

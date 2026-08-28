@@ -2236,6 +2236,11 @@ export function chatScript(
     // design.md §16.8。ワークフローViewの「タスク停止」による停止。manual（この画面の
     // 停止ボタン）とは別の操作なので、LoopStopReason側で区別されている
     taskStopped: 'ワークフローから停止されました',
+    // issue #891。エージェント自身が行き詰まりを申告した（応答の最終行が合図と完全一致）
+    escalated: '解決できないと申告があったため止めました',
+    // issue #891。時間上限に達した。判定はターンの完了時に行うため、実際に止まるのは上限を
+    // 超えた直後のターン境界になる
+    timedOut: '時間上限に達したため止めました',
   };
 
   function applyLoop(loop) {
@@ -2271,6 +2276,8 @@ export function chatScript(
       initialPrompt: el('loopInitial').value,
       continuePrompt: el('loopContinue').value,
       maxIterations: el('loopMax').value,
+      // 時間上限（分、issue #891）。空なら拡張機能側で「時間では止めない」に丸められる
+      maxDurationMinutes: el('loopMaxDuration').value,
       condition: el('loopCondition').value,
     };
     if (!plan.continuePrompt.trim()) {
@@ -2664,6 +2671,20 @@ export function chatScript(
     button.querySelector('.composerOverflowLabel').textContent = 'ターン要約を' + action;
   }
 
+  el('loopEngineeringToggle').addEventListener('click', () =>
+    vscode.postMessage({ type: 'toggleLoopEngineering' }),
+  );
+
+  // ループエンジニアリングモード（issue #891）。ターン要約と同じ形のトグルだが、
+  // 効く相手は手動で送る発言ではなくループが送る指示
+  function applyLoopEngineeringEnabled(enabled) {
+    const button = el('loopEngineeringToggle');
+    const action = enabled ? '無効にする' : '有効にする';
+    button.setAttribute('aria-pressed', String(enabled));
+    button.setAttribute('aria-label', 'ループエンジニアリングを' + action);
+    button.querySelector('.composerOverflowLabel').textContent = 'ループエンジニアリングを' + action;
+  }
+
   /**
    * アイコン列の「…」メニューの開閉（issue #296）。畳んだボタンはcomposerIconRowの
    * 中に実体をそのまま置いてあり、hidden属性で表と行き来させているだけなので、
@@ -2976,6 +2997,9 @@ export function chatScript(
     }
     if (data.type === 'turnSummary' && typeof data.enabled === 'boolean') {
       applyTurnSummaryEnabled(data.enabled);
+    }
+    if (data.type === 'loopEngineering' && typeof data.enabled === 'boolean') {
+      applyLoopEngineeringEnabled(data.enabled);
     }
     if (data.type === 'files') {
       // 打っている途中に古い応答が届くことがある。今の語と一致するものだけ出す
