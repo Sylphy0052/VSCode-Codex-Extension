@@ -6,8 +6,8 @@ import {
   DEFAULT_STALL_REPEAT_COUNT,
 } from './stallDetector';
 import {
-  appendLoopEngineeringInstruction,
   agentMessageFinalLine,
+  appendLoopEngineeringInstruction,
   declaresEscalate,
   lastAgentMessage,
   type LoopEngineeringConfig,
@@ -284,6 +284,10 @@ export function decoratePrompt(prompt: string, condition: string): string {
  * `declaresEscalate`（issue #891）が同じ理由で最終行の完全一致にしてあり、判定方式を
  * 揃えた（共通の取り出しは`agentMessageFinalLine`）。
  *
+ * **これは挙動の変更である。** 合図を文中へ埋めて返していたエージェントでは、これまで
+ * 終了していたループが終了しなくなる。`decoratePrompt`の依頼文も、合図だけを最後の行へ
+ * 出すよう明示する文面へ合わせて直してある。
+ *
  * **その発言が現在のターンのものかは、この関数では判断しない**（issue #937）。会話全体
  * から直近の`agentMessage`を探す形にしていた頃は、ツール実行だけで本文を返さなかった
  * ターンで過去の発言を拾い、ループを始める前に残っていた合図で停止しえた。どの発言を
@@ -320,14 +324,6 @@ function isSameBoundary(
 }
 
 /**
- * 同じ指示を条件成立まで送り続ける。
- *
- * ターンの完了は `ChatState.busy` の立ち下がりで見る。CodexとClaude Codeで
- * 状態の形が共通なので、この制御はプロバイダを問わず同じものを使える。
- * 画面ではなく拡張機能側に置くのは、タブの再描画やウィンドウのリロードで
- * 進行中のループが消えないようにするため。
- */
-/**
  * ターン境界で覚えておく、最後の`agentMessage`の目印（issue #937）。
  *
  * `id`と最終行の**両方**が前の境界と一致していれば、そのターンは新しい発言を出して
@@ -338,6 +334,14 @@ interface AgentMessageBoundary {
   finalLine: string | undefined;
 }
 
+/**
+ * 同じ指示を条件成立まで送り続ける。
+ *
+ * ターンの完了は `ChatState.busy` の立ち下がりで見る。CodexとClaude Codeで
+ * 状態の形が共通なので、この制御はプロバイダを問わず同じものを使える。
+ * 画面ではなく拡張機能側に置くのは、タブの再描画やウィンドウのリロードで
+ * 進行中のループが消えないようにするため。
+ */
 export class LoopController {
   private plan: LoopPlan | undefined;
   private status: LoopStatus = idleLoopStatus;

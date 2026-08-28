@@ -3,12 +3,12 @@ import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { ChatItem } from '../../src/appserver/chatState';
 import {
+  agentMessageFinalLine,
   appendLoopEngineeringInstruction,
   declaresEscalate,
   defaultLoopEngineeringConfig,
   DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
   DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION,
-  agentMessageFinalLine,
   lastAgentMessage,
   LOOP_ESCALATE_TOKEN,
   type LoopEngineeringConfig,
