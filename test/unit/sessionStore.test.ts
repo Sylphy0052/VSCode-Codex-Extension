@@ -194,7 +194,7 @@ describe('SessionStore.list', () => {
   it('indexが無ければ空を返す', async () => {
     const empty = new FakeFs({});
     const result = await new SessionStore(empty, paths, new InMemoryMetaCache()).list(options());
-    expect(result).toEqual({ sessions: [], skippedIndexLines: 0, unresolved: 0 });
+    expect(result).toEqual({ sessions: [], skippedIndexLines: 0, unresolved: 0, filteredOut: 0 });
   });
 
   it('壊れたindex行を数えつつ残りを返す', async () => {

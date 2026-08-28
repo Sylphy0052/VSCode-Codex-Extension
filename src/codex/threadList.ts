@@ -37,8 +37,10 @@ export function parseThreadListPage(result: unknown): ThreadListPage {
  * - `threadSource` が明示的に `'user'` 以外の値（`'subagent'` など）を持つ派生スレッドのみ除く。
  *   実測（codex-cli 0.147.0、`thread/list` を全件ページングし尽くした33件）では `threadSource` は
  *   全件 `null` だったため、`null` / 未設定はユーザースレッドとして通す。ファイル読み経路
- *   （`sessionMeta.isUserThread`）は `session_index.jsonl` の `thread_source` に実値が入るため
- *   従来どおり `=== 'user'` の絞り込みで正しい（design.md §4.4）。
+ *   （`sessionMeta.isUserThread`）も同じ規則で判定する。あちらが見ているのは
+ *   `session_index.jsonl` ではなくロールアウト1行目の `session_meta` で、codex-cli 0.148.0 では
+ *   そこに `thread_source` が無い。未設定を除外扱いにすると一覧が丸ごと空になるため、
+ *   両経路とも「明示的に `'user'` 以外のときだけ除く」に揃えてある（design.md §4.4、issue #943）。
  * - `archived` に相当するフィールドは無いため、`path` が `archivedSessionsDir` 配下かどうかで
  *   判定する（ファイル読み経路と同じ考え方。design.md §4.2）。
  * - `updatedAt` は実測でUnix epoch秒（数値）。文字列（ISO8601）で来た場合も念のため受け付ける。

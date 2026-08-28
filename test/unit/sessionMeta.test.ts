@@ -92,8 +92,40 @@ describe('sessionIdFromRolloutName', () => {
 });
 
 describe('isUserThread', () => {
-  it('ユーザー起点の対話セッションのみ真', () => {
+  it('ユーザー起点の対話セッションは真', () => {
     expect(isUserThread(parseSessionMeta(realLine)!)).toBe(true);
+  });
+
+  it('thread_source が無い session_meta も真（codex-cli 0.148.0 では書かれない。issue #943）', () => {
+    const line = JSON.stringify({
+      type: 'session_meta',
+      payload: {
+        session_id: ID,
+        id: ID,
+        timestamp: '2026-08-29T06:50:41.000Z',
+        cwd: '/home/user/workspace/novel-writer',
+        originator: 'codex_vscode',
+        cli_version: '0.148.0',
+        source: 'vscode',
+      },
+    });
+    const meta = parseSessionMeta(line);
+    expect(meta?.threadSource).toBeUndefined();
+    expect(isUserThread(meta!)).toBe(true);
+  });
+
+  it('thread_source が subagent の派生スレッドは偽', () => {
+    const line = JSON.stringify({
+      type: 'session_meta',
+      payload: {
+        session_id: ID,
+        cwd: '/w',
+        timestamp: '2026-08-06T15:57:16Z',
+        originator: 'codex_vscode',
+        thread_source: 'subagent',
+      },
+    });
+    expect(isUserThread(parseSessionMeta(line)!)).toBe(false);
   });
 });
 

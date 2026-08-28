@@ -142,7 +142,16 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-/** ユーザーが直接始めた対話セッションか。index に載るのはこれだけ（設計書 §4.1）。 */
+/**
+ * ユーザーが直接始めた対話セッションか（設計書 §4.1）。
+ *
+ * `thread_source` が明示的に `'user'` 以外の値（`'subagent'` など）を持つ派生スレッドだけを除く。
+ * codex-cli 0.148.0 の `session_meta` にはこのキー自体が無く、未設定を除外扱いにすると
+ * 一覧が丸ごと空になる（issue #943）。`thread/list` 経路（`threadList.normalizeThread`）も
+ * 同じ規則で判定しており、両経路の扱いを揃えている。
+ */
 export function isUserThread(meta: SessionMeta): boolean {
-  return meta.threadSource === 'user';
+  return (
+    meta.threadSource === undefined || meta.threadSource === '' || meta.threadSource === 'user'
+  );
 }

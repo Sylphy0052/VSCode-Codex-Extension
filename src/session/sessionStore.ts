@@ -50,6 +50,11 @@ export interface ListResult {
   /** ロールアウトが見つからず cwd を解決できなかった件数。 */
   unresolved: number;
   /**
+   * 派生スレッド（`thread_source` が `'user'` 以外）として一覧から除いた件数。
+   * 除外だけで0件になったときに原因が分かるようにするためのもの（issue #943）。
+   */
+  filteredOut?: number;
+  /**
    * `thread/list` を使わずファイル読みへ退避した理由。`thread/list` で組み立てられた場合は
    * undefined（黙って切り替わったことが分からなくなるのを防ぐため、退避時は必ず設定する。
    * issue #45）。
@@ -195,6 +200,7 @@ export class SessionStore {
 
     const sessions: SessionSummary[] = [];
     let unresolved = 0;
+    let filteredOut = 0;
 
     for (const { id, location, updatedAt } of ordered) {
       if (sessions.length >= Math.max(0, options.maxEntries)) {
@@ -208,6 +214,7 @@ export class SessionStore {
       }
       // サブエージェントなどの派生スレッドは一覧に出さない（設計書 §4.1）
       if (!isUserThread(meta)) {
+        filteredOut++;
         continue;
       }
       if (options.scope === 'workspace' && !isWithinAny(meta.cwd, options.workspaceFolders)) {
@@ -232,7 +239,7 @@ export class SessionStore {
       }
     }
 
-    return { sessions, skippedIndexLines: skipped, unresolved };
+    return { sessions, skippedIndexLines: skipped, unresolved, filteredOut };
   }
 
   /**
