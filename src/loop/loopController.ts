@@ -17,6 +17,7 @@ import {
   collectCommandEvidence,
   collectRecentTurns,
   DEFAULT_MAX_INDETERMINATE,
+  isSettledCommandItem,
   normalizeGoalDefinition,
   type GoalEvaluator,
   type GoalEvidence,
@@ -328,6 +329,14 @@ export class LoopController {
    * 走らせない（評価はターンごとに1回）。
    */
   private evaluating = false;
+  /**
+   * 一時停止中にターンが完了したため、送らずに保留している次の指示（issue #909）。
+   *
+   * `resume()`がこれをそのまま送る。`undefined`は「まだ送るべき指示が決まっていない」
+   * ——ターンが走行中か、停止判定で止まったか——を表し、この場合`resume()`は何も送らない
+   * （走行中のターンの完了時に`observe()`が続きを決める）。`start()`・`stop()`で戻す。
+   */
+  private pendingPrompt: string | undefined;
 
   constructor(
     private readonly send: (text: string) => void | Promise<void>,
@@ -368,9 +377,13 @@ export class LoopController {
   }
 
   /**
-   * `pause()` で止めたループを再開し、直ちに次の `continuePrompt` を送る
+   * `pause()` で止めたループを再開し、**保留していた指示があればそれを送る**
    * （design.md §16.21「返信が届いたら running へ戻し、返信の本文を添えて次の指示を送る」。
    * 本文を添える処理自体は `TaskSession.setPromptTransform` 側で行う）。
+   *
+   * 送る指示は`sendNext`が保留したもの（issue #909）。ここで組み立て直さないのは、
+   * ゴール駆動で直前の評価の`gaps`・`nextFocus`を失わないため。一時停止中に上限へ達した
+   * ・撤退が申告された等で既に止まっている場合は、そもそも保留が無いので何も送らない。
    *
    * 走っていない、または一時停止中でなければ何もしない。
    */
@@ -379,15 +392,25 @@ export class LoopController {
       return;
     }
     this.paused = false;
-    this.dispatch(this.continuationPrompt(this.plan), 'continue');
+    const pending = this.pendingPrompt;
+    if (pending === undefined) {
+      // 送るべき指示がまだ決まっていない（issue #909）。ターンが走行中なら、その完了時の
+      // `observe()`が停止判定を経て続きを決める。ここで送ると、完了を見ないまま次の指示を
+      // 重ねて送ってしまう
+      return;
+    }
+    this.pendingPrompt = undefined;
+    this.dispatch(pending, 'continue');
   }
 
   /**
-   * 一時停止からの再開で送る指示（issue #892）。
+   * 初回に送る指示（issue #892）。
    *
    * ゴール駆動では`continuePrompt`を使わない（次の指示文はEvaluatorの判定から組み立てる）
-   * ため、空文字を送ってしまわないよう元の目的だけを添えた文にする。再開の直後は
-   * まだ新しい判定が無いため、`gaps`や`nextFocus`は付けようがない。
+   * ため、空文字を送ってしまわないよう元の目的だけを添えた文にする。まだ1度も評価して
+   * いないため、`gaps`や`nextFocus`は付けようがない。
+   *
+   * 再開（`resume`）ではこれを使わない。保留していた指示をそのまま送る（issue #909）。
    */
   private continuationPrompt(plan: LoopPlan): string {
     if (plan.goal === undefined) {
@@ -405,6 +428,7 @@ export class LoopController {
     this.seenEvidenceIds = new Set();
     this.indeterminateStreak = 0;
     this.evaluating = false;
+    this.pendingPrompt = undefined;
     this.status = {
       running: true,
       iteration: 0,
@@ -445,6 +469,7 @@ export class LoopController {
     this.seenEvidenceIds = new Set();
     this.indeterminateStreak = 0;
     this.evaluating = false;
+    this.pendingPrompt = undefined;
     this.status = { ...this.status, running: false, stopReason: reason };
     this.onStatus(this.status);
     return true;
@@ -492,11 +517,6 @@ export class LoopController {
       this.stop('failed');
       return;
     }
-    if (this.paused) {
-      // waitingReply（design.md §16.21）。resume()が呼ばれるまでここで待つ。
-      // 回数上限・終了条件の判定はresume後の次回observe()で改めて行う
-      return;
-    }
     // 撤退の申告（issue #891）は終了条件（`condition`）の有無に関わらず見る。
     // 「解決できないので止めてくれ」は条件の成立とは独立した申し出であり、条件を
     // 設定していないループでも効かせる必要がある。完了（`done`）より先に判定するのは、
@@ -515,18 +535,17 @@ export class LoopController {
     // `stallThreshold`回連続していないかを見る。履歴の更新は判定の対象になった
     // ターンの直後、maxReachedの判定より先に行う——停滞と回数切れが同時に成立しうる
     // 最終ターンでは、進捗の無さそのものを理由にできる停滞判定を優先する
+    // 履歴の更新はゴール駆動かどうかに関わらずここで行う。**判定**の位置だけが違う
+    // （ゴール駆動ではEvaluatorの後ろ。issue #909）
     this.stallHistory = pushTurnSignature(
       this.stallHistory,
       extractTurnSignature(state),
       this.stallThreshold,
     );
-    if (detectStalledLoop(this.stallHistory, this.stallThreshold)) {
-      this.stop('stalled');
-      return;
-    }
-    // ゴール駆動ループ（issue #892）はここから先を非同期で行う。時間上限・回数切れの
+    // ゴール駆動ループ（issue #892）はここから先を非同期で行う。停滞・時間上限・回数切れの
     // 判定を評価より後ろに置くのは、**最終ターンで達成していた場合を取りこぼさない**ため。
-    // 先に回数で止めると、達成していたループが`maxReached`（未達扱い）で終わってしまう
+    // 先に止めると、達成していたループが`stalled`や`maxReached`（未達扱い）で終わってしまう。
+    // 完了判定の所有権をEvaluatorへ渡した以上、終局の判定はEvaluatorに先に見せる（issue #909）
     if (plan.goal !== undefined) {
       this.evaluating = true;
       void this.runGoalTurn(plan, state).finally(() => {
@@ -534,9 +553,24 @@ export class LoopController {
       });
       return;
     }
-    // 時間上限（issue #891）。停滞・回数切れと並ぶ3本目の縛りで、ターン境界で見る。
-    // 停滞判定より後、回数切れより前に置く——停滞は「進んでいない」という原因を
-    // 名指しできる分だけ理由として具体的で、時間切れ・回数切れより優先する価値がある
+    this.finishTurn(plan, plan.continuePrompt);
+  }
+
+  /**
+   * ターンの後始末（停滞・時間・回数の判定と、次の指示の送信）。
+   *
+   * ゴール駆動と従来のループで共通の後段。ゴール駆動ではEvaluatorの終局判定
+   * （`achieved` / `escalate`）を先に見たうえでここへ来る（issue #909）。
+   */
+  private finishTurn(plan: LoopPlan, nextPrompt: string): void {
+    // 停滞判定（design.md §16.27、Issue #336）。回数上限・時間上限より先に見る——
+    // 停滞は「進んでいない」という原因を名指しできる分だけ理由として具体的で、
+    // 時間切れ・回数切れより優先する価値がある
+    if (detectStalledLoop(this.stallHistory, this.stallThreshold)) {
+      this.stop('stalled');
+      return;
+    }
+    // 時間上限（issue #891）。停滞・回数切れと並ぶ3本目の縛りで、ターン境界で見る
     if (this.hasExceededDuration(plan)) {
       this.stop('timedOut');
       return;
@@ -545,7 +579,22 @@ export class LoopController {
       this.stop('maxReached');
       return;
     }
-    this.dispatch(plan.continuePrompt, 'continue');
+    this.sendNext(nextPrompt);
+  }
+
+  /**
+   * 次のターンを送る。**一時停止中なら送らず、送るはずだった指示を保留する**（issue #909）。
+   *
+   * `pause()`が止めるのは次の指示の送信だけであり、ターンの後始末（停止判定）ではない。
+   * 保留した指示は`resume()`がそのまま送る。ここで捨てて`resume()`側で組み立て直すと、
+   * ゴール駆動では直前の評価の`gaps`・`nextFocus`が失われる。
+   */
+  private sendNext(prompt: string): void {
+    if (this.paused) {
+      this.pendingPrompt = prompt;
+      return;
+    }
+    this.dispatch(prompt, 'continue');
   }
 
   /**
@@ -599,22 +648,20 @@ export class LoopController {
     } else {
       this.indeterminateStreak = 0;
     }
-    if (this.hasExceededDuration(plan)) {
-      this.stop('timedOut');
-      return;
-    }
-    if (this.status.iteration >= plan.maxIterations) {
-      this.stop('maxReached');
-      return;
-    }
-    this.dispatch(buildNextTurnPrompt(evaluation, goal.definition.purpose), 'continue');
+    // 終局でない判定（`continue` / 続きを許す`indeterminate`）のときだけ、停滞・時間・
+    // 回数の縛りを見る。Evaluatorの終局判定を先に見るのは issue #909 の順序
+    this.finishTurn(plan, buildNextTurnPrompt(evaluation, goal.definition.purpose));
   }
 
   /** このターンで新しく得た証拠をledgerへ積む。 */
   private ingestEvidence(state: ChatState, iteration: number): void {
     const added = collectCommandEvidence(state.items, this.seenEvidenceIds, iteration);
     for (const item of state.items) {
-      if (item.kind === 'commandExecution') {
+      // **終了コードが読める項目だけを「拾った」ものとして記録する（issue #909）。**
+      // 実行中の項目まで記録すると、終了コードが出た次のターンで`collectCommandEvidence`が
+      // `seen`に弾かれ、そのコマンドは二度と証拠にならない。「実行中のものは次のターンで
+      // 拾う」という`collectCommandEvidence`の前提を壊さないため、判定を揃える
+      if (isSettledCommandItem(item)) {
         this.seenEvidenceIds.add(item.id);
       }
     }
