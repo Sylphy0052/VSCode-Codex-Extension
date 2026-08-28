@@ -6,9 +6,16 @@ import {
   LoopController,
   LOOP_DONE_TOKEN,
   LOOP_ITERATION_LIMIT,
+  LOOP_DURATION_LIMIT_MINUTES,
   normalizeLoopPlan,
   type LoopPlan,
 } from '../../src/loop/loopController';
+import {
+  defaultLoopEngineeringConfig,
+  DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
+  DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION,
+  LOOP_ESCALATE_TOKEN,
+} from '../../src/loop/loopEngineering';
 
 const state = (overrides: Partial<ChatState> = {}): ChatState => ({
   ...initialChatState,
@@ -460,5 +467,170 @@ describe('LoopController: 停滞検知（design.md §16.27、Issue #336）', () 
     expect(sent).toHaveLength(3);
     expect(controller.running).toBe(false);
     expect(controller.getStatus().stopReason).toBe('stalled');
+  });
+});
+
+describe('LoopController（撤退の申告・時間上限・ループエンジニアリング、issue #891）', () => {
+  it('応答の最終行が合図と完全一致したらescalatedで止まる', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan({ maxIterations: 5 }));
+    runTurn(
+      controller,
+      state({ items: [agentMessage(`権限が無く進められない。\n${LOOP_ESCALATE_TOKEN}`)] }),
+    );
+    expect(controller.running).toBe(false);
+    expect(controller.getStatus().stopReason).toBe('escalated');
+    expect(sent).toHaveLength(1);
+  });
+
+  it('合図が本文中に説明として現れただけでは止まらない', () => {
+    // 指示文そのものが会話にこの綴りを含むため、includes判定だと1回目で誤停止する
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan({ maxIterations: 5 }));
+    runTurn(
+      controller,
+      state({
+        items: [agentMessage(`行き詰まったら ${LOOP_ESCALATE_TOKEN} を返します。続けます。`)],
+      }),
+    );
+    expect(controller.running).toBe(true);
+    expect(controller.getStatus().stopReason).toBeUndefined();
+    expect(sent).toHaveLength(2);
+  });
+
+  it('終了条件を設定していなくても撤退の申告は効く', () => {
+    const { send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan({ condition: '', maxIterations: 5 }));
+    runTurn(controller, state({ items: [agentMessage(LOOP_ESCALATE_TOKEN)] }));
+    expect(controller.getStatus().stopReason).toBe('escalated');
+  });
+
+  it('時間上限を超えたターンの完了時にtimedOutで止まる', () => {
+    const { sent, send } = spy();
+    let clock = 1_000;
+    const controller = new LoopController(send, undefined, undefined, () => clock);
+    controller.start(plan({ maxIterations: 50, maxDurationMs: 60_000 }));
+    clock += 30_000;
+    runTurn(controller, state({ turnResultText: '1回目' }));
+    expect(controller.running).toBe(true);
+    clock += 30_000;
+    runTurn(controller, state({ turnResultText: '2回目' }));
+    expect(controller.running).toBe(false);
+    expect(controller.getStatus().stopReason).toBe('timedOut');
+    // 上限を超えたことに気づくのはターンの完了時なので、送信は2回で止まる
+    expect(sent).toHaveLength(2);
+  });
+
+  it('時間上限を指定しなければ時間では止まらない', () => {
+    const { send } = spy();
+    let clock = 0;
+    const controller = new LoopController(send, undefined, undefined, () => clock);
+    controller.start(plan({ maxIterations: 3 }));
+    clock += 10 * 24 * 60 * 60 * 1000;
+    runTurn(controller, state({ turnResultText: '1回目' }));
+    expect(controller.running).toBe(true);
+    expect(controller.getStatus().stopReason).toBeUndefined();
+  });
+
+  it('1回目には方針文を、2回目以降には継続用の文を連結する', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(
+      plan({
+        maxIterations: 3,
+        engineering: { ...defaultLoopEngineeringConfig, enabled: true },
+      }),
+    );
+    runTurn(controller, state({ turnResultText: '1回目' }));
+    expect(sent[0]).toContain(DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION);
+    expect(sent[1]).toContain(DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION);
+    expect(sent[1]).not.toContain(DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION);
+  });
+
+  it('初回指示が空で継続指示から始めても、1回目には方針文を連結する', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(
+      plan({
+        initialPrompt: '',
+        engineering: { ...defaultLoopEngineeringConfig, enabled: true },
+      }),
+    );
+    expect(sent[0]).toContain(DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION);
+  });
+
+  it('モードが無効なら送信テキストは一字一句変わらない', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan({ condition: '', engineering: defaultLoopEngineeringConfig }));
+    expect(sent[0]).toBe('第1話を執筆');
+  });
+
+  it('方針は終了条件より前に置く', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(
+      plan({
+        condition: '20話完了',
+        engineering: { ...defaultLoopEngineeringConfig, enabled: true },
+      }),
+    );
+    const first = sent[0] ?? '';
+    expect(first.indexOf(DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION)).toBeLessThan(
+      first.indexOf('20話完了'),
+    );
+  });
+});
+
+describe('normalizeLoopPlan（時間上限とループエンジニアリング、issue #891）', () => {
+  it('分をミリ秒へ直す', () => {
+    expect(
+      normalizeLoopPlan({ continuePrompt: '次へ', maxIterations: 5, maxDurationMinutes: '30' })
+        ?.maxDurationMs,
+    ).toBe(30 * 60_000);
+  });
+
+  it('空・0以下・数値でない指定は「時間では止めない」として扱う', () => {
+    for (const raw of ['', '0', '-5', 'ずっと', undefined]) {
+      const plan = normalizeLoopPlan({
+        continuePrompt: '次へ',
+        maxIterations: 5,
+        maxDurationMinutes: raw,
+      });
+      expect(plan).toBeDefined();
+      expect(plan && 'maxDurationMs' in plan).toBe(false);
+    }
+  });
+
+  it('時間上限は24時間で頭打ちにする', () => {
+    expect(
+      normalizeLoopPlan({ continuePrompt: '次へ', maxIterations: 5, maxDurationMinutes: 99999 })
+        ?.maxDurationMs,
+    ).toBe(LOOP_DURATION_LIMIT_MINUTES * 60_000);
+  });
+
+  it('方針は引数から受け取り、webviewから届いた値では差し替えられない', () => {
+    const engineering = { ...defaultLoopEngineeringConfig, enabled: true };
+    const built = normalizeLoopPlan(
+      {
+        continuePrompt: '次へ',
+        maxIterations: 5,
+        engineering: {
+          enabled: true,
+          initialInstruction: '乗っ取られた指示',
+          continueInstruction: '',
+        },
+      },
+      engineering,
+    );
+    expect(built?.engineering).toEqual(engineering);
+  });
+
+  it('方針を渡さなければキーごと持たない', () => {
+    const built = normalizeLoopPlan({ continuePrompt: '次へ', maxIterations: 5 });
+    expect(built && 'engineering' in built).toBe(false);
   });
 });

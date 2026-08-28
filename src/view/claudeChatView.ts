@@ -34,6 +34,8 @@ import {
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
   setChatTurnSummaryEnabled,
+  readChatLoopEngineeringConfig,
+  setChatLoopEngineeringEnabled,
   readClaudeConfig,
   readWorkflowsConfig,
   workspaceFolderPaths,
@@ -1254,6 +1256,7 @@ export class ClaudeChatViewManager
       showAgentSelector: true,
       composerButtons: composerButtonsConfig.buttons,
       turnSummaryEnabled: readChatTurnSummaryConfig().enabled,
+      loopEngineeringEnabled: readChatLoopEngineeringConfig().enabled,
       // effort・エージェントだけ扱いが違う。黙って効かないより、効くタイミングを書くほうがまし
       settingsNote:
         'モデルと承認は今の会話にすぐ効きます。Effortは送りますが、CLIが結果を返さないため反映は確かめられません。エージェントは起動引数でのみ決まるため、変更は次のセッションから効きます。「既定」へ戻す操作も次のセッションから効きます。',
@@ -1804,7 +1807,9 @@ export class ClaudeChatViewManager
         return;
       }
       if (type === 'loop/start') {
-        const plan = normalizeLoopPlan(m['plan']);
+        // ループエンジニアリングの方針（issue #891）は設定から読んで渡す。webviewから
+        // 届いた`plan`には含めない（`chatView.ts`側と同じ理由）
+        const plan = normalizeLoopPlan(m['plan'], readChatLoopEngineeringConfig());
         if (plan === undefined) {
           void vscode.window.showErrorMessage('ループの継続指示と最大回数を入力してください');
           return;
@@ -1845,6 +1850,13 @@ export class ClaudeChatViewManager
         const enabled = !readChatTurnSummaryConfig().enabled;
         void setChatTurnSummaryEnabled(enabled)
           .then(() => entry.panel?.webview.postMessage({ type: 'turnSummary', enabled }))
+          .catch((e: unknown) => this.reportError(e));
+        return;
+      }
+      if (type === 'toggleLoopEngineering') {
+        const enabled = !readChatLoopEngineeringConfig().enabled;
+        void setChatLoopEngineeringEnabled(enabled)
+          .then(() => entry.panel?.webview.postMessage({ type: 'loopEngineering', enabled }))
           .catch((e: unknown) => this.reportError(e));
         return;
       }

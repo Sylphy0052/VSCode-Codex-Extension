@@ -49,6 +49,11 @@ import {
 import { DEFAULT_SECOND_OPINION_TEMPLATE } from './secondOpinion/prompt';
 import { DEFAULT_SECOND_OPINION_TIMEOUT_MS } from './secondOpinion/run';
 import { DEFAULT_TURN_SUMMARY_INSTRUCTION, type TurnSummaryConfig } from './view/turnSummary';
+import {
+  DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
+  DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION,
+  type LoopEngineeringConfig,
+} from './loop/loopEngineering';
 import { normalizeSendOn, type SendOnMode } from './view/sendKey';
 import type { HistoryGroupBy } from './util/sessionGrouping';
 import { parseSessionPresets, type SessionPreset } from './sessionPresets';
@@ -265,6 +270,32 @@ export async function setChatTurnSummaryEnabled(enabled: boolean): Promise<void>
   await vscode.workspace
     .getConfiguration('agent')
     .update('chat.turnSummary.enabled', enabled, vscode.ConfigurationTarget.Global);
+}
+
+/**
+ * ループが送る指示の末尾へ付ける方針（`agent.chat.loopEngineering.*`、issue #891）。
+ * 既定は無効で、有効にするまでループの送信テキストは一字一句変わらない。連結の判断と
+ * 実体は`src/loop/loopEngineering.ts`（`vscode`をimportしないロジック層）が持ち、
+ * ここでは生値を渡すだけ（`readChatTurnSummaryConfig`と同じ流儀・同じスコープ）。
+ */
+export function readChatLoopEngineeringConfig(): LoopEngineeringConfig {
+  const c = vscode.workspace.getConfiguration('agent');
+  const initial = c.get<string>('chat.loopEngineering.initialInstruction');
+  const cont = c.get<string>('chat.loopEngineering.continueInstruction');
+  return {
+    enabled: c.get<boolean>('chat.loopEngineering.enabled') ?? false,
+    initialInstruction:
+      typeof initial === 'string' ? initial : DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION,
+    continueInstruction:
+      typeof cont === 'string' ? cont : DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
+  };
+}
+
+/** ループの送信にループエンジニアリングの方針を付けるかを、ユーザー設定へ保存する。 */
+export async function setChatLoopEngineeringEnabled(enabled: boolean): Promise<void> {
+  await vscode.workspace
+    .getConfiguration('agent')
+    .update('chat.loopEngineering.enabled', enabled, vscode.ConfigurationTarget.Global);
 }
 
 /** ターンの完了・承認待ちの通知（issue #286、design.md §14.55）。 */

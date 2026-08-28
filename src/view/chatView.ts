@@ -36,6 +36,8 @@ import {
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
   setChatTurnSummaryEnabled,
+  readChatLoopEngineeringConfig,
+  setChatLoopEngineeringEnabled,
   readConfig,
   readWorkflowsConfig,
   workspaceFolderPaths,
@@ -743,6 +745,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       showSettings: true,
       composerButtons: composerButtonsConfig.buttons,
       turnSummaryEnabled: readChatTurnSummaryConfig().enabled,
+      loopEngineeringEnabled: readChatLoopEngineeringConfig().enabled,
       // review/startはapp-serverの標準機能なので、コマンド一覧を待たずに常に出す
       review: { mode: 'quickPick' },
       // 会話の1行要約（issue #228、design.md §14.41）。拡張機能の独自機能として、
@@ -1136,7 +1139,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       if (type === 'loop/start') {
-        const plan = normalizeLoopPlan(m['plan']);
+        // ループエンジニアリングの方針（issue #891）は設定から読んで渡す。webviewから
+        // 届いた`plan`には含めない——送信文の組み立てに使う指示文をwebview側の値で
+        // 差し替えられるようにしないため
+        const plan = normalizeLoopPlan(m['plan'], readChatLoopEngineeringConfig());
         if (plan === undefined) {
           void vscode.window.showErrorMessage('ループの継続指示と最大回数を入力してください');
           return;
@@ -1204,6 +1210,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           await this.settings.update(key, value);
         }
         this.refreshSettings();
+        return;
+      }
+      if (type === 'toggleLoopEngineering') {
+        const enabled = !readChatLoopEngineeringConfig().enabled;
+        await setChatLoopEngineeringEnabled(enabled);
+        void entry.panel?.webview.postMessage({ type: 'loopEngineering', enabled });
         return;
       }
       if (type === 'toggleTurnSummary') {

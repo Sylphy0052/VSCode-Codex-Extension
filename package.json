@@ -846,6 +846,24 @@
           "scope": "window",
           "markdownDescription": "`agent.chat.turnSummary.enabled` が有効なときに発言の末尾へ付け足す指示文。本文との間には空行が入る。空文字にすると付け足さない（無効化と同じ）。"
         },
+        "agent.chat.loopEngineering.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "ループが送る指示の末尾へ、`agent.chat.loopEngineering.initialInstruction` / `agent.chat.loopEngineering.continueInstruction` の方針を毎回付け足す（issue #891、Codex/Claude Code両画面共通）。機械的な検証で完了を判断させ、効かない手を繰り返させず、エラーを次のターンへ折り返させ、行き詰まったら `<<LOOP_ESCALATE>>` で撤退を申告させるための設定。既定は無効で、有効にするまでループの送信内容は変わらない。手動で送る発言には付かない（そちらは `agent.chat.turnSummary.*`）。"
+        },
+        "agent.chat.loopEngineering.initialInstruction": {
+          "type": "string",
+          "default": "このループでは次の方針で作業すること。1) 完了したかどうかは、テストの終了コードやコマンドの実行結果など、機械的に確認できる根拠で判断する。自己申告で完了としない。2) 前回と同じやり方で解決しなかった場合は、同じ手を繰り返さず方針を変える。3) 直前のターンで出たエラーや失敗した出力は、次の作業の入力として扱う。4) 自力では解決できないと判断した場合は、作業を続けずに、応答の最終行へ <<LOOP_ESCALATE>> とだけ出力して人へ引き継ぐ。",
+          "scope": "window",
+          "markdownDescription": "`agent.chat.loopEngineering.enabled` が有効なときに、ループの**1回目**の指示の末尾へ付け足す方針。本文との間には空行が入る。空文字にすると付け足さない。`<<LOOP_ESCALATE>>` は応答の**最終行がこの綴りと完全に一致**したときだけ効く（本文の途中に出てきても止まらない）。"
+        },
+        "agent.chat.loopEngineering.continueInstruction": {
+          "type": "string",
+          "default": "ループの作業方針（機械的な検証・行き詰まったときの方針変更・エラーの折り返し・解決不能なときの <<LOOP_ESCALATE>>）を継続すること。前ターンの検証結果を根拠に次の行動を選ぶこと。",
+          "scope": "window",
+          "markdownDescription": "`agent.chat.loopEngineering.enabled` が有効なときに、ループの**2回目以降**の指示の末尾へ付け足す再確認。1回目の方針は同じ会話に残っているため、繰り返し送るぶんは短くしてある。空文字にすると付け足さない。"
+        },
         "agent.notifications.approvalPending": {
           "type": "boolean",
           "default": true,

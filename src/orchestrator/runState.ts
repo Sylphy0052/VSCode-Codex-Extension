@@ -79,6 +79,23 @@ export type TaskFailureReason =
    * worktreeでの最初からのやり直しも従来どおり選べる）。
    */
   | { readonly kind: 'stalled' }
+  /**
+   * エージェント自身が「自力では解決できない」と申告してループが止まった
+   * （`LoopStopReason: 'escalated'`、issue #891）。
+   *
+   * `stalled`（同じ応答の反復という機械的な停滞検知）と原因が異なるため区別するが、
+   * **扱いは`stalled`と同格**にする。自動再試行の対象にせず、セッションも残す
+   * （`continueTask`で指示を変えて続きを試せる）。
+   */
+  | { readonly kind: 'escalated' }
+  /**
+   * ループが時間上限（`LoopPlan.maxDurationMs`）に達して止まった
+   * （`LoopStopReason: 'timedOut'`、issue #891）。
+   *
+   * 回数の上限に達した`maxReached`の時間版で、扱いも`maxReached` / `stalled`と同格。
+   * 自動再試行の対象にせず、セッションを残す。
+   */
+  | { readonly kind: 'timedOut' }
   /** 依存先タスクの失敗が波及して `skipped` になった。 */
   | { readonly kind: 'dependencyFailed'; readonly failedTaskIds: readonly string[] }
   /**
@@ -523,6 +540,18 @@ export function applyLoopStopReason(
     // 機械的にやり直しても再び停滞する可能性が高いため、人・オーケストレーターの判断
     // （`continueTask`で続きを試す／`retryTask`で最初からやり直す）を挟む
     return markFailed(run, tasks, taskId, { kind: 'stalled' });
+  }
+
+  if (reason === 'escalated') {
+    // 撤退の申告（issue #891）。`stalled`と同じく`retries`の自動再試行の経路には
+    // 乗せない——エージェント自身が「自力では解決できない」と言っている状態を、
+    // 条件を変えずに機械的にやり直しても同じ地点で行き詰まる可能性が高い
+    return markFailed(run, tasks, taskId, { kind: 'escalated' });
+  }
+
+  if (reason === 'timedOut') {
+    // 時間切れ（issue #891）。`maxReached`の時間版で、自動再試行の対象にしない
+    return markFailed(run, tasks, taskId, { kind: 'timedOut' });
   }
 
   // reason === 'failed'。`retries`の範囲内なら、新しいスレッド・worktreeでやり直す前提で
@@ -1097,6 +1126,25 @@ export function applyAutoResume(run: RunState, tasks: readonly WorkflowTask[]): 
  * 連鎖して `skipped` になった依存先を `pending` へ戻すことと、`haltedByUser` を解除する
  * ことは `retryTask` と同じ（人の明示操作を再開の合図として扱う）。
  */
+/**
+ * 「続ける」（`continueTask`）で同じ会話のまま再開してよい失敗理由か（issue #891）。
+ *
+ * どれも「セッションやCLIが壊れたわけではなく、走らせ方の縛りかエージェント自身の
+ * 判断で止まっただけ」という共通点を持つ。`onTaskFinished`（`runner.ts`）が
+ * セッションを残すのも同じ集合で、両者は揃えて直す必要がある
+ * （あちらは`LoopStopReason`、こちらは`TaskFailureReason['kind']`と型が違うため、
+ * 一つの定数にはまとめられない）。webview側の同じ判定は`workflowScript.ts`の
+ * `canContinueTask`にある。
+ */
+export function isResumableFailure(failure: TaskFailureReason | undefined): boolean {
+  return (
+    failure?.kind === 'maxReached' ||
+    failure?.kind === 'stalled' ||
+    failure?.kind === 'escalated' ||
+    failure?.kind === 'timedOut'
+  );
+}
+
 export function continueTask(
   run: RunState,
   tasks: readonly WorkflowTask[],
@@ -1107,10 +1155,7 @@ export function continueTask(
   if (task === undefined || current === undefined) {
     return run;
   }
-  if (
-    current.state !== 'failed' ||
-    (current.failure?.kind !== 'maxReached' && current.failure?.kind !== 'stalled')
-  ) {
+  if (current.state !== 'failed' || !isResumableFailure(current.failure)) {
     return run;
   }
   const depsAllDone = task.dependsOn.every((dep) => run.tasks.get(dep)?.state === 'done');
