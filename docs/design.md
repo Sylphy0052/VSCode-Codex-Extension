@@ -7651,9 +7651,11 @@ turn/completed                  ← ここで初めて turnResultText が入る
 
 **真偽値ではなく単調増加の数にしてある。** `turnResultReady: boolean` でも実装できるが、「次のターン開始で false に戻す」というedgeの管理が要り、戻し忘れが次のターンの判定を狂わせる。数なら読み手は「前に見た値と違うか」だけを見ればよく、途中に何件のイベントが挟まっても、`turnResultText` が正当に空でも、完了そのものは判定できる。
 
-#### 接続断でも確定として数える
+#### 接続断・中断でも確定として数える
 
 `chatSession.ts` の `markTurnFailed()`（issue #420）と `streamSession.ts` の `stateAfterProcessGone()`（issue #897）は、CLIとの接続が切れたときに `busy: false, turnFailed: true` まで戻す。**ここでも `turnCompletionSeq` を進める。** 進めないと、完了の世代を見て次を決める側が `turn/completed` を永久に待ち、接続断でループが止まらなくなる。「結果が確定した」には「失敗として確定した」を含める。
+
+中断（`chatSession.interrupt()` / `streamSession.interrupt()`）も同じ扱いにする。中断はターンを終わらせるが `turn/completed` は来ない。**ただし中断リクエスト自体が失敗した分岐では進めない**——あちらはターンが続いている可能性が高く（コード中のコメントもそう書いている）、完了として扱うと次の指示を重ねて送ることになる。`startReview`（inline）の失敗ロールバックも進めない。ターンが始まっていないためである。「`busy` を false にする箇所」と「結果が確定した箇所」は一致しない、というのがこの節の要点である。
 
 Claude Codeは `result` の1イベントで `busy: false` と `turnResultText` を同時に決めるため、この順序の食い違いは起きない。それでも同じ意味で世代を進め、読み手をプロバイダ共通にしている。
 
