@@ -1013,7 +1013,15 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
         return evaluation();
       }),
     );
-    await finishTurn(loop, [commandItem('c1', 'npm test', 'exit 0'), agentMessage('直しました')]);
+    await finishTurn2(
+      loop,
+      state({
+        busy: false,
+        items: [commandItem('c1', 'npm test', 'exit 0'), agentMessage('直しました')],
+        // 申告はそのターンの`turnResultText`から取る（issue #933）
+        turnResultText: '直しました',
+      }),
+    );
     const evidence = inputs[0]?.evidence ?? [];
     expect(evidence.some((e) => e.kind === 'test' && e.status === 'pass')).toBe(true);
     expect(evidence.some((e) => e.kind === 'worker-report' && e.status === 'unknown')).toBe(true);
@@ -1032,6 +1040,166 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
     await finishTurn(loop, items);
     await finishTurn(loop, items);
     expect((inputs[1]?.evidence ?? []).filter((e) => e.kind === 'test')).toHaveLength(1);
+  });
+
+  describe('現在の実行以外の状態を持ち込まない（issue #933）', () => {
+    it('ループを始める前に完了していたコマンドは、最初の評価の証拠に入らない', async () => {
+      // `ChatState.items`は会話全体を持ち続ける。baselineを持たないと「開始前に
+      // `npm test`が通っていた」だけで受入基準を満たしたと判定されうる
+      const inputs: GoalEvaluatorInput[] = [];
+      const before = [commandItem('old', 'npm test', 'exit 0')];
+      const loop = new LoopController(() => undefined);
+      loop.start(
+        goalPlan(async (i) => {
+          inputs.push(i);
+          return evaluation();
+        }),
+        before,
+      );
+      await finishTurn(loop, before);
+      expect(inputs[0]?.evidence ?? []).toHaveLength(0);
+    });
+
+    it('ループを始めた後に完了したコマンドは、これまでどおり証拠に入る', async () => {
+      const inputs: GoalEvaluatorInput[] = [];
+      const before = [commandItem('old', 'npm test', 'exit 0')];
+      const loop = new LoopController(() => undefined);
+      loop.start(
+        goalPlan(async (i) => {
+          inputs.push(i);
+          return evaluation();
+        }),
+        before,
+      );
+      await finishTurn(loop, [...before, commandItem('new', 'npm run build', 'exit 0')]);
+      const evidence = inputs[0]?.evidence ?? [];
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0]?.source).toContain('npm run build');
+    });
+
+    it('開始時点でまだ実行中だったコマンドは、終わった時点で証拠になる', async () => {
+      // baselineへ入れてよいのは終了コードの読める項目だけ（issue #909と同じ判定）
+      const inputs: GoalEvaluatorInput[] = [];
+      const before = [commandItem('c1', 'npm test', 'running')];
+      const loop = new LoopController(() => undefined);
+      loop.start(
+        goalPlan(async (i) => {
+          inputs.push(i);
+          return evaluation();
+        }),
+        before,
+      );
+      await finishTurn(loop, [commandItem('c1', 'npm test', 'exit 0')]);
+      expect((inputs[0]?.evidence ?? []).filter((e) => e.kind === 'test')).toHaveLength(1);
+    });
+
+    it('そのターンが何も言わなければ、過去の発言を申告として積み直さない', async () => {
+      const inputs: GoalEvaluatorInput[] = [];
+      const loop = new LoopController(() => undefined);
+      loop.start(
+        goalPlan(async (i) => {
+          inputs.push(i);
+          return evaluation();
+        }),
+      );
+      // コマンド実行だけで本文を返さなかったターン。`items`には過去の発言が残っている
+      await finishTurn2(
+        loop,
+        state({
+          busy: false,
+          items: [agentMessage('前のターンで直しました')],
+          turnResultText: '',
+        }),
+      );
+      expect((inputs[0]?.evidence ?? []).filter((e) => e.kind === 'worker-report')).toHaveLength(0);
+    });
+
+    it('古い実行のEvaluatorが返っても、新しい実行の評価待ちを折らない', async () => {
+      let releaseA: ((value: GoalEvaluation) => void) | undefined;
+      const gateA = new Promise<GoalEvaluation>((resolve) => {
+        releaseA = resolve;
+      });
+      const loop = new LoopController(() => undefined);
+      loop.start(goalPlan(async () => gateA));
+      loop.observe(state({ busy: true }));
+      loop.observe(state({ busy: false }));
+      loop.stop('manual');
+
+      // 別の実行を始め、こちらも評価待ちにする
+      let evaluatedB = 0;
+      loop.start(
+        goalPlan(async () => {
+          evaluatedB += 1;
+          return new Promise<GoalEvaluation>(() => undefined);
+        }),
+      );
+      loop.observe(state({ busy: true }));
+      loop.observe(state({ busy: false }));
+      expect(evaluatedB).toBe(1);
+
+      // 古い評価がいま返る。Bの`evaluating`を折ってはいけない
+      releaseA?.(evaluation({ verdict: 'achieved' }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(loop.running).toBe(true);
+      expect(loop.getStatus().stopReason).toBeUndefined();
+      // 折れていれば、次のターン完了で2回目の評価が走ってしまう
+      loop.observe(state({ busy: true }));
+      loop.observe(state({ busy: false }));
+      expect(evaluatedB).toBe(1);
+    });
+
+    it('同じ計画のオブジェクトで始め直しても、古い評価が新しい実行を止めない', async () => {
+      // `this.plan !== plan`の参照比較だけでは、同じオブジェクトを使い回されると
+      // 別の実行を自分の実行と取り違える
+      let releaseA: ((value: GoalEvaluation) => void) | undefined;
+      const gateA = new Promise<GoalEvaluation>((resolve) => {
+        releaseA = resolve;
+      });
+      let first = true;
+      const plan = goalPlan(async () => {
+        if (first) {
+          first = false;
+          return gateA;
+        }
+        return new Promise<GoalEvaluation>(() => undefined);
+      });
+      const loop = new LoopController(() => undefined);
+      loop.start(plan);
+      loop.observe(state({ busy: true }));
+      loop.observe(state({ busy: false }));
+      loop.stop('manual');
+      loop.start(plan);
+
+      releaseA?.(evaluation({ verdict: 'achieved' }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(loop.running).toBe(true);
+      expect(loop.getStatus().stopReason).toBeUndefined();
+    });
+
+    it('古い実行の送信が失敗しても、新しい実行をfailedで止めない', async () => {
+      let rejectA: ((reason: Error) => void) | undefined;
+      const sendA = new Promise<void>((_, reject) => {
+        rejectA = reject;
+      });
+      let first = true;
+      const loop = new LoopController(() => {
+        if (first) {
+          first = false;
+          return sendA;
+        }
+        return undefined;
+      });
+      loop.start(goalPlan(async () => evaluation()));
+      loop.stop('manual');
+      loop.start(goalPlan(async () => evaluation()));
+
+      rejectA?.(new Error('古い送信の失敗'));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(loop.running).toBe(true);
+      expect(loop.getStatus().stopReason).toBeUndefined();
+    });
   });
 
   it('indeterminate が続いたら人へ渡す', async () => {

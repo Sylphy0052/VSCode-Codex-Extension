@@ -1315,7 +1315,7 @@ export class ClaudeChatViewManager
   ): TaskSession {
     return {
       sessionId,
-      runLoop: (plan: LoopPlan) => entry.loop.start(plan),
+      runLoop: (plan: LoopPlan) => entry.loop.start(plan, entry.session.getState().items),
       send: (text: string) => this.sendOnce(entry, text),
       setPromptTransform: (transform) => {
         entry.promptTransform = transform;
@@ -1825,7 +1825,7 @@ export class ClaudeChatViewManager
           return;
         }
         this.log.info(`ループ開始: 最大${plan.maxIterations}回`);
-        entry.loop.start(plan);
+        entry.loop.start(plan, entry.session.getState().items);
         return;
       }
       if (type === 'loop/stop') {

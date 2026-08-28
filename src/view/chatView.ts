@@ -786,7 +786,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   private buildTaskSession(entry: ChatPanel, threadId: string, mcpRequested = false): TaskSession {
     return {
       sessionId: threadId,
-      runLoop: (plan: LoopPlan) => entry.loop.start(plan),
+      runLoop: (plan: LoopPlan) => entry.loop.start(plan, entry.session.getState().items),
       send: (text: string) => {
         void this.sendOnce(entry, text);
       },
@@ -1154,7 +1154,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           return;
         }
         this.log.info(`ループ開始: 最大${plan.maxIterations}回`);
-        entry.loop.start(plan);
+        entry.loop.start(plan, entry.session.getState().items);
         return;
       }
       if (type === 'loop/stop') {

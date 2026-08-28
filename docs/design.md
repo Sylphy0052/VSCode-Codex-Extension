@@ -7572,6 +7572,29 @@ Evaluatorへ渡す会話の抜粋は `untrustedText.ts` の囲い（`formatUntru
 - `test/unit/loopController.test.ts`（`issue #914`のdescribe）: 一時停止中に時間上限を超えたターンが終われば `timedOut` で止まること、待ち時間で上限を跨いだ `resume()` が送らずに止まること、停止理由が同時に成立したときの優先順位、時間上限の境界（`limit - 1` は継続、`limit` と `limit + 1` は停止）、上限を大きく超えても `busy` の間は止まらないこと、評価を待っている間に一時停止して再開しても1回だけ送ること、合図が本文の途中にあるだけでは止まらないこと、最終行に合図以外が混ざっていれば止まらないこと、応答の後ろにコマンド実行が並んでいても合図を拾うこと
 - `test/unit/loopEngineering.test.ts`: `lastAgentMessageFinalLine` の取り出し、応答の後ろに `commandExecution` が並んでも撤退の申告が成立すること
 
+### 14.88 現在のループ実行以外の状態を持ち込まない（Issue #933）
+
+§14.86（issue #909）・§14.87（issue #914）の後の実装を外部レビューへ掛けて見つかった3系統の不備。どれも「**いま走っているループ実行（run）の外にある状態が、この実行の中へ混ざる**」という同じ不変条件の違反である。
+
+**ゴール駆動の証拠はループ開始時点でbaselineを取る。** `start()` は `seenEvidenceIds` を空にし、`ingestEvidence()` は `state.items` 全体を `collectCommandEvidence` へ渡していた。`ChatState.items` は会話全体を持ち続けるため、**ループを始める前に実行された終了コード付きのコマンドがすべて `iteration=1` の証拠として積まれる**。「開始前に `npm test` が通っていた」だけで受入基準を満たしたとEvaluatorが判定し、現在のコードを一度も検証しないまま `done` で止まりうる。`start(plan, existingItems)` で開始時点の項目を受け取り、`isSettledCommandItem` で絞ったidを `seenEvidenceIds` の初期値にする。`ChatState` 全体ではなく `readonly ChatItem[]` を渡すのは、`LoopController` を `vscode` にも会話の全体像にも依存させないため。
+
+`worker-report` も同じ問題を持っていた。`buildWorkerReportEvidence` は `lastNonEmptyAgentMessageText(state.items)` で会話全体から直近の発言を探すため、コマンド実行だけで本文を返さなかったターンで**過去のターンの発言を現在のiterationの申告として積み直す**。`state.turnResultText`（そのターンの `agentMessage` だけを連結した値）へ寄せた。そのターンが何も言わなかったなら申告は無いのが正しく、`stallDetector.ts` が署名の取り出しで `items` へフォールバックしないのと同じ理由である。`status` が `unknown` なので `achieved` の直接の根拠にはならないが、Evaluatorの `reason` / `gaps` / `nextFocus` を古い主張で汚す。
+
+**非同期の処理は実行世代で隔離する。** `runGeneration` を1つ持ち、`start()` と `stop()` で進める。非同期の開始点で世代を捕まえ、解決した時点で `this.runGeneration` と違えば何もしない。守る対象は3箇所。
+
+- `observe()` の `.finally(() => { this.evaluating = false; })` — run Aの評価がpendingのままAを止めてBを開始すると、Aのfinallyが**Bの `evaluating` を折る**。Bの評価中にもう1つ評価が走る
+- `dispatch()` の `result.catch(() => this.stop('failed'))` — run Aの送信Promiseが後からrejectすると、**Bが `failed` で止まる**
+- `runGoalTurn()` のawait後 — 既に `this.plan !== plan` を見ていたが、参照比較なので**同じ計画のオブジェクトを使い回されると別の実行を自分の実行と取り違える**。現在の全呼び出し元はリテラルか `normalizeLoopPlan` の新規オブジェクトのため今は起きないが、この前提を呼び出し側へ押しつけない
+
+`.finally()` と `Promise.catch()` は計画を持たないので、参照比較では守れない。世代という1つの数だけが全経路で使える印になる。
+
+**Evaluatorの応答待ちは時間上限の外にある。** 判定は `finishTurn()` にあり、Evaluatorを待っている間の `observe()` は `evaluating` で戻るため、待っている最中に上限を跨いでも止まらない。ただし `goalEvaluatorProcess.ts` はプロセスをタイムアウトで落とす（既定 `agent.chat.goalEvaluator.timeoutSeconds` = 120秒）ので、無期限には待たない。§14.87 のsoft deadlineの超過幅に、**上限を跨いだ最後のEvaluator待ちの分（最大でタイムアウト1回分）** が加わると考えればよい。毎ターン加算されるわけではない。
+
+#### 確かめ方
+
+- `test/unit/loopController.test.ts`（`issue #933`のdescribe）: ループ開始前に完了していたコマンドが最初の評価の証拠に入らないこと、開始後に完了したコマンドはこれまでどおり入ること、開始時点で実行中だったコマンドは終わった時点で証拠になること、そのターンが何も言わなければ過去の発言を申告として積み直さないこと、古い実行のEvaluatorが返っても新しい実行の評価待ちを折らないこと、同じ計画のオブジェクトで始め直しても古い評価が新しい実行を止めないこと、古い実行の送信の失敗が新しい実行を `failed` にしないこと
+- 上の7件は、修正を1つずつ戻すと落ちることを確認した（実際に不具合を捕まえていること）
+
 ### 16.44 チームモード（Issue #693）
 
 #### 何を足したのか
