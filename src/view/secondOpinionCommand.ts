@@ -124,6 +124,11 @@ async function pickEffort(
 ): Promise<string | undefined> {
   const available = listEfforts(candidate.model);
   const ordered = [candidate.effort, ...available.filter((e) => e !== candidate.effort)];
+  if (ordered.length === 1) {
+    // 選べる値が1つしか無い（effortを持たないモデルなど）なら選ばせない。
+    // 依頼先が1件のときにQuickPickを出さないのと同じ扱い（受入基準2）
+    return candidate.effort;
+  }
   const picked = await vscode.window.showQuickPick(
     ordered.map((effort) =>
       effort === candidate.effort

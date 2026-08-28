@@ -138,12 +138,39 @@ describe('セカンドオピニオンの実行時の選択（Issue #944）', () 
   });
 
   it('effortを選ばずに閉じたら何も起動しない', async () => {
-    __mock.showQuickPickAnswer = () => undefined;
+    const shown: unknown[][] = [];
+    __mock.showQuickPickAnswer = (items) => {
+      shown.push([...items]);
+      return undefined;
+    };
     const host = new RecordingHost();
     const registry = new SecondOpinionRegistry();
-    await startSecondOpinion(port(''), host, registry, noopLog, unusedGit, () => ['high']);
+    await startSecondOpinion(port(''), host, registry, noopLog, unusedGit, () => ['low', 'high']);
+    // 最初に出るのがeffortの選択（依頼先は候補1件なので出ない）
+    expect(shown).toHaveLength(1);
     expect(host.inputs).toHaveLength(0);
     expect(registry.isRunning('parent-a')).toBe(false);
+  });
+
+  it('選べるeffortが1つしか無ければ選ばせない', async () => {
+    const shown: unknown[][] = [];
+    __mock.showQuickPickAnswer = (items) => {
+      shown.push([...items]);
+      const list = items as Array<{ artifactKind?: string }>;
+      return list.find((item) => item.artifactKind === 'none');
+    };
+    const host = new RecordingHost();
+    await startSecondOpinion(
+      port(''),
+      host,
+      new SecondOpinionRegistry(),
+      noopLog,
+      unusedGit,
+      () => ['high'],
+    );
+    // 出たのは資料の選択だけ
+    expect(shown).toHaveLength(1);
+    expect(host.inputs[0]?.config.effort).toBe('high');
   });
 
   it('会話が短いときは要約セッションを開かず、記録そのものを背景に渡す', async () => {
