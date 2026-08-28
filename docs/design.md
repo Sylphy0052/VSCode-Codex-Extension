@@ -1220,6 +1220,8 @@ Claude Codeは消費率（`usedPercent`）を返さない。実測した中身�
 - Codexは専用のメソッドがある。`thread/compacted` 通知はプロトコル側で非推奨なので見ず、`contextCompaction` 項目の到着で判断する
 - Claude Codeには専用の制御要求が無い。TUIと同じく `/compact` を**発言として送る**（`local_command` の制御要求は `Unsupported control request subtype` で失敗する）
 - Claude Codeの結果は `system` の `status` 通知に入る。`compact_result` は `success` か `failed` で、失敗時は `compact_error` が付く（例: `Not enough messages to compact.`）。**成功の項目は `compact_boundary` が受け持ち、`status` からは失敗だけを項目にする**。両方で作ると同じ圧縮が二重に並ぶ
+- Claude Codeは圧縮を**始めた時点**でも `status` 通知を流す（`{"subtype":"status","status":"compacting"}`。CLI 2.1.247 で実測）。これを種類 `contextCompactionStarted` の項目として会話に残す（issue #893）。圧縮は数十秒かかることがあり、開始を捨てると完了（`compact_boundary`）か失敗（`compact_result`）が届くまで画面に何も出ず、実行できていないように見える
+- 開始と完了は別の項目のまま残す。3つの通知は `uuid` がそれぞれ異なるため1件へまとめ直せないうえ、いつ始めていつ終わったかは時系列として読めた方がよい
 - 圧縮後にCLIが流す要約は `content` が配列ではなく文字列で届くため、発言としては並ばない（`applyUser` は配列の part だけを見ている）
 - 圧縮の位置は種類 `contextCompaction` の項目として会話に残す。CodexとClaude Codeで同じ種類にそろえてあるので、描画側の分岐は要らない
 

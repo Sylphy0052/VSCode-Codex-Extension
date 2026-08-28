@@ -102,6 +102,9 @@ export function chatScript(
     webSearch: 'Web検索',
     plan: '計画',
     contextCompaction: '会話を圧縮しました',
+    // 圧縮の開始（issue #893）。Claude Codeの status: "compacting" から作る。
+    // 完了の contextCompaction とは別項目にし、始まったことをその場で見せる
+    contextCompactionStarted: '会話を圧縮しています',
     settingsChanged: '設定',
     imageView: '画像',
     imageGeneration: '画像の生成',

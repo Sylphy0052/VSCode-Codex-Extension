@@ -905,9 +905,34 @@ describe('圧縮', () => {
     expect(state.items).toEqual([]);
   });
 
-  it('進行中の status では何もしない', () => {
+  it('進行中の status で開始を項目にする（issue #893）', () => {
     const state = apply([{ type: 'system', subtype: 'status', status: 'compacting', uuid: 's0' }]);
-    expect(state.items).toEqual([]);
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]).toMatchObject({
+      id: 'compaction:s0',
+      kind: 'contextCompactionStarted',
+    });
+  });
+
+  it('同じ進行中の status が二度届いても項目は増えない', () => {
+    const event = { type: 'system', subtype: 'status', status: 'compacting', uuid: 's0' };
+    expect(apply([event, event]).items).toHaveLength(1);
+  });
+
+  it('開始の項目は完了の項目と別に残る（issue #893）', () => {
+    const state = apply([
+      { type: 'system', subtype: 'status', status: 'compacting', uuid: 's0' },
+      {
+        type: 'system',
+        subtype: 'compact_boundary',
+        uuid: 'b4',
+        compact_metadata: { trigger: 'manual', pre_tokens: 100, post_tokens: 10 },
+      },
+    ]);
+    expect(state.items.map((item) => item.kind)).toEqual([
+      'contextCompactionStarted',
+      'contextCompaction',
+    ]);
   });
 
   it('失敗した圧縮は理由を残す', () => {
@@ -983,7 +1008,8 @@ describe('セッション中の設定変更', () => {
       { type: 'system', subtype: 'status', status: 'compacting', uuid: 's3' },
       { type: 'system', subtype: 'status', status: null, compact_result: 'success', uuid: 's4' },
     ]);
-    expect(state.items).toEqual([]);
+    // 圧縮の開始は項目になる（issue #893）が、設定変更の項目は作られない
+    expect(state.items.map((item) => item.kind)).toEqual(['contextCompactionStarted']);
   });
 });
 
