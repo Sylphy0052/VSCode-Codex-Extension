@@ -82,7 +82,7 @@ export function pendingSecondOpinionDisplay(
 /**
  * 応答が届いた後の表示。
  *
- * 回答は要約せず全文をそのまま載せる（別モデルの解釈を挟むと、独立レビューとしての
+ * 回答は要約せず全文をそのまま載せる（別モデルの解釈を挟むと、独立した意見としての
  * 値打ちが落ちるため。Issue #894 の受入基準6）。
  */
 export function finishedSecondOpinionDisplay(
