@@ -218,14 +218,16 @@ export class ClaudeSessionStore {
    * リロードで復元されたパネルはcwdを持たないため、transcriptの素性から取り戻す。
    */
   async resolveCwd(sessionId: string): Promise<string | undefined> {
-    // 索引はcwdも持っている（Issue #887）。載っていればtranscriptを開かずに済む
-    const indexed = this.index.findBySessionId(sessionId);
-    if (indexed?.session.cwd !== undefined) {
-      return indexed.session.cwd;
-    }
+    // 実体が消えていれば undefined を返す契約は変えない（呼び出し側はワークスペース
+    // フォルダへ退避する）。そのうえで、解決できたパスが索引の指す先と同じなら
+    // 索引が持つcwdをそのまま使い、transcriptを開き直さない（Issue #887）
     const filePath = await this.resolveTranscriptPath(sessionId);
     if (filePath === undefined) {
       return undefined;
+    }
+    const indexed = this.index.findBySessionId(sessionId);
+    if (indexed?.filePath === filePath && indexed.session.cwd !== undefined) {
+      return indexed.session.cwd;
     }
     return (await this.readHeadMeta(filePath))?.cwd;
   }
