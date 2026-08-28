@@ -1040,6 +1040,8 @@ const COMPOSER_ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2" width="11" height="12" rx="1.2"/><path d="m5 6 1.2 1.2L8.5 5M9.5 6h1.5M5 10l1.2 1.2L8.5 9M9.5 10h1.5"/></svg>',
   handoff:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8h8M8.5 4.5 12 8l-3.5 3.5"/><path d="M2.5 3.5v9"/></svg>',
+  secondOpinion:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.8 4.2a1 1 0 0 1 1-1h6.4a1 1 0 0 1 1 1v3.6a1 1 0 0 1-1 1H5.4L3 11V8.8h-.2a1 1 0 0 1-1-1z"/><path d="M12.2 6.2h1a1 1 0 0 1 1 1v3.6a1 1 0 0 1-1 1H13V14l-2.4-2.2H8.2"/></svg>',
   previousUserMessage:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V4M5.3 6.7 8 4l2.7 2.7"/><path d="M3.5 2.5h9"/></svg>',
   nextUserMessage:
@@ -1213,6 +1215,15 @@ function composerButtonSpec(id: ComposerButtonId, ctx: ComposerButtonContext): C
         hidden: false,
         pressed: false,
         icon: COMPOSER_ICONS.handoff,
+      };
+    case 'secondOpinion':
+      return {
+        ariaLabel: 'セカンドオピニオン',
+        title:
+          'この会話を渡さずに、独立したCodexセッションへレビューを依頼します（結果はこの会話へ表示されます）',
+        hidden: false,
+        pressed: false,
+        icon: COMPOSER_ICONS.secondOpinion,
       };
   }
 }

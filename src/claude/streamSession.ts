@@ -3,8 +3,10 @@ import type { ApprovalDecision } from '../appserver/approvals';
 import {
   addApproval,
   appendNotice,
+  appendSecondOpinion,
   appendSideQuestion,
   enqueue,
+  NO_BACKGROUND_TERMINALS,
   popLastQueued,
   removeApproval,
   removeQueued,
@@ -249,6 +251,14 @@ export class ClaudeStreamSession {
     this.update(appendSideQuestion(this.state, id, display));
   }
 
+  /**
+   * セカンドオピニオン（Issue #894）を会話へ1項目として残す/更新する。
+   * `noteSideQuestion` と同じくCLIとのやり取り（transcript）には乗らない画面だけの表示。
+   */
+  noteSecondOpinion(id: string, display: { status: string; text: string; detail: string }): void {
+    this.update(appendSecondOpinion(this.state, id, display));
+  }
+
   /** プロセスを起動する。発言はこの後 `send` で流す。 */
   start(options: ClaudeStreamOptions): void {
     // 現状の`claudeChatView.ts`（`openNew`/`openTaskSession`/resume/fork/restore）は
@@ -308,7 +318,7 @@ export class ClaudeStreamSession {
       // exit/errorハンドラと同じ「ターン失敗」の経路なので、承認待ち・各種応答待ちも
       // 同じく解放する。放置するとawaitしている側が永遠に待つ（issue #355）
       this.releasePendingWaiters();
-      this.update({ ...this.state, busy: false, turnFailed: true });
+      this.update(this.stateAfterProcessGone());
     });
 
     proc.stdout.on('data', (chunk: Buffer) => {
@@ -337,7 +347,7 @@ export class ClaudeStreamSession {
       // 同じ解放処理を共有）
       this.releasePendingWaiters();
       // 会話の途中でプロセスが消えた形なので、続きは送れない
-      this.update({ ...this.state, busy: false, turnFailed: true });
+      this.update(this.stateAfterProcessGone());
     });
     proc.on('error', (e) => {
       if (this.proc !== proc) {
@@ -347,7 +357,7 @@ export class ClaudeStreamSession {
       this.proc = undefined;
       // 起動直後にCLIが異常終了した場合も、exitハンドラと同様に解放する（issue #355）
       this.releasePendingWaiters();
-      this.update({ ...this.state, busy: false, turnFailed: true });
+      this.update(this.stateAfterProcessGone());
     });
 
     const threadId =
@@ -1135,7 +1145,7 @@ export class ClaudeStreamSession {
         this.proc = undefined;
         this.buffer = '';
         this.releasePendingWaiters();
-        this.update({ ...this.state, busy: false, turnFailed: true });
+        this.update(this.stateAfterProcessGone());
       }
     }
   }
@@ -1336,6 +1346,24 @@ export class ClaudeStreamSession {
   /** 承認要求が一度も来ていないか（劣化検知の補助）。 */
   get approvalsSeen(): boolean {
     return this.sawApprovalRequest;
+  }
+
+  /**
+   * プロセスが失われたときの状態（issue #897）。
+   *
+   * `busy`・`turnFailed`に加えてバックグラウンドの一覧も落とす。バックグラウンドのタスク
+   * （実測では`local_bash`）はCLIプロセスの子なので、CLIが消えれば一緒に消える。一覧は
+   * `background_tasks_changed`通知だけを正としており（`streamJson.ts`）、プロセスが死んだ
+   * 後は「消えた」通知も届かない。残したままにすると、走っている処理が何も無いのに
+   * チャット画面の外周が黄色（バックグラウンド実行中）のままになる。
+   */
+  private stateAfterProcessGone(): ChatState {
+    return {
+      ...this.state,
+      busy: false,
+      turnFailed: true,
+      backgroundTerminals: NO_BACKGROUND_TERMINALS,
+    };
   }
 
   /**

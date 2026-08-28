@@ -956,6 +956,18 @@ describe('markInterruptedCommands', () => {
     expect(notice?.detail).toContain('走り続けることがあります');
   });
 
+  it('中断した時点で走っていたコマンドを一覧から外す（issue #897）', () => {
+    const before = withCommand('inProgress');
+    expect(before.backgroundTerminals).toHaveLength(1);
+    const state = markInterruptedCommands(before, TURN);
+    expect(state.backgroundTerminals).toEqual([]);
+  });
+
+  it('印の付いた項目は復元時の再派生でも一覧に載らない（issue #897）', () => {
+    const state = markInterruptedCommands(withCommand('inProgress'), TURN);
+    expect(deriveCodexBackgroundTerminals(state.items)).toEqual([]);
+  });
+
   it('Claude Code の running も実行中として扱う', () => {
     const state = markInterruptedCommands(withCommand('running'), TURN);
     expect(state.items.find((i) => i.id === 'cmd_1')?.interruptedWhileRunning).toBe(true);
@@ -1360,6 +1372,33 @@ describe('applyEvent / item/started でbackgroundTerminalsを更新する（issu
       },
     });
     expect(completed.backgroundTerminals).toEqual([]);
+  });
+
+  it('item/completedを取り逃してもturn/completedで一覧が空になる（issue #897）', () => {
+    const started = applyEvent(initialChatState, 'item/started', {
+      turnId: TURN,
+      item: {
+        id: 'cmd_bg',
+        type: 'commandExecution',
+        command: 'sleep 45',
+        status: 'inProgress',
+      },
+    });
+    expect(started.backgroundTerminals).toHaveLength(1);
+    expect(applyEvent(started, 'turn/completed', {}).backgroundTerminals).toEqual([]);
+  });
+
+  it('turn/failedでも一覧が空になる（issue #897）', () => {
+    const started = applyEvent(initialChatState, 'item/started', {
+      turnId: TURN,
+      item: {
+        id: 'cmd_bg',
+        type: 'commandExecution',
+        command: 'sleep 45',
+        status: 'inProgress',
+      },
+    });
+    expect(applyEvent(started, 'turn/failed', {}).backgroundTerminals).toEqual([]);
   });
 });
 

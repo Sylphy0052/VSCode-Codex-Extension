@@ -7293,7 +7293,51 @@ Anthropicが「ループエンジニアリング」として整理している�
 - `test/unit/loopEngineering.test.ts`: 無効なら本文を変えないこと、1回目と2回目以降で連結する文面が違うこと、指示文・本文が空なら連結しないこと、最終行が合図と完全一致したときだけ `declaresEscalate` が成立し、本文中の説明では成立しないこと
 - `test/unit/loopController.test.ts`: 合図で `escalated` として止まること・説明文では止まらないこと、時間上限を超えたターンの完了時に `timedOut` で止まること・指定しなければ時間では止まらないこと、方針が終了条件より前に置かれること、`maxDurationMinutes` の正規化（空・0以下・数値でない値はキーごと持たない、24時間で頭打ち）、`engineering` がwebviewの値で差し替えられないこと
 
-### 14.80 ゴール駆動ループとActor/Judgeの分離（issue #892）
+### 14.80 セカンドオピニオン（Issue #894）
+
+会話中の成果物を、**その会話を渡さないまま**別のセッションへ評価させる導線。入力欄の「…」メニューの `secondOpinion` ボタンから起動する。Codex画面・Claude Code画面のどちらから押しても、開くのは独立した**Codexのセッション**（既定は `gpt-5.6-sol` / effort `high`）。
+
+#### 脇道の質問（14.62）との違い
+
+脇道の質問は本流の会話を踏まえる。Codexは現スレッドを `ephemeral: true` でforkし、Claudeは過去の脇道のやり取りを `history` として添える。セカンドオピニオンは逆で、会話を一切渡さない。渡すのは「起動時点の成果物」と「利用者が編集した依頼文」だけ。いまのエージェントが持っている仮説・見落とし・フレーミングを引き継がせないことが目的であり、**会話の要約すら渡さない**（要約した時点でそのエージェントの解釈が混ざる）。会話の項目種別も `sideQuestion` とは分けて `secondOpinion` にしてある。読み手が取り違えると、返ってきた指摘の重みを誤って判断するため。
+
+#### レビュー対象は押した時点で固定する
+
+`sandbox: 'read-only'` が防げるのは**セカンドオピニオン自身**の書き込みだけで、親セッションが実行中に作業ツリーを書き換えることは止められない。何もしないと「ファイルAを読んだ後にAが書き換わり、その後にファイルBを読む」という、どの時点にも存在しなかった状態をレビューすることになる。そのため押下時に `git rev-parse HEAD` と `git diff HEAD` を一度だけ実行し、その結果を固定してプロンプトへ載せる（`src/secondOpinion/snapshot.ts`）。プロンプトでも「この baseCommit と差分を正本として扱い、現在の作業ツリーは対象に含めない」と明示し、ベース側は `git show <baseCommit>:<path>` で読ませる。差分が `MAX_DIFF_CHARS`（20万文字）を超える場合は末尾を落とし、**落としたことを本文へ明記する**（黙って切ると「全部を見た」前提で判断されてしまう）。
+
+対象は3種類から選ぶ: `Workspace changes`（既定）／`Last assistant response`（明示的なopt-in。独立性は下がる）／`No context`。
+
+#### 結果は表示するだけで、親セッションへは送らない
+
+最終回答は全文を親セッションの会話へ1項目として差し込む（要約しない。別モデルの解釈を挟むとセカンドオピニオンとしての値打ちが落ちる）。**ユーザー発言として自動送信はしない。** 指摘が誤っていた場合に、それがそのまま次の作業指示として扱われてしまうため。
+
+#### 単発ターンの土台は分解セッションと共有する
+
+実体は `planner.ts` の `runSingleTurnTask`。`sendSingleTurn`（§16.9の分解セッション）から、planner固有の文言（ログのprefix・「分解セッション」という主語）と「必ずタブを開く」挙動を引数へ出して共通化したもの。安全側の固定値（`approvalMode: 'never'` / `sandbox: 'read-only'`、起動直前の `assertSingleTurnSessionIsSafe`）は両者で同じで、`model` / `effort` だけを候補から渡す。`sendSingleTurn` は従来の引数の並びを保つラッパとして残しており、plannerの挙動は変えていない。
+
+#### 設定
+
+- `agent.secondOpinion.candidates`: 依頼先の候補（`{name, model, effort}[]`）。既定は `gpt-5.6-sol` / `high` の1件。**候補が1件なら選択UIを出さずに起動する。** 壊れた値・空配列は既定へ丸める（候補ゼロで起動不能にしない）。`provider` は持たせない（Codex固定。この機能の値打ちはモデルの多様性ではなくコンテキストの分離にある）
+- `agent.secondOpinion.headless`: 既定 `true`。`TaskSession.open()` を呼ばず、タブを作らないまま完走する。`buildEntry` が `panel: undefined` でパネルを作り、`postState` / `onSessionChange` がタブの無い状態を織り込み済みなので、開かなくても状態の更新経路は回る。`false` にすると進行が見えるタブを開く（`preserveFocus: true` なのでフォーカスは奪わない）
+- `agent.secondOpinion.timeoutMs`: 既定5分。10秒〜60分へ丸める
+- `agent.secondOpinion.template`: 依頼文の既定値
+
+`sandbox` と `approvalMode` は設定にしない。レビューに書き込みは要らず、「ついでに直しておきました」を構造として不可能にする。
+
+#### 同時実行とログ
+
+親セッションごとに1本（`SecondOpinionRegistry`）。実行中はそのボタンだけをdisableし、**入力欄と送信は止めない**（別視点の待ち時間で本流の作業を止めない）。別の親セッションからの同時実行は禁止しない。
+
+本番ログにはプロンプト全文・diff全文を出さない（credential・顧客情報・proprietary codeが入りうる）。出すのは `model` / `effort` / `headless` / `contextSource` / `promptChars` だけ。
+
+#### 確かめ方
+
+- `test/unit/secondOpinion.test.ts`: 候補の検証（非配列・空配列・不正なmodel/effort・重複名の丸め）、プロンプトの組み立て（独立レビューの指示・baseCommit・切り詰めの明記・差分にコードフェンスが含まれても囲みが壊れないこと）、`openTaskSession` へ渡る値（`read-only` / `never` / 候補のmodel・effort）、送信本文が依頼文とスナップショットだけから組み立てた本文と一字一句一致すること（親セッションの会話が入り込む余地が無い）、headlessで `open()` が呼ばれないこと、全経路で `dispose()` されること、スナップショットの取得（非git・変更なし・切り詰め）
+- `test/unit/composerButtons.test.ts`: 正準の並びに `secondOpinion` が入り、「…」メニューへ畳まれること
+- `test/unit/webviewScript.test.ts`: `secondOpinion` の本文がMarkdown描画経路に載ること
+- `docs/manual-test.md` U-43: 実機での挙動（実行中に作業ツリーを触っても対象が動かないこと、headlessでタブが増えないこと、重複起動を止めること、ログに本文が出ないこと）
+
+### 14.81 ゴール駆動ループとActor/Judgeの分離（issue #892）
 
 目的とゴール（受入基準）を先に決め、**1ターンごとに別セッションのAI（Evaluator）が会話と実行結果を読んで達成したかを判定する**ループを足した。判定が未達なら、次のターンで集中すべきことを添えて自動で続ける。Claude Code の `/goal` と同じ考え方だが、証拠（evidence）の扱いを厳しくしてある。
 

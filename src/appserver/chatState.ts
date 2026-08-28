@@ -1092,6 +1092,13 @@ export function deriveCodexBackgroundTerminals(
     if (item.kind !== 'commandExecution' || item.status !== 'inProgress') {
       continue;
     }
+    // 中断した時点で走っていたコマンドは `inProgress` のまま固定される（`keepsInterruptedMark`
+    // が意図的に印を残すため）。ここで拾い続けると、ターンが終わっているのに画面の外周が
+    // 黄色（バックグラウンド実行中）のままになる（issue #897）。CLI側に子プロセスが残る
+    // ことは会話に出した注記が伝えており、この一覧が二重に伝える必要は無い
+    if (item.interruptedWhileRunning === true) {
+      continue;
+    }
     result.push({
       id: item.id,
       command: item.detail,
@@ -1250,6 +1257,9 @@ export function applyEvent(
         busy: false,
         turnId: undefined,
         turnFailed: false,
+        // ターンが終われば走っているコマンドも無い。`item/completed` を取り逃した項目が
+        // `inProgress` のまま残ると、画面の外周が黄色のままになる（issue #897）
+        backgroundTerminals: NO_BACKGROUND_TERMINALS,
         turnResultText: summary.text,
         turnEditedFiles: summary.editedFiles,
       };
@@ -1262,6 +1272,8 @@ export function applyEvent(
         busy: false,
         turnId: undefined,
         turnFailed: true,
+        // `turn/completed` と同じ理由で落とす（issue #897）
+        backgroundTerminals: NO_BACKGROUND_TERMINALS,
         turnResultText: summary.text,
         turnEditedFiles: summary.editedFiles,
       };
@@ -1651,6 +1663,35 @@ export function appendSideQuestion(
 }
 
 /**
+ * セカンドオピニオン（Issue #894）を会話へ1項目として残す/更新する。
+ *
+ * `appendSideQuestion` と同じく「同じidで呼び直すと上書きする」形にする（実行中 →
+ * 完了/失敗と状態が進むたびに同じ項目を書き換え、項目を積み増さない）。表示の中身は
+ * `src/secondOpinion/display.ts`（`vscode`を持ち込まない純粋なロジック層）が組み立てる。
+ * 脇道の質問とは別の種類にしてあるのは、渡している文脈が正反対（脇道の質問は本流の
+ * 会話を踏まえる／セカンドオピニオンは踏まえない）で、読み手が取り違えると指摘の
+ * 重みを誤って判断するため。
+ */
+export function appendSecondOpinion(
+  state: ChatState,
+  id: string,
+  display: { status: string; text: string; detail: string },
+): ChatState {
+  return {
+    ...state,
+    items: upsertItem(state.items, {
+      id,
+      kind: 'secondOpinion',
+      text: display.text,
+      detail: display.detail,
+      status: display.status,
+      turnId: undefined,
+      diffs: NO_DIFFS,
+    }),
+  };
+}
+
+/**
  * 中断の注記のid（issue #258）。
  *
  * ターンごとに別のidにする。中断はターンを終わらせるので、1回の中断につき1行になり、
@@ -1719,7 +1760,13 @@ export function markInterruptedCommands(state: ChatState, turnId: string | undef
     isRunningCommand(item) ? { ...item, interruptedWhileRunning: true } : item,
   );
   return appendNotice(
-    { ...state, items },
+    // 印を付けた項目は「バックグラウンドで実行中」の一覧から外れる（issue #897）。
+    // 中断後に `item/completed` が届く保証は無く、再派生をここで行わないと一覧が残り続ける。
+    // 派生し直してよいのは、この関数の呼び出し元がCodexの`chatSession.ts`だけであり、
+    // Codexの一覧が常に`items`から作られるため。Claude Codeの一覧は
+    // `background_tasks_changed`通知だけを正とするので、この関数をClaude Code側から
+    // 呼ぶことになったら、ここで派生し直してはいけない
+    { ...state, items, backgroundTerminals: deriveCodexBackgroundTerminals(items) },
     interruptedCommandsNoticeId(turnId),
     'ターンを中断しました。実行中だったコマンドはCLI側で走り続けることがあります' +
       '（中断はターンを終わらせますが、コマンドの子プロセスは残ります）。' +
