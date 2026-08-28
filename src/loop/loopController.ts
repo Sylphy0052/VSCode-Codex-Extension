@@ -645,8 +645,9 @@ export class LoopController {
     } else {
       this.indeterminateStreak = 0;
     }
-    // 終局でない判定（`continue` / 続きを許す`indeterminate`）のときだけ、停滞・時間・
-    // 回数の縛りを見る。Evaluatorの終局判定を先に見るのは issue #909 の順序
+    // ここへ来るのは終局でない判定のときだけ——`continue`か、連続上限に達していない
+    // `indeterminate`（上限に達した分は上で`escalated`として返している）。Evaluatorの
+    // 終局判定を停滞より先に見るのが issue #909 の順序
     this.finishTurn(plan, buildNextTurnPrompt(evaluation, goal.definition.purpose));
   }
 
