@@ -7603,7 +7603,9 @@ Evaluatorへ渡す会話の抜粋は `untrustedText.ts` の囲い（`formatUntru
 
 **代わりに、前のターン境界の `agentMessage` と比べて「このターンで新しく出た発言か」を直接見る。** `LoopController` が `lastMessageBoundary` を持ち、`start(plan, existingItems)` で開始時点の値を入れ、`observe()` がターンの完了を消費した直後に更新する。更新を停止判定より**前**に置くのは、どこかの `return` で更新を忘れて次のターンの判定が狂うのを防ぐため。合図の判定は、新しい発言が出たときだけ行う。
 
-境界に持つのは `id` と**最終行の両方**である。`id` だけでは足りない。Claude側の `blockId` / `partialId`（`claude/streamJson.ts`）は `message.id` が取れないとき `assistant` へフォールバックするため、`assistant:text:0` が毎ターン同じ値になる。`id` だけを比べると、この状況で新しい発言を「前と同じ」と見て合図を取りこぼす。最終行だけでも足りない（別の発言がたまたま同じ行で終わることがある）。残る取りこぼしは「同じ `id` で最終行も同じ発言が2ターン続く」場合だけで、その最終行が合図なら1ターン目で既に止まっているため、合図の判定としては到達しない。
+**比べるのは項目そのもの（参照の同一性）である。** `id` と最終行の組で比べる案は成立しない。Claude側の `blockId` / `partialId`（`claude/streamJson.ts`）は `message.id` が取れないとき `assistant` へフォールバックするため、`assistant:text:0` が実行を跨いで同じ値になる。`<<LOOP_DONE>>` で終えた会話から始め直し、1ターン目に同じ合図を返すと、開始時点のbaselineと `id` も最終行も一致してしまい、**新しく返した合図を「前と同じ」と見て無視する**。同一実行の中では「合図が2ターン続くなら1ターン目で止まっている」が成り立つが、実行を跨ぐ `start()` のbaselineでは成り立たない。
+
+参照で比べてよいのは、`ChatState` の更新が**変えた項目だけを新しいオブジェクトへ差し替え、触っていない項目の参照をそのまま残す**ためである（`upsertItem` / `appendDelta`、および `markInterruptedCommands` も実行中のコマンドだけを作り直す）。参照が変わっていなければ、そのターンは何も言っていない。
 
 **純粋関数側は「渡された発言が合図か」だけを答える。** `declaresDone(item)` / `declaresEscalate(item)` / `agentMessageFinalLine(item)` は `ChatItem` を受け取る形にし、「どの発言を見るか」は `LoopController` が決める。会話の全体像を見る責務を1箇所へ寄せた（`lastAgentMessage(items)` だけが `items` を走査する）。
 
@@ -7611,9 +7613,9 @@ Evaluatorへ渡す会話の抜粋は `untrustedText.ts` の囲い（`formatUntru
 
 #### 確かめ方
 
-- `test/unit/loopController.test.ts`（`issue #937`のdescribe）: 開始前に残っていた `<<LOOP_DONE>>` / `<<LOOP_ESCALATE>>` で止まらないこと、前のターンの発言を次のツールだけのターンで拾い直さないこと、そのターンで新しく出た合図ではこれまでどおり止まること、`id` が使い回されても本文が変わっていれば新しい発言として扱うこと、`turnResultText` が空でも新しい発言の合図で止まること、止め直したループが前の実行の発言を持ち越さないこと
+- `test/unit/loopController.test.ts`（`issue #937`のdescribe）: 開始前に残っていた `<<LOOP_DONE>>` / `<<LOOP_ESCALATE>>` で止まらないこと、前のターンの発言をツールだけの次のターンで新しい発言として扱わないこと、そのターンで新しく出た合図ではこれまでどおり止まること、`id` が使い回されても新しい発言なら合図として扱うこと、`turnResultText` が空でも新しい発言の合図で止まること、止め直したループが前の実行の発言を持ち越さないこと、**始め直した後に同じ `id` で同じ合図を新しく返しても止まること**
 - `test/unit/loopEngineering.test.ts`: `declaresEscalate` / `agentMessageFinalLine` が `agentMessage` 以外を渡されたとき成立しないこと、`lastAgentMessage` が応答の後ろにコマンド実行が並んでいてもその応答を返すこと（§14.87 からの要件）
-- 境界の比較を無効化すると「開始前に残っていた合図では止まらない」など3件が落ち、比較を `id` だけに落とすと「idが使い回されても」の1件が落ちることを確認した
+- 境界の比較を無効化すると3件が落ち、比較を `id` と最終行の組に落とすと「始め直した後に同じidで同じ合図を新しく返しても止まる」の1件が落ちることを確認した
 
 ### 16.44 チームモード（Issue #693）
 

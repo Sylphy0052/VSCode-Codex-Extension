@@ -1066,7 +1066,7 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
       expect(controller.running).toBe(true);
     });
 
-    it('前のターンの合図を、次のツールだけのターンで拾い直さない', () => {
+    it('前のターンの発言を、ツールだけの次のターンで新しい発言として扱わない', () => {
       // 合図を含まない応答を1ターン目に出し、2ターン目はコマンド実行だけで終わる。
       // このとき1ターン目の発言が判定に掛かってはいけない
       const first = [message('a1', '直しました')];
@@ -1091,10 +1091,10 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
       expect(controller.getStatus().stopReason).toBe('done');
     });
 
-    it('idが使い回されても、本文が変わっていれば新しい発言として扱う', () => {
+    it('idが使い回されても、新しい発言なら合図として扱う', () => {
       // Claude側は`message.id`が取れないと`assistant:text:0`へフォールバックするため、
       // 別のターンの発言が同じidになる（`streamJson.ts`の`blockId` / `partialId`）。
-      // idだけで比べると、ここで合図を取りこぼして止まれなくなる
+      // idで比べると、ここで合図を取りこぼして止まれなくなる
       const controller = new LoopController(() => undefined);
       controller.start(plan({ condition: '20話完了', maxIterations: 5 }));
       runTurn(controller, state({ items: [message('assistant:text:0', '直しました')] }));
@@ -1110,6 +1110,18 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
       const controller = new LoopController(() => undefined);
       controller.start(plan({ condition: '20話完了', maxIterations: 5 }));
       runTurn(controller, state({ items: [message('a1', LOOP_DONE_TOKEN)], turnResultText: '' }));
+      expect(controller.getStatus().stopReason).toBe('done');
+    });
+
+    it('始め直した後に、同じidで同じ合図を新しく返しても止まる', () => {
+      // Claudeのfallback idでは、別の実行の発言が同じ`assistant:text:0`になる。
+      // idと最終行だけを比べると、開始前のbaselineと区別が付かず**新しく返した合図を
+      // 無視して止まれなくなる**。境界は項目そのもので比べる
+      const previous = [message('assistant:text:0', LOOP_DONE_TOKEN)];
+      const controller = new LoopController(() => undefined);
+      controller.start(plan({ condition: '20話完了', maxIterations: 5 }), previous);
+      // 別のオブジェクトだが、idも本文も開始前の発言と完全に同じ
+      runTurn(controller, state({ items: [message('assistant:text:0', LOOP_DONE_TOKEN)] }));
       expect(controller.getStatus().stopReason).toBe('done');
     });
 
