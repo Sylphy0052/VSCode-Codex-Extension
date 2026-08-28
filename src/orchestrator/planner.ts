@@ -1060,16 +1060,20 @@ export interface SingleTurnOptions {
 }
 
 /**
- * 分解専用のセッションを1つ開き、1ターンだけ送って応答を受け取り、閉じる。
+ * 使い捨てのセッションを1つ開き、1ターンだけ送って応答を受け取り、閉じる。
+ *
+ * 分解セッション（`sendSingleTurn`）とセカンドオピニオン（Issue #894、
+ * `secondOpinion/run.ts`）が共有する土台。呼び出し側ごとに違うのは、渡すプロンプト・
+ * タブを開くか・ログの主語だけで、以下の性質は共通で保証する。
  *
  * `TaskSession.runLoop`（`LoopController`）を`maxIterations: 1, condition: ''`で使う。
  * `condition`が空文字なら`decoratePrompt`は何も付け足さない（`loopController.ts`参照）ため、
- * 「YAMLのみを出力する」というこちらの指示とLOOP_DONEの合図が混ざらない。1回送った時点で
+ * 呼び出し側が組み立てたプロンプトへLOOP_DONEの合図などが混ざらない。1回送った時点で
  * `maxReached`として`onFinished`が呼ばれるので、そこで`state.turnResultText`を受け取る。
  *
  * 承認要求は理由を問わず全て拒否する（design.md §16.9「承認要求は全て拒否する」）。
- * `escalation.ts`の危険判定は経由しない。分解セッションに「妥当な危険操作」という
- * カテゴリは無く、判定するまでもなく拒否してよいため。
+ * `escalation.ts`の危険判定は経由しない。この経路に「妥当な危険操作」というカテゴリは
+ * 無く、判定するまでもなく拒否してよいため。
  *
  * `timeoutMs`（既定`PLANNER_TURN_TIMEOUT_MS`）以内に`onFinished`が呼ばれなければ、
  * ハングしたとみなして打ち切る（issue #389 根拠3。CLIプロセスのハング・イベントの
@@ -1084,7 +1088,7 @@ export interface SingleTurnOptions {
  * ここでは`clearTimeout`忘れやログの二重出力も避ける）。`session.dispose()`は
  * 経路によらず`finally`で1回だけ呼ぶ。
  *
- * `roadmap.ts`からも使う（`buildPlannerSessionInput`と同じ理由でexportする）。
+ * `roadmap.ts`・`secondOpinion/run.ts`からも使う（`buildPlannerSessionInput`と同じ理由でexportする）。
  */
 export async function runSingleTurnTask(
   host: TaskSessionHost,

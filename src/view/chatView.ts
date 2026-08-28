@@ -1264,18 +1264,6 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   }
 
   /**
-   * 脇道の質問を送る（issue #24、design.md §14.26、Codex TUIの `/btw` 相当）。
-   *
-   * 現在のスレッドをephemeralに（`ephemeral: true`で）forkし、新しいタブへ
-   * fork応答をそのまま差し込んでから質問を送る。ephemeralスレッドは
-   * `thread/resume` で読み直せないため、既存の「分岐」（`forkFrom`）のように
-   * `openThread`（内部で`thread/resume`を呼ぶ）は使わず、`ChatSession.loadForkedThread`
-   * でfork応答を直接適用する（`chatSession.ts` 参照）。
-   *
-   * 元のスレッド（`entry`）の状態には一切触れない。本流の会話が脇道の質問で
-   * 汚れないのはこのため。
-   */
-  /**
    * セカンドオピニオン（Issue #894）を起動する。
    *
    * 脇道の質問（`startSideQuestion`）と違い、この会話は一切渡さない。独立したCodex
@@ -1299,6 +1287,18 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     );
   }
 
+  /**
+   * 脇道の質問を送る（issue #24、design.md §14.26、Codex TUIの `/btw` 相当）。
+   *
+   * 現在のスレッドをephemeralに（`ephemeral: true`で）forkし、新しいタブへ
+   * fork応答をそのまま差し込んでから質問を送る。ephemeralスレッドは
+   * `thread/resume` で読み直せないため、既存の「分岐」（`forkFrom`）のように
+   * `openThread`（内部で`thread/resume`を呼ぶ）は使わず、`ChatSession.loadForkedThread`
+   * でfork応答を直接適用する（`chatSession.ts` 参照）。
+   *
+   * 元のスレッド（`entry`）の状態には一切触れない。本流の会話が脇道の質問で
+   * 汚れないのはこのため。
+   */
   private async startSideQuestion(entry: ChatPanel, question: string): Promise<void> {
     const threadId = entry.session.threadId;
     if (threadId === undefined) {

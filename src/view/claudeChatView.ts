@@ -917,22 +917,6 @@ export class ClaudeChatViewManager
     await this.startSideQuestion(entry, question);
   }
 
-  /**
-   * 脇道の質問を送る（issue #334、design.md §14.62、Codexの `/btw` 相当）。
-   *
-   * Codex側（`chatView.ts`の`startSideQuestion`）は`thread/fork`で新しいタブを開き、
-   * そこへ普通の会話として質問と応答を差し込む。Claude Codeの`side_question`は
-   * 新しいセッションを作らない1往復の制御要求のため、同じタブの中に
-   * `kind:'sideQuestion'`の1項目として残す（`ClaudeStreamSession.noteSideQuestion`）。
-   * これは実際のCLIとのやり取り（transcript）には一切乗らない、拡張機能側だけの表示
-   * （design.md §14.62で実測済み）。
-   *
-   * このタブで過去に送った脇道の質問（`entry.sideQuestionHistory`）を`history`として
-   * 添え、`/btw`を連続で送ったときに前のやり取りを踏まえられるようにする
-   * （本流の会話そのものは踏まえない。`control.ts`の`buildSideQuestionRequest`参照）。
-   * `sideQuestionHistory`は無制限に伸びないよう`capSideQuestionHistory`で直近
-   * `MAX_SIDE_QUESTION_HISTORY`件へ収める（`sideQuestion.ts`参照）。
-   */
   /** `extension.ts` から、セカンドオピニオンの依頼先（Codex側のホスト）を注入する。 */
   setSecondOpinionHost(host: TaskSessionHost): void {
     this.secondOpinionHost = host;
@@ -967,6 +951,22 @@ export class ClaudeChatViewManager
     );
   }
 
+  /**
+   * 脇道の質問を送る（issue #334、design.md §14.62、Codexの `/btw` 相当）。
+   *
+   * Codex側（`chatView.ts`の`startSideQuestion`）は`thread/fork`で新しいタブを開き、
+   * そこへ普通の会話として質問と応答を差し込む。Claude Codeの`side_question`は
+   * 新しいセッションを作らない1往復の制御要求のため、同じタブの中に
+   * `kind:'sideQuestion'`の1項目として残す（`ClaudeStreamSession.noteSideQuestion`）。
+   * これは実際のCLIとのやり取り（transcript）には一切乗らない、拡張機能側だけの表示
+   * （design.md §14.62で実測済み）。
+   *
+   * このタブで過去に送った脇道の質問（`entry.sideQuestionHistory`）を`history`として
+   * 添え、`/btw`を連続で送ったときに前のやり取りを踏まえられるようにする
+   * （本流の会話そのものは踏まえない。`control.ts`の`buildSideQuestionRequest`参照）。
+   * `sideQuestionHistory`は無制限に伸びないよう`capSideQuestionHistory`で直近
+   * `MAX_SIDE_QUESTION_HISTORY`件へ収める（`sideQuestion.ts`参照）。
+   */
   private async startSideQuestion(entry: ClaudePanel, question: string): Promise<void> {
     const id = `sideQuestion:${randomUUID()}`;
     entry.session.noteSideQuestion(id, pendingSideQuestionDisplay(question));
