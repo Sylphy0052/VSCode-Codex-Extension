@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { lastNonEmptyAgentMessageText } from '../appserver/chatState';
+import { lastNonEmptyAgentMessageText, type ChatState } from '../appserver/chatState';
 import type { ClaudePermissionMode } from '../claude/types';
 import { SANDBOX_MODES, type ApprovalMode } from '../codex/types';
 import { LOOP_ITERATION_LIMIT } from '../loop/loopController';
@@ -1057,6 +1057,38 @@ export interface SingleTurnOptions {
   label?: string | undefined;
   /** ログのprefix。既定は `[planner]`。 */
   logPrefix?: string | undefined;
+  /**
+   * 打ち切り（タイムアウト）時に、そこまでに出ていた最後のagentMessageを
+   * {@link SingleTurnTimeoutError.partialText} へ載せるか。既定は `false`（従来どおり捨てる）。
+   *
+   * セカンドオピニオン（Issue #907）のためのオプション。分解セッションで有効にしては
+   * ならない——途中までのYAMLは構文として壊れており、それを定義として読むと、
+   * 「打ち切られた」ではなく「変な定義が生成された」形の失敗に化けるためである。
+   */
+  partialOnTimeout?: boolean | undefined;
+}
+
+/**
+ * 単発ターンの打ち切り（Issue #389）を表すエラー。
+ *
+ * 従来は素の`Error`だったため、呼び出し側は文言でしか打ち切りを判別できなかった。
+ * Issue #907で「打ち切っても途中の回答を残す」を入れるにあたり、型で判別できるようにし、
+ * 回収した部分出力を運ばせる。文言は従来と一字一句同じに保つ（既存のテスト・
+ * 会話へ残る表示がこの文面に依存している）。
+ */
+export class SingleTurnTimeoutError extends Error {
+  /**
+   * 打ち切り時点で出ていた最後の非空agentMessage。
+   *
+   * `partialOnTimeout: false`（既定）のときと、1件も出ていなかったときは`undefined`。
+   */
+  readonly partialText: string | undefined;
+
+  constructor(message: string, partialText?: string | undefined) {
+    super(message);
+    this.name = 'SingleTurnTimeoutError';
+    this.partialText = partialText;
+  }
 }
 
 /**
@@ -1105,6 +1137,7 @@ export async function runSingleTurnTask(
     openPanel = true,
     label = DEFAULT_SINGLE_TURN_LABEL,
     logPrefix = DEFAULT_SINGLE_TURN_LOG_PREFIX,
+    partialOnTimeout = false,
   } = options;
   assertSingleTurnSessionIsSafe(provider, input, label);
   const session = await host.openTaskSession(input);
@@ -1120,6 +1153,15 @@ export async function runSingleTurnTask(
   try {
     return await new Promise<string>((resolve, reject) => {
       let settled = false;
+      // 打ち切り時に部分出力を拾うため、直近の状態を持つ。`TaskSession`には状態を
+      // 取り出す口が無く、`onFinished`は打ち切り時には呼ばれないため、変化を受けて
+      // 保つしかない（`partialOnTimeout`が偽なら参照しない）
+      let latestState: ChatState | undefined;
+      if (partialOnTimeout) {
+        session.onStateChanged((state) => {
+          latestState = state;
+        });
+      }
       const timer = setTimeout(() => {
         if (settled) {
           return;
@@ -1134,8 +1176,17 @@ export async function runSingleTurnTask(
           const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
           log?.warn(`${logPrefix} タイムアウト後のinterrupt()に失敗しました: ${message}`);
         });
+        // 打ち切りまでに出ていた分は、呼び出し側が望めば渡す（Issue #907）。ここで
+        // 捨てると、長考するモデルほど成果が丸ごと消える。本文はログへ出さない
+        const partial =
+          partialOnTimeout && latestState !== undefined
+            ? lastNonEmptyAgentMessageText(latestState.items)
+            : '';
         reject(
-          new Error(`${label}のターンが${timeoutMs}ミリ秒以内に完了しなかったため打ち切りました`),
+          new SingleTurnTimeoutError(
+            `${label}のターンが${timeoutMs}ミリ秒以内に完了しなかったため打ち切りました`,
+            partial.trim() === '' ? undefined : partial,
+          ),
         );
       }, timeoutMs);
       session.onFinished((reason, state) => {

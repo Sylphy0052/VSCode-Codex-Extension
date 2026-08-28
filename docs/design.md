@@ -7485,6 +7485,34 @@ Evaluatorへ渡す会話の抜粋は `untrustedText.ts` の囲い（`formatUntru
 
 - `test/unit/webviewScript.test.ts`: 枠色の判定が`applyBackgroundRunning`1か所に集約されていること、条件が`!busy && (hasBackgroundTerminals || secondOpinionRunning)`であること、状態更新側もこの関数を通ること（旧実装のように条件式を直接書かないこと）
 
+### 14.85 打ち切っても途中の回答を残す（Issue #907）
+
+`gpt-5.6-sol` / `high` は思考が長く、§14.80の既定（5分）では実際に打ち切りへ達した。既定を15分へ延ばし、あわせて「打ち切ったら成果が丸ごと消える」という単発ターンの土台側の性質を直した。
+
+#### 既定を延ばした理由
+
+セカンドオピニオンはタブを開かず（headless）、走っている間も入力欄は使える。上限を短く保つ動機は「ハングしたセッションを残さない」ことだけで、待たされて困る場面が無い。設定 `agent.secondOpinion.timeoutMs` の丸めの範囲（10秒〜60分）は変えていない。要約側（§14.83、2分）も変えていない——要約は `low` で走り、本体とは別枠のため。
+
+#### 部分出力の回収は、呼び出し側が選ぶ
+
+`runSingleTurnTask` の打ち切りは、`session.interrupt()` を投げて即 `reject` していた。正常終了時だけ `lastNonEmptyAgentMessageText(state.items)` へフォールバックしており、打ち切り時は同じ回収をしていない。長考するモデルほど、ここで捨てる量が大きい。
+
+`partialOnTimeout`（既定 `false`）を足し、有効なときだけ、打ち切り時点の最後の非空 `agentMessage` を `SingleTurnTimeoutError.partialText` へ載せる。`TaskSession` には状態を取り出す口が無く、打ち切り時は `onFinished` も呼ばれないため、`onStateChanged` で最新の `ChatState` を保っておいて使う（有効なときだけ購読する）。
+
+**既定を `false` にしてあるのが要点である。**分解セッション（`planner.ts` / `roadmap.ts`）で有効にしてはならない——途中までのYAMLは構文として壊れており、それを定義として読むと「打ち切られた」ではなく「変な定義が生成された」形の失敗に化ける。回収してよいのは、出力が人向けの散文で、途中まででも読む値打ちがある呼び出し側だけである。
+
+打ち切りのエラーは素の `Error` から `SingleTurnTimeoutError` にした（文言は一字一句変えていない。既存の表示・テストが依存しているため）。`interrupt()` と `dispose()` の呼び出しも従来どおりで、CLIプロセスの後始末は変わらない。
+
+#### 「途中まで」は失敗ではなく、全文とも別物として出す
+
+`runSecondOpinion` は、部分出力が取れた打ち切りを `ok: true` に `partialReason` を添えた形で返す。失敗として捨てると読む値打ちのある内容が消え、かといって全文と同じ見た目にすると、指摘が出ていないのか出せなかったのかを読み手が取り違える。会話へは専用の表示（`partialSecondOpinionDisplay`）で、本文の見出しを「回答（打ち切り時点まで）」にし、注記へ打ち切りの理由を出す。
+
+ログへ出すのは `timeout partial=yes responseChars=<数>` だけで、本文は出さない（§14.80と同じ）。
+
+#### 確かめ方
+
+- `test/unit/secondOpinionTimeout.test.ts`: `partialOnTimeout` 未指定なら部分出力を捨てること・指定すれば最後のagentMessageを載せること、1件も出ていなければ載せないこと、打ち切っても `interrupt()` / `dispose()` を呼ぶこと、打ち切りの文言が従来と同じこと、`runSecondOpinion` が「途中まで」と「失敗」を返し分けること、本文をログへ出さないこと、既定が15分で `package.json` の既定と一致すること
+
 ### 16.44 チームモード（Issue #693）
 
 #### 何を足したのか

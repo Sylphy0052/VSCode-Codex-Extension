@@ -99,6 +99,30 @@ export function finishedSecondOpinionDisplay(
 }
 
 /**
+ * 打ち切られ、そこまでの回答だけが返ったときの表示（Issue #907）。
+ *
+ * 失敗ではなく完了として出す——内容は本物の回答であり、読む値打ちがあるため。ただし
+ * 途中で切れていることが分からないと、指摘が出ていないのか出せなかったのかを取り違える。
+ * 本文の冒頭と注記の両方に、打ち切られた事実を出す。
+ */
+export function partialSecondOpinionDisplay(
+  candidate: SecondOpinionCandidate,
+  contextKind: SecondOpinionContextKind,
+  request: string,
+  response: string,
+  reason: string,
+  summaryStatus: SecondOpinionSummaryStatus = 'off',
+): SecondOpinionDisplay {
+  return {
+    status: 'completed',
+    text:
+      `セカンドオピニオン（${candidate.name}）\n\n**依頼**\n\n${request}\n\n` +
+      `**回答（打ち切り時点まで）**\n\n${response}`,
+    detail: `${reason}（ここまでの回答を残しています） ・ ${independenceNote(summaryStatus)} ・ ${describeRun(candidate, contextKind)}`,
+  };
+}
+
+/**
  * 失敗・打ち切りの表示。
  *
  * タブを開かない（headless）場合、ここに出さないと人には何も見えない。理由を必ず載せる

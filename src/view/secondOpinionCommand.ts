@@ -25,6 +25,7 @@ import type { SecondOpinionCandidate } from '../secondOpinion/candidates';
 import {
   failedSecondOpinionDisplay,
   finishedSecondOpinionDisplay,
+  partialSecondOpinionDisplay,
   pendingSecondOpinionDisplay,
   type SecondOpinionDisplay,
   type SecondOpinionSummaryStatus,
@@ -35,7 +36,11 @@ import {
   type SecondOpinionContext,
   type SecondOpinionContextKind,
 } from '../secondOpinion/prompt';
-import { runSecondOpinion, SecondOpinionRegistry } from '../secondOpinion/run';
+import {
+  runSecondOpinion,
+  SecondOpinionRegistry,
+  type SecondOpinionResult,
+} from '../secondOpinion/run';
 import { captureWorkspaceSnapshot } from '../secondOpinion/snapshot';
 import { summarizeConversation } from '../secondOpinion/summary';
 
@@ -262,18 +267,7 @@ export async function startSecondOpinion(
     );
     const summaryStatus: SecondOpinionSummaryStatus =
       summary.text !== undefined ? 'attached' : summary.failure === undefined ? 'off' : 'failed';
-    port.note(
-      id,
-      result.ok
-        ? finishedSecondOpinionDisplay(
-            candidate,
-            contextKind,
-            request,
-            result.response,
-            summaryStatus,
-          )
-        : failedSecondOpinionDisplay(candidate, contextKind, request, result.reason),
-    );
+    port.note(id, resultDisplay(candidate, contextKind, request, result, summaryStatus));
     if (!result.ok) {
       log.warn(`[secondOpinion] 失敗しました: ${result.reason}`);
     }
@@ -281,4 +275,39 @@ export async function startSecondOpinion(
     registry.end(port.parentSessionId);
     port.setRunning(false);
   }
+}
+
+/**
+ * 結果の3通り（全文・打ち切りで途中まで・失敗）を表示へ振り分ける（Issue #907）。
+ *
+ * 打ち切りでも `ok: true` で返ってくるため、`ok` だけで分けると「途中まで」が全文と
+ * 同じ見た目になり、指摘が出ていないのか出せなかったのか読み手に区別できなくなる。
+ */
+function resultDisplay(
+  candidate: SecondOpinionCandidate,
+  contextKind: SecondOpinionContextKind,
+  request: string,
+  result: SecondOpinionResult,
+  summaryStatus: SecondOpinionSummaryStatus,
+): SecondOpinionDisplay {
+  if (!result.ok) {
+    return failedSecondOpinionDisplay(candidate, contextKind, request, result.reason);
+  }
+  if (result.partialReason !== undefined) {
+    return partialSecondOpinionDisplay(
+      candidate,
+      contextKind,
+      request,
+      result.response,
+      result.partialReason,
+      summaryStatus,
+    );
+  }
+  return finishedSecondOpinionDisplay(
+    candidate,
+    contextKind,
+    request,
+    result.response,
+    summaryStatus,
+  );
 }
