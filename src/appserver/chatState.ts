@@ -1092,6 +1092,13 @@ export function deriveCodexBackgroundTerminals(
     if (item.kind !== 'commandExecution' || item.status !== 'inProgress') {
       continue;
     }
+    // 中断した時点で走っていたコマンドは `inProgress` のまま固定される（`keepsInterruptedMark`
+    // が意図的に印を残すため）。ここで拾い続けると、ターンが終わっているのに画面の外周が
+    // 黄色（バックグラウンド実行中）のままになる（issue #897）。CLI側に子プロセスが残る
+    // ことは会話に出した注記が伝えており、この一覧が二重に伝える必要は無い
+    if (item.interruptedWhileRunning === true) {
+      continue;
+    }
     result.push({
       id: item.id,
       command: item.detail,
@@ -1250,6 +1257,9 @@ export function applyEvent(
         busy: false,
         turnId: undefined,
         turnFailed: false,
+        // ターンが終われば走っているコマンドも無い。`item/completed` を取り逃した項目が
+        // `inProgress` のまま残ると、画面の外周が黄色のままになる（issue #897）
+        backgroundTerminals: NO_BACKGROUND_TERMINALS,
         turnResultText: summary.text,
         turnEditedFiles: summary.editedFiles,
       };
@@ -1262,6 +1272,8 @@ export function applyEvent(
         busy: false,
         turnId: undefined,
         turnFailed: true,
+        // `turn/completed` と同じ理由で落とす（issue #897）
+        backgroundTerminals: NO_BACKGROUND_TERMINALS,
         turnResultText: summary.text,
         turnEditedFiles: summary.editedFiles,
       };
@@ -1719,7 +1731,9 @@ export function markInterruptedCommands(state: ChatState, turnId: string | undef
     isRunningCommand(item) ? { ...item, interruptedWhileRunning: true } : item,
   );
   return appendNotice(
-    { ...state, items },
+    // 印を付けた項目は「バックグラウンドで実行中」の一覧から外れる（issue #897）。
+    // 中断後に `item/completed` が届く保証は無く、再派生をここで行わないと一覧が残り続ける
+    { ...state, items, backgroundTerminals: deriveCodexBackgroundTerminals(items) },
     interruptedCommandsNoticeId(turnId),
     'ターンを中断しました。実行中だったコマンドはCLI側で走り続けることがあります' +
       '（中断はターンを終わらせますが、コマンドの子プロセスは残ります）。' +
