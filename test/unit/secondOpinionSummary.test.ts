@@ -8,6 +8,7 @@ import type {
 } from '../../src/orchestrator/taskSession';
 import { normalizeSecondOpinionSummary } from '../../src/secondOpinion/candidates';
 import { buildSecondOpinionPrompt } from '../../src/secondOpinion/prompt';
+import { finishedSecondOpinionDisplay } from '../../src/secondOpinion/display';
 import { runSecondOpinion } from '../../src/secondOpinion/run';
 import {
   buildConversationSummaryPrompt,
@@ -204,6 +205,41 @@ describe('要約を添えたセカンドオピニオンのプロンプト（Issu
       }),
     ).toBe(withoutSummary);
     expect(withoutSummary).not.toContain('会話の要約');
+  });
+});
+
+describe('要約の結末に応じた会話の注記（Issue #903）', () => {
+  it('要約を添えたときは「要約のみを添えた独立評価」と出す', () => {
+    const display = finishedSecondOpinionDisplay(
+      CANDIDATE,
+      'workspaceSnapshot',
+      'レビューして',
+      '指摘です',
+      'attached',
+    );
+    expect(display.detail).toContain('別セッションが作った要約のみを添えた独立評価');
+  });
+
+  it('要約に失敗したときは、添えていないことを会話へ残す（ログだけにしない）', () => {
+    const display = finishedSecondOpinionDisplay(
+      CANDIDATE,
+      'workspaceSnapshot',
+      'レビューして',
+      '指摘です',
+      'failed',
+    );
+    expect(display.detail).toContain('要約は作れなかった');
+  });
+
+  it('要約を切っているときは従来どおり「会話の内容は渡していません」', () => {
+    const display = finishedSecondOpinionDisplay(
+      CANDIDATE,
+      'workspaceSnapshot',
+      'レビューして',
+      '指摘です',
+      'off',
+    );
+    expect(display.detail).toContain('この会話の内容は渡していません');
   });
 });
 

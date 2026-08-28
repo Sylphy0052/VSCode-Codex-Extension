@@ -27,6 +27,7 @@ import {
   finishedSecondOpinionDisplay,
   pendingSecondOpinionDisplay,
   type SecondOpinionDisplay,
+  type SecondOpinionSummaryStatus,
 } from '../secondOpinion/display';
 import {
   CONTEXT_KIND_LABELS,
@@ -216,15 +217,17 @@ export async function startSecondOpinion(
   if (contextKind === undefined) {
     return;
   }
-  const requestText = await vscode.window.showInputBox({
+  const request = await vscode.window.showInputBox({
     title: 'セカンドオピニオンへの依頼',
-    prompt: 'この会話の内容は渡りません。依頼したいことだけを書いてください',
+    // 要約を添える設定では「会話の内容は渡らない」は事実と食い違う。何が渡るかを正しく出す
+    prompt: config.summary.enabled
+      ? 'この会話そのものは渡らず、別セッションが作った要約だけが渡ります。依頼したいことを書いてください'
+      : 'この会話の内容は渡りません。依頼したいことだけを書いてください',
     value: config.template,
   });
-  if (requestText === undefined || requestText.trim() === '') {
+  if (request === undefined || request.trim() === '') {
     return;
   }
-  const request = requestText;
   const context = await captureContext(contextKind, cwd, port, git);
   if (context === undefined) {
     return;
@@ -257,6 +260,8 @@ export async function startSecondOpinion(
       },
       log,
     );
+    const summaryStatus: SecondOpinionSummaryStatus =
+      summary.text !== undefined ? 'attached' : summary.failure === undefined ? 'off' : 'failed';
     port.note(
       id,
       result.ok
@@ -265,7 +270,7 @@ export async function startSecondOpinion(
             contextKind,
             request,
             result.response,
-            summary.text !== undefined,
+            summaryStatus,
           )
         : failedSecondOpinionDisplay(candidate, contextKind, request, result.reason),
     );
